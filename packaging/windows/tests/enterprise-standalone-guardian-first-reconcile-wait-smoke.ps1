@@ -237,20 +237,28 @@ try {
             # another version or oversized.
             $script:SmokeStart = [DateTime]::UtcNow
             Write-SmokeStartupRecord -State 'reconciling' -UpdatedAt ([DateTime]::UtcNow) -ProcessId 4242
+            # A reader without last_error is reported, not a strict-mode stop.
+            $readError = {
+                param($Read)
+                if ($null -eq $Read) { return '<no record>' }
+                $property = $Read.PSObject.Properties['last_error']
+                if ($null -eq $property) { return '<no last_error>' }
+                return [string]$property.Value
+            }
             $read = Get-DefenseClawGuardianStartupProgress -Layout $layout -ProcessId 4242 -StartedAfter $script:SmokeStart.AddSeconds(-1)
-            if ($null -eq $read -or $read.state -cne 'reconciling' -or $read.targets_done -ne 3 -or $read.targets_total -ne 10 -or $read.last_error -cne '') {
+            if ($null -eq $read -or $read.state -cne 'reconciling' -or $read.targets_done -ne 3 -or $read.targets_total -ne 10 -or (& $readError $read) -cne '') {
                 $failures.Add("record reader: a valid record read as '$read'")
             }
             # last_error is optional and must be a string.
             [IO.File]::WriteAllText($script:SmokeRecordPath, ([IO.File]::ReadAllText($script:SmokeRecordPath) -replace '"targets_total":10', '"targets_total":10,"last_error":"reconcile failed"'))
             $read = Get-DefenseClawGuardianStartupProgress -Layout $layout -ProcessId 4242 -StartedAfter $script:SmokeStart.AddSeconds(-1)
-            if ($null -eq $read -or $read.last_error -cne 'reconcile failed') {
-                $failures.Add("record reader: last_error read as '$($read.last_error)'")
+            if ($null -eq $read -or (& $readError $read) -cne 'reconcile failed') {
+                $failures.Add("record reader: last_error read as '$(& $readError $read)'")
             }
             [IO.File]::WriteAllText($script:SmokeRecordPath, ([IO.File]::ReadAllText($script:SmokeRecordPath) -replace '"last_error":"reconcile failed"', '"last_error":{"x":1}'))
             $read = Get-DefenseClawGuardianStartupProgress -Layout $layout -ProcessId 4242 -StartedAfter $script:SmokeStart.AddSeconds(-1)
-            if ($null -eq $read -or $read.last_error -cne '') {
-                $failures.Add("record reader: a non-string last_error read as '$($read.last_error)'")
+            if ($null -eq $read -or (& $readError $read) -cne '') {
+                $failures.Add("record reader: a non-string last_error read as '$(& $readError $read)'")
             }
             if ($null -ne (Get-DefenseClawGuardianStartupProgress -Layout $layout -ProcessId 4242 -StartedAfter $script:SmokeStart.AddSeconds(5))) {
                 $failures.Add('record reader: a record from before this start was accepted')
