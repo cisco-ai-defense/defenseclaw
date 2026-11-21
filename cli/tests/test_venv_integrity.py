@@ -430,6 +430,12 @@ def test_probe_key_follows_the_site_packages_folder(tmp_path: Path, monkeypatch)
     site = tmp_path / "site"
     site.mkdir()
     (site / "httpx").mkdir()
+    # A key is written well before a later pip change. Windows moves folder
+    # times on a coarse clock, so the steps here, microseconds apart, can
+    # share one mtime: set the folder back so the change is a later tick
+    # (rel-1-0-10:GAP-1711).
+    stat = os.stat(site)
+    os.utime(site, ns=(stat.st_atime_ns, stat.st_mtime_ns - 2_000_000_000))
     monkeypatch.setattr(venv_integrity, "site_packages", lambda: str(site))
     first = venv_integrity.probe_key("no_such_pkg_xyz", (), "1")
     assert first["site"] and first["site"][1] == 1
