@@ -384,6 +384,14 @@ func (j *LLMJudge) suppressionPack(ctx context.Context) *guardrail.RulePack {
 	return j.rp
 }
 
+// injectionJudgePackEnabled reports whether the rule pack leaves the injection
+// judge on. A pack without an injection judge file keeps the config switch the
+// only gate (GAP-0174).
+func injectionJudgePackEnabled(rp *guardrail.RulePack) bool {
+	jc := rp.InjectionJudge()
+	return jc == nil || jc.Enabled
+}
+
 // RunJudges runs injection and PII judges according to config.
 // Returns a merged verdict or an allow verdict on error/reentrancy.
 //
@@ -429,7 +437,11 @@ func (j *LLMJudge) RunJudges(ctx context.Context, direction, content, toolName s
 	if toolResult {
 		piiDirection = "completion"
 	}
-	runInjection := j.cfg.Injection && (direction == "prompt" || toolResult)
+	// GAP-0174: the pack decides too. permissive/judge/injection.yaml ships
+	// enabled:false, so under that pack the injection judge stays off even
+	// when guardrail.judge.injection is on.
+	runInjection := j.cfg.Injection && (direction == "prompt" || toolResult) &&
+		injectionJudgePackEnabled(j.suppressionPack(ctx))
 	runPII := j.cfg.PII
 	if piiDirection == "prompt" && !j.cfg.PIIPrompt {
 		runPII = false
@@ -2347,6 +2359,15 @@ func (j *LLMJudge) toolJudgeContextSample(ctx context.Context, toolName, args st
 		// its calls stay.
 		entry.UserIntent = ""
 	}
+	// GAP-0151: a subagent session with no task of its own reads its parent's
+	// (read-only; the parent's record is not written to).
+	var parentTargets []string
+	if entry.UserIntent == "" && !j.sessionTaskCleared(sessionID) {
+		if intent, parent := j.parentIntent(ctx, sessionID); intent != "" {
+			entry.UserIntent = intent
+			parentTargets = j.sessionScopeTargets(parent)
+		}
+	}
 	prior := entry.Prior
 	// TARGET_HISTORY: what this session did earlier to the call's targets.
 	// The intent store has no place for it (judge_packet.go).
@@ -2358,7 +2379,7 @@ func (j *LLMJudge) toolJudgeContextSample(ctx context.Context, toolName, args st
 		// addresses and paths the task names, or none. The task is a scope to
 		// check a call against, not a permission.
 		targets := "none"
-		if named := mergeScopeTargets(j.sessionScopeTargets(sessionID), entry.UserIntent); len(named) > 0 {
+		if named := mergeScopeTargets(append(append([]string(nil), j.sessionScopeTargets(sessionID)...), parentTargets...), entry.UserIntent); len(named) > 0 {
 			targets = strings.Join(named, ", ")
 		}
 		writeToolJudgeSection(&sample, nonce, "SESSION_USER_INTENT", fmt.Sprintf("untrusted=\"true\" named_targets=%q", targets), entry.UserIntent)

@@ -152,6 +152,12 @@ type agentHookRequest struct {
 	// (prompt, user_prompt, userPrompt, initial_prompt, initialPrompt): what the
 	// user typed, as opposed to the fallback fields Content may come from.
 	PromptField string
+	// ContentFromResultField marks Content as read from a result-shaped field
+	// (tool_response, result, error, or a tool_info command/response), not from
+	// a prompt-shaped one. A prompt event that carries only such text has no user
+	// text: Content is still inspected, but never recorded as the user's task
+	// (GAP-0150).
+	ContentFromResultField bool
 	// ToolCallUnparsed: the connector's decoder found no tool call it can
 	// read (connector.HookProfileRequest.ToolCallUnparsed).
 	ToolCallUnparsed bool
@@ -847,6 +853,16 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 				judge.ResetToolJudgeSession(ctx, judgeSessionKeyFor(ctx, req.SessionID))
 			}
 			a.resetUserDownloadRequests(sessionKey)
+		}
+		if canonicalEvent(req.HookEventName) == "subagentstart" && req.ParentSessionID != "" &&
+			req.SessionID != "" && req.ParentSessionID != req.SessionID {
+			// A subagent with its own session id is judged with its parent's task
+			// (GAP-0151).
+			childKey := judgeSessionKeyFor(ctx, req.SessionID)
+			parentKey := judgeSessionKeyFor(ctx, req.ParentSessionID)
+			for _, judge := range a.hookSessionJudges(ctx) {
+				judge.LinkChildSession(childKey, parentKey)
+			}
 		}
 		t0 := time.Now()
 		// attemptedWrite covers BOTH "writeJSON returned successfully"
@@ -3446,13 +3462,16 @@ func normalizeAgentHookRequestWithCorrelationEvent(connectorName string, payload
 			"customInstructions",
 		)
 	}
+	contentFromResult := false
 	if content == "" {
 		if toolInfo := objectAt(payload, "tool_info"); toolInfo != nil {
 			content = firstString(toolInfo, "user_prompt", "content", "command_line", "command", "mcp_result", "response")
+			contentFromResult = content != "" && firstString(toolInfo, "user_prompt") == ""
 		}
 	}
 	if content == "" {
 		content = stringifyHookValue(firstValue(payload, "tool_response", "toolResponse", "tool_result", "toolResult", "result", "error"))
+		contentFromResult = content != ""
 	}
 
 	promptField := firstString(payload, "prompt", "user_prompt", "userPrompt", "initial_prompt", "initialPrompt")
@@ -3473,10 +3492,11 @@ func normalizeAgentHookRequestWithCorrelationEvent(connectorName string, payload
 		ConnectorName: connectorName,
 		AgentID:       agentID, AgentName: agentName, AgentType: agentType,
 		RootAgentID: rootAgentID, ParentAgentID: parentAgentID, ChildAgentID: childAgentID,
-		HookEventName:   event,
-		PromptField:     promptField,
-		SemanticEventID: correlationValue(connector.CorrelationTargetSemanticEvent),
-		SessionID:       sessionID, TurnID: turnID, MessageID: correlationValue(connector.CorrelationTargetMessage),
+		HookEventName:          event,
+		PromptField:            promptField,
+		ContentFromResultField: contentFromResult,
+		SemanticEventID:        correlationValue(connector.CorrelationTargetSemanticEvent),
+		SessionID:              sessionID, TurnID: turnID, MessageID: correlationValue(connector.CorrelationTargetMessage),
 		ThreadID:      correlationValue(connector.CorrelationTargetThread),
 		RootSessionID: rootSessionID, ParentSessionID: parentSessionID, ChildSessionID: childSessionID,
 		ToolInvocationID: correlationValue(connector.CorrelationTargetTool),
@@ -3567,6 +3587,7 @@ func normalizeAgentHookRequestWithRawProfileEvent(connectorName string, payload 
 		// replace an explicitly empty tool_output/error/output/result_json/
 		// edits/text/summary value.
 		req.Content = decoded.Content
+		req.ContentFromResultField = false
 	}
 	if decoded.Direction != "" {
 		req.Direction = decoded.Direction
@@ -3724,8 +3745,12 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 			if req.ConnectorName == "hermes" || req.ConnectorName == "openclaw" {
 				scopeText = ""
 			}
-			a.observeUserTurn(ctx, req.Content, scopeText, req.CWD, verdict)
-			a.observeAlignmentTurn(ctx, req.ConnectorName, req.Content, verdict)
+			intentText := req.Content
+			if req.ContentFromResultField {
+				intentText = ""
+			}
+			a.observeUserTurn(ctx, intentText, scopeText, req.CWD, verdict)
+			a.observeAlignmentTurn(ctx, req.ConnectorName, intentText, verdict)
 		}
 	case isResultLikeEvent(req.HookEventName):
 		// The tool-result judges get the call this output answers (judge_packet.go):
