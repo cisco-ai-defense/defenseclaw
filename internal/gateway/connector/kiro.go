@@ -250,6 +250,32 @@ func (c *KiroConnector) Teardown(_ context.Context, opts SetupOpts) error {
 			errs = append(errs, err)
 		}
 	}
+	if scope == nil && !kiroManaged(opts) {
+		// The user's own default agents (the one the settings name, the one
+		// the settings backup names) are not files Setup writes. The pass
+		// above takes the exact and edited entries out of them; this install's
+		// own hook script in an older command form stays unless the exact
+		// scope removes it, and VerifyClean (exactScope) counts it as this
+		// install's, so the teardown failed on it (rel-1-0-10 GAP-1548).
+		var userAgents []string
+		for _, path := range agents {
+			if !written[path] {
+				userAgents = append(userAgents, path)
+			}
+		}
+		userScope, err := c.exactScope(opts, kiroRecordedFiles{agents: userAgents})
+		if err != nil {
+			errs = append(errs, err)
+		}
+		for _, path := range userAgents {
+			if !userScope.covers(path) {
+				continue
+			}
+			if err := c.reclaimKiroAgentFile(opts, path, command, userScope); err != nil {
+				errs = append(errs, err)
+			}
+		}
+	}
 	for _, path := range recorded.agents {
 		// The scope holds only the files with one of this install's exact
 		// commands, so a covered agent has DefenseClaw hooks to remove.
