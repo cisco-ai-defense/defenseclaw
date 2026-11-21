@@ -295,6 +295,16 @@ func TestR105WindowsPowerShellBalancedNestingIsLinear(t *testing.T) {
 		"T1d-1500/Bash":          {gap0747StateRule, gap0747CompoundLimitRule},
 		"T1d-1500/shell_command": {gap0747StateRule, gap0747CompoundLimitRule},
 		"T1d-1500/PowerShell":    {gap0747CompoundLimitRule},
+		// Each powershell -c body (200 nested "$( ) with quotes) is read as
+		// written since rel-1-0-10:GAP-1638, so the call gets the verdict of
+		// the same statements sent directly: past the compound limit, beside
+		// the state write (the parent's direct-200-then-clear verdict).
+		"T2s-20x200-read-then-clear/Bash":          {gap0747StateRule, gap0747CompoundLimitRule},
+		"T2s-20x200-read-then-clear/shell_command": {gap0747StateRule, gap0747CompoundLimitRule},
+		"T2s-20x200-read-then-clear/PowerShell":    {gap0747StateRule, gap0747CompoundLimitRule},
+		"T2w-50x200-then-clear/Bash":               {gap0747StateRule, gap0747CompoundLimitRule},
+		"T2w-50x200-then-clear/shell_command":      {gap0747StateRule, gap0747CompoundLimitRule},
+		"T2w-50x200-then-clear/PowerShell":         {gap0747StateRule, gap0747CompoundLimitRule},
 	}
 	for _, tc := range []struct {
 		name  string

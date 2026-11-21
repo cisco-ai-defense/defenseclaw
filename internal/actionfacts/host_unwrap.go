@@ -190,7 +190,7 @@ func unwrapPowerShellOnce(source string) (string, Dialect, bool, bounded.CapSet)
 	whole := len(script.Statements) == 1
 	var wholeDialect Dialect
 	for _, statement := range script.Statements {
-		body, dialect, start, end, moves, ok := powerShellStatementWrapper(source, script, statement)
+		body, dialect, start, end, moves, ok := powerShellStatementWrapper(source, script, statement, whole)
 		if !ok || moves && !whole {
 			// A launcher that starts its script in another folder is read
 			// in place only as the whole call: its Set-Location would move
@@ -242,6 +242,7 @@ func powerShellStatementWrapper(
 	source string,
 	script *psparse.Script,
 	statement psparse.Statement,
+	whole bool,
 ) (body string, dialect Dialect, start, end int, moves, ok bool) {
 	pipeline, isPipeline := statement.(*psparse.Pipeline)
 	if !isPipeline || pipeline.ChainRHS != nil || pipeline.ChainOp != "" ||
@@ -270,7 +271,15 @@ func powerShellStatementWrapper(
 	if !named {
 		return
 	}
-	nested := psparse.ExtractNestedScripts(&psparse.Script{
+	// A launcher between other statements keeps psparse's own reading: its
+	// statement is read whole as a statement of the list
+	// (HostScriptReadings), so its payload as written is read there, once,
+	// not pasted into the list a second time (launcherNestedScripts).
+	extract := psparse.ExtractNestedScripts
+	if whole {
+		extract = launcherNestedScripts
+	}
+	nested := extract(&psparse.Script{
 		Statements: []psparse.Statement{statement},
 		Dialect:    script.Dialect,
 	})
@@ -457,6 +466,31 @@ func launcherWordsArePlain(command *psparse.Command) bool {
 	return true
 }
 
+// launcherNestedScripts is psparse.ExtractNestedScripts of script, with the
+// script of a launcher whose payload psparse leaves unread for legacy quoting
+// alone (ps_legacy_quoting: a double quote, a blank word ending in a
+// backslash, an empty word) read as written. Windows PowerShell 5.1 may drop
+// or change that quote when it hands the word over, but pwsh 7 and any caller
+// that hands over the argv as is run the payload
+// as written, so it is one way the call runs. The reading only adds: the call
+// as written is judged as before, and before this the payload had no reading
+// at all, so an eventvwr handler chain in a quoted -Command body was allowed
+// with no finding in every tier while the same chain sent plainly alerted
+// (rel-1-0-10:GAP-1638). Only the legacy-quoting gate depends on the dialect
+// (every word was resolved by the parse already), so no other payload is
+// read differently, and a call without such a payload pays no second pass.
+func launcherNestedScripts(script *psparse.Script) []psparse.NestedScript {
+	nested := psparse.ExtractNestedScripts(script)
+	for _, candidate := range nested {
+		if candidate.Reason == psparse.ReasonLegacyQuoting {
+			asWritten := *script
+			asWritten.Dialect = psparse.DialectPwsh7
+			return psparse.ExtractNestedScripts(&asWritten)
+		}
+	}
+	return nested
+}
+
 // commandHasEmptyWord reports an empty static word among the words of a
 // launcher call: PowerShell versions pass it differently, so the script stays
 // opaque.
@@ -621,7 +655,7 @@ func powerShellHostBody(argv []string) (string, Dialect, bool) {
 		return "", DialectNone, false
 	}
 	var found *psparse.NestedScript
-	nested := psparse.ExtractNestedScripts(script)
+	nested := launcherNestedScripts(script)
 	for i := range nested {
 		if nested[i].Kind != psparse.KindPowerShellCommand &&
 			nested[i].Kind != psparse.KindEncodedCommand {
