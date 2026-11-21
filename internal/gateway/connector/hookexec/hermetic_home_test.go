@@ -1,6 +1,8 @@
 // Copyright 2026 Cisco Systems, Inc. and its affiliates
 // SPDX-License-Identifier: Apache-2.0
 
+//go:build !windows
+
 package hookexec
 
 import (
@@ -17,7 +19,8 @@ import (
 // files of both; on a shared box the real account home held about 9,000
 // entries in .defenseclaw, and walking them under load pushed the ordinary
 // hard link rows of TestLateOrdinaryCallProtectedReach past their answer
-// budget (substrate-1:GAP-0277).
+// budget (substrate-1:GAP-0277). Its only callers are !windows tests, so
+// the file is too (rel-1-0-10:GAP-0105).
 func hermeticAccountHome(t *testing.T) string {
 	t.Helper()
 	root, err := filepath.EvalSymlinks(t.TempDir())
