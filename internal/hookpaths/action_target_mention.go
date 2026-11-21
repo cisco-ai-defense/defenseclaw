@@ -295,7 +295,8 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 			// rel/1.0.10: without it cd -- "$(mktemp -d)" && cat "$(pwd)"/.*/*
 			// was no longer read as a key pattern in an unknown folder while
 			// cat .*/* was (rel-1-0-10:GAP-1296, the GAP-1023 cells).
-			if resolverWord && resolverWordKnown(word, values) {
+			resolverPattern := resolverWord && resolverWordKnown(word, values)
+			if resolverPattern {
 				// The resolver reads this word: its escaped pattern is the
 				// one recorded and judged, not the flattened value.
 				// A pattern form the resolver does not model exactly is never
@@ -307,7 +308,15 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 					resolverPatternModeled(pattern) && check(pattern, false, effectiveCWD) {
 					return true
 				}
-			} else if known && (!strings.ContainsAny(value, "*?[]") || activeGlob) {
+			}
+			// On a Windows host a Windows home's paths are spelled with
+			// backslashes (C:\Users\me\.ssh\authorized_keys). The resolver
+			// reads a backslash as a POSIX escape and removes it, so its
+			// reading never names the key that spelling names; the plain
+			// value keeps the spelling, and it still judges the word there,
+			// as on rel/1.0.10 (rel-1-0-10:GAP-1624). The resolver's own
+			// candidates below are judged too.
+			if (!resolverPattern || windowsHost) && known && (!strings.ContainsAny(value, "*?[]") || activeGlob) {
 				// A parsed value has had its shell tilde expanded already;
 				// a remaining "~/" was quoted, escaped or parameter-derived.
 				if check(value, false, effectiveCWD) {
