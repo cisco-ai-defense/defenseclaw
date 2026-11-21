@@ -26,7 +26,7 @@ var (
 	_ = bounded.Register("hookpaths.maxHiddenDirectoryDepth", bounded.Depth, int(maxHiddenDirectoryDepth))
 	_ = bounded.Register("hookpaths.maxIndirectSourceBytes", bounded.Bytes, int(maxIndirectSourceBytes))
 	_ = bounded.Register("hookpaths.maxLinkAliasSteps", bounded.Paths, int(maxLinkAliasSteps))
-	_ = bounded.Register("hookpaths.maxLinkedTreeEntries", bounded.Paths, int(maxLinkedTreeEntries))
+	_ = bounded.Register("hookpaths.maxLinkedTreeWork", bounded.Paths, int(maxLinkedTreeWork))
 	_ = bounded.Register("hookpaths.maxMentionBraceFields", bounded.Items, int(maxMentionBraceFields))
 	_ = bounded.Register("hookpaths.maxOpaquePathForms", bounded.Paths, int(maxOpaquePathForms))
 	_ = bounded.Register("hookpaths.maxOversizePayloadBytes", bounded.Bytes, int(maxOversizePayloadBytes))

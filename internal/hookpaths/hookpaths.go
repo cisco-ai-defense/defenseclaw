@@ -5329,6 +5329,9 @@ func commandLinksRead(command, cwd, home string, facts map[string]string, record
 		// the gateway own; only a move source it may not read is judged
 		// by that user-side reading (GAP-0091).
 		stable := true
+		// One work budget for every linked tree walk of this reading
+		// (linkedTreeWork, rel-1-0-10:GAP-1727).
+		work := &linkedTreeWork{}
 		moves := len(renameOps) > 0 || len(findMoves) > 0
 		walked := moves || wrappedCds
 		_, readable := ResolveWriteTarget(cwd)
@@ -5352,12 +5355,12 @@ func commandLinksRead(command, cwd, home string, facts map[string]string, record
 			// A nested cd or a find -exec mv may also go below a linked
 			// directory through a disk link to state (RV-c4-1).
 			if stable && (wrappedCds || len(findMoves) > 0) {
-				stable = links.linkedTreesClear(command, cwd, home, wrappedCds, findMoves)
+				stable = links.linkedTreesClear(command, cwd, home, wrappedCds, findMoves, work)
 			}
 			// A move after a directory change is followed as a plain one
 			// only when no entry it takes is a disk link to state (GAP-2602).
 			if stable && cds {
-				stable = movedEntriesAwayFromState(renameOps, findMoves, home)
+				stable = movedEntriesAwayFromState(renameOps, findMoves, home, work)
 			}
 			links.movesStable = stable
 			walkFailed = !stable
@@ -5372,7 +5375,7 @@ func commandLinksRead(command, cwd, home string, facts map[string]string, record
 			stable, unplacedRelative = links.followRenames(renameOps, userView), false
 			if stable && !userView {
 				stable = links.dotDotPastLinksClear(command, cwd, home) && links.aliasesAwayFromState(cwd, home) &&
-					movedEntriesAwayFromState(renameOps, findMoves, home)
+					movedEntriesAwayFromState(renameOps, findMoves, home, work)
 				links.movesStable = stable
 			}
 		}
