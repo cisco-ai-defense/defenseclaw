@@ -4509,6 +4509,12 @@ class TestSetupModeHelp(unittest.TestCase):
 # J3 — per-direction detection-strategy flags (opt-in, off by default)
 # ---------------------------------------------------------------------------
 class TestJ3PerDirectionStrategy(_BaseSetup):
+    def setUp(self):
+        super().setUp()
+        # `setup guardrail --connector codex` refuses a connector that is not set up
+        # (the loader's unsaved OpenClaw default is not a roster), so give it one.
+        self._seed_map("codex")
+
     def test_help_exposes_per_direction_flags(self):
         out = CliRunner().invoke(setup_group, ["guardrail", "--help"], catch_exceptions=False).output
         for opt in ("--detection-strategy-prompt", "--detection-strategy-completion", "--detection-strategy-tool-call"):
@@ -4526,7 +4532,7 @@ class TestJ3PerDirectionStrategy(_BaseSetup):
         self.assertEqual(res.exit_code, 0, msg=res.output)
         self.assertEqual(self.app.cfg.guardrail.detection_strategy_completion, "regex_judge")
 
-    def test_judge_strategy_flag_enables_judge_with_all_hook_coverage(self):
+    def test_judge_strategy_flag_enables_judge_for_the_named_connector_only_gap1113(self):
         with _stub_side_effects(), \
                 patch("defenseclaw.commands.cmd_setup.execute_guardrail_setup", return_value=(True, [])):
             res = _invoke(
@@ -4540,7 +4546,7 @@ class TestJ3PerDirectionStrategy(_BaseSetup):
         self.assertTrue(self.app.cfg.guardrail.judge.enabled)
         self.assertEqual(self.app.cfg.guardrail.detection_strategy, "regex_judge")
         self.assertEqual(self.app.cfg.guardrail.detection_strategy_completion, "regex_judge")
-        self.assertEqual(self.app.cfg.guardrail.judge.hook_connectors, ["*"])
+        self.assertEqual(self.app.cfg.guardrail.judge.hook_connectors, ["codex"])
 
     def test_scoped_mode_update_preserves_empty_judge_gate(self):
         self._seed_map("antigravity", "hermes", "opencode")
@@ -4589,7 +4595,43 @@ class TestJ3PerDirectionStrategy(_BaseSetup):
         self.assertTrue(self.app.cfg.guardrail.judge.enabled)
         self.assertEqual(self.app.cfg.guardrail.detection_strategy, "regex_judge")
         self.assertEqual(self.app.cfg.guardrail.detection_strategy_completion, "regex_only")
-        self.assertEqual(self.app.cfg.guardrail.judge.hook_connectors, ["*"])
+        self.assertEqual(self.app.cfg.guardrail.judge.hook_connectors, ["codex"])
+
+    def test_judge_strategy_flag_leaves_other_connectors_out_of_the_gate_gap1113(self):
+        # GAP-1113: `setup guardrail --connector claudecode --detection-strategy judge_first`
+        # opened the judge for nine other connectors and left Claude Code out.
+        gc = self.app.cfg.guardrail
+        gc.connectors = {
+            name: PerConnectorGuardrailConfig(mode="action") for name in ("claudecode", "codex", "cursor", "hermes")
+        }
+        gc.connector = "claudecode"
+        gc.judge.enabled = False
+        gc.judge.hook_connectors = ["*"]  # the config default while the judge is off
+        with _stub_side_effects(), \
+                patch("defenseclaw.commands.cmd_setup.execute_guardrail_setup", return_value=(True, [])):
+            res = _invoke(
+                [
+                    "guardrail", "--non-interactive", "--connector", "claudecode", "--no-restart", "--mode", "action",
+                    "--detection-strategy", "judge_first",
+                ],
+                self.app,
+            )
+        self.assertEqual(res.exit_code, 0, msg=res.output)
+        self.assertTrue(gc.judge.enabled)
+        self.assertEqual(gc.judge.hook_connectors, ["claudecode"])
+
+        # A second connector joins the gate; the first stays.
+        with _stub_side_effects(), \
+                patch("defenseclaw.commands.cmd_setup.execute_guardrail_setup", return_value=(True, [])):
+            res = _invoke(
+                [
+                    "guardrail", "--non-interactive", "--connector", "codex", "--no-restart", "--mode", "action",
+                    "--detection-strategy", "judge_first",
+                ],
+                self.app,
+            )
+        self.assertEqual(res.exit_code, 0, msg=res.output)
+        self.assertEqual(gc.judge.hook_connectors, ["claudecode", "codex"])
 
     def test_summary_shows_the_judge_llm_in_use(self):
         # GAP-2056: the summary printed the empty legacy guardrail.judge.model

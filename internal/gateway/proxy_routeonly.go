@@ -18,10 +18,12 @@ import (
 	"reflect"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/modelusage"
@@ -63,7 +65,20 @@ type routeOnlyServer struct {
 	inflight  map[string]int
 	heldBytes int64
 	signers   bedrockSigners
+	// refused rate-limits the audit rows of listener refusals (guarded by mu).
+	refused map[string]routeRefusalAudit
 }
+
+// routeRefusalAudit is the audit state of one connector and refusal reason.
+type routeRefusalAudit struct {
+	last       time.Time
+	suppressed int
+}
+
+// routeOnlyRefusalAuditEvery bounds the audit rows of one refusal reason of one
+// connector: a loop of bad credentials is one row per interval with the count
+// of the refusals it stands for, not a row per request.
+const routeOnlyRefusalAuditEvery = 10 * time.Second
 
 func newRouteOnlyServer(router *engineRouter, cfg func() *config.Config, dataDir string) *routeOnlyServer {
 	transport := &http.Transport{
@@ -179,6 +194,7 @@ func (s *routeOnlyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if !caller.Verified {
 		// Never the credential or a header value: the connector and why.
 		fmt.Fprintf(os.Stderr, "[routing] route-only refused connector=%s reason=%s\n", connector, caller.Reason)
+		s.auditListenerRefused(r.Context(), connector, caller.Reason)
 		if caller.Reason == routeCallerPeerLookupLimited {
 			// A burst of new connections over the account own lookup bound:
 			// agents retry a 429.
@@ -316,6 +332,10 @@ func (s *routeOnlyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	original.usage.Subject = subject
 	original.usage.SubjectName = sanitizeLLMEventUser(userScopedIdentityName(subject))
 	routeCaller, routeProfiles := routeOnlyCaller(r.Context(), subject)
+	if usageOn() {
+		// The groups usage?by=group rolls up (rel-1-0-10:GAP-1154).
+		original.usage.Groups = usageCallerGroups(cfg, routeCaller)
+	}
 	attempt, routedOutcome, originalAllowed := s.decide(r, cfg, connector, native, family, upstream, inClass, signer, body, routeCaller, routeProfiles)
 	original.usage.Route = usageDecision(usageRouteFacts(routedOutcome, true), false)
 	if routedOutcome.Result == "" {
@@ -370,11 +390,50 @@ func (s *routeOnlyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if originalAllowed && len(body) <= routeOnlyRetryBodyCap {
 		retry = &original
 	}
-	if routedOutcome.Route != nil && routedOutcome.Route.SensitiveNarrowed() {
-		attempt.sensitive = &routedOutcome
-	}
+	attempt.outcome = &routedOutcome
 	w.Header().Set("X-Semantic-Router", "routed")
 	s.forwardWithRetry(w, r, *attempt, retry, body)
+}
+
+// auditListenerRefused writes the audit row of a route-only request the
+// listener refused because its caller could not be verified (a wrong or
+// replayed route credential, an account other than the gateway owner, an
+// account that is not enrolled): DESIGN 7.3 asks for an audit row, and the
+// gateway log alone is not where an administrator looks (rel-1-0-10:GAP-1106).
+// It is its own action, not inspect-request-block, so block counts and
+// dashboards do not take an authentication refusal for a guardrail block.
+// The row names the connector and the reason code, never a credential or a
+// header value. A burst of connection-limit refusals is not audited: it is
+// answered 429 and retried.
+func (s *routeOnlyServer) auditListenerRefused(ctx context.Context, connector, reason string) {
+	if s.router == nil || s.router.logger == nil || reason == routeCallerPeerLookupLimited {
+		return
+	}
+	now := time.Now()
+	key := connector + "/" + reason
+	s.mu.Lock()
+	if s.refused == nil {
+		s.refused = map[string]routeRefusalAudit{}
+	}
+	state := s.refused[key]
+	if !state.last.IsZero() && now.Sub(state.last) < routeOnlyRefusalAuditEvery {
+		state.suppressed++
+		s.refused[key] = state
+		s.mu.Unlock()
+		return
+	}
+	suppressed := state.suppressed
+	if len(s.refused) > 256 {
+		s.refused = map[string]routeRefusalAudit{}
+	}
+	s.refused[key] = routeRefusalAudit{last: now}
+	s.mu.Unlock()
+	detail := "route-only refused the model request connector=" + boundedRouterLabel(connector, 32) +
+		" reason=" + boundedRouterLabel(reason, 64)
+	if suppressed > 0 {
+		detail += " repeated=" + strconv.Itoa(suppressed)
+	}
+	_ = s.router.logger.LogActionCtx(ctx, string(audit.ActionRoutingListenerRefused), "routing.listener", detail)
 }
 
 // sensitiveConfigured reports whether routing.sensitive can narrow the
@@ -485,9 +544,11 @@ type routeOnlyAttempt struct {
 	provider    string
 	signer      *bedrockSigner // gateway SigV4 signing (nil: none)
 	usage       modelusage.CallFacts
-	// sensitive is the outcome of a routed call routing.sensitive keeps
-	// local (nil otherwise): a failed call is refused and audited as such.
-	sensitive *SemanticRouteOutcome
+	// outcome is the routing outcome of a routed attempt (nil for the
+	// original request): a routed call that fails before its first byte is
+	// recorded as a fallback with the alias that failed, and for a request
+	// routing.sensitive keeps local it is refused and audited as such.
+	outcome *SemanticRouteOutcome
 }
 
 // routeOnlyAPIFamily names the routable API family of a native path.
@@ -680,6 +741,12 @@ func (s *routeOnlyServer) decide(r *http.Request, cfg *config.Config, connector,
 			out.Result = SemanticRouteFallback
 			if out.Route != nil {
 				out.Route.Warnings = append(out.Route.Warnings, "route_only_fallback:"+code)
+				if code != "previous_response" {
+					// A call that continues a stored response of the original
+					// provider cannot go elsewhere, whatever the alias is: not
+					// a failing alias.
+					out.Route.Warnings = append(out.Route.Warnings, routedAliasFailedPrefix+alias+":"+code)
+				}
 			}
 		}
 		out.Decision = nil
@@ -865,7 +932,18 @@ func (s *routeOnlyServer) forwardWithRetry(w http.ResponseWriter, r *http.Reques
 	}
 	cross := !strings.EqualFold(routed.provider, routeOnlyProvider(routeOnlyAPIFamily(routed.native)))
 	retryable := (err != nil && !wrote) || (err == nil && retryableRouteStatus(resp.StatusCode, cross))
+	sensitive := routed.outcome
+	if sensitive != nil && (sensitive.Route == nil || !sensitive.Route.SensitiveNarrowed()) {
+		sensitive = nil
+	}
 	if original != nil && retryable && r.Context().Err() == nil && time.Since(started) < routeOnlyRetryWindow {
+		cause := "unreachable"
+		if err == nil {
+			cause = "http_" + strconv.Itoa(resp.StatusCode)
+		}
+		// The original request serves the call, so the decision ring says
+		// fallback and names the alias that failed (GAP-1099, GAP-1101).
+		amendRoutedCallFailed(r.Context(), routed.outcome, cause)
 		if resp != nil {
 			_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
 			resp.Body.Close()
@@ -879,7 +957,7 @@ func (s *routeOnlyServer) forwardWithRetry(w http.ResponseWriter, r *http.Reques
 	if err != nil {
 		call.End(err)
 		msg := "the routed model is unreachable"
-		if o := routed.sensitive; o != nil && o.Route != nil {
+		if o := sensitive; o != nil {
 			// The local model of a sensitive request is down: refused, never
 			// sent to the cloud, and recorded as such (GAP-0576).
 			out := *o
@@ -892,7 +970,7 @@ func (s *routeOnlyServer) forwardWithRetry(w http.ResponseWriter, r *http.Reques
 		routeOnlySendError(w, err, msg)
 		return
 	}
-	if o := routed.sensitive; o != nil && o.Route != nil && o.Route.Backend != nil {
+	if o := sensitive; o != nil && o.Route.Backend != nil {
 		if msg, refused := routeOnlySensitiveLocalRefusal(resp, o.Route.Backend.Alias); refused {
 			// Recorded as the routing.sensitive refusal it is, like an
 			// unreachable local model (code and path only, no provider text).

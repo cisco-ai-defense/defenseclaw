@@ -482,7 +482,9 @@ func alignmentEffects(ctx context.Context, connectorName, toolName, args, cwd st
 	if raw == nil && trimmed != "" && call.Surface == effects.SurfaceShell {
 		call.Command = trimmed
 	}
-	opts := effects.Options{Flavor: alignmentFlavor(cwd), Home: hookActiveHome(ctx), CWD: cwd}
+	flavor := alignmentFlavor(cwd)
+	opts := effects.Options{Flavor: flavor, Home: hookActiveHome(ctx), CWD: cwd,
+		BSDUserland: effectBSDUserland(effectHostGOOS, flavor)}
 	if opts.Flavor == effects.FlavorWindows && connectorName == "claudecode" && strings.EqualFold(toolName, "Bash") {
 		// Claude Code's Bash tool runs Git Bash on Windows: its command is POSIX
 		// text, and with the Windows table inferred from the folder an rm is no

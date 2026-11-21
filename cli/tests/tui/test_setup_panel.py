@@ -769,6 +769,34 @@ def test_guardrail_wizard_prefills_single_connector_and_passes_explicit_scope() 
     assert argv[argv.index("--connector") + 1] == "codex"
 
 
+def test_guardrail_wizard_global_scope_judge_covers_every_connector_on_a_single_connector_install() -> None:
+    # Global scope means every active connector, including ones added later. The wizard
+    # names the one connector on a single-connector install, and `--connector X` alone
+    # would narrow judge.hook_connectors to [X].
+    cfg = {"claw": {"mode": "codex"}}
+    fields = _guardrail_wizard_fields_for({"--detection-strategy": "judge_first"}, cfg)
+    argv = build_wizard_args(SetupWizard.GUARDRAIL, fields, cfg)
+    assert argv[argv.index("--connector") + 1] == "codex"
+    assert argv[argv.index("--judge-hook-connectors") + 1] == "all"
+
+    # A gate that lists connectors is left alone (see
+    # test_guardrail_wizard_omits_judge_hook_connectors_without_openclaw_default).
+    listed = _guardrail_wizard_fields_for(
+        {"--detection-strategy": "judge_first"}, {**cfg, "guardrail": {"judge": {"hook_connectors": ["codex"]}}}
+    )
+    assert "--judge-hook-connectors" not in build_wizard_args(
+        SetupWizard.GUARDRAIL, listed, {**cfg, "guardrail": {"judge": {"hook_connectors": ["codex"]}}}
+    )
+
+    # No judge change, no gate flag: the existing gate is left alone.
+    plain = build_wizard_args(SetupWizard.GUARDRAIL, _guardrail_wizard_fields_for({}, cfg), cfg)
+    assert "--judge-hook-connectors" not in plain
+
+    # Connector scope keeps the connector-only gate.
+    scoped = _guardrail_wizard_fields_for({"@Scope": "selected-connector", "--detection-strategy": "judge_first"}, cfg)
+    assert "--judge-hook-connectors" not in build_wizard_args(SetupWizard.GUARDRAIL, scoped, cfg)
+
+
 def test_trusted_paths_wizard_builds_real_setup_commands() -> None:
     fields = wizard_form_defs(SetupWizard.TRUSTED_PATHS)
     assert build_wizard_args(SetupWizard.TRUSTED_PATHS, fields) == ("setup", "trusted-paths", "list")
@@ -984,7 +1012,7 @@ def test_guardrail_wizard_omits_judge_hook_connectors_without_openclaw_default()
         },
     }
     fields = _guardrail_wizard_fields_for({"--detection-strategy": "regex_judge"}, cfg)
-    argv = build_wizard_args(SetupWizard.GUARDRAIL, fields)
+    argv = build_wizard_args(SetupWizard.GUARDRAIL, fields, cfg)
     assert wizard_field_value(fields, "Hook Connectors") == ""
     assert "--judge-hook-connectors" not in argv
 

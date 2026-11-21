@@ -95,6 +95,28 @@ func amendRoutingDecision(ctx context.Context, o SemanticRouteOutcome) {
 	})
 }
 
+// routedAliasFailedPrefix starts the decision warning that names a routed
+// alias whose call was served by the original model instead:
+// routed_alias_failed:<alias>:<cause> (cause is a route-only preparation code
+// such as signing or credential, http_<status>, or unreachable).
+const routedAliasFailedPrefix = "routed_alias_failed:"
+
+// amendRoutedCallFailed rewrites the recorded decision of a routed call that
+// failed before its first byte and was served by the original request: the
+// outcome becomes fallback and the warnings name the alias and the cause, so
+// `routing status`, `routing explain` and doctor stop saying applied
+// (rel-1-0-10:GAP-1099, GAP-1101). The outcome is not changed.
+func amendRoutedCallFailed(ctx context.Context, o *SemanticRouteOutcome, cause string) {
+	if o == nil || o.Route == nil || o.Route.Backend == nil {
+		return
+	}
+	out := *o
+	route := *o.Route
+	route.Warnings = append(slices.Clone(route.Warnings), routedAliasFailedPrefix+route.Backend.Alias+":"+cause)
+	out.Route, out.Result = &route, SemanticRouteFallback
+	amendRoutingDecision(ctx, out)
+}
+
 // routingCallerMatcher answers routing.admin identity selectors (groups,
 // users, agents) for ctx's verified subject with the proof rules of
 // guardrail.profile_assignments (assignmentState): yes, no, or maybe when a
@@ -159,23 +181,66 @@ func routingGroupSIDsFor(cfg *config.Config) *profileGroupSIDs {
 	if routingGroupSIDs.cfg == cfg {
 		return routingGroupSIDs.table
 	}
-	var names []config.ProfileAssignment
+	routingGroupSIDs.cfg = cfg
+	routingGroupSIDs.table = nil
+	if names := routingAdminGroupNames(cfg); len(names) > 0 {
+		assignment := []config.ProfileAssignment{{Match: config.ProfileMatch{Groups: names}}}
+		routingGroupSIDs.table = buildProfileGroupSIDs(assignment, profileGroupSIDLookup, profileGroupLocalSIDLookup, profileGroupSIDWait)
+	}
+	return routingGroupSIDs.table
+}
+
+// routingAdminGroupNames lists, once each in config order (the first
+// spelling of names that differ only in case, as the matcher folds case),
+// the groups that routing.admin rules (match.groups) and group budgets name.
+func routingAdminGroupNames(cfg *config.Config) []string {
+	if cfg == nil || cfg.Routing.Admin == nil {
+		return nil
+	}
+	var names []string
+	add := func(group string) {
+		if strings.TrimSpace(group) != "" && !slices.ContainsFunc(names, func(n string) bool { return strings.EqualFold(n, group) }) {
+			names = append(names, group)
+		}
+	}
 	for _, r := range cfg.Routing.Admin.Rules {
-		if len(r.Match.Groups) > 0 {
-			names = append(names, config.ProfileAssignment{Match: config.ProfileMatch{Groups: r.Match.Groups}})
+		for _, group := range r.Match.Groups {
+			add(group)
 		}
 	}
 	for _, b := range cfg.Routing.Admin.Budgets {
 		if b.Scope == config.RoutingBudgetScopeGroup {
-			names = append(names, config.ProfileAssignment{Match: config.ProfileMatch{Groups: []string{b.Subject}}})
+			add(b.Subject)
 		}
 	}
-	routingGroupSIDs.cfg = cfg
-	routingGroupSIDs.table = nil
-	if len(names) > 0 {
-		routingGroupSIDs.table = buildProfileGroupSIDs(names, profileGroupSIDLookup, profileGroupLocalSIDLookup, profileGroupSIDWait)
+	return names
+}
+
+// usageGroupsMax bounds the groups one usage record carries.
+const usageGroupsMax = 16
+
+// usageCallerGroups names the routing.admin groups (rules match.groups and
+// group budgets, as the administrator wrote them) the verified caller is
+// proved a member of, with the matcher routing.admin rules and group budgets
+// use, so GET /usage?by=group rolls usage up by the groups routing acts on.
+// Before, nothing set the groups of a usage record and by=group was always
+// empty (rel-1-0-10:GAP-1154). Managed hosts only (identity selectors do not
+// apply on a per-user gateway); nil for an unverified caller and for groups
+// the facts cannot prove. Bounded: configured names only, at most
+// usageGroupsMax, whatever the account's directory membership.
+func usageCallerGroups(cfg *config.Config, caller engine.Caller) []string {
+	if cfg == nil || !cfg.StandaloneEnterprise() || !caller.Verified || caller.Matches == nil {
+		return nil
 	}
-	return routingGroupSIDs.table
+	var groups []string
+	for _, group := range routingAdminGroupNames(cfg) {
+		if caller.Matches(config.ProfileMatch{Groups: []string{group}}) == engine.Yes {
+			if groups = append(groups, group); len(groups) == usageGroupsMax {
+				break
+			}
+		}
+	}
+	return groups
 }
 
 // adminFor is the evaluator of cfg's generation: one installed with

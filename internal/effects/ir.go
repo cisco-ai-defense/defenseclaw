@@ -41,7 +41,19 @@ type Stmt struct {
 	// failure of the statement before it (the right side of `a && b`, `a || b`).
 	// The walker uses it to know a cd's outcome (round 8 F); OpNone otherwise.
 	Link Op
-	Span [2]int
+	// DeadGuard names the builtins (true, false, :) whose constant status makes
+	// this statement unreachable: the right side of a provably false `&&` or a
+	// provably true `||` (GAP-0218). The walker treats the statement as dead only
+	// while none of these names is a function or an alias.
+	DeadGuard []string
+	// ExecMark marks an empty statement placed before the body of a compound
+	// command that has redirects; ExecFrom, on the compound's redirect-only
+	// statement, points at it. The shell opens those redirects before the body
+	// runs, so the walker reads them under the execution state of the mark, not
+	// the state an exec / exit in the body left (GAP-0218 review round 3).
+	ExecMark bool
+	ExecFrom *Stmt
+	Span     [2]int
 }
 
 // Cmd is one simple command or pipeline stage.
@@ -64,8 +76,12 @@ type Cmd struct {
 	// inside them must not change the parent's cwd/env (review N2).
 	Pipeline bool
 	Async    bool
-	Cond     bool
-	Span     [2]int
+	// ChildList marks a command inside a backgrounded compound or && / || list
+	// (`{ ...; } &`, `a || b &`): bash runs the whole list in a child shell, so
+	// an exit or exec there does not end this one (GAP-0218).
+	ChildList bool
+	Cond      bool
+	Span      [2]int
 	// Host is psparse's verdict on a cmd / powershell / pwsh host call that the
 	// PowerShell frontend lowered, nil when psparse gave none. The walker unwraps
 	// the payload only from a Static verdict, with psparse's text; a NotStatic

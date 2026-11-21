@@ -1786,7 +1786,7 @@ attributes:
   introduced_in: telemetry-registry-v4
 - id: defenseclaw.route.filtered_by
   type: string
-  brief: "What narrowed the routing choices: sensitive, unknown_alias, policy, api, capability or credential; any other filter is reported as other"
+  brief: "What narrowed the routing choices: sensitive, unknown_alias, policy, api, capability, credential or endpoint; any other filter is reported as other"
   examples:
   - "sensitive"
   stability: stable

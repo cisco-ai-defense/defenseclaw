@@ -186,8 +186,17 @@ type responsesUsage struct {
 	OutputTokens optInt `json:"output_tokens"`
 	InputDetails *struct {
 		CachedTokens optInt `json:"cached_tokens"`
+		// A provider that bills cache writes (Bedrock) reports them next to
+		// cached_tokens. The field name is not part of the OpenAI schema, so
+		// the spellings seen on the wire are all read.
+		CacheWriteTokens         optInt `json:"cache_write_tokens"`
+		CacheWriteInputTokens    optInt `json:"cache_write_input_tokens"`
+		CacheCreationInputTokens optInt `json:"cache_creation_input_tokens"`
 	} `json:"input_tokens_details"`
-	OutputDetails *struct {
+	// The same counters at the top of usage, where some providers put them.
+	CacheWriteInputTokens    optInt `json:"cache_write_input_tokens"`
+	CacheCreationInputTokens optInt `json:"cache_creation_input_tokens"`
+	OutputDetails            *struct {
 		ReasoningTokens optInt `json:"reasoning_tokens"`
 	} `json:"output_tokens_details"`
 }
@@ -198,9 +207,26 @@ func (r responsesUsage) apply(u *Usage) {
 	if r.InputDetails != nil {
 		u.set(HasCacheRead, &u.CacheRead, r.InputDetails.CachedTokens)
 	}
+	// Like cached_tokens, the cache-write count is part of input_tokens.
+	u.set(HasCacheCreation, &u.CacheCreation, r.cacheWrite())
 	if r.OutputDetails != nil {
 		u.set(HasReasoning, &u.Reasoning, r.OutputDetails.ReasoningTokens)
 	}
+}
+
+// cacheWrite is the first cache-write count the response carries, details first.
+func (r responsesUsage) cacheWrite() optInt {
+	var counts []optInt
+	if r.InputDetails != nil {
+		counts = append(counts, r.InputDetails.CacheWriteTokens, r.InputDetails.CacheWriteInputTokens, r.InputDetails.CacheCreationInputTokens)
+	}
+	counts = append(counts, r.CacheWriteInputTokens, r.CacheCreationInputTokens)
+	for _, c := range counts {
+		if c.ok {
+			return c
+		}
+	}
+	return optInt{}
 }
 
 func parseResponsesDoc(body []byte) Usage {

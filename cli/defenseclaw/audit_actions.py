@@ -227,18 +227,22 @@ ACTION_INSPECT_TOOL_CONFIRM: Final[str] = "inspect-tool-confirm"
 ACTION_INSPECT_TOOL_BLOCK: Final[str] = "inspect-tool-block"
 ACTION_INSPECT_TOOL_ALERT: Final[str] = "inspect-tool-alert"
 ACTION_INSPECT_TOOL_ALLOW: Final[str] = "inspect-tool-allow"
+ACTION_INSPECT_TOOL_TIMEOUT: Final[str] = "inspect-tool-timeout"
 ACTION_INSPECT_REQUEST_CONFIRM: Final[str] = "inspect-request-confirm"
 ACTION_INSPECT_REQUEST_BLOCK: Final[str] = "inspect-request-block"
 ACTION_INSPECT_REQUEST_ALERT: Final[str] = "inspect-request-alert"
 ACTION_INSPECT_REQUEST_ALLOW: Final[str] = "inspect-request-allow"
+ACTION_INSPECT_REQUEST_TIMEOUT: Final[str] = "inspect-request-timeout"
 ACTION_INSPECT_RESPONSE_CONFIRM: Final[str] = "inspect-response-confirm"
 ACTION_INSPECT_RESPONSE_BLOCK: Final[str] = "inspect-response-block"
 ACTION_INSPECT_RESPONSE_ALERT: Final[str] = "inspect-response-alert"
 ACTION_INSPECT_RESPONSE_ALLOW: Final[str] = "inspect-response-allow"
+ACTION_INSPECT_RESPONSE_TIMEOUT: Final[str] = "inspect-response-timeout"
 ACTION_INSPECT_TOOL_RESPONSE_CONFIRM: Final[str] = "inspect-tool-response-confirm"
 ACTION_INSPECT_TOOL_RESPONSE_BLOCK: Final[str] = "inspect-tool-response-block"
 ACTION_INSPECT_TOOL_RESPONSE_ALERT: Final[str] = "inspect-tool-response-alert"
 ACTION_INSPECT_TOOL_RESPONSE_ALLOW: Final[str] = "inspect-tool-response-allow"
+ACTION_INSPECT_TOOL_RESPONSE_TIMEOUT: Final[str] = "inspect-tool-response-timeout"
 ACTION_INSPECT_REVEAL: Final[str] = "inspect-reveal"
 
 # Setup, operator, API, and sink instrumentation.
@@ -267,6 +271,9 @@ ACTION_SETUP_REDACTION_POLICY: Final[str] = "setup-redaction-policy"
 ACTION_SETUP_NOTIFICATIONS_TOGGLE: Final[str] = "setup-notifications-toggle"
 ACTION_SETUP_NOTIFICATIONS_SET: Final[str] = "setup-notifications-set"
 ACTION_SETUP_ROUTING: Final[str] = "setup-routing"
+ACTION_ROUTING_LISTENER_REFUSED: Final[str] = "routing.listener_refused"
+ACTION_ROUTING_ADMIN_DENIED: Final[str] = "routing.admin_denied"
+ACTION_ROUTING_SENSITIVE_REFUSED: Final[str] = "routing.sensitive_refused"
 ACTION_SETUP_SPLUNK: Final[str] = "setup-splunk"
 ACTION_SETUP_OBSERVABILITY: Final[str] = "setup-observability"
 ACTION_SETUP_LOCAL_OBSERVABILITY: Final[str] = "setup-local-observability"
@@ -472,18 +479,22 @@ ALL_ACTIONS: Final[tuple[str, ...]] = (
     ACTION_INSPECT_TOOL_BLOCK,
     ACTION_INSPECT_TOOL_ALERT,
     ACTION_INSPECT_TOOL_ALLOW,
+    ACTION_INSPECT_TOOL_TIMEOUT,
     ACTION_INSPECT_REQUEST_CONFIRM,
     ACTION_INSPECT_REQUEST_BLOCK,
     ACTION_INSPECT_REQUEST_ALERT,
     ACTION_INSPECT_REQUEST_ALLOW,
+    ACTION_INSPECT_REQUEST_TIMEOUT,
     ACTION_INSPECT_RESPONSE_CONFIRM,
     ACTION_INSPECT_RESPONSE_BLOCK,
     ACTION_INSPECT_RESPONSE_ALERT,
     ACTION_INSPECT_RESPONSE_ALLOW,
+    ACTION_INSPECT_RESPONSE_TIMEOUT,
     ACTION_INSPECT_TOOL_RESPONSE_CONFIRM,
     ACTION_INSPECT_TOOL_RESPONSE_BLOCK,
     ACTION_INSPECT_TOOL_RESPONSE_ALERT,
     ACTION_INSPECT_TOOL_RESPONSE_ALLOW,
+    ACTION_INSPECT_TOOL_RESPONSE_TIMEOUT,
     ACTION_INSPECT_REVEAL,
     ACTION_API_AUTH_FAILURE,
     ACTION_API_CONFIG_PATCH,
@@ -510,6 +521,9 @@ ALL_ACTIONS: Final[tuple[str, ...]] = (
     ACTION_SETUP_NOTIFICATIONS_TOGGLE,
     ACTION_SETUP_NOTIFICATIONS_SET,
     ACTION_SETUP_ROUTING,
+    ACTION_ROUTING_LISTENER_REFUSED,
+    ACTION_ROUTING_ADMIN_DENIED,
+    ACTION_ROUTING_SENSITIVE_REFUSED,
     ACTION_SETUP_SPLUNK,
     ACTION_SETUP_OBSERVABILITY,
     ACTION_SETUP_LOCAL_OBSERVABILITY,

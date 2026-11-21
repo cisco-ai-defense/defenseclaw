@@ -115,6 +115,12 @@ const (
 	ReasonNonCanonicalPath   ReasonCode = "non_canonical_path"
 	ReasonDestMayBeDir       ReasonCode = "dest_may_be_dir"
 	ReasonVirtualRoot        ReasonCode = "virtual_root"
+	// ReasonExecutionState: the shell may not run this effect at all. An earlier
+	// unconditional `set -n`, `exec CMD`, `exit` or a DEBUG trap that ends or
+	// stops execution changed
+	// what the rest of the shell runs, or the statement sits behind a provably
+	// false `&&` / true `||` (rel-1-0-10 GAP-0218).
+	ReasonExecutionState ReasonCode = "execution_state"
 )
 
 // reasonPrecedence orders reasons so a composite unknown reports the most
@@ -142,6 +148,7 @@ var reasonPrecedence = map[ReasonCode]int{
 	ReasonNonCanonicalPath:   11,
 	ReasonDestMayBeDir:       12,
 	ReasonVirtualRoot:        10,
+	ReasonExecutionState:     6,
 }
 
 // Reason is one closed reason with its scope.

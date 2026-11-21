@@ -45,7 +45,10 @@ type ownStatusView struct {
 type ownRoutingView struct {
 	Enabled   bool     `json:"enabled"`
 	RouteOnly []string `json:"route_only"`
-	Budget    *struct {
+	// RouteOnlyUnavailable is why the route-only connectors do not route this
+	// account (it has no home directory); empty otherwise.
+	RouteOnlyUnavailable string `json:"route_only_unavailable"`
+	Budget               *struct {
 		ID          string  `json:"id"`
 		Period      string  `json:"period"`
 		LimitUSD    float64 `json:"limit_usd"`
@@ -67,6 +70,8 @@ func ownRoutingLines(view *ownRoutingView) []string {
 		text = "on"
 		if len(view.RouteOnly) > 0 {
 			text += " (" + strings.Join(view.RouteOnly, ", ") + " routed)"
+		} else if view.RouteOnlyUnavailable != "" {
+			text += " (not routed for this account: " + view.RouteOnlyUnavailable + ")"
 		}
 	}
 	lines := []string{fmt.Sprintf("  Routing       %s", text)}

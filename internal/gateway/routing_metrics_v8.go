@@ -73,7 +73,7 @@ func routeFilteredByLabel(v string) string {
 	switch v {
 	case "":
 		return ""
-	case "sensitive", "unknown_alias", "policy", "api", "capability", "credential":
+	case "sensitive", "unknown_alias", "policy", "api", "capability", "credential", "endpoint":
 		return v
 	}
 	return "other"

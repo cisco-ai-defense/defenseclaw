@@ -352,6 +352,49 @@ def signing_rows(connector: str, upstream: dict[str, Any], live: dict[str, Any] 
     return rows
 
 
+def passthrough_rows(connector: str, upstream: dict[str, Any]) -> list[Row]:
+    """Claude Code on Bedrock with bedrock.auth passthrough recorded.
+
+    FAIL only when the recorded passthrough is proven unusable: the only Bedrock
+    key is the one defenseclaw keys set keeps for a routing alias, so Claude Code
+    signs with SigV4 and every call answers HTTP 400 while the agent-config row
+    says the credential is passed through. WARN when no key is visible but the
+    deciding source may be outside doctor's view (another shell, a project
+    settings.local.json, managed settings) (rel-1-0-10:GAP-1105)."""
+    if connector != "claudecode" or str((upstream.get("bedrock") or {}).get("auth") or "") != "passthrough":
+        return []
+    state = ro.claude_bedrock_passthrough_state()
+    label = f"Route-only {connector} Bedrock auth"
+    fix = (
+        "run defenseclaw routing disable --connector claudecode, then defenseclaw routing enable "
+        "--connector claudecode: it re-detects the AWS profile and the gateway signs"
+    )
+    if state == ro.PASSTHROUGH_UNUSABLE:
+        return [
+            Row(
+                "fail",
+                label,
+                "config.yaml records bedrock.auth passthrough, but Claude Code has no AWS_BEARER_TOKEN_BEDROCK in its "
+                "environment (the key defenseclaw keys set keeps is not given to it) and signs Bedrock calls itself: "
+                "every call fails with HTTP 400 (a SigV4-signed request cannot pass through the gateway)",
+                fix,
+            )
+        ]
+    if state == ro.PASSTHROUGH_UNKNOWN:
+        return [
+            Row(
+                "warn",
+                label,
+                "config.yaml records bedrock.auth passthrough, but doctor sees no AWS_BEARER_TOKEN_BEDROCK for Claude Code "
+                "(it may come from another shell, a project settings.local.json or managed settings, which doctor does not "
+                "read). If Claude Code answers HTTP 400 \"a SigV4-signed Bedrock request cannot pass through the gateway\", "
+                "it has no key",
+                fix + ", unless Claude Code gets the key from a source you control",
+            )
+        ]
+    return []
+
+
 def _signing_row(label: str, ok: bool, good: str, bad: str, fix: str) -> Row:
     return Row("pass", label, good) if ok else Row("fail", label, bad or "failed", fix)
 
@@ -658,6 +701,8 @@ def route_only_rows(
                 )
             )
         rows.extend(signed)
+        if renders:
+            rows.extend(passthrough_rows(name, up))
     held = port_held_row(cfg, platform)
     if held is not None:
         rows.append(held)

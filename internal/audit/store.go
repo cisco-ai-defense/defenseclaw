@@ -2163,6 +2163,14 @@ var migrations = []migration{
 		description: rejectedRecordsMigrationDescription,
 		apply:       migrateRejectedRecords,
 	},
+	{
+		description: "MCP inventory: add bounded durable observed tool state",
+		apply:       migrateMCPObservedTools,
+	},
+	{
+		description: "MCP inventory: add bounded durable advertised tool state",
+		apply:       migrateMCPAdvertisedTools,
+	},
 }
 
 // tableExists reports whether the given SQLite table is present.
@@ -2386,6 +2394,16 @@ func (s *Store) Init() error {
 		}
 		if !exists {
 			return fmt.Errorf("audit: mandatory event-history column %s is missing", column)
+		}
+	}
+	// A Secure Client store records the rejected_records migration without
+	// the table (it keeps main's schema), so the same file opened later as a
+	// standalone store never got it and every write of the opt-in store
+	// failed. The table and its index are created idempotently here, before
+	// the retention infrastructure that covers them (GAP-0072).
+	if !s.secureClientSchema {
+		if err := migrateRejectedRecords(s.db); err != nil {
+			return fmt.Errorf("audit: ensure rejected_records: %w", err)
 		}
 	}
 	if err := ensureRetentionTimestampInfrastructure(s.db, !s.secureClientSchema); err != nil {
@@ -2826,7 +2844,11 @@ var knownTables = map[string]bool{
 	"guardrail_chain_terminal_resets":    true,
 	"guardrail_chain_cutoff_barriers":    true,
 	// Connector/session selection and load provenance (WIN-AUD-070/071).
-	"runtime_asset_state": true,
+	"runtime_asset_state":         true,
+	"mcp_observed_tools":          true,
+	"mcp_observed_tool_parents":   true,
+	"mcp_advertised_tools":        true,
+	"mcp_advertised_tool_parents": true,
 }
 
 func (s *Store) hasColumn(table, column string) (bool, error) {

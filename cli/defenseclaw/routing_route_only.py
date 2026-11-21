@@ -21,7 +21,7 @@ import urllib.parse
 from dataclasses import dataclass
 from typing import Any
 
-from defenseclaw import codex_toml
+from defenseclaw import codex_toml, credential_provenance
 from defenseclaw.connector_paths import claude_config_dir, codex_home
 
 ROUTE_ONLY_CONNECTORS = ("claudecode", "codex")
@@ -60,7 +60,10 @@ def _truthy(value: Any) -> bool:
 def _claude_settings() -> tuple[dict[str, str], dict[str, str], dict[str, Any]]:
     """The agent env (shell merged with settings.json env), the settings.json
     env block alone, and the settings document."""
-    env = {k: v for k, v in os.environ.items() if k.startswith(("ANTHROPIC_", "CLAUDE_CODE_", "AWS_"))}
+    # The shell environment as the agent sees it: a key that defenseclaw keys set
+    # keeps in ~/.defenseclaw/.env and this process copied into os.environ is
+    # not in Claude Code's environment (rel-1-0-10:GAP-1105).
+    env = {k: v for k, v in credential_provenance.child_environ().items() if k.startswith(("ANTHROPIC_", "CLAUDE_CODE_", "AWS_"))}
     path = os.path.join(claude_config_dir(), "settings.json")
     try:
         with open(path, encoding="utf-8") as fh:
@@ -160,6 +163,60 @@ def _claude_bedrock_upstream(env: dict[str, str], own: dict[str, str], settings:
             f"the AWS profile {profile!r} is not in the AWS config or credentials file; {_SIGNING_OPTIONS}"
         )
     return Upstream(upstream, "invoke", "profile", bedrock_profile=profile, bedrock_region=region)
+
+
+PASSTHROUGH_OK, PASSTHROUGH_UNUSABLE, PASSTHROUGH_UNKNOWN = "ok", "unusable", "unknown"
+
+
+def _claude_settings_set(path: str, names: tuple[str, ...]) -> bool | None:
+    """Whether the Claude Code settings file at path sets one of names in its env
+    block (None: the file exists but cannot be read; False: absent or not set)."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            doc = json.load(fh)
+    except FileNotFoundError:
+        return False
+    except (OSError, ValueError):
+        return None
+    block = doc.get("env") if isinstance(doc, dict) else None
+    return isinstance(block, dict) and any(str(block.get(n) or "").strip() for n in names)
+
+
+def claude_bedrock_passthrough_state() -> str:
+    """Whether a recorded bedrock.auth passthrough works for Claude Code here.
+
+    PASSTHROUGH_OK: Claude Code is not in Bedrock mode, skips AWS auth, or has a
+    Bedrock API key in the shell or settings.json env doctor can see.
+    PASSTHROUGH_UNUSABLE: proven unusable. The only Bedrock key in this process
+    is the one defenseclaw keys set keeps in ~/.defenseclaw/.env (Claude Code never
+    sees it) and no settings file doctor can read gives Claude Code one: it signs
+    with SigV4 and every call answers HTTP 400 (rel-1-0-10:GAP-1105).
+    PASSTHROUGH_UNKNOWN: no key is visible, but the deciding source may be outside
+    doctor's view (an export in another shell, a project settings.local.json,
+    managed settings): not proven either way."""
+    env, _own, _settings = _claude_settings()
+    if not _truthy(env.get("CLAUDE_CODE_USE_BEDROCK")):
+        return PASSTHROUGH_OK
+    if _truthy(env.get("CLAUDE_CODE_SKIP_BEDROCK_AUTH")) or env.get("AWS_BEARER_TOKEN_BEDROCK"):
+        return PASSTHROUGH_OK
+    if not os.environ.get("AWS_BEARER_TOKEN_BEDROCK"):
+        # Nothing in this process either: say nothing is proven.
+        return PASSTHROUGH_UNKNOWN
+    from defenseclaw.connector_paths import _claude_file_managed_settings_paths, claude_settings_paths
+
+    names = ("AWS_BEARER_TOKEN_BEDROCK", "CLAUDE_CODE_SKIP_BEDROCK_AUTH")
+    try:
+        # settings.json is already in the environment above; the local files and the
+        # managed settings are the sources that can still give Claude Code a key.
+        paths = [p for p in claude_settings_paths() if os.path.basename(p) == "settings.local.json"]
+        paths += [os.path.join(claude_config_dir(), "settings.local.json")] + _claude_file_managed_settings_paths()
+    except Exception:  # noqa: BLE001 - a path helper that fails proves nothing
+        return PASSTHROUGH_UNKNOWN
+    for path in paths:
+        found = _claude_settings_set(path, names)
+        if found is None or found:
+            return PASSTHROUGH_UNKNOWN
+    return PASSTHROUGH_UNUSABLE
 
 
 def detect_upstream(connector: str) -> Upstream | None:

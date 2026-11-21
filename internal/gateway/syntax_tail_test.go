@@ -215,7 +215,7 @@ func TestGAP0526BlockedCommandWithSyntaxErrorStillBlocks(t *testing.T) {
 		}
 		for _, id := range gap0526SortedIDs(cases) {
 			k := cases[id]
-			if control, combined := verdictOf(gap0486Blocked[k.control]), verdictOf(k.command); !gap0825ProxyHolds(id, control, combined, rank, verdictOf) {
+			if control, combined := verdictOf(gap0486Blocked[k.control]), verdictOf(k.command); !gap0825ProxyHolds(control, combined, rank) {
 				t.Errorf("/llm %s %s: %s alone, %s with the syntax error", mode, id, control, combined)
 			}
 		}

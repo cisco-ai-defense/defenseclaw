@@ -23,7 +23,7 @@ routing:
         message: "Contractors may not use cloud models. Contact IT."
 ```
 
-- Every matching rule applies. A deny wins, `allow` lists intersect, and the first matching `default` that is allowed is used.
+- Every matching rule applies. A deny wins, `allow` lists intersect, and the first matching `default` that is allowed is used. A default is a preference: when it cannot serve the request (a Bedrock Converse alias cannot answer the Responses API Codex calls, it lacks a capability the request needs, or it has no credential), the next alias of the rule's `allow` list that can serve it is used, in list order, rather than refusing a request that an allowed model could answer. A rule with no `default` tries nothing extra, and a request whose model the rule does not allow is still refused with the rule named.
 - `allow` also binds a request that is not routed: its own model must be one of the allowed models.
 - `match` keys: `groups`, `users`, `connectors`, `agents`, `categories`, `severity_at_least`. Keys combine with AND, values of one key with OR.
 - Groups and users match only a verified caller, with the same proof rules as profile assignments. On a managed device, when DefenseClaw cannot confirm a fact, a constraining rule applies and a deny rule refuses.
@@ -172,3 +172,5 @@ defenseclaw routing rules list      # rules and notes on rules that do less than
 ```
 
 On a managed device a standard user runs `status`, `budgets list` and `explain` and sees only their own decisions and budgets: the gateway answers on its hook socket (Linux, macOS) or its service pipe (Windows) for the account that asks. `routing.admin.visibility.users_see: none` turns that off.
+
+`defenseclaw status` on a managed Linux or macOS device also has a **Routing** row: `on (claudecode, codex routed)` names the route-only connectors that route this account. When the gateway cannot resolve a home directory for the account (a directory account that sets none, so `HOME` is `/var/empty`, or a home path that does not exist, or a directory lookup that did not answer), the per-user route settings are not known to exist, so the row says `on (not routed for this account: home directory not resolved)`. It says what is known: it does not say the account has no home. Give the account a home directory, or run `defenseclaw status` again once the directory answers, then restart its agent. The Windows own-status pipe does not make this check.
