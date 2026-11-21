@@ -108,12 +108,10 @@ func (a *App) defaultDoctor() *openshell.Doctor {
 		}
 	}
 	// Off Linux the Docker VM's kernel is checked in a local image: the
-	// base image, else an overlay image built on it.
-	if recs, err := a.Images.List(); err == nil {
-		for _, r := range recs {
-			d.ProbeImages = append(d.ProbeImages, r.Tag)
-		}
-	}
+	// base image, else an overlay image built on it. The doctor's Landlock
+	// row and sandbox run read the same probe (rel-1-0-10:GAP-1746).
+	d.ProbeImages = a.harnessImageTags()
+	d.DockerVMLandlockABI = a.DockerVMLandlock
 	return d
 }
 
@@ -1332,6 +1330,7 @@ func (a *App) RunDoctor(ctx context.Context, o DoctorOptions) error {
 			rep = a.runDoctor(ctx)
 		}
 	}
+	refusal := a.doctorRunRefusal(ctx, rep)
 	if o.Output == OutputJSON {
 		_, off := sandboxesOff(rep)
 		// One exit contract: a failed check exits 1 in either format, so a
@@ -1339,7 +1338,8 @@ func (a *App) RunDoctor(ctx context.Context, o DoctorOptions) error {
 		// cannot run sandboxes is fine (GAP-0308).
 		if err := writeJSON(a.IO.Out, struct {
 			OK bool `json:"ok"`
-			// Ready is OK with sandboxes turned on (sandboxesOff).
+			// Ready is OK with sandboxes turned on (sandboxesOff), on a
+			// machine where sandbox run does not refuse (doctorRunRefusal).
 			Ready bool `json:"ready"`
 			// OpenShellInstall is when setup offers the OpenShell install
 			// (DoctorReport.OpenShellInstallNeeded), which the TUI presets.
@@ -1351,11 +1351,11 @@ func (a *App) RunDoctor(ctx context.Context, o DoctorOptions) error {
 			// OpenShellInstallVersion is the release setup installs.
 			OpenShellInstallVersion string `json:"openshell_install_version"`
 			*openshell.DoctorReport
-		}{rep.OK(), rep.OK() && !off, rep.OpenShellInstallNeeded(), rep.OpenShellUpgradeAvailable(), openshell.InstallerVersion, rep}); err != nil {
+		}{rep.OK(), rep.OK() && !off && refusal == nil, rep.OpenShellInstallNeeded(), rep.OpenShellUpgradeAvailable(), openshell.InstallerVersion, rep}); err != nil {
 			return err
 		}
 	} else {
-		a.printDoctor(rep)
+		a.printDoctor(rep, refusal)
 	}
 	if !rep.OK() {
 		return &ExitError{Code: 1, Err: &Silent{Err: errors.New("sandbox doctor found problems")}}
@@ -1383,7 +1383,22 @@ func (a *App) waitReconnect(ctx context.Context) {
 	}
 }
 
-func (a *App) printDoctor(rep *openshell.DoctorReport) {
+// doctorRunRefusal is what sandbox run refuses on this machine before it
+// builds anything, asked the way run asks it (dockerDesktopRefusal, with
+// the probe the Landlock row read): on a Mac whose gateway runs the docker
+// driver on Docker Desktop, a Linux VM whose Landlock could not be checked
+// left that row a warning and the doctor said ready, while every run was
+// refused (rel-1-0-10:GAP-1746). nil elsewhere.
+func (a *App) doctorRunRefusal(ctx context.Context, rep *openshell.DoctorReport) error {
+	if rep.Driver != openshell.DriverDocker {
+		return nil
+	}
+	return a.dockerDesktopRefusal(ctx, openshell.Driver{Name: rep.Driver}, nil)
+}
+
+// printDoctor prints the checks and the verdict; refusal is what sandbox
+// run refuses on this machine (doctorRunRefusal), which is not ready.
+func (a *App) printDoctor(rep *openshell.DoctorReport, refusal error) {
 	for _, c := range rep.Checks {
 		var mark string
 		switch c.Status {
@@ -1418,6 +1433,10 @@ func (a *App) printDoctor(rep *openshell.DoctorReport) {
 		a.warn("not ready for sandboxes yet: " + why)
 	} else if failed > 0 {
 		a.bad("not ready for sandboxes: " + plural(int64(failed), "check", "checks") + " failed")
+	} else if refusal != nil {
+		// The run's words, the reason and its way on (the Landlock row's
+		// fix is the doctor's own).
+		a.warn("not ready for sandboxes yet: sandbox run refuses on this machine: " + refusal.Error())
 	} else {
 		a.ok("ready for sandboxes")
 	}

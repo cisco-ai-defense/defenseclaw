@@ -943,6 +943,11 @@ func (a *App) checkNameFree(ctx context.Context, api API, name string, headless 
 // managed account's doctor does not do). A Docker VM that is not Docker Desktop
 // (Colima, OrbStack), and a Docker that does not answer, are left to try,
 // as on Linux.
+//
+// It is the one verdict on that VM: the doctor's last line asks it too
+// (spec nil), with the same probe (App.DockerVMLandlock, which the doctor's
+// Landlock row reads), so the doctor never calls ready a Mac where every
+// run is refused (rel-1-0-10:GAP-1746).
 func (a *App) dockerDesktopRefusal(ctx context.Context, d openshell.Driver, spec *harness.Spec) error {
 	if a.GOOS != "darwin" || d.Name != openshell.DriverDocker {
 		return nil
@@ -966,7 +971,10 @@ func (a *App) dockerDesktopRefusal(ctx context.Context, d openshell.Driver, spec
 		// administrator and downloads nothing (GAP-1705).
 		why = "DefenseClaw could not check Docker Desktop's Linux VM for the Landlock OpenShell sandboxes need: the OpenShell base image it checks in " +
 			"is not on this machine yet"
-		step = "`" + CommandName + " image build " + HarnessArg(spec) + "` downloads it (about 4 GB) with the " + spec.DisplayName + " image; then run this again"
+		step = "`" + CommandName + " image build` downloads it (about 4 GB) with the harness images; then check again"
+		if spec != nil {
+			step = "`" + CommandName + " image build " + HarnessArg(spec) + "` downloads it (about 4 GB) with the " + spec.DisplayName + " image; then run this again"
+		}
 	case err != nil && !errors.Is(err, openshell.ErrLandlockMissing):
 		why = "DefenseClaw could not check Docker Desktop's Linux VM for the Landlock OpenShell sandboxes need (" + err.Error() + ")"
 	case err == nil && abi > 0:
