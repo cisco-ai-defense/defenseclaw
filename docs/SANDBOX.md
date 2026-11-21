@@ -2108,7 +2108,10 @@ Startup variables that must apply before the managed `env` does
 (`DISABLE_AUTOUPDATER=1`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`,
 `CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL=1`,
 `CLAUDE_CODE_RESTRICT_PERSONAL_CONFIG=1`) travel through
-`sandbox create --env`. `CLAUDE_CODE_RESTRICT_PERSONAL_CONFIG` makes
+`sandbox create --env`, and the Claude Code launcher also exports
+`CLAUDE_CODE_RESTRICT_PERSONAL_CONFIG=1` (replacing any other value), so a
+Claude started from a shell in the sandbox has it too.
+`CLAUDE_CODE_RESTRICT_PERSONAL_CONFIG` makes
 Claude treat the workload-writable `~/.claude` as untrusted: a
 `processWrapper` there no longer launches background sessions (an empty
 managed value does not outrank it), a plugin folder placed directly in

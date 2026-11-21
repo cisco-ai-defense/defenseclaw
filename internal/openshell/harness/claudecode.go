@@ -221,7 +221,7 @@ func claudeCodeModelArg(args []string) (flag, override string) {
 }
 
 var claudeCodeLauncher = `#!/bin/bash -p
-# defenseclaw-sandbox-launcher v2
+# defenseclaw-sandbox-launcher v3
 # DefenseClaw Claude Code launcher (OpenShell sandbox images, root-owned).
 # Refreshes the first-run state that cannot be baked into the image, then
 # execs the pinned Claude Code binary with the caller's arguments.
@@ -230,7 +230,15 @@ var claudeCodeLauncher = `#!/bin/bash -p
 # key. For an OpenShell placeholder those include revision digits that change
 # on every sandbox start, so the approval is recorded again on each launch.
 set -u
-` + launcherPreamble + `# Claude Code's native build asks the user to add ~/.local/bin, where its own
+` + launcherPreamble + `# CLAUDE_CODE_RESTRICT_PERSONAL_CONFIG=1 makes Claude treat the
+# workload-writable ~/.claude as untrusted. Claude reads it before any settings
+# file, so the managed env cannot carry it, and sandbox create --env sets it
+# only for the process the sandbox starts. A Claude started any other way (a
+# shell in the sandbox, openshell exec) gets it here, and a caller value is
+# never kept (GAP-1200).
+CLAUDE_CODE_RESTRICT_PERSONAL_CONFIG=1
+export CLAUDE_CODE_RESTRICT_PERSONAL_CONFIG
+# Claude Code's native build asks the user to add ~/.local/bin, where its own
 # installer links it, to PATH until it is there (DISABLE_INSTALLATION_CHECKS
 # does not cover that check). The pinned binary never lives there; the entry
 # only follows the system directories, as Ubuntu's ~/.profile adds it.
