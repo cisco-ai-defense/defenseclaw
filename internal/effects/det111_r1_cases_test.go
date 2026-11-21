@@ -196,7 +196,7 @@ var det111Pending = map[string]string{
 	"GAP-1577/var3": "Tee-Object -FilePath has no program row (S4-R2)",
 	"GAP-1588/var4": "statement lowered (fsutil exec present): the gap is the legacy dialect placement, decision side",
 	"GAP-1588/var5": "statement lowered (icacls exec present): the gap is the legacy dialect placement, decision side",
-	"GAP-1667/var":  "cmd /c on the Git Bash route is not lowered in the POSIX dialect",
+	"GAP-1667/var":  "cmd /c body lowered on the Git Bash route; tar on Windows has no program row (S4-R2)",
 	"GAP-1667/var2": "cmd copy /y and tar on Windows have no program rows (S4-R2)",
 }
 

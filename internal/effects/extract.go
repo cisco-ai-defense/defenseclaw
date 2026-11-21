@@ -1477,7 +1477,11 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 		rest := inner[1:]
 		found := false
 		for j, a := range rest {
-			if a.Static && (strings.EqualFold(a.Value, "/c") || strings.EqualFold(a.Value, "/k")) {
+			// Git Bash (MSYS) turns a leading // into /, so cmd //c is cmd's
+			// /c there: the spelling that runs a body from a POSIX shell (DET111
+			// R1, GAP-1667).
+			if a.Static && (strings.EqualFold(a.Value, "/c") || strings.EqualFold(a.Value, "/k") ||
+				dialect == DialectPOSIX && (strings.EqualFold(a.Value, "//c") || strings.EqualFold(a.Value, "//k"))) {
 				found = true
 				parts := make([]string, 0, len(rest)-j-1)
 				allStatic := true
