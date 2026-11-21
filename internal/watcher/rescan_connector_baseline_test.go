@@ -18,6 +18,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // pluginBaselineScanner returns the findings fixed for each target and
@@ -459,7 +460,6 @@ func TestSkippedTreeHashCoversWhatTheSnapshotLeavesOut(t *testing.T) {
 		func() { writePluginFile(t, filepath.Join(dir, ".git", "HEAD"), "ref") },
 		func() { writePluginFile(t, filepath.Join(dir, ".venv", "notes.txt"), "n") },
 		func() { writePluginFile(t, filepath.Join(dir, "lib", "__pycache__", "x.dll"), "native") },
-		func() { _ = os.Symlink(filepath.Join(dir, "plugin.yaml"), filepath.Join(dir, "link.yaml")) },
 	} {
 		change()
 		got := skippedTreeHash(dir, hermesScannerLoader(t))
@@ -467,6 +467,29 @@ func TestSkippedTreeHashCoversWhatTheSnapshotLeavesOut(t *testing.T) {
 			t.Fatalf("skipped-tree hash did not change: %q", got)
 		}
 		seen = append(seen, got)
+	}
+}
+
+// A link in a plugin folder is part of the skipped-tree hash, and so is its
+// target. The link fixture is its own test: a standard Windows account may not
+// create one (rel-1-0-10:GAP-1623), and the change above ignored that error
+// and failed as "did not change" there.
+func TestSkippedTreeHashCoversALink(t *testing.T) {
+	dir := t.TempDir()
+	writePluginFile(t, filepath.Join(dir, "plugin.yaml"), "name: a\n")
+	writePluginFile(t, filepath.Join(dir, "other.yaml"), "name: b\n")
+	link := filepath.Join(dir, "link.yaml")
+	testenv.Symlink(t, filepath.Join(dir, "plugin.yaml"), link)
+	first := skippedTreeHash(dir, hermesScannerLoader(t))
+	if first == "" {
+		t.Fatal("a link left the skipped-tree hash empty")
+	}
+	if err := os.Remove(link); err != nil {
+		t.Fatal(err)
+	}
+	testenv.Symlink(t, filepath.Join(dir, "other.yaml"), link)
+	if got := skippedTreeHash(dir, hermesScannerLoader(t)); got == "" || got == first {
+		t.Fatalf("retargeted link: skipped-tree hash %q, want a new value (was %q)", got, first)
 	}
 }
 
