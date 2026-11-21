@@ -320,6 +320,56 @@ func patchKiroV2AgentHooks(path, hookScript string) error {
 	return writeJSONObject(path, cfg)
 }
 
+// kiroV3EngineSince is the first kiro-cli whose agent loads the agent file's
+// hooks together with ~/.kiro/hooks/*.json (GAP-0165: kiro-cli 3.3.0 audited
+// every tool call twice).
+const kiroV3EngineSince = "3.0.0"
+
+// kiroCLIv3Engine reports whether rawVersion is a kiro-cli banner at or after
+// kiroV3EngineSince. A Kiro IDE version, an empty or an unreadable version is
+// false: the earlier two-surface registration stays.
+func kiroCLIv3Engine(rawVersion string) bool {
+	raw := strings.TrimSpace(rawVersion)
+	if !strings.HasPrefix(strings.ToLower(raw), "kiro-cli") || strings.Contains(raw, "+kiro-ide") {
+		return false
+	}
+	version := NormalizeAgentVersion("kiro", raw)
+	return version != "" && CompareAgentVersions(version, kiroV3EngineSince) >= 0
+}
+
+// patchKiroAgentWithoutHooks writes the defenseclaw agent overlay with none of
+// DefenseClaw's hooks and drops DefenseClaw's entries a CLI 2.x Setup left in
+// either form. The user's own entries stay.
+func patchKiroAgentWithoutHooks(path, hookScript string) error {
+	cfg, err := readJSONObject(path)
+	if err != nil {
+		return err
+	}
+	if name, _ := cfg["name"].(string); strings.TrimSpace(name) == "" {
+		cfg["name"] = kiroManagedAgentName
+	}
+	seedKiroDefaultAgentOverlay(cfg)
+	if list, ok := cfg["hooks"].([]interface{}); ok {
+		if kept := removeKiroOwnedUniversalHooks(list, hookScript); len(kept) == 0 {
+			delete(cfg, "hooks")
+		} else {
+			cfg["hooks"] = kept
+		}
+	} else if hooks, ok := cfg["hooks"].(map[string]interface{}); ok {
+		for event, raw := range hooks {
+			if remaining := removeKiroOwnedV2Hooks(raw, hookScript); len(remaining) == 0 {
+				delete(hooks, event)
+			} else {
+				hooks[event] = remaining
+			}
+		}
+		if len(hooks) == 0 {
+			delete(cfg, "hooks")
+		}
+	}
+	return writeJSONObject(path, cfg)
+}
+
 // kiroV2HookTimeoutIs reports whether a decoded JSON number is want.
 func kiroV2HookTimeoutIs(raw interface{}, want int) bool {
 	switch v := raw.(type) {

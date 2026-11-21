@@ -116,12 +116,19 @@ func (c *KiroConnector) Setup(ctx context.Context, opts SetupOpts) error {
 			return fmt.Errorf("kiro record hook backup %s: %w", path, err)
 		}
 	}
+	// kiro-cli 3.x loads the agent file's hooks and ~/.kiro/hooks together,
+	// so DefenseClaw hooks in both audit every tool call twice (GAP-0165).
+	// There the agent file keeps its overlay and loses DefenseClaw's hooks.
+	patchAgent := patchKiroV2AgentHooks
+	if kiroCLIv3Engine(opts.AgentVersion) {
+		patchAgent = patchKiroAgentWithoutHooks
+	}
 	for _, path := range c.agentConfigPaths(opts) {
 		logical := kiroAgentBackupLogicalName(path)
 		if err := captureManagedFileBackup(opts.DataDir, c.Name(), logical, path); err != nil {
 			return fmt.Errorf("kiro capture agent backup %s: %w", path, err)
 		}
-		if err := patchKiroV2AgentHooks(path, command); err != nil {
+		if err := patchAgent(path, command); err != nil {
 			return fmt.Errorf("kiro agent hooks %s: %w", path, err)
 		}
 		if err := updateManagedFileBackupPostHash(opts.DataDir, c.Name(), logical, path); err != nil {
@@ -1463,7 +1470,21 @@ func (c *KiroConnector) ownedHookContractPresentFor(opts SetupOpts, command, v3C
 			return false, nil
 		}
 	}
+	v3Only := kiroCLIv3Engine(opts.AgentVersion)
 	for _, path := range c.agentConfigPaths(opts) {
+		if v3Only {
+			// kiro-cli 3.x reads ~/.kiro/hooks, so an agent file that still
+			// holds DefenseClaw's hooks doubles every audit row: report it
+			// as a broken contract and let the repair strip it (GAP-0165).
+			held, err := kiroV2AgentReferencesAnyHook(path, command)
+			if err != nil {
+				return false, err
+			}
+			if held {
+				return false, nil
+			}
+			continue
+		}
 		present, err := kiroV2AgentReferencesHook(path, command)
 		if err != nil {
 			return false, err
