@@ -160,3 +160,89 @@ func TestStandaloneClaudeEnsureRendersRecordedFormsOutsideTransactionLock(t *tes
 		t.Fatalf("ownership record after the concurrent change: %+v", upgraded)
 	}
 }
+
+// lockCountingClaudeProvider counts the drop-in checks made while the test's
+// transaction wrapper holds the managed policy lock.
+type lockCountingClaudeProvider struct {
+	connector.ManagedHookPolicyProvider
+	locked           *bool
+	total, underLock *int
+}
+
+func (p lockCountingClaudeProvider) VerifyManagedHookPolicy(body []byte, setup connector.SetupOpts) error {
+	*p.total++
+	if *p.locked {
+		*p.underLock++
+	}
+	return p.ManagedHookPolicyProvider.VerifyManagedHookPolicy(body, setup)
+}
+
+// rel-1-0-10 GAP-1713 (second holder): deferred staging proves the published
+// Claude drop-in is this deployment's with VerifyWindowsClaudeManagedPolicyIdentity,
+// which checked the bytes against every recorded contract, lock and guard
+// form under the lock (5 s on the managed host, every pass). The bytes read
+// under the lock are checked after it is released.
+func TestClaudePolicyIdentityChecksTheDropInOutsideTransactionLock(t *testing.T) {
+	requireGAP633Elevated(t) // a standard user is refused the managed policy folder (rel-1-0-10 GAP-1519)
+	fixture := newWindowsManagedInstallFixture(t, map[string]interface{}{"allowManagedHooksOnly": true})
+	setStandaloneProfileForTest(t, true)
+	opts := windowsManagedInstallOptions(fixture)
+	opts.AgentVersion = "2.1.230 (Claude Code)"
+	if _, err := Install(context.Background(), opts); err != nil {
+		t.Fatal(err)
+	}
+	transaction := windowsClaudeManagedPolicyTransaction
+	provider := windowsClaudeManagedPolicyIdentityProvider
+	t.Cleanup(func() {
+		windowsClaudeManagedPolicyTransaction = transaction
+		windowsClaudeManagedPolicyIdentityProvider = provider
+	})
+	locked := false
+	total, underLock := 0, 0
+	windowsClaudeManagedPolicyTransaction = func(fn func() error) error {
+		return transaction(func() error {
+			locked = true
+			defer func() { locked = false }()
+			return fn()
+		})
+	}
+	windowsClaudeManagedPolicyIdentityProvider = func() connector.ManagedHookPolicyProvider {
+		return lockCountingClaudeProvider{provider(), &locked, &total, &underLock}
+	}
+	if err := VerifyWindowsClaudeManagedPolicyIdentity(fixture.hookExe, opts.APIAddr, "DefenseClawGateway-Test"); err != nil {
+		t.Fatalf("identity of the installed policy: %v", err)
+	}
+	if total == 0 {
+		t.Fatal("the identity proof checked no drop-in bytes")
+	}
+	if underLock != 0 {
+		t.Fatalf("the identity proof made %d of its %d drop-in checks under the managed policy transaction lock", underLock, total)
+	}
+
+	// A drop-in whose record authenticates it but that no recorded contract
+	// renders is still refused, from the bytes read under the lock.
+	statePath := filepath.Join(filepath.Dir(fixture.policyPath), windowsClaudeManagedStateFile)
+	stateBody, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var record windowsClaudeManagedPolicyState
+	if err := decodeWindowsClaudeManagedPolicyState(stateBody, &record); err != nil {
+		t.Fatal(err)
+	}
+	foreign := []byte("{\n  \"hooks\": {}\n}\n")
+	record.PolicySHA256 = windowsManagedPolicyDigest(foreign)
+	foreignState, err := json.MarshalIndent(record, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := windowsManagedPolicyWriter(fixture.policyPath, foreign, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := windowsManagedPolicyWriter(statePath, append(foreignState, '\n'), true); err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifyWindowsClaudeManagedPolicyIdentity(fixture.hookExe, opts.APIAddr, "DefenseClawGateway-Test"); err == nil {
+		t.Fatal("the identity proof accepted a drop-in no recorded contract renders")
+	}
+}
