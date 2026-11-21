@@ -359,6 +359,11 @@ class InstalledVersionCheck:
     discovery: Any | None
     changed: Mapping[str, str]
     unchecked: Mapping[str, str]
+    #: ``(recorded executable, executable read now)`` of a connector whose
+    #: version was read from another executable than the one the evidence
+    #: recorded: a second install, not an update of the recorded one, so its
+    #: row names both instead of saying the agent updated (GAP-0195).
+    moved: Mapping[str, tuple[str, str]] = dataclasses.field(default_factory=dict)
 
 
 #: One answer is shared by everything one Doctor run judges: the connector
@@ -709,6 +714,7 @@ def recheck_installed_versions(
     replaced = False
     changed: dict[str, str] = {}
     unchecked: dict[str, str] = {}
+    moved_from: dict[str, tuple[str, str]] = {}
     for raw_name, signal in agents.items():
         name = normalize_connector(raw_name) if isinstance(raw_name, str) and len(raw_name) <= 128 else ""
         recorded = getattr(signal, "version", "")
@@ -721,6 +727,7 @@ def recheck_installed_versions(
             continue
         if name == "kiro":
             before = _kiro_installed_token(signal)
+            before_path = _kiro_selected_path(signal)
             fresh, did_change, why = _recheck_kiro(signal, data_dir)
             if why:
                 unchecked[name] = why
@@ -728,6 +735,13 @@ def recheck_installed_versions(
                 changed[name] = before
                 updated[raw_name] = fresh
                 replaced = True
+                after_path = _kiro_selected_path(fresh)
+                if (
+                    before_path
+                    and after_path
+                    and agent_discovery._path_key(before_path) != agent_discovery._path_key(after_path)
+                ):
+                    moved_from[name] = (before_path, after_path)
             continue
         if name not in agent_discovery._SPECS:
             unchecked[name] = "no version probe is defined for it"
@@ -742,6 +756,8 @@ def recheck_installed_versions(
         moved = agent_discovery._path_key(path) != agent_discovery._path_key(recorded_path) if recorded_path else True
         if version_changed and recorded.strip():
             changed[name] = _safe_semver_from_agent(recorded)
+            if recorded_path and moved:
+                moved_from[name] = (recorded_path, path)
         if version_changed or moved:
             updated[raw_name] = dataclasses.replace(
                 signal,
@@ -753,12 +769,62 @@ def recheck_installed_versions(
             replaced = True
     if not replaced:
         return InstalledVersionCheck(discovery, {}, unchecked)
-    return InstalledVersionCheck(dataclasses.replace(discovery, agents=updated), changed, unchecked)
+    return InstalledVersionCheck(dataclasses.replace(discovery, agents=updated), changed, unchecked, moved_from)
 
 
 def _kiro_installed_token(signal: Any) -> str:
     selected = assess_kiro_signal(signal).selected
     return _safe_semver_from_agent(selected.normalized) if selected is not None else ""
+
+
+#: Cursor's executables by role (ntpath stem, lower case): the Desktop hook
+#: host and the Agent CLI. Both read ~/.cursor/hooks.json; each has its own
+#: pins (Desktop semver ranges, Agent CLI date-hash builds).
+_CURSOR_DESKTOP_STEMS = frozenset({"cursor"})
+_CURSOR_AGENT_CLI_STEMS = frozenset({"agent", "cursor-agent"})
+
+
+def _executable_stem(path: str) -> str:
+    import ntpath
+
+    return ntpath.splitext(ntpath.basename(path))[0].lower()
+
+
+def cursor_agent_cli_discovery(discovery: Any | None, data_dir: str) -> tuple[Any, str] | None:
+    """The evidence with Cursor's Agent CLI in place of its Desktop (GAP-0196).
+
+    Discovery prefers the Desktop hook host, so on a host with both the
+    connector row judged the Desktop version and the Agent CLI that runs the
+    same hooks was never compared with its own pins (another account without
+    the Desktop got "untested newer" for the same CLI build). Returns
+    ``(discovery, executable)`` with the cursor signal re-read from the first
+    Agent CLI launch candidate that answers, or None when the recorded
+    executable is not the Desktop or no Agent CLI answers.
+    """
+
+    agents = getattr(discovery, "agents", None)
+    if not isinstance(agents, Mapping) or not dataclasses.is_dataclass(discovery):
+        return None
+    signal = agents.get("cursor")
+    if signal is None or not dataclasses.is_dataclass(signal) or not getattr(signal, "installed", False):
+        return None
+    recorded = getattr(signal, "binary_path", "")
+    if not isinstance(recorded, str) or _executable_stem(recorded) not in _CURSOR_DESKTOP_STEMS:
+        return None
+    for candidate in _launch_candidates("cursor", data_dir):
+        if _executable_stem(candidate) not in _CURSOR_AGENT_CLI_STEMS:
+            continue
+        found, error = _probe_agent_version("cursor", candidate, data_dir)
+        if found.strip() and not error:
+            fresh = dataclasses.replace(signal, binary_path=candidate, version=found, error="")
+            return dataclasses.replace(discovery, agents={**agents, "cursor": fresh}), candidate
+    return None
+
+
+def _kiro_selected_path(signal: Any) -> str:
+    selected = assess_kiro_signal(signal).selected
+    path = getattr(selected, "path", "") if selected is not None else ""
+    return path if isinstance(path, str) else ""
 
 
 def assess_component_health(

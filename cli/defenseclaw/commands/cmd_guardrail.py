@@ -1720,10 +1720,8 @@ def _set_connector_fail_mode(app: AppContext, requested: str, mode: str | None, 
             # The source follows the order the outage resolver applies, so the line never
             # contradicts the value above it (GAP-0824).
             ux.subhead(proxy_outage_source(app.cfg, key), indent="  ")
-        elif has_override:
-            ux.subhead(f"per-connector override (global default: {global_fm}).", indent="  ")
         else:
-            ux.subhead(f"inherited from global default ({global_fm}).", indent="  ")
+            ux.subhead(_hook_fail_mode_source_text(gc, key, has_override, global_fm), indent="  ")
         if proxy:
             # Hooks do not exist for a proxy-backed connector: only a foreign or
             # unguarded registration is drift, as the unscoped report says.
@@ -2149,6 +2147,33 @@ def _show_per_user_outage_modes(app: AppContext) -> None:
     click.echo(f"  {ux.dim('Fail closed during an outage:')} defenseclaw guardrail fail-mode closed")
     click.echo(f"  {ux.dim('Gateway down:')} defenseclaw-gateway start; defenseclaw doctor if it does not start")
     click.echo()
+
+
+def _hook_fail_mode_source_text(gc: object, key: str, has_override: bool, global_fm: str) -> str:
+    """Where the hook fail mode of *key* comes from, in the words of its resolver (GAP-1175).
+
+    GuardrailConfig fills an unset global hook_fail_mode with closed, so a
+    connector whose policy tier keeps outages open printed "open - inherited
+    from global default (closed)". The source now follows
+    hook_fail_mode_resolution, the one rule doctor and status read.
+    """
+
+    saved_text = str(getattr(gc, "hook_fail_mode", "") or "").strip()
+    global_saved = bool(getattr(gc, "_hook_fail_mode_saved", True)) and bool(saved_text)
+    if has_override:
+        return f"per-connector override (global default: {global_fm if global_saved else 'not set'})."
+    resolver = getattr(gc, "hook_fail_mode_resolution", None)
+    mode, source = resolver(key) if callable(resolver) else (global_fm, "config:guardrail.hook_fail_mode")
+    if source.startswith("pack-default:"):
+        tier = source.split(":", 1)[1] or "default"
+        return f"{mode} by default in the {tier} policy tier (guardrail.hook_fail_mode is not set)."
+    if source == "managed-default":
+        return f"{mode} by default on a managed install (guardrail.hook_fail_mode is not set)."
+    if source == "secure-client-default":
+        return f"{mode} by default under Secure Client (guardrail.hook_fail_mode is not set)."
+    if source.startswith("config:") and source != "config:guardrail.hook_fail_mode":
+        return f"{mode} from {source.split(':', 1)[1]}."
+    return f"inherited from global default ({global_fm})."
 
 
 @guardrail.command("fail-mode")

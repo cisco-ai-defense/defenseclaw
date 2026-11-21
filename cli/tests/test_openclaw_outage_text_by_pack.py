@@ -238,3 +238,32 @@ def test_secure_client_openclaw_names_secure_client_as_the_source_of_its_outage_
         assert "from the policy tier (strict tier)" not in out
         assert "closed by the strict policy" not in out
     assert "set by Secure Client (open unless the administrator chose otherwise)" in scoped
+
+
+# ---- GAP-1175: the source line of a hook connector agrees with its value ----
+
+
+def _kiro_config(tmp_path: Path, *, saved: str = ""):
+    from defenseclaw.config import PerConnectorGuardrailConfig
+
+    cfg = _two_connector_config(tmp_path, saved=saved)
+    cfg.guardrail.connectors = {"codex": PerConnectorGuardrailConfig(), "kiro": PerConnectorGuardrailConfig()}
+    return cfg
+
+
+def test_an_unsaved_hook_fail_mode_is_named_as_the_policy_tier_default_not_a_closed_global(tmp_path: Path) -> None:
+    cfg = _kiro_config(tmp_path)
+    mode, source = cfg.guardrail.hook_fail_mode_resolution("kiro")
+    assert (mode, source) == ("open", "pack-default:default")
+    run = CliRunner().invoke(cmd_guardrail.fail_mode_cmd, ["--connector", "kiro"], obj=_app(cfg))
+    assert run.exit_code == 0, run.output
+    out = _words(run.output)
+    assert "inherited from global default (closed)" not in out
+    assert "open by default in the default policy tier (guardrail.hook_fail_mode is not set)." in out
+
+
+def test_a_saved_global_hook_fail_mode_is_still_shown_as_inherited(tmp_path: Path) -> None:
+    # Benign twin: an explicitly saved global value is the inherited one.
+    cfg = _kiro_config(tmp_path, saved="closed")
+    out = _words(CliRunner().invoke(cmd_guardrail.fail_mode_cmd, ["--connector", "kiro"], obj=_app(cfg)).output)
+    assert "inherited from global default (closed)." in out

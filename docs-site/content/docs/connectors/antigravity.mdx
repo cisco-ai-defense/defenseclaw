@@ -181,6 +181,7 @@ DefenseClaw builds an Antigravity overlay image. Nothing on your host changes.
 - Windows ARM64 is not supported.
 - Enterprise, managed, Team, ProgramData, cloud-dashboard, MDM and organization policy surfaces are outside this connector and unverified.
 - Antigravity can run a tool when its pre-tool hook times out or cannot start, even in fail mode `closed`. This is an Antigravity limit. See [Known limits](/docs/support-matrix#antigravity).
+- `agy` updates itself. On its first run after an install it can replace its own executable with the newest release, keep the old file beside it as `agy.<n>.old` and write `~/.gemini/antigravity-cli/updater/update_status.json`. Google documents no setting that turns this off, so a version you pinned does not stay pinned. A newer version keeps its hooks and runs as an untested newer version. `defenseclaw doctor` reads the version of the `agy` that runs now (an executable setup admits) and says which version was recorded before the update; run `defenseclaw setup antigravity` to record the new one.
 
 ## Disable
 

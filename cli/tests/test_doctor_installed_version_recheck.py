@@ -861,3 +861,140 @@ def test_an_update_within_the_recorded_contract_stays_a_pass_without_a_setup_ste
     assert "installed=0.23.1" in row["detail"]
     assert row["status"] == "pass"
     assert "defenseclaw setup hermes" not in (row.get("remediation") or "")
+
+
+# ---- GAP-0195: another install answered, not an update of the recorded one --
+
+
+def test_kiro_row_names_both_installs_when_another_one_answers_first() -> None:
+    # A user kiro-cli setup recorded beside an app-bundle one this shell launches
+    # first: both answer, so the agent did not update; the row names the one read.
+    recorded, bundled = _above(_above(KIRO_CLI_HOOK_FLOOR)), _above(KIRO_CLI_HOOK_FLOOR)
+    _gate, row = _kiro_gate_and_row(
+        recorded,
+        (_K_NEW,),
+        {_K_NEW: (f"kiro-cli {bundled}", ""), _K_OLD: (f"kiro-cli {recorded}", "")},
+    )
+    assert f"installed={bundled}" in row["detail"]
+    assert "before the agent updated" not in row["detail"]
+    assert f"read from {_K_NEW}" in row["detail"]
+    assert f"recorded as {recorded} from {_K_OLD}, another install" in row["detail"]
+
+
+def test_kiro_recorded_install_updated_in_place_still_says_updated() -> None:
+    # Benign twin: the same executable answers a new version.
+    old, new = _above(KIRO_CLI_HOOK_FLOOR), _above(_above(KIRO_CLI_HOOK_FLOOR))
+    _gate, row = _kiro_gate_and_row(old, (_K_OLD,), {_K_OLD: (f"kiro-cli {new}", "")})
+    assert f"installed={new}" in row["detail"]
+    assert f"recorded as {old} before the agent updated" in row["detail"]
+    assert "another install" not in row["detail"]
+
+
+def test_an_agent_read_from_another_executable_names_both() -> None:
+    row, _ = _row_with_candidates(
+        (_NEW,), {_NEW: ("codex-cli 0.167.0", ""), _OLD: ("codex-cli 0.160.0", "")}
+    )
+    assert "installed=0.167.0" in row["detail"]
+    assert "before the agent updated" not in row["detail"]
+    assert f"read from {_NEW}" in row["detail"] and f"from {_OLD}, another install" in row["detail"]
+
+
+# ---- GAP-0196: Cursor's Agent CLI is judged against its own pins -------------
+
+_CURSOR_DESKTOP = "/Applications/Cursor.app/Contents/Resources/app/bin/cursor"
+_CURSOR_CLI = "/Users/u/.local/bin/agent"
+
+
+def _cursor_rows(recorded: str, candidates: tuple[str, ...], answers: dict[str, tuple[str, str]]) -> dict[str, dict]:
+    agents = {
+        n: AgentSignal(name=n, installed=False, config_path="", binary_path="", version="", error="")
+        for n in agent_discovery.DISCOVERABLE_CONNECTORS
+    }
+    agents["cursor"] = AgentSignal(
+        name="cursor", installed=True, config_path="", binary_path=recorded, version=answers[recorded][0], error=""
+    )
+    discovery = AgentDiscovery(scanned_at="2026-11-06T00:00:00Z", agents=agents, cache_hit=True)
+    r = _DoctorResult()
+    with (
+        mock.patch("defenseclaw.doctor_health.read_cached_discovery", return_value=discovery),
+        mock.patch.object(agent_discovery, "_version_for_agent_binary", _by_path(answers)),
+        mock.patch.object(agent_discovery, "_binary_candidates_for_agent", return_value=candidates),
+        mock.patch.object(cmd_doctor, "_doctor_component_evidence", return_value=()),
+        mock.patch.object(cmd_doctor, "_connector_enabled", return_value=True),
+        mock.patch.object(cmd_doctor, "_unverified_executable_note", return_value=("", "")),
+    ):
+        cmd_doctor._check_component_connector_compatibility(SimpleNamespace(data_dir=""), ["cursor"], r)
+    return {c["label"]: c for c in r.checks if c["label"].startswith("Connector compatibility: cursor")}
+
+
+def test_cursor_agent_cli_beside_the_desktop_gets_its_own_row() -> None:
+    rows = _cursor_rows(
+        _CURSOR_DESKTOP,
+        (_CURSOR_DESKTOP, _CURSOR_CLI),
+        {_CURSOR_DESKTOP: ("3.27.22", ""), _CURSOR_CLI: ("2026.11.11-b912975", "")},
+    )
+    assert "installed=3.27.22" in rows["Connector compatibility: cursor"]["detail"]
+    cli = rows["Connector compatibility: cursor Agent CLI"]
+    assert _CURSOR_CLI in cli["detail"] and "2026.11.11" in cli["detail"]
+    assert "untested newer" in cli["detail"] and cli["status"] == "pass"
+
+
+def test_cursor_reviewed_agent_cli_build_beside_the_desktop_passes() -> None:
+    rows = _cursor_rows(
+        _CURSOR_DESKTOP,
+        (_CURSOR_DESKTOP, _CURSOR_CLI),
+        {_CURSOR_DESKTOP: ("3.27.22", ""), _CURSOR_CLI: ("2026.07.23-e383d2b", "")},
+    )
+    assert rows["Connector compatibility: cursor Agent CLI"]["status"] == "pass"
+
+
+def test_cursor_agent_cli_alone_keeps_one_row() -> None:
+    # Benign twin: the recorded executable is the Agent CLI, judged by the main row.
+    rows = _cursor_rows(_CURSOR_CLI, (_CURSOR_CLI,), {_CURSOR_CLI: ("2026.11.11-b912975", "")})
+    assert list(rows) == ["Connector compatibility: cursor"]
+
+
+# ---- GAP-0199: agy updates itself; Doctor reads the agy that runs now --------
+
+_AGY = "/Users/u/.local/bin/agy"
+
+
+def test_self_updated_agy_is_reported_at_the_version_that_runs_now() -> None:
+    agents = {
+        n: AgentSignal(name=n, installed=False, config_path="", binary_path="", version="", error="")
+        for n in agent_discovery.DISCOVERABLE_CONNECTORS
+    }
+    agents["antigravity"] = AgentSignal(
+        name="antigravity", installed=True, config_path="", binary_path=_AGY, version="1.5.7", error=""
+    )
+    discovery = AgentDiscovery(scanned_at="2026-11-06T00:00:00Z", agents=agents, cache_hit=True)
+
+    def probe(_name, _path, *_a, require_trusted_binary_paths=True, **_k):
+        # The passive probe refuses ~/.local/bin; setup admits it (GAP-0164).
+        return ("", agent_discovery.UNTRUSTED_PREFIX_ERROR) if require_trusted_binary_paths else ("1.5.8", "")
+
+    r = _DoctorResult()
+    with (
+        mock.patch("defenseclaw.doctor_health.read_cached_discovery", return_value=discovery),
+        mock.patch.object(agent_discovery, "_version_for_agent_binary", mock.Mock(side_effect=probe)),
+        mock.patch.object(doctor_health, "_setup_admits_for_probe", return_value=True),
+        mock.patch.object(cmd_doctor, "_doctor_component_evidence", return_value=()),
+        mock.patch.object(cmd_doctor, "_connector_enabled", return_value=True),
+        mock.patch.object(cmd_doctor, "_unverified_executable_note", return_value=("", "")),
+    ):
+        cmd_doctor._check_component_connector_compatibility(SimpleNamespace(data_dir=""), ["antigravity"], r)
+    row = next(c for c in r.checks if c["label"] == "Connector compatibility: antigravity")
+    assert "installed=1.5.8" in row["detail"]
+    assert "recorded as 1.5.7 before the agent updated" in row["detail"]
+
+
+def test_antigravity_docs_name_the_agy_self_update() -> None:
+    from pathlib import Path
+
+    page = (
+        Path(__file__).resolve().parents[2] / "docs-site" / "content" / "docs" / "connectors" / "antigravity.mdx"
+    ).read_text(encoding="utf-8")
+    limits = page.split("## Limits", 1)[1].split("\n## ", 1)[0]
+    assert "`agy` updates itself" in limits
+    assert "no setting that turns this off" in limits
+    assert "defenseclaw setup antigravity" in limits

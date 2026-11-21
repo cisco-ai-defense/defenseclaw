@@ -5127,7 +5127,17 @@ def _check_component_connector_compatibility(
             )
         elif finding.installed_version:
             detail += f"; installed={finding.installed_version}"
-            if finding.connector in rechecked.changed:
+            if finding.connector in rechecked.moved:
+                # Another install answered, not an update of the recorded one
+                # (GAP-0195): name the executable read and the one recorded.
+                recorded_path, read_path = rechecked.moved[finding.connector]
+                was = rechecked.changed.get(finding.connector, "")
+                detail += (
+                    f" (read from {read_path}, the install this shell launches first; recorded"
+                    + (f" as {was}" if was else "")
+                    + f" from {recorded_path}, another install)"
+                )
+            elif finding.connector in rechecked.changed:
                 # Only a plain semver of the recorded text reaches the row.
                 was = rechecked.changed[finding.connector]
                 detail += (
@@ -5251,6 +5261,52 @@ def _check_component_connector_compatibility(
             check_id=f"doctor.connector.{finding.connector}.compatibility",
             reason_code=finding.reason_code,
             remediation=remediation,
+        )
+    if "cursor" in enabled:
+        _emit_cursor_agent_cli_compatibility(discovery, data_dir, r)
+
+
+def _emit_cursor_agent_cli_compatibility(discovery: object, data_dir: str, r: _DoctorResult) -> None:
+    """Judge Cursor's Agent CLI against its own pins beside the Desktop (GAP-0196).
+
+    The cursor row judges the executable discovery recorded, which is the
+    Desktop hook host when both are installed. The Agent CLI runs the same
+    hooks.json, so it gets its own row, naming the executable read.
+    """
+
+    from defenseclaw.doctor_health import (
+        HealthStatus,
+        build_health_report,
+        cursor_agent_cli_discovery,
+        supported_range_text,
+    )
+
+    found = cursor_agent_cli_discovery(discovery, data_dir)
+    if found is None:
+        return
+    cli_discovery, executable = found
+    for finding in build_health_report(("cursor",), cli_discovery, components=()).connectors:
+        detail = finding.summary
+        if finding.installed_version:
+            detail += f"; installed={finding.installed_version} ({executable})"
+        if finding.contract_id:
+            detail += f"; contract={finding.contract_id}"
+        if finding.supported_agent_ranges:
+            detail += f"; supported={supported_range_text(finding.supported_agent_ranges)}"
+        if finding.status is HealthStatus.SUPPORTED:
+            tag = "pass"
+        elif finding.status is HealthStatus.UNSUPPORTED:
+            tag = "fail"
+        else:
+            tag = "warn"
+        _emit(
+            tag,
+            "Connector compatibility: cursor Agent CLI",
+            detail,
+            r=r,
+            check_id="doctor.connector.cursor.agent_cli.compatibility",
+            reason_code=finding.reason_code,
+            remediation=_health_remediation_text(finding.remediations),
         )
 
 
