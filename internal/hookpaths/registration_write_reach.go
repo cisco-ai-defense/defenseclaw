@@ -962,10 +962,10 @@ func registrationFindReachedFiles(args []*syntax.Word, values actionValues, cwd,
 	}
 	var reached []string
 	for _, root := range roots {
-		path := OperandPath(root, cwd)
+		root, path, prefix := findRootStart(root, cwd, home)
 		if info, err := pathStat(path); err == nil && info.IsDir() {
 			for _, target := range protected {
-				if !strings.HasPrefix(target.path, path+string(filepath.Separator)) {
+				if target.path == path || !findRootHolds(path, prefix, target.path) {
 					continue
 				}
 				// A find hands its child only the entries the walk finds: a
@@ -1100,6 +1100,26 @@ func findRootHolds(root, prefix, path string) bool {
 	return path == root || strings.HasPrefix(path, prefix)
 }
 
+// findRootStart is a find root as the walk starts from it: the root as
+// written (a Git Bash drive mount spelled as its drive root on a Windows hook
+// host), the absolute root, and the prefix of every path below it, the root
+// ending in one separator. A root that already ends in one (/, and C:\ for
+// find C:/) is its own prefix: one more separator (//, C:\\) starts no path,
+// so a find from / or a drive root reached none of the protected files a find
+// from the home reaches (rel-1-0-10:GAP-1642, GAP-1644, GAP-1647).
+func findRootStart(written, cwd, home string) (string, string, string) {
+	// Git Bash spells a drive root /c/ or /c (GAP-0781 RV8-1).
+	if runtime.GOOS == "windows" && actionWindowsHome(home) {
+		written = findGitBashDriveRoot(written)
+	}
+	root := OperandPath(written, cwd)
+	prefix := root
+	if !strings.HasSuffix(prefix, string(filepath.Separator)) {
+		prefix += string(filepath.Separator)
+	}
+	return written, root, prefix
+}
+
 // findGitBashDriveRoot spells a Git Bash drive mount start (/c/, /c,
 // /cygdrive/c) as that drive's root: actionMSYSDrivePath leaves /c as c:, the
 // drive's current folder, while Git Bash's /c is the root
@@ -1212,21 +1232,8 @@ func registrationFindReach(words []string, cwd, home string, protected, all prot
 	for i, name := range names {
 		nameTests[i], _ = newFindTest(nameOption, name, "")
 	}
-	// Git Bash spells a drive root /c/ or /c (GAP-0781 RV8-1).
-	windowsHost := runtime.GOOS == "windows" && actionWindowsHome(home)
 	for _, written := range roots {
-		if windowsHost {
-			written = findGitBashDriveRoot(written)
-		}
-		root := OperandPath(written, cwd)
-		// A root that already ends in a separator (/, and C:\ for find C:/)
-		// is its own prefix: one more separator (//, C:\\) starts no path,
-		// so find / and find C:/ reached none of the registration files
-		// find ~ reaches (rel-1-0-10:GAP-1642).
-		prefix := root
-		if !strings.HasSuffix(prefix, string(filepath.Separator)) {
-			prefix += string(filepath.Separator)
-		}
+		written, root, prefix := findRootStart(written, cwd, home)
 		below := func(target protectedFile) bool {
 			return findRootHolds(root, prefix, target.path)
 		}
