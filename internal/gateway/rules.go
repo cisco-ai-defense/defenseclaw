@@ -29,6 +29,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/decide"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/semantic"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/rxprefilter"
@@ -89,6 +90,11 @@ type RuleFinding struct {
 	// only the in-process trusted-action boundary may use the proof to decide
 	// whether the finding can participate in a synchronous deny decision.
 	proof findingProof
+	// Proof is the DET111 proof of the finding (internal/guardrail/decide):
+	// what the call does, to which protected class, how sure the reader is.
+	// Value-free and never serialized; decide.Decide reads it to pick the
+	// tier row. The zero Proof is a finding mapped by its severity alone.
+	Proof decide.Proof `json:"-"`
 	// shellProtectedFile marks a finding of the shell-command protected-file
 	// class on a shell command (markShellProtectedFileFindings). It is
 	// private and value-free; profileClassFloor reads it.
