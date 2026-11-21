@@ -301,7 +301,54 @@ func ReadArchiveExtractions(command, cwd, home string, windowsShell bool) Archiv
 type archiveExtractionScan struct {
 	paths, unknown []string
 	whole          []ArchiveWhole
+	listings       []archiveListingSpan
 	trunc          bounded.Truncated
+}
+
+// archiveListingSpan is the byte range of a tar listing call (tar -tf x.tar,
+// actionTarListsOnly) in the text it was read from.
+type archiveListingSpan struct {
+	text       string
+	start, end int
+}
+
+// archiveListing reports a tar call that only lists an archive: every word
+// static and actionTarListsOnly. It reads the archive and writes no file.
+func archiveListing(words []string, static []bool) bool {
+	switch strings.ToLower(strings.TrimSuffix(filepath.Base(words[0]), ".exe")) {
+	case "tar", "gtar", "bsdtar":
+	default:
+		return false
+	}
+	for _, known := range static {
+		if !known {
+			return false
+		}
+	}
+	return actionTarListsOnly(words[1:])
+}
+
+// textBefore is text up to at with the tar listings read from it that end
+// there blanked: a mention of an archive in a listing of it is a read, not a
+// write that may stage it (rel-1-0-10:GAP-1662).
+func (read *archiveExtractionScan) textBefore(text string, at int) string {
+	before := text[:at]
+	var blanked []byte
+	for _, listing := range read.listings {
+		if listing.start < 0 || listing.start >= listing.end || listing.end > at || listing.text != text {
+			continue
+		}
+		if blanked == nil {
+			blanked = []byte(before)
+		}
+		for index := listing.start; index < listing.end; index++ {
+			blanked[index] = ' '
+		}
+	}
+	if blanked == nil {
+		return before
+	}
+	return string(blanked)
 }
 
 // archiveMembersUnknown reports an extraction whose members cannot be read
@@ -342,7 +389,7 @@ func archiveWalk(file *syntax.File, text, cwd, home string, depth int, read *arc
 		first := len(read.whole)
 		defer func() {
 			for index := first; index < len(read.whole); index++ {
-				if archiveStagedBefore(file, call, text, home, read.whole[index].Archive) {
+				if archiveStagedBefore(file, call, text, home, read.whole[index].Archive, read) {
 					read.whole[index].staged = true
 				}
 			}
@@ -373,6 +420,10 @@ func archiveWalk(file *syntax.File, text, cwd, home string, depth int, read *arc
 			if code, ok := pythonLiteralCode(words); ok {
 				pythonArchiveExtractions(code, cwd, home, read)
 			}
+			return true
+		}
+		if archiveListing(words, static) {
+			read.listings = append(read.listings, archiveListingSpan{text: text, start: int(call.Pos().Offset()), end: int(call.End().Offset())})
 			return true
 		}
 		archiveCallExtractions(words, static, cwd, read)
@@ -425,9 +476,10 @@ func archiveCallExtractions(words []string, static []bool, cwd string, read *arc
 // archiveStagedBefore reports that a statement before the extraction call
 // may write the archive: the statements before it are not only static cd
 // and mkdir (onlyDirectoryStatementsBefore), and the text before the call
-// names the archive (rel-1-0-10:GAP-1224). A call the text cannot place is
-// read as staged.
-func archiveStagedBefore(file *syntax.File, call *syntax.CallExpr, text, home, archive string) bool {
+// names the archive (rel-1-0-10:GAP-1224) outside a tar listing of it
+// (textBefore, rel-1-0-10:GAP-1662). A call the text cannot place is read as
+// staged.
+func archiveStagedBefore(file *syntax.File, call *syntax.CallExpr, text, home, archive string, read *archiveExtractionScan) bool {
 	if archive == "" || onlyDirectoryStatementsBefore(file, call, home) {
 		return false
 	}
@@ -435,7 +487,7 @@ func archiveStagedBefore(file *syntax.File, call *syntax.CallExpr, text, home, a
 	if at < 0 || at > len(text) {
 		return true
 	}
-	return strings.Contains(text[:at], filepath.Base(archive))
+	return strings.Contains(read.textBefore(text, at), filepath.Base(archive))
 }
 
 // archiveRenamesMembers reports a tar or unzip extraction that changes the

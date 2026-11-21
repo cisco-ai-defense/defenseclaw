@@ -148,7 +148,7 @@ func pythonArchivePath(arg, cwd, home string) (string, bool) {
 // With windowsShell a native tar, unzip or 7z call is read too
 // (psNativeArchiveCall). Input past the parser's bounds is TRUNCATED.
 func powerShellArchiveExtractions(command, cwd, home string, windowsShell bool, read *archiveExtractionScan) {
-	lower := strings.ToLower(command)
+	text, lower := command, strings.ToLower(command)
 	native := windowsShell && psNativeExtractorWord.MatchString(lower)
 	if !native && !strings.Contains(lower, "expand-archive") && !strings.Contains(lower, "extracttodirectory") || !filepath.IsAbs(cwd) {
 		return
@@ -179,11 +179,11 @@ func powerShellArchiveExtractions(command, cwd, home string, windowsShell bool, 
 		name = strings.ToLower(name)
 		if native {
 			if program, ok := psNativeExtractor(name); ok {
-				psNativeArchiveCall(command, program, cwd, home, lower, read)
+				psNativeArchiveCall(command, program, cwd, home, text, read)
 				return
 			}
 			if base := strings.TrimSuffix(name[strings.LastIndexAny(name, `\/`)+1:], ".exe"); base == "cmd" {
-				psCmdArchiveCall(command, cwd, home, lower, read)
+				psCmdArchiveCall(command, cwd, home, text, read)
 				return
 			}
 		}
@@ -377,10 +377,9 @@ func psNativeExtractor(name string) (string, bool) {
 // parameter token as written (-xf, -C), a literal, a home variable or a
 // string of literal runs and home variables (psNativeWord); any other value
 // is a word with no static spelling. The words after --% are passed as they
-// are written. A whole archive the command names again before the call (a
-// Copy-Item onto it) is staged, as the Expand-Archive reading has it
-// (rel-1-0-10:GAP-1224).
-func psNativeArchiveCall(command *psparse.Command, program, cwd, home, lower string, read *archiveExtractionScan) {
+// are written. A whole archive the text before the call names (a Copy-Item
+// onto it) is staged (psNativeArchiveWords).
+func psNativeArchiveCall(command *psparse.Command, program, cwd, home, text string, read *archiveExtractionScan) {
 	words, static := []string{program}, []bool{true}
 	add := func(word string, known bool) {
 		if !known {
@@ -403,17 +402,33 @@ func psNativeArchiveCall(command *psparse.Command, program, cwd, home, lower str
 	for _, field := range strings.Fields(command.StopParsing) {
 		add(psSlashWord(field), true)
 	}
-	psNativeArchiveWords(words, static, cwd, lower, read)
+	if len(command.Redirs) == 0 && archiveListing(words, static) {
+		start, end := command.Span()
+		read.listings = append(read.listings, archiveListingSpan{text: text, start: start, end: end})
+		return
+	}
+	psNativeArchiveWords(command, words, static, cwd, text, read)
 }
 
-// psNativeArchiveWords reads the words of one native extractor call; a whole
-// archive the command names again before the call (a Copy-Item onto it) is
-// staged, as the Expand-Archive reading has it (rel-1-0-10:GAP-1224).
-func psNativeArchiveWords(words []string, static []bool, cwd, lower string, read *archiveExtractionScan) {
+// psNativeArchiveWords reads the words of one native extractor call. A whole
+// archive the text before the call names may be written there first (a
+// Copy-Item onto it) and is staged, as the POSIX reading has it
+// (archiveStagedBefore, rel-1-0-10:GAP-1224); a mention after the call (a
+// Remove-Item of it) is not, nor is one in a tar listing of it (textBefore,
+// rel-1-0-10:GAP-1662). A call the text cannot place is read as staged.
+func psNativeArchiveWords(call psparse.Node, words []string, static []bool, cwd, text string, read *archiveExtractionScan) {
 	first := len(read.whole)
 	archiveCallExtractions(words, static, cwd, read)
+	if first == len(read.whole) {
+		return
+	}
+	at, _ := call.Span()
+	if at < 0 || at > len(text) {
+		at = len(text)
+	}
+	before := strings.ToLower(read.textBefore(text, at))
 	for index := first; index < len(read.whole); index++ {
-		if strings.Count(lower, strings.ToLower(filepath.Base(read.whole[index].Archive))) > 1 {
+		if strings.Contains(before, strings.ToLower(filepath.Base(read.whole[index].Archive))) {
 			read.whole[index].staged = true
 		}
 	}
@@ -425,7 +440,7 @@ func psNativeArchiveWords(words []string, static []bool, cwd, lower string, read
 // start of a word is the home, as cmd expands it (rel-1-0-10:GAP-1633). A
 // value with no static spelling, or an option before /c this reading does not
 // know, leaves the call unread.
-func psCmdArchiveCall(command *psparse.Command, cwd, home, lower string, read *archiveExtractionScan) {
+func psCmdArchiveCall(command *psparse.Command, cwd, home, text string, read *archiveExtractionScan) {
 	var body []string
 	inBody := false
 	for _, element := range command.Elements {
@@ -480,7 +495,7 @@ func psCmdArchiveCall(command *psparse.Command, cwd, home, lower string, read *a
 		}
 		words, static = append(words, psSlashWord(field)), append(static, true)
 	}
-	psNativeArchiveWords(words, static, cwd, lower, read)
+	psNativeArchiveWords(command, words, static, cwd, text, read)
 }
 
 // psNativeWord is one PowerShell value as the word a native program gets:

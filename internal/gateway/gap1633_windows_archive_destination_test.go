@@ -91,6 +91,10 @@ func TestGAP1633WindowsArchiveDestinationIsAStateWrite(t *testing.T) {
 	// also takes persistence.ssh_authorized_keys_command, a block in every
 	// tier. The state write is what this test proves.
 	staged := `Copy-Item cfgarch.tar staged.tar; tar -xf staged.tar -C $env:USERPROFILE\.defenseclaw`
+	// rel-1-0-10 GAP-1662: a listing before the call does not stage the
+	// archive, a copy onto it still does.
+	listedCopied := `tar -tf ok.tar; Copy-Item cfgarch.tar ok.tar; tar -xf ok.tar -C $env:USERPROFILE`
+	listedCopiedPosix := `tar -tf ok.tar; cp cfgarch.tar ok.tar; tar -xf ok.tar -C ~`
 	writes := []string{
 		`tar -xf mark.tar -C ` + state,
 		`tar.exe -xf mark.tar -C ` + state,
@@ -107,6 +111,8 @@ func TestGAP1633WindowsArchiveDestinationIsAStateWrite(t *testing.T) {
 		`cmd /c tar -xf mark.tar -C %USERPROFILE%\.defenseclaw`,
 		`cmd /c "tar -xf mark.tar -C %USERPROFILE%\.defenseclaw"`,
 		staged,
+		listedCopied,
+		listedCopiedPosix,
 		// The POSIX spelling keeps its reading.
 		`tar -xf mark.tar -C ~/.defenseclaw`,
 	}
@@ -118,6 +124,13 @@ func TestGAP1633WindowsArchiveDestinationIsAStateWrite(t *testing.T) {
 		`cmd /c tar -xf ok.tar -C %USERPROFILE%\fcwork\out`,
 		`tar -tf mark.tar`,
 		`Start-Process notepad; $target = 'tar'`,
+		// rel-1-0-10 GAP-1662: only a mention of the archive before the
+		// call may stage it; one after it (the archive removed) is not, and
+		// a listing before it writes nothing (the PowerShell reading of a
+		// POSIX spelling as well).
+		`tar -xf ok.tar -C $env:USERPROFILE; Remove-Item ok.tar`,
+		`tar -xf ok.tar -C ~; rm ok.tar`,
+		`tar -tf ok.tar; tar -xf ok.tar -C ~`,
 	}
 	routes := []struct{ connector, tool string }{
 		{"claudecode", "PowerShell"},
@@ -176,7 +189,9 @@ func TestGAP1633WindowsArchiveDestinationIsAStateWrite(t *testing.T) {
 			for _, command := range writes {
 				action, findings := evaluate(command)
 				want := tier.want
-				if command == staged && runtime.GOOS == "windows" && action == "block" &&
+				// The listed-then-copied rows land in the home, which holds
+				// .ssh: the same GAP-1634 block on every host.
+				if (command == staged && runtime.GOOS == "windows" || command == listedCopied || command == listedCopiedPosix) && action == "block" &&
 					strings.Contains(findings, "persistence.ssh_authorized_keys_command") {
 					want = "block"
 				}
