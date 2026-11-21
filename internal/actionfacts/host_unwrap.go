@@ -190,7 +190,7 @@ func unwrapPowerShellOnce(source string) (string, Dialect, bool, bounded.CapSet)
 	whole := len(script.Statements) == 1
 	var wholeDialect Dialect
 	for _, statement := range script.Statements {
-		body, dialect, start, end, moves, ok := powerShellStatementWrapper(source, script, statement)
+		body, dialect, start, end, moves, ok := powerShellStatementWrapper(source, script, statement, whole)
 		if !ok || moves && !whole {
 			// A launcher that starts its script in another folder is read
 			// in place only as the whole call: its Set-Location would move
@@ -242,6 +242,7 @@ func powerShellStatementWrapper(
 	source string,
 	script *psparse.Script,
 	statement psparse.Statement,
+	whole bool,
 ) (body string, dialect Dialect, start, end int, moves, ok bool) {
 	pipeline, isPipeline := statement.(*psparse.Pipeline)
 	if !isPipeline || pipeline.ChainRHS != nil || pipeline.ChainOp != "" ||
@@ -270,7 +271,15 @@ func powerShellStatementWrapper(
 	if !named {
 		return
 	}
-	nested := psparse.ExtractNestedScripts(&psparse.Script{
+	// A launcher between other statements keeps psparse's own reading: its
+	// statement is read whole as a statement of the list
+	// (HostScriptReadings), so its payload as written is read there, once,
+	// not pasted into the list a second time (launcherNestedScripts).
+	extract := psparse.ExtractNestedScripts
+	if whole {
+		extract = launcherNestedScripts
+	}
+	nested := extract(&psparse.Script{
 		Statements: []psparse.Statement{statement},
 		Dialect:    script.Dialect,
 	})
@@ -457,6 +466,31 @@ func launcherWordsArePlain(command *psparse.Command) bool {
 	return true
 }
 
+// launcherNestedScripts is psparse.ExtractNestedScripts of script, with the
+// script of a launcher whose payload psparse leaves unread for legacy quoting
+// alone (ps_legacy_quoting: a double quote, a blank word ending in a
+// backslash, an empty word) read as written. Windows PowerShell 5.1 may drop
+// or change that quote when it hands the word over, but pwsh 7 and any caller
+// that hands over the argv as is run the payload
+// as written, so it is one way the call runs. The reading only adds: the call
+// as written is judged as before, and before this the payload had no reading
+// at all, so an eventvwr handler chain in a quoted -Command body was allowed
+// with no finding in every tier while the same chain sent plainly alerted
+// (rel-1-0-10:GAP-1638). Only the legacy-quoting gate depends on the dialect
+// (every word was resolved by the parse already), so no other payload is
+// read differently, and a call without such a payload pays no second pass.
+func launcherNestedScripts(script *psparse.Script) []psparse.NestedScript {
+	nested := psparse.ExtractNestedScripts(script)
+	for _, candidate := range nested {
+		if candidate.Reason == psparse.ReasonLegacyQuoting {
+			asWritten := *script
+			asWritten.Dialect = psparse.DialectPwsh7
+			return psparse.ExtractNestedScripts(&asWritten)
+		}
+	}
+	return nested
+}
+
 // commandHasEmptyWord reports an empty static word among the words of a
 // launcher call: PowerShell versions pass it differently, so the script stays
 // opaque.
@@ -621,7 +655,7 @@ func powerShellHostBody(argv []string) (string, Dialect, bool) {
 		return "", DialectNone, false
 	}
 	var found *psparse.NestedScript
-	nested := psparse.ExtractNestedScripts(script)
+	nested := launcherNestedScripts(script)
 	for i := range nested {
 		if nested[i].Kind != psparse.KindPowerShellCommand &&
 			nested[i].Kind != psparse.KindEncodedCommand {
@@ -1323,7 +1357,8 @@ func HostScriptReadings(input Input, facts Facts, depth int, listed bool) HostSc
 // not static but whose text is written out: powershell -Command { block },
 // powershell -Command "<script>" that expands only $HOME and $env:NAME
 // (psparse.HostCommandChildText, rel-1-0-10:GAP-1226), and Start-Process
-// powershell -ArgumentList <literal words with -Command>.
+// powershell -ArgumentList <literal words with -Command> or <one literal
+// command line> (startProcessCommandLine).
 func nonStaticNestedText(source string, nested psparse.NestedScript) (string, bool) {
 	command, ok := nested.Source.(*psparse.Command)
 	if !ok {
@@ -1374,26 +1409,38 @@ func nonStaticNestedText(source string, nested psparse.NestedScript) (string, bo
 		words := cradleWords(command)
 		var host string
 		var list psparse.Expr
-		for index, word := range words {
+		for index := 0; index < len(words); index++ {
+			word := words[index]
 			switch {
 			case word.param && len(word.text) >= 1 && strings.HasPrefix("argumentlist", word.text):
 				list = word.value
 				if list == nil && index+1 < len(words) {
-					list = words[index+1].value
+					// The value word is the list, never the program.
+					index++
+					list = words[index].value
 				}
 			case !word.param && host == "" && word.text != "":
 				host = word.text
 			}
 		}
+		if !hostLauncherIdentity(host, "powershell") && !hostLauncherIdentity(host, "pwsh") {
+			return "", false
+		}
+		if line, isLine := list.(*psparse.StringLit); isLine {
+			return startProcessCommandLine(host, line)
+		}
 		array, isArray := list.(*psparse.ArrayLit)
-		if !isArray || (!hostLauncherIdentity(host, "powershell") && !hostLauncherIdentity(host, "pwsh")) {
+		if !isArray {
 			return "", false
 		}
 		var rest []string
 		seen := false
 		for _, element := range array.Elements {
+			// A word with a double quote is read as written, as a launcher
+			// body that holds one is (launcherNestedScripts,
+			// rel-1-0-10:GAP-1638).
 			text, static := psparse.LiteralString(element)
-			if !static || strings.Contains(text, `"`) {
+			if !static {
 				return "", false
 			}
 			if seen {
@@ -1409,6 +1456,26 @@ func nonStaticNestedText(source string, nested psparse.NestedScript) (string, bo
 		return strings.Join(rest, " "), true
 	}
 	return "", false
+}
+
+// startProcessCommandLine is the script of Start-Process <host>
+// -ArgumentList '<line>': the child host gets line as its command line, which
+// it splits at blanks into its words, so the words are read by the launcher
+// argv reading (powerShellLauncherBody: the host switches, then -Command or
+// the first word that is not a switch, to the end). A line with a double quote
+// is read as written: Windows PowerShell 5.1 may drop the quote when it splits
+// the line, but the script as written is one way the call runs, and before
+// this the line had no reading at all, so an eventvwr handler chain given as
+// the line was allowed with no finding in every tier while the same chain sent
+// plainly alerted (rel-1-0-10:GAP-1638). Newlines stay inside their word, as
+// the host splits at spaces and tabs only.
+func startProcessCommandLine(host string, line *psparse.StringLit) (string, bool) {
+	text, static := psparse.LiteralString(line)
+	if !static {
+		return "", false
+	}
+	words := strings.FieldsFunc(text, func(r rune) bool { return r == ' ' || r == '\t' })
+	return powerShellLauncherBody(append([]string{host}, words...))
 }
 
 type nestedText struct {

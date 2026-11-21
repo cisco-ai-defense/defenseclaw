@@ -66,7 +66,7 @@ var shoptGlobBits = func() map[string]uint8 {
 // set -e, -u, -x, -o pipefail and the shopt names that change no expansion
 // change nothing (rel-1-0-10:GAP-0350).
 func globOptionsInCall(command string, start shellGlobOptions) shellGlobOptions {
-	if !globOptionsChangeTextMayMatch(command) || !globOptionsChangeText.MatchString(command) {
+	if !globOptionsChangeTextMatches(command) {
 		return start
 	}
 	file, ok := parseShell(command)
@@ -236,28 +236,49 @@ func globOptionsSet(args []string, o *shellGlobOptions) {
 }
 
 // globOptionLiteral is the text of a word with no expansion in it (plain,
-// single- or double-quoted literal text).
+// single- or double-quoted literal text, an ANSI-C quote with no escape), as
+// the shell reads it after quote removal: `s\hopt` is shopt and `"se\t"` is
+// se\t (rel-1-0-10:GAP-1614). An unescaped pattern character is no literal.
 func globOptionLiteral(word *syntax.Word) (string, bool) {
 	var b strings.Builder
 	for _, part := range word.Parts {
 		switch part := part.(type) {
 		case *syntax.Lit:
-			if strings.ContainsAny(part.Value, "\\*?[") {
-				return "", false
+			for i := 0; i < len(part.Value); i++ {
+				switch character := part.Value[i]; character {
+				case '*', '?', '[':
+					return "", false
+				case '\\':
+					if i++; i == len(part.Value) {
+						return "", false
+					}
+					if part.Value[i] != '\n' {
+						b.WriteByte(part.Value[i])
+					}
+				default:
+					b.WriteByte(character)
+				}
 			}
-			b.WriteString(part.Value)
 		case *syntax.SglQuoted:
-			if part.Dollar {
+			if part.Dollar && strings.ContainsRune(part.Value, '\\') {
 				return "", false
 			}
 			b.WriteString(part.Value)
 		case *syntax.DblQuoted:
 			for _, inner := range part.Parts {
 				lit, ok := inner.(*syntax.Lit)
-				if !ok || strings.ContainsRune(lit.Value, '\\') {
+				if !ok {
 					return "", false
 				}
-				b.WriteString(lit.Value)
+				for i := 0; i < len(lit.Value); i++ {
+					// In double quotes a backslash escapes only $ ` " \ and a newline.
+					if lit.Value[i] == '\\' && i+1 < len(lit.Value) && strings.IndexByte("$`\"\\\n", lit.Value[i+1]) >= 0 {
+						if i++; lit.Value[i] == '\n' {
+							continue
+						}
+					}
+					b.WriteByte(lit.Value[i])
+				}
 			}
 		default:
 			return "", false
@@ -293,6 +314,31 @@ var globOptionsChangeLiterals = []string{
 	"shopt", "GLOBIGNORE", "BASHOPTS", "SHELLOPTS", "set", "eval", "source", "bash",
 	". ", ".\t", ".\n", ".\f", ".\r",
 }
+
+// globOptionsChangeTextMatches is the text gate of globOptionsInCall: the
+// call as written, or as the shell reads its words, may change the glob
+// options (globOptionsChangeText). The shell removes a line continuation
+// (backslash-newline) and the quote and escape characters before it reads a
+// name, so `GLOB\<newline>IGNORE=x`, `"shopt" -s dotglob`, `s\hopt`, `'set' -f`,
+// `$'eval' x` and `set \<newline>-f` change the options as their plain
+// spelling does, and a gate on the raw text alone passed them by with no
+// parse (rel-1-0-10:GAP-1614). The gate is a filter only: the parsed walk
+// decides, and a call with no quote or backslash is scanned once, as before.
+func globOptionsChangeTextMatches(command string) bool {
+	if globOptionsChangeTextMayMatch(command) && globOptionsChangeText.MatchString(command) {
+		return true
+	}
+	if !strings.ContainsAny(command, "\\'\"") {
+		return false
+	}
+	read := strings.ReplaceAll(command, "\\\n", "")
+	read = globOptionsQuoteRemoval.Replace(read)
+	return globOptionsChangeTextMayMatch(read) && globOptionsChangeText.MatchString(read)
+}
+
+// globOptionsQuoteRemoval drops the quote and escape characters of a call's
+// text for the gate (the $ of $'...' and $"..." with them).
+var globOptionsQuoteRemoval = strings.NewReplacer("$'", "", "$\"", "", "\\", "", "'", "", "\"", "")
 
 // globOptionsChangeTextMayMatch reports whether command holds one of the
 // literals every match of globOptionsChangeText holds: a command with none

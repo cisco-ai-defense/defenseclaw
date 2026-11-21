@@ -89,7 +89,6 @@ func TestWindowsExactSecurityControlNearNegativesStayQuiet(t *testing.T) {
 		{`Set-MpPreference -ExclusionPath $drive -Force`, actionfacts.DialectPowerShell},
 		{`Add-MpPreference @params`, actionfacts.DialectPowerShell},
 		{`& Add-MpPreference -ExclusionExtension ".exe" -Force`, actionfacts.DialectPowerShell},
-		{`powershell -Command 'Add-MpPreference -ExclusionExtension ".exe" -Force'`, actionfacts.DialectPowerShell},
 		{`auditpol /get /category:*`, actionfacts.DialectCMD},
 		{`auditpol /set /category:"Detailed Tracking" /failure:enable`, actionfacts.DialectCMD},
 		{`auditpol /set /category:%CATEGORY% /failure:disable`, actionfacts.DialectCMD},

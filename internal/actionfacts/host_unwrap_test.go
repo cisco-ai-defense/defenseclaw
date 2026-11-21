@@ -129,10 +129,14 @@ func TestHostScriptTwinReadsAStartProcessArgumentList(t *testing.T) {
 	if !slices.ContainsFunc(reading.Twins, func(twin Input) bool { return twin.Command == `Get-Content C:\tmp\a.txt` }) {
 		t.Fatalf("no reading of the Start-Process child: %#v", reading.Twins)
 	}
+	// A word with a double quote is read as written (rel-1-0-10:GAP-1638).
+	quoted := hookShellInput(t, "PowerShell", `Start-Process powershell -ArgumentList '-c','Write-Output "x"'`)
+	if !slices.ContainsFunc(HostScriptReadings(quoted, Analyze(quoted), 0, false).Twins, func(twin Input) bool { return twin.Command == `Write-Output "x"` }) {
+		t.Fatalf("no reading of the quoted Start-Process child")
+	}
 	for _, opaque := range []string{
 		`Start-Process powershell -ArgumentList '-c',$payload`,
 		`Start-Process C:\tmp\powershell.exe -ArgumentList '-c','Get-Date'`,
-		`Start-Process powershell -ArgumentList '-c','Write-Output "x"'`,
 	} {
 		input := hookShellInput(t, "PowerShell", opaque)
 		for _, twin := range HostScriptReadings(input, Analyze(input), 0, false).Twins {

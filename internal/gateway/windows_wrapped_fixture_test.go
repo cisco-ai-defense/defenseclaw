@@ -37,10 +37,11 @@ var windowsStatementWrappers = []struct {
 }{
 	{"cd-prefix", func(c string) string { return `Set-Location C:\Users\alice\proj; ` + c }},
 	{"trailer", func(c string) string { return c + ` ; Write-Output done` }},
-	// The hook's selection places this spelling in no dialect: its POSIX
-	// reading is complete, so only the list without its last statement
-	// reads the attack (windowsListPrefixTwinRequest, rel-1-0-10:GAP-0348).
+	// The hook's selection places these spellings in no dialect, so only the
+	// list cut before its trailers reads the attack
+	// (windowsListPrefixTwinRequests, rel-1-0-10:GAP-0348, GAP-1569).
 	{"echo-trailer", func(c string) string { return c + ` ; echo done` }},
+	{"echo-trailers", func(c string) string { return c + ` ; echo a ; echo b` }},
 	{"call-block", func(c string) string { return `& { ` + c + ` }` }},
 }
 
@@ -55,15 +56,13 @@ var windowsWrappedKnownLimit = map[string]string{
 // windowsWrappedKnownWrapperLimit lists the (wrapper, fixture) pairs one
 // wrapper is known to hide, with the reason: rel-1-0-10:GAP-1561. The hook's
 // selection places `<statement> ; echo done` in no dialect; the list-prefix
-// reading (windowsListPrefixTwinRequest) reads only a POSIX list whose own
-// reading is complete, and these are a native program the POSIX reading
-// leaves partial or PowerShell grammar the POSIX list parser cannot read.
+// readings (windowsListPrefixTwinRequests) need a list the POSIX grammar reads
+// whole, and these are PowerShell grammar the POSIX list parser cannot read.
 var windowsWrappedKnownWrapperLimit = map[string]string{
-	"echo-trailer/windows-procdump-lsass":                  "GAP-1561: own POSIX reading partial",
-	"echo-trailer/windows-usn-journal-delete-powershell":   "GAP-1561: own POSIX reading partial",
-	"echo-trailer/windows-recursive-everyone-full-control": "GAP-1561: own POSIX reading partial",
-	"echo-trailer/windows-disable-amsi-reflection":         "GAP-1561: PowerShell grammar, no POSIX list",
-	"echo-trailer/windows-comsvcs-lsass":                   "GAP-1561: PowerShell grammar, no POSIX list",
+	"echo-trailer/windows-disable-amsi-reflection":  "GAP-1561: PowerShell grammar, no POSIX list",
+	"echo-trailer/windows-comsvcs-lsass":            "GAP-1561: PowerShell grammar, no POSIX list",
+	"echo-trailers/windows-disable-amsi-reflection": "GAP-1561: PowerShell grammar, no POSIX list",
+	"echo-trailers/windows-comsvcs-lsass":           "GAP-1561: PowerShell grammar, no POSIX list",
 }
 
 // windowsEquivalentRules are rules that name the same action in another
