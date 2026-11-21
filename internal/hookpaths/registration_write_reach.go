@@ -8,6 +8,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -1068,7 +1069,7 @@ func registrationFindRsyncReach(file *syntax.File, cwd, home string, protected, 
 		}
 		switch programBase(words[0]) {
 		case "find":
-			found = registrationFindReach(words, cwd, protected, all)
+			found = registrationFindReach(words, cwd, home, protected, all)
 		case "rsync":
 			found = registrationRsyncReach(words, cwd, protected)
 		case "install", "ginstall":
@@ -1089,6 +1090,28 @@ func registrationFindRsyncReach(file *syntax.File, cwd, home string, protected, 
 	return found
 }
 
+// findRootHolds reports a path at or below a find root; prefix is the root
+// ending in one separator. Windows compares names without case, so find c:/
+// walks a C: home (rel-1-0-10:GAP-1642).
+func findRootHolds(root, prefix, path string) bool {
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(path, root) || len(path) > len(prefix) && strings.EqualFold(path[:len(prefix)], prefix)
+	}
+	return path == root || strings.HasPrefix(path, prefix)
+}
+
+// findGitBashDriveRoot spells a Git Bash drive mount start (/c/, /c,
+// /cygdrive/c) as that drive's root: actionMSYSDrivePath leaves /c as c:, the
+// drive's current folder, while Git Bash's /c is the root
+// (rel-1-0-10:GAP-1642).
+func findGitBashDriveRoot(written string) string {
+	mapped := actionMSYSDrivePath(written)
+	if mapped != written && len(mapped) == 2 {
+		return mapped + "/"
+	}
+	return mapped
+}
+
 // findChildRemovesTree reports whether the options of an rm-like find child
 // (the words after its program) ask it to remove folders with their content.
 func findChildRemovesTree(args []string) bool {
@@ -1104,7 +1127,7 @@ func findChildRemovesTree(args []string) bool {
 	return false
 }
 
-func registrationFindReach(words []string, cwd string, protected, all protectedFiles) bool {
+func registrationFindReach(words []string, cwd, home string, protected, all protectedFiles) bool {
 	// paths are the -path and -regex tests, which do not filter here.
 	var roots, names []string
 	var paths []findTest
@@ -1189,10 +1212,23 @@ func registrationFindReach(words []string, cwd string, protected, all protectedF
 	for i, name := range names {
 		nameTests[i], _ = newFindTest(nameOption, name, "")
 	}
+	// Git Bash spells a drive root /c/ or /c (GAP-0781 RV8-1).
+	windowsHost := runtime.GOOS == "windows" && actionWindowsHome(home)
 	for _, written := range roots {
+		if windowsHost {
+			written = findGitBashDriveRoot(written)
+		}
 		root := OperandPath(written, cwd)
+		// A root that already ends in a separator (/, and C:\ for find C:/)
+		// is its own prefix: one more separator (//, C:\\) starts no path,
+		// so find / and find C:/ reached none of the registration files
+		// find ~ reaches (rel-1-0-10:GAP-1642).
+		prefix := root
+		if !strings.HasSuffix(prefix, string(filepath.Separator)) {
+			prefix += string(filepath.Separator)
+		}
 		below := func(target protectedFile) bool {
-			return target.path == root || strings.HasPrefix(target.path, root+string(filepath.Separator))
+			return findRootHolds(root, prefix, target.path)
 		}
 		aimed := func(target protectedFile, tests []findTest) bool {
 			return slices.ContainsFunc(tests, func(test findTest) bool { return test.aimsAt(written, root, target.path) })
@@ -1219,8 +1255,8 @@ func registrationFindReach(words []string, cwd string, protected, all protectedF
 				!pathNamed && !aimed(target, nameTests) {
 				continue
 			}
-			if !tree && limits == 1 && maxDepth >= 0 && target.path != root &&
-				strings.Count(strings.TrimPrefix(target.path, root+string(filepath.Separator)), string(filepath.Separator)) >= maxDepth {
+			if !tree && limits == 1 && maxDepth >= 0 && len(target.path) > len(prefix) &&
+				strings.Count(target.path[len(prefix):], string(filepath.Separator)) >= maxDepth {
 				continue
 			}
 			if len(names) == 0 {
