@@ -795,6 +795,10 @@ func (w *walker) resolveWord(wd Word) Word {
 				}
 			}
 			if !ok {
+				// The segments stay on the word, so a reader of its literal part
+				// (env NAME=$V: the name) still sees them; the Reason keeps the
+				// word unresolved. Tail is the literal after the dynamic part.
+
 				return Word{Static: false, Reason: ReasonDynamicExpansion, Span: wd.Span, Segs: wd.Segs, Tail: segTail(wd.Segs[i+1:])}
 			}
 			// An unquoted variable undergoes field splitting and globbing: if

@@ -191,43 +191,42 @@ func isShellName(name string) bool {
 // psStartProcessShellTarget reports a Start-Process (saps) command whose child
 // is powershell/pwsh/cmd in any argument form -- the child's -ArgumentList is
 // run as code we cannot reconstruct, so it is opaque (psparse delta review 5
-// (a)). The child is the -FilePath value, else the first positional argument.
+// (a)). The child is bound as PowerShell binds it (psStartProcessBind): the
+// -FilePath value, else the first positional left after the valued parameters
+// took theirs (-WindowStyle Hidden powershell runs powershell). A binding the
+// reader cannot settle (an ambiguous or unknown parameter) is a shell target
+// when any argument names one.
 func psStartProcessShellTarget(c *psparse.Command) bool {
 	if n := psBaseNameOf(c); n != "start-process" && n != "saps" {
 		return false
 	}
-	var target, firstPos psparse.Expr
-	els := c.Elements
-	for i := 0; i < len(els); i++ {
-		switch e := els[i].(type) {
-		case *psparse.Parameter:
-			n := strings.ToLower(e.Name)
-			if n != "" && strings.HasPrefix("filepath", n) { // -F.. -> -FilePath (unique prefix)
-				if e.HasColon && e.Colon != nil {
-					target = e.Colon
-				} else if i+1 < len(els) {
-					if a, ok := els[i+1].(*psparse.Arg); ok {
-						target = a.Value
-						i++
-					}
+	shell := func(e psparse.Expr) bool {
+		s, ok := psparse.LiteralString(e)
+		// A shell child, or a launcher (wt/conhost/start) that itself starts a
+		// shell, runs an opaque payload (psparse delta review 5 (a) / review 6 (c)).
+		return ok && (isShellName(s) || isLauncherName(s))
+	}
+	b := psStartProcessBind(c)
+	if b.unsettled {
+		for _, el := range c.Elements {
+			switch e := el.(type) {
+			case *psparse.Arg:
+				if shell(e.Value) {
+					return true
+				}
+			case *psparse.Parameter:
+				if e.Colon != nil && shell(e.Colon) {
+					return true
 				}
 			}
-		case *psparse.Arg:
-			if firstPos == nil {
-				firstPos = e.Value
-			}
 		}
-	}
-	if target == nil {
-		target = firstPos
-	}
-	if target == nil {
 		return false
 	}
-	s, ok := psparse.LiteralString(target)
-	// A shell child, or a launcher (wt/conhost/start) that itself starts a shell,
-	// runs an opaque payload (psparse delta review 5 (a) / review 6 (c)).
-	return ok && (isShellName(s) || isLauncherName(s))
+	target := b.file
+	if target == nil && len(b.positional) > 0 {
+		target = b.positional[0]
+	}
+	return target != nil && shell(target)
 }
 
 // psBaseNameOf returns the leaf name of a command, or "" when it is not a literal.

@@ -191,43 +191,18 @@ func psChildCommand(args []string) (string, bool) {
 // joined by blanks, as Start-Process joins them) is the child's command line.
 // ok is false when the child, the list or the line cannot be read.
 func psStartProcessChild(c *psparse.Command) (text string, dialect Dialect, ok bool) {
-	var file, argList psparse.Expr
-	var positional []psparse.Expr
-	els := c.Elements
-	for i := 0; i < len(els); i++ {
-		switch e := els[i].(type) {
-		case *psparse.Parameter:
-			n := strings.ToLower(e.Name)
-			var val psparse.Expr
-			if e.HasColon && e.Colon != nil {
-				val = e.Colon
-			} else if i+1 < len(els) {
-				if a, ok := els[i+1].(*psparse.Arg); ok {
-					val = a.Value
-					i++
-				}
-			}
-			switch {
-			case n != "" && strings.HasPrefix("filepath", n):
-				file = val
-			case n == "args" || (len(n) >= 2 && strings.HasPrefix("argumentlist", n)):
-				argList = val
-			case n == "wait" || n == "nonewwindow" || n == "passthru" || n == "windowstyle" || n == "verb":
-				if n == "wait" || n == "nonewwindow" || n == "passthru" {
-					if val != nil && !e.HasColon {
-						// a switch takes no value: the word after it is positional
-						i--
-					}
-				}
-			default:
-				return "", "", false // -WorkingDirectory, -Credential, redirection files ...
-			}
-		case *psparse.Arg:
-			positional = append(positional, e.Value)
+	b := psStartProcessBind(c)
+	if b.unsettled {
+		return "", "", false
+	}
+	for _, n := range b.params {
+		switch n {
+		case "filepath", "argumentlist", "wait", "nonewwindow", "passthru", "windowstyle", "verb":
 		default:
-			return "", "", false
+			return "", "", false // -WorkingDirectory, -Credential, redirection files ...
 		}
 	}
+	file, argList, positional := b.file, b.argList, b.positional
 	if file == nil && len(positional) > 0 {
 		file, positional = positional[0], positional[1:]
 	}
@@ -270,6 +245,94 @@ func psStartProcessChild(c *psparse.Command) (text string, dialect Dialect, ok b
 		return code, DialectPowerShell, ok
 	}
 	return "", "", false
+}
+
+// psSPBinding is a Start-Process call bound as PowerShell binds it.
+type psSPBinding struct {
+	file, argList psparse.Expr
+	positional    []psparse.Expr
+	params        []string // the full names of the parameters given
+	// unsettled: a parameter the reader cannot bind (an ambiguous prefix, a
+	// name Start-Process does not have) or an element that is not an argument.
+	unsettled bool
+}
+
+// psStartProcessSwitches take no value; psStartProcessValued take the next
+// argument (or a :value).
+var (
+	psStartProcessSwitches = []string{"wait", "nonewwindow", "passthru", "usenewenvironment", "loaduserprofile", "whatif", "confirm"}
+	psStartProcessValued   = []string{"filepath", "argumentlist", "credential", "workingdirectory", "verb", "windowstyle",
+		"redirectstandarderror", "redirectstandardinput", "redirectstandardoutput", "environment"}
+)
+
+// psStartProcessParam resolves a parameter name (a unique prefix, or the args /
+// lup aliases) to its full name; ok is false for an ambiguous or unknown one.
+func psStartProcessParam(n string) (full string, isSwitch, ok bool) {
+	switch n {
+	case "args":
+		return "argumentlist", false, true
+	case "lup":
+		return "loaduserprofile", true, true
+	case "":
+		return "", false, false
+	}
+	hits := 0
+	for _, s := range psStartProcessSwitches {
+		if strings.HasPrefix(s, n) {
+			full, isSwitch, hits = s, true, hits+1
+		}
+	}
+	for _, s := range psStartProcessValued {
+		if strings.HasPrefix(s, n) {
+			full, isSwitch, hits = s, false, hits+1
+		}
+	}
+	return full, isSwitch, hits == 1
+}
+
+// psStartProcessBind binds a Start-Process call: a switch takes no value, a
+// valued parameter takes its :value or the next argument, and the arguments
+// left are positional (FilePath, then ArgumentList). The child pick and the
+// child's command line read the same binding (DET111 R1, GAP-1655: a first
+// positional taken before -WindowStyle Hidden consumed its value was a parser
+// differential).
+func psStartProcessBind(c *psparse.Command) psSPBinding {
+	var b psSPBinding
+	els := c.Elements
+	for i := 0; i < len(els); i++ {
+		switch e := els[i].(type) {
+		case *psparse.Parameter:
+			full, isSwitch, ok := psStartProcessParam(strings.ToLower(e.Name))
+			if !ok {
+				b.unsettled = true
+				continue
+			}
+			b.params = append(b.params, full)
+			if isSwitch {
+				continue // a -Wait:$true colon value is the switch's own
+			}
+			var val psparse.Expr
+			if e.HasColon {
+				val = e.Colon
+			} else if i+1 < len(els) {
+				if a, isArg := els[i+1].(*psparse.Arg); isArg {
+					val = a.Value
+					i++
+				}
+			}
+			switch full {
+			case "filepath":
+				b.file = val
+			case "argumentlist":
+				b.argList = val
+			}
+		case *psparse.Arg:
+			b.positional = append(b.positional, e.Value)
+		default:
+			b.unsettled = true
+		}
+	}
+	return b
 }
 
 // envItemCmdlets change an item of the drive they name: on the Env: drive, an
