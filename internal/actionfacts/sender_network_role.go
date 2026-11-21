@@ -145,7 +145,7 @@ func readCommandNetworkRole(facts Facts, command CommandFact, assumeFed bool) (S
 		sender := SenderFact{
 			CommandID: command.ID, Program: prog, Origin: SenderNetworkRole,
 			Network: connects, DestinationUnknown: !command.ArgvComplete,
-			Operands: senderOperandWords(prog, words), FedText: command.LiteralStdin,
+			Operands: senderOperandWords(prog, words), FedText: fedStdinText(command),
 		}
 		external := false
 		for _, network := range connects {

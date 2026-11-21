@@ -1136,6 +1136,14 @@ func projectPOSIXLiteralHeredoc(
 		command.LiteralStdin = ""
 		command.LiteralStdinComplete = false
 		command.LiteralStdinAmbiguous = true
+		// The text the body shows (an expansion is one "$") is what a
+		// file-transfer batch fed to a sender names: a put of a credentials
+		// file is a literal word of it, expansions or not
+		// (rel-1-0-10:GAP-0675).
+		if view, _, readable := posixHeredocText(redirection.Hdoc, false, false); readable &&
+			len(view) <= maxScalarBytes && !strings.ContainsRune(view, 0) {
+			command.LiteralStdinView = view
+		}
 		return
 	}
 	body, exact := literalPOSIXHeredocBody(redirection.Hdoc)
