@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -30,7 +31,8 @@ func gap1324Tree(t *testing.T, dir string, folders int) {
 // folder it reached and stopped only at a counted bound, with no protected
 // file among its matches, is now a TRUNCATED reading (the one bound rule):
 // no protected target, the cap recorded on the hook call, and the managed
-// hook client sends GlobFactCapped for it, so a gateway behind ProtectHome
+// hook client sends it under GlobCapFactPrefix (never as a GlobFactPrefix
+// value, which a 1.0.10 gateway refuses), so a gateway behind ProtectHome
 // reads the same.
 func TestGAP1324GlobWalkCapIsTruncated(t *testing.T) {
 	home := t.TempDir()
@@ -58,7 +60,7 @@ func TestGAP1324GlobWalkCapIsTruncated(t *testing.T) {
 		command, decision, fact string
 	}{
 		{"cp a.txt at/b*/c*", "", "0"},
-		{"cp a.txt past/b*/c*", "", "c"},
+		{"cp a.txt past/b*/c*", "", "cap"},
 		{"cp a.txt alias/b*/a*", "protected-target", "1"},
 	} {
 		if got := ActionCommandDecision(row.command, project, home); got != row.decision {
@@ -67,8 +69,11 @@ func TestGAP1324GlobWalkCapIsTruncated(t *testing.T) {
 		facts := actionGlobFacts(row.command, project, home)
 		var fact string
 		for key, value := range facts {
-			if len(key) > len(GlobFactPrefix) && key[:len(GlobFactPrefix)] == GlobFactPrefix {
-				fact = value
+			switch {
+			case strings.HasPrefix(key, GlobFactPrefix):
+				fact += value
+			case strings.HasPrefix(key, GlobCapFactPrefix) && value == "1":
+				fact += "cap"
 			}
 		}
 		if fact != row.fact {

@@ -23,8 +23,8 @@ var readerClockReads = map[string]string{
 	// share that does not answer in the call's budget is "unanswered", which
 	// already counts as not clear (never an allow). The one allowed non-work
 	// bound of the registry.
-	"internal/hookpaths/network_path.go:askNetworkShare":    "network-share answer wait",
-	"internal/hookpaths/network_path_links.go:stillPlain":   "network-share answer wait",
+	"internal/hookpaths/network_path.go:askNetworkShare":  "network-share answer wait",
+	"internal/hookpaths/network_path_links.go:stillPlain": "network-share answer wait",
 	// The settle check of a file system fingerprint (activeStateSettleLimit):
 	// a folder changed in the clock tick of the walk could change again with
 	// the same stamp, so its view is not kept across calls. It decides only

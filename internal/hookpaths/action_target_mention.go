@@ -2294,9 +2294,10 @@ func (g *actionGlobs) recording() bool { return g != nil && g.record != nil }
 func (g *actionGlobs) full() bool { return g.recording() && len(g.record) >= maxGlobFacts }
 
 // note records the client's answer: "1" when a match reaches a protected
-// file, "0" when its walk was complete and no match does.
+// file, "0" when its walk was complete and no match does, GlobFactCapped when
+// it stopped at a bound (sent as GlobCapFactPrefix, actionGlobFacts).
 func (g *actionGlobs) note(pattern, answer string) {
-	if !g.recording() || len(GlobFactPrefix)+len(pattern) > MaxWriteTargetPathBytes {
+	if !g.recording() || len(GlobCapFactPrefix)+len(pattern) > MaxWriteTargetPathBytes {
 		return
 	}
 	if key := GlobFactPrefix + pattern; g.record[key] != "1" {
@@ -2312,7 +2313,13 @@ func (g *actionGlobs) answer(pattern string) string {
 	if g == nil || g.facts == nil {
 		return ""
 	}
-	return g.facts[GlobFactPrefix+pattern]
+	if answer := g.facts[GlobFactPrefix+pattern]; answer != "" {
+		return answer
+	}
+	if g.facts[GlobCapFactPrefix+pattern] == "1" {
+		return GlobFactCapped
+	}
+	return ""
 }
 
 // actionGlobFacts expands, as the user, each pathname pattern the action
@@ -2325,6 +2332,16 @@ func actionGlobFacts(command, cwd, home string) map[string]string {
 	}
 	globs := &actionGlobs{record: map[string]string{}}
 	actionProtectedTargetMentionDepth(command, cwd, home, 0, false, globs)
+	// A capped walk goes on the wire under its own key (GlobCapFactPrefix),
+	// never as a GlobFactPrefix value: a 1.0.10 gateway refuses the whole
+	// map for an answer it does not know and falls back to its closed
+	// default, and ignores a key it does not know.
+	for key, answer := range globs.record {
+		if answer == GlobFactCapped {
+			delete(globs.record, key)
+			globs.record[GlobCapFactPrefix+strings.TrimPrefix(key, GlobFactPrefix)] = "1"
+		}
+	}
 	return globs.record
 }
 

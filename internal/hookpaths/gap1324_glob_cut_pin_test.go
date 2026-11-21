@@ -15,8 +15,9 @@ import (
 )
 
 // The GAP-1324 cap reaches the hook call (CallState.GlobCut), from this
-// process's own walk and from the managed hook client's GlobFactCapped answer
-// for a pattern this process cannot see; Decode keeps that answer.
+// process's own walk and from the managed hook client's GlobCapFactPrefix
+// answer for a pattern this process cannot see; Decode keeps that answer and
+// refuses a capped value under GlobFactPrefix (no client sends one).
 func TestGAP1324GlobWalkCapReachesTheCall(t *testing.T) {
 	home := t.TempDir()
 	project := filepath.Join(home, "proj")
@@ -45,27 +46,40 @@ func TestGAP1324GlobWalkCapReachesTheCall(t *testing.T) {
 	hidden := filepath.Join(t.TempDir(), "gone", "home")
 	pattern := filepath.Join(hidden, "proj", "w", "b*", "c*")
 	for _, row := range []struct {
-		answer, decision string
-		cut              bool
+		facts    map[string]string
+		decision string
+		cut      bool
 	}{
-		{GlobFactCapped, "", true},
-		{"0", "", false},
-		{"1", "protected-target", false},
+		{map[string]string{GlobCapFactPrefix + pattern: "1"}, "", true},
+		{map[string]string{GlobFactPrefix + pattern: "0"}, "", false},
+		{map[string]string{GlobFactPrefix + pattern: "1"}, "protected-target", false},
+		// A match that reaches a protected file wins over a cap.
+		{map[string]string{GlobFactPrefix + pattern: "1", GlobCapFactPrefix + pattern: "1"}, "protected-target", false},
 	} {
-		facts := map[string]string{GlobFactPrefix + pattern: row.answer}
+		facts := row.facts
 		var decision string
 		got := cut(func() {
 			decision = ActionCommandDecisionWithDialectAndGlobFacts("cp a.txt "+pattern, filepath.Join(hidden, "proj"), hidden, "", facts)
 		})
 		if decision != row.decision || got.Any() != row.cut {
-			t.Errorf("client answer %q: decision %q cut %q, want %q cut=%v", row.answer, decision, got.Reason(), row.decision, row.cut)
+			t.Errorf("client answer %q: decision %q cut %q, want %q cut=%v", row.facts, decision, got.Reason(), row.decision, row.cut)
 		}
 	}
-	encoded, err := json.Marshal(map[string]string{GlobFactPrefix + pattern: GlobFactCapped})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if targets, ok := Decode(base64.RawURLEncoding.EncodeToString(encoded)); !ok || targets[GlobFactPrefix+pattern] != GlobFactCapped {
-		t.Errorf("Decode refused the capped answer: %v %q", ok, targets)
+	for _, row := range []struct {
+		facts map[string]string
+		ok    bool
+	}{
+		{map[string]string{GlobCapFactPrefix + pattern: "1"}, true},
+		{map[string]string{GlobCapFactPrefix + pattern: "0"}, false},
+		{map[string]string{GlobCapFactPrefix + "w/b*": "1"}, false},
+		{map[string]string{GlobFactPrefix + pattern: GlobFactCapped}, false},
+	} {
+		encoded, err := json.Marshal(row.facts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := Decode(base64.RawURLEncoding.EncodeToString(encoded)); ok != row.ok {
+			t.Errorf("Decode(%q) ok=%v, want %v", row.facts, ok, row.ok)
+		}
 	}
 }

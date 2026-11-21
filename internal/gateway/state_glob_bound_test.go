@@ -62,8 +62,8 @@ func TestStatePatternReadingReportsItsBounds(t *testing.T) {
 	}
 	installDefaultProfileConnector(t, "claudecode")
 	for _, row := range []struct {
-		id, command   string
-		limit, block  bool
+		id, command  string
+		limit, block bool
 	}{
 		// 71 names match: the reading spells the first 64 and is TRUNCATED.
 		{"GAP-1017 past the match cap", "cp a.txt ~/.defenseclaw/*.yaml", true, true},
