@@ -22,6 +22,7 @@ import (
 // The real provider must retain the caller's cancellation cause after the
 // transport closes, so judge records can name a stopped request correctly.
 func TestGAP0564RealProviderCancellationReason(t *testing.T) {
+	closeBifrostTenantsAfter(t)
 	entered := make(chan struct{}, 1)
 	disconnected := make(chan struct{}, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -70,6 +71,7 @@ func TestGAP0564RealProviderCancellationReason(t *testing.T) {
 }
 
 func TestGAP0564RealProviderDeadlineDisconnect(t *testing.T) {
+	closeBifrostTenantsAfter(t)
 	entered := make(chan struct{}, 1)
 	disconnected := make(chan struct{}, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -119,6 +121,7 @@ func TestGAP0564RealProviderDeadlineDisconnect(t *testing.T) {
 // Cancellation during TLS setup must release the model connection as well as
 // the judge call. The peer deliberately leaves the handshake unfinished.
 func TestGAP0564RealProviderTLSHandshakeDisconnect(t *testing.T) {
+	closeBifrostTenantsAfter(t)
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -188,6 +191,7 @@ func TestGAP0564RealProviderTLSHandshakeDisconnect(t *testing.T) {
 }
 
 func TestGAP0564RealProviderTLSBenignAnswer(t *testing.T) {
+	closeBifrostTenantsAfter(t)
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.Copy(io.Discard, r.Body)
 		_ = r.Body.Close()
@@ -214,6 +218,7 @@ func TestGAP0564RealProviderTLSBenignAnswer(t *testing.T) {
 }
 
 func TestGAP0564RealProviderHookWindowDisconnect(t *testing.T) {
+	closeBifrostTenantsAfter(t)
 	entered := make(chan struct{}, 1)
 	disconnected := make(chan struct{}, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -264,6 +269,7 @@ func TestGAP0564RealProviderHookWindowDisconnect(t *testing.T) {
 
 // A completed model request still supplies the benign judge answer.
 func TestGAP0564RealProviderBenignAnswer(t *testing.T) {
+	closeBifrostTenantsAfter(t)
 	answered := make(chan struct{}, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.Copy(io.Discard, r.Body)
