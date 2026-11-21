@@ -272,7 +272,7 @@ EFF-LAUNCHERS-11 ps schtasks	U|
 EFF-LAUNCHERS-12 posix at	U|
 EFF-LAUNCHERS-13 systemd-run	U|
 EFF-LAUNCHERS-14 nsenter	U|
-EFF-LAUNCHERS-15 script -c	U|
+EFF-LAUNCHERS-15 script -c	U|write:/dev/null
 EFF-LAUNCHERS-16 flock	U|
 EFF-LAUNCHERS-17 parallel	U|
 EFF-LAUNCHERS-18 setpriv	U|
@@ -804,7 +804,7 @@ W parallel	U|
 W pkexec	U|
 W proxychains	U|
 W runuser -u u --	U|
-W script -qc	U|
+W script -qc	U|write:/tmp/k
 W setsid	U|
 W sg wheel	U|
 W stdbuf -o0	U|
@@ -891,7 +891,7 @@ Y15 ren dir	U|delete:c:\users\u\.ssh\x.bak
 Y16 rename long	U|delete:c:\users\u\k
 Y17 copy con	U|
 Y18 forfiles	U|
-Z01 runuser --	U|
+Z01 runuser --	K|delete:/home/u/.ssh
 Z02 runuser -c	U|delete:/home/u/.ssh
 Z03 curl -O in ssh cwd	U|
 Z04 curl -OJ	U|
@@ -1045,9 +1045,9 @@ rv7-B62 su - -c rel	U|
 rv7-B63 runuser -l rel	U|
 rv7-B64 sudo -u u -i sh -c rel	U|
 rv7-B65 systemd-run WorkingDirectory	U|
-rv7-B66 nice env --chdir=	U|append:/home/u/.ssh/authorized_keys
+rv7-B66 nice env --chdir=	K|append:/home/u/.ssh/authorized_keys
 rv7-B68 parallel :::	U|
-rv7-B69 watch	U|
+rv7-B69 watch	K|append:/home/u/.ssh/authorized_keys
 rv7-B71 git -C apply	U|
 rv7-B73 unzip -d	U|
 rv7-B75 exec env -C sh -c	K|append:/home/u/.ssh/authorized_keys
@@ -1176,8 +1176,8 @@ rv7-L31 sh -c positional cd	U|
 rv7-L32 bash -c $0 cd	U|
 rv7-L33 unknown env var path	U|
 rv7-L34 unknown env var cd	U|
-rv7-L35 flock -c	U|
-rv7-L36 script -c	U|
+rv7-L35 flock -c	K|append:/home/u/.ssh/authorized_keys
+rv7-L36 script -c	K|append:/home/u/.ssh/authorized_keys,append:/home/u/proj/authorized_keys,write:/dev/null
 rv7-L37 su - login moves cwd	U|
 rv7-L38 bash -l keeps cwd	K|append:/home/u/.ssh/authorized_keys,append:/home/u/proj/authorized_keys
 rv7-L39 ssh remote not local	U|
@@ -1202,7 +1202,7 @@ rv7-L57 HOME via declare	K|append:/home/u/.ssh/authorized_keys
 rv7-L58 HOME via local in fn	U|
 rv7-L59 HOME via getopts/printf -v	U|
 rv7-L60 sudo -D then sh -c	K|append:/home/u/.ssh/authorized_keys
-rv7-L61 stdbuf tee	U|append:/home/u/.ssh/authorized_keys
+rv7-L61 stdbuf tee	K|append:/home/u/.ssh/authorized_keys
 rv7-L62 setsid sh -c	K|append:/home/u/.ssh/authorized_keys,append:/home/u/proj/authorized_keys
 rv7-L63 xargs sh -c cd	U|append:/home/u/.ssh/authorized_keys,append:/home/u/proj/authorized_keys
 rv7-L64 time builtin + cd	K|append:/home/u/.ssh/authorized_keys,append:/home/u/proj/authorized_keys

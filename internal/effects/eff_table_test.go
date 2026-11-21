@@ -167,6 +167,9 @@ func TestEFFTable(t *testing.T) {
 }
 
 // Launchers are explicitly opaque: the tail is a command line we do not parse.
+// A launcher with a wrapper row (nsenter, script -c, flock, watch) is read
+// through the row instead: its child is walked, and the call is not fully
+// known here because the child (/t/x.sh) is an unmodeled program.
 func TestEFFLaunchersAreOpaque(t *testing.T) {
 	for _, r := range effRows {
 		if !strings.HasPrefix(r.id, "EFF-LAUNCHERS-") {
@@ -175,6 +178,9 @@ func TestEFFLaunchersAreOpaque(t *testing.T) {
 		res := Extract(r.call, r.o)
 		if res.FullyKnown() {
 			t.Errorf("%s: fully known", r.id)
+		}
+		if len(res.Effects) > 0 && len(res.Effects[0].Origin.Wrappers) > 0 {
+			continue
 		}
 		opaque := false
 		for _, e := range res.Effects {

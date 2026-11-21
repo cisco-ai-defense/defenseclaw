@@ -125,6 +125,7 @@ type walker struct {
 	res        *Result
 	o          Options
 	cmdNo      int
+	wrapOuts   []wrapperOutput // files the current command's wrappers open themselves (time -o, script FILE)
 	funcs      map[string]bool
 	aliases    map[string]string
 	links      map[string]string // link key -> target physical path (review R7)
@@ -747,7 +748,10 @@ func (w *walker) resolveWord(wd Word) Word {
 		if s.Var != "" {
 			v, ok := w.env[s.Var]
 			if !ok {
-				return Word{Static: false, Reason: ReasonDynamicExpansion, Span: wd.Span}
+				// The segments stay on the word, so a reader of its literal part
+				// (env NAME=$V: the name) still sees them; the Reason keeps the
+				// word unresolved.
+				return Word{Static: false, Reason: ReasonDynamicExpansion, Span: wd.Span, Segs: wd.Segs}
 			}
 			// An unquoted variable undergoes field splitting and globbing: if
 			// its value carries IFS whitespace or a glob metachar we cannot
@@ -1065,8 +1069,26 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 	inner, wrappers, foreign, fromInput, wrapperUA := w.stripWrappers(words)
 	spec := w.spec // the child-process environment this command applies (round 8 E)
 	if len(inner) == 0 {
+		if n := len(wrappers); n > 0 && wrappers[n-1] != "exec" && wrappers[n-1] != "command" && wrappers[n-1] != "builtin" {
+			// a wrapper with no child word (`nohup`, `timeout 5`): nothing we can
+			// read runs, so the call is never clean. A bare exec only applies its
+			// redirections to the shell.
+			e := Effect{Kind: KindExec, Target: Target{Type: TargetProcess, Link: LinkNotChecked}, TargetState: TargetStateKnown, RoleState: RoleStateKnown, Cond: cond,
+				Origin: Origin{Surface: w.res.Surface, Dialect: dialect, Command: cmdNo, Program: wrappers[len(wrappers)-1], Wrappers: wrappers, Depth: depth, Span: c.Span}}
+			e.addReason(ReasonUnmodeledProgram, ScopeRole)
+			w.lastPrim = w.emit(e)
+		}
 		w.handleRedirs(c, dialect, cmdNo, depth, cond, nil)
 		return
+	}
+	// The files a wrapper opens itself are placed in the caller's folder,
+	// before a wrapper's own folder change applies to the child.
+	var wrapEffects []Effect
+	for _, wo := range w.wrapOuts {
+		op := operand{value: wo.word.Value, static: wo.word.Static, quoted: wo.word.Quoted, glob: wo.word.Glob, role: wo.role}
+		if e := w.effectForOperand(op, Program{}, Origin{Surface: w.res.Surface, Dialect: dialect, Command: cmdNo, Program: wrappers[0], Wrappers: wrappers, Depth: depth, Span: c.Span}, cond, false, false, false, dialect, depth); e != nil {
+			wrapEffects = append(wrapEffects, *e)
+		}
 	}
 	prog := inner[0]
 	if !prog.Static {
@@ -1074,6 +1096,9 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 			Origin: Origin{Surface: w.res.Surface, Dialect: dialect, Command: cmdNo, Wrappers: wrappers, Depth: depth, Span: c.Span}}
 		e.addReason(ReasonDynamicExpansion, ScopeTarget)
 		w.lastPrim = w.emit(e)
+		for _, we := range wrapEffects {
+			w.emit(we)
+		}
 		w.handleRedirs(c, dialect, cmdNo, depth, cond, nil)
 		return
 	}
@@ -1218,6 +1243,9 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 	}()
 	baseIdx := w.emit(base)
 	w.lastPrim = baseIdx
+	for _, e := range wrapEffects {
+		w.emit(e)
+	}
 
 	// 6. Interpreter reading piped / heredoc stdin as code (review PX-5).
 	w.interpreterStdin(c, entry, known, inner[1:], dialect, depth, cond, origin, prevPrim)
@@ -1453,6 +1481,7 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 	readIdx := []int{}
 	readByKeyLocal := map[string]int{} // source path key -> read index, for the copy-label join
 	emittedTargetEffect := false
+	emittedKinds := map[Kind]bool{}
 	for _, op := range ops {
 		e := w.effectForOperand(op, entry, origin, cond, foreign, fromInput, shadowed, dialect, depth)
 		if e == nil {
@@ -1467,6 +1496,7 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 		})
 		if e.Target.Type == TargetPath || e.Target.Type == TargetRemote || e.Kind == KindNetworkSend {
 			emittedTargetEffect = true
+			emittedKinds[e.Kind] = true
 		}
 		switch e.Kind {
 		case KindRead:
@@ -1514,8 +1544,14 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 	// A command run by xargs gets its operands from stdin: emit its positional
 	// role with an unknown target so `ls | xargs rm` is a (dynamic) delete
 	// rather than exec-only (review R3-3 / round-3 leftovers).
-	if fromInput && !emittedTargetEffect {
-		if role := posModeRole(entry.Pos); role != RoleNone {
+	// A copier fed by xargs (`xargs cp SRC`) takes its destination from stdin
+	// too: the write is there even when the source was read (GAP-1317).
+	fedRole := posModeRole(entry.Pos)
+	if entry.Pos == PosSourcesDest {
+		fedRole = RoleWrite
+	}
+	if fromInput && !emittedKinds[fedRole.kind()] {
+		if role := fedRole; role != RoleNone {
 			e := Effect{Kind: role.kind(), Cond: cond, RoleState: RoleStateKnown, TargetState: TargetStateUnknown,
 				Target: Target{Type: TargetPath, Flavor: w.o.flavor(), Link: LinkNotChecked, CaseFold: w.o.CaseInsensitive}, Origin: origin}
 			e.addReason(ReasonOperandsFromInput, ScopeTarget)

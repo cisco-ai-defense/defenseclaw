@@ -293,6 +293,225 @@ const (
 	wrapInput
 )
 
+// Wrapper is one wrapper row (DESIGN D2, programs as data): a launcher that
+// runs a child program after its own options, and what it changes for that
+// child. The row is the launcher's whole option grammar: an option it does not
+// list makes the call unaccounted (never clean), and a launcher with no row is
+// an unmodeled program. Options end at the first operand (every row below is a
+// getopt "+" tool or a shell builtin), except script, whose options and one file
+// operand may come in any order.
+type Wrapper struct {
+	kind wrapperKind
+	// shorts are the switch letters; valued lists the options that take a value
+	// (short: the rest of the word or the next word; long: --opt=v or the next
+	// word); optional lists the short letters whose value can only be attached
+	// (xargs -iR, nsenter -mFILE); longs lists the long switches.
+	shorts   string
+	valued   []string
+	optional string
+	longs    []string
+	// optLongs are long options whose value is optional and attached only
+	// (--mount[=FILE]).
+	optLongs []string
+	// stop lists the options with which the launcher runs no child (command -v
+	// prints, taskset -p acts on a process): the call is then the launcher's own
+	// program row, not a wrapper.
+	stop []string
+	// sub is a subcommand that must follow the name (uv run); needs lists the
+	// options one of which must be the first word for the row to apply
+	// (runuser -u runs a program, runuser -c a shell).
+	sub   string
+	needs []string
+
+	posSkip   int  // leading positionals before the child (DURATION, host, dir, mask, priority, lock file)
+	envAssign bool // NAME=val words set the child's environment (env)
+
+	chdir      []string // options whose value is the child's working folder (env -C, sudo -D, nsenter --wd)
+	login      []string // options that start the child in an unknown folder (sudo -i)
+	clear      []string // options that reset the child's environment (env -i, exec -c)
+	keepEnv    []string // options that keep the caller's environment but not HOME (sudo -E)
+	unset      []string // options whose value is a variable removed from the child (env -u)
+	argv0      []string // exec -a NAME: a NAME that starts with - makes a login shell
+	loginShell []string // exec -l: a login shell
+
+	replaceOpt     []string // options whose value (default {}) the launcher replaces with each input name (xargs -I)
+	shellOpt       []string // options whose value is shell text run by sh -c (script -c)
+	shellAfterSkip bool     // flock FILE -c TEXT: the text follows the skipped operand
+	joinShell      bool     // watch CMD ARGS: the words are joined and run by sh -c ...
+	execOpt        []string // ... unless one of these options is given (watch -x)
+
+	outputs    map[string]Role // options whose value is a file the launcher itself opens, with its role (time -o writes, xargs -a reads)
+	appendOpt  []string        // options that turn those writes into appends (time -a)
+	operandOut string          // the launcher writes its file operand, this name when absent (script typescript)
+}
+
+func (r Wrapper) isValued(fn string) bool { return hasName(r.valued, fn) }
+
+func (r Wrapper) optionalLong(fn string) bool { return hasName(r.optLongs, fn) }
+
+// longName resolves a long option of the row: the exact name, or an
+// unambiguous prefix of one (GNU getopt_long). A prefix shared by two options
+// of the row is not resolved.
+func (r Wrapper) longName(fn string) (string, bool) {
+	var all []string
+	for _, n := range r.valued {
+		if strings.HasPrefix(n, "--") {
+			all = append(all, n)
+		}
+	}
+	all = append(all, r.longs...)
+	all = append(all, r.optLongs...)
+	return resolveLong(fn, all)
+}
+
+// applies reports whether the row reads the words after the launcher name:
+// the subcommand and first option it needs are there, and no option makes the
+// launcher run without a child.
+func (r Wrapper) applies(rest []Word) bool {
+	if r.sub != "" {
+		if len(rest) == 0 || !rest[0].Static || rest[0].Value != r.sub {
+			return false
+		}
+		rest = rest[1:]
+	}
+	if len(r.needs) > 0 {
+		if len(rest) == 0 || !rest[0].Static {
+			return false
+		}
+		v := rest[0].Value
+		if eq := strings.IndexByte(v, '='); eq > 0 {
+			v = v[:eq]
+		}
+		if !hasName(r.needs, v) && !(len(v) > 2 && v[0] == '-' && v[1] != '-' && hasName(r.needs, v[:2])) {
+			return false
+		}
+	}
+	for _, a := range rest {
+		if !a.Static || a.Value == "--" || len(a.Value) < 2 || a.Value[0] != '-' {
+			break // the options end here
+		}
+		v := a.Value
+		if eq := strings.IndexByte(v, '='); eq > 0 {
+			v = v[:eq]
+		}
+		if hasName(r.stop, v) {
+			return false
+		}
+		if !strings.HasPrefix(v, "--") {
+			for _, ch := range v[1:] {
+				if hasName(r.stop, "-"+string(ch)) {
+					return false
+				}
+				if r.isValued("-" + string(ch)) {
+					break
+				}
+			}
+		} else if full, ok := r.longName(v); ok && hasName(r.stop, full) {
+			return false
+		}
+	}
+	return true
+}
+
+// resolveLong returns the long option fn names among all: itself, or the one
+// option it is an unambiguous prefix of.
+func resolveLong(fn string, all []string) (string, bool) {
+	match, n := "", 0
+	for _, a := range all {
+		if a == fn {
+			return a, true
+		}
+		if len(fn) > 2 && strings.HasPrefix(a, fn) {
+			if match != a {
+				n++
+			}
+			match = a
+		}
+	}
+	return match, n == 1
+}
+
+// wrapperTable is the wrapper part of the program table. A launcher not listed
+// is the inner program itself and, being unmodeled, is not fully known; a
+// listed wrapper is transparent only for the options named in its row.
+var wrapperTable = map[string]Wrapper{
+	"sudo": {kind: wrapIdentity, shorts: "AbEeHiKklnPSsVvB",
+		valued: []string{"-u", "-g", "-C", "-h", "-p", "-r", "-t", "-U", "-D", "-T", "--user", "--group", "--chdir", "--close-from", "--host", "--prompt", "--role", "--type", "--other-user", "--command-timeout"},
+		longs:  []string{"--preserve-env", "--login", "--set-home", "--shell", "--background", "--non-interactive", "--reset-timestamp", "--remove-timestamp", "--stdin", "--askpass", "--preserve-groups", "--bell"},
+		stop:   []string{"-e", "--edit", "-l", "--list", "-v", "--validate", "-V", "--version", "-K", "--remove-timestamp"},
+		chdir:  []string{"-D", "--chdir"}, login: []string{"-i", "--login"}, keepEnv: []string{"-E", "--preserve-env"}},
+	"doas": {kind: wrapIdentity, shorts: "nsL", valued: []string{"-u", "-C"}, stop: []string{"-C", "-L", "-s"}},
+	// runuser -u USER [--] PROGRAM runs PROGRAM as USER with no shell; the -c
+	// and login forms are the shell row (su, runuser).
+	"runuser": {kind: wrapIdentity, needs: []string{"-u", "--user"}, shorts: "mpf",
+		valued: []string{"-u", "-g", "-G", "-w", "--user", "--group", "--supp-group", "--whitelist-environment"},
+		longs:  []string{"--preserve-environment"}},
+	"env": {kind: wrapPlain, shorts: "i0v", envAssign: true,
+		valued: []string{"-u", "-C", "--unset", "--chdir"}, longs: []string{"--ignore-environment", "--null", "--debug"},
+		chdir: []string{"-C", "--chdir"}, clear: []string{"-i", "--ignore-environment"}, unset: []string{"-u", "--unset"}},
+	"nohup":   {kind: wrapPlain},
+	"setsid":  {kind: wrapPlain, shorts: "cfw", longs: []string{"--ctty", "--fork", "--wait"}},
+	"nice":    {kind: wrapPlain, valued: []string{"-n", "--adjustment"}},
+	"ionice":  {kind: wrapPlain, shorts: "t", valued: []string{"-c", "-n", "--class", "--classdata"}, longs: []string{"--ignore"}, stop: []string{"-p", "-P", "-u", "--pid", "--pgid", "--uid"}},
+	"timeout": {kind: wrapPlain, shorts: "fpv", valued: []string{"-s", "-k", "--signal", "--kill-after"}, longs: []string{"--foreground", "--preserve-status", "--verbose"}, posSkip: 1},
+	"stdbuf":  {kind: wrapPlain, valued: []string{"-i", "-o", "-e", "--input", "--output", "--error"}},
+	// taskset [-a] [-c] MASK|LIST PROGRAM; -p acts on a running process.
+	"taskset": {kind: wrapPlain, shorts: "ac", longs: []string{"--all-tasks", "--cpu-list"}, stop: []string{"-p", "--pid"}, posSkip: 1},
+	// chrt [policy] PRIORITY PROGRAM; -p acts on a process, -m prints limits.
+	"chrt": {kind: wrapPlain, shorts: "bdfiorRav", valued: []string{"-T", "-P", "-D", "--sched-runtime", "--sched-period", "--sched-deadline"},
+		longs: []string{"--batch", "--deadline", "--fifo", "--idle", "--other", "--rr", "--reset-on-fork", "--all-tasks", "--verbose"},
+		stop:  []string{"-p", "--pid", "-m", "--max"}, posSkip: 1},
+	// flock [options] FILE PROGRAM... | flock [options] FILE -c TEXT. The lock
+	// file is opened (created when missing), not written.
+	"flock": {kind: wrapPlain, shorts: "sxunoF", valued: []string{"-w", "-E", "--timeout", "--wait", "--conflict-exit-code"},
+		longs: []string{"--shared", "--exclusive", "--unlock", "--nonblock", "--nb", "--close", "--no-fork", "--verbose"}, posSkip: 1, shellAfterSkip: true},
+	"command": {kind: wrapPlain, shorts: "p", stop: []string{"-v", "-V"}},
+	"builtin": {kind: wrapPlain},
+	"exec":    {kind: wrapPlain, shorts: "cl", valued: []string{"-a"}, clear: []string{"-c"}, argv0: []string{"-a"}, loginShell: []string{"-l"}},
+	// time: the bash keyword's -p and GNU time, which can write its report to a
+	// file (-o FILE, -a appends).
+	"time": {kind: wrapPlain, shorts: "pvqa", valued: []string{"-o", "-f", "--output", "--format"},
+		longs: []string{"--portability", "--verbose", "--quiet", "--append"}, outputs: map[string]Role{"-o": RoleWrite, "--output": RoleWrite}, appendOpt: []string{"-a", "--append"}},
+	// xargs: -i, -e, -l (and --replace, --eof, --max-lines) take an attached
+	// value only; -a FILE reads the operands from FILE.
+	"xargs": {kind: wrapInput, shorts: "0rtpxo", optional: "iel",
+		valued:   []string{"-n", "-I", "-P", "-a", "-s", "-L", "-d", "-E", "--max-args", "--max-procs", "--arg-file", "--delimiter", "--max-chars", "--process-slot-var"},
+		optLongs: []string{"--replace", "--eof", "--max-lines"},
+		longs:    []string{"--null", "--no-run-if-empty", "--verbose", "--interactive", "--exit", "--open-tty"},
+		replaceOpt: []string{"-I", "-i", "--replace"},
+		outputs:    map[string]Role{"-a": RoleRead, "--arg-file": RoleRead}},
+	"chroot": {kind: wrapForeign, valued: []string{"--userspec", "--groups"}, longs: []string{"--skip-chdir"}, posSkip: 1},
+	// nsenter enters other namespaces: the child may see another file system, so
+	// its effects are foreign; --wd / -w name its folder there.
+	"nsenter": {kind: wrapForeign, shorts: "FaZ", optional: "muinpUCTrw",
+		valued:   []string{"-t", "-S", "-G", "-W", "--target", "--setuid", "--setgid", "--wdns"},
+		optLongs: []string{"--mount", "--uts", "--ipc", "--net", "--pid", "--user", "--cgroup", "--time", "--root", "--wd"},
+		longs:    []string{"--all", "--no-fork", "--preserve-credentials", "--follow-context"}, chdir: []string{"-w", "--wd"}},
+	// script [options] [FILE]: runs -c TEXT under a terminal and writes the
+	// session to FILE (typescript when absent); -O/-I/-B/-T name more logs.
+	"script": {kind: wrapPlain, shorts: "aefqh", optional: "t",
+		valued:     []string{"-c", "-E", "-m", "-o", "-O", "-I", "-B", "-T", "--command", "--echo", "--logging-format", "--output-limit", "--log-out", "--log-in", "--log-io", "--log-timing"},
+		longs:      []string{"--append", "--return", "--flush", "--force", "--quiet"},
+		optLongs:   []string{"--timing"},
+		shellOpt:   []string{"-c", "--command"},
+		outputs:    map[string]Role{"-O": RoleWrite, "--log-out": RoleWrite, "-I": RoleWrite, "--log-in": RoleWrite, "-B": RoleWrite, "--log-io": RoleWrite, "-T": RoleWrite, "--log-timing": RoleWrite},
+		appendOpt:  []string{"-a", "--append"},
+		operandOut: "typescript"},
+	// watch [options] CMD ARGS: sh -c "CMD ARGS" again and again; -x runs the
+	// words as an argv.
+	"watch": {kind: wrapPlain, shorts: "bcegtpwx", optional: "d", valued: []string{"-n", "-q", "--interval", "--equexit"},
+		longs:    []string{"--beep", "--color", "--no-color", "--errexit", "--chgexit", "--no-title", "--precise", "--no-wrap", "--exec", "--no-rerun"},
+		optLongs: []string{"--differences"}, joinShell: true, execOpt: []string{"-x", "--exec"}},
+	// uv run [options] PROGRAM: the program in the project environment.
+	"uv": {kind: wrapPlain, sub: "run", shorts: "q",
+		valued: []string{"--with", "--python", "-p", "--project", "--group", "--extra", "--env-file", "--index", "--default-index", "--with-requirements", "--directory"},
+		longs:  []string{"--quiet", "--frozen", "--locked", "--isolated", "--no-sync", "--no-project", "--active", "--no-dev", "--all-extras", "--offline", "--no-config", "--no-cache"},
+		chdir:  []string{"--directory"}, outputs: map[string]Role{"--env-file": RoleRead, "--with-requirements": RoleRead}},
+	"ssh": {kind: wrapForeign, shorts: "46AaCfGgKkMNnqsTtVvXxYy", posSkip: 1,
+		valued: []string{"-i", "-p", "-o", "-l", "-F", "-L", "-R", "-D", "-b", "-c", "-m", "-O", "-Q", "-w", "-e", "-J", "-W"}},
+	"wsl": {kind: wrapForeign, valued: []string{"-u", "-d", "--user", "--distribution"}},
+}
+
 // fl builds a flag set: valued maps a flag to its value role; the remaining
 // args are switch flags (no value, no effect) that the program accepts. Under
 // the KNOWN-is-an-allowlist rule (round 3) a program must list every flag its
