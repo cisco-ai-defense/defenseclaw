@@ -312,6 +312,8 @@ Setup properties use `NAME=value`; names are case-insensitive and ignore dashes.
 | `BUNDLE=<path>` | With `/ensure`: apply this signed policy bundle. With `CONFIG=` on a computer without DefenseClaw, Setup installs from `CONFIG=` with every service stopped, then applies the bundle and starts the services on it; if the bundle is not applied it removes that install and exits `1603`. On an installed computer `CONFIG=` is then ignored |
 | `TRUSTANCHORS=<path>` | With `/ensure` and `BUNDLE=`: install this administrator-only bundle trust anchor file with the bundle. Not with `CONFIG=` alone |
 | `DEVICEGROUP=<group>` | With `TRUSTANCHORS=`: install the anchors pinned to this one device group, which must be one the file lists (or the file lists none). `enterprise windows ensure --trust-anchors <file> --device-group <group>` does the same |
+| `COWORKPACKAGE=<path>` | With `/ensure`, `/install`, `/upgrade` or `/repair`, not with `BUNDLE=`: the Cowork VM sensor package, authenticated by `package_sha256` and cached ([Cowork VM sensor](/docs/connectors/cowork-vm-sensor#windows)) |
+| `COWORKSIGNATURE=<path>` | Like `COWORKPACKAGE=`: the detached signature of the package, authenticated by `signature_sha256` |
 | `REFUSECAPABILITYLOSS=1` | With `/ensure` and `BUNDLE=`: refuse a bundle that turns off an enforced capability |
 | `ATTESTCLAUDEEFFECTIVEPOLICY=1` | With `/repair`: record the Claude Code attestation ([Verify the install](#verify-the-install)) |
 | `ALLOWEDSIGNERS=<sha256>,<sha256>` | Accept only these Authenticode signer thumbprints |
@@ -1423,6 +1425,8 @@ Claude Cowork runs its agent loop on the computer, with the Claude Code engine t
 | `status` and `verify` | Print a `cowork` line (`configured`, and how many hook calls reported themselves as Cowork since the gateway started), each enrolled account's last Cowork event, and each enrolled account's Claude Desktop data folders with the newest engine build and its Authenticode trust (for example `engine 2.1.317 trusted`; JSON `cowork.claude_desktop`). An elevated session is needed for the per-account lines |
 
 See [Claude Cowork](/docs/connectors/cowork) for the tools, `managed_hooks_only` and the limits.
+
+To watch inside the Cowork VM as well, turn on the [Cowork VM sensor](/docs/connectors/cowork-vm-sensor) with `enterprise.cowork_vm_sensor`. Setup delivers the package and writes the two Claude Desktop registry values.
 
 ## Sandboxes
 

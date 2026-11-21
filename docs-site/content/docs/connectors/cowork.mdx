@@ -276,13 +276,17 @@ On a per-user install the TUI Overview shows the same state in its Configuration
 
 The user's identity comes from the operating system, never from Cowork's environment.
 
+## VM sensor
+
+The hook route sees a tool call before it runs. It does not show what happens inside the Cowork VM after the command starts. For that, DefenseClaw ships a separate sensor that Claude Desktop installs in the VM. It is available on managed standalone macOS and Windows only. It watches processes, files, network connections and DNS in the VM, and it only observes: it blocks nothing. It sends its events to your own OTLP collector, not to the computer's DefenseClaw gateway, and it does not need the Claude Code connector. In 1.0.10 the packages in the release are unsigned, which Claude Desktop does not install, and no run has had Claude Desktop install DefenseClaw's sensor in a real VM. See [Cowork VM sensor](/docs/connectors/cowork-vm-sensor).
+
 ## Limits
 
 | Limit | Detail |
 | --- | --- |
 | Web fetch runs on Anthropic's side | Host egress controls on your computer do not see it. DefenseClaw sees the URL in the hook, before the call, and can block it by URL rule |
 | The VM shell goes through Anthropic's proxy | Outbound traffic from the VM leaves through Anthropic's proxy and its allowlist. DefenseClaw's host egress controls do not apply to it |
-| DefenseClaw's hook sees tool calls, not what a command did | What a shell command ran inside the VM is not visible from the hook |
+| DefenseClaw's hook sees tool calls, not what a command did | What a shell command ran inside the VM is not visible from the hook. The [VM sensor](/docs/connectors/cowork-vm-sensor) watches the VM on managed macOS and Windows |
 | The Cowork surface is caller-reported | The hook marks a call as Cowork when `CLAUDE_CODE_IS_COWORK=1` is set and the agent is the Desktop engine. Any local process can send that marker. It is used for attribution, never for identity, so "protected" and "last Cowork event" are evidence and not proof |
 | Unmeasured input shapes | The 1.0.8 tests captured the input of `save_skill`, `search_plugins` and `search_connectors`. They did not capture `suggest_plugin_install`, which Cowork did not call, or `form_input`, `javascript_tool` and `navigate`, which the tested third-party build does not offer, or the format of `CLAUDE_CODE_WORKSPACE_HOST_PATHS`. A call with a shape DefenseClaw does not read keeps the generic MCP path |
 | Cowork plugins are not inventoried | [AI Discovery](/docs/ai-discovery) lists the names of the plugins enabled in Cowork (`cowork_plugins`, read from `local-agent-mode-sessions/<account>/<org>/rpm/manifest.json`). Those plugins are not in the Claude Code skill and plugin inventory, and the watcher and the scanners do not read them, so DefenseClaw does not scan their skills, commands or MCP servers |
@@ -296,4 +300,5 @@ The user's identity comes from the operating system, never from Cowork's environ
 
 - [Claude Code connector](/docs/connectors/claudecode)
 - [Machine policy](/docs/enterprise/machine-policy), for the drop-in files and `managed_hooks_only`
+- [Cowork VM sensor](/docs/connectors/cowork-vm-sensor), the detection-only sensor inside the Cowork VM
 - [AI Discovery](/docs/ai-discovery)

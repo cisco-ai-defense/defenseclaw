@@ -21,6 +21,7 @@
   "connectors/compatibility",
   "connectors/copilot",
   "connectors/cowork",
+  "connectors/cowork-vm-sensor",
   "connectors/cursor",
   "connectors/devin",
   "connectors/hermes",
