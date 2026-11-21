@@ -107,6 +107,10 @@ func TestGAP0348TrailingStatementKeepsTheVerdictFiveTiers(t *testing.T) {
 		{"claudecode", "Bash", ":(){ :|:& };:", ":(){ :|:& };: ; Write-Output done"},
 		{"codex", "Bash", ":(){ :|:& };:", ":(){ :|:& };: ; echo a ; echo b"},
 		{"claudecode", "Bash", ":(){ :|:& };:", ":(){ :|:& };: ; Write-Output a ; Write-Output b"},
+		// More trailers than readings: the prefix that ends with the bomb is
+		// read first (windowsListPrefixAnchoredIndex), never dropped by the cap.
+		{"codex", "Bash", ":(){ :|:& };:", ":(){ :|:& };: ; " + strings.Join(listPrefixBenignStatements(12), " ; ")},
+		{"codex", "Bash", ":(){ :|:& };:", "git status ; :(){ :|:& };:\n" + strings.Join(listPrefixBenignStatements(20), "\n")},
 	}
 	// Native Windows programs whose own POSIX reading is partial (a Windows
 	// path or quoting the POSIX model cannot place): by corpus id.
@@ -163,6 +167,63 @@ func TestGAP0348TrailingStatementKeepsTheVerdictFiveTiers(t *testing.T) {
 				if action, raw := listPrefixHookPost(t, a, connector, "Bash", command, p.managed); listPrefixActionRank(action) != 0 ||
 					len(listPrefixFindingRules(t, raw)) != 0 {
 					t.Errorf("%s %s benign %q: %q: %.400s", p.name, connector, command, action, raw)
+				}
+			}
+		}
+	}
+}
+
+// listPrefixBenignStatements are n statements of an ordinary developer list.
+func listPrefixBenignStatements(n int) []string {
+	base := []string{"git status", "git log -1", "npm ci", "npm run lint", "npm run build", "npm test", "git add -A",
+		"git diff --cached --stat", "echo ok", "pwd", "go build ./...", "go vet ./..."}
+	statements := make([]string, n)
+	for i := range statements {
+		statements[i] = base[i%len(base)]
+	}
+	return statements
+}
+
+// TestGAP1599BenignListsKeepTheRelVerdictFiveTiers pins rel-1-0-10:GAP-1587
+// and GAP-1599: a benign list of 10 or more statements keeps rel's answer
+// (allow, no finding) in the five tiers on the Codex shell and Claude Code's
+// Bash tool, also when its first statement leaves the POSIX analysis
+// invalid (a bash here-string, an ANSI-C quote with an escaped quote). A key
+// per invalid prefix made each of them a run of its own: 8 readings that
+// read no statement and the items cap (ACTION-COMPOUND-LIMIT, an alert in
+// default, permissive and managed, a block in strict and managed-strict).
+func TestGAP1599BenignListsKeepTheRelVerdictFiveTiers(t *testing.T) {
+	previous := windowsHookHost
+	windowsHookHost = func() bool { return true }
+	t.Cleanup(func() { windowsHookHost = previous })
+	lead := func(first string, n int, sep string) string {
+		return strings.Join(append([]string{first}, listPrefixBenignStatements(n-1)...), sep)
+	}
+	hereString, ansiC := `grep -c ok <<< "$OUT"`, `printf '%s\n' $'it\'s ok'`
+	rows := map[string]string{
+		"bc10":    strings.Join(listPrefixBenignStatements(10), " ; "),
+		"bc10and": strings.Join([]string{"cd app", "npm ci", "npm run lint", "npm run build", "npm test", "cd ..", "go build ./...", "go vet ./...", "go test ./...", "echo done"}, " && "),
+		"bc14nl": strings.Join([]string{"set -e", "cd app", "npm ci", "npm run lint", "npm run build", "npm test", "cd ..", "go build ./...",
+			"go vet ./...", "go test ./...", "git add -A", "git status", "git diff --stat", "echo done"}, "\n"),
+		"hs10":    lead(hereString, 10, " ; "),
+		"hs10nl":  lead(hereString, 10, "\n"),
+		"hs10and": lead(hereString, 10, " && "),
+		"hs32":    lead(hereString, 32, " ; "),
+		"ac10":    lead(ansiC, 10, " ; "),
+		"ac32":    lead(ansiC, 32, " ; "),
+	}
+	ids := make([]string, 0, len(rows))
+	for id := range rows {
+		ids = append(ids, id)
+	}
+	slices.Sort(ids)
+	for _, p := range gap0437Packs {
+		for _, connector := range []string{"codex", "claudecode"} {
+			a := gap0437Server(t, p, connector, "action")
+			for _, id := range ids {
+				if action, raw := listPrefixHookPost(t, a, connector, "Bash", rows[id], p.managed); listPrefixActionRank(action) != 0 ||
+					len(listPrefixFindingRules(t, raw)) != 0 {
+					t.Errorf("%s %s %s: %q, want allow with no finding as rel: %.400s", p.name, connector, id, action, raw)
 				}
 			}
 		}
@@ -244,11 +305,23 @@ func TestGAP0348ListPrefixReadingBound(t *testing.T) {
 	// the ends of its key runs, never truncated (rel-1-0-10:GAP-1587); a
 	// call over the budget is refused whole and has none.
 	for _, n := range []int{10, 64, 128} {
-		long := request(list(n))
-		withWindowsShellDialect(&long, true)
-		if twins, cut := windowsListPrefixTwinRequests(long, actionfacts.Analyze(long.Input)); len(twins) > 2 || cut.Any() {
-			t.Errorf("a benign list of %d statements: %d twins, cut %v", n, len(twins), cut.Any())
+		for _, first := range []string{"echo lead", `grep -c ok <<< "$OUT"`, `printf '%s\n' $'it\'s ok'`} {
+			long := request(first + " ; " + list(n-1))
+			withWindowsShellDialect(&long, true)
+			if twins, cut := windowsListPrefixTwinRequests(long, actionfacts.Analyze(long.Input)); len(twins) > 2 || cut.Any() {
+				t.Errorf("a benign list of %d statements after %q: %d twins, cut %v", n, first, len(twins), cut.Any())
+			}
 		}
+	}
+	// The prefix that ends with the fork bomb is read first, past the cap too.
+	bomb := request("echo a ; :(){ :|:& };: ; " + list(30))
+	withWindowsShellDialect(&bomb, true)
+	if twins, _ := windowsListPrefixTwinRequests(bomb, actionfacts.Analyze(bomb.Input)); len(twins) == 0 ||
+		twins[0].Input.Command != "echo a ; :(){ :|:& };:" {
+		t.Errorf("a fork bomb before 30 trailers: twins %+v", twins)
+	}
+	if index, ok := windowsListPrefixAnchoredIndex("git status ; C:\\work\\x ; echo a:b", []string{"git status ; C:\\work\\x", "git status"}); ok {
+		t.Errorf("a list with no fork bomb has an anchored reading at %d", index)
 	}
 	over := request(list(200))
 	withWindowsShellDialect(&over, true)

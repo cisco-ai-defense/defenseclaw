@@ -34,23 +34,48 @@ const windowsListPrefixMaxKeys = 48
 // one key are read the same way, statement by statement, so the longest
 // prefix of a run of them holds every statement the shorter ones hold, read
 // the same way, and the run that ends at the call as written is read by the
-// call itself. An invalid reading reads no statement (a fork bomb is proven
-// only where it ends the text, endsWithForkBomb), so it proves nothing about
-// a shorter or longer prefix: each invalid prefix, and an invalid call, is a
-// run of its own (alone, its index plus one; rel-1-0-10:GAP-1569).
+// call itself. An invalid reading reads no statement, so a run of invalid
+// prefixes is one run like any other: the only thing an invalid prefix
+// proves is anchored at its end (the fork bomb, endsWithForkBomb), and that
+// prefix is read on its own (windowsListPrefixAnchoredIndex,
+// rel-1-0-10:GAP-1569). A key per invalid prefix made every list whose first
+// statement the POSIX analysis cannot read (a here-string, an ANSI-C quote
+// with an escaped quote) a run per prefix: 8 readings that read nothing and
+// the items cap on 10 or more statements, where rel allows
+// (rel-1-0-10:GAP-1599).
 type windowsListPrefixKey struct {
 	hint, dialect actionfacts.Dialect
 	status        actionfacts.ParseStatus
-	alone         int
 }
 
-// windowsListPrefixKeyOf is the key of a reading at index of the run search.
-func windowsListPrefixKeyOf(hint actionfacts.Dialect, parse actionfacts.ParseResult, index int) windowsListPrefixKey {
-	key := windowsListPrefixKey{hint: hint, dialect: parse.Dialect, status: parse.Status}
-	if parse.Status == actionfacts.StatusInvalid {
-		key.alone = index + 1
+// windowsListPrefixKeyOf is the key of a prefix reading.
+func windowsListPrefixKeyOf(hint actionfacts.Dialect, parse actionfacts.ParseResult) windowsListPrefixKey {
+	return windowsListPrefixKey{hint: hint, dialect: parse.Dialect, status: parse.Status}
+}
+
+// windowsListPrefixAnchoredIndex is the run-search index of the longest
+// prefix (prefixes longest first) that ends with the fork bomb, when the call
+// as written does not: the bomb is proven only where it ends the text
+// (forkBombProof), so a trailer hides it from the call and from every longer
+// prefix whatever their keys. One reading proves it; none when the text holds
+// no bomb at all (a blank-free scan of the call first, so a list with no bomb
+// scans no prefix).
+func windowsListPrefixAnchoredIndex(command string, prefixes []string) (int, bool) {
+	if !strings.Contains(command, ":") || endsWithForkBomb(command) || !strings.Contains(strings.Map(func(r rune) rune {
+		switch r {
+		case ' ', '\t', '\r', '\n':
+			return -1
+		}
+		return r
+	}, command), forkBombText) {
+		return 0, false
 	}
-	return key
+	for i, prefix := range prefixes {
+		if endsWithForkBomb(prefix) {
+			return len(prefixes) - 1 - i, true
+		}
+	}
+	return 0, false
 }
 
 // windowsListPrefixTwinRequests are the extra readings of a Windows hook's
@@ -121,7 +146,10 @@ func windowsListPrefixTwinRequests(request trustedActionRequest, facts actionfac
 	}
 	count := len(prefixes)
 	twins := make(map[int]trustedActionRequest)
-	key := func(index int) windowsListPrefixKey {
+	twinAt := func(index int) trustedActionRequest {
+		if twin, ok := twins[index]; ok {
+			return twin
+		}
 		prefix := prefixes[count-1-index]
 		twin := windowsReadingTwin(request)
 		twin.windowsPowerShellReading = nil
@@ -131,16 +159,24 @@ func windowsListPrefixTwinRequests(request trustedActionRequest, facts actionfac
 			twin.Input.DialectHint, _ = selectWindowsShellDialectReading(twin.Input.Tool, prefix, twin.Input)
 		}
 		twins[index] = twin
-		return windowsListPrefixKeyOf(twin.Input.DialectHint, actionfacts.Analyze(twin.Input).Parse, index)
+		return twin
 	}
-	whole := windowsListPrefixKeyOf("", facts.Parse, count)
+	key := func(index int) windowsListPrefixKey {
+		twin := twinAt(index)
+		return windowsListPrefixKeyOf(twin.Input.DialectHint, actionfacts.Analyze(twin.Input).Parse)
+	}
+	whole := windowsListPrefixKeyOf("", facts.Parse)
 	ends, capped := windowsListPrefixRunEnds(count, whole, key, windowsListPrefixMaxKeys)
+	// The anchored reading goes first, so the cap never drops it.
+	if anchored, ok := windowsListPrefixAnchoredIndex(command, prefixes); ok && !slices.Contains(ends, anchored) {
+		ends = append([]int{anchored}, ends...)
+	}
 	if len(ends) > windowsListPrefixMaxReadings {
 		ends, capped = ends[:windowsListPrefixMaxReadings], true
 	}
 	readings := make([]trustedActionRequest, 0, len(ends))
 	for _, end := range ends {
-		readings = append(readings, twins[end])
+		readings = append(readings, twinAt(end))
 	}
 	if capped {
 		return readings, bounded.Of(bounded.Items)
