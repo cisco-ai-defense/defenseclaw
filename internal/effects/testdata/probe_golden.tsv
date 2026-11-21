@@ -677,7 +677,7 @@ T01 Write abs	K|write:/home/u/.ssh/authorized_keys
 T02 Write rel	U|
 T03 Write tilde	K|write:/home/u/.bashrc
 T04 Edit	K|write:/home/u/.claude/settings.json
-T05 patch move to	K|write:/home/u/.ssh/authorized_keys,write:/home/u/proj/x.txt
+T05 patch move to	K|delete:/home/u/proj/x.txt,write:/home/u/.ssh/authorized_keys,write:/home/u/proj/x.txt
 T06 patch add rel	U|
 T07 codex shell workdir	K|append:/home/u/.ssh/authorized_keys
 T08 codex exec_command workdir	K|append:/home/u/.ssh/authorized_keys
