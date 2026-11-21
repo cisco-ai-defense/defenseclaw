@@ -230,7 +230,7 @@ Cowork is the agent mode of Claude Desktop. For each user who has run Claude Des
 | `engine_version` | The newest Claude Code build that Claude Desktop bundles (the engine behind Cowork). |
 | `vm_bundle_present`, `vm_bundle_bytes` | The Cowork VM bundle and the combined size of its files. The bundle is several gigabytes; the size comes from the file sizes, never from reading the images. |
 | `cowork_plugins` | Names of the plugins enabled in Cowork, sorted, at most 64. Names only. |
-| `deployment` | Which Claude Desktop deployment the data folder belongs to: `1p` (signed in to Claude) or `3p` (third-party inference: Amazon Bedrock, Google Vertex AI, Microsoft Foundry). The value comes from the folder (the table below), not from the `deploymentMode` in its `claude_desktop_config.json`; on the measured machines the two always agreed. Each deployment has its own data folder, so a user who runs both gets two signals. |
+| `deployment` | Which Claude Desktop deployment the data folder belongs to: `1p` (signed in to Claude) or `3p` (third-party inference: Amazon Bedrock, Google Vertex AI, Microsoft Foundry). The value comes from the folder (the table below), not from the `deploymentMode` in its `claude_desktop_config.json`. Each deployment has its own data folder, so a user who runs both gets two signals. |
 
 The data folders the scan reads:
 
@@ -251,7 +251,7 @@ The scan lists and reads these paths with fixed limits and never starts Claude D
 
 On Windows the MSIX folders (`claude_<id>`, `Claude_*`) are matched by name, at most four per folder. The folder whose id matches an installed MSIX package (`%LOCALAPPDATA%\Packages\Claude_<id>`) is read first. When more folders match than are read, every signal of that account is partial (`cap_exceeded`). A data folder that holds only Claude Desktop's migration marker (`.user-data-left.claude_<id>`, left behind in the older MSIX folder once the data moved to `Claude-Data`) is not reported. The catalog reads `claude_desktop_config.json` (configs and MCP servers) in the same folders, MSIX folders included.
 
-The macOS folders and the Windows MSIX folders were measured on Claude Desktop 4.16336.0, for both deployments. These are still unmeasured and follow the macOS layout until a Cowork host confirms them:
+The macOS folders and the Windows MSIX folders are read for Claude Desktop 4.16336.0, for both deployments. The following are Preview and follow the macOS layout until a Cowork host confirms them:
 
 - the VM bundle name and place (`vm_bundles\claudevm.bundle`); the scan falls back to the first `*.bundle` folder in `vm_bundles`,
 - the session and plugin files under `local-agent-mode-sessions`, and `vm-support-probe.json`,
@@ -1433,7 +1433,7 @@ On Linux it runs as an unprivileged account inside a systemd sandbox; on
 Windows it runs as a dedicated virtual service account. On managed macOS it runs as `_defenseclaw`. On all three, only the sensor
 helper holds root.
 
-Measured under the shipped Linux unit, a gateway reading directly sees
+Under the shipped Linux unit, a gateway reading directly sees
 **one process and zero connections**. `ProcSubset=pid` removes `/proc/net` and
 hides every other process before privilege is even considered,
 `RestrictAddressFamilies` blocks `AF_NETLINK` and `AF_PACKET`, and the empty

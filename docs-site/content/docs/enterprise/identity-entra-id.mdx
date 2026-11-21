@@ -17,7 +17,7 @@ keywords:
 DefenseClaw never calls Microsoft Entra ID or Microsoft Graph. A user signs in to the computer with Entra ID, the computer gives that user an operating system account, and DefenseClaw reads the account the way it reads any other: the SID and sign-in token on Windows, NSS on Linux, Open Directory on macOS. A `groups` assignment can name an Entra group only where the operating system knows the membership. What is read from where is in [How DefenseClaw knows who a user is](/docs/enterprise/identity-sources). Guardrail profiles apply to per-user installs and to the standalone enterprise profile; the Secure Client profile rejects them.
 
 <Callout type="warn" title="Not part of the release certification">
-Active Directory is the certified identity stack. The Entra setups below were last verified live in October 2026 with Claude Code on Entra-joined Windows 11, Ubuntu 22.04 on Azure (Entra SSH sign-in), Ubuntu 24.04 with Himmelblau 5.0.0, RHEL 9.8 on Entra Domain Services, and macOS 15.8 with Platform SSO. Hybrid-joined Windows, Entra Kerberos and Himmelblau 4.x were not tested.
+Active Directory is the certified identity stack. The Entra setups below are for Claude Code on Entra-joined Windows 11, Ubuntu 22.04 on Azure (Entra SSH sign-in), Ubuntu 24.04 with Himmelblau 5.0.0, RHEL 9.8 on Entra Domain Services, and macOS 15.8 with Platform SSO. Hybrid-joined Windows, Entra Kerberos and Himmelblau 4.x are Preview.
 </Callout>
 
 ## Pick your setup
@@ -146,11 +146,11 @@ $ getent group defenseclaw-ml-team
 $
 ```
 
-Assign profiles by `users`, or add a local group of your own. Install DefenseClaw per user as that user, as in [Install](/docs/get-started/download). The Entra role is only for sign-in; DefenseClaw does not use it. The standalone enterprise package on an Entra Linux VM was not tested.
+Assign profiles by `users`, or add a local group of your own. Install DefenseClaw per user as that user, as in [Install](/docs/get-started/download). The Entra role is only for sign-in; DefenseClaw does not use it. The standalone enterprise package on an Entra Linux VM is Preview.
 
 ### Himmelblau
 
-[Himmelblau](https://github.com/himmelblau-idm/himmelblau) is an open-source (GPL-3.0) NSS, PAM and SSH module that signs Entra users in to Linux and reads their Entra groups. It needs no app registration. The test used the 5.0.0 nightly build on Ubuntu 24.04, the only free channel at the time; the 4.0.5 stable packages need a paid entitlement token and were not tested.
+[Himmelblau](https://github.com/himmelblau-idm/himmelblau) is an open-source (GPL-3.0) NSS, PAM and SSH module that signs Entra users in to Linux and reads their Entra groups. It needs no app registration. This page uses the 5.0.0 nightly build on Ubuntu 24.04, the only free channel; the 4.0.5 stable packages need a paid entitlement token and are Preview.
 
 **Before users sign in.** Entra refuses remote sign-in through Himmelblau for a user with no MFA method registered (`AADSTS50072`, "Remote session with unenrolled MFA user denied"). Have each user register an authenticator app at **Security info**. The first sign-in then asks for the Entra password, the code and a new Windows Hello PIN of at least six characters, and joins the computer to Entra: it creates a device object, so your users need permission to join devices.
 
@@ -175,7 +175,7 @@ The packages add `himmelblau` to the `passwd`, `group` and `shadow` lines of `ns
 `id` names the Entra groups, but `getent group ml-team` answers nothing: Himmelblau finds a group only by gid or object ID. DefenseClaw matches the names `id` reports without regard to case (Unicode case folding); spaces and accents still belong to the name. Quote a name with spaces in YAML, for example `groups: ["Research ML Team"]`. The records carry directory `entra_id`, source `himmelblau`, assurance `verified`, a `posix_uid`, the private group plus the Entra groups in `group_count`, and the SSH session.
 
 - **Group changes.** Himmelblau caches an account for 300 seconds (`cache_timeout`). In the test a removal showed in `id` after 1 minute 46 seconds and an addition after 4 minutes 58 seconds; a new sign-in, or `sudo aad-tool cache-clear`, shows it at once. DefenseClaw then picks it up within its 15-minute cache.
-- **Entra unreachable.** Cached accounts and groups keep answering, across a daemon restart. A new SSH sign-in of an MFA user is refused (`PAM_ABORT: Network outage detected`) unless Himmelblau's `offline_breakglass` is set up (off by default, not tested).
+- **Entra unreachable.** Cached accounts and groups keep answering, across a daemon restart. A new SSH sign-in of an MFA user is refused (`PAM_ABORT: Network outage detected`) unless Himmelblau's `offline_breakglass` is set up (off by default; Preview).
 - **Daemon down or restarting.** `id` shows the Entra groups as bare numbers. DefenseClaw keeps such an answer for 2 minutes instead of 15, so a group member gets the group profile again within about 2 minutes of the daemon's return.
 - **Restart with the script.** On the 5.0.0 nightly, a second `systemctl restart himmelblaud himmelblaud-tasks` left the units stuck (`inactive (dead-resources-pinned)`) until `systemctl clean --what=fdstore himmelblaud.service`. `setup-himmelblau.sh restart --apply` stops the sockets and daemons, clears the stored descriptors and starts them again; `configure` restarts the same way.
 - **Reconfigure.** `configure --apply` writes the keys above and removes any other `himmelblau.conf` settings. Its preview names the unmanaged keys, and each apply keeps a timestamped backup. An omitted `--allow-group` preserves an existing `pam_allow_groups`; use `--allow-all` to remove it.
@@ -238,7 +238,7 @@ For a fleet, let Intune decide who is in the group, with one signed-in Entra use
 - An Intune copy without `USER_NAME` stops with exit 2. An `add` copy changes the named account only while that account is in front at the console; with another user in front or the login window showing it changes nothing and exits 1. In Intune, set **Script frequency** for both copies (for example, daily) and **Max number of times to retry if script fails** for the `add` copy (for example, 3). The defaults run each copy once and never retry a failure. Check the script result and local group membership after sign-in; if the user was never in front during a run, rerun the copy. See [Microsoft's macOS shell script settings](https://learn.microsoft.com/en-us/intune/device-management/tools/run-shell-scripts-macos).
 - The script refuses built-in and privileged groups (`admin`, `wheel`, `staff`, `com.apple.*`, any group with an id below 500) unless `--allow-system-group` (`ALLOW_SYSTEM_GROUP=yes`) is given. `remove` leaves the group in place; delete it with `dseditgroup -o delete <group>` when no assignment uses it.
 
-The membership itself was tested; delivery through Intune was not. The member got the group profile on a per-user install and on standalone enterprise, the other user got `default_profile`, and removing the membership moved her back to the default.
+A member of the group gets the group profile on a per-user install and on standalone enterprise, another user gets `default_profile`, and removing the membership moves the member back to the default. Delivery through Intune is Preview.
 
 Platform SSO stores each registered account's Entra UPN in its record (`AltSecurityIdentities`, `PlatformSSO:<upn>`), which root can read. The standalone enterprise enumerator reads it: the account is directory `entra_id`, source `macos_platform_sso`, with the UPN as its principal and domain, so a `users` assignment by UPN works there. Accounts that never registered stay `local`. A per-user install cannot read the record and reports `local`. A new Platform SSO account can enter the full macOS Setup Assistant at first login; sign demonstration users in once before a timed run, or deploy an approved Setup Assistant skip payload.
 
@@ -297,7 +297,7 @@ sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux profile-explain -
 sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos profile-explain --user alice --connector claudecode
 ```
 
-`profile` names the profile and `match` says `user` or `group`; another Entra user gets `default_profile`. The fields the records carry for an Entra user (the complete table is [Entra ID fields, as seen live](/docs/enterprise/identity-sources#entra-id-fields-as-seen-live)):
+`profile` names the profile and `match` says `user` or `group`; another Entra user gets `default_profile`. The fields the records carry for an Entra user (the complete table is [Entra ID fields, as seen live](/docs/enterprise/identity-sources#entra-id-fields)):
 
 | Field | Windows | Linux `aad` |
 | --- | --- | --- |

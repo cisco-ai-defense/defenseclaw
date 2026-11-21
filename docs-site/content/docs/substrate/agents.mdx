@@ -19,20 +19,20 @@ keywords:
 
 | Agent | Headless (`run --task`) | Model route | In an actor today |
 |---|---|---|---|
-| Claude Code | `claude -p` | DefenseClaw gateway | **Proven.** Interactive and headless, on a real model, from macOS and Linux laptops. Windows laptops are being re-checked |
-| Codex | `codex exec` | DefenseClaw gateway (`/llm/bedrock/openai` or `/llm/openai`) | Hooks, headless and interactive proven in an actor, on a real model, in the lab. **Model route:** GPT-5.6 Luna on Bedrock (`us.openai.gpt-5.6-luna`) through the gateway's Bedrock OpenAI-compatible route, or OpenAI with a key in `defenseclaw-llm`. `template build --provider bedrock` or `openai` picks one |
-| GitHub Copilot CLI | `copilot -p` | DefenseClaw gateway (`/llm/bedrock/openai`) | Hooks and a real model proven in an actor, in the lab. **Model route:** Bedrock only, through the gateway's OpenAI-compatible route |
+| Claude Code | `claude -p` | DefenseClaw gateway | **Supported.** Interactive and headless, on a real model, from macOS and Linux laptops. Windows laptops are Preview |
+| Codex | `codex exec` | DefenseClaw gateway (`/llm/bedrock/openai` or `/llm/openai`) | Hooks, headless and interactive work in an actor, on a real model. **Model route:** GPT-5.6 Luna on Bedrock (`us.openai.gpt-5.6-luna`) through the gateway's Bedrock OpenAI-compatible route, or OpenAI with a key in `defenseclaw-llm`. `template build --provider bedrock` or `openai` picks one |
+| GitHub Copilot CLI | `copilot -p` | DefenseClaw gateway (`/llm/bedrock/openai`) | Hooks and a real model work in an actor. **Model route:** Bedrock only, through the gateway's OpenAI-compatible route |
 | Hermes | `hermes chat -q` | DefenseClaw gateway | Same as Copilot CLI |
 | OpenCode | `opencode run` | DefenseClaw gateway | Same as Copilot CLI. `defenseclaw substrate run opencode` starts it: its plugin sends its hook events through the actor kit |
-| Kiro CLI | `kiro-cli chat --no-interactive` | Vendor sign-in only | Hooks, tamper checks and refusals proven. **No model run:** it needs a vendor sign-in or `KIRO_API_KEY` |
-| Antigravity CLI | `agy -p` | Vendor sign-in only | Hooks, tamper checks and refusals proven. **No model run:** it needs a vendor sign-in or `GEMINI_API_KEY` |
-| Cursor Agent CLI | `cursor-agent -p` | Vendor key (`CURSOR_API_KEY`) | Hook path proven. **No model run.** `run` starts it, with the sign-in rules below |
+| Kiro CLI | `kiro-cli chat --no-interactive` | Vendor sign-in only | **Preview.** Hooks, tamper checks and refusals work. **Model access:** it needs a vendor sign-in or `KIRO_API_KEY` |
+| Antigravity CLI | `agy -p` | Vendor sign-in only | **Preview.** Hooks, tamper checks and refusals work. **Model access:** it needs a vendor sign-in or `GEMINI_API_KEY` |
+| Cursor Agent CLI | `cursor-agent -p` | Vendor key (`CURSOR_API_KEY`) | **Preview.** The hook path works. **Model access:** a vendor key or sign-in. `run` starts it, with the sign-in rules below |
 | Amp | `amp -x` | Vendor key (`AMP_API_KEY`) | Works against its API on a key, but **can't run**: it speaks WebSocket only, which Substrate's egress refuses (see below). `run` starts it in open source, with that note and the sign-in warning |
-| Devin CLI | `devin -p` | Vendor sign-in only | Hook path proven. **No model run.** `run` starts it, with the sign-in rules below |
+| Devin CLI | `devin -p` | Vendor sign-in only | **Preview.** The hook path works. **Model access:** a vendor key or sign-in. `run` starts it, with the sign-in rules below |
 | OpenClaw, ZeptoClaw | No | No | Not in this release |
 | Claude desktop and Cowork, Cursor, Kiro and Antigravity editors, Copilot in VS Code | No | No | Desktop apps need a screen |
 
-"Proven" means a person drove it in a real terminal, or a headless task ran, with DefenseClaw's hooks firing and a real model answering through the gateway. Only Claude Code has been driven through the launcher; the others were driven through the kit and a lab gateway. "No model run" means the vendor offers no key or sign-in the test cluster could use, so only the parts that need no model were checked.
+**Supported** means a person can drive the agent in a real terminal, or a headless task runs, with DefenseClaw's hooks firing and a real model answering through the gateway. Only Claude Code is started through the launcher; the others run through the kit and a gateway. **Preview** means the hooks work, but the agent needs a vendor key or sign-in for a model.
 
 `defenseclaw substrate run` starts all ten agents. For Amp it first prints that Amp's WebSocket connections are not passed through yet, so it may not reach its model. Cursor, Kiro, Antigravity, Devin and Amp follow the sign-in rules below.
 
@@ -96,7 +96,7 @@ A managed refusal comes back before any actor exists, as `403` with the reason `
 | Many agents at once | Limited by the machine | Limited by the machine | Limited by the cluster |
 | Laptop OS | All | Linux, Apple-silicon Mac | All, including Windows and Intel Macs |
 | Several people on one host | Yes | One account per host | Yes, each agent isolated |
-| Identity | OS user | OS user (verified on managed hosts) | Company sign-in for the person; each agent's identity is signed by Substrate |
+| Identity | OS user | OS user | Company sign-in for the person; each agent's identity is signed by Substrate |
 
 ## The interactive terminal
 

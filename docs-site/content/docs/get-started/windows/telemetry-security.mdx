@@ -146,7 +146,7 @@ authenticated; it is not a claim that localhost is inherently trusted.
 - A connector-scoped token is restricted by connector, route, signal, and
   loopback origin.
 - Management routes require their own authentication.
-- An agent on another computer sending hooks to this gateway is not tested
+- An agent on another computer sending hooks to this gateway is not supported
   on Windows.
 - Outbound OTLP, Splunk, Galileo, webhooks, and provider calls are independent
   client connections. Their availability does not expand hook coverage.
@@ -154,7 +154,7 @@ authenticated; it is not a claim that localhost is inherently trusted.
   unsupported.
 
 Do not expose the local API to your network to make a remote agent work. That
-is not a tested setup, and it needs authentication, TLS, and firewall
+is not a supported setup, and it needs authentication, TLS, and firewall
 measures this guide does not cover.
 
 ## Release and installer trust

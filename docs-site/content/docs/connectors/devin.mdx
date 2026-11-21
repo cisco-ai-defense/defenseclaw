@@ -161,7 +161,7 @@ Can fail closed: yes. On a per-user install with no saved mode, a gateway that i
 | W3C traceparent | yes |
 | Fail closed | yes |
 
-The contract was reviewed against Devin CLI `3000.4.25` on Windows, macOS and Linux. On Linux it is also pinned to `3000.11.3`, which a live check showed delivers `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop` and `SessionEnd` under these names and honors exit-code-2 blocks on `UserPromptSubmit` and `PreToolUse` (`PermissionRequest` and `PostCompaction` are not verified). Any other CLI from `3000.4.25` on, on every OS, runs as an untested newer version unless known broken ([version policy](/docs/connectors/compatibility#version-policy)). On Windows a CLI older than `3000.4.25` has no contract, so setup refuses it in observe and action mode.
+The contract was reviewed against Devin CLI `3000.4.25` on Windows, macOS and Linux. On Linux it is also pinned to `3000.11.3`, which delivers `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop` and `SessionEnd` under these names and honors exit-code-2 blocks on `UserPromptSubmit` and `PreToolUse` (blocking on `PermissionRequest` and `PostCompaction` is Preview). Any other CLI from `3000.4.25` on, on every OS, runs as an untested newer version unless known broken ([version policy](/docs/connectors/compatibility#version-policy)). On Windows a CLI older than `3000.4.25` has no contract, so setup refuses it in observe and action mode.
 
 Devin documents `session_id` and a per-turn `prompt_id` but no per-tool invocation ID. CLI 3000.11.3 sends an undocumented `tool_use_id` that DefenseClaw does not rely on, so cross-event tool pairing is detection-only.
 
@@ -193,7 +193,7 @@ The image is **unverified**, so `defenseclaw sandbox run devin` refuses it. Devi
 | Skip permissions | Would start with `--permission-mode dangerous`. `--safe` drops `--permission-mode dangerous` and `autonomous` from your arguments. |
 | Tamper detection | DefenseClaw pairs each `PostToolUse` with its `PreToolUse` by session, tool name and input. A tool that ran although denied, or whose `PreToolUse` never arrived, raises `hook_tamper` and the pack's `hooks.on_tamper` applies ([policy packs](/docs/sandboxes/policy-packs)). On a logged-in CLI 3000.11.3, `PostToolUse` fires only for a tool that ran. |
 | Workspace trust | The launcher always passes `--respect-workspace-trust false` and refuses that flag from you, because a headless run fails in an untrusted folder. A project's own `.devin/hooks.v1.json` then loads beside DefenseClaw's without a prompt. |
-| Sign-in | A login inside the sandbox (`/usr/local/lib/defenseclaw/bin/devin-launch auth login --force-manual-token-flow`) is the only path. The credential stays in `~/.local/share/devin`, where the agent can read it. Not tested live. |
+| Sign-in | A login inside the sandbox (`/usr/local/lib/defenseclaw/bin/devin-launch auth login --force-manual-token-flow`) is the only path. The credential stays in `~/.local/share/devin`, where the agent can read it. This sign-in is Preview. |
 | Image | Devin CLI 3000.4.25 from its release archive, checked against the SHA-256 in Devin's manifest. |
 
 ## Limits

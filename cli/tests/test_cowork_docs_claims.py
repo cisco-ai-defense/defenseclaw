@@ -310,7 +310,7 @@ def test_the_vm_limit_is_scoped_to_the_hook():
 def test_the_engine_version_is_the_vocabulary_engine_version():
     version = re.search(r'CoworkVocabularyEngineVersion = "([\d.]+)"', GO_COWORK.read_text(encoding="utf-8")).group(1)
     text = _page()
-    assert f"measured on engines {version} and " in text
+    assert f"for engines {version} and " in text
     assert f"Engine {version} resolves to a known contract (`claudecode-hooks-v2`)" in text
     contracts = json.loads(CONTRACTS.read_text(encoding="utf-8"))
 

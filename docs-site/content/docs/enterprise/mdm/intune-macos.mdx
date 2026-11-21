@@ -9,7 +9,7 @@ keywords:
   - Apple silicon
 ---
 
-<Callout title="Validation">Live script delivery was exercised with test package `9.9.9` (build `f9ed814b1`, PR #1304): install, an offline period and repeated uninstall. A cached install can still reinstall after removal; see [Remove DefenseClaw](#remove-defenseclaw). The earlier removal check used test package `1.0.902`. These test builds do not certify later releases or the PKG app route.</Callout>
+<Callout title="Status">Script delivery supports install, an offline period and repeated uninstall. A cached install can still reinstall after removal; see [Remove DefenseClaw](#remove-defenseclaw). The PKG app route is Preview.</Callout>
 
 You upload one root shell script: your copy of
 `packaging/mdm/macos/defenseclaw-enterprise.sh` with its settings block and config
@@ -169,8 +169,8 @@ reinstalling after a purge.
 
 First remove the Macs from the install script's assignment. The Intune agent for
 macOS keeps running a cached recurring install script after its assignment is
-removed: in the test tenant, Graph confirmed the script had no assignments, yet the
-Mac ran it again 4 seconds and 16 minutes later. A cached install run after the
+removed: Graph can confirm the script has no assignments, yet the
+Mac runs it again, for example 4 seconds and 16 minutes later. A cached install run after the
 uninstall reinstalls the pkg. Before you assign uninstall:
 
 1. Check the Intune agent log on each Mac (`/Library/Logs/Microsoft/Intune`) and wait
