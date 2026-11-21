@@ -17,6 +17,18 @@ macOS runs either profile:
 The rows below cover the standalone profile. They are numbered `M-01`…; the
 second column names the matching Windows row.
 
+One Secure Client data flow is noted here because it changes what leaves the
+host: on the `secure_client` profile, each AI discovery `local_model` record
+sent to the managed Cisco AI Defense destination carries the model ID (a
+Hugging Face repo ID, an Ollama `model:tag`, a local API model ID, or a file
+or directory stem), a stable model key, the runtime, status, format, size,
+modality, owning application and relevance (Spec 016; documented under
+"Managed enterprise export" in `docs-site/content/docs/ai-discovery.mdx`). A
+file or directory stem can be a name the user chose. Paths and other
+basenames are not sent, the model ID is a `content` field that the `strict`
+projection removes, and the standalone and OSS profiles do not send these
+fields.
+
 ## Review scope
 
 - Primary paths:

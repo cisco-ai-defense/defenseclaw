@@ -10,6 +10,8 @@ for current behavior.
 
 ## [Unreleased] — 1.0.9
 
+- **Secure Client sends local model identity to Cisco AI Defense.** On the Secure Client profile only, each AI discovery `local_model` record sent to the managed AI Defense destination now carries the model ID, a stable model key (`mdl_` plus a SHA-256 of the runtime and model ID, unchanged across moves, reinstalls and `--purge`, and shared by a model found both on disk and through a loopback model API), the runtime, status (installed or loaded), format, size, modality, owning application and relevance (`defenseclaw.ai.model.*`). The `ai.discovery.completed` summary adds `snapshot_published` and `local_model_signals`, so AI Defense can tell a complete snapshot from a partial or suppressed one before removing a model. Before, AI Defense received only the runtime label and provenance, so it could not tell models apart. The model ID is a `content` field (the `strict` projection removes it) and paths are never sent. OSS per-user and standalone managed (including MDM) records are unchanged. Discovery scope, caps and cadence are unchanged. (AIFW-38915, Spec 016)
+
 - **Custom Cisco AI Defense rules keep their names in hook-decision events.** DefenseClaw previously collapsed every unrecognized AI Defense rule name to `CISCO-UNKNOWN` and the generic display text `Custom Policy Violation`, so multiple custom matches became indistinguishable and downstream event details could not name the rule that blocked the action. Custom rules now receive a deterministic `CISCO-CUSTOM-<name-hash>` identity, while the bounded original name is exported beside it in the aligned `defenseclaw.guardrail.rule_names` field. Known Cisco rule identities are unchanged.
 
 ### Changed
