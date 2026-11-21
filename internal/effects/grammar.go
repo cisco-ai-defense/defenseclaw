@@ -112,14 +112,43 @@ func awkProgramOK(s string) bool {
 
 // sedScriptOK accepts a sed script made only of commands that read and edit the
 // pattern space: no w / W (write a file), r / R (read one), e (execute) and no
-// s///w, s///e flag. The delimiter rule is GNU's (the next unescaped delimiter
-// ends a part, brackets are not special); a bracket that BSD sed would carry
-// across the delimiter is rejected so both implementations agree.
+// s///w, s///e flag.
 func sedScriptOK(s string) bool {
+	rd, ok := readSedScript(s)
+	return ok && rd.inert()
+}
+
+// sedReading is what a sed script does outside the pattern space (DESIGN D2:
+// the sed grammar row): the files its w / W commands and s///w flags write
+// (opened, so truncated, when sed starts, even when no line is written:
+// rel-1-0-10 GAP-1500), the files r / R read, and the commands e and s///e run.
+type sedReading struct {
+	writes  []string
+	reads   []string
+	execs   []string // e COMMAND: the command text
+	execDyn bool     // e with no command, or s///e: the pattern space is run
+}
+
+func (r sedReading) inert() bool {
+	return len(r.writes) == 0 && len(r.reads) == 0 && len(r.execs) == 0 && !r.execDyn
+}
+
+// readSedScript parses a sed script. The delimiter rule is GNU's (the next
+// unescaped delimiter ends a part, brackets are not special); a bracket that BSD
+// sed would carry across the delimiter is rejected so both implementations
+// agree. A file name runs to the end of the line, as in GNU and BSD sed (`w f;
+// p` writes the file "f; p"). Any construct the parser does not know rejects
+// the script.
+func readSedScript(s string) (sedReading, bool) {
 	if len(s) > maxGrammarSource {
-		return false
+		return sedReading{}, false
 	}
 	p := &sedParser{s: s}
+	ok := p.script()
+	return p.rd, ok
+}
+
+func (p *sedParser) script() bool {
 	depth := 0
 	for {
 		p.skip(" \t;\n")
@@ -177,6 +206,25 @@ func sedScriptOK(s string) bool {
 			if !p.translit() {
 				return false
 			}
+		case 'w', 'W':
+			name, ok := p.fileName()
+			if !ok {
+				return false
+			}
+			p.rd.writes = append(p.rd.writes, name)
+		case 'r', 'R':
+			name, ok := p.fileName()
+			if !ok {
+				return false
+			}
+			p.rd.reads = append(p.rd.reads, name)
+		case 'e':
+			cmd := p.restOfLine()
+			if strings.TrimSpace(cmd) == "" {
+				p.rd.execDyn = true
+			} else {
+				p.rd.execs = append(p.rd.execs, cmd)
+			}
 		case 'b', 't', 'T', ':':
 			// GNU ends a label at whitespace or ';' and goes on parsing commands, so
 			// anything after the label other than the end of the command is a command
@@ -204,15 +252,36 @@ func sedScriptOK(s string) bool {
 				p.i++
 			}
 		default:
-			return false // w W r R e v and anything unknown
+			return false // v and anything unknown
 		}
 	}
+}
+
+// restOfLine returns the text up to the end of the line and consumes it.
+func (p *sedParser) restOfLine() string {
+	start := p.i
+	for !p.eof() && p.s[p.i] != '\n' {
+		p.i++
+	}
+	return p.s[start:p.i]
+}
+
+// fileName reads the file operand of w, W, r, R and s///w: blanks, then the
+// rest of the line. An empty name is an error in sed.
+func (p *sedParser) fileName() (string, bool) {
+	p.skip(" \t")
+	name := p.restOfLine()
+	if name == "" {
+		return "", false
+	}
+	return name, true
 }
 
 type sedParser struct {
 	s       string
 	i       int
 	hadAddr bool
+	rd      sedReading
 }
 
 func (p *sedParser) eof() bool { return p.i >= len(p.s) }
@@ -354,8 +423,17 @@ func (p *sedParser) subst() bool {
 		switch {
 		case c == 'g' || c == 'p' || c == 'i' || c == 'I' || c == 'm' || c == 'M' || (c >= '0' && c <= '9'):
 			p.i++
-		case c == 'e' || c == 'w':
-			return false
+		case c == 'e':
+			p.i++
+			p.rd.execDyn = true // the pattern space after the substitution is run
+		case c == 'w':
+			p.i++
+			name, ok := p.fileName()
+			if !ok {
+				return false
+			}
+			p.rd.writes = append(p.rd.writes, name)
+			return true
 		default:
 			return p.endOfCommand()
 		}

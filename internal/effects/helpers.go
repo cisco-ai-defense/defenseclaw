@@ -97,8 +97,8 @@ type wrapperParse struct {
 	unaccounted bool
 	login       bool
 	appendOut   bool
-	shellText   *Word // the value of a shell-text option (script -c, flock -c)
-	execMode    bool  // watch -x: the child words are an argv, not shell text
+	shellText   *Word  // the value of a shell-text option (script -c, flock -c)
+	execMode    bool   // watch -x: the child words are an argv, not shell text
 	replace     string // xargs -I STR: the child words holding STR get a name from input
 	outs        []wrapperOutput
 }
@@ -454,8 +454,27 @@ func flagLookup(p Program, name string, dialect Dialect) (Flag, bool) {
 		}
 		return Flag{}, false
 	}
-	fl, ok := p.Flags[key]
+	_, fl, ok := flagResolve(p, key)
 	return fl, ok
+}
+
+// flagResolve finds a POSIX flag in a row: the exact name, or for a GNU tool a
+// long option it is an unambiguous prefix of (getopt_long), returned with its
+// full name. The prefix must be unambiguous among all the tool's long options,
+// not only the row's (a prefix of two is an error in the tool).
+func flagResolve(p Program, key string) (string, Flag, bool) {
+	if fl, ok := p.Flags[key]; ok {
+		return key, fl, true
+	}
+	if len(p.Longs) == 0 || !strings.HasPrefix(key, "--") {
+		return key, Flag{}, false
+	}
+	full, ok := resolveLong(key, p.Longs)
+	if !ok {
+		return key, Flag{}, false
+	}
+	fl, ok := p.Flags[full]
+	return full, fl, ok
 }
 
 func collectExecArgv(words []Word) []Word {

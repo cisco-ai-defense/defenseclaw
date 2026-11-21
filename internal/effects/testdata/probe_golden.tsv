@@ -31,7 +31,7 @@ A30 tar C before x	U|
 A31 tar xf in home cwd	U|
 A32 tar -x -f sep	U|
 A33 tar --extract	U|
-A34 tar czf - src	K|write:/home/u/.ssh
+A34 tar czf - src	K|
 A35 tar cf old dest	K|write:/home/u/.bashrc
 A36 git rm	U|
 A37 git checkout file	U|
@@ -713,7 +713,7 @@ T29 xargs rm	U|
 T3 git push	K|
 T30 git hooks clone+cd	U|write:/home/u/proj/r/**
 T4 tar x	U|
-T5 tar c	K|write:/home/u/.ssh
+T5 tar c	K|
 T6 sed -i	K|write:/home/u/.bashrc
 T7 find -delete	K|delete:/home/u/.ssh
 T8 find -exec rm	U|
@@ -1326,10 +1326,10 @@ rv8-S03 sh -	U|
 rv8-S04 cmd fd 0 dup	U|
 rv8-S05 bash -i pipe	U|
 rv8-T01 uniq IN OUT	K|write:/home/u/.ssh/authorized_keys
-rv8-T02 sed w	U|
-rv8-T03 sed s///w	U|
-rv8-T04 sed -e w	U|
-rv8-T05 awk print >>	U|
+rv8-T02 sed w	K|write:/home/u/.ssh/authorized_keys
+rv8-T03 sed s///w	K|write:/home/u/.ssh/authorized_keys
+rv8-T04 sed -e w	K|write:/home/u/.ssh/authorized_keys
+rv8-T05 awk print >>	U|append:/home/u/.ssh/authorized_keys
 rv8-T06 awk -f	U|
 rv8-T07 sed -f	U|
 rv8-T08 xxd -r IN OUT	K|write:/home/u/.ssh/authorized_keys
@@ -1402,11 +1402,11 @@ rv8-Y09 ps hash value & Add-Content	K|write:c:\users\u\.ssh\authorized_keys
 rv9-A01 awk -W dump-variables	U|
 rv9-A02 awk -W posix then program	U|
 rv9-A03 awk -W exec file	U|
-rv9-A04 awk -- program	U|
-rv9-A05 awk -v -- program	U|
-rv9-A06 awk -Wposix fused	U|
+rv9-A04 awk -- program	U|write:/home/u/.ssh/authorized_keys
+rv9-A05 awk -v -- program	U|write:/home/u/.ssh/authorized_keys
+rv9-A06 awk -Wposix fused	U|write:/home/u/.ssh/authorized_keys
 rv9-A07 awk -i inplace	U|
-rv9-A08 awk -e source	U|
+rv9-A08 awk -e source	U|write:/home/u/.ssh/authorized_keys
 rv9-A09 awk -W interactive program	U|
 rv9-A10 awk read (control)	K|
 rv9-G01 sed colon label then w	U|
@@ -1414,13 +1414,13 @@ rv9-G02 sed b label then w	U|
 rv9-G03 sed t label then w	U|
 rv9-G04 sed -i empty bsd	K|write:/home/u/.ssh/authorized_keys,write:/home/u/proj/s/a/b
 rv9-G05 sed --in-place=suffix	K|write:/home/u/.ssh/authorized_keys
-rv9-G06 sed -- then script	U|
-rv9-G07 sed -s -- 1w	U|
-rv9-G08 sed a text then w line	U|
-rv9-G09 sed i backslash newline	U|
-rv9-G10 sed brace w newline	U|
+rv9-G06 sed -- then script	K|write:/home/u/.ssh/authorized_keys
+rv9-G07 sed -s -- 1w	K|write:/home/u/.ssh/authorized_keys
+rv9-G08 sed a text then w line	K|write:/home/u/.ssh/authorized_keys
+rv9-G09 sed i backslash newline	K|write:/home/u/.ssh/authorized_keys
+rv9-G10 sed brace w newline	K|write:/home/u/.ssh/authorized_keys
 rv9-G11 sed -E -i	K|write:/home/u/.ssh/authorized_keys
-rv9-G12 sed s M flag then w	U|
+rv9-G12 sed s M flag then w	K|write:/home/u/.ssh/authorized_keys
 rv9-G13 sed -e then file positional (control)	K|
 rv9-G14 sed -z in place	K|write:/home/u/.ssh/authorized_keys
 rv9-I01 printf -v HOME	U|
