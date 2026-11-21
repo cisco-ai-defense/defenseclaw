@@ -297,6 +297,11 @@ func localJudgeEndpoint(endpoint string) bool {
 // An alignment call (judgeCallAlignment) never waits for a slot: with none
 // free it fails with errJudgeSlotBusy, and it gives its slot up (failing
 // with errJudgeSlotPreempted) as soon as another judge call has to wait.
+//
+// A blank answer (no choice, or only white space) is asked once more on the
+// same slot while ctx allows: a model occasionally ends a turn with no text
+// (GAP-0610). A second blank answer goes to the caller, whose empty or
+// unparsed path treats it as a failed judge call.
 func (j *LLMJudge) chat(ctx context.Context, kind string, req *ChatRequest) (resp *ChatResponse, err error) {
 	var release func()
 	yielding := judgeCallClassOf(kind) == judgeCallAlignment
@@ -328,13 +333,28 @@ func (j *LLMJudge) chat(ctx context.Context, kind string, req *ChatRequest) (res
 	if end, bounded := hookJudgeAnswerEnd(ctx); bounded && !time.Now().Before(end) {
 		return nil, context.Canceled
 	}
-	call := j.beginJudgeUsage(ctx, kind)
-	if yielding {
-		return j.chatAbandonable(ctx, call, req)
+	for attempt := 0; ; attempt++ {
+		call := j.beginJudgeUsage(ctx, kind)
+		if yielding {
+			resp, err = j.chatAbandonable(ctx, call, req)
+		} else {
+			resp, err = j.provider.ChatCompletion(ctx, req)
+			finishJudgeUsage(call, resp, err)
+		}
+		if attempt > 0 || err != nil || !judgeAnswerBlank(resp) || ctx.Err() != nil {
+			return resp, err
+		}
+		if end, bounded := hookJudgeAnswerEnd(ctx); bounded && !time.Now().Before(end) {
+			return resp, err
+		}
 	}
-	resp, err = j.provider.ChatCompletion(ctx, req)
-	finishJudgeUsage(call, resp, err)
-	return resp, err
+}
+
+// judgeAnswerBlank reports a model response with no answer text: no choice,
+// no message, or a message of white space only.
+func judgeAnswerBlank(resp *ChatResponse) bool {
+	return resp == nil || len(resp.Choices) == 0 || resp.Choices[0].Message == nil ||
+		strings.TrimSpace(resp.Choices[0].Message.Content) == ""
 }
 
 // maxAbandonedAlignmentCalls bounds the alignment provider calls still
