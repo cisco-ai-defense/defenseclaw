@@ -43,8 +43,10 @@ func TestActiveUserLoginTildeTargetIsTheActiveHome(t *testing.T) {
 	}
 	// block rows that block for rules of their own in the default pack.
 	blockRules := map[string][]string{
-		"echo k >> U/.ssh/authorized_keys":                   {gap0747SSHKeysRule},
-		"source ./env.sh; make > U/.defenseclaw/config.yaml": {gap0747StateRule, gap0747CompoundLimitRule, gap0747SSHKeysRule},
+		"echo k >> U/.ssh/authorized_keys": {gap0747SSHKeysRule},
+		// No SSH keys finding: the target's last element is the fixed name
+		// config.yaml, no authorized-keys file (GAP-1050).
+		"source ./env.sh; make > U/.defenseclaw/config.yaml": {gap0747StateRule, gap0747CompoundLimitRule},
 	}
 	allow := []string{
 		"PATH=U/bin:$PATH make test > build.log",
