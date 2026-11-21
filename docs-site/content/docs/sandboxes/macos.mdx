@@ -13,10 +13,6 @@ keywords:
 
 Install and configure OpenShell sandboxes on an Apple-silicon Mac. Each sandbox is a MicroVM with its own Linux kernel. The agent works on a copy of your project, and you bring its changes back when you are happy with them.
 
-<Callout type="info" title="Preview">
-Running sandboxes on macOS is in preview. It is available and may change.
-</Callout>
-
 ## How it fits together
 
 <Flow direction="TB" caption="A Mac sandbox. The agent works on a copy of your project inside a MicroVM; nothing reaches your folder until you pull it back.">
@@ -44,7 +40,7 @@ Running sandboxes on macOS is in preview. It is available and may change.
 | Homebrew | Your account must be able to write to Homebrew's folders. OpenShell installs from the `nvidia/openshell` formula, without `sudo`. |
 | Xcode or Command Line Tools | Current for your macOS release. Homebrew may build from source. They include Git 2.29 or newer, which a copy-mode run uses to copy your project and the pre-session snapshot of a git repository uses; a MicroVM mounts no host folders, so every run on a Mac works on a copy and the row fails without git; `defenseclaw sandbox doctor` checks it (**Host Git**). |
 | `e2fsprogs` | Setup offers to install it with Homebrew. |
-| Docker Desktop, running | Start it once on your own account first. It asks for Rosetta, local-network access and an administrator password. |
+| Docker Desktop 29.8 or newer, running | Start it once on your own account first. It asks for Rosetta, local-network access and an administrator password. Turn on **Settings → Resources → Network → Enable host networking**, then restart the gateway (`defenseclaw-gateway restart`). |
 | Disk | At least 13 GiB free in the VM volume (24 GiB recommended). The first image build downloads about 3 GB. |
 
 OpenShell 0.1.6 or newer is required. Setup installs it, or upgrades an older one, after asking. If another account owns Homebrew, setup stops and names the owner and folder. Ask them for write access, or install a Homebrew of your own in your home directory ([below](#a-homebrew-that-belongs-to-another-account)). On a managed Mac an administrator provides OpenShell: [Sandboxes on managed computers](/docs/enterprise/sandboxes).

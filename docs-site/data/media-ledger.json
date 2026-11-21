@@ -23,8 +23,15 @@
     "replays": 0
   },
   "connectors/cowork-vm-sensor": {
-    "videos": [],
-    "images": [],
+    "videos": [
+      "cowork-vm-sensor-standin"
+    ],
+    "images": [
+      "/images/cowork/cowork-standin-grafana-findings.png",
+      "/images/cowork/cowork-standin-grafana-tactics.png",
+      "/images/cowork/cowork-standin-install.png",
+      "/images/posters/cowork-vm-sensor-standin.jpg"
+    ],
     "demos": [],
     "replays": 0
   },
