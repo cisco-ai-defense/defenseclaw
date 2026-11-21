@@ -738,8 +738,9 @@ the machine config, not in a user's home, and apply to every enrolled user.
    own lookup is the fallback.
 
 On a managed Windows computer, group profiles use the user's active desktop
-session token. After sign-out, group-dependent assignments use the default
-profile; the next desktop sign-in supplies current groups. SSH and scheduled-task
+session token. After sign-out, the account's groups are unknown: a group-dependent
+assignment refuses the request and names the missing groups (`default_lookup_failed`);
+the next desktop sign-in supplies current groups. SSH and scheduled-task
 sessions do not supply those groups.
 Guardrail profiles are rejected under the Secure Client profile, which keeps
 its behavior as it was.
