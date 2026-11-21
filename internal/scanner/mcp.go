@@ -784,12 +784,14 @@ func (s *MCPScanner) Scan(ctx context.Context, target string) (*ScanResult, erro
 	}
 
 	if stdout.Len() > 0 {
-		findings, parseErr := parseMCPOutput(stdout.Bytes())
+		findings, tools, partial, parseErr := parseMCPOutputWithTools(stdout.Bytes())
 		if parseErr != nil {
 			scanErr = fmt.Errorf("scanner: failed to parse %s output: %w (stderr=%s)", s.Name(), parseErr, stderrStr)
 			return nil, scanErr
 		}
 		result.Findings = findings
+		result.MCPAdvertisedTools = tools
+		result.MCPToolListPartial = partial
 	}
 	result.Warnings = mcpAnalyzerWarnings(stderrStr)
 
@@ -859,10 +861,12 @@ func mcpOutputError(stdout []byte) string {
 // same top-level shape the plugin scanner parses, so the two paths
 // share a single contract.
 type mcpScanResult struct {
-	Scanner   string       `json:"scanner"`
-	Target    string       `json:"target"`
-	Timestamp string       `json:"timestamp"`
-	Findings  []mcpFinding `json:"findings"`
+	Scanner                string       `json:"scanner"`
+	Target                 string       `json:"target"`
+	Timestamp              string       `json:"timestamp"`
+	Findings               []mcpFinding `json:"findings"`
+	AdvertisedTools        []string     `json:"advertised_tools"`
+	AdvertisedToolsPartial bool         `json:"advertised_tools_partial"`
 }
 
 type mcpFinding struct {
@@ -908,10 +912,15 @@ func mcpAnalyzerWarnings(stderr string) []string {
 }
 
 func parseMCPOutput(data []byte) ([]Finding, error) {
+	findings, _, _, err := parseMCPOutputWithTools(data)
+	return findings, err
+}
+
+func parseMCPOutputWithTools(data []byte) ([]Finding, []string, bool, error) {
 	clean := extractJSON(ansiRe.ReplaceAll(data, nil))
 	var out mcpScanResult
 	if err := json.Unmarshal(clean, &out); err != nil {
-		return nil, err
+		return nil, nil, false, err
 	}
 
 	findings := make([]Finding, 0, len(out.Findings))
@@ -938,5 +947,30 @@ func parseMCPOutput(data []byte) ([]Finding, error) {
 			LineNumber:  ln,
 		})
 	}
-	return findings, nil
+	// The scanner may return duplicate or malformed server-controlled names.
+	// Keep only bounded, single-component labels; never parse tool content.
+	if out.AdvertisedTools == nil {
+		// Older CLI output has no authoritative tools/list result. Preserve
+		// existing advertised evidence instead of treating it as empty.
+		return findings, nil, true, nil
+	}
+	tools := make([]string, 0, min(len(out.AdvertisedTools), 256))
+	seen := make(map[string]struct{}, len(out.AdvertisedTools))
+	partial := out.AdvertisedToolsPartial
+	for _, name := range out.AdvertisedTools {
+		if len(tools) == 256 {
+			partial = true
+			break
+		}
+		if name == "" || len(name) > 256 || strings.TrimSpace(name) != name || strings.ContainsAny(name, "/\\") || strings.ContainsFunc(name, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
+			partial = true
+			continue
+		}
+		if _, exists := seen[name]; exists {
+			continue
+		}
+		seen[name] = struct{}{}
+		tools = append(tools, name)
+	}
+	return findings, tools, partial, nil
 }

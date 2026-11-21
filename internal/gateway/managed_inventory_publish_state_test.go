@@ -201,10 +201,17 @@ func TestManagedInventoryDigestDetectsMeaningfulFields(t *testing.T) {
 		"connectorSubprocessPolicy":   func(c *endpointInventoryComponent) { c.connectorSubprocessPolicy = "all" },
 		"mcpTransport":                func(c *endpointInventoryComponent) { c.mcpTransport = "http" },
 		"mcpCommandBasename":          func(c *endpointInventoryComponent) { c.mcpCommandBasename = "uvx" },
+		"mcpCommandFingerprint":       func(c *endpointInventoryComponent) { c.mcpCommandFingerprint = "hmac-sha256:changed" },
+		"mcpArgumentsFingerprint":     func(c *endpointInventoryComponent) { c.mcpArgumentsFingerprint = "hmac-sha256:changed" },
+		"mcpSourceScope":              func(c *endpointInventoryComponent) { c.mcpSourceScope = "project" },
+		"mcpServerURL":                func(c *endpointInventoryComponent) { c.mcpServerURL = "https://mcp.example.com/v1" },
 		"mcpURLHost":                  func(c *endpointInventoryComponent) { c.mcpURLHost = "127.0.0.1:9000" },
 		"mcpAuthProviderType":         func(c *endpointInventoryComponent) { c.mcpAuthProviderType = "none" },
 		"mcpDisabled":                 func(c *endpointInventoryComponent) { c.mcpDisabled = &otherBool },
 		"mcpDisabledNil":              func(c *endpointInventoryComponent) { c.mcpDisabled = nil },
+		"mcpToolSource":               func(c *endpointInventoryComponent) { c.mcpToolSource = "observed" },
+		"mcpToolParentID":             func(c *endpointInventoryComponent) { c.mcpToolParentID = "parent-2" },
+		"mcpToolObservedAt":           func(c *endpointInventoryComponent) { c.mcpToolObservedAt = "2026-11-18T00:00:00Z" },
 		"agentConnector":              func(c *endpointInventoryComponent) { c.agentConnector = "codex" },
 		"agentInstalled":              func(c *endpointInventoryComponent) { c.agentInstalled = nil },
 		"agentHasConfig":              func(c *endpointInventoryComponent) { c.agentHasConfig = nil },
@@ -557,6 +564,16 @@ func TestManagedInventoryPublishStateFutureStampIsDue(t *testing.T) {
 }
 
 func TestManagedInventoryPublishStateFailOpen(t *testing.T) {
+	legacyVersion, err := json.Marshal(managedInventoryPublishFile{
+		Version:      managedInventoryPublishStateVersion - 1,
+		FullBundleAt: time.Now().UTC(),
+		Collections: map[string]managedInventoryPublishRecord{
+			"collection": {Digest: "digest-a"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	forwardVersion, err := json.Marshal(managedInventoryPublishFile{
 		Version:      managedInventoryPublishStateVersion + 1,
 		FullBundleAt: time.Now().UTC(),
@@ -575,6 +592,7 @@ func TestManagedInventoryPublishStateFailOpen(t *testing.T) {
 		{name: "missing", write: false},
 		{name: "malformed", content: []byte("{not json"), write: true},
 		{name: "empty", content: nil, write: true},
+		{name: "legacy-version", content: legacyVersion, write: true},
 		{name: "forward-version", content: forwardVersion, write: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {

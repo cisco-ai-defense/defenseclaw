@@ -7,10 +7,17 @@ package hookpaths
 
 import (
 	"errors"
+	"os"
 
 	"github.com/defenseclaw/defenseclaw/internal/fixturefs"
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 )
+
+// pathOpenDirectory is pathOpen on Windows: directory, junction, share and
+// MSYS path handling stay as pathOpen reads them (#1486).
+func pathOpenDirectory(name string) (*os.File, error) {
+	return pathOpen(name)
+}
 
 // networkShareRoot is the \\server\share volume of a path on a network share,
 // in every spelling Windows opens one by (windowsShareRoot), as the path

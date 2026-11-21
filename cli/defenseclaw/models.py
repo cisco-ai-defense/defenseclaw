@@ -83,6 +83,9 @@ class ScanResult:
     notes: list[str] = field(default_factory=list)
     # What the scan ran with, for output ("policy": "quiet", "judge": a model or "off").
     settings: dict[str, str] = field(default_factory=dict)
+    # MCP only: names returned by tools/list, independent of analyzer findings.
+    advertised_tools: list[str] = field(default_factory=list)
+    advertised_tools_partial: bool = False
 
     def has_severity(self, severity: str) -> bool:
         return any(f.severity == severity for f in self.findings)
@@ -108,6 +111,9 @@ class ScanResult:
         }
         if self.settings:
             payload["settings"] = dict(self.settings)
+        if self.scanner == "mcp-scanner":
+            payload["advertised_tools"] = list(self.advertised_tools)
+            payload["advertised_tools_partial"] = self.advertised_tools_partial
         return json.dumps(payload, indent=2)
 
 
