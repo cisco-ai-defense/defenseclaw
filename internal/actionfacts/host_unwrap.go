@@ -1453,7 +1453,10 @@ func nonStaticNestedText(source string, nested psparse.NestedScript) (string, bo
 		if !seen || len(rest) == 0 {
 			return "", false
 		}
-		return strings.Join(rest, " "), true
+		// Start-Process joins the words with blanks into the child's command
+		// line, so a body word written "<chain>" is the chain
+		// (rel-1-0-10:GAP-1655).
+		return commandLineBody(strings.Join(rest, " ")), true
 	}
 	return "", false
 }
@@ -1468,14 +1471,66 @@ func nonStaticNestedText(source string, nested psparse.NestedScript) (string, bo
 // this the line had no reading at all, so an eventvwr handler chain given as
 // the line was allowed with no finding in every tier while the same chain sent
 // plainly alerted (rel-1-0-10:GAP-1638). Newlines stay inside their word, as
-// the host splits at spaces and tabs only.
+// the host splits at spaces and tabs only. A body that is one double-quoted
+// word (-Command "<chain>") is the chain: the host splits its command line
+// with the CommandLineToArgvW rules, which take off that pair of quotes and
+// turn \" into ", so the body is read with one level of quotes taken off
+// (commandLineQuotedWord); as written it is a string expression that runs
+// nothing (rel-1-0-10:GAP-1655).
 func startProcessCommandLine(host string, line *psparse.StringLit) (string, bool) {
 	text, static := psparse.LiteralString(line)
 	if !static {
 		return "", false
 	}
 	words := strings.FieldsFunc(text, func(r rune) bool { return r == ' ' || r == '\t' })
-	return powerShellLauncherBody(append([]string{host}, words...))
+	body, ok := powerShellLauncherBody(append([]string{host}, words...))
+	if !ok {
+		return "", false
+	}
+	return commandLineBody(body), true
+}
+
+// commandLineBody is the script of a -Command body of a child command line:
+// one double-quoted word is read with its quotes taken off
+// (commandLineQuotedWord), any other body as written.
+func commandLineBody(body string) string {
+	if inner, quoted := commandLineQuotedWord(body); quoted && strings.TrimSpace(inner) != "" {
+		return inner
+	}
+	return body
+}
+
+// commandLineQuotedWord is the word a child process gets for text when text
+// is one double-quoted word of its command line (CommandLineToArgvW): the
+// quotes at both ends are taken off, 2n backslashes before a quote give n,
+// and 2n+1 backslashes before a quote give n and a literal quote. Text with
+// any other quote that is not escaped (two quoted spans, "" inside) is not
+// one word, so it has no such reading.
+func commandLineQuotedWord(text string) (string, bool) {
+	if len(text) < 2 || text[0] != '"' || text[len(text)-1] != '"' {
+		return "", false
+	}
+	var word strings.Builder
+	backslashes := 0
+	for i := 1; i < len(text); i++ {
+		switch text[i] {
+		case '\\':
+			backslashes++
+			continue
+		case '"':
+			word.WriteString(strings.Repeat(`\`, backslashes/2))
+			if backslashes%2 == 0 {
+				// The closing quote: it must end the text.
+				return word.String(), i == len(text)-1
+			}
+			word.WriteByte('"')
+		default:
+			word.WriteString(strings.Repeat(`\`, backslashes))
+			word.WriteByte(text[i])
+		}
+		backslashes = 0
+	}
+	return "", false
 }
 
 type nestedText struct {
