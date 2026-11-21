@@ -50,6 +50,8 @@ func TestParseBodyFamilies(t *testing.T) {
 		{"anthropic", FamilyMessages, "anthropic_messages.json", want{2112, 34, 2000, 100, 0, HasInput | HasOutput | HasCacheRead | HasCacheCreation, "claude-haiku-4-5-20251001"}},
 		{"chat", FamilyChat, "openai_chat.json", want{120, 80, 64, 0, 30, HasInput | HasOutput | HasCacheRead | HasReasoning, "gpt-5-2025-08-07"}},
 		{"responses", FamilyResponses, "openai_responses.json", want{300, 90, 200, 0, 40, HasInput | HasOutput | HasCacheRead | HasReasoning, "gpt-5-2025-08-07"}},
+		// Bedrock Responses: cache_write_tokens is part of input_tokens, like cached_tokens (GAP-1114).
+		{"responses-cache-write", FamilyResponses, "openai_responses_cache_write.json", want{5373, 7, 0, 5371, 0, HasInput | HasOutput | HasCacheRead | HasCacheCreation | HasReasoning, "gpt-oss-120b"}},
 		// Converse inputTokens is uncached: 14 + 1500 + 300.
 		{"converse", FamilyConverse, "bedrock_converse.json", want{1814, 22, 1500, 300, 0, HasInput | HasOutput | HasCacheRead | HasCacheCreation, ""}},
 		// Gemini output = candidates 60 + thoughts 25; prompt includes cached.
@@ -119,6 +121,7 @@ func TestStreamFamiliesAnyChunking(t *testing.T) {
 		{"anthropic", FamilyMessages, "anthropic_stream.sse", want{1025, 15, 1000, 0, 0, HasInput | HasOutput | HasCacheRead | HasCacheCreation, "claude-haiku-4-5-20251001"}},
 		{"chat", FamilyChat, "openai_chat_stream.sse", want{50, 9, 0, 0, 0, HasInput | HasOutput | HasCacheRead | HasReasoning, "gpt-5-2025-08-07"}},
 		{"responses", FamilyResponses, "openai_responses_stream.sse", want{10, 5, 0, 0, 0, HasInput | HasOutput | HasCacheRead | HasReasoning, "gpt-5-2025-08-07"}},
+		{"responses-cache-write", FamilyResponses, "openai_responses_cache_write_stream.sse", want{5373, 7, 0, 5371, 0, HasInput | HasOutput | HasCacheRead | HasCacheCreation | HasReasoning, "gpt-oss-120b"}},
 		{"gemini", FamilyGemini, "gemini_stream.sse", want{10, 5, 0, 0, 2, HasInput | HasOutput | HasReasoning, "gemini-2.5-flash"}},
 	}
 	for _, c := range cases {

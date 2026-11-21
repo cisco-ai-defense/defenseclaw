@@ -1,0 +1,1 @@
+{"id":"resp_3","object":"response","model":"gpt-oss-120b","status":"completed","output":[],"usage":{"input_tokens":5373,"input_tokens_details":{"cached_tokens":0,"cache_write_tokens":5371},"output_tokens":7,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":5380}}

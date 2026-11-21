@@ -7416,6 +7416,9 @@ def _resolve_judge_hook_gate(
     *,
     judge_just_enabled: bool,
     current: list[str],
+    connector: str | None = None,
+    judge_enabled_by_run: bool = False,
+    judge_was_on: bool = False,
 ) -> list[str] | None:
     """Resolve ``--judge-hook-connectors`` into a new ``judge.hook_connectors`` gate (B2).
 
@@ -7436,6 +7439,13 @@ def _resolve_judge_hook_gate(
     (``["*"]``) — the agreed product default (tui.md §10.2) so enabling the
     judge never silently no-ops on the hook lane. A deliberate empty gate on a
     re-run (judge already enabled) is preserved, not re-armed.
+
+    ``connector`` is the hook connector the operator named (``--connector``).
+    A command that names one connector must not change the others (GAP-1113),
+    so the default gate is that connector alone, added to a gate that already
+    lists others. An ``["*"]`` gate of a judge that was already on covers it and
+    stays; the ``["*"]`` a config carries while the judge is off is only the
+    dormant default, so the named connector replaces it.
     """
     if value is not None:
         low = value.strip().lower()
@@ -7458,6 +7468,12 @@ def _resolve_judge_hook_gate(
             if norm not in names:
                 names.append(norm)
         return names
+    named = normalize_connector(connector) if connector else ""
+    if named in _HOOK_ENFORCED_CONNECTORS:
+        if not judge_enabled_by_run or (judge_was_on and current == ["*"]):
+            return None
+        kept = list(current) if judge_was_on else [c for c in current if c != "*"]
+        return kept if named in kept else [*kept, named]
     if judge_just_enabled and not current:
         return ["*"]
     return None
@@ -7575,7 +7591,9 @@ def _resolve_judge_hook_gate(
         "always covers the proxy lane; hook connectors are opt-in. Pass 'all' "
         "(or '*'), 'none', or a comma-separated list of hook-enforced "
         "connectors (e.g. hermes,codex). When omitted and the judge is being "
-        "enabled for the first time, defaults to all active hook connectors."
+        "enabled with --connector X, only X is added to the gate and the other "
+        "connectors are left as they are; without --connector, the first "
+        "enablement covers all active hook connectors."
     ),
 )
 @click.option(
@@ -8008,6 +8026,7 @@ def setup_guardrail(
         # flip ``gc.judge.enabled`` on, so the hook-gate default only fires when
         # this run actually turns the judge on (not on every re-run).
         judge_enabled_by_this_run = False
+        judge_was_on = bool(gc.judge.enabled)
         # Connector resolution order in non-interactive mode: an explicit
         # --connector / --agent flag, then _non_interactive_guardrail_connector
         # (configured primary or roster, installed picked hint, older implied
@@ -8254,6 +8273,9 @@ def setup_guardrail(
                 gc.judge.enabled and judge_enabled_by_this_run and not list(gc.judge.hook_connectors or [])
             ),
             current=list(gc.judge.hook_connectors or []),
+            connector=explicit_connector,
+            judge_enabled_by_run=bool(gc.judge.enabled and judge_enabled_by_this_run),
+            judge_was_on=judge_was_on,
         )
         if new_gate is not None:
             gc.judge.hook_connectors = new_gate
