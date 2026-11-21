@@ -1163,6 +1163,12 @@ func runWindowsImageSwapLaunches(t *testing.T, target string, builds []string, s
 	}
 	commandLine := `"` + target + `" -n 1 127.0.0.1`
 	var starts atomic.Int64
+	// launched counts the starts that returned (started or refused). Each
+	// restore waits for one more before the next, so the restores interleave
+	// with the launches however slowly the host starts a new image: a native
+	// elevated run, where every restore puts a new image in place, started
+	// 184 programs beside 300 restores on a fixed 10 ms gap.
+	var launched atomic.Int64
 	var mu sync.Mutex
 	var failures []error
 	stop := make(chan struct{})
@@ -1187,8 +1193,10 @@ func runWindowsImageSwapLaunches(t *testing.T, target string, builds []string, s
 					mu.Lock()
 					failures = append(failures, err)
 					mu.Unlock()
+					launched.Add(1)
 					continue
 				}
+				launched.Add(1)
 				_ = windows.TerminateProcess(process.Process, 0)
 				_, _ = windows.WaitForSingleObject(process.Process, 5000)
 				_ = windows.CloseHandle(process.Thread)
@@ -1197,7 +1205,9 @@ func runWindowsImageSwapLaunches(t *testing.T, target string, builds []string, s
 		}()
 	}
 	restoreErrs := 0
+	paced := true
 	for i := 0; i < swaps; i++ {
+		before := launched.Load()
 		if err := copyWindowsManagedFile(builds[i%2], target, windowsInstallFileSDDL, true, true); err != nil {
 			restoreErrs++
 			if restoreErrs <= 3 {
@@ -1205,6 +1215,16 @@ func runWindowsImageSwapLaunches(t *testing.T, target string, builds []string, s
 			}
 		}
 		time.Sleep(gap)
+		// A start that never returns ends the pacing; the caller's start
+		// count then shows it.
+		for deadline := time.Now().Add(5 * time.Second); paced && launched.Load() <= before; {
+			if time.Now().After(deadline) {
+				t.Logf("restore %d: no start returned within 5 s; the restores run unpaced from here", i)
+				paced = false
+				break
+			}
+			time.Sleep(time.Millisecond)
+		}
 	}
 	close(stop)
 	wg.Wait()
