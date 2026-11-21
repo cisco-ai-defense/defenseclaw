@@ -1502,6 +1502,24 @@ func (keys actionPrivateKeyFiles) read(value, cwd string) bool {
 			return false
 		}
 	}
+	// On darwin and Windows an operand is a key by its resolved name in any
+	// case, or as the same file. An operand that is there and is no link or
+	// reparse point at its last component resolves to its own base name, so
+	// when that name is no key name in any case only the file identity can
+	// make it a key, and its own lstat answers that. The link walk of every
+	// match of a wide pattern read each folder of its path again: about ten
+	// file system reads a match, 4,096 matches of $PWD/w/*/* in 80-90 ms of
+	// the 200 ms inspect budget on a macOS runner, where Linux answers in
+	// one stat a match (rel-1-0-10:GAP-1066).
+	if info, err := pathLstat(target); err == nil && info.Mode()&(os.ModeSymlink|os.ModeIrregular) == 0 &&
+		!keys.nameCanBeKey(filepath.Base(target)) {
+		for _, keyInfo := range keys.infos {
+			if keyInfo != nil && os.SameFile(info, keyInfo) {
+				return true
+			}
+		}
+		return false
+	}
 	resolved, ok := ResolveWriteTarget(target)
 	if !ok {
 		return false
@@ -1523,6 +1541,17 @@ func (keys actionPrivateKeyFiles) read(value, cwd string) bool {
 			}
 		}
 		if os.SameFile(info, keyInfo) {
+			return true
+		}
+	}
+	return false
+}
+
+// nameCanBeKey reports a base name that names a key as samePathName matches
+// names: in any case on darwin and Windows.
+func (keys actionPrivateKeyFiles) nameCanBeKey(base string) bool {
+	for _, key := range keys.paths {
+		if samePathName(base, filepath.Base(key)) {
 			return true
 		}
 	}
