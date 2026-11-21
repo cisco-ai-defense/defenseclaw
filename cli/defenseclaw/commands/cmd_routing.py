@@ -474,7 +474,9 @@ def doctor_alias_rows(cfg: Any) -> list[tuple[str, str]]:
     [] when the gateway cannot be asked (doctor names that elsewhere)."""
     import types
 
-    answer, error = _ask_gateway(types.SimpleNamespace(cfg=cfg), "GET", "/api/v1/routing/effective", timeout=3, params={"recent": 1})
+    answer, error = _ask_gateway(
+        types.SimpleNamespace(cfg=cfg), "GET", "/api/v1/routing/effective", timeout=3, params={"recent": 1}
+    )
     if error or not isinstance(answer, dict):
         return []
     return [("warn", note) for note in alias_failure_notes(answer)]
@@ -1687,7 +1689,8 @@ def routing_setup(
     # The alias the test prompt (a coding request) must reach once the gateway
     # runs this configuration: the coding route, or the default when no rule
     # sends work elsewhere. Anything else is not predicted.
-    expect = routes.get("coding") or (default if classifier == "rules" and not (routes or _dicts(routing.get("decisions"))) else "")
+    no_rules = not (routes or _dicts(routing.get("decisions")))
+    expect = routes.get("coding") or (default if classifier == "rules" and no_rules else "")
     answer, error = _setup_test(app, expect)
     if error:
         click.echo(f'Test skipped: {error}. Run later: defenseclaw routing test "<prompt>"')
