@@ -45,12 +45,17 @@ func gap1731Fixture(t *testing.T) (SetupOpts, []byte, func(map[string]interface{
 	}
 	previousSettings := ClaudeCodeSettingsPathOverride
 	previousManaged := ClaudeCodeManagedSettingsRootOverride
+	previousProgramFiles := claudeCodeWindowsProgramFilesRoot
 	ClaudeCodeSettingsPathOverride = ""
 	ClaudeCodeManagedSettingsRootOverride = ""
+	// The file tier resolves through the trusted Program Files root, not
+	// the environment; point it at the fixture's managed root.
+	claudeCodeWindowsProgramFilesRoot = func() (string, error) { return filepath.Dir(managedRoot), nil }
 	t.Cleanup(func() {
 		claudeCodeOSManagedSettingsLoader = previousLoader
 		ClaudeCodeSettingsPathOverride = previousSettings
 		ClaudeCodeManagedSettingsRootOverride = previousManaged
+		claudeCodeWindowsProgramFilesRoot = previousProgramFiles
 	})
 	t.Setenv("ProgramFiles", filepath.Dir(managedRoot))
 	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
@@ -73,7 +78,7 @@ func TestGAP1731HKLMMergeAdmitsManagedHooks(t *testing.T) {
 	}{
 		{"merge with a policy key, merge-capable client", map[string]interface{}{"managedSourcesBehavior": "merge", "permissions": deny}, "2.1.250 (Claude Code)"},
 		{"merge, versionless re-render", map[string]interface{}{"managedSourcesBehavior": "merge", "permissions": deny}, ""},
-		{"only source-control keys", map[string]interface{}{"managedSourcesBehavior": "merge", "wslInheritsWindowsSettings": false}, "2.1.100"},
+		{"only source-control keys, client below the merge floor", map[string]interface{}{"managedSourcesBehavior": "merge", "wslInheritsWindowsSettings": false}, "2.1.200"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			setHKLM(tc.hklm)
