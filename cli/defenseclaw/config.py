@@ -8846,7 +8846,7 @@ def _validate_enterprise_cowork_vm_sensor(raw: Mapping[str, Any]) -> None:
     patterns = {
         "tenant": (r"[A-Za-z0-9][A-Za-z0-9._-]*", 128),
         "device": (r"[A-Za-z0-9][A-Za-z0-9._-]*", 128),
-        "collector": (r"[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?:[0-9]{1,5}", 253),
+        "collector": (r"[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?:[0-9]{1,5}", 200),
         "vendor": (r"[a-z][a-z0-9_-]*", 64),
         "package_sha256": (r"[0-9a-f]{64}", 64),
         "signature_sha256": (r"[0-9a-f]{64}", 64),

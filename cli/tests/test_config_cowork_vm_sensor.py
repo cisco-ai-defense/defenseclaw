@@ -92,6 +92,7 @@ def test_cowork_refused_outside_standalone(tmp_path, mode, profile, block):
         ("collector", "edr.example.com:65536"),
         ("collector", "otel-:4318"),
         ("collector", "edr.example.com.:443"),
+        ("collector", "c" * 196 + ":4318"),
         ("vendor", "Cisco"),
         ("package_sha256", "A" * 64),
         ("signature_sha256", "no"),

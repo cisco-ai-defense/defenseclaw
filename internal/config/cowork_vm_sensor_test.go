@@ -243,6 +243,7 @@ func TestCoworkCollectorMatchesVMInstaller(t *testing.T) {
 		"otel-:4318", "otel.:4318", "-otel:4318", ".otel:4318", "otel:", ":4318", "otel:0",
 		"otel:65536", "otel:123456", "otel_1:4318", "https://otel:4318", "otel:4318/x",
 		"[::1]:4318", "o-.-o:4318", strings.Repeat("c", 150) + ":4318",
+		strings.Repeat("c", 195) + ":4318", strings.Repeat("c", 196) + ":4318", strings.Repeat("c", 248) + ":4318",
 	} {
 		c := goodCoworkVMSensor()
 		c.Collector = collector
