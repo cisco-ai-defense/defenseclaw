@@ -83,10 +83,13 @@ const refreshFlightMax = 2 * time.Second
 // incarnation. It is the bound a registration miss already has (uidMissTTL).
 const refusalReuse = uidMissTTL
 
-// refreshState is a name's last refresh: whether it is running, and what it
-// confirmed when (GAP-0243).
+// refreshState is a name's last refresh: the running lookup, if any, and
+// what the last one confirmed when (GAP-0243).
 type refreshState struct {
-	running bool
+	// flight is the running lookup, nil when none runs. It is set and
+	// cleared under the cache's mu, so a request that decides to join it
+	// waits on that lookup and never starts another (GAP-1695).
+	flight *refreshFlight
 	// started is when the running lookup started; confirmed and
 	// confirmedStart when the last answered one answered and started.
 	started        time.Time
@@ -96,6 +99,14 @@ type refreshState struct {
 	// failed: the last lookup that ended got no answer from the leader
 	// (a transport error or its own timeout).
 	failed bool
+}
+
+// refreshFlight is one refresh lookup. done closes once entry and err are
+// set.
+type refreshFlight struct {
+	done  chan struct{}
+	entry uidEntry
+	err   error
 }
 
 // RefreshResult is what a Refresh learned.
@@ -205,10 +216,9 @@ const defaultRefreshBudget = 20 * time.Millisecond
 
 // Refresh resolves a again past its cached entry and reports whether the
 // registration changed (GAP-0237). It bounds what a flood costs the leader
-// and the requests (GAP-0243): one lookup per name in flight (its own
-// singleflight, never forgotten while it runs), which concurrent refreshes
-// join, and a request waits refreshBudget for it (a refusal) or
-// confirmBudget (anything else).
+// and the requests (GAP-0243): one lookup per name in flight, which
+// concurrent refreshes join, and a request waits refreshBudget for it (a
+// refusal) or confirmBudget (anything else).
 //
 // Anything that would allow, and a cached delete, needs a lookup made
 // during this request (one started after since, the request's start): the
@@ -227,7 +237,7 @@ func (c *UIDCache) Refresh(ctx context.Context, a ActorRef, refusal bool, since 
 	if st == nil {
 		if len(c.refresh) >= maxUIDEntries {
 			for k, old := range c.refresh {
-				if !old.running {
+				if old.flight == nil {
 					delete(c.refresh, k)
 				}
 			}
@@ -236,6 +246,7 @@ func (c *UIDCache) Refresh(ctx context.Context, a ActorRef, refusal bool, since 
 		c.refresh[key] = st
 	}
 	cachedAsConfirmed := ok && !st.confirmed.IsZero() && prev.live == st.entry.live && prev.rec == st.entry.rec
+	f := st.flight
 	switch {
 	case cachedAsConfirmed && st.confirmedStart.After(since):
 		// A lookup made during this request confirmed the entry.
@@ -244,9 +255,9 @@ func (c *UIDCache) Refresh(ctx context.Context, a ActorRef, refusal bool, since 
 	case refusal && cachedAsConfirmed && now.Sub(st.confirmed) < refusalReuse:
 		c.mu.Unlock()
 		return RefreshSame
-	case st.running && (refusal || st.started.After(since)):
+	case f != nil && (refusal || st.started.After(since)):
 		// Join the running lookup: one in flight per name.
-	case st.running:
+	case f != nil:
 		// The running lookup started before this request, and only one
 		// runs per name.
 		failed := st.failed
@@ -256,25 +267,24 @@ func (c *UIDCache) Refresh(ctx context.Context, a ActorRef, refusal bool, since 
 		}
 		return RefreshUnconfirmed
 	default:
-		st.running, st.started = true, now
+		f = &refreshFlight{done: make(chan struct{})}
+		st.flight, st.started = f, now
+		go func() {
+			fctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), refreshFlightMax)
+			defer cancel()
+			rec, live, err := c.r.ResolveActor(fctx, a.Atespace, a.Name)
+			c.mu.Lock()
+			defer c.mu.Unlock()
+			st.flight, st.failed, f.err = nil, err != nil, err
+			if err == nil {
+				f.entry = uidEntry{rec: rec, live: live, at: c.now()}
+				st.confirmed, st.confirmedStart, st.entry = f.entry.at, st.started, f.entry
+				c.storeLocked(key, f.entry)
+			}
+			close(f.done)
+		}()
 	}
 	c.mu.Unlock()
-	ch := c.sf.DoChan("refresh\x00"+key, func() (any, error) {
-		fctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), refreshFlightMax)
-		defer cancel()
-		rec, live, err := c.r.ResolveActor(fctx, a.Atespace, a.Name)
-		c.mu.Lock()
-		defer c.mu.Unlock()
-		st.running = false
-		st.failed = err != nil
-		if err != nil {
-			return nil, err
-		}
-		ne := uidEntry{rec: rec, live: live, at: c.now()}
-		st.confirmed, st.confirmedStart, st.entry = ne.at, st.started, ne
-		c.storeLocked(key, ne)
-		return ne, nil
-	})
 	budget := c.refreshBudget
 	if !refusal {
 		budget = max(budget, c.confirmBudget)
@@ -290,11 +300,11 @@ func (c *UIDCache) Refresh(ctx context.Context, a ActorRef, refusal bool, since 
 		return RefreshUnconfirmed
 	}
 	select {
-	case r := <-ch:
-		if r.Err != nil {
+	case <-f.done:
+		if f.err != nil {
 			return RefreshUnreachable
 		}
-		ne := r.Val.(uidEntry)
+		ne := f.entry
 		if !ok || ne.live != prev.live || ne.rec != prev.rec {
 			return RefreshChanged
 		}
