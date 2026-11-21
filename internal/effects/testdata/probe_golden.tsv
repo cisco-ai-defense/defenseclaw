@@ -8,10 +8,10 @@ A07 install ak	U|
 A08 install -t dir	K|write:/home/u/.ssh/authorized_keys
 A09 rsync ak	U|
 A10 dd of=	K|write:/home/u/.ssh/authorized_keys
-A11 sed -i.bak	U|write:/home/u/.bashrc
-A12 sed -ibak	U|write:/home/u/.bashrc
+A11 sed -i.bak	K|write:/home/u/.bashrc,write:/home/u/.bashrc.bak
+A12 sed -ibak	K|write:/home/u/.bashrc,write:/home/u/.bashrcbak
 A13 sed -Ei	K|write:/home/u/.bashrc
-A14 sed --in-place=.b	K|write:/home/u/.bashrc
+A14 sed --in-place=.b	K|write:/home/u/.bashrc,write:/home/u/.bashrc.b
 A15 perl -pi -e	U|
 A16 truncate	K|write:/home/u/.ssh/authorized_keys
 A17 touch	K|write:/home/u/.ssh/authorized_keys
@@ -829,7 +829,7 @@ W2 gb HOME C:/ cd	K|append:c:\users\u\.ssh\authorized_keys
 W2 timeout	K|delete:/etc/x
 W3 gb export HOME cd	K|append:c:\users\u\.ssh\authorized_keys
 W3 nice -n	K|delete:/etc/x
-W4 env -u	K|delete:/etc/x
+W4 env -u	U|delete:/etc/x
 W4 gb HOME cd ~	K|append:c:\users\u\.ssh\authorized_keys,append:c:\work\authorized_keys
 W5 gb HOME prefix cd	K|append:c:\users\u\.ssh\authorized_keys
 W5 xargs -n	U|
@@ -1179,7 +1179,7 @@ rv7-L34 unknown env var cd	U|
 rv7-L35 flock -c	U|
 rv7-L36 script -c	U|
 rv7-L37 su - login moves cwd	U|
-rv7-L38 bash -l keeps cwd	K|append:/home/u/.ssh/authorized_keys,append:/home/u/proj/authorized_keys
+rv7-L38 bash -l keeps cwd	U|append:/home/u/.ssh/authorized_keys,append:/home/u/proj/authorized_keys
 rv7-L39 ssh remote not local	U|
 rv7-L40 subshell cd does not leak	K|append:/home/u/.ssh/authorized_keys
 rv7-L41 cmdsubst cd does not leak	K|append:/home/u/.ssh/authorized_keys
@@ -1219,7 +1219,7 @@ rv7-L83 workdir then cd ..	U|
 rv7-L84 workdir dotdot	U|
 rv7-L85 workdir + cd -	U|
 rv7-M1 mac cd mixed rel	K|append:/users/u/.ssh/authorized_keys
-rv7-M2 mac HOME prefix zsh -c	K|append:/users/u/.ssh/authorized_keys
+rv7-M2 mac HOME prefix zsh -c	U|append:/users/u/.ssh/authorized_keys
 rv7-M3 mac caffeinate tee	U|
 rv7-M4 mac arch sh -c	U|
 rv7-M5 mac Library/.. claude	U|
@@ -1310,7 +1310,7 @@ rv8-E10 command export HOME	K|append:/home/u/.ssh/authorized_keys
 rv8-E11 builtin export HOME	K|append:/home/u/.ssh/authorized_keys
 rv8-E12 command declare HOME	U|append:/home/u/.ssh/authorized_keys
 rv8-E13 command export D (control)	K|append:/home/u/.ssh/authorized_keys
-rv8-E14 set -a (control)	U|
+rv8-E14 set -a (control)	K|append:/home/u/.ssh/authorized_keys
 rv8-E15 env -u HOME (control)	U|
 rv8-E16 typeset +x HOME bare cd	U|
 rv8-E17 unset then assign HOME	U|
@@ -1413,7 +1413,7 @@ rv9-G01 sed colon label then w	U|
 rv9-G02 sed b label then w	U|
 rv9-G03 sed t label then w	U|
 rv9-G04 sed -i empty bsd	K|write:/home/u/.ssh/authorized_keys,write:/home/u/proj/s/a/b
-rv9-G05 sed --in-place=suffix	K|write:/home/u/.ssh/authorized_keys
+rv9-G05 sed --in-place=suffix	K|write:/home/u/.ssh/authorized_keys,write:/home/u/.ssh/authorized_keys.bak
 rv9-G06 sed -- then script	U|
 rv9-G07 sed -s -- 1w	U|
 rv9-G08 sed a text then w line	U|
