@@ -504,6 +504,15 @@ func dispatchTrustedActionOnce(
 	// nested in the handler's own call, or in a twin of this dispatch, it
 	// begins nothing more, rel-1-0-10:GAP-0766).
 	defer hookpaths.HookCall()()
+	// Every cap a pattern expansion of the call hit is the call's one
+	// TRUNCATED reading (the one bound rule): a walk that stopped at its
+	// bound with no protected match before it is at least the unknown tier,
+	// beside what was read, whichever reader ran it; the target scan's walk
+	// no longer holds it as a protected target (rel-1-0-10:GAP-1324). It is
+	// read while the call is open, after every reading and twin below.
+	defer func() {
+		findings = withBoundedTruncation(findings, hookpaths.HookCallState().GlobCut(), request)
+	}()
 	defer func() { findings = markShellProtectedFileFindings(request, findings) }()
 	defer recoverTrustedActionFault(request, &findings)
 	// A call whose shell the tool does not name is judged in the POSIX

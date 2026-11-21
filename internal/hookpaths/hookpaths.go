@@ -188,9 +188,17 @@ const LinksStableKey = "\x00links-stable"
 // GlobFactPrefix keys the hook client's expansion of one pathname pattern
 // that the action target scan checks, by the absolute pattern. "0" means the
 // user's view expanded it completely and no match reaches a protected file;
-// "1" means a match does. Only a gateway that cannot expand the pattern
-// itself (ProtectHome) reads it; a missing answer keeps its fallback.
+// "1" means a match does; GlobFactCapped means the user's walk read every
+// folder it reached, stopped at a counted bound and found no protected match
+// before it (a TRUNCATED reading, rel-1-0-10:GAP-1324). Only a gateway that
+// cannot expand the pattern itself (ProtectHome) reads it; a missing answer
+// keeps its fallback. A gateway older than GlobFactCapped refuses the whole
+// map (Decode), which keeps its closed fallback.
 const GlobFactPrefix = "\x00glob:"
+
+// GlobFactCapped is the GlobFactPrefix answer of a walk that stopped at a
+// bound (TRUNCATED).
+const GlobFactCapped = "c"
 
 // ReadingTargetPrefix keys the hook client resolution of one write operand
 // on a static reading of a call with a runtime-expanded operand word
@@ -3737,7 +3745,7 @@ func Decode(value string) (map[string]string, bool) {
 			!filepath.IsAbs(strings.TrimPrefix(key, ReplacedLinkFactPrefix))) {
 			return nil, false
 		}
-		if strings.HasPrefix(key, GlobFactPrefix) && (value != "0" && value != "1" ||
+		if strings.HasPrefix(key, GlobFactPrefix) && (value != "0" && value != "1" && value != GlobFactCapped ||
 			!filepath.IsAbs(strings.TrimPrefix(key, GlobFactPrefix))) {
 			return nil, false
 		}
