@@ -42,6 +42,10 @@ type parseOutput struct {
 	// windowsDescriptorCopy records an exact N>&1 in a Windows parse, which
 	// keeps a pipeline partial (windowsValidatePipelineAuthority).
 	windowsDescriptorCopy bool
+	// windowsHookHost is Input.WindowsHookHost of the reading of the call
+	// itself: a POSIX shell on a Windows hook host (Git Bash, the Claude Code
+	// Bash tool) runs the native sc.exe (rel-1-0-10:GAP-1656).
+	windowsHookHost bool
 }
 
 func newParseOutput(dialect Dialect, startID int64) parseOutput {

@@ -42,3 +42,52 @@ func TestGAP1656ClaudeBashDefenderServiceStop(t *testing.T) {
 		}
 	})
 }
+
+// TestGAP1656ClaudeBashServiceQueriesStayAllowed: reading sc in the Git Bash
+// dialect adds no block on a status query, a configuration read, an other
+// service or an other start type, in any tier.
+// The Defender stop and disable forms get the endpoint finding in the
+// non-strict tiers too (alert, as the codex shell call does).
+func TestGAP1656ClaudeBashServiceQueriesStayAllowed(t *testing.T) {
+	prev := windowsHookHost
+	windowsHookHost = func() bool { return true }
+	t.Cleanup(func() { windowsHookHost = prev })
+	benign := []string{
+		"sc query WinDefend",
+		"sc.exe query WinDefend",
+		"sc qc WinDefend",
+		"sc.exe qc WinDefend",
+		"sc query",
+		"sc.exe stop Spooler",
+		"sc config Spooler start= disabled",
+		"sc.exe config WinDefend start= auto",
+	}
+	attacks := []string{
+		"sc.exe stop WinDefend",
+		"sc config WinDefend start= disabled",
+	}
+	shapeParityTiers(t, func(t *testing.T, p gap0437Pack) {
+		cwd := t.TempDir()
+		claude := gap0437Server(t, p, "claudecode", "action")
+		installToolCallCorpusProfileConnector(t, "claudecode", p.pack)
+		judge := func(form string) string {
+			return shapeParityHook(t, claude.handleAgentHook("claudecode"), shapeParityCall{name: "claudecode/Bash",
+				conn: "claudecode", event: "PreToolUse", body: shapeParityEnvelope("PreToolUse", cwd, "Bash",
+					map[string]any{"command": form})}, p.managed)
+		}
+		for _, form := range benign {
+			if got := judge(form); got != "allow" {
+				t.Errorf("%s: benign claudecode Bash %q = %s, want allow", p.name, form, got)
+			}
+		}
+		want := "alert"
+		if p.pack == "strict" {
+			want = "block"
+		}
+		for _, form := range attacks {
+			if got := judge(form); got != want {
+				t.Errorf("%s: claudecode Bash %q = %s, want %s", p.name, form, got, want)
+			}
+		}
+	})
+}

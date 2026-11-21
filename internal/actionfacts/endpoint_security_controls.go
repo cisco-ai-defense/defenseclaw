@@ -33,7 +33,7 @@ func classifyEndpointSecurityControl(out *parseOutput, command *CommandFact) boo
 	if command == nil || !staticArguments(command.Arguments) {
 		return false
 	}
-	step, ok := exactEndpointSecurityArgvStep(*command)
+	step, ok := exactEndpointSecurityArgvStep(*command, out.windowsHookHost)
 	if !ok {
 		return false
 	}
@@ -46,7 +46,7 @@ func classifyEndpointSecurityControl(out *parseOutput, command *CommandFact) boo
 	return true
 }
 
-func exactEndpointSecurityCommandStep(command CommandFact) (string, bool) {
+func exactEndpointSecurityCommandStep(command CommandFact, windowsHookHost bool) (string, bool) {
 	if command.ControlFlowUncertain || command.PipelineID != 0 ||
 		command.Kind != CommandKindProcess || command.Effect != EffectExecute ||
 		!command.ArgvComplete || len(command.Redirects) != 0 ||
@@ -58,10 +58,15 @@ func exactEndpointSecurityCommandStep(command CommandFact) (string, bool) {
 			return "", false
 		}
 	}
-	return exactEndpointSecurityArgvStep(command)
+	return exactEndpointSecurityArgvStep(command, windowsHookHost)
 }
 
-func exactEndpointSecurityArgvStep(command CommandFact) (string, bool) {
+// exactEndpointSecurityArgvStep is the closed product step of one command.
+// windowsHookHost says the call runs on a Windows host: there a POSIX shell
+// (Git Bash, the Claude Code Bash tool) runs the native sc.exe for sc and
+// sc.exe, as CMD and PowerShell do; elsewhere a POSIX sc is not the Windows
+// service control program (rel-1-0-10:GAP-1656).
+func exactEndpointSecurityArgvStep(command CommandFact, windowsHookHost bool) (string, bool) {
 	switch command.Program {
 	case "systemctl":
 		if len(command.Argv) == 4 && command.Argv[1] == "disable" &&
@@ -107,7 +112,8 @@ func exactEndpointSecurityArgvStep(command CommandFact) (string, bool) {
 			return endpointStepSentinelDisable, true
 		}
 	case "sc", "sc.exe":
-		if !windowsNativeExecutableDialect(command.Dialect) && command.Dialect != DialectArgv {
+		if !windowsNativeExecutableDialect(command.Dialect) && command.Dialect != DialectArgv &&
+			(command.Dialect != DialectPOSIX || !windowsHookHost) {
 			return "", false
 		}
 		if len(command.Argv) < 3 || !strings.EqualFold(command.Argv[2], "WinDefend") {
@@ -116,8 +122,8 @@ func exactEndpointSecurityArgvStep(command CommandFact) (string, bool) {
 		switch {
 		case len(command.Argv) == 3 && strings.EqualFold(command.Argv[1], "stop"):
 			return endpointStepWinDefendStop, true
-		case len(command.Argv) == 4 && strings.EqualFold(command.Argv[1], "config") &&
-			strings.EqualFold(command.Argv[3], "start=disabled"):
+		case strings.EqualFold(command.Argv[1], "config") &&
+			winDefendStartDisabled(command.Argv[3:]):
 			return endpointStepWinDefendDisable, true
 		case len(command.Argv) == 3 && strings.EqualFold(command.Argv[1], "query"):
 			return endpointStepWinDefendQuery, true
@@ -126,11 +132,24 @@ func exactEndpointSecurityArgvStep(command CommandFact) (string, bool) {
 	return "", false
 }
 
+// winDefendStartDisabled reports that the option words of an sc config are
+// exactly the start type disabled: the documented two-word spelling
+// "start= disabled" or the joined "start=disabled" (rel-1-0-10:GAP-1656).
+func winDefendStartDisabled(words []string) bool {
+	switch len(words) {
+	case 1:
+		return strings.EqualFold(words[0], "start=disabled")
+	case 2:
+		return strings.EqualFold(words[0], "start=") && strings.EqualFold(words[1], "disabled")
+	}
+	return false
+}
+
 // ExactEndpointSecurityProductDisable proves a source-supported,
 // closed product operations: Falcon Sensor stop+disable, both Carbon Black
 // launch daemons unloaded, Little Snitch unloaded, Sysmon uninstalled, or the
-// exact WinDefend service stop or stop+disable sequence followed by its
-// read-only status query,
+// exact WinDefend service stop, start-type disable, or stop+disable sequence
+// followed by its read-only status query,
 // or an exact Microsoft Defender for Endpoint real-time protection disable.
 // Every top-level invocation must belong to the selected proof; unrelated
 // commands, dynamic operands, wrappers other than a literal sudo, pipelines,
@@ -165,13 +184,17 @@ func ExactEndpointSecurityProductDisable(facts Facts) bool {
 		return true
 	case slices.Equal(steps, []string{endpointStepSentinelDisable}):
 		return true
-	case slices.Equal(steps, []string{endpointStepWinDefendStop}):
+	case slices.Equal(steps, []string{endpointStepWinDefendStop}),
+		slices.Equal(steps, []string{endpointStepWinDefendDisable}):
 		// A lone bare sc in Windows PowerShell 5.1 is Set-Content. Keep the
-		// older multi-command fixture's classification, but a single stop
-		// proves the service operation only for sc.exe or CMD's bare sc.
+		// older multi-command fixture's classification, but a single stop or
+		// start-type disable proves the service operation only for sc.exe, or
+		// for the bare sc of CMD or of a POSIX shell on a Windows host, the
+		// only POSIX reading whose step matches (rel-1-0-10:GAP-1656).
 		for _, command := range facts.Commands {
 			if command.ParentCommandID == 0 {
-				return command.Program == "sc.exe" || command.Dialect == DialectCMD
+				return command.Program == "sc.exe" || command.Dialect == DialectCMD ||
+					command.Dialect == DialectPOSIX
 			}
 		}
 		return false
@@ -189,8 +212,8 @@ func ExactEndpointSecurityProductDisable(facts Facts) bool {
 // WinDefendSequenceUnproved reports that an action holds more than one
 // top-level WinDefend sc step but the steps are not an exact WinDefend
 // disable. The closed sequence proof owns such a call: a per-command reading
-// of its stop must not prove a disable that the whole sequence does not
-// (rel-1-0-10:GAP-1194).
+// of its stop or its start-type disable must not prove a disable that the
+// whole sequence does not (rel-1-0-10:GAP-1194, GAP-1656).
 func WinDefendSequenceUnproved(facts Facts) bool {
 	if !facts.Authoritative() {
 		return false
@@ -207,27 +230,28 @@ func WinDefendSequenceUnproved(facts Facts) bool {
 	return winDefendSteps > 1 && !ExactEndpointSecurityProductDisable(facts)
 }
 
-// ExactWinDefendStopOnly reports that the action is exactly one WinDefend
-// service stop that ExactEndpointSecurityProductDisable proves.
-func ExactWinDefendStopOnly(facts Facts) bool {
+// ExactWinDefendSingleStep reports that the action is exactly one WinDefend
+// service stop or start-type disable that
+// ExactEndpointSecurityProductDisable proves.
+func ExactWinDefendSingleStep(facts Facts) bool {
 	if !ExactEndpointSecurityProductDisable(facts) {
 		return false
 	}
-	stopOnly := false
+	single := false
 	for _, command := range facts.Commands {
 		if command.ParentCommandID != 0 {
 			continue
 		}
-		if stopOnly {
+		if single {
 			return false
 		}
 		step, ok := exactEndpointSecurityTopLevelStep(facts, command)
-		if !ok || step != endpointStepWinDefendStop {
+		if !ok || step != endpointStepWinDefendStop && step != endpointStepWinDefendDisable {
 			return false
 		}
-		stopOnly = true
+		single = true
 	}
-	return stopOnly
+	return single
 }
 
 func isWinDefendStep(step string) bool {
@@ -244,7 +268,7 @@ func exactEndpointSecurityTopLevelStep(facts Facts, command CommandFact) (string
 		return "", false
 	}
 	if command.Program != "sudo" {
-		return exactEndpointSecurityCommandStep(command)
+		return exactEndpointSecurityCommandStep(command, facts.windowsHookHost)
 	}
 	if len(command.Argv) < 2 {
 		return "", false
@@ -259,7 +283,7 @@ func exactEndpointSecurityTopLevelStep(facts Facts, command CommandFact) (string
 			!slices.Equal(command.Argv[1:], child.Argv) {
 			return "", false
 		}
-		step, ok := exactEndpointSecurityCommandStep(child)
+		step, ok := exactEndpointSecurityCommandStep(child, facts.windowsHookHost)
 		if !ok {
 			return "", false
 		}

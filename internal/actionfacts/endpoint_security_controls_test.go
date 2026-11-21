@@ -161,8 +161,8 @@ func TestWinDefendSequenceUnproved(t *testing.T) {
 			if got := WinDefendSequenceUnproved(facts); got != tc.unproved {
 				t.Errorf("WinDefendSequenceUnproved=%t want %t", got, tc.unproved)
 			}
-			if got := ExactWinDefendStopOnly(facts); got != tc.stopOnly {
-				t.Errorf("ExactWinDefendStopOnly=%t want %t", got, tc.stopOnly)
+			if got := ExactWinDefendSingleStep(facts); got != tc.stopOnly {
+				t.Errorf("ExactWinDefendSingleStep=%t want %t", got, tc.stopOnly)
 			}
 		})
 	}

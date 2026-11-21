@@ -172,6 +172,10 @@ type Facts struct {
 	DataFlows                                []DataFlowFact
 	// moverCallsUnread: the facts are the reading of WithMoverCallsUnread.
 	moverCallsUnread bool
+	// windowsHookHost is Input.WindowsHookHost: the POSIX reading of the call
+	// runs on a Windows host, where its sc is the native service control
+	// program (rel-1-0-10:GAP-1656). Private, in process only.
+	windowsHookHost bool
 	// sendSources are the shell values and argv of a call whose projection
 	// is not complete, for the sender reader (ReadSenders) to read what the
 	// projection did not. Private, in process only.
