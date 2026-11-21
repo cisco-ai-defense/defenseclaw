@@ -619,6 +619,10 @@ func buildPOSIXTable() {
 			posixTable[n] = q
 		}
 	}
+	// pwsh is also a POSIX-hosted executable on Linux and macOS. Keep its
+	// launcher grammar in the POSIX table so its command body is read.
+	add(Program{Names: []string{"powershell", "pwsh"}, Pos: PosNone, PSLaunch: true,
+		Flags: map[string]Flag{"-command": {Value: true, Role: RoleExecCode}, "-c": {Value: true, Role: RoleExecCode}, "-encodedcommand": {Value: true, Role: RoleExecCode}, "-enc": {Value: true, Role: RoleExecCode}, "-ec": {Value: true, Role: RoleExecCode}, "-e": {Value: true, Role: RoleExecCode}, "-file": {Value: true, Role: RoleExecCode}}})
 	add(Program{Names: []string{"cat", "tac", "less", "more", "bat", "nl"}, Pos: PosAllRead,
 		Flags: fl(nil, "-n", "-b", "-E", "-s", "-v", "-A", "-T", "-e", "-t", "-u", "-r", "--number", "--show-ends")})
 	add(Program{Names: []string{"head", "tail"}, Pos: PosAllRead,
