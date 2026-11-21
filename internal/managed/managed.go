@@ -91,14 +91,43 @@ func HookGuardianAuthorizationDir(dataDir string) string {
 // run there (config validate) read /opt/cisco/defenseclaw/runtime-hook-guardian,
 // which does not exist, found no guardian identity records and warned that
 // a group budget the gateway applies selects nobody (rel-1-0-10:GAP-1541).
+//
+// The Windows standalone layout has the same shape: its PowerShell lifecycle
+// creates <ProgramData>\Cisco\DefenseClaw\hook-guardian-state beside the
+// runtime data directory and gives its services the path in their registry
+// Environment, so an administrator shell read runtime-hook-guardian there
+// (rel-1-0-10:GAP-1739). Its roots come from the protected HKLM registration
+// (standaloneWindowsAuthLayout), never from the caller's environment.
 func hookGuardianAuthorizationDirFor(goos, dataDir string) string {
 	clean := filepath.Clean(strings.TrimSpace(dataDir))
-	if goos == "darwin" {
+	switch goos {
+	case "darwin":
 		if layout, err := StandaloneLayoutFor(goos); err == nil && clean == layout.DataDir {
+			return layout.GuardianAuthDir
+		}
+	case "windows":
+		// Only a ...\runtime directory can be the layout's, so a per-user
+		// data directory reads no registration.
+		trimmed := strings.TrimRight(clean, `\/`)
+		if !strings.HasSuffix(strings.ToLower(trimmed), `\runtime`) {
+			break
+		}
+		if layout, err := standaloneWindowsAuthLayout(); err == nil && strings.EqualFold(trimmed, layout.DataDir) {
 			return layout.GuardianAuthDir
 		}
 	}
 	return clean + "-hook-guardian"
+}
+
+// standaloneWindowsAuthLayout is the Windows standalone layout of the trusted
+// HKLM Program Files and ProgramData roots, for hookGuardianAuthorizationDirFor.
+// Tests replace it.
+var standaloneWindowsAuthLayout = func() (StandaloneLayout, error) {
+	programFiles, programData, err := TrustedStandaloneWindowsRoots()
+	if err != nil {
+		return StandaloneLayout{}, err
+	}
+	return StandaloneWindowsLayoutForRoots(programFiles, programData)
 }
 
 // ForeignHookCleanDirSuffix names the folder next to the data directory in
