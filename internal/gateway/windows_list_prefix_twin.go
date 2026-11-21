@@ -110,8 +110,15 @@ func windowsListPrefixAnchoredIndex(command string, prefixes []string) (int, boo
 // reading is complete or invalid, whose list without its last statement the
 // hook read before (ec38ad5973). A call whose own reading is partial or
 // ambiguous, which the hook read no prefix of, is read at its first cut only
-// (the statement a trailer hides in the GAP-0348 round-2 fixtures), when that
-// prefix is read another way than the call: the search computed the keys of
+// (the statement a trailer hides in the GAP-0348 round-2 fixtures), when the
+// hook places that prefix in another dialect than the call or its analysis
+// infers another (procdump.exe ... C:\Temp\x.dmp alone is PowerShell, with
+// `; echo done` POSIX). A first statement the call reads in its own dialect
+// and only its status sets apart (git status is complete, the list partial
+// for an operand grammar or construct the POSIX model leaves out) is read by
+// the call statement by statement already: reading it again cost one more
+// dispatch on every such list, most lists on a Windows folder, 1.11-1.14x
+// p99 on a short mix (FX13-WLIST v3). The search computed the keys of
 // up to log2(n)+2 prefixes, each a PowerShell and a POSIX analysis on the
 // Codex route, on every such list, and long benign lists of that kind (most
 // lists on a Windows folder) cost 5-12% more at the median and more than
@@ -179,7 +186,7 @@ func windowsListPrefixTwinRequests(request trustedActionRequest, facts actionfac
 	var capped bool
 	switch facts.Parse.Status {
 	case actionfacts.StatusPartial, actionfacts.StatusAmbiguous:
-		if key(0) != whole {
+		if first := key(0); first.hint != whole.hint || first.dialect != whole.dialect {
 			ends = []int{0}
 		}
 	default:

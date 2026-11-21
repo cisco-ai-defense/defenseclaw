@@ -313,6 +313,18 @@ func TestGAP0348ListPrefixReadingBound(t *testing.T) {
 			}
 		}
 	}
+	// A list the call reads partial, whose first statement it reads in its own
+	// dialect, makes no reading (FX13 perf); one whose first statement is
+	// read in another dialect makes one, of that statement.
+	for command, want := range map[string]string{"cd x && ls; pwd": "", "git add -A && git commit -m wip && git status": "",
+		"fsutil.exe usn deletejournal /d D: ; echo a ; echo b": "fsutil.exe usn deletejournal /d D:"} {
+		partial := request(command)
+		withWindowsShellDialect(&partial, true)
+		twins, cut := windowsListPrefixTwinRequests(partial, actionfacts.Analyze(partial.Input))
+		if cut.Any() || want == "" && len(twins) != 0 || want != "" && (len(twins) != 1 || twins[0].Input.Command != want) {
+			t.Errorf("partial list %q: twins %+v cut %v; want %q", command, twins, cut.Any(), want)
+		}
+	}
 	// The prefix that ends with the fork bomb is read first, past the cap too.
 	bomb := request("echo a ; :(){ :|:& };: ; " + list(30))
 	withWindowsShellDialect(&bomb, true)
