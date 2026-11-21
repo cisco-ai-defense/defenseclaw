@@ -1,0 +1,87 @@
+---
+title: Guardrail coverage
+description: What the guardrail catches, by attack class, connector and operating system. For each class, which layers see it, what is on by default, where it can block, what was measured, and where it does not reach.
+keywords:
+  - guardrail coverage
+  - what DefenseClaw catches
+  - attack classes
+  - prompt injection coverage
+  - connector coverage
+  - Windows PowerShell coverage
+  - what DefenseClaw does not catch
+---
+
+import { ConnectorOsMatrix } from '@/components/support-matrix';
+
+This page answers one question: **will the guardrail see this attack on my agent and my operating system, and will it stop it?**
+
+Two words matter here. A layer **sees** an attack when it raises a finding, and the finding goes to the audit log and, in action mode, to an alert. A layer **blocks** when the agent's hook can stop the call before it runs, and a proven finding reaches the pack's block level. Seeing is far wider than blocking. [How the guardrail works](/docs/guardrail/how-it-works) shows the layers.
+
+## Your connector
+
+Every connector with a hook can block a tool call before it runs. The columns below are what differs between them. They come from the connector contracts in the code and from the [capability matrix](/docs/connectors/capability-matrix).
+
+| Connector | Blocks a prompt | Checks tool results | Asks you in the agent | Fail-closed hook | Gives the judge your task |
+| --- | --- | --- | --- | --- | --- |
+| Claude Code, Claude Cowork | Yes | Yes | Yes (Manual mode) | Yes | Yes |
+| Codex | Yes | Yes | No | Yes | Yes |
+| Cursor | Yes | Yes | No | Yes | Yes (IDE) |
+| Devin | Yes | Yes | No | Yes | Yes |
+| Kiro | Kiro IDE only | Yes | No | Yes | Yes (IDE) |
+| Amp | No | Yes | Yes | Yes | Yes |
+| GitHub Copilot CLI | No | Yes | No | Not always: a hook that cannot start or times out can let a call run | Yes |
+| Hermes | No | Yes | No | Partly: a killed hook can fail open | Yes, without a destination |
+| OpenCode | No | Yes | No | Yes | No |
+| Antigravity | No | Before the tool only | Yes (before a tool runs) | Not always: a hook that cannot start or times out can let a call run | No |
+| OpenClaw (proxy) | Not listed | Yes | Yes | Yes | No |
+| ZeptoClaw (proxy) | Not listed | Yes | No | Yes | Not listed |
+
+A prompt rule can block only where the agent has a hook that can block a prompt. Elsewhere a matching prompt reaches the model, and tool-call rules still block. The fail-closed column is about a hook that cannot answer; what each connector does in a gateway outage is in the [gateway outage table](/docs/connectors/capability-matrix#gateway-outage).
+
+## Your operating system
+
+The matrix shows which connector is supported on Linux, macOS and Windows, open source and enterprise. **Supported** means a live test on that OS verified the hooks and a block before the tool ran.
+
+<ConnectorOsMatrix />
+
+Per operating system, the guardrail differs in four places:
+
+- **Shell and PowerShell.** On Linux and macOS a command goes through the shell parser. On Windows, PowerShell and `cmd` commands go through the PowerShell parser, and the rules include Windows proofs: an LSASS or registry-hive dump, a deleted shadow copy, a disabled Defender, AMSI or audit policy, a UAC hijack. See [Deterministic rules](/docs/guardrail/deterministic-rules).
+- **Protected files.** The watch covers `authorized_keys` on every OS. Shell startup files and autostart entries are watched on Linux and macOS. A managed gateway has no watch, except through the kernel control on managed Linux ([Protected files](/docs/guardrail/protected-files)).
+- **Speed.** How many calls a second one host can check depends on the OS and the install ([Hook sizing](/docs/support-matrix#hook-sizing)).
+- **Fail mode.** A per-user install on any OS follows its pack when the gateway is down. A managed host is `closed` by default ([Fail modes](/docs/reference/fail-modes)).
+
+## Your attack class
+
+"Default" says what is on before you change anything. "Measured" is from the 1.0.10 benchmarks ([Guardrail benchmarks](/docs/guardrail/benchmarks)): recall with the `default` rules alone, then with rules, decision model and judge together, on the public set named. A benchmark row says how a layer did on that set, not that it catches every case of the class.
+
+| Attack class | Layers that see it | Default | Can block | Measured |
+| --- | --- | --- | --- | --- |
+| **Destructive or malicious commands**: reverse shell, wiping data, privilege change, download then run, disabling security tools | Rules and the shell and PowerShell readers; the decision model and judge add recall | Rules on | Yes, when proven and at the block level, on a connector with a pre-tool hook | Public shell set 0.839 and 1.000; Windows shell set 0.297 and 0.973; Atomic Red Team 0.185 and 0.715; RedCode bash 0.000 and 0.818 |
+| **Secrets and credentials** in a prompt, a command or a tool result | `secret` and `sensitive-path` rules | On | By the pack's levels | Not benchmarked on its own |
+| **Staged leaks**: read a secret in one call, send it in another | [Secret flow tracking](/docs/guardrail/secret-flow-tracking) | Shadow: records only | Strict and managed packs block, once it is out of shadow | Not benchmarked |
+| **Persistence**: startup files, `authorized_keys`, Git hooks, `LD_PRELOAD`, scheduled jobs | `command` rules; the [file watch](/docs/guardrail/protected-files) | Rules on. Watch on in the per-user gateway. | Rules: yes. The watch alerts only. | Not benchmarked on its own |
+| **Prompt injection in the user's prompt** | `trust-exploit` rules; the judge | Rules on | Only where the agent can block a prompt (table above) | AgentDojo prompts 0.995 and 0.995 |
+| **Indirect prompt injection in a tool result** | [Tool-result checks](/docs/guardrail/tool-results); the judge | On. Alerts in the default pack, blocks in strict. | Strict only. The call has already run, so it warns the agent. | AgentDojo results 0.635 and 0.973; BIPIA email 0.010 and 0.913 |
+| **Intent deviation**: a call the user did not ask for, often after an injection | [Alignment check](/docs/guardrail/intent) | **Off** | Alert or block, when you turn it on | Alone: precision 0.722, recall 0.583 |
+| **Sends to a place nobody named** | The send check; `c2` rules for known exfiltration hosts | Send check records only. `c2` rules on. | `c2` rules by pack. The send check never blocks in 1.0.10. | Not benchmarked |
+| **Poisoned MCP tools**: instructions hidden in a tool description or a call | YARA signatures (11); rules; the judge | On, YARA alert-only | Rules only | MCPTox 0.120 and 0.390; MCP-hunt 0.977 and 1.000 |
+| **Tampering with DefenseClaw or the agent's own instructions** | `cognitive-file` rules; `tamper.detector_state_write` | On | Strict and `managed-strict` packs block it in every mode; default alerts | Not benchmarked |
+| **Personal data** | `enterprise-data` rules; the opt-in privacy pack | On | By the pack's levels | English privacy pack F1 89.08%, independent PII holdout F1 96.88% |
+| **Multi-step attacks** in one session | 26 fixed chains (for example a download, then a run of the same file) | On | Yes, when every step is proven | Not benchmarked as a set |
+| **Production destruction**: cloud, database, infrastructure, Kubernetes, Active Directory | The six opt-in protection packs | Off until you pick a pack | By the pack | Not benchmarked on its own |
+
+Alert-only detectors never block: the YARA signatures and the after-the-fact session correlator.
+
+## What it does not reach
+
+- **A child program's writes.** The hook reads the text of a call. It cannot see what a program a command starts writes later. Use the file watch, a sandbox or file permissions.
+- **A connector with no prompt hook.** A matching prompt reaches the model. The tool call it leads to is still checked.
+- **A connector that sends no prompt text** (OpenCode, Antigravity, Cursor Agent CLI, Kiro CLI 2.x, and OpenClaw's tool-call check). The judge sees tool calls without the user's task, so intent-based checks cannot run there ([Intent-based guardrails](/docs/guardrail/intent)).
+- **Tool results are not blocked** in the `default` pack. The call has run. The agent is told not to follow the text, and you see a line.
+- **Layers that are off.** The decision model, the judge and the alignment check are off until you turn them on. The rules alone catch about a fifth of the attacks in the public sets and almost no prompt injection that needs the context of the request.
+- **Blocking needs a pre-tool hook.** Where a hook cannot stop a call, the finding stays in the audit log and DefenseClaw does not claim it prevented anything.
+- **Observe mode** only records. It enforces nothing, apart from the tamper rule in the strict packs.
+- **An input too long to read in full** is judged at least at the unknown tier, but only the part DefenseClaw read can prove a block.
+
+"Not benchmarked" means no public benchmark scores that class on its own. The rules, their proofs and their tests are in the repository.
