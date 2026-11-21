@@ -1113,11 +1113,33 @@ func findRootStart(written, cwd, home string) (string, string, string) {
 		written = findGitBashDriveRoot(written)
 	}
 	root := OperandPath(written, cwd)
-	prefix := root
-	if !strings.HasSuffix(prefix, string(filepath.Separator)) {
-		prefix += string(filepath.Separator)
+	return written, root, rootPrefix(root)
+}
+
+// rootPrefix is the prefix of every path below a folder: the folder ending
+// in one separator. A folder that already ends in one (/, C:\) is its own
+// prefix: one more separator (//, C:\\) starts no path (rel-1-0-10:GAP-1642,
+// GAP-1650).
+func rootPrefix(folder string) string {
+	if strings.HasSuffix(folder, string(filepath.Separator)) {
+		return folder
 	}
-	return written, root, prefix
+	return folder + string(filepath.Separator)
+}
+
+// folderHolds reports a path at or below a folder, the file system root and
+// a drive root included: an rsync --delete destination or an archive folder
+// of / reaches every registered file a destination of the home reaches
+// (rel-1-0-10:GAP-1650).
+func folderHolds(folder, path string) bool {
+	return findRootHolds(folder, rootPrefix(folder), path)
+}
+
+// folderBelow reports a path strictly below a folder (folderHolds without the
+// folder itself, which Windows compares without case).
+func folderBelow(folder, path string) bool {
+	prefix := rootPrefix(folder)
+	return len(path) > len(prefix) && findRootHolds(folder, prefix, path)
 }
 
 // findGitBashDriveRoot spells a Git Bash drive mount start (/c/, /c,
@@ -1569,7 +1591,7 @@ func registrationRsyncReach(words []string, cwd string, protected protectedFiles
 	destination := OperandPath(last, cwd)
 	if deletes {
 		for _, target := range protected {
-			if target.path == destination || strings.HasPrefix(target.path, destination+string(filepath.Separator)) {
+			if folderHolds(destination, target.path) {
 				return true
 			}
 		}
@@ -1689,7 +1711,7 @@ func registrationArchivePossibleReachAs(command, cwd, home string, names []strin
 			// registered file there is a possible write (rel-1-0-10:GAP-0142).
 			if unknown {
 				for _, name := range names {
-					if strings.HasPrefix(name, folder+string(filepath.Separator)) {
+					if folderBelow(folder, name) {
 						found = folder
 						return false
 					}
@@ -1704,7 +1726,7 @@ func registrationArchivePossibleReachAs(command, cwd, home string, names []strin
 					// A member below a registered folder is no reach: the folder is
 					// not replaced by it, only a registered file or a member that
 					// holds one is (rel-1-0-10:GAP-0659).
-					if name == target || strings.HasPrefix(name, target+string(filepath.Separator)) {
+					if folderHolds(target, name) {
 						found = target
 						return false
 					}
@@ -1716,7 +1738,7 @@ func registrationArchivePossibleReachAs(command, cwd, home string, names []strin
 				continue
 			}
 			for _, name := range names {
-				if name != folder && strings.HasPrefix(name, folder+string(filepath.Separator)) {
+				if folderBelow(folder, name) {
 					found = folder
 					return false
 				}
