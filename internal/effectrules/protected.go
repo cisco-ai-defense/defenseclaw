@@ -79,6 +79,17 @@ func gradeTarget(t effects.Target, state effects.TargetState, kind effects.Kind,
 	// claimed as a member of any named set (which would make a benign dynamic
 	// read look like a credential read).
 	if t.Path == "" {
+		if strings.HasPrefix(t.Spelling, "$?") {
+			// Only the literal tail of an unread word ($(f)/.ssh/id_rsa): a
+			// mutation of a protected name, or a read of a credential, reaches
+			// the set (R-NAME). A read of another protected name behind an unread
+			// prefix ("$X/.ssh/config", "$d/AGENTS.md" in a loop) stays out: it is
+			// common in benign traces (FPR rule).
+			if (mutatingKind(kind) || set.readReach) && suspiciousShape(t, set, flavor) {
+				return gradeUnknown
+			}
+			return gradeNo
+		}
 		if suspiciousShape(t, set, flavor) {
 			return gradeUnknown
 		}
