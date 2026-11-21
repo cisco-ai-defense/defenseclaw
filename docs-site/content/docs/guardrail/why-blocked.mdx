@@ -45,7 +45,7 @@ The **Decision** line says what happened:
 | `would block (observe mode)` | The call ran only because the agent is in observe mode. Switch to action and it blocks. |
 | `detected in the prompt (cannot block)`, `detected after the tool ran (cannot block)`, `detected in the displayed reply (cannot block)` | The finding came on an event that cannot be stopped. It is a record. |
 
-A rule that matched a call it could not decide on its own (a detection-only finding) is not an alert. `defenseclaw alerts` ends with how many there were in the last 24 hours, and `defenseclaw audit export --since 24h` lists them.
+A rule that matched a call it could not decide on its own (a detection-only finding) is not an alert. `defenseclaw alerts`, run without `--connector` or `--show`, ends with how many there were in the last 24 hours, and `defenseclaw audit export --since 24h` lists them.
 
 ## 3. Read the rule ID
 

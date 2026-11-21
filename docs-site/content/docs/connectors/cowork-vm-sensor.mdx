@@ -202,7 +202,7 @@ enterprise:
 
 ### Windows
 
-1. Put the package and signature in a local folder that standard users cannot write. DefenseClaw refuses a source folder that `Authenticated Users` can write. `source_dir` is a local drive path with backslashes, such as `C:\ProgramData\DcMdm\edr`.
+1. Put the package and signature in a local folder that standard users cannot write. DefenseClaw refuses a source folder that `Authenticated Users` can write. `source_dir` is a local drive path with backslashes, such as `C:\ProgramData\Example\edr`.
 2. Run Setup with the config and the files:
 
    ```text
@@ -227,7 +227,7 @@ All keys are under `enterprise.cowork_vm_sensor` in the administrator config. Ev
 | `mode` | `off` | `off`, `on` | `off` or an absent block does no delivery. With `off`, the `--cowork-package` and `--cowork-signature` inputs are refused |
 | `tenant` | none; required when `on` | Up to 128 characters of `A-Z a-z 0-9 . _ -`, starting with a letter or digit | Goes to the VM as `tenant=` and into `cowork.tenant`. An identifier, never a secret |
 | `device` | unset; each computer derives its own | Same characters and limit as `tenant` | Unset: the Mac's `IOPlatformUUID` or the PC's `MachineGuid`, with every other character removed, at most 64 characters. Set it only to override. One fleet-wide config then gives every computer a different ID |
-| `collector` | none; required when `on` | `host:port`, host up to 253 characters of `A-Z a-z 0-9 . -`, port 1 to 65535 | No `https://`, no path, no spaces. The sensor adds `https://`. The host must end in a letter or digit, or the VM exits 14. The VM also refuses a value longer than 200 characters, and the whole arguments line must fit 256 bytes |
+| `collector` | none; required when `on` | `host:port` of at most 253 characters in all, the host made of `A-Z a-z 0-9 . -`, the port 1 to 65535 | No `https://`, no path, no spaces. The sensor adds `https://`. The host must end in a letter or digit, or the VM exits 14. The VM also refuses a value longer than 200 characters, and the whole arguments line must fit 256 bytes |
 | `vendor` | none; required when `on` | Lowercase letters, digits, `_` and `-`, starting with a letter, up to 64 | The identifier Anthropic assigned. Sets `coworkEDRIntegrationVendor` |
 | `source_dir` | none; required when `on` | An absolute path, up to 4,096 characters, no spaces at either end | macOS: a canonical `/` path. Windows: a local drive path with backslashes. With explicit inputs: the lifecycle cache |
 | `package_sha256` | none; required when `on` | 64 lowercase hexadecimal characters | SHA-256 of the package for this computer's architecture |

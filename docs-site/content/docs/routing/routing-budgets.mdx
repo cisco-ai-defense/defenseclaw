@@ -18,7 +18,7 @@ routing:
         allow: [local]
         default: local
       - id: contractors-no-cloud
-        match: {groups: ["DCLAB\\contractors"]}
+        match: {groups: ["EXAMPLE\\contractors"]}
         action: deny
         message: "Contractors may not use cloud models. Contact IT."
 ```
@@ -188,7 +188,7 @@ defenseclaw routing explain REQUEST_ID
 A routing command that changes the config (`enable`, `models add`, `rules add`, `budgets add`, `pricing set`) or a dry run (`routing test`) answers with the key the administrator config owns and exits 3; nothing is changed. To dry-run a rule, run it on a workstation with the per-user install and the same admin config:
 
 ```bash
-defenseclaw routing test "write a parser" --as-user DCLAB\\alice   # which model, which rule
+defenseclaw routing test "write a parser" --as-user EXAMPLE\\alice   # which model, which rule
 defenseclaw routing rules list      # rules and notes on rules that do less than they look
 ```
 

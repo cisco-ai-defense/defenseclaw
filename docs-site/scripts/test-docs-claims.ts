@@ -2983,6 +2983,9 @@ describe('1.0.7 ruled limits are visible on their affected pages (GAP-0539)', ()
     for (const [name, phrase] of [
       ['connectors/hermes.mdx', 'vendor skills synchronized by a Hermes store, Nix, or Homebrew install can be treated as user-installed skills'],
       ['scanning/mcp-scanner.mdx', 'a stdio server started for `defenseclaw mcp scan` can leave a long-lived child after the scan ends'],
+      ['reference/fail-modes.mdx', 'a sustained hook flood can outpace the local audit writer'],
+      ['observability/index.mdx', 'idle gateway memory can grow gradually with the audit store'],
+      ['get-started/windows/paths-troubleshooting.mdx', 'can stop before `doctor`, `setup`, or `status` can name the path problem'],
       ['enterprise/troubleshooting.mdx', 'An unexpected Claude Code policy value type, an untrusted key access list, or server-managed settings can still surface as a slower Setup failure'],
     ] as const) {
       assert.ok(page(name).includes(phrase), `${name} lacks: ${phrase}`);

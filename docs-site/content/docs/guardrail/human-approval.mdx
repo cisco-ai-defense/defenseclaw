@@ -30,7 +30,7 @@ Approval applies in action mode, to a finding that is at or above your minimum s
 These are the `default` pack's levels (blocks at CRITICAL). Three more things decide whether a call asks:
 
 - **Blocking wins.** If `block_at` is at or below your minimum, a finding blocks before it can ask. In the `strict` pack (blocks at MEDIUM), approval at HIGH never fires. DefenseClaw warns about this in `defenseclaw doctor`: `human approval at HIGH cannot ask: block_at MEDIUM blocks those findings first; lower hilt.min_severity or raise block_at`.
-- **Alert-only rules never ask.** A HIGH rule that only alerts (such as `PATH-AWS-CONFIG`) shows a notice and records `alert`.
+- **Alert-only rules never ask.** A HIGH rule that only alerts (such as `impact.sql_destructive_mutation`) shows a notice and records `alert`.
 - **Observe mode never asks.** Observe records the verdict and lets the call run.
 
 The cascade can also produce an ask, when you set it to: an unsure [decision model](/docs/guardrail/decision-model) answer without the judge, an unknown tier set to `confirm`, a judge block that the decision model did not confirm, or a Rego decision of `confirm`. See [Configure the cascade](/docs/guardrail/configure-cascade#settings).
@@ -110,7 +110,7 @@ defenseclaw alerts --connector claudecode --limit 5
 defenseclaw alerts --connector claudecode --limit 5 --show 2    # the number of the confirm row
 ```
 
-A call that asked has a `claudecode:PreToolUse` row with `Decision: confirm`. Your approve or deny answer is handled inside the agent, so DefenseClaw records the finding and the verdict, not who approved. A call that could not ask shows `blocked` instead.
+A call that asked has a `claudecode:PreToolUse` row with `Decision: confirm`. On Claude Code your approve or deny answer is handled inside the agent, so DefenseClaw records the finding and the verdict, not who approved. OpenClaw approvals are recorded as `approval_approved` and `approval_denied`. A call that could not ask shows `blocked` instead.
 
 ## Limits
 

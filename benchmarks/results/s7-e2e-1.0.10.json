@@ -322,7 +322,7 @@
  ],
  "other_tools_note": "frozen results of earlier runs of each tool's best setting, not re-run; PromptGuard 2 alone was not run; LlamaFirewall lead is not significant (J intervals overlap)",
  "not_included": [
-  "owner agent-trace set (held out): no counts published",
+  "agent-trace set (held out): no counts published",
   "opt-in alignment lane (off in every setup)",
   "permissive pack (ran, not reported)",
   "corpus text, prompts, tool arguments, model answers"

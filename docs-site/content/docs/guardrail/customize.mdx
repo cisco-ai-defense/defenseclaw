@@ -60,7 +60,7 @@ Start in observe mode and move an agent to action once the alerts look right. Ob
 
 The rules always run while the guardrail is on; you can turn off single rules ([suppress and allow](#suppress-and-allow)). To stop all guarding, see [turn it off](/docs/guardrail/disabling).
 
-Smaller stages are cascade lanes. Each is `off`, `shadow` (record only) or `on`:
+Smaller stages are cascade lanes. Most are `off`, `shadow` (record only) or `on`. The alignment lane also takes `alert` and `block`, and the `effects` and `secret_flow` lanes take only `off` or `shadow`:
 
 ```bash
 defenseclaw guardrail cascade explain --connector claudecode     # lists every lane, its value and the key that set it
