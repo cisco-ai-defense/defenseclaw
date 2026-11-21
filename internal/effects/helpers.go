@@ -80,6 +80,7 @@ func (w *walker) stripWrappers(words []Word) (inner []Word, wrappers []string, f
 		}
 		if p.replace != "" {
 			words = append(words[:i:i], replacedWords(words[i:], p.replace)...)
+
 		}
 	}
 	return words[i:], wrappers, foreign, fromInput, unaccounted
@@ -289,6 +290,15 @@ func (p *wrapperParse) child(words []Word, i int) ([]Word, int) {
 	}
 	// skip leading positionals (DURATION, host, dir, mask, priority, lock file).
 	for s := 0; s < row.posSkip && i < len(words); s++ {
+		if p.name == "chroot" && s == 0 {
+			// chroot NEWROOT starts in / of the new root; only / is a folder
+			// the walk can place in its current filesystem (GAP-1483).
+			if words[i].Static && cleanPOSIX(words[i].Value) == "/" {
+				p.w.spec.chdir, p.w.spec.chdirSet = "/", true
+			} else {
+				p.w.spec.cwdDyn = true
+			}
+		}
 		i++
 	}
 	if row.shellAfterSkip && i+1 < len(words) && words[i].Static && (words[i].Value == "-c" || words[i].Value == "--command") {
