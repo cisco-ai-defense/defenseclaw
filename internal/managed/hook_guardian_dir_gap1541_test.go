@@ -1,6 +1,8 @@
 // Copyright 2026 Cisco Systems, Inc. and its affiliates
 // SPDX-License-Identifier: Apache-2.0
 
+//go:build !windows
+
 package managed
 
 import "testing"
@@ -9,7 +11,9 @@ import "testing"
 // administrator shell), the macOS standalone data directory resolves to the
 // hook-guardian-state directory its lifecycle creates and its plists name,
 // not to a <data_dir>-hook-guardian that does not exist there. Every other
-// data directory keeps <data_dir>-hook-guardian.
+// data directory keeps <data_dir>-hook-guardian. The cases are the Linux and
+// macOS layouts' slash paths, which filepath.Clean rewrites on a Windows
+// host, so the test builds only off Windows (Windows has no such layout).
 func TestHookGuardianAuthorizationDirFollowsTheMacStandaloneLayout(t *testing.T) {
 	layout, err := StandaloneLayoutFor("darwin")
 	if err != nil {
