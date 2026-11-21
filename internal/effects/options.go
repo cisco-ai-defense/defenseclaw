@@ -80,9 +80,13 @@ func (o Options) maxEffects() int {
 
 const (
 	defaultMaxEffects = 256
-	maxNestedDepth    = 1 // one unwrapped level of nested script text (lead)
-	maxDataText       = 8 << 10
-	maxSpellingBytes  = 4 << 10
-	maxMCPDepth       = 6
-	maxMCPNodes       = 256
+	// maxNestedDepth is how many levels of nested script text are lowered
+	// (sh -c inside eval inside source ...). Each level is counted work under
+	// walkWorkBudget; past it the call has a nesting_limit unknown (DET111 D1:
+	// a nested body is read, not judged as another spelling).
+	maxNestedDepth   = 4
+	maxDataText      = 8 << 10
+	maxSpellingBytes = 4 << 10
+	maxMCPDepth      = 6
+	maxMCPNodes      = 256
 )

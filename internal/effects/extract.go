@@ -232,6 +232,19 @@ type walker struct {
 	// spec is the environment change the command being walked applies to the
 	// child process it starts (prefix assignments, env/sudo wrapper options).
 	spec *childSpec
+	// fileText holds the text earlier statements of the call wrote to a file
+	// (a here-document, a static echo), by path key: a later sh FILE, . FILE,
+	// ./FILE or sh < FILE runs that text (DET111 R1, GAP-1502).
+	fileText map[string]fileBody
+	// exactOK / exactText: the command being walked prints exactly exactText
+	// on stdout (exactOutput); literalKind is the data kind of literalOut.
+	exactOK     bool
+	exactText   string
+	literalKind DataKind
+	// positional, when positionalSet, are the $0 $1 ... the next child body
+	// lowered by unwrapCodeScoped binds (sh -c BODY ARG0 ARG1, sh FILE ARG1).
+	positional    []Word
+	positionalSet bool
 }
 
 // cwdState is one cwd certainty value: the primary candidate and the others.
@@ -723,6 +736,7 @@ func (w *walker) emit(e Effect) int {
 		// read or run that may not happen keeps its reading, as before.
 		e.addReason(ReasonExecutionState, ScopeRole)
 	}
+	w.forgetFileBody(e)
 	w.res.Effects = append(w.res.Effects, e)
 	return len(w.res.Effects)
 }
@@ -748,6 +762,9 @@ func (w *walker) resolveWord(wd Word) Word {
 	for i, s := range wd.Segs {
 		if s.Var != "" {
 			v, ok := w.env[s.Var]
+			if s.Var == psHomeVar {
+				v, ok = w.curHome, w.curHome != "" // PowerShell's automatic $HOME
+			}
 			if !ok {
 				// The segments stay on the word, so a reader of its literal part
 				// (env NAME=$V: the name) still sees them; the Reason keeps the
@@ -815,6 +832,10 @@ func (w *walker) resolveWords(in []Word) []Word {
 type stageData struct {
 	reads   []int
 	literal string
+	// exact: the stage printed exactly text (an exact printer, see
+	// exactOutput), so a shell reading the pipe runs that text.
+	exact bool
+	text  string
 }
 
 // maxStageSources bounds the sources one stage carries, so a long pipeline of
@@ -827,14 +848,16 @@ const maxStageSources = 32
 // substitution's reads to the dynamic data the command sends or writes.
 func (w *walker) commandStage(c *Cmd, dialect Dialect, depth int, cond bool) {
 	savedIn, savedLit, savedRedir := w.stageIn, w.literalOut, w.redirOut
+	savedExact, savedText, savedKind := w.exactOK, w.exactText, w.literalKind
 	in := stageData{}
 	if c.PipeIn {
 		in = w.stageOut
 	}
 	w.stageIn, w.literalOut, w.redirOut = in, "", nil
+	w.exactOK, w.exactText, w.literalKind = false, "", ""
 	start, own := len(w.res.Effects), w.cmdNo+1
 	w.command(c, dialect, depth, cond)
-	out := stageData{literal: w.literalOut}
+	out := stageData{literal: w.literalOut, exact: w.exactOK && !stdoutRedirected(c.Redirs), text: w.exactText}
 	if out.literal == "" {
 		out.literal = in.literal
 	}
@@ -855,6 +878,7 @@ func (w *walker) commandStage(c *Cmd, dialect Dialect, depth int, cond bool) {
 	}
 	w.stageOut = out
 	w.stageIn, w.literalOut, w.redirOut = savedIn, savedLit, savedRedir
+	w.exactOK, w.exactText, w.literalKind = savedExact, savedText, savedKind
 }
 
 // linkSubstitutionData records that the data a command sends or writes, when
@@ -1100,12 +1124,29 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 		for _, we := range wrapEffects {
 			w.emit(we)
 		}
+		// A program named by a variable ("$SHELL" -c BODY, "$s" <<< BODY) may be
+		// a shell: its body is lowered as a possible one (DET111 R1, GAP-1538,
+		// GAP-1554), and the substitutions in its words still run.
+		w.possibleShell(c, rawWordsFor(inner[:1], c.Words)[0], inner[1:], dialect, depth, e.Origin)
 		w.handleRedirs(c, dialect, cmdNo, depth, cond, nil)
+		for _, sub := range c.Nested {
+			s := w.saveScope()
+			w.walkScript(sub, depth)
+			w.restoreScope(s)
+		}
 		return
 	}
 	program := programBasename(prog.Value, w.o.flavor())
 	origin := Origin{Surface: w.res.Surface, Dialect: dialect, Command: cmdNo, Program: program, Wrappers: wrappers, Depth: depth, Span: c.Span}
 	w.literalOut = literalPrinted(program, inner[1:], dialect)
+	if dialect == DialectPOSIX {
+		if text, ok := exactOutput(program, inner[1:], c.Redirs, w.resolveWord); ok {
+			w.exactOK, w.exactText = true, text
+			if w.literalOut == "" && text != "" {
+				w.literalOut, w.literalKind = cap8k(text), DataHeredoc
+			}
+		}
+	}
 
 	// Calling a user-defined function (including one that shadows cd) may change
 	// the cwd unobservably: mark it dynamic (review R3-6 C06/C07).
@@ -1123,6 +1164,9 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 		return
 	}
 	nameOpaque := w.unbindReader(program, inner)
+	if program == "read" && dialect == DialectPOSIX {
+		w.bindRead(c, inner[1:]) // read NAME <<< WORD binds NAME (GAP-1554)
+	}
 	declUA := false
 	if dialect == DialectPOSIX && isDeclBuiltin(program) && len(inner) > 1 {
 		ok, opq := w.declWords(program, inner[1:])
@@ -1275,6 +1319,12 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 
 	w.noteDriveAlias(program, inner[1:])
 	if !known {
+		// ./FILE of a file the call wrote runs that text (GAP-1502).
+		if dialect == DialectPOSIX && strings.Contains(prog.Value, "/") {
+			if b, ok := w.scriptBody(prog.Value); ok {
+				w.unwrapWithArgs(b.text, DialectPOSIX, depth, cond || b.cond, origin, inner)
+			}
+		}
 		w.handleRedirs(c, dialect, cmdNo, depth, cond, nil)
 		for _, sub := range c.Nested {
 			s := w.saveScope()
@@ -1291,6 +1341,16 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 		// verdict, with psparse's text; a NotStatic one is opaque, and the walker's
 		// own /c scan must not turn an off-table shape into a known payload (R9-3).
 		w.hostPayload(c, dialect, depth, cond, origin)
+		w.handleRedirs(c, dialect, cmdNo, depth, cond, nil)
+		return
+	}
+	// The cmd frontend kept the verbatim text after /c: the child cmd runs it
+	// with its quotes and operators, so it is read as a cmd line, not rebuilt
+	// from words whose quotes are gone (DET111 R1).
+	if entry.CmdC && c.CmdBodySet && dialect == DialectCMD && len(inner) == len(words) {
+		if strings.TrimSpace(c.CmdBody) != "" {
+			w.unwrapCode(c.CmdBody, true, DialectCMD, depth, cond, origin)
+		}
 		w.handleRedirs(c, dialect, cmdNo, depth, cond, nil)
 		return
 	}
@@ -1436,18 +1496,31 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 	}
 	// unzip extracts unknown files into -d dir or the cwd (review R3-3 Z06).
 	if program == "unzip" {
-		dir := ""
+		dir, dirSet, dirDyn := "", false, false
 		for i, a := range inner[1:] {
-			if a.Static && a.Value == "-d" && i+1 < len(inner[1:]) && inner[1:][i+1].Static {
-				dir = inner[1:][i+1].Value
+			if a.Static && a.Value == "-d" && i+1 < len(inner[1:]) {
+				dirSet = true
+				nx := inner[1:][i+1]
+				dir, dirDyn = nx.Value, !nx.Static
 			}
 		}
 		e := Effect{Kind: KindWrite, Cond: cond, RoleState: RoleStateKnown, TargetState: TargetStateUnknown,
 			Target: Target{Type: TargetPath, Flavor: w.o.flavor(), Link: LinkNotChecked, CaseFold: w.o.CaseInsensitive}, Origin: origin}
-		if dir != "" {
+		if !dirSet {
+			dir = "."
+		}
+		// The -d folder is placed by the one path resolver like every other
+		// target (a ~ in Git Bash is the Windows home: DET111 R1, GAP-1173); a
+		// dynamic -d is an unknown folder, never the cwd.
+		if dirDyn {
+			e.addReason(ReasonDynamicExpansion, ScopeTarget)
+		} else {
 			e.Target.Spelling = cap4k(dir)
-		} else if w.curCWD != "" {
-			e.Target.Spelling = cap4k(w.curCWD)
+			if abs, ok, r := w.placeRel(dir); ok {
+				e.Target.Path = abs
+			} else {
+				e.addReason(r, ScopeTarget)
+			}
 		}
 		e.addReason(ReasonOpaqueArchive, ScopeTarget)
 		w.emit(e)
@@ -1482,8 +1555,25 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 	readIdx := []int{}
 	readByKeyLocal := map[string]int{} // source path key -> read index, for the copy-label join
 	emittedTargetEffect := false
+	// Inline interpreter code is Data: its path literals and the path arguments
+	// handed to it are opaque path effects, and its positionals are arguments,
+	// not a program to run (GAP-0893, GAP-0662, GAP-1653).
+	inlineCode := dialect == DialectPOSIX && isCodeInterpreter(program) && w.inlineCode(c, inner[1:], origin, cond)
+	shellPOSIX := dialect == DialectPOSIX && isPOSIXShell(program)
+	sc := shellInvocation(inner[1:])
+	codeOps := 0
+	w.nestedBodies(c, program, inner, dialect, depth, cond, origin)
 	emittedKinds := map[Kind]bool{}
 	for _, op := range ops {
+		if inlineCode && op.role == RoleExecProgram {
+			continue
+		}
+		if shellPOSIX && op.role == RoleExecCode {
+			codeOps++
+			if sc.hasC && codeOps > 1 {
+				continue // a word after sh -c CODE is $0, $1 ...: an argument, not code
+			}
+		}
 		e := w.effectForOperand(op, entry, origin, cond, foreign, fromInput, shadowed, dialect, depth)
 		if e == nil {
 			continue
@@ -1525,8 +1615,21 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 		if op.role == RoleExecCode && op.static && entry.ShellCode {
 			childScope := program != "eval" && program != "source" && program != "."
 			w.spec = spec
-			w.unwrapCodeScoped(op.value, op.static, dialect, depth, cond, origin, childScope)
+			switch {
+			case dialect == DialectPOSIX && program == "eval":
+				// lowered whole by nestedBodies (all arguments joined)
+			case shellPOSIX && sc.hasC:
+				w.unwrapWithArgs(op.value, dialect, depth, cond, origin, sc.rest)
+			case !childScope && isStdinPath(op.value):
+				// source /dev/stdin: the text on stdin (nestedBodies)
+			default:
+				w.unwrapCodeScoped(op.value, op.static, dialect, depth, cond, origin, childScope)
+				w.runWrittenScript(op.value, program, sc, dialect, depth, cond, origin, childScope)
+			}
 		}
+	}
+	if program == "tee" && dialect == DialectPOSIX {
+		w.teeData(c, inner[1:], cmdNo, cmdStart)
 	}
 	// (see the stage-link cases in secretflow_stage_test.go).
 	// to the pipe (s7-flow).
@@ -1851,15 +1954,10 @@ func (w *walker) interpreterStdin(c *Cmd, entry Program, known bool, args []Word
 	if !interpreter {
 		return
 	}
-	var hdoc string
-	hdocStatic := false
 	hasStdin := c.PipeIn
 	for _, r := range c.Redirs {
 		if r.Op == RedirHeredoc || r.Op == RedirHereString {
 			hasStdin = true
-			if !r.BodyExpands {
-				hdoc, hdocStatic = r.Body, true
-			}
 		}
 		// `sh < file`: with no script or -c operand, the interpreter reads its
 		// code from that file, which we cannot see (round 8 R, GAP-0132).
@@ -1875,8 +1973,11 @@ func (w *walker) interpreterStdin(c *Cmd, entry Program, known bool, args []Word
 	if entry.ShellCode && !c.PipeIn && hasCodeOperand(args, true) {
 		return
 	}
-	if hdocStatic && entry.ShellCode {
-		w.unwrapCode(hdoc, true, dialect, depth, cond, origin)
+	// The text the call feeds it (here-document, here-string, an exact printer
+	// upstream of the pipe, a printing process substitution, a file the call
+	// wrote) is the script it runs (DET111 R1, GAP-1151, GAP-1593).
+	if text, tcond, ok := w.stdinText(c); ok && entry.ShellCode && !hasCodeOperand(args, true) {
+		w.unwrapCode(text, true, dialect, depth, cond || tcond, origin)
 		return
 	}
 	e := Effect{Kind: KindExec, Cond: cond, Target: Target{Type: TargetProcess, Link: LinkNotChecked},
@@ -3050,7 +3151,11 @@ func (w *walker) handleRedirs(c *Cmd, dialect Dialect, cmdNo, depth int, cond bo
 					// echo/printf with static arguments: the write lays down this
 					// literal (s7-flow GAP-0130).
 					if e.Data == nil {
-						e.Data = &Data{Kind: DataLiteral}
+						kind := DataLiteral
+						if w.literalKind != "" {
+							kind = w.literalKind
+						}
+						e.Data = &Data{Kind: kind}
 					}
 					e.Data.Text, e.Data.Bytes = w.literalOut, len(w.literalOut)
 				case c.PipeIn && w.stageIn.literal != "":
@@ -3067,6 +3172,9 @@ func (w *walker) handleRedirs(c *Cmd, dialect Dialect, cmdNo, depth int, cond bo
 				if k := e.Target.Key(); k != "" {
 					w.writeByKey[k] = idx
 				}
+				if stdout && w.exactOK && r.Op != RedirAppend && len(w.exactText) <= maxDataText {
+					w.noteFileBody(e, w.exactText)
+				}
 				if stdout {
 					w.redirOut = append(w.redirOut, idx)
 				}
@@ -3080,6 +3188,9 @@ func (w *walker) handleRedirs(c *Cmd, dialect Dialect, cmdNo, depth int, cond bo
 				})
 			}
 		case RedirRead:
+			if r.Target.ProcSub != nil {
+				continue // `< <(...)`: the pipe of a process substitution, walked as nested
+			}
 			e := Effect{Kind: KindRead, Cond: cond, RoleState: RoleStateKnown, TargetState: TargetStateKnown,
 				Target: Target{Type: TargetPath, Flavor: w.o.flavor(), Link: LinkNotChecked, CaseFold: w.o.CaseInsensitive},
 				Origin: Origin{Surface: w.res.Surface, Dialect: dialect, Command: cmdNo, Depth: depth, Span: c.Span}}
@@ -3165,9 +3276,11 @@ func (w *walker) unwrapCode(code string, static bool, dialect Dialect, depth int
 // cd/env changes persist (review R3-6 C08).
 func (w *walker) unwrapCodeScoped(code string, static bool, dialect Dialect, depth int, cond bool, origin Origin, childScope bool) {
 	if !static {
+		w.positional, w.positionalSet = nil, false
 		return
 	}
 	if depth+1 > maxNestedDepth {
+		w.positional, w.positionalSet = nil, false
 		w.res.addUnknown(ReasonNestingLimit)
 		return
 	}
@@ -3191,6 +3304,7 @@ func (w *walker) unwrapCodeScoped(code string, static bool, dialect Dialect, dep
 	w.pathDialect = dialect
 	defer func() { w.pathDialect = savedPD }()
 	if !childScope {
+		w.positional, w.positionalSet = nil, false
 		w.walkScript(sub, depth+1)
 		return
 	}
@@ -3198,6 +3312,7 @@ func (w *walker) unwrapCodeScoped(code string, static bool, dialect Dialect, dep
 	env, exp, home := w.childEnvironment(dialect)
 	w.env, w.exported = env, exp
 	w.varsOwned = true
+	w.bindPositional()
 	if dialect == DialectPOSIX {
 		w.curHome = home
 	}
@@ -3862,6 +3977,15 @@ func (w *walker) tarEffects(args []Word, origin Origin, cond bool, depth int) {
 			dest = "."
 		}
 		mk(KindWrite, dest, TargetStateUnknown, ReasonOpaqueArchive)
+		// A member the call names lands at dest/member when the archive holds
+		// it (DET111 R1, GAP-1173). tar strips a leading / and refuses .., so
+		// only a plain relative name is joined.
+		for _, f := range files {
+			if f.Static && f.Value != "" && !f.Glob && !looksGlob(f.Value) && !absoluteSpelling(f.Value, w.o.flavor()) &&
+				!strings.Contains("/"+strings.ReplaceAll(f.Value, `\`, "/")+"/", "/../") {
+				mk(KindWrite, joinDir(dest, f.Value), TargetStateUnknown, ReasonOpaqueArchive)
+			}
+		}
 	default: // list or unknown mode
 		if archive != "" && archive != "-" {
 			mk(KindRead, archive, TargetStateKnown, "")
@@ -4837,6 +4961,9 @@ func (w *walker) declWords(program string, args []Word) (ok, opaque bool) {
 func (w *walker) hostPayload(c *Cmd, dialect Dialect, depth int, cond bool, origin Origin) {
 	if c.Host.Opaque {
 		w.opaqueExec(origin, cond)
+		if c.Host.Maybe != "" {
+			w.unwrapUncertain(c.Host.Maybe, c.Host.Dialect, depth, origin, nil, true)
+		}
 		return
 	}
 	w.unwrapCode(c.Host.Text, true, c.Host.Dialect, depth, cond, origin)

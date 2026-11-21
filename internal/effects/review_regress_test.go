@@ -113,9 +113,17 @@ func TestReviewRegressionPOSIX(t *testing.T) {
 			t.Fatal("unquoted * after a quoted prefix not a glob")
 		}
 	})
-	t.Run("PX-6 brace list is a pattern", func(t *testing.T) {
-		if !has(shell("rm /etc/{passwd,shadow}", envOpts), KindDelete, "/etc/{passwd,shadow}", TargetStateUnknown) {
-			t.Fatal("brace list treated as one literal")
+	t.Run("PX-6 brace list expands to its words", func(t *testing.T) {
+		// Brace expansion runs first, as in the shell: each alternative is
+		// its own operand (DET111 R1, GAP-0662), never one literal.
+		r := shell("rm /etc/{passwd,shadow}", envOpts)
+		if !has(r, KindDelete, "/etc/passwd", TargetStateKnown) || !has(r, KindDelete, "/etc/shadow", TargetStateKnown) {
+			t.Fatal("brace list not expanded into its words")
+		}
+	})
+	t.Run("PX-6 oversized brace expansion stays a pattern", func(t *testing.T) {
+		if !has(shell("rm /etc/{a,b,c}{a,b,c}{a,b,c}{a,b,c}{a,b,c}x", envOpts), KindDelete, "/etc/{a,b,c}{a,b,c}{a,b,c}{a,b,c}{a,b,c}x", TargetStateUnknown) {
+			t.Fatal("a brace expansion past maxBraceWords is not kept as one glob word")
 		}
 	})
 	t.Run("PX-6 escaped star is literal", func(t *testing.T) {
