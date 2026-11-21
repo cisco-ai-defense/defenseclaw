@@ -10,6 +10,6 @@
     {"provider": "anthropic", "model": "claude-opus-4-5*", "input_per_mtok": 5.0, "output_per_mtok": 25.0, "cache_read_per_mtok": 0.5, "cache_write_per_mtok": 6.25},
     {"provider": "bedrock", "model": "claude-opus-4-5*", "input_per_mtok": 5.0, "output_per_mtok": 25.0, "cache_read_per_mtok": 0.5, "cache_write_per_mtok": 6.25},
     {"provider": "openai", "model": "gpt-5", "input_per_mtok": 1.25, "output_per_mtok": 10.0, "cache_read_per_mtok": 0.125},
-    {"provider": "openai", "model": "gpt-5-2*", "input_per_mtok": 1.25, "output_per_mtok": 10.0, "cache_read_per_mtok": 0.125}
+    {"provider": "openai", "model": "gpt-5.2*", "input_per_mtok": 1.25, "output_per_mtok": 10.0, "cache_read_per_mtok": 0.125}
   ]
 }
