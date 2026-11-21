@@ -154,7 +154,7 @@ scope.
 ## Other benchmark lanes
 
 - [`cmd/s7bench`](cmd/s7bench/README.md) (build tag `s7bench`) and
-  [`s7/gate`](s7/gate): the S7 end-to-end harness and scorer. They replay
+  [`s7/gate`](s7/gate): the end-to-end harness and scorer. They replay
   labelled tool calls, prompts and tool results through the real hook code with
   the rules, the decision model and the judge. Results of the 1.0.10 run:
   [`results/s7-e2e-1.0.10.json`](results/s7-e2e-1.0.10.json). The corpora and

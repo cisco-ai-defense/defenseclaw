@@ -156,7 +156,7 @@ Set the hook timeout with `defenseclaw guardrail judge add claudecode --timeout 
 ## What it costs
 
 - **Calls.** A tool call makes one tool-judge call. A prompt can start up to three (injection, exfiltration, PII), each tool result an injection call, and each reply a PII call.
-- **Time.** On the S7 whole-cascade run, the judge was asked about 28% of the calls (16,957 requests for 61,438 calls). With the rules, the decision model and the judge, hook time was 834 ms at the median and 2,905 ms at the 95th percentile, and the judge answered in time on 99.2% of the calls sent to it at the 3.4-second window. A call the judge does not answer keeps its other verdicts, so a cut-off costs recall and never turns into a silent allow.
+- **Time.** On the whole-cascade run, the judge was asked about 28% of the calls (16,957 requests for 61,438 calls). With the rules, the decision model and the judge, hook time was 834 ms at the median and 2,905 ms at the 95th percentile, and the judge answered in time on 99.2% of the calls sent to it at the 3.4-second window. A call the judge does not answer keeps its other verdicts, so a cut-off costs recall and never turns into a silent allow.
 - **Money.** The judge's share was USD 0.114 per 1,000 calls with Gemma 4 31B at list price. Your cost depends on the model, the provider and your mix of calls. Judge tokens appear on the judge trace and the GenAI token-usage metric.
 
 Details and the method: [guardrail benchmarks](/docs/guardrail/benchmarks).
@@ -211,9 +211,9 @@ guardrail:
 
 ## How good it is
 
-- **Whole cascade (S7, 1.0.10 candidate).** Rules, decision model and judge together reached F1 0.629 [0.605, 0.654], against 0.342 for the default rules alone. Benign calls alerted: 4.8% with the judge, 25.8% with the decision model alone. Benign calls blocked: 1.2%.
+- **Whole cascade (end-to-end, 1.0.10 candidate).** Rules, decision model and judge together reached F1 0.629 [0.605, 0.654], against 0.342 for the default rules alone. Benign calls alerted: 4.8% with the judge, 25.8% with the decision model alone. Benign calls blocked: 1.2%.
 - **Judge in context (public validation, Gemma 4 26B A4B).** Rules followed by the judge detected 94 of 100 held-out attack trajectories (precision 98.95%, F1 0.964) and alerted on 1 of 20 benign coding trajectories, with no benign block.
-- **Recommended model (Gemma 4 31B, S7 judge rounds).** Rules plus the judge blocked no benign call on two public agent-trace corpora (1,200 benign calls) and alerted on 8 and 11 of the 694 benign calls of one of them (the rules alone: 15 and 16). On a Windows shell corpus, 7 and 9 of 2,459 benign calls were blocked (about 0.3%). Alert recall on the other public corpus rose from 0.29 to 0.64.
+- **Recommended model (Gemma 4 31B, judge rounds).** Rules plus the judge blocked no benign call on two public agent-trace corpora (1,200 benign calls) and alerted on 8 and 11 of the 694 benign calls of one of them (the rules alone: 15 and 16). On a Windows shell corpus, 7 and 9 of 2,459 benign calls were blocked (about 0.3%). Alert recall on the other public corpus rose from 0.29 to 0.64.
 
 Read the [guardrail benchmarks](/docs/guardrail/benchmarks) and the [contextual judge benchmark](/docs/guardrail/benchmarks#llm-judge) for what each number measured, on which build, and the commands to reproduce it. Models differ widely: Gemma 3 12B alerted on 90% of benign trajectories in the same test and is not recommended for enforcement.
 

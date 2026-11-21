@@ -452,7 +452,7 @@ Scanner processes run under the gateway's process-tree supervisor. How it ends t
 
 ### 1.0.7 local scan limit
 
-GAP-0499: on macOS and Linux, a stdio server started for `defenseclaw mcp scan` can leave a long-lived child after the scan ends. The scan result does not prove that child stopped. Check and stop a remaining child process by its PID before starting another scan.
+On macOS and Linux, a stdio server started for `defenseclaw mcp scan` can leave a long-lived child after the scan ends. The scan result does not prove that child stopped. Check and stop a remaining child process by its PID before starting another scan.
 
 ## Availability and recovery
 

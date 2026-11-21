@@ -1,15 +1,8 @@
 {
  "schema": "defenseclaw-s7-e2e-results/1",
- "title": "S7 end-to-end guardrail benchmark, 1.0.10 release candidate",
+ "title": "End-to-end guardrail benchmark, 1.0.10 release candidate",
  "run_date": "2026-11-16",
- "build": "rel/1.0.10 4269debe92 plus harness-only changes (s7bench harness merge 0e819e2a5e; bench-only judge window seam). Not run on the released build.",
- "test_records": [
-  "TST-4058",
-  "TST-4059",
-  "TST-4060",
-  "TST-4061",
-  "TST-4062"
- ],
+ "build": "1.0.10 release candidate 4269debe92 plus changes to the test harness only (and a bench-only switch that lets the hook wait 8 seconds for the judge). Not run on the released build.",
  "label_set": "v3.3 (source labels plus reviewed overlays; overlays in benchmarks/s7/gate/labels)",
  "split": "s7-holdout-v1, holdout side, run once",
  "pooled_over": "13 third-party tool-call sets",

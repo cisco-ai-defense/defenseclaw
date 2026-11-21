@@ -134,26 +134,26 @@ These are the agent, operating system, local Splunk bridge, sandbox, upgrade and
 
 The deterministic hook reader covers common command forms. The optional [LLM judge](/docs/policies/deterministic-detection#optional-llm-judge) is the second layer for the remaining forms below. These limits apply to the rule layer in 1.0.7; a managed host's operating-system controls still apply independently.
 
-| Ruling | Limit |
-| --- | --- |
-| GAP-0347, GAP-0354 | On Windows, statements after a subexpression prefix and junction references inside a Bash wrapper are outside the reader's proof. |
-| GAP-0350 | A long script can exceed the self-protection reader's bounded analysis. |
-| GAP-0339, GAP-0391 | Some archive entries and later file moves cannot be tied together by the deterministic archive proof. |
-| GAP-0355, GAP-0390 | A path held in a shell variable populated by `read` is not fully resolved through a later write or copy, including on managed macOS. |
-| GAP-0367, GAP-0425 | A PowerShell scriptblock or leading unquoted call, and a shell function defined in an `&&` list after a directory change, can hide later statements from the reader. |
-| GAP-0429 | Case modification or pattern substitution used as a redirect target is outside the reader's proof. |
-| GAP-0372 | Two ordinary copy commands with options and a dynamic destination can still be refused because the destination cannot be proved. Run them yourself or name a fixed destination. |
+| Limit |
+| --- |
+| On Windows, statements after a subexpression prefix and junction references inside a Bash wrapper are outside the reader's proof. |
+| A long script can exceed the self-protection reader's bounded analysis. |
+| Some archive entries and later file moves cannot be tied together by the deterministic archive proof. |
+| A path held in a shell variable populated by `read` is not fully resolved through a later write or copy, including on managed macOS. |
+| A PowerShell scriptblock or leading unquoted call, and a shell function defined in an `&&` list after a directory change, can hide later statements from the reader. |
+| Case modification or pattern substitution used as a redirect target is outside the reader's proof. |
+| Two ordinary copy commands with options and a dynamic destination can still be refused because the destination cannot be proved. Run them yourself or name a fixed destination. |
 
-Long PowerShell pipelines now receive the same bounded treatment as POSIX pipelines and can be refused when the reader cannot prove the full command. The GAP-0379 MCP refusal wording can still be less specific than the underlying reason; a refusal remains a refusal. See [Fail modes](/docs/reference/fail-modes) for what the agent receives.
+Long PowerShell pipelines now receive the same bounded treatment as POSIX pipelines and can be refused when the reader cannot prove the full command. The MCP refusal wording can still be less specific than the underlying reason; a refusal remains a refusal. See [Fail modes](/docs/reference/fail-modes) for what the agent receives.
 
 ### Other 1.0.7 limits
 
-- **GAP-0327:** On macOS per-user installs, idle gateway memory can grow gradually with the audit store. Retention bounds the store, but does not immediately return all memory; see [Local history](/docs/observability#local-history).
-- **GAP-0482:** On per-user Windows, a redirect to a network share that responds slowly can receive a conservative reader decision. Check the destination and retry from a terminal when appropriate.
-- **GAP-0495:** On per-user Windows, replacing the DefenseClaw home with a junction can leave the copied launcher unable to start doctor, setup or status. Restore a regular home folder before rerunning the command; the gateway refuses to start in this state. See [Windows paths](/docs/get-started/windows/paths-troubleshooting).
-- **GAP-0519:** Per-user Linux performance budgets were measured on x86 hosts with four vCPUs. A two-vCPU arm64 host can exceed hook latency and command-time budgets while remaining inside memory and restart bounds.
-- **GAP-0524:** During a sustained per-user Windows hook flood, some calls can lack a completed audit row even when the agent received a decision. See [Audit completeness](/docs/reference/fail-modes#audit-completeness-under-windows-floods).
-- **GAP-0264:** On managed Windows, Setup's check of a new hook image runs under a filtered copy of its own token, not as an enrolled user, so application control or EDR rules that name one user or group are not evaluated at install. If such a rule blocks the hook later, Claude Code and Codex run the tool call without a DefenseClaw decision whatever the fail mode is. Allow the DefenseClaw signer for every enrolled user and group, and check an audit row from an enrolled account after an upgrade. See [Windows hook images](/docs/enterprise/windows).
+- On macOS per-user installs, idle gateway memory can grow gradually with the audit store. Retention bounds the store, but does not immediately return all memory; see [Local history](/docs/observability#local-history).
+- On per-user Windows, a redirect to a network share that responds slowly can receive a conservative reader decision. Check the destination and retry from a terminal when appropriate.
+- On per-user Windows, replacing the DefenseClaw home with a junction can leave the copied launcher unable to start doctor, setup or status. Restore a regular home folder before rerunning the command; the gateway refuses to start in this state. See [Windows paths](/docs/get-started/windows/paths-troubleshooting).
+- Per-user Linux performance budgets were measured on x86 hosts with four vCPUs. A two-vCPU arm64 host can exceed hook latency and command-time budgets while remaining inside memory and restart bounds.
+- During a sustained per-user Windows hook flood, some calls can lack a completed audit row even when the agent received a decision. See [Audit completeness](/docs/reference/fail-modes#audit-completeness-under-windows-floods).
+- On managed Windows, Setup's check of a new hook image runs under a filtered copy of its own token, not as an enrolled user, so application control or EDR rules that name one user or group are not evaluated at install. If such a rule blocks the hook later, Claude Code and Codex run the tool call without a DefenseClaw decision whatever the fail mode is. Allow the DefenseClaw signer for every enrolled user and group, and check an audit row from an enrolled account after an upgrade. See [Windows hook images](/docs/enterprise/windows).
 
 ## Claude Code shell
 
