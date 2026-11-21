@@ -506,18 +506,27 @@ func rmRecursiveOptions(words []string) (recursive, force, interactive bool) {
 			continue
 		}
 		switch {
-		case word == "--recursive":
-			recursive = true
-		case word == "--force":
-			force = true
-		case word == "--interactive":
-			interactive = true
-		case strings.HasPrefix(word, "--interactive="):
-			// --interactive=never (no, none) never asks, so it is the
-			// removal itself; the last prompting option wins, as in rm
-			// (rel-1-0-10:GAP-0743).
-			interactive = !rmNeverPrompts[strings.TrimPrefix(word, "--interactive=")]
 		case strings.HasPrefix(word, "--"):
+			// GNU getopt takes any unambiguous prefix of a long option, so
+			// --rec, --for and --int are --recursive, --force and
+			// --interactive; every long option of rm that starts with r, f
+			// or i is that one (rel-1-0-10:GAP-0743).
+			name, when, hasWhen := strings.Cut(word[2:], "=")
+			switch {
+			case name == "":
+			case !hasWhen && strings.HasPrefix("recursive", name):
+				recursive = true
+			case !hasWhen && strings.HasPrefix("force", name):
+				force = true
+			case !hasWhen && strings.HasPrefix("interactive", name):
+				interactive = true
+			case hasWhen && strings.HasPrefix("interactive", name):
+				// --interactive=never (no, none) never asks, so it is the
+				// removal itself; the last prompting option wins, as in rm
+				// (rel-1-0-10:GAP-0743). argmatch takes a prefix of a WHEN
+				// value, and every prefix of never, no and none is a "never".
+				interactive = !rmNeverPrompts(when)
+			}
 		default:
 			for _, flag := range word[1:] {
 				recursive = recursive || flag == 'r' || flag == 'R'
@@ -529,9 +538,13 @@ func rmRecursiveOptions(words []string) (recursive, force, interactive bool) {
 	return recursive, force, interactive
 }
 
-// rmNeverPrompts are the WHEN values of rm --interactive=WHEN that never
-// ask before a removal.
-var rmNeverPrompts = map[string]bool{"never": true, "no": true, "none": true}
+// rmNeverPrompts reports a WHEN value of rm --interactive=WHEN that never
+// asks before a removal: never, no, none or a prefix of them (coreutils
+// argmatch, which accepts a prefix whose matches share one meaning).
+func rmNeverPrompts(when string) bool {
+	return when != "" && when[0] == 'n' &&
+		(strings.HasPrefix("never", when) || strings.HasPrefix("none", when))
+}
 
 // stdinAnswersYesPrograms are the programs whose output answers every prompt
 // of an interactive rm with yes: yes with no word, or with a word that
