@@ -70,7 +70,6 @@ func (s *Sidecar) applyModelUsage(cfg *config.Config) {
 	}
 	rt := s.modelUsage()
 	tok, price := cfg.Observability.Tokenomics, cfg.Observability.Pricing
-	setNativeUsageSuppression(cfg)
 	wantStore := tok.Enabled && tok.LocalStore.Enabled
 	if err := rt.store.Configure(wantStore, tok.UsageRetentionDays()); err != nil {
 		fmt.Fprintf(os.Stderr, "[modelusage] local usage store unavailable: %v\n", err)
@@ -83,7 +82,6 @@ func (s *Sidecar) stopModelUsage() {
 	if s == nil {
 		return
 	}
-	setNativeUsageSuppression(nil)
 	if rt := s.modelUsageRT.Load(); rt != nil {
 		rt.engine.Apply(config.TokenomicsConfig{}, config.PricingConfig{})
 		_ = rt.store.Configure(false, 0)

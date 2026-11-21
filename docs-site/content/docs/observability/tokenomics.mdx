@@ -178,7 +178,13 @@ The gateway answers `GET /usage?by=model|connector|route|profile|role|provider|u
 
 ## Agents that report their own usage
 
-Claude Code and Codex send their own usage over OTLP. `observability.tokenomics.native_otel_import` lets DefenseClaw read it for connectors that do not go through the guardrail proxy. When the proxy carries the connector, the proxy record is counted and the agent figures are only a cross-check, so a call is never counted twice.
+Claude Code and Codex send their own usage over OTLP. `observability.tokenomics.native_otel_import` lets DefenseClaw read it. DefenseClaw pairs the agent figures with the route-only listener record of the same call, by the provider request id or else by the token counts. When both records arrive within 15 minutes, the call is counted once, from the listener record. A call the listener did not record, for example from an agent session started before `defenseclaw routing enable`, is counted from the agent figures.
+
+A call can still be counted twice when:
+
+- the agent exports it more than 15 minutes after the call,
+- the gateway restarts between the call and the export,
+- the two records report different token counts and only one of them has a request id.
 
 <Callout type="warn" title="Sandbox only">
 This import only has a source inside an isolated OpenShell sandbox. DefenseClaw renders the OTLP exporter and its scoped token into the agent's settings there and nowhere else. On a host install, setup does not enable Claude Code or Codex telemetry (it removes only exporters it wrote itself), so the switches below change nothing and no `claude_code.api_request` or `codex.sse_event` record is imported. On a host, usage and cost come from the calls the guardrail proxy carries (route-only routing included). To see a cost the agent reports next to ours on a host, send the agent's own OTLP to a collector you run.

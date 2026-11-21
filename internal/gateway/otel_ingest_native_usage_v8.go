@@ -7,59 +7,12 @@ import (
 	"context"
 	"math"
 	"strings"
-	"sync/atomic"
 	"time"
 
-	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/modelusage"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
 )
-
-// nativeUsageSuppressed reports whether the route-only listener carries the
-// model traffic of connector: routing is on, the connector is listed in
-// routing.route_only.connectors (config.RouteOnlyRouted, the test the
-// listener answers by) and has a routing.route_only.upstreams entry (without
-// one nothing points the agent at the listener, routeOnlySetupBase). The
-// guardrail proxy does not suppress native usage.
-// While the listener carries a connector it records every call, so the usage
-// the agent reports in its own OTLP stream is a cross-check only: its
-// log.model.response import still runs, but nothing is counted from it (no
-// log.model.usage, no cost or token counter, no store row, no budget spend).
-// With routing off the listener answers nothing and the agent is pointed back
-// at its own endpoint, so native usage is the source again (rel-1-0-10
-// GAP-0223). applyModelUsage refreshes it on start and on every reload.
-var nativeUsageSuppressed = func(connector string) bool {
-	set := nativeCarriedConnectors.Load()
-	if set == nil {
-		return false
-	}
-	_, carried := (*set)[strings.ToLower(strings.TrimSpace(connector))]
-	return carried
-}
-
-var nativeCarriedConnectors atomic.Pointer[map[string]struct{}]
-
-// setNativeUsageSuppression records which connectors the gateway carries the
-// model traffic of, from a validated config.
-func setNativeUsageSuppression(cfg *config.Config) {
-	if cfg == nil {
-		nativeCarriedConnectors.Store(nil)
-		return
-	}
-	set := map[string]struct{}{}
-	for _, c := range cfg.Routing.RouteOnly.Connectors {
-		c = strings.ToLower(strings.TrimSpace(c))
-		if _, upstream := cfg.Routing.RouteOnly.Upstreams[c]; c != "" && upstream && cfg.RouteOnlyRouted(c) {
-			set[c] = struct{}{}
-		}
-	}
-	if len(set) == 0 {
-		nativeCarriedConnectors.Store(nil)
-		return
-	}
-	nativeCarriedConnectors.Store(&set)
-}
 
 // Inbound classes whose leaves carry one model call and derive a usage record.
 const (
@@ -85,7 +38,9 @@ const (
 
 // recordNativeOTLPUsageV8 derives the log.model.usage record of one imported
 // agent model call and hands it to the process usage engine, which prices,
-// labels and counts it like a proxied call. It never fails the import.
+// labels and counts it like a proxied call, unless the route-only listener
+// recorded the same call (modelusage reconciles per call, GAP-1227). It never
+// fails the import.
 func (a *APIServer) recordNativeOTLPUsageV8(
 	ctx context.Context,
 	leaf otlpDecodedLeaf,
@@ -102,8 +57,7 @@ func (a *APIServer) recordNativeOTLPUsageV8(
 		return modelusage.Record{}, false
 	}
 	engine := processModelUsage.Load()
-	if engine == nil || !engine.NativeImportEnabled(authenticatedSource) ||
-		nativeUsageSuppressed(authenticatedSource) {
+	if engine == nil || !engine.NativeImportEnabled(authenticatedSource) {
 		return modelusage.Record{}, false
 	}
 	rec, ok := a.nativeOTLPUsageRecordV8(ctx, leaf, match, authenticatedSource, receipt)

@@ -87,13 +87,6 @@ func nativeUsagePricing() config.PricingConfig {
 	}}
 }
 
-func setNativeUsageSuppressed(t *testing.T, fn func(string) bool) {
-	t.Helper()
-	previous := nativeUsageSuppressed
-	nativeUsageSuppressed = fn
-	t.Cleanup(func() { nativeUsageSuppressed = previous })
-}
-
 func nativeDoubleAttribute(key string, value float64) *commonpb.KeyValue {
 	return &commonpb.KeyValue{Key: key, Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_DoubleValue{DoubleValue: value}}}
 }
@@ -339,31 +332,23 @@ func TestNativeUsageAbsentCountsStayAbsent(t *testing.T) {
 	}
 }
 
-func TestNativeUsageGatingAndProxySuppression(t *testing.T) {
+func TestNativeUsageGating(t *testing.T) {
 	off := false
 	for _, test := range []struct {
-		name     string
-		tok      config.TokenomicsConfig
-		suppress func(string) bool
-		record   bool
+		name   string
+		tok    config.TokenomicsConfig
+		record bool
 	}{
 		{name: "tokenomics off", tok: config.TokenomicsConfig{}},
 		{name: "claudecode import off", tok: config.TokenomicsConfig{Enabled: true,
 			NativeOTelImport: config.TokenomicsNativeImportConfig{ClaudeCode: &off}}},
 		{name: "agent role not recorded", tok: config.TokenomicsConfig{Enabled: true, Roles: []string{"judge"}}},
-		{name: "proxy carries claudecode", tok: config.TokenomicsConfig{Enabled: true},
-			suppress: func(connector string) bool { return connector == "claudecode" }},
-		{name: "proxy carries codex only", tok: config.TokenomicsConfig{Enabled: true},
-			suppress: func(connector string) bool { return connector == "codex" }, record: true},
 		{name: "codex import off", tok: config.TokenomicsConfig{Enabled: true,
 			NativeOTelImport: config.TokenomicsNativeImportConfig{Codex: &off}}, record: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			fixture := newCodexNativeOTLPFixture(t)
 			sink := installNativeUsageEngine(t, test.tok)
-			if test.suppress != nil {
-				setNativeUsageSuppressed(t, test.suppress)
-			}
 			api := &APIServer{}
 			api.bindOTLPObservabilityRuntime(fixture.runtime)
 			now := time.Now().UTC()
@@ -383,9 +368,6 @@ func TestNativeUsageGatingAndProxySuppression(t *testing.T) {
 				sink.none(t)
 			}
 		})
-	}
-	if nativeUsageSuppressed("claudecode") || nativeUsageSuppressed("codex") {
-		t.Fatal("the default must never suppress")
 	}
 }
 
@@ -478,95 +460,4 @@ func (c *countingSpendSink) Add(string, []string, float64, bool, time.Time) {
 	c.mu.Lock()
 	c.calls++
 	c.mu.Unlock()
-}
-
-func TestRouteOnlyConfigMakesNativeUsageACrossCheckSoOneProxiedCallIsOneCharge(t *testing.T) {
-	cfg := &config.Config{}
-	cfg.Routing.Enabled = true
-	cfg.Routing.RouteOnly.Connectors = []string{"claudecode"}
-	cfg.Routing.RouteOnly.Upstreams = map[string]config.RoutingUpstreamConfig{"claudecode": {BaseURL: "https://api.anthropic.com", API: config.RoutingAPIMessages}}
-	setNativeUsageSuppression(cfg)
-	t.Cleanup(func() { setNativeUsageSuppression(nil) })
-	if !nativeUsageSuppressed("claudecode") || nativeUsageSuppressed("codex") || !nativeUsageSuppressed(" ClaudeCode ") {
-		t.Fatal("suppression follows routing.route_only.connectors")
-	}
-
-	fixture := newCodexNativeOTLPFixture(t)
-	sink := installNativeUsageEngine(t, config.TokenomicsConfig{Enabled: true})
-	engine := processModelUsage.Load()
-	spend := &countingSpendSink{}
-	engine.SetSpendSink(spend)
-	api := &APIServer{}
-	api.bindOTLPObservabilityRuntime(fixture.runtime)
-
-	// the call goes through the route-only listener: one record, one charge
-	call := engine.Begin(context.Background(), modelusage.CallFacts{
-		Connector: "claudecode", Listener: "route_only", APIFamily: modelusage.FamilyMessages, CallRole: modelusage.RoleAgent,
-		SelectedProvider: "anthropic", SelectedModel: "claude-sonnet-4-5-20250929", ChargeKeys: []string{"user:1001"},
-	})
-	call.Body([]byte(`{"model":"claude-sonnet-4-5-20250929","usage":{"input_tokens":12,"output_tokens":431}}`))
-	call.End(nil)
-	sink.one(t)
-
-	// the same call, reported again by Claude Code in its own OTLP stream
-	now := time.Now().UTC()
-	if _, err := api.importDecodedOTLPRequestV8(
-		context.Background(), claudeAPIRequestLog(now, claudeAPIRequestAttributes()), otelSignalLogs, "claudecode", now,
-	); err != nil {
-		t.Fatal(err)
-	}
-	sink.none(t)
-	spend.mu.Lock()
-	defer spend.mu.Unlock()
-	if spend.calls != 1 {
-		t.Fatalf("budget charges = %d, want 1 for one proxied call", spend.calls)
-	}
-
-	// without route-only the same leaf is the source
-	setNativeUsageSuppression(nil)
-	if _, err := api.importDecodedOTLPRequestV8(
-		context.Background(), claudeAPIRequestLog(now, claudeAPIRequestAttributes()), otelSignalLogs, "claudecode", now,
-	); err != nil {
-		t.Fatal(err)
-	}
-	sink.one(t)
-}
-
-// TestNativeUsageIsTheSourceWhileRoutingIsOff: routing.route_only.connectors
-// left in config.yaml after defenseclaw routing disable must not drop the
-// agent's native usage, because the route-only listener answers nothing
-// while routing is off (rel-1-0-10 GAP-0223).
-func TestNativeUsageIsTheSourceWhileRoutingIsOff(t *testing.T) {
-	cfg := &config.Config{}
-	cfg.Routing.RouteOnly.Connectors = []string{"claudecode"}
-	setNativeUsageSuppression(cfg)
-	t.Cleanup(func() { setNativeUsageSuppression(nil) })
-	if nativeUsageSuppressed("claudecode") {
-		t.Fatal("routing off: claudecode native usage must be counted, the route-only listener carries nothing")
-	}
-
-	fixture := newCodexNativeOTLPFixture(t)
-	sink := installNativeUsageEngine(t, config.TokenomicsConfig{Enabled: true})
-	api := &APIServer{}
-	api.bindOTLPObservabilityRuntime(fixture.runtime)
-	now := time.Now().UTC()
-	if _, err := api.importDecodedOTLPRequestV8(
-		context.Background(), claudeAPIRequestLog(now, claudeAPIRequestAttributes()), otelSignalLogs, "claudecode", now,
-	); err != nil {
-		t.Fatal(err)
-	}
-	sink.one(t)
-
-	// Routing on but no upstream for the connector: nothing points it at the
-	// listener, so its native usage is still the source.
-	cfg.Routing.Enabled = true
-	setNativeUsageSuppression(cfg)
-	if nativeUsageSuppressed("claudecode") {
-		t.Fatal("no route-only upstream: claudecode stays direct, native usage must be counted")
-	}
-	cfg.Routing.RouteOnly.Upstreams = map[string]config.RoutingUpstreamConfig{"claudecode": {BaseURL: "https://api.anthropic.com", API: config.RoutingAPIMessages}}
-	setNativeUsageSuppression(cfg)
-	if !nativeUsageSuppressed("claudecode") {
-		t.Fatal("routing on: the route-only listener carries claudecode, native usage is a cross-check")
-	}
 }
