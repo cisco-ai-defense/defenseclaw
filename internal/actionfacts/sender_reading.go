@@ -93,6 +93,16 @@ type SenderFact struct {
 	FedText string
 }
 
+// fedStdinText is the literal text fed to a command's standard input: the
+// quoted here-document or here-string it is, else the text an unquoted
+// here-document shows (LiteralStdinView, each expansion one "$").
+func fedStdinText(command CommandFact) string {
+	if command.LiteralStdin != "" {
+		return command.LiteralStdin
+	}
+	return command.LiteralStdinView
+}
+
 // SendReading is the shared sender reader's answer for one call.
 type SendReading struct {
 	Senders []SenderFact
@@ -236,7 +246,7 @@ func readProjectedSenders(facts Facts, reading *SendReading, depth int) {
 		args := commandWords(command)
 		if network := uploads[command.ID]; len(network) > 0 {
 			sender := SenderFact{CommandID: command.ID, Program: prog, Origin: SenderProjected, Network: network,
-				Operands: senderOperandWords(prog, args), FedText: command.LiteralStdin}
+				Operands: senderOperandWords(prog, args), FedText: fedStdinText(command)}
 			for _, n := range network {
 				host := n.NormalizedHost
 				if host == "" {
@@ -257,7 +267,7 @@ func readProjectedSenders(facts Facts, reading *SendReading, depth int) {
 				reading.Senders = append(reading.Senders, SenderFact{
 					CommandID: command.ID, Program: prog, Origin: SenderRemoteCopy,
 					Hosts: hosts, DestinationUnknown: unknown || !command.ArgvComplete,
-					Operands: senderOperandWords(prog, args), FedText: command.LiteralStdin,
+					Operands: senderOperandWords(prog, args), FedText: fedStdinText(command),
 				})
 			}
 		}

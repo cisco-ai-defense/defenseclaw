@@ -242,7 +242,7 @@ func readUploadOptionSenders(facts Facts, reading *SendReading) {
 		sender := SenderFact{
 			CommandID: command.ID, Program: senderProgramName(command.Program), Origin: SenderUploadOption,
 			DestinationUnknown: true, Operands: staticOperands(append(files, targets...)),
-			FedText: command.LiteralStdin,
+			FedText: fedStdinText(command),
 		}
 		for _, target := range targets {
 			if host, ok := urlOperandHost(target); ok {
