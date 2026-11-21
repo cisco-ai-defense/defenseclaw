@@ -1375,7 +1375,9 @@ func (r *EventRouter) handleToolCall(evt EventFrame) {
 	// managed_enterprise: the judge is a local decision-maker — disabled so
 	// AID stays authoritative.
 	if judge := judgeOf(r.policyGeneration(), r.judge); !ManagedEnterpriseActive() && judge != nil && len(payload.Args) > 0 {
-		judgeCtx := ContextWithSessionID(context.Background(), payload.SessionID)
+		// An OpenClaw chat message may be a remote party's: the task it
+		// recorded excuses no call (rel-1-0-10:GAP-0149).
+		judgeCtx := withJudgeRemoteParty(ContextWithSessionID(context.Background(), payload.SessionID), "openclaw")
 		scopeReason := r.recordToolScopeFloor(judge, judgeCtx, payload.Tool, string(payload.Args))
 		judgeSample, judgeEligible := judge.prepareToolJudgeSample(judgeCtx, payload.Tool, string(payload.Args))
 		if judgeEligible {

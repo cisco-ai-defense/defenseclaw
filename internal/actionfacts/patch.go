@@ -247,6 +247,32 @@ func patchNamePlaced(name string, shellView bool) bool {
 	return isAcceptedPatchPath(name) && (!shellView || !posixHeredocLiteralEscapes(name))
 }
 
+// patchHomeMarker stands for a plain $HOME or ${HOME} in the text a shell
+// shows of a here-document it expands (posixHeredocText). Its bytes are no
+// shell syntax, and no body that holds its first byte gets one.
+const patchHomeMarker = "\x01HOME\x01"
+
+// patchHeaderTarget is the name a reader places for a header name, and false
+// for one no reader places (patchNamePlaced). In the text a shell shows of a
+// here-document it expands (shellView), a name whose only expansion is a
+// leading $HOME or ${HOME} before a relative name is the file under the
+// active home, "~/<name>", which the path facts resolve as they resolve a
+// shell operand $HOME (rel-1-0-10:GAP-1094). The envelope stays unplaced as
+// a whole (GAP-1093): this only adds the file the header names.
+func patchHeaderTarget(name string, shellView bool) (string, bool) {
+	if shellView {
+		if rest, ok := strings.CutPrefix(name, patchHomeMarker+"/"); ok {
+			if rest == "" || strings.HasPrefix(rest, "/") || strings.HasPrefix(rest, "~") ||
+				strings.IndexByte(rest, patchHomeMarker[0]) >= 0 || posixHeredocLiteralEscapes(rest) ||
+				!isAcceptedPatchPath(rest) {
+				return "", false
+			}
+			return "~/" + rest, true
+		}
+	}
+	return name, patchNamePlaced(name, shellView)
+}
+
 // readPatchEnvelope is parsePatchEnvelope for the text of the envelope, or
 // for the text a shell shows of a here-document it expands (shellView), whose
 // header names may change when the shell expands them (patchNamePlaced).
@@ -364,10 +390,11 @@ func readPatchEnvelope(text string, shellView bool) patchEnvelopeResult {
 				break
 			}
 		}
+		target, placed := patchHeaderTarget(pathValue, shellView)
 		if kind != "" && pathValue != "" && len(pathValue) <= maxScalarBytes &&
 			strings.IndexByte(pathValue, 0) < 0 &&
 			strings.TrimLeftFunc(pathValue, unicode.IsSpace) == pathValue &&
-			!patchNamePlaced(pathValue, shellView) {
+			!placed {
 			// The tool writes this file, but no reader places its name:
 			// the rest of the envelope is still read, and a well formed
 			// one is unplaced, not invalid.
@@ -398,7 +425,7 @@ func readPatchEnvelope(text string, shellView bool) patchEnvelopeResult {
 		switch kind {
 		case "add", "update":
 			changes = append(changes, patchPathChange{
-				path: pathValue, access: PathAccessWrite,
+				path: target, access: PathAccessWrite,
 			})
 			unplacedChange = append(unplacedChange, headerUnplaced)
 			pendingUpdate = -1
@@ -411,7 +438,7 @@ func readPatchEnvelope(text string, shellView bool) patchEnvelopeResult {
 			updateContent = false
 		case "delete":
 			changes = append(changes, patchPathChange{
-				path: pathValue, access: PathAccessDelete,
+				path: target, access: PathAccessDelete,
 			})
 			unplacedChange = append(unplacedChange, headerUnplaced)
 			pendingUpdate = -1
@@ -426,7 +453,7 @@ func readPatchEnvelope(text string, shellView bool) patchEnvelopeResult {
 			}
 			changes[pendingUpdate].access = PathAccessDelete
 			changes = append(changes, patchPathChange{
-				path: pathValue, access: PathAccessWrite,
+				path: target, access: PathAccessWrite,
 			})
 			unplacedChange = append(unplacedChange, headerUnplaced)
 			pendingUpdate = -1

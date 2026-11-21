@@ -1234,19 +1234,32 @@ func posixHeredocDelimiterQuoted(word *syntax.Word) bool {
 // parameter expansion, or a backslash before $, a backquote, another backslash
 // or a line end. The text then holds one "$" for each expansion and keeps the
 // backslashes as written. readable is false for a quoted body that is not one
-// literal.
+// literal. A plain $HOME or ${HOME} is written as patchHomeMarker instead,
+// unless a literal of the body holds the marker's first byte, so a header
+// whose only expansion is the home is placed as a shell operand $HOME is
+// (rel-1-0-10:GAP-1094).
 func posixHeredocText(
 	body *syntax.Word, quoted, stripTabs bool,
 ) (text string, dynamic, readable bool) {
 	var out strings.Builder
 	lineStart := true
+	markHome := !quoted
+	for _, part := range body.Parts {
+		if literal, ok := part.(*syntax.Lit); ok && strings.IndexByte(literal.Value, patchHomeMarker[0]) >= 0 {
+			markHome = false
+		}
+	}
 	for _, part := range body.Parts {
 		literal, ok := part.(*syntax.Lit)
 		if !ok {
 			if quoted {
 				return "", false, false
 			}
-			out.WriteByte('$')
+			if markHome && plainHomeParameter(part) {
+				out.WriteString(patchHomeMarker)
+			} else {
+				out.WriteByte('$')
+			}
 			lineStart = false
 			dynamic = true
 			continue

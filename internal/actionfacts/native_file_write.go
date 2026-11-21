@@ -367,7 +367,7 @@ func nativePatchWrites(object map[string]any) []nativeFileWrite {
 // nativePatchEnvelopeWrites reads the files and the added and removed lines of
 // an apply_patch envelope that parsePatchEnvelope read complete (its
 // canonical form; shellView as readPatchEnvelope read it). A file no reader
-// places (patchNamePlaced) is no write
+// places (patchHeaderTarget) is no write
 // the content rules can judge by its name, as it is no path fact: its lines
 // are skipped, and the file it moves to still gets them (rel-1-0-10:GAP-1055).
 func nativePatchEnvelopeWrites(text string, shellView bool) []nativeFileWrite {
@@ -377,12 +377,12 @@ func nativePatchEnvelopeWrites(text string, shellView bool) []nativeFileWrite {
 		switch {
 		case strings.HasPrefix(line, "*** Add File: "), strings.HasPrefix(line, "*** Update File: "):
 			current = nil
-			if target := patchDirectivePath(line, line[:strings.Index(line, ": ")+2]); patchNamePlaced(target, shellView) {
+			if target, placed := patchHeaderTarget(patchDirectivePath(line, line[:strings.Index(line, ": ")+2]), shellView); placed {
 				writes = append(writes, nativeFileWrite{target: target, whole: strings.HasPrefix(line, "*** Add File: ")})
 				current = []int{len(writes) - 1}
 			}
 		case strings.HasPrefix(line, "*** Move to: "):
-			if target := patchDirectivePath(line, "*** Move to: "); patchNamePlaced(target, shellView) {
+			if target, placed := patchHeaderTarget(patchDirectivePath(line, "*** Move to: "), shellView); placed {
 				writes = append(writes, nativeFileWrite{target: target})
 				current = append(current, len(writes)-1)
 			}

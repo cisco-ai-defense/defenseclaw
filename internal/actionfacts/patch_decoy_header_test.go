@@ -151,8 +151,18 @@ func TestPatchHeredocHeaderTheShellExpandsIsUnplaced(t *testing.T) {
 			}) {
 				t.Fatalf("no write fact for the placed header: %#v", facts.Paths)
 			}
-			if slices.ContainsFunc(facts.Paths, func(path PathFact) bool { return strings.Contains(path.Value, "decoy") }) {
+			// A lone leading $HOME or ${HOME} is placed under the active home
+			// (rel-1-0-10:GAP-1094); no other expanded header is a fact.
+			homeHeader := strings.Contains(name, "HOME")
+			placedHome := func(path PathFact) bool {
+				return homeHeader && path.Access == PathAccessWrite && strings.HasSuffix(path.Value, "/decoy.txt") &&
+					!strings.ContainsAny(path.Value, "$`{}")
+			}
+			if slices.ContainsFunc(facts.Paths, func(path PathFact) bool { return strings.Contains(path.Value, "decoy") && !placedHome(path) }) {
 				t.Fatalf("the expanded header is a fact: %#v", facts.Paths)
+			}
+			if homeHeader && !slices.ContainsFunc(facts.Paths, placedHome) {
+				t.Fatalf("the $HOME header is not placed under the home: %#v", facts.Paths)
 			}
 			if !CommandPatchNamesUnplacedTarget(facts) {
 				t.Fatal("the expanded header is not reported")
