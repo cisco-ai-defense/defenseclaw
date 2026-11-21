@@ -108,7 +108,7 @@ func nonShellToolFindings(ctx context.Context, request trustedActionRequest, fin
 	// before the bound is judged as always.
 	var trunc bounded.Truncated
 	trunc.Merge(mapping.Truncated)
-	twins := 0
+	twins, wholeTwins := 0, 0
 	seenPath := map[string]bool{}
 	for _, e := range mapping.Effects {
 		switch e.Kind {
@@ -138,11 +138,18 @@ func nonShellToolFindings(ctx context.Context, request trustedActionRequest, fin
 				}
 				add(id, "path in MCP tool arguments", false)
 			}
-			if twins >= maxNonShellPathTwins {
+			// The value of a path list read whole is another reading of
+			// its parts, counted on its own (rel-1-0-10:GAP-0646): a list
+			// of 64 paths no longer loses the twin of the whole value.
+			counted := &twins
+			if e.Whole {
+				counted = &wholeTwins
+			}
+			if *counted >= maxNonShellPathTwins {
 				trunc.Hit(bounded.Paths)
 				continue
 			}
-			twins++
+			*counted++
 			// The native twin reads a relative path against the session's
 			// directory, as the path rules above do (rel-1-0-10:GAP-1071).
 			twinEffect := e
