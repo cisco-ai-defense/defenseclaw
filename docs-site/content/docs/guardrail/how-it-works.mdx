@@ -1,0 +1,143 @@
+---
+title: How the guardrail works
+description: One path from a tool call or prompt to a verdict. Each type of guardrail, what it checks, when it runs, what it costs in time and money, how good it is, and how the layers combine, in observe and action mode, and when one fails.
+keywords:
+  - how DefenseClaw guardrail works
+  - types of guardrails
+  - guardrail cascade
+  - rules System One LLM judge Rego
+  - observe mode action mode
+  - hook fail mode
+  - CRITICAL floor
+  - admin locks
+---
+
+The guardrail looks at what an agent is about to do, and what it just read, and decides: allow, alert, ask you, or block. It does this in layers. Each layer can only add to what the earlier layers found, except one optional policy that you write yourself.
+
+This page is the map. It lists every type of guardrail, then shows how they combine into one verdict. Each row links to the page that goes deeper.
+
+## The path of one decision
+
+<Flow
+  direction="TB"
+  caption="The order the layers answer a tool call in. Rules always run. System One and the LLM judge run only when you turn them on. The Rego policy runs only when you set one. The floor and the locks apply last. Observe mode then records the result instead of enforcing it."
+>
+  <Node id="call" kind="gateway">{`Tool call, prompt or\ntool result arrives`}</Node>
+  <Node id="rules" kind="policy">{`1. Rules\nlocal, always on`}</Node>
+  <Node id="s1" kind="policy">{`2. System One\ndecision model, optional`}</Node>
+  <Node id="judge" kind="policy">{`3. LLM judge\noptional`}</Node>
+  <Node id="rego" kind="policy">{`4. Rego policy\nyour own, optional`}</Node>
+  <Node id="floor" kind="decision">{`5. CRITICAL floor\nand admin locks`}</Node>
+  <Node id="mode" kind="decision">{`6. Observe or action\nand what the agent can do`}</Node>
+  <Node id="out" kind="agent">{`Allow, alert, ask\nor block`}</Node>
+  <Edge from="call" to="rules" />
+  <Edge from="rules" to="s1" label="findings" />
+  <Edge from="s1" to="judge" label="answer" />
+  <Edge from="judge" to="rego" label="finding" />
+  <Edge from="rego" to="floor" label="action" />
+  <Edge from="floor" to="mode" />
+  <Edge from="mode" to="out" />
+</Flow>
+
+The same order is in the gateway code (`internal/gateway/cascade.go`), and `defenseclaw guardrail cascade explain` prints what each layer does for one connector.
+
+## Types of guardrails
+
+| Type | What it checks | Runs on | Default |
+| --- | --- | --- | --- |
+| **Rules** (rule packs) | Findings from 279 to 299 local rules, depending on the pack, in seven families: commands, sensitive paths, secrets, prompt injection, exfiltration hosts, personal data, agent files. The pack's levels turn findings into block or alert. | Prompts, tool calls, tool results, model responses | On. The `default` pack. |
+| **Shell and PowerShell readers** | The effect of a command, not its words: what it reads, writes, deletes, runs or sends, and where. A block needs this proof. | Tool calls | On, part of the rules |
+| **Secret and PII patterns** | Provider keys, tokens, private keys, connection strings, card and bank numbers, contact data. | Prompts, tool calls, tool results | On. The opt-in privacy pack adds more. |
+| **Regex, CEL and YARA detectors** | The matchers behind the rules. Your own rules use the same ones. YARA scans MCP tool descriptions. | The same surfaces as the rules | On. Custom rules: none until you add them. |
+| **Decision model** (System One, Gemini Decision 1) | A small fast model answers "allow, confirm or block?" with probabilities. | Tool calls | Off |
+| **LLM judge** | A model reads the call, the user's request and recent calls, and reports a finding with a severity. | Prompts, tool calls, tool results, model responses | Off |
+| **Intent-based checks** | Whether a call matches what the user asked for: the alignment check (`ALIGNMENT-DRIFT`) and the send-to-an-unnamed-place check (`INTENT-SCOPE-SEND`). | Tool calls that have a side effect or send data | Alignment check off. Send check records only. |
+| **Tool-result checks** | Text in a tool's output that is written to steer the agent (indirect prompt injection), and secrets in it. | Tool results | On. Alerts in the default pack. |
+| **Secret flow tracking** | A secret the agent read that later reaches a network send, even in a different call. | Tool calls and their results, per session | Shadow: records, changes nothing |
+| **Protected files** | A change to `authorized_keys`, shell startup files or autostart entries while an agent ran. | The file system, after the fact | On in the per-user gateway: alert |
+| **Rego final-decision policy** | Your own policy sees every layer's answer and sets the final action within limits you set. | Every surface | Off until you set a policy |
+| **Human approval** | A risky call below the block level pauses and asks you, in the agent. | Tool calls, on agents that can ask | Off |
+| **CRITICAL floor and admin locks** | A proven CRITICAL finding never ends below the floor. Locks keep a key at the administrator's value. | Every decision | Floor: alert. Locks: none. |
+
+Where to read more:
+
+- Rules, the command readers and patterns: [Deterministic rules](/docs/guardrail/deterministic-rules) and the [deterministic detection reference](/docs/policies/deterministic-detection).
+- [Decision model](/docs/guardrail/decision-model).
+- LLM judge: [Set up the guardrail](/docs/guardrail#recommended-judge-model-gemma-4-31b-on-bedrock).
+- [Intent-based guardrails](/docs/guardrail/intent).
+- [Tool results](/docs/guardrail/tool-results), [secret flow tracking](/docs/guardrail/secret-flow-tracking) and [protected files](/docs/guardrail/protected-files).
+- Rego, locks and the floor: [Configure the cascade](/docs/guardrail/configure-cascade).
+- [Human approval](/docs/hitl).
+
+### Time, cost and how good
+
+The numbers come from the 1.0.10 benchmarks ([Guardrail benchmarks](/docs/guardrail/benchmarks)). The whole-cascade rows are pooled over 13 public tool-call sets (1,147 attack cases and 4,930 benign cases) on the 1.0.10 release candidate `4269debe92`. The alignment check was measured on nine of those sets. "Benign alerted" is the share of harmless calls that raised an alert. Hook time is per tool call, at the 50th and 95th percentile. A dash means the layer was not measured on its own.
+
+| Type | Time | Cost | How good |
+| --- | --- | --- | --- |
+| Rules, `default` pack | 17 ms and 30 ms | Local CPU only | Precision 0.884, recall 0.212, 0.6% of benign calls alerted, 0.1% blocked |
+| Rules, `strict` pack | 17 ms and 30 ms | Local CPU only | Precision 0.876, recall 0.221, 0.7% alerted, 0.4% blocked |
+| Command readers | Part of the rules | Local CPU only | On 7,908 benign commands, no false finding in `default` or `permissive` |
+| Secret and PII patterns | Part of the rules | Local CPU only | English privacy pack F1 89.08%, independent PII holdout F1 96.88%, no false findings on either |
+| Decision model, after the rules | 209 ms and 363 ms | About USD 0.115 per 1,000 calls | Recall 0.907, but 25.8% of benign calls alerted. Do not run it as the only layer after the rules. |
+| Decision model and LLM judge | 834 ms and 2,905 ms | About USD 0.229 per 1,000 calls | Precision 0.728, recall 0.554, 4.8% of benign calls alerted, F1 0.629 |
+| Alignment check, alone | Up to 3 seconds when it asks. A call it asks about takes 580 ms and 1,558 ms. | About USD 0.015 per 1,000 calls | Precision 0.722, recall 0.583, 4.9% alerted, F1 0.645 |
+| Tool-result checks | Part of the rules | Local CPU only. The judge adds model cost when on. | Rules alone: 0.635 recall on AgentDojo results, 0.010 on BIPIA email. With the cascade: 0.973 and 0.913. |
+| Secret flow, protected files | Local; the file watch checks every 2 seconds | None | Not benchmarked |
+| Rego policy | 5 ms by default, 50 ms at most | None | Not benchmarked: it applies your own rules |
+
+Read these with the [benchmarks page](/docs/guardrail/benchmarks): it lists the data, the build and how to repeat each run. Blocking is rarer than alerting. A block needs a proof and an agent that can block before the tool runs.
+
+## What each layer can and cannot change
+
+| Layer | It can | It cannot |
+| --- | --- | --- |
+| Rules | Set the first verdict. A proven finding at the block level blocks the call. | See what a child program writes after a command starts. |
+| System One | Add a finding. A confident answer from both its probability and its risk score is a CRITICAL block. | Lower what the rules found. Block a call the rules already flagged: that call goes to the judge, or asks. |
+| LLM judge | Add a finding with a severity. | Lower the rules' verdict, or a confident System One block. Turning it on never weakens an earlier layer. |
+| Rego policy | Raise or lower the action, between the `lowest` and `highest` you set. | Go below the unknown tier for input DefenseClaw did not read in full, below the CRITICAL floor, or use the network. |
+| CRITICAL floor | Hold a proven CRITICAL finding at alert or higher. | It is not a block by itself; the administrator sets it. |
+| Admin locks | Keep a key at the top-level value on a managed host, so a profile or connector cannot weaken it. | Hide a locked value: doctor and `cascade explain` name every value it ignored. |
+
+Unsure answers: an unsure System One answer has no verdict of its own. With the judge on, the judge decides, never below the rules' verdict. Without the judge, it asks (or alerts where the agent cannot ask). A call DefenseClaw could not read in full (too long, too deep, too many paths) is judged at least at the **unknown tier**, never as a silent allow.
+
+The full rules, settings and examples are on [Configure the cascade](/docs/guardrail/configure-cascade).
+
+## Observe and action
+
+- **Observe** records every finding and enforces none. Start here. The config default is `observe`. One exception: a change to DefenseClaw's own files by an agent is blocked in every mode by the `strict` and `managed-strict` packs, and raises a HIGH alert in the `default` and `permissive` packs.
+- **Action** applies the block and alert levels. In the `default` pack, CRITICAL blocks and MEDIUM and above alerts. With human approval on, a HIGH call asks you where the agent can ask.
+
+Only some agents can ask: for example Claude Code (in Manual permission mode only), Antigravity, Amp and OpenClaw. The others get an alert, and the audit log keeps `raw_action: confirm`. [Set up the guardrail](/docs/guardrail#which-agents-can-ask) has the list.
+
+## What happens when a layer fails
+
+| What failed | What the call gets |
+| --- | --- |
+| The LLM judge: timeout, error, late answer, busy, or off | The verdict the rules and System One gave without it. A System One question or alert stays. The failure is counted and reported. |
+| The decision model is down or slow | The rule verdict stands. After three failures in a row it is skipped for 30 seconds. |
+| The Rego policy errors or runs out of time | The call is judged at the unknown tier. |
+| The gateway cannot answer at all | The hook fail mode decides. |
+
+Two cases turn a missing judge answer into a refusal, never an allow: an unattended Agent Substrate run and the `strict` policy (`JUDGE-UNAVAILABLE`), and, with `hook_fail_mode: closed`, a call the rules escalated to the judge as CRITICAL.
+
+The **hook fail mode** is `open` (the call runs, with a warning and a record) or `closed` (it blocks):
+
+- **Per user.** A saved `guardrail.hook_fail_mode` wins. With none saved, the `default` and `permissive` packs let a call run while the gateway is not running, and the `strict` pack blocks it. A gateway that took the call and gave no answer in time blocks in every tier, with one exception for ordinary calls on Claude Code and Codex.
+- **Managed.** `closed` is the default. An administrator can choose `open` for a proven outage only.
+- **Secure Client.** An unset mode is `open`.
+- **By connector.** Each connector's result is in the [gateway outage table](/docs/connectors/capability-matrix#gateway-outage). [Fail modes](/docs/reference/fail-modes) has every case.
+
+## How long a decision may take
+
+| Layer | Limit |
+| --- | --- |
+| Rules | Local, no wait |
+| Decision model | `decision_model.timeout`, 1 second by default. In front of the judge, at most a quarter of the time left, about 0.85 seconds. |
+| LLM judge | `guardrail.judge.hook_timeout`, 8 seconds by default, but a hook that reports progress waits at most 3.4 seconds from when the gateway got the call for the model layers |
+| Alignment check | Up to 3 seconds, never past the hook's answer window. With less than 1 second left it does not ask. |
+| Rego policy | `cascade.policy.timeout_ms`, 5 by default, 50 at most |
+
+A late model answer never removes a finding. It is ignored, and the verdict that stood stays.
+
+How many calls a host can check each second depends on the OS and the install: see Hook sizing on the [support matrix](/docs/support-matrix#hook-sizing).
