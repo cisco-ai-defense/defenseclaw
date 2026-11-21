@@ -69,7 +69,14 @@ func TestCodexWindowsActionBlocksCompleteArgvMarker(t *testing.T) {
 		// /k runs the body as /c does and then stays open: its script is read
 		// (rel-1-0-10:GAP-0711).
 		{"cmd.exe /k body is read", `cmd.exe /k echo dccert-block-marker > codex-blocked2.txt`, true},
-		{"cmd.exe /x stays partial", `cmd.exe /x /c echo dccert-block-marker > codex-allowed.txt`, false},
+		// cmd.exe /X is a real cmd switch (the old name of /E:ON): the body
+		// after /c is read and the cert block marker blocks. rel 8e58b26846
+		// read /x partially and allowed it, a miss the old "stays partial"
+		// row pinned; the FU12 fold (rel 8e58b26846..efdb4f76a4) reads it
+		// fully (lead ruling D31, 2026-11-21). The benign twin shows that /x
+		// itself does not block.
+		{"cmd.exe /x body is read", `cmd.exe /x /c echo dccert-block-marker > codex-blocked2.txt`, true},
+		{"benign cmd.exe /x", `cmd.exe /x /c echo hi > codex-allowed.txt`, false},
 		{"cmd.exe /e:maybe stays partial", `cmd.exe /e:maybe /c echo dccert-block-marker > codex-allowed.txt`, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
