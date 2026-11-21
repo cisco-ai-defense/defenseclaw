@@ -80,6 +80,10 @@ var propTemplates = []propTemplate{
 	{`awk 'BEGIN { "date" | getline x }'`, refUnknown},
 	{`awk '{print $1}' {M}`, refNoWrite},
 	{`awk -F: '{print $1}' {M}`, refNoWrite},
+	// the other awk implementations share the row (DET111 S4-R2)
+	{`gawk '{print > "{M}"}' f`, refWrites},
+	{`mawk 'BEGIN{print "k" >> "{M}"}'`, refWrites},
+	{`nawk '{print $1}' {M}`, refNoWrite},
 	// uniq and xxd: the second operand is written
 	{`uniq in {M}`, refWrites},
 	{`uniq -c in {M}`, refWrites},
@@ -266,7 +270,7 @@ var refClass = func() map[string]string {
 		"setfacl", "dd", "tee", "truncate", "sort", "split", "csplit", "uniq", "xxd", "zip", "gzip", "gunzip", "zcat", "bzip2", "bunzip2",
 		"bzcat", "xz", "unxz", "xzcat", "unzip", "tar", "scp", "rsync", "base64")
 	// carry a script, program, format or config in an operand
-	add("text", "sed", "awk", "curl", "wget", "find", "fd", "rg") // rg --pre runs a preprocessor
+	add("text", "sed", "awk", "gawk", "mawk", "nawk", "curl", "wget", "find", "fd", "rg") // rg --pre runs a preprocessor
 	add("shell", "bash", "sh", "zsh", "dash", "ksh", "eval", "source", ".", "su", "runuser", "python", "python3", "node", "nodejs", "ruby", "perl", "php", "go")
 	add("special", "git")
 	// Windows table (lower case)

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/awkprog"
 	"github.com/defenseclaw/defenseclaw/internal/psparse"
 )
 
@@ -125,6 +126,7 @@ type walker struct {
 	res        *Result
 	o          Options
 	cmdNo      int
+	wrapOuts   []wrapperOutput // files the current command's wrappers open themselves (time -o, script FILE)
 	funcs      map[string]bool
 	aliases    map[string]string
 	links      map[string]string // link key -> target physical path (review R7)
@@ -764,7 +766,10 @@ func (w *walker) resolveWord(wd Word) Word {
 				v, ok = w.curHome, w.curHome != "" // PowerShell's automatic $HOME
 			}
 			if !ok {
-				return Word{Static: false, Reason: ReasonDynamicExpansion, Span: wd.Span}
+				// The segments stay on the word, so a reader of its literal part
+				// (env NAME=$V: the name) still sees them; the Reason keeps the
+				// word unresolved.
+				return Word{Static: false, Reason: ReasonDynamicExpansion, Span: wd.Span, Segs: wd.Segs}
 			}
 			// An unquoted variable undergoes field splitting and globbing: if
 			// its value carries IFS whitespace or a glob metachar we cannot
@@ -1089,8 +1094,26 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 	inner, wrappers, foreign, fromInput, wrapperUA := w.stripWrappers(words)
 	spec := w.spec // the child-process environment this command applies (round 8 E)
 	if len(inner) == 0 {
+		if n := len(wrappers); n > 0 && wrappers[n-1] != "exec" && wrappers[n-1] != "command" && wrappers[n-1] != "builtin" {
+			// a wrapper with no child word (`nohup`, `timeout 5`): nothing we can
+			// read runs, so the call is never clean. A bare exec only applies its
+			// redirections to the shell.
+			e := Effect{Kind: KindExec, Target: Target{Type: TargetProcess, Link: LinkNotChecked}, TargetState: TargetStateKnown, RoleState: RoleStateKnown, Cond: cond,
+				Origin: Origin{Surface: w.res.Surface, Dialect: dialect, Command: cmdNo, Program: wrappers[len(wrappers)-1], Wrappers: wrappers, Depth: depth, Span: c.Span}}
+			e.addReason(ReasonUnmodeledProgram, ScopeRole)
+			w.lastPrim = w.emit(e)
+		}
 		w.handleRedirs(c, dialect, cmdNo, depth, cond, nil)
 		return
+	}
+	// The files a wrapper opens itself are placed in the caller's folder,
+	// before a wrapper's own folder change applies to the child.
+	var wrapEffects []Effect
+	for _, wo := range w.wrapOuts {
+		op := operand{value: wo.word.Value, static: wo.word.Static, quoted: wo.word.Quoted, glob: wo.word.Glob, role: wo.role}
+		if e := w.effectForOperand(op, Program{}, Origin{Surface: w.res.Surface, Dialect: dialect, Command: cmdNo, Program: wrappers[0], Wrappers: wrappers, Depth: depth, Span: c.Span}, cond, false, false, false, dialect, depth); e != nil {
+			wrapEffects = append(wrapEffects, *e)
+		}
 	}
 	prog := inner[0]
 	if !prog.Static {
@@ -1098,6 +1121,9 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 			Origin: Origin{Surface: w.res.Surface, Dialect: dialect, Command: cmdNo, Wrappers: wrappers, Depth: depth, Span: c.Span}}
 		e.addReason(ReasonDynamicExpansion, ScopeTarget)
 		w.lastPrim = w.emit(e)
+		for _, we := range wrapEffects {
+			w.emit(we)
+		}
 		// A program named by a variable ("$SHELL" -c BODY, "$s" <<< BODY) may be
 		// a shell: its body is lowered as a possible one (DET111 R1, GAP-1538,
 		// GAP-1554), and the substitutions in its words still run.
@@ -1262,6 +1288,9 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 	}()
 	baseIdx := w.emit(base)
 	w.lastPrim = baseIdx
+	for _, e := range wrapEffects {
+		w.emit(e)
+	}
 
 	// 6. Interpreter reading piped / heredoc stdin as code (review PX-5).
 	w.interpreterStdin(c, entry, known, inner[1:], dialect, depth, cond, origin, prevPrim)
@@ -1534,6 +1563,7 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 	sc := shellInvocation(inner[1:])
 	codeOps := 0
 	w.nestedBodies(c, program, inner, dialect, depth, cond, origin)
+	emittedKinds := map[Kind]bool{}
 	for _, op := range ops {
 		if inlineCode && op.role == RoleExecProgram {
 			continue
@@ -1557,6 +1587,7 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 		})
 		if e.Target.Type == TargetPath || e.Target.Type == TargetRemote || e.Kind == KindNetworkSend {
 			emittedTargetEffect = true
+			emittedKinds[e.Kind] = true
 		}
 		switch e.Kind {
 		case KindRead:
@@ -1617,8 +1648,14 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 	// A command run by xargs gets its operands from stdin: emit its positional
 	// role with an unknown target so `ls | xargs rm` is a (dynamic) delete
 	// rather than exec-only (review R3-3 / round-3 leftovers).
-	if fromInput && !emittedTargetEffect {
-		if role := posModeRole(entry.Pos); role != RoleNone {
+	// A copier fed by xargs (`xargs cp SRC`) takes its destination from stdin
+	// too: the write is there even when the source was read (GAP-1317).
+	fedRole := posModeRole(entry.Pos)
+	if entry.Pos == PosSourcesDest {
+		fedRole = RoleWrite
+	}
+	if fromInput && !emittedKinds[fedRole.kind()] {
+		if role := fedRole; role != RoleNone {
 			e := Effect{Kind: role.kind(), Cond: cond, RoleState: RoleStateKnown, TargetState: TargetStateUnknown,
 				Target: Target{Type: TargetPath, Flavor: w.o.flavor(), Link: LinkNotChecked, CaseFold: w.o.CaseInsensitive}, Origin: origin}
 			e.addReason(ReasonOperandsFromInput, ScopeTarget)
@@ -2110,6 +2147,9 @@ func (w *walker) classifyOperands(words []Word, p Program, dialect Dialect) ([]o
 		// PowerShell / long --flag=value and -Param:Value inline value.
 		fname, inlineVal, hasInline := splitInlineFlagValue(name, dialect)
 		fl, ok := flagLookup(p, fname, dialect)
+		if ok && dialect == DialectPOSIX {
+			fname, _, _ = flagResolve(p, fname) // an abbreviation reads as its full name (--target= is --target-directory=)
+		}
 		if !ok {
 			// POSIX combined short flags (-xzf, -sSLo): the split marks the
 			// token unaccounted if any component is unlisted.
@@ -2133,10 +2173,9 @@ func (w *walker) classifyOperands(words []Word, p Program, dialect Dialect) ([]o
 		if p.DeleteFlag != "" && fname == p.DeleteFlag {
 			del = true
 		}
-		if (p.Pos == PosSourcesDest) && (fname == "-t" || fname == "--target-directory" || strings.HasPrefix(fname, "--target-directory=")) {
-			if v, iv, has := splitInlineFlagValue(name, dialect); has {
-				destDir = iv
-				_ = v
+		if (p.Pos == PosSourcesDest) && (fname == "-t" || fname == "--target-directory") {
+			if hasInline {
+				destDir = inlineVal
 			} else if i+1 < len(words) && words[i+1].Static {
 				destDir = words[i+1].Value
 				i += 2
@@ -2164,8 +2203,12 @@ func (w *walker) classifyOperands(words []Word, p Program, dialect Dialect) ([]o
 			}
 			continue
 		}
-		if hasInline && textBad(fl.Text, Word{Value: inlineVal, Static: true}) {
-			unknownFlag = true // a script / format / config the closed grammar does not accept
+		if hasInline {
+			tops, bad := w.textOperands(fl.Text, Word{Value: inlineVal, Static: true})
+			out = append(out, tops...)
+			if bad {
+				unknownFlag = true // a script / format / config the closed grammar does not accept
+			}
 		}
 		if hasInline {
 			if routeSourcesDestFlag(p, fl, Word{Value: inlineVal, Static: true}, &srcFlags, &destFlag) {
@@ -2181,7 +2224,9 @@ func (w *walker) classifyOperands(words []Word, p Program, dialect Dialect) ([]o
 		}
 		if fl.Value {
 			if i+1 < len(words) {
-				if textBad(fl.Text, words[i+1]) {
+				tops, bad := w.textOperands(fl.Text, words[i+1])
+				out = append(out, tops...)
+				if bad {
 					unknownFlag = true
 				}
 				if routeSourcesDestFlag(p, fl, words[i+1], &srcFlags, &destFlag) {
@@ -2212,18 +2257,145 @@ func (w *walker) classifyOperands(words []Word, p Program, dialect Dialect) ([]o
 	}
 	// The script / pattern positional a FirstPosIgnore program takes is accounted
 	// only if its closed grammar accepts it (sed script, awk program).
-	if p.FirstPosIgnore && !hasExpr && len(positionals) > 0 && textBad(p.FirstPosText, positionals[0]) {
-		unknownFlag = true
+	if p.FirstPosIgnore && !hasExpr && len(positionals) > 0 {
+		tops, bad := w.textOperands(p.FirstPosText, positionals[0])
+		out = append(out, tops...)
+		if bad {
+			unknownFlag = true
+		}
 	}
 	// A PosNone program with operands it does not model leaves them unaccounted,
 	// unless its entry declares the operands inert data (review R5-2).
 	if p.Pos == PosNone && len(positionals) > 0 && !p.InertOperands {
 		unknownFlag = true
 	}
-	out = append(out, w.positionalOperands(positionals, p, posCtx{unknownFlag: unknownFlag, inPlace: inPlace, del: del, hasExpr: hasExpr, destDir: destDir,
+	posOps := w.positionalOperands(positionals, p, posCtx{unknownFlag: unknownFlag, inPlace: inPlace, del: del, hasExpr: hasExpr, destDir: destDir,
 		appendMode: p.AppendFlag != "" && hasAppendFlag(words, p.AppendFlag),
-		upload:     p.Pos == PosBits && hasWordFold(words, "/upload"), program: w.curProgram, words: words})...)
+		upload:     p.Pos == PosBits && hasWordFold(words, "/upload"), program: w.curProgram, words: words})
+	recursive := hasRowFlag(words, p, p.Recursive)
+	dry := hasRowFlag(words, p, p.DryRun)
+	for _, op := range posOps {
+		if dry && op.role != RoleRead {
+			continue // a dry run writes, links and deletes none of its operands
+		}
+		if recursive && op.role == RoleWrite && !op.remote {
+			op.subtree = true // a tree copy writes every file below the destination
+		}
+		out = append(out, op)
+	}
 	return out, inner, unknownFlag
+}
+
+// hasRowFlag reports one of the row options names among the words, before
+// "--": the word itself, its --name=value form, its GNU abbreviation, or a
+// letter of a short cluster (up to the first letter that takes a value).
+func hasRowFlag(words []Word, p Program, names []string) bool {
+	if len(names) == 0 {
+		return false
+	}
+	for _, wd := range words {
+		if !wd.Static || len(wd.Value) < 2 || wd.Value[0] != '-' {
+			continue
+		}
+		v := wd.Value
+		if v == "--" {
+			return false
+		}
+		if strings.HasPrefix(v, "--") {
+			if eq := strings.IndexByte(v, '='); eq > 0 {
+				v = v[:eq]
+			}
+			full, _, _ := flagResolve(p, v)
+			if hasName(names, full) {
+				return true
+			}
+			continue
+		}
+		for _, ch := range v[1:] {
+			f := "-" + string(ch)
+			if hasName(names, f) {
+				return true
+			}
+			if fl, ok := p.Flags[f]; ok && fl.Value {
+				break
+			}
+		}
+	}
+	return false
+}
+
+// textOperands reads a script or program value through the closed grammar its
+// row names (DESIGN D2): the files and commands the text names become operands
+// of the call (a sed w file is written, an r file read, an e command run; an
+// awk print redirect writes its file, a gawk /inet file is a connection), and
+// bad reports a value the grammar does not accept, so the call is
+// unaccounted. An awk program with a redirect stays unaccounted (the scan lists
+// only literal targets) but its literal writes are kept.
+func (w *walker) textOperands(kind TextKind, v Word) (ops []operand, bad bool) {
+	switch kind {
+	case TextSed:
+		if !v.Static || len(v.Value) > maxGrammarSource {
+			return nil, true
+		}
+		rd, ok := readSedScript(v.Value)
+		if !ok {
+			return nil, true
+		}
+		for _, f := range rd.writes {
+			if f == "/dev/stdout" || f == "/dev/stderr" {
+				continue // GNU sed writes these streams, not a file
+			}
+			ops = append(ops, operand{value: f, static: true, quoted: true, role: RoleWrite})
+		}
+		for _, f := range rd.reads {
+			ops = append(ops, operand{value: f, static: true, quoted: true, role: RoleRead})
+		}
+		// r / R put the file's bytes in the output, which the call does not
+		// track: the read is kept, the call is not fully known.
+		bad = len(rd.reads) > 0
+		for _, c := range rd.execs {
+			ops = append(ops, operand{value: c, static: true, role: RoleExecCode})
+		}
+		if rd.execDyn {
+			ops = append(ops, operand{role: RoleExecCode})
+		}
+		return ops, bad
+	case TextAwk:
+		if !v.Static || len(v.Value) > maxGrammarSource {
+			return nil, true
+		}
+		if awkProgramOK(v.Value) {
+			return nil, false
+		}
+		for _, o := range awkprog.Parse(v.Value).Outputs {
+			if hostPort, ok := awkInetTarget(o.Target); ok {
+				ops = append(ops, operand{value: hostPort, static: true, role: RoleURLUpload})
+				continue
+			}
+			role := RoleWrite
+			if o.Append {
+				role = RoleAppend
+			}
+			ops = append(ops, operand{value: o.Target, static: true, quoted: true, role: role})
+		}
+		return ops, true
+	}
+	return nil, textBad(kind, v)
+}
+
+// awkInetTarget reads a gawk special file /inet[46]/PROTO/LPORT/HOST/RPORT: a
+// print redirect into it is a network connection to HOST:RPORT, not a file
+// write (rel-1-0-10 GAP-1571). It returns the connection as a URL.
+func awkInetTarget(t string) (string, bool) {
+	parts := strings.Split(t, "/")
+	if len(parts) != 6 || parts[0] != "" || (parts[1] != "inet" && parts[1] != "inet4" && parts[1] != "inet6") {
+		return "", false
+	}
+	proto, host, port := parts[2], parts[4], parts[5]
+	if (proto != "tcp" && proto != "udp") || host == "" {
+		return "", false
+	}
+	return proto + "://" + host + ":" + port, true
 }
 
 // execPlaceholders marks the {} and stdin (-) operands of a find/xargs inner
@@ -2316,7 +2488,9 @@ func (w *walker) splitShortFlags(name string, words []Word, i *int, p Program, o
 				return true, true // a dynamic target directory is not accounted
 			}
 			if j+1 < len(body) {
-				if textBad(fl.Text, Word{Value: body[j+1:], Static: true}) {
+				tops, bad := w.textOperands(fl.Text, Word{Value: body[j+1:], Static: true})
+				*out = append(*out, tops...)
+				if bad {
 					unknownFlag = true
 				}
 				*out = append(*out, operandValue(fl, Word{Value: body[j+1:], Static: true}, p))
@@ -2324,7 +2498,9 @@ func (w *walker) splitShortFlags(name string, words []Word, i *int, p Program, o
 				return true, unknownFlag
 			}
 			if *i+1 < len(words) {
-				if textBad(fl.Text, words[*i+1]) {
+				tops, bad := w.textOperands(fl.Text, words[*i+1])
+				*out = append(*out, tops...)
+				if bad {
 					unknownFlag = true
 				}
 				*out = append(*out, operandValue(fl, words[*i+1], p))
@@ -3545,26 +3721,67 @@ func (w *walker) opaqueExec(origin Origin, cond bool) {
 func (w *walker) tarEffects(args []Word, origin Origin, cond bool, depth int) {
 	mode := byte(0) // 'c','x','t'
 	archive := ""
-	archivePending := false
 	cdir := ""
 	var files []Word
+	var lists []string // -T / --files-from: the members are named in these files
+	// pending are the value letters of an old-style bundle (`tar xfC a.tar dir`)
+	// still waiting for their word, in order.
+	var pending []byte
+	setValue := func(letter byte, val Word) {
+		v := val.Value
+		switch letter {
+		case 'f':
+			if val.Static {
+				archive = v
+			}
+		case 'C':
+			if val.Static {
+				cdir = v
+			}
+		case 'T':
+			if val.Static {
+				lists = append(lists, v)
+			} else {
+				lists = append(lists, "")
+			}
+		case 'I', 'F':
+			w.opaqueExec(origin, cond) // a compress program or a volume script is run
+		}
+	}
+	tarLongs := posixTable["tar"].Longs
 	for i := 0; i < len(args); i++ {
 		a := args[i]
+		if len(pending) > 0 {
+			setValue(pending[0], a)
+			pending = pending[1:]
+			continue
+		}
 		if !a.Static {
-			if archivePending {
-				archivePending = false
-			} else {
-				files = append(files, a)
-			}
+			files = append(files, a)
 			continue
 		}
 		v := a.Value
-		// Long options may carry their value inline as --name=value (review D A33).
+		// Long options may carry their value inline as --name=value (review D
+		// A33), and GNU tar (argp) takes an unambiguous prefix of any of its long
+		// options (--ext, --dir: rel-1-0-10 GAP-0661).
 		long, inlineVal, hasInline := v, "", false
 		if strings.HasPrefix(v, "--") {
 			if eq := strings.IndexByte(v, '='); eq >= 0 {
 				long, inlineVal, hasInline = v[:eq], v[eq+1:], true
 			}
+			if full, ok := resolveLong(long, tarLongs); ok {
+				long = full
+			}
+		}
+		longValue := func() Word {
+			if hasInline {
+				return Word{Value: inlineVal, Static: true}
+			}
+			if i+1 < len(args) {
+				i++
+				return args[i]
+			}
+			return Word{}
 		}
 		switch {
 		case long == "--extract" || long == "--get":
@@ -3576,32 +3793,27 @@ func (w *walker) tarEffects(args []Word, origin Origin, cond bool, depth int) {
 		case long == "--append" || long == "--update" || long == "--concatenate" || long == "--catenate" || long == "--delete":
 			mode = 'a' // the archive itself is rewritten
 		case v == "-C" || long == "--directory":
-			if hasInline {
-				cdir = inlineVal
-			} else if i+1 < len(args) && args[i+1].Static {
-				cdir = args[i+1].Value
-				i++
-			}
+			setValue('C', longValue())
 		case v == "-f" || long == "--file":
-			if hasInline {
-				archive = inlineVal
-			} else if i+1 < len(args) && args[i+1].Static {
-				archive = args[i+1].Value
-				i++
-			}
-		case v == "--to-command" || v == "--checkpoint-action":
+			setValue('f', longValue())
+		case v == "-T" || long == "--files-from":
+			setValue('T', longValue())
+		case long == "--to-command" || long == "--checkpoint-action" || long == "--use-compress-program" ||
+			long == "--info-script" || long == "--new-volume-script" || long == "--rsh-command" || long == "--rmt-command":
 			w.opaqueExec(origin, cond)
-			if i+1 < len(args) {
-				i++
-			}
+			longValue()
 		case strings.HasPrefix(v, "--"):
-			// unknown long option: ignore
-		case strings.HasPrefix(v, "-") || isTarModeBundle(v):
-			// a flag bundle like -xzf / xzf / czf: read the mode and whether -f
-			// takes the next token as the archive.
+			if tarValuedLongs[long] {
+				longValue() // the option's value is not a member
+			}
+		case strings.HasPrefix(v, "-") || (i == 0 && isTarModeBundle(v)):
+			// a flag bundle like -xzf / xzf / czf: the modes, and the letters that
+			// take a value: with a dash the rest of the word or the next word,
+			// old style (no dash) the next words in order.
+			dash := strings.HasPrefix(v, "-")
 			body := strings.TrimPrefix(v, "-")
 			for k := 0; k < len(body); k++ {
-				switch body[k] {
+				switch c := body[k]; c {
 				case 'c':
 					mode = 'c'
 				case 'x':
@@ -3610,13 +3822,23 @@ func (w *walker) tarEffects(args []Word, origin Origin, cond bool, depth int) {
 					mode = 't'
 				case 'r', 'u', 'A':
 					mode = 'a' // append / update / concatenate: the archive is rewritten
-				case 'f':
-					archivePending = true
+				default:
+					if strings.IndexByte(tarValueLetters, c) < 0 {
+						continue
+					}
+					if !dash {
+						pending = append(pending, c)
+						continue
+					}
+					if k+1 < len(body) {
+						setValue(c, Word{Value: body[k+1:], Static: true})
+					} else if i+1 < len(args) {
+						i++
+						setValue(c, args[i])
+					}
+					k = len(body)
 				}
 			}
-		case archivePending:
-			archive = v
-			archivePending = false
 		default:
 			files = append(files, a)
 		}
@@ -3638,10 +3860,18 @@ func (w *walker) tarEffects(args []Word, origin Origin, cond bool, depth int) {
 		}
 		w.emit(e)
 	}
+	for _, l := range lists {
+		if l != "" && l != "-" {
+			mk(KindRead, l, TargetStateKnown, "")
+		}
+	}
 	switch mode {
 	case 'c':
 		if archive != "" && archive != "-" {
 			mk(KindWrite, archive, TargetStateKnown, "")
+		}
+		if len(lists) > 0 {
+			mk(KindRead, "", TargetStateUnknown, ReasonOperandsFromInput) // the members the list names
 		}
 		for _, f := range files {
 			if f.Static {
@@ -3685,6 +3915,22 @@ func (w *walker) tarEffects(args []Word, origin Origin, cond bool, depth int) {
 	}
 }
 
+// tarValueLetters are the GNU tar short options that take a value.
+const tarValueLetters = "fCTXbFgHIKLNV"
+
+// tarValuedLongs are the GNU tar long options whose value is required, so a
+// separate next word is the value, not a member.
+var tarValuedLongs = map[string]bool{
+	"--exclude": true, "--exclude-from": true, "--transform": true, "--xform": true, "--strip-components": true,
+	"--owner": true, "--group": true, "--mode": true, "--newer": true, "--newer-mtime": true, "--after-date": true,
+	"--label": true, "--suffix": true, "--format": true, "--blocking-factor": true, "--record-size": true,
+	"--tape-length": true, "--index-file": true, "--volno-file": true, "--listed-incremental": true, "--level": true,
+	"--warning": true, "--quoting-style": true, "--owner-map": true, "--group-map": true, "--mtime": true,
+	"--starting-file": true, "--exclude-tag": true, "--exclude-tag-all": true, "--exclude-tag-under": true,
+	"--checkpoint-action": true, "--to-command": true, "--use-compress-program": true, "--info-script": true,
+	"--new-volume-script": true, "--rsh-command": true, "--rmt-command": true,
+}
+
 func isTarModeBundle(v string) bool {
 	if v == "" || strings.ContainsAny(v, "/\\.=") {
 		return false
@@ -3694,7 +3940,7 @@ func isTarModeBundle(v string) bool {
 		switch v[i] {
 		case 'c', 'x', 't', 'r', 'u', 'A':
 			has = true
-		case 'f', 'z', 'j', 'v', 'J', 'a', 'p', 'h':
+		case 'f', 'z', 'j', 'v', 'J', 'a', 'p', 'h', 'C', 'T':
 		default:
 			return false
 		}
@@ -4168,6 +4414,9 @@ func tarHasUnknownFlag(args []Word) bool {
 			k := v
 			if eq := strings.IndexByte(v, '='); eq >= 0 {
 				k = v[:eq]
+			}
+			if full, ok := resolveLong(k, posixTable["tar"].Longs); ok {
+				k = full
 			}
 			if !known[k] {
 				return true

@@ -127,6 +127,61 @@ type Program struct {
 	AppendFlag     string   // switch that turns the file operands into appends (tee -a)
 	InertOperands  bool     // a PosNone program whose positionals are inert data (echo, true) -- else a positional is unaccounted (review R5-2)
 	OptionsFirst   bool     // options end at the first operand (BSD getopt, no permutation): later words are operands (GAP-0219)
+	// Longs are every long option of the GNU tool (gnuLongOptions): a long
+	// option word that is an unambiguous prefix of one of them is that option
+	// (getopt_long). Empty for a tool that takes no abbreviation (curl, rg).
+	Longs []string
+	// DryRun lists the options with which the program writes none of its
+	// operands (rsync -n); Recursive the options with which a destination write
+	// is a whole tree (cp -r, rsync -a).
+	DryRun    []string
+	Recursive []string
+}
+
+// gnuLongOptions are every long option of the GNU tool (its --help on the build
+// box, coreutils 9.4, GNU grep 3.11, GNU sed 4.9, GNU tar 1.35, GNU wget): the
+// ambiguity set of a GNU long-option abbreviation (getopt_long takes any
+// unambiguous prefix: cp --target=DIR, sort --out=FILE, grep --incl=GLOB, tar
+// --ext). A prefix of two real options is an error in the tool, so it is never
+// resolved here even when only one of them is in the row (DESIGN D2, F1).
+var gnuLongOptions = map[string]string{
+	"cp":        "--archive --attributes-only --backup --context --copy-contents --debug --dereference --force --help --interactive --link --no-clobber --no-dereference --no-preserve --no-target-directory --one-file-system --parents --preserve --recursive --reflink --remove-destination --sparse --strip-trailing-slashes --suffix --symbolic-link --target-directory --update --verbose --version",
+	"mv":        "--backup --context --debug --force --help --interactive --no-clobber --no-copy --no-target-directory --strip-trailing-slashes --suffix --target-directory --update --verbose --version",
+	"install":   "--backup --compare --context --debug --directory --group --help --mode --no-target-directory --owner --preserve-context --preserve-timestamps --strip --strip-program --suffix --target-directory --verbose --version",
+	"ln":        "--backup --directory --force --help --interactive --logical --no-dereference --no-target-directory --physical --relative --suffix --symbolic --target-directory --verbose --version",
+	"rm":        "--dir --force --help --interactive --no-preserve-root --one-file-system --preserve-root --recursive --verbose --version",
+	"unlink":    "--help --version",
+	"shred":     "--exact --force --help --iterations --random-source --remove --size --verbose --version --zero",
+	"mkdir":     "--context --help --mode --parents --verbose --version",
+	"touch":     "--date --help --no-create --no-dereference --reference --time --version",
+	"chmod":     "--changes --help --no-preserve-root --preserve-root --quiet --recursive --reference --silent --verbose --version",
+	"chown":     "--changes --dereference --from --help --no-dereference --no-preserve-root --preserve-root --quiet --recursive --reference --silent --verbose --version",
+	"chgrp":     "--changes --dereference --help --no-dereference --no-preserve-root --preserve-root --quiet --recursive --reference --silent --verbose --version",
+	"tee":       "--append --help --ignore-interrupts --output-error --version",
+	"truncate":  "--help --io-blocks --no-create --reference --size --version",
+	"sed":       "--debug --expression --file --follow-symlinks --help --in-place --line-length --null-data --posix --quiet --regexp-extended --sandbox --separate --silent --unbuffered --version",
+	"sort":      "--batch-size --buffer-size --check --compress-program --debug --dictionary-order --field-separator --files0-from --general-numeric-sort --help --human-numeric-sort --ignore-case --ignore-leading-blanks --ignore-nonprinting --key --merge --month-sort --numeric-sort --output --parallel --random-sort --random-source --reverse --sort --stable --temporary-directory --unique --version --version-sort --zero-terminated",
+	"grep":      "--after-context --basic-regexp --before-context --binary --binary-files --byte-offset --color --colour --context --count --dereference-recursive --devices --directories --exclude --exclude-dir --exclude-from --extended-regexp --file --files-with-matches --files-without-match --fixed-strings --group-separator --help --ignore-case --include --initial-tab --invert-match --label --line-buffered --line-number --line-regexp --max-count --no-filename --no-group-separator --no-ignore-case --no-messages --null --null-data --only-matching --perl-regexp --quiet --recursive --regexp --silent --text --version --with-filename --word-regexp",
+	"tar":       "--absolute-names --acls --add-file --after-date --anchored --append --atime-preserve --auto-compress --backup --block-number --blocking-factor --bzip2 --catenate --check-device --check-links --checkpoint --checkpoint-action --clamp-mtime --compare --compress --concatenate --confirmation --create --delay-directory-restore --delete --dereference --diff --directory --exclude --exclude-backups --exclude-caches --exclude-caches-all --exclude-caches-under --exclude-from --exclude-ignore --exclude-ignore-recursive --exclude-tag --exclude-tag-all --exclude-tag-under --exclude-vcs --exclude-vcs-ignores --extract --file --files-from --force-local --format --full-time --get --group --group-map --gunzip --gzip --hard-dereference --help --hole-detection --ignore-case --ignore-command-error --ignore-failed-read --ignore-zeros --incremental --index-file --info-script --interactive --keep-directory-symlink --keep-newer-files --keep-old-files --label --level --list --listed-incremental --lzip --lzma --lzop --mode --mtime --multi-volume --new-volume-script --newer --newer-mtime --no-acls --no-anchored --no-auto-compress --no-check-device --no-delay-directory-restore --no-ignore-case --no-ignore-command-error --no-null --no-overwrite-dir --no-quote-chars --no-recursion --no-same-owner --no-same-permissions --no-seek --no-selinux --no-unquote --no-verbatim-files-from --no-wildcards --no-wildcards-match-slash --no-xattrs --null --numeric-owner --occurrence --old-archive --one-file-system --one-top-level --overwrite --overwrite-dir --owner --owner-map --pax-option --portability --posix --preserve-order --preserve-permissions --quote-chars --quoting-style --read-full-records --record-size --recursion --recursive-unlink --remove-files --restrict --rmt-command --rsh-command --same-order --same-owner --same-permissions --seek --selinux --show-defaults --show-omitted-dirs --show-snapshot-field-ranges --show-stored-names --show-transformed-names --skip-old-files --sort --sparse --sparse-version --starting-file --strip-components --suffix --tape-length --test-label --to-command --to-stdout --totals --touch --transform --uncompress --ungzip --unlink-first --unquote --update --usage --use-compress-program --utc --verbatim-files-from --verbose --verify --version --volno-file --warning --wildcards --wildcards-match-slash --xattrs --xattrs-exclude --xattrs-include --xform --xz --zstd",
+	"wget":      "--accept --accept-regex --adjust-extension --append-output --ask-password --auth-no-challenge --background --backup-converted --backups --base --bind-address --body-data --body-file --ca-certificate --ca-directory --certificate --certificate-type --ciphers --compression --config --connect-timeout --content-disposition --content-on-error --continue --convert-file-only --convert-links --crl-file --cut-dirs --debug --default-page --delete-after --directory-prefix --dns-timeout --domains --exclude-directories --exclude-domains --execute --follow-ftp --follow-tags --force-directories --force-html --ftp-password --ftp-user --ftps-clear-data-connection --ftps-fallback-to-ftp --ftps-implicit --ftps-resume-ssl --header --help --hsts-file --http-password --http-user --https-only --ignore-case --ignore-length --ignore-tags --include-directories --inet4-only --inet6-only --input-file --keep-session-cookies --level --limit-rate --load-cookies --local-encoding --max-redirect --method --mirror --no-cache --no-check-certificate --no-clobber --no-config --no-cookies --no-directories --no-dns-cache --no-glob --no-host-directories --no-hsts --no-http-keep-alive --no-if-modified-since --no-iri --no-netrc --no-parent --no-passive-ftp --no-proxy --no-remove-listing --no-use-server-timestamps --no-verbose --no-warc-compression --no-warc-digests --no-warc-keep-log --output-document --output-file --page-requisites --password --pinnedpubkey --post-data --post-file --prefer-family --preserve-permissions --private-key --private-key-type --progress --protocol-directories --proxy-password --proxy-user --quiet --quota --random-file --random-wait --read-timeout --recursive --referer --regex-type --reject --reject-regex --rejected-log --relative --remote-encoding --report-speed --restrict-file-names --retr-symlinks --retry-connrefused --retry-on-host-error --retry-on-http-error --save-cookies --save-headers --secure-protocol --server-response --show-progress --span-hosts --spider --start-pos --strict-comments --timeout --timestamping --tries --trust-server-names --unlink --use-askpass --user --user-agent --verbose --version --wait --waitretry --warc-cdx --warc-dedup --warc-file --warc-header --warc-max-size --warc-tempdir --xattr",
+	"head":      "--bytes --help --lines --quiet --silent --verbose --version --zero-terminated",
+	"tail":      "--bytes --follow --help --lines --max-unchanged-stats --pid --quiet --retry --silent --sleep-interval --verbose --version --zero-terminated",
+	"cat":       "--help --number --number-nonblank --show-all --show-ends --show-nonprinting --show-tabs --squeeze-blank --version",
+	"du":        "--all --apparent-size --block-size --bytes --count-links --dereference --dereference-args --exclude --exclude-from --files0-from --help --human-readable --inodes --max-depth --no-dereference --null --one-file-system --separate-dirs --si --summarize --threshold --time --time-style --total --version",
+	"ls":        "--all --almost-all --author --block-size --classify --color --context --dereference --dereference-command-line --dereference-command-line-symlink-to-dir --directory --dired --escape --file-type --format --full-time --group-directories-first --help --hide --hide-control-chars --human-readable --hyperlink --ignore --ignore-backups --indicator-style --inode --kibibytes --literal --no-group --numeric-uid-gid --quote-name --quoting-style --recursive --reverse --show-control-chars --si --size --sort --tabsize --time --time-style --version --width --zero",
+	"split":     "--additional-suffix --bytes --elide-empty-files --filter --help --hex-suffixes --line-bytes --lines --number --numeric-suffixes --separator --suffix-length --unbuffered --verbose --version",
+	"base64":    "--decode --help --ignore-garbage --version --wrap",
+	"gzip":      "--best --decompress --fast --force --help --keep --license --list --name --no-name --quiet --recursive --rsyncable --stdout --suffix --synchronous --test --verbose --version",
+	"uniq":      "--all-repeated --check-chars --count --group --help --ignore-case --repeated --skip-chars --skip-fields --unique --version --zero-terminated",
+	"wc":        "--bytes --chars --files0-from --help --lines --max-line-length --total --version --words",
+	"cut":       "--bytes --characters --complement --delimiter --fields --help --only-delimited --output-delimiter --version --zero-terminated",
+	"stat":      "--cached --dereference --file-system --format --help --printf --terse --version",
+	"readlink":  "--canonicalize --canonicalize-existing --canonicalize-missing --help --no-newline --quiet --silent --verbose --version --zero",
+	"realpath":  "--canonicalize-existing --canonicalize-missing --help --logical --no-symlinks --physical --quiet --relative-base --relative-to --strip --version --zero",
+	"diff":      "--GTYPE-group-format --LTYPE-line-format --brief --color --context --ed --exclude --exclude-from --expand-tabs --from-file --help --horizon-lines --ifdef --ignore-all-space --ignore-blank-lines --ignore-case --ignore-file-name-case --ignore-matching-lines --ignore-space-change --ignore-tab-expansion --ignore-trailing-space --initial-tab --label --left-column --line-format --minimal --new-file --no-dereference --no-ignore-file-name-case --normal --paginate --palette --rcs --recursive --report-identical-files --show-c-function --show-function-line --side-by-side --speed-large-files --starting-file --strip-trailing-cr --suppress-blank-empty --suppress-common-lines --tabsize --text --to-file --unidirectional-new-file --unified --version --width",
+	"cmp":       "--bytes --help --ignore-initial --print-bytes --quiet --silent --verbose --version",
+	"sha256sum": "--binary --check --help --ignore-missing --quiet --status --strict --tag --text --version --warn --zero",
+	"md5sum":    "--binary --check --help --ignore-missing --quiet --status --strict --tag --text --version --warn --zero",
 }
 
 var (
@@ -266,6 +321,7 @@ func buildBSDTable() {
 		}
 		p.Names = []string{name}
 		p.Flags = flags
+		p.Longs = nil // the BSD tools take no long option
 		// Every operand of rm, unlink and tee is a target, so reading BSD's stop
 		// at the first operand changes no mutation; for cp, mv, ln and install a
 		// trailing option moves the destination, so bsdRejectsFlag sends those
@@ -293,6 +349,225 @@ const (
 	wrapInput
 )
 
+// Wrapper is one wrapper row (DESIGN D2, programs as data): a launcher that
+// runs a child program after its own options, and what it changes for that
+// child. The row is the launcher's whole option grammar: an option it does not
+// list makes the call unaccounted (never clean), and a launcher with no row is
+// an unmodeled program. Options end at the first operand (every row below is a
+// getopt "+" tool or a shell builtin), except script, whose options and one file
+// operand may come in any order.
+type Wrapper struct {
+	kind wrapperKind
+	// shorts are the switch letters; valued lists the options that take a value
+	// (short: the rest of the word or the next word; long: --opt=v or the next
+	// word); optional lists the short letters whose value can only be attached
+	// (xargs -iR, nsenter -mFILE); longs lists the long switches.
+	shorts   string
+	valued   []string
+	optional string
+	longs    []string
+	// optLongs are long options whose value is optional and attached only
+	// (--mount[=FILE]).
+	optLongs []string
+	// stop lists the options with which the launcher runs no child (command -v
+	// prints, taskset -p acts on a process): the call is then the launcher's own
+	// program row, not a wrapper.
+	stop []string
+	// sub is a subcommand that must follow the name (uv run); needs lists the
+	// options one of which must be the first word for the row to apply
+	// (runuser -u runs a program, runuser -c a shell).
+	sub   string
+	needs []string
+
+	posSkip   int  // leading positionals before the child (DURATION, host, dir, mask, priority, lock file)
+	envAssign bool // NAME=val words set the child's environment (env)
+
+	chdir      []string // options whose value is the child's working folder (env -C, sudo -D, nsenter --wd)
+	login      []string // options that start the child in an unknown folder (sudo -i)
+	clear      []string // options that reset the child's environment (env -i, exec -c)
+	keepEnv    []string // options that keep the caller's environment but not HOME (sudo -E)
+	unset      []string // options whose value is a variable removed from the child (env -u)
+	argv0      []string // exec -a NAME: a NAME that starts with - makes a login shell
+	loginShell []string // exec -l: a login shell
+
+	replaceOpt     []string // options whose value (default {}) the launcher replaces with each input name (xargs -I)
+	shellOpt       []string // options whose value is shell text run by sh -c (script -c)
+	shellAfterSkip bool     // flock FILE -c TEXT: the text follows the skipped operand
+	joinShell      bool     // watch CMD ARGS: the words are joined and run by sh -c ...
+	execOpt        []string // ... unless one of these options is given (watch -x)
+
+	outputs    map[string]Role // options whose value is a file the launcher itself opens, with its role (time -o writes, xargs -a reads)
+	appendOpt  []string        // options that turn those writes into appends (time -a)
+	operandOut string          // the launcher writes its file operand, this name when absent (script typescript)
+}
+
+func (r Wrapper) isValued(fn string) bool { return hasName(r.valued, fn) }
+
+func (r Wrapper) optionalLong(fn string) bool { return hasName(r.optLongs, fn) }
+
+// longName resolves a long option of the row: the exact name, or an
+// unambiguous prefix of one (GNU getopt_long). A prefix shared by two options
+// of the row is not resolved.
+func (r Wrapper) longName(fn string) (string, bool) {
+	var all []string
+	for _, n := range r.valued {
+		if strings.HasPrefix(n, "--") {
+			all = append(all, n)
+		}
+	}
+	all = append(all, r.longs...)
+	all = append(all, r.optLongs...)
+	return resolveLong(fn, all)
+}
+
+// applies reports whether the row reads the words after the launcher name:
+// the subcommand and first option it needs are there, and no option makes the
+// launcher run without a child.
+func (r Wrapper) applies(rest []Word) bool {
+	if r.sub != "" {
+		if len(rest) == 0 || !rest[0].Static || rest[0].Value != r.sub {
+			return false
+		}
+		rest = rest[1:]
+	}
+	if len(r.needs) > 0 {
+		if len(rest) == 0 || !rest[0].Static {
+			return false
+		}
+		v := rest[0].Value
+		if eq := strings.IndexByte(v, '='); eq > 0 {
+			v = v[:eq]
+		}
+		if !hasName(r.needs, v) && !(len(v) > 2 && v[0] == '-' && v[1] != '-' && hasName(r.needs, v[:2])) {
+			return false
+		}
+	}
+	for _, a := range rest {
+		if !a.Static || a.Value == "--" || len(a.Value) < 2 || a.Value[0] != '-' {
+			break // the options end here
+		}
+		v := a.Value
+		if eq := strings.IndexByte(v, '='); eq > 0 {
+			v = v[:eq]
+		}
+		if hasName(r.stop, v) {
+			return false
+		}
+		if !strings.HasPrefix(v, "--") {
+			for _, ch := range v[1:] {
+				if hasName(r.stop, "-"+string(ch)) {
+					return false
+				}
+				if r.isValued("-" + string(ch)) {
+					break
+				}
+			}
+		} else if full, ok := r.longName(v); ok && hasName(r.stop, full) {
+			return false
+		}
+	}
+	return true
+}
+
+// resolveLong returns the long option fn names among all: itself, or the one
+// option it is an unambiguous prefix of.
+func resolveLong(fn string, all []string) (string, bool) {
+	match, n := "", 0
+	for _, a := range all {
+		if a == fn {
+			return a, true
+		}
+		if len(fn) > 2 && strings.HasPrefix(a, fn) {
+			if match != a {
+				n++
+			}
+			match = a
+		}
+	}
+	return match, n == 1
+}
+
+// wrapperTable is the wrapper part of the program table. A launcher not listed
+// is the inner program itself and, being unmodeled, is not fully known; a
+// listed wrapper is transparent only for the options named in its row.
+var wrapperTable = map[string]Wrapper{
+	"sudo": {kind: wrapIdentity, shorts: "AbEeHiKklnPSsVvB",
+		valued: []string{"-u", "-g", "-C", "-h", "-p", "-r", "-t", "-U", "-D", "-T", "--user", "--group", "--chdir", "--close-from", "--host", "--prompt", "--role", "--type", "--other-user", "--command-timeout"},
+		longs:  []string{"--preserve-env", "--login", "--set-home", "--shell", "--background", "--non-interactive", "--reset-timestamp", "--remove-timestamp", "--stdin", "--askpass", "--preserve-groups", "--bell"},
+		stop:   []string{"-e", "--edit", "-l", "--list", "-v", "--validate", "-V", "--version", "-K", "--remove-timestamp"},
+		chdir:  []string{"-D", "--chdir"}, login: []string{"-i", "--login"}, keepEnv: []string{"-E", "--preserve-env"}},
+	"doas": {kind: wrapIdentity, shorts: "nsL", valued: []string{"-u", "-C"}, stop: []string{"-C", "-L", "-s"}},
+	// runuser -u USER [--] PROGRAM runs PROGRAM as USER with no shell; the -c
+	// and login forms are the shell row (su, runuser).
+	"runuser": {kind: wrapIdentity, needs: []string{"-u", "--user"}, shorts: "mpf",
+		valued: []string{"-u", "-g", "-G", "-w", "--user", "--group", "--supp-group", "--whitelist-environment"},
+		longs:  []string{"--preserve-environment"}},
+	"env": {kind: wrapPlain, shorts: "i0v", envAssign: true,
+		valued: []string{"-u", "-C", "--unset", "--chdir"}, longs: []string{"--ignore-environment", "--null", "--debug"},
+		chdir: []string{"-C", "--chdir"}, clear: []string{"-i", "--ignore-environment"}, unset: []string{"-u", "--unset"}},
+	"nohup":   {kind: wrapPlain},
+	"setsid":  {kind: wrapPlain, shorts: "cfw", longs: []string{"--ctty", "--fork", "--wait"}},
+	"nice":    {kind: wrapPlain, valued: []string{"-n", "--adjustment"}},
+	"ionice":  {kind: wrapPlain, shorts: "t", valued: []string{"-c", "-n", "--class", "--classdata"}, longs: []string{"--ignore"}, stop: []string{"-p", "-P", "-u", "--pid", "--pgid", "--uid"}},
+	"timeout": {kind: wrapPlain, shorts: "fpv", valued: []string{"-s", "-k", "--signal", "--kill-after"}, longs: []string{"--foreground", "--preserve-status", "--verbose"}, posSkip: 1},
+	"stdbuf":  {kind: wrapPlain, valued: []string{"-i", "-o", "-e", "--input", "--output", "--error"}},
+	// taskset [-a] [-c] MASK|LIST PROGRAM; -p acts on a running process.
+	"taskset": {kind: wrapPlain, shorts: "ac", longs: []string{"--all-tasks", "--cpu-list"}, stop: []string{"-p", "--pid"}, posSkip: 1},
+	// chrt [policy] PRIORITY PROGRAM; -p acts on a process, -m prints limits.
+	"chrt": {kind: wrapPlain, shorts: "bdfiorRav", valued: []string{"-T", "-P", "-D", "--sched-runtime", "--sched-period", "--sched-deadline"},
+		longs: []string{"--batch", "--deadline", "--fifo", "--idle", "--other", "--rr", "--reset-on-fork", "--all-tasks", "--verbose"},
+		stop:  []string{"-p", "--pid", "-m", "--max"}, posSkip: 1},
+	// flock [options] FILE PROGRAM... | flock [options] FILE -c TEXT. The lock
+	// file is opened (created when missing), not written.
+	"flock": {kind: wrapPlain, shorts: "sxunoF", valued: []string{"-w", "-E", "--timeout", "--wait", "--conflict-exit-code"},
+		longs: []string{"--shared", "--exclusive", "--unlock", "--nonblock", "--nb", "--close", "--no-fork", "--verbose"}, posSkip: 1, shellAfterSkip: true},
+	"command": {kind: wrapPlain, shorts: "p", stop: []string{"-v", "-V"}},
+	"builtin": {kind: wrapPlain},
+	"exec":    {kind: wrapPlain, shorts: "cl", valued: []string{"-a"}, clear: []string{"-c"}, argv0: []string{"-a"}, loginShell: []string{"-l"}},
+	// time: the bash keyword's -p and GNU time, which can write its report to a
+	// file (-o FILE, -a appends).
+	"time": {kind: wrapPlain, shorts: "pvqa", valued: []string{"-o", "-f", "--output", "--format"},
+		longs: []string{"--portability", "--verbose", "--quiet", "--append"}, outputs: map[string]Role{"-o": RoleWrite, "--output": RoleWrite}, appendOpt: []string{"-a", "--append"}},
+	// xargs: -i, -e, -l (and --replace, --eof, --max-lines) take an attached
+	// value only; -a FILE reads the operands from FILE.
+	"xargs": {kind: wrapInput, shorts: "0rtpxo", optional: "iel",
+		valued:     []string{"-n", "-I", "-P", "-a", "-s", "-L", "-d", "-E", "--max-args", "--max-procs", "--arg-file", "--delimiter", "--max-chars", "--process-slot-var"},
+		optLongs:   []string{"--replace", "--eof", "--max-lines"},
+		longs:      []string{"--null", "--no-run-if-empty", "--verbose", "--interactive", "--exit", "--open-tty"},
+		replaceOpt: []string{"-I", "-i", "--replace"},
+		outputs:    map[string]Role{"-a": RoleRead, "--arg-file": RoleRead}},
+	"chroot": {kind: wrapForeign, valued: []string{"--userspec", "--groups"}, longs: []string{"--skip-chdir"}, posSkip: 1},
+	// nsenter enters other namespaces: the child may see another file system, so
+	// its effects are foreign; --wd / -w name its folder there.
+	"nsenter": {kind: wrapForeign, shorts: "FaZ", optional: "muinpUCTrw",
+		valued:   []string{"-t", "-S", "-G", "-W", "--target", "--setuid", "--setgid", "--wdns"},
+		optLongs: []string{"--mount", "--uts", "--ipc", "--net", "--pid", "--user", "--cgroup", "--time", "--root", "--wd"},
+		longs:    []string{"--all", "--no-fork", "--preserve-credentials", "--follow-context"}, chdir: []string{"-w", "--wd"}},
+	// script [options] [FILE]: runs -c TEXT under a terminal and writes the
+	// session to FILE (typescript when absent); -O/-I/-B/-T name more logs.
+	"script": {kind: wrapPlain, shorts: "aefqh", optional: "t",
+		valued:     []string{"-c", "-E", "-m", "-o", "-O", "-I", "-B", "-T", "--command", "--echo", "--logging-format", "--output-limit", "--log-out", "--log-in", "--log-io", "--log-timing"},
+		longs:      []string{"--append", "--return", "--flush", "--force", "--quiet"},
+		optLongs:   []string{"--timing"},
+		shellOpt:   []string{"-c", "--command"},
+		outputs:    map[string]Role{"-O": RoleWrite, "--log-out": RoleWrite, "-I": RoleWrite, "--log-in": RoleWrite, "-B": RoleWrite, "--log-io": RoleWrite, "-T": RoleWrite, "--log-timing": RoleWrite},
+		appendOpt:  []string{"-a", "--append"},
+		operandOut: "typescript"},
+	// watch [options] CMD ARGS: sh -c "CMD ARGS" again and again; -x runs the
+	// words as an argv.
+	"watch": {kind: wrapPlain, shorts: "bcegtpwx", optional: "d", valued: []string{"-n", "-q", "--interval", "--equexit"},
+		longs:    []string{"--beep", "--color", "--no-color", "--errexit", "--chgexit", "--no-title", "--precise", "--no-wrap", "--exec", "--no-rerun"},
+		optLongs: []string{"--differences"}, joinShell: true, execOpt: []string{"-x", "--exec"}},
+	// uv run [options] PROGRAM: the program in the project environment.
+	"uv": {kind: wrapPlain, sub: "run", shorts: "q",
+		valued: []string{"--with", "--python", "-p", "--project", "--group", "--extra", "--env-file", "--index", "--default-index", "--with-requirements", "--directory"},
+		longs:  []string{"--quiet", "--frozen", "--locked", "--isolated", "--no-sync", "--no-project", "--active", "--no-dev", "--all-extras", "--offline", "--no-config", "--no-cache"},
+		chdir:  []string{"--directory"}, outputs: map[string]Role{"--env-file": RoleRead, "--with-requirements": RoleRead}},
+	"ssh": {kind: wrapForeign, shorts: "46AaCfGgKkMNnqsTtVvXxYy", posSkip: 1,
+		valued: []string{"-i", "-p", "-o", "-l", "-F", "-L", "-R", "-D", "-b", "-c", "-m", "-O", "-Q", "-w", "-e", "-J", "-W"}},
+	"wsl": {kind: wrapForeign, valued: []string{"-u", "-d", "--user", "--distribution"}},
+}
+
 // fl builds a flag set: valued maps a flag to its value role; the remaining
 // args are switch flags (no value, no effect) that the program accepts. Under
 // the KNOWN-is-an-allowlist rule (round 3) a program must list every flag its
@@ -313,7 +588,11 @@ func fl(valued map[string]Flag, switches ...string) map[string]Flag {
 func buildPOSIXTable() {
 	add := func(p Program) {
 		for _, n := range p.Names {
-			posixTable[n] = p
+			q := p
+			if l, ok := gnuLongOptions[n]; ok {
+				q.Longs = strings.Fields(l)
+			}
+			posixTable[n] = q
 		}
 	}
 	add(Program{Names: []string{"cat", "tac", "less", "more", "bat", "nl"}, Pos: PosAllRead,
@@ -325,7 +604,7 @@ func buildPOSIXTable() {
 	// only the flags its own GNU program accepts, so a flag of the sibling is
 	// unaccounted (rel-1-0-10 GAP-0219). install -d (make directories), -s and
 	// --strip-program (run a stripper) stay unaccounted.
-	add(Program{Names: []string{"cp"}, Pos: PosSourcesDest,
+	add(Program{Names: []string{"cp"}, Pos: PosSourcesDest, Recursive: []string{"-r", "-R", "-a", "--recursive", "--archive"},
 		Flags: fl(map[string]Flag{"-t": {Value: true, Role: RoleWrite}, "--target-directory": {Value: true, Role: RoleWrite}, "-S": {Value: true, Role: RoleIgnore}},
 			"-r", "-R", "-f", "-v", "-p", "-a", "-n", "-i", "-u", "-L", "-P", "-H", "-d", "-l", "-s", "-x", "-b", "-T",
 			"--recursive", "--force", "--preserve", "--no-clobber", "--archive", "--parents", "--no-dereference", "--dereference", "--verbose", "--update", "--symbolic-link", "--link", "--interactive")})
@@ -358,7 +637,9 @@ func buildPOSIXTable() {
 	add(Program{Names: []string{"sed"}, Pos: PosAllRead, FirstPosIgnore: true, FirstPosText: TextSed, InPlace: "-i",
 		Flags: fl(map[string]Flag{"-e": {Value: true, Text: TextSed}, "--expression": {Value: true, Text: TextSed}, "-f": {Value: true, Role: RoleRead, Text: TextScriptFile}, "--file": {Value: true, Role: RoleRead, Text: TextScriptFile}, "-l": {Value: true, Role: RoleIgnore}},
 			"-i", "-n", "-r", "-E", "-s", "-u", "-z", "--in-place", "--regexp-extended", "--quiet", "--silent", "--separate", "--null-data")})
-	add(Program{Names: []string{"awk"}, Pos: PosAllRead, FirstPosIgnore: true, FirstPosText: TextAwk,
+	// awk and its implementations: the POSIX program grammar is the same; the
+	// gawk-only options are not listed, so they leave the call unaccounted.
+	add(Program{Names: []string{"awk", "gawk", "mawk", "nawk"}, Pos: PosAllRead, FirstPosIgnore: true, FirstPosText: TextAwk,
 		Flags: fl(map[string]Flag{"-f": {Value: true, Role: RoleRead, Text: TextScriptFile}, "-v": {Value: true}, "-F": {Value: true}})})
 	add(Program{Names: []string{"tar"}, Pos: PosNone, TarStyle: true})
 	add(Program{Names: []string{"unzip"}, Pos: PosAllRead, Flags: fl(map[string]Flag{"-d": {Value: true, Role: RoleIgnore}}, "-o", "-q", "-l", "-v", "-n", "-j", "-x", "-P")})
@@ -411,8 +692,33 @@ func buildPOSIXTable() {
 			"-F": {Value: true, Role: RoleIgnore}, "-J": {Value: true, Role: RoleIgnore}, "-l": {Value: true, Role: RoleIgnore},
 			"-c": {Value: true, Role: RoleIgnore}, "-S": {Value: true, Role: RoleIgnore}},
 			"-q", "-p", "-C", "-B", "-v", "-3", "-4", "-6", "-T", "-O")})
+	// rsync (3.2 option grammar; popt takes no abbreviation). A dry run (-n,
+	// --dry-run, --list-only) writes no destination file, but its --log-file is
+	// written all the same (rel-1-0-10 GAP-0104 read, GAP-1478 write). -r / -a
+	// copy whole trees: the destination write is a subtree. Left out on purpose
+	// (unaccounted): the --delete family and --remove-source-files (they delete
+	// files the call does not name), -f/--filter (merge rules read files), and
+	// every option not listed.
+	ign := Flag{Value: true, Role: RoleIgnore}
 	add(Program{Names: []string{"rsync"}, Pos: PosSourcesDest, Remote: true,
-		Flags: map[string]Flag{"-e": {Value: true, Role: RoleExecCode}, "--rsh": {Value: true, Role: RoleExecCode}}})
+		DryRun: []string{"-n", "--dry-run", "--list-only"}, Recursive: []string{"-r", "-a", "--recursive", "--archive"},
+		Flags: fl(map[string]Flag{"-e": {Value: true, Role: RoleExecCode}, "--rsh": {Value: true, Role: RoleExecCode}, "--rsync-path": {Value: true, Role: RoleExecCode},
+			"--log-file": {Value: true, Role: RoleAppend}, "--write-batch": {Value: true, Role: RoleWrite}, "--only-write-batch": {Value: true, Role: RoleWrite},
+			"--backup-dir":   {Value: true, Role: RoleWrite},
+			"--exclude-from": {Value: true, Role: RoleRead}, "--include-from": {Value: true, Role: RoleRead}, "--password-file": {Value: true, Role: RoleRead},
+			"--exclude": ign, "--include": ign, "--bwlimit": ign, "--timeout": ign, "--contimeout": ign, "--chmod": ign, "--chown": ign,
+			"--usermap": ign, "--groupmap": ign, "--max-size": ign, "--min-size": ign, "--block-size": ign, "-B": ign, "--compress-level": ign,
+			"--compress-choice": ign, "--checksum-choice": ign, "--modify-window": ign, "--port": ign, "--info": ign, "--debug": ign,
+			"--out-format": ign, "--log-file-format": ign, "--suffix": ign, "--iconv": ign, "--partial-dir": ign, "-@": ign, "--zc": ign, "--cc": ign},
+			"-a", "-r", "-v", "-z", "-n", "-h", "-P", "-u", "-c", "-l", "-p", "-t", "-g", "-o", "-D", "-H", "-A", "-X", "-x", "-L", "-k", "-K",
+			"-S", "-W", "-q", "-i", "-m", "-R", "-E", "-O", "-J", "-U", "-N", "-b", "-d", "-y", "-s", "-8",
+			"--archive", "--recursive", "--verbose", "--compress", "--dry-run", "--list-only", "--human-readable", "--progress", "--partial",
+			"--update", "--checksum", "--links", "--perms", "--times", "--group", "--owner", "--devices", "--specials", "--hard-links",
+			"--acls", "--xattrs", "--one-file-system", "--copy-links", "--copy-dirlinks", "--keep-dirlinks", "--sparse", "--whole-file",
+			"--quiet", "--itemize-changes", "--prune-empty-dirs", "--relative", "--executability", "--omit-dir-times", "--omit-link-times",
+			"--atimes", "--crtimes", "--backup", "--dirs", "--fuzzy", "--stats", "--ignore-existing", "--existing", "--size-only",
+			"--inplace", "--append", "--append-verify", "--delay-updates", "--no-motd", "--numeric-ids", "--safe-links", "--munge-links",
+			"--protect-args", "--secluded-args", "--mkpath", "--8-bit-output", "--no-inc-recursive", "--ignore-times", "--super", "--fake-super")})
 	add(Program{Names: []string{"find"}, Pos: PosAllRead, DeleteFlag: "-delete",
 		Flags: fl(map[string]Flag{
 			"-exec": {Role: RoleExecProgram}, "-execdir": {Role: RoleExecProgram}, "-ok": {Role: RoleExecProgram}, "-okdir": {Role: RoleExecProgram},
