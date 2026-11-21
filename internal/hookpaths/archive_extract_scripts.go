@@ -145,10 +145,12 @@ func pythonArchivePath(arg, cwd, home string) (string, bool) {
 // (source, folder), or the ZipFileExtensions form (archive object, folder).
 // A path is a literal, or a string of literals and the home variables ($HOME,
 // $env:USERPROFILE, $env:HOME); the cmdlet also reads ~ and FileSystem::.
-// Input past the parser's bounds is TRUNCATED.
-func powerShellArchiveExtractions(command, cwd, home string, read *archiveExtractionScan) {
+// With windowsShell a native tar, unzip or 7z call is read too
+// (psNativeArchiveCall). Input past the parser's bounds is TRUNCATED.
+func powerShellArchiveExtractions(command, cwd, home string, windowsShell bool, read *archiveExtractionScan) {
 	lower := strings.ToLower(command)
-	if !strings.Contains(lower, "expand-archive") && !strings.Contains(lower, "extracttodirectory") || !filepath.IsAbs(cwd) {
+	native := windowsShell && psNativeExtractorWord.MatchString(lower)
+	if !native && !strings.Contains(lower, "expand-archive") && !strings.Contains(lower, "extracttodirectory") || !filepath.IsAbs(cwd) {
 		return
 	}
 	script, _ := psparse.Parse(command, psparse.Options{Dialect: psparse.DialectUnknown})
@@ -175,6 +177,16 @@ func powerShellArchiveExtractions(command, cwd, home string, read *archiveExtrac
 			return
 		}
 		name = strings.ToLower(name)
+		if native {
+			if program, ok := psNativeExtractor(name); ok {
+				psNativeArchiveCall(command, program, cwd, home, lower, read)
+				return
+			}
+			if base := strings.TrimSuffix(name[strings.LastIndexAny(name, `\/`)+1:], ".exe"); base == "cmd" {
+				psCmdArchiveCall(command, cwd, home, lower, read)
+				return
+			}
+		}
 		name = strings.TrimPrefix(name, `microsoft.powershell.archive\`)
 		if name != "expand-archive" {
 			return
@@ -342,35 +354,166 @@ func psUniqueParameter(name string) (psArchiveParameter, bool) {
 	return found, matches == 1
 }
 
+// psNativeExtractorWord is a native extractor program word in a command's
+// lower-case text: the gate of the PowerShell reading of native calls, so a
+// command that only spells tar inside another word (Start-Process, $target)
+// is not parsed again.
+var psNativeExtractorWord = lazyregexp.New(`(?:^|[\s;&|(){}'"\\/])(?:bsdtar|gtar|tar|unzip|7z[ar]?)(?:\.exe)?(?:$|[\s;&|)'"])`)
+
+// psNativeExtractor is the extractor a PowerShell command name runs: tar,
+// bsdtar, gtar, unzip or 7z, by its base name with or without a folder and
+// .exe (tar.exe, C:\Windows\System32\tar.exe).
+func psNativeExtractor(name string) (string, bool) {
+	base := strings.TrimSuffix(name[strings.LastIndexAny(name, `\/`)+1:], ".exe")
+	switch base {
+	case "tar", "bsdtar", "gtar", "unzip", "7z", "7za", "7zr":
+		return base, true
+	}
+	return "", false
+}
+
+// psNativeArchiveCall reads a native extractor call of a PowerShell command
+// with the words PowerShell hands the program (rel-1-0-10:GAP-1633): a
+// parameter token as written (-xf, -C), a literal, a home variable or a
+// string of literal runs and home variables (psNativeWord); any other value
+// is a word with no static spelling. The words after --% are passed as they
+// are written. A whole archive the command names again before the call (a
+// Copy-Item onto it) is staged, as the Expand-Archive reading has it
+// (rel-1-0-10:GAP-1224).
+func psNativeArchiveCall(command *psparse.Command, program, cwd, home, lower string, read *archiveExtractionScan) {
+	words, static := []string{program}, []bool{true}
+	add := func(word string, known bool) {
+		if !known {
+			word = ""
+		}
+		words, static = append(words, word), append(static, known)
+	}
+	for _, element := range command.Elements {
+		switch value := element.(type) {
+		case *psparse.Parameter:
+			// -C:value reaches the program as one word this reading does
+			// not split.
+			add(value.Raw, !value.HasColon)
+		case *psparse.Arg:
+			add(psNativeWord(value.Value, home))
+		case psparse.Expr:
+			add(psNativeWord(value, home))
+		}
+	}
+	for _, field := range strings.Fields(command.StopParsing) {
+		add(psSlashWord(field), true)
+	}
+	psNativeArchiveWords(words, static, cwd, lower, read)
+}
+
+// psNativeArchiveWords reads the words of one native extractor call; a whole
+// archive the command names again before the call (a Copy-Item onto it) is
+// staged, as the Expand-Archive reading has it (rel-1-0-10:GAP-1224).
+func psNativeArchiveWords(words []string, static []bool, cwd, lower string, read *archiveExtractionScan) {
+	first := len(read.whole)
+	archiveCallExtractions(words, static, cwd, read)
+	for index := first; index < len(read.whole); index++ {
+		if strings.Count(lower, strings.ToLower(filepath.Base(read.whole[index].Archive))) > 1 {
+			read.whole[index].staged = true
+		}
+	}
+}
+
+// psCmdArchiveCall reads cmd /c (or /k) running a native extractor from a
+// PowerShell command: the words after /c, one quoted body or several words,
+// are split at blanks, and %USERPROFILE% or %HOMEDRIVE%%HOMEPATH% at the
+// start of a word is the home, as cmd expands it (rel-1-0-10:GAP-1633). A
+// value with no static spelling, or an option before /c this reading does not
+// know, leaves the call unread.
+func psCmdArchiveCall(command *psparse.Command, cwd, home, lower string, read *archiveExtractionScan) {
+	var body []string
+	inBody := false
+	for _, element := range command.Elements {
+		var word string
+		var ok bool
+		switch value := element.(type) {
+		case *psparse.Parameter:
+			word, ok = value.Raw, !value.HasColon
+		case *psparse.Arg:
+			word, ok = psPathText(value.Value, home)
+		case psparse.Expr:
+			word, ok = psPathText(value, home)
+		}
+		if !ok {
+			return
+		}
+		if inBody {
+			body = append(body, word)
+			continue
+		}
+		switch strings.ToLower(word) {
+		case "/c", "/k":
+			inBody = true
+		case "/d", "/s", "/q":
+		default:
+			return
+		}
+	}
+	fields := strings.Fields(strings.ReplaceAll(strings.Join(body, " "), `"`, ""))
+	if len(fields) == 0 {
+		return
+	}
+	program, ok := psNativeExtractor(strings.ToLower(fields[0]))
+	if !ok {
+		return
+	}
+	words, static := []string{program}, []bool{true}
+	for _, field := range fields[1:] {
+		if home != "" {
+			for _, prefix := range []string{"%userprofile%", "%homedrive%%homepath%"} {
+				if len(field) >= len(prefix) && strings.EqualFold(field[:len(prefix)], prefix) &&
+					(len(field) == len(prefix) || field[len(prefix)] == '\\' || field[len(prefix)] == '/') {
+					field = home + field[len(prefix):]
+					break
+				}
+			}
+		}
+		if strings.Contains(field, "%") {
+			// Another variable: no static spelling.
+			words, static = append(words, ""), append(static, false)
+			continue
+		}
+		words, static = append(words, psSlashWord(field)), append(static, true)
+	}
+	psNativeArchiveWords(words, static, cwd, lower, read)
+}
+
+// psNativeWord is one PowerShell value as the word a native program gets:
+// psPathText, with ~ at its start read as the home (as the cmdlet paths
+// have it) and, on a POSIX gateway judging a Windows hook call, the
+// backslash read as the separator it is there.
+func psNativeWord(value psparse.Expr, home string) (string, bool) {
+	text, ok := psPathText(value, home)
+	if !ok {
+		return "", false
+	}
+	if home != "" && (text == "~" || strings.HasPrefix(text, `~\`) || strings.HasPrefix(text, "~/")) {
+		text = home + text[1:]
+	}
+	return psSlashWord(text), true
+}
+
+// psSlashWord reads a backslash as the separator on a POSIX gateway; a
+// Windows gateway's filepath reads both.
+func psSlashWord(text string) string {
+	if filepath.Separator == '/' {
+		return strings.ReplaceAll(text, `\`, "/")
+	}
+	return text
+}
+
 // psArchivePath places one PowerShell path value in cwd: a literal, a home
 // variable, or a string of literal runs and home variables. cmdlet reads
 // the provider forms (~, FileSystem::) a cmdlet path takes and a .NET call
 // does not.
 func psArchivePath(value psparse.Expr, cwd, home string, cmdlet bool) (string, bool) {
-	text, ok := psparse.LiteralString(value)
-	switch expression := value.(type) {
-	case *psparse.Variable:
-		if !psHomeVariable(expression) || home == "" {
-			return "", false
-		}
-		text, ok = home, true
-	case *psparse.StringLit:
-		if !ok && !expression.Static {
-			var built strings.Builder
-			for _, part := range expression.Parts {
-				switch {
-				case part.Expr == nil:
-					built.WriteString(part.Lit)
-				case home != "" && psHomeVariable(part.Expr):
-					built.WriteString(home)
-				default:
-					return "", false
-				}
-			}
-			text, ok = built.String(), true
-		}
-	}
-	if !ok || text == "" {
+	text, ok := psPathText(value, home)
+	if !ok {
 		return "", false
 	}
 	if cmdlet {
@@ -383,8 +526,50 @@ func psArchivePath(value psparse.Expr, cwd, home string, cmdlet bool) (string, b
 		if home != "" && (text == "~" || strings.HasPrefix(text, `~\`) || strings.HasPrefix(text, "~/")) {
 			text = home + text[1:]
 		}
+		// A provider path takes the backslash as its separator on every
+		// host, as PowerShell on Linux and macOS reads it too
+		// (rel-1-0-10:GAP-1633).
+		text = psSlashWord(text)
 	}
 	return filepath.Clean(OperandPath(text, cwd)), true
+}
+
+// psPathText is the text of one PowerShell value: a literal, a home
+// variable, or a string of literal runs and home variables.
+func psPathText(value psparse.Expr, home string) (string, bool) {
+	text, ok := psparse.LiteralString(value)
+	switch expression := value.(type) {
+	case *psparse.Variable:
+		if !psHomeVariable(expression) || home == "" {
+			return "", false
+		}
+		text, ok = home, true
+	case *psparse.StringLit:
+		if !ok && !expression.Static {
+			var built strings.Builder
+			// A bare word PowerShell fuses from adjacent atoms
+			// ($env:USERPROFILE\.defenseclaw) has each atom as a part: a
+			// literal atom is its text (rel-1-0-10:GAP-1633).
+			for _, part := range expression.Parts {
+				literal, isLiteral := psparse.LiteralString(part.Expr)
+				switch {
+				case part.Expr == nil:
+					built.WriteString(part.Lit)
+				case home != "" && psHomeVariable(part.Expr):
+					built.WriteString(home)
+				case isLiteral:
+					built.WriteString(literal)
+				default:
+					return "", false
+				}
+			}
+			text, ok = built.String(), true
+		}
+	}
+	if !ok || text == "" {
+		return "", false
+	}
+	return text, true
 }
 
 // psHomeVariable reports $HOME, $env:USERPROFILE or $env:HOME.

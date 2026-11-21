@@ -98,7 +98,7 @@ func TestGAP1173ReadArchiveExtractions(t *testing.T) {
 		{"ZipFile tilde is a folder", `[IO.Compression.ZipFile]::ExtractToDirectory('a.zip', '~')`, []string{filepath.Join(cwd, "~")}, nil, []whole{{filepath.Join(cwd, "~"), archive("a.zip")}}},
 	} {
 		t.Run(row.name, func(t *testing.T) {
-			read := ReadArchiveExtractions(row.command, cwd, home)
+			read := ReadArchiveExtractions(row.command, cwd, home, false)
 			if !slices.Equal(read.Paths, row.paths) {
 				t.Errorf("paths %q, want %q", read.Paths, row.paths)
 			}
@@ -148,7 +148,7 @@ func TestGAP1173ArchiveWholeLanding(t *testing.T) {
 		{"missing", "tar -xf gone.tar -C '" + home + "'", false, false},
 	} {
 		t.Run(row.name, func(t *testing.T) {
-			read := ReadArchiveExtractions(row.command, dir, home)
+			read := ReadArchiveExtractions(row.command, dir, home, false)
 			if len(read.Whole) != 1 {
 				t.Fatalf("whole %v", read.Whole)
 			}
