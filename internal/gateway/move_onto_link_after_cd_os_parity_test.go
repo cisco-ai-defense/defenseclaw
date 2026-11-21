@@ -15,6 +15,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // moveOntoLinkParityRow is one shell call of a per-user action-mode
@@ -58,9 +59,7 @@ func judgeMoveOntoLinkParityRows(t *testing.T, rows []moveOntoLinkParityRow) {
 	}
 	for link, target := range map[string]string{"slink": keys, "tlink": filepath.Join(project, "ordinary", "f.txt"),
 		"sdlink": state, "dssh": filepath.Dir(keys)} {
-		if err := os.Symlink(target, filepath.Join(project, link)); err != nil {
-			t.Fatal(err)
-		}
+		testenv.Symlink(t, target, filepath.Join(project, link))
 	}
 	if runtime.GOOS == "windows" {
 		if out, err := exec.Command("cmd", "/c", "mklink", "/J", filepath.Join(project, "jssh"), filepath.Dir(keys)).CombinedOutput(); err != nil {
