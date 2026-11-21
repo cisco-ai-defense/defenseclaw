@@ -667,18 +667,7 @@ func (e judgeCallEffects) redacted() judgeCallEffects {
 // redacted, and with the sample's delimiters replaced so it cannot look like
 // the sample's end.
 func toolResultSectionText(value string) string {
-	return neutralizeToolResultMarker(toolResultSampleDelims.Replace(redactToolResultCall(value)))
-}
-
-// toolResultMarkerRe matches the phrase that opens the gateway's own note
-// (toolResultContextNote), in any case and spacing.
-var toolResultMarkerRe = lazyregexp.New(`(?i)context\s+from\s+defenseclaw`)
-
-// neutralizeToolResultMarker rewrites the gateway's marker phrase in session
-// text, as the sample delimiters are, so text the session wrote cannot pose
-// as the gateway's note inside a section (rel-1-0-10:GAP-0714).
-func neutralizeToolResultMarker(value string) string {
-	return toolResultMarkerRe.ReplaceAllString(value, "[quoted: context from defenseclaw]")
+	return toolResultSampleDelims.Replace(redactToolResultCall(value))
 }
 
 var toolResultSampleDelims = strings.NewReplacer("<<<", "‹‹‹", ">>>", "›››")
@@ -693,7 +682,7 @@ func toolResultHeaderValue(value string, maxBytes int) string {
 		return r
 	}, value)
 	value = strings.Join(strings.Fields(value), " ")
-	value = neutralizeToolResultMarker(toolResultSampleDelims.Replace(value))
+	value = toolResultSampleDelims.Replace(value)
 	if len(value) > maxBytes {
 		value = utf8SafePrefix(value, maxBytes) + " [truncated]"
 	}
