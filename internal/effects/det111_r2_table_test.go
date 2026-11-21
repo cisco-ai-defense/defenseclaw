@@ -5,6 +5,9 @@
 package effects
 
 import (
+	"bufio"
+	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 )
@@ -73,4 +76,37 @@ func TestDET111R2SevenZipDynamicFusedOutputTableRole(t *testing.T) {
 	if !outputTree {
 		t.Fatalf("7z dynamic output roles = %#v; want an unresolved subtree write", ops)
 	}
+}
+
+func TestDET111R2BSDSedInPlaceFromCorpus(t *testing.T) {
+	f, err := os.Open("testdata/det111_r2.cases.jsonl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 64*1024), 2*1024*1024)
+	for sc.Scan() {
+		var c det111R2CorpusCase
+		if err := json.Unmarshal(sc.Bytes(), &c); err != nil {
+			t.Fatal(err)
+		}
+		if c.ID != "det111/GAP-1500/bsd-I-p/var" {
+			continue
+		}
+		cmd := strings.Replace(c.Payload.Command, "sed ", "/usr/bin/sed ", 1)
+		o := det111R2Options(c.Payload)
+		o.BSDUserland = true
+		r := Extract(Call{Surface: SurfaceShell, Tool: "shell", Command: cmd, Workdir: c.Payload.CWD}, o)
+		for _, e := range r.Effects {
+			if e.Kind == KindWrite && e.TargetState == TargetStateKnown && strings.Contains(e.Target.Path, "/.claude/settings.json") {
+				return
+			}
+		}
+		t.Fatalf("BSD sed -I did not write the protected corpus target\n%s", fmtRes(r))
+	}
+	if err := sc.Err(); err != nil {
+		t.Fatal(err)
+	}
+	t.Fatal("GAP-1500 BSD -I corpus row missing")
 }

@@ -2181,7 +2181,7 @@ func (w *walker) classifyOperands(words []Word, p Program, dialect Dialect) ([]o
 			i++
 			continue
 		}
-		if p.InPlace != "" && (fname == p.InPlace || fname == "--in-place" || strings.HasPrefix(fname, "--in-place=")) {
+		if isInPlaceFlag(p, fname) || fname == "--in-place" || strings.HasPrefix(fname, "--in-place=") {
 			inPlace = true
 		}
 		if p.DeleteFlag != "" && fname == p.DeleteFlag {
@@ -2298,6 +2298,18 @@ func (w *walker) classifyOperands(words []Word, p Program, dialect Dialect) ([]o
 		out = append(out, op)
 	}
 	return out, inner, unknownFlag
+}
+
+func isInPlaceFlag(p Program, name string) bool {
+	if p.InPlace == name {
+		return true
+	}
+	for _, flag := range p.InPlaceFlags {
+		if flag == name {
+			return true
+		}
+	}
+	return false
 }
 
 // hasRowFlag reports one of the row options names among the words, before
@@ -2502,7 +2514,7 @@ func (w *walker) splitShortFlags(name string, words []Word, i *int, p Program, o
 	body := name[1:]
 	for j := 0; j < len(body); j++ {
 		fn := "-" + string(body[j])
-		if fn == p.InPlace {
+		if isInPlaceFlag(p, fn) {
 			*inPlace = true
 		}
 		fl, ok := flagLookup(p, fn, DialectPOSIX)

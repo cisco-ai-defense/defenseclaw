@@ -118,7 +118,8 @@ type Program struct {
 	ShellCode      bool     // the code operand is shell text we can unwrap
 	FirstPosIgnore bool     // first positional is a script/pattern, not a path (sed/grep)
 	FirstPosText   TextKind // the grammar that must accept that first positional (sed script, awk program, grep pattern)
-	InPlace        string   // flag that turns read positionals into writes (sed -i)
+	InPlace        string   // primary flag that turns read positionals into writes (sed -i)
+	InPlaceFlags   []string // additional table flags with the same role, e.g. BSD sed -I
 	DeleteFlag     string   // flag that adds a delete of the positionals (find -delete)
 	Remote         bool     // a host:path operand is a remote target (scp/rsync)
 	CmdC           bool     // /c|/k payload is an inner command to unwrap (cmd.exe)
@@ -353,6 +354,14 @@ func buildBSDTable() {
 	bsd("install", fl(map[string]Flag{"-B": ign, "-f": ign, "-g": ign, "-h": ign, "-m": ign, "-o": ign, "-T": ign},
 		"-b", "-C", "-c", "-p", "-S", "-U", "-v"))
 	bsd("tee", fl(nil, "-a", "-i"))
+	bsd("sed", map[string]Flag{
+		"-e": {Value: true, Text: TextSed}, "-f": {Value: true, Role: RoleRead, Text: TextScriptFile},
+		"-i": {Value: true, Role: RoleIgnore}, "-I": {Value: true, Role: RoleIgnore}, "-l": {Value: true, Role: RoleIgnore},
+		"-E": {}, "-n": {}, "-u": {}, "-a": {},
+	})
+	p := bsdTable["sed"]
+	p.InPlaceFlags = []string{"-I"}
+	bsdTable["sed"] = p
 }
 
 type wrapperKind int
