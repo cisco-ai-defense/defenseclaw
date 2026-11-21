@@ -3754,7 +3754,13 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 			if req.ContentFromResultField {
 				intentText = ""
 			}
-			a.observeUserTurn(ctx, intentText, scopeText, req.CWD, verdict)
+			// Hermes says which platform the turn came from: a messaging
+			// party's turn is never the task (GAP-1637).
+			sender := hookTurnSender(req.ConnectorName, req.Payload)
+			if sender == judgeTurnSenderRemote {
+				intentText = ""
+			}
+			a.observeUserTurn(withJudgeTurnSender(ctx, req.ConnectorName, sender), intentText, scopeText, req.CWD, verdict)
 			a.observeAlignmentTurn(ctx, req.ConnectorName, intentText, verdict)
 		}
 	case isResultLikeEvent(req.HookEventName):

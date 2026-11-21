@@ -2416,6 +2416,10 @@ func (j *LLMJudge) toolJudgeContextSample(ctx context.Context, toolName, args st
 	// TARGET_HISTORY: what this session did earlier to the call's targets.
 	// The intent store has no place for it (judge_packet.go).
 	targetHistory := j.judgeTargets().record(sessionID, effects, time.Now())
+	// A remote chat party may have written the task: unless the connector
+	// said the owner typed it (GAP-1637), it scopes nothing for the judge
+	// (toolJudgeUnverifiedIntentNote) and the decision model does not get it.
+	intentUnverified := judgeTaskOwnerUnknown(ctx) && !j.sessionTaskFromOwner(sessionID)
 
 	var sample strings.Builder
 	if entry.UserIntent != "" {
@@ -2427,9 +2431,7 @@ func (j *LLMJudge) toolJudgeContextSample(ctx context.Context, toolName, args st
 			targets = strings.Join(named, ", ")
 		}
 		attrs := fmt.Sprintf("untrusted=\"true\" named_targets=%q", targets)
-		if judgeTaskOwnerUnknown(ctx) {
-			// A remote chat party may have written the task: it scopes
-			// nothing for the judge (toolJudgeUnverifiedIntentNote).
+		if intentUnverified {
 			attrs = toolJudgeIntentUnverifiedAttr + " " + attrs
 		}
 		writeToolJudgeSection(&sample, nonce, "SESSION_USER_INTENT", attrs, entry.UserIntent)
@@ -2452,6 +2454,9 @@ func (j *LLMJudge) toolJudgeContextSample(ctx context.Context, toolName, args st
 			SessionUserIntent: entry.UserIntent,
 			CurrentToolCall:   decisionModelToolCall{Tool: sanitizeToolName(toolName), Arguments: current},
 			SessionHistory:    j.renderDecisionHistory(ctx),
+		}
+		if intentUnverified {
+			state.SessionUserIntent = ""
 		}
 		j.recordDecisionHistory(ctx, decisionHistoryEvent{kind: 'c', tool: sanitizeToolName(toolName), text: args})
 		for _, event := range prior {
@@ -2580,7 +2585,11 @@ func (j *LLMJudge) ObserveSessionPrompt(ctx context.Context, content string) {
 // kernel-verified hook peer, or the account a per-user credential is bound
 // to) plus the session's state key, so another account that sends the same
 // session id can neither read, write nor reset it (GAP-0460). On a per-user
-// gateway, which has no verified caller, it is the state key as before.
+// gateway, which runs as its one user and has no verified caller, the
+// state key is the user's. The canonical connector the request came through
+// (judgeSessionConnector) is part of the key too, so two connectors, or a
+// connector and an unscoped caller, that send the same session id never
+// share a task, calls or decision history (GAP-0152).
 func judgeSessionKey(ctx context.Context) string {
 	return judgeSessionKeyFor(ctx, SessionIDFromContext(ctx))
 }
@@ -2589,6 +2598,9 @@ func judgeSessionKeyFor(ctx context.Context, sessionID string) string {
 	key := sandboxSessionStateKey(ctx, sessionID)
 	if key == "" {
 		return ""
+	}
+	if connectorName := judgeSessionConnector(ctx); connectorName != "" {
+		key = "connector\x00" + connectorName + "\x00" + key
 	}
 	if caller, ok := verifiedAuditCaller(ctx); ok && caller.ID != "" {
 		return "caller\x00" + caller.ID + "\x00" + key

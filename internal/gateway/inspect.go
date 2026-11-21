@@ -2903,7 +2903,10 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.Connector = serverConnector
-	r = r.WithContext(openClawInspectIdentity(r.Context(), serverConnector))
+	// The judge keeps the session's task and calls under the connector the
+	// call is scoped to (judgeSessionKeyFor), the one the OpenClaw event
+	// router names for its own turns (GAP-0152).
+	r = r.WithContext(withJudgeSessionConnector(openClawInspectIdentity(r.Context(), serverConnector), serverConnector))
 	r = r.WithContext(withCascadeTrace(r.Context(), a.decisionConfig(r.Context()), serverConnector))
 
 	ctx, cancel := context.WithTimeout(r.Context(), a.inspectScanBudget())

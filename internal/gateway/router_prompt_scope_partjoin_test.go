@@ -39,7 +39,7 @@ func TestScanInboundPromptScopeReadsTheJoinedPartsVerdict(t *testing.T) {
 			}
 			sessionID := fmt.Sprintf("agent:main:pj-scope-%s-%d", tc.rule, n)
 			r.scanInboundPrompt(sessionID, "", "gpt-5.5", content)
-			if !judge.sessionTaskCleared(sessionID) {
+			if !judge.sessionTaskCleared(judgeSessionKey(openClawJudgeContext(sessionID))) {
 				t.Errorf("%s %d parts: a prompt whose joined parts the local scan blocks was recorded as the session task", tc.row, n)
 			}
 		}
@@ -52,7 +52,7 @@ func TestScanInboundPromptScopeReadsTheJoinedPartsVerdict(t *testing.T) {
 	}
 	const benignSession = "agent:main:pj-scope-benign"
 	r.scanInboundPrompt(benignSession, "", "gpt-5.5", benign)
-	if judge.sessionTaskCleared(benignSession) {
+	if judge.sessionTaskCleared(judgeSessionKey(openClawJudgeContext(benignSession))) {
 		t.Error("control: a benign block-array prompt was not recorded as the session task")
 	}
 }
