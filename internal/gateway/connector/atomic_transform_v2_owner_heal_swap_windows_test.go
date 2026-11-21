@@ -83,14 +83,17 @@ func gap1651SystemOnlyVictim(t *testing.T) (root, file string) {
 func TestGAP1651SwapBetweenFolderCheckAndFileOpenHandsNothingOver(t *testing.T) {
 	for _, tc := range []struct {
 		name string
+		// pinned: the heal holds this folder without delete sharing, so
+		// the rename itself must be refused.
+		pinned bool
 		// swapped returns the path to move away and the victim folder the
 		// junction left in its place points at.
 		swapped func(codexDir, victimRoot string) (from, target string)
 	}{
-		{"folder", func(codexDir, victimRoot string) (string, string) {
+		{"folder", true, func(codexDir, victimRoot string) (string, string) {
 			return codexDir, filepath.Join(victimRoot, ".codex")
 		}},
-		{"ancestor", func(codexDir, victimRoot string) (string, string) {
+		{"ancestor", false, func(codexDir, victimRoot string) (string, string) {
 			return filepath.Dir(codexDir), victimRoot
 		}},
 	} {
@@ -126,6 +129,9 @@ func TestGAP1651SwapBetweenFolderCheckAndFileOpenHandsNothingOver(t *testing.T) 
 				t.Fatalf("swap: junction %s -> %s: %v\n%s", from, target, junctionErr, junctionOut)
 			}
 			t.Logf("swap rename of %s: %v; heal: %v", from, renameErr, healErr)
+			if tc.pinned && renameErr == nil {
+				t.Errorf("the folder was renamed while the heal held it; want the rename refused")
+			}
 			if owner := gap1651OwnerOf(t, victim); owner == nil || !owner.IsWellKnown(windows.WinLocalSystemSid) {
 				t.Fatalf("GAP-1651 TOCTOU: a %s swap after the folder check handed the SYSTEM-only file %s to the account (owner now %v)",
 					tc.name, victim, owner)

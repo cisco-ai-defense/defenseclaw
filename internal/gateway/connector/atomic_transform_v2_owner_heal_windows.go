@@ -61,7 +61,11 @@ func healAtomicTransformV2ConfigLeftToAdmin(path string) error {
 	folder, name := filepath.Dir(path), filepath.Base(path)
 	var previous *windows.SID
 	repairErr := runWindowsManagedPrivilegedRepair(func() error {
-		dir, err := openWindowsManagedRepairHandleShared(folder, true, windows.READ_CONTROL,
+		// FILE_LIST_DIRECTORY makes the open take part in share checks (an
+		// open for attributes and READ_CONTROL only does not), so leaving out
+		// FILE_SHARE_DELETE really refuses a rename or delete of the folder.
+		dir, err := openWindowsManagedRepairHandleShared(folder, true,
+			windows.READ_CONTROL|windows.FILE_LIST_DIRECTORY,
 			windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE)
 		if err != nil {
 			return err
