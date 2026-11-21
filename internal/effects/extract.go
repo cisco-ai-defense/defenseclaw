@@ -2285,9 +2285,17 @@ func (w *walker) classifyOperands(words []Word, p Program, dialect Dialect) ([]o
 			endOpts = endOpts || p.OptionsFirst
 			continue
 		}
-		// PowerShell / long --flag=value and -Param:Value inline value.
-		fname, inlineVal, hasInline := splitInlineFlagValue(name, dialect)
-		inlineWord := Word{Value: inlineVal, Static: true}
+		// A native -xVALUE value comes before PowerShell's -Name:Value syntax:
+		// the colon after a drive letter belongs to the attached path.
+		fname, inlineVal, hasInline := name, "", false
+		inlineWord := Word{}
+		if flag, value, attached := splitAttachedNativeValue(name, p, dialect); attached {
+			fname, inlineWord, hasInline = flag, value, true
+			inlineVal = value.Value
+		} else {
+			fname, inlineVal, hasInline = splitInlineFlagValue(name, dialect)
+			inlineWord = Word{Value: inlineVal, Static: true}
+		}
 		if dynamicInline {
 			fname, inlineWord, hasInline = name, dynamicValue, true
 			inlineVal = dynamicValue.Value
@@ -2649,6 +2657,22 @@ func splitDynamicAttachedFlag(wd Word, p Program, dialect Dialect) (string, Word
 		return "", Word{}, false
 	}
 	return best, attachedValueWord(name[len(best):], wd), true
+}
+
+// splitAttachedNativeValue consumes -xVALUE for a one-letter table option in
+// CMD/PowerShell native argument grammars. POSIX short clusters stay with
+// splitShortFlags so their left-to-right value and unknown-flag rules apply.
+func splitAttachedNativeValue(name string, p Program, dialect Dialect) (string, Word, bool) {
+	if dialect == DialectPOSIX || (dialect != DialectCMD && dialect != DialectPowerShell) ||
+		len(name) <= 2 || name[0] != '-' || strings.HasPrefix(name, "--") {
+		return "", Word{}, false
+	}
+	for flag, fl := range p.Flags {
+		if len(flag) == 2 && flag[0] == '-' && fl.Value && strings.EqualFold(name[:2], flag) {
+			return flag, Word{Value: name[2:], Static: true}, true
+		}
+	}
+	return "", Word{}, false
 }
 
 // splitInlineFlagValue splits --flag=value and PowerShell -Name:value.

@@ -110,3 +110,24 @@ func TestDET111R2BSDSedInPlaceFromCorpus(t *testing.T) {
 	}
 	t.Fatal("GAP-1500 BSD -I corpus row missing")
 }
+
+func TestDET111R2SevenZipPSFusedOutputEndToEnd(t *testing.T) {
+	o := Options{
+		Flavor: FlavorWindows, Dialect: DialectPowerShell,
+		Home: `C:\Users\alice`, CWD: `C:\Users\alice\proj`,
+		Env: map[string]string{"HOME": `C:\Users\alice`, "USERPROFILE": `C:\Users\alice`},
+	}
+	command := `7z x a.7z -o$env:USERPROFILE\.defenseclaw`
+	r := Extract(Call{Surface: SurfaceShell, Tool: "PowerShell", Workdir: o.CWD, Command: command}, o)
+	for _, e := range r.Effects {
+		if e.Kind != KindWrite || !e.Target.Subtree {
+			continue
+		}
+		for _, spelling := range []string{e.Target.Path, e.Target.Spelling, e.Target.Glob} {
+			if strings.Contains(strings.ToLower(spelling), ".defenseclaw") {
+				return
+			}
+		}
+	}
+	t.Fatalf("fused PowerShell -o target did not reach the 7z subtree-write row\n%s", fmtRes(r))
+}
