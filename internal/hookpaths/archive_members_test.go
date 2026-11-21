@@ -72,16 +72,16 @@ func TestArchiveExtractionPathsJoinTheMember(t *testing.T) {
 		commands = append(commands, `tar -xf /tmp/a.tar --directory=`+home+` ./.defenseclaw/config.yaml`)
 	}
 	for _, command := range commands {
-		if got := ArchiveExtractionPaths(command, cwd, home); !slices.Equal(got, want) {
+		if got := ReadArchiveExtractions(command, cwd, home, false).Paths; !slices.Equal(got, want) {
 			t.Errorf("%s: paths %q, want %q", command, got, want)
 		}
 	}
 	// A member that climbs out of the working folder lands where it says.
-	if got := ArchiveExtractionPaths(`tar -xf /tmp/a.tar ../.defenseclaw/config.yaml`, cwd, home); !slices.Contains(got, want[1]) {
+	if got := ReadArchiveExtractions(`tar -xf /tmp/a.tar ../.defenseclaw/config.yaml`, cwd, home, false).Paths; !slices.Contains(got, want[1]) {
 		t.Errorf("a member below .. : paths %q, want %q among them", got, want[1])
 	}
 	// No member: the folder alone, as before.
-	if got := ArchiveExtractionPaths(`tar -xf /tmp/a.tar -C ~`, cwd, home); !slices.Equal(got, []string{home}) {
+	if got := ReadArchiveExtractions(`tar -xf /tmp/a.tar -C ~`, cwd, home, false).Paths; !slices.Equal(got, []string{home}) {
 		t.Errorf("no member list: paths %q, want the folder alone", got)
 	}
 }

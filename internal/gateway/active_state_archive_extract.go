@@ -177,7 +177,10 @@ func readArchiveState(facts actionfacts.Facts, request trustedActionRequest) arc
 	if !ok {
 		return archiveStateReading{}
 	}
-	read := hookpaths.ReadArchiveExtractions(command, facts.CWD, strings.TrimRight(facts.ActiveHome, "/"))
+	// A Windows hook host runs the call in a native Windows shell: its tar,
+	// unzip and 7z words are read as PowerShell hands them too
+	// (rel-1-0-10:GAP-1633).
+	read := hookpaths.ReadArchiveExtractions(command, facts.CWD, strings.TrimRight(facts.ActiveHome, "/"), request.Input.WindowsHookHost)
 	reading := archiveStateReading{caps: read.Caps}
 	for _, full := range read.Paths {
 		if judge.reaches(full) {

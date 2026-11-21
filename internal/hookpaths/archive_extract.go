@@ -184,31 +184,6 @@ func cpioDestinations(words []string) []string {
 	return nil
 }
 
-// ArchiveExtractionPaths returns the absolute paths the archive extractions
-// of a shell command write: each folder (ArchiveExtractionDestinations) and
-// each member the extraction names, joined below it and normalized
-// (ArchiveExtractionMembers), so `tar -xf a.tar -C ~ .defenseclaw/config.yaml`
-// is a write of that file (rel-1-0-10:GAP-0142). Each word is expanded as the
-// shell would from the home alone (quotes, ~/, $HOME; a word with any other
-// expansion is skipped) and a relative folder is placed in cwd. A leading
-// sudo, env, nice, nohup, time, command, exec or timeout is looked through. It
-// is nil when the command does not parse.
-func ArchiveExtractionPaths(command, cwd, home string) []string {
-	paths, _ := ArchiveExtractionReading(command, cwd, home)
-	return paths
-}
-
-// ArchiveExtractionReading is ArchiveExtractionPaths with the caps the
-// reading hit. A shell -c body (and su -c, script -c, ssh) is read as a
-// command of its own down to InlineMaxShellDepth levels; a body nested deeper,
-// or a wrapper chain longer than actionfacts.InlineChainRounds, is TRUNCATED
-// (bound rule, cap depth): what it extracts is unknown
-// (rel-1-0-10:GAP-0663).
-func ArchiveExtractionReading(command, cwd, home string) ([]string, bounded.CapSet) {
-	read := ReadArchiveExtractions(command, cwd, home)
-	return read.Paths, read.Caps
-}
-
 // ArchiveExtractions is what the archive extractions of one command write
 // (ReadArchiveExtractions).
 type ArchiveExtractions struct {
@@ -292,16 +267,33 @@ func (whole ArchiveWhole) Landing() (paths []string, present, listed bool) {
 }
 
 // ReadArchiveExtractions reads the archive extractions of a command: the
-// shell calls ArchiveExtractionReading reads (tar, unzip, 7z, cpio, ditto,
-// and python -c code that calls tarfile, zipfile or shutil.unpack_archive)
-// and, on a command that names one, the PowerShell Expand-Archive and
-// ZipFile ExtractToDirectory calls (rel-1-0-10:GAP-1173).
-func ReadArchiveExtractions(command, cwd, home string) ArchiveExtractions {
+// shell calls (tar, unzip, 7z, cpio, ditto, and python -c code that calls
+// tarfile, zipfile or shutil.unpack_archive) and, on a command that names
+// one, the PowerShell Expand-Archive and ZipFile ExtractToDirectory calls
+// (rel-1-0-10:GAP-1173). Paths are the absolute paths they write: each folder
+// (ArchiveExtractionDestinations) and each member the extraction names,
+// joined below it and normalized (ArchiveExtractionMembers), so
+// `tar -xf a.tar -C ~ .defenseclaw/config.yaml` is a write of that file
+// (rel-1-0-10:GAP-0142). Each shell word is expanded as the shell would from
+// the home alone (quotes, ~/, $HOME; a word with any other expansion is
+// skipped) and a relative folder is placed in cwd. A leading sudo, env, nice,
+// nohup, time, command, exec or timeout is looked through. A shell -c body
+// (and su -c, script -c, ssh) is read as a command of its own down to
+// InlineMaxShellDepth levels; a body nested deeper, or a wrapper chain longer
+// than actionfacts.InlineChainRounds, is TRUNCATED (bound rule, cap depth) in
+// Caps: what it extracts is unknown (rel-1-0-10:GAP-0663). windowsShell says
+// the command runs in a native Windows shell (a Windows hook host): its tar,
+// unzip and 7z calls are then also read with PowerShell words, so a
+// backslash folder (tar -xf x.tar -C C:\Users\u\.defenseclaw, or
+// $env:USERPROFILE\.defenseclaw, ~\.defenseclaw) is the folder PowerShell
+// hands the program, where the POSIX reading of the same text drops the
+// backslashes and the $env: word (rel-1-0-10:GAP-1633).
+func ReadArchiveExtractions(command, cwd, home string, windowsShell bool) ArchiveExtractions {
 	var read archiveExtractionScan
 	if file, parsed := parseShell(command); parsed && filepath.IsAbs(cwd) {
 		archiveWalk(file, command, cwd, home, 0, &read)
 	}
-	powerShellArchiveExtractions(command, cwd, home, &read)
+	powerShellArchiveExtractions(command, cwd, home, windowsShell, &read)
 	return ArchiveExtractions{Paths: read.paths, Unknown: read.unknown, Whole: read.whole, Caps: read.trunc.Set()}
 }
 
@@ -309,7 +301,54 @@ func ReadArchiveExtractions(command, cwd, home string) ArchiveExtractions {
 type archiveExtractionScan struct {
 	paths, unknown []string
 	whole          []ArchiveWhole
+	listings       []archiveListingSpan
 	trunc          bounded.Truncated
+}
+
+// archiveListingSpan is the byte range of a tar listing call (tar -tf x.tar,
+// actionTarListsOnly) in the text it was read from.
+type archiveListingSpan struct {
+	text       string
+	start, end int
+}
+
+// archiveListing reports a tar call that only lists an archive: every word
+// static and actionTarListsOnly. It reads the archive and writes no file.
+func archiveListing(words []string, static []bool) bool {
+	switch strings.ToLower(strings.TrimSuffix(filepath.Base(words[0]), ".exe")) {
+	case "tar", "gtar", "bsdtar":
+	default:
+		return false
+	}
+	for _, known := range static {
+		if !known {
+			return false
+		}
+	}
+	return actionTarListsOnly(words[1:])
+}
+
+// textBefore is text up to at with the tar listings read from it that end
+// there blanked: a mention of an archive in a listing of it is a read, not a
+// write that may stage it (rel-1-0-10:GAP-1662).
+func (read *archiveExtractionScan) textBefore(text string, at int) string {
+	before := text[:at]
+	var blanked []byte
+	for _, listing := range read.listings {
+		if listing.start < 0 || listing.start >= listing.end || listing.end > at || listing.text != text {
+			continue
+		}
+		if blanked == nil {
+			blanked = []byte(before)
+		}
+		for index := listing.start; index < listing.end; index++ {
+			blanked[index] = ' '
+		}
+	}
+	if blanked == nil {
+		return before
+	}
+	return string(blanked)
 }
 
 // archiveMembersUnknown reports an extraction whose members cannot be read
@@ -350,7 +389,7 @@ func archiveWalk(file *syntax.File, text, cwd, home string, depth int, read *arc
 		first := len(read.whole)
 		defer func() {
 			for index := first; index < len(read.whole); index++ {
-				if archiveStagedBefore(file, call, text, home, read.whole[index].Archive) {
+				if archiveStagedBefore(file, call, text, home, read.whole[index].Archive, read) {
 					read.whole[index].staged = true
 				}
 			}
@@ -383,49 +422,64 @@ func archiveWalk(file *syntax.File, text, cwd, home string, depth int, read *arc
 			}
 			return true
 		}
-		members := ArchiveExtractionMembers(words[0], words[1:])
-		unknown := archiveMembersUnknown(words[0], words[1:])
-		// A call that names no member extracts the whole archive: where its
-		// members land is read from the archive (rel-1-0-10:GAP-1173).
-		var whole ArchiveWhole
-		if len(members) == 0 && !unknown {
-			if archive, ok := extractionArchive(program, words[1:], static[1:], cwd); ok {
-				whole = ArchiveWhole{Archive: archive, format: archiveTar, renamed: archiveRenamesMembers(program, words[1:])}
-				if program == "unzip" {
-					whole.format = archiveZip
-				}
-			}
+		if archiveListing(words, static) {
+			read.listings = append(read.listings, archiveListingSpan{text: text, start: int(call.Pos().Offset()), end: int(call.End().Offset())})
+			return true
 		}
-		for _, folder := range ArchiveExtractionDestinations(words[0], words[1:]) {
-			if folder == "" || strings.HasPrefix(folder, "~") {
-				continue
-			}
-			if !filepath.IsAbs(folder) {
-				folder = filepath.Join(cwd, folder)
-			}
-			folder = filepath.Clean(folder)
-			read.paths = append(read.paths, folder)
-			if unknown {
-				read.unknown = append(read.unknown, folder)
-			}
-			for _, member := range members {
-				read.paths = append(read.paths, archiveMemberPath(folder, member))
-			}
-			if whole.Archive != "" {
-				whole.Folder = folder
-				read.whole = append(read.whole, whole)
-			}
-		}
+		archiveCallExtractions(words, static, cwd, read)
 		return true
 	})
+}
+
+// archiveCallExtractions reads one extractor call: words are the program and
+// the words it is handed ("" where static is false: a word with no static
+// spelling), a relative folder is placed in cwd. The shell reading
+// (archiveWalk) and the PowerShell reading of a native call
+// (psNativeArchiveCall) share it.
+func archiveCallExtractions(words []string, static []bool, cwd string, read *archiveExtractionScan) {
+	program := strings.ToLower(filepath.Base(words[0]))
+	members := ArchiveExtractionMembers(words[0], words[1:])
+	unknown := archiveMembersUnknown(words[0], words[1:])
+	// A call that names no member extracts the whole archive: where its
+	// members land is read from the archive (rel-1-0-10:GAP-1173).
+	var whole ArchiveWhole
+	if len(members) == 0 && !unknown {
+		if archive, ok := extractionArchive(program, words[1:], static[1:], cwd); ok {
+			whole = ArchiveWhole{Archive: archive, format: archiveTar, renamed: archiveRenamesMembers(program, words[1:])}
+			if program == "unzip" {
+				whole.format = archiveZip
+			}
+		}
+	}
+	for _, folder := range ArchiveExtractionDestinations(words[0], words[1:]) {
+		if folder == "" || strings.HasPrefix(folder, "~") {
+			continue
+		}
+		if !filepath.IsAbs(folder) {
+			folder = filepath.Join(cwd, folder)
+		}
+		folder = filepath.Clean(folder)
+		read.paths = append(read.paths, folder)
+		if unknown {
+			read.unknown = append(read.unknown, folder)
+		}
+		for _, member := range members {
+			read.paths = append(read.paths, archiveMemberPath(folder, member))
+		}
+		if whole.Archive != "" {
+			whole.Folder = folder
+			read.whole = append(read.whole, whole)
+		}
+	}
 }
 
 // archiveStagedBefore reports that a statement before the extraction call
 // may write the archive: the statements before it are not only static cd
 // and mkdir (onlyDirectoryStatementsBefore), and the text before the call
-// names the archive (rel-1-0-10:GAP-1224). A call the text cannot place is
-// read as staged.
-func archiveStagedBefore(file *syntax.File, call *syntax.CallExpr, text, home, archive string) bool {
+// names the archive (rel-1-0-10:GAP-1224) outside a tar listing of it
+// (textBefore, rel-1-0-10:GAP-1662). A call the text cannot place is read as
+// staged.
+func archiveStagedBefore(file *syntax.File, call *syntax.CallExpr, text, home, archive string, read *archiveExtractionScan) bool {
 	if archive == "" || onlyDirectoryStatementsBefore(file, call, home) {
 		return false
 	}
@@ -433,7 +487,7 @@ func archiveStagedBefore(file *syntax.File, call *syntax.CallExpr, text, home, a
 	if at < 0 || at > len(text) {
 		return true
 	}
-	return strings.Contains(text[:at], filepath.Base(archive))
+	return strings.Contains(read.textBefore(text, at), filepath.Base(archive))
 }
 
 // archiveRenamesMembers reports a tar or unzip extraction that changes the
