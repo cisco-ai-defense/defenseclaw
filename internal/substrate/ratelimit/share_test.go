@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -21,7 +22,6 @@ type shareCluster struct {
 	now      time.Time
 	shares   *Shares
 	limiters []*Limiter
-	pending  sync.WaitGroup
 	down     bool
 }
 
@@ -32,7 +32,6 @@ func newShareCluster(n int, cfg Config) *shareCluster {
 	for range n {
 		l := New(cfg)
 		l.ShareThrough(func(ctx context.Context, in ShareReport) (ShareAnswer, error) {
-			defer c.pending.Done()
 			if c.isDown() {
 				return ShareAnswer{}, errors.New("leader down")
 			}
@@ -55,17 +54,23 @@ func (c *shareCluster) isDown() bool {
 	return c.down
 }
 
-// acquire is one request on limiter i; it waits for an exchange it started.
+// acquire is one request on limiter i; it waits for an exchange it started
+// until the limiter has applied the answer. send returns before exchange
+// takes l.mu again to clear sharing and apply it, so the wait is on
+// sharing, not on send: a step that saw the old budget admitted too much
+// on a loaded runner, and a stale sharing made the next step's guess wrong.
 func (c *shareCluster) acquire(i int, atespace, uid string) bool {
 	l := c.limiters[i]
-	l.mu.Lock()
-	due := l.send != nil && !l.sharing && c.now.Sub(l.lastReport) >= ShareInterval
-	l.mu.Unlock()
-	if due {
-		c.pending.Add(1)
-	}
 	release, err := l.Acquire(atespace, uid)
-	c.pending.Wait()
+	for {
+		l.mu.Lock()
+		busy := l.sharing
+		l.mu.Unlock()
+		if !busy {
+			break
+		}
+		runtime.Gosched()
+	}
 	if err != nil {
 		return false
 	}
