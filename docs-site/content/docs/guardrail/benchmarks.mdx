@@ -24,7 +24,7 @@ effects**, not suspicious words, so the rules alone catch little but block
 almost nothing by mistake. The decision model and the LLM judge add coverage,
 and both are off until you set them up
 ([decision model](/docs/guardrail/decision-model),
-[LLM judge](/docs/guardrail#recommended-judge-model-gemma-4-31b-on-bedrock)).
+[LLM judge](/docs/guardrail/llm-judge#turn-it-on)).
 Every table below says which layers ran.
 
 ## Which benchmark answers which question
@@ -374,14 +374,14 @@ recommended blocking none of them.
 **26B A4B** and Gemma 3 12B. It was not run again with the model DefenseClaw
 recommends in 1.0.10, Gemma 4 **31B** (`google.gemma-4-31b`). The 31B model was
 measured on the S7 sets: see the
-[recommended judge model](/docs/guardrail#recommended-judge-model-gemma-4-31b-on-bedrock)
+[recommended judge model](/docs/guardrail/llm-judge#turn-it-on)
 and the [whole-cascade results](#the-whole-cascade-s7-end-to-end).
 
 ### Recommended runtime path
 
 Use the deterministic-first `regex_judge` strategy for coding sessions, with
 Gemma 4 31B on Amazon Bedrock as the judge model
-([configuration](/docs/guardrail#recommended-judge-model-gemma-4-31b-on-bedrock)).
+([configuration](/docs/guardrail/llm-judge#turn-it-on)).
 The table below measured Gemma 4 26B A4B, not 31B.
 The judge stays opt-in. A decisive local result returns immediately. Only
 unresolved tool calls incur a model request, and a call the parser proves

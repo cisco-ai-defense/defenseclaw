@@ -8,7 +8,7 @@ keywords:
   - DefenseClaw native ask
 ---
 
-Human approval (HITL) pauses a risky call and asks you instead of silently allowing or hard-blocking it. It works in action mode, on agents that can ask: Claude Code, Antigravity, Amp and OpenClaw ([the list](/docs/guardrail#which-agents-can-ask)). CRITICAL findings still block without asking, and alert-only rules never ask.
+Human approval (HITL) pauses a risky call and asks you instead of silently allowing or hard-blocking it. It works in action mode, on agents that can ask: Claude Code, Antigravity, Amp and OpenClaw ([the list](/docs/guardrail/human-approval#which-agents-can-ask)). CRITICAL findings still block without asking, and alert-only rules never ask.
 
 This story retells the walkthrough briefly. The full page, with the per-connector table and every detail, is [HITL](/docs/hitl).
 
@@ -145,5 +145,5 @@ The TUI shows alerts and audit events but has no pending-approval queue, so it c
 
 <Cards>
   <Card title="HITL reference" href="/docs/hitl" description="The per-connector event matrix, thresholds, and decision flow." />
-  <Card title="Allow a blocked call" href="/docs/guardrail#allow-a-blocked-call" description="The safe ways to let through something a guardrail rule blocks or alerts on, from a one-off approval to a scoped rule change." />
+  <Card title="Allow a blocked call" href="/docs/guardrail/false-blocks" description="The safe ways to let through something a guardrail rule blocks or alerts on, from a one-off approval to a scoped rule change." />
 </Cards>

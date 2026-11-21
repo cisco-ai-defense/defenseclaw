@@ -9,7 +9,7 @@ keywords:
   - confirm verdict fallback
 ---
 
-Human approval (HITL) pauses a risky call and asks you instead of silently allowing or hard-blocking it. It works in action mode, on agents that can ask: Claude Code, Antigravity, Amp and OpenClaw ([the list](/docs/guardrail#which-agents-can-ask)). CRITICAL findings still block without asking, and alert-only rules never ask.
+Human approval (HITL) pauses a risky call and asks you instead of silently allowing or hard-blocking it. It works in action mode, on agents that can ask: Claude Code, Antigravity, Amp and OpenClaw ([the list](/docs/guardrail/human-approval#which-agents-can-ask)). CRITICAL findings still block without asking, and alert-only rules never ask.
 
 <DefenseClawDemo scenario="hitl-native-approval" variant="approve" />
 
@@ -140,6 +140,6 @@ defenseclaw guardrail hilt off
 
 ## Next
 
-- [How a tool call is decided](/docs/guardrail#how-a-tool-call-is-decided)
+- [How a tool call is decided](/docs/guardrail/how-it-works)
 - [Allow a blocked call](/docs/guardrail)
 - [Thresholds](/docs/policies/thresholds)

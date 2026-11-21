@@ -103,7 +103,7 @@ defenseclaw-gateway audit export --connector codex --since 30m \
 ## Prompt alerts versus tool-call enforcement
 
 - Prompt findings follow the configured block threshold in action mode. HIGH prompt findings can block when `block_at` is HIGH. A finding below the threshold alerts; CRITICAL findings block. See [Thresholds](/docs/policies/thresholds).
-- Codex cannot ask, so a confirm verdict becomes an alert ([which agents can ask](/docs/guardrail#which-agents-can-ask)).
+- Codex cannot ask, so a confirm verdict becomes an alert ([which agents can ask](/docs/guardrail/human-approval#which-agents-can-ask)).
 
 ## Variations
 

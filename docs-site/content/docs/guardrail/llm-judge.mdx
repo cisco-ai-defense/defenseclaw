@@ -215,7 +215,7 @@ guardrail:
 - **Judge in context (public validation, Gemma 4 26B A4B).** Rules followed by the judge detected 94 of 100 held-out attack trajectories (precision 98.95%, F1 0.964) and alerted on 1 of 20 benign coding trajectories, with no benign block.
 - **Recommended model (Gemma 4 31B, S7 judge rounds).** Rules plus the judge blocked no benign call on two public agent-trace corpora (1,200 benign calls) and alerted on 8 and 11 of the 694 benign calls of one of them (the rules alone: 15 and 16). On a Windows shell corpus, 7 and 9 of 2,459 benign calls were blocked (about 0.3%). Alert recall on the other public corpus rose from 0.29 to 0.64.
 
-Read the [guardrail benchmarks](/docs/guardrail/benchmarks) and the [contextual judge benchmark](/docs/guardrail/llm-judge-benchmark) for what each number measured, on which build, and the commands to reproduce it. Models differ widely: Gemma 3 12B alerted on 90% of benign trajectories in the same test and is not recommended for enforcement.
+Read the [guardrail benchmarks](/docs/guardrail/benchmarks) and the [contextual judge benchmark](/docs/guardrail/benchmarks#llm-judge) for what each number measured, on which build, and the commands to reproduce it. Models differ widely: Gemma 3 12B alerted on 90% of benign trajectories in the same test and is not recommended for enforcement.
 
 ## Problems
 
