@@ -821,6 +821,11 @@ var (
 	// release whose hook-contract lock a target still carries. Tests
 	// replace it.
 	enterpriseHookReconcileTargetRelease = enterprisehooks.WindowsProtectedTargetFromOtherRelease
+	// enterpriseHookReconcileTargetRetireRender names this release when a
+	// target's lock is this release's render of a hook-image retire (an
+	// earlier image of this install recorded for it, GAP-1096). Only the
+	// read-only prior-render proof takes it. Tests replace it.
+	enterpriseHookReconcileTargetRetireRender = enterprisehooks.WindowsProtectedTargetRetireRender
 	// enterpriseHookReconcileTargetEarlierMatrix reports a target whose
 	// agent config still holds an earlier release's hook matrix (GAP-2463).
 	// Tests replace it.
@@ -1217,9 +1222,21 @@ func enterpriseHookRepairAfterVerifyFailure(
 			// previous-release hook keeps running; or the administrator chose
 			// hook fail mode open, which the closed-registration proof above
 			// cannot hold, and the registration itself is proven. Secure Client
-			// has its own branch above.
+			// has its own branch above. A lock this release wrote under a
+			// hook-image retire, over records for an earlier image of this
+			// install, admits only the first proof: after retire, 1.0.9 and the
+			// upgrade back the records are the earlier render, but the lock
+			// names this release (GAP-1096). It opens no other wait, so an
+			// account-written Hermes config or the open mode alone still fails.
 			if !enterpriseHookReconcileSecureClient() {
-				if written, other, releaseErr := enterpriseHookReconcileTargetRelease(opts); releaseErr == nil && other {
+				written, other, releaseErr := enterpriseHookReconcileTargetRelease(opts)
+				retired := false
+				if releaseErr == nil && !other {
+					if retiredBy, retire, retireErr := enterpriseHookReconcileTargetRetireRender(opts); retireErr == nil && retire {
+						written, retired = retiredBy, true
+					}
+				}
+				if releaseErr == nil && (other || retired) {
 					prior := opts
 					prior.AcceptPriorReleaseRender = true
 					if _, priorErr := enterpriseHookReconcileVerifier(ctx, prior); priorErr == nil {
@@ -1230,7 +1247,7 @@ func enterpriseHookRepairAfterVerifyFailure(
 							errEnterpriseHookAwaitingSignIn, enterpriseHookAwaitingSignInPriorRender, written, verifyErr,
 						)
 					}
-					if strings.EqualFold(strings.TrimSpace(opts.HookFailMode), "open") {
+					if other && strings.EqualFold(strings.TrimSpace(opts.HookFailMode), "open") {
 						if registered, proofErr := enterpriseHookReconcileMachineRegistration(opts); proofErr == nil && registered {
 							return enterprisehooks.InstallResult{}, false, fmt.Errorf(
 								"%w: %s: DefenseClaw %s protected it, and its exact active Windows session is unavailable, "+

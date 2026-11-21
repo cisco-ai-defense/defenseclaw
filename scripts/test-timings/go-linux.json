@@ -1686,6 +1686,7 @@
    "TestGAP0268RefusalNoticeReachesOnlyItsOwnActor": 2.3,
    "TestGAP0272BootstrapErrorNamesTheDestinationAndTheCause": 3.0,
    "TestGAP0272SubstrateGatewayStartsWithAnInClusterOTLPDestination": 10.2,
+   "TestGAP0277DeliveredManagedCallKeepsItsAuditRowAfterTheEarlierDeadline": 11.5,
    "TestGAP0284MessageViewIsTheForwardedBody": 11.7,
    "TestGAP0285SeveralFilesReadThenUploadRefusedOnBothPaths": 42.3,
    "TestGAP0298SSHFolderSetupAllowsInEveryMode": 5.3,

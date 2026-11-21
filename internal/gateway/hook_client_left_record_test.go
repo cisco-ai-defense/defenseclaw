@@ -169,8 +169,8 @@ func TestScriptHookCallAnsweredToItsClientStaysAllowed(t *testing.T) {
 
 // The extended write window of an answered call applies to the per-user
 // install a validated config describes (it compared a deployment mode no
-// config can hold), and never to a managed one.
-func TestPerUserInstallKeepsTheLongRecordWindowOfAnAnsweredCall(t *testing.T) {
+// config can hold) and to a managed one (rel-1-0-10 GAP-0277).
+func TestAnsweredCallKeepsTheLongRecordWindowPerUserAndManaged(t *testing.T) {
 	f := perUserHookFixture(t)
 	ctx, cancel := f.api.hookDeliveredPersistenceContext(t.Context(), true)
 	if cancel == nil {
@@ -184,8 +184,18 @@ func TestPerUserInstallKeepsTheLongRecordWindowOfAnAnsweredCall(t *testing.T) {
 		t.Fatal("a call without a receipt got the answered-call window")
 	}
 	f.api.scannerCfg.DeploymentMode = "managed_enterprise"
+	f.api.scannerCfg.Enterprise = config.EnterpriseConfig{Profile: "standalone"}
+	managedCtx, managedCancel := f.api.hookDeliveredPersistenceContext(t.Context(), true)
+	if managedCancel == nil {
+		t.Fatal("a managed answered call got the ordinary window")
+	}
+	defer managedCancel()
+	if deadline, ok := managedCtx.Deadline(); !ok || time.Until(deadline) < 20*time.Second {
+		t.Fatalf("managed window deadline = %v, want about 30 s", deadline)
+	}
+	f.api.scannerCfg.Enterprise = config.EnterpriseConfig{Profile: "secure_client"}
 	if _, none := f.api.hookDeliveredPersistenceContext(t.Context(), true); none != nil {
-		t.Fatal("a managed call got the per-user window")
+		t.Fatal("a Secure Client call got the answered-call window; it keeps its own grace")
 	}
 }
 
