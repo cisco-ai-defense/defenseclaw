@@ -1,0 +1,95 @@
+---
+title: Why was this blocked?
+description: Find which rule, model or setting decided a call, from the message the agent shows to the audit record, cascade explain, doctor and the profile that applied.
+keywords:
+  - why was this blocked
+  - guardrail cascade explain
+  - defenseclaw alerts
+  - audit log
+  - rule ID
+  - DefenseClaw doctor
+  - guardrail profile explain
+  - cascade-decisions.jsonl
+---
+
+When the guardrail stops a call, you can find out what decided it in four steps. Start at the top and stop when you have the rule or the layer.
+
+## 1. Read the message the agent shows
+
+A rule block reads:
+
+```text
+DefenseClaw policy blocked this action (rule C2-WEBHOOK-SITE: webhook.site (known exfil)). Do not retry it in another form.
+```
+
+The text names the deciding rules by ID. A judge verdict, a block-list entry or an install admission names itself instead. On a standalone enterprise computer the message says `DefenseClaw blocked this action under your organization's policy`.
+
+If your administrator or you set a custom block message (`defenseclaw guardrail block-message`), it replaces the text only for a block that has no specific reason. The audit record always keeps the real reason.
+
+## 2. Find the alert
+
+```bash
+defenseclaw alerts --connector claudecode --limit 25
+defenseclaw alerts --connector claudecode --limit 25 --show 1
+```
+
+The first command lists the newest alerts. The second prints one in full: severity, time, **Decision**, **Connector**, **Rule**, **Scanner**, the location, the details, and a next step where there is one. When an alert names a person or an agent, it also shows who, with the session. The `1` is the row number; use the same `--connector` and `--limit` in both commands so the number points at the same row. `--json` prints the list for scripts, and in the TUI (`defenseclaw tui`, panel 2) `/` searches the rule ID and title.
+
+The **Decision** line says what happened:
+
+| Decision | Meaning |
+| --- | --- |
+| `blocked` | The call was stopped. |
+| `confirm` | The agent asked you ([human approval](/docs/guardrail/human-approval)). |
+| `alert` | The call ran, and DefenseClaw raised an alert. |
+| `would block (observe mode)` | The call ran only because the agent is in observe mode. Switch to action and it blocks. |
+| `detected in the prompt (cannot block)`, `detected after the tool ran (cannot block)`, `detected in the displayed reply (cannot block)` | The finding came on an event that cannot be stopped. It is a record. |
+
+A rule that matched a call it could not decide on its own (a detection-only finding) is not an alert. `defenseclaw alerts` ends with how many there were in the last 24 hours, and `defenseclaw audit export --since 24h` lists them.
+
+## 3. Read the rule ID
+
+The ID tells you which layer produced the finding:
+
+| ID | Layer | What it means |
+| --- | --- | --- |
+| `SEC-…`, `C2-…`, `PATH-…`, `CMD-…`, `ENT-…` and the like | Rules | A rule of the pack matched. `defenseclaw guardrail list-packs` shows which pack applies. |
+| `JUDGE-INJ-…`, `JUDGE-PII-…`, `JUDGE-EXFIL-…`, `JUDGE-TOOL-…` | [LLM judge](/docs/guardrail/llm-judge) | The model flagged a category. The reason starts with `judge-tool-injection:` for the tool judge. |
+| `JUDGE-DECISION-MODEL` | [Decision model](/docs/guardrail/decision-model) | System One was confident, or unsure and asked. |
+| `JUDGE-UNAVAILABLE`, `JUDGE-UNAVAILABLE-ESCALATED` | LLM judge | The judge gave no verdict and the strict policy or a closed fail mode refused the call. |
+| `ALIGNMENT-DRIFT` | [Alignment check](/docs/guardrail/alignment-check) | The call did not serve your task. |
+| `INTENT-SCOPE-SEND` | LLM judge | A send to a place no prompt named. It records only. |
+| `TOOLRESULT-…` | [Tool results](/docs/guardrail/tool-results) | The output of a tool tried to direct the agent. |
+| `CASCADE-POLICY:ID`, `CASCADE-POLICY-ERROR` | Rego policy | Your policy set the final action, or failed. |
+| `CASCADE-UNKNOWN-FLOOR`, `CASCADE-PROVEN-BLOCK-FLOOR`, `CASCADE-CRITICAL-FLOOR` | [The cascade's last step](/docs/guardrail/configure-cascade#the-order-of-a-decision) | DefenseClaw could not read the input in full, or a proven CRITICAL finding raised the action. |
+| `protected-file-changed` | [Protected files](/docs/guardrail/protected-files) | A watched file changed while an agent tool call ran. It is an alert. |
+
+For a rule, find its definition in the pack, for example `grep -rn C2-WEBHOOK-SITE ~/.defenseclaw/policies/guardrail/`.
+
+## 4. See what applies
+
+These commands show the settings that decided, not the single call.
+
+```bash
+defenseclaw guardrail status                              # mode, pack, levels, approval and judge per agent
+defenseclaw guardrail cascade explain --connector claudecode
+defenseclaw guardrail cascade explain --last 1            # the latest decision your Rego policy set, or a floor raised
+defenseclaw guardrail profile explain --user alice --connector claudecode
+defenseclaw doctor
+```
+
+- **`guardrail cascade explain`** prints what each layer does for that agent: the mode and pack, the block and alert levels, the unknown tier, whether System One and the judge run, the lanes, the Rego policy and its limits, the locks, and the config key that set each value. See [Configure the cascade](/docs/guardrail/configure-cascade#see-what-applies).
+- **`--last N`** replays the Nth newest decision the gateway recorded in `cascade-decisions.jsonl` (decisions a policy set or failed on, or that a floor raised) and says which layer or policy rule set the final action. It does not record calls that no policy or floor touched.
+- **`guardrail profile explain`** names the profile a user, an agent or a connector resolves to and why. A different profile can mean different levels. See [user and group policies](/docs/guardrail/user-and-group-policies).
+- **`defenseclaw doctor`** checks the rule pack, the policy, the cascade and the judge. A `Detection` warning means the judge is gated off or failing. A `Guardrail cascade` failure names the key that is invalid and the fallback in force.
+
+## Other places to look
+
+- `defenseclaw audit logs --grep judge_unavailable` finds the gateway's one-line alert for each call the judge gave no verdict on.
+- `defenseclaw audit export --connector claudecode --since 1h` exports every audit row, including config changes, as JSON lines.
+- In the TUI, the Alerts and Audit panels show the same rows with the details of the selected one.
+
+## Next
+
+- It was wrong to block it: [fix a false block](/docs/guardrail/false-blocks).
+- Change what a layer does: [customize the guardrail](/docs/guardrail/customize).

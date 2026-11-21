@@ -1,0 +1,192 @@
+---
+title: Customize the guardrail
+description: One page for changing every part of the guardrail. Pick a pack and mode, turn layers on or off, choose the models, set thresholds, suppress noise, write and test your own rules, add a Rego policy, give groups their own profile, and lock settings.
+keywords:
+  - customize guardrail
+  - custom rules
+  - rule pack
+  - block_at
+  - alert_at
+  - suppressions
+  - Rego policy
+  - guardrail profile
+  - admin locked
+  - YARA
+  - CEL
+---
+
+Everything you can change about the guardrail, with the command and the page that has the depth. Settings apply to every agent unless you add `--connector NAME`. Most take effect on the gateway's next reload. On a managed computer the administrator makes these changes in the managed config and the per-user commands refuse ([locks](#lock-settings-on-managed-hosts)).
+
+| I want to | Do this |
+| --- | --- |
+| Block more, or less | [Pick a pack and mode](#pick-a-pack-and-mode), [set thresholds](#set-thresholds-and-severities) |
+| Add or remove a model layer | [Turn layers on or off](#turn-layers-on-or-off) |
+| Use my own model | [Choose the models](#choose-the-models) |
+| Stop one noisy rule | [Suppress and allow](#suppress-and-allow) |
+| Catch something DefenseClaw does not | [Write your own rules](#write-your-own-rules) |
+| Have the last word on a decision | [A Rego policy](#a-rego-final-decision-policy) |
+| Different rules for a group or an agent | [Profiles and connectors](#profiles-per-connector-user-and-group) |
+
+## Pick a pack and mode
+
+A rule pack is the set of rules and the default block and alert levels. The mode decides whether findings are enforced.
+
+| Pack | Blocks at | Alerts at |
+| --- | --- | --- |
+| `default` | CRITICAL | MEDIUM and up |
+| `strict` | MEDIUM and up | LOW and up |
+| `permissive` | CRITICAL | HIGH and up |
+
+```bash
+defenseclaw guardrail list-packs                          # who enforces which
+defenseclaw guardrail use-pack strict                     # every agent
+defenseclaw guardrail use-pack strict --connector codex   # one agent
+defenseclaw guardrail mode observe --connector codex      # record only, block nothing
+defenseclaw guardrail mode action                         # enforce
+```
+
+Start in observe mode and move an agent to action once the alerts look right. Observe mode never blocks, with one exception: an agent that changes DefenseClaw's own files is blocked in every mode by the `strict` and `managed-strict` packs. More: [rules and custom packs](/docs/policies/rules), [policy defaults](/docs/policies/defaults), [Multi-connector](/docs/guardrail/multi-connector).
+
+## Turn layers on or off
+
+| Layer | Turn on | Turn off |
+| --- | --- | --- |
+| [LLM judge](/docs/guardrail/llm-judge) | `defenseclaw guardrail judge add claudecode --enable` | `defenseclaw guardrail judge remove claudecode` |
+| [Decision model](/docs/guardrail/decision-model) | `defenseclaw setup decision-model --base-url URL --model NAME --connectors claudecode --ping` | `defenseclaw config set decision_model.enabled false` |
+| [Alignment check](/docs/guardrail/alignment-check) | `defenseclaw config set guardrail.cascade.lanes.alignment alert` | `defenseclaw config set guardrail.cascade.lanes.alignment off` |
+| [Secret flow tracking](/docs/guardrail/secret-flow-tracking) | `defenseclaw guardrail secret-flow enable` | `defenseclaw guardrail secret-flow disable` |
+| [Protected files](/docs/guardrail/protected-files) | `guardrail.protected_files.on_change: alert` (the default) or `restore` | `guardrail.protected_files.on_change: off` |
+| [Human approval](/docs/guardrail/human-approval) | `defenseclaw guardrail hilt on --min-severity HIGH` | `defenseclaw guardrail hilt off` |
+
+The rules always run while the guardrail is on; you can turn off single rules ([suppress and allow](#suppress-and-allow)). To stop all guarding, see [turn it off](/docs/guardrail/disabling).
+
+Smaller stages are cascade lanes. Each is `off`, `shadow` (record only) or `on`:
+
+```bash
+defenseclaw guardrail cascade explain --connector claudecode     # lists every lane, its value and the key that set it
+defenseclaw config set guardrail.cascade.lanes.judge_read_skip off
+```
+
+## Choose the models
+
+- **Judge.** Set `--judge-provider`, `--judge-model`, `--judge-api-base` and `--judge-api-key-env` on `defenseclaw setup guardrail`, or edit `guardrail.judge.llm` in `config.yaml`. The judge uses its own `llm` block, else the shared one. The recommended model is Gemma 4 31B on Bedrock; local models work too. See [LLM judge](/docs/guardrail/llm-judge) and [LLM providers](/docs/guardrail/unified-llm-key).
+- **Decision model.** Point it at an endpoint with `defenseclaw setup decision-model --base-url URL --model NAME --connectors claudecode,codex --ping`. `--show --ping` prints and tests the saved setting. See [decision model](/docs/guardrail/decision-model).
+- **Which agents use them.** `guardrail.judge.hook_connectors` and `decision_model.hook_connectors` name the agents. Per-agent and per-profile overrides of System One's routing are under `guardrail.connectors.NAME.cascade.system_one`.
+
+## Set thresholds and severities
+
+```bash
+defenseclaw guardrail block-at HIGH                       # block from HIGH up
+defenseclaw guardrail alert-at MEDIUM
+defenseclaw guardrail block-at CRITICAL --connector codex # one agent
+defenseclaw guardrail rule severity CMD-REVSHELL-BASH high --connector codex
+```
+
+A connector's level wins over the global one, which wins over the pack's. Anything that blocks also alerts. [Thresholds](/docs/policies/thresholds) shows every scope and its precedence.
+
+What each model layer may do, and how unreadable input is treated, are cascade settings:
+
+```bash
+defenseclaw config set guardrail.cascade.judge.max_action alert    # the judge is advisory
+defenseclaw config set guardrail.cascade.unknown alert             # input too long to read: alert, not the pack's default
+defenseclaw config set guardrail.cascade.judge.block_needs_system_one true
+```
+
+The full list is in [Configure the cascade](/docs/guardrail/configure-cascade#settings).
+
+## Suppress and allow
+
+| You want | Use |
+| --- | --- |
+| A rule off, for one agent | `defenseclaw guardrail rule disable ID --connector X` |
+| A model finding on safe text dropped | `defenseclaw guardrail suppress add ID --finding JUDGE-PII-EMAIL --entity PATTERN --reason TEXT` |
+| A tool you vetted to skip the scan gate | `defenseclaw tool allow NAME --connector X --reason TEXT` |
+| An opt-in protection pack on | `defenseclaw guardrail protection enable NAME` |
+| A skill, MCP server or plugin allowed or blocked | The [block and allow list](/docs/policies/admission) |
+
+Suppressions act on the LLM judge only. A rule finding is turned off with `rule disable` or `rule severity`. Steps, checks and undo: [fix a false block](/docs/guardrail/false-blocks). Patterns for the three suppression lists: [suppression cookbook](/docs/policies/suppression-cookbook).
+
+## Write your own rules
+
+A custom rule lives in a rule pack: a folder of YAML files that you copy from a bundled pack, edit, validate and pin by its digest. The gateway refuses a pack whose files no longer match the digest.
+
+| Kind | What it matches | Where it runs | Write and test it |
+| --- | --- | --- | --- |
+| Regex | Text, with a Go RE2 `pattern`. | Prompts, replies, tool calls and tool results. A pattern alone on a tool call only detects; it never blocks. | [Regex cookbook](/docs/policies/regex-cookbook), the regex tester in the [policy creator](/docs/policies/creator) |
+| CEL | Parsed facts of a tool call (programs, paths, network actions, data flow) with a typed `expression`, plus a required regex fallback. A CEL rule can block. | Tool calls. | [CEL authoring](/docs/policies/cel/authoring), [CEL engine](/docs/policies/cel/engine) |
+| YARA | The name, schema and description of an MCP tool. | The MCP scanner, not the hook path. | List the file in `scanners.mcp_scanner.yara.extra_rules` with its `sha256:` digest ([MCP scanner](/docs/scanning/mcp-scanner)) |
+
+```bash
+cp -R ~/.defenseclaw/policies/guardrail/default ~/my-guardrail-pack
+# edit ~/my-guardrail-pack/rules/*.yaml, or add a file with its own category
+defenseclaw guardrail validate-pack ~/my-guardrail-pack     # schema, regex, CEL typing and cost limits
+defenseclaw guardrail use-pack ~/my-guardrail-pack --connector claudecode
+```
+
+`validate-pack` prints the `files digest` that `use-pack` pins. Edit the pack later and the gateway keeps the old policy until you pin the new digest; `defenseclaw doctor` fails the **Rule pack** row until you do.
+
+To test a rule before it guards anything, run it in a throwaway home with [verify locally](/docs/policies/verify-locally), and test matches and near misses per agent. [Validate a rule pack](/docs/policies/rulepack-validation) lists what the check covers. Turn a new rule's agent to observe mode first and read the alerts. The [recipe catalog](/docs/policies/recipes) has the shipped rules to copy.
+
+To change what the rules already say without copying a pack, use `guardrail.rules` (`enable`, `disable`, `severity_overrides`, `suppressions`, `sensitive_tools`, `protections`). See [Rules and custom packs](/docs/policies/rules#customise-a-pack-with-guardrailrules).
+
+## A Rego final-decision policy
+
+A Rego module has the last word on a call, within limits you set. It can raise or lower the cascade's action; a proven CRITICAL finding and an input DefenseClaw could not read in full never end below their floors.
+
+```yaml
+# ~/.defenseclaw/config.yaml
+guardrail:
+  cascade:
+    policy:
+      module: {path: /etc/defenseclaw/cascade.rego, digest: "sha256:<hex of the file>"}
+      lowest: alert       # the lowest action it may set on a flagged call
+      highest: block
+```
+
+```bash
+shasum -a 256 /etc/defenseclaw/cascade.rego                       # the digest
+defenseclaw config validate                                        # same check the gateway runs
+defenseclaw guardrail cascade explain --input decision.json        # replay one policy input through it
+defenseclaw guardrail cascade explain --last 1                     # replay the latest recorded decision
+```
+
+The input the module receives, the decisions it can return, and worked examples (block secrets from MEDIUM, a team policy) are in [Configure the cascade](/docs/guardrail/configure-cascade#the-rego-policy). A module that errors or runs out of time judges the call at the unknown tier.
+
+## Profiles per connector, user and group
+
+A profile is a named set of guardrail settings, assigned to directory groups, users, agents or connectors. This gives contractors `block_at: MEDIUM` while an ML team stays in observe mode:
+
+```yaml
+guardrail:
+  profiles:
+    contractors: {mode: action, block_at: MEDIUM, alert_at: LOW}
+    ml-team: {mode: observe}
+  profile_assignments:
+    - profile: contractors
+      match: {groups: ["contractors@corp.example.com"]}
+    - profile: ml-team
+      match: {groups: ["ml-team@corp.example.com"]}
+  default_profile: ml-team
+```
+
+```bash
+defenseclaw config validate
+defenseclaw guardrail profile list
+defenseclaw guardrail profile explain --user alice@corp.example.com --connector claudecode
+```
+
+A person in several profiles gets the strictest combination. A profile can set `mode`, `block_at`, `alert_at`, `hilt`, `rule_pack`, `rules`, `block_message` and, per connector, the same settings; `guardrail.profiles.NAME.cascade` carries the cascade settings. Steps, scenarios and the match reasons: [user and group policies](/docs/guardrail/user-and-group-policies). For per-agent settings without profiles, see [Multi-connector](/docs/guardrail/multi-connector#per-connector-overrides).
+
+## Lock settings on managed hosts
+
+On a managed install `config.yaml` belongs to the administrator. No user command, file or environment variable can change it. The administrator delegates settings through profiles and keeps the rest fixed with the cascade's admin block:
+
+```yaml
+guardrail:
+  cascade:
+    admin:
+      locked: [mode, block_at, hilt, judge]    # no connector or profile may set these
+      critical_floor: alert                      # the lowest a proven CRITICAL finding can end at
+```
+
+`locked` takes `mode`, `block_at`, `alert_at`, `hilt`, `rule_pack`, `rules`, `unknown`, `judge` (or `judge.KEY`), `system_one` (or `system_one.KEY`), `lanes` (or `lanes.LANE`), or `*`. Every writer refuses a profile or connector that sets a locked key. If one reaches the gateway anyway, the gateway ignores it and uses the top-level value, and `defenseclaw doctor`, `cascade explain` and the audit log name each value it ignored. The Rego limits and `critical_floor` are top level only. See [Managed installs and locks](/docs/guardrail/configure-cascade#managed-installs-and-locks) and the [enterprise configuration](/docs/enterprise/configuration).
