@@ -3073,6 +3073,10 @@ func (s *Sidecar) bindHookRuntimePolicyResolver(guard *HookConfigGuard) {
 			policyTier:    tier,
 			guardrailMode: cfg.EffectiveGuardrailModeForConnector(connectorName),
 			hiltEnabled:   cfg.EffectiveHILTForConnector(connectorName).Enabled,
+			// As connectorSetupOptsChecked renders it (rel-1-0-10:GAP-1664).
+			routeOnly: func(apiAddr string) *connector.RouteOnlySetup {
+				return gatedRouteOnly(cfg, routeOnlySetupFor(cfg, connectorName, apiAddr))
+			},
 		}, sync.OnceFunc(s.hookPolicyMu.RUnlock), true
 	})
 }
