@@ -5964,6 +5964,7 @@ func (s *Sidecar) runGuardrailMulti(ctx context.Context) error {
 	baseOpts := withOpenClawSetupOpts(connector.SetupOpts{DataDir: s.currentConfig().DataDir, ProxyAddr: proxyAddr, APIAddr: apiAddr}, s.currentConfig())
 	previous := connector.LoadActiveConnectors(s.currentConfig().DataDir)
 	var failedRemoved []string
+	var removedWhy map[string]string
 	setupSeed := multiConnectorSetupTransaction{}
 	if s.currentConfig().Guardrail.Enabled {
 		activeState, err := connector.CaptureActiveConnectorStateSnapshot(s.currentConfig().DataDir)
@@ -5979,7 +5980,7 @@ func (s *Sidecar) runGuardrailMulti(ctx context.Context) error {
 		candidates, unavailable, _ := s.removedConnectorRollbackCandidates(
 			registry, previous, names, apiToken, proxyAddr, apiAddr, hookLockState,
 		)
-		removed, teardownFailed := teardownRemovedConnectorCandidates(candidates, ctx, func(conn connector.Connector, priorOpts connector.SetupOpts) error {
+		removed, teardownFailed, teardownWhy := teardownRemovedConnectorCandidates(candidates, ctx, func(conn connector.Connector, priorOpts connector.SetupOpts) error {
 			if containsFold(configured, conn.Name()) {
 				return nil // Disabled connectors keep their cached-path tombstones.
 			}
@@ -5987,6 +5988,7 @@ func (s *Sidecar) runGuardrailMulti(ctx context.Context) error {
 		})
 		setupSeed.removed = removed
 		failedRemoved = append(unavailable, teardownFailed...)
+		removedWhy = teardownWhy
 	} else {
 		var dropped []string
 		failedRemoved, dropped = teardownRemovedConnectorsReport(registry, previous, names, baseOpts, s.currentConfig().ConnectorWorkspaceDir(), ctx, configured)
@@ -6028,7 +6030,7 @@ func (s *Sidecar) runGuardrailMulti(ctx context.Context) error {
 			return persistErr
 		}
 		if len(failedTeardown) > 0 {
-			teardownErr := fmt.Errorf("connector teardown incomplete for: %s", strings.Join(failedTeardown, ", "))
+			teardownErr := fmt.Errorf("connector teardown incomplete for: %s", connectorTeardownCauses(failedTeardown, removedWhy))
 			s.health.SetGuardrail(StateError, teardownErr.Error(), nil)
 			return teardownErr
 		}
@@ -6061,7 +6063,7 @@ func (s *Sidecar) runGuardrailMulti(ctx context.Context) error {
 			return persistErr
 		}
 		if len(failedRemoved) > 0 {
-			teardownErr := fmt.Errorf("connector teardown incomplete for: %s", strings.Join(failedRemoved, ", "))
+			teardownErr := fmt.Errorf("connector teardown incomplete for: %s", connectorTeardownCauses(failedRemoved, removedWhy))
 			s.health.SetGuardrail(StateError, teardownErr.Error(), nil)
 			return teardownErr
 		}
@@ -6867,7 +6869,7 @@ func (s *Sidecar) teardownPreviousConnectorTransaction(
 			requested.Name(),
 		)
 	}
-	removed, failed := teardownRemovedConnectorCandidates(candidates, ctx, func(conn connector.Connector, priorOpts connector.SetupOpts) error {
+	removed, failed, why := teardownRemovedConnectorCandidates(candidates, ctx, func(conn connector.Connector, priorOpts connector.SetupOpts) error {
 		return removeTeardownHookFiles(registry, conn, []string{requested.Name()}, priorOpts)
 	})
 	candidates, failed = keepAgentSettingsRefusedTeardowns(ctx, candidates, failed, transaction)
@@ -6888,9 +6890,10 @@ func (s *Sidecar) teardownPreviousConnectorTransaction(
 			)
 		}
 		return fmt.Errorf(
-			"connector switch %s to %s teardown failed; restored the prior connector registration",
+			"connector switch %s to %s teardown failed: %s; restored the prior connector registration",
 			previousName,
 			requested.Name(),
+			connectorTeardownCauses(failed, why),
 		)
 	}
 	transaction.removed = removed
@@ -8817,20 +8820,23 @@ func dropRemovedConnectorWithNothingInstalled(conn connector.Connector, opts con
 }
 
 // teardownRemovedConnectorCandidates removes only connectors for which the
-// caller already holds exact roster/lock/registration rollback authority.
+// caller already holds exact roster/lock/registration rollback authority. why
+// holds, for each failed name, the error that failed it: the start error names
+// it, so a user does not have to find it in gateway.log (rel-1-0-10 GAP-1549).
 func teardownRemovedConnectorCandidates(
 	candidates []multiConnectorSetupRollbackPoint,
 	ctx context.Context,
 	cleanup ...func(connector.Connector, connector.SetupOpts) error,
-) ([]multiConnectorSetupRollbackPoint, []string) {
+) ([]multiConnectorSetupRollbackPoint, []string, map[string]string) {
 	removed := make([]multiConnectorSetupRollbackPoint, 0, len(candidates))
 	var failed []string
+	why := map[string]string{}
 	for _, candidate := range candidates {
 		name := candidate.conn.Name()
 		priorOpts, err := priorConnectorSetupOpts(candidate)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "[guardrail] removed connector %s rollback evidence became invalid — retaining for teardown retry: %v\n", name, err)
-			failed = append(failed, name)
+			failed, why[name] = append(failed, name), err.Error()
 			continue
 		}
 		fmt.Fprintf(os.Stderr, "[guardrail] connector %s no longer active — tearing down transactionally\n", name)
@@ -8840,25 +8846,39 @@ func teardownRemovedConnectorCandidates(
 		}
 		if err := verifyConnectorRemoved(candidate.conn, priorOpts, teardownErr); err != nil {
 			fmt.Fprintf(os.Stderr, "[guardrail] WARNING: removed connector %s left stale state: %v\n", name, err)
-			failed = append(failed, name)
+			failed, why[name] = append(failed, name), err.Error()
 			continue
 		}
 		if len(cleanup) > 0 {
 			if err := cleanup[0](candidate.conn, priorOpts); err != nil {
 				fmt.Fprintf(os.Stderr, "[guardrail] WARNING: remove connector %s hook files: %v\n", name, err)
-				failed = append(failed, name)
+				failed, why[name] = append(failed, name), err.Error()
 				continue
 			}
 		}
 		if err := connector.ClearHookContractLockEntry(priorOpts.DataDir, name); err != nil {
 			fmt.Fprintf(os.Stderr, "[guardrail] WARNING: clear hook contract lock for removed connector %s: %v\n", name, err)
-			failed = append(failed, name)
+			failed, why[name] = append(failed, name), err.Error()
 			continue
 		}
 		removed = append(removed, candidate)
 		fmt.Fprintf(os.Stderr, "[guardrail] removed connector %s teardown verified clean with rollback authority retained\n", name)
 	}
-	return removed, failed
+	return removed, failed, why
+}
+
+// connectorTeardownCauses names each failed connector with the error that
+// failed its teardown, for the error the start returns.
+func connectorTeardownCauses(failed []string, why map[string]string) string {
+	parts := make([]string, 0, len(failed))
+	for _, name := range failed {
+		if cause := strings.TrimSpace(why[name]); cause != "" {
+			parts = append(parts, name+" ("+cause+")")
+		} else {
+			parts = append(parts, name)
+		}
+	}
+	return strings.Join(parts, "; ")
 }
 
 // failGuardrailWithRollback is the shared fail-loud path for connector

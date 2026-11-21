@@ -1693,7 +1693,7 @@ func TestMultiConnectorPublicationFailureRestoresSuccessfullyRemovedConnector(t 
 	if len(unavailable) != 0 || len(candidates) != 1 {
 		t.Fatalf("removal candidates=%v unavailable=%v, want one rollback-authorized Cursor", candidates, unavailable)
 	}
-	seed.removed, unavailable = teardownRemovedConnectorCandidates(candidates, context.Background())
+	seed.removed, unavailable, _ = teardownRemovedConnectorCandidates(candidates, context.Background())
 	if len(unavailable) != 0 || len(seed.removed) != 1 {
 		t.Fatalf("removed=%v failed=%v, want successful transactional removal", seed.removed, unavailable)
 	}
@@ -1819,7 +1819,7 @@ func TestMultiConnectorPublicationRollbackKeepsConnectorRemovedWhenItsCredential
 	if len(unavailable) != 0 || len(candidates) != 1 {
 		t.Fatalf("removal candidates=%v unavailable=%v, want one rollback-authorized Cursor", candidates, unavailable)
 	}
-	seed.removed, unavailable = teardownRemovedConnectorCandidates(candidates, context.Background())
+	seed.removed, unavailable, _ = teardownRemovedConnectorCandidates(candidates, context.Background())
 	if len(unavailable) != 0 || len(seed.removed) != 1 {
 		t.Fatalf("removed=%v failed=%v, want successful transactional removal", seed.removed, unavailable)
 	}
@@ -1877,7 +1877,7 @@ func TestMultiConnectorPublicationRollbackKeepsConnectorRemovedWhenItsCredential
 	if len(unavailable) != 0 || len(candidates) != 1 {
 		t.Fatalf("retry candidates=%v unavailable=%v, want Cursor's removal still authorized", candidates, unavailable)
 	}
-	if again, failed := teardownRemovedConnectorCandidates(candidates, context.Background()); len(failed) != 0 || len(again) != 1 {
+	if again, failed, _ := teardownRemovedConnectorCandidates(candidates, context.Background()); len(failed) != 0 || len(again) != 1 {
 		t.Fatalf("retry removed=%v failed=%v, want Cursor removed cleanly", again, failed)
 	}
 	if lock := connector.LoadHookContractLockEntry(s.cfg.DataDir, "cursor"); lock.Connector != "" {

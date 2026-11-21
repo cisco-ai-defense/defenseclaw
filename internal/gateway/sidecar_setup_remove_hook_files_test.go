@@ -155,7 +155,7 @@ func TestSetupRemoveTransactionalTeardownClearsWrittenHookFile(t *testing.T) {
 	}
 	reg := connector.NewRegistry()
 	reg.RegisterBuiltin(probe)
-	removed, failed := teardownRemovedConnectorCandidates([]multiConnectorSetupRollbackPoint{point}, context.Background(),
+	removed, failed, _ := teardownRemovedConnectorCandidates([]multiConnectorSetupRollbackPoint{point}, context.Background(),
 		func(conn connector.Connector, priorOpts connector.SetupOpts) error {
 			return removeTeardownHookFiles(reg, conn, nil, priorOpts)
 		})
