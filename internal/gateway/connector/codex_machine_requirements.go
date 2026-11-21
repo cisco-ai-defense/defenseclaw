@@ -926,11 +926,10 @@ func reconcileWindowsCodexRequirements(
 		return nil, false, err
 	}
 
-	rendered, err := toml.Marshal(cfg)
+	rendered, err := renderCodexRequirementsPreserving(raw, cfg)
 	if err != nil {
 		return nil, false, fmt.Errorf("marshal Codex requirements: %w", err)
 	}
-	rendered = retainCodexTOMLBOM(raw, rendered)
 	if len(rendered) > windowsCodexMachineRequirementsLimit {
 		return nil, false, fmt.Errorf(
 			"rendered Codex requirements exceed %d bytes",
@@ -1131,11 +1130,10 @@ func removeWindowsCodexRequirementsOwnedChanges(
 		}
 	}
 
-	rendered, err := toml.Marshal(cfg)
+	rendered, err := renderCodexRequirementsPreserving(current, cfg)
 	if err != nil {
 		return nil, false, fmt.Errorf("marshal surgically cleaned Codex requirements: %w", err)
 	}
-	rendered = retainCodexTOMLBOM(current, rendered)
 	if len(rendered) > windowsCodexMachineRequirementsLimit {
 		return nil, false, fmt.Errorf(
 			"surgically cleaned Codex requirements exceed %d bytes",
@@ -1657,11 +1655,11 @@ func stripWindowsCodexLayout(raw []byte, hookBinary, managedDir string) ([]byte,
 	} else {
 		cfg["hooks"] = hooks
 	}
-	rendered, err := toml.Marshal(cfg)
+	rendered, err := renderCodexRequirementsPreserving(raw, cfg)
 	if err != nil {
 		return nil, false, fmt.Errorf("marshal Codex requirements without a managed layout: %w", err)
 	}
-	return retainCodexTOMLBOM(raw, rendered), true, nil
+	return rendered, true, nil
 }
 
 // windowsCodexAdoptPreimageBaseline extracts the shared isolation controls
