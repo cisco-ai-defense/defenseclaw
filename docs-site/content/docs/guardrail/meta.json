@@ -15,7 +15,6 @@
     "decision-model",
     "alignment-check",
     "---Benchmarks---",
-    "benchmarks",
-    "llm-judge-benchmark"
+    "benchmarks"
   ]
 }

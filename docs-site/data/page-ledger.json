@@ -149,7 +149,6 @@
   "guardrail/aliases",
   "guardrail/benchmarks",
   "guardrail/disabling",
-  "guardrail/llm-judge-benchmark",
   "guardrail/multi-connector",
   "guardrail/semantic-routing",
   "guardrail/switching-connectors",
