@@ -18,34 +18,50 @@ INSTALLER = (
 RENDERERS = ("Get-DefenseClawRenderedEnterpriseConfig", "Get-DefenseClawRenderedEnterpriseTargets")
 
 
-def _logical_lines(text: str) -> list[str]:
-    # Join PowerShell backtick line continuations into one logical line.
-    return re.sub(r"`[ \t]*\r?\n[ \t]*", " ", text).splitlines()
+def _command_at(text: str, start: int) -> str:
+    """The PowerShell command that starts at ``start``: up to the first line end
+    outside parentheses that is not a backtick continuation."""
+    depth = 0
+    i = start
+    while i < len(text):
+        ch = text[i]
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            if depth == 0:
+                break  # the end of an enclosing (Get-... ) expression
+            depth -= 1
+        elif ch == "\n" and depth == 0 and not text[start:i].rstrip().endswith("`"):
+            break
+        i += 1
+    return re.sub(r"\s+", " ", text[start:i].replace("`", " ")).strip()
 
 
 def _render_calls() -> list[str]:
+    text = INSTALLER.read_text(encoding="utf-8")
     calls = []
-    for line in _logical_lines(INSTALLER.read_text(encoding="utf-8")):
-        for name in RENDERERS:
-            if name in line and not line.lstrip().startswith(("function ", "#")):
-                calls.append(line.strip())
+    for name in RENDERERS:
+        for match in re.finditer(re.escape(name), text):
+            line_start = text.rfind("\n", 0, match.start()) + 1
+            prefix = text[line_start : match.start()].strip()
+            if prefix.startswith(("function", "#")):
+                continue
+            calls.append(_command_at(text, match.start()))
     return calls
 
 
 def test_every_installer_render_call_passes_the_enterprise_profile() -> None:
     calls = _render_calls()
     # The deferred placeholder pair and the -Mode/-Connector shorthand pair.
-    assert len(calls) >= 4, calls
+    assert len(calls) == 4, calls
     missing = [c for c in calls if "-ForProfile $EnterpriseProfile" not in c]
     assert missing == [], missing
 
 
 def test_deferred_placeholder_config_follows_the_enterprise_profile() -> None:
-    text = "\n".join(_logical_lines(INSTALLER.read_text(encoding="utf-8")))
+    text = INSTALLER.read_text(encoding="utf-8")
     start = text.index("if ($DeferredConfig) {")
-    block = text[start : text.index("$Config = $deferredConfigPath", start)]
-    config_calls = [
-        line for line in block.splitlines() if "Get-DefenseClawRenderedEnterpriseConfig" in line
-    ]
-    assert len(config_calls) == 1, config_calls
-    assert "-ForProfile $EnterpriseProfile" in config_calls[0], config_calls[0]
+    end = text.index("$Config = $deferredConfigPath", start)
+    at = text.index("Get-DefenseClawRenderedEnterpriseConfig", start)
+    assert at < end
+    assert "-ForProfile $EnterpriseProfile" in _command_at(text, at)
