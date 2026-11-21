@@ -132,7 +132,6 @@ func effectShadowRun(request trustedActionRequest, mode effectRulesMode, tiers .
 		return finish(reason, 0)
 	}
 	deadline := start.Add(effectShadowTimeCap)
-	opts.Deadline = deadline
 	if effectShadowFaultHook != nil {
 		effectShadowFaultHook()
 	}
