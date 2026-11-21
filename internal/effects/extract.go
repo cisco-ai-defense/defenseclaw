@@ -5,6 +5,7 @@
 package effects
 
 import (
+	"path"
 	"strings"
 	"time"
 
@@ -194,6 +195,8 @@ type walker struct {
 	// variables (enable -n cd, shopt -s cdable_vars), or cd was aliased: its
 	// target and effect are no longer what the argument says.
 	cdUnreliable bool
+	// lastpipe: shopt -s lastpipe is in effect (see command).
+	lastpipe bool
 	// pwdOwn: the call assigned PWD after its last cd, so $PWD is that value
 	// and not the tracked folder.
 	pwdOwn bool
@@ -747,6 +750,19 @@ func (w *walker) resolveWord(wd Word) Word {
 	glob := false
 	quoted := false
 	for i, s := range wd.Segs {
+		if s.Subst == "pwd" {
+			// $(pwd) prints the working folder unless pwd is a function, an
+			// alias or disabled.
+			v, ok := "", false
+			if w.isBuiltin("pwd", DialectPOSIX) {
+				v, ok = w.cwdWord(i == 0)
+			}
+			if !ok {
+				return Word{Static: false, Reason: ReasonDynamicExpansion, Span: wd.Span, Tail: segTail(wd.Segs[i+1:])}
+			}
+			b.WriteString(v)
+			continue
+		}
 		if s.Var != "" {
 			v, ok := w.env[s.Var]
 			if s.Var == "PWD" && !w.pwdOwn && !w.namerefSeen {
@@ -758,8 +774,15 @@ func (w *walker) resolveWord(wd Word) Word {
 				// unknown folder keeps the name for the reach rule.
 				v, ok = w.cwdWord(i == 0)
 			}
+			if ok && s.Op != nil {
+				if v == "." && s.Var == "PWD" {
+					ok = false // an operator on a folder the walk does not hold as one
+				} else {
+					v, ok = applyParamOp(v, s.Op)
+				}
+			}
 			if !ok {
-				return Word{Static: false, Reason: ReasonDynamicExpansion, Span: wd.Span}
+				return Word{Static: false, Reason: ReasonDynamicExpansion, Span: wd.Span, Tail: segTail(wd.Segs[i+1:])}
 			}
 			// An unquoted variable undergoes field splitting and globbing: if
 			// its value carries IFS whitespace or a glob metachar we cannot
@@ -1053,8 +1076,27 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 	// A pipeline stage or a background command runs in a child shell: its cd and
 	// assignments must not leak into the parent (review N2 V3/V7).
 	if c.Pipeline || c.Async {
-		saved := w.saveScope()
-		defer w.restoreScope(saved)
+		switch {
+		case c.PipeLast && !c.Async && dialect == DialectPOSIX && w.lastpipe:
+			// shopt -s lastpipe: bash runs the last stage in this shell
+			// (non-interactive, so no job control), so its cd and assignments
+			// stay (rel-1-0-10:GAP-1037).
+		case c.PipeLast && !c.Async && dialect == DialectPOSIX:
+			// Without lastpipe bash runs it in a child, but zsh and a lastpipe
+			// set where the walk cannot see it run it here: the folder after it
+			// is either one.
+			saved := w.saveScope()
+			defer func() {
+				after := w.cwdNow()
+				w.restoreScope(saved)
+				if before := w.cwdNow(); !after.equal(before) {
+					w.setCWDState(joinCWD(before, after))
+				}
+			}()
+		default:
+			saved := w.saveScope()
+			defer w.restoreScope(saved)
+		}
 	}
 
 	w.cmdNo++
@@ -2005,6 +2047,7 @@ type operand struct {
 	uploadIsFile  bool   // RoleSendData: the body is a file / stdin ("-"), not literal text
 	copyFrom      string // a copy destination write: the source spelling whose read it carries (s7-flow)
 	subtree       bool   // the write covers the whole directory tree below the path (git clone / init)
+	tail          string // Word.Tail of a dynamic operand
 	// findName / findFiltered: a find -delete root deletes only the files its
 	// predicates select: one -name/-iname pattern (findName), or a predicate the
 	// walk does not read as a pattern (findFiltered alone).
@@ -2391,7 +2434,7 @@ func (w *walker) positionalOperands(ps []Word, p Program, ctx posCtx) []operand 
 	taint := ctx.unknownFlag
 	mk := func(wd Word, role Role) operand {
 		return operand{value: wd.Value, static: wd.Static, quoted: wd.Quoted,
-			glob: wd.Glob || (p.Pattern && !wd.Quoted), role: role, pattern: p.Pattern}
+			glob: wd.Glob || (p.Pattern && !wd.Quoted), role: role, pattern: p.Pattern, tail: wd.Tail}
 	}
 	if p.FirstPosIgnore && !ctx.hasExpr && len(ps) > 0 {
 		ps = ps[1:] // sed script / grep pattern is not a path (only when no -e/-f gave it)
@@ -2693,6 +2736,7 @@ func (w *walker) effectForOperand(op operand, p Program, origin Origin, cond, fo
 	}
 	if !op.static {
 		e.Target.Type = TargetPath
+		e.Target.Spelling = dynamicSpelling(op.tail)
 		e.addReason(ReasonDynamicExpansion, ScopeTarget)
 		return e
 	}
@@ -2968,6 +3012,7 @@ func (w *walker) handleRedirs(c *Cmd, dialect Dialect, cmdNo, depth int, cond bo
 
 func (w *walker) fillRedirTarget(e *Effect, t Word) {
 	if !t.Static {
+		e.Target.Spelling = dynamicSpelling(t.Tail)
 		e.addReason(ReasonDynamicExpansion, ScopeTarget)
 		return
 	}
@@ -4520,6 +4565,8 @@ func (w *walker) noteShellOptions(program string, args []Word) {
 				w.execfailMaybe = true
 			case "extdebug":
 				w.extdebugMaybe = true
+			case "lastpipe":
+				w.lastpipe = on
 			}
 			if a.Value == "-s" || a.Value == "-o" {
 				on = true
@@ -4737,4 +4784,99 @@ func joinPattern(root, name string, flavor Flavor) string {
 		sep = `\`
 	}
 	return strings.TrimRight(root, `/\`) + sep + "**" + sep + name
+}
+
+// dynamicSpelling is the Spelling of a target whose word is not static: "$?"
+// and the literal path tail after the last dynamic part, so the classifier can
+// read a protected name in it (R-NAME); empty when the tail is no path step.
+func dynamicSpelling(tail string) string {
+	if !strings.HasPrefix(tail, "/") || len(tail) < 2 {
+		return ""
+	}
+	return cap4k("$?" + tail)
+}
+
+// applyParamOp applies a parameter operator with static operands to a value.
+// Pattern removal matches the shell way (* and ? match any character, / too);
+// a pattern the matcher cannot read is not applied (ok false).
+func applyParamOp(v string, op *ParamOp) (string, bool) {
+	switch op.Kind {
+	case "#", "##":
+		best := -1
+		for i := 0; i <= len(v); i++ {
+			if m, ok := shellPatternMatch(op.Pat, v[:i]); !ok {
+				return "", false
+			} else if m {
+				best = i
+				if op.Kind == "#" {
+					break
+				}
+			}
+		}
+		if best < 0 {
+			return v, true
+		}
+		return v[best:], true
+	case "%", "%%":
+		best := -1
+		for i := len(v); i >= 0; i-- {
+			if m, ok := shellPatternMatch(op.Pat, v[i:]); !ok {
+				return "", false
+			} else if m {
+				best = i
+				if op.Kind == "%" {
+					break
+				}
+			}
+		}
+		if best < 0 {
+			return v, true
+		}
+		return v[:best], true
+	case "/":
+		return strings.Replace(v, op.Pat, op.With, 1), true
+	case "//":
+		return strings.ReplaceAll(v, op.Pat, op.With), true
+	case ":":
+		if op.Off > len(v) {
+			return "", true
+		}
+		r := v[op.Off:]
+		if op.HasLen && op.Len < len(r) {
+			r = r[:op.Len]
+		}
+		return r, true
+	}
+	return "", false
+}
+
+// shellPatternMatch matches a shell pattern of a parameter operator, where *
+// and ? also match /. Bracket expressions and escapes are not read (ok false).
+func shellPatternMatch(pat, s string) (match, ok bool) {
+	if strings.ContainsAny(pat, `[\`) {
+		return false, false
+	}
+	const sep = "\x00"
+	if strings.Contains(s, sep) {
+		return false, false
+	}
+	m, err := path.Match(strings.ReplaceAll(pat, "/", sep), strings.ReplaceAll(s, "/", sep))
+	if err != nil {
+		return false, false
+	}
+	return m, true
+}
+
+// segTail is the literal text of the segments after a dynamic one, when they
+// are all literals (the Word.Tail of a word the walker could not resolve).
+func segTail(segs []WordSeg) string {
+	var b strings.Builder
+	for _, s := range segs {
+		if s.Var != "" || s.Subst != "" {
+			b.Reset()
+			continue
+		}
+		b.WriteString(s.Lit)
+	}
+	return b.String()
 }

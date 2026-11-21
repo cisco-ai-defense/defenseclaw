@@ -511,7 +511,7 @@ P22 HOME reassigned, cd	K|append:/home/u/.ssh/authorized_keys
 P23 HOME reassigned, tilde	K|append:/home/u/.ssh/authorized_keys
 P24 HOME export tilde	K|append:/home/u/.ssh/authorized_keys
 P25 var alias	K|append:/home/u/.ssh/authorized_keys
-P26 param op	U|
+P26 param op	K|append:/home/u/.ssh/authorized_keys
 P27 set -- positional	U|
 P28 command cd	K|append:/home/u/.ssh/authorized_keys,append:/home/u/proj/authorized_keys
 P29 builtin cd	K|append:/home/u/.ssh/authorized_keys

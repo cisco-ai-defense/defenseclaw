@@ -75,6 +75,8 @@ type Cmd struct {
 	// background (`&`) command: both run in a child shell, so a cd/assignment
 	// inside them must not change the parent's cwd/env (review N2).
 	Pipeline bool
+	// PipeLast marks the last stage of a POSIX pipeline (see Pipeline).
+	PipeLast bool
 	Async    bool
 	// ChildList marks a command inside a backgrounded compound or && / || list
 	// (`{ ...; } &`, `a || b &`): bash runs the whole list in a child shell, so
@@ -110,6 +112,24 @@ type WordSeg struct {
 	// metacharacter (so an escaped `\*` is literal but an unescaped `{a,b}`
 	// alongside it still globs -- review N10).
 	Glob bool
+	// Op is a parameter operator on Var with static operands (${V%pat},
+	// ${V#pat}, ${V/a/b}, ${V:off:len}); the walker applies it to the value.
+	Op *ParamOp
+	// Subst names a command substitution the walker can evaluate itself:
+	// "pwd" for $(pwd), `pwd` and $(pwd -L), the working folder unless pwd is
+	// shadowed (rel-1-0-10:GAP-1043, GAP-1608).
+	Subst string
+}
+
+// ParamOp is one parameter operator with static operands.
+type ParamOp struct {
+	// Kind is "#", "##", "%", "%%" (pattern removal), "/", "//" (replace
+	// first / every literal match), or ":" (substring).
+	Kind     string
+	Pat      string
+	With     string
+	Off, Len int
+	HasLen   bool
 }
 
 // Word is one argv element. The frontend fills Segs for a word built only of
@@ -129,6 +149,10 @@ type Word struct {
 	Reason ReasonCode
 	Segs   []WordSeg
 	Span   [2]int
+	// Tail is the literal text after the last dynamic part of a word that is
+	// not static ($(f)/.ssh/id_rsa -> /.ssh/id_rsa): the classifier's reach
+	// rule reads a protected name in it (R-NAME, rel-1-0-10:GAP-1043).
+	Tail string
 }
 
 // Assign is a VAR=value prefix on a command (or an export/declare).

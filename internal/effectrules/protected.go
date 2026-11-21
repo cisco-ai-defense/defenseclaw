@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/effects"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/semanticpb"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
 
@@ -539,4 +540,69 @@ func rootOf(flavor effects.Flavor) string {
 		return ""
 	}
 	return "/"
+}
+
+// Protection is the protected-set classifier's answer for one set of one
+// target, in the terms of the one decision function (DET111 D3/D4): the target
+// class, yes (known) or maybe, and for maybe the reach reason (PLAN 5.3).
+type Protection struct {
+	Set string
+	// Class: authorized_keys, autostart, credential, other_home_credential,
+	// hook_config or state.
+	Class string
+	// Certainty: known (yes) or maybe.
+	Certainty string
+	// Reach, for maybe only: R-NAME (a word names a member), R-GLOB (a pattern
+	// can match one), R-CWD (a relative name under an unknown folder lands on
+	// one) or R-FS (a path the resolver could not verify).
+	Reach string
+	// Basis is the classifier's match basis (exact, tree, link, subtree, glob,
+	// lexical, cwd, dir, protected_dir, wrong_dir, dynamic, unresolved).
+	Basis string
+}
+
+var setClass = map[string]string{
+	SetSSHAuthorizedKeys: "authorized_keys",
+	SetShellRC:           "autostart",
+	SetCredentials:       "credential",
+	SetAgentHookConfig:   "hook_config",
+	SetSelfProtection:    "state",
+}
+
+// Protected is protected(target) -> yes | no | maybe(reason) for one graded
+// target of Project: one Protection per set it may be in (none: no). Every
+// route reads the classifier through this one function.
+func Protected(pt *semanticpb.EffectTarget) []Protection {
+	if pt == nil {
+		return nil
+	}
+	out := make([]Protection, 0, len(pt.Protected))
+	for _, m := range pt.Protected {
+		p := Protection{Set: m.Set, Class: setClass[m.Set], Basis: m.Reason}
+		if p.Class == "" {
+			continue
+		}
+		if m.State == string(gradeKnown) {
+			p.Certainty = "known"
+		} else {
+			p.Certainty = "maybe"
+			switch m.Reason {
+			case "glob", "subtree":
+				p.Reach = "R-GLOB"
+			case "cwd":
+				p.Reach = "R-CWD"
+			case "lexical", "unresolved":
+				p.Reach = "R-FS"
+			default: // dir, protected_dir, wrong_dir, dynamic
+				p.Reach = "R-NAME"
+			}
+			if m.Set == SetCredentials && m.Reason == "wrong_dir" {
+				// a credential file's shape outside the active home: another
+				// account's credential (rel-1-0-10:GAP-0899, GAP-0898)
+				p.Class = "other_home_credential"
+			}
+		}
+		out = append(out, p)
+	}
+	return out
 }

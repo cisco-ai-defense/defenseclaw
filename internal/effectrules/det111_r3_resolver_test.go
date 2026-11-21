@@ -80,6 +80,18 @@ func r3Rows() []r3Row {
 		// working folder
 		{gap: "GAP-1608 $PWD/../ glob", o: px, c: sh(`cat $PWD/../.ssh/id_*`), want: map[string]string{SetCredentials: U}},
 		{gap: "GAP-1608 $PWD after cd", o: px, c: sh(`cd ~/.ssh && echo k >> "$PWD/authorized_keys"`), want: map[string]string{SetSSHAuthorizedKeys: K}},
+		{gap: "GAP-1608 $(pwd)/../ glob", o: px, c: sh(`cat $(pwd)/../.ssh/id_*`), want: map[string]string{SetCredentials: U}},
+		{gap: "GAP-1535 $(pwd) on a Windows working folder", o: wgbh, c: sh(`cat $(pwd)/.ssh/id_rsa`), want: map[string]string{SetCredentials: K}},
+		{gap: "GAP-1043 pwd function", o: ph, c: sh(`pwd() { echo /tmp; }; cat $(pwd)/.ssh/id_rsa`), want: map[string]string{SetCredentials: U}},
+		{gap: "GAP-1043 pwd function, backquotes", o: px, c: sh("pwd() { echo /tmp; }; echo k >> `pwd`/.ssh/authorized_keys"),
+			want: map[string]string{SetSSHAuthorizedKeys: U}},
+		{gap: "GAP-1244 ${PWD%suffix}", o: px, c: sh(`cat ${PWD%/proj}/.ssh/id_rsa`), want: map[string]string{SetCredentials: K}},
+		{gap: "GAP-1244 ${PWD%/*}", o: px, c: sh(`cat "${PWD%/*}/.aws/credentials"`), want: map[string]string{SetCredentials: K}},
+		{gap: "GAP-1244 ${PWD/proj/}", o: px, c: sh(`cat ${PWD/proj/}.ssh/id_rsa`), want: map[string]string{SetCredentials: K}},
+		{gap: "GAP-1244 ${PWD:0:10}", o: px, c: sh(`cat ${PWD:0:10}/.aws/credentials`), want: map[string]string{SetCredentials: K}},
+		{gap: "GAP-1037 lastpipe cd", o: px, c: sh(`shopt -s lastpipe; echo x | cd ~/.ssh; cat id_rsa`), want: map[string]string{SetCredentials: K}},
+		{gap: "GAP-1037 pipe cd may run here (zsh)", o: px, c: sh(`echo x | cd ~/.ssh; cat id_rsa`), want: map[string]string{SetCredentials: K}},
+		{gap: "GAP-1037 fp: cd in a middle stage", o: px, c: sh(`shopt -s lastpipe; cd ~/.ssh | cat; cat notes.txt`), want: map[string]string{"*": N}},
 		{gap: "GAP-1535 ~+ on a Windows working folder", o: wgb, c: sh(`cd 'C:\Users\u' && cat ~+/.ssh/id_rsa`), want: map[string]string{SetCredentials: K}},
 		{gap: "GAP-1556 $env:X folder, keys", o: wps, c: sh(`Set-Location $env:X; Set-Content -Path authorized_keys -Value x`),
 			want: map[string]string{SetSSHAuthorizedKeys: U}},
@@ -168,4 +180,32 @@ func r3Dump(res effects.Result, facts []*semanticpb.EffectFact) string {
 			" glob=" + e.Target.Glob + " lex=" + e.Target.Lexical + " prot=" + strings.Join(pr, ",") + "\n")
 	}
 	return b.String()
+}
+
+// TestDET111R3Protected checks the classifier answer in decision terms.
+func TestDET111R3Protected(t *testing.T) {
+	px, _, _, _, _, _ := r3Opts()
+	cases := []struct {
+		cmd, class, certainty, reach string
+	}{
+		{`echo k >> ~/.ssh/authorized_keys`, "authorized_keys", "known", ""},
+		{`cat ~/.ss*/id_rsa`, "credential", "maybe", "R-GLOB"},
+		{`cat /srv/homes/bob/.aws/credentials`, "other_home_credential", "maybe", "R-NAME"},
+		{`cd $X; echo x > authorized_keys`, "authorized_keys", "maybe", "R-CWD"},
+	}
+	for _, c := range cases {
+		res := effects.Extract(effects.Call{Surface: effects.SurfaceShell, Command: c.cmd}, px)
+		facts := Project(res, Env{Home: px.Home, Flavor: px.Flavor, Resolve: func(p string) (string, bool) { return p, true }})
+		hit := false
+		var got []Protection
+		for _, f := range facts {
+			for _, p := range Protected(f.Target) {
+				got = append(got, p)
+				hit = hit || (p.Class == c.class && p.Certainty == c.certainty && p.Reach == c.reach)
+			}
+		}
+		if !hit {
+			t.Errorf("%s: want %s/%s/%s, got %+v", c.cmd, c.class, c.certainty, c.reach, got)
+		}
+	}
 }
