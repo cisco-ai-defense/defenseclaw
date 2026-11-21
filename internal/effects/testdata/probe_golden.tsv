@@ -319,7 +319,7 @@ G07 gb /C/ upper	K|append:c:\users\u\.ssh\authorized_keys
 G07 quoted backslash	K|append:c:\users\u\.ssh\authorized_keys
 G08 escaped backslash	K|append:c:\users\u\.ssh\authorized_keys
 G08 gb cd ~	K|write:c:\users\u\.bashrc
-G09 cmd //c	U|
+G09 cmd //c	U|append:c:\users\u\.ssh\authorized_keys
 G09 gb /home/u	U|
 G1 gitbash /c/ path	K|delete:c:\users\u\.ssh
 G10 gb /etc	U|
@@ -327,7 +327,7 @@ G10 ln -s in .ssh	U|link:c:\t\a
 G11 HOME reassigned cd	K|append:c:\users\u\.ssh\authorized_keys
 G11 gb $USERPROFILE	U|
 G12 cp dest dir	K|write:c:\users\u\.ssh\authorized_keys
-G12 gb cmd //c	U|
+G12 gb cmd //c	U|append:c:\users\u\.ssh\authorized_keys
 G13 gb powershell -c	K|write:c:\users\u\.ssh\authorized_keys
 G13 mixed case drive	K|append:c:\users\u\.ssh\authorized_keys
 G14 gb /tmp	U|
@@ -653,7 +653,7 @@ S46 Set-Location $HOME	U|
 S47 sc PS5 alias	U|
 S48 Move-Item -Destination	U|delete:c:\tmp\k
 S49 Copy-Item -ToSession	U|write:c:\users\u\.ssh\authorized_keys\k
-S5 ps powershell positional	U|
+S5 ps powershell positional	U|delete:c:\users\u\.ssh
 S50 Set-Location -LiteralPath	U|
 S51 [Environment]::SetEnvironmentVariable	U|
 S52 Out-File positional	K|write:c:\users\u\.ssh\authorized_keys
@@ -983,10 +983,10 @@ psr9-K06 cmd: /k then /c	U|
 psr9-K07 cmd: two words before /c	U|
 psr9-K08 cmd: dynamic option	U|
 psr9-K09 cmd: /c table shape	K|delete:c:\users\u\.ssh\authorized_keys
-psr9-W03 pwsh -wd	U|
-psr9-W04 pwsh -WorkingDirectory	U|
-psr9-W05 powershell -wd win	U|
-psr9-W07 pwsh -wd -enc	U|
+psr9-W03 pwsh -wd	U|delete:/home/u/.ssh/authorized_keys
+psr9-W04 pwsh -WorkingDirectory	U|delete:/home/u/.ssh/authorized_keys
+psr9-W05 powershell -wd win	U|delete:c:\windows\system32\drivers
+psr9-W07 pwsh -wd -enc	U|delete:/home/u/.ssh/authorized_keys
 rv7-B01 cd none ; write	K|append:/home/u/.bashrc,append:/t/none/.bashrc
 rv7-B02 cd none ; ../ write	U|
 rv7-B03 pushd none ; write	K|append:/home/u/.ssh/authorized_keys,append:/t/none/authorized_keys
@@ -997,7 +997,7 @@ rv7-B08 cd none || tee	K|append:/home/u/.ssh/authorized_keys
 rv7-B09 gb cd none || write	K|append:c:\users\u\.bashrc
 rv7-B10 gb cd none ; write	K|append:c:\none\.bashrc,append:c:\users\u\.bashrc
 rv7-B100 ps env into Start-Process cmd	U|append:c:\users\u\.ssh\authorized_keys
-rv7-B101 gb USERPROFILE into cmd //c	U|
+rv7-B101 gb USERPROFILE into cmd //c	U|append:c:\users\u\.ssh\authorized_keys
 rv7-B102 cmd set then cmd /c %%	U|
 rv7-B11 ps Set-Location none ; Set-Content	K|write:c:\t\none\authorized_keys,write:c:\users\u\.ssh\authorized_keys
 rv7-B12 ps cd none ; Add-Content -Path .\	K|write:c:\t\none\authorized_keys,write:c:\users\u\.ssh\authorized_keys
@@ -1058,11 +1058,11 @@ rv7-B84 cmd pwsh -WorkingDirectory	U|
 rv7-B85 gb pwsh -wd	U|
 rv7-B86 cmd start title /D	U|
 rv7-B87 ps cmd /c cd /d	U|append:c:\users\u\.ssh\authorized_keys,append:c:\work\authorized_keys
-rv7-B88 ps-linux pwsh -wd	U|
+rv7-B88 ps-linux pwsh -wd	U|write:/home/u/.ssh/authorized_keys
 rv7-B89 bash pwsh -WorkingDirectory	U|
 rv7-B90 ps wsl -e sh -c	U|
 rv7-B91 ps bash -c tilde	U|
-rv7-B93 gb cmd //c cd /d	U|
+rv7-B93 gb cmd //c cd /d	U|append:c:\users\u\.ssh\authorized_keys
 rv7-B95 ps env USERPROFILE into cmd	U|append:c:\users\u\.ssh\authorized_keys
 rv7-B98 cmd two-line set then %P%	U|
 rv7-B99 ps env into powershell -c	U|
@@ -1101,7 +1101,7 @@ rv7-E07 mirror sudo -i rel	U|
 rv7-E08 mirror ps Set-Location shadow	U|
 rv7-E09 mirror gb HOME prefix child	K|append:c:\t\h\.bashrc
 rv7-E10 mirror printf -v HOME	U|
-rv7-G1 gb cd then cmd //c	U|
+rv7-G1 gb cd then cmd //c	U|append:c:\users\u\.ssh\authorized_keys,append:c:\work\authorized_keys
 rv7-G10 gb env -C	K|append:c:\users\u\.ssh\authorized_keys
 rv7-G12 gb cd $HOME	K|append:c:\users\u\.ssh\authorized_keys
 rv7-G13 gb PWD var	K|append:c:\users\u\.ssh\authorized_keys,append:c:\work\authorized_keys
@@ -1435,25 +1435,25 @@ rv9-I09 printf -v subscript	U|
 rv9-I10 read subscript	U|
 rv9-I12 sh alias newline	U|
 rv9-I13 expr (control)	K|
-rv9-M01 B88 pwsh -wd -c	U|
-rv9-M02 pwsh -WorkingDirectory -c	U|
-rv9-M03 pwsh -wd -ec	U|
-rv9-M04 pwsh -NoProfile -wd -c	U|
-rv9-M05 win powershell -wd -c	U|
+rv9-M01 B88 pwsh -wd -c	U|write:/home/u/.ssh/authorized_keys
+rv9-M02 pwsh -WorkingDirectory -c	U|write:/home/u/.ssh/authorized_keys
+rv9-M03 pwsh -wd -ec	U|write:/home/u/.ssh/authorized_keys
+rv9-M04 pwsh -NoProfile -wd -c	U|write:/home/u/.ssh/authorized_keys
+rv9-M05 win powershell -wd -c	U|write:c:\users\u\.ssh\authorized_keys
 rv9-M06 cmd pwsh -wd -c	U|
 rv9-M07 posix pwsh -wd -c	U|
 rv9-M08 pwsh -wd rel -c	U|
-rv9-M09 pwsh -wd dot -c abs	U|
-rv9-M10 pwsh -wd -c Set-Location inside	U|
-rv9-M11 S5 powershell positional	U|
+rv9-M09 pwsh -wd dot -c abs	U|write:/home/u/.ssh/authorized_keys
+rv9-M10 pwsh -wd -c Set-Location inside	U|write:/tmp/authorized_keys
+rv9-M11 S5 powershell positional	U|delete:c:\users\u\.ssh
 rv9-M12 pwsh -wd dir/. rel	U|
 rv9-M13 pwsh -WorkingDirectory dir/. rel	U|
-rv9-M14 pwsh -wd dir/ rel	U|
+rv9-M14 pwsh -wd dir/ rel	U|write:/home/u/.ssh/authorized_keys
 rv9-M15 pwsh -wd .ssh/. rel	U|
-rv9-M16 win powershell -wd dir-bs-dot rel	U|
+rv9-M16 win powershell -wd dir-bs-dot rel	U|write:c:\users\u\.ssh\authorized_keys
 rv9-M17 pwsh -wd dir/echo rel	U|
 rv9-M18 posix bash pwsh -wd dir/.	U|
-rv9-M19 pwsh -wd dot rel (control)	U|
+rv9-M19 pwsh -wd dot rel (control)	U|write:/home/u/authorized_keys
 rv9-N01 cd || brace eval	K|append:/home/u/.ssh/authorized_keys,append:/home/u/proj/authorized_keys
 rv9-N02 cd && source && write	U|append:/home/u/.ssh/authorized_keys
 rv9-N03 cd fail || cd && eval && write	U|

@@ -1478,7 +1478,11 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 		rest := inner[1:]
 		found := false
 		for j, a := range rest {
-			if a.Static && (strings.EqualFold(a.Value, "/c") || strings.EqualFold(a.Value, "/k")) {
+			// Git Bash (MSYS) turns a leading // into /, so cmd //c is cmd's
+			// /c there: the spelling that runs a body from a POSIX shell (DET111
+			// R1, GAP-1667).
+			if a.Static && (strings.EqualFold(a.Value, "/c") || strings.EqualFold(a.Value, "/k") ||
+				dialect == DialectPOSIX && (strings.EqualFold(a.Value, "//c") || strings.EqualFold(a.Value, "//k"))) {
 				found = true
 				parts := make([]string, 0, len(rest)-j-1)
 				allStatic := true
@@ -2301,6 +2305,15 @@ func (w *walker) classifyOperands(words []Word, p Program, dialect Dialect) ([]o
 			inlineVal = dynamicValue.Value
 		}
 		fl, ok := flagLookup(p, fname, dialect)
+		if !ok && !dynamicInline && dialect != DialectPOSIX {
+			// A PowerShell or cmd word whose colon is the value's own (7z
+			// -oC:\x: not -Name:value) is a table flag with its value glued on
+			// (DET111 R1, GAP-1663).
+			if flag, value, split := splitDynamicAttachedFlag(wd, p, dialect); split {
+				fname, inlineWord, hasInline, inlineVal = flag, value, true, value.Value
+				fl, ok = flagLookup(p, fname, dialect)
+			}
+		}
 		if ok && dialect == DialectPOSIX {
 			fname, _, _ = flagResolve(p, fname) // an abbreviation reads as its full name (--target= is --target-directory=)
 		}
@@ -2609,16 +2622,17 @@ func isFlagToken(name string, dialect Dialect) bool {
 
 // splitDynamicKeyValueOperand applies a table-valued key=value option when the value remains unresolved.
 func splitDynamicKeyValueOperand(wd Word, p Program, dialect Dialect) (string, Word, bool) {
-	eq := strings.IndexByte(wd.Value, '=')
+	name := dynamicLead(wd)
+	eq := strings.IndexByte(name, '=')
 	if eq <= 0 {
 		return "", Word{}, false
 	}
-	flag := wd.Value[:eq]
+	flag := name[:eq]
 	fl, ok := flagLookup(p, flag, dialect)
 	if !ok || !fl.Value {
 		return "", Word{}, false
 	}
-	value := attachedValueWord(wd.Value[eq+1:], wd)
+	value := attachedValueWord(name[eq+1:], wd)
 	value.Glob = wd.Glob
 	return flag, value, true
 }
@@ -2627,15 +2641,34 @@ func attachedValueWord(value string, source Word) Word {
 	out := Word{Value: value, Static: source.Static, Quoted: source.Quoted}
 	if !source.Static {
 		out.Reason = ReasonDynamicExpansion
+		out.Tail = source.Tail // the literal after the unresolved part names the place
 	}
 	return out
+}
+
+// dynamicLead is the text a word starts with: its value when static, else the
+// literal segments before its first unresolved one (7z -o$env:X\y: "-o"). A
+// resolved word that did not resolve keeps its Segs but no Value (DET111 R1,
+// GAP-1663).
+func dynamicLead(wd Word) string {
+	if wd.Static || wd.Value != "" {
+		return wd.Value
+	}
+	var b strings.Builder
+	for _, s := range wd.Segs {
+		if s.Var != "" || s.Op != nil {
+			break
+		}
+		b.WriteString(s.Lit)
+	}
+	return b.String()
 }
 
 // splitDynamicAttachedFlag lets the table consume an attached option value whose
 // value still contains an unresolved expansion (for example 7z -o$env:USERPROFILE).
 // The frontend owns tokenization; this only separates a known table flag from its value.
 func splitDynamicAttachedFlag(wd Word, p Program, dialect Dialect) (string, Word, bool) {
-	name := wd.Value
+	name := dynamicLead(wd)
 	if flag, value, has := splitInlineFlagValue(name, dialect); has {
 		if fl, ok := flagLookup(p, flag, dialect); ok && fl.Value {
 			return flag, attachedValueWord(value, wd), true
@@ -2643,7 +2676,9 @@ func splitDynamicAttachedFlag(wd Word, p Program, dialect Dialect) (string, Word
 	}
 	best := ""
 	for flag, fl := range p.Flags {
-		if !fl.Value || len(flag) < 2 || !strings.HasPrefix(name, flag) || len(name) == len(flag) {
+		// A word whose whole literal lead is the flag still has a value: the
+		// unresolved part after it (-o$env:X).
+		if !fl.Value || len(flag) < 2 || !strings.HasPrefix(name, flag) || len(name) == len(flag) && wd.Static {
 			continue
 		}
 		if flag[0] != '-' || strings.HasPrefix(flag, "--") || dialect != DialectPOSIX && len(flag) != 2 {
@@ -2757,7 +2792,7 @@ func (w *walker) splitShortFlags(name string, words []Word, i *int, p Program, o
 }
 
 func operandValue(fl Flag, v Word, p Program) operand {
-	op := operand{value: v.Value, static: v.Static, quoted: v.Quoted, glob: v.Glob, role: fl.Role, subtree: fl.Subtree}
+	op := operand{value: v.Value, static: v.Static, quoted: v.Quoted, glob: v.Glob, role: fl.Role, subtree: fl.Subtree, tail: v.Tail}
 	if fl.Role == RoleUploadFile {
 		// -T / --upload-file / --post-file / -InFile: the value is always a local
 		// file (or "-" for stdin); it is never inline literal data.
@@ -5241,6 +5276,11 @@ func (w *walker) hostPayload(c *Cmd, dialect Dialect, depth int, cond bool, orig
 	if c.Host.Opaque {
 		w.opaqueExec(origin, cond)
 		if c.Host.Maybe != "" {
+			if c.Host.MaybeCWD != "" {
+				saved := w.cwdNow()
+				w.setCWDState(w.placeCDTarget(c.Host.MaybeCWD, saved))
+				defer w.setCWDState(saved)
+			}
 			w.unwrapUncertain(c.Host.Maybe, c.Host.Dialect, depth, origin, nil, true)
 		}
 		return
@@ -5342,7 +5382,7 @@ func joinPattern(root, name string, flavor Flavor) string {
 // and the literal path tail after the last dynamic part, so the classifier can
 // read a protected name in it (R-NAME); empty when the tail is no path step.
 func dynamicSpelling(tail string) string {
-	if !strings.HasPrefix(tail, "/") || len(tail) < 2 {
+	if !strings.HasPrefix(tail, "/") && !strings.HasPrefix(tail, `\`) || len(tail) < 2 {
 		return ""
 	}
 	return cap4k("$?" + tail)

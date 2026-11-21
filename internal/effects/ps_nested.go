@@ -139,24 +139,108 @@ func winArgv(line string) []string {
 // first positional (its meaning differs between editions) or an option the
 // reader does not know.
 func psChildCommand(args []string) (string, bool) {
+	l, ok := psReadLaunch(args)
+	if !ok || l.wd != "" || l.positional {
+		return "", false
+	}
+	return l.code, true
+}
+
+// psLaunch is a powershell / pwsh command line read by psReadLaunch.
+type psLaunch struct {
+	code string
+	wd   string // the -WorkingDirectory (-wd) folder
+	// positional: the code is a positional argument (Windows PowerShell runs
+	// it as -Command, pwsh as a -File script).
+	positional bool
+}
+
+// psLaunchMaybe reads a powershell / pwsh call whose reading depends on the
+// host edition, which effects never knows: a -WorkingDirectory (-wd) folder
+// (pwsh has it, Windows PowerShell does not) or a positional script (Windows
+// PowerShell runs it as -Command, pwsh as -File). Its body, run in the -wd
+// folder, is a possible reading; the call stays opaque (DET111 R1, GAP-1557).
+func psLaunchMaybe(c *psparse.Command) (*HostPayload, bool) {
+	if b := psBaseNameOf(c); b != "powershell" && b != "pwsh" {
+		return nil, false
+	}
+	if psHostHasEncodedArgs(c) {
+		return nil, false
+	}
+	argv, ok := psHostArgv(c)
+	if !ok {
+		return nil, false
+	}
+	l, ok := psReadLaunch(argv)
+	if !ok || (l.wd == "" && !l.positional) {
+		return nil, false
+	}
+	return &HostPayload{Opaque: true, Maybe: l.code, MaybeCWD: l.wd, Dialect: DialectPowerShell}, true
+}
+
+// psHostArgv is the argv a host call passes when every element is literal: a
+// switch as written, an argument its literal text.
+func psHostArgv(c *psparse.Command) ([]string, bool) {
+	var out []string
+	for _, el := range c.Elements {
+		switch e := el.(type) {
+		case *psparse.Parameter:
+			if e.HasColon {
+				return nil, false
+			}
+			out = append(out, e.Raw)
+		case *psparse.Arg:
+			s, ok := psparse.LiteralString(e.Value)
+			if !ok {
+				return nil, false
+			}
+			out = append(out, s)
+		default:
+			return nil, false
+		}
+	}
+	return out, true
+}
+
+// psReadLaunch reads a powershell / pwsh argv: the -Command / -EncodedCommand
+// body or a positional script, and the -WorkingDirectory folder. ok is false
+// for an unknown switch, a -File script or no code.
+func psReadLaunch(args []string) (psLaunch, bool) {
+	var l psLaunch
 	valued := []string{"executionpolicy", "windowstyle", "version", "inputformat", "outputformat", "configurationname", "settingsfile", "custompipename"}
 	bare := []string{"noprofile", "noninteractive", "nologo", "noexit", "sta", "mta", "login", "noprofileloadtime", "interactive"}
 	prefixOf := func(full, n string, min int) bool { return len(n) >= min && strings.HasPrefix(full, n) }
+	code := func(rest []string) (psLaunch, bool) {
+		l.code = strings.Join(rest, " ")
+		return l, strings.TrimSpace(l.code) != "" && strings.TrimSpace(l.code) != "-"
+	}
 	for i := 0; i < len(args); i++ {
 		a := args[i]
-		if len(a) < 2 || (a[0] != '-' && a[0] != '/') {
-			return "", false
+		if a == "" || (a[0] != '-' && a[0] != '/') {
+			l.positional = true
+			return code(args[i:])
+		}
+		if len(a) < 2 {
+			return l, false
 		}
 		n := strings.ToLower(a[1:])
 		switch {
 		case n == "c" || prefixOf("command", n, 3):
-			rest := strings.Join(args[i+1:], " ")
-			return rest, strings.TrimSpace(rest) != "" && strings.TrimSpace(rest) != "-"
+			return code(args[i+1:])
 		case n == "e" || n == "ec" || prefixOf("encodedcommand", n, 3):
 			if i+1 >= len(args) {
-				return "", false
+				return l, false
 			}
-			return psparse.DecodeEncodedCommand(args[i+1])
+			text, ok := psparse.DecodeEncodedCommand(args[i+1])
+			l.code = text
+			return l, ok
+		case n == "wd" || prefixOf("workingdirectory", n, 3):
+			if i+1 >= len(args) {
+				return l, false
+			}
+			l.wd = args[i+1]
+			i++
+			continue
 		case n == "nop" || n == "noni":
 			continue
 		case n == "ep" || n == "ex" || n == "w":
@@ -180,10 +264,10 @@ func psChildCommand(args []string) (string, bool) {
 			}
 		}
 		if !known {
-			return "", false
+			return l, false
 		}
 	}
-	return "", false
+	return l, false
 }
 
 // psStartProcessChild is the script a Start-Process of powershell / pwsh / cmd

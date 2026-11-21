@@ -78,6 +78,18 @@ func lowerPSScript(command string, o Options, expandNested bool) *Script {
 			lw.hosts[ns.Source] = hp
 		}
 	}
+	if expandNested {
+		// A host call whose reading depends on the edition (-wd, a positional
+		// script) is read as a possible reading (DET111 R1, GAP-1557).
+		collectPSCommands(sc.Statements, 0, func(c *psparse.Command) {
+			if hp := lw.hosts[c]; hp != nil && !hp.Opaque {
+				return
+			}
+			if hp, ok := psLaunchMaybe(c); ok {
+				lw.hosts[c] = hp
+			}
+		})
+	}
 	lw.statements(sc.Statements, false)
 	if expandNested {
 		// Start-Process launching powershell/pwsh/cmd: psparse joins/splits the
