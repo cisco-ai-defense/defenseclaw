@@ -367,3 +367,76 @@ func psEncodedWithBlanks(c *psparse.Command) (string, bool) {
 	}
 	return "", false
 }
+
+// psExpandedCommand reads the -Command body of a host call that is one
+// expandable string whose only expansions are the session $HOME and trusted
+// $env: values ("Copy-Item $HOME\.aws\credentials ..."). Both readings agree
+// on it: a PowerShell parent expands the string before the child starts, and a
+// child that receives it verbatim expands the same variables to the same
+// values. Any other expansion keeps the body unread (DET111 R1, GAP-1226).
+func psExpandedCommand(c *psparse.Command, o Options) (string, bool) {
+	els := c.Elements
+	for i := 0; i < len(els); i++ {
+		p, ok := els[i].(*psparse.Parameter)
+		if !ok {
+			continue
+		}
+		n := strings.ToLower(p.Name)
+		if n != "c" && !(len(n) >= 3 && strings.HasPrefix("command", n)) {
+			continue
+		}
+		if p.HasColon || i+2 != len(els) {
+			return "", false // the body must be the one, last argument
+		}
+		a, ok := els[i+1].(*psparse.Arg)
+		if !ok {
+			return "", false
+		}
+		sl, ok := a.Value.(*psparse.StringLit)
+		if !ok {
+			return "", false
+		}
+		w, ok := psStringWord(sl)
+		if !ok {
+			return "", false
+		}
+		var b strings.Builder
+		for _, seg := range w.Segs {
+			switch {
+			case seg.Var == "":
+				b.WriteString(seg.Lit)
+			case seg.Var == psHomeVar:
+				if o.Home == "" {
+					return "", false
+				}
+				b.WriteString(o.Home)
+			default:
+				v, ok := psEnvValue(o.Env, seg.Var)
+				if !ok {
+					return "", false
+				}
+				b.WriteString(v)
+			}
+		}
+		text := b.String()
+		if strings.ContainsAny(text, "\"`$") {
+			return "", false // a value that brings its own quoting or expansion
+		}
+		return text, true
+	}
+	return "", false
+}
+
+// psEnvValue looks a trusted environment value up the way Windows does: the
+// name is case-insensitive.
+func psEnvValue(env map[string]string, name string) (string, bool) {
+	if v, ok := env[name]; ok {
+		return v, true
+	}
+	for k, v := range env {
+		if strings.EqualFold(k, name) {
+			return v, true
+		}
+	}
+	return "", false
+}

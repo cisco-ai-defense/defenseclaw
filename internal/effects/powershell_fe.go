@@ -56,6 +56,11 @@ func lowerPSScript(command string, o Options, expandNested bool) *Script {
 					ns.Text, ns.Static = text, true
 				}
 			}
+			if !ns.Static && ns.Kind == psparse.KindPowerShellCommand {
+				if text, ok := psExpandedCommand(cmd, o); ok {
+					ns.Text, ns.Static = text, true
+				}
+			}
 			if ns.Static && !psHostUnsafe(cmd, ns) {
 				hp = &HostPayload{Text: ns.Text, Dialect: DialectPowerShell}
 				if ns.Dialect == "cmd" {
