@@ -178,9 +178,7 @@ func TestDET111R1Dump(t *testing.T) {
 // or reason that closes it. A pending row that starts to pass fails the test,
 // so the list only shrinks.
 var det111Pending = map[string]string{
-	"GAP-0662/var5": "uv run is not a wrapper row yet (S4-R2 program table)",
 	"GAP-0662/var6": "watch is not a wrapper row yet (S4-R2 program table)",
-	"GAP-0662/var7": "script -c body is not lowered (S4-R2 wrapper row with a shell body)",
 	"GAP-0662/var8": "ssh host body runs remotely: a remote target, ruling needed",
 	"GAP-1173/var4": "Expand-Archive has no program row (S4-R2)",
 	"GAP-1173/var5": "tar in PowerShell has no program row on Windows (S4-R2)",
