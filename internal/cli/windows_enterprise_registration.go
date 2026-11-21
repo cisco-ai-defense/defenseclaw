@@ -117,6 +117,13 @@ var (
 	// ProgramData staging writes the computer's own ProgramData, and only an
 	// administrator token can build it (GAP-0079).
 	windowsEnterpriseStagingElevated = func() bool { return windows.GetCurrentProcessToken().IsElevated() }
+	// windowsEnterpriseLeftoverSweep removes this CLI's expired staging
+	// leftovers under the computer's ProgramData roots before a staging
+	// folder is made there. The package's tests pin it to a no-op: an
+	// elevated run of a staging test would otherwise delete the real
+	// computer's own leftovers and trip the GAP-0079 machine-state guard
+	// (GAP-1488).
+	windowsEnterpriseLeftoverSweep = sweepWindowsEnterpriseLeftovers
 	// windowsEnterpriseProcessUserSID is the account of this process's
 	// token.
 	windowsEnterpriseProcessUserSID = func() (*windows.SID, error) {
