@@ -424,9 +424,17 @@ func (lw *psLower) command(c *psparse.Command, cond, pipeIn bool) *Cmd {
 	} else {
 		out.Words = append(out.Words, Word{Reason: ReasonDynamicExpansion})
 	}
-	for _, el := range c.Elements {
-		switch e := el.(type) {
+	native := psNativeName(c)
+	for i := 0; i < len(c.Elements); i++ {
+		switch e := c.Elements[i].(type) {
 		case *psparse.Parameter:
+			if native && !e.HasColon && i+1 < len(c.Elements) {
+				if wd, ok := lw.fusedNativeArg(e, c.Elements[i+1]); ok {
+					out.Words = append(out.Words, wd)
+					i++
+					continue
+				}
+			}
 			out.Words = append(out.Words, Word{Value: "-" + e.Name, Static: true, Segs: []WordSeg{{Lit: "-" + e.Name}}})
 			if e.HasColon && e.Colon != nil {
 				// -Path:a,b,c : a comma list is several operands, never one path.
@@ -453,6 +461,52 @@ func (lw *psLower) command(c *psparse.Command, cond, pipeIn bool) *Cmd {
 		lw.addRedir(out, r)
 	}
 	return out
+}
+
+// psNativeName reports a command whose name is a program, not a cmdlet: a
+// literal name with no Verb-Noun hyphen. PowerShell binds a cmdlet's -Name
+// value to the parameter, but hands a native program the source text of a
+// switch and the argument glued to it (-o$env:X\y) as one argv word.
+func psNativeName(c *psparse.Command) bool {
+	name := psBaseNameOf(c)
+	return name != "" && !strings.Contains(name, "-")
+}
+
+// fusedNativeArg is the one argv word a native program gets for a switch with
+// an argument glued to it (7z -o$env:USERPROFILE\x, DET111 R1, GAP-1663): the
+// switch text and the argument's word, ok false when a blank separates them or
+// the argument is several words.
+func (lw *psLower) fusedNativeArg(p *psparse.Parameter, next psparse.CommandElement) (Word, bool) {
+	a, ok := next.(*psparse.Arg)
+	if !ok {
+		return Word{}, false
+	}
+	_, pEnd := p.Span()
+	aStart, _ := a.Span()
+	if pEnd != aStart {
+		return Word{}, false
+	}
+	ws := lw.argWords(a.Value)
+	if len(ws) != 1 {
+		return Word{}, false
+	}
+	lw.exprCommands(a.Value, true)
+	sw := "-" + p.Name
+	w := ws[0]
+	if w.Reason != "" {
+		return Word{Reason: w.Reason}, true
+	}
+	segs := []WordSeg{{Lit: sw}}
+	if w.Segs != nil {
+		segs = append(segs, w.Segs...)
+	} else {
+		segs = append(segs, WordSeg{Lit: w.Value, Quoted: w.Quoted})
+	}
+	out := Word{Segs: segs, Static: w.Static, Quoted: w.Quoted}
+	if w.Static {
+		out.Value = sw + w.Value
+	}
+	return out, true
 }
 
 func (lw *psLower) addRedir(c *Cmd, r *psparse.Redirection) {
