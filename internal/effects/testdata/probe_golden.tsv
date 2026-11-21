@@ -548,7 +548,7 @@ R5-1a SP embedded quote	U|delete:c:\windows,write:c:\work\x
 R5-1b host embedded quote	U|
 R5-2 string ArgumentList	U|delete:c:\windows
 R5-3 quoted wildcard	U|
-R5-4 SP -a prefix	U|
+R5-4 SP -a prefix	U|delete:c:\windows
 R5-5 dyn before /c	U|
 R6 exec fd	K|write:/home/u/.bashrc
 R6-1a stdin -c -	U|
