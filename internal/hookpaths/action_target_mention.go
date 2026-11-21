@@ -1554,15 +1554,33 @@ var actionWindowsMentionToken = lazyregexp.New(`(?:[A-Za-z]:)?[A-Za-z0-9_./~*?\[
 // where //x/y.sh is a local path the reading is unchanged, and an empty host
 // (file:///path) names a local path everywhere.
 func actionURLAuthorityToken(text string, start int, token string) bool {
-	if start < 2 || text[start-1] != ':' || len(token) < 3 || token[0] != '/' || token[1] != '/' || token[2] == '/' {
+	if start < 2 || text[start-1] != ':' || len(token) < 3 || token[0] != '/' || token[1] != '/' {
 		return false
 	}
+	// The shell removes the quotes of a word, so "http"://h/x and ht"tp"://h/x
+	// are the word http://h/x: quote characters inside the scheme are skipped
+	// (rel-1-0-10:GAP-0926).
 	scheme := start - 1
-	for scheme > 0 && actionURLSchemeByte(text[scheme-1]) {
+	for scheme > 0 {
+		c := text[scheme-1]
+		if c == '"' || c == '\'' {
+			scheme--
+			continue
+		}
+		if !actionURLSchemeByte(c) {
+			break
+		}
 		scheme--
 	}
-	if scheme == start-1 || !asciiLetter(text[scheme]) {
+	name := strings.NewReplacer(`"`, "", "'", "").Replace(text[scheme : start-1])
+	if name == "" || !asciiLetter(name[0]) {
 		return false
+	}
+	if token[2] == '/' {
+		// An empty authority names a local path for a file URL only; the
+		// triple slash of any other scheme (http:///host/share/f) is a
+		// URL spelling, not a share operand.
+		return !strings.EqualFold(name, "file")
 	}
 	return networkShareRootOf(token) != ""
 }
