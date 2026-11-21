@@ -341,8 +341,9 @@ Use `--judge-provider vertex_ai` with the `--judge-vertex-*` flags, or `--judge-
 
 ## Recommended judge model: Gemma 4 31B on Bedrock
 
-The judge is opt-in: a new install runs the rules only (`detection_strategy:
-regex_only`), and nothing calls a model until you turn the judge on. When you
+The judge is opt-in: a new install runs the rules only, and nothing calls a
+model until you turn the judge on (`guardrail.judge.enabled`, and the
+connectors to cover in `guardrail.judge.hook_connectors`). When you
 do, use Gemma 4 31B (`google.gemma-4-31b`) on Amazon Bedrock. DefenseClaw
 benchmarks the judge and tunes its prompt against this model.
 

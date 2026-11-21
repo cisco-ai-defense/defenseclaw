@@ -11,10 +11,19 @@ keywords:
 
 DefenseClaw's contextual judge is designed to add coverage when one tool call
 is ambiguous in isolation. On the frozen public validation set, the
-deterministic-first cascade with Bedrock Gemma 4 detected **94 of 100**
+deterministic-first cascade with Bedrock Gemma 4 26B A4B detected **94 of 100**
 family-excluded attack trajectories, with **98.95% precision**, **94% recall**,
 and **0.964 F1**. It alerted on one of 20 benign coding trajectories and
 recommended blocking none of them.
+
+<Callout type="info" title="Which model, which date">
+This benchmark ran on 2026-09-09 with Gemma 4 **26B A4B** and Gemma 3 12B. It
+was not run again with the model DefenseClaw recommends in 1.0.10, Gemma 4
+**31B** (`google.gemma-4-31b`). The 31B model was measured on the S7 sets: see
+the [recommended judge model](/docs/guardrail#recommended-judge-model-gemma-4-31b-on-bedrock)
+and the [whole-cascade results](/docs/guardrail/benchmarks#the-whole-cascade-s7-end-to-end).
+Do not read the 26B A4B rows below as 31B results.
+</Callout>
 
 <Callout type="info" title="Benchmark-bounded coverage">
 These results measure the frozen dataset and runtime path described below;
@@ -29,6 +38,7 @@ bound of 16.11%.
 Use the deterministic-first `regex_judge` strategy for coding sessions, with
 Gemma 4 31B on Amazon Bedrock as the judge model
 ([configuration](/docs/guardrail#recommended-judge-model-gemma-4-31b-on-bedrock)).
+The table below measured Gemma 4 26B A4B, not 31B.
 The judge stays opt-in. A decisive local result returns immediately. Only
 unresolved tool calls incur a model request, and a call the parser proves
 only reads (`cat`, `ls`, `grep` or a file Read, with no write, network action
@@ -96,11 +106,11 @@ gateway. Dataset commands are never executed.
 | System | TP / FN | FP / TN | Precision | Recall | F1 | FPR | Attack block recall | Benign block rate |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | Deterministic only | 1 / 99 | 0 / 20 | 100% | 1% | 0.020 | 0% | 0% | 0% |
-| Gemma 4 judge first | 94 / 6 | 1 / 19 | 98.95% | 94% | **0.964** | 5% | 35% | **0%** |
-| Deterministic → Gemma 4 | 94 / 6 | 1 / 19 | 98.95% | 94% | **0.964** | 5% | 35% | **0%** |
+| Gemma 4 26B A4B judge first | 94 / 6 | 1 / 19 | 98.95% | 94% | **0.964** | 5% | 35% | **0%** |
+| Deterministic → Gemma 4 26B A4B | 94 / 6 | 1 / 19 | 98.95% | 94% | **0.964** | 5% | 35% | **0%** |
 | Gemma 3 judge first | 99 / 1 | 18 / 2 | 84.62% | 99% | 0.912 | 90% | 95% | 90% |
 
-Gemma 4 added 93 detections beyond the deterministic result. Gemma 3's higher
+Gemma 4 26B A4B added 93 detections beyond the deterministic result. Gemma 3's higher
 attack recall came with a 90% benign trajectory alert and block rate, so it is
 not recommended for coding-session enforcement. The Granite model was
 dropped after pilots with lower recall, and the Qwen 3.5 and Muse models
