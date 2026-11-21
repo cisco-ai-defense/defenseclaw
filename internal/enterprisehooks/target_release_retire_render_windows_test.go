@@ -32,6 +32,9 @@ import (
 // is not. The release check itself stays as it was (review RV-LENT P2-1): a
 // retire render is never "another release" for the other sign-in waits.
 func TestWindowsProtectedTargetRetireRenderTakesThisReleaseRetireRender(t *testing.T) {
+	// The fixture gives the account folders their owner with the setup
+	// privilege (gap45Own), which only an elevated token holds.
+	requireGAP633Elevated(t)
 	gap45AllowMutation(t)
 	sid := currentWindowsTestSID(t)
 	home := newWindowsTargetOwnedTestHome(t, sid)

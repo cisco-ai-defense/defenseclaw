@@ -46,9 +46,15 @@ func TestGAP1045RecursiveSearchOverManyFoldersStaysUnderTheCaps(t *testing.T) {
 		t.Fatal(err)
 	}
 	record = resolveCredentialPathReadsWithin(defaultCredentialPathLimits, out.credentialWords, dir, dir, out.commands, out.paths)
+	// A Windows host records the probed file by its native path (Value): a
+	// POSIX read carries no Resolved spelling of a drive-letter path.
 	found := false
 	for _, read := range record.reads {
-		found = found || strings.HasSuffix(read.Resolved, filepath.Join("mod07", ".aws", "credentials"))
+		spelled := read.Resolved
+		if spelled == "" {
+			spelled = read.Value
+		}
+		found = found || strings.HasSuffix(spelled, filepath.Join("mod07", ".aws", "credentials"))
 	}
 	if !found {
 		t.Fatalf("the credentials file under a searched folder is no longer found: %+v", record)

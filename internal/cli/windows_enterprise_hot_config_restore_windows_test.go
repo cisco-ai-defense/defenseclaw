@@ -109,6 +109,7 @@ func TestWindowsEnterpriseHotConfigUndoRepublishesTheTargets(t *testing.T) {
 // under lifecycle.lock. A config another run committed while the preflight
 // ran stays installed, and the stale broken bytes are not kept.
 func TestWindowsEnterpriseUnparseableRescueKeepsAConcurrentCommit(t *testing.T) {
+	requireAdministratorTestToken(t, "rejected-config.yaml is written under the Administrators-owned AdminFile descriptor (keepWindowsEnterpriseRejectedFile)")
 	const broken = "invalid: [\n"
 	const committed = "config_version: 9\nguardrail:\n  block_at: HIGH\n"
 	candidate := strings.Replace(standaloneGatewayCheckConfig, "config_version: 8\n", "config_version: 9\n", 1)
@@ -463,6 +464,7 @@ func TestWindowsEnterpriseHotConfigUnprovenUndoIsNotRestarted(t *testing.T) {
 // guardian then finds the bytes recorded and never takes the repair's own
 // write for a hand edit (it did, and the gateway refused to start on it).
 func TestWindowsEnterpriseUnparseableRescueRecordsTheSuppliedConfigAsTheLifecycleGeneration(t *testing.T) {
+	requireAdministratorTestToken(t, "rejected-config.yaml is written under the Administrators-owned AdminFile descriptor (keepWindowsEnterpriseRejectedFile)")
 	t.Cleanup(func() { managedConfigRecordDeferredTo = "" })
 	const broken = "invalid: [\n"
 	const recorded = "config_version: 9\n# the recorded generation\n"
