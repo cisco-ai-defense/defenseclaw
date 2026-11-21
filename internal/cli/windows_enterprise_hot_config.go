@@ -659,6 +659,11 @@ func windowsEnterpriseHotConfigApply(
 		}
 		var targetsErr, gatewayErr, guardianErr error
 		targetsRepublished := false
+		// lostHooksErr: the targets are published again, but the hooks of the
+		// targets the candidate dropped are not proven back. It is kept apart
+		// from targetsErr: closing hooks cannot reach those targets, and the
+		// gateway proof still runs (rel-1-0-10 GAP-1646).
+		var lostHooksErr error
 		// The previously enrolled targets the candidate's targets no longer
 		// enroll: the guardian may already have removed their hooks, and
 		// republishing targets.yaml does not prove the hooks are back.
@@ -692,7 +697,7 @@ func windowsEnterpriseHotConfigApply(
 					// candidate dropped has its verified hook again, or waits
 					// for its own Windows session (GAP-0905).
 					if err := windowsEnterpriseHotConfigTargetHooksProven(restoreCtx, layout, lost, windowsEnterpriseHotConfigRestartTimeout); err != nil {
-						targetsErr = fmt.Errorf("the previous targets were published again, but the hooks of the previously enrolled targets were not proven back: %w", err)
+						lostHooksErr = fmt.Errorf("the previous targets were published again, but the hooks of the previously enrolled targets were not proven back: %w", err)
 					}
 				}
 			}
@@ -747,7 +752,28 @@ func windowsEnterpriseHotConfigApply(
 				}
 			}
 		}
+		plainChange := !bundleChange && !payloadlessRollback
+		if lostHooksErr != nil && !plainChange {
+			// A signed bundle has no transaction after it: the undo is the
+			// end state, so a dropped target without its hook again fails it
+			// as before (GAP-0905).
+			targetsErr = lostHooksErr
+		}
 		if restoreErr == nil && targetsErr == nil && gatewayErr == nil && guardianErr == nil {
+			if lostHooksErr != nil {
+				// A plain config change goes on to the upgrade transaction,
+				// which installs the same change and drops these targets
+				// again: proving their hooks back only to remove them was
+				// what failed a connector removal (kiro) with
+				// targets_restore_failed, stopped the gateway and forced
+				// every other hook closed, a closure that never reaches the
+				// dropped targets. The previous config is back and its
+				// policy is proven live; the transaction's result decides
+				// (rel-1-0-10 GAP-1646, as GAP-0933 for the fail mode).
+				result.AddWarning("dropped_target_hooks_unproven", "the change could not be applied in the running gateway, and the hooks of the previously enrolled targets it drops were not proven back for the previous config ("+
+					windowsEnterpriseBoundedDiagnostic(lostHooksErr.Error())+"); these targets have no DefenseClaw hook until the upgrade transaction applies the change, which drops them: "+
+					windowsEnterpriseBoundedDiagnostic(strings.Join(windowsHotConfigTargetLabels(lost), ", ")))
+			}
 			if !holding {
 				return
 			}
@@ -774,7 +800,7 @@ func windowsEnterpriseHotConfigApply(
 			if holdErr != nil {
 				closure = "the hooks could not be held closed (" + windowsEnterpriseBoundedDiagnostic(holdErr.Error()) + ")"
 			}
-			if !bundleChange && !payloadlessRollback {
+			if plainChange {
 				// A plain config change goes on to the upgrade transaction,
 				// which installs it and restarts the guardian, so an error
 				// here said "the previous config is back" over a 1603 while
@@ -1543,6 +1569,14 @@ func windowsEnterpriseHotConfigUnprovenTargetHooks(ctx context.Context, installe
 	}
 	if err := json.Unmarshal(out, &report); err != nil {
 		if runErr != nil {
+			// Its own refusal is on stderr; "exit status 1" alone named no
+			// cause (rel-1-0-10 GAP-1646).
+			var exitErr *exec.ExitError
+			if errors.As(runErr, &exitErr) {
+				if detail := strings.TrimSpace(string(exitErr.Stderr)); detail != "" {
+					return targets, fmt.Errorf("enterprise hooks readiness: %w: %s", runErr, windowsEnterpriseBoundedDiagnostic(detail))
+				}
+			}
 			return targets, fmt.Errorf("enterprise hooks readiness: %w", runErr)
 		}
 		return targets, fmt.Errorf("read the enterprise hooks readiness report: %w", err)
