@@ -2468,6 +2468,12 @@ func callBindsNames(call *syntax.CallExpr, match func(string) bool, every []stri
 		if len(call.Args) >= 3 && call.Args[1].Lit() == "-v" {
 			if name, known := simpleStaticWord(call.Args[2], nil); known {
 				add(name)
+			} else {
+				// A name the walk cannot read may be any name
+				// (rel-1-0-10:GAP-1044).
+				for _, user := range every {
+					add(user)
+				}
 			}
 		}
 	case "read", "mapfile", "readarray":
