@@ -7,6 +7,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -511,6 +512,9 @@ func (r *credentialPathResolver) resolve(words []credentialPathWord) {
 	// Readers, with the operand positions a variable may be read through.
 	readOperands := make(map[int64]map[int]bool)
 	readerParents := make(map[int64]bool)
+	// expandingRead: readers with a read operand that expands, the only
+	// place a substitution's output is read (rel-1-0-10:GAP-1047).
+	expandingRead := make(map[int64]bool)
 	for _, command := range r.commands {
 		if r.stopped() {
 			return
@@ -526,6 +530,9 @@ func (r *credentialPathResolver) resolve(words []credentialPathWord) {
 		positions := make(map[int]bool, len(operands))
 		for _, index := range operands {
 			positions[index] = true
+			if index < len(command.Arguments) && command.Arguments[index].Expands {
+				expandingRead[command.ID] = true
+			}
 		}
 		readOperands[command.ID] = positions
 		if command.ParentCommandID != 0 {
@@ -535,7 +542,9 @@ func (r *credentialPathResolver) resolve(words []credentialPathWord) {
 	// A reader's operand built by a substitution (cat "$(echo .env)") reads
 	// what the substituted echo or printf prints, and a find whose -exec runs
 	// a reader reads the files its name tests match: which file, the call
-	// does not say.
+	// does not say. A substitution in a reader's other words (the pattern of
+	// grep "$(echo .env)" .gitignore) reads nothing: the reader needs a read
+	// operand that expands.
 	for _, command := range r.commands {
 		if r.stopped() {
 			return
@@ -544,7 +553,7 @@ func (r *credentialPathResolver) resolve(words []credentialPathWord) {
 			continue
 		}
 		switch {
-		case (command.Program == "echo" || command.Program == "printf") && readOperands[command.ParentCommandID] != nil:
+		case (command.Program == "echo" || command.Program == "printf") && expandingRead[command.ParentCommandID]:
 			operands := credentialOperandIndexes(command.Argv, nil)
 			if command.Program == "printf" && len(operands) > 0 {
 				operands = operands[1:] // the format
@@ -676,11 +685,15 @@ func (r *credentialPathResolver) readCommand(command CommandFact, form credentia
 			operands = operands[1:]
 		}
 		recursive := credentialSearchRecursive(argv, program)
+		var filter credentialSearchFilter
+		if recursive {
+			filter = credentialSearchFilterOf(command, program)
+		}
 		for _, index := range operands {
 			argument := command.Arguments[index]
 			r.argument(command.ID, argument, false)
 			if recursive && !argument.Expands && argument.Value != "" {
-				r.searchFolder(command.ID, argument.Value)
+				r.searchFolder(command.ID, argument.Value, filter)
 			}
 		}
 		return operands
@@ -920,15 +933,202 @@ func (r *credentialPathResolver) programWord(id int64, argument ArgumentFact) {
 	if !strings.ContainsFunc(value, credentialProgramSeparator) {
 		return
 	}
-	for _, token := range strings.FieldsFunc(value, credentialProgramSeparator) {
+	for _, token := range credentialProgramReadTokens(value) {
 		if r.stopped() {
 			return
 		}
-		if strings.HasPrefix(token, "-") {
-			continue
-		}
 		r.candidate(id, token, false, false)
 	}
+}
+
+// credentialProgramReadTokens returns the words of program text the program
+// may read: every word but an option and a word the program only prints or
+// writes (rel-1-0-10:GAP-1047). Those are a word whose innermost call is a
+// print, log or write call (print('copy .env.example to .env'),
+// fs.writeFileSync('.env', ...), open('.env', 'w')), a word right after a
+// bare print verb (puts ".env"), and the target of an awk output redirect or
+// pipe (print > ".env"). A word inside a read call stays, however it is
+// nested: print(open('.env').read()) reads .env.
+func credentialProgramReadTokens(text string) []string {
+	var tokens, calls []string
+	var quote rune
+	prev, start := "", -1
+	emit := func(end int) {
+		if start < 0 {
+			return
+		}
+		token := text[start:end]
+		start = -1
+		skip := strings.HasPrefix(token, "-") || prev == ">" || prev == ">>" || prev == "|" ||
+			credentialProgramPrintVerbs[strings.ToLower(prev)]
+		if !skip && len(calls) > 0 {
+			skip = credentialProgramNonReadCall(calls[len(calls)-1], text[end:])
+		}
+		prev = token
+		if !skip {
+			tokens = append(tokens, token)
+		}
+	}
+	for i, c := range text {
+		if !credentialProgramSeparator(c) {
+			if start < 0 {
+				start = i
+			}
+			continue
+		}
+		name := ""
+		if start >= 0 {
+			name = text[start:i]
+		}
+		emit(i)
+		switch {
+		case quote != 0:
+			if c == quote {
+				quote = 0
+			}
+		case c == '\'' || c == '"':
+			quote = c
+		case c == '(':
+			calls = append(calls, name)
+		case c == ')':
+			if len(calls) > 0 {
+				calls = calls[:len(calls)-1]
+			}
+		}
+	}
+	emit(len(text))
+	return tokens
+}
+
+// credentialProgramPrintVerbs are calls and statements that print or log
+// their arguments, by their last name segment, lower case.
+var credentialProgramPrintVerbs = map[string]bool{
+	"print": true, "println": true, "printf": true, "sprintf": true, "puts": true, "say": true,
+	"echo": true, "warn": true, "log": true, "info": true, "debug": true, "error": true,
+	"format": true, "write": true, "writeln": true, "writelines": true,
+}
+
+// credentialProgramWriteCalls write or create the file their first argument
+// names, by their last name segment, lower case.
+var credentialProgramWriteCalls = map[string]bool{
+	"writefile": true, "writefilesync": true, "appendfile": true, "appendfilesync": true,
+	"write_text": true, "write_bytes": true, "createwritestream": true,
+	"mkdir": true, "mkdirsync": true, "makedirs": true, "touch": true,
+}
+
+// credentialProgramWriteMode matches the rest of an open call after its file
+// argument when the call opens it to write only: , 'w' / , "a" / , mode="wb".
+var credentialProgramWriteMode = regexp.MustCompile(`^['"]?\s*,\s*(?:mode\s*=\s*)?['"][wax][bt]?['"]`)
+
+// credentialProgramNonReadCall reports a call that prints, logs or writes
+// its arguments rather than reading a file they name. rest is the program
+// text after the word.
+func credentialProgramNonReadCall(call, rest string) bool {
+	name := strings.ToLower(call[strings.LastIndexAny(call, ".:$@")+1:])
+	switch {
+	case credentialProgramPrintVerbs[name], credentialProgramWriteCalls[name]:
+		return true
+	case name == "open" || name == "opensync":
+		return credentialProgramWriteMode.MatchString(rest)
+	}
+	return false
+}
+
+// credentialSearchFilter keeps, of a recursive search's credentials-file
+// probes, those the search opens (rel-1-0-10:GAP-1047): rg skips hidden
+// files and folders unless --hidden, -. or -uu; grep -r reads only the
+// names its --include globs match, never those its --exclude or
+// --exclude-dir globs match. The zero filter searches every probe.
+type credentialSearchFilter struct {
+	skipHidden bool
+	// include, exclude and excludeDir are grep's --include, --exclude and
+	// --exclude-dir globs.
+	include, exclude, excludeDir []string
+}
+
+func credentialSearchFilterOf(command CommandFact, program string) credentialSearchFilter {
+	argv := command.Argv
+	var filter credentialSearchFilter
+	if program == "rg" {
+		hidden, unrestricted := false, 0
+		for _, arg := range argv[1:] {
+			if arg == "--" {
+				break
+			}
+			switch {
+			case arg == "--hidden", arg == "--unrestricted" && unrestricted >= 1:
+				hidden = true
+			case arg == "--unrestricted":
+				unrestricted++
+			case strings.HasPrefix(arg, "-") && !strings.HasPrefix(arg, "--"):
+				if strings.Contains(arg[1:], ".") {
+					hidden = true
+				}
+				unrestricted += strings.Count(arg[1:], "u")
+			}
+		}
+		filter.skipHidden = !hidden && unrestricted < 2
+		return filter
+	}
+	for i := 1; i < len(argv); i++ {
+		arg := argv[i]
+		if arg == "--" {
+			break
+		}
+		if arg == "" && i < len(command.Arguments) && strings.HasPrefix(command.Arguments[i].StaticGlob, "--include=") {
+			// An unquoted --include=*.go is a glob the shell leaves as it is
+			// when nothing matches it; a match is a name that still ends in
+			// .go, so the filter only narrows. --exclude and --exclude-dir
+			// are taken only from literal words: a matching file could
+			// replace the glob with a narrower exclusion.
+			filter.include = append(filter.include, strings.TrimPrefix(command.Arguments[i].StaticGlob, "--include="))
+			continue
+		}
+		for _, option := range []struct {
+			name string
+			list *[]string
+		}{{"--include", &filter.include}, {"--exclude", &filter.exclude}, {"--exclude-dir", &filter.excludeDir}} {
+			switch {
+			case strings.HasPrefix(arg, option.name+"="):
+				*option.list = append(*option.list, strings.TrimPrefix(arg, option.name+"="))
+			case arg == option.name && i+1 < len(argv):
+				i++
+				*option.list = append(*option.list, argv[i])
+			}
+		}
+	}
+	return filter
+}
+
+// searches reports whether the search opens the probe at rel (slash
+// separated, under the searched folder).
+func (f credentialSearchFilter) searches(rel string) bool {
+	segments := strings.Split(rel, "/")
+	base := segments[len(segments)-1]
+	if f.skipHidden {
+		for _, segment := range segments {
+			if strings.HasPrefix(segment, ".") {
+				return false
+			}
+		}
+	}
+	matches := func(globs []string, name string) bool {
+		for _, glob := range globs {
+			if ok, err := path.Match(glob, name); err == nil && ok {
+				return true
+			}
+		}
+		return false
+	}
+	if len(f.include) > 0 && !matches(f.include, base) || matches(f.exclude, base) {
+		return false
+	}
+	for _, dir := range segments[:len(segments)-1] {
+		if matches(f.excludeDir, dir) {
+			return false
+		}
+	}
+	return true
 }
 
 func credentialProgramSeparator(r rune) bool {
@@ -1067,7 +1267,7 @@ func credentialGlobHasLiteral(pattern string) bool {
 // recursive search reads: each first segment of the probes is looked up once,
 // and only a regular file that is there counts (T6 scope ruling: an ordinary
 // repository search starts no chain).
-func (r *credentialPathResolver) searchFolder(id int64, folder string) {
+func (r *credentialPathResolver) searchFolder(id int64, folder string, filter credentialSearchFilter) {
 	dir := folder
 	if strings.HasPrefix(dir, "~/") && r.home != "" {
 		dir = filepath.Join(r.home, dir[2:])
@@ -1095,6 +1295,9 @@ func (r *credentialPathResolver) searchFolder(id int64, folder string) {
 			continue
 		}
 		for _, probe := range probes {
+			if !filter.searches(probe.value) {
+				continue
+			}
 			if !r.lookups.Take() {
 				return
 			}
