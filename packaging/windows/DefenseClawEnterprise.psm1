@@ -31831,13 +31831,13 @@ function Get-DefenseClawSharedManagedHookOwners {
         if ([string]::IsNullOrWhiteSpace($owner)) {
             throw "$($specification.name) managed-hook ownership has no gateway service"
         }
-        # Secure Client counts the owner even when the bound policy file was
-        # removed or changed after DefenseClaw wrote it (an MDM or an
-        # administrator edit): the writer re-merges and re-authenticates the
-        # file later in this transaction, so a reinstall no longer fails on
-        # it. Standalone and strict keep refusing.
-        $lenientBinding = -not (Test-DefenseClawStandaloneProfile) -and
-            -not (Test-DefenseClawTrustStrictAncestors)
+        # Outside strict mode the owner counts even when the bound policy
+        # file was removed or changed after DefenseClaw wrote it (Intune, an
+        # MDM or an administrator edit): this probe only decides ownership,
+        # and the writer re-merges and re-authenticates the file later in
+        # this transaction, so a reinstall no longer fails 1603 on it. Both
+        # profiles (GAP-1732: standalone refused too); strict keeps refusing.
+        $lenientBinding = -not (Test-DefenseClawTrustStrictAncestors)
         foreach ($binding in @($specification.bindings)) {
             $boundPath = [string]$binding.path
             $expectedHash = [string]$state.([string]$binding.field)
