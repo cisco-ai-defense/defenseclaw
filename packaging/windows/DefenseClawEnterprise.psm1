@@ -33131,6 +33131,29 @@ function Test-DefenseClawManifestCatchUpTeardownRefusal {
     return $false
 }
 
+function Test-DefenseClawLockWaitTeardownRefusal {
+    <#
+        rel-1-0-10:GAP-1713: whether a teardown refusal says only that the
+        read-only check timed out waiting for a managed transaction lock that
+        another DefenseClaw process held (the hook Guardian's reconcile pass
+        holds them while it repairs). The holder releases the lock when its
+        pass ends, so the check asks again within its wait.
+    #>
+    param([string]$Message)
+    $text = [string]$Message
+    foreach ($needle in @(
+            'waiting for managed policy transaction lock',
+            'timed out waiting for Cursor transaction lock',
+            'timed out waiting for managed runtime selector lock',
+            'timed out waiting for the per-user enrollment lock'
+        )) {
+        if ($text.Contains($needle)) {
+            return $true
+        }
+    }
+    return $false
+}
+
 # rel-1-0-6:GAP-0319/GAP-0346: how long the uninstall pre-commit check waits
 # for the enumerator pass and the guardian's adoption after a deleted
 # enrolled account, and how often it asks again. Tests shorten them.
@@ -33356,7 +33379,8 @@ function Invoke-DefenseClawUninstallPrecommitHookCheck {
     }
     catch {
         $deletedAccount = Test-DefenseClawDeletedAccountTeardownRefusal -Message $_.Exception.Message
-        if (-not $deletedAccount -and
+        $lockWait = Test-DefenseClawLockWaitTeardownRefusal -Message $_.Exception.Message
+        if (-not $deletedAccount -and -not $lockWait -and
             -not (Test-DefenseClawManifestCatchUpTeardownRefusal -Message $_.Exception.Message)) {
             throw
         }
@@ -33373,7 +33397,12 @@ function Invoke-DefenseClawUninstallPrecommitHookCheck {
     $deadline = [DateTime]::UtcNow.AddSeconds($script:UninstallDeletedAccountWaitSeconds)
     $restartEnumerator = $deletedAccount
     $enumeratorRestarted = $false
-    if (-not $deletedAccount) {
+    if ($lockWait) {
+        # rel-1-0-10:GAP-1713: another DefenseClaw process held a managed
+        # transaction lock for the whole lock wait. Ask again within the wait.
+        Write-DefenseClawLifecyclePhase -Stage 'a managed transaction lock was held by another DefenseClaw process: asking again before the uninstall'
+    }
+    elseif (-not $deletedAccount) {
         # rel-1-0-6:GAP-0319: the enumerator pass already ran between the
         # lifecycle's own rebinding and this check (or the guardian had not
         # adopted its manifest yet), so the first refusal is the stale
@@ -33425,8 +33454,10 @@ function Invoke-DefenseClawUninstallPrecommitHookCheck {
         }
         catch {
             $message = $_.Exception.Message
-            if (Test-DefenseClawManifestCatchUpTeardownRefusal -Message $message) {
-                # The enumerator's new manifest is not adopted yet. This
+            if ((Test-DefenseClawManifestCatchUpTeardownRefusal -Message $message) -or
+                (Test-DefenseClawLockWaitTeardownRefusal -Message $message)) {
+                # The enumerator's new manifest is not adopted yet, or a
+                # managed transaction lock is still held (GAP-1713). This
                 # in-between refusal never replaces the one kept for the
                 # deadline (the first refusal or the last deleted-account one).
                 continue
