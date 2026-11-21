@@ -111,7 +111,7 @@ async def test_wide_rows_fit_the_body_at_80x24(tmp_path, panel, model_name, colu
     async with app.run_test(size=(80, 24)) as pilot:
         model = getattr(app, model_name)
         model.data_table_columns = lambda: columns
-        model.data_table_rows = lambda: (row,)
+        model.data_table_rows = lambda compact=False: (row,)
         app.action_switch_panel(panel)
         await settle_panel(app, pilot)
         app._render_chrome()  # noqa: SLF001
