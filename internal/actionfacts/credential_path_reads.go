@@ -1093,11 +1093,17 @@ func (r *credentialPathResolver) searchFolder(id int64, folder string) {
 		if r.stopped() {
 			return
 		}
-		if !r.lookups.Take() {
+		// A first segment that is not there costs no lookup of the cap
+		// (rel-1-0-10:GAP-1045): an ordinary search over many folders stays
+		// under it. The probe it is is charged to the work cap instead.
+		if !r.work.Take() {
 			return
 		}
 		if _, err := os.Lstat(filepath.Join(dir, first)); err != nil {
 			continue
+		}
+		if !r.lookups.Take() {
+			return
 		}
 		for _, probe := range probes {
 			if !r.lookups.Take() {
