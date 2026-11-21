@@ -227,10 +227,17 @@ func verifiedGroupDomains(ctx context.Context, spoolDir string) []groupDomains {
 		// lookup outside the gateway (config validate) merges none, and a
 		// Mac's Open Directory answer has no NetBIOS domain, so the check
 		// paired nothing there and kept a warning for a group the matcher
-		// selects (rel-1-0-10:GAP-1541).
-		facts = mergeSpoolFacts(facts, record)
+		// selects (rel-1-0-10:GAP-1541). The gateway merges only the record
+		// of the account that holds the uid now (readIdentitySpoolFactsForAccount):
+		// merging any record let the warning fold the domain of a record
+		// the matcher never reads, such as a removed account's whose uid a
+		// new account holds (rel-1-0-10:GAP-1740).
+		holder, named := profileExplainAccountName(record.Key)
+		if named && spoolRecordNamesAccount(record, holder) && !spoolRecordOfOtherSID(record, facts.AccountSID) {
+			facts = mergeSpoolFacts(facts, record)
+		}
 		subject := profileSubjectFromVerified(VerifiedSubject{
-			UserID: record.Key, IDKind: useridentity.KindForID(record.Key), UserName: record.User, Directory: facts,
+			UserID: record.Key, IDKind: useridentity.KindForID(record.Key), UserName: holder, Directory: facts,
 		}, false)
 		pair := groupDomainsOf(&subject)
 		if strings.ContainsAny(pair.netbios, `\/@ `) || !pair.paired() || known(pair.dns) {
