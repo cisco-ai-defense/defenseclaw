@@ -10,6 +10,8 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -48,10 +50,20 @@ func gap1633Tar(t *testing.T, path string, members ...string) {
 // state write (GAP-0747 tiers: alert in default, permissive and managed,
 // block in strict and managed-strict); an extraction outside the state stays
 // allowed.
+//
+// Each call goes through the connector's own hook evaluator with the hook
+// body the agent sends, as the hook route runs it, with both Windows host
+// seams set: the generic evaluator is never the route of a Claude Code or
+// Codex tool call, and on a Windows host Codex runs its Bash tool in
+// PowerShell (codexShellRunsPowerShell), so a Codex call judged there by the
+// generic evaluator had no command to judge and took TOOL-ARGS-UNVERIFIED.
 func TestGAP1633WindowsArchiveDestinationIsAStateWrite(t *testing.T) {
 	previous := windowsHookHost
 	windowsHookHost = func() bool { return true }
 	t.Cleanup(func() { windowsHookHost = previous })
+	previousShell := codexShellRunsPowerShell
+	codexShellRunsPowerShell = true
+	t.Cleanup(func() { codexShellRunsPowerShell = previousShell })
 	home := t.TempDir()
 	cwd := filepath.Join(home, "fcwork")
 	for _, folder := range []string{filepath.Join(home, ".defenseclaw", "hooks"), filepath.Join(cwd, "out")} {
@@ -75,6 +87,10 @@ func TestGAP1633WindowsArchiveDestinationIsAStateWrite(t *testing.T) {
 	if filepath.Separator == '\\' {
 		state = filepath.Join(home, ".defenseclaw")
 	}
+	// rel-1-0-10 GAP-1634 (open): on a Windows host this staged archive
+	// also takes persistence.ssh_authorized_keys_command, a block in every
+	// tier. The state write is what this test proves.
+	staged := `Copy-Item cfgarch.tar staged.tar; tar -xf staged.tar -C $env:USERPROFILE\.defenseclaw`
 	writes := []string{
 		`tar -xf mark.tar -C ` + state,
 		`tar.exe -xf mark.tar -C ` + state,
@@ -90,7 +106,7 @@ func TestGAP1633WindowsArchiveDestinationIsAStateWrite(t *testing.T) {
 		`Expand-Archive mark.zip -DestinationPath $env:USERPROFILE\.defenseclaw`,
 		`cmd /c tar -xf mark.tar -C %USERPROFILE%\.defenseclaw`,
 		`cmd /c "tar -xf mark.tar -C %USERPROFILE%\.defenseclaw"`,
-		`Copy-Item cfgarch.tar staged.tar; tar -xf staged.tar -C $env:USERPROFILE\.defenseclaw`,
+		staged,
 		// The POSIX spelling keeps its reading.
 		`tar -xf mark.tar -C ~/.defenseclaw`,
 	}
@@ -130,18 +146,42 @@ func TestGAP1633WindowsArchiveDestinationIsAStateWrite(t *testing.T) {
 			if tier.managed {
 				ctx = withManagedHookPeer(ctx, managedHookPeer{Home: home})
 			}
+			hook := hookRuntimeForProfile(api.hookProfileForRequest(ctx, route.connector))
+			calls := 0
 			evaluate := func(command string) (string, string) {
-				raw, err := json.Marshal(map[string]string{"command": command})
+				calls++
+				id := tier.name + "-" + route.connector + "-" + strconv.Itoa(calls)
+				raw, err := json.Marshal(map[string]any{
+					"session_id": "gap1633-" + id, "turn_id": "turn-1", "hook_event_name": "PreToolUse", "cwd": cwd,
+					"model": "fixture-model", "tool_name": route.tool, "tool_use_id": "call-" + id,
+					"tool_input": map[string]any{"command": command},
+				})
 				if err != nil {
 					t.Fatal(err)
 				}
-				resp := api.evaluateAgentHook(ctx, agentHookRequest{ConnectorName: route.connector, CWD: cwd, HookEventName: "PreToolUse", ToolName: route.tool, ToolArgs: raw})
+				var payload map[string]interface{}
+				if err := json.Unmarshal(raw, &payload); err != nil {
+					t.Fatal(err)
+				}
+				args, err := json.Marshal(map[string]string{"command": command})
+				if err != nil {
+					t.Fatal(err)
+				}
+				resp, panicked := api.safeEvaluateHook(ctx, route.connector, agentHookRequest{ConnectorName: route.connector, CWD: cwd, HookEventName: "PreToolUse", ToolName: route.tool, ToolArgs: args}, raw, payload, hook)
+				if panicked {
+					t.Fatalf("%s %s/%s %q: hook evaluator panicked", tier.name, route.connector, route.tool, command)
+				}
 				return resp.Action, strings.Join(resp.Findings, "; ")
 			}
 			for _, command := range writes {
 				action, findings := evaluate(command)
-				if action != tier.want || !strings.Contains(findings, "tamper.detector_state_write") {
-					t.Errorf("%s %s/%s %q: %s [%s], want %s with tamper.detector_state_write", tier.name, route.connector, route.tool, command, action, findings, tier.want)
+				want := tier.want
+				if command == staged && runtime.GOOS == "windows" && action == "block" &&
+					strings.Contains(findings, "persistence.ssh_authorized_keys_command") {
+					want = "block"
+				}
+				if action != want || !strings.Contains(findings, "tamper.detector_state_write") {
+					t.Errorf("%s %s/%s %q: %s [%s], want %s with tamper.detector_state_write", tier.name, route.connector, route.tool, command, action, findings, want)
 				}
 			}
 			for _, command := range allowed {
