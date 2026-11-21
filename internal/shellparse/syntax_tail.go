@@ -305,8 +305,8 @@ func quotedHereDocs(command string, from int, budget *bounded.Counter) []quotedH
 			continue
 		}
 		lineEnd += at
-		if opener, end := quoteAt(at), quoteAt(lineEnd); opener == unread ||
-			opener != 0 && (end == 0 || end == unread) {
+		opener, end := quoteAt(at), quoteAt(lineEnd)
+		if opener == unread || opener != 0 && (end == 0 || end == unread) {
 			at++
 			continue
 		}
@@ -324,7 +324,7 @@ func quotedHereDocs(command string, from int, budget *bounded.Counter) []quotedH
 		if !budget.TakeN(read) {
 			break
 		}
-		if !closed {
+		if !closed || opener != 0 && argumentClosesIn(command, bodyFrom, bodyTo, from, quoteAt) {
 			at++
 			continue
 		}
@@ -336,6 +336,26 @@ func quotedHereDocs(command string, from int, budget *bounded.Counter) []quotedH
 	}
 	readHereDocScripts(command, from, quoteAt, docs, starts, budget)
 	return docs
+}
+
+// argumentClosesIn reports a quoted argument that holds a here-document
+// opener and closes inside the lines of its body, before the terminator: the
+// text after the closing quote is statements of the shell, not data of the
+// consumer, so the body is not kept apart (rel-1-0-10:GAP-0914). The quote
+// closes the argument when the byte after the closing quote ends a word; a
+// quote that reopens at once ('"'"' spells one apostrophe) or a word that
+// goes on (it's) does not, and the lines after a syntax error stay apart as
+// they did (GAP-0876).
+func argumentClosesIn(command string, bodyFrom, bodyTo, from int, quoteAt func(int) byte) bool {
+	for at := max(bodyFrom, from+1); at < bodyTo && at < len(command); at++ {
+		if quoteAt(at) != 0 || quoteAt(at-1) == 0 || quoteAt(at-1) == unreadQuote {
+			continue
+		}
+		if strings.IndexByte(" \t\n;&|<>()", command[at]) >= 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // quotedHereDocWord reads the delimiter after a << at offset at: an optional
