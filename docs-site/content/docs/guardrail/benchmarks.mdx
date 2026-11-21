@@ -1,17 +1,225 @@
 ---
-title: Deterministic detection benchmarks
-description: Public F1, false-positive, benign-block, YARA, privacy, and bounded-chain results for DefenseClaw's deterministic guardrails.
+title: Guardrail benchmarks
+description: What DefenseClaw measured for its guardrail in 1.0.10 - rule detection, the full rules, decision model and judge cascade, the LLM judge, model routing, and hook speed - with the build, the data and how to reproduce each result.
 keywords:
   - DefenseClaw benchmarks
-  - deterministic agent security
+  - guardrail benchmark
+  - agent guardrail F1
   - tool call detection F1
   - agent guardrail false positive rate
+  - LLM judge benchmark
+  - routing benchmark
+  - hook latency
   - CEL regex YARA benchmark
 ---
 
+This page collects every benchmark behind the DefenseClaw guardrail in
+1.0.10. Each section says what was measured, on which build, with which
+data, and how to run it yourself.
+
+Read the numbers with two facts in mind. DefenseClaw blocks **proved
+effects**, not suspicious words, so the rules alone catch little but block
+almost nothing by mistake. The decision model and the LLM judge add coverage,
+and both are off until you set them up
+([decision model](/docs/guardrail/decision-model),
+[LLM judge](/docs/guardrail#recommended-judge-model-gemma-4-31b-on-bedrock)).
+Every table below says which layers ran.
+
+## Which benchmark answers which question
+
+| Question | Benchmark | Build and date | Section |
+| --- | --- | --- | --- |
+| How precise are the rules on public command, PII and agent-trace data? | Deterministic detection | Rule packs of September 2026 (scorecard of 2026-09-08). Not run again for 1.0.10. | [Rule detection](#rule-detection-on-public-data) |
+| How much does the whole cascade catch, and what does it cost in noise, time and money? | S7 end-to-end | 1.0.10 release candidate `4269debe92`, 2026-11-16 | [Whole cascade](#the-whole-cascade-s7-end-to-end) |
+| How well does the LLM judge read one session in context? | Contextual judge | Gemma 4 26B A4B, 2026-09-09 | [LLM judge](#llm-judge) |
+| Does the alignment check help? | Alignment check | 1.0.10 code | [Alignment check](/docs/guardrail/alignment-check#how-well-it-works) |
+| How good is the decision model on its own? | System One benchmark | OpenJev with Gemma 4 as the judge | [Decision model](/docs/guardrail/decision-model#benchmarks) |
+| Does the router send each prompt to the right model? | Routing evaluation | Stand-in classifiers, 2026-11-12 | [Model routing](#model-routing) |
+| How many tool calls a second can one host check? | Hook sizing | 1.0.10 release candidate `f1ccff5b7a`, 2026-11-17 | [Hook speed](#hook-speed-and-sizing) |
+
+## The whole cascade: S7 end-to-end
+
+This is the benchmark to quote for 1.0.10. It replays labelled tool calls,
+prompts and tool results through the real hook code, with each layer added in
+turn: rules, then the decision model, then the LLM judge.
+
+**What ran.** The 1.0.10 release candidate `4269debe92`, plus changes to the
+test harness only (and a bench-only switch that lets the hook wait 8 seconds
+for the judge). It ran on 2026-11-16. Fixes made after that build, some of
+them to rules, are in the released 1.0.10. The benchmark was not run again on
+the released build, so its rows can differ from these.
+
+**What each setup is.**
+
+| Setup | Layers |
+| --- | --- |
+| (a) Rules, default pack | What a new install runs. No model is called. |
+| (b) Rules, strict pack | The rules with the `strict` pack. |
+| (c) Rules and decision model | Cascade 2 of the [decision model](/docs/guardrail/decision-model#three-cascades): Gemini Decision 1 answers what the rules let through. |
+| (d) Rules, decision model and judge | Cascade 3: the decision model decides the clear calls, Gemma 4 31B on Bedrock judges the rest. The hook waits at most **3.4 seconds** for the model layers, as shipped. |
+| (e) Same as (d), 8-second wait | A test setting, not the shipped one. It shows what the judge adds when it is never cut off. |
+
+**Data.** Thirteen third-party tool-call sets, holdout side: AgentDojo,
+MCPTox, InjecAgent, MCP-hunt, DTAP, Agentic RedTeam, Nemotron terminal, an
+extra public shell set, a public Windows shell set, Atomic Red Team (Linux and
+macOS), RedCode bash, Cowrie honeypot sessions and a set of benign coding
+sessions. That is 1,147 attack cases and 4,930 benign cases. The three
+attack-only sets use the benign coding sessions as their benign side. The
+prompt and tool-result sets are listed apart below. Labels are label set 3.3:
+the source labels plus reviewed corrections (the correction files are in
+`benchmarks/s7/gate/labels`). The holdout side was run once, and nothing was
+tuned on any case for this run.
+
+### Pooled result
+
+Alert level: a case counts when DefenseClaw raised an alert or a block.
+Block level: only when it blocked.
+
+| Setup | Precision | Recall | Benign calls alerted | F1 [95% interval] | Block recall | Benign calls blocked | Hook time p50 / p95 | USD per 1,000 calls |
+| --- | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: |
+| (a) Rules, default | 0.884 | 0.212 | 0.6% | 0.342 [0.307, 0.374] | 0.045 | 0.1% | 17 / 30 ms | 0.0002 |
+| (b) Rules, strict | 0.876 | 0.221 | 0.7% | 0.354 [0.321, 0.382] | 0.153 | 0.4% | 17 / 30 ms | 0.0002 |
+| (c) Rules and decision model | 0.450 | 0.907 | 25.8% | 0.601 [0.589, 0.615] | 0.347 | 1.2% | 209 / 363 ms | 0.115 |
+| **(d) Rules, decision model and judge** | **0.728** | **0.554** | **4.8%** | **0.629 [0.605, 0.654]** | **0.385** | **1.2%** | **834 / 2,905 ms** | **0.229** |
+| (e) Same, 8-second wait (test only) | 0.735 | 0.548 | 4.6% | 0.628 [0.603, 0.653] | 0.386 | 1.2% | 839 / 2,913 ms | 0.230 |
+
+How to read it:
+
+- **The rules are precise and blunt.** Few benign calls are touched, but they
+  catch about a fifth of the attacks. Most of what they miss is prompt
+  injection (AgentDojo, InjecAgent, BIPIA), which only the context of the
+  request shows.
+- **The decision model alone is too noisy.** In (c) a quarter of benign
+  calls raise an alert. Do not run it as the only layer after the rules.
+- **The judge brings the noise back down.** In (d) the false-alert rate falls
+  from 25.8% to 4.8% and recall falls from 0.907 to 0.554. The judge cannot
+  lower a confident block of the decision model, so benign blocks stay at
+  1.2% (57 calls).
+- **Blocking is much rarer than alerting.** Only a call with strong evidence
+  is blocked, and a block needs a connector with a synchronous pre-tool hook.
+- **The judge answered in time on 99.2% of the calls sent to it** at the 3.4
+  second wait. For a call the judge did not answer in time, the decision
+  model's own answer stands (an unsure answer stays an alert or a question).
+  A cut-off call costs recall and never turns into a silent allow.
+
+### Per set
+
+Rules only (default pack) next to the full cascade (d). Recall is at alert
+level. "Benign alerted" is on the set's own benign calls; for the sets marked
+`*` it is on the 923 benign coding calls.
+
+| Set | Attacks / benign | Rules recall | Rules benign alerted | Cascade recall | Cascade benign alerted | Cascade block recall |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| AgentDojo | 513 / 753 | 0.006 | 0.5% | 0.386 | 9.2% | 0.316 |
+| MCPTox | 100 / 343 | 0.120 | 0.0% | 0.390 | 0.3% | 0.310 |
+| InjecAgent | 80 / 5 | 0.000 | 0.0% (5 calls) | 0.000 | 0.0% (5 calls) | 0.000 |
+| MCP-hunt | 88 / 437 | 0.977 | 0.0% | 1.000 | 0.7% | 0.034 |
+| Agentic RedTeam | 22 / 0 | 0.773 | no benign calls | 0.955 | no benign calls | 0.318 |
+| Extra public shell | 31 / 521 | 0.839 | 1.9% | 1.000 | 5.2% | 0.710 |
+| Public Windows shell | 37 / 177 | 0.297 | 0.0% | 0.973 | 0.0% | 0.703 |
+| Atomic Red Team `*` | 151 / 0 | 0.185 | 0.8% | 0.715 | 1.0% | 0.523 |
+| RedCode bash `*` | 44 / 0 | 0.000 | 0.8% | 0.818 | 1.0% | 0.750 |
+| Cowrie sessions `*` | 81 / 0 | 0.741 | 0.8% | 0.975 | 1.0% | 0.975 |
+
+On prompts and tool results, which the judge also reads:
+
+| Set | Attacks / benign | Rules recall | Rules benign alerted | Cascade recall | Cascade benign alerted | Cascade block recall |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| AgentDojo, user prompt | 194 / 57 | 0.995 | 1.8% | 0.995 | 12.3% | 0.701 |
+| AgentDojo, tool result | 255 / 444 | 0.635 | 0.0% | 0.973 | 0.7% | 0.000 |
+| BIPIA email, tool result | 103 / 32 | 0.010 | 0.0% | 0.913 | 0.0% | 0.000 |
+
+Where it does not work, plainly:
+
+- **InjecAgent: nothing found** (0 of 80), with the rules or with the full
+  cascade. It has only 5 benign calls, so its false-alert rate says nothing.
+- **AgentDojo tool calls: 39% recall.** The cascade misses most of them, and
+  alerts on 9.2% of the benign calls of that set.
+- **Tool results are not blocked.** The default pack never blocks a tool
+  result ([tool results](/docs/guardrail/tool-results)), so the block recall
+  there is zero by design.
+- The 12.3% false-alert rate on AgentDojo prompts is 7 of 57 benign prompts,
+  a small sample.
+
+### Next to other tools
+
+Each tool's best setting from earlier runs, scored with the same labels on the
+sets it covers. These are the frozen results of those runs. The other tools
+were not re-run for this build.
+
+| Tool | Sets covered | Their F1 | Their benign alerted | DefenseClaw (d) F1 on the same sets |
+| --- | ---: | ---: | ---: | ---: |
+| LlamaFirewall (PromptGuard 2, AlignmentCheck, CodeShield) | 13 | 0.575 | 9.6% | 0.629 |
+| LLM Guard | 3 | 0.549 | 6.9% | 0.688 |
+| Qwen3Guard-Gen 8B | 13 | 0.466 | 2.3% | 0.629 |
+| Granite Guardian 3.3 8B | 13 | 0.482 | 32.9% | 0.629 |
+| Llama Guard 4 12B | 13 | 0.337 | 73.2% | 0.629 |
+| Invariant Guardrails | 13 | 0.205 | 7.1% | 0.629 |
+| NeMo Guardrails | 13 | 0.101 | 11.5% | 0.629 |
+| Guardrails AI | 13 | 0.000 | 0.0% | 0.629 |
+| CodeShield (part of LlamaFirewall) | 4 | 0.000 | 0.0% | 0.878 |
+
+DefenseClaw has the highest F1 of the runs, but not by a margin you should
+rely on against LlamaFirewall: the 95% intervals of the two overlap. On
+speed, LlamaFirewall's p50 and p95 were 2,950 and 24,687 ms, with a cost of
+USD 0.80 per 1,000 calls; the DefenseClaw cascade is in the table above.
+PromptGuard 2 on its own was not run. A tool none of whose rules apply to a
+tool call scores near zero by construction; read those rows as "does not cover
+this surface", not as a failure of the tool at its own job.
+
+### Time and cost
+
+- **Hook time** is built from measured parts, not timed end to end: a
+  single-stream sample of 19,920 rules-only calls on a busy test host, the
+  recorded latency of the decision model, and the recorded latency of the
+  judge's answers. The rules-only figure is an upper bound for an idle host
+  (p99 42 ms). With the cascade, p99 is 3,620 ms. The hook never waits longer
+  than the 3.4 second window for the model layers.
+- **Cost** is the price of the model calls at list price, plus CPU time at an
+  assumed price per core-second. The judge was sent on 28% of the calls
+  (16,957 requests for 61,438 calls) and cost USD 0.114 per 1,000 calls. The
+  decision model adds USD 0.115. Use your own prices: the numbers move with
+  the model, the provider and the mix of calls you send.
+
+### Reproduce it
+
+The numbers on this page are in
+[`benchmarks/results/s7-e2e-1.0.10.json`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/benchmarks/results/s7-e2e-1.0.10.json):
+counts and rates only, with the build and the label set. The harness and the
+scorer are in the repository. The corpora, the saved decision model and judge
+answers and DefenseClaw's own agent traces are not, so a rerun gives your own numbers for
+the public sets, not these.
+
+```bash
+go build -tags s7bench -trimpath -o bin/s7bench ./benchmarks/cmd/s7bench
+
+# Build each public corpus (see benchmarks/README.md), register it, and list
+# it in corpora.json as {"name": {"files": ["/abs/path.cases.jsonl"]}}.
+python3 benchmarks/s7/gate/s7gate.py register-corpus CORPUS.jsonl --version v1
+
+# Rules only, three packs. --labels none scores the corpus files as they are.
+python3 benchmarks/s7/gate/s7gate.py all \
+  --bin bin/s7bench --policy-dir policies \
+  --corpora corpora.json --out outputs/s7 --labels none
+```
+
+For the judge rows, pass the judge settings to the harness with
+`--harness-args "-strategy regex_judge -judge-model MODEL -judge-url URL"`
+and add your own Bedrock or OpenAI-compatible access. For the decision-model
+rows add `-dm-url` and `-dm-cache-dir`
+([`benchmarks/cmd/s7bench/README.md`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/benchmarks/cmd/s7bench/README.md)
+lists the flags). To score with reviewed labels, point `--labels` at a label
+set, or at one correction file from `benchmarks/s7/gate/labels` for the
+corpus it belongs to.
+
+## Rule detection on public data
+
 DefenseClaw is designed to block **proved effects**, not merely suspicious
 words. We evaluated that design across public malicious-command, PII,
-tool-injection, and honest agent-trajectory datasets.
+tool-injection, and honest agent-trajectory datasets in September 2026. The
+scorecard is dated 2026-09-08 and has not been regenerated since. 1.0.10
+added and changed rules, and this public harness was not run again for them;
+the S7 end-to-end rows above are the 1.0.10 measurement.
 
 <Callout type="info" title="How to read these results">
 The **Profile** column is the guardrail rule-pack profile (`default`,
@@ -26,12 +234,7 @@ conformance results are kept separate from binary accuracy. A successful
 attack trajectory does not make every tool call a malicious true positive.
 </Callout>
 
-For the model-based judge that covers what these rules leave unresolved,
-see the [contextual LLM judge benchmark](/docs/guardrail/llm-judge-benchmark):
-Gemma 4 production-path F1, false positives, benign blocking, latency,
-tokens, cost, and connector intent context.
-
-## Headline validation results
+### Headline validation results
 
 | Benchmark | Profile | TP/TN/FP/FN | F1 | FPR | Benign blocks |
 | --- | --- | ---: | ---: | ---: | ---: |
@@ -50,7 +253,7 @@ estimate therefore has a 95% Wilson lower bound of 70.09%. The observed
 0/7,908 FPR has a 95% Wilson upper bound of 0.04855%. We publish both facts
 because a perfect point estimate should not be mistaken for broad coverage.
 
-## Does it interrupt benign work?
+### Does it interrupt benign work?
 
 We separately ran honest agent and terminal trajectories. No evaluated benign
 call was blocked.
@@ -66,16 +269,16 @@ LinuxArena is the clearest remaining noise problem. Most findings are
 legitimate secret-like values used against local services. They are allow-only,
 but they can still create alert fatigue.
 
-## What changed
+### What the detector is made of
 
 <Cards>
   <Card title="34 exact atomic rules" href="/docs/policies/deterministic-detection#exact-atomic-semantic-rules" description="Execution, persistence, privilege, credential access, impact, and security-control tampering proofs." />
   <Card title="26 bounded chains" href="/docs/policies/deterministic-detection#bounded-tool-call-chains" description="Exact identity and result joins over at most the current event plus eight predecessors." />
   <Card title="Eleven YARA signatures" href="/docs/policies/deterministic-detection#yara-mcp-description-scanning" description="High-precision MCP description-injection signals that remain alert-only." />
-  <Card title="Five opt-in packs + one staged contract" href="/docs/policies/deterministic-detection#protection-packs-and-policy-provided-context" description="PII, cloud, database, infrastructure, and Kubernetes packs, plus a staged SSH integrity contract." />
+  <Card title="Six opt-in packs + one staged contract" href="/docs/policies/deterministic-detection#protection-packs-and-policy-provided-context" description="PII, cloud, database, infrastructure, Kubernetes and Active Directory packs, plus a staged SSH integrity contract." />
 </Cards>
 
-The detector now uses four layers:
+The detector uses four layers:
 
 1. **ActionFacts** normalize a call into operation, resource, scope,
    sensitivity, result status, control flow, and value-minimized identity.
@@ -94,7 +297,7 @@ Read the [deterministic detection reference](/docs/policies/deterministic-detect
 for the complete rule-family inventory, all 34 exact rule IDs, every bounded
 chain and enforcement posture, YARA coverage, and protection-pack status.
 
-## Multi-step attacks
+### Multi-step attacks
 
 [MonitoringBench](https://huggingface.co/datasets/neur26anonsub/ctrldataset2026)
 provided 2,442 environment-successful attacks with exact tool arguments. We
@@ -116,9 +319,10 @@ Several public contextual datasets remain difficult:
 | [InjecAgent](https://github.com/uiuc-kang-lab/InjecAgent) chains | 0/0/0/544 | No stable source/sink identity in the normalized evidence |
 
 We expose these misses rather than converting nearby suspicious words into
-false-positive-prone rules.
+false-positive-prone rules. The judge and the decision model are what reach
+these cases: see the S7 rows above.
 
-## How labels were produced
+### How labels were produced
 
 Public source labels were normalized, deduplicated, and group-split with fixed
 seed `741983`. Optional GPT-OSS batch inference proposed action types and
@@ -130,14 +334,7 @@ every required role. Missing identity, unknown result, dynamic operands,
 conditional execution, intervening mutation, or unresolved policy context
 forced an abstention. GPT-OSS was never used at runtime.
 
-<Callout type="warn" title="Known validity limits">
-Offline model labels can share correlated errors, retrospective test sets were
-inspected during tuning, and authored conformance fixtures do not estimate
-population accuracy. The command validation positive class is small, while
-LinuxArena shows that alert noise can remain even when block noise is zero.
-</Callout>
-
-## Reproduce it
+### Reproduce it
 
 The public harness, source revisions, schemas, normalizers, label finalizers,
 fixtures, and machine-readable scorecard live in the repository's
@@ -171,3 +368,93 @@ go build -buildvcs=true -trimpath \
 For complete dataset commands, per-split matrices, initial-state results,
 labeling methodology, every rule family, and replication steps, read
 [`benchmarks/DETERMINISTIC-DETECTION-BENCHMARKS.md`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/benchmarks/DETERMINISTIC-DETECTION-BENCHMARKS.md).
+The results are in
+[`benchmarks/results/public-scorecard-v1.json`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/benchmarks/results/public-scorecard-v1.json).
+
+## LLM judge
+
+The judge reads one tool call together with the user's request and the
+session's recent calls. On the frozen public validation, the deterministic
+rules followed by Bedrock Gemma 4 26B A4B detected 94 of 100 family-excluded
+attack trajectories (precision 98.95%, F1 0.964) and alerted on one of 20
+benign coding trajectories, with no benign block. The lane was measured on
+2026-09-09 with Gemma 4 **26B A4B**.
+
+The model DefenseClaw recommends in 1.0.10 is Gemma 4 **31B**. It was
+measured on the S7 sets: see the rows above, the
+[recommended judge model](/docs/guardrail#recommended-judge-model-gemma-4-31b-on-bedrock)
+for the two benchmark rounds on public agent traces, and the
+[alignment check](/docs/guardrail/alignment-check#how-well-it-works), which
+also uses it. The
+[contextual judge benchmark](/docs/guardrail/llm-judge-benchmark) has the
+design, the model comparison, time, tokens and cost, how intent reaches the
+judge on each connector, and the commands to reproduce it.
+
+## Model routing
+
+The routing evaluation measures the classifiers that can drive
+`routing.classifier` ([semantic routing](/docs/guardrail/semantic-routing)).
+It holds 555 labelled prompts in seven categories (coding, reasoning, chat,
+summarize, sensitive, tool-heavy and cheap-and-fast; 77 to 81 each) and 358
+route-flip prompts made from 70 base prompts. Models wrote the prompts and
+their category labels, and a second model labelled a 10% sample (56 prompts)
+blind: the two agreed on every category.
+
+Result of 2026-11-12, with the keyword rules and a decision model stand-in
+(Amazon Nova Micro and Nova Lite on Bedrock). The vLLM Semantic Router
+container (pinned `v0.3.0`) gave the same answers as the keyword rules on
+99.8% of the 555 prompts.
+
+| Classifier | Macro-F1 | Failed calls | Time p50 / p95 | Route flips | Sensitive prompts that ended on a cloud model (of 80) |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Keyword rules | 0.508 | 0% | 0.3 / 1.3 ms | 28.8% | 35 |
+| Decision model stand-in, Nova Micro | 0.617 | 41.4% | 512 / 644 ms | 33.8% | 25 |
+| Decision model stand-in, Nova Lite | 0.889 | 2.5% | 701 / 902 ms | 17.8% | 17 |
+
+What this shows:
+
+- **Keywords are fast and flat.** They are right on about half the prompts and
+  can be steered: adding a category keyword to a prompt flipped the route on
+  34 of 40 test prompts, in each of three attack forms.
+- **A decision model is better and slower.** Nova Lite got 88% of the prompts
+  right and answered in 0.7 to 0.9 seconds. Nova Micro failed on 41% of the
+  calls. A hybrid that asks the model first and falls back to the keywords
+  after 300 ms scored the same as the keywords alone, because the model took
+  longer than that. With a 1-second wait, the Nova Lite hybrid had 18.2% route
+  flips. The hybrid is an experiment of the harness; it is not a classifier you
+  can select.
+- **The profile filter holds.** After the filter, no prompt ended on a model
+  its profile does not allow (0 violations in every row), and under the
+  `local_only` profile no sensitive prompt reached a cloud model.
+- **The rule pack finds few sensitive prompts.** The shipped rule pack
+  flagged 45% of the sensitive prompts, so 35 of 80 still reached a cloud model
+  under the default profile with the keyword rules. Use `local_only` or the
+  sensitive-data check ([semantic routing](/docs/guardrail/semantic-routing))
+  when a prompt must not leave.
+
+To reproduce it, build `benchmarks/routing/cmd/routing-eval` and run it with
+`-classifiers keyword,vllm_sr,systemone`. The prompt set, the route-flip set,
+the label check and both result sets are in
+[`benchmarks/routing/`](https://github.com/cisco-ai-defense/defenseclaw/tree/main/benchmarks/routing).
+With `-classifiers keyword` alone it needs no Docker and no network.
+
+```bash
+go build -o /tmp/routing-eval ./benchmarks/routing/cmd/routing-eval
+/tmp/routing-eval -data benchmarks/routing/data -out /tmp/routing-eval-out -classifiers keyword
+go test ./benchmarks/routing/...
+```
+
+## Hook speed and sizing
+
+Hook speed has two questions. How long one call takes is in the rows above:
+17 ms at p50 for the rules, up to 3.4 seconds when a model layer is asked.
+How many calls a second one host can check depends on the operating system, the
+install type and the instance size. The measured maximum rates of 1.0.10 for
+each platform, one very large command and the host-capacity warning are in
+[Hook sizing](/docs/support-matrix#hook-sizing). The rates there are
+measurements of release candidate `f1ccff5b7a` (2026-11-17).
+
+The load tool that measured the rates is an internal test tool and is not
+in the repository. To see how your own host does, read the hook-capacity
+counts in `defenseclaw status` and `defenseclaw doctor`
+([local observability](/docs/observability/local-observability)).
