@@ -4,4 +4,6 @@
 
 import os
 
-os.environ.setdefault("S7_HOLDOUT_SPLIT", os.path.join(os.path.dirname(os.path.abspath(__file__)), "testdata", "holdout-split-test.json"))
+os.environ.setdefault(
+    "S7_HOLDOUT_SPLIT", os.path.join(os.path.dirname(os.path.abspath(__file__)), "testdata", "holdout-split-test.json")
+)

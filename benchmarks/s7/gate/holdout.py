@@ -21,13 +21,16 @@ tuned_corpora are regression suites (each case is the repro of a fix it scores):
 overrides keep a lane's pre-registered split for its own cases: s7-shellrecall froze sha256('sr-split-v1|'+key)[0]&1 on source-session / command-skeleton
 groups before it wrote any rule, so a case it has already put on a side stays on it.
 """
+
 import hashlib
 import json
 import os
 
 # The frozen split file is data, not code: s7-gate deploys holdout-split-v1.json beside this module on every bench box (it is
 # not in the repository). S7_HOLDOUT_SPLIT names another file (the repository tests use testdata/holdout-split-test.json).
-FILE = os.environ.get("S7_HOLDOUT_SPLIT") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "holdout-split-v1.json")
+FILE = os.environ.get("S7_HOLDOUT_SPLIT") or os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "holdout-split-v1.json"
+)
 TUNE, HOLDOUT = "tune", "holdout"
 _cache = {}
 
@@ -38,7 +41,9 @@ def load(path=None):
         raw = open(path, "rb").read()
         cfg = json.loads(raw)
         cfg["_sha256"] = hashlib.sha256(raw).hexdigest()
-        cfg["_overrides"] = {(o["corpus"], o["id"]): o["split"] for src in cfg.get("overrides", []) for o in src["rows"]}
+        cfg["_overrides"] = {
+            (o["corpus"], o["id"]): o["split"] for src in cfg.get("overrides", []) for o in src["rows"]
+        }
         _cache[path] = cfg
     return _cache[path]
 

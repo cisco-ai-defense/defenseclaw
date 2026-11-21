@@ -16,6 +16,7 @@ only on one box. This module never reads or prints case text: it works on ids, v
   check-labels --labels SET.jsonl --overlay F [--overlay F ...]
       exit 0 when every overlay row is in the set with the same verdict; exit 1 and the ids that are missing or differ otherwise.
 """
+
 from __future__ import annotations
 
 import collections
@@ -111,7 +112,9 @@ def write_set(out_dir, name, version, rows, base_path, overlay_paths, stats):
     os.makedirs(out_dir, exist_ok=True)
     lp, mp = os.path.join(out_dir, name + ".jsonl"), os.path.join(out_dir, name + ".manifest.json")
     if os.path.exists(lp) or os.path.exists(mp):
-        raise LabelError(f"{lp} or its manifest already exists: a label set is never rewritten in place; give the new set another --name")
+        raise LabelError(
+            f"{lp} or its manifest already exists: a label set is never rewritten in place; give the new set another --name"
+        )
     body = "".join(json.dumps(r, sort_keys=True, separators=(",", ":")) + "\n" for r in rows).encode()
     manifest = {
         "version": version,
@@ -149,7 +152,9 @@ def cmd_fold(a):
     except LabelError as e:
         print(f"s7gate: fold-labels: {e}", file=sys.stderr)
         sys.exit(4)
-    print(f"fold-labels: {a.name} {a.version}: {m['rows']} rows (changed {stats['changed']}, already the same {stats['same']}, added {stats['added']}) sha256 {m['labels_sha256'][:16]}")
+    print(
+        f"fold-labels: {a.name} {a.version}: {m['rows']} rows (changed {stats['changed']}, already the same {stats['same']}, added {stats['added']}) sha256 {m['labels_sha256'][:16]}"
+    )
 
 
 def cmd_check(a):

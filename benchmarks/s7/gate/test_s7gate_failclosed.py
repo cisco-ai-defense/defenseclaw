@@ -9,6 +9,7 @@ GAP-0226: compare gave PASS/FAIL when only one side recorded a label set; the sc
           the label copy hid its errors.
 GAP-0362: a redaction pass rewrote corpus files in place while the labels stayed; a run read the mutated copy.
 """
+
 from __future__ import annotations
 
 import json
@@ -30,9 +31,19 @@ BUILD = HERE.parent / "wincorpus" / "build.py"
 
 
 def case(cid: str, truth: str) -> dict:
-    return {"id": cid, "surface": "action", "source": {"dataset": "unit/inert"}, "strata": {"platform": "linux", "provider": "claude-code"},
-            "truth": {"source_truth": truth, "applicability": "in_scope", "expected_disposition": "block" if truth == "malicious" else "allow", "categories": []},
-            "payload": {"tool_name": "Bash", "command": "echo inert", "dialect": "claudecode"}}
+    return {
+        "id": cid,
+        "surface": "action",
+        "source": {"dataset": "unit/inert"},
+        "strata": {"platform": "linux", "provider": "claude-code"},
+        "truth": {
+            "source_truth": truth,
+            "applicability": "in_scope",
+            "expected_disposition": "block" if truth == "malicious" else "allow",
+            "categories": [],
+        },
+        "payload": {"tool_name": "Bash", "command": "echo inert", "dialect": "claudecode"},
+    }
 
 
 class Env:
@@ -45,7 +56,9 @@ class Env:
         self.croot = self.root / "corpora"
         self.croot.mkdir()
         self.corpus = self.croot / "unit.cases.jsonl"
-        self.corpus.write_text("".join(json.dumps(case(i, t)) + "\n" for i, t in (("b1", "benign"), ("a1", "malicious"))))
+        self.corpus.write_text(
+            "".join(json.dumps(case(i, t)) + "\n" for i, t in (("b1", "benign"), ("a1", "malicious")))
+        )
         self.cfg = self.root / "corpora.json"
         self.cfg.write_text(json.dumps({"unit": {"files": [str(self.corpus)]}}))
         self.labels = self.root / "labels"
@@ -57,7 +70,10 @@ class Env:
     def decisions(self, out: Path) -> None:
         d = out / "decisions" / "unit"
         d.mkdir(parents=True)
-        rows = [{"case": "b1", "idx": 0, "action": "allow"}, {"case": "a1", "idx": 0, "action": "block", "raw_action": "block", "rule_ids": ["R-1"]}]
+        rows = [
+            {"case": "b1", "idx": 0, "action": "allow"},
+            {"case": "a1", "idx": 0, "action": "block", "raw_action": "block", "rule_ids": ["R-1"]},
+        ]
         (d / "x-default.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
         # a complete harness shard, as s7gate run leaves it: its ids file and exit status 0 (GAP-0170 completeness)
         (d / "ids.x.txt").write_text("b1\na1\n")
@@ -69,7 +85,13 @@ class Env:
         return p
 
     def run(self, *args, script: Path = GATE):
-        return subprocess.run([sys.executable, "-I", str(script), *map(str, args)], capture_output=True, text=True, env=self.env, check=False)
+        return subprocess.run(
+            [sys.executable, "-I", str(script), *map(str, args)],
+            capture_output=True,
+            text=True,
+            env=self.env,
+            check=False,
+        )
 
     def score(self, out: Path, *extra):
         self.decisions(out)
@@ -79,7 +101,9 @@ class Env:
 def write_score(d: Path, labels: dict | None, fpr: float = 0.0) -> None:
     (d / "scores").mkdir(parents=True)
     cell = {"fpr": fpr, "f1": 1.0, "recall": 1.0}
-    (d / "scores" / "unit-default.json").write_text(json.dumps({"block": cell, "alert": cell, "benign_alert_rules": [], "labels": labels}))
+    (d / "scores" / "unit-default.json").write_text(
+        json.dumps({"block": cell, "alert": cell, "benign_alert_rules": [], "labels": labels})
+    )
 
 
 class CompareFailsClosed(unittest.TestCase):
@@ -159,7 +183,10 @@ class ScoreLabels(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("label file", r.stderr)
         self.assertIn("not found", r.stderr)
-        self.assertFalse((out / "scores").exists() and any((out / "scores").iterdir()), "no score may be written without its label set")
+        self.assertFalse(
+            (out / "scores").exists() and any((out / "scores").iterdir()),
+            "no score may be written without its label set",
+        )
 
     def test_missing_named_label_file_is_an_error(self):
         e = Env(self)
@@ -219,7 +246,7 @@ class ScoreLabels(unittest.TestCase):
         ns.reviews, ns.labels = None, "none"
         self.assertEqual(G.resolve_labels(ns), (None, None))
         ns.reviews, ns.labels = str(lab), "none"
-        self.assertEqual(G.resolve_labels(ns)[0], str(lab))   # --reviews wins
+        self.assertEqual(G.resolve_labels(ns)[0], str(lab))  # --reviews wins
 
 
 class PushLabelsFailsLoudly(unittest.TestCase):
@@ -278,14 +305,19 @@ class PushLabelsFailsLoudly(unittest.TestCase):
     def test_a_failing_copy_exits_4_with_the_step(self):
         e = Env(self)
         s, d = self.src(e), e.root / "dest"
-        with mock.patch.object(G.shutil, "copyfile", side_effect=OSError("disk full")), self.assertRaises(SystemExit) as cm:
+        with (
+            mock.patch.object(G.shutil, "copyfile", side_effect=OSError("disk full")),
+            self.assertRaises(SystemExit) as cm,
+        ):
             G.push_labels(str(s), str(d))
         self.assertIn("disk full", str(cm.exception.code))
 
 
 class CorpusFilesAreNeverRewritten(unittest.TestCase):
     def run_cmd(self, e: Env):
-        return e.run("run", "--bin", "/nonexistent/s7bench", "--policy-dir", e.root, "--corpora", e.cfg, "--out", e.root / "out")
+        return e.run(
+            "run", "--bin", "/nonexistent/s7bench", "--policy-dir", e.root, "--corpora", e.cfg, "--out", e.root / "out"
+        )
 
     def register(self, e: Env, version: str = "v1"):
         return e.run("register-corpus", e.corpus, "--version", version)
@@ -300,7 +332,9 @@ class CorpusFilesAreNeverRewritten(unittest.TestCase):
     def test_run_refuses_a_corpus_file_changed_in_place(self):
         e = Env(self)
         self.assertEqual(self.register(e).returncode, 0)
-        e.corpus.write_text(e.corpus.read_text().replace("echo inert", "echo REDACTED_SECRET"))   # the pass-2 redaction, in place
+        e.corpus.write_text(
+            e.corpus.read_text().replace("echo inert", "echo REDACTED_SECRET")
+        )  # the pass-2 redaction, in place
         r = self.run_cmd(e)
         self.assertEqual(r.returncode, 5, r.stdout + r.stderr)
         self.assertIn("changed in place", r.stderr)
@@ -357,7 +391,10 @@ class CorpusFilesAreNeverRewritten(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         e.cfg.write_text(json.dumps({"unit": {"files": [str(red)]}}))
         self.assertEqual(e.run("verify-corpora", "--corpora", e.cfg).returncode, 0)
-        self.assertEqual(G.file_sha256(str(e.corpus)), json.loads((e.croot / "VERSIONS.json").read_text())["files"]["unit.cases.jsonl"]["sha256"])
+        self.assertEqual(
+            G.file_sha256(str(e.corpus)),
+            json.loads((e.croot / "VERSIONS.json").read_text())["files"]["unit.cases.jsonl"]["sha256"],
+        )
 
     def test_register_a_missing_file_exits_2(self):
         e = Env(self)
@@ -369,10 +406,10 @@ class CorpusFilesAreNeverRewritten(unittest.TestCase):
         self.assertEqual(self.register(e).returncode, 0)
         with mock.patch.dict(os.environ, {"S7_CORPORA_ROOT": str(e.croot)}):
             with self.assertRaises(SystemExit):
-                G.refuse_corpus_overwrite(str(e.croot / "x.jsonl"), [str(e.croot / "x.jsonl")])    # its own input
+                G.refuse_corpus_overwrite(str(e.croot / "x.jsonl"), [str(e.croot / "x.jsonl")])  # its own input
             with self.assertRaises(SystemExit):
-                G.refuse_corpus_overwrite(str(e.corpus), [])                                        # a registered version
-            G.refuse_corpus_overwrite(str(e.croot / "new.jsonl"), [str(e.corpus)])                  # a new file is fine
+                G.refuse_corpus_overwrite(str(e.corpus), [])  # a registered version
+            G.refuse_corpus_overwrite(str(e.croot / "new.jsonl"), [str(e.corpus)])  # a new file is fine
 
     def test_the_corpus_builder_refuses_to_write_over_its_input(self):
         e = Env(self)

@@ -869,6 +869,10 @@ jobs:
           save-cache: ${{ github.ref == 'refs/heads/main' }}
       - run: uv sync
       - run: make py-lint
+      # The S7 benchmark scorer and its tools (benchmarks/s7) had tests that no CI job ran, so the scorer the
+      # bench gate uses drifted from them (rel-1-0-10 GAP-1578, GAP-1581). Stdlib only, about 25 s.
+      - name: S7 benchmark tooling tests
+        run: uv run --frozen python -m pytest benchmarks/s7 -q -p no:cacheprovider
 
   python-lint-test:
     # Preserve the existing required-check name while making it the single
