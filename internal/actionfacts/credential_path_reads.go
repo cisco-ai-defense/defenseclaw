@@ -1009,6 +1009,11 @@ func (r *credentialPathResolver) globNamesCredentialFile(glob string) bool {
 		aligned := segments[len(segments)-k:]
 		literal, match := false, true
 		for i, pattern := range aligned {
+			// path.Match scans the pattern: charge the bytes it reads
+			// (rel-1-0-10:GAP-1046).
+			if !r.work.TakeN(len(pattern)) {
+				return false
+			}
 			if !credentialGlobSegmentMatches(pattern, probe.segments[i]) {
 				match = false
 				break
