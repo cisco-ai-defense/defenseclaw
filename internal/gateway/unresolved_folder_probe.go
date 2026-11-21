@@ -104,6 +104,10 @@ func unresolvedFolderNamesProtectedFile(value, home string, access actionfacts.P
 	if strings.HasPrefix(value, "../") {
 		return false
 	}
+	// A parent of the home spells the same file from its own folder
+	// (alice/.aws/credentials, home/alice/.defenseclaw/config.yaml): read it
+	// as the spelling from the home (rel-1-0-10:GAP-1004).
+	value = fromHomeSpelling(value, home)
 	if state, ok := strings.CutPrefix(value, ".defenseclaw/"); ok && access != actionfacts.PathAccessRead {
 		member, _, _ := strings.Cut(state, "/")
 		return slices.Contains(activeDefenseClawStateNames, member)
@@ -111,6 +115,27 @@ func unresolvedFolderNamesProtectedFile(value, home string, access actionfacts.P
 	candidate := path.Join(home, value)
 	shape, ok := actionfacts.MatchCredentialFileShape(candidate)
 	return ok && shape.HomeFile && candidate == path.Join(home, shape.Relative)
+}
+
+// fromHomeSpelling drops the folder names that lead from a parent of the home
+// (the one that holds the account folders, or its parent) down to the home:
+// alice/.aws/credentials and home/alice/.aws/credentials are .aws/credentials
+// when the home is /home/alice. A value that does not start so is returned as
+// it is.
+func fromHomeSpelling(value, home string) string {
+	user := path.Base(home)
+	if user == "/" || user == "." || user == "" {
+		return value
+	}
+	if rest, ok := strings.CutPrefix(value, user+"/"); ok {
+		return rest
+	}
+	if parent := path.Base(path.Dir(home)); parent != "/" && parent != "." {
+		if rest, ok := strings.CutPrefix(value, parent+"/"+user+"/"); ok {
+			return rest
+		}
+	}
+	return value
 }
 
 // unresolvedFolderGlobNames are the relative spellings a pathname pattern
