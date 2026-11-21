@@ -106,6 +106,9 @@ type HostPayload struct {
 	// child gets when the parent does not expand it): the walker lowers it as
 	// maybe effects and the call stays opaque (DET111 R1, GAP-1550).
 	Maybe string
+	// MaybeCWD is the folder the Maybe reading runs in (-WorkingDirectory),
+	// placed against the caller's folder; "" keeps the caller's.
+	MaybeCWD string
 }
 
 // WordSeg is one piece of a word: a literal run (Lit) or a simple variable

@@ -5065,6 +5065,11 @@ func (w *walker) hostPayload(c *Cmd, dialect Dialect, depth int, cond bool, orig
 	if c.Host.Opaque {
 		w.opaqueExec(origin, cond)
 		if c.Host.Maybe != "" {
+			if c.Host.MaybeCWD != "" {
+				saved := w.cwdNow()
+				w.setCWDState(w.placeCDTarget(c.Host.MaybeCWD, saved))
+				defer w.setCWDState(saved)
+			}
 			w.unwrapUncertain(c.Host.Maybe, c.Host.Dialect, depth, origin, nil, true)
 		}
 		return

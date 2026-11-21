@@ -59,7 +59,13 @@ func (c det111Case) role() string {
 
 func loadDET111Cases(t *testing.T) []det111Case {
 	t.Helper()
-	f, err := os.Open("testdata/det111_r1.cases.jsonl")
+	return loadDET111CasesFile(t, "testdata/det111_r1.cases.jsonl")
+}
+
+// loadDET111CasesFile loads one DET111 corpus copy.
+func loadDET111CasesFile(t *testing.T, name string) []det111Case {
+	t.Helper()
+	f, err := os.Open(name)
 	if err != nil {
 		t.Fatalf("open cases: %v", err)
 	}
