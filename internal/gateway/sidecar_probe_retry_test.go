@@ -166,8 +166,13 @@ func TestRunGuardrailSingleConnectorRetriesSettingsInUse(t *testing.T) {
 	connectorSettingsBusyDelay = time.Millisecond
 	errSetupReached := errors.New("setup ran with the settings file free")
 
+	// first and last are when the run's first and last setup started: the
+	// retry window the budget bounds, without the start and the rollback
+	// around it (about 8 s a run natively on Windows, rel-1-0-10:GAP-1521).
+	var first, last time.Time
 	run := func(t *testing.T, busySetups int, other error) (int, error) {
 		t.Helper()
+		first, last = time.Time{}, time.Time{}
 		codexConfig := filepath.Join(t.TempDir(), ".codex", "config.toml")
 		prevCodex := connector.CodexConfigPathOverride
 		connector.CodexConfigPathOverride = codexConfig
@@ -175,6 +180,9 @@ func TestRunGuardrailSingleConnectorRetriesSettingsInUse(t *testing.T) {
 		calls := 0
 		singleConnectorSetup = func(context.Context, connector.Connector, connector.SetupOpts) error {
 			calls++
+			if last = time.Now(); first.IsZero() {
+				first = last
+			}
 			if other != nil {
 				return other
 			}
@@ -202,12 +210,12 @@ func TestRunGuardrailSingleConnectorRetriesSettingsInUse(t *testing.T) {
 		t.Fatalf("held settings: setup calls=%d err=%v, want 4 calls ending in the free-file setup", calls, err)
 	}
 
-	// A file that stays in use still fails the start, within the budget.
+	// A file that stays in use still fails the start: the retries stop
+	// within the budget.
 	connectorSettingsBusyBudget = 200 * time.Millisecond
-	started := time.Now()
 	calls, err = run(t, 1<<20, nil)
-	if calls < 2 || !errors.Is(err, errSettingsInUse) || time.Since(started) > 5*time.Second {
-		t.Fatalf("stuck settings: setup calls=%d err=%v after %s", calls, err, time.Since(started))
+	if window := last.Sub(first); calls < 2 || !errors.Is(err, errSettingsInUse) || window > 5*time.Second {
+		t.Fatalf("stuck settings: setup calls=%d err=%v, retried for %s", calls, err, window)
 	}
 
 	// Other failures are not retried.
