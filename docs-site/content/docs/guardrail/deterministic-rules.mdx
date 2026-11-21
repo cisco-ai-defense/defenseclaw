@@ -82,7 +82,7 @@ In action mode, the pack turns a finding's severity into an action:
 | Severity | Permissive | Default | Strict |
 | --- | --- | --- | --- |
 | CRITICAL | Block | Block | Block |
-| HIGH | Alert | Alert, or ask when [human approval](/docs/hitl) is on | Block |
+| HIGH | Alert | Alert, or ask when [human approval](/docs/guardrail/human-approval) is on | Block |
 | MEDIUM | Allow | Alert | Block |
 | LOW | Allow | Allow | Alert |
 
@@ -116,3 +116,9 @@ Two groups of rules, and one watcher, protect what lets a change outlive the ses
 - The rules read the text of a call. They cannot see what a child program writes after a command starts. For protected files, use the watch above, a sandbox or file permissions.
 - A custom regex is never blocking proof on a tool call. A rule you write blocks only where a built-in proof covers it, or through the Rego policy ([Configure the cascade](/docs/guardrail/configure-cascade#the-rego-policy)).
 - A connector that has no pre-tool hook cannot block a call. A prompt rule blocks only where the agent can block a prompt.
+
+## Next
+
+- [Packs and modes](/docs/guardrail/packs-and-modes): pick a pack, and move an agent from observe to action.
+- [Customize the guardrail](/docs/guardrail/customize): thresholds, suppressions and your own rules.
+- [Fix a false block](/docs/guardrail/false-blocks).

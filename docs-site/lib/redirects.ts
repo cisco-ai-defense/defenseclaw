@@ -103,6 +103,7 @@ export const legacyRedirects: Record<string, string> = {
   'get-started/windows/connectors-enforcement': '/docs/connectors/',
   'get-started/windows/managed-enterprise': '/docs/enterprise/windows/',
   'guardrail/aliases': '/docs/connectors/aliases/',
+  'guardrail/alignment-check': '/docs/guardrail/intent/',
   'guardrail/llm-judge-benchmark': '/docs/guardrail/benchmarks/',
   'guardrail/semantic-routing': '/docs/routing/semantic-routing/',
   'guardrail/switching-connectors': '/docs/connectors/switching-connectors/',

@@ -53,7 +53,7 @@ Start in observe mode and move an agent to action once the alerts look right. Ob
 | --- | --- | --- |
 | [LLM judge](/docs/guardrail/llm-judge) | `defenseclaw guardrail judge add claudecode --enable` | `defenseclaw guardrail judge remove claudecode` |
 | [Decision model](/docs/guardrail/decision-model) | `defenseclaw setup decision-model --base-url URL --model NAME --connectors claudecode --ping` | `defenseclaw config set decision_model.enabled false` |
-| [Alignment check](/docs/guardrail/alignment-check) | `defenseclaw config set guardrail.cascade.lanes.alignment alert` | `defenseclaw config set guardrail.cascade.lanes.alignment off` |
+| [Alignment check](/docs/guardrail/intent) | `defenseclaw config set guardrail.cascade.lanes.alignment alert` | `defenseclaw config set guardrail.cascade.lanes.alignment off` |
 | [Secret flow tracking](/docs/guardrail/secret-flow-tracking) | `defenseclaw guardrail secret-flow enable` | `defenseclaw guardrail secret-flow disable` |
 | [Protected files](/docs/guardrail/protected-files) | `guardrail.protected_files.on_change: alert` (the default) or `restore` | `guardrail.protected_files.on_change: off` |
 | [Human approval](/docs/guardrail/human-approval) | `defenseclaw guardrail hilt on --min-severity HIGH` | `defenseclaw guardrail hilt off` |

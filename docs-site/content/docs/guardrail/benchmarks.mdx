@@ -34,7 +34,7 @@ Every table below says which layers ran.
 | How precise are the rules on public command, PII and agent-trace data? | Deterministic detection | Rule packs of September 2026 (scorecard of 2026-09-08). Not run again for 1.0.10. | [Rule detection](#rule-detection-on-public-data) |
 | How much does the whole cascade catch, and what does it cost in noise, time and money? | S7 end-to-end | 1.0.10 release candidate `4269debe92`, 2026-11-16 | [Whole cascade](#the-whole-cascade-s7-end-to-end) |
 | How well does the LLM judge read one session in context? | Contextual judge | Gemma 4 26B A4B, 2026-09-09 | [LLM judge](#llm-judge) |
-| Does the alignment check help? | Alignment check | 1.0.10 code | [Alignment check](/docs/guardrail/alignment-check#how-well-it-works) |
+| Does the alignment check help? | Alignment check | 1.0.10 code | [Alignment check](/docs/guardrail/intent#how-good-it-is) |
 | How good is the decision model on its own? | System One benchmark | OpenJev with Gemma 4 as the judge | [Decision model](/docs/guardrail/decision-model#benchmarks) |
 | Does the router send each prompt to the right model? | Routing evaluation | Stand-in classifiers, 2026-11-12 | [Model routing](#model-routing) |
 | How many tool calls a second can one host check? | Hook sizing | 1.0.10 release candidate `f1ccff5b7a`, 2026-11-17 | [Hook speed](#hook-speed-and-sizing) |

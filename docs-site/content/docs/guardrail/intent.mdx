@@ -60,7 +60,7 @@ In 1.0.10 the check only records. It writes a judge event of kind `tool_intent_s
 
 ## The alignment check
 
-The alignment check is a separate lane that asks the [LLM judge](/docs/guardrail/configure-cascade) one question about each side-effecting tool call:
+The alignment check is a separate lane that asks the [LLM judge](/docs/guardrail/llm-judge) one question about each side-effecting tool call:
 
 > Is this call needed for, or consistent with, the user's task?
 

@@ -57,7 +57,7 @@ The ID tells you which layer produced the finding:
 | `JUDGE-INJ-…`, `JUDGE-PII-…`, `JUDGE-EXFIL-…`, `JUDGE-TOOL-…` | [LLM judge](/docs/guardrail/llm-judge) | The model flagged a category. The reason starts with `judge-tool-injection:` for the tool judge. |
 | `JUDGE-DECISION-MODEL` | [Decision model](/docs/guardrail/decision-model) | System One was confident, or unsure and asked. |
 | `JUDGE-UNAVAILABLE`, `JUDGE-UNAVAILABLE-ESCALATED` | LLM judge | The judge gave no verdict and the strict policy or a closed fail mode refused the call. |
-| `ALIGNMENT-DRIFT` | [Alignment check](/docs/guardrail/alignment-check) | The call did not serve your task. |
+| `ALIGNMENT-DRIFT` | [Alignment check](/docs/guardrail/intent) | The call did not serve your task. |
 | `INTENT-SCOPE-SEND` | LLM judge | A send to a place no prompt named. It records only. |
 | `TOOLRESULT-…` | [Tool results](/docs/guardrail/tool-results) | The output of a tool tried to direct the agent. |
 | `CASCADE-POLICY:ID`, `CASCADE-POLICY-ERROR` | Rego policy | Your policy set the final action, or failed. |
