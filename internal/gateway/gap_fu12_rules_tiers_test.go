@@ -26,11 +26,8 @@ const fu12Never = "!block"
 
 var (
 	fu12UnknownTier = [5]string{"alert", "alert", "block", "alert", "block"}
-	// fu12UnknownTierManagedBlock is the unknown tier with the managed
-	// default cell at block, the verdict of rel 8e58b26846 there.
-	fu12UnknownTierManagedBlock = [5]string{"alert", "alert", "block", "block", "block"}
-	fu12BlockAll                = [5]string{"block", "block", "block", "block", "block"}
-	fu12NoBlock                 = [5]string{fu12Never, fu12Never, fu12Never, fu12Never, fu12Never}
+	fu12BlockAll    = [5]string{"block", "block", "block", "block", "block"}
+	fu12NoBlock     = [5]string{fu12Never, fu12Never, fu12Never, fu12Never, fu12Never}
 )
 
 func fu12TierVerdicts(t *testing.T, connector string, rows []fu12TierRow) {
@@ -87,12 +84,14 @@ var gap0747Rows = []fu12TierRow{
 // model of, a pipe stage or a backup redirect, is the unknown tier. A name
 // handed on ($_), a write through the unknown program to the file, tee -a,
 // an append and a sink in ~/.ssh keep the block in every pack (as on rel).
-// Q2 and Q4 block in the managed default pack as rel 8e58b26846 does
-// (persistence.ssh_authorized_keys_command): the regression rule keeps rel's
-// block there until the owner rules (GAP-1611).
+// Q2 and Q4 are the unknown tier behind a managed hook peer too: the
+// client's carried protected decision (GAP-0415) is the same unknown-program
+// reading, so the managed default alerts like the per-user default and
+// managed-strict blocks (owner ruling 2026-11-21, rel-1-0-10:GAP-1611/1698;
+// 1.0.10 blocked in the managed default).
 var gap0843Rows = []fu12TierRow{
-	{"Q2", "wc -l ~/.ssh/authorized_keys && $TOOL > /tmp/o3report.txt", fu12UnknownTierManagedBlock},
-	{"Q4", "cat ~/.ssh/authorized_keys | python3 -c \"$CODE\" > /tmp/o3o", fu12UnknownTierManagedBlock},
+	{"Q2", "wc -l ~/.ssh/authorized_keys && $TOOL > /tmp/o3report.txt", fu12UnknownTier},
+	{"Q4", "cat ~/.ssh/authorized_keys | python3 -c \"$CODE\" > /tmp/o3o", fu12UnknownTier},
 	{"Q5", "cat ~/.ssh/authorized_keys > /tmp/keys.bak", fu12UnknownTier},
 	{"T1", "ls ~/.ssh/authorized_keys; cp /tmp/k $_", fu12BlockAll},
 	{"T2", "wc -l ~/.ssh/authorized_keys && $TOOL > ~/.ssh/authorized_keys", fu12BlockAll},
