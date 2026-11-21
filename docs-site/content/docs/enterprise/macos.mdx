@@ -317,7 +317,7 @@ Claude Cowork runs its agent loop on the Mac, as the user, with the Claude Code 
 
 | Item | macOS |
 | --- | --- |
-| Measured | Test hooks in managed settings and in a `managed-settings.d` drop-in ran in Cowork turns on Claude Desktop 4.4212.0, and a deny held. In the 1.0.8 tests on a managed Mac with Claude Desktop 4.16336.0 (engine 2.1.317) using third-party inference through Amazon Bedrock, Cowork's hook calls reached the gateway with surface `cowork`, and an administrator deny rule blocked `mcp__workspace__bash`. A read of a `.env` file was not blocked: its contents reached the model, which chose not to repeat the key (DefenseClaw did not withhold it), and DefenseClaw recorded the secret after the read; to prevent such a read, deny the path at `PreToolUse` ([Secrets in tool results](/docs/connectors/claudecode#secrets-in-tool-results)). With `managed_hooks_only: enforce` an organization plugin's hooks did not run, with `preserve` they did, and DefenseClaw's hooks ran under both. With the gateway service stopped, Cowork prompts were blocked with `enterprise_managed_gateway_not_running` |
+| Behavior | Hooks in managed settings and in a `managed-settings.d` drop-in run in Cowork turns, and a deny holds. On a managed Mac with Claude Desktop 4.16336.0 (engine 2.1.317) using third-party inference through Amazon Bedrock, Cowork's hook calls reach the gateway with surface `cowork`, and an administrator deny rule blocks `mcp__workspace__bash`. A read of a `.env` file is not blocked: its contents reach the model, and DefenseClaw records the secret after the read; to prevent such a read, deny the path at `PreToolUse` ([Secrets in tool results](/docs/connectors/claudecode#secrets-in-tool-results)). With `managed_hooks_only: enforce` an organization plugin's hooks do not run, with `preserve` they do, and DefenseClaw's hooks run under both. With the gateway service stopped, Cowork prompts are blocked with `enterprise_managed_gateway_not_running` |
 | Organization plugins | Claude Desktop 4.16336.0 installs a plugin in `/Library/Application Support/Claude/org-plugins/` only when its `.claude-plugin/plugin.json` sets `"installationPreference": "required"`; otherwise it is only listed as available |
 | Engine folder | `~/Library/Application Support/Claude/claude-code/<version>/`, or `Claude-3p` instead of `Claude` for third-party inference. DefenseClaw trusts it by Anthropic's Developer ID signature, checked as the user with `codesign`, and by an `Info.plist` version equal to the folder |
 | Shell | Runs in the Cowork Linux VM on the Mac |
@@ -514,7 +514,7 @@ Grant the access with a PPPC payload (`com.apple.TCC.configuration-profile-polic
 </dict>
 ```
 
-The code requirement needs a signed build. On an unsigned test build, grant Full
+The code requirement needs a signed build. On an unsigned build, grant Full
 Disk Access to that path by hand in System Settings, then restart the helper with
 `sudo launchctl kickstart -k system/com.cisco.defenseclaw.sensor-helper`. A config
 that carries `enterprise.tetragon` is accepted and ignored on macOS;
@@ -538,10 +538,10 @@ a per-user managed preference that appears when an account signs in. An MDM
 agent that delivers the same preference bytes again changes nothing: pins
 compare content only.
 
-On a managed 1.0.2 macOS 15.8 test host, a standard user started Claude Code inside
-a `sandbox-exec` profile that hid its machine policy directory. Claude ran a
-Bash tool call, while the gateway recorded no matching call and administrator
-`status` and `verify` still reported complete security. A hook cannot refuse
+On managed macOS, a standard user can start Claude Code inside
+a `sandbox-exec` profile that hides its machine policy directory. Claude then runs a
+Bash tool call, while the gateway records no matching call and administrator
+`status` and `verify` still report complete security. A hook cannot refuse
 an agent that never loads it. Until agent launch and policy registration are
 enforced outside that process-local view, a healthy result does not prove that
 all Claude tool calls are inspected ([M-34](/docs/enterprise/threat-model)).

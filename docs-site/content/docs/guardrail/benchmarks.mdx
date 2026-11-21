@@ -160,7 +160,7 @@ this surface", not as a failure of the tool at its own job.
 ### Time and cost
 
 - **Hook time** is built from measured parts, not timed end to end: a
-  single-stream sample of 19,920 rules-only calls on a busy test host, the
+  single-stream sample of 19,920 rules-only calls on a busy host, the
   recorded latency of the decision model, and the recorded latency of the
   judge's answers. The rules-only figure is an upper bound for an idle host
   (p99 42 ms). With the cascade, p99 is 3,620 ms. The hook never waits longer
@@ -626,7 +626,7 @@ each platform, one very large command and the host-capacity warning are in
 [Hook sizing](/docs/support-matrix#hook-sizing). The rates there are
 measurements of release candidate `f1ccff5b7a` (2026-11-17).
 
-The load tool that measured the rates is an internal test tool and is not
+The load tool for these rates is not
 in the repository. To see how your own host does, read the hook-capacity
 counts in `defenseclaw status` and `defenseclaw doctor`
 ([local observability](/docs/observability/local-observability)).

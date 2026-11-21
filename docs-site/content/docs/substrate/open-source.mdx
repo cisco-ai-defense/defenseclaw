@@ -24,7 +24,7 @@ This page follows one developer, on their own cluster, from install to a finishe
 - `kubectl` and `helm` pointed at that cluster, and the `kubectl ate` plugin.
 - DefenseClaw 1.0.10 or later on your laptop. Any OS works, because the agent doesn't run on your laptop.
 - A model key: an Anthropic or OpenAI API key, or an Amazon Bedrock key. It goes into the cluster once, and agents never see it.
-- A way to sign in. Either an OpenID Connect (OIDC) provider the launcher can use (device flow; for a lab, Keycloak is enough), or nothing at all: without `substrate.identity.oidc`, the cluster accepts your Kubernetes identity.
+- A way to sign in. Either an OpenID Connect (OIDC) provider the launcher can use (device flow; for a trial, Keycloak is enough), or nothing at all: without `substrate.identity.oidc`, the cluster accepts your Kubernetes identity.
 
 ## Set up once
 

@@ -107,7 +107,7 @@ Can fail closed: yes. On a per-user install with no saved mode, a gateway that i
 
 ### Rejected command display
 
-In the tested Amp 0.0.1790798464 build, a policy-rejected shell call can still have a checked, collapsed **Ran 1 command** summary. This counts an attempted tool call; the command did not execute. Expand the tool result to see **Tool rejected by plugin** and the DefenseClaw policy reason. The matching DefenseClaw audit block and absent command output confirm the rejection. The plugin sends Amp `reject-and-continue` with that reason before execution. Amp's [plugin API](https://ampcode.com/docs/plugin-api) does not provide a field for changing the collapsed summary.
+In Amp 0.0.1790798464, a policy-rejected shell call can still have a checked, collapsed **Ran 1 command** summary. This counts an attempted tool call; the command did not execute. Expand the tool result to see **Tool rejected by plugin** and the DefenseClaw policy reason. The matching DefenseClaw audit block and absent command output confirm the rejection. The plugin sends Amp `reject-and-continue` with that reason before execution. Amp's [plugin API](https://ampcode.com/docs/plugin-api) does not provide a field for changing the collapsed summary.
 
 ## MCP, skills, checks, plugins, and agents
 
@@ -168,7 +168,7 @@ The [sandbox guide](/docs/sandboxes/guide) covers the `sandbox` commands. What t
 | --- | --- |
 | Tier | User. Amp loads plugins only from `~/.config/amp/plugins` and a project's `.amp/plugins`. The plugin lives in the image home (`/sandbox/.config/amp/plugins/defenseclaw.ts`), where the agent can edit it. The launcher points Amp at that home, drops variables that load other plugins or settings, and refuses `--settings-file`. DefenseClaw reports a sandbox whose hooks go silent. |
 | Skip permissions | Would start with `--dangerously-allow-all`. `--safe` keeps prompts and drops it. |
-| Sign-in | The account API key only. The `defenseclaw-amp` profile binds `AMP_API_KEY` to `ampcode.com` (not tested live). `sandbox run` has no `--llm` choice for Amp. |
+| Sign-in | The account API key only. The `defenseclaw-amp` profile binds `AMP_API_KEY` to `ampcode.com` (Preview). `sandbox run` has no `--llm` choice for Amp. |
 | Image | Amp 0.0.1785334225-g9abe75, with the npm registry integrity and the native binary's SHA-256 checked. The plugin loads before any server call and fails closed. Hooks reaching DefenseClaw and blocking still need a run with a key. |
 
 ## Enterprise deployments

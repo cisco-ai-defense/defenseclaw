@@ -297,7 +297,7 @@ llm:
 # loopback-only Docker sidecar (omit `remote`) and its settings need a restart.
 routing:
   enabled: false
-  version: "0.3.0"            # the only tested managed-sidecar contract
+  version: "0.3.0"            # the only supported managed-sidecar contract
   port: 8080
   algorithm: static
   # remote: {endpoint: https://router.example.com}  # sends prompt content
@@ -1140,7 +1140,7 @@ A `custom-providers.json` marked `_derived_from` is rendered from this section o
 | `substrate.enabled` | `false` | Turns the Substrate components on. Needs `identity.issuer`. |
 | `substrate.api.address`, `.server_name`, `.ca_file` | `api.ate-system.svc:443`, `api.ate-system.svc`, `/var/run/ate/ca.crt` | Where ate-api-server is and how its certificate is checked. The trust bundle is reread when it rotates. |
 | `substrate.api.auth`, `.token_file`, `.credential_bundle` | `serviceaccount`, `/var/run/ate/token`, `/var/run/ate/credential-bundle.pem` | `serviceaccount` sends a projected token, `mtls` presents a pod certificate. Both are reread from disk. |
-| `substrate.supported_versions` | `>=1.0.0 <1.1.0` | Substrate versions DefenseClaw is tested on. |
+| `substrate.supported_versions` | `>=1.0.0 <1.1.0` | Substrate versions DefenseClaw supports. |
 | `substrate.identity.issuer`, `.audience`, `.token_lifetime_seconds` | none, `defenseclaw`, `300` | The cluster's actor token issuer (unique per cluster), the audience DefenseClaw accepts and the token lifetime (300 s only: egress caches the token by actor name). |
 | `substrate.identity.actor_cert_oid` | `1.3.6.1.4.1.11129.2.12.2` | The actor identity extension in actor certificates. |
 | `substrate.identity.keys_url`, `.keys_ca_file` | the `idp` Service key set, the servicedns trust bundle | Where the gateway reads the actor-token keys, and the CA of that address. A unique issuer need not resolve. |

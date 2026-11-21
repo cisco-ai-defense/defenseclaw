@@ -1,6 +1,6 @@
 ---
 title: Guardrail coverage
-description: What the guardrail catches, by attack class, connector and operating system. For each class, which layers see it, what is on by default, where it can block, what was measured, and where it does not reach.
+description: What the guardrail catches, by attack class, connector and operating system. For each class, which layers see it, what is on by default, where it can block, what the benchmarks show, and where it does not reach.
 keywords:
   - guardrail coverage
   - what DefenseClaw catches
@@ -40,7 +40,7 @@ A prompt rule can block only where the agent has a hook that can block a prompt.
 
 ## Your operating system
 
-The matrix shows which connector is supported on Linux, macOS and Windows, open source and enterprise. **Supported** means a live test on that OS verified the hooks and a block before the tool ran.
+The matrix shows which connector is supported on Linux, macOS and Windows, open source and enterprise. **Supported** means the hooks check tool calls on that OS and can block one before it runs.
 
 <ConnectorOsMatrix />
 

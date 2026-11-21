@@ -530,11 +530,11 @@ sandboxes and the egress proxy is in [Agent segmentation](/docs/segmentation).
 
 ## Claude Cowork
 
-Claude Desktop for Linux is a beta, and Cowork on Linux is not certified. In the 1.0.8 tests the managed drop-in and per-user setup were verified on Linux, but Cowork itself was not run. The Claude Code drop-in (`/etc/claude-code/managed-settings.d/90-defenseclaw.json`) is meant to cover Cowork where it runs. There is nothing to configure for Cowork itself.
+Claude Desktop for Linux is a beta, and Cowork on Linux is not certified: Cowork on Linux is Preview. The managed drop-in and per-user setup work on Linux. The Claude Code drop-in (`/etc/claude-code/managed-settings.d/90-defenseclaw.json`) is meant to cover Cowork where it runs. There is nothing to configure for Cowork itself.
 
 | Item | Linux |
 | --- | --- |
-| Engine folder | `claude-code/<version>/` in `~/.config/Claude`, or in `~/.config/Claude-3p` for third-party inference. These follow the vendor's convention; no Linux engine build has been measured. A relocated `XDG_CONFIG_HOME` is not followed |
+| Engine folder | `claude-code/<version>/` in `~/.config/Claude`, or in `~/.config/Claude-3p` for third-party inference. These follow the vendor's convention and are Preview on Linux. A relocated `XDG_CONFIG_HOME` is not followed |
 | Engine identity | Linux builds carry no vendor signature. A build counts only when its version folder holds an executable `claude`. It is reported as unsigned, and as unidentified while it runs, so `verify` fails while Cowork or the Code tab runs |
 
 See [Claude Cowork](/docs/connectors/cowork) for the tools, `managed_hooks_only` and the limits.

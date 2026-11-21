@@ -61,8 +61,8 @@ A rule is a match (a regex, a CEL expression, or both) plus a title, a severity 
 
 A rule that read only the words of a command would block `echo rm -rf /` and miss `r""m -rf /`. DefenseClaw reads what the command does.
 
-1. **Parse.** A shell command (`bash`, `sh`, `zsh`) goes through a full shell parser. A PowerShell command goes through a PowerShell parser written for this job. It builds a syntax tree and never runs anything. A nested script (`powershell -Command ...`, `cmd /c ...`) is read as well, but only for argument shapes that were tested against a real host. Any other shape is marked "not static" with a reason code.
-2. **List the effects.** The tree becomes a bounded list of effects: read, write, delete, link, run, network send or fetch, change of permissions. Each has a target that is either known, or unknown with a reason code. This step is the same on every OS, and Windows paths are tested on Linux.
+1. **Parse.** A shell command (`bash`, `sh`, `zsh`) goes through a full shell parser. A PowerShell command goes through a PowerShell parser written for this job. It builds a syntax tree and never runs anything. A nested script (`powershell -Command ...`, `cmd /c ...`) is read as well, but only for the argument shapes it knows. Any other shape is marked "not static" with a reason code.
+2. **List the effects.** The tree becomes a bounded list of effects: read, write, delete, link, run, network send or fetch, change of permissions. Each has a target that is either known, or unknown with a reason code. This step is the same on every OS, and Windows paths are handled on Linux too.
 3. **Build the facts.** The effects and the command's arguments become typed facts: which program, which operation, which path, which host, how sensitive.
 4. **Match.** The rule's regex or CEL expression picks a candidate from the facts.
 5. **Prove.** For a block, a check written in code must accept the same rule on the same effect. A regex hit alone is not proof.

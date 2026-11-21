@@ -47,7 +47,7 @@ These are the defaults. Your one job is to give the scanner a judge (`defensecla
 | Meta-analyzer | off (it costs recall) | `enable_meta: false` |
 | VirusTotal, AI Defense, OSV | off | `analyzers.*.enabled: false` |
 
-The `quiet` preset is the one with the fewest false positives, and it is measured with the judge. The scanner's own [recommended settings page](https://cisco-ai-defense.github.io/docs/skill-scanner/recommended-settings) has the benchmark numbers behind these choices.
+The `quiet` preset is the one with the fewest false positives, and it is meant to run with the judge. The scanner's own [recommended settings page](https://cisco-ai-defense.github.io/docs/skill-scanner/recommended-settings) has the benchmark numbers behind these choices.
 
 ## One-shot scan
 
@@ -269,7 +269,7 @@ When the provider is `vllm`, the wizard prints the serve line for you:
     vllm serve <weights> --served-model-name <name> --structured-outputs-config '{"backend": "xgrammar", "disable_any_whitespace": true}'
 ```
 
-Until a judge works, the scanner still runs its static rules with the same `quiet` policy, so a skill is not left unscanned. Treat that as a gap to close, not a setup: `quiet` is measured with the judge, and the rules alone miss most malicious skills. `defenseclaw doctor` and the wizard say so:
+Until a judge works, the scanner still runs its static rules with the same `quiet` policy, so a skill is not left unscanned. Treat that as a gap to close, not a setup: `quiet` is meant to run with the judge, and the rules alone miss most malicious skills. `defenseclaw doctor` and the wizard say so:
 
 ```text
   [WARN] Scanner settings  —  the skill-scanner LLM judge is off; Add an LLM judge ('defenseclaw setup llm') or the local vLLM option

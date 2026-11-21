@@ -1,6 +1,6 @@
 ---
 title: Cowork VM sensor
-description: The DefenseClaw sensor that Claude Desktop installs inside the Claude Cowork Linux VM. What it sees, where its events go, how an administrator delivers it on managed macOS and Windows, every setting, and what was and was not verified.
+description: The DefenseClaw sensor that Claude Desktop installs inside the Claude Cowork Linux VM. What it sees, where its events go, how an administrator delivers it on managed macOS and Windows, every setting, and its limits.
 keywords:
   - Cowork VM sensor
   - Cowork EDR integration
@@ -16,8 +16,8 @@ The Cowork VM sensor is a second, separate protection for [Claude Cowork](/docs/
 
 Claude Desktop has a setting for this, Anthropic's Cowork EDR integration. An administrator tells Claude Desktop which vendor package to install in the VM. At each VM start, Claude Desktop unpacks the package and runs its `install.sh` as root. DefenseClaw ships such a package, `defenseclaw-cowork-<arch>.tar.gz`, and the standalone enterprise lifecycle puts it and its settings on the computer.
 
-<Callout title="Status in 1.0.10" type="warn">
-The host side was run on managed macOS and managed Windows in the 1.0.8 tests: DefenseClaw delivered the package, signature and install arguments, and Claude Desktop read them and sent the package to the VM. The VM refused it with `vendor_unknown`, because the vendor used in the tests is not on Anthropic's list. So **no run has had Claude Desktop install and run DefenseClaw's sensor inside a real Cowork VM**. The package itself ran as root on Linux stand-ins that copy Claude's installer. The 1.0.9 and 1.0.10 releases carry the two packages and **no signature**, and Claude Desktop installs only signed packages. Nothing in the delivery was run again on a 1.0.10 build. [What was verified](#what-was-verified) has the detail.
+<Callout title="Preview" type="info">
+The Cowork VM sensor is Preview: it is available but may change. Claude Desktop installs only signed packages from a vendor that Anthropic lists. The 1.0.9 and 1.0.10 releases carry the two packages and **no signature**, so Claude Desktop does not install DefenseClaw's sensor from them until the package is signed with a vendor key that Anthropic lists.
 </Callout>
 
 ## The hook route and the sensor
@@ -135,7 +135,7 @@ When the sensor is on and the host is not ready, `status` and `verify` add the w
 
 Two more codes come from `ensure`: `cowork_vm_sensor_unsupported` (mode `on` on Linux) and `cowork_vm_sensor_device_unavailable` (a Mac whose hardware UUID cannot be read while `device` is unset).
 
-To confirm that Claude Desktop accepted the package, read the Claude diagnostic report's `cowork-edr-integration.txt`. In the 1.0.8 tests it said whether both settings were set by device management, the decision (`go` or `dormant`), the vendor ID, and how each VM start ended (for example `refused_guest reason=vendor_unknown`). Claude shows the last 4 KB of the install script's output in that file.
+To confirm that Claude Desktop accepted the package, read the Claude diagnostic report's `cowork-edr-integration.txt`. It says whether both settings were set by device management, the decision (`go` or `dormant`), the vendor ID, and how each VM start ended (for example `refused_guest reason=vendor_unknown`). Claude shows the last 4 KB of the install script's output in that file.
 
 ## Where it works
 
@@ -264,7 +264,7 @@ The configuration is rendered again at every VM start, so an edit made inside th
 
 **Repair.** `ensure` puts back a deleted or changed package, signature or arguments file, and on Windows the two registry values. On macOS it cannot put back the MDM profile: that is yours.
 
-**Turn off.** Set `mode: "off"` (or remove the block) and run `ensure`. DefenseClaw removes the package, signature and arguments files it wrote, its cache copies, and the folders it created once they are empty. On Windows it also removes the two registry values it wrote. A file you added is kept. On macOS a delivered file that you changed is kept too, with the warning `cowork_vm_sensor_incomplete`. On macOS the profile stays until you remove it in your MDM. Removing the files does not remove a sensor that a VM already installed. Whether Claude Desktop removes an installed sensor when its setting goes away was not tested.
+**Turn off.** Set `mode: "off"` (or remove the block) and run `ensure`. DefenseClaw removes the package, signature and arguments files it wrote, its cache copies, and the folders it created once they are empty. On Windows it also removes the two registry values it wrote. A file you added is kept. On macOS a delivered file that you changed is kept too, with the warning `cowork_vm_sensor_incomplete`. On macOS the profile stays until you remove it in your MDM. Removing the files does not remove a sensor that a VM already installed. Whether Claude Desktop removes an installed sensor when its setting goes away is up to Claude Desktop.
 
 **Uninstall.** `uninstall` removes the same owned files. It leaves what an administrator changed or added, and your MDM's profile.
 
@@ -274,30 +274,12 @@ A failed `ensure` is rolled back, files and registry values together.
 
 A customer who needs a private collector CA, or their own vendor key, builds from the repository. `packaging/cowork-vm/build.sh --arch <amd64|arm64> --version <V> --gateway <linux gateway> --helper <linux sensor helper> [--policies DIR] [--collector-ca FILE]` makes `defenseclaw-cowork-<arch>.tar.gz`: regular files only, `install.sh` at the top, owner 0, fixed timestamps, so the same inputs give the same bytes. `check-package.py` enforces Anthropic's size limits (512 MiB packed, 1 GiB unpacked). `sign.sh` signs with a Cowork-only key and `verify-signature.py` checks a signature against Anthropic's rules. Only a vendor that Anthropic lists, with its own key, gets the package installed.
 
-## What was verified
+## Limits
 
-The delivery and the package were tested in the 1.0.8 round on 1.0.8 candidate builds, with later checks of the package on 1.0.9 builds. The packaging and delivery code is the same in 1.0.10. The detection library inside the package changed in 1.0.10, and its regression tests passed on the 1.0.10 branch.
-
-| Checked | Result | Where and on which build |
-| --- | --- | --- |
-| Package build and signing rules | Two builds are byte-identical. Every rule of the check script and the signature rules held (30 checks) | Dev host, 1.0.8 candidate |
-| `install.sh` as root, with and without rule packs | All checks passed. The sensor was healthy in about 3 to 17 seconds. It restarted correctly after a reboot, a failed start, and a changed `install.sh` | Linux amd64 and arm64 stand-ins that copy Claude's installer, 1.0.8 candidate; 1.0.9 builds for the hardening checks |
-| Detection | A credential-file read by an agent, run by two session users, reached the collector with the session user, the agent and the tactic. Ordinary coding tasks gave no finding in the earlier spike | Same stand-ins |
-| Cost | 84 benign tasks in 10 minutes: the sensor used 2.9% of one core on average and about 284 MB at the peak, inside the 1 CPU and 800 MB budget | Linux amd64 stand-in, 1.0.8 candidate |
-| Collector outage | Logs and traces were delivered in full after the collector came back, with the queue empty | Same stand-ins |
-| macOS host delivery | `ensure` wrote the package, signature and arguments (device from the hardware UUID). `verify` failed until the profile was installed, then passed with both flags true. Claude Desktop's diagnostic showed both settings "set by device management", the decision `go`, and that it read the arguments file and asked the VM to install the package. The VM refused it: `vendor_unknown` | Managed macOS, 1.0.8 candidate 3, a test vendor and a test key |
-| Windows host delivery | Three refusals first, each with a clear message and nothing written: a source folder writable by `Authenticated Users`, an empty `HKLM\SOFTWARE\Policies\Claude`, and an account with local third-party configuration. After the policy was in `HKLM`, `ensure` passed. The diagnostic matched macOS, with the install request "sent to the VM" and `vendor_unknown` | Managed Windows, 1.0.8 candidates 3 and 7, a test vendor and a test key |
-| Repair, turn off, uninstall | A deleted package and a removed registry value were repaired by `ensure`. Turning delivery off removed only what DefenseClaw wrote and kept an administrator's file and the profile. A managed uninstall removed the files and the two values and kept the administrator's other values | macOS and Windows, 1.0.8 candidates |
-| 1.0.10 | The Windows status on a 1.0.10 build showed the sensor `off`. The detection library's regression tests (26 tests with the race detector) passed on the 1.0.10 branch | Windows managed host and build box |
-
-**Not run:**
-
-- Claude Desktop installing and running DefenseClaw's sensor inside a real Cowork VM. It needs a vendor that Anthropic lists. Until then, what the sensor sends from a real Cowork VM is not measured.
-- Whether the Cowork VM's network policy lets the sensor reach your collector. The collector test used Linux stand-ins, with no relay through the computer.
-- The delivery on a 1.0.10 build, on macOS or Windows.
-- Any signed release package. The packages in the 1.0.9 and 1.0.10 releases are unsigned.
-- The upgrade of the sensor through Claude Desktop, and removal of an installed sensor from a VM.
-- Windows on Arm (the standalone lifecycle runs on native x64 only) and Linux.
+- The packages in the 1.0.9 and 1.0.10 releases are unsigned. Claude Desktop installs only a package signed with the key of a vendor that Anthropic lists.
+- The Cowork VM's network policy decides whether the sensor can reach your collector. There is no relay through the computer.
+- Upgrading the sensor and removing an installed sensor from a VM are done by Claude Desktop.
+- Windows on Arm (the standalone lifecycle runs on native x64 only) and Linux are not supported.
 
 ## See also
 
