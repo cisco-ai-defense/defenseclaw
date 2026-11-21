@@ -325,6 +325,12 @@ func (c *Config) ReadMCPServersForConnector(connector string) ([]MCPServerEntry,
 // configured workspace. Runtime hooks carry only the server name; this gives
 // the gateway the server's URL, command and transport so URL-pinned registry
 // rules match at runtime the same way they do at admission (GAP-2488).
+//
+// The per-call lookups use the servers of every source that read and drop
+// the reader's error: that error marks an inventory pass incomplete (#1406),
+// and treating it as not-found let one malformed or oversized source, such
+// as a .codex/config.toml a repository plants, hide the user's own servers
+// from URL- and command-pinned rules at the hook (GAP-1692).
 func (c *Config) LookupMCPServerForConnector(connector, workspaceDir, name string) (MCPServerEntry, bool) {
 	name = strings.TrimSpace(name)
 	if name == "" {
@@ -334,10 +340,7 @@ func (c *Config) LookupMCPServerForConnector(connector, workspaceDir, name strin
 	if workspaceDir == "" && c != nil {
 		workspaceDir = c.ConnectorWorkspaceDir()
 	}
-	entries, err := c.readMCPServersForConnectorIn(connector, workspaceDir)
-	if err != nil {
-		return MCPServerEntry{}, false
-	}
+	entries, _ := c.readMCPServersForConnectorIn(connector, workspaceDir)
 	for _, e := range entries {
 		if e.Name == name {
 			return e, true
@@ -386,10 +389,7 @@ func (c *Config) LookupMCPToolServerForConnector(connector, workspaceDir, name s
 	if workspaceDir == "" && c != nil {
 		workspaceDir = c.ConnectorWorkspaceDir()
 	}
-	entries, err := c.readMCPServersForConnectorIn(connector, workspaceDir)
-	if err != nil {
-		return MCPServerEntry{}, false
-	}
+	entries, _ := c.readMCPServersForConnectorIn(connector, workspaceDir)
 	if entry, ok := lookupMCPToolServer(connector, entries, name); ok {
 		return entry, true
 	}
@@ -408,8 +408,8 @@ func (c *Config) CodexMCPToolServerAmbiguous(workspaceDir, toolServer string) bo
 	if workspaceDir == "" && c != nil {
 		workspaceDir = c.ConnectorWorkspaceDir()
 	}
-	entries, err := c.readMCPServersForConnectorIn("codex", workspaceDir)
-	return err == nil && codexMCPToolServerAmbiguous(entries, toolServer)
+	entries, _ := c.readMCPServersForConnectorIn("codex", workspaceDir)
+	return codexMCPToolServerAmbiguous(entries, toolServer)
 }
 
 // CodexMCPToolServerAmbiguousUnderHome uses the managed caller's Codex
