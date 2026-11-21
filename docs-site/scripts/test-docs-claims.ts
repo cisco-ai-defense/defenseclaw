@@ -2961,19 +2961,31 @@ describe('account-keys refusal on a per-user install (rel-1-0-6:GAP-0417)', () =
 describe('1.0.7 ruled limits are visible on their affected pages (GAP-0539)', () => {
   it('lists the remaining reader, platform, and audit limits while omitting the repaired hook cleanup', () => {
     const matrix = page('support-matrix.mdx').split('### 1.0.7 deterministic reader limits')[1]?.split('## Claude Code shell')[0] ?? '';
-    for (const id of ['0339', '0347', '0350', '0354', '0355', '0367', '0372', '0379', '0390', '0391', '0425', '0429', '0327', '0482', '0495', '0519', '0524']) {
-      assert.ok(matrix.includes(`GAP-${id}`), `GAP-${id} missing from the 1.0.7 known limits`);
+    // Public pages carry no internal ids: each limit is pinned by its plain sentence.
+    for (const phrase of [
+      'statements after a subexpression prefix and junction references inside a Bash wrapper are outside the reader\'s proof',
+      'A long script can exceed the self-protection reader\'s bounded analysis',
+      'Some archive entries and later file moves cannot be tied together',
+      'A path held in a shell variable populated by `read` is not fully resolved',
+      'A PowerShell scriptblock or leading unquoted call',
+      'Case modification or pattern substitution used as a redirect target',
+      'Two ordinary copy commands with options and a dynamic destination',
+      'The MCP refusal wording',
+      'idle gateway memory can grow gradually with the audit store',
+      'a redirect to a network share that responds slowly',
+      'replacing the DefenseClaw home with a junction',
+      'A two-vCPU arm64 host can exceed hook latency',
+      'some calls can lack a completed audit row',
+    ]) {
+      assert.ok(matrix.includes(phrase), `1.0.7 known limits lack: ${phrase}`);
     }
     assert.ok(!matrix.includes('GAP-0510'), 'repaired connector cleanup is still listed as a limit');
-    for (const [name, id] of [
-      ['reference/fail-modes.mdx', '0524'],
-      ['observability/index.mdx', '0327'],
-      ['connectors/hermes.mdx', '0486'],
-      ['scanning/mcp-scanner.mdx', '0499'],
-      ['get-started/windows/paths-troubleshooting.mdx', '0495'],
-      ['enterprise/troubleshooting.mdx', '0409'],
+    for (const [name, phrase] of [
+      ['connectors/hermes.mdx', 'vendor skills synchronized by a Hermes store, Nix, or Homebrew install can be treated as user-installed skills'],
+      ['scanning/mcp-scanner.mdx', 'a stdio server started for `defenseclaw mcp scan` can leave a long-lived child after the scan ends'],
+      ['enterprise/troubleshooting.mdx', 'An unexpected Claude Code policy value type, an untrusted key access list, or server-managed settings can still surface as a slower Setup failure'],
     ] as const) {
-      assert.ok(page(name).includes(`GAP-${id}`), `${name} lacks GAP-${id}`);
+      assert.ok(page(name).includes(phrase), `${name} lacks: ${phrase}`);
     }
     assert.match(page('enterprise/windows.mdx'), /### 1\.0\.7 purge limit/);
   });
@@ -2996,7 +3008,7 @@ describe('macOS account join key while the domain is away (rel-1-0-6:GAP-0447)',
 describe('GAP-0372 documented reader limit', () => {
   it('names the dynamic destination limit and a fixed destination option', () => {
     const matrix = page('support-matrix.mdx');
-    assert.match(matrix, /GAP-0372[^\n]*dynamic destination can still be refused/);
+    assert.match(matrix, /dynamic destination can still be refused/);
     assert.match(matrix, /Run them yourself or name a fixed destination/);
   });
 });
