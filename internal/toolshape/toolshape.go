@@ -812,11 +812,11 @@ func (w *walker) str(key, val string) {
 		}
 	}
 	switch {
-	case t.pathWrite[key] && looksPath(val):
+	case t.pathWrite[key] && looksPathUnderKey(val):
 		w.path(KindWrite, key, val)
 	case t.inputKey[key] && looksPath(val):
 		w.path(KindRead, key, val)
-	case (t.pathRead[key] || t.pathKeySuffix(key)) && looksPath(val):
+	case (t.pathRead[key] || t.pathKeySuffix(key)) && looksPathUnderKey(val):
 		w.path(w.pathKind(), key, val)
 	case fromURI && looksPath(val):
 		w.path(w.pathKind(), key, val)
@@ -1275,6 +1275,20 @@ func absolutePath(s string) bool {
 		return true
 	}
 	return false
+}
+
+// looksPathUnderKey is looksPath plus a bare file name (shadow, id_rsa), for a
+// value under a key that names a path or a file: the tool opens it relative to
+// its working folder, as a native file tool does, so the effect is judged on the
+// path resolved against the session folder (rel-1-0-10:GAP-1071). A value with
+// white space, a control character, a shell metacharacter or a URL or address
+// shape stays text.
+func looksPathUnderKey(s string) bool {
+	if looksPath(s) {
+		return true
+	}
+	return s != "" && len(s) <= maxPath && !strings.ContainsAny(s, " \t\n\r\x00$`;|&<>\"'*?{}") &&
+		!looksURL(s) && !looksAddress(s) && !strings.Contains(s, "://") && !strings.Contains(s, ":")
 }
 
 // looksPath is absolutePath plus relative forms, for a value under a path

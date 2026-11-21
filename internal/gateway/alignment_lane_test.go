@@ -343,3 +343,34 @@ func TestAlignmentChatIsPreemptedByToolJudge(t *testing.T) {
 		t.Fatalf("alignment call: %v, want preempted", err)
 	}
 }
+
+// rel-1-0-10:GAP-0940: on a Windows working folder, Claude Code's Bash tool
+// is read as POSIX (an rm outside the folder is a delete) and a Windows
+// temporary folder is a temporary folder.
+func TestFT07AlignmentWindowsFolder(t *testing.T) {
+	ctx := context.Background()
+	const cwd = `C:\Users\bench\work`
+	for _, tc := range []struct {
+		args string
+		want bool
+	}{
+		{`{"command":"rm -rf /opt/other"}`, true},
+		{`{"command":"git status"}`, false},
+	} {
+		if got, _ := alignmentSideEffecting(ctx, "claudecode", "Bash", tc.args, cwd); got != tc.want {
+			t.Errorf("alignmentSideEffecting(Bash %s) = %v, want %v", tc.args, got, tc.want)
+		}
+	}
+	for path, want := range map[string]bool{
+		`C:\Users\bench\AppData\Local\Temp\x.txt`: true,
+		`c:/windows/temp/x.txt`:                   true,
+		`D:\Temp`:                                 true,
+		`C:\Users\bench\AppData\Roaming\x.txt`:    false,
+		`C:\Users\bench\work\Temp.txt`:            false,
+		`C:\Windows\System32\x.dll`:               false,
+	} {
+		if got := alignmentTempPath(path); got != want {
+			t.Errorf("alignmentTempPath(%q) = %v, want %v", path, got, want)
+		}
+	}
+}

@@ -5,6 +5,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/intentstore"
 )
 
 // intentScopeSessions holds, per judge session key (judgeSessionKey), what the
@@ -22,6 +24,15 @@ import (
 type intentScopeSessions struct {
 	mu       sync.Mutex
 	sessions map[string]intentScopeSession
+	// parents maps a child session's key to its parent's (GAP-0151): a
+	// connector that gives a subagent its own session id announces the pair at
+	// the subagent's start; the child's tool calls then read the parent's task.
+	parents map[string]scopeParentLink
+}
+
+type scopeParentLink struct {
+	parent   string
+	lastSeen time.Time
 }
 
 type intentScopeSession struct {
@@ -93,7 +104,52 @@ func (t *intentScopeSessions) setGitHosts(key string, hosts []string) {
 func (t *intentScopeSessions) reset(key string) {
 	t.mu.Lock()
 	delete(t.sessions, key)
+	delete(t.parents, key)
 	t.mu.Unlock()
+}
+
+// link records that child is a subagent session of parent. The table is bounded
+// like the sessions: expired links go first, then the least recently seen.
+func (t *intentScopeSessions) link(child, parent string, now time.Time) {
+	if child == "" || parent == "" || child == parent {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.parents == nil {
+		t.parents = make(map[string]scopeParentLink)
+	}
+	if _, held := t.parents[child]; !held && len(t.parents) >= maxToolJudgeContextSessions {
+		for k, l := range t.parents {
+			if now.Sub(l.lastSeen) >= toolJudgeContextTTL {
+				delete(t.parents, k)
+			}
+		}
+		for len(t.parents) >= maxToolJudgeContextSessions {
+			oldestKey, oldest := "", time.Time{}
+			for k, l := range t.parents {
+				if oldestKey == "" || l.lastSeen.Before(oldest) {
+					oldestKey, oldest = k, l.lastSeen
+				}
+			}
+			if oldestKey == "" {
+				break
+			}
+			delete(t.parents, oldestKey)
+		}
+	}
+	t.parents[child] = scopeParentLink{parent: parent, lastSeen: now}
+}
+
+// parentOf is the parent session key of a linked child, or "".
+func (t *intentScopeSessions) parentOf(child string) string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	l, ok := t.parents[child]
+	if !ok || time.Since(l.lastSeen) >= toolJudgeContextTTL {
+		return ""
+	}
+	return l.parent
 }
 
 // roomLocked makes room for one more session: expired sessions go first, then
@@ -168,6 +224,36 @@ func (j *LLMJudge) ClearSessionTask(ctx context.Context) {
 	if sessionID := judgeSessionKey(ctx); sessionID != "" {
 		j.scopeSessions().clearTask(sessionID)
 	}
+}
+
+// LinkChildSession records that childKey (a judge session key) is a subagent
+// session of parentKey. The child's tool calls are judged with the parent's
+// task when the child has none of its own (GAP-0151).
+func (j *LLMJudge) LinkChildSession(childKey, parentKey string) {
+	if j == nil {
+		return
+	}
+	j.scopeSessions().link(childKey, parentKey, time.Now())
+}
+
+// parentIntent is the task of the session childKey is a subagent of, read
+// without recording anything, and the parent's key; "" when the session has no
+// linked parent, the store cannot read, or the parent's turn has no task. The
+// parent's own record is never written to (read-only fallback).
+func (j *LLMJudge) parentIntent(ctx context.Context, childKey string) (string, string) {
+	parent := j.scopeSessions().parentOf(childKey)
+	if parent == "" || j.sessionTaskCleared(parent) {
+		return "", ""
+	}
+	reader, ok := j.intentStore().(intentstore.Reader)
+	if !ok {
+		return "", ""
+	}
+	snap, found, err := reader.Lookup(ctx, parent)
+	if err != nil || !found {
+		return "", ""
+	}
+	return snap.UserIntent, parent
 }
 
 // sessionTaskCleared reports a session whose turn this process saw start and

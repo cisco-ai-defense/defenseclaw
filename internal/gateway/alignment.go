@@ -71,7 +71,7 @@ const (
 	alignmentFindingID    = "ALIGNMENT-DRIFT"
 	alignmentTurnBytes    = 600
 	alignmentCallBytes    = 1200
-	alignmentDestBytes    = 400
+	alignmentDestBytes    = 600
 	alignmentRecentBytes  = 240
 	alignmentRecentCalls  = 4
 	alignmentSessions     = 4096
@@ -483,6 +483,12 @@ func alignmentEffects(ctx context.Context, connectorName, toolName, args, cwd st
 		call.Command = trimmed
 	}
 	opts := effects.Options{Flavor: alignmentFlavor(cwd), Home: hookActiveHome(ctx), CWD: cwd}
+	if opts.Flavor == effects.FlavorWindows && connectorName == "claudecode" && strings.EqualFold(toolName, "Bash") {
+		// Claude Code's Bash tool runs Git Bash on Windows: its command is POSIX
+		// text, and with the Windows table inferred from the folder an rm is no
+		// delete (GAP-0940).
+		opts.Dialect = effects.DialectPOSIX
+	}
 	return effects.Extract(call, opts), true
 }
 
@@ -496,6 +502,9 @@ func alignmentFlavor(cwd string) effects.Flavor {
 
 // alignmentTempPath reports a path under a temporary folder.
 func alignmentTempPath(path string) bool {
+	if alignmentWindowsTempPath(path) {
+		return true
+	}
 	clean := filepath.ToSlash(filepath.Clean(path))
 	for _, root := range []string{"/tmp", "/var/tmp", "/private/tmp", "/dev/shm", "/dev/null"} {
 		if clean == root || strings.HasPrefix(clean, root+"/") {
@@ -504,6 +513,28 @@ func alignmentTempPath(path string) bool {
 	}
 	return false
 }
+
+// alignmentWindowsTempPath reports a path under a Windows temporary folder:
+// X:\Windows\Temp, X:\Temp, or a user's AppData\Local\Temp (GAP-0940).
+func alignmentWindowsTempPath(path string) bool {
+	p := strings.ToLower(strings.ReplaceAll(path, `\`, "/"))
+	if len(p) < 3 || p[1] != ':' || p[2] != '/' || p[0] < 'a' || p[0] > 'z' {
+		return false
+	}
+	rest := p[3:]
+	under := func(prefix string) bool { return rest == prefix || strings.HasPrefix(rest, prefix+"/") }
+	if under("windows/temp") || under("temp") {
+		return true
+	}
+	if after, ok := strings.CutPrefix(rest, "users/"); ok {
+		if _, tail, found := strings.Cut(after, "/"); found && under2(tail, "appdata/local/temp") {
+			return true
+		}
+	}
+	return false
+}
+
+func under2(path, prefix string) bool { return path == prefix || strings.HasPrefix(path, prefix+"/") }
 
 func alignmentUnder(path, dir string) bool {
 	if path == "" || dir == "" || !filepath.IsAbs(path) {
@@ -642,7 +673,7 @@ func alignmentDestinations(facts effects.Result, args string) []string {
 	seen := map[string]bool{}
 	add := func(s string) {
 		s = strings.TrimSpace(s)
-		if s == "" || seen[s] || len(out) >= 8 {
+		if s == "" || seen[s] || len(out) >= 12 {
 			return
 		}
 		seen[s] = true
@@ -669,8 +700,38 @@ func alignmentDestinations(facts effects.Result, args string) []string {
 				} else {
 					add(s)
 				}
+				return
+			}
+			// A value that is prose or long names its destination as a word
+			// of the text (GAP-0824).
+			for _, word := range alignmentDestinationWords(s) {
+				add(word)
 			}
 		})
+	}
+	return out
+}
+
+// alignmentDestinationWords are the words of a long or multi-word value that
+// are shaped like a URL or an address, from its head and its tail (a long value
+// is read up to 64 KiB, so one value cannot cost the lane unbounded time).
+func alignmentDestinationWords(s string) []string {
+	const window = 32 << 10
+	if len(s) <= 64 && !strings.ContainsAny(s, " \t\n") {
+		return nil
+	}
+	if len(s) > 2*window {
+		s = s[:window] + " " + s[len(s)-window:]
+	}
+	var out []string
+	for _, word := range strings.Fields(s) {
+		word = strings.Trim(word, "\"'`.,;:!?()[]{}<>")
+		if word != "" && alignmentDestinationValue(word) {
+			out = append(out, word)
+			if len(out) >= 12 {
+				break
+			}
+		}
 	}
 	return out
 }
