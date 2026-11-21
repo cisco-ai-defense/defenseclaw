@@ -49,6 +49,20 @@ func TestGAP1731StatusReportsClaudeHKLMShadowing(t *testing.T) {
 		t.Fatalf("merge report = %+v", report)
 	}
 
+	// Mixed clients: the oldest enrolled version is the one checked, so a
+	// merge that only the newer client honours still reports shadowing.
+	gotVersion = ""
+	report = enterpriseHookStatusReport{}
+	enterpriseHooksReportClaudeHKLMPolicy(&report, []enterpriseHookReconcileRow{
+		{Connector: "claudecode", OK: true, Result: &enterprisehooks.InstallResult{AgentVersion: "2.1.250 (Claude Code)"}},
+		{Connector: "claudecode", OK: true, Result: &enterprisehooks.InstallResult{AgentVersion: ""}},
+		{Connector: "claudecode", OK: false, Result: &enterprisehooks.InstallResult{AgentVersion: "2.1.200 (Claude Code)"}},
+		{Connector: "claudecode", OK: true, Result: &enterprisehooks.InstallResult{AgentVersion: "2.1.260 (Claude Code)"}},
+	})
+	if gotVersion != "2.1.200 (Claude Code)" {
+		t.Fatalf("status checked Claude Code %q, want the oldest enrolled 2.1.200 (Claude Code)", gotVersion)
+	}
+
 	verdict.shadowed = true
 	report = enterpriseHookStatusReport{}
 	enterpriseHooksReportClaudeHKLMPolicy(&report, claudeRows[:1])

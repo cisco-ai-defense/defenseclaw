@@ -88,10 +88,6 @@ func readOptionalClaudeCodeManagedSettings(name, kind, path string) (*claudeCode
 	return source, err
 }
 
-func (s *claudeCodeSettingsSource) active() bool {
-	return s != nil && len(s.settings) > 0
-}
-
 func (s *claudeCodeSettingsSource) label() string {
 	if s == nil {
 		return ""

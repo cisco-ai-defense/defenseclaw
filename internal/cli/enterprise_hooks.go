@@ -2443,14 +2443,21 @@ func enterpriseHooksReportClaudeHKLMPolicy(report *enterpriseHookStatusReport, r
 	if runtime.GOOS != "windows" {
 		return
 	}
-	agentVersion, enrolled := "", false
+	// The oldest enrolled client decides: a merge policy that a newer
+	// Claude Code honours still hides the drop-in from an older one.
+	agentVersion, lowest, enrolled := "", "", false
 	for _, row := range rows {
 		if row.Connector != "claudecode" || row.Removed {
 			continue
 		}
 		enrolled = true
-		if row.Result != nil && agentVersion == "" {
-			agentVersion = strings.TrimSpace(row.Result.AgentVersion)
+		if row.Result == nil {
+			continue
+		}
+		raw := strings.TrimSpace(row.Result.AgentVersion)
+		version := connector.NormalizeAgentVersion("claudecode", raw)
+		if version != "" && (lowest == "" || connector.CompareAgentVersions(version, lowest) < 0) {
+			agentVersion, lowest = raw, version
 		}
 	}
 	if !enrolled {

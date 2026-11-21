@@ -2937,13 +2937,20 @@ class WindowsHookDoctorTests(unittest.TestCase):
         # source-control keys) leaves the file-based drop-in in force; a plain
         # HKLM policy still hides it.
         runtime = self._runtime()
-        config = self._config("claudecode", f'"{runtime}"')
+        config = self._config("claudecode", f'"{runtime}"', claude_contract="claudecode-hooks-v2")
         document = json.loads(config.read_text(encoding="utf-8"))
         for groups in document["hooks"].values():
             for group in groups:
                 for handler in group["hooks"]:
                     handler["args"].append("--enterprise-managed")
         config.write_text(json.dumps(document), encoding="utf-8")
+        lock_path = self.data / "hook_contract_lock.json"
+
+        def client(version: str) -> None:
+            lock = json.loads(lock_path.read_text(encoding="utf-8"))
+            lock["connectors"]["claudecode"]["raw_agent_version"] = f"{version} (Claude Code)"
+            lock["connectors"]["claudecode"]["normalized_agent_version"] = version
+            lock_path.write_text(json.dumps(lock), encoding="utf-8")
 
         def check_with(hklm):
             def registry_policy(hive_name: str):
@@ -2956,6 +2963,7 @@ class WindowsHookDoctorTests(unittest.TestCase):
             ):
                 return self._validate("claudecode", config, managed_settings_paths=None, managed_enterprise=True)
 
+        client("2.1.250")
         merged = check_with({"managedSourcesBehavior": "merge", "permissions": {"deny": ["Bash(curl:*)"]}})
         self.assertEqual(merged.state, "healthy", merged.detail)
         self.assertIn("merged with", merged.detail)
@@ -2966,6 +2974,15 @@ class WindowsHookDoctorTests(unittest.TestCase):
         self.assertIn("no hooks table", shadowed.detail)
         disabled = check_with({"managedSourcesBehavior": "merge", "disableAllHooks": True})
         self.assertEqual(disabled.state, "policy-blocked", disabled.detail)
+        # Claude Code below 2.1.242 ignores merge, as the Go audit says; a
+        # control-only policy is still skipped on any client.
+        client("2.1.219")
+        older = check_with({"managedSourcesBehavior": "merge", "permissions": {"deny": ["Bash(curl:*)"]}})
+        self.assertEqual(older.state, "policy-blocked", older.detail)
+        self.assertIn("ignores managedSourcesBehavior: merge", older.detail)
+        self.assertIn("2.1.242", older.detail)
+        older_control_only = check_with({"managedSourcesBehavior": "merge"})
+        self.assertEqual(older_control_only.state, "healthy", older_control_only.detail)
 
     def test_codex_requires_complete_trusted_event_matrix(self) -> None:
         runtime = self._runtime()
