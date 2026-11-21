@@ -56,6 +56,12 @@ func lowerPSScript(command string, o Options, expandNested bool) *Script {
 					ns.Text, ns.Static = text, true
 				}
 			}
+			if !ns.Static && ns.Kind == psparse.KindCmdC &&
+				(ns.Reason == psparse.ReasonLegacyQuoting || ns.Reason == psparse.ReasonCmdArgv) {
+				if text, ok := psLegacyCmdBody(cmd); ok {
+					ns.Text, ns.Static, ns.Dialect = text, true, "cmd"
+				}
+			}
 			if !ns.Static && ns.Kind == psparse.KindPowerShellCommand {
 				if text, ok := psExpandedCommand(cmd, o); ok {
 					ns.Text, ns.Static = text, true

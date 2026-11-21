@@ -440,3 +440,82 @@ func psEnvValue(env map[string]string, name string) (string, bool) {
 	}
 	return "", false
 }
+
+// psLegacyCmdBody is the body a PowerShell `cmd [switches] /c ARGS` hands
+// cmd.exe when psparse declined it for legacy quoting only because its joined
+// text shows the quotes PowerShell itself adds: every argument is a static
+// word with no embedded double quote, no empty word and no blank-bearing word
+// ending in a backslash (the 5.1 cases that change the argv), so the command
+// line is the words joined with a blank, a blank-bearing word wrapped in
+// quotes, and cmd's /c rule strips the first and last quote of the body
+// (DET111 R1, GAP-0974: cmd /c cmd /c "..." from PowerShell). psparse also
+// declines a payload it cannot locate (ps_cmd_argv); the same exact reading
+// applies when every word before the run switch is a plain switch.
+func psLegacyCmdBody(c *psparse.Command) (string, bool) {
+	var words []string
+	slash := -1
+	for _, el := range c.Elements {
+		var v string
+		switch x := el.(type) {
+		case *psparse.Arg:
+			sl, ok := x.Value.(*psparse.StringLit)
+			if !ok || !sl.Static || sl.Fused {
+				return "", false
+			}
+			v = sl.Value
+		case *psparse.Parameter:
+			if x.HasColon {
+				return "", false
+			}
+			v = x.Raw
+		default:
+			return "", false
+		}
+		if v == "" || strings.ContainsRune(v, '"') {
+			return "", false
+		}
+		if strings.ContainsAny(v, " \t") {
+			if strings.HasSuffix(v, `\`) {
+				return "", false
+			}
+			v = `"` + v + `"`
+		}
+		if lv := strings.ToLower(v); slash < 0 {
+			switch {
+			case lv == "/c" || lv == "/k" || lv == "/r":
+				slash = len(words)
+			case !psCmdPlainSwitch(lv):
+				// a fused, combined or quoting switch (/d/c, /crd, /s) before
+				// the run switch: cmd reads it differently, stay opaque
+				return "", false
+			}
+		}
+		words = append(words, v)
+	}
+	if slash < 0 || slash+1 >= len(words) {
+		return "", false
+	}
+	body := strings.Join(words[slash+1:], " ")
+	if strings.HasPrefix(body, `"`) {
+		if last := strings.LastIndex(body, `"`); last > 0 {
+			body = body[1:last] + body[last+1:]
+		}
+	}
+	return body, true
+}
+
+// psCmdPlainSwitch reports a word before cmd's run switch that does not change
+// where or how the /c body is read: /d /q /a /u, and the
+// /e: /f: /v: settings.
+func psCmdPlainSwitch(w string) bool {
+	switch w {
+	case "/d", "/q", "/a", "/u":
+		return true
+	}
+	for _, p := range []string{"/e:", "/f:", "/v:"} {
+		if strings.HasPrefix(w, p) && !strings.Contains(w[len(p):], "/") {
+			return true
+		}
+	}
+	return false
+}

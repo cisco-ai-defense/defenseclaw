@@ -185,7 +185,6 @@ var det111Pending = map[string]string{
 	"GAP-0662/var7":  "script -c body is not lowered (S4-R2 wrapper row with a shell body)",
 	"GAP-0662/var8":  "ssh host body runs remotely: a remote target, ruling needed",
 	"GAP-0662/var9":  "env-var hand-off to inline code (P=STATE python -c os.environ) not bound",
-	"GAP-0974/var4":  "cmd /c cmd /c double nesting stays opaque",
 	"GAP-1173/var2":  "tar member operand under -C home is not joined to the folder",
 	"GAP-1173/var3":  "unzip -d on a Windows home spelled with / is not canonical for the classifier",
 	"GAP-1173/var4":  "Expand-Archive has no program row (S4-R2)",
