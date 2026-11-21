@@ -2118,12 +2118,16 @@ func (w *walker) classifyOperands(words []Word, p Program, dialect Dialect) ([]o
 		name := wd.Value
 		dynamicInline := false
 		dynamicValue := Word{}
-		if flag, value, ok := splitDynamicAttachedFlag(wd, p, dialect); ok {
-			name, dynamicValue, dynamicInline = flag, value, true
-		} else if !wd.Static {
-			positionals = append(positionals, wd)
-			i++
-			continue
+		if !wd.Static {
+			if flag, value, ok := splitDynamicKeyValueOperand(wd, p, dialect); ok {
+				name, dynamicValue, dynamicInline = flag, value, true
+			} else if flag, value, ok := splitDynamicAttachedFlag(wd, p, dialect); ok {
+				name, dynamicValue, dynamicInline = flag, value, true
+			} else {
+				positionals = append(positionals, wd)
+				i++
+				continue
+			}
 		}
 		if endOpts {
 			positionals = append(positionals, wd)
@@ -2456,6 +2460,22 @@ func isFlagToken(name string, dialect Dialect) bool {
 		return true
 	}
 	return false
+}
+
+// splitDynamicKeyValueOperand applies a table-valued key=value option when the value remains unresolved.
+func splitDynamicKeyValueOperand(wd Word, p Program, dialect Dialect) (string, Word, bool) {
+	eq := strings.IndexByte(wd.Value, '=')
+	if eq <= 0 {
+		return "", Word{}, false
+	}
+	flag := wd.Value[:eq]
+	fl, ok := flagLookup(p, flag, dialect)
+	if !ok || !fl.Value {
+		return "", Word{}, false
+	}
+	value := attachedValueWord(wd.Value[eq+1:], wd)
+	value.Glob = wd.Glob
+	return flag, value, true
 }
 
 func attachedValueWord(value string, source Word) Word {
