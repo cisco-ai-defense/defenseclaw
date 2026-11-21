@@ -22,6 +22,12 @@
     ],
     "replays": 0
   },
+  "connectors/cowork-vm-sensor": {
+    "videos": [],
+    "images": [],
+    "demos": [],
+    "replays": 0
+  },
   "connectors/cowork": {
     "videos": [],
     "images": [
