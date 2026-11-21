@@ -341,10 +341,14 @@ _STRUCTURED_EXPECTED_OBJECT_FIELDS: Final = {
     "defenseclaw.inventory.mcp_identifier": (
         ("name", True, "scalar", "string"),
         ("url_host", False, "scalar", "string"),
+            ("server_url", False, "scalar", "string"),
+        ("command_fingerprint", False, "scalar", "string"),
+        ("arguments_fingerprint", False, "scalar", "string"),
     ),
     "defenseclaw.inventory.mcp_metadata_item": (
         ("transport", False, "scalar", "string"),
         ("command_basename", False, "scalar", "string"),
+        ("source_scope", False, "scalar", "string"),
         ("auth_provider_type", False, "scalar", "string"),
         ("disabled", True, "scalar", "boolean"),
     ),
@@ -450,7 +454,7 @@ _STRUCTURED_EXPECTED_KNOWN_VALUES: Final = {
     ("gen_ai.uri_part", "modality"): ("image", "video", "audio", "document"),
 }
 _STRUCTURED_DISPOSITIONS_SHA256: Final = "19aa6a80165bed241ae9e427b9b4f7cea9d0b7001c11e5f6460b84c89bd4c0c3"
-_STRUCTURED_TYPES_SHA256: Final = "e930cdb58971080a64d8d6ab2bd3d8794719cf8c26551c13a59f57745086fe7b"
+_STRUCTURED_TYPES_SHA256: Final = "c707aa7692753bc921c4f407ab842a8f53fa361717b125ce94b92b7982bf85d4"
 _STRUCTURAL_CONTRACT_SHA256: Final = "a5f1dcae714d17b138a130a9a8b99f754165370974dbaef994976d67a8f8abaa"
 _CANONICAL_JSON_LIMITS: Final = {
     "max_depth": 8,
