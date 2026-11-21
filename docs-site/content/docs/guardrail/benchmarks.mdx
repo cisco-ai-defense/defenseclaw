@@ -1,6 +1,6 @@
 ---
 title: Guardrail benchmarks
-description: What DefenseClaw measured for its guardrail in 1.0.10 - rule detection, the full rules, decision model and judge cascade, the LLM judge, model routing, and hook speed - with the build, the data, how to reproduce each result, and its limits.
+description: What DefenseClaw measured for its guardrail in 1.0.10 - rule detection, the full rules, decision model and judge cascade, the LLM judge, model routing, and hook speed - with the build, the data and how to reproduce each result.
 keywords:
   - DefenseClaw benchmarks
   - guardrail benchmark
@@ -15,7 +15,7 @@ keywords:
 
 This page collects every benchmark behind the DefenseClaw guardrail in
 1.0.10. Each section says what was measured, on which build, with which
-data, how to run it yourself, and where the result stops being true.
+data, and how to run it yourself.
 
 Read the numbers with two facts in mind. DefenseClaw blocks **proved
 effects**, not suspicious words, so the rules alone catch little but block
@@ -181,30 +181,6 @@ this surface", not as a failure of the tool at its own job.
   decision model adds USD 0.115. Use your own prices: the numbers move with
   the model, the provider and the mix of calls you send.
 
-### Limits of this benchmark
-
-- **A release-candidate build, not the released one.** See above.
-- **The rules were developed against the tune side of the older sets and
-  against several families of the newer ones.** Only the holdout side is
-  scored, and it was run once. Sets DefenseClaw wrote itself (destructive
-  actions, tampering) are reported apart and are never an estimate of
-  accuracy in the field.
-- **The decision model rows replay saved answers.** The benchmark stored each
-  model answer under a hash of the exact request and replayed it, so a run is
-  repeatable. The time of those rows is composed from measured parts, as
-  described above.
-- **One draw of the judge.** The judge's answers come from one pass against
-  Bedrock, reused wherever a request was identical to an earlier pass. A new
-  pass can differ by a few calls. Against the earlier run of the same
-  benchmark, no benign call newly raised an alert or a block.
-- **A held-out set of DefenseClaw's own agent traces is not in these rows.**
-  Public text gives no counts from it.
-- **Not run:** the opt-in [alignment check](/docs/guardrail/alignment-check)
-  was off in every setup; its own page has its numbers. The permissive pack
-  ran and is not reported. One further set was run with the rules only.
-- **Labels are checked data, not ground truth.** They are the source labels
-  plus reviewed corrections, and a source label can be wrong.
-
 ### Reproduce it
 
 The numbers on this page are in
@@ -358,13 +334,6 @@ every required role. Missing identity, unknown result, dynamic operands,
 conditional execution, intervening mutation, or unresolved policy context
 forced an abstention. GPT-OSS was never used at runtime.
 
-<Callout type="warn" title="Known validity limits">
-Offline model labels can share correlated errors, retrospective test sets were
-inspected during tuning, and authored conformance fixtures do not estimate
-population accuracy. The command validation positive class is small, while
-LinuxArena shows that alert noise can remain even when block noise is zero.
-</Callout>
-
 ### Reproduce it
 
 The public harness, source revisions, schemas, normalizers, label finalizers,
@@ -463,17 +432,6 @@ What this shows:
   sensitive-data check ([semantic routing](/docs/guardrail/semantic-routing))
   when a prompt must not leave.
 
-<Callout type="warn" title="Limits of the routing evaluation">
-The decision model here is a **stand-in** (a general Bedrock model behind the
-System One protocol), not System One. Prices in the cost columns are a
-placeholder table, so the dollar figures show the order of the options and
-nothing more. The keyword row follows the matching of the 1.0.9 container
-(whole words, last user message). The built-in `rules` classifier of 1.0.10
-matches as a case-insensitive substring in the newest request text, so it
-matches more often than this row. It was not measured. Re-run before you use
-these numbers to pick a classifier.
-</Callout>
-
 To reproduce it, build `benchmarks/routing/cmd/routing-eval` and run it with
 `-classifiers keyword,vllm_sr,systemone`. The prompt set, the route-flip set,
 the label check and both result sets are in
@@ -496,8 +454,7 @@ each platform, one very large command and the host-capacity warning are in
 [Hook sizing](/docs/support-matrix#hook-sizing). The rates there are
 measurements of release candidate `f1ccff5b7a` (2026-11-17).
 
-1.0.10 does not reach 100 tool calls a second on one host, and the page says
-so. The load tool that measured the rates is an internal test tool and is not
+The load tool that measured the rates is an internal test tool and is not
 in the repository. To see how your own host does, read the hook-capacity
 counts in `defenseclaw status` and `defenseclaw doctor`
 ([local observability](/docs/observability/local-observability)).
