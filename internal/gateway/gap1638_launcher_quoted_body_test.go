@@ -44,8 +44,16 @@ func TestGAP1638LauncherBodyWithQuotesIsRead(t *testing.T) {
 		{"pwsh -c twice", `pwsh -c '` + twice + `'`, true},
 		{"powershell -Command double-quoted twice", `powershell -Command "` + strings.ReplaceAll(twice, `"`, `\"`) + `"`, true},
 		{"launcher after a statement", `Write-Output start; powershell -Command '` + gap1638Chain + `'`, true},
+		{"Start-Process command line", `Start-Process powershell -ArgumentList '` + gap1638Chain + `'`, true},
+		{"Start-Process command line with switches", `Start-Process -FilePath powershell.exe -ArgumentList '-NoProfile -ExecutionPolicy Bypass -Command ` + twice + `' -Wait`, true},
+		{"Start-Process word list", `Start-Process powershell -ArgumentList '-NoProfile','-Command','` + twice + `'`, true},
+		{"Start-Process after a statement", `Write-Output start; Start-Process pwsh -ArgumentList '-c ` + gap1638Chain + `'`, true},
 		{"benign handler twice", `powershell -Command '` + benign + "; " + benign + `'`, false},
 		{"benign quoted output", `powershell -NoProfile -Command 'Write-Output "build ok"; Get-Date'`, false},
+		{"benign Start-Process command line", `Start-Process powershell -ArgumentList '-NoProfile -Command Write-Output "build ok"; Get-Date' -Wait`, false},
+		{"benign Start-Process word list", `Start-Process powershell -ArgumentList '-c','Write-Output "build ok"'`, false},
+		{"benign Start-Process handler", `Start-Process powershell -ArgumentList '` + benign + `'`, false},
+		{"benign Start-Process file", `Start-Process powershell -ArgumentList '-File C:\tools\build.ps1' -Wait`, false},
 	}
 	for _, pack := range gap0437Packs {
 		server := gap0437Server(t, pack, "codex", "action")
@@ -91,6 +99,34 @@ func TestGAP1638LauncherBodyReading(t *testing.T) {
 		}
 		if got != c.want {
 			t.Errorf("%s: launcher body %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
+// TestGAP1638StartProcessCommandLineReading: Start-Process to a powershell or
+// pwsh host reads the -ArgumentList as the child's command line, written as
+// one string or as a word list, a double quote included; a list built at run
+// time, -File and a program that is not the system host stay unread.
+func TestGAP1638StartProcessCommandLineReading(t *testing.T) {
+	body := `New-Item "HKCU:\x" -Force; Start-Process notepad.exe`
+	for _, c := range []struct{ command, want string }{
+		{`Start-Process powershell -ArgumentList '` + body + `'`, body},
+		{`Start-Process powershell -ArgumentList '-NoProfile -WindowStyle Hidden -Command ` + body + `'`, body},
+		{`Start-Process -ArgumentList '-c ` + body + `' -FilePath pwsh.exe`, body},
+		{`Start-Process powershell -ArgumentList '-NoProfile','-Command','` + body + `'`, body},
+		{`Start-Process powershell -ArgumentList "-c $p"`, ""},
+		{`Start-Process powershell -ArgumentList '-File C:\tools\build.ps1'`, ""},
+		{`Start-Process C:\tmp\powershell.exe -ArgumentList '` + body + `'`, ""},
+	} {
+		input := windowsHookShellCall(c.command, `C:\repo`)
+		got := ""
+		for _, twin := range actionfacts.HostScriptReadings(input, actionfacts.Analyze(input), 0, false).Twins {
+			if strings.Contains(twin.Command, "notepad.exe") || strings.Contains(twin.Command, "build.ps1") || strings.Contains(twin.Command, "$p") {
+				got = twin.Command
+			}
+		}
+		if got != c.want {
+			t.Errorf("%s: child script %q, want %q", c.command, got, c.want)
 		}
 	}
 }
