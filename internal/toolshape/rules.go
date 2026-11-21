@@ -216,6 +216,17 @@ func ShellCandidate(text string) bool {
 			return true
 		}
 	}
+	if !strings.ContainsAny(text, `'"\`) {
+		return false
+	}
+	// A word split by quotes or a backslash (sh'ad'ow, sha\dow) is the word
+	// the shell reads once they are removed (rel-1-0-10:GAP-1070).
+	unquoted := strings.ToLower(strings.NewReplacer(`'`, "", `"`, "", `\`, "").Replace(text))
+	for _, w := range t.ShellTriggers {
+		if strings.Contains(unquoted, w) {
+			return true
+		}
+	}
 	return false
 }
 
