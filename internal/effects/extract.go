@@ -5,6 +5,7 @@
 package effects
 
 import (
+	"path"
 	"strings"
 	"time"
 
@@ -196,6 +197,11 @@ type walker struct {
 	// variables (enable -n cd, shopt -s cdable_vars), or cd was aliased: its
 	// target and effect are no longer what the argument says.
 	cdUnreliable bool
+	// lastpipe: shopt -s lastpipe is in effect (see command).
+	lastpipe bool
+	// pwdOwn: the call assigned PWD after its last cd, so $PWD is that value
+	// and not the tracked folder.
+	pwdOwn bool
 	// execState: an unconditional `set -n` (or another unreviewed set option),
 	// `exec CMD`, `exit` or DEBUG/RETURN trap ran in this shell, so whether a
 	// later statement runs is not modeled: every later effect of the shell is
@@ -760,16 +766,45 @@ func (w *walker) resolveWord(wd Word) Word {
 	glob := false
 	quoted := false
 	for i, s := range wd.Segs {
+		if s.Subst == "pwd" {
+			// $(pwd) prints the working folder unless pwd is a function, an
+			// alias or disabled.
+			v, ok := "", false
+			if w.isBuiltin("pwd", DialectPOSIX) {
+				v, ok = w.cwdWord(i == 0)
+			}
+			if !ok {
+				return Word{Static: false, Reason: ReasonDynamicExpansion, Span: wd.Span, Tail: segTail(wd.Segs[i+1:])}
+			}
+			b.WriteString(v)
+			continue
+		}
 		if s.Var != "" {
 			v, ok := w.env[s.Var]
 			if s.Var == psHomeVar {
 				v, ok = w.curHome, w.curHome != "" // PowerShell's automatic $HOME
 			}
+			if s.Var == "PWD" && !w.pwdOwn && !w.namerefSeen {
+				// The shell keeps PWD as the working folder it changed to; the
+				// walk tracks that folder, so $PWD is it unless the call set PWD
+				// after its last cd (rel-1-0-10:GAP-1608, GAP-1244). A leading
+				// $PWD under a folder the walk holds as several candidates, or
+				// none, is the relative ".": each candidate places it, and an
+				// unknown folder keeps the name for the reach rule.
+				v, ok = w.cwdWord(i == 0)
+			}
+			if ok && s.Op != nil {
+				if v == "." && s.Var == "PWD" {
+					ok = false // an operator on a folder the walk does not hold as one
+				} else {
+					v, ok = applyParamOp(v, s.Op)
+				}
+			}
 			if !ok {
 				// The segments stay on the word, so a reader of its literal part
 				// (env NAME=$V: the name) still sees them; the Reason keeps the
-				// word unresolved.
-				return Word{Static: false, Reason: ReasonDynamicExpansion, Span: wd.Span, Segs: wd.Segs}
+				// word unresolved. Tail is the literal after the dynamic part.
+				return Word{Static: false, Reason: ReasonDynamicExpansion, Span: wd.Span, Segs: wd.Segs, Tail: segTail(wd.Segs[i+1:])}
 			}
 			// An unquoted variable undergoes field splitting and globbing: if
 			// its value carries IFS whitespace or a glob metachar we cannot
@@ -788,6 +823,25 @@ func (w *walker) resolveWord(wd Word) Word {
 		lit := s.Lit
 		// A leading ~ (~/ on POSIX, ~\ or ~/ on Windows) expands to the running
 		// home; with no known home it is dynamic (review N6).
+		if i == 0 && s.Quoted && strings.HasPrefix(lit, "~") {
+			// A quoted tilde is a literal folder named ~ (bash expands only an
+			// unquoted tilde prefix): never the home.
+			lit = "./" + lit
+			b.WriteString(lit)
+			quoted = true
+			continue
+		}
+		if i == 0 && !s.Quoted && strings.HasPrefix(lit, "~") && !isTilde(lit, w.o.flavor()) {
+			v, ok := w.tildePrefix(lit)
+			if !ok {
+				return Word{Static: false, Reason: ReasonDynamicExpansion, Span: wd.Span}
+			}
+			if s.Glob {
+				glob = true
+			}
+			b.WriteString(v)
+			continue
+		}
 		if i == 0 && isTilde(lit, w.o.flavor()) {
 			if w.curHome == "" {
 				return Word{Static: false, Reason: ReasonDynamicExpansion, Span: wd.Span}
@@ -817,6 +871,55 @@ func (w *walker) resolveWord(wd Word) Word {
 		b.WriteString(lit)
 	}
 	return Word{Value: b.String(), Static: true, Quoted: quoted, Glob: glob, Span: wd.Span}
+}
+
+// cwdWord is the value of $PWD or ~+: the working folder when the walk knows
+// it as one folder, else "." when the word starts with it (placed like a
+// relative name under every candidate folder).
+func (w *walker) cwdWord(leading bool) (string, bool) {
+	if cwd, ok := w.knownCWD(); ok {
+		return cwd, true
+	}
+	if leading {
+		return ".", true
+	}
+	return "", false
+}
+
+// knownCWD is the working folder when the walk knows it as one folder.
+func (w *walker) knownCWD() (string, bool) {
+	if w.curCWD == "" || len(w.cwdAlt) > 0 {
+		return "", false
+	}
+	return w.curCWD, true
+}
+
+// tildePrefix expands an unquoted POSIX tilde prefix other than ~ and ~/:
+// ~+ is the working folder and ~- the previous one (unknown here); ~login is
+// that account's home through tildeAccount (the active login, an account the
+// caller vouched for, or the literal folder of a name no login can have).
+func (w *walker) tildePrefix(lit string) (string, bool) {
+	name, rest := lit[1:], ""
+	if i := strings.IndexAny(name, `/`); i >= 0 {
+		name, rest = name[:i], name[i:]
+	}
+	if name == "+" {
+		cwd, ok := w.cwdWord(true)
+		if !ok {
+			return "", false
+		}
+		if w.o.flavor() == FlavorWindows {
+			return strings.TrimRight(cwd, `\`) + rest, true
+		}
+		return strings.TrimRight(cwd, "/") + rest, true
+	}
+	if w.o.flavor() == FlavorWindows {
+		return "", false
+	}
+	o := w.o
+	o.Home = w.curHome
+	h, ok, _ := tildeAccount(lit, o)
+	return h, ok
 }
 
 func (w *walker) resolveWords(in []Word) []Word {
@@ -1002,8 +1105,27 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 	// A pipeline stage or a background command runs in a child shell: its cd and
 	// assignments must not leak into the parent (review N2 V3/V7).
 	if c.Pipeline || c.Async {
-		saved := w.saveScope()
-		defer w.restoreScope(saved)
+		switch {
+		case c.PipeLast && !c.Async && dialect == DialectPOSIX && w.lastpipe:
+			// shopt -s lastpipe: bash runs the last stage in this shell
+			// (non-interactive, so no job control), so its cd and assignments
+			// stay (rel-1-0-10:GAP-1037).
+		case c.PipeLast && !c.Async && dialect == DialectPOSIX:
+			// Without lastpipe bash runs it in a child, but zsh and a lastpipe
+			// set where the walk cannot see it run it here: the folder after it
+			// is either one.
+			saved := w.saveScope()
+			defer func() {
+				after := w.cwdNow()
+				w.restoreScope(saved)
+				if before := w.cwdNow(); !after.equal(before) {
+					w.setCWDState(joinCWD(before, after))
+				}
+			}()
+		default:
+			saved := w.saveScope()
+			defer w.restoreScope(saved)
+		}
 	}
 
 	w.cmdNo++
@@ -1061,6 +1183,9 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 		if rv.Static {
 			w.ownVars()
 			w.env[a.Name] = rv.Value
+			if a.Name == "PWD" {
+				w.pwdOwn = true
+			}
 			// A reassigned HOME re-roots `~` and a bare cd under POSIX shell
 			// semantics, on every flavor incl. Git Bash (review 6 C). PowerShell's
 			// `~` is fixed at session start, so $env:USERPROFILE must not rebind it
@@ -1781,6 +1906,7 @@ func (w *walker) applyCWDChange(program string, args []Word, dialect Dialect, co
 	old := w.cwdNow()
 	succ := cwdState{}
 	mayFail := true
+	w.pwdOwn = false // cd sets PWD to the folder it changed to
 	switch {
 	case !found:
 		// bare cd -> the home directory; a prefix HOME= on this command wins (W5/W6).
@@ -2059,6 +2185,12 @@ type operand struct {
 	uploadIsFile  bool   // RoleSendData: the body is a file / stdin ("-"), not literal text
 	copyFrom      string // a copy destination write: the source spelling whose read it carries (s7-flow)
 	subtree       bool   // the write covers the whole directory tree below the path (git clone / init)
+	tail          string // Word.Tail of a dynamic operand
+	// findName / findFiltered: a find -delete root deletes only the files its
+	// predicates select: one -name/-iname pattern (findName), or a predicate the
+	// walk does not read as a pattern (findFiltered alone).
+	findName     string
+	findFiltered bool
 }
 
 func hasWordFold(words []Word, v string) bool {
@@ -2107,6 +2239,7 @@ func (w *walker) classifyOperands(words []Word, p Program, dialect Dialect) ([]o
 	unknownFlag := false
 	inPlace := false
 	del := false
+	findName, findOpaque := "", false
 	hasExpr := false
 	destDir := ""
 	var srcFlags []Word
@@ -2172,6 +2305,8 @@ func (w *walker) classifyOperands(words []Word, p Program, dialect Dialect) ([]o
 		}
 		if p.DeleteFlag != "" && fname == p.DeleteFlag {
 			del = true
+		} else if p.DeleteFlag != "" {
+			findName, findOpaque = findPredicate(fname, words, i, findName, findOpaque)
 		}
 		if (p.Pos == PosSourcesDest) && (fname == "-t" || fname == "--target-directory") {
 			if hasInline {
@@ -2269,7 +2404,14 @@ func (w *walker) classifyOperands(words []Word, p Program, dialect Dialect) ([]o
 	if p.Pos == PosNone && len(positionals) > 0 && !p.InertOperands {
 		unknownFlag = true
 	}
-	posOps := w.positionalOperands(positionals, p, posCtx{unknownFlag: unknownFlag, inPlace: inPlace, del: del, hasExpr: hasExpr, destDir: destDir,
+	if del {
+		for _, wd := range positionals {
+			if wd.Static && (wd.Value == "!" || wd.Value == "(" || wd.Value == ")" || wd.Value == ",") {
+				findOpaque = true // a negated or grouped expression: not one pattern
+			}
+		}
+	}
+	posOps := w.positionalOperands(positionals, p, posCtx{unknownFlag: unknownFlag, inPlace: inPlace, del: del, findName: findName, findOpaque: findOpaque, hasExpr: hasExpr, destDir: destDir,
 		appendMode: p.AppendFlag != "" && hasAppendFlag(words, p.AppendFlag),
 		upload:     p.Pos == PosBits && hasWordFold(words, "/upload"), program: w.curProgram, words: words})
 	recursive := hasRowFlag(words, p, p.Recursive)
@@ -2552,6 +2694,8 @@ type posCtx struct {
 	unknownFlag bool
 	inPlace     bool
 	del         bool
+	findName    string
+	findOpaque  bool
 	hasExpr     bool
 	destDir     string
 	appendMode  bool // tee -a: the file operands are appended to, not rewritten
@@ -2567,7 +2711,7 @@ func (w *walker) positionalOperands(ps []Word, p Program, ctx posCtx) []operand 
 	taint := ctx.unknownFlag
 	mk := func(wd Word, role Role) operand {
 		return operand{value: wd.Value, static: wd.Static, quoted: wd.Quoted,
-			glob: wd.Glob || (p.Pattern && !wd.Quoted), role: role, pattern: p.Pattern}
+			glob: wd.Glob || (p.Pattern && !wd.Quoted), role: role, pattern: p.Pattern, tail: wd.Tail}
 	}
 	if p.FirstPosIgnore && !ctx.hasExpr && len(ps) > 0 {
 		ps = ps[1:] // sed script / grep pattern is not a path (only when no -e/-f gave it)
@@ -2581,8 +2725,12 @@ func (w *walker) positionalOperands(ps []Word, p Program, ctx posCtx) []operand 
 		}
 		for _, wd := range ps {
 			out = append(out, mk(wd, role))
-			if ctx.del { // find -delete: the roots are also deleted
-				out = append(out, mk(wd, RoleDelete))
+			if ctx.del { // find -delete: the roots and the files below them are deleted
+				d := mk(wd, RoleDelete)
+				d.subtree = true
+				d.findName = ctx.findName
+				d.findFiltered = ctx.findOpaque || ctx.findName != ""
+				out = append(out, d)
 			}
 		}
 	case PosInOut:
@@ -2865,6 +3013,7 @@ func (w *walker) effectForOperand(op operand, p Program, origin Origin, cond, fo
 	}
 	if !op.static {
 		e.Target.Type = TargetPath
+		e.Target.Spelling = dynamicSpelling(op.tail)
 		e.addReason(ReasonDynamicExpansion, ScopeTarget)
 		return e
 	}
@@ -2875,6 +3024,7 @@ func (w *walker) effectForOperand(op operand, p Program, origin Origin, cond, fo
 		(dialect == DialectPowerShell && looksGlob(op.value)) {
 		e.Target.Type = TargetPath
 		e.Target.Glob = cap4k(op.value)
+		e.Target.Lexical = cap4k(lexicalCandidate(op.value, w.opts()))
 		e.addReason(ReasonGlob, ScopeTarget)
 		return e
 	}
@@ -2886,10 +3036,24 @@ func (w *walker) effectForOperand(op operand, p Program, origin Origin, cond, fo
 		if tgt, ok := w.links[e.Target.Key()]; ok {
 			e.Target.Physical = tgt
 		}
+		if op.findFiltered {
+			// find deletes only the files below the root its predicates select:
+			// the -name pattern at any depth, or any file for a predicate the
+			// walk does not read as a pattern. The classifier intersects it with
+			// the protected sets; the root's own delete stays as before.
+			name := op.findName
+			if name == "" || op.findOpaqueName() {
+				name = "*"
+			}
+			e.Target.Lexical = cap4k(joinPattern(abs, name, w.o.flavor()))
+		}
 		if w.onAliasedDrive(abs) {
 			e.addReason(ReasonNonCanonicalPath, ScopeTarget)
 		}
 	} else {
+		if reason == ReasonNonCanonicalPath {
+			e.Target.Lexical = cap4k(lexicalCandidate(e.Target.Spelling, w.opts()))
+		}
 		e.addReason(reason, ScopeTarget)
 	}
 	// a destination that may be a directory: the real target is dir/basename,
@@ -3135,6 +3299,7 @@ func (w *walker) handleRedirs(c *Cmd, dialect Dialect, cmdNo, depth int, cond bo
 
 func (w *walker) fillRedirTarget(e *Effect, t Word) {
 	if !t.Static {
+		e.Target.Spelling = dynamicSpelling(t.Tail)
 		e.addReason(ReasonDynamicExpansion, ScopeTarget)
 		return
 	}
@@ -3153,6 +3318,7 @@ func (w *walker) fillRedirTarget(e *Effect, t Word) {
 	}
 	if t.Glob {
 		e.Target.Glob = cap4k(t.Value)
+		e.Target.Lexical = cap4k(lexicalCandidate(t.Value, w.opts()))
 		e.addReason(ReasonGlob, ScopeTarget)
 		return
 	}
@@ -3166,6 +3332,9 @@ func (w *walker) fillRedirTarget(e *Effect, t Word) {
 			e.addReason(ReasonNonCanonicalPath, ScopeTarget)
 		}
 	} else {
+		if reason == ReasonNonCanonicalPath {
+			e.Target.Lexical = cap4k(lexicalCandidate(e.Target.Spelling, w.opts()))
+		}
 		e.addReason(reason, ScopeTarget)
 	}
 }
@@ -3435,6 +3604,7 @@ type scopeState struct {
 	varsOwned bool
 	execState bool
 	debugTrap bool
+	pwdOwn    bool
 }
 
 // saveScope returns the current state and installs private copies of the
@@ -3443,7 +3613,7 @@ type scopeState struct {
 func (w *walker) saveScope() scopeState {
 	s := scopeState{cwd: w.curCWD, home: w.curHome, alt: w.cwdAlt, stack: w.cwdStack, env: w.env,
 		exported: w.exported, chain: w.cdChain, narrowed: w.narrowed, narrowedOther: w.narrowedOther,
-		execState: w.execState, debugTrap: w.debugTrap}
+		execState: w.execState, debugTrap: w.debugTrap, pwdOwn: w.pwdOwn}
 	w.debugTrap = false // a subshell does not inherit a DEBUG trap
 	// The env and exported maps are shared with the saved state until the child
 	// first writes one (ownVars): most scopes (a command substitution, a pipeline
@@ -3473,6 +3643,7 @@ func (w *walker) restoreScope(s scopeState) {
 	w.varsOwned = s.varsOwned
 	w.execState = s.execState
 	w.debugTrap = s.debugTrap
+	w.pwdOwn = s.pwdOwn
 }
 
 func cloneBools(in map[string]bool) map[string]bool {
@@ -3498,6 +3669,8 @@ func (w *walker) unsetVar(name string) {
 		}
 	case "CDPATH":
 		w.cdpathMaybeSet = true
+	case "PWD":
+		w.pwdOwn = true // unset or rebound: no longer the tracked folder
 	}
 }
 
@@ -4765,6 +4938,8 @@ func (w *walker) noteShellOptions(program string, args []Word) {
 				w.execfailMaybe = true
 			case "extdebug":
 				w.extdebugMaybe = true
+			case "lastpipe":
+				w.lastpipe = on
 			}
 			if a.Value == "-s" || a.Value == "-o" {
 				on = true
@@ -4865,12 +5040,18 @@ func (w *walker) declWords(program string, args []Word) (ok, opaque bool) {
 		}
 		if attr || nameref || w.namerefSeen {
 			delete(w.env, name) // the stored value is transformed or aliased
+			if name == "PWD" {
+				w.pwdOwn = true
+			}
 			if name == "HOME" && w.curDialect == DialectPOSIX {
 				w.curHome = ""
 			}
 			continue
 		}
 		w.env[name] = val
+		if name == "PWD" {
+			w.pwdOwn = true
+		}
 		if name == "HOME" && w.curDialect == DialectPOSIX {
 			w.curHome = w.placeHomeValue(val)
 		}
@@ -4938,5 +5119,140 @@ func (w *walker) makeUncertain(name string) {
 		}
 	case "CDPATH":
 		w.cdpathMaybeSet = true
+	case "PWD":
+		w.pwdOwn = true
 	}
+}
+
+// findPredicate reads one find predicate before -delete: -name/-iname with a
+// static pattern is kept as the one name pattern; the predicates that select
+// every file (type, traversal and output options) are ignored; any other
+// predicate, or a second name, makes the selection opaque.
+func findPredicate(fname string, words []Word, i int, name string, opaque bool) (string, bool) {
+	switch fname {
+	case "-type", "-xtype", "-xdev", "-mount", "-depth", "-print", "-print0", "-noleaf",
+		"-ignore_readdir_race", "-noignore_readdir_race", "-warn", "-nowarn", "-follow", "-H", "-L", "-P", "-a", "-and":
+		return name, opaque
+	case "-name", "-iname":
+		if name != "" || i+1 >= len(words) || !words[i+1].Static {
+			return name, true
+		}
+		v := words[i+1].Value
+		if fname == "-iname" {
+			v = strings.ToLower(v)
+		}
+		return v, opaque
+	}
+	return name, true
+}
+
+// findOpaqueName reports a -name pattern that cannot be one path component
+// (a / in it never matches a base name, so the pattern selects nothing; keep
+// it opaque rather than reason about it).
+func (op operand) findOpaqueName() bool {
+	return strings.ContainsAny(op.findName, `/\`)
+}
+
+// joinPattern is root/**/name in the flavor's separator.
+func joinPattern(root, name string, flavor Flavor) string {
+	sep := "/"
+	if flavor == FlavorWindows {
+		sep = `\`
+	}
+	return strings.TrimRight(root, `/\`) + sep + "**" + sep + name
+}
+
+// dynamicSpelling is the Spelling of a target whose word is not static: "$?"
+// and the literal path tail after the last dynamic part, so the classifier can
+// read a protected name in it (R-NAME); empty when the tail is no path step.
+func dynamicSpelling(tail string) string {
+	if !strings.HasPrefix(tail, "/") || len(tail) < 2 {
+		return ""
+	}
+	return cap4k("$?" + tail)
+}
+
+// applyParamOp applies a parameter operator with static operands to a value.
+// Pattern removal matches the shell way (* and ? match any character, / too);
+// a pattern the matcher cannot read is not applied (ok false).
+func applyParamOp(v string, op *ParamOp) (string, bool) {
+	switch op.Kind {
+	case "#", "##":
+		best := -1
+		for i := 0; i <= len(v); i++ {
+			if m, ok := shellPatternMatch(op.Pat, v[:i]); !ok {
+				return "", false
+			} else if m {
+				best = i
+				if op.Kind == "#" {
+					break
+				}
+			}
+		}
+		if best < 0 {
+			return v, true
+		}
+		return v[best:], true
+	case "%", "%%":
+		best := -1
+		for i := len(v); i >= 0; i-- {
+			if m, ok := shellPatternMatch(op.Pat, v[i:]); !ok {
+				return "", false
+			} else if m {
+				best = i
+				if op.Kind == "%" {
+					break
+				}
+			}
+		}
+		if best < 0 {
+			return v, true
+		}
+		return v[:best], true
+	case "/":
+		return strings.Replace(v, op.Pat, op.With, 1), true
+	case "//":
+		return strings.ReplaceAll(v, op.Pat, op.With), true
+	case ":":
+		if op.Off > len(v) {
+			return "", true
+		}
+		r := v[op.Off:]
+		if op.HasLen && op.Len < len(r) {
+			r = r[:op.Len]
+		}
+		return r, true
+	}
+	return "", false
+}
+
+// shellPatternMatch matches a shell pattern of a parameter operator, where *
+// and ? also match /. Bracket expressions and escapes are not read (ok false).
+func shellPatternMatch(pat, s string) (match, ok bool) {
+	if strings.ContainsAny(pat, `[\`) {
+		return false, false
+	}
+	const sep = "\x00"
+	if strings.Contains(s, sep) {
+		return false, false
+	}
+	m, err := path.Match(strings.ReplaceAll(pat, "/", sep), strings.ReplaceAll(s, "/", sep))
+	if err != nil {
+		return false, false
+	}
+	return m, true
+}
+
+// segTail is the literal text of the segments after a dynamic one, when they
+// are all literals (the Word.Tail of a word the walker could not resolve).
+func segTail(segs []WordSeg) string {
+	var b strings.Builder
+	for _, s := range segs {
+		if s.Var != "" || s.Subst != "" {
+			b.Reset()
+			continue
+		}
+		b.WriteString(s.Lit)
+	}
+	return b.String()
 }

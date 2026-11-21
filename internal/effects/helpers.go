@@ -289,6 +289,16 @@ func (p *wrapperParse) child(words []Word, i int) ([]Word, int) {
 	}
 	// skip leading positionals (DURATION, host, dir, mask, priority, lock file).
 	for s := 0; s < row.posSkip && i < len(words); s++ {
+		if p.name == "chroot" && s == 0 {
+			// chroot NEWROOT starts the command in / of the new root: the real
+			// / when NEWROOT is /, else a folder the walk cannot place
+			// (rel-1-0-10:GAP-1483: chroot / sh <<E wrote in the caller folder).
+			if words[i].Static && cleanPOSIX(words[i].Value) == "/" {
+				p.w.spec.chdir, p.w.spec.chdirSet = "/", true
+			} else {
+				p.w.spec.cwdDyn = true
+			}
+		}
 		i++
 	}
 	if row.shellAfterSkip && i+1 < len(words) && words[i].Static && (words[i].Value == "-c" || words[i].Value == "--command") {

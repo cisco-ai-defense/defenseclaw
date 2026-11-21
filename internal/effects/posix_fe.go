@@ -34,6 +34,7 @@ func parsePOSIX(command string, o Options) *Script {
 type posixWalker struct {
 	out       *Script
 	pipeDepth int
+	pipeLast  bool
 	// link is the && / || relation of the statement being lowered to the one
 	// before it; every statement lowered while it is set carries it (round 8 F).
 	link Op
@@ -228,9 +229,17 @@ func (w *posixWalker) binary(st *syntax.Stmt, cmd *syntax.BinaryCmd, cond bool) 
 		w.stmt(cmd.X, cond, false)
 		w.linked(OpOr, func() { w.unlessConst(cmd.X, true, func() { w.stmt(cmd.Y, true, false) }) })
 	case syntax.Pipe, syntax.PipeAll:
+		// The last stage of the outermost pipeline is marked: with bash's
+		// lastpipe (and always in zsh) it runs in the caller's shell
+		// (rel-1-0-10:GAP-1037).
+		last := w.pipeDepth == 0 || w.pipeLast
+		saved := w.pipeLast
 		w.pipeDepth++
+		w.pipeLast = false
 		w.stmt(cmd.X, cond, false)
+		w.pipeLast = last
 		w.stmt(cmd.Y, cond, true)
+		w.pipeLast = saved
 		w.pipeDepth--
 	default:
 		w.unknown(ReasonUnparsedConstruct, cmd)
@@ -318,7 +327,7 @@ func (w *posixWalker) ifClause(cmd *syntax.IfClause, cond bool) {
 }
 
 func (w *posixWalker) declClause(st *syntax.Stmt, cmd *syntax.DeclClause, cond, pipeIn bool) {
-	c := &Cmd{Cond: cond, PipeIn: pipeIn, Pipeline: w.pipeDepth > 0, Span: span(cmd)}
+	c := &Cmd{Cond: cond, PipeIn: pipeIn, Pipeline: w.pipeDepth > 0, PipeLast: w.pipeDepth > 0 && w.pipeLast, Span: span(cmd)}
 	// Only `export` (or declare/typeset -x) puts a variable in the environment of
 	// the commands that follow; a plain declare/local/readonly does not (round 8 E).
 	isExport := cmd.Variant != nil && cmd.Variant.Value == "export"
@@ -373,7 +382,7 @@ func (w *posixWalker) declClause(st *syntax.Stmt, cmd *syntax.DeclClause, cond, 
 }
 
 func (w *posixWalker) emitCall(st *syntax.Stmt, call *syntax.CallExpr, cond, pipeIn bool) {
-	c := &Cmd{Cond: cond, PipeIn: pipeIn, Pipeline: w.pipeDepth > 0, Async: st.Background || w.coproc > 0, Span: span(st)}
+	c := &Cmd{Cond: cond, PipeIn: pipeIn, Pipeline: w.pipeDepth > 0, PipeLast: w.pipeDepth > 0 && w.pipeLast, Async: st.Background || w.coproc > 0, Span: span(st)}
 	if call != nil {
 		for _, a := range call.Assigns {
 			if a.Name == nil {
@@ -572,8 +581,14 @@ func (w *posixWalker) word(word *syntax.Word) Word {
 				case *syntax.Lit:
 					addLit(unescapePOSIX(ip.Value, true), true, false)
 				case *syntax.ParamExp:
-					if name, ok := simpleParam(ip); ok {
-						segs = append(segs, WordSeg{Var: name, Quoted: true})
+					if seg, ok := paramSeg(ip, true); ok {
+						segs = append(segs, seg)
+					} else {
+						dynamic(ReasonDynamicExpansion)
+					}
+				case *syntax.CmdSubst:
+					if pwdSubst(ip) {
+						segs = append(segs, WordSeg{Subst: "pwd", Quoted: true})
 					} else {
 						dynamic(ReasonDynamicExpansion)
 					}
@@ -582,8 +597,8 @@ func (w *posixWalker) word(word *syntax.Word) Word {
 				}
 			}
 		case *syntax.ParamExp:
-			if name, ok := simpleParam(p); ok {
-				segs = append(segs, WordSeg{Var: name})
+			if seg, ok := paramSeg(p, false); ok {
+				segs = append(segs, seg)
 			} else {
 				dynamic(ReasonDynamicExpansion)
 			}
@@ -592,7 +607,13 @@ func (w *posixWalker) word(word *syntax.Word) Word {
 			// an expression can carry a subscript with a command substitution
 			w.unknown(ReasonOpaqueCode, p)
 			dynamic(ReasonDynamicExpansion)
-		case *syntax.CmdSubst, *syntax.ExtGlob:
+		case *syntax.CmdSubst:
+			if pwdSubst(p) {
+				segs = append(segs, WordSeg{Subst: "pwd"})
+			} else {
+				dynamic(ReasonDynamicExpansion)
+			}
+		case *syntax.ExtGlob:
 			dynamic(ReasonDynamicExpansion)
 		case *syntax.ProcSubst:
 			dynamic(ReasonUnparsedConstruct)
@@ -601,6 +622,7 @@ func (w *posixWalker) word(word *syntax.Word) Word {
 		}
 	}
 	if out.Reason != "" {
+		out.Tail = literalTail(word)
 		return out
 	}
 	out.Segs = segs
@@ -619,6 +641,152 @@ func (w *posixWalker) word(word *syntax.Word) Word {
 		out.Value = b.String()
 	}
 	return out
+}
+
+// paramSeg lowers a parameter expansion the walker can evaluate: a plain
+// $NAME / ${NAME}, or one operator with static operands (pattern removal,
+// literal replacement, a literal substring). Anything else is dynamic.
+func paramSeg(p *syntax.ParamExp, quoted bool) (WordSeg, bool) {
+	if name, ok := simpleParam(p); ok {
+		return WordSeg{Var: name, Quoted: quoted}, true
+	}
+	if p == nil || p.Param == nil || p.Excl || p.Length || p.Width || p.Index != nil || p.Names != 0 {
+		return WordSeg{}, false
+	}
+	seg := WordSeg{Var: p.Param.Value, Quoted: quoted}
+	switch {
+	case p.Exp != nil && p.Repl == nil && p.Slice == nil:
+		pat, ok := staticWordText(p.Exp.Word)
+		if !ok {
+			return WordSeg{}, false
+		}
+		switch p.Exp.Op {
+		case syntax.RemSmallPrefix:
+			seg.Op = &ParamOp{Kind: "#", Pat: pat}
+		case syntax.RemLargePrefix:
+			seg.Op = &ParamOp{Kind: "##", Pat: pat}
+		case syntax.RemSmallSuffix:
+			seg.Op = &ParamOp{Kind: "%", Pat: pat}
+		case syntax.RemLargeSuffix:
+			seg.Op = &ParamOp{Kind: "%%", Pat: pat}
+		default:
+			return WordSeg{}, false
+		}
+	case p.Repl != nil && p.Exp == nil && p.Slice == nil:
+		orig, ok1 := staticWordText(p.Repl.Orig)
+		with, ok2 := staticWordText(p.Repl.With)
+		if !ok1 || !ok2 || orig == "" || strings.ContainsAny(orig, "*?[#%") {
+			return WordSeg{}, false
+		}
+		kind := "/"
+		if p.Repl.All {
+			kind = "//"
+		}
+		seg.Op = &ParamOp{Kind: kind, Pat: orig, With: with}
+	case p.Slice != nil && p.Exp == nil && p.Repl == nil:
+		off, ok := arithLiteral(p.Slice.Offset)
+		if !ok || off < 0 {
+			return WordSeg{}, false
+		}
+		seg.Op = &ParamOp{Kind: ":", Off: off}
+		if p.Slice.Length != nil {
+			n, ok := arithLiteral(p.Slice.Length)
+			if !ok || n < 0 {
+				return WordSeg{}, false
+			}
+			seg.Op.Len, seg.Op.HasLen = n, true
+		}
+	default:
+		return WordSeg{}, false
+	}
+	return seg, true
+}
+
+// staticWordText is the text of a word of literals only (nil is ""). A
+// pattern word keeps its glob metacharacters; a quoted one is literal, which
+// a pattern matcher would read differently, so quoting is refused.
+func staticWordText(w *syntax.Word) (string, bool) {
+	if w == nil {
+		return "", true
+	}
+	var b strings.Builder
+	for _, part := range w.Parts {
+		lit, ok := part.(*syntax.Lit)
+		if !ok || strings.ContainsAny(lit.Value, `\$`+"`") {
+			return "", false
+		}
+		b.WriteString(lit.Value)
+	}
+	return b.String(), true
+}
+
+// arithLiteral is a non-negative decimal literal of an arithmetic slot.
+func arithLiteral(x syntax.ArithmExpr) (int, bool) {
+	w, ok := x.(*syntax.Word)
+	if !ok {
+		return 0, false
+	}
+	s, ok := staticWordText(w)
+	if !ok || s == "" || len(s) > 6 {
+		return 0, false
+	}
+	n := 0
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return 0, false
+		}
+		n = n*10 + int(c-'0')
+	}
+	return n, true
+}
+
+// pwdSubst reports $(pwd), `pwd` or $(pwd -L): one plain call of pwd with no
+// assignment, redirect or other word, whose output is the logical working
+// folder. pwd -P (physical) is not read.
+func pwdSubst(cs *syntax.CmdSubst) bool {
+	if cs == nil || len(cs.Stmts) != 1 {
+		return false
+	}
+	st := cs.Stmts[0]
+	if st.Negated || st.Background || st.Coprocess || len(st.Redirs) > 0 {
+		return false
+	}
+	call, ok := st.Cmd.(*syntax.CallExpr)
+	if !ok || len(call.Assigns) > 0 || len(call.Args) == 0 || len(call.Args) > 2 {
+		return false
+	}
+	if call.Args[0].Lit() != "pwd" {
+		return false
+	}
+	return len(call.Args) == 1 || call.Args[1].Lit() == "-L"
+}
+
+// literalTail is the literal text after the last part of word that is not a
+// literal (only unquoted, single-quoted and double-quoted literal runs count).
+func literalTail(word *syntax.Word) string {
+	var tail []string
+	for i := len(word.Parts) - 1; i >= 0; i-- {
+		switch p := word.Parts[i].(type) {
+		case *syntax.Lit:
+			tail = append(tail, unescapePOSIX(p.Value, false))
+		case *syntax.SglQuoted:
+			if p.Dollar {
+				return joinReversed(tail)
+			}
+			tail = append(tail, p.Value)
+		default:
+			return joinReversed(tail)
+		}
+	}
+	return joinReversed(tail)
+}
+
+func joinReversed(parts []string) string {
+	var b strings.Builder
+	for i := len(parts) - 1; i >= 0; i-- {
+		b.WriteString(parts[i])
+	}
+	return b.String()
 }
 
 // simpleParam returns the variable name for a plain $NAME / ${NAME} with no

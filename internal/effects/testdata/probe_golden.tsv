@@ -50,7 +50,7 @@ A49 while < >>	K|append:/home/u/.ssh/authorized_keys
 A50 xargs -I cp	U|
 A51 xargs rm	U|
 A52 xargs sh -c	U|append:/home/u/.ssh/authorized_keys
-A53 find -delete	K|delete:/home/u/.ssh
+A53 find -delete	K|delete:/home/u/.ssh/**
 A54 find -exec cp to ak	U|
 A55 find -exec sh -c	K|append:/home/u/.ssh/authorized_keys
 A56 find -fprint	K|write:/home/u/.bashrc
@@ -64,7 +64,7 @@ A63 cp -s symlink	U|
 B01 ~u user tilde	U|
 B02 ~root	U|
 B03 ${HOME}	K|write:/home/u/.bashrc
-B04 ~+ tilde	U|
+B04 ~+ tilde	K|write:/home/u/.bashrc
 B05 ~- tilde	U|
 B06 env HOME= then ~ (outer expands)	U|
 B07 prefix HOME= then ~	U|
@@ -75,7 +75,7 @@ B11 declare HOME	K|write:/tmp/h/.bashrc
 B12 readonly/export -n	K|write:/home/u/.bashrc
 B13 ${HOME:-/tmp}	U|
 B14 ${X:-~}	U|
-B15 $PWD	U|
+B15 $PWD	K|write:/home/u/.bashrc
 B16 $OLDPWD	U|
 B17 double slash/dot	U|
 B18 dotdot	U|
@@ -113,7 +113,7 @@ C10 trailing dot	U|
 C11 cd .. relative	U|append:c:\users\u\.ssh\authorized_keys,append:c:\work\authorized_keys
 C11 source builtin	U|write:/home/u/proj/.bashrc
 C12 CDPATH env	U|
-C12 drive-relative after drive switch	U|
+C12 drive-relative after drive switch	U|append:c:\users\u\.ssh\authorized_keys,append:c:\work\authorized_keys
 C13 CDPATH assigned	U|
 C13 pushd UNC	U|
 C14 builtin cd	K|append:/home/u/.ssh/authorized_keys,append:/home/u/proj/authorized_keys
@@ -379,7 +379,7 @@ K10 lowercase var	U|
 K11 @ prefix	U|
 K11 drive switch	U|append:c:\users\u\.ssh\authorized_keys,append:c:\work\authorized_keys
 K12 cmd /c cd	K|delete:c:\work\x
-K12 drive-relative C:	U|
+K12 drive-relative C:	U|append:c:\users\u\.ssh\authorized_keys,append:c:\work\authorized_keys
 K13 mklink	K|link:c:\tmp\k,link:c:\users\u\.ssh\authorized_keys
 K14 mklink /J	U|link:c:\tmp\evil,link:c:\users\u\.ssh
 K15 delayed !P!	U|
@@ -511,7 +511,7 @@ P22 HOME reassigned, cd	K|append:/home/u/.ssh/authorized_keys
 P23 HOME reassigned, tilde	K|append:/home/u/.ssh/authorized_keys
 P24 HOME export tilde	K|append:/home/u/.ssh/authorized_keys
 P25 var alias	K|append:/home/u/.ssh/authorized_keys
-P26 param op	U|
+P26 param op	K|append:/home/u/.ssh/authorized_keys
 P27 set -- positional	U|
 P28 command cd	K|append:/home/u/.ssh/authorized_keys,append:/home/u/proj/authorized_keys
 P29 builtin cd	K|append:/home/u/.ssh/authorized_keys
@@ -537,7 +537,7 @@ Q1 quoted-prefix+glob	U|
 Q1b cat quoted-prefix glob	U|
 Q2 brace	K|delete:/etc/passwd,delete:/etc/shadow
 Q3 dq backslash	K|delete:/tmp/a\b
-Q4 quoted tilde	K|delete:/home/u/x
+Q4 quoted tilde	K|delete:/home/u/proj/~/x
 Q5 escaped star	K|delete:/tmp/*
 R1 block redirect	K|write:/home/u/.bashrc
 R2 subshell redirect	K|append:/home/u/.bashrc
@@ -708,14 +708,14 @@ T24 git -c	U|
 T25 cp -t	K|write:/etc/a,write:/etc/b
 T26 python -m pip	U|
 T27 tee -a	K|append:/home/u/.bashrc
-T28 find exec then delete	U|delete:/home/u
+T28 find exec then delete	U|delete:/home/u/**
 T29 xargs rm	U|
 T3 git push	K|
 T30 git hooks clone+cd	U|write:/home/u/proj/r/**
 T4 tar x	U|
 T5 tar c	K|
 T6 sed -i	K|write:/home/u/.bashrc
-T7 find -delete	K|delete:/home/u/.ssh
+T7 find -delete	K|delete:/home/u/.ssh/**
 T8 find -exec rm	U|
 T9 grep pattern	K|
 V1 CDPATH prefix ;	U|
@@ -925,7 +925,7 @@ Z31 hash -p	U|
 Z32 enable -n cd	U|
 Z33 shopt autocd	U|append:/home/u/proj/authorized_keys
 Z34 cd from var then ssh	K|append:/home/u/.ssh/authorized_keys,append:/home/u/proj/authorized_keys
-Z35 cd quoted ~	K|write:/home/u/.bashrc,write:/home/u/proj/.bashrc
+Z35 cd quoted ~	K|write:/home/u/proj/.bashrc,write:/home/u/proj/~/.bashrc
 Z36 install -d no	K|write:/home/u/.ssh/k
 Z37 cp -r src/. ~	U|
 Z38 rsync into ~/	U|
@@ -1104,7 +1104,7 @@ rv7-E10 mirror printf -v HOME	U|
 rv7-G1 gb cd then cmd //c	U|
 rv7-G10 gb env -C	K|append:c:\users\u\.ssh\authorized_keys
 rv7-G12 gb cd $HOME	K|append:c:\users\u\.ssh\authorized_keys
-rv7-G13 gb PWD var	U|
+rv7-G13 gb PWD var	K|append:c:\users\u\.ssh\authorized_keys,append:c:\work\authorized_keys
 rv7-G14 gb workdir windows	K|append:c:\users\u\.ssh\authorized_keys
 rv7-G15 gb function cd	U|
 rv7-G16 gb subshell cd no leak	K|append:c:\users\u\.bashrc
@@ -1119,7 +1119,7 @@ rv7-G7 gb cd quoted backslash	K|append:c:\users\u\.ssh\authorized_keys,append:c:
 rv7-G8 gb pushd popd	U|
 rv7-G9 gb cd - twice	U|
 rv7-K1 cmd child cd no leak	U|append:c:\users\u\.ssh\authorized_keys,append:c:\work\authorized_keys
-rv7-K10 cmd C: drive cwd after /d D:	U|
+rv7-K10 cmd C: drive cwd after /d D:	U|append:c:\work\authorized_keys
 rv7-K11 cmd cd other drive keeps current	U|append:c:\work\authorized_keys,append:d:\x\authorized_keys
 rv7-K12 cmd unknown env path	U|
 rv7-K13 cmd unknown env cd	U|
@@ -1161,12 +1161,12 @@ rv7-L16 exec redirect after cd	K|append:/home/u/.ssh/authorized_keys
 rv7-L17 unset HOME tilde	U|
 rv7-L18 empty HOME tilde	U|
 rv7-L19 tilde-user	U|
-rv7-L20 tilde-plus after cd	U|
+rv7-L20 tilde-plus after cd	K|append:/home/u/.ssh/authorized_keys,append:/home/u/proj/authorized_keys
 rv7-L21 tilde-minus oldpwd	U|
 rv7-L22 cd --	K|append:/home/u/.ssh/authorized_keys,append:/home/u/proj/authorized_keys
 rv7-L23 cd -L	K|append:/home/u/.ssh/authorized_keys
 rv7-L24 CDPATH prefix command cd	U|
-rv7-L25 PWD var after cd	U|
+rv7-L25 PWD var after cd	K|append:/home/u/.ssh/authorized_keys,append:/home/u/proj/authorized_keys
 rv7-L26 OLDPWD var	U|
 rv7-L27 sudo keeps cwd	K|append:/home/u/.ssh/authorized_keys,append:/home/u/proj/authorized_keys
 rv7-L28 sudo -i moves cwd	U|
