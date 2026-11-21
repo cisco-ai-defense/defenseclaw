@@ -6,6 +6,7 @@ package hookpaths
 import (
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 
 	"mvdan.cc/sh/v3/syntax"
@@ -61,7 +62,7 @@ func registrationFlowMembers(file *syntax.File, command, cwd, home string, prote
 	// only a reader, a cp source or a tar member spells is not a write of
 	// it (registrationFlowReadSpans, rel-1-0-10:GAP-0104).
 	blanked, readOnly := registrationFlowBlank(command, registrationFlowReadSpans(file, cwd, home, protected))
-	text := registrationHomeText(blanked, home)
+	text := registrationFlowSpelling(registrationHomeText(blanked, home))
 	words := registrationStaticWords(file, home, readOnly)
 	// resolved holds each distinct word of the command as the hook resolves it,
 	// read once for the whole registration set: the answer for a word does not
@@ -76,11 +77,12 @@ func registrationFlowMembers(file *syntax.File, command, cwd, home string, prote
 		}
 		path := entry.path
 		base, parent := filepath.Base(path), filepath.Dir(path)
+		spelledPath, spelledBase, spelledParent := registrationFlowSpelling(path), registrationFlowSpelling(base), registrationFlowSpelling(parent)
 		switch {
-		case registrationMentions(text, path, false):
+		case registrationMentions(text, spelledPath, false):
 			named[index] = true
-		case registrationMentions(text, base, true) &&
-			(cwd == parent || registrationMentions(text, parent, false)):
+		case registrationMentions(text, spelledBase, true) &&
+			(registrationFlowSpelling(cwd) == spelledParent || registrationMentions(text, spelledParent, false)):
 			named[index] = true
 		default:
 			// A word that is a link the hook resolves.
@@ -123,6 +125,21 @@ func registrationIsFolder(entry protectedFile, set protectedFiles) bool {
 		}
 	}
 	return false
+}
+
+// registrationFlowSpelling is a path or command text as the flow net
+// compares it. On Windows a hook config path is C:\Users\x\.codex\config.toml
+// while the text spells the home as Git Bash and PowerShell do (~/.codex/
+// config.toml, $HOME/.codex/..., C:/Users/x/.codex/...): compared as written,
+// the home's backslashes never matched the slashes of the rest, so eval "..."
+// > f and tar -xf x.tar -C ~/.codex config.toml reached no hook config. Both
+// sides are read in the slash spelling and the case a Windows path ignores
+// (rel-1-0-10:GAP-0154). Elsewhere text is kept as written.
+func registrationFlowSpelling(value string) string {
+	if runtime.GOOS != "windows" {
+		return value
+	}
+	return strings.ToLower(filepath.ToSlash(value))
 }
 
 // registrationHomeText spells ~ and $HOME with the home folder.
