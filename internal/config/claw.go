@@ -2132,10 +2132,18 @@ func readMCPServersAntigravity(workspaceDir string) ([]MCPServerEntry, error) {
 	return dedupMCPEntries(entries), firstErr
 }
 
+// readMCPFromJSONPath reads the MCP servers of a JSON config file. A file of
+// whitespace only lists no servers, as strictDotMCPServers reads .mcp.json:
+// Antigravity can leave an empty mcp_config.json, and reading it as a parse
+// error made every managed inventory cycle partial (FX13-WIN1).
 func readMCPFromJSONPath(path string, paths ...[]string) ([]MCPServerEntry, error) {
 	data, err := readGatewayMCPFile(path)
 	if err != nil {
 		return nil, err
+	}
+	data = bytes.TrimSpace(bytes.TrimPrefix(data, utf8BOM))
+	if len(data) == 0 {
+		return nil, nil
 	}
 	var doc map[string]any
 	if err := json.Unmarshal(data, &doc); err != nil {

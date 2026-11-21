@@ -987,6 +987,36 @@ func TestReadMCPServersForConnector_AntigravityRequiresPinnedWorkspace(t *testin
 	}
 }
 
+// rel-1-0-10 FX13-WIN1: an empty or whitespace-only Antigravity
+// mcp_config.json lists no servers and is not a read error, so the managed
+// inventory is not partial forever on an endpoint that has one. A truncated
+// document stays a read error.
+func TestReadMCPServersForConnector_AntigravityEmptyConfigListsNoServers(t *testing.T) {
+	home := t.TempDir()
+	testenv.SetHome(t, home)
+	agyDir := filepath.Join(home, ".gemini", "config")
+	if err := os.MkdirAll(agyDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(agyDir, "mcp_config.json")
+	cfg := &Config{}
+	for name, body := range map[string]string{"empty": "", "whitespace": " \r\n\t", "bom": "\ufeff\n"} {
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		entries, err := cfg.ReadMCPServersForConnector("antigravity")
+		if err != nil || len(entries) != 0 {
+			t.Fatalf("%s antigravity config: entries=%+v err=%v, want none and no error", name, entries, err)
+		}
+	}
+	if err := os.WriteFile(path, []byte(`{"mcpServers":`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cfg.ReadMCPServersForConnector("antigravity"); err == nil {
+		t.Fatal("truncated antigravity config did not report a read error")
+	}
+}
+
 func TestReadMCPServersForConnector_AntigravityMissingAndMalformedSafeNoOpenClawFallback(t *testing.T) {
 	home := t.TempDir()
 	testenv.SetHome(t, home)
