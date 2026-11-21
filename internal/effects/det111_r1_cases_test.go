@@ -201,7 +201,6 @@ var det111Pending = map[string]string{
 	"GAP-1577/var3":  "Tee-Object -FilePath has no program row (S4-R2)",
 	"GAP-1588/var4":  "statement lowered (fsutil exec present): the gap is the legacy dialect placement, decision side",
 	"GAP-1588/var5":  "statement lowered (icacls exec present): the gap is the legacy dialect placement, decision side",
-	"GAP-1655/var":   "Start-Process -ArgumentList child body: lowered statements differ from the plain -Command seed",
 	"GAP-1667/var":   "cmd /c on the Git Bash route is not lowered in the POSIX dialect",
 	"GAP-1667/var2":  "cmd copy /y and tar on Windows have no program rows (S4-R2)",
 }
@@ -232,8 +231,18 @@ func det111Collect(c det111Case) det111Facts {
 		}
 	}
 	for _, e := range res.Effects {
-		if e.Kind == effects.KindExec && e.Origin.Program != "" {
-			p := strings.ToLower(e.Origin.Program)
+		// The program an exec runs is its target (a Start-Process child
+		// runs powershell under the start-process origin); the origin
+		// program names it when the target has no spelling.
+		run := e.Target.Spelling
+		if e.Target.Path != "" {
+			run = e.Target.Path
+		}
+		if run == "" {
+			run = e.Origin.Program
+		}
+		if e.Kind == effects.KindExec && run != "" {
+			p := strings.ToLower(run)
 			p = p[strings.LastIndexAny(p, `/\`)+1:]
 			f.progs[strings.TrimSuffix(p, ".exe")] = true
 		}
