@@ -234,10 +234,15 @@ func TestWindowsCodexLiveShapeClaimedRules(t *testing.T) {
 	singleLineCases := []struct{ name, command string }{
 		{"ep-sc-exe", `sc.exe stop WinDefend`},
 		{"ep-cmd-sc", `cmd /c sc stop WinDefend`},
+		// The documented two-word start type spelling (rel-1-0-10:GAP-1656).
+		{"ep-sc-exe-start-disabled", `sc.exe config WinDefend start= disabled`},
+		{"ep-cmd-sc-start-disabled", `cmd /c sc config WinDefend start= disabled`},
 	}
 	ordinaryServiceCalls := []struct{ name, command string }{
 		{"service-status", `sc.exe query WinDefend`},
 		{"unrelated-service", `sc.exe stop Spooler`},
+		{"service-config-read", `sc.exe qc WinDefend`},
+		{"service-start-auto", `sc.exe config WinDefend start= auto`},
 	}
 	tiers := []struct {
 		name, pack, action string

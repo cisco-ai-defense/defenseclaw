@@ -1491,7 +1491,7 @@ func dispatchTrustedActionWith(
 						})
 					}
 				}
-				if winDefendSequenceUnproved && actionfacts.ExactWinDefendStopOnly(actionfacts.Analyze(child.Input)) {
+				if winDefendSequenceUnproved && actionfacts.ExactWinDefendSingleStep(actionfacts.Analyze(child.Input)) {
 					childFindings = slices.DeleteFunc(childFindings, func(f RuleFinding) bool {
 						return f.RuleID == "tamper.endpoint_security_product_disable"
 					})

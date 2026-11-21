@@ -209,6 +209,7 @@ func analyze(input Input, twinCommand string, capture *redirectTargetCapture) Fa
 		}
 		parse := func(source string) parseOutput {
 			parsed := parseCommandAs(source, dialect, startID, 0)
+			parsed.windowsHookHost = input.WindowsHookHost
 			parsed.curlCapabilities = authenticatedCurlCapabilities(input.CurlCapabilities)
 			expandBoundedInlineInterpreters(&parsed, 0)
 			classifyOutput(&parsed)
@@ -311,6 +312,7 @@ func analyze(input Input, twinCommand string, capture *redirectTargetCapture) Fa
 		input.ActiveAgentFilesCaseInsensitiveUncertain
 	facts.ActiveAgentFilesUncertain = input.ActiveAgentFilesUncertain
 	facts.ActiveStateTreeNames = maps.Clone(input.ActiveStateTreeNames)
+	facts.windowsHookHost = input.WindowsHookHost
 	classifyCanonicalPasswordCrackerPotfileRead(&facts)
 	facts.SensitiveEgressArtifactWrites =
 		projectSensitiveEgressArtifactWrites(input)

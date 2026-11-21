@@ -441,11 +441,14 @@ func classifyCommand(out *parseOutput, command *CommandFact) {
 				addOperation(command, OperationWrite)
 				out.markPartial(IssueUnknownOperandGrammar)
 			}
-		} else if command.Dialect == DialectCMD &&
+		} else if (command.Dialect == DialectCMD ||
+			command.Dialect == DialectPOSIX && out.windowsHookHost) &&
 			classifyEndpointSecurityControl(out, command) {
 			// Bare sc is accepted only for the exact WinDefend sequence owned by
-			// ExactEndpointSecurityProductDisable. Other CMD sc grammars remain
-			// deliberately non-authoritative.
+			// ExactEndpointSecurityProductDisable, in CMD and in a POSIX shell
+			// on a Windows host (Git Bash runs the native sc.exe,
+			// rel-1-0-10:GAP-1656). Other sc grammars remain deliberately
+			// non-authoritative.
 		} else {
 			out.markPartial(IssueUnknownOperandGrammar)
 		}
