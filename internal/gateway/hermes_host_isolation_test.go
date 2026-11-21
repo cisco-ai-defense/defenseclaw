@@ -18,8 +18,7 @@ import (
 
 func TestMain(m *testing.M) {
 	prepareGatewayTestProcess()
-	// No test swaps os.Stderr (GAP-1591, stderr_tee_test.go), except the
-	// capture under -test.v=test2json, where testing.M.Run redirects it.
+	// No test swaps os.Stderr (GAP-1591, GAP-1602, stderr_tee_test.go).
 	if err := setUpStderrCapture(); err != nil {
 		fmt.Fprintln(os.Stderr, "install the stderr tee:", err)
 		os.Exit(1)
@@ -52,7 +51,6 @@ func TestMain(m *testing.M) {
 	}
 	restoreChain := connector.UseClaudeCodeChainFixtureForTests()
 	code := m.Run()
-	flushStderrCapture()
 	restoreChain()
 	restoreHome()
 	removeMigratedAuditTemplate()
@@ -61,6 +59,8 @@ func TestMain(m *testing.M) {
 		fmt.Fprintln(os.Stderr, err)
 		code = 1
 	}
+	// Everything written to the tee, the cleanup's messages too, is out.
+	flushStderrCapture()
 	os.Exit(code)
 }
 
