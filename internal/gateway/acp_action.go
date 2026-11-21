@@ -738,6 +738,7 @@ func (a *APIServer) inspectACPFrameAction(
 			if trunc.Any() {
 				callCtx = withJudgeInputCut(ctx)
 			}
+			capture := &toolChainHookCapture{reportedCWD: cwd}
 			judged = a.inspectAgentHookToolCall(callCtx, agentHookRequest{
 				ConnectorName: connectorName,
 				HookEventName: req.Method,
@@ -750,7 +751,11 @@ func (a *APIServer) inspectACPFrameAction(
 				ToolName:    call.tool,
 				ToolArgs:    call.args,
 				Direction:   "tool_call",
+				toolChain:   capture,
 			}, profile, true)
+			// A script the call runs is read as a hook connector reads it
+			// (rel-1-0-10:GAP-0783).
+			judged = strongerACPVerdict(judged, a.acpArtifactVerdict(callCtx, connectorName, call, cwd, capture, action.enforceable))
 		}
 		verdict = strongerACPVerdict(verdict, judged)
 	}

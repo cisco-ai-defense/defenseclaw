@@ -33,6 +33,26 @@ type S7JudgeCall struct {
 	// signal strength, "none" left out), so a benign alert can be traced to
 	// the label that raised it (review-only needs_review vs signal).
 	Signals map[string]string `json:"signals,omitempty"`
+	// ReqChars is the size of the request that was sent (message characters) and MaxTok its output cap, recorded for every call. A cut or
+	// failed call has no usage in its answer, so these two are what the scorer prices it with (rel-1-0-10:GAP-0649).
+	ReqChars int `json:"req_chars,omitempty"`
+	MaxTok   int `json:"max_tok,omitempty"`
+}
+
+// s7ReqChars is the message size of a judge request, in characters.
+func s7ReqChars(req *ChatRequest) int {
+	if req == nil {
+		return 0
+	}
+	n := 0
+	for _, m := range req.Messages {
+		if m.Content != "" {
+			n += len(m.Content)
+		} else {
+			n += len(m.RawContent)
+		}
+	}
+	return n
 }
 
 type s7RecordingProvider struct {
@@ -47,9 +67,13 @@ func (p *s7RecordingProvider) ChatCompletion(ctx context.Context, req *ChatReque
 	p.mu.Lock()
 	p.inflight[sid]++
 	p.mu.Unlock()
+	c := S7JudgeCall{ReqChars: s7ReqChars(req)}
+	if req != nil && req.MaxTokens != nil {
+		c.MaxTok = *req.MaxTokens
+	}
 	t0 := time.Now()
 	resp, err := p.inner.ChatCompletion(ctx, req)
-	c := S7JudgeCall{LatencyMs: time.Since(t0).Milliseconds()}
+	c.LatencyMs = time.Since(t0).Milliseconds()
 	if err != nil {
 		c.Err = err.Error()
 		if len(c.Err) > 200 {

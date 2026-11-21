@@ -109,11 +109,15 @@ type record struct {
 	Judge      *gateway.S7Judge      `json:"judge,omitempty"`
 	JudgeCalls []gateway.S7JudgeCall `json:"judge_calls,omitempty"`
 	// ScopeShadow lists the task-scope findings the floor recorded in shadow for this call.
-	ScopeShadow []string          `json:"scope_shadow,omitempty"`
-	PostStatus  int               `json:"post_status,omitempty"`
-	LatencyUs   int64             `json:"lat_us"`
-	Err         string            `json:"err,omitempty"`
-	Extra       map[string]string `json:"extra,omitempty"`
+	ScopeShadow []string `json:"scope_shadow,omitempty"`
+	// PromptJudgeCalls and PromptLatUs are the opening UserPromptSubmit's own judge requests and hook latency, written on the session's idx 0
+	// row. They are the prompt's cost, not the first tool call's (rel-1-0-10:GAP-0650), so JudgeCalls on that row holds the tool call's only.
+	PromptJudgeCalls []gateway.S7JudgeCall `json:"prompt_judge_calls,omitempty"`
+	PromptLatUs      int64                 `json:"prompt_lat_us,omitempty"`
+	PostStatus       int                   `json:"post_status,omitempty"`
+	LatencyUs        int64                 `json:"lat_us"`
+	Err              string                `json:"err,omitempty"`
+	Extra            map[string]string     `json:"extra,omitempty"`
 }
 
 var shellTools = map[string]bool{"bash_command": true, "bash": true, "execute_command": true, "shell": true,
@@ -433,6 +437,11 @@ func main() {
 		// drives every connector.
 		cfg.Guardrail.Judge.HookConnectors = []string{"*"}
 	}
+	wantDM, wantJudge, lerr := parseLayers(*layers)
+	if lerr != nil {
+		fmt.Fprintln(os.Stderr, "[s7bench] FATAL:", lerr)
+		os.Exit(2)
+	}
 	if err := dmFillJudgeRefused(*dmFill, *judgeModel, *judgeURL, *layers); err != nil {
 		fmt.Fprintln(os.Stderr, "[s7bench] FATAL:", err)
 		os.Exit(2)
@@ -501,8 +510,6 @@ func main() {
 		preHeaders = []string{"X-DefenseClaw-Hook-Answer-Within-Ms", fmt.Sprint(*answerWithin)}
 	}
 	fmt.Fprintf(os.Stderr, "[s7bench] pack=%s mode=%s strategy=%s judge=%v dm=%v layers=%q record=%v answer_within_ms=%d\n", *pack, *mode, *strategy, hasJudge, hasDM, *layers, recording, *answerWithin)
-	wantDM := strings.Contains(*layers, "dm")
-	wantJudge := strings.Contains(*layers, "judge")
 
 	var want map[string]bool
 	if *ids != "" {
@@ -677,9 +684,16 @@ func runCase(e *gateway.S7Engine, c corpusCase, connectorFlag, surface string, p
 	if intent == "" && promptFromContent {
 		intent = c.Payload.Content
 	}
+	// The opening prompt's judge requests are taken now, for this session, so they are charged to the prompt and not to the idx 0 tool call
+	// (rel-1-0-10:GAP-0650). Its hook call is timed on its own.
+	var promptCalls []gateway.S7JudgeCall
+	var promptLat time.Duration
 	if intent != "" {
 		body, _ := json.Marshal(map[string]any{"hook_event_name": "UserPromptSubmit", "session_id": sid, "cwd": cwd, "prompt": intent, "transcript_path": ""})
+		pt0 := time.Now()
 		e.HookFor(ctx, conn, body)
+		promptLat = time.Since(pt0)
+		promptCalls = e.TakeJudgeCalls(sid)
 	}
 	for i, ev := range events {
 		var tool string
@@ -729,6 +743,9 @@ func runCase(e *gateway.S7Engine, c corpusCase, connectorFlag, surface string, p
 			LatencyUs: time.Since(t0).Microseconds()}
 		r.JudgeCalls = e.TakeJudgeCalls(sid)
 		r.ScopeShadow = e.TakeScopeShadow(sid)
+		if i == 0 {
+			r.PromptJudgeCalls, r.PromptLatUs = promptCalls, promptLat.Microseconds()
+		}
 		var hr hookResp
 		if err := json.Unmarshal(resp, &hr); err != nil {
 			r.Err = "decode: " + err.Error()

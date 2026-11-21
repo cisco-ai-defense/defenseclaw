@@ -114,6 +114,15 @@ func (s *Sidecar) reclaimUnguardedConnectorHooks(ctx context.Context, registry *
 		} else if !connector.PatchedFilesNameOwnHook(opts, conn) {
 			continue
 		}
+		// The reclaim of an unfinished teardown may find no hook entry left,
+		// only what that teardown left in the data folder (Kiro backup
+		// records, its hook script or token): it says so, and its audit row
+		// does not claim hooks were removed (rel-1-0-10 GAP-1299).
+		stateOnly := false
+		if decoded {
+			entries, err := connector.OrphanedHookConfigPaths(conn, opts)
+			stateOnly = err == nil && len(entries) == 0
+		}
 		result := "removed"
 		reclaim := opts
 		reclaim.ReclaimOwnHooksOnly = true
@@ -135,7 +144,13 @@ func (s *Sidecar) reclaimUnguardedConnectorHooks(ctx context.Context, registry *
 			if err := removeTeardownHookFiles(registry, conn, cfg.ActiveConnectors(), opts); err != nil {
 				fmt.Fprintf(os.Stderr, "[guardrail] WARNING: connector %s hook script and token were not removed: %v\n", name, err)
 			}
-			fmt.Fprintf(os.Stderr, "[guardrail] connector %s is not guarded: removed the DefenseClaw hooks an earlier setup left\n", name)
+			if stateOnly {
+				result = "state-removed"
+				fmt.Fprintf(os.Stderr, "[guardrail] connector %s is not guarded: no DefenseClaw hooks were left; "+
+					"finished the teardown an earlier setup left unfinished in the data folder\n", name)
+			} else {
+				fmt.Fprintf(os.Stderr, "[guardrail] connector %s is not guarded: removed the DefenseClaw hooks an earlier setup left\n", name)
+			}
 		}
 		if s.logger != nil {
 			_ = s.logger.LogAction(

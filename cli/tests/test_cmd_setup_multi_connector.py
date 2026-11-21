@@ -2077,6 +2077,39 @@ class TestRemoveConnector(unittest.TestCase):
         self.assertEqual(gc.connector, "codex")
         self.assertEqual(self.app.cfg.claw.mode, "codex")
 
+    # GAP-1645: a scripted or MDM run has no terminal; the confirmation prompt
+    # would block on stdin forever. Refuse with the flag to pass instead.
+    def test_remove_without_yes_refuses_when_not_interactive(self):
+        self._seed_map("codex", "cursor", "devin")
+        with self._no_restart_bounce():
+            result = _invoke(["remove", "devin", "--no-restart"], self.app)
+        self.assertNotEqual(result.exit_code, 0, msg=result.output)
+        text = " ".join(result.output.split())
+        self.assertIn("no terminal to ask on", text)
+        self.assertIn("--yes", text)
+        self.assertEqual(set(self.app.cfg.guardrail.connectors), {"codex", "cursor", "devin"})
+
+    def test_remove_last_connector_without_yes_refuses_when_not_interactive(self):
+        self._seed_single("codex")
+        with self._no_restart_bounce():
+            result = _invoke(["remove", "codex", "--force", "--no-restart"], self.app)
+        self.assertNotEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("--yes", " ".join(result.output.split()))
+        self.assertEqual(self.app.cfg.guardrail.connector, "codex")
+
+    def test_remove_prompts_on_a_terminal(self):
+        self._seed_map("codex", "cursor", "devin")
+        with (
+            self._no_restart_bounce(),
+            patch("defenseclaw.commands.cmd_setup._is_interactive", return_value=True),
+        ):
+            result = CliRunner().invoke(
+                setup_group, ["remove", "devin", "--no-restart"], obj=self.app, input="n\n", catch_exceptions=False
+            )
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("Aborted; no changes made.", result.output)
+        self.assertEqual(set(self.app.cfg.guardrail.connectors), {"codex", "cursor", "devin"})
+
     # GAP-2125: a running gateway tears the connector down on its config
     # reload, so --no-restart must not say the hooks stay until a restart.
     def test_remove_no_restart_says_the_running_gateway_applies_it_on_reload(self):
@@ -2710,8 +2743,8 @@ class TestRemoveConnector(unittest.TestCase):
     def test_remove_declined_is_noop(self):
         self._seed_map("codex", "cursor")
         with self._no_restart_bounce(), patch(
-            "defenseclaw.commands.cmd_setup.click.confirm", return_value=False
-        ):
+            "defenseclaw.commands.cmd_setup._is_interactive", return_value=True
+        ), patch("defenseclaw.commands.cmd_setup.click.confirm", return_value=False):
             result = _invoke(["remove", "cursor", "--no-restart"], self.app)
         self.assertEqual(result.exit_code, 0, msg=result.output)
         self.assertIn("Aborted", result.output)

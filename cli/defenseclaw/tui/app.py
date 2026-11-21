@@ -5325,7 +5325,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, RoutingPanelMixin, App
         if self.active_panel == "ai":
             self._table_columns, self._table_rows = self._fit_to_screen(
                 self.ai_discovery_model.data_table_columns(),
-                self.ai_discovery_model.data_table_rows(),
+                self.ai_discovery_model.data_table_rows(compact=0 < self.size.width < 100),
                 drop=("Detectors", "Vendor", "Identity", "Version", "Categories"),
             )
             empty = self.ai_discovery_model.empty_state()
@@ -5533,8 +5533,13 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, RoutingPanelMixin, App
             return
 
         ai_visible = self.active_panel == "ai" and not self.help_open
-        columns = self.ai_discovery_model.model_table_columns()
-        rows = self.ai_discovery_model.model_table_rows()
+        # The models table fits the body like the products table, so Format and the other right-hand columns are not clipped at 80
+        # columns (GAP-0908); Format is the first to go, Enter's detail shows it.
+        columns, rows = self._fit_to_screen(
+            self.ai_discovery_model.model_table_columns(),
+            self.ai_discovery_model.model_table_rows(),
+            drop=("Format", "Status", "Owner"),
+        )
         # At 80x24 an open product detail left the products table no rows
         # under the models table (GAP-1380); the models table steps aside
         # until the detail closes.
