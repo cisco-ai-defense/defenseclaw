@@ -276,37 +276,37 @@ A customer who needs a private collector CA, or their own vendor key, builds fro
 
 ## See it run (stand-in VM)
 
-<Callout title="This is a stand-in, not Claude Desktop's Cowork VM" type="warn">
-Stand-in Linux VM running the real DefenseClaw sensor package; Claude Desktop's own Cowork VM is not shown (requires Anthropic vendor registration).
+<Callout title="Preview" type="info">
+Preview: the Cowork VM sensor is available but may change. Claude Desktop needs Anthropic vendor registration before it installs the sensor.
 </Callout>
 
-Claude Desktop refuses DefenseClaw's package with `vendor_unknown` until Anthropic lists the vendor. So the recording below uses an ordinary Linux VM (Ubuntu 24.04, amd64) instead. The package is the one published in the 1.0.10 release, `defenseclaw-cowork-amd64.tar.gz`, checked against the release checksum. A small stand-in loader does what the [install script](#what-the-install-script-does-in-the-vm) says Claude Desktop does: it unpacks the package, then runs `install.sh` as root with no arguments and with the install arguments in `COWORK_EDR_INTEGRATION_ARGS`. The loader does not check a signature or a vendor list, because the release packages are unsigned.
+The recording below uses a stand-in Linux VM (Ubuntu 24.04, amd64) because Claude Desktop installs the sensor only for a vendor that Anthropic lists. The package is `defenseclaw-cowork-amd64.tar.gz` from the 1.0.10 release. A small loader does what the [install script](#what-the-install-script-does-in-the-vm) says Claude Desktop does: it unpacks the package, then runs `install.sh` as root with no arguments and with the install arguments in `COWORK_EDR_INTEGRATION_ARGS`. The loader does not check a signature or a vendor list.
 
 <Video
   src="cowork-vm-sensor-standin"
   aspect="16/9"
-  caption="Stand-in Linux VM running the real DefenseClaw sensor package; Claude Desktop's own Cowork VM is not shown (requires Anthropic vendor registration). The video shows the install, a real Claude Code agent run as a session user, and the events in Grafana."
+  caption="Stand-in Linux VM running the DefenseClaw sensor package. Claude Desktop needs Anthropic vendor registration before it installs the sensor. The video shows the install, a Claude Code agent run by a session user, and the events in Grafana."
 />
 
-What ran, in order:
+In order:
 
-1. The loader installed the package. The sensor came up in 12 seconds with the device and tenant from the arguments file.
+1. The loader installs the package. The sensor starts with the device and tenant from the arguments file.
 
-![Stand-in Linux VM running the real DefenseClaw sensor package; Claude Desktop's own Cowork VM is not shown (requires Anthropic vendor registration). The terminal shows the loader run, the install script's last line (sensor up, version 1.0.10, device standin-vm-01), both units active, and the agent's four answers.](/images/cowork/cowork-standin-install.png)
+![Stand-in Linux VM running the DefenseClaw sensor package. Claude Desktop needs Anthropic vendor registration before it installs the sensor. The terminal shows the loader run, the install script's last line (sensor up, version 1.0.10, device standin-vm-01), both units active, and the agent's four answers.](/images/cowork/cowork-standin-install.png)
 
-2. A session user (a home under `/sessions`, as in Cowork) ran a real Claude Code agent through Amazon Bedrock. The agent ran shell commands, wrote a file, made a network call and read a decoy credential file (fake values).
-3. The sensor sent its events over TLS to a collector on the same network, which feeds Loki and Grafana from the [local observability stack](/docs/observability/local-observability). The collector's certificate authority was added to the VM's system trust store, because the release package carries none.
+2. A session user (a home under `/sessions`, as in Cowork) runs Claude Code through Amazon Bedrock. The agent runs shell commands, writes a file, makes a network call and reads a decoy credential file (fake values).
+3. The sensor sends its events over TLS to a collector on the same network, which feeds Loki and Grafana from the [local observability stack](/docs/observability/local-observability). The release package carries no certificate authority, so the VM trusts the collector's authority through its system trust store.
 
-![Stand-in Linux VM running the real DefenseClaw sensor package; Claude Desktop's own Cowork VM is not shown (requires Anthropic vendor registration). Grafana Explore on Loki lists the runtime findings of the claude agent for the session user cwk-demo1, each with its severity and signal, such as agent_credential_access.](/images/cowork/cowork-standin-grafana-findings.png)
+![Stand-in Linux VM running the DefenseClaw sensor package. Claude Desktop needs Anthropic vendor registration before it installs the sensor. Grafana Explore on Loki lists the runtime findings of the claude agent for the session user cwk-demo1, each with its severity and signal, such as agent_credential_access.](/images/cowork/cowork-standin-grafana-findings.png)
 
-![Stand-in Linux VM running the real DefenseClaw sensor package; Claude Desktop's own Cowork VM is not shown (requires Anthropic vendor registration). Grafana Explore on Loki lists the activity records of the claude agent: one credential access record (ATT&CK T1552) per finding, with the session user. The resource labels show the sensor version, tenant and device from the install arguments.](/images/cowork/cowork-standin-grafana-tactics.png)
+![Stand-in Linux VM running the DefenseClaw sensor package. Claude Desktop needs Anthropic vendor registration before it installs the sensor. Grafana Explore on Loki lists the activity records of the claude agent: one credential access record (ATT&CK T1552) per finding, with the session user. The resource labels show the sensor version, tenant and device from the install arguments.](/images/cowork/cowork-standin-grafana-tactics.png)
 
-What this shows and does not show:
+What to expect:
 
-- The events are real: the sensor and the agent were real, and nothing was edited. Names, addresses and users on screen are replaced with examples.
-- The sensor reported the read of the credential file as a credential-access tactic and finding. It did not report the shell commands, the file write or the web call as tactics: the only tactic it reported in this run was credential access. The other findings in the list (`unknown_provider_egress`, `shadow_ai_egress`) come from the agent's own connections to Amazon Bedrock and to `example.com`. In a real Cowork VM the agent's model traffic goes to Anthropic, so those findings can differ.
-- The Grafana boards `defenseclaw-ai-runtime` and `defenseclaw-ai-discovery` select `service_name="defenseclaw"`. The sensor's service name is `defenseclaw-cowork-vm`, so they show nothing for it. The screenshots use Explore with `service_name="defenseclaw-cowork-vm"`.
-- It does not show Claude Desktop starting the sensor, the VM network policy letting events out to your collector, or the host side (the `cowork_vm_sensor` status row, the profile or registry values). The host side is described under [What was verified](#what-was-verified).
+- The read of the credential file gives a credential-access tactic and finding. Shell commands, file writes and web calls give no tactic record of their own.
+- The other findings in the list (`unknown_provider_egress`, `shadow_ai_egress`) come from the agent's connections to its model endpoint (Amazon Bedrock here) and to a web site. In Cowork the model endpoint is Anthropic's, so those findings can differ.
+- The Grafana boards `defenseclaw-ai-runtime` and `defenseclaw-ai-discovery` select `service_name="defenseclaw"`. The sensor's service name is `defenseclaw-cowork-vm`, so use Explore with `service_name="defenseclaw-cowork-vm"` to see its events.
+- Names, addresses and users on screen are replaced with examples.
 
 ## What was verified
 
