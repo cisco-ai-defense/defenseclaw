@@ -10,9 +10,54 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
+
+// gap1672FileRenameInformation is FILE_RENAME_INFORMATION.
+type gap1672FileRenameInformation struct {
+	ReplaceIfExists uint32
+	RootDirectory   windows.Handle
+	FileNameLength  uint32
+	FileName        [1]uint16
+}
+
+// gap1672RenameWithDeleteOnly renames from to to through a handle opened with
+// DELETE alone, the one right a folder's FILE_DELETE_CHILD gives on a file
+// whose own DACL grants the caller nothing. os.Rename (MoveFileEx) also asks
+// for SYNCHRONIZE, which only the file's DACL can grant, so it is refused;
+// NtSetInformationFile on this handle is what an account would use.
+func gap1672RenameWithDeleteOnly(from, to string) error {
+	name, err := windows.NewNTUnicodeString(`\??\` + from)
+	if err != nil {
+		return err
+	}
+	attributes := windows.OBJECT_ATTRIBUTES{
+		Length:     uint32(unsafe.Sizeof(windows.OBJECT_ATTRIBUTES{})),
+		ObjectName: name,
+		Attributes: windows.OBJ_CASE_INSENSITIVE,
+	}
+	var handle windows.Handle
+	var status windows.IO_STATUS_BLOCK
+	if err := windows.NtCreateFile(&handle, windows.DELETE, &attributes, &status, nil, 0,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, windows.FILE_OPEN,
+		windows.FILE_NON_DIRECTORY_FILE|windows.FILE_OPEN_REPARSE_POINT, 0, 0); err != nil {
+		return err
+	}
+	defer windows.CloseHandle(handle)
+	target, err := windows.UTF16FromString(`\??\` + to)
+	if err != nil {
+		return err
+	}
+	length := (len(target) - 1) * 2
+	var shape gap1672FileRenameInformation
+	buffer := make([]byte, int(unsafe.Offsetof(shape.FileName))+length+2)
+	info := (*gap1672FileRenameInformation)(unsafe.Pointer(&buffer[0]))
+	info.FileNameLength = uint32(length)
+	copy(unsafe.Slice(&info.FileName[0], len(target)), target)
+	return windows.NtSetInformationFile(handle, &status, &buffer[0], uint32(len(buffer)), windows.FileRenameInformation)
+}
 
 // TestGAP1672SystemOnlyFileRenamedIntoTheSlotStaysSystemOwned: the account
 // owns its guardian-shaped .codex folder, so it can rename into the config
@@ -50,7 +95,7 @@ func TestGAP1672SystemOnlyFileRenamedIntoTheSlotStaysSystemOwned(t *testing.T) {
 	}
 	// The rename needs only delete-child on the victim's folder and add-file
 	// on the account's own folder, both of which the account has.
-	if err := os.Rename(victim, path); err != nil {
+	if err := gap1672RenameWithDeleteOnly(victim, path); err != nil {
 		t.Fatalf("rename the SYSTEM-only file into the config slot: %v", err)
 	}
 	if _, err := os.ReadFile(path); !errors.Is(err, os.ErrPermission) {
