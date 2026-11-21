@@ -46,6 +46,9 @@ type posixWalker struct {
 	// marks maps a compound statement with redirects to the mark statement
 	// lowered before its body.
 	marks map[*syntax.Stmt]*Stmt
+	// coproc counts the coprocess bodies being lowered: each runs
+	// asynchronously in a child shell, like a background command (GAP-1508).
+	coproc int
 }
 
 // linked lowers the right side of && / || with the link set.
@@ -126,6 +129,7 @@ func (w *posixWalker) stmt(st *syntax.Stmt, cond, pipeIn bool) {
 		for _, inner := range cmd.Cond {
 			w.stmt(inner, cond, false)
 		}
+		w.loopReadInput(st, cmd)
 		for _, inner := range cmd.Do {
 			w.stmt(inner, true, false)
 		}
@@ -176,6 +180,25 @@ func (w *posixWalker) stmt(st *syntax.Stmt, cond, pipeIn bool) {
 	case *syntax.TimeClause:
 		if cmd.Stmt != nil {
 			w.stmt(cmd.Stmt, cond, pipeIn)
+		}
+	case *syntax.CoprocClause:
+		// coproc [NAME] CMD: CMD runs asynchronously in a child shell with its
+		// output on a pipe; it runs (GAP-1508).
+		if cmd.Stmt != nil {
+			body := cmd.Stmt
+			// `coproc curl -fsSL URL | sh`: bash takes a NAME only before a
+			// compound command; before a simple command (or a pipeline that starts
+			// with one) the word is the program, which the parser put in Name.
+			if cmd.Name != nil {
+				if nb, ok := prependProgram(body, cmd.Name); ok {
+					body = nb
+				}
+			}
+			w.coproc++
+			w.bg++
+			w.stmt(body, cond, pipeIn)
+			w.bg--
+			w.coproc--
 		}
 	default:
 		w.unknown(ReasonUnparsedConstruct, st.Cmd)
@@ -349,7 +372,7 @@ func (w *posixWalker) declClause(st *syntax.Stmt, cmd *syntax.DeclClause, cond, 
 }
 
 func (w *posixWalker) emitCall(st *syntax.Stmt, call *syntax.CallExpr, cond, pipeIn bool) {
-	c := &Cmd{Cond: cond, PipeIn: pipeIn, Pipeline: w.pipeDepth > 0, Async: st.Background, Span: span(st)}
+	c := &Cmd{Cond: cond, PipeIn: pipeIn, Pipeline: w.pipeDepth > 0, Async: st.Background || w.coproc > 0, Span: span(st)}
 	if call != nil {
 		for _, a := range call.Assigns {
 			if a.Name == nil {
@@ -368,8 +391,13 @@ func (w *posixWalker) emitCall(st *syntax.Stmt, call *syntax.CallExpr, cond, pip
 			c.Assigns = append(c.Assigns, as)
 		}
 		for _, arg := range call.Args {
-			c.Words = append(c.Words, w.word(arg))
+			wd := w.word(arg)
+			n := len(c.Nested)
 			w.scanCmdSubsts(arg, c)
+			if soleInputProcSubst(arg) && len(c.Nested) == n+1 {
+				wd.ProcSub = c.Nested[n]
+			}
+			c.Words = append(c.Words, wd)
 		}
 	}
 	w.redirs(st, c)
@@ -460,7 +488,11 @@ func (w *posixWalker) redirs(st *syntax.Stmt, c *Cmd) {
 		}
 		if r.Word != nil {
 			red.Target = w.word(r.Word)
+			n := len(c.Nested)
 			w.scanCmdSubsts(r.Word, c)
+			if r.Op == syntax.RdrIn && soleInputProcSubst(r.Word) && len(c.Nested) == n+1 {
+				red.Target.ProcSub = c.Nested[n]
+			}
 		}
 		// A here-string's text is the word after <<<; it is the body of that
 		// redirect (round 8 R: a shell fed `<<< "$(..)"` must not look empty).
@@ -507,8 +539,15 @@ func (w *posixWalker) word(word *syntax.Word) Word {
 			addLit(unescapePOSIX(p.Value, false), false, hasUnescapedMeta(p.Value))
 		case *syntax.SglQuoted:
 			if p.Dollar {
-				// ANSI-C quoting $'...\x72...': the escapes are not decoded, so
-				// the value is not a canonical path (review R3-7).
+				// ANSI-C quoting $'...\x72...': decoded as bash decodes it, so a
+				// program name or a path spelled with escapes is read
+				// (GAP-1629); an escape the decoder does not take is not a
+				// canonical value (review R3-7).
+				if v, ok := decodeANSIC(p.Value); ok {
+					addLit(v, true, false)
+					out.Quoted = true
+					continue
+				}
 				dynamic(ReasonNonCanonicalPath)
 				continue
 			}
@@ -598,6 +637,15 @@ func heredocBody(w *syntax.Word) (string, bool) {
 		case *syntax.Lit:
 			b.WriteString(p.Value)
 		case *syntax.SglQuoted:
+			if p.Dollar {
+				v, ok := decodeANSIC(p.Value)
+				if !ok {
+					expands = true
+					continue
+				}
+				b.WriteString(v)
+				continue
+			}
 			b.WriteString(p.Value)
 		case *syntax.DblQuoted:
 			// "plain text" is static; anything with an expansion inside is not.
@@ -683,4 +731,164 @@ func allDigits(s string) bool {
 		}
 	}
 	return true
+}
+
+// soleInputProcSubst reports a word that is exactly one input process
+// substitution <(...).
+func soleInputProcSubst(word *syntax.Word) bool {
+	if word == nil || len(word.Parts) != 1 {
+		return false
+	}
+	ps, ok := word.Parts[0].(*syntax.ProcSubst)
+	return ok && ps.Op == syntax.CmdIn
+}
+
+// loopReadInput gives the read of `while read [-r] NAME; do ...; done <<< W`
+// (or <<E) the loop's input, so the body sees NAME bound (GAP-1554).
+func (w *posixWalker) loopReadInput(st *syntax.Stmt, cmd *syntax.WhileClause) {
+	if len(cmd.Cond) != 1 || len(w.out.Stmts) == 0 {
+		return
+	}
+	call, ok := cmd.Cond[0].Cmd.(*syntax.CallExpr)
+	if !ok || len(call.Args) == 0 || call.Args[0].Lit() != "read" || len(cmd.Cond[0].Redirs) > 0 {
+		return
+	}
+	var in []*syntax.Redirect
+	for _, r := range st.Redirs {
+		if r != nil && r.N == nil && (r.Op == syntax.WordHdoc || r.Op == syntax.Hdoc || r.Op == syntax.DashHdoc) {
+			in = append(in, r)
+		}
+	}
+	last := w.out.Stmts[len(w.out.Stmts)-1]
+	if len(in) == 0 || len(last.Cmds) != 1 || len(last.Cmds[0].Words) == 0 || last.Cmds[0].Words[0].Value != "read" {
+		return
+	}
+	tmp := &Cmd{}
+	w.redirs(&syntax.Stmt{Redirs: in}, tmp)
+	last.Cmds[0].Redirs = append(last.Cmds[0].Redirs, tmp.Redirs...)
+}
+
+// decodeANSIC decodes the body of a bash $'...' word. ok is false for a NUL
+// (bash ends the word there) or a truncated escape.
+func decodeANSIC(s string) (string, bool) {
+	if !strings.Contains(s, `\`) {
+		return s, true
+	}
+	var b strings.Builder
+	hexVal := func(c byte) int {
+		switch {
+		case c >= '0' && c <= '9':
+			return int(c - '0')
+		case c >= 'a' && c <= 'f':
+			return int(c-'a') + 10
+		case c >= 'A' && c <= 'F':
+			return int(c-'A') + 10
+		}
+		return -1
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] != '\\' {
+			b.WriteByte(s[i])
+			continue
+		}
+		if i+1 >= len(s) {
+			return "", false
+		}
+		i++
+		switch c := s[i]; c {
+		case 'a':
+			b.WriteByte(7)
+		case 'b':
+			b.WriteByte(8)
+		case 'e', 'E':
+			b.WriteByte(27)
+		case 'f':
+			b.WriteByte(12)
+		case 'n':
+			b.WriteByte('\n')
+		case 'r':
+			b.WriteByte('\r')
+		case 't':
+			b.WriteByte('\t')
+		case 'v':
+			b.WriteByte(11)
+		case '\\', '\'', '"', '?':
+			b.WriteByte(c)
+		case 'c':
+			if i+1 >= len(s) {
+				return "", false
+			}
+			i++
+			v := s[i] & 0x1f
+			if v == 0 {
+				return "", false
+			}
+			b.WriteByte(v)
+		case 'x', 'u', 'U':
+			limit := map[byte]int{'x': 2, 'u': 4, 'U': 8}[c]
+			v, n := 0, 0
+			for n < limit && i+1 < len(s) && hexVal(s[i+1]) >= 0 {
+				i++
+				v = v*16 + hexVal(s[i])
+				n++
+			}
+			if n == 0 {
+				b.WriteByte('\\')
+				b.WriteByte(c)
+				continue
+			}
+			if v == 0 {
+				return "", false
+			}
+			if c == 'x' {
+				b.WriteByte(byte(v))
+			} else {
+				b.WriteRune(rune(v))
+			}
+		default:
+			if c >= '0' && c <= '7' {
+				v, n := int(c-'0'), 1
+				for n < 3 && i+1 < len(s) && s[i+1] >= '0' && s[i+1] <= '7' {
+					i++
+					v = v*8 + int(s[i]-'0')
+					n++
+				}
+				if v&0xff == 0 {
+					return "", false
+				}
+				b.WriteByte(byte(v))
+				continue
+			}
+			b.WriteByte('\\')
+			b.WriteByte(c)
+		}
+	}
+	return b.String(), true
+}
+
+// prependProgram returns a copy of st whose leftmost simple command starts with
+// word (the parse tree is shared through the parse cache, so it is never
+// changed in place). ok is false when the leftmost command is compound.
+func prependProgram(st *syntax.Stmt, word *syntax.Word) (*syntax.Stmt, bool) {
+	if st == nil {
+		return nil, false
+	}
+	cp := *st
+	switch c := st.Cmd.(type) {
+	case *syntax.CallExpr:
+		nc := *c
+		nc.Args = append([]*syntax.Word{word}, c.Args...)
+		cp.Cmd = &nc
+		return &cp, true
+	case *syntax.BinaryCmd:
+		x, ok := prependProgram(c.X, word)
+		if !ok {
+			return nil, false
+		}
+		nb := *c
+		nb.X = x
+		cp.Cmd = &nb
+		return &cp, true
+	}
+	return nil, false
 }

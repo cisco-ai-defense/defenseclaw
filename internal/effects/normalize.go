@@ -19,6 +19,14 @@ func Normalize(connector, tool string, args json.RawMessage) Call {
 		return shellCall(tool, args)
 	case lt == "apply_patch" || lt == "applypatch":
 		return Call{Surface: SurfacePatch, Tool: tool, Args: args, Command: shellStringArg(args)}
+	case lt == "patch":
+		// Hermes' patch tool in patch mode carries a V4A envelope (*** Begin
+		// Patch ... *** End Patch): it is the same patch frontend as Codex's
+		// apply_patch, so an Update File + Move to is read as the write it is
+		// (DET111 R1, GAP-1057). Its replace mode stays an MCP-shaped call.
+		if text := patchEnvelopeArg(args); text != "" {
+			return Call{Surface: SurfacePatch, Tool: tool, Args: args, Command: text}
+		}
 	case isFileTool(lt):
 		return Call{Surface: SurfaceFileTool, Tool: tool, Args: args}
 	}
@@ -169,4 +177,16 @@ func baseName(p string) string {
 		p = p[i+1:]
 	}
 	return strings.ToLower(p)
+}
+
+// patchEnvelopeArg is the V4A envelope a patch tool carries in one of its
+// string fields, or "".
+func patchEnvelopeArg(args json.RawMessage) string {
+	m := decodeArgs(args)
+	for _, k := range []string{"patch", "input", "content", "command"} {
+		if v, ok := m[k].(string); ok && strings.Contains(v, "*** Begin Patch") {
+			return v
+		}
+	}
+	return ""
 }

@@ -88,6 +88,11 @@ type Cmd struct {
 	// verdict is opaque and is never unwrapped by the walker's own parsing
 	// (psparse review 9 R9-3, GAP-0193).
 	Host *HostPayload
+	// CmdBody is the verbatim text after the /c or /k switch of a cmd call the
+	// cmd frontend lowered, with cmd's outer quote pair removed: the command
+	// line the child cmd runs (its quotes and operators intact).
+	CmdBody    string
+	CmdBodySet bool
 }
 
 // HostPayload is psparse's reading of one host call's payload.
@@ -129,6 +134,10 @@ type Word struct {
 	Reason ReasonCode
 	Segs   []WordSeg
 	Span   [2]int
+	// ProcSub is the body of a word that is one input process substitution
+	// <(...) (it is also in the command's Nested): a consumer that reads the
+	// word as a file (source, a `<` redirect) reads what the body prints.
+	ProcSub *Script
 }
 
 // Assign is a VAR=value prefix on a command (or an export/declare).

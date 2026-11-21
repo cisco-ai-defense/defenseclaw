@@ -114,6 +114,8 @@ func extractPatch(call Call, o Options) Result {
 type patchTarget struct {
 	path string
 	kind Kind
+	// moved marks the targets of an Update File + Move to pair.
+	moved bool
 }
 
 func parsePatchEnvelope(text string) ([]patchTarget, bool) {
@@ -138,7 +140,13 @@ func parsePatchEnvelope(text string) ([]patchTarget, bool) {
 		case strings.HasPrefix(l, "*** Delete File:"):
 			out = append(out, patchTarget{path: strings.TrimSpace(l[len("*** Delete File:"):]), kind: KindDelete})
 		case strings.HasPrefix(l, "*** Move to:"):
-			out = append(out, patchTarget{path: strings.TrimSpace(l[len("*** Move to:"):]), kind: KindWrite})
+			// A move after an Update File writes the new name and removes the old
+			// one (GAP-1057).
+			if n := len(out); n > 0 && out[n-1].kind == KindWrite && !out[n-1].moved {
+				out[n-1].moved = true
+				out = append(out, patchTarget{path: out[n-1].path, kind: KindDelete, moved: true})
+			}
+			out = append(out, patchTarget{path: strings.TrimSpace(l[len("*** Move to:"):]), kind: KindWrite, moved: true})
 		case strings.HasPrefix(l, "*** End Patch"):
 			sawEnd = true
 		}

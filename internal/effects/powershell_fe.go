@@ -48,6 +48,14 @@ func lowerPSScript(command string, o Options, expandNested bool) *Script {
 				continue
 			}
 			hp := &HostPayload{Opaque: true}
+			if !ns.Static && ns.Kind == psparse.KindEncodedCommand {
+				// psparse keeps a base64 word with a tab, CR or LF NotStatic; the
+				// host skips those (Convert.FromBase64String), so it is read the
+				// way the host decodes it (DET111 R1, GAP-1199).
+				if text, ok := psEncodedWithBlanks(cmd); ok {
+					ns.Text, ns.Static = text, true
+				}
+			}
 			if ns.Static && !psHostUnsafe(cmd, ns) {
 				hp = &HostPayload{Text: ns.Text, Dialect: DialectPowerShell}
 				if ns.Dialect == "cmd" {
@@ -70,8 +78,30 @@ func lowerPSScript(command string, o Options, expandNested bool) *Script {
 				spShell[c] = true
 			}
 		})
-		for range spShell {
+		// A child whose command line is literal is also read as the child reads
+		// it (CommandLineToArgvW, then its -Command / -EncodedCommand or cmd /c
+		// body), so what it runs is visible (DET111 R1, GAP-1577, GAP-1655). The
+		// opaque marker stays: the child's edition (and so its exact argv
+		// reading) is not known, so the call is never fully known.
+		for n := range spShell {
 			s.Unknowns = append(s.Unknowns, UnknownNode{Reason: ReasonOpaqueCode})
+			c, isCmd := n.(*psparse.Command)
+			text, d, ok := "", DialectNone, false
+			if isCmd {
+				text, d, ok = psStartProcessChild(c)
+			}
+			if !ok {
+				continue
+			}
+			var inner *Script
+			if d == DialectCMD {
+				inner = parseCMD(text, o)
+			} else {
+				inner = lowerPSScript(text, o, true)
+			}
+			s.Funcs = append(s.Funcs, inner.Funcs...)
+			s.Stmts = append(s.Stmts, inner.Stmts...)
+			s.Unknowns = append(s.Unknowns, inner.Unknowns...)
 		}
 		for _, ns := range nested {
 			if spShell[ns.Source] {
@@ -268,6 +298,10 @@ type psLower struct {
 	out   *Script
 	o     Options
 	hosts map[psparse.Node]*HostPayload
+	// envChanged names the environment variables a command of the statement
+	// being lowered changes through the Env: drive or
+	// [Environment]::SetEnvironmentVariable: they are unknown after it.
+	envChanged []string
 }
 
 func (lw *psLower) statements(sts []psparse.Statement, cond bool) {
@@ -319,6 +353,8 @@ func (lw *psLower) pipeline(p *psparse.Pipeline, cond bool) {
 				c := lw.command(e, segCond, idx > 0)
 				lw.out.Stmts = append(lw.out.Stmts, &Stmt{Cmds: []*Cmd{c}, Cond: segCond})
 				lastCmd = c
+				lw.noteEnvDrive(c)
+				lw.flushEnv(segCond)
 			case *psparse.ExprStatement:
 				lw.exprCommands(e.Expr, segCond)
 			}
@@ -352,6 +388,23 @@ func (lw *psLower) assignment(a *psparse.Assignment, cond bool) {
 
 func (lw *psLower) command(c *psparse.Command, cond, pipeIn bool) *Cmd {
 	out := &Cmd{Cond: cond, PipeIn: pipeIn, Host: lw.hosts[c]}
+	// `& { ... }` / `. { ... }` runs the block now, under the command's own
+	// condition, in this session (a Set-Location or $env: change inside it
+	// stays): its statements are lowered in place (DET111 R1, GAP-1255).
+	if sb, ok := c.Name.(*psparse.ScriptBlockExpr); ok && (c.InvokeOp == "&" || c.InvokeOp == ".") {
+		lw.statements(sb.Statements, cond)
+		for _, el := range c.Elements {
+			if e, ok := el.(psparse.Expr); ok {
+				lw.exprCommands(e, true)
+			} else if a, ok := el.(*psparse.Arg); ok {
+				lw.exprCommands(a.Value, true)
+			}
+		}
+		for _, r := range c.Redirs {
+			lw.addRedir(out, r)
+		}
+		return out
+	}
 	// program name
 	if name, ok := psparse.LiteralString(c.Name); ok && c.InvokeOp != "." {
 		out.Words = append(out.Words, Word{Value: name, Static: true, Segs: []WordSeg{{Lit: name}}})
@@ -448,11 +501,18 @@ func (lw *psLower) exprWord(e psparse.Expr) Word {
 	if e == nil {
 		return Word{Reason: ReasonDynamicExpansion}
 	}
-	if v, ok := e.(*psparse.Variable); ok && strings.EqualFold(v.Scope, "env") {
-		return Word{Segs: []WordSeg{{Var: v.Name}}}
+	if v, ok := e.(*psparse.Variable); ok {
+		if seg, ok := psVarSeg(v); ok {
+			return Word{Segs: []WordSeg{seg}}
+		}
 	}
 	if s, ok := psparse.LiteralString(e); ok {
 		return Word{Value: s, Static: true, Segs: []WordSeg{{Lit: s}}}
+	}
+	if sl, ok := e.(*psparse.StringLit); ok {
+		if wd, ok := psStringWord(sl); ok {
+			return wd // "$HOME\.aws\x", $env:USERPROFILE\.ssh (DET111 R1, GAP-0998)
+		}
 	}
 	return Word{Reason: ReasonDynamicExpansion}
 }
@@ -492,6 +552,7 @@ func (lw *psLower) exprCommands(e psparse.Expr, cond bool) {
 		for _, a := range v.Args {
 			lw.exprCommands(a, cond)
 		}
+		lw.noteEnvInvoke(v, cond)
 	case *psparse.Binary:
 		lw.exprCommands(v.LHS, cond)
 		lw.exprCommands(v.RHS, cond)

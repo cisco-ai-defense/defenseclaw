@@ -81,7 +81,9 @@ var effRows = []row{
 	shellRow("EFF-HEREDOC-02 bash -s", raLinHome, "", "bash -s <<'E'\necho k >> /home/u/.ssh/authorized_keys\nE", effAK),
 	shellRow("EFF-HEREDOC-03 sh dash", raLinHome, "", "sh - <<'E'\necho k >> /home/u/.ssh/authorized_keys\nE", effAK),
 	shellRow("EFF-HEREDOC-04 zsh tab-stripped", raLinHome, "", "zsh <<-'E'\n\techo k >> /home/u/.ssh/authorized_keys\nE", effAK),
-	shellRow("EFF-HEREDOC-05 cat pipe sh", raLinHome, "", "cat <<'E' | sh\necho k >> /home/u/.ssh/authorized_keys\nE", dynamicTarget),
+	// DET111 R1: cat of a static here-document piped to sh is the same script as
+	// sh <<E (the pipe carries exactly the document).
+	shellRow("EFF-HEREDOC-05 cat pipe sh", raLinHome, "", "cat <<'E' | sh\necho k >> /home/u/.ssh/authorized_keys\nE", effAK),
 	shellRow("EFF-HEREDOC-06 sh -e flag", raLinHome, "", "sh -e <<'E'\necho k >> /home/u/.ssh/authorized_keys\nE", effAK),
 	shellRow("EFF-HEREDOC-07 unquoted expanding", raLinHome, "", "sh <<E\necho k >> $X/authorized_keys\nE", dynamicTarget),
 	shellRow("EFF-HEREDOC-08 here-string", raLinHome, "", `sh <<< 'echo k >> /home/u/.ssh/authorized_keys'`, effAK),
