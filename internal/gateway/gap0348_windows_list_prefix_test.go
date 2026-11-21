@@ -5,6 +5,7 @@ package gateway
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -80,11 +81,14 @@ func listPrefixActionRank(action string) int {
 // places no .git/config under a Windows folder, and its PowerShell reading is
 // partial with no readable-statements reading, so a trailing benign statement
 // hid the git read writing .git/config (and the fork bomb on Claude Code's
-// Git Bash tool). The list without its last statement is read as the hook
-// reads that call (windowsListPrefixTwinRequest): the wrapped call gets the
-// verdict of the attack alone, in the five tiers, on the Codex shell and
-// Claude Code's Bash tool. Benign lists a developer runs keep their verdict
-// (no new block or alert in default).
+// Git Bash tool). The list cut before each later statement is read as the
+// hook reads that call (windowsListPrefixTwinRequests): the wrapped call gets
+// the verdict of the attack alone, in the five tiers, on the Codex shell and
+// Claude Code's Bash tool, behind one trailer or a run of them
+// (rel-1-0-10:GAP-1569), and for a native Windows program whose own POSIX
+// reading is partial (the GAP-1561 fixtures). Benign lists a developer runs
+// keep their verdict (no new finding in default and permissive), a
+// here-document list included (rel-1-0-10:GAP-1570).
 func TestGAP0348TrailingStatementKeepsTheVerdictFiveTiers(t *testing.T) {
 	previous := windowsHookHost
 	windowsHookHost = func() bool { return true }
@@ -101,6 +105,22 @@ func TestGAP0348TrailingStatementKeepsTheVerdictFiveTiers(t *testing.T) {
 		// on Linux and macOS (rel-1-0-10:GAP-1561); a PowerShell spelling in
 		// the trailer keeps the call in no dialect.
 		{"claudecode", "Bash", ":(){ :|:& };:", ":(){ :|:& };: ; Write-Output done"},
+		{"codex", "Bash", ":(){ :|:& };:", ":(){ :|:& };: ; echo a ; echo b"},
+		{"claudecode", "Bash", ":(){ :|:& };:", ":(){ :|:& };: ; Write-Output a ; Write-Output b"},
+	}
+	// Native Windows programs whose own POSIX reading is partial (a Windows
+	// path or quoting the POSIX model cannot place): by corpus id.
+	nativePartial := map[string]bool{"windows-procdump-lsass": true, "windows-usn-journal-delete-powershell": true,
+		"windows-recursive-everyone-full-control": true}
+	for _, c := range readJSONL[toolCallCorpusCase](t, "toolcall", "corpus.jsonl") {
+		if nativePartial[c.ID] {
+			delete(nativePartial, c.ID)
+			attacks = append(attacks, row{"codex", "Bash", c.Command, c.Command + " ; echo done"},
+				row{"codex", "Bash", c.Command, c.Command + " ; echo a ; echo b"})
+		}
+	}
+	if len(nativePartial) != 0 {
+		t.Fatalf("corpus fixtures missing: %v", nativePartial)
 	}
 	benign := []string{
 		"git status; echo done",
@@ -109,6 +129,9 @@ func TestGAP0348TrailingStatementKeepsTheVerdictFiveTiers(t *testing.T) {
 		"cd x && ls; pwd",
 		"npm test || echo failed",
 		"git diff --stat HEAD; git status",
+		"git fetch; git status; git log -1",
+		"npm ci && npm run build && npm test",
+		"cat <<EOF > notes.txt ; echo done\nhello\nEOF",
 	}
 	for _, p := range gap0437Packs {
 		for _, connector := range []string{"codex", "claudecode"} {
@@ -146,56 +169,139 @@ func TestGAP0348TrailingStatementKeepsTheVerdictFiveTiers(t *testing.T) {
 	}
 }
 
-// TestGAP0348ListPrefixReadingBound: the list-prefix reading is one reading
-// of a Windows hook call placed in no dialect whose POSIX list has two or more
-// statements; never a reading twin's, a single statement's, a call placed in
-// a dialect, or a Linux or macOS hook call (no Windows readings).
+// TestGAP0348ListPrefixReadingBound: the list-prefix readings are those of a
+// Windows hook call placed in no dialect whose POSIX list has two or more
+// statements, one per cut before a later statement, at most
+// windowsListPrefixMaxReadings and truncated past them; never a reading
+// twin's, a single statement's, a cut inside a here-document, a call placed
+// in a dialect, or a Linux or macOS hook call (no Windows readings).
 func TestGAP0348ListPrefixReadingBound(t *testing.T) {
-	for _, c := range []struct{ command, prefix string }{
-		{"a ; b", "a"},
-		{"a\nb", "a"},
-		{"a && b", "a"},
-		{"a || b", "a"},
-		{"a; b && c", "a; b"},
-		{"a && b; c", "a && b"},
-		{"a && b && c", "a && b"},
-		{":(){ :|:& };: ; echo done", ":(){ :|:& };:"},
-		{"a & b", "a &"},
-		{"a", ""},
-		{"a | b", ""},
-		{"! a && b", "! a"},
-		{"! (a && b)", ""},
-		{"(a; b)", ""},
-		{"{ a; b; }", ""},
-		{"if a; then b; fi", ""},
-		{"a 'b", ""},
+	for _, c := range []struct {
+		command  string
+		prefixes []string
+	}{
+		{"a ; b", []string{"a"}},
+		{"a\nb", []string{"a"}},
+		{"a && b", []string{"a"}},
+		{"a || b", []string{"a"}},
+		{"a; b && c", []string{"a; b", "a"}},
+		{"a && b; c", []string{"a && b", "a"}},
+		{"a && b && c", []string{"a && b", "a"}},
+		{"a ; b ; c", []string{"a ; b", "a"}},
+		{":(){ :|:& };: ; echo done", []string{":(){ :|:& };:", ":(){ :|:& }"}},
+		{"a & b", []string{"a &"}},
+		{"a", nil},
+		{"a | b", nil},
+		{"! a && b", []string{"! a"}},
+		{"! (a && b)", nil},
+		{"(a; b)", nil},
+		{"{ a; b; }", nil},
+		{"if a; then b; fi", nil},
+		{"a 'b", nil},
+		{"cat <<EOF > f ; echo done\nhi\nEOF", nil},
+		{"cat <<EOF > f\nhi\nEOF\necho done", []string{"cat <<EOF > f\nhi\nEOF"}},
 	} {
-		got, ok := posixListPrefix(c.command)
-		if got != c.prefix || ok != (c.prefix != "") {
-			t.Errorf("posixListPrefix(%q) = %q, %v; want %q", c.command, got, ok, c.prefix)
+		if got := posixListPrefixes(c.command); !slices.Equal(got, c.prefixes) {
+			t.Errorf("posixListPrefixes(%q) = %q; want %q", c.command, got, c.prefixes)
 		}
 	}
-	args, err := json.Marshal(map[string]string{"command": "git show --output=.git/config HEAD ; echo done"})
-	if err != nil {
-		t.Fatal(err)
+	list := func(n int) string {
+		statements := make([]string, n)
+		for i := range statements {
+			statements[i] = fmt.Sprintf("echo %d", i)
+		}
+		return strings.Join(statements, " ; ")
 	}
-	call := trustedActionRequest{Input: actionfacts.Input{Tool: "Bash", Args: args, CWD: `C:\work`}}
-	facts := actionfacts.Analyze(call.Input)
-	if _, ok := windowsListPrefixTwinRequest(call, facts); ok {
+	if got := posixListPrefixes(list(200)); len(got) != 199 || got[0] != list(199) || got[198] != list(1) {
+		t.Errorf("200 statements: %d prefixes", len(got))
+	}
+	request := func(command string) trustedActionRequest {
+		args, err := json.Marshal(map[string]string{"command": command})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return trustedActionRequest{Input: actionfacts.Input{Tool: "Bash", Args: args, CWD: `C:\work`}}
+	}
+	call := request("git show --output=.git/config HEAD ; echo done")
+	if twins, cut := windowsListPrefixTwinRequests(call, actionfacts.Analyze(call.Input)); len(twins) != 0 || cut.Any() {
 		t.Error("a call with no Windows readings (a Linux or macOS hook) has a list-prefix reading")
 	}
 	withWindowsShellDialect(&call, true)
-	twin, ok := windowsListPrefixTwinRequest(call, actionfacts.Analyze(call.Input))
-	if !ok || twin.Input.Command != "git show --output=.git/config HEAD" || !twin.readingTwin ||
-		twin.Input.DialectHint != actionfacts.DialectPowerShell {
-		t.Fatalf("Windows hook call: twin %v %q hint %q", ok, twin.Input.Command, twin.Input.DialectHint)
+	twins, cut := windowsListPrefixTwinRequests(call, actionfacts.Analyze(call.Input))
+	if len(twins) != 1 || cut.Any() || twins[0].Input.Command != "git show --output=.git/config HEAD" || !twins[0].readingTwin ||
+		twins[0].Input.DialectHint != actionfacts.DialectPowerShell {
+		t.Fatalf("Windows hook call: %d twins, cut %v: %+v", len(twins), cut.Any(), twins)
 	}
-	if _, again := windowsListPrefixTwinRequest(twin, actionfacts.Analyze(twin.Input)); again {
+	if again, _ := windowsListPrefixTwinRequests(twins[0], actionfacts.Analyze(twins[0].Input)); len(again) != 0 {
 		t.Error("a reading twin makes a list-prefix reading of its own")
 	}
 	placed := call
 	placed.Input.DialectHint = actionfacts.DialectPOSIX
-	if _, ok := windowsListPrefixTwinRequest(placed, actionfacts.Analyze(placed.Input)); ok {
+	if again, _ := windowsListPrefixTwinRequests(placed, actionfacts.Analyze(placed.Input)); len(again) != 0 {
 		t.Error("a call placed in a dialect has a list-prefix reading")
 	}
+	// A benign list of any length within the statement budget is read at
+	// the ends of its key runs, never truncated (rel-1-0-10:GAP-1587); a
+	// call over the budget is refused whole and has none.
+	for _, n := range []int{10, 64, 128} {
+		long := request(list(n))
+		withWindowsShellDialect(&long, true)
+		if twins, cut := windowsListPrefixTwinRequests(long, actionfacts.Analyze(long.Input)); len(twins) > 2 || cut.Any() {
+			t.Errorf("a benign list of %d statements: %d twins, cut %v", n, len(twins), cut.Any())
+		}
+	}
+	over := request(list(200))
+	withWindowsShellDialect(&over, true)
+	if twins, cut := windowsListPrefixTwinRequests(over, actionfacts.Analyze(over.Input)); len(twins) != 0 || cut.Any() {
+		t.Errorf("a call over the statement budget: %d twins, cut %v", len(twins), cut.Any())
+	}
+}
+
+// TestGAP1587ListPrefixRunEnds: windowsListPrefixRunEnds returns the last
+// prefix of every run of one key except the run ending at the call, found by
+// sampling and bisection, and caps (ONE BOUND RULE) when the key budget stops
+// the search.
+func TestGAP1587ListPrefixRunEnds(t *testing.T) {
+	keyOf := func(pattern string) func(int) windowsListPrefixKey {
+		return func(index int) windowsListPrefixKey {
+			return windowsListPrefixKey{dialect: actionfacts.Dialect(pattern[index : index+1])}
+		}
+	}
+	whole := func(pattern string) windowsListPrefixKey {
+		return windowsListPrefixKey{dialect: actionfacts.Dialect(pattern[len(pattern)-1:])}
+	}
+	for _, c := range []struct {
+		pattern string // keys of prefixes 0..count-1, then the call
+		ends    []int
+	}{
+		{"ab", []int{0}},
+		{"aa", nil},
+		{"abbbbbbbbb", []int{0}},
+		{"aaaaaaaaab", []int{8}},
+		{"aaaaabbbbb", []int{4}},
+		{"abbbbbbbbbbbbbbbbbbbbbbbbbbbbbba", []int{30, 0}},
+		{"aaabbbccca", []int{8, 5, 2}},
+	} {
+		count := len(c.pattern) - 1
+		computed := 0
+		key := keyOf(c.pattern)
+		ends, capped := windowsListPrefixRunEnds(count, whole(c.pattern), func(i int) windowsListPrefixKey { computed++; return key(i) }, windowsListPrefixMaxKeys)
+		if !slices.Equal(ends, c.ends) || capped {
+			t.Errorf("%s: ends %v capped %v; want %v", c.pattern, ends, capped, c.ends)
+		}
+		if computed > 2*listPrefixBits(count)+8 {
+			t.Errorf("%s: %d keys", c.pattern, computed)
+		}
+	}
+	if ends, capped := windowsListPrefixRunEnds(9, whole("aaabbbccca"), keyOf("aaabbbccca"), 7); !capped || len(ends) == 0 {
+		t.Errorf("a search stopped by the key budget: ends %v, capped %v; want the items cap", ends, capped)
+	}
+}
+
+func listPrefixBits(n int) int {
+	b := 0
+	for ; n > 0; n >>= 1 {
+		b++
+	}
+	return b
 }
