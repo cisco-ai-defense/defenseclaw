@@ -290,6 +290,14 @@ func validateAtomicTransformWindowsPrivateHandleACL(
 func atomicTransformBoundObjectAttributes(
 	parent *os.File, name string, descriptor *windows.SECURITY_DESCRIPTOR,
 ) (*windows.OBJECT_ATTRIBUTES, error) {
+	return atomicTransformBoundObjectAttributesForHandle(windows.Handle(parent.Fd()), name, descriptor)
+}
+
+// atomicTransformBoundObjectAttributesForHandle names one component relative
+// to an already-open directory handle, with no reparse processing.
+func atomicTransformBoundObjectAttributesForHandle(
+	parent windows.Handle, name string, descriptor *windows.SECURITY_DESCRIPTOR,
+) (*windows.OBJECT_ATTRIBUTES, error) {
 	if filepathBase := filepath.Base(name); filepathBase != name || name == "." || name == ".." {
 		return nil, fmt.Errorf("invalid relative compare-and-swap artifact name %q", name)
 	}
@@ -299,7 +307,7 @@ func atomicTransformBoundObjectAttributes(
 	}
 	return &windows.OBJECT_ATTRIBUTES{
 		Length:             uint32(unsafe.Sizeof(windows.OBJECT_ATTRIBUTES{})),
-		RootDirectory:      windows.Handle(parent.Fd()),
+		RootDirectory:      parent,
 		ObjectName:         unicode,
 		Attributes:         windows.OBJ_CASE_INSENSITIVE | windows.OBJ_DONT_REPARSE,
 		SecurityDescriptor: descriptor,
