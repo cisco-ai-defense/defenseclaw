@@ -59,6 +59,9 @@ class Env:
         d.mkdir(parents=True)
         rows = [{"case": "b1", "idx": 0, "action": "allow"}, {"case": "a1", "idx": 0, "action": "block", "raw_action": "block", "rule_ids": ["R-1"]}]
         (d / "x-default.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
+        # a complete harness shard, as s7gate run leaves it: its ids file and exit status 0 (GAP-0170 completeness)
+        (d / "ids.x.txt").write_text("b1\na1\n")
+        (d / "x-default.jsonl.rc").write_text("0\n")
 
     def label_file(self, name: str = "v.jsonl", rows=(("b1", "benign"),)) -> Path:
         p = self.labels / name
