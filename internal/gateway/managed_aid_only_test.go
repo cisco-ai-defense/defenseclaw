@@ -668,8 +668,8 @@ func TestHookManagedAIDOnly_CodeGuardIgnored(t *testing.T) {
 		Tool: "write",
 		Args: json.RawMessage(`{"path":"config.py","content":"AWS_SECRET = \"AKIAIOSFODNN7EXAMPLE\""}`),
 	}
-	if cg := a.runCodeGuardOnArgs(req); cg != nil {
-		t.Fatalf("managed runCodeGuardOnArgs should be inert, got %d findings", len(cg))
+	if cg := a.runCodeGuardOnArgsWithProvenance(context.Background(), req).findings; cg != nil {
+		t.Fatalf("managed runCodeGuardOnArgsWithProvenance should be inert, got %d findings", len(cg))
 	}
 	v := a.inspectToolPolicy(req)
 	if v == nil || v.Action != "allow" {

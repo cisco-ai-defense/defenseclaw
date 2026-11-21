@@ -492,6 +492,26 @@ func applyPatchStdinText(command CommandFact) (text string, shellView, ok bool) 
 	return command.LiteralStdinView, true, true
 }
 
+// CommandPatchEnvelopes is the envelope text of each apply_patch command of
+// facts fed by a here-document (applyPatchStdinText), in the order the
+// commands are read: the patch the tool reads, the form in which Codex sends
+// its patch tool (exec_command `apply_patch <<PATCH`). The content checks of
+// the native apply_patch tool read it as they read the tool's own envelope,
+// as nativeCallWrites gives its files to the path proofs (rel-1-0-10:GAP-1635).
+// shellView is true when one of them is the text of a document the shell
+// expands, whose expansions are content no reader knows.
+func CommandPatchEnvelopes(facts Facts) (envelopes []string, shellView bool) {
+	for _, command := range facts.Commands {
+		text, view, ok := applyPatchStdinText(command)
+		if !ok {
+			continue
+		}
+		envelopes = append(envelopes, text)
+		shellView = shellView || view
+	}
+	return envelopes, shellView
+}
+
 // classifyPOSIXApplyPatchStdin gives a shell-fed, literal patch the same
 // path operations as the native apply_patch tool. A here-document keeps the
 // envelope bytes (applyPatchStdinText); other stdin forms have no

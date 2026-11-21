@@ -102,6 +102,11 @@ type ToolInspectRequest struct {
 	// toolUseID is set by a connector adapter, never from the wire (see
 	// contentScope below).
 	toolUseID string
+	// codeGuardPartial marks the CodeGuard view of a shell here-document
+	// patch the shell expands (codeGuardShellPatchArgs): its findings are
+	// shown and never enforced, as for any scan that did not read the
+	// whole content. Never from the wire.
+	codeGuardPartial bool
 	// toolArgsAreHookEnvelope marks args the connector did not project from a
 	// tool payload: the whole hook envelope, session and event keys included.
 	toolArgsAreHookEnvelope bool
@@ -1457,12 +1462,6 @@ func isWriteToolName(tool string) bool {
 	return false
 }
 
-// runCodeGuardOnArgs extracts path/content from write_file/edit_file args
-// and runs CodeGuard content scanning.
-func (a *APIServer) runCodeGuardOnArgs(req *ToolInspectRequest) []scanner.Finding {
-	return a.runCodeGuardOnArgsWithProvenance(context.Background(), req).findings
-}
-
 type codeGuardArgsScan struct {
 	findings []scanner.Finding
 	complete bool
@@ -1482,7 +1481,43 @@ func codeGuardWriteRequest(req *ToolInspectRequest, action trustedActionRequest)
 		view.Tool, view.Args = tool, action.Input.Args
 		return &view, true
 	}
-	return req, isWriteToolName(strings.ToLower(req.Tool))
+	if isWriteToolName(strings.ToLower(req.Tool)) {
+		return req, true
+	}
+	if args, partial, ok := codeGuardShellPatchArgs(action.Input); ok {
+		view := *req
+		view.Tool, view.Args, view.codeGuardPartial = "apply_patch", args, partial
+		return &view, true
+	}
+	return req, false
+}
+
+// codeGuardShellPatchArgs is the apply_patch argument object of a shell call
+// that feeds apply_patch its envelope by a here-document
+// (actionfacts.CommandPatchEnvelopes): Codex sends its patch tool so
+// (exec_command `apply_patch <<PATCH`), and CodeGuard read only the native
+// tool's envelope, so the same patch raised CG-* findings as apply_patch and
+// none as the shell call (rel-1-0-10:GAP-1635). Only a call whose command
+// text or arguments (the hook routes give the command in the shell tool's
+// arguments) hold an envelope is parsed. partial is true for a document the
+// shell expands.
+func codeGuardShellPatchArgs(input actionfacts.Input) (args json.RawMessage, partial, ok bool) {
+	if len(input.Argv) != 0 || !codeGuardMayHoldShellPatch(input.Command) && !codeGuardMayHoldShellPatch(string(input.Args)) {
+		return nil, false, false
+	}
+	envelopes, shellView := actionfacts.CommandPatchEnvelopes(actionfacts.Analyze(input))
+	if len(envelopes) == 0 {
+		return nil, false, false
+	}
+	args, err := json.Marshal(map[string]string{"command": strings.Join(envelopes, "\n")})
+	if err != nil {
+		return nil, false, false
+	}
+	return args, shellView, true
+}
+
+func codeGuardMayHoldShellPatch(text string) bool {
+	return strings.Contains(text, "apply_patch") && strings.Contains(text, "*** Begin Patch")
 }
 
 // codeGuardWriteTool reports a trusted action tool whose arguments carry the
@@ -1508,7 +1543,9 @@ func (a *APIServer) runCodeGuardOnArgsWithProvenance(ctx context.Context, req *T
 	if cfg := a.decisionConfig(ctx); cfg != nil {
 		rulesDir = cfg.Scanners.CodeGuard
 	}
-	return codeGuardScanWriteArgs(rulesDir, req.Tool, req.Args)
+	scan := codeGuardScanWriteArgs(rulesDir, req.Tool, req.Args)
+	scan.complete = scan.complete && !req.codeGuardPartial
+	return scan
 }
 
 // codeGuardPatchTools are the tools whose arguments carry an apply_patch
