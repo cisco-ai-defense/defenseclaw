@@ -9,6 +9,7 @@ import "github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 // registry: bounded.Register, checked by bounded.TestCapRegistry). A new
 // max* cap this package compares a count against is added here.
 var (
+	_ = bounded.Register("hookpaths.maxRegistrationGlobMatches", bounded.Items, int(maxRegistrationGlobMatches))
 	_ = bounded.Register("hookpaths.maxActiveStateDepth", bounded.Depth, int(maxActiveStateDepth))
 	_ = bounded.Register("hookpaths.maxBoundLinkWords", bounded.Paths, int(maxBoundLinkWords))
 	_ = bounded.Register("hookpaths.maxCallKeyReads", bounded.Time, int(maxCallKeyReads))
