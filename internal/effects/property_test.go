@@ -268,7 +268,7 @@ var refClass = func() map[string]string {
 	// writers of their file operands
 	add("writes", "cp", "install", "mv", "rm", "unlink", "shred", "ln", "mkdir", "touch", "mkfifo", "mknod", "chmod", "chown", "chgrp",
 		"setfacl", "dd", "tee", "truncate", "sort", "split", "csplit", "uniq", "xxd", "zip", "gzip", "gunzip", "zcat", "bzip2", "bunzip2",
-		"bzcat", "xz", "unxz", "xzcat", "unzip", "tar", "scp", "rsync", "base64")
+		"bzcat", "xz", "unxz", "xzcat", "unzip", "tar", "scp", "rsync", "base64", "7z", "7za", "7zr")
 	// carry a script, program, format or config in an operand
 	add("text", "sed", "awk", "gawk", "mawk", "nawk", "curl", "wget", "find", "fd", "rg") // rg --pre runs a preprocessor
 	add("shell", "bash", "sh", "zsh", "dash", "ksh", "eval", "source", ".", "su", "runuser", "python", "python3", "node", "nodejs", "ruby", "perl", "php", "go")

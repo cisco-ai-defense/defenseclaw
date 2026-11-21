@@ -198,7 +198,7 @@ EFF-ARCHIVE-07 bunzip2	K|delete:/home/u/.ssh/authorized_keys.bz2,write:/home/u/.
 EFF-ARCHIVE-08 gzip compresses (original removed)	K|delete:/home/u/.ssh/authorized_keys,write:/home/u/.ssh/authorized_keys.gz
 EFF-ARCHIVE-09 gzip -c is read only	K|
 EFF-ARCHIVE-10 zip writes the archive	U|
-EFF-ARCHIVE-11 7z	U|
+EFF-ARCHIVE-11 7z	K|write:/home/u/.ssh/**
 EFF-ARCHIVE-12 bsdtar	U|
 EFF-ARCHIVE-13 cpio	U|
 EFF-BITS-01 transfer	K|write:c:\users\u\.ssh\authorized_keys
@@ -328,7 +328,7 @@ G11 HOME reassigned cd	K|append:c:\users\u\.ssh\authorized_keys
 G11 gb $USERPROFILE	U|
 G12 cp dest dir	K|write:c:\users\u\.ssh\authorized_keys
 G12 gb cmd //c	U|
-G13 gb powershell -c	U|
+G13 gb powershell -c	K|write:c:\users\u\.ssh\authorized_keys
 G13 mixed case drive	K|append:c:\users\u\.ssh\authorized_keys
 G14 gb /tmp	U|
 G15 gb /proc/cygdrive	U|
@@ -900,7 +900,7 @@ Z06 unzip into home cwd	U|
 Z07 unzip -d ~	U|
 Z08 bsdtar -xf	U|
 Z09 cpio -i	U|
-Z10 7z x -o	U|
+Z10 7z x -o	K|write:/home/u/.ssh/**
 Z11 gunzip -c >	K|write:/home/u/.ssh/authorized_keys
 Z12 git am	U|
 Z13 git stash pop	U|
@@ -1110,7 +1110,7 @@ rv7-G15 gb function cd	U|
 rv7-G16 gb subshell cd no leak	K|append:c:\users\u\.bashrc
 rv7-G17 gb workdir msys	K|append:c:\users\u\.ssh\authorized_keys
 rv7-G18 gb unknown env	U|
-rv7-G2 gb cd then powershell -c	U|
+rv7-G2 gb cd then powershell -c	K|write:c:\users\u\.ssh\authorized_keys,write:c:\work\authorized_keys
 rv7-G3 gb HOME prefix bash -c	K|append:c:\users\u\.ssh\authorized_keys
 rv7-G4 gb HOME reassigned then child	K|append:c:\users\u\.ssh\authorized_keys
 rv7-G5 gb pipeline cd subshell	K|append:c:\users\u\.bashrc
