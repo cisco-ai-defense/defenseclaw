@@ -495,10 +495,18 @@ func connectBy(ctx context.Context, deadline time.Time, onConnect func()) (tryCt
 				if peerCheck.deciding.Load() && ownerScanEnded(connected, tryCtx, peerCheck) {
 					return
 				}
-				if peerCheck.abandoned.Load() {
+				if peerCheck.abandoned.Load() && peerCheck.recordedHolder.Load() {
 					// The owner scan of a queued connection outlasted
-					// ownerScanGrace: the outage of an unanswered listener.
+					// ownerScanGrace after it showed the recorded gateway
+					// holding the listener: the outage of an unanswered
+					// listener.
 					cancel(errPerUserOwnerScanUnfinished)
+				} else if peerCheck.abandoned.Load() {
+					// The scan outlasted the grace before it showed the
+					// recorded gateway holding the listener: nothing ties
+					// the listener to the gateway, whatever the load
+					// (GAP-1534).
+					cancel(errPerUserOwnerUnproven)
 				} else if peerCheck.pending.Load() {
 					// A listener took the connection and its owner is not
 					// proven yet (the Windows tuple wait of one that
@@ -519,10 +527,13 @@ func connectBy(ctx context.Context, deadline time.Time, onConnect func()) (tryCt
 // owner scan of its unaccepted connection (verifyConnected). The scan is
 // bounded work: every process of the account, plus a short re-read of a
 // thread that cannot be read for a moment. The grace only keeps the deadline
-// from cutting it. A scan still running after the grace has shown neither
-// the own gateway nor another process, so the try ends as the outage of an
-// unanswered listener (errPerUserOwnerScanUnfinished): nothing was sent, and
-// the outage mode of the account decides.
+// from cutting it. A scan still running after the grace that has shown the
+// recorded gateway holding the listener, and not yet that no other process
+// of the account holds it, ends the try as the outage of an unanswered
+// listener (errPerUserOwnerScanUnfinished): nothing was sent, and the outage
+// mode of the account decides. A scan that has not shown even that ends it
+// refused (errPerUserOwnerUnproven, GAP-1534): a listener nobody has tied to
+// the gateway never gets the outage allow because the host is busy.
 const ownerScanGrace = 2 * time.Second
 
 // ownerScanEnded holds the connect deadline of a try while the owner scan of

@@ -138,6 +138,21 @@ func darwinRecordedGatewayHoldsSocket(ctx context.Context, local, remote *net.TC
 	return false
 }
 
+// darwinPIDHoldsListener reports whether process pid, of this account, holds
+// a listening socket on port at one of ips. It reads that one process only.
+func darwinPIDHoldsListener(ctx context.Context, pid, port int, ips []net.IP) bool {
+	process, err := unix.SysctlKinfoProc("kern.proc.pid", pid)
+	if err != nil || process == nil || process.Eproc.Ucred.Uid != uint32(os.Geteuid()) {
+		return false
+	}
+	for _, ip := range ips {
+		if held, err := darwinProcessHoldsSocket(ctx, pid, process.Proc.P_starttime, &net.TCPAddr{IP: ip, Port: port}, nil, darwinTCPListen); err == nil && held {
+			return true
+		}
+	}
+	return false
+}
+
 func darwinTCPAddrEqual(a, b *net.TCPAddr) bool {
 	return a.Port == b.Port && a.IP.Equal(b.IP)
 }

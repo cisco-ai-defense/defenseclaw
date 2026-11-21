@@ -56,8 +56,10 @@ func tupleStillQueued(client, server *net.TCPAddr) bool {
 }
 
 // listenersHeldOnlyByPID is listenersHeldOnlyBy on the live socket tables.
-func listenersHeldOnlyByPID(pid int, server *net.TCPAddr) bool {
-	return listenersHeldOnlyBy(procSelfNet, "/proc", pid, server)
+// onHeld, when not nil, is called once pid is shown to hold every listening
+// socket, before the other processes of the account are read.
+func listenersHeldOnlyByPID(pid int, server *net.TCPAddr, onHeld func()) bool {
+	return listenersHeldOnlyByThen(procSelfNet, "/proc", pid, server, onHeld)
 }
 
 // listenersHeldOnlyBy reports whether the kernel lists at least one listening
@@ -69,6 +71,13 @@ func listenersHeldOnlyByPID(pid int, server *net.TCPAddr) bool {
 // Any other holder of the port, even one of the same account, an unreadable
 // table or descriptor list, or no listener, is false.
 func listenersHeldOnlyBy(procNet, procRoot string, pid int, server *net.TCPAddr) bool {
+	return listenersHeldOnlyByThen(procNet, procRoot, pid, server, nil)
+}
+
+// listenersHeldOnlyByThen is listenersHeldOnlyBy that calls onHeld, when not
+// nil, once pid is shown to hold every listening socket, before the other
+// processes of this account are read.
+func listenersHeldOnlyByThen(procNet, procRoot string, pid int, server *net.TCPAddr, onHeld func()) bool {
 	key, table, err := procTCPEndpoint(server)
 	if err != nil {
 		return false
@@ -102,6 +111,9 @@ func listenersHeldOnlyBy(procNet, procRoot string, pid int, server *net.TCPAddr)
 		if !held[inode] {
 			return false
 		}
+	}
+	if onHeld != nil {
+		onHeld()
 	}
 	return heldByNoOtherProcessOfThisAccount(procRoot, pid, inodes, &settle)
 }
