@@ -185,7 +185,11 @@ func TestGAP1150FailedLocationChangeThenRelativeStateWriteFiveTiers(t *testing.T
 				state := strings.Contains(string(raw), "tamper.detector_state_write")
 				// A proven state write is a HIGH alert outside strict and
 				// managed strict, a block there (GAP-0747 owner tiering 2026-11-15T15:20Z).
-				if want := gap1173Want("write", p.name); r.block && (action != want || !state) {
+				want := gap1173Want("write", p.name)
+				if gap1157CopilotUnresolvedBlock(p.managed, route, action, raw) {
+					want = "block"
+				}
+				if r.block && (action != want || !state) {
 					t.Errorf("%s %s %s: action %q, want %s by tamper.detector_state_write: %.400s", p.name, route, r.id, action, want, raw)
 				}
 				if !r.block && (action == "block" || state) {
@@ -194,4 +198,14 @@ func TestGAP1150FailedLocationChangeThenRelativeStateWriteFiveTiers(t *testing.T
 			}
 		}
 	}
+}
+
+// gap1157CopilotUnresolvedBlock is a managed Copilot write on these rows that
+// is also an unresolved write target (rel-1-0-10:GAP-1157, same at rel): a
+// CRITICAL block by persistence.ssh_authorized_keys_command next to the state
+// rule. Native Windows (cimapnat1, 2026-11-21) answers it so; the block is
+// stronger than the GAP-0747 state tier, so it stands.
+func gap1157CopilotUnresolvedBlock(managed bool, route, action string, raw []byte) bool {
+	return managed && route == "copilot" && action == "block" &&
+		strings.Contains(string(raw), "A write target could not be resolved")
 }

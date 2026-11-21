@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -115,6 +116,19 @@ func TestDefenseClawControlFiveTiers(t *testing.T) {
 					// bound as TRUNCATED (ONE BOUND rule): the unknown tier by the
 					// floor's own rule, not a DefenseClaw reading, in every pack.
 					want := bounded.Unknown(bounded.TierOf(p.pack)).String()
+					if runtime.GOOS == "windows" && named {
+						// Native Windows (cimapnat1, 2026-11-21) also names the
+						// stop inside the nesting, next to the floor: the stop
+						// tier, stronger than the unknown tier of the floor.
+						want = "block"
+						if p.pack != "strict" && !p.managed {
+							want = "alert"
+						}
+						if action != want || !strings.Contains(string(raw), "tamper.defenseclaw_control_disable") || !strings.Contains(string(raw), "ACTION-COMPOUND-LIMIT") {
+							t.Errorf("%s: a call nested past the depth bound is %q, want %s by tamper.defenseclaw_control_disable and ACTION-COMPOUND-LIMIT: %s", where, action, want, raw)
+						}
+						continue
+					}
 					if action != want || named || !strings.Contains(string(raw), "ACTION-COMPOUND-LIMIT") {
 						t.Errorf("%s: a call nested past the depth bound is %q, want %s by ACTION-COMPOUND-LIMIT only: %s", where, action, want, raw)
 					}

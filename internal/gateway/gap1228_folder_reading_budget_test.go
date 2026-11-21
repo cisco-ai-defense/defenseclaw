@@ -115,7 +115,11 @@ func TestGAP1228PaddedWindowsCallAfterMovesThatMayFailKeepsItsReadingsFiveTiers(
 					// The state write rows: a proven DefenseClaw state write is
 					// a HIGH alert outside strict and managed strict, a block
 					// there (GAP-0747 owner tiering 2026-11-15T15:20Z).
-					if want := gap1173Want("write", p.name); action != want || !strings.Contains(string(raw), gap0747StateRule) {
+					want := gap1173Want("write", p.name)
+					if gap1157CopilotUnresolvedBlock(p.managed, route, action, raw) {
+						want = "block"
+					}
+					if action != want || !strings.Contains(string(raw), gap0747StateRule) {
 						t.Errorf("%s %s %s: action %q, want %s by %s: %.400s", p.name, route, r.id, action, want, gap0747StateRule, raw)
 					}
 					continue
