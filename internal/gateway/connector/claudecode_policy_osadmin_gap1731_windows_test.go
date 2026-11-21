@@ -14,8 +14,10 @@ import (
 )
 
 // gap1731Fixture renders and installs DefenseClaw's drop-in in an isolated
-// file tier, then serves hklm as the HKLM Settings policy.
-func gap1731Fixture(t *testing.T) (SetupOpts, []byte, func(map[string]interface{})) {
+// file tier, then serves hklm as the HKLM Settings policy. It returns the
+// drop-in path: the hook contract depends on the Claude Code version, so a
+// case that sets AgentVersion installs the render for that version.
+func gap1731Fixture(t *testing.T) (SetupOpts, []byte, func(map[string]interface{}), string) {
 	t.Helper()
 	_, opts, _, managedRoot := isolatedClaudePolicyFixture(t)
 	opts.ManagedEnterprise = true
@@ -59,7 +61,7 @@ func gap1731Fixture(t *testing.T) (SetupOpts, []byte, func(map[string]interface{
 	})
 	t.Setenv("ProgramFiles", filepath.Dir(managedRoot))
 	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
-	return opts, body, func(value map[string]interface{}) { hklm = value }
+	return opts, body, func(value map[string]interface{}) { hklm = value }, policyPath
 }
 
 // TestGAP1731HKLMMergeAdmitsManagedHooks: an HKLM Claude Code policy that sets
@@ -68,7 +70,7 @@ func gap1731Fixture(t *testing.T) (SetupOpts, []byte, func(map[string]interface{
 // guardian audit checks the merged file tier. Fails on a64bfdb931: every
 // non-empty HKLM policy refused enrolment.
 func TestGAP1731HKLMMergeAdmitsManagedHooks(t *testing.T) {
-	opts, body, setHKLM := gap1731Fixture(t)
+	opts, body, setHKLM, policyPath := gap1731Fixture(t)
 	deny := map[string]interface{}{"deny": []interface{}{"Bash(curl:*)"}}
 
 	for _, tc := range []struct {
@@ -84,8 +86,15 @@ func TestGAP1731HKLMMergeAdmitsManagedHooks(t *testing.T) {
 			setHKLM(tc.hklm)
 			opts := opts
 			opts.AgentVersion = tc.version
-			if _, err := NewClaudeCodeConnector().ManagedHookPolicy(opts); err != nil {
+			rendered, err := NewClaudeCodeConnector().ManagedHookPolicy(opts)
+			if err != nil {
 				t.Fatalf("ManagedHookPolicy under HKLM %v: %v", tc.hklm, err)
+			}
+			// Setup installs the drop-in it rendered for this client version
+			// (2.1.250 resolves claudecode-hooks-v2, which adds DirectoryAdded),
+			// and the audit checks the contract of that same version.
+			if err := os.WriteFile(policyPath, rendered, 0o600); err != nil {
+				t.Fatal(err)
 			}
 			if present, err := claudeCodeEffectiveHookContract(opts); err != nil || !present {
 				t.Fatalf("effective contract under HKLM %v = (present=%v, err=%v), want present", tc.hklm, present, err)
@@ -110,7 +119,7 @@ func TestGAP1731HKLMMergeAdmitsManagedHooks(t *testing.T) {
 // still refuses, naming merge (and its client floor) as the fix; merge with
 // disableAllHooks or on an older client still refuses.
 func TestGAP1731HKLMShadowingNamesTheFix(t *testing.T) {
-	opts, _, setHKLM := gap1731Fixture(t)
+	opts, _, setHKLM, _ := gap1731Fixture(t)
 	deny := map[string]interface{}{"deny": []interface{}{"Bash(curl:*)"}}
 	for _, tc := range []struct {
 		name    string

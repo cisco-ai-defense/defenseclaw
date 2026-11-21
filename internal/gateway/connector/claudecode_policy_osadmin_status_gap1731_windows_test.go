@@ -13,7 +13,7 @@ import (
 // TestGAP1731HKLMRawGateAndStatus covers the raw-string gate the enterprise
 // installer calls after it authenticates the HKLM key, and the status view.
 func TestGAP1731HKLMRawGateAndStatus(t *testing.T) {
-	opts, _, setHKLM := gap1731Fixture(t)
+	opts, _, setHKLM, _ := gap1731Fixture(t)
 	opts.AgentVersion = "2.1.250"
 	label := `HKLM Settings policy (HKLM\SOFTWARE\Policies\ClaudeCode\Settings)`
 	if err := ClaudeCodeOSAdminPolicyAdmitsManagedHooks(`{"managedSourcesBehavior":"merge","permissions":{"deny":["Bash(curl:*)"]}}`, label, opts); err != nil {
