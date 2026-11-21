@@ -50,7 +50,9 @@ DefenseClaw ships three binaries. Each row below is on the Python CLI unless it 
 | Gateway daemon | `defenseclaw-gateway start|stop|restart` | [Gateway daemon](#gateway-daemon) |
 | Configuration | `config get|set|unset` | [Configuration](#configuration) |
 | Upgrade and uninstall | `upgrade`, `uninstall` | [Upgrade](#upgrade), [Uninstall](#uninstall--disable) |
+| Model routing, budgets and cost | `routing ...`, `defenseclaw-gateway budget-store ...` | [Routing](#routing) |
 | Sandboxes | `sandbox ...` | [Sandbox](#sandbox) |
+| Agents in an Agent Substrate cluster | `substrate ...` | [Agent Substrate](#agent-substrate) |
 | Enterprise lifecycle | `enterprise ...`, run by the gateway's full path | [Enterprise](#enterprise) |
 
 `config.yaml` holds every setting you choose. Every command that changes one (`config set`, `guardrail ...`, `skill|mcp|plugin|tool block|allow`, `policy activate`, the `setup` commands, the TUI) goes through the same config writer, which checks the change before it writes. A running gateway applies a valid change itself and shows a new policy generation in `defenseclaw status`; only the [restart-required keys](#restart-required-keys) need `defenseclaw-gateway restart`. Files derived from `config.yaml`, such as `custom-providers.json` and the generated hook scripts, are rewritten for you. See [Source of truth](/docs/reference/source-of-truth).
@@ -307,7 +309,7 @@ Hook setup aliases (`setup codex`, `setup claude-code` and the rest) add or reco
 | `defenseclaw setup skill-scanner` / `setup mcp-scanner` | Configure the skill and MCP scanners: analyzers, the LLM judge, optional VirusTotal, AI Defense and OSV lookups, and the scan policy. They write `scanners.skill_scanner.*` or `scanners.mcp_scanner.*` (and the shared `llm:` block) in `config.yaml`, then restart a running gateway, as most `setup` subcommands do. `--non-interactive` takes every choice from flags; the [flags are below](#setup-skill-scanner-and-setup-mcp-scanner-flags). See [Scanners](/docs/scanning). |
 | `defenseclaw setup registry` | Interactive wizard that registers a skill or MCP catalog; the same as `defenseclaw registry wizard`. See [Registries](#registries). |
 | `defenseclaw setup migrate-llm [--dry-run] [--no-backup]` | Rewrite a `config.yaml` that still carries pre-v5 `inspect_llm`, `default_llm_*` or guardrail LLM fields into the unified `llm:` block, writing `config.yaml.bak` first unless `--no-backup`. On a current config it prints `Config already in v5 shape — nothing to migrate.` |
-| `defenseclaw setup routing --enable\|--disable\|--status` | Configure or inspect semantic model routing for proxy-mode OpenAI Chat Completions traffic. Managed mode requires Docker; all config changes activate on gateway restart. See [Semantic routing](/docs/guardrail/semantic-routing). |
+| `defenseclaw setup routing --enable\|--disable\|--status` | Configure or inspect semantic model routing with the vLLM Semantic Router container (classifier `vllm_sr`, which needs Docker and a gateway restart). For the in-process `rules` classifier, models, rules and budgets use [`defenseclaw routing`](#routing). See [Semantic routing](/docs/guardrail/semantic-routing). |
 | `defenseclaw setup tokenomics [--enable\|--disable\|--status\|--seed-pricing] [--json]` | Turn per-call model usage and cost on or off and seed the reviewed default price table when `config.yaml` has none. Off by default. See [Tokenomics](/docs/observability/tokenomics). |
 | `defenseclaw setup llm [--show] [--non-interactive] [--provider P] [--model M] [--api-key-env NAME]` | Write the unified or role-scoped LLM block (`--role unified\|agent\|judge`) in `config.yaml`; the key itself goes to `~/.defenseclaw/.env`. `--show` prints the resolved values and changes nothing. Supports SaaS providers and regional Bedrock / Vertex AI / Azure OpenAI via dedicated `--bedrock-*`, `--vertex-*`, `--azure-*` flags, plus `--instance-name` to bind a custom provider from `llm_providers` (use `--provider custom`) and `--inherit-from` to seed from a sibling component. `--ping` / `--no-ping` sends (or skips) a one-shot reachability probe after saving. See [LLM providers](/docs/guardrail/unified-llm-key). |
 | `defenseclaw setup provider add\|list\|show\|remove` | Manage `llm_providers.custom` entries that route LLM traffic through internal or self-hosted endpoints. `custom-providers.json` is derived from them; never edit it. `add` writes the entry and asks a running gateway to reload its provider registry (`--no-reload` skips); omit `--name` for the wizard. `list` prints the live registry. [`add` flags](#setup-provider-add-flags) are below. |
@@ -462,7 +464,7 @@ On a managed standalone device these are refused with exit `3`; see [Managed dev
 | [`quickstart`](/docs/get-started/first-run) | No | Always | Zero-prompt by design; use `init` for the wizard. |
 | [`setup guardrail`](/docs/guardrail/aliases) | Default | `--non-interactive` plus flags | Missing flags fall back to wizard defaults. Hook fail mode and judge fallback models have no flag here. |
 | [`setup <connector>`](/docs/guardrail/aliases) | Yes | Flags plus `--yes` | With other connectors configured the default, also under `--yes`, is to add; `--replace` switches. With `--mode`, a TTY run does not ask for the mode again. |
-| `setup routing` | No | `--enable`, `--disable`, `--status` | Needs Docker. Proxy-mode OpenAI Chat Completions traffic only. |
+| `setup routing` | No | `--enable`, `--disable`, `--status` | The vLLM Semantic Router container: needs Docker. For the `rules` classifier use `defenseclaw routing setup`. |
 | `setup tokenomics` | No | `--enable`, `--disable`, `--status`, `--seed-pricing`, `--json` | Writes `observability.tokenomics` and, when absent, `observability.pricing`. Exit 3 on a managed host. |
 | `keys set` | Hidden prompt without a value | `--value-stdin` (or `--value`, visible in `ps`) | See [Keys](/docs/reference/keys). |
 | `keys fill-missing` | Yes | `--yes` skips the opening confirmation | Prompts for every required key that is unset. |
@@ -520,7 +522,7 @@ Per-connector guardrail controls. `--connector X` is the explicit scope selector
 | `defenseclaw guardrail list-packs [--json]` | Read-only. Lists the built-in rule-pack presets, custom packs found under `~/.defenseclaw/policies/guardrail/` or configured anywhere, and the pack each active connector enforces (per-connector override > global pack > built-in default). `--json` prints `{"version": 1, "global": {...}, "connectors": [...], "packs": [...]}`. |
 | `defenseclaw guardrail use-pack PACK [--connector X] [--no-validate] [--repin [--yes]] [--json]` | Switch rule packs. `PACK` is a preset (`default`, `strict`, `permissive`), a `guardrail.custom_packs` key, a pack name under `~/.defenseclaw/policies/guardrail/`, or a directory. It is written as `guardrail.rule_pack`; a custom directory is also pinned as `guardrail.custom_packs.NAME` with its validated digest, so an edited pack is refused until `--repin` pins it again (it shows the pinned and the new digest, names the other scopes that share the pin, lists every `config.yaml` edit, and asks; if `config.yaml` changed meanwhile it saves nothing and says to run it again; `--yes` for scripts, which `--json` needs). An invalid pack changes nothing; `--no-validate` skips validating a built-in pack. Without `--connector`, every connector uses `PACK` and per-connector packs are removed. `--json` prints `{"version": 1, "ok", "scope", "connector", "pack", "path", "cleared_overrides", "validation", "gateway", "message"}`. |
 | `defenseclaw guardrail use-pack --clear --connector X` | Remove X's rule-pack override so it uses the global pack again. |
-| `defenseclaw guardrail protection list [--json]` | Read-only. Lists the opt-in protection packs (five selectable, one staged) and which scope (the global pack or an active connector) has which on. See [Opt-in protection packs](#opt-in-protection-packs). |
+| `defenseclaw guardrail protection list [--json]` | Read-only. Lists the opt-in protection packs (six selectable, one staged) and which scope (the global pack or an active connector) has which on. See [Opt-in protection packs](#opt-in-protection-packs). |
 | `defenseclaw guardrail protection enable NAME [--connector X] [--profile P] [--json]` | Turn an opt-in protection pack on for a scope: adds `NAME` to `guardrail[.profiles.P][.connectors.C].rules.protections`, which the gateway layers onto the scope's rule pack on its next reload. Staged and unknown packs are refused (exit `1`). The gateway composes the pack in memory on its next reload; nothing is restarted. |
 | `defenseclaw guardrail protection disable NAME [--connector X] [--profile P] [--json]` | Remove `NAME` from that scope's `rules.protections`. If a wider scope enables it, the command refuses with exit `1`; disable it at that wider scope. |
 | `defenseclaw guardrail rule enable\|disable RULE_ID [--connector X] [--profile P] [--json]` | Turn one rule on or off for a scope (`guardrail.rules.enable` / `disable`). An ID the scope's rule pack does not have is refused by the gateway when it reloads, and the previous configuration keeps running. |
@@ -1289,6 +1291,33 @@ teardown stop and delete any that still run. To leave sandboxes in place during 
 `deleting` phases count as running. Only `stopped`, `completed`, `deleted`
 and `missing` do not.
 
+## Routing
+
+`defenseclaw routing` sets up and reads semantic model routing, rules, budgets, prices and usage. The concepts, the rule and budget keys and a worked setup are on [Semantic routing](/docs/guardrail/semantic-routing), [Routing rules and budgets](/docs/enterprise/routing-budgets) and [Tokenomics](/docs/observability/tokenomics). Every command that changes `config.yaml` goes through the same config writer as `config set`. On a managed standalone device the administrator config in the signed bundle owns these keys: the commands that change them are refused with exit `3` and name the key ([Managed command availability](/docs/enterprise/managed-commands)).
+
+| Command | Use it for |
+| --- | --- |
+| `defenseclaw routing setup [--classifier C] [--model M] [--route R] [--yes]` | Guided setup: model aliases, classifier, default model and route rules, then a test. `--classifier rules` needs no Docker. |
+| `defenseclaw routing status [--json]` | Whether routing is on, its models, rules, health and your last decisions. |
+| `defenseclaw routing enable\|disable [--connector claudecode\|codex]` | Turn routing on or off, or route (or stop routing) one hook connector's model calls through the gateway (route-only). `disable --connector` works with the gateway stopped. |
+| `defenseclaw routing models list\|add\|remove\|set-default` | Manage the model aliases (`add NAME`). `add` takes `--provider`, `--model`, `--base-url`, `--api-key-env`, `--api` and `--capability`. `remove` is refused while a rule, budget or default uses the alias. |
+| `defenseclaw routing rules list\|add\|remove\|move` | Manage `routing.admin` rules, or a profile's routing overlay with `--profile`. `add` takes the match flags (`--groups`, `--users`, `--connectors`, `--agents`, `--categories`, `--severity-at-least`) and `--allow`, `--default`, `--deny` with `--message`, and `--at` for the position. |
+| `defenseclaw routing budgets list\|add\|remove` | Manage budgets (`--scope`, `--subject`, `--period`, `--limit-usd`, `--on-exceed`) and list them with the spend so far in the period. |
+| `defenseclaw routing pricing show\|set\|import` | Show the price table, change one model's prices (`--input`, `--output`, `--cache-read`, `--cache-write`, `--reasoning`; bumps the table version) or replace the table from a YAML or JSON file shaped like `observability.pricing`. |
+| `defenseclaw routing test PROMPT [--connector C] [--as-profile P] [--as-user U] [--json]` | Dry run: which model the prompt would go to, and why. No model is called. |
+| `defenseclaw routing explain REQUEST_ID [--json]` | Why a recent call went where it went. The gateway keeps the last 256 decisions. |
+| `defenseclaw routing usage [--by BY] [--since 24h\|7d\|30d] [--json]` | Tokens, calls and cost, yours or, for an administrator, everyone's. |
+
+`defenseclaw setup routing --enable\|--disable\|--status` is the older switch for the vLLM Semantic Router container, which only the `vllm_sr` classifier uses.
+
+The opt-in fleet budget store runs from the gateway binary, on a server of your choice (see [Routing rules and budgets](/docs/enterprise/routing-budgets)):
+
+| Command | Use it for |
+| --- | --- |
+| `defenseclaw-gateway budget-store serve` | Serve the store over HTTPS until stopped. It reads `routing.admin.budget_store.server`. |
+| `defenseclaw-gateway budget-store device issue\|add\|revoke\|list` | Issue one device credential on an administrator workstation, register it on the store host, refuse a device from now on, or list the devices. |
+| `defenseclaw-gateway budget-store report` | Fleet totals per charge key. Store host only. |
+
 ## Sandbox
 
 Linux, and Apple-silicon Macs, where sandboxes are OpenShell MicroVMs that
@@ -1314,6 +1343,10 @@ see also [Sandbox](/docs/sandboxes/first-session).
 | `defenseclaw sandbox enable\|disable <harness>` | Add or remove the shell wrapper that makes a harness command run sandboxed. |
 | `defenseclaw sandbox teardown [--dry-run]` | Remove DefenseClaw's sandboxes, providers, images, gateway change, and wrappers. `defenseclaw uninstall` runs it. |
 | `defenseclaw sandbox kernel-feed install\|status\|uninstall` | Linux: install (as root), check or remove the opt-in sandbox kernel feed, a root service that adds Tetragon's exec and exit records to your docker sandboxes' process trees. Run as yourself, `install` prints the `sudo` command. See [sandbox kernel-feed](/docs/reference/sandbox-cli#sandbox-kernel-feed). |
+
+## Agent Substrate
+
+`defenseclaw substrate ...` runs your coding agents as actors in your organization's [Agent Substrate](/docs/substrate) cluster. It talks to that cluster and needs no local DefenseClaw install, daemon or sandbox. The commands are `login`, `logout`, `whoami`, `run`, `connect`, `list`, `status`, `logs`, `pull`, `checkpoint`, `undo`, `delete`, `migrate`, `approvals`, `approve`, `reject`, `usage`, `secrets`, `policy`, `bundle`, `doctor`, `verify`, `setup` and `template`. Every command and flag is on [Substrate reference](/docs/substrate/reference).
 
 ## Enterprise
 
