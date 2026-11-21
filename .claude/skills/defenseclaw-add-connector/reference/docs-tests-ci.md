@@ -71,7 +71,7 @@ No test checks these. Review each one. They are the pages that name most connect
 | Area | Pages |
 |---|---|
 | Connectors | `connectors/index.mdx`, `connectors/compatibility.mdx`, `connectors/capability-matrix.mdx`, `command-generator.mdx`, `index.mdx` |
-| Setup and guardrails | `get-started/quickstart.mdx`, `reference/cli.mdx`, `guardrail/aliases.mdx`, `guardrail/disabling.mdx`, `guardrail/aliases.mdx`, `guardrail/unified-llm-key.mdx`, `guardrail/semantic-routing.mdx` |
+| Setup and guardrails | `get-started/quickstart.mdx`, `reference/cli.mdx`, `connectors/aliases.mdx`, `guardrail/disabling.mdx`, `connectors/aliases.mdx`, `get-started/unified-llm-key.mdx`, `routing/semantic-routing.mdx` |
 | Reference | `reference/cli.mdx`, `reference/configuration.mdx`, `reference/gateway-api.mdx`, `reference/env-vars.mdx` (generated) |
 | Features | `ai-discovery.mdx`, `hitl.mdx`, `stories/hitl-approvals.mdx`, `guardrail/llm-judge-benchmark.mdx`, `policies/cel/tool-call-state.mdx` |
 | Windows | `get-started/windows/telemetry-security.mdx`, `get-started/windows/paths-troubleshooting.mdx` |

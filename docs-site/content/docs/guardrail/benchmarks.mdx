@@ -393,7 +393,7 @@ judge on each connector, and the commands to reproduce it.
 ## Model routing
 
 The routing evaluation measures the classifiers that can drive
-`routing.classifier` ([semantic routing](/docs/guardrail/semantic-routing)).
+`routing.classifier` ([semantic routing](/docs/routing/semantic-routing)).
 It holds 555 labelled prompts in seven categories (coding, reasoning, chat,
 summarize, sensitive, tool-heavy and cheap-and-fast; 77 to 81 each) and 358
 route-flip prompts made from 70 base prompts. Models wrote the prompts and
@@ -429,7 +429,7 @@ What this shows:
 - **The rule pack finds few sensitive prompts.** The shipped rule pack
   flagged 45% of the sensitive prompts, so 35 of 80 still reached a cloud model
   under the default profile with the keyword rules. Use `local_only` or the
-  sensitive-data check ([semantic routing](/docs/guardrail/semantic-routing))
+  sensitive-data check ([semantic routing](/docs/routing/semantic-routing))
   when a prompt must not leave.
 
 To reproduce it, build `benchmarks/routing/cmd/routing-eval` and run it with

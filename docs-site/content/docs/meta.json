@@ -8,6 +8,7 @@
     "support-matrix",
     "---Features---",
     "guardrail",
+    "routing",
     "policies",
     "scanning",
     "ai-discovery",

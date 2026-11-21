@@ -240,7 +240,7 @@ With `--non-interactive`, a flag changes only what it names. The LLM flags write
 
 ## The judge
 
-With `judge_source: inherit` (the default) the judge is DefenseClaw's `llm:` block: provider, model, key and base URL. Set it once with `defenseclaw setup llm`; see [Unified LLM key](/docs/guardrail/unified-llm-key) for how the key resolves. The recommended model is `anthropic/claude-sonnet-5-5`.
+With `judge_source: inherit` (the default) the judge is DefenseClaw's `llm:` block: provider, model, key and base URL. Set it once with `defenseclaw setup llm`; see [Unified LLM key](/docs/get-started/unified-llm-key) for how the key resolves. The recommended model is `anthropic/claude-sonnet-5-5`.
 
 To give the MCP scanner its own judge, fill its `llm` block and switch the source. The two keys are validated together, so unset `judge_source` first when it is set to `inherit`:
 
@@ -484,7 +484,7 @@ isn't present; it never crashes the gateway.
 ## See also
 
 - [Skill scanner](/docs/scanning/skill-scanner): the sibling scanner for skills, with the same admission pattern
-- [Unified LLM key](/docs/guardrail/unified-llm-key): the `llm:` block the judge inherits and how its key resolves
+- [Unified LLM key](/docs/get-started/unified-llm-key): the `llm:` block the judge inherits and how its key resolves
 - [Block or allow an asset](/docs/policies/admission): the `asset_policy` lists and which rule wins
 - [Admission](/docs/policies/admission): the `admission:` block and the actions per severity
 - [Migrating to v9](/docs/reference/migrate-v9): the v8 to v9 key moves

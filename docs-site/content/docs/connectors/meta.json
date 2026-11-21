@@ -3,6 +3,8 @@
   "pages": [
     "capability-matrix",
     "compatibility",
+    "aliases",
+    "switching-connectors",
     "---Agents---",
     "claudecode",
     "cowork",

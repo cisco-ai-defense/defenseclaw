@@ -14,6 +14,8 @@ call has already run when its output comes back, so DefenseClaw treats the
 output as a warning about what the agent reads next, not as an action to
 stop.
 
+**How good it is.** On the S7 benchmark, the rules alone found 0.64 of the AgentDojo tool-result attacks and 0.01 of the BIPIA email ones, with no benign result alerted. With the full cascade behind them (the decision model and the LLM judge), recall is 0.97 and 0.91, and 0.7% and 0.0% of benign results alert. See [Benchmarks](/docs/guardrail/benchmarks#the-whole-cascade-s7-end-to-end).
+
 ## What is checked
 
 Every tool result goes through one set of checks, whichever way it reaches

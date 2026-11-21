@@ -724,7 +724,7 @@ Optional keys that DefenseClaw 1.0.10 reads. With none set, the plugin is manage
 
 ### Routing and observability behavior
 
-The `routing` block applies to OpenClaw and ZeptoClaw on the proxy's OpenAI-compatible Chat Completions path and, from 1.0.10, to Claude Code and Codex model calls that go through the gateway with `routing.route_only` (Linux, macOS and Windows). `defenseclaw keys list` discovers each non-empty `api_key_env`; the classifier never receives the key value. See [Semantic routing](/docs/guardrail/semantic-routing).
+The `routing` block applies to OpenClaw and ZeptoClaw on the proxy's OpenAI-compatible Chat Completions path and, from 1.0.10, to Claude Code and Codex model calls that go through the gateway with `routing.route_only` (Linux, macOS and Windows). `defenseclaw keys list` discovers each non-empty `api_key_env`; the classifier never receives the key value. See [Semantic routing](/docs/routing/semantic-routing).
 
 Routing keys added in 1.0.10. Each one is optional; leaving it out keeps the 1.0.9 behavior. On a managed host they come from the admin `config.yaml` in the signed policy bundle, and a bundle that sets any of them needs `--min-product-version 1.0.10`.
 
@@ -754,7 +754,7 @@ Routing keys added in 1.0.10. Each one is optional; leaving it out keeps the 1.0
 | `routing.admin.rules` | ordered list of `id`, `match` (`groups`, `users`, `connectors`, `agents`, `categories`, `severity_at_least`), and either `allow` / `default` or `action: deny` with an optional `message`. Every matching rule applies: a deny wins, `allow` lists intersect (and also bind a request that is not routed), the first matching `default` that is allowed is used | none |
 | `routing.admin.budgets` | list of `id`, `scope` (`user`, `group`, `connector`), `subject` (a user or `*` for each user, one group, a connector or `*`), `period` (`day`, `week` from Monday, `month`; UTC), `limit_usd`, `on_exceed` (`warn`, `deny`, `downgrade:<alias>[,<alias>]`). Needs `observability.tokenomics` on with computed cost and the `agent` role recorded (spend is kept in its own ledger, not the local usage store) | none |
 | `routing.admin.visibility.users_see` | `own` (a user reads only their own usage, decisions and budgets) or `none` (only administrators read them) | `own` |
-| `routing.admin.budget_store` | opt-in fleet budget store, standalone managed devices only: `url` (`https://host[:port]`), `credential` (name of the protected credential that holds this device's issued credential), `ca_file` (absolute path), `sync_interval` (10s to 10m), `timeout_ms` (100 to 10000). See [Routing rules and budgets](/docs/enterprise/routing-budgets) | off; `credential: routing-budget-store-device`, `sync_interval: 30s`, `timeout_ms: 2000` |
+| `routing.admin.budget_store` | opt-in fleet budget store, standalone managed devices only: `url` (`https://host[:port]`), `credential` (name of the protected credential that holds this device's issued credential), `ca_file` (absolute path), `sync_interval` (10s to 10m), `timeout_ms` (100 to 10000). See [Routing rules and budgets](/docs/routing/routing-budgets) | off; `credential: routing-budget-store-device`, `sync_interval: 30s`, `timeout_ms: 2000` |
 | `routing.admin.budget_store.server` | store host only (`defenseclaw-gateway budget-store serve`): `listen`, `tls_cert_file`, `tls_key_file`, `db_path` (absolute paths), `rate_limit_per_minute` per device, `device_daily_cap_usd` | `rate_limit_per_minute: 600`, `device_daily_cap_usd: 500` |
 | `guardrail.profiles.<name>.routing` | `allowed_aliases`, `denied_providers`, `default_alias`, `categories`, `allow_user_override`: only tightens `routing.admin`; a key in `routing.admin.locked` is refused | nothing added |
 
@@ -824,7 +824,7 @@ When a queue overflows, the newest enqueue is dropped; older work, the mandatory
 
 In `hot` mode a change to a restart-required key is not rejected: the gateway keeps that key's running value, logs `[config] restart the gateway to apply <key>; the rest of the change applies now`, and applies everything else. The storage paths (`data_dir`, `observability.local.path`, `observability.local.judge_bodies_path`) and `deployment_mode` cannot be kept that way: the gateway refuses that reload, and every later one, until it restarts. `/health` shows `last_reload_error`, and an `/enforce` write answers `applied: false`. Changing `gateway.config_reload.mode` itself needs a restart.
 
-The LLM block, regional Bedrock, Vertex and Azure backends and how doctor validates them are on [LLM providers](/docs/guardrail/unified-llm-key).
+The LLM block, regional Bedrock, Vertex and Azure backends and how doctor validates them are on [LLM providers](/docs/get-started/unified-llm-key).
 
 ## OpenShell sandbox settings
 

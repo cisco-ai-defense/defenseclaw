@@ -16,7 +16,9 @@ keywords:
 
 The decision model is a small, fast model that answers one question per tool call, "allow, confirm or block?", with calibrated probabilities. It is off by default. To choose what its answers do (for example, alert instead of asking when it is unsure) per connector or profile, see [Configure the cascade](/docs/guardrail/configure-cascade).
 
-Like the [unified LLM key](/docs/guardrail/unified-llm-key), it is one setting, `decision_model:`, used by two components:
+**How good it is.** On the S7 benchmark, adding the decision model to the rules raised alert recall from 0.21 to 0.91, and 25.8% of benign calls then raised an alert. With the LLM judge behind it, recall is 0.55 and 4.8% of benign calls alert. See [Benchmarks](/docs/guardrail/benchmarks#the-whole-cascade-s7-end-to-end).
+
+Like the [unified LLM key](/docs/get-started/unified-llm-key), it is one setting, `decision_model:`, used by two components:
 
 | Component | What it does with the decision model |
 | --- | --- |
