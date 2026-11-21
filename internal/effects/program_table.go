@@ -130,6 +130,7 @@ type Program struct {
 	MovesSources   bool     // the sources are removed from where they were (mv, move, ren, Move-Item): each is also a delete
 	AppendFlag     string   // switch that turns the file operands into appends (tee -a)
 	InertOperands  bool     // a PosNone program whose positionals are inert data (echo, true) -- else a positional is unaccounted (review R5-2)
+	BuiltinUnknown bool     // fallback shell builtin: positional words are unknown reads, never assumed data
 	OptionsFirst   bool     // options end at the first operand (BSD getopt, no permutation): later words are operands (GAP-0219)
 	// Longs are every long option of the GNU tool (gnuLongOptions): a long
 	// option word that is an unambiguous prefix of one of them is that option
@@ -188,6 +189,17 @@ var gnuLongOptions = map[string]string{
 	"md5sum":    "--binary --check --help --ignore-missing --quiet --status --strict --tag --text --version --warn --zero",
 }
 
+// posixShellBuiltins is the union of common Bash and Zsh builtins. The oracle
+// test checks the installed shells and keeps a real builtin from falling
+// through to an inert, unmodeled-program reading.
+var posixShellBuiltins = map[string]bool{}
+
+func initPOSIXShellBuiltins() {
+	for _, name := range strings.Fields(`. : [ alias bg bind break builtin caller cd command compgen complete compopt continue declare dirs disown echo enable eval exec exit export false fc fg getopts hash help history jobs kill let local logout mapfile popd printf pushd pwd read readarray readonly return set shift shopt source suspend test times trap true type typeset ulimit umask unalias unset wait zcompile zformat zftp zle zmodload zparseopts zprof zpty zsocket zstyle`) {
+		posixShellBuiltins[name] = true
+	}
+}
+
 var (
 	posixTable   = map[string]Program{}
 	windowsTable = map[string]Program{}
@@ -197,6 +209,7 @@ var (
 )
 
 func init() {
+	initPOSIXShellBuiltins()
 	buildPOSIXTable()
 	buildBSDTable()
 	buildWindowsTable()
@@ -257,8 +270,13 @@ func lookupPOSIX(name string, flavor Flavor, bsd bool) (Program, bool) {
 			return p, true
 		}
 	}
-	p, ok := posixTable[name]
-	return p, ok
+	if p, ok := posixTable[name]; ok {
+		return p, true
+	}
+	if posixShellBuiltins[name] {
+		return Program{Names: []string{name}, Pos: PosAllRead, Strict: true, BuiltinUnknown: true}, true
+	}
+	return Program{}, false
 }
 
 // bsdRejectsFlag reports an option word the BSD row does not accept: a long
@@ -623,6 +641,8 @@ func buildPOSIXTable() {
 	// launcher grammar in the POSIX table so its command body is read.
 	add(Program{Names: []string{"powershell", "pwsh"}, Pos: PosNone, PSLaunch: true,
 		Flags: map[string]Flag{"-command": {Value: true, Role: RoleExecCode}, "-c": {Value: true, Role: RoleExecCode}, "-encodedcommand": {Value: true, Role: RoleExecCode}, "-enc": {Value: true, Role: RoleExecCode}, "-ec": {Value: true, Role: RoleExecCode}, "-e": {Value: true, Role: RoleExecCode}, "-file": {Value: true, Role: RoleExecCode}}})
+	// These builtins only format or emit arguments; their operands are data.
+	add(Program{Names: []string{"echo", "printf", "true", "false", ":", "pwd", "read"}, Pos: PosNone, InertOperands: true})
 	add(Program{Names: []string{"cat", "tac", "less", "more", "bat", "nl"}, Pos: PosAllRead,
 		Flags: fl(nil, "-n", "-b", "-E", "-s", "-v", "-A", "-T", "-e", "-t", "-u", "-r", "--number", "--show-ends")})
 	add(Program{Names: []string{"head", "tail"}, Pos: PosAllRead,

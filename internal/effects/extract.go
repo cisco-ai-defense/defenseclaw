@@ -1375,7 +1375,7 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 	if progReason != "" {
 		base.addReason(progReason, ScopeTarget)
 	}
-	if !known {
+	if !known || entry.BuiltinUnknown {
 		base.RoleState = RoleStateUnknown
 		base.addReason(ReasonUnmodeledProgram, ScopeRole)
 	}
@@ -1388,7 +1388,7 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 	}
 	prevPrim := w.lastPrim
 	cmdStart := len(w.res.Effects) // first effect index (0-based) of this command
-	unaccounted := wrapperUA || declUA || bsdReject
+	unaccounted := wrapperUA || declUA || bsdReject || entry.BuiltinUnknown
 	nestedStart := -1
 	// Single choke point (review N4-1 / R5-1): any step that leaves an argv
 	// token unaccounted (wrapper, launcher, tar, operands) sets unaccounted;
