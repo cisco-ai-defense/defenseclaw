@@ -49,16 +49,22 @@ func starvedGlob(spinners int, fn func()) time.Duration {
 // ~/.defenseclaw/*/conf*.yaml wrote the state configs of 64 folders unseen
 // whenever the box was slow. The bound covers what rel read on an idle box:
 // 64 folders of 2,000 names each (past one scheduler slice of reading) are
-// read whole.
+// read whole. On Windows the pattern words carry the home with forward
+// slashes (a backslash literal is never expanded, statePatternWord) and each
+// folder holds 200 names, since NTFS and Defender make 128,000 file creates
+// cost minutes there.
 func TestStateGlobTwinCountsWorkNotTime(t *testing.T) {
-	home := t.TempDir()
+	home, names := t.TempDir(), 2000
+	if runtime.GOOS == "windows" {
+		home, names = filepath.ToSlash(home), 200
+	}
 	state := filepath.Join(home, ".defenseclaw")
 	for d := range maxStateGlobMatches {
 		dir := filepath.Join(state, fmt.Sprintf("d%02d", d))
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			t.Fatal(err)
 		}
-		for i := range 2000 {
+		for i := range names {
 			if err := os.WriteFile(filepath.Join(dir, fmt.Sprintf("n%03d", i)), nil, 0o600); err != nil {
 				t.Fatal(err)
 			}
