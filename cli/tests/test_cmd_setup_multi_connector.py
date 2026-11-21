@@ -2095,7 +2095,7 @@ class TestRemoveConnector(unittest.TestCase):
             result = _invoke(["remove", "codex", "--force", "--no-restart"], self.app)
         self.assertNotEqual(result.exit_code, 0, msg=result.output)
         self.assertIn("--yes", " ".join(result.output.split()))
-        self.assertEqual(set(self.app.cfg.guardrail.connectors), {"codex"})
+        self.assertEqual(self.app.cfg.guardrail.connector, "codex")
 
     def test_remove_prompts_on_a_terminal(self):
         self._seed_map("codex", "cursor", "devin")
@@ -2743,8 +2743,8 @@ class TestRemoveConnector(unittest.TestCase):
     def test_remove_declined_is_noop(self):
         self._seed_map("codex", "cursor")
         with self._no_restart_bounce(), patch(
-            "defenseclaw.commands.cmd_setup.click.confirm", return_value=False
-        ):
+            "defenseclaw.commands.cmd_setup._is_interactive", return_value=True
+        ), patch("defenseclaw.commands.cmd_setup.click.confirm", return_value=False):
             result = _invoke(["remove", "cursor", "--no-restart"], self.app)
         self.assertEqual(result.exit_code, 0, msg=result.output)
         self.assertIn("Aborted", result.output)

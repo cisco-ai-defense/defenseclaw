@@ -14710,6 +14710,23 @@ def _plugin_teardown_problem(cfg, connector: str) -> str:
     return ""
 
 
+def _remove_can_prompt(connector: str) -> bool:
+    """False, with the flag to pass, when ``setup remove`` has no terminal to ask on.
+
+    A script, an MDM step or a service run has no console: the confirmation
+    prompt would wait on stdin forever (GAP-1645). ``--yes`` is the explicit
+    answer for those runs.
+    """
+    if _is_interactive():
+        return True
+    ux.echo(
+        f"  ✗ Cannot ask whether to remove {connector!r}: there is no terminal to ask on. "
+        f"Re-run with --yes to remove it without a prompt: defenseclaw setup remove {connector} --yes",
+        err=True,
+    )
+    return False
+
+
 def _remove_connector(
     app: AppContext,
     *,
@@ -14808,6 +14825,8 @@ def _remove_connector(
                 err=True,
             )
             return False
+        if not yes and not _remove_can_prompt(match):
+            return False
         if not yes and not click.confirm(
             f"Remove the last connector {match!r} and fully unconfigure enforcement?",
             default=False,
@@ -14816,6 +14835,8 @@ def _remove_connector(
             # the setup-add cancel path — not an error.
             click.echo("  Aborted; no changes made.")
             return True
+    elif not yes and not _remove_can_prompt(match):
+        return False
     elif not yes and not click.confirm(f"Remove connector {match!r}?", default=True):
         click.echo("  Aborted; no changes made.")
         return True
