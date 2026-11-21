@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -95,7 +96,11 @@ func TestGAP1316WindowsReadingTwinLeavesTheCallsScriptReadingsOut(t *testing.T) 
 // and the GAP-1316 row on the Codex and Copilot shell routes, in every tier,
 // with the twin leaving the call's script readings out and with the twin
 // judging them again: every answer is the same. On native Windows the
-// protected rows still block.
+// authorized_keys row still blocks, and the writes of the DefenseClaw config
+// are proven state writes: tamper.detector_state_write in every tier, with
+// the GAP-0747 owner tiering (2026-11-15T15:20Z) a HIGH alert in default,
+// permissive and managed default and a block in strict and managed strict
+// (gap1173WantFor).
 func TestGAP1316WindowsReadingTwinAnswersAreUnchanged(t *testing.T) {
 	prevHost := windowsHookHost
 	windowsHookHost = func() bool { return true }
@@ -105,20 +110,21 @@ func TestGAP1316WindowsReadingTwinAnswersAreUnchanged(t *testing.T) {
 	rel := filepath.Join(".defenseclaw", "config.yaml")
 	write := "type nul >> " + rel
 	move := "Set-Location " + home + "; "
+	// kind: "write" is a proven state write, "block" blocks in every tier,
+	// "" is not judged here beyond the twin equality.
 	rows := []struct {
-		id, command string
-		block       bool
+		id, command, kind string
 	}{
-		{"w-plain-12", move + gap1316Appends(12), false},
-		{"set-location-home-only", move + write, true},
-		{"cert-form", move + "cd " + missing + "; " + write, true},
-		{"push-location", move + "Push-Location " + missing + "; " + write, true},
-		{"add-content", move + "cd " + missing + "; Add-Content -Path " + rel + " -Value x; " + gap1316Appends(2), true},
-		{"keys", move + "Add-Content " + filepath.Join(home, ".ssh", "authorized_keys") + " x; " + gap1316Appends(2), true},
-		{"launcher", move + `powershell -NoProfile -Command "type nul >> ` + rel + `"; ` + gap1316Appends(1), true},
-		{"benign-append", "cd " + missing + "; type nul >> notes.txt", false},
-		{"benign-project", "Set-Location " + project + "; cd " + missing + "; " + gap1316Appends(3), false},
-		{"benign-read", move + "cd " + missing + "; Get-Content " + rel, false},
+		{"w-plain-12", move + gap1316Appends(12), ""},
+		{"set-location-home-only", move + write, "write"},
+		{"cert-form", move + "cd " + missing + "; " + write, "write"},
+		{"push-location", move + "Push-Location " + missing + "; " + write, "write"},
+		{"add-content", move + "cd " + missing + "; Add-Content -Path " + rel + " -Value x; " + gap1316Appends(2), "write"},
+		{"keys", move + "Add-Content " + filepath.Join(home, ".ssh", "authorized_keys") + " x; " + gap1316Appends(2), "block"},
+		{"launcher", move + `powershell -NoProfile -Command "type nul >> ` + rel + `"; ` + gap1316Appends(1), "write"},
+		{"benign-append", "cd " + missing + "; type nul >> notes.txt", ""},
+		{"benign-project", "Set-Location " + project + "; cd " + missing + "; " + gap1316Appends(3), ""},
+		{"benign-read", move + "cd " + missing + "; Get-Content " + rel, ""},
 	}
 	answer := func(p gap0437Pack, route, command string, keep bool) map[string]any {
 		windowsTwinsKeepHostReadings = keep
@@ -136,8 +142,20 @@ func TestGAP1316WindowsReadingTwinAnswersAreUnchanged(t *testing.T) {
 				if !reflect.DeepEqual(left, kept) {
 					t.Errorf("%s %s %s: answer %v, want %v as with the twin's own script readings", p.name, route, r.id, left, kept)
 				}
-				if runtime.GOOS == "windows" && r.block && left["action"] != "block" && (!p.managed || route != "copilot") {
-					t.Errorf("%s %s %s: action %v, want block", p.name, route, r.id, left["action"])
+				if runtime.GOOS != "windows" || r.kind == "" || (p.managed && route == "copilot") {
+					continue
+				}
+				action, _ := left["action"].(string)
+				var rules []string
+				ids, _ := left["rule_ids"].([]any)
+				for _, id := range ids {
+					rules = append(rules, fmt.Sprint(id))
+				}
+				switch want := gap1173WantFor("write", p.name, action, rules); {
+				case r.kind == "block" && action != "block":
+					t.Errorf("%s %s %s: action %q rules %v, want block", p.name, route, r.id, action, rules)
+				case r.kind == "write" && (action != want || !slices.Contains(rules, gap0747StateRule)):
+					t.Errorf("%s %s %s: action %q rules %v, want %q with %s", p.name, route, r.id, action, rules, want, gap0747StateRule)
 				}
 			}
 		}
