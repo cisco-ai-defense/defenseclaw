@@ -6,9 +6,15 @@
 package hookpaths
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 )
+
+// Keep Windows directory, junction, share, and MSYS path handling unchanged.
+func pathOpenDirectory(name string) (*os.File, error) {
+	return pathOpen(name)
+}
 
 // networkShareRoot is the \\server\share volume of a UNC path, also spelled
 // with forward slashes or in the \\?\UNC\ and \\.\UNC\ forms, as the path
