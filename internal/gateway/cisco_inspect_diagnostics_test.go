@@ -33,45 +33,37 @@ func TestCiscoInspectFailureDiagnosticsFollowLateStderrRedirect(t *testing.T) {
 	SetManagedEnterpriseActive(true)
 	t.Cleanup(func() { SetManagedEnterpriseActive(managedEnterpriseWasActive) })
 
-	serviceLog, err := os.CreateTemp(t.TempDir(), "gateway-*.log")
-	if err != nil {
-		t.Fatalf("create redirected gateway log: %v", err)
+	// TestMain replaced os.Stderr after package init with the stderr tee
+	// (GAP-1591): a late redirect, as the Windows service host makes. The
+	// test does not swap os.Stderr itself, which would race the read-loop
+	// drainer that reads it (GAP-1602).
+	if os.Stderr == stderrAtPackageInit {
+		t.Fatal("os.Stderr is still the stream of package init: no late redirect to follow")
 	}
-	originalStderr := os.Stderr
-	os.Stderr = serviceLog
-	t.Cleanup(func() {
-		os.Stderr = originalStderr
-		_ = serviceLog.Close()
-	})
 
 	const privateResponseMarker = "private-tenant-response-marker"
-	verdict := doInspectHTTP(t.Context(), nil, inspectCall{
-		client: &http.Client{Transport: ciscoRoundTripFunc(func(request *http.Request) (*http.Response, error) {
-			return &http.Response{
-				StatusCode: http.StatusForbidden,
-				Header:     make(http.Header),
-				Body: io.NopCloser(strings.NewReader(
-					`{"code":403,"message":"Forbidden","detail":"` + privateResponseMarker + `"}`,
-				)),
-				Request: request,
-			}, nil
-		})},
-		endpoint: "https://inspect.example.test",
-		urlPath:  "/api/v1/inspect/chat",
-		payload:  map[string]interface{}{"messages": []interface{}{}},
-		setAuth:  func(*http.Request) {},
+	var verdict *ScanVerdict
+	logText := captureStderr(t, func() {
+		verdict = doInspectHTTP(t.Context(), nil, inspectCall{
+			client: &http.Client{Transport: ciscoRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusForbidden,
+					Header:     make(http.Header),
+					Body: io.NopCloser(strings.NewReader(
+						`{"code":403,"message":"Forbidden","detail":"` + privateResponseMarker + `"}`,
+					)),
+					Request: request,
+				}, nil
+			})},
+			endpoint: "https://inspect.example.test",
+			urlPath:  "/api/v1/inspect/chat",
+			payload:  map[string]interface{}{"messages": []interface{}{}},
+			setAuth:  func(*http.Request) {},
+		})
 	})
 	if verdict != nil {
 		t.Fatalf("failure response verdict=%+v, want nil", verdict)
 	}
-	if err := serviceLog.Sync(); err != nil {
-		t.Fatalf("sync redirected gateway log: %v", err)
-	}
-	contents, err := os.ReadFile(serviceLog.Name())
-	if err != nil {
-		t.Fatalf("read redirected gateway log: %v", err)
-	}
-	logText := string(contents)
 	for _, expected := range []string{
 		"[cisco-ai-defense] error:",
 		"[gateway] error subsystem=cisco-inspect code=INVALID_RESPONSE",
@@ -90,10 +82,20 @@ func TestCiscoInspectFailureDiagnosticsFollowLateStderrRedirect(t *testing.T) {
 	if strings.Contains(logText, "response_body=") {
 		t.Fatalf("redirected gateway log exposed an unrestricted response body: %q", logText)
 	}
-	if len(contents) > 1024 {
-		t.Fatalf("redirected diagnostic length=%d, want <= 1024", len(contents))
+	// The capture can hold other goroutines' lines too: bound this call's.
+	diagnostic := 0
+	for line := range strings.SplitAfterSeq(logText, "\n") {
+		if strings.Contains(line, "[cisco-ai-defense]") || strings.Contains(line, "subsystem=cisco-inspect") {
+			diagnostic += len(line)
+		}
+	}
+	if diagnostic > 1024 {
+		t.Fatalf("redirected diagnostic length=%d, want <= 1024", diagnostic)
 	}
 }
+
+// stderrAtPackageInit is the stream the package-initialized log writers saw.
+var stderrAtPackageInit = os.Stderr
 
 func TestCiscoInspectFailureDiagnosticsAreUsefulAndSecretSafe(t *testing.T) {
 	// The upstream diagnostic contract must remain secret-safe even when the
