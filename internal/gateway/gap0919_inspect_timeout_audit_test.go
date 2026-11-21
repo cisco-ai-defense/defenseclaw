@@ -125,6 +125,10 @@ func TestInspectToolScanTimeoutWritesOneAuditRowAndCountsTheCheck(t *testing.T) 
 // The content routes answer 504 past the scan budget too; each writes its
 // own timeout row (GAP-0919).
 func TestInspectContentRoutesScanTimeoutWritesOneAuditRow(t *testing.T) {
+	// The scan waits for the budget: with only a 1 ns budget, a Windows timer
+	// tick can come after the scan and the route answers 200.
+	inspectScanHoldForTest = func(ctx context.Context) { <-ctx.Done() }
+	t.Cleanup(func() { inspectScanHoldForTest = nil })
 	big := strings.Repeat("hello world ", maxInspectContentLen/12)
 	output, _ := json.Marshal(big)
 	for _, tc := range []struct {

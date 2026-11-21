@@ -78,6 +78,13 @@ func (a *APIServer) inspectScanBudget() time.Duration {
 	return inspectScanTimeout
 }
 
+// inspectScanHoldForTest, when a test sets it, runs in the scan goroutine of
+// scanWithTimeout and scanToolResultWithTimeout before the scan. A test holds
+// it until the budget ends so the 504 path does not race the host timer: a
+// 1 ns budget fires on the next timer tick, after a sub-millisecond scan on
+// Windows. Runtime code never sets it.
+var inspectScanHoldForTest func(context.Context)
+
 // scanWithTimeout runs ScanAllRules under a context deadline. Returns partial
 // results if the deadline fires — the caller should treat a timeout as a
 // high-severity finding.
@@ -86,7 +93,11 @@ func scanWithTimeout(ctx context.Context, text, toolName string, timeout time.Du
 	defer cancel()
 
 	ch := make(chan []RuleFinding, 1)
+	hold := inspectScanHoldForTest
 	go func() {
+		if hold != nil {
+			hold(ctx)
+		}
 		ch <- scanAllRulesFor(ctx, text, toolName)
 	}()
 	select {
@@ -105,7 +116,11 @@ func scanToolResultWithTimeout(ctx context.Context, text, toolName string, timeo
 	defer cancel()
 
 	ch := make(chan []RuleFinding, 1)
+	hold := inspectScanHoldForTest
 	go func() {
+		if hold != nil {
+			hold(ctx)
+		}
 		ch <- toolResponseEndpointFindings(snapshotRulePackGenerationFor(ctx, profileRequestConnector(ctx)), text, toolName, !ManagedEnterpriseActive())
 	}()
 	select {
