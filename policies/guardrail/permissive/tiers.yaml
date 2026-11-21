@@ -1,0 +1,38 @@
+# Tier table of this rule pack (DET111 D4, internal/guardrail/decide).
+# One row per proof class; floor is the least action, levels false drops the
+# finding from the severity mapping, severity replaces the finding's own.
+version: 1
+tier: permissive
+rows:
+  - id: evaluation-fault
+    source: rel-1-0-10:GAP-0486
+    per_user:
+      floor: block
+    managed:
+      floor: block
+  - id: unverified-path
+    source: rel-1-0-10:TOOL-PATH-UNVERIFIED managed close
+    per_user:
+      floor: allow
+    managed:
+      floor: block
+  - id: truncated
+    source: rel-1-0-6:GAP-0675
+    per_user:
+      floor: alert
+      levels: false
+    managed:
+      floor: alert
+      levels: false
+  - id: state-write
+    source: rel-1-0-10:GAP-0747
+    per_user:
+      floor: alert
+    managed:
+      floor: alert
+  - id: shell-protected-file
+    source: rel-1-0-6:GAP-0675
+    per_user:
+      floor: alert
+    managed:
+      floor: alert

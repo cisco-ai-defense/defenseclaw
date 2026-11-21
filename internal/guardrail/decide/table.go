@@ -136,7 +136,7 @@ var builtin = Table{Rows: []Row{
 		// not answer for, on every surface, in every tier; per-user keeps
 		// the pack's levels.
 		ID: RowUnverifiedPath, Certainty: []Certainty{CertMaybe}, Reach: []string{ReachFS},
-		Content: true, SecureClient: true, Source: "managedClosesOnUnverifiedPath",
+		Content: true, SecureClient: true, Source: "rel-1-0-10:TOOL-PATH-UNVERIFIED managed close",
 		Cells: [deploymentCount][tierCount]Cell{
 			uniform(Cell{Levels: true}), uniform(Cell{Floor: Block, Levels: true}),
 		},
@@ -188,36 +188,45 @@ type ColumnRow struct {
 	Managed Cell
 }
 
-type yamlCell struct {
+// CellYAML, RowYAML and ColumnYAML are the tiers.yaml schema.
+type CellYAML struct {
 	Floor    string `yaml:"floor"`
 	Levels   *bool  `yaml:"levels,omitempty"`
 	Severity string `yaml:"severity,omitempty"`
 }
 
-type yamlRow struct {
+type RowYAML struct {
 	ID      string   `yaml:"id"`
 	Source  string   `yaml:"source,omitempty"`
-	PerUser yamlCell `yaml:"per_user"`
-	Managed yamlCell `yaml:"managed"`
+	PerUser CellYAML `yaml:"per_user"`
+	Managed CellYAML `yaml:"managed"`
 }
 
-type yamlColumn struct {
+type ColumnYAML struct {
 	Version int       `yaml:"version"`
 	Tier    string    `yaml:"tier"`
-	Rows    []yamlRow `yaml:"rows"`
+	Rows    []RowYAML `yaml:"rows"`
 }
 
-// ParseColumn reads and checks a pack's tiers.yaml: version 1, a known tier,
-// every row id a row of the built-in table and listed once, known actions
-// and severities, and a floor of allow only where the cell keeps the levels
-// (a cell that maps nothing would allow the finding silently).
+// TiersFile is the tier table file of a rule pack.
+const TiersFile = "tiers.yaml"
+
+// ParseColumn reads and checks a pack's tiers.yaml (ColumnYAML.Column).
 func ParseColumn(data []byte) (*Column, error) {
-	var raw yamlColumn
+	var raw ColumnYAML
 	dec := yaml.NewDecoder(bytes.NewReader(data))
 	dec.KnownFields(true)
 	if err := dec.Decode(&raw); err != nil {
 		return nil, fmt.Errorf("tiers.yaml: %w", err)
 	}
+	return raw.Column()
+}
+
+// Column checks a decoded tiers.yaml: version 1, a known tier, every row id
+// a row of the built-in table and listed once, known actions and
+// severities, and a floor of allow only where the cell keeps the levels (a
+// cell that maps nothing would allow the finding silently).
+func (raw ColumnYAML) Column() (*Column, error) {
 	if raw.Version != 1 {
 		return nil, fmt.Errorf("tiers.yaml: version %d, want 1", raw.Version)
 	}
@@ -248,7 +257,7 @@ func ParseColumn(data []byte) (*Column, error) {
 	return col, nil
 }
 
-func (c yamlCell) cell(row, deployment string) (Cell, error) {
+func (c CellYAML) cell(row, deployment string) (Cell, error) {
 	floor := strings.ToLower(strings.TrimSpace(c.Floor))
 	switch floor {
 	case "allow", "alert", "confirm", "block":
@@ -306,13 +315,13 @@ func (t *Table) ColumnOf(tier Tier) *Column {
 // MarshalColumn writes col as tiers.yaml, with each row's source as written
 // in the built-in table.
 func MarshalColumn(col *Column) ([]byte, error) {
-	raw := yamlColumn{Version: 1, Tier: col.Tier.String()}
+	raw := ColumnYAML{Version: 1, Tier: col.Tier.String()}
 	for _, r := range col.Rows {
 		source := ""
 		if b := builtin.row(r.ID); b != nil {
 			source = b.Source
 		}
-		raw.Rows = append(raw.Rows, yamlRow{ID: r.ID, Source: source, PerUser: toYAMLCell(r.PerUser), Managed: toYAMLCell(r.Managed)})
+		raw.Rows = append(raw.Rows, RowYAML{ID: r.ID, Source: source, PerUser: toYAMLCell(r.PerUser), Managed: toYAMLCell(r.Managed)})
 	}
 	var buf bytes.Buffer
 	buf.WriteString("# Tier table of this rule pack (DET111 D4, internal/guardrail/decide).\n")
@@ -329,8 +338,8 @@ func MarshalColumn(col *Column) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-func toYAMLCell(c Cell) yamlCell {
-	out := yamlCell{Floor: c.Floor.String()}
+func toYAMLCell(c Cell) CellYAML {
+	out := CellYAML{Floor: c.Floor.String()}
 	if !c.Levels {
 		f := false
 		out.Levels = &f

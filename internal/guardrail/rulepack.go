@@ -40,6 +40,7 @@ import (
 	"syscall"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/decide"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/semantic"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	policyassets "github.com/defenseclaw/defenseclaw/policies"
@@ -55,7 +56,11 @@ var defaultsFS embed.FS
 
 // RulePack is the top-level container loaded from a rule-pack directory.
 type RulePack struct {
-	Suppressions   *SuppressionsConfig
+	Suppressions *SuppressionsConfig
+	// Tiers is the pack's tier table column (tiers.yaml, DET111 D4): the
+	// pack's own tier and what each proof class is worth in it. Nil keeps
+	// the built-in column of decide.Builtin().
+	Tiers          *decide.Column
 	JudgeConfigs   map[string]*JudgeYAML
 	SensitiveTools *SensitiveToolsConfig
 	RuleFiles      []*RulesFileYAML
@@ -399,6 +404,17 @@ func loadRulePack(dir string, validateManifest bool) (*RulePack, error) {
 		}
 		rp.Suppressions = &cfg
 	}
+	if _, ok := inventory.files[decide.TiersFile]; ok {
+		var raw decide.ColumnYAML
+		if err := decode(decide.TiersFile, &raw); err != nil {
+			return nil, err
+		}
+		col, err := raw.Column()
+		if err != nil {
+			return nil, rulePackErr(decide.TiersFile, "invalid_tiers", err.Error())
+		}
+		rp.Tiers = col
+	}
 	if _, ok := inventory.files["sensitive-tools.yaml"]; ok {
 		var cfg SensitiveToolsConfig
 		if err := decode("sensitive-tools.yaml", &cfg); err != nil {
@@ -740,7 +756,7 @@ func isRecognizedRulePackYAML(rel string) bool {
 		return false
 	}
 	switch rel {
-	case "suppressions.yaml", "sensitive-tools.yaml", "rules/local-patterns.yaml":
+	case "suppressions.yaml", "sensitive-tools.yaml", "rules/local-patterns.yaml", decide.TiersFile:
 		return true
 	}
 	for _, name := range knownJudgeNames {
