@@ -106,7 +106,16 @@ func windowsListPrefixAnchoredIndex(command string, prefixes []string) (int, boo
 // times, each costing about 2 ms per statement (rel-1-0-10:GAP-1587). The
 // runs are found from the keys of the prefixes of 1, 2, 4, 8 ... statements
 // and the list without its last statement, bisected where two of them
-// differ (windowsListPrefixRunEnds).
+// differ (windowsListPrefixRunEnds). That search is for a call whose own
+// reading is complete or invalid, whose list without its last statement the
+// hook read before (ec38ad5973). A call whose own reading is partial or
+// ambiguous, which the hook read no prefix of, is read at its first cut only
+// (the statement a trailer hides in the GAP-0348 round-2 fixtures), when that
+// prefix is read another way than the call: the search computed the keys of
+// up to log2(n)+2 prefixes, each a PowerShell and a POSIX analysis on the
+// Codex route, on every such list, and long benign lists of that kind (most
+// lists on a Windows folder) cost 5-12% more at the median and more than
+// 1.10x at p99 (FX13-WLIST perf, TST-10544).
 //
 // A prefix runs exactly as written whatever follows it, folder moves included,
 // so it cannot invent a folder or a write the call does not make, and a fork
@@ -166,7 +175,16 @@ func windowsListPrefixTwinRequests(request trustedActionRequest, facts actionfac
 		return windowsListPrefixKeyOf(twin.Input.DialectHint, actionfacts.Analyze(twin.Input).Parse)
 	}
 	whole := windowsListPrefixKeyOf("", facts.Parse)
-	ends, capped := windowsListPrefixRunEnds(count, whole, key, windowsListPrefixMaxKeys)
+	var ends []int
+	var capped bool
+	switch facts.Parse.Status {
+	case actionfacts.StatusPartial, actionfacts.StatusAmbiguous:
+		if key(0) != whole {
+			ends = []int{0}
+		}
+	default:
+		ends, capped = windowsListPrefixRunEnds(count, whole, key, windowsListPrefixMaxKeys)
+	}
 	// The anchored reading goes first, so the cap never drops it.
 	if anchored, ok := windowsListPrefixAnchoredIndex(command, prefixes); ok && !slices.Contains(ends, anchored) {
 		ends = append([]int{anchored}, ends...)
