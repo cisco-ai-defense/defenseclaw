@@ -289,6 +289,31 @@ func identityState(c Caller, m config.ProfileMatch) (MatchState, string) {
 	return s, fact
 }
 
+// BudgetChargeKey is the spend key chargeKey charges for a user budget that
+// names one user or a group budget ("" for a * or connector budget), for
+// the caller own budget views.
+func BudgetChargeKey(b config.RoutingBudget) string {
+	if b.Subject == config.RoutingBudgetSubjectAll {
+		return ""
+	}
+	switch b.Scope {
+	case config.RoutingBudgetScopeUser:
+		return "user:" + b.ID + ":=" + shortHash(b.Subject)
+	case config.RoutingBudgetScopeGroup:
+		return "group:" + b.ID + ":" + shortHash(b.Subject)
+	}
+	return ""
+}
+
+// NamesCaller reports whether the facts prove that the users and groups
+// selectors of m name c, with the matcher Evaluate uses; No and Maybe are
+// false. The caller own views (routing rules and budgets list) show only
+// what applies to the caller for certain.
+func NamesCaller(c Caller, m config.ProfileMatch) bool {
+	state, _ := identityState(c, m)
+	return state == Yes
+}
+
 func (p *Policy) applyBudgets(req Request, ledger *Ledger, now time.Time, v *Verdict) {
 	var strongest *compiledBudget
 	for i := range p.budgets {

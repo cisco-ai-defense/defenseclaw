@@ -178,7 +178,7 @@ func (e *Engine) Decide(ctx context.Context, req Request) (d Decision) {
 				if !slices.Contains(d.NoCredential, c.alias) {
 					d.NoCredential = append(d.NoCredential, c.alias)
 				}
-			case "capability", "api":
+			case "capability", "api", "endpoint":
 				d.OtherUnfit = true
 			}
 			if narrowed && localWhy == "" && slices.Contains(e.sensitive.Aliases, c.alias) {

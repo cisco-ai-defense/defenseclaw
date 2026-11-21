@@ -6,6 +6,7 @@ package gateway
 
 import (
 	"context"
+	"runtime"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/effectrules"
@@ -138,7 +139,8 @@ func effectCall(connector string, in actionfacts.Input) (effects.Call, effects.O
 	case actionfacts.DialectPOSIX:
 		dialect = effects.DialectPOSIX
 	}
-	opts := effects.Options{Flavor: flavor, Dialect: dialect, Home: in.ActiveHome, CWD: in.CWD}
+	opts := effects.Options{Flavor: flavor, Dialect: dialect, Home: in.ActiveHome, CWD: in.CWD,
+		BSDUserland: effectBSDUserland(effectHostGOOS, flavor)}
 
 	switch {
 	case in.Command != "":
@@ -150,6 +152,16 @@ func effectCall(connector string, in actionfacts.Input) (effects.Call, effects.O
 	default:
 		return effects.Call{}, opts, false
 	}
+}
+
+// effectHostGOOS is the host the hook runs on; a test pins it.
+var effectHostGOOS = runtime.GOOS
+
+// effectBSDUserland reports that a POSIX call runs the BSD tools: the hook
+// runs on the agent's host, and macOS ships BSD cp, mv, ln, rm, install and
+// tee, whose flags differ from GNU coreutils (rel-1-0-10 GAP-0219).
+func effectBSDUserland(goos string, flavor effects.Flavor) bool {
+	return goos == "darwin" && flavor == effects.FlavorPOSIX
 }
 
 // computeEffectShadow runs the effect lane for one request and returns its

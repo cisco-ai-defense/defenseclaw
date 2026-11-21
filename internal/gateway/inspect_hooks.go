@@ -204,7 +204,9 @@ func (a *APIServer) handleInspectRequest(w http.ResponseWriter, r *http.Request)
 	} else {
 		ruleFindings, err := scanWithTimeout(r.Context(), req.Content, "user-request", a.inspectScanBudget())
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "[inspect] pre-request scan timeout after %s\n", time.Since(t0))
+			elapsed := time.Since(t0)
+			fmt.Fprintf(os.Stderr, "[inspect] pre-request scan timeout after %s\n", elapsed)
+			a.auditInspectScanTimeout(r, "/api/v1/inspect/request", audit.ActionInspectRequestTimeout, "pre-request", elapsed)
 			a.writeJSON(w, http.StatusGatewayTimeout, map[string]string{"error": "scan timeout"})
 			return
 		}
@@ -312,7 +314,9 @@ func (a *APIServer) handleInspectResponse(w http.ResponseWriter, r *http.Request
 	} else {
 		ruleFindings, err := scanWithTimeout(r.Context(), req.Content, "llm-response", a.inspectScanBudget())
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "[inspect] post-response scan timeout after %s\n", time.Since(t0))
+			elapsed := time.Since(t0)
+			fmt.Fprintf(os.Stderr, "[inspect] post-response scan timeout after %s\n", elapsed)
+			a.auditInspectScanTimeout(r, "/api/v1/inspect/response", audit.ActionInspectResponseTimeout, "post-response", elapsed)
 			a.writeJSON(w, http.StatusGatewayTimeout, map[string]string{"error": "scan timeout"})
 			return
 		}
@@ -414,7 +418,9 @@ func (a *APIServer) handleInspectToolResponse(w http.ResponseWriter, r *http.Req
 	} else {
 		ruleFindings, err := scanToolResultWithTimeout(r.Context(), outputStr, req.Tool+"-response", a.inspectScanBudget())
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "[inspect] post-tool scan timeout after %s\n", time.Since(t0))
+			elapsed := time.Since(t0)
+			fmt.Fprintf(os.Stderr, "[inspect] post-tool scan timeout after %s\n", elapsed)
+			a.auditInspectScanTimeout(r, "/api/v1/inspect/tool-response", audit.ActionInspectToolResponseTimeout, req.Tool, elapsed)
 			a.writeJSON(w, http.StatusGatewayTimeout, map[string]string{"error": "scan timeout"})
 			return
 		}

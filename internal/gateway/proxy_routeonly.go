@@ -332,6 +332,10 @@ func (s *routeOnlyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	original.usage.Subject = subject
 	original.usage.SubjectName = sanitizeLLMEventUser(userScopedIdentityName(subject))
 	routeCaller, routeProfiles := routeOnlyCaller(r.Context(), subject)
+	if usageOn() {
+		// The groups usage?by=group rolls up (rel-1-0-10:GAP-1154).
+		original.usage.Groups = usageCallerGroups(cfg, routeCaller)
+	}
 	attempt, routedOutcome, originalAllowed := s.decide(r, cfg, connector, native, family, upstream, inClass, signer, body, routeCaller, routeProfiles)
 	original.usage.Route = usageDecision(usageRouteFacts(routedOutcome, true), false)
 	if routedOutcome.Result == "" {

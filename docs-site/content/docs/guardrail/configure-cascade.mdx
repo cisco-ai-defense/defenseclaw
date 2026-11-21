@@ -111,7 +111,7 @@ The policy receives, for each call:
 | `subject` | The verified profile (`profile`, `profiles` when several match), the group that matched, and how the person was identified. No user names or group lists. |
 | `findings` | Up to 64 rule findings: `rule_id`, `severity`, `enforceable`, `alert_only`, `confidence`, `tags`. No evidence, arguments or content. |
 | `flagged` | Whether any layer flagged the call. |
-| `truncated` | `any`: the input was read only up to a limit; `uninspected`: DefenseClaw did not read it in full (a limit that decides, a hook payload over the size cap, or inspect content over 256 KiB); `proven_block`: an uninspected input whose read part already proved a block; `input_findings_capped`: more findings than this input holds. |
+| `truncated` | `any`: the input was read only up to a limit; `uninspected`: DefenseClaw did not read it in full (a limit that decides, a hook payload over the size cap, or inspect content over 256 KiB); `proven_block`: an uninspected input whose read part already proved a block, or a block whose findings this input capped; `input_findings_capped`: more findings than this input holds. |
 | `layers` | `rules` (`action`, `severity`), `system_one` (`ran`, `route`, `risk`, `risk_score`, `action`), `judge` (`ran`, `failed`, `action`, `severity`, `confidence`), and the model layers' finding IDs. |
 | `cascade_action`, `unknown_action`, `limits` | The action before the policy, the unknown tier's action, and your limits. |
 

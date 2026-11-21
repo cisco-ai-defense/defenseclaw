@@ -22,7 +22,7 @@ from typing import Any
 
 import click
 
-from defenseclaw import config_writer, routing_tokenomics, ux
+from defenseclaw import config_writer, price_lookup, routing_tokenomics, ux
 from defenseclaw.context import AppContext, pass_ctx
 
 ADMIN_RULES_KEY = "routing.admin.rules"
@@ -808,6 +808,30 @@ def routing_models_add(
     models.append(entry)
     if _write(app, {"routing.models": models}):
         _key_hint(app, api_key_env)
+        _endpoint_hint(provider, base_url, entry.get("apis") or [])
+
+
+# API families a route-only connector sends that a bedrock model without a
+# base_url cannot take: the gateway forwards them unchanged in shape, and
+# Bedrock has a default endpoint only for Converse and InvokeModel.
+_BEDROCK_ROUTE_ONLY_UNREACHABLE = ("messages", "responses")
+
+
+def _endpoint_hint(provider: str, base_url: str, apis: list[str]) -> None:
+    """Say when route-only connectors can never use the model just added
+    (rel-1-0-10:GAP-1167): routing skips it for their calls (routing explain
+    shows filtered_by:endpoint) and they keep their own model."""
+    if provider.lower() != "bedrock" or base_url:
+        return
+    unreachable = [a for a in apis if a in _BEDROCK_ROUTE_ONLY_UNREACHABLE]
+    if not unreachable:
+        return
+    ux.warn(
+        f"route-only {' and '.join(unreachable)} calls (Codex sends responses, Claude Code messages) "
+        "cannot reach a bedrock model without --base-url, so routing skips it for them "
+        "(routing explain: filtered_by:endpoint). For the Bedrock OpenAI-compatible endpoint add the model "
+        "as --provider openai --base-url https://bedrock-runtime.REGION.amazonaws.com/openai/v1"
+    )
 
 
 def _key_hint(app: AppContext, env_name: str) -> None:
@@ -965,30 +989,27 @@ def _lint(doc: dict[str, Any]) -> list[str]:
         if budget.get("scope") == "group" and not managed:
             notes.append(f"budget {budget.get('id')}: a group budget counts only this device's user here")
     obs = doc.get("observability") or {}
-    tokenomics = obs.get("tokenomics") or {}
-    if budgets and not (tokenomics.get("enabled") and (tokenomics.get("local_store") or {}).get("enabled")):
-        notes.append(
-            "budgets need observability.tokenomics.enabled and observability.tokenomics.local_store.enabled: "
-            + routing_tokenomics.ENABLE_COMMAND
-        )
-    priced = {
-        (str(p.get("provider")), str(p.get("model")))
-        for p in _list((obs.get("pricing") or {}).get("models"))
-        if isinstance(p, dict)
-    }
+    # What the gateway's budget feed needs (config.BudgetFeedReady), not the
+    # local usage store: budget spend has its own ledger.
+    feed = routing_tokenomics.note_from_doc(doc)
+    if budgets and feed is not None and feed.budgets:
+        notes.append(feed.text)
+    # The gateway's lookup for the alias's model (Bedrock region and vendor
+    # prefixes, ARNs, case, provider *, the unknown_model fallback), so an
+    # alias the price table covers is not reported as unpriced (rel-1-0-10
+    # GAP-1108). The gateway also retries with the model a response names;
+    # a config cannot say which, so this checks the alias's own model.
+    pricing = obs.get("pricing")
     for m in _list(routing.get("models")):
-        if isinstance(m, dict) and budgets and not _priced(priced, str(m.get("provider")), str(m.get("model"))):
+        if (
+            isinstance(m, dict)
+            and budgets
+            and price_lookup.price_entry(pricing, str(m.get("provider") or ""), str(m.get("model") or "")) is None
+        ):
             notes.append(
                 f"model {m.get('name')} has no price in observability.pricing: its calls do not count toward budgets"
             )
     return notes
-
-
-def _priced(priced: set[tuple[str, str]], provider: str, model: str) -> bool:
-    for p, m in priced:
-        if p == provider and (m == model or (m.endswith("*") and model.startswith(m[:-1]))):
-            return True
-    return False
 
 
 @routing_rules.command("add")
@@ -1159,8 +1180,10 @@ def routing_budgets_list(app: AppContext, as_json: bool) -> None:
         used = (
             f"{r['spent_usd']:.2f}"
             if isinstance(r.get("spent_usd"), (int, float))
-            else (f"{r['percent_used']:.0f}%" if isinstance(r.get("percent_used"), (int, float)) else "?")
+            else (f"{r['percent_used']:.0f}%" if isinstance(r.get("percent_used"), (int, float)) else "")
         )
+        # A pooled budget over its limit comes back as exceeded with no total.
+        used = used or ("over" if r.get("exceeded") is True else "?")
         click.echo(
             f"{r.get('id', ''):<16} {r.get('scope')}:{str(r.get('subject') or ''):<14} "
             f"{used}/{r.get('limit_usd')} USD per {r.get('period')}"

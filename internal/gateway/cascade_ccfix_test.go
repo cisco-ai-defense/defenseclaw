@@ -162,25 +162,25 @@ func TestCascadeUninspectedMarkerWhateverTheVerdict(t *testing.T) {
 	v := ruleVerdict("block", "HIGH")
 	v.markOversizeUninspected()
 	v.markOversizeUninspected()
-	if !cascadeUninspected(v) || !cascadeProvenBlock(v) || v.Findings[0] != hookOversizeUninspectedRuleID || len(v.Findings) != 2 {
-		t.Fatalf("oversize after a block: uninspected=%v proven=%v findings=%v", cascadeUninspected(v), cascadeProvenBlock(v), v.Findings)
+	if !cascadeUninspected(v) || !cascadeInputProvenBlockOf(v, false) || v.Findings[0] != hookOversizeUninspectedRuleID || len(v.Findings) != 2 {
+		t.Fatalf("oversize after a block: uninspected=%v proven=%v findings=%v", cascadeUninspected(v), cascadeInputProvenBlockOf(v, false), v.Findings)
 	}
 	v = &ToolInspectVerdict{Action: "allow", Severity: "NONE"}
 	v.markOversizeUninspected()
-	if v.Action != "block" || cascadeProvenBlock(v) {
-		t.Fatalf("oversize from allow: action=%s proven=%v", v.Action, cascadeProvenBlock(v))
+	if v.Action != "block" || cascadeInputProvenBlockOf(v, false) {
+		t.Fatalf("oversize from allow: action=%s proven=%v", v.Action, cascadeInputProvenBlockOf(v, false))
 	}
 	for unknown, want := range map[string]string{"alert": "alert", "confirm": "alert", "block": "block", "": "alert"} {
 		v = &ToolInspectVerdict{Action: "allow", Severity: "NONE"}
 		v.markContentCut(unknown)
-		if v.Action != want || !cascadeUninspected(v) || cascadeProvenBlock(v) || v.Reason != contentCutReason {
+		if v.Action != want || !cascadeUninspected(v) || cascadeInputProvenBlockOf(v, false) || v.Reason != contentCutReason {
 			t.Errorf("cut from allow, unknown %q: action=%s (want %s) uninspected=%v reason=%q", unknown, v.Action, want, cascadeUninspected(v), v.Reason)
 		}
 	}
 	v = ruleVerdict("block", "HIGH")
 	v.markContentCut("alert")
-	if v.Action != "block" || !cascadeProvenBlock(v) {
-		t.Fatalf("cut after a block: action=%s proven=%v", v.Action, cascadeProvenBlock(v))
+	if v.Action != "block" || !cascadeInputProvenBlockOf(v, false) {
+		t.Fatalf("cut after a block: action=%s proven=%v", v.Action, cascadeInputProvenBlockOf(v, false))
 	}
 }
 

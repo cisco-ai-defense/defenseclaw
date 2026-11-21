@@ -181,23 +181,66 @@ func routingGroupSIDsFor(cfg *config.Config) *profileGroupSIDs {
 	if routingGroupSIDs.cfg == cfg {
 		return routingGroupSIDs.table
 	}
-	var names []config.ProfileAssignment
+	routingGroupSIDs.cfg = cfg
+	routingGroupSIDs.table = nil
+	if names := routingAdminGroupNames(cfg); len(names) > 0 {
+		assignment := []config.ProfileAssignment{{Match: config.ProfileMatch{Groups: names}}}
+		routingGroupSIDs.table = buildProfileGroupSIDs(assignment, profileGroupSIDLookup, profileGroupLocalSIDLookup, profileGroupSIDWait)
+	}
+	return routingGroupSIDs.table
+}
+
+// routingAdminGroupNames lists, once each in config order (the first
+// spelling of names that differ only in case, as the matcher folds case),
+// the groups that routing.admin rules (match.groups) and group budgets name.
+func routingAdminGroupNames(cfg *config.Config) []string {
+	if cfg == nil || cfg.Routing.Admin == nil {
+		return nil
+	}
+	var names []string
+	add := func(group string) {
+		if strings.TrimSpace(group) != "" && !slices.ContainsFunc(names, func(n string) bool { return strings.EqualFold(n, group) }) {
+			names = append(names, group)
+		}
+	}
 	for _, r := range cfg.Routing.Admin.Rules {
-		if len(r.Match.Groups) > 0 {
-			names = append(names, config.ProfileAssignment{Match: config.ProfileMatch{Groups: r.Match.Groups}})
+		for _, group := range r.Match.Groups {
+			add(group)
 		}
 	}
 	for _, b := range cfg.Routing.Admin.Budgets {
 		if b.Scope == config.RoutingBudgetScopeGroup {
-			names = append(names, config.ProfileAssignment{Match: config.ProfileMatch{Groups: []string{b.Subject}}})
+			add(b.Subject)
 		}
 	}
-	routingGroupSIDs.cfg = cfg
-	routingGroupSIDs.table = nil
-	if len(names) > 0 {
-		routingGroupSIDs.table = buildProfileGroupSIDs(names, profileGroupSIDLookup, profileGroupLocalSIDLookup, profileGroupSIDWait)
+	return names
+}
+
+// usageGroupsMax bounds the groups one usage record carries.
+const usageGroupsMax = 16
+
+// usageCallerGroups names the routing.admin groups (rules match.groups and
+// group budgets, as the administrator wrote them) the verified caller is
+// proved a member of, with the matcher routing.admin rules and group budgets
+// use, so GET /usage?by=group rolls usage up by the groups routing acts on.
+// Before, nothing set the groups of a usage record and by=group was always
+// empty (rel-1-0-10:GAP-1154). Managed hosts only (identity selectors do not
+// apply on a per-user gateway); nil for an unverified caller and for groups
+// the facts cannot prove. Bounded: configured names only, at most
+// usageGroupsMax, whatever the account's directory membership.
+func usageCallerGroups(cfg *config.Config, caller engine.Caller) []string {
+	if cfg == nil || !cfg.StandaloneEnterprise() || !caller.Verified || caller.Matches == nil {
+		return nil
 	}
-	return routingGroupSIDs.table
+	var groups []string
+	for _, group := range routingAdminGroupNames(cfg) {
+		if caller.Matches(config.ProfileMatch{Groups: []string{group}}) == engine.Yes {
+			if groups = append(groups, group); len(groups) == usageGroupsMax {
+				break
+			}
+		}
+	}
+	return groups
 }
 
 // adminFor is the evaluator of cfg's generation: one installed with

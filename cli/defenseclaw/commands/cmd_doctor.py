@@ -13746,7 +13746,7 @@ def _check_routing_sensitive(cfg, r: _DoctorResult) -> None:
 def _check_routing_tokenomics(cfg, r: _DoctorResult) -> None:
     """Routing or a budget is on while tokenomics is off (GAP-0932): the dashboard
     panels and budgets stay empty. It stays off by default; say how to turn it on."""
-    from defenseclaw.routing_tokenomics import ENABLE_COMMAND, note_from_cfg
+    from defenseclaw.routing_tokenomics import note_from_cfg
 
     note = note_from_cfg(cfg)
     if note:
@@ -13754,7 +13754,7 @@ def _check_routing_tokenomics(cfg, r: _DoctorResult) -> None:
             "warn" if note.budgets else "info",
             "Routing tokenomics",
             note.detail,
-            remediation=ENABLE_COMMAND,
+            remediation=note.remedy,
             r=r,
         )
 

@@ -2388,6 +2388,16 @@ func (s *Store) Init() error {
 			return fmt.Errorf("audit: mandatory event-history column %s is missing", column)
 		}
 	}
+	// A Secure Client store records the rejected_records migration without
+	// the table (it keeps main's schema), so the same file opened later as a
+	// standalone store never got it and every write of the opt-in store
+	// failed. The table and its index are created idempotently here, before
+	// the retention infrastructure that covers them (GAP-0072).
+	if !s.secureClientSchema {
+		if err := migrateRejectedRecords(s.db); err != nil {
+			return fmt.Errorf("audit: ensure rejected_records: %w", err)
+		}
+	}
 	if err := ensureRetentionTimestampInfrastructure(s.db, !s.secureClientSchema); err != nil {
 		return fmt.Errorf("audit: verify event timestamp retention infrastructure: %w", err)
 	}

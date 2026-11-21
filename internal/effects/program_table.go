@@ -126,19 +126,24 @@ type Program struct {
 	MovesSources   bool     // the sources are removed from where they were (mv, move, ren, Move-Item): each is also a delete
 	AppendFlag     string   // switch that turns the file operands into appends (tee -a)
 	InertOperands  bool     // a PosNone program whose positionals are inert data (echo, true) -- else a positional is unaccounted (review R5-2)
+	OptionsFirst   bool     // options end at the first operand (BSD getopt, no permutation): later words are operands (GAP-0219)
 }
 
 var (
 	posixTable   = map[string]Program{}
 	windowsTable = map[string]Program{}
+	// bsdTable overrides posixTable for the BSD (macOS) programs whose flags
+	// differ from GNU coreutils (Options.BSDUserland, GAP-0219).
+	bsdTable = map[string]Program{}
 )
 
 func init() {
 	buildPOSIXTable()
+	buildBSDTable()
 	buildWindowsTable()
 }
 
-func lookupProgram(name string, flavor Flavor, dialect Dialect) (Program, bool) {
+func lookupProgram(name string, flavor Flavor, dialect Dialect, bsd bool) (Program, bool) {
 	// The command grammar, not the host, selects the table: a POSIX shell on
 	// Windows (Git Bash) uses the POSIX programs (review N17).
 	switch dialect {
@@ -146,15 +151,137 @@ func lookupProgram(name string, flavor Flavor, dialect Dialect) (Program, bool) 
 		p, ok := windowsTable[strings.ToLower(name)]
 		return p, ok
 	case DialectPOSIX:
-		p, ok := posixTable[name]
-		return p, ok
+		return lookupPOSIX(name, flavor, bsd)
 	}
 	if flavor == FlavorWindows {
 		p, ok := windowsTable[strings.ToLower(name)]
 		return p, ok
 	}
+	return lookupPOSIX(name, flavor, bsd)
+}
+
+// lookupPOSIX returns the BSD row of a program on a BSD (macOS) host, else the
+// GNU row. Git Bash (the Windows flavor) runs GNU coreutils.
+
+// bsdSystemProgram reports a program word that names the macOS system (BSD)
+// tool for certain: an absolute path in /bin or /usr/bin. A bare name is read
+// with the GNU row: GNU coreutils may come first on PATH (Homebrew gnubin), and
+// a GNU mutation the BSD row would reject must never be demoted (t-obs-b2 batch
+// review P2-3). Any other path is GNU or unknown, also the GNU row.
+func bsdSystemProgram(word string) bool {
+	i := strings.LastIndexByte(word, '/')
+	if i < 0 {
+		return false
+	}
+	switch word[:i] {
+	case "/bin", "/usr/bin":
+		return true
+	}
+	return false
+}
+
+func lookupPOSIX(name string, flavor Flavor, bsd bool) (Program, bool) {
+	if bsd && flavor != FlavorWindows {
+		if p, ok := bsdTable[name]; ok {
+			return p, true
+		}
+	}
 	p, ok := posixTable[name]
 	return p, ok
+}
+
+// bsdRejectsFlag reports an option word the BSD row does not accept: a long
+// option (the BSD tools take none), or a short option or cluster letter not
+// in the row, before the first operand (or dynamic word), where BSD getopt
+// stops. After that, an option-shaped word is an operand to BSD but an
+// option to GNU (which permutes): unless the row reads every operand as a
+// target (OptionsFirst), the two readings differ, so it is a reject too.
+func bsdRejectsFlag(p, gnu Program, args []Word) bool {
+	// A flag both rows know with a different arity (cp -S, install -S / -T)
+	// moves the operands between the readings: a reject too (review round 3).
+	arityDiffers := func(name string, f Flag) bool {
+		g, ok := gnu.Flags[name]
+		return ok && g.Value != f.Value
+	}
+	for i := 0; i < len(args); i++ {
+		v := args[i].Value
+		if !args[i].Static || len(v) < 2 || v[0] != '-' {
+			if p.OptionsFirst {
+				return false // BSD getopt stops at the first operand
+			}
+			for _, a := range args[i+1:] {
+				if !a.Static || a.Value == "--" {
+					return false
+				}
+				if len(a.Value) > 1 && a.Value[0] == '-' {
+					return true
+				}
+			}
+			return false
+		}
+		if v == "--" {
+			return false
+		}
+		if strings.HasPrefix(v, "--") {
+			return true
+		}
+		if f, ok := p.Flags[v]; ok {
+			if arityDiffers(v, f) {
+				return true
+			}
+			if f.Value {
+				i++
+			}
+			continue
+		}
+		for j := 1; j < len(v); j++ {
+			f, ok := p.Flags["-"+v[j:j+1]]
+			if !ok || arityDiffers("-"+v[j:j+1], f) {
+				return true
+			}
+			if f.Value {
+				if j == len(v)-1 {
+					i++
+				}
+				break
+			}
+		}
+	}
+	return false
+}
+
+// buildBSDTable writes the BSD (macOS) rows of the listed POSIX programs: the
+// GNU row's operand shape with the flags of the BSD tool (macOS man pages:
+// cp, mv, ln, rm/unlink, install, tee). The BSD tools take no long options,
+// and BSD cp, mv and ln have no target-directory option (-t), so a GNU-only
+// flag is unaccounted there (rel-1-0-10 GAP-0219). Left out on purpose (stay
+// unaccounted): ln -F (removes a directory target), rm -W (undelete),
+// install -d (make directories), -D (destination root), -l (link instead of
+// copy), -M (writes a metalog) and -s (runs strip).
+func buildBSDTable() {
+	bsd := func(name string, flags map[string]Flag) {
+		p, ok := posixTable[name]
+		if !ok {
+			panic("effects: no GNU row for BSD program " + name)
+		}
+		p.Names = []string{name}
+		p.Flags = flags
+		// Every operand of rm, unlink and tee is a target, so reading BSD's stop
+		// at the first operand changes no mutation; for cp, mv, ln and install a
+		// trailing option moves the destination, so bsdRejectsFlag sends those
+		// to the GNU reading, unaccounted.
+		p.OptionsFirst = p.Pos == PosAllDelete || p.Pos == PosAllWrite
+		bsdTable[name] = p
+	}
+	ign := Flag{Value: true, Role: RoleIgnore}
+	bsd("cp", fl(nil, "-R", "-r", "-H", "-L", "-P", "-f", "-i", "-n", "-a", "-c", "-l", "-N", "-p", "-S", "-s", "-v", "-X", "-x"))
+	bsd("mv", fl(nil, "-f", "-i", "-n", "-h", "-v"))
+	bsd("ln", fl(nil, "-L", "-P", "-s", "-f", "-i", "-w", "-h", "-n", "-v"))
+	bsd("rm", fl(nil, "-f", "-i", "-d", "-I", "-P", "-R", "-r", "-v", "-x"))
+	bsd("unlink", fl(nil))
+	bsd("install", fl(map[string]Flag{"-B": ign, "-f": ign, "-g": ign, "-h": ign, "-m": ign, "-o": ign, "-T": ign},
+		"-b", "-C", "-c", "-p", "-S", "-U", "-v"))
+	bsd("tee", fl(nil, "-a", "-i"))
 }
 
 type wrapperKind int
@@ -194,16 +321,27 @@ func buildPOSIXTable() {
 	add(Program{Names: []string{"head", "tail"}, Pos: PosAllRead,
 		Flags: fl(map[string]Flag{"-n": {Value: true}, "-c": {Value: true}, "--lines": {Value: true}, "--bytes": {Value: true}},
 			"-q", "-v", "-z", "-f", "-F", "-s", "--quiet", "--verbose", "--silent", "--follow")})
-	add(Program{Names: []string{"cp", "install"}, Pos: PosSourcesDest,
+	// cp and install, and rm, unlink and shred, are separate rows: each lists
+	// only the flags its own GNU program accepts, so a flag of the sibling is
+	// unaccounted (rel-1-0-10 GAP-0219). install -d (make directories), -s and
+	// --strip-program (run a stripper) stay unaccounted.
+	add(Program{Names: []string{"cp"}, Pos: PosSourcesDest,
+		Flags: fl(map[string]Flag{"-t": {Value: true, Role: RoleWrite}, "--target-directory": {Value: true, Role: RoleWrite}, "-S": {Value: true, Role: RoleIgnore}},
+			"-r", "-R", "-f", "-v", "-p", "-a", "-n", "-i", "-u", "-L", "-P", "-H", "-d", "-l", "-s", "-x", "-b", "-T",
+			"--recursive", "--force", "--preserve", "--no-clobber", "--archive", "--parents", "--no-dereference", "--dereference", "--verbose", "--update", "--symbolic-link", "--link", "--interactive")})
+	add(Program{Names: []string{"install"}, Pos: PosSourcesDest,
 		Flags: fl(map[string]Flag{"-t": {Value: true, Role: RoleWrite}, "--target-directory": {Value: true, Role: RoleWrite},
 			"-m": {Value: true, Role: RoleIgnore}, "-o": {Value: true, Role: RoleIgnore}, "-g": {Value: true, Role: RoleIgnore}, "-S": {Value: true, Role: RoleIgnore}, "--mode": {Value: true, Role: RoleIgnore}},
-			"-r", "-R", "-f", "-v", "-p", "-a", "-n", "-i", "-u", "-L", "-P", "-H", "-d", "-l", "-s", "-x", "-b", "-T", "-D",
-			"--recursive", "--force", "--preserve", "--no-clobber", "--archive", "--parents", "--no-dereference", "--dereference", "--verbose", "--update", "--symbolic-link", "--link", "--interactive")})
+			"-v", "-p", "-b", "-T", "-D", "--verbose")})
 	add(Program{Names: []string{"mv"}, Pos: PosSourcesDest, MovesSources: true,
 		Flags: fl(map[string]Flag{"-t": {Value: true, Role: RoleWrite}, "--target-directory": {Value: true, Role: RoleWrite}, "-S": {Value: true, Role: RoleIgnore}},
 			"-f", "-i", "-n", "-v", "-u", "-b", "-T", "--force", "--no-clobber", "--verbose", "--update", "--backup", "--interactive")})
-	add(Program{Names: []string{"rm", "unlink", "shred"}, Pos: PosAllDelete, Strict: true,
-		Flags: fl(nil, "-r", "-R", "-f", "-v", "-i", "-I", "-d", "-u", "-z", "-n", "--recursive", "--force", "--verbose", "--preserve-root", "--no-preserve-root", "--one-file-system", "--interactive", "--dir")})
+	add(Program{Names: []string{"rm"}, Pos: PosAllDelete, Strict: true,
+		Flags: fl(nil, "-r", "-R", "-f", "-v", "-i", "-I", "-d", "--recursive", "--force", "--verbose", "--preserve-root", "--no-preserve-root", "--one-file-system", "--interactive", "--dir")})
+	add(Program{Names: []string{"unlink"}, Pos: PosAllDelete, Strict: true, Flags: fl(nil)}) // unlink takes no option
+	add(Program{Names: []string{"shred"}, Pos: PosAllDelete, Strict: true,
+		Flags: fl(map[string]Flag{"-n": {Value: true, Role: RoleIgnore}, "-s": {Value: true, Role: RoleIgnore}, "--iterations": {Value: true, Role: RoleIgnore}, "--size": {Value: true, Role: RoleIgnore}},
+			"-f", "-u", "-v", "-x", "-z", "--force", "--remove", "--verbose", "--exact", "--zero")})
 	add(Program{Names: []string{"ln"}, Pos: PosLinkTargetLink,
 		Flags: fl(map[string]Flag{"-t": {Value: true, Role: RoleLink}, "-S": {Value: true, Role: RoleIgnore}},
 			"-s", "-f", "-n", "-v", "-r", "-T", "-i", "-b", "-d", "-P", "-L", "--symbolic", "--force", "--relative", "--no-dereference", "--verbose")})

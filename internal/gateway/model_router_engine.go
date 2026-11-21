@@ -119,6 +119,7 @@ func (r *engineRouter) engineFor(ctx context.Context) (*engine.Engine, *config.C
 			SensitiveMarks:   r.marks,
 			SensitiveChecker: r.sensitiveCheckerFor(cfg),
 			CredentialOK:     func(b engine.Backend, req engine.Request) bool { return r.backendCredentialOK(cfg, b, req) },
+			EndpointOK:       routeOnlyEndpointKnown,
 		})
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "[routing] policy build failed, routing off for this generation: %v\n", err)
@@ -239,6 +240,24 @@ func routeOnlyCredentialFits(req engine.Request, b engine.Backend, key string) b
 		return same || strings.EqualFold(strings.TrimSpace(b.Provider), "bedrock")
 	}
 	return true
+}
+
+// routeOnlyEndpointKnown is the route-only endpoint rule as an eligibility
+// filter: the listener forwards the agent request unchanged in shape, so it
+// sends a routed call to the model base_url, else to the upstream of the
+// agent own provider, else to the public endpoint of the model provider.
+// A model with none of these (a bedrock alias without base_url for a
+// Responses or Messages call: Bedrock has no default endpoint for them) is
+// skipped with filtered_by endpoint, so routing test, routing explain and the
+// real call agree; before, the engine chose it and the call fell back to the
+// original model with only a route_only_fallback:origin warning
+// (rel-1-0-10:GAP-1167). Other listeners keep every backend.
+func routeOnlyEndpointKnown(b engine.Backend, req engine.Request) bool {
+	if req.Listener != engine.ListenerRouteOnly || originOf(b.BaseURL) != "" {
+		return true
+	}
+	provider := strings.ToLower(strings.TrimSpace(b.Provider))
+	return provider == strings.ToLower(req.RequestedProvider) || providerDefaultOrigins[provider] != ""
 }
 
 // Route implements ModelRouter.
@@ -415,20 +434,24 @@ func (p *GuardrailProxy) recordRouteDeny(ctx context.Context, path string, d *en
 }
 
 // auditRouteDeny writes the audit row of a routing refusal: a managed
-// admin rule (target routing.admin) or a sensitive request no local model
-// could serve (target routing.sensitive). Code and path only, no text.
+// admin rule (action routing.admin_denied, target routing.admin) or a
+// sensitive request no local model could serve (routing.sensitive_refused,
+// target routing.sensitive). Code and path only, no text. These are routing
+// decisions, not guardrail verdicts: their own actions keep them out of the
+// guardrail block counts (inspect-request-block, which they shared before,
+// GAP-1126). The request is refused either way.
 func auditRouteDeny(ctx context.Context, logger *audit.Logger, path string, d *engine.DenyReason) {
 	if logger == nil {
 		return
 	}
-	code, target := "routing_admin_denied", "routing.admin"
+	code, target, action := "routing_admin_denied", "routing.admin", audit.ActionRoutingAdminDenied
 	if d != nil && d.Code != "" {
 		code = d.Code
 	}
 	if code == engine.DenyCodeSensitiveLocal {
-		target = "routing.sensitive"
+		target, action = "routing.sensitive", audit.ActionRoutingSensitiveRefused
 	}
-	_ = logger.LogActionCtx(ctx, string(audit.ActionInspectRequestBlock), target, "routing refused the model request: "+boundedRouterLabel(code, 96)+" path="+boundedRouterLabel(path, 128))
+	_ = logger.LogActionCtx(ctx, string(action), target, "routing refused the model request: "+boundedRouterLabel(code, 96)+" path="+boundedRouterLabel(path, 128))
 }
 
 // routerActive reports whether this request is routed at all.

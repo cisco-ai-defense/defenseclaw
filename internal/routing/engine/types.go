@@ -183,7 +183,7 @@ type Decision struct {
 	// instead of blaming the administrator, rel-1-0-10 GAP-0921).
 	NoCredential []string
 	// OtherUnfit is true when another allowed alias was dropped for a reason
-	// that is not a credential (capability or API family), so a missing
+	// that is not a credential (capability, API family or endpoint), so a missing
 	// credential is not the whole story.
 	OtherUnfit   bool
 	FailureCode  string

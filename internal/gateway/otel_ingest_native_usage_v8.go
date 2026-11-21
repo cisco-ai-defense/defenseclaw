@@ -16,16 +16,19 @@ import (
 	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
 )
 
-// nativeUsageSuppressed reports whether the route-only listener or the
-// guardrail proxy carries the model traffic of connector. While it does, that
-// path records every call, so the usage the agent reports in its own OTLP
-// stream is a cross-check only: its log.model.response import still runs, but
-// nothing is counted from it (no log.model.usage, no cost or token counter,
-// no store row, no budget spend). The answer comes from the loaded config, not
-// from a per-call guess: a hook connector listed in routing.route_only.connectors
-// sends its model calls through the gateway (D6); a hook-only connector takes
-// native usage as the source. applyModelUsage refreshes it on start and on
-// every reload.
+// nativeUsageSuppressed reports whether the route-only listener carries the
+// model traffic of connector: routing is on, the connector is listed in
+// routing.route_only.connectors (config.RouteOnlyRouted, the test the
+// listener answers by) and has a routing.route_only.upstreams entry (without
+// one nothing points the agent at the listener, routeOnlySetupBase). The
+// guardrail proxy does not suppress native usage.
+// While the listener carries a connector it records every call, so the usage
+// the agent reports in its own OTLP stream is a cross-check only: its
+// log.model.response import still runs, but nothing is counted from it (no
+// log.model.usage, no cost or token counter, no store row, no budget spend).
+// With routing off the listener answers nothing and the agent is pointed back
+// at its own endpoint, so native usage is the source again (rel-1-0-10
+// GAP-0223). applyModelUsage refreshes it on start and on every reload.
 var nativeUsageSuppressed = func(connector string) bool {
 	set := nativeCarriedConnectors.Load()
 	if set == nil {
@@ -46,7 +49,8 @@ func setNativeUsageSuppression(cfg *config.Config) {
 	}
 	set := map[string]struct{}{}
 	for _, c := range cfg.Routing.RouteOnly.Connectors {
-		if c = strings.ToLower(strings.TrimSpace(c)); c != "" {
+		c = strings.ToLower(strings.TrimSpace(c))
+		if _, upstream := cfg.Routing.RouteOnly.Upstreams[c]; c != "" && upstream && cfg.RouteOnlyRouted(c) {
 			set[c] = struct{}{}
 		}
 	}

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/routingadmin"
 )
 
 // ownNoHomeReason is what the routing member says when the gateway could not
@@ -49,7 +50,7 @@ func ownAccountHomeless(ctx context.Context) bool {
 // routing.admin.visibility.users_see none a standard account gets the
 // organization-wide facts (on or off, the routed connectors) and no budget.
 // nil when there is no configuration.
-func ownRoutingSummary(cfg *config.Config, key string, now time.Time) map[string]any {
+func ownRoutingSummary(cfg *config.Config, key string, own routingadmin.Caller, now time.Time) map[string]any {
 	if cfg == nil {
 		return nil
 	}
@@ -61,7 +62,7 @@ func ownRoutingSummary(cfg *config.Config, key string, now time.Time) map[string
 		return summary
 	}
 	var nearest *routingBudgetView
-	for _, view := range routingBudgetViews(cfg, key, false, now) {
+	for _, view := range routingBudgetViews(cfg, key, false, own, now) {
 		view := view
 		if view.PercentUsed == nil {
 			continue
