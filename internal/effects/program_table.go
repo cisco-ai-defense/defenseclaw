@@ -79,6 +79,8 @@ type Flag struct {
 	// token to count as accounted (a script, a format, a config file). Empty for
 	// a value that is plainly inert data (a count, a mode, a delimiter).
 	Text TextKind
+	// Subtree marks a write-valued option whose destination covers descendants (archive extraction).
+	Subtree bool
 }
 
 type PosMode string
@@ -101,6 +103,7 @@ const (
 	PosBits           PosMode = "bits"     // bitsadmin: URL then local file; /upload sends the file
 	PosInOut          PosMode = "in_out"   // uniq / xxd [INPUT [OUTPUT]]: the second operand is written
 	PosZip            PosMode = "zip"      // zip ARCHIVE FILE...: the archive is written, the files are read
+	PosArchive        PosMode = "archive"  // 7z command ARCHIVE [MEMBER...]: role follows the command word
 	PosCompress       PosMode = "compress" // gzip/xz/bzip2: each operand is replaced by its (de)compressed file
 )
 
@@ -206,7 +209,19 @@ func lookupProgram(name string, flavor Flavor, dialect Dialect, bsd bool) (Progr
 		p, ok := windowsTable[strings.ToLower(name)]
 		return p, ok
 	case DialectPOSIX:
-		return lookupPOSIX(name, flavor, bsd)
+		if p, ok := lookupPOSIX(name, flavor, bsd); ok {
+			return p, true
+		}
+		if flavor == FlavorWindows {
+			key := strings.ToLower(strings.TrimSuffix(name, ".exe"))
+			// These are native Windows interpreters invoked from Git Bash; they
+			// retain their host switch grammars even though the caller is POSIX.
+			if key == "cmd" || key == "powershell" || key == "pwsh" {
+				p, ok := windowsTable[key]
+				return p, ok
+			}
+		}
+		return Program{}, false
 	}
 	if flavor == FlavorWindows {
 		p, ok := windowsTable[strings.ToLower(name)]
@@ -642,6 +657,7 @@ func buildPOSIXTable() {
 	add(Program{Names: []string{"awk", "gawk", "mawk", "nawk"}, Pos: PosAllRead, FirstPosIgnore: true, FirstPosText: TextAwk,
 		Flags: fl(map[string]Flag{"-f": {Value: true, Role: RoleRead, Text: TextScriptFile}, "-v": {Value: true}, "-F": {Value: true}})})
 	add(Program{Names: []string{"tar"}, Pos: PosNone, TarStyle: true})
+	add(Program{Names: []string{"7z", "7za", "7zr"}, Pos: PosArchive, Flags: map[string]Flag{"-o": {Value: true, Role: RoleWrite, Subtree: true}}})
 	add(Program{Names: []string{"unzip"}, Pos: PosAllRead, Flags: fl(map[string]Flag{"-d": {Value: true, Role: RoleIgnore}}, "-o", "-q", "-l", "-v", "-n", "-j", "-x", "-P")})
 	add(Program{Names: []string{"zip"}, Pos: PosZip,
 		Flags: fl(map[string]Flag{"-x": {Value: true, Role: RoleIgnore}, "-i": {Value: true, Role: RoleIgnore}}, "-r", "-q", "-j", "-0", "-1", "-2", "-3", "-4", "-5", "-6", "-7", "-8", "-9", "-v", "-g", "-u", "-y", "-X", "-D", "-9")})
@@ -824,6 +840,7 @@ func buildWindowsTable() {
 		}
 	}
 	add(Program{Names: []string{"copy", "xcopy"}, Pos: PosSourcesDest})
+	add(Program{Names: []string{"7z", "7za", "7zr"}, Pos: PosArchive, Flags: map[string]Flag{"-o": {Value: true, Role: RoleWrite, Subtree: true}}})
 	add(Program{Names: []string{"robocopy"}, Pos: PosRobocopy})
 	add(Program{Names: []string{"move", "ren", "rename"}, Pos: PosSourcesDest, MovesSources: true})
 	add(Program{Names: []string{"del", "erase", "rd", "rmdir"}, Pos: PosAllDelete, Strict: true})
