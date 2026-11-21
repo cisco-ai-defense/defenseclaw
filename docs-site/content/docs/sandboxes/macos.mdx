@@ -72,7 +72,7 @@ Run sandboxes in OpenShell MicroVMs? On a Mac, MicroVMs do not start until OpenS
   ✓ Done →  cd <project> && defenseclaw sandbox run claude
 ```
 
-Setup asks the MicroVM question on every Mac, also when the OpenShell gateway already runs the `vm` driver (the OpenShell default on a fresh install). The default answer, no, and `--yes` keep sandboxes on Docker: setup sets `compute_driver = "docker"` and restarts the gateway, and never writes `compute_driver = "vm"`. With a sandbox on the gateway, `--yes` does not restart it; add `--restart-gateway`.
+Setup asks the MicroVM question on every Mac, also when the OpenShell gateway already runs the `vm` driver (the OpenShell default on a fresh install). The default answer, no, and `--yes` keep sandboxes on Docker: setup sets `compute_driver = "docker"` and restarts the gateway, and never writes `compute_driver = "vm"`. With a sandbox on the gateway, `--yes` does not restart it; add `--restart-gateway`. Before it moves a gateway off `vm`, setup checks this Mac for the Docker driver, as it does for a gateway already on Docker: Landlock in Docker Desktop's Linux VM (it offers to download the base image to check it in), host networking, and file sharing of your home folder when sandboxes mount folders. With host networking or file sharing off it shows the setting to change and, on a terminal, checks again once you change it; otherwise setup ends with "not ready for sandboxes yet".
 
 Setup installs OpenShell and `e2fsprogs`, switches the gateway to MicroVMs (a backed-up change to its `gateway.toml`, one restart), turns off OpenShell's usage telemetry, and builds the harness images. The MicroVM settings apply to every sandbox on the gateway. Flags are in the [sandbox CLI reference](/docs/reference/sandbox-cli).
 

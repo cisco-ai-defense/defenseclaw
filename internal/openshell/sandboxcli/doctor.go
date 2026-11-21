@@ -119,8 +119,16 @@ func (a *App) defaultDoctor() *openshell.Doctor {
 
 // runDoctor runs the host checks plus DefenseClaw's own.
 func (a *App) runDoctor(ctx context.Context) *openshell.DoctorReport {
+	return a.runDoctorFor(ctx, "")
+}
+
+// runDoctorFor is runDoctor with a Mac's machine checks made for the
+// compute driver machine in place of the gateway's ("": the gateway's;
+// openshell.Doctor.MachineDriver).
+func (a *App) runDoctorFor(ctx context.Context, machine openshell.ComputeDriver) *openshell.DoctorReport {
 	a.defaults()
 	d := a.defaultDoctor()
+	d.MachineDriver = machine
 	var st *statusProbe
 	managed := onManagedHost()
 	if a.Cfg != nil || managed {

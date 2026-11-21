@@ -189,12 +189,27 @@ func TestSetupUsesAGatewayRunAnotherWay(t *testing.T) {
 					ta.IO.TTY = false
 				}
 				tc.o.SkipImages, tc.o.NoWrappers = true, true
-				ta.ok(t, ta.Setup(bg, tc.o))
+				// -n takes the MicroVM question's default on a Mac: the docker
+				// driver, never vm, which this gateway runs until its user
+				// restarts it, so setup ends not ready (GAP-1704).
+				macVM := mac && !tc.o.NonInteractive
+				leavesVM := mac && !macVM
+				if leavesVM {
+					wantExit(t, ta.Setup(bg, tc.o), 1)
+				} else {
+					ta.ok(t, ta.Setup(bg, tc.o))
+				}
 				out := ta.output()
 				has(t, out, line, "⚠ Gateway service: "+gatewayWarn+"\n",
 					"→ setup uses this gateway as it runs: after a gateway change, restart it yourself, the way you started it\n",
 					"then you restart the gateway, the way you started it, so it loads the change (DefenseClaw cannot restart it)",
-					"✓ openshell.enabled is on", "Done →")
+					"✓ openshell.enabled is on")
+				if leavesVM {
+					has(t, out, "not ready for sandboxes yet: restart the OpenShell gateway yourself, the way you started it, so it runs the docker driver; then `defenseclaw sandbox run ")
+					lacks(t, out, "Done →")
+				} else {
+					has(t, out, "Done →")
+				}
 				lacks(t, out, "✗", "Restart the OpenShell gateway now?", "restarts the gateway", "systemctl --user restart", "brew services restart", "doctor --fix")
 				if !tc.o.NonInteractive {
 					has(t, out, "Write this change? DefenseClaw cannot restart this gateway: you restart it, the way you started it, to apply it [Y/n]")
@@ -224,11 +239,10 @@ func TestSetupUsesAGatewayRunAnotherWay(t *testing.T) {
 					stops = "restarting it stops every sandbox on it (none runs now): save or sync a MicroVM guest's work first, then stop it before the restart " +
 						"(`defenseclaw sandbox stop NAME` for DefenseClaw sandboxes or, for raw OpenShell sandboxes, save work outside the guest first on a gateway older than 0.1.5 because raw stop may not flush it, then `openshell sandbox stop NAME`; DefenseClaw's stop requests a disk sync; raw OpenShell stop on a gateway running 0.1.5 or later requests a guest flush before a planned stop); if a flush fails, changes after the last successful disk sync may be lost\n"
 				}
-				has(t, out, "✓ gateway configuration written; it takes effect when you restart the gateway\n",
-					"⚠ restart the OpenShell gateway yourself, the way you started it, so it runs on the change above (DefenseClaw cannot restart it); "+stops)
-				// -n takes the MicroVM question's default on a Mac: the docker
-				// driver, never vm (GAP-1704).
-				macVM := mac && !tc.o.NonInteractive
+				has(t, out, "✓ gateway configuration written; it takes effect when you restart the gateway\n")
+				if !leavesVM {
+					has(t, out, "⚠ restart the OpenShell gateway yourself, the way you started it, so it runs on the change above (DefenseClaw cannot restart it); "+stops)
+				}
 				if p := ta.gateway.planned[0]; macVM && (p.ComputeDriver != openshell.DriverVM || p.VMIdentity == nil) ||
 					mac && !macVM && (p.ComputeDriver != openshell.DriverDocker || p.VMIdentity != nil) ||
 					!mac && (!p.EnableBindMounts || p.Env[openshell.EnvTelemetryEnabled] != "false") {

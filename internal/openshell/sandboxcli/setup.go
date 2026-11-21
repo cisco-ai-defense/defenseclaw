@@ -188,6 +188,25 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) (retErr error) {
 	restartYourself, unwritten := false, false
 	// Steps left out say so at the end, with the command that does them.
 	var skipped []string
+	// dockerRep is the report the docker driver's needs are read from: the
+	// gateway's, unless a Mac gateway on vm moves to docker, whose report is
+	// the MicroVM driver's view of the machine (Landlock enforced by the
+	// MicroVM's kernel, Docker's network and file sharing not used): then
+	// the doctor checks the machine again for the docker driver
+	// (machineDriver; GAP-1704).
+	dockerRep := rep
+	var machineDriver openshell.ComputeDriver
+	recheck := func() {
+		if machineDriver == "" {
+			rep = a.runDoctor(ctx)
+			dockerRep = rep
+			return
+		}
+		dockerRep = a.runDoctorFor(ctx, machineDriver)
+		// A report of this machine for the docker driver, which its
+		// machine line names: the gateway's driver stays rep's.
+		dockerRep.Driver = machineDriver
+	}
 
 	// 2. The compute driver (macOS, and Linux with KVM): OpenShell's MicroVM
 	// driver, whose MicroVMs have their own kernel with Landlock.
@@ -233,9 +252,17 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) (retErr error) {
 			return err
 		}
 		microVM = yes
+		if !yes && macOS && onVM {
+			// Check it before anything changes, as on a gateway already on
+			// docker.
+			machineDriver = openshell.DriverDocker
+			a.printf("  Checking this machine for the docker driver…  ")
+			recheck()
+			a.printf("%s\n", a.machineLine(dockerRep))
+		}
 		if !yes {
 			// The docker driver needs a Docker VM kernel with Landlock (Docker Desktop 29.8+).
-			if err := a.machineFailure(rep, false); err != nil {
+			if err := a.machineFailure(dockerRep, false); err != nil {
 				return err
 			}
 		}
@@ -245,7 +272,7 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) (retErr error) {
 	// already on this machine. With none yet (the check offers to download
 	// the base image the harness images are built on), setup downloads it
 	// and asks again, before it installs anything that could never run.
-	if c := rep.Get(openshell.CheckIDLandlock); !microVM && c != nil && c.Status == openshell.StatusWarn {
+	if c := dockerRep.Get(openshell.CheckIDLandlock); !microVM && c != nil && c.Status == openshell.StatusWarn {
 		download := c.Fix != nil && c.Fix.Apply != nil
 		pull := false
 		if download && !o.SkipImages {
@@ -266,9 +293,46 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) (retErr error) {
 				return fmt.Errorf("download the OpenShell base image: %w", err)
 			}
 			a.printf("  Checking this machine again…  ")
-			rep = a.runDoctor(ctx)
-			a.printf("%s\n", a.machineLine(rep))
-			if err := a.machineFailure(rep, false); err != nil {
+			recheck()
+			a.printf("%s\n", a.machineLine(dockerRep))
+			if err := a.machineFailure(dockerRep, false); err != nil {
+				return err
+			}
+		}
+	}
+	// On a Mac the docker driver also needs Docker Desktop settings setup
+	// cannot change: host networking, which the OpenShell supervisor uses,
+	// and the home folder shared with Docker, for the project and settings
+	// mounts. Setup names the one that is off with its fix and, on a
+	// terminal, checks again once it is changed; one left off ends setup
+	// not ready (GAP-1704).
+	var dockerUnmet []openshell.Check
+	if macOS && !microVM {
+		for {
+			dockerUnmet = unmetDockerSettings(dockerRep, o.NoMounts)
+			if len(dockerUnmet) == 0 {
+				break
+			}
+			for _, c := range dockerUnmet {
+				a.bad(c.Title + ": " + c.Detail)
+				if c.Fix != nil {
+					a.note("→ " + c.Fix.Line())
+				}
+			}
+			if assume {
+				break
+			}
+			again, err := a.ask("Check Docker Desktop again? (once you have changed the setting above)", true, false)
+			if err != nil {
+				return err
+			}
+			if !again {
+				break
+			}
+			a.printf("  Checking this machine again…  ")
+			recheck()
+			a.printf("%s\n", a.machineLine(dockerRep))
+			if err := a.machineFailure(dockerRep, false); err != nil {
 				return err
 			}
 		}
@@ -771,6 +835,14 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) (retErr error) {
 		driver = openshell.DriverVM
 	}
 	ready, noDockerGroup, down := a.waitDaemon(ctx, driver)
+	// File sharing counts only for the mounts the gateway ends up with.
+	mountsOn := state.BindMounts.Enabled() || changes.EnableBindMounts
+	var unmet []openshell.Check
+	for _, c := range dockerUnmet {
+		if c.ID != openshell.CheckIDDockerFileSharing || mountsOn {
+			unmet = append(unmet, c)
+		}
+	}
 	for _, s := range skipped {
 		a.note("skipped: " + s)
 	}
@@ -789,9 +861,29 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) (retErr error) {
 		a.warn("not ready for sandboxes yet: restart the OpenShell gateway on the MicroVM driver (`" + CommandName + " setup --restart-gateway`), then `" +
 			CommandName + " run " + cmd + "`")
 		return errSetupNotReady()
-	case switchTo == openshell.DriverDocker && !leftVM && !unmanaged:
+	case switchTo == openshell.DriverDocker && !leftVM && unwritten:
+		a.warn("not ready for sandboxes yet: the gateway change was not written, so a restart alone leaves the gateway on the MicroVM driver, where no sandbox starts on a Mac. Rerun `" +
+			CommandName + " setup` and let it write the change, then restart the OpenShell gateway yourself, the way you started it; then `" +
+			CommandName + " run " + cmd + "`")
+		return errSetupNotReady()
+	case switchTo == openshell.DriverDocker && !leftVM && unmanaged:
+		a.warn("not ready for sandboxes yet: restart the OpenShell gateway yourself, the way you started it, so it runs the docker driver; then `" +
+			CommandName + " run " + cmd + "`")
+		return errSetupNotReady()
+	case switchTo == openshell.DriverDocker && !leftVM:
 		a.warn("not ready for sandboxes yet: the gateway still runs the MicroVM driver, where no sandbox starts on a Mac; restart it on the docker driver (`" +
 			CommandName + " setup --restart-gateway`), then `" + CommandName + " run " + cmd + "`")
+		return errSetupNotReady()
+	case len(unmet) > 0:
+		var needs []string
+		for _, c := range unmet {
+			need := c.Title
+			if c.Fix != nil && c.Fix.Summary != "" {
+				need += " (" + c.Fix.Summary + ")"
+			}
+			needs = append(needs, need)
+		}
+		a.warn("not ready for sandboxes yet: the docker driver needs " + strings.Join(needs, " and ") + "; then `" + CommandName + " run " + cmd + "`")
 		return errSetupNotReady()
 	case down:
 		a.warn("not ready for sandboxes yet: the DefenseClaw daemon is not running; start it with `defenseclaw-gateway start`, then `" +
@@ -1569,6 +1661,23 @@ func (a *App) machineFailure(rep *openshell.DoctorReport, landlockLater bool) er
 		}
 	}
 	return nil
+}
+
+// unmetDockerSettings are the Docker Desktop settings a Mac's docker
+// driver needs that the report finds off: host networking, and file
+// sharing unless setup mounts nothing (noMounts). A setting the doctor
+// could not read (a warning) does not count.
+func unmetDockerSettings(rep *openshell.DoctorReport, noMounts bool) []openshell.Check {
+	var out []openshell.Check
+	for _, id := range []string{openshell.CheckIDDockerHostNetwork, openshell.CheckIDDockerFileSharing} {
+		if id == openshell.CheckIDDockerFileSharing && noMounts {
+			continue
+		}
+		if c := rep.Get(id); c != nil && c.Status == openshell.StatusFail {
+			out = append(out, *c)
+		}
+	}
+	return out
 }
 
 func failed(rep *openshell.DoctorReport, id string) bool {
