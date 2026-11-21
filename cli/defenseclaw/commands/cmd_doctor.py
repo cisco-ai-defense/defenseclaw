@@ -10824,39 +10824,6 @@ def _check_kiro_global_scope(r: _DoctorResult) -> None:
     )
 
 
-def _check_kiro_duplicate_hook_surfaces(r: _DoctorResult) -> None:
-    """Warn when kiro-cli's v3 engine loads DefenseClaw hooks from two files.
-
-    kiro-cli 3.x (settings ``chat.agentEngine`` = ``v3``) loads the agent
-    file's hooks and ``~/.kiro/hooks/*.json`` together, so DefenseClaw hooks
-    in both audit every tool call twice (GAP-0165). Setup on kiro-cli 3.x
-    writes only the hooks file; this reports an install where both still carry
-    DefenseClaw's hooks, for example one Kiro itself upgraded from kiro-cli 2.x.
-    """
-    home = connector_home("kiro")
-    try:
-        with open(os.path.join(home, "settings", "cli.json"), encoding="utf-8") as fh:
-            settings = json.load(fh)
-    except (OSError, ValueError):
-        return
-    if not isinstance(settings, dict) or str(settings.get("chat.agentEngine", "")).strip().lower() != "v3":
-        return
-    markers = _HOOK_HEALTH_FALLBACK["kiro"][1]
-    global_hooks = os.path.join(home, "hooks", "defenseclaw.json")
-    agent = os.path.join(home, "agents", "defenseclaw.json")
-    if not (_file_references_marker(global_hooks, markers) and _file_references_marker(agent, markers)):
-        return
-    _emit(
-        "warn",
-        "Kiro hook surfaces",
-        f"kiro-cli runs its v3 engine, which loads both {agent} and {global_hooks}; both carry DefenseClaw "
-        "hooks, so every tool call is inspected and audited twice",
-        r=r,
-        reason_code="kiro_duplicate_hook_surfaces",
-        remediation="Run `defenseclaw setup kiro`: on kiro-cli 3.x it keeps DefenseClaw's hooks in the hooks file only",
-    )
-
-
 _KIRO_BUILT_IN_AGENTS = frozenset({"kiro_default", "kiro_help", "kiro_planner"})
 
 
@@ -19872,7 +19839,6 @@ def _check_connector_inventory(
         _emit("pass", "Connector scope", "global user config", r=r)
     if connector == "kiro":
         _check_kiro_custom_default_agent(r)
-        _check_kiro_duplicate_hook_surfaces(r)
 
     # Skill dirs (scoped to this connector so a multi-connector loop
     # inventories each connector's own layout, not just the primary's).

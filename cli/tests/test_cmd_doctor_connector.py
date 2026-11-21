@@ -3596,30 +3596,6 @@ class TestKiroConnectorScopeRequiresWorkspace(unittest.TestCase):
             codes += [c["reason_code"] for c in r.checks if c["label"] == "Kiro default agent"]
         self.assertEqual(codes, ["kiro_custom_agent_hooked", "kiro_custom_agent_unhooked"])
 
-    def test_kiro_v3_engine_with_hooks_in_both_files_warns(self) -> None:
-        # GAP-0165: kiro-cli 3.x loads the agent file and the hooks file, so
-        # DefenseClaw hooks in both audit every tool call twice.
-        settings = os.path.join(self._kiro_home.name, "settings", "cli.json")
-        agent = os.path.join(self._kiro_home.name, "agents", "defenseclaw.json")
-        os.makedirs(os.path.dirname(settings))
-        os.makedirs(os.path.dirname(agent))
-        self._write_global_hooks("/home/u/.defenseclaw/hooks/kiro-hook.sh --hook-surface v3")
-        hooked = {"name": "defenseclaw", "hooks": {"preToolUse": [{"command": "/home/u/.defenseclaw/hooks/kiro-hook.sh"}]}}
-        cases = (
-            ({"chat.agentEngine": "v3"}, hooked, ["kiro_duplicate_hook_surfaces"]),
-            ({"chat.agentEngine": "v3"}, {"name": "defenseclaw"}, []),
-            ({}, hooked, []),
-        )
-        for engine_settings, agent_body, want in cases:
-            with open(settings, "w", encoding="utf-8") as fh:
-                json.dump(engine_settings, fh)
-            with open(agent, "w", encoding="utf-8") as fh:
-                json.dump(agent_body, fh)
-            r = _DoctorResult()
-            _check_connector_inventory(self._cfg(""), "kiro", r)
-            got = [c["reason_code"] for c in r.checks if c["label"] == "Kiro hook surfaces"]
-            self.assertEqual(got, want, (engine_settings, agent_body))
-
     def test_kiro_global_file_without_defenseclaw_hooks_fails(self) -> None:
         self._write_global_hooks("/usr/local/bin/other-audit-hook", name="team-audit")
         row = self._scope_row("kiro", "")
