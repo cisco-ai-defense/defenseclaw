@@ -32,7 +32,7 @@ A guardrail profile is a named set of guardrail settings. You assign profiles to
 - The users are in a directory group or a local group on the host. Find the exact spelling: `id -Gn` on Linux, or `defenseclaw guardrail profile explain --user alice --json | jq .subject` run as alice (a per-user install explains only your own account).
 - The AD group names in this page's YAML examples use Linux SSSD's `name@domain` form. The same entry selects the AD group on macOS and Windows, which list it as `DOMAIN\group`: `name@domain` and `DOMAIN\name` of the user's own verified domain are one group. `enterprise macos profile-explain` lists the user's groups.
 - On Windows, group profiles need the standalone enterprise install. Per-user installs have no group list.
-- Steps 1 to 3 are for a per-user install. A managed host (Linux, macOS or Windows) has no per-user `config.yaml` and no `defenseclaw guardrail` commands except `defenseclaw guardrail profile explain` on Linux and macOS, which shows a standard user their own profile ([Managed command availability](/docs/enterprise/managed-commands)). Put the profiles in the machine config and check them as [Deliver it to managed hosts](#deliver-it-to-managed-hosts) shows.
+- Steps 1 to 3 are for a per-user install. A managed host (Linux, macOS or Windows) has no per-user `config.yaml` and no `defenseclaw guardrail` commands except `defenseclaw guardrail profile explain` on Linux and macOS, which shows a standard user their own profile ([Managed command availability](/docs/enterprise/managed-commands)): put the profiles in the machine config and check them as [Deliver it to managed hosts](#deliver-it-to-managed-hosts) shows. On Windows that is `& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' config validate FILE` and `& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows profile-explain --user CORP\alice`, from an elevated PowerShell prompt.
 
 ### Steps
 
@@ -114,7 +114,7 @@ A guardrail profile is a named set of guardrail settings. You assign profiles to
 ### Good to know
 
 - Set a strict `default_profile` for accounts no assignment selects. While a directory lookup fails, a request whose assignment needs the missing fact is refused (`default_lookup_failed`) and names that fact.
-- On a per-user install the user owns `config.yaml` and can change their own profile. On a managed host the profile lives in the machine config, and an administrator checks and applies it as root: see [Deliver it to managed hosts](#deliver-it-to-managed-hosts).
+- On a per-user install the user owns `config.yaml` and can change their own profile. On a managed host the profile lives in the machine config: the administrator checks the file with `/opt/defenseclaw/bin/defenseclaw-gateway config validate FILE`, applies it with `/opt/defenseclaw/bin/defenseclaw-gateway enterprise linux ensure --config FILE` (`/opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos ensure --config FILE` on macOS), and checks one account with `/opt/defenseclaw/bin/defenseclaw-gateway enterprise linux profile-explain --user USER --connector CONNECTOR` (`/opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos profile-explain` on macOS), as root.
 
 ### Undo
 

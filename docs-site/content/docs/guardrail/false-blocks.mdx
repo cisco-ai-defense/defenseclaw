@@ -113,7 +113,7 @@ defenseclaw guardrail validate-pack ~/my-guardrail-pack
 defenseclaw guardrail use-pack ~/my-guardrail-pack --connector claudecode
 ```
 
-`use-pack` pins the pack by its digest. If you edit the pack later, the gateway keeps the old policy and `defenseclaw doctor` fails the **Rule pack** row until you pin the new `files digest` it prints. [Rules and custom packs](/docs/policies/rules) has the details, and [customize the guardrail](/docs/guardrail/customize) covers the other layers.
+`use-pack` pins the pack by its digest. If you edit the pack later, the gateway keeps the old policy; `defenseclaw doctor` fails the **Config validation** and **Rule pack** rows and skips **Policy** until you pin the new `files digest` (the Rule pack row prints the `config set` command). [Rules and custom packs](/docs/policies/rules) has the details, and [customize the guardrail](/docs/guardrail/customize) covers the other layers.
 
 ## If it keeps happening
 

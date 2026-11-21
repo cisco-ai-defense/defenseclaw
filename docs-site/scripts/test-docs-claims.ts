@@ -30,7 +30,7 @@ function page(name: string): string {
 }
 
 describe('Tool judge task scope', () => {
-  const text = () => page('guardrail/index.mdx').split('### Which connectors give the judge your task')[1].split('### Let tool calls go first')[0];
+  const text = () => page('guardrail/llm-judge.mdx').split('### What the tool judge sees')[1].split('## How it handles unsure answers')[0];
   it('lists the connectors that keep the task and documents the scope finding', () => {
     const section = text();
     assert.match(section, /\*\*Kept:\*\*[^*]*Claude Code[^*]*Devin\./);
@@ -38,10 +38,10 @@ describe('Tool judge task scope', () => {
     assert.match(section, /\*\*Not kept[^*]*\*\*[^*]*OpenCode[^*]*OpenClaw/);
     assert.match(section, /`INTENT-SCOPE-SEND`/);
     assert.match(section, /Naming a mailbox covers that address only; a person you name without an address counts when you also name the domain of the mailbox/);
-    assert.match(section, /In this release the check only records: it writes a judge event of kind `tool_intent_scope_shadow`/);
-    assert.match(section, /`guardrail\.judge\.intent_scope` to `off` to stop the check; `shadow` is the default/);
-    assert.match(section, /never from words in quoted text, a commit message or a here-document/);
-    assert.match(section, /hosts of the git remotes of your working folder count as named/);
+    assert.match(section, /The check only records: it writes a judge event of kind `tool_intent_scope_shadow`/);
+    assert.match(section, /`guardrail\.judge\.intent_scope` to `off` to stop it; `shadow` is the default/);
+    assert.match(section, /never words in quoted text, a commit message or a here-document/);
+    assert.match(section, /hosts of your working folder's git remotes count as named/);
   });
 });
 
@@ -1611,7 +1611,7 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-2640", page: "get-started/unified-llm-key.mdx", section: "AWS Bedrock", has: ["the `bedrock/` prefix is optional"], lacks: ["give it the `bedrock/` prefix, for example"] },
   { gap: "GAP-2639", page: "reference/setup-guardrail.mdx", has: ["The hook judge works with GPT-5.6 Luna on Bedrock", "through the Bedrock Converse API"], lacks: ["The hook judge needs an Anthropic model on Bedrock"] },
   // GAP-2627 (LEAD 03:53 EDT 10-30; T11a dc-fc-r104-cap-ewin4 C03): with the judge on in action mode, an agent-run `claude mcp add` of a remote server can be blocked as a security-control change (judge-tool-injection); documented workaround.
-  { gap: "GAP-2627", page: "guardrail/llm-judge.mdx", section: "The judge blocks an agent-run configuration command", has: ["With the LLM judge on and the connector in action mode, the judge can block a configuration command the agent runs for you", "such as `claude mcp add --transport http <name> <url>` for a remote MCP server", "`judge-tool-injection`", "Add the server outside the agent session: type the same command in your own terminal, or use `defenseclaw mcp set <name> --url <url>`", "take the connector off the judge: `defenseclaw guardrail judge remove <agent>`", "The connector keeps its mode and its rule checks."], lacks: ["or use `defenseclaw mcp set <name>`, which"] },
+  { gap: "GAP-2627", page: "guardrail/llm-judge.mdx", section: "The judge blocks an agent-run configuration command", has: ["With the judge on and the connector in action mode, the judge can block a configuration command the agent runs for you", "such as `claude mcp add --transport http NAME URL`", "`judge-tool-injection`", "Add the server outside the agent session, or use `defenseclaw mcp set NAME --url URL`", "take the connector off the judge: `defenseclaw guardrail judge remove claudecode`", "The connector keeps its mode and its rule checks."], lacks: ["or use `defenseclaw mcp set <name>`, which"] },
   // GAP-2622 (LEAD 03:33 EDT 10-30; T11a dc-fc-r103-b2-mac C01): balanced MCP admission blocks only CRITICAL; HIGH/MEDIUM/LOW warn (policy/admission.go compileAssetType).
   { gap: "GAP-2622", page: "scanning/mcp-scanner.mdx", section: "Continuous protection", has: ["with the built-in defaults, only CRITICAL blocks the install and disables", "A HIGH, MEDIUM or LOW verdict admits the server with an", "install-warning audit row, and its tool calls go ahead."], lacks: ["MEDIUM and above block the install and disable"] },
   // GAP-2025 RV5-2(a) (LEAD STEER 03:19 EDT 10-30; gateway half TST-33941, guardian half T11 TST-45927): the one-tick refusal after an /etc/passwd change is a documented limit.
@@ -1840,7 +1840,7 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-2216", page: "scanning/skill-scanner.mdx", has: ["DefenseClaw needs Python 3.11 to 3.13 (the package refuses Python 3.10)"], lacks: ["DefenseClaw itself still runs on Python 3.10"] },
   { gap: "GAP-2216", page: "scanning/mcp-scanner.mdx", has: ["itself needs Python 3.11 to 3.13 (the package refuses Python 3.10)"], lacks: ["DefenseClaw itself also supports Python 3.10"] },
   { gap: "GAP-2216", page: "scanning/registries.mdx", has: ["DefenseClaw needs Python 3.11 to 3.13, so every"], lacks: ["any Python 3.10 runtime"] },
-  { gap: "GAP-1587", page: "guardrail/index.mdx", has: ["fails the **Config validation** and **Rule pack** rows and skips **Policy**"], lacks: ["fails the Policy row until you pin the new digest"] },
+  { gap: "GAP-1587", page: "guardrail/false-blocks.mdx", has: ["fails the **Config validation** and **Rule pack** rows and skips **Policy**"], lacks: ["fails the Policy row until you pin the new digest"] },
   { gap: "GAP-1656", page: "policies/rules.mdx", has: ["`live state was not checked while config.yaml is invalid`"], lacks: ["fails the **Policy** row: `generation 2"] },
   { gap: "GAP-1652", page: "guardrail/setup-problems.mdx", has: ["pin the `files digest` value it prints (the guardrail.custom_packs pin, not the `digest` line)", "set both its `path` and `digest`"] },
   { gap: "GAP-1649", page: "reference/keys.mdx", has: ["`DefenseClaw blocked this because its gateway is stopped`", "`defenseclaw: gateway unreachable, blocking <agent> tool (fail mode closed)`"] },
