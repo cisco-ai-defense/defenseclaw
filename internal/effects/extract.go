@@ -785,17 +785,11 @@ func (w *walker) resolveWord(wd Word) Word {
 				v, ok = w.curHome, w.curHome != "" // PowerShell's automatic $HOME
 			}
 			if s.Var == "PWD" && !w.pwdOwn && !w.namerefSeen {
-				// The shell keeps PWD as the working folder it changed to; the
-				// walk tracks that folder, so $PWD is it unless the call set PWD
-				// after its last cd (rel-1-0-10:GAP-1608, GAP-1244). A leading
-				// $PWD under a folder the walk holds as several candidates, or
-				// none, is the relative ".": each candidate places it, and an
-				// unknown folder keeps the name for the reach rule.
 				v, ok = w.cwdWord(i == 0)
 			}
 			if ok && s.Op != nil {
 				if v == "." && s.Var == "PWD" {
-					ok = false // an operator on a folder the walk does not hold as one
+					ok = false
 				} else {
 					v, ok = applyParamOp(v, s.Op)
 				}
@@ -2249,7 +2243,20 @@ func (w *walker) classifyOperands(words []Word, p Program, dialect Dialect) ([]o
 	for i < len(words) {
 		wd := words[i]
 		name := wd.Value
-		if endOpts || !wd.Static {
+		dynamicInline := false
+		dynamicValue := Word{}
+		if !wd.Static {
+			if flag, value, ok := splitDynamicKeyValueOperand(wd, p, dialect); ok {
+				name, dynamicValue, dynamicInline = flag, value, true
+			} else if flag, value, ok := splitDynamicAttachedFlag(wd, p, dialect); ok {
+				name, dynamicValue, dynamicInline = flag, value, true
+			} else {
+				positionals = append(positionals, wd)
+				i++
+				continue
+			}
+		}
+		if endOpts {
 			positionals = append(positionals, wd)
 			i++
 			continue
@@ -2279,6 +2286,11 @@ func (w *walker) classifyOperands(words []Word, p Program, dialect Dialect) ([]o
 		}
 		// PowerShell / long --flag=value and -Param:Value inline value.
 		fname, inlineVal, hasInline := splitInlineFlagValue(name, dialect)
+		inlineWord := Word{Value: inlineVal, Static: true}
+		if dynamicInline {
+			fname, inlineWord, hasInline = name, dynamicValue, true
+			inlineVal = dynamicValue.Value
+		}
 		fl, ok := flagLookup(p, fname, dialect)
 		if ok && dialect == DialectPOSIX {
 			fname, _, _ = flagResolve(p, fname) // an abbreviation reads as its full name (--target= is --target-directory=)
@@ -2300,7 +2312,7 @@ func (w *walker) classifyOperands(words []Word, p Program, dialect Dialect) ([]o
 			i++
 			continue
 		}
-		if p.InPlace != "" && (fname == p.InPlace || fname == "--in-place" || strings.HasPrefix(fname, "--in-place=")) {
+		if isInPlaceFlag(p, fname) || fname == "--in-place" || strings.HasPrefix(fname, "--in-place=") {
 			inPlace = true
 		}
 		if p.DeleteFlag != "" && fname == p.DeleteFlag {
@@ -2339,21 +2351,21 @@ func (w *walker) classifyOperands(words []Word, p Program, dialect Dialect) ([]o
 			continue
 		}
 		if hasInline {
-			tops, bad := w.textOperands(fl.Text, Word{Value: inlineVal, Static: true})
+			tops, bad := w.textOperands(fl.Text, inlineWord)
 			out = append(out, tops...)
 			if bad {
 				unknownFlag = true // a script / format / config the closed grammar does not accept
 			}
 		}
 		if hasInline {
-			if routeSourcesDestFlag(p, fl, Word{Value: inlineVal, Static: true}, &srcFlags, &destFlag) {
+			if routeSourcesDestFlag(p, fl, inlineWord, &srcFlags, &destFlag) {
 				if fl.Role == RoleWrite {
 					destFlagSet = true
 				}
 				i++
 				continue
 			}
-			out = append(out, operandValue(fl, Word{Value: inlineVal, Static: true}, p))
+			out = append(out, operandValue(fl, inlineWord, p))
 			i++
 			continue
 		}
@@ -2407,7 +2419,7 @@ func (w *walker) classifyOperands(words []Word, p Program, dialect Dialect) ([]o
 	if del {
 		for _, wd := range positionals {
 			if wd.Static && (wd.Value == "!" || wd.Value == "(" || wd.Value == ")" || wd.Value == ",") {
-				findOpaque = true // a negated or grouped expression: not one pattern
+				findOpaque = true
 			}
 		}
 	}
@@ -2426,6 +2438,18 @@ func (w *walker) classifyOperands(words []Word, p Program, dialect Dialect) ([]o
 		out = append(out, op)
 	}
 	return out, inner, unknownFlag
+}
+
+func isInPlaceFlag(p Program, name string) bool {
+	if p.InPlace == name {
+		return true
+	}
+	for _, flag := range p.InPlaceFlags {
+		if flag == name {
+			return true
+		}
+	}
+	return false
 }
 
 // hasRowFlag reports one of the row options names among the words, before
@@ -2574,6 +2598,58 @@ func isFlagToken(name string, dialect Dialect) bool {
 	return false
 }
 
+// splitDynamicKeyValueOperand applies a table-valued key=value option when the value remains unresolved.
+func splitDynamicKeyValueOperand(wd Word, p Program, dialect Dialect) (string, Word, bool) {
+	eq := strings.IndexByte(wd.Value, '=')
+	if eq <= 0 {
+		return "", Word{}, false
+	}
+	flag := wd.Value[:eq]
+	fl, ok := flagLookup(p, flag, dialect)
+	if !ok || !fl.Value {
+		return "", Word{}, false
+	}
+	value := attachedValueWord(wd.Value[eq+1:], wd)
+	value.Glob = wd.Glob
+	return flag, value, true
+}
+
+func attachedValueWord(value string, source Word) Word {
+	out := Word{Value: value, Static: source.Static, Quoted: source.Quoted}
+	if !source.Static {
+		out.Reason = ReasonDynamicExpansion
+	}
+	return out
+}
+
+// splitDynamicAttachedFlag lets the table consume an attached option value whose
+// value still contains an unresolved expansion (for example 7z -o$env:USERPROFILE).
+// The frontend owns tokenization; this only separates a known table flag from its value.
+func splitDynamicAttachedFlag(wd Word, p Program, dialect Dialect) (string, Word, bool) {
+	name := wd.Value
+	if flag, value, has := splitInlineFlagValue(name, dialect); has {
+		if fl, ok := flagLookup(p, flag, dialect); ok && fl.Value {
+			return flag, attachedValueWord(value, wd), true
+		}
+	}
+	best := ""
+	for flag, fl := range p.Flags {
+		if !fl.Value || len(flag) < 2 || !strings.HasPrefix(name, flag) || len(name) == len(flag) {
+			continue
+		}
+		if flag[0] != '-' || strings.HasPrefix(flag, "--") || dialect != DialectPOSIX && len(flag) != 2 {
+			continue
+		}
+		if len(flag) > len(best) {
+			best = flag
+		}
+	}
+	if best == "" {
+		return "", Word{}, false
+	}
+	return best, attachedValueWord(name[len(best):], wd), true
+}
+
 // splitInlineFlagValue splits --flag=value and PowerShell -Name:value.
 func splitInlineFlagValue(name string, dialect Dialect) (flag, value string, has bool) {
 	if eq := strings.IndexByte(name, '='); eq >= 0 {
@@ -2594,7 +2670,7 @@ func (w *walker) splitShortFlags(name string, words []Word, i *int, p Program, o
 	body := name[1:]
 	for j := 0; j < len(body); j++ {
 		fn := "-" + string(body[j])
-		if fn == p.InPlace {
+		if isInPlaceFlag(p, fn) {
 			*inPlace = true
 		}
 		fl, ok := flagLookup(p, fn, DialectPOSIX)
@@ -2656,7 +2732,7 @@ func (w *walker) splitShortFlags(name string, words []Word, i *int, p Program, o
 }
 
 func operandValue(fl Flag, v Word, p Program) operand {
-	op := operand{value: v.Value, static: v.Static, quoted: v.Quoted, glob: v.Glob, role: fl.Role}
+	op := operand{value: v.Value, static: v.Static, quoted: v.Quoted, glob: v.Glob, role: fl.Role, subtree: fl.Subtree}
 	if fl.Role == RoleUploadFile {
 		// -T / --upload-file / --post-file / -InFile: the value is always a local
 		// file (or "-" for stdin); it is never inline literal data.
@@ -2842,6 +2918,32 @@ func (w *walker) positionalOperands(ps []Word, p Program, ctx posCtx) []operand 
 		if len(ps) > 0 {
 			out = append(out, mk(ps[0], RoleWrite))
 		}
+	case PosArchive:
+		// 7z command ARCHIVE [MEMBER...]. Extraction/list/test read the archive;
+		// add/update/delete mutate it. Member selectors are not filesystem paths.
+		if len(ps) >= 2 {
+			mode := strings.ToLower(ps[0].Value)
+			out = append(out, mk(ps[0], RoleIgnore))
+			switch mode {
+			case "x", "e", "l", "t", "test":
+				out = append(out, mk(ps[1], RoleRead))
+			case "a", "u":
+				out = append(out, mk(ps[1], RoleWrite))
+				for _, wd := range ps[2:] {
+					out = append(out, mk(wd, RoleRead))
+				}
+			case "d":
+				out = append(out, mk(ps[1], RoleWrite))
+			default:
+				op := mk(ps[1], RoleWrite)
+				op.roleUncertain = true
+				out = append(out, op)
+			}
+		} else if len(ps) == 1 {
+			op := mk(ps[0], RoleWrite)
+			op.roleUncertain = true
+			out = append(out, op)
+		}
 	case PosZip:
 		// zip ARCHIVE FILE...: the first operand is the archive it writes (zip adds
 		// .zip when the name has no extension, so the final name is not certain),
@@ -3013,7 +3115,11 @@ func (w *walker) effectForOperand(op operand, p Program, origin Origin, cond, fo
 	}
 	if !op.static {
 		e.Target.Type = TargetPath
+		e.Target.Subtree = op.subtree
 		e.Target.Spelling = dynamicSpelling(op.tail)
+		if e.Target.Spelling == "" {
+			e.Target.Spelling = cap4k(op.value)
+		}
 		e.addReason(ReasonDynamicExpansion, ScopeTarget)
 		return e
 	}
@@ -3033,9 +3139,7 @@ func (w *walker) effectForOperand(op operand, p Program, origin Origin, cond, fo
 	e.Target.Spelling = cap4k(op.value)
 	if abs, ok, reason := placePath(op.value, w.opts()); ok {
 		e.Target.Path = abs
-		if tgt, ok := w.links[e.Target.Key()]; ok {
-			e.Target.Physical = tgt
-		}
+		e.Target.Physical = w.callLinkPhysical(e.Target)
 		if op.findFiltered {
 			// find deletes only the files below the root its predicates select:
 			// the -name pattern at any depth, or any file for a predicate the
@@ -3045,7 +3149,13 @@ func (w *walker) effectForOperand(op operand, p Program, origin Origin, cond, fo
 			if name == "" || op.findOpaqueName() {
 				name = "*"
 			}
-			e.Target.Lexical = cap4k(joinPattern(abs, name, w.o.flavor()))
+			// A root that is a link this call created walks the link's
+			// target (rel-1-0-10:GAP-1573c): join the pattern there.
+			root := abs
+			if e.Target.Physical != "" {
+				root = e.Target.Physical
+			}
+			e.Target.Lexical = cap4k(joinPattern(root, name, w.o.flavor()))
 		}
 		if w.onAliasedDrive(abs) {
 			e.addReason(ReasonNonCanonicalPath, ScopeTarget)
@@ -3325,9 +3435,7 @@ func (w *walker) fillRedirTarget(e *Effect, t Word) {
 	e.Target.Spelling = cap4k(t.Value)
 	if abs, ok, reason := placePath(t.Value, w.opts()); ok {
 		e.Target.Path = abs
-		if tgt, ok := w.links[e.Target.Key()]; ok {
-			e.Target.Physical = tgt
-		}
+		e.Target.Physical = w.callLinkPhysical(e.Target)
 		if w.onAliasedDrive(abs) {
 			e.addReason(ReasonNonCanonicalPath, ScopeTarget)
 		}
@@ -3465,10 +3573,12 @@ func (w *walker) childEnvironment(childDialect Dialect) (env map[string]string, 
 
 func (w *walker) recordLink(op operand, ops []operand) {
 	var linkPath, targetSpelling string
+	maybeDir := false
 	for _, o2 := range ops {
 		if o2.role == RoleLink && o2.static {
 			if abs, ok, _ := placePath(o2.value, w.opts()); ok {
 				linkPath = abs
+				maybeDir = o2.destMaybeDir
 			}
 		}
 		if o2.role == RoleLinkTarget && o2.static {
@@ -3489,6 +3599,47 @@ func (w *walker) recordLink(op operand, ops []operand) {
 	}
 	t := Target{Path: linkPath, Flavor: w.o.flavor(), CaseFold: w.o.CaseInsensitive}
 	w.links[t.Key()] = targetAbs
+	if maybeDir {
+		// ln -s T d where d is an existing folder puts the link at
+		// d/basename(T); a later d/<name>/... may walk T (GAP-1573c).
+		t.Path = joinDir(linkPath, baseName2(targetSpelling))
+		w.links[t.Key()] = targetAbs
+	}
+}
+
+// callLinkPhysical is where a target lands when it is, or lies below, a link
+// an earlier command of this call created (ln -s T d; ... d/x): the longest
+// recorded link prefix, joined with the rest of the path. Empty when no in-call
+// link covers it. The link does not exist on disk at hook time, so the
+// classifier grades such a target maybe, never known (DET111 F1).
+func (w *walker) callLinkPhysical(t Target) string {
+	if len(w.links) == 0 {
+		return ""
+	}
+	key := t.Key()
+	if tgt, ok := w.links[key]; ok {
+		return tgt
+	}
+	if len(key) != len(t.Path) {
+		return "" // a case fold changed the byte length: no prefix split
+	}
+	sep := "/"
+	if t.Flavor == FlavorWindows {
+		sep = `\`
+	}
+	for i := len(key) - 1; i > 0; i-- {
+		if key[i] != sep[0] {
+			continue
+		}
+		if tgt, ok := w.links[key[:i]]; ok {
+			rest := t.Path[i:]
+			if t.Flavor == FlavorWindows {
+				rest = strings.ReplaceAll(rest, "/", `\`)
+			}
+			return strings.TrimRight(tgt, `/\`) + rest
+		}
+	}
+	return ""
 }
 
 func parentDir(p string, flavor Flavor) string {

@@ -135,6 +135,13 @@ func gradeTarget(t effects.Target, state effects.TargetState, kind effects.Kind,
 			return gradeUnknown
 		}
 	}
+	// A target at or below a link an earlier command of this call created
+	// lands on that link's target (effects fills Physical). The link is not on
+	// disk at hook time, so not every component is resolved: maybe, never
+	// known (DET111 F1, rel-1-0-10:GAP-1573c).
+	if callLinkReaches(t, set, flavor) {
+		return gradeUnknown
+	}
 	if !ok {
 		// The link reading could not complete: the write may still reach a
 		// member. Never "no" for an unchecked link.
@@ -296,6 +303,8 @@ func matchBasis(t effects.Target, grade setGrade, set protectedSet, flavor effec
 		return "cwd"
 	case t.Path == "":
 		return "dynamic"
+	case callLinkReaches(t, set, flavor):
+		return "call_link"
 	case t.Subtree && treeHoldsSet(t.Path, set, flavor):
 		return "subtree"
 	case underProtectedDir(t.Path, set, flavor):
@@ -305,6 +314,23 @@ func matchBasis(t effects.Target, grade setGrade, set protectedSet, flavor effec
 	default:
 		return "unresolved"
 	}
+}
+
+// callLinkReaches reports that a target's in-call link landing (Physical, set
+// by effects for a path at or below a link this call created) is a member, is
+// under a protected tree or folder, or, for a tree effect, holds the set.
+func callLinkReaches(t effects.Target, set protectedSet, flavor effects.Flavor) bool {
+	ph := t.Physical
+	if ph == "" || t.Path == "" || ph == t.Path {
+		return false
+	}
+	if t.Subtree && t.Lexical != "" {
+		// a walk that selects by name below the link (find d/ -name x):
+		// effects joined the pattern on the landing; that pattern decided.
+		return false
+	}
+	return memberExact(ph, set, flavor) || underTree(ph, set, flavor) || underProtectedDir(ph, set, flavor) ||
+		(t.Subtree && treeHoldsSet(ph, set, flavor))
 }
 
 // dirExact reports that a path is exactly one of the set's protected

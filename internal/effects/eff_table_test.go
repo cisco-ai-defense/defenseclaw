@@ -112,7 +112,7 @@ var effRows = []row{
 	shellRow("EFF-ARCHIVE-08 gzip compresses (original removed)", raLinHome, "", `gzip /home/u/.ssh/authorized_keys`, effAK),
 	shellRow("EFF-ARCHIVE-09 gzip -c is read only", raLinHome, "", `gzip -c /home/u/.ssh/id_rsa`, ""),
 	shellRow("EFF-ARCHIVE-10 zip writes the archive", raLinHome, "", `zip /home/u/.ssh/authorized_keys.zip /t/a`, dynamicTarget),
-	shellRow("EFF-ARCHIVE-11 7z", raLinHome, "", `7z x /t/a.7z -o/home/u/.ssh`, dynamicTarget),
+	shellRow("EFF-ARCHIVE-11 7z", raLinHome, "", `7z x /t/a.7z -o/home/u/.ssh`, "/home/u/.ssh/**"),
 	shellRow("EFF-ARCHIVE-12 bsdtar", raLinHome, "", `bsdtar -xf /t/a.tar -C /home/u/.ssh`, dynamicTarget),
 	shellRow("EFF-ARCHIVE-13 cpio", raLinHome, "", `cd /home/u/.ssh && cpio -id < /t/a.cpio`, dynamicTarget),
 	shellRow("EFF-GITC-01 filter-branch", raLinHome, "", `git -C /home/u/.ssh filter-branch --force HEAD`, dynamicTarget),
