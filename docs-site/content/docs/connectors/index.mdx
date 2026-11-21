@@ -37,7 +37,7 @@ Connectors are the adapter layer between agent frameworks and DefenseClaw. They 
 | [OpenCode](/docs/connectors/opencode) | Plugin | Tool calls | No | Linux, macOS, Windows |
 | [Amp](/docs/connectors/amp) | Plugin | Tool calls and results | `tool.call`, `tool.result` | Linux, macOS, Windows |
 | [Hermes](/docs/connectors/hermes) | Hook | `pre_tool_call` | No | Linux, macOS, Windows |
-| [OpenClaw](/docs/connectors/openclaw) | Proxy | Requests, responses, tool calls | `before_tool_call` | Linux, macOS |
+| [OpenClaw](/docs/connectors/openclaw) | Proxy (hooks on Windows) | Requests, responses, tool calls | `before_tool_call` | Linux, macOS, Windows (OpenClaw 2026.8.35 or later) |
 | [ZeptoClaw](/docs/connectors/zeptoclaw) | Proxy | Requests, responses, tool calls | No | Linux, macOS |
 
 Where an agent cannot ask, a confirm verdict becomes an alert with the original action kept; Copilot CLI blocks it instead. You can review it in audit or the TUI, but you cannot resume the call. The [capability matrix](/docs/connectors/capability-matrix) has the full per-connector detail, and [Human approval](/docs/guardrail) has the per-event matrix.
@@ -53,8 +53,6 @@ What each OS supports, and what live tests verified. Switch to **Enterprise** fo
 <ConnectorOsMatrix />
 
 ZeptoClaw needs the guardrail proxy, which native Windows does not host. OpenClaw runs there in native hooks mode ([Hook modes](/docs/connectors/openclaw#hook-modes)).
-
-{/* pending: the Windows column of the matrix above follows platform_support.go; update with the Windows native branch */}
 
 ## OpenShell sandbox
 

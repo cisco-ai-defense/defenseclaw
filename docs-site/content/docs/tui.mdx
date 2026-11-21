@@ -271,7 +271,7 @@ protection, for example `● default policy · default pack · 1 of 5 opt-in pac
 | --- | --- |
 | Posture | One row for the global setting and one per active connector: mode (observe logs, action enforces), the levels tool calls are blocked and alerted at, human approval, rule pack and opt-in packs. The detail pane says in plain words what that scope does and shows the CRITICAL / HIGH / MEDIUM / LOW → action table. |
 | Opt-in packs | The high-assurance deterministic packs: privacy, cloud production, database destruction, infrastructure destruction and Kubernetes production (and the staged SSH authorized-keys contract, which can't be turned on yet), with what each covers and whether it is on for the selected scope. |
-| Chains | The 26 built-in bounded tool-call chains (for example SQL `xp_cmdshell` enable → invoke, Kubernetes manifest write → apply → pod exec, download → execute), grouped by SQL, Kubernetes, cloud, host, credentials, data egress, network and security controls. `✓` marks the chains that can block; `◐` marks alert-only ones. Read-only. |
+| Chains | The 26 built-in bounded tool-call chains (for example SQL `xp_cmdshell` enable → invoke, Kubernetes manifest write → apply → pod exec, download → execute), grouped by SQL, Kubernetes, cloud, host, credentials, data egress, network and security controls. `✓` marks the chains that can block; `◐` marks alert-only ones. Above the chains, a **Secret flow tracking** block shows the [secret flow](/docs/guardrail/secret-flow-tracking) settings (mode and effective mode, label sets, sink action, re-encodings, memory limits, allowlist) and, when the gateway is running, the tracked sessions and the latest redacted hits. Read-only. |
 | Rule families | The rule families in the scope's pack (command, sensitive path, secret, trust exploit, C2, enterprise data, cognitive file) with how many rules each has and what it catches. |
 | Policies | Every named policy with the active one marked; `Enter` picks one to activate. |
 | Rule packs | The rule pack of each scope; `Enter` switches it for all connectors or one. |
@@ -464,6 +464,16 @@ the details window takes the keys of its view, and `Esc` closes it.
 | `P` | Pull the work of a sandbox that works on a copy: **Show what comes back** (`defenseclaw sandbox pull <name>`, which changes nothing), **Apply it to the project folder** (`--apply`, a 3-way merge that `U` reverts) or **Put it on branch** `dc/<name>` (`--branch`, which leaves your working tree alone). The command runs in this terminal: it shows the changes first and asks before it brings back a change that can run code on your machine. `p` still opens Policies |
 | `w` | Sandboxed by default: turn the shell wrapper on or off per harness (`defenseclaw sandbox enable` or `defenseclaw sandbox disable`) |
 | `r` | Refresh now |
+
+The **Sandboxes** view also lists the agents you started with
+`defenseclaw substrate run` on [Agent Substrate](/docs/substrate), with runtime
+`substrate`. The TUI reads them with `defenseclaw substrate list --json` at most
+every 15 seconds and shows the first 50 (`+N more` for the rest). If you are not
+signed in or the cluster does not answer, the panel shows one dim line, for
+example `Agent Substrate: not signed in. Run: defenseclaw substrate login`,
+instead of an error. On an agent row, `c` connects (it resumes a suspended
+agent), `P` pulls its work, and `d` deletes it after one confirmation. The
+other keys are for OpenShell sandboxes.
 
 Blocks of private networks, cloud metadata addresses and your organization's
 block lists cannot be lifted here. When `openshell.admin.allow_unblock` is
