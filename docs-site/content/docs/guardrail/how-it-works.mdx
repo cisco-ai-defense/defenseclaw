@@ -110,7 +110,7 @@ The full rules, settings and examples are on [Configure the cascade](/docs/guard
 - **Observe** records every finding and enforces none. Start here. The config default is `observe`. One exception: a change to DefenseClaw's own files by an agent is blocked in every mode by the `strict` and `managed-strict` packs, and raises a HIGH alert in the `default` and `permissive` packs.
 - **Action** applies the block and alert levels. In the `default` pack, CRITICAL blocks and MEDIUM and above alerts. With human approval on, a HIGH call asks you where the agent can ask.
 
-Only some agents can ask: for example Claude Code (in Manual permission mode only), Antigravity, Amp and OpenClaw. The others get an alert, and the audit log keeps `raw_action: confirm`. [Set up the guardrail](/docs/guardrail#which-agents-can-ask) has the list.
+Only some agents can ask: for example Claude Code (in Manual permission mode only), Antigravity, Amp and OpenClaw. The others get an alert, and the audit log keeps `raw_action: confirm`. [Set up the guardrail](/docs/guardrail/human-approval#which-agents-can-ask) has the list.
 
 ## What happens when a layer fails
 
