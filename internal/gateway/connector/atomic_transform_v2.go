@@ -157,6 +157,9 @@ func atomicTransformFileV2(
 	if err := atomicTransformValidateNoReparsePathPlatform(transactionDir); err != nil {
 		return fmt.Errorf("validate Windows transaction locator: %w", err)
 	}
+	if err := healAtomicTransformV2ConfigLeftToAdmin(path); err != nil {
+		return err
+	}
 	stateDir, err := prepareAtomicTransformStateDir(transactionDir)
 	if err != nil {
 		return fmt.Errorf("prepare stable compare-and-swap transaction directory: %w", err)
