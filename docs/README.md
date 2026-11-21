@@ -17,6 +17,7 @@ procedures, package-local notes, generated schema references, and test fixtures.
 | System boundaries | [`ARCHITECTURE.md`](ARCHITECTURE.md) | `cli/`, `cmd/`, `internal/`, `extensions/defenseclaw/` |
 | Guardrail | [`GUARDRAIL.md`](GUARDRAIL.md), [`GUARDRAIL_RULE_PACKS.md`](GUARDRAIL_RULE_PACKS.md), [`PARSELIMITS.md`](PARSELIMITS.md) | `internal/gateway/`, `internal/guardrail/`, `internal/shellparse/`, `policies/` |
 | Observability v8 | [`OBSERVABILITY.md`](OBSERVABILITY.md) | `schemas/telemetry/v8/`, `schemas/config/v8/`, `internal/observability/` |
+| Agent Substrate | [`SUBSTRATE.md`](SUBSTRATE.md), [`examples/substrate/eks/`](examples/substrate/eks/README.md) | `internal/substrate/`, `internal/cli/substrate*.go`, `deploy/helm/defenseclaw-substrate/` |
 | Gateway | [`reference/GATEWAY_SPEC.md`](reference/GATEWAY_SPEC.md) | `internal/gateway/` |
 | OpenShell sandbox | [`SANDBOX.md`](SANDBOX.md) (architecture, and what the retired standalone install left), [`OPENSHELL_SANDBOX_EVENTS.md`](OPENSHELL_SANDBOX_EVENTS.md) (telemetry) | `internal/openshell/`, `internal/sandboxauth/`, `policies/sandbox/` |
 | Private upstream security | [`reference/PRIVATE_UPSTREAMS.md`](reference/PRIVATE_UPSTREAMS.md) | `internal/netguard/`, `internal/gateway/provider.go` |
