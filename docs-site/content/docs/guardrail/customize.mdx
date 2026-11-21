@@ -69,7 +69,7 @@ defenseclaw config set guardrail.cascade.lanes.judge_read_skip off
 
 ## Choose the models
 
-- **Judge.** Set `--judge-provider`, `--judge-model`, `--judge-api-base` and `--judge-api-key-env` on `defenseclaw setup guardrail`, or edit `guardrail.judge.llm` in `config.yaml`. The judge uses its own `llm` block, else the shared one. The recommended model is Gemma 4 31B on Bedrock; local models work too. See [LLM judge](/docs/guardrail/llm-judge) and [LLM providers](/docs/guardrail/unified-llm-key).
+- **Judge.** Set `--judge-provider`, `--judge-model`, `--judge-api-base` and `--judge-api-key-env` on `defenseclaw setup guardrail`, or edit `guardrail.judge.llm` in `config.yaml`. The judge uses its own `llm` block, else the shared one. The recommended model is Gemma 4 31B on Bedrock; local models work too. See [LLM judge](/docs/guardrail/llm-judge) and [LLM providers](/docs/get-started/unified-llm-key).
 - **Decision model.** Point it at an endpoint with `defenseclaw setup decision-model --base-url URL --model NAME --connectors claudecode,codex --ping`. `--show --ping` prints and tests the saved setting. See [decision model](/docs/guardrail/decision-model).
 - **Which agents use them.** `guardrail.judge.hook_connectors` and `decision_model.hook_connectors` name the agents. Per-agent and per-profile overrides of System One's routing are under `guardrail.connectors.NAME.cascade.system_one`.
 

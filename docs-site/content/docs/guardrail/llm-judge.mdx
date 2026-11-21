@@ -55,7 +55,7 @@ Run `defenseclaw config validate`, then restart the gateway.
 
 - **Keep `hook_connectors`.** Without it the judge reviews no hook connector's tool calls, even with `enabled: true`. An empty or missing list means the judge reviews proxy traffic only. `setup guardrail` and `defenseclaw guardrail judge add all --enable` write `["*"]`; `defenseclaw init` writes the connectors you pick. When the list is empty the gateway log says `LLM judge hook lane off` and `defenseclaw doctor` warns on the **Detection** row.
 - **Action mode only.** A hook connector is judged only in action mode. `guardrail judge add` refuses an observe-mode connector.
-- **Any other model works the same way.** Pass its `--judge-provider` and `--judge-model`. Bedrock models, Vertex AI, Azure OpenAI and your own endpoints are in [LLM providers](/docs/guardrail/unified-llm-key).
+- **Any other model works the same way.** Pass its `--judge-provider` and `--judge-model`. Bedrock models, Vertex AI, Azure OpenAI and your own endpoints are in [LLM providers](/docs/get-started/unified-llm-key).
 - **Turn it off** with `guardrail.detection_strategy: regex_only` or `guardrail.judge.enabled: false`. To take one connector off the judge: `defenseclaw guardrail judge remove claudecode`.
 
 ```bash
