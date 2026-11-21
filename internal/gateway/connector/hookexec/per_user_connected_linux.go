@@ -62,21 +62,16 @@ func listenersHeldOnlyByPID(pid int, server *net.TCPAddr, onHeld func()) bool {
 	return listenersHeldOnlyByThen(procSelfNet, "/proc", pid, server, onHeld)
 }
 
-// listenersHeldOnlyBy reports whether the kernel lists at least one listening
-// socket that can take a connection to server and every one is a socket that
-// process pid holds open. A dual-stack IPv6 listener appears in tcp6, so both
-// tables are read; a socket bound to the wildcard address counts for the
-// loopback server, and no other process of this account holds any of those
-// sockets (a forked or inherited listener descriptor shares the accept queue).
-// Any other holder of the port, even one of the same account, an unreadable
-// table or descriptor list, or no listener, is false.
-func listenersHeldOnlyBy(procNet, procRoot string, pid int, server *net.TCPAddr) bool {
-	return listenersHeldOnlyByThen(procNet, procRoot, pid, server, nil)
-}
-
-// listenersHeldOnlyByThen is listenersHeldOnlyBy that calls onHeld, when not
-// nil, once pid is shown to hold every listening socket, before the other
-// processes of this account are read.
+// listenersHeldOnlyByThen reports whether the kernel lists at least one
+// listening socket that can take a connection to server and every one is a
+// socket that process pid holds open. A dual-stack IPv6 listener appears in
+// tcp6, so both tables are read; a socket bound to the wildcard address counts
+// for the loopback server, and no other process of this account holds any of
+// those sockets (a forked or inherited listener descriptor shares the accept
+// queue). Any other holder of the port, even one of the same account, an
+// unreadable table or descriptor list, or no listener, is false. onHeld, when
+// not nil, is called once pid is shown to hold every listening socket, before
+// the other processes of this account are read.
 func listenersHeldOnlyByThen(procNet, procRoot string, pid int, server *net.TCPAddr, onHeld func()) bool {
 	key, table, err := procTCPEndpoint(server)
 	if err != nil {

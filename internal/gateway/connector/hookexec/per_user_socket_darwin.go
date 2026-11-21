@@ -139,18 +139,19 @@ func darwinRecordedGatewayHoldsSocket(ctx context.Context, local, remote *net.TC
 }
 
 // darwinPIDHoldsListener reports whether process pid, of this account, holds
-// a listening socket on port at one of ips. It reads that one process only.
-func darwinPIDHoldsListener(ctx context.Context, pid, port int, ips []net.IP) bool {
+// the listening socket bound to the dialled address server itself. It reads
+// that one process only. A wildcard listener of pid does not count: the
+// kernel hands a connection to a more specific listener first, so another
+// process bound to the dialled address (a decoy) would take it while pid
+// holds only the wildcard (GAP-1534 review). This is as strict as the Linux
+// mark, where every listener that could take the connection is pid's.
+func darwinPIDHoldsListener(ctx context.Context, pid int, server *net.TCPAddr) bool {
 	process, err := unix.SysctlKinfoProc("kern.proc.pid", pid)
 	if err != nil || process == nil || process.Eproc.Ucred.Uid != uint32(os.Geteuid()) {
 		return false
 	}
-	for _, ip := range ips {
-		if held, err := darwinProcessHoldsSocket(ctx, pid, process.Proc.P_starttime, &net.TCPAddr{IP: ip, Port: port}, nil, darwinTCPListen); err == nil && held {
-			return true
-		}
-	}
-	return false
+	held, err := darwinProcessHoldsSocket(ctx, pid, process.Proc.P_starttime, server, nil, darwinTCPListen)
+	return err == nil && held
 }
 
 func darwinTCPAddrEqual(a, b *net.TCPAddr) bool {

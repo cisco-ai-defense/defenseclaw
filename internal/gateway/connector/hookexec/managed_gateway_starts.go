@@ -543,8 +543,10 @@ const ownerScanGrace = 2 * time.Second
 // and the dial returned its answer (the check is no longer pending). A scan
 // that said no ends the wait with false (the deadline cut applies), and so
 // does a scan still running when the grace ends, which also marks the check
-// abandoned: connectBy then ends the try with errPerUserOwnerScanUnfinished,
-// and a proof arriving later is void.
+// abandoned: connectBy then ends the try with errPerUserOwnerScanUnfinished
+// when the scan had shown the recorded gateway holding the listener
+// (recordedHolder), else with errPerUserOwnerUnproven, and a proof arriving
+// later is void.
 func ownerScanEnded(connected <-chan struct{}, tryCtx context.Context, check *perUserPeerCheck) bool {
 	grace := time.NewTimer(ownerScanGrace)
 	defer grace.Stop()
