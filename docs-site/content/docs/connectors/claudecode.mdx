@@ -129,19 +129,20 @@ The administrator manages Claude Code in the managed `config.yaml`. `guardrail.c
 
 - In action mode `PreToolUse` can deny a tool call or ask you first. The question appears inside Claude Code in Manual mode, its default; in any other permission mode the call is blocked with a note to switch to Manual mode and ask again.
 - The prompt, permission, task, stop, compaction, config and elicitation events can also block.
-- Events that carry a tool's result (`PostToolUse`, `PostToolUseFailure`, `PermissionDenied`) are advisory. DefenseClaw scans them and records findings, but the tool has already run.
+- `PostToolUse` can block: the answer is `decision: "block"` with a reason Claude Code gives the model. The tool has already run and its result has already reached the model, so the block tells the agent, and a `systemMessage` tells you, instead of withholding the result ([Tool results](/docs/guardrail/tool-results)). `PostToolUseFailure` and `PermissionDenied` are advisory: DefenseClaw scans them and records findings.
 - Observe mode records policy findings without blocking on those findings. On a per-user install, when the gateway is not running, the default and permissive policies let the call run with one warning; strict and managed installs block it ([gateway outage table](/docs/connectors/capability-matrix#gateway-outage)). A running hook blocks every other failure it detects; a killed or timed-out hook lets the call run ([Vendor limits](/docs/enterprise/machine-policy#vendor-limits)). Settings and limits are in [Fail modes](/docs/reference/fail-modes).
 
 ### Verdict mapping
 
-Thirteen events can block on Claude Code `>=2.1.154, <2.1.219`. From `2.1.219` fourteen can, because `PostToolBatch` joins the list. Only `PreToolUse` supports native ask. `Setup` is observation-only and is not registered. `WorktreeCreate` is not registered, because a handler replaces Claude Code's default worktree creation and must return the new path.
+Fourteen events can block on Claude Code `>=2.1.154, <2.1.219`, `PostToolUse` among them. From `2.1.219` fifteen can, because `PostToolBatch` joins the list. Only `PreToolUse` supports native ask. `Setup` is observation-only and is not registered. `WorktreeCreate` is not registered, because a handler replaces Claude Code's default worktree creation and must return the new path.
 
 Claude Code's interactive `!` shell mode is outside this hook contract. In the reviewed native CLI, a command entered through `!` ran without a preceding `PreToolUse` or `UserPromptSubmit` event, while the same kind of command through the Bash tool produced `PreToolUse`. DefenseClaw cannot inspect or deny a direct `!` shell command through this connector; host filesystem permissions still apply.
 
 | Event group | DefenseClaw behavior |
 | --- | --- |
 | `PreToolUse` | Evaluates typed tool arguments. Action mode returns a deny, or `permissionDecision: ask`. |
-| `PostToolUse`, `PostToolUseFailure`, `PermissionDenied` | Carry returned content, not a typed action. Scanned for trust, secret and PII findings. Command, path, cognitive-file and C2 rules do not block on literals in the returned bytes, so source text that explains `rm -rf /` produces telemetry only. Advisory. |
+| `PostToolUse` | Carries returned content, not a typed action. Scanned for trust, secret and PII findings. Command, path, cognitive-file and C2 rules do not block on literals in the returned bytes, so source text that explains `rm -rf /` produces telemetry only. Every result finding is HIGH at most: the default and permissive packs alert, strict blocks with `decision: "block"`. Every alert and block also carries a `systemMessage`, the one part of a hook answer Claude Code shows you. |
+| `PostToolUseFailure`, `PermissionDenied` | Carry returned content, not a typed action, scanned as `PostToolUse` is. Advisory: findings go to the model as `additionalContext`, with a `systemMessage` for you. |
 | `PostToolBatch` | Carries the batch's returned content, so its findings are advisory and command or path rules do not block on it. From 2.1.219 it can block continuation before the next model call. It cannot undo the batch's side effects. |
 | `DirectoryAdded` (2.1.219 and later) | Synchronous, matcherless, bounded to 30 seconds, observation only. Records the added path and source. No block, ask or decision authority. |
 | `ConfigChange` | Blockable, except when `source=policy_settings`, where Claude Code ignores blocking decisions. |
@@ -153,10 +154,8 @@ A standalone `PostToolUse` response may use physically verified local source pro
 A tool's result reaches Claude Code before `PostToolUse` runs, so DefenseClaw cannot keep a result away from the model. Result-side secrets are detected and recorded, not prevented. When a result holds a secret, for example an AWS secret access key in a `.env` file that `Read` returned, DefenseClaw does this in both modes:
 
 - It records the finding (here `SEC-AWS-SECRET`, CRITICAL) with the value redacted.
-- It answers `allow` with `would_block: true`, also in action mode. A block at this point cannot take the result back.
-- It names the rule to the model in `additionalContext`, never the value. Claude usually then declines to repeat the secret. That is the model's choice, not a DefenseClaw control.
-
-DefenseClaw does not return Claude Code's `PostToolUse` `decision: "block"`. It would only add a reason to the conversation, and the result stays in it.
+- In the default and permissive packs it answers with an alert. In strict it answers `decision: "block"`. Neither takes the result back.
+- It names the rule to the model (`additionalContext` on an alert, the block reason in strict), never the value, and shows you the same line as a `systemMessage`. Claude usually then declines to repeat the secret. That is the model's choice, not a DefenseClaw control.
 
 To stop a secret file from being read, block the read at `PreToolUse` with a path rule in a [custom pack](/docs/policies/rules#add-your-own-pack). This rule blocks a `Read` of any `.env` file, and a shell command that DefenseClaw parses as reading one, such as `cat .env`. `.env.example` and other names do not match:
 
@@ -231,12 +230,12 @@ On every host install, setup removes the native exporter settings it can prove D
 
 | Item | Detail |
 | --- | --- |
-| Tier | Managed. Hooks are in `/etc/claude-code/managed-settings.d/50-defenseclaw.json` with `allowManagedHooksOnly`. The drop-in also turns off Claude Code's own sandbox, the auto-updater, installation checks and non-essential traffic, and sends OTel to DefenseClaw. Hooks fail closed and use a per-sandbox token. |
+| Tier | Managed. Hooks are in `/etc/claude-code/managed-settings.d/50-defenseclaw.json` with `allowManagedHooksOnly`. The drop-in also turns off Claude Code's own sandbox, the auto-updater, installation checks and non-essential traffic, and sends OTel to DefenseClaw. Hooks fail closed and use a per-sandbox token. Claude Code starts with `CLAUDE_CODE_RESTRICT_PERSONAL_CONFIG=1`, so your `~/.claude` in the sandbox, which the agent can write, cannot add a background-session launcher (`processWrapper`), a plugin folder placed directly in `~/.claude/skills` (its skills still load; marketplace plugins at user, project and local scope still load) or tool pre-approvals; Claude Code refuses every prompt while `~/.claude/settings.json` has errors. The drop-in also empties the plugin-folder, launcher and proxy-auth-helper variables (`CLAUDE_CODE_PLUGIN_DIRS`, `CLAUDE_CODE_PROCESS_WRAPPER`, `CLAUDE_CODE_ENABLE_PROXY_AUTH_HELPER`) and the service endpoints Claude Code reads. |
 | Skip permissions | On by default (`open` and `balanced` packs): `--dangerously-skip-permissions`. `--safe` or the `strict` pack keeps prompts, and managed settings refuse `bypassPermissions` from a flag or file. |
 | Sign-in | `--llm auto` shares `ANTHROPIC_API_KEY`, else `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`). OpenShell holds the secret; the sandbox gets a placeholder valid only at `api.anthropic.com`. `--llm bedrock`, and `auto` when neither is set, shares a short-term `AWS_BEARER_TOKEN_BEDROCK` for the Bedrock Mantle Anthropic endpoint in `--bedrock-region` (default `$AWS_REGION`, then `$AWS_DEFAULT_REGION`, then `us-east-1`). `openshell.llm` sets the default. With `--llm none`, log in inside the sandbox; that login stays in the sandbox home. |
 | Bedrock models | Bedrock Mantle serves Claude only under `anthropic.*` ids. A Bedrock run starts on `anthropic.claude-sonnet-5` and maps Opus to `anthropic.claude-opus-4-8`, Sonnet to `anthropic.claude-sonnet-5`, and Haiku (also background tasks) to `anthropic.claude-haiku-4-5`. Pick another with `-- --model MODEL` or `/model`. |
 | Per-sandbox settings | A read-only `60-defenseclaw-run.json` wins over the image's. It pins the model provider (and Bedrock models), so a repository's `.claude/settings.json` cannot redirect the conversation. A read-only `/etc/claude-code/managed-mcp.json` lists the MCP servers brought from your setup. Repository `.mcp.json` servers do not start unless the pack sets [`mcp.project_servers: allow`](/docs/sandboxes/policy-packs). `--no-mcp` leaves yours behind. |
-| Image | Claude Code 2.1.156 by default. A version without a reviewed Linux hook contract is refused. Verified end to end against a mock model, including hostile settings such as `disableAllHooks`, and in a live run where a blocked command was denied and the egress block list held. |
+| Image | Claude Code 2.1.311 by default, downloaded from Anthropic's release server (`downloads.claude.ai`) at build time and refused unless its SHA-256 is the pinned one. Amazon Bedrock serves its newer models, such as Opus 5.5 on the Mantle route sandboxes use, only to Claude Code 2.1.280 and newer; the base image's own 2.1.156 is replaced, and the image is about 290 MB larger. Bedrock Mantle does not serve Claude Haiku 5.5, so a sandbox cannot run it yet. A version without a reviewed Linux hook contract is refused. 2.1.311 is verified in the real image against mock models: hooks fire, a blocked command is denied, hostile settings and provider redirects in repository settings are neutralised, MCP and safe-mode controls hold, and a user-settings launcher, proxy auth helper or plugin folder does not take effect. The end-to-end run through an OpenShell gateway was last on 2.1.156, against a mock model, including hostile settings such as `disableAllHooks`, and in a live run where a blocked command was denied and the egress block list held. |
 
 ## Claude Cowork
 
@@ -247,7 +246,7 @@ Claude Desktop's Cowork mode runs Claude Code's engine on your computer, and tha
 - `disableAllHooks: true` in any Claude Code settings file turns every hook off. The gateway raises a guardrail-degraded alert, `defenseclaw status` shows DEGRADED, and `defenseclaw doctor` fails the **Claude Code hooks** row. Remove the key and restart Claude Code.
 - A project's `.claude/settings.json`, or a file passed with `claude --settings`, can do the same for its sessions. DefenseClaw cannot see a `--settings` file.
 - Claude Code does not run its hook for a command you type with `!` in shell mode, as input from you. DefenseClaw cannot inspect or block that command. See [Known limits](/docs/support-matrix#claude-code-shell).
-- `PostToolUse`, `PostToolUseFailure` and `PermissionDenied` are advisory: they cannot undo a finished tool.
+- No result event can undo a finished tool or take its result back from the model. A `PostToolUse` block tells the agent and you; `PostToolUseFailure` and `PermissionDenied` are advisory.
 - `ConfigChange` is blockable, except when `source=policy_settings`, where Claude Code ignores blocking decisions.
 - `Setup` and `WorktreeCreate` are not registered.
 - In action mode, the first prompt or tool call of a session whose `SessionStart` never reached the gateway waits up to 1 second for that start, so a start that is blocked still blocks the session. A session whose `SessionStart` reached the gateway does not wait, and later calls of a session never wait.

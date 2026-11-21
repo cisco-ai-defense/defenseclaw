@@ -280,7 +280,9 @@ class SetupReplaceTests(_RunningTokenCase):
                 setup_group, ["openclaw", "--replace", "--yes", "--no-restart"], obj=self.app, catch_exceptions=False
             )
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertEqual(self.app.cfg.gateway.resolved_token(), _NEW)
+        # R-TOK: the OpenClaw token is the OpenClaw credential; the master stays.
+        self.assertEqual(self.app.cfg.gateway.resolved_token(), _RUNNING)
+        self.assertEqual(os.environ.get("OPENCLAW_GATEWAY_TOKEN"), _NEW)
         self.assertTrue(gateway.tokens)
         self.assertEqual(set(gateway.tokens), {_RUNNING})
 

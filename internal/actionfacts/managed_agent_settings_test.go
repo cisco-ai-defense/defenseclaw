@@ -209,8 +209,8 @@ func TestWindowsLocalHostIsAWholeName(t *testing.T) {
 		"":                        false,
 		"10.0.0.5":                false,
 	} {
-		if got := windowsLocalHost(host); got != want {
-			t.Errorf("windowsLocalHost(%q) = %t, want %t", host, got, want)
+		if got := WindowsServerIsThisMachine(host); got != want {
+			t.Errorf("WindowsServerIsThisMachine(%q) = %t, want %t", host, got, want)
 		}
 	}
 	if drive, ok := WindowsLocalDrivePath(`\\box.corp.example.com\C$\dir`); !ok || drive != "C:/dir" {

@@ -17,6 +17,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -194,7 +195,7 @@ func restoreWindowsBundleConfig(ctx context.Context, replacing string) windowsBu
 	if !e.needsRestore(handEdit) && e.InstalledConfig != nil {
 		return out
 	}
-	roots, err := windowsManagedLayout.roots(managed.ProfileStandalone)
+	roots, err := hookcli.WindowsManagedLayout.Roots(managed.ProfileStandalone)
 	if err != nil {
 		return fail("bundle_restore_failed", "cannot resolve the trusted enterprise roots to re-apply "+label+": "+windowsEnterpriseBoundedDiagnostic(err.Error()))
 	}

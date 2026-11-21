@@ -1815,6 +1815,10 @@ def _run_openclaw(*args: str) -> _CmdResult:
         msg = f"exit code {proc.returncode}"
         if stderr_snippet:
             msg += f": {stderr_snippet}"
+        from defenseclaw.config import openclaw_config_repair_hint
+
+        if hint := openclaw_config_repair_hint(proc.stderr, proc.stdout):
+            msg += f". {hint}"
         return _CmdResult(data=None, error=msg, command=cmd_str)
 
     decoder = json.JSONDecoder()

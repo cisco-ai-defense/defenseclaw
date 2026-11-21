@@ -73,7 +73,7 @@ describe("sidecar correlation integration", () => {
       }),
     });
 
-    await client.status();
+    await client.listBlocked();
 
     expect(lastHeaders[HEADER_DEFENSECLAW_AGENT_ID.toLowerCase()]).toBe(
       "logical-agent",
@@ -89,7 +89,7 @@ describe("sidecar correlation integration", () => {
       "trace-1",
     );
 
-    await client.status();
+    await client.listBlocked();
     expect(
       lastHeaders[HEADER_DEFENSECLAW_AGENT_INSTANCE_ID.toLowerCase()],
     ).toBe("integration-echo-inst");

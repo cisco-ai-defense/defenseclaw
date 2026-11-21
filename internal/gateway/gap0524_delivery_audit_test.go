@@ -4,81 +4,28 @@
 package gateway
 
 import (
-	"bufio"
 	"context"
 	"database/sql"
-	"io"
-	"net/http"
-	"strconv"
-	"strings"
 	"testing"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
-	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 func TestGAP0524DeliveredPerUserKeepsBothDecisionRecordsAfterEarlierDeadline(t *testing.T) {
 	f := newManagedHookAuditFixture(t, nil)
 	f.api.scannerCfg.DeploymentMode = "per_user"
-	previous := hookStagePanicHook
-	delayNext := false
-	hookStagePanicHook = func(_ context.Context, stage string) {
-		if stage == "delivered" && delayNext {
-			delayNext = false
-			time.Sleep(agentHookPersistGrace + 50*time.Millisecond)
-		}
-	}
-	t.Cleanup(func() { hookStagePanicHook = previous })
+	delayNext := delayDeliveredStage(t)
 	call := func(session string) {
 		t.Helper()
-		body := managedHookBody(session, "PreToolUse")
-		reader, writer := io.Pipe()
-		request, err := http.NewRequestWithContext(t.Context(), http.MethodPost,
-			f.server.URL+"/api/v1/claudecode/hook", reader)
-		if err != nil {
-			t.Fatal(err)
-		}
-		request.Header.Set(hookexec.HookDeliveryReceiptHeader, "1")
-		request.Header.Set(hookexec.HookDeliveryPayloadBytesHeader, strconv.Itoa(len(body)))
-		responseCh := make(chan *http.Response, 1)
-		errorCh := make(chan error, 1)
-		go func() {
-			response, requestErr := f.server.Client().Do(request)
-			if requestErr != nil {
-				errorCh <- requestErr
-				return
-			}
-			responseCh <- response
-		}()
-		if _, err := io.WriteString(writer, body); err != nil {
-			t.Fatal(err)
-		}
-		var response *http.Response
-		select {
-		case response = <-responseCh:
-		case err := <-errorCh:
-			t.Fatal(err)
-		case <-time.After(5 * time.Second):
-			t.Fatal("gateway did not offer the answer")
-		}
-		defer response.Body.Close()
-		buffered := bufio.NewReader(response.Body)
-		line, err := buffered.ReadString('\n')
-		if response.StatusCode != http.StatusOK || err != nil || !strings.Contains(line, `"action":"allow"`) {
-			t.Fatalf("per-user answer: status=%d line=%q error=%v", response.StatusCode, line, err)
-		}
-		if _, err := io.WriteString(writer, hookexec.HookDeliveryReceiptAck); err != nil {
-			t.Fatal(err)
-		}
-		_ = writer.Close()
-		_, _ = io.Copy(io.Discard, buffered)
+		deliverAckedHookCall(t, f, session)
 	}
 	call("g524-benign")
 	if got := f.audited(t, "g524-benign")["g524-benign"]; got != "allow" {
 		t.Fatalf("ordinary benign call audit = %q, want allow", got)
 	}
-	delayNext = true
+	delayNext()
 	call("g524-delayed")
 	if got := f.audited(t, "g524-delayed")["g524-delayed"]; got != "allow" {
 		t.Fatalf("delivered call audit = %q, want allow", got)
@@ -135,7 +82,10 @@ func TestGAP0524QueuedPerUserDecisionSurvivesExpiredForegroundContext(t *testing
 		if !result.AuditPersisted || !result.DecisionSettled {
 			t.Fatalf("expired foreground context lost terminal records: %+v", result)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(max(30*time.Second, testenv.Scale(5*time.Second, 3*testenv.HostSlowdown()))):
+		// The records settle as soon as the writer returns, so this is the
+		// wait for a signal, not a speed limit: it stretches with the host
+		// (GAP-0510: a box at load 100 took 3.7 s of a 5 s window).
 		t.Fatal("queued terminal records did not settle after the writer returned")
 	}
 	audit.CloseCallWrites(batchCtx)

@@ -56,14 +56,18 @@ var agentProcessPattern = lazyregexp.New(
 // design: it matches executable basenames and discards argv, so an agent
 // framework inside a bare python3 is invisible to it. The runtime plane reads
 // argv to close that gap.
+//
+// MCP servers are not in this list: isMCPProcess recognises them by what a
+// command runs. The unanchored "MCP server package" and "MCP server entry
+// point" patterns that were here matched a token anywhere in argv, so cat
+// mcp-server-x.json or python3 -c ... mcp-server-x became an agent root of
+// its own and opened the lineage gate with no agent above it (GAP-1163).
 var agentCmdlinePatterns = []struct {
 	pattern *regexp.Regexp
 	reason  string
 }{
 	{regexp.MustCompile(`(?i)\b(langchain|langgraph|llama_index|llamaindex|crewai|autogen|` +
 		`pydantic_ai|openai_agents|strands)\b`), "agent framework module"},
-	{regexp.MustCompile(`(?i)@modelcontextprotocol/`), "MCP server package"},
-	{regexp.MustCompile(`(?i)\bmcp[-_]server[-_]`), "MCP server entry point"},
 	{regexp.MustCompile(`(?i)\b(openai|anthropic|litellm|ollama)\b\s+\w`), "provider SDK CLI"},
 }
 
@@ -75,9 +79,34 @@ var mcpProcessPattern = lazyregexp.New(`(?i)(mcp[-_]server|server[-_]mcp|modelco
 // mcpInterpreters are the runtimes an MCP server is normally launched through,
 // where the thing being executed is an argument rather than argv[0].
 var mcpInterpreters = map[string]bool{
-	"node": true, "nodejs": true, "npx": true, "bun": true, "deno": true,
+	"node": true, "nodejs": true, "npx": true, "bun": true, "bunx": true, "deno": true,
 	"python": true, "python3": true, "uv": true, "uvx": true, "pipx": true,
+	"npm": true, "pnpm": true, "pnpx": true, "yarn": true,
 	"ruby": true, "php": true, "java": true, "dotnet": true,
+}
+
+// mcpRunnerSubcommands are the subcommands a package runner takes before the
+// package it runs (uv run, uv tool run, pipx run, npm exec, pnpm dlx, yarn
+// dlx, bun x, deno run).
+var mcpRunnerSubcommands = map[string]map[string]bool{
+	"uv":   {"run": true, "tool": true},
+	"pipx": {"run": true},
+	"npm":  {"exec": true, "x": true},
+	"pnpm": {"dlx": true, "exec": true},
+	"yarn": {"dlx": true, "exec": true},
+	"bun":  {"x": true, "run": true},
+	"deno": {"run": true},
+}
+
+// mcpInlineCodeFlags are the interpreter options whose value is the program
+// itself (python3 -c, node -e). What follows that value is data handed to the
+// program, not something the interpreter runs.
+var mcpInlineCodeFlags = map[string]map[string]bool{
+	"python": {"-c": true}, "python3": {"-c": true},
+	"node":   {"-e": true, "--eval": true, "-p": true, "--print": true},
+	"nodejs": {"-e": true, "--eval": true, "-p": true, "--print": true},
+	"bun":    {"-e": true, "--eval": true, "-p": true, "--print": true},
+	"ruby":   {"-e": true}, "php": {"-r": true},
 }
 
 // isMCPProcess reports whether this command line *runs* an MCP server, as
@@ -96,19 +125,40 @@ var mcpInterpreters = map[string]bool{
 // `npx @modelcontextprotocol/server-filesystem`. So the token also counts
 // when it appears in what an interpreter was asked to run -- which `vim` and
 // `grep` are not.
+//
+// Windows command lines name the interpreter with its extension and often
+// quote it ("C:\Program Files\nodejs\node.exe" ...): the interpreter is
+// looked up without either, or node.exe, python.exe, uvx.exe and npx.cmd
+// would run a server unrecognised.
 func isMCPProcess(cmdline string) bool {
-	fields := strings.Fields(cmdline)
+	fields := commandWords(cmdline)
 	if len(fields) == 0 {
 		return false
 	}
 	if mcpProcessPattern.MatchString(BaseName(fields[0])) {
 		return true
 	}
-	if !mcpInterpreters[strings.ToLower(BaseName(fields[0]))] {
+	interpreter := strings.ToLower(BaseName(fields[0]))
+	interpreter = strings.TrimSuffix(interpreter, extensionOf(interpreter))
+	if !mcpInterpreters[interpreter] {
 		return false
 	}
+	subcommands := mcpRunnerSubcommands[interpreter]
 	for index := 1; index < len(fields); index++ {
 		argument := fields[index]
+		if mcpInlineCodeFlags[interpreter][argument] {
+			return false
+		}
+		if subcommands[argument] {
+			// A runner names its subcommand before the package it runs
+			// (uv tool run takes two words). Any other first word is the
+			// program itself (deno server.ts) or a subcommand that runs
+			// nothing (npm install), which the match below tells apart.
+			if argument != "tool" {
+				subcommands = nil
+			}
+			continue
+		}
 		if strings.HasPrefix(argument, "-") {
 			// -m/--module take the thing to run as their value.
 			if argument == "-m" || argument == "--module" {
@@ -124,6 +174,44 @@ func isMCPProcess(cmdline string) bool {
 		return mcpProcessPattern.MatchString(argument)
 	}
 	return false
+}
+
+// commandWords splits a command line into its words. A double- or
+// single-quoted span is one word without its quotes, and a backslash is an
+// ordinary character, so a quoted Windows path such as
+// "C:\Program Files\nodejs\node.exe" stays whole.
+func commandWords(cmdline string) []string {
+	var (
+		words   []string
+		word    strings.Builder
+		inWord  bool
+		closing rune
+	)
+	for _, r := range cmdline {
+		switch {
+		case closing != 0:
+			if r == closing {
+				closing = 0
+			} else {
+				word.WriteRune(r)
+			}
+		case r == '"' || r == '\'':
+			closing, inWord = r, true
+		case r == ' ' || r == '\t' || r == '\n' || r == '\r':
+			if inWord {
+				words = append(words, word.String())
+				word.Reset()
+				inWord = false
+			}
+		default:
+			word.WriteRune(r)
+			inWord = true
+		}
+	}
+	if inWord {
+		words = append(words, word.String())
+	}
+	return words
 }
 
 // IsAgentProcess reports whether an executable name is itself a known agent.

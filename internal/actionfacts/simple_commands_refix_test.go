@@ -93,7 +93,11 @@ func TestSimpleCommandsW24UnprovenCases(t *testing.T) {
 		input := Input{Tool: "shell", Command: tt.command, CWD: tt.cwd,
 			ActiveHome: `C:\Users\alice`, DialectHint: tt.dialect}
 		got := SimpleCommands(input, Analyze(input))
-		if !slices.ContainsFunc(got, func(child SimpleCommand) bool { return child.EvaluationFailure == "parse" }) {
+		// An unknown shell option before -c leaves its body unproven: the
+		// unknown-tier marker is that fail-closed result too (GAP-0535).
+		if !slices.ContainsFunc(got, func(child SimpleCommand) bool {
+			return child.EvaluationFailure == "parse" || child.EvaluationFailure == EvaluationFailureUnresolvedBody
+		}) {
 			t.Errorf("%q: expected a fail-closed parse result, got %#v", tt.command, got)
 		}
 	}

@@ -1,0 +1,23 @@
+# Agent Substrate v1.0.0 install file for EKS (see README.md in this folder).
+# Replace BUCKET with your snapshot bucket. `kindCluster.enabled` only turns the
+# kind install profile on (it needs docker and a kube context, not a kind cluster);
+# the patched overlay then uses S3 with the node role instead of the test object store.
+apiVersion: install.ate.dev/v1alpha1
+kind: SubstrateInstall
+namespace: ate-system
+kindCluster:
+  enabled: true
+  name: kind
+sandboxClasses: gvisor
+atenet:
+  dataplane: envoy
+  egress:
+    credentialProvider: "{\"name\":\"k8s.io\"}"
+ingressAllowedSPIFFEIDs: spiffe://cluster.local/ns/ate-system/sa/atenet-client
+images:
+  repo: ghcr.io/agent-substrate/substrate
+  tag: v1.0.0
+storage:
+  bucketName: BUCKET
+  snapshotLocation: s3://BUCKET/snapshots/
+rolloutTimeout: 10m0s

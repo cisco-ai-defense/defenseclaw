@@ -32,7 +32,22 @@ func LateCallGrade(command, cwd, home string) Grade {
 }
 
 func lateCallGradeReading(command, cwd, home string, spelled bool) Grade {
-	calls, known := lateKnownCalls(command, cwd, home, 0, spelled)
+	return lateCallGradeReadingIn(command, cwd, home, spelled, false)
+}
+
+// lateChainedCallGrade is LateCallGrade (the shell reading) of the steps
+// before a cd that LateChainCallGrade models at a later step: they are read
+// as part of a compound call even when they are one statement, so a step that
+// changes the shell context (pushd, source, export, exec, ...) keeps the call
+// Possible and the folder the cd starts from stays the call folder.
+func lateChainedCallGrade(command, cwd, home string) Grade {
+	return lateCallGradeReadingIn(command, cwd, home, false, true)
+}
+
+// lateCallGradeReadingIn is lateCallGradeReading; chained reads every
+// statement as part of a compound call (lateChainedCallGrade).
+func lateCallGradeReadingIn(command, cwd, home string, spelled, chained bool) Grade {
+	calls, known := lateKnownCallsIn(command, cwd, home, 0, spelled, chained)
 	if !known {
 		return GradePossible
 	}
@@ -142,6 +157,10 @@ func LateKnownCalls(command, cwd, home string) ([][]string, bool) {
 }
 
 func lateKnownCalls(command, cwd, home string, depth int, spelled bool) ([][]string, bool) {
+	return lateKnownCallsIn(command, cwd, home, depth, spelled, false)
+}
+
+func lateKnownCallsIn(command, cwd, home string, depth int, spelled, chained bool) ([][]string, bool) {
 	if depth > 2 {
 		return nil, false
 	}
@@ -151,7 +170,7 @@ func lateKnownCalls(command, cwd, home string, depth int, spelled bool) ([][]str
 	}
 	var calls [][]string
 	for _, stmt := range file.Stmts {
-		part, ok := lateKnownStatement(stmt, cwd, home, depth, len(file.Stmts) > 1, spelled)
+		part, ok := lateKnownStatement(stmt, cwd, home, depth, chained || len(file.Stmts) > 1, spelled)
 		if !ok {
 			return nil, false
 		}
@@ -567,7 +586,7 @@ func lateEnvName(name string) bool {
 
 func lateChangesShellContext(program string) bool {
 	switch program {
-	case "cd", "pushd", "popd", "export", "unset", "set", "declare", "typeset", "readonly", "eval", "source", ".", "builtin", "command", "exec":
+	case "cd", "chdir", "pushd", "popd", "export", "unset", "set", "declare", "typeset", "readonly", "eval", "source", ".", "builtin", "command", "exec":
 		return true
 	default:
 		return false

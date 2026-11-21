@@ -1,0 +1,56 @@
+DefenseClaw for Agent Substrate {{ .Chart.AppVersion }} is installed in {{ .Release.Namespace }}.
+
+Next:
+  1. Register the egress callout and the ingress client with Substrate (writes
+     the SubstrateInstall overlay; refuses when another callout is set):
+       defenseclaw substrate setup --namespace {{ .Release.Namespace }}
+     and run ate-setup with the overlay it prints.
+{{- if not .Values.bootstrap.ownerTokenSecret }}
+  2. Grant DefenseClaw its Substrate roles. No bootstrap.ownerTokenSecret was
+     given, so print the access policies and apply them as a global owner:
+       defenseclaw substrate setup --print-access-policies
+{{- end }}
+  3. Check everything:
+       defenseclaw substrate doctor
+
+Actor Service (the only DefenseClaw host in egress policies): {{ include "dc.actorHost" . }}
+Admin Service (launcher, fleet; never reachable from actors): {{ include "dc.adminHost" . }}
+
+{{- if include "dc.kubeSignIn" . }}
+People sign in with their Kubernetes credentials (no OIDC issuer): the
+gateway ServiceAccount is bound to system:auth-delegator by the cluster-wide
+ClusterRoleBinding {{ include "dc.authDelegatorBinding" . }}.
+{{- end }}
+
+{{- if .Values.metrics.prometheusRule.enabled }}
+{{- with .Values.metrics.prometheusRule.namespaceLabel }}
+
+The policy alerts select {{ . }}="{{ $.Release.Namespace }}" on the
+defenseclaw_substrate_* series. They never fire unless your OTLP receiver or
+collector promotes the k8s.namespace.name resource attribute to that label
+(Prometheus otlp.promote_resource_attributes, or the collector's
+resource_to_telemetry_conversion).
+{{- else }}
+
+The policy alerts read every release's defenseclaw_substrate_* series in that
+Prometheus. To scope them to this release, promote the k8s.namespace.name
+resource attribute and set metrics.prometheusRule.namespaceLabel
+(k8s_namespace_name).
+{{- end }}
+{{- end }}
+
+{{- $g := .Values.config.guardrail | default dict }}
+{{- $modes := list (toString ($g.mode | default "")) }}
+{{- range $name, $p := ($g.profiles | default dict) }}
+{{- $modes = append $modes (toString ((($p | default dict).mode) | default "")) }}
+{{- end }}
+{{- if has "observe" $modes }}
+
+guardrail.mode or a profile's mode is observe: actors always enforce, so it
+changes no actor verdict (docs/SUBSTRATE.md, Hook).
+{{- end }}
+
+Uninstall removes DefenseClaw-written egress policies first (actors fall back
+to deny-all), then run `defenseclaw substrate setup --remove` to take the
+callout out of Substrate. Snapshots stay in the Substrate bucket: the
+uninstall log and docs/SUBSTRATE.md list the purge steps.

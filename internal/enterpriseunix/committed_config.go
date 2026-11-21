@@ -31,7 +31,7 @@ import (
 //
 // The kept rejected file is also the record that the administrator's
 // config is not the one running: status warns and verify fails with
-// config_rejected while it is current. It stops being current once
+// config_rejected (enterprisestatus.CodeConfigRejected) while it is current. It stops being current once
 // config.yaml is written again after the revert (a corrected push, or the
 // last applied config pushed back) and a run applies or confirms it, or a
 // run applies an explicit --config. The revert stamps the kept file with
@@ -45,7 +45,6 @@ const (
 	rejectedReasonName = "rejected-config.reason"
 	maxRejectedReason  = 1 << 10
 	codeConfigReverted = "config_reverted"
-	codeConfigRejected = "config_rejected"
 )
 
 func (e *Env) committedConfigPath() string {
@@ -112,18 +111,7 @@ func (l *lifecycle) revertRejectedConfig(record *Deployment, committed, planned 
 		}
 	}
 	if rejected != nil {
-		if err := env.writeFileAtomic(env.rejectedConfigPath(), rejected, 0o600, rootOwner()); err != nil {
-			r.AddWarning(codeConfigReverted, "could not keep a copy of the rejected config: "+err.Error())
-		}
-		reason := strings.Join(strings.Fields(cause), " ")
-		if len(reason) > maxRejectedReason {
-			reason = strings.ToValidUTF8(reason[:maxRejectedReason], "") + "..."
-		}
-		if reason == "" {
-			_ = removeFile(env.rejectedReasonPath())
-		} else if err := env.writeFileAtomic(env.rejectedReasonPath(), []byte(reason+"\n"), 0o600, rootOwner()); err != nil {
-			r.AddWarning(codeConfigReverted, "could not keep why the config was rejected: "+err.Error())
-		}
+		l.keepRejectedConfig(rejected, cause)
 	}
 	owner := fileOwner{UID: 0, GID: record.ServiceGID}
 	if err := env.writeFileAtomic(env.P(env.Layout.ConfigPath), committed, 0o640, owner); err != nil {
@@ -143,6 +131,50 @@ func (l *lifecycle) revertRejectedConfig(record *Deployment, committed, planned 
 	}
 	r.AddWarning(codeConfigReverted, "config.yaml was not applied; the last applied config is back in place and the rejected file is kept at "+kept)
 	return nil
+}
+
+// keepRejectedConfig keeps the rejected bytes and why they were rejected.
+func (l *lifecycle) keepRejectedConfig(rejected []byte, cause string) {
+	env, r := l.env, l.result
+	if err := env.writeFileAtomic(env.rejectedConfigPath(), rejected, 0o600, rootOwner()); err != nil {
+		r.AddWarning(codeConfigReverted, "could not keep a copy of the rejected config: "+err.Error())
+	}
+	reason := strings.Join(strings.Fields(cause), " ")
+	if len(reason) > maxRejectedReason {
+		reason = strings.ToValidUTF8(reason[:maxRejectedReason], "") + "..."
+	}
+	if reason == "" {
+		_ = removeFile(env.rejectedReasonPath())
+	} else if err := env.writeFileAtomic(env.rejectedReasonPath(), []byte(reason+"\n"), 0o600, rootOwner()); err != nil {
+		r.AddWarning(codeConfigReverted, "could not keep why the config was rejected: "+err.Error())
+	}
+}
+
+// keepRejectedConfigFile is the record of an explicit --config whose run
+// failed and rolled back: the snapshot put the config the deployment ran
+// before back, so status and verify, which read only the deployment, said
+// ok as if the requested config were applied (rel-1-0-10 GAP-1027, the same
+// report Windows Setup /ensure CONFIG= now gets). The rejected bytes are kept
+// as for an in-place edit, stamped with the restored config.yaml's time, so
+// the record stays current until config.yaml is written again or a run
+// applies a --config (settleRejectedConfig). Nothing is kept for a config
+// that is the applied one, or when config.yaml is not the applied config
+// after the rollback.
+func (l *lifecycle) keepRejectedConfigFile(record *Deployment, planned []byte, cause string) {
+	env := l.env
+	if record == nil || l.opts.ConfigFile == "" || planned == nil || sha256Bytes(planned) == record.ConfigSHA256 {
+		return
+	}
+	path := env.P(env.Layout.ConfigPath)
+	restored, err := os.Stat(path)
+	if err != nil {
+		return
+	}
+	if current, err := sha256File(path); err != nil || current != record.ConfigSHA256 {
+		return
+	}
+	l.keepRejectedConfig(planned, cause)
+	_ = os.Chtimes(env.rejectedConfigPath(), restored.ModTime(), restored.ModTime())
 }
 
 // restoreNewerConfig puts back a config.yaml written during a run whose

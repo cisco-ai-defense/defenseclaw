@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"golang.org/x/sys/windows"
@@ -18,8 +19,23 @@ import (
 // SQLite creates WAL and shared-memory files after the database is opened.
 // Protect their parent first so newly created journals cannot inherit a
 // readable DACL, even briefly before Secure sees them.
+//
+// In the managed enterprise gateway service (DEFENSECLAW_DEPLOYMENT_MODE
+// pinned in its service environment) the stores live in the installer-owned
+// runtime tree. The gateway logs on as LocalSystem with a restricted service
+// SID, so a folder it creates is owned by NT SERVICE\<gateway> and one Setup
+// or an elevated administrator creates is owned by Administrators: never by
+// the token user (SYSTEM) that the per-user safefile rule requires. The
+// SYSTEM-only DACL of that rule would also drop the service write entry the
+// restricted token needs. Those folders get the managed runtime trust check
+// instead: owner SYSTEM, Administrators, TrustedInstaller or the gateway
+// service, and no write entry for anyone else (GAP-1125).
 func protectParent(dbPath string) error {
-	return safefile.ProtectDirectory(filepath.Dir(dbPath))
+	dir := filepath.Dir(dbPath)
+	if mode := managed.PinnedDeploymentMode(); managed.IsManagedEnterprise(mode) {
+		return managed.PrepareServiceRuntimeDir(mode, dir, "SQLite store directory")
+	}
+	return safefile.ProtectDirectory(dir)
 }
 
 // Windows mode bits do not describe the DACL and os.Chmod cannot remove
@@ -27,6 +43,10 @@ func protectParent(dbPath string) error {
 // An elevated token may assign Administrators ownership to a new file;
 // ProtectFile normalizes that owner in ordinary process mode if needed.
 func secureFile(path string, _ os.FileInfo) error {
+	if mode := managed.PinnedDeploymentMode(); managed.IsManagedEnterprise(mode) {
+		// The file inherits the runtime folder entries checked above.
+		return managed.PrepareServiceRuntimeFile(mode, path, "SQLite store file")
+	}
 	if handleErr := safefile.ProtectFileWhileInUse(path); handleErr != nil {
 		// The ordinary Safefile writer can take ownership. Restrict that
 		// fallback to the current user or the local Administrators group

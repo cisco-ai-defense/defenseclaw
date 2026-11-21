@@ -36,12 +36,8 @@ func globFactsFixture(t *testing.T, alias bool) (homes, home, cwd string) {
 		}
 	}
 	if alias {
-		if err := os.Symlink(keys, filepath.Join(cwd, "keydir")); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.Symlink(filepath.Join(keys, "authorized_keys"), filepath.Join(cwd, "notes")); err != nil {
-			t.Fatal(err)
-		}
+		testSymlink(t, keys, filepath.Join(cwd, "keydir"))
+		testSymlink(t, filepath.Join(keys, "authorized_keys"), filepath.Join(cwd, "notes"))
 	}
 	t.Setenv("HOME", home)
 	t.Cleanup(func() { _ = os.Chmod(homes, 0o700) })

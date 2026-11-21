@@ -37,7 +37,7 @@ import (
 // path, so an observe-mode count of pending operations depended on the
 // machine (rel-1-0-6 GAP-0256).
 func TestPendingOperationsStayPerSessionUnderReusedToolIDs(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	installDefaultProfileConnector(t, "claudecode")
 	fixture := newSidecarRuntimeFixture(t, true)
 	fingerprints, err := observabilityredaction.NewEngine(bytes.Repeat([]byte{0x42}, 32))

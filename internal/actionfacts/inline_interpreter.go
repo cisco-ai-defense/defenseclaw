@@ -1396,3 +1396,17 @@ func (parser *inlineParser) consumeSymbol(value string) bool {
 	parser.position++
 	return true
 }
+
+// InlineProgramPastBound reports a perl or ruby command whose inline program
+// (-e, -E and their bundles) is past the bound of the inline program reader
+// (maxInlineInterpreterBytes): the analysis stops at input_limit there and
+// reads none of the program's commands. The gateway judges such a call at
+// the unknown tier of the bound rule (rel-1-0-10:GAP-0689).
+func InlineProgramPastBound(command CommandFact) bool {
+	if command.Program != "perl" && command.Program != "ruby" ||
+		command.Dialect != DialectPOSIX || !command.ArgvComplete {
+		return false
+	}
+	_, state := parseInlineInterpreterInvocation(command.Argv, command.Program)
+	return state == inlineInvocationLimited
+}

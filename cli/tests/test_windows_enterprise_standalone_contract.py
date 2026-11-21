@@ -943,6 +943,24 @@ def test_every_standalone_smoke_runs_from_exactly_one_smoke_file() -> None:
     assert (tests / "enterprise-standalone-codex-writer-stuck-smoke.ps1").is_file()
 
 
+def test_standalone_smokes_that_dot_source_the_module_bind_the_engine_modules() -> None:
+    # A smoke that dot-sources module functions from the AST instead of importing the
+    # module skips the module's load-time binding of the engine modules. Windows PowerShell
+    # 5.1 under a PowerShell 7 parent (Windows CI runs Python under pwsh) then autoloads the
+    # PowerShell 7 Utility manifest, which has no Get-FileHash, so such a smoke runs that
+    # block itself.
+    assert "foreach ($engineModuleName in @(" in _text(MODULE)
+    tests = MODULE.parent / "tests"
+    checked = 0
+    for name in STANDALONE_SMOKES:
+        body = _text(tests / name)
+        if "#Requires -Version 7" in body or "[scriptblock]::Create" not in body or "Import-Module" in body:
+            continue
+        checked += 1
+        assert "-eq 'engineModuleName'" in body, name
+    assert checked >= 1
+
+
 # The standalone Claude client floor the module records equals the lowest
 # Claude hook contract (the Go guardian enforces the same floor).
 
@@ -1006,6 +1024,8 @@ $ast = [Management.Automation.Language.Parser]::ParseFile($ModulePath, [ref]$tok
 if ($errors.Count -gt 0) { throw "module parse failed: $($errors[0].Message)" }
 foreach ($name in @(
     'Get-DefenseClawRetiredInstallTreeAllowlist',
+    'Get-DefenseClawHookImageTreeItems',
+    'Test-DefenseClawHookImageFileName',
     'Test-DefenseClawLayoutBrokerEnabled',
     'Assert-DefenseClawNoReparsePath',
     'Remove-DefenseClawEmptyRetiredInstallDirectory',
@@ -3351,3 +3371,31 @@ def test_codex_vendor_folder_adoption_runs_before_the_snapshot_and_tolerates_def
         assert f"'{name}'" in names
     assert "'requirements.toml'" not in names
     assert r"'^\.defenseclaw-managed-hooks\.state\.[1-9][0-9]{0,7}$'" in names
+
+
+def test_ensure_verify_accepts_only_guardian_reported_target_failures() -> None:
+    """GAP-0601: the Verify an ensure runs before it plans a repair accepts a
+    complete reconcile whose only failures are user targets the guardian
+    reported, so a rerun over a signed-out account is a no-op instead of a
+    repair that stops the services. The CLI asks through the strict
+    environment, only a standalone Verify takes it, and the administrator's
+    verify (no variable) stays strict."""
+
+    installer = _text(INSTALLER)
+    standalone = installer[installer.index("if ($EnterpriseProfile -ceq 'Standalone') {") :]
+    standalone = standalone[: standalone.index("Invoke-DefenseClawEnterpriseLifecycle @arguments")]
+    variable = "DEFENSECLAW_STANDALONE_ENSURE_VERIFY_DEGRADED"
+    assert f"[Environment]::SetEnvironmentVariable('{variable}', $null, 'Process')" in standalone
+    assert "if ($Action -eq 'Verify' -and $degradedRequest -ceq '1') {" in standalone
+    assert "$arguments['AcceptDegradedTargets'] = $true" in standalone
+
+    module = _text(MODULE)
+    lifecycle = _function_body(module, "Invoke-DefenseClawEnterpriseLifecycle")
+    assert "throw '-AcceptDegradedTargets is valid only with a standalone Verify'" in lifecycle
+    verify = lifecycle[lifecycle.index("if ($Action -eq 'Verify') {") :]
+    verify = verify[: verify.index("Assert-DefenseClawAdministrator")]
+    assert verify.count("-AcceptDegradedTargets:$AcceptDegradedTargets") == 2
+
+    go = (ROOT / "internal" / "cli" / "windows_enterprise_standalone.go").read_text(encoding="utf-8")
+    assert f'windowsEnterpriseEnsureVerifyDegradedVariable = "{variable}"' in go
+    assert go.count("windowsEnterpriseEnsureVerifyDegradedKey{}, true)") == 2

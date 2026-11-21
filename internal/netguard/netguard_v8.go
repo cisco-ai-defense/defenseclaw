@@ -37,6 +37,42 @@ var (
 	ErrV8RedirectBlocked   = errors.New("netguard: v8 push redirect blocked")
 )
 
+// V8AddressProhibitedError is ErrV8AddressProhibited with the opt-in that
+// would allow the address, so a caller can name the fix without seeing the
+// address (GAP-0272). Option is "allow_private_networks", "allow_cgnat", or
+// "" for an address no option allows (metadata, link-local, reserved).
+type V8AddressProhibitedError struct{ Option string }
+
+func (*V8AddressProhibitedError) Error() string { return ErrV8AddressProhibited.Error() }
+
+// Is keeps errors.Is(err, ErrV8AddressProhibited) true.
+func (*V8AddressProhibitedError) Is(target error) bool { return target == ErrV8AddressProhibited }
+
+// V8ProhibitedOption returns the network_safety option that would allow the
+// address behind err, or "" when err is not a prohibited address or no option
+// allows it.
+func V8ProhibitedOption(err error) string {
+	var prohibited *V8AddressProhibitedError
+	if errors.As(err, &prohibited) {
+		return prohibited.Option
+	}
+	return ""
+}
+
+// prohibitedError says which option, if any, would allow addr.
+func (p V8NetworkSafetyPolicy) prohibitedError(addr netip.Addr) error {
+	option := ""
+	widened := V8NetworkSafetyPolicy{AllowPrivateNetworks: true, AllowCGNAT: true}
+	if addr.IsValid() && widened.allowsAddr(addr) {
+		if v8CGNATPrefix.Contains(addr.Unmap()) {
+			option = "allow_cgnat"
+		} else {
+			option = "allow_private_networks"
+		}
+	}
+	return &V8AddressProhibitedError{Option: option}
+}
+
 // V8NetworkSafetyPolicy is the complete destination-scoped address policy for
 // an observability-v8 push exporter. It intentionally has no package-global or
 // environment-backed state.
@@ -289,8 +325,11 @@ func resolveV8(ctx context.Context, host string, policy V8NetworkSafetyPolicy, r
 	var selected netip.Addr
 	for _, candidate := range ips {
 		addr, ok := netip.AddrFromSlice(candidate.IP)
-		if !ok || !policy.allowsAddr(addr.Unmap()) {
+		if !ok {
 			return netip.Addr{}, ErrV8AddressProhibited
+		}
+		if !policy.allowsAddr(addr.Unmap()) {
+			return netip.Addr{}, policy.prohibitedError(addr.Unmap())
 		}
 		addr = addr.Unmap()
 		if !selected.IsValid() && v8NetworkMatches(network, addr) {

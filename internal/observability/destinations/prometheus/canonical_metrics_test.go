@@ -253,6 +253,13 @@ func TestGeneratedRecordScrapeCoversEveryCatalogShapeAliasesBoundsAndCumulativeS
 			DefenseClawMetricTargetType: observability.Present("config"),
 		},
 	)))
+	// counter/double: a USD cost counter keeps its unit in the family name.
+	harness.record(t, generatedMetricBuilt(builder.BuildMetricDefenseClawModelCost(
+		observability.MetricDefenseClawModelCostInput{
+			Envelope: envelope, Value: 0.25,
+			DefenseClawConnectorSource: observability.Present("codex"),
+		},
+	)))
 	// histogram/int64 with an authored explicit boundary table.
 	harness.record(t, generatedMetricBuilt(builder.BuildMetricDefenseClawJudgePersistBatchSize(
 		observability.MetricDefenseClawJudgePersistBatchSizeInput{Envelope: envelope, Value: 7},
@@ -304,6 +311,7 @@ func TestGeneratedRecordScrapeCoversEveryCatalogShapeAliasesBoundsAndCumulativeS
 		`# HELP defenseclaw_connector_hook_latency_milliseconds Connector hook handler latency.`,
 		`defenseclaw_activity_total{action="reload",actor="operator",target_type="config"} 5`,
 		`defenseclaw_judge_persist_batch_size_bucket{le="8"} 1`,
+		`defenseclaw_model_cost_USD_total{connector="codex"} 0.25`,
 		`defenseclaw_connector_hook_latency_milliseconds_bucket{connector="codex",event_type="prompt",reason="allow",result="ok",le="10"} 1`,
 		`defenseclaw_connector_hook_latency_milliseconds_sum{connector="codex",event_type="prompt",reason="allow",result="ok"} 7.5`,
 		`defenseclaw_connector_hook_latency_milliseconds_count{connector="codex",event_type="prompt",reason="allow",result="ok"} 1`,
@@ -332,7 +340,7 @@ func TestGeneratedRecordScrapeCoversEveryCatalogShapeAliasesBoundsAndCumulativeS
 	}
 
 	covered := map[string]struct{}{
-		"counter/int64": {}, "histogram/int64": {}, "histogram/double": {},
+		"counter/int64": {}, "counter/double": {}, "histogram/int64": {}, "histogram/double": {},
 		"gauge/int64": {}, "gauge/double": {}, "updowncounter/int64": {},
 	}
 	catalogShapes := map[string]struct{}{}

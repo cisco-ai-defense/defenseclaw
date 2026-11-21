@@ -440,12 +440,25 @@ func TestReviewFlagsIgnoredHarnessConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, label := range []string{".claude/settings.local.json", "CLAUDE.local.md"} {
-		if f, ok := flagByLabel(rep, label); !ok || f.Kind != RiskPolicy || f.Severity != SeverityHigh || !strings.Contains(f.Detail, "git ignores") {
+		// .claude/settings.local.json also carries its agent-config flag
+		// (GAP-0473); the sensitive pattern is the flag this test checks.
+		f, ok := Flag{}, false
+		for _, x := range rep.Flags {
+			if x.Label == label && x.Kind == RiskPolicy {
+				f, ok = x, true
+			}
+		}
+		if !ok || f.Severity != SeverityHigh || !strings.Contains(f.Detail, "git ignores") {
 			t.Errorf("flag %s = %+v, %v; flags: %+v", label, f, ok, rep.Flags)
 		}
 	}
-	if f, ok := flagByLabel(rep, "dist/opencode.json"); ok {
-		t.Errorf("build output matched a bare file-name pattern: %+v", f)
+	// dist/opencode.json may carry its agent-config flag (OpenCode started
+	// in dist/ reads it, GAP-0522); the bare sensitive pattern must not
+	// match it.
+	for _, f := range rep.Flags {
+		if f.Label == "dist/opencode.json" && f.Kind == RiskPolicy {
+			t.Errorf("build output matched a bare file-name pattern: %+v", f)
+		}
 	}
 	if !strings.Contains(rep.RiskLine(), ".claude/settings.local.json") {
 		t.Errorf("risk line = %q", rep.RiskLine())

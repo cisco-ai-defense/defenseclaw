@@ -26,14 +26,18 @@ bound of 16.11%.
 
 ## Recommended runtime path
 
-Use the deterministic-first `regex_judge` strategy for coding sessions. A
-decisive local result returns immediately. Only unresolved tool calls incur a
-model request. `judge_first` remains useful for measuring the judge's maximum
+Use the deterministic-first `regex_judge` strategy for coding sessions, with
+Gemma 4 31B on Amazon Bedrock as the judge model
+([configuration](/docs/guardrail#recommended-judge-model-gemma-4-31b-on-bedrock)).
+The judge stays opt-in. A decisive local result returns immediately. Only
+unresolved tool calls incur a model request, and a call the parser proves
+only reads (`cat`, `ls`, `grep` or a file Read, with no write, network action
+or interpreter) is not sent to the judge unless a rule flagged it. `judge_first` remains useful for measuring the judge's maximum
 coverage, but it adds model latency to every eligible call.
 
 <Flow
   direction="TB"
-  caption="The recommended regex_judge path for one proposed tool call. Local rules run first; a result that already blocks, or has a CRITICAL finding the rules can enforce, skips the judge. A finding the rules flag but cannot block on their own (detection-only) goes to the judge; if the judge then gives no verdict, a CRITICAL one follows `hook_fail_mode` (refused when it is closed: strict tier, managed hosts, explicit `closed`). Otherwise the judge sees the call together with the user's latest prompt and this session's recent tool calls, kept in gateway memory only. Model-generated text never becomes the user's intent. Only a connector with a synchronous pre-tool hook can block; event-stream connectors get the same judgment as an observation."
+  caption="The recommended regex_judge path for one proposed tool call. Local rules run first; a result that already blocks, or has a CRITICAL finding the rules can enforce, skips the judge. A finding the rules flag but cannot block on their own (detection-only) goes to the judge; if the judge then gives no verdict, a CRITICAL one follows `hook_fail_mode` (refused when it is closed: strict tier, managed hosts, explicit `closed`). Otherwise the judge sees the call together with the user's latest prompt, this session's recent tool calls, what DefenseClaw's parser proves the call does (its effects and resolved targets), what the session did earlier to those targets, and the rules that flagged it, all kept in gateway memory only. Model-generated text never becomes the user's intent. Only a connector with a synchronous pre-tool hook can block; event-stream connectors get the same judgment as an observation."
 >
   <Node id="intent" kind="operator">{`User's latest prompt\nfrom the prompt hook`}</Node>
   <Node id="tool" kind="agent">{`Agent proposes a tool call\npre-tool hook`}</Node>
@@ -48,9 +52,31 @@ coverage, but it adds model latency to every eligible call.
 </Flow>
 
 `weak_signal` findings are ignored. `needs_review` can alert but cannot block
-by itself. A block requires actionable corroboration or strong structural
-evidence of exfiltration or destruction. This keeps ambiguous activity visible
-without turning ordinary coding commands into routine interruptions.
+by itself. In the default pack a lone `needs_review` finding on a call no rule
+flagged is recorded without an alert, except on a call DefenseClaw's parser
+does not model (MCP and other tools, where the judge sees only the call text):
+there it still alerts, and never blocks (cascade lane `judge_unmodeled_alert`).
+A block requires actionable corroboration
+or strong structural evidence of exfiltration or destruction. This keeps
+ambiguous activity visible without turning ordinary coding commands into
+routine interruptions.
+
+Next to the call, the judge gets what DefenseClaw's own parser proves the call
+does: the paths it reads, writes, deletes or runs, and its network actions, what
+earlier calls of the session did to the same paths, and the rules that sent the
+call to the judge. It judges those effects rather than the call's vocabulary: a
+call the parser proves sends nothing over the network is not judged as data
+exfiltration.
+
+When the judge reads a tool's output (the injection judge, and the PII judge
+for the tools your pack lists), it also gets what the tool-call judge gets: the
+tool's name, its call's arguments (shortened, credentials removed), what the
+parser found the call does, and your request for the turn (read from the
+shared intent store, so every gateway replica gives the same one). They come
+before the output as sections marked with a nonce that is new for every call
+and named only in the judge's instructions, so text in the output or the call
+cannot open or close a section. Everything in them is treated as untrusted
+data.
 
 ## Frozen public validation
 
@@ -79,6 +105,13 @@ attack recall came with a 90% benign trajectory alert and block rate, so it is
 not recommended for coding-session enforcement. The Granite model was
 dropped after pilots with lower recall, and the Qwen 3.5 and Muse models
 were not included in the frozen matrix.
+
+The judge sends a JSON schema as `response_format`. `openai.gpt-oss-safeguard-20b`
+on Bedrock Mantle does not follow it: about two thirds of its answers (64 to 66%
+in the bake-off) came back malformed, each of which counts as a judge failure
+and leaves the rule verdict as it was. It parsed 97 to 98% of answers without
+the schema, but DefenseClaw has no switch that turns the schema off, so do not
+use it as the judge model. Use Gemma 4 31B.
 
 Stateful labels apply to whole trajectories, not individual tool calls. On the
 benign lane, 1 of 511 hook decisions alerted (0.20%) and none blocked. That is

@@ -26,7 +26,9 @@ func runContained(cmd *exec.Cmd) error {
 	return runTree(cmd, false)
 }
 
-// runTracked is RunTree: the Job Object refuses breakaway.
+// runTracked is RunTree, below the normal priority class (withScannerPriority,
+// GAP-0251): the Job Object refuses breakaway.
 func runTracked(cmd *exec.Cmd) error {
+	withScannerPriority(cmd)
 	return runTree(cmd, false)
 }

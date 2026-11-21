@@ -11,6 +11,13 @@ linters:
       - path: 'internal/gateway/connector/atomic_transform_(bound|bound_other|metadata_other)\.go'
         linters:
           - unused
+      # Windows diagnostics start with the name of an API, a file system or a
+      # product (Windows, NTFS, ACL, Amp). Operators read the text and tests
+      # assert it, so the capital letter stays.
+      - path: 'internal/gateway/connector/.*_windows.*\.go'
+        linters:
+          - staticcheck
+        text: 'ST1005'
       # Machine requirements types and helpers have Windows production callers.
       - path: 'internal/gateway/connector/codex_machine_requirements\.go'
         linters:

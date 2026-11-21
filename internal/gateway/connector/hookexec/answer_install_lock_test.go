@@ -111,9 +111,7 @@ func TestEarlyAnswerWatchdogAnswersClosedDuringInstallInEveryHookForm(t *testing
 	// under -race on a loaded runner the line took longer than the 100 ms
 	// wait, and its goroutine wrote into the TempDir after the subtest's
 	// cleanup had begun to remove it (GAP-0680 class).
-	previousLogWait := answerWatchdogLogWait
-	answerWatchdogLogWait = 30 * time.Second
-	t.Cleanup(func() { answerWatchdogLogWait = previousLogWait })
+	setAnswerWatchdogLogWait(t, 30*time.Second)
 	covered := map[string]bool{}
 	for _, form := range nativeToolHookForms {
 		covered[form.connector] = true

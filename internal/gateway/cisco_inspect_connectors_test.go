@@ -63,7 +63,7 @@ func captureAIDPayloadForConnector(
 	headers map[string]string,
 ) []byte {
 	t.Helper()
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 
 	var gotBody []byte
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -288,7 +288,7 @@ func TestCiscoInspectClient_ConnectorToolCallPayloads(t *testing.T) {
 // as its own tool call, under its own name, with a "dc-" id derived from that
 // call, since the CLI hook reports no tool id.
 func TestCiscoInspectClient_CopilotParallelCallsEachSendAToolCall(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	var (
 		mu     sync.Mutex
 		bodies [][]byte

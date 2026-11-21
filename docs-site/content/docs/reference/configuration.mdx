@@ -105,6 +105,8 @@ In `~/.defenseclaw`, `%USERPROFILE%\.defenseclaw` on Windows, or `DEFENSECLAW_HO
 
 `~/.defenseclaw/doctor_cache.json` is the latest non-dry-run Doctor snapshot. The TUI reads it for the Overview panel instead of repeating network probes on every redraw.
 
+`~/.defenseclaw/scanner_import_probe.json` (mode 0600) remembers that the MCP scanner SDK imported, so Doctor does not start a child Python that loads LiteLLM on every run. It is checked again after any reinstall, upgrade or repair of `cisco-ai-mcp-scanner` or `litellm`, after any change to the installed packages and after a day. Only a pass is remembered, so a failure is shown on every run. It is safe to delete.
+
 ```json
 {
   "schema_version": 2,
@@ -290,8 +292,9 @@ llm:
     insecure_skip_verify: false
 
 # Optional semantic model classifier for proxy-mode OpenAI Chat Completions.
-# Routing-only edits are validated by config reload but activate on gateway
-# restart. Omit `remote` to run the pinned, loopback-only Docker sidecar.
+# With classifier: rules (in-process, no Docker) routing edits apply on reload;
+# classifier vllm_sr (the default when the key is absent) runs the pinned,
+# loopback-only Docker sidecar (omit `remote`) and its settings need a restart.
 routing:
   enabled: false
   version: "0.3.0"            # the only tested managed-sidecar contract
@@ -345,6 +348,25 @@ guardrail:
   detection_strategy_prompt: ""      # per-lane override; empty -> detection_strategy
   detection_strategy_completion: regex_only  # default for tool results and completions; regex_judge also sends them to the judge
   detection_strategy_tool_call: ""   # per-lane override; empty -> detection_strategy
+  cascade:
+    lanes:                     # one live/shadow switch per lane, any case; effects and secret_flow: off | shadow (on is not available in 1.0.10)
+      effects: shadow          # the effect-model rule lane: computes and records beside today's rules, never changes the answer
+      secret_flow: shadow      # Secret flow tracking (needs the effects lane not off)
+      nonshell: "on"           # the MCP and app tool lane: on (default) | shadow | off; shadow and off add nothing
+  effects_rules_tier: restricted  # restricted | full: how far the effect lane may block (ships restricted)
+  secret_flow:                 # Secret flow tracking: alert when a labeled secret reaches an external sink
+    label_sets:
+      credentials: true        # label .env, SSH keys, cloud/token files, keychain, /proc/*/environ
+      extra_path_globs: []      # extra ~ or absolute path globs to label as secret
+      extra_secret_patterns: [] # extra basename globs to label as secret
+    sink_action:
+      default: alert           # the default pack never blocks; alert only
+      strict: block            # alert | block (a managed install follows its pack)
+    reencodings: true          # also match base64/hex/URL-encoded forms of a secret value
+    memory:
+      max_labeled_paths: 512   # per-session labeled-path cap (LRU)
+      max_value_digests: 256   # per-session secret-value-digest cap
+    destination_allowlist: []   # hosts (and dotted suffixes) that are not external, e.g. your git remote
 
   # judge.llm omitted: the judge inherits the top-level llm block.
   judge:
@@ -437,6 +459,10 @@ webhooks:
     min_severity: HIGH
 ```
 
+`min_severity` filters findings. An approval request (`approval-request`, for example an ask an unattended Agent Substrate run queued for a person) is always sent; leave it out with an `events` list that does not name `approval-request`.
+
+On an Agent Substrate gateway, a generic post about an actor's tool call also names the actor: `substrate_actor`, `substrate_atespace`, `substrate_person` (the person's subject, as the audit row has it), `substrate_profile` and `substrate_unattended`. `host` is the gateway pod.
+
 ### Other top-level keys
 
 Defaults from the loader. Omitted keys take these values.
@@ -450,11 +476,11 @@ Defaults from the loader. Omitted keys take these values.
 | `tenant_id`, `workspace_id`, `discovery_source` | empty | Identity stamped on every record. Restart required. |
 | `deployment_mode` | empty | `managed_enterprise` on a managed device. Restart required. |
 | `claw.mode` | `openclaw` | The primary connector. With several active it names the first; the OTel attribute `defenseclaw.claw.mode` is set only while a single connector is active. |
-| `claw.home_dir`, `claw.config_file` | `~/.openclaw`, `~/.openclaw/openclaw.json` | Where the OpenClaw install is looked up. |
+| `claw.home_dir`, `claw.config_file` | `~/.openclaw`, `~/.openclaw/openclaw.json` | Where the OpenClaw install is looked up, and the home and `openclaw.json` that the OpenClaw connector patches (honoured since 1.0.10). A `config_file` left at its default follows a moved `home_dir`. |
 | `claw.workspace_dir` | empty | Set by `setup <connector> --workspace` or `config set`; scopes hooks to one folder, and setup without `--workspace` keeps it ([Per-connector files](#per-connector-files)). |
 | `gateway.host`, `gateway.port` | `127.0.0.1`, `18789` | The upstream agent gateway (OpenClaw and ZeptoClaw fleet link). |
 | `gateway.fleet_mode` | `auto` | `auto`, `enabled` or `disabled`: when to dial `host:port` ([OpenClaw fleet link](#openclaw-fleet-link)). |
-| `gateway.token_env` | `DEFENSECLAW_GATEWAY_TOKEN` | The variable that holds the sidecar API token ([Keys](/docs/reference/keys)). |
+| `gateway.token_env` | `DEFENSECLAW_GATEWAY_TOKEN` | The variable that holds the sidecar API token ([Keys](/docs/reference/keys)). `OPENCLAW_GATEWAY_TOKEN` is not accepted here: it holds the OpenClaw gateway credential, and the gateway skips it. `defenseclaw doctor --fix` changes it to `DEFENSECLAW_GATEWAY_TOKEN`. |
 | `gateway.api_port`, `gateway.api_bind` | `18970`, empty | The sidecar REST API. Empty `api_bind` binds `127.0.0.1` ([Gateway API](/docs/reference/gateway-api#bind-address)). |
 | `gateway.device_key_file` | `<data_dir>/device.key` | The device key. |
 | `gateway.auto_approve_safe` | `false` | Auto-approve safe requests from the upstream gateway. |
@@ -466,7 +492,15 @@ Defaults from the loader. Omitted keys take these values.
 | `watch.rescan_enabled`, `watch.rescan_interval_min`, `watch.rescan_content_gated` | `true`, `60`, `true` | Periodic rescan of installed assets; content gating skips a target whose content did not change. |
 | `llm.timeout`, `llm.max_retries` | `30`, `2` | Seconds and retries for the unified LLM block. |
 | `decision_model.enabled` | `false` | The [decision model](/docs/guardrail/decision-model) for tool calls: in front of the LLM judge where the judge runs. Needs `decision_model.base_url` and `.model`; the token is in `DEFENSECLAW_DECISION_MODEL_KEY` (`.api_key_env`), or `.credential` on a managed device. |
+| `decision_model.protocol` | `system-one` | Wire protocol of the endpoint: `system-one` (`{model, state, questions}`, Bearer token) or `gemini-decisions` ([Gemini Decision 1](/docs/guardrail/decision-model#gemini-decision-1): `{model, input, questions}`, key in `x-goog-api-key`). Exact lowercase values. Hot reload. |
 | `decision_model.hook_connectors` | empty | Connectors (or `*`) whose tool calls the decision model answers on its own where the LLM judge does not run: rules, then the decision model, no judge. Empty keeps it in front of the judge only. Hot reload. |
+| `decision_model.block_risk_score`, `.escalate_rule_flagged` | `1.5`, `true` | A confident block also needs the model's risk score at or above `block_risk_score`, and never lands on a call the rules flagged (it goes to the judge or asks). Hot reload. |
+| `guardrail.cascade.unknown` | `pack` | The unknown and truncated tier: `pack` (strict blocks, default and permissive alert), `alert`, `confirm` or `block`; never below alert. Also under `guardrail.connectors.<agent>.cascade`, `guardrail.profiles.<name>.cascade` and their connectors. Hot reload. [Configure the cascade](/docs/guardrail/configure-cascade). |
+| `guardrail.cascade.judge.max_action`, `.block_needs_system_one`, `.no_verdict` | `block`, `false`, `rules` | The LLM judge's role: the most it can decide (`block`, `confirm`, `alert`, `log`); whether a judge block needs System One's confident block too (otherwise it asks); and what a call gets when the model layers give no verdict (`rules` or `unknown`). Every scope. Hot reload. |
+| `guardrail.cascade.system_one.on_unsure` | `confirm` | System One without the judge, on an unsure answer or a refusal: `confirm`, `alert` or `rules` (adds nothing). Under a connector or profile scope, `system_one` also takes `allow_threshold`, `block_threshold`, `block_risk_score` and `escalate_rule_flagged` to override the `decision_model` values for that scope. Hot reload. |
+| `guardrail.cascade.lanes.<lane>` | each lane's shipped value | `off`, `shadow` (record the lane's verdict without changing the answer) or `on`; a lane that ships shadow-only accepts `off` and `shadow`. Every scope, except `effects` and `secret_flow`: process-wide lanes, top level only, shadow-only in 1.0.10 (default `shadow`). Hot reload. |
+| `guardrail.cascade.policy.module`, `.lowest`, `.highest`, `.timeout_ms` | unset, `alert`, `block`, `5` | The Rego final-decision policy (`{path, digest}`, package `defenseclaw.cascade`), the lowest and highest action it may set on a flagged call, and the milliseconds per evaluation (at most 50; an error or timeout judges the call at the unknown tier). Top level only. Hot reload. |
+| `guardrail.cascade.admin.critical_floor`, `.locked` | `alert`, empty | The lowest action a proven CRITICAL finding can end at (`log` is the explicit opt-out), and the keys no connector or profile may set. Top level only. Hot reload. |
 | `decision_model.timeout`, `.allow_threshold`, `.block_threshold`, `.on_confident_block` | `1`, `0.30`, `0.75`, `escalate` | Seconds per call; risk at or below which an allow is confident; risk at or above which a block answer is confident; whether the judge still checks a confident block (with the judge only). Hot reload. |
 | `cisco_ai_defense.endpoint` | `https://us.api.inspect.aidefense.security.cisco.com` | The AI Defense inspection endpoint. |
 | `cisco_ai_defense.api_key_env`, `.timeout_ms` | `CISCO_AI_DEFENSE_API_KEY`, `3000` | The key variable, and the request timeout. |
@@ -476,10 +510,13 @@ Defaults from the loader. Omitted keys take these values.
 | `notifications.sources.hook`, `.guardrail`, `.asset_policy` | `true` | Per-source switches. |
 | `notifications.dedup_window`, `.max_per_minute` | 30 seconds, `12` | Duplicate suppression and rate cap. |
 | `guardrail.stream_buffer_bytes` | `1024` | Buffer for streamed proxy responses. |
+| `guardrail.history_seen_max` | `2048` | Most history segments (the earlier turns a client sends with each request: its own, the model's, tool results) the guardrail proxy remembers as inspected, per Agent Substrate actor or per session of a verified host caller (at most 32 sessions per caller and 256 in all), for one mode, guardrail profile and policy generation; a change of any of them inspects the history once more. The proxy inspects each history segment it does not remember, once. A remembered one keeps its verdict and is not inspected again. A turn of a request the proxy refused is never forwarded later. That is the text the refusal is attributed to, among everything the request sent for the first time: its current turns and the history segments the proxy had not seen (a model reply that quotes an injection, a compaction summary). With one current turn and no new history, that turn is recorded as refused. Otherwise the proxy finds the text with more checks, one more judge or AI Defense call each and at most 8 in all. It checks the current turns first, together, then each alone when they block (the ones that block alone are recorded). When they do not block, it checks the new history with them, then searches the new history, in up to 128 groups of consecutive segments, for the shortest run of the newest groups that blocks together with the current turns, and records the oldest group of that run: a refusal that two parts cause together (one in the history and one in the current turn, or both in the history) records the older part and no benign turn. These checks run one after another before the block reply, so a refusal can take up to 8 judge timeouts longer. When no check blocks (the refusal came from the system text, or from history the proxy had already inspected), the current turns, the system text and the new history are recorded as refused. Text of a refused request that is not recorded as refused is inspected again on the next request. A system or developer message that a client puts among the turns (Claude Code adds such reminders) counts as a turn where it sits: a current turn after the model's last one, history before it; only the ones a message list starts with are inspected on every request. When the client sends such a turn back as history, its text is replaced with a note that DefenseClaw policy removed it (the turn and the role order stay), the request goes on, and an audit row (`guardrail-launder`: session, turn index, rule, no content) records the removal. A signed Bedrock request body cannot be rewritten, so on that wire a session that still carries a refused turn is refused until the client drops that turn. An inspection in which a stage failed open (AI Defense unreachable, a failed judge) records nothing it allowed. A forgotten segment is inspected again. A caller the gateway did not verify is remembered for nothing: all of its history is inspected on every request. On Agent Substrate the gateway replicas share an actor's record through the leader, so a turn refused on one replica is removed on every other; while the leader does not answer, the history is inspected in full. |
+| `guardrail.max_body_values` | `400000` | Most JSON values the guardrail proxy reads in one request body or reply event to inspect it. A body with more is not inspected: a managed install and the strict tier refuse it, the default forwards it with an alert that names this key. Raise it for a legitimate large body (for example a batch of token-id embedding inputs). |
 | `guardrail.judge.timeout`, `.adjudication_timeout` | `30`, `5` | Seconds for a judge call, and for adjudication. |
 | `guardrail.judge.max_parallel` | Automatic | Most judge calls sent to the judge model at once. Unset uses `1` for loopback/private endpoints and no limit for public endpoints; explicit `0` means no limit. With a limit, tool-call judging goes first. See [A judge on a local model](/docs/guardrail#let-tool-calls-go-first). |
 | `guardrail.judge.extra_body` | empty | Additional JSON fields for a judge using an OpenAI-compatible endpoint. Judge-owned request fields and authentication keys are refused when the config loads. See [Lemonade and Gemma 4](/docs/guardrail#lemonade-and-gemma-4). |
 | `guardrail.judge.injection`, `.pii`, `.pii_prompt`, `.pii_completion`, `.tool_injection`, `.exfil` | `true` | Which judge categories run when the judge is enabled. |
+| `guardrail.judge.intent_scope` | `shadow` | The check for a tool call that sends data to a place your task does not name ([`INTENT-SCOPE-SEND`](/docs/guardrail#which-connectors-give-the-judge-your-task)): `shadow` records the finding in a judge event and a log line and leaves the verdict alone, `off` does not look. Releases before 1.0.10 refuse this key. |
 | `guardrail.judge_sweep` | `true` | Run the full judge on content the regex triage found no signal in. |
 | `guardrail.retain_judge_bodies`, `.judge_persist_queue_depth` | `true`, `1024` | Keep raw judge bodies in `judge_bodies.db`, and the async write queue depth. Restart required. |
 | `guardrail.hook_self_heal`, `.hook_self_heal_debounce_ms` | `true`, `500` | Re-install a deleted DefenseClaw hook block while the gateway runs. Restart required. |
@@ -539,6 +576,7 @@ concept pages explain how they combine: [Rules](/docs/policies/rules) and
 | `guardrail.block_at`, `guardrail.alert_at` | empty | The lowest severity that blocks or alerts: `CRITICAL`, `HIGH`, `MEDIUM` or `LOW`, in any case. Empty inherits: a connector from the global value, the global value from the rule pack's default. `alert_at` is never above `block_at`. `defenseclaw guardrail block-at LEVEL [--connector X]` writes them. |
 | `guardrail.cisco_trust_level` | `full` | How much a Cisco AI Defense verdict counts. `full`: as much as a local finding. `advisory`: a verdict that only Cisco AI Defense reached is downgraded to an alert, never a block. `none`: Cisco AI Defense results are ignored when choosing the action. |
 | `guardrail.internal_domains` | `[]` | Your organization's own domains, such as `corp.example.com`. A download from a host that is one of them or under one does not start the [download → execute](/docs/policies/deterministic-detection#download--execute) alert. Domain names only: no scheme, port, path, wildcard or IP address. At most 256. |
+| `guardrail.cascade.lanes.nonshell` | `on` | The switch of the [MCP and app tool lane](/docs/policies/deterministic-detection#mcp-and-app-tool-calls): the effects read from MCP and app tool calls, and the table rules on shell and native file-tool calls. `on` judges them. `shadow` and `off` compute nothing and add nothing, so every verdict is the one a build without the lane gives. Write the value exactly (`on`, `shadow` or `off`, lower case) at the top level; another spelling, another value or a connector or profile scope is refused when the configuration loads. |
 | `guardrail.judge.trace` | `false` | Log the judge's prompts and responses for debugging. They can hold agent traffic and secrets. It replaces `DEFENSECLAW_JUDGE_TRACE`, and a managed device refuses it. |
 
 `block_at` and `alert_at` are the only threshold source. They apply to hook
@@ -666,9 +704,63 @@ The gateway dials the OpenClaw or ZeptoClaw gateway at `gateway.host` and `gatew
 
 When `guardrail.connectors` lists agents, the active connector comes from that roster. An older `claw.mode` default does not add OpenClaw to it.
 
+### OpenClaw connector (`connectors.openclaw`)
+
+Optional keys that DefenseClaw 1.0.10 reads. With none set, the plugin is managed, OpenClaw and DefenseClaw run as one account and the hook mode is `auto`. A signed bundle that sets any of them must require `min_product_version` 1.0.10. The block is refused with the Secure Client integration. Setup, the plugin and the checks are on the [OpenClaw connector](/docs/connectors/openclaw) page.
+
+| Key | Default | What it does |
+| --- | --- | --- |
+| `connectors.openclaw.plugin_install` | `managed` | `managed`: setup writes the plugin into `extensions/defenseclaw` in the OpenClaw home. `external`: an administrator installed it at `plugin_dir`; DefenseClaw checks that its files equal this build and never writes or deletes them ([Administrator-installed plugin](/docs/connectors/openclaw#administrator-installed-plugin)). |
+| `connectors.openclaw.plugin_dir` | empty | Clean absolute path of the administrator-installed plugin, ending in a folder named `defenseclaw`. Used only with `plugin_install: external` and required there. Set it before `plugin_install`. |
+| `connectors.openclaw.operator_admin` | `true` | Ask OpenClaw for the `operator.admin` scope, used only to turn off a blocked skill, plugin or MCP server through OpenClaw. `false` keeps read, write and approvals; blocks are still enforced by DefenseClaw admission and inspection. |
+| `connectors.openclaw.hooks.mode` | `auto` | `auto` or `proxy`. `auto` uses the native plugin hooks on OpenClaw 2026.8.35 and later (with the guardrail proxy on Linux and macOS, alone on Windows) and the guardrail proxy below that. `proxy` keeps the 1.0.9 behaviour; refused on Windows ([Hook modes](/docs/connectors/openclaw#hook-modes)). |
+| `connectors.openclaw.hooks.prompt_gate` | `false` | Check every user prompt in `before_agent_run` before the model reads it; blocks it in action mode. Always on in native mode (Windows), where it is the only request check ([Prompt gate](/docs/connectors/openclaw#prompt-gate)). |
+| `connectors.openclaw.plugin_account` | empty | OS account of the OpenClaw gateway when it is not the account of the DefenseClaw gateway (the [separate-user layout](/docs/connectors/openclaw#separate-users-linux-and-macos)). Linux and macOS only. Needs `plugin_install: external` and `plugin_token_file`. |
+| `connectors.openclaw.plugin_token_file` | empty | Clean absolute path where DefenseClaw publishes the plugin credential for `plugin_account`. Its folder must be owned by the DefenseClaw account and not writable by group or others. Needs `plugin_account`. |
+| `connectors.openclaw.plugin_token_group` | none (required with `plugin_account`) | Group of the OpenClaw account that may read `plugin_token_file` (mode 0640). It must contain `plugin_account` and must not be a group every account is in, such as `staff` or `users`. Linux and macOS. |
+| `connectors.openclaw.install_policy` | `auto` | `auto`, `on` or `off`. When on (OpenClaw 2026.8.35 and later), OpenClaw asks DefenseClaw admission before it installs or updates a skill or plugin. `auto` is on in the strict tier and on managed installs, off in the default and permissive tiers ([Install admission](/docs/connectors/openclaw#install-admission)). |
+
+`plugin_account` and `plugin_token_group` take letters, digits, `_`, `.` and `-`, at most 64 characters, and do not start with `.` or `-`.
+
 ### Routing and observability behavior
 
 The `routing` block affects OpenClaw and ZeptoClaw only on the proxy's OpenAI-compatible Chat Completions path. `defenseclaw keys list` discovers each non-empty `api_key_env`; the classifier never receives the key value. See [Semantic routing](/docs/guardrail/semantic-routing).
+
+Routing keys added in 1.0.10. Each one is optional; leaving it out keeps the 1.0.9 behavior. On a managed host they come from the admin `config.yaml` in the signed policy bundle, and a bundle that sets any of them needs `--min-product-version 1.0.10`.
+
+| Key | Values | Left out |
+| --- | --- | --- |
+| `routing.classifier` | `rules` (in-process, no Docker), `systemone`, `vllm_sr` | `vllm_sr` |
+| `routing.min_confidence` | 0 to 1; a lower classifier confidence counts as no answer | 0 |
+| `routing.on_classifier_error` | `original` (send the request unchanged), `rules` (ask the rules classifier) | `original` |
+| `routing.default_alias` | a `routing.models` alias used when nothing else is picked | the unconditional decision |
+| `routing.categories` | map of classifier category to alias | none |
+| `routing.allow_user_override` | `true` lets a request that names an allowed alias keep it | `false` |
+| `routing.sensitive` | `aliases` plus `severity_at_least` and/or `signals` (keyword signal names): at or above that guardrail severity, or when a listed signal matches, only these aliases are used, and the request never goes to the original (cloud) model or another alias: when none of these aliases can serve it, it is refused with `routing_sensitive_local_unavailable` and the cause. A local alias with a `base_url` and no `api_key_env` or `credential` is called with no credential. Best effort: regex and keyword checks miss personal data written in prose; for regulated groups give their profile an `allowed_aliases` list of local models only | none |
+| `routing.sensitive.check` | `off`, `auto`, `decision_model` or `judge`: also ask one bounded yes/no question per request, "does this contain sensitive data", to the decision model (System One or the Decisions API) or the guardrail judge. A positive from the regex floor or the check keeps the request on `routing.sensitive.aliases`. `auto` uses the decision model when one is configured, else the judge. The route waits for the answer (about 0.4 s with a small model). | `off` |
+| `routing.sensitive.on_unavailable` | `local` or `ignore`: what a check that failed, timed out or did not answer does. `local` prefers the sensitive aliases and keeps the normal route when none can take the request; it never blocks. | `local` |
+| `routing.sensitive.timeout_ms` | Time cap of one check, 50 to 5000. A check past it counts as unavailable. | `1000` |
+| `routing.sensitive.max_bytes` | Bytes sent to the check, 256 to 65536: on the chat listener the user, assistant and tool turns (newest first, never system prompts), on route-only and passthrough the newest user turn. A newest turn cut by it is judged at the unknown tier: `strict` prefers a local model. | `8192` |
+| `routing.sensitive.definition` | Your organization's definition of sensitive data, added to the question (at most 1024 bytes). | none |
+| `routing.systemone` | `use_decision_model` (reuse `decision_model`), `base_url`, `model`, `api_key_env`, `credential`, `timeout_ms` (default 300, at most 1000) | none. With Gemini Decision 1 every routed prompt goes to Google and `timeout_ms` should be `1000` ([privacy and latency](/docs/guardrail/decision-model#gemini-decision-1)). |
+| `routing.models[].apis` | `chat`, `messages`, `responses`, `converse`, `invoke`: API families the backend serves without translation | the provider default |
+| `routing.models[].credential` | protected credential name on a managed host; the gateway reads only it when it is set. A managed model with only `api_key_env` (1.0.9 configs) still reads the gateway service environment, and doctor warns to move the key to a credential | none |
+| `routing.models[].bedrock` | `region`, `auth` (`passthrough`, `profile`, `instance_role`, `iam_credentials`) and the key names for gateway signing | none |
+| `routing.decisions[].conditions[].type` | `keyword`, plus `connector`, `api_family` and `request` (`has_tools`, `tool_turn`, `has_images`, `long_context`, and `tool_loop` with `routing.context.include_tool_names`) with the `rules` or `systemone` classifier | `keyword` only |
+| `routing.route_only.connectors` | `claudecode`, `codex`: hook connectors whose model calls go through the gateway for routing and usage only. On managed macOS and Windows the agent credential is not forwarded, so the bundle must give the gateway its own credential for each routed upstream (a `routing.models[].credential` of the same provider and base URL, or gateway Bedrock signing); validation refuses a bundle without one, because every model call would answer 503. `defenseclaw doctor` and `defenseclaw status` show one route-only row per connector (gateway readiness, agent config, Bedrock signing checks). On Linux and Windows, when another account holds the gateway API port, the gateway logs and audits it (`gateway-degraded`) and replaces the route credential once it owns the port again; on a Mac with more than one account doctor warns instead | none |
+| `routing.route_only.upstreams.<connector>` | `base_url`, `api`, `bedrock`: where unrouted calls go; the route-only enable step writes it from the agent configuration. Claude Code on Bedrock with a Bedrock API key gets `bedrock.auth: passthrough` (the key must be in the environment Claude Code starts with: your shell or the `env` block of its `settings.json`; a key that `defenseclaw keys set` keeps in `~/.defenseclaw/.env` for a routing alias does not count, and `defenseclaw doctor` fails the **Route-only claudecode Bedrock auth** row when passthrough is recorded and the only Bedrock key is that stored one, so Claude Code signs with SigV4, which answers HTTP 400; when no key is visible but it may come from another shell, a project `settings.local.json` or managed settings, which doctor does not read, the row is a warning with the same remedy); with IAM credentials it gets `bedrock.auth: profile` (the `AWS_PROFILE` of Claude Code, else `default`): Claude Code then skips its own AWS signing (`CLAUDE_CODE_SKIP_BEDROCK_AUTH=1`) and the gateway signs each call with SigV4. `instance_role` (the AWS default chain) and `iam_credentials` (`*_env` names, or `*_credential` names on a managed host) also sign at the gateway; `region` defaults to the region in the upstream host. The gateway signs only `POST /model/{id}/converse`, `converse-stream`, `invoke` and `invoke-with-response-stream` (other Bedrock calls get 403) and sends its credential only to an https `bedrock-runtime` AWS host. Enable keeps passthrough when Claude Code already sets `CLAUDE_CODE_SKIP_BEDROCK_AUTH`, and refuses static `AWS_ACCESS_KEY_ID` without a profile, `awsCredentialExport` or `awsAuthRefresh`, an AWS profile missing from the AWS config and credentials files, and an `AWS_CONFIG_FILE` set only in Claude Code settings | none |
+| `routing.context` | `recent_user_turns` (0 to 8 older user messages), `include_first_user_turn`, `max_bytes` (the older messages together, default 8192, at most 65536), `per_turn_bytes` (one older message, default 2048, at most `max_bytes`), `include_tool_names` (tool names only, never arguments or results; turns on the `tool_loop` request condition). The newest message keeps its 8 KiB limit. Left out: tool results, assistant replies, system prompts, and user-role text that starts with a marker agents write (`<system-reminder>`, `<environment_context>`, `<user_instructions>`, command, hook and IDE tags such as `<bash-stdout>` or `<local-command-stdout>`, `# AGENTS.md instructions`, `# CLAUDE.md`, Claude Code `Contents of /path (...instructions):` attachments, compaction summaries, skill loads, the OpenClaw context message), block by block; a custom slash command gives its `<command-args>` and the expanded command file is skipped. Keyword signals match the newest message and the context with no recency weighting, so an older message can pick a higher-priority rule than the newest one; MCP tool names are chosen by the tool server. A cut context is recorded as the decision warning `context_truncated:bytes` (or `items` past 32 tool names) and never removes a signal the newest message matched. `systemone` gets at most 8 KiB. Refused with `vllm_sr`, which reads the newest message only | the newest user message only |
+| `routing.admin` | `allowed_aliases`, `denied_providers`, `default_alias`, `categories`, `allow_user_override`, `locked`: the organization floor | no floor |
+| `routing.admin.rules` | ordered list of `id`, `match` (`groups`, `users`, `connectors`, `agents`, `categories`, `severity_at_least`), and either `allow` / `default` or `action: deny` with an optional `message`. Every matching rule applies: a deny wins, `allow` lists intersect (and also bind a request that is not routed), the first matching `default` that is allowed is used | none |
+| `routing.admin.budgets` | list of `id`, `scope` (`user`, `group`, `connector`), `subject` (a user or `*` for each user, one group, a connector or `*`), `period` (`day`, `week` from Monday, `month`; UTC), `limit_usd`, `on_exceed` (`warn`, `deny`, `downgrade:<alias>[,<alias>]`). Needs `observability.tokenomics` on with computed cost and the `agent` role recorded (spend is kept in its own ledger, not the local usage store) | none |
+| `routing.admin.visibility.users_see` | `own` (a user reads only their own usage, decisions and budgets) or `none` (only administrators read them) | `own` |
+| `routing.admin.budget_store` | opt-in fleet budget store, standalone managed devices only: `url` (`https://host[:port]`), `credential` (name of the protected credential that holds this device's issued credential), `ca_file` (absolute path), `sync_interval` (5s to 10m), `timeout_ms` (100 to 30000). See [Routing rules and budgets](/docs/enterprise/routing-budgets) | off; `credential: routing-budget-store-device`, `sync_interval: 30s`, `timeout_ms: 2000` |
+| `routing.admin.budget_store.server` | store host only (`defenseclaw-gateway budget-store serve`): `listen`, `tls_cert_file`, `tls_key_file`, `db_path` (absolute paths), `rate_limit_per_minute` per device, `device_daily_cap_usd` | `rate_limit_per_minute: 120`, `device_daily_cap_usd: 500` |
+| `guardrail.profiles.<name>.routing` | `allowed_aliases`, `denied_providers`, `default_alias`, `categories`, `allow_user_override`: only tightens `routing.admin`; a key in `routing.admin.locked` is refused | nothing added |
+
+Rule and budget denies take effect only on a standalone managed device; on other installs they are reported in `defenseclaw routing status`, `doctor` and the audit log, and routing goes on. On a managed device a rule that names users, groups or agents treats a caller whose identity cannot be confirmed as matching a constraining rule and refuses on a deny rule; while the classifier is down every category rule applies, so their `allow` lists must share an alias. Budgets count the cost of agent calls: the computed cost (tokens times `observability.pricing`), else the cost the provider reported; a call with no known cost makes the spend unknown, and a deny budget then refuses on a managed device. Each managed host counts its own spend; with `routing.admin.budget_store` the store adds up the spend of every device and a host falls back to its own count while the store cannot be reached. Calls already running when a limit is reached still finish. Rules, budgets and visibility need DefenseClaw 1.0.10 or later (sign the bundle with `--min-product-version 1.0.10`). Which routing commands a standard user runs on a managed computer: [Managed commands](/docs/enterprise/managed-commands).
+
+A profile overlay intersects `allowed_aliases`, adds to `denied_providers`, and can only turn `allow_user_override` off: it is on only when `routing.allow_user_override` is `true` and no layer sets it to `false`. A profile that names an alias the floor does not allow fails validation. `routing.admin` and `routing.route_only` are refused with the Secure Client integration.
 
 Omissions compile to an explicit effective policy; inspect it with `defenseclaw config show --effective --section observability` and `defenseclaw observability plan`. Destination kinds, buckets, routes and redaction are on [Observability](/docs/observability).
 
@@ -676,7 +768,39 @@ Omissions compile to an explicit effective policy; inspect it with `defenseclaw 
 - An enabled destination without `send` or `routes` takes every bucket, every signal it supports, and profile `none`. A logs-only kind sends all logs; a general OTLP kind sends logs, traces and metrics. The Galileo preset generates one traces-only `capability-default` route restricted to its available family membership.
 - An explicit `send` or `routes` block replaces the generated route. A selected nonmember of the Galileo family is rejected as `unsupported_shape` and reported through destination failure accounting.
 - Destinations are independent fan-out legs; one failing does not stop another. For advanced routes the first matching route wins per destination and signal, and an unmatched record is not delivered. Selectors AND across fields and OR within one: `buckets`, `sources`, `connectors`, `actions`, `event_names`, `min_severity`. Collection happens first, so routing cannot recreate a disabled signal.
-- Exactly one generated local SQLite destination is mandatory. It is configured only through `observability.local`, cannot be disabled or filtered, and keeps `retention_days` (default 7; `0` retains forever and warns about capacity). The same window bounds AI discovery history in `<data_dir>/inventory.db`. `max_store_mb` (default `0`, off) is an opt-in size cap for `audit.db` in MiB, 64 or more.
+- Exactly one generated local SQLite destination is mandatory. It is configured only through `observability.local`, cannot be disabled or filtered, and keeps `retention_days` (default 7; `0` retains forever and warns about capacity). The same window bounds AI discovery history in `<data_dir>/inventory.db`. `max_store_mb` (default `0`, off) is an opt-in size cap for `audit.db` in MiB, 64 or more. `keep_rejected_records` (default `false`) keeps a redacted copy of each record the v8 schema gate refuses in `audit.db`, capped by `rejected_records_max_rows` (default 10000); read it with `defenseclaw audit rejected`.
+
+### Tokenomics and pricing
+
+`observability.tokenomics` records what every model call used and cost. `observability.pricing` is the price table it reads. Both are off or absent by default, and an absent block behaves exactly as before 1.0.10. See [Tokenomics](/docs/observability/tokenomics) for what a usage record holds and how cost is computed. On a managed host both blocks come from the admin `config.yaml` in the signed policy bundle, and a bundle that sets either one needs `--min-product-version 1.0.10`, even when the value is `enabled: false`.
+
+Prices are never compiled into DefenseClaw. The gateway prices a call only from `observability.pricing` in `config.yaml`. A model with no entry has no cost, not a zero cost. On a managed host both blocks come from the admin `config.yaml` in the signed bundle.
+
+Both blocks reload with the rest of `config.yaml`: a change applies without a restart.
+
+| Key | Default | What it does |
+| --- | --- | --- |
+| `observability.tokenomics.enabled` | `false` | Master switch. Off: no usage record, no metric, no local store, no extra goroutine. |
+| `observability.tokenomics.record_routing_provenance` | `true` | Put the requested and selected model, the route decision and the profile on each usage record. |
+| `observability.tokenomics.roles` | empty (all roles) | Call roles to record: `agent`, `judge`, `decision_model`, `ai_defense`, `router_classifier`. Unknown or repeated roles are refused. |
+| `observability.tokenomics.native_otel_import.claudecode`, `.codex` | `true`, `true` | Import per-call usage from the OTLP stream the agent sends. Applies only while `enabled` is true. The stream exists only for agents in an isolated OpenShell sandbox; host setup does not turn on Claude Code or Codex telemetry, so on a host the switch changes nothing. A call the route-only listener recorded is counted once, from the listener record; the import counts the calls it did not record. |
+| `observability.tokenomics.cost.compute` | `true` | Compute cost from `observability.pricing`. |
+| `observability.tokenomics.cost.currency` | `USD` | USD is the only value. There is no currency conversion. |
+| `observability.tokenomics.cost.keep_reported` | `true` | Keep a per-call cost that the provider or the agent reported, and mark its basis `reported`. A reported cost wins over the computed one. Running session totals are never used. |
+| `observability.tokenomics.local_store.enabled` | `false` | Keep an hourly usage aggregate in `<data_dir>/model_usage/model_usage.db`. |
+| `observability.tokenomics.local_store.retention_days` | `30` | Days the aggregate is kept. `1` to `3650`. |
+| `observability.tokenomics.local_store.granularity` | `hour` | `hour` is the only value. |
+| `observability.tokenomics.metrics.labels` | `connector`, `provider`, `model`, `route_decision`, `call_role`, `profile` | Labels on `defenseclaw.model.cost` and `defenseclaw.model.tokens`. A closed set: list a subset to drop labels. Identity names (user, group, session, device, host and similar) are refused. |
+| `observability.pricing.version` | empty | Table version, up to 64 characters, stamped on every usage record. Required when `models` is not empty. Change it when you change a price. |
+| `observability.pricing.models[].provider`, `.model` | required | The provider and model the entry prices. Matching ignores case. `model` is an exact id, or a prefix that ends in `*`; the longest prefix wins and an exact id beats any prefix. A provider of `*` matches every provider after provider-specific entries. Bedrock region and inference-profile prefixes (`us.`, `eu.`, `global.` and similar) and inference-profile ARNs are reduced to the model id before matching. A provider and model listed twice is refused. At most 2,000 entries. |
+| `observability.pricing.models[].input_per_mtok`, `.output_per_mtok` | required | USD per million input tokens (uncached) and output tokens. `0` to `100000`. |
+| `observability.pricing.models[].cache_read_per_mtok`, `.cache_write_per_mtok` | input rate | USD per million cache-read and cache-creation input tokens. Absent: the call prices those tokens at `input_per_mtok`. |
+| `observability.pricing.models[].reasoning_per_mtok` | output rate | USD per million reasoning output tokens. Absent: priced at `output_per_mtok`. |
+| `observability.pricing.ai_defense.per_call_usd` | absent | Flat USD price of one Cisco AI Defense inspection call. Absent: those calls have no cost. |
+| `observability.pricing.unknown_model` | `omit` | `omit`: a model with no entry has no cost. `fallback`: price it with `observability.pricing.fallback`. |
+| `observability.pricing.fallback.input_per_mtok`, `.output_per_mtok` | absent | Rates for `unknown_model: fallback`; both are required then. `cache_read_per_mtok`, `cache_write_per_mtok` and `reasoning_per_mtok` are optional, with the same defaults as a model entry. |
+
+A value outside these bounds, a missing `version` on a non-empty table, an unknown role and an identity label are refused with a message that names the key, on `defenseclaw config set` and on a reload. The gateway keeps the previous settings when a reload is refused.
 
 ### Destination transport and queue limits
 
@@ -1007,6 +1131,57 @@ The `domains` array drives the gateway's URL → instance lookup: when an inboun
 
 A `custom-providers.json` marked `_derived_from` is rendered from this section on config writes. Do not edit it: the gateway does not read its edits back, `defenseclaw doctor` reports drift in the **Custom-provider overlay** row, and `defenseclaw doctor --fix` regenerates it. An unmarked overlay with `request_overrides` is a **live input** the gateway still merges ([Custom providers](/docs/reference/migrate-v9#custom-providers)).
 
+## Agent Substrate settings (`substrate.*`)
+
+`substrate:` configures DefenseClaw for coding agents that run as [Agent Substrate](https://github.com/agent-substrate/substrate) actors in Kubernetes. It is off by default and only the cluster components read it; the chart writes it into the cluster ConfigMap. The gateway validates the whole section at load, enabled or not.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `substrate.enabled` | `false` | Turns the Substrate components on. Needs `identity.issuer`. |
+| `substrate.api.address`, `.server_name`, `.ca_file` | `api.ate-system.svc:443`, `api.ate-system.svc`, `/var/run/ate/ca.crt` | Where ate-api-server is and how its certificate is checked. The trust bundle is reread when it rotates. |
+| `substrate.api.auth`, `.token_file`, `.credential_bundle` | `serviceaccount`, `/var/run/ate/token`, `/var/run/ate/credential-bundle.pem` | `serviceaccount` sends a projected token, `mtls` presents a pod certificate. Both are reread from disk. |
+| `substrate.supported_versions` | `>=1.0.0 <1.1.0` | Substrate versions DefenseClaw is tested on. |
+| `substrate.identity.issuer`, `.audience`, `.token_lifetime_seconds` | none, `defenseclaw`, `300` | The cluster's actor token issuer (unique per cluster), the audience DefenseClaw accepts and the token lifetime (300 s only: egress caches the token by actor name). |
+| `substrate.identity.actor_cert_oid` | `1.3.6.1.4.1.11129.2.12.2` | The actor identity extension in actor certificates. |
+| `substrate.identity.keys_url`, `.keys_ca_file` | the `idp` Service key set, the servicedns trust bundle | Where the gateway reads the actor-token keys, and the CA of that address. A unique issuer need not resolve. |
+| `substrate.identity.oidc`, `.workload_oidc` | none | Sign-in for people (`issuer`, `client_id`, `groups_claim`) and trusted CI identity providers (`issuer`, `audience`, and `subject` or `claims` naming the trusted workloads, for example `claims: {repository: acme/web}`; an entry without them is refused). A `subject` is exact or ends in `:*` or `/*` (for example `repo:acme/web:*`); a raw prefix such as `repo:acme/web*` or a bare `*` is refused. |
+| `substrate.services.actor`, `.admin` | `defenseclaw-actor.defenseclaw-system.svc.cluster.local`, `defenseclaw-admin.defenseclaw-system.svc.cluster.local` | The two gateway Services, fully qualified: actors resolve only names their egress policy lists, so the kit uses this exact name. Actors can reach only the actor Service. |
+| `substrate.launcher_atespaces` | none | Profile to the atespaces DefenseClaw owns for it, for example `{engineering: [eng-payments]}`. |
+| `substrate.require_attested_templates` | `true` | An actor whose template has no DefenseClaw attestation gets no network. |
+| `substrate.templates.trust_anchors` | `/etc/defenseclaw/substrate/template-anchors/anchors.pem` | The template signing keys (PEM), mounted from an admin-only Secret. A change applies at the next poll; a missing file refuses every template. |
+| `substrate.templates.min_policy_generation`, `.max_age`, `.allow_unverified_base` | `0`, none, `false` | Refuse templates scanned under an older policy, built too long ago, or on a base image that is neither allowlisted nor attested. |
+| `substrate.templates.registry_auth.docker_config` | none | A docker config.json (the chart's `controller.templateRegistrySecret` mount). Each `auths` entry is sent only to its own registry host, after that host asks. Re-read when it changes; a missing file is anonymous, a broken one refuses. |
+| `substrate.templates.registry_auth.ecr_hosts` | none | Amazon ECR registry hosts (`<account>.dkr.ecr.<region>.amazonaws.com`) logged in to with `ecr:GetAuthorizationToken` through the AWS SDK default chain (IRSA or EKS Pod Identity). |
+| `substrate.identity.admin_groups` | none | Groups (OIDC groups claim, or Kubernetes groups with the Kubernetes sign-in) whose members are Substrate administrators; the gateway's `--admin-groups` (chart `gateway.adminGroups`) adds to it. |
+| `substrate.templates.allowed_images`, `.profile_images` | none | Repository globs (`registry/path/*`, the registry host named exactly) every template container must match, and a narrower list per profile. The controller fetches attestations only from these registry hosts, so with none no template is admitted. Required in `managed_enterprise`, where `require_attested_templates: false` is refused. |
+| `substrate.templates.volume_images` | none | Repository globs a template may mount as read-only image volumes. Any other image volume refuses the template. |
+| `substrate.templates.plain_http_registries`, `.revoked_digests` | none | Registries reached over plain HTTP (dev clusters only), and image digests never admitted again. |
+| `substrate.default_sandbox_class` | `gvisor` | `gvisor` or `microvm`. |
+| `substrate.idle_suspend_after` | `30m` | Suspends an actor with no activity and low CPU; `0s` turns it off. Never with a pending ask. |
+| `substrate.workspace_max_bytes` | `1073741824` (1 GiB) | Largest workspace upload a launcher may send through the gateway; above it the upload is refused with a `--clone` hint. |
+| `substrate.unattended.asks`, `.ask_timeout`, `.telemetry_sampling` | `deny`, `30m`, `1.0` | Unattended runs: `deny` or `queue` asks, how long a queued ask waits, the share of routine records kept. |
+| `substrate.rate_limits.per_actor_rps`, `.per_atespace_rps` | `20`, `500` | Fair-share limits on the actor Service, across all gateway replicas (counted through the leader every second; each replica applies the whole budget only in the first second of a flood and while it can't reach the leader). |
+| `substrate.extproc.enabled`, `.failure_mode`, `.body_inspection`, `.body_max_bytes` | `true`, `closed`, `auto`, `1048576` | The egress callout: what it does when it can't decide (`open` is refused in `managed_enterprise`), and body mode (`auto` and `on` ask for the body of every MCP or listed-host request, `off` checks headers only). In managed enterprise with `failure_mode` `closed`, `auto` refuses requests to the listed MCP servers until a request body has reached the callout, because a stock filter would forward them unread; set `on` when your Substrate has the body opt-in, or `off`. Bodies are at most 1 MiB. Body mode needs Agent Substrate's egress filter with mode override (upstream #3817); on a stock v1.0.0 filter set `off`. Requests the callout can't inspect (over 1 MiB, event-stream, gRPC or multipart bodies) are refused when `failure_mode` is `closed`. |
+| `substrate.extproc.mcp_hosts`, `.body_hosts` | none | Remote MCP servers whose JSON-RPC bodies are inspected (`host` or `host=<server name>`; also allowed for every actor), and other hosts whose bodies get the DLP scans. |
+| `substrate.extproc.dlp.credential_headers` | `alert` | `alert` or `deny` for a secret-shaped credential header sent to a host no secret is bound to. Secret shapes in URLs and other headers are always refused. |
+| `substrate.extproc.judge.url`, `.token_file`, `.ca_file`, `.timeout` | none, none, none, `1500ms` | The gateway route that judges MCP tool calls the callout sees; the timeout is at most `1800ms`, and all calls of one batch share that budget. When it is the gateway's `/api/v1/substrate/callout/verdict` route, the callout raises asks on the same listener (`/api/v1/substrate/callout/ask`); without it, an ask-required host is refused. |
+| `substrate.extproc.uid.cache_ttl`, `.stale_max` | `60s`, `60s` | How long a verified actor UID is reused, and served while ate-api-server is down (at most `10m`). |
+| `substrate.extproc.chain.check_budget`, `.send_budget`, `.queue_size` | `20ms`, `250ms`, `4096` | Time for the tool-chain check of a request (at most `500ms`); time for a check whose miss refuses the request (one that can carry data out, any request of an unattended actor or on a managed or `closed` install, and one that reuses a cached registration) and for the registration lookup that confirms it (at most `500ms`, never shorter than `check_budget`); and the observed-egress queue. |
+| `substrate.extproc.chain.failure_mode` | `auto` | When the tool-chain check can't answer in time, or the actor has no DefenseClaw registration. `auto` refuses on a managed install (`deployment_mode: managed_enterprise`) and for unattended actors, and allows the rest with an alert. `closed` always refuses. `open` always allows with an alert, and is refused on a managed install. |
+| `substrate.extproc.ask.hold` | `1500ms` | How long a request waits for an ask, at most `1800ms` (the callout answers within 1.8 s, under the egress filter's 2 s message timeout). The ask is raised after the tool-chain check, inside the same 1.8 s: with the defaults (`send_budget` 250 ms, hold 1.5 s) an ask gets its whole hold when the check answers, and a slow gateway leader shortens it. |
+| `substrate.extproc.cluster_domains`, `.actor_trust_domain`, `.egress_peers` | `svc.cluster.local`, the callout's defaults | In-cluster name suffixes, the SPIFFE trust domain of actors, and the SPIFFE IDs allowed to call the callout. |
+| `substrate.extproc.request_access`, `.log_headers`, `.redact_headers`, `.blocklist_files`, `.actor_secrets_dir` | none, `false`, none, the built-in feed, none | The contact refusals name; redacted request headers in events; extra headers to redact; egress feeds instead of the built-in one; where the profiles' `actor_secrets` values are mounted. |
+| `substrate.llm.providers`, `.credential.provider_uri` | none | Model providers the proxy serves actors, and where it reads their keys. Model traffic always goes through the DefenseClaw proxy. |
+| `substrate.llm.bedrock_models` | none (any model) | Bedrock model IDs actors may call, for example `[us.anthropic.claude-haiku-5-5]`. A call naming another model, such as the Opus and Sonnet probes Claude Code sends when it starts, is sent to the first ID instead, through the same guardrails. |
+| `substrate.egress.allow`, `.ecosystem_packs`, `.registries` | none, every pack, none | Hosts every actor may reach before its profile tightens them. Packs: `pypi`, `npm`, `crates`, `go`. Model provider hosts are always left out. |
+| `substrate.secrets` | none | Credentials injected at egress on bound hosts. Each entry has `name`, `source` (an `ate-secret://` reference, never a value), `inject` (`hosts`, `header`, `prefix`, `placeholder`), `scope` (`shared` or `per_person`) and `profiles`. |
+| `substrate.allow_passthrough_for` | none | Hosts forwarded without inspection, for pinned certificates. A secret is never bound to one. |
+| `substrate.admin` | none | The organization floor for actors, with the keys of `openshell.admin` plus `sandbox_class`, `idle_suspend_after`, `idle_suspend_tasks`, `unattended_asks`, `ask_timeout`, `actor_secrets`, `ask_hosts` and `url_rules`. The host-only keys `allow_mount`, `allow_host_ports`, `process_tree`, `driver_fallback`, `require_copy_for` and locked `workdir.*` keys are refused. See [the Substrate reference](/docs/substrate/reference). |
+| `substrate.bundles.enabled` | `false` | The controller applies signed policy bundles: profiles and `match.substrate` assignments for a stage of atespaces, over `config.yaml`. `substrate.admin` still applies. |
+| `substrate.bundles.anchors_file` | `/etc/defenseclaw-substrate/bundle-anchors/bundle-anchors.json` | The bundle trust anchors (`bundle-anchors.json`), mounted from an admin-only Secret. |
+| `substrate.bundles.inbox` | `defenseclaw-bundle-inbox` | The ConfigMap a GitOps tool writes signed bundles to: `<stage>.dcbundle` and `<stage>.atespaces`. |
+| `substrate.bundles.refresh_interval` | `10s` | How often the controller re-reads the bundle state, the inbox and the anchors (1s to 10m). |
+
 ## Environment variables
 
 Every variable DefenseClaw reads, with defaults, is on [Environment variables](/docs/reference/env-vars). `DEFENSECLAW_HOME` relocates the data directory and `DEFENSECLAW_LLM_KEY` is the unified LLM key. On a managed standalone device some variables are ignored or may only tighten a setting ([Managed hosts](/docs/reference/env-vars#managed-hosts-and-the-environment)).
@@ -1021,7 +1196,7 @@ There is no `DEFENSECLAW_GATEWAY_BIND`, `DEFENSECLAW_DATA_DIR` or `DEFENSECLAW_L
 
 | Connector | File DefenseClaw mutates |
 | --- | --- |
-| OpenClaw | `~/.openclaw/openclaw.json`, `~/.openclaw/extensions/defenseclaw/` |
+| OpenClaw | `openclaw.json` and `extensions/defenseclaw/` in the OpenClaw home (`claw.home_dir`, `~/.openclaw` by default); with `connectors.openclaw.plugin_install: external` the plugin is read from `plugin_dir` and not written; with `plugin_account` DefenseClaw writes only `plugin_token_file` |
 | ZeptoClaw | `~/.zeptoclaw/config.json` |
 | Claude Code | `~/.claude/settings.json` |
 | Codex | `~/.codex/config.toml` |
@@ -1058,11 +1233,12 @@ Restart the gateway to apply guardrail.hook_self_heal: defenseclaw-gateway resta
 | `gateway` (the listener, API port and credentials; except `gateway.watcher.*` and the `gateway.config_reload` keys other than `mode`) | The listeners and credentials the process owns |
 | `guardrail.host`, `guardrail.port`, `guardrail.enabled`, `guardrail.connector`, `guardrail.scanner_mode`, `guardrail.retain_judge_bodies` | The guardrail listener, whether it runs, and start-up settings |
 | `guardrail.hook_self_heal`, `guardrail.hook_self_heal_debounce_ms` | The hook guard |
-| `claw`, `agent`, `routing`, `plugin_dir` | Paths, identity, the model router and the connector plugins, captured at start |
+| `claw`, `agent`, `plugin_dir` | Paths, identity and the connector plugins, captured at start |
+| `routing.port`, `routing.version`, `routing.remote`, `routing.algorithm` (and, with classifier `vllm_sr`, `routing.enabled`, `routing.models`, `routing.signals`, `routing.decisions`, `routing.classifier`) | The vLLM Semantic Router container and its translated config; every other routing key, and all of them with the `rules` or `systemone` classifier, apply without a restart |
 | `deployment_mode`, `enterprise.profile`, `enterprise.network`, `enterprise.openshell` | The deployment boundary |
 | `fleet.enabled`, `fleet.mqtt_broker_url`, `fleet.mqtt_require_tls`, `fleet.ota_key_env`, `fleet.emergency_key_env`, `fleet.device_key_env`, `fleet.mqtt_user_env`, `fleet.mqtt_pass_env` | MQTT connections and signing keys |
 | `environment`, `tenant_id`, `workspace_id`, `discovery_source` | Identity stamped on every record from start |
 
-Every other key is hot, including `guardrail.mode`, `guardrail.hook_fail_mode`, thresholds, rule packs and rules, `admission`, `asset_policy`, `scanners`, `llm_providers`, `policy_dir`, `quarantine_dir`, `observability.destinations` and `update`. The effective policy digest is stamped on `/health`, `/status` and every decision event; `defenseclaw-gateway policy digest` computes it from the file on disk, and the **Policy** row of `defenseclaw doctor` compares it with what the gateway applied ([Policy generation and digest](/docs/reference/cli#policy-generation-and-digest)).
+Every other key is hot, including `guardrail.mode`, `guardrail.hook_fail_mode`, thresholds, rule packs and rules, `admission`, `asset_policy`, `scanners`, `llm_providers`, `policy_dir`, `quarantine_dir`, `observability.destinations`, `observability.tokenomics`, `observability.pricing` and `update`. The effective policy digest is stamped on `/health`, `/status` and every decision event; `defenseclaw-gateway policy digest` computes it from the file on disk, and the **Policy** row of `defenseclaw doctor` compares it with what the gateway applied ([Policy generation and digest](/docs/reference/cli#policy-generation-and-digest)).
 
 `defenseclaw-gateway policy reload` asks the running gateway to rebuild the generation now, for scripts and for assets the watcher may not see. Connector wiring (hook scripts, agent files) is not re-applied by a reload: run `defenseclaw-gateway restart` or `defenseclaw setup <connector>`. Both commands belong to the Go gateway binary; the Python CLI has no `gateway` group.

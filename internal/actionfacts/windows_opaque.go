@@ -348,8 +348,12 @@ func windowsPowerShellTypeExpressionBeforeComment(runes []rune, i int) bool {
 }
 
 // Keep a dynamic call opaque, but return to the lexer at its next top-level
-// separator. The following command can then be read on its own.
-func windowsPowerShellDynamicCallEnd(runes []rune, from int) int {
+// separator. The following command can then be read on its own. ok is false
+// when the text has no balanced end (an opaque value without one, an
+// unterminated block comment, a stray close): the rest of the source is then
+// skipped unread, as the same construct outside a dynamic call is
+// (rel-1-0-10:GAP-1035).
+func windowsPowerShellDynamicCallEnd(runes []rune, from int) (int, bool) {
 	var quote rune
 	var closes []rune
 	argumentMode := []bool{true}
@@ -395,7 +399,7 @@ func windowsPowerShellDynamicCallEnd(runes []rune, from int) int {
 				(r == '$' || r == '@') && (runes[i+1] == '(' || runes[i+1] == '{')) {
 			end, ok := windowsPowerShellOpaqueEnd(runes, i)
 			if !ok {
-				return len(runes)
+				return len(runes), false
 			}
 			i = end
 			continue
@@ -404,7 +408,7 @@ func windowsPowerShellDynamicCallEnd(runes []rune, from int) int {
 			windowsPowerShellCommentStarts(runes, i, len(closes) > 0 && !argumentMode[len(argumentMode)-1]) {
 			end, ok := windowsPowerShellBlockCommentEnd(runes, i)
 			if !ok {
-				return len(runes)
+				return len(runes), false
 			}
 			i = end
 			continue
@@ -430,20 +434,20 @@ func windowsPowerShellDynamicCallEnd(runes []rune, from int) int {
 			}
 		case ')', '}':
 			if len(closes) == 0 || closes[len(closes)-1] != r {
-				return len(runes)
+				return len(runes), false
 			}
 			closes = closes[:len(closes)-1]
 			argumentMode = argumentMode[:len(argumentMode)-1]
 			statementStart = statementStart[:len(statementStart)-1]
 		case ';', '|', '\n', '\r':
 			if len(closes) == 0 {
-				return i
+				return i, true
 			}
 			argumentMode[len(argumentMode)-1] = false
 			statementStart[len(statementStart)-1] = true
 		case '&':
 			if len(closes) == 0 && (i == 0 || runes[i-1] != '>') {
-				return i
+				return i, true
 			}
 			if i == 0 || runes[i-1] != '>' {
 				argumentMode[len(argumentMode)-1] = false
@@ -451,7 +455,7 @@ func windowsPowerShellDynamicCallEnd(runes []rune, from int) int {
 			}
 		}
 	}
-	return len(runes)
+	return len(runes), true
 }
 
 // Return the first pipeline, chain, or physical line boundary outside double quotes.

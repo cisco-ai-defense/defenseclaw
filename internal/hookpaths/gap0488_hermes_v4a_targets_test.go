@@ -28,9 +28,7 @@ func TestGAP0488HermesV4AClientListsHeaderTargets(t *testing.T) {
 	if err := os.WriteFile(keys, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(keys, filepath.Join(project, "keys-link")); err != nil {
-		t.Fatal(err)
-	}
+	testSymlink(t, keys, filepath.Join(project, "keys-link"))
 	t.Setenv("HOME", home)
 	resolve := func(args map[string]any) map[string]string {
 		t.Helper()

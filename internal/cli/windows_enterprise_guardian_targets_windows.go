@@ -9,12 +9,13 @@ package cli
 import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 )
 
 // windowsEnterpriseGuardianStateForStatus reads the standalone guardian's
 // last pass; tests replace it.
 var windowsEnterpriseGuardianStateForStatus = func() (enterpriseHookGuardianState, bool, error) {
-	layout, err := windowsManagedLayout.standalone()
+	layout, err := hookcli.WindowsManagedLayout.Standalone()
 	if err != nil {
 		return enterpriseHookGuardianState{}, false, err
 	}

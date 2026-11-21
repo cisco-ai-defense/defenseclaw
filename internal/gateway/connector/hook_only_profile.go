@@ -153,8 +153,9 @@ func hookOnlyProfileRespond(in HookRespondInput) HookRespondOutput {
 		output = antigravityHookOutputForProfile(in.Req.HookEventName, in.Action, in.RawAction, reason, in.AdditionalContext)
 	case "kiro":
 		// Kiro 2.x blocks PreToolUse with exit 2. CLI 3.x / IDE also
-		// accept decision=block. The shipped hook never prints stdout
-		// because Kiro appends it to agent context.
+		// accept decision=block. The shipped hook prints no stdout, which
+		// Kiro appends to the agent context, except the v3 prompt note
+		// (hookexec.KiroV3PromptCheckedNote).
 		if in.Action == "block" {
 			output = map[string]interface{}{"decision": "block", "reason": reason}
 		}

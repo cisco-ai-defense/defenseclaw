@@ -198,6 +198,10 @@ the cell names one.
 A client that DefenseClaw does not support, or one that is too old or modified,
 is not covered.
 
+### Tamper protection for the hook config
+
+On a managed host the DefenseClaw hook lives in the agent's managed settings layer, which standard users cannot write. A shell command that writes to the user's own agent hook config is watched separately, by the guardrail rule `tamper.agent_hook_config_write`. With the default rule pack it raises a HIGH alert and the tool call still runs. With the `strict` and `managed-strict` packs it blocks the call.
+
 ### Weaken security
 
 | Attempt | Result | Enforced by |

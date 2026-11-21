@@ -26,10 +26,12 @@ import (
 	"runtime"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
 
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/envvars"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
@@ -497,6 +499,17 @@ func resolveConnectorOptsFor(dataDir, name string) connector.SetupOpts {
 		opts.ProxyAddr = fmt.Sprintf("127.0.0.1:%d", cfg.Guardrail.Port)
 	}
 	opts.WorkspaceDir = cfg.ConnectorWorkspaceDir()
+	opts.OpenClawHome = cfg.OpenClawHome()
+	opts.OpenClawConfigPath = cfg.OpenClawConfigPath()
+	opts.OpenClawPluginDir = cfg.OpenClawExternalPluginDir()
+	opts.OpenClawPluginAccount = strings.TrimSpace(cfg.Connectors.OpenClaw.PluginAccount)
+	opts.OpenClawHooksMode = cfg.OpenClawHooksMode()
+	opts.OpenClawPromptGate = cfg.Connectors.OpenClaw.Hooks.PromptGate
+	opts.OpenClawPluginTokenFile = strings.TrimSpace(cfg.Connectors.OpenClaw.PluginTokenFile)
+	opts.OpenClawPluginTokenGroup = strings.TrimSpace(cfg.Connectors.OpenClaw.PluginTokenGroup)
+	opts.OpenClawInstallPolicy = cfg.OpenClawInstallPolicyOn()
+	opts.OpenClawInstallPolicyTimeoutMs = cfg.OpenClawInstallPolicyTimeoutMs()
+	opts.OpenClawInstallPolicyFailsClosed = cfg.OpenClawInstallPolicyFailsClosed()
 	opts.PolicyTier = cfg.HookPolicyTierForConnector(name)
 	// Setup writes this into Codex's [otel] table; a surgical teardown only
 	// removes it when it knows the same value (GAP-1979).
@@ -628,7 +641,7 @@ func runConnectorReconcileEvery(cmd *cobra.Command, dataDir string) error {
 	if len(causes) == 0 {
 		return nil
 	}
-	return withExitCode(fmt.Errorf("not every connector is on its current hook: %s", strings.Join(causes, "; ")),
+	return cliusage.WithExitCode(fmt.Errorf("not every connector is on its current hook: %s", strings.Join(causes, "; ")),
 		gatewayStartAdmissionRefusedExitCode)
 }
 
@@ -1043,6 +1056,9 @@ func runConnectorTeardown(cmd *cobra.Command, _ []string) error {
 	}
 
 	opts := resolveConnectorOpts(dataDir)
+	// This removal names a leftover it cannot clean (an agent file that is
+	// not JSON) and fails; the gateway's boot teardowns log it (GAP-1304).
+	opts.ReportUnreadableResidue = true
 	ctx, cancel := context.WithCancel(cmd.Context())
 	defer cancel()
 
@@ -1288,10 +1304,16 @@ func pruneOrphanedConnector(ctx context.Context, dataDir, name string, conn conn
 	}
 	defer restoreConfigHome()
 	opts := resolveConnectorOptsFor(dataDir, name)
+	// After a rollback's data swap, the saved newer install proves which
+	// account-wide hooks it set up (Kiro on Windows, GAP-1221).
+	opts.RollbackSavedDataDir = connectorRollbackBackupsDir
 	paths, err := connector.OrphanedHookConfigPaths(conn, opts)
 	if err != nil || len(paths) == 0 {
 		return nil, err
 	}
+	// The connector is not configured here: its teardown removes only this
+	// install's entries, never another data folder's in the shared files.
+	opts.ReclaimOwnHooksOnly = true
 	restoreState, err := connector.MarkConnectorInactive(dataDir, name)
 	if err != nil {
 		return nil, fmt.Errorf("mark connector inactive: %w", err)
@@ -1320,6 +1342,44 @@ func runConnectorRecoverConfig(cmd *cobra.Command, _ []string) error {
 	return nil
 }
 
+// rollbackTargetLacksRouteOnly reports whether the release a rollback or
+// downgrade returns to predates route-only (1.0.10); an unknown or
+// unreadable target counts as older, the safe direction.
+func rollbackTargetLacksRouteOnly(target string) bool {
+	parts := strings.Split(strings.TrimPrefix(strings.TrimSpace(target), "v"), ".")
+	if len(parts) < 3 {
+		return true
+	}
+	nums := [3]int{}
+	for i := 0; i < 3; i++ {
+		// A pre-release or build suffix (1.0.10-rc.1, 1.0.11+abc,
+		// 1.0.11~rc1) does not change the release number.
+		n, err := strconv.Atoi(strings.FieldsFunc(parts[i]+"-", func(r rune) bool { return r == '-' || r == '+' || r == '~' })[0])
+		if err != nil {
+			return true
+		}
+		nums[i] = n
+	}
+	return nums[0] < 1 || (nums[0] == 1 && nums[1] == 0 && nums[2] < 10)
+}
+
+// managedRouteOnlyConnectors lists the agents a standalone managed
+// deployment routes with route-only: the guardian writes their route
+// settings into each enrolled account, and no release before 1.0.10 takes
+// them back (rel-1-0-10 GAP-0647).
+func managedRouteOnlyConnectors(cfg *config.Config) []string {
+	if cfg == nil || !cfg.StandaloneEnterprise() {
+		return nil
+	}
+	var routed []string
+	for _, name := range config.RouteOnlyCapableConnectors {
+		if cfg.RouteOnlyRouted(name) {
+			routed = append(routed, name)
+		}
+	}
+	return routed
+}
+
 func runConnectorPrepareRollback(cmd *cobra.Command, _ []string) error {
 	dataDir := resolveConnectorDataDir()
 	if dataDir == "" {
@@ -1335,6 +1395,7 @@ func runConnectorPrepareRollback(cmd *cobra.Command, _ []string) error {
 		names = []string{connectorFlagName}
 	}
 	opts := resolveConnectorOpts(dataDir)
+	opts.RollbackTargetVersion = strings.TrimSpace(connectorRollbackToVersion)
 	converted := map[string]int{}
 	failed := map[string]string{}
 	for _, name := range names {
@@ -1363,6 +1424,33 @@ func runConnectorPrepareRollback(cmd *cobra.Command, _ []string) error {
 		}
 		if count > 0 {
 			converted[name] = count
+		}
+	}
+	// A release before 1.0.10 has no route-only listener: the agent model
+	// settings route-only wrote go back before it is installed, so the
+	// agent does not get 401 on every call (rel-1-0-10 GAP-0602). The
+	// installers run this with the gateway stopped, after the prompt.
+	routeRestored, routeFailed := map[string]bool{}, map[string]string{}
+	if !connectorRollbackRestore && rollbackTargetLacksRouteOnly(opts.RollbackTargetVersion) {
+		for _, name := range config.RouteOnlyCapableConnectors {
+			if connectorFlagName != "" && connectorFlagName != name {
+				continue
+			}
+			conn, ok := reg.Get(name)
+			rc, routable := conn.(connector.RouteOnlyConnector)
+			if !ok || !routable {
+				continue
+			}
+			restore, err := bindConnectorLifecycleConfigHome(name)
+			if err == nil {
+				err = rc.ApplyRouteOnly(opts, nil)
+				restore()
+			}
+			if err != nil {
+				routeFailed[name] = "route-only model settings were not put back (" + err.Error() + "); run defenseclaw routing disable --connector " + name + " before the rollback, or remove the DefenseClaw base URL and route header from its settings by hand"
+				continue
+			}
+			routeRestored[name] = true
 		}
 	}
 	// until 1.1 (GAP-2136): the agent files the OpenHands/OmniGent teardown
@@ -1395,6 +1483,13 @@ func runConnectorPrepareRollback(cmd *cobra.Command, _ []string) error {
 			payload["restored"] = converted
 			delete(payload, "converted")
 		}
+		if len(routeRestored) > 0 {
+			payload["route_only_restored"] = routeRestored
+		}
+		if len(routeFailed) > 0 {
+			payload["ok"] = false
+			payload["route_only_failed"] = routeFailed
+		}
 		if err := json.NewEncoder(cmd.OutOrStdout()).Encode(payload); err != nil {
 			return err
 		}
@@ -1426,6 +1521,26 @@ func runConnectorPrepareRollback(cmd *cobra.Command, _ []string) error {
 		if putBackErr != nil {
 			fmt.Fprintf(cmd.ErrOrStderr(), "  %v\n", putBackErr)
 		}
+		for _, name := range config.RouteOnlyCapableConnectors {
+			if routeRestored[name] {
+				fmt.Fprintf(cmd.OutOrStdout(), "  %s %s: put back the model settings route-only changed; restart the agent\n",
+					Style(glyph("✓", "OK"), "fg=green", "bold"), name)
+			}
+		}
+		for _, name := range config.RouteOnlyCapableConnectors {
+			if why, ok := routeFailed[name]; ok {
+				fmt.Fprintf(cmd.ErrOrStderr(), "  %s: %s\n", name, why)
+			}
+		}
+	}
+	if len(routeFailed) > 0 && len(failed) == 0 {
+		names := make([]string, 0, len(routeFailed))
+		for _, name := range config.RouteOnlyCapableConnectors {
+			if _, ok := routeFailed[name]; ok {
+				names = append(names, name)
+			}
+		}
+		return fmt.Errorf("connector prepare-rollback: could not put back the route-only model settings of %s", strings.Join(names, ", "))
 	}
 	if len(failed) > 0 {
 		failedNames := make([]string, 0, len(failed))
@@ -1487,6 +1602,7 @@ func runConnectorVerify(cmd *cobra.Command, _ []string) error {
 	}
 
 	opts := resolveConnectorOpts(dataDir)
+	opts.ReportUnreadableResidue = true
 	verifyErr := conn.VerifyClean(opts)
 
 	if connectorFlagJSON {

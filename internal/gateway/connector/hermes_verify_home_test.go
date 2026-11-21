@@ -429,7 +429,7 @@ func TestManagedHermesReleasesTheEarlierDefaultHome(t *testing.T) {
 	custom := filepath.Join(home, "hermes-work")
 	defaultConfig := hermespath.ConfigPathForUserHome(home)
 	customConfig := filepath.Join(custom, "config.yaml")
-	allowlist := func(config string) string { return filepath.Join(filepath.Dir(config), hermesAllowlistFileName) }
+	allowlist := func(config string) string { return filepath.Join(filepath.Dir(config), HermesAllowlistFileName) }
 	opts := prepareHermesSetupAdmissionFixture(t, SetupOpts{
 		DataDir:  filepath.Join(home, ".defenseclaw"),
 		APIAddr:  "127.0.0.1:18970",

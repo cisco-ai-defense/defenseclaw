@@ -141,7 +141,7 @@ You can also run setup from the TUI (`defenseclaw tui`, `0`, **Sandboxes (OpenSh
     { type: "prompt", text: "Make `claude` and `codex` run sandboxed automatically? (shell wrapper; undo any time) [y/N] ", reply: "", pauseMs: 800 },
     { type: "prompt", text: "Build the Claude Code image now? (the first build downloads about 3 GB; otherwise the first `defenseclaw sandbox run claude` builds it) [Y/n] ", reply: "", pauseMs: 800 },
     { type: "out", text: "  Building the Claude Code image (the first build downloads about 3 GB)…" },
-    { type: "ok", text: "  ✓ Claude Code 2.1.156: defenseclaw/sandbox:claudecode-0c61e3e41504692d-u1009, hooks verified (built in 50s)" },
+    { type: "ok", text: "  ✓ Claude Code 2.1.311: defenseclaw/sandbox:claudecode-0c61e3e41504692d-u1009, hooks verified (built in 50s)" },
     { type: "prompt", text: "Build the Codex image now? (the first build downloads about 3 GB; otherwise the first `defenseclaw sandbox run codex` builds it) [Y/n] ", reply: "n", pauseMs: 800 },
     { type: "ok", text: "  ✓ the daemon runs the sandbox subsystem (ingress 127.0.0.1:19011, egress proxy 127.0.0.1:19012)" },
     { type: "out", text: "  skipped: the Codex image (the first `defenseclaw sandbox run codex` builds it, or `defenseclaw sandbox image build codex`)" },
@@ -167,7 +167,7 @@ defenseclaw sandbox doctor
   ✓ Gateway compute driver     docker
   ✓ Project bind mounts        enabled for the docker driver
   ✓ Sandbox ingress port       127.0.0.1:18971 is served by the DefenseClaw daemon
-  ✓ Harness images             hook-verified: claudecode 2.1.156, codex 0.146.0
+  ✓ Harness images             hook-verified: claudecode 2.1.311, codex 0.146.0
   …
 
   ✓ ready for sandboxes

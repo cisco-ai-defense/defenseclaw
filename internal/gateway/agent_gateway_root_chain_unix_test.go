@@ -24,7 +24,7 @@ import (
 
 func agentGatewayRootChainAPI(t *testing.T, rootScope bool) (http.Handler, *audit.Store) {
 	t.Helper()
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	installToolCallCorpusProfileConnector(t, connector.AgentGatewayConnectorName, "strict")
 	store, logger := testStoreAndV8Logger(t)
 	cfg := &config.Config{}

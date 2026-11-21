@@ -22,8 +22,9 @@
 // could run it as root through this helper; this helper now only undoes that:
 // it stops the root gateway it started for the calling account (by signalling
 // its verified PID; it runs no program), returns the root-owned DefenseClaw
-// files that gateway left in the account's DefenseClaw home, and deletes its
-// private gateway copy. It never starts a gateway.
+// files that gateway left in the account's DefenseClaw home and the agent
+// config files it rewrote in the account home, and deletes its private
+// gateway copy. It never starts a gateway.
 
 import Darwin
 import Foundation
@@ -607,6 +608,12 @@ enum GatewayAdminOwnershipRepair {
         var skipped: [String] = []
         var incomplete = false
 
+        mutating func merge(_ other: Outcome) {
+            restored += other.restored
+            skipped += other.skipped
+            incomplete = incomplete || other.incomplete
+        }
+
         var summary: String {
             var lines: [String] = []
             if restored.isEmpty {
@@ -618,18 +625,33 @@ enum GatewayAdminOwnershipRepair {
                 lines.append("Returned \(restored.count) root-owned files and folders to your account: \(shown)\(more).")
             }
             if !skipped.isEmpty {
-                lines.append("Left \(skipped.count) root-owned items unchanged (hard-linked or special files): "
+                lines.append("Left \(skipped.count) root-owned items unchanged (hard links, special files, setuid or "
+                    + "setgid files, and items other accounts can write): "
                     + skipped.prefix(GatewayAdminOwnershipRepair.listedPaths).joined(separator: ", ") + ".")
             }
             if incomplete {
-                lines.append("Part of the home could not be inspected; run `defenseclaw doctor` to see what is still root-owned.")
+                lines.append("Part of the home was left root-owned because it could not be inspected or other accounts can "
+                    + "write it; run `defenseclaw doctor` to see what is still root-owned and how to fix it.")
             }
             return lines.joined(separator: "\n") + "\n"
         }
     }
 
+    /// Returns what owner owns under root to the account. `privateOnly` is
+    /// the whole-folder return of an agent config folder
+    /// (GatewayAdminAgentConfigRepair), held to the per-file rules there: a
+    /// root-owned folder another account can write is neither returned nor
+    /// entered (reported as skipped), a file with a setuid, setgid, group or
+    /// other write bit is left as it is (reported as skipped), a folder of a
+    /// third account, an account folder others can write or one on another
+    /// volume is not entered, and a folder is returned only after everything in it was
+    /// inspected, so a walk cut short leaves it root-owned and still listed by
+    /// connector.RootOwnedAgentConfigPaths instead of returning it with
+    /// unlisted root-owned children. The DefenseClaw home walk keeps the
+    /// account's access first: each folder is returned before its contents.
     static func restore(home root: Int32, from owner: uid_t = 0, to account: (uid: uid_t, gid: gid_t),
-                        names allowed: Set<String> = GatewayAdminOwnershipRepair.ownedNames,
+                        names allowed: Set<String>? = GatewayAdminOwnershipRepair.ownedNames,
+                        privateOnly: Bool = false,
                         maximumEntries: Int = GatewayAdminOwnershipRepair.maximumEntries,
                         change: ((Int32, String) -> Int32)? = nil) throws -> Outcome {
         let apply = change ?? { descriptor, _ in fchown(descriptor, account.uid, account.gid) }
@@ -639,56 +661,113 @@ enum GatewayAdminOwnershipRepair {
         }
         var outcome = Outcome()
         var visited = 0
-        if metadata.st_uid == owner {
-            if apply(root, ".") == 0 { outcome.restored.append(".") } else { outcome.incomplete = true }
+
+        func give(_ descriptor: Int32, _ relative: String) -> Bool {
+            if apply(descriptor, relative) == 0 {
+                outcome.restored.append(relative)
+                return true
+            }
+            outcome.incomplete = true
+            return false
         }
 
-        func walk(_ directory: Int32, _ prefix: String, _ depth: Int) {
+        // A verified open folder: returned (when owner owns it) and walked.
+        // false when anything in it was left uninspected.
+        func folder(_ descriptor: Int32, _ status: stat, _ relative: String, _ prefix: String, _ depth: Int) -> Bool {
+            let owned = status.st_uid == owner
+            guard privateOnly else {
+                if owned { _ = give(descriptor, relative) }
+                return walk(descriptor, prefix, depth)
+            }
+            let shared = status.st_mode & 0o022 != 0
+            if owned {
+                if shared {
+                    // Others could have placed what it holds: left as it is,
+                    // and so is every folder holding it.
+                    outcome.skipped.append(relative)
+                    outcome.incomplete = true
+                    return false
+                }
+                guard walk(descriptor, prefix, depth) else { return false }
+                return give(descriptor, relative)
+            }
+            if status.st_uid == account.uid && !shared {
+                return walk(descriptor, prefix, depth)
+            }
+            // A folder of a third account, or one others can write, is not
+            // entered, so what it holds stays uninspected.
+            outcome.incomplete = true
+            return false
+        }
+
+        func walk(_ directory: Int32, _ prefix: String, _ depth: Int) -> Bool {
             guard depth < maximumDepth, let listed = GatewayAdminDirectory.names(of: directory) else {
                 outcome.incomplete = true
-                return
+                return false
             }
-            let names = prefix.isEmpty ? listed.filter(allowed.contains) : listed
+            var complete = true
+            let names = prefix.isEmpty ? listed.filter { allowed?.contains($0) ?? true } : listed
             for name in names.sorted() {
                 visited += 1
                 guard visited <= maximumEntries else {
                     outcome.incomplete = true
-                    return
+                    return false
                 }
                 let relative = prefix.isEmpty ? name : prefix + "/" + name
                 var entry = stat()
                 guard fstatat(directory, name, &entry, AT_SYMLINK_NOFOLLOW) == 0 else { continue }
                 switch entry.st_mode & S_IFMT {
                 case S_IFDIR:
-                    guard entry.st_dev == metadata.st_dev else { continue }
+                    guard entry.st_dev == metadata.st_dev else {
+                        // Another volume is never walked; in an agent config
+                        // folder that leaves it uninspected.
+                        if privateOnly { outcome.incomplete = true; complete = false }
+                        continue
+                    }
                     let child = openat(directory, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
                     guard child >= 0 else {
                         outcome.incomplete = true
+                        complete = false
                         continue
                     }
                     defer { close(child) }
                     var opened = stat()
                     guard fstat(child, &opened) == 0, opened.st_mode & S_IFMT == S_IFDIR,
-                          opened.st_dev == metadata.st_dev else { continue }
-                    if opened.st_uid == owner {
-                        if apply(child, relative) == 0 { outcome.restored.append(relative) } else { outcome.incomplete = true }
+                          opened.st_dev == metadata.st_dev else {
+                        if privateOnly { outcome.incomplete = true; complete = false }
+                        continue
                     }
-                    walk(child, relative, depth + 1)
+                    if !folder(child, opened, relative, relative, depth + 1) { complete = false }
                 case S_IFREG:
                     guard entry.st_uid == owner else { continue }
+                    // One link when inspected, and the opened file is that
+                    // inode: a hard link to a file elsewhere (another link
+                    // count) opened and then unlinked before the fstat, or a
+                    // file swapped in after the fstatat, is never changed.
+                    guard entry.st_nlink == 1 else {
+                        outcome.skipped.append(relative)
+                        continue
+                    }
+                    #if GATEWAY_ADMIN_HELPER_TESTING
+                    // Declared by Tests/GatewayAdminHelperTests.swift.
+                    GatewayAdminOwnershipRepair.walkFileCheckedForTesting?(relative)
+                    #endif
                     let file = openat(directory, name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_NOCTTY | O_CLOEXEC)
                     guard file >= 0 else {
                         outcome.incomplete = true
+                        complete = false
                         continue
                     }
                     defer { close(file) }
                     var opened = stat()
-                    guard fstat(file, &opened) == 0, opened.st_mode & S_IFMT == S_IFREG,
-                          opened.st_uid == owner, opened.st_dev == metadata.st_dev, opened.st_nlink == 1 else {
+                    guard fstat(file, &opened) == 0, opened.st_ino == entry.st_ino, opened.st_dev == entry.st_dev,
+                          opened.st_mode & S_IFMT == S_IFREG,
+                          opened.st_uid == owner, opened.st_dev == metadata.st_dev, opened.st_nlink == 1,
+                          !privateOnly || opened.st_mode & 0o6022 == 0 else {
                         outcome.skipped.append(relative)
                         continue
                     }
-                    if apply(file, relative) == 0 { outcome.restored.append(relative) } else { outcome.incomplete = true }
+                    if !give(file, relative) { complete = false }
                 case S_IFLNK:
                     // Never followed or changed; the account owns the folder
                     // holding it and can remove it.
@@ -697,8 +776,165 @@ enum GatewayAdminOwnershipRepair {
                     if entry.st_uid == owner { outcome.skipped.append(relative) }
                 }
             }
+            return complete
         }
-        walk(root, "", 0)
+        _ = folder(root, metadata, ".", "", 0)
+        return outcome
+    }
+}
+
+/// Return the agent config files a root-run gateway rewrote in the account
+/// home (its connector setup at boot) to the account. Before 1.0.9 the writers
+/// left them root:600 (GAP-0848), so the account's own gateway and agent can
+/// neither read nor replace them; Go lists them as
+/// connector.RootOwnedAgentConfigPaths and doctor prints a sudo step. The paths
+/// are fixed here: none crosses XPC, and the home comes from the account
+/// record. A path is walked from the account home one name at a time with
+/// O_NOFOLLOW: a folder the account owns and nobody else can write is entered;
+/// a root-owned folder on the way is returned whole by the same walk as the
+/// DefenseClaw home under the same file rules (`privateOnly`), and only once
+/// all of it was inspected (Go lists the outermost one); the file itself is changed
+/// only when it is a root-owned regular file with one link, on the home's
+/// volume, with no setuid, setgid, group or other write bit, pinned by inode
+/// through its own descriptor. Links, other owners and anything else stay as
+/// they are.
+enum GatewayAdminAgentConfigRepair {
+    // BEGIN agentConfigPaths: the macOS default candidates of
+    // connector.RootOwnedAgentConfigPaths, relative to the account home
+    // (internal/gateway/connector/root_owned_agent_config_macapp_test.go).
+    static let relativePaths: [String] = [
+        ".claude/settings.json",
+        ".codex/config.toml",
+        ".config/amp/plugins/defenseclaw.ts",
+        ".config/devin/config.json",
+        ".config/opencode/plugins/defenseclaw.js",
+        ".copilot/hooks/defenseclaw.json",
+        ".cursor/hooks.json",
+        ".gemini/config/hooks.json",
+        ".hermes/config.yaml",
+        ".hermes/shell-hooks-allowlist.json",
+        ".kiro/agents/defenseclaw.json",
+        ".kiro/hooks/defenseclaw.json",
+        ".kiro/settings/cli.json",
+        ".openclaw/openclaw.json",
+        ".zeptoclaw/config.json",
+    ]
+    // END agentConfigPaths
+
+    /// The account home as a descriptor reached without following a link,
+    /// owned by the account and writable by nobody else.
+    static func openAccountHome(_ home: String, uid: uid_t) throws -> Int32 {
+        guard GatewayAdminPolicy.isCanonicalAbsolutePath(home), home != "/" else {
+            throw GatewayAdminFailure.refused("The account has no valid home directory.")
+        }
+        var current = open("/", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        guard current >= 0 else { throw GatewayAdminFailure.refused("The account home could not be opened.") }
+        for component in home.split(separator: "/") {
+            let next = openat(current, String(component), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+            close(current)
+            guard next >= 0 else {
+                throw GatewayAdminFailure.refused("The account home could not be opened without following a link.")
+            }
+            current = next
+        }
+        var metadata = stat()
+        guard fstat(current, &metadata) == 0, metadata.st_uid == uid, metadata.st_mode & 0o022 == 0 else {
+            close(current)
+            throw GatewayAdminFailure.refused("The account home is not owned by the account or is writable by others.")
+        }
+        return current
+    }
+
+    static func restore(accountHome home: String, from owner: uid_t = 0,
+                        to account: (uid: uid_t, gid: gid_t)) -> GatewayAdminOwnershipRepair.Outcome {
+        guard let descriptor = try? openAccountHome(home, uid: account.uid) else {
+            return GatewayAdminOwnershipRepair.Outcome(incomplete: true)
+        }
+        defer { close(descriptor) }
+        return restore(home: descriptor, from: owner, to: account)
+    }
+
+    static func restore(home: Int32, from owner: uid_t = 0, to account: (uid: uid_t, gid: gid_t),
+                        paths: [String] = GatewayAdminAgentConfigRepair.relativePaths,
+                        change: ((Int32, String) -> Int32)? = nil) -> GatewayAdminOwnershipRepair.Outcome {
+        let apply = change ?? { descriptor, _ in fchown(descriptor, account.uid, account.gid) }
+        var outcome = GatewayAdminOwnershipRepair.Outcome()
+        var homeStatus = stat()
+        guard fstat(home, &homeStatus) == 0 else { return GatewayAdminOwnershipRepair.Outcome(incomplete: true) }
+        var returnedFolders: [String] = []
+        for path in paths {
+            if returnedFolders.contains(where: { path.hasPrefix($0 + "/") }) { continue }
+            let components = path.split(separator: "/").map(String.init)
+            var parent = dup(home)
+            guard parent >= 0 else { outcome.incomplete = true; continue }
+            var relative = ""
+            for (index, name) in components.enumerated() {
+                relative = relative.isEmpty ? name : relative + "/" + name
+                let shown = "~/" + relative
+                var entry = stat()
+                guard fstatat(parent, name, &entry, AT_SYMLINK_NOFOLLOW) == 0 else {
+                    if errno != ENOENT { outcome.incomplete = true }
+                    break
+                }
+                guard entry.st_dev == homeStatus.st_dev else { break }
+                if index < components.count - 1 {
+                    guard entry.st_mode & S_IFMT == S_IFDIR else { break }
+                    let child = openat(parent, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+                    guard child >= 0 else { outcome.incomplete = true; break }
+                    var opened = stat()
+                    guard fstat(child, &opened) == 0, opened.st_ino == entry.st_ino, opened.st_dev == entry.st_dev,
+                          opened.st_mode & S_IFMT == S_IFDIR else {
+                        close(child)
+                        outcome.incomplete = true
+                        break
+                    }
+                    if opened.st_uid == account.uid {
+                        // The account's own folder: entered only while nobody
+                        // else can write it, and never returned.
+                        guard opened.st_mode & 0o022 == 0 else {
+                            close(child)
+                            break
+                        }
+                        close(parent)
+                        parent = child
+                        continue
+                    }
+                    if opened.st_uid == owner {
+                        let folder = (try? GatewayAdminOwnershipRepair.restore(
+                            home: child, from: owner, to: account, names: nil, privateOnly: true,
+                            change: { descriptor, inner in apply(descriptor, inner == "." ? shown : shown + "/" + inner) }))
+                            ?? GatewayAdminOwnershipRepair.Outcome(incomplete: true)
+                        outcome.merge(GatewayAdminOwnershipRepair.Outcome(
+                            restored: folder.restored.map { $0 == "." ? shown : shown + "/" + $0 },
+                            skipped: folder.skipped.map { $0 == "." ? shown : shown + "/" + $0 },
+                            incomplete: folder.incomplete))
+                        returnedFolders.append(relative)
+                    }
+                    close(child)
+                    break
+                }
+                guard entry.st_mode & S_IFMT == S_IFREG, entry.st_uid == owner else { break }
+                guard entry.st_nlink == 1, entry.st_mode & 0o6022 == 0 else {
+                    outcome.skipped.append(shown)
+                    break
+                }
+                #if GATEWAY_ADMIN_HELPER_TESTING
+                // Declared by Tests/GatewayAdminHelperTests.swift.
+                Self.fileCheckedForTesting?(shown)
+                #endif
+                let file = openat(parent, name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_NOCTTY | O_CLOEXEC)
+                guard file >= 0 else { outcome.incomplete = true; break }
+                defer { close(file) }
+                var opened = stat()
+                guard fstat(file, &opened) == 0, opened.st_ino == entry.st_ino, opened.st_dev == entry.st_dev,
+                      opened.st_uid == owner, opened.st_mode == entry.st_mode, opened.st_nlink == 1 else {
+                    outcome.skipped.append(shown)
+                    break
+                }
+                if apply(file, shown) == 0 { outcome.restored.append(shown) } else { outcome.incomplete = true }
+            }
+            close(parent)
+        }
         return outcome
     }
 }
@@ -926,7 +1162,11 @@ private final class GatewayAdminSession: NSObject, GatewayAdminProtocol {
                             GatewayAdminStop.stop(processes, isSame: { GatewayAdminRootProcess.isSame($0, staged: staged) })
                         },
                         restoreOwnership: {
-                            try GatewayAdminOwnershipRepair.restore(home: installation.descriptor, to: (account.uid, account.gid))
+                            var outcome = try GatewayAdminOwnershipRepair.restore(
+                                home: installation.descriptor, to: (account.uid, account.gid))
+                            outcome.merge(GatewayAdminAgentConfigRepair.restore(
+                                accountHome: account.home, to: (account.uid, account.gid)))
+                            return outcome
                         },
                         removeStagedGateway: { try GatewayAdminTrust.removeStagedGateway(account: account) }
                     )

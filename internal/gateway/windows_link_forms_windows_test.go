@@ -140,7 +140,9 @@ func TestR107WindowsManagedLinkFormsCorpus(t *testing.T) {
 				recorder := httptest.NewRecorder()
 				api.handleAgentHook(connector).ServeHTTP(recorder, req)
 				body := recorder.Body.String()
-				blocked := strings.HasPrefix(body, `{"action":"block"`)
+				// A proven state write alone is the HIGH alert of the default
+				// pack (GAP-0747 owner tiering 2026-11-15T15:20Z).
+				blocked := gap0747BodyBlocked(body, row.block, false)
 				if blocked != row.block {
 					t.Errorf("%s %s managed=%v %q: block=%v, want %v: %.500s", row.id, connector, managed, row.command, blocked, row.block, body)
 				}

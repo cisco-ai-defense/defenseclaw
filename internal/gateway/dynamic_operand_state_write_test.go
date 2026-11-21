@@ -35,7 +35,25 @@ type homeStateWriteRow struct {
 	block   bool
 }
 
+// homeStateRuleRow is a row that blocks in the default pack for rules of its
+// own (not as the HIGH state write alert): the block and each named rule id
+// are the oracle (gap0747BlockedForRule, GAP-1563).
+type homeStateRuleRow struct {
+	command string
+	rules   []string
+}
+
 func judgeHomeStateWriteRows(t *testing.T, rows []homeStateWriteRow) {
+	t.Helper()
+	judgeHomeStateRows(t, rows, nil)
+}
+
+func judgeHomeStateRuleRows(t *testing.T, rows []homeStateRuleRow) {
+	t.Helper()
+	judgeHomeStateRows(t, nil, rows)
+}
+
+func judgeHomeStateRows(t *testing.T, rows []homeStateWriteRow, ruleRows []homeStateRuleRow) {
 	t.Helper()
 	home := t.TempDir()
 	cwd := filepath.Join(home, "project")
@@ -63,9 +81,20 @@ func judgeHomeStateWriteRows(t *testing.T, rows []homeStateWriteRow) {
 				findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
 					Input: input, Connector: connectorName, EnforcementCapable: true,
 				})
-				blocked := buildVerdict(findings, "tool_call").Action == "block"
-				if blocked != row.block {
-					t.Errorf("%s hint=%q %q: block=%v, want %v", connectorName, hint, row.command, blocked, row.block)
+				// row.block: a proven state write, a HIGH alert in the default
+				// tier (GAP-0747); other blocking rules keep blocking.
+				if msg := gap0747DefaultTierCheck(findings, row.block); msg != "" {
+					t.Errorf("%s hint=%q %q: %s (want %v) %v", connectorName, hint, row.command, msg, row.block, FindingStrings(findings))
+				}
+			}
+			for _, row := range ruleRows {
+				command := strings.ReplaceAll(row.command, "HOMEDIR", home)
+				input := actionfacts.Input{Tool: "Bash", Command: command, CWD: cwd, ActiveHome: home, DialectHint: hint}
+				findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
+					Input: input, Connector: connectorName, EnforcementCapable: true,
+				})
+				if msg := gap0747BlockedForRule(findings, row.rules...); msg != "" {
+					t.Errorf("%s hint=%q %q: %s %v", connectorName, hint, row.command, msg, FindingStrings(findings))
 				}
 			}
 		}
@@ -93,7 +122,6 @@ func TestDynamicOperandWordKeepsTheStateWriteJudged(t *testing.T) {
 		{"cp a.txt $(true) HOMEDIR/.defenseclaw/config.yaml", true},
 		{"mv a.txt $HOME/.defenseclaw/hooks/pc8-f.sh $(true)", true},
 		{"install a.txt HOMEDIR/.defenseclaw/hooks/pc8-f.sh $(true)", true},
-		{"cp a.txt ~/.ssh/authorized_keys $(true)", true},
 		{"cp a.txt HOMEDIR/.defenseclaw/config.yaml", true},
 		// The benign twins stay allowed: a project copy with a command
 		// substitution, a read of state into a runtime directory, and a
@@ -105,6 +133,11 @@ func TestDynamicOperandWordKeepsTheStateWriteJudged(t *testing.T) {
 		{"cp ~/.defenseclaw/config.yaml $(mktemp -d)/", false},
 		{"cp a.txt HOMEDIR/.defenseclaw/config.yaml \"$(true)\"", false},
 		{"mv $(ls *.log) archive/", false},
+	})
+	// These rows block in the default pack for rules of their own, not as
+	// the HIGH state write alert (GAP-1563).
+	judgeHomeStateRuleRows(t, []homeStateRuleRow{
+		{"cp a.txt ~/.ssh/authorized_keys $(true)", []string{gap0747SSHKeysRule}},
 	})
 }
 
@@ -123,10 +156,14 @@ func TestExportHomeAssignmentMovesTheHomeSpelling(t *testing.T) {
 		{"declare -x HOME=HOMEDIR/.defenseclaw; cp a.txt ~/config.yaml", true},
 		{"readonly HOME=HOMEDIR/.defenseclaw; cp a.txt ~/config.yaml", true},
 		{"HOME=HOMEDIR/.defenseclaw; export HOME; cp a.txt ~/config.yaml", true},
-		{"export HOME=HOMEDIR/.ssh; echo k >> ~/authorized_keys", true},
 		{"export HOME=/tmp/pc11x; cp a.txt ~/config.yaml", false},
 		{"export HOME=HOMEDIR/project; cp a.txt ~/out.txt", false},
 		{"export PATH=$PATH:/opt/bin; cp a.txt ~/project/out.txt", false},
+	})
+	// These rows block in the default pack for rules of their own, not as
+	// the HIGH state write alert (GAP-1563).
+	judgeHomeStateRuleRows(t, []homeStateRuleRow{
+		{"export HOME=HOMEDIR/.ssh; echo k >> ~/authorized_keys", []string{gap0747SSHKeysRule}},
 	})
 }
 

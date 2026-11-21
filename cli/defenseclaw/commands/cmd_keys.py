@@ -115,10 +115,16 @@ def _emit_gateway_restart_hint(cfg, env_name: str) -> None:
 
 
 def _gateway_token_names(cfg) -> set[str]:
-    """Env names that hold DefenseClaw's own gateway auth token."""
-    names = {"DEFENSECLAW_GATEWAY_TOKEN", "OPENCLAW_GATEWAY_TOKEN"}
+    """Env names that hold DefenseClaw's own gateway auth token.
+
+    OPENCLAW_GATEWAY_TOKEN is not one: it is the OpenClaw credential, a
+    separate registry key (R-TOK), even when an old token_env names it.
+    """
+    from defenseclaw.config import is_openclaw_gateway_token_env
+
+    names = {"DEFENSECLAW_GATEWAY_TOKEN"}
     token_env = str(getattr(getattr(cfg, "gateway", None), "token_env", "") or "").strip()
-    if token_env:
+    if token_env and not is_openclaw_gateway_token_env(token_env):
         names.add(token_env)
     return names
 
@@ -131,8 +137,8 @@ def _gateway_token_name(cfg, name: str) -> str | None:
     if platform_support.host_os() != "windows":
         return name if name in names else None
     configured = str(getattr(getattr(cfg, "gateway", None), "token_env", "") or "").strip()
-    for candidate in (configured, "DEFENSECLAW_GATEWAY_TOKEN", "OPENCLAW_GATEWAY_TOKEN"):
-        if candidate and candidate.casefold() == name.casefold():
+    for candidate in (configured, "DEFENSECLAW_GATEWAY_TOKEN"):
+        if candidate and candidate in names and candidate.casefold() == name.casefold():
             return candidate
     return None
 
@@ -332,16 +338,9 @@ def keys_set(app: AppContext, env_name: str, value: str | None, value_stdin: boo
         # command failed after the key was saved (GAP-0490).
         keep_running_gateway_token(app.logger, app.cfg.data_dir, app.cfg.gateway.resolved_token(), value)
     try:
-        # The gateway token is one value with two spellings (and the gateway
-        # writes both when it adopts a token from openclaw.json). A saved token
-        # replaces every spelling already in .env, so an older copy under the
-        # other name never wins at the next gateway start (GAP-0847).
-        spellings = [env_name]
-        if gateway_name:
-            stored = set(_dotenv_names(dotenv_path))
-            spellings += sorted(name for name in _gateway_token_names(app.cfg) if name != env_name and name in stored)
-        for spelling in spellings:
-            _save_secret_to_dotenv(spelling, value, app.cfg.data_dir)
+        # DEFENSECLAW_GATEWAY_TOKEN and OPENCLAW_GATEWAY_TOKEN are separate
+        # credentials (R-TOK): saving one never changes the other.
+        _save_secret_to_dotenv(env_name, value, app.cfg.data_dir)
     except SafetyError as exc:
         _refuse_unsafe_dotenv(dotenv_path, exc)
     if app.logger:

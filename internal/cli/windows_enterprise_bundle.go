@@ -34,6 +34,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
@@ -210,7 +211,7 @@ func syncWindowsBundleMarker(store *enterprisebundle.Store) error {
 	if err != nil || st.Current == nil {
 		return err
 	}
-	marker, err := registry.OpenKey(windowsEnterpriseMachineRegistry, WindowsEnterpriseMarkerKey,
+	marker, err := registry.OpenKey(windowsEnterpriseMachineRegistry, hookcli.WindowsEnterpriseMarkerKey,
 		registry.SET_VALUE|registry.QUERY_VALUE|registry.WOW64_64KEY)
 	if err != nil {
 		return fmt.Errorf("open the enterprise marker to publish the confirmed bundle: %w", err)

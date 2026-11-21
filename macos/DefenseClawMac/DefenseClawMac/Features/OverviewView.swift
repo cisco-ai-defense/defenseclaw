@@ -33,6 +33,9 @@ struct OverviewView: View {
     @State private var appliedPolicyError: String?
     @State private var appliedPolicyCacheKey = ""
     @State private var appliedPolicyFetchedAt: Date?
+    /// Runtime-computed Overview lines (admission overrides summary, storage
+    /// policy), re-read when the selected installation or its config changes.
+    @State private var runtimeSummary: RuntimeOverviewSummary.Result?
 
     struct HourlyPoint: Identifiable {
         let hour: Date
@@ -68,17 +71,18 @@ struct OverviewView: View {
                 quickActionsCard
                 SandboxOverviewCard()
                 configurationCard
-                if !admissionOverrides.isEmpty {
-                    DCCard("Admission overrides", systemImage: "checklist") {
-                        KeyValueGrid(pairs: admissionOverrides)
-                    }
-                }
                 if !appliedPolicy.isEmpty || appliedPolicyError != nil {
                     DCCard("Effective policy\(scopeSuffix)", systemImage: "person.badge.shield.checkmark") {
                         if let appliedPolicyError {
                             Text(appliedPolicyError).font(.caption).foregroundStyle(Cisco.orange)
                         } else {
-                            KeyValueGrid(pairs: appliedPolicy.keys.sorted().map { ($0, appliedPolicy[$0] ?? "") })
+                            // A failed account lookup reads like the error line
+                            // above, not like one more setting (GAP-1271).
+                            if let lookupError = appliedPolicy["Lookup error"] {
+                                Text(lookupError).font(.caption).foregroundStyle(Cisco.orange)
+                            }
+                            KeyValueGrid(pairs: appliedPolicy.keys.sorted().filter { $0 != "Lookup error" }
+                                .map { ($0, appliedPolicy[$0] ?? "") })
                         }
                     }
                 }
@@ -116,6 +120,7 @@ struct OverviewView: View {
         }
         .task { refresh() }
         .task(id: appState.health.fetchedAt) { await loadData() } // pulse-fed
+        .task(id: "\(appState.installationGeneration)/\(appState.configDiskGeneration)") { await loadRuntimeSummary() }
         .onChange(of: appState.connectorFilter, initial: true) { _, newValue in
             // The TUI dispatches the lazy per-connector aibom load whenever
             // the ENFORCEMENT box renders with a connector selected —
@@ -712,6 +717,12 @@ struct OverviewView: View {
                         }
                     }
                 }
+                // TUI "overrides" row: admission actions config.yaml sets that
+                // differ from built-in policy, summarized by the runtime
+                // (format_scanner_overrides_summary); nothing when none.
+                if let overrides = runtimeSummary?.admissionOverrides, !overrides.isEmpty {
+                    scannerContextRow("overrides", overrides, tint: Cisco.sky, filled: true)
+                }
                 if let err = appState.scannerFixError {
                     Text(err)
                         .font(.caption2)
@@ -757,16 +768,30 @@ struct OverviewView: View {
     /// runtime-loaded OTel destination and audit sink from /health, with
     /// delivery/eligibility routing labels and redacted endpoints (TUI
     /// _overview_observability_panel).
+    private func destinationColor(_ state: String) -> Color {
+        switch EntityState.classify(state) {
+        case .active: return Cisco.green
+        case .blocked, .quarantined: return Cisco.red
+        case .warn: return Cisco.orange
+        default: return .secondary
+        }
+    }
+
     private var observabilityCard: some View {
         DCCard("Observability Destinations · Runtime", systemImage: "antenna.radiowaves.left.and.right") {
+            if let storage = runtimeSummary?.storage {
+                storageLines(storage)
+            } else if let problem = runtimeSummary?.storageError, !problem.isEmpty {
+                Text(problem).font(.caption).foregroundStyle(Cisco.orange)
+            }
             if appState.health.observabilityRows.isEmpty {
-                Text("No runtime-loaded destinations. Configure one in Setup → Observability / Galileo, then restart the gateway.")
+                Text("No runtime-loaded destinations. Configure one in Setup → Observability / Galileo, then refresh after the gateway applies it.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             } else {
                 Table(appState.health.observabilityRows) {
                     TableColumn("Name") { row in
-                        Text(row.name).fontWeight(.medium)
+                        Text(row.name).fontWeight(.medium).help(row.detail)
                     }
                     TableColumn("Target", value: \.target).width(78)
                     TableColumn("Scope") { row in
@@ -779,20 +804,21 @@ struct OverviewView: View {
                     .width(90)
                     TableColumn("State") { row in
                         Text(row.state)
-                            .foregroundStyle(row.state == "enabled" ? Cisco.green : Color.secondary)
+                            .foregroundStyle(destinationColor(row.state))
+                            .help(row.detail)
                     }
-                    .width(64)
+                    .width(88)
                     TableColumn("Signals") { row in
                         Text(row.signals).foregroundStyle(.secondary)
                     }
                     .width(130)
-                    TableColumn("Routing") { row in
+                    TableColumn("Delivery") { row in
                         Text(row.routing.nonEmpty ?? "—")
                             .font(.caption.monospacedDigit())
                             .foregroundStyle(Cisco.sky)
                             .lineLimit(1)
                             .truncationMode(.tail)
-                            .help(row.routing.nonEmpty ?? "No routing data yet")
+                            .help(row.detail)
                     }
                     TableColumn("Endpoint") { row in
                         Text(row.endpoint)
@@ -804,6 +830,11 @@ struct OverviewView: View {
                 }
                 .frame(height: CGFloat(appState.health.observabilityRows.count) * 28 + 32)
                 .scrollDisabled(true)
+                ForEach(appState.health.observabilityRows.filter { !$0.queue.isEmpty || !$0.healthReason.isEmpty }) { row in
+                    Text("\(row.name): \(row.state) · \(row.healthReason) · \(row.queue)")
+                        .font(.caption).foregroundStyle(destinationColor(row.state))
+                        .textSelection(.enabled).help(row.detail)
+                }
                 Text("Names are identities: a new name adds a route; the same name updates it. Manage in Setup → Observability / Galileo.")
                     .font(.caption2)
                     .italic()
@@ -1081,22 +1112,46 @@ struct OverviewView: View {
         await loadAppliedPolicy()
     }
 
-    private var admissionOverrides: [(String, String)] {
-        var rows: [(String, String)] = []
-        for asset in ["defaults", "skill", "mcp", "plugin"] {
-            let actions = appState.config.raw["admission.\(asset).actions"]?.mapping ?? [:]
-            for severity in actions.keys.sorted() {
-                guard let node = actions[severity] else { continue }
-                if let value = node.string { rows.append(("\(asset) · \(severity)", value)) }
-                else if let surfaces = node.mapping {
-                    let value = ["install", "file", "runtime", "verdict"].compactMap { key in
-                        surfaces[key]?.string.map { "\(key)=\($0)" }
-                    }.joined(separator: ", ")
-                    if !value.isEmpty { rows.append(("\(asset) · \(severity)", value)) }
-                }
-            }
+    /// The TUI's SCANNERS "overrides" row and OBSERVABILITY storage lines are
+    /// runtime-computed (admission_overrides.py, v8_status.py), so they come
+    /// from the selected runtime's interpreter rather than a YAML re-read.
+    private func loadRuntimeSummary() async {
+        let generation = appState.installationGeneration
+        guard let runtimePython = await appState.cli.locateRuntimePython() else {
+            runtimeSummary = nil
+            return
         }
-        return rows
+        let result = await appState.cli.run(
+            binary: runtimePython, arguments: ["-c", RuntimeOverviewSummary.dumpScript], mutation: false
+        )
+        // A run SwiftUI cancelled (the task id changed or the view left) must
+        // not blank the rows its successor is about to fill.
+        guard !Task.isCancelled, !result.cancelled, generation == appState.installationGeneration else { return }
+        runtimeSummary = result.succeeded ? RuntimeOverviewSummary.parse(result.output) : nil
+    }
+
+    /// TUI storage prefix: "Local SQLite · retention=… · controller=… · judge
+    /// capture=…" then "Event history: … · Judge bodies: …". The controller
+    /// is the live gateway's retention state, never the last snapshot's while
+    /// the gateway is down (GAP-2586).
+    @ViewBuilder
+    private func storageLines(_ storage: RuntimeOverviewSummary.Storage) -> some View {
+        let controller: String = {
+            guard appState.gatewayReachable else { return "offline (gateway not running)" }
+            let state = appState.health.retentionState.isEmpty ? "unavailable" : appState.health.retentionState
+            let failure = appState.health.retentionFailure
+            return failure.isEmpty ? state : "\(state) (\(failure))"
+        }()
+        Text("Local SQLite · retention=\(storage.retention) · controller=\(controller) · judge capture=\(storage.judgeCapture)")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .textSelection(.enabled)
+        Text("Event history: \(storage.localPath) · Judge bodies: \(storage.judgeBodiesPath)")
+            .font(.caption)
+            .foregroundStyle(.tertiary)
+            .lineLimit(2)
+            .truncationMode(.middle)
+            .textSelection(.enabled)
     }
 
     private func loadAppliedPolicy() async {

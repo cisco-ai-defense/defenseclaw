@@ -76,4 +76,6 @@ def rollback(yes: bool) -> None:
     _refuse_on_managed_host("rollback")
     from defenseclaw.upgrade_shim import run
 
+    # A rollback puts the route-only agent settings back in the saved
+    # installer's prepare-rollback step (GAP-0602).
     raise SystemExit(run(["rollback"] + (["--yes"] if yes else [])))

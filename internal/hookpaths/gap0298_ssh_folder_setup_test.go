@@ -64,12 +64,8 @@ func TestSSHFolderSetupIsNotAKeysWrite(t *testing.T) {
 		if err := os.MkdirAll(filepath.Join(home, ".ssh"), 0o700); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.Symlink("../.ssh", filepath.Join(project, "sshlink")); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.Symlink("../.ssh/authorized_keys", filepath.Join(project, "keylink")); err != nil {
-			t.Fatal(err)
-		}
+		testSymlink(t, "../.ssh", filepath.Join(project, "sshlink"))
+		testSymlink(t, "../.ssh/authorized_keys", filepath.Join(project, "keylink"))
 		for _, command := range []string{"chmod 700 sshlink", "mkdir -p sshlink"} {
 			if got := ActionCommandDecision(command, project, home); got != "" {
 				t.Errorf("%q = %q, want allow", command, got)

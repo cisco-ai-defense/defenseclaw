@@ -92,6 +92,9 @@ const (
 	// credentials (its supplementary groups), named through NSS: the facts
 	// of its own account when a proof of who holds the uid needs root.
 	SourceProcessCredentials = "process_credentials"
+	// SourceOIDC is a person verified from an OIDC token on Agent
+	// Substrate (the actor's registration).
+	SourceOIDC = "oidc"
 )
 
 // DirectoryFacts are the directory attributes of one end-user account,

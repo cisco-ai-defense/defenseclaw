@@ -7,9 +7,13 @@
     "switching-connectors",
     "disabling",
     "protected-files",
+    "secret-flow-tracking",
+    "tool-results",
     "semantic-routing",
     "unified-llm-key",
+    "configure-cascade",
     "decision-model",
+    "alignment-check",
     "---Benchmarks---",
     "benchmarks",
     "llm-judge-benchmark"

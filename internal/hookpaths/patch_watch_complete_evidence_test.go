@@ -103,9 +103,7 @@ func TestCompletePatchEvidenceIsAlwaysWatched(t *testing.T) {
 				if err := os.Remove(target); err != nil {
 					t.Fatal(err)
 				}
-				if err := os.Symlink(keys, target); err != nil {
-					t.Fatal(err)
-				}
+				testSymlink(t, keys, target)
 				defer func() {
 					_ = os.Remove(target)
 					_ = os.WriteFile(target, []byte("x\n"), 0o600)

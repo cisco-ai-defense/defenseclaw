@@ -12,11 +12,9 @@
 
 from __future__ import annotations
 
-import pytest
-
 from datetime import datetime, timedelta, timezone
 
-from defenseclaw import connector_paths
+import pytest
 from defenseclaw.observability.custody_status import (
     NativeDeliveryStatus,
     NativeDeliverySummary,
@@ -43,9 +41,6 @@ from defenseclaw.tui.panels.overview import (
     OverviewConfig,
     OverviewPanelModel,
     SubsystemHealth,
-    active_connector_name,
-    connector_source_label,
-    friendly_connector_name,
     gateway_health_is_broken,
     keys_overflow_suffix,
     live_health_contradicts,
@@ -1111,7 +1106,6 @@ def test_overview_health_signals_name_their_cause() -> None:
     """GAP-1158: no proxy port for hook-only rosters, the zero-hook notice is
     scoped to the gateway uptime, and a DEGRADED runtime says why."""
 
-    from defenseclaw.tui.services.overview_state import zero_connector_requests_notice
     from defenseclaw.tui.services.runtime_state import RuntimeOverview
 
     hook_only = OverviewConfig(

@@ -25,10 +25,7 @@ flows) can import without dragging in OpenClaw paperwork.
 
 from __future__ import annotations
 
-import os
-import tempfile
 import unittest
-from unittest.mock import patch
 
 from defenseclaw import llm_keys
 
@@ -121,38 +118,6 @@ class TestModelToProxyName(unittest.TestCase):
         )
 
 
-class TestDeriveMasterKey(unittest.TestCase):
-    """Direct module-level test for ``derive_master_key``.
-
-    The legacy back-compat name ``_derive_master_key`` is covered in
-    ``test_guardrail.py``; here we assert the public name resolves to
-    the same implementation.
-    """
-
-    def test_deterministic(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            key_path = os.path.join(tmp, "device.key")
-            with open(key_path, "wb") as f:
-                f.write(b"some-random-bytes")
-            k1 = llm_keys.derive_master_key(key_path)
-            k2 = llm_keys.derive_master_key(key_path)
-            self.assertEqual(k1, k2)
-            self.assertTrue(k1.startswith("sk-dc-"))
-            self.assertEqual(len(k1), 6 + 64)
-
-    def test_raises_on_missing(self):
-        # Patch Path so the fallback ``~/.defenseclaw/device.key``
-        # also points at a non-existent location. Otherwise this
-        # test fails on developer machines that already have a real
-        # device.key from previous ``defenseclaw init`` runs.
-        with tempfile.TemporaryDirectory() as tmp, \
-             patch("defenseclaw.llm_keys.Path") as mock_path:
-            from pathlib import Path as RealPath
-            mock_path.home.return_value = RealPath(tmp)
-            with self.assertRaises(RuntimeError):
-                llm_keys.derive_master_key("/nonexistent/device.key")
-
-
 class TestBackCompatShim(unittest.TestCase):
     """``defenseclaw.guardrail`` must re-export every public name.
 
@@ -173,11 +138,8 @@ class TestBackCompatShim(unittest.TestCase):
             guardrail.model_to_proxy_name,
             llm_keys.model_to_proxy_name,
         )
-        # Legacy underscore-prefixed name is preserved.
-        self.assertIs(
-            guardrail._derive_master_key,
-            llm_keys.derive_master_key,
-        )
+        self.assertFalse(hasattr(llm_keys, "derive_master_key"))
+        self.assertFalse(hasattr(guardrail, "_derive_master_key"))
 
     def test_shim_exports_openclaw_surface(self):
         from defenseclaw import guardrail, openclaw_guardrail

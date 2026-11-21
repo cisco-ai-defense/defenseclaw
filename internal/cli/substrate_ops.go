@@ -1,0 +1,498 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
+// SPDX-License-Identifier: Apache-2.0
+
+package cli
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
+	"os"
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/spf13/cobra"
+
+	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/api"
+	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/attach"
+	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/auth"
+	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/safetext"
+	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/workspace"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/relay"
+
+	"golang.org/x/term"
+)
+
+// --- logs -------------------------------------------------------------------
+
+func runSubstrateLogs(cmd *cobra.Command, out *substrateOutput, com *substrateCommon, ref string, follow bool, task string) error {
+	asJSON, err := out.wantJSON()
+	if err != nil {
+		return err
+	}
+	s, err := substrateOpen(cmd, com)
+	if err != nil {
+		return err
+	}
+	ctx, stop := substrateContext(cmd)
+	defer stop()
+	a, err := resolveSubstrateActor(ctx, s.Client, ref)
+	if err != nil {
+		return substrateFail(err)
+	}
+	if a.State == substrateStateCrashed {
+		// GAP-0420: no wait for an agent that cannot answer.
+		return substrateFail(substrateCrashedErr(a))
+	}
+	o, err := substrateAttachOptions(cmd, s, a, "auto", true)
+	if err != nil {
+		return err
+	}
+	o.NoBanner = true
+	id := task
+	if id == "" {
+		st, err := attach.Status(ctx, o)
+		if err != nil {
+			return substrateFail(err)
+		}
+		if id = latestSubstrateTask(st); id == "" {
+			if a.Unattended {
+				// GAP-0420: a headless run whose actor crashed and came back
+				// lost its run and its log with the worker.
+				return fmt.Errorf("%s/%s has no headless task now: its run and log were lost when it crashed and was brought back to an earlier snapshot. "+
+					"Bring its folder home with: defenseclaw substrate pull %s, or start the task again in a new agent", a.Atespace, a.Name, a.Name)
+			}
+			return fmt.Errorf("%s/%s has no headless task; start one with: defenseclaw substrate run AGENT --task \"...\"", a.Atespace, a.Name)
+		}
+	}
+	emit := attach.TextEmitter(cmd.OutOrStdout(), cmd.ErrOrStderr())
+	if asJSON {
+		emit = func(e relay.TaskEvent) { _ = writeSubstrateJSONCompact(cmd.OutOrStdout(), e) }
+	}
+	var code int
+	if follow {
+		defer substratePresence(cmd, a)()
+		code, err = attach.FollowTask(ctx, o, id, emit)
+	} else {
+		// A snapshot: read what is there, then stop once nothing new comes.
+		// Only the open log is timed, never the wait for the agent to wake
+		// and answer: that wait cut a finished task's log off unread, and
+		// logs printed nothing with exit 0 (GAP-0406).
+		code, err = attach.SnapshotTask(ctx, o, id, attach.Quiet{First: 3 * time.Second, Then: 2 * time.Second}, emit)
+		if errors.Is(err, attach.ErrTaskStillRunning) {
+			if !asJSON {
+				fmt.Fprintf(cmd.ErrOrStderr(), "The task is still running. Follow it with: defenseclaw substrate logs -f %s\n", a.Name)
+			}
+			return nil
+		}
+	}
+	if err != nil {
+		return substrateFail(err)
+	}
+	if err == nil && code != 0 && !asJSON {
+		fmt.Fprintf(cmd.ErrOrStderr(), "The task ended with exit code %d.\n", code)
+	}
+	return nil
+}
+
+// latestSubstrateTask picks the newest task id from a relay status document.
+func latestSubstrateTask(st map[string]any) string {
+	tasks, _ := st["tasks"].(map[string]any)
+	type item struct {
+		id      string
+		started string
+	}
+	var items []item
+	for id, v := range tasks {
+		m, _ := v.(map[string]any)
+		started, _ := m["started"].(string)
+		items = append(items, item{id, started})
+	}
+	if len(items) == 0 {
+		return ""
+	}
+	sort.Slice(items, func(i, j int) bool { return items[i].started > items[j].started })
+	return items[0].id
+}
+
+// --- pull -------------------------------------------------------------------
+
+func runSubstratePull(cmd *cobra.Command, f *substratePullFlags, ref string) error {
+	asJSON, err := f.out.wantJSON()
+	if err != nil {
+		return err
+	}
+	modes := 0
+	for _, on := range []bool{f.apply, f.branch != "", f.patch != ""} {
+		if on {
+			modes++
+		}
+	}
+	if modes > 1 {
+		return cliusage.WithExitCode(errors.New("choose one of --apply, --branch NAME or --patch-out FILE"), 2)
+	}
+	if f.allowFlagged && !f.apply {
+		// Refused before anything is read, also on an empty pull
+		// (GAP-0531).
+		return cliusage.WithExitCode(errors.New("--allow-flagged goes with --apply (a branch or a patch writes nothing that runs)"), 2)
+	}
+	s, err := substrateOpen(cmd, &f.com)
+	if err != nil {
+		return err
+	}
+	ctx, stop := substrateContext(cmd)
+	defer stop()
+	a, err := resolveSubstrateActor(ctx, s.Client, ref)
+	if err != nil {
+		return substrateFail(err)
+	}
+	if a.State == substrateStateCrashed {
+		return substrateFail(substrateCrashedErr(a))
+	}
+	name := substrateCopyName(a)
+	dataDir := auth.StateDir()
+	if !workspace.HasCopy(dataDir, name) {
+		return fmt.Errorf("this computer has no record of the folder you sent to %s/%s, so it cannot tell what the agent changed. "+
+			"Pull from the computer you ran it on, or push from inside the agent (defenseclaw substrate connect %s, then git push)", a.Atespace, a.Name, a.Name)
+	}
+	rel, err := substrateOpenRelay(ctx, s, a)
+	if err != nil {
+		return err
+	}
+	defer rel.Close()
+	w := cmd.OutOrStdout()
+	fmt.Fprintln(cmd.ErrOrStderr(), "Reading the agent's work...")
+	rev, err := workspace.Pull(ctx, workspace.PullOptions{Exec: rel.Client, DataDir: dataDir, Name: name, Label: a.Name, Timeout: f.timeout, Project: "."})
+	if err != nil {
+		return fmt.Errorf("could not read the agent's work: %w", err)
+	}
+	if asJSON {
+		files := make([]map[string]any, 0, len(rev.Changed))
+		for _, c := range rev.Changed {
+			files = append(files, map[string]any{"path": c.Path, "status": c.Status, "flags": c.Flags})
+		}
+		doc := map[string]any{"agent": a.Atespace + "/" + a.Name, "summary": rev.Summary, "flagged": rev.Flagged, "empty": rev.Empty, "files": files, "sensitive": rev.Sensitive, "blocking": rev.Blocking}
+		if f.diff {
+			doc["diff"] = string(rev.Diff)
+		}
+		if modes == 0 {
+			return writeSubstrateJSON(w, doc)
+		}
+		defer func() { _ = writeSubstrateJSON(w, doc) }()
+	} else {
+		fmt.Fprint(w, safetext.Clean(rev.Text))
+		if f.diff && len(rev.Diff) > 0 {
+			fmt.Fprintf(w, "\n%s", safetext.Visible(string(rev.Diff)))
+		}
+	}
+	if rev.Empty {
+		return nil
+	}
+	mode, branch, patch := workspace.ModeApply, f.branch, f.patch
+	switch {
+	case f.apply:
+		// Flagged files land only on an explicit yes: --allow-flagged, or
+		// the question answered y. --yes takes the safe answer, no
+		// (GAP-0472); Apply then refuses and names the files.
+		accept, write, err := substratePullAccept(f, rev.Sensitive, substrateInteractive(), func() (bool, error) {
+			return substrateConfirm(cmd, "Some of these changes can run code on this computer. Write them into this folder anyway?")
+		})
+		if err != nil {
+			return err
+		}
+		if !write {
+			fmt.Fprintln(cmd.ErrOrStderr(), "Nothing was written to this folder. Look at them first with --branch NAME or --patch-out FILE, or pass --allow-flagged.")
+			return nil
+		}
+		return substrateApply(cmd, dataDir, name, mode, branch, patch, accept)
+	case f.branch != "":
+		mode = workspace.ModeBranch
+	case f.patch != "":
+		mode = workspace.ModePatch
+	default:
+		return substratePullChoose(cmd, f, a, name, dataDir, rev)
+	}
+	// A branch or a patch runs nothing; Apply still refuses a branch whose
+	// history would keep a secret.
+	return substrateApply(cmd, dataDir, name, mode, branch, patch, false)
+}
+
+// substratePullAccept decides whether pull --apply may write files flagged
+// as able to run code: --allow-flagged says yes; otherwise a terminal asks
+// (the default answer is no). --yes takes that safe answer and never says
+// yes for the user (GAP-0472): Apply then refuses and names the files.
+// write is false when the user answered no.
+func substratePullAccept(f *substratePullFlags, sensitive, interactive bool, ask func() (bool, error)) (accept, write bool, err error) {
+	if !sensitive || f.allowFlagged {
+		return f.allowFlagged, true, nil
+	}
+	if f.yes || !interactive {
+		return false, true, nil
+	}
+	ok, err := ask()
+	if err != nil {
+		return false, false, err
+	}
+	return ok, ok, nil
+}
+
+// substratePullChoose asks what to do with the changes on a terminal; with
+// no terminal it says how to choose.
+func substratePullChoose(cmd *cobra.Command, f *substratePullFlags, a api.Actor, name, dataDir string, rev *workspace.Review) error {
+	hint := fmt.Sprintf("Nothing was written to this folder. Bring the changes home with:\n  defenseclaw substrate pull %s --apply            write them into this folder\n  defenseclaw substrate pull %s --branch NAME      put them on a new git branch\n  defenseclaw substrate pull %s --patch-out FILE   write a patch", a.Name, a.Name, a.Name)
+	if f.yes {
+		// The safe default is a branch, which runs nothing; a secret still
+		// keeps it out of the branch's history (Apply decides).
+		return substrateApply(cmd, dataDir, name, workspace.ModeBranch, "", "", false)
+	}
+	if !substrateInteractive() {
+		fmt.Fprintln(cmd.ErrOrStderr(), hint)
+		return nil
+	}
+	q := "Write these changes into this folder?"
+	if rev.Sensitive {
+		q = "Some of these changes can run code on this computer. Write them into this folder anyway?"
+	}
+	ok, err := substrateConfirm(cmd, q)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		fmt.Fprintln(cmd.ErrOrStderr(), hint)
+		return nil
+	}
+	return substrateApply(cmd, dataDir, name, workspace.ModeApply, "", "", true)
+}
+
+// substrateInteractive is true when stdin is a terminal. A char device is
+// not enough: /dev/null is one, and a script that gives pull no input must
+// get the hint, not a question.
+func substrateInteractive() bool {
+	return term.IsTerminal(int(os.Stdin.Fd()))
+}
+
+func substrateApply(cmd *cobra.Command, dataDir, name string, mode workspace.ApplyMode, branch, patch string, accept bool) error {
+	ctx, stop := substrateContext(cmd)
+	defer stop()
+	res, err := workspace.Apply(ctx, workspace.ApplyOptions{DataDir: dataDir, Name: name, Mode: mode, Branch: branch, PatchPath: patch, AcceptSensitive: accept})
+	if err != nil {
+		var sens *workspace.SensitiveError
+		if errors.As(err, &sens) {
+			// The refusal already names --allow-flagged, --branch and
+			// --patch-out; the advice is said once (GAP-0531).
+			return cliusage.WithExitCode(err, substrateExitRefused)
+		}
+		return err
+	}
+	fmt.Fprint(cmd.OutOrStdout(), strings.TrimRight(safetext.Clean(res.Text), "\n")+"\n")
+	return nil
+}
+
+// --- checkpoint and undo ----------------------------------------------------
+
+func substrateRemoteDir(a api.Actor) (string, error) {
+	dir := workspace.RemoteDirOf(auth.StateDir(), substrateCopyName(a))
+	if dir == "" {
+		return "", fmt.Errorf("this computer has no record of where %s/%s keeps your folder. Run checkpoint and undo on the computer you started it from", a.Atespace, a.Name)
+	}
+	return dir, nil
+}
+
+func runSubstrateCheckpoint(cmd *cobra.Command, out *substrateOutput, com *substrateCommon, ref string, every time.Duration) error {
+	asJSON, err := out.wantJSON()
+	if err != nil {
+		return err
+	}
+	if every < 0 || (every > 0 && every < time.Minute) {
+		return cliusage.WithExitCode(errors.New("--every must be at least 1m, for example --every 1h"), 2)
+	}
+	s, err := substrateOpen(cmd, com)
+	if err != nil {
+		return err
+	}
+	ctx, stop := substrateContext(cmd)
+	defer stop()
+	a, err := resolveSubstrateActor(ctx, s.Client, ref)
+	if err != nil {
+		return substrateFail(err)
+	}
+	dir, err := substrateRemoteDir(a)
+	if err != nil {
+		return err
+	}
+	take := func() error {
+		rel, err := substrateOpenRelay(ctx, s, a)
+		if err != nil {
+			return err
+		}
+		defer rel.Close()
+		info, err := workspace.Checkpoint(ctx, workspace.CheckpointOptions{Exec: rel.Client, Dir: dir, DataDir: auth.StateDir(), Name: substrateCopyName(a)})
+		if err != nil {
+			return err
+		}
+		if asJSON {
+			return writeSubstrateJSONCompact(cmd.OutOrStdout(), map[string]any{"id": info.ID, "files": info.Files, "agent": a.Atespace + "/" + a.Name, "time": time.Now().UTC()})
+		}
+		fmt.Fprintf(cmd.OutOrStdout(), "Saved restore point %s (%d files). Go back to it with: defenseclaw substrate undo %s --to %s\n", info.ID, info.Files, a.Name, info.ID)
+		return nil
+	}
+	if err := take(); err != nil {
+		return err
+	}
+	if every == 0 {
+		return nil
+	}
+	tick := time.NewTicker(every)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-tick.C:
+			if err := take(); err != nil {
+				fmt.Fprintf(cmd.ErrOrStderr(), "Could not save a restore point: %v\n", err)
+			}
+		}
+	}
+}
+
+func runSubstrateUndo(cmd *cobra.Command, com *substrateCommon, ref, to string, yes bool) error {
+	s, err := substrateOpen(cmd, com)
+	if err != nil {
+		return err
+	}
+	ctx, stop := substrateContext(cmd)
+	defer stop()
+	a, err := resolveSubstrateActor(ctx, s.Client, ref)
+	if err != nil {
+		return substrateFail(err)
+	}
+	if a.State == substrateStateCrashed {
+		// GAP-0410: a crashed agent has no worker to run the restore in.
+		// The gateway first brings it back to its last snapshot.
+		if !yes {
+			ok, err := substrateConfirm(cmd, fmt.Sprintf("%s/%s crashed. Bring it back to its last snapshot? What it did after that snapshot is lost.", a.Atespace, a.Name))
+			if err != nil {
+				return err
+			}
+			if !ok {
+				fmt.Fprintln(cmd.OutOrStdout(), "Nothing changed.")
+				return nil
+			}
+		}
+		if _, err := s.Client.Recover(ctx, a.Atespace, a.Name); err != nil {
+			var ae *api.Error
+			if errors.As(err, &ae) && ae.NotImplemented() {
+				return substrateFail(fmt.Errorf("this cluster cannot bring a crashed agent back yet; ask your administrator to upgrade DefenseClaw (or to run: kubectl ate revert actor %s -a %s)", a.Name, a.Atespace))
+			}
+			return substrateFail(fmt.Errorf("bringing %s/%s back from its crash: %w", a.Atespace, a.Name, err))
+		}
+		fmt.Fprintf(cmd.ErrOrStderr(), "%s/%s crashed; it is back at its last snapshot and starting.\n", a.Atespace, a.Name)
+	}
+	dir, err := substrateRemoteDir(a)
+	if err != nil {
+		return err
+	}
+	if !yes {
+		which := "the last restore point"
+		if to != "" {
+			which = "restore point " + to
+		}
+		ok, err := substrateConfirm(cmd, fmt.Sprintf("Put %s/%s back to %s? What the agent changed since is lost.", a.Atespace, a.Name, which))
+		if err != nil {
+			return err
+		}
+		if !ok {
+			fmt.Fprintln(cmd.OutOrStdout(), "Nothing changed.")
+			return nil
+		}
+	}
+	rel, err := substrateOpenRelay(ctx, s, a)
+	if err != nil {
+		return err
+	}
+	defer rel.Close()
+	opts := workspace.UndoOptions{Exec: rel.Client, Dir: dir, ID: to, DataDir: auth.StateDir(), Name: substrateCopyName(a)}
+	info, err := workspace.Undo(ctx, opts)
+	for try := 1; err != nil && a.State == substrateStateCrashed && try <= substrateUndoStartTries && substrateRelayStarting(err); try++ {
+		// The recovered agent's relay may need a moment to answer.
+		if serr := substrateSleep(ctx, 2*time.Second); serr != nil {
+			return serr
+		}
+		info, err = workspace.Undo(ctx, opts)
+	}
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), "Put %s/%s back to restore point %s.\n", a.Atespace, a.Name, info.ID)
+	// GAP-0415: what the agent was asking about is gone with the folder it
+	// changed; its pending asks close now instead of waiting out their time.
+	if n := substrateCloseAsks(ctx, s.Client, a, "the agent was put back to a restore point with undo"); n > 0 {
+		fmt.Fprintf(cmd.ErrOrStderr(), "Closed %d pending question(s) of %s.\n", n, a.Name)
+	}
+	return nil
+}
+
+// substrateUndoStartTries bounds the retries of an undo while a recovered
+// agent starts (2 s apart).
+const substrateUndoStartTries = 30
+
+// substrateRelayStarting reports an error of an agent that is still
+// starting (HTTP 502, 503 or 504 from the route or the relay).
+func substrateRelayStarting(err error) bool {
+	if errors.Is(err, attach.ErrStarting) || errors.Is(err, attach.ErrClusterFull) {
+		return true
+	}
+	msg := err.Error()
+	for _, code := range []string{"HTTP 502", "HTTP 503", "HTTP 504"} {
+		if strings.Contains(msg, code) {
+			return true
+		}
+	}
+	return false
+}
+
+func substrateSleep(ctx context.Context, d time.Duration) error {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
+	}
+}
+
+// substrateCloseAsks denies a's pending asks with why and returns how many
+// it closed. Best effort: an ask it cannot close expires as before.
+func substrateCloseAsks(ctx context.Context, cl *api.Client, a api.Actor, why string) int {
+	asks, err := cl.Asks(ctx)
+	if err != nil {
+		return 0
+	}
+	n := 0
+	for _, k := range asks {
+		if k.Actor != a.Name || (k.Atespace != "" && k.Atespace != a.Atespace) {
+			continue
+		}
+		if cl.Decide(ctx, k.ID, "deny", false, why) == nil {
+			n++
+		}
+	}
+	return n
+}

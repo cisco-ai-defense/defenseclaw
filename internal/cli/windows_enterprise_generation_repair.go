@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -50,7 +51,7 @@ func repairWindowsEnterpriseConfigGeneration(ctx context.Context, opts *windowsE
 	if err != nil {
 		return false, nil
 	} // The ordinary source preflight reports it.
-	layout, err := windowsManagedLayout.standalone()
+	layout, err := hookcli.WindowsManagedLayout.Standalone()
 	if err != nil {
 		return false, err
 	}
@@ -86,7 +87,7 @@ func repairWindowsEnterpriseConfigGeneration(ctx context.Context, opts *windowsE
 	if report.GatewayReportedDigest != "" {
 		floor = max(floor, report.GatewayReportedConfigGeneration)
 	}
-	roots, err := windowsManagedLayout.roots(managed.ProfileStandalone)
+	roots, err := hookcli.WindowsManagedLayout.Roots(managed.ProfileStandalone)
 	if err != nil {
 		return false, err
 	}

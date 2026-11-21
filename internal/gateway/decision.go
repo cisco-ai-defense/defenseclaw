@@ -129,8 +129,9 @@ func guardrailActionForConnectorFindings(
 	findings []RuleFinding,
 	confirmable bool,
 ) string {
-	return guardrailActionForProfile(findings, cfg != nil && cfg.SecureClientIntegration(),
-		func() bool { return strictPackPosture(cfg, connector) },
+	return guardrailActionForProfileUnknown(findings, cfg != nil && cfg.SecureClientIntegration(),
+		func() bool { return cfg.HookPolicyTierForConnector(connector) == config.HookPolicyTierStrict },
+		func() string { return cascadeUnknownForConfig(cfg, connector) },
 		func(severity string) string {
 			return guardrailActionForConnector(cfg, connector, severity, confirmable)
 		})
@@ -262,11 +263,15 @@ func guardrailActionForGuardrailFindings(
 	findings []RuleFinding,
 	confirmable bool,
 ) string {
-	return guardrailActionForProfile(findings, ManagedEnterpriseActive(),
-		func() bool {
-			ref := gc.EffectiveRulePackRef(connector)
-			return guardrailPackPosture(gc, ref) == config.HookPolicyTierStrict
-		},
+	// ManagedEnterpriseActive is the Secure Client posture: the sidecar sets
+	// it from cfg.ManagedAIDOnly() (sidecar.go). A managed standalone install
+	// leaves it false, so its proxy limit findings map by the pack like the
+	// hook routes (TestBoundedProxyPathMapsByThePack).
+	strict := func() bool {
+		return gc != nil && guardrailPackPosture(gc, gc.EffectiveRulePackRef(connector)) == config.HookPolicyTierStrict
+	}
+	return guardrailActionForProfileUnknown(findings, ManagedEnterpriseActive(), strict,
+		func() string { return cascadeUnknownForGuardrail(gc, connector, strict) },
 		func(severity string) string {
 			return guardrailActionForGuardrailConnector(gc, connector, severity, confirmable)
 		})

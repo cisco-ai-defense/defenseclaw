@@ -96,7 +96,7 @@ func (r claudeCodeReplayRow) field(key string) string {
 // and the store the handler wrote.
 func replayClaudeCodeAgentToolFixture(t *testing.T) (*APIServer, string, []map[string]interface{}) {
 	t.Helper()
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	installDefaultProfileConnector(t, "claudecode")
 	fixture := newSidecarRuntimeFixture(t, true)
 	fingerprints, err := observabilityredaction.NewEngine(bytes.Repeat([]byte{0x42}, 32))

@@ -26,7 +26,7 @@ func TestR106CopyBeforeARuntimeWordCopyStaysAllowed(t *testing.T) {
 		{command: `cp b.txt e.txt $(true)`},
 		{command: `cp a.txt c.txt; cp c.txt d.txt`},
 		{command: `cp a.txt c.txt; cp c.txt ~/.ssh/authorized_keys $(true)`, block: true},
-		{command: `cp a.txt c.txt; cp c.txt HOMEDIR/.defenseclaw/config.yaml $(true)`, block: true},
+		{command: `cp a.txt c.txt; cp c.txt HOMEDIR/.defenseclaw/config.yaml $(true)`, block: true, state: true},
 		{command: `ln -s ../.ssh/authorized_keys c.txt; cp a.txt c.txt $(true)`, block: true},
 		{command: `ln -s ../.ssh c; cp a.txt c/authorized_keys $(true)`, block: true},
 		{command: `cp -P keylink c.txt; cp a.txt c.txt $(true)`, block: true},

@@ -56,7 +56,10 @@ type reachParentAnswer struct {
 
 // parentProtectedReach keeps the complete link reading of a shared parent.
 // A final ordinary directory does not clear a protected intermediate hop.
-func (m *TargetMemo) parentProtectedReach(parent, home string, names reachNames) reachParentAnswer {
+// mark is the call's cut count taken before names were made: a grade made
+// against names read while the budget cut a share off is not kept either,
+// even when the parent walk itself met no cut (rel-1-0-10:GAP-1606).
+func (m *TargetMemo) parentProtectedReach(parent, home string, names reachNames, mark uint64) reachParentAnswer {
 	key := reachParentKey{parent, home}
 	if m != nil {
 		m.mu.Lock()
@@ -98,7 +101,7 @@ func (m *TargetMemo) parentProtectedReach(parent, home string, names reachNames)
 	case unread || !ok:
 		answer.grade = GradePossible
 	}
-	if m != nil {
+	if m != nil && m.keepsSince(mark) {
 		m.mu.Lock()
 		if m.reachParents == nil {
 			m.reachParents = make(map[reachParentKey]reachParentAnswer)
@@ -171,6 +174,7 @@ func (m *TargetMemo) protectedReachNames(home string, sshOnly bool) reachNames {
 			return names
 		}
 	}
+	mark := m.cutMark()
 	names := reachNames{}
 	ssh := filepath.Join(home, ".ssh")
 	names.addDirectory(ssh)
@@ -210,7 +214,7 @@ func (m *TargetMemo) protectedReachNames(home string, sshOnly bool) reachNames {
 			names.addDirectory(resolved)
 		}
 	}
-	if m != nil {
+	if m != nil && m.keepsSince(mark) {
 		m.mu.Lock()
 		if m.reachNames == nil {
 			m.reachNames = make(map[string]reachNames)
@@ -246,6 +250,9 @@ func (m *TargetMemo) protectedReach(target, home string, sshOnly bool) Grade {
 	if !filepath.IsAbs(target) || !filepath.IsAbs(home) {
 		return GradePossible
 	}
+	// mark spans the protected names and the parent reading graded against
+	// them (parentProtectedReach).
+	mark := m.cutMark()
 	names := m.protectedReachNames(home, sshOnly)
 	raw := target
 	target = filepath.Clean(raw)
@@ -274,7 +281,7 @@ func (m *TargetMemo) protectedReach(target, home string, sshOnly bool) Grade {
 		entryInfo, entryErr = PathLstat(target)
 		if os.IsNotExist(entryErr) || entryErr == nil &&
 			(entryInfo.IsDir() || entryInfo.Mode().IsRegular() && linkCount(target, entryInfo) == 1) {
-			answer := m.parentProtectedReach(parent, home, names)
+			answer := m.parentProtectedReach(parent, home, names, mark)
 			if names.has(filepath.Join(answer.resolved, filepath.Base(target))) {
 				return GradeNamed
 			}

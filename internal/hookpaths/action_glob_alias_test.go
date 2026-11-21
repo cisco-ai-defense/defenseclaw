@@ -30,9 +30,7 @@ func TestR104GlobParentThroughDirectoryAlias(t *testing.T) {
 		filepath.Join(cwd, "keydir"):       ssh,
 		filepath.Join(cwd, "sub", "inner"): ssh,
 	} {
-		if err := os.Symlink(target, link); err != nil {
-			t.Fatal(err)
-		}
+		testSymlink(t, target, link)
 	}
 	for _, command := range []string{
 		`cp payload keyd*/authorized_keys`,

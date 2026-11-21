@@ -84,7 +84,7 @@ func TestR105ShellBodyLinkReadsAsThePlainLink(t *testing.T) {
 				t.Errorf("%s %q: evaluator panic %s", connectorName, row.command, panicked)
 				continue
 			}
-			if blocked := buildVerdict(findings, "tool_call").Action == "block"; blocked != row.block {
+			if blocked := gap0747Blocked(findings, row.block); blocked != row.block {
 				t.Errorf("%s %q: block=%v want %v (%v)", connectorName, row.command, blocked, row.block, findings)
 			}
 		}

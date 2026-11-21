@@ -25,7 +25,9 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/defenseclaw/defenseclaw/internal/awkprog"
 	"github.com/defenseclaw/defenseclaw/internal/shellparse"
+	"mvdan.cc/sh/v3/expand"
 	"mvdan.cc/sh/v3/syntax"
 )
 
@@ -73,7 +75,9 @@ func parsePOSIX(source string, startID int64, wrapperDepth int) parseOutput {
 	pipelines := posixPipelineRelations(file)
 	representedFallbacks := exactStandalonePOSIXAbsoluteCDFallbacks(file)
 	statementIDs := make(map[*syntax.Stmt]int64)
+	workFolders, unreadWorkFolders := posixWorkFolders(file)
 	var stack []syntax.Node
+	var credentialArgIndexes map[*syntax.CallExpr]map[*syntax.Word]int
 	syntax.Walk(file, func(node syntax.Node) bool {
 		if node == nil {
 			if len(stack) > 0 {
@@ -86,6 +90,10 @@ func parsePOSIX(source string, startID int64, wrapperDepth int) parseOutput {
 		}
 
 		switch typed := node.(type) {
+		case *syntax.Redirect, *syntax.Assign, *syntax.ParamExp:
+			// The secret-read chain's evidence: input redirects, variable
+			// values and the variables a word expands (credentialPathRecord).
+			captureCredentialPathWord(&out, typed, stack, statementIDs, &credentialArgIndexes)
 		case *syntax.FuncDecl:
 			// A definition is inert until invoked. Do not project its body as
 			// an executed action.
@@ -113,6 +121,10 @@ func parsePOSIX(source string, startID int64, wrapperDepth int) parseOutput {
 			command, ok := projectPOSIXStatement(typed, pipelines[typed], stack, statementIDs, &out)
 			if ok {
 				statementIDs[typed] = command.ID
+				command.workFolders = workFolders[typed]
+				if unreadWorkFolders != nil {
+					command.moverUnreadFolders, command.moverUnread = unreadWorkFolders[typed], true
+				}
 				out.appendCommand(command)
 			}
 		}
@@ -122,6 +134,7 @@ func parsePOSIX(source string, startID int64, wrapperDepth int) parseOutput {
 
 	addPOSIXStructuralFlows(&out)
 	expandStaticPOSIXWrappers(&out, wrapperDepth)
+	expandStaticPOSIXWrappedAwkCalls(&out, wrapperDepth)
 	if posixMayRebindHome(parsedSource) {
 		for i := range out.commands {
 			for j := range out.commands[i].Arguments {
@@ -447,7 +460,7 @@ func projectPOSIXStatement(
 		command.Argv = append(command.Argv, argument.Value)
 		if index == 0 {
 			command.Executable = argument.Value
-			command.Program = commandProgram(argument.Value)
+			command.Program = commandProgramForDialect(argument.Value, DialectPOSIX)
 		}
 	}
 	if len(call.Args) == 0 {
@@ -555,11 +568,15 @@ func projectPOSIXWord(word *syntax.Word) ArgumentFact {
 	sawQuoted := false
 	sawUnquoted := false
 	unquotedExpansion := false
-	for _, part := range word.Parts {
+	prefix, prefixed := "", false
+	for _, part := range posixANSICParts(word.Parts) {
 		rawUnquotedExpansion := posixUnquotedExpansion(part, value.Len() == 0)
 		partValue, partQuote, partExpands := projectPOSIXWordPart(part)
 		if partExpands {
 			expands = true
+			if !prefixed {
+				prefix, prefixed = value.String(), true
+			}
 		} else {
 			if partQuote == QuoteNone {
 				sawUnquoted = true
@@ -579,10 +596,17 @@ func projectPOSIXWord(word *syntax.Word) ArgumentFact {
 		quote = QuoteNone
 	}
 	staticValue := value.String()
+	if !prefixed {
+		prefix = staticValue
+	}
 	result := ArgumentFact{
 		Value:   staticValue,
 		Quote:   quote,
 		Expands: expands || unquotedExpansion,
+	}
+	if result.Expands {
+		result.staticPrefix = prefix
+		result.holeText = posixHoleText(word)
 	}
 	if expands {
 		result.homeSpelling = posixHomeSpelling(word)
@@ -596,6 +620,40 @@ func projectPOSIXWord(word *syntax.Word) ArgumentFact {
 		result.literalTilde = strings.HasPrefix(staticValue, "~")
 	}
 	return result
+}
+
+// posixHoleText is the static text of a word with awkprog.Hole in the place of
+// each expansion, also inside double quotes: the text around a computed part
+// of an awk program is the program awk gets.
+func posixHoleText(word *syntax.Word) string {
+	var text strings.Builder
+	for _, part := range word.Parts {
+		switch part := part.(type) {
+		case *syntax.Lit:
+			text.WriteString(unquotePOSIXLiteral(part.Value, false))
+		case *syntax.SglQuoted:
+			if part.Dollar {
+				text.WriteString(awkprog.Hole)
+			} else {
+				text.WriteString(part.Value)
+			}
+		case *syntax.DblQuoted:
+			if part.Dollar {
+				text.WriteString(awkprog.Hole)
+				continue
+			}
+			for _, nested := range part.Parts {
+				if lit, ok := nested.(*syntax.Lit); ok {
+					text.WriteString(unquotePOSIXLiteral(lit.Value, true))
+				} else {
+					text.WriteString(awkprog.Hole)
+				}
+			}
+		default:
+			text.WriteString(awkprog.Hole)
+		}
+	}
+	return text.String()
 }
 
 // carryPOSIXLiteralTildes keeps the parser's quoted-tilde mark on the argv a
@@ -746,7 +804,11 @@ func projectPOSIXWordPart(part syntax.WordPart) (string, QuoteKind, bool) {
 	case *syntax.Lit:
 		return unquotePOSIXLiteral(part.Value, false), QuoteNone, false
 	case *syntax.SglQuoted:
-		return part.Value, QuoteSingle, part.Dollar
+		if part.Dollar {
+			value, ok := posixANSICValue(part.Value)
+			return value, QuoteSingle, !ok
+		}
+		return part.Value, QuoteSingle, false
 	case *syntax.DblQuoted:
 		var value strings.Builder
 		for _, nested := range part.Parts {
@@ -763,6 +825,59 @@ func projectPOSIXWordPart(part syntax.WordPart) (string, QuoteKind, bool) {
 	default:
 		return "", QuoteNone, true
 	}
+}
+
+// posixANSICParts is parts with each ANSI-C quote marked as one. The POSIX
+// reader parses $'...' as a literal $ before a single-quoted string; bash
+// (the shell of the Bash tool) reads one quote whose escapes it decodes, so
+// the word is that quote: the unescaped $ that ends the literal goes and the
+// quote is read as $'...' (rel-1-0-10:GAP-0351). parts is not changed.
+func posixANSICParts(parts []syntax.WordPart) []syntax.WordPart {
+	var out []syntax.WordPart
+	for index, part := range parts {
+		literal, isLiteral := part.(*syntax.Lit)
+		if !isLiteral || index+1 >= len(parts) || !strings.HasSuffix(literal.Value, "$") {
+			continue
+		}
+		quote, isQuote := parts[index+1].(*syntax.SglQuoted)
+		if !isQuote || quote.Dollar {
+			continue
+		}
+		body := strings.TrimSuffix(literal.Value, "$")
+		if escapes := len(body) - len(strings.TrimRight(body, `\`)); escapes%2 == 1 {
+			continue // \$ is a literal dollar
+		}
+		if out == nil {
+			out = slices.Clone(parts)
+		}
+		out[index] = &syntax.Lit{ValuePos: literal.ValuePos, ValueEnd: literal.ValueEnd, Value: body}
+		out[index+1] = &syntax.SglQuoted{Left: quote.Left, Right: quote.Right, Dollar: true, Value: quote.Value}
+	}
+	if out == nil {
+		return parts
+	}
+	return out
+}
+
+// posixANSICValue is the text the shell makes of an ANSI-C quote ($'...'):
+// its escapes decoded as the shell expander decodes them (expand.Format with
+// no arguments, the hookpaths reading of the same word). A quote whose value
+// is not certain is not static (ok false): one with \c (a control character
+// the expander does not decode) or one that makes a NUL (bash cuts the word
+// there). touch $'\x2eenv' names .env, so the path fact names the file
+// (rel-1-0-10:GAP-0351). Each call hands expand.Format a config of its own:
+// a nil config makes the expander prepare and use one package-wide config
+// (its string builder included), which concurrent hook calls would share
+// (rel-1-0-10:GAP-0351 data race).
+func posixANSICValue(text string) (string, bool) {
+	if strings.Contains(text, `\c`) {
+		return "", false
+	}
+	value, _, err := expand.Format(&expand.Config{}, text, nil)
+	if err != nil || strings.ContainsRune(value, 0) {
+		return "", false
+	}
+	return value, true
 }
 
 func projectPOSIXDoubleQuotedPart(part syntax.WordPart) (string, bool) {
@@ -1021,6 +1136,14 @@ func projectPOSIXLiteralHeredoc(
 		command.LiteralStdin = ""
 		command.LiteralStdinComplete = false
 		command.LiteralStdinAmbiguous = true
+		// The text the body shows (an expansion is one "$") is what a
+		// file-transfer batch fed to a sender names: a put of a credentials
+		// file is a literal word of it, expansions or not
+		// (rel-1-0-10:GAP-0675).
+		if view, _, readable := posixHeredocText(redirection.Hdoc, false, false); readable &&
+			len(view) <= maxScalarBytes && !strings.ContainsRune(view, 0) {
+			command.LiteralStdinView = view
+		}
 		return
 	}
 	body, exact := literalPOSIXHeredocBody(redirection.Hdoc)
@@ -1119,19 +1242,32 @@ func posixHeredocDelimiterQuoted(word *syntax.Word) bool {
 // parameter expansion, or a backslash before $, a backquote, another backslash
 // or a line end. The text then holds one "$" for each expansion and keeps the
 // backslashes as written. readable is false for a quoted body that is not one
-// literal.
+// literal. A plain $HOME or ${HOME} is written as patchHomeMarker instead,
+// unless a literal of the body holds the marker's first byte, so a header
+// whose only expansion is the home is placed as a shell operand $HOME is
+// (rel-1-0-10:GAP-1094).
 func posixHeredocText(
 	body *syntax.Word, quoted, stripTabs bool,
 ) (text string, dynamic, readable bool) {
 	var out strings.Builder
 	lineStart := true
+	markHome := !quoted
+	for _, part := range body.Parts {
+		if literal, ok := part.(*syntax.Lit); ok && strings.IndexByte(literal.Value, patchHomeMarker[0]) >= 0 {
+			markHome = false
+		}
+	}
 	for _, part := range body.Parts {
 		literal, ok := part.(*syntax.Lit)
 		if !ok {
 			if quoted {
 				return "", false, false
 			}
-			out.WriteByte('$')
+			if markHome && plainHomeParameter(part) {
+				out.WriteString(patchHomeMarker)
+			} else {
+				out.WriteByte('$')
+			}
 			lineStart = false
 			dynamic = true
 			continue
@@ -1375,12 +1511,14 @@ func posixDescriptorIsUnredirected(command CommandFact, fd int64) bool {
 func expandStaticPOSIXWrappers(out *parseOutput, wrapperDepth int) {
 	outerCommands := cloneCommands(out.commands)
 	for _, command := range outerCommands {
-		if !command.ArgvComplete || len(command.Argv) < 2 {
+		// An awk call is read word by word, so a computed word that is not
+		// its program leaves the reading of its commands whole (GAP-0653).
+		if len(command.Argv) < 2 || !command.ArgvComplete && !IsAwkCall(command) {
 			continue
 		}
 		program := commandProgram(command.Executable)
 		var child parseOutput
-		switch program {
+		switch posixStaticWrapperSwitchKey(program) {
 		case "bash", "sh", "zsh", "dash", "ksh", "mksh":
 			if structuralPOSIXPipelineStdinInterpreter(out, &command) ||
 				exactPOSIXShellPreviewInvocation(&command) {
@@ -1438,7 +1576,22 @@ func expandStaticPOSIXWrappers(out *parseOutput, wrapperDepth int) {
 				return
 			}
 			child = parseCommandAs(nested, dialect, out.nextID, wrapperDepth+1)
-		case "sudo", "exec", "env", "command", "builtin", "nsenter", "chroot":
+		case "awk", "gawk", "mawk", "nawk":
+			// An awk program starts a shell command through system(),
+			// print | and | getline; a command written as string literals
+			// is judged as the hook running it directly (GAP-0499). One
+			// built from anything else is answered by the gateway at the
+			// unknown tier (awkprog.DynamicReason).
+			body := AwkCall(command).Read().Body
+			if body == "" {
+				continue
+			}
+			if wrapperDepth >= maxWrapperDepth {
+				out.markLimit(IssueWrapperLimit)
+				return
+			}
+			child = parsePOSIX(body, out.nextID, wrapperDepth+1)
+		case posixStaticWrapperKey:
 			nestedArgv, ok, uncertain := staticPOSIXWrapperArgv(command.Argv, program)
 			if uncertain {
 				out.markPartial(IssueUnsupportedConstruct)
@@ -1446,14 +1599,15 @@ func expandStaticPOSIXWrappers(out *parseOutput, wrapperDepth int) {
 			if !ok {
 				continue
 			}
-			if wrapperDepth >= maxWrapperDepth {
+			cost := staticPOSIXWrapperDepthCost(command.Argv)
+			if wrapperDepth+cost > maxWrapperDepth {
 				out.markLimit(IssueWrapperLimit)
 				return
 			}
 			child = analyzeStructuredArgv(
 				nestedArgv,
 				out.nextID,
-				wrapperDepth+1,
+				wrapperDepth+cost,
 				DialectPOSIX,
 			)
 			// The argv was projected exactly by the surrounding POSIX parser;
@@ -1464,23 +1618,14 @@ func expandStaticPOSIXWrappers(out *parseOutput, wrapperDepth int) {
 			continue
 		}
 		for i := range child.commands {
-			if child.commands[i].ParentCommandID == 0 {
-				child.commands[i].ParentCommandID = command.ID
-				if posixDescriptorIsUnredirected(child.commands[i], 1) {
-					child.appendDataFlow(DataFlowFact{
-						FromCommandID: child.commands[i].ID,
-						ToCommandID:   command.ID,
-						From:          DataStdout,
-						To:            DataProcess,
-					})
-				}
+			// The body of a wrapper starts in the folder its caller is in.
+			inner := &child.commands[i]
+			if inner.moverUnread || command.moverUnread {
+				inner.moverUnreadFolders, inner.moverUnread = inner.moverUnreadOrFolders().within(command.moverUnreadOrFolders()), true
 			}
-			child.commands[i].Wrappers = append(
-				[]WrapperFact{{Executable: command.Executable, Argv: cloneSlice(command.Argv)}},
-				child.commands[i].Wrappers...,
-			)
+			inner.workFolders = inner.workFolders.within(command.workFolders)
 		}
-		out.mergeNested(child)
+		mergeStaticPOSIXWrapperChild(out, command, child)
 	}
 }
 
@@ -1515,6 +1660,68 @@ var (
 		"-b": {}, "--background": {},
 	}
 )
+
+// posixContextNeutralWrappers are the static wrappers that change only how
+// long, how nicely or how detached the program they run runs (nice, time,
+// timeout, nohup): not who runs it, where, or with which environment.
+var posixContextNeutralWrappers = map[string]struct{}{
+	"nice": {}, "time": {}, "timeout": {}, "nohup": {},
+}
+
+// staticPOSIXWrapperDepthCost is the wrapper depth the static wrapper at
+// argv[0] spends. A run of context-neutral wrappers is unwrapped linearly and
+// spends none, up to InlineChainWrappers (the chain bound the inline
+// hand-off and the prefix-wrapper readers read whole); a run past that bound
+// is the wrapper limit at once (TRUNCATED, the one bound rule). Every wrapper
+// that changes who runs the program, where or with which environment (env,
+// sudo, doas, exec, command, builtin, nsenter, chroot) spends 1, as on rel,
+// so maxWrapperDepth still bounds them. Joining the shared set
+// (rel-1-0-10:GAP-0859) made a 64-deep nohup chain stop at maxWrapperDepth,
+// below the bound the readers use (TestBoundRuleEveryLaneCapOther,
+// s7/tamper-min wrapper chain; substrate-1:GAP-0334).
+func staticPOSIXWrapperDepthCost(argv []string) int {
+	run := 0
+	for len(argv) >= 2 {
+		program := commandProgram(argv[0])
+		if _, neutral := posixContextNeutralWrappers[program]; !neutral {
+			break
+		}
+		if run++; run > InlineChainWrappers {
+			return maxWrapperDepth + 1
+		}
+		nested, ok, uncertain := staticPOSIXWrapperArgv(argv, program)
+		if !ok || uncertain {
+			break
+		}
+		argv = nested
+	}
+	if run == 0 {
+		return 1
+	}
+	return 0
+}
+
+// staticPOSIXWrapperPrograms are the programs staticPOSIXWrapperArgv unwraps:
+// the one list of the pass-through wrappers, read by both places that
+// expand them (expandStaticPOSIXWrappers and analyzeStructuredArgv) through
+// posixStaticWrapperSwitchKey.
+var staticPOSIXWrapperPrograms = map[string]struct{}{
+	"env": {}, "sudo": {}, "command": {}, "builtin": {}, "exec": {},
+	"nsenter": {}, "chroot": {}, "nice": {}, "time": {}, "timeout": {}, "nohup": {},
+}
+
+// posixStaticWrapperKey is the switch key of a program in
+// staticPOSIXWrapperPrograms.
+const posixStaticWrapperKey = "\x00static-posix-wrapper"
+
+// posixStaticWrapperSwitchKey maps a pass-through wrapper to
+// posixStaticWrapperKey and any other program to itself.
+func posixStaticWrapperSwitchKey(program string) string {
+	if _, ok := staticPOSIXWrapperPrograms[program]; ok {
+		return posixStaticWrapperKey
+	}
+	return program
+}
 
 func staticPOSIXWrapperArgv(argv []string, program string) ([]string, bool, bool) {
 	if len(argv) < 2 {
@@ -1581,6 +1788,117 @@ func staticPOSIXWrapperArgv(argv []string, program string) ([]string, bool, bool
 				return nil, false, true
 			}
 			return cloneSlice(argv[i:]), true, false
+		}
+
+	case "nice":
+		for i := 1; i < len(argv); i++ {
+			arg := argv[i]
+			switch {
+			case arg == "--":
+				if i+1 < len(argv) {
+					return cloneSlice(argv[i+1:]), true, false
+				}
+				return nil, false, false
+			case arg == "--help" || arg == "--version":
+				return nil, false, false
+			case arg == "-n" || arg == "--adjustment":
+				i++
+				if i >= len(argv) {
+					return nil, false, true
+				}
+			case strings.HasPrefix(arg, "--adjustment="):
+			case strings.HasPrefix(arg, "-n") && posixSignedDecimal(arg[2:]):
+			case strings.HasPrefix(arg, "-") && posixSignedDecimal(strings.TrimLeft(arg, "-")):
+				// The historical -N and --N spellings of -n N.
+			case strings.HasPrefix(arg, "-"):
+				return nil, false, true
+			default:
+				return cloneSlice(argv[i:]), true, false
+			}
+		}
+
+	case "time":
+		// The external time program (the shell keyword is parsed as syntax).
+		for i := 1; i < len(argv); i++ {
+			arg := argv[i]
+			switch {
+			case arg == "--":
+				if i+1 < len(argv) {
+					return cloneSlice(argv[i+1:]), true, false
+				}
+				return nil, false, false
+			case arg == "-p" || arg == "-v" || arg == "-a" || arg == "-q" ||
+				arg == "--portability" || arg == "--verbose" || arg == "--append" ||
+				arg == "--quiet":
+			case arg == "-f" || arg == "--format":
+				i++
+				if i >= len(argv) {
+					return nil, false, true
+				}
+			case strings.HasPrefix(arg, "--format="):
+			case strings.HasPrefix(arg, "-f") && len(arg) > 2:
+			case strings.HasPrefix(arg, "-"):
+				// -o FILE writes a report file; --help, --version and the
+				// rest are not a plain pass-through.
+				return nil, false, true
+			default:
+				return cloneSlice(argv[i:]), true, false
+			}
+		}
+
+	case "timeout":
+		i := 1
+	timeoutOptions:
+		for ; i < len(argv); i++ {
+			arg := argv[i]
+			switch {
+			case arg == "--":
+				i++
+				break timeoutOptions
+			case arg == "--preserve-status" || arg == "--foreground" ||
+				arg == "-v" || arg == "--verbose":
+			case arg == "-s" || arg == "--signal" || arg == "-k" || arg == "--kill-after":
+				i++
+				if i >= len(argv) {
+					return nil, false, true
+				}
+			case strings.HasPrefix(arg, "--signal=") || strings.HasPrefix(arg, "--kill-after="):
+			case (strings.HasPrefix(arg, "-s") || strings.HasPrefix(arg, "-k")) && len(arg) > 2:
+			case strings.HasPrefix(arg, "-"):
+				return nil, false, true
+			default:
+				break timeoutOptions
+			}
+		}
+		if i >= len(argv) {
+			return nil, false, false
+		}
+		if !posixTimeoutDuration(argv[i]) {
+			return nil, false, true
+		}
+		if i+1 < len(argv) {
+			return cloneSlice(argv[i+1:]), true, false
+		}
+		return nil, false, false
+
+	case "nohup":
+		// nohup takes no options but --help, --version and the -- end
+		// marker: its first word decides (staticcheck SA4008, the loop
+		// this replaces never passed its first word).
+		if len(argv) > 1 {
+			switch arg := argv[1]; {
+			case arg == "--":
+				if len(argv) > 2 {
+					return cloneSlice(argv[2:]), true, false
+				}
+				return nil, false, false
+			case arg == "--help" || arg == "--version":
+				return nil, false, false
+			case strings.HasPrefix(arg, "-"):
+				return nil, false, true
+			default:
+				return cloneSlice(argv[1:]), true, false
+			}
 		}
 
 	case "sudo":
@@ -1790,4 +2108,39 @@ func posixShellProgram(program string) bool {
 func isStaticEnvironmentAssignment(value string) bool {
 	name, _, ok := strings.Cut(value, "=")
 	return ok && name != ""
+}
+
+// posixSignedDecimal reports an optionally signed decimal number.
+func posixSignedDecimal(value string) bool {
+	value = strings.TrimPrefix(strings.TrimPrefix(value, "+"), "-")
+	if value == "" {
+		return false
+	}
+	for _, character := range value {
+		if character < '0' || character > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// posixTimeoutDuration reports a timeout(1) DURATION: a number with an
+// optional s, m, h or d suffix.
+func posixTimeoutDuration(value string) bool {
+	if value != "" && strings.ContainsRune("smhd", rune(value[len(value)-1])) {
+		value = value[:len(value)-1]
+	}
+	digits := 0
+	dots := 0
+	for _, character := range value {
+		switch {
+		case character >= '0' && character <= '9':
+			digits++
+		case character == '.':
+			dots++
+		default:
+			return false
+		}
+	}
+	return digits > 0 && dots <= 1
 }

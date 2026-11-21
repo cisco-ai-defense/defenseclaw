@@ -25,13 +25,16 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
-// managedEnterpriseActive mirrors managed.IsManagedEnterprise(cfg.
-// DeploymentMode) at the gateway-package level so request-scoped policy
-// propagation and compatibility notification sinks can gate the
-// cloud-controlled per-inspection redaction directive on managed_enterprise.
+// managedEnterpriseActive mirrors cfg.ManagedAIDOnly(), the Secure Client
+// posture (a managed_enterprise install whose enterprise profile is
+// secure_client, which is also what a managed config with no
+// enterprise.profile resolves to), at the gateway-package level so
+// request-scoped policy propagation and compatibility notification sinks can
+// gate the cloud-controlled per-inspection redaction directive on it. A
+// managed standalone install leaves it false.
 //
-// Wired from deployment_mode by NewSidecar and applyConfigReload, alongside
-// redaction.SetAgentReasonRedactionDisabled. Reads use atomic.Bool so request
+// Wired by setManagedEnterpriseRedactionPosture from NewSidecar and the
+// config reload, alongside redaction.SetAgentReasonRedactionDisabled. Reads use atomic.Bool so request
 // hot paths stay lock-free.
 var managedEnterpriseActive atomic.Bool
 

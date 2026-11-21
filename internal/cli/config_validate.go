@@ -15,16 +15,22 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"runtime"
+	"sort"
 	"strings"
 
 	"github.com/spf13/cobra"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/observability"
 )
 
 var (
@@ -120,6 +126,7 @@ var configValidateCmd = &cobra.Command{
 		warnings = append(warnings, configV8InstalledAdvisories(loaded)...)
 		warnings = append(warnings, configValidateManagedStandaloneWarnings(loaded)...)
 		warnings = append(warnings, configValidateUserEntryWarnings(cmd.Context(), loaded.runtime.Guardrail.ProfileAssignments)...)
+		warnings = append(warnings, configValidateRoutingGroupWarnings(cmd.Context(), loaded.runtime)...)
 		if configValidateJSON {
 			valid := true
 			encoder := json.NewEncoder(out)
@@ -153,6 +160,18 @@ var configValidateUserEntryWarnings = func(ctx context.Context, assignments []co
 	return warnings
 }
 
+// configValidateRoutingGroupWarnings names the routing.admin rules and
+// group budgets whose group this computer knows by no spelling the matcher
+// selects, so a deny there never acts (rel-1-0-10:GAP-1124). A seam for
+// tests.
+var configValidateRoutingGroupWarnings = func(ctx context.Context, loadedCfg *config.Config) []string {
+	spoolDir := ""
+	if loadedCfg != nil && loadedCfg.DataDir != "" {
+		spoolDir = enterprisehooks.IdentitySpoolDir(managed.HookGuardianAuthorizationDir(loadedCfg.DataDir))
+	}
+	return gateway.RoutingAdminGroupWarnings(ctx, loadedCfg, spoolDir)
+}
+
 // configValidateLayout is this computer's standalone layout. A seam for
 // tests.
 var configValidateLayout = func() (managed.StandaloneLayout, error) {
@@ -170,7 +189,7 @@ func configValidateManagedHostLayout() (managed.StandaloneLayout, bool) {
 	// marker, as every other managed-host check there reads it; without it
 	// validate with no file read the per-user config the administrator has
 	// none of (GAP-1625, the Windows half of GAP-0602).
-	if _, present := managedHostWindowsStandalone(); present {
+	if _, present := hookcli.ManagedHostWindowsStandalone(); present {
 		return layout, true
 	}
 	if layout.DescriptorPath == "" {
@@ -244,6 +263,98 @@ func configValidateManagedStandaloneWarnings(loaded *loadedConfigV8File) []strin
 			port, config.DefaultGatewayAPIPort)}
 	}
 	return nil
+}
+
+// configValidateDestinationWarnings names two push destination settings that
+// validate accepts offline but that deliver nothing (GAP-0272):
+//   - a Kubernetes Service host (NAME.NAMESPACE.svc[.cluster.local]) resolves
+//     to a cluster address, private on most clusters: without
+//     network_safety.allow_private_networks the gateway starts the
+//     destination deferred and refuses that address on every delivery;
+//   - an otlp destination on port 4318 (OTLP/HTTP) with protocol grpc, the
+//     default.
+func configValidateDestinationWarnings(loaded *loadedConfigV8File) []string {
+	if loaded == nil || loaded.compiled == nil || loaded.compiled.Plan == nil {
+		return nil
+	}
+	var warnings []string
+	for _, shown := range loaded.compiled.Plan.Destinations() {
+		destination, ok := loaded.compiled.Plan.RuntimeDestination(shown.Name)
+		if !ok || !destination.Enabled {
+			continue
+		}
+		switch destination.Kind {
+		case config.ObservabilityV8DestinationOTLP, config.ObservabilityV8DestinationSplunkHEC,
+			config.ObservabilityV8DestinationHTTPJSONL:
+		default:
+			continue
+		}
+		host, port := configValidateEndpointHostPort(destination.Transport.Endpoint)
+		safety := destination.Transport.NetworkSafety
+		// Only allow_private_networks admits a private ClusterIP; allow_cgnat
+		// alone does not (GAP-0287). Every endpoint counts: the main one and
+		// each signal override.
+		if safety == nil || !safety.AllowPrivateNetworks {
+			hosts := []string{host}
+			for _, signal := range configValidateOverrideSignals(destination.Transport.SignalOverrides) {
+				if endpoint := destination.Transport.SignalOverrides[signal].Endpoint; endpoint != "" {
+					overrideHost, _ := configValidateEndpointHostPort(endpoint)
+					hosts = append(hosts, overrideHost)
+				}
+			}
+			seen := map[string]bool{}
+			for _, candidate := range hosts {
+				if seen[candidate] || !configValidateKubernetesServiceHost(candidate) {
+					continue
+				}
+				seen[candidate] = true
+				warnings = append(warnings, fmt.Sprintf(
+					"private_service_endpoint: observability destination %q: %s is a Kubernetes Service name, which resolves to a cluster address; "+
+						"set network_safety.allow_private_networks: true on it, or the gateway runs without it and refuses that address on every delivery",
+					destination.Name, candidate))
+			}
+		}
+		if destination.Kind == config.ObservabilityV8DestinationOTLP && port == "4318" &&
+			(destination.Transport.Protocol == "grpc" || destination.Transport.Protocol == "grpc/protobuf") {
+			warnings = append(warnings, fmt.Sprintf(
+				"otlp_protocol_port: observability destination %q: protocol is grpc (the default) on port 4318, the OTLP/HTTP port; "+
+					"set protocol: http/protobuf, or use the gRPC port 4317", destination.Name))
+		}
+	}
+	return warnings
+}
+
+// configValidateOverrideSignals returns the override signals in a stable order.
+func configValidateOverrideSignals(overrides map[observability.Signal]config.ObservabilityV8SignalOverrideSource) []observability.Signal {
+	signals := make([]observability.Signal, 0, len(overrides))
+	for signal := range overrides {
+		signals = append(signals, signal)
+	}
+	sort.Slice(signals, func(i, j int) bool { return signals[i] < signals[j] })
+	return signals
+}
+
+// configValidateKubernetesServiceHost reports a Service DNS name of the
+// default cluster domain: NAME.NAMESPACE.svc or NAME.NAMESPACE.svc.cluster.local.
+func configValidateKubernetesServiceHost(host string) bool {
+	host = strings.TrimSuffix(strings.ToLower(host), ".")
+	return strings.HasSuffix(host, ".svc") || strings.HasSuffix(host, ".svc.cluster.local")
+}
+
+// configValidateEndpointHostPort splits a URL or a gRPC host:port authority.
+func configValidateEndpointHostPort(endpoint string) (string, string) {
+	if strings.Contains(endpoint, "://") {
+		parsed, err := url.Parse(endpoint)
+		if err != nil {
+			return "", ""
+		}
+		return parsed.Hostname(), parsed.Port()
+	}
+	host, port, err := net.SplitHostPort(endpoint)
+	if err != nil {
+		return endpoint, ""
+	}
+	return host, port
 }
 
 func configValidateShownPath(path string) string {

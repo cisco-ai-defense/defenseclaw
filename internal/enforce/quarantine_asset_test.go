@@ -6,9 +6,7 @@
 package enforce
 
 import (
-	"encoding/json"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -299,68 +297,6 @@ func TestQuarantineSourceTheProcessMayNotDeleteIsRemovedByTheGuardian(t *testing
 	}
 	if err := <-refused; err == nil {
 		t.Fatal("the guardian accepted a source outside the watched folders")
-	}
-}
-
-// GAP-0414: the guardian could not remove the source of a signed-out
-// Microsoft Entra ID user (no S4U logon); it answered with an error and
-// forgot the request, so the skill stayed in the profile. A deferred removal
-// is kept and retried until it succeeds.
-func TestDeferredQuarantineRemovalIsRetriedUntilItSucceeds(t *testing.T) {
-	root := t.TempDir()
-	channel := QuarantineRemovalChannelFor(filepath.Join(root, "data"), filepath.Join(root, "guardian"))
-	request := QuarantineRemovalRequest{
-		Version: quarantineRemovalVersion, ID: "rec-gap0414", Nonce: "n1", TargetType: "skill",
-		SourcePath: filepath.Join(root, "skills", "bad"), QuarantinePath: filepath.Join(root, "quarantine", "bad"),
-		ContentHash: strings.Repeat("a", 64),
-	}
-	payload, err := json.Marshal(request)
-	if err != nil {
-		t.Fatal(err)
-	}
-	requestPath := filepath.Join(channel.RequestDir, request.ID+".json")
-	if err := os.MkdirAll(channel.RequestDir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(requestPath, payload, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	channel.ServeOnce(func(QuarantineRemovalRequest) error {
-		return fmt.Errorf("%w: the owner is signed out", ErrQuarantineRemovalDeferred)
-	})
-	var result QuarantineRemovalResult
-	if err := readQuarantineRemovalFile(filepath.Join(channel.ResultDir, request.ID+".json"), &result); err != nil || result.OK ||
-		!strings.Contains(result.Error, "deferred") {
-		t.Fatalf("deferred answer = %+v, %v", result, err)
-	}
-	// GAP-0795: the deferred request keeps why, for enterprise windows status.
-	if deferred := channel.DeferredRemovals(); len(deferred) != 1 || deferred[0].Deferred != "the owner is signed out" {
-		t.Fatalf("deferred removals %+v, want one saying why", deferred)
-	}
-	if err := os.Remove(requestPath); err != nil { // the gateway collected its answer
-		t.Fatal(err)
-	}
-	signedIn, retries := false, 0
-	retry := func(got QuarantineRemovalRequest) error {
-		retries++
-		if got.ID != request.ID || got.SourcePath != request.SourcePath {
-			t.Fatalf("retried %+v", got)
-		}
-		if !signedIn {
-			return ErrQuarantineRemovalDeferred
-		}
-		if retries == 2 {
-			return fmt.Errorf("sharing violation")
-		}
-		return nil
-	}
-	channel.ServeDeferred(retry)
-	signedIn = true
-	channel.ServeDeferred(retry)
-	channel.ServeDeferred(retry)
-	channel.ServeDeferred(retry)
-	if retries != 3 || len(channel.DeferredRemovals()) != 0 {
-		t.Fatalf("deferred removal ran %d times, want 3 (kept after transient error, dropped once removed)", retries)
 	}
 }
 

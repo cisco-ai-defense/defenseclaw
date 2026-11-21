@@ -94,6 +94,8 @@ gateway.
 | `bundle-receipt.schema.json` | `.../enterprise/management/bundle-receipt-v1.json` | the files `<etc>/bundles/receipt.json` and `<etc>/bundles/receipt-events/<receipt_id>.json` |
 | `bundle-anchors.schema.json` | `.../enterprise/management/bundle-anchors-v1.json` | the trust anchor file the agent supplies (input) |
 | `identity-refresh.schema.json` | `.../enterprise/management/identity-refresh-v1.json` | `enterprise identity refresh --json` (from 1.0.6) |
+| `substrate-status.schema.json` | `.../enterprise/management/substrate-status-v1.json` | `defenseclaw substrate status --json`, a cluster (from 1.0.10) |
+| `substrate-verify.schema.json` | `.../enterprise/management/substrate-verify-v1.json` | `defenseclaw substrate verify --json`, a cluster (from 1.0.10) |
 
 Every `$id` starts with `https://defenseclaw.cisco.com/schemas/enterprise/`.
 The schemas are Draft 2020-12 and closed (`additionalProperties: false`), so
@@ -112,7 +114,7 @@ local detail and the administrator's tenant and key choices. Keep them on
 the device: warning and error messages (with their `subject`, `detail`,
 `reason` and `path`, and a receipt's `error_message`), `enrollment.accounts`,
 `cowork.accounts` and `cowork.claude_desktop.accounts`, `excluded_users` and `excluded_groups`, `removed_connectors`, `services`,
-`machine_policy`, `destinations`, `audit_store`, `scanners`, `api_port_holders`, `log_path`, `package_path`,
+`machine_policy`, `destinations`, `audit_store`, `scanners`, `api_port_holders`, `routing` (the model routing counts and route-only readiness of status and verify), `log_path`, `package_path`,
 `last_reload_error`, `changes`, `sessions_restart_required.entries`, a
 receipt's `actor` and `principal`, the bundle `created_by` and
 `change_summary`, the credential names (`secret_refs[].name`,
@@ -132,6 +134,8 @@ with only the members that are safe to send off the device:
 | `bundle-status-forward.schema.json` | `bundle status --json` |
 | `bundle-receipt-forward.schema.json` | receipt files (4.9) |
 | `identity-refresh-forward.schema.json` | `enterprise identity refresh --json` (from 1.0.6) |
+| `substrate-status-forward.schema.json` | `substrate status --json` (from 1.0.10): all but the check messages |
+| `substrate-verify-forward.schema.json` | `substrate verify --json` (from 1.0.10): all but the check messages |
 
 They list only DefenseClaw ids, bundle and receipt ids, the agent's own
 `delivery_id`, digests, counts, codes, booleans, enums, versions and times.

@@ -56,7 +56,7 @@ func TestRequestGatewayShutdownSendsAuthenticatedRuntimeIdentity(t *testing.T) {
 	cfg.DataDir = dataDir
 	cfg.Gateway.APIBind = host
 	cfg.Gateway.APIPort = port
-	if err := requestGatewayShutdown(server.Client(), cfg, token, os.Getpid()); err != nil {
+	if err := requestGatewayShutdownOnDataDir(server.Client(), cfg, token, os.Getpid(), cfg.DataDir); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -64,7 +64,7 @@ func TestRequestGatewayShutdownSendsAuthenticatedRuntimeIdentity(t *testing.T) {
 func TestRequestGatewayShutdownRejectsMissingTokenAndFailureResponse(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.DataDir = t.TempDir()
-	if err := requestGatewayShutdown(http.DefaultClient, cfg, "", 1); err == nil || !strings.Contains(err.Error(), "token") {
+	if err := requestGatewayShutdownOnDataDir(http.DefaultClient, cfg, "", 1, cfg.DataDir); err == nil || !strings.Contains(err.Error(), "token") {
 		t.Fatalf("missing-token error = %v", err)
 	}
 
@@ -74,7 +74,7 @@ func TestRequestGatewayShutdownRejectsMissingTokenAndFailureResponse(t *testing.
 	defer server.Close()
 	host, port := splitHostPortForTest(t, strings.TrimPrefix(server.URL, "http://"))
 	cfg.Gateway.APIBind, cfg.Gateway.APIPort = host, port
-	if err := requestGatewayShutdown(server.Client(), cfg, "token", os.Getpid()); err == nil || !strings.Contains(err.Error(), "409") {
+	if err := requestGatewayShutdownOnDataDir(server.Client(), cfg, "token", os.Getpid(), cfg.DataDir); err == nil || !strings.Contains(err.Error(), "409") {
 		t.Fatalf("failure response error = %v", err)
 	}
 }
@@ -91,7 +91,7 @@ func TestRequestGatewayShutdownNeverLeaksTokenToForeignListener(t *testing.T) {
 	cfg.DataDir = t.TempDir()
 	cfg.Gateway.APIBind, cfg.Gateway.APIPort = host, port
 	withStartupListenerInspector(t, func(string, int) (int, error) { return 99, nil })
-	err := requestGatewayShutdown(server.Client(), cfg, "must-not-leak", 42)
+	err := requestGatewayShutdownOnDataDir(server.Client(), cfg, "must-not-leak", 42, cfg.DataDir)
 	if err == nil || !strings.Contains(err.Error(), "refusing to send") {
 		t.Fatalf("foreign-listener error = %v", err)
 	}
@@ -104,7 +104,7 @@ func TestRequestGatewayShutdownNeverSendsTokenOffLoopback(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.DataDir = t.TempDir()
 	cfg.Gateway.APIBind = "198.51.100.8"
-	err := requestGatewayShutdown(http.DefaultClient, cfg, "must-not-leak", os.Getpid())
+	err := requestGatewayShutdownOnDataDir(http.DefaultClient, cfg, "must-not-leak", os.Getpid(), cfg.DataDir)
 	if err == nil || !strings.Contains(err.Error(), "non-loopback") {
 		t.Fatalf("non-loopback shutdown error = %v", err)
 	}
@@ -126,7 +126,7 @@ func TestRequestGatewayShutdownDoesNotFollowRedirects(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.DataDir = t.TempDir()
 	cfg.Gateway.APIBind, cfg.Gateway.APIPort = host, port
-	err := requestGatewayShutdown(origin.Client(), cfg, "must-not-leak", os.Getpid())
+	err := requestGatewayShutdownOnDataDir(origin.Client(), cfg, "must-not-leak", os.Getpid(), cfg.DataDir)
 	if err == nil || !strings.Contains(err.Error(), "307") {
 		t.Fatalf("redirect response error = %v, want 307 rejection", err)
 	}

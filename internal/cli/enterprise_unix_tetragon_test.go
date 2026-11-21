@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 )
 
@@ -31,10 +32,10 @@ func TestUnixTetragonCommandTree(t *testing.T) {
 			t.Fatalf("enterprise linux tetragon %s: %v", action, err)
 		}
 		parseErr := cmd.ParseFlags([]string{"--bogus"})
-		if parseErr == nil || commandExitCode(cmd.FlagErrorFunc()(cmd, parseErr)) != want {
+		if parseErr == nil || cliusage.ExitCode(cmd.FlagErrorFunc()(cmd, parseErr)) != want {
 			t.Fatalf("tetragon %s --bogus: %v", action, parseErr)
 		}
-		if err := cmd.ValidateArgs([]string{"extra"}); err == nil || commandExitCode(err) != want {
+		if err := cmd.ValidateArgs([]string{"extra"}); err == nil || cliusage.ExitCode(err) != want {
 			t.Fatalf("tetragon %s extra: %v", action, err)
 		}
 	}
@@ -45,7 +46,7 @@ func TestUnixTetragonCommandTree(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var coded *exitCodeError
+	var coded *cliusage.ExitCodeError
 	if runErr := group.RunE(group, []string{"bogus"}); !errors.As(runErr, &coded) || coded.ExitCode() != want {
 		t.Fatalf("tetragon bogus: %v", runErr)
 	}
@@ -62,7 +63,7 @@ func TestUnixTetragonCommandTree(t *testing.T) {
 			t.Fatalf("--for %s = %s, %v", value, got, err)
 		}
 	}
-	if !strings.Contains(plainFlagValueError(pause.ParseFlags([]string{"--for=soon"})), "--for takes a duration up to 7d") {
+	if !strings.Contains(cliusage.PlainFlagValueError(pause.ParseFlags([]string{"--for=soon"})), "--for takes a duration up to 7d") {
 		t.Fatal("--for=soon has no plain message")
 	}
 	if err := pause.ParseFlags([]string{"--for=0"}); err != nil {
@@ -82,7 +83,7 @@ func TestUnixTetragonCommandTree(t *testing.T) {
 			t.Fatalf("--ready-for %s = %q, %v", mode, got, err)
 		}
 	}
-	if !strings.Contains(plainFlagValueError(verify.ParseFlags([]string{"--ready-for=off"})), "--ready-for takes consume, observe or enforce") {
+	if !strings.Contains(cliusage.PlainFlagValueError(verify.ParseFlags([]string{"--ready-for=off"})), "--ready-for takes consume, observe or enforce") {
 		t.Fatal("--ready-for=off has no plain message")
 	}
 	status, _, _ := rootCmd.Find([]string{"enterprise", "linux", "tetragon", "status"})

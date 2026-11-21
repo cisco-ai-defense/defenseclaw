@@ -27,12 +27,8 @@ func TestPlaceDirectoryReadsAParentStepAfterALinkByTheFileSystem(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := os.Symlink(filepath.Join(home, ".ssh"), filepath.Join(project, "lnk")); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(project, filepath.Join(root, "proj-alias")); err != nil {
-		t.Fatal(err)
-	}
+	testSymlink(t, filepath.Join(home, ".ssh"), filepath.Join(project, "lnk"))
+	testSymlink(t, project, filepath.Join(root, "proj-alias"))
 	for _, c := range []struct{ name, base, dir, want string }{
 		{"absolute through a link", "", project + "/lnk/..", home},
 		{"absolute with a dot", "", project + "/lnk/../.", home},
@@ -67,9 +63,7 @@ func TestCleanedDirectoryIsTheTextCleanUpCodexAppliesToAWorkdir(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := os.Symlink(filepath.Join(home, ".ssh"), filepath.Join(project, "lnk")); err != nil {
-		t.Fatal(err)
-	}
+	testSymlink(t, filepath.Join(home, ".ssh"), filepath.Join(project, "lnk"))
 	for _, c := range []struct{ name, base, dir, want string }{
 		{"relative through a link", project, "lnk/..", project},
 		{"absolute through a link", project, project + "/lnk/..", project},
@@ -109,9 +103,7 @@ func TestPlaceDirectoryReadsAParentStepAsTextWhereTheSystemDoes(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := os.Symlink(filepath.Join(home, ".ssh"), filepath.Join(project, "lnk")); err != nil {
-		t.Fatal(err)
-	}
+	testSymlink(t, filepath.Join(home, ".ssh"), filepath.Join(project, "lnk"))
 	for _, c := range []struct{ name, base, dir, want string }{
 		{"absolute through a link", "", project + "/lnk/..", project},
 		{"absolute with a dot", "", project + "/lnk/../.", project},

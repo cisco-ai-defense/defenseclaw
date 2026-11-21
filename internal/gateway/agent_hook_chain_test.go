@@ -538,7 +538,7 @@ func TestProjectFirewallTrustExpansionThenDestinationUse(t *testing.T) {
 }
 
 func TestAuthenticatedHookDownloadThenExecuteRequiresSameSessionAndSuccess(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	installToolCallCorpusProfileConnector(t, "claudecode", "strict")
 	store, logger := testStoreAndV8Logger(t)
 	cfg := &config.Config{}
@@ -587,7 +587,7 @@ func TestAuthenticatedHookDownloadThenExecuteRequiresSameSessionAndSuccess(t *te
 }
 
 func TestAuthenticatedHookFirewallExpansionRequiresSuccessfulEdit(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	installDefaultProfileConnector(t, "claudecode")
 	store, logger := testStoreAndV8Logger(t)
 	cfg := &config.Config{}
@@ -700,7 +700,7 @@ func TestProjectSQLServerXPCommandShellChainIsExactAndTerminalSuccessOnly(t *tes
 }
 
 func TestAuthenticatedHookSQLServerChainRequiresBothSuccessfulOutcomes(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	installDefaultProfileConnector(t, "claudecode")
 	store, logger := testStoreAndV8Logger(t)
 	cfg := &config.Config{}
@@ -878,7 +878,7 @@ spec:
 }
 
 func TestAuthenticatedHookPrivilegedKubernetesRequiresThreeSuccessfulOperations(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	installDefaultProfileConnector(t, "claudecode")
 	store, logger := testStoreAndV8Logger(t)
 	cfg := &config.Config{}
@@ -1063,7 +1063,7 @@ func TestProjectWirelessCaptureDeauthUsesOnlyExactOpaqueBSSIDJoin(t *testing.T) 
 }
 
 func TestAuthenticatedHookWirelessCaptureDeauthRequiresSuccessfulSameSessionSequence(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	installDefaultProfileConnector(t, "claudecode")
 	store, logger := testStoreAndV8Logger(t)
 	cfg := &config.Config{}
@@ -1492,7 +1492,7 @@ func TestProjectStagedReverseShellPersistenceUsesExactJoinAndRewriteBarrier(t *t
 }
 
 func TestAuthenticatedHookStagedReverseShellPersistenceRequiresSuccessfulExactLineage(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	installDefaultProfileConnector(t, "claudecode")
 	store, logger := testStoreAndV8Logger(t)
 	cfg := &config.Config{}
@@ -1593,7 +1593,7 @@ func TestAuthenticatedHookStagedReverseShellPersistenceRequiresSuccessfulExactLi
 }
 
 func TestAuthenticatedHookSecretsdumpPsExecRequiresSuccessfulSameSessionIdentity(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	installDefaultProfileConnector(t, "claudecode")
 	store, logger := testStoreAndV8Logger(t)
 	cfg := &config.Config{}
@@ -1864,7 +1864,7 @@ func TestTrustedActionChainCatalogProjectsExactPairsAndBenignNeighbors(t *testin
 }
 
 func TestAuthenticatedHookToolChainHonorsProfileActionAfterSuccess(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	policiesRoot := guardrailPoliciesRoot(t)
 	tests := []struct {
 		name           string
@@ -1925,7 +1925,7 @@ func TestAuthenticatedHookToolChainHonorsProfileActionAfterSuccess(t *testing.T)
 }
 
 func TestAuthenticatedHookIdentityBoundCriticalChainRemainsVisibleWithAtomicBlock(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	policiesRoot := guardrailPoliciesRoot(t)
 	for _, profileName := range []string{"default", "permissive", "strict"} {
 		t.Run(profileName, func(t *testing.T) {
@@ -1980,7 +1980,7 @@ func TestAuthenticatedHookIdentityBoundCriticalChainRemainsVisibleWithAtomicBloc
 }
 
 func TestAuthenticatedHookToolChainDoesNotArmOnAttemptOrFailure(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	installDefaultProfileConnector(t, "claudecode")
 	store, logger := testStoreAndV8Logger(t)
 	cfg := &config.Config{}
@@ -2041,7 +2041,7 @@ func TestAuthenticatedHookToolChainDoesNotArmOnAttemptOrFailure(t *testing.T) {
 }
 
 func TestAuthenticatedAMPToolChainUsesExactResultLifecycle(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	installToolCallCorpusProfileConnector(t, "amp", "strict")
 	store, logger := testStoreAndV8Logger(t)
 	cfg := &config.Config{}
@@ -2121,7 +2121,7 @@ func TestAuthenticatedAMPToolChainUsesExactResultLifecycle(t *testing.T) {
 }
 
 func TestAuthenticatedHookToolChainResetsOnlyAtSessionBoundary(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	for _, test := range []struct {
 		name      string
 		connector string
@@ -2206,7 +2206,7 @@ func TestAuthenticatedHookToolChainResetsOnlyAtSessionBoundary(t *testing.T) {
 }
 
 func TestAuthenticatedHookToolChainDoesNotInferStateTransitionPayload(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	installDefaultProfileConnector(t, "claudecode")
 	store, logger := testStoreAndV8Logger(t)
 	cfg := &config.Config{}
@@ -2241,7 +2241,7 @@ func TestAuthenticatedHookToolChainDoesNotInferStateTransitionPayload(t *testing
 }
 
 func TestAuthenticatedHookToolChainDenialRequiresPreparedInvocation(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	installDefaultProfileConnector(t, "claudecode")
 	fixture := newSidecarRuntimeFixture(t, true)
 	store := fixture.store
@@ -2518,7 +2518,7 @@ func TestSafeApplyAgentHookToolChainsPanicBeforeCommitUsesFailMode(t *testing.T)
 }
 
 func TestSafeApplyAgentHookToolChainsPanicAfterDetectionOnlyChainFailsClosed(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	installDefaultProfileConnector(t, "claudecode")
 	store, logger := testStoreAndV8Logger(t)
 	cfg := &config.Config{}
@@ -2657,7 +2657,7 @@ func assertToolChainStep(
 // judge; neither does a download from a built-in internal suffix or from a
 // domain in guardrail.internal_domains.
 func TestAuthenticatedHookDownloadThenExecuteHostnameRelativeAndUserRequest(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	installToolCallCorpusProfileConnector(t, "claudecode", "strict")
 	for _, withJudge := range []bool{false, true} {
 		t.Run(fmt.Sprintf("judge=%t", withJudge), func(t *testing.T) {

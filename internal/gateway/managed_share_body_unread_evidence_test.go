@@ -21,7 +21,7 @@ import (
 // names is blocked in every tier whatever the evidence says
 // (rel-1-0-9:GAP-0950, managed macOS and Linux).
 func TestManagedGatewayJudgesAScriptBodyTheHookClientLeftUnread(t *testing.T) {
-	home, _ := r104ReviewHome(t)
+	home, _ := r104ReviewHomeNoAlias(t)
 	// The managed gateway has no view of this folder: it reads nothing in it.
 	cwd := filepath.Join(home, "unreadable-by-the-gateway", "hop001")
 	type outcome struct{ strict, def string }

@@ -83,6 +83,7 @@ func verifyManagedConnectedPeer(parent context.Context, client, server *net.TCPA
 // again until the deadline; a row of another process refuses at once.
 func awaitManagedDarwinSocket(ctx context.Context, client, server *net.TCPAddr, servicePID int) error {
 	refused := errors.New("connected listener is not the managed gateway service")
+	attempt := 0
 	for {
 		table, err := managedDarwinSocketTable(ctx)
 		if err != nil {
@@ -98,7 +99,7 @@ func awaitManagedDarwinSocket(ctx context.Context, client, server *net.TCPAddr, 
 		select {
 		case <-ctx.Done():
 			return refused
-		case <-time.After(20 * time.Millisecond):
+		case <-time.After(nextConnectedPollPause(&attempt)):
 		}
 	}
 }

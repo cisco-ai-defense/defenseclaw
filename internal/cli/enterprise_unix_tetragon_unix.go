@@ -18,17 +18,18 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/enterpriseunix"
 )
 
 func runUnixTetragon(cmd *cobra.Command, action string, opts *unixTetragonOptions) error {
 	if goos := enterpriseunix.CurrentGOOS(); goos != "linux" {
-		return withExitCode(fmt.Errorf("`enterprise linux tetragon` reads Linux hosts; this host is %s", goos), enterprisestatus.UnixExitInvalidArgs)
+		return cliusage.WithExitCode(fmt.Errorf("`enterprise linux tetragon` reads Linux hosts; this host is %s", goos), enterprisestatus.UnixExitInvalidArgs)
 	}
 	env, err := newUnixLifecycleEnv("linux")
 	if err != nil {
-		return withExitCode(err, enterprisestatus.UnixExitFailure)
+		return cliusage.WithExitCode(err, enterprisestatus.UnixExitFailure)
 	}
 	if action == enterpriseunix.TetragonActionVerify {
 		readiness := enterpriseunix.RunTetragonVerify(cmd.Context(), env, opts.readyFor)
@@ -40,9 +41,9 @@ func runUnixTetragon(cmd *cobra.Command, action string, opts *unixTetragonOption
 			return nil
 		}
 		if len(readiness.Errors) > 0 {
-			return withExitCode(errors.New("tetragon verify failed; see the "+countNoun(len(readiness.Errors), "problem")+" listed above"), readiness.ExitCode)
+			return cliusage.WithExitCode(errors.New("tetragon verify failed; see the "+countNoun(len(readiness.Errors), "problem")+" listed above"), readiness.ExitCode)
 		}
-		return withExitCode(errors.New("not ready for "+readiness.ReadyFor+"; see the failing checks above"), readiness.ExitCode)
+		return cliusage.WithExitCode(errors.New("not ready for "+readiness.ReadyFor+"; see the failing checks above"), readiness.ExitCode)
 	}
 	report := enterpriseunix.RunTetragon(cmd.Context(), env, enterpriseunix.TetragonOptions{
 		Action: action, For: opts.pauseFor, UntilReboot: opts.untilReboot, Reason: opts.reason, User: opts.user,
@@ -54,7 +55,7 @@ func runUnixTetragon(cmd *cobra.Command, action string, opts *unixTetragonOption
 	if report.OK {
 		return nil
 	}
-	return withExitCode(errors.New("tetragon "+action+" failed; see the "+countNoun(len(report.Errors), "problem")+" listed above"), report.ExitCode)
+	return cliusage.WithExitCode(errors.New("tetragon "+action+" failed; see the "+countNoun(len(report.Errors), "problem")+" listed above"), report.ExitCode)
 }
 
 func reportTetragonNotRoot(action string, errors []enterprisestatus.Message) {

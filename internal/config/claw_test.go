@@ -987,6 +987,36 @@ func TestReadMCPServersForConnector_AntigravityRequiresPinnedWorkspace(t *testin
 	}
 }
 
+// rel-1-0-10 FX13-WIN1: an empty or whitespace-only Antigravity
+// mcp_config.json lists no servers and is not a read error, so the managed
+// inventory is not partial forever on an endpoint that has one. A truncated
+// document stays a read error.
+func TestReadMCPServersForConnector_AntigravityEmptyConfigListsNoServers(t *testing.T) {
+	home := t.TempDir()
+	testenv.SetHome(t, home)
+	agyDir := filepath.Join(home, ".gemini", "config")
+	if err := os.MkdirAll(agyDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(agyDir, "mcp_config.json")
+	cfg := &Config{}
+	for name, body := range map[string]string{"empty": "", "whitespace": " \r\n\t", "bom": "\ufeff\n"} {
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		entries, err := cfg.ReadMCPServersForConnector("antigravity")
+		if err != nil || len(entries) != 0 {
+			t.Fatalf("%s antigravity config: entries=%+v err=%v, want none and no error", name, entries, err)
+		}
+	}
+	if err := os.WriteFile(path, []byte(`{"mcpServers":`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cfg.ReadMCPServersForConnector("antigravity"); err == nil {
+		t.Fatal("truncated antigravity config did not report a read error")
+	}
+}
+
 func TestReadMCPServersForConnector_AntigravityMissingAndMalformedSafeNoOpenClawFallback(t *testing.T) {
 	home := t.TempDir()
 	testenv.SetHome(t, home)
@@ -1589,5 +1619,32 @@ func TestSkillDirs_OpenClawReadsJSON5Config(t *testing.T) {
 				t.Errorf("home skills dir missing; dirs %v", dirs)
 			}
 		})
+	}
+}
+
+// The connector patches claw.config_file, else <claw.home_dir>/openclaw.json;
+// a config_file left at its default follows a moved home_dir.
+func TestOpenClawConfigPath(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	def := filepath.Join(home, ".openclaw")
+	srv := filepath.Clean("/srv/oc")
+	cases := []struct{ homeDir, configFile, wantHome, wantConfig string }{
+		{"", "", def, filepath.Join(def, "openclaw.json")},
+		{"~/.openclaw", "~/.openclaw/openclaw.json", def, filepath.Join(def, "openclaw.json")},
+		{"/srv/oc", "~/.openclaw/openclaw.json", srv, filepath.Join(srv, "openclaw.json")},
+		{"/srv/oc", "", srv, filepath.Join(srv, "openclaw.json")},
+		{"/srv/oc", "/etc/oc/main.json", srv, filepath.Clean("/etc/oc/main.json")},
+		{"~/.openclaw", "~/custom/openclaw.json", def, filepath.Join(home, "custom", "openclaw.json")},
+	}
+	for _, tc := range cases {
+		cfg := &Config{Claw: ClawConfig{HomeDir: tc.homeDir, ConfigFile: tc.configFile}}
+		if got := cfg.OpenClawHome(); got != tc.wantHome {
+			t.Errorf("OpenClawHome(%q) = %q, want %q", tc.homeDir, got, tc.wantHome)
+		}
+		if got := cfg.OpenClawConfigPath(); got != tc.wantConfig {
+			t.Errorf("OpenClawConfigPath(%q, %q) = %q, want %q", tc.homeDir, tc.configFile, got, tc.wantConfig)
+		}
 	}
 }

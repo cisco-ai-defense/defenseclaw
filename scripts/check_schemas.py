@@ -58,6 +58,8 @@ TELEMETRY_REGISTRY_GENERATOR = ROOT / "scripts" / "generate_telemetry_registry.p
 # listing a type with no payload would name a shape nothing can satisfy. The
 # EventAIDiscovery constant survives as an observability classification key --
 # a different contract, pinned by internal/observability/classification_test.go.
+# "model_usage" is absent for the same reason: EventModelUsage is only the
+# classification key of the v8 model usage record and has no envelope payload.
 EXPECTED_ENVELOPE_EVENT_TYPES = {
     "verdict", "judge", "lifecycle", "error", "diagnostic",
     "scan", "scan_finding", "activity", "egress",
@@ -153,6 +155,8 @@ MDM_CONTRACT_SCHEMAS = (
     "identity-refresh.schema.json",
     "lifecycle-result.schema.json",
     "secret-result.schema.json",
+    "substrate-status.schema.json",
+    "substrate-verify.schema.json",
     "version.schema.json",
 )
 
@@ -1108,6 +1112,8 @@ MDM_FORWARD_SCHEMAS = {
     "bundle-status-forward.schema.json": "bundle-status.schema.json",
     "bundle-receipt-forward.schema.json": "bundle-receipt.schema.json",
     "identity-refresh-forward.schema.json": None,
+    "substrate-status-forward.schema.json": "substrate-status.schema.json",
+    "substrate-verify-forward.schema.json": "substrate-verify.schema.json",
 }
 # Member names a forward schema must never list: they name accounts, hold
 # free text or local detail.

@@ -483,8 +483,11 @@ func persistNativeOTLPEvidence(
 	var relationships []audit.CorrelationRelationship
 	for _, value := range values {
 		kind, ok := auditIdentifierKind(value)
+		if !ok || value.Target == connector.CorrelationTargetSemanticEvent || !correlationIdentifierStored(kind) {
+			continue
+		}
 		digest := correlationValueDigest(instance.ConnectorInstanceID, value)
-		if !ok || digest == "" || value.Target == connector.CorrelationTargetSemanticEvent {
+		if digest == "" {
 			continue
 		}
 		if _, err := tx.PutIdentifier(ctx, audit.CorrelationIdentifier{
