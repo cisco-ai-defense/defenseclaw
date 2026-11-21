@@ -1576,11 +1576,16 @@ func actionURLAuthorityToken(text string, start int, token string) bool {
 	if name == "" || !asciiLetter(name[0]) {
 		return false
 	}
-	if token[2] == '/' {
-		// An empty authority names a local path for a file URL only; the
-		// triple slash of any other scheme (http:///host/share/f) is a
-		// URL spelling, not a share operand.
-		return !strings.EqualFold(name, "file")
+	if token[2] == '/' && (len(name) < 2 || strings.EqualFold(name, "file")) {
+		// An empty authority names a local path for a file URL, and a
+		// one-letter scheme is a drive letter: C:///Users/u/f is a path,
+		// no URL (rel-1-0-10:GAP-1661). The triple slash of another scheme
+		// (http:///host/share/f) is a URL spelling where it reads as a
+		// share, as any //host/... part is (rel-1-0-10:GAP-0926). A POSIX
+		// host reads ///abs/path as the local /abs/path, so
+		// scp x localhost:///home/u/.ssh/f keeps its mention there
+		// (rel-1-0-10:GAP-1665).
+		return false
 	}
 	return networkShareRootOf(token) != ""
 }
