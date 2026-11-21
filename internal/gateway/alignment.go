@@ -71,7 +71,7 @@ const (
 	alignmentFindingID    = "ALIGNMENT-DRIFT"
 	alignmentTurnBytes    = 600
 	alignmentCallBytes    = 1200
-	alignmentDestBytes    = 400
+	alignmentDestBytes    = 600
 	alignmentRecentBytes  = 240
 	alignmentRecentCalls  = 4
 	alignmentSessions     = 4096
@@ -673,7 +673,7 @@ func alignmentDestinations(facts effects.Result, args string) []string {
 	seen := map[string]bool{}
 	add := func(s string) {
 		s = strings.TrimSpace(s)
-		if s == "" || seen[s] || len(out) >= 8 {
+		if s == "" || seen[s] || len(out) >= 12 {
 			return
 		}
 		seen[s] = true
@@ -700,8 +700,38 @@ func alignmentDestinations(facts effects.Result, args string) []string {
 				} else {
 					add(s)
 				}
+				return
+			}
+			// A value that is prose or long names its destination as a word
+			// of the text (GAP-0824).
+			for _, word := range alignmentDestinationWords(s) {
+				add(word)
 			}
 		})
+	}
+	return out
+}
+
+// alignmentDestinationWords are the words of a long or multi-word value that
+// are shaped like a URL or an address, from its head and its tail (a long value
+// is read up to 64 KiB, so one value cannot cost the lane unbounded time).
+func alignmentDestinationWords(s string) []string {
+	const window = 32 << 10
+	if len(s) <= 64 && !strings.ContainsAny(s, " \t\n") {
+		return nil
+	}
+	if len(s) > 2*window {
+		s = s[:window] + " " + s[len(s)-window:]
+	}
+	var out []string
+	for _, word := range strings.Fields(s) {
+		word = strings.Trim(word, "\"'`.,;:!?()[]{}<>")
+		if word != "" && alignmentDestinationValue(word) {
+			out = append(out, word)
+			if len(out) >= 12 {
+				break
+			}
+		}
 	}
 	return out
 }

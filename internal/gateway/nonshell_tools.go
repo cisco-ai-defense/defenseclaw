@@ -143,7 +143,11 @@ func nonShellToolFindings(ctx context.Context, request trustedActionRequest, fin
 				continue
 			}
 			twins++
-			for _, f := range nonShellPathTwin(ctx, request, e, twinContent) {
+			// The native twin reads a relative path against the session's
+			// directory, as the path rules above do (rel-1-0-10:GAP-1071).
+			twinEffect := e
+			twinEffect.Path = resolved
+			for _, f := range nonShellPathTwin(ctx, request, twinEffect, twinContent) {
 				if slices.ContainsFunc(out, func(x RuleFinding) bool { return x.RuleID == f.RuleID }) {
 					continue
 				}

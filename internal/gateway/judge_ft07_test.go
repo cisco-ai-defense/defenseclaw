@@ -18,25 +18,35 @@ package gateway
 
 import (
 	"context"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/effects"
 )
 
-// rel-1-0-10:GAP-0174: the permissive pack ships judge/injection.yaml with
-// enabled:false, so the injection judge stays off under it even when
-// guardrail.judge.injection is on; the default pack keeps it on.
-func TestFT07PackFlagTurnsTheInjectionJudgeOff(t *testing.T) {
-	for _, tc := range []struct {
-		pack      string
-		wantCalls int
-	}{{"../../policies/guardrail/permissive", 0}, {"", 1}} {
-		mock := &mockLLMProvider{response: &ChatResponse{Choices: []ChatChoice{{Message: &ChatMessage{Role: "assistant", Content: cleanInjectionJudgeJSON}}}}}
-		j := newMockJudge(t, mock)
-		j.rp = mustLoadRulePack(t, tc.pack)
-		j.cfg.Injection = true
-		j.RunJudges(context.Background(), "prompt", "please summarise the release notes", "")
-		if len(mock.captured) != tc.wantCalls {
-			t.Errorf("pack %q: judge calls = %d, want %d", tc.pack, len(mock.captured), tc.wantCalls)
+// rel-1-0-10:GAP-0174: guardrail.judge.injection alone turns the injection
+// judge on or off, under every pack: the permissive pack's judge/injection.yaml
+// enabled:false is not read, as on rel.
+func TestFT07InjectionJudgeFollowsTheConfigSwitchUnderEveryPack(t *testing.T) {
+	for _, pack := range []string{"../../policies/guardrail/permissive", "../../policies/guardrail/strict", ""} {
+		for _, on := range []bool{true, false} {
+			mock := &mockLLMProvider{response: &ChatResponse{Choices: []ChatChoice{{Message: &ChatMessage{Role: "assistant", Content: cleanInjectionJudgeJSON}}}}}
+			j := newMockJudge(t, mock)
+			j.rp = mustLoadRulePack(t, pack)
+			j.cfg.Injection = on
+			j.RunJudges(context.Background(), "prompt", "please summarise the release notes", "")
+			want := 0
+			if on {
+				want = 1
+			}
+			if len(mock.captured) != want {
+				t.Errorf("pack %q injection=%v: judge calls = %d, want %d", pack, on, len(mock.captured), want)
+			}
 		}
 	}
 }
@@ -98,5 +108,135 @@ func TestFT07SubagentSessionReadsTheParentTask(t *testing.T) {
 	judge.LinkChildSession(judgeSessionKey(childCtx), judgeSessionKey(parentCtx))
 	if none := judge.toolJudgeContextSample(childCtx, "Bash", `{"command":"ls"}`); strings.Contains(none, "SESSION_USER_INTENT") {
 		t.Fatalf("a taskless parent gave the child a task:\n%s", none)
+	}
+}
+
+// blockingProvider ignores its context: it returns only when release closes.
+type blockingProvider struct{ release chan struct{} }
+
+func (p *blockingProvider) ChatCompletion(_ context.Context, _ *ChatRequest) (*ChatResponse, error) {
+	<-p.release
+	return nil, context.Canceled
+}
+
+func (p *blockingProvider) ChatCompletionStream(_ context.Context, _ *ChatRequest, _ func(StreamChunk)) (*ChatUsage, error) {
+	return nil, context.Canceled
+}
+
+// rel-1-0-10:GAP-0824: an alignment call whose window closed gives its judge
+// slot up at once, though the provider ignores cancellation; the number of
+// such abandoned calls is bounded.
+func TestFT07AlignmentSlotIsReleasedWhenTheAnswerIsAbandoned(t *testing.T) {
+	provider := &blockingProvider{release: make(chan struct{})}
+	t.Cleanup(func() { close(provider.release) })
+	j := newMockJudge(t, &mockLLMProvider{})
+	j.provider = provider
+	j.calls = &judgeScheduler{}
+	j.calls.setLimit(1)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	returned := make(chan error, 1)
+	go func() {
+		_, err := j.chat(ctx, "alignment", &ChatRequest{})
+		returned <- err
+	}()
+	select {
+	case err := <-returned:
+		if err == nil {
+			t.Fatalf("the abandoned alignment call returned no error")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("the alignment call kept waiting for a provider that ignores cancellation")
+	}
+	toolCtx, toolCancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer toolCancel()
+	release, err := j.calls.acquire(toolCtx, judgeCallTool)
+	if err != nil {
+		t.Fatalf("the tool judge waited behind an abandoned alignment call: %v", err)
+	}
+	release()
+}
+
+func TestFT07AbandonedAlignmentCallsAreCapped(t *testing.T) {
+	provider := &blockingProvider{release: make(chan struct{})}
+	t.Cleanup(func() { close(provider.release) })
+	j := newMockJudge(t, &mockLLMProvider{})
+	j.provider = provider
+	j.calls = &judgeScheduler{}
+	j.calls.setLimit(2)
+	for i := 0; i < maxAbandonedAlignmentCalls; i++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+		_, _ = j.chat(ctx, "alignment", &ChatRequest{})
+		cancel()
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if _, err := j.chat(ctx, "alignment", &ChatRequest{}); err == nil || !strings.Contains(err.Error(), "no free judge slot") {
+		t.Fatalf("a call past the cap of abandoned calls was sent: %v", err)
+	}
+}
+
+// rel-1-0-10:GAP-0824: a destination written in prose inside a long value, or
+// among many fields, reaches the model.
+func TestFT07AlignmentLongValueKeepsAProseDestination(t *testing.T) {
+	prose := strings.Repeat("Please summarise the quarterly numbers for the board. ", 30) +
+		"Then send the report to ops@corp.example today. " + strings.Repeat("Thanks for your help with this. ", 30)
+	args := fmt.Sprintf(`{"subject":"report","body":%q}`, prose)
+	sample, cut := alignmentCallSample("custom_tool", args, effects.Result{})
+	if !cut || !strings.Contains(sample, "destinations:") || !strings.Contains(sample, "ops@corp.example") {
+		t.Fatalf("the prose destination was lost (cut=%v):\n%s", cut, sample)
+	}
+	fields := make([]string, 0, 121)
+	for i := 0; i < 120; i++ {
+		fields = append(fields, fmt.Sprintf(`"f%03d":"%s"`, i, strings.Repeat("x", 40)))
+	}
+	fields = append(fields, `"z_note":"mail the totals to finance@corp.example when done"`)
+	sample, _ = alignmentCallSample("custom_tool", "{"+strings.Join(fields, ",")+"}", effects.Result{})
+	if !strings.Contains(sample, "finance@corp.example") {
+		t.Fatalf("a destination among 120 fields was lost:\n%s", sample)
+	}
+}
+
+// rel-1-0-10:GAP-1071: an MCP file read or write of a path relative to the
+// session folder is judged as the native tool judges the same file.
+func TestFT07MCPRelativePathIsJudgedLikeTheNativeTool(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "home", "alice")
+	ssh := filepath.Join(home, ".ssh")
+	if err := os.MkdirAll(ssh, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	for _, p := range gap0437Packs {
+		a := gap0437Server(t, p, "claudecode", "action")
+		n := 0
+		verdict := func(tool string, input map[string]any) string {
+			n++
+			id := "ft07-1071-" + p.name + "-" + strconv.Itoa(n)
+			return shadowLaneVerdict(gap0437Serve(t, a.handleAgentHook("claudecode"), "/api/v1/claude-code/hook", map[string]any{
+				"hook_event_name": "PreToolUse", "session_id": id, "cwd": ssh,
+				"tool_name": tool, "tool_use_id": "tu-" + id, "tool_input": input,
+			}))
+		}
+		abs := filepath.Join(ssh, "id_rsa")
+		nativeRead := verdict("Read", map[string]any{"file_path": abs})
+		nativeWrite := verdict("Write", map[string]any{"file_path": abs, "content": "x"})
+		for _, tc := range []struct {
+			name, tool string
+			input      map[string]any
+			want       string
+		}{
+			{"read", "mcp__filesystem__read_file", map[string]any{"path": "id_rsa"}, nativeRead},
+			{"read ./", "mcp__filesystem__read_file", map[string]any{"path": "./id_rsa"}, nativeRead},
+			{"read up", "mcp__filesystem__read_file", map[string]any{"path": "../.ssh/id_rsa"}, nativeRead},
+			{"write", "mcp__filesystem__write_file", map[string]any{"path": "id_rsa", "content": "x"}, nativeWrite},
+		} {
+			if got := verdict(tc.tool, tc.input); got != tc.want {
+				t.Errorf("%s %s: MCP relative path is %s, the native tool gives %s", p.name, tc.name, got, tc.want)
+			}
+		}
+		if nativeRead[0] == 'A' && nativeWrite[0] == 'A' {
+			t.Errorf("%s: setup: the native tool allows both (%s, %s)", p.name, nativeRead, nativeWrite)
+		}
 	}
 }

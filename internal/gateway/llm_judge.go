@@ -41,6 +41,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/intentstore"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
+	"github.com/defenseclaw/defenseclaw/internal/modelusage"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 )
 
@@ -110,12 +111,15 @@ func redactEntity(s string) string {
 // migration fallback. The non-LLM knobs (Enabled, Timeout, PII toggles,
 // ToolInjection, Fallbacks, …) continue to come from JudgeConfig.
 type LLMJudge struct {
-	cfg          *config.JudgeConfig
-	model        string
-	providerName string
-	provider     LLMProvider
-	rp           *guardrail.RulePack
-	secureClient bool
+	// alignmentAbandoned counts alignment calls whose answer was given up
+	// while the provider had not returned (GAP-0824).
+	alignmentAbandoned atomic.Int32
+	cfg                *config.JudgeConfig
+	model              string
+	providerName       string
+	provider           LLMProvider
+	rp                 *guardrail.RulePack
+	secureClient       bool
 	// decision is the decision model in front of the tool-call judge; nil
 	// when decision_model is off.
 	decision *decisionModel
@@ -297,6 +301,9 @@ func (j *LLMJudge) chat(ctx context.Context, kind string, req *ChatRequest) (res
 	var release func()
 	yielding := judgeCallClassOf(kind) == judgeCallAlignment
 	if yielding {
+		if j.alignmentAbandoned.Load() >= maxAbandonedAlignmentCalls {
+			return nil, errJudgeSlotBusy
+		}
 		ctx, release, err = j.calls.acquireYielding(ctx)
 		if err != nil {
 			return nil, err
@@ -322,9 +329,49 @@ func (j *LLMJudge) chat(ctx context.Context, kind string, req *ChatRequest) (res
 		return nil, context.Canceled
 	}
 	call := j.beginJudgeUsage(ctx, kind)
+	if yielding {
+		return j.chatAbandonable(ctx, call, req)
+	}
 	resp, err = j.provider.ChatCompletion(ctx, req)
 	finishJudgeUsage(call, resp, err)
 	return resp, err
+}
+
+// maxAbandonedAlignmentCalls bounds the alignment provider calls still
+// running after their answer was given up: past it a new alignment call is
+// not sent (errJudgeSlotBusy), so a provider that ignores cancellation cannot
+// pile up requests (GAP-0824).
+const maxAbandonedAlignmentCalls = 4
+
+// chatAbandonable is the provider call of an alignment request. It returns as
+// soon as ctx ends (the window closed, or the slot went to a waiting judge
+// call) even when the provider has not stopped, so the caller's release gives
+// the slot up then and not when the provider finally returns (GAP-0824). The
+// provider call is counted until it returns.
+func (j *LLMJudge) chatAbandonable(ctx context.Context, usage modelusage.Call, req *ChatRequest) (*ChatResponse, error) {
+	type result struct {
+		resp *ChatResponse
+		err  error
+	}
+	done := make(chan result, 1)
+	var settled atomic.Bool // set by whichever of the two sides comes first
+	go func() {
+		resp, err := j.provider.ChatCompletion(ctx, req)
+		finishJudgeUsage(usage, resp, err)
+		if !settled.CompareAndSwap(false, true) {
+			j.alignmentAbandoned.Add(-1) // the caller gave up first
+		}
+		done <- result{resp, err}
+	}()
+	select {
+	case r := <-done:
+		return r.resp, r.err
+	case <-ctx.Done():
+		if settled.CompareAndSwap(false, true) {
+			j.alignmentAbandoned.Add(1)
+		}
+		return nil, ctx.Err()
+	}
 }
 
 func judgeFailureReason(err error) string {
@@ -384,14 +431,6 @@ func (j *LLMJudge) suppressionPack(ctx context.Context) *guardrail.RulePack {
 	return j.rp
 }
 
-// injectionJudgePackEnabled reports whether the rule pack leaves the injection
-// judge on. A pack without an injection judge file keeps the config switch the
-// only gate (GAP-0174).
-func injectionJudgePackEnabled(rp *guardrail.RulePack) bool {
-	jc := rp.InjectionJudge()
-	return jc == nil || jc.Enabled
-}
-
 // RunJudges runs injection and PII judges according to config.
 // Returns a merged verdict or an allow verdict on error/reentrancy.
 //
@@ -437,11 +476,9 @@ func (j *LLMJudge) RunJudges(ctx context.Context, direction, content, toolName s
 	if toolResult {
 		piiDirection = "completion"
 	}
-	// GAP-0174: the pack decides too. permissive/judge/injection.yaml ships
-	// enabled:false, so under that pack the injection judge stays off even
-	// when guardrail.judge.injection is on.
-	runInjection := j.cfg.Injection && (direction == "prompt" || toolResult) &&
-		injectionJudgePackEnabled(j.suppressionPack(ctx))
+	// guardrail.judge.injection alone decides: the pack's judge/injection.yaml
+	// enabled key is validated but not read (GAP-0174).
+	runInjection := j.cfg.Injection && (direction == "prompt" || toolResult)
 	runPII := j.cfg.PII
 	if piiDirection == "prompt" && !j.cfg.PIIPrompt {
 		runPII = false

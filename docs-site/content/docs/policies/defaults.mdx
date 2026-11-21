@@ -108,7 +108,7 @@ Scopes and precedence are in [thresholds](/docs/policies/thresholds).
 
 | Pack | Enabled rules | Judge prompts | `suppressions.yaml` |
 | --- | --- | --- | --- |
-| `permissive` | 238 of 246 | `pii` and `tool-injection` with higher thresholds; `injection` ships disabled | 12 entries, including all IP findings and selected file-inspection PII |
+| `permissive` | 238 of 246 | `pii` and `tool-injection` with higher thresholds; `injection` is present, and `guardrail.judge.injection` alone turns it on or off (the `enabled` key in the judge file is not read) | 12 entries, including all IP findings and selected file-inspection PII |
 | `default` | 242 of 246 | `injection`, `pii`, `tool-injection` | 9 entries: private and loopback IPs, platform IDs, expected system metadata |
 | `strict` | 258 of 258 | the same three, lower thresholds | 4 entries, minimal; no tool suppressions |
 
