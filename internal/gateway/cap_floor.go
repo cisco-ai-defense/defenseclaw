@@ -386,7 +386,9 @@ func (r *capFloorRegion) mayLeave(text string) bool {
 		if !strings.Contains(word, "/") {
 			continue
 		}
-		if word[0] == '/' || word[0] == '-' || r.linkOnWay(word) {
+		// A first segment that is not a plain name (@/x, +/x, ,/x) is not
+		// read as a project path (GAP-0897).
+		if word[0] == '/' || word[0] == '-' || !capFloorPlainNameStart(word[0]) || r.linkOnWay(word) {
 			return true
 		}
 	}
@@ -569,6 +571,12 @@ func (r *capFloorConsumerReader) shellStdin(command string, stmt, i int) (stdin,
 	return ok && capFloorStdin(program, args, known), ok
 }
 
+// capFloorPlainNameStart reports a byte that starts a plain file name: a
+// letter, a digit, an underscore or a dot.
+func capFloorPlainNameStart(c byte) bool {
+	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_' || c == '.'
+}
+
 // capFloorNeverDashC reports a static word that no text appended to it makes a
 // shell -c option word (capFloorDashCOption): it does not start with one
 // dash, or it already holds a = or a /. The empty word is not one: two
@@ -603,6 +611,11 @@ func capFloorCut(command string, reader *capFloorConsumerReader, from, to int) [
 	// broken is set by an unquoted blank or redirect since the last
 	// consumer reading: the word that reading ended in is complete.
 	broken := false
+	// wordFrom is the offset where the word in progress starts (after the
+	// last unquoted blank, redirect or cut). A reading taken at or before it
+	// ends in the PREVIOUS word, so it cannot stand for the growing one
+	// (GAP-1025).
+	wordFrom := from
 	// plain is cleared by any part of the word in progress that is not a
 	// capFloorPlainByte or a plain quote: a $'...' or $"..." quote, an
 	// escape, a $, a backquote, a glob, brace or tilde character, a
@@ -636,7 +649,7 @@ func capFloorCut(command string, reader *capFloorConsumerReader, from, to int) [
 			pieces = append(pieces, capFloorPiece{start: start, end: end})
 		}
 		start, stmt = next, next
-		plain = true
+		plain, wordFrom = true, next
 	}
 	cutPipe := func(end, next int) {
 		if pipeFrom < 0 {
@@ -646,7 +659,7 @@ func capFloorCut(command string, reader *capFloorConsumerReader, from, to int) [
 			pieces = append(pieces, capFloorPiece{start: start, end: end})
 		}
 		start, stmt = next, next
-		plain = true
+		plain, wordFrom = true, next
 	}
 	// enter opens a $( or ( at i whose statement starts at next.
 	enter := func(i, next int) {
@@ -689,7 +702,7 @@ func capFloorCut(command string, reader *capFloorConsumerReader, from, to int) [
 		}
 		switch {
 		case c == ' ' || c == '\t' || c == '<' || c == '>':
-			broken, plain = true, true
+			broken, plain, wordFrom = true, true, i+1
 		case c == ')':
 			broken = true
 		case c != '\'' && c != '"' && !capFloorPlainByte(c):
@@ -708,7 +721,7 @@ func capFloorCut(command string, reader *capFloorConsumerReader, from, to int) [
 			}
 			// Past the reader's budget the quoted word is not judged as a
 			// script: the cut is a cap of the call (the unknown tier).
-			if dashC, _ := reader.shellDashC(command, stmt, i, !broken && plain); dashC {
+			if dashC, _ := reader.shellDashC(command, stmt, i, !broken && plain && reader.last.end > wordFrom); dashC {
 				pieces = append(pieces, capFloorPiece{start: i, end: end, body: body})
 			}
 			// The helper also folds escaped quote joins. Those are not

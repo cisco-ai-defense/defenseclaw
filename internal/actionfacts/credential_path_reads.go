@@ -1009,6 +1009,11 @@ func (r *credentialPathResolver) globNamesCredentialFile(glob string) bool {
 		aligned := segments[len(segments)-k:]
 		literal, match := false, true
 		for i, pattern := range aligned {
+			// path.Match scans the pattern: charge the bytes it reads
+			// (rel-1-0-10:GAP-1046).
+			if !r.work.TakeN(len(pattern)) {
+				return false
+			}
 			if !credentialGlobSegmentMatches(pattern, probe.segments[i]) {
 				match = false
 				break
@@ -1088,11 +1093,17 @@ func (r *credentialPathResolver) searchFolder(id int64, folder string) {
 		if r.stopped() {
 			return
 		}
-		if !r.lookups.Take() {
+		// A first segment that is not there costs no lookup of the cap
+		// (rel-1-0-10:GAP-1045): an ordinary search over many folders stays
+		// under it. The probe it is is charged to the work cap instead.
+		if !r.work.Take() {
 			return
 		}
 		if _, err := os.Lstat(filepath.Join(dir, first)); err != nil {
 			continue
+		}
+		if !r.lookups.Take() {
+			return
 		}
 		for _, probe := range probes {
 			if !r.lookups.Take() {
