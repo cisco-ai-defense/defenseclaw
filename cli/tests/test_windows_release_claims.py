@@ -28,7 +28,7 @@ RETIRED_CONNECTORS = {"openhands", "omnigent"}
 
 # The 1.0.3 docs layout (back since 2026-10-26, owner) keeps these reference pages in the
 # Connectors section next to the connector pages.
-_CONNECTOR_SECTION_REFERENCE_PAGES = {"capability-matrix", "compatibility", "openclaw-integration"}
+_CONNECTOR_SECTION_REFERENCE_PAGES = {"capability-matrix", "compatibility", "openclaw-integration", "aliases", "switching-connectors", "cowork-vm-sensor"}
 
 # Hook routes a gateway calls (1.0.6 agent-gateway, #1394). They sit with the
 # connector pages but install nothing and have no setup connector, so they

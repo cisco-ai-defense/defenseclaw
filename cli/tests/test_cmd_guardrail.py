@@ -2100,7 +2100,7 @@ class HILTCommandTests(unittest.TestCase):
                 # `policy activate` does not copy a preset's hilt section.
                 self.assertEqual(args[:2], ["policy", "activate"], msg=line)
         self.assertFalse(gc.effective_hilt("claudecode").enabled)
-        flag_doc = page.parents[1] / "guardrail/index.mdx"
+        flag_doc = page.parents[1] / "reference/setup-guardrail.mdx"
         self.assertIn("Without --connector it changes only the global guardrail.hilt", flag_doc.read_text())
 
 

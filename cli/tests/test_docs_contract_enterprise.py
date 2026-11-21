@@ -435,9 +435,9 @@ FACTS = [
          'removed when the last one exits'),
     ]),
     ('gap_0038_write_proof_names_child_program_limit_without_recipes', [
-        (('guardrail/index.mdx',),
-         '### Protected-file write proof'),
-        (('guardrail/index.mdx',),
+        (('guardrail/protected-files.mdx',),
+         '## Protected-file write proof'),
+        (('guardrail/protected-files.mdx',),
          'use a sandbox or file permissions'),
     ]),
     ('gap_0296_manifest_is_in_pinned_digest', [
