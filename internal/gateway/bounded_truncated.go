@@ -131,7 +131,7 @@ func boundedLimitIndex(findings []RuleFinding) int {
 // withBoundedTruncation adds the truncation in set to the findings of what
 // was read before the caps, which keep deciding on their own: the profile
 // maps the result to at least the unknown tier of the pack and never below
-// those findings (guardrailActionForProfile). An evaluation-limit finding the
+// those findings (decide.Decide, row truncated). An evaluation-limit finding the
 // call already carries is kept, title included, and gains the bounded reason,
 // so a call has one limit finding; a data-word record beside it is not one
 // and stays detection-only (GAP-0760). The caller's slice is not changed. No cap

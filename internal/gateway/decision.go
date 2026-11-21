@@ -124,20 +124,6 @@ func guardrailActionForGuardrailConnector(gc *config.GuardrailConfig, connector,
 		confirmable && hiltEnabled(gc, connector), hiltMinRank(gc, connector))
 }
 
-func guardrailActionForConnectorFindings(
-	cfg *config.Config,
-	connector string,
-	findings []RuleFinding,
-	confirmable bool,
-) string {
-	return guardrailActionForProfileUnknown(findings, cfg != nil && cfg.SecureClientIntegration(),
-		func() bool { return cfg.HookPolicyTierForConnector(connector) == config.HookPolicyTierStrict },
-		func() string { return cascadeUnknownForConfig(cfg, connector) },
-		func(severity string) string {
-			return guardrailActionForConnector(cfg, connector, severity, confirmable)
-		})
-}
-
 // profileMeetActionForFindings evaluates each member's own findings under its
 // own thresholds, HILT and mode on this request path. Untagged findings come
 // from shared scanners (such as CodeGuard) and apply to every member. The
@@ -174,39 +160,10 @@ func profileMeetActionForFindings(
 	return action
 }
 
+// singleProfileActionForFindings is the verdict of one profile's findings:
+// decide.Decide with the profile's levels, tier and deployment.
 func singleProfileActionForFindings(cfg *config.Config, connector string, findings []RuleFinding, confirmable, content bool) string {
-	action := legacySingleProfileActionForFindings(cfg, connector, findings, confirmable, content)
-	decideDual("single", connector, action, func() decide.Input {
-		return decideInputForConfig(cfg, connector, findings, confirmable, content, true)
-	})
-	return action
-}
-
-func legacySingleProfileActionForFindings(cfg *config.Config, connector string, findings []RuleFinding, confirmable, content bool) string {
-	if managedClosesOnUnverifiedPath(cfg, findings) {
-		return guardrailActionBlock
-	}
-	if content {
-		return guardrailContentActionForFindings(cfg, connector, findings, confirmable)
-	}
-	return guardrailActionForConnectorFindings(cfg, connector, findings, confirmable)
-}
-
-// managedClosesOnUnverifiedPath reports a managed deployment (any enterprise
-// profile with local rules) that holds an enforceable TOOL-PATH-UNVERIFIED
-// finding: a check the file system would not answer fails closed there, as in
-// the strict tier, whatever threshold its rule pack gives the finding. The
-// OSS default and permissive tiers keep the finding as a visible alert.
-func managedClosesOnUnverifiedPath(cfg *config.Config, findings []RuleFinding) bool {
-	if cfg == nil || cfg.EnterpriseProfile() == "" {
-		return false
-	}
-	for _, finding := range enforceableRuleFindings(findings) {
-		if finding.RuleID == windowsPathUnverifiedRuleID {
-			return true
-		}
-	}
-	return false
+	return decideRoute("single", connector, decideInputForConfig(cfg, connector, findings, confirmable, content, true))
 }
 
 func profileMeetActionForSeverity(ctx context.Context, cfg *config.Config, connector, severity string, confirmable, content bool) string {
@@ -228,13 +185,7 @@ func guardrailContentAction(cfg *config.Config, connector, severity string, conf
 }
 
 func guardrailContentActionForFindings(cfg *config.Config, connector string, findings []RuleFinding, confirmable bool) string {
-	action := guardrailActionForFindings(findings, func(severity string) string {
-		return guardrailContentAction(cfg, connector, severity, confirmable)
-	})
-	decideDual("content", connector, action, func() decide.Input {
-		return decideInputForConfig(cfg, connector, findings, confirmable, true, false)
-	})
-	return action
+	return decideRoute("content", connector, decideInputForConfig(cfg, connector, findings, confirmable, true, false))
 }
 
 // guardrailContentActionForGuardrail is guardrailContentAction for a caller
@@ -280,35 +231,7 @@ func guardrailActionForGuardrailFindings(
 	// it from cfg.ManagedAIDOnly() (sidecar.go). A managed standalone install
 	// leaves it false, so its proxy limit findings map by the pack like the
 	// hook routes (TestBoundedProxyPathMapsByThePack).
-	strict := func() bool {
-		return gc != nil && guardrailPackPosture(gc, gc.EffectiveRulePackRef(connector)) == config.HookPolicyTierStrict
-	}
-	action := guardrailActionForProfileUnknown(findings, ManagedEnterpriseActive(), strict,
-		func() string { return cascadeUnknownForGuardrail(gc, connector, strict) },
-		func(severity string) string {
-			return guardrailActionForGuardrailConnector(gc, connector, severity, confirmable)
-		})
-	decideDual("guardrail", connector, action, func() decide.Input {
-		return decideInputForGuardrail(gc, connector, findings, confirmable)
-	})
-	return action
-}
-
-// guardrailActionForFindings maps enforceable findings with actionFor and
-// caps alert-only findings at an alert.
-func guardrailActionForFindings(findings []RuleFinding, actionFor func(severity string) string) string {
-	action := guardrailActionAllow
-	if enforceable := enforceableRuleFindings(findings); len(enforceable) > 0 {
-		action = actionFor(HighestSeverity(enforceable))
-	}
-	if alerts := alertOnlyRuleFindings(findings); len(alerts) > 0 {
-		candidate := actionFor(HighestSeverity(alerts))
-		if candidate == guardrailActionBlock || candidate == guardrailActionConfirm {
-			candidate = guardrailActionAlert
-		}
-		action = strongerGuardrailAction(action, candidate)
-	}
-	return action
+	return decideRoute("guardrail", connector, decideInputForGuardrail(gc, connector, findings, confirmable))
 }
 
 func strongerGuardrailAction(left, right string) string {
@@ -672,14 +595,14 @@ func decideInputForGuardrail(gc *config.GuardrailConfig, connector string, findi
 	}
 }
 
-// decideDualHook, set only by tests (DET111_S1_DUAL), sees every decision
-// the legacy path made beside the decide.Decide answer for the same call.
-var decideDualHook func(route, connector, legacy string, in decide.Input, got decide.Output)
+// decideRecordHook, set only by tests (DET111_S1_REC: the characterization
+// recorder), sees every decision with its input.
+var decideRecordHook func(route, connector string, in decide.Input, out decide.Output)
 
-func decideDual(route, connector, legacy string, input func() decide.Input) {
-	if decideDualHook == nil {
-		return
+func decideRoute(route, connector string, in decide.Input) string {
+	out := decide.Decide(in)
+	if decideRecordHook != nil {
+		decideRecordHook(route, connector, in, out)
 	}
-	in := input()
-	decideDualHook(route, connector, legacy, in, decide.Decide(in))
+	return decideAction(out.Action)
 }

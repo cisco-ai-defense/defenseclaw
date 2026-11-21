@@ -252,16 +252,16 @@ func describeDualFindings(findings []RuleFinding) string {
 	return "[" + strings.Join(parts, " ") + "]"
 }
 
-// The characterization recorder and the dual run (DET111 step 1). With
-// DET111_S1_DUAL=<file>, every decision a gateway test makes is compared
-// with decide.Decide on the same call, and each distinct
-// (route, connector, deployment, Secure Client, surface, tier, pack tier,
-// cascade unknown, findings) -> (1.0.10 action, decide action) row is
-// appended to the file once (JSON lines). A row whose two actions differ
-// has "diff": true. Collisions (one proof key, two actions) are read from
-// the file offline.
+// The characterization recorder (DET111 step 1). With DET111_S1_REC=<file>,
+// each distinct (route, connector, deployment, Secure Client, surface,
+// tier, pack tier, cascade unknown, levels, findings) -> (action,
+// severity) row of a gateway test decision is appended to the file once
+// (JSON lines). Collisions (one proof key, two actions) are read from the
+// file offline. (The dual run that compared these rows with the 1.0.10
+// path, DET111_S1_DUAL, ran at b900f4e77b; the frozen oracle above keeps
+// the table equal to it.)
 func init() {
-	path := os.Getenv("DET111_S1_DUAL")
+	path := os.Getenv("DET111_S1_REC")
 	if path == "" {
 		return
 	}
@@ -271,8 +271,8 @@ func init() {
 	}
 	var mu sync.Mutex
 	seen := map[string]bool{}
-	decideDualHook = func(route, connector, legacy string, in decide.Input, got decide.Output) {
-		row := dualRow(route, connector, legacy, in, got)
+	decideRecordHook = func(route, connector string, in decide.Input, got decide.Output) {
+		row := dualRow(route, connector, in, got)
 		key, _ := json.Marshal(row)
 		mu.Lock()
 		defer mu.Unlock()
@@ -302,16 +302,14 @@ type dualRecord struct {
 	Unknown    string        `json:"unknown,omitempty"`
 	Levels     string        `json:"levels"`
 	Findings   []dualFinding `json:"findings"`
-	Legacy     string        `json:"legacy"`
 	Decide     string        `json:"decide"`
 	Severity   string        `json:"severity"`
-	Diff       bool          `json:"diff,omitempty"`
 }
 
-func dualRow(route, connector, legacy string, in decide.Input, got decide.Output) dualRecord {
+func dualRow(route, connector string, in decide.Input, got decide.Output) dualRecord {
 	row := dualRecord{
 		Route: route, Connector: connector, Deployment: in.Deployment.String(), Secure: in.SecureClient,
-		Surface: uint8(in.Surface), Legacy: normalizedGuardrailAction(legacy), Decide: decideAction(got.Action),
+		Surface: uint8(in.Surface), Decide: decideAction(got.Action),
 		Severity: got.Severity.String(),
 		Levels:   fmt.Sprintf("%v/%v/%v@%v", in.Levels.Block, in.Levels.Alert, in.Levels.Confirm, in.Levels.ConfirmAt),
 	}
@@ -334,6 +332,5 @@ func dualRow(route, connector, legacy string, in decide.Input, got decide.Output
 		a, b := row.Findings[i], row.Findings[j]
 		return a.Rule+a.Proof+a.Sev < b.Rule+b.Proof+b.Sev
 	})
-	row.Diff = row.Legacy != row.Decide
 	return row
 }

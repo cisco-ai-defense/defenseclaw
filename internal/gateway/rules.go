@@ -97,12 +97,12 @@ type RuleFinding struct {
 	Proof decide.Proof `json:"-"`
 	// shellProtectedFile marks a finding of the shell-command protected-file
 	// class on a shell command (markShellProtectedFileFindings). It is
-	// private and value-free; profileClassFloor reads it.
+	// private and value-free; legacyFindingProof reads it.
 	shellProtectedFile bool
 	// omittedOperand marks the evaluation-limit finding that stands for a
 	// named write operand the hook client left out of its bounded map: a
 	// target the gateway cannot place, which may be a link to a protected
-	// file. It is private and value-free; guardrailActionForProfile keeps its
+	// file. It is private and value-free; decide.Decide keeps its
 	// block in every profile.
 	omittedOperand bool
 	// boundedCaps are the caps of a reader's truncation this evaluation-limit
