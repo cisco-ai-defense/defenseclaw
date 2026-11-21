@@ -869,7 +869,11 @@ func windowsLex(source string, dialect windowsDialect, out *parseOutput) ([]wind
 						}) {
 							return lexemes, false
 						}
-						i = windowsPowerShellDynamicCallEnd(runes, i+1) - 1
+						end, balanced := windowsPowerShellDynamicCallEnd(runes, i+1)
+						if !balanced {
+							out.markUnread(IssueUnsupportedConstruct)
+						}
+						i = end - 1
 						continue
 					}
 					if !appendOperator(windowsCallLexeme, "&", i+1) {

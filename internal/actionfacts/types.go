@@ -1031,7 +1031,9 @@ type ParseResult struct {
 	// the reader balanced (a subexpression, an array, a hashtable, a
 	// here-string) or a dynamic call target leaves it unset: the text was
 	// read, and the argument-command reading (psparse.ArgumentCommandReading)
-	// reads the commands in those values.
+	// reads the commands in those values. A dynamic call target whose
+	// arguments hold a construct with no balanced end is unread like the
+	// same construct elsewhere (GAP-1035).
 	Unread bool
 }
 
