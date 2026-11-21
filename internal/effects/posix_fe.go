@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/shellparse"
+	"mvdan.cc/sh/v3/expand"
 	"mvdan.cc/sh/v3/syntax"
 )
 
@@ -391,9 +392,20 @@ func (w *posixWalker) emitCall(st *syntax.Stmt, call *syntax.CallExpr, cond, pip
 			c.Assigns = append(c.Assigns, as)
 		}
 		for _, arg := range call.Args {
-			wd := w.word(arg)
 			n := len(c.Nested)
 			w.scanCmdSubsts(arg, c)
+			// Brace expansion is the shell's first word expansion: a {a,b}
+			// list becomes its words before ~ and variables are read, so each
+			// alternative is its own operand (DET111 R1, GAP-0662).
+			if alts, ok := braceWords(arg); ok {
+				for _, alt := range alts {
+					wd := w.word(alt)
+					wd.Span = span(arg)
+					c.Words = append(c.Words, wd)
+				}
+				continue
+			}
+			wd := w.word(arg)
 			if soleInputProcSubst(arg) && len(c.Nested) == n+1 {
 				wd.ProcSub = c.Nested[n]
 			}
@@ -699,6 +711,46 @@ func atoiSafe(s string) (int, bool) {
 		n = n*10 + int(s[i]-'0')
 	}
 	return n, true
+}
+
+// maxBraceWords bounds the words one brace-expanded argument becomes; a larger
+// expansion stays one glob word.
+const maxBraceWords = 64
+
+// braceWords is the brace expansion of one argument, ok false when it has no
+// brace group or expands past maxBraceWords (it then stays a glob word).
+func braceWords(arg *syntax.Word) (words []*syntax.Word, ok bool) {
+	if arg == nil || !strings.Contains(arg.Lit(), "{") && !wordLitHasBrace(arg) {
+		return nil, false
+	}
+	if shellparse.BraceFieldsTooLarge(arg) {
+		return nil, false
+	}
+	split := *arg // SplitBraces replaces the Parts slice, never the parts
+	if !syntax.SplitBraces(&split) {
+		return nil, false
+	}
+	defer func() {
+		if recover() != nil {
+			words, ok = nil, false // a library panic: keep the glob word
+		}
+	}()
+	words = expand.Braces(&split)
+	if len(words) < 2 || len(words) > maxBraceWords {
+		return nil, false
+	}
+	return words, true
+}
+
+// wordLitHasBrace reports an unquoted literal part with a brace, the only place
+// a brace group can start.
+func wordLitHasBrace(arg *syntax.Word) bool {
+	for _, p := range arg.Parts {
+		if lit, ok := p.(*syntax.Lit); ok && strings.Contains(lit.Value, "{") {
+			return true
+		}
+	}
+	return false
 }
 
 // hasUnescapedMeta reports whether a raw POSIX literal has an unescaped glob

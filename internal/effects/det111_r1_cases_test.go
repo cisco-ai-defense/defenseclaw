@@ -178,30 +178,22 @@ func TestDET111R1Dump(t *testing.T) {
 // or reason that closes it. A pending row that starts to pass fails the test,
 // so the list only shrinks.
 var det111Pending = map[string]string{
-	"GAP-0662/var10": "brace-expanded operand of inline code is not expanded into its words",
-	"GAP-0662/var4":  "su -c body: the inline-code path operand is lost one level down",
-	"GAP-0662/var5":  "uv run is not a wrapper row yet (S4-R2 program table)",
-	"GAP-0662/var6":  "watch is not a wrapper row yet (S4-R2 program table)",
-	"GAP-0662/var7":  "script -c body is not lowered (S4-R2 wrapper row with a shell body)",
-	"GAP-0662/var8":  "ssh host body runs remotely: a remote target, ruling needed",
-	"GAP-0662/var9":  "env-var hand-off to inline code (P=STATE python -c os.environ) not bound",
-	"GAP-1173/var2":  "tar member operand under -C home is not joined to the folder",
-	"GAP-1173/var3":  "unzip -d on a Windows home spelled with / is not canonical for the classifier",
-	"GAP-1173/var4":  "Expand-Archive has no program row (S4-R2)",
-	"GAP-1173/var5":  "tar in PowerShell has no program row on Windows (S4-R2)",
-	"GAP-1173/var6":  "inline-code folder literal is opaque; the classifier grades a folder for mutations only (S4-R3)",
-	"GAP-1226/var4":  "body read now; .pgpass is not in the credentials set (S4-R3 classifier)",
-	"GAP-1273/var":   "newgrp reads a shell from stdin: no program row yet (S4-R2)",
-	"GAP-1502/var2":  "the file a staged curl -d @FILE sends is not graded (send data source, S3-PRE classifier wiring)",
-	"GAP-1550/var2":  "powershell -c expandable body on the exec route stays opaque",
-	"GAP-1554/var":   "a here-string fed to a $SHELL program word is not lowered as a shell",
-	"GAP-1554/var2":  "a pipe into a $SHELL program word is not lowered as a shell",
-	"GAP-1561/var5":  "statement lowered (git --output); .git/config is not a protected set: decision side (S1/S4-R3)",
-	"GAP-1577/var3":  "Tee-Object -FilePath has no program row (S4-R2)",
-	"GAP-1588/var4":  "statement lowered (fsutil exec present): the gap is the legacy dialect placement, decision side",
-	"GAP-1588/var5":  "statement lowered (icacls exec present): the gap is the legacy dialect placement, decision side",
-	"GAP-1667/var":   "cmd /c on the Git Bash route is not lowered in the POSIX dialect",
-	"GAP-1667/var2":  "cmd copy /y and tar on Windows have no program rows (S4-R2)",
+	"GAP-0662/var5": "uv run is not a wrapper row yet (S4-R2 program table)",
+	"GAP-0662/var6": "watch is not a wrapper row yet (S4-R2 program table)",
+	"GAP-0662/var7": "script -c body is not lowered (S4-R2 wrapper row with a shell body)",
+	"GAP-0662/var8": "ssh host body runs remotely: a remote target, ruling needed",
+	"GAP-1173/var4": "Expand-Archive has no program row (S4-R2)",
+	"GAP-1173/var5": "tar in PowerShell has no program row on Windows (S4-R2)",
+	"GAP-1173/var6": "inline-code folder literal is opaque; the classifier grades a folder for mutations only (S4-R3)",
+	"GAP-1226/var4": "body read now; .pgpass is not in the credentials set (S4-R3 classifier)",
+	"GAP-1273/var":  "newgrp reads a shell from stdin: no program row yet (S4-R2)",
+	"GAP-1502/var2": "the file a staged curl -d @FILE sends is not graded (send data source, S3-PRE classifier wiring)",
+	"GAP-1561/var5": "statement lowered (git --output); .git/config is not a protected set: decision side (S1/S4-R3)",
+	"GAP-1577/var3": "Tee-Object -FilePath has no program row (S4-R2)",
+	"GAP-1588/var4": "statement lowered (fsutil exec present): the gap is the legacy dialect placement, decision side",
+	"GAP-1588/var5": "statement lowered (icacls exec present): the gap is the legacy dialect placement, decision side",
+	"GAP-1667/var":  "cmd /c on the Git Bash route is not lowered in the POSIX dialect",
+	"GAP-1667/var2": "cmd copy /y and tar on Windows have no program rows (S4-R2)",
 }
 
 // det111Facts is what the per-gap table compares: the protected-set reach of
@@ -240,6 +232,11 @@ func det111Collect(c det111Case) det111Facts {
 		if run == "" {
 			run = e.Origin.Program
 		}
+		// A program word that is a variable running code the call does not
+		// show may be any shell: it stands for a seed's named shell.
+		if e.Kind == effects.KindExec && run == "" && det111HasReason(e, effects.ReasonOpaqueCode) {
+			f.progs[det111AnyShell] = true
+		}
 		if e.Kind == effects.KindExec && run != "" {
 			p := strings.ToLower(run)
 			p = p[strings.LastIndexAny(p, `/\`)+1:]
@@ -257,9 +254,24 @@ func det111Collect(c det111Case) det111Facts {
 	return f
 }
 
+// det111AnyShell is the program of an exec whose program word is a variable
+// that runs code (GAP-1554: "$SHELL" <<< BODY).
+const det111AnyShell = "<possible-shell>"
+
+var det111Shells = map[string]bool{"sh": true, "bash": true, "zsh": true, "dash": true, "ksh": true}
+
+func det111HasReason(e effects.Effect, code effects.ReasonCode) bool {
+	for _, r := range e.Reasons {
+		if r.Code == code {
+			return true
+		}
+	}
+	return false
+}
+
 func det111Covers(v, seed det111Facts) bool {
 	for p := range seed.progs {
-		if !v.progs[p] {
+		if !v.progs[p] && !(det111Shells[p] && v.progs[det111AnyShell]) {
 			return false
 		}
 	}

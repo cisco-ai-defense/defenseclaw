@@ -1467,18 +1467,31 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 	}
 	// unzip extracts unknown files into -d dir or the cwd (review R3-3 Z06).
 	if program == "unzip" {
-		dir := ""
+		dir, dirSet, dirDyn := "", false, false
 		for i, a := range inner[1:] {
-			if a.Static && a.Value == "-d" && i+1 < len(inner[1:]) && inner[1:][i+1].Static {
-				dir = inner[1:][i+1].Value
+			if a.Static && a.Value == "-d" && i+1 < len(inner[1:]) {
+				dirSet = true
+				nx := inner[1:][i+1]
+				dir, dirDyn = nx.Value, !nx.Static
 			}
 		}
 		e := Effect{Kind: KindWrite, Cond: cond, RoleState: RoleStateKnown, TargetState: TargetStateUnknown,
 			Target: Target{Type: TargetPath, Flavor: w.o.flavor(), Link: LinkNotChecked, CaseFold: w.o.CaseInsensitive}, Origin: origin}
-		if dir != "" {
+		if !dirSet {
+			dir = "."
+		}
+		// The -d folder is placed by the one path resolver like every other
+		// target (a ~ in Git Bash is the Windows home: DET111 R1, GAP-1173); a
+		// dynamic -d is an unknown folder, never the cwd.
+		if dirDyn {
+			e.addReason(ReasonDynamicExpansion, ScopeTarget)
+		} else {
 			e.Target.Spelling = cap4k(dir)
-		} else if w.curCWD != "" {
-			e.Target.Spelling = cap4k(w.curCWD)
+			if abs, ok, r := w.placeRel(dir); ok {
+				e.Target.Path = abs
+			} else {
+				e.addReason(r, ScopeTarget)
+			}
 		}
 		e.addReason(ReasonOpaqueArchive, ScopeTarget)
 		w.emit(e)
@@ -3656,6 +3669,15 @@ func (w *walker) tarEffects(args []Word, origin Origin, cond bool, depth int) {
 			dest = "."
 		}
 		mk(KindWrite, dest, TargetStateUnknown, ReasonOpaqueArchive)
+		// A member the call names lands at dest/member when the archive holds
+		// it (DET111 R1, GAP-1173). tar strips a leading / and refuses .., so
+		// only a plain relative name is joined.
+		for _, f := range files {
+			if f.Static && f.Value != "" && !f.Glob && !looksGlob(f.Value) && !absoluteSpelling(f.Value, w.o.flavor()) &&
+				!strings.Contains("/"+strings.ReplaceAll(f.Value, `\`, "/")+"/", "/../") {
+				mk(KindWrite, joinDir(dest, f.Value), TargetStateUnknown, ReasonOpaqueArchive)
+			}
+		}
 	default: // list or unknown mode
 		if archive != "" && archive != "-" {
 			mk(KindRead, archive, TargetStateKnown, "")
@@ -4612,6 +4634,9 @@ func (w *walker) declWords(program string, args []Word) (ok, opaque bool) {
 func (w *walker) hostPayload(c *Cmd, dialect Dialect, depth int, cond bool, origin Origin) {
 	if c.Host.Opaque {
 		w.opaqueExec(origin, cond)
+		if c.Host.Maybe != "" {
+			w.unwrapUncertain(c.Host.Maybe, c.Host.Dialect, depth, origin, nil, true)
+		}
 		return
 	}
 	w.unwrapCode(c.Host.Text, true, c.Host.Dialect, depth, cond, origin)

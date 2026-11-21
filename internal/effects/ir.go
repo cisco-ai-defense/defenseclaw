@@ -99,7 +99,11 @@ type Cmd struct {
 type HostPayload struct {
 	Opaque  bool    // not static, or unsafe to trust: no unwrap
 	Text    string  // the payload text when !Opaque
-	Dialect Dialect // the payload's grammar when !Opaque
+	Dialect Dialect // the payload's grammar when !Opaque, or of Maybe
+	// Maybe is one possible reading of an Opaque payload (the verbatim text a
+	// child gets when the parent does not expand it): the walker lowers it as
+	// maybe effects and the call stays opaque (DET111 R1, GAP-1550).
+	Maybe string
 }
 
 // WordSeg is one piece of a word: a literal run (Lit) or a simple variable

@@ -5,6 +5,7 @@
 package effects
 
 import (
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -431,11 +432,28 @@ func (w *walker) possibleShell(c *Cmd, raw Word, args []Word, dialect Dialect, d
 	switch {
 	case sc.hasC && sc.hasArg && sc.code.Static:
 		w.unwrapUncertain(sc.code.Value, dialect, depth, origin, sc.rest, true)
+	case sc.hasC && sc.hasArg:
+		w.possibleShellOpaque(origin)
 	case sc.stdin:
 		if text, _, ok := w.stdinText(c); ok {
 			w.unwrapUncertain(text, dialect, depth, origin, nil, true)
+		} else if hasStdinSource(c) {
+			w.possibleShellOpaque(origin)
 		}
 	}
+}
+
+// possibleShellOpaque is the code a variable program word may run as a shell
+// when the call does not show it (a -c body, a here-string or a pipe built by a
+// substitution): an opaque code exec, conditional and of unknown role -- the
+// reading a named shell gets for an unseen body, as a maybe (DET111 R1,
+// GAP-1554).
+func (w *walker) possibleShellOpaque(origin Origin) {
+	e := Effect{Kind: KindExec, Cond: true, Target: Target{Type: TargetProcess, Link: LinkNotChecked},
+		TargetState: TargetStateUnknown, RoleState: RoleStateUnknown, Origin: origin}
+	e.addReason(ReasonOpaqueCode, ScopeTarget)
+	e.addReason(ReasonDynamicExpansion, ScopeRole)
+	w.emit(e)
 }
 
 // evalText is the text eval runs: its arguments joined by blanks. A word whose
@@ -672,17 +690,87 @@ func (w *walker) inlineCode(c *Cmd, args []Word, origin Origin, cond bool) bool 
 			w.opaquePathEffect(lit, origin, cond)
 		}
 	}
-	for _, a := range ic.args {
-		if !a.Static || seen[a.Value] {
+	raws := rawWordsFor(ic.args, c.Words)
+	for i, a := range ic.args {
+		if !a.Static {
+			// A dynamic word (a ~ whose home the call changed: su -c, GAP-0662)
+			// keeps its as-written spelling, so a protected tail still reaches
+			// the classifier with an unknown target.
+			if sp := rawSpelling(raws[i]); pathLike(sp) && !seen[sp] {
+				seen[sp] = true
+				w.opaqueDynamicEffect(sp, origin, cond)
+			}
 			continue
 		}
-		v := a.Value
-		if strings.ContainsAny(v, `/\`) || strings.HasPrefix(v, ".") || strings.HasPrefix(v, "~") {
-			seen[v] = true
-			w.opaquePathEffect(v, origin, cond)
+		if seen[a.Value] || !pathLike(a.Value) {
+			continue
+		}
+		seen[a.Value] = true
+		if a.Glob {
+			w.opaqueGlobEffect(a.Value, origin, cond) // a brace list or wildcard the shell expands
+			continue
+		}
+		w.opaquePathEffect(a.Value, origin, cond)
+	}
+	// A prefix assignment (P=PATH python3 -c CODE) hands its value to the code
+	// through the environment when the code names it (DET111 R1, GAP-0662).
+	if ic.inline && code != "" && w.spec != nil {
+		names := make([]string, 0, len(w.spec.assigns))
+		for n := range w.spec.assigns {
+			names = append(names, n)
+		}
+		sort.Strings(names)
+		for _, n := range names {
+			ca := w.spec.assigns[n]
+			if !ca.ok || seen[ca.val] || !pathLike(ca.val) || !strings.Contains(code, n) {
+				continue
+			}
+			seen[ca.val] = true
+			w.opaquePathEffect(ca.val, origin, cond)
 		}
 	}
 	return true
+}
+
+// pathLike reports a word that looks like a path: a separator, or a leading .
+// or ~.
+func pathLike(v string) bool {
+	return strings.ContainsAny(v, `/\`) || strings.HasPrefix(v, ".") || strings.HasPrefix(v, "~")
+}
+
+// rawSpelling is a frontend word as written, its variables as $NAME; "" when
+// it has no segments.
+func rawSpelling(wd Word) string {
+	var b strings.Builder
+	for _, s := range wd.Segs {
+		if s.Var != "" {
+			b.WriteString("$" + s.Var)
+			continue
+		}
+		b.WriteString(s.Lit)
+	}
+	return b.String()
+}
+
+// opaqueDynamicEffect is opaquePathEffect for a spelling the walker cannot
+// place: the target is unknown and carries the spelling.
+func (w *walker) opaqueDynamicEffect(spelling string, origin Origin, cond bool) {
+	e := Effect{Kind: KindOpaque, Cond: cond, RoleState: RoleStateUnknown, TargetState: TargetStateUnknown,
+		Target: Target{Type: TargetPath, Flavor: w.o.flavor(), Link: LinkNotChecked, CaseFold: w.o.CaseInsensitive, Spelling: cap4k(spelling)},
+		Origin: origin}
+	e.addReason(ReasonDynamicExpansion, ScopeTarget)
+	e.addReason(ReasonOpaqueCode, ScopeRole)
+	w.emit(e)
+}
+
+// opaqueGlobEffect is opaquePathEffect for a pattern: the target is the glob.
+func (w *walker) opaqueGlobEffect(pattern string, origin Origin, cond bool) {
+	e := Effect{Kind: KindOpaque, Cond: cond, RoleState: RoleStateUnknown, TargetState: TargetStateKnown,
+		Target: Target{Type: TargetPath, Flavor: w.o.flavor(), Link: LinkNotChecked, CaseFold: w.o.CaseInsensitive, Glob: cap4k(pattern)},
+		Origin: origin}
+	e.addReason(ReasonGlob, ScopeTarget)
+	e.addReason(ReasonOpaqueCode, ScopeRole)
+	w.emit(e)
 }
 
 // nestedBodies lowers the bodies of eval and source / . that the operand loop

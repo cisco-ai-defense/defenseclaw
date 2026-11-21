@@ -373,8 +373,16 @@ func psEncodedWithBlanks(c *psparse.Command) (string, bool) {
 // $env: values ("Copy-Item $HOME\.aws\credentials ..."). Both readings agree
 // on it: a PowerShell parent expands the string before the child starts, and a
 // child that receives it verbatim expands the same variables to the same
-// values. Any other expansion keeps the body unread (DET111 R1, GAP-1226).
-func psExpandedCommand(c *psparse.Command, o Options) (string, bool) {
+// values (DET111 R1, GAP-1226).
+//
+// A body that also names plain session variables (foreach ($f in ...)) has no
+// agreed reading: a PowerShell parent puts in values the call does not show,
+// a child that gets the text verbatim reads the variables itself. The verbatim
+// text is then returned with maybe set: the walker lowers it as a possible
+// reading and the call stays opaque (DET111 R1, GAP-1550). Any other
+// expansion (a subexpression, a scoped or splatted variable) keeps the body
+// unread.
+func psExpandedCommand(c *psparse.Command, o Options) (text string, maybe, ok bool) {
 	els := c.Elements
 	for i := 0; i < len(els); i++ {
 		p, ok := els[i].(*psparse.Parameter)
@@ -386,45 +394,93 @@ func psExpandedCommand(c *psparse.Command, o Options) (string, bool) {
 			continue
 		}
 		if p.HasColon || i+2 != len(els) {
-			return "", false // the body must be the one, last argument
+			return "", false, false // the body must be the one, last argument
 		}
-		a, ok := els[i+1].(*psparse.Arg)
-		if !ok {
-			return "", false
+		a, isArg := els[i+1].(*psparse.Arg)
+		if !isArg {
+			return "", false, false
 		}
-		sl, ok := a.Value.(*psparse.StringLit)
-		if !ok {
-			return "", false
+		sl, isLit := a.Value.(*psparse.StringLit)
+		if !isLit {
+			return "", false, false
 		}
-		w, ok := psStringWord(sl)
-		if !ok {
-			return "", false
+		if w, agreed := psStringWord(sl); agreed {
+			text, ok = psExpandSegs(w.Segs, o)
+			return text, false, ok
 		}
-		var b strings.Builder
-		for _, seg := range w.Segs {
-			switch {
-			case seg.Var == "":
-				b.WriteString(seg.Lit)
-			case seg.Var == psHomeVar:
-				if o.Home == "" {
-					return "", false
-				}
-				b.WriteString(o.Home)
-			default:
-				v, ok := psEnvValue(o.Env, seg.Var)
-				if !ok {
-					return "", false
-				}
-				b.WriteString(v)
-			}
-		}
-		text := b.String()
-		if strings.ContainsAny(text, "\"`$") {
-			return "", false // a value that brings its own quoting or expansion
-		}
-		return text, true
+		text, ok = psVerbatimBody(sl, o)
+		return text, ok, ok
 	}
-	return "", false
+	return "", false, false
+}
+
+// psExpandSegs writes an expandable string's segments with the session $HOME
+// and trusted $env: values put in. ok is false for an unknown value or one
+// that brings its own quoting or expansion.
+func psExpandSegs(segs []WordSeg, o Options) (string, bool) {
+	var b strings.Builder
+	for _, seg := range segs {
+		switch {
+		case seg.Var == "":
+			b.WriteString(seg.Lit)
+		case seg.Var == psHomeVar:
+			if o.Home == "" {
+				return "", false
+			}
+			b.WriteString(o.Home)
+		default:
+			v, ok := psEnvValue(o.Env, seg.Var)
+			if !ok {
+				return "", false
+			}
+			b.WriteString(v)
+		}
+	}
+	text := b.String()
+	if strings.ContainsAny(text, "\"`$") {
+		return "", false // a value that brings its own quoting or expansion
+	}
+	return text, true
+}
+
+// psVerbatimBody is the text a child host gets when the parent passes an
+// expandable string unexpanded: literals and the resolvable variables as
+// psExpandSegs writes them, a plain session variable ($f) kept as written.
+// ok is false for any other part, or when no plain variable is kept (the
+// agreed reading then applies).
+func psVerbatimBody(sl *psparse.StringLit, o Options) (string, bool) {
+	if sl == nil || sl.Static || sl.Fused || sl.Bare || len(sl.Parts) == 0 {
+		return "", false
+	}
+	var b strings.Builder
+	kept := false
+	for _, p := range sl.Parts {
+		if p.Expr == nil {
+			if strings.ContainsAny(p.Lit, "\"`$\x00") {
+				return "", false
+			}
+			b.WriteString(p.Lit)
+			continue
+		}
+		v, isVar := p.Expr.(*psparse.Variable)
+		if !isVar {
+			return "", false
+		}
+		if seg, ok := psVarSeg(v); ok {
+			text, ok := psExpandSegs([]WordSeg{seg}, o)
+			if !ok {
+				return "", false
+			}
+			b.WriteString(text)
+			continue
+		}
+		if v.Splat || v.Scope != "" || !plainIdent(v.Name) {
+			return "", false
+		}
+		b.WriteString("$" + v.Name)
+		kept = true
+	}
+	return b.String(), kept
 }
 
 // psEnvValue looks a trusted environment value up the way Windows does: the

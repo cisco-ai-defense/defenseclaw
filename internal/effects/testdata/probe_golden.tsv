@@ -535,7 +535,7 @@ P8 iwr positional|iex	U|
 P9 Start-Process positional	K|
 Q1 quoted-prefix+glob	U|
 Q1b cat quoted-prefix glob	U|
-Q2 brace	U|
+Q2 brace	K|delete:/etc/passwd,delete:/etc/shadow
 Q3 dq backslash	K|delete:/tmp/a\b
 Q4 quoted tilde	K|delete:/home/u/x
 Q5 escaped star	K|delete:/tmp/*
@@ -726,8 +726,8 @@ V12 for rebinds var	U|
 V13 read rebinds var	U|
 V14 field split	U|
 V15 glob after expansion	U|
-V16 brace+escaped tilde	U|
-V17 brace+escaped	U|
+V16 brace+escaped tilde	K|delete:/home/u/*,delete:/home/u/.ssh
+V17 brace+escaped	K|delete:/etc/passwd,delete:/etc/sha*dow
 V19 export HOME	K|delete:/tmp/.bashrc
 V19b dynamic HOME export	U|
 V2 CDPATH prefix tilde	U|
