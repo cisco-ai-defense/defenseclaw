@@ -1633,6 +1633,16 @@ def _read_claude_cli_settings(raw: str, workspace_dir: str) -> _ClaudeSettingsSo
     return _ClaudeSettingsSource("CLI --settings", path, document)
 
 
+_CLAUDE_SOURCE_CONTROL_KEYS = frozenset({"managedSourcesBehavior", "wslInheritsWindowsSettings"})
+
+
+def _claude_source_has_policy_key(settings: dict[str, Any] | None) -> bool:
+    """Whether Claude Code selects this managed source (a non-null key other than the source-control keys)."""
+    return bool(settings) and any(
+        key not in _CLAUDE_SOURCE_CONTROL_KEYS and value is not None for key, value in settings.items()
+    )
+
+
 def _claude_managed_sources(
     config_path: str,
     managed_settings_paths: tuple[str, ...] | None,
@@ -1718,8 +1728,15 @@ def inspect_claude_managed_enabled_plugins(
     except _InspectionError:
         return {}, False
 
+    # Claude Code skips a managed source that carries only source-control
+    # keys (managedSourcesBehavior, wslInheritsWindowsSettings) and applies
+    # the next one.
     active_managed = next(
-        (source for source in (remote, os_managed, file_managed, hkcu) if source is not None and source.settings),
+        (
+            source
+            for source in (remote, os_managed, file_managed, hkcu)
+            if source is not None and _claude_source_has_policy_key(source.settings)
+        ),
         None,
     )
     if (
@@ -1789,8 +1806,15 @@ def _resolve_claude_effective_document(
         config_path, managed_settings_paths, remote_settings_path
     )
 
+    # Claude Code skips a managed source that carries only source-control
+    # keys (managedSourcesBehavior, wslInheritsWindowsSettings) and applies
+    # the next one.
     active_managed = next(
-        (source for source in (remote, os_managed, file_managed, hkcu) if source is not None and source.settings),
+        (
+            source
+            for source in (remote, os_managed, file_managed, hkcu)
+            if source is not None and _claude_source_has_policy_key(source.settings)
+        ),
         None,
     )
     # policyHelper is honored only when its administrator-controlled MDM/file
@@ -1815,6 +1839,22 @@ def _resolve_claude_effective_document(
                 "containing the DefenseClaw hook matrix",
             )
         _validate_claude_managed_controls(active_managed, True)
+        if (
+            active_managed is os_managed
+            and active_managed.settings.get("managedSourcesBehavior") == "merge"
+            and file_managed is not None
+        ):
+            # GAP-1731: an HKLM policy that merges managed sources (Claude
+            # Code 2.1.242+) leaves DefenseClaw's file-based drop-in in force;
+            # the merged hooks carry the matrix exactly when the drop-in does.
+            _validate_claude_managed_controls(file_managed, True)
+            hooks = file_managed.settings.get("hooks")
+            if not isinstance(hooks, dict):
+                raise _InspectionError(
+                    "policy-blocked",
+                    f"Claude Code {file_managed.label} has no hooks table containing the DefenseClaw contract",
+                )
+            return file_managed.settings, f"managed_source={active_managed.label} merged with {file_managed.label}"
         hooks = active_managed.settings.get("hooks")
         if not isinstance(hooks, dict):
             raise _InspectionError(

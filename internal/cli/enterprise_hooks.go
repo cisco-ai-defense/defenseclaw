@@ -1394,6 +1394,13 @@ type enterpriseHookStatusReport struct {
 	Activation                    *enterpriseHookGuardianActivation    `json:"activation,omitempty"`
 	Verification                  []enterpriseHookReconcileRow         `json:"verification,omitempty"`
 	ClaudeEffectivePolicyVerified bool                                 `json:"claude_effective_policy_verified"`
+	// ClaudePolicyShadowedByHKLM says a Windows HKLM Claude Code Settings
+	// policy hides DefenseClaw's file-based managed hooks; the detail names
+	// the fix. ClaudePolicyHKLMManagedSourcesMerge says the HKLM policy merges
+	// managed sources, so both apply (GAP-1731).
+	ClaudePolicyShadowedByHKLM          bool   `json:"claude_policy_shadowed_by_hklm"`
+	ClaudePolicyHKLMManagedSourcesMerge bool   `json:"claude_policy_hklm_managed_sources_merge,omitempty"`
+	ClaudePolicyHKLMDetail              string `json:"claude_policy_hklm_detail,omitempty"`
 	// Enrollment lists, per enrolled account, each connector and its state
 	// in the last guardian reconcile.
 	Enrollment []enterpriseHookEnrollment `json:"enrollment,omitempty"`
@@ -1645,6 +1652,7 @@ func runEnterpriseHooksStatus(cmd *cobra.Command, _ []string) error {
 		report.Verification = append([]enterpriseHookReconcileRow(nil), state.Results...)
 		report.ClaudeEffectivePolicyVerified =
 			enterpriseHooksClaudeEffectivePolicyVerified(state.Results)
+		enterpriseHooksReportClaudeHKLMPolicy(&report, state.Results)
 	}
 	report.OK = len(report.Errors) == 0
 	if enterpriseHookJSON {
@@ -2421,6 +2429,43 @@ func runEnterpriseHooksVerifyWithScope(cmd *cobra.Command, registrationOnly bool
 		return fmt.Errorf("enterprise hooks verify failed for %d target(s)", failures)
 	}
 	return nil
+}
+
+// enterpriseHookClaudeOSAdminPolicyStatus is the connector's read-only HKLM
+// view; tests replace it.
+var enterpriseHookClaudeOSAdminPolicyStatus = connector.ClaudeCodeOSAdminPolicyStatus
+
+// enterpriseHooksReportClaudeHKLMPolicy reports, on Windows with an enrolled
+// Claude Code target, whether the HKLM Claude Code policy shadows the
+// DefenseClaw drop-in. A shadowing policy is a warning that names the fix:
+// the guardian's own Claude rows carry the failure.
+func enterpriseHooksReportClaudeHKLMPolicy(report *enterpriseHookStatusReport, rows []enterpriseHookReconcileRow) {
+	if runtime.GOOS != "windows" {
+		return
+	}
+	agentVersion, enrolled := "", false
+	for _, row := range rows {
+		if row.Connector != "claudecode" || row.Removed {
+			continue
+		}
+		enrolled = true
+		if row.Result != nil && agentVersion == "" {
+			agentVersion = strings.TrimSpace(row.Result.AgentVersion)
+		}
+	}
+	if !enrolled {
+		return
+	}
+	shadowed, merges, detail := enterpriseHookClaudeOSAdminPolicyStatus(connector.SetupOpts{
+		ManagedEnterprise: true,
+		AgentVersion:      agentVersion,
+	})
+	report.ClaudePolicyShadowedByHKLM = shadowed
+	report.ClaudePolicyHKLMManagedSourcesMerge = merges
+	report.ClaudePolicyHKLMDetail = detail
+	if shadowed {
+		report.Warnings = append(report.Warnings, "claude_policy_shadowed_by_hklm: "+detail)
+	}
 }
 
 // enterpriseHooksClaudeEffectivePolicyVerified deliberately remains false for
