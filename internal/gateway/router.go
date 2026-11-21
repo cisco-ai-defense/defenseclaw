@@ -1121,6 +1121,11 @@ func (r *EventRouter) handleAgentStreamEvent(se agentStreamEnvelope, evt EventFr
 	if se.Data != nil {
 		_ = json.Unmarshal(se.Data, &data)
 	}
+	// The stream names the session's id next to its key. A plugin that sends
+	// the id is judged under the key (openclaw_session_alias.go, GAP-0148).
+	if id, ok := agentRunReportedIdentifier(se.SessionID, data.SessionID); ok && agentRunIdentifier(se.SessionKey) {
+		learnOpenClawSessionAlias(id, se.SessionKey)
+	}
 
 	readLoopLogf("[bifrost] agent stream: stream=%s phase=%s runId=%s session=%s seq=%d",
 		se.Stream, data.Phase, se.RunID, se.SessionKey, se.Seq)

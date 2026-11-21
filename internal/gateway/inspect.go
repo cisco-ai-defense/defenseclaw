@@ -2909,6 +2909,12 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), a.inspectScanBudget())
 	defer cancel()
 	workerCtx := deferManagedAIDFailOpenAccounting(ctx)
+	if serverConnector == "openclaw" {
+		// The judge reads the session's task under the session key the event
+		// router keeps it under, also for a plugin that sends the transcript's
+		// session id (rel-1-0-10:GAP-0148).
+		workerCtx = withOpenClawSessionKey(workerCtx)
+	}
 
 	fmt.Fprintf(os.Stderr, "[inspect] >>> tool=%q args=%s content_len=%d direction=%s\n",
 		req.Tool, redaction.MessageContent(string(req.Args)), len(req.Content), req.Direction)

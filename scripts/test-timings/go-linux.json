@@ -2720,6 +2720,7 @@
    "TestProxyPromptBlockAlertNamesDirectionAndReason": 3.3,
    "TestProxyReadOfWindowsCredentialPathAlertsFiveTiers": 4.0,
    "TestProxyToolCallsNeverWeakerThanClaudeCode": 185.5,
+   "TestProxyToolCallsNeverWeakerThanClaudeCodeManaged": 105.0,
    "TestProxyV8ModelTraceMetricsStayPinnedAcrossRuntimeReload": 2.3,
    "TestPushdAndSubshellLinkToStateIsStateWrite": 10.8,
    "TestR103B07GAP0651ProtectedCommandGroups": 9.4,

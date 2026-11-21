@@ -368,41 +368,72 @@ func shapeParityTiers(t *testing.T, fn func(t *testing.T, p gap0437Pack)) {
 // TestProxyToolCallsNeverWeakerThanClaudeCode: the LLM proxy's tool-call
 // route judges a model reply's Bash, Write, Edit and Read calls at least as
 // the Claude Code hook does (GAP-0782), in the default, permissive and strict
-// packs (the proxy has no managed tier).
+// packs. TestProxyToolCallsNeverWeakerThanClaudeCodeManaged runs the managed
+// tiers; they are a test of their own so the shard planner can place each.
 func TestProxyToolCallsNeverWeakerThanClaudeCode(t *testing.T) {
+	proxyParityTiers(t, false)
+}
+
+// TestProxyToolCallsNeverWeakerThanClaudeCodeManaged: the same in the managed
+// and managed-strict tiers. A managed install runs the /llm proxy too; the
+// parity test skipped every managed tier, so drift there went unseen
+// (rel-1-0-10:GAP-0911).
+func TestProxyToolCallsNeverWeakerThanClaudeCodeManaged(t *testing.T) {
+	proxyParityTiers(t, true)
+}
+
+func proxyParityTiers(t *testing.T, managedTiers bool) {
 	cases := shapeParityCases(t)
 	if testing.Short() {
 		cases = cases[:len(cases)/4]
 	}
-	shapeParityTiers(t, func(t *testing.T, p gap0437Pack) {
-		if p.managed {
-			t.Skip("the proxy route has no managed tier")
+	for _, p := range gap0437Packs {
+		if p.managed != managedTiers {
+			continue
 		}
-		srv := gap0437Server(t, p, "claudecode", "action")
-		installToolCallCorpusProfileConnector(t, "claudecode", p.pack)
-		hook := srv.handleAgentHook("claudecode")
-		proxy := newTestProxy(t, &mockProvider{}, newMockInspector(), "action")
-		proxy.cfg.RulePack = p.pack
-		installToolCallCorpusProfileConnector(t, proxy.connectorName(), p.pack)
-		// A model reply names no session directory, so the proxy judges a
-		// call in an empty directory of its own (proxyNeutralCWD); Claude
-		// Code is asked in an empty directory too, so a relative operand
-		// names no real file on either side.
-		cwd := t.TempDir()
-		for _, c := range cases {
-			base := shapeParityHook(t, hook, shapeParityCall{name: "claudecode", conn: "claudecode",
-				event: "PreToolUse", body: shapeParityEnvelope("PreToolUse", cwd, c.tool, c.args)}, false)
-			args, _ := json.Marshal(c.args)
-			calls, _ := json.Marshal([]map[string]any{{"type": "function", "function": map[string]string{"name": c.tool, "arguments": string(args)}}})
-			got := "allow"
-			if v := proxy.inspectToolCalls(context.Background(), calls); v != nil {
-				got = v.Action
-			}
-			if shapeParityRank[got] < shapeParityRank[base] {
-				t.Errorf("%s %s: proxy %s, Claude Code %s %s", p.name, c.id, got, c.tool, base)
-			}
+		p := p
+		t.Run(p.name, func(t *testing.T) { proxyParityTier(t, p, cases) })
+	}
+}
+
+func proxyParityTier(t *testing.T, p gap0437Pack, cases []struct {
+	id   string
+	tool string
+	args map[string]any
+}) {
+	// The managed tiers are the DefenseClaw managed install (deployment mode
+	// in the gateway's config, gap0437Server). ManagedEnterpriseActive stays
+	// off: it is the Secure Client integration (cfg.ManagedAIDOnly), which
+	// keeps its own tool policy.
+	srv := gap0437Server(t, p, "claudecode", "action")
+	installToolCallCorpusProfileConnector(t, "claudecode", p.pack)
+	hook := srv.handleAgentHook("claudecode")
+	proxy := newTestProxy(t, &mockProvider{}, newMockInspector(), "action")
+	proxy.cfg.RulePack = p.pack
+	installToolCallCorpusProfileConnector(t, proxy.connectorName(), p.pack)
+	// A model reply names no session directory, so the proxy judges a
+	// call in an empty directory of its own (proxyNeutralCWD); Claude
+	// Code is asked in an empty directory too, so a relative operand
+	// names no real file on either side.
+	cwd := t.TempDir()
+	stronger := 0
+	defer func() { t.Logf("%s: %d rows, proxy stronger on %d", p.name, len(cases), stronger) }()
+	for _, c := range cases {
+		base := shapeParityHook(t, hook, shapeParityCall{name: "claudecode", conn: "claudecode",
+			event: "PreToolUse", body: shapeParityEnvelope("PreToolUse", cwd, c.tool, c.args)}, p.managed)
+		args, _ := json.Marshal(c.args)
+		calls, _ := json.Marshal([]map[string]any{{"type": "function", "function": map[string]string{"name": c.tool, "arguments": string(args)}}})
+		got := "allow"
+		if v := proxy.inspectToolCalls(context.Background(), calls); v != nil {
+			got = v.Action
 		}
-	})
+		if shapeParityRank[got] > shapeParityRank[base] {
+			stronger++
+		}
+		if shapeParityRank[got] < shapeParityRank[base] {
+			t.Errorf("%s %s: proxy %s, Claude Code %s %s", p.name, c.id, got, c.tool, base)
+		}
+	}
 }
 
 // TestWindowsHostShellDialectEveryRoute: on a Windows host the fixture's

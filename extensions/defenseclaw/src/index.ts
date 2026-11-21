@@ -170,6 +170,16 @@ function openClawWorkspaceHome(): string {
 // OpenClaw runs file and exec tools from the agent workspace by default.
 // The extension's process directory can differ from that workspace, so use
 // the host's agent config when deciding relative targets during an outage.
+// The session a request names is the OpenClaw session key: the key the
+// gateway's event router keeps the user's task under (session.message) and
+// the other hooks already send. The tool check sent the transcript's session
+// id first, so the tool judge looked for the task under a key it was never
+// stored under and judged OpenClaw tool calls without it
+// (rel-1-0-10:GAP-0148). The session id is used only when OpenClaw names no key.
+function sessionOf(ctx?: { sessionKey?: string; sessionId?: string }): string | undefined {
+  return ctx?.sessionKey || ctx?.sessionId || undefined;
+}
+
 function toolWorkspaceCwd(api: DefenseClawPluginHost, ctx?: ToolContext): string {
   const runtimeWorkspace = (ctx as ToolContext & { workspaceDir?: string } | undefined)?.workspaceDir;
   if (runtimeWorkspace && isAbsolute(runtimeWorkspace)) return runtimeWorkspace;
@@ -507,7 +517,7 @@ export default function (api: DefenseClawPluginHost) {
 
   const trackToolContext = (ctx?: ToolContext): void => {
     if (!ctx) return;
-    const sessionId = ctx.sessionId ?? ctx.sessionKey;
+    const sessionId = sessionOf(ctx);
     const runId = ctx.runId;
     if (sessionId || runId) {
       currentToolContext = { sessionId, runId };
@@ -635,7 +645,7 @@ export default function (api: DefenseClawPluginHost) {
     payload: Record<string, unknown>,
     toolCtx?: ToolContext,
   ): Promise<InspectVerdict> {
-    const sessionId = toolCtx?.sessionId ?? toolCtx?.sessionKey;
+    const sessionId = sessionOf(toolCtx);
     const bodyPayload = sessionId
       ? { ...payload, session_id: sessionId, approval_surface: "native" }
       : { ...payload, approval_surface: "native" };
@@ -824,7 +834,6 @@ export default function (api: DefenseClawPluginHost) {
   };
 
   const MAX_OBSERVED_TEXT = 256 * 1024;
-  const sessionOf = (ctx?: { sessionKey?: string; sessionId?: string }) => ctx?.sessionKey ?? ctx?.sessionId;
 
   if (hookMode !== "proxy") {
     // Prompt gate (connectors.openclaw.hooks.prompt_gate, off by default):
@@ -885,7 +894,7 @@ export default function (api: DefenseClawPluginHost) {
       const texts = Array.isArray(event?.assistantTexts) ? event.assistantTexts.filter((t: unknown) => typeof t === "string") : [];
       const content = texts.join("\n").slice(0, MAX_OBSERVED_TEXT);
       if (!content) return;
-      const sessionId = event?.sessionId ?? sessionOf(ctx);
+      const sessionId = sessionOf(ctx) ?? event?.sessionId;
       void daemonClient.postRaw("/api/v1/inspect/response", {
         content,
         model: event?.model,
