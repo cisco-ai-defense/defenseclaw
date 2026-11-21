@@ -67,12 +67,12 @@ func useForeignHookGuardian(t *testing.T, policy map[string]config.EnterpriseCon
 }
 
 // skipForeignHookLedgerOnWindows skips a test that writes the removal
-// ledger: on Windows the protected write sets a SYSTEM-owned DACL.
+// ledger under a standard Windows token: the protected write sets a
+// SYSTEM-owned DACL, which needs an administrator token. The elevated native
+// set and Windows Native CI run it (rel-1-0-10:GAP-1512).
 func skipForeignHookLedgerOnWindows(t *testing.T) {
 	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Skip("the protected ledger write sets a SYSTEM-owned DACL")
-	}
+	requireAdministratorTestToken(t, "the protected ledger write sets a SYSTEM-owned DACL")
 }
 
 // removals is the ledger ("" entries when there is none).
