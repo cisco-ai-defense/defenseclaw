@@ -131,7 +131,7 @@ func TestPassthroughDecodesProviderEncodings(t *testing.T) {
 			insp.setVerdict("completion", &ScanVerdict{Action: "block", Severity: "HIGH", Reason: "test secret"})
 			rec = httptest.NewRecorder()
 			proxy.handlePassthrough(rec, req())
-			if strings.Contains(rec.Body.String(), "4242") || rec.Header().Get("Content-Encoding") != "" {
+			if bedrockSecretLeaked(rec.Body.String()) || rec.Header().Get("Content-Encoding") != "" {
 				t.Fatalf("blocked reply forwarded: %d %v %q", rec.Code, rec.Header(), rec.Body.Bytes())
 			}
 		})

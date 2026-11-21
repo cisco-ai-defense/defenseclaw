@@ -26,6 +26,7 @@ import (
 	"os"
 	"reflect"
 	"runtime"
+	"runtime/debug"
 	"slices"
 	"strconv"
 	"strings"
@@ -994,6 +995,16 @@ func TestInspectToolMessageMarginBandStillBlocksTheKey(t *testing.T) {
 	// the test to 8.6 GB plain and 26 GB under -race (max RSS), which killed the
 	// 16 GB CI runner of gateway shard 20. The product handler needs 0.23 GB for
 	// the same bodies. The heap bound below keeps the test from growing back.
+	//
+	// The bound is on this test's own growth above a post-GC baseline, not on
+	// the process heap: in a whole internal/gateway run, earlier tests leave
+	// ~725 MiB live and the absolute peak passed 1 GiB at rel too (GAP-1643).
+	// A low GC percent while the test runs keeps the pacer from letting garbage
+	// grow in proportion to that retained heap, so the growth stays this test's.
+	runtime.GC()
+	var base runtime.MemStats
+	runtime.ReadMemStats(&base)
+	defer debug.SetGCPercent(debug.SetGCPercent(25))
 	peakHeap := make(chan uint64, 1)
 	stopSampling := make(chan struct{})
 	go func() {
@@ -1021,8 +1032,9 @@ func TestInspectToolMessageMarginBandStillBlocksTheKey(t *testing.T) {
 		if hookAnswerRaceBuild {
 			limit *= 3
 		}
-		if peak > limit {
-			t.Errorf("peak heap in use was %d MiB, over the %d MiB bound: the size search must not build bodies far past the API limit", peak>>20, limit>>20)
+		growth := peak - min(peak, base.HeapInuse)
+		if growth > limit {
+			t.Errorf("heap in use grew %d MiB above the %d MiB post-GC baseline (peak %d MiB), over the %d MiB bound: the size search must not build bodies far past the API limit", growth>>20, base.HeapInuse>>20, peak>>20, limit>>20)
 		}
 	}()
 	prose := func(n int) string { return strings.Repeat("the quarterly plan is attached for review. ", n/43+1)[:n] }
@@ -1142,4 +1154,21 @@ func TestInspectToolMessageMarginBandStillBlocksTheKey(t *testing.T) {
 			}
 		}
 	}
+}
+
+// GAP-1643: the margin-band heap bound holds with a large heap retained by
+// earlier tests (a whole internal/gateway run leaves ~725 MiB live). Red when
+// the bound is on the absolute process heap, green when it is on the test's own
+// growth. Plain build only: the -race bound is 3 GiB and a ballast above it is
+// too heavy for a CI runner.
+func TestGAP1643MarginBandHeapBoundIgnoresRetainedHeap(t *testing.T) {
+	if hookAnswerRaceBuild || testing.Short() {
+		t.Skip("plain, non-short build only: the ballast must pass the 1 GiB plain bound")
+	}
+	ballast := make([]byte, 1100<<20)
+	for i := 0; i < len(ballast); i += 4096 {
+		ballast[i] = 1
+	}
+	TestInspectToolMessageMarginBandStillBlocksTheKey(t)
+	runtime.KeepAlive(ballast)
 }

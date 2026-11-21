@@ -2049,6 +2049,7 @@
    "TestGAP1472HereStringShellVerdicts": 3.2,
    "TestGAP1474NeutralChainTheReadingRefusesKeepsTheFloor": 126.3,
    "TestGAP1642FindFromTheRootReachesTheHookFilesFindHomeReaches": 17.7,
+   "TestGAP1643MarginBandHeapBoundIgnoresRetainedHeap": 4.5,
    "TestGAP2590BenignLinkReadersAndLinkRemoval": 3.0,
    "TestGAP2590ChecksAroundTheRmOfALink": 8.3,
    "TestGatewayEgressV8EmitsGeneratedLogAndMetricWithoutLegacyPath": 3.7,
