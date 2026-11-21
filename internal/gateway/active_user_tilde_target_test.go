@@ -54,10 +54,13 @@ func TestActiveUserTildeTargetIsTheActiveHome(t *testing.T) {
 		"echo k >> ~dcku/.ssh/authorized_keys",
 	}
 	blockRules := map[string][]string{
-		"echo k >> ~dcku/.ssh/authorized_keys":                     {gap0747SSHKeysRule},
-		"echo k >> ~/.ssh/authorized_keys":                         {gap0747SSHKeysRule},
-		"source ./env.sh; echo x > ~dcku/.defenseclaw/config.yaml": {gap0747StateRule, gap0747SSHKeysRule},
+		"echo k >> ~dcku/.ssh/authorized_keys": {gap0747SSHKeysRule},
+		"echo k >> ~/.ssh/authorized_keys":     {gap0747SSHKeysRule},
 	}
+	// "source ./env.sh; echo x > ~dcku/.defenseclaw/config.yaml" is not in
+	// blockRules: after the unread source the target still ends in the fixed
+	// name config.yaml, so it is no authorized-keys write (GAP-1050) and the
+	// call is the HIGH state write alert, as its ~/ control spelling is.
 	allow := []string{
 		"cat ~dcku/.defenseclaw/config.yaml",
 		"ls ~dcku/.defenseclaw",
