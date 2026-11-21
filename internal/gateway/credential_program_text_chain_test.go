@@ -75,6 +75,12 @@ func TestCredentialNameInProgramTextIsNoReadOfIt(t *testing.T) {
 		{"Q34", "grep -r --exclude='*.env' --include='.env' KEY .", true},
 		{"Q34b", "grep -r --exclude='*.txt' --include='*.go' KEY .", true},
 		{"Q34c", "grep -r --include='.env' --exclude='*.env' KEY .", false},
+		// An --exclude the filter cannot read (an expansion, an
+		// --exclude-from file) or an abbreviated option (--incl) keeps
+		// every name grep may read, as on rel.
+		{"Q35", `grep -r --exclude="$X" --include='*.go' KEY .`, true},
+		{"Q35b", "grep -r --exclude-from=ignore.lst --include='*.go' KEY .", true},
+		{"Q35c", "grep -r --exclude='*.env' --incl='.env' KEY .", true},
 	}
 	installCorrelationHMACForTest(t)
 	for _, r := range rows {

@@ -1103,8 +1103,11 @@ func credentialSearchFilterOf(command CommandFact, program string) credentialSea
 	}
 	// add records one option's glob. A glob the call does not spell is,
 	// for --include, the unquoted glob itself (a file matching it can only
-	// narrow it) or "*" (any name), and is dropped for --exclude and
-	// --exclude-dir: either way the filter keeps every name it might read.
+	// narrow it) or "*" (any name); for --exclude and --exclude-from (whose
+	// patterns GNU grep adds to the same ordered list) an exclude that
+	// matches no name, kept in its place so a later --include never becomes
+	// the first option; for --exclude-dir nothing. Either way the filter
+	// keeps every name the search might read.
 	add := func(option, glob string, known bool) {
 		switch option {
 		case "--include":
@@ -1112,16 +1115,22 @@ func credentialSearchFilterOf(command CommandFact, program string) credentialSea
 				glob = "*"
 			}
 			filter.names = append(filter.names, credentialSearchGlob{glob, true})
-		case "--exclude":
-			if known {
-				filter.names = append(filter.names, credentialSearchGlob{glob, false})
+		case "--exclude", "--exclude-from":
+			if !known || option == "--exclude-from" {
+				// path.Match("", name) is false for every file name.
+				glob = ""
 			}
+			filter.names = append(filter.names, credentialSearchGlob{glob, false})
 		case "--exclude-dir":
 			if known {
 				filter.excludeDir = append(filter.excludeDir, glob)
 			}
 		}
 	}
+	// abbreviated: grep's getopt_long takes any unambiguous prefix of a long
+	// option (--incl, --exclude-f). Such a word switches the name filter off
+	// (every name is read, as on rel) instead of guessing which option it is.
+	abbreviated := false
 	for i := 1; i < len(argv); i++ {
 		arg := argv[i]
 		if arg == "--" {
@@ -1129,15 +1138,28 @@ func credentialSearchFilterOf(command CommandFact, program string) credentialSea
 		}
 		if !spelled(i) {
 			argument := command.Arguments[i]
-			switch {
+			switch prefix := argument.staticPrefix; {
 			case strings.HasPrefix(argument.StaticGlob, "--include="):
 				add("--include", strings.TrimPrefix(argument.StaticGlob, "--include="), true)
-			case strings.HasPrefix(argument.staticPrefix, "--include"):
+			case strings.HasPrefix(prefix, "--include"):
 				add("--include", "", false)
+			case strings.HasPrefix(prefix, "--exclude-dir"):
+				add("--exclude-dir", "", false)
+			case prefix == "" || strings.HasPrefix(prefix, "-"):
+				// --exclude="$X", --exclude-from="$F", or a word that may
+				// expand to either: an exclude grep may read in this place.
+				add("--exclude", "", false)
 			}
 			continue
 		}
-		for _, option := range []string{"--include", "--exclude", "--exclude-dir"} {
+		if name, _, _ := strings.Cut(arg, "="); len(name) > 2 && strings.HasPrefix(name, "--") {
+			for _, option := range []string{"--include", "--exclude", "--exclude-dir", "--exclude-from"} {
+				if len(name) < len(option) && strings.HasPrefix(option, name) && name != "--exclude" {
+					abbreviated = true
+				}
+			}
+		}
+		for _, option := range []string{"--include", "--exclude", "--exclude-dir", "--exclude-from"} {
 			switch {
 			case strings.HasPrefix(arg, option+"="):
 				add(option, strings.TrimPrefix(arg, option+"="), true)
@@ -1152,6 +1174,9 @@ func credentialSearchFilterOf(command CommandFact, program string) credentialSea
 				}
 			}
 		}
+	}
+	if abbreviated {
+		filter.names = nil
 	}
 	return filter
 }
