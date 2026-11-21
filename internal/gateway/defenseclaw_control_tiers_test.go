@@ -77,6 +77,10 @@ func TestDefenseClawControlFiveTiers(t *testing.T) {
 	}
 	for _, p := range gap0437Packs {
 		a := gap0437Server(t, p, "openclaw", "action")
+		// The corpus judges verdicts, not the scan deadline (the GAP-0919
+		// timeout tests hold that): a hosted Windows runner answered one row
+		// 504 after the 200 ms production deadline.
+		a.inspectToolScanTimeout = 10 * time.Second
 		// The first call of a pack builds its rule generation; under -race on
 		// a loaded box that can outlast the scan deadline, so it is repeated
 		// until the generation is built.

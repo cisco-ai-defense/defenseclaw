@@ -158,7 +158,6 @@ func TestGAP1150FailedLocationChangeThenRelativeStateWriteFiveTiers(t *testing.T
 	}
 	for _, p := range gap0437Packs {
 		for _, route := range []string{"claudecode", "codex", "codex-argv", "codex-shell_command", "codex-cmd", "copilot"} {
-			a := gap0437Server(t, p, strings.SplitN(route, "-", 2)[0], "action")
 			rows := powerShell
 			if route == "codex-cmd" {
 				rows = cmd
@@ -176,12 +175,18 @@ func TestGAP1150FailedLocationChangeThenRelativeStateWriteFiveTiers(t *testing.T
 					// rel-1-0-10:GAP-1157 (same at rel).
 					continue
 				}
+				// A gateway of its own for each call: gap1150Post sends one
+				// tool use id, and a second call with it on one gateway is a
+				// correlation collision (as in the GAP-1228 test).
+				a := gap0437Server(t, p, strings.SplitN(route, "-", 2)[0], "action")
 				out := gap1150Post(t, a, route, r.cwd, r.command, home, p.managed)
 				raw, _ := json.Marshal(out)
 				action, _ := out["action"].(string)
 				state := strings.Contains(string(raw), "tamper.detector_state_write")
-				if r.block && (action != "block" || !state) {
-					t.Errorf("%s %s %s: action %q, want block by tamper.detector_state_write: %.400s", p.name, route, r.id, action, raw)
+				// A proven state write is a HIGH alert outside strict and
+				// managed strict, a block there (GAP-0747 owner tiering 2026-11-15T15:20Z).
+				if want := gap1173Want("write", p.name); r.block && (action != want || !state) {
+					t.Errorf("%s %s %s: action %q, want %s by tamper.detector_state_write: %.400s", p.name, route, r.id, action, want, raw)
 				}
 				if !r.block && (action == "block" || state) {
 					t.Errorf("%s %s %s: a benign twin was judged %q: %.400s", p.name, route, r.id, action, raw)

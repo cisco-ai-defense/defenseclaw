@@ -104,8 +104,16 @@ func TestGAP1060DefaultStreamWriteNativeEveryTier(t *testing.T) {
 					for _, suffix := range gap1060Suffixes {
 						cells++
 						command := fmt.Sprintf(form.text, "'"+target+suffix.text+"'")
-						if got := gap1007Decide(t, home, cwd, tier, tool, command); got != "block" {
-							t.Errorf("%s/%s/%s|%s: action %s, want block (the config's default stream)", tier.name, tool, form.id, suffix.id, got)
+						// A proven state write is a HIGH alert outside strict
+						// and managed strict (GAP-0747 owner tiering 2026-11-15T15:20Z); a call that also names
+						// another tamper or persistence rule keeps its block.
+						got, other := gap1007DecideFull(t, home, cwd, tier, tool, command)
+						want := gap0747WantAction(tier.posture == "strict")
+						if other {
+							want = "block"
+						}
+						if got != want {
+							t.Errorf("%s/%s/%s|%s: action %s, want %s (the config's default stream)", tier.name, tool, form.id, suffix.id, got, want)
 						}
 					}
 				}
