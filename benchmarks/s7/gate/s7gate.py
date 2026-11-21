@@ -4,7 +4,7 @@
   s7gate.py run     --bin s7bench --policy-dir DIR --corpora corpora.json --out OUT [--packs default,permissive,strict] [--gomaxprocs 8] [--only name,...]
   s7gate.py score   --corpora corpora.json --out OUT [--reviews reviews.jsonl]          writes OUT/scores/<corpus>-<pack>.json and OUT/SUMMARY.md
   s7gate.py compare --base OUTBASE --cand OUTCAND                                      per-corpus rate deltas + per-rule diffs; exit 1 if a gate rate worsens
-  s7gate.py all     (run + score)                                                      the one command used for before/after; a missing label set refuses first (exit 2)
+  s7gate.py all     (run + score)                                                      the one command used for before/after; a missing or changed label set refuses (exit 1)
   s7gate.py register-corpus FILE --version ID   record the sha256 of a corpus file as a registered version
   s7gate.py verify-corpora --corpora C [--only a,b]   exit 1 when a corpus file is missing, unregistered or changed in place
   s7gate.py push-labels --src DIR --dest DIR [--name labels-v3]   copy a label set to <dest>/current.*, verified by sha256; any failure exits 4
@@ -13,7 +13,7 @@
 
 One scorer (rel-1-0-10 GAP-1581): this file is the scorer s7-gate deploys to the bench boxes (with holdout.py, surface.py, s7session.py and
 labelfold.py beside it; the frozen holdout-split-v1.json is data and stays on the dev host, S7_HOLDOUT_SPLIT names another file). Exit codes
-are per subcommand: run/score/all/audit 4 = incomplete run; push-labels/fold-labels/check-labels 4 = bad input; 2 = a missing label set or file;
+are per subcommand: run/score/all/audit 4 = incomplete run; push-labels/fold-labels/check-labels 4 = bad input; 1 = a missing label set, or one that changed during the run;
 compare 1 = a gate rate worsened, 3 = no verdict (label sets or fixture roots differ, a side unlabelled without --allow-unlabelled, a cell
 incomplete). Corpus registry root $S7_CORPORA_ROOT (default ~/s7c/corpora); default label set $S7_LABELS_DEFAULT (default
 ~/s7c/labels/current.jsonl); fixture root $S7_FIXTURE_ROOT (default ~/s7c/fx), one per box and label-free (GAP-0495, GAP-0736).
@@ -62,7 +62,6 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import holdout as HOLD  # noqa: E402, N812  the frozen holdout split (rel-1-0-10 S7 L2); see holdout.py
-import labelfold  # noqa: E402
 from surface import case_surface  # noqa: E402
 
 PACKS = ["default", "permissive", "strict"]
@@ -173,7 +172,11 @@ FIXTURE_FILES = {
 # (rel-1-0-10:GAP-0666, GAP-0648, GAP-0684). The root is now FX_BASE/<12 hex of sha256 of the run directory>: one fixed length, unique per run.
 # Parent of the per-run fixture trees the scorer made before one root per box (GAP-0666 scheme); gc_fixtures removes the
 # trees whose run directory is gone. Kept until no run directory of that scorer is left on the bench boxes (1.0.12).
-FX_BASE = os.path.expanduser(os.environ.get("S7_FX_BASE", "~/s7c/fx"))
+FX_HASH_LEN = 12  # hex digits of a per-run tree name (the per-run scheme, GAP-0666)
+
+
+def fx_base():
+    return os.path.abspath(os.path.expanduser(os.environ.get("S7_FX_BASE") or "~/s7c/fx"))
 
 
 def fixture_root(out=None):
@@ -197,6 +200,31 @@ def fixture_root(out=None):
     return os.path.abspath(os.path.expanduser(os.environ.get("S7_FIXTURE_ROOT") or "~/s7c/fx"))
 
 
+def _per_run_tree(root):
+    name = os.path.basename(root.rstrip("/"))
+    return len(name) == FX_HASH_LEN and all(c in "0123456789abcdef" for c in name)
+
+
+def run_fixture_root(d):
+    """(root, scheme) of the fixture tree a run directory's corpora were rewritten under. RUN.json fixture_root (this
+    scorer): scheme 'box' (one label-free root per box), or 'per-run' for a --resume of an older run (its
+    fx_base()/<12 hex> tree). Else OUT/fx of the run, or of the run it was rescored from (a deployed-scorer run: a
+    link to its per-run tree, or a pre-labelfix directory): 'per-run'. (None, None) when none is there. Per-run trees
+    have paths of one length (GAP-0666) and compare with each other; a per-run tree against the box root does not
+    (13 bytes shorter per path), nor do two different box roots (GAP-0495)."""
+    try:
+        run = json.load(open(os.path.join(d, "RUN.json")))
+    except (OSError, ValueError):
+        run = {}
+    root = run.get("fixture_root")
+    if root:
+        return root, "per-run" if _per_run_tree(root) else "box"
+    for r in (d, run.get("rescored_from")):
+        if r and os.path.lexists(os.path.join(r, "fx")):
+            return os.path.realpath(os.path.join(r, "fx")), "per-run"
+    return None, None
+
+
 def _read_owner(d):
     try:
         with open(os.path.join(d, ".owner")) as f:
@@ -207,12 +235,13 @@ def _read_owner(d):
 
 def gc_fixtures():
     """Remove FX_BASE/<hash> trees whose run directory is gone (rm -rf gate/<label>, clean-stale, --overwrite)."""
+    base = fx_base()
     try:
-        names = os.listdir(FX_BASE)
+        names = os.listdir(base)
     except OSError:
         return
     for h in names:
-        d = os.path.join(FX_BASE, h)
+        d = os.path.join(base, h)
         owner = _read_owner(d)
         if owner is None:
             continue
@@ -1554,6 +1583,7 @@ def resolve_labels(a):
             f"s7gate: label file {path or '(none)'} not found. The default is {default_labels()} (copied by `s7gate.py push-labels` or s7-gate push_labels); pass --labels none to score the corpus files as they stand, on purpose."
         )
     raw = open(path, "rb").read()
+    a._label_bytes = raw
     man = path[: -len(".jsonl")] + ".manifest.json" if path.endswith(".jsonl") else ""
     ver = ""
     if man and os.path.exists(man):
@@ -1642,10 +1672,18 @@ def cmd_score(a):
     reviews = {}
     tags = {}
     dispo = {}
-    lab_path, lab_info = a.resolved_labels if getattr(a, "resolved_labels", None) else resolve_labels(a)
+    pinned = getattr(a, "resolved_labels", None)
+    lab_path, lab_info = resolve_labels(a)  # read again now: the bytes parsed below are the bytes hashed here
+    if pinned and pinned[1] and (lab_info or {}).get("sha256") != pinned[1]["sha256"]:
+        raise SystemExit(
+            f"s7gate: label file {lab_path} changed during the run (sha256 {pinned[1]['sha256'][:16]} at the start, "
+            f"{(lab_info or {}).get('sha256', 'none')[:16]} now; s7-gate push_labels replaces current.jsonl): no score is "
+            f"written. Rescore the run under one label set: s7gate.py score --decisions-from {a.out} --out <new> "
+            "--labels <file>"
+        )
     if lab_path:
-        for l in open(lab_path):
-            l = l.rstrip("\n")
+        for l in a._label_bytes.decode("utf-8").split("\n"):
+            l = l.rstrip("\r")
             if not l:
                 continue
             if l.startswith("{"):
@@ -2043,24 +2081,19 @@ def cmd_compare(a):
         except (OSError, ValueError):
             return "live"
 
-    def _fxroot(d):
-        try:
-            return json.load(open(f"{d}/RUN.json")).get("fixture_root")
-        except (OSError, ValueError):
-            return None
-
-    fxs = [_fxroot(a.base), _fxroot(a.cand)]
-    if fxs[0] != fxs[1]:
-        if fxs[0] and fxs[1]:
-            print(
-                f"GATE: FIXTURE ROOTS DIFFER (base {fxs[0]}, candidate {fxs[1]}): the corpora were rewritten to "
-                "different paths; rerun one side (no verdict)"
-            )
-            sys.exit(3)
+    (fx0, k0), (fx1, k1) = run_fixture_root(a.base), run_fixture_root(a.cand)
+    fxs, kinds = [fx0, fx1], [k0, k1]
+    if None in fxs:
         lines.append(
-            f"WARNING the {'base' if not fxs[0] else 'candidate'} side records no fixture root (a run of an older "
-            "scorer): its corpus paths may differ from the other side's (GAP-0495)"
+            f"WARNING the {' and '.join(n for n, x in (('base', fxs[0]), ('candidate', fxs[1])) if not x)} side "
+            "records no fixture root and has no OUT/fx: its corpus paths may differ from the other side's (GAP-0495)"
         )
+    elif kinds[0] != kinds[1] or (kinds[0] == "box" and fxs[0] != fxs[1]):
+        print(
+            f"GATE: FIXTURE ROOTS DIFFER (base {fxs[0]} [{kinds[0]}], candidate {fxs[1]} [{kinds[1]}]): the corpora "
+            "were rewritten to paths of different length or text (GAP-0666, GAP-0495); rerun one side (no verdict)"
+        )
+        sys.exit(3)
     fb, fc = _fsmode(a.base), _fsmode(a.cand)
     if fb != fc:
         lines.append(
@@ -2394,7 +2427,15 @@ def main():
     ppl.add_argument("--src", required=True)
     ppl.add_argument("--dest", default=os.path.dirname(default_labels()))
     ppl.add_argument("--name", default="labels-v3")
-    labelfold.add_parsers(sub)
+    try:
+        import labelfold  # only fold-labels / check-labels need it; a box without labelfold.py runs everything else
+    except ImportError:
+        labelfold = None
+    if labelfold:
+        labelfold.add_parsers(sub)
+    elif len(sys.argv) > 1 and sys.argv[1] in ("fold-labels", "check-labels"):
+        print(f"s7gate: {sys.argv[1]} needs labelfold.py beside s7gate.py (copy it with the scorer)", file=sys.stderr)
+        sys.exit(4)
     for n in ("run", "score", "compare", "all"):
         p = sub.add_parser(n)
         if n in ("run", "all"):
@@ -2524,7 +2565,8 @@ def main():
     elif a.cmd == "audit":
         sys.exit(0 if cmd_audit(a) else 4)
     else:
-        # GAP-1580: a missing label set refuses before the harness runs (exit 2), not after the whole run
+        # GAP-1580: a missing label set refuses before the harness runs (exit 1), not after the whole run; cmd_score
+        # refuses again if the file changed while the run went on (s7-gate push_labels replaces current.jsonl)
         a.resolved_labels = resolve_labels(a)
         ran = cmd_run(a)
         scored = cmd_score(a)

@@ -148,13 +148,20 @@ def write_set(out_dir, name, version, rows, base_path, overlay_paths, stats):
         "overlays": [{"file": os.path.basename(p), "sha256": sha256_file(p)} for p in overlay_paths],
         "fold": stats,
     }
-    for path, data in ((lp, body), (mp, (json.dumps(manifest, indent=1, sort_keys=True) + "\n").encode())):
-        try:
+    # both files are written in full first; the manifest is put in place before the label set, so a failure leaves at
+    # most a manifest with no set (which resolve_labels and write_set refuse), never a set without its manifest
+    pairs = ((mp, (json.dumps(manifest, indent=1, sort_keys=True) + "\n").encode()), (lp, body))
+    try:
+        for path, data in pairs:
             with open(path + ".tmp", "wb") as f:
                 f.write(data)
+        for path, _ in pairs:
             os.replace(path + ".tmp", path)
-        except OSError as e:
-            raise LabelError(f"--out {out_dir}: cannot write {os.path.basename(path)}: {e.strerror or e}") from e
+    except OSError as e:
+        for path, _ in pairs:
+            if os.path.exists(path + ".tmp"):
+                os.remove(path + ".tmp")
+        raise LabelError(f"--out {out_dir}: cannot write the label set: {e.strerror or e}") from e
     return manifest
 
 

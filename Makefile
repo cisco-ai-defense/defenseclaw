@@ -1428,6 +1428,7 @@ py-lint: pycli
 	$(RUFF) check cli/tests/
 	@# The S7 benchmark tooling is linted too (GAP-1578): it was outside every lint run and drifted to 919 findings.
 	$(RUFF) check benchmarks/s7/
+	$(RUFF) format --check benchmarks/s7/
 
 go-lint: sync-openclaw-extension
 	@# gofmt drift is the #1 review comment on every PR, so fail fast

@@ -64,7 +64,13 @@ class Env:
         self.labels = self.root / "labels"
         self.labels.mkdir()
         self.default_labels = self.labels / "current.jsonl"
-        self.env = dict(os.environ, S7_CORPORA_ROOT=str(self.croot), S7_LABELS_DEFAULT=str(self.default_labels))
+        self.env = dict(
+            os.environ,
+            S7_CORPORA_ROOT=str(self.croot),
+            S7_LABELS_DEFAULT=str(self.default_labels),
+            S7_FX_BASE=str(self.root / "fx"),
+            S7_FIXTURE_ROOT=str(self.root / "fx"),
+        )  # never the real ~/s7c/fx
         self.env.pop("S7_LABELS", None)
 
     def decisions(self, out: Path) -> None:
