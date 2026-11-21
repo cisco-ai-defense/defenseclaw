@@ -252,10 +252,10 @@ func ProtectWindowsManagedRuntimeAdminFile(path string) error {
 
 // PlanWindowsManagedRuntimeRoots resolves and de-duplicates every enabled
 // manifest row. Existing roots must have the exact target-owner/seven-ACE
-// contract, and each planned root's identity is pinned into the plan. On
-// Secure Client a drifted retained root is re-stamped to it first (recorded in
-// RepairedProfiles) and a profile that still cannot be planned is skipped
-// with its rows kept; the direct standalone plan and strict mode refuse both.
+// contract, and each planned root's identity is pinned into the plan. A
+// profile the plan cannot use is skipped with its rows kept, on both profiles
+// (GAP-1733); on Secure Client a drifted retained root is re-stamped first
+// (recorded in RepairedProfiles). Strict mode refuses both.
 // Absent roots receive independent random staging names and marker SIDs.
 func PlanWindowsManagedRuntimeRoots(
 	manifest Manifest,
@@ -339,11 +339,13 @@ func planWindowsManagedRuntimeRoots(
 	if !validWindowsManagedRuntimeDigest(manifestSHA256) {
 		return plan, fmt.Errorf("enterprise hooks: invalid managed runtime manifest SHA-256")
 	}
-	// Secure Client skips an unusable profile and may repair its retained
-	// root. Standalone lifecycle validation also skips that account, without
-	// repairing or following its folder. Direct standalone validation and
-	// strict mode still return the account failure.
-	resilient := !managed.TrustStrictAncestors() && (!windowsEnterpriseStandaloneProcess() || skipAccountFailures)
+	// Both profiles skip an unusable profile (busy, unusable, or holding a
+	// per-user install's folder) instead of failing every user, and record
+	// it (GAP-1733). The skipped folder is never followed, repaired or taken
+	// over. Direct standalone validation (one user's check) and strict mode
+	// still return the account failure.
+	standalone := windowsEnterpriseStandaloneProcess()
+	resilient := !managed.TrustStrictAncestors() && (!standalone || !validation || skipAccountFailures)
 	var (
 		targets []windowsManagedRuntimeTarget
 		skipped []WindowsManagedRuntimeSkippedProfile
@@ -394,10 +396,12 @@ func planWindowsManagedRuntimeRoots(
 	// skip a user probes that a profile opens for staging and drops a skipped
 	// user's rows.
 	probeMutable := publish != nil && resilient
-	// Install, Upgrade and Repair plans re-stamp a drifted retained root
-	// instead of failing every user; a validation plan never changes a
-	// folder. A profile the plan still cannot use is skipped below.
-	repairDrift := !validation && resilient
+	// Secure Client Install, Upgrade and Repair plans re-stamp a drifted
+	// retained root instead of failing every user; a validation plan never
+	// changes a folder. Drift repair stays Secure Client only: on standalone
+	// it would loosen the trust verdict on a folder DefenseClaw did not
+	// stamp. A profile the plan still cannot use is skipped below.
+	repairDrift := !validation && resilient && !standalone
 	deferredOnly := windowsManagedRuntimeDeferredOnlyRoots(manifest)
 	roots := make([]WindowsManagedRuntimeRootPlan, 0, len(targets))
 	var repaired []WindowsManagedRuntimeSkippedProfile
@@ -420,7 +424,8 @@ func planWindowsManagedRuntimeRoots(
 				// like any other profile the plan cannot use: the folder is
 				// left untouched and the account is not enrolled, so one
 				// user's old per-user install no longer fails the install
-				// for every user. A standalone or strict plan refuses it.
+				// for every user (GAP-1733, both profiles). A strict plan
+				// refuses it.
 				if !resilient || errors.Is(inspectErr, errWindowsManagedRuntimePlanHost) {
 					return inspectErr
 				}
@@ -1086,7 +1091,9 @@ func resolveWindowsManagedRuntimeTarget(userHome, rawSID, rawDataDir string) (wi
 // found it only after minutes of work, and a run that got further committed
 // and then failed on it (GAP-0741). A folder the plan takes over (one a
 // standalone purge kept, or one the account created itself before
-// enrollment) passes.
+// enrollment) passes. Outside strict mode the install plan skips such a user
+// and enrolls the others (GAP-1733), so the preflight refuses only when it
+// would skip every target.
 func PreflightWindowsManagedRuntimeRoots(manifest Manifest) error {
 	if err := windowsManagedRuntimeSetupAuthorize(); err != nil {
 		return err
@@ -1095,14 +1102,42 @@ func PreflightWindowsManagedRuntimeRoots(manifest Manifest) error {
 	if err != nil {
 		return err
 	}
+	strict := managed.TrustStrictAncestors()
 	return windowsManagedRuntimeSetupPrivilege(func() error {
+		refusals := make([]error, 0, len(targets))
 		for _, target := range targets {
-			if err := inspectWindowsManagedRuntimeRoot(target); err != nil {
+			err := inspectWindowsManagedRuntimeRoot(target)
+			if err != nil && strict {
 				return err
 			}
+			refusals = append(refusals, err)
 		}
-		return nil
+		return windowsManagedRuntimePreflightVerdict(refusals, strict)
 	})
+}
+
+// windowsManagedRuntimePreflightVerdict is the preflight's answer from each
+// target's inspection: the first refusal in strict mode, otherwise the first
+// refusal only when every target is refused (the install would enrol nobody).
+func windowsManagedRuntimePreflightVerdict(refusals []error, strict bool) error {
+	var first error
+	refused := 0
+	for _, err := range refusals {
+		if err == nil {
+			continue
+		}
+		if strict {
+			return err
+		}
+		if first == nil {
+			first = err
+		}
+		refused++
+	}
+	if refused == len(refusals) {
+		return first
+	}
+	return nil
 }
 
 // inspectWindowsManagedRuntimeRoot is the read-only half of

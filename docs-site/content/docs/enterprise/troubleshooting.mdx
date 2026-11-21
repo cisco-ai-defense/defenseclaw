@@ -466,7 +466,7 @@ A Setup `/ensure` returns `noop: true` with `noop_reason: compliant`, but takes 
 
 #### The first Windows install stops with `preflight_failed` naming `.defenseclaw`
 
-The message names `C:\Users\<user>\.defenseclaw`, or says "committed, but its protected managed-hook lifecycle journal could not be retired". A per-user install left that folder, and the managed install does not take it over. The first install refuses before it changes anything; a run that had already committed is installed and running.
+The message names `C:\Users\<user>\.defenseclaw`, or says "committed, but its protected managed-hook lifecycle journal could not be retired". A per-user install left that folder, and the managed install does not take it over. When other enrolled users can be protected, Setup leaves that user out instead and finishes, with a `target_runtime_profile_skipped` warning that names the user and the folder; it stops only when every enrolled profile holds such a folder, or in strict mode. The first install refuses before it changes anything; a run that had already committed is installed and running.
 
 **Fix.** Have that user run `defenseclaw uninstall --all --binaries --yes`, or move the folder out of the profile, then run the same command again. When the message says the change is committed, the installed CLI finishes it: `& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows ensure --profile standalone` from an elevated PowerShell prompt. See [Per-user installs](/docs/enterprise/windows#per-user-installs).
 
