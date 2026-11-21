@@ -536,7 +536,7 @@ func recoverWindowsSetupRelaxedDataDirectoryPrivileged(dataDir string, target *w
 	if err != nil {
 		return false, fmt.Errorf("enterprise hooks: read DACL of %s: %w", dataDir, err)
 	}
-	relaxed, err := windowsSetupRelaxedDirectoryDACL(sd)
+	relaxed, err := managed.IsWindowsSetupRelaxedDirectoryDACL(sd)
 	if err != nil || !relaxed {
 		return false, err
 	}
@@ -608,7 +608,7 @@ func recoverWindowsSetupRelaxedHookDirectoryPrivileged(dataDir string, target *w
 	if err != nil {
 		return false, fmt.Errorf("enterprise hooks: read DACL of %s: %w", hookDir, err)
 	}
-	relaxed, err := windowsSetupRelaxedDirectoryDACL(sd)
+	relaxed, err := managed.IsWindowsSetupRelaxedDirectoryDACL(sd)
 	if err != nil || !relaxed {
 		return false, err
 	}
@@ -620,57 +620,6 @@ func recoverWindowsSetupRelaxedHookDirectoryPrivileged(dataDir string, target *w
 		return false, fmt.Errorf("enterprise hooks: restore canonical DACL on %s: %w", hookDir, err)
 	}
 	return true, nil
-}
-
-// windowsSetupRelaxedDirectoryDACL reports whether sd carries exactly the
-// protected owner-private DACL relaxWindowsStandalonePerUserDirectory applies
-// (windowsSetupRelaxedDirectorySDDL), in either ACE order.
-func windowsSetupRelaxedDirectoryDACL(sd *windows.SECURITY_DESCRIPTOR) (bool, error) {
-	if sd == nil {
-		return false, nil
-	}
-	control, _, err := sd.Control()
-	if err != nil {
-		return false, err
-	}
-	if control&windows.SE_DACL_PROTECTED == 0 {
-		return false, nil
-	}
-	dacl, _, err := sd.DACL()
-	if err != nil || dacl == nil || dacl.AceCount != 2 {
-		return false, nil
-	}
-	system, err := windows.CreateWellKnownSid(windows.WinLocalSystemSid)
-	if err != nil {
-		return false, err
-	}
-	ownerRights, err := windows.CreateWellKnownSid(windows.WinCreatorOwnerRightsSid)
-	if err != nil {
-		return false, err
-	}
-	const fullAccess windows.ACCESS_MASK = 0x001f01ff
-	const inherit = windows.OBJECT_INHERIT_ACE | windows.CONTAINER_INHERIT_ACE
-	sawSystem, sawOwnerRights := false, false
-	for index := uint32(0); index < uint32(dacl.AceCount); index++ {
-		var ace *windows.ACCESS_ALLOWED_ACE
-		if err := windows.GetAce(dacl, index, &ace); err != nil {
-			return false, err
-		}
-		if ace == nil || ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE ||
-			ace.Header.AceFlags != inherit || ace.Mask != fullAccess {
-			return false, nil
-		}
-		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
-		switch {
-		case sid.Equals(system) && !sawSystem:
-			sawSystem = true
-		case sid.Equals(ownerRights) && !sawOwnerRights:
-			sawOwnerRights = true
-		default:
-			return false, nil
-		}
-	}
-	return sawSystem && sawOwnerRights, nil
 }
 
 func openWindowsGuardianACLRoot(path string, final bool) (windows.Handle, error) {

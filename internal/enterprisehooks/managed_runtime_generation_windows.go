@@ -2135,7 +2135,7 @@ func windowsManagedRuntimeDirSetupRelaxed(path string, target *windows.SID) bool
 	if err != nil || owner == nil || !owner.Equals(target) {
 		return false
 	}
-	relaxed, err := windowsSetupRelaxedDirectoryDACL(sd)
+	relaxed, err := managed.IsWindowsSetupRelaxedDirectoryDACL(sd)
 	return err == nil && relaxed
 }
 

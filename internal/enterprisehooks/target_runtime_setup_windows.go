@@ -1186,7 +1186,7 @@ func windowsManagedRuntimePurgeKeptAdoptable(final windows.Handle, target window
 	if err != nil || owner == nil || !owner.Equals(target.sid) {
 		return false
 	}
-	relaxed, err := windowsSetupRelaxedDirectoryDACL(descriptor)
+	relaxed, err := managed.IsWindowsSetupRelaxedDirectoryDACL(descriptor)
 	return err == nil && relaxed
 }
 
@@ -1510,7 +1510,7 @@ func adoptWindowsManagedRuntimePurgeKeptRoot(parent, final windows.Handle, targe
 	if err != nil || owner == nil || !owner.Equals(target.sid) {
 		return false, err
 	}
-	if relaxed, err := windowsSetupRelaxedDirectoryDACL(descriptor); err != nil || !relaxed {
+	if relaxed, err := managed.IsWindowsSetupRelaxedDirectoryDACL(descriptor); err != nil || !relaxed {
 		return false, err
 	}
 	identity, err := windowsManagedRuntimeHandleIdentity(final, true)
@@ -3365,7 +3365,7 @@ func validateWindowsManagedRuntimeCleanupSubdirectoryHandle(
 	if err != nil {
 		return err
 	}
-	if setup, err := windowsSetupRelaxedDirectoryDACL(descriptor); err != nil {
+	if setup, err := managed.IsWindowsSetupRelaxedDirectoryDACL(descriptor); err != nil {
 		return err
 	} else if !setup {
 		return canonicalErr
