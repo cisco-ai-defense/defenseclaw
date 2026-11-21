@@ -60,7 +60,7 @@ With the `default` pack in action mode:
 | MEDIUM | Alert | Alert |
 | LOW | Allow | Allow |
 
-Observe mode does not enforce policy findings, whatever the levels say. Hook fail mode and proxy availability still apply. There is one exception: an agent that changes DefenseClaw's own files, such as a copy into `~/.defenseclaw` (rule `tamper.detector_state_write`), is blocked in every mode by the `strict` and `managed-strict` packs. The `default` and `permissive` packs, a managed install's default pack included, raise a HIGH alert and do not block it.
+Observe mode does not enforce policy findings, whatever the levels say. Hook fail mode and proxy availability still apply. There is one exception: an agent that changes DefenseClaw's own files, such as a copy into `~/.defenseclaw` (rule `tamper.detector_state_write`) is blocked in every mode by the `strict` and `managed-strict` packs; the default and permissive packs, a managed install's default pack included, raise a HIGH alert and do not block it.
 
 Change the mode:
 

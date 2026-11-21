@@ -10,7 +10,7 @@ keywords:
   - identity-based policy
 ---
 
-A guardrail profile is a named set of guardrail overrides. When several profiles are proven to match a request, the profile that enforces at least what each of the others does applies; when none does, their strictest combination applies. If an assignment needs an identity fact the OS has not confirmed, the request is refused and the missing fact is named. A default profile catches everyone else. For the task, see [Give a group its own policy](/docs/guardrail/user-and-group-policies).
+A guardrail profile is a named set of guardrail overrides. When several profiles are proven to match a request, the profile that enforces at least what each of the others does applies; when none does, their strictest combination applies. If an assignment needs an identity fact the OS has not confirmed, the request is refused and the missing fact is named. A default profile catches everyone else.
 
 <Callout type="info" title="Where the identity comes from">
 DefenseClaw reads who a user is from the operating system and never calls
@@ -25,14 +25,14 @@ separately; a per-user install explains only your own account.
 
 ## Give a group its own policy
 
-A guardrail profile is a named set of guardrail settings. You assign profiles to directory groups, users, agents or connectors. When several profiles are proven to match, the one that covers the others, or their strictest combination, applies; `default_profile` catches everyone else. A request whose assignment needs an identity fact the operating system has not confirmed is refused, and the refusal names that fact. Only identities the operating system vouches for can select a profile ([how DefenseClaw knows who a user is](/docs/enterprise/identity-sources)).
+A guardrail profile is a named set of guardrail settings. You assign profiles to directory groups, users, agents or connectors. When several profiles are proven to match, the one that covers the others, or their strictest combination, applies; `default_profile` catches everyone else. A request whose assignment needs an identity fact the operating system has not confirmed is refused, and the refusal names that fact.
 
 ### Before you start
 
 - The users are in a directory group or a local group on the host. Find the exact spelling: `id -Gn` on Linux, or `defenseclaw guardrail profile explain --user alice --json | jq .subject` run as alice (a per-user install explains only your own account).
 - The AD group names in this page's YAML examples use Linux SSSD's `name@domain` form. The same entry selects the AD group on macOS and Windows, which list it as `DOMAIN\group`: `name@domain` and `DOMAIN\name` of the user's own verified domain are one group. `enterprise macos profile-explain` lists the user's groups.
 - On Windows, group profiles need the standalone enterprise install. Per-user installs have no group list.
-- Steps 1 to 3 are for a per-user install. A managed host (Linux, macOS or Windows) has no per-user `config.yaml` and no `defenseclaw guardrail` commands except `defenseclaw guardrail profile explain` on Linux and macOS, which shows a standard user their own profile ([Managed command availability](/docs/enterprise/managed-commands)): put the profiles in the machine config and check them as [Deliver it to managed hosts](#deliver-it-to-managed-hosts) shows. On Windows that is `& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' config validate FILE` and `& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows profile-explain --user CORP\alice`, from an elevated PowerShell prompt.
+- Steps 1 to 3 are for a per-user install. A managed host (Linux, macOS or Windows) has no per-user `config.yaml` and no `defenseclaw guardrail` commands except `defenseclaw guardrail profile explain` on Linux and macOS, which shows a standard user their own profile ([Managed command availability](/docs/enterprise/managed-commands)). Put the profiles in the machine config and check them as [Deliver it to managed hosts](#deliver-it-to-managed-hosts) shows.
 
 ### Steps
 
@@ -114,7 +114,7 @@ A guardrail profile is a named set of guardrail settings. You assign profiles to
 ### Good to know
 
 - Set a strict `default_profile` for accounts no assignment selects. While a directory lookup fails, a request whose assignment needs the missing fact is refused (`default_lookup_failed`) and names that fact.
-- On a per-user install the user owns `config.yaml` and can change their own profile. On a managed host the profile lives in the machine config: the administrator checks the file with `/opt/defenseclaw/bin/defenseclaw-gateway config validate FILE`, applies it with `/opt/defenseclaw/bin/defenseclaw-gateway enterprise linux ensure --config FILE` (`/opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos ensure --config FILE` on macOS), and checks one account with `/opt/defenseclaw/bin/defenseclaw-gateway enterprise linux profile-explain --user USER --connector CONNECTOR` (`/opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos profile-explain` on macOS), as root.
+- On a per-user install the user owns `config.yaml` and can change their own profile. On a managed host the profile lives in the machine config, and an administrator checks and applies it as root: see [Deliver it to managed hosts](#deliver-it-to-managed-hosts).
 
 ### Undo
 
@@ -747,6 +747,8 @@ its behavior as it was.
 
 ## Next steps
 
+- [Customize the guardrail](/docs/guardrail/customize): everything you can change, in one place.
+- [How the guardrail works](/docs/guardrail/how-it-works): where a profile's settings take effect.
 - [Build a policy in the browser](/docs/policies/creator)
 - [Thresholds](/docs/policies/thresholds)
 - [Identity sources](/docs/enterprise/identity-sources): the OS facts behind a verified identity.
