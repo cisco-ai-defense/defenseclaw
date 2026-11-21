@@ -503,10 +503,10 @@ P16 PS Remove-Item pos -LiteralPath glob	U|
 P17 PS backtick	U|
 P17 cd then sh -c	K|append:/home/u/.ssh/authorized_keys,append:/home/u/proj/authorized_keys
 P18 heredoc	K|write:/home/u/.ssh/authorized_keys
-P19 in-call symlink dir	U|append:/tmp/s/authorized_keys,link:/home/u/.ssh
+P19 in-call symlink dir	U|append:/home/u/.ssh/authorized_keys,link:/home/u/.ssh
 P2 quoted wildcard -Path	U|
 P20 in-call symlink file	U|append:/home/u/.bashrc,link:/home/u/.bashrc
-P21 relative symlink in cwd	U|append:/tmp/w/s/authorized_keys,link:/home/u/.ssh
+P21 relative symlink in cwd	U|append:/home/u/.ssh/authorized_keys,link:/home/u/.ssh
 P22 HOME reassigned, cd	K|append:/home/u/.ssh/authorized_keys
 P23 HOME reassigned, tilde	K|append:/home/u/.ssh/authorized_keys
 P24 HOME export tilde	K|append:/home/u/.ssh/authorized_keys

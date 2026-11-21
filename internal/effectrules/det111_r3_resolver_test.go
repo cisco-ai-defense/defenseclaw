@@ -29,6 +29,9 @@ type r3Row struct {
 	want map[string]string
 	// path, when set, is a target Path some effect must carry exactly.
 	path string
+	// kind, when set, grades only the effects of this kind (the call's other
+	// effects, such as the ln that made a link, are not the proof).
+	kind effects.Kind
 }
 
 func r3Opts() (px, ph, wps, wpsh, wgb, wgbh effects.Options) {
@@ -121,6 +124,22 @@ func r3Rows() []r3Row {
 			want: map[string]string{SetAgentHookConfig: U}},
 		{gap: "GAP-1590 find -regex at the dot root", o: ph, c: sh(`find . -regex '.*/\.s[s]h/.*' -delete`),
 			want: map[string]string{SetSSHAuthorizedKeys: U}},
+		{gap: "GAP-1573c in-call link as a find root", o: px, c: sh(`ln -s ~/.claude d && find d/ -name '*.json' -delete`),
+			kind: effects.KindDelete, want: map[string]string{SetAgentHookConfig: U}},
+		{gap: "GAP-1573c in-call link, find -L", o: px, c: sh(`ln -s ~/.claude d; find -L d -name settings.json -delete`),
+			kind: effects.KindDelete, want: map[string]string{SetAgentHookConfig: U}},
+		{gap: "GAP-1573c in-call link, bare tree delete", o: px, c: sh(`ln -sfn ~/.ssh k && find k/ -delete`),
+			kind: effects.KindDelete, want: map[string]string{SetSSHAuthorizedKeys: U}},
+		{gap: "GAP-1573c write below an in-call link", o: px, c: sh(`ln -s ~/.ssh k && echo x >> k/authorized_keys`),
+			kind: effects.KindAppend, want: map[string]string{SetSSHAuthorizedKeys: U}},
+		{gap: "GAP-1573c guard: link placed inside an existing folder", o: px, c: sh(`mkdir -p d; ln -s ~/.ssh d; echo x >> d/.ssh/authorized_keys`),
+			kind: effects.KindAppend, want: map[string]string{SetSSHAuthorizedKeys: U}},
+		{gap: "GAP-1573c Git Bash in-call link as a find root", o: wgb, c: sh(`ln -s ~/.claude d && find d/ -name '*.json' -delete`),
+			kind: effects.KindDelete, want: map[string]string{SetAgentHookConfig: U}},
+		{gap: "GAP-1573c fp: in-call link to a project folder", o: px, c: sh(`ln -s ~/proj/src d && find d/ -name '*.pyc' -delete`),
+			kind: effects.KindDelete, want: map[string]string{"*": N}},
+		{gap: "GAP-1573c fp: pattern the hook folder does not hold", o: px, c: sh(`ln -s ~/.claude d && find d/ -name '*.pyc' -delete`),
+			kind: effects.KindDelete, want: map[string]string{SetAgentHookConfig: N}},
 		{gap: "GAP-1573 fp: find -name *.pyc -delete in the home", o: ph, c: sh(`find ~ -name '*.pyc' -delete`), want: map[string]string{"*": N}},
 		{gap: "GAP-1590 fp: find -regex in a project", o: px, c: sh(`find . -regex '.*\.log' -delete`), want: map[string]string{"*": N}},
 	}
@@ -141,7 +160,10 @@ func TestDET111R3Resolver(t *testing.T) {
 			}
 			facts := Project(res, Env{Home: r.o.Home, Flavor: r.o.Flavor, Resolve: rs})
 			best := map[string]string{}
-			for _, f := range facts {
+			for i, f := range facts {
+				if r.kind != "" && res.Effects[i].Kind != r.kind {
+					continue
+				}
 				for _, m := range f.Target.Protected {
 					if gradeRank[m.State] > gradeRank[best[m.Set]] {
 						best[m.Set] = m.State

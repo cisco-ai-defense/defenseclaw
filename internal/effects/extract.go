@@ -2756,9 +2756,7 @@ func (w *walker) effectForOperand(op operand, p Program, origin Origin, cond, fo
 	e.Target.Spelling = cap4k(op.value)
 	if abs, ok, reason := placePath(op.value, w.opts()); ok {
 		e.Target.Path = abs
-		if tgt, ok := w.links[e.Target.Key()]; ok {
-			e.Target.Physical = tgt
-		}
+		e.Target.Physical = w.callLinkPhysical(e.Target)
 		if op.findFiltered {
 			// find deletes only the files below the root its predicates select:
 			// the -name pattern at any depth, or any file for a predicate the
@@ -2768,7 +2766,13 @@ func (w *walker) effectForOperand(op operand, p Program, origin Origin, cond, fo
 			if name == "" || op.findOpaqueName() {
 				name = "*"
 			}
-			e.Target.Lexical = cap4k(joinPattern(abs, name, w.o.flavor()))
+			// A root that is a link this call created walks the link's
+			// target (rel-1-0-10:GAP-1573c): join the pattern there.
+			root := abs
+			if e.Target.Physical != "" {
+				root = e.Target.Physical
+			}
+			e.Target.Lexical = cap4k(joinPattern(root, name, w.o.flavor()))
 		}
 		if w.onAliasedDrive(abs) {
 			e.addReason(ReasonNonCanonicalPath, ScopeTarget)
@@ -3038,9 +3042,7 @@ func (w *walker) fillRedirTarget(e *Effect, t Word) {
 	e.Target.Spelling = cap4k(t.Value)
 	if abs, ok, reason := placePath(t.Value, w.opts()); ok {
 		e.Target.Path = abs
-		if tgt, ok := w.links[e.Target.Key()]; ok {
-			e.Target.Physical = tgt
-		}
+		e.Target.Physical = w.callLinkPhysical(e.Target)
 		if w.onAliasedDrive(abs) {
 			e.addReason(ReasonNonCanonicalPath, ScopeTarget)
 		}
@@ -3174,10 +3176,12 @@ func (w *walker) childEnvironment(childDialect Dialect) (env map[string]string, 
 
 func (w *walker) recordLink(op operand, ops []operand) {
 	var linkPath, targetSpelling string
+	maybeDir := false
 	for _, o2 := range ops {
 		if o2.role == RoleLink && o2.static {
 			if abs, ok, _ := placePath(o2.value, w.opts()); ok {
 				linkPath = abs
+				maybeDir = o2.destMaybeDir
 			}
 		}
 		if o2.role == RoleLinkTarget && o2.static {
@@ -3198,6 +3202,47 @@ func (w *walker) recordLink(op operand, ops []operand) {
 	}
 	t := Target{Path: linkPath, Flavor: w.o.flavor(), CaseFold: w.o.CaseInsensitive}
 	w.links[t.Key()] = targetAbs
+	if maybeDir {
+		// ln -s T d where d is an existing folder puts the link at
+		// d/basename(T); a later d/<name>/... may walk T (GAP-1573c).
+		t.Path = joinDir(linkPath, baseName2(targetSpelling))
+		w.links[t.Key()] = targetAbs
+	}
+}
+
+// callLinkPhysical is where a target lands when it is, or lies below, a link
+// an earlier command of this call created (ln -s T d; ... d/x): the longest
+// recorded link prefix, joined with the rest of the path. Empty when no in-call
+// link covers it. The link does not exist on disk at hook time, so the
+// classifier grades such a target maybe, never known (DET111 F1).
+func (w *walker) callLinkPhysical(t Target) string {
+	if len(w.links) == 0 {
+		return ""
+	}
+	key := t.Key()
+	if tgt, ok := w.links[key]; ok {
+		return tgt
+	}
+	if len(key) != len(t.Path) {
+		return "" // a case fold changed the byte length: no prefix split
+	}
+	sep := "/"
+	if t.Flavor == FlavorWindows {
+		sep = `\`
+	}
+	for i := len(key) - 1; i > 0; i-- {
+		if key[i] != sep[0] {
+			continue
+		}
+		if tgt, ok := w.links[key[:i]]; ok {
+			rest := t.Path[i:]
+			if t.Flavor == FlavorWindows {
+				rest = strings.ReplaceAll(rest, "/", `\`)
+			}
+			return strings.TrimRight(tgt, `/\`) + rest
+		}
+	}
+	return ""
 }
 
 func parentDir(p string, flavor Flavor) string {
