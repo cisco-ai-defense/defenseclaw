@@ -60,6 +60,9 @@ type protectedSet struct {
 	// in one of these but is not an exact member is a protected basename in an
 	// unexpected directory (rule c): graded unknown, not clean.
 	tails []string
+	// bases are the folders a call with an unknown working folder may be in
+	// for this set: the home and the set's protected folders (R-CWD).
+	bases []string
 }
 
 // agentConfigFolders are the per-connector configuration folders whose hook
@@ -171,6 +174,9 @@ func buildSets(home string, flavor effects.Flavor) map[string]protectedSet {
 			}
 		}
 		ps.tails = tails
+		if home != "" {
+			ps.bases = append([]string{home}, ps.dirs...)
+		}
 		sets[name] = ps
 	}
 

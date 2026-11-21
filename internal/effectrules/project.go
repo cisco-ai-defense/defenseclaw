@@ -106,7 +106,7 @@ func projectTarget(
 		return pt
 	}
 	for _, name := range AllSets {
-		grade := gradeTarget(t, state, sets[name], flavor, rsv)
+		grade := gradeTarget(t, state, kind, sets[name], flavor, rsv)
 		if grade == gradeNo {
 			continue // absence folds to "no" in protected(); keep the list bounded
 		}

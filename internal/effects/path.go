@@ -35,7 +35,6 @@ func placePath(spelling string, o Options) (abs string, ok bool, reason ReasonCo
 func canonicalIssue(s string, flavor Flavor) ReasonCode {
 	if flavor == FlavorWindows {
 		w := strings.ReplaceAll(s, "/", `\`)
-		lw := strings.ToLower(w)
 		switch {
 		case strings.HasPrefix(w, `\\.\`), strings.HasPrefix(w, `\\?\`):
 			return ReasonNonCanonicalPath
@@ -60,7 +59,6 @@ func canonicalIssue(s string, flavor Flavor) ReasonCode {
 				return ReasonNonCanonicalPath
 			}
 		}
-		_ = lw
 		return ""
 	}
 	// POSIX: a path with a .. (after a component that might be a symlink), a
@@ -97,8 +95,13 @@ func placePOSIX(spelling string, o Options) (string, bool, ReasonCode) {
 		}
 		s = o.Home + strings.TrimPrefix(s, "~")
 	case strings.HasPrefix(s, "~"):
-		// ~user: another user's home, which we cannot place without lookup.
-		return "", false, ReasonDynamicExpansion
+		// ~name: the named account's home when the caller vouched for it, a
+		// literal folder when name can never be a login, else unknown.
+		h, ok, reason := tildeAccount(s, o)
+		if !ok {
+			return "", false, reason
+		}
+		s = h
 	}
 	if !strings.HasPrefix(s, "/") {
 		if o.CWD == "" || !strings.HasPrefix(o.CWD, "/") {
@@ -107,6 +110,100 @@ func placePOSIX(spelling string, o Options) (string, bool, ReasonCode) {
 		s = o.CWD + "/" + s
 	}
 	return cleanPOSIX(s), true, ""
+}
+
+// tildeAccount expands a POSIX ~name prefix (s starts with ~ and is not ~ or
+// ~/). The active login and the accounts the caller vouched for expand to their
+// home; a name that can never be a login (., .., or a character no login has)
+// is the literal folder ~name, as bash keeps a tilde word whose lookup fails
+// (rel-1-0-10:GAP-0948); ~+ and ~- and the directory-stack forms are the
+// walker's (resolveWord), so here they are unknown.
+func tildeAccount(s string, o Options) (string, bool, ReasonCode) {
+	name, rest := s[1:], ""
+	if i := strings.IndexByte(name, '/'); i >= 0 {
+		name, rest = name[:i], name[i:]
+	}
+	switch {
+	case name == "" || name[0] == '+' || name[0] == '-':
+		return "", false, ReasonDynamicExpansion
+	case !validLoginName(name):
+		return "./" + s, true, ""
+	case o.Login != "" && name == o.Login:
+		if o.Home == "" {
+			return "", false, ReasonDynamicExpansion
+		}
+		return strings.TrimRight(o.Home, "/") + rest, true, ""
+	}
+	if h, ok := o.Accounts[name]; ok && strings.HasPrefix(h, "/") {
+		return strings.TrimRight(h, "/") + rest, true, ""
+	}
+	return "", false, ReasonDynamicExpansion
+}
+
+// validLoginName reports a name the passwd lookup of a tilde prefix can find:
+// the POSIX portable login characters (plus @ and the trailing $ of a machine
+// account), never . or .. and never a leading -.
+func validLoginName(name string) bool {
+	if name == "" || name == "." || name == ".." || name[0] == '-' {
+		return false
+	}
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9',
+			c == '.', c == '_', c == '-', c == '@':
+		case c == '$' && i == len(name)-1:
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// lexicalCandidate is the Target.Lexical of a spelling placePath refused as
+// not canonical: the absolute path it names with home, account and working
+// folder applied and nothing collapsed, so the resolver can walk it physically
+// (a .. after a link climbs from the link's target) and the classifier can read
+// it as a pattern. Empty when the spelling has no such candidate (a device or
+// share prefix, a provider path, an unexpanded %VAR%, an unknown folder).
+func lexicalCandidate(spelling string, o Options) string {
+	if spelling == "" {
+		return ""
+	}
+	if o.flavor() == FlavorWindows {
+		w := strings.ReplaceAll(spelling, "/", `\`)
+		if strings.HasPrefix(w, `\\`) || strings.Contains(spelling, "::") || strings.Contains(w, "%") {
+			return ""
+		}
+		// Win32 collapses . and .. by name before the file system sees the
+		// path, so the only non-canonical part left is the 8.3-looking name,
+		// a trailing dot or space or a stream: place the rest as usual.
+		if abs, ok, _ := placeWindows(spelling, o); ok {
+			return abs
+		}
+		return ""
+	}
+	s := spelling
+	switch {
+	case s == "~" || strings.HasPrefix(s, "~/"):
+		if o.Home == "" {
+			return ""
+		}
+		s = o.Home + strings.TrimPrefix(s, "~")
+	case strings.HasPrefix(s, "~"):
+		h, ok, _ := tildeAccount(s, o)
+		if !ok {
+			return ""
+		}
+		s = h
+	}
+	if !strings.HasPrefix(s, "/") {
+		if o.CWD == "" || !strings.HasPrefix(o.CWD, "/") {
+			return ""
+		}
+		s = strings.TrimRight(o.CWD, "/") + "/" + strings.TrimPrefix(s, "./")
+	}
+	return s
 }
 
 // cleanPOSIX collapses . and .. and repeated slashes. Pure lexical cleaning;
@@ -179,8 +276,15 @@ func placeWindows(spelling string, o Options) (string, bool, ReasonCode) {
 		if strings.HasPrefix(rest, `\`) {
 			return normalizeWindows(s, o), true, ""
 		}
-		// C:foo is relative to the current directory on drive C, which we
-		// cannot place without per-drive cwd state (review P2).
+		// C:foo is relative to the current folder of drive C. That is the
+		// working folder when the working folder is on C (Win32 keeps one
+		// current folder per drive, and the process's is its own drive's);
+		// another drive's current folder is unknown (review P2,
+		// rel-1-0-10:GAP-1078).
+		if cwd := strings.ReplaceAll(o.CWD, "/", `\`); len(cwd) >= 3 && isDriveLetter(cwd[0]) && cwd[1] == ':' && cwd[2] == '\\' &&
+			strings.EqualFold(cwd[:1], s[:1]) && !strings.HasPrefix(o.CWD, `\\`) {
+			return normalizeWindows(strings.TrimRight(cwd, `\`)+`\`+rest, o), true, ""
+		}
 		return "", false, ReasonDynamicCWD
 	}
 	// Root-relative \x (relative to current drive).
