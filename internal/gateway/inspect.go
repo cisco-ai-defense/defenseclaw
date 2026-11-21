@@ -2261,6 +2261,7 @@ func (a *APIServer) runHookJudgeSingle(ctx context.Context, strategyDirection, j
 	if content == "" {
 		return nil
 	}
+	ctx = withJudgeRemoteParty(ctx, connector)
 	// Gate on the configuration of the generation the judge came from: the
 	// request pins one, so a reload cannot pair a new gate with a nil or
 	// previous judge. A start-time scannerCfg can have another connector gate.

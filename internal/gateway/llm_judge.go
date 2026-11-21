@@ -2368,7 +2368,13 @@ func (j *LLMJudge) toolJudgeContextSample(ctx context.Context, toolName, args st
 		if named := mergeScopeTargets(j.sessionScopeTargets(sessionID), entry.UserIntent); len(named) > 0 {
 			targets = strings.Join(named, ", ")
 		}
-		writeToolJudgeSection(&sample, nonce, "SESSION_USER_INTENT", fmt.Sprintf("untrusted=\"true\" named_targets=%q", targets), entry.UserIntent)
+		attrs := fmt.Sprintf("untrusted=\"true\" named_targets=%q", targets)
+		if judgeTaskOwnerUnknown(ctx) {
+			// A remote chat party may have written the task: it scopes
+			// nothing for the judge (toolJudgeUnverifiedIntentNote).
+			attrs = toolJudgeIntentUnverifiedAttr + " " + attrs
+		}
+		writeToolJudgeSection(&sample, nonce, "SESSION_USER_INTENT", attrs, entry.UserIntent)
 	}
 	if len(prior) > 0 {
 		sample.WriteString("RECENT TOOL CALLS FROM THE SAME SESSION (oldest first):\n")
@@ -2629,6 +2635,9 @@ func (j *LLMJudge) runToolJudgeLLM(ctx context.Context, toolName, args, sample s
 	systemPrompt := fmt.Sprintf(basePrompt, "see the tool attribute of CURRENT_TOOL_CALL")
 	if nonce := toolJudgeSampleNonce(sample); nonce != "" {
 		systemPrompt += "\n\n" + toolJudgeNonceLine(nonce)
+		if toolJudgeIntentUnverified(sample, nonce) {
+			systemPrompt += "\n\n" + toolJudgeUnverifiedIntentNote
+		}
 	}
 
 	const kind = "tool_injection"
