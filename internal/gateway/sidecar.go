@@ -867,6 +867,37 @@ func buildTranslateInput(cfg *config.Config) routing.TranslateInput {
 	return input
 }
 
+// refreshRoutingHealthOnReload publishes the routing health of a reload that
+// turned routing.enabled on or off, or changed its classifier or backends,
+// with a classifier that runs in the gateway: the routing engine is built per
+// generation, so the new state is live, and boot (and the vllm_sr probe loop)
+// are the only other writers of this subsystem (rel-1-0-10 GAP-1744). A
+// vllm_sr router is a container that starts and stops with the process, so
+// its health stays with boot and the probe loop whenever either generation
+// runs it.
+func (s *Sidecar) refreshRoutingHealthOnReload(prev, next config.RoutingConfig) {
+	if s == nil || s.health == nil {
+		return
+	}
+	runsContainer := func(r config.RoutingConfig) bool {
+		return r.Enabled && r.EffectiveClassifier() == config.RoutingClassifierVLLMSR
+	}
+	if runsContainer(prev) || runsContainer(next) {
+		return
+	}
+	if !next.Enabled {
+		if prev.Enabled {
+			s.health.SetRouting(StateDisabled, "", map[string]interface{}{"enabled": false})
+		}
+		return
+	}
+	details := effectiveRoutingHealthDetails(next)
+	if prev.Enabled && reflect.DeepEqual(effectiveRoutingHealthDetails(prev), details) {
+		return
+	}
+	s.health.SetRouting(StateRunning, "", details)
+}
+
 func effectiveRoutingHealthDetails(cfg config.RoutingConfig) map[string]interface{} {
 	mode := "managed"
 	if strings.TrimSpace(cfg.Remote.Endpoint) != "" {
@@ -2648,6 +2679,7 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 	}
 	s.applyModelUsage(appliedCfg)
 	s.applyRoutingAdmin(appliedCfg)
+	s.refreshRoutingHealthOnReload(oldCfg.Routing, appliedCfg.Routing)
 
 	if aiRestart {
 		if nextAIDiscovery != nil {
