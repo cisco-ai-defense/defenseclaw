@@ -200,7 +200,7 @@ func TestKiroTeardownSkipsARecordedFileItCannotParse(t *testing.T) {
 		{"empty", "", false},
 	} {
 		for _, reclaim := range []bool{false, true} {
-			mode := "setup remove"
+			mode := "connector teardown"
 			if reclaim {
 				mode = "reclaim"
 			}
@@ -217,7 +217,10 @@ func TestKiroTeardownSkipsARecordedFileItCannotParse(t *testing.T) {
 					}
 				}
 				conn := NewKiroConnector()
-				opts := SetupOpts{DataDir: dataB, APIAddr: "127.0.0.1:18970", APIToken: "tok-test", HookFailMode: "closed", WorkspaceDir: w1}
+				// `connector teardown` and `connector verify` report the file
+				// (the boot teardowns log it: GAP-1304,
+				// TestKiroBootTeardownLogsARecordedFileItCannotParseAndGoesOn).
+				opts := SetupOpts{DataDir: dataB, APIAddr: "127.0.0.1:18970", APIToken: "tok-test", HookFailMode: "closed", WorkspaceDir: w1, ReportUnreadableResidue: true}
 				if err := conn.Setup(context.Background(), opts); err != nil {
 					t.Fatalf("Setup: %v", err)
 				}
@@ -248,7 +251,7 @@ func TestKiroTeardownSkipsARecordedFileItCannotParse(t *testing.T) {
 				opts.ReclaimOwnHooksOnly = false
 				if tc.unreadable && !reclaim {
 					if err == nil || !strings.Contains(err.Error(), w1Hooks) {
-						t.Errorf("setup remove kiro = %v, want it to fail and name %s, which it cannot parse", err, w1Hooks)
+						t.Errorf("connector teardown kiro = %v, want it to fail and name %s, which it cannot parse", err, w1Hooks)
 					}
 				} else if err != nil {
 					t.Fatalf("Teardown failed on the file it cannot parse: %v", err)
@@ -291,10 +294,10 @@ func TestKiroTeardownSkipsARecordedFileItCannotParse(t *testing.T) {
 						t.Errorf("the next boot would reclaim again: %v, %v", owns, err)
 					}
 					if err := conn.Teardown(context.Background(), opts); err == nil || !strings.Contains(err.Error(), w1Hooks) {
-						t.Errorf("setup remove kiro after the reclaim = %v, want it to fail and name %s", err, w1Hooks)
+						t.Errorf("connector teardown kiro after the reclaim = %v, want it to fail and name %s", err, w1Hooks)
 					}
 				} else if err := conn.VerifyClean(opts); err == nil {
-					t.Error("VerifyClean passed after setup remove failed on the file it cannot parse")
+					t.Error("VerifyClean passed after connector teardown failed on the file it cannot parse")
 				}
 				// The user fixes the file; the next removal takes install B's
 				// entry out of it, keeps the user's, and finishes.
@@ -306,7 +309,7 @@ func TestKiroTeardownSkipsARecordedFileItCannotParse(t *testing.T) {
 					t.Fatal(err)
 				}
 				if err := conn.Teardown(context.Background(), opts); err != nil {
-					t.Fatalf("setup remove kiro once the file parses: %v", err)
+					t.Fatalf("connector teardown kiro once the file parses: %v", err)
 				}
 				if held, err := kiroV3FileHoldsCommand(w1Hooks, conn.installHookCommands(opts)); err != nil || held {
 					t.Errorf("install B's entry stayed in the fixed file: %v, %v", held, err)

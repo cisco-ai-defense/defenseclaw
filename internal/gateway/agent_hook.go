@@ -758,7 +758,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 				return
 			}
 		}
-		// A second delivery of one Copilot tool call (see
+		// A second delivery of one Copilot or Kiro tool call (see
 		// agent_hook_copilot_dedupe.go) gets the first delivery's verdict,
 		// rendered for its own profile, and is not evaluated or audited
 		// again. The verdict was decided under the same generation and

@@ -1056,6 +1056,9 @@ func runConnectorTeardown(cmd *cobra.Command, _ []string) error {
 	}
 
 	opts := resolveConnectorOpts(dataDir)
+	// This removal names a leftover it cannot clean (an agent file that is
+	// not JSON) and fails; the gateway's boot teardowns log it (GAP-1304).
+	opts.ReportUnreadableResidue = true
 	ctx, cancel := context.WithCancel(cmd.Context())
 	defer cancel()
 
@@ -1301,6 +1304,9 @@ func pruneOrphanedConnector(ctx context.Context, dataDir, name string, conn conn
 	}
 	defer restoreConfigHome()
 	opts := resolveConnectorOptsFor(dataDir, name)
+	// After a rollback's data swap, the saved newer install proves which
+	// account-wide hooks it set up (Kiro on Windows, GAP-1221).
+	opts.RollbackSavedDataDir = connectorRollbackBackupsDir
 	paths, err := connector.OrphanedHookConfigPaths(conn, opts)
 	if err != nil || len(paths) == 0 {
 		return nil, err
@@ -1596,6 +1602,7 @@ func runConnectorVerify(cmd *cobra.Command, _ []string) error {
 	}
 
 	opts := resolveConnectorOpts(dataDir)
+	opts.ReportUnreadableResidue = true
 	verifyErr := conn.VerifyClean(opts)
 
 	if connectorFlagJSON {

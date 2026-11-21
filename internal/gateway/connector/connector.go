@@ -375,6 +375,29 @@ type SetupOpts struct {
 	// install's live hooks stay (review P2 of rel-1-0-10 GAP-1092). The
 	// teardown of a configured connector leaves it false.
 	ReclaimOwnHooksOnly bool
+
+	// ReportUnreadableResidue is set by `connector teardown` and `connector
+	// verify`, the native steps of uninstall and of an operator's removal. A
+	// leftover the connector cannot clean and that guards nothing fails them
+	// and names the file to fix (Kiro: a file only a backup record names that
+	// is not a JSON object, which Kiro cannot load either, rel-1-0-10
+	// GAP-1298). The gateway's boot teardowns (guardrail disabled, a removed
+	// connector, the lock-only orphan reconcile, the unguarded reclaim) leave
+	// it false: they log the file and go on, as their failure came back on
+	// every start until the file was fixed, and the boot reclaim finishes
+	// the cleanup once it can be read (rel-1-0-10 GAP-1304).
+	ReportUnreadableResidue bool
+
+	// RollbackSavedDataDir is the saved data folder of the newer install a
+	// rollback just left (`connector prune-orphans --rollback-backups-dir`,
+	// which the installers run with that release's gateway after the data
+	// swap). A connector that proves ownership of an account-wide command by
+	// what a data folder holds (Kiro on Windows, kiroDataDirSetUpKiro) also
+	// takes the proof from this folder: the install that set the connector
+	// up is the one the rollback left, and the restored folder never held
+	// it, so the hooks it left stayed after the rollback and Kiro failed
+	// closed without its token (rel-1-0-10 GAP-1221). Empty everywhere else.
+	RollbackSavedDataDir string
 }
 
 // ManagedHookPolicyProvider renders and verifies connector-owned settings for
