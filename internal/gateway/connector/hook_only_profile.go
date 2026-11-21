@@ -299,8 +299,9 @@ func copilotHookOutputForProfile(event, action, rawAction, reason, additional st
 			return map[string]interface{}{"additionalContext": additional}
 		}
 	case "userprompttransformed":
-		// This event is mutation-only. DefenseClaw observes and audits the
-		// transformed prompt but never rewrites model-facing content.
+		// This event is mutation-only. The connector profile never rewrites
+		// model-facing content; the gateway replaces a prompt that an
+		// action-mode block stops (copilotBlockedPromptOutput, GAP-1730).
 		return map[string]interface{}{}
 	}
 	return nil

@@ -918,8 +918,8 @@
     },
     "copilot-hook.sh": {
       "mode": "-rwx------",
-      "size": 26356,
-      "sha256": "936f444f297c3746279587dce2e875971980ac338a3704e4ed1862f6ad3b0b93"
+      "size": 26567,
+      "sha256": "3c034f876311d2affaa7971e13a0259066c36ceb893c47e3ee32e2447e7e56f5"
     },
     "inspect-request.sh": {
       "mode": "-rwx------",
@@ -965,8 +965,8 @@
     },
     "copilot-hook.sh": {
       "mode": "-rwx------",
-      "size": 11663,
-      "sha256": "443ee82d98a2bc4c5e16bc4962c6114567473bf315610d4d6799fef01a0b7c7a"
+      "size": 11967,
+      "sha256": "24cc27478c7c91110dd979d012f41b090ebba4c9a4f75fe1c3e64d500ce271fb"
     },
     "inspect-request.sh": {
       "mode": "-rwx------",
@@ -1494,8 +1494,8 @@
     },
     "copilot-hook.sh": {
       "mode": "-rwx------",
-      "size": 26166,
-      "sha256": "32a5c04c18e769dd022e6dd0bd0b099c5a532386ca4a5e678d4cad42aaaffd04"
+      "size": 26377,
+      "sha256": "67cb4f6a9f6d3272d37f7edd324e1e92d27f2beb1c692a3c7cd02334fbc82ad5"
     },
     "cursor-hook.sh": {
       "mode": "-rwx------",
@@ -1581,8 +1581,8 @@
     },
     "copilot-hook.sh": {
       "mode": "-rwx------",
-      "size": 26166,
-      "sha256": "6d39f574845b57dae3c6b0eb0220199dfe91f9f0ce0edd53794dc20b1ce67123"
+      "size": 26377,
+      "sha256": "dbd3bbb7847b726bf7f43c401771b8dc255b6a3542f8832e2fda545eb3d4a43e"
     },
     "cursor-hook.sh": {
       "mode": "-rwx------",
