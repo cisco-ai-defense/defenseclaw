@@ -6,7 +6,6 @@ package effects
 
 import (
 	"encoding/json"
-	"time"
 )
 
 // Call is one normalized tool invocation handed to Extract. It is the output
@@ -56,12 +55,6 @@ type Options struct {
 	SessionFiles map[string]string
 	// MaxEffects bounds the output; zero uses the package default.
 	MaxEffects int
-	// Deadline, when set, stops the walk once the clock passes it: the walker
-	// checks it every deadlineCheckEvery units of work and, past it, ends like
-	// an exhausted work budget (one limit unknown), so a caller that must stay
-	// inside a time cap (the live shadow lane) never waits on a long walk. It
-	// is read-only wall-clock input; the zero value means no deadline.
-	Deadline time.Time
 }
 
 func (o Options) flavor() Flavor {
