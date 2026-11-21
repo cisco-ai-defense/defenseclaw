@@ -91,6 +91,23 @@ class FixtureRootIsRecorded(unittest.TestCase):
         self.assertIn("FIXTURE ROOTS DIFFER", r.stdout)
 
 
+class RuleListsAreStable(unittest.TestCase):
+    """Equal-count rules are listed by name, whatever order the scorer met them in (two scorings of one run on
+    dc-s7-bench4 listed them in different orders)."""
+
+    def test_ties_are_ordered_by_key_and_the_cut_is_stable(self):
+        import collections
+
+        sys.path.insert(0, str(HERE))
+        import s7gate as G  # noqa: N812
+
+        a = collections.Counter({"R-B": 2, "R-A": 2, "R-C": 5, "R-D": 1})
+        b = collections.Counter({"R-D": 1, "R-A": 2, "R-C": 5, "R-B": 2})
+        self.assertEqual(G.top_counts(a, 3), [["R-C", 5], ["R-A", 2], ["R-B", 2]])
+        self.assertEqual(G.top_counts(a, 3), G.top_counts(b, 3))
+        self.assertEqual(G.top_counts(a), G.top_counts(b))
+
+
 if __name__ == "__main__":
     os.environ.setdefault("S7_HOLDOUT_SPLIT", str(HERE / "testdata" / "holdout-split-test.json"))
     unittest.main()

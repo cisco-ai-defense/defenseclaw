@@ -82,7 +82,9 @@ class LabelfoldInputs(unittest.TestCase):
 
     def test_a_line_separator_inside_a_string_stays_one_row(self):
         ov = self.root / "ls.jsonl"
-        ov.write_text(json.dumps({"id": "c1", "source_truth": "malicious", "why": "a\u2028b"}, ensure_ascii=False) + "\n")
+        ov.write_text(
+            json.dumps({"id": "c1", "source_truth": "malicious", "why": "a\u2028b"}, ensure_ascii=False) + "\n"
+        )
         self.assertEqual(self.fold(overlay=ov).returncode, 0)
 
 

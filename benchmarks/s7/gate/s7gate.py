@@ -1627,6 +1627,14 @@ def cmd_push_labels(a):
         raise
 
 
+def top_counts(counter, n=None):
+    """counter.most_common(n) with ties broken by key: Counter keeps insertion order for equal counts, and the scorer's
+    insertion order is not stable between processes, so two scorings of one run listed equal-count rules in different
+    orders (and could cut a different rule at n)."""
+    items = sorted(counter.items(), key=lambda kv: (-kv[1], str(kv[0])))
+    return [list(kv) for kv in (items if n is None else items[:n])]
+
+
 def cmd_score(a):
     cfgs = json.load(open(a.corpora))
     droot = getattr(a, "decisions_from", "") or a.out
@@ -1937,12 +1945,15 @@ def cmd_score(a):
                     if truth[i]["state"] == "benign" and i in diag_set:
                         for rr in pred[i]["rules"]:
                             fpr_rules[rr] += 1
-                gg["fp_rules"] = fpr_rules.most_common(6)
-                gg["miss_causes"] = collections.Counter(
-                    c2
-                    for c2 in (miss_cause(pred[i]) for i in sel if truth[i]["state"] == "attack" and i in diag_set)
-                    if c2
-                ).most_common(4)
+                gg["fp_rules"] = top_counts(fpr_rules, 6)
+                gg["miss_causes"] = top_counts(
+                    collections.Counter(
+                        c2
+                        for c2 in (miss_cause(pred[i]) for i in sel if truth[i]["state"] == "attack" and i in diag_set)
+                        if c2
+                    ),
+                    4,
+                )
                 surf[sname] = gg
             res["surfaces"] = surf
             rb = collections.Counter()
@@ -1957,12 +1968,14 @@ def cmd_score(a):
                 else:
                     for r in pred[i]["rules"]:
                         ra[r] += 1
-            res["benign_alert_rules"] = rb.most_common(60)
-            res["benign_block_rules"] = rbb.most_common(60)
-            res["attack_rules"] = ra.most_common(40)
-            res["miss_causes"] = collections.Counter(
-                c for c in (miss_cause(pred[i]) for i in diag_ids if truth[i]["state"] == "attack") if c
-            ).most_common()
+            res["benign_alert_rules"] = top_counts(rb, 60)
+            res["benign_block_rules"] = top_counts(rbb, 60)
+            res["attack_rules"] = top_counts(ra, 40)
+            res["miss_causes"] = top_counts(
+                collections.Counter(
+                    c for c in (miss_cause(pred[i]) for i in diag_ids if truth[i]["state"] == "attack") if c
+                )
+            )
             res["benign_hit_ids"] = {
                 "block": [i for i in diag_ids if truth[i]["state"] == "benign" and pred[i]["block"]][:400],
                 "alert": [
