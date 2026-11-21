@@ -577,6 +577,7 @@ func TestWindowsEnterpriseEnsureWaitsForCredentialGeneration(t *testing.T) {
 // GAP-0145: the config.yaml an ensure replaces after a hand edit is kept as
 // rejected-config.yaml beside it.
 func TestWindowsEnterpriseEnsureKeepsAHandEditedConfig(t *testing.T) {
+	requireAdministratorTestToken(t, "rejected-config.yaml is written under the Administrators-owned AdminFile descriptor (keepWindowsEnterpriseRejectedFile)")
 	host, _ := newHotConfigHost(t, "config_version: 9\nguardrail:\n  mode: observe\n", "config_version: 9\n")
 	if kept := keepInstalledWindowsEnterpriseEditedConfig(); kept != "" {
 		t.Fatalf("a config with no recorded generation was kept: %s", kept)
@@ -599,6 +600,7 @@ func TestWindowsEnterpriseEnsureKeepsAHandEditedConfig(t *testing.T) {
 // the upgrade transaction, which loaded the installed file first, refused
 // it, and wrote its bytes back on rollback.
 func TestWindowsEnterpriseEnsureInstallsTheSuppliedConfigOverAnUnparseableOne(t *testing.T) {
+	requireAdministratorTestToken(t, "rejected-config.yaml is written under the Administrators-owned AdminFile descriptor (keepWindowsEnterpriseRejectedFile)")
 	const broken = "an administrator edit left this line instead of YAML\n"
 	next := strings.Replace(
 		strings.Replace(standaloneGatewayCheckConfig, "config_version: 8\n", "config_version: 9\n", 1),

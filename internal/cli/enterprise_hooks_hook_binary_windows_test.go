@@ -201,6 +201,7 @@ func TestCopyWindowsManagedFileSwapsARunningProgram(t *testing.T) {
 // c) 6,316 of 7,193 starts failed with "Access is denied" or 6838. The
 // count can be raised natively with -g656-image-swaps.
 func TestCopyWindowsManagedFileSwapsUnderConcurrentLaunches(t *testing.T) {
+	requireAdministratorTestToken(t, "the product restore writes the hook binary with the install file descriptor (an Administrators owner), and a standard user cannot hard-link that image for the next swap")
 	swaps := *windowsImageSwapLaunchSwaps
 	if swaps <= 0 {
 		swaps = 300
