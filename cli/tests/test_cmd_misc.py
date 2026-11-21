@@ -1134,7 +1134,10 @@ class TestSetupGuardrailJudgeFlagsObserveMode(unittest.TestCase):
         result, _ = self._invoke("observe")
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertEqual(result.output.count("The LLM judge"), 1, result.output)
-        self.assertIn("The LLM judge is off", result.output)
+        # GAP-1113: --connector claudecode puts that connector alone in place
+        # of the dormant 'all' gate, so the one warning is the run's own
+        # "was not enabled" (the 'all'-pruned "is off" line is interactive).
+        self.assertIn("The LLM judge was not enabled", result.output)
         self.assertIn("defenseclaw setup claude-code --mode action --enable-judge --yes", result.output)
         self.assertNotIn("judge add", result.output)
         self.assertFalse(self.app.cfg.guardrail.judge.enabled)
