@@ -95,6 +95,28 @@ func amendRoutingDecision(ctx context.Context, o SemanticRouteOutcome) {
 	})
 }
 
+// routedAliasFailedPrefix starts the decision warning that names a routed
+// alias whose call was served by the original model instead:
+// routed_alias_failed:<alias>:<cause> (cause is a route-only preparation code
+// such as signing or credential, http_<status>, or unreachable).
+const routedAliasFailedPrefix = "routed_alias_failed:"
+
+// amendRoutedCallFailed rewrites the recorded decision of a routed call that
+// failed before its first byte and was served by the original request: the
+// outcome becomes fallback and the warnings name the alias and the cause, so
+// `routing status`, `routing explain` and doctor stop saying applied
+// (rel-1-0-10:GAP-1099, GAP-1101). The outcome is not changed.
+func amendRoutedCallFailed(ctx context.Context, o *SemanticRouteOutcome, cause string) {
+	if o == nil || o.Route == nil || o.Route.Backend == nil {
+		return
+	}
+	out := *o
+	route := *o.Route
+	route.Warnings = append(slices.Clone(route.Warnings), routedAliasFailedPrefix+route.Backend.Alias+":"+cause)
+	out.Route, out.Result = &route, SemanticRouteFallback
+	amendRoutingDecision(ctx, out)
+}
+
 // routingCallerMatcher answers routing.admin identity selectors (groups,
 // users, agents) for ctx's verified subject with the proof rules of
 // guardrail.profile_assignments (assignmentState): yes, no, or maybe when a

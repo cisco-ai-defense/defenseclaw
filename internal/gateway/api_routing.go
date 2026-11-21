@@ -161,12 +161,71 @@ func (a *APIServer) handleRoutingEffective(w http.ResponseWriter, r *http.Reques
 		"admin":   admin,
 		"budgets": routingBudgetViews(cfg, key, admin, time.Now()),
 		"recent":  nonNilSlice(routingAdminRuntime.Decisions().Recent(key, admin, recent)),
+		// Aliases whose calls the original model served instead, so a dead
+		// endpoint is not only a "fallback" row in the recent decisions.
+		"alias_failures": routingAliasFailures(routingAdminRuntime.Decisions().Recent(key, admin, routingadmin.DecisionsSize), time.Now()),
 	}
 	if admin && cfg != nil && cfg.Routing.Admin != nil {
 		body["rules"] = nonNilSlice(cfg.Routing.Admin.Rules)
 		body["allowed_aliases"] = nonNilSlice(cfg.Routing.Admin.AllowedAliases)
 	}
 	writeRoutingJSON(w, http.StatusOK, body)
+}
+
+// routingAliasFailure is one routed alias whose calls failed before their
+// first byte and were served by the original model.
+type routingAliasFailure struct {
+	Alias string `json:"alias"`
+	// Count is the failures since the alias last served a call.
+	Count int `json:"count"`
+	// Cause is the latest one: unreachable, http_<status>, or a route-only
+	// preparation code (signing, credential, ...).
+	Cause string `json:"cause"`
+	// Connector and LastAt describe the latest failure.
+	Connector string `json:"connector,omitempty"`
+	LastAt    string `json:"last_at"`
+}
+
+// routingAliasFailureWindow bounds how old a failure may be and still be
+// reported: an alias that failed days ago and has not been used since is not
+// "failing" now.
+const routingAliasFailureWindow = 24 * time.Hour
+
+// routingAliasFailures lists the aliases whose newest recorded event is a
+// failure that the original model served (the warning amendRoutedCallFailed
+// and the route-only fallback add), newest decision first as Recent returns
+// them. A later call that the alias served ends its failure.
+func routingAliasFailures(entries []routingadmin.DecisionEntry, now time.Time) []routingAliasFailure {
+	out := []routingAliasFailure{}
+	index := map[string]int{}
+	served := map[string]bool{}
+	for _, e := range entries {
+		if now.Sub(e.Time) > routingAliasFailureWindow {
+			continue
+		}
+		if e.Outcome == engine.OutcomeApplied && e.SelectedAlias != "" {
+			// Older failures of this alias are over; newer ones were counted.
+			served[e.SelectedAlias] = true
+			continue
+		}
+		for _, w := range e.Warnings {
+			rest, ok := strings.CutPrefix(w, routedAliasFailedPrefix)
+			if !ok {
+				continue
+			}
+			alias, cause, _ := strings.Cut(rest, ":")
+			if alias == "" || served[alias] {
+				continue
+			}
+			if i, seen := index[alias]; seen {
+				out[i].Count++
+				continue
+			}
+			index[alias] = len(out)
+			out = append(out, routingAliasFailure{Alias: alias, Count: 1, Cause: cause, Connector: e.Connector, LastAt: e.Time.UTC().Format(time.RFC3339)})
+		}
+	}
+	return out
 }
 
 func (a *APIServer) handleRoutingBudgets(w http.ResponseWriter, r *http.Request) {

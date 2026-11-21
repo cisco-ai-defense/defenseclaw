@@ -245,6 +245,46 @@ def test_setup_wait_is_bounded_and_says_the_gateway_has_not_applied_it(home: Pat
     assert sum(slept) <= cmd_routing.SETUP_TEST_WAIT_SECONDS + 1
 
 
+def test_setup_route_waits_until_the_test_names_the_new_alias(home: Path, monkeypatch) -> None:
+    """GAP-1100, GAP-1102: the Test line named the alias the gateway still ran from before --route."""
+    slept = _setup_clock(monkeypatch)
+    answers = iter([({"selected_alias": "local", "candidate_alias": "local"}, "")] * 2 + [({"selected_alias": "fast", "candidate_alias": "fast"}, "")])
+    monkeypatch.setattr(cmd_routing, "_ask_gateway", lambda app, method, path, **kw: next(answers))
+    result = run("setup", "--yes", "--classifier", "rules", "--route", "coding=fast")
+    assert result.exit_code == 0, result.output
+    assert "Test: a coding prompt goes to fast." in result.output and "local" not in result.output
+    assert len(slept) == 2
+
+
+def test_setup_route_never_prints_the_previous_alias_when_the_gateway_does_not_reload(home: Path, monkeypatch) -> None:
+    slept = _setup_clock(monkeypatch)
+    old = ({"selected_alias": "local", "candidate_alias": "local"}, "")
+    monkeypatch.setattr(cmd_routing, "_ask_gateway", lambda app, method, path, **kw: old)
+    result = run("setup", "--yes", "--classifier", "rules", "--route", "coding=fast")
+    assert result.exit_code == 0, result.output
+    assert "Test: a coding prompt goes to" not in result.output
+    assert "Test skipped: the gateway still routes a coding prompt to local, not fast" in result.output
+    assert sum(slept) <= cmd_routing.SETUP_TEST_WAIT_SECONDS + 1
+
+
+def test_setup_route_prints_an_answer_that_names_no_alias(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failed classifier or a filtered default names no alias: that is the outcome, not a stale configuration."""
+    slept = _setup_clock(monkeypatch)
+    answer = ({"selected_alias": "", "candidate_alias": "", "outcome": "fallback", "failure": "upstream_status"}, "")
+    monkeypatch.setattr(cmd_routing, "_ask_gateway", lambda app, method, path, **kw: answer)
+    result = run("setup", "--yes", "--classifier", "rules", "--route", "coding=fast")
+    assert "Test: a coding prompt goes to fallback." in result.output and slept == []
+
+
+def test_setup_route_accepts_a_candidate_the_filters_removed(home: Path, monkeypatch) -> None:
+    """The coding route is applied when the gateway names it as the candidate, even if a filter kept it from serving."""
+    slept = _setup_clock(monkeypatch)
+    answer = ({"selected_alias": "", "candidate_alias": "fast", "outcome": "fallback"}, "")
+    monkeypatch.setattr(cmd_routing, "_ask_gateway", lambda app, method, path, **kw: answer)
+    result = run("setup", "--yes", "--classifier", "rules", "--route", "coding=fast")
+    assert "Test: a coding prompt goes to fallback." in result.output and slept == []
+
+
 def test_setup_does_not_wait_for_a_stopped_gateway_or_a_reported_cause(home: Path, monkeypatch) -> None:
     slept = _setup_clock(monkeypatch)
     # The default fixture gateway is down: one try, no wait.
@@ -273,6 +313,39 @@ def test_status_warns_with_the_gateway_startup_cause(home: Path, monkeypatch) ->
     assert any("could not start it: routing: Docker is required" in w for w in data["warnings"])
 
 
+FAILING = {
+    "alias_failures": [
+        {"alias": "dead", "count": 3, "cause": "http_503", "connector": "codex", "last_at": "2026-11-17T08:01:02Z"},
+        {"alias": "gone", "count": 1, "cause": "unreachable", "last_at": "2026-11-17T08:02:03Z"},
+    ]
+}
+
+
+def test_status_warns_about_an_alias_whose_calls_the_original_model_served(home: Path, monkeypatch) -> None:
+    """GAP-1099, GAP-1101: a dead alias endpoint fell back silently."""
+    (home / "config.yaml").write_text(BODY.replace("enabled: false", "enabled: true"))
+    monkeypatch.setattr(cmd_routing, "_ask_gateway", lambda app, method, path, **kw: ({"recent": [], **FAILING}, ""))
+    data = json.loads(run("status", "--json").output)
+    dead = [w for w in data["warnings"] if w.startswith("alias dead failed 3 times")]
+    gone = [w for w in data["warnings"] if w.startswith("alias gone failed 1 time ")]
+    assert dead and "HTTP 503" in dead[0] and "08:01:02 UTC" in dead[0] and "original model served" in dead[0]
+    assert gone and "the endpoint did not answer" in gone[0]
+    assert "alias dead failed" in run("status").output
+    # A gateway that lists none says nothing.
+    monkeypatch.setattr(cmd_routing, "_ask_gateway", lambda app, method, path, **kw: ({"recent": [], "alias_failures": []}, ""))
+    assert not any("failed" in w for w in json.loads(run("status", "--json").output)["warnings"])
+
+
+def test_doctor_alias_rows_name_each_failing_alias(monkeypatch) -> None:
+    monkeypatch.setattr(cmd_routing, "_ask_gateway", lambda app, method, path, **kw: (dict(FAILING), ""))
+    rows = cmd_routing.doctor_alias_rows(object())
+    assert [status for status, _ in rows] == ["warn", "warn"]
+    assert "alias dead failed 3 times" in rows[0][1] and "alias gone failed 1 time" in rows[1][1]
+    # The gateway cannot be asked: doctor names that elsewhere.
+    monkeypatch.setattr(cmd_routing, "_ask_gateway", lambda app, method, path, **kw: (None, "the gateway is not running"))
+    assert cmd_routing.doctor_alias_rows(object()) == []
+
+
 def test_doctor_rows(home: Path) -> None:
     assert cmd_routing.doctor_rows() == []
     (home / "config.yaml").write_text(BODY + "  admin:\n    rules:\n      - {id: c, match: {groups: [g]}, action: deny}\n")
@@ -296,6 +369,27 @@ def test_setup_adds_models_without_prompting(home: Path, monkeypatch) -> None:
     assert routing["models"] == [{"name": "fast", "provider": "openai", "model": "gpt-4.1-mini"}]
     assert routing["enabled"] is True and routing["default_alias"] == "fast"
     assert run("setup", "--yes", "--model", "bad").exit_code == 2
+
+
+def test_setup_route_with_systemone_writes_routing_categories(home: Path) -> None:
+    """GAP-1098: System One reads routing.categories, not the keyword decisions, so
+    the remedy doctor names (setup --classifier systemone --route coding=ALIAS) must fill it."""
+    result = run("setup", "--yes", "--classifier", "systemone", "--route", "coding=fast", "--route", "summarize=local")
+    assert result.exit_code == 0, result.output
+    routing = written(home)["routing"]
+    assert routing["categories"] == {"coding": "fast", "summarize": "local"}
+    assert {d["name"] for d in routing["decisions"]} == {"coding", "summarize"}
+    # A later run re-points one category and keeps the others the user set.
+    (home / "config.yaml").write_text(
+        (home / "config.yaml").read_text().replace("  categories:", "  categories:\n    reasoning: fast", 1)
+    )
+    assert run("setup", "--yes", "--classifier", "systemone", "--route", "coding=local").exit_code == 0
+    assert written(home)["routing"]["categories"] == {"reasoning": "fast", "coding": "local", "summarize": "local"}
+
+
+def test_setup_route_with_rules_leaves_routing_categories_alone(home: Path) -> None:
+    assert run("setup", "--yes", "--classifier", "rules", "--route", "coding=fast").exit_code == 0
+    assert "categories" not in written(home)["routing"]
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="chmod 0 does not take read access away on Windows")

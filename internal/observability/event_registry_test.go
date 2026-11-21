@@ -315,8 +315,9 @@ func TestClassifiedDefaultEventNamesMatchReviewedSnapshot(t *testing.T) {
 	}
 
 	// model.usage joined as the default identity of the model_usage gateway_event
-	// producer (GAP-0220); no other default name changed.
-	const wantSHA256 = "1c1695144fd8954276e3b9415de0f78100dc52a578ab872fdda2112512e68029"
+	// producer (GAP-0220); legacy.audit.routing.listener_refused joined as the
+	// default identity of the routing.listener_refused audit action (GAP-1106).
+	const wantSHA256 = "c88c032255dcda630d34eca0c3ce0ba6f2f8943e789f0fa1ed4f8ef0297ce649"
 	sum := sha256.Sum256([]byte(strings.Join(eventNamesToStrings(names), "\n")))
 	if got := hex.EncodeToString(sum[:]); got != wantSHA256 {
 		t.Fatalf("classified default event-name snapshot changed: sha256=%s names=%v", got, names)

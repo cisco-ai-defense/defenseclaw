@@ -441,6 +441,45 @@ def routing_cmd() -> None:
 # ---------------- status
 
 
+_ALIAS_FAILURE_CAUSES = {
+    "unreachable": "the endpoint did not answer",
+    "signing": "gateway Bedrock signing is not ready for it",
+    "credential": "no credential the gateway may send it",
+}
+
+
+def alias_failure_notes(effective: dict[str, Any]) -> list[str]:
+    """One line per routed alias whose calls failed before their first byte and
+    were served by the original model instead (the gateway lists them as
+    alias_failures; rel-1-0-10:GAP-1099, GAP-1101). Without it a dead endpoint
+    looks like routing that works."""
+    notes = []
+    for f in _dicts(effective.get("alias_failures")):
+        cause = str(f.get("cause") or "")
+        if cause.startswith("http_"):
+            cause = f"HTTP {cause[5:]}"
+        else:
+            cause = _ALIAS_FAILURE_CAUSES.get(cause, cause or "unknown")
+        count = int(f.get("count") or 1)
+        notes.append(
+            f"alias {f.get('alias')} failed {count} time{'s' if count != 1 else ''} since it last served a call "
+            f"(last: {cause}, {str(f.get('last_at') or '')[11:19]} UTC): the original model served those requests; "
+            f"check its base_url and key with defenseclaw routing models list"
+        )
+    return notes
+
+
+def doctor_alias_rows(cfg: Any) -> list[tuple[str, str]]:
+    """("warn", detail) rows for defenseclaw doctor, one per failing routed alias;
+    [] when the gateway cannot be asked (doctor names that elsewhere)."""
+    import types
+
+    answer, error = _ask_gateway(types.SimpleNamespace(cfg=cfg), "GET", "/api/v1/routing/effective", timeout=3, params={"recent": 1})
+    if error or not isinstance(answer, dict):
+        return []
+    return [("warn", note) for note in alias_failure_notes(answer)]
+
+
 def _status_data(app: AppContext) -> dict[str, Any]:
     data: dict[str, Any] = {"managed": _managed()}
     warnings: list[str] = []
@@ -492,6 +531,8 @@ def _status_data(app: AppContext) -> dict[str, Any]:
         cause = " ".join(str((data["health"] or {}).get("last_error") or "").split())[:300]
         if cause:
             warnings.append(f"routing is on but the gateway could not start it: {cause} ({_cause_fix(cause)})")
+    if isinstance(effective, dict):
+        warnings.extend(alias_failure_notes(effective))
     for budget in _dicts(effective.get("budgets")) if isinstance(effective, dict) else []:
         if budget.get("exceeded"):
             warnings.append(
@@ -1451,11 +1492,22 @@ SETUP_TEST_WAIT_SECONDS = 12.0
 SETUP_TEST_POLL_SECONDS = 1.0
 
 
-def _setup_test(app: AppContext) -> tuple[Any, str]:
+def _names_expected(answer: dict, expect: str) -> bool:
+    """Whether the dry-run answer shows the route setup just wrote: it names expect,
+    or names no alias at all (a failed classifier or a filtered default: the answer is
+    the real outcome, not a stale configuration)."""
+    named = (answer.get("candidate_alias"), answer.get("selected_alias"))
+    return expect in named or not any(named)
+
+
+def _setup_test(app: AppContext, expect: str = "") -> tuple[Any, str]:
     """(answer, error) of the setup test prompt. While the gateway has not
     applied the change yet it is asked again for a bounded time, stopping at
     once when the gateway reports why routing cannot start; a gateway that is
-    not running is not waited for."""
+    not running is not waited for. expect is the alias the coding prompt must
+    reach once the change is applied: a gateway that still answers with the
+    previous configuration is asked again, so the Test line never names the
+    alias that was just replaced (rel-1-0-10:GAP-1100, GAP-1102)."""
     import time
 
     deadline = time.monotonic() + SETUP_TEST_WAIT_SECONDS
@@ -1468,12 +1520,23 @@ def _setup_test(app: AppContext) -> tuple[Any, str]:
             json={"prompt": "Write a Python function that reverses a list."},
             timeout=10,
         )
-        if not error or not _routing_not_applied(error):
+        if error and not _routing_not_applied(error):
             return answer, error
-        if _startup_cause(app) or time.monotonic() >= deadline:
+        if not error and (not expect or not isinstance(answer, dict) or _names_expected(answer, expect)):
+            return answer, error
+        if error and _startup_cause(app) or time.monotonic() >= deadline:
             break
         waited = True
         time.sleep(SETUP_TEST_POLL_SECONDS)
+    if not error:
+        # Routing answers, but with the configuration from before the change.
+        got = (answer or {}).get("candidate_alias") or (answer or {}).get("selected_alias")
+        seconds = int(SETUP_TEST_WAIT_SECONDS)
+        return None, (
+            f"the gateway still routes a coding prompt to {got}, not {expect} (waited {seconds} s): it has not "
+            "reloaded config.yaml yet, or another rule of routing.decisions matches first; it reloads by itself, "
+            "or restart it: defenseclaw-gateway restart; check with defenseclaw routing test"
+        )
     cause = _startup_cause(app)
     if cause:
         return None, f"{error} ({cause}); {_cause_fix(cause)}"
@@ -1584,6 +1647,12 @@ def routing_setup(
     }
     if routes:
         changes["routing.signals"], changes["routing.decisions"] = _route_rules(routing, routes)
+        if classifier == "systemone":
+            # System One picks one of routing.categories and never reads the
+            # keyword decisions: without the map every request falls back with
+            # configuration_failure (rel-1-0-10:GAP-1098).
+            existing = routing.get("categories")
+            changes["routing.categories"] = {**(existing if isinstance(existing, dict) else {}), **routes}
     if not _write(app, changes):
         click.echo("Routing already has these settings.")
     if classifier == "rules" and not (routes or _dicts(routing.get("decisions"))):
@@ -1592,7 +1661,11 @@ def routing_setup(
             f"No route rules yet: every request goes to {default}. Send a kind of work elsewhere: "
             f"defenseclaw routing setup --route coding={other} (also reasoning and summarize)."
         )
-    answer, error = _setup_test(app)
+    # The alias the test prompt (a coding request) must reach once the gateway
+    # runs this configuration: the coding route, or the default when no rule
+    # sends work elsewhere. Anything else is not predicted.
+    expect = routes.get("coding") or (default if classifier == "rules" and not (routes or _dicts(routing.get("decisions"))) else "")
+    answer, error = _setup_test(app, expect)
     if error:
         click.echo(f'Test skipped: {error}. Run later: defenseclaw routing test "<prompt>"')
     elif isinstance(answer, dict):

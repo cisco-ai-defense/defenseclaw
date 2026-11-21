@@ -13653,6 +13653,26 @@ def _check_agent_identity_ledger(health: dict | None, r: _DoctorResult) -> None:
         )
 
 
+def _check_routing_aliases(cfg, r: _DoctorResult) -> None:
+    """A routed alias whose calls failed before their first byte and were served
+    by the original model instead: one WARN row per alias. Routing looks healthy
+    while a dead endpoint sends everything to the original model
+    (rel-1-0-10:GAP-1099, GAP-1101)."""
+    routing = getattr(cfg, "routing", None)
+    if routing is None or not bool(getattr(routing, "enabled", False)):
+        return
+    from defenseclaw.commands.cmd_routing import doctor_alias_rows
+
+    for status, detail in doctor_alias_rows(cfg):
+        _emit(
+            status,
+            "Routed alias",
+            detail,
+            remediation="fix or remove the alias: defenseclaw routing models list; routing models remove NAME",
+            r=r,
+        )
+
+
 def _check_routing_policy(r: _DoctorResult) -> None:
     """routing.admin rules and budgets that do less than they look (defenseclaw routing rules list)."""
     from defenseclaw.commands.cmd_routing import doctor_rows
@@ -17266,6 +17286,7 @@ def doctor(
     _check_signature_packs(cfg, r)
     routing_health = _administrator_health(cfg, r, sidecar_health)
     _check_semantic_routing(cfg, r, live_health=routing_health)
+    _check_routing_aliases(cfg, r)
     _check_routing_policy(r)
     _check_routing_sensitive(cfg, r)
     _check_routing_tokenomics(cfg, r)

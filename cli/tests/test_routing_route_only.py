@@ -91,6 +91,70 @@ def test_bedrock_iam_uses_gateway_signing_and_bearer_passes_through(homes: Path,
     }
 
 
+def test_bedrock_key_from_the_defenseclaw_dotenv_is_not_the_agent_credential(
+    homes: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """GAP-1105: defenseclaw keys set AWS_BEARER_TOKEN_BEDROCK for a Codex alias; the CLI copies it
+    from ~/.defenseclaw/.env into its own environment, but Claude Code never sees it, so enabling
+    route-only recorded passthrough and every Claude Code call failed with HTTP 400."""
+    from defenseclaw import credential_provenance
+
+    _aws_files(homes, monkeypatch)
+    monkeypatch.setenv("CLAUDE_CODE_USE_BEDROCK", "1")
+    monkeypatch.setenv("AWS_REGION", "us-west-2")
+    monkeypatch.setenv("AWS_BEARER_TOKEN_BEDROCK", "dotenv-key")
+    credential_provenance._reset_for_tests()
+    try:
+        credential_provenance.note_dotenv_candidate(str(homes), "AWS_BEARER_TOKEN_BEDROCK", "dotenv-key", injected=True)
+        up = ro.detect_upstream("claudecode")
+        assert up is not None and up.to_config()["bedrock"] == {"auth": "profile", "profile": "default", "region": "us-west-2"}
+        assert ro.claude_bedrock_passthrough_state() == ro.PASSTHROUGH_UNUSABLE
+    finally:
+        credential_provenance._reset_for_tests()
+    # The same key exported in the shell (or in settings.json env) is the agent credential.
+    up = ro.detect_upstream("claudecode")
+    assert up is not None and up.to_config()["bedrock"] == {"auth": "passthrough", "region": "us-west-2"}
+    assert ro.claude_bedrock_passthrough_state() == ro.PASSTHROUGH_OK
+
+
+def test_passthrough_state_is_proven_only_when_the_dotenv_key_is_the_only_source(
+    homes: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from defenseclaw import credential_provenance
+
+    state = ro.claude_bedrock_passthrough_state
+    assert state() == ro.PASSTHROUGH_OK  # not in Bedrock mode
+    monkeypatch.setenv("CLAUDE_CODE_USE_BEDROCK", "1")
+    # No key anywhere doctor can see: not proven (another shell or managed settings may give it).
+    assert state() == ro.PASSTHROUGH_UNKNOWN
+    monkeypatch.setenv("CLAUDE_CODE_SKIP_BEDROCK_AUTH", "1")
+    assert state() == ro.PASSTHROUGH_OK
+    monkeypatch.delenv("CLAUDE_CODE_SKIP_BEDROCK_AUTH")
+    _settings(homes, {"env": {"AWS_BEARER_TOKEN_BEDROCK": "k"}})
+    assert state() == ro.PASSTHROUGH_OK
+    (homes / "claude" / "settings.json").unlink()
+    # The only key is the one defenseclaw keys set injected from the dotenv: proven.
+    monkeypatch.setenv("AWS_BEARER_TOKEN_BEDROCK", "dotenv-key")
+    credential_provenance._reset_for_tests()
+    try:
+        credential_provenance.note_dotenv_candidate(str(homes), "AWS_BEARER_TOKEN_BEDROCK", "dotenv-key", injected=True)
+        monkeypatch.setattr("defenseclaw.connector_paths._claude_file_managed_settings_paths", lambda: [])
+        assert state() == ro.PASSTHROUGH_UNUSABLE
+        # A settings.local.json that sets the key (or one doctor cannot read) takes the proof away.
+        local = homes / "claude" / "settings.local.json"
+        monkeypatch.setattr(
+            "defenseclaw.connector_paths.claude_settings_paths", lambda workspace_dir=None: [str(local)]
+        )
+        local.write_text(json.dumps({"env": {"AWS_BEARER_TOKEN_BEDROCK": "k"}}), encoding="utf-8")
+        assert state() == ro.PASSTHROUGH_UNKNOWN
+        local.write_text("{not json", encoding="utf-8")
+        assert state() == ro.PASSTHROUGH_UNKNOWN
+        local.unlink()
+        assert state() == ro.PASSTHROUGH_UNUSABLE
+    finally:
+        credential_provenance._reset_for_tests()
+
+
 def test_codex_upstreams(homes: Path) -> None:
     cfgfile = homes / "codex" / "config.toml"
     cfgfile.write_text("model_provider = \"bedrock\"\n[model_providers.bedrock]\nbase_url = \"https://mantle.example/v1/\"\nwire_api = \"responses\"\n", encoding="utf-8")
