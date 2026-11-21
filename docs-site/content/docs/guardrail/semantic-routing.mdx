@@ -13,6 +13,16 @@ keywords:
 
 Semantic routing lets the gateway pick a model after it reads a request and before it forwards it. A classifier names the kind of work (for example coding or summarize), and the model you mapped to it answers. Guardrail checks, administrator rules and budgets still apply to the model that is picked, and a routing failure sends the original request unchanged.
 
+{/* tv-demo:begin see */}
+## See it run
+
+<Video
+  src="router-oss"
+  aspect="16/9"
+  caption="Semantic routing on one laptop, recorded live: turn routing on, restart the gateway to apply it, the Routing panel of the terminal UI, route-only mode for Codex, a cheap prompt to the small model, a hard prompt to the strong model, a sensitive prompt kept on the local model, a rule added while Codex runs, the doctor check, and usage and cost per model. Names and addresses are replaced with examples, prices are example prices, and waits are shortened."
+/>
+{/* tv-demo:end see */}
+
 ## Choose a classifier and a way in
 
 | Classifier (`routing.classifier`) | What it is | Needs |
@@ -126,7 +136,7 @@ routing:
 
 - Read: user messages. Left out: tool results, assistant replies, system prompts, and user-role text that starts with a marker agents write: `<system-reminder>`, `<environment_context>`, `<user_instructions>`, command, hook and IDE tags (`<bash-stdout>`, `<local-command-stdout>`, `<command-name>`, `<user-prompt-submit-hook>`, `<ide_selection>` and similar), `# AGENTS.md instructions`, `# CLAUDE.md`, `Contents of `, compaction summaries (Claude Code and Codex), skill loads, `<user_shell_command>`, the OpenClaw context message, its `Sender (untrusted metadata):` envelope and its heartbeat and session-startup prompts. Each content block is checked on its own, so a typed prompt in the same message as agent blocks is still read. For a custom slash command the router reads what you typed after the command name (`<command-args>`) and skips the next block of that message, the expanded command file. Text an agent writes without such a marker can still be read. Tool names are read without their arguments or results; MCP tool names are chosen by the tool server.
 - The newest message keeps its 8 KiB limit; `per_turn_bytes` and `max_bytes` bound the older messages.
-- Keyword signals match the newest message and the context, newest first, one message per paragraph, with no recency weighting: an older message can match a higher-priority rule than the newest one. With `include_tool_names` they also see a line such as `tools: Bash,Read`, and the request condition `tool_loop` matches when the conversation called a tool. `routing.sensitive.signals` match the context too.
+- Keyword signals match the newest message and the context, newest first, one message per paragraph, with no recency weighting: an older message can match a higher-priority rule than the newest one. With `include_tool_names` they also see a line such as `tools: Bash,Read`, and the request condition `tool_loop` matches when the conversation called a tool. `routing.sensitive.signals` match the newest message only.
 - `systemone` gets the same context, at most 8 KiB. `vllm_sr` reads the newest message only, so validation refuses `routing.context` with it.
 - When a limit cuts the context, the decision carries the warning `context_truncated:bytes` (`items` past 32 tool names), shown by `defenseclaw routing explain`. The newest message is never dropped, and a cut never removes a signal the newest message matched.
 
@@ -143,8 +153,10 @@ A routed response carries these headers:
 
 ```text
 X-Semantic-Router: routed
-X-Semantic-Router-Reason: decision=… model=… confidence=…
+X-Semantic-Router-Reason: source=… rule=… model=…
 ```
+
+Only the guardrail proxy sends the reason header, and only for chat completions. Route-only mode sends `X-Semantic-Router: routed`, or `X-Semantic-Router: fallback` when the routed model failed before its first byte and the original request was sent.
 
 Each routed request also records one `defenseclaw.semantic_routing.decision` count and a `defenseclaw.semantic_routing.latency` measurement. The labels are a closed set: `result` (`applied`, `fallback` or `denied`), `error.code` (`none`, `timeout`, `upstream_status`, `decode_failure`, `unknown_alias`, `credential_failure`, `configuration_failure`, `filtered`, `breaker_open`, `low_confidence` or `no_candidate`) and `decision` (`override` or `default`), plus `connector`, `route_source`, `route_category`, `filtered_by`, `listener`, `deny_reason` and `budget_id` (see [Tokenomics](/docs/observability/tokenomics#routing-and-budget-metrics)). Both listeners record the count. Prompt text, credentials, endpoints and the header reason string are never labels.
 
@@ -157,6 +169,26 @@ With `routing.sensitive` set (`aliases` plus `severity_at_least` and/or `signals
 - **Size bounds.** With `routing.sensitive` set, the route-only listener refuses a body over 64 MiB (HTTP 413) and answers HTTP 503 with `Retry-After` while its shared request buffer is full, instead of sending the request unchecked.
 - **Keyless local models.** A model with its own loopback `base_url` and no `api_key_env` or `credential` (Ollama, vLLM on this host) is called with no credential, also when the agent signs in with a login or a Bedrock bearer key. A sensitive request tries its local models this way at any address.
 - **When the local model refuses the request.** A local model that does not accept a request the agent sends (for example Ollama and the `additional_tools` input item Codex sends when its model catalog entry uses `use_responses_lite`) is not replaced by the cloud model: the agent gets HTTP 400 with a DefenseClaw message that names `routing.sensitive`, the local alias and the model's own reason. Use a local model that accepts the request, or a Codex catalog entry without `use_responses_lite` for the model.
+
+{/* tv-demo:begin shots */}
+## What you see
+
+Setup in the terminal UI lists Semantic routing in the Guardrail and scanning group. Its card shows whether routing is on and which classifier it uses.
+
+![Setup in defenseclaw tui: the Guardrail and scanning group with Semantic routing selected, showing that routing is on with the rules classifier](/images/routing/tui-setup-routing.png)
+
+The wizard runs the same command you can type, and asks you to confirm it first.
+
+![The Semantic routing wizard in defenseclaw tui: the classifier field set to rules and the command it will run, defenseclaw routing setup with yes and classifier rules](/images/routing/tui-setup-wizard.png)
+
+The Routing panel lists the models, rules and budgets that routing can use. Its keys add a model, delete one, turn routing on or off, test a prompt, and open usage and prices.
+
+![The Routing panel of defenseclaw tui: three models named fast, deep and local, with fast as the default, and one daily budget](/images/routing/tui-routing-panel.png)
+
+The routing explain command shows why one call went where it went: the model the client asked for, the outcome, the category, the source and the reasons.
+
+![The routing explain output for a sensitive prompt: requested model us.openai.gpt-5.6-luna, outcome applied to the local alias, category sensitive, source rules, reasons filtered_by:sensitive and sensitive:signal:positive](/images/routing/cli-routing-explain.png)
+{/* tv-demo:end shots */}
 
 ## Going back to a release before 1.0.10
 
