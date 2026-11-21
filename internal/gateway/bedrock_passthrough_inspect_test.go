@@ -31,6 +31,11 @@ import (
 
 const bedrockSecretText = "the vault code is 4242"
 
+// bedrockSecretLeaked reports whether a reply body still carries the secret
+// text. It matches the words, never the bare digits: a blocked reply carries a
+// Unix created_at stamp, and 1795242423 contains 4242 (GAP-1658).
+func bedrockSecretLeaked(body string) bool { return strings.Contains(body, "code is 4242") }
+
 // bedrockInvokeStreamFrames is an InvokeModelWithResponseStream answer for
 // Claude: Anthropic stream events in base64 eventstream chunks.
 func bedrockInvokeStreamFrames(t *testing.T, texts ...string) []byte {
@@ -159,7 +164,7 @@ func TestPassthroughInspectsBedrockInvokeStream(t *testing.T) {
 	insp.setVerdict("completion", &ScanVerdict{Action: "block", Severity: "HIGH", Reason: "test secret"})
 	rec = httptest.NewRecorder()
 	proxy.handlePassthrough(rec, bedrockRequest(upstream.URL, path))
-	if bytes.Contains(rec.Body.Bytes(), frames[:64]) || strings.Contains(rec.Body.String(), "4242") {
+	if bytes.Contains(rec.Body.Bytes(), frames[:64]) || bedrockSecretLeaked(rec.Body.String()) {
 		t.Fatalf("blocked stream reached the caller: %d bytes", rec.Body.Len())
 	}
 }
@@ -174,7 +179,7 @@ func TestPassthroughBlocksBedrockInvokeBody(t *testing.T) {
 	insp.setVerdict("completion", &ScanVerdict{Action: "block", Severity: "HIGH", Reason: "test secret"})
 	rec := httptest.NewRecorder()
 	proxy.handlePassthrough(rec, bedrockRequest(upstream.URL, "/model/us.anthropic.claude-haiku-4-5-20251001-v1:0/invoke"))
-	if strings.Contains(rec.Body.String(), "4242") {
+	if bedrockSecretLeaked(rec.Body.String()) {
 		t.Fatalf("blocked invoke body forwarded: %d %s", rec.Code, rec.Body)
 	}
 }
@@ -208,7 +213,7 @@ func TestPassthroughDecodesCompressedReplies(t *testing.T) {
 	if rec.Body.Len() > 0 && bytes.HasPrefix(rec.Body.Bytes(), []byte{0x1f, 0x8b}) {
 		t.Fatal("compressed reply reached the caller uninspected")
 	}
-	if strings.Contains(rec.Body.String(), "4242") {
+	if bedrockSecretLeaked(rec.Body.String()) {
 		t.Fatalf("compressed reply was not inspected: %d %s", rec.Code, rec.Body)
 	}
 	dst := http.Header{}
@@ -395,5 +400,18 @@ func TestPassthroughBadBedrockFrameFailsByMode(t *testing.T) {
 	}
 	if rec := call(); !bytes.Equal(rec.Body.Bytes(), bad) {
 		t.Fatalf("OSS default: the stream was not forwarded with an alert (%d of %d bytes)", rec.Body.Len(), len(bad))
+	}
+}
+
+// GAP-1658: a blocked reply whose created_at stamp holds the secret's digits is
+// not a leak, and a reply that carries the secret text is. The body is the one
+// TestPassthroughInspectsBedrockOpenAIReplyText reported at 06:27:03Z.
+func TestGAP1658BedrockLeakCheckIgnoresTheReplyTimestamp(t *testing.T) {
+	blocked := `{"created_at":1795242423,"defenseclaw_blocked":true,"defenseclaw_reason":"[DefenseClaw] The model's response was blocked due to a potential security concern (test secret)"}`
+	if bedrockSecretLeaked(blocked) {
+		t.Errorf("a blocked reply stamped created_at 1795242423 was read as a leak of %q", bedrockSecretText)
+	}
+	if !bedrockSecretLeaked(`{"output_text":"` + bedrockSecretText + `"}`) {
+		t.Errorf("a reply carrying %q was not read as a leak", bedrockSecretText)
 	}
 }

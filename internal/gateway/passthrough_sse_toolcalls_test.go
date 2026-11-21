@@ -214,7 +214,7 @@ func TestPassthroughInspectsBedrockOpenAIReplyText(t *testing.T) {
 	insp.setVerdict("completion", &ScanVerdict{Action: "block", Severity: "HIGH", Reason: "test secret"})
 	rec := httptest.NewRecorder()
 	proxy.handlePassthrough(rec, lunaPassthroughRequest(up.URL, "/openai/v1/responses", false))
-	if strings.Contains(rec.Body.String(), "4242") {
+	if bedrockSecretLeaked(rec.Body.String()) {
 		t.Fatalf("a blocked reply text reached the agent: %s", rec.Body)
 	}
 	up = sseUpstream(t, "text/event-stream", sseEvents(`{"type":"response.output_text.delta","delta":"the vault code is 4242"}`,
@@ -223,7 +223,7 @@ func TestPassthroughInspectsBedrockOpenAIReplyText(t *testing.T) {
 	insp.setVerdict("completion", &ScanVerdict{Action: "block", Severity: "HIGH", Reason: "test secret"})
 	rec = httptest.NewRecorder()
 	proxy.handlePassthrough(rec, lunaPassthroughRequest(up.URL, "/openai/v1/responses", true))
-	if strings.Contains(rec.Body.String(), "4242") {
+	if bedrockSecretLeaked(rec.Body.String()) {
 		t.Fatalf("a blocked streamed text reached the agent: %s", rec.Body)
 	}
 }
