@@ -1885,6 +1885,7 @@ def test_uninstall_after_a_deleted_enrolled_account_passes_on_the_first_call(tmp
     _run_lifecycle_functions(tmp_path, [
         "Test-DefenseClawDeletedAccountTeardownRefusal",
         "Test-DefenseClawManifestCatchUpTeardownRefusal",
+        "Test-DefenseClawLockWaitTeardownRefusal",
         "Invoke-DefenseClawUninstallPrecommitHookCheck",
     ], _PURGE_DELETED_ACCOUNT_HARNESS + r"""
 $stale = 'managed-hook teardown check failed: protected managed-hook activation evidence does not match the current manifest'
@@ -1936,6 +1937,7 @@ def test_uninstall_restarts_the_enumerator_on_a_later_deleted_account(tmp_path) 
     _run_lifecycle_functions(tmp_path, [
         "Test-DefenseClawDeletedAccountTeardownRefusal",
         "Test-DefenseClawManifestCatchUpTeardownRefusal",
+        "Test-DefenseClawLockWaitTeardownRefusal",
         "Invoke-DefenseClawUninstallPrecommitHookCheck",
     ], _PURGE_DELETED_ACCOUNT_HARNESS + r"""
 $stale = 'managed-hook teardown check failed: protected managed-hook activation evidence does not match the current manifest'
