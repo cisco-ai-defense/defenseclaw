@@ -151,18 +151,22 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) (retErr error) {
 	a.printf("  Checking this machine…  ")
 	rep := a.runDoctor(ctx)
 	a.printf("%s\n", a.machineLine(rep))
-	// A Mac runs sandboxes in OpenShell MicroVMs. Until its gateway does,
-	// the Landlock check is of the Linux VM Docker runs in, which on
-	// Docker Desktop has none: no reason to stop before the question that
-	// switches the gateway (step 2).
+	// On a Mac MicroVMs do not start until OpenShell fixes its MicroVM
+	// driver (GAP-0007), and the docker driver needs the Landlock of the
+	// Linux VM Docker runs in. Setup asks on every Mac, also when the
+	// gateway already runs the vm driver (the upstream default of a fresh
+	// OpenShell): a no, or --yes, moves it to docker rather than writing
+	// vm (GAP-1704). No reason to stop at the Landlock check before that
+	// question (step 2).
 	macOS := a.GOOS == "darwin"
-	microVM := rep.Driver == openshell.DriverVM
+	onVM := rep.Driver == openshell.DriverVM
+	microVM := onVM
 	// A Linux host with KVM may run them too; there the docker driver stays
 	// the default, and the kernel's missing Landlock is what makes
 	// MicroVMs the way on.
 	linuxKVM := a.GOOS == "linux" && !microVM && rep.MicroVM.KVMUsable()
 	noLandlock := linuxKVM && failed(rep, openshell.CheckIDLandlock)
-	if err := a.machineFailure(rep, (macOS && !microVM) || noLandlock); err != nil {
+	if err := a.machineFailure(rep, macOS || noLandlock); err != nil {
 		return err
 	}
 	// A TLS-inspecting proxy does not stop setup (a provider it leaves
@@ -187,11 +191,13 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) (retErr error) {
 
 	// 2. The compute driver (macOS, and Linux with KVM): OpenShell's MicroVM
 	// driver, whose MicroVMs have their own kernel with Landlock.
-	if (macOS && !microVM) || linuxKVM {
+	if macOS || linuxKVM {
 		if c := rep.Get(openshell.CheckIDLandlock); c != nil && c.Status == openshell.StatusFail {
 			a.note("Landlock: " + c.Detail + "; MicroVMs have their own kernel, which enforces it")
 		}
-		a.listDockerSandboxes(ctx, rep)
+		if !onVM {
+			a.listDockerSandboxes(ctx, rep)
+		}
 		// Which gateway.toml the service reads is known once OpenShell is
 		// installed: on a Mac the formula brings its own, under the
 		// Homebrew prefix.
@@ -205,6 +211,12 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) (retErr error) {
 		}
 		question, def := `Run sandboxes in OpenShell MicroVMs? On a Mac, MicroVMs do not start until OpenShell fixes its MicroVM driver; Docker Desktop 29.8 or newer runs sandboxes on the docker driver (the run-time Landlock check decides). (sets compute_driver = "vm" in `+
 			where+restarts+"; OpenShell calls this driver experimental)", false
+		if onVM {
+			// The gateway is on vm already: the default, no, is the switch.
+			question = `Run sandboxes in OpenShell MicroVMs? This gateway runs the MicroVM driver, but on a Mac MicroVMs do not start until OpenShell fixes it; ` +
+				`no switches it to the docker driver, which runs sandboxes on Docker Desktop 29.8 or newer (the run-time Landlock check decides) (sets compute_driver = "docker" in ` +
+				where + restarts + `; sandboxes made on the MicroVM driver cannot start after the switch)`
+		}
 		if linuxKVM {
 			// The docker driver is a Linux host's default: MicroVMs are the
 			// answer to a kernel without Landlock, and an option otherwise.
@@ -464,10 +476,25 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) (retErr error) {
 			}
 		}
 	}
+	// A Mac gateway on (or configured for) the vm driver whose MicroVMs
+	// the answer above turned down moves to docker in the same plan
+	// (GAP-1704).
+	leavingVM := macOS && !microVM && (onVM || rep.ConfiguredDriver == openshell.DriverVM)
+	if leavingVM {
+		changes.ComputeDriver = openshell.DriverDocker
+	}
 	// Switching the driver strands the other driver's sandboxes. The
 	// gateway runs MicroVMs once it restarts on them: a restart not given
 	// leaves it on docker.
 	switching := microVM && rep.Driver != openshell.DriverVM
+	var switchTo openshell.ComputeDriver
+	switch {
+	case switching:
+		switchTo = openshell.DriverVM
+	case leavingVM && onVM:
+		switchTo = openshell.DriverDocker
+	}
+	leftVM := false
 	switched := false
 	if changes.EnableBindMounts || changes.ComputeDriver != "" || changes.ServiceUMask != "" || len(changes.Env) > 0 || len(changes.UnsetEnv) > 0 ||
 		changes.DockerNamespace != "" {
@@ -508,7 +535,7 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) (retErr error) {
 				restartYourself = true
 				break
 			}
-			restart, err := a.consentGatewayRestart(ctx, o, assume, microVM, switching)
+			restart, err := a.consentGatewayRestart(ctx, o, assume, microVM, switchTo)
 			if err != nil {
 				return err
 			}
@@ -521,6 +548,7 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) (retErr error) {
 					return fmt.Errorf("change the gateway configuration: %w", retryAfterStop(err))
 				}
 				switched = switching
+				leftVM = switchTo == openshell.DriverDocker
 				if microVM {
 					a.ok("gateway configured and restarted: it runs sandboxes in OpenShell MicroVMs")
 				} else {
@@ -530,24 +558,30 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) (retErr error) {
 				skipped = append(skipped, "the OpenShell gateway change above (it restarts the gateway; apply it with `"+
 					CommandName+" doctor --fix` or `"+CommandName+" setup --restart-gateway`)")
 			}
-		case switching:
-			// The configuration already selects MicroVMs, but the gateway
+		case switchTo != "":
+			// The configuration already selects the driver, but the gateway
 			// was not restarted on it.
-			a.note("the gateway configuration already selects the MicroVM driver; the gateway has not been restarted on it")
+			named := map[openshell.ComputeDriver]string{openshell.DriverVM: "MicroVM", openshell.DriverDocker: "docker"}[switchTo]
+			a.note("the gateway configuration already selects the " + named + " driver; the gateway has not been restarted on it")
 			if unmanaged {
 				restartYourself = true
 				break
 			}
-			restart, err := a.consentGatewayRestart(ctx, o, assume, microVM, switching)
+			restart, err := a.consentGatewayRestart(ctx, o, assume, microVM, switchTo)
 			if err != nil {
 				return err
 			}
 			if !restart {
-				skipped = append(skipped, "restarting the OpenShell gateway on the MicroVM driver (`"+CommandName+" doctor --fix` or `"+CommandName+" setup --restart-gateway`)")
+				skipped = append(skipped, "restarting the OpenShell gateway on the "+named+" driver (`"+CommandName+" doctor --fix` or `"+CommandName+" setup --restart-gateway`)")
 				break
 			}
 			if err := a.Gateway.Restart(ctx); err != nil {
 				return fmt.Errorf("restart the OpenShell gateway: %w", retryAfterStop(err))
+			}
+			if switchTo == openshell.DriverDocker {
+				leftVM = true
+				a.ok("gateway restarted: it runs sandboxes on the docker driver")
+				break
 			}
 			switched = true
 			a.ok("gateway restarted: it runs sandboxes in OpenShell MicroVMs")
@@ -571,6 +605,8 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) (retErr error) {
 	switch {
 	case onMicroVMs:
 		a.note("every run works on a copy (the MicroVM driver mounts no host folders); `" + CommandName + " pull NAME --apply` brings the changes back")
+	case switchTo == openshell.DriverDocker && !leftVM:
+		a.warn("the gateway still runs the MicroVM driver, where no sandbox starts on a Mac; it runs sandboxes on the docker driver " + once)
 	case stuck:
 		kernel := "the Linux VM Docker runs in"
 		if a.GOOS == "linux" {
@@ -752,6 +788,10 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) (retErr error) {
 	case stuck:
 		a.warn("not ready for sandboxes yet: restart the OpenShell gateway on the MicroVM driver (`" + CommandName + " setup --restart-gateway`), then `" +
 			CommandName + " run " + cmd + "`")
+		return errSetupNotReady()
+	case switchTo == openshell.DriverDocker && !leftVM && !unmanaged:
+		a.warn("not ready for sandboxes yet: the gateway still runs the MicroVM driver, where no sandbox starts on a Mac; restart it on the docker driver (`" +
+			CommandName + " setup --restart-gateway`), then `" + CommandName + " run " + cmd + "`")
 		return errSetupNotReady()
 	case down:
 		a.warn("not ready for sandboxes yet: the DefenseClaw daemon is not running; start it with `defenseclaw-gateway start`, then `" +
@@ -1137,9 +1177,14 @@ func retryAfterStop(err error) error {
 	return err
 }
 
-func (a *App) consentGatewayRestart(ctx context.Context, o SetupOptions, assume, microVM, switching bool) (bool, error) {
+func (a *App) consentGatewayRestart(ctx context.Context, o SetupOptions, assume, microVM bool, switchTo openshell.ComputeDriver) (bool, error) {
 	if o.RestartGateway {
 		return true, nil
+	}
+	switching := switchTo != ""
+	to, from := "MicroVM", "docker"
+	if switchTo == openshell.DriverDocker {
+		to, from = "docker", "MicroVM"
 	}
 	var sandboxes, held []string
 	var known bool
@@ -1164,11 +1209,11 @@ func (a *App) consentGatewayRestart(ctx context.Context, o SetupOptions, assume,
 	}
 	switch {
 	case switching && known:
-		a.warn("applying this restarts the OpenShell gateway on the MicroVM driver: the " + plural(int64(len(sandboxes)), "sandbox", "sandboxes") +
-			" on it (" + shortList(sandboxes) + ") were made on the docker driver, stop if running, and cannot start again: OpenShell drops them a few minutes after the switch, " +
+		a.warn("applying this restarts the OpenShell gateway on the " + to + " driver: the " + plural(int64(len(sandboxes)), "sandbox", "sandboxes") +
+			" on it (" + shortList(sandboxes) + ") were made on the " + from + " driver, stop if running, and cannot start again: OpenShell drops them a few minutes after the switch, " +
 			"with any copy-mode work in them that was not brought back (`" + CommandName + " pull NAME --apply`, or --branch or --patch-out FILE), so bring it back and confirm the project, branch or patch file contains it before switching")
 	case switching:
-		a.warn("applying this restarts the OpenShell gateway on the MicroVM driver, and " + what + "; sandboxes made on the docker driver cannot start again after it, and OpenShell drops them a few minutes later with any work not brought back")
+		a.warn("applying this restarts the OpenShell gateway on the " + to + " driver, and " + what + "; sandboxes made on the " + from + " driver cannot start again after it, and OpenShell drops them a few minutes later with any work not brought back")
 	case microVM:
 		a.warn("applying this restarts the OpenShell gateway, which DefenseClaw does only once OpenShell reports every MicroVM sandbox on it stopped, and " + what)
 	default:
