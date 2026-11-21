@@ -5828,7 +5828,7 @@ func (s *Sidecar) reconcileUnconfiguredConnectors(ctx context.Context, registry 
 		WorkspaceDir:      s.currentConfig().ConnectorWorkspaceDir(),
 		ManagedEnterprise: managed.IsManagedEnterprise(s.currentConfig().DeploymentMode),
 	}, s.currentConfig())
-	failed, dropped := teardownRemovedConnectorsReport(registry, previous, nil, opts, opts.WorkspaceDir, ctx)
+	failed, dropped, why := teardownRemovedConnectorsWhy(registry, previous, nil, opts, opts.WorkspaceDir, ctx)
 	for _, name := range dropped {
 		s.auditDroppedConnectorState(name, "removed")
 	}
@@ -5839,7 +5839,7 @@ func (s *Sidecar) reconcileUnconfiguredConnectors(ctx context.Context, registry 
 	if err := connector.SaveActiveConnectors(s.currentConfig().DataDir, failed); err != nil {
 		return fmt.Errorf("persist connectors awaiting teardown retry: %w", err)
 	}
-	return fmt.Errorf("connector teardown incomplete for: %s", strings.Join(failed, ", "))
+	return fmt.Errorf("connector teardown incomplete for: %s", connectorTeardownCauses(failed, why))
 }
 
 // runGuardrailMulti is the multi-connector boot loop. It activates ONLY when
@@ -6009,7 +6009,7 @@ func (s *Sidecar) runGuardrailMulti(ctx context.Context) error {
 		}
 		setupSeed.activeState = activeState
 		setupSeed.hookLockState = hookLockState
-		candidates, unavailable, _ := s.removedConnectorRollbackCandidates(
+		candidates, unavailable, _, unavailableWhy := s.removedConnectorRollbackCandidates(
 			registry, previous, names, apiToken, proxyAddr, apiAddr, hookLockState,
 		)
 		removed, teardownFailed, teardownWhy := teardownRemovedConnectorCandidates(candidates, ctx, func(conn connector.Connector, priorOpts connector.SetupOpts) error {
@@ -6020,10 +6020,11 @@ func (s *Sidecar) runGuardrailMulti(ctx context.Context) error {
 		})
 		setupSeed.removed = removed
 		failedRemoved = append(unavailable, teardownFailed...)
-		removedWhy = teardownWhy
+		removedWhy = maps.Clone(unavailableWhy)
+		maps.Copy(removedWhy, teardownWhy)
 	} else {
 		var dropped []string
-		failedRemoved, dropped = teardownRemovedConnectorsReport(registry, previous, names, baseOpts, s.currentConfig().ConnectorWorkspaceDir(), ctx, configured)
+		failedRemoved, dropped, removedWhy = teardownRemovedConnectorsWhy(registry, previous, names, baseOpts, s.currentConfig().ConnectorWorkspaceDir(), ctx, configured)
 		for _, name := range dropped {
 			s.auditDroppedConnectorState(name, "removed")
 		}
@@ -6883,7 +6884,7 @@ func (s *Sidecar) teardownPreviousConnectorTransaction(
 		return nil
 	}
 	previousName := strings.Join(previousNames, ", ")
-	candidates, unavailable, dropped := s.removedConnectorRollbackCandidates(
+	candidates, unavailable, dropped, unavailableWhy := s.removedConnectorRollbackCandidates(
 		registry,
 		previousNames,
 		[]string{requested.Name()},
@@ -6896,9 +6897,10 @@ func (s *Sidecar) teardownPreviousConnectorTransaction(
 	// rollback authority; requested Setup publishes the roster without it.
 	if len(unavailable) > 0 || len(candidates)+len(dropped) != len(previousNames) {
 		return fmt.Errorf(
-			"refuse connector switch %s to %s without complete prior-registration rollback authority",
+			"refuse connector switch %s to %s without complete prior-registration rollback authority%s",
 			previousName,
 			requested.Name(),
+			connectorCausesSuffix(unavailable, unavailableWhy),
 		)
 	}
 	removed, failed, why := teardownRemovedConnectorCandidates(candidates, ctx, func(conn connector.Connector, priorOpts connector.SetupOpts) error {
@@ -6915,9 +6917,10 @@ func (s *Sidecar) teardownPreviousConnectorTransaction(
 		rollbackErr := rollbackMultiConnectorPublication(ctx, restore)
 		if rollbackErr != nil {
 			return fmt.Errorf(
-				"connector switch %s to %s teardown failed; prior-registration rollback incomplete: %w",
+				"connector switch %s to %s teardown failed: %s; prior-registration rollback incomplete: %w",
 				previousName,
 				requested.Name(),
+				connectorTeardownCauses(failed, why),
 				rollbackErr,
 			)
 		}
@@ -8248,6 +8251,13 @@ func verifyEffectiveHookRegistration(opts connector.SetupOpts, conn connector.Co
 	return nil
 }
 
+// teardownRemovedConnectorsReport is teardownRemovedConnectorsWhy without the
+// causes.
+func teardownRemovedConnectorsReport(registry *connector.Registry, previous, current []string, opts connector.SetupOpts, retiredWorkspace string, ctx context.Context, configured ...[]string) (failed, dropped []string) {
+	failed, dropped, _ = teardownRemovedConnectorsWhy(registry, previous, current, opts, retiredWorkspace, ctx, configured...)
+	return failed, dropped
+}
+
 // teardownRemovedConnectorsReport tears down connectors that were active on
 // a previous boot but are absent from the current active set — the
 // set-difference path for the multi-connector boot path (removed = previous − current). It is intended to
@@ -8270,10 +8280,11 @@ func verifyEffectiveHookRegistration(opts connector.SetupOpts, conn connector.Co
 // retiredWorkspace is the configured connector workspace (claw.workspace_dir)
 // the teardown of a retired connector also checks: a workspace-pinned older
 // setup registered its hook there.
-func teardownRemovedConnectorsReport(registry *connector.Registry, previous, current []string, opts connector.SetupOpts, retiredWorkspace string, ctx context.Context, configured ...[]string) (failed, dropped []string) {
+func teardownRemovedConnectorsWhy(registry *connector.Registry, previous, current []string, opts connector.SetupOpts, retiredWorkspace string, ctx context.Context, configured ...[]string) (failed, dropped []string, why map[string]string) {
 	if registry == nil || len(previous) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
+	why = map[string]string{}
 	keepConfigured := current
 	if len(configured) > 0 {
 		keepConfigured = configured[0]
@@ -8296,12 +8307,12 @@ func teardownRemovedConnectorsReport(registry *connector.Registry, previous, cur
 		if !ok {
 			if !connectorDroppable(registry, prevName) {
 				fmt.Fprintf(os.Stderr, "[guardrail] removed connector %q not in registry and a plugin may still provide it — skipping teardown, retaining for retry\n", prevName)
-				failed = append(failed, prevName)
+				failed, why[prevName] = append(failed, prevName), "not in the registry and a plugin may still provide it"
 				continue
 			}
 			if err := retireOrDropUnregisteredConnector(ctx, registry, retiredConnectorOpts(opts.DataDir, retiredWorkspace), prevName, "removed", nil); err != nil {
 				fmt.Fprintf(os.Stderr, "[guardrail] WARNING: %v\n", err)
-				failed = append(failed, prevName)
+				failed, why[prevName] = append(failed, prevName), err.Error()
 				continue
 			}
 			dropped = append(dropped, prevName)
@@ -8314,32 +8325,32 @@ func teardownRemovedConnectorsReport(registry *connector.Registry, previous, cur
 		}
 		if err := verifyConnectorRemoved(old, opts, teardownErr); err != nil {
 			fmt.Fprintf(os.Stderr, "[guardrail] WARNING: removed connector %s left stale state: %v\n", prevName, err)
-			failed = append(failed, prevName)
+			failed, why[prevName] = append(failed, prevName), err.Error()
 			continue
 		}
 		if !containsFold(keepConfigured, prevName) {
 			if err := removeTeardownHookFiles(registry, old, keepConfigured, opts); err != nil {
 				fmt.Fprintf(os.Stderr, "[guardrail] WARNING: remove connector %s hook files: %v\n", prevName, err)
-				failed = append(failed, prevName)
+				failed, why[prevName] = append(failed, prevName), err.Error()
 				continue
 			}
 		}
 		if err := connector.ClearHookContractLockEntry(opts.DataDir, prevName); err != nil {
 			fmt.Fprintf(os.Stderr, "[guardrail] WARNING: clear hook contract lock for removed connector %s: %v\n", prevName, err)
-			failed = append(failed, prevName)
+			failed, why[prevName] = append(failed, prevName), err.Error()
 			continue
 		}
 		if len(keepConfigured) == 0 && !opts.ManagedEnterprise {
 			if err := connector.RemoveUnusedSharedHookRuntime(opts.DataDir); err != nil {
 				fmt.Fprintf(os.Stderr, "[guardrail] WARNING: remove unused shared hook runtime: %v\n", err)
-				failed = append(failed, prevName)
+				failed, why[prevName] = append(failed, prevName), err.Error()
 				continue
 			}
 		}
 		RemoveConnectorRulePackOverrides(prevName)
 		fmt.Fprintf(os.Stderr, "[guardrail] removed connector %s teardown verified clean\n", prevName)
 	}
-	return failed, dropped
+	return failed, dropped, why
 }
 
 func removeTeardownHookFiles(registry *connector.Registry, removed connector.Connector, current []string, opts connector.SetupOpts) error {
@@ -8745,10 +8756,11 @@ func (s *Sidecar) removedConnectorRollbackCandidates(
 	previous, current []string,
 	apiToken, proxyAddr, apiAddr string,
 	lockState *connector.HookContractLockSnapshot,
-) ([]multiConnectorSetupRollbackPoint, []string, []string) {
+) ([]multiConnectorSetupRollbackPoint, []string, []string, map[string]string) {
 	if registry == nil || len(previous) == 0 {
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
+	why := map[string]string{}
 	keep := make(map[string]struct{}, len(current))
 	for _, name := range current {
 		if trimmed := strings.TrimSpace(name); trimmed != "" {
@@ -8773,14 +8785,14 @@ func (s *Sidecar) removedConnectorRollbackCandidates(
 		if !ok {
 			if !connectorDroppable(registry, name) {
 				fmt.Fprintf(os.Stderr, "[guardrail] removed connector %q not in registry and a plugin may still provide it — retaining for teardown retry\n", name)
-				failed = append(failed, name)
+				failed, why[name] = append(failed, name), "not in the registry and a plugin may still provide it"
 				continue
 			}
 			// No build-shipped owner can tear this name down, so retrying would
 			// fail forever. Drop DefenseClaw's lock state and leave host files.
 			if err := retireOrDropUnregisteredConnector(context.Background(), registry, s.retiredConnectorOpts(), name, "removed", nil); err != nil {
 				fmt.Fprintf(os.Stderr, "[guardrail] WARNING: %v — retaining for teardown retry\n", err)
-				failed = append(failed, name)
+				failed, why[name] = append(failed, name), err.Error()
 				continue
 			}
 			s.auditDroppedConnectorState(name, "removed")
@@ -8790,7 +8802,7 @@ func (s *Sidecar) removedConnectorRollbackCandidates(
 		opts, err := s.connectorSetupOptsChecked(conn, apiToken, proxyAddr, apiAddr)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "[guardrail] removed connector %s rollback authority unavailable — retaining for teardown retry: %v\n", name, err)
-			failed = append(failed, name)
+			failed, why[name] = append(failed, name), err.Error()
 			continue
 		}
 		conn.SetCredentials(opts.APIToken)
@@ -8812,7 +8824,7 @@ func (s *Sidecar) removedConnectorRollbackCandidates(
 		priorOpts, err := priorConnectorSetupOpts(point)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "[guardrail] removed connector %s has incomplete rollback evidence — retaining for teardown retry: %v\n", name, err)
-			failed = append(failed, name)
+			failed, why[name] = append(failed, name), err.Error()
 			continue
 		}
 		pluginName := strings.ToLower(strings.TrimSpace(name))
@@ -8820,13 +8832,13 @@ func (s *Sidecar) removedConnectorRollbackCandidates(
 			point.pluginSnapshot, err = connector.CapturePluginArtifactRegistrationSnapshot(priorOpts, pluginName)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "[guardrail] removed %s plugin rollback snapshot failed — retaining for teardown retry: %v\n", name, err)
-				failed = append(failed, name)
+				failed, why[name] = append(failed, name), err.Error()
 				continue
 			}
 		}
 		candidates = append(candidates, point)
 	}
-	return candidates, failed, dropped
+	return candidates, failed, dropped, why
 }
 
 // dropRemovedConnectorWithNothingInstalled reports whether a connector that
@@ -8911,6 +8923,15 @@ func connectorTeardownCauses(failed []string, why map[string]string) string {
 		}
 	}
 	return strings.Join(parts, "; ")
+}
+
+// connectorCausesSuffix is ": <connector> (<cause>); ..." for the connectors in
+// names, or "" when none is named.
+func connectorCausesSuffix(names []string, why map[string]string) string {
+	if len(names) == 0 {
+		return ""
+	}
+	return ": " + connectorTeardownCauses(names, why)
 }
 
 // failGuardrailWithRollback is the shared fail-loud path for connector

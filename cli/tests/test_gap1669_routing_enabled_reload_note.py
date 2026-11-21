@@ -45,7 +45,8 @@ def test_the_reload_note_follows_the_classifier(tmp_path, classifier, hot):
     path = _write(tmp_path, classifier)
     result = config_writer.apply([Change("routing.enabled", True)], "cli:test", "t", path=path)
     assert result.restart_required == ["routing.enabled"]  # the writer list stays conservative
-    assert cmd_config._routing_enabled_applies_on_reload(result.restart_required, result.changed, path) is hot
+    got = cmd_config._routing_enabled_applies_on_reload(result.restart_required, result.changed, path)
+    assert got == (classifier if hot else "")
 
 
 def test_changing_the_classifier_in_the_same_write_stays_a_restart(tmp_path):
@@ -53,11 +54,11 @@ def test_changing_the_classifier_in_the_same_write_stays_a_restart(tmp_path):
     result = config_writer.apply(
         [Change("routing.enabled", True), Change("routing.classifier", "rules")], "cli:test", "t", path=path
     )
-    assert cmd_config._routing_enabled_applies_on_reload(result.restart_required, result.changed, path) is False
+    assert cmd_config._routing_enabled_applies_on_reload(result.restart_required, result.changed, path) == ""
 
 
 def test_an_unreadable_config_keeps_the_restart_message(tmp_path):
-    assert cmd_config._routing_enabled_applies_on_reload(["routing.enabled"], ["routing.enabled"], str(tmp_path / "x")) is False
+    assert cmd_config._routing_enabled_applies_on_reload(["routing.enabled"], ["routing.enabled"], str(tmp_path / "x")) == ""
 
 
 @pytest.mark.parametrize(("classifier", "hot"), [("rules", True), ("vllm_sr", False)])
@@ -73,6 +74,7 @@ def test_config_set_prints_the_right_message(tmp_path, monkeypatch, classifier, 
     out = result.output
     assert result.exception is None or isinstance(result.exception, SystemExit), repr(result.exception)
     if hot:
-        assert "routing.enabled applies on reload" in out and "Restart the gateway" not in out, out
+        assert "routing.enabled applies on reload" in out and f"with the {classifier} classifier" in out, out
+        assert "Restart the gateway" not in out, out
     else:
         assert "Restart the gateway to apply routing.enabled" in out, out

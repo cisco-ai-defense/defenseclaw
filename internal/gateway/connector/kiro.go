@@ -155,6 +155,16 @@ func (c *KiroConnector) Setup(ctx context.Context, opts SetupOpts) error {
 	return errors.Join(staleErr, reclaimErr)
 }
 
+// kiroPathError wraps err with what failed and the file. A parse error names
+// the file itself, and naming it again made one broken file read as two
+// (rel-1-0-10 GAP-1745).
+func kiroPathError(what, path string, err error) error {
+	if strings.Contains(err.Error(), path) {
+		return fmt.Errorf("%s: %w", what, err)
+	}
+	return fmt.Errorf("%s %s: %w", what, path, err)
+}
+
 func (c *KiroConnector) Teardown(_ context.Context, opts SetupOpts) error {
 	command := c.hookCommand(opts)
 	scope, err := c.reclaimScope(opts)
@@ -241,7 +251,7 @@ func (c *KiroConnector) Teardown(_ context.Context, opts SetupOpts) error {
 			// otherwise leave the file byte for byte.
 			if present, err := kiroV2AgentReferencesAnyHook(path, command); err != nil || !present {
 				if err != nil {
-					errs = append(errs, fmt.Errorf("kiro inspect agent %s: %w", path, err))
+					errs = append(errs, kiroPathError("kiro inspect agent", path, err))
 				}
 				continue
 			}
@@ -259,7 +269,10 @@ func (c *KiroConnector) Teardown(_ context.Context, opts SetupOpts) error {
 		// install's, so the teardown failed on it (rel-1-0-10 GAP-1548).
 		var userAgents []string
 		for _, path := range agents {
-			if !written[path] {
+			// A file Kiro cannot parse was named by the pass above
+			// (kiro inspect agent): reading it again would name it twice
+			// (rel-1-0-10 GAP-1745).
+			if !written[path] && !kiroFileUnparsable(path) {
 				userAgents = append(userAgents, path)
 			}
 		}
@@ -418,7 +431,7 @@ func (c *KiroConnector) exactScope(opts SetupOpts, recorded kiroRecordedFiles) (
 	var errs []error
 	for _, path := range slices.Concat(recorded.hooks, recorded.agents) {
 		if held, err := scope.holds(path); err != nil {
-			errs = append(errs, fmt.Errorf("kiro inspect %s: %w", path, err))
+			errs = append(errs, kiroPathError("kiro inspect", path, err))
 		} else if held {
 			scope.files[filepath.Clean(path)] = true
 		}
@@ -792,24 +805,24 @@ func (c *KiroConnector) reclaimKiroHookFile(opts SetupOpts, path, command string
 	logical := kiroBackupLogicalName(path)
 	restored, err := restoreManagedFileBackupIfUnchanged(opts.DataDir, c.Name(), logical, path)
 	if err != nil {
-		return fmt.Errorf("kiro restore hook %s: %w", path, err)
+		return kiroPathError("kiro restore hook", path, err)
 	}
 	if !restored {
 		operatorFile := kiroPristineIsOperators(opts.DataDir, c.Name(), logical, command)
 		if err := removeKiroV3HooksKeeping(path, command, operatorFile, scope); err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("kiro remove hook %s: %w", path, err)
+			return kiroPathError("kiro remove hook", path, err)
 		}
 		if err := keepPristineEmptyHooks(opts.DataDir, c.Name(), logical, path); err != nil {
-			return fmt.Errorf("kiro keep the empty hooks of %s: %w", path, err)
+			return kiroPathError("kiro keep the empty hooks of", path, err)
 		}
 	} else if present, err := kiroV3FileReferencesHook(path, command); err != nil {
-		return fmt.Errorf("kiro inspect restored hook %s: %w", path, err)
+		return kiroPathError("kiro inspect restored hook", path, err)
 	} else if present {
 		// A backup captured while the account still held an earlier
 		// enrollment's hooks (whose own backup is gone) put DefenseClaw's
 		// entries back; they go too (GAP-1932).
 		if err := removeKiroV3HooksKeeping(path, command, false, scope); err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("kiro remove hook %s: %w", path, err)
+			return kiroPathError("kiro remove hook", path, err)
 		}
 	}
 	dropErr := dropManagedFileBackup(opts.DataDir, c.Name(), logical)
@@ -857,23 +870,23 @@ func (c *KiroConnector) reclaimKiroAgentFile(opts SetupOpts, path, command strin
 	logical := kiroAgentBackupLogicalName(path)
 	restored, err := restoreManagedFileBackupIfUnchanged(opts.DataDir, c.Name(), logical, path)
 	if err != nil {
-		return fmt.Errorf("kiro restore agent %s: %w", path, err)
+		return kiroPathError("kiro restore agent", path, err)
 	}
 	if !restored {
 		operatorFile := kiroPristineIsOperators(opts.DataDir, c.Name(), logical, command)
 		if err := removeKiroV2AgentHooksKeeping(path, command, operatorFile, scope); err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("kiro remove agent hooks %s: %w", path, err)
+			return kiroPathError("kiro remove agent hooks", path, err)
 		}
 		if err := keepPristineEmptyHooks(opts.DataDir, c.Name(), logical, path); err != nil {
-			return fmt.Errorf("kiro keep the empty hooks of %s: %w", path, err)
+			return kiroPathError("kiro keep the empty hooks of", path, err)
 		}
 	} else if present, err := kiroV2AgentReferencesAnyHook(path, command); err != nil {
-		return fmt.Errorf("kiro inspect restored agent %s: %w", path, err)
+		return kiroPathError("kiro inspect restored agent", path, err)
 	} else if present {
 		// The restored agent came from a backup that already held
 		// DefenseClaw's hooks (GAP-1932).
 		if err := removeKiroV2AgentHooksKeeping(path, command, false, scope); err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("kiro remove agent hooks %s: %w", path, err)
+			return kiroPathError("kiro remove agent hooks", path, err)
 		}
 	}
 	dropErr := dropManagedFileBackup(opts.DataDir, c.Name(), logical)
