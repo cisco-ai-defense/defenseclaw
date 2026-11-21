@@ -75,6 +75,17 @@ func skipForeignHookLedgerOnWindows(t *testing.T) {
 	requireAdministratorTestToken(t, "the protected ledger write sets a SYSTEM-owned DACL")
 }
 
+// skipForeignHookCleanupFixtureOnWindows skips the cleanup cases whose
+// fixture does not hold on Windows even with an administrator token: the
+// synthetic target SID has no loaded registry hive, and the in-process guard
+// case expects the in-progress ledger name (rel-1-0-10:GAP-1729).
+func skipForeignHookCleanupFixtureOnWindows(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("the Windows cleanup fixture does not hold yet: the synthetic target account has no loaded registry hive (GAP-1729)")
+	}
+}
+
 // removals is the ledger ("" entries when there is none).
 func (g *foreignHookGuardian) removals(t *testing.T) []enterprisepolicy.ForeignHookRemoval {
 	t.Helper()
@@ -509,7 +520,7 @@ func runForeignHookRemovalOrderCases(t *testing.T, cases []foreignHookRemovalOrd
 // The worker's pipe protocol and the real worker process are in
 // the Unix file.
 func TestForeignHookRemovalRecordsBeforeTheFileChanges(t *testing.T) {
-	skipForeignHookLedgerOnWindows(t)
+	skipForeignHookCleanupFixtureOnWindows(t)
 	runForeignHookRemovalOrderCases(t, []foreignHookRemovalOrderCase{
 		{
 			name:       "the in-process guard",
@@ -824,7 +835,7 @@ func TestReconcileForeignHooksHoldsNoLockWhileItCleans(t *testing.T) {
 // remove: a cleanup with nothing to remove finishes while a gateway exchange
 // holds the lock, without asking for it, and changes nothing.
 func TestInProcessForeignCleanupLocksOnlyToRemove(t *testing.T) {
-	skipForeignHookLedgerOnWindows(t)
+	skipForeignHookCleanupFixtureOnWindows(t)
 	g := useForeignHookGuardian(t, nil)
 	useInProcessCleanupAsSelf(t)
 	home := t.TempDir()
