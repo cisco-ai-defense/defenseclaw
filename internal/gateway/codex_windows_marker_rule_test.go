@@ -4,6 +4,7 @@
 package gateway
 
 import (
+	"runtime"
 	"strings"
 	"testing"
 
@@ -74,8 +75,10 @@ func TestCodexWindowsActionBlocksCompleteArgvMarker(t *testing.T) {
 		// read /x partially and allowed it, a miss the old "stays partial"
 		// row pinned; the FU12 fold (rel 8e58b26846..efdb4f76a4) reads it
 		// fully (lead ruling D31, 2026-11-21). The benign twin shows that /x
-		// itself does not block.
-		{"cmd.exe /x body is read", `cmd.exe /x /c echo dccert-block-marker > codex-blocked2.txt`, true},
+		// itself does not block. Only the Windows reading takes /x; on other
+		// hosts the launcher reading still stops at it and names the rule as
+		// detection-only, as rel does (rel-1-0-10:GAP-1708, 1.0.11).
+		{"cmd.exe /x body is read", `cmd.exe /x /c echo dccert-block-marker > codex-blocked2.txt`, runtime.GOOS == "windows"},
 		{"benign cmd.exe /x", `cmd.exe /x /c echo hi > codex-allowed.txt`, false},
 		{"cmd.exe /e:maybe stays partial", `cmd.exe /e:maybe /c echo dccert-block-marker > codex-allowed.txt`, false},
 	} {
