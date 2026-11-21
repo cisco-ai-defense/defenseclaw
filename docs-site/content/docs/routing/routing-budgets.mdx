@@ -151,7 +151,7 @@ More:
 - Devices behind one NAT address share a high request limit (20 times `rate_limit_per_minute`); a busy host on that address can push them to per-device counting for a minute.
 - After a gateway restart, a user's spend on other devices is read within seconds; calls made in those seconds see only this device's spend.
 - The TLS key must be owned by the account that runs the store and readable only by it. It may be a link, for example into `/etc/letsencrypt/live`, when the file it points to meets that rule.
-- A stream that the user stops, or that the upstream breaks, after the answer started has no final token count: the user's own budget reads as unknown for 10 minutes (a deny budget then refuses on a managed device).
+- A stream that the user stops, or that the upstream breaks, after the answer started has no final token count. For most providers the user's own budget then reads as unknown for 10 minutes (a deny budget refuses on a managed device). In 1.0.10 an Anthropic Messages or Bedrock stream cut before its last message is not unknown: it is charged as its input plus one output token, so a client that drops the stream right after the answer arrives is under-charged. 1.0.11 charges it as unknown.
 
 
 {/* tv-demo:begin shots */}
