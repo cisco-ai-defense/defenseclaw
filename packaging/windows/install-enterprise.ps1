@@ -4728,7 +4728,9 @@ try {
         throw '-Mode / -Connector are valid only with Install, Upgrade, or Repair'
     }
     if ($DeferredConfig) {
-        # Use a real, valid managed-enterprise policy and an empty target set so
+        # Use a real, valid managed-enterprise policy for this -EnterpriseProfile
+        # (a standalone config must name enterprise.profile standalone, or the
+        # gateway refuses it; rel-1-0-10:GAP-1749) and an empty target set so
         # the ordinary authenticated install transaction can establish every
         # machine artifact and ACL. All services remain disabled. A later
         # Repair with both real inputs performs target preparation and the
@@ -4744,7 +4746,8 @@ try {
         [IO.File]::WriteAllText(
             $deferredConfigPath,
             (Get-DefenseClawRenderedEnterpriseConfig `
-                -Mode observe -Connectors $deferredConnectors),
+                -Mode observe -Connectors $deferredConnectors `
+                -ForProfile $EnterpriseProfile),
             [Text.UTF8Encoding]::new($false)
         )
         [IO.File]::WriteAllText(
