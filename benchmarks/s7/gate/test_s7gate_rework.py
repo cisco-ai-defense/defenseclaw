@@ -46,7 +46,19 @@ class LabelsPinnedForTheRun(unittest.TestCase):
         (e.root / "policy").mkdir()
         self.assertEqual(e.run("register-corpus", e.corpus, "--version", "unit-v1").returncode, 0)
         out = e.root / "out"
-        r = e.run("all", "--bin", fake, "--policy-dir", e.root / "policy", "--corpora", e.cfg, "--out", out)
+        r = e.run(
+            "all",
+            "--bin",
+            fake,
+            "--policy-dir",
+            e.root / "policy",
+            "--corpora",
+            e.cfg,
+            "--out",
+            out,
+            "--min-free-gb",
+            "1",
+        )
         self.assertNotEqual(lab.read_text().count("\n"), 1, "the stand-in harness did not change the label file")
         self.assertIn("changed during the run", r.stderr, r.stdout + r.stderr)
         self.assertNotIn(r.returncode, (0, 4), r.stdout + r.stderr)

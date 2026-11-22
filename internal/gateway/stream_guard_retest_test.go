@@ -84,7 +84,7 @@ func retestPassthrough(t *testing.T, writes []string) string {
 		name   string
 	}{"127.0.0.1", "openai"})
 	defer func() { providerDomains = orig }()
-	proxy := newTestProxy(t, &mockProvider{}, retestInspector(), "action")
+	proxy := gap0429Proxy(t, &mockProvider{}, retestInspector())
 	body := mustJSON(t, map[string]interface{}{
 		"model": "m", "stream": true, "max_tokens": 64,
 		"messages": []map[string]interface{}{{"role": "user", "content": "summarize the change"}},
@@ -135,7 +135,7 @@ func retestLLMChunks(t *testing.T, chunks []StreamChunk) string {
 		"model": "gpt-4", "stream": true,
 		"messages": []map[string]interface{}{{"role": "user", "content": "go"}},
 	})
-	proxy := newTestProxy(t, &mockProvider{streamChunks: chunks}, retestInspector(), "action")
+	proxy := gap0429Proxy(t, &mockProvider{streamChunks: chunks}, retestInspector())
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(reqBody))
 	req.RemoteAddr = "127.0.0.1:12345"
 	req.Header.Set("Content-Type", "application/json")
