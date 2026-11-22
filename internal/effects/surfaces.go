@@ -168,20 +168,30 @@ func parsePatchEnvelope(text string) ([]patchTarget, bool) {
 	}
 	var out []patchTarget
 	sawEnd := false
+	inUpdate := false // inside an Update File chunk body
 	for _, line := range strings.Split(text, "\n") {
-		// Match headers only at column 0: a "*** Delete File:" sitting in the
-		// diff body (a context/'+' line) is attacker text, not a real header
-		// (review SF-5).
+		// A "*** Delete File:" sitting in an Update File chunk body (a context
+		// line, leading blank) is attacker text, not a header (review SF-5).
+		// Anywhere else a header the applier trims is one: apply_patch reads a
+		// hunk header with its leading blanks trimmed (S3-PRE security review,
+		// DET111 R1), so an indented header is read there too.
 		l := strings.TrimRight(line, "\r")
 		if !strings.HasPrefix(l, "*** ") {
-			continue
+			t := strings.TrimLeft(l, " \t")
+			if inUpdate || !strings.HasPrefix(t, "*** ") {
+				continue
+			}
+			l = t
 		}
 		switch {
 		case strings.HasPrefix(l, "*** Add File:"):
+			inUpdate = false
 			out = append(out, patchTarget{path: strings.TrimSpace(l[len("*** Add File:"):]), kind: KindWrite})
 		case strings.HasPrefix(l, "*** Update File:"):
+			inUpdate = true
 			out = append(out, patchTarget{path: strings.TrimSpace(l[len("*** Update File:"):]), kind: KindWrite})
 		case strings.HasPrefix(l, "*** Delete File:"):
+			inUpdate = false
 			out = append(out, patchTarget{path: strings.TrimSpace(l[len("*** Delete File:"):]), kind: KindDelete})
 		case strings.HasPrefix(l, "*** Move to:"):
 			// A move after an Update File writes the new name and removes the old
