@@ -1132,9 +1132,17 @@ actions. That exclusivity applies to the release-owned managed inventory
 actions; `ai_discovery` records continue to follow the
 destination policy and also reach the generated destination in managed mode.
 
-### Managed skill inventory
+### Skill inventory
 
-On a Secure Client endpoint, the managed inventory carries every skill the agents load in the `endpoint_skill_inventory` collection (action `managed_skill_inventory`): one `ai_component.observed` record per skill and agent, sent only to the managed Cisco AI Defense destination (a standalone enterprise or per-user install sends none), with these fields under `defenseclaw.inventory.skill`:
+With `ai_discovery` on, the gateway sends every skill the agents load in the `endpoint_skill_inventory` collection after each full scan: one `ai_component.observed` record per skill and agent. Where the records go depends on the product:
+
+| Product | Action | Where the records go |
+| --- | --- | --- |
+| Per-user install (Preview) | `skill_inventory` | The local audit log and your own observability destinations |
+| Standalone enterprise (Preview) | `skill_inventory` | The local audit log and the destinations the administrator configured |
+| Secure Client endpoint | `managed_skill_inventory` | The local audit log and the managed Cisco AI Defense destination only |
+
+Each destination applies its own redaction profile to the record. On a managed machine only the machine configuration decides what is sent; a user cannot change it. The records carry these fields under `defenseclaw.inventory.skill` in every product:
 
 | Field | Meaning |
 | --- | --- |
@@ -1144,7 +1152,7 @@ On a Secure Client endpoint, the managed inventory carries every skill the agent
 | `scope` | `user`, `project`, `bundled` (shipped by the agent vendor), `managed` (an admin folder outside every home) or `plugin` |
 | `location` | The skill folder below the user's home, as `~/.claude/skills/pdf`. The account name and the absolute path stay on the endpoint; a project or managed skill sends none |
 | `agents` | Every agent that reads the folder. Each agent still gets its own record and component id, with the same hash. The record's `defenseclaw.ai.component.vendor` is that agent's vendor from the discovery catalog (Anthropic, OpenAI, Anysphere, GitHub, …) |
-| `publisher`, `publisher_source` | Who published the skill and how that is known: `declared` (the SKILL.md author), `plugin_manifest`, `vendor_bundled` or `unknown` |
+| `publisher`, `publisher_source` | Who published the skill and how that is known: `declared` (the SKILL.md author), `plugin_manifest`, `vendor_bundled` or `unknown`. The publisher is a content field, so the destination's redaction profile masks a secret in it |
 | `version` | The version the SKILL.md frontmatter declares (top level or under `metadata`), one line of at most 64 bytes. The description it declares goes in `defenseclaw.inventory.item.description`, folded to one line of at most 512 bytes. Both are the skill author's own claims and content fields, so the destination's redaction profile masks a secret in them |
 | `manifest_size` | Size of the SKILL.md in bytes, with its `manifest_hash` |
 | `plugin`, `plugin_version`, `plugin_enabled` | For a skill a Claude Code, Codex, Cursor or Copilot CLI plugin ships: the plugin (`name@marketplace`), its version and whether it is on. Cursor and Copilot CLI record no enabled state |
@@ -1152,11 +1160,13 @@ On a Secure Client endpoint, the managed inventory carries every skill the agent
 
 A scan reads at most 32 MiB and 1,000 files and folders per skill, and 256 MiB in all; a bigger skill is sent as `too_large`. `.git` and Finder or Explorer metadata files (`.DS_Store`, `Thumbs.db`, `desktop.ini`) are left out, so they do not change the hash.
 
-The state is saved only after the collection was published, so a change that did not reach AI Defense is sent again on the next scan. A skill is sent as removed once a complete scan no longer finds it.
+The gateway keeps the state in its data folder and saves it only after the collection was published, so a change that was not sent goes out again on the next scan. A skill is sent as removed once a complete scan no longer finds it. An unchanged collection is sent again once a day. A skill folder that has not changed since the last scan is not read again; every folder is read in full at least once a day.
 
-With `ai_discovery.include_skill_manifests: true` (off by default), the record of a new or changed skill also carries its SKILL.md text, once per file version: one record carries the text, and every record of that file carries `manifest_hash`. The text is a content field, so the destination's redaction profile masks secrets before upload. A file over 256 KiB, the most the redaction detectors scan in one field, goes in ordered parts that end at a line and keep a PEM block whole, one part a scan, and at most 2 MiB of text goes out in one scan; a file that cannot be split that way, or needs more than 128 parts, sends only its hash. Local submission progress is saved after publication, separately from durable delivery confirmation.
+The default redaction profile of your own destinations is `none`. To mask secrets in the declared description, version and publisher, and in SKILL.md text, set `observability.buckets.ai.discovery.redaction_profile` (or the destination's route) to `sensitive` or stricter; see [Redaction](/docs/observability/redaction#resolution-order).
 
-When this option is on, managed full scans can also query the optional, CMID-authenticated `POST /api/v1/inspect/defense_claw/skill-manifest-receipts` path on the **same AI Defense HTTPS origin** as event ingest. Allow this path through an outbound proxy if it filters by URL. The request carries one manifest hash and a fresh nonce; the response carries only scoped part indexes and SHA-256 digests, never the document. It uses the existing CMID credential and trust-aware transport and follows no redirects. This optional capability creates no new listener, worker or destination; turning `include_skill_manifests` off disables it. Older servers returning 404, 405 or 501 retain initial upload behavior and never cause completed bodies to replay.
+With `ai_discovery.include_skill_manifests: true` (off by default, in every product), the record of a new or changed skill also carries its SKILL.md text, once per file version: one record carries the text, and every record of that file carries `manifest_hash`. The text is a content field, so the destination's redaction profile masks secrets before upload. A file over 256 KiB, the most the redaction detectors scan in one field, goes in ordered parts that end at a line and keep a PEM block whole, one part a scan, and at most 2 MiB of text goes out in one scan; a file that cannot be split that way, or needs more than 128 parts, sends only its hash. Local submission progress is saved after publication, separately from durable delivery confirmation.
+
+On a Secure Client endpoint, when this option is on, full scans can also query the optional, CMID-authenticated `POST /api/v1/inspect/defense_claw/skill-manifest-receipts` path on the **same AI Defense HTTPS origin** as event ingest. Allow this path through an outbound proxy if it filters by URL. The request carries one manifest hash and a fresh nonce; the response carries only scoped part indexes and SHA-256 digests, never the document. It uses the existing CMID credential and trust-aware transport and follows no redirects. This optional capability creates no new listener, worker or destination; turning `include_skill_manifests` off disables it. Older servers returning 404, 405 or 501 retain initial upload behavior and never cause completed bodies to replay.
 
 A part is acknowledged only when durable storage reports its exact **post-redaction** digest. Initial parts take priority; after a two-minute in-flight grace, a later full scan retries only already-submitted parts that a fresh authenticated snapshot still reports missing. Retries remain one part per manifest per scan within the existing aggregate text budget. Failed receipt requests back off from two minutes to a bounded 64 minutes and never manufacture missing-part evidence. Checks are limited to 16 fairly rotated hashes and ten seconds in one full scan, so a large inventory can require several cycles. Recovery runs on the full-scan cadence, not the process-only tick, and does not add a faster scan timer.
 
