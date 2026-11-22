@@ -599,12 +599,24 @@ jobs:
 
   go-pinned:
     # A pull request with no Go change still runs the Go tests that name a
-    # file it changes, such as a docs page a test reads.
+    # file it changes, such as a docs page a test reads. A README.md edit
+    # names 490 internal/gateway tests (and 25 smaller packages): as one
+    # go test process that set ran 840 s and hit the 14m -timeout (#1489 on
+    # 4afc511651). So the job runs as PINNED_SHARDS parallel shards: a
+    # target of more than 50 tests (or a whole package) is split over every
+    # shard by go_test_shards.py --match (recorded times, exact cover); a
+    # smaller target runs whole in one shard, assigned in turn. A target the
+    # script cannot split (fewer test files than shards) runs whole too, so
+    # every selected test still runs exactly once.
     name: Go Pinned Tests
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.go_pinned == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -617,17 +629,36 @@ jobs:
           cache: npm
           cache-dependency-path: extensions/defenseclaw/package-lock.json
       - run: make plugin
-      - name: Run the Go tests that name a changed file
+      - name: Run this shard of the Go tests that name a changed file
         env:
           GO_TESTS: ${{ needs.changes.outputs.go_tests }}
+          PINNED_SHARD: ${{ matrix.shard }}
+          PINNED_SHARDS: 8
         run: |
           set -euo pipefail
           status=0
-          while IFS=$'\t' read -r package pattern; do
-            echo "::group::go test -run '$pattern' $package"
-            go test -count=1 -timeout 14m -run "$pattern" "$package" || status=1
-            echo "::endgroup::"
-          done < <(python3 -c 'import json, os; [print(t["package"] + "\t" + t["run"]) for t in json.loads(os.environ["GO_TESTS"])]')
+          small=0
+          while IFS=$'\t' read -r package pattern names; do
+            regexes=()
+            plan=(python3 scripts/go_test_shards.py --package-dir "${package#./}" --match "$pattern"
+              --timings scripts/test-timings/go-linux.json --shard-count "$PINNED_SHARDS")
+            if [ "$names" -gt 50 ] && check="$("${plan[@]}" --check 2>&1)"; then
+              # Split over every shard; this shard may hold none of it.
+              if grep -qx "shard $PINNED_SHARD: 0 items" <<<"$check"; then continue; fi
+              mapfile -t regexes < <("${plan[@]}" --shard-index "$PINNED_SHARD" --bounded)
+              [ "${#regexes[@]}" -gt 0 ] || { echo "::error::no -run regex for $package shard $PINNED_SHARD"; exit 1; }
+            else
+              turn=$small
+              small=$((small + 1))
+              [ $((turn % PINNED_SHARDS)) -eq "$PINNED_SHARD" ] || continue
+              regexes=("$pattern")
+            fi
+            for regex in "${regexes[@]}"; do
+              echo "::group::go test $package (shard $PINNED_SHARD of $PINNED_SHARDS)"
+              go test -count=1 -timeout 14m -run "$regex" "$package" || status=1
+              echo "::endgroup::"
+            done
+          done < <(python3 -c 'import json, os; [print(t["package"] + "\t" + t["run"] + "\t" + str(1000 if t["run"] == "." else t["run"].count("|") + 1)) for t in json.loads(os.environ["GO_TESTS"])]')
           exit "$status"
 
   go-test-throughput:
