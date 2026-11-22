@@ -14,6 +14,9 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+// newSubstrateFixture is unix-only (substrate_listener_test.go).
+//go:build !windows
+
 package gateway
 
 import (

@@ -583,6 +583,14 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
                 "push-branch", "string", "push the agent's work to its origin as a new branch of this name (Preview)"
             ),
             _Flag(
+                "restore-secret-lines",
+                "bool",
+                (
+                    "in files uploaded with credentials replaced, keep the agent's changed lines with the value put back "
+                    "(default: keep your line)"
+                ),
+            ),
+            _Flag(
                 "timeout",
                 "duration",
                 "stop reading the agent's work after this long (default 10m)",
