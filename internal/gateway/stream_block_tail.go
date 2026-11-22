@@ -53,6 +53,7 @@ func streamTailOf(path, provider string, ndjson bool) streamTail {
 type streamMark struct {
 	msgStart bool // an Anthropic message_start
 	start    int  // the Anthropic content block it opens, -1 none
+	call     bool // the block it opens is a tool call (isCallType)
 	stop     int  // the Anthropic content block it closes, -1 none
 	bedrock  int  // the highest Bedrock content index read up to and with this event, -1 none
 }
@@ -69,6 +70,9 @@ func anthropicStreamMark(data string) streamMark {
 	var ev struct {
 		Type  string `json:"type"`
 		Index *int   `json:"index"`
+		Block struct {
+			Type string `json:"type"`
+		} `json:"content_block"`
 	}
 	if json.Unmarshal([]byte(data), &ev) != nil {
 		return m
@@ -77,7 +81,7 @@ func anthropicStreamMark(data string) streamMark {
 	case ev.Type == "message_start":
 		m.msgStart = true
 	case ev.Type == "content_block_start" && ev.Index != nil && *ev.Index >= 0:
-		m.start = *ev.Index
+		m.start, m.call = *ev.Index, isCallType(ev.Block.Type)
 	case ev.Type == "content_block_stop" && ev.Index != nil && *ev.Index >= 0:
 		m.stop = *ev.Index
 	}
@@ -87,9 +91,10 @@ func anthropicStreamMark(data string) streamMark {
 // streamSent is what the agent got of the content blocks of the stream.
 type streamSent struct {
 	msgStart bool
-	open     int // the Anthropic content block opened and not closed, -1 none
-	next     int // the next free Anthropic content index
-	bedrock  int // the highest Bedrock content index sent, -1 none
+	open     int  // the Anthropic content block opened and not closed, -1 none
+	openCall bool // that open block is a tool call
+	next     int  // the next free Anthropic content index
+	bedrock  int  // the highest Bedrock content index sent, -1 none
 }
 
 func newStreamSent() streamSent { return streamSent{open: -1, bedrock: -1} }
@@ -100,13 +105,13 @@ func (s *streamSent) add(m streamMark) {
 		s.msgStart = true
 	}
 	if m.start >= 0 {
-		s.open = m.start
+		s.open, s.openCall = m.start, m.call
 		if m.start >= s.next {
 			s.next = m.start + 1
 		}
 	}
 	if m.stop >= 0 && m.stop == s.open {
-		s.open = -1
+		s.open, s.openCall = -1, false
 	}
 	if m.bedrock > s.bedrock {
 		s.bedrock = m.bedrock
@@ -137,7 +142,18 @@ func writeStreamBlockTail(w http.ResponseWriter, tail streamTail, calls *sseTool
 // writeAnthropicBlockTail closes the content block the agent has open, adds
 // msg as a text block at the next index the agent did not get, and ends the
 // message (end_turn), so the Messages stream stays one valid message.
+//
+// A tool call block the agent has open (its start and deltas went out with
+// an alert, and the call was refused at its content_block_stop) is never
+// closed: Claude Code and the AI SDK run a tool_use at its
+// content_block_stop with the input they got. That stream ends with an
+// Anthropic error event that carries msg, and no message_stop.
 func writeAnthropicBlockTail(w io.Writer, sent streamSent, model, msg string) {
+	if sent.open >= 0 && sent.openCall {
+		raw, _ := json.Marshal(map[string]any{"type": "error", "error": map[string]string{"type": "permission_error", "message": msg}})
+		fmt.Fprintf(w, "event: error\ndata: %s\n\n", raw)
+		return
+	}
 	var evs []map[string]any
 	if !sent.msgStart {
 		evs = append(evs, map[string]any{"type": "message_start", "message": map[string]any{"id": "msg_blocked", "type": "message",

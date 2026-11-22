@@ -292,3 +292,189 @@ func TestBedrockBlockTailIndexFollowsTheSentBlocks(t *testing.T) {
 		})
 	}
 }
+
+// gap1206BigArgs is tool call input over sseToolCallMax, sent in parts.
+func gap1206BigArgs() []string {
+	args := `{"note":"` + strings.Repeat("a", sseToolCallMax+(64<<10)) + `"}`
+	var parts []string
+	for len(args) > 0 {
+		n := min(len(args), 256<<10)
+		parts = append(parts, args[:n])
+		args = args[n:]
+	}
+	return parts
+}
+
+// A refused tool call whose start and deltas went out (its input is over
+// sseToolCallMax, so on a non-strict tier it is forwarded with an alert and
+// refused at its content_block_stop) is never closed: Claude Code and the
+// AI SDK run a tool_use at its content_block_stop. The stream ends with an
+// Anthropic error event that carries the block, and no message_stop
+// (RV-ROUTE2 on rel-1-0-10:GAP-1206).
+func TestStreamBlockTailNeverClosesAnOpenRefusedToolUse(t *testing.T) {
+	covAllowPrivate(t)
+	text, _ := json.Marshal(gap1206Text)
+	name, _ := json.Marshal(covBlockedTool)
+	second := []string{`{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"tu_1","name":` + string(name) + `,"input":{}}}`}
+	for _, part := range gap1206BigArgs() {
+		pj, _ := json.Marshal(part)
+		second = append(second, `{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":`+string(pj)+`}}`)
+	}
+	second = append(second, `{"type":"content_block_stop","index":1}`,
+		`{"type":"message_delta","delta":{"stop_reason":"tool_use"}}`,
+		`{"type":"message_stop"}`)
+	up := gap1206Upstream(t, "text/event-stream",
+		gap1206SSE(`{"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","content":[],"usage":{"input_tokens":1,"output_tokens":1}}}`,
+			`{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
+			`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":`+string(text)+`}}`,
+			`{"type":"content_block_stop","index":0}`),
+		gap1206SSE(second...))
+	proxy := covProxy(t, up, "anthropic", &covInspector{})
+	gap1206SendFirst(t, proxy)
+	req := covJSON(t, map[string]any{"model": "dc-test-model", "stream": true, "messages": []any{map[string]any{"role": "user", "content": "hello there"}}})
+	out := covPost(proxy, up, "/v1/messages", req, nil).Body.String()
+	if strings.Contains(out, "chat.completion.chunk") || strings.Contains(out, "[DONE]") {
+		t.Fatalf("the block tail is an OpenAI chunk inside a Messages stream:\n%.600s", out)
+	}
+
+	toolStarted, toolStopped, msgStop := false, false, false
+	var last struct {
+		Type  string `json:"type"`
+		Error struct {
+			Type    string `json:"type"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	for _, d := range gap1206Data(out) {
+		var ev struct {
+			Type  string `json:"type"`
+			Index int    `json:"index"`
+		}
+		if err := json.Unmarshal([]byte(d), &ev); err != nil {
+			t.Fatalf("an event the Messages client cannot read: %.200q", d)
+		}
+		switch {
+		case ev.Type == "content_block_start" && ev.Index == 1:
+			toolStarted = true
+		case ev.Type == "content_block_stop" && ev.Index == 1:
+			toolStopped = true
+		case ev.Type == "message_stop":
+			msgStop = true
+		}
+		_ = json.Unmarshal([]byte(d), &last)
+	}
+	if !toolStarted {
+		t.Fatalf("precondition: the tool_use start did not reach the agent (no forwarded call):\n%.600s", out)
+	}
+	if toolStopped {
+		t.Fatal("the refused tool_use got a content_block_stop: the agent finalizes and runs it")
+	}
+	if msgStop {
+		t.Fatal("the stream with the refused tool_use open ends with message_stop")
+	}
+	if last.Type != "error" || last.Error.Type == "" || !strings.Contains(last.Error.Message, "[DefenseClaw]") ||
+		!strings.Contains(out, "event: error\n") {
+		t.Fatalf("want the stream to end with an Anthropic error event that carries the block (last %+v):\n%.300s", last, out[max(0, len(out)-300):])
+	}
+}
+
+// The Bedrock tail never closes an open block: a refused toolUse whose start
+// and deltas went out with an alert (more than the proxy holds is held behind
+// it) gets no stop for its index, in the invoke and the converse shape
+// (RV-ROUTE2 on rel-1-0-10:GAP-1206).
+func TestBedrockBlockTailNeverClosesAnOpenRefusedToolUse(t *testing.T) {
+	covAllowPrivate(t)
+	text, _ := json.Marshal(gap1206Text)
+	// Under bedrockStreamToolMax decoded, over maxInitialBufBytes on the
+	// wire (json.Marshal writes each < as \u003c), so the call is forwarded
+	// with an alert, read whole and refused.
+	args := `{"note":"` + strings.Repeat("<", 200<<10) + `"}`
+	var parts []string
+	for a := args; len(a) > 0; {
+		n := min(len(a), 32<<10)
+		parts, a = append(parts, a[:n]), a[n:]
+	}
+	js := func(v any) []byte { b, _ := json.Marshal(v); return b }
+	chunk := func(ev any) []byte {
+		return covBedrockFrame(t, "chunk", js(map[string]string{"bytes": base64.StdEncoding.EncodeToString(js(ev))}))
+	}
+	invoke := [][]byte{chunk(map[string]any{"type": "content_block_start", "index": 1, "content_block": map[string]any{"type": "tool_use", "id": "tu_1", "name": covBlockedTool, "input": map[string]any{}}})}
+	converse := [][]byte{covBedrockFrame(t, "contentBlockStart", js(map[string]any{"contentBlockIndex": 1, "start": map[string]any{"toolUse": map[string]any{"toolUseId": "tu_1", "name": covBlockedTool}}}))}
+	for _, p := range parts {
+		invoke = append(invoke, chunk(map[string]any{"type": "content_block_delta", "index": 1, "delta": map[string]any{"type": "input_json_delta", "partial_json": p}}))
+		converse = append(converse, covBedrockFrame(t, "contentBlockDelta", js(map[string]any{"contentBlockIndex": 1, "delta": map[string]any{"toolUse": map[string]any{"input": p}}})))
+	}
+	invoke = append(invoke, chunk(map[string]any{"type": "content_block_stop", "index": 1}),
+		chunk(map[string]any{"type": "message_delta", "delta": map[string]any{"stop_reason": "tool_use"}, "usage": map[string]int{"output_tokens": 20}}),
+		chunk(map[string]any{"type": "message_stop"}))
+	converse = append(converse, covBedrockFrame(t, "contentBlockStop", []byte(`{"contentBlockIndex":1}`)),
+		covBedrockFrame(t, "messageStop", []byte(`{"stopReason":"tool_use"}`)))
+	for _, st := range []struct {
+		name, path    string
+		first, second [][]byte
+	}{
+		{"invoke", "/model/us.anthropic.claude-haiku-4-5-20251001-v1:0/invoke-with-response-stream",
+			[][]byte{chunk(map[string]any{"type": "message_start", "message": map[string]any{"model": "claude-haiku-4-5-20251001", "usage": map[string]int{"input_tokens": 5}}}),
+				chunk(map[string]any{"type": "content_block_start", "index": 0, "content_block": map[string]any{"type": "text", "text": ""}}),
+				chunk(json.RawMessage(`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":` + string(text) + `}}`)),
+				chunk(map[string]any{"type": "content_block_stop", "index": 0})},
+			invoke},
+		{"converse", "/model/dc-test-model/converse-stream",
+			[][]byte{covBedrockFrame(t, "messageStart", []byte(`{"role":"assistant"}`)),
+				covBedrockFrame(t, "contentBlockDelta", []byte(`{"contentBlockIndex":0,"delta":{"text":`+string(text)+`}}`)),
+				covBedrockFrame(t, "contentBlockStop", []byte(`{"contentBlockIndex":0}`))},
+			converse},
+	} {
+		t.Run(st.name, func(t *testing.T) {
+			up := gap1206Upstream(t, "application/vnd.amazon.eventstream", st.first, st.second)
+			proxy, insp := bedrockPassthroughProxy(t, up.srv)
+			proxy.toolCallVerdictForTest = covToolVerdict
+			insp.setVerdict("completion", allowVerdict("mock"))
+			gap1206SendFirst(t, proxy)
+			rec := httptest.NewRecorder()
+			proxy.handlePassthrough(rec, bedrockRequest(up.srv.URL, st.path))
+			out := rec.Body.Bytes()
+			if !bytes.Contains(out, st.second[1]) {
+				t.Fatalf("precondition: the tool call deltas did not reach the agent (%d bytes)", len(out))
+			}
+			blocked, stopped := false, false
+			dec, r := eventstream.NewDecoder(), bytes.NewReader(out)
+			for r.Len() > 0 {
+				msg, err := dec.Decode(r, nil)
+				if err != nil {
+					t.Fatalf("the agent did not get whole frames: %v", err)
+				}
+				payload, typ := msg.Payload, ""
+				if v := msg.Headers.Get(":event-type"); v != nil {
+					typ = v.String()
+				}
+				if typ == "chunk" {
+					var c struct {
+						Bytes []byte `json:"bytes"`
+					}
+					_ = json.Unmarshal(payload, &c)
+					payload = c.Bytes
+				}
+				if strings.Contains(string(payload), "[DefenseClaw]") {
+					blocked = true
+				}
+				var ev struct {
+					Type       string `json:"type"`
+					Index      *int   `json:"index"`
+					BlockIndex *int   `json:"contentBlockIndex"`
+				}
+				_ = json.Unmarshal(payload, &ev)
+				if (ev.Type == "content_block_stop" && ev.Index != nil && *ev.Index == 1) ||
+					(typ == "contentBlockStop" && ev.BlockIndex != nil && *ev.BlockIndex == 1) {
+					stopped = true
+				}
+			}
+			if !blocked {
+				t.Fatal("precondition: the call was not refused (no block in the stream)")
+			}
+			if stopped {
+				t.Fatal("the refused toolUse got a stop for its index: the agent finalizes and runs it")
+			}
+		})
+	}
+}
