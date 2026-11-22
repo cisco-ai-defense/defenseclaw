@@ -71,6 +71,9 @@ func TestGAP0299CountedWorkPerCall(t *testing.T) {
 	if got["decodes"] > gap0299MaxArgsDecodes {
 		t.Errorf("decodes of the 1 MiB arguments in one call = %d, bound %d", got["decodes"], gap0299MaxArgsDecodes)
 	}
+	if got["lowers"] > gap0299MaxTextLowers {
+		t.Errorf("lower-cased copies of the 1 MiB text in one call = %d, bound %d", got["lowers"], gap0299MaxTextLowers)
+	}
 	if got["walks"] > 0 && got["keys"] > 2*got["walks"] {
 		t.Errorf("memo key builds = %d for %d memo walks, bound 2 per walk", got["keys"], got["walks"])
 	}
@@ -81,4 +84,5 @@ func TestGAP0299CountedWorkPerCall(t *testing.T) {
 const (
 	gap0299MaxLargeParses = 2 // 7 at a64bfdb931
 	gap0299MaxArgsDecodes = 7 // 11 at a64bfdb931
+	gap0299MaxTextLowers  = 2 // 24 at a64bfdb931
 )

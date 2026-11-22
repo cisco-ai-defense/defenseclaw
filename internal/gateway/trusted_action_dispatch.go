@@ -50,6 +50,7 @@ import (
 	"mvdan.cc/sh/v3/pattern"
 	"mvdan.cc/sh/v3/syntax"
 	"github.com/defenseclaw/defenseclaw/internal/workcount"
+	"github.com/defenseclaw/defenseclaw/internal/textlower"
 )
 
 // trustedActionDispatchMaxCost bounds the semantic rules' total CEL cost per
@@ -2086,7 +2087,7 @@ func withActiveStateTargetMention(
 				// script, which the PowerShell reading walks (rel-1-0-10:GAP-1134).
 				// A .NET open that may write the state by a mode or path known
 				// only at run time is the unknown tier (rel-1-0-10:GAP-1138).
-				spelled := strings.Contains(strings.ToLower(command), ".defenseclaw")
+				spelled := strings.Contains(textlower.Lower(command), ".defenseclaw")
 				proven, unknown := spelled && provenCMDSlashCStateWrite(request), false
 				if !proven && (spelled || request.ProtectedHomeHook || strings.HasPrefix(request.Input.ActiveHome, "/")) {
 					proven, unknown = provenPowerShellStateWrite(request)

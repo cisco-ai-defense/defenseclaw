@@ -32,6 +32,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/psparse"
 	"github.com/defenseclaw/defenseclaw/internal/shellparse"
 	"mvdan.cc/sh/v3/syntax"
+	"github.com/defenseclaw/defenseclaw/internal/textlower"
 )
 
 // ActionStateTargetMention applies the same independent target scan to the
@@ -2199,7 +2200,7 @@ func actionDotglobSettingIn(folded string) bool {
 // costs a large heredoc body hundreds of milliseconds, and it can match only
 // where a glob character is followed by an opening parenthesis.
 func actionCommandMayDotglob(command string) bool {
-	if actionDotglobSettingIn(strings.ReplaceAll(strings.ToLower(command), "_", "")) {
+	if actionDotglobSettingIn(strings.ReplaceAll(textlower.Lower(command), "_", "")) {
 		return true
 	}
 	if !strings.Contains(command, "*(") && !strings.Contains(command, "?(") && !strings.Contains(command, "](") {

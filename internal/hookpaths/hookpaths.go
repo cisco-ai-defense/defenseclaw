@@ -33,6 +33,7 @@ import (
 	"mvdan.cc/sh/v3/syntax"
 
 	"github.com/defenseclaw/defenseclaw/internal/workcount"
+	"github.com/defenseclaw/defenseclaw/internal/textlower"
 )
 
 const Header = "X-DefenseClaw-Resolved-Writes"
@@ -7612,7 +7613,7 @@ func cmdMklinkDriveRelative(words, args []string, cwd string) ([]string, bool) {
 // maskCmdMklinkCalls blanks the cmd /c mklink calls that cmdMklinkArgs
 // reads, so the opaque link text scan sees only the others.
 func maskCmdMklinkCalls(file *syntax.File, command, home string) string {
-	if !strings.Contains(strings.ToLower(command), "mklink") {
+	if !strings.Contains(textlower.Lower(command), "mklink") {
 		return command
 	}
 	masked := []byte(command)

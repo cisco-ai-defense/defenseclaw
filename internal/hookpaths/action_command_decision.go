@@ -16,6 +16,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 	"mvdan.cc/sh/v3/syntax"
+	"github.com/defenseclaw/defenseclaw/internal/textlower"
 )
 
 // ActionCommandDecision returns an enforcement reason only when the command
@@ -268,7 +269,7 @@ func actionConcreteProtectedWriteOnWithOperands(command, cwd, home string, windo
 	}
 	// A patch envelope and each supported patch program spell "patch".
 	// Other commands cannot contribute patch targets to this writer list.
-	if strings.Contains(strings.ToLower(command), "patch") {
+	if strings.Contains(textlower.Lower(command), "patch") {
 		patches, _ := ApplyPatchWriteTargets("Bash", nil, command, cwd, home)
 		writes = append(writes, patches...)
 	}
