@@ -120,6 +120,11 @@ func Push(ctx context.Context, opts PushOptions) (*PushOutcome, error) {
 		if mode == osw.PushRefuse {
 			return out, &osw.PushConflictError{Paths: conf}
 		}
+		// Before the restore point: nothing is written when --mine would
+		// remove an agent file or folder the person did not name (RV2 N2).
+		if r := plan.Replacing(); len(r) > 0 && mode == osw.PushMine {
+			return out, &osw.PushReplaceError{Changes: r}
+		}
 	}
 	cpID := opts.Checkpoint
 	if !opts.NoCheckpoint {

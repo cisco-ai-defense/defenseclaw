@@ -599,6 +599,10 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             "Then choose: --mine sends yours (the agent's version stays in the restore point), --theirs keeps "
             "the\n"
             "agent's and sends the rest, and --patch-out FILE keeps the agent's and writes your change to FILE.\n"
+            "When sending yours would remove an agent file or folder in its way (a file where you made a folder, "
+            "or\n"
+            "a folder where you made a file), --mine names it and sends nothing; add --replace to send yours "
+            "anyway.\n"
             "What you send is not shown as the agent's work in a later pull. This command is a Preview."
         ),
         example=(
@@ -622,6 +626,11 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
                 "string",
                 "on a conflict, keep the agent's version and write your change to this file",
                 metavar="FILE",
+            ),
+            _Flag(
+                "replace",
+                "bool",
+                "with --mine, also remove an agent file or folder in the way of yours (it stays in the restore point)",
             ),
             _Flag("theirs", "bool", "on a conflict, keep the agent's version and send the rest"),
             _Flag(

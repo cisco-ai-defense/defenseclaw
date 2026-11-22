@@ -48,6 +48,10 @@ const (
 	PushRefuse PushMode = ""
 	// PushMine sends the laptop version of a conflicting path.
 	PushMine PushMode = "mine"
+	// PushMineReplace is PushMine that also removes an agent file, link
+	// or folder in the way of the laptop version (Replacing). PushMine
+	// refuses those with *PushReplaceError (RV2 N2).
+	PushMineReplace PushMode = "mine-replace"
 	// PushTheirs keeps the agent's version and sends the rest.
 	PushTheirs PushMode = "theirs"
 )
@@ -71,13 +75,30 @@ type PushChange struct {
 	// would follow the link out of the project) and conflicts unless
 	// the push itself deletes that parent (RV1 P2-1, P3-2).
 	badParent bool
+	// Replaces is the agent's file, link or folder that sending the
+	// laptop version would remove: a file or link where the path needs a
+	// folder, or a folder where the laptop has a file (RV2 N2).
+	Replaces string `json:"replaces,omitempty"`
+}
+
+// ReplaceNote says in plain words what sending this path removes in the
+// agent, or "" when it removes nothing of the agent's.
+func (c PushChange) ReplaceNote() string {
+	switch c.Replaces {
+	case "":
+		return ""
+	case c.Path:
+		return "the agent has a folder here; sending yours removes that folder"
+	default:
+		return "the agent has a file or link at " + c.Replaces + "; sending yours removes it"
+	}
 }
 
 // agentProbe is the shell function both the check and the write use to
 // read one path in the agent: "parent:Q" when a leading directory Q is a
 // symlink or not a directory (checked before the path, so nothing is read
-// through it), else the blob id of the file or link, "other" for anything
-// else, "-" for nothing there.
+// through it), else the blob id of the file or link, "dir" for a folder,
+// "other" for anything else, "-" for nothing there.
 const agentProbe = `probe() {
   q=$1
   while :; do
@@ -87,6 +108,7 @@ const agentProbe = `probe() {
   f="$W/$1"
   if [ -L "$f" ]; then printf '%s' "$(readlink -- "$f")" | g hash-object --stdin
   elif [ -f "$f" ]; then g hash-object --path="$1" -- "$f"
+  elif [ -d "$f" ]; then printf dir
   elif [ -e "$f" ]; then printf other
   else printf -; fi
 }`
@@ -121,6 +143,19 @@ func (p *PushPlan) Conflicts() []string {
 	for _, c := range p.Changes {
 		if c.Conflict {
 			out = append(out, c.Path)
+		}
+	}
+	return out
+}
+
+// Replacing lists the conflicts whose laptop version removes an agent
+// file, link or folder in its way (PushChange.Replaces): PushMine refuses
+// them, PushMineReplace sends them (RV2 N2).
+func (p *PushPlan) Replacing() []PushChange {
+	var out []PushChange
+	for _, c := range p.Changes {
+		if c.Conflict && c.Replaces != "" {
+			out = append(out, c)
 		}
 	}
 	return out
@@ -325,6 +360,9 @@ func (p *PushPlan) checkAgent(ctx context.Context) error {
 				continue
 			}
 			c.Conflict = true
+			if o == "dir" && c.Status != "deleted" {
+				c.Replaces = c.Path // the laptop file would replace the agent's folder
+			}
 		}
 	}
 	// A path under an agent file or symlink conflicts, unless the push
@@ -342,11 +380,15 @@ func (p *PushPlan) checkAgent(ctx context.Context) error {
 		if !c.badParent {
 			continue
 		}
-		if q := strings.TrimPrefix(c.seen, "parent:"); deleted[q] && c.oldOID == "" {
+		q := strings.TrimPrefix(c.seen, "parent:")
+		if deleted[q] && c.oldOID == "" {
 			c.badParent = false
 			continue
 		}
 		c.Conflict = true
+		if c.Status != "deleted" {
+			c.Replaces = q // the write would unlink the agent's file to make the folder
+		}
 	}
 	return nil
 }
@@ -446,6 +488,9 @@ func (p *PushPlan) Send(ctx context.Context, up Uploader, mode PushMode, checkpo
 	if len(conf) > 0 && mode == PushRefuse {
 		return nil, &PushConflictError{Paths: conf}
 	}
+	if r := p.Replacing(); len(r) > 0 && mode == PushMine {
+		return nil, &PushReplaceError{Changes: r}
+	}
 	var base, write []PushChange
 	res := &PushResult{}
 	for _, c := range p.Changes {
@@ -480,7 +525,7 @@ func (p *PushPlan) Send(ctx context.Context, up Uploader, mode PushMode, checkpo
 			writes.WriteString(c.Path + "\x00")
 		}
 		touched = append(touched, c.Path)
-		expect.WriteString(c.seen + " " + octalEscape(c.Path) + "\n")
+		expect.WriteString(octalEscape(c.seen) + " " + octalEscape(c.Path) + "\n")
 	}
 	if err := os.WriteFile(filepath.Join(bundleDir, "writes"), writes.Bytes(), 0o600); err != nil {
 		return nil, err
@@ -509,9 +554,17 @@ func (p *PushPlan) Send(ctx context.Context, up Uploader, mode PushMode, checkpo
 		agentProbe,
 		// One writer at a time (a push while sync runs, two computers):
 		// the lock covers check, write and the baseline move. A lock left
-		// by a killed write is older than any write may run (RV1 P3-3).
-		`L="$D/push.lock"`,
-		`find "$D" -maxdepth 1 -name push.lock -mmin +` + strconv.Itoa(pushLockStaleMinutes) + ` -exec rm -rf -- {} + 2>/dev/null || true`,
+		// by a killed write is older than any write may run (RV1 P3-3); it
+		// is taken over under a short guard, so two writers that both find
+		// it stale cannot both get in. A guard left by a killed takeover
+		// is older than a minute (RV2 N4).
+		`L="$D/push.lock" T="$D/push.lock.take"`,
+		`stale() { [ -n "$(find "$D" -maxdepth 1 -name push.lock -mmin +` + strconv.Itoa(pushLockStaleMinutes) + ` 2>/dev/null)" ]; }`,
+		`find "$D" -maxdepth 1 -name push.lock.take -mmin +1 -exec rm -rf -- {} + 2>/dev/null || true`,
+		`if stale && mkdir -- "$T" 2>/dev/null; then if stale; then rm -rf -- "$L"; fi; rmdir -- "$T" 2>/dev/null || true; fi`,
+		// dash and busybox sh skip the EXIT trap when a signal ends them;
+		// the relay ends a write on timeout or Ctrl-C with TERM (RV2 N3).
+		`trap 'exit 143' TERM; trap 'exit 130' INT; trap 'exit 129' HUP`,
 		`mkdir -- "$L" 2>/dev/null || { rm -rf -- "$bd"; echo "another push or sync is writing into this agent" >&2; exit 98; }`,
 		`cleanup() { rm -rf -- "$bd" "$D/push.idx" "$L"; g update-ref -d ` + pushRef + ` 2>/dev/null || true; }`,
 		`trap cleanup EXIT`,
@@ -519,7 +572,9 @@ func (p *PushPlan) Send(ctx context.Context, up Uploader, mode PushMode, checkpo
 		`[ "$cur" = "$old" ] || { echo "the copy in the agent moved (baseline $cur)" >&2; exit 95; }`,
 		// Every path the push touches must still be as the check saw it.
 		`n=0`,
-		`while IFS=' ' read -r e enc; do n=$((n+1)); p=$(printf "%bx" "$enc"); p=${p%x}; [ "$(probe "$p")" = "$e" ] || { printf 'changed=%s\n' "$n"; exit 97; }; done < "$bd/expect"`,
+		// Both fields are octal-escaped: a "parent:Q" with a space in Q
+		// would split into the wrong fields (RV2 N1).
+		`while IFS=' ' read -r ee enc; do n=$((n+1)); e=$(printf "%bx" "$ee"); e=${e%x}; p=$(printf "%bx" "$enc"); p=${p%x}; [ "$(probe "$p")" = "$e" ] || { printf 'changed=%s\n' "$n"; exit 97; }; done < "$bd/expect"`,
 		`g fetch -q --no-tags "$bd/push.bundle" "+` + pushRef + `:` + pushRef + `"`,
 		`[ "$(g rev-parse -q --verify '` + pushRef + `^{commit}')" = "$new" ] || { echo "the push did not arrive whole" >&2; exit 96; }`,
 		`if [ -s "$bd/deletes" ]; then GIT_INDEX_FILE="$D/push.idx" g read-tree "$old" && GIT_INDEX_FILE="$D/push.idx" g rm -q -f --ignore-unmatch --pathspec-from-file="$bd/deletes" --pathspec-file-nul; rm -f -- "$D/push.idx"; fi`,
@@ -577,7 +632,7 @@ const pushLockStaleMinutes = 15
 
 // ErrPushBusy: another push or sync was writing into the agent; nothing
 // was written.
-var ErrPushBusy = errors.New("workspace: another push or sync is writing into this agent; nothing was sent, try again")
+var ErrPushBusy = errors.New("workspace: another push or sync is writing into this agent; nothing was sent, try again (a lock left by an interrupted push clears after 15 minutes)")
 
 // AgentChangedError: the agent changed a path between the check and the
 // write; nothing was written.
@@ -642,6 +697,19 @@ func (p *PushPlan) commit(ctx context.Context, base []PushChange) (string, strin
 		return fail(err)
 	}
 	return commit, dir, nil
+}
+
+// PushReplaceError: with PushMine, sending these conflicts would remove an
+// agent file, link or folder in their way that the person did not name;
+// nothing was sent. PushMineReplace sends them anyway (RV2 N2).
+type PushReplaceError struct{ Changes []PushChange }
+
+func (e *PushReplaceError) Error() string {
+	lines := make([]string, 0, len(e.Changes))
+	for _, c := range e.Changes {
+		lines = append(lines, c.Path+" ("+c.ReplaceNote()+")")
+	}
+	return "workspace: sending your version removes the agent's files in the way: " + strings.Join(lines, ", ")
 }
 
 // PushConflictError lists the paths both sides changed.
