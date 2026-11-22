@@ -317,7 +317,9 @@ func emitEndpointInventory(
 			discoveredEntriesFromReport(*discoveryReport, inventory.SignalSkill, "skill"),
 			skillsComplete,
 		)
-		if cfg != nil && cfg.AIDiscovery.IncludeSkillManifests {
+		// A partial skill list cannot prune saved receipts or advance a manifest.
+		if skillsComplete && cfg != nil && cfg.AIDiscovery.IncludeSkillManifests {
+			publish.cycle.refreshManifestReceipts(ctx, emitter, skillEntries)
 			publish.cycle.attachSkillManifests(skillEntries)
 		}
 		if err := emitEndpointInventorySnapshot(
@@ -1347,10 +1349,18 @@ func emitInventorySnapshot(
 	// digest nor count toward the daily bundle.
 	managedRejected := managedInventoryPublishRejected(summaryOutcome)
 	for _, component := range components {
+		componentContext, current := publish.cycle.manifestEmissionContext(ctx, component)
+		if !current {
+			component.skillManifest = ""
+			managedRejected = true
+		}
 		outcome, err := emitEndpointInventoryComponent(
-			ctx, emitter, source, scanID, component,
+			componentContext, emitter, source, scanID, component,
 			recordSource, action, phase, detector,
 		)
+		if publish.cycle != nil && !managedInventoryPublishRejected(outcome) {
+			publish.cycle.observeManifestProjection(component, outcome)
+		}
 		if managedInventoryPublishRejected(outcome) {
 			managedRejected = true
 		}

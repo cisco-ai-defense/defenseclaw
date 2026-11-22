@@ -482,6 +482,9 @@ func (runtime *Runtime) emitWithLeaseControls(
 	if graph == nil || !ok {
 		return pipeline.LocalLogOutcome{}, &Error{code: ErrorComponentUnavailable}
 	}
+	if !managedManifestGenerationMatches(ctx, graph.Generation()) {
+		return pipeline.LocalLogOutcome{}, &Error{code: ErrorComponentUnavailable}
+	}
 	local, ok := component.(*localLogComponent)
 	if !ok || local.digest != graph.Digest() {
 		return pipeline.LocalLogOutcome{}, &Error{code: ErrorComponentUnavailable}
@@ -520,6 +523,9 @@ func (runtime *Runtime) emitWithLeaseControls(
 		// (GAP-1536). Imported records stay SQLite-first, and so does a
 		// record whose producer writes it again (RemoteExportAfterLocalWrite).
 		if len(outcome.OptionalWork()) > 0 {
+			if !managedManifestProjectionMatches(ctx, outcome) {
+				return pipeline.LocalLogOutcome{}, &Error{code: ErrorInvalidDependency}
+			}
 			if inbound {
 				return pipeline.LocalLogOutcome{}, processErr
 			}
@@ -541,6 +547,9 @@ func (runtime *Runtime) emitWithLeaseControls(
 		if processErr != nil {
 			return outcome, processErr
 		}
+	}
+	if !managedManifestProjectionMatches(ctx, outcome) {
+		return pipeline.LocalLogOutcome{}, &Error{code: ErrorInvalidDependency}
 	}
 	if !outcome.LocalPersisted() && !outcome.ManagedOnly() {
 		return outcome, nil
