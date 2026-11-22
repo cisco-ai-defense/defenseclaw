@@ -91,7 +91,7 @@ func (s *ContinuousDiscoveryService) detectClaudeProjectSkills() ([]AISignal, er
 		if len(entries) == 0 {
 			continue
 		}
-		out = append(out, s.signalFromDirectoryChildren(*claude, SignalSkill, "skill", path))
+		out = append(out, projectSkills(s.signalFromDirectoryChildren(*claude, SignalSkill, "skill", path), true))
 	}
 	if skipped {
 		return out, errors.New("Claude project skills skipped: project outside home, unreadable, linked, or over limit")

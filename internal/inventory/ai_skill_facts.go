@@ -25,6 +25,14 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
+// Skill scope values (defenseclaw.inventory.skill.scope).
+const (
+	SkillScopeUser    = "user"
+	SkillScopeProject = "project"
+	SkillScopeBundled = "bundled"
+	SkillScopeManaged = "managed"
+)
+
 // Skill content status values (defenseclaw.inventory.skill.content_status).
 const (
 	SkillContentOK         = "ok"
@@ -38,6 +46,7 @@ const (
 	maxSkillBytes     = 32 << 20
 	maxSkillScanBytes = 256 << 20
 	maxSkillDepth     = 12
+	maxSkillLocation  = 512
 )
 
 var errSkillTooLarge = errors.New("skill folder exceeds the hash limits")
@@ -47,6 +56,10 @@ var errSkillTooLarge = errors.New("skill folder exceeds the hash limits")
 type AISkillFacts struct {
 	ContentHash   string `json:"content_hash,omitempty"`
 	ContentStatus string `json:"content_status"`
+	Scope         string `json:"scope"`
+	// Location is the folder below the user's home ("~/..."); the absolute
+	// path never leaves the endpoint.
+	Location string `json:"location,omitempty"`
 }
 
 func (s *ContinuousDiscoveryService) resetSkillFacts() {
@@ -57,7 +70,7 @@ func (s *ContinuousDiscoveryService) resetSkillFacts() {
 
 // skillFacts returns the facts of the skill folder at path, computed once
 // per skill scan. One scan reads at most maxSkillScanBytes across all users.
-func (s *ContinuousDiscoveryService) skillFacts(path string) *AISkillFacts {
+func (s *ContinuousDiscoveryService) skillFacts(path string, bundled bool) *AISkillFacts {
 	s.skillFactsMu.Lock()
 	facts, seen := s.skillFactsSeen[path]
 	limit := min64(maxSkillBytes, maxSkillScanBytes-s.skillBytesRead)
@@ -66,7 +79,14 @@ func (s *ContinuousDiscoveryService) skillFacts(path string) *AISkillFacts {
 		return &facts
 	}
 	hash, status, read := hashSkillFolder(path, limit)
-	facts = AISkillFacts{ContentHash: hash, ContentStatus: status}
+	location, inHome := s.skillLocation(path)
+	facts = AISkillFacts{ContentHash: hash, ContentStatus: status, Scope: SkillScopeUser, Location: location}
+	switch {
+	case bundled:
+		facts.Scope = SkillScopeBundled
+	case !inHome:
+		facts.Scope = SkillScopeManaged // an admin folder such as /etc/codex/skills
+	}
 	s.skillFactsMu.Lock()
 	s.skillBytesRead += read
 	if s.skillFactsSeen == nil {
@@ -75,6 +95,22 @@ func (s *ContinuousDiscoveryService) skillFacts(path string) *AISkillFacts {
 	s.skillFactsSeen[path] = facts
 	s.skillFactsMu.Unlock()
 	return &facts
+}
+
+// realChildDirs lists the folders in dir, never a link to one.
+func realChildDirs(dir string) []string {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, entry := range entries {
+		if entry.IsDir() && !strings.HasPrefix(entry.Name(), ".") {
+			out = append(out, entry.Name())
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 func min64(a, b int64) int64 {
@@ -169,6 +205,24 @@ func hashSkillFolder(root string, limit int64) (hash, status string, total int64
 	return "sha256:" + hex.EncodeToString(digest.Sum(nil)), SkillContentOK, total
 }
 
+// skillLocation is path below the scanned home that holds it, as "~/rel"
+// with forward slashes ("" when it cannot be sent), and whether path is in
+// a scanned home at all.
+func (s *ContinuousDiscoveryService) skillLocation(path string) (string, bool) {
+	for _, home := range s.homesToScan() {
+		rel, err := filepath.Rel(home, path)
+		if err != nil || rel == "." || rel == ".." || filepath.IsAbs(rel) ||
+			strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			continue
+		}
+		if location := "~/" + filepath.ToSlash(rel); len(location) <= maxSkillLocation && !containsUnicodeControl(location) {
+			return location, true
+		}
+		return "", true
+	}
+	return "", false
+}
+
 // validateSkillFacts bounds the facts a per-user scan reports.
 func validateSkillFacts(facts AISkillFacts) error {
 	switch facts.ContentStatus {
@@ -182,6 +236,14 @@ func validateSkillFacts(facts AISkillFacts) error {
 		}
 	default:
 		return fmt.Errorf("unknown skill content status %q", facts.ContentStatus)
+	}
+	switch facts.Scope {
+	case SkillScopeUser, SkillScopeProject, SkillScopeBundled, SkillScopeManaged:
+	default:
+		return fmt.Errorf("unknown skill scope %q", facts.Scope)
+	}
+	if facts.Location != "" && (!strings.HasPrefix(facts.Location, "~/") || !userScanText(facts.Location, maxSkillLocation)) {
+		return errors.New("skill location must be a printable home-relative path")
 	}
 	return nil
 }
