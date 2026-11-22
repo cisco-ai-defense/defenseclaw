@@ -7,9 +7,31 @@ package tactics
 import (
 	"slices"
 	"strings"
-
-	"github.com/defenseclaw/defenseclaw/internal/effects"
+	"sync/atomic"
 )
+
+// LaunchReader is the program table's reading of a command, as
+// startsLocalMCPServer needs it. Launched returns the argv of the program a
+// command's launchers start (env, sudo, nohup, timeout, setsid, ...) and
+// whether that child is certain; Modeled reports a program the table has a
+// row for. windows selects the Windows table.
+//
+// The host plane (package sensor) sets it from internal/effects; tactics does
+// not import effects itself because the slim hook binary links tactics (its
+// path readers use RunsProgram and MayNameProgram) and its size budget has no
+// room for the effects tables. Without a reader every command that names a
+// server keeps the 1.0.10 reading.
+type LaunchReader struct {
+	Launched func(argv []string, windows bool) (child []string, known bool)
+	Modeled  func(program string, windows bool) bool
+}
+
+var launchReader atomic.Pointer[LaunchReader]
+
+// SetLaunchReader installs the program table reader startsLocalMCPServer uses.
+func SetLaunchReader(reader LaunchReader) {
+	launchReader.Store(&reader)
+}
 
 // mcpContainerRunners start a container whose program is inside the image, so
 // the run command's own words are all there is to read (docker run
@@ -23,8 +45,8 @@ var mcpContainerRunWords = []string{"run", "create"}
 // startsLocalMCPServer reports whether cmdline may run a local MCP tool
 // server. Each command it holds (in a list, a pipeline, a substitution, or a
 // script handed to sh -c, eval, PowerShell -Command or cmd /c) is read past
-// its launchers with the wrapper rows of the effects program table (env,
-// sudo, nohup, timeout, setsid, nice, chroot, ...), and then:
+// its launchers with the wrapper rows of the effects program table
+// (LaunchReader: env, sudo, nohup, timeout, setsid, nice, chroot, ...), and then:
 //
 //   - an MCP runtime (node, python3 -m, npx, uvx, ...) or a program named like
 //     a server starts one when isMCPArgv says so, by position;
@@ -34,8 +56,9 @@ var mcpContainerRunWords = []string{"run", "create"}
 //   - anything else keeps the 1.0.10 reading, an MCP name anywhere in the
 //     command: an unmodeled program (it may be a launcher), a launcher with no
 //     child or with an option its row does not account for, a dynamic program
-//     word, a container image, or a script nested past the reader's limit. The Claude client is
-//     unmodeled here; its own argument reader in Classify decides.
+//     word, a container image, or a script nested past the reader's limit.
+//     The Claude client is unmodeled here; its own argument reader in
+//     Classify decides.
 func startsLocalMCPServer(cmdline string) bool {
 	if !localMCPCommand.MatchString(cmdline) {
 		return false
@@ -74,8 +97,11 @@ func commandStartsMCPServer(words []shellWord, depth int) bool {
 	if !named {
 		return false
 	}
-	flavor := commandFlavor(argv[0])
-	child, _, known := effects.LaunchedArgv(argv, flavor)
+	reader := launchReader.Load()
+	if reader == nil {
+		return true
+	}
+	child, known := reader.Launched(argv, windowsProgram(argv[0]))
 	// A launcher with no child to read (env DOCS=@modelcontextprotocol/x
 	// alone, the wrapper part the host plane classifies on its own) is the
 	// program itself and unmodeled, like an unknown launcher option or a
@@ -104,7 +130,7 @@ func commandStartsMCPServer(words []shellWord, depth int) bool {
 		return true
 	}
 	interpreter := strings.TrimSuffix(program, extensionOf(program))
-	return !mcpInterpreters[interpreter] && !effects.ModeledProgram(child[0], commandFlavor(child[0]))
+	return !mcpInterpreters[interpreter] && !reader.Modeled(child[0], windowsProgram(child[0]))
 }
 
 // childWords are the shell words of the child argv LaunchedArgv returned: the
@@ -121,13 +147,10 @@ func childWords(words []shellWord, argv, child []string) []shellWord {
 	return rewritten
 }
 
-// commandFlavor reads a program word written as a Windows path or with a
-// Windows executable extension with the Windows table.
-func commandFlavor(program string) effects.Flavor {
+// windowsProgram reports a program word written as a Windows path or with a
+// Windows executable extension, which the Windows table reads.
+func windowsProgram(program string) bool {
 	lower := strings.ToLower(program)
-	if strings.Contains(program, `\`) || strings.HasSuffix(lower, ".exe") ||
-		strings.HasSuffix(lower, ".cmd") || strings.HasSuffix(lower, ".bat") {
-		return effects.FlavorWindows
-	}
-	return effects.FlavorPOSIX
+	return strings.Contains(program, `\`) || strings.HasSuffix(lower, ".exe") ||
+		strings.HasSuffix(lower, ".cmd") || strings.HasSuffix(lower, ".bat")
 }
