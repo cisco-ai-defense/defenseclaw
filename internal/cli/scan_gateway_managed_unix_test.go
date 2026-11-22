@@ -15,6 +15,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
@@ -30,12 +31,12 @@ func TestManagedUnixGatewayScanRunsThroughTheManagedGateway(t *testing.T) {
 	if err := os.WriteFile(descriptor, []byte("{}"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	restorePath, restoreTrust, restoreEndpoint, restoreRuntime := managedHostDescriptorPath, managedHostRecordTrusted, scanGatewayEndpoint, managedScanUnixRuntime
+	restorePath, restoreTrust, restoreEndpoint, restoreRuntime := hookcli.ManagedHostDescriptorPath, hookcli.ManagedHostRecordTrusted, scanGatewayEndpoint, managedScanUnixRuntime
 	t.Cleanup(func() {
-		managedHostDescriptorPath, managedHostRecordTrusted, scanGatewayEndpoint, managedScanUnixRuntime = restorePath, restoreTrust, restoreEndpoint, restoreRuntime
+		hookcli.ManagedHostDescriptorPath, hookcli.ManagedHostRecordTrusted, scanGatewayEndpoint, managedScanUnixRuntime = restorePath, restoreTrust, restoreEndpoint, restoreRuntime
 	})
-	managedHostDescriptorPath = func() string { return descriptor }
-	managedHostRecordTrusted = func(string) error { return nil }
+	hookcli.ManagedHostDescriptorPath = func() string { return descriptor }
+	hookcli.ManagedHostRecordTrusted = func(string) error { return nil }
 	asked := errors.New("asked the managed gateway")
 	for _, installed := range []bool{true, false} {
 		managedScanUnixRuntime = func() error { return nil }
@@ -79,9 +80,9 @@ func TestManagedUnixGatewayScanRunsThroughTheManagedGateway(t *testing.T) {
 
 // A host without a trusted managed deployment record keeps the gateway scan.
 func TestGatewayScanWithoutManagedRecordStillAsksTheGateway(t *testing.T) {
-	restorePath, restoreEndpoint := managedHostDescriptorPath, scanGatewayEndpoint
-	t.Cleanup(func() { managedHostDescriptorPath, scanGatewayEndpoint = restorePath, restoreEndpoint })
-	managedHostDescriptorPath = func() string { return filepath.Join(t.TempDir(), "absent.json") }
+	restorePath, restoreEndpoint := hookcli.ManagedHostDescriptorPath, scanGatewayEndpoint
+	t.Cleanup(func() { hookcli.ManagedHostDescriptorPath, scanGatewayEndpoint = restorePath, restoreEndpoint })
+	hookcli.ManagedHostDescriptorPath = func() string { return filepath.Join(t.TempDir(), "absent.json") }
 	asked := errors.New("asked the gateway")
 	scanGatewayEndpoint = func() (string, string, error) { return "", "", asked }
 	for _, kind := range []string{"skill", "mcp", "plugin"} {
@@ -100,18 +101,20 @@ func TestManagedCodeScanPrintsNoPerUserHint(t *testing.T) {
 	if err := os.WriteFile(descriptor, []byte("{}"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	restorePath, restoreTrust := managedHostDescriptorPath, managedHostRecordTrusted
-	t.Cleanup(func() { managedHostDescriptorPath, managedHostRecordTrusted = restorePath, restoreTrust })
-	managedHostRecordTrusted = func(string) error { return nil }
+	restorePath, restoreTrust := hookcli.ManagedHostDescriptorPath, hookcli.ManagedHostRecordTrusted
+	t.Cleanup(func() {
+		hookcli.ManagedHostDescriptorPath, hookcli.ManagedHostRecordTrusted = restorePath, restoreTrust
+	})
+	hookcli.ManagedHostRecordTrusted = func(string) error { return nil }
 	clean := &scanner.ScanResult{Target: "/srv/skill"}
 	finding := &scanner.ScanResult{Target: "/srv/skill", Findings: []scanner.Finding{{ID: "CG-1", Severity: "HIGH", Title: "t"}}}
 	for _, tc := range []struct {
 		name    string
 		managed bool
 	}{{"managed", true}, {"per-user", false}} {
-		managedHostDescriptorPath = func() string { return filepath.Join(t.TempDir(), "absent.json") }
+		hookcli.ManagedHostDescriptorPath = func() string { return filepath.Join(t.TempDir(), "absent.json") }
 		if tc.managed {
-			managedHostDescriptorPath = func() string { return descriptor }
+			hookcli.ManagedHostDescriptorPath = func() string { return descriptor }
 		}
 		for _, result := range []*scanner.ScanResult{clean, finding} {
 			out := captureStdout(t, func() { printCodeScanResults(result) })
@@ -133,10 +136,12 @@ func TestManagedCodeScanOfAnUnlistableSkillIsIncomplete(t *testing.T) {
 	if err := os.WriteFile(descriptor, []byte("{}"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	restorePath, restoreTrust := managedHostDescriptorPath, managedHostRecordTrusted
-	t.Cleanup(func() { managedHostDescriptorPath, managedHostRecordTrusted = restorePath, restoreTrust })
-	managedHostDescriptorPath = func() string { return descriptor }
-	managedHostRecordTrusted = func(string) error { return nil }
+	restorePath, restoreTrust := hookcli.ManagedHostDescriptorPath, hookcli.ManagedHostRecordTrusted
+	t.Cleanup(func() {
+		hookcli.ManagedHostDescriptorPath, hookcli.ManagedHostRecordTrusted = restorePath, restoreTrust
+	})
+	hookcli.ManagedHostDescriptorPath = func() string { return descriptor }
+	hookcli.ManagedHostRecordTrusted = func(string) error { return nil }
 	skill := filepath.Join(t.TempDir(), "skill")
 	if err := os.Mkdir(skill, 0o700); err != nil {
 		t.Fatal(err)

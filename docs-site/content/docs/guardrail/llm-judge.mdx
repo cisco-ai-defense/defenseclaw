@@ -1,0 +1,234 @@
+---
+title: LLM judge
+description: The optional second opinion from a language model. What it reads, which model to use, how long it may take, what it costs, how it handles unsure answers, and how well it works.
+keywords:
+  - LLM judge
+  - guardrail.judge
+  - judge model
+  - Gemma 4 31B
+  - hook_timeout
+  - regex_judge
+  - judge_first
+  - judge fallback
+  - JUDGE-UNAVAILABLE
+  - max_parallel
+---
+
+The LLM judge is an optional second opinion. When the rules cannot settle a call, a language model reads it and says whether it looks like an attack. The judge is off until you turn it on. It can only add to what the rules decided: it never lowers a rule verdict ([the order of a decision](/docs/guardrail/configure-cascade#the-order-of-a-decision)).
+
+A judge call costs time and money, and its input leaves your machine for the model provider you choose. Use a model you trust with that content, or a local model.
+
+## Turn it on
+
+The recommended judge is Gemma 4 31B (`google.gemma-4-31b`) on Amazon Bedrock. DefenseClaw tunes the judge prompts against this model.
+
+```bash
+defenseclaw keys set DEFENSECLAW_LLM_KEY   # a Bedrock API key
+
+defenseclaw setup guardrail --non-interactive --connector claudecode --mode action \
+  --detection-strategy regex_judge \
+  --judge-provider openai-compatible \
+  --judge-model google.gemma-4-31b \
+  --judge-api-base https://bedrock-mantle.us-east-1.api.aws/openai/v1 \
+  --judge-api-key-env DEFENSECLAW_LLM_KEY --restart
+```
+
+Gemma 4 runs on the `bedrock-mantle` endpoint and only under the `/openai/v1` path. The `/v1` path refuses it with "isn't supported on this route", and Converse and InvokeModel do not serve it. It is in-Region only (us-east-1, us-east-2, us-west-2, eu-central-1).
+
+The same settings in `config.yaml`:
+
+```yaml
+# ~/.defenseclaw/config.yaml
+guardrail:
+  detection_strategy: regex_judge        # rules first; the judge reviews what they leave open
+  judge:
+    enabled: true
+    hook_connectors: ["*"]               # every hook connector; or name them, e.g. [claudecode, codex]
+    llm:
+      provider: openai-compatible
+      model: google.gemma-4-31b
+      base_url: https://bedrock-mantle.us-east-1.api.aws/openai/v1
+      api_key_env: DEFENSECLAW_LLM_KEY
+```
+
+Run `defenseclaw config validate`, then restart the gateway.
+
+- **Keep `hook_connectors`.** Without it the judge reviews no hook connector's tool calls, even with `enabled: true`. An empty or missing list means the judge reviews proxy traffic only. `setup guardrail` and `defenseclaw guardrail judge add all --enable` write `["*"]`; `defenseclaw init` writes the connectors you pick. When the list is empty the gateway log says `LLM judge hook lane off` and `defenseclaw doctor` warns on the **Detection** row.
+- **Action mode only.** A hook connector is judged only in action mode. `guardrail judge add` refuses an observe-mode connector.
+- **Any other model works the same way.** Pass its `--judge-provider` and `--judge-model`. Bedrock models, Vertex AI, Azure OpenAI and your own endpoints are in [LLM providers](/docs/get-started/unified-llm-key).
+- **Turn it off** with `guardrail.detection_strategy: regex_only` or `guardrail.judge.enabled: false`. To take one connector off the judge: `defenseclaw guardrail judge remove claudecode`.
+
+```bash
+defenseclaw guardrail judge list     # the gate, the timeouts and the state of each connector
+```
+
+## What it reads
+
+The strategy decides when the judge is asked. Set it per direction with `guardrail.detection_strategy_prompt`, `_completion` (tool results and replies) and `_tool_call`; each falls back to `guardrail.detection_strategy`.
+
+| Strategy | The judge is asked |
+| --- | --- |
+| `regex_only` | Never. The rules decide alone. |
+| `regex_judge` | After the rules, on what they leave open. A tool call the rules already blocked, or flagged CRITICAL in a way they can enforce, is not sent. A call the parser proves only reads (`cat`, `ls`, `grep`, a file Read) is not sent unless a rule flagged it. |
+| `judge_first` | On every call it covers. This adds model time to each one. |
+
+The shipped defaults are `detection_strategy: regex_judge` and `detection_strategy_completion: regex_only`. While `judge.enabled` is `false`, no strategy asks a model.
+
+| What | Judge | What it asks | Switch |
+| --- | --- | --- | --- |
+| Your prompt | Injection | Is it trying to override the agent's instructions? | `judge.injection` |
+| Your prompt | Exfiltration | Is it trying to read or ship out credentials or sensitive files? | `judge.exfil` |
+| Your prompt | PII | Does it carry personal data? | `judge.pii`, `judge.pii_prompt` |
+| A tool call | Tool judge | Does the call do something that attacks the agent, hides code, changes a security control, sends data out or destroys data? | `judge.tool_injection` |
+| A tool result | Injection | Does this data try to direct the agent? | `judge.injection` |
+| A model reply | PII | Does it carry personal data? | `judge.pii`, `judge.pii_completion` |
+
+All switches default to on once the judge is on. A tool result goes to the PII judge only when your pack lists the tool with `judge_result: true`. The [tool results](/docs/guardrail/tool-results) page has the details.
+
+### The prompts
+
+Each judge has a system prompt that tells it what an attack is and what an ordinary action looks like. The bundled packs carry them in `judge/injection.yaml`, `judge/pii.yaml` and `judge/tool-injection.yaml`; the exfiltration judge's prompt is built in, and a pack can replace it with `judge/exfil.yaml`. The tool judge's prompt lists the false-positive controls for coding sessions. For example, reading a credential-shaped path is not exfiltration without an outbound destination, and a scoped delete of repository files is not a destructive command. A custom pack can change the prompts; see [deterministic detection](/docs/policies/deterministic-detection#optional-llm-judge) for the pack files and categories.
+
+### What the tool judge sees
+
+Next to the call, the tool judge gets:
+
+- the call: its tool name and arguments (long arguments are cut in the middle, at about 3 KB);
+- your latest prompt of the session, the session user intent (at most 2 KB, the start and the end of a longer prompt);
+- the last seven tool calls of the session (about 1 KB each);
+- what DefenseClaw's own parser proves the call does: the paths it reads, writes, deletes or runs, its network actions, and what earlier calls did to the same paths;
+- the rules that sent the call to the judge.
+
+Everything in the packet is untrusted data. Section markers carry a fresh random nonce, so text in a call or a file cannot open or close a section. The user intent is data for the judge, never an instruction, and it never excuses a call the rules block. When the judge reads a tool's output it gets the tool, its call (shortened, with credentials removed), what the parser found the call does, and your request for the turn.
+
+The judge knows your task only on connectors whose hooks send the prompt:
+
+- **Kept:** Claude Code, Claude Cowork, Codex, GitHub Copilot CLI, Cursor (IDE), Amp, Kiro (IDE) and Devin.
+- **Kept, but names no destination:** Hermes. Its prompt can come from a remote chat party, so no host or address in it counts as one you named, and every send from a Hermes session raises the finding below.
+- **Not kept:** OpenCode, Cursor Agent CLI, Kiro CLI 2.x and Antigravity, whose hooks send no prompt text, and OpenClaw, whose tool-call check looks the task up under another session key. The judge sees their tool calls without your task.
+
+A new prompt starts a new turn. A prompt DefenseClaw blocks, and an empty prompt, leave the turn with no task.
+
+### A send to a place no prompt named
+
+When the judge is on, DefenseClaw checks every tool call that sends data (a post or upload tool, a mail tool, `curl` with a body, `scp`, `rsync`, `mail`, a cloud copy, a backup or archive to another place) against the places your prompts in the session named. A send to a host or mailbox that none of them named gets the finding `INTENT-SCOPE-SEND`.
+
+The check only records: it writes a judge event of kind `tool_intent_scope_shadow` and a log line, and the verdict is what it is without the check. Set `guardrail.judge.intent_scope` to `off` to stop it; `shadow` is the default. It reads the parsed command, never words in quoted text, a commit message or a here-document. Naming a host covers that host and its sub-domains, not its parent domain; the hosts of your working folder's git remotes count as named. Naming a mailbox covers that address only; a person you name without an address counts when you also name the domain of the mailbox. A command that may send but cannot be read, and a call too large to read in full, are recorded as outside the task. A destination you describe but do not spell out ("the management team") is not named, and neither is anything in a tool result or a remote chat message.
+
+## How it handles unsure answers
+
+The judge labels each category it flags with a signal strength:
+
+| Strength | What it means | What DefenseClaw does |
+| --- | --- | --- |
+| `weak_signal` | A benign reading is plausible and the effect is small. | Ignored. No finding. |
+| `needs_review` | A benign reading is plausible, but the effect would be serious. | A MEDIUM finding. It can alert and cannot block by itself. |
+| `signal` | No plausible benign reading, bounded effect. | Counts toward a block. |
+| `strong_signal` | No plausible benign reading, serious effect. | One exfiltration or destruction category at this strength blocks. |
+
+For the tool judge, a single actionable category stays MEDIUM and alerts. Two categories with one actionable signal are HIGH, and a strong exfiltration or destruction signal (or three categories with two actionable signals) is CRITICAL, and both block. In the default pack, a lone `needs_review` finding on a call no rule flagged is recorded without an alert, unless the parser does not model the call (MCP and other tools): there it alerts, and never blocks. Both are cascade lanes (`judge_read_skip`, `judge_unmodeled_alert`, `judge_tool_result_context`, all `on` by default, only while the judge is on for the connector). See [Configure the cascade](/docs/guardrail/configure-cascade#settings).
+
+A judge verdict goes through `block_at` and `alert_at` like a rule finding. To cap what it may do, set `guardrail.cascade.judge.max_action` (`alert` makes it advisory). To make a judge block count only when the [decision model](/docs/guardrail/decision-model) also blocked, set `guardrail.cascade.judge.block_needs_system_one: true`.
+
+### When the judge does not answer
+
+A judge that gives no verdict changes nothing: the rules' verdict stands. The reason is one of `timeout`, `error`, `late` (the hook's answer could not wait longer), `busy` (too many hook judge calls at once) or `budget` (earlier judge calls of the same hook used its time).
+
+Two refusals, never allows: the strict policy and an unattended Agent Substrate run refuse a call the judge was asked about and did not answer (`JUDGE-UNAVAILABLE`), and under `hook_fail_mode: closed` a call the rules escalated to the judge as CRITICAL is refused (`JUDGE-UNAVAILABLE-ESCALATED`).
+
+Every missing verdict is reported, in every tier:
+
+- a `[guardrail] ALERT judge_unavailable` line in the gateway log;
+- `judge_fallback` on the hook's audit row, and the counter `defenseclaw.guardrail.judge.fallbacks` by connector and reason;
+- `defenseclaw status` (Judge fallbacks), `defenseclaw-gateway status`, the TUI overview and the **Detection** row of `defenseclaw doctor`, counted since the gateway started its judge.
+
+## How long it may take
+
+| Setting | Default | What it limits |
+| --- | --- | --- |
+| `guardrail.judge.hook_timeout` | 8 seconds | One judge round trip on a hook. |
+| Tool-call answer window | 3.4 seconds (fixed) | How long the hook may hold a tool call for the judge. The Claude Code and Codex hooks give DefenseClaw about 4 seconds, so a tool judge that has not answered in 3.4 seconds is reported as `late` and the rule verdict stands. |
+| `guardrail.judge.timeout` | 30 seconds | One call on the proxy lane (OpenClaw and ZeptoClaw). |
+| `guardrail.judge.adjudication_timeout` | 5 seconds | The judge's review of what the rules flagged under `regex_judge`. |
+
+Set the hook timeout with `defenseclaw guardrail judge add claudecode --timeout 6`. Keep it under about 8 seconds: the hook scripts allow 10 seconds in total. A late answer is still recorded, and a slow model never blocks by mistake.
+
+## What it costs
+
+- **Calls.** A tool call makes one tool-judge call. A prompt can start up to three (injection, exfiltration, PII), each tool result an injection call, and each reply a PII call.
+- **Time.** On the whole-cascade run, the judge was asked about 28% of the calls (16,957 requests for 61,438 calls). With the rules, the decision model and the judge, hook time was 834 ms at the median and 2,905 ms at the 95th percentile, and the judge answered in time on 99.2% of the calls sent to it at the 3.4-second window. A call the judge does not answer keeps its other verdicts, so a cut-off costs recall and never turns into a silent allow.
+- **Money.** The judge's share was USD 0.114 per 1,000 calls with Gemma 4 31B at list price. Your cost depends on the model, the provider and your mix of calls. Judge tokens appear on the judge trace and the GenAI token-usage metric.
+
+Details and the method: [guardrail benchmarks](/docs/guardrail/benchmarks).
+
+## Run a local model
+
+A judge on your own machine (Ollama, vLLM, LM Studio, Lemonade) answers one call at a time, so judge calls queue behind each other. DefenseClaw sends one request at a time by default when the judge endpoint is loopback, private or link-local; a public endpoint has no limit.
+
+To keep the tool judge and stop the other calls, give prompts, tool results and replies to the rules alone:
+
+```yaml
+# ~/.defenseclaw/config.yaml
+guardrail:
+  detection_strategy: regex_judge        # the judge reviews what the rules leave open
+  detection_strategy_prompt: regex_only  # prompts get the rules only
+  detection_strategy_completion: regex_only
+  judge:
+    enabled: true
+    tool_injection: true                 # keep the tool-call judge
+    hook_connectors: [claudecode]
+```
+
+Pass `--detection-strategy-completion` every time you run `setup guardrail`: when it turns the judge on for a hook connector it sets `detection_strategy_completion: regex_judge` unless you name a value. The rules still scan every prompt, tool result and reply; you lose only the judge's second look at them. The tool judge still knows the task: the prompt you type is kept as the session user intent whatever the prompt strategy is.
+
+**Let tool calls go first.** To cap how many judge calls run at once (for Ollama, set it to its `OLLAMA_NUM_PARALLEL`):
+
+```bash
+defenseclaw config set guardrail.judge.max_parallel 1
+defenseclaw-gateway restart
+```
+
+A tool-call judge then goes ahead of every waiting prompt or tool-output judge, and with 2 or more slots it keeps one for itself. Set it to `0` for no limit, or unset it for the endpoint-based default. Releases before 1.0.6 refuse this key: run `defenseclaw config unset guardrail.judge.max_parallel` before you go back to one.
+
+**Gemma 4 on Lemonade.** The judge can turn off the model's thinking mode so its bounded answer holds the classification:
+
+```yaml
+guardrail:
+  judge:
+    enabled: true
+    hook_connectors: ["*"]
+    llm:
+      provider: openai-compatible
+      model: gemma-4
+      base_url: http://127.0.0.1:8000/v1
+      api_key_env: LEMONADE_API_KEY      # a value is needed even if the server ignores it
+    extra_body:
+      chat_template_kwargs:
+        enable_thinking: false
+```
+
+`guardrail.judge.extra_body` adds top-level fields to the judge's OpenAI-compatible chat requests. Judge-owned request fields and authentication settings are refused when the config loads. Check it with `defenseclaw config get guardrail.judge.extra_body` and `defenseclaw config validate`.
+
+## How good it is
+
+- **Whole cascade (end-to-end, 1.0.10 candidate).** Rules, decision model and judge together reached F1 0.629 [0.605, 0.654], against 0.342 for the default rules alone. Benign calls alerted: 4.8% with the judge, 25.8% with the decision model alone. Benign calls blocked: 1.2%.
+- **Judge in context (public validation, Gemma 4 26B A4B).** Rules followed by the judge detected 94 of 100 held-out attack trajectories (precision 98.95%, F1 0.964) and alerted on 1 of 20 benign coding trajectories, with no benign block.
+- **Recommended model (Gemma 4 31B, judge rounds).** Rules plus the judge blocked no benign call on two public agent-trace corpora (1,200 benign calls) and alerted on 8 and 11 of the 694 benign calls of one of them (the rules alone: 15 and 16). On a Windows shell corpus, 7 and 9 of 2,459 benign calls were blocked (about 0.3%). Alert recall on the other public corpus rose from 0.29 to 0.64.
+
+Read the [guardrail benchmarks](/docs/guardrail/benchmarks) and the [contextual judge benchmark](/docs/guardrail/benchmarks#llm-judge) for what each number measured, on which build, and the commands to reproduce it. Models differ widely: Gemma 3 12B alerted on 90% of benign trajectories in the same benchmark and is not recommended for enforcement.
+
+## Problems
+
+### The judge blocks an agent-run configuration command
+
+With the judge on and the connector in action mode, the judge can block a configuration command the agent runs for you, such as `claude mcp add --transport http NAME URL`. It reads the call as a change to a security control, and the audit log shows a `judge-tool-injection` block. The same command typed in your own terminal is not an agent tool call, so the hook does not check it.
+
+Add the server outside the agent session, or use `defenseclaw mcp set NAME --url URL`, which scans the server before it adds it. If agents must change their own configuration, take the connector off the judge: `defenseclaw guardrail judge remove claudecode`. The connector keeps its mode and its rule checks.
+
+### The judge never runs
+
+Run `defenseclaw guardrail judge list`. A connector shows `regex + AID only` when it is not gated on or is in observe mode, `gated on, judge inactive` when `judge.enabled` is off, and `the judge is failing` or `the gateway is not running the judge` when the gateway could not start or reach the model. `defenseclaw doctor` names the repair on its **Detection** row.
+
+### A judged call was blocked and should not have been
+
+See [fix a false block](/docs/guardrail/false-blocks) and [why was this blocked](/docs/guardrail/why-blocked).

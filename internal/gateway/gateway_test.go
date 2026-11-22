@@ -45,6 +45,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/intentstore"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	observabilityredaction "github.com/defenseclaw/defenseclaw/internal/observability/redaction"
 	observabilityruntime "github.com/defenseclaw/defenseclaw/internal/observability/runtime"
@@ -399,7 +400,7 @@ func (s *stubConnector) Authenticate(*http.Request) bool                     { r
 func (s *stubConnector) Route(*http.Request, []byte) (*connector.ConnectorSignals, error) {
 	return nil, nil
 }
-func (s *stubConnector) SetCredentials(string, string)         {}
+func (s *stubConnector) SetCredentials(string)                 {}
 func (s *stubConnector) VerifyClean(connector.SetupOpts) error { return nil }
 
 // TestProxyShouldBindForConnector pins the routing decision behind
@@ -413,7 +414,11 @@ func (s *stubConnector) VerifyClean(connector.SetupOpts) error { return nil }
 //   - skip the bind for openclaw (breaking every existing OpenClaw
 //     install on upgrade, since openclaw's data path goes through
 //     /v1/chat/completions on the proxy port).
+//
+// The matrix is the Linux/macOS topology; native Windows OpenClaw runs its
+// plugin hooks only and binds no proxy (checked at the end).
 func TestProxyShouldBindForConnector(t *testing.T) {
+	t.Cleanup(connector.PinOpenClawHooksGOOSForTest("linux"))
 	cases := []struct {
 		name       string
 		conn       connector.Connector
@@ -448,9 +453,18 @@ func TestProxyShouldBindForConnector(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("openclaw_native_windows", func(t *testing.T) {
+		defer connector.PinOpenClawHooksGOOSForTest("windows")()
+		if proxyShouldBindForConnector(&stubConnector{name: "openclaw"}, &config.GuardrailConfig{}) {
+			t.Error("proxyShouldBindForConnector(openclaw) on native Windows = true, want false (hooks only, no proxy)")
+		}
+	})
 }
 
 func TestProxyShouldBindForConfiguredConnector(t *testing.T) {
+	// Linux/macOS topology; the native Windows OpenClaw answer is at the end.
+	t.Cleanup(connector.PinOpenClawHooksGOOSForTest("linux"))
 	cases := []struct {
 		name      string
 		connector string
@@ -485,6 +499,14 @@ func TestProxyShouldBindForConfiguredConnector(t *testing.T) {
 	if got := proxyShouldBindForConfiguredConnector(&config.Config{}); got {
 		t.Errorf("proxyShouldBindForConfiguredConnector(zero config) = %v, want false", got)
 	}
+
+	t.Run("openclaw_native_windows", func(t *testing.T) {
+		defer connector.PinOpenClawHooksGOOSForTest("windows")()
+		cfg := &config.Config{Guardrail: config.GuardrailConfig{Connector: "openclaw"}}
+		if proxyShouldBindForConfiguredConnector(cfg) {
+			t.Error("proxyShouldBindForConfiguredConnector(openclaw) on native Windows = true, want false (hooks only, no proxy)")
+		}
+	})
 }
 
 // TestIsLoopbackGatewayHost pins the host-classification helper used
@@ -891,6 +913,9 @@ func TestSidecarFleetRPCsEnabled(t *testing.T) {
 }
 
 func TestShouldRunProviderProbeForConnector(t *testing.T) {
+	// The OpenClaw rows probe the providers behind the Linux/macOS proxy;
+	// native Windows OpenClaw has no proxy and no probe (checked at the end).
+	t.Cleanup(connector.PinOpenClawHooksGOOSForTest("linux"))
 	cases := []struct {
 		name string
 		conn connector.Connector
@@ -933,16 +958,26 @@ func TestShouldRunProviderProbeForConnector(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("openclaw_native_windows_skips_probe", func(t *testing.T) {
+		defer connector.PinOpenClawHooksGOOSForTest("windows")()
+		gc := config.GuardrailConfig{Connector: "openclaw"}
+		if shouldRunProviderProbeForConnector(&stubConnector{name: "openclaw"}, &gc) {
+			t.Error("shouldRunProviderProbeForConnector(openclaw) on native Windows = true, want false (no proxy upstream to probe)")
+		}
+	})
 }
 
 type rollbackConnector struct {
 	stubConnector
 	teardownCalled bool
 	verifyCalled   bool
+	teardownOpts   connector.SetupOpts
 }
 
-func (r *rollbackConnector) Teardown(context.Context, connector.SetupOpts) error {
+func (r *rollbackConnector) Teardown(_ context.Context, opts connector.SetupOpts) error {
 	r.teardownCalled = true
+	r.teardownOpts = opts
 	return nil
 }
 
@@ -982,6 +1017,11 @@ func TestRecordAndRollbackFailedConnectorSetup_DoesNotPublishFailedConnector(t *
 
 	if !conn.teardownCalled {
 		t.Fatal("rollback did not call connector Teardown")
+	}
+	// The connector can keep what tells the operator how to finish the
+	// setup (the OpenClaw separate-user block to merge, GAP-1130).
+	if !conn.teardownOpts.SetupRollback {
+		t.Fatal("rollback Teardown did not carry SetupRollback")
 	}
 	if !conn.verifyCalled {
 		t.Fatal("rollback did not call connector VerifyClean")
@@ -1184,34 +1224,6 @@ func TestSidecarRunGuardrailZeroConfigDoesNotDefaultOpenClaw(t *testing.T) {
 	}
 	if snap.Guardrail.LastError != "no connector configured" {
 		t.Fatalf("Guardrail.LastError = %q, want no connector configured", snap.Guardrail.LastError)
-	}
-}
-
-func TestDeriveMasterKey(t *testing.T) {
-	tmpDir := t.TempDir()
-	keyFile := filepath.Join(tmpDir, "device.key")
-	if err := os.WriteFile(keyFile, []byte("test-key-data"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	key := deriveMasterKey(tmpDir)
-	if key == "" {
-		t.Fatal("deriveMasterKey() returned empty string")
-	}
-	if !strings.HasPrefix(key, "sk-dc-") {
-		t.Errorf("deriveMasterKey() = %q, want sk-dc- prefix", key)
-	}
-
-	key2 := deriveMasterKey(tmpDir)
-	if key != key2 {
-		t.Error("deriveMasterKey() should be deterministic")
-	}
-}
-
-func TestDeriveMasterKeyMissing(t *testing.T) {
-	key := deriveMasterKey(t.TempDir())
-	if key != "" {
-		t.Errorf("deriveMasterKey() with missing key file should return empty, got %q", key)
 	}
 }
 
@@ -2863,6 +2875,8 @@ func TestAPIStatusRejectsPost(t *testing.T) {
 // the Guardrail field plumbing could silently regress the contract
 // and the TUI would render a misleading panel.
 func TestAPIStatusEmitsConnectorMode(t *testing.T) {
+	// OpenClaw cases use the Linux/macOS proxy topology on every host.
+	t.Cleanup(connector.PinOpenClawHooksGOOSForTest("linux"))
 	cases := []struct {
 		name             string
 		connector        string
@@ -3074,6 +3088,7 @@ func TestAPIStatusAMPActionPolicyModeUsesHooksWithoutProxy(t *testing.T) {
 // This is the API-contract guard behind the gateway-status "Connector Mode"
 // fan-out so a 3-connector install never collapses to a single posture.
 func TestAPIStatusConnectorModesFansOut(t *testing.T) {
+	t.Cleanup(connector.PinOpenClawHooksGOOSForTest("linux"))
 	cfg := &config.Config{}
 	cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{
 		"codex":    {},
@@ -5562,8 +5577,10 @@ func TestNormalizeCiscoResponse(t *testing.T) {
 		}
 	})
 
-	t.Run("untrusted labels use fixed identity", func(t *testing.T) {
+	t.Run("custom labels use inert identity and sanitized display", func(t *testing.T) {
 		marker := "producer-label-" + strings.Repeat("z", 40)
+		ruleName := "custom-\x00" + marker
+		displayName := "custom-" + marker
 		v := normalizeCiscoResponse(map[string]interface{}{
 			"is_safe": false,
 			"action":  "Block",
@@ -5571,23 +5588,24 @@ func TestNormalizeCiscoResponse(t *testing.T) {
 				marker,
 			},
 			"rules": []interface{}{
-				map[string]interface{}{"rule_name": "custom-" + marker, "classification": "VIOLATION"},
+				map[string]interface{}{"rule_name": ruleName, "classification": "VIOLATION"},
 			},
 		})
-		if len(v.Findings) != 1 || v.Findings[0] != ciscoUnknownFindingID {
-			t.Fatalf("untrusted Cisco findings=%v, want fixed unknown identities", v.Findings)
+		wantID, wantName := canonicalCiscoRuleFinding(ruleName)
+		if len(v.Findings) != 1 || v.Findings[0] != wantID ||
+			!strings.HasPrefix(v.Findings[0], ciscoCustomFindingPrefix) || strings.Contains(v.Findings[0], marker) {
+			t.Fatalf("custom Cisco findings=%v, want inert hashed identity %q", v.Findings, wantID)
 		}
-		if strings.Contains(v.Reason, marker) || v.Reason !=
-			"Cisco AI Defense: Custom Policy Violation" {
-			t.Fatalf("untrusted Cisco labels reached reason: %q", v.Reason)
+		if wantName != displayName || v.Reason != "Cisco AI Defense: "+displayName || strings.ContainsRune(v.Reason, '\x00') {
+			t.Fatalf("custom Cisco display name was not sanitized: name=%q reason=%q", wantName, v.Reason)
 		}
-		if projected := redaction.ForSinkReason(v.Reason); projected != v.Reason || strings.Contains(projected, marker) {
-			t.Fatalf("Cisco reason redaction projection=%q, want fixed display labels", projected)
+		if projected := redaction.ForSinkReason(v.Reason); projected != v.Reason || strings.ContainsRune(projected, '\x00') {
+			t.Fatalf("Cisco reason redaction projection=%q, want sanitized display label", projected)
 		}
 		for _, finding := range NormalizeScanVerdict(v) {
-			if finding.CanonicalID != ciscoUnknownFindingID || strings.Contains(finding.CanonicalID, marker) ||
+			if finding.CanonicalID != wantID || strings.Contains(finding.CanonicalID, marker) ||
 				strings.Contains(finding.OriginalID, marker) || strings.HasPrefix(finding.CanonicalID, "UNKNOWN-") {
-				t.Fatalf("untrusted Cisco label reached normalized identity: %+v", finding)
+				t.Fatalf("custom Cisco label reached normalized identity: %+v", finding)
 			}
 		}
 
@@ -5605,8 +5623,8 @@ func TestNormalizeCiscoResponse(t *testing.T) {
 			t.Fatalf("persisted Cisco events=%#v err=%v", events, err)
 		}
 		persistedEvent := fmt.Sprintf("%s %#v", events[0].Details, events[0].Structured)
-		if strings.Contains(persistedEvent, marker) || !strings.Contains(persistedEvent, "Custom Policy Violation") {
-			t.Fatalf("persisted Cisco reason retained cloud label: %s", persistedEvent)
+		if strings.ContainsRune(persistedEvent, '\x00') || !strings.Contains(persistedEvent, displayName) {
+			t.Fatalf("persisted Cisco reason did not retain the sanitized display name: %s", persistedEvent)
 		}
 	})
 }
@@ -6631,11 +6649,10 @@ func TestHandleToolCallRecordsJudgeContextBeforeAsyncDispatch(t *testing.T) {
 		router.handleToolCall(EventFrame{Type: "tool_call", Payload: payload})
 	}
 
-	judge.toolContextMu.Lock()
-	events := append([]toolJudgeContextEvent(nil), judge.toolContext["ordered-session"].events...)
-	judge.toolContextMu.Unlock()
-	if len(events) != 2 || !strings.Contains(events[0].args, "first prerequisite") ||
-		!strings.Contains(events[1].args, "second dependent") {
+	snapshot, _ := judge.intentStore().(*intentstore.Process).Peek("ordered-session")
+	events := snapshot.Prior
+	if len(events) != 2 || !strings.Contains(events[0].Args, "first prerequisite") ||
+		!strings.Contains(events[1].Args, "second dependent") {
 		t.Fatalf("tool context event order = %+v", events)
 	}
 

@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // claudeBashParityRow is one Claude Code Bash call judged by a per-user
@@ -45,9 +46,7 @@ func judgeClaudeBashParityRows(t *testing.T, rows []claudeBashParityRow) {
 			t.Fatal(err)
 		}
 	}
-	if err := os.Symlink(keys, filepath.Join(project, "alias")); err != nil {
-		t.Fatal(err)
-	}
+	testenv.Symlink(t, keys, filepath.Join(project, "alias"))
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
 	slashProject := filepath.ToSlash(project)

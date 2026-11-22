@@ -71,9 +71,11 @@ var configSecretKeys = map[string]bool{
 
 // configCredentialKeys are config keys whose scalar value names an
 // enterprise credential (enterprise.*.credential, observability
-// {credential: NAME} headers, bearer_credential, token_credential).
+// {credential: NAME} headers, bearer_credential, token_credential, and the
+// routing Bedrock signing credentials).
 var configCredentialKeys = map[string]bool{
 	"credential": true, "bearer_credential": true, "token_credential": true,
+	"access_key_credential": true, "secret_key_credential": true, "session_token_credential": true,
 }
 
 // CheckInlineSecrets refuses (inline_secret) a bundle file that holds a

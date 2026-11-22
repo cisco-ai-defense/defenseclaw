@@ -185,6 +185,19 @@ func (a *APIServer) ownStatusAnswer(ctx context.Context, idKey, self, name, doma
 	if connectors != nil {
 		answer["connectors"] = connectors
 	}
+	if usage := a.ownUsageSummary(ctx, idKey, self); usage != nil {
+		answer["usage"] = usage
+	}
+	if routing := ownRoutingSummary(cfg, self, routingOwnCaller(ctx, cfg, self), time.Now()); routing != nil {
+		if _, routed := routing["route_only"]; routed && idKey == "uid" && ownAccountHomeless(ctx) {
+			// Routing is on for the computer, but this account has no home to
+			// hold the route settings: its agents are not routed, and status
+			// must not say they are (rel-1-0-10:GAP-1103).
+			delete(routing, "route_only")
+			routing["route_only_unavailable"] = ownNoHomeReason
+		}
+		answer["routing"] = routing
+	}
 	return answer
 }
 

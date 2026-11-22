@@ -22,6 +22,10 @@
 // --enterprise-managed): it runs as the agent's user, trusts only the
 // root-owned runtime descriptor, and verifies the gateway's uid before
 // sending a byte.
+//
+// It links only the hook command tree (internal/hookcli): not the gateway,
+// its servers, its stores or its cloud SDKs. Every agent tool call starts
+// it, so its start cost is paid per call (W1, rel-1-0-10 H1).
 package main
 
 import (
@@ -37,9 +41,9 @@ import (
 	_ "github.com/defenseclaw/defenseclaw/cmd/internal/hookpriority"
 	// Its init keeps the collector off until main starts (GAP-0050).
 	"github.com/defenseclaw/defenseclaw/cmd/internal/initgc"
-	"github.com/defenseclaw/defenseclaw/internal/cli"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/hookguard"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
@@ -54,7 +58,7 @@ func main() {
 	initgc.Restore()
 	// A panic anywhere in the hook path becomes the hook's failure decision
 	// instead of a stack dump on the agent-visible stderr.
-	defer cli.RecoverHookPanic()
+	defer hookcli.RecoverHookPanic()
 	// Identity inspection must not depend on mutable per-user hook state. Setup
 	// invokes this exact mode before signing and after installation so archived
 	// hook bytes are bound to the payload manifest's source commit.
@@ -92,14 +96,14 @@ func main() {
 	// cache its absolute command for the lifetime of their process. Disabled,
 	// publishing, missing, or unsafe installer state is an intentional no-op;
 	// check it before parsing project-inherited environment or fail-mode flags.
-	if cli.NativeHookRuntimeNoop() {
+	if hookcli.NativeHookRuntimeNoop() {
 		os.Exit(0)
 	}
 	// Hermes v0.19 keeps registered callbacks in memory until its host is
 	// restarted. A connector-scoped disabled tombstone lets an already-running
 	// Hermes process safely call the exact cached native command after teardown
 	// without disabling any other connector that shares this launcher.
-	if cli.NativeConnectorHookNoop(os.Args[1:]) {
+	if hookcli.NativeConnectorHookNoop(os.Args[1:]) {
 		os.Exit(0)
 	}
 	if !isHookEntrypoint(os.Args[1:]) {
@@ -134,9 +138,7 @@ func main() {
 			os.Exit(nonHookInvocationExit(os.Args[1:], os.Stdin, os.Stderr))
 		}
 	}
-	cli.SetVersion(version)
-	cli.SetBuildInfo(commit, date)
-	os.Exit(cli.Execute())
+	os.Exit(hookcli.Execute(version))
 }
 
 type noArgHookKind uint8

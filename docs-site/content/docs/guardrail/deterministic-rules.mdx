@@ -1,0 +1,124 @@
+---
+title: Deterministic rules
+description: What the local rules check, how a shell or PowerShell command is read, what the three rule packs are, which families of rules ship, how protected state and persistence are covered, and what only alerts and what blocks.
+keywords:
+  - deterministic rules
+  - rule packs
+  - default strict permissive
+  - PowerShell command parsing
+  - shell command parsing
+  - protected files
+  - persistence detection
+  - alert or block
+---
+
+The rules are the first layer, and the only one that is always on. They run on this machine, call no model and cost no money. Every other layer ([System One](/docs/guardrail/decision-model), the LLM judge, the [alignment check](/docs/guardrail/intent)) can add to what the rules find. None can remove it. See [how the guardrail works](/docs/guardrail/how-it-works) for the whole path.
+
+This page covers four things: the packs, the families of rules, how a command is read, and what alerts versus what blocks.
+
+## Pick a pack
+
+A rule pack is a folder of rule files and a set of block and alert levels. Three ship with DefenseClaw.
+
+| Pack | Rules declared | Rules on | Blocks at | Alerts at |
+| --- | ---: | ---: | --- | --- |
+| `default` (called balanced in the benchmarks) | 287 | 283 | CRITICAL | MEDIUM and up |
+| `strict` | 299 | 299 | MEDIUM and up | LOW and up |
+| `permissive` | 287 | 279 | CRITICAL | HIGH and up |
+
+Switch the pack, or only the levels, with:
+
+```bash
+defenseclaw guardrail use-pack strict
+defenseclaw guardrail block-at HIGH --connector codex
+```
+
+`use-pack` also takes `--connector` to switch one connector. A `block-at` or `alert-at` change moves the levels without changing the pack. [Thresholds](/docs/policies/thresholds) shows which scope wins.
+
+Strict trades noise for blocks. In the public benchmarks it raised eight alerts on 7,908 benign commands that default did not, and blocked none of them. See [Guardrail benchmarks](/docs/guardrail/benchmarks).
+
+Six opt-in protection packs (privacy, cloud production, database destruction, infrastructure destruction, Kubernetes production and Active Directory) and one staged SSH contract sit beside them in `policies/guardrail-use-cases`. [Deterministic detection](/docs/policies/deterministic-detection#protection-packs-and-policy-provided-context) lists them.
+
+## The families of rules
+
+The `default` pack's 283 enabled rules fall into seven families, one rule file each.
+
+| Family | Rules | What it finds |
+| --- | ---: | --- |
+| `command` | 151 | Execution, reverse shells, destructive disk and data operations, persistence, privilege changes, credential access, tampering with security controls, and cloud, database, Kubernetes and source-control effects |
+| `sensitive-path` | 29 | Reads or writes of SSH, cloud, Kubernetes, container, package-manager, Git, environment, browser-session, shell-history and shell-profile paths, hooks and runtime sockets |
+| `secret` | 27 | Provider keys, API tokens, private keys, JWTs, connection strings with passwords, bearer tokens, and secret assignments |
+| `trust-exploit` | 30 | Prompt injection: instruction override, impersonation, jailbreaks, prompt extraction, role spoofing, hidden text |
+| `c2` | 18 | Known exfiltration endpoints, cloud metadata URLs, DNS tunneling |
+| `enterprise-data` | 15 | Payment, bank, contact, medical and birth-date shapes |
+| `cognitive-file` | 13 | Changes to an agent's instruction, memory and configuration files, the gateway's files and DefenseClaw's own state |
+
+The `strict` pack has more command rules (162) and `permissive` has fewer personal-data rules on (11). CI checks the counts on that reference against the rule files. The full list is the [deterministic detection reference](/docs/policies/deterministic-detection).
+
+A rule is a match (a regex, a CEL expression, or both) plus a title, a severity and tags. Matchers only pick candidates. They do not decide a block, as the next two sections show.
+
+## How a command is read
+
+A rule that read only the words of a command would block `echo rm -rf /` and miss `r""m -rf /`. DefenseClaw reads what the command does.
+
+1. **Parse.** A shell command (`bash`, `sh`, `zsh`) goes through a full shell parser. A PowerShell command goes through a PowerShell parser written for this job. It builds a syntax tree and never runs anything. A nested script (`powershell -Command ...`, `cmd /c ...`) is read as well, but only for the argument shapes it knows. Any other shape is marked "not static" with a reason code.
+2. **List the effects.** The tree becomes a bounded list of effects: read, write, delete, link, run, network send or fetch, change of permissions. Each has a target that is either known, or unknown with a reason code. This step is the same on every OS, and Windows paths are handled on Linux too.
+3. **Build the facts.** The effects and the command's arguments become typed facts: which program, which operation, which path, which host, how sensitive.
+4. **Match.** The rule's regex or CEL expression picks a candidate from the facts.
+5. **Prove.** For a block, a check written in code must accept the same rule on the same effect. A regex hit alone is not proof.
+
+What the parser cannot resolve, it does not guess. A construct it cannot read is marked unknown and the call is judged at least at the unknown tier: alert in the `default` and `permissive` packs, block in `strict`. It is never a silent allow. A command too long to read in full is treated the same way. [Configure the cascade](/docs/guardrail/configure-cascade) has the `cascade.unknown` setting.
+
+## What alerts and what blocks
+
+Every finding has a severity. The pack's block level turns severity into the action, but a block needs more than a severity.
+
+- **Proven.** 34 rules use an exact semantic proof: for example a download that is then run as the same file, a dump of the LSASS process, a deleted shadow copy, a disabled Windows Defender, a global `LD_PRELOAD`. 26 fixed chains join steps of one session (a download, then the run of the same file). A rule outside these can raise an alert or a detection record, never a block on its own.
+- **A connector that can block.** The agent's hook must be able to stop the call before it runs. Where it cannot, the finding stays in the audit log and the action is not claimed as prevention. [Coverage](/docs/guardrail/coverage) lists the surfaces.
+- **Action mode.** In observe mode a finding is only recorded, never enforced.
+
+In action mode, the pack turns a finding's severity into an action:
+
+| Severity | Permissive | Default | Strict |
+| --- | --- | --- | --- |
+| CRITICAL | Block | Block | Block |
+| HIGH | Alert | Alert, or ask when [human approval](/docs/guardrail/human-approval) is on | Block |
+| MEDIUM | Allow | Alert | Block |
+| LOW | Allow | Allow | Alert |
+
+Alert-only detectors never block, whatever the pack: the eleven YARA signatures that scan MCP tool descriptions, and the correlator that looks at a session after the fact. They produce findings for the audit log and for you.
+
+Read the pack's own numbers in the [benchmarks](/docs/guardrail/benchmarks). On the 1.0.10 run, the `default` rules alone had precision 0.884 and recall 0.212, alerted on 0.6% of benign calls and blocked 0.1%. They are precise and blunt: most of what they miss is prompt injection that needs the context of the request.
+
+## Protected state and persistence
+
+Two groups of rules, and one watcher, protect what lets a change outlive the session.
+
+**Protected state.** The `sensitive-path` family flags a read or write of credential stores and agent state. The `cognitive-file` family flags a change to the agent's own instruction, memory and configuration files, and to DefenseClaw's state. For the last one, the rule `tamper.detector_state_write` blocks the change in every mode under the `strict` and `managed-strict` packs, and raises a HIGH alert under `default` and `permissive`.
+
+**Persistence.** Persistence rules sit in the `command` family and in the sensitive-path rules. Examples: a write to a shell profile (`persistence.shell_profile_write`), an `authorized_keys` change (`persistence.ssh_authorized_keys_command`), a Git hook (`persistence.git_hook_write`), a global `LD_PRELOAD` (`persistence.global_ld_preload_install`), a Windows accessibility-feature hijack, and a Kubernetes cron job that opens a reverse shell.
+
+**The file watch.** A command can write a file it never names, for example through a script. After the hook, a per-user gateway watches `authorized_keys`, shell startup files and autostart entries every two seconds. If one changes while an agent tool call ran, you get a HIGH `protected-file-changed` alert. It blocks nothing by default. [Protected files](/docs/guardrail/protected-files) has the list, the OS limits and the `restore` option. [Secret flow tracking](/docs/guardrail/secret-flow-tracking) covers the other staged attack: read a secret in one call, send it in another.
+
+## Change what the rules do
+
+| To do this | Use |
+| --- | --- |
+| Pick stricter or looser rules | `defenseclaw guardrail use-pack` |
+| Move only the block or alert level | `defenseclaw guardrail block-at` and `alert-at` ([Thresholds](/docs/policies/thresholds)) |
+| Stop one rule from firing in one place | [Suppression cookbook](/docs/policies/suppression-cookbook) |
+| Write a rule | [Rules](/docs/policies/rules), [Regex cookbook](/docs/policies/regex-cookbook) |
+| Check a pack or a rule before you use it | [Verify locally](/docs/policies/verify-locally), [Rulepack validation](/docs/policies/rulepack-validation) |
+| Set different rules per connector, person or group | [User and group policies](/docs/guardrail/user-and-group-policies) |
+
+## Limits
+
+- The rules read the text of a call. They cannot see what a child program writes after a command starts. For protected files, use the watch above, a sandbox or file permissions.
+- A custom regex is never blocking proof on a tool call. A rule you write blocks only where a built-in proof covers it, or through the Rego policy ([Configure the cascade](/docs/guardrail/configure-cascade#the-rego-policy)).
+- A connector that has no pre-tool hook cannot block a call. A prompt rule blocks only where the agent can block a prompt.
+
+## Next
+
+- [Packs and modes](/docs/guardrail/packs-and-modes): pick a pack, and move an agent from observe to action.
+- [Customize the guardrail](/docs/guardrail/customize): thresholds, suppressions and your own rules.
+- [Fix a false block](/docs/guardrail/false-blocks).

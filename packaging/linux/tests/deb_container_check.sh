@@ -15,7 +15,7 @@
 # A removal whose user manager does not answer fails and keeps the package,
 # and the next removal goes on once it answers.
 #
-# On a host without docker (dc-build-1), unpack a Debian rootfs into a
+# On a host without docker (for example a build host), unpack a Debian rootfs into a
 # scratch folder and run it there as root in a private mount and pid
 # namespace, with DC_CONTAINER_CHECK=1:
 #   sudo unshare --mount --pid --fork --propagation private sh -c \

@@ -117,7 +117,7 @@ func TestDownloadThenExecuteJoinsDriveLetterSpellingsOnWindows(t *testing.T) {
 // per-user and on a managed Windows gateway; a download the user asked to
 // run and another file stay quiet (rel-1-0-6:GAP-0182).
 func TestDownloadThenExecuteAlertsForADriveLetterDownloadThroughTheHook(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	saved := toolChainDriveMounts
 	toolChainDriveMounts = true
 	t.Cleanup(func() { toolChainDriveMounts = saved })

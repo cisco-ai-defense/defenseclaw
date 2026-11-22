@@ -448,7 +448,14 @@ func validResolvedPath(flavor actionfacts.PathFlavor, value string) bool {
 	case actionfacts.PathFlavorPOSIX:
 		// A Git Bash parse on Windows resolves ~ and $HOME to the drive
 		// home in slash form (C:/Users/x), an absolute POSIX path for
-		// that shell (GAP-2304, GAP-2122 Windows leg).
+		// that shell (GAP-2304, GAP-2122 Windows leg). A drive root keeps
+		// its slash: path.Clean spells C:/ as C:, the drive's current
+		// folder, so a call on the drive root (find C:/ -delete) failed
+		// the projection and no semantic rule judged it
+		// (rel-1-0-10:GAP-0945).
+		if len(value) == 3 && actionfacts.DriveSlashPath(value) {
+			return true
+		}
 		return (strings.HasPrefix(value, "/") || actionfacts.DriveSlashPath(value)) && path.Clean(value) == value
 	case actionfacts.PathFlavorWindows:
 		return validWindowsResolvedPath(value)

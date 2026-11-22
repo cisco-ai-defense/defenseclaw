@@ -386,7 +386,7 @@ func (a *App) Run(ctx context.Context, o RunOptions) (err error) {
 			return nameTakenError(req.Name, headless)
 		}
 		problem := a.landlockHint(apiError(err), func() openshell.Driver { return drv })
-		if ex.VMFirstBoot && !policyRefusal(err) && firstStartFailure(err) {
+		if ex.VMFirstBoot && !policyRefusal(err) && firstStartFailure(err) && !strings.Contains(err.Error(), openshell.MicroVMGuestRootLimit) {
 			return fmt.Errorf("%w; a MicroVM first start prepares a 5-8 GB disk and may need a retry; "+
 				"run defenseclaw sandbox doctor to inspect leftover staging disks", problem)
 		}
@@ -930,13 +930,18 @@ func (a *App) checkNameFree(ctx context.Context, api API, name string, headless 
 }
 
 // dockerDesktopRefusal refuses a run, before its image is built or its
-// sandbox is made, on a Mac whose gateway runs the docker driver on Docker
-// Desktop: its sandboxes run on the kernel of Docker Desktop's Linux VM,
-// which has no Landlock, so OpenShell's supervisor fails every one of them
-// (the doctor's Landlock and compute driver checks say the same). It asks
-// Docker only in that case, one `docker info` and no Landlock probe. A
-// Docker VM that may have Landlock (Colima, OrbStack), and a Docker that
-// does not answer, are left to try, as on Linux.
+// sandbox is made, on a Mac whose gateway runs the docker driver on a
+// Docker Desktop whose Linux VM kernel has no usable Landlock: its
+// sandboxes run on that kernel, and OpenShell's supervisor fails every one
+// of them. Docker Desktop is asked only in that case (one `docker info`),
+// and then its VM is probed for Landlock as the doctor does, in a local
+// image: 6.12.65-linuxkit has no Landlock, 7.0.14-linuxkit (Docker Desktop
+// 29.8) has ABI 8, and a refusal by name alone kept every Mac on a newer
+// Docker Desktop from running a docker-driver sandbox (rel-1-0-10:GAP-0007).
+// A VM that cannot be checked is refused too, with the doctor fix that
+// downloads the image to check in. A Docker VM that is not Docker Desktop
+// (Colima, OrbStack), and a Docker that does not answer, are left to try,
+// as on Linux.
 func (a *App) dockerDesktopRefusal(ctx context.Context, d openshell.Driver) error {
 	if a.GOOS != "darwin" || d.Name != openshell.DriverDocker {
 		return nil
@@ -944,9 +949,24 @@ func (a *App) dockerDesktopRefusal(ctx context.Context, d openshell.Driver) erro
 	if engine, err := a.DockerEngine(ctx); err != nil || !openshell.IsDockerDesktop(engine) {
 		return nil
 	}
-	return withNextStep(errors.New("no sandbox can start on this gateway: it runs sandboxes on the docker driver, and Docker Desktop's Linux VM "+
-		"has no Landlock, which OpenShell sandboxes need; nothing was built or created"),
-		"run sandboxes in OpenShell MicroVMs, which have their own kernel: `"+CommandName+" setup` switches the gateway to them (or `"+
+	abi, _, err := a.DockerVMLandlock(ctx)
+	if err == nil && abi >= openshell.MinLandlockABI {
+		return nil
+	}
+	why := "Docker Desktop's Linux VM has no Landlock, which OpenShell sandboxes need"
+	switch {
+	case errors.Is(err, openshell.ErrLandlockDisabled):
+		why = "Docker Desktop's Linux VM has Landlock turned off, and OpenShell sandboxes need it"
+	case errors.Is(err, openshell.ErrNoProbeImage):
+		why = "DefenseClaw could not check Docker Desktop's Linux VM for the Landlock OpenShell sandboxes need: the OpenShell base image it checks in " +
+			"is not on this machine yet (`" + CommandName + " doctor --fix` downloads it and checks)"
+	case err != nil && !errors.Is(err, openshell.ErrLandlockMissing):
+		why = "DefenseClaw could not check Docker Desktop's Linux VM for the Landlock OpenShell sandboxes need (" + err.Error() + ")"
+	case err == nil && abi > 0:
+		why = fmt.Sprintf("Docker Desktop's Linux VM has Landlock ABI %d, and OpenShell sandboxes need ABI %d or newer", abi, openshell.MinLandlockABI)
+	}
+	return withNextStep(errors.New("no sandbox can start on this gateway: it runs sandboxes on the docker driver, and "+why+"; nothing was built or created"),
+		"update Docker Desktop, or run sandboxes in OpenShell MicroVMs, which have their own kernel: `"+CommandName+" setup` switches the gateway to them (or `"+
 			CommandName+" doctor --fix`; details: "+setupTroubleshootingURL+")")
 }
 

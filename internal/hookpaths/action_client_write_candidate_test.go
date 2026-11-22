@@ -5,7 +5,10 @@ package hookpaths
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/testenv/hlinkmatrix"
 )
 
 func TestActionClientWriteCandidate(t *testing.T) {
@@ -27,27 +30,57 @@ func TestActionClientWriteCandidate(t *testing.T) {
 	}
 }
 
+// The dead-value proof removes a block, so it holds only when the shell is
+// known. With no startup it gives each row's answer. With an exported
+// function that a call of the row runs (the row's echo, install or rsync),
+// it is declined for every row. With an exported function no call of the
+// row runs (the host's own, like the module function that RHEL and the
+// shared dev host export), each row keeps its answer: a function no
+// statement calls changes nothing (rel-1-0-10:GAP-0276). Every cell sets the
+// environment in the test after it clears the host's.
 func TestActionClientDeadValueProofDeclinesChangedShellExpansion(t *testing.T) {
 	// The proof needs an absolute working directory, as every hook reports;
 	// /tmp/project is not one on Windows.
 	root := t.TempDir()
 	cwd, home := filepath.Join(root, "project"), filepath.Join(root, "home")
-	for _, row := range []struct {
-		name, command string
-		want          bool
+	for _, cell := range []struct {
+		id string
+		// function names the function exported for a row (nil: none).
+		function func(t *testing.T, row hlinkmatrix.DeadValueRow) string
+		called   bool
 	}{
-		{"ordinary-redirect", `f=keylink; f=a.txt; echo m >> "$f"`, true},
-		{"quoted-install", `f=keylink; f=a.txt; install b.txt "$f"`, true},
-		{"quoted-rsync", `f=keylink; f=a.txt; rsync b.txt "$f"`, true},
-		{"rebound-home", `HOME=/tmp/project; f=~/keylink; echo m >> "$f"`, false},
-		{"directory-stack-tilde", `f=~+/keylink; echo m >> "$f"`, false},
-		{"unquoted-install", `f=keylink; f=a.txt; install b.txt $f`, false},
-		{"unquoted-rsync", `f=keylink; f=a.txt; rsync b.txt $f`, false},
+		{"no-startup", nil, false},
+		{"unrelated-exported-function", func(*testing.T, hlinkmatrix.DeadValueRow) string { return "s7probe" }, false},
+		{"called-exported-function", func(t *testing.T, row hlinkmatrix.DeadValueRow) string {
+			return deadValueRowProgram(t, row.Command)
+		}, true},
 	} {
-		t.Run(row.name, func(t *testing.T) {
-			if got := actionClientProvedSafeVariableTargets(row.command, cwd, home); got != row.want {
-				t.Errorf("proof %v, want %v for %q", got, row.want, row.command)
+		t.Run(cell.id, func(t *testing.T) {
+			clearShellStartupEnv(t)
+			for _, row := range hlinkmatrix.DeadValueRows() {
+				t.Run(row.ID, func(t *testing.T) {
+					function := ""
+					if cell.function != nil {
+						function = cell.function(t, row)
+						t.Setenv("BASH_FUNC_"+function+"%%", "() {  :\n}")
+					}
+					want := row.ProvedSafe && !cell.called
+					if got := actionClientProvedSafeVariableTargets(row.Command, cwd, home); got != want {
+						t.Errorf("proof %v, want %v for %q with exported function %q", got, want, row.Command, function)
+					}
+				})
 			}
 		})
 	}
+}
+
+// deadValueRowProgram is the program of a dead-value row's write: the first
+// word of its last statement (echo, install, rsync).
+func deadValueRowProgram(t *testing.T, command string) string {
+	t.Helper()
+	fields := strings.Fields(command[strings.LastIndexByte(command, ';')+1:])
+	if len(fields) == 0 || strings.Contains(fields[0], "=") {
+		t.Fatalf("no program word in the last statement of %q", command)
+	}
+	return fields[0]
 }

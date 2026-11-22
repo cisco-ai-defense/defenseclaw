@@ -38,7 +38,9 @@ from defenseclaw.hermes_skills import (
 # the registry when the plugin is installed, so it differs between installs of
 # the same provider version. These pins let a host with no registry access
 # identify the releases below; any other release is confirmed against the npm
-# registry (``_registry_digest``), so a new release needs no change here.
+# registry (``_registry_digest``) or, for an install from ClawHub, against the
+# official ClawHub artifact (``_clawhub_digest``), so a new release needs no
+# change here.
 # ``scripts/openclaw_provider_digests.py`` prints the rows for a release.
 VENDOR_DIGESTS = {
     ("@openclaw/amazon-bedrock-provider", "2026.9.33"):
@@ -121,6 +123,7 @@ def inspect_official_provider_tree(plugin_dir: str, *, data_dir: str = "") -> Pr
     # below, once the local tree has passed the cheap checks.
     want = VENDOR_DIGESTS.get((name, version))
     unverified = False
+    clawhub: str | None = None
 
     peers = package.get("peerDependencies", {})
     if not isinstance(peers, dict):
@@ -158,8 +161,18 @@ def inspect_official_provider_tree(plugin_dir: str, *, data_dir: str = "") -> Pr
                 # profiles still admit a release whose install record names
                 # the registry archive; strict never reaches this check.
                 unverified = _recorded_registry_release(records, name, version)
-        if not unverified and (not want or not hmac.compare_digest(found, want)):
-            return None
+        if not unverified and not _same_digest(found, want):
+            # OpenClaw 2026.11.3 and later install an official provider from
+            # ClawHub, whose build of a release has other bytes than the npm
+            # archive of the same version (GAP-1195). Those bytes are proven
+            # against the official ClawHub artifact, never against a record.
+            if clawhub is None:
+                try:
+                    clawhub = _clawhub_digest(name, version) or ""
+                except _RegistryUnavailableError:
+                    clawhub = ""
+            if not _same_digest(found, clawhub):
+                return None
         for peer, (link, before) in links.items():
             try:
                 if before != _validated_peer_link(link, root, peer, data_dir):
@@ -173,6 +186,10 @@ def inspect_official_provider_tree(plugin_dir: str, *, data_dir: str = "") -> Pr
         possible_peer=any(state[1] is not None for _, state in links.values()),
         unverified=unverified,
     )
+
+
+def _same_digest(found: str, published: str | None) -> bool:
+    return bool(published) and hmac.compare_digest(found, published)
 
 
 # Fields an installer adds to or removes from the published manifest.
@@ -301,6 +318,11 @@ def _package_digest(
 
 
 _REGISTRY = "https://registry.npmjs.org"
+# ClawHub, OpenClaw's own registry. It serves the official providers under the
+# same package names, packed from its own build (see ``_clawhub_digest``).
+_CLAWHUB = "https://clawhub.ai"
+_CLAWHUB_OWNER = "openclaw"
+_SHA256_HEX = re.compile(r"[0-9a-f]{64}")
 _REGISTRY_TIMEOUT_SECONDS = 20
 _REGISTRY_METADATA_MAX_BYTES = 4 * 1024 * 1024
 _REGISTRY_TARBALL_MAX_BYTES = 64 * 1024 * 1024
@@ -317,7 +339,7 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 def _registry_get(url: str, limit: int) -> bytes:
-    if not url.startswith(_REGISTRY + "/"):
+    if not url.startswith((_REGISTRY + "/", _CLAWHUB + "/")):
         raise ValueError("not a registry address")
     opener = urllib.request.build_opener(_NoRedirect)
     with opener.open(url, timeout=_REGISTRY_TIMEOUT_SECONDS) as response:
@@ -377,16 +399,80 @@ def _registry_digest(name: str, version: str) -> str | None:
             or not isinstance(integrity, str) or not integrity.startswith("sha512-")
         ):
             return None
-        archive = _registry_fetch(dist["tarball"], _REGISTRY_TARBALL_MAX_BYTES)
-        expected = base64.b64decode(integrity[len("sha512-"):], validate=True)
-        if not hmac.compare_digest(hashlib.sha512(archive).digest(), expected):
-            return None
-        digest = _archive_package_digest(archive)
+        digest = _proven_archive_digest(dist["tarball"], integrity)
     except (OSError, ValueError, KeyError, TypeError, AttributeError, tarfile.TarError):
         return None
     if digest:
         _registry_digests[key] = digest
     return digest
+
+
+def _clawhub_digest(name: str, version: str) -> str | None:
+    """The package-own-files digest of a release as ClawHub publishes it.
+
+    OpenClaw 2026.11.3 and later install an official provider from ClawHub
+    (install source ``clawhub``). ClawHub packs its own build of the release,
+    so its files are not the files of the npm archive of the same version
+    (GAP-1195). ClawHub must list the package as an official package owned by
+    OpenClaw, and name for the release an npm-pack archive at its own address
+    for this name and version; the archive is fetched from that address,
+    checked against both the sha512 integrity and the sha256 ClawHub states,
+    and digested exactly as an installed tree is. Any other answer gives no
+    identity. An outage raises ``_RegistryUnavailableError``.
+    """
+
+    key = (_CLAWHUB, name, version)
+    if key in _registry_digests:
+        return _registry_digests[key]
+    if name not in _OFFICIAL_PACKAGES or not _VERSION.fullmatch(version):
+        return None
+    scope, package = name.split("/", 1)
+    quoted = urllib.parse.quote(name, safe="")
+    tarball = f"{_CLAWHUB}/api/npm/{name}/-/{scope[1:]}-{package}-{version}.tgz"
+    try:
+        listing = json.loads(_registry_fetch(
+            f"{_CLAWHUB}/api/v1/packages/{quoted}", _REGISTRY_METADATA_MAX_BYTES,
+        ))
+        entry, owner = listing["package"], listing["owner"]
+        if (
+            entry["name"] != name or entry["channel"] != "official"
+            or entry["isOfficial"] is not True
+            or owner["handle"] != _CLAWHUB_OWNER or owner["official"] is not True
+        ):
+            return None
+        release = json.loads(_registry_fetch(
+            f"{_CLAWHUB}/api/v1/packages/{quoted}/versions/{version}/artifact",
+            _REGISTRY_METADATA_MAX_BYTES,
+        ))
+        artifact = release["artifact"]
+        sha256 = artifact["sha256"]
+        integrity = artifact["npmIntegrity"]
+        if (
+            release["package"]["name"] != name or release["version"] != version
+            or artifact["kind"] != "npm-pack" or artifact["format"] != "tgz"
+            or artifact["tarballUrl"] != tarball
+            or not isinstance(sha256, str) or not _SHA256_HEX.fullmatch(sha256)
+            or not isinstance(integrity, str) or not integrity.startswith("sha512-")
+        ):
+            return None
+        digest = _proven_archive_digest(tarball, integrity, sha256=sha256)
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, tarfile.TarError):
+        return None
+    if digest:
+        _registry_digests[key] = digest
+    return digest
+
+
+def _proven_archive_digest(tarball: str, integrity: str, *, sha256: str = "") -> str | None:
+    """Fetch a release archive, prove it against the stated hashes, digest it."""
+
+    archive = _registry_fetch(tarball, _REGISTRY_TARBALL_MAX_BYTES)
+    expected = base64.b64decode(integrity[len("sha512-"):], validate=True)
+    if not hmac.compare_digest(hashlib.sha512(archive).digest(), expected):
+        return None
+    if sha256 and not hmac.compare_digest(hashlib.sha256(archive).hexdigest(), sha256):
+        return None
+    return _archive_package_digest(archive)
 
 
 def _archive_package_digest(archive: bytes) -> str | None:

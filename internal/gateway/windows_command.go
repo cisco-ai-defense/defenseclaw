@@ -16,6 +16,9 @@ import (
 	"regexp"
 	"strings"
 	"unicode"
+	"unicode/utf8"
+
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 )
 
 func windowsCommandFindingsWithOptions(
@@ -98,6 +101,14 @@ func windowsCommandFindingsWithOptions(
 			add("CMD-WIN-IWR-IEX", "PowerShell download piped to expression execution", "CRITICAL", 0.99, "execution", "download-exec", "windows")
 		}
 	}
+	// The pipe form is one spelling of a download cradle: any PowerShell
+	// chain that runs content a web request or WebClient fetched is the same
+	// action (actionfacts.PowerShellFetchedContentExecuted reads the chain on
+	// the psparse tree, after the static launchers are unwrapped).
+	if !seen["CMD-WIN-IWR-IEX"] &&
+		actionfacts.PowerShellFetchedContentExecuted(command, actionfactsDialect(dialect)) {
+		add("CMD-WIN-IWR-IEX", "PowerShell download piped to expression execution", "CRITICAL", 0.99, "execution", "download-exec", "windows")
+	}
 
 	return findings
 }
@@ -166,6 +177,18 @@ const (
 	windowsDialectCMD
 )
 
+// actionfactsDialect is the ActionFacts grammar of a command text read in the
+// Windows recognizer's dialect; a text of unknown dialect is a POSIX shell's.
+func actionfactsDialect(dialect windowsShellDialect) actionfacts.Dialect {
+	switch dialect {
+	case windowsDialectPowerShell:
+		return actionfacts.DialectPowerShell
+	case windowsDialectCMD:
+		return actionfacts.DialectCMD
+	}
+	return actionfacts.DialectPOSIX
+}
+
 func windowsCommandText(text, toolName string) (string, windowsShellDialect, bool) {
 	name := strings.ToLower(strings.TrimSpace(toolName))
 	dialect := windowsDialectUnknown
@@ -217,11 +240,18 @@ func unwrapWindowsCommand(command string, dialect windowsShellDialect, depth int
 	if depth >= 3 || len(segments) != 1 {
 		return segments, dialect
 	}
-	tokens := windowsTokens(segments[0], dialect)
+	// Only a launcher's tokens are read in full: tokenizing a whole 1 MiB
+	// command to look at its first word cost about 18 MiB
+	// (rel-1-0-10:GAP-0299).
+	tokens := windowsTokensUpTo(segments[0], dialect, 3)
 	if len(tokens) < 3 {
 		return segments, dialect
 	}
 	name := windowsExecutableName(tokens[0])
+	if name != "powershell" && name != "pwsh" && name != "cmd" {
+		return segments, dialect
+	}
+	tokens = windowsTokens(segments[0], dialect)
 	if name == "powershell" || name == "pwsh" {
 		for i := 1; i < len(tokens)-1; i++ {
 			arg := strings.ToLower(tokens[i])
@@ -243,82 +273,94 @@ func unwrapWindowsCommand(command string, dialect windowsShellDialect, depth int
 // windowsSegments splits executable pipeline stages without treating quoted
 // documentation or string literals as commands.
 func windowsSegments(command string, dialect windowsShellDialect) []string {
-	var out []string
-	start := 0
-	var quote rune
-	escaped := false
-	runes := []rune(command)
-	for i, r := range runes {
-		if escaped {
-			escaped = false
-			continue
-		}
-		if windowsEscapeRune(r, dialect, quote) {
-			escaped = true
-			continue
-		}
-		if quote != 0 {
-			if r == quote {
-				quote = 0
-			}
-			continue
-		}
-		if r == '\'' || r == '"' {
-			quote = r
-			continue
-		}
-		if r == '|' {
-			if part := strings.TrimSpace(string(runes[start:i])); part != "" {
-				out = append(out, part)
-			}
-			start = i + 1
-		}
-	}
-	if part := strings.TrimSpace(string(runes[start:])); part != "" {
-		out = append(out, part)
-	}
-	return out
+	return windowsSplit(command, dialect, func(r rune) bool { return r == '|' })
 }
 
 func windowsStatements(stage string, dialect windowsShellDialect) []string {
+	return windowsSplit(stage, dialect, func(r rune) bool { return r == ';' || r == '&' || r == '\n' || r == '\r' })
+}
+
+// windowsSplit splits text at each separator rune outside quotes and
+// escapes, and keeps the trimmed non-empty parts. A text of valid UTF-8 is
+// split in place, so each part is a piece of text, not a copy: the copies
+// of a 1 MiB command, one per line, and its rune slices cost about 13 MiB
+// (rel-1-0-10:GAP-0299). Any other text is read as runes, each invalid byte
+// becoming U+FFFD in its part, as before (windowsSplitRunes).
+func windowsSplit(text string, dialect windowsShellDialect, separator func(rune) bool) []string {
+	if !utf8.ValidString(text) {
+		return windowsSplitRunes(text, dialect, separator)
+	}
 	var out []string
+	scan := windowsSplitScanner(dialect, separator)
 	start := 0
-	var quote rune
-	escaped := false
-	runes := []rune(stage)
+	for i, r := range text {
+		if scan(r) {
+			out = windowsKeepPart(out, text[start:i])
+			start = i + utf8.RuneLen(r)
+		}
+	}
+	return windowsKeepPart(out, text[start:])
+}
+
+// windowsSplitRunes is windowsSplit on the runes of text, each part a new
+// string of its runes.
+func windowsSplitRunes(text string, dialect windowsShellDialect, separator func(rune) bool) []string {
+	var out []string
+	scan := windowsSplitScanner(dialect, separator)
+	start := 0
+	runes := []rune(text)
 	for i, r := range runes {
-		if escaped {
-			escaped = false
-			continue
-		}
-		if windowsEscapeRune(r, dialect, quote) {
-			escaped = true
-			continue
-		}
-		if quote != 0 {
-			if r == quote {
-				quote = 0
-			}
-			continue
-		}
-		if r == '\'' || r == '"' {
-			quote = r
-			continue
-		}
-		if r == ';' || r == '&' || r == '\n' || r == '\r' {
-			if part := strings.TrimSpace(string(runes[start:i])); part != "" {
-				out = append(out, part)
-			}
+		if scan(r) {
+			out = windowsKeepPart(out, string(runes[start:i]))
 			start = i + 1
 		}
 	}
-	if part := strings.TrimSpace(string(runes[start:])); part != "" {
+	return windowsKeepPart(out, string(runes[start:]))
+}
+
+// windowsKeepPart appends part, trimmed, to out unless it is blank.
+func windowsKeepPart(out []string, part string) []string {
+	if part = strings.TrimSpace(part); part != "" {
 		out = append(out, part)
 	}
 	return out
 }
 
+// windowsSplitScanner reads the runes of a text in order and reports each
+// separator rune outside quotes and escapes.
+func windowsSplitScanner(dialect windowsShellDialect, separator func(rune) bool) func(rune) bool {
+	var quote rune
+	escaped := false
+	return func(r rune) bool {
+		if escaped {
+			escaped = false
+			return false
+		}
+		if windowsEscapeRune(r, dialect, quote) {
+			escaped = true
+			return false
+		}
+		if quote != 0 {
+			if r == quote {
+				quote = 0
+			}
+			return false
+		}
+		if r == '\'' || r == '"' {
+			quote = r
+			return false
+		}
+		return separator(r)
+	}
+}
+
 func windowsTokens(segment string, dialect windowsShellDialect) []string {
+	return windowsTokensUpTo(segment, dialect, -1)
+}
+
+// windowsTokensUpTo is windowsTokens that stops after the first limit tokens
+// (limit < 0: all of them).
+func windowsTokensUpTo(segment string, dialect windowsShellDialect, limit int) []string {
 	var tokens []string
 	var current strings.Builder
 	var quote rune
@@ -330,6 +372,9 @@ func windowsTokens(segment string, dialect windowsShellDialect) []string {
 		}
 	}
 	for _, r := range segment {
+		if limit >= 0 && len(tokens) >= limit {
+			return tokens
+		}
 		if escaped {
 			current.WriteRune(r)
 			escaped = false

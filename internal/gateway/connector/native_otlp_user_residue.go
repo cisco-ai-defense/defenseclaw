@@ -193,6 +193,9 @@ func UserNativeOTLPConfigPathFor(connectorName, home string) string {
 // UserNativeOTLPReadLimit bounds every file the native OTLP check reads.
 const UserNativeOTLPReadLimit = userNativeOTLPReadLimit
 
+// ErrUserNativeOTLPFileTooLarge is wrapped by UserNativeOTLPFileTooLarge.
+var ErrUserNativeOTLPFileTooLarge = errUserNativeOTLPFileTooLarge
+
 // UserNativeOTLPFileTooLarge is the error for a file over
 // UserNativeOTLPReadLimit; it names the base name only.
 func UserNativeOTLPFileTooLarge(name string) error {
@@ -296,12 +299,15 @@ func withUserAgentConfigLock(path string, opts SetupOpts, fn func() error) error
 	return withFileLock(path, fn)
 }
 
-// A managed Windows user's .defenseclaw directory has a protected DACL that
-// lets the user edit runtime files but reserves WRITE_DAC for SYSTEM. The
-// compare-and-swap helper's private-state setup would try to replace that
-// DACL under the user's impersonated token. Keep this edit's private recovery
-// state beside the user's agent config instead.
-func userNativeOTLPTransactionDir(configPath string, opts SetupOpts) string {
+// userAgentConfigTransactionDir is the compare-and-swap state directory of an
+// edit of the account's own agent config. A managed Windows user's
+// .defenseclaw directory has a protected DACL that lets the user edit runtime
+// files but reserves WRITE_DAC for SYSTEM. The compare-and-swap helper's
+// private-state setup would try to replace that DACL under the user's
+// impersonated token and fail with access denied. Keep the edit's private
+// recovery state beside the user's agent config instead. Used by the native
+// OTLP residue repair and the route-only render (rel-1-0-10:GAP-1097).
+func userAgentConfigTransactionDir(configPath string, opts SetupOpts) string {
 	if opts.ManagedEnterprise && runtime.GOOS == "windows" {
 		return filepath.Join(filepath.Dir(configPath), ".defenseclaw-cas-state")
 	}
@@ -396,7 +402,7 @@ func codexUserNativeOTLP(configPath string, opts SetupOpts, apply bool) ([]strin
 		return removed, err
 	}
 	err = withUserAgentConfigLock(configPath, opts, func() error {
-		return atomicTransformFileWithStateDir(configPath, userNativeOTLPTransactionDir(configPath, opts), 0o600, func(current []byte, exists bool) (atomicTransformResult, error) {
+		return atomicTransformFileWithStateDir(configPath, userAgentConfigTransactionDir(configPath, opts), 0o600, func(current []byte, exists bool) (atomicTransformResult, error) {
 			if !exists {
 				removed = nil
 				return atomicTransformResult{Remove: true}, nil
@@ -497,7 +503,7 @@ func claudeCodeUserNativeOTLP(settingsPath string, opts SetupOpts, apply bool) (
 		return removed, err
 	}
 	err = withUserAgentConfigLock(settingsPath, opts, func() error {
-		return atomicTransformFileWithStateDir(settingsPath, userNativeOTLPTransactionDir(settingsPath, opts), 0o600, func(current []byte, exists bool) (atomicTransformResult, error) {
+		return atomicTransformFileWithStateDir(settingsPath, userAgentConfigTransactionDir(settingsPath, opts), 0o600, func(current []byte, exists bool) (atomicTransformResult, error) {
 			if !exists {
 				removed = nil
 				return atomicTransformResult{Remove: true}, nil

@@ -75,7 +75,7 @@ func TestRemovedConnectorWithNothingInstalledLeavesTheRosterGap2617(t *testing.T
 			}
 			candidates, retained, _ := s.removedConnectorRollbackCandidates(
 				registry, connector.LoadActiveConnectors(s.cfg.DataDir), []string{"claudecode"},
-				"synthetic gateway token", "127.0.0.1:0", "127.0.0.1:0", "synthetic master key",
+				"synthetic gateway token", "127.0.0.1:0", "127.0.0.1:0",
 				lock,
 			)
 			if len(candidates) != 0 {

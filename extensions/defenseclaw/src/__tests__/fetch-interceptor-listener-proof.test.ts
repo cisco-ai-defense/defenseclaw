@@ -10,7 +10,7 @@
  * gateway. A failed proof answers as a gateway outage and sends nothing.
  */
 
-import { mkdtempSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -23,7 +23,7 @@ const TOKEN = "c".repeat(64);
 
 describe("proxy hop listener proof", () => {
   const originalFetch = globalThis.fetch;
-  const saved = { home: process.env.DEFENSECLAW_HOME, token: process.env.DEFENSECLAW_GATEWAY_TOKEN };
+  const saved = { home: process.env.DEFENSECLAW_HOME };
   let calls: Array<{ url: string; headers: Headers }>;
   let interceptor: ReturnType<typeof createFetchInterceptor>;
 
@@ -31,7 +31,8 @@ describe("proxy hop listener proof", () => {
     vi.spyOn(console, "log").mockImplementation(() => undefined);
     vi.spyOn(console, "warn").mockImplementation(() => undefined);
     process.env.DEFENSECLAW_HOME = mkdtempSync(join(tmpdir(), "dc-proof-"));
-    process.env.DEFENSECLAW_GATEWAY_TOKEN = TOKEN;
+    mkdirSync(join(process.env.DEFENSECLAW_HOME, "hooks"));
+    writeFileSync(join(process.env.DEFENSECLAW_HOME, "hooks", ".hook-openclaw.token"), TOKEN + "\n");
     _resetSidecarConfigCache();
     calls = [];
     globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -47,8 +48,6 @@ describe("proxy hop listener proof", () => {
     globalThis.fetch = originalFetch;
     if (saved.home === undefined) delete process.env.DEFENSECLAW_HOME;
     else process.env.DEFENSECLAW_HOME = saved.home;
-    if (saved.token === undefined) delete process.env.DEFENSECLAW_GATEWAY_TOKEN;
-    else process.env.DEFENSECLAW_GATEWAY_TOKEN = saved.token;
     _resetSidecarConfigCache();
     _setListenerProofForTest(async () => {});
     vi.restoreAllMocks();
@@ -72,20 +71,13 @@ describe("proxy hop listener proof", () => {
   });
 
   it("sends no provider key without a token to prove the listener with", async () => {
-    const savedLegacy = process.env.OPENCLAW_GATEWAY_TOKEN;
-    process.env.DEFENSECLAW_GATEWAY_TOKEN = "";
-    process.env.OPENCLAW_GATEWAY_TOKEN = "";
+    rmSync(join(process.env.DEFENSECLAW_HOME!, "hooks", ".hook-openclaw.token"));
     _resetSidecarConfigCache();
-    try {
-      // The real proof: with no token it refuses before any connection.
-      _setListenerProofForTest(undefined);
-      const res = await modelCall();
-      expect(res.status).toBe(503);
-      expect(calls.filter((c) => c.url.includes(":14011/v1/chat/completions"))).toEqual([]);
-    } finally {
-      if (savedLegacy === undefined) delete process.env.OPENCLAW_GATEWAY_TOKEN;
-      else process.env.OPENCLAW_GATEWAY_TOKEN = savedLegacy;
-    }
+    // The real proof: with no token it refuses before any connection.
+    _setListenerProofForTest(undefined);
+    const res = await modelCall();
+    expect(res.status).toBe(503);
+    expect(calls.filter((c) => c.url.includes(":14011/v1/chat/completions"))).toEqual([]);
   });
 
   it("proves the listener before every proxied model call", async () => {

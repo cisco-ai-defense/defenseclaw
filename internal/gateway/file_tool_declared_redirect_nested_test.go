@@ -72,7 +72,13 @@ func TestRVGXARGNestedDeclaredLink(t *testing.T) {
 				}
 				_, action, _, body := rvgxVerdict(t, "claudecode", "Bash", map[string]any{"command": command}, cell.profile, cell.managed, home, project, fmt.Sprintf("gxarg-r3-%d", i))
 				got := strings.Split(action, "/")[0]
-				if form.block && got != "block" {
+				// A proven state write alerts outside the strict profile
+				// (GAP-0747 owner tiering 2026-11-15T15:20Z).
+				if form.block && cell.profile != "strict" && strings.Contains(body, gap0747StateRule) {
+					if got != "alert" {
+						t.Errorf("%s: %s, want alert (%.300s)", form.name, got, body)
+					}
+				} else if form.block && got != "block" {
 					t.Errorf("%s: %s, want block (%.300s)", form.name, got, body)
 				} else if !form.block && got != "allow" {
 					t.Errorf("%s: %s, want allow (%.300s)", form.name, got, body)

@@ -33,9 +33,7 @@ func TestFixedTextEchoJoinedToAStatementIsVerdictNeutral(t *testing.T) {
 	if err := os.WriteFile(keys, []byte("decoy\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(keys, filepath.Join(cwd, "keylink")); err != nil {
-		t.Fatal(err)
-	}
+	testSymlink(t, keys, filepath.Join(cwd, "keylink"))
 	for _, row := range []struct{ statement, compound string }{
 		{"uniq keylink > /dev/null", "uniq keylink > /dev/null; echo done"},
 		{"uniq keylink > /dev/null", "uniq keylink > /dev/null; echo uniq-done"},

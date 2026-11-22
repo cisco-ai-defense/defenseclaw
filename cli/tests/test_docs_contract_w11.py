@@ -133,7 +133,7 @@ def test_pages_do_not_say_a_version_with_no_contract_is_saved_in_observe():
     hermes = _page("connectors/hermes.mdx")
     assert "saves Hermes in observe mode with upgrade guidance" not in hermes
     assert "refuses Hermes in observe and action mode" in hermes
-    trouble = _page("guardrail/index.mdx")
+    trouble = _page("guardrail/setup-problems.mdx")
     assert (
         "Its installed version has no hook contract (below the tested floor or known broken). Action mode needs one."
         not in trouble

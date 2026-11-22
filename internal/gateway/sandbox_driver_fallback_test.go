@@ -184,6 +184,10 @@ func TestSandboxDriverClaim(t *testing.T) {
 		"vm on a docker host":     {cfg: host("docker", ""), goos: "linux", driver: "vm", reason: "configured", wantRefusal: "configuration selects docker"},
 		"mac is MicroVM only":     {cfg: host("auto", ""), goos: "darwin", driver: "docker", reason: "kvm_missing", wantRefusal: "configuration selects vm"},
 		"mac vm":                  {cfg: host("", ""), goos: "darwin", driver: "vm", reason: "configured", wantDriver: "vm", wantReason: "configured"},
+		// rel-1-0-10:GAP-0007: a Mac whose organization sets docker runs docker.
+		"mac docker configured":   {cfg: host("docker", ""), goos: "darwin", driver: "docker", reason: "configured", wantDriver: "docker", wantReason: "configured"},
+		"mac vm on a docker host": {cfg: host("docker", ""), goos: "darwin", driver: "vm", reason: "configured", wantRefusal: "configuration selects docker"},
+		"mac docker by default":   {cfg: host("", ""), goos: "darwin", driver: "docker", reason: "configured", wantRefusal: "configuration selects vm"},
 	} {
 		driver, reason, refusal := sandboxDriverClaim(tc.cfg, tc.goos, tc.floor, tc.driver, tc.reason, gw)
 		switch {

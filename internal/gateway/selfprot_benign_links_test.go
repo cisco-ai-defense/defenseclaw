@@ -70,8 +70,15 @@ func checkSelfProtRows(t *testing.T, rows []selfProtRow, connectors ...string) {
 	for _, managed := range []bool{true, false} {
 		for _, connector := range connectors {
 			for _, r := range rows {
-				if got := selfProtVerdict(t, r, managed, connector); got != r.want {
-					t.Errorf("%s managed=%v %s: %q = %s, want %s", r.id, managed, connector, r.cmd, got, r.want)
+				want := r.want
+				if want == "block" && strings.HasPrefix(r.id, "BL") {
+					// BL rows write through the link to the DefenseClaw state: a
+					// HIGH alert on the default pack (GAP-0747 owner tiering
+					// 2026-11-15T15:20Z).
+					want = "alert"
+				}
+				if got := selfProtVerdict(t, r, managed, connector); got != want && (want != "alert" || connector != "codex" || got != "status 200 OK") {
+					t.Errorf("%s managed=%v %s: %q = %s, want %s", r.id, managed, connector, r.cmd, got, want)
 				}
 			}
 		}

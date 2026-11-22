@@ -165,19 +165,6 @@ beforeEach(() => {
 });
 
 describe("DaemonClient", () => {
-  describe("status", () => {
-    it("returns daemon status on success", async () => {
-      const client = makeClient();
-      const res = await client.status();
-
-      expect(res.ok).toBe(true);
-      expect(res.status).toBe(200);
-      expect(res.data).toEqual({ running: true, uptime_seconds: 42 });
-      expect(lastRequest.method).toBe("GET");
-      expect(lastRequest.url).toBe("/status");
-    });
-  });
-
   describe("submitScanResult", () => {
     it("posts scan result to /scan/result", async () => {
       const client = makeClient();
@@ -197,50 +184,6 @@ describe("DaemonClient", () => {
     });
   });
 
-  describe("block", () => {
-    it("posts block request with correct payload", async () => {
-      const client = makeClient();
-      await client.block("skill", "evil-skill", "contains malware");
-
-      expect(lastRequest.method).toBe("POST");
-      expect(lastRequest.url).toBe("/enforce/block");
-      expect(JSON.parse(lastRequest.body)).toEqual({
-        target_type: "skill",
-        target_name: "evil-skill",
-        reason: "contains malware",
-      });
-    });
-  });
-
-  describe("allow", () => {
-    it("posts allow request with correct payload", async () => {
-      const client = makeClient();
-      await client.allow("mcp", "trusted-mcp", "reviewed and approved");
-
-      expect(lastRequest.method).toBe("POST");
-      expect(lastRequest.url).toBe("/enforce/allow");
-      expect(JSON.parse(lastRequest.body)).toEqual({
-        target_type: "mcp",
-        target_name: "trusted-mcp",
-        reason: "reviewed and approved",
-      });
-    });
-  });
-
-  describe("unblock", () => {
-    it("sends DELETE to /enforce/block with JSON body", async () => {
-      const client = makeClient();
-      await client.unblock("skill", "temp-skill");
-
-      expect(lastRequest.method).toBe("DELETE");
-      expect(lastRequest.url).toBe("/enforce/block");
-      expect(JSON.parse(lastRequest.body)).toEqual({
-        target_type: "skill",
-        target_name: "temp-skill",
-      });
-    });
-  });
-
   describe("listBlocked", () => {
     it("returns empty block list", async () => {
       const client = makeClient();
@@ -248,22 +191,6 @@ describe("DaemonClient", () => {
 
       expect(res.ok).toBe(true);
       expect(res.data).toEqual([]);
-    });
-  });
-
-  describe("listAlerts", () => {
-    it("passes limit parameter", async () => {
-      const client = makeClient();
-      await client.listAlerts(10);
-
-      expect(lastRequest.url).toBe("/alerts?limit=10");
-    });
-
-    it("uses default limit of 50", async () => {
-      const client = makeClient();
-      await client.listAlerts();
-
-      expect(lastRequest.url).toBe("/alerts?limit=50");
     });
   });
 
@@ -283,7 +210,7 @@ describe("DaemonClient", () => {
     it("returns ok=false on HTTP error status", async () => {
       responseOverride = { status: 500, body: "internal error" };
       const client = makeClient();
-      const res = await client.status();
+      const res = await client.listBlocked();
 
       expect(res.ok).toBe(false);
       expect(res.status).toBe(500);
@@ -304,7 +231,7 @@ describe("DaemonClient", () => {
         status: 0,
         requestError: new Error("connect ECONNREFUSED 127.0.0.1:18970"),
       }));
-      const res = await client.status();
+      const res = await client.listBlocked();
 
       expect(res.ok).toBe(false);
       expect(res.status).toBe(0);
@@ -315,7 +242,7 @@ describe("DaemonClient", () => {
   describe("headers", () => {
     it("sets Content-Type and Accept headers", async () => {
       const client = makeClient();
-      await client.status();
+      await client.listBlocked();
 
       expect(lastRequest.headers["Content-Type"]).toBe("application/json");
       expect(lastRequest.headers.Accept).toBe("application/json");
@@ -330,34 +257,35 @@ describe("DaemonClient", () => {
 
     it("includes X-DefenseClaw-Client header on GET requests", async () => {
       const client = makeClient();
-      await client.status();
+      await client.listBlocked();
 
       expect(lastRequest.headers["X-DefenseClaw-Client"]).toBe(
         "openclaw-plugin",
       );
     });
 
-    it("includes X-DefenseClaw-Client header on POST requests", async () => {
+    it("names the client and the openclaw connector on POST requests", async () => {
       const client = makeClient();
-      await client.block("skill", "evil-skill", "malware");
+      await client.logEvent({ foo: "bar" });
 
       expect(lastRequest.headers["X-DefenseClaw-Client"]).toBe(
         "openclaw-plugin",
+      );
+      expect(lastRequest.headers["x-defenseclaw-connector"] ?? lastRequest.headers["X-DefenseClaw-Connector"]).toBe(
+        "openclaw",
       );
     });
 
-    it("includes X-DefenseClaw-Client header on DELETE requests", async () => {
-      const client = makeClient();
-      await client.unblock("skill", "temp-skill");
-
-      expect(lastRequest.headers["X-DefenseClaw-Client"]).toBe(
-        "openclaw-plugin",
-      );
+    it("has no call that loosens policy", () => {
+      const client = makeClient() as unknown as Record<string, unknown>;
+      for (const name of ["block", "allow", "unblock", "status", "listAlerts"]) {
+        expect(client[name]).toBeUndefined();
+      }
     });
 
     it("includes X-DefenseClaw-Agent-Id and instance id from correlation", async () => {
       const client = makeClient();
-      await client.status();
+      await client.listBlocked();
 
       expect(lastRequest.headers[HEADER_DEFENSECLAW_AGENT_ID]).toBe("test-agent");
       expect(lastRequest.headers[HEADER_DEFENSECLAW_AGENT_INSTANCE_ID]).toBe(
@@ -384,12 +312,12 @@ describe("DaemonClient", () => {
         };
       });
 
-      await client.status();
+      await client.listBlocked();
       expect(lastRequest.headers[HEADER_DEFENSECLAW_AGENT_INSTANCE_ID]).toBe(
         "session-instance-1",
       );
 
-      await client.status();
+      await client.listBlocked();
       expect(lastRequest.headers[HEADER_DEFENSECLAW_AGENT_INSTANCE_ID]).toBe(
         "sidecar-echo-99",
       );
@@ -400,7 +328,7 @@ describe("DaemonClient", () => {
       const client = makeClient(undefined, {
         logOutboundRequest: (e) => logs.push(e),
       });
-      await client.status();
+      await client.listBlocked();
 
       expect(logs).toHaveLength(1);
       expect(logs[0].agentId).toBe("test-agent");

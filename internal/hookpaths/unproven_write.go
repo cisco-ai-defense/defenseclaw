@@ -4,13 +4,21 @@
 package hookpaths
 
 import (
+	"errors"
 	"io"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode"
 
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/awkprog"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
+	"github.com/defenseclaw/defenseclaw/internal/psparse"
+	"github.com/defenseclaw/defenseclaw/internal/pythoninert"
+	"github.com/defenseclaw/defenseclaw/internal/sensor/tactics"
 	"github.com/defenseclaw/defenseclaw/internal/shellparse"
 	"mvdan.cc/sh/v3/syntax"
 )
@@ -21,19 +29,318 @@ import (
 const UnprovenReasonKey = "\x00unproven-write"
 
 var unprovenReasonTitles = map[string]string{
-	"trap":                 "A trap handler can write a protected file",
-	"function":             "A called function can write a protected file",
-	"dynamic-command":      "A dynamic command can write a protected file",
-	"dynamic-argument":     "A dynamic argument can select a protected file",
-	"eval-source":          "Evaluated or sourced code can write a protected file",
-	"interpreter-path":     "Interpreter file effects cannot be proved safe for the protected path",
-	"interpreter-argument": "An interpreter has a dynamic argument after writable code",
-	"shell-parse":          "A shell parse error leaves a protected write unproved",
-	"shell-parse-bound":    "A shell parse exceeded the protected write proof bound",
-	"copy-directory":       "A copy into a directory can select a protected file",
-	"cdpath":               "CDPATH can select a directory containing a protected file link",
-	"nested-shell":         "A nested shell or shell script can write a protected file",
+	"trap":                   "A trap handler can write a protected file",
+	"function":               "A called function can write a protected file",
+	"dynamic-command":        "A dynamic command can write a protected file",
+	"dynamic-argument":       "A dynamic argument can select a protected file",
+	"eval-source":            "Evaluated or sourced code can write a protected file",
+	"interpreter-path":       "Interpreter file effects cannot be proved safe for the protected path",
+	"interpreter-argument":   "An interpreter has a dynamic argument after writable code",
+	"shell-parse":            "A shell parse error leaves a protected write unproved",
+	"shell-parse-bound":      "A shell parse exceeded the protected write proof bound",
+	UnprovenParserFault:      "The command could not be parsed safely",
+	UnprovenBoundedPaths:     "A write operand expanded past the path bound and may name a protected file",
+	"copy-directory":         "A copy into a directory can select a protected file",
+	"cdpath":                 "CDPATH can select a directory containing a protected file link",
+	"nested-shell":           "A nested shell or shell script can write a protected file",
+	UnprovenLinkUnread:       "A link the command makes or changes could not be read and may lead to a protected file",
+	UnprovenTargetUnresolved: "A write target could not be resolved and may be a protected file",
 }
+
+// linkCallText is link-making code this package does not evaluate:
+// interpreter, PowerShell and Windows link calls, wider than opaqueLink
+// (Perl and Ruby symlink, a .NET or COM link call).
+var linkCallText = lazyregexp.New(`(?i)symlink|hardlink|junction|\bos\.link\b|\bFile\.link\b|\blink\s*\(|mklink|createsymboliclink|createhardlink`)
+
+// newItemText is a New-Item spelling, read by commandNewItemMayMakeLink;
+// newItemAliasText is its ni alias in a command position.
+var (
+	newItemText      = lazyregexp.New(`(?i)\bnew-item\b`)
+	newItemAliasText = lazyregexp.New(`(?i)(?:^|[\s;|&({])ni\s`)
+)
+
+// newItemSpellingIndexes are the New-Item spellings of PowerShell text: the
+// name, and its ni alias in a command position. The alias counts as the name
+// does, so a ni call the PowerShell reading leaves without argv (a dynamic
+// operand) is an unread spelling, as such a New-Item call is
+// (rel-1-0-10:GAP-0849, native T12: ni -Ty SymbolicLink with a computed
+// target read as no link, and with a static one it kept the opaque reading).
+func newItemSpellingIndexes(command string) [][]int {
+	return append(newItemText.FindAllStringIndex(command, -1), newItemAliasText.FindAllStringIndex(command, -1)...)
+}
+
+// commandNewItemMayMakeLink reports a command whose New-Item calls may make
+// a link: unless the text reads as PowerShell and every New-Item
+// spelling in it is a call whose item type is fixed as a file or a folder
+// (powerShellNewItemMayMakeLink). Any New-Item counted as a possible link
+// before, so on a Windows host a benign script that writes a file and then
+// creates one with New-Item -ItemType File kept its authorized-keys block
+// in the default tier (rel-1-0-10:GAP-0801).
+func commandNewItemMayMakeLink(command string) bool {
+	mayMakeLink, unread, _ := newItemCallsMayMakeLink(command)
+	return mayMakeLink || unread
+}
+
+// commandNewItemLinkSpelled is commandNewItemMayMakeLink for the link
+// reading (commandLinksRead): a New-Item spelling the PowerShell reading did
+// not read as a call (text another program runs, such as a PowerShell script
+// in a bash string, or a script block) is read from its words
+// (newItemTextMayMakeLink) instead of counting as a possible link, so a
+// folder or a file New-Item in such text keeps the reading it had before
+// (rel-1-0-10:GAP-0849: only the -ItemType link spelling was read there).
+func commandNewItemLinkSpelled(command string) bool {
+	mayMakeLink, unread, powerShell := newItemCallsMayMakeLink(command)
+	return mayMakeLink || unread && newItemTextMayMakeLink(command, powerShell)
+}
+
+// newItemTextMayMakeLink reads every New-Item spelling of a text from its
+// words alone: the words of its statement (newItemTextWords), without their
+// quotes and without redirections, bind as powerShellNewItemMayMakeLink binds
+// a call's words; a word that may expand at run time is not static. A
+// statement whose bracket is still open at the end of the text is not read,
+// so it may make a link. In text that reads as PowerShell (powerShell) the ni
+// alias is read as New-Item is; in text of another dialect it is not read, as
+// in newItemCallsMayMakeLink.
+func newItemTextMayMakeLink(command string, powerShell bool) bool {
+	spellings := newItemText.FindAllStringIndex(command, -1)
+	if powerShell {
+		spellings = newItemSpellingIndexes(command)
+	}
+	for _, loc := range spellings {
+		texts, closed := newItemTextWords(command[loc[1]:])
+		if !closed {
+			return true
+		}
+		var words []string
+		var static []bool
+		for _, word := range texts {
+			word = strings.Trim(word, "'\"`\\")
+			if word == "" || strings.ContainsAny(word, "<>") {
+				continue
+			}
+			words = append(words, word)
+			static = append(static, !strings.ContainsAny(word, "$@(){}`"))
+		}
+		if powerShellNewItemMayMakeLink(words, static, false) {
+			return true
+		}
+	}
+	return false
+}
+
+// newItemTextWords splits the text after a New-Item spelling into the words
+// of its statement. The statement ends at a separator, a pipe or a closing
+// bracket outside any bracket, and a bracketed expression, such as
+// (Split-Path $out) or a script block, is one word with its spaces and
+// separators, as PowerShell reads it (rel-1-0-10:GAP-0849: the words of
+// New-Item -ItemType Directory (Split-Path $out) were split at the space and
+// cut at the parenthesis, so $out read as a second positional word and a
+// folder as a possible link). closed is false when a bracket opened in the
+// statement is still open at the end of the text.
+func newItemTextWords(rest string) (words []string, closed bool) {
+	var word strings.Builder
+	flush := func() {
+		if word.Len() > 0 {
+			words = append(words, word.String())
+			word.Reset()
+		}
+	}
+	depth := 0
+	for _, r := range rest {
+		switch {
+		case r == '(' || r == '{':
+			depth++
+		case r == ')' || r == '}':
+			if depth == 0 {
+				flush()
+				return words, true
+			}
+			depth--
+		case depth == 0 && strings.ContainsRune(";|&\n\r", r):
+			flush()
+			return words, true
+		case depth == 0 && unicode.IsSpace(r):
+			flush()
+			continue
+		}
+		word.WriteRune(r)
+	}
+	flush()
+	return words, depth == 0
+}
+
+// newItemCallsMayMakeLink reads the New-Item calls of a command as
+// PowerShell: mayMakeLink is a read call that may make a link
+// (powerShellNewItemMayMakeLink); unread is a New-Item spelling that is no
+// read call (the text is not PowerShell, or the spelling is in a string or a
+// script block); powerShell is text that reads as PowerShell.
+func newItemCallsMayMakeLink(command string) (mayMakeLink, unread, powerShell bool) {
+	spellings := len(newItemText.FindAllStringIndex(command, -1))
+	aliases := len(newItemAliasText.FindAllStringIndex(command, -1))
+	if spellings == 0 && aliases == 0 {
+		return false, false, false
+	}
+	facts := analyzeAtHookFolder(actionfacts.Input{Tool: "PowerShell", Command: command, DialectHint: actionfacts.DialectPowerShell})
+	// A partial parse (a dynamic value) still names each call it read; a
+	// New-Item spelling outside a read call (a string, a script block)
+	// leaves the counts unequal.
+	if facts.Parse.Dialect != actionfacts.DialectPowerShell {
+		// The ni alias is read in PowerShell text only.
+		return false, spellings > 0, false
+	}
+	// A call after the first of its pipeline reads pipeline input.
+	pipelineHead := make(map[int64]int64)
+	for _, call := range facts.Commands {
+		if head, seen := pipelineHead[call.PipelineID]; call.PipelineID != 0 && (!seen || call.ID < head) {
+			pipelineHead[call.PipelineID] = call.ID
+		}
+	}
+	read := 0
+	for _, call := range facts.Commands {
+		// ni is the built-in alias of New-Item; in PowerShell text its
+		// spelling counts as the name's does.
+		alias := len(call.Argv) > 0 && strings.EqualFold(call.Argv[0], "ni")
+		if len(call.Argv) == 0 || !alias && !strings.EqualFold(call.Argv[0], "new-item") {
+			continue
+		}
+		// A word is static unless it expands at run time (a variable, a
+		// splat, a subexpression or script block, an escape).
+		static := make([]bool, len(call.Argv)-1)
+		for i, word := range call.Argv[1:] {
+			static[i] = call.ArgvComplete || !strings.ContainsAny(word, "$@(){}`")
+		}
+		if powerShellNewItemMayMakeLink(call.Argv[1:], static, call.PipelineID != 0 && pipelineHead[call.PipelineID] != call.ID) {
+			return true, false, true
+		}
+		read++
+	}
+	return false, read != spellings+aliases, true
+}
+
+// powerShellNewItemMayMakeLink reports a New-Item call (the words after the
+// program, and which are static) that may create a link: an item type that
+// is a link or that this reading cannot fix. The words bind as PowerShell
+// binds them (psparse.NewItemParameters): a name or an alias in any case, a
+// prefix that names one parameter only, any dash form, and -Name: with the
+// value in the next word. A word that binds to no known parameter or to more
+// than one, a splat, a dynamic parameter name or item type, or a second
+// positional word may be an item type, so the call may make a link
+// (rel-1-0-10:GAP-0849). piped is a call after the first of its pipeline:
+// ItemType binds from a property of its input. No item type (a file), or a
+// static File, Directory or Container (or a prefix PowerShell reads as one),
+// makes no link.
+func powerShellNewItemMayMakeLink(args []string, static []bool, piped bool) bool {
+	if piped {
+		return true
+	}
+	itemType, typed, positional := "", false, 0
+	for i := 0; i < len(args); i++ {
+		word := args[i]
+		// A splat can carry -ItemType.
+		if strings.HasPrefix(word, "@") {
+			return true
+		}
+		param, value, inline, isParameter, known := psparse.NewItemParameters.BindWord(word)
+		if !isParameter {
+			// A value word: the first takes the -Path position. New-Item has
+			// no other positional parameter, so a second is binding this
+			// reading does not follow.
+			positional++
+			if positional > 1 {
+				return true
+			}
+			continue
+		}
+		// A dynamic word in a parameter's place can be -ItemType.
+		if i >= len(static) || !static[i] || !known {
+			return true
+		}
+		if param.Switch {
+			continue
+		}
+		isItemType := param.Name == "itemtype"
+		if !inline || value == "" {
+			if i+1 >= len(args) {
+				return isItemType
+			}
+			i++
+			value = args[i]
+			if isItemType && (i >= len(static) || !static[i]) {
+				return true
+			}
+		}
+		if !isItemType {
+			continue
+		}
+		if typed {
+			return true
+		}
+		typed, itemType = true, strings.ToLower(strings.Trim(value, "'\""))
+	}
+	return typed && !powerShellItemTypeMakesNoLink(itemType)
+}
+
+// powerShellItemTypeMakesNoLink reports an -ItemType value the FileSystem
+// provider reads as a file or a folder: it matches the value as a
+// case-insensitive prefix (value*) of directory, container and file before
+// the link types. A wildcard or an empty value is not read.
+func powerShellItemTypeMakesNoLink(value string) bool {
+	if value == "" || strings.ContainsAny(value, "*?[]`") {
+		return false
+	}
+	for _, name := range strings.Fields(newItemNoLinkTypes) {
+		if strings.HasPrefix(name, value) {
+			return true
+		}
+	}
+	return false
+}
+
+// newItemNoLinkTypes are the item types the FileSystem provider matches
+// (value*) before the link types: a folder (directory, container) or a file.
+const newItemNoLinkTypes = "directory container file"
+
+// CommandMayMakeLink reports a command that may create a link itself, with a
+// target the static reading cannot place: a link program (also behind a
+// wrapper or a multicall binary), a copy with a link option, link-making
+// interpreter or Windows code, or code it does not read at all (eval,
+// source, a nested shell, a command substitution, a backtick). A link the
+// command makes can point anywhere, the home included, so a write the
+// authorized-keys proof holds as unknown in such a command is not
+// lowered (rel-1-0-10:GAP-0013 review F1).
+func CommandMayMakeLink(command string) bool {
+	if command == "" {
+		return false
+	}
+	if strings.Contains(command, "$(") || strings.Contains(command, "`") || strings.Contains(command, "<(") || strings.Contains(command, ">(") {
+		return true
+	}
+	if opaqueLink.MatchString(command) || linkCallText.MatchString(command) || commandNewItemMayMakeLink(command) {
+		return true
+	}
+	if tactics.RunsProgram(command, linkPrograms...) || tactics.RunsProgram(command, multicallPrograms...) {
+		return true
+	}
+	if tactics.RunsProgram(command, copyPrograms...) && copyLinkOption.MatchString(command) {
+		return true
+	}
+	return tactics.RunsProgram(command, "eval", "source", ".", "sh", "bash", "zsh", "dash", "ksh", "fish", "pwsh", "powershell", "cmd", "busybox", "toybox")
+}
+
+// The classes of an authorized-keys proof that found no protected file but
+// could not show the write is ordinary (rel-1-0-10:GAP-0013).
+const (
+	UnprovenLinkUnread       = "link-unread"
+	UnprovenTargetUnresolved = "target-unresolved"
+)
+
+// UnprovenParserFault is the class of a command the shell parser failed on
+// internally (shellparse.ErrParserFault: a contained panic, or text the
+// recovering parse refuses because it could loop). Nothing about the command
+// was read, so every pack blocks it, as the gateway's failed-check answer did
+// when the panic reached it (rel-1-0-10:GAP-0437, GAP-0486). It wins over
+// every other class of the same command.
+const UnprovenParserFault = "parser-fault"
 
 // UnprovenWriteTitle gives the operator the class that prevented a proof.
 func UnprovenWriteTitle(reason string) string {
@@ -80,7 +387,11 @@ var (
 // dynamic interpreter write operand can name the protected file directly.
 func UnprovenProtectedWrite(command, cwd, home string) string {
 	budget := unprovenParseBudget{bytes: 8 * MaxPayloadBytes, calls: 512}
-	return unprovenProtectedWriteDepth(command, cwd, home, 0, &budget)
+	reason := unprovenProtectedWriteDepth(command, cwd, home, 0, &budget)
+	if budget.fault {
+		return UnprovenParserFault
+	}
+	return reason
 }
 
 // The budget is shared by every nested and recovered parse of one hook call.
@@ -90,6 +401,10 @@ type unprovenParseBudget struct {
 	bytes   int
 	calls   int
 	bounded bool
+	// fault records a recovering parse the parser failed on
+	// (shellparse.ErrParserFault), at any depth; trunc carries its cap.
+	fault bool
+	trunc bounded.Truncated
 }
 
 func unprovenProtectedWriteDepth(command, cwd, home string, depth int, budget *unprovenParseBudget) string {
@@ -128,14 +443,19 @@ func unprovenProtectedWriteDepth(command, cwd, home string, depth int, budget *u
 		}
 		return ""
 	}
-	reachable := false
+	reachable, reachChecked := false, false
 	called := calledFunctions(file, home)
 	reachText := command
 	if strings.Contains(command, "()") || strings.Contains(command, "function ") {
 		reachText = reachableShellWords(file, called, home)
 	}
+	// The answer depends only on the text, the working directory and the home,
+	// so it is read once for the call, not once for each statement that asks
+	// (a "no" was read again for every command of a long script: 100 lines
+	// cost 446,000 lstat calls, 27 s on a Windows host, rel-1-0-10:GAP-0766).
 	checkReach := func() bool {
-		if !reachable {
+		if !reachChecked {
+			reachChecked = true
 			reachable = samePathName(cwd, home) || samePathName(cwd, filepath.Join(home, ".ssh")) ||
 				protectedReachFromText(reachText, cwd, home)
 		}
@@ -424,7 +744,14 @@ func unprovenShellParseWrite(command, cwd, home string, depth int, budget *unpro
 		budget.bounded = true
 		return true // Beyond the command proof bound, effects are unknown.
 	}
-	file, _ := syntax.NewParser(syntax.Variant(syntax.LangBash), syntax.RecoverErrors(8)).Parse(shellparse.Reader(command), "")
+	file, err := shellparse.ParseRecovering(command, 8, &budget.trunc)
+	if errors.Is(err, shellparse.ErrParserFault) {
+		// The parser failed on this text (rel-1-0-10:GAP-0437, GAP-0487):
+		// nothing of it was read. UnprovenProtectedWrite answers
+		// UnprovenParserFault for the whole command, whatever else it found.
+		budget.fault = true
+		return true
+	}
 	if file == nil {
 		return strings.Contains(command, ">") ||
 			unprovenWriter.MatchString(command) && protectedReachFromText(command, cwd, home)
@@ -583,9 +910,9 @@ func awkCallUnproven(call *syntax.CallExpr, cwd, home string) bool {
 			options = false
 			continue
 		}
-		name, value, attached := awkOptionValue(word)
+		name, value, attached := awkprog.OptionValue(word)
 		if name == "" {
-			unknownOption = unknownOption || !slicesContainsString(awkHarmlessFlags, word)
+			unknownOption = unknownOption || !slicesContainsString(awkprog.HarmlessFlags, word)
 			continue
 		}
 		valueFixed := true
@@ -632,34 +959,11 @@ func awkCallUnproven(call *syntax.CallExpr, cwd, home string) bool {
 		return true
 	}
 	for _, program := range programs {
-		if awkUnprovenOutput(program, cwd, home) || awkCommandEffect(program) {
+		if awkUnprovenOutput(program, cwd, home) || awkprog.Parse(program).RunsCommand() {
 			return true
 		}
 	}
 	return dynamicOperand && unknownOption
-}
-
-// Flags that take no value and add no file or command effect. Every other
-// option (gawk -o, -p, -d, -D, -i, -l, ...) leaves the program unknown.
-var awkHarmlessFlags = []string{"--posix", "-P", "--traditional", "--compat", "--sandbox", "-S",
-	"-b", "--characters-as-bytes", "-n", "--non-decimal-data", "-N", "--use-lc-numeric",
-	"-M", "--bignum", "-O", "--optimize", "-s", "--no-optimize", "-r", "--re-interval"}
-
-// awkOptionValue names a value option (f, e, v or F) and its attached value.
-func awkOptionValue(word string) (name, value string, attached bool) {
-	for _, option := range []struct{ short, long, name string }{
-		{"-f", "--file", "f"}, {"-e", "--source", "e"}, {"-v", "--assign", "v"}, {"-F", "--field-separator", "F"},
-	} {
-		switch {
-		case word == option.short || word == option.long:
-			return option.name, "", false
-		case strings.HasPrefix(word, option.long+"="):
-			return option.name, word[len(option.long)+1:], true
-		case strings.HasPrefix(word, option.short) && !strings.HasPrefix(word, "--"):
-			return option.name, word[len(option.short):], true
-		}
-	}
-	return "", "", false
 }
 
 // awkDynamicOptionName names the value option of a computed word whose
@@ -672,7 +976,7 @@ func awkDynamicOptionName(word *syntax.Word) string {
 	if !ok {
 		return ""
 	}
-	name, _, _ := awkOptionValue(literal.Value)
+	name, _, _ := awkprog.OptionValue(literal.Value)
 	return name
 }
 
@@ -688,7 +992,7 @@ func awkDynamicProgram(word *syntax.Word, cwd, home string) (string, bool) {
 		return "", false
 	}
 	output, unsafe, _ := awkOutputProof(text, cwd, home)
-	if output || unsafe || awkCommandEffect(text) {
+	if output || unsafe || awkprog.Parse(text).RunsCommand() {
 		return "", false
 	}
 	return text, true
@@ -731,142 +1035,6 @@ func awkRenderedProgram(word *syntax.Word) (string, bool) {
 	return rendered.String(), true
 }
 
-// awkCommandEffect reports awk code that runs a command (a pipe, system(),
-// or a gawk @ directive that loads more code). Strings, regular expression
-// literals and comments are data; || is a logical operator.
-func awkCommandEffect(code string) bool {
-	previous := byte('{')
-	for i := 0; i < len(code); i++ {
-		c := code[i]
-		if awkBlank(code, &i) {
-			continue
-		}
-		if end, found, ok := awkDataEnd(code, i, previous); found {
-			if !ok {
-				return true
-			}
-			if c != '#' {
-				previous = code[end]
-			}
-			i = end
-			continue
-		}
-		switch {
-		case c == '|':
-			if i+1 < len(code) && code[i+1] == '|' {
-				i++
-			} else {
-				return true
-			}
-		case c == '@':
-			return true
-		case awkWordByte(c) && (c < '0' || c > '9'):
-			start := i
-			for i+1 < len(code) && awkWordByte(code[i+1]) {
-				i++
-			}
-			if code[start:i+1] == "system" {
-				return true
-			}
-		}
-		previous = code[i]
-	}
-	return false
-}
-
-func awkWordByte(c byte) bool {
-	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_'
-}
-
-// awkBlank steps over a blank or a backslash-newline continuation. Awk reads
-// both as a blank: neither ends a statement nor opens a literal.
-func awkBlank(code string, i *int) bool {
-	switch code[*i] {
-	case ' ', '\t', '\r':
-		return true
-	case '\\':
-		next := *i + 1
-		if next < len(code) && code[next] == '\r' {
-			next++
-		}
-		if next < len(code) && code[next] == '\n' {
-			*i = next
-			return true
-		}
-	}
-	return false
-}
-
-// awkDataEnd finds the awk data that starts at code[i]: a string, a regular
-// expression literal (a slash where awk cannot divide, after the previous
-// significant byte) or a comment. It returns the index of the data's last
-// byte; a comment ends before its newline, which still ends the statement.
-// found is false when code[i] starts no data. ok is false when the data has
-// no end awk accepts, so the program does not run as this scan reads it.
-func awkDataEnd(code string, i int, previous byte) (end int, found, ok bool) {
-	switch c := code[i]; {
-	case c == '"':
-		for j := i + 1; j < len(code); j++ {
-			switch code[j] {
-			case '\\':
-				j++
-			case '"':
-				return j, true, true
-			}
-		}
-		return len(code) - 1, true, false
-	case c == '#':
-		if newline := strings.IndexByte(code[i:], '\n'); newline >= 0 {
-			return i + newline - 1, true, true
-		}
-		return len(code) - 1, true, true
-	case c == '/' && strings.IndexByte("(,{};!~&|\n?:=}", previous) >= 0:
-		end, ok := awkRegexEnd(code, i)
-		return end, true, ok
-	}
-	return i, false, true
-}
-
-// awkRegexEnd returns the index of the slash that closes the regular
-// expression literal opening at code[start]. A slash inside a bracket
-// expression belongs to it, as gawk and mawk read it; an awk that ends the
-// literal there rejects its unclosed bracket and runs nothing. [:class:],
-// [.symbol.] and [=equivalent=] close with their own pair, not the first ].
-// ok is false for a literal that does not close on its line.
-func awkRegexEnd(code string, start int) (int, bool) {
-	bracket := false
-	for i := start + 1; i < len(code); i++ {
-		c := code[i]
-		switch {
-		case c == '\n':
-			return i, false
-		case c == '\\':
-			if i+1 < len(code) && code[i+1] == '\n' {
-				return i + 1, false
-			}
-			i++
-		case bracket && c == '[' && i+1 < len(code) && strings.IndexByte(":.=", code[i+1]) >= 0:
-			closer := string(code[i+1]) + "]"
-			if end := strings.Index(code[i+2:], closer); end >= 0 && !strings.Contains(code[i+2:i+2+end], "\n") {
-				i += 2 + end + 1
-			}
-		case bracket && c == ']':
-			bracket = false
-		case c == '[':
-			bracket = true
-			if i+1 < len(code) && code[i+1] == '^' {
-				i++
-			}
-			if i+1 < len(code) && code[i+1] == ']' {
-				i++
-			}
-		case !bracket && c == '/':
-			return i, true
-		}
-	}
-	return len(code) - 1, false
-}
-
 // provedOrdinaryInterpreterPrefix reports wrapper words that end with a
 // complete inline interpreter program which is a proved write to a fixed
 // ordinary destination; later dynamic words can only be its argv.
@@ -895,21 +1063,24 @@ func awkUnprovenOutput(code, cwd, home string) bool {
 func awkOutputProof(code, cwd, home string) (output, unsafe bool, literals []string) {
 	printing := false
 	previous := byte('{')
+	var slash awkprog.Slash
 	for i := 0; i < len(code); i++ {
 		c := code[i]
-		if awkBlank(code, &i) {
+		if awkprog.Blank(code, &i) {
 			continue
 		}
-		if end, found, ok := awkDataEnd(code, i, previous); found {
+		if end, found, ok := awkprog.DataEnd(code, i, slash.RegexOK()); found {
 			if !ok {
 				return output, true, literals
 			}
 			if c != '#' {
 				previous = code[end]
+				slash.Data()
 			}
 			i = end
 			continue
 		}
+		slash.Feed(code, i)
 		before := previous
 		previous = c
 		if c == '\n' && strings.IndexByte(",&|", before) >= 0 {
@@ -920,9 +1091,9 @@ func awkOutputProof(code, cwd, home string) (output, unsafe bool, literals []str
 			printing = false
 			continue
 		}
-		if awkWordByte(c) && (c < '0' || c > '9') {
+		if awkprog.WordByte(c) && (c < '0' || c > '9') {
 			start := i
-			for i+1 < len(code) && awkWordByte(code[i+1]) {
+			for i+1 < len(code) && awkprog.WordByte(code[i+1]) {
 				i++
 			}
 			previous = code[i]
@@ -1465,10 +1636,6 @@ func pythonHomePathAssignment(statement, home string) (string, bool) {
 	return "", false
 }
 
-// PythonInertTextMasked is supplied by guardrail, which imports hookpaths.
-// With no callback, every byte remains potentially executable.
-var PythonInertTextMasked func(code, cwd string) string
-
 func pythonCallSetsImportPath(call *syntax.CallExpr) bool {
 	for _, assignment := range call.Assigns {
 		if assignment.Name == nil {
@@ -1486,9 +1653,10 @@ func unprovenInterpreterCode(code, language, cwd, home string, maskInert bool) (
 		return "interpreter-path", true
 	}
 	scan := code
-	if maskInert && PythonInertTextMasked != nil &&
-		(language == "python" || strings.HasPrefix(language, "python3")) {
-		if masked := PythonInertTextMasked(code, cwd); len(masked) == len(code) {
+	if maskInert && (language == "python" || strings.HasPrefix(language, "python3")) {
+		// The string text no string of the program can run is blanked
+		// (pythoninert); the hook binary and the gateway mask alike.
+		if masked := pythoninert.InertTextMasked(code, cwd); len(masked) == len(code) {
 			scan = masked
 		}
 	}
@@ -1818,6 +1986,13 @@ func protectedReachPathWith(path string, protected protectedFiles, ssh string, m
 	if !ok {
 		return false
 	}
+	return protectedReachResolved(resolved, protected, ssh)
+}
+
+// protectedReachResolved is protectedReachPathWith for a path already resolved
+// (resolveWriteTarget): a caller that asks about many protected sets resolves
+// each path once, not once for every set.
+func protectedReachResolved(resolved string, protected protectedFiles, ssh string) bool {
 	if protected.has(resolved) || samePathName(resolved, ssh) {
 		return true
 	}

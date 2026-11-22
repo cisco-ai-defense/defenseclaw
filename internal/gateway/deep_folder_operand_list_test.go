@@ -12,30 +12,94 @@ import (
 	"testing"
 )
 
-// deepFolderFixture is the managed fixture in a project folder about 200
-// bytes deep, where the client map holds about half of the 255 operands of a
-// command: every entry carries two absolute paths.
+// deepFolderMinProject is the depth the GAP-1058 regression needs: a project
+// folder at least this many bytes deep, so the client map holds about half of
+// the 255 operands of a command.
+const deepFolderMinProject = 180
+
+// deepFolderFixture is the managed fixture in a project folder at least
+// deepFolderMinProject bytes deep on any temp root. The padding is computed
+// from the length of the temp folder it was made in, not fixed: a fixed pad
+// left the project at 161 plus the digits of the two random folder suffixes,
+// so a short root such as /tmp passed only when both had 10 digits
+// (rel-1-0-10:GAP-0439).
 func deepFolderFixture(t *testing.T) b36ManagedHookFixture {
 	t.Helper()
-	f := deepFolderFixtureOf(t, 2, 60)
-	if len(f.project) < 180 {
-		t.Fatalf("project folder is %d bytes, want a deep one", len(f.project))
+	if runtime.GOOS == "darwin" {
+		// macOS limits a path to 1024 bytes and its temp root is long already.
+		return deepFolderFixtureOf(t, 2, 60)
+	}
+	base := deepFolderBase(t)
+	// project = base/<pad>/b36<digits>/homes/alice/project, digits >= 1.
+	rest := len(filepath.Join("b36", "homes", "alice", "project")) + 1
+	pad := deepFolderMinProject - len(base) - 1 - 1 - rest
+	if pad < 1 {
+		pad = 1
+	}
+	const nameMax = 200
+	deep := base
+	for pad > 0 {
+		w := pad
+		if w > nameMax {
+			w = nameMax
+		}
+		deep = filepath.Join(deep, strings.Repeat("a", w))
+		pad -= w
+	}
+	if err := os.MkdirAll(deep, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	f := newB36ManagedHookFixtureIn(t, deep)
+	if len(f.project) < deepFolderMinProject {
+		t.Fatalf("project folder is %d bytes, want at least %d", len(f.project), deepFolderMinProject)
 	}
 	return f
 }
 
-// deepFolderFixtureOf is the managed fixture below parts folders of width
-// bytes each.
-func deepFolderFixtureOf(t *testing.T, parts, width int) b36ManagedHookFixture {
+// deepFolderBase is a fresh folder in the temp root, removed with the test.
+func deepFolderBase(t *testing.T) string {
 	t.Helper()
-	if runtime.GOOS == "darwin" && parts*width > 800 {
-		t.Skip("macOS limits a path to 1024 bytes")
-	}
 	base, err := os.MkdirTemp("", "deepfolder")
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(base) })
+	return base
+}
+
+// The fixture reaches its depth on a short temp root whatever digits the two
+// random folder names get: it is made 150 times under /tmp. Before the pad was
+// computed from the root, some of these had a project folder of 179
+// bytes or fewer.
+func TestDeepFolderFixtureReachesItsDepthOnAShortTempRoot(t *testing.T) {
+	if runtime.GOOS == "windows" || runtime.GOOS == "darwin" {
+		t.Skip("short POSIX temp root")
+	}
+	if fi, err := os.Stat("/tmp"); err != nil || !fi.IsDir() {
+		t.Skip("no /tmp")
+	}
+	t.Setenv("TMPDIR", "/tmp")
+	for i := 0; i < 150; i++ {
+		t.Run(fmt.Sprintf("make=%d", i), func(t *testing.T) {
+			f := deepFolderFixture(t)
+			if len(f.project) < deepFolderMinProject {
+				t.Fatalf("project folder is %d bytes, want at least %d", len(f.project), deepFolderMinProject)
+			}
+		})
+	}
+}
+
+// deepFolderFixtureOf is the managed fixture below parts folders of width
+// bytes each. It names that folder as the fixture's parent: setting TMPDIR
+// moved t.TempDir() there only while GOTMPDIR was unset, so on a gate box
+// that sets GOTMPDIR the project stayed about 125 bytes deep and both deep
+// folder tests failed their own guards (rel-1-0-10:GAP-0439, GAP-0423).
+func deepFolderFixtureOf(t *testing.T, parts, width int) b36ManagedHookFixture {
+	t.Helper()
+	if runtime.GOOS == "darwin" && parts*width > 800 {
+		t.Skip("macOS limits a path to 1024 bytes")
+	}
+	base := deepFolderBase(t)
 	deep := base
 	for i := 0; i < parts; i++ {
 		deep = filepath.Join(deep, strings.Repeat("a", width))
@@ -43,8 +107,7 @@ func deepFolderFixtureOf(t *testing.T, parts, width int) b36ManagedHookFixture {
 	if err := os.MkdirAll(deep, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("TMPDIR", deep)
-	return newB36ManagedHookFixture(t)
+	return newB36ManagedHookFixtureIn(t, deep)
 }
 
 // TestLongOperandListInADeepFolderIsAllowedAndKeepsProtectedTargets is

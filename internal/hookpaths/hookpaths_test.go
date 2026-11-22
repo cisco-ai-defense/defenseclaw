@@ -270,9 +270,7 @@ func TestRelativeLinkTargetDotDot(t *testing.T) {
 		{filepath.Join(home, "a2", "l"), filepath.FromSlash("b/../t")},
 		{filepath.Join(home, "ordinary", "lib"), filepath.FromSlash("../shared")},
 	} {
-		if err := os.Symlink(link.target, link.name); err != nil {
-			t.Fatal(err)
-		}
+		testSymlink(t, link.target, link.name)
 	}
 	for _, row := range []struct {
 		name, path, want string

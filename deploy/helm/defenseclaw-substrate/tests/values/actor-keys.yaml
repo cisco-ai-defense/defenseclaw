@@ -1,0 +1,13 @@
+# A per-cluster actor token issuer (GAP-0194): the issuer is only compared
+# as the iss string, and the gateway reads the keys from the keys URL with
+# the CA from a ConfigMap, mounted on the gateway only.
+substrate:
+  actorKeys:
+    url: https://idp.ate-system.svc/openid/v1/jwks
+    caConfigMap: idp-ca
+config:
+  substrate:
+    identity:
+      issuer: https://substrate-e2.idp.invalid
+      audience: defenseclaw
+      token_lifetime_seconds: 300

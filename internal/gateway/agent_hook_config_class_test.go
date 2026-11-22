@@ -6,6 +6,7 @@ package gateway
 import (
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -103,6 +104,24 @@ func (h gap0048Home) links(t *testing.T) bool {
 		}
 	}
 	return true
+}
+
+// gap0048DirLink links the directory target at link. A Windows standard user
+// may not make a symlink, so there a junction, which needs no privilege, stands
+// in; a link that cannot be made fails the test, never a row that then runs
+// against a path that does not exist (rel-1-0-10:GAP-1388).
+func gap0048DirLink(t *testing.T, target, link string) {
+	t.Helper()
+	err := os.Symlink(target, link)
+	if err == nil {
+		return
+	}
+	if runtime.GOOS != "windows" {
+		t.Fatalf("link %s: %v", link, err)
+	}
+	if out, jerr := exec.Command("cmd.exe", "/d", "/c", "mklink", "/J", link, target).CombinedOutput(); jerr != nil {
+		t.Fatalf("link %s: symlink: %v; junction: %v %s", link, err, jerr, out)
+	}
 }
 
 // gap0048Row is one tool call and its verdict in the default and the strict

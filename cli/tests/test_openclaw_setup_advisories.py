@@ -32,6 +32,8 @@ import pytest
 from defenseclaw.commands import cmd_setup
 from defenseclaw.connector_contracts import openclaw_bedrock_plugin_missing
 
+pytestmark = pytest.mark.usefixtures("openclaw_proxy_topology")
+
 MID = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
 LEGACY_BEDROCK = {
     "models": {

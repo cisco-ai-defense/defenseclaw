@@ -578,9 +578,10 @@ func TestHandleAgentHook_RecoveredEvaluationUsesFailMode(t *testing.T) {
 		{"claudecode", "PreToolUse", "observe", "closed", "block"},
 		{"codex", "PreToolUse", "observe", "closed", "block"},
 		{"hermes", "pre_tool_call", "observe", "closed", "block"},
-		// PostToolUse is advisory in Claude Code's contract: its native
-		// answer cannot refuse the completed call.
-		{"claudecode", "PostToolUse", "action", "closed", "allow"},
+		// PostToolUse answers decision block on Claude Code (GAP-0605): a
+		// failed check in closed mode is that block form. The completed call
+		// stays done; the reason reaches the model and systemMessage the user.
+		{"claudecode", "PostToolUse", "action", "closed", "block"},
 	} {
 		t.Run(strings.Join([]string{tc.connector, tc.event, tc.mode, tc.failMode}, "/"), func(t *testing.T) {
 			previous, had := hookProfileRuntimes[tc.connector]
@@ -629,8 +630,8 @@ func TestHandleAgentHook_RecoveredEvaluationUsesFailMode(t *testing.T) {
 			if row.Structured["result"] != "panic" || row.Structured["action"] != tc.wantAction || row.Structured["would_block"] != wantWouldBlock {
 				t.Fatalf("audit=%v, want panic/%s/would_block=%v", row.Structured, tc.wantAction, wantWouldBlock)
 			}
-			if tc.event == "PostToolUse" && (decisionIsDenied(response["claude_code_output"]) || row.Enforced) {
-				t.Fatalf("post-tool output=%v enforced=%v, want the advisory answer", response["claude_code_output"], row.Enforced)
+			if tc.event == "PostToolUse" && (!decisionIsDenied(response["claude_code_output"]) || !row.Enforced) {
+				t.Fatalf("post-tool output=%v enforced=%v, want the PostToolUse decision block (GAP-0605)", response["claude_code_output"], row.Enforced)
 			}
 			extra, _ := row.Structured["extra"].(map[string]any)
 			if extra["panic"] != "true" {

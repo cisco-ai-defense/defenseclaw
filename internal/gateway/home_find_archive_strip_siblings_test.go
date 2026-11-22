@@ -98,7 +98,7 @@ func TestHomeFindArchiveStripSkipsSiblingsTheNameTestRefuses(t *testing.T) {
 						t.Fatal(err)
 					}
 				}
-				if blocked := buildVerdict(findings, "tool_call").Action == "block"; blocked != row.block {
+				if blocked := gap0747Blocked(findings, row.block); blocked != row.block {
 					t.Errorf("%s %s %s %q: block=%v, want %v (%s)", mode, connector, row.id, row.command, blocked, row.block,
 						strings.Join(FindingStrings(findings), ","))
 				}

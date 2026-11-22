@@ -266,8 +266,8 @@ actor EventStreamReader {
         observedFindingCounts = [:]
         retainedBufferBytes = logBuffers.values.flatMap { $0 }.reduce(0) { $0 + retainedBytes(of: $1) }
         for row in rows.reversed() {
-            let payload = Self.safeProjectionJSON(row.payloadJSON)
             let projection = Self.safeProjectionJSON(row.projectionJSON)
+            let payload = Self.canonicalPayload(row, projection: projection)
             func value(_ keys: String...) -> String {
                 for key in keys {
                     if let text = payload[key] as? String, !text.isEmpty { return text }
@@ -352,6 +352,18 @@ actor EventStreamReader {
                 if retainedBytes(of: event) <= recordByteLimit { delta.egress.append(event) }
             }
         }
+    }
+
+    /// The payload of a canonical row. A legacy.audit.* compatibility row
+    /// keeps no payload_json since 1.0.10 (S8 R4): its body is the canonical
+    /// record body (projected_record_json body, byte-equal to the old
+    /// payload_json), so Raw JSON shows it instead of {} (GAP-0451), as the
+    /// TUI does. Every other row reads payload_json only.
+    private static func canonicalPayload(_ row: CanonicalEvent, projection: [String: Any]) -> [String: Any] {
+        let payload = safeProjectionJSON(row.payloadJSON)
+        guard row.payloadJSON.isEmpty, row.eventName.hasPrefix("legacy.audit."),
+              let body = projection["body"] as? [String: Any] else { return payload }
+        return body
     }
 
     /// Runtime projections are already redacted. Defense in depth for older

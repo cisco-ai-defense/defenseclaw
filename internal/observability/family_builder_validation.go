@@ -46,7 +46,14 @@ const (
 	FamilyBuildRecordRejected             FamilyBuildErrorCode = "record_rejected"
 )
 
-type FamilyBuildError struct{ code FamilyBuildErrorCode }
+// FamilyBuildError keeps the failure code and, when one field caused it, that
+// field's schema-owned key (a registry name, never a producer value). Error
+// names only the code, so log lines stay as they were; the rejected-record
+// store (#1442) reads the field through Field.
+type FamilyBuildError struct {
+	code  FamilyBuildErrorCode
+	field string
+}
 
 func (buildError *FamilyBuildError) Error() string {
 	if buildError == nil {
@@ -62,12 +69,31 @@ func (buildError *FamilyBuildError) Code() FamilyBuildErrorCode {
 	return buildError.code
 }
 
+// Field is the schema key of the field that failed, or "" when the failure is
+// not about one field (envelope, trace shape, descriptor).
+func (buildError *FamilyBuildError) Field() string {
+	if buildError == nil {
+		return ""
+	}
+	return buildError.field
+}
+
 func IsFamilyBuildError(err error, code FamilyBuildErrorCode) bool {
 	var target *FamilyBuildError
 	return errors.As(err, &target) && target.code == code
 }
 
 func familyBuildFailure(code FamilyBuildErrorCode) error { return &FamilyBuildError{code: code} }
+
+// withFamilyField names the field a field-level failure came from. An error
+// that already names a field, or is not a FamilyBuildError, is returned as it is.
+func withFamilyField(err error, key string) error {
+	var buildError *FamilyBuildError
+	if !errors.As(err, &buildError) || buildError.field != "" {
+		return err
+	}
+	return &FamilyBuildError{code: buildError.code, field: key}
+}
 
 type familyDerivationContext struct {
 	bucket              Bucket
@@ -403,7 +429,7 @@ func materializeFamilyFields(
 	provided := make(map[string]familyFieldValue, len(values))
 	for _, value := range values {
 		if _, duplicate := provided[value.key]; duplicate {
-			return nil, nil, familyBuildFailure(FamilyBuildDuplicateField)
+			return nil, nil, withFamilyField(familyBuildFailure(FamilyBuildDuplicateField), value.key)
 		}
 		provided[value.key] = value
 	}
@@ -413,7 +439,7 @@ func materializeFamilyFields(
 	}
 	for key := range provided {
 		if _, exists := known[key]; !exists {
-			return nil, nil, familyBuildFailure(FamilyBuildUnknownField)
+			return nil, nil, withFamilyField(familyBuildFailure(FamilyBuildUnknownField), key)
 		}
 	}
 
@@ -422,7 +448,7 @@ func materializeFamilyFields(
 	for _, descriptor := range descriptors {
 		required, forbidden, err := resolvedFamilyRequirement(descriptor, conditionStates)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, withFamilyField(err, descriptor.key)
 		}
 		providedValue := provided[descriptor.key]
 		// A derived conditional value has no caller-owned presence. When its
@@ -433,29 +459,29 @@ func materializeFamilyFields(
 		if descriptor.requirement == familyRequirementConditional && !required &&
 			descriptor.source != familyValueInput {
 			if providedValue.present {
-				return nil, nil, familyBuildFailure(FamilyBuildForbiddenField)
+				return nil, nil, withFamilyField(familyBuildFailure(FamilyBuildForbiddenField), descriptor.key)
 			}
 			continue
 		}
 		value, present, err := resolvedFamilyFieldValue(descriptor, providedValue, context)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, withFamilyField(err, descriptor.key)
 		}
 		if forbidden && present {
-			return nil, nil, familyBuildFailure(FamilyBuildForbiddenField)
+			return nil, nil, withFamilyField(familyBuildFailure(FamilyBuildForbiddenField), descriptor.key)
 		}
 		if required && !present {
-			return nil, nil, familyBuildFailure(FamilyBuildMissingRequired)
+			return nil, nil, withFamilyField(familyBuildFailure(FamilyBuildMissingRequired), descriptor.key)
 		}
 		if !present {
 			continue
 		}
 		if err := validateFamilyFieldValue(descriptor, value); err != nil {
-			return nil, nil, err
+			return nil, nil, withFamilyField(err, descriptor.key)
 		}
 		canonical, err := canonicalFamilyJSONValue(value)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, withFamilyField(err, descriptor.key)
 		}
 		object[descriptor.key] = canonical
 		addFamilyLeafClasses(classes, "/"+encodeJSONPointerToken(descriptor.key), canonical, descriptor.fieldClass)

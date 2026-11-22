@@ -162,7 +162,7 @@ func (c removedOnlyConnector) Route(*http.Request, []byte) (*ConnectorSignals, e
 	return nil, fmt.Errorf("connector %q was removed", c.name)
 }
 
-func (c removedOnlyConnector) SetCredentials(string, string) {}
+func (c removedOnlyConnector) SetCredentials(string) {}
 
 func (c removedOnlyConnector) scriptPath(dataDir string) string {
 	return filepath.Join(dataDir, "hooks", c.script)

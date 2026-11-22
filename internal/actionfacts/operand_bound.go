@@ -110,6 +110,10 @@ type heredocMark struct {
 
 func (b *operandBounder) run() {
 	command, n := b.command, len(b.command)
+	// The reading is about as long as the command: one buffer, not the
+	// doublings of a 1 MiB here-document copied line by line
+	// (rel-1-0-10:GAP-0299).
+	b.out.Grow(n)
 	for i := 0; i < n; {
 		c := command[i]
 		switch {

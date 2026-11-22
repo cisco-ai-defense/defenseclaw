@@ -539,11 +539,11 @@ If the OpenShell gateway does not answer, or a global OpenShell policy prevents 
 
 #### MicroVM create is refused on Linux with KVM
 
-**You see:** "the MicroVM could not resolve localhost to its loopback ingress" and the new sandbox is deleted.
+**You see:** "OpenShell gave the MicroVM's root folder to the sandbox's account, so DefenseClaw cannot trust what the guest resolves localhost to" (before 1.0.10: "the MicroVM could not resolve localhost to its loopback ingress") and the new sandbox is deleted. macOS is affected the same way.
 
 **Cause:** With OpenShell 0.1.6, MicroVM sandboxes on Linux with KVM do not start on per-user or managed computers. OpenShell gives the sandbox account ownership of the guest root folder; on a managed computer, the OpenShell gateway also runs as the enrolled account. DefenseClaw cannot trust the guest's `localhost` resolver and refuses the sandbox.
 
-**Fix:** Until a fixed OpenShell release is supported, use Docker. On a per-user computer, run `defenseclaw sandbox setup` and answer no to MicroVMs. On a managed computer, ask your administrator to set `enterprise.openshell.driver: docker` and run `ensure`. `driver_fallback: docker` does not cover this refusal.
+**Fix:** Until a fixed OpenShell release is supported, use Docker. On a per-user computer, run `defenseclaw sandbox setup` and answer no to MicroVMs. On a managed computer, ask your administrator to set `enterprise.openshell.driver: docker` and run `ensure`. On a Mac, Docker needs Docker Desktop 29.8 or newer with **Enable host networking** on ([macOS](/docs/sandboxes/macos#docker-desktops-vm-has-no-landlock)). `driver_fallback: docker` does not cover this refusal.
 
 #### OpenShell issues that are open upstream
 

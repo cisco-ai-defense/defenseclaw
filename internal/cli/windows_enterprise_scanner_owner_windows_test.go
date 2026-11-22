@@ -8,11 +8,12 @@ package cli
 import (
 	"errors"
 	"fmt"
-	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 
 	"golang.org/x/sys/windows"
 

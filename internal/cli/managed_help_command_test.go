@@ -23,6 +23,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -32,9 +33,9 @@ import (
 // user with no per-user config got the managed refusal. Every help request
 // the table's own help row lists now prints help and exits 0.
 func TestManagedWindowsHelpCommandRunsWithoutPerUserConfig(t *testing.T) {
-	previous := managedHostWindowsStandalone
-	t.Cleanup(func() { managedHostWindowsStandalone = previous })
-	managedHostWindowsStandalone = func() (string, bool) { return `HKLM\SOFTWARE\Cisco\DefenseClaw\Enterprise`, true }
+	previous := hookcli.ManagedHostWindowsStandalone
+	t.Cleanup(func() { hookcli.ManagedHostWindowsStandalone = previous })
+	hookcli.ManagedHostWindowsStandalone = func() (string, bool) { return `HKLM\SOFTWARE\Cisco\DefenseClaw\Enterprise`, true }
 	t.Setenv(managed.DeploymentModeEnv, "")
 	t.Setenv(managed.ConfigPathEnv, "")
 	t.Setenv("DEFENSECLAW_HOME", t.TempDir())

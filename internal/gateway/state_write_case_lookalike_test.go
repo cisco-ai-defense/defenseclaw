@@ -19,7 +19,7 @@ func TestStateWriteCaseDifferentLookalikeFollowsFileSystemCase(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX command matrix")
 	}
-	_, cwd := r104ReviewHome(t)
+	_, cwd := r104ReviewHomeNoAlias(t)
 	api := instructionProtectionTestAPI(t, "claudecode", "action", "HIGH")
 	lookalikeBlocks := runtime.GOOS != "linux"
 	rows := []struct {

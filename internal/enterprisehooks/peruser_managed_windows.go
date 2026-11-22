@@ -65,6 +65,12 @@ func RegisterWindowsStandalonePerUserConnectors(registry *connector.Registry) {
 		registry.RegisterBuiltin(connector.NewCopilotConnector())
 		return
 	}
+	registerWindowsStandalonePerUserConnectors(registry)
+}
+
+// registerWindowsStandalonePerUserConnectors adds every built-in per-user
+// connector of the standalone profile to registry.
+func registerWindowsStandalonePerUserConnectors(registry *connector.Registry) {
 	registry.RegisterBuiltin(connector.NewCopilotConnector())
 	registry.RegisterBuiltin(connector.NewAntigravityConnector())
 	registry.RegisterBuiltin(connector.NewDevinConnector())
@@ -335,7 +341,9 @@ func updateWindowsPerUserManagedEnrollment(
 		if err != nil {
 			return err
 		}
-		if exists && !sameWindowsEnterprisePath(current.HookExecutable, hookExecutable) {
+		// An enrollment an older launch image of this install recorded is
+		// rewritten with the current one: that is the switch (GAP-0751).
+		if exists && !sameWindowsManagedHookImage(current.HookExecutable, hookExecutable) {
 			return fmt.Errorf(
 				"enterprise hooks: %s enrollment belongs to hook executable %s, not %s",
 				connectorName,
@@ -439,7 +447,9 @@ func resolveWindowsPerUserManagedHookRuntime(
 		return result, nil
 	}
 	result.PolicyActive = true
-	if !sameWindowsEnterprisePath(enrollment.HookExecutable, hookExecutable) {
+	// The invoking hook may be an older launch image of this install
+	// (GAP-0751); the generation it reads is resolved for that executable.
+	if !sameWindowsManagedHookImage(enrollment.HookExecutable, hookExecutable) {
 		return result, fmt.Errorf(
 			"enterprise hooks: invoking hook executable %s does not match the %s enrollment executable %s",
 			hookExecutable,
@@ -583,7 +593,13 @@ func verifyWindowsPerUserManagedRegistration(
 	if !exists {
 		return fmt.Errorf("enterprise hooks: %s enrollment is absent", name)
 	}
-	if !sameWindowsEnterprisePath(enrollment.HookExecutable, target.hookExecutable) {
+	// A verification that accepts an earlier release render also accepts an
+	// enrollment that still names the earlier image the target records: the
+	// hook admits it, and the first reconcile in an active session rewrites it
+	// (GAP-0751, GAP-1096).
+	if !sameWindowsEnterprisePath(enrollment.HookExecutable, target.hookExecutable) &&
+		(target.recordsHookExecutable() == target.hookExecutable ||
+			!sameWindowsEnterprisePath(enrollment.HookExecutable, target.recordsHookExecutable())) {
 		return fmt.Errorf("enterprise hooks: %s enrollment names a different hook executable", name)
 	}
 	entry, ok := windowsPerUserManagedEnrollmentTargetForSID(enrollment, target.sid.String())
@@ -598,7 +614,7 @@ func verifyWindowsPerUserManagedRegistration(
 		name,
 		target.sid,
 		target.dataDir,
-		target.hookExecutable,
+		target.recordsHookExecutable(),
 		target.setup.APIAddr,
 		target.setup.HookAPIToken,
 		contractID,

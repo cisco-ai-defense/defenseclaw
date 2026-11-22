@@ -63,11 +63,12 @@ def test_managed_package_command_scope(page, facts, obsolete):
 
 
 @pytest.mark.parametrize("page", ["enterprise/mdm/index.mdx", "enterprise/mdm/intune-macos.mdx"])
-def test_mdm_live_delivery_names_the_test_build(page):
+def test_mdm_pages_carry_no_test_build_talk(page):
     text = (DOCS / page).read_text()
-    assert "`9.9.9`" in text
-    assert "f9ed814b1" in text
-    assert "test build" in text
+    assert "`9.9.9`" not in text
+    assert "f9ed814b1" not in text
+    assert "test build" not in text
+    assert "Preview" in text or "supported" in text
 
 
 def test_mdm_invalid_candidate_code_is_consistent():

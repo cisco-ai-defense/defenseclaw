@@ -17,6 +17,7 @@
 package lazyregexp
 
 import (
+	"errors"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -120,11 +121,25 @@ func TestEveryModulePatternCompiles(t *testing.T) {
 	pkgs := map[string]*pkgFiles{} // by import path
 	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
+			// Tests of other packages may run in parallel in this
+			// checkout and remove their own scratch folders (for
+			// example enterprisehooks' .m4-test-* folders) between
+			// the listing and the visit. A path that is gone holds no
+			// pattern to check.
+			if errors.Is(err, fs.ErrNotExist) {
+				return nil
+			}
 			return err
 		}
 		if d.IsDir() {
 			switch d.Name() {
-			case "vendor", "node_modules", "testdata", ".git":
+			case "vendor", "node_modules", "testdata":
+				return filepath.SkipDir
+			}
+			// The go tool ignores folders whose names start with "."
+			// (".git", ".github", test scratch folders), so no package
+			// of the module lives there.
+			if path != root && strings.HasPrefix(d.Name(), ".") {
 				return filepath.SkipDir
 			}
 			return nil
@@ -133,6 +148,9 @@ func TestEveryModulePatternCompiles(t *testing.T) {
 			return nil
 		}
 		file, err := parser.ParseFile(fset, path, nil, parser.SkipObjectResolution)
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil // removed by a parallel test after the listing
+		}
 		if err != nil {
 			return err
 		}
@@ -268,5 +286,22 @@ func TestEveryModulePatternCompiles(t *testing.T) {
 	}
 	if unread != runtimeBuiltPatterns {
 		t.Fatalf("%d lazyregexp.New patterns are built at run time, want %d: make a new one a constant, or update runtimeBuiltPatterns with a test of it", unread, runtimeBuiltPatterns)
+	}
+}
+
+func TestOfWrapsACompiledPatternWithoutRegisteringIt(t *testing.T) {
+	registryMu.Lock()
+	before := len(registry)
+	registryMu.Unlock()
+	rx := regexp.MustCompile(`a+b`)
+	lr := Of(rx)
+	if lr.Regexp() != rx || !lr.MatchString("aab") || lr.String() != "a+b" {
+		t.Fatalf("Of did not wrap the compiled pattern: %v", lr.Regexp())
+	}
+	registryMu.Lock()
+	after := len(registry)
+	registryMu.Unlock()
+	if after != before {
+		t.Fatalf("Of registered the pattern: registry %d -> %d", before, after)
 	}
 }

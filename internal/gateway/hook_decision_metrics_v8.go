@@ -220,7 +220,15 @@ func (a *APIServer) emitHookDecisionLogV8(
 			DefenseClawGuardrailLatencyMs:       observability.Present(max(float64(env.ElapsedMs), 0)),
 			DefenseClawGuardrailReason:          hookV8OptionalText(hookSourceReason(resp), hookDecisionReasonMaxBytes),
 			DefenseClawGuardrailRuleIds:         hookDecisionV8RuleIDs(resp.RuleIDs),
+			DefenseClawGuardrailRuleNames:       hookDecisionV8RuleNames(resp.RuleNames),
 			DefenseClawGuardrailJudgeFallback:   hookDecisionV8JudgeFallback(env),
+			// The connector-hook facts local readers need, now that a benign
+			// per-user allow keeps only this row (#1384, registry v4).
+			DefenseClawHookRulePackDir:          hookV8OptionalText(env.RulePackDir, 8192),
+			DefenseClawHookRawOrigin:            hookDecisionV8RawOrigin(env.RawOrigin),
+			DefenseClawHookRawEventIds:          hookDecisionV8RuleIDs(env.RawEventIDs),
+			DefenseClawHookBodyBytes:            observability.Present(max(env.BodyBytes, 0)),
+			DefenseClawHookBoundedPrefixReview:  hookDecisionV8BoundedPrefixReview(env),
 			DefenseClawSandboxID:                sandboxID,
 			DefenseClawSandboxName:              sandboxName,
 			DefenseClawSandboxDriver:            managed.Driver,
@@ -232,7 +240,31 @@ func (a *APIServer) emitHookDecisionLogV8(
 			DefenseClawOpenshellInstallMode:     managed.InstallMode,
 			DefenseClawSubjectKey:               managed.SubjectKey,
 		}
+		if sub := hookV8Substrate(ctx); sub.ActorUID.IsPresent() {
+			identityInput.DefenseClawSandboxRuntime = sub.Runtime
+			if sub.Driver.IsPresent() {
+				identityInput.DefenseClawSandboxDriver = sub.Driver
+			}
+			identityInput.DefenseClawSandboxSubstrateAtespace = sub.Atespace
+			identityInput.DefenseClawSandboxSubstrateActor = sub.Actor
+			identityInput.DefenseClawSandboxSubstrateActorUid = sub.ActorUID
+			identityInput.DefenseClawSandboxSubstrateTemplate = sub.Template
+			identityInput.DefenseClawSandboxSubstrateBatchID = sub.BatchID
+			identityInput.DefenseClawSandboxSubstrateKitVersion = sub.KitVersion
+			identityInput.DefenseClawSandboxSubstrateParentUid = sub.ParentUID
+			identityInput.DefenseClawSandboxSubstrateRunMode = sub.RunMode
+			identityInput.AteActorUid = sub.ActorUID
+		}
 		meta.Identity.applyTo(&identityInput)
+		if cfg := a.decisionConfig(ctx); cfg != nil && cfg.SecureClientIntegration() {
+			// Secure Client records keep the shape of main (#1092): its
+			// connector-hook row stays local and holds these facts.
+			identityInput.DefenseClawHookRulePackDir = observability.Absent[string]()
+			identityInput.DefenseClawHookRawOrigin = observability.Absent[string]()
+			identityInput.DefenseClawHookRawEventIds = observability.Absent[[]string]()
+			identityInput.DefenseClawHookBodyBytes = observability.Absent[int64]()
+			identityInput.DefenseClawHookBoundedPrefixReview = observability.Absent[bool]()
+		}
 		return builder.BuildLogCompatHookDecision(identityInput)
 	})
 	var pipelineErr *pipeline.Error
@@ -247,6 +279,20 @@ func (a *APIServer) emitHookDecisionLogV8(
 		return hookDecisionLogUnbuildable
 	}
 	return hookDecisionLogFailed
+}
+
+func hookDecisionV8RawOrigin(origin string) observability.Optional[string] {
+	if origin != "hook" {
+		return observability.Absent[string]()
+	}
+	return observability.Present(origin)
+}
+
+func hookDecisionV8BoundedPrefixReview(env HookAuditEnvelope) observability.Optional[bool] {
+	if env.Extra["bounded_prefix_review"] != "true" {
+		return observability.Absent[bool]()
+	}
+	return observability.Present(true)
 }
 
 // hookDecisionResult is the result every sink of a hook decision carries:
@@ -570,6 +616,26 @@ func hookDecisionV8RuleIDs(values []string) observability.Optional[[]string] {
 	}
 	if len(result) == 0 {
 		return observability.Absent[[]string]()
+	}
+	return observability.Present(result)
+}
+
+func hookDecisionV8RuleNames(values []string) observability.Optional[[]string] {
+	if len(values) == 0 {
+		return observability.Absent[[]string]()
+	}
+	if len(values) > 8 {
+		values = values[:8]
+	}
+	result := make([]string, 0, len(values))
+	total := 0
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" || len(value) > 256 || !utf8.ValidString(value) || total+len(value) > 2048 {
+			return observability.Absent[[]string]()
+		}
+		total += len(value)
+		result = append(result, value)
 	}
 	return observability.Present(result)
 }

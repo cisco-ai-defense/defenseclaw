@@ -209,6 +209,7 @@ func analyze(input Input, twinCommand string, capture *redirectTargetCapture) Fa
 		}
 		parse := func(source string) parseOutput {
 			parsed := parseCommandAs(source, dialect, startID, 0)
+			parsed.windowsHookHost = input.WindowsHookHost
 			parsed.curlCapabilities = authenticatedCurlCapabilities(input.CurlCapabilities)
 			expandBoundedInlineInterpreters(&parsed, 0)
 			classifyOutput(&parsed)
@@ -255,12 +256,16 @@ func analyze(input Input, twinCommand string, capture *redirectTargetCapture) Fa
 		if parsed.status == StatusPartial &&
 			(dialect == DialectPowerShell || dialect == DialectCMD) {
 			// The same for $HOME, ~ and %USERPROFILE% under a Windows
-			// ActiveHome (GAP-0912). A program with no operand grammar
-			// stays partial the same way after the rewrite (type nul >
-			// %USERPROFILE%\f), so its static redirect targets keep
-			// their path facts, as for the POSIX home (GAP-2225, GAP-2408).
+			// ActiveHome (GAP-0912), and for PowerShell's $HOME and ~ in a
+			// script pwsh runs under a Linux or macOS one: a launcher body
+			// (rel-1-0-10:GAP-1134) or the command of a PowerShell tool
+			// (rel-1-0-10:GAP-1214), posixPowerShellScript. A program
+			// with no operand grammar stays partial the same way after the
+			// rewrite (type nul > %USERPROFILE%\f), so its static redirect
+			// targets keep their path facts, as for the POSIX home
+			// (GAP-2225, GAP-2408).
 			home, _ := normalizeActiveHome(input.ActiveHome)
-			if rewrite, ok := rewriteTrustedWindowsShellHome(command, home, dialect); ok {
+			if rewrite, ok := rewriteTrustedShellHome(command, home, dialect, posixPowerShellScript(input)); ok {
 				// As for a POSIX home, a rewrite that only narrows the issues
 				// is kept: a redirect to a home path in a command list the
 				// classifier reads only in part (type a.txt & type nul >
@@ -307,6 +312,7 @@ func analyze(input Input, twinCommand string, capture *redirectTargetCapture) Fa
 		input.ActiveAgentFilesCaseInsensitiveUncertain
 	facts.ActiveAgentFilesUncertain = input.ActiveAgentFilesUncertain
 	facts.ActiveStateTreeNames = maps.Clone(input.ActiveStateTreeNames)
+	facts.windowsHookHost = input.WindowsHookHost
 	classifyCanonicalPasswordCrackerPotfileRead(&facts)
 	facts.SensitiveEgressArtifactWrites =
 		projectSensitiveEgressArtifactWrites(input)
@@ -374,8 +380,74 @@ func analyze(input Input, twinCommand string, capture *redirectTargetCapture) Fa
 		projectPOSIXNonRootUIDZeroAccountWrites(input)
 	facts.POSIXUnrestrictedSudoersGrantWrites =
 		projectPOSIXUnrestrictedSudoersGrantWrites(input, facts)
+	if facts.Parse.Status != StatusComplete && facts.Parse.Status != StatusNotApplicable {
+		facts.sendSources = senderSourcesOf(input, extracted, argv)
+	}
 	return facts
 }
+
+// senderSourcesOf is every shell value and argv of a call, for the sender
+// reader: the command text read (or refused), the values a conflict left
+// out, the argv, and a one-word command with its args read as one argv.
+func senderSourcesOf(input Input, extracted extractedInput, argv []string) []sendSource {
+	var sources []sendSource
+	seen := map[string]bool{}
+	addText := func(text string) {
+		if text == "" || seen[text] || len(sources) >= maxSendSources {
+			return
+		}
+		dialect, _ := chooseRawCommandDialect(input.Tool, input.DialectHint, text)
+		switch dialect {
+		case DialectPOSIX, DialectPowerShell, DialectCMD:
+		default:
+			return
+		}
+		seen[text] = true
+		sources = append(sources, sendSource{text: text, dialect: dialect})
+	}
+	addArgv := func(words []string) {
+		if len(words) == 0 || len(sources) >= maxSendSources {
+			return
+		}
+		sources = append(sources, sendSource{argv: cloneSlice(words)})
+	}
+	addText(input.Command)
+	addText(extracted.command)
+	for _, text := range extracted.unreadCommands {
+		addText(text)
+	}
+	argvs := [][]string{argv}
+	if len(extracted.argv) > 0 && !equalStrings(extracted.argv, argv) {
+		argvs = append(argvs, extracted.argv)
+	}
+	argvs = append(argvs, extracted.unreadArgvs...)
+	for _, words := range argvs {
+		addArgv(words)
+	}
+	// A program named on its own (a one-word command, or a one-element
+	// argv) beside its args: the tool runs them as one argv.
+	var programs []string
+	if word := extracted.command; word != "" && !strings.ContainsAny(word, " \t\r\n") {
+		programs = append(programs, word)
+	}
+	for _, words := range argvs {
+		if len(words) == 1 {
+			programs = append(programs, words[0])
+		}
+	}
+	for _, program := range programs {
+		for _, words := range argvs {
+			if len(words) > 1 || len(words) == 1 && words[0] != program {
+				if words[0] != program {
+					addArgv(append([]string{program}, words...))
+				}
+			}
+		}
+	}
+	return sources
+}
+
+const maxSendSources = 8
 
 func equivalentExtractedCommand(tool, direct, extracted string) bool {
 	if direct == extracted {
@@ -429,6 +501,22 @@ func analyzeStructuredArgv(
 	wrapperDepth int,
 	dialect Dialect,
 ) parseOutput {
+	return analyzeStructuredArgvWords(argv, nil, startID, wrapperDepth, dialect)
+}
+
+// analyzeStructuredArgvWords is analyzeStructuredArgv for the words of a
+// command a static wrapper runs (expandStaticPOSIXWrappers): words are the
+// shell's word objects of argv, so the wrapped program sees which words
+// expand at run time exactly as the bare call does, and an interpreter case
+// (the awk program reading among them) answers as it answers the bare call
+// (rel-1-0-10:GAP-0859). nil words are the exact words of a structured argv.
+func analyzeStructuredArgvWords(
+	argv []string,
+	words []ArgumentFact,
+	startID int64,
+	wrapperDepth int,
+	dialect Dialect,
+) parseOutput {
 	if !validDialect(dialect) {
 		out := newParseOutput(DialectNone, startID)
 		out.markAmbiguous(IssueConflictingSources)
@@ -461,7 +549,13 @@ func analyzeStructuredArgv(
 	}
 
 	command := commandFromArgvAs(out.nextCommandID(), argv, dialect)
+	withShellWords(&command, words)
 	if !out.appendCommand(command) {
+		return out
+	}
+	if !command.ArgvComplete && !IsAwkCall(command) && !staticPOSIXWrappedAwkCall(command) {
+		// A word that expands at run time: the program is not read on, as the
+		// shell parser does not read it on for the bare call.
 		return out
 	}
 	program := command.Program
@@ -469,8 +563,8 @@ func analyzeStructuredArgv(
 		child         parseOutput
 		nestedDialect = DialectNone
 	)
-	switch program {
-	case "env", "sudo", "command", "builtin", "exec", "nsenter", "chroot":
+	switch posixStaticWrapperSwitchKey(program) {
+	case posixStaticWrapperKey:
 		nestedArgv, ok, uncertain := staticPOSIXWrapperArgv(argv, program)
 		if uncertain {
 			out.markUnsupported(IssueUnsupportedConstruct)
@@ -479,16 +573,27 @@ func analyzeStructuredArgv(
 		if !ok {
 			return out
 		}
-		if wrapperDepth >= maxWrapperDepth {
+		cost := staticPOSIXWrapperDepthCost(argv)
+		if wrapperDepth+cost > maxWrapperDepth {
 			out.markLimit(IssueWrapperLimit)
 			return out
 		}
-		child = analyzeStructuredArgv(
+		var run []WrapperFact
+		if cost == 0 {
+			nestedArgv, run = staticPOSIXNeutralRun(nestedArgv)
+		}
+		child = analyzeStructuredArgvWords(
 			nestedArgv,
+			staticPOSIXWrappedWords(command.Arguments, argv, nestedArgv),
 			out.nextID,
-			wrapperDepth+1,
+			wrapperDepth+cost,
 			DialectPOSIX,
 		)
+		if len(run) > 0 {
+			for i := range child.commands {
+				child.commands[i].Wrappers = append(cloneWrapperFacts(run), child.commands[i].Wrappers...)
+			}
+		}
 	case "su":
 		nested, ok := exactRootSuCommand(command)
 		if !ok {
@@ -505,6 +610,22 @@ func analyzeStructuredArgv(
 		}
 		nestedDialect = DialectPOSIX
 		child = parsePOSIX(nested, out.nextID, wrapperDepth+1)
+	case "awk", "gawk", "mawk", "nawk":
+		// An awk program behind an exact wrapper (env, sudo, ...) reaches here as
+		// argv: the shell commands it starts through system(), print | and
+		// | getline are judged as the hook running them directly, as in the
+		// shell parser (posix.go, GAP-0499). A command built at run time is
+		// answered by the gateway at the unknown tier (awkprog.DynamicReason).
+		body := AwkCall(command).Read().Body
+		if body == "" {
+			return out
+		}
+		if wrapperDepth >= maxWrapperDepth {
+			out.markLimit(IssueWrapperLimit)
+			return out
+		}
+		nestedDialect = DialectPOSIX
+		child = parsePOSIX(body, out.nextID, wrapperDepth+1)
 	case "eval":
 		if len(argv) < 2 {
 			return out
@@ -577,6 +698,36 @@ func analyzeStructuredArgv(
 	}
 	attachStructuredChild(&out, command, child)
 	return out
+}
+
+// staticPOSIXNeutralRun reads the rest of a run of context-neutral wrappers
+// (nice, time, timeout, nohup) in one walk: nested is the command at the end
+// of the run, and run the wrappers in between, outermost first, as the
+// wrapper facts each command of the end command's reading carries. Each
+// wrapper of the run was a command of its own read one level deeper, and
+// each level prepended and cloned the wrapper facts of every command below
+// it: a 64-deep run, which spends no wrapper depth (substrate-1:GAP-0334),
+// cost O(n^3) allocations per call, and the hook got slower with every call
+// in one process (rel-1-0-10:GAP-0977). A wrapper the reading cannot unwrap
+// exactly (an uncertain option, no command) ends the run, and the usual
+// reading of that wrapper decides. The words of every wrapper of the run are
+// static when the outer call's are (a suffix of its words), so the outer
+// call's checks hold for them.
+func staticPOSIXNeutralRun(nested []string) ([]string, []WrapperFact) {
+	var run []WrapperFact
+	for len(nested) >= 2 {
+		program := commandProgram(nested[0])
+		if _, neutral := posixContextNeutralWrappers[program]; !neutral {
+			break
+		}
+		deeper, ok, uncertain := staticPOSIXWrapperArgv(nested, program)
+		if !ok || uncertain || len(deeper) == 0 {
+			break
+		}
+		run = append(run, WrapperFact{Executable: nested[0], Argv: nested})
+		nested = deeper
+	}
+	return nested, run
 }
 
 func attachStructuredChild(
@@ -1491,6 +1642,16 @@ type toolArgumentSemantics struct {
 func PathTool(tool string) bool {
 	semantics, known := lookupToolArgumentSemantics(tool)
 	return known && semantics.acceptsPaths
+}
+
+// KnownTool reports a tool name actionfacts reads with its own argument
+// semantics or runs as a command (a reviewed file, network or shell tool).
+// A name outside it, such as an MCP tool, is read by internal/toolshape.
+func KnownTool(tool string) bool {
+	if _, known := lookupToolArgumentSemantics(tool); known {
+		return true
+	}
+	return argsExecutionTool(tool)
 }
 
 func lookupToolArgumentSemantics(tool string) (toolArgumentSemantics, bool) {

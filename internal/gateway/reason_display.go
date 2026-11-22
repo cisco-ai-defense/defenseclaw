@@ -111,6 +111,36 @@ func trustedBuiltInFindingLabel(label string) bool {
 	return false
 }
 
+// logDisplayReason is the stderr diagnostic form of a verdict reason or
+// finding label. A "matched: <rule-id>:<title>, ..." reason, or a single
+// "<rule-id>:<title>" label, whose every label is a compiled-in or loaded
+// rule-pack rule keeps its titles: they are the pack author's static text.
+// Anything else goes through redaction.Reason. Before, the generic redaction
+// kept the rule id and hashed the title, so "ENT-EMAIL-BULK:Email address"
+// logged as "ENT-EMAIL-BULK:<redacted len=13 sha=f2488fd4>", which reads as a
+// 13-byte match span that exists nowhere in the request (substrate-1:GAP-0159
+// side finding).
+func logDisplayReason(reason string) string {
+	if redaction.Reveal() || reason == "" {
+		return reason
+	}
+	body, matched := strings.CutPrefix(reason, builtInMatchReasonPrefix)
+	if !matched {
+		body = reason
+	}
+	labels := splitMatchLabels(body)
+	if len(labels) == 0 {
+		return redaction.Reason(reason)
+	}
+	for _, label := range labels {
+		id, title, ok := strings.Cut(label, ":")
+		if !ok || (!trustedBuiltInFindingLabel(label) && !activeRulePackLabel(id, title)) {
+			return redaction.Reason(reason)
+		}
+	}
+	return reason
+}
+
 // trustedShipAuthoredReason reports a reason DefenseClaw wrote from its own
 // text only: catalog rule labels, CodeGuard counts, the unparsed and
 // oversize refusals, the install-window refusal and the session-start gate
@@ -232,6 +262,14 @@ const agentReviewAction = "review"
 // redaction directive, or the managed agent-reason carve-out (which hands
 // the agent the raw reason) leave displayReason unchanged.
 func agentVerdictReason(action, sourceReason, displayReason string, policy redaction.SinkPolicy) string {
+	reason := agentVerdictReasonOf(action, sourceReason, displayReason, policy)
+	if action == "block" {
+		reason = withUnclearedReadNote(reason, sourceReason)
+	}
+	return reason
+}
+
+func agentVerdictReasonOf(action, sourceReason, displayReason string, policy redaction.SinkPolicy) string {
 	if action != "block" && action != "confirm" && action != agentReviewAction {
 		return displayReason
 	}
@@ -772,4 +810,36 @@ func agentConfirmUnavailableReason(agent, sourceReason, displayReason string, po
 	}
 	return "DefenseClaw blocked this action: your organization's policy needs your confirmation for it" + detail +
 		", and " + agent + " cannot ask for it. Contact your administrator if you need it allowed."
+}
+
+// unclearedReadNotePrefix starts the one sentence a block keeps from the
+// source reason on every agent surface: why the secret-read chain refused
+// the egress of a connector whose results can't be tied to their calls
+// (substrate-1 GAP-0338). It is DefenseClaw's own text around a connector
+// name.
+const unclearedReadNotePrefix = "The credentials read could not be cleared: no result correlation for "
+
+// unclearedReadConnector is the connector name the note may carry.
+var unclearedReadConnector = lazyregexp.New(`^[a-z][a-z0-9-]{0,31}$`)
+
+// unclearedReadNote is the note sentence in reason, or "".
+func unclearedReadNote(reason string) string {
+	_, rest, ok := strings.Cut(reason, unclearedReadNotePrefix)
+	if !ok {
+		return ""
+	}
+	name, _, ok := strings.Cut(rest, ".")
+	if !ok || !unclearedReadConnector.MatchString(name) {
+		return ""
+	}
+	return unclearedReadNotePrefix + name + "."
+}
+
+// withUnclearedReadNote adds the note of sourceReason to reason once.
+func withUnclearedReadNote(reason, sourceReason string) string {
+	note := unclearedReadNote(sourceReason)
+	if note == "" || strings.Contains(reason, note) {
+		return reason
+	}
+	return strings.TrimSpace(reason + " " + note)
 }

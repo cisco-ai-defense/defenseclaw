@@ -230,7 +230,7 @@ Cowork is the agent mode of Claude Desktop. For each user who has run Claude Des
 | `engine_version` | The newest Claude Code build that Claude Desktop bundles (the engine behind Cowork). |
 | `vm_bundle_present`, `vm_bundle_bytes` | The Cowork VM bundle and the combined size of its files. The bundle is several gigabytes; the size comes from the file sizes, never from reading the images. |
 | `cowork_plugins` | Names of the plugins enabled in Cowork, sorted, at most 64. Names only. |
-| `deployment` | Which Claude Desktop deployment the data folder belongs to: `1p` (signed in to Claude) or `3p` (third-party inference: Amazon Bedrock, Google Vertex AI, Microsoft Foundry). The value comes from the folder (the table below), not from the `deploymentMode` in its `claude_desktop_config.json`; on the measured machines the two always agreed. Each deployment has its own data folder, so a user who runs both gets two signals. |
+| `deployment` | Which Claude Desktop deployment the data folder belongs to: `1p` (signed in to Claude) or `3p` (third-party inference: Amazon Bedrock, Google Vertex AI, Microsoft Foundry). The value comes from the folder (the table below), not from the `deploymentMode` in its `claude_desktop_config.json`. Each deployment has its own data folder, so a user who runs both gets two signals. |
 
 The data folders the scan reads:
 
@@ -251,7 +251,7 @@ The scan lists and reads these paths with fixed limits and never starts Claude D
 
 On Windows the MSIX folders (`claude_<id>`, `Claude_*`) are matched by name, at most four per folder. The folder whose id matches an installed MSIX package (`%LOCALAPPDATA%\Packages\Claude_<id>`) is read first. When more folders match than are read, every signal of that account is partial (`cap_exceeded`). A data folder that holds only Claude Desktop's migration marker (`.user-data-left.claude_<id>`, left behind in the older MSIX folder once the data moved to `Claude-Data`) is not reported. The catalog reads `claude_desktop_config.json` (configs and MCP servers) in the same folders, MSIX folders included.
 
-The macOS folders and the Windows MSIX folders were measured on Claude Desktop 4.16336.0, for both deployments. These are still unmeasured and follow the macOS layout until a Cowork host confirms them:
+The macOS folders and the Windows MSIX folders are read for Claude Desktop 4.16336.0, for both deployments. The following are Preview and follow the macOS layout until a Cowork host confirms them:
 
 - the VM bundle name and place (`vm_bundles\claudevm.bundle`); the scan falls back to the first `*.bundle` folder in `vm_bundles`,
 - the session and plugin files under `local-agent-mode-sessions`, and `vm-support-probe.json`,
@@ -1039,6 +1039,89 @@ agent inventory received through agent discovery uses the same per-item model.
 Incomplete, overflowed, or otherwise non-authoritative collections are retained
 as local diagnostics instead of being exported as authoritative snapshots.
 
+Managed MCP inventory treats an unreadable connector configuration, a malformed
+server entry in otherwise valid JSON, an invalid Codex or Amp configuration,
+or an incomplete discovery scan as a partial observation. Valid entries from
+other sources remain in the local diagnostic. The gateway emits a local,
+redacted inventory diagnostic and keeps the last complete managed snapshot;
+it does not report the missing entries as removals. A complete scan can publish
+a genuinely empty inventory when servers have been removed, but only after
+every connector configuration read completes successfully. The partial
+summary contains a source and counts; component rows owned by the unreadable
+connector stay on the local diagnostic route and are not exported as managed
+inventory. Complete sibling connectors can still submit their server records
+individually. Those submissions are additive observations, not an authoritative
+endpoint snapshot, and do not tell AI Defense to remove rows belonging to the
+unreadable connector.
+On Windows, a LocalSystem gateway cannot read configured user-profile MCP
+files. That collection remains partial until a per-user source provides them;
+the gateway does not replace the last complete cloud snapshot with an empty one.
+
+Local MCP component records include the safe server name, safe command basename,
+transport, connector, native configuration scope when known, and the discovery
+source. For command-based entries, when the gateway has its installation token,
+it also exports separate keyed HMAC fingerprints of the full command and ordered arguments. The token
+never leaves the gateway through these fields; raw command paths, arguments,
+environment variables, headers, and OAuth material are not exported. A gateway
+token rotation changes these fingerprints. A local MCP component ID derives
+from the connector, user scope, and server alias, preserving the identity used
+by earlier inventory releases. Command, argument, or token changes update the
+record's fingerprints without replacing the component or its tool history. The
+connector and user scope distinguish separate installations on one endpoint,
+while the alias keeps two entries with identical commands and ordered arguments
+visible as distinct configured rows. Renaming the alias creates a new component.
+
+Remote MCP component records also include the configured server endpoint URL.
+The exported value keeps only the HTTP(S) scheme, host, and explicit port; it
+omits userinfo, path, query parameters, and fragments. A remote MCP component ID
+also derives from connector, user scope, and server alias. Endpoint changes
+update that component in place. DefenseClaw does not probe
+the endpoint to collect this value; it comes from native connector
+configuration. Renaming a remote server alias creates a new component.
+
+When a local or remote MCP admission scan completes, DefenseClaw preserves the bounded tool
+names returned by its existing `tools/list` request even if the scanner reports
+zero findings. Authenticated agent hooks also record the names of MCP tools
+called at runtime. Managed local and remote inventory emit these as `mcp_tool` components with
+the current parent server component ID, `advertised` or `observed` source, and
+the UTC observation time. It exports names only: tool descriptions, input
+schemas, call arguments, and results are excluded. A completed empty listing
+clears previously advertised names from the bounded durable snapshot; an
+incomplete listing produces a local partial diagnostic. An ambiguous server
+alias across user profiles is not attributed to either profile. Advertised tool
+evidence and observed tool names are persisted in bounded local SQLite state,
+restored after a gateway restart, and retained until an authoritative parent
+refresh retires the configured alias. Each parent retains at most 256 distinct
+advertised names and 256 distinct observed names. Once an observed parent is at
+that limit, a new distinct name is rejected and the collection remains partial;
+existing names and their timestamps are never evicted to make room. A restored complete advertised listing
+remains complete once its configured parent is matched again; a restored
+partial listing remains partial until that server completes a later listing,
+including an empty one. Durable restore completeness is tracked separately for
+advertised and observed tools: an unreadable advertised snapshot keeps only the
+advertised collection diagnostic, while unresolved observed rows keep the
+observed collection diagnostic until their read succeeds. A newly observed
+tool also remains diagnostic until SQLite confirms its write; a failed write is
+retried on a later inventory cycle without delaying the hook response. A
+listing that completes before its newly configured parent has been refreshed
+is retained in memory, persisted, and published after that parent is
+established. Tool components use the managed route only when their parent
+server component is eligible for that route. An over-limit or otherwise
+diagnostic-only parent therefore cannot leave an authoritative orphan tool.
+This flow does not reconcile a central
+principal catalog. Remote tool lineage follows the alias-based server ID.
+DefenseClaw reuses the scanner's existing remote
+`tools/list` request and does not start an additional endpoint probe. If an
+older scanner omits the tool-list field, the gateway marks the listing unknown
+and keeps the last complete managed snapshot. Only managed enterprise mode
+records this tool inventory; parent identities refresh with inventory
+publication. An observed call alone does not mark a listing complete.
+The `defenseclaw.inventory.mcp_tool_events` counter distinguishes listing,
+authenticated-call observation, and export submission using fixed outcome and
+reason labels. An observation whose verified server parent is unavailable uses
+the bounded `parent_unavailable` reason; the counter never uses a tool name,
+server URL, scan error text, or call argument as a label.
+
 The release-owned managed agent, connector, MCP, skill, and plugin inventory
 actions are blocked from operator-configured remote destinations. Mandatory
 SQLite remains authoritative locally, and the generated CMID-authenticated AI
@@ -1361,7 +1444,7 @@ On Linux it runs as an unprivileged account inside a systemd sandbox; on
 Windows it runs as a dedicated virtual service account. On managed macOS it runs as `_defenseclaw`. On all three, only the sensor
 helper holds root.
 
-Measured under the shipped Linux unit, a gateway reading directly sees
+Under the shipped Linux unit, a gateway reading directly sees
 **one process and zero connections**. `ProcSubset=pid` removes `/proc/net` and
 hides every other process before privilege is even considered,
 `RestrictAddressFamilies` blocks `AF_NETLINK` and `AF_PACKET`, and the empty

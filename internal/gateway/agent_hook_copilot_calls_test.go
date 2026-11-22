@@ -10,7 +10,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 
@@ -56,9 +55,9 @@ func copilotParallelOnHost(t *testing.T, input map[string]any, project string) m
 	if err := json.Unmarshal(raw, &out); err != nil {
 		t.Fatal(err)
 	}
-	if runtime.GOOS == "windows" {
-		out["cwd"] = project
-	}
+	// The captured cwd is the prefix the paths are moved from. Setting it to
+	// project first (as on Windows before) moved no path, so the calls named
+	// another account's profile on the test host (rel-1-0-10:GAP-1622).
 	cwd, _ := out["cwd"].(string)
 	move := func(value any) any {
 		text, ok := value.(string)

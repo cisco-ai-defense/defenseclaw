@@ -27,6 +27,15 @@ import (
 // them see the same answer. A nil memo reads the file system every time.
 type TargetMemo struct {
 	mu sync.Mutex
+	// excuseNonWrites makes the mention scan leave a protected name alone when
+	// the statement that holds it only reads (ActionMentionsNoWriteRole).
+	excuseNonWrites bool
+	// excuseUnknownRoles widens that scan to the unknown tier
+	// (ActionMentionsNoKnownWrite): see unknownRolesExcused.
+	excuseUnknownRoles bool
+	// startup is the agent's shell startup for this evaluation, from the
+	// hook client's header (nil: the process's own).
+	startup *ShellStartup
 	// prefixes is the write-target walk state after each absolute path
 	// prefix (walkWritePathMemo).
 	prefixes map[string]walkState
@@ -43,6 +52,8 @@ type TargetMemo struct {
 	// resolved are the answers of resolveWriteTarget by the exact path: the
 	// scans of one call ask for the same operands again (GAP-0483).
 	resolved map[string]resolvedTarget
+	// entries are the answers of stateEntryMayDiffer by the exact path.
+	entries map[string]stateEntry
 	// The shared reach reader keeps complete names and per-parent answers.
 	reachNames   map[string]reachNames
 	reachParents map[reachParentKey]reachParentAnswer
@@ -51,14 +62,39 @@ type TargetMemo struct {
 	// Windows candidate checks among them (WorkParts).
 	work       int
 	candidates int
+	// call is the memory of the hook call the memo was made in, when the call
+	// keeps one (memoHookCall): the memo resolves its write targets there.
+	call *TargetMemo
+	// owner is the hook call whose memory this memo is (hookCall.targets,
+	// nil for the memo of one evaluation). It outlives each evaluation, so
+	// it keeps no answer read while the call's budget cut a share wait
+	// short (hookCall.keepsSince): the share may answer later in the call,
+	// and an evaluation after that reads it (rel-1-0-10:GAP-1606).
+	owner *hookCall
 }
 
 // maxTargetMemoEntries bounds a memo: past it, answers are computed and not
 // kept. A call under the hook payload cap has fewer distinct words.
 const maxTargetMemoEntries = 1 << 16
 
-// NewTargetMemo returns an empty memo for one evaluation.
+// NewTargetMemo returns an empty memo for one evaluation. Made in a hook call
+// that keeps a memory of the file system (memoHookCall), it resolves its write
+// targets and state entries in the call's memory: the gateway and the scans
+// make a memo for each evaluation of the call, and each walked the same paths
+// again. A Codex call on Windows whose command named a script behind the
+// system's link bound walked the 63 links once per memo, 7,000 lstat calls
+// and 0.7 s of its answer (rel-1-0-10:GAP-0447). The answers depend only on
+// the path and the file system, which is the same for the whole decision.
 func NewTargetMemo() *TargetMemo {
+	memo := newTargetMemo()
+	if call := memoHookCall(); call != nil {
+		memo.call = call.targets()
+	}
+	return memo
+}
+
+// newTargetMemo is an empty memo that keeps its own answers.
+func newTargetMemo() *TargetMemo {
 	return &TargetMemo{
 		prefixes: make(map[string]walkState),
 		words:    make(map[memoWordKey]bool),
@@ -66,6 +102,7 @@ func NewTargetMemo() *TargetMemo {
 		keys:     make(map[string][]string),
 		files:    make(map[string]protectedFiles),
 		resolved: make(map[string]resolvedTarget),
+		entries:  make(map[string]stateEntry),
 	}
 }
 
@@ -83,10 +120,13 @@ func (m *TargetMemo) protectedFiles(home string) protectedFiles {
 	files, ok := m.files[home]
 	m.mu.Unlock()
 	if !ok {
+		mark := m.cutMark()
 		files = newProtectedFilesWith(home, m)
-		m.mu.Lock()
-		m.files[home] = files
-		m.mu.Unlock()
+		if m.keepsSince(mark) {
+			m.mu.Lock()
+			m.files[home] = files
+			m.mu.Unlock()
+		}
 	}
 	return slices.Clone(files)
 }
@@ -101,10 +141,13 @@ func (m *TargetMemo) ProtectedAuthorizedKeysPaths(home string) []string {
 	paths, ok := m.keys[home]
 	m.mu.Unlock()
 	if !ok {
+		mark := m.cutMark()
 		paths = protectedAuthorizedKeysPaths(home, m)
-		m.mu.Lock()
-		m.keys[home] = paths
-		m.mu.Unlock()
+		if m.keepsSince(mark) {
+			m.mu.Lock()
+			m.keys[home] = paths
+			m.mu.Unlock()
+		}
 	}
 	return slices.Clone(paths)
 }
@@ -170,7 +213,12 @@ func (m *TargetMemo) prefix(key string) (walkState, bool) {
 	return state, ok
 }
 
-func (m *TargetMemo) storePrefix(key string, state walkState) {
+// storePrefix keeps the walk state after the prefix key, unless the budget
+// cut a share wait of the call short since the walk began (mark: cutMark).
+func (m *TargetMemo) storePrefix(key string, state walkState, mark uint64) {
+	if !m.keepsSince(mark) {
+		return
+	}
 	state.crossed = append([]bool(nil), state.crossed...)
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -178,6 +226,29 @@ func (m *TargetMemo) storePrefix(key string, state walkState) {
 		m.prefixes[key] = state
 	}
 }
+
+// cutCall is the hook call whose budget cuts decide what m keeps: the call
+// whose memory m is, or the call an evaluation memo was made in (nil: none,
+// m keeps every answer for its one evaluation, as off Windows).
+func (m *TargetMemo) cutCall() *hookCall {
+	switch {
+	case m == nil:
+		return nil
+	case m.owner != nil:
+		return m.owner
+	case m.call != nil:
+		return m.call.owner
+	}
+	return nil
+}
+
+// cutMark is hookCall.cutMark of cutCall.
+func (m *TargetMemo) cutMark() uint64 { return m.cutCall().cutMark() }
+
+// keepsSince reports whether m keeps an answer read since mark: only when
+// the budget of its call cut no share wait short meanwhile
+// (hookCall.keepsSince).
+func (m *TargetMemo) keepsSince(mark uint64) bool { return m.cutCall().keepsSince(mark) }
 
 func (m *TargetMemo) word(key memoWordKey) (answer, ok bool) {
 	if m == nil {
@@ -212,8 +283,12 @@ func (m *TargetMemo) stateHome(home string) *actionStateHome {
 	if ok {
 		return state
 	}
+	mark := m.cutMark()
 	state = &actionStateHome{home: home, memo: m, done: true}
 	state.resolved, state.ok = m.resolveWriteTarget(home)
+	if !m.keepsSince(mark) {
+		return state
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if earlier, ok := m.homes[home]; ok {
@@ -234,6 +309,9 @@ func (m *TargetMemo) resolveWriteTarget(path string) (string, bool) {
 	if m == nil {
 		return ResolveWriteTarget(path)
 	}
+	if m.call != nil {
+		return m.call.resolveWriteTarget(path)
+	}
 	writeTargetWalks.Add(1)
 	m.mu.Lock()
 	known, found := m.resolved[path]
@@ -241,11 +319,89 @@ func (m *TargetMemo) resolveWriteTarget(path string) (string, bool) {
 	if found {
 		return known.path, known.ok
 	}
+	mark := m.cutMark()
 	resolved, _, _, ok := walkWritePathMemo("", path, 0, false, false, m)
+	if !m.keepsSince(mark) {
+		// A share on the way did not answer only because the call's
+		// budget cut its wait short: the next ask may read it
+		// (rel-1-0-10:GAP-1606).
+		return resolved, ok
+	}
 	m.mu.Lock()
 	if len(m.resolved) < maxTargetMemoEntries {
 		m.resolved[path] = resolvedTarget{path: resolved, ok: ok}
 	}
 	m.mu.Unlock()
 	return resolved, ok
+}
+
+// stateEntry is one answer of actionStateEntryMayDiffer.
+type stateEntry struct{ differ, missing bool }
+
+// stateEntryMayDiffer is actionStateEntryMayDiffer through the memo. The
+// state scans ask for the entry of the same word in every statement and
+// every reading of the call, and on Windows the Lstat of a name behind folder
+// links first walks each link of it for the share check: a word behind the
+// system's link bound cost a Codex call 77 walks of 63 links, 0.8 s
+// (rel-1-0-10:GAP-0447).
+func (m *TargetMemo) stateEntryMayDiffer(value string) (differ, missing bool) {
+	if m == nil {
+		return actionStateEntryMayDiffer(value)
+	}
+	if m.call != nil {
+		return m.call.stateEntryMayDiffer(value)
+	}
+	m.mu.Lock()
+	known, found := m.entries[value]
+	m.mu.Unlock()
+	if found {
+		return known.differ, known.missing
+	}
+	mark := m.cutMark()
+	differ, missing = actionStateEntryMayDiffer(value)
+	if !m.keepsSince(mark) {
+		return differ, missing
+	}
+	m.mu.Lock()
+	if len(m.entries) < maxTargetMemoEntries {
+		m.entries[value] = stateEntry{differ: differ, missing: missing}
+	}
+	m.mu.Unlock()
+	return differ, missing
+}
+
+// nonWritesExcused is set for the scan ActionMentionsNoWriteRole runs; a nil memo
+// (a scan that carries none) never excuses.
+func (m *TargetMemo) nonWritesExcused() bool { return m != nil && m.excuseNonWrites }
+
+// unknownRolesExcused is set for the scan ActionMentionsNoKnownWrite runs: a
+// reader statement keeps its excuse beside a program the scan has no model
+// of (a dynamic program word, an echo of an expansion), in a pipeline and with
+// its output redirected to a file the call names (rel-1-0-10:GAP-0843).
+func (m *TargetMemo) unknownRolesExcused() bool { return m != nil && m.excuseUnknownRoles }
+
+// WithShellStartup sets the agent's shell startup the evaluation's safe
+// proofs judge against and returns the memo.
+func (m *TargetMemo) WithShellStartup(startup *ShellStartup) *TargetMemo {
+	if m != nil {
+		m.startup = startup
+	}
+	return m
+}
+
+// ShellStartup is the startup set by WithShellStartup (nil: none).
+func (m *TargetMemo) ShellStartup() *ShellStartup {
+	if m == nil {
+		return nil
+	}
+	return m.startup
+}
+
+// shellStartup is the agent's startup the evaluation was given, or this
+// process's own.
+func (m *TargetMemo) shellStartup() ShellStartup {
+	if m != nil && m.startup != nil {
+		return *m.startup
+	}
+	return CurrentShellStartup()
 }

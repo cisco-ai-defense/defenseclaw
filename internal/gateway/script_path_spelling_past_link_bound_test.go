@@ -53,7 +53,7 @@ func homeLinkChain(t *testing.T, home string, n int, target string) string {
 // (rel-1-0-9:GAP-0982, WN34-01; one reader for every spelling,
 // readActionScript).
 func TestEveryScriptPathSpellingPastTheLinkBoundIsJudgedByTheTier(t *testing.T) {
-	home, _ := r104ReviewHome(t)
+	home, _ := r104ReviewHomeNoAlias(t)
 	if runtime.GOOS != "windows" {
 		resolved, err := filepath.EvalSymlinks(home)
 		if err != nil {

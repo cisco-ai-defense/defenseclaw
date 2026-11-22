@@ -20,11 +20,18 @@ import (
 // write without a trace). Whether the finding blocks stays what the rule
 // pack's thresholds and the proof of the finding say: a protected file or
 // link that a command names directly, through a value it sets or through a
-// link stays blocked in every profile. No finding of the class is lowered:
-// every reading that tried to tell an unproven target from a named one in
-// the gateway opened a protected write (a link the command makes, an
-// extraction), so the balanced warning for the unproven remainder is a
-// detection and proof task (#1189), not a profile rule.
+// link stays blocked in every profile.
+//
+// An authorized-keys finding whose only basis is a target the proof could
+// not resolve (an unreadable link operation, an operand neither the hook
+// client nor this gateway could place) is not a known key write. Per the
+// owner's rel-1-0-6:GAP-0675 ruling (2026-11-06) and the lead's 1.0.10 answer
+// (rel-1-0-10:GAP-0013, GAP-0004) it is built alert-only for a per-user
+// install in the default and permissive tiers, where the LLM judge, when it
+// is enabled, still judges the call (an alert-only CRITICAL is not decisive
+// under regex_judge); every managed install, in every tier, and the strict
+// tier keep the block (unprovenKeyWriteMayWarn). A target the proof found
+// protected, and every call that names a key file, blocks everywhere.
 var shellProtectedFileRules = map[string]bool{
 	"PERSISTENCE.SSH_AUTHORIZED_KEYS_COMMAND": true,
 	"PATH-SSH-DIR":                    true,
@@ -69,9 +76,12 @@ func markShellProtectedFileFindings(request trustedActionRequest, findings []Rul
 // selfProtectionRules are the rules that protect DefenseClaw itself: a
 // write, append, delete or metadata change of its state, configuration,
 // hooks, policies, receipts and registries (tamper.detector_state_write and
-// the active-state owners that report it). An enforcing finding of these
-// rules blocks in every profile, permissive included, per-user and managed
-// (rel-1-0-6:GAP-0675 review 1 M3a).
+// the active-state owners that report it). An enforcing finding is a high
+// alert in the default and permissive tiers, a managed install's default
+// pack included, and a block in strict and managed-strict, whatever route
+// reported it and whatever the levels say (profileClassFloor; owner,
+// 2026-11-15T15:20Z, rel-1-0-10:GAP-0747). It replaces the every-profile
+// block of rel-1-0-6:GAP-0675 review 1 M3a.
 var selfProtectionRules = map[string]bool{
 	"TAMPER.DETECTOR_STATE_WRITE": true,
 }
@@ -79,26 +89,41 @@ var selfProtectionRules = map[string]bool{
 // profileClassFloor is the one place a rule pack is kept from allowing what
 // the profiles must never allow silently (rel-1-0-6:GAP-0675). It returns the
 // least action the findings get whatever the thresholds say:
-//   - a self-protection finding that could block: block, in every profile;
+//   - a finding of a call the reader could not evaluate (evaluationFault):
+//     block, in every profile;
+//   - a self-protection finding that could block: block in the strict tier
+//     (strict reports it, read once and only for such a finding: the hook
+//     policy tier of the connector, request.StrictPolicy), managed-strict
+//     included; else at least an alert, so a pack that relabels the rule
+//     cannot allow it silently;
 //   - a shell-command protected-file finding that could block: at least an
 //     alert, so the permissive profile shows the finding and records it
 //     instead of allowing the command without a trace.
 //
 // A finding that could not block (detection-only, alert-only, allowed) sets no
-// floor. The Secure Client integration is unchanged: Cisco AI Defense decides
-// there.
-func profileClassFloor(findings []RuleFinding, secureClient bool) string {
+// floor. The Secure Client integration is unchanged: Cisco AI Defense decides there.
+func profileClassFloor(findings []RuleFinding, secureClient bool, strict func() bool) string {
 	floor := guardrailActionAllow
 	if secureClient {
 		return floor
 	}
+	var tierRead, strictTier bool
 	for _, finding := range findings {
 		if !finding.contributesToEnforcement() {
 			continue
 		}
-		if selfProtectionRules[canonicalTrustedRuleID(finding.RuleID)] {
+		selfProtection := selfProtectionRules[canonicalTrustedRuleID(finding.RuleID)]
+		if selfProtection && strict != nil {
+			if !tierRead {
+				strictTier, tierRead = strict(), true
+			}
+			if strictTier {
+				floor = guardrailActionBlock
+			}
+		}
+		if finding.evaluationFault {
 			floor = guardrailActionBlock
-		} else if finding.shellProtectedFile {
+		} else if finding.shellProtectedFile || selfProtection {
 			floor = strongerGuardrailAction(floor, guardrailActionAlert)
 		}
 	}
@@ -122,13 +147,21 @@ const evaluationLimitRuleID = "ACTION-COMPOUND-LIMIT"
 // protected file, so it keeps its block.
 func withoutEnforcingEvaluationLimit(findings []RuleFinding) ([]RuleFinding, bool) {
 	isLimit := func(finding RuleFinding) bool {
-		return finding.contributesToEnforcement() && !finding.omittedOperand &&
-			canonicalTrustedRuleID(finding.RuleID) == evaluationLimitRuleID
+		return finding.contributesToEnforcement() && profileMappedLimitFinding(finding)
 	}
 	if !slices.ContainsFunc(findings, isLimit) {
 		return findings, false
 	}
 	return slices.DeleteFunc(slices.Clone(findings), isLimit), true
+}
+
+// profileMappedLimitFinding reports the evaluation-limit or reader-failure
+// finding that proves no target (not the one that stands for an omitted
+// operand), which the profile maps by tier.
+func profileMappedLimitFinding(finding RuleFinding) bool {
+	id := canonicalTrustedRuleID(finding.RuleID)
+	return !finding.omittedOperand && !finding.evaluationFault &&
+		(id == evaluationLimitRuleID || id == canonicalTrustedRuleID(parseFailureRuleID))
 }
 
 // guardrailActionForProfile maps findings to the action of the profile: the
@@ -143,12 +176,32 @@ func withoutEnforcingEvaluationLimit(findings []RuleFinding) ([]RuleFinding, boo
 func guardrailActionForProfile(
 	findings []RuleFinding, secureClient bool, strict func() bool, actionFor func(severity string) string,
 ) string {
+	return guardrailActionForProfileUnknown(findings, secureClient, strict, func() string {
+		if strict() {
+			return ""
+		}
+		return guardrailActionAlert
+	}, actionFor)
+}
+
+// guardrailActionForProfileUnknown is guardrailActionForProfile with the
+// unknown tier of guardrail.cascade (strict is the tier of the
+// self-protection floor, profileClassFloor): unknown is read only when a limit
+// finding is present; "" maps the limit finding by the pack's levels (the
+// strict pack), else it is the unknown-tier action (alert in the default
+// and permissive packs, or cascade.unknown).
+func guardrailActionForProfileUnknown(
+	findings []RuleFinding, secureClient bool, strict func() bool, unknown func() string,
+	actionFor func(severity string) string,
+) string {
 	if !secureClient {
-		if rest, limited := withoutEnforcingEvaluationLimit(findings); limited && !strict() {
-			return strongerGuardrailAction(guardrailActionAlert, strongerGuardrailAction(
-				profileClassFloor(rest, false), guardrailActionForFindings(rest, actionFor)))
+		if rest, limited := withoutEnforcingEvaluationLimit(findings); limited {
+			if floor := unknown(); floor != "" {
+				return strongerGuardrailAction(floor, strongerGuardrailAction(
+					profileClassFloor(rest, false, strict), guardrailActionForFindings(rest, actionFor)))
+			}
 		}
 	}
-	return strongerGuardrailAction(profileClassFloor(findings, secureClient),
+	return strongerGuardrailAction(profileClassFloor(findings, secureClient, strict),
 		guardrailActionForFindings(findings, actionFor))
 }

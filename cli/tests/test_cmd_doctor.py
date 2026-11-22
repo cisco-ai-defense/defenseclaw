@@ -28,6 +28,8 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from tests.environment import isolated_home_env
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -354,6 +356,7 @@ class DoctorHermesPathTests(unittest.TestCase):
             self.assertIn(config_path, result.checks[0]["detail"])
             self.assertIn("live=false", result.checks[0]["detail"])
 
+@pytest.mark.usefixtures("openclaw_proxy_topology")
 class DoctorGuardrailTests(unittest.TestCase):
     def setUp(self):
         from defenseclaw.commands import cmd_doctor
@@ -432,6 +435,89 @@ class DoctorGuardrailTests(unittest.TestCase):
         _check_proxy_interception(cfg, result, live_health={"interception": {"verified": False}})
         self.assertEqual(result.failed, 1, result.checks)
         self.assertIn("not being intercepted", result.checks[0]["detail"])
+
+    def test_native_openclaw_still_reports_install_admission(self):
+        # GAP-1139: native OpenClaw (Windows) closes the proxy port on
+        # purpose; doctor returned before the install admission row, so a
+        # strict tier whose admission was not registered said nothing.
+        cfg = Config(
+            data_dir="/tmp/defenseclaw",
+            audit_db="/tmp/defenseclaw/audit.db",
+            quarantine_dir="/tmp/defenseclaw/quarantine",
+            plugin_dir="/tmp/defenseclaw/plugins",
+            policy_dir="/tmp/defenseclaw/policies",
+            guardrail=GuardrailConfig(enabled=True, model="openai/gpt-4", port=4000, connector="openclaw"),
+            gateway=GatewayConfig(),
+            openshell=OpenShellConfig(),
+        )
+        result = _DoctorResult()
+        with (
+            patch("defenseclaw.commands.cmd_doctor._guardrail_proxy_intentionally_closed", return_value="native"),
+            patch("defenseclaw.openclaw_plugin_config.configured_openclaw_hook_mode", return_value="native"),
+            patch("defenseclaw.openclaw_plugin_config.openclaw_plugin_evidence", return_value=("native", "plugin seen", True)),
+            patch("defenseclaw.openclaw_plugin_config.openclaw_install_policy_state", return_value="none"),
+            patch("defenseclaw.openclaw_plugin_config.openclaw_install_policy_wanted", return_value=True),
+            patch(
+                "defenseclaw.openclaw_plugin_config.openclaw_install_policy_recorded_state",
+                return_value="not registered: OpenClaw 2026.8.35 is too old for strict install policy on Windows (needs 2026.11.3 or later)",
+            ),
+        ):
+            _check_proxy_interception(cfg, result, live_health={})
+        rows = {c["label"]: c for c in result.checks}
+        self.assertIn("OpenClaw install admission", rows, result.checks)
+        self.assertEqual(rows["OpenClaw install admission"]["status"], "warn")
+        # GAP-1170: the row names the reason the gateway recorded.
+        self.assertIn("2026.8.35 is too old for strict install policy", rows["OpenClaw install admission"]["detail"])
+        self.assertEqual(result.failed, 0, result.checks)
+
+    def _openclaw_rows(self, stale):
+        cfg = Config(
+            data_dir="/tmp/defenseclaw",
+            audit_db="/tmp/defenseclaw/audit.db",
+            quarantine_dir="/tmp/defenseclaw/quarantine",
+            plugin_dir="/tmp/defenseclaw/plugins",
+            policy_dir="/tmp/defenseclaw/policies",
+            guardrail=GuardrailConfig(enabled=True, model="openai/gpt-4", port=4000, connector="openclaw"),
+            gateway=GatewayConfig(),
+            openshell=OpenShellConfig(),
+        )
+        result = _DoctorResult()
+        with (
+            patch("defenseclaw.commands.cmd_doctor._guardrail_proxy_intentionally_closed", return_value="native"),
+            patch("defenseclaw.openclaw_plugin_config.configured_openclaw_hook_mode", return_value="native"),
+            patch("defenseclaw.openclaw_plugin_config.openclaw_plugin_evidence", return_value=("native", "plugin seen", True)),
+            patch("defenseclaw.openclaw_plugin_config.openclaw_install_policy_state", return_value="ours"),
+            patch("defenseclaw.openclaw_plugin_config.openclaw_install_policy_stale_version", return_value=stale),
+        ):
+            _check_proxy_interception(cfg, result, live_health={})
+        return {c["label"]: c for c in result.checks}
+
+    def test_registered_install_admission_warns_when_openclaw_is_now_too_old(self):
+        # GAP-1198: setup registered the command under OpenClaw 2026.11.3; the
+        # cached version is now 2026.8.35. The row may not say PASS. The
+        # stale result is the real function's, for Windows.
+        import shutil
+
+        from defenseclaw.openclaw_plugin_config import openclaw_install_policy_stale_version
+
+        data_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, data_dir, True)
+        with open(os.path.join(data_dir, "agent_discovery.json"), "w", encoding="utf-8") as f:
+            json.dump({"agents": {"openclaw": {"version": "2026.8.35"}}}, f)
+        with open(os.path.join(data_dir, "openclaw-install-policy-state.json"), "w", encoding="utf-8") as f:
+            json.dump({"state": "registered", "openclaw_version": "2026.11.3"}, f)
+        stale = openclaw_install_policy_stale_version(SimpleNamespace(data_dir=data_dir), "win32")
+        self.assertTrue(stale[0], stale)
+        row = self._openclaw_rows(stale)["OpenClaw install admission"]
+        self.assertEqual(row["status"], "warn")
+        self.assertIn("2026.8.35 may be too old for strict install policy", row["detail"])
+        self.assertIn("upgrade OpenClaw to 2026.11.3", row["remediation"])
+        # d: the drive-root ACL advice is for a command OpenClaw refuses, not for a downgrade.
+        self.assertNotIn("drive root", row["remediation"])
+
+    def test_registered_install_admission_passes_for_a_current_version(self):
+        row = self._openclaw_rows(("", False))["OpenClaw install admission"]
+        self.assertEqual(row["status"], "pass")
 
     def test_proxy_interception_waits_for_first_report_after_restart(self):
         # GAP-2487: right after a sidecar restart the plugin has not reported
@@ -1783,6 +1869,7 @@ class DoctorHookReachabilityTests(unittest.TestCase):
             self.assertEqual(result.passed, 1)
 
 
+@pytest.mark.usefixtures("openclaw_proxy_topology")
 class DoctorLLMKeyProviderRoutingTests(unittest.TestCase):
     """Regression: provider routing must be prefix-based, not substring-based.
 
@@ -2299,6 +2386,7 @@ class VerifyBedrockTests(unittest.TestCase):
             self.assertEqual(_bedrock_region(), "us-east-1")
 
 
+@pytest.mark.usefixtures("openclaw_proxy_topology")
 class BedrockRoutingTests(unittest.TestCase):
     """Check ``_check_llm_api_key`` routes Bedrock configs to
     :func:`_verify_bedrock` (M3 hook)."""
@@ -2386,6 +2474,33 @@ class CiscoAIDefenseProbeTests(unittest.TestCase):
             ),
         )
 
+    def test_remote_or_both_without_a_key_setting_is_a_config_error_gap0464(self):
+        # GAP-0464: scanner_mode remote or both with no AI Defense key configured
+        # never runs the remote scan; doctor names the setting and the two fixes.
+        for mode in ("remote", "both"):
+            cfg = self._make_cfg()
+            cfg.guardrail.scanner_mode = mode
+            cfg.cisco_ai_defense.api_key_env = ""
+            r = _DoctorResult()
+            _check_cisco_ai_defense(cfg, r)
+            self.assertEqual(r.failed, 1, r.checks)
+            detail = r.checks[0]["detail"]
+            self.assertIn(f"guardrail.scanner_mode is {mode}", detail)
+            self.assertIn("no AI Defense API key is configured", detail)
+            self.assertIn("set guardrail.scanner_mode to local", detail)
+
+    def test_inline_api_key_is_not_a_missing_key_gap0464(self):
+        # The deprecated inline cisco_ai_defense.api_key still works: doctor must
+        # not tell that host its remote scanner never runs.
+        cfg = self._make_cfg()
+        cfg.guardrail.scanner_mode = "both"
+        cfg.cisco_ai_defense.api_key_env = ""
+        cfg.cisco_ai_defense.api_key = "inline-key"
+        r = _DoctorResult(passive=True)
+        _check_cisco_ai_defense(cfg, r)
+        details = " ".join(str(c.get("detail", "")) for c in r.checks)
+        self.assertNotIn("no AI Defense API key is configured", details)
+
     @patch("defenseclaw.commands.cmd_doctor.click.echo")
     @patch("defenseclaw.commands.cmd_doctor._http_probe", return_value=(401, "invalid api key"))
     @patch("defenseclaw.commands.cmd_doctor._resolve_api_key", return_value="fake-key")
@@ -2426,6 +2541,31 @@ class CiscoAIDefenseProbeTests(unittest.TestCase):
         self.assertEqual(r.failed, 1, r.checks)
         printed = "\n".join(call.args[0] if call.args else "" for call in mock_echo.call_args_list)
         self.assertIn("defenseclaw setup", printed)
+
+    @patch("defenseclaw.commands.cmd_doctor._http_probe")
+    @patch("defenseclaw.commands.cmd_doctor._resolve_api_key", return_value="")
+    def test_remote_or_both_without_a_key_is_a_failure_naming_the_key(self, _mock_resolve, mock_probe):
+        # GAP-0464: scanner_mode remote or both with no AI Defense key is a
+        # configuration error (the remote scanner never runs): doctor fails
+        # and names the key to set; no request is made.
+        for mode in ("remote", "both"):
+            cfg = self._make_cfg()
+            cfg.guardrail.scanner_mode = mode
+            r = _DoctorResult()
+            _check_cisco_ai_defense(cfg, r)
+            self.assertEqual(r.failed, 1, (mode, r.checks))
+            self.assertEqual(r.checks[0]["label"], "Cisco AI Defense")
+            self.assertEqual(r.checks[0]["detail"], "CISCO_AI_DEFENSE_API_KEY not set")
+        cfg = self._make_cfg(endpoint="")
+        r = _DoctorResult()
+        _check_cisco_ai_defense(cfg, r)
+        self.assertEqual(r.checks[0]["detail"], "endpoint not configured")
+        cfg = self._make_cfg()
+        cfg.guardrail.scanner_mode = "local"
+        r = _DoctorResult()
+        _check_cisco_ai_defense(cfg, r)
+        self.assertEqual((r.failed, r.checks[0]["status"]), (0, "skip"))
+        mock_probe.assert_not_called()
 
     @patch("defenseclaw.commands.cmd_doctor._http_probe", return_value=(200, "ok"))
     @patch("defenseclaw.commands.cmd_doctor._resolve_api_key", return_value="fake-key")
@@ -3931,10 +4071,29 @@ class GuardrailProxyMultiConnectorTests(unittest.TestCase):
             _guardrail_proxy_intentionally_closed,
         )
 
-        self.assertEqual(
-            _guardrail_proxy_intentionally_closed(self._cfg(["hermes", "openclaw"])),
-            "",
+        with patch("defenseclaw.platform_support.host_os", return_value="linux"):
+            self.assertEqual(
+                _guardrail_proxy_intentionally_closed(self._cfg(["hermes", "openclaw"])),
+                "",
+            )
+
+    def test_native_windows_openclaw_reports_no_proxy(self):
+        # Native Windows OpenClaw runs only its plugin hooks: no guardrail
+        # proxy listens, so a closed port is expected, alone or with a hook
+        # connector; ZeptoClaw still needs the probe.
+        from defenseclaw.commands.cmd_doctor import (
+            _guardrail_proxy_intentionally_closed,
         )
+
+        with patch("defenseclaw.platform_support.host_os", return_value="windows"):
+            alone = _guardrail_proxy_intentionally_closed(self._cfg(["openclaw"], mode="action"))
+            mixed = _guardrail_proxy_intentionally_closed(self._cfg(["codex", "openclaw"]))
+            zepto = _guardrail_proxy_intentionally_closed(self._cfg(["openclaw", "zeptoclaw"]))
+        self.assertIn("openclaw (mode=action via native plugin hooks)", alone)
+        self.assertIn("no guardrail proxy in native hook mode", alone)
+        self.assertIn("codex (mode=observe)", mixed)
+        self.assertIn("openclaw (mode=observe via native plugin hooks)", mixed)
+        self.assertEqual(zepto, "")
 
     def test_zeptoclaw_peer_forces_real_probe(self):
         from defenseclaw.commands.cmd_doctor import (

@@ -109,6 +109,13 @@ func dockerVMLandlock(ctx context.Context, run Runner, images []string) (abi int
 	return 0, kernel, fmt.Errorf("landlock_create_ruleset failed with errno %s", strings.Join(answer[1:], " "))
 }
 
+// DockerVMLandlockABI is dockerVMLandlock for the sandbox CLI: the
+// Landlock ABI of the kernel Docker runs containers on, probed in the
+// first of images that is on this machine.
+func DockerVMLandlockABI(ctx context.Context, run Runner, images []string) (abi int, kernel string, err error) {
+	return dockerVMLandlock(ctx, run, images)
+}
+
 // DockerEngineOS is the operating system `docker info` reports for the
 // engine the docker CLI talks to: "Docker Desktop" on Docker Desktop, the
 // VM's distribution under Colima. It is one short call, with none of the
@@ -122,8 +129,10 @@ func DockerEngineOS(ctx context.Context, run Runner) (string, error) {
 }
 
 // IsDockerDesktop reports an engine operating system (DockerEngineOS, or
-// docker info's OperatingSystem) of Docker Desktop, whose Linux VM kernel
-// (linuxkit) is built without Landlock.
+// docker info's OperatingSystem) of Docker Desktop. Whether its Linux VM
+// kernel (linuxkit) has Landlock depends on the release: 6.12.65-linuxkit
+// has none, 7.0.14-linuxkit (Docker Desktop 29.8) has ABI 8, so only a
+// probe of the VM decides (dockerVMLandlock).
 func IsDockerDesktop(engineOS string) bool { return strings.Contains(engineOS, "Docker Desktop") }
 
 // lastLine is the last non-empty line of a command's output.

@@ -23,9 +23,7 @@ func lateWrite(t *testing.T, path, text string) {
 
 func lateSymlink(t *testing.T, target, link string) {
 	t.Helper()
-	if err := os.Symlink(target, link); err != nil {
-		t.Fatal(err)
-	}
+	testSymlink(t, target, link)
 }
 
 func lateAssertOrdinary(t *testing.T, project string, rows []struct {
@@ -36,7 +34,7 @@ func lateAssertOrdinary(t *testing.T, project string, rows []struct {
 	for _, tc := range rows {
 		t.Run(tc.name, func(t *testing.T) {
 			for _, c := range []struct{ connector, tool string }{{"claudecode", "Bash"}, {"codex", "exec_command"}} {
-				if got := LateOrdinaryCall(c.connector, lateBash(t, c.tool, project, tc.command)); got != tc.want {
+				if got := LateOrdinaryCallAt("", c.connector, lateBash(t, c.tool, project, tc.command)); got != tc.want {
 					t.Errorf("%s: ordinary=%v, want %v, command=%q", c.connector, got, tc.want, tc.command)
 				}
 			}

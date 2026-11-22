@@ -54,8 +54,8 @@ func (twin unknownKeyTwinRequest) findings(parent context.Context) []RuleFinding
 }
 
 // selfProtectionFindings keeps the findings that protect DefenseClaw's own
-// state (tamper.detector_state_write): the one class that blocks in every
-// profile for a string in any key of a file-tool call.
+// state (tamper.detector_state_write): the one class read from a string in
+// any key of a file-tool call.
 func selfProtectionFindings(findings []RuleFinding) []RuleFinding {
 	return slices.DeleteFunc(slices.Clone(findings), func(f RuleFinding) bool {
 		return f.RuleID != "tamper.detector_state_write"

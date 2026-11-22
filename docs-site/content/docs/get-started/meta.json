@@ -1,4 +1,14 @@
 {
   "title": "Get started",
-  "pages": ["what-is-defenseclaw", "download", "install", "quickstart", "first-run", "first-guardrail", "upgrade", "windows"]
+  "pages": [
+    "what-is-defenseclaw",
+    "download",
+    "install",
+    "quickstart",
+    "first-run",
+    "first-guardrail",
+    "unified-llm-key",
+    "upgrade",
+    "windows"
+  ]
 }

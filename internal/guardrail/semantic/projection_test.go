@@ -273,3 +273,30 @@ func validProcess(
 		},
 	}
 }
+
+// rel-1-0-10:GAP-0945: a Git Bash path fact on a Windows drive root is
+// C:/ (path.Clean would spell it C:, the drive's current folder). It
+// projects like any other clean drive path, so a call on the drive root
+// (find C:/ -type f -delete) is judged by the semantic rules; an unclean
+// drive path still fails the projection.
+func TestProjectKeepsAGitBashDriveRoot(t *testing.T) {
+	for _, test := range []struct {
+		resolved string
+		want     ProjectionCode
+	}{
+		{"C:/", ProjectionOK},
+		{"c:/", ProjectionOK},
+		{"C:/Users/alice", ProjectionOK},
+		{"C:", ProjectionInvalidReference},
+		{"C://", ProjectionInvalidReference},
+		{"C:/Users/alice/", ProjectionInvalidReference},
+		{"C:/Users/../alice", ProjectionInvalidReference},
+	} {
+		source := validActionFacts()
+		source.Paths[0].Flavor = actionfacts.PathFlavorPOSIX
+		source.Paths[0].Value, source.Paths[0].Normalized, source.Paths[0].Resolved = test.resolved, test.resolved, test.resolved
+		if _, code := Project(source); code != test.want {
+			t.Errorf("Project(resolved %q) code = %q, want %q", test.resolved, code, test.want)
+		}
+	}
+}

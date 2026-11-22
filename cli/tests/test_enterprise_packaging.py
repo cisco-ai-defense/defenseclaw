@@ -988,38 +988,66 @@ def _linux_scriptlet(host: _Host, name: str) -> str:
     )
 
 
-def test_linux_postinstall_preserves_last_result_when_output_storage_is_full(tmp_path: Path) -> None:
+# GAP-0057: on a full lifecycle-state filesystem the result file could not
+# be created, so the package's install run did not start; dnf said Complete
+# and last-package-result.json kept the previous version's ok:true, which MDM
+# detection and administrators read as this package's. The kept result is
+# overwritten in place (its truncation frees the room) with this run's
+# failure, named disk_full, which status and verify then report.
+def test_linux_postinstall_records_a_full_disk_over_the_previous_result(tmp_path: Path) -> None:
     host = _Host(tmp_path, apply_path_active=True)
     host.state.mkdir()
-    previous = b'{"schema_version":2,"ok":true,"installed_version":"1.0.3"}\n'
+    previous = b'{"schema_version":2,"ok":true,"action":"ensure","product_version":"1.0.3"}\n'
     result_path = host.state / "last-package-result.json"
     result_path.write_bytes(previous)
-    # The log's open fails as on ENOSPC, after the old stdout redirect had
-    # already truncated the last good result. No lifecycle process ran.
+    # The log's open fails as on ENOSPC. No lifecycle process ran.
     (host.state / "last-package-result.log").mkdir()
-    _write_stub(host.bin, "mktemp", "echo 'mktemp: No space left on device' >&2; exit 1")
+    _write_stub(host.bin, "mktemp", "echo 'mktemp: failed to create file: No space left on device' >&2; exit 1")
     result = host.run(_linux_scriptlet(host, "postinstall.sh"), "2")
     assert result.returncode == 0  # the package transaction still completes
-    assert result_path.read_bytes() == previous
     assert not any(call.startswith("gateway ") for call in host.calls())
+    document = json.loads(result_path.read_text(encoding="utf-8"))
+    assert document["ok"] is False and document["action"] == "ensure", document
+    assert document["errors"][0]["code"] == "disk_full", document
+    assert str(host.state) in document["errors"][0]["message"], document
+    assert "product_version" not in document  # not the 1.0.3 run's any more
     assert "no deployment is active" not in result.stderr
     assert "not applied" in result.stderr
-    assert "disk" in result.stderr.lower() or "space" in result.stderr.lower()
+    assert "space" in result.stderr.lower()
+    assert "now records this run" in result.stderr
     assert "enterprise linux ensure --from-package" in result.stderr
     assert "systemctl start defenseclaw-enterprise-apply.path" in host.calls()
 
 
-def test_linux_postinstall_preserves_last_result_when_atomic_publish_fails(tmp_path: Path) -> None:
+def test_linux_postinstall_removes_the_previous_result_it_cannot_overwrite(tmp_path: Path) -> None:
     host = _Host(tmp_path)
     host.state.mkdir()
     result_path = host.state / "last-package-result.json"
-    previous = b'{"schema_version":2,"ok":true,"installed_version":"1.0.3"}\n'
-    result_path.write_bytes(previous)
+    result_path.write_bytes(b'{"schema_version":2,"ok":true,"product_version":"1.0.3"}\n')
+    (host.state / "last-package-result.log").write_text("old stderr\n", encoding="utf-8")
+    _write_stub(host.bin, "mktemp", "echo 'mktemp: Input/output error' >&2; exit 1")
+    # A shell that cannot write the file at all: printf into it fails.
+    original = _linux_scriptlet(host, "postinstall.sh")
+    script = original.replace('(printf "%s\\n" "$current" >"$state/last-package-result.json")', "false", 1)
+    assert script != original
+    result = host.run(script, "2")
+    assert result.returncode == 0
+    assert not result_path.exists()
+    assert not (host.state / "last-package-result.log").exists()
+    assert "was removed" in result.stderr
+
+
+def test_linux_postinstall_writes_this_run_over_the_last_result_when_atomic_publish_fails(tmp_path: Path) -> None:
+    host = _Host(tmp_path, gateway_out='{"schema_version":2,"ok":true,"product_version":"1.0.4"}')
+    host.state.mkdir()
+    result_path = host.state / "last-package-result.json"
+    result_path.write_bytes(b'{"schema_version":2,"ok":true,"installed_version":"1.0.3"}\n')
     _write_stub(host.bin, "mv", "echo 'mv: No space left on device' >&2; exit 1")
     result = host.run(_linux_scriptlet(host, "postinstall.sh"), "2")
     assert result.returncode == 0
-    assert result_path.read_bytes() == previous
+    assert json.loads(result_path.read_text(encoding="utf-8"))["product_version"] == "1.0.4"
     assert "current package result could not be saved" in result.stderr
+    assert "now records this run" in result.stderr
     assert "enterprise linux ensure --from-package" in result.stderr
     assert not list(host.state.glob(".last-package-result.*"))
 

@@ -1,0 +1,227 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+// SPDX-License-Identifier: Apache-2.0
+
+package audit
+
+import (
+	"context"
+	"math"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+)
+
+// rel-1-0-10:GAP-1153: under a 50-100 calls/s hook flood on a per-user Mac
+// the WAL grew from 114 to 5786 MiB in two minutes, and every guard pass held
+// the hooks for the full 470 ms emergency hold without restarting the log.
+// SQLite syncs audit.db only at the end of a copy that reached the live end
+// of the log, which a copy off the writer never does under a flood, so the
+// copy under the writer synced every page that the copies since the last
+// restart had written. A pass over the limit took the writer without syncing
+// first, so that work grew with every pass and never fit in the hold.
+//
+// The model: the copy under the writer costs walGAP1153PerCopy for each copy
+// off the writer whose pages are not yet synced (a sync of the database file
+// off the writer resets the count), and one more for its own. A flood keeps
+// every copy off the writer short of the end of the log; three passes under
+// the limit leave three copies unsynced, as a flood that has been running
+// does. Each over-limit pass must then restart the log inside the ordinary
+// bounded hold, and no audit row is lost.
+const walGAP1153PerCopy = 30 * time.Millisecond
+
+func TestGAP1153OverLimitPassSyncsOffTheWriterSoTheLogRestartsUnderAFlood(t *testing.T) {
+	store, cleanup := newTestStore(t)
+	defer cleanup()
+	logWALGuardEvents(t, store, 200)
+	writes := writeDuringEveryCopy(t, store)
+	flood, originalSync, originalWriter := walCopyPhaseHook, walSyncPhaseHook, walWriterPhaseHook
+	t.Cleanup(func() { walSyncPhaseHook, walWriterPhaseHook = originalSync, originalWriter })
+	var unsynced atomic.Int64
+	walCopyPhaseHook = func(ctx context.Context) {
+		flood(ctx)
+		unsynced.Add(1)
+	}
+	walSyncPhaseHook = func(context.Context) { unsynced.Store(0) }
+	walWriterPhaseHook = func(hold context.Context) {
+		timer := time.NewTimer(walGAP1153PerCopy * time.Duration(unsynced.Load()+1))
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+			// The copy reached the end of the log and synced audit.db.
+			unsynced.Store(0)
+		case <-hold.Done():
+		}
+	}
+	for pass := range 3 {
+		got, err := store.CheckpointWALIfLarge(context.Background(), math.MaxInt64, testWALWriterBudget)
+		if err != nil || got.Restarted || got.WriterHeld != 0 {
+			t.Fatalf("flood pass %d under the limit: %+v, %v; want a copy off the writer that does not reach the end", pass, got, err)
+		}
+	}
+	if unsynced.Load() != 3 {
+		t.Fatalf("copies off the writer left unsynced = %d; want 3", unsynced.Load())
+	}
+	hold := min(walCatchUpCap, testWALWriterBudget/2)
+	if walGAP1153PerCopy*5 <= hold {
+		t.Fatalf("model: four unsynced copies must outlast the %v hold", hold)
+	}
+	for pass := range 4 {
+		got, err := store.CheckpointWALIfLarge(context.Background(), 0, testWALWriterBudget)
+		if err != nil || !got.Bounded || got.HoldCap != hold {
+			t.Fatalf("over-limit pass %d: %+v, %v; want a bounded catch-up with the %v hold", pass, got, err, hold)
+		}
+		if !got.Restarted || got.WriterDeferred || got.Syncs == 0 {
+			t.Fatalf("over-limit pass %d under a flood: %+v (copies unsynced at the writer phase: %d); "+
+				"want a sync off the writer, then a restart inside the hold", pass, got, unsynced.Load())
+		}
+		if store.WALOverLimit() {
+			t.Fatalf("over-limit pass %d restarted the log but left the store marked over the limit", pass)
+		}
+		logWALGuardEvents(t, store, 20)
+		for range 3 {
+			if _, err := store.CheckpointWALIfLarge(context.Background(), math.MaxInt64, testWALWriterBudget); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if got, want := countWALGuardEvents(t, store), 200+4*20+int(writes.Load()); got != want {
+		t.Fatalf("audit rows after the passes = %d; want all %d written", got, want)
+	}
+}
+
+// rel-1-0-10:GAP-1153, a disk slower than the hooks' page writes: every
+// bounded hold reaches its cap without restarting the log. After
+// walCappedHoldsBeforeBackoff of them the passes leave the writer alone for
+// a rest that doubles with each further capped hold, and the first restart
+// ends it, so a disk that catches up again gets a hold on every pass.
+func TestGAP1153CappedHoldsBackOffUntilTheLogRestarts(t *testing.T) {
+	store, cleanup := newTestStore(t)
+	defer cleanup()
+	logWALGuardEvents(t, store, 200)
+	writes := writeDuringEveryCopy(t, store)
+	overrideWALDuration(t, &walCatchUpCap, 40*time.Millisecond)
+	now := time.Now()
+	originalClock, originalWriter := walClock, walWriterPhaseHook
+	t.Cleanup(func() { walClock, walWriterPhaseHook = originalClock, originalWriter })
+	walClock = func() time.Time { return now }
+	walWriterPhaseHook = outrunTheHold(t, store)
+	pass := func(label string) WALCheckpoint {
+		t.Helper()
+		got, err := store.CheckpointWALIfLarge(context.Background(), 0, testWALWriterBudget)
+		if err != nil || !got.Bounded || !got.WriterDeferred || got.Restarted {
+			t.Fatalf("%s: %+v, %v; want a bounded pass that does not restart the log", label, got, err)
+		}
+		return got
+	}
+	for index := range walCappedHoldsBeforeBackoff {
+		if got := pass("capped hold"); got.HoldBackoff || got.WriterHeld < got.HoldCap {
+			t.Fatalf("pass %d: %+v; want a hold that reaches its cap", index, got)
+		}
+	}
+	for index := range 3 {
+		if got := pass("rest"); !got.HoldBackoff || got.WriterHeld != 0 || !got.OverLimit {
+			t.Fatalf("pass %d after %d capped holds: %+v; want the writer left alone and the log still over the limit", index, walCappedHoldsBeforeBackoff, got)
+		}
+	}
+	now = now.Add(walHoldBackoffBase)
+	if got := pass("after the first rest"); got.HoldBackoff || got.WriterHeld < got.HoldCap {
+		t.Fatalf("pass after the rest: %+v; want one more capped hold", got)
+	}
+	now = now.Add(walHoldBackoffBase)
+	if got := pass("inside the doubled rest"); !got.HoldBackoff {
+		t.Fatalf("pass inside the doubled rest: %+v; want the writer left alone", got)
+	}
+	// The disk catches up: the next hold restarts the log and ends the rest.
+	walWriterPhaseHook = originalWriter
+	now = now.Add(walHoldBackoffBase)
+	got, err := store.CheckpointWALIfLarge(context.Background(), 0, testWALWriterBudget)
+	if err != nil || got.HoldBackoff || !got.Restarted || got.OverLimit {
+		t.Fatalf("pass after the disk caught up: %+v, %v; want a hold that restarts the log and ends the over-limit record", got, err)
+	}
+	logWALGuardEvents(t, store, 20)
+	if got, err := store.CheckpointWALIfLarge(context.Background(), 0, testWALWriterBudget); err != nil || got.HoldBackoff || got.WriterHeld == 0 {
+		t.Fatalf("pass after the restart: %+v, %v; want a hold again without a rest", got, err)
+	}
+	if got, want := countWALGuardEvents(t, store), 220+int(writes.Load()); got != want {
+		t.Fatalf("audit rows after the passes = %d; want all %d written", got, want)
+	}
+}
+
+// deadlineAtContext is a pass context whose deadline is at, on the test's
+// walClock; it is never done.
+type deadlineAtContext struct {
+	context.Context
+	at time.Time
+}
+
+func (c deadlineAtContext) Deadline() (time.Time, bool) { return c.at, true }
+
+// rel-1-0-10:GAP-1153 review: on a slow disk the syncs of a settle round took
+// 8-26 s each (G-flood-wal round 3). Before each round a pass checks the time
+// it has left, and a pass over the limit that cannot fit one more round and
+// its writer phase goes to the writer at once, instead of running all
+// walBoundedSettleRounds rounds into its deadline.
+func TestGAP1153SettleRoundsStopWhenThePassHasNoTimeForAnother(t *testing.T) {
+	store, cleanup := newTestStore(t)
+	defer cleanup()
+	logWALGuardEvents(t, store, 200)
+	writes := writeDuringEveryCopy(t, store)
+	overrideWALDuration(t, &walCatchUpCap, overLimitTestHoldCap)
+	var clockMu sync.Mutex
+	now := time.Now()
+	originalClock, originalSync := walClock, walSyncPhaseHook
+	t.Cleanup(func() { walClock, walSyncPhaseHook = originalClock, originalSync })
+	walClock = func() time.Time {
+		clockMu.Lock()
+		defer clockMu.Unlock()
+		return now
+	}
+	const slowSync = 20 * time.Second
+	walSyncPhaseHook = func(context.Context) {
+		clockMu.Lock()
+		now = now.Add(slowSync)
+		clockMu.Unlock()
+	}
+	// After the first 20 s round the pass has 31.5 s left, room for another
+	// round and its writer phase (walPassReserve); after the second it has
+	// 11.5 s, so it stops after two syncs instead of three.
+	ctx := deadlineAtContext{Context: context.Background(), at: walClock().Add(2*slowSync + slowSync/2 + walPassReserve())}
+	if walBoundedSettleRounds < 2 {
+		t.Fatalf("model: walBoundedSettleRounds = %d; the test needs at least 2", walBoundedSettleRounds)
+	}
+	pass, err := store.CheckpointWALIfLarge(ctx, 0, 2*overLimitTestHoldCap)
+	if err != nil || !pass.Bounded || pass.Syncs != 2 {
+		t.Fatalf("slow-sync pass over the limit: %+v, %v; want a bounded pass that stops after 2 of its %d syncs", pass, err, walBoundedSettleRounds+1)
+	}
+	if pass.HoldCap <= 0 || pass.WriterHeld <= 0 || !pass.Restarted {
+		t.Fatalf("slow-sync pass over the limit: %+v; want it to take the writer and restart the log", pass)
+	}
+	if got, want := countWALGuardEvents(t, store), 200+int(writes.Load()); got != want {
+		t.Fatalf("audit rows after the pass = %d; want all %d written", got, want)
+	}
+}
+
+// rel-1-0-10:GAP-1153 review: a pass over the limit whose copies left no time
+// for even one sync of audit.db does not hold the writer: the copy under it
+// would have to sync the whole unsynced backlog, the failure this gap is
+// about. It leaves the writer to the next pass and keeps the log marked over
+// the limit.
+func TestGAP1153PassWithNoTimeForASyncLeavesTheWriterAlone(t *testing.T) {
+	store, cleanup := newTestStore(t)
+	defer cleanup()
+	logWALGuardEvents(t, store, 200)
+	writes := writeDuringEveryCopy(t, store)
+	writers := countWriterPhases(t)
+	ctx := deadlineAtContext{Context: context.Background(), at: walClock().Add(walPassReserve() / 2)}
+	pass, err := store.CheckpointWALIfLarge(ctx, 0, testWALWriterBudget)
+	if err != nil || !pass.Bounded || !pass.WriterDeferred || pass.Syncs != 0 || pass.WriterHeld != 0 || pass.Restarted {
+		t.Fatalf("pass with no time for a sync: %+v, %v; want a bounded pass that leaves the writer alone", pass, err)
+	}
+	if writers.Load() != 0 || !pass.OverLimit || !store.WALOverLimit() {
+		t.Fatalf("pass with no time for a sync: %d writer phases, %+v; want none and the log still over the limit", writers.Load(), pass)
+	}
+	if got, want := countWALGuardEvents(t, store), 200+int(writes.Load()); got != want {
+		t.Fatalf("audit rows after the pass = %d; want all %d written", got, want)
+	}
+}

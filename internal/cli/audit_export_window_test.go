@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
@@ -284,8 +285,8 @@ func TestAuditExportBadWindowIsUsageError(t *testing.T) {
 	for _, bad := range [][2]string{{"yesterday", ""}, {"", "tomorrow"}, {"2026-09-27T19:00:00Z", "2026-09-27T18:00:00Z"}} {
 		auditExportSince, auditExportUntil = bad[0], bad[1]
 		err := runAuditExport(auditExportCmd, nil)
-		if commandExitCode(err) != 2 || !strings.Contains(fmt.Sprint(err), "--help") {
-			t.Errorf("--since %q --until %q = %v (exit %d), want a usage error with exit 2", bad[0], bad[1], err, commandExitCode(err))
+		if cliusage.ExitCode(err) != 2 || !strings.Contains(fmt.Sprint(err), "--help") {
+			t.Errorf("--since %q --until %q = %v (exit %d), want a usage error with exit 2", bad[0], bad[1], err, cliusage.ExitCode(err))
 		}
 		if _, statErr := os.Stat(out); !os.IsNotExist(statErr) {
 			t.Fatalf("--since %q --until %q created %s", bad[0], bad[1], out)

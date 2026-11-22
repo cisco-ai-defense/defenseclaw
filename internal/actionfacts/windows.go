@@ -167,7 +167,7 @@ func windowsValidatePipelineAuthority(
 	if len(edges) == 0 {
 		return
 	}
-	if dialect == windowsPowerShell &&
+	if !out.windowsDescriptorCopy && dialect == windowsPowerShell &&
 		(windowsDirectWebExpressionPipeline(commands, edges) ||
 			windowsDirectProcessStopPipeline(commands, edges) ||
 			windowsDirectACLPipeline(commands, edges) ||
@@ -609,7 +609,8 @@ func windowsLex(source string, dialect windowsDialect, out *parseOutput) ([]wind
 			(i+3 == len(runes) || unicode.IsSpace(runes[i+3])) {
 			// PowerShell's stop-parsing token makes the native arguments
 			// opaque up to an unquoted pipe, &&, or the physical line end.
-			out.markPartial(IssueUnsupportedConstruct)
+			// That remainder is skipped, never lexed: it is unread.
+			out.markUnread(IssueUnsupportedConstruct)
 			wordExpands = true
 			for _, literal := range "--%" {
 				if !writeRune(literal) {
@@ -637,6 +638,8 @@ func windowsLex(source string, dialect windowsDialect, out *parseOutput) ([]wind
 			}
 			end, ok := windowsPowerShellOpaqueEnd(runes, i)
 			if !ok {
+				// No balanced end: the rest of the source is never lexed.
+				out.markUnread(IssueUnsupportedConstruct)
 				break
 			}
 			i = end
@@ -781,10 +784,17 @@ func windowsLex(source string, dialect windowsDialect, out *parseOutput) ([]wind
 				return lexemes, false
 			}
 			if duplicationEnd, ok := windowsFDDuplicationEnd(runes, i); ok {
-				// Descriptor duplication has no file target. Retain the
-				// surrounding command as a non-authoritative positive fact,
-				// but consume the whole construct so "&1" cannot become a
-				// separator followed by a phantom command.
+				// Descriptor duplication has no file target. Consume the
+				// whole construct so "&1" cannot become a separator followed
+				// by a phantom command. An exact N>&1 (2>&1, 3>&1) is valid
+				// in both dialects and only decides whether that stream ends
+				// where stdout does: it names no file, so it leaves the file
+				// facts of the statement (a following >> T) authoritative
+				// (GAP-0974). In a pipeline it would add the stream to the
+				// piped data, so windowsValidatePipelineAuthority keeps such a
+				// pipeline partial. Any other copy (1>&2, >&1) stays partial.
+				exactCopy := wordActive && quoteKind == QuoteNone && windowsAllDigits(value.String()) &&
+					duplicationEnd == i+2 && runes[duplicationEnd] == '1'
 				if wordActive && quoteKind == QuoteNone && windowsAllDigits(value.String()) {
 					value.Reset()
 					quoteKind = QuoteNone
@@ -797,7 +807,11 @@ func windowsLex(source string, dialect windowsDialect, out *parseOutput) ([]wind
 				} else if !flush() {
 					return lexemes, false
 				}
-				out.markPartial(IssueUnsupportedConstruct)
+				if exactCopy {
+					out.windowsDescriptorCopy = true
+				} else {
+					out.markPartial(IssueUnsupportedConstruct)
+				}
 				i = duplicationEnd
 				continue
 			}
@@ -840,7 +854,8 @@ func windowsLex(source string, dialect windowsDialect, out *parseOutput) ([]wind
 			case ';', '&':
 				if r == '&' && (i+1 >= len(runes) || runes[i+1] != '&') &&
 					!wordActive && windowsPowerShellCallPosition(lexemes) {
-					if !windowsPowerShellQuotedCallTarget(runes, i+1) {
+					if !windowsPowerShellQuotedCallTarget(runes, i+1) &&
+						!windowsPowerShellNetExecCallTarget(runes, i+1) {
 						// A dynamic call target is not an authoritative command
 						// word. Keep its invocation opaque, then continue to a
 						// following statement separator and command.
@@ -854,7 +869,11 @@ func windowsLex(source string, dialect windowsDialect, out *parseOutput) ([]wind
 						}) {
 							return lexemes, false
 						}
-						i = windowsPowerShellDynamicCallEnd(runes, i+1) - 1
+						end, balanced := windowsPowerShellDynamicCallEnd(runes, i+1)
+						if !balanced {
+							out.markUnread(IssueUnsupportedConstruct)
+						}
+						i = end - 1
 						continue
 					}
 					if !appendOperator(windowsCallLexeme, "&", i+1) {
@@ -873,6 +892,20 @@ func windowsLex(source string, dialect windowsDialect, out *parseOutput) ([]wind
 				}
 				continue
 			case '(', ')', '{', '}':
+				if r == '{' && wordActive && value.Len() > 0 {
+					// A braced GUID inside a word (auditpol /subcategory:{GUID})
+					// is argument text: PowerShell starts a script block only
+					// at the start of a word.
+					if end, ok := windowsBracedGUIDEnd(runes, i); ok {
+						for ; i < end; i++ {
+							if !writeRune(runes[i]) {
+								return lexemes, false
+							}
+						}
+						i--
+						continue
+					}
+				}
 				out.markPartial(IssueUnsupportedConstruct)
 			case ',':
 				out.markPartial(IssueUnsupportedConstruct)
@@ -947,6 +980,29 @@ func windowsCMDNativeQuoteUncertain(
 	}
 	return activeQuote != '"' || !previousQuote || valueLength != 0 ||
 		!windowsCMDWordBoundary(runes, index+1)
+}
+
+// windowsBracedGUIDEnd returns the index after a {xxxxxxxx-xxxx-xxxx-xxxx-
+// xxxxxxxxxxxx} GUID that starts at runes[start].
+func windowsBracedGUIDEnd(runes []rune, start int) (int, bool) {
+	const length = 38
+	if start+length > len(runes) || runes[start] != '{' || runes[start+length-1] != '}' {
+		return 0, false
+	}
+	for offset := 1; offset < length-1; offset++ {
+		r := runes[start+offset]
+		switch offset {
+		case 9, 14, 19, 24:
+			if r != '-' {
+				return 0, false
+			}
+		default:
+			if (r < '0' || r > '9') && (r < 'a' || r > 'f') && (r < 'A' || r > 'F') {
+				return 0, false
+			}
+		}
+	}
+	return start + length, true
 }
 
 func windowsPowerShellQuoteDelimiter(r rune) rune {
@@ -1144,6 +1200,7 @@ func windowsBuildCommands(
 		switch lexeme.kind {
 		case windowsWordLexeme:
 			if current.callOperator && len(current.words) == 0 &&
+				!windowsStaticNetExecCommandWord(lexeme.word) &&
 				(lexeme.word.expands || !lexeme.word.quotedOnly ||
 					lexeme.word.quote != QuoteSingle && lexeme.word.quote != QuoteDouble ||
 					lexeme.word.value == "") {
@@ -1562,14 +1619,20 @@ func (b *windowsFactBuilder) addCanonicalPath(
 }
 
 func windowsCanonicalPathFactValue(value string) (string, bool) {
-	if value == "" || strings.TrimSpace(value) != value ||
+	// Win32 strips the trailing spaces of a file name, so a file operand
+	// with them names the file without them (windowsOpenedNames,
+	// rel-1-0-10:GAP-1075). Leading or other white space, and trailing
+	// spaces on a registry key, leave the operand unknown.
+	body := strings.TrimRight(value, " ")
+	if body == "" || strings.TrimSpace(body) != body ||
 		windowsEnvironmentProviderPath(value) {
 		return "", false
 	}
-	if _, ok := canonicalRegistryPath(value); ok {
+	_, registry := canonicalRegistryPath(value)
+	switch {
+	case registry && body == value:
 		return value, true
-	}
-	if looksLikeRegistryPath(value) {
+	case registry, looksLikeRegistryPath(value):
 		return "", false
 	}
 	return canonicalWindowsFilesystemPath(value)
@@ -1778,14 +1841,13 @@ func windowsClassifyPowerShell(
 		command.Effect = EffectPreview
 		return
 	}
+	if windowsClassifyNativeProgram(command, args, builder) {
+		return
+	}
 	switch name {
 	case "echo", "write-output", "write-host", "get-date", "whoami", "whoami.exe",
 		"hostname", "hostname.exe", "pwd":
 		return
-	case "icacls", "icacls.exe":
-		// icacls is a native executable; PowerShell resolves quoting before the
-		// program receives the same slash-option grammar used from cmd.exe.
-		windowsClassifyICACLS(command, args, builder)
 	case "get-content", "gc", "cat", "type":
 		filesystem, environment := windowsAddPowerShellPaths(
 			"get-content",
@@ -1830,9 +1892,12 @@ func windowsClassifyPowerShell(
 			windowsAddOperation(command, OperationWrite)
 		}
 		windowsAddPowerShellPrimaryPath(name, command.ID, access, args, true, builder)
-	case "add-content":
+	case "add-content", "ac":
+		// ac is Add-Content's alias in Windows PowerShell and PowerShell 7 on
+		// Windows; the structured reading already reads it so
+		// (rel-1-0-10:GAP-1115).
 		windowsAddOperation(command, OperationAppend)
-		windowsAddPowerShellPrimaryPath(name, command.ID, PathAccessAppend, args, true, builder)
+		windowsAddPowerShellPrimaryPath("add-content", command.ID, PathAccessAppend, args, true, builder)
 	case "remove-item", "ri", "rm", "del", "erase", "rmdir", "rd":
 		windowsAddOperation(command, OperationDelete)
 		windowsAddPowerShellPaths(
@@ -1915,46 +1980,10 @@ func windowsClassifyPowerShell(
 	case "invoke-webrequest", "iwr", "invoke-restmethod", "irm",
 		"curl", "curl.exe", "wget", "wget.exe":
 		windowsClassifyWeb(command, args, true, builder)
-	case "reg", "reg.exe":
-		windowsClassifyRegistry(command, args, builder)
-	case "procdump", "procdump.exe":
-		windowsClassifyLSASSDump(command, args, builder)
-	case "ntdsutil", "ntdsutil.exe":
-		windowsClassifyNTDSIFMDump(command, args, builder)
-	case "fsutil", "fsutil.exe":
-		windowsClassifyFSUtil(command, args, builder)
-	case "vssadmin", "vssadmin.exe":
-		windowsClassifyVSSAdmin(command, args, builder)
-	case "bcdedit", "bcdedit.exe":
-		windowsClassifyBCDEdit(command, args, builder)
-	case "auditpol", "auditpol.exe":
-		windowsClassifyAuditPol(command, args, builder)
 	case "set-mppreference":
 		windowsClassifySetMPPreference(command, args, builder)
 	case "add-mppreference":
 		windowsClassifyAddMPPreference(command, builder)
-	case "wbadmin", "wbadmin.exe", "wmic", "wmic.exe":
-		windowsClassifyRecoveryStore(command, args, builder)
-	case "nmap", "nmap.exe", "masscan", "masscan.exe", "fping", "fping.exe":
-		windowsClassifyNetworkScanner(command, args, builder)
-	case "naabu", "naabu.exe":
-		windowsClassifyNaabu(command, args, builder)
-	case "nc", "nc.exe", "ncat", "ncat.exe", "netcat", "netcat.exe":
-		windowsClassifyNetcat(command, args, builder)
-	case "ssh", "ssh.exe", "autossh", "autossh.exe", "sftp", "sftp.exe":
-		windowsClassifySSH(command, args, builder)
-	case "git", "git.exe":
-		windowsClassifyGit(command, args, builder)
-	case "aws", "gcloud":
-		classifyCredentialCLI(builder.out, command, command.Program)
-		classifyCloudAuditControlDestruction(command)
-	case "openssl", "openssl.exe":
-		classifyOpenSSLDecode(builder.out, command)
-	case "format":
-		classifyWindowsFormat(builder.out, command)
-	case "codex", "codex.exe", "claude", "claude.exe",
-		"gemini", "gemini.exe", "opencode", "opencode.exe":
-		classifyAgentRuntime(builder.out, command, command.Program)
 	case "start-process":
 		windowsAddPowerShellPrimaryPath(name, command.ID, PathAccessExecute, args, true, builder)
 		if windowsStartProcessHasActionArguments(args) {
@@ -1990,6 +2019,9 @@ func windowsClassifyPowerShell(
 	case "remove-process":
 		windowsAddOperation(command, OperationProcessKill)
 	case ".":
+		if windowsClassifyDotSourcedNetExec(command, args, builder) {
+			return
+		}
 		windowsAddOperation(command, OperationRead)
 		if !windowsClassifyPowerShellDotSource(command, args, builder) {
 			builder.out.markPartial(IssueUnsupportedConstruct)
@@ -2104,6 +2136,9 @@ func windowsClassifyCMD(
 		command.Effect = EffectPreview
 		return
 	}
+	if windowsClassifyNativeProgram(command, args, builder) {
+		return
+	}
 	switch command.Program {
 	case "echo", "ver", "whoami", "whoami.exe", "hostname", "hostname.exe", "rem":
 		return
@@ -2131,6 +2166,25 @@ func windowsClassifyCMD(
 		windowsAddCMDRename(command.ID, args, builder)
 	case "curl", "curl.exe", "wget", "wget.exe":
 		windowsClassifyWeb(command, args, false, builder)
+	case "powershell", "powershell.exe", "pwsh", "pwsh.exe", "cmd", "cmd.exe",
+		"call", "for", "if", "start", "set", "setlocal":
+		builder.out.markPartial(IssueUnsupportedConstruct)
+	default:
+		builder.out.markPartial(IssueUnknownOperandGrammar)
+	}
+}
+
+// windowsClassifyNativeProgram classifies an external Windows executable by its
+// own operand grammar. The grammar belongs to the program, not to the shell that
+// launched it, so cmd.exe and PowerShell calls of the same program share one
+// classifier (PowerShell only adds its own quoting, which windowsWord already
+// carries). It reports whether program is one of them.
+func windowsClassifyNativeProgram(
+	command *CommandFact,
+	args []windowsWord,
+	builder *windowsFactBuilder,
+) bool {
+	switch command.Program {
 	case "certutil", "certutil.exe":
 		windowsClassifyCertutil(command, args, builder)
 	case "reg", "reg.exe":
@@ -2139,6 +2193,8 @@ func windowsClassifyCMD(
 		windowsClassifyLSASSDump(command, args, builder)
 	case "ntdsutil", "ntdsutil.exe":
 		windowsClassifyNTDSIFMDump(command, args, builder)
+	case "nxc", "netexec", "crackmapexec":
+		windowsClassifyNetExec(command, builder)
 	case "fsutil", "fsutil.exe":
 		windowsClassifyFSUtil(command, args, builder)
 	case "vssadmin", "vssadmin.exe":
@@ -2155,15 +2211,15 @@ func windowsClassifyCMD(
 		windowsClassifyTakeown(command, args, builder)
 	case "taskkill", "taskkill.exe":
 		windowsClassifyTaskkill(command, args, builder)
-	case "schtasks":
+	case "schtasks", "schtasks.exe":
 		windowsClassifySchtasks(command, args, builder)
-	case "net", "net1":
+	case "net", "net1", "net.exe", "net1.exe":
 		windowsClassifyNetLocalGroup(command, args, builder)
 	case "nmap", "nmap.exe", "masscan", "masscan.exe", "fping", "fping.exe":
 		windowsClassifyNetworkScanner(command, args, builder)
 	case "naabu", "naabu.exe":
 		windowsClassifyNaabu(command, args, builder)
-	case "nc", "ncat", "netcat":
+	case "nc", "nc.exe", "ncat", "ncat.exe", "netcat", "netcat.exe":
 		windowsClassifyNetcat(command, args, builder)
 	case "ssh", "ssh.exe", "autossh", "autossh.exe", "sftp", "sftp.exe":
 		windowsClassifySSH(command, args, builder)
@@ -2179,12 +2235,10 @@ func windowsClassifyCMD(
 	case "codex", "codex.exe", "claude", "claude.exe",
 		"gemini", "gemini.exe", "opencode", "opencode.exe":
 		classifyAgentRuntime(builder.out, command, command.Program)
-	case "powershell", "powershell.exe", "pwsh", "pwsh.exe", "cmd", "cmd.exe",
-		"call", "for", "if", "start", "set", "setlocal":
-		builder.out.markPartial(IssueUnsupportedConstruct)
 	default:
-		builder.out.markPartial(IssueUnknownOperandGrammar)
+		return false
 	}
+	return true
 }
 
 func windowsHasWildcard(args []windowsWord) bool {
@@ -4102,7 +4156,7 @@ func windowsAddPowerShellNewItemPath(
 			if !switchValueValid {
 				builder.out.markPartial(IssueUnknownOperandGrammar)
 			}
-		case unquoted && strings.HasPrefix(lower, "-"):
+		case unquoted && powerShellDashLed(lower):
 			builder.out.markPartial(IssueUnknownOperandGrammar)
 		default:
 			positionals = append(positionals, arg)
@@ -4888,7 +4942,7 @@ func windowsClassifyWeb(
 		// PowerShell's unqualified wget alias owns Invoke-WebRequest
 		// parameters such as -InFile. Only a literal real wget executable argv
 		// can inherit the independently closed GNU Wget grammar.
-		if !windowsNativeWebArgvUncertain(command) &&
+		if !windowsPowerShellNativeArgvUncertain(command) &&
 			windowsExactNativeWebArgv(command, args) {
 			parsed := parseWgetArgv(command.Argv)
 			if parsed.ConfigDisabled &&
@@ -5073,7 +5127,7 @@ func windowsClassifyCurl(
 	args []windowsWord,
 	builder *windowsFactBuilder,
 ) {
-	if windowsNativeWebArgvUncertain(command) {
+	if windowsPowerShellNativeArgvUncertain(command) {
 		// Windows PowerShell 5.1 reserializes native argv through a legacy
 		// quoting layer. Literal double quotes, standalone empty arguments,
 		// and unquoted expression delimiters can therefore change the argv
@@ -5093,7 +5147,11 @@ func windowsClassifyCurl(
 	windowsClassifyCurlRecovery(command, args, builder)
 }
 
-func windowsNativeWebArgvUncertain(command *CommandFact) bool {
+// windowsPowerShellNativeArgvUncertain reports a PowerShell native-command argv
+// that Windows PowerShell 5.1 can reserialize: a literal double quote, a quoted
+// empty argument, or an unquoted expression delimiter. The argv the native
+// child receives is then not the one the lexer saw.
+func windowsPowerShellNativeArgvUncertain(command *CommandFact) bool {
 	if command == nil || command.Dialect != DialectPowerShell {
 		return false
 	}
@@ -5118,11 +5176,6 @@ func windowsExactNativeWebArgv(command *CommandFact, args []windowsWord) bool {
 		argument := command.Arguments[index]
 		if argument.Expands || argument.Quote == QuoteMixed ||
 			argument.Value != command.Argv[index] {
-			return false
-		}
-		if command.Dialect == DialectPowerShell &&
-			(strings.ContainsRune(argument.Value, '"') ||
-				argument.Value == "" && argument.Quote != QuoteNone) {
 			return false
 		}
 	}
@@ -5757,4 +5810,65 @@ func windowsEndpoint(word windowsWord) (string, string, int64, bool) {
 		return "", "", 0, false
 	}
 	return scheme, host, port, true
+}
+
+// windowsStaticNetExecCommandWord reports an unquoted, static word that names a
+// NetExec executable: after the call operator it is the command (as the quoted
+// form is), not an expression (rel-1-0-10:GAP-0406).
+func windowsStaticNetExecCommandWord(word windowsWord) bool {
+	if word.expands || word.wildcard || word.quote != QuoteNone || word.nativeArgvUncertain {
+		return false
+	}
+	_, ok := netExecProgramFamily(word.value)
+	return ok
+}
+
+// windowsPowerShellNetExecCallTarget reports whether the text after a call
+// operator starts with an unquoted, static word naming a NetExec executable.
+func windowsPowerShellNetExecCallTarget(runes []rune, start int) bool {
+	for start < len(runes) && runes[start] != '\n' && runes[start] != '\r' &&
+		unicode.IsSpace(runes[start]) {
+		start++
+	}
+	end := start
+	for end < len(runes) && !unicode.IsSpace(runes[end]) && !strings.ContainsRune(";|&<>(){}\"'`$*?[],", runes[end]) {
+		end++
+	}
+	if end == start {
+		return false
+	}
+	_, ok := netExecProgramFamily(string(runes[start:end]))
+	return ok
+}
+
+// windowsClassifyDotSourcedNetExec reads `. <netexec path> args` as a call to
+// that program, as the call operator is read: PowerShell runs an executable it
+// is asked to dot-source.
+func windowsClassifyDotSourcedNetExec(command *CommandFact, args []windowsWord, builder *windowsFactBuilder) bool {
+	if len(args) == 0 || !command.ArgvComplete || len(command.Argv) != len(args)+1 ||
+		len(command.Arguments) != len(args)+1 || !windowsStaticNetExecCommandWord(args[0]) {
+		return false
+	}
+	family, _ := netExecProgramFamily(args[0].value)
+	command.Executable = windowsExecutable(args[0].value)
+	command.Program = family
+	command.Arguments = command.Arguments[1:]
+	command.Argv = command.Argv[1:]
+	windowsClassifyNetExec(command, builder)
+	return true
+}
+
+// windowsClassifyNetExec gives a NetExec / CrackMapExec call under PowerShell or
+// cmd the same closed recognizers as the POSIX classifier
+// (rel-1-0-10:GAP-0051): an NTDS dump, or a complete statically credentialed
+// domain-service call, adds a credential-read operation; anything else stays
+// partial. A NetExec installed per user (pipx under the profile, C:\Tools) is
+// the same family: netExecProgramFamily is applied where Program is derived.
+func windowsClassifyNetExec(command *CommandFact, builder *windowsFactBuilder) {
+	if _, ok := exactDirectoryCredentialCommand(*command); ok ||
+		ExactNetExecDomainServiceAuth(*command) {
+		windowsAddOperation(command, OperationCredentialRead)
+		return
+	}
+	builder.out.markPartial(IssueUnknownOperandGrammar)
 }

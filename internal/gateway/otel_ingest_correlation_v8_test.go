@@ -178,7 +178,7 @@ func correlateCodexActivePromptBoundary(
 }
 
 func TestNativeOTLPCorrelationSpanReplayConflictAndSourceIsolation(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	fixture := newCodexNativeOTLPFixture(t)
 	api := &APIServer{store: fixture.store}
 	api.bindOTLPObservabilityRuntime(fixture.runtime)
@@ -295,7 +295,7 @@ func TestNativeOTLPLeafCanaryRequiresEveryCollectedTarget(t *testing.T) {
 }
 
 func TestNativeOTLPIdenticalLogsRemainDistinctAndSourceProvenCodexCallIDJoinsHook(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	fixture := newCodexNativeOTLPFixture(t)
 	api := &APIServer{store: fixture.store}
 	api.bindOTLPObservabilityRuntime(fixture.runtime)
@@ -357,7 +357,7 @@ func TestNativeOTLPIdenticalLogsRemainDistinctAndSourceProvenCodexCallIDJoinsHoo
 }
 
 func TestNativeOTLPIDlessToolLinksUniquePendingWithoutCollapse(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	fixture := newCodexNativeOTLPFixture(t)
 	api := &APIServer{store: fixture.store}
 	api.bindOTLPObservabilityRuntime(fixture.runtime)
@@ -366,6 +366,7 @@ func TestNativeOTLPIDlessToolLinksUniquePendingWithoutCollapse(t *testing.T) {
 	hook := correlateCodexToolStartWithoutNativeID(
 		t, t.Context(), api, "conversation-native-tool-1", "unique",
 	)
+	requireActivePendingStartForTest(t, fixture.path, hook.SemanticEventID, 1)
 	accounting, err := api.importDecodedOTLPRequestV8(
 		t.Context(), codexCorrelationToolRequest(now, ""),
 		otelSignalTraces, "codex", now,
@@ -399,21 +400,16 @@ func TestNativeOTLPIDlessToolLinksUniquePendingWithoutCollapse(t *testing.T) {
 		WHERE relationship_type='same_as'`).Scan(&sameAs); err != nil {
 		t.Fatal(err)
 	}
-	var pendingStatus, terminalSemantic string
-	if err := database.QueryRow(`SELECT status, terminal_semantic_event_id
-		FROM correlation_pending_operations WHERE operation_id=?`,
-		hook.ToolInvocationID).Scan(&pendingStatus, &terminalSemantic); err != nil {
-		t.Fatal(err)
+	if causedBy != 1 || sameAs != 0 {
+		t.Fatalf("derived join caused_by=%d same_as=%d native=%q", causedBy, sameAs, nativeSemantic)
 	}
-	if causedBy != 1 || sameAs != 0 || pendingStatus != string(audit.CorrelationOperationCompleted) ||
-		terminalSemantic != nativeSemantic {
-		t.Fatalf("derived join caused_by=%d same_as=%d pending=%q terminal=%q native=%q",
-			causedBy, sameAs, pendingStatus, terminalSemantic, nativeSemantic)
-	}
+	// The native end that joined the start (caused_by) resolved its
+	// operation: only a successful resolve deletes the row (S8 R5).
+	requireActivePendingStartForTest(t, fixture.path, hook.SemanticEventID, 0)
 }
 
 func TestNativeOTLPIDlessToolAmbiguityRemainsUnresolved(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	fixture := newCodexNativeOTLPFixture(t)
 	api := &APIServer{store: fixture.store}
 	api.bindOTLPObservabilityRuntime(fixture.runtime)
@@ -458,7 +454,7 @@ func TestNativeOTLPIDlessToolAmbiguityRemainsUnresolved(t *testing.T) {
 }
 
 func TestNativeOTLPReportedDifferentToolIDDoesNotLinkPendingHookOperation(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	fixture := newCodexNativeOTLPFixture(t)
 	api := &APIServer{store: fixture.store}
 	api.bindOTLPObservabilityRuntime(fixture.runtime)
@@ -538,7 +534,7 @@ func TestNativeOTLPReportedOperationIdentityPreventsPendingFallback(t *testing.T
 }
 
 func TestNativeOTLPCodexResponseLinksUniqueDurablePromptWithoutCollapse(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	fixture := newCodexNativeOTLPFixture(t)
 	hookAPI := &APIServer{store: fixture.store}
 	profile := hookAPI.hookProfileForConnector("codex")
@@ -612,7 +608,10 @@ func TestNativeOTLPCodexResponseLinksUniqueDurablePromptWithoutCollapse(t *testi
 		"conversation-native-1", prompt.TurnID, prompt.AgentID).Scan(&relationshipProjection); err != nil {
 		t.Fatal(err)
 	}
-	if events != 3 || groups != 3 || causedBy != 1 || exactMerges != 0 || derivedMembership != 2 ||
+	// The cursor-derived turn and agent are in the native observations
+	// (nativeProjection), not in correlation_identifiers: turn and agent
+	// identifiers are no longer stored (S8 R5, correlationIdentifierStored).
+	if events != 3 || groups != 3 || causedBy != 1 || exactMerges != 0 || derivedMembership != 0 ||
 		nativeProjection == 0 || relationshipProjection != 0 {
 		t.Fatalf("durable prompt join events=%d groups=%d caused_by=%d exact_merges=%d derived_membership=%d native_projection=%d relationship_projection=%d",
 			events, groups, causedBy, exactMerges, derivedMembership, nativeProjection, relationshipProjection)
@@ -620,7 +619,7 @@ func TestNativeOTLPCodexResponseLinksUniqueDurablePromptWithoutCollapse(t *testi
 }
 
 func TestNativeOTLPCodexResponseLeavesAmbiguousPromptBoundariesUnresolved(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	fixture := newCodexNativeOTLPFixture(t)
 	hookAPI := &APIServer{store: fixture.store}
 	first := correlateCodexActivePromptBoundary(
@@ -663,7 +662,7 @@ func TestNativeOTLPCodexResponseLeavesAmbiguousPromptBoundariesUnresolved(t *tes
 }
 
 func TestNativeOTLPCodexResponseWithReportedTurnDoesNotJoinActivePrompt(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	fixture := newCodexNativeOTLPFixture(t)
 	hookAPI := &APIServer{store: fixture.store}
 	_ = correlateCodexActivePromptBoundary(
@@ -710,7 +709,7 @@ func TestNativeOTLPCodexResponseWithReportedTurnDoesNotJoinActivePrompt(t *testi
 }
 
 func TestNativeOTLPSharedTraceAddsTopologyWithoutBusinessIdentity(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	fixture := newCodexNativeOTLPFixture(t)
 	api := &APIServer{store: fixture.store}
 	api.bindOTLPObservabilityRuntime(fixture.runtime)
@@ -785,7 +784,7 @@ func TestNativeOTLPSharedTraceAddsTopologyWithoutBusinessIdentity(t *testing.T) 
 }
 
 func TestNativeOTLPNonAuthoritativeSourceEventDoesNotMergeRails(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	fixture := newCodexNativeOTLPFixture(t)
 	api := &APIServer{store: fixture.store}
 	api.bindOTLPObservabilityRuntime(fixture.runtime)
@@ -856,7 +855,7 @@ func TestNativeOTLPNonAuthoritativeSourceEventDoesNotMergeRails(t *testing.T) {
 }
 
 func TestNativeOTLPMetricGetsOccurrenceContextWithoutIdentityLabels(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	fixture := newCodexNativeOTLPFixture(t)
 	api := &APIServer{store: fixture.store}
 	api.bindOTLPObservabilityRuntime(fixture.runtime)
@@ -893,7 +892,7 @@ func TestNativeOTLPMetricGetsOccurrenceContextWithoutIdentityLabels(t *testing.T
 }
 
 func TestNativeOTLPDropOnlyDoesNotPromoteCustodyOrPoisonReplay(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	fixture := newCodexNativeOTLPFixtureWithCollection(t, false)
 	api := &APIServer{store: fixture.store}
 	api.bindOTLPObservabilityRuntime(fixture.runtime)
@@ -921,7 +920,7 @@ func TestNativeOTLPDropOnlyDoesNotPromoteCustodyOrPoisonReplay(t *testing.T) {
 }
 
 func TestNativeOTLPReceiptFailureRetriesUntilExactCanarySucceeds(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	fixture := newCodexNativeOTLPFixture(t)
 	api := &APIServer{store: fixture.store}
 	api.bindOTLPObservabilityRuntime(fixture.runtime)
@@ -987,7 +986,7 @@ func TestNativeOTLPReceiptFailureRetriesUntilExactCanarySucceeds(t *testing.T) {
 }
 
 func TestNativeOTLPConflictingAliasesFailBeforeOccurrencePersistence(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	fixture := newCodexNativeOTLPFixture(t)
 	api := &APIServer{store: fixture.store}
 	api.bindOTLPObservabilityRuntime(fixture.runtime)
@@ -1043,7 +1042,7 @@ func TestNativeOTLPTypedIdentityConsistencyKeepsKindsIndependent(t *testing.T) {
 }
 
 func TestNativeOTLPReportedLogicalCannotInventGroup(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	server, store := newHookCorrelationServer(t, filepath.Join(t.TempDir(), "audit.db"))
 	defer store.Close() //nolint:errcheck
 	classifier := mustOTLPInboundClassifierV8(t)
@@ -1134,7 +1133,7 @@ func containsCorrelationTarget(values []connector.CorrelationValue, target conne
 // GAP-0031). A native Codex record that only inherits the cursor's agent
 // must take the live hook identity, not be dropped as invalid_mapped_field.
 func TestNativeOTLPCodexCursorDerivedAgentYieldsToLiveHookLifecycle(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	fixture := newCodexNativeOTLPFixture(t)
 	hookAPI := &APIServer{store: fixture.store}
 	prompt := correlateCodexActivePromptBoundary(

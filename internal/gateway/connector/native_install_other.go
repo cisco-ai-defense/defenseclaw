@@ -28,6 +28,10 @@ func canonicalStandaloneWindowsHookBinary() string {
 	return ""
 }
 
+func standaloneWindowsHookLaunchImages() []string {
+	return nil
+}
+
 func canonicalNativeWindowsHookBinary() string {
 	return ""
 }

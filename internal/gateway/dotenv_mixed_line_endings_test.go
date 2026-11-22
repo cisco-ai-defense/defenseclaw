@@ -16,11 +16,11 @@ func TestGatewayDotEnvWritersNormalizeAMixedFileToOneEnding(t *testing.T) {
 		write func(t *testing.T, dir string)
 		want  []string
 	}{
-		{"token refresh", func(t *testing.T, dir string) {
-			if err := persistRefreshedToken(dir, "new-token"); err != nil {
+		{"OpenClaw token refresh", func(t *testing.T, dir string) {
+			if err := saveOpenClawToken(t, dir, "new-token"); err != nil {
 				t.Fatal(err)
 			}
-		}, []string{"DEFENSECLAW_LLM_KEY=keep", "DEFENSECLAW_GATEWAY_TOKEN=new-token", "# note"}},
+		}, []string{"DEFENSECLAW_LLM_KEY=keep", "DEFENSECLAW_GATEWAY_TOKEN=old-token", "# note", "OPENCLAW_GATEWAY_TOKEN=new-token"}},
 		{"first boot append", func(t *testing.T, dir string) {
 			if err := appendEnvLine(filepath.Join(dir, ".env"), "DEFENSECLAW_GATEWAY_TOKEN", "boot-token"); err != nil {
 				t.Fatal(err)

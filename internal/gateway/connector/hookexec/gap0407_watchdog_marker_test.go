@@ -105,8 +105,18 @@ func TestGAP0407ClaimedBlockKeepsPreparedToolID(t *testing.T) {
 	})
 	opts.failurePayload = []byte(`{"session_id":"s","tool_use_id":"claimed-block"}`)
 	sp := specs["claudecode"]
-	deadline := time.Now().Add(450 * time.Millisecond)
-	_ = startAnswerWatchdog(&opts, sp, "closed", deadline, deadline)
+	// The record of the claimed answer is the marker prepared ahead of the
+	// deadline. watch prepares it on its own timer 350 ms before a 450 ms
+	// deadline, and a hosted macOS runner can stall a goroutine longer than
+	// that (684.95 ms seen, see above; macOS CI run 43337422577 had no
+	// marker at the deadline). Production prepares it a full
+	// answerWatchdogLogPrepareLead (1 s) ahead. So the test prepares it at
+	// once (the same prepare; watch's own call is then a no-op) and gives
+	// it that second before the deadline.
+	deadline := time.Now().Add(answerWatchdogLogPrepareLead)
+	w := startAnswerWatchdog(&opts, sp, "closed", deadline, deadline)
+	w.failureLog.prepare(w.failureLogHome)
+	defer awaitAnswerWatchdogBackground(t, w) // runs before the release above: the watchdog does not wait for the logger
 	go func() {
 		defer close(loggerDone)
 		logHookFailure(opts, sp, "gateway did not answer", "transport", "closed", true)
@@ -117,6 +127,11 @@ func TestGAP0407ClaimedBlockKeepsPreparedToolID(t *testing.T) {
 		t.Fatal("failure logger did not reach the clock")
 	}
 	select {
+	case <-w.failureLog.markerReady:
+	case <-time.After(time.Until(deadline)):
+		t.Fatalf("the marker was not prepared %v after its prepare began (the runner stalled)", answerWatchdogLogPrepareLead)
+	}
+	select {
 	case got := <-exited:
 		if !claudeBlocked(runResult{code: got.code, stdout: got.out}) {
 			t.Fatalf("watchdog did not deliver a block: code=%d", got.code)
@@ -125,7 +140,7 @@ func TestGAP0407ClaimedBlockKeepsPreparedToolID(t *testing.T) {
 			!bytes.Contains(got.marker, []byte(`"outcome":"fail_closed"`)) {
 			t.Fatalf("blocked call has no per-ID record: %q", got.marker)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(time.Until(deadline) + 2*time.Second):
 		t.Fatal("watchdog did not exit at its answer deadline")
 	}
 }
@@ -165,8 +180,18 @@ func TestGAP0407ClaimedOpenKeepsAllowedRecord(t *testing.T) {
 	})
 	opts.failurePayload = []byte(`{"session_id":"s","tool_use_id":"claimed-open"}`)
 	sp := specs["claudecode"]
-	deadline := time.Now().Add(450 * time.Millisecond)
-	_ = startAnswerWatchdog(&opts, sp, "closed", deadline, deadline)
+	// The record of the claimed answer is the marker prepared ahead of the
+	// deadline. watch prepares it on its own timer 350 ms before a 450 ms
+	// deadline, and a hosted macOS runner can stall a goroutine longer than
+	// that (684.95 ms seen, see above; macOS CI run 43337422577 had no
+	// marker at the deadline). Production prepares it a full
+	// answerWatchdogLogPrepareLead (1 s) ahead. So the test prepares it at
+	// once (the same prepare; watch's own call is then a no-op) and gives
+	// it that second before the deadline.
+	deadline := time.Now().Add(answerWatchdogLogPrepareLead)
+	w := startAnswerWatchdog(&opts, sp, "closed", deadline, deadline)
+	w.failureLog.prepare(w.failureLogHome)
+	defer awaitAnswerWatchdogBackground(t, w) // runs before the release above: the watchdog does not wait for the logger
 	go func() {
 		defer close(loggerDone)
 		logUnreachableFailure(opts, sp, perUserGatewayRestartingReason, "open", false)
@@ -175,6 +200,11 @@ func TestGAP0407ClaimedOpenKeepsAllowedRecord(t *testing.T) {
 	case <-entered:
 	case <-time.After(time.Second):
 		t.Fatal("failure logger did not reach the clock")
+	}
+	select {
+	case <-w.failureLog.markerReady:
+	case <-time.After(time.Until(deadline)):
+		t.Fatalf("the marker was not prepared %v after its prepare began (the runner stalled)", answerWatchdogLogPrepareLead)
 	}
 	select {
 	case got := <-exited:
@@ -186,7 +216,7 @@ func TestGAP0407ClaimedOpenKeepsAllowedRecord(t *testing.T) {
 			bytes.Contains(got.marker, []byte(`"outcome":"fail_closed"`)) {
 			t.Fatalf("allowed call has an incorrect local record: %q", got.marker)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(time.Until(deadline) + 2*time.Second):
 		t.Fatal("watchdog did not exit at its answer deadline")
 	}
 }

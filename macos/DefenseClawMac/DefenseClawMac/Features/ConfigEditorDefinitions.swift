@@ -75,7 +75,7 @@ enum ConfigRestartPolicy {
     static let restartKeys = [
         "data_dir", "observability.local.path", "observability.local.judge_bodies_path",
         "gateway", "guardrail.host", "guardrail.port", "guardrail.enabled", "guardrail.connector",
-        "guardrail.scanner_mode", "guardrail.retain_judge_bodies", "guardrail.hook_self_heal",
+        "guardrail.scanner_mode", "guardrail.retain_judge_bodies", "guardrail.hook_self_heal", "guardrail.protected_files",
         "guardrail.hook_self_heal_debounce_ms", "claw", "agent", "routing", "plugin_dir",
         "deployment_mode", "enterprise.profile", "enterprise.network", "enterprise.openshell",
         "environment", "tenant_id", "workspace_id", "discovery_source",
@@ -125,6 +125,18 @@ enum ConfigDraftRebase {
 // MARK: - Validation (port of setup_state.validate_config_field)
 
 enum ConfigFieldValidation {
+    /// config.decision_model_url_error: https anywhere, or http to loopback only.
+    static func decisionModelURLProblem(_ value: String) -> String? {
+        guard let url = URL(string: value.trimmingCharacters(in: .whitespaces)), let scheme = url.scheme?.lowercased(), let host = url.host?.lowercased(), !host.isEmpty else {
+            return "expected an http(s) URL with a host"
+        }
+        if scheme == "https" { return nil }
+        if scheme == "http" {
+            return ["localhost", "127.0.0.1", "::1", "[::1]"].contains(host) || host.hasPrefix("127.") ? nil : "http is allowed to loopback only; use https"
+        }
+        return "expected an http(s) URL"
+    }
+
     struct Result {
         var severity: String = ""   // "", "warning", "error"
         var message: String = ""
@@ -140,6 +152,17 @@ enum ConfigFieldValidation {
         }
         if field.kind == .choice, !field.options.isEmpty, !field.options.contains(value) {
             return Result(severity: "error", message: "choose one of: " + field.options.joined(separator: ", "))
+        }
+        // setup_state._FLOAT_FIELD_KEYS (1.0.7): fractions, or fractional seconds.
+        if ["decision_model.timeout", "decision_model.allow_threshold", "decision_model.block_threshold"].contains(field.key), !value.isEmpty {
+            guard let number = Double(value) else { return Result(severity: "error", message: "expected a number") }
+            let upper = field.key.hasSuffix("timeout") ? 30.0 : 1.0
+            if !(0...upper).contains(number) {
+                return Result(severity: "error", message: "must be between 0 and \(upper == 1.0 ? "1" : "30")")
+            }
+        }
+        if field.key == "decision_model.base_url", !value.isEmpty, let problem = decisionModelURLProblem(value) {
+            return Result(severity: "error", message: problem)
         }
         if field.kind == .int {
             guard let number = Int(value) else {
@@ -205,8 +228,7 @@ enum ConfigEditorCatalog {
     static var llmOverrideProviders: [String] { [""] + llmProviders }
     static let connectors = [
         "openclaw", "zeptoclaw", "codex", "claudecode", "hermes", "cursor",
-        "devin", "copilot", "antigravity",
-        "opencode", "amp",
+        "devin", "copilot", "antigravity", "opencode", "amp", "kiro",
     ]
     static let detectionStrategies = ["regex_only", "regex_judge", "judge_first"]
 
@@ -816,6 +838,25 @@ enum ConfigEditorCatalog {
                 .init(label: "Base URL", key: "inspect_llm.base_url", kind: .header),
                 .init(label: "Timeout (s)", key: "inspect_llm.timeout", kind: .header),
                 .init(label: "Max Retries", key: "inspect_llm.max_retries", kind: .header),
+            ]
+        ))
+
+        // Runtime 1.0.7: the unified decision model (setup.py "Decision Model").
+        sections.append(ConfigEditorSection(
+            name: "Decision Model",
+            summary: "Fast first pass on tool calls, in front of the LLM judge or alone; skill scans record its advisory score.",
+            help: "Token value: defenseclaw keys set DEFENSECLAW_DECISION_MODEL_KEY. Check: setup decision-model --ping.",
+            fields: [
+                .init(label: "Enabled", key: "decision_model.enabled", kind: .bool, hint: "Off by default. Runs in front of the LLM judge, or alone for the connectors below."),
+                .init(label: "Model", key: "decision_model.model", hint: "Model name the System One endpoint serves."),
+                .init(label: "Endpoint URL", key: "decision_model.base_url", hint: "https, or http to loopback only."),
+                .init(label: "Token Env", key: "decision_model.api_key_env", hint: "Env var NAME; default DEFENSECLAW_DECISION_MODEL_KEY."),
+                .init(label: "Timeout (s)", key: "decision_model.timeout", hint: "Blank = 1. The judge runs when it is late."),
+                .init(label: "Allow At", key: "decision_model.allow_threshold", hint: "Risk at or below skips the judge. Blank = 0.30."),
+                .init(label: "Block At", key: "decision_model.block_threshold", hint: "Risk at or above is a confident block. Blank = 0.75."),
+                .init(label: "Confident Block", key: "decision_model.on_confident_block", kind: .choice, options: ["", "escalate", "decide"],
+                      hint: "escalate: the judge still checks it (default). decide: it stands."),
+                .init(label: "Answers Alone For", key: "decision_model.hook_connectors", hint: "Connectors (comma list, or *) answered alone where the judge is off."),
             ]
         ))
 

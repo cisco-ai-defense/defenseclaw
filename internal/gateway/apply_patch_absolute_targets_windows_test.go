@@ -105,10 +105,11 @@ func TestWindowsApplyPatchAbsoluteTargetsAreJudged(t *testing.T) {
 	}{
 		{`{H}\.ssh\authorized_keys`, "persistence.ssh_authorized_keys_command", true},
 		{`{R}{H}\.ssh\authorized_keys`, "persistence.ssh_authorized_keys_command", true},
-		{`{H}\.defenseclaw\config.yaml`, "tamper.detector_state_write", true},
+		// A proven state write is a HIGH alert outside strict (GAP-0747 owner tiering 2026-11-15T15:20Z).
+		{`{H}\.defenseclaw\config.yaml`, "tamper.detector_state_write", false},
 		{`{P}\.git\hooks\pre-commit`, "persistence.git_hook_write", false},
 		{`{R}{P}\.git\hooks\pre-commit`, "persistence.git_hook_write", false},
-		{`{R}{H}\.defenseclaw\config.yaml`, "tamper.detector_state_write", true},
+		{`{R}{H}\.defenseclaw\config.yaml`, "tamper.detector_state_write", false},
 	}
 	for _, profile := range []string{"default", "strict"} {
 		for _, connectorName := range []string{"codex", "copilot"} {

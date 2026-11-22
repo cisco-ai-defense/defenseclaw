@@ -70,6 +70,21 @@ func ProjectLabel(realPath string) (key, value string) {
 var repoNameUnsafe = lazyregexp.New(`[^A-Za-z0-9._-]+`)
 
 // RepoName derives the /work/<repo> directory name from a host folder.
+// folderName is FolderName when it is a usable folder name (one path
+// element, no control character, at most 255 bytes), else RepoName.
+func (o StageOptions) folderName(realPath string) string {
+	n := o.FolderName
+	if n == "" || n == "." || n == ".." || len(n) > 255 || strings.ContainsAny(n, "/\\\x00") {
+		return RepoName(realPath)
+	}
+	for _, r := range n {
+		if r < 0x20 || r == 0x7f {
+			return RepoName(realPath)
+		}
+	}
+	return n
+}
+
 func RepoName(realPath string) string {
 	base := filepath.Base(filepath.Clean(realPath))
 	base = repoNameUnsafe.ReplaceAllString(base, "-")

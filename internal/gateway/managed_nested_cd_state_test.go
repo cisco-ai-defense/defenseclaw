@@ -108,7 +108,7 @@ func TestR105GAP2485ManagedCdWalkUsesClientCWD(t *testing.T) {
 					for _, r := range rows {
 						got := send(t, connector, mode, r.cwd, r.command)
 						// Observe reports the finding; action blocks.
-						if r.block && (mode == "action" && !strings.HasPrefix(got, `{"action":"block"`) || !strings.Contains(got, "tamper.detector_state_write")) {
+						if r.block && (mode == "action" && !gap0747HookBlocked(got, "") || !strings.Contains(got, "tamper.detector_state_write")) {
 							t.Errorf("%s/%s %s = %.400s, want the tamper.detector_state_write finding (block in action)", connector, mode, r.command, got)
 						}
 						if !r.block && (strings.HasPrefix(got, `{"action":"block"`) || strings.Contains(got, "tamper.detector_state_write")) {

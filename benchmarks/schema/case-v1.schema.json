@@ -61,6 +61,7 @@
               "active_home": {"type": "string", "maxLength": 4096},
               "active_agent_files": {"type": "array", "maxItems": 256, "items": {"type": "string", "maxLength": 4096}},
               "outcome": {"enum": ["succeeded", "failed", "denied", "cancelled", "unknown"]},
+              "tool_result": {"$ref": "#/$defs/event_result"},
               "offset_seconds": {"type": "integer", "minimum": 0, "maximum": 1800},
               "result_proof": {"type": "string", "maxLength": 262144}
             },
@@ -75,7 +76,9 @@
             ]
           }
         },
-        "tool_result": {"$ref": "#/$defs/tool_result"}
+        "tool_result": {"$ref": "#/$defs/tool_result"},
+        "user_intent": {"type": "string", "maxLength": 4096},
+        "event_result": {"$ref": "#/$defs/event_result"}
       }
     },
     "truth": {
@@ -194,6 +197,16 @@
     }
   ],
   "$defs": {
+    "event_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["text"],
+      "properties": {
+        "text": {"type": "string", "maxLength": 20000},
+        "truncated": {"type": "boolean"},
+        "bytes": {"type": "integer", "minimum": 0}
+      }
+    },
     "tool_result": {
       "type": "object",
       "additionalProperties": false,

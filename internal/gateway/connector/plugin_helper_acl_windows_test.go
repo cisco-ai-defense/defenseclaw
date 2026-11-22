@@ -7,13 +7,19 @@ package connector
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
+
+// errorInvalidOwner is ERROR_INVALID_OWNER (1307), the exit status of
+// icacls /setowner when the account may not assign that owner.
+const errorInvalidOwner = 1307
 
 // A writable record, hook directory or helper can redirect the plugin's
 // bearer-bearing native POST. Exercise the rendered plugins on Windows so
@@ -172,7 +178,19 @@ func TestWindowsPerUserPluginRejectsWritableHelperPaths(t *testing.T) {
 				}
 				icacls := func(args ...string) {
 					t.Helper()
-					if out, err := exec.Command("icacls", args...).CombinedOutput(); err != nil {
+					out, err := exec.Command("icacls", args...).CombinedOutput()
+					var exit *exec.ExitError
+					if errors.As(err, &exit) && exit.ExitCode() == errorInvalidOwner && slices.Contains(args, "/setowner") &&
+						!slices.Contains(args, "*"+current.Uid) {
+						// Only an account that holds the restore privilege
+						// (an elevated run, as Windows Native CI) may make
+						// another principal the owner; a standard account
+						// gets ERROR_INVALID_OWNER before the plugin runs, so
+						// the case has no verdict to check here
+						// (rel-1-0-10:GAP-1181).
+						t.Skipf("icacls %v: this account may not assign another owner (ERROR_INVALID_OWNER); run elevated", args)
+					}
+					if err != nil {
 						t.Fatalf("icacls %v: %v\n%s", args, err, out)
 					}
 				}

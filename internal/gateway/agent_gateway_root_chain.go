@@ -86,7 +86,7 @@ func rootToolChainAdded(
 	profile connector.HookProfile,
 	req agentHookRequest,
 	resp agentHookResponse,
-	repository *audit.ToolChainRepository,
+	repository toolChainStore,
 	root, session audit.ToolChainObserveResult,
 	panicState *toolChainHookPanicState,
 ) audit.ToolChainObserveResult {
@@ -118,7 +118,7 @@ func (a *APIServer) applyToolChainRootResult(
 	req agentHookRequest,
 	resp agentHookResponse,
 	finalization *toolChainHookFinalization,
-	repository *audit.ToolChainRepository,
+	repository toolChainStore,
 	root, added audit.ToolChainObserveResult,
 	denyEligible bool,
 	latency time.Duration,
@@ -134,11 +134,11 @@ func (a *APIServer) applyToolChainRootResult(
 		note.rootChain.chainIDs = appendUniqueStrings(note.rootChain.chainIDs, added.DetectedChainIDs...)
 	}
 	chainFindings := toolChainRuleFindings(added)
-	intent := toolChainHookIntent(
+	intent := substrateChainEgressIntent(ctx, toolChainHookIntent(
 		guardrailActionForConnector(a.decisionConfig(ctx), req.ConnectorName, HighestSeverity(chainFindings), true),
 		denyEligible,
 		added,
-	)
+	), added)
 	resp = mergeAgentHookFindings(profile, req, resp, chainFindings, intent)
 	if added.Status == audit.ToolChainObserveFresh {
 		eval := a.emitHookRuleFindings(

@@ -112,8 +112,9 @@ func claudeCodeProfileEventContent(payload map[string]interface{}) string {
 // evaluateClaudeCodeHook:
 //
 //   - rawAction=="block" + event-is-not-claude-enforceable →
-//     allow + wouldBlock=true (Claude Code's PostToolUse,
-//     PostToolBatch, SessionStart, etc. are observe-only by contract).
+//     allow + wouldBlock=true (Claude Code's PostToolBatch,
+//     SessionStart, etc. are observe-only by contract; PostToolUse
+//     renders decision=block, GAP-0605).
 //   - observe mode: any block/alert/confirm verdict demotes to
 //     allow; wouldBlock=true for the block case.
 //   - action mode + rawAction=="confirm": stays confirm only on
@@ -255,6 +256,14 @@ func claudeCodeOutputForProfile(req HookProfileRequest, action, rawAction, reaso
 				"action":        "decline",
 				"content":       map[string]interface{}{},
 			}}
+		case "PostToolUse":
+			// The model reads the reason with the result it already has; the
+			// user sees only systemMessage (GAP-0605).
+			out := map[string]interface{}{"decision": "block", "reason": claudeCodeReasonOrDefault(reason)}
+			if notice := ToolResultUserNotice(action, reason, additional); notice != "" {
+				out["systemMessage"] = notice
+			}
+			return out
 		default:
 			return map[string]interface{}{"decision": "block", "reason": claudeCodeReasonOrDefault(reason)}
 		}
@@ -294,10 +303,18 @@ func claudeCodeOutputForProfile(req HookProfileRequest, action, rawAction, reaso
 	switch event {
 	case "UserPromptSubmit", "UserPromptExpansion", "PostToolUse", "PostToolUseFailure",
 		"PostToolBatch", "SubagentStart", "SubagentStop":
-		return map[string]interface{}{"hookSpecificOutput": map[string]interface{}{
+		out := map[string]interface{}{"hookSpecificOutput": map[string]interface{}{
 			"hookEventName":     event,
 			"additionalContext": additional,
 		}}
+		// additionalContext reaches the model only; a result finding also
+		// shows the user a line (GAP-0605).
+		if ToolResultEvent(event) {
+			if notice := ToolResultUserNotice(action, reason, additional); notice != "" {
+				out["systemMessage"] = notice
+			}
+		}
+		return out
 	default:
 		return map[string]interface{}{"systemMessage": additional}
 	}

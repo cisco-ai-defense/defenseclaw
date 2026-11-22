@@ -120,6 +120,53 @@ func WindowsProtectedTargetFromOtherRelease(opts InstallOptions) (string, bool, 
 	return written, true, nil
 }
 
+// WindowsProtectedTargetRetireRender reads, without writing, the protected
+// hook-contract lock entry and the protected runtime selector of one managed
+// target, and reports this release as the lock's writer when this release
+// wrote the lock while the selector records, for the target SID, an earlier
+// trusted hook image of this install (windowsPriorReleaseTargetHookImage).
+// That is the render of a hook-image retire: this release rewrote the
+// account's records for the transition image bin\defenseclaw-hook.exe before
+// the administrator went back to 1.0.9, which accepts that render and leaves
+// it and its lock as they are. After the upgrade back the lock names this
+// release, so WindowsProtectedTargetFromOtherRelease says no, and an account
+// with no active session failed instead of waiting for its sign-in (GAP-1096,
+// cert replay on IB4). The guardian asks it only for its read-only proof that
+// accepts the earlier release's render, never for another sign-in wait: the
+// Hermes earlier-matrix wait trusts the account's own config and Secure Client
+// trusts the lock alone, so a retire render must not open them. Any other lock,
+// and any error reading the selector, reads as no.
+func WindowsProtectedTargetRetireRender(opts InstallOptions) (string, bool, error) {
+	lock, err := windowsProtectedTargetLock(opts)
+	if err != nil {
+		return "", false, err
+	}
+	written := strings.TrimSpace(lock.DefenseClawVersion)
+	if written == "" || written != strings.TrimSpace(version.Current().BinaryVersion) ||
+		!windowsProtectedTargetRecordsEarlierHookImage(opts) {
+		return "", false, nil
+	}
+	return written, true, nil
+}
+
+// windowsProtectedTargetRecordsEarlierHookImage reports that the protected
+// runtime selector records, for the target SID, an earlier trusted hook image
+// of this install than the one this release names
+// (windowsPriorReleaseTargetHookImage). Any error reads as no.
+func windowsProtectedTargetRecordsEarlierHookImage(opts InstallOptions) bool {
+	_, sid, err := validateWindowsEnterpriseHome(opts.UserHome, opts.OwnerSID)
+	if err != nil {
+		return false
+	}
+	current, err := windowsEnterpriseHookExecutable()
+	if err != nil {
+		return false
+	}
+	prior := opts
+	prior.AcceptPriorReleaseRender = true
+	return windowsPriorReleaseTargetHookImage(prior, opts.ConnectorName, sid, current) != current
+}
+
 // WindowsProtectedTargetRunsEarlierHookMatrix reads, without writing, one
 // managed target's agent config and reports that it holds the hook matrix an
 // earlier release registered, which differs from this release's only by the

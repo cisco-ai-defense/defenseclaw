@@ -1,7 +1,6 @@
 """GAP-2640: an unprefixed Bedrock id resolves to the bedrock provider."""
 
 import pytest
-
 from defenseclaw.config import LLMConfig, is_bedrock_model_id
 from defenseclaw.scanner._llm_env import litellm_model
 

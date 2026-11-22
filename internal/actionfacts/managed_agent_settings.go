@@ -275,7 +275,7 @@ func WindowsLocalDrivePath(value string) (string, bool) {
 	}
 	parts := strings.SplitN(rest, "/", 3)
 	if len(parts) < 2 || len(parts[1]) != 2 || !isASCIILetter(parts[1][0]) || parts[1][1] != '$' ||
-		!windowsLocalHost(parts[0]) {
+		!WindowsServerIsThisMachine(parts[0]) {
 		return "", false
 	}
 	tail := ""
@@ -285,13 +285,13 @@ func WindowsLocalDrivePath(value string) (string, bool) {
 	return strings.ToUpper(parts[1][:1]) + ":/" + tail, true
 }
 
-// windowsLocalHost reports a UNC host name that is this machine: localhost,
+// WindowsServerIsThisMachine reports a UNC server name that is this machine: localhost,
 // a loopback address in any spelling Windows resolves (127.0.0.0/8, ::1,
 // the ipv6-literal.net form), or one of the names of this host
 // (localHostNames). A name that only shares the first label with this host,
 // such as the same short name in another DNS domain, is another machine
 // (rel-1-0-6:GAP-0734 review 11 M1).
-func windowsLocalHost(host string) bool {
+func WindowsServerIsThisMachine(host string) bool {
 	host = strings.ToLower(strings.TrimSuffix(host, "."))
 	host = strings.TrimSuffix(strings.TrimPrefix(host, "["), "]")
 	switch host {

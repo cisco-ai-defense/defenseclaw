@@ -108,6 +108,33 @@ func PerUserGatewayRestartProvenDuringCall(dataDir string, peer *PerUserPeerReco
 // perUserRestartProofBudget bounds PerUserGatewayRestartProven.
 var perUserRestartProofBudget = 300 * time.Millisecond
 
+// perUserPeerReadWait bounds the wait, at the deadline, for the read of the
+// connected peer's process that started when the call connected.
+var perUserPeerReadWait = 500 * time.Millisecond
+
+// wait returns the peer once its read is done, false when it is unknown or
+// the read did not end within wait.
+func (r *PerUserPeerRecord) wait(wait time.Duration) (perUserPeerProcess, bool) {
+	if r == nil || r.done == nil {
+		return perUserPeerProcess{}, false
+	}
+	// A read that has ended is the answer, whatever the wait (a wait of zero
+	// asks only whether the read has ended).
+	select {
+	case <-r.done:
+		return r.peer, r.ok
+	default:
+	}
+	expired, stop := proofclock.NewTimer(wait)
+	defer stop()
+	select {
+	case <-r.done:
+		return r.peer, r.ok
+	case <-expired:
+		return perUserPeerProcess{}, false
+	}
+}
+
 func perUserGatewayRestartProof(ctx context.Context, open func(string) (*os.File, error), dataDir string, peer *PerUserPeerRecord, startObserved bool) bool {
 	if !startObserved && !perUserGatewayStartInProgressWith(open, dataDir) {
 		return false

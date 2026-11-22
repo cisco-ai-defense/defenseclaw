@@ -169,6 +169,40 @@ func TestIdentitySpoolPassRunsInsideTheIntervalOnlyWhenTheAccountDatabaseChanged
 	}
 }
 
+// identitySpoolTickRanAPass runs one guardian tick (start) and says whether it
+// started a spool pass, after waiting for a started pass to end. The tick
+// decides before it returns (enterpriseHookIdentitySpoolPassDue marks the
+// pass running), and a pass sends on passes before it ends: a tick that left
+// no pass running and none sent started none, so the ticks that must start
+// no pass need not wait 2 s each to see that.
+func identitySpoolTickRanAPass(t *testing.T, passes <-chan struct{}, start func()) bool {
+	t.Helper()
+	state := &enterpriseHookIdentitySpoolState
+	start()
+	state.Lock()
+	running := state.running
+	state.Unlock()
+	if !running && len(passes) == 0 {
+		return false
+	}
+	select {
+	case <-passes:
+	case <-time.After(2 * time.Second):
+		return false
+	}
+	// The pass records its fingerprint when it ends.
+	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
+		state.Lock()
+		running := state.running
+		state.Unlock()
+		if !running {
+			return true
+		}
+	}
+	t.Fatal("the spool pass did not end")
+	return true
+}
+
 // GAP-2026 (lead 19:08): the guardian's tick itself, not only its due
 // decision, runs a spool pass inside the interval when the local account
 // database changed (useradd, userdel) and none when nothing changed.
@@ -209,23 +243,9 @@ func TestIdentitySpoolTickRunsAPassInsideTheIntervalOnlyWhenTheAccountDatabaseCh
 	}
 	tick := func() bool {
 		t.Helper()
-		startEnterpriseHookIdentitySpool(context.Background(), io.Discard, enterpriseHookReconcileRun{})
-		select {
-		case <-passes:
-		case <-time.After(2 * time.Second):
-			return false
-		}
-		// The pass records its fingerprint when it ends.
-		for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
-			state.Lock()
-			running := state.running
-			state.Unlock()
-			if !running {
-				return true
-			}
-		}
-		t.Fatal("the spool pass did not end")
-		return true
+		return identitySpoolTickRanAPass(t, passes, func() {
+			startEnterpriseHookIdentitySpool(context.Background(), io.Discard, enterpriseHookReconcileRun{})
+		})
 	}
 	if !tick() {
 		t.Fatal("the first tick ran no spool pass")
@@ -315,22 +335,9 @@ func TestIdentitySpoolTickRunsAPassWhenTheDirectoryNamesAnotherSIDForTheUID(t *t
 	run := enterpriseHookReconcileRun{Rows: []enterpriseHookReconcileRow{{User: name, UID: uid, Connector: "codex", OK: true}}}
 	tick := func() bool {
 		t.Helper()
-		startEnterpriseHookIdentitySpool(context.Background(), io.Discard, run)
-		select {
-		case <-passes:
-		case <-time.After(2 * time.Second):
-			return false
-		}
-		for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
-			state.Lock()
-			running := state.running
-			state.Unlock()
-			if !running {
-				return true
-			}
-		}
-		t.Fatal("the spool pass did not end")
-		return true
+		return identitySpoolTickRanAPass(t, passes, func() {
+			startEnterpriseHookIdentitySpool(context.Background(), io.Discard, run)
+		})
 	}
 	if !tick() {
 		t.Fatal("the first tick ran no spool pass")

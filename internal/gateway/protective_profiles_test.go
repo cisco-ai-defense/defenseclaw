@@ -272,8 +272,8 @@ func TestPrivacyHighAssuranceProfileBlocksSelectedPIIOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if pack.Summary().EnabledRuleCount != 13 {
-		t.Fatalf("privacy profile enabled rule count = %d, want 13", pack.Summary().EnabledRuleCount)
+	if pack.Summary().EnabledRuleCount != 14 {
+		t.Fatalf("privacy profile enabled rule count = %d, want 14", pack.Summary().EnabledRuleCount)
 	}
 }
 

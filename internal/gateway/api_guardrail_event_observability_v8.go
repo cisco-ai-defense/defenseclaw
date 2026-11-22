@@ -201,10 +201,11 @@ func (a *APIServer) emitGuardrailEventV8(ctx context.Context, facts apiGuardrail
 		}
 		// The verified account behind the evaluation, as the hook decision
 		// and tool rows of the same user carry it: without it a record that
-		// says the principal is verified names nobody (GAP-0252). Secure
-		// Client keeps the family of main, which names no user (issue #1092).
+		// says the principal is verified names nobody (GAP-0252). Under
+		// Secure Client only a request whose end user was labelled names
+		// one (v8RecordNamesCaller).
 		caller := auditCallerIdentity(ctx)
-		if !ManagedEnterpriseActive() {
+		if v8RecordNamesCaller(ctx, caller.ID) {
 			input.UserID = hookV8OptionalIdentifier(caller.ID)
 			input.DefenseClawUserIDKind = v8UserIDKind(caller.IDKind)
 			input.DefenseClawUserName = v8UserName(caller.Name, hookV8OptionalIdentifier)
