@@ -335,7 +335,7 @@ def _plausible_host(value: str) -> bool:
 
 
 def vault_keys_hint(model: VaultPanelModel) -> str:
-    return "  ".join(f"\\[{k}] {label}" for k, label in model.keys())
+    return " · ".join(f"{k} {label}" for k, label in model.keys())
 
 
 def vault_help_rows() -> list[tuple[str, str]]:

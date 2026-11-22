@@ -105,10 +105,12 @@ def test_row_keys_build_the_cli_commands() -> None:
 
 
 def test_hint_and_help_name_every_key() -> None:
-    assert "\\[a] add" in vault_keys_hint_for(False) and "\\[d]" not in vault_keys_hint_for(False)
+    assert "a add" in vault_keys_hint_for(False) and "d delete" not in vault_keys_hint_for(False)
     hint = vault_keys_hint_for(True)
-    for key in ("a", "v", "e", "n", "d", "enter", "r"):
-        assert f"\\[{key}]" in hint
+    assert "\\" not in hint
+    for key, label in (("a", "add"), ("v", "replace value"), ("e", "set host"), ("n", "rename"), ("d", "delete"),
+                       ("enter", "details"), ("r", "refresh")):
+        assert f"{key} {label}" in hint
     assert ("K", "open this panel") in vault_help_rows()
 
 
