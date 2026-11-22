@@ -26,6 +26,7 @@ import (
 	"io/fs"
 	"maps"
 	"os"
+	"os/exec"
 	"path"
 	"path/filepath"
 	"runtime"
@@ -1694,9 +1695,6 @@ func TestMigrateV9NamesTheActionsAHostWithoutDataJSONDropped(t *testing.T) {
 // empty rule_pack_dir selected the embedded packs in v8; v9 has no such key,
 // so the switch to the default pack folder is a recorded conflict, not silent.
 func TestMigrateV9RecordsTheEmbeddedPackAnEmptyRulePackDirSelected(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("a standalone Windows host without policy_dir keeps the embedded packs")
-	}
 	source := "config_version: 8\nguardrail:\n  rule_pack_dir: \"\"\nobservability: {}\n"
 	result, err := MigrateV9(context.Background(), MigrateV9Input{
 		ConfigPath: filepath.Join(t.TempDir(), "config.yaml"), Source: []byte(source), InMemory: true,
@@ -1710,12 +1708,34 @@ func TestMigrateV9RecordsTheEmbeddedPackAnEmptyRulePackDirSelected(t *testing.T)
 	}
 }
 
+// blockedAuditDBPath returns an audit.db path whose access fails with an error
+// that is not "does not exist" (rel-1-0-10:GAP-1532). On Unix a path under a
+// regular file does it; Windows reports that layout as not found, so there an
+// audit.db that the account is denied read access to does it.
+func blockedAuditDBPath(t *testing.T, dir string) string {
+	t.Helper()
+	if runtime.GOOS != "windows" {
+		parent := filepath.Join(dir, "blocked")
+		if err := os.WriteFile(parent, []byte("not a directory"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return filepath.Join(parent, "audit.db")
+	}
+	auditPath := filepath.Join(dir, "audit.db")
+	if err := os.WriteFile(auditPath, []byte("not read"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	who := os.Getenv("USERDOMAIN") + `\` + os.Getenv("USERNAME")
+	if out, err := exec.Command("icacls", auditPath, "/deny", who+":(R,RA)").CombinedOutput(); err != nil {
+		t.Fatalf("deny read on the audit db: %v: %s", err, out)
+	}
+	t.Cleanup(func() { _ = exec.Command("icacls", auditPath, "/remove:d", who).Run() })
+	return auditPath
+}
+
 // A missing audit.db is optional, but a path that cannot be accessed must
 // stop the persisted migration before it drops operator policy.
 func TestMigrateV9RefusesAuditDBAccessError(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("Windows reports a path under a regular file as not found, so this layout cannot produce an access error there")
-	}
 	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
 	dir := t.TempDir()
 	t.Setenv("DEFENSECLAW_HOME", dir)
@@ -1724,12 +1744,9 @@ func TestMigrateV9RefusesAuditDBAccessError(t *testing.T) {
 	if err := os.WriteFile(configPath, source, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	parent := filepath.Join(dir, "blocked")
-	if err := os.WriteFile(parent, []byte("not a directory"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	auditPath := blockedAuditDBPath(t, dir)
 	_, err := MigrateV9(context.Background(), MigrateV9Input{
-		ConfigPath: configPath, AuditDBPath: filepath.Join(parent, "audit.db"),
+		ConfigPath: configPath, AuditDBPath: auditPath,
 	})
 	if err == nil {
 		t.Fatal("migration committed without reading the configured audit.db")
@@ -1864,15 +1881,22 @@ func TestMigrateV9RefusesADamagedStoreWithoutAReadableActionsTable(t *testing.T)
 // the strict preset (which resolves to that pack) instead of a custom pack
 // pinned to files the next package replaces.
 func TestMigrateV9KeepsTheShippedPackAPreset(t *testing.T) {
+	// The Linux layout (the macOS one has the same shape) on Unix hosts; the
+	// native Windows standalone layout on Windows, where a Linux path is not
+	// absolute (rel-1-0-10:GAP-1532).
+	goos, join := "linux", func(elem ...string) string { return path.Join(elem...) }
 	if runtime.GOOS == "windows" {
-		t.Skip("the shipped-pack preset serves the Linux and macOS standalone layouts; a Linux layout path is not absolute on Windows")
+		goos, join = "windows", func(elem ...string) string { return strings.Join(elem, `\`) }
 	}
-	layout, err := managed.StandaloneLayoutFor("linux")
+	layout, err := managed.StandaloneLayoutFor(goos)
+	if runtime.GOOS == "windows" {
+		layout, err = managed.StandaloneWindowsLayoutForRoots(`C:\Program Files`, `C:\ProgramData`)
+	}
 	if err != nil {
 		t.Fatal(err)
 	}
 	policyDir := t.TempDir()
-	shipped := path.Join(layout.VendorPolicyDir, "guardrail", "strict")
+	shipped := join(layout.VendorPolicyDir, "guardrail", "strict")
 	source := "config_version: 8\ndeployment_mode: managed_enterprise\nenterprise:\n  profile: standalone\npolicy_dir: " +
 		policyDir + "\nguardrail:\n  rule_pack_dir: " + shipped + "\nobservability: {}\n"
 	result, err := MigrateV9(context.Background(), MigrateV9Input{
@@ -1883,6 +1907,11 @@ func TestMigrateV9KeepsTheShippedPackAPreset(t *testing.T) {
 	}
 	if got := string(result.Migrated); !strings.Contains(got, "rule_pack: strict") || strings.Contains(got, "custom_packs") {
 		t.Fatalf("the shipped strict pack did not stay the preset:\n%s", got)
+	}
+	if runtime.GOOS == "windows" {
+		// The Windows shipped-pack folder comes from the machine registration,
+		// not from the layout, so only the migration is asserted there.
+		return
 	}
 	cfg := &Config{PolicyDir: policyDir, ConfigFilePath: layout.ConfigPath, DeploymentMode: "managed_enterprise"}
 	cfg.Enterprise.Profile = "standalone"
