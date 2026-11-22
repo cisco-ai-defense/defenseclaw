@@ -87,7 +87,7 @@ type webhookEndpoint struct {
 	events      map[string]bool
 	cooldown    time.Duration
 	mu          sync.Mutex
-	lastSent    map[string]time.Time // key: "target\x00action"
+	lastSent    map[string]time.Time // key: "target\x00action" (a closed ask adds its details)
 
 	// Circuit breaker (per-endpoint): 5 consecutive delivery failures → open 60s.
 	brkMu               sync.Mutex
@@ -408,6 +408,13 @@ func (d *WebhookDispatcher) Dispatch(event audit.Event) {
 			continue
 		}
 		cooldownKey := event.Target + "\x00" + action
+		if closedAsk {
+			// Each closed ask is its own notice: two asks for one host that
+			// close together (one crash, two actors, a retried record names
+			// the same ask) must not share one cooldown slot (GAP-0678). The
+			// details name the ask.
+			cooldownKey += "\x00" + event.Details
+		}
 		if !ep.claimSlot(cooldownKey) {
 			d.logger.Printf("suppressed duplicate %s/%s for %s (cooldown %s)",
 				event.Target, action, ep.logURL, ep.cooldown)
