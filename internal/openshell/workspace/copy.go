@@ -170,7 +170,12 @@ type CopyRecord struct {
 	// it was staged from ("" for plain folders and unborn branches).
 	Baseline string `json:"baseline"`
 	Head     string `json:"head,omitempty"`
-	Branch   string `json:"branch,omitempty"`
+	// SandboxHead is the commit the sandbox copy's HEAD starts at when it
+	// is not Head: one commit on Head whose tree holds the uploaded
+	// version of each tracked file whose credentials were replaced (its
+	// committed versions, with the values, are withheld).
+	SandboxHead string `json:"sandbox_head,omitempty"`
+	Branch      string `json:"branch,omitempty"`
 	// Remotes are the (credential-free) remotes configured in the copy.
 	Remotes map[string]string `json:"remotes,omitempty"`
 	// LineEndings are the operator's core.autocrlf/eol/safecrlf settings,
@@ -217,6 +222,19 @@ type SandboxCopy struct {
 	StateDir     string   `json:"remote_state_dir,omitempty"`
 	Baseline     string   `json:"baseline"`
 	Head         string   `json:"head,omitempty"`
+	SandboxHead  string   `json:"sandbox_head,omitempty"`
+}
+
+// sandboxHead is the commit the sandbox copy's HEAD starts at: the
+// baseline for a plain folder, else SandboxHead or Head.
+func (r *CopyRecord) sandboxHead() string {
+	switch {
+	case r.Kind == CopyPlain:
+		return r.Baseline
+	case r.SandboxHead != "":
+		return r.SandboxHead
+	}
+	return r.Head
 }
 
 // stateDir is the copy's state directory in the sandbox.
@@ -255,7 +273,7 @@ func (r *CopyRecord) inSandbox() []*CopyRecord {
 	if p := r.Replaced; p != nil {
 		return []*CopyRecord{{
 			Version: r.Version, Name: r.Name, Project: r.Project, Kind: p.Kind,
-			RemoteDir: p.RemoteDir, RemoteGitDir: p.RemoteGitDir, StateDir: p.StateDir, Baseline: p.Baseline, Head: p.Head,
+			RemoteDir: p.RemoteDir, RemoteGitDir: p.RemoteGitDir, StateDir: p.StateDir, Baseline: p.Baseline, Head: p.Head, SandboxHead: p.SandboxHead,
 		}}
 	}
 	return nil
@@ -266,7 +284,7 @@ func (r *CopyRecord) replacing(prev *CopyRecord) {
 	switch {
 	case prev == nil:
 	case prev.UploadedAt != nil:
-		r.Replaced = &SandboxCopy{Kind: prev.Kind, RemoteDir: prev.RemoteDir, RemoteGitDir: prev.RemoteGitDir, StateDir: prev.StateDir, Baseline: prev.Baseline, Head: prev.Head}
+		r.Replaced = &SandboxCopy{Kind: prev.Kind, RemoteDir: prev.RemoteDir, RemoteGitDir: prev.RemoteGitDir, StateDir: prev.StateDir, Baseline: prev.Baseline, Head: prev.Head, SandboxHead: prev.SandboxHead}
 	default:
 		r.Replaced = prev.Replaced
 	}
@@ -863,8 +881,12 @@ func stageGit(ctx context.Context, rec *CopyRecord, opts StageOptions, scanOpts 
 	// not in the copy's index, and marking it failed the whole run with
 	// "Unable to mark file .env" (GAP-0596). Held back, it is simply absent
 	// from the copy.
+	replaced := map[string]struct{}{}
+	for _, l := range rec.SecretLines {
+		replaced[l.Rel] = struct{}{}
+	}
 	inCopy := map[string]bool{}
-	if len(heldBack) > 0 && head != "" {
+	if (len(heldBack) > 0 || len(replaced) > 0) && head != "" {
 		listed, err := sg.output(ctx, "ls-files", "-z", "--cached")
 		if err != nil {
 			return err
@@ -886,7 +908,43 @@ func stageGit(ctx context.Context, rec *CopyRecord, opts StageOptions, scanOpts 
 			return err
 		}
 	}
-	baseline, err := captureBaseline(ctx, sg, filepath.Join(stage, ".git", "index"), head, false)
+	// A tracked file uploaded with its credentials replaced: its committed
+	// versions are withheld below, so the sandbox's HEAD and index must
+	// hold the uploaded version. Left pointing at the withheld blob, the
+	// agent's git status, diff and stash failed, and with text=auto or
+	// core.autocrlf so did the pull's capture (GAP-0752). One commit on
+	// Head holds the uploaded versions.
+	var replacedTracked []string
+	for p := range replaced {
+		if inCopy[p] {
+			replacedTracked = append(replacedTracked, p)
+		}
+	}
+	sandboxHead := head
+	if len(replacedTracked) > 0 {
+		sort.Strings(replacedTracked)
+		g := sg
+		g.stdin = strings.NewReader(strings.Join(replacedTracked, "\x00") + "\x00")
+		if err := g.run(ctx, "update-index", "-z", "--stdin"); err != nil {
+			return err
+		}
+		tree, err := sg.line(ctx, "write-tree")
+		if err != nil {
+			return err
+		}
+		if sandboxHead, err = sg.line(ctx, "commit-tree", tree, "-p", head, "-m", "defenseclaw: credentials replaced with placeholders in the sandbox copy"); err != nil {
+			return err
+		}
+		ref := []string{"update-ref", "--no-deref", "HEAD", sandboxHead}
+		if branch != "" {
+			ref = []string{"update-ref", branch, sandboxHead}
+		}
+		if err := sg.run(ctx, ref...); err != nil {
+			return err
+		}
+		rec.SandboxHead = sandboxHead
+	}
+	baseline, err := captureBaseline(ctx, sg, filepath.Join(stage, ".git", "index"), sandboxHead, false)
 	if err != nil {
 		return err
 	}
@@ -904,10 +962,6 @@ func stageGit(ctx context.Context, rec *CopyRecord, opts StageOptions, scanOpts 
 		// A file uploaded with its credentials replaced keeps only the
 		// replaced version: its committed versions hold the values.
 		held := toSet(heldBack)
-		replaced := map[string]struct{}{}
-		for _, l := range rec.SecretLines {
-			replaced[l.Rel] = struct{}{}
-		}
 		withheld := func(rel string) bool {
 			if _, ok := held[rel]; ok {
 				return true
@@ -1584,11 +1638,7 @@ func establishBaseline(ctx context.Context, rec *CopyRecord, ex Execer) error {
 	if kv["baseline"] != rec.Baseline {
 		return fmt.Errorf("workspace: sandbox baseline is %q, expected %s", kv["baseline"], rec.Baseline)
 	}
-	wantHead := rec.Head
-	if rec.Kind == CopyPlain {
-		wantHead = rec.Baseline
-	}
-	if kv["head"] != wantHead {
+	if wantHead := rec.sandboxHead(); kv["head"] != wantHead {
 		return fmt.Errorf("workspace: sandbox HEAD is %q, expected %q", kv["head"], wantHead)
 	}
 	t := time.Now().UTC()

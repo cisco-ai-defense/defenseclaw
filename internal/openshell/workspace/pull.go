@@ -154,10 +154,7 @@ func LoadPull(dataDir, name string) (*PullResult, error) {
 // hold) and bundles every object the host does not already have. It
 // prints key=value lines.
 func captureScript(rec *CopyRecord, bundle bool) string {
-	head := rec.Head
-	if rec.Kind == CopyPlain {
-		head = rec.Baseline
-	}
+	head := rec.sandboxHead()
 	addArgs := "--all"
 	if rec.Kind == CopyPlain {
 		addArgs += " --force"
