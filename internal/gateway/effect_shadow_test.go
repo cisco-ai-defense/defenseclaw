@@ -11,6 +11,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/effectrules"
 	"github.com/defenseclaw/defenseclaw/internal/effects"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/decide"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/semanticpb"
 )
@@ -53,9 +54,51 @@ func TestClassifyRestrictedListedCommands(t *testing.T) {
 			if !c.restricted {
 				t.Fatalf("set %s cmd %q/%q: expected restricted tier", set, lc.program, lc.surface)
 			}
-			wantRuling := set == effectrules.SetSSHAuthorizedKeys || set == effectrules.SetSelfProtection
-			if c.restrictedRuling != wantRuling {
-				t.Fatalf("set %s cmd %q: restrictedRuling=%v want %v", set, lc.program, c.restrictedRuling, wantRuling)
+			if set != effectrules.SetSelfProtection {
+				continue
+			}
+			// A proven state write keeps its 1.0.10 Decide row: alert in
+			// default/permissive and managed-default, block in strict packs.
+			// The effects proof joins this row; its internal ruling bit is not
+			// the live verdict.
+			for _, tier := range boundedTestTiers {
+				deployment := decide.PerUser
+				if tier.managed {
+					deployment = decide.Managed
+				}
+				decisionTier := decide.TierDefault
+				if tier.tier == bounded.TierPermissive {
+					decisionTier = decide.TierPermissive
+				} else if tier.tier == bounded.TierStrict {
+					decisionTier = decide.TierStrict
+				}
+				findings := []decide.Finding{{
+					RuleID: decide.RuleStateWrite, Severity: decide.SevLow,
+					Proof: decide.Proof{Kind: decide.KindWrite, Target: decide.TargetState, Certainty: decide.CertKnown, Source: "legacy"},
+				}}
+				effect := EffectShadowResult{
+					Tier: string(effectTierRestricted), Action: effectAction(c.touches, c.restrictedRuling, decisionTier == decide.TierStrict),
+					Sets: []string{effectrules.SetSelfProtection}, Program: lc.program,
+					Kind: string(effects.KindWrite), Known: true, KnownMutation: true,
+				}
+				for _, finding := range effectShadowFindings(effect, effectRulesOn) {
+					findings = append(findings, decide.Finding{
+						RuleID: finding.RuleID, Severity: decide.ParseSeverity(finding.Severity), Proof: finding.Proof,
+					})
+				}
+				got := decide.Decide(decide.Input{
+					Findings:   findings,
+					Deployment: deployment, Levels: decide.TierLevels(decisionTier),
+					Tier: func() decide.Tier { return decisionTier },
+				})
+				want := decide.Alert
+				if decisionTier == decide.TierStrict {
+					want = decide.Block
+				}
+				if got.Action != want {
+					t.Fatalf("self_protection cmd %q/%q tier %s: live Decide verdict=%s want %s",
+						lc.program, lc.surface, tier.name, got.Action, want)
+				}
 			}
 		}
 	}
