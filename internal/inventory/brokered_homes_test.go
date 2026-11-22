@@ -4,6 +4,7 @@
 package inventory
 
 import (
+	"os"
 	"path"
 	"path/filepath"
 	"testing"
@@ -108,5 +109,34 @@ func TestFailedBrokeredReadKeepsHelperSignals(t *testing.T) {
 	gone := service.classifyAndPersist("full-3", "test", time.Now(), nil, stats(false), load(), true)
 	if gone.Summary.GoneSignals != 1 {
 		t.Fatalf("helper up, signal absent: gone %d", gone.Summary.GoneSignals)
+	}
+}
+
+// A brokered home is closed to the gateway: its skill rows carry no folder
+// facts, so the gateway opens no file there and never reports such a skill
+// as unreadable or as an admin (scope managed) skill (GAP-1810).
+func TestBrokeredSkillRowsReadNoSkillFolder(t *testing.T) {
+	skills := filepath.Join(t.TempDir(), ".claude", "skills")
+	if err := os.MkdirAll(filepath.Join(skills, "pdf"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skills, "pdf", "SKILL.md"), []byte("---\nname: pdf\n---\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	service := &ContinuousDiscoveryService{opts: AIDiscoveryOptions{Mode: "passive"}}
+	entry := BrokeredHomeEntry{Path: ".claude/skills", Dir: true, Children: []BrokeredHomeChild{{Name: "pdf"}}}
+	signal := service.brokeredChildrenSignal(AISignature{ID: "claudecode"}, SignalSkill, "skill", skills, entry)
+	rows := 0
+	for _, ev := range signal.Evidence {
+		if ev.Type != "skill_entry" {
+			continue
+		}
+		rows++
+		if ev.Skill != nil {
+			t.Fatalf("brokered skill row carries folder facts read by the gateway: %+v", *ev.Skill)
+		}
+	}
+	if rows != 1 {
+		t.Fatalf("want one brokered skill row, got %d: %+v", rows, signal.Evidence)
 	}
 }

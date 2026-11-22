@@ -534,7 +534,9 @@ func (s *ContinuousDiscoveryService) brokeredChildrenSignal(sig AISignature, cat
 				}
 				continue
 			}
-			evidence = append(evidence, s.directoryChildEvidence(detector, path, child.Name, name))
+			// No skill folder facts: hashing would open the files of a home
+			// that is closed to the gateway (the helper sends no contents).
+			evidence = append(evidence, s.childEvidenceRow(detector, path, child.Name, name))
 		}
 		if entry.ChildrenTruncated && !partial {
 			partial, coverageReason = true, CoverageReasonCapExceeded

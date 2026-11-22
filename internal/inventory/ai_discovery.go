@@ -2854,6 +2854,17 @@ func (s *ContinuousDiscoveryService) signalFromDirectoryChildren(sig AISignature
 // directoryChildEvidence is the evidence row of the child entry (named name
 // once sanitized) of the skills / rules / plugins folder at parent.
 func (s *ContinuousDiscoveryService) directoryChildEvidence(detector, parent, entry, name string) AIEvidence {
+	ev := s.childEvidenceRow(detector, parent, entry, name)
+	if detector == "skill" {
+		ev.Skill = s.skillFacts(filepath.Join(parent, entry), false)
+	}
+	return ev
+}
+
+// childEvidenceRow is directoryChildEvidence without the skill folder facts.
+// A brokered home's row uses it: the gateway never opens a file in a home
+// the sensor helper reads for it (brokered_homes.go).
+func (s *ContinuousDiscoveryService) childEvidenceRow(detector, parent, entry, name string) AIEvidence {
 	child := filepath.Join(parent, entry)
 	ev := AIEvidence{
 		Type:     detector + "_entry",
@@ -2866,7 +2877,6 @@ func (s *ContinuousDiscoveryService) directoryChildEvidence(detector, parent, en
 		// apart from "walker didn't stamp an origin"
 		// (latter must fail-safe).
 		ev.Origin = "user"
-		ev.Skill = s.skillFacts(child, false)
 	}
 	if s.keepEvidencePath() {
 		ev.RawPath = child
