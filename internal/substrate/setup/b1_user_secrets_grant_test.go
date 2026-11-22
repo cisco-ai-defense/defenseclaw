@@ -81,8 +81,10 @@ func TestB1ProviderGrantsTheUserSecretsNamespace(t *testing.T) {
 		t.Fatalf("after uninstall:\n%s", pol)
 	}
 
-	// The plan refuses a user secrets namespace that is DefenseClaw's or Substrate's.
-	for _, ns := range []string{plan.Namespace, plan.SubstrateNamespace, "Bad_NS"} {
+	// The plan refuses a user secrets namespace that is DefenseClaw's or
+	// Substrate's, the admin secrets one or a system one (RV3 P3-5).
+	for _, ns := range []string{plan.Namespace, plan.SubstrateNamespace, "Bad_NS",
+		testPlan().CredentialProvider.SecretsNamespace, "default", "kube-system", "kube-public", "kube-node-lease"} {
 		p := testPlan()
 		p.CredentialProvider.UserSecretsNamespace = ns
 		if err := p.Validate(); err == nil || !strings.Contains(err.Error(), "user_secrets_namespace") {

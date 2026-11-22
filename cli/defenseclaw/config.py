@@ -4830,7 +4830,9 @@ class SubstrateSecretTemplate:
     """One substrate.secret_templates entry (Go SubstrateSecretTemplate)."""
 
     name: str = ""
-    hosts: list[str] = field(default_factory=list)
+    # None = unset (a built-in template keeps its hosts); [] = no host
+    # without an administrator. A save keeps the difference (Go MarshalYAML).
+    hosts: list[str] | None = None
     header: str = ""
     form: str = ""
     basic_user: str = ""
@@ -8248,7 +8250,7 @@ def _merge_substrate(raw: Any) -> SubstrateConfig:
         secret_templates=[
             SubstrateSecretTemplate(
                 name=str(t.get("name", "") or ""),
-                hosts=_string_list(t.get("hosts")),
+                hosts=None if t.get("hosts") is None else _string_list(t.get("hosts")),
                 header=str(t.get("header", "") or ""),
                 form=str(t.get("form", "") or ""),
                 basic_user=str(t.get("basic_user", "") or ""),
@@ -8349,6 +8351,7 @@ def _serialize_substrate(cfg: Config, d: dict[str, Any]) -> None:
     if isinstance(admin, dict):
         _strip_unset_sandbox_keys(admin)
     packs = (block.get("egress") or {}).get("ecosystem_packs")
+    no_hosts = [i for i, t in enumerate(block.get("secret_templates") or []) if isinstance(t, dict) and t.get("hosts") == []]
     pruned = _prune_unset(block)
     if pruned is _V8_MISSING:
         pruned = {}
@@ -8389,6 +8392,8 @@ def _serialize_substrate(cfg: Config, d: dict[str, Any]) -> None:
             pruned.pop("self_service_secrets")
     if packs == []:
         pruned.setdefault("egress", {})["ecosystem_packs"] = []
+    for i in no_hosts:  # an explicit hosts: [] stays (Go MarshalYAML)
+        pruned["secret_templates"][i]["hosts"] = []
     d["substrate"] = pruned
 
 

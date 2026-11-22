@@ -100,7 +100,9 @@ func TestB1BindingOwnerFilter(t *testing.T) {
 	if err := store.Update(context.Background(), func(d *secretbind.Doc) error {
 		for i := range d.Bindings {
 			if d.Bindings[i].ID == "b-00000000a2" {
-				d.Bindings[i].State = secretbind.Active
+				// Approval keeps the ask id: an approved host outside the
+				// template stays (RV3 P2-2 drops it only without one).
+				d.Bindings[i].State, d.Bindings[i].AskID = secretbind.Active, "A-1"
 			}
 		}
 		return nil

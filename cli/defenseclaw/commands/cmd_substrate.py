@@ -712,7 +712,7 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             "and never printed."
         ),
         example=(
-            "defenseclaw substrate secrets add gl-work --template gitlab --host git.corp.example --from-op "
+            "defenseclaw substrate secrets add gl-work --template gitlab --host gitlab.com --from-op "
             "op://eng/gitlab/token\n"
             "defenseclaw substrate secrets add nexus --template generic-basic --host nexus.corp.example --user "
             "ci-bot --from-file ~/.nexus-token"

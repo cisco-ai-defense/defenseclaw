@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"slices"
 	"strings"
 )
 
@@ -175,8 +176,9 @@ func (p ChartPlan) Validate() error {
 		errs = append(errs, errors.New("credential_provider.secrets_namespace must not be the DefenseClaw namespace (D14)"))
 	}
 	if u := p.CredentialProvider.UserSecretsNamespace; u != "" &&
-		(!dnsLabel.MatchString(u) || u == p.Namespace || u == p.SubstrateNamespace) {
-		errs = append(errs, errors.New("credential_provider.user_secrets_namespace must be a namespace name other than the DefenseClaw and Substrate namespaces"))
+		(!dnsLabel.MatchString(u) || u == p.Namespace || u == p.SubstrateNamespace || u == p.CredentialProvider.SecretsNamespace ||
+			slices.Contains([]string{"default", "kube-system", "kube-public", "kube-node-lease"}, u)) {
+		errs = append(errs, errors.New("credential_provider.user_secrets_namespace must be a namespace of its own: not the DefenseClaw, Substrate or admin secrets namespace, and not a Kubernetes system namespace"))
 	}
 	if p.StoreStateConfigMap == "" {
 		errs = append(errs, errors.New("store_state_config_map is required"))

@@ -177,18 +177,27 @@ func (t Template) Prefix() string {
 // "Basic " before it. Any other form stores the token as given. Add and
 // set both store through it, so a re-set keeps the injected header valid.
 func (t Template) StoredValue(b Binding, token string) (string, error) {
-	if t.Form != FormBasic {
-		return token, nil
+	stored := token
+	if t.Form == FormBasic {
+		user := b.BasicUser
+		if user == "" {
+			user = t.BasicUser
+		}
+		if !basicUserRE.MatchString(user) {
+			return "", errors.New("basic_user")
+		}
+		stored = base64.StdEncoding.EncodeToString([]byte(user + ":" + token))
 	}
-	user := b.BasicUser
-	if user == "" {
-		user = t.BasicUser
+	if len(stored) > MaxStoredValue {
+		return "", errors.New("value too large for a request header")
 	}
-	if !basicUserRE.MatchString(user) {
-		return "", errors.New("basic_user")
-	}
-	return base64.StdEncoding.EncodeToString([]byte(user + ":" + token)), nil
+	return stored, nil
 }
+
+// MaxStoredValue caps the stored (header) form of a value: the proxy's
+// default request header limit is 60 KiB in all, and the basic form grows
+// a token by 4/3 (RV3 P4-2). A larger value would fail every request.
+const MaxStoredValue = 56 << 10
 
 // ValueSecretName is the Kubernetes Secret, in the self-service
 // namespace, that holds every value of the person with key personKey; one

@@ -219,6 +219,9 @@ type SubstrateConfig struct {
 	// catalog in force now (config.yaml applied live): mode, limits, asks
 	// and templates follow it; namespace and provider stay the boot ones.
 	LiveSelfService func() (config.SubstrateSelfServiceSecretsConfig, []config.SubstrateSecretTemplate)
+	// LiveNoSwapHosts, when set, is substrate.egress.no_swap_hosts as the
+	// gateway follows config.yaml; NoSwapHosts is the boot value.
+	LiveNoSwapHosts func() []string
 	NoSwapHosts     []string
 	// SecretAudit receives each typed secret change record
 	// (log.substrate.secret.changed); nil sends it to the gateway's

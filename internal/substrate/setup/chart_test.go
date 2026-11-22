@@ -132,6 +132,10 @@ func TestChartRefusesBadValues(t *testing.T) {
 		"memory home, decimal limit short": memoryHomeExample + ",callout.resources.limits.memory=600M",                         // 572 MiB < 640 MiB
 		"memory home, unreadable limit":    memoryHomeExample + ",leader.resources.limits.memory=lots",
 		"bad namespace label":              "metrics.prometheusRule.enabled=true,metrics.prometheusRule.namespaceLabel=k8s.namespace.name",
+		// RV3 P3-5: the self-service namespace is one of its own.
+		"user secrets in kube-system":         "config.substrate.self_service_secrets.namespace=kube-system",
+		"user secrets in default":             "config.substrate.self_service_secrets.namespace=default",
+		"user secrets with the admin secrets": "config.substrate.self_service_secrets.namespace=defenseclaw-actor-secrets",
 	} {
 		args := []string{"template", "dc", chartDir, "--kube-version", chartKubeVersion, "--set", set}
 		if err := exec.Command(helm, args...).Run(); err == nil {

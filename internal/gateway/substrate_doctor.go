@@ -32,6 +32,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/egressspec"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/identity"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/secretbind"
 )
 
 // Gateway-side checks for `defenseclaw substrate doctor --cluster`, from where
@@ -412,6 +413,31 @@ func SubstrateSecretEchoHostCheck(secrets []config.SubstrateSecret, noSwap []str
 		c.Status = "warn"
 		c.Detail = "inject.allow_echo adds these secrets on hosts that return them to the agent: " + strings.Join(kept, "; ")
 		c.Fix = "remove inject.allow_echo unless the echo is intended"
+	}
+	return c
+}
+
+// SubstrateSecretBindingStoreCheck is the substrate.secret_bindings row: the
+// self-service bindings ConfigMap reads, and no entry in it was left out as
+// invalid (a hand edit). A left-out entry is dropped on the next change, so
+// the row names it first (RV3 P3-2).
+func SubstrateSecretBindingStoreCheck(store *secretbind.Store) SubstrateCheck {
+	c := SubstrateCheck{ID: "substrate.secret_bindings", Status: "pass", Detail: "the self-service bindings read"}
+	if store == nil {
+		c.Detail = "self-service bindings are off"
+		return c
+	}
+	loaded, dropped, err := store.Health()
+	switch {
+	case err != nil && !loaded:
+		c.Status, c.Detail = "fail", "the self-service bindings do not read: "+err.Error()
+		c.Fix = "check that the gateway can get and patch its bindings ConfigMap"
+	case err != nil:
+		c.Status, c.Detail = "warn", "the last read of the self-service bindings failed, the gateway uses the one before: "+err.Error()
+		c.Fix = "check the bindings ConfigMap: a hand edit may have left it unreadable"
+	case len(dropped) > 0:
+		c.Status, c.Detail = "warn", "these binding entries are not valid and are left out: "+strings.Join(dropped, ", ")
+		c.Fix = "fix or remove them in the bindings ConfigMap; the next add or rm rewrites it without them"
 	}
 	return c
 }

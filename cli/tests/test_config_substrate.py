@@ -184,6 +184,20 @@ class TestSubstrateLoadSave(unittest.TestCase):
             self.assertEqual(saved, _FULL)
             self.assertEqual(self._load(tmpdir).substrate, sub)
 
+    def test_template_empty_hosts_survive_save(self):
+        # An explicit hosts: [] means no host without an administrator; an
+        # unset list takes the built-in hosts. A save keeps the difference.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = self._write(tmpdir, {"substrate": {"secret_templates": [{"name": "github", "hosts": []}, {"name": "gitlab"}]}})
+            cfg = self._load(tmpdir)
+            self.assertEqual(cfg.substrate.secret_templates[0].hosts, [])
+            self.assertIsNone(cfg.substrate.secret_templates[1].hosts)
+            cfg.save()
+            saved = yaml.safe_load(Path(path).read_text())["substrate"]["secret_templates"]
+            self.assertEqual(saved, [{"name": "github", "hosts": []}, {"name": "gitlab"}])
+            again = self._load(tmpdir).substrate.secret_templates
+            self.assertEqual([t.hosts for t in again], [[], None])
+
     def test_set_from_python_writes_only_what_is_set(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             path = self._write(tmpdir, {})

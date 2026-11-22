@@ -85,7 +85,7 @@ func TestStoreWriteReadOwnerFilter(t *testing.T) {
 	if got := s.ForOwner(eng1); len(got) != 1 || got[0].Owner != eng1 {
 		t.Fatalf("ForOwner(eng1) = %+v", got)
 	}
-	if len(s.All()) != 2 || len(s.ForOwner("")) != 0 {
+	if len(allOf(s)) != 2 || len(s.ForOwner("")) != 0 {
 		t.Fatal("All or empty owner wrong")
 	}
 	// Callers get copies.
@@ -130,7 +130,7 @@ func TestRefreshKeepsLastGood(t *testing.T) {
 	if err := s.Refresh(context.Background()); err == nil {
 		t.Fatal("bad document accepted")
 	}
-	if len(s.All()) != 1 {
+	if len(allOf(s)) != 1 {
 		t.Fatal("bad read dropped the last good document")
 	}
 	if _, _, err := s.Health(); err == nil {
@@ -148,7 +148,7 @@ func TestUpdateRetriesConflictsThenGivesUp(t *testing.T) {
 	add(t, s, bind(eng1, "a"))
 	m.conflicts = 2
 	add(t, s, bind(eng1, "b"))
-	if len(s.All()) != 2 {
+	if len(allOf(s)) != 2 {
 		t.Fatal("retry lost the write")
 	}
 	m.conflicts = 3
@@ -198,10 +198,20 @@ func TestB1StoreOffStartsNoWatcher(t *testing.T) {
 	if runtime.NumGoroutine() > before {
 		t.Fatal("a nil store started a goroutine")
 	}
-	if s.All() != nil || s.ForOwner(eng1) != nil || s.Refresh(ctx) != nil {
+	if allOf(s) != nil || s.ForOwner(eng1) != nil || s.Refresh(ctx) != nil {
 		t.Fatal("a nil store reads something")
 	}
 	if err := s.Update(ctx, func(*Doc) error { return nil }); !errors.Is(err, ErrNoStore) {
 		t.Fatalf("nil store write: %v", err)
 	}
+}
+
+// allOf is every binding of the last good read (test only).
+func allOf(s *Store) []Binding {
+	if s == nil {
+		return nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return cloneBindings(s.doc.Bindings)
 }

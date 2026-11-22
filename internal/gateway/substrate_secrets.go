@@ -224,7 +224,7 @@ func (a *APIServer) substrateRemoveSecret(st *substrateState) http.HandlerFunc {
 			return
 		}
 		c, _ := substrateCallerFrom(r.Context())
-		if err := a.substrateRemoveBinding(r.Context(), st, c, r.PathValue("name")); err != nil {
+		if err := a.substrateRemoveBinding(r.Context(), st, c, r.PathValue("name"), key); err != nil {
 			fmt.Fprintf(os.Stderr, "[substrate] binding %s not removed: %v\n", r.PathValue("name"), err)
 			a.recordSubstrateSecretChange(r.Context(), st, r.PathValue("name"), audit.SubstrateSecretRemoved, "", true)
 			writeSubstrateJSONError(w, http.StatusBadGateway, "secret_not_removed")

@@ -23,7 +23,6 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"slices"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -62,6 +61,14 @@ func (st *substrateState) selfService() config.SubstrateSelfServiceSecretsConfig
 	ss, _ := st.cfg.LiveSelfService()
 	ss.Namespace, ss.Provider = st.cfg.SelfService.Namespace, st.cfg.SelfService.Provider
 	return ss
+}
+
+// noSwapHosts is substrate.egress.no_swap_hosts in force (RV3 P3-1).
+func (st *substrateState) noSwapHosts() []string {
+	if st.cfg.LiveNoSwapHosts == nil {
+		return st.cfg.NoSwapHosts
+	}
+	return st.cfg.LiveNoSwapHosts()
 }
 
 // secretTemplates is the template catalog config in force.
@@ -176,7 +183,7 @@ func (a *APIServer) substrateAddSecret(st *substrateState) http.HandlerFunc {
 			writeSubstrateJSONError(w, http.StatusBadRequest, "invalid_pattern")
 			return
 		}
-		if len(egressspec.EchoHostsCoveredWith(host, st.cfg.NoSwapHosts)) > 0 && !(in.AllowEcho && st.selfService().AllowEchoBindings) {
+		if len(egressspec.EchoHostsCoveredWith(host, st.noSwapHosts())) > 0 && !(in.AllowEcho && st.selfService().AllowEchoBindings) {
 			writeSubstrateJSONError(w, http.StatusForbidden, "secret_echo_host")
 			return
 		}
@@ -325,14 +332,29 @@ func (a *APIServer) substrateStoredValue(st *substrateState, c substrateCaller, 
 }
 
 // substrateRemoveBinding drops the caller's binding named name from the
-// store after its value was removed. A name that is not a binding (a
-// per-person admin secret) is left alone.
-func (a *APIServer) substrateRemoveBinding(ctx context.Context, st *substrateState, c substrateCaller, name string) error {
+// store after the value under removedKey was removed. A name that is not a
+// binding (a per-person admin secret) is left alone. When an admin
+// per_person secret of the same name shadowed the binding, removedKey was
+// the admin secret's: the binding's own value goes too, so no value is
+// left behind without a binding (RV3 P3-3).
+func (a *APIServer) substrateRemoveBinding(ctx context.Context, st *substrateState, c substrateCaller, name, removedKey string) error {
 	if st.cfg.Bindings == nil || c.person.Subject == "" {
 		return nil
 	}
 	owner := render.PersonKey(c.person.Subject)
-	if !slices.ContainsFunc(st.cfg.Bindings.ForOwner(owner), func(b secretbind.Binding) bool { return b.Name == name }) {
+	found := false
+	for _, b := range st.cfg.Bindings.ForOwner(owner) {
+		if b.Name != name {
+			continue
+		}
+		found = true
+		if b.ID != removedKey && st.cfg.SecretStore != nil {
+			if err := st.cfg.SecretStore.Remove(ctx, st.selfService().EffectiveNamespace(), secretbind.ValueSecretName(owner), b.ID); err != nil {
+				return err
+			}
+		}
+	}
+	if !found {
 		return nil
 	}
 	return st.cfg.Bindings.Update(ctx, func(d *secretbind.Doc) error {

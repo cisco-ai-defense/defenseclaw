@@ -1063,7 +1063,7 @@
     "use": "add \u003cname\u003e",
     "short": "Add a secret of your own for one host, under a template",
     "long": "Creates your own secret NAME for HOST under TEMPLATE (see secrets templates) and stores its\nvalue. A host the template covers is used from your agents' next request; any other host waits\nuntil an administrator approves it. For a basic template (git hosts, PyPI) give only the token:\nthe cluster adds the user name. generic-basic needs --user.\n\nThe value comes from exactly one source: the terminal without echo (no flag), --from-gh (the\nGitHub CLI's sign-in), --from-keychain SERVICE (macOS keychain), --from-op op://vault/item/field\n(1Password CLI), --from-file PATH, --stdin or --from-env VAR. It is never put on a command line\nand never printed.",
-    "example": "defenseclaw substrate secrets add gl-work --template gitlab --host git.corp.example --from-op op://eng/gitlab/token\ndefenseclaw substrate secrets add nexus --template generic-basic --host nexus.corp.example --user ci-bot --from-file ~/.nexus-token",
+    "example": "defenseclaw substrate secrets add gl-work --template gitlab --host gitlab.com --from-op op://eng/gitlab/token\ndefenseclaw substrate secrets add nexus --template generic-basic --host nexus.corp.example --user ci-bot --from-file ~/.nexus-token",
     "args": [
       {
         "name": "name",

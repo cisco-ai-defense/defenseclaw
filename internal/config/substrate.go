@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/substrate/egressspec"
+	"gopkg.in/yaml.v3"
 )
 
 // SubstrateConfig is substrate: (PLAN §7.1), DefenseClaw on Agent Substrate.
@@ -132,6 +133,33 @@ type SubstrateSecretTemplate struct {
 	Profiles  []string `mapstructure:"profiles"   yaml:"profiles,omitempty"`
 	Registry  string   `mapstructure:"registry"   yaml:"registry,omitempty"`
 }
+
+// MarshalYAML keeps an explicit empty host list: hosts: [] means no host
+// without an administrator, while an unset list takes a built-in
+// template's hosts. Plain omitempty would turn the first into the second
+// on any config save (RV3 P2-3).
+func (t SubstrateSecretTemplate) MarshalYAML() (any, error) {
+	type plain SubstrateSecretTemplate
+	var n yaml.Node
+	if err := n.Encode(plain(t)); err != nil {
+		return nil, err
+	}
+	if t.Hosts != nil && len(t.Hosts) == 0 && n.Kind == yaml.MappingNode && len(n.Content) >= 2 {
+		k := &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: "hosts"}
+		v := &yaml.Node{Kind: yaml.SequenceNode, Tag: "!!seq", Style: yaml.FlowStyle}
+		n.Content = append(n.Content[:2:2], append([]*yaml.Node{k, v}, n.Content[2:]...)...)
+	}
+	return &n, nil
+}
+
+// substrateReservedNamespaces are never the self-service namespace: the
+// gateway gets get/patch on every Secret there and the actors' credential
+// provider reads it (RV3 P3-5).
+var substrateReservedNamespaces = []string{"default", "kube-system", "kube-public", "kube-node-lease"}
+
+// substrateBasicUserRE is secretbind's basic_user rule: printable ASCII,
+// no space and no ":" (RV3 P3-7).
+var substrateBasicUserRE = regexp.MustCompile(`^[!-9;-~]{1,128}$`)
 
 // EffectiveMode is the self-service mode, bindings when unset.
 func (s SubstrateSelfServiceSecretsConfig) EffectiveMode() string {
@@ -913,6 +941,8 @@ func (s *SubstrateConfig) Validate() error {
 	}
 	if ss.Namespace != "" && !egressspec.IsDNS1123Label(ss.Namespace) {
 		bad("self_service_secrets.namespace", "%q is not a Kubernetes namespace name", ss.Namespace)
+	} else if slices.Contains(substrateReservedNamespaces, ss.Namespace) {
+		bad("self_service_secrets.namespace", "%q is a Kubernetes system namespace; use a namespace of its own", ss.Namespace)
 	}
 	if ss.Provider != "" && !egressspec.IsDNS1123Subdomain(ss.Provider) {
 		bad("self_service_secrets.provider", "%q is not a provider name", ss.Provider)
@@ -946,6 +976,9 @@ func (s *SubstrateConfig) Validate() error {
 		}
 		if t.Header != "" && !substrateHeaderNameRE.MatchString(t.Header) {
 			bad(key+".header", "%q is not a header name", t.Header)
+		}
+		if t.BasicUser != "" && !substrateBasicUserRE.MatchString(t.BasicUser) {
+			bad(key+".basic_user", "must be 1-128 printable characters with no space or \":\"")
 		}
 		for j, g := range t.Profiles {
 			if _, err := path.Match(g, ""); err != nil {

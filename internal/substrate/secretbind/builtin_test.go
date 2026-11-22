@@ -200,3 +200,24 @@ func TestB1SecretsNarrowedTemplateRV3P22(t *testing.T) {
 		t.Fatalf("Secrets changed its input: %v", in[1].Hosts)
 	}
 }
+
+// TestStoredValueHeaderCapRV3P42: the stored form fits the proxy's header
+// limit; a basic token is capped after its base64 growth.
+func TestStoredValueHeaderCapRV3P42(t *testing.T) {
+	bearer := Template{Name: "b", Form: FormBearer}
+	basic := Template{Name: "c", Form: FormBasic, BasicUser: "x-token-auth"}
+	cases := []struct {
+		t    Template
+		n    int
+		want bool
+	}{
+		{bearer, MaxStoredValue, true}, {bearer, MaxStoredValue + 1, false},
+		{basic, 40 << 10, true}, {basic, 43 << 10, false},
+	}
+	for _, c := range cases {
+		_, err := c.t.StoredValue(Binding{}, strings.Repeat("a", c.n))
+		if (err == nil) != c.want {
+			t.Errorf("%s %d: %v", c.t.Form, c.n, err)
+		}
+	}
+}

@@ -121,7 +121,7 @@ until an administrator approves it. For a basic template (git hosts, PyPI) give 
 the cluster adds the user name. generic-basic needs --user.
 
 ` + substrateSourceHelp,
-		Example: "defenseclaw substrate secrets add gl-work --template gitlab --host git.corp.example --from-op op://eng/gitlab/token\n" +
+		Example: "defenseclaw substrate secrets add gl-work --template gitlab --host gitlab.com --from-op op://eng/gitlab/token\n" +
 			"defenseclaw substrate secrets add nexus --template generic-basic --host nexus.corp.example --user ci-bot --from-file ~/.nexus-token",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
