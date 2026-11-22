@@ -152,17 +152,28 @@ func recognizeCredentialKeys(input string) []candidate {
 				decoded = value
 			}
 		}
-		valid = valid && end-keyStart <= 8192 && !credentialPlaceholder(decoded) && len(decoded) >= 4
+		bounded := end-keyStart <= maxCredentialKeySpan
+		if valid && quoted && !bounded {
+			// A quoted value whose closing quote is past the bound is
+			// redacted as its first word, as the parent redacted it; it is
+			// never kept whole (substrate-1 GAP-0656).
+			_, end, valid = parseAssignmentValue(input, start, false)
+			if closing := strings.IndexByte(input[start:max(end, start)], input[position]); closing >= 0 {
+				end = start + closing // the word ends at the closing quote
+			}
+			valid, bounded = valid && end > start, true
+			decoded, quoted = input[start:max(end, start)], false
+		}
+		valid = valid && bounded && !credentialPlaceholder(decoded) && len(decoded) >= 4
 		if valid && !quoted && (strings.ContainsAny(decoded, "()") || identifierPathRE.MatchString(decoded) ||
 			codeValue(decoded, input[keyStart:wordEnd], word)) {
 			valid = false // a call, a field path or a name (os.Getenv("X"), cfg.Token, x = x, None) is code
 		}
-		if valid && strings.HasSuffix(word, "token") && allDigits(decoded) && len(decoded) <= 10 {
-			valid = false // a count (prompt_token: 12345678)
+		if valid && word == "token" && allDigits(decoded) && len(decoded) <= 10 &&
+			countTokenKey(input[keyStart:wordStart]) {
+			valid = false // a count (token: 4096, prompt_token: 12345678), not SERVICE_TOKEN=12345678 (substrate-1 GAP-0654)
 		}
-		if valid && word == "token" && keyStart == wordStart && len(decoded) < 16 &&
-			!(byteAny(decoded, isASCIIDigit) && byteAny(decoded, func(c byte) bool { return isASCIIUpper(c) || isASCIILower(c) }) &&
-				!strings.ContainsAny(decoded, " \t")) {
+		if valid && word == "token" && keyStart == wordStart && len(decoded) < 16 && tokenizerPiece(decoded) {
 			valid = false // a bare token key holding a word ({"token": " world"}, logprob and tokenizer output)
 		}
 		if valid && !quoted && strings.ContainsAny(decoded, "[]") {
@@ -175,6 +186,57 @@ func recognizeCredentialKeys(input string) []candidate {
 		result = append(result, candidate{start: start, end: end, accepted: valid})
 	}
 	return result
+}
+
+// maxCredentialKeySpan bounds a credential-key assignment from its key to
+// the end of its value, as v1 assignments are bounded.
+const maxCredentialKeySpan = 8192
+
+// countTokenKeyPrefixes are the key words before token that name a count or
+// a position (prompt_token, max_token, last_token), not a credential.
+var countTokenKeyPrefixes = map[string]bool{
+	"prompt": true, "completion": true, "input": true, "output": true, "total": true, "cached": true,
+	"reasoning": true, "context": true, "max": true, "min": true, "num": true, "n": true,
+	"first": true, "last": true, "next": true, "start": true, "end": true, "stop": true,
+}
+
+// countTokenKey reports whether prefix, the key before its token word, names
+// a count: a bare token key, or a count word (prompt_, maxToken).
+func countTokenKey(prefix string) bool {
+	prefix = strings.ToLower(strings.TrimRight(prefix, "_-."))
+	if prefix == "" {
+		return true
+	}
+	if cut := strings.LastIndexAny(prefix, "_-."); cut >= 0 {
+		prefix = prefix[cut+1:]
+	}
+	return countTokenKeyPrefixes[prefix]
+}
+
+// tokenizerPiece reports a short value under a bare token key that is
+// tokenizer or logprob output rather than a credential: a word or piece with
+// no digit (" world", "Hello!", "\u0120the", "...."), or one made of letters
+// and digits around a space. Digits with symbols, digits past a count and
+// mixed symbols are credential-shaped (substrate-1 GAP-0655).
+func tokenizerPiece(value string) bool {
+	if strings.ContainsAny(value, " \t") {
+		return true
+	}
+	if byteAny(value, isASCIIDigit) {
+		return false
+	}
+	if byteAny(value, func(c byte) bool { return isASCIIUpper(c) || isASCIILower(c) || c >= 0x80 }) {
+		return true
+	}
+	var seen [256]bool
+	distinct := 0
+	for index := 0; index < len(value); index++ {
+		if !seen[value[index]] {
+			seen[value[index]] = true
+			distinct++
+		}
+	}
+	return distinct < 3 // repeated punctuation ("....", "----")
 }
 
 // credentialPlaceholder reports a value that names a credential without
