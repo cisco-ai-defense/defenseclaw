@@ -59,6 +59,13 @@ func deliveredVerdicts(t *testing.T, store *audit.Store) map[string]string {
 			if action, _ := event.Structured["action"].(string); id != "" && out[id] == "" {
 				out[id] = action
 			}
+		case "hook_decision":
+			// A benign per-user allow keeps only its hook_decision row
+			// (#1384), a Claude Code receipt call too (GAP-1172).
+			id := strings.TrimSpace(event.ToolID)
+			if action, _ := event.Structured["defenseclaw.guardrail.effective_action"].(string); id != "" && out[id] == "" {
+				out[id] = action
+			}
 		case string(audit.ActionGuardrailBlock):
 			// Only the hook's own block of a pre-execution event is the
 			// call's verdict (GAP-0271 review).

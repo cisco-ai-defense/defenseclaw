@@ -4,13 +4,9 @@
 package config
 
 import (
-	"errors"
-	"os"
 	"path/filepath"
 	"slices"
 	"strings"
-
-	gatewayconnector "github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
 // codexProjectTrust is what the Codex user config.toml says about projects:
@@ -32,14 +28,10 @@ type codexProjectEntry struct {
 	trusted bool
 }
 
-func readCodexProjectTrust(userPath string) codexProjectTrust {
-	if _, err := os.Stat(userPath); errors.Is(err, os.ErrNotExist) {
-		return codexProjectTrust{}
-	}
-	data, ok := gatewayconnector.ReadStableInventoryFile(userPath, maxCodexInventoryConfigBytes)
-	if !ok {
-		return codexProjectTrust{unknown: true}
-	}
+// parseCodexProjectTrust reads the [projects] trust of the Codex user
+// config whose bytes are data; a config that does not parse leaves the trust
+// unknown.
+func parseCodexProjectTrust(data []byte) codexProjectTrust {
 	var doc struct {
 		Projects map[string]struct {
 			TrustLevel string `toml:"trust_level"`

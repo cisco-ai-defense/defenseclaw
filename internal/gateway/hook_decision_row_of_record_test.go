@@ -534,7 +534,12 @@ func TestHookDecisionIsRowOfRecordOnlyForBenignPerUserAllows(t *testing.T) {
 		{name: "panic", env: HookAuditEnvelope{Result: "panic", Action: "allow"}},
 		{name: "panicked", panicked: true},
 		{name: "bounded prefix review", env: HookAuditEnvelope{Result: "ok", Action: "allow", Extra: map[string]string{"bounded_prefix_review": "true"}}},
-		{name: "pending occurrence", req: func(r agentHookRequest) agentHookRequest { r.pendingOccurrenceID = "occ"; return r }},
+		{name: "journaled occurrence", req: func(r agentHookRequest) agentHookRequest {
+			r.pendingOccurrenceID, r.pendingJournaled = "occ", true
+			return r
+		}},
+		// A per-user receipt call: occurrence IDs, no journal row (GAP-1172).
+		{name: "unjournaled occurrence", req: func(r agentHookRequest) agentHookRequest { r.pendingOccurrenceID = "occ"; return r }, want: true},
 		{name: "recovery", req: func(r agentHookRequest) agentHookRequest { r.pendingRecovery = true; return r }},
 		{name: "sandbox receipt", req: func(r agentHookRequest) agentHookRequest { r.sandboxReceiptAcknowledgment = true; return r }},
 		{name: "correlation unavailable", req: func(r agentHookRequest) agentHookRequest { r.CorrelationUnavailable = true; return r }},

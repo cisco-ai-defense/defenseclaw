@@ -140,14 +140,75 @@ fi
 unset _dc_diag_dir _dc_diag_log _dc_diag_size
 {{- end}}`
 
+// shellExitGuardTemplate is the fail-mode exit guard of the Claude Code, Codex
+// and Cursor shell hooks that are not Secure Client renders: the per-user
+// hooks, where it replaces the boot trap, and the standalone managed hooks,
+// right after DEFENSECLAW_HOME is fixed (GAP-1734). defenseclaw_harden_env
+// keeps _dc_hook_on_exit as the EXIT trap, so the guard holds to the end.
+//
+//   - Every deliberate exit goes through the exit function, which marks it.
+//     Bash 3.2 (macOS /bin/bash) ends a script with status 0 after an unbound
+//     variable or a "." of a missing file, so an unmarked exit is a failure
+//     whatever its status.
+//   - A deliberate exit 0 or 2 keeps its outcome (a per-user Codex block is
+//     answered as Codex reads one, codex_closed_answer). Any other status, or
+//     an unmarked exit, is an unexpected failure: exit status 1 is a
+//     non-blocking error for the agents, so it never decides the outcome. In
+//     fail mode closed (per-user: defenseclaw_boot_fails_closed) the hook
+//     blocks the call; fail mode open keeps the exit status, as the boot trap
+//     did.
+//
+// The Secure Client renders keep their own bytes: macOS uses the managed
+// prologue above, and the other Secure Client renders are pinned
+// (TestSecureClientShellRendersKeepPrePerfBytes).
+const shellExitGuardTemplate = `{{define "shell-exit-guard"}}_DC_EXIT_INTENDED=0
+exit() {
+  local _dc_status=$?
+  _DC_EXIT_INTENDED=1
+  builtin exit "${1:-$_dc_status}"
+}
+{{if .Managed}}_DC_HOOK_FAIL_MODE="{{.FailMode}}"
+{{end}}_dc_hook_on_exit() {
+  local rc=$?
+  set +e
+  trap - EXIT
+  if declare -F _defenseclaw_hook_cleanup >/dev/null 2>&1; then
+    _defenseclaw_hook_cleanup >/dev/null 2>&1 || true
+  fi
+  if [ "$_DC_EXIT_INTENDED" = "1" ]; then
+    case "$rc" in
+      0) builtin exit 0 ;;
+      2) {{if and (eq .ConnectorName "codex") (not .Managed)}}codex_closed_answer{{else}}builtin exit 2{{end}} ;;
+    esac
+  elif [ "$rc" -eq 0 ]; then
+    rc=1
+  fi
+  {{if .Managed}}[ "$_DC_HOOK_FAIL_MODE" = "closed" ]{{else}}defenseclaw_boot_fails_closed{{end}} || builtin exit "$rc"
+{{- if eq .ConnectorName "cursor"}}
+  printf '%s\n' '{"continue":false,"permission":"deny","user_message":"DefenseClaw hook failed closed","agent_message":"DefenseClaw hook failed closed"}'
+  builtin exit 2
+{{- else if and (eq .ConnectorName "codex") (not .Managed)}}
+  codex_closed_answer
+{{- else}}
+  printf '%s (unexpected exit status %s)\n' "` + managedHookBlockSentence + `" "$rc" >&2
+  builtin exit 2
+{{- end}}
+}
+trap '_dc_hook_on_exit' EXIT
+{{- end}}`
+
 // parseHookTemplate parses a hook template together with the shared managed
-// prologue so every connector template can include it by name.
+// prologue and the shell exit guard so every connector template can include
+// them by name.
 func parseHookTemplate(tmpl string) (*template.Template, error) {
 	t, err := template.New("").Parse(tmpl)
 	if err != nil {
 		return nil, err
 	}
 	if _, err := t.New("managed-prologue-definitions").Parse(managedHookPrologueTemplate); err != nil {
+		return nil, err
+	}
+	if _, err := t.New("shell-exit-guard-definitions").Parse(shellExitGuardTemplate); err != nil {
 		return nil, err
 	}
 	return t, nil

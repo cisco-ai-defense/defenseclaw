@@ -47,10 +47,13 @@ func TestRoutingGroupWarningFoldsTheMacRecordAccountDomain(t *testing.T) {
 		Directory: useridentity.DirectoryActiveDirectory, Groups: []string{`DCLAB\dc-r102-devs`}, ResolvedAt: now}
 	validate, cached, lookup := validateManagedGuardianAuthorization, cachedDirectoryFacts, profileExplainDirectoryFacts
 	exists, qualify, silent := profileGroupExists, profileGroupQualifiedName, bareGroupsDirectorySilent
+	holder := profileExplainAccountName
 	t.Cleanup(func() {
 		validateManagedGuardianAuthorization, cachedDirectoryFacts, profileExplainDirectoryFacts = validate, cached, lookup
 		profileGroupExists, profileGroupQualifiedName, bareGroupsDirectorySilent = exists, qualify, silent
+		profileExplainAccountName = holder
 	})
+	profileExplainAccountName = func(id string) (string, bool) { return "dcad-r102-eng1", id == uid }
 	validateManagedGuardianAuthorization = func(string, string) error { return nil }
 	cachedDirectoryFacts = func(string) (useridentity.DirectoryFacts, time.Time, bool) {
 		return useridentity.DirectoryFacts{}, time.Time{}, false
