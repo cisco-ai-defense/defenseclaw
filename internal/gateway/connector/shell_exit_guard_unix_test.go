@@ -93,7 +93,7 @@ func TestShellHookUnexpectedFailureAfterHardeningFollowsFailMode(t *testing.T) {
 						// Fail mode open keeps the exit status (an unmarked 0
 						// counts as 1): never a block, never an allow by
 						// accident of bash's status.
-						if run.exitCode != 1 && !(failureName == "deliberate exit 3" && run.exitCode == 3) {
+						if run.exitCode != 1 && (failureName != "deliberate exit 3" || run.exitCode != 3) {
 							t.Fatalf("open exit = %d, want the failure status (stdout %q, stderr %q)", run.exitCode, run.stdout, run.stderr)
 						}
 						if strings.Contains(run.stdout, `"deny"`) {
