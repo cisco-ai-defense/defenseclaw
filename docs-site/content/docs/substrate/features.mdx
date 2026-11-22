@@ -30,12 +30,14 @@ Every DefenseClaw feature runs in the cluster gateway, the same code as on a lap
 
 Because every model call passes the guardrail proxy, the model request and reply checks apply to every agent that routes through the gateway, and the caller is the verified actor and person from the signed token, never a header the agent sends.
 
-What is **not** in this release yet: semantic and admin routing rules, budgets (warn, downgrade or deny) and per-call usage and cost records for actors. The gateway's tokenomics store keeps usage per gateway replica and has no batch or actor key, so the cluster does not serve it for actors yet. Until it does:
+**Preview.** Budgets and usage for agents are a Preview feature.
 
-- `defenseclaw substrate usage` answers "this cluster does not offer that yet; ask your administrator to upgrade DefenseClaw on it". `usage --batch` does too.
-- No budget applies to an actor or a batch.
-- The fleet view has no spend.
-- Metrics carry no person or actor labels.
+- **Usage.** `defenseclaw substrate usage` is a table of your own agents' calls, tokens and cost. `--by` rolls it up by agent (the default), model, batch, atespace, day, connector or provider; `--since` takes a window such as `24h` or `7d` (the default is 7 days). `--batch ID` reads one batch. Administrators add `--all` and `--by person` to read everyone's usage. A call whose model is not in the price table is counted but has no cost, and the table says so.
+- **Budgets.** A budget under `routing.admin.budgets` limits spend per period (`day`, `week` or `month`) and either warns, downgrades to a cheaper model or denies. A budget with scope `actor` gives every agent its own limit, and scope `batch` gives every batch of one person its own limit. Both take `subject: "*"`. The cluster keeps at most 4096 keys for one such budget; when a launcher makes more, the least recently used counters are dropped and the next verdict carries a `budget_keys_evicted` warning. User, group and connector budgets are not capped, because their keys come from subjects an administrator lists.
+- **Warning level.** `warn_at_percent` on a budget raises a `budget_warn` record at that share of the limit. The warning is not added to model replies: look at `defenseclaw substrate usage`, or at the `BUDGET` column of `defenseclaw substrate list` and the `Budget` line of `defenseclaw substrate status NAME`, which show the share used (`80 %`) or `over`.
+- **When a budget is used up.** The agent gets the usual refusal in the shape of its own call, streamed or not.
+- **People.** Calls of an agent are counted under the person who started it, by the person's issuer and subject, so usage lists a subject at two sign-in servers as two people. Named `users:` selectors and named user budgets treat one subject at two issuers as one person.
+- **Turn it off.** `substrate.usage.enabled: false` turns usage and cluster budgets off; the chart value `observability.tokenomics.enabled: false` turns cost off. The chart seeds the price table from its reviewed default unless `config.observability.pricing` is set.
 
 ## Policies
 

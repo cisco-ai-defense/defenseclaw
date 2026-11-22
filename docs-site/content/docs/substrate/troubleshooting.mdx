@@ -258,3 +258,10 @@ This section is for a coding agent, or an LLM working for one, that hits a Defen
 - **Your terminal is detached.** That is normal. The run continues. Write results to the repository or the task's output, not to your terminal.
 - **You were suspended and resumed.** Your clock may have jumped and your connections may have been reset. Check the time, reopen connections, and don't assume a long-running command is still running.
 - **Never** try to read or change the hook settings, the root-owned managed settings or the kit. They are outside your user, and changes are reported.
+
+## Usage and budgets (Preview)
+
+- **"usage is turned off on this cluster"**: `substrate.usage.enabled` is `false`. Ask your administrator to turn it on.
+- **"the cluster's leader did not answer"**: usage and budget spend come from the leader. Try again in a minute; `defenseclaw substrate doctor` shows the `cluster_budgets` row.
+- **A call has no cost**: its model is not in the price table (`observability.pricing`). `defenseclaw substrate usage` counts the call and says how many had no cost; an administrator adds the model to the table.
+- **`BUDGET` shows `over`**: a budget that counts the agent is used up for its period; the agent's model calls are refused or downgraded until it resets.
