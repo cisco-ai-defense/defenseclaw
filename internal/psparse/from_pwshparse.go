@@ -527,15 +527,19 @@ func (a *pwAdapter) argExpr(n *pwshparse.Node) Expr {
 }
 
 // wordParts splits an expandable bareword into atoms as composeAtoms keeps
-// them: the literal text between expansions as bareword atoms, each expansion
-// as its expression.
+// them: the literal text between expansions and each expansion as its
+// expression. Quote delimiters inside the word are not part of its value:
+// pwsh reads $HOME'\x' as the word $HOME\x (the oracle value), so each quoted
+// run is a string literal of its kind with the delimiters dropped, and a
+// quote opened before an expansion stays open after it (-o"$v"x).
 func (a *pwAdapter) wordParts(n *pwshparse.Node) []StringPart {
 	var out []StringPart
 	s := a.sp(n)
 	pos := s.start
+	var q rune // the open quote kind: 0, '\'' or '"'
 	lit := func(e int) {
 		if e > pos && e <= len(a.src) {
-			out = append(out, StringPart{Expr: a.p.barewordExpr(Token{Kind: TokGeneric, Raw: a.src[pos:e], Value: a.src[pos:e], Start: pos, End: e})})
+			out = append(out, a.quotedRuns(pos, e, &q)...)
 		}
 	}
 	for _, k := range n.Kids {
@@ -548,6 +552,61 @@ func (a *pwAdapter) wordParts(n *pwshparse.Node) []StringPart {
 		pos = ke
 	}
 	lit(s.end)
+	return out
+}
+
+// quotedRuns reads src[s:e], a piece of a generic word between expansions:
+// an unquoted run is a bareword atom, a single- or double-quoted run is a
+// string literal without its delimiters (a doubled quote is one quote, a
+// backtick escapes the next character). *q carries an open quote across an
+// expansion.
+func (a *pwAdapter) quotedRuns(s, e int, q *rune) []StringPart {
+	var out []StringPart
+	start := s
+	flush := func(end int) {
+		if end <= start {
+			return
+		}
+		raw := a.src[start:end]
+		switch *q {
+		case '\'':
+			out = append(out, StringPart{Expr: &StringLit{span: span{start, end}, Kind: StrSingle, Raw: raw, Value: collapseDoubled(raw, isSingleQuote), Static: true}})
+		case '"':
+			out = append(out, StringPart{Expr: a.p.stringLit(Token{Kind: TokString, Raw: `"` + raw + `"`, Start: start - 1, End: end + 1, Str: StrDouble})})
+		default:
+			out = append(out, StringPart{Expr: a.p.barewordExpr(Token{Kind: TokGeneric, Raw: raw, Value: raw, Start: start, End: end})})
+		}
+	}
+	for i := s; i < e; {
+		r, sz := utf8.DecodeRuneInString(a.src[i:e])
+		next := func() (rune, int) {
+			if i+sz >= e {
+				return 0, 0
+			}
+			return utf8.DecodeRuneInString(a.src[i+sz : e])
+		}
+		switch {
+		case r == '`' && *q != '\'':
+			_, nsz := next()
+			i += sz + nsz
+			continue
+		case *q == 0 && isSingleQuote(r):
+			flush(i)
+			*q, start = '\'', i+sz
+		case *q == 0 && isDoubleQuote(r):
+			flush(i)
+			*q, start = '"', i+sz
+		case (*q == '\'' && isSingleQuote(r)) || (*q == '"' && isDoubleQuote(r)):
+			if nr, nsz := next(); (*q == '\'' && isSingleQuote(nr)) || (*q == '"' && isDoubleQuote(nr)) {
+				i += sz + nsz // a doubled quote is one literal quote
+				continue
+			}
+			flush(i)
+			*q, start = 0, i+sz
+		}
+		i += sz
+	}
+	flush(e)
 	return out
 }
 

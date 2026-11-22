@@ -207,3 +207,58 @@ func nestedPart(v string) string {
 	}
 	return ""
 }
+
+// TestFromPwshparseWordQuotes: an expandable bareword drops its inner quote
+// delimiters as pwsh does. Oracle (pwsh 7.6.6 ExpandableStringExpressionAst
+// .Value, BareWord): $HOME'\x' -> $HOME\x, a"$v"x -> a$vx.
+// The adapter kept the quotes in the literal atoms, so Remove-Item $HOME'\x'
+// deleted a "C:\Users\alice'\x'" target instead of the home subfolder.
+func TestFromPwshparseWordQuotes(t *testing.T) {
+	cases := []struct{ src, want string }{
+		{`Remove-Item $HOME'\x'`, `${HOME}\x`},
+		{`tool a"$v"x`, `a${v}x`},
+		{`tool $env:TEMP"\y z"`, `${env:TEMP}\y z`},
+		{`tool $a'it''s'`, `${a}it's`},
+		{`tool $a"q""t"`, `${a}q"t`},
+		{`tool $a'"'`, `${a}"`},
+		{`tool $a"'"`, `${a}'`},
+		{`tool $a\b`, `${a}\b`},
+	}
+	for _, c := range cases {
+		sc, ok := FromPwshparse(c.src, Options{Dialect: DialectPwsh7})
+		if !ok {
+			t.Fatalf("declined %q", c.src)
+		}
+		var got string
+		WalkCommands(sc, func(cm *Command) {
+			for _, el := range cm.Elements {
+				arg, ok := el.(*Arg)
+				if !ok {
+					continue
+				}
+				sl, ok := arg.Value.(*StringLit)
+				if !ok || sl.Static {
+					continue
+				}
+				var b strings.Builder
+				for _, p := range sl.Parts {
+					if v, ok := p.Expr.(*Variable); ok {
+						n := v.Name
+						if v.Scope != "" {
+							n = v.Scope + ":" + n
+						}
+						b.WriteString("${" + n + "}")
+					} else if s, ok := LiteralString(p.Expr); ok {
+						b.WriteString(s)
+					} else {
+						fmt.Fprintf(&b, "<%T>", p.Expr)
+					}
+				}
+				got = b.String()
+			}
+		})
+		if got != c.want {
+			t.Errorf("%q: word = %q, want %q", c.src, got, c.want)
+		}
+	}
+}

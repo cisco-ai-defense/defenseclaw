@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-package pwshparse
+package pwshparse_test
 
 import (
 	"encoding/base64"
@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/psparse"
+	"github.com/defenseclaw/defenseclaw/internal/pwshparse"
 )
 
 // TestParseLatencyVsPsparse compares the per-row parse latency of the port with the reader it replaces
@@ -27,7 +28,7 @@ func TestParseLatencyVsPsparse(t *testing.T) {
 	if s := os.Getenv("PWSHPERF_REPS"); s != "" {
 		fmt.Sscan(s, &reps)
 	}
-	ob := readGz(t, "pub.b64.gz")
+	ob := pwshparse.ReadGzB(t, "pub.b64.gz")
 	var scripts []string
 	for ob.Scan() {
 		b, err := base64.StdEncoding.DecodeString(ob.Text())
@@ -56,9 +57,9 @@ func TestParseLatencyVsPsparse(t *testing.T) {
 				}
 				t0 = time.Now()
 				if treeOnly {
-					ParseTree(s)
+					pwshparse.ParseTree(s)
 				} else {
-					Parse(s)
+					pwshparse.Parse(s)
 				}
 				if d := time.Since(t0); d < bp {
 					bp = d
@@ -91,7 +92,7 @@ func TestParseLatencyVsPsparse(t *testing.T) {
 
 // BenchmarkParseFixture parses every public fixture row up to 4 KiB per iteration (profiling aid).
 func BenchmarkParseFixture(b *testing.B) {
-	ob := readGzB(b, "pub.b64.gz")
+	ob := pwshparse.ReadGzB(b, "pub.b64.gz")
 	var scripts []string
 	for ob.Scan() {
 		raw, err := base64.StdEncoding.DecodeString(ob.Text())
@@ -106,7 +107,7 @@ func BenchmarkParseFixture(b *testing.B) {
 	b.ResetTimer()
 	for n := 0; n < b.N; n++ {
 		for _, s := range scripts {
-			Parse(s)
+			pwshparse.Parse(s)
 		}
 	}
 }
