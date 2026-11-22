@@ -149,9 +149,17 @@ func mutatingEffectKind(kind string) bool {
 }
 
 // effectCall builds the pure-extractor call and options from a trusted action
-// input. ok is false when there is nothing executable to analyze.
-func effectCall(connector string, in actionfacts.Input) (effects.Call, effects.Options, bool) {
+// input. ok is false when there is nothing executable to analyze. windows is
+// a call a Windows host runs (effectWindowsCall): its paths are Windows
+// paths in every dialect, so Git Bash (hint POSIX) keeps the POSIX grammar
+// with Windows path rules, and a shell call the hook placed in no dialect
+// (a Codex shell) is not read as POSIX: the extractor infers PowerShell or
+// cmd from its text, except Claude Code's Bash tool, which runs Git Bash.
+func effectCall(connector string, in actionfacts.Input, windows bool) (effects.Call, effects.Options, bool) {
 	flavor := effects.FlavorPOSIX
+	if windows {
+		flavor = effects.FlavorWindows
+	}
 	dialect := effects.DialectNone
 	switch in.DialectHint {
 	case actionfacts.DialectPowerShell:
@@ -160,6 +168,10 @@ func effectCall(connector string, in actionfacts.Input) (effects.Call, effects.O
 		flavor, dialect = effects.FlavorWindows, effects.DialectCMD
 	case actionfacts.DialectPOSIX:
 		dialect = effects.DialectPOSIX
+	default:
+		if windows && connector == "claudecode" && strings.EqualFold(in.Tool, "Bash") {
+			dialect = effects.DialectPOSIX
+		}
 	}
 	opts := effects.Options{Flavor: flavor, Dialect: dialect, Home: in.ActiveHome, CWD: in.CWD,
 		BSDUserland: effectBSDUserland(effectHostGOOS, flavor)}
@@ -180,6 +192,17 @@ func effectCall(connector string, in actionfacts.Input) (effects.Call, effects.O
 	default:
 		return effects.Call{}, opts, false
 	}
+}
+
+// effectWindowsCall reports a call judged as a Windows host runs it: a
+// Windows hook placed it (its shell dialect selection ran), or its working
+// folder or home is a drive-absolute or UNC path. The readers already read
+// such a call with Windows rules; before this the lane read a Codex shell on
+// a Windows host (no dialect hint) and Git Bash as POSIX paths, and the
+// POSIX lexer ate the backslashes of C:\Users\...
+func effectWindowsCall(request trustedActionRequest) bool {
+	return request.windowsShellDialect || request.windowsDialectReadings ||
+		windowsShapedPath(request.Input.CWD) || windowsShapedPath(request.Input.ActiveHome)
 }
 
 // effectPatchTool names the connectors' patch tools (apply_patch for Codex,
