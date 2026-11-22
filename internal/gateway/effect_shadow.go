@@ -5,11 +5,14 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	osuser "os/user"
 	"runtime"
 	"slices"
 	"strings"
+	"sync/atomic"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/effectrules"
@@ -203,6 +206,77 @@ func effectPatchText(in actionfacts.Input) string {
 		}
 	}
 	return strings.Join(texts, "\n")
+}
+
+// maxEffectAccountLookups bounds the passwd lookups of one call (counted
+// work; S2 cap registry name gateway.maxEffectAccountLookups). A ~name past
+// it stays unknown, which the lane reads as a reach (the unknown tier of its
+// pack), never as a clear path.
+const maxEffectAccountLookups = 4
+
+var (
+	effectAccountLookups     atomic.Int64 // passwd lookups the lane made
+	effectAccountLookupsOver atomic.Int64 // ~names the cap left unknown
+)
+
+// effectLookupAccountHome is the passwd lookup (getpwnam, through os/user) of
+// a ~name: the account's absolute home. A test pins it.
+var effectLookupAccountHome = func(name string) (string, bool) {
+	account, err := osuser.Lookup(name)
+	if err != nil || !strings.HasPrefix(account.HomeDir, "/") {
+		return "", false
+	}
+	return account.HomeDir, true
+}
+
+// effectActiveLogin is the hook account's login for the lane, from the
+// trusted identity the ~<login> twin reads (trustedActiveLogins, GAP-2378):
+// "" for a call that spells no ~, so such a call costs nothing.
+func effectActiveLogin(ctx context.Context, in actionfacts.Input) string {
+	if !strings.Contains(in.Command, "~") && !bytes.Contains(in.Args, []byte("~")) &&
+		!slices.ContainsFunc(in.Argv, func(a string) bool { return strings.Contains(a, "~") }) {
+		return ""
+	}
+	if logins := trustedActiveLogins(ctx, in.ActiveHome); len(logins) > 0 {
+		return logins[0]
+	}
+	return ""
+}
+
+// effectAccountOptions fills the account fields of a POSIX call's options:
+// Login, the hook account's login, so ~<login> names the active home as the
+// shell's passwd lookup does (rel-1-0-10:GAP-1678), and Accounts, the homes of
+// the other ~names the call spells, from a passwd lookup bounded by
+// maxEffectAccountLookups per call and counted. A name the lookup does not
+// find, or one past the cap, stays unknown (GAP-1677, GAP-0898).
+func effectAccountOptions(call effects.Call, opts effects.Options, login string) effects.Options {
+	if opts.Flavor != effects.FlavorPOSIX {
+		return opts
+	}
+	opts.Login = login
+	text := call.Command + "\n" + string(call.Args) + "\n" + strings.Join(call.Argv, "\n")
+	if !strings.Contains(text, "~") {
+		return opts
+	}
+	looked := 0
+	for _, name := range effects.TildeAccountNames(text) {
+		if login != "" && strings.EqualFold(name, login) {
+			continue
+		}
+		if looked == maxEffectAccountLookups {
+			effectAccountLookupsOver.Add(1)
+			continue
+		}
+		looked++
+		effectAccountLookups.Add(1)
+		if home, ok := effectLookupAccountHome(name); ok {
+			if opts.Accounts == nil {
+				opts.Accounts = map[string]string{}
+			}
+			opts.Accounts[name] = home
+		}
+	}
+	return opts
 }
 
 // effectHostGOOS is the host the hook runs on; a test pins it.

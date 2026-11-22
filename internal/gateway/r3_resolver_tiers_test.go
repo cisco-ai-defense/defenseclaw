@@ -10,9 +10,11 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/effects"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 )
 
@@ -64,7 +66,7 @@ func r3TierHome(t *testing.T) (home, login string) {
 	t.Helper()
 	home = t.TempDir()
 	for _, f := range []string{".ssh/authorized_keys", ".ssh/id_rsa", ".aws/credentials", ".claude/settings.json",
-		".defenseclaw/config.yaml", "proj/notes.txt", "proj/src/a.py"} {
+		".codex/hooks.json", ".defenseclaw/config.yaml", "proj/notes.txt", "proj/src/a.py"} {
 		p := filepath.Join(home, f)
 		if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
 			t.Fatal(err)
@@ -104,10 +106,20 @@ func r3PosixTierRows(home, login string) []r3TierRow {
 		{gap: "GAP-1573c fp: in-call link to a project folder", command: `ln -s ~/proj/src d && find d/ -name '*.pyc' -delete`, want: "allow"},
 	}
 	if login != "" {
-		// GAP-1678's hook-config row joins when the effects lane fills
-		// Options.Login from the trusted identity; the keys row is a guard.
+		// GAP-1678: ~<login> is the active home for the hook config write as
+		// for the keys (the lane's Options.Login, from the trusted identity),
+		// in any case and whatever HOME the call sets (bash reads ~login from
+		// the password database).
+		up := strings.ToUpper(login)
 		rows = append(rows,
-			r3TierRow{gap: "GAP-1678 ~login keys", command: `cp proj/notes.txt ~` + login + `/.ssh/authorized_keys`, cwd: ".", want: "ctl:cp proj/notes.txt ~/.ssh/authorized_keys"})
+			r3TierRow{gap: "GAP-1678 ~login keys", command: `cp proj/notes.txt ~` + login + `/.ssh/authorized_keys`, cwd: ".", want: "ctl:cp proj/notes.txt ~/.ssh/authorized_keys"},
+			r3TierRow{gap: "GAP-1678 ~login claude hook config", command: `echo k >> ~` + login + `/.claude/settings.json`, cwd: ".", want: "ctl:echo k >> ~/.claude/settings.json"},
+			r3TierRow{gap: "GAP-1678 ~LOGIN claude hook config", command: `echo k >> ~` + up + `/.claude/settings.json`, cwd: ".", want: "ctl:echo k >> ~/.claude/settings.json"},
+			r3TierRow{gap: "GAP-1678 ~login cp operand", command: `cp proj/notes.txt ~` + login + `/.claude/settings.json`, cwd: ".", want: "ctl:cp proj/notes.txt ~/.claude/settings.json"},
+			r3TierRow{gap: "GAP-1678 ~login codex hooks", command: `echo k >> ~` + login + `/.codex/hooks.json`, cwd: ".", want: "ctl:echo k >> ~/.codex/hooks.json"},
+			r3TierRow{gap: "GAP-1678 HOME set, ~login", command: `HOME=/tmp/x; echo k >> ~` + login + `/.claude/settings.json`, cwd: ".", want: "ctl:echo k >> ~/.claude/settings.json"},
+			r3TierRow{gap: "GAP-1678 fp: ~login project file", command: `echo k >> ~` + login + `/proj/notes.txt`, cwd: ".", want: "allow"},
+		)
 	}
 	return rows
 }
@@ -115,12 +127,92 @@ func r3PosixTierRows(home, login string) []r3TierRow {
 func TestDET111R3ResolverVerdictFiveTiers(t *testing.T) {
 	useDefaultEffectsLane(t) // the shipped configuration: the effects lane is live
 	home, login := r3TierHome(t)
+	r3CheckPosixTierRows(t, home, r3PosixTierRows(home, login))
+}
+
+// GAP-1677/GAP-1678 with another account the passwd lookup finds: ~peer/..
+// climbs out of peer's home into the active home (the lane's
+// Options.Accounts, a bounded lookup), and peer's own plain files stay allowed.
+func TestDET111R3AccountTildeFiveTiers(t *testing.T) {
+	useDefaultEffectsLane(t)
+	home, _ := r3TierHome(t)
+	peer := filepath.Join(filepath.Dir(home), "peer")
+	if err := os.MkdirAll(peer, 0o700); err != nil { // .. is walked on disk
+		t.Fatal(err)
+	}
+	// dcr3alias is a second login of the active home (an AD short name
+	// beside the user@domain login): its ~ spelling is the home itself.
+	pinEffectAccounts(t, map[string]string{"dcr3peer": peer, "dcr3alias": home})
+	base := filepath.Base(home)
+	r3CheckPosixTierRows(t, home, []r3TierRow{
+		{gap: "GAP-1677 ~alias keys", command: `echo k >> ~dcr3alias/.ssh/authorized_keys`, cwd: ".", want: "ctl:echo k >> ~/.ssh/authorized_keys"},
+		{gap: "GAP-1677 ~alias hook config", command: `cp proj/notes.txt ~dcr3alias/.claude/settings.json`, cwd: ".", want: "ctl:cp proj/notes.txt ~/.claude/settings.json"},
+		{gap: "GAP-1677 ~peer/../login hook config", command: `echo k >> ~dcr3peer/../` + base + `/.claude/settings.json`, cwd: ".", want: "ctl:echo k >> ~/.claude/settings.json"},
+		// a .. below another account's home is a maybe (the folder may be a link)
+		{gap: "GAP-1677 ~peer/../login keys", command: `echo k >> ~dcr3peer/../` + base + `/.ssh/authorized_keys`, cwd: ".", want: "maybe"},
+		// another account's credential stays the other-home credential read
+		// once the lookup places it (GAP-0898)
+		{gap: "GAP-0898 ~peer credential", command: `cat ~dcr3peer/.ssh/id_rsa`, cwd: ".", want: "maybe"},
+		{gap: "GAP-0898 ~peer aws credential", command: `cat ~dcr3peer/.aws/credentials`, cwd: ".", want: "maybe"},
+		{gap: "GAP-1677 fp: ~peer plain file", command: `echo k >> ~dcr3peer/notes.txt`, cwd: ".", want: "allow"},
+		{gap: "GAP-1677 fp: ~peer/../login project file", command: `echo k >> ~dcr3peer/../` + base + `/proj/notes.txt`, cwd: ".", want: "allow"},
+	})
+}
+
+// pinEffectAccounts makes the lane's passwd lookup read accounts.
+func pinEffectAccounts(t *testing.T, accounts map[string]string) {
+	t.Helper()
+	old := effectLookupAccountHome
+	effectLookupAccountHome = func(name string) (string, bool) {
+		home, ok := accounts[name]
+		return home, ok
+	}
+	t.Cleanup(func() { effectLookupAccountHome = old })
+}
+
+// The lane looks up at most maxEffectAccountLookups ~names per call, counts
+// each lookup and each name past the cap, never looks up the active login,
+// and leaves a name past the cap unknown.
+func TestDET111R3AccountLookupBudget(t *testing.T) {
+	var asked []string
+	old := effectLookupAccountHome
+	effectLookupAccountHome = func(name string) (string, bool) {
+		asked = append(asked, name)
+		return "/home/" + name, true
+	}
+	t.Cleanup(func() { effectLookupAccountHome = old })
+	lookups, over := effectAccountLookups.Load(), effectAccountLookupsOver.Load()
+	call := effects.Call{Surface: effects.SurfaceShell, Command: "cat ~DCKU/a ~a1/x ~a2/x ~a3/x ~a4/x ~a5/x ~a6/x"}
+	opts := effectAccountOptions(call, effects.Options{Flavor: effects.FlavorPOSIX, Home: "/home/dcku"}, "dcku")
+	if opts.Login != "dcku" {
+		t.Fatalf("Login = %q", opts.Login)
+	}
+	if want := []string{"a1", "a2", "a3", "a4"}; !slices.Equal(asked, want) {
+		t.Fatalf("looked up %q, want %q", asked, want)
+	}
+	if _, ok := opts.Accounts["a5"]; ok || len(opts.Accounts) != maxEffectAccountLookups {
+		t.Fatalf("Accounts = %v", opts.Accounts)
+	}
+	if d := effectAccountLookups.Load() - lookups; d != 4 {
+		t.Fatalf("lookups counted %d, want 4", d)
+	}
+	if d := effectAccountLookupsOver.Load() - over; d != 2 {
+		t.Fatalf("over-cap counted %d, want 2", d)
+	}
+	win := effectAccountOptions(call, effects.Options{Flavor: effects.FlavorWindows}, "dcku")
+	if win.Login != "" || win.Accounts != nil {
+		t.Fatalf("Windows flavor got account options: %+v", win)
+	}
+}
+
+func r3CheckPosixTierRows(t *testing.T, home string, rows []r3TierRow) {
+	t.Helper()
 	probe := os.Getenv("DET111_R3_PROBE") != ""
 	for _, tier := range boundedTestTiers {
 		floor := bounded.Unknown(tier.tier)
 		for _, route := range r3PosixRoutes() {
 			api := gap0589TierAPI(t, route.connector, tier.posture, tier.managed, tier.tier)
-			for _, row := range r3PosixTierRows(home, login) {
+			for _, row := range rows {
 				cwd := filepath.Join(home, "proj")
 				if row.cwd == "." {
 					cwd = home
