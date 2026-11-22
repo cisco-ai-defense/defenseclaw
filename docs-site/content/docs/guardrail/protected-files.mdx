@@ -12,6 +12,8 @@ script, `xargs`, `find -exec`, `make`, a git option) can write a file the
 text never names. The protected-file watch is the layer after the hook: it
 checks a short list of files that let a change outlive the session.
 
+**How good it is.** No benchmark scores this layer on its own. It compares file hashes, so a change it reports is a real change; who made it is decided by timing (see [Limits](#limits)). [Benchmarks](/docs/guardrail/benchmarks) lists what is measured.
+
 ## What it watches
 
 The watch runs in the per-user gateway on Linux, macOS and Windows. A
@@ -66,6 +68,10 @@ guardrail:
 writes only into a folder the gateway's own account owns. Configuration tools
 that rewrite these files during an agent session would be undone; leave
 `restore` off on those hosts.
+
+## Protected-file write proof
+
+The write proof checks command text before a tool runs. It does not see what child programs write. A write inside a script, interpreter or shell built-in that the command only names cannot be fully checked from the command text. A rule that needs the complete action cannot block that inner write; an eligible rule about the complete outer argument list can still block the call in action mode. For protected files, use a sandbox or file permissions as an additional control.
 
 ## Limits
 

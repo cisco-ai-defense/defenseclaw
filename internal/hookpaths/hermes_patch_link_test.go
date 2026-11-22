@@ -22,9 +22,7 @@ func TestR104LeadHermesPatchLinkTarget(t *testing.T) {
 	}
 	link := filepath.Join(project, "w0-v4a-link")
 	protected := filepath.Join(home, ".ssh", "authorized_keys")
-	if err := os.Symlink(filepath.Join(project, "d")+"\n*** Add File: "+protected, link); err != nil {
-		t.Fatal(err)
-	}
+	testSymlink(t, filepath.Join(project, "d")+"\n*** Add File: "+protected, link)
 	patch := "*** Begin Patch\n*** Add File: w0-v4a-link\n+marker\n*** End Patch\n"
 	args, err := json.Marshal(map[string]string{"mode": "patch", "patch": patch})
 	if err != nil {
@@ -40,9 +38,7 @@ func TestR104LeadHermesPatchLinkTarget(t *testing.T) {
 		t.Fatalf("patch link target %q was treated as a proved ordinary destination", target)
 	}
 	ordinary := filepath.Join(project, "ordinary-link")
-	if err := os.Symlink(filepath.Join(project, "ordinary.txt"), ordinary); err != nil {
-		t.Fatal(err)
-	}
+	testSymlink(t, filepath.Join(project, "ordinary.txt"), ordinary)
 	if target, ok := ResolveWriteTarget(ordinary); !ok || target != filepath.Join(project, "ordinary.txt") {
 		t.Fatalf("ordinary link target=%q known=%v", target, ok)
 	}

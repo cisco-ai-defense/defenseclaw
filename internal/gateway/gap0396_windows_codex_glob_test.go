@@ -15,6 +15,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // GAP-0396: an unquoted source glob in a project does not make the fixed
@@ -47,16 +48,10 @@ func TestGAP0396WindowsCodexProjectGlobCopy(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, dir := range []string{"build", "out"} {
-		if err := os.Symlink(keys, filepath.Join(linked, dir, "a.txt")); err != nil {
-			t.Fatal(err)
-		}
+		testenv.Symlink(t, keys, filepath.Join(linked, dir, "a.txt"))
 	}
-	if err := os.Symlink(keys, filepath.Join(caseLinked, "build", "c.TXT")); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(keys, filepath.Join(project, "keylink")); err != nil {
-		t.Fatal(err)
-	}
+	testenv.Symlink(t, keys, filepath.Join(caseLinked, "build", "c.TXT"))
+	testenv.Symlink(t, keys, filepath.Join(project, "keylink"))
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
 	rows := []struct{ name, cwd, command, want string }{

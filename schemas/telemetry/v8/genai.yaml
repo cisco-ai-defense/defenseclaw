@@ -371,7 +371,7 @@ attributes:
     overrides:
       max_utf8_bytes: 20
       pattern: '^agt-[0-9a-f]{16}$'
-    notes: derived by the gateway from the machine id, the verified user, the connector and the config root; never a credential and never a metric label
+    notes: derived by the gateway from the machine id, the verified user, the connector and the config root; never a credential and never a metric label. For an Agent Substrate actor it is derived from the string substrate/v1, the cluster UID, the verified person subject (or atespace:<name> for an unattended workload) and the connector, so a fork is a new sandbox under the same agent identity
   introduced_in: telemetry-registry-v2
 - id: defenseclaw.agent.root.id
   type: string
@@ -821,7 +821,9 @@ attributes:
       enum:
       - windows_sid
       - posix_uid
-    notes: closed namespace so a consumer can join user.id without inferring the platform from its shape
+      - oidc_subject
+      - k8s_user
+    notes: closed namespace so a consumer can join user.id without inferring the platform from its shape; on Agent Substrate, oidc_subject is the subject claim of an OIDC person verified by the gateway, scoped by the issuer the gateway trusts, and k8s_user is the Kubernetes user name the gateway verified with a TokenReview (open source clusters without an OIDC provider)
   introduced_in: telemetry-registry-v2
 - id: defenseclaw.user.principal
   type: string
@@ -911,7 +913,7 @@ attributes:
     overrides:
       max_utf8_bytes: 64
       pattern: '^[a-z][a-z0-9_]{0,63}$'
-    notes: bounded lowercase source token such as nss_files, sssd, winbind, nss_ldap, sssd_infopipe, windows_lsa, windows_identity_store, macos_opendirectory, macos_platform_sso or hook_reported
+    notes: bounded lowercase source token such as nss_files, sssd, winbind, nss_ldap, sssd_infopipe, windows_lsa, windows_identity_store, macos_opendirectory, macos_platform_sso or hook_reported; on Agent Substrate oidc (a person verified from an OIDC token) or workload_oidc (a workload identity bound to a live actor UID)
   introduced_in: telemetry-registry-v2
 - id: defenseclaw.user.principal.assurance
   type: string
@@ -930,7 +932,7 @@ attributes:
       - verified
       - claimed
       - verified_by_connector
-    notes: verified only when the gateway or root enumerator resolved the facts for a kernel- or credential-verified uid or SID; verified_by_connector when a trusted connector named the person and the gateway resolved the facts itself; anything the hook reports is claimed
+    notes: verified only when the gateway or root enumerator resolved the facts for a kernel- or credential-verified uid or SID; verified_by_connector when a trusted connector named the person and the gateway resolved the facts itself; anything the hook reports is claimed. On Agent Substrate verified is used only for a person or workload the gateway verified and bound to a live actor UID; facts an actor sends about itself are claimed
   introduced_in: telemetry-registry-v2
 - id: defenseclaw.user.enrollment
   type: string
@@ -1551,6 +1553,450 @@ attributes:
       max: 9223372036854775807
     notes: typed and bounded
   introduced_in: telemetry-registry-v1
+- id: defenseclaw.usage.cache_read_tokens
+  type: int64
+  brief: "Input tokens served from the provider prompt cache (a subset of input tokens)"
+  examples:
+  - 2000
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: numeric-range-v1
+    overrides:
+      min: 0
+      max: 9223372036854775807
+    notes: typed and bounded
+  introduced_in: telemetry-registry-v4
+- id: defenseclaw.usage.cache_creation_tokens
+  type: int64
+  brief: "Input tokens written to the provider prompt cache (a subset of input tokens)"
+  examples:
+  - 100
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: numeric-range-v1
+    overrides:
+      min: 0
+      max: 9223372036854775807
+    notes: typed and bounded
+  introduced_in: telemetry-registry-v4
+- id: defenseclaw.usage.reasoning_tokens
+  type: int64
+  brief: "Output tokens spent on reasoning (a subset of output tokens)"
+  examples:
+  - 30
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: numeric-range-v1
+    overrides:
+      min: 0
+      max: 9223372036854775807
+    notes: typed and bounded
+  introduced_in: telemetry-registry-v4
+- id: defenseclaw.cost.usd
+  type: double
+  brief: "Cost of one model call in USD; absent when unknown, never 0 for unknown"
+  examples:
+  - 0.0042
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: numeric-range-v1
+    overrides:
+      min: 0.0
+      max: 1000000000000.0
+    notes: typed and bounded
+  introduced_in: telemetry-registry-v4
+- id: defenseclaw.cost.computed_usd
+  type: double
+  brief: "Cost computed from the price table, kept next to a reported cost"
+  examples:
+  - 0.0041
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: numeric-range-v1
+    overrides:
+      min: 0.0
+      max: 1000000000000.0
+    notes: typed and bounded
+  introduced_in: telemetry-registry-v4
+- id: defenseclaw.cost.reported_usd
+  type: double
+  brief: "Per-call cost the provider or agent reported"
+  examples:
+  - 0.0042
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: numeric-range-v1
+    overrides:
+      min: 0.0
+      max: 1000000000000.0
+    notes: typed and bounded
+  introduced_in: telemetry-registry-v4
+- id: defenseclaw.model.total_ms
+  type: double
+  brief: "Total model call duration in milliseconds"
+  examples:
+  - 812.5
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: numeric-range-v1
+    overrides:
+      min: 0.0
+      max: 1000000000000.0
+    notes: typed and bounded
+  introduced_in: telemetry-registry-v4
+- id: defenseclaw.usage.source
+  type: string
+  brief: "Where the token counts came from: provider, stream_final, header or native_otel"
+  examples:
+  - "provider"
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: bounded-v1
+    notes: typed and bounded
+  introduced_in: telemetry-registry-v4
+- id: defenseclaw.usage.partial
+  type: string
+  brief: "Billing feature the flat price table cannot price, when present"
+  examples:
+  - "service_tier:priority"
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: bounded-v1
+    notes: typed and bounded
+  introduced_in: telemetry-registry-v4
+- id: defenseclaw.api.family
+  type: string
+  brief: "Wire API of the model call: chat, messages, responses, converse, invoke, gemini, ollama or other"
+  examples:
+  - "messages"
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: bounded-v1
+    notes: typed and bounded
+  introduced_in: telemetry-registry-v4
+- id: defenseclaw.call.role
+  type: string
+  brief: "Who made the model call: agent, judge, decision_model, ai_defense or router_classifier"
+  examples:
+  - "agent"
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: bounded-v1
+    notes: typed and bounded
+  introduced_in: telemetry-registry-v4
+- id: defenseclaw.route.decision
+  type: string
+  brief: "Routing outcome: applied, fallback, denied, none or passthrough"
+  examples:
+  - "applied"
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: bounded-v1
+    notes: typed and bounded
+  introduced_in: telemetry-registry-v4
+- id: defenseclaw.route.source
+  type: string
+  brief: "What picked the route: rules, systemone, vllm_sr, profile_default or admin_default"
+  examples:
+  - "rules"
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: bounded-v1
+    notes: typed and bounded
+  introduced_in: telemetry-registry-v4
+- id: defenseclaw.route.category
+  type: string
+  brief: "Bounded classifier label for the route"
+  examples:
+  - "coding"
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: bounded-v1
+    notes: typed and bounded
+  introduced_in: telemetry-registry-v4
+- id: defenseclaw.route.rule_id
+  type: string
+  brief: "Routing rule that picked the model"
+  examples:
+  - "cheap-coding"
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: bounded-v1
+    notes: typed and bounded
+  introduced_in: telemetry-registry-v4
+- id: defenseclaw.route.filtered_by
+  type: string
+  brief: "What narrowed the routing choices: sensitive, unknown_alias, policy, api, capability, credential or endpoint; any other filter is reported as other"
+  examples:
+  - "sensitive"
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: bounded-v1
+    notes: typed and bounded
+  introduced_in: telemetry-registry-v4
+- id: defenseclaw.route.listener
+  type: string
+  brief: "Which listener decided the route: guardrail or route_only"
+  examples:
+  - "route_only"
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: bounded-v1
+    notes: typed and bounded
+  introduced_in: telemetry-registry-v4
+- id: defenseclaw.route.deny_reason
+  type: string
+  brief: "Closed class of a routing refusal: budget_exceeded, budget_unavailable, budget_cost_unknown, budget_downgrade_unavailable, rule_deny, identity_unconfirmed, routing_admin_denied, routing_sensitive_local_unavailable or other"
+  examples:
+  - "budget_exceeded"
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: bounded-v1
+    notes: typed and bounded
+  introduced_in: telemetry-registry-v4
+- id: defenseclaw.route.fallback_reason
+  type: string
+  brief: "Closed failure code of a call that fell back to the original request: timeout, upstream_status, decode_failure, unknown_alias, credential_failure, configuration_failure, filtered, breaker_open, low_confidence or no_candidate"
+  examples:
+  - "upstream_status"
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: bounded-v1
+    notes: typed and bounded
+  introduced_in: telemetry-registry-v4
+- id: defenseclaw.cost.baseline_usd
+  type: double
+  brief: "What the same tokens would have cost on the model the client asked for, in USD; absent when that model has no price or the call has no known cost"
+  examples:
+  - 0.0125
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: numeric-range-v1
+    overrides:
+      min: 0.0
+      max: 1000000000000.0
+    notes: typed and bounded
+  introduced_in: telemetry-registry-v4
+- id: defenseclaw.budget.id
+  type: string
+  brief: "Administrator-chosen id of a routing budget (never its subject, user or group)"
+  examples:
+  - "eng-monthly"
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: bounded-v1
+    notes: typed and bounded
+  introduced_in: telemetry-registry-v4
+- id: defenseclaw.budget.scope
+  type: string
+  brief: "Scope of a routing budget: user, group or connector"
+  examples:
+  - "user"
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: bounded-v1
+    notes: typed and bounded
+  introduced_in: telemetry-registry-v4
+- id: defenseclaw.budget.period
+  type: string
+  brief: "Window of a routing budget: day, week or month"
+  examples:
+  - "month"
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: bounded-v1
+    notes: typed and bounded
+  introduced_in: telemetry-registry-v4
+- id: defenseclaw.provider.requested
+  type: string
+  brief: "Provider the client asked for before routing"
+  examples:
+  - "anthropic"
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: bounded-v1
+    notes: typed and bounded
+  introduced_in: telemetry-registry-v4
+- id: defenseclaw.cost.basis
+  type: string
+  brief: "How the cost was obtained: computed, reported or none"
+  examples:
+  - "computed"
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: bounded-v1
+    notes: typed and bounded
+  introduced_in: telemetry-registry-v4
+- id: defenseclaw.cost.price_entry
+  type: string
+  brief: "Price table entry that priced the call"
+  examples:
+  - "anthropic/claude-haiku-4-5*"
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: bounded-v1
+    notes: typed and bounded
+  introduced_in: telemetry-registry-v4
+- id: defenseclaw.pricing.version
+  type: string
+  brief: "Version of the price table in config.yaml"
+  examples:
+  - "2026-11-12.1"
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: bounded-v1
+    notes: typed and bounded
+  introduced_in: telemetry-registry-v4
+- id: defenseclaw.pricing.digest
+  type: string
+  brief: "sha256 of the canonical price table in config.yaml"
+  examples:
+  - "9f2c0d1e"
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: bounded-v1
+    notes: typed and bounded
+  introduced_in: telemetry-registry-v4
+- id: defenseclaw.usage.token_kind
+  type: string
+  brief: "Disjoint token kind on defenseclaw.model.tokens: input, cache_read, cache_creation, output or reasoning"
+  examples:
+  - "input"
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: bounded-v1
+    notes: typed and bounded
+  introduced_in: telemetry-registry-v4
+- id: defenseclaw.model.selected
+  type: string
+  brief: "Model the call was routed to (the requested model is gen_ai.request.model)"
+  examples:
+  - "claude-haiku-4-5"
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: high
+  normalization:
+    id: identifier-v1
+    notes: typed and bounded
+  introduced_in: telemetry-registry-v4
 - id: defenseclaw.tool.provider
   type: string
   brief: Tool provider class
@@ -2835,6 +3281,68 @@ groups:
   - ref: defenseclaw.telemetry.tokens.reported
     requirement_level: recommended
   body_fields: []
+- id: usage.model
+  type: attribute_group
+  brief: Per-call model usage, routing provenance and cost. Identity joins stay on correlation.identity; groups never appear here.
+  stability: stable
+  introduced_in: telemetry-registry-v4
+  extends: []
+  attributes:
+  - ref: defenseclaw.usage.cache_read_tokens
+    requirement_level: recommended
+  - ref: defenseclaw.usage.cache_creation_tokens
+    requirement_level: recommended
+  - ref: defenseclaw.usage.reasoning_tokens
+    requirement_level: recommended
+  - ref: defenseclaw.usage.source
+    requirement_level: recommended
+  - ref: defenseclaw.usage.partial
+    requirement_level: recommended
+  - ref: defenseclaw.api.family
+    requirement_level: recommended
+  - ref: defenseclaw.call.role
+    requirement_level: recommended
+  - ref: defenseclaw.model.selected
+    requirement_level: recommended
+  - ref: defenseclaw.provider.requested
+    requirement_level: recommended
+  - ref: defenseclaw.route.decision
+    requirement_level: recommended
+  - ref: defenseclaw.route.source
+    requirement_level: recommended
+  - ref: defenseclaw.route.category
+    requirement_level: recommended
+  - ref: defenseclaw.route.rule_id
+    requirement_level: recommended
+  - ref: defenseclaw.route.filtered_by
+    requirement_level: recommended
+  - ref: defenseclaw.route.listener
+    requirement_level: recommended
+  - ref: defenseclaw.route.fallback_reason
+    requirement_level: recommended
+  - ref: defenseclaw.guardrail.profile.name
+    requirement_level: recommended
+  - ref: defenseclaw.guardrail.profile.digest
+    requirement_level: recommended
+  - ref: defenseclaw.cost.usd
+    requirement_level: recommended
+  - ref: defenseclaw.cost.basis
+    requirement_level: recommended
+  - ref: defenseclaw.cost.baseline_usd
+    requirement_level: recommended
+  - ref: defenseclaw.cost.computed_usd
+    requirement_level: recommended
+  - ref: defenseclaw.cost.reported_usd
+    requirement_level: recommended
+  - ref: defenseclaw.cost.price_entry
+    requirement_level: recommended
+  - ref: defenseclaw.pricing.version
+    requirement_level: recommended
+  - ref: defenseclaw.pricing.digest
+    requirement_level: recommended
+  - ref: defenseclaw.model.total_ms
+    requirement_level: recommended
+  body_fields: []
 - id: genai.tool
   type: attribute_group
   brief: Pinned tool operation/call fields and safe execution metadata.
@@ -2941,6 +3449,20 @@ groups:
     requirement_level: required
   - ref: defenseclaw.telemetry.tokens.reported
     requirement_level: required
+- id: body.model.usage
+  type: body_group
+  brief: Model usage body with tokens, routing provenance and cost, and no prompt or response content.
+  stability: stable
+  introduced_in: telemetry-registry-v4
+  extends:
+  - correlation.interaction
+  - correlation.agent
+  - genai.model
+  - usage.model
+  - correlation.identity
+  - correlation.sandbox
+  attributes: []
+  body_fields: []
 - id: body.tool.activity
   type: body_group
   brief: Tool activity body with projected arguments and result.
@@ -3158,6 +3680,7 @@ groups:
   - content.output
   - error.core
   - genai.model
+  - usage.model
   - security.guardrail.outcome
   attributes:
   - ref: gen_ai.request.model
@@ -3476,6 +3999,30 @@ groups:
     legacy_bindings:
     - source: internal/observability/event_registry.go
       disposition: preserved
+- id: log.model.usage
+  type: log
+  brief: Canonical model.usage log identity.
+  stability: stable
+  introduced_in: telemetry-registry-v4
+  extends:
+  - body.model.usage
+  attributes: []
+  body_fields: []
+  log:
+    event_name: model.usage
+  x-defenseclaw:
+    bucket: model.io
+    family_schema_version: 1
+    outcome_requirement: required
+    allowed_outcomes:
+    - cancelled
+    - completed
+    - failed
+    route_selector: true
+    mandatory_floor: []
+    compatibility_profiles:
+    - local-observability-v1
+    legacy_bindings: []
 - id: log.tool.invocation.blocked
   type: log
   brief: Canonical tool.invocation.blocked log identity.
@@ -4350,6 +4897,423 @@ groups:
       details:
         prometheus_projection: local-observability-v1
         missing_values: never fabricated
+- id: metric.defenseclaw.model.cost
+  type: metric
+  brief: "USD cost of model calls; calls with no known cost add nothing"
+  stability: stable
+  introduced_in: telemetry-registry-v4
+  extends: []
+  attributes:
+  - ref: defenseclaw.connector.source
+    requirement_level: recommended
+  - ref: gen_ai.provider.name
+    requirement_level: recommended
+  - ref: defenseclaw.cost.price_entry
+    requirement_level: recommended
+  - ref: defenseclaw.route.decision
+    requirement_level: recommended
+  - ref: defenseclaw.call.role
+    requirement_level: recommended
+  - ref: defenseclaw.guardrail.profile.name
+    requirement_level: recommended
+  body_fields: []
+  metric:
+    instrument_name: defenseclaw.model.cost
+    instrument_type: counter
+    value_type: double
+    unit: "USD"
+    description: "USD cost of model calls; calls with no known cost add nothing"
+    temporality: delta
+    label_projections:
+    - profile: local-observability-v1
+      mappings:
+      - ref: defenseclaw.connector.source
+        label: connector
+      - ref: gen_ai.provider.name
+        label: provider
+      - ref: defenseclaw.cost.price_entry
+        label: model
+      - ref: defenseclaw.route.decision
+        label: route_decision
+      - ref: defenseclaw.call.role
+        label: call_role
+      - ref: defenseclaw.guardrail.profile.name
+        label: profile
+  x-defenseclaw:
+    bucket: model.io
+    family_schema_version: 1
+    route_selector: true
+    compatibility_profiles:
+    - local-observability-v1
+    legacy_bindings: []
+- id: metric.defenseclaw.model.tokens
+  type: metric
+  brief: "Disjoint token counts of model calls by kind (input uncached, cache_read, cache_creation, output without reasoning, reasoning)"
+  stability: stable
+  introduced_in: telemetry-registry-v4
+  extends: []
+  attributes:
+  - ref: defenseclaw.connector.source
+    requirement_level: recommended
+  - ref: gen_ai.provider.name
+    requirement_level: recommended
+  - ref: defenseclaw.cost.price_entry
+    requirement_level: recommended
+  - ref: defenseclaw.route.decision
+    requirement_level: recommended
+  - ref: defenseclaw.call.role
+    requirement_level: recommended
+  - ref: defenseclaw.guardrail.profile.name
+    requirement_level: recommended
+  - ref: defenseclaw.usage.token_kind
+    requirement_level: recommended
+  body_fields: []
+  metric:
+    instrument_name: defenseclaw.model.tokens
+    instrument_type: counter
+    value_type: int64
+    unit: "{token}"
+    description: "Disjoint token counts of model calls by kind (input uncached, cache_read, cache_creation, output without reasoning, reasoning)"
+    temporality: delta
+    label_projections:
+    - profile: local-observability-v1
+      mappings:
+      - ref: defenseclaw.connector.source
+        label: connector
+      - ref: gen_ai.provider.name
+        label: provider
+      - ref: defenseclaw.cost.price_entry
+        label: model
+      - ref: defenseclaw.route.decision
+        label: route_decision
+      - ref: defenseclaw.call.role
+        label: call_role
+      - ref: defenseclaw.guardrail.profile.name
+        label: profile
+      - ref: defenseclaw.usage.token_kind
+        label: kind
+  x-defenseclaw:
+    bucket: model.io
+    family_schema_version: 1
+    route_selector: true
+    compatibility_profiles:
+    - local-observability-v1
+    legacy_bindings: []
+- id: metric.defenseclaw.tokenomics.dropped
+  type: metric
+  brief: "Usage records lost before they were counted: the bounded queue was full, or the local store reached its bucket or row cap"
+  stability: stable
+  introduced_in: telemetry-registry-v4
+  extends: []
+  attributes:
+  body_fields: []
+  metric:
+    instrument_name: defenseclaw.tokenomics.dropped
+    instrument_type: counter
+    value_type: int64
+    unit: "{record}"
+    description: "Usage records lost before they were counted: the bounded queue was full, or the local store reached its bucket or row cap"
+    temporality: delta
+    empty_labels_reason: The counter has no instrument-specific attributes; OTel resource attributes may still be attached by the provider.
+  x-defenseclaw:
+    bucket: model.io
+    family_schema_version: 1
+    route_selector: true
+    compatibility_profiles:
+    - local-observability-v1
+    legacy_bindings: []
+- id: metric.defenseclaw.model.cost.baseline
+  type: metric
+  brief: "USD the same calls would have cost on the model the client asked for; a call is counted only when both that price and its own cost are known"
+  stability: stable
+  introduced_in: telemetry-registry-v4
+  extends: []
+  attributes:
+  - ref: defenseclaw.connector.source
+    requirement_level: recommended
+  - ref: gen_ai.provider.name
+    requirement_level: recommended
+  - ref: defenseclaw.cost.price_entry
+    requirement_level: recommended
+  - ref: defenseclaw.route.decision
+    requirement_level: recommended
+  - ref: defenseclaw.call.role
+    requirement_level: recommended
+  - ref: defenseclaw.guardrail.profile.name
+    requirement_level: recommended
+  body_fields: []
+  metric:
+    instrument_name: defenseclaw.model.cost.baseline
+    instrument_type: counter
+    value_type: double
+    unit: "USD"
+    description: "USD the same calls would have cost on the model the client asked for; a call is counted only when both that price and its own cost are known"
+    temporality: delta
+    label_projections:
+    - profile: local-observability-v1
+      mappings:
+      - ref: defenseclaw.connector.source
+        label: connector
+      - ref: gen_ai.provider.name
+        label: provider
+      - ref: defenseclaw.cost.price_entry
+        label: model
+      - ref: defenseclaw.route.decision
+        label: route_decision
+      - ref: defenseclaw.call.role
+        label: call_role
+      - ref: defenseclaw.guardrail.profile.name
+        label: profile
+  x-defenseclaw:
+    bucket: model.io
+    family_schema_version: 1
+    route_selector: true
+    compatibility_profiles:
+    - local-observability-v1
+    legacy_bindings: []
+- id: metric.defenseclaw.model.cost.compared
+  type: metric
+  brief: "USD actually spent on the calls that also count in defenseclaw.model.cost.baseline, so the two compare like for like"
+  stability: stable
+  introduced_in: telemetry-registry-v4
+  extends: []
+  attributes:
+  - ref: defenseclaw.connector.source
+    requirement_level: recommended
+  - ref: gen_ai.provider.name
+    requirement_level: recommended
+  - ref: defenseclaw.cost.price_entry
+    requirement_level: recommended
+  - ref: defenseclaw.route.decision
+    requirement_level: recommended
+  - ref: defenseclaw.call.role
+    requirement_level: recommended
+  - ref: defenseclaw.guardrail.profile.name
+    requirement_level: recommended
+  body_fields: []
+  metric:
+    instrument_name: defenseclaw.model.cost.compared
+    instrument_type: counter
+    value_type: double
+    unit: "USD"
+    description: "USD actually spent on the calls that also count in defenseclaw.model.cost.baseline, so the two compare like for like"
+    temporality: delta
+    label_projections:
+    - profile: local-observability-v1
+      mappings:
+      - ref: defenseclaw.connector.source
+        label: connector
+      - ref: gen_ai.provider.name
+        label: provider
+      - ref: defenseclaw.cost.price_entry
+        label: model
+      - ref: defenseclaw.route.decision
+        label: route_decision
+      - ref: defenseclaw.call.role
+        label: call_role
+      - ref: defenseclaw.guardrail.profile.name
+        label: profile
+  x-defenseclaw:
+    bucket: model.io
+    family_schema_version: 1
+    route_selector: true
+    compatibility_profiles:
+    - local-observability-v1
+    legacy_bindings: []
+- id: metric.defenseclaw.budget.limit
+  type: metric
+  brief: "Limit of one routing budget in USD"
+  stability: stable
+  introduced_in: telemetry-registry-v4
+  extends: []
+  attributes:
+  - ref: defenseclaw.budget.id
+    requirement_level: recommended
+  - ref: defenseclaw.budget.scope
+    requirement_level: recommended
+  - ref: defenseclaw.budget.period
+    requirement_level: recommended
+  body_fields: []
+  metric:
+    instrument_name: defenseclaw.budget.limit
+    instrument_type: gauge
+    value_type: double
+    unit: "USD"
+    description: "Limit of one routing budget in USD"
+    temporality: unspecified
+    label_projections:
+    - profile: local-observability-v1
+      mappings:
+      - ref: defenseclaw.budget.id
+        label: budget_id
+      - ref: defenseclaw.budget.scope
+        label: scope
+      - ref: defenseclaw.budget.period
+        label: period
+  x-defenseclaw:
+    bucket: model.io
+    family_schema_version: 1
+    route_selector: true
+    compatibility_profiles:
+    - local-observability-v1
+    legacy_bindings: []
+- id: metric.defenseclaw.budget.spend
+  type: metric
+  brief: "Spend of one routing budget in the current window (every subject added); absent while the budget spend is still loading"
+  stability: stable
+  introduced_in: telemetry-registry-v4
+  extends: []
+  attributes:
+  - ref: defenseclaw.budget.id
+    requirement_level: recommended
+  - ref: defenseclaw.budget.scope
+    requirement_level: recommended
+  - ref: defenseclaw.budget.period
+    requirement_level: recommended
+  body_fields: []
+  metric:
+    instrument_name: defenseclaw.budget.spend
+    instrument_type: gauge
+    value_type: double
+    unit: "USD"
+    description: "Spend of one routing budget in the current window (every subject added); absent while the budget spend is still loading"
+    temporality: unspecified
+    label_projections:
+    - profile: local-observability-v1
+      mappings:
+      - ref: defenseclaw.budget.id
+        label: budget_id
+      - ref: defenseclaw.budget.scope
+        label: scope
+      - ref: defenseclaw.budget.period
+        label: period
+  x-defenseclaw:
+    bucket: model.io
+    family_schema_version: 1
+    route_selector: true
+    compatibility_profiles:
+    - local-observability-v1
+    legacy_bindings: []
+- id: metric.defenseclaw.budget.peak_subject_spend
+  type: metric
+  brief: "Highest single-subject spend of one routing budget in the current window"
+  stability: stable
+  introduced_in: telemetry-registry-v4
+  extends: []
+  attributes:
+  - ref: defenseclaw.budget.id
+    requirement_level: recommended
+  - ref: defenseclaw.budget.scope
+    requirement_level: recommended
+  - ref: defenseclaw.budget.period
+    requirement_level: recommended
+  body_fields: []
+  metric:
+    instrument_name: defenseclaw.budget.peak_subject_spend
+    instrument_type: gauge
+    value_type: double
+    unit: "USD"
+    description: "Highest single-subject spend of one routing budget in the current window"
+    temporality: unspecified
+    label_projections:
+    - profile: local-observability-v1
+      mappings:
+      - ref: defenseclaw.budget.id
+        label: budget_id
+      - ref: defenseclaw.budget.scope
+        label: scope
+      - ref: defenseclaw.budget.period
+        label: period
+  x-defenseclaw:
+    bucket: model.io
+    family_schema_version: 1
+    route_selector: true
+    compatibility_profiles:
+    - local-observability-v1
+    legacy_bindings: []
+- id: metric.defenseclaw.budget.subjects_exceeded
+  type: metric
+  brief: "Subjects of one routing budget at or over its limit in the current window"
+  stability: stable
+  introduced_in: telemetry-registry-v4
+  extends: []
+  attributes:
+  - ref: defenseclaw.budget.id
+    requirement_level: recommended
+  - ref: defenseclaw.budget.scope
+    requirement_level: recommended
+  - ref: defenseclaw.budget.period
+    requirement_level: recommended
+  body_fields: []
+  metric:
+    instrument_name: defenseclaw.budget.subjects_exceeded
+    instrument_type: gauge
+    value_type: int64
+    unit: "{subject}"
+    description: "Subjects of one routing budget at or over its limit in the current window"
+    temporality: unspecified
+    label_projections:
+    - profile: local-observability-v1
+      mappings:
+      - ref: defenseclaw.budget.id
+        label: budget_id
+      - ref: defenseclaw.budget.scope
+        label: scope
+      - ref: defenseclaw.budget.period
+        label: period
+  x-defenseclaw:
+    bucket: model.io
+    family_schema_version: 1
+    route_selector: true
+    compatibility_profiles:
+    - local-observability-v1
+    legacy_bindings: []
+- id: metric.defenseclaw.budget.store.sync_age
+  type: metric
+  brief: "Seconds since this device last read the fleet budget store"
+  stability: stable
+  introduced_in: telemetry-registry-v4
+  extends: []
+  attributes:
+  body_fields: []
+  metric:
+    instrument_name: defenseclaw.budget.store.sync_age
+    instrument_type: gauge
+    value_type: double
+    unit: "s"
+    description: "Seconds since this device last read the fleet budget store"
+    temporality: unspecified
+    empty_labels_reason: The instrument has no instrument-specific attributes; OTel resource attributes may still be attached by the provider.
+  x-defenseclaw:
+    bucket: model.io
+    family_schema_version: 1
+    route_selector: true
+    compatibility_profiles:
+    - local-observability-v1
+    legacy_bindings: []
+- id: metric.defenseclaw.budget.store.healthy
+  type: metric
+  brief: "1 when the last sync with the fleet budget store worked, 0 when it or the last push failed"
+  stability: stable
+  introduced_in: telemetry-registry-v4
+  extends: []
+  attributes:
+  body_fields: []
+  metric:
+    instrument_name: defenseclaw.budget.store.healthy
+    instrument_type: gauge
+    value_type: int64
+    unit: "{state}"
+    description: "1 when the last sync with the fleet budget store worked, 0 when it or the last push failed"
+    temporality: unspecified
+    empty_labels_reason: The instrument has no instrument-specific attributes; OTel resource attributes may still be attached by the provider.
+  x-defenseclaw:
+    bucket: model.io
+    family_schema_version: 1
+    route_selector: true
+    compatibility_profiles:
+    - local-observability-v1
+    legacy_bindings: []
 - id: metric.defenseclaw.codex.notify
   type: metric
   brief: Codex notify events received via the notify-bridge shim, labelled by type/status
@@ -4674,7 +5638,7 @@ groups:
       disposition: preserved
 - id: metric.defenseclaw.semantic_routing.decision
   type: metric
-  brief: Per-request semantic routing decision (result=applied|fallback, error.code=closed failure class, decision=override|default)
+  brief: Per-request semantic routing decision (result=applied|fallback|denied, error.code=closed failure class, decision=override|default, plus the route source, category, filter, listener, refusal class and budget id)
   stability: stable
   introduced_in: telemetry-registry-v1
   extends: []
@@ -4685,13 +5649,27 @@ groups:
     requirement_level: recommended
   - ref: defenseclaw.metric.decision
     requirement_level: recommended
+  - ref: defenseclaw.connector.source
+    requirement_level: recommended
+  - ref: defenseclaw.route.source
+    requirement_level: recommended
+  - ref: defenseclaw.route.category
+    requirement_level: recommended
+  - ref: defenseclaw.route.filtered_by
+    requirement_level: recommended
+  - ref: defenseclaw.route.listener
+    requirement_level: recommended
+  - ref: defenseclaw.route.deny_reason
+    requirement_level: recommended
+  - ref: defenseclaw.budget.id
+    requirement_level: recommended
   body_fields: []
   metric:
     instrument_name: defenseclaw.semantic_routing.decision
     instrument_type: counter
     value_type: int64
     unit: '{decision}'
-    description: Per-request semantic routing decision (result=applied|fallback, error.code=closed failure class, decision=override|default)
+    description: Per-request semantic routing decision (result=applied|fallback|denied, error.code=closed failure class, decision=override|default, plus the route source, category, filter, listener, refusal class and budget id)
     temporality: delta
     label_projections:
     - profile: local-observability-v1
@@ -4702,6 +5680,20 @@ groups:
         label: error.code
       - ref: defenseclaw.metric.decision
         label: decision
+      - ref: defenseclaw.connector.source
+        label: connector
+      - ref: defenseclaw.route.source
+        label: route_source
+      - ref: defenseclaw.route.category
+        label: route_category
+      - ref: defenseclaw.route.filtered_by
+        label: filtered_by
+      - ref: defenseclaw.route.listener
+        label: listener
+      - ref: defenseclaw.route.deny_reason
+        label: deny_reason
+      - ref: defenseclaw.budget.id
+        label: budget_id
   x-defenseclaw:
     bucket: model.io
     family_schema_version: 1

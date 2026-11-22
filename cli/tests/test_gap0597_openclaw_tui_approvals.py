@@ -20,6 +20,8 @@ from defenseclaw.connector_contracts import OPENCLAW_APPROVAL_SURFACES, openclaw
 
 from tests.test_openclaw_setup_advisories import _setup, _with_plugin
 
+pytestmark = pytest.mark.usefixtures("openclaw_proxy_topology")
+
 
 @pytest.mark.parametrize(
     ("version", "shows"),

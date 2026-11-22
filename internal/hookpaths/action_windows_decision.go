@@ -9,6 +9,8 @@ import (
 	"strings"
 	"unicode/utf16"
 	"unicode/utf8"
+
+	"github.com/defenseclaw/defenseclaw/internal/psparse"
 )
 
 // Windows hooks can run a POSIX shell while reporting a native Windows home.
@@ -807,7 +809,7 @@ func actionWindowsStatement(words []string, cwd, home string, depth int) string 
 				if i+2 >= len(words) {
 					return "nested-shell"
 				}
-				encoded, err := base64.StdEncoding.DecodeString(words[i+2])
+				encoded, err := base64.StdEncoding.DecodeString(psparse.HostBase64(words[i+2])) // GAP-1197
 				if err != nil || len(encoded)%2 != 0 || len(encoded) == 0 {
 					return "nested-shell"
 				}

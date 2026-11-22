@@ -23,6 +23,7 @@ type parseOutput struct {
 	dialect          Dialect
 	issues           []IssueCode
 	commands         []CommandFact
+	credentialWords  []credentialPathWord
 	paths            []PathFact
 	network          []NetworkFact
 	dataFlows        []DataFlowFact
@@ -36,6 +37,15 @@ type parseOutput struct {
 	shortCircuitLists map[*syntax.Stmt]int64
 	// POSIX exec redirects may persist a literal descriptor for later commands.
 	posixOpenFDs map[int64]string
+	// unread is ParseResult.Unread: markUnread sets it.
+	unread bool
+	// windowsDescriptorCopy records an exact N>&1 in a Windows parse, which
+	// keeps a pipeline partial (windowsValidatePipelineAuthority).
+	windowsDescriptorCopy bool
+	// windowsHookHost is Input.WindowsHookHost of the reading of the call
+	// itself: a POSIX shell on a Windows hook host (Git Bash, the Claude Code
+	// Bash tool) runs the native sc.exe (rel-1-0-10:GAP-1656).
+	windowsHookHost bool
 }
 
 func newParseOutput(dialect Dialect, startID int64) parseOutput {
@@ -75,6 +85,14 @@ func (o *parseOutput) markPartial(code IssueCode) {
 		o.status = StatusPartial
 	}
 	o.addIssue(code)
+}
+
+// markUnread is markPartial for text the reader skipped without reading it
+// (ParseResult.Unread). An operand grammar the reader does not model is
+// markPartial alone.
+func (o *parseOutput) markUnread(code IssueCode) {
+	o.markPartial(code)
+	o.unread = true
 }
 
 func (o *parseOutput) markUnsupported(code IssueCode) {
@@ -186,6 +204,7 @@ func (o *parseOutput) merge(other parseOutput) {
 	for _, issue := range other.issues {
 		o.addIssue(issue)
 	}
+	o.unread = o.unread || other.unread
 	for _, command := range other.commands {
 		if !o.appendCommand(command) {
 			break
@@ -195,6 +214,7 @@ func (o *parseOutput) merge(other parseOutput) {
 	for _, command := range o.commands {
 		validCommandIDs[command.ID] = struct{}{}
 	}
+	o.credentialWords = append(o.credentialWords, other.credentialWords...)
 	for _, fact := range other.paths {
 		if fact.CommandID != 0 {
 			if _, ok := validCommandIDs[fact.CommandID]; !ok {
@@ -304,22 +324,23 @@ func (o parseOutput) factsWithWindowsShellCWD(tool, cwd, activeHome string, wind
 	}
 	commands := cloneCommands(o.commands)
 	paths := cloneSlice(o.paths)
-	normalizePathFactsForCommandsInShell(paths, cwd, activeHome, commands, windowsShellCWD)
+	paths = normalizePathFactsForCommandsInShell(paths, cwd, activeHome, commands, windowsShellCWD)
 	reconcileNormalizedDeviceWrites(commands, paths)
 	network := cloneSlice(o.network)
 	normalizeNetworkFacts(network)
 	artifacts := cloneSlice(o.artifacts)
 	normalizeArtifactFactsForCommands(artifacts, cwd, activeHome, commands)
 	return Facts{
-		Tool:       tool,
-		CWD:        cwd,
-		ActiveHome: activeHome,
-		Parse:      ParseResult{Status: status, Dialect: dialect, Issues: cloneSlice(o.issues)},
-		Commands:   commands,
-		Paths:      paths,
-		Network:    network,
-		DataFlows:  cloneSlice(o.dataFlows),
-		Artifacts:  artifacts,
+		Tool:            tool,
+		CWD:             cwd,
+		ActiveHome:      activeHome,
+		Parse:           ParseResult{Status: status, Dialect: dialect, Issues: cloneSlice(o.issues), Unread: o.unread},
+		Commands:        commands,
+		Paths:           paths,
+		Network:         network,
+		DataFlows:       cloneSlice(o.dataFlows),
+		Artifacts:       artifacts,
+		credentialPaths: resolveCredentialPathReads(o.credentialWords, cwd, activeHome, commands, paths),
 	}
 }
 

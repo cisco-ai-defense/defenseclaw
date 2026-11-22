@@ -867,14 +867,14 @@ func TestPowerShellProviderDriveRejectionPreservesFilesystemPaths(t *testing.T) 
 func TestCanonicalWindowsFilesystemPathRejectsWin32Aliases(t *testing.T) {
 	t.Parallel()
 
+	// The trailing dots and spaces Win32 strips (the last name, one dot of a
+	// folder name) read as the file they open since rel-1-0-10:GAP-1075; see
+	// TestCanonicalWindowsFilesystemPathReadsWin32TrimmedNames. A space that
+	// ends a folder name and a share name are kept by Win32 and stay unknown.
 	for _, value := range []string{
-		`C:\safe\file.`,
-		`C:\safe\file `,
-		`C:\safe\directory.\file.txt`,
 		`C:\safe\directory \file.txt`,
 		`\\server\share.\file.txt`,
 		`\\server\share \file.txt`,
-		`Microsoft.PowerShell.Core\FileSystem::C:\safe\file.`,
 		`C:\safe\file.:stream`,
 		`C:\safe\file :stream`,
 		`C:\safe\NUL`,
@@ -905,6 +905,33 @@ func TestCanonicalWindowsFilesystemPathRejectsWin32Aliases(t *testing.T) {
 				)
 			}
 		})
+	}
+}
+
+// TestCanonicalWindowsFilesystemPathReadsWin32TrimmedNames: Win32 drops the
+// trailing dots and spaces of the last name and one trailing dot of a folder
+// name, so these spellings open the plain file and read as it
+// (rel-1-0-10:GAP-1075). Before, they minted no path fact at all, and a write
+// to a protected file through them was allowed in every tier.
+func TestCanonicalWindowsFilesystemPathReadsWin32TrimmedNames(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct{ value, want string }{
+		{`C:\safe\file.`, `C:\safe\file`},
+		{`C:\safe\file `, `C:\safe\file`},
+		{`C:\safe\directory.\file.txt`, `C:\safe\directory\file.txt`},
+		{`Microsoft.PowerShell.Core\FileSystem::C:\safe\file.`, `C:\safe\file`},
+	} {
+		canonical, ok := canonicalWindowsFilesystemPath(test.value)
+		if !ok || canonical != test.want {
+			t.Errorf(
+				"path %q canonicalized to (%q, %t), want %q",
+				test.value,
+				canonical,
+				ok,
+				test.want,
+			)
+		}
 	}
 }
 
@@ -1014,8 +1041,9 @@ func TestCanonicalWindowsFilesystemPathPreservesUnambiguousPaths(t *testing.T) {
 func TestAnalyzePowerShellWin32AliasesFailClosed(t *testing.T) {
 	t.Parallel()
 
+	// A trailing dot is no longer an alias here: Win32 strips it and the
+	// operand reads as the file itself (rel-1-0-10:GAP-1075, pinned below).
 	for _, value := range []string{
-		`C:\Windows\System32\drivers\etc\hosts.`,
 		`C:\Windows\System32\drivers\etc\NUL.txt`,
 	} {
 		value := value
@@ -1052,6 +1080,39 @@ func TestAnalyzePowerShellWin32AliasesFailClosed(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestAnalyzePowerShellTrailingDotReadsTheFile(t *testing.T) {
+	t.Parallel()
+
+	const hosts = `C:\Windows\System32\drivers\etc\hosts`
+	for _, input := range []Input{
+		{
+			Tool:        "powershell",
+			Command:     `Remove-Item -LiteralPath '` + hosts + `.'`,
+			DialectHint: DialectPowerShell,
+		},
+		{
+			Tool:        "powershell",
+			Argv:        []string{"Remove-Item", "-LiteralPath", hosts + "."},
+			DialectHint: DialectPowerShell,
+		},
+	} {
+		facts := Analyze(input)
+		if !hasWindowsPathFact(facts.Paths, hosts) {
+			t.Fatalf("trailing-dot spelling of %q did not read as the file: %#v", hosts, facts)
+		}
+	}
+}
+
+// hasWindowsPathFact reports whether a Windows path fact names want.
+func hasWindowsPathFact(paths []PathFact, want string) bool {
+	for _, path := range paths {
+		if path.Flavor == PathFlavorWindows && path.Value == want {
+			return true
+		}
+	}
+	return false
 }
 
 func TestActiveHomeTildeNormalizationPreservesRawSpelling(t *testing.T) {

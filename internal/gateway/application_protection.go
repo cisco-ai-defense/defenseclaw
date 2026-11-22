@@ -38,7 +38,6 @@ type applicationProtectionController struct {
 	apiToken  string
 	proxyAddr string
 	apiAddr   string
-	masterKey string
 	cache     *guardrail.RulePackCache
 
 	mu         sync.Mutex
@@ -83,14 +82,13 @@ type applicationProtectionSkippedRow struct {
 	LastSeen   string  `json:"last_seen,omitempty"`
 }
 
-func newApplicationProtectionController(s *Sidecar, registry *connector.Registry, apiToken, proxyAddr, apiAddr, masterKey string) *applicationProtectionController {
+func newApplicationProtectionController(s *Sidecar, registry *connector.Registry, apiToken, proxyAddr, apiAddr string) *applicationProtectionController {
 	c := &applicationProtectionController{
 		sidecar:    s,
 		registry:   registry,
 		apiToken:   apiToken,
 		proxyAddr:  proxyAddr,
 		apiAddr:    apiAddr,
-		masterKey:  masterKey,
 		cache:      guardrail.NewRulePackCache(),
 		activeAuto: map[string]applicationProtectionActiveRow{},
 		guards:     map[string]*HookConfigGuard{},
@@ -114,7 +112,7 @@ func newApplicationProtectionController(s *Sidecar, registry *connector.Registry
 	return c
 }
 
-func (c *applicationProtectionController) UpdateRuntime(registry *connector.Registry, apiToken, proxyAddr, apiAddr, masterKey string) {
+func (c *applicationProtectionController) UpdateRuntime(registry *connector.Registry, apiToken, proxyAddr, apiAddr string) {
 	if c == nil {
 		return
 	}
@@ -126,7 +124,6 @@ func (c *applicationProtectionController) UpdateRuntime(registry *connector.Regi
 	c.apiToken = apiToken
 	c.proxyAddr = proxyAddr
 	c.apiAddr = apiAddr
-	c.masterKey = masterKey
 }
 
 func (c *applicationProtectionController) OnDiscoveryReport(ctx context.Context, report inventory.AIDiscoveryReport) {
@@ -307,7 +304,7 @@ func (c *applicationProtectionController) ensureAutoConnectorLocked(ctx context.
 	if err != nil {
 		return err
 	}
-	if err := c.sidecar.setupOneConnector(ctx, conn, opts, c.masterKey, c.cache); err != nil {
+	if err := c.sidecar.setupOneConnector(ctx, conn, opts, c.cache); err != nil {
 		if !errors.Is(err, connector.ErrSetupRefusedUnchanged) {
 			recordAndRollbackFailedConnectorSetup(conn, opts, ctx)
 		}

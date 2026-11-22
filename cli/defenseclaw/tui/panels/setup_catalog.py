@@ -67,6 +67,7 @@ WIZARD_GROUPS: tuple[tuple[str, tuple[tuple[SetupWizard, str], ...]], ...] = (
             (SetupWizard.TRUSTED_PATHS, "Trusted agent binaries"),
             (SetupWizard.REGISTRIES, "Approved catalogs"),
             (SetupWizard.ACP_GUARD, "Editor agents (ACP)"),
+            (SetupWizard.SEMANTIC_ROUTING, "Semantic routing"),
             (SetupWizard.SANDBOX, "Sandboxes (OpenShell)"),
         ),
     ),
@@ -541,6 +542,10 @@ def task_status(
             return TaskStatus("attention", "catalog required")
         sources = [source for source in _items(cfg, "registries.sources") if _enabled(source)]
         return TaskStatus("ok", _plural(len(sources), "catalog")) if sources else TaskStatus("off", "none added")
+    if wizard == SetupWizard.SEMANTIC_ROUTING:
+        if not _flag(cfg, "routing.enabled"):
+            return TaskStatus("off")
+        return TaskStatus("ok", f"on · {_text(cfg, 'routing.classifier') or 'vllm_sr'}")
     if wizard == SetupWizard.ACP_GUARD:
         if not _flag(cfg, "acp.enabled"):
             return TaskStatus("off")
@@ -637,10 +642,11 @@ SECTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "Trusted Paths",
             "OpenShell Sandboxes",
             "Watch",
+            "Routing",
         ),
     ),
     ("Hooks (read-only)", ("Agent Hooks", "Connector Hooks")),
-    ("Observability", ("Observability", "Webhooks", "Notifications", "AI Discovery")),
+    ("Observability", ("Observability", "Tokenomics", "Webhooks", "Notifications", "AI Discovery")),
     # claw.mode is the single-agent setting from before connectors; on a
     # multi-connector install it read as "Which agent framework DefenseClaw
     # defends" (GAP-2253).

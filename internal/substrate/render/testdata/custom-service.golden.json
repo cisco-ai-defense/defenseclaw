@@ -1,0 +1,59 @@
+{
+  "policy": {
+    "rules": [
+      {
+        "http": {
+          "effects": {
+            "replaceHeaders": [
+              {
+                "actorJwt": {
+                  "audiences": [
+                    "dc-prod"
+                  ],
+                  "expirationSeconds": "300"
+                },
+                "header": "x-defenseclaw-actor",
+                "prefix": "Bearer "
+              }
+            ]
+          },
+          "hostnames": [
+            "dc-actor.security.svc.cluster.local"
+          ],
+          "ports": {
+            "numbers": [
+              8443
+            ]
+          }
+        }
+      },
+      {
+        "https": {
+          "hostnames": [
+            "*.cluster.local"
+          ],
+          "ports": {
+            "numbers": [
+              443
+            ]
+          }
+        }
+      }
+    ]
+  },
+  "dropped": [
+    {
+      "host": "*.svc.cluster.local",
+      "source": "allow",
+      "reason": "defenseclaw_internal",
+      "detail": "security.svc.cluster.local"
+    },
+    {
+      "host": "other.security.svc.cluster.local",
+      "source": "allow",
+      "reason": "defenseclaw_internal",
+      "detail": "security.svc.cluster.local"
+    }
+  ],
+  "bindings": null
+}

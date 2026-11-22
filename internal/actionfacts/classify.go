@@ -23,8 +23,11 @@ import (
 	"net/url"
 	"path"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/psparse"
 )
 
 var filesystemFormatterPrograms = []string{
@@ -289,7 +292,7 @@ func classifyCommand(out *parseOutput, command *CommandFact) {
 		command.Effect = EffectExecute
 	}
 	if command.Program == "" {
-		command.Program = commandProgram(command.Executable)
+		command.Program = commandProgramForDialect(command.Executable, command.Dialect)
 	}
 	parserClassified := len(command.Operations) > 0
 	program := command.Program
@@ -438,11 +441,14 @@ func classifyCommand(out *parseOutput, command *CommandFact) {
 				addOperation(command, OperationWrite)
 				out.markPartial(IssueUnknownOperandGrammar)
 			}
-		} else if command.Dialect == DialectCMD &&
+		} else if (command.Dialect == DialectCMD ||
+			command.Dialect == DialectPOSIX && out.windowsHookHost) &&
 			classifyEndpointSecurityControl(out, command) {
 			// Bare sc is accepted only for the exact WinDefend sequence owned by
-			// ExactEndpointSecurityProductDisable. Other CMD sc grammars remain
-			// deliberately non-authoritative.
+			// ExactEndpointSecurityProductDisable, in CMD and in a POSIX shell
+			// on a Windows host (Git Bash runs the native sc.exe,
+			// rel-1-0-10:GAP-1656). Other sc grammars remain deliberately
+			// non-authoritative.
 		} else {
 			out.markPartial(IssueUnknownOperandGrammar)
 		}
@@ -472,14 +478,14 @@ func classifyCommand(out *parseOutput, command *CommandFact) {
 		}
 	case "set-mppreference":
 		if !classifyExactWindowsSecurityControlMutation(command) {
-			_, disabled, ok := exactWindowsDefenderDisableSetting(
+			disabled, _, ok := exactWindowsDefenderDisableSettings(
 				windowsWordsFromArguments(command.Arguments[1:]),
 			)
 			if !ok {
 				out.markPartial(IssueUnknownOperandGrammar)
 			} else {
 				addOperation(command, OperationConfigChange)
-				if disabled {
+				if len(disabled) != 0 {
 					addOperation(command, OperationPolicyBypass)
 				}
 			}
@@ -749,6 +755,14 @@ func classifyCommand(out *parseOutput, command *CommandFact) {
 	case "nxc", "netexec", "crackmapexec", "john", "john.exe":
 		if _, ok := exactDirectoryCredentialCommand(*command); ok {
 			addOperation(command, OperationCredentialRead)
+		} else if ExactNetExecDomainServiceAuth(*command) {
+			// A complete, statically credentialed NetExec/CrackMapExec
+			// domain-service invocation (rel-1-0-10:GAP-0014). Keeping the
+			// parse authoritative lets the built-in HIGH
+			// credential.directory_ticket_request rule alert (default) or
+			// block (strict), and the opt-in active-directory-protection pack
+			// block it at CRITICAL.
+			addOperation(command, OperationCredentialRead)
 		} else {
 			out.markPartial(IssueUnknownOperandGrammar)
 		}
@@ -786,6 +800,16 @@ func classifyCommand(out *parseOutput, command *CommandFact) {
 		// Known command grammar; the parser or wrapper analysis owns any nested
 		// command source.
 	default:
+		if spec, ok := posixFileReaderSpecs[program]; ok && !spec.startsProgram {
+			// A standard program that reads the files named in its
+			// arguments, like cat and head (the table is the whole list). A
+			// Windows or PowerShell program of the same name (sort.exe,
+			// Sort-Object) has another grammar.
+			if requireCommandDialect(out, command, DialectPOSIX, DialectArgv) {
+				classifyPOSIXFileReader(out, command, spec)
+			}
+			break
+		}
 		classifyUnknownOutputOperand(out, command)
 		if posixVersionedPythonProgram(program) {
 			classifyPOSIXStdinScriptInterpreter(out, command)
@@ -808,6 +832,13 @@ func classifyCommand(out *parseOutput, command *CommandFact) {
 		out.markPartial(IssueUnknownOperandGrammar)
 	}
 
+	if spec, ok := posixFileReaderSpecs[program]; ok && spec.startsProgram &&
+		(command.Dialect == DialectPOSIX || command.Dialect == DialectArgv) {
+		// xargs -a FILE reads its input items from FILE. The program it runs
+		// is read on its own words (classifyEmbeddedPrograms), so the parse
+		// stays as partial as it was.
+		classifyPOSIXFileReader(out, command, spec)
+	}
 	classifyRedirects(out, command)
 }
 
@@ -951,6 +982,9 @@ func commandProgram(executable string) string {
 }
 
 func commandProgramForDialect(executable string, dialect Dialect) string {
+	if family, ok := netExecProgramFamily(executable); ok {
+		return family
+	}
 	if program, ok := windowsScriptProgram(executable, dialect); ok {
 		return program
 	}
@@ -1689,7 +1723,7 @@ func classifyStructuredPowerShellNewItem(
 		if controls.consume(command, arg) {
 			continue
 		}
-		if arg == "" || arg == "-" || !strings.HasPrefix(arg, "-") {
+		if arg == "" || arg == "-" || !powerShellDashLed(arg) {
 			if !structuredPowerShellStaticOperand(arg) {
 				targetValid = false
 				structuredPowerShellMarkDynamicEffect(command, arg)
@@ -1827,39 +1861,27 @@ func structuredPowerShellBooleanValue(value string) (bool, bool) {
 	}
 }
 
+// canonicalPowerShellNewItemParameter binds a New-Item parameter key (a
+// dash word without a colon part) as PowerShell binds it, through the shared
+// table psparse.NewItemParameters: a name or alias in any case, a prefix of
+// one parameter only, any dash form (rel-1-0-10:GAP-0849). The result is the
+// canonical name with a hyphen. A key that binds to no parameter or to more
+// than one is returned in lower case, so it falls to the reader's
+// unknown-parameter case.
 func canonicalPowerShellNewItemParameter(key string) string {
-	switch strings.ToLower(key) {
-	case "-type":
-		return "-itemtype"
-	case "-target":
-		return "-value"
-	case "-ea":
-		return "-erroraction"
-	case "-ev":
-		return "-errorvariable"
-	case "-infa":
-		return "-informationaction"
-	case "-iv":
-		return "-informationvariable"
-	case "-ob":
-		return "-outbuffer"
-	case "-ov":
-		return "-outvariable"
-	case "-pv":
-		return "-pipelinevariable"
-	case "-proga":
-		return "-progressaction"
-	case "-wa":
-		return "-warningaction"
-	case "-wv":
-		return "-warningvariable"
-	case "-db":
-		return "-debug"
-	case "-vb":
-		return "-verbose"
-	default:
-		return strings.ToLower(key)
+	if name, _, colon, ok := psparse.ParameterWord(key); ok && !colon {
+		if binding, known := psparse.NewItemParameters.Bind(name); known {
+			return "-" + binding.Name
+		}
 	}
+	return strings.ToLower(key)
+}
+
+// powerShellDashLed reports a word PowerShell may read as a parameter: a
+// hyphen first, or an en dash, em dash or horizontal bar before a name.
+func powerShellDashLed(word string) bool {
+	_, _, _, ok := psparse.ParameterWord(word)
+	return ok || strings.HasPrefix(word, "-")
 }
 
 func powerShellNewItemCommonValueAuthoritative(
@@ -3028,7 +3050,21 @@ func classifyPatternSearchPaths(
 }
 
 func searchOperands(argv []string, program string) []string {
-	var operands []string
+	indexes := searchOperandIndexes(argv, program)
+	if len(indexes) == 0 {
+		return nil
+	}
+	operands := make([]string, 0, len(indexes))
+	for _, index := range indexes {
+		operands = append(operands, argv[index])
+	}
+	return operands
+}
+
+// searchOperandIndexes is searchOperands as argv indexes (the pattern, when
+// no option gives it, first).
+func searchOperandIndexes(argv []string, program string) []int {
+	var operands []int
 	options := true
 	for i := 1; i < len(argv); i++ {
 		arg := argv[i]
@@ -3042,7 +3078,7 @@ func searchOperands(argv []string, program string) []string {
 			}
 			continue
 		}
-		operands = append(operands, arg)
+		operands = append(operands, i)
 	}
 	return operands
 }
@@ -3741,10 +3777,25 @@ func classifyPOSIXInstall(out *parseOutput, command *CommandFact) {
 	destination := parsed.positionals[len(parsed.positionals)-1]
 	addOperation(command, OperationCopy)
 	appendCommandPath(out, command, PathAccessWrite, destination)
-	if hasMode && dangerousInstallMode(mode) {
+	if hasMode && (dangerousInstallMode(mode) ||
+		ModeOpensRead(mode) && slices.ContainsFunc(parsed.positionals[:len(parsed.positionals)-1], credentialFileValue)) {
+		// A copy of a credentials file installed group or world readable
+		// widens who reads the credential (rel-1-0-10:GAP-0950).
 		addOperation(command, OperationPermissionChange)
 		appendCommandPath(out, command, PathAccessMetadata, destination)
 	}
+}
+
+// ModeOpensRead reports a literal numeric mode (three or four octal digits)
+// that lets the group or other users read the file.
+func ModeOpensRead(mode string) bool {
+	parsed, err := strconv.ParseUint(mode, 8, 16)
+	return err == nil && (len(mode) == 3 || len(mode) == 4) && parsed&0o044 != 0
+}
+
+func credentialFileValue(value string) bool {
+	_, ok := MatchCredentialFileShape(value)
+	return ok
 }
 
 // classifyRsync records the local destination of rsync (the last operand)
@@ -3756,8 +3807,69 @@ func classifyRsync(out *parseOutput, command *CommandFact) {
 	if !requireCommandDialect(out, command, DialectPOSIX, DialectArgv) {
 		return
 	}
-	parsed := parseOwnedPOSIXOptions(
-		command.Argv,
+	parsed := parseRsyncOptions(command.Argv)
+	if parsed.preview {
+		command.Effect = EffectPreview
+		return
+	}
+	if !parsed.complete {
+		out.markPartial(IssueUnknownOperandGrammar)
+	}
+	if len(parsed.positionals) < 2 {
+		out.markPartial(IssueUnknownOperandGrammar)
+		return
+	}
+	_, removeSources := parsed.seen["--remove-source-files"]
+	addOperation(command, OperationCopy)
+	for _, source := range parsed.positionals[:len(parsed.positionals)-1] {
+		if rsyncRemoteOperand(source) {
+			continue
+		}
+		appendCommandPath(out, command, PathAccessRead, source)
+		if removeSources {
+			addOperation(command, OperationDelete)
+			appendCommandPath(out, command, PathAccessDelete, source)
+		}
+	}
+	destination := parsed.positionals[len(parsed.positionals)-1]
+	if !rsyncRemoteOperand(destination) {
+		appendCommandPath(out, command, PathAccessWrite, destination)
+		return
+	}
+	// A remote destination with local sources sends their contents to that
+	// host, as scp does (classifySCP): the shared sender reader and the
+	// upload rules read it as an upload (GAP-0595). A remote source as well
+	// is a transfer between hosts, not read here.
+	host, ok := rsyncRemoteHost(destination)
+	if !ok {
+		return
+	}
+	for _, source := range parsed.positionals[:len(parsed.positionals)-1] {
+		if rsyncRemoteOperand(source) {
+			return
+		}
+	}
+	addOperation(command, OperationConnect)
+	addOperation(command, OperationUpload)
+	scheme := "ssh"
+	if strings.HasPrefix(destination, "rsync://") || strings.Contains(destination, "::") {
+		scheme = "rsync"
+	}
+	out.appendNetwork(NetworkFact{
+		CommandID: command.ID,
+		Action:    NetworkUpload,
+		Scheme:    scheme,
+		Host:      strings.ToLower(host),
+	})
+	out.appendDataFlow(DataFlowFact{ToCommandID: command.ID, From: DataFile, To: DataProcess})
+	out.appendDataFlow(DataFlowFact{FromCommandID: command.ID, From: DataProcess, To: DataNetwork})
+}
+
+// parseRsyncOptions reads an rsync argv (the program word first) with the
+// option grammar classifyRsync owns.
+func parseRsyncOptions(argv []string) ownedPOSIXOptionParse {
+	return parseOwnedPOSIXOptions(
+		argv,
 		exactOptionSet(
 			"-e", "--rsh", "-f", "--filter", "-T", "--temp-dir", "-B", "--block-size",
 			"--rsync-path", "--exclude", "--include", "--exclude-from", "--include-from",
@@ -3787,32 +3899,50 @@ func classifyRsync(out *parseOutput, command *CommandFact) {
 		),
 		exactOptionSet("--help", "--version", "-n", "--dry-run", "--list-only"),
 	)
-	if parsed.preview {
-		command.Effect = EffectPreview
-		return
-	}
-	if !parsed.complete {
-		out.markPartial(IssueUnknownOperandGrammar)
-	}
-	if len(parsed.positionals) < 2 {
-		out.markPartial(IssueUnknownOperandGrammar)
-		return
-	}
-	_, removeSources := parsed.seen["--remove-source-files"]
-	addOperation(command, OperationCopy)
-	for _, source := range parsed.positionals[:len(parsed.positionals)-1] {
-		if rsyncRemoteOperand(source) {
-			continue
+}
+
+// RsyncPreview reports an rsync argv (the program word first) that is a dry
+// run or a listing (-n, --dry-run, --list-only) with every option one the
+// rsync grammar knows: it writes nothing. A call wrapped in sudo keeps the
+// wrapper as its command fact, so the gateway reads the wrapped rsync with
+// this (rel-1-0-10:GAP-0104: sudo rsync -anrc --delete x/ ~/.defenseclaw/hooks/).
+// An unknown option (--no-dry-run turns the preview off again) is no preview.
+func RsyncPreview(argv []string) bool {
+	parsed := parseRsyncOptions(argv)
+	return parsed.preview && parsed.complete
+}
+
+// rsyncRemoteHost is the host of a remote rsync operand: [user@]host:path,
+// [user@]host::module or rsync://[user@]host[:port]/module.
+func rsyncRemoteHost(operand string) (string, bool) {
+	if rest, ok := strings.CutPrefix(operand, "rsync://"); ok {
+		if slash := strings.IndexByte(rest, '/'); slash >= 0 {
+			rest = rest[:slash]
 		}
-		appendCommandPath(out, command, PathAccessRead, source)
-		if removeSources {
-			addOperation(command, OperationDelete)
-			appendCommandPath(out, command, PathAccessDelete, source)
+		if at := strings.LastIndex(rest, "@"); at >= 0 {
+			rest = rest[at+1:]
 		}
+		if colon := strings.LastIndexByte(rest, ':'); colon >= 0 && !strings.Contains(rest, "]") {
+			rest = rest[:colon]
+		}
+		rest = strings.Trim(rest, "[]")
+		if !validNetworkHost(rest) {
+			return "", false
+		}
+		return rest, true
 	}
-	if destination := parsed.positionals[len(parsed.positionals)-1]; !rsyncRemoteOperand(destination) {
-		appendCommandPath(out, command, PathAccessWrite, destination)
+	colon := strings.IndexByte(operand, ':')
+	if colon <= 0 {
+		return "", false
 	}
+	host := operand[:colon]
+	if at := strings.LastIndex(host, "@"); at >= 0 {
+		host = host[at+1:]
+	}
+	if !validNetworkHost(host) {
+		return "", false
+	}
+	return host, true
 }
 
 // rsyncRemoteOperand reports host:path, host::module and rsync:// operands.
@@ -8332,6 +8462,38 @@ func classifyDD(out *parseOutput, command *CommandFact) {
 			addOperation(command, OperationDiskWrite)
 		}
 	}
+	if ddExpandingOutput(command) {
+		addOperation(command, OperationWrite)
+	}
+}
+
+// ddExpandingOutput reports a dd operand that expands (a variable, a command
+// substitution, a glob) and is, or may be, its output: of=$X, of=k[0-9], or a
+// word whose static text shows no key ("$ARGS"). The argv keeps such a word
+// as "", so the values above never see it, and the call has no other write.
+// A reader of the effects model (the hookpaths write operand walk) would read
+// dd as a reader of if= alone and skip the operand that writes. A word whose
+// static key is another one (if=$X, bs=$N) is not an output (rel-1-0-10:
+// GAP-1296; the GAP-0379 attached dd rows).
+func ddExpandingOutput(command *CommandFact) bool {
+	if len(command.Arguments) != len(command.Argv) {
+		for _, arg := range command.Argv[1:] {
+			if arg == "" {
+				return true // a word the parser could not keep: it may be of=
+			}
+		}
+		return false
+	}
+	for _, argument := range command.Arguments[1:] {
+		if !argument.Expands {
+			continue
+		}
+		key, _, keyed := strings.Cut(argument.staticPrefix, "=")
+		if !keyed || key == "of" {
+			return true
+		}
+	}
+	return false
 }
 
 func classifyPOSIXFilesystemFormat(
@@ -8797,10 +8959,13 @@ func windowsDriveRoot(value string) bool {
 }
 
 type nsenterInvocation struct {
-	paths      []string
-	childIndex int
-	preview    bool
-	complete   bool
+	paths         []string
+	childIndex    int
+	childKnown    bool
+	workDir       string
+	folderUnknown bool
+	preview       bool
+	complete      bool
 }
 
 func parseNSEnterInvocation(argv []string) nsenterInvocation {
@@ -8837,6 +9002,11 @@ func parseNSEnterInvocation(argv []string) nsenterInvocation {
 			continue
 		case "-F", "--no-fork":
 			continue
+		case "-w", "--wd", "-r", "--root":
+			// With no attached value, nsenter inherits the target process's
+			// folder or root, which the caller cannot place locally.
+			result.folderUnknown = true
+			continue
 		case "-t", "--target":
 			if i+1 >= len(argv) || argv[i+1] == "" {
 				result.complete = false
@@ -8857,6 +9027,24 @@ func parseNSEnterInvocation(argv []string) nsenterInvocation {
 			} else {
 				target = value
 			}
+			continue
+		}
+		if strings.HasPrefix(arg, "--wd=") {
+			result.workDir = strings.TrimPrefix(arg, "--wd=")
+			if !staticAbsolutePOSIXPath(result.workDir) {
+				result.folderUnknown = true
+			}
+			continue
+		}
+		if strings.HasPrefix(arg, "-w") && len(arg) > 2 {
+			result.workDir = arg[2:]
+			if !staticAbsolutePOSIXPath(result.workDir) {
+				result.folderUnknown = true
+			}
+			continue
+		}
+		if strings.HasPrefix(arg, "--root=") || strings.HasPrefix(arg, "-r") && len(arg) > 2 {
+			result.folderUnknown = true
 			continue
 		}
 		if strings.HasPrefix(arg, "-t") && len(arg) > 2 {
@@ -8922,6 +9110,10 @@ func parseNSEnterInvocation(argv []string) nsenterInvocation {
 			"/proc/"+canonicalTarget+"/ns/"+selection.name,
 		)
 	}
+	// Even without a namespace selector, the option grammar can identify the
+	// child command. The facts stay partial, while readers of its shell body
+	// can still hand that body to the ordinary checks.
+	result.childKnown = result.complete && result.childIndex > 0 && !result.preview
 	if len(selections) == 0 && !result.preview {
 		result.complete = false
 	}

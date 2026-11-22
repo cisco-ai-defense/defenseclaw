@@ -51,6 +51,9 @@ type Generation struct {
 	RulePacks map[string]*guardrail.RulePack
 	Profiles  *guardrailProfileSet
 	OPA       *policy.Prepared
+	// CascadePolicy is the prepared guardrail.cascade.policy module, nil
+	// when the policy is off.
+	CascadePolicy *policy.CascadePolicy
 	// Admission is keyed by config.AdmissionType* (skill, mcp, plugin, tool).
 	Admission   map[string]policy.CompiledAdmission
 	AssetPolicy *config.AssetPolicyConfig
@@ -170,4 +173,7 @@ type PolicyHealth struct {
 	// gateway restart.
 	PendingRestart []string `json:"pending_restart,omitempty"`
 	ComponentCount int      `json:"component_count"`
+	// CascadeInvalid is the message of an invalid guardrail.cascade and the
+	// fallback in effect.
+	CascadeInvalid string `json:"cascade_invalid,omitempty"`
 }

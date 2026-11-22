@@ -462,9 +462,12 @@ def status(app: AppContext, as_json: bool) -> None:
             for label, val in (
                 ("Total scans", counts.total_scans),
                 ("Active alerts", counts.alerts),
+                ("Unread calls", counts.unread_calls),
             ):
                 if val is None:
                     val = ux.dim("not counted (too many audit events to count quickly; list them: defenseclaw alerts)")
+                elif label == "Unread calls" and val:
+                    val = f"{val} " + ux.dim("(ACTION-PARSE-FAILURE: tool calls read only in part)")
                 ux.echo(f"    {_label((label + ':').ljust(16))} {val}")
         else:
             ux.echo(f"    {ux._style('unavailable', fg='yellow')} {ux.dim(f'(audit DB error: {db_error})')}")
@@ -519,6 +522,7 @@ def status(app: AppContext, as_json: bool) -> None:
                 ux._style("running", fg="green") + ux.dim(_sidecar_running_detail(health, bind, cfg.gateway.api_port)),
             )
         _print_policy(health)
+        _print_hook_capacity(health)
         _print_watch_root_coverage(health)
         _print_audit_log_health(cfg, health)
         _print_retention_cap_warning(health)
@@ -529,7 +533,8 @@ def status(app: AppContext, as_json: bool) -> None:
         _print_application_protection(cfg, health=health)
         _print_semantic_routing(cfg, health=health)
         _print_llm_judge(health, cfg)
-        _print_decision_model(cfg)
+        _print_decision_model(cfg, health)
+        _print_alignment_lane(cfg)
         _print_hook_guardian(cfg)
         _print_fleet_health(cfg, _fleet_status_client(client, health))
         hint(
@@ -941,6 +946,41 @@ def _guardrail_turned_off(gc) -> bool:
     return getattr(gc, "enabled", True) is False
 
 
+def _print_openclaw_install_admission(cfg, platform: str | None = None) -> None:
+    """The "OpenClaw installs" row for an OpenClaw whose install_policy is on."""
+    from defenseclaw.openclaw_plugin_config import (
+        openclaw_install_policy_recorded_state,
+        openclaw_install_policy_stale_version,
+        openclaw_install_policy_state,
+    )
+
+    if openclaw_install_policy_state(cfg) == "ours":
+        stale, certain = openclaw_install_policy_stale_version(cfg, platform)
+        if stale:
+            # Not certain: the Windows ACL rule is the gateway's to settle
+            # (GAP-1198).
+            checked = "not checked" if certain else "may not be checked"
+            _status_row(
+                "OpenClaw installs",
+                ux._style(f"OpenClaw version changed; {checked} (defenseclaw doctor)", fg="yellow"),
+            )
+        else:
+            _status_row("OpenClaw installs", "checked by DefenseClaw before OpenClaw installs them")
+        return
+    recorded = openclaw_install_policy_recorded_state(cfg)
+    _status_row(
+        "OpenClaw installs",
+        ux._style(
+            (
+                recorded.split(":", 2)[1].strip()[:60] + "... (defenseclaw doctor)"
+                if recorded.startswith("not registered:")
+                else "not registered (run defenseclaw doctor)"
+            ),
+            fg="yellow",
+        ),
+    )
+
+
 def _print_agents(
     cfg,
     *,
@@ -1008,6 +1048,7 @@ def _print_agents(
     gc = getattr(cfg, "guardrail", None)
     agent_missing = {c for c in actives if _agent_missing(cfg, c, health_map.get(c))}
     desktop_engine = _claude_desktop_engine_version(cfg) if "claudecode" in actives else ""
+    hermes_plugins = _hermes_shipped_plugins_note(cfg) if "hermes" in actives else ""
     # ``guardrail.enabled: false`` (``setup guardrail --disable``, or the
     # default ``uninstall``) makes the gateway tear every hook connector
     # down, so none of them enforces (GAP-1312). The OpenClaw row reports the
@@ -1076,6 +1117,20 @@ def _print_agents(
                 ux.warn(f"{issue}. Fix the syntax error in openclaw.json (OpenClaw reads JSON5).")
             else:
                 ux.warn(f"{issue}; OpenClaw may skip reload. Run defenseclaw setup openclaw.")
+        else:
+            from defenseclaw.openclaw_plugin_config import openclaw_plugin_evidence
+
+            hook_mode, hook_detail, _seen = openclaw_plugin_evidence(cfg, None if sidecar_down else health)
+            _status_row("OpenClaw hooks", f"{hook_mode} ({hook_detail})")
+            from defenseclaw.openclaw_plugin_config import (
+                openclaw_install_policy_wanted,
+                openclaw_operator_admin_off,
+            )
+
+            if openclaw_operator_admin_off():
+                _status_row("OpenClaw remediation", "off (no operator.admin)")
+            if openclaw_install_policy_wanted(cfg):
+                _print_openclaw_install_admission(cfg)
     if guardrail_off:
         ux.echo(" " * 16 + ux.dim("Turn protection back on: defenseclaw setup guardrail"))
     if sidecar_down and enabled_count and not sidecar_unread and not sidecar_unchecked:
@@ -1098,6 +1153,7 @@ def _print_agents(
         fail_mode = _effective_status_fail_mode(cfg, conn)
         fail_mode_note = f" ({fail_mode['note']})" if fail_mode.get("note") else ""
         fail_mode_suffix = f" fail-mode={fail_mode['effective']}{fail_mode_note} provenance={fail_mode['provenance']}"
+        fail_mode_suffix += _status_failure_outcomes_suffix(fail_mode)
         friendly = _friendly_connector_name(conn)
         disclosure = _cursor_priority_conflict_disclosure(conn)
         disclosure_suffix = f" {disclosure}" if disclosure else ""
@@ -1200,6 +1256,15 @@ def _print_agents(
                     f"                {dim_text}{degraded}",
                     18,
                 )
+    if hermes_plugins:
+        _echo_wrapped(" " * 16 + ux._style(hermes_plugins, fg="yellow"), 18)
+    # A connector with no tool-result block form says so (GAP-0605).
+    from defenseclaw.commands.cmd_doctor import tool_result_injection_limit
+
+    for conn in actives:
+        limit = tool_result_injection_limit(conn) if _is_enabled(conn) else ""
+        if limit:
+            _echo_wrapped(" " * 16 + ux.dim(f"{limit}: the output reaches the model; see defenseclaw alerts"), 16)
 
 
 class _PublicForegroundHealth(dict):
@@ -1263,6 +1328,11 @@ def _fetch_runtime_bound_health(client, cfg) -> dict | None:
     if isinstance(policy, dict):
         # The effective policy the gateway applied, for the Policy row.
         health = {**health, "policy": policy}
+    capacity = document.get("hook_capacity")
+    if isinstance(capacity, dict):
+        # The hook load of the last hour (S8 DESIGN 18): only the
+        # authenticated /status of a per-user gateway carries it.
+        health = {**health, "hook_capacity": capacity}
     # The verified runtime PID, for the Sidecar row (GAP-1789).
     return {**health, "pid": trust.pid} if "pid" not in health else health
 
@@ -1346,6 +1416,75 @@ def _policy_status(health: dict | None) -> dict | None:
         "last_reload_error": policy_reload_rejection(policy),
         "opa_unavailable": policy.get("opa_unavailable") or "",
     }
+
+
+def _hook_capacity_status(health: dict | None) -> dict | None:
+    """The hook capacity window of the gateway (S8 DESIGN 18), or None.
+
+    Counts of the last hour: tool calls answered in time, and the ones that
+    ran out of their answer budget (deadline denies, late allows) or were
+    refused by the admission limits (shed). It comes from the authenticated
+    /status, or the /health a managed gateway gives an administrator. Absent
+    on older gateways, on Secure Client and for an ordinary account of a
+    managed host.
+    """
+    capacity = (health or {}).get("hook_capacity")
+    if not isinstance(capacity, dict):
+        return None
+    window = capacity.get("window") if isinstance(capacity.get("window"), dict) else {}
+
+    def count(key: str) -> int:
+        value = window.get(key)
+        return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
+
+    minutes = capacity.get("window_minutes")
+    return {
+        "window_minutes": minutes if isinstance(minutes, int) and not isinstance(minutes, bool) else 60,
+        "answered": count("answered"),
+        "deadline_denies": count("deadline_denies"),
+        "late_allows": count("late_allows"),
+        "shed": count("shed"),
+        "sizing_doc": str(capacity.get("sizing_doc") or "")[:200],
+    }
+
+
+def _hook_capacity_shed_clause(shed: int) -> str:
+    """The clause of the calls the admission limits refused (status and doctor).
+
+    A refused call whose hook resent it and got in ran with a policy answer,
+    so the clause says the count is of calls refused at least once and names
+    the block only for a call no resend got in (GAP-0742 N1).
+    """
+    return (
+        f"{shed} call(s) refused by the admission limits at least once; "
+        "a call no resend got in is blocked when its budget ends"
+    )
+
+
+def _hook_capacity_clauses(denies: int, late: int, shed: int) -> list[str]:
+    """What the window holds, one clause per kind (doctor shares the shed clause)."""
+    clauses = []
+    if denies + late:
+        clauses.append(f"{denies} denied and {late} unchecked tool call(s) ran out of their answer budget")
+    if shed:
+        clauses.append(_hook_capacity_shed_clause(shed))
+    return clauses
+
+
+def _print_hook_capacity(health: dict | None) -> None:
+    """One row only when a call ran out of its answer budget or was refused in the window."""
+    capacity = _hook_capacity_status(health)
+    if capacity is None:
+        return
+    clauses = _hook_capacity_clauses(capacity["deadline_denies"], capacity["late_allows"], capacity["shed"])
+    if not clauses:
+        return
+    minutes, answered = capacity["window_minutes"], capacity["answered"]
+    value = (
+        f"over capacity in the last {minutes} min: " + "; and ".join(clauses) + f" ({answered} answered in time); "
+        "not a policy result, see defenseclaw doctor"
+    )
+    _status_row("Hook capacity", ux._style(value, fg="yellow"))
 
 
 def _print_policy(health: dict | None) -> None:
@@ -1444,6 +1583,15 @@ def _effective_status_mode(cfg, connector: str, source: str = "manual") -> str:
         except Exception:
             return ""
     return ""
+
+
+def _status_failure_outcomes_suffix(fail_mode: dict) -> str:
+    """What each kind of hook failure does, after fail-mode= (#1441), or ""."""
+
+    from defenseclaw.fail_mode import failure_outcomes_summary
+
+    summary = failure_outcomes_summary(fail_mode.get("on_failure"))
+    return f" on-failure=({summary})" if summary else ""
 
 
 def _effective_status_fail_mode(cfg, connector: str) -> dict:
@@ -1680,6 +1828,28 @@ def _agent_missing(cfg, connector: str, live: dict | None = None) -> bool:
         )
     except Exception:  # noqa: BLE001 - status must survive incomplete evidence.
         return False
+
+
+def _hermes_shipped_plugins_note(cfg) -> str:
+    """A note when the gateway cannot recognize the shipped plugins of the installed Hermes, or "".
+
+    Reads the version the last agent discovery recorded; nothing is run
+    (rel-1-0-10:GAP-0765).
+    """
+    try:
+        from defenseclaw.hermes_vendor_plugins import COVERED, shipped_plugin_coverage
+        from defenseclaw.inventory import agent_discovery
+
+        disc = agent_discovery._read_cache(data_dir=str(getattr(cfg, "data_dir", "") or "") or None)
+        signal = disc.agents.get("hermes") if disc is not None else None
+        if signal is None or not signal.installed:
+            return ""
+        coverage = shipped_plugin_coverage(signal.version)
+    except Exception:  # noqa: BLE001 - the note is optional.
+        return ""
+    if coverage.state in ("", COVERED):
+        return ""
+    return f"Hermes shipped plugins: {coverage.detail}; {coverage.step}"
 
 
 def _claude_desktop_engine_version(cfg) -> str:
@@ -1922,6 +2092,22 @@ def _semantic_routing_status(cfg, health: dict | None = None) -> dict:
     return state
 
 
+def _route_only_status(cfg, health: dict | None = None) -> list[dict]:
+    """One state per route-only connector: the doctor rows without the agent
+    config and signing detail rows (S1 DESIGN 7.4)."""
+    from defenseclaw.doctor_route_only import route_only_rows
+
+    try:
+        rows = route_only_rows(cfg, health, profile=_enterprise_profile(cfg))
+    except Exception:
+        return []
+    listed = (getattr(cfg.routing, "route_only", None) or {}).get("connectors") or []
+    keep = {f"Route-only {c}" for c in listed} | {"Route-only", "Route-only API port"}
+    return [
+        {"label": row.label, "tag": row.tag, "detail": row.detail, "fix": row.fix} for row in rows if row.label in keep
+    ]
+
+
 def _print_semantic_routing(cfg, health: dict | None = None) -> None:
     state = _semantic_routing_status(cfg, health=health)
     if not state["configured"]:
@@ -1931,6 +2117,9 @@ def _print_semantic_routing(cfg, health: dict | None = None) -> None:
     color = "green" if runtime == "running" else "yellow"
     value = f"{state['mode']} — {runtime}; {state['model_count']} model(s)"
     _status_row("Model routing", ux._style(value, fg=color))
+    for row in _route_only_status(cfg, health):
+        row_color = {"pass": "green", "fail": "red"}.get(row["tag"], "yellow")
+        _status_row(row["label"], ux._style(row["detail"], fg=row_color))
 
 
 def _print_audit_log_health(cfg, health: dict | None) -> None:
@@ -2042,17 +2231,58 @@ def _print_judge_fallbacks(details: dict, cfg=None) -> None:
         _status_row("Judge fallbacks", ux._style(summary + ("; " + hint if hint else ""), fg="yellow"))
 
 
-def _print_decision_model(cfg) -> None:
+def _print_alignment_lane(cfg) -> None:
+    """``Alignment check`` row while guardrail.cascade.lanes.alignment is not
+    off (the lane is opt-in; nothing is printed while it is off)."""
+    from defenseclaw import cascade
+
+    mode = cascade.alignment_mode(cfg)
+    if mode.startswith("off") and "scopes" not in mode:
+        return
+    _status_row("Alignment check", mode)
+
+
+def decision_model_health_note(health: dict | None) -> str:
+    """Plain words for the gateway's recent decision-model calls when some
+    failed (guardrail decision_model_* details), or "". A dead endpoint fails
+    open, so it showed nowhere but the gateway log (GAP-0604)."""
+    guardrail = health.get("guardrail") if isinstance(health, dict) else None
+    details = guardrail.get("details") if isinstance(guardrail, dict) else None
+    if not isinstance(details, dict):
+        return ""
+    state = details.get("decision_model_state")
+    if state not in ("failing", "degraded"):
+        return ""
+    total = details.get("decision_model_recent_calls", 0)
+    if state == "failing":
+        note = (
+            f"failing: all of its last {total} call(s) failed, so tool calls are decided without it "
+            "(the LLM judge where it runs, else the rules)"
+        )
+    else:
+        note = f"degraded: {details.get('decision_model_failed_calls', 0)} of its last {total} call(s) failed"
+    last_error = str(details.get("decision_model_last_error") or "").strip()
+    if last_error:
+        note += f"; last error: {last_error}"
+    return note
+
+
+def _print_decision_model(cfg, health: dict | None = None) -> None:
     """One row naming the tool-call cascade per active connector, while the
-    decision model is on (rules only / rules -> decision model / ... -> LLM judge)."""
+    decision model is on (rules only / rules -> decision model / ... -> LLM judge),
+    and whether its recent calls in the gateway failed."""
     from defenseclaw import decision_model as dmod
 
     dm = getattr(cfg, "decision_model", None)
     if dm is None or not dm.active():
         return
-    lines = dmod.cascade_lines(cfg)
-    if lines:
-        _status_row("Decision model", "; ".join(lines))
+    value = "; ".join(dmod.cascade_lines(cfg))
+    note = decision_model_health_note(health)
+    if note:
+        problem = ux._style(note + "; run 'defenseclaw doctor'", fg="yellow")
+        value = f"{value}; {problem}" if value else problem
+    if value:
+        _status_row("Decision model", value)
 
 
 def _print_llm_judge(health: dict | None, cfg=None) -> None:
@@ -2523,6 +2753,7 @@ def _status_payload(app) -> dict:
             payload["activity"] = {
                 "total_scans": counts.total_scans,
                 "active_alerts": counts.alerts,
+                "unread_calls": counts.unread_calls,
             }
     else:
         payload["enforcement"] = None
@@ -2609,6 +2840,8 @@ def _status_payload(app) -> dict:
             payload["audit_store_cap_warning"] = warning
     if (policy := _policy_status(health)) is not None:
         payload["policy"] = policy
+    if (capacity := _hook_capacity_status(health)) is not None:
+        payload["hook_capacity"] = capacity
     payload["connectors"] = _connector_roster(cfg, health=health)
     if any(row.get("name") == "openclaw" and row.get("enabled") for row in payload["connectors"]):
         from defenseclaw.openclaw_plugin_config import configured_openclaw_plugin_config_issue
@@ -2623,6 +2856,7 @@ def _status_payload(app) -> dict:
         payload["cowork"] = cowork_row.as_dict()
     payload["application_protection"] = _application_protection_status(cfg, health=health)
     payload["semantic_routing"] = _semantic_routing_status(cfg, health=health)
+    payload["semantic_routing"]["route_only"] = _route_only_status(cfg, health)
     payload["hook_guardian"] = _hook_guardian_status(cfg)
     payload["fleet"] = _fleet_health_payload(cfg, _fleet_status_client(client, health))
     payload["native_otlp_delivery"] = _native_delivery_summary(cfg).as_json()

@@ -360,6 +360,9 @@ func (a *APIServer) sandboxVerdictWithReason(
 	// The verb follows what the harness does: a block DefenseClaw cannot
 	// enforce on this event (a tool result) is flagged, not blocked.
 	plain := sandboxVerdictReason(ctx, connectorName, action, resp.RuleIDs, findings)
+	if action == "block" {
+		plain = withUnclearedReadNote(plain, resp.Reason)
+	}
 	return a.renderSandboxVerdict(ctx, profile, req, rawBody, payload, resp, plain)
 }
 
@@ -370,6 +373,16 @@ func (a *APIServer) sandboxVerdictWithReason(
 // the user would look for a rule that is not there.
 const sandboxInternalErrorReason = "DefenseClaw hit an internal error while checking this call and blocked it. " +
 	"Retry the call; if this keeps happening, ask the user to run defenseclaw sandbox doctor."
+
+// sandboxAuditFailureReason is the plain reason of a sandbox hook that failed
+// closed because the call's audit record could not be written: the gateway's
+// audit store is full or failing (GAP-0402). It is no policy block and no
+// failed check of the call, so it names the store instead of the generic
+// internal error, and the operator knows where to look.
+const sandboxAuditFailureReason = "DefenseClaw blocked this call because it could not write the call's audit record: " +
+	"the DefenseClaw gateway's audit store is full or failing. This is not a policy decision. " +
+	"Retry later; if this keeps happening, ask your administrator to check the gateway's audit store " +
+	"(gateway log: \"ALERT audit_store_full\" when it is full, \"hook audit persistence failed\" otherwise)."
 
 // failSandboxHookClosed turns the response of a sandbox hook whose
 // evaluation or finalization panicked into a block with
@@ -386,6 +399,22 @@ func (a *APIServer) failSandboxHookClosed(
 	rawBody []byte,
 	payload map[string]interface{},
 	resp agentHookResponse,
+) agentHookResponse {
+	return a.failSandboxHookClosedFor(ctx, profile, connectorName, req, rawBody, payload, resp, sandboxInternalErrorReason)
+}
+
+// failSandboxHookClosedFor is failSandboxHookClosed with the plain reason
+// the agent reads: sandboxInternalErrorReason for a failed check,
+// sandboxAuditFailureReason for an audit record that could not be written.
+func (a *APIServer) failSandboxHookClosedFor(
+	ctx context.Context,
+	profile connector.HookProfile,
+	connectorName string,
+	req agentHookRequest,
+	rawBody []byte,
+	payload map[string]interface{},
+	resp agentHookResponse,
+	reason string,
 ) (out agentHookResponse) {
 	if !sandboxHookForConnector(ctx, connectorName) {
 		return resp
@@ -400,12 +429,12 @@ func (a *APIServer) failSandboxHookClosed(
 			// The callback-free render keeps the native denial: a bare
 			// block reaches some agents as an allow.
 			out = resp
-			out.Reason = sandboxInternalErrorReason
-			out.HookOutput = nativeFallbackOutput(profile, connectorName, req, "block", sandboxInternalErrorReason)
+			out.Reason = reason
+			out.HookOutput = nativeFallbackOutput(profile, connectorName, req, "block", reason)
 			a.handleHookPanic(ctx, connectorName, req.HookEventName, fmt.Sprintf("sandbox fail-closed render panic: %v", r))
 		}
 	}()
-	return a.renderSandboxVerdict(ctx, profile, req, rawBody, payload, resp, sandboxInternalErrorReason)
+	return a.renderSandboxVerdict(ctx, profile, req, rawBody, payload, resp, reason)
 }
 
 // renderSandboxVerdict gives a sandbox verdict its plain reason and

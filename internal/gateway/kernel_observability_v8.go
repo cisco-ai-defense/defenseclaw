@@ -237,11 +237,24 @@ func runtimeLoginID(value string) observability.Optional[string] {
 	return observability.Present(value)
 }
 
+// runtimeUserName is defenseclaw.user.name for a runtime record: the account
+// name as recorded when it fits the syntax of the field, else its bare
+// account. A Windows host-plane root is owned by DOMAIN\name, whose backslash
+// the field refuses, and passing it through failed the whole record on every
+// poll (GAP-1141). A name that fits in neither form is dropped, not the
+// record.
+func runtimeUserName(name string) observability.Optional[string] {
+	if recorded := observability.OptionalUserName(name); recorded.IsPresent() {
+		return recorded
+	}
+	return observability.OptionalUserName(useridentity.BareAccountName(name))
+}
+
 func (adapter *aiRuntimeV8Adapter) identityFields(identity runtimeIdentity) runtimeIdentityFields {
 	fields := runtimeIdentityFields{
 		UserID:          aiDiscoveryV8OptionalText(identity.UserID),
 		IDKind:          v8UserIDKind(discoveryUserIDKind(identity.UserID)),
-		UserName:        aiDiscoveryV8OptionalText(identity.UserName),
+		UserName:        runtimeUserName(identity.UserName),
 		LoginID:         runtimeLoginID(identity.LoginID),
 		AgentIdentityID: agentIdentityV8(identity.AgentIdentityID),
 	}

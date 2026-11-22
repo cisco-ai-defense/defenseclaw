@@ -144,7 +144,9 @@ func TestCaseFoldingHostNestedCredentialFileIsJudgedInEveryLetterCase(t *testing
 // letter case, is an ordinary file: it and its link are allowed. That includes
 // a copy of the AWS credentials file (credentials.bak) in the default and
 // permissive tiers; the strict tier keeps such a copy protected, and the
-// credentials file itself is protected in every tier (the test above).
+// credentials file itself is protected in every tier (the test above). A
+// template or sample (credentials.sample, credentials.example) is not a copy:
+// it is allowed in every tier (rel-1-0-6:GAP-1009, substrate-1:GAP-0210).
 func TestCaseFoldingHostLinkToAnOrdinaryNeighbourOfACredentialFileIsAllowed(t *testing.T) {
 	withPathCaseFoldHost(t, true)
 	for _, profile := range []string{"default", "permissive", "strict"} {
@@ -153,6 +155,7 @@ func TestCaseFoldingHostLinkToAnOrdinaryNeighbourOfACredentialFileIsAllowed(t *t
 		for _, relative := range []string{
 			"Users/fixture/.netrc.bak", "users/fixture/.NETRC.old", "Users/fixture/.git-credentials.bak",
 			"USERS/fixture/notes.txt", "Users/fixture/.awsnotes", "Users/fixture/.aws/config.sample",
+			"users/fixture/.AWS/Credentials.Sample", "Users/fixture/.aws/credentials.example",
 		} {
 			root := t.TempDir()
 			project := filepath.Join(root, "project")
@@ -164,7 +167,7 @@ func TestCaseFoldingHostLinkToAnOrdinaryNeighbourOfACredentialFileIsAllowed(t *t
 			}
 		}
 		for _, relative := range []string{
-			"Users/fixture/.aws/credentials.bak", "users/fixture/.AWS/Credentials.Sample", "Users/fixture/.aws/credentials.old",
+			"Users/fixture/.aws/credentials.bak", "users/fixture/.AWS/Credentials.Bak", "Users/fixture/.aws/credentials.old",
 		} {
 			root := t.TempDir()
 			project := filepath.Join(root, "project")

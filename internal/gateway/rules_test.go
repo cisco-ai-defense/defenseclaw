@@ -43,12 +43,17 @@ func syntheticPrivateKeyPEM(label string) string {
 // Secret rules — true positives
 // ---------------------------------------------------------------------------
 
-func TestSecretRules_TruePositives(t *testing.T) {
-	cases := []struct {
-		name   string
-		input  string
-		wantID string
-	}{
+// secretRuleFixture is one credential value a secret rule must find.
+type secretRuleFixture struct {
+	name   string
+	input  string
+	wantID string
+}
+
+// secretRuleTruePositives are the secret rule fixtures, shared by the rule
+// test below and the stream guard property test (stream_guard_test.go).
+func secretRuleTruePositives() []secretRuleFixture {
+	return []secretRuleFixture{
 		{"AWS access key", runtimeDetectorSignature(`{"key": "AK`, `IA7G4N2K9Q6M8R3T5V"}`), "SEC-AWS-KEY"},
 		{"AWS secret key assignment", runtimeDetectorSignature("aws_secret_access_", "key = wJ8fN2qK5vR9mT3xP7dL", "1cH6zB4sY0uE8aG2iC5"), "SEC-AWS-SECRET"},
 		{"Anthropic key", runtimeDetectorSignature(`{"api_key": "sk-ant-`, `api03-A7b9C2d4E6f8G1h3J5k7L9m2"}`), "SEC-ANTHROPIC"},
@@ -58,6 +63,7 @@ func TestSecretRules_TruePositives(t *testing.T) {
 		{"GitHub PAT", runtimeDetectorSignature("gh", "p_A7b9C2d4E6f8G1h3J5k7", "L9m2N4p6Q8r1S3t5"), "SEC-GITHUB-TOKEN"},
 		{"GitHub fine-grained PAT", runtimeDetectorSignature("github_", "pat_11AAAAAA_", "abcdefghijklmnopqrstuv"), "SEC-GITHUB-PAT"},
 		{"GitLab PAT", runtimeDetectorSignature("gl", "pat-", "xY7q2V9m4K8r1T6p3N5z"), "SEC-GITLAB"},
+		{"Hugging Face token", runtimeDetectorSignature("hf", "_A7b9C2d4E6f8G1h3J5k7", "L9m2N4p6Q8r0S1"), "SEC-HF-TOKEN"},
 		{"Google API key", runtimeDetectorSignature("AI", "za7G4N2K9Q6M8R3T5V1X7", "B4C9D2F6H8J3K5L9"), "SEC-GOOGLE"},
 		{"Slack bot token", runtimeDetectorSignature("xox", "b-123456789012-1234567890123-", "AbCdEfGh"), "SEC-SLACK-TOKEN"},
 		{"Slack webhook", "https://" + "hooks.slack.com/services/" +
@@ -73,8 +79,10 @@ func TestSecretRules_TruePositives(t *testing.T) {
 		{"npm token", runtimeDetectorSignature("npm_", "A7b9C2d4E6f8G1h3J5k7", "L9m2N4p6Q8r1T7u9"), "SEC-NPM-TOKEN"},
 		{"PyPI token", runtimeDetectorSignature("pypi-", "AgEIcHlwaS5vcmcCJGNlNjRhMGQ2", "LTljNmQtNGNmOC1iMTc2LWFjYmQ4ZTRhNjk1"), "SEC-PYPI-TOKEN"},
 	}
+}
 
-	for _, tc := range cases {
+func TestSecretRules_TruePositives(t *testing.T) {
+	for _, tc := range secretRuleTruePositives() {
 		t.Run(tc.name, func(t *testing.T) {
 			findings := ScanAllRules(tc.input, "unknown_tool")
 			found := false

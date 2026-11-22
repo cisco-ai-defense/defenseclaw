@@ -18,15 +18,35 @@ a "still running" line, so a hung shard names its test.
 --timings writes the pass and fail events of every package and top-level
 test, without output, in `go test -json` form: scripts/update_test_timings.py
 go reads these files to refresh scripts/test-timings/go-linux.json. A
-top-level test's Elapsed there is its wall time (from its run event, or its
-cont event once t.Parallel resumed it, to its pass or fail event) when that
-is longer: go test leaves the parallel subtests out of their parent's
-Elapsed, so a test of parallel subtests weighed almost nothing to the shard
-planner while it held its shard for minutes. A top-level test still running
-when the stream ends (the package -timeout killed it) is written as a fail
-with the wall time it had run until the last event: a refresh then weighs
-the slowest test of a timed-out shard by at least that time, not as an
-unlisted test.
+top-level test's Elapsed there is its share of its package's wall time
+(TopLevelShares): every second of the run is split evenly between the
+top-level tests running in it, from a run or cont event to the next pause,
+pass, fail or skip. A test of parallel subtests therefore weighs the wall
+time its subtests hold (go test leaves them out of their parent's Elapsed,
+so such a test weighed almost nothing to the shard planner while it held
+its shard for minutes), and t.Parallel top-level tests that run side by
+side weigh their part of that time, not each the whole of it (their wall
+spans overlap: internal/actionfacts summed 653 s of test time in a package
+run of 165 s, run 43229287498). The shares of a package add up to the time
+its tests ran, which is what a shard of them takes. A top-level test still
+running when the stream ends (the package -timeout killed it, or the job
+was killed first) is written as a fail with the share it had until the last
+event and "CutOff": true: a refresh (scripts/update_test_timings.py) reads
+it as a cut-off and weighs the test by at least that time and at least its
+recorded time, never as an unlisted test. The mark, not the place after the
+package end event, says so: a job killed before go test's own -timeout
+writes no package end event (GAP-1033). An event without a Time keeps
+go test's Elapsed.
+
+--untimed-against FILE (a scripts/test-timings/*.json file) names the
+top-level tests that ran UNTIMED_MIN_SECONDS or more and that FILE does not
+time in a package it times by test: the shard planner weighs such a test as
+one of the package's fast tests ("*", about 0.25 s), so one new slow test
+can overfill its shard (TestGAP0980Round2ReviewRows, 391 s under -race,
+weighed 0.25 s). The planner cannot tell a new test from a fast one (the
+file keeps only the tests of two seconds or more), so the run that first
+times it names it: a summary line and a GitHub warning per test (at most
+20), the list a refresh adds (GAP-1053).
 
 --annotate TITLE prints a GitHub error annotation per failed top-level test
 (at most 20). The exit status is always 0; the caller keeps go test's.
@@ -41,6 +61,9 @@ import sys
 from datetime import datetime
 
 _FRACTION = re.compile(r"(\.\d{6})\d+")
+# The shortest test a timings refresh keeps by name (update_test_timings.py
+# keeps faster tests only as their mean "*").
+UNTIMED_MIN_SECONDS = 2.0
 
 
 def _time(event: dict) -> datetime | None:
@@ -54,16 +77,125 @@ def _time(event: dict) -> datetime | None:
         return None
 
 
+class TopLevelShares:
+    """Each top-level test's share of its package's wall time.
+
+    Feed every event in stream order (event()); seconds() is the share of a
+    test that ran with timed events, or None. Between two events of a
+    package, the time is split evenly between its top-level tests that are
+    running (a run or cont event, not yet followed by a pause, pass, fail
+    or skip); subtest events only move the clock. A package's end (its own
+    pass or fail) clears its clock, so the next shard or part of the same
+    package in one log starts afresh.
+    """
+
+    def __init__(self) -> None:
+        self._running: dict[str, set[str]] = {}
+        self._clock: dict[str, datetime] = {}
+        self._share: dict[tuple[str, str], float] = {}
+
+    def _advance(self, package: str, at: datetime) -> None:
+        clock = self._clock.get(package)
+        running = self._running.get(package)
+        if clock is not None and running and at > clock:
+            part = (at - clock).total_seconds() / len(running)
+            for test in running:
+                self._share[(package, test)] += part
+        if clock is None or at > clock or not running:
+            self._clock[package] = at
+
+    def event(self, package: str, test: str | None, action: str | None, at: datetime | None) -> None:
+        if at is None:
+            return
+        self._advance(package, at)
+        if test is None:
+            # A package's start (a job that ran it again in the same log) and
+            # its end both leave no test of it running.
+            if action in ("start", "pass", "fail"):
+                self._clock.pop(package, None)
+                self._running.pop(package, None)
+            return
+        if "/" in test:
+            return
+        if action == "run":
+            # A test run again (-count, a retry) weighs its last run.
+            self._share[(package, test)] = 0.0
+        if action in ("run", "cont"):
+            self._running.setdefault(package, set()).add(test)
+            self._share.setdefault((package, test), 0.0)
+        elif action in ("pause", "pass", "fail", "skip"):
+            self._running.get(package, set()).discard(test)
+
+    def finish(self, at: datetime) -> None:
+        """Charge the tests still running up to at (the last event)."""
+        for package in list(self._running):
+            self._advance(package, at)
+
+    def seconds(self, package: str, test: str) -> float | None:
+        share = self._share.get((package, test))
+        return None if share is None else round(share, 3)
+
+
+def expected_names(pattern: str) -> set[str] | None:
+    """The test names of a -run pattern ^(A|B)$ (scripts/go-unix-test-pattern.sh)
+    or ^(?:A|B)$ (scripts/go_test_shards.py), or None when it is anything else."""
+    match = re.fullmatch(r"\^\((?:\?:)?(.*)\)\$", pattern.strip(), re.S)
+    if match is None:
+        return None
+    names = {re.sub(r"\\(.)", r"\1", name) for name in match.group(1).split("|")}
+    if not names or not all(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name) for name in names):
+        return None
+    return names
+
+
+def untimed_tests(times: dict[tuple[str, str], float], timings: dict) -> list[tuple[str, str, float]]:
+    """(package, test, seconds) of each test of times that ran at least
+    UNTIMED_MIN_SECONDS and that timings does not name in a package it times
+    by test, slowest first."""
+    by_test = timings.get("tests", {})
+    untimed = []
+    for (package, test), seconds in times.items():
+        if seconds < UNTIMED_MIN_SECONDS:
+            continue
+        rel = next((rel for rel in by_test if package == rel or package.endswith("/" + rel)), None)
+        if rel is not None and test not in by_test[rel]:
+            untimed.append((package, test, seconds))
+    return sorted(untimed, key=lambda item: (-item[2], item[1]))
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--timings", help="write the pass/fail events (no output) to this file")
     parser.add_argument("--annotate", metavar="TITLE", help="GitHub ::error title for failed tests")
+    parser.add_argument(
+        "--expect-run",
+        metavar="PATTERN",
+        help="the go test -run pattern of this run, ^(A|B|...)$ or ^(?:A|B|...)$: exit 1 unless every test it names "
+        "reported a pass, fail or skip (a name the binary does not have runs nothing, and go test passes)",
+    )
+    parser.add_argument(
+        "--untimed-against",
+        metavar="TIMINGS",
+        help="name the tests of UNTIMED_MIN_SECONDS or more this timings file does not time (warnings only)",
+    )
     args = parser.parse_args()
+    known = None
+    if args.untimed_against is not None:
+        with open(args.untimed_against, encoding="utf-8") as file:
+            known = json.load(file)
+    times: dict[tuple[str, str], float] = {}
+    expected = None
+    if args.expect_run is not None:
+        expected = expected_names(args.expect_run)
+        if expected is None:
+            parser.error(f"--expect-run is not ^(A|B|...)$ of test names: {args.expect_run[:80]!r}")
+    reported: set[str] = set()
 
     out = sys.stdout
     timings = open(args.timings, "w", encoding="utf-8") if args.timings else None
     buffered: dict[tuple[str, str], list[str]] = {}
-    started: dict[tuple[str, str], datetime] = {}
+    started: set[tuple[str, str]] = set()
+    shares = TopLevelShares()
     last: datetime | None = None
     failed: list[str] = []
     package_failed = False
@@ -95,6 +227,7 @@ def main() -> int:
             at = _time(event)
             if at is not None:
                 last = at
+            shares.event(package, test, action, at)
             if test is None:
                 if action == "output":
                     out.write(event.get("Output", ""))
@@ -103,14 +236,18 @@ def main() -> int:
                     package_failed = package_failed or action == "fail"
                     if timings is None:
                         continue
-                    timings.write(json.dumps({"Action": action, "Package": package, "Elapsed": event.get("Elapsed", 0)}) + "\n")
+                    timings.write(
+                        json.dumps({"Action": action, "Package": package, "Elapsed": event.get("Elapsed", 0)}) + "\n"
+                    )
                 continue
             key = (package, test)
+            if action in ("pass", "fail", "skip") and "/" not in test:
+                reported.add(test)
             if action in ("run", "cont") and "/" not in test and at is not None:
-                started[key] = at
+                started.add(key)
             elif action in ("pause", "skip"):
                 # A parallel test waits for its turn: that wait is not its time.
-                started.pop(key, None)
+                started.discard(key)
             if action == "output":
                 buffered.setdefault(key, []).append(event.get("Output", ""))
             elif action in ("pass", "skip"):
@@ -120,18 +257,24 @@ def main() -> int:
                 out.flush()
                 if "/" not in test:
                     failed.append(test)
-            if action in ("pass", "fail") and "/" not in test and timings is not None:
+            if action in ("pass", "fail") and "/" not in test and (timings is not None or known is not None):
                 elapsed = event.get("Elapsed", 0)
-                start, end = started.pop(key, None), _time(event)
-                if start is not None and end is not None:
-                    elapsed = max(elapsed, round((end - start).total_seconds(), 3))
-                record = {"Action": action, "Package": package, "Test": test, "Elapsed": elapsed}
-                timings.write(json.dumps(record) + "\n")
-        if timings is not None and last is not None:
-            for (package, test), start in started.items():
-                elapsed = round((last - start).total_seconds(), 3)
-                record = {"Action": "fail", "Package": package, "Test": test, "Elapsed": elapsed}
-                timings.write(json.dumps(record) + "\n")
+                share = shares.seconds(package, test)
+                if key in started and at is not None and share is not None:
+                    elapsed = share
+                started.discard(key)
+                times[key] = float(elapsed or 0)
+                if timings is not None:
+                    record = {"Action": action, "Package": package, "Test": test, "Elapsed": elapsed}
+                    timings.write(json.dumps(record) + "\n")
+        if (timings is not None or known is not None) and last is not None:
+            shares.finish(last)
+            for package, test in sorted(started):
+                elapsed = shares.seconds(package, test) or 0.0
+                times[(package, test)] = max(times.get((package, test), 0.0), elapsed)
+                if timings is not None:
+                    record = {"Action": "fail", "Package": package, "Test": test, "Elapsed": elapsed, "CutOff": True}
+                    timings.write(json.dumps(record) + "\n")
     finally:
         if timings is not None:
             timings.close()
@@ -147,8 +290,27 @@ def main() -> int:
                 out.write(f"::error title={args.annotate}::{test} was still running\n")
         elif not names and package_failed:
             out.write(f"::error title={args.annotate}::No named failing test was reported\n")
+    if known is not None:
+        untimed = untimed_tests(times, known)
+        out.write(f"{len(untimed)} tests of {UNTIMED_MIN_SECONDS:g} s or more have no time in {args.untimed_against}\n")
+        for package, test, seconds in untimed[:20]:
+            out.write(
+                f"::warning title=untimed test::{test} ({package}) ran {seconds:.1f} s"
+                f" with no time in {args.untimed_against}\n"
+            )
+    status = 0
+    if expected is not None:
+        ran = expected & reported
+        missing = sorted(expected - reported)
+        out.write(f"{len(ran)} of {len(expected)} selected tests reported a result\n")
+        if missing:
+            title = args.annotate or "go test"
+            out.write(f"::error title={title}::{len(missing)} selected tests reported no result\n")
+            for name in missing[:20]:
+                out.write(f"::error title={title}::{name} reported no result\n")
+            status = 1
     out.flush()
-    return 0
+    return status
 
 
 if __name__ == "__main__":

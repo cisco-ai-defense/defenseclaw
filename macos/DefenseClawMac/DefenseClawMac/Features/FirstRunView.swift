@@ -21,7 +21,7 @@ import SwiftUI
 struct ConnectorDiscoverySelection: Equatable {
     static let onboardingConnectors = [
         "codex", "claudecode", "hermes", "cursor", "devin", "copilot",
-        "antigravity", "opencode", "amp",
+        "antigravity", "opencode", "amp", "kiro",
     ]
 
     let registered: Set<String>
@@ -66,7 +66,9 @@ struct FirstRunView: View {
     /// cmd_init._current_hook_fail_mode: a new install gets the config
     /// default, closed (hooks block where supported when a check can't
     /// finish); the TUI first run opens on the same value.
-    @State private var failMode = "closed"
+    /// tui/panels/first_run.py (1.0.7) FAIL_MODE_CHOICES: "policy" (the
+    /// default) saves nothing, the policy tier decides a gateway outage.
+    @State private var failMode = "policy"
     @State private var humanApproval = false
     @State private var hiltSeverity = "HIGH"
     @AppStorage(GatewayAutoStartPreference.key) private var startGateway = true
@@ -281,10 +283,11 @@ struct FirstRunView: View {
                 // CLI preserves any saved setting.
                 if profile == "action" {
                     Picker("Hook Failure Mode", selection: $failMode) {
-                        Text("Closed - block where supported").tag("closed")
-                        Text("Open - allow and log").tag("open")
+                        Text("Policy - the policy tier decides").tag("policy")
+                        Text("Open - allow with a warning").tag("open")
+                        Text("Closed - block").tag("closed")
                     }
-                    Text("Action profile only. If a check can't finish: closed = block where supported, open = allow and log.")
+                    Text("Action profile only. While the gateway is down: policy = default and permissive allow with a warning, strict blocks; open = allow with a warning; closed = block.")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                     Toggle("Require human approval", isOn: $humanApproval)

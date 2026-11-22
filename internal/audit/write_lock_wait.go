@@ -112,6 +112,9 @@ func (s *Store) noteWriteAttempt(started time.Time, err error, write bool) {
 	if s == nil {
 		return
 	}
+	if err != nil {
+		s.NoteWriteError("SQLite write", err)
+	}
 	switch {
 	case err == nil && write:
 		s.setWriteLockHeld(false)

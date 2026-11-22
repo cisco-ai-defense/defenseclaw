@@ -22,6 +22,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
 )
@@ -147,4 +148,21 @@ func TestDaemonRefusalNeverEndsWithItsReasonCode(t *testing.T) {
 	if err := withoutReasonCode(exit); !errors.As(err, &kept) || kept.Code != 3 || err.Error() != sentence {
 		t.Fatalf("withoutReasonCode(exit 3) = %#v", err)
 	}
+}
+
+// rel-1-0-10:GAP-0007: the workload check's refusal of a MicroVM whose root
+// folder OpenShell gave to the sandbox's account is a known limit, not a
+// first-start failure: no retry hint follows it.
+func TestGAP0007MicroVMGuestRootLimitHasNoRetryHint(t *testing.T) {
+	ta := newTestApp(t, "")
+	ta.daemon.status.Gateway.Driver = "vm"
+	ta.daemon.explain.VMFirstBoot = true
+	ta.daemon.errors["POST "+sandboxapi.PathSandboxes] = &sandboxapi.Error{Code: sandboxapi.CodePolicyRejected,
+		Message: "sandbox t does not run as DefenseClaw prepared it; DefenseClaw deleted it", Detail: openshell.MicroVMGuestRootLimit + " (uid 503 owns it)"}
+	err := ta.Run(bg, RunOptions{Harness: "claude"})
+	if err == nil {
+		t.Fatal("Run succeeded")
+	}
+	has(t, err.Error(), "a known limit", "run sandboxes on the docker driver")
+	lacks(t, err.Error(), "may need a retry")
 }

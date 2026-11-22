@@ -28,6 +28,7 @@ SELECTABLE = (
     "database-destruction-protection",
     "infrastructure-destruction-protection",
     "kubernetes-production-protection",
+    "active-directory-protection",
 )
 STAGED = "ssh-authorized-keys-protection"
 
@@ -63,7 +64,7 @@ def test_bundled_packs_are_the_use_case_tree() -> None:
     packs = pc.protection_packs()
     assert [p.name for p in packs] == [*SELECTABLE, STAGED]
     by_name = {p.name: p for p in packs}
-    assert [by_name[n].rule_count for n in SELECTABLE] == [13, 4, 3, 5, 3]
+    assert [by_name[n].rule_count for n in SELECTABLE] == [14, 4, 3, 5, 3, 5]
     assert by_name[STAGED].status == "staged"
     assert by_name[STAGED].rule_ids == ()
     for pack in packs:

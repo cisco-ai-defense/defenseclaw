@@ -82,6 +82,7 @@ export const generated: GeneratedStatus = {
     judge: { oss: 'SSP', enterprise: 'PPP' },
     redaction: { oss: 'SSP', enterprise: 'NNN' },
     sandboxes: { oss: 'PPU', enterprise: 'SSU' },
+    substrate: { oss: 'PPP', enterprise: 'PPP' },
     acp: { oss: 'PSP', enterprise: 'NNN' },
     'ai-discovery': { oss: 'SSS', enterprise: 'SSP' },
     'runtime-discovery': { oss: 'SSS', enterprise: 'SSP' },
@@ -267,7 +268,7 @@ const connectorSources: ConnectorSource[] = [
     id: 'opencode',
     integration: 'Plugin',
     minVersion: '2.0.0',
-    versionNote: 'V2-only contract covers 2.0.0 up to 2.3.0. Version 2.2.5 was checked live on Linux, macOS and native Windows in per-user and managed installs; 2.2.3 and 2.2.4 were checked on selected platforms. Newer V2 minors are untested; V1 and unversioned git builds are refused.',
+    versionNote: 'V2-only contract covers 2.0.0 up to 2.3.0. Newer V2 minors run as untested newer versions; V1 and unversioned git builds are refused.',
     route: MACHINE,
     routeNote: 'Machine policy through the managed OpenCode plugin that the standalone package installs; per-user when that plugin is missing.',
   },
@@ -396,11 +397,18 @@ const featureSources: FeatureSource[] = [
     note: 'Linux and macOS only. A standalone managed install runs sandboxes under the policy of the person’s directory group; Windows is refused. See Sandboxes on managed computers.',
   },
   {
+    id: 'substrate',
+    label: 'Agent Substrate (cloud sandboxes)',
+    href: '/docs/substrate',
+    group: 'Protect',
+    note: 'Runs the agent in a Kubernetes cluster; only the launcher runs on your computer. Preview.',
+  },
+  {
     id: 'acp',
     label: 'ACP guard (Kiro, Zed)',
     href: '/docs/acp-guard',
     group: 'Protect',
-    note: 'Per-user install, or enterprise managed mode through `enterprise acp enroll` (preview, not yet verified live).',
+    note: 'Per-user install, or enterprise managed mode through `enterprise acp enroll` (Preview).',
   },
   { id: 'ai-discovery', label: 'AI discovery', href: '/docs/ai-discovery', group: 'Discover' },
   {
@@ -498,7 +506,7 @@ const featureSources: FeatureSource[] = [
     href: '/docs/enterprise/mdm',
     group: 'Enterprise controls',
     note:
-      'Intune, Jamf, Iru (formerly Kandji), Workspace ONE, ConfigMgr and Linux configuration management. Verified by simulating the MDM run context; the recipes have not been run in a live MDM tenant.',
+      'Intune, Jamf, Iru (formerly Kandji), Workspace ONE, ConfigMgr and Linux configuration management. Preview: check the recipes by simulating the MDM run context.',
   },
 ];
 

@@ -10,6 +10,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -37,7 +38,19 @@ func stageCodexDiscoveryAuthorityFixture(
 
 // prepareGatewayTestProcess runs the Codex app-server fixture before the
 // shared TestMain isolates the package's tests from the host Hermes setup.
+//
+// It first makes the token user the default owner of every file and folder the
+// tests create (GAP-1463, same fix as GAP-0079 in cli, hookcli and managed). An
+// elevated token (an SSH Administrator, a CI runner) otherwise gives
+// BUILTIN\Administrators ownership of t.TempDir folders, and safefile rightly
+// refuses them as foreign-owned (first-boot gateway token persist). A per-user
+// gateway runs as a standard user, whose objects it owns; the product check is
+// unchanged.
 func prepareGatewayTestProcess() {
+	if _, err := testenv.OwnNewObjectsAsTokenUser(); err != nil {
+		fmt.Fprintln(os.Stderr, "gateway tests: make the token user the owner of new files:", err)
+		os.Exit(2)
+	}
 	if os.Getenv(codexSetupAppServerHelperEnv) == "1" &&
 		len(os.Args) == 3 && os.Args[1] == "app-server" && os.Args[2] == "--stdio" {
 		os.Exit(runCodexSetupAppServerHelper())
@@ -317,7 +330,7 @@ func TestMultiPublicationRollbackUsesRawCodexLockBehindFreshSetupReceipt(t *test
 
 	transaction, err := s.setupConnectorsIsolatedTransaction(
 		context.Background(), []connector.Connector{conn},
-		"synthetic gateway token", "127.0.0.1:0", "127.0.0.1:0", "synthetic master key",
+		"synthetic gateway token", "127.0.0.1:0", "127.0.0.1:0",
 		guardrail.NewRulePackCache(),
 	)
 	if err != nil {

@@ -4,6 +4,7 @@
 package actionfacts
 
 import (
+	"path"
 	"regexp"
 	"strings"
 )
@@ -32,18 +33,20 @@ func (h *HandedEntries) add(other HandedEntries) {
 }
 
 // findEmbeddedReaders are programs that, handed file names, only read
-// them (or change only modes, owners or times: chmod, chown, chgrp,
-// touch, judged on their own), whatever their arguments.
+// them whatever their arguments. A program with an option that writes a file
+// or runs a program (rg --pre, file -C, less -o, sort -o) is not here: it is
+// read option by option below. chmod, chown, chgrp and touch are not here
+// either: a find child changes the mode, owner or times of the entry it is
+// handed, which is a change of it (rel-1-0-10:GAP-0501).
 var findEmbeddedReaders = map[string]struct{}{
 	"basename": {}, "b2sum": {}, "cat": {}, "cksum": {}, "cmp": {}, "diff": {},
-	"dirname": {}, "du": {}, "echo": {}, "egrep": {}, "fgrep": {}, "file": {},
-	"grep": {}, "head": {}, "less": {}, "ls": {}, "md5": {}, "md5sum": {},
+	"dirname": {}, "du": {}, "echo": {}, "egrep": {}, "fgrep": {},
+	"grep": {}, "head": {}, "ls": {}, "md5": {}, "md5sum": {},
 	"more": {}, "od": {}, "printf": {}, "readlink": {}, "realpath": {},
-	"rg": {}, "sha1sum": {}, "sha224sum": {}, "sha256sum": {}, "sha384sum": {},
+	"sha1sum": {}, "sha224sum": {}, "sha256sum": {}, "sha384sum": {},
 	"sha512sum": {}, "shasum": {}, "stat": {}, "strings": {}, "tail": {},
 	"test": {}, "[": {}, "true": {}, "false": {}, "wc": {},
 	"jq": {}, "cut": {}, "column": {}, "nl": {}, "tac": {}, "rev": {},
-	"chmod": {}, "chown": {}, "chgrp": {}, "touch": {},
 }
 
 // FindEmbeddedCommandMayChange reports a find argv with an -exec, -execdir,
@@ -72,6 +75,88 @@ func FindHandedEntries(argv []string) HandedEntries {
 		i = end
 	}
 	return result
+}
+
+// FindHandedReadings are the programs a find hands its starting points to,
+// each read as the program run on one starting point alone: for an -exec,
+// -execdir, -ok or -okdir program that only reads or copies the entries it
+// is handed (a reader or a copy-out, handedEntriesOf), the program with each
+// {} written as that starting point. find ~/.cargo/credentials -exec cp {}
+// /tmp/n \; copies the file as cp ~/.cargo/credentials /tmp/n does, and a
+// gateway judges that reading too and keeps the strictest finding: the
+// developer-token files of the credentials table had no rule over the find,
+// so the find allowed where the copy alone alerts (rel-1-0-10:GAP-1048). A
+// program that may change the entries is not read so: its starting points
+// are write facts already (GAP-2122). A starting point the facts did not
+// resolve (a word made at run time) is not read. truncated reports more
+// readings than maxSimpleEvaluations, the walk's own bound: the first ones
+// are returned and the caller judges the rest as the unknown tier (the one
+// bound rule).
+func FindHandedReadings(facts Facts) (readings []string, truncated bool) {
+	for _, command := range facts.Commands {
+		if command.Dialect != DialectPOSIX || !command.ArgvComplete || len(command.Argv) < 2 ||
+			path.Base(strings.ReplaceAll(command.Program, `\`, "/")) != "find" {
+			continue
+		}
+		var starts []string
+		for _, candidate := range facts.Paths {
+			if candidate.CommandID != command.ID || candidate.Access != PathAccessRead {
+				continue
+			}
+			spelling := candidate.Resolved
+			if spelling == "" {
+				spelling = candidate.Normalized
+			}
+			if spelling == "" {
+				spelling = candidate.Value
+			}
+			if spelling == "" || strings.HasPrefix(spelling, "$") || strings.HasPrefix(spelling, "~") {
+				continue
+			}
+			starts = append(starts, spelling)
+		}
+		if len(starts) == 0 {
+			continue
+		}
+		argv := command.Argv
+		for i := 1; i+1 < len(argv); i++ {
+			action := argv[i]
+			if action != "-exec" && action != "-execdir" && action != "-ok" && action != "-okdir" {
+				continue
+			}
+			end := i + 1
+			for end < len(argv) && argv[end] != ";" && argv[end] != "+" {
+				end++
+			}
+			words := argv[i+1 : end]
+			i = end
+			if len(words) == 0 || !strings.Contains(strings.Join(words, " "), "{}") ||
+				handedEntriesOf(words, action == "-execdir" || action == "-okdir").MayChange {
+				continue
+			}
+			for _, start := range starts {
+				quoted := make([]string, len(words))
+				for j, word := range words {
+					quoted[j] = findReadingWord(strings.ReplaceAll(word, "{}", start))
+				}
+				if len(readings) == maxSimpleEvaluations {
+					return readings, true
+				}
+				readings = append(readings, strings.Join(quoted, " "))
+			}
+		}
+	}
+	return readings, false
+}
+
+// findReadingWord is word as one shell word: as it is when every character
+// is one the shell reads literally, else in single quotes.
+func findReadingWord(word string) string {
+	if word != "" && strings.Trim(word, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_./:@%+=,-") == "" &&
+		!strings.HasPrefix(word, "~") && !strings.Contains(word, "=") {
+		return word
+	}
+	return "'" + strings.ReplaceAll(word, "'", `'\''`) + "'"
 }
 
 // XargsHandedEntries reads the program words of an xargs (the program and
@@ -126,11 +211,22 @@ func handedEntriesOf(words []string, inEntryDir bool) HandedEntries {
 		only = !xxdWritesOutput(args)
 	case "sort":
 		only = sortOnlyPrints(args)
+	case "rg":
+		only = rgOnlyReads(args)
+	case "file":
+		only = fileOnlyReads(args)
+	case "less":
+		only = lessOnlyReads(args)
 	case "sed":
 		only = sedOnlyPrints(args)
 	case "awk", "gawk", "mawk", "nawk":
 		only = awkOnlyPrints(args)
 	case "python", "python3":
+		// Inline code a read grammar proves read-only changes no entry it is
+		// handed (rel-1-0-10:GAP-0657).
+		if InlineCodeHandoff(words).ProvenReads {
+			return HandedEntries{}
+		}
 		return jsonToolHandedEntries(args, inEntryDir)
 	case "cp", "rsync":
 		return copyHandedEntries(program, args, inEntryDir)
@@ -242,15 +338,21 @@ func sortOnlyPrints(args []string) bool {
 		case arg == "--":
 			return true
 		case strings.HasPrefix(arg, "--"):
+			// getopt_long takes any unambiguous prefix of a long option
+			// (--out is --output, --compress-prog is --compress-program).
 			name, _, attached := strings.Cut(arg, "=")
-			switch name {
-			case "--output", "--compress-program", "--files0-from":
-				return false
-			case "--key", "--field-separator", "--buffer-size", "--temporary-directory",
-				"--parallel", "--batch-size", "--sort", "--random-source":
-				if !attached {
-					i++
+			if long := sortLongOption(name); long != "" {
+				switch long {
+				case "--output", "--compress-program", "--files0-from":
+					return false
+				case "--key", "--field-separator", "--buffer-size", "--temporary-directory",
+					"--parallel", "--batch-size", "--sort", "--random-source":
+					if !attached {
+						i++
+					}
 				}
+			} else {
+				return false // ambiguous or unknown: it may be one that writes
 			}
 		case strings.HasPrefix(arg, "-") && arg != "-":
 			for at, letter := range arg[1:] {
@@ -263,6 +365,96 @@ func sortOnlyPrints(args []string) bool {
 					}
 					break
 				}
+			}
+		}
+	}
+	return true
+}
+
+// sortLongOptions are the GNU sort long options.
+var sortLongOptions = []string{
+	"--batch-size", "--buffer-size", "--check", "--compress-program", "--debug", "--dictionary-order",
+	"--field-separator", "--files0-from", "--help", "--ignore-case", "--ignore-leading-blanks",
+	"--ignore-nonprinting", "--key", "--merge", "--month-sort", "--numeric-sort", "--output",
+	"--parallel", "--random-sort", "--random-source", "--reverse", "--sort", "--stable", "--temporary-directory",
+	"--unique", "--version", "--version-sort", "--zero-terminated", "--general-numeric-sort",
+	"--human-numeric-sort",
+}
+
+// sortLongOption names the long option a --word spells, exactly or as an
+// unambiguous prefix, and "" for anything else.
+func sortLongOption(word string) string {
+	match := ""
+	for _, option := range sortLongOptions {
+		if option == word {
+			return option
+		}
+		if strings.HasPrefix(option, word) {
+			if match != "" {
+				return ""
+			}
+			match = option
+		}
+	}
+	return match
+}
+
+// rgOnlyReads reports an rg whose options neither run a program (--pre, the
+// -z/--search-zip decompressors, --hostname-bin) nor name a file to write.
+func rgOnlyReads(args []string) bool {
+	for _, arg := range args {
+		name, _, _ := strings.Cut(arg, "=")
+		switch {
+		case arg == "--":
+			return true
+		case strings.HasPrefix(arg, "--"):
+			switch name {
+			case "--pre", "--search-zip", "--hostname-bin", "--generate":
+				return false
+			}
+		case strings.HasPrefix(arg, "-") && arg != "-":
+			if strings.ContainsRune(arg[1:], 'z') {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// fileOnlyReads reports a file whose options do not compile a magic file
+// (-C writes MAGIC.mgc next to it); a long option may be abbreviated.
+func fileOnlyReads(args []string) bool {
+	for _, arg := range args {
+		switch {
+		case arg == "--":
+			return true
+		case strings.HasPrefix(arg, "--"):
+			name, _, _ := strings.Cut(arg, "=")
+			if strings.HasPrefix("--compile", name) {
+				return false
+			}
+		case strings.HasPrefix(arg, "-") && arg != "-":
+			if strings.ContainsRune(arg[1:], 'C') {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// lessOnlyReads reports a less whose options are plain display flags: the
+// options that log the input to a file (-o, -O, --log-file), read a key file
+// or take a command (+cmd, -p, -P, -k, -t, -T and the like) are not.
+func lessOnlyReads(args []string) bool {
+	for _, arg := range args {
+		switch {
+		case arg == "--":
+			return true
+		case strings.HasPrefix(arg, "+") || strings.HasPrefix(arg, "--"):
+			return false
+		case strings.HasPrefix(arg, "-") && arg != "-":
+			if strings.Trim(arg[1:], "EFgGiIJmMnNqQrRsSuUVwWX") != "" {
+				return false
 			}
 		}
 	}

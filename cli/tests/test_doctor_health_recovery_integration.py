@@ -786,7 +786,8 @@ def test_upgraded_install_with_large_audit_db_and_legacy_key_gets_next_steps(tmp
     cmd_doctor._check_audit_db(cfg, result)
     cmd_doctor._check_device_identity(cfg, result)
 
-    audit, identity = result.checks
+    audit, unread, identity = result.checks
+    assert unread["check_id"] == "doctor.guardrail.unread-calls" and unread["status"] == "pass"
     assert audit["status"] == "pass" and "PRAGMA quick_check" in audit["detail"]
     assert cmd_doctor._plan_audit_db_recovery(cfg).state == "noop"
     assert identity["status"] == "pass" and "no action needed" in identity["detail"]
@@ -805,7 +806,8 @@ def test_audit_store_moved_aside_by_the_gateway_is_reported(tmp_path) -> None:
     result = _DoctorResult()
     cmd_doctor._check_audit_db(cfg, result)
 
-    store, notice = result.checks
+    store, notice, unread = result.checks
+    assert unread["check_id"] == "doctor.guardrail.unread-calls"
     assert store["status"] == "pass"
     assert notice["status"] == "warn" and notice["reason_code"] == "audit-db-moved-aside"
     assert f"Older audit records stay in {moved}" in notice["detail"]

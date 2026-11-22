@@ -1,0 +1,12 @@
+# Eval stand-ins for guardrail.profiles.<name>.routing (S1 owns the real
+# overlay). The filter narrows only: a guardrail PII/secret finding keeps
+# local aliases only, then an alias outside allowed_aliases becomes
+# default_alias (or the first allowed alias).
+local_aliases: [local]
+# The model the agent asked for (a coding agent asks for its strong model).
+# A classifier error falls back to it (D3), then the profile filter applies.
+request_alias: strong
+profiles:
+  default:     {allowed_aliases: [local, fast, mid, strong], default_alias: fast}
+  restricted:  {allowed_aliases: [local, fast, mid],         default_alias: mid}
+  local_only:  {allowed_aliases: [local],                    default_alias: local}

@@ -158,7 +158,7 @@ $NotData = @(".venv", ".venv.busy", ".uv", "previous", "previous.new", ".repair"
     ".lifecycle-txn.json", ".lifecycle-txn.json.new", ".lifecycle-closer", "*.dc-removed-*")
 # Connectors supported on Windows (cli/defenseclaw/platform_support.py).
 $ConnectorChoices = @("codex", "claudecode", "hermes", "cursor", "devin", "copilot", "antigravity",
-    "opencode", "amp", "kiro", "none")
+    "opencode", "amp", "kiro", "openclaw", "none")
 # -File runs return exit codes; `irm | iex` and script blocks must never exit
 # (that would close the user's window), so they throw instead.
 $RunAsFile = -not [string]::IsNullOrEmpty($PSCommandPath)
@@ -2372,7 +2372,41 @@ function New-Venv([string]$Path, [string]$Where) {
     if (-not (Invoke-UvPipInstall $lockArgs)) { return $false }
     Repair-TiktokenRanks $python $Where
     Write-Info "Installing the DefenseClaw package into $Where and compiling it"
-    return (Invoke-UvPipInstall @("pip", "install", "--quiet", "--compile-bytecode", "--python", $python, "--no-deps", (Join-Path $Staging $Wheel)))
+    $wheelArgs = @("pip", "install", "--quiet", "--compile-bytecode", "--python", $python, "--no-deps", (Join-Path $Staging $Wheel))
+    if (-not (Invoke-UvPipInstall $wheelArgs)) { return $false }
+    return (Repair-DamagedPackages $python $Where $lockArgs $wheelArgs)
+}
+
+function Repair-DamagedPackages([string]$Python, [string]$Where, [string[]]$LockArgs, [string[]]$WheelArgs) {
+    # uv hard-links each package from its long-lived cache, so a write into an
+    # installed file in any environment built from that cache changes the
+    # cached copy, and uv puts it into every later environment without
+    # reading it again: an upgrade to 1.0.9 got the files of an older LiteLLM
+    # wheel and the MCP scanner no longer imported (rel-1-0-10 GAP-0006).
+    # venv_integrity.py compares every package with its wheel RECORD; a
+    # damaged one leaves the cache and is downloaded again.
+    $site = Join-Path (Split-Path -Parent (Split-Path -Parent $Python)) "Lib\site-packages"
+    $check = @("-I", (Join-Path $site "defenseclaw\venv_integrity.py"), $site)
+    $probe = Get-NativeProbe $Python $check -Json
+    if ($probe.Exit -eq 0) { return $true }
+    $names = @($probe.Output -split "\r?\n" | ForEach-Object { $_.Trim() } | Where-Object { $_ -match '^[A-Za-z0-9][A-Za-z0-9._-]*$' })
+    if ($probe.Exit -ne 3 -or $names.Count -eq 0) {
+        Write-Err "Could not check the Python packages in $Where against their wheels (exit $($probe.Exit))"
+        return $false
+    }
+    Write-Warn ("The installed files of {0} in {1} differ from their wheels (the uv cache they come from was changed); downloading them again" -f ($names -join ", "), $Where)
+    $again = @()
+    foreach ($name in $names) {
+        $again += @("--reinstall-package", $name)
+        Invoke-Uv @("cache", "clean", $name) -Quiet | Out-Null
+    }
+    if (-not (Invoke-UvPipInstall ($LockArgs + $again))) { return $false }
+    Repair-TiktokenRanks $Python $Where
+    if (-not (Invoke-UvPipInstall ($WheelArgs + $again))) { return $false }
+    $probe = Get-NativeProbe $Python $check -Json
+    if ($probe.Exit -eq 0) { return $true }
+    Write-Err ("The Python packages {0} in {1} still differ from their wheels after a fresh download; delete the uv cache {2} and run the installer again" -f ($names -join ", "), $Where, $env:UV_CACHE_DIR)
+    return $false
 }
 
 function Invoke-BelowNormal([scriptblock]$Action) {
@@ -5043,8 +5077,8 @@ function Convert-HooksForRollback([string]$From, [string]$BackTo) {
     $help = Get-NativeOutput $gateway @("connector", "prepare-rollback", "--help")
     if ($BackTo -and $help -match '--to-version') { $prepare += @("--to-version", $BackTo) }
     if ((Invoke-Native $gateway $prepare) -ne 0) {
-        Write-Warn ("Could not rewrite the agent hook entries of DefenseClaw $From in the form $BackTo reads (see above). " +
-            "After the rollback, 'defenseclaw uninstall' may leave those DefenseClaw entries in the agent settings, such as " +
+        Write-Warn ("Could not rewrite the agent hook entries, or put back the route-only model settings, of DefenseClaw $From for $BackTo (see above). " +
+            "A route-only agent then gets 401 until the DefenseClaw base URL and route header are removed from its settings. After the rollback, 'defenseclaw uninstall' may leave those DefenseClaw entries in the agent settings, such as " +
             "the cmd.exe entries that run defenseclaw-hook.exe in %USERPROFILE%\.claude\settings.json; remove them by hand")
     }
 }
@@ -5990,7 +6024,9 @@ function Invoke-Install {
     # 3) already said which one. Anything else restores the previous install.
     $provenGateway = $startNew -and -not $sealOnly
     # Only connectors this release supports on Windows are required again: a
-    # retired one (or the default openclaw entry) has no hooks to put back.
+    # retired one has no hooks to put back. OpenClaw (native plugin hooks on
+    # Windows since 1.0.10) is held like the others: Get-HeldConnectors drops
+    # one the previous gateway reported unhealthy, as 1.0.9 refused it here.
     $guardedBefore = @(@(Get-Field $Manifest "Connectors") | Where-Object { $ConnectorChoices -contains $_ -and $_ -ne "none" })
     $problems = @(Wait-LifecycleProof $stagedBinaries $provenGateway $guardedBefore -RequireDigest:$provenGateway)
     if ($problems.Count) {

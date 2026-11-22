@@ -11,13 +11,15 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 func TestManagedE2fsprogsPackageFallback(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("macOS tool selection")
 	}
-	root, err := os.MkdirTemp(os.TempDir(), "e2fs-package-test-")
+	root, err := os.MkdirTemp(testenv.TraversableTempDir(t), "e2fs-package-test-")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,7 +75,7 @@ func TestManagedE2fsprogsInaccessibleCandidatesNameTheRepair(t *testing.T) {
 	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
 		t.Skip("requires an unprivileged POSIX process")
 	}
-	root, err := os.MkdirTemp("", "e2fs-inaccessible-")
+	root, err := os.MkdirTemp(testenv.TraversableTempDir(t), "e2fs-inaccessible-")
 	if err != nil {
 		t.Fatal(err)
 	}

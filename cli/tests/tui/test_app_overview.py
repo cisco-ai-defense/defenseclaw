@@ -28,8 +28,6 @@ from defenseclaw.tui.app import (
     _DEFENSECLAW_LOGO,
     DefenseClawTUI,
     _activity_refresh_bucket,
-    _agents_summary,
-    _enforcement_label,
     _event_histogram,
     _fetch_v8_operator_status,
     _overview_config,

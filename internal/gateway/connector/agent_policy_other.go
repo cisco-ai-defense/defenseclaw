@@ -28,8 +28,6 @@ func codexPlatformManagedPolicy(policy codexEffectivePolicy, err error) (codexEf
 
 func codexAttributePolicy(policy codexEffectivePolicy) codexEffectivePolicy { return policy }
 
-func codexRequirementsUntrustedAccepted(string, error) bool { return false }
-
 func codexPreinspectedPolicy(string, string) (codexEffectivePolicy, bool) {
 	return codexEffectivePolicy{}, false
 }

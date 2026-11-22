@@ -8,6 +8,7 @@ package gateway
 import (
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -19,7 +20,8 @@ import (
 // machineLayoutCall posts one PreToolUse call of the Claude Code hook, as
 // the per-user hook or as a managed hook peer of home, under the rule pack
 // ("" is the default pack), and reports whether it is blocked by the
-// DefenseClaw state-write finding.
+// DefenseClaw state-write finding (a block in the strict pack, a HIGH alert in
+// the others).
 func machineLayoutCall(t *testing.T, home, project, tool string, input map[string]any, managed bool, pack string) (blocked bool, response string) {
 	t.Helper()
 	cfg := &config.Config{}
@@ -37,7 +39,19 @@ func machineLayoutCall(t *testing.T, home, project, tool string, input map[strin
 	recorder := httptest.NewRecorder()
 	api.handleAgentHook("claudecode").ServeHTTP(recorder, req)
 	response = recorder.Body.String()
-	return strings.HasPrefix(response, `{"action":"block"`) && strings.Contains(response, "tamper.detector_state_write"), response
+	// GAP-0747 owner tiering 2026-11-15T15:20Z: the state write is a block in
+	// strict and a HIGH alert in the default and permissive packs.
+	want := `{"action":"alert"`
+	if pack == "strict" {
+		want = `{"action":"block"`
+	}
+	if strings.HasPrefix(response, `{"action":"block"`) && strings.Contains(response, "tamper.detector_state_write") &&
+		strings.Contains(response, "persistence.ssh_authorized_keys_command") {
+		// The unresolved-target rule beside the state write blocks in every
+		// tier (the /etc/defenseclaw/../ spelling cannot be resolved).
+		return true, response
+	}
+	return strings.HasPrefix(response, want) && strings.Contains(response, "tamper.detector_state_write"), response
 }
 
 // machineLayoutProtected are files of the machine install and state of a
@@ -138,7 +152,7 @@ func TestMachineLayoutShellWritesAreSelfProtection(t *testing.T) {
 				blocked, got := machineLayoutCall(t, home, project, "Bash", map[string]any{"command": row.command, "description": "d"}, managed, pack)
 				switch {
 				case row.protected && !blocked:
-					t.Errorf("managed=%t pack=%q: %s = %.200s, want protected block", managed, pack, row.command, got)
+					t.Errorf("managed=%t pack=%q: %s = %.900s, want protected block", managed, pack, row.command, got)
 				case !row.protected && pack != "strict" && strings.HasPrefix(got, `{"action":"block"`):
 					t.Errorf("managed=%t pack=%q: %s = %.200s, want allow", managed, pack, row.command, got)
 				}
@@ -188,11 +202,19 @@ func TestMachineLayoutApplyPatchIsSelfProtection(t *testing.T) {
 		for _, managed := range []bool{false, true} {
 			for _, connectorName := range []string{"codex", "copilot"} {
 				f := newAbsolutePatchFixture(t)
+				// The profile pack is installed once per cell, not once
+				// per call (a pack load and CEL compile is about 0.25 s of
+				// CPU under -race; it was 96 percent of the test).
+				installToolCallCorpusProfileConnector(t, connectorName, profile)
 				for _, file := range machineLayoutProtected {
 					for _, patch := range []string{updatePatch(file), "*** Begin Patch\n*** Add File: " + file + "\n+x\n*** End Patch\n",
 						"*** Begin Patch\n*** Delete File: " + file + "\n*** End Patch\n"} {
-						if got, out := postApplyPatch(t, f, connectorName, profile, managed, patch); got != "block" || !strings.Contains(out, "tamper.detector_state_write") {
-							t.Errorf("%s/%s managed=%t patch of %s = %s, want protected block: %.300s", profile, connectorName, managed, file, got, out)
+						want := "alert" // GAP-0747: a HIGH alert outside strict
+						if profile == "strict" {
+							want = "block"
+						}
+						if got, out := postInstalledApplyPatch(t, f, connectorName, profile, managed, patch); got != want || !strings.Contains(out, "tamper.detector_state_write") {
+							t.Errorf("%s/%s managed=%t patch of %s = %s, want protected %s: %.300s", profile, connectorName, managed, file, got, want, out)
 						}
 					}
 				}
@@ -201,12 +223,59 @@ func TestMachineLayoutApplyPatchIsSelfProtection(t *testing.T) {
 				}
 				for _, file := range machineLayoutOrdinary {
 					file = strings.ReplaceAll(file, "{P}", f.project)
-					if got, out := postApplyPatch(t, f, connectorName, profile, managed, updatePatch(file)); got == "block" {
+					if got, out := postInstalledApplyPatch(t, f, connectorName, profile, managed, updatePatch(file)); got == "block" {
 						t.Errorf("%s/%s managed=%t patch of %s = block, want allow: %.300s", profile, connectorName, managed, file, out)
 					}
 				}
 			}
 		}
+	}
+}
+
+// postInstalledApplyPatch is postApplyPatch for a cell whose profile pack
+// the caller has already installed for connectorName with
+// installToolCallCorpusProfileConnector: the same request, headers and
+// decision, without loading the pack again for every call.
+func postInstalledApplyPatch(t *testing.T, f absolutePatchFixture, connectorName, profile string, managed bool, patch string) (string, string) {
+	t.Helper()
+	var body map[string]any
+	if connectorName == "codex" {
+		body = map[string]any{"session_id": "gap0361", "hook_event_name": "PreToolUse", "cwd": f.project, "permission_mode": "default",
+			"tool_name": "apply_patch", "tool_use_id": "toolu_gap0361", "tool_input": map[string]any{"command": patch}}
+	} else {
+		body = map[string]any{"sessionId": "gap0361", "timestamp": 1790483549431, "cwd": f.project, "toolName": "apply_patch", "toolArgs": patch}
+	}
+	raw := string(mustJSON(t, body))
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = connectorName
+	cfg.Guardrail.RulePackDir = filepath.Join(guardrailPoliciesRoot(t), profile)
+	api := &APIServer{scannerCfg: cfg, health: NewSidecarHealth()}
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/"+connectorName+"/hook", strings.NewReader(raw))
+	req.Header.Set("Content-Type", "application/json")
+	if connectorName == "copilot" {
+		req.Header.Set("X-DefenseClaw-Copilot-Event", "preToolUse")
+		req.Header.Set(hookpaths.Header, hookpaths.ResolveConnector("copilot", "", "preToolUse", []byte(raw)))
+	} else {
+		req.Header.Set(hookpaths.Header, hookpaths.Resolve([]byte(raw)))
+		setTestCodexHookBinding(req, "PreToolUse", defaultTestCodexHookContract)
+	}
+	if managed {
+		req = req.WithContext(withManagedHookPeer(req.Context(), managedHookPeer{Home: f.home}))
+	}
+	recorder := httptest.NewRecorder()
+	api.handleAgentHook(connectorName).ServeHTTP(recorder, req)
+	out := recorder.Body.String()
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status %d: %.400s", recorder.Code, out)
+	}
+	switch {
+	case strings.Contains(out, `"action":"block"`) || strings.Contains(out, `"permissionDecision":"deny"`):
+		return "block", out
+	case strings.Contains(out, `"action":"alert"`):
+		return "alert", out
+	default:
+		return "allow", out
 	}
 }
 

@@ -445,7 +445,7 @@ func TestProxyDispatch_BlockEnqueuesGuardrailToast(t *testing.T) {
 		Reason:   "test verdict reason",
 		Severity: "HIGH",
 	}
-	p.enqueueBlockNotification(verdict, "prompt", "claude-3.5-sonnet")
+	p.enqueueBlockNotification(context.Background(), verdict, "prompt", "claude-3.5-sonnet")
 
 	got := rec.WaitFor(t, 1)
 	if !strings.Contains(got[0].Title, "claude-3.5-sonnet") {
@@ -494,7 +494,7 @@ func TestProxyDispatch_RedactsReason(t *testing.T) {
 		Reason:   "regex hit on AKIAIOSFODNN7EXAMPLE in user input",
 		Severity: "HIGH",
 	}
-	p.enqueueBlockNotification(verdict, "prompt", "claude-3.5-sonnet")
+	p.enqueueBlockNotification(context.Background(), verdict, "prompt", "claude-3.5-sonnet")
 	got := rec.WaitFor(t, 1)
 	if strings.Contains(got[0].Body, "AKIAIOSFODNN7EXAMPLE") {
 		t.Errorf("guardrail toast must not leak raw AWS-key-shaped string; "+

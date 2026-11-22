@@ -133,3 +133,32 @@ rules:
     severity: HIGH
     confidence: 0.80
     tags: [cognitive-tampering, tampering]
+  - id: tamper.defenseclaw_control_disable
+    tool_call_only: true
+    # Code-owned (defenseClawControlFindings, GAP-0596): a tool call that
+    # stops, disables, uninstalls or weakens DefenseClaw itself: the
+    # defenseclaw or defenseclaw-gateway program with a stop, disable,
+    # uninstall, reset, observe-mode, fail-open or config set/unset verb, a
+    # service manager (systemctl, launchctl, sc, net, schtasks, Stop-Service)
+    # stopping a DefenseClaw unit, label or service, or kill/pkill/taskkill of
+    # a DefenseClaw process. Read-only commands, restarts and enables stay
+    # allowed. The inert regex cannot match alone. Same decision as
+    # tamper.detector_state_write: the effect is the same as writing the state.
+    pattern: 'a^'
+    title: "Stop or disable DefenseClaw"
+    severity: CRITICAL
+    confidence: 0.98
+    tags: [cognitive-tampering, tampering, security-state]
+  - id: tamper.defenseclaw_control_unproven
+    tool_call_only: true
+    # Code-owned (defenseClawControlFindings, GAP-0596): a DefenseClaw command
+    # that changes something the rules cannot name (a verb that is not a known
+    # read, stop or disable), a dynamic DefenseClaw target of a kill or service
+    # manager, or an unopened inline script that names DefenseClaw with a
+    # stopping word. HIGH: an alert in the default and permissive packs, a
+    # block in strict.
+    pattern: 'a^'
+    title: "Change or stop DefenseClaw (unproven)"
+    severity: HIGH
+    confidence: 0.80
+    tags: [cognitive-tampering, tampering]

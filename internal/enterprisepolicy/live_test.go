@@ -339,8 +339,10 @@ func TestVerifyLiveClaudeRequiresTheCanaryToolCallRecord(t *testing.T) {
 	}
 	agent := fakeAgentScript(t, "claude", map[string]string{})
 	for name, lo := range map[string]LiveOptions{
-		"no event history":       {},
-		"missing audit database": {AuditDB: filepath.Join(t.TempDir(), "audit.db")},
+		"no event history": {},
+		"missing audit database": {HookRecords: func(ctx context.Context, query audit.HookToolInvocationQuery) (audit.HookToolInvocationEvidence, error) {
+			return audit.FindHookToolInvocation(ctx, filepath.Join(t.TempDir(), "audit.db"), query)
+		}},
 	} {
 		lo.Connector, lo.AgentBinary, lo.Home, lo.UID, lo.Timeout = ConnectorClaudeCode, agent, home, os.Getuid(), 30*time.Second
 		result, err := VerifyLive(context.Background(), opts, lo)

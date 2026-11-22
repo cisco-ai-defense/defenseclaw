@@ -1,0 +1,23 @@
+# PLACEHOLDER price table until S10 writes the reviewed default table into
+# config.yaml (observability.pricing). Cloud rows use Anthropic first-party
+# list prices as cached by the claude-api reference on 2026-11-03 (USD per
+# million tokens): fast = Haiku 5.5, mid = Sonnet 5.5, strong = Opus 5.5.
+# local = an on-device model, priced 0 (hardware cost not counted).
+version: placeholder-2026-11-12.1
+note: "placeholder prices (Haiku/Sonnet/Opus 5.5 list, 2026-11-03); replace with the S10 table"
+chars_per_token: 4
+aliases:
+  local:  {input_per_mtok: 0.0,  output_per_mtok: 0.0}
+  fast:   {input_per_mtok: 0.10, output_per_mtok: 0.50}
+  mid:    {input_per_mtok: 2.00, output_per_mtok: 10.00}
+  strong: {input_per_mtok: 4.00, output_per_mtok: 20.00}
+# Expected output tokens per request by expected category (placeholder
+# estimate; input tokens are measured from the prompt at chars_per_token).
+output_tokens:
+  coding: 700
+  reasoning: 1200
+  chat: 300
+  summarize: 250
+  sensitive: 350
+  tool_heavy: 800
+  cheap_fast: 40

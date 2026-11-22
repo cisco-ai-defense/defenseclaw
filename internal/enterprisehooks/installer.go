@@ -61,7 +61,6 @@ type InstallOptions struct {
 	ProxyAddr      string
 	APIToken       string
 	OTLPPathToken  string
-	MasterKey      string
 	HookFailMode   string
 	GuardrailMode  string
 	HILTEnabled    bool
@@ -92,6 +91,11 @@ type InstallOptions struct {
 	// Unix shell hook runs for the session facts (see connector.SetupOpts).
 	// Empty everywhere else.
 	ManagedHookBinary string
+	// RouteOnly is the route-only rendering of this target (S1 DESIGN
+	// 17.7): set by the standalone guardian for an enrolled user of a
+	// routed connector, nil otherwise (Setup then removes an earlier
+	// render, and Verify reports one left behind as route_config_drift).
+	RouteOnly *connector.RouteOnlySetup
 
 	// AllowMissingHookConfigRepair permits the guardian to recreate a missing
 	// native hook config file only after an administrator-owned caller has
@@ -171,7 +175,21 @@ type InstallResult struct {
 	// the schema a prior binary reads strictly. The worker's answer carries
 	// it next to the result, and the guardian records it in its own file.
 	AgentConfig string `json:"-"`
+	// RouteOnly is RouteOnlyUnverified when verify could not read the route-only
+	// agent files of the account: on Windows only LocalSystem reads them as the
+	// account, so the verify of an elevated administrator proves the render
+	// neither present nor drifted (GAP-1111). Empty otherwise, and always
+	// empty in the results of the guardian, which runs as LocalSystem.
+	RouteOnly string `json:"route_only,omitempty"`
 }
+
+// RouteOnlyUnverified is InstallResult.RouteOnly for a route-only render
+// verify could not read.
+const RouteOnlyUnverified = "unverified"
+
+// RouteConfigUnverifiedCode is the error code of a target whose route-only
+// render verify could not read: not ok, and not route_config_drift.
+const RouteConfigUnverifiedCode = "route_config_unverified"
 
 // agentConfigReadOnVerify reports a guardian that verifies the accounts'
 // agent configs without writing in their data folders: the Windows
@@ -276,6 +294,7 @@ func newVerifyTarget(opts InstallOptions, operation string) (verifyTarget, error
 		// the guard existed, or edited) fails and the guardian re-renders it.
 		ForeignHookGuardBinary: strings.TrimSpace(opts.ForeignHookGuardBinary),
 		ManagedHookBinary:      strings.TrimSpace(opts.ManagedHookBinary),
+		RouteOnly:              opts.RouteOnly,
 	}
 	if runtime.GOOS == "darwin" && secureClientHookDelivery() {
 		setupOpts.HookExecutable = "/opt/cisco/secureclient/defenseclaw/bin/defenseclaw-gateway"
@@ -417,6 +436,15 @@ func Verify(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 			// target's own per-user credentials.
 			if connector.HookCredentialDrifted(lock, setupOpts) {
 				return fmt.Errorf("enterprise hooks: connector %s hooks were installed with credentials that are not bound to this user", conn.Name())
+			}
+			// A route-only rendering the user edited or removed, one with a
+			// rotated credential, or one left after routing was turned off
+			// fails verification, so the guardian repair re-renders it and
+			// its report carries route_config_drift (S1 DESIGN 18.3).
+			if standalonePerUserRepair(uid) {
+				if err := connector.RouteOnlyDrift(conn, setupOpts, setupOpts.RouteOnly); err != nil {
+					return fmt.Errorf("enterprise hooks: %w", err)
+				}
 			}
 			// A standalone Hermes hook installed before it ran the
 			// foreign-hook guard (or for another hook binary) is
@@ -560,6 +588,7 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 		// Only the standalone guardian sets this, for Amp and OpenCode.
 		ForeignHookGuardBinary: strings.TrimSpace(opts.ForeignHookGuardBinary),
 		ManagedHookBinary:      strings.TrimSpace(opts.ManagedHookBinary),
+		RouteOnly:              opts.RouteOnly,
 	}
 	if runtime.GOOS == "darwin" && secureClientHookDelivery() {
 		setupOpts.HookExecutable = "/opt/cisco/secureclient/defenseclaw/bin/defenseclaw-gateway"
@@ -685,7 +714,7 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 				return err
 			}
 			defer unlock()
-			conn.SetCredentials(setupOpts.APIToken, opts.MasterKey)
+			conn.SetCredentials(setupOpts.APIToken)
 			previousLockEntry := connector.LoadHookContractLockEntry(dataDir, conn.Name())
 			var beforeSetup dataDirSnapshot
 			var beforeHookConfigs hookConfigSnapshot

@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
+	"github.com/defenseclaw/defenseclaw/internal/daemon"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
@@ -36,11 +37,16 @@ func (a *APIServer) recordRuntimeAPIAddress(listener net.Listener) error {
 	if !host.IsLoopback() {
 		return nil
 	}
+	// start_identity is this process's creation time as its PID record
+	// spells it: daemon.HomeGatewayHoldsPort tells this gateway from a later
+	// process that got its PID, and a non-elevated start or stop accepts an
+	// elevated gateway whose token it cannot read by it (rel-1-0-10:GAP-1164).
 	body, err := json.Marshal(struct {
-		PID  int    `json:"pid"`
-		Host string `json:"host"`
-		Port int    `json:"port"`
-	}{os.Getpid(), host.String(), address.Port})
+		PID           int    `json:"pid"`
+		Host          string `json:"host"`
+		Port          int    `json:"port"`
+		StartIdentity string `json:"start_identity,omitempty"`
+	}{os.Getpid(), host.String(), address.Port, daemon.SelfStartIdentity()})
 	if err != nil {
 		return err
 	}

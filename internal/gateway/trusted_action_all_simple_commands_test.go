@@ -365,9 +365,15 @@ func TestTrustedActionDirectoryBuiltinsMatchStandalone(t *testing.T) {
 			Input:      actionfacts.Input{Tool: "shell", Command: command, CWD: "/repo", ActiveHome: "/home/alice", DialectHint: actionfacts.DialectPOSIX},
 			LegacyText: command, Connector: connector, EnforcementCapable: true,
 		})
+		// The folder is not known and the operand is a private key in a
+		// home: the unknown tier of an unresolved folder (the shared limit
+		// finding, reason unresolved_folder; the profile makes it an alert
+		// in default and a block in strict), never the parse-uncertainty
+		// refusal (rel-1-0-10:GAP-0871 ruling, td327rev review).
+		limit := findingWithID(findings, "ACTION-COMPOUND-LIMIT")
 		if got := findingWithID(findings, "ACTION-COMPOUND-UNPROVEN"); got != nil ||
-			buildVerdict(findings, "tool_call").Action == guardrailActionBlock {
-			t.Errorf("%q: unknown directory was refused by parse uncertainty: %v", command, FindingStrings(findings))
+			limit == nil || !strings.Contains(limit.Evidence, unresolvedFolderReason) {
+			t.Errorf("%q: unknown directory: want the unresolved-folder unknown tier and no parse refusal: %v", command, FindingStrings(findings))
 		}
 	}
 }

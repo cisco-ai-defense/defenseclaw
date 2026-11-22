@@ -31,7 +31,7 @@ func TestFileToolVendorFolderOrdinaryFileAllowsAndPublishedSettingsStayBlocked(t
 				"/etc/codex/requirements.toml", "/Library/Application Support/ClaudeCode/managed-settings.json",
 			} {
 				input := map[string]any{"file_path": file, "content": "x"}
-				if _, got := postFileToolCell(t, home, project, "Write", input, managed, pack); !strings.HasPrefix(got, fileToolBlockPrefix) {
+				if _, got := postFileToolCell(t, home, project, "Write", input, managed, pack); !gap0747FileToolBlocked(got, pack) {
 					t.Errorf("published settings %q managed=%t pack=%q allowed: %.200s", file, managed, pack, got)
 				}
 			}
@@ -66,7 +66,7 @@ func TestFileToolWindowsVendorFolderOrdinaryFileAndShortNameShapeAllowAndAliases
 				`//localhost/C$/Program Files/ClaudeCode/managed-settings.json`,
 			} {
 				input := map[string]any{"file_path": file, "content": "x"}
-				if _, got := postFileToolCell(t, home, home+`\proj`, "Write", input, managed, pack); !strings.HasPrefix(got, fileToolBlockPrefix) {
+				if _, got := postFileToolCell(t, home, home+`\proj`, "Write", input, managed, pack); !gap0747FileToolBlocked(got, pack) {
 					t.Errorf("protected alias %q managed=%t pack=%q allowed: %.200s", file, managed, pack, got)
 				}
 			}

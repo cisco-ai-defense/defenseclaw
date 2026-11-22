@@ -1,6 +1,6 @@
 ---
 title: Okta on Linux
-description: Read Okta users and groups on a Linux host through the Okta LDAP Interface and SSSD, choose DefenseClaw guardrail profiles by Okta group, and check the result. Covers the Okta setup, the SSSD build that can bind to Okta, the starter scripts, what was tested, and troubleshooting.
+description: Read Okta users and groups on a Linux host through the Okta LDAP Interface and SSSD, choose DefenseClaw guardrail profiles by Okta group, and check the result. Covers the Okta setup, the SSSD build that can bind to Okta, the starter scripts, what is supported, and troubleshooting.
 keywords:
   - DefenseClaw Okta
   - Okta LDAP Interface
@@ -16,10 +16,10 @@ DefenseClaw never calls Okta. On Linux, Okta users become operating-system accou
 
 This applies to per-user installs and the standalone enterprise profile on Linux. The Secure Client integration rejects `guardrail.profiles`, `profile_assignments` and `default_profile`. A per-user install keeps its config in the user's home, so the user can change their own profile; to enforce one, deliver it in the machine config of the standalone profile.
 
-## What was tested
+## What is supported
 
-<Callout type="warn" title="Not part of the release certification">
-Active Directory is the certified identity stack. The Okta lab is retired, so this page describes the last verified behaviour (October 2026, RHEL 9.8, one okta.com org, SSSD 2.9.8 with the `ldap_use_ppolicy` backport, Claude Code, per-user and standalone enterprise installs). Ubuntu, Debian, SLES, RHEL 10, other Okta domains and macOS or Windows with Okta were not tested.
+<Callout type="warn" title="Preview">
+Active Directory is the supported identity stack. Okta on Linux is Preview: it is available but may change. It works with RHEL 9.8, one okta.com org, SSSD 2.9.8 with the `ldap_use_ppolicy` backport, Claude Code, and per-user and standalone enterprise installs. Ubuntu, Debian, SLES, RHEL 10, other Okta domains and macOS or Windows with Okta are Preview.
 </Callout>
 
 ## Requirements
@@ -219,7 +219,7 @@ Read a record with `defenseclaw audit export` as in [Join a Linux host to AD](/d
 
 ## macOS and Windows
 
-This kit covers Linux hosts. For the other platforms DefenseClaw reports what the operating system already knows; see [How Okta and Entra users appear](/docs/enterprise/identity-sources#how-okta-and-entra-users-appear). AD-joined Windows and macOS, with Okta provisioning users into AD, show the AD account; Okta provisioning into AD, Entra federation with Okta, and Platform SSO or Okta Device Access with Okta Verify (directory `okta`, standalone enterprise only) were not tested live.
+This kit covers Linux hosts. For the other platforms DefenseClaw reports what the operating system already knows; see [How Okta and Entra users appear](/docs/enterprise/identity-sources#how-okta-and-entra-users-appear). AD-joined Windows and macOS, with Okta provisioning users into AD, show the AD account; Okta provisioning into AD, Entra federation with Okta, and Platform SSO or Okta Device Access with Okta Verify (directory `okta`, standalone enterprise only) are Preview.
 
 ## Troubleshooting
 

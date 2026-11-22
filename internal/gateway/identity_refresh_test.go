@@ -233,7 +233,7 @@ func TestIdentityRefreshRefusals(t *testing.T) {
 // The audit row (and the telemetry built from it) carries counts only: no
 // account name and no uid or SID.
 func TestIdentityRefreshAuditRowCarriesCountsOnly(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	fixture := newSidecarRuntimeFixture(t, true)
 	fingerprints, err := observabilityredaction.NewEngine(bytes.Repeat([]byte{0x42}, 32))
 	if err != nil {

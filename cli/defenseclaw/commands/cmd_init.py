@@ -3635,13 +3635,17 @@ def _setup_gateway_defaults(cfg, logger, is_new_config: bool = True) -> None:
     connector = ", ".join(active) or "none"
     openclaw_active = "openclaw" in active
     gw_info = _resolve_gateway_for_connector(cfg)
-    token_configured = False
     if is_new_config:
         cfg.gateway.host = gw_info["host"]
         cfg.gateway.port = gw_info["port"]
 
+    from defenseclaw.commands.cmd_setup import _repoint_openclaw_token_env
+
+    # OPENCLAW_GATEWAY_TOKEN is never the DefenseClaw master (R-TOK); a token_env
+    # an earlier release pointed at it is repointed at the canonical name.
+    _repoint_openclaw_token_env(cfg.gateway)
     if openclaw_active and gw_info["token"]:
-        from defenseclaw.commands.cmd_setup import _save_secret_to_dotenv
+        from defenseclaw.commands.cmd_setup import _ensure_master_gateway_token, _save_secret_to_dotenv
         from defenseclaw.logger import keep_running_gateway_token
 
         # The OpenClaw gateway token is read from the connector-controlled
@@ -3651,25 +3655,23 @@ def _setup_gateway_defaults(cfg, logger, is_new_config: bool = True) -> None:
         # fails loudly with an operator-facing error instead of being relied
         # on the writer's defense-in-depth sanitization alone. F-0361.
         _validate_gateway_token("OPENCLAW_GATEWAY_TOKEN", gw_info["token"])
-        # A re-run with a running gateway: it keeps its token until it
-        # restarts, so this run's audit events use that one (GAP-0490).
-        keep_running_gateway_token(logger, cfg.data_dir, cfg.gateway.resolved_token(), gw_info["token"])
+        # The OpenClaw token is only the credential the gateway presents to
+        # the OpenClaw WebSocket. The DefenseClaw master is a separate value
+        # that the OpenClaw account never holds: one is generated now when
+        # .env has none, or when it still equals the OpenClaw token.
+        # The token a running gateway loaded: an older one may still run on a
+        # master equal to the OpenClaw token, which resolved_token() skips.
+        previous = os.environ.get("DEFENSECLAW_GATEWAY_TOKEN", "").strip() or cfg.gateway.resolved_token()
         _save_secret_to_dotenv("OPENCLAW_GATEWAY_TOKEN", gw_info["token"], cfg.data_dir)
-        cfg.gateway.token = ""
-        cfg.gateway.token_env = "OPENCLAW_GATEWAY_TOKEN"
-        token_configured = True
-    else:
-        # Hook-only / non-openclaw install (or openclaw with no token):
-        # default token_env to the canonical DEFENSECLAW_ name (the Go gateway
-        # auto-generates it on first boot and writes ~/.defenseclaw/.env).
-        # Preserve any operator-set value to respect explicit overrides from
-        # `defenseclaw setup gateway`. `resolved_token()` still falls back to a
-        # legacy OPENCLAW_GATEWAY_TOKEN already in .env, so upgraders keep
-        # authenticating without manual remediation. (_resolve_gateway_for_
-        # connector only ever returns a token for openclaw, so the prior
-        # per-connector-name token branch was unreachable and is dropped.)
-        cfg.gateway.token_env = cfg.gateway.token_env or "DEFENSECLAW_GATEWAY_TOKEN"
-        token_configured = bool(cfg.gateway.resolved_token())
+        if _ensure_master_gateway_token(cfg.data_dir, openclaw_token=gw_info["token"]):
+            # A re-run with a running gateway: it keeps its token until it
+            # restarts, so this run's audit events use that one (GAP-0490).
+            keep_running_gateway_token(logger, cfg.data_dir, previous, cfg.gateway.resolved_token())
+    # Default token_env to the canonical name; an operator-set value from
+    # `defenseclaw setup gateway` is kept. (_resolve_gateway_for_connector
+    # only ever returns a token for openclaw.)
+    cfg.gateway.token_env = cfg.gateway.token_env or "DEFENSECLAW_GATEWAY_TOKEN"
+    token_configured = bool(cfg.gateway.resolved_token())
     if gw_info.get("token_cleanup"):
         click.echo(f"  {gw_info['token_cleanup']}")
     if gw_info.get("token_notice"):
@@ -3828,6 +3830,20 @@ def _setup_guardrail_inline(app, cfg, logger) -> bool:
         click.echo("  Guardrail not enabled.")
         click.echo("  You can enable it later with 'defenseclaw setup guardrail'.")
         return False
+
+    actives = cfg.active_connectors() if hasattr(cfg, "active_connectors") else []
+    if "openclaw" in {str(gc.connector or "").strip().lower(), *actives}:
+        # The OpenClaw preflight (plugin bytes and owners, OpenClaw files, the
+        # native floor) runs before init configures anything, as in setup
+        # openclaw (rel-1-0-10 GAP-0075, REVIEW-4 P2-6).
+        from defenseclaw.commands.cmd_setup import _agent_settings_refusal
+
+        if refusal := _agent_settings_refusal(
+            cfg, "openclaw", workspace_dir="", will_restart=True,
+            changed="Init configured no guardrail", rerun="command",
+        ):
+            ux.warn(refusal, indent="  ")
+            return False
 
     ok, warnings = execute_guardrail_setup(app, save_config=False)
 

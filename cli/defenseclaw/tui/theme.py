@@ -111,8 +111,10 @@ def severity_color(severity: str, tokens: ThemeTokens = DEFAULT_TOKENS) -> str:
 
     styles = {
         "CRITICAL": tokens.accent_red,
+        "CRIT": tokens.accent_red,
         "HIGH": tokens.accent_orange,
         "MEDIUM": tokens.accent_amber,
+        "MED": tokens.accent_amber,
         "LOW": tokens.accent_blue,
         "INFO": tokens.text_secondary,
     }

@@ -8,6 +8,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/antigravityargs"
 )
 
 func TestAntigravityProfileDecodeOfficialEvents(t *testing.T) {
@@ -119,7 +121,7 @@ func TestAntigravityToolArgsFromRawPayloadStrictEnvelope(t *testing.T) {
 		}
 	}
 
-	nested := strings.Repeat("[", antigravityMaxJSONNestingDepth) + "0" + strings.Repeat("]", antigravityMaxJSONNestingDepth)
+	nested := strings.Repeat("[", antigravityargs.MaxJSONNestingDepth) + "0" + strings.Repeat("]", antigravityargs.MaxJSONNestingDepth)
 	deep := []byte(`{"toolCall":{"name":"run_command","args":{"nested":` + nested + `}}}`)
 	if !json.Valid(deep) || antigravityToolArgsFromRawPayload(deep) != nil {
 		t.Fatal("excessively nested payload was not rejected")

@@ -17,8 +17,6 @@ import json
 import re
 from pathlib import Path
 
-import pytest
-
 ROOT = Path(__file__).resolve().parents[2]
 PAGE = ROOT / "docs-site/content/docs/connectors/cowork.mdx"
 GO_CONNECTOR = ROOT / "internal/gateway/connector"
@@ -310,7 +308,7 @@ def test_the_vm_limit_is_scoped_to_the_hook():
 def test_the_engine_version_is_the_vocabulary_engine_version():
     version = re.search(r'CoworkVocabularyEngineVersion = "([\d.]+)"', GO_COWORK.read_text(encoding="utf-8")).group(1)
     text = _page()
-    assert f"measured on engines {version} and " in text
+    assert f"for engines {version} and " in text
     assert f"Engine {version} resolves to a known contract (`claudecode-hooks-v2`)" in text
     contracts = json.loads(CONTRACTS.read_text(encoding="utf-8"))
 
@@ -329,27 +327,59 @@ def test_the_engine_version_is_the_vocabulary_engine_version():
     assert floor <= tuple(int(p) for p in version.split(".")), contract["agent_version"]
 
 
-# The sensor's names, its package and its asset names. "Cowork VM" alone is
-# Anthropic's VM and is named on purpose (R39).
-_SENSOR_TERMS = re.compile(r"vm[ _-]?sensor|sensor package|cowork[_-]vm|defenseclaw-cowork-(?:amd64|arm64)", re.I)
-
-
-# Every public doc: the docs site, docs/, the CHANGELOG and the README
-# (audit review 2 N3, review 3).
-_PUBLIC_DOCS = (
-    *sorted((ROOT / "docs-site/content").rglob("*.mdx")),
-    *sorted((ROOT / "docs").rglob("*.md")),
-    ROOT / "CHANGELOG.md",
-    ROOT / "README.md",
+# The Cowork VM sensor has its own page (owner decision 2026-11-21: document it;
+# it was undocumented before). Pin its settings table and its reason codes to
+# the schema and the host-delivery code.
+SENSOR_PAGE = ROOT / "docs-site/content/docs/connectors/cowork-vm-sensor.mdx"
+SENSOR_SCHEMA = ROOT / "schemas/config/v8/defenseclaw-config.schema.json"
+SENSOR_REASON_SOURCES = (
+    ROOT / "internal/enterpriseunix/cowork.go",
+    ROOT / "internal/cli/windows_enterprise_cowork_windows.go",
 )
 
 
-@pytest.mark.parametrize("path", _PUBLIC_DOCS, ids=lambda path: path.relative_to(ROOT).as_posix())
-def test_public_docs_do_not_name_the_vm_sensor(path):
-    # The Cowork VM sensor is undocumented by owner decision.
-    text = path.read_text(encoding="utf-8")
-    assert not _SENSOR_TERMS.findall(text), _SENSOR_TERMS.findall(text)
-    assert _SENSOR_TERMS.search("the Cowork VM sensor") and not _SENSOR_TERMS.search("the Cowork VM")
+def _sensor_page() -> str:
+    return SENSOR_PAGE.read_text(encoding="utf-8")
+
+
+def test_the_vm_sensor_settings_table_is_the_schema_keys_and_defaults():
+    schema = json.loads(SENSOR_SCHEMA.read_text(encoding="utf-8"))
+    (block,) = [v for k, v in _walk_items(schema) if k == "cowork_vm_sensor" and "properties" in v]
+    keys = set(block["properties"])
+    rows = _table(_section(_sensor_page(), "## Settings"), "Key")
+    assert {_ticks(row[0])[0] for row in rows} == keys
+    default_mode = block["properties"]["mode"]["default"]
+    mode_row = next(row for row in rows if _ticks(row[0]) == ["mode"])
+    assert f"`{default_mode}`" in mode_row[1]
+    required = set(block["allOf"][0]["then"]["required"])
+    assert required == {"tenant", "collector", "vendor", "source_dir", "package_sha256"}
+    for row in rows:
+        key = _ticks(row[0])[0]
+        assert (key in required) == ("required when `on`" in row[1]), key
+
+
+def _walk_items(node):
+    if isinstance(node, dict):
+        for key, value in node.items():
+            yield key, value
+            yield from _walk_items(value)
+    elif isinstance(node, list):
+        for value in node:
+            yield from _walk_items(value)
+
+
+def test_the_vm_sensor_reason_codes_are_the_codes_the_code_reports():
+    codes: set[str] = set()
+    for path in SENSOR_REASON_SOURCES:
+        text = path.read_text(encoding="utf-8")
+        codes |= set(re.findall(r'problem\("(\w+)"', text))
+        codes |= set(re.findall(r'\bcode\s*:?=\s*"(\w+)"', text))
+        codes |= set(re.findall(r'ReasonCodes(?: = append\(s\.ReasonCodes,| = \[\]string\{)\s*"(\w+)"', text))
+    codes |= {"cowork_vm_sensor_unsupported", "cowork_vm_sensor_device_unavailable"}
+    codes -= {"cowork_vm_sensor_incomplete"}
+    page = _sensor_page()
+    missing = sorted(code for code in codes if f"`{code}`" not in page)
+    assert not missing, missing
 
 
 def test_the_printed_uninstall_step_is_the_documented_reminder():

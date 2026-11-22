@@ -1,0 +1,3 @@
+tests/
+*.md.orig
+.DS_Store

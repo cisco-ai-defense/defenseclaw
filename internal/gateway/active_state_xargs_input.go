@@ -4,11 +4,15 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"path"
+	"slices"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/shellparse"
 	"mvdan.cc/sh/v3/syntax"
 )
 
@@ -50,6 +54,53 @@ func xargsStaticInputStateMutation(facts actionfacts.Facts, request trustedActio
 	return false
 }
 
+// xargsStaticInputReadings are the calls an xargs fed fixed words makes
+// (xargsStaticInputTwin, split and word twins, once each), for the
+// dispatcher to judge as typed (rel-1-0-10:GAP-0997). A command with no
+// xargs pipe has none.
+func xargsStaticInputReadings(command, home string) []string {
+	if len(command) > maxHereStringTwinBytes || !strings.Contains(command, "xargs") || !strings.Contains(command, "|") {
+		return nil
+	}
+	var readings []string
+	for _, split := range []bool{true, false} {
+		if twin, ok := xargsStaticInputTwin(command, home, split); ok && !slices.Contains(readings, twin) {
+			readings = append(readings, twin)
+		}
+	}
+	return readings
+}
+
+// xargsStaticInputTwinRequests are the requests for the calls an xargs fed
+// fixed words makes (xargsStaticInputReadings), for a reader that judges a
+// call on its own facts (the shell lane) to judge them as typed
+// (rel-1-0-10:GAP-0997). A reading twin gets none, so they do not nest.
+func xargsStaticInputTwinRequests(request trustedActionRequest) []trustedActionRequest {
+	if request.readingTwin || request.simpleCommandPass {
+		return nil
+	}
+	command, known := trustedBashCommandInput(request.Input)
+	if !known {
+		return nil
+	}
+	var twins []trustedActionRequest
+	for _, reading := range xargsStaticInputReadings(command, request.Input.ActiveHome) {
+		twin := windowsReadingTwin(request)
+		twin.Input.Command, twin.Input.Args, twin.Input.Argv = reading, nil, nil
+		if len(bytes.TrimSpace(request.Input.Args)) != 0 {
+			// The rules that read the tool input read the twin's command
+			// there, as the call carries its own.
+			raw, err := json.Marshal(map[string]string{"command": reading})
+			if err != nil {
+				continue
+			}
+			twin.Input.Command, twin.Input.Args = "", raw
+		}
+		twins = append(twins, twin)
+	}
+	return twins
+}
+
 // stateTwinMutates judges twin, a rewritten spelling of the action, through
 // the whole dispatcher: mutates when it gets an enforcing state tamper
 // finding; judged is false when the twin does not parse.
@@ -85,7 +136,7 @@ func xargsStaticInputTwin(command, home string, split bool) (string, bool) {
 const maxXargsTwinScriptDepth = 2
 
 func xargsStaticInputTwinAt(command, home string, split bool, depth int) (string, bool) {
-	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(command), "")
+	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(shellparse.Reader(command), "")
 	if err != nil {
 		return "", false
 	}

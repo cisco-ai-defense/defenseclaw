@@ -245,7 +245,10 @@ actor AuditStore {
                      THEN payload_json ELSE '' END AS payload_json,
                 CASE WHEN length(CAST(projected_record_json AS BLOB)) <= 65536
                      THEN projected_record_json ELSE '' END AS projected_record_json,
-                CASE WHEN length(CAST(payload_json AS BLOB)) > 65536 THEN 1 ELSE 0 END AS omitted
+                CASE WHEN length(CAST(payload_json AS BLOB)) > 65536 THEN 1
+                     WHEN COALESCE(payload_json, '') = '' AND event_name LIKE 'legacy.audit.%'
+                          AND length(CAST(projected_record_json AS BLOB)) > 65536 THEN 1
+                     ELSE 0 END AS omitted
             FROM audit_events
             WHERE signal = 'logs' AND bucket IS NOT NULL AND bucket <> ''
             ORDER BY timestamp DESC, rowid DESC LIMIT ?

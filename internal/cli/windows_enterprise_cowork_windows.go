@@ -24,6 +24,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
@@ -359,7 +360,7 @@ func loadWindowsCoworkSourceConfig(path string) (*config.Config, error) {
 	if err == nil || !errors.As(err, &drift) {
 		return c, err
 	}
-	layout, layoutErr := windowsManagedLayout.standalone()
+	layout, layoutErr := hookcli.WindowsManagedLayout.Standalone()
 	if layoutErr != nil {
 		return nil, err
 	}

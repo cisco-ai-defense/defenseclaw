@@ -27,12 +27,8 @@ func TestR104Loop1DynamicOperandWriteProof(t *testing.T) {
 	if err := os.WriteFile(protected, []byte("marker"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(protected, filepath.Join(cwd, "alias")); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(protected, filepath.Join(cwd, "linked-out.txt")); err != nil {
-		t.Fatal(err)
-	}
+	testSymlink(t, protected, filepath.Join(cwd, "alias"))
+	testSymlink(t, protected, filepath.Join(cwd, "linked-out.txt"))
 	t.Setenv("HOME", home)
 	for name, program := range map[string]string{"read.awk": "{print}\n", "write.awk": "{print > out}\n"} {
 		if err := os.WriteFile(filepath.Join(cwd, name), []byte(program), 0o600); err != nil {

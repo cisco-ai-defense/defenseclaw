@@ -136,7 +136,6 @@ func TestApplicationProtectionModeMatrixPreservesUnmanagedBaselineRepair(t *test
 				"hook-token",
 				"127.0.0.1:4000",
 				"127.0.0.1:18970",
-				"master-token",
 			)
 			stopGuards := func() int {
 				controller.mu.Lock()

@@ -98,7 +98,7 @@ func (c *Config) PreviewConnectorHILT(connector string, hilt HILTConfig) (Connec
 	for _, name := range names {
 		profile := base.Guardrail.Profiles[name]
 		preview.Profiles = append(preview.Profiles,
-			scope(name, deriveProfileFrom(base, profile), deriveProfileFrom(alt, profile)))
+			scope(name, deriveProfileFrom(base, name, profile), deriveProfileFrom(alt, name, profile)))
 	}
 	return preview, nil
 }

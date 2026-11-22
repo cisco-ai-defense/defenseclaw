@@ -1,0 +1,78 @@
+[
+  {
+    "name": "default pack",
+    "mode": "open"
+  },
+  {
+    "name": "observe mode, default pack",
+    "mode": "open"
+  },
+  {
+    "name": "permissive pack",
+    "mode": "open"
+  },
+  {
+    "name": "strict pack",
+    "mode": "closed"
+  },
+  {
+    "name": "saved closed",
+    "mode": "closed"
+  },
+  {
+    "name": "saved open over strict",
+    "mode": "open"
+  },
+  {
+    "name": "connector strict pack",
+    "mode": "closed"
+  },
+  {
+    "name": "pinned custom default pack",
+    "mode": "open"
+  },
+  {
+    "name": "pinned custom default pack, other connector",
+    "mode": "open"
+  },
+  {
+    "name": "pinned custom permissive pack",
+    "mode": "open"
+  },
+  {
+    "name": "pinned custom strict pack",
+    "mode": "closed"
+  },
+  {
+    "name": "pinned custom pack, stale pin",
+    "mode": "closed"
+  },
+  {
+    "name": "pinned custom pack, expression does not compile",
+    "mode": "closed"
+  },
+  {
+    "name": "unpinned custom default pack",
+    "mode": "closed"
+  },
+  {
+    "name": "connector custom pinned default pack",
+    "mode": "open"
+  },
+  {
+    "name": "sandbox profile pack looser than the admin floor",
+    "mode": "closed"
+  },
+  {
+    "name": "managed deployment",
+    "mode": "closed"
+  },
+  {
+    "name": "unreadable config",
+    "mode": "closed"
+  },
+  {
+    "name": "no config",
+    "mode": "closed"
+  }
+]

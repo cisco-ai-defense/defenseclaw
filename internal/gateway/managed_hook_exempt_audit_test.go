@@ -34,7 +34,7 @@ func exemptAuditRows(t *testing.T, store *audit.Store) int {
 // the call, not for a call the handler refused. A row the audit store did
 // not take leaves the interval open for the next call.
 func TestExemptUserRowFollowsAnAnsweredCallAndAStoredWrite(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	fixture := newSidecarRuntimeFixture(t, true)
 	fingerprints, err := observabilityredaction.NewEngine(bytes.Repeat([]byte{0x42}, 32))
 	if err != nil {
@@ -81,7 +81,7 @@ func TestExemptUserRowFollowsAnAnsweredCallAndAStoredWrite(t *testing.T) {
 // enterprise-exempt-user row and does not start the interval, so the
 // account's next inspected Codex call writes one.
 func TestExemptUserNotificationLeavesTheAuditIntervalOpen(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	fixture := newSidecarRuntimeFixture(t, true)
 	fingerprints, err := observabilityredaction.NewEngine(bytes.Repeat([]byte{0x42}, 32))
 	if err != nil {

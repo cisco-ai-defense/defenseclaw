@@ -19,7 +19,7 @@ import (
 // the control file that was hit; a call that also writes an authorized-keys
 // file keeps the keys title.
 func TestSSHControlFileWriteIsNamedForTheFile(t *testing.T) {
-	home, cwd := r104ReviewHome(t)
+	home, cwd := r104ReviewHomeNoAlias(t)
 	const keysTitle = "SSH authorized keys mutation"
 	for _, tc := range []struct {
 		command, want string

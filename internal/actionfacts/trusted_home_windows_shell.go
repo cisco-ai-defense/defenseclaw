@@ -16,6 +16,10 @@ import (
 // literal spelling was judged (GAP-1205).
 var trustedWindowsHomeLiteral = lazyMustCompile(`^[A-Za-z]:/[\p{L}\p{M}\p{N}._+ /-]*$`)
 
+// trustedUnixPowerShellHome is a Linux or macOS ActiveHome that reads as the
+// same path when written into a PowerShell word: the same characters, under /.
+var trustedUnixPowerShellHome = lazyMustCompile(`^/[\p{L}\p{M}\p{N}._+ /-]*$`)
+
 // windowsShellHomeAnchors are the spellings of the caller's home a PowerShell
 // or cmd word may start with, lower-cased. PowerShell's $HOME is a constant
 // automatic variable; USERPROFILE and the FileSystem provider home could be
@@ -25,9 +29,44 @@ var windowsShellHomeAnchors = map[Dialect][]string{
 	DialectCMD:        {"%userprofile%"},
 }
 
-// rewriteTrustedWindowsShellHome replaces each home anchor ($HOME, ~,
+// posixPowerShellHomeAnchors are the home spellings of pwsh on Linux and
+// macOS: $HOME and the FileSystem provider home ~ (USERPROFILE is not set
+// there). A pwsh -Command body that writes $HOME/.codex/config.toml or
+// ~/.defenseclaw/config.yaml was partial with no finding, where the same
+// path written out was judged (rel-1-0-10:GAP-1134).
+var posixPowerShellHomeAnchors = []string{"${home}", "$home", "~"}
+
+// posixPowerShellScript reports a reading of a script pwsh runs, whose $HOME
+// and ~ name a Linux or macOS ActiveHome: the script of a PowerShell launcher
+// (Input.PowerShellLauncherBody, rel-1-0-10:GAP-1134) or the command of a
+// PowerShell tool (Claude Code's PowerShell tool on Linux or macOS). Such a
+// tool call that wrote $HOME/.defenseclaw/config.yaml was partial with no
+// finding, where the same script in a launcher, or the path written out, was
+// judged (rel-1-0-10:GAP-1214). A Windows ActiveHome never takes this case.
+func posixPowerShellScript(input Input) bool {
+	if input.PowerShellLauncherBody {
+		return true
+	}
+	if input.WindowsHookHost {
+		return false
+	}
+	switch input.DialectHint {
+	case "", DialectNone, DialectPowerShell:
+	default:
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(input.Tool)) {
+	case "powershell", "powershell.exe", "pwsh", "pwsh.exe":
+		return true
+	}
+	return false
+}
+
+// rewriteTrustedShellHome replaces each home anchor ($HOME, ~,
 // $env:USERPROFILE, %USERPROFILE%) that starts a word and is followed by a
-// path separator with the trusted Windows ActiveHome. A Windows home made
+// path separator with the trusted Windows ActiveHome, and in a script pwsh
+// runs under a Linux or macOS ActiveHome (posixScript, posixPowerShellScript)
+// each of posixPowerShellHomeAnchors with that home. A Windows home made
 // `echo k >> $HOME\.ssh\authorized_keys` and `Get-Content ~\.ssh\id_rsa`
 // partial with no finding, while the same paths written out were judged
 // (GAP-0912). The caller re-parses the result and keeps it only when that
@@ -36,15 +75,21 @@ var windowsShellHomeAnchors = map[Dialect][]string{
 // The rewrite declines source with an escape character, an anchor inside
 // single quotes (PowerShell) or any other mention of HOME or USERPROFILE,
 // which could change what the anchors name before they are expanded.
-func rewriteTrustedWindowsShellHome(source, activeHome string, dialect Dialect) (string, bool) {
+func rewriteTrustedShellHome(source, activeHome string, dialect Dialect, posixScript bool) (string, bool) {
 	anchors := windowsShellHomeAnchors[dialect]
-	if len(anchors) == 0 || !trustedWindowsHomeLiteral.MatchString(activeHome) ||
-		strings.ContainsAny(source, "`^\x00") {
-		return "", false
-	}
 	// Written with backslashes, as cmd would otherwise read /Users as a
 	// switch; PowerShell reads both separators.
 	home := strings.ReplaceAll(activeHome, "/", `\`)
+	switch {
+	case trustedWindowsHomeLiteral.MatchString(activeHome):
+	case posixScript && dialect == DialectPowerShell && trustedUnixPowerShellHome.MatchString(activeHome):
+		anchors, home = posixPowerShellHomeAnchors, activeHome
+	default:
+		return "", false
+	}
+	if len(anchors) == 0 || strings.ContainsAny(source, "`^\x00") {
+		return "", false
+	}
 	lower := strings.ToLower(source)
 	var out, rest strings.Builder
 	last := 0

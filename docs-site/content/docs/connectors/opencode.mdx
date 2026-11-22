@@ -43,7 +43,7 @@ defenseclaw setup opencode                # first setup defaults to observe: rec
 defenseclaw setup opencode --mode action  # reject blocked calls before they run
 ```
 
-A re-run without `--mode` keeps the current mode. On a terminal setup still asks for the mode, with the current one as the default (Enter keeps it), and whether to re-apply the hooks; in action mode it also asks whether to add the LLM judge. `--yes` skips the questions ([the questions setup asks](/docs/guardrail/switching-connectors#the-questions-setup-asks)). On Windows, run the same commands in PowerShell.
+A re-run without `--mode` keeps the current mode. On a terminal setup still asks for the mode, with the current one as the default (Enter keeps it), and whether to re-apply the hooks; in action mode it also asks whether to add the LLM judge. `--yes` skips the questions ([the questions setup asks](/docs/connectors/switching-connectors#the-questions-setup-asks)). On Windows, run the same commands in PowerShell.
 
 **OpenCode's background server.** OpenCode V2 keeps a background server running after its window closes, and that server keeps the plugin it loaded. On Linux and macOS, `defenseclaw setup opencode` (also with `--mode`) and `defenseclaw uninstall` restart your account's own server when it runs, and say so; an open OpenCode window reconnects to it. After an upgrade, on Windows, or when setup says it could not, run `opencode service restart` yourself. Until OpenCode starts, `defenseclaw status` shows it as `IDLE`, which is normal.
 

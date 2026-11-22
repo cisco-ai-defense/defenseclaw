@@ -108,7 +108,7 @@ func updatePatch(target string) string {
 func TestApplyPatchAbsoluteTargetsAreJudged(t *testing.T) {
 	rows := []struct {
 		target, rule string
-		critical     bool // blocks in the default pack too
+		critical     bool // blocks in the default pack too (a state write alerts there, GAP-0747)
 	}{
 		{"/etc/sudoers", "PATH-ETC-SUDOERS", false},
 		{"/etc/shadow", "PATH-ETC-SHADOW", true},
@@ -116,7 +116,7 @@ func TestApplyPatchAbsoluteTargetsAreJudged(t *testing.T) {
 		{"{H}/.bashrc", "persistence.shell_profile_write", false},
 		{"{H}/.bash_history", "PATH-HISTORY", false},
 		{"{P}/.git/hooks/pre-commit", "persistence.git_hook_write", false},
-		{"{H}/.defenseclaw/config.yaml", "tamper.detector_state_write", true},
+		{"{H}/.defenseclaw/config.yaml", "tamper.detector_state_write", false},
 		{"{H}/.ssh/authorized_keys", "persistence.ssh_authorized_keys_command", true},
 	}
 	for _, profile := range []string{"default", "strict"} {

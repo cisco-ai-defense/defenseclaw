@@ -61,6 +61,28 @@ func RemoveIdleFileLockSentinels() {
 	}
 }
 
+// openWindowsLockFile opens or creates a per-user lock file. While
+// removeIdleWindowsLockSentinel inspects an idle lock it holds the file
+// without sharing, and an open then fails with a sharing violation; that
+// lasts a few system calls, so the open is retried for up to
+// windowsManagedFileLockTimeout.
+func openWindowsLockFile(lockPath string) (*os.File, error) {
+	deadline := time.Now().Add(windowsManagedFileLockTimeout)
+	for {
+		lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
+		if err == nil || !errors.Is(err, windows.ERROR_SHARING_VIOLATION) || !time.Now().Before(deadline) {
+			return lockFile, err
+		}
+		time.Sleep(windowsManagedFileLockRetry)
+	}
+}
+
+// removeIdleLockFile removes lockPath when it is an empty lock file no one
+// holds open (removeIdleWindowsLockSentinel).
+func removeIdleLockFile(lockPath string) {
+	removeIdleWindowsLockSentinel(lockPath)
+}
+
 // removeIdleWindowsLockSentinel deletes path when it is an empty regular
 // file with one link that it can open without sharing: no other handle, so no
 // lock holder, is open on it.
@@ -139,7 +161,7 @@ func withFileLockModeForTarget(
 			managedTarget,
 		)
 	} else {
-		lockFile, err = os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
+		lockFile, err = openWindowsLockFile(lockPath)
 	}
 	if err != nil {
 		return fmt.Errorf("open lock file %s: %w", lockPath, err)

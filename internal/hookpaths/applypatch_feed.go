@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
+	"github.com/defenseclaw/defenseclaw/internal/sensor/tactics"
 )
 
 // A staged patch is an apply_patch call that reads its envelope from a file:
@@ -32,6 +33,12 @@ var patchFeedProgram = lazyregexp.New(`^[A-Za-z][A-Za-z0-9_.-]*$`)
 // text read on stdin. ok is false unless the text is a staged-patch command
 // (see above) with at least one such file.
 func patchStagedFeeds(text string) (files []string, powershell []bool, ok bool) {
+	// Every feed is read by an apply_patch word of the text: a text that
+	// names none (MayNameProgram) is not split into words to find out,
+	// as every reading of a large here-document did (rel-1-0-10:GAP-0299).
+	if !tactics.MayNameProgram(text, applyPatchNames...) {
+		return nil, nil, false
+	}
 	collapsed, collapsedOK := patchCollapseEnvelopes(text)
 	if !collapsedOK || strings.ContainsAny(collapsed, ">`(){}") || strings.Contains(collapsed, "$(") {
 		return nil, nil, false

@@ -60,21 +60,25 @@ func normalizePathFactsForCommands(
 }
 
 // normalizePathFactsForCommandsInShell is normalizePathFactsForCommands;
-// windowsShellCWD is Input.MovedWindowsShellCWD.
+// windowsShellCWD is Input.MovedWindowsShellCWD. It normalizes facts in place
+// and returns them with the readings of each relative operand in the other
+// folders its command may run in (working_folder.go) appended.
 func normalizePathFactsForCommandsInShell(
 	facts []PathFact,
 	cwd string,
 	activeHome string,
 	commands []CommandFact,
 	windowsShellCWD bool,
-) {
+) []PathFact {
 	commandByID := make(map[int64]*CommandFact, len(commands))
 	for i := range commands {
 		commandByID[commands[i].ID] = &commands[i]
 	}
+	windowsFolders := windowsWorkFolders(commands)
 	// One index per command: a command of thousands of operands has a path
 	// fact for each, and each fact asked the whole argument list (GAP-0483).
 	indexByID := make(map[int64]*commandPathIndex, len(commands))
+	var others []PathFact
 	for i := range facts {
 		command := commandByID[facts[i].CommandID]
 		var index *commandPathIndex
@@ -84,30 +88,55 @@ func normalizePathFactsForCommandsInShell(
 				indexByID[command.ID] = index
 			}
 		}
+		// A command that runs after a cd works in the folders the cd may have
+		// moved the call to (working_folder.go): the fact is read in the
+		// hook's folder when the command may run there, and in each other
+		// folder below; an unresolved folder keeps the hook's reading.
+		raw := facts[i]
+		facts[i].parsedFlavor = raw.Flavor
+		factCWD, otherDirs, unresolved := commandWorkFolderDirs(cwd, activeHome, command, windowsFolders)
 		context := pathContextForCommand(
 			facts[i],
-			cwd,
+			factCWD,
 			command,
 			index,
 		)
 		context.windowsShellCWD = windowsShellCWD
 		normalized, absolute, resolved := derivePathWithContext(
 			facts[i],
-			cwd,
+			factCWD,
 			activeHome,
 			context,
 		)
+		if factCWD != cwd {
+			hookNormalized, hookAbsolute, hookResolved := derivePathWithContext(facts[i], cwd, activeHome, context)
+			facts[i].atHook = &pathAtHook{normalized: hookNormalized, absolute: hookAbsolute, resolved: hookResolved}
+		}
 		facts[i].Normalized = normalized
 		facts[i].Absolute = absolute
 		facts[i].Resolved = resolved
 		facts[i].Flavor = normalizedPathFlavorWithContext(
 			facts[i],
-			cwd,
+			factCWD,
 			normalized,
 			resolved,
 			context,
 		)
+		facts[i].unresolvedFolder = unresolved
+		for _, dir := range otherDirs {
+			other := raw
+			otherContext := pathContextForCommand(raw, dir, command, index)
+			otherContext.windowsShellCWD = windowsShellCWD
+			other.Normalized, other.Absolute, other.Resolved = derivePathWithContext(raw, dir, activeHome, otherContext)
+			if other.Resolved == facts[i].Resolved && other.Normalized == facts[i].Normalized {
+				continue // an absolute operand names the same file in every folder
+			}
+			other.Flavor = normalizedPathFlavorWithContext(other, dir, other.Normalized, other.Resolved, otherContext)
+			other.otherFolder = true
+			others = append(others, other)
+		}
 	}
+	return append(facts, others...)
 }
 
 func pathContextForCommand(
@@ -599,22 +628,25 @@ func canonicalWindowsFilesystemPath(value string) (string, bool) {
 	if value == "" {
 		return "", false
 	}
-
 	lower := strings.ToLower(value)
 	providerQualified := false
 	switch {
 	case strings.HasPrefix(lower, powerShellFileSystemProviderPrefix):
-		value = value[len(powerShellFileSystemProviderPrefix):]
-		if value == "" || strings.Contains(strings.ToLower(value), "::") {
+		value = windowsOpenedNames(value[len(powerShellFileSystemProviderPrefix):])
+		if value == "" || strings.Contains(value, "::") {
 			return "", false
 		}
 		providerQualified = true
 	case strings.HasPrefix(lower, `microsoft.powershell.core\filesystem`),
 		strings.HasPrefix(lower, `microsoft.powershell.core/`),
 		strings.HasPrefix(lower, `microsoft.powershell.core\`),
-		strings.HasPrefix(lower, `filesystem::`),
-		strings.Contains(lower, "::"):
+		strings.HasPrefix(lower, `filesystem::`):
 		return "", false
+	default:
+		value = windowsOpenedNames(value)
+		if strings.Contains(value, "::") {
+			return "", false
+		}
 	}
 	if windowsNonFilesystemProviderPath(value) {
 		return "", false
@@ -781,6 +813,134 @@ func windowsPreADSComponent(component string) string {
 		return component[:index]
 	}
 	return component
+}
+
+// windowsOpenedNames is a Windows path with each name spelled as the file
+// Win32 opens for it (rel-1-0-10:GAP-1060, GAP-1075), so the PowerShell and
+// cmd readings mint the path fact of the file itself, as windowsOpenedPath
+// in the gateway reads the Bash and Write operands:
+//   - the trailing dots and spaces Win32 strips (WindowsTrimmedName: of the
+//     last name; the periods of a folder name), except in a path with the
+//     exact extended-length prefix \\?\, which Win32 does not normalize;
+//   - the default data stream of the last name (name::$DATA in any case, and
+//     the empty stream name: a trailing colon) is the file itself; in an
+//     extended-length path the suffix with trailing dots or spaces is read
+//     as the file too (Win32 opens it or rejects it, never another file);
+//   - the index alias of a folder (dir::$INDEX_ALLOCATION,
+//     dir:$I30:$INDEX_ALLOCATION, any case) is the folder itself, as a
+//     folder on the way and as the last name (rd /s /q removes the folder,
+//     rel-1-0-10:GAP-1079).
+//
+// A named stream (file:name, file:name:$DATA) is another stream and stays as
+// written. The root (a drive spec, which keeps C:name drive-relative, a share,
+// a device or extended prefix) is never rewritten, and the first name of a
+// relative path keeps a trailing colon (a PowerShell drive such as HKCU:).
+func windowsOpenedNames(value string) string {
+	verbatim := strings.HasPrefix(value, `\\?\`)
+	rootEnd := windowsPathRootEnd(value)
+	var out strings.Builder
+	out.WriteString(value[:rootEnd])
+	rest := value[rootEnd:]
+	for index := 0; ; index++ {
+		end := strings.IndexAny(rest, `\/`)
+		name, separator := rest, ""
+		if end >= 0 {
+			name, separator = rest[:end], rest[end:end+1]
+		}
+		last := end < 0
+		out.WriteString(windowsOpenedName(name, last, verbatim, index == 0 && rootEnd == 0))
+		out.WriteString(separator)
+		if last {
+			return out.String()
+		}
+		rest = rest[end+1:]
+	}
+}
+
+// windowsOpenedName is one name of windowsOpenedNames. A dot segment or a
+// name that would trim to nothing (or to a dot segment) is kept as written.
+func windowsOpenedName(name string, last, verbatim, relativeFirst bool) string {
+	if name == "" || name == "." || name == ".." {
+		return name
+	}
+	trimmed := name
+	if !verbatim {
+		trimmed = WindowsTrimmedName(name, last)
+	}
+	if trimmed == "" || trimmed == "." || trimmed == ".." {
+		return name
+	}
+	base := windowsPreADSComponent(trimmed)
+	if base == "" || base == trimmed {
+		return trimmed
+	}
+	stream := strings.ToUpper(trimmed[len(base):])
+	switch {
+	case last && (stream == "::$DATA" || stream == ":" && !relativeFirst):
+		return base
+	case last && verbatim && strings.TrimRight(stream, ". ") == "::$DATA":
+		return base
+	case stream == "::$INDEX_ALLOCATION" || stream == ":$I30:$INDEX_ALLOCATION":
+		return base
+	}
+	return trimmed
+}
+
+// WindowsTrimmedName is a path name as Win32 keeps it. Trailing periods and
+// spaces are removed from the last name only (a path that ends in a separator
+// has an empty last name). In any other name only the periods of a name that
+// ends in a period go, so a trailing space stays part of the folder name (a
+// file below "x \" is not a file below "x"), and a name of three or more
+// periods is a valid folder name, kept. The gateway reads Bash and Write
+// operands with it (windowsOpenedPath), the PowerShell and cmd readings with
+// windowsOpenedNames.
+func WindowsTrimmedName(name string, last bool) string {
+	switch {
+	case last:
+		return strings.TrimRight(name, ". ")
+	case len(name) >= 3 && strings.Trim(name, ".") == "":
+		return name
+	}
+	return strings.TrimRight(name, ".")
+}
+
+// windowsPathRootEnd is the length of the root of a Windows path that
+// windowsOpenedNames leaves as written: a device or extended prefix with its
+// drive spec or UNC share, a share (\\server\share), or a drive spec (C:,
+// with no separator, so C:name stays drive-relative). A rooted or relative
+// path has none.
+func windowsPathRootEnd(value string) int {
+	slashed := strings.ReplaceAll(value, `\`, "/")
+	end := 0
+	share := false
+	switch {
+	case strings.HasPrefix(slashed, "//?/") || strings.HasPrefix(slashed, "//./"):
+		end = len("//?/")
+		if len(slashed) >= end+len("UNC/") && strings.EqualFold(slashed[end:end+len("UNC/")], "UNC/") {
+			end += len("UNC/")
+			share = true
+		}
+	case strings.HasPrefix(slashed, "//"):
+		end = len("//")
+		share = true
+	}
+	if share {
+		for parts := 0; parts < 2; parts++ {
+			next := strings.IndexByte(slashed[end:], '/')
+			if next < 0 {
+				return len(value)
+			}
+			end += next
+			if parts == 0 {
+				end++
+			}
+		}
+		return end
+	}
+	if len(slashed) >= end+2 && isASCIILetter(slashed[end]) && slashed[end+1] == ':' {
+		end += 2
+	}
+	return end
 }
 
 func windowsReservedDeviceComponent(component string) bool {

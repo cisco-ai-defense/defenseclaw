@@ -203,8 +203,8 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) (retErr error) {
 		if unmanaged {
 			restarts = "; you restart the gateway yourself to apply it"
 		}
-		question, def := `Run sandboxes in OpenShell MicroVMs? macOS needs them: Docker Desktop's Linux kernel has no Landlock. (sets compute_driver = "vm" in `+
-			where+restarts+"; OpenShell calls this driver experimental)", true
+		question, def := `Run sandboxes in OpenShell MicroVMs? On a Mac, MicroVMs do not start until OpenShell fixes its MicroVM driver; Docker Desktop 29.8 or newer runs sandboxes on the docker driver (the run-time Landlock check decides). (sets compute_driver = "vm" in `+
+			where+restarts+"; OpenShell calls this driver experimental)", false
 		if linuxKVM {
 			// The docker driver is a Linux host's default: MicroVMs are the
 			// answer to a kernel without Landlock, and an option otherwise.
@@ -222,7 +222,7 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) (retErr error) {
 		}
 		microVM = yes
 		if !yes {
-			// The docker driver needs the Landlock the Docker VM lacks.
+			// The docker driver needs a Docker VM kernel with Landlock (Docker Desktop 29.8+).
 			if err := a.machineFailure(rep, false); err != nil {
 				return err
 			}

@@ -126,7 +126,10 @@ func RunContained(cmd *exec.Cmd) error {
 // its device and inode numbers, so managed root-owned files retain their
 // custody checks. If a namespace, pidfd, Landlock domain or filter cannot be
 // established, nothing from the command runs and RunTracked returns
-// ErrNotContained.
+// ErrNotContained. When the host refuses the namespaces themselves
+// (user.max_user_namespaces=0, or a seccomp profile or sandbox that refuses
+// user namespaces), the error also carries ErrContainmentUnavailable and
+// names the cause (GAP-0521).
 // On macOS a supervisor, a short-lived copy of this binary in a process
 // group of its own, runs the command in a session of its own. It follows
 // every descendant with kqueue NOTE_FORK and NOTE_EXIT and the

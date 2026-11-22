@@ -26,13 +26,13 @@ func TestR108G501OpenClawPluginNoticeIsScopedAndOneShot(t *testing.T) {
 	if len(received) != 0 {
 		t.Fatal("plugin notice was added to the durable session transcript")
 	}
-	first, receipt := s.notify.PrepareSystemMessage()
+	first, receipt := s.notify.PrepareSystemMessage("")
 	if !strings.Contains(first, `Plugin "amazon-bedrock"`) || !strings.Contains(first, "Continue unrelated requests normally") ||
 		strings.Contains(first, "You MUST") || len(receipt) != 1 {
 		t.Fatalf("notice=%q receipt=%v", first, receipt)
 	}
 	s.notify.CommitSystemMessage(receipt)
-	second, _ := s.notify.PrepareSystemMessage()
+	second, _ := s.notify.PrepareSystemMessage("")
 	if second != "" {
 		t.Fatalf("notice repeated on a later request: %q", second)
 	}
@@ -44,15 +44,15 @@ func TestR108G501OpenClawPluginNoticeIsScopedAndOneShot(t *testing.T) {
 func TestR108G501PluginNoticeRetriesOnlyAfterInjection(t *testing.T) {
 	queue := NewNotificationQueue()
 	queue.Push(SecurityNotification{SubjectType: "plugin", SkillName: "sample", OneShot: true})
-	first, receipt := queue.PrepareSystemMessage()
+	first, receipt := queue.PrepareSystemMessage("")
 	if first == "" || len(receipt) != 1 {
 		t.Fatalf("notice=%q receipt=%v", first, receipt)
 	}
-	if next, _ := queue.PrepareSystemMessage(); next != "" {
+	if next, _ := queue.PrepareSystemMessage(""); next != "" {
 		t.Fatalf("reserved notice repeated: %q", next)
 	}
 	queue.ReleaseSystemMessage(receipt)
-	if next, retry := queue.PrepareSystemMessage(); next == "" || len(retry) != 1 {
+	if next, retry := queue.PrepareSystemMessage(""); next == "" || len(retry) != 1 {
 		t.Fatalf("released notice=%q receipt=%v", next, retry)
 	}
 }

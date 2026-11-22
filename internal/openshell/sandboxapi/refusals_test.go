@@ -252,3 +252,28 @@ func TestRefusalHarnessNamesMatchHarnessSpecs(t *testing.T) {
 		}
 	}
 }
+
+// While the organization's change of the sandbox setup is still being
+// applied, the host-run refusal says to try again and names no exception
+// to ask IT for: it clears by itself, as the sandbox CLI's own message
+// does (rel-1-0-10 GAP-0001 F9).
+func TestHostRunUnavailableWhileSetupChangesAsksForNoException(t *testing.T) {
+	for _, why := range []string{sandboxapi.UnavailableSetupChanging, sandboxapi.UnavailableSetupChanging + "."} {
+		got := sandboxapi.HostRunUnavailable("claudecode", why, "prerequisite_missing", "help@example.com")
+		for _, banned := range []string{"Need an exception", "help@example.com", "quote reason"} {
+			if strings.Contains(got, banned) {
+				t.Fatalf("setup-changing refusal carries %q: %q", banned, got)
+			}
+		}
+		for _, want := range []string{"must run in a sandbox", "try again in a few minutes"} {
+			if !strings.Contains(got, want) {
+				t.Fatalf("setup-changing refusal lacks %q: %q", want, got)
+			}
+		}
+	}
+	// Any other reason keeps the exception contact and the reason code.
+	other := sandboxapi.HostRunUnavailable("claudecode", "OpenShell is not installed", "prerequisite_missing", "help@example.com")
+	if !strings.Contains(other, "Need an exception? Contact help@example.com") || !strings.Contains(other, "quote reason prerequisite_missing") {
+		t.Fatalf("other reasons lost the contact: %q", other)
+	}
+}

@@ -54,7 +54,7 @@ func TestCustodyRefusalOfOneActiveConnectorKeepsTheOthersEnforcing(t *testing.T)
 		peer := &bootStubConnector{stubConnector: stubConnector{name: "codex"}}
 		return s.setupConnectorsIsolatedTransaction(
 			context.Background(), []connector.Connector{peer, connector.NewOpenCodeConnector()},
-			"tok", "127.0.0.1:0", "127.0.0.1:0", "master", guardrail.NewRulePackCache(),
+			"tok", "127.0.0.1:0", "127.0.0.1:0", guardrail.NewRulePackCache(),
 		)
 	}
 
@@ -135,8 +135,9 @@ func TestCustodyRefusalOfOneActiveConnectorKeepsTheOthersEnforcing(t *testing.T)
 
 // The same rule covers the other custody refusal made before Setup writes: the
 // agent executable folder another account can write. Anything that is not a
-// custody refusal keeps failing the refresh of an active connector, so an
-// upgrade still rolls back.
+// custody refusal (or an agent executable that changed since setup, GAP-0249)
+// keeps failing the refresh of an active connector, so an upgrade still rolls
+// back.
 func TestOnlyCustodyRefusalsOfAnActiveConnectorAreScopedToIt(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -164,7 +165,7 @@ func TestOnlyCustodyRefusalsOfAnActiveConnectorAreScopedToIt(t *testing.T) {
 			peer := &bootStubConnector{stubConnector: stubConnector{name: "codex"}}
 			got, err := s.setupConnectorsIsolatedTransaction(
 				context.Background(), []connector.Connector{refused, peer},
-				"tok", "127.0.0.1:0", "127.0.0.1:0", "master", guardrail.NewRulePackCache(),
+				"tok", "127.0.0.1:0", "127.0.0.1:0", guardrail.NewRulePackCache(),
 			)
 			if !tc.skipped {
 				if err == nil || !strings.Contains(err.Error(), "connector claudecode refresh failed") {

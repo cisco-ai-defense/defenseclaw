@@ -586,9 +586,12 @@ func CorrelationSpecForConnector(name, hookContractID string) (CorrelationSpec, 
 
 	switch name {
 	case "kiro":
-		if kiroWindowsManagedHookContractID(hookContractID) {
-			// Managed Windows Kiro hooks keep the explicit canonical
-			// correlation every unpinned Kiro hook uses.
+		if kiroWindowsManagedHookContractID(hookContractID) || hookContractID == KiroSandboxHookContractID {
+			// Managed Windows Kiro hooks, and the sandbox image's (an
+			// OpenShell or Substrate actor's hook posts), keep the explicit
+			// canonical correlation every unpinned Kiro hook uses: the
+			// profile below binds the ACP surface only, so a hook event got
+			// no correlation and no tool chain state (substrate-1 GAP-0339).
 			return CorrelationSpec{}, false
 		}
 		bindings := appendBindings(base,

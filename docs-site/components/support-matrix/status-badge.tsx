@@ -48,8 +48,8 @@ export function StatusBadge({ status, compact = false, label }: StatusBadgeProps
 }
 
 const LEGEND: { status: Status; text: string }[] = [
-  { status: 'supported', text: 'Verified by live tests in this release' },
-  { status: 'preview', text: 'In the code, not verified live in this release' },
+  { status: 'supported', text: 'Supported in this release' },
+  { status: 'preview', text: 'Preview: available, may change' },
   { status: 'unsupported', text: 'The code refuses it on that OS or edition' },
   { status: 'not-offered', text: 'Not part of that edition' },
 ];

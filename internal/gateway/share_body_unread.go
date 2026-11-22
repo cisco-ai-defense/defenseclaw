@@ -94,10 +94,10 @@ func shareBodyUnreadFindings(ctx context.Context, findings []RuleFinding, enforc
 	if has("ACTION-COMPOUND-LIMIT") || has(shareBodyUnreadRuleID) {
 		return findings
 	}
-	title := "Script on a network share was not read: the share did not answer within the hook call wait"
+	title := "Script on a network share was not read: the hook call opens no share on another machine, and a share of this machine did not answer within its wait"
 	switch {
 	case linkBound && budget:
-		title = "Script was not read: a share on its path did not answer within the hook call wait, or its path passes more links than the hook call follows"
+		title = "Script was not read: a share on its path was not read within the hook call, or its path passes more links than the hook call follows"
 	case linkBound:
 		title = "Script was not read: its path passes more links than the hook call follows, so a network share on it may not have been asked"
 	}

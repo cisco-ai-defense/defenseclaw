@@ -96,7 +96,7 @@ The shell inspect hooks need `jq` or `python3`. If neither is installed, they bl
 | AWS Bedrock | Bundled. `boto3` ships in the base dependencies, so SigV4, IAM credential modes and Anthropic-on-Bedrock bearer tokens work. |
 | Google Vertex AI | The gateway routes Vertex through its bundled Bifrost backend. The Python CLI scanner and judge paths need the `[vertex]` extra (about 286 MB of dependencies); in a source checkout, `uv sync --extra vertex`. Never modify a release-managed runtime. |
 | Azure OpenAI | Bundled, through LiteLLM's `azure_openai` adapter. |
-| Self-hosted or internal endpoints | Bundled. Add with `defenseclaw setup provider add` ([LLM providers](/docs/guardrail/unified-llm-key)). |
+| Self-hosted or internal endpoints | Bundled. Add with `defenseclaw setup provider add` ([LLM providers](/docs/get-started/unified-llm-key)). |
 
 ## Install from source
 

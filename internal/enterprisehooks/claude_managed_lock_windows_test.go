@@ -30,7 +30,7 @@ func claudeLockTestSetup() connector.SetupOpts {
 func TestWindowsClaudeRecordedPolicyRecognizesPreviousCommandForm(t *testing.T) {
 	setStandaloneProfileForTest(t, true)
 	record := windowsClaudeManagedPolicyState{HookExecutable: claudeLockTestSetup().HookExecutable}
-	previous, err := renderWindowsClaudeRecordedPolicy(record, "", false, true)
+	previous, err := renderWindowsClaudeRecordedPolicy(record, "", false, windowsClaudeFormDirect)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,6 +90,7 @@ func TestWindowsStandaloneClaudePolicyCarriesTheManagedHooksOnlyLock(t *testing.
 // drop-in that sets allowManagedHooksOnly to false fails verify naming that
 // file, although DefenseClaw's own drop-in is canonical.
 func TestStandaloneClaudeVerifyNamesTheMissingLockAndALaterOverride(t *testing.T) {
+	requireGAP633Elevated(t) // a standard user is refused the managed policy folder (rel-1-0-10 GAP-1519)
 	fixture := newWindowsManagedInstallFixture(t, map[string]interface{}{"allowManagedHooksOnly": true})
 	t.Cleanup(func() { SetWindowsClaudeManagedHooksOnlyPolicy(nil) })
 	setStandaloneProfileForTest(t, true)
@@ -138,6 +139,7 @@ func TestStandaloneClaudeVerifyNamesTheMissingLockAndALaterOverride(t *testing.T
 // broken still fails, and a drop-in edited outside DefenseClaw is left
 // alone.
 func TestWindowsClaudeManagedHooksOnlyChangeNeedsNoAccountSession(t *testing.T) {
+	requireGAP633Elevated(t) // a standard user is refused the managed policy folder (rel-1-0-10 GAP-1519)
 	fixture := newWindowsManagedInstallFixture(t, map[string]interface{}{"allowManagedHooksOnly": true})
 	t.Cleanup(func() { SetWindowsClaudeManagedHooksOnlyPolicy(nil) })
 	setStandaloneProfileForTest(t, true)
