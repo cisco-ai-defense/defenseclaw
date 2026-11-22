@@ -111,7 +111,7 @@ type Sidecar struct {
 	// gateway report, which its install watcher admits (GAP-2591).
 	hookMCP hookReportedMCPServers
 	// mcpTools joins scanner listings and authenticated hook observations to
-	// currently configured server IDs for managed inventory publication.
+	// currently configured server IDs for endpoint inventory publication.
 	mcpTools mcpToolInventory
 
 	// modelUsageRT is the model usage engine and its local store (inert until
@@ -139,8 +139,8 @@ type Sidecar struct {
 	configMgr     *ConfigManager
 	modelRouter   ModelRouter
 
-	// inventoryPublish is the managed_enterprise inventory change gate. It is nil
-	// in every other deployment mode. It lives here, not inside the emitter
+	// inventoryPublish is the endpoint inventory change gate (new, changed,
+	// removed; a daily resend), in every product. It lives here, not inside the emitter
 	// closures, because those closures are rebuilt on every config reload while
 	// the publish memory must survive reloads.
 	inventoryPublish *managedInventoryPublishState
@@ -620,11 +620,8 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger) (*
 		runtime, _ := sidecar.observabilityV8LifecycleRuntime().(hookLifecycleMetricV8Runtime)
 		recordMCPToolInventoryMetric(ctx, runtime, stage, outcome, reason)
 	}
-	if store != nil && managed.IsManagedEnterprise(cfg.DeploymentMode) {
-		sidecar.mcpTools.store = store
-		if loadErr := sidecar.mcpTools.restoreFromStore(context.Background()); loadErr != nil {
-			fmt.Fprintf(os.Stderr, "[sidecar] observed MCP tool state unavailable: %v\n", loadErr)
-		}
+	if loadErr := sidecar.mcpTools.attachStore(context.Background(), cfg, store); loadErr != nil {
+		fmt.Fprintf(os.Stderr, "[sidecar] observed MCP tool state unavailable: %v\n", loadErr)
 	}
 	// Commit the already-validated cold-start policy candidate only after every
 	// fallible constructor has succeeded. A rejected candidate must leave the
@@ -1142,9 +1139,17 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 			s.currentConfig(), s.observabilityV8Emitter(), snapshotFn, s.inventoryPublish, &s.mcpTools,
 		)
 		if discovery != nil {
+			s.inventoryPublish.SetSkillManifestReader(discovery.SkillManifest)
 			discovery.SetManagedInventoryEmitHook(inventoryEmit)
 		}
 		initialInventoryEmit = inventoryEmit
+	} else if discovery := s.aiDiscoverySnapshot(); discovery != nil {
+		// An OSS per-user gateway publishes the endpoint inventory to local
+		// audit and the user's own destinations after each full scan.
+		s.inventoryPublish.SetSkillManifestReader(discovery.SkillManifest)
+		discovery.SetSkillInventoryEmitHook(makeEndpointInventoryEmitter(
+			s.currentConfig(), s.observabilityV8Emitter(), discovery.Snapshot, s.inventoryPublish, &s.mcpTools,
+		))
 	}
 
 	runID := gatewaylog.ProcessRunID()
@@ -2760,14 +2765,21 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 			s.currentConfig(), s.observabilityV8Emitter(), snapshotFn, s.inventoryPublish, &s.mcpTools,
 		)
 		if svc != nil {
+			s.inventoryPublish.SetSkillManifestReader(svc.SkillManifest)
+			svc.SetSkillInventoryEmitHook(nil)
 			svc.SetManagedInventoryEmitHook(inventoryEmit)
 		}
 		inventoryEmit(ctx)
 	} else if svc := s.aiDiscoverySnapshot(); svc != nil {
 		// The discovery service can survive a deployment-mode-only reload.
 		// Clear the generation-owned callback so later scan cadences cannot
-		// retain managed endpoint inventory behavior.
+		// retain managed endpoint inventory behavior, and publish the
+		// endpoint inventory the OSS way from the just-published config.
 		svc.SetManagedInventoryEmitHook(nil)
+		s.inventoryPublish.SetSkillManifestReader(svc.SkillManifest)
+		svc.SetSkillInventoryEmitHook(makeEndpointInventoryEmitter(
+			s.currentConfig(), s.observabilityV8Emitter(), svc.Snapshot, s.inventoryPublish, &s.mcpTools,
+		))
 	}
 
 	if watcherRestart {
@@ -4436,6 +4448,40 @@ func (s *Sidecar) runWatcher(ctx context.Context) error {
 	}
 }
 
+// observeMCPToolListing keeps the tool names of a completed MCP admission scan
+// for the MCP tool inventory. It records only while the gateway sends the
+// endpoint inventory (endpointInventoryOn): on a Secure Client endpoint, and
+// elsewhere with ai_discovery on; otherwise it costs nothing.
+func (s *Sidecar) observeMCPToolListing(ctx context.Context, connectorName, serverName string, result *scanner.ScanResult, scanErr error) {
+	if !endpointInventoryOn(s.currentConfig()) {
+		return
+	}
+	// Endpoint inventory publication refreshes parent identities on startup
+	// and on config changes; avoid re-reading every connector on each scan.
+	// A judge can reject a scan after the scanner returned a valid tools/list
+	// projection. Keep that content-free listing; the admission verdict does
+	// not make the scanner evidence incomplete.
+	if result == nil || result.MCPAdvertisedTools == nil {
+		s.mcpTools.recordListingFailureContext(ctx, connectorName, serverName)
+		if scanErr != nil || result == nil {
+			s.mcpTools.recordMetric(ctx, "list", "error", "scan_failed")
+		} else {
+			s.mcpTools.recordMetric(ctx, "list", "partial", "incomplete")
+		}
+		return
+	}
+	s.mcpTools.recordAdvertisedContext(ctx, connectorName, serverName, result.MCPAdvertisedTools, result.Timestamp, result.MCPToolListPartial)
+	outcome := "success"
+	if len(result.MCPAdvertisedTools) == 0 {
+		outcome = "empty"
+	}
+	reason := "none"
+	if result.MCPToolListPartial {
+		outcome, reason = "partial", "incomplete"
+	}
+	s.mcpTools.recordMetric(ctx, "list", outcome, reason)
+}
+
 // guardianQuarantineRemovalTimeout bounds the wait for the hook guardian to
 // remove a quarantined source in an enrolled user's folder.
 const guardianQuarantineRemovalTimeout = 30 * time.Second
@@ -4675,36 +4721,7 @@ func (s *Sidecar) runWatcherOnce(ctx context.Context) (restart bool, err error) 
 	w := watcher.New(s.currentConfig(), skillDirs, pluginDirs, s.store, s.logger, nil, func(r watcher.AdmissionResult) {
 		s.handleAdmissionResult(r)
 	})
-	w.SetMCPToolObserver(func(ctx context.Context, connectorName, serverName string, result *scanner.ScanResult, scanErr error) {
-		cfg := s.currentConfig()
-		if cfg == nil || !managed.IsManagedEnterprise(cfg.DeploymentMode) {
-			return
-		}
-		// Managed inventory publication refreshes parent identities on startup
-		// and on config changes; avoid re-reading every connector on each scan.
-		// A judge can reject a scan after the scanner returned a valid tools/list
-		// projection. Keep that content-free listing; the admission verdict does
-		// not make the scanner evidence incomplete.
-		if result == nil || result.MCPAdvertisedTools == nil {
-			s.mcpTools.recordListingFailureContext(ctx, connectorName, serverName)
-			if scanErr != nil || result == nil {
-				s.mcpTools.recordMetric(ctx, "list", "error", "scan_failed")
-			} else {
-				s.mcpTools.recordMetric(ctx, "list", "partial", "incomplete")
-			}
-			return
-		}
-		s.mcpTools.recordAdvertisedContext(ctx, connectorName, serverName, result.MCPAdvertisedTools, result.Timestamp, result.MCPToolListPartial)
-		outcome := "success"
-		if len(result.MCPAdvertisedTools) == 0 {
-			outcome = "empty"
-		}
-		reason := "none"
-		if result.MCPToolListPartial {
-			outcome, reason = "partial", "incomplete"
-		}
-		s.mcpTools.recordMetric(ctx, "list", outcome, reason)
-	})
+	w.SetMCPToolObserver(s.observeMCPToolListing)
 	if enrolled != nil {
 		// A folder that appeared since the previous watcher (a user made
 		// ~/.claude/skills, or a user was enrolled) holds what was added

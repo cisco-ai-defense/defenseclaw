@@ -259,22 +259,31 @@ func trustedActionPrivateHomeDestination(facts actionfacts.Facts, candidate acti
 // made only from the actor's kit claims read the kit's facts instead
 // (substrateGuestClaims.homePlaces), which this gateway cannot check, so they
 // are read only where the answer adds a finding to a call that would have none
-// without the kit (substrate-1 GAP-0549).
-type homePlaceView func(place string) bool
+// without the kit (substrate-1 GAP-0549). It points at the kit's places, a
+// value, so the dispatch memo keys a request by the places it reads
+// (reflect.DeepEqual compares the set): a closure is never deeply equal, and
+// kept every repeat of an actor's request out of the memo (substrate-1
+// GAP-0758).
+type homePlaceView = *homePlaceSet
+
+// homePlaceSet is the kit's private home places (substrateGuestClaims.homePlaces).
+type homePlaceSet struct {
+	places map[string]bool
+}
 
 // ownerOnly is hookpaths.HomePlaceOwnerOnly read through view.
-func (view homePlaceView) ownerOnly(place string) bool {
+func (view *homePlaceSet) ownerOnly(place string) bool {
 	if view != nil {
-		return view(path.Clean(place))
+		return view.places[path.Clean(place)]
 	}
 	return hookpaths.HomePlaceOwnerOnly(place)
 }
 
 // privateHome is hookpaths.PrivateHomePlace read through view.
-func (view homePlaceView) privateHome(place, home string) bool {
+func (view *homePlaceSet) privateHome(place, home string) bool {
 	if view != nil {
 		place = path.Clean(place)
-		return pathWithin(place, home) && !pathWithin(place, home+"/.ssh") && view(place)
+		return pathWithin(place, home) && !pathWithin(place, home+"/.ssh") && view.places[place]
 	}
 	return hookpaths.PrivateHomePlace(place, home)
 }

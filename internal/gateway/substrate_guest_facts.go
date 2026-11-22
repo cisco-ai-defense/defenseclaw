@@ -73,7 +73,7 @@ func (claims *substrateGuestClaims) homePlaceView() homePlaceView {
 	if claims == nil {
 		return nil
 	}
-	return func(place string) bool { return claims.homePlaces[place] }
+	return &homePlaceSet{places: claims.homePlaces}
 }
 
 // substrateGuestLinkClaim is one tool_input.<key> path argument, as the

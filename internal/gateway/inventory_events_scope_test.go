@@ -80,6 +80,21 @@ func TestEndpointInventoryScopeFromEvidenceUsesParentPathHash(t *testing.T) {
 	}
 }
 
+// TestEndpointInventoryScopeSkipsEntryRows: the walker sorts evidence by
+// type and hash, so entry rows come before the parent row. Adding a
+// sibling entry must not move the scope of the entries already there.
+func TestEndpointInventoryScopeSkipsEntryRows(t *testing.T) {
+	t.Parallel()
+	parent := inventory.AIEvidence{Type: "skill", PathHash: "hmac-sha256:" + strings.Repeat("a", 64)}
+	pdf := inventory.AIEvidence{Type: "skill_entry", PathHash: "hmac-sha256:" + strings.Repeat("5", 64)}
+	sibling := inventory.AIEvidence{Type: "skill_entry", PathHash: "hmac-sha256:" + strings.Repeat("0", 64)}
+	before := endpointInventoryScopeFromEvidence([]inventory.AIEvidence{pdf, parent})
+	after := endpointInventoryScopeFromEvidence([]inventory.AIEvidence{sibling, pdf, parent})
+	if before != strings.Repeat("a", 16) || after != before {
+		t.Fatalf("scope = %q, then %q after a sibling was added; want the parent row's", before, after)
+	}
+}
+
 // TestEndpointInventoryComponentIDDistinctAcrossScopes verifies that
 // two identical (kind, sig-id, name) inputs with different scope
 // tokens produce different component ids — the end-to-end contract of
