@@ -60,6 +60,9 @@ type Row struct {
 	// (Proof.Source, e.g. SourceEffects); empty matches any reader. It keeps
 	// an effects-lane row off the 1.0.10 reader's finding of the same rule.
 	Sources []string
+	// LinkAt: the row matches only a proof that is not a link to the member
+	// (Proof.LinkTo false): a link placed at the member, or any other kind.
+	LinkAt bool
 	// Content: the row applies on the content surface too.
 	Content bool
 	// SecureClient: the row applies under the Secure Client integration.
@@ -115,7 +118,8 @@ func (r *Row) matches(p Proof) bool {
 		(len(r.Certainty) == 0 || slices.Contains(r.Certainty, p.Certainty)) &&
 		(len(r.Reach) == 0 || slices.Contains(r.Reach, p.Reach)) &&
 		(len(r.Sets) == 0 || slices.Contains(r.Sets, p.Set)) &&
-		(len(r.Sources) == 0 || slices.Contains(r.Sources, p.Source))
+		(len(r.Sources) == 0 || slices.Contains(r.Sources, p.Source)) &&
+		(!r.LinkAt || !p.LinkTo)
 }
 
 // cell is the row's cell for d, reading the tier only when the row's cells
@@ -157,8 +161,10 @@ const (
 	// every plain spelling of it on its own (persistence.ssh_authorized_keys_command),
 	// and the effect finding folds there; the effects reading of a script
 	// spelling that reader does not name raised 6 benign owner cells of the
-	// T17 sweep, all new blocks, and no attack cell. A link at the state
-	// keeps its row (self-protection).
+	// T17 sweep, all new blocks. A link at the state keeps its row
+	// (self-protection), and so does a link TO a member (Proof.LinkTo: ln -s
+	// ~/.ssh/authorized_keys s, then a write through s; GAP-1530, GAP-1538,
+	// GAP-1548, GAP-0659), which the row once muted on 15 attack cells.
 	RowEffectLink = "effect-link"
 	// RowEffectRead: a Known read of one's own credential file the effects
 	// lane proves is a shadow record. The 1.0.10 credential rules
@@ -243,7 +249,7 @@ var builtin = Table{Rows: []Row{
 		},
 	},
 	{
-		ID: RowEffectLink, Rules: []string{RuleEffectRestricted, RuleEffectUnknown}, Kinds: []ProofKind{KindLink},
+		ID: RowEffectLink, Rules: []string{RuleEffectRestricted, RuleEffectUnknown}, Kinds: []ProofKind{KindLink}, LinkAt: true,
 		Targets: []TargetClass{TargetHookConfig, TargetAuthorizedKeys, TargetCredential, TargetOtherHomeCredential, TargetAutostart, TargetSystem, TargetProject, TargetOther, TargetNone},
 		Content: true, SecureClient: true, Source: "DET111 effects link at a member (sweep T17)",
 		Cells: [deploymentCount][tierCount]Cell{

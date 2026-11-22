@@ -25,6 +25,7 @@ func TestEffectShadowOnlyRows(t *testing.T) {
 		}
 		return Finding{RuleID: rule, Severity: SevCritical, Proof: p}
 	}
+	linkTo := func(f Finding) Finding { f.Proof.LinkTo = true; return f }
 	for _, tc := range []struct {
 		name   string
 		f      Finding
@@ -47,6 +48,10 @@ func TestEffectShadowOnlyRows(t *testing.T) {
 		{"restricted link authorized_keys", effect(RuleEffectRestricted, KindLink, TargetAuthorizedKeys, CertKnown), true},
 		{"restricted link hook config", effect(RuleEffectRestricted, KindLink, TargetHookConfig, CertKnown), true},
 		{"restricted link state", effect(RuleEffectRestricted, KindLink, TargetState, CertKnown), false},
+		// A link TO a member (ln -s ~/.ssh/authorized_keys s) is an alias the
+		// call can write through: it keeps its row (GAP-1530, GAP-1538).
+		{"restricted link to authorized_keys", linkTo(effect(RuleEffectRestricted, KindLink, TargetAuthorizedKeys, CertKnown)), false},
+		{"restricted link to credential", linkTo(effect(RuleEffectRestricted, KindLink, TargetCredential, CertKnown)), false},
 		{"effects read ssh key", Finding{RuleID: "PATH-SSH-KEY", Severity: SevCritical, Proof: Proof{Kind: KindRead, Target: TargetCredential, Certainty: CertKnown, Set: SetSSHPrivateKey, Source: SourceEffects}}, true},
 		{"effects read aws", Finding{RuleID: "PATH-AWS-CREDS", Severity: SevCritical, Proof: Proof{Kind: KindRead, Target: TargetCredential, Certainty: CertKnown, Set: SetAWSCredentials, Source: SourceEffects}}, true},
 		{"effects read other home ssh key", Finding{RuleID: "PATH-SSH-KEY", Severity: SevCritical, Proof: Proof{Kind: KindRead, Target: TargetOtherHomeCredential, Certainty: CertKnown, Set: SetSSHPrivateKey, Source: SourceEffects}}, false},

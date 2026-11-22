@@ -3303,6 +3303,7 @@ func (w *walker) effectForOperand(op operand, p Program, origin Origin, cond, fo
 	e := &Effect{Origin: origin, Cond: cond, RoleState: RoleStateKnown, TargetState: TargetStateKnown,
 		Target: Target{Flavor: w.o.flavor(), Link: LinkNotChecked, CaseFold: w.o.CaseInsensitive}}
 	e.Kind = op.role.kind()
+	e.LinkTarget = op.role == RoleLinkTarget
 	if op.roleUncertain {
 		e.addReason(ReasonUnknownFlag, ScopeRole)
 	}

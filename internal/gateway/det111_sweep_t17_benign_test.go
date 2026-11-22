@@ -49,6 +49,11 @@ func TestDET111SweepT17BenignShapesKeepTheirLaneOffCellFiveTiers(t *testing.T) {
 	controls := []string{
 		`echo 'ssh-ed25519 AAAAC3x k' >> ${PWD%/proj}/.ssh/authorized_keys`,
 		`ln -sf ${PWD%/proj}/dot/authorized_keys ${PWD%/proj}/.ssh/authorized_keys`,
+		// A link TO a member, then a write through it (the P0 alias rows
+		// GAP-1530, GAP-1538, GAP-1548, GAP-0659 the link row once muted).
+		`ln -s ~/.ssh/authorized_keys s && cp -a s notes.txt && echo k >> notes.txt`,
+		`ln ~/.ssh/authorized_keys notes.txt && echo k >> notes.txt`,
+		`L=/bin/ln; "$L" -sf ~/.ssh/authorized_keys v2.txt; echo dummy-key >> v2.txt`,
 	}
 	for _, tier := range boundedTestTiers {
 		for _, route := range r3PosixRoutesForReadRows() {

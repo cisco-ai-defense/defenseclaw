@@ -205,6 +205,10 @@ type Proof struct {
 	// names one of them, so a read takes the cell of the 1.0.10 rule that
 	// names the same file class whatever the spelling (GAP-1244).
 	Set string
+	// LinkTo marks a KindLink proof whose protected member is the link's
+	// target (ln -s ~/.ssh/authorized_keys s: an alias of the member the
+	// call can write or read through), not the place the link is put.
+	LinkTo bool
 }
 
 // IsZero reports a finding with no proof: no kind and no uncertainty mark
