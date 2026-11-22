@@ -153,13 +153,12 @@ func appendTrustedFIFOListenerBindShellFinding(
 		return findings
 	}
 	return append(findings, adjustConfidence(input.Tool, RuleFinding{
-		RuleID:      rule.ID,
-		Title:       rule.Title,
-		Severity:    rule.Severity,
-		Confidence:  rule.Confidence,
-		Evidence:    commandText,
-		Tags:        append([]string(nil), rule.Tags...),
-		LineNumber:  1,
-		enforcement: findingEnforcementAllowed,
+		RuleID:     rule.ID,
+		Title:      rule.Title,
+		Severity:   rule.Severity,
+		Confidence: rule.Confidence,
+		Evidence:   commandText,
+		Tags:       append([]string(nil), rule.Tags...),
+		LineNumber: 1,
 	}))
 }

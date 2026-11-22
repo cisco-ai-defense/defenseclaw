@@ -28,6 +28,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/decide"
 )
 
 // Tool-judge answers in the compact checklist format.
@@ -221,8 +222,8 @@ func TestRegexJudgeHighVerdictFollowsBlockAt(t *testing.T) {
 }
 
 func TestRegexJudgeLocalVerdictDecisive(t *testing.T) {
-	finding := func(severity string, enforcement findingEnforcement) RuleFinding {
-		return RuleFinding{RuleID: "R-" + severity, Severity: severity, enforcement: enforcement}
+	finding := func(severity string, enforcement decide.Proof) RuleFinding {
+		return RuleFinding{RuleID: "R-" + severity, Severity: severity, Proof: enforcement}
 	}
 	secureClient := &config.Config{DeploymentMode: "managed_enterprise"}
 	if !secureClient.SecureClientIntegration() {
@@ -239,15 +240,15 @@ func TestRegexJudgeLocalVerdictDecisive(t *testing.T) {
 		{"HIGH alert", nil, &ToolInspectVerdict{Action: "alert", Severity: "HIGH"}, false},
 		{"CRITICAL without findings", nil, &ToolInspectVerdict{Action: "alert", Severity: "CRITICAL"}, true},
 		{"enforceable CRITICAL", nil, &ToolInspectVerdict{Action: "alert", Severity: "CRITICAL",
-			DetailedFindings: []RuleFinding{finding("CRITICAL", findingEnforcementAllowed)}}, true},
+			DetailedFindings: []RuleFinding{finding("CRITICAL", enforcingProof)}}, true},
 		{"detection-only CRITICAL", nil, &ToolInspectVerdict{Action: "allow", Severity: "CRITICAL",
-			DetailedFindings: []RuleFinding{finding("CRITICAL", findingEnforcementDetectionOnly)}}, false},
+			DetailedFindings: []RuleFinding{finding("CRITICAL", recordProof)}}, false},
 		{"alert-only CRITICAL", nil, &ToolInspectVerdict{Action: "alert", Severity: "CRITICAL",
-			DetailedFindings: []RuleFinding{finding("CRITICAL", findingEnforcementAlertOnly)}}, false},
+			DetailedFindings: []RuleFinding{finding("CRITICAL", advisoryProof)}}, false},
 		{"detection-only CRITICAL beside enforceable HIGH", nil, &ToolInspectVerdict{Action: "alert", Severity: "CRITICAL",
-			DetailedFindings: []RuleFinding{finding("CRITICAL", findingEnforcementDetectionOnly), finding("HIGH", findingEnforcementInherit)}}, false},
+			DetailedFindings: []RuleFinding{finding("CRITICAL", recordProof), finding("HIGH", enforcingProof)}}, false},
 		{"Secure Client keeps the verdict severity", secureClient, &ToolInspectVerdict{Action: "allow", Severity: "CRITICAL",
-			DetailedFindings: []RuleFinding{finding("CRITICAL", findingEnforcementDetectionOnly)}}, true},
+			DetailedFindings: []RuleFinding{finding("CRITICAL", recordProof)}}, true},
 	} {
 		if got := regexJudgeLocalVerdictDecisive(tc.cfg, tc.verdict); got != tc.want {
 			t.Errorf("%s: decisive=%v, want %v", tc.name, got, tc.want)
@@ -367,7 +368,7 @@ func TestRegexJudgeEscalatedCallFollowsHookFailModeWhenJudgeGivesNoVerdict(t *te
 
 func TestRegexJudgeEscalatedCritical(t *testing.T) {
 	detectionOnly := &ToolInspectVerdict{Action: "allow", Severity: "CRITICAL",
-		DetailedFindings: []RuleFinding{{RuleID: "R", Severity: "CRITICAL", enforcement: findingEnforcementDetectionOnly}}}
+		DetailedFindings: []RuleFinding{{RuleID: "R", Severity: "CRITICAL", Proof: recordProof}}}
 	secureClient := &config.Config{DeploymentMode: "managed_enterprise"}
 	managed := &config.Config{DeploymentMode: "managed_enterprise", Enterprise: config.EnterpriseConfig{Profile: "standalone"}}
 	for _, tc := range []struct {

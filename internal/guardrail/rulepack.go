@@ -40,6 +40,7 @@ import (
 	"syscall"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/decide"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/semantic"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	policyassets "github.com/defenseclaw/defenseclaw/policies"
@@ -55,7 +56,11 @@ var defaultsFS embed.FS
 
 // RulePack is the top-level container loaded from a rule-pack directory.
 type RulePack struct {
-	Suppressions   *SuppressionsConfig
+	Suppressions *SuppressionsConfig
+	// Tiers is the pack's tier table column (tiers.yaml, DET111 D4): the
+	// pack's own tier and what each proof class is worth in it. Nil keeps
+	// the built-in column of decide.Builtin().
+	Tiers          *decide.Column
 	JudgeConfigs   map[string]*JudgeYAML
 	SensitiveTools *SensitiveToolsConfig
 	RuleFiles      []*RulesFileYAML
@@ -399,6 +404,17 @@ func loadRulePack(dir string, validateManifest bool) (*RulePack, error) {
 		}
 		rp.Suppressions = &cfg
 	}
+	if _, ok := inventory.files[decide.TiersFile]; ok {
+		var raw decide.ColumnYAML
+		if err := decode(decide.TiersFile, &raw); err != nil {
+			return nil, err
+		}
+		col, err := raw.Column()
+		if err != nil {
+			return nil, rulePackErr(decide.TiersFile, "invalid_tiers", err.Error())
+		}
+		rp.Tiers = col
+	}
 	if _, ok := inventory.files["sensitive-tools.yaml"]; ok {
 		var cfg SensitiveToolsConfig
 		if err := decode("sensitive-tools.yaml", &cfg); err != nil {
@@ -528,11 +544,18 @@ func (rp *RulePack) FilesDigest() string {
 	return rp.filesDigest
 }
 
-// Posture is the level named by the manifest bytes loaded and covered by
-// FilesDigest. An absent or unrecognized optional manifest has no posture.
+// Posture is the pack's own tier: the level named by the manifest bytes
+// loaded and covered by FilesDigest, else the tier field of its tiers.yaml.
+// A copy that lost its manifest keeps the tier its content names, whatever
+// its folder is called (rel-1-0-10:GAP-1562, owner 2026-11-21: a pack's tier
+// comes from the pack's own tier field, never from its folder name). A pack
+// naming neither has no posture.
 func (rp *RulePack) Posture() string {
 	if rp == nil {
 		return ""
+	}
+	if rp.manifestPosture == "" && rp.Tiers != nil {
+		return rp.Tiers.Tier.String()
 	}
 	return rp.manifestPosture
 }
@@ -740,7 +763,7 @@ func isRecognizedRulePackYAML(rel string) bool {
 		return false
 	}
 	switch rel {
-	case "suppressions.yaml", "sensitive-tools.yaml", "rules/local-patterns.yaml":
+	case "suppressions.yaml", "sensitive-tools.yaml", "rules/local-patterns.yaml", decide.TiersFile:
 		return true
 	}
 	for _, name := range knownJudgeNames {

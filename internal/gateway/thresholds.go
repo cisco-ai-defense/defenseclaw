@@ -99,8 +99,12 @@ func publishPackPostures() {
 }
 
 // packPosture returns the posture of ref's pack at dir (its resolved
-// directory; "" uses ref.Dir): the manifest posture a generation recorded
-// for that directory, else the legacy folder-name table.
+// directory; "" uses ref.Dir): the posture a generation recorded for that
+// directory; for a directory no generation loaded, the pack's own tier field
+// (manifest posture, else tiers.yaml tier), read once and remembered; else
+// the legacy folder table. A pack's tier is its own field, never its folder
+// name (rel-1-0-10:GAP-1562), so the folder table only answers for a folder
+// whose pack names no tier.
 func packPosture(ref config.RulePackRef, dir string) string {
 	if dir = strings.TrimSpace(dir); dir == "" {
 		dir = strings.TrimSpace(ref.Dir)
@@ -109,6 +113,9 @@ func packPosture(ref config.RulePackRef, dir string) string {
 	if dir != "" {
 		if v, ok := packPostures.Load(dir); ok {
 			raw = v.(string)
+		} else {
+			raw = guardrail.ReadPackPosture(dir)
+			rememberPackPosture(dir, raw)
 		}
 	}
 	return postureFromManifest(dir, raw)

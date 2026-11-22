@@ -34,7 +34,7 @@ func TestBuildVerdict_AllDetectionOnlyAllows(t *testing.T) {
 	cfg.Guardrail.RulePackDir = "/profiles/strict"
 	finding := RuleFinding{
 		RuleID: "CMD-PYTHON-C", Title: "generic interpreter execution",
-		Severity: "LOW", enforcement: findingEnforcementDetectionOnly,
+		Severity: "LOW", Proof: recordProof,
 	}
 	verdict := buildVerdictWithConfig([]RuleFinding{finding}, "tool_call", cfg, "", true)
 	if verdict.Action != guardrailActionAllow || verdict.Severity != "LOW" ||

@@ -42,9 +42,8 @@ func TestWindowsHighRiskFallbacksStayShadowWithoutTypedProof(t *testing.T) {
 			}
 
 			finding := RuleFinding{
-				RuleID:      test.ruleID,
-				Severity:    "CRITICAL",
-				enforcement: findingEnforcementAllowed,
+				RuleID:   test.ruleID,
+				Severity: "CRITICAL",
 			}.withTrustedActionProof(newExactFallbackFindingProof(
 				test.ruleID,
 				facts.Authoritative(),

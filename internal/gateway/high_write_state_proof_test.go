@@ -25,7 +25,7 @@ func TestHighWriteKeepsAProvenStateMutation(t *testing.T) {
 	target := home + "/.defenseclaw/hooks/k04.sh"
 	for _, connectorName := range []string{"claudecode", "codex"} {
 		installDefaultProfileConnector(t, connectorName)
-		proven := RuleFinding{RuleID: ruleID, enforcement: findingEnforcementAllowed}
+		proven := RuleFinding{RuleID: ruleID}
 		proven = proven.withTrustedActionProof(newFindingProof(findingProofActiveStateMutation, ruleID, true))
 		request := trustedActionRequest{
 			Input: actionfacts.Input{Tool: "Bash", Command: "./build.sh > " + target, CWD: cwd, ActiveHome: home,

@@ -70,6 +70,13 @@ func gap0747BlockedForRule(findings []RuleFinding, ruleIDs ...string) string {
 		return "action " + action + ", want block for " + strings.Join(ruleIDs, "+") + " (findings " + strings.Join(ids, ",") + ")"
 	}
 	for _, id := range ruleIDs {
+		// "!id": the block must not name that rule.
+		if absent, ok := strings.CutPrefix(id, "!"); ok {
+			if slices.Contains(ids, absent) {
+				return "block names " + absent + " (findings " + strings.Join(ids, ",") + ")"
+			}
+			continue
+		}
 		if !slices.Contains(ids, id) {
 			return "block without the " + id + " finding (findings " + strings.Join(ids, ",") + ")"
 		}
@@ -83,7 +90,9 @@ func gap0747SplitState(findings []RuleFinding) (*RuleFinding, []RuleFinding) {
 	var rest []RuleFinding
 	var state *RuleFinding
 	for i := range findings {
-		if findings[i].RuleID == gap0747StateRule {
+		// A link-held state write (GAP-1568) carries the keys hold's own
+		// verdict, not the state write's tier: it stays with the rest.
+		if findings[i].RuleID == gap0747StateRule && !findings[i].linkHeld {
 			state = &findings[i]
 			continue
 		}
@@ -287,6 +296,13 @@ func gap0747HookBodyCheck(body, want string) string {
 		return "action " + answer.Action + ", want " + kinds[0] + " (findings " + strings.Join(ids, ",") + ")"
 	}
 	for _, id := range kinds[1:] {
+		// "!id": the answer must not name that rule.
+		if absent, ok := strings.CutPrefix(id, "!"); ok {
+			if slices.Contains(ids, absent) {
+				return "answer names " + absent + " (findings " + strings.Join(ids, ",") + ")"
+			}
+			continue
+		}
 		if !slices.Contains(ids, id) {
 			return "no " + id + " finding (findings " + strings.Join(ids, ",") + ")"
 		}

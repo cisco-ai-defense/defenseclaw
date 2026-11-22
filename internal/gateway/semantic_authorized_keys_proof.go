@@ -182,15 +182,15 @@ func appendTrustedCMDPrivateKeyReadFinding(
 	if !ok {
 		return findings
 	}
-	enforcement := findingEnforcementDetectionOnly
+	enforcement := recordProof
 	if request.EnforcementCapable {
-		enforcement = findingEnforcementAllowed
+		enforcement = enforcingProof
 	}
 	return append(findings, adjustConfidence(input.Tool, RuleFinding{
 		RuleID: rule.ID, Title: rule.Title, Severity: rule.Severity,
 		Confidence: rule.Confidence, Evidence: trustedActionInputText(input, ""),
 		Tags: append([]string(nil), rule.Tags...), LineNumber: 1,
-		enforcement: enforcement,
+		Proof: enforcement,
 	}))
 }
 
@@ -1430,7 +1430,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 					// operand: the plain ones are allowed in the others. The
 					// statement-bounded reading leaves the omitted operands
 					// to the reading judged before it (GAP-1069).
-					if request.statementBounded || omittedPlain[target] && !request.StrictPolicy {
+					if request.statementBounded || omittedPlain[target] && !request.tierEnforces(tierGateStrict) {
 						return false
 					}
 					omitted := !windowsLocationOrdinaryWriteTarget(target)
@@ -1559,7 +1559,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		if request.nonWriteMention != nil && trustedShellCommandInput(request.Input) {
 			readsOnly := hookpaths.ActionMentionsNoWriteRole(input.Command, input.CWD, facts.ActiveHome, input.DialectHint, globFacts)
 			switch {
-			case readsOnly && !request.StrictPolicy && !request.ManagedInstall && !request.ProtectedHomeHook:
+			case readsOnly && !request.tierEnforces(tierGateManaged) && !request.ProtectedHomeHook:
 				*request.nonWriteMention = true
 			case !readsOnly && request.unknownMention != nil &&
 				hookpaths.ActionMentionsNoKnownWrite(input.Command, input.CWD, facts.ActiveHome, input.DialectHint, globFacts) &&
@@ -1584,6 +1584,25 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		// the user's hook ran the same decision on the same command and
 		// found a protected target, as a per-user gateway does (GAP-2514,
 		// GAP-2515).
+		//
+		// The client carries that decision for every call with a word the
+		// shell expands (rel-1-0-10:GAP-0415), so it also reaches a call
+		// whose keys file is named only beside a program the scan has no
+		// write model of: that call, and each of its statements, is held at
+		// the unknown tier, as a per-user gateway holds it (GAP-0843, the
+		// branch above; clientCarryIsUnknownMention).
+		if request.nonWriteMention != nil && request.unknownMention != nil {
+			whole := input
+			if request.simpleCommandPass && request.parentPatch != nil && request.parentPatch.Command != "" {
+				whole = *request.parentPatch
+				if !filepath.IsAbs(whole.CWD) {
+					whole.CWD = input.CWD
+				}
+			}
+			if clientCarryIsUnknownMention(request, clientTargets, whole.Command, whole.CWD, facts.ActiveHome, whole.DialectHint) {
+				*request.unknownMention = true
+			}
+		}
 		return confirmed()
 	}
 	if hookpaths.DynamicCopyProtectedBasename(input.Command, facts.ActiveHome) {
@@ -2465,6 +2484,32 @@ func nativeFileToolWriteOperand(input actionfacts.Input, facts actionfacts.Facts
 // left to the shell reading.
 func placedByCodexClient(connector, resolved string) bool {
 	return connector == "codex" && resolved != ""
+}
+
+// clientCarryIsUnknownMention reports a managed call (ProtectedHomeHook)
+// whose hook client carried a protected decision (ActionDecisionKey) for
+// command, the whole call (targets: the client's map before connector
+// scoping, which is also its glob facts), where a per-user gateway holds
+// the same call at the unknown tier (rel-1-0-10:GAP-0843): the call names a keys file only
+// beside a program the scan has no write model of (the two readings of the
+// GAP-0843 branch of trustedExistingAuthorizedKeysSymlinkWrite: not reads
+// only, which keeps the managed block of GAP-0018, and no known write), and
+// the client resolved no write into ~/.ssh or the state. Since GAP-0415 the
+// client carries its decision for every call with a word the shell expands,
+// so for such a call that decision is the same unknown-program reading, not
+// a key write the client found. A known write or a write the client
+// resolved there keeps the block, and the unknown tier blocks in strict and
+// managed-strict.
+func clientCarryIsUnknownMention(request trustedActionRequest, targets map[string]string, command, cwd, home string, dialect actionfacts.Dialect) bool {
+	if !request.ProtectedHomeHook || command == "" || targets[hookpaths.ActionDecisionKey] != hookpaths.ProtectedTargetDecision ||
+		!trustedShellCommandInput(request.Input) || !clientMapClearsKeyFiles(targets, home) {
+		return false
+	}
+	if !filepath.IsAbs(cwd) {
+		cwd = targets[hookpaths.CWDKey]
+	}
+	return !hookpaths.ActionMentionsNoWriteRole(command, cwd, home, dialect, targets) &&
+		hookpaths.ActionMentionsNoKnownWrite(command, cwd, home, dialect, targets)
 }
 
 // clientMapClearsKeyFiles reports whether the managed hook client, which

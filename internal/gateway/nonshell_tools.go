@@ -76,7 +76,7 @@ func nonShellToolFindings(ctx context.Context, request trustedActionRequest, fin
 	if generation == nil {
 		return findings
 	}
-	hard := request.StrictPolicy || request.ManagedInstall
+	hard := request.tierEnforces(tierGateManaged)
 	out := append([]RuleFinding(nil), findings...)
 	// add adds a rule's finding once. An uncertain finding (the call's own
 	// account or API host is unknown) alerts in every tier and never blocks.
@@ -156,8 +156,8 @@ func nonShellToolFindings(ctx context.Context, request trustedActionRequest, fin
 				// guessed role the finding is an alert at most outside the
 				// strict tier; a finding the native tool leaves detection-only
 				// stays so.
-				if !hard && !mapping.RoleKnown && f.enforcement != findingEnforcementDetectionOnly {
-					f.enforcement, f.proof = findingEnforcementAlertOnly, findingProof{}
+				if !hard && !mapping.RoleKnown && !f.Proof.Recorded() {
+					f.Proof, f.proof = f.Proof.Advise(), findingProof{}
 				}
 				f.Title += " (path in MCP tool arguments)"
 				out = append(out, f)
@@ -295,10 +295,10 @@ func nonShellFinding(rule *PatternRule, note, tool string, hard bool) RuleFindin
 		Evidence: tool, Tags: append([]string(nil), rule.Tags...), LineNumber: 1,
 	}
 	if hard {
-		f.enforcement = findingEnforcementAllowed
+		f.Proof = f.Proof.Enforce()
 		f.proof = newExactFallbackFindingProof(rule.ID, true, true, true, true)
 	} else {
-		f.enforcement = findingEnforcementAlertOnly
+		f.Proof = f.Proof.Advise()
 	}
 	return f
 }
@@ -327,10 +327,10 @@ func nonShellNamesOtherAccountCredential(facts actionfacts.Facts) bool {
 // its rule than existing: it may enforce where existing only alerts, or it
 // carries a higher severity.
 func nonShellFindingStronger(candidate, existing RuleFinding) bool {
-	if candidate.enforcement == findingEnforcementAllowed && existing.enforcement != findingEnforcementAllowed {
+	if candidate.contributesToEnforcement() && !existing.contributesToEnforcement() {
 		return true
 	}
-	if existing.enforcement == findingEnforcementAllowed && candidate.enforcement != findingEnforcementAllowed {
+	if existing.contributesToEnforcement() && !candidate.contributesToEnforcement() {
 		return false
 	}
 	return guardrailSeverityRank(candidate.Severity) > guardrailSeverityRank(existing.Severity)
@@ -445,7 +445,7 @@ func shellToolFindings(ctx context.Context, request trustedActionRequest, findin
 	}
 	request.Input.CWD = managedClientCWD(ctx, request.Input.CWD, request.ResolvedWriteTargets)
 	facts := actionfacts.Analyze(request.Input)
-	hard := request.StrictPolicy || request.ManagedInstall
+	hard := request.tierEnforces(tierGateManaged)
 	otherAccount := nonShellNamesOtherAccountCredential(facts)
 	out := append([]RuleFinding(nil), findings...)
 	// A finding of the lane is merged as the dispatch merges the finding of a

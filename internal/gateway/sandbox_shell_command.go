@@ -270,18 +270,18 @@ const (
 // only blocks where the call is enforcement-capable (observe mode records
 // would_block).
 func unverifiedShellCommandFinding(enforcementCapable bool) RuleFinding {
-	enforcement := findingEnforcementAllowed
+	enforcement := enforcingProof
 	if !enforcementCapable {
-		enforcement = findingEnforcementDetectionOnly
+		enforcement = recordProof
 	}
 	return RuleFinding{
-		RuleID:      unverifiedShellCommandRuleID,
-		Title:       unverifiedShellCommandTitle,
-		Severity:    "CRITICAL",
-		Confidence:  1,
-		Tags:        []string{"tool-arguments"},
-		LineNumber:  1,
-		enforcement: enforcement,
+		RuleID:     unverifiedShellCommandRuleID,
+		Title:      unverifiedShellCommandTitle,
+		Severity:   "CRITICAL",
+		Confidence: 1,
+		Tags:       []string{"tool-arguments"},
+		LineNumber: 1,
+		Proof:      enforcement,
 	}
 }
 
@@ -300,7 +300,7 @@ func unverifiedShellCommandFinding(enforcementCapable bool) RuleFinding {
 // and its audit (rel-1-0-10:GAP-0833). A verdict that gains nothing is
 // returned unchanged.
 func mergeSandboxShellCommandVerdict(ctx context.Context, cfg *config.Config, connectorName string, verdict *ToolInspectVerdict, findings []RuleFinding) *ToolInspectVerdict {
-	action := profileMeetActionForFindings(ctx, cfg, connectorName, findings, true, false)
+	action, floorConfirm := profileMeetDecisionForFindings(ctx, cfg, connectorName, findings, true, false)
 	deciding := make([]RuleFinding, 0, len(findings))
 	for _, finding := range findings {
 		if finding.contributesToEnforcement() || finding.contributesToAlertOnly() {
@@ -309,7 +309,7 @@ func mergeSandboxShellCommandVerdict(ctx context.Context, cfg *config.Config, co
 	}
 	if strongerGuardrailAction(verdict.Action, action) == verdict.Action {
 		out := verdict
-		if verdict.decisionConfirm && action == guardrailActionConfirm {
+		if verdict.decisionConfirm && action == guardrailActionConfirm && !floorConfirm {
 			// A rule confirms the call too: the confirm is no longer the
 			// decision model's alone, so it keeps the rule mapping (a block
 			// where the agent cannot ask).
@@ -321,8 +321,9 @@ func mergeSandboxShellCommandVerdict(ctx context.Context, cfg *config.Config, co
 	}
 	merged := *verdict
 	merged.Action = action
-	// The action is the rules' now (stronger than the verdict's).
-	merged.decisionConfirm = false
+	// The action is the rules' now (stronger than the verdict's): a
+	// confirm floor's confirm keeps its no-ask alert.
+	merged.decisionConfirm = floorConfirm
 	merged.DetailedFindings = append([]RuleFinding(nil), verdict.DetailedFindings...)
 	merged.Findings = append([]string(nil), verdict.Findings...)
 	reasons := make([]string, 0, minInt(len(deciding), 5))

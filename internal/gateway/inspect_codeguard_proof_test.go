@@ -271,16 +271,14 @@ rules:
 func TestAggregateCodeGuardSeveritySeparatesVisibleAndEnforceable(t *testing.T) {
 	findings := []RuleFinding{
 		{
-			Severity:    string(scanner.SeverityCritical),
-			enforcement: findingEnforcementDetectionOnly,
+			Severity: string(scanner.SeverityCritical),
+			Proof:    recordProof,
 		},
 		{
-			Severity:    string(scanner.SeverityHigh),
-			enforcement: findingEnforcementAllowed,
+			Severity: string(scanner.SeverityHigh),
 		},
 		{
-			Severity:    "MEDIUM",
-			enforcement: findingEnforcementAllowed,
+			Severity: "MEDIUM",
 		},
 	}
 	severity, enforceableSeverity := aggregateCodeGuardSeverity(
@@ -298,8 +296,7 @@ func TestAggregateCodeGuardSeveritySeparatesVisibleAndEnforceable(t *testing.T) 
 
 	severity, enforceableSeverity = aggregateCodeGuardSeverity(
 		[]RuleFinding{{
-			Severity:    string(scanner.SeverityHigh),
-			enforcement: findingEnforcementAllowed,
+			Severity: string(scanner.SeverityHigh),
 		}},
 		"CRITICAL",
 		"CRITICAL",
@@ -315,12 +312,11 @@ func TestAggregateCodeGuardSeveritySeparatesVisibleAndEnforceable(t *testing.T) 
 	severity, enforceableSeverity = aggregateCodeGuardSeverity(
 		[]RuleFinding{
 			{
-				Severity:    string(scanner.SeverityMedium),
-				enforcement: findingEnforcementAllowed,
+				Severity: string(scanner.SeverityMedium),
 			},
 			{
-				Severity:    string(scanner.SeverityLow),
-				enforcement: findingEnforcementDetectionOnly,
+				Severity: string(scanner.SeverityLow),
+				Proof:    recordProof,
 			},
 		},
 		"NONE",

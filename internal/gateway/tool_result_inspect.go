@@ -147,7 +147,7 @@ func toolResultChecks(generation *compiledRulePackCategories, content, toolName 
 			// Verified workspace source (a test fixture, a rule file) is
 			// telemetry, as for every other rule (scanContentRulesWithOptions).
 			f.Severity = "LOW"
-			f.enforcement = findingEnforcementDetectionOnly
+			f.Proof = f.Proof.Record()
 		}
 		injection = append(injection, f)
 	}

@@ -44,7 +44,11 @@ type Cell struct {
 // Row is one row of the tier table: the proofs it matches and a cell per
 // deployment and tier. An empty match list matches anything.
 type Row struct {
-	ID        string
+	ID string
+	// Rules: the row matches only a finding of one of these rule ids
+	// (case-insensitive), with or without a proof. A row with no rules
+	// matches a finding by its proof only, and never a finding with none.
+	Rules     []string
 	Kinds     []ProofKind
 	Targets   []TargetClass
 	Certainty []Certainty
@@ -74,19 +78,27 @@ type Table struct {
 	Rows []Row
 }
 
-func (t *Table) match(p Proof, surface Surface, secureClient bool) *Row {
-	if p.IsZero() {
-		return nil
-	}
+// match is the first row that decides f: a rule row when f's rule is
+// listed (and its proof matches the row's proof selectors), else a proof
+// row when f has a proof. Gate rows never match a finding.
+func (t *Table) match(f Finding, surface Surface, secureClient bool) *Row {
+	noProof := f.Proof.IsZero()
 	for i := range t.Rows {
 		row := &t.Rows[i]
 		if row.Gate {
 			continue
 		}
+		if len(row.Rules) > 0 {
+			if !slices.ContainsFunc(row.Rules, func(id string) bool { return strings.EqualFold(id, strings.TrimSpace(f.RuleID)) }) {
+				continue
+			}
+		} else if noProof {
+			continue
+		}
 		if surface == SurfaceContent && !row.Content || secureClient && !row.SecureClient {
 			continue
 		}
-		if row.matches(p) {
+		if row.matches(f.Proof) {
 			return row
 		}
 	}
@@ -120,13 +132,19 @@ func (r *Row) cell(d Deployment, tier func() Tier) Cell {
 
 // Row ids of the built-in table.
 const (
-	RowRecord          = "record"
-	RowAdvisory        = "advisory"
-	RowEvaluationFault = "evaluation-fault"
-	RowUnverifiedPath  = "unverified-path"
-	RowTruncated       = "truncated"
-	RowStateWrite      = "state-write"
-	RowProtectedFile   = "shell-protected-file"
+	RowRecord   = "record"
+	RowAdvisory = "advisory"
+	// RowAskTicketRequest: a Kerberos ticket request (or credentialed
+	// domain service use) asks for a person's confirmation in the default
+	// tier where the agent can ask, and is an alert where it cannot; never a
+	// block in default. Strict keeps its block, permissive its alert
+	// (rel-1-0-10:GAP-0017, GAP-0067).
+	RowAskTicketRequest = "ask-ticket-request"
+	RowEvaluationFault  = "evaluation-fault"
+	RowUnverifiedPath   = "unverified-path"
+	RowTruncated        = "truncated"
+	RowStateWrite       = "state-write"
+	RowProtectedFile    = "shell-protected-file"
 	// The known credential reads (GAP-1244, GAP-0888, GAP-0898/0899): a
 	// read proven on a credential file class takes the cell the 1.0.10
 	// rule naming that class gives its plain spelling (cat <the file>),
@@ -190,6 +208,21 @@ var builtin = Table{Rows: []Row{
 		Content: true, SecureClient: true, Source: "rel-1-0-10:alert-only",
 		Cells: [deploymentCount][tierCount]Cell{
 			uniform(Cell{Levels: true, Ceiling: CeilingAlert}), uniform(Cell{Levels: true, Ceiling: CeilingAlert}),
+		},
+	},
+	{
+		// A ticket request confirms in the default tier, per-user and
+		// managed alike: a confirm floor over the severity mapping, so the
+		// HIGH finding asks where it alerted (the hook asks where the agent
+		// can and alerts where it cannot, never a block: GAP-0371). Strict
+		// and permissive keep the 1.0.10 mapping (strict blocks HIGH). The
+		// record and advisory rows come first, so a ticket finding a reader
+		// only recorded or advised keeps that cell.
+		ID: RowAskTicketRequest, Rules: []string{"credential.directory_ticket_request"},
+		Source: "rel-1-0-10:GAP-0017/GAP-0067",
+		Cells: [deploymentCount][tierCount]Cell{
+			{TierDefault: {Floor: Confirm, Levels: true}, TierPermissive: {Levels: true}, TierStrict: {Levels: true}},
+			{TierDefault: {Floor: Confirm, Levels: true}, TierPermissive: {Levels: true}, TierStrict: {Levels: true}},
 		},
 	},
 	{
@@ -512,12 +545,12 @@ func toYAMLCell(c Cell) CellYAML {
 	return out
 }
 
-// Severity is the severity the table gives a finding with proof p on the
-// tool surface when every cell of its row agrees (the truncated row: a
-// bound alone is MEDIUM), else SevNone: the finding's own severity stands.
-// It is the severity a verdict reports for the finding (HighestSeverity).
-func (t *Table) Severity(p Proof) Severity {
-	row := t.match(p, SurfaceTool, false)
+// Severity is the severity the table gives finding f on the tool surface
+// when every cell of its row agrees (the truncated row: a bound alone is
+// MEDIUM), else SevNone: the finding's own severity stands. It is the
+// severity a verdict reports for the finding (HighestSeverity).
+func (t *Table) Severity(f Finding) Severity {
+	row := t.match(f, SurfaceTool, false)
 	if row == nil {
 		return SevNone
 	}

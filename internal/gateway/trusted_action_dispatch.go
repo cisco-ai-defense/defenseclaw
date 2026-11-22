@@ -509,6 +509,11 @@ func dispatchTrustedActionOnce(
 	// begins nothing more, rel-1-0-10:GAP-0766).
 	defer hookpaths.HookCall()()
 	defer func() { findings = markShellProtectedFileFindings(request, findings) }()
+	// The rule name of a link-held state write is settled once, on the
+	// outermost call, after every reading (GAP-1568).
+	if parent == nil || parent.Value(effectShadowContextKey{}) == nil {
+		defer func() { findings = withLinkHeldStateWrites(findings) }()
+	}
 	defer recoverTrustedActionFault(request, &findings)
 	// A call whose shell the tool does not name is judged in the POSIX
 	// reading too, before any bound below decides the call: a credential
@@ -1797,25 +1802,23 @@ func dispatchTrustedActionWith(
 				matchedSemanticOwnerIDs[claimedID] = struct{}{}
 			}
 			finding := RuleFinding{
-				RuleID:      candidate.rule.ID,
-				Title:       candidate.rule.Title,
-				Severity:    candidate.rule.Severity,
-				Confidence:  candidate.rule.Confidence,
-				Tags:        append([]string(nil), candidate.rule.Tags...),
-				enforcement: findingEnforcementAllowed,
+				RuleID:     candidate.rule.ID,
+				Title:      candidate.rule.Title,
+				Severity:   candidate.rule.Severity,
+				Confidence: candidate.rule.Confidence,
+				Tags:       append([]string(nil), candidate.rule.Tags...),
 			}
 			if !request.EnforcementCapable ||
 				candidate.owner.detectionOnly || candidate.owner.alertOnly ||
 				!enforcementFacts.EnforcementEligible() ||
 				!enforcementResult.Matched {
-				finding.enforcement = findingEnforcementDetectionOnly
+				finding.Proof = finding.Proof.Record()
 			}
 			if request.EnforcementCapable && candidate.owner.alertOnly {
-				finding.enforcement = findingEnforcementAlertOnly
+				finding.Proof = finding.Proof.Advise()
 			}
-			if candidate.owner.strictEnforced && !request.StrictPolicy &&
-				finding.enforcement == findingEnforcementAllowed {
-				finding.enforcement = findingEnforcementAlertOnly
+			if candidate.owner.strictEnforced && finding.contributesToEnforcement() {
+				finding.Proof = request.tieredProof(finding.Proof, tierGateStrict)
 			}
 			finding = finding.withTrustedActionProof(
 				newActionFactsSemanticFindingProof(
@@ -2188,9 +2191,9 @@ func withProvenActiveStateMutation(request trustedActionRequest, findings []Rule
 	finding.Severity = severity
 	finding.Title = canonical.Title
 	finding.Tags = canonical.Tags
-	finding.enforcement = findingEnforcementDetectionOnly
+	finding.Proof = finding.Proof.Record()
 	if request.EnforcementCapable {
-		finding.enforcement = findingEnforcementAllowed
+		finding.Proof = finding.Proof.Enforce()
 	}
 	finding = finding.withTrustedActionProof(newFindingProof(findingProofActiveStateMutation, ruleID, true))
 	if index >= 0 {
@@ -5721,9 +5724,9 @@ func withMigratedLiteralRuleFindings(
 		} else {
 			finding = adjustConfidence(request.Input.Tool, finding)
 		}
-		finding.enforcement = findingEnforcementDetectionOnly
+		finding.Proof = finding.Proof.Record()
 		if request.EnforcementCapable {
-			finding.enforcement = findingEnforcementAllowed
+			finding.Proof = finding.Proof.Enforce()
 		}
 		finding = finding.withTrustedActionProof(newActionFactsSubgraphFindingProof(candidate.rule.ID, true, true))
 		if index >= 0 {
@@ -7438,11 +7441,7 @@ func withCradleUnknownTier(findings []RuleFinding, request trustedActionRequest)
 			return findings
 		}
 		proven = true
-		if request.StrictPolicy || request.ManagedInstall {
-			finding.enforcement = findingEnforcementAllowed
-		} else {
-			finding.enforcement = findingEnforcementAlertOnly
-		}
+		finding.Proof = request.tieredProof(finding.Proof, tierGateManaged)
 	}
 	return findings
 }
@@ -7463,7 +7462,7 @@ func withHostTwinFindings(findings, twin []RuleFinding) []RuleFinding {
 	proven := make([]RuleFinding, len(twin))
 	for index, finding := range twin {
 		if finding.contributesToEnforcement() && !finding.proof.authorizes(finding.RuleID) {
-			finding.enforcement = findingEnforcementDetectionOnly
+			finding.Proof = finding.Proof.Record()
 		}
 		proven[index] = finding
 	}
@@ -7549,7 +7548,7 @@ func filterExactFallbackFindings(
 			continue
 		}
 		if hasTag(finding.Tags, trustedParserUncertaintyTag) {
-			finding.enforcement = findingEnforcementDetectionOnly
+			finding.Proof = finding.Proof.Record()
 			filtered = append(filtered, finding)
 			continue
 		}
@@ -7582,9 +7581,9 @@ func filterExactFallbackFindings(
 		}
 		proven = proven || boundedSubgraphProven
 		if contract.alertOnly && enforcementCapable && matched {
-			finding.enforcement = findingEnforcementAlertOnly
+			finding.Proof = finding.Proof.Advise()
 		} else if contract.detectionOnly || !enforcementCapable || !proven {
-			finding.enforcement = findingEnforcementDetectionOnly
+			finding.Proof = finding.Proof.Record()
 			// The contract proved its operation on what the analysis read, but
 			// the call was read only in part, so no enforcing reader ran
 			// (rel-1-0-10:GAP-0892). A detection-only contract never denies
@@ -7592,7 +7591,7 @@ func filterExactFallbackFindings(
 			// (withPartialStateWriteFloor).
 			finding.partialReading = matched && !proofBoundary && enforcementCapable && operandGrammarOnlyReading(facts)
 		} else {
-			finding.enforcement = findingEnforcementAllowed
+			finding.Proof = finding.Proof.Enforce()
 		}
 		if boundedSubgraphProven {
 			finding = finding.withTrustedActionProof(
@@ -8050,17 +8049,16 @@ func appendTrustedBoundedExactFallbackFindings(
 			evidence = input.Tool
 		}
 		finding := RuleFinding{
-			RuleID:      rule.ID,
-			Title:       rule.Title,
-			Severity:    rule.Severity,
-			Confidence:  rule.Confidence,
-			Evidence:    evidence,
-			Tags:        append([]string(nil), rule.Tags...),
-			LineNumber:  1,
-			enforcement: findingEnforcementAllowed,
+			RuleID:     rule.ID,
+			Title:      rule.Title,
+			Severity:   rule.Severity,
+			Confidence: rule.Confidence,
+			Evidence:   evidence,
+			Tags:       append([]string(nil), rule.Tags...),
+			LineNumber: 1,
 		}
 		if contract.boundedRequiresActiveExpression && contract.detectionOnly {
-			finding.enforcement = findingEnforcementDetectionOnly
+			finding.Proof = finding.Proof.Record()
 		}
 		findings = append(findings, adjustConfidence(input.Tool, finding))
 		seen[ruleID] = struct{}{}
@@ -8386,7 +8384,7 @@ func filterTrustedLegacyActionContext(
 	filtered := findings[:0]
 	for _, finding := range findings {
 		if hasTag(finding.Tags, trustedParserUncertaintyTag) {
-			finding.enforcement = findingEnforcementDetectionOnly
+			finding.Proof = finding.Proof.Record()
 			filtered = append(filtered, finding)
 			continue
 		}
@@ -8415,7 +8413,7 @@ func filterTrustedLegacyActionContext(
 			}
 			if readOnlyInspection {
 				finding.Severity = "LOW"
-				finding.enforcement = findingEnforcementDetectionOnly
+				finding.Proof = finding.Proof.Record()
 				filtered = append(filtered, finding)
 				continue
 			}
@@ -8536,16 +8534,16 @@ func trustedLegacyProvenCommandFinding(
 		finding.RuleID,
 		contract,
 	) && (contract.prerequisite == nil || contract.prerequisite(facts)) {
-		finding.enforcement = findingEnforcementDetectionOnly
+		finding.Proof = finding.Proof.Record()
 	}
 	if finding.RuleID == "CMD-EVAL" &&
-		finding.enforcement != findingEnforcementDetectionOnly {
+		!finding.Proof.Recorded() {
 		// eval's operand is only known when it runs, so no parse can prove
 		// the call and the proof boundary left the finding detection-only,
 		// which "defenseclaw alerts" never shows (GAP-2575). An executed
 		// eval with a runtime operand alerts at the connector's threshold
 		// and never confirms or blocks.
-		finding.enforcement = findingEnforcementAlertOnly
+		finding.Proof = finding.Proof.Advise()
 	}
 	if proof, proven := trustedSemanticOwnerFindingProofFromActions(
 		finding.RuleID,
@@ -10982,7 +10980,6 @@ func trustedActionLimitFindings(enforcementCapable bool) []RuleFinding {
 	failure := RuleFinding{
 		RuleID: ruleID, Title: "Shell command exceeds policy evaluation limit",
 		Severity: "CRITICAL", Confidence: 1,
-		enforcement: findingEnforcementAllowed,
 	}.withTrustedActionProof(newEvaluationFailureFindingProof(ruleID))
 	return applyTrustedActionProofBoundary([]RuleFinding{failure}, enforcementCapable)
 }
@@ -11045,7 +11042,6 @@ func trustedActionParseFailureFindings(enforcementCapable bool) []RuleFinding {
 	failure := RuleFinding{
 		RuleID: parseFailureRuleID, Title: parseFailureTitle,
 		Severity: "CRITICAL", Confidence: 1,
-		enforcement: findingEnforcementAllowed,
 	}.withTrustedActionProof(newEvaluationFailureFindingProof(parseFailureRuleID))
 	return applyTrustedActionProofBoundary([]RuleFinding{failure}, enforcementCapable)
 }
@@ -11159,20 +11155,20 @@ func unreadPartFindings(title string, enforcementCapable bool) []RuleFinding {
 		// A record, not a finding about the call: it does not raise the
 		// severity of an allowed answer (the alert variants raise it back).
 		findings[index].Severity = "LOW"
-		findings[index].enforcement = findingEnforcementDetectionOnly
+		findings[index].Proof = findings[index].Proof.Record()
 	}
 	return findings
 }
 
 // unreadPartAlert turns unread-part records into the unknown tier as an
-// alert: CRITICAL, capped below confirm and block (findingEnforcementAlertOnly).
+// alert: CRITICAL, capped below confirm and block (the advisory row of the tier table).
 func unreadPartAlert(findings []RuleFinding, enforcementCapable bool) []RuleFinding {
 	if !enforcementCapable {
 		return findings
 	}
 	for index := range findings {
 		findings[index].Severity = "CRITICAL"
-		findings[index].enforcement = findingEnforcementAlertOnly
+		findings[index].Proof = findings[index].Proof.Advise()
 	}
 	return findings
 }
@@ -11526,7 +11522,7 @@ func appendTrustedBashFallbackFindings(
 				// proof cannot upgrade an outer PARTIAL or INVALID shell
 				// expression. Preserve the finding for shadow analysis while
 				// replacing any nested authority with an explicit shadow proof.
-				finding.enforcement = findingEnforcementDetectionOnly
+				finding.Proof = finding.Proof.Record()
 				finding = finding.withTrustedActionProof(
 					newParserShadowFindingProof(finding.RuleID),
 				)
@@ -11542,7 +11538,7 @@ func appendTrustedBashFallbackFindings(
 }
 
 func markTrustedParserUncertainty(finding RuleFinding) RuleFinding {
-	finding.enforcement = findingEnforcementDetectionOnly
+	finding.Proof = finding.Proof.Record()
 	finding.disposition = findingDispositionAudit
 	finding.Severity = "LOW"
 	if finding.Confidence > 0.25 {
