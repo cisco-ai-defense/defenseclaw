@@ -265,6 +265,8 @@ type AIEvidence struct {
 	// Kept in sync with Origin at emit time; either both are set or
 	// both are absent.
 	Bundled bool `json:"bundled,omitempty"`
+	// Skill describes the folder of a skill_entry row (ai_skill_facts.go).
+	Skill *AISkillFacts `json:"skill,omitempty"`
 }
 
 // Match-kind constants. Stamped by detectors so the confidence engine
@@ -402,6 +404,7 @@ type AISignal struct {
 	Basenames          []string        `json:"basenames,omitempty"`
 	WorkspaceHash      string          `json:"workspace_hash,omitempty"`
 	Version            string          `json:"version,omitempty"`
+	Location           string          `json:"location,omitempty"` // of a binary install (ai_agent_installs.go)
 	Component          *AIComponent    `json:"component,omitempty"`
 	Model              *LocalModelInfo `json:"model,omitempty"`
 	Runtime            *ProcessRuntime `json:"runtime,omitempty"`
@@ -622,6 +625,12 @@ type ContinuousDiscoveryService struct {
 	// runtime remains the sole owner of signal records.
 	managedInventoryEmitMu sync.RWMutex
 	managedInventoryEmit   func(context.Context)
+	// skillFactsSeen keeps one skill scan's folder facts by path: a shared
+	// folder such as ~/.agents/skills is walked once per agent reading it.
+	skillFactsMu   sync.Mutex
+	skillFactsSeen map[string]AISkillFacts
+	skillBytesRead int64
+	skillManifests map[string]string // SKILL.md hash -> skill folder
 	// modelAPIProbeCursor rotates origins and catalogs across bounded passes so
 	// a stalled or over-cap loopback provider cannot starve later providers.
 	modelAPIProbeCursor  atomic.Uint64
@@ -2617,20 +2626,82 @@ func dirHasEntry(path string) bool {
 // constant — trivial to grep, trivial to disable via
 // disabled_signature_ids per surface.
 func (s *ContinuousDiscoveryService) detectSkills() []AISignal {
+	s.resetSkillFacts()
+	defer s.resetSkillFacts()
 	var out []AISignal
 	for _, sig := range s.catalog {
+		// ~/.agents/skills and the relative .agents/skills can name one folder.
+		seen := map[string]bool{}
 		for _, candidate := range sig.SkillPaths {
+			if strings.HasPrefix(strings.TrimSpace(candidate), "/") && !filepath.IsAbs(strings.TrimSpace(candidate)) {
+				continue // a Unix admin folder, on Windows
+			}
+			// A folder named relative to a scan root is a repository's.
+			project := relativeCandidate(candidate)
 			for _, path := range s.expandCandidatePath(candidate) {
+				if seen[filepath.Clean(path)] {
+					continue
+				}
+				seen[filepath.Clean(path)] = true
 				if dirHasEntry(path) && !s.profileLinkRefused(path) {
 					signal := s.signalFromDirectoryChildren(sig, SignalSkill, "skill", path)
 					if !s.profileLinkRefused(path) {
-						out = append(out, signal)
+						out = append(out, projectSkills(signal, project))
+					}
+					// Claude Code keeps account-synced skills in
+					// skills/synced/<account>/<skill>; each account folder is
+					// scanned as its own skill folder.
+					if synced, ok := claudeSyncedSkills(path); ok && strings.EqualFold(strings.TrimSpace(sig.ID), "claudecode") {
+						for _, account := range realChildDirs(synced) {
+							accountDir := filepath.Join(synced, account)
+							if dirHasEntry(accountDir) && !s.profileLinkRefused(accountDir) {
+								// The account id stays on the endpoint.
+								signal := s.signalFromDirectoryChildren(sig, SignalSkill, "skill", accountDir)
+								signal.Basenames = slices.DeleteFunc(signal.Basenames, func(name string) bool { return name == account })
+								for i, ev := range signal.Evidence {
+									if ev.Type == "skill" {
+										signal.Evidence[i].Basename = "synced"
+									}
+									if ev.Skill != nil {
+										ev.Skill.Location = strings.Replace(ev.Skill.Location, "/synced/"+account+"/", "/synced/", 1)
+									}
+								}
+								out = append(out, projectSkills(signal, project))
+							}
+						}
 					}
 				}
 			}
 		}
 	}
-	return out
+	return append(out, s.detectPluginSkills()...)
+}
+
+func relativeCandidate(candidate string) bool {
+	candidate = strings.TrimSpace(candidate)
+	return candidate != "" && !strings.ContainsAny(candidate[:1], "~$/\\") && !filepath.IsAbs(candidate)
+}
+
+// projectSkills marks the skills of a repository folder, whose path stays
+// on the endpoint.
+func projectSkills(signal AISignal, project bool) AISignal {
+	for _, ev := range signal.Evidence {
+		if ev.Skill != nil && project {
+			ev.Skill.Scope, ev.Skill.Location = SkillScopeProject, ""
+		}
+	}
+	return signal
+}
+
+// claudeSyncedSkills returns the synced folder of a .claude/skills folder,
+// which holds account folders of skills rather than one skill.
+func claudeSyncedSkills(skillsDir string) (string, bool) {
+	if filepath.Base(skillsDir) != "skills" || filepath.Base(filepath.Dir(skillsDir)) != ".claude" {
+		return "", false
+	}
+	synced := filepath.Join(skillsDir, "synced")
+	info, err := os.Lstat(synced)
+	return synced, err == nil && info.IsDir()
 }
 
 func (s *ContinuousDiscoveryService) detectRules() []AISignal {
@@ -2732,6 +2803,9 @@ func (s *ContinuousDiscoveryService) signalFromDirectoryChildren(sig AISignature
 				if detector == "skill" && isHiddenSkillStateFile(entry) {
 					continue
 				}
+				if _, synced := claudeSyncedSkills(path); detector == "skill" && synced && entry.Name() == "synced" {
+					continue // scanned per account by detectSkills
+				}
 				// A hidden folder beside the plugins is the agent's own working
 				// state (Codex .remote-plugin-install-staging), not a plugin.
 				if detector == "plugin" && strings.HasPrefix(entry.Name(), ".") {
@@ -2792,6 +2866,7 @@ func (s *ContinuousDiscoveryService) directoryChildEvidence(detector, parent, en
 		// apart from "walker didn't stamp an origin"
 		// (latter must fail-safe).
 		ev.Origin = "user"
+		ev.Skill = s.skillFacts(child, false)
 	}
 	if s.keepEvidencePath() {
 		ev.RawPath = child
@@ -2837,6 +2912,7 @@ func (s *ContinuousDiscoveryService) appendHermesSkillChildren(evidence *[]AIEvi
 			PathHash: hashPath(entry.Path),
 			Origin:   origin,
 			Bundled:  entry.Bundled,
+			Skill:    s.skillFacts(entry.Path, entry.Bundled),
 		}
 		if s.keepEvidencePath() {
 			ev.RawPath = entry.Path
@@ -2923,6 +2999,7 @@ func (s *ContinuousDiscoveryService) appendSystemSkillChildren(evidence *[]AIEvi
 			PathHash: hashPath(child),
 			Origin:   origin,
 			Bundled:  bundled,
+			Skill:    s.skillFacts(child, bundled),
 		}
 		if s.keepEvidencePath() {
 			ev.RawPath = child
@@ -2944,7 +3021,7 @@ func (s *ContinuousDiscoveryService) isCodexBundledSkillContainer(path string) b
 		return sameInventoryPath(path, filepath.Join(configured, "skills", enforce.BundledSkillContainer))
 	}
 	for _, home := range s.homesToScan() {
-		if sameInventoryPath(path, filepath.Join(home, ".codex", "skills", enforce.BundledSkillContainer)) {
+		if sameInventoryPath(path, filepath.Join(s.agentHome(home, "CODEX_HOME"), "skills", enforce.BundledSkillContainer)) {
 			return true
 		}
 	}
@@ -2996,8 +3073,16 @@ func (s *ContinuousDiscoveryService) detectBinaries() []AISignal {
 	var out []AISignal
 	for _, sig := range s.catalog {
 		for _, bin := range sig.BinaryNames {
+			seen := map[string]bool{}
 			if path, err := s.lookPath(bin); err == nil && path != "" {
+				seen[filepath.Clean(path)] = true
 				out = append(out, s.signalFromPath(sig, SignalAICLI, "binary", path))
+			}
+			for _, path := range s.agentInstalls(bin) {
+				if !seen[path] {
+					seen[path] = true
+					out = append(out, s.signalFromPath(sig, SignalAICLI, "binary", path))
+				}
 			}
 		}
 	}
@@ -3136,6 +3221,8 @@ func (s *ContinuousDiscoveryService) detectProcesses() ([]AISignal, error) {
 		}
 		out = append(out, signal)
 	}
+	// E26: a running Agent Substrate launcher is labelled as such.
+	out = append(out, s.detectSubstrateLaunchers(procs, now)...)
 	return out, nil
 }
 
@@ -4071,6 +4158,9 @@ func (s *ContinuousDiscoveryService) signalFromPath(sig AISignature, category, d
 		ev.RawPath = path
 	}
 	out := s.signalFromEvidence(sig, category, detector, []AIEvidence{ev})
+	if detector == "binary" && s.sandbox == nil {
+		out.Location = s.installLocation(path)
+	}
 	s.stampHomeOwner(&out, path)
 	// "Last active" for path-evidence detectors (config / binary /
 	// MCP / extension) defaults to the file's modification time when
@@ -4235,6 +4325,16 @@ func (s *ContinuousDiscoveryService) expandCandidatePattern(candidate string) []
 	candidate = strings.TrimSpace(candidate)
 	if candidate == "" {
 		return nil
+	}
+	// A managed scan reads each user's saved CODEX_HOME and the like.
+	if name, rest, ok := agentHomeCandidate(candidate); ok && s.opts.ManagedEnterprise {
+		var out []string
+		for _, home := range s.homesToScan() {
+			if dir := s.savedAgentHome(home, name); dir != "" {
+				out = append(out, filepath.Join(dir, rest))
+			}
+		}
+		return out
 	}
 	if rewritten, ok := s.profileRelativeCandidate(candidate); ok {
 		candidate = rewritten
