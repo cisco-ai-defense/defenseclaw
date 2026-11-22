@@ -6,6 +6,7 @@ package effects
 
 import (
 	"encoding/json"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -17,36 +18,79 @@ func extractFileTool(call Call, o Options) Result {
 	res := Result{Surface: SurfaceFileTool, Flavor: o.flavor(), Dialect: DialectNone}
 	m := decodeArgs(call.Args)
 	kind := fileToolKind(call.Tool)
-	pathVal := firstString(m, "file_path", "path", "filePath", "filename", "file", "target", "notebook_path")
-	e := Effect{Kind: kind, RoleState: RoleStateKnown, TargetState: TargetStateKnown,
-		Target: Target{Type: TargetPath, Flavor: o.flavor(), Link: LinkNotChecked},
-		Origin: Origin{Surface: SurfaceFileTool, Command: 1, Program: call.Tool}}
-	if pathVal == "" {
+	// Every path key is read: when several name different paths the tool's
+	// own key precedence decides which it writes, so each is a target whose
+	// role is unknown (S3-PRE security review, DET111 R1).
+	pathVals := distinctStrings(m, "file_path", "path", "filePath", "filename", "file", "target", "notebook_path")
+	mk := func() Effect {
+		return Effect{Kind: kind, RoleState: RoleStateKnown, TargetState: TargetStateKnown,
+			Target: Target{Type: TargetPath, Flavor: o.flavor(), Link: LinkNotChecked},
+			Origin: Origin{Surface: SurfaceFileTool, Command: 1, Program: call.Tool}}
+	}
+	if len(pathVals) == 0 {
+		e := mk()
 		e.Kind = KindOpaque
 		e.addReason(ReasonUnknownTool, ScopeTarget)
 		res.Effects = append(res.Effects, e)
 		return res
 	}
-	e.Target.Spelling = cap4k(pathVal)
-	if abs, ok, reason := placePath(pathVal, o); ok {
-		e.Target.Path = abs
-	} else {
-		e.addReason(reason, ScopeTarget)
-	}
-	if kind == KindWrite {
-		content := firstString(m, "content", "new_string", "newString", "contents", "text", "file_text")
-		e.Data = &Data{Kind: DataLiteral, Bytes: len(content), Text: cap8k(content)}
-	}
 	// Schema accounting (review R5-1): an argument key the file-tool schema does
 	// not expect means the call is not fully understood -> not fully known.
+	unknownKey := false
 	for k := range m {
 		if !fileToolArgKey(k) {
-			e.addReason(ReasonUnknownTool, ScopeRole)
+			unknownKey = true
 			break
 		}
 	}
-	res.Effects = append(res.Effects, e)
+	content := ""
+	if kind == KindWrite {
+		content = firstString(m, "content", "new_string", "newString", "contents", "text", "file_text")
+	}
+	for _, pathVal := range pathVals {
+		e := mk()
+		e.Target.Spelling = cap4k(pathVal)
+		if abs, ok, reason := placePath(pathVal, o); ok {
+			e.Target.Path = abs
+		} else {
+			e.addReason(reason, ScopeTarget)
+		}
+		if kind == KindWrite {
+			e.Data = &Data{Kind: DataLiteral, Bytes: len(content), Text: cap8k(content)}
+		}
+		if unknownKey || len(pathVals) > 1 {
+			e.addReason(ReasonUnknownTool, ScopeRole)
+		}
+		res.Effects = append(res.Effects, e)
+	}
 	return res
+}
+
+// wholeAbsPath reports a string that is one absolute path and nothing else:
+// /x or ~/x on POSIX, C:\x or \\host\x on Windows, no blank or newline.
+func wholeAbsPath(v string, o Options) bool {
+	if len(v) < 2 || len(v) > maxSpellingBytes || strings.ContainsAny(v, " \t\r\n") {
+		return false
+	}
+	if strings.HasPrefix(v, "/") || strings.HasPrefix(v, "~/") {
+		return !strings.HasPrefix(v, "//")
+	}
+	if o.flavor() == FlavorWindows {
+		return len(v) > 2 && v[1] == ':' && (v[2] == '\\' || v[2] == '/') || strings.HasPrefix(v, `\\`)
+	}
+	return false
+}
+
+// distinctStrings is every non-empty string value of keys, in key order, each
+// once.
+func distinctStrings(m map[string]any, keys ...string) []string {
+	var out []string
+	for _, k := range keys {
+		if s, ok := m[k].(string); ok && s != "" && !slices.Contains(out, s) {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // fileToolArgKey reports whether a file-tool argument key is in the expected
@@ -211,6 +255,22 @@ func extractMCP(call Call, o Options) Result {
 			}
 			if looksPathKey(key) && looksAbsOrRel(t) {
 				e := Effect{Kind: kindGuess, RoleState: RoleStateGuessed, TargetState: TargetStateKnown,
+					Target: Target{Type: TargetPath, Spelling: cap4k(t), Flavor: o.flavor(), Link: LinkNotChecked},
+					Origin: Origin{Surface: SurfaceMCP, Command: 1, Program: call.Tool}}
+				if abs, ok, reason := placePath(t, o); ok {
+					e.Target.Path = abs
+				} else {
+					e.addReason(reason, ScopeTarget)
+				}
+				e.addReason(ReasonMCPSemantics, ScopeRole)
+				res.Effects = append(res.Effects, e)
+				return
+			}
+			// A whole absolute path under a key that does not name one (query,
+			// arg, value) may still be what the server opens: a target of
+			// unknown role, never dropped (S3-PRE security review, DET111 R1).
+			if wholeAbsPath(t, o) {
+				e := Effect{Kind: kindGuess, RoleState: RoleStateUnknown, TargetState: TargetStateKnown,
 					Target: Target{Type: TargetPath, Spelling: cap4k(t), Flavor: o.flavor(), Link: LinkNotChecked},
 					Origin: Origin{Surface: SurfaceMCP, Command: 1, Program: call.Tool}}
 				if abs, ok, reason := placePath(t, o); ok {
