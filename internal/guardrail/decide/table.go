@@ -476,9 +476,10 @@ func (t *Table) row(id string) *Row {
 }
 
 // WithColumn is t with col's cells in col's tier column; rows col does not
-// list keep t's cells.
+// list keep t's cells. A column that changes no cell is t itself (a built-in
+// pack's tiers.yaml decides with Builtin()).
 func (t *Table) WithColumn(col *Column) *Table {
-	if col == nil {
+	if col == nil || !t.changedBy(col) {
 		return t
 	}
 	out := &Table{Rows: slices.Clone(t.Rows)}
@@ -489,6 +490,16 @@ func (t *Table) WithColumn(col *Column) *Table {
 		}
 	}
 	return out
+}
+
+func (t *Table) changedBy(col *Column) bool {
+	for _, cr := range col.Rows {
+		if row := t.row(cr.ID); row != nil &&
+			(row.Cells[PerUser][col.Tier] != cr.PerUser || row.Cells[Managed][col.Tier] != cr.Managed) {
+			return true
+		}
+	}
+	return false
 }
 
 // ColumnOf is the column of t for tier, in row order (what a pack's
