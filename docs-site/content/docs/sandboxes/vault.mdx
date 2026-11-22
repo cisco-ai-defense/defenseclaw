@@ -1,0 +1,141 @@
+---
+title: Credential vault (Preview)
+description: Keep the secrets your sandboxed agents need in a vault, bound to the one host each may be sent to. The agent sees only a placeholder; DefenseClaw also moves secrets an agent is given into the vault.
+keywords:
+  - DefenseClaw vault
+  - sandbox credentials
+  - secret placeholder
+  - OpenShell credential
+  - sandbox vault add
+  - credential capture
+---
+
+<Callout type="info" title="Preview">
+The credential vault is a preview feature of OpenShell sandboxes on Linux and macOS, for per-user installs and managed computers.
+</Callout>
+
+Coding agents leak credentials because they hold them: a key in the agent's
+environment can end up in the model's context, a transcript, a file or a commit.
+The vault keeps your secrets out of the agent's reach. Each secret is bound to
+the one host it may be sent to. A sandbox started with `--vault NAME` gives the
+agent only a placeholder in `$NAME`; OpenShell puts the real value in on the
+way out, to that host only.
+
+```text
+ your vault (your account only)        sandbox (the agent)              the API
+ STRIPE_API_KEY → api.stripe.com  ──►  $STRIPE_API_KEY = placeholder  ──►  OpenShell swaps the
+                                       curl -H "Authorization: Bearer      placeholder for the
+                                       $STRIPE_API_KEY" api.stripe.com      value, for api.stripe.com only
+```
+
+## Add a secret
+
+```bash
+defenseclaw sandbox vault add STRIPE_API_KEY --host api.stripe.com
+```
+
+The value is typed with echo off. To pipe it instead:
+
+```bash
+printf '%s\n' "$VALUE" | defenseclaw sandbox vault add STRIPE_API_KEY --host api.stripe.com --value-stdin
+```
+
+`NAME` is the environment variable the sandbox sees. `--host` is the only host
+the value is ever sent to: a host name, with `:port` when it is not 443. URLs,
+paths and wildcards are refused.
+
+## Use it in a sandbox
+
+```bash
+defenseclaw sandbox run claude --vault STRIPE_API_KEY
+```
+
+`--vault` takes one name and repeats. The run's banner lists each secret and
+its host on the `Secret` line. Inside the sandbox the agent uses the variable as
+usual (`$STRIPE_API_KEY` in a header). It never holds the value.
+
+- A secret works only against its host. Sent anywhere else, the placeholder is
+  just a meaningless string.
+- Do not let the agent print the variable. OpenShell refuses every request whose
+  body carries a placeholder, so once a placeholder lands in the conversation
+  (the agent ran `env`, say) later model calls of that conversation fail. Start
+  a new conversation with `defenseclaw sandbox connect NAME`.
+- A sandbox keeps the secrets it was created with. To give a running sandbox a
+  new or replaced secret, stop it and start a new one.
+
+## Secrets DefenseClaw captures for you
+
+When an agent in a sandbox is given a secret with a well-known shape, the
+secret goes into your vault and the call is stopped before the value reaches
+the model. This covers Claude Code and Codex prompts and tool calls, and these
+kinds of secret:
+
+| Kind | Vault name | Bound to |
+| --- | --- | --- |
+| Anthropic API key | `ANTHROPIC_API_KEY` | `api.anthropic.com` |
+| OpenAI API key | `OPENAI_API_KEY` | `api.openai.com` |
+| GitHub token (classic or fine-grained) | `GITHUB_TOKEN` | `api.github.com` |
+| Slack token | `SLACK_TOKEN` | `slack.com` |
+| Stripe live secret key | `STRIPE_API_KEY` | `api.stripe.com` |
+| Google API key | `GOOGLE_API_KEY` | no host: bind one before use |
+
+A second, different secret of the same kind gets `_2`, `_3` and so on.
+
+- **In a prompt.** The prompt is stopped and the model never sees the value.
+  Claude Code and Codex hooks cannot edit a prompt, only stop it, so send the
+  prompt again without the value and start a sandbox with `--vault NAME` to let
+  the agent use the secret.
+- **In a tool call.** The tool call is stopped and the agent is told to use
+  `$NAME` instead. The agent's model wrote the value, so it has seen it: the
+  secret is marked **exposed: rotate**. Rotate it with its issuer, then
+  `defenseclaw sandbox vault replace NAME`.
+
+AWS access keys are not captured: AWS signs each request with the key, which a
+placeholder swap cannot do. Turn capture off with `openshell.vault.auto_capture:
+false` ([configuration](/docs/reference/configuration)). On a managed computer
+your administrator's setting applies.
+
+## See and change your secrets
+
+```bash
+defenseclaw sandbox vault list
+```
+
+```text
+NAME            HOST             STATUS           SOURCE    LAST USED
+GITHUB_TOKEN    api.github.com   exposed: rotate  captured  never
+GOOGLE_API_KEY  —                needs a host     captured  never
+STRIPE_API_KEY  api.stripe.com   ready            manual    3m ago (demo)
+```
+
+Values are never printed. `show NAME` gives one secret's details, `replace`
+sets a new value, `bind` sets the host, `rename` changes the variable name and
+`remove` deletes it. See [the sandbox CLI reference](/docs/reference/sandbox-cli#sandbox-vault).
+
+In the TUI, the **Vault** tab (`K`) shows the same list and does the same
+changes: `a` add, `v` replace value, `e` set host, `n` rename, `d` delete,
+Enter details. A value is typed in a hidden field and goes to the command on
+standard input.
+
+## Where the vault lives
+
+| Install | Vault file |
+| --- | --- |
+| Per-user (Linux, macOS) | `~/.defenseclaw/vault/vault.json` |
+| Managed computer, Linux | `~/.local/state/defenseclaw-sandbox/vault/vault.json` |
+| Managed computer, macOS | `~/Library/Application Support/DefenseClaw Sandbox/vault/vault.json` |
+
+The directory is readable by your account only (mode 0700, the file 0600). The
+vault is never mounted into a sandbox. It is not encrypted: anything running as
+your account can read it, as it can read your shell environment. On a managed
+computer the managed gateway never receives a value, and a captured secret is
+removed from the hook call before the call reaches it.
+
+## Limits
+
+- The vault serves sandboxes only. An agent outside a sandbox gets nothing from it.
+- Secrets are your own. Your administrator's floor (`allowed_credentials`, the
+  egress rules) applies to vault secrets exactly as to `--credential`.
+- A host that echoes the `Authorization` header back would return the value to
+  the agent. Bind secrets to the API host itself.
+- Any program in the sandbox can use a secret against its host.

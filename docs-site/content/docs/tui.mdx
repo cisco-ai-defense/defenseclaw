@@ -80,6 +80,7 @@ to filter.
 | `T` | Tools | The tool block/allow list, which is `asset_policy.tool` in `config.yaml` (capital `T`; lowercase `t` is a panel key). To add the first rule, press `:` and type `tool block <tool-name> --connector <connector>` (or `tool allow`) |
 | `6` | Inventory | Combined inventory view, with sub-tabs for skills, plugins, MCPs, agents (including agent identities), tools, models, memory and [IDE plugins](#ide-plugins) |
 | `7` | Sandboxes | OpenShell sandboxes, their live activity feed, and the rare asks ([below](#sandboxes-panel)) |
+| `K` | Vault | Preview, Linux and macOS: your [credential vault](/docs/sandboxes/vault) for sandboxes, names, hosts and status, never values ([below](#vault-panel)) |
 | `8` | Logs | Live gateway logs with filter presets. The view opens on the newest line and follows new lines until you move the cursor |
 | `9` | Audit | Audit trail. The **Blocks** filter chip (move between chips with `h` and `l`; `3` still opens Skills) lists the calls DefenseClaw blocked, hook and guardrail blocks included, from the whole trail; the other views load the newest 500 events (the header says since when; use `defenseclaw audit export` for older ones). A row's detail names the connector, decision, mode and rule. `e` writes the rows of the current view to a new `defenseclaw-audit-export-<date>-<time>.json` in the data directory; an earlier export is never replaced |
 | `A` | Activity | Live output from commands you run; `l` (Mutations; `h` goes back to Commands) lists config and policy changes with what changed (for example `/.env/NAME: unset -> set`) |
@@ -544,6 +545,28 @@ end-of-session summary, `Enter` brings the TUI back. `c` hands the terminal to
 `defenseclaw sandbox connect <name>` the same way. While the terminal is
 handed over, `Ctrl-C` belongs to the command (at its prompts, say) and never
 quits the TUI; at "Press Enter to return to DefenseClaw" it returns too.
+
+## Vault panel
+
+Press `K` for **Vault** (Preview), your [credential vault](/docs/sandboxes/vault):
+the secrets your sandboxes can use, each with the one host it may be sent to, its
+status (`ready`, `needs a host`, `exposed: rotate`), where it came from (added by
+you or captured from a sandboxed agent) and when a sandbox last used it. The panel
+shows only your own secrets and never a value. It shows on Linux and macOS, where
+sandboxes run.
+
+| Key | Action |
+| --- | --- |
+| `a` | Add a secret: its name, its host, then its value in a hidden field |
+| `v` | Replace the selected secret's value (after you rotate it) |
+| `e` | Set the selected secret's host |
+| `n` | Rename the selected secret |
+| `d` | Remove the selected secret (asks first) |
+| Enter | Show the selected secret's details |
+| `r` | Refresh |
+
+Every change runs a `defenseclaw sandbox vault` command you see first. A value
+goes to the command on standard input, never on its command line.
 
 ## Sandbox wizard
 
