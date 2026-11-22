@@ -286,6 +286,10 @@ type Facts struct {
 	// class for exact kubectl requests. Tokens, selectors, contexts,
 	// namespaces, output formats, and other argument values are discarded.
 	KubernetesSensitiveAccesses []KubernetesSensitiveAccessFact `json:"-"`
+	// KubeRequests is every Kubernetes API request the action issues, from
+	// kubectl argv and from curl or wget URLs addressed to an apiserver
+	// (kube_request.go, GAP-1824).
+	KubeRequests []KubeRequestFact `json:"-"`
 	// StructuredPortForwards contains a closed forward class, bounded ports,
 	// and an opaque destination identity. Raw target hosts are discarded.
 	StructuredPortForwards []StructuredPortForwardFact `json:"-"`
