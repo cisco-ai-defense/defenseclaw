@@ -34,7 +34,27 @@ func (a *App) VaultDir() string {
 	return vault.DirIn(a.dataDir())
 }
 
-func (a *App) vault() *vault.Store { return vault.Open(a.VaultDir()) }
+// openVault opens the CLI's vault: it reads the vault key from the OS
+// keystore and seals a file vault on its next change (tests replace it).
+var openVault = vault.OpenWithKeystore
+
+func (a *App) vault() *vault.Store { return openVault(a.VaultDir()) }
+
+// vaultNotice prints what a change has to say about how the vault is kept
+// (sealed now, or still a file and why).
+func (a *App) vaultNotice(st *vault.Store) {
+	if n := st.Notice(); n != "" {
+		a.note(n)
+	}
+}
+
+// vaultStorageLine prints how the vault is kept.
+func (a *App) vaultStorageLine(s vault.Storage) {
+	a.line("Storage: " + s.Label)
+	if s.Note != "" {
+		a.note(s.Note)
+	}
+}
 
 // vaultJSONEntry is one entry in --output json: the metadata and the
 // derived status and target; never the value.
@@ -55,13 +75,22 @@ func (a *App) VaultList(format OutputFormat) error {
 	if err != nil {
 		return err
 	}
+	storage, err := st.Storage()
+	if err != nil {
+		return err
+	}
 	if format == OutputJSON {
 		out := make([]vaultJSONEntry, 0, len(list))
 		for _, e := range list {
 			out = append(out, vaultJSON(e))
 		}
-		return writeJSON(a.IO.Out, map[string]any{"path": st.Path(), "entries": out})
+		doc := map[string]any{"path": st.Path(), "entries": out, "storage": storage.Label, "sealed": storage.Mode == "sealed"}
+		if storage.Note != "" {
+			doc["storage_note"] = storage.Note
+		}
+		return writeJSON(a.IO.Out, doc)
 	}
+	a.vaultStorageLine(storage)
 	if len(list) == 0 {
 		a.note("the vault is empty; add a secret with `" + CommandName + " vault add NAME --host HOST`")
 		return nil
@@ -133,11 +162,13 @@ func (a *App) VaultAdd(name, host string, opts VaultValueOptions) error {
 	if err != nil {
 		return err
 	}
-	e, err := a.vault().Add(vault.AddInput{Name: name, Value: value, Host: host, Source: vault.SourceManual})
+	st := a.vault()
+	e, err := st.Add(vault.AddInput{Name: name, Value: value, Host: host, Source: vault.SourceManual})
 	if err != nil {
 		return err
 	}
 	a.ok(fmt.Sprintf("added %s for %s", e.Name, e.Target()))
+	a.vaultNotice(st)
 	a.note(fmt.Sprintf("use it in a sandbox: %s run claude --vault %s", CommandName, e.Name))
 	return nil
 }
@@ -151,32 +182,38 @@ func (a *App) VaultReplace(name string, opts VaultValueOptions) error {
 	if err != nil {
 		return err
 	}
-	e, err := a.vault().ReplaceValue(name, value)
+	st := a.vault()
+	e, err := st.ReplaceValue(name, value)
 	if err != nil {
 		return err
 	}
 	a.ok("replaced the value of " + e.Name)
+	a.vaultNotice(st)
 	a.note("sandboxes started from now on use the new value; restart running ones to pick it up")
 	return nil
 }
 
 // VaultBind sets the host a secret may be sent to.
 func (a *App) VaultBind(name, host string) error {
-	e, err := a.vault().Bind(name, host)
+	st := a.vault()
+	e, err := st.Bind(name, host)
 	if err != nil {
 		return err
 	}
 	a.ok(fmt.Sprintf("%s may now be sent to %s only", e.Name, e.Target()))
+	a.vaultNotice(st)
 	return nil
 }
 
 // VaultRename renames a secret.
 func (a *App) VaultRename(name, newName string) error {
-	e, err := a.vault().Rename(name, newName)
+	st := a.vault()
+	e, err := st.Rename(name, newName)
 	if err != nil {
 		return err
 	}
 	a.ok(fmt.Sprintf("renamed %s to %s", name, e.Name))
+	a.vaultNotice(st)
 	return nil
 }
 
@@ -198,6 +235,7 @@ func (a *App) VaultRemove(name string, yes bool) error {
 		return err
 	}
 	a.ok("removed " + name)
+	a.vaultNotice(st)
 	a.note("running sandboxes keep the value until they stop; revoke it with its issuer if it may have leaked")
 	return nil
 }

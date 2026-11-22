@@ -111,7 +111,7 @@ func (s *Store) CaptureAll(ins []CaptureInput, wait time.Duration) ([]Captured, 
 		}
 	}
 	var out []Captured
-	err := s.updateWait(wait, func(f *file) error {
+	err := s.updateWait(wait, needNothing, func(f *file) error {
 		out = out[:0]
 		now := s.now().UTC()
 		captured := 0
