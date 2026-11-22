@@ -33071,6 +33071,76 @@ function Invoke-DefenseClawLegacyHelperTombstoneHookTeardown {
     }
 }
 
+function Update-DefenseClawReleaseHistory {
+    <#
+        rel-1-0-10:GAP-1537, GAP-0644: adds the release the prior deployment
+        record names to the administrator-only machine release history,
+        <StateRoot>\install\release_history.json. A signed-out target's
+        hook-contract lock is in the account's own DefenseClaw folder, which
+        the account owns and can write, so the guardian honours the release a
+        lock names (the other-release and Hermes earlier-matrix sign-in waits)
+        only when this history names it. The first upgrade from 1.0.10 or
+        older seeds it with the release it replaces. Every entry is a release
+        this computer ran, so a run that rolls back leaves only true entries.
+        A history whose access list is not the canonical administrator-only
+        one, or that does not parse, is not carried forward.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        $PriorMetadata
+    )
+    if ($null -eq $PriorMetadata -or
+        $null -eq $PriorMetadata.PSObject.Properties['product_version']) {
+        return
+    }
+    $releasePattern = '^[0-9A-Za-z][0-9A-Za-z.+-]{0,63}$'
+    $prior = ([string]$PriorMetadata.product_version).Trim()
+    if ($prior -cnotmatch $releasePattern) {
+        return
+    }
+    # Beside the deployment record (<StateRoot>\install), where the guardian
+    # reads it.
+    $path = [IO.Path]::Combine(
+        [IO.Path]::GetDirectoryName([string]$Layout.MetadataPath),
+        'release_history.json'
+    )
+    $releases = [Collections.Generic.List[string]]::new()
+    if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $path -PathType Leaf) {
+        try {
+            Assert-DefenseClawNoReparsePath -Path $path
+            Assert-DefenseClawCanonicalPathAcl `
+                -Path $path `
+                -Expected (New-DefenseClawCanonicalPathAcl `
+                    -IsDirectory:$false `
+                    -Kind AdminFile `
+                    -GatewayServiceSID $script:AdministratorsSID)
+            $existing = [IO.File]::ReadAllText($path) |
+                Microsoft.PowerShell.Utility\ConvertFrom-Json
+            if ($null -ne $existing.PSObject.Properties['schema_version'] -and
+                [string]$existing.schema_version -ceq '1' -and
+                $null -ne $existing.PSObject.Properties['releases']) {
+                foreach ($release in @($existing.releases)) {
+                    $text = [string]$release
+                    if ($text -cmatch $releasePattern -and -not $releases.Contains($text)) {
+                        $releases.Add($text)
+                    }
+                }
+            }
+        }
+        catch {
+            $releases.Clear()
+        }
+    }
+    if ($releases.Contains($prior)) {
+        return
+    }
+    $releases.Add($prior)
+    Write-DefenseClawJsonAtomic -Path $path -Kind AdminFile -Value ([ordered]@{
+        schema_version = 1
+        releases = @($releases.ToArray())
+    })
+}
+
 function Write-DefenseClawDeploymentMetadataBytes {
     # Publishes exact deployment metadata bytes with the canonical
     # Administrators-only access list Get-DefenseClawDeploymentMetadata
@@ -51909,6 +51979,7 @@ function Invoke-DefenseClawInstallLikeLifecycle {
             )) `
             -ManagedHooksActivation $managedHooksActivation `
             -ApprovedPolicySources $approvedPolicySources
+        Update-DefenseClawReleaseHistory -Layout $Layout -PriorMetadata $metadata
         Write-DefenseClawJsonAtomic -Value $newMetadata -Path $Layout.MetadataPath -Kind AdminFile
         Set-DefenseClawManagedAcls -Layout $Layout -GatewayServiceName $GatewayServiceName
         Set-DefenseClawStandaloneSecretsAcls `

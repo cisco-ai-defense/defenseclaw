@@ -818,8 +818,9 @@ var (
 	enterpriseHookReconcileInstaller        = enterprisehooks.Install
 	enterpriseHookReconcileSessionAvailable = enterpriseHookTargetSessionAvailable
 	// enterpriseHookReconcileTargetRelease names the other DefenseClaw
-	// release whose hook-contract lock a target still carries. Tests
-	// replace it.
+	// release whose hook-contract lock a target still carries, only when the
+	// administrator-only machine release history proves this computer ran it
+	// (the account can write its lock, GAP-1537, GAP-0644). Tests replace it.
 	enterpriseHookReconcileTargetRelease = enterprisehooks.WindowsProtectedTargetFromOtherRelease
 	// enterpriseHookReconcileTargetRetireRender names this release when a
 	// target's lock is this release's render of a hook-image retire (an
@@ -1127,14 +1128,19 @@ func enterpriseHookRepairAfterVerifyFailure(
 			if written, other, releaseErr := enterpriseHookReconcileTargetRelease(opts); releaseErr == nil && other {
 				// The earlier release's hooks may still run unchanged: then
 				// the account is guarded, only not fail-closed, until its
-				// next connect (GAP-2463).
-				if earlier, matrixErr := enterpriseHookReconcileTargetEarlierMatrix(opts); matrixErr == nil && earlier {
-					return enterprisehooks.InstallResult{}, false, fmt.Errorf(
-						"%w: %s: DefenseClaw %s registered them without fail_closed, and this release's hooks "+
-							"install only in the account's own Windows session; its exact active Windows session is "+
-							"unavailable, so the guardian upgrades them at the account's next connect (verification: %v)",
-						errEnterpriseHookAwaitingSignIn, enterpriseHookAwaitingSignInEarlierMatrix, written, verifyErr,
-					)
+				// next connect (GAP-2463). The account can write its Hermes
+				// config and its lock, so its matrix counts only when the
+				// release the machine release history proved this computer
+				// ran registered no fail_closed (GAP-1537).
+				if connector.HermesReleaseRegisteredWithoutFailClosed(written) {
+					if earlier, matrixErr := enterpriseHookReconcileTargetEarlierMatrix(opts); matrixErr == nil && earlier {
+						return enterprisehooks.InstallResult{}, false, fmt.Errorf(
+							"%w: %s: DefenseClaw %s registered them without fail_closed, and this release's hooks "+
+								"install only in the account's own Windows session; its exact active Windows session is "+
+								"unavailable, so the guardian upgrades them at the account's next connect (verification: %v)",
+							errEnterpriseHookAwaitingSignIn, enterpriseHookAwaitingSignInEarlierMatrix, written, verifyErr,
+						)
+					}
 				}
 				if enterpriseHookReconcileSecureClient() {
 					return enterprisehooks.InstallResult{}, false, fmt.Errorf(

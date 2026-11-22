@@ -108,6 +108,14 @@ func windowsProtectedTargetMachineRegistration(opts InstallOptions, requireClose
 // A lock that cannot be read, or one this release wrote, is not from
 // another release; such a failure stays a failure. Both profiles: a Secure
 // Client upgrade with a signed-out enrolled account failed the same way.
+//
+// The lock is in the account's own DefenseClaw folder, which the account
+// owns and can write, so the release it names counts only when the
+// administrator-only machine release history proves this computer ran it
+// (windowsMachineRanRelease). Otherwise an account that edited
+// defenseclaw_version to an older release turned its own tampering into a
+// sign-in wait (GAP-1537, GAP-0644). A release the history does not name, and
+// any error reading the history, is not another release.
 func WindowsProtectedTargetFromOtherRelease(opts InstallOptions) (string, bool, error) {
 	lock, err := windowsProtectedTargetLock(opts)
 	if err != nil {
@@ -116,6 +124,10 @@ func WindowsProtectedTargetFromOtherRelease(opts InstallOptions) (string, bool, 
 	written := strings.TrimSpace(lock.DefenseClawVersion)
 	if written == "" || written == strings.TrimSpace(version.Current().BinaryVersion) {
 		return "", false, nil
+	}
+	ran, err := windowsMachineRanRelease(written)
+	if err != nil || !ran {
+		return "", false, err
 	}
 	return written, true, nil
 }
@@ -175,6 +187,10 @@ func windowsProtectedTargetRecordsEarlierHookImage(opts InstallOptions) bool {
 // a target another release protected that fails verification while its
 // account has no active session: its earlier hooks still guard the account
 // until the guardian upgrades them in that session (rel-1-0-5 GAP-2463).
+// The account can write that config, so the guardian asks only when the
+// release WindowsProtectedTargetFromOtherRelease proved this computer ran is
+// one from before fail_closed (connector.HermesReleaseRegisteredWithoutFailClosed,
+// GAP-1537).
 func WindowsProtectedTargetRunsEarlierHookMatrix(opts InstallOptions) (bool, error) {
 	target, err := resolveWindowsGenericManagedTarget(opts)
 	if err != nil {
