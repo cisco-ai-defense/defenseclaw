@@ -183,7 +183,7 @@ func (a *APIServer) substrateAddSecret(st *substrateState) http.HandlerFunc {
 			writeSubstrateJSONError(w, http.StatusBadRequest, "invalid_pattern")
 			return
 		}
-		if len(egressspec.EchoHostsCoveredWith(host, st.noSwapHosts())) > 0 && !(in.AllowEcho && st.selfService().AllowEchoBindings) {
+		if len(egressspec.EchoHostsCoveredWith(host, st.noSwapHosts())) > 0 && (!in.AllowEcho || !st.selfService().AllowEchoBindings) {
 			writeSubstrateJSONError(w, http.StatusForbidden, "secret_echo_host")
 			return
 		}

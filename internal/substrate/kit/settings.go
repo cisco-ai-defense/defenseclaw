@@ -743,13 +743,40 @@ func gitConfig() string {
 	return b.String()
 }
 
+// gitCredentialHelper answers get with the placeholder. On erase (git
+// sends it after the host refused the placeholder: no secret of the
+// person's is bound there) it prints one line on stderr that names the
+// host and the command to run on the person's own computer (B1 2.2). The
+// host is cut to letters, digits, dots and dashes, so the agent's remote
+// cannot write terminal controls or a forged command; nothing is set from
+// inside the agent.
 const gitCredentialHelper = `#!/bin/sh
 # DefenseClaw git credential helper (Agent Substrate actor images, root-owned).
 # It never holds a secret: Substrate egress swaps the placeholder for the real
 # token on the hosts the token is bound to, and nowhere else.
-[ "${1:-}" = get ] || exit 0
-while IFS= read -r line && [ -n "$line" ]; do :; done
-printf 'username=x-access-token\npassword=placeholder-not-a-secret\n'
+case "${1:-}" in
+get)
+	while IFS= read -r line && [ -n "$line" ]; do :; done
+	printf 'username=x-access-token\npassword=placeholder-not-a-secret\n'
+	;;
+erase)
+	host=
+	while IFS= read -r line && [ -n "$line" ]; do
+		case "$line" in host=*) host=${line#host=} ;; esac
+	done
+	host=$(printf '%s' "${host%%:*}" | LC_ALL=C tr -cd 'A-Za-z0-9.-' | cut -c1-253)
+	[ -n "$host" ] || exit 0
+	case "$host" in
+	github.com) t=github ;;
+	gitlab.com) t=gitlab ;;
+	bitbucket.org) t=bitbucket ;;
+	*) t=TEMPLATE ;;
+	esac
+	printf 'DefenseClaw: %s refused the request. On your computer run: defenseclaw substrate secrets add NAME --template %s --host %s\n' "$host" "$t" "$host" >&2
+	[ "$t" = TEMPLATE ] && printf 'DefenseClaw: defenseclaw substrate secrets templates lists the templates you may use.\n' >&2
+	;;
+esac
+exit 0
 `
 
 // npmConfig is the kit's npmrc. It holds no token: a registry a
