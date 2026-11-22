@@ -280,13 +280,13 @@ type managedInventoryPublishCycle struct {
 }
 
 // forcedBundle reports whether this cycle ignores digests and publishes
-// everything. A nil cycle (non-managed) always publishes.
+// everything. A nil cycle (no publish state) always publishes.
 func (cycle *managedInventoryPublishCycle) forcedBundle() bool {
 	return cycle == nil || cycle.forced
 }
 
 // shouldPublish reports whether a collection needs to ship this cycle. A nil
-// cycle never suppresses, which is what keeps non-managed behavior identical.
+// cycle (no publish state: no data folder) never suppresses.
 func (cycle *managedInventoryPublishCycle) shouldPublish(key, digest string) bool {
 	if cycle == nil || cycle.state == nil || cycle.forced {
 		return true

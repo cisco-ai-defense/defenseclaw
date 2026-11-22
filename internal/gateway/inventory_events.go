@@ -1083,8 +1083,8 @@ func readMCPServersUnderHomeForOSWithStatus(connectorName, home, goos string) ([
 // ai_component.observed record with defenseclaw.agent.discovery.connector set
 // so downstream can correlate MCP / skills / plugins with the owning agent.
 //
-// gate is the managed_enterprise change gate; it is nil in every other
-// deployment mode, and a nil gate publishes unconditionally as before.
+// gate is the endpoint inventory change gate, in every product; it is nil
+// only without a data folder, and a nil gate publishes unconditionally.
 func makeEndpointInventoryEmitter(
 	cfg *config.Config,
 	emitter sidecarRuntimeEmitter,

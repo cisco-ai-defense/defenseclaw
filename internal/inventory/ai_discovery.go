@@ -629,8 +629,9 @@ type ContinuousDiscoveryService struct {
 	// runtime remains the sole owner of signal records.
 	managedInventoryEmitMu sync.RWMutex
 	managedInventoryEmit   func(context.Context)
-	// skillInventoryEmit publishes the skill inventory after each full scan
-	// where managedInventoryEmit is not installed (an OSS per-user gateway).
+	// skillInventoryEmit publishes the endpoint inventory after each full
+	// scan where managedInventoryEmit is not installed (a gateway outside
+	// managed_enterprise).
 	// Unlike that hook it changes neither the scan cadence nor what a scan
 	// saves.
 	skillInventoryEmit func(context.Context)
@@ -1590,8 +1591,9 @@ func (s *ContinuousDiscoveryService) SetManagedInventoryEmitHook(fn func(context
 }
 
 // SetSkillInventoryEmitHook installs the sidecar callback that publishes the
-// skill inventory after each full scan of a gateway outside
-// managed_enterprise. A nil callback clears it.
+// endpoint inventory (connectors, MCP servers and tools, skills, plugins)
+// after each full scan of a gateway outside managed_enterprise. A nil
+// callback clears it.
 func (s *ContinuousDiscoveryService) SetSkillInventoryEmitHook(fn func(context.Context)) {
 	if s == nil {
 		return

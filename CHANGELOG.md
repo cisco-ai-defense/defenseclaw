@@ -101,7 +101,7 @@ Where a fix affects earlier releases, the affected versions are named.
 - **A managed scan does not follow a link to a plugin folder.** A plugin's skills are read only when every folder from the user's home down to the plugin is a real folder.
 - **A Windows user's moved agent folder is still scanned after sign-out.** A managed scan keeps using the last `CODEX_HOME`, `CLAUDE_CONFIG_DIR` or `COPILOT_HOME` folder it read for a user, so their skills are not reported removed at sign-out and new at sign-in.
 - **The skill publisher is a content field.** A publisher a SKILL.md declares is the skill author's own text, so a redacting profile now masks a secret in `defenseclaw.inventory.skill.publisher`, as it already did in the declared description and version.
-- **A skill folder that has not changed is not read again on every scan.** Discovery keeps each folder's hash while none of its files changed and reads every folder in full at least once a day.
+- **A skill folder that has not changed is not read again on every scan.** Discovery keeps each folder's hash while none of its files changed and reads every folder in full at least once a day. On a managed Windows machine every scan still reads every folder.
 - **Managed scans on macOS and Linux report every install of an agent.** Each copy of an agent binary in a user's bin folders or the machine prefixes is its own discovery signal, with `defenseclaw.ai.component.location` (`~/.local/bin/claude`, or `/opt/homebrew/bin/codex` for a system location).
 
 ### Changed
