@@ -209,7 +209,9 @@ def convert(root: Path, dataset_id: str, version: str, benign_modulus: int, cdir
             if r["id"] in rows:
                 st["dup"] += 1
                 continue
-            if app != "in_scope" or det in ("contextual_or_dual_use", "unresolved"):
+            # truth rule: a source-malicious row without deterministic proof (contextual, unresolved, out of scope, or no
+            # deterministic_truth at all) is never an attack row of the contract corpus
+            if app != "in_scope" or det in ("contextual_or_dual_use", "unresolved") or (det is None and srct == "malicious"):
                 if srct == "malicious":
                     # source says malicious but the contract has no deterministic proof: kept apart as a source-label
                     # attack set (<slug>-srcmal), reported separately, never mixed into the contract corpus
@@ -229,8 +231,8 @@ def convert(root: Path, dataset_id: str, version: str, benign_modulus: int, cdir
             elif det is None and srct == "sensitive":
                 st["sensitive"] += 1
                 continue
-            elif det is None and srct in ("benign", "malicious"):
-                new, kind = srct, "label_only"
+            elif det is None and srct == "benign":
+                new, kind = "benign", "label_only"
             else:
                 st["abstain"] += 1
                 continue
