@@ -128,11 +128,21 @@ func (a *APIServer) substrateDecideAsk(st *substrateState) http.HandlerFunc {
 		case asks.IsDecided(err):
 			writeSubstrateJSONError(w, http.StatusConflict, "ask_already_answered")
 			return
+		case asks.IsAdminOnly(err):
+			writeSubstrateJSONError(w, http.StatusForbidden, "ask_admin_only")
+			return
 		case err != nil:
 			writeSubstrateJSONError(w, http.StatusServiceUnavailable, "asks_unavailable")
 			return
 		}
 		a.emitSubstrateApprovalV8(r.Context(), got, false, audit.SandboxApprovalByOperator)
+		if err := a.substrateBindingDecided(r.Context(), st, got); err != nil {
+			// The ask is answered but the binding store refused the write:
+			// the binding stays waiting; the administrator is told.
+			fmt.Fprintf(os.Stderr, "[substrate] binding of ask %s not moved: %v\n", got.ID, err)
+			writeSubstrateJSONError(w, http.StatusBadGateway, "secret_not_stored")
+			return
+		}
 		if got.OwnerID != ownerOf(c.person).ID() {
 			// An administrator answering someone else's ask is recorded as
 			// themselves (decided_by), and logged here.

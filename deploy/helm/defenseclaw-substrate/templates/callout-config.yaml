@@ -41,9 +41,11 @@ refused here as for extproc.failure_mode (GAP-0063, GAP-0090). */ -}}
 {{- $s := dict "name" .name "hosts" (.inject.hosts | default list) "header" .inject.header -}}
 {{- with .inject.placeholder }}{{ $_ := set $s "placeholder" . }}{{ end -}}
 {{- with .profiles }}{{ $_ := set $s "profiles" . }}{{ end -}}
+{{- if .inject.allow_echo }}{{ $_ := set $s "allow_echo" true }}{{ end -}}
 {{- $secrets = append $secrets $s -}}
 {{- end -}}
 {{- if $secrets }}{{ $_ := set $c "secrets" $secrets }}{{ end -}}
+{{- with (($sub.egress | default dict).no_swap_hosts) }}{{ $_ := set $c "no_swap_hosts" . }}{{ end -}}
 {{- /* One profile per launcher profile: its atespaces, the egress allow
 list, the unattended ask mode, the exposed values, and the ask hosts and
 url rules. The profile's

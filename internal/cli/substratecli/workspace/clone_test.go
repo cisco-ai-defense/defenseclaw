@@ -136,3 +136,31 @@ func TestCloneRefusesWhatIsNotARepositoryAddress(t *testing.T) {
 		t.Errorf("503 hint missing: %q", e.Error())
 	}
 }
+
+func TestB1CloneHostAndHint(t *testing.T) {
+	for raw, want := range map[string]string{
+		"https://Git.Corp.Example:8443/team/app.git": "git.corp.example",
+		"http://git.corp.example/a.git":              "git.corp.example",
+		"ssh://git@git.corp.example/team/app.git":    "git.corp.example",
+		"git@github.com:me/app.git":                  "github.com",
+		"git@git.corp.example:me/app.git":            "", // stays SSH in the actor: no token
+		"ssh://deploy@git.corp.example/a.git":        "",
+		"git://git.corp.example/a.git":               "",
+	} {
+		if got := CloneHost(raw); got != want {
+			t.Errorf("CloneHost(%q) = %q, want %q", raw, got, want)
+		}
+	}
+	e := &CloneError{URL: "https://git.corp.example/a.git", Message: "fatal: Authentication failed for 'https://git.corp.example/a.git/'"}
+	if !e.NeedsCredential() || !strings.Contains(e.Error(), "ask your administrator to allow it") {
+		t.Fatalf("no hint: %q", e.Error())
+	}
+	e.Hint = "git.corp.example needs a token"
+	if got := e.Error(); !strings.HasSuffix(got, ". git.corp.example needs a token") || strings.Contains(got, "ask your administrator") {
+		t.Fatalf("hint: %q", got)
+	}
+	e = &CloneError{URL: "https://git.corp.example/a.git", Message: "fatal: unable to access: Could not resolve host: git.corp.example", Hint: "x"}
+	if e.NeedsCredential() || strings.Contains(e.Error(), ". x") || !strings.Contains(e.Error(), "network rules may not allow") {
+		t.Fatalf("resolve: %q", e.Error())
+	}
+}

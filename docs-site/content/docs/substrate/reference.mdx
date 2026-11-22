@@ -29,7 +29,8 @@ keywords:
 | `migrate <name>` | Move an actor with an old kit to the current kit |
 | `approvals`, `approve <id> [--always] [--reason]`, `reject <id> [--reason]` | Answer asks, including for detached and unattended runs. `approvals` lists `ID`, `AGENT`, `WHAT`, `SEVERITY`, `AGE` and `RUN`; an ask an unattended run queued shows `unattended` and the time left in `RUN` |
 | `usage [--batch ID] [--all]` | Your own usage and cost. Not available yet: the cluster answers "does not offer that yet" (see [Feature coverage](/docs/substrate/features#routing-budgets-and-cost)) |
-| `secrets list [--mine]`, `set NAME (--stdin \| --from-env VAR)`, `rm NAME`, `test NAME` | Names of your secrets and their bindings. Values are never shown. See [Secrets](/docs/substrate/secrets) |
+| `secrets templates`, `secrets add NAME --template T --host H [--expires 90d] [--user U] [source]` | Preview. Bind a token of your own to one host. See [Secrets](/docs/substrate/secrets#add-your-own-for-a-host-preview) |
+| `secrets list [--mine]`, `set NAME [--from-gh \| --from-op REF \| --from-keychain SERVICE \| --from-file PATH \| --stdin \| --from-env VAR]`, `rm NAME`, `test NAME` | Names of your secrets and their bindings. Values are never shown. See [Secrets](/docs/substrate/secrets) |
 | `policy explain NAME`, `show`, `test NAME --host H [--method M] \| --tool T` | Your own effective policy and where each value comes from; `test` asks whether a host, method or tool would be allowed for an agent |
 | `policy reset ATESPACE/NAME [--reason TEXT] [--yes]` | Administrators: clear a `policy_conflict` once the other writer is stopped. The controller writes the full policy again and the count of three reverts starts over. Audited under your own name |
 | `doctor` | Checks this computer and your sign-in. Administrators add `--install-file FILE` (the SubstrateInstall file given to `ate-setup`) for the cluster's own checks, the same ones `verify` runs, read with `kubectl` (`--kube-context`, `--kubeconfig`, `--namespace`, `--substrate-namespace`, `--managed-atespaces`); `--cluster` without it says what is missing. Ends with `ready for agents`, or `not ready` and exit 1 |
@@ -137,7 +138,16 @@ The `substrate` section of the DefenseClaw configuration. On a cluster it comes 
 | `substrate.llm.bedrock_models` | `[]` | Bedrock model IDs actors may call. A call that names another model goes to the first entry instead, through the same guardrails. That holds for `/model/<id>` and for the model named in the body of the OpenAI-compatible calls (`/llm/bedrock/openai/v1/responses` and `/chat/completions`). A body that can't be read as a JSON object with a model, or that is compressed or too large, is refused |
 | `substrate.llm.credential.provider_uri` | none | Where the model key comes from (`ate-secret://...`) |
 | `substrate.egress.allow`, `.ecosystem_packs`, `.registries` | `[]`, every pack, `[]` | The base egress every actor gets before its profile tightens it |
+| `substrate.egress.no_swap_hosts` | `[]` | Preview. Hosts that return the requests they get, added to the built-in echo list. No secret is added on them (`secret_echo_host`), for administrator and personal secrets alike |
 | `substrate.secrets` | `[]` | See [Secrets](/docs/substrate/secrets) |
+| `substrate.secrets[].inject.allow_echo` | `false` | Preview. Adds this one secret on an echo host anyway. The gateway warns at start for each such entry |
+| `substrate.self_service_secrets.mode` | `bindings` | Preview. `bindings`: people add their own secrets under a template. `values_only`: they only store values for the secrets in `substrate.secrets`. `off`: neither. `values_only` and `off` also stop the secrets people added from being used. Changes apply without a restart, except from `off`, which needs a restart of the gateway and the controller |
+| `substrate.self_service_secrets.namespace` | `defenseclaw-user-secrets` | Preview. Where people's own values live. Not the release or the Substrate namespace |
+| `substrate.self_service_secrets.outside_templates` | `ask` | Preview. A host no template covers: `ask` opens an ask only an administrator answers; `refuse` refuses it |
+| `substrate.self_service_secrets.ask_timeout` | `72h` | Preview. How long such an ask waits for an administrator (at most `168h`) |
+| `substrate.self_service_secrets.max_per_person` | `20` | Preview. Secrets one person may add (1 to 200) |
+| `substrate.self_service_secrets.allow_echo_bindings` | `false` | Preview. Lets a person bind their own secret to an echo host with `--allow-echo` |
+| `substrate.secret_templates` | `[]` | Preview. The templates people may use. Each entry has `name`, and optionally `hosts`, `header`, `form` (`bearer`, `basic` or `raw`), `basic_user` and `profiles`. A built-in name keeps its built-in values for any field left out |
 | `substrate.allow_passthrough_for` | `[]` | Hosts that are not inspected. Never given a secret |
 | `substrate.admin` | none | The cluster floor, the same keys as `openshell.admin` plus the Substrate keys below. Profiles tighten it |
 
@@ -209,6 +219,7 @@ The signed chart is `oci://ghcr.io/cisco-ai-defense/charts/defenseclaw-substrate
 | `callout.judge.tokenSecret` | The callout's token for the MCP tool-rules route. Default `defenseclaw-callout-judge`, which the chart creates. `""` turns the route off: MCP tool calls then raise an alert, and a managed install refuses them |
 | `callout.actorSecrets.secretName` | A Secret whose keys are the values profiles' `actor_secrets` expose. Mounted in the callout and the gateway only |
 | `admin.expose.type`, `admin.expose.ingress.*`, `admin.url`, `admin.tlsSecretName` | How laptops reach the admin Service, and the https address published for `login --kube` |
+| `credentialProvider.createUserSecretsNamespace` | Preview. Creates the namespace of `substrate.self_service_secrets.namespace` when self-service secrets are on. Default `true`; `false` when the namespace already exists |
 | `credentialProvider.secretsNamespace` | The namespace that holds the per-actor secret copies. Default `defenseclaw-actor-secrets`. Two releases in one cluster, for example a managed one next to an open-source one, each need their own. Only one of them can register the egress callout, because Substrate has one callout slot |
 | `substrate.actorKeys.url` | Sets `substrate.identity.keys_url`. Empty is the `idp` Service |
 | `substrate.actorKeys.caConfigMap` | A ConfigMap (key `ca.crt`) with the CA of the keys URL, mounted on the gateway as `keys_ca_file`. Empty is the servicedns trust bundle |

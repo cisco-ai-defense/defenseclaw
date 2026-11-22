@@ -784,6 +784,52 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
         ),
     ),
     _Cmd(
+        ("secrets", "add"),
+        "Add a secret of your own for one host, under a template",
+        long=(
+            "Creates your own secret NAME for HOST under TEMPLATE (see secrets templates) and stores its\n"
+            "value. A host the template covers is used from your agents' next request; any other host waits\n"
+            "until an administrator approves it. For a basic template (git hosts, PyPI) give only the token:\n"
+            "the cluster adds the user name. generic-basic needs --user.\n"
+            "\n"
+            "The value comes from exactly one source: the terminal without echo (no flag), --from-gh (the\n"
+            "GitHub CLI's sign-in), --from-keychain SERVICE (macOS keychain), --from-op op://vault/item/field\n"
+            "(1Password CLI), --from-file PATH, --stdin or --from-env VAR. It is never put on a command line\n"
+            "and never printed."
+        ),
+        example=(
+            "defenseclaw substrate secrets add gl-work --template gitlab --host gitlab.com --from-op "
+            "op://eng/gitlab/token\n"
+            "defenseclaw substrate secrets add nexus --template generic-basic --host nexus.corp.example --user "
+            "ci-bot --from-file ~/.nexus-token"
+        ),
+        args=(_Arg("name"),),
+        flags=(
+            _Flag("account", "string", "with --from-keychain: the item's account"),
+            _Flag(
+                "allow-echo",
+                "bool",
+                "allow a host that returns the requests it gets (only when your administrator allows it)",
+            ),
+            _Flag("context", "string", "cluster to use (default: the one you signed in to last)", metavar="NAME"),
+            _Flag(
+                "expires",
+                "string",
+                "when the secret stops being used: 90d, 12h or a date (2027-01-31); at most 400 days",
+            ),
+            _Flag("from-env", "string", "read the value from this environment variable"),
+            _Flag("from-file", "string", "read the value from this file"),
+            _Flag("from-gh", "bool", "read the value from the GitHub CLI's sign-in (gh auth token)"),
+            _Flag("from-keychain", "string", "read the value from this macOS keychain item (its service name)"),
+            _Flag("from-op", "string", "read the value from 1Password (op://vault/item/field)"),
+            _Flag("gh-host", "string", "with --from-gh: the GitHub host to read the sign-in of (default: gh's own)"),
+            _Flag("host", "string", "the one host the secret is for"),
+            _Flag("stdin", "bool", "read the value from standard input"),
+            _Flag("template", "string", "the template to use (see secrets templates)", metavar="NAME"),
+            _Flag("user", "string", "the user name for a basic template (generic-basic needs it)"),
+        ),
+    ),
+    _Cmd(
         ("secrets", "list"),
         "List secret names you can use",
         flags=(
@@ -807,23 +853,51 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
         ("secrets", "set"),
         "Store one of your own secrets",
         long=(
-            "Stores the value for NAME, bound to the hosts your administrator allowed for it. The value\n"
-            "is read from the terminal without echo, from standard input with --stdin, or from an environment\n"
-            "variable with --from-env VAR. It is never put on the command line."
+            "Stores the value for NAME, bound to the hosts your administrator allowed for it.\n"
+            "\n"
+            "The value comes from exactly one source: the terminal without echo (no flag), --from-gh (the\n"
+            "GitHub CLI's sign-in), --from-keychain SERVICE (macOS keychain), --from-op op://vault/item/field\n"
+            "(1Password CLI), --from-file PATH, --stdin or --from-env VAR. It is never put on a command line\n"
+            "and never printed."
+        ),
+        example=(
+            "defenseclaw substrate secrets set GITHUB_TOKEN --from-gh\n"
+            "defenseclaw substrate secrets set GITLAB_TOKEN --from-op op://eng/gitlab/token\n"
+            "defenseclaw substrate secrets set NPM_TOKEN --from-keychain npm-publish"
         ),
         args=(_Arg("name"),),
         flags=(
+            _Flag("account", "string", "with --from-keychain: the item's account"),
             _Flag("context", "string", "cluster to use (default: the one you signed in to last)", metavar="NAME"),
             _Flag("from-env", "string", "read the value from this environment variable"),
+            _Flag("from-file", "string", "read the value from this file"),
+            _Flag("from-gh", "bool", "read the value from the GitHub CLI's sign-in (gh auth token)"),
+            _Flag("from-keychain", "string", "read the value from this macOS keychain item (its service name)"),
+            _Flag("from-op", "string", "read the value from 1Password (op://vault/item/field)"),
+            _Flag("gh-host", "string", "with --from-gh: the GitHub host to read the sign-in of (default: gh's own)"),
             _Flag("mine", "bool", "your own secret (the only kind this command acts on)", default="true"),
             _Flag("stdin", "bool", "read the value from standard input"),
         ),
     ),
     _Cmd(
+        ("secrets", "templates"),
+        "List the templates you may use to add your own secrets",
+        long=(
+            "Lists the templates your administrator approved for your own secrets: the hosts each one\n"
+            "covers without an approval and how the value goes into the request. Use one with secrets add."
+        ),
+        flags=(
+            _Flag("context", "string", "cluster to use (default: the one you signed in to last)", metavar="NAME"),
+            _Flag("json", "bool", "same as --output json"),
+            _Flag("output", "string", "output format: text or json", short="o", default="text", metavar="FORMAT"),
+        ),
+    ),
+    _Cmd(
         ("secrets", "test"),
-        "Check that a secret is bound and the cluster can use it",
+        "Check that a secret is stored and usable, and whether an agent gets it",
         args=(_Arg("name"),),
         flags=(
+            _Flag("agent", "string", "also say whether this agent's policy carries the secret"),
             _Flag("context", "string", "cluster to use (default: the one you signed in to last)", metavar="NAME"),
             _Flag("json", "bool", "same as --output json"),
             _Flag("mine", "bool", "your own secret (the only kind this command acts on)", default="true"),

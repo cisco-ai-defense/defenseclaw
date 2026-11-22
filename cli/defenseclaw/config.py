@@ -4757,6 +4757,9 @@ class SubstrateEgressConfig:
     # None = every ecosystem pack (Go nil); [] = none.
     ecosystem_packs: list[str] | None = None
     registries: list[str] = field(default_factory=list)
+    # Hosts added to the built-in echo hosts: no secret is added there
+    # unless the entry sets inject.allow_echo (Go NoSwapHosts).
+    no_swap_hosts: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -4793,6 +4796,8 @@ class SubstrateSecretInject:
     header: str = ""
     prefix: str = ""
     placeholder: str = ""
+    # Lets the secret be added on a host that returns requests (Go AllowEcho).
+    allow_echo: bool = False
 
 
 @dataclass
@@ -4817,6 +4822,36 @@ class SubstrateBundlesConfig:
     anchors_file: str = ""
     inbox: str = ""
     refresh_interval: str = ""
+
+
+@dataclass
+class SubstrateSelfServiceSecretsConfig:
+    """substrate.self_service_secrets (Go SubstrateSelfServiceSecretsConfig)."""
+
+    # bindings (default), values_only or off.
+    mode: str = ""
+    namespace: str = ""
+    provider: str = ""
+    max_per_person: int = 0
+    # ask (default) or refuse, for a host no template covers.
+    outside_templates: str = ""
+    ask_timeout: str = ""
+    allow_echo_bindings: bool = False
+
+
+@dataclass
+class SubstrateSecretTemplate:
+    """One substrate.secret_templates entry (Go SubstrateSecretTemplate)."""
+
+    name: str = ""
+    # None = unset (a built-in template keeps its hosts); [] = no host
+    # without an administrator. A save keeps the difference (Go MarshalYAML).
+    hosts: list[str] | None = None
+    header: str = ""
+    form: str = ""
+    basic_user: str = ""
+    profiles: list[str] = field(default_factory=list)
+    registry: str = ""
 
 
 @dataclass
@@ -4852,6 +4887,8 @@ class SubstrateConfig:
     llm: SubstrateLLMConfig = field(default_factory=SubstrateLLMConfig)
     egress: SubstrateEgressConfig = field(default_factory=SubstrateEgressConfig)
     secrets: list[SubstrateSecret] = field(default_factory=list)
+    self_service_secrets: SubstrateSelfServiceSecretsConfig = field(default_factory=SubstrateSelfServiceSecretsConfig)
+    secret_templates: list[SubstrateSecretTemplate] = field(default_factory=list)
     allow_passthrough_for: list[str] = field(default_factory=list)
     admin: OpenShellAdminConfig = field(default_factory=OpenShellAdminConfig)
     bundles: SubstrateBundlesConfig = field(default_factory=SubstrateBundlesConfig)
@@ -8136,12 +8173,14 @@ def _merge_substrate(raw: Any) -> SubstrateConfig:
                     header=str(inject.get("header", "") or ""),
                     prefix=str(inject.get("prefix", "") or ""),
                     placeholder=str(inject.get("placeholder", "") or ""),
+                    allow_echo=bool(inject.get("allow_echo", False)),
                 ),
                 scope=str(item.get("scope", "") or ""),
                 profiles=_string_list(item.get("profiles")),
             )
         )
     packs = egress.get("ecosystem_packs")
+    self_service = _mapping(raw.get("self_service_secrets"))
     return SubstrateConfig(
         enabled=raw.get("enabled") is True,
         api=SubstrateAPIConfig(
@@ -8219,8 +8258,30 @@ def _merge_substrate(raw: Any) -> SubstrateConfig:
             allow=_string_list(egress.get("allow")),
             ecosystem_packs=None if packs is None else _string_list(packs),
             registries=_string_list(egress.get("registries")),
+            no_swap_hosts=_string_list(egress.get("no_swap_hosts")),
         ),
         secrets=secrets,
+        self_service_secrets=SubstrateSelfServiceSecretsConfig(
+            mode=str(self_service.get("mode", "") or ""),
+            namespace=str(self_service.get("namespace", "") or ""),
+            provider=str(self_service.get("provider", "") or ""),
+            max_per_person=_int_or_zero(self_service.get("max_per_person")),
+            outside_templates=str(self_service.get("outside_templates", "") or ""),
+            ask_timeout=str(self_service.get("ask_timeout", "") or ""),
+            allow_echo_bindings=bool(self_service.get("allow_echo_bindings", False)),
+        ),
+        secret_templates=[
+            SubstrateSecretTemplate(
+                name=str(t.get("name", "") or ""),
+                hosts=None if t.get("hosts") is None else _string_list(t.get("hosts")),
+                header=str(t.get("header", "") or ""),
+                form=str(t.get("form", "") or ""),
+                basic_user=str(t.get("basic_user", "") or ""),
+                profiles=_string_list(t.get("profiles")),
+                registry=str(t.get("registry", "") or ""),
+            )
+            for t in (_mapping(x) for x in (raw.get("secret_templates") or []))
+        ],
         allow_passthrough_for=_string_list(raw.get("allow_passthrough_for")),
         admin=_merge_openshell_admin(raw.get("admin")),
         bundles=_merge_substrate_bundles(raw.get("bundles")),
@@ -8313,6 +8374,7 @@ def _serialize_substrate(cfg: Config, d: dict[str, Any]) -> None:
     if isinstance(admin, dict):
         _strip_unset_sandbox_keys(admin)
     packs = (block.get("egress") or {}).get("ecosystem_packs")
+    no_hosts = [i for i, t in enumerate(block.get("secret_templates") or []) if isinstance(t, dict) and t.get("hosts") == []]
     pruned = _prune_unset(block)
     if pruned is _V8_MISSING:
         pruned = {}
@@ -8338,8 +8400,23 @@ def _serialize_substrate(cfg: Config, d: dict[str, Any]) -> None:
             bundles.pop("enabled")
         if not bundles:
             pruned.pop("bundles")
+    for sec in pruned.get("secrets") or []:
+        inject = sec.get("inject") if isinstance(sec, dict) else None
+        if isinstance(inject, dict) and inject.get("allow_echo") is False:  # Go omitempty
+            inject.pop("allow_echo")
+    self_service = pruned.get("self_service_secrets")
+    if isinstance(self_service, dict):
+        # Go omitempty: false and 0 are not written.
+        if self_service.get("allow_echo_bindings") is False:
+            self_service.pop("allow_echo_bindings")
+        if self_service.get("max_per_person") == 0:
+            self_service.pop("max_per_person")
+        if not self_service:
+            pruned.pop("self_service_secrets")
     if packs == []:
         pruned.setdefault("egress", {})["ecosystem_packs"] = []
+    for i in no_hosts:  # an explicit hosts: [] stays (Go MarshalYAML)
+        pruned["secret_templates"][i]["hosts"] = []
     d["substrate"] = pruned
 
 

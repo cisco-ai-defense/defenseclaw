@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/substrate/egressspec"
+	"gopkg.in/yaml.v3"
 )
 
 // SubstrateConfig is substrate: (PLAN §7.1), DefenseClaw on Agent Substrate.
@@ -84,6 +85,11 @@ type SubstrateConfig struct {
 	LLM        SubstrateLLMConfig        `mapstructure:"llm"                yaml:"llm,omitempty"`
 	Egress     SubstrateEgressConfig     `mapstructure:"egress"             yaml:"egress,omitempty"`
 	Secrets    []SubstrateSecret         `mapstructure:"secrets"            yaml:"secrets,omitempty"`
+	// SelfServiceSecrets is how people bind their own secrets (B1 2.5).
+	SelfServiceSecrets SubstrateSelfServiceSecretsConfig `mapstructure:"self_service_secrets" yaml:"self_service_secrets,omitempty"`
+	// SecretTemplates is the admin catalog of templates people bind their
+	// own secrets with; none = the built-in seven (secretbind.Builtin).
+	SecretTemplates []SubstrateSecretTemplate `mapstructure:"secret_templates" yaml:"secret_templates,omitempty"`
 	// AllowPassthroughFor lists hosts forwarded without inspection
 	// (certificate pinning). A secret is never bound to one.
 	AllowPassthroughFor []string `mapstructure:"allow_passthrough_for" yaml:"allow_passthrough_for,omitempty"`
@@ -93,6 +99,126 @@ type SubstrateConfig struct {
 	// Bundles is signed policy bundles (substrate_bundles.go).
 	Bundles SubstrateBundlesConfig `mapstructure:"bundles" yaml:"bundles,omitempty"`
 }
+
+// Self-service secret modes (substrate.self_service_secrets.mode).
+const (
+	SelfServiceBindings   = "bindings"
+	SelfServiceValuesOnly = "values_only"
+	SelfServiceOff        = "off"
+)
+
+// SubstrateSelfServiceSecretsConfig is substrate.self_service_secrets.
+type SubstrateSelfServiceSecretsConfig struct {
+	// Mode is bindings (default), values_only (people only set values of
+	// listed secrets) or off (no binding store is read at all).
+	Mode string `mapstructure:"mode" yaml:"mode,omitempty"`
+	// Namespace holds the self-service values; never the release or
+	// Substrate namespace (the chart refuses it).
+	Namespace string `mapstructure:"namespace" yaml:"namespace,omitempty"`
+	// Provider is the credential provider name in the generated sources.
+	Provider string `mapstructure:"provider" yaml:"provider,omitempty"`
+	// MaxPerPerson bounds one person's bindings (1-200, default 20).
+	MaxPerPerson int `mapstructure:"max_per_person" yaml:"max_per_person,omitempty"`
+	// OutsideTemplates is ask (default) or refuse, for a host no template
+	// covers.
+	OutsideTemplates string `mapstructure:"outside_templates" yaml:"outside_templates,omitempty"`
+	// AskTimeout bounds an administrator ask for a binding (default 72h,
+	// at most 168h).
+	AskTimeout string `mapstructure:"ask_timeout" yaml:"ask_timeout,omitempty"`
+	// AllowEchoBindings lets a person set allow_echo on their own binding.
+	AllowEchoBindings bool `mapstructure:"allow_echo_bindings" yaml:"allow_echo_bindings,omitempty"`
+}
+
+// SubstrateSecretTemplate is one substrate.secret_templates entry.
+type SubstrateSecretTemplate struct {
+	Name      string   `mapstructure:"name"       yaml:"name"`
+	Hosts     []string `mapstructure:"hosts"      yaml:"hosts,omitempty"`
+	Header    string   `mapstructure:"header"     yaml:"header,omitempty"`
+	Form      string   `mapstructure:"form"       yaml:"form,omitempty"`
+	BasicUser string   `mapstructure:"basic_user" yaml:"basic_user,omitempty"`
+	Profiles  []string `mapstructure:"profiles"   yaml:"profiles,omitempty"`
+	Registry  string   `mapstructure:"registry"   yaml:"registry,omitempty"`
+}
+
+// MarshalYAML keeps an explicit empty host list: hosts: [] means no host
+// without an administrator, while an unset list takes a built-in
+// template's hosts. Plain omitempty would turn the first into the second
+// on any config save (RV3 P2-3).
+func (t SubstrateSecretTemplate) MarshalYAML() (any, error) {
+	type plain SubstrateSecretTemplate
+	var n yaml.Node
+	if err := n.Encode(plain(t)); err != nil {
+		return nil, err
+	}
+	if t.Hosts != nil && len(t.Hosts) == 0 && n.Kind == yaml.MappingNode && len(n.Content) >= 2 {
+		k := &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: "hosts"}
+		v := &yaml.Node{Kind: yaml.SequenceNode, Tag: "!!seq", Style: yaml.FlowStyle}
+		n.Content = append(n.Content[:2:2], append([]*yaml.Node{k, v}, n.Content[2:]...)...)
+	}
+	return &n, nil
+}
+
+// substrateReservedNamespaces are never the self-service namespace: the
+// gateway gets get/patch on every Secret there and the actors' credential
+// provider reads it (RV3 P3-5).
+var substrateReservedNamespaces = []string{"default", "kube-system", "kube-public", "kube-node-lease"}
+
+// substrateBasicUserRE is secretbind's basic_user rule: printable ASCII,
+// no space and no ":" (RV3 P3-7).
+var substrateBasicUserRE = regexp.MustCompile(`^[!-9;-~]{1,128}$`)
+
+// EffectiveMode is the self-service mode, bindings when unset.
+func (s SubstrateSelfServiceSecretsConfig) EffectiveMode() string {
+	if s.Mode == "" {
+		return SelfServiceBindings
+	}
+	return s.Mode
+}
+
+// EffectiveNamespace is where self-service values live.
+func (s SubstrateSelfServiceSecretsConfig) EffectiveNamespace() string {
+	if s.Namespace == "" {
+		return "defenseclaw-user-secrets"
+	}
+	return s.Namespace
+}
+
+// EffectiveProvider is the credential provider of self-service sources.
+func (s SubstrateSelfServiceSecretsConfig) EffectiveProvider() string {
+	if s.Provider == "" {
+		return "k8s-credential-provider"
+	}
+	return s.Provider
+}
+
+// EffectiveMaxPerPerson is the per-person binding limit.
+func (s SubstrateSelfServiceSecretsConfig) EffectiveMaxPerPerson() int {
+	if s.MaxPerPerson <= 0 {
+		return 20
+	}
+	return s.MaxPerPerson
+}
+
+// EffectiveOutsideTemplates is ask or refuse.
+func (s SubstrateSelfServiceSecretsConfig) EffectiveOutsideTemplates() string {
+	if s.OutsideTemplates == "" {
+		return "ask"
+	}
+	return s.OutsideTemplates
+}
+
+// EffectiveAskTimeout is the binding ask timeout.
+func (s SubstrateSelfServiceSecretsConfig) EffectiveAskTimeout() time.Duration {
+	if d, err := time.ParseDuration(s.AskTimeout); err == nil && d > 0 {
+		return d
+	}
+	return 72 * time.Hour
+}
+
+var (
+	substrateTemplateNameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
+	substrateHeaderNameRE   = regexp.MustCompile(`^[A-Za-z0-9!#$%&'*+.^_|~-]{1,64}$`)
+)
 
 // SubstrateTemplatesConfig is how the controller admits templates (PLAN
 // §5.3, §6.6): every container image must be pinned by digest and carry a
@@ -380,6 +506,9 @@ type SubstrateEgressConfig struct {
 	// EcosystemPacks (nil = every pack) names package-index packs.
 	EcosystemPacks []string `mapstructure:"ecosystem_packs" yaml:"ecosystem_packs,omitempty"`
 	Registries     []string `mapstructure:"registries"      yaml:"registries,omitempty"`
+	// NoSwapHosts are added to the built-in echo hosts: no secret is added
+	// on a host they cover unless its entry sets inject.allow_echo. Hot.
+	NoSwapHosts []string `mapstructure:"no_swap_hosts" yaml:"no_swap_hosts,omitempty"`
 }
 
 // SubstrateSecret is one entry of substrate.secrets (PLAN §7.2). The value
@@ -402,6 +531,10 @@ type SubstrateSecretInject struct {
 	// Placeholder is the environment variable the actor carries in place
 	// of the value.
 	Placeholder string `mapstructure:"placeholder" yaml:"placeholder,omitempty"`
+	// AllowEcho lets the secret be added on a host that returns the
+	// requests it gets (egressspec.EchoHosts, egress.no_swap_hosts). Off by
+	// default: the real value would come back to the agent.
+	AllowEcho bool `mapstructure:"allow_echo" yaml:"allow_echo,omitempty"`
 }
 
 // Substrate defaults.
@@ -840,6 +973,7 @@ func (s *SubstrateConfig) Validate() error {
 
 	checkPatterns("egress.allow", s.Egress.Allow)
 	checkPatterns("egress.registries", s.Egress.Registries)
+	checkPatterns("egress.no_swap_hosts", s.Egress.NoSwapHosts)
 	checkPatterns("allow_passthrough_for", s.AllowPassthroughFor)
 	known := egressspec.EcosystemPacks()
 	for i, p := range s.Egress.EcosystemPacks {
@@ -854,6 +988,58 @@ func (s *SubstrateConfig) Validate() error {
 			passthrough[p.String()] = true
 		}
 	}
+	ss := s.SelfServiceSecrets
+	if !slices.Contains([]string{"", SelfServiceBindings, SelfServiceValuesOnly, SelfServiceOff}, ss.Mode) {
+		bad("self_service_secrets.mode", "must be bindings, values_only or off")
+	}
+	if ss.Namespace != "" && !egressspec.IsDNS1123Label(ss.Namespace) {
+		bad("self_service_secrets.namespace", "%q is not a Kubernetes namespace name", ss.Namespace)
+	} else if slices.Contains(substrateReservedNamespaces, ss.Namespace) {
+		bad("self_service_secrets.namespace", "%q is a Kubernetes system namespace; use a namespace of its own", ss.Namespace)
+	}
+	if ss.Provider != "" && !egressspec.IsDNS1123Subdomain(ss.Provider) {
+		bad("self_service_secrets.provider", "%q is not a provider name", ss.Provider)
+	}
+	if ss.MaxPerPerson < 0 || ss.MaxPerPerson > 200 {
+		bad("self_service_secrets.max_per_person", "must be 1-200")
+	}
+	if !slices.Contains([]string{"", "ask", "refuse"}, ss.OutsideTemplates) {
+		bad("self_service_secrets.outside_templates", "must be ask or refuse")
+	}
+	if ss.AskTimeout != "" {
+		if d, err := time.ParseDuration(ss.AskTimeout); err != nil || d <= 0 || d > 168*time.Hour {
+			bad("self_service_secrets.ask_timeout", "must be a duration over 0 and at most 168h")
+		}
+	}
+	tmplNames := map[string]bool{}
+	for i, t := range s.SecretTemplates {
+		key := fmt.Sprintf("secret_templates[%d]", i)
+		if !substrateTemplateNameRE.MatchString(t.Name) {
+			bad(key+".name", "%q must be 1-63 lower-case letters, digits and \"-\"", t.Name)
+		} else if tmplNames[t.Name] {
+			bad(key+".name", "%q is listed twice", t.Name)
+		}
+		tmplNames[t.Name] = true
+		checkPatterns(key+".hosts", t.Hosts)
+		if !slices.Contains([]string{"", "bearer", "basic", "raw"}, t.Form) {
+			bad(key+".form", "must be bearer, basic or raw")
+		}
+		if !slices.Contains([]string{"", "none", "npm", "pypi"}, t.Registry) {
+			bad(key+".registry", "must be none, npm or pypi")
+		}
+		if t.Header != "" && !substrateHeaderNameRE.MatchString(t.Header) {
+			bad(key+".header", "%q is not a header name", t.Header)
+		}
+		if t.BasicUser != "" && !substrateBasicUserRE.MatchString(t.BasicUser) {
+			bad(key+".basic_user", "must be 1-128 printable characters with no space or \":\"")
+		}
+		for j, g := range t.Profiles {
+			if _, err := path.Match(g, ""); err != nil {
+				bad(fmt.Sprintf("%s.profiles[%d]", key, j), "%q is not a profile glob", g)
+			}
+		}
+	}
+
 	names := map[string]bool{}
 	for i, sec := range s.Secrets {
 		key := fmt.Sprintf("secrets[%d]", i)

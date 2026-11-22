@@ -701,7 +701,7 @@ func newSubstrateSecretsCmd() *cobra.Command {
 to requests to the hosts the secret is bound to. These commands list the names you can use,
 store your own, and remove or test them. Values are never shown.`,
 	}
-	parent.AddCommand(newSubstrateSecretsListCmd(), newSubstrateSecretsSetCmd(), newSubstrateSecretsRmCmd(), newSubstrateSecretsTestCmd())
+	parent.AddCommand(newSubstrateSecretsTemplatesCmd(), newSubstrateSecretsAddCmd(), newSubstrateSecretsListCmd(), newSubstrateSecretsSetCmd(), newSubstrateSecretsRmCmd(), newSubstrateSecretsTestCmd())
 	return parent
 }
 
@@ -738,11 +738,23 @@ func newSubstrateSecretsListCmd() *cobra.Command {
 				fmt.Fprintln(w, "No secrets are available to you.")
 				return nil
 			}
+			now := time.Now()
 			rows := make([][]string, 0, len(list))
 			for _, sec := range list {
-				rows = append(rows, []string{sec.Name, substrateDash(sec.Scope), substrateDash(strings.Join(sec.Hosts, ",")), substrateDash(sec.Status)})
+				agents := "-"
+				if len(sec.Agents) > 0 {
+					agents = strings.Join(sec.Agents, ",")
+				}
+				rows = append(rows, []string{sec.Name, substrateDash(strings.Join(sec.Hosts, ",")), substrateSecretKind(sec),
+					substrateDash(sec.Status), substrateSince(sec.LastUsed, now), substrateUntil(sec.Expires, now), agents})
 			}
-			substrateTable(w, []string{"NAME", "SCOPE", "HOSTS", "STATUS"}, rows)
+			substrateTable(w, []string{"NAME", "HOST", "KIND", "STATUS", "LAST USED", "EXPIRES", "AGENTS"}, rows)
+			for _, sec := range list {
+				if days, soon := substrateExpiresSoon(sec, now); soon {
+					fmt.Fprintf(w, "warning: %s expires in %d days. Renew it: remove it with defenseclaw substrate secrets rm %s and add it again with --expires.\n",
+						sec.Name, days, sec.Name)
+				}
+			}
 			return nil
 		},
 	}
@@ -754,19 +766,21 @@ func newSubstrateSecretsListCmd() *cobra.Command {
 
 func newSubstrateSecretsSetCmd() *cobra.Command {
 	var (
-		com       substrateCommon
-		fromEnv   string
-		fromStdin bool
+		com substrateCommon
+		src substrateSecretSource
 	)
 	cmd := &cobra.Command{
 		Use:   "set <name>",
 		Short: "Store one of your own secrets",
-		Long: `Stores the value for NAME, bound to the hosts your administrator allowed for it. The value
-is read from the terminal without echo, from standard input with --stdin, or from an environment
-variable with --from-env VAR. It is never put on the command line.`,
+		Long: `Stores the value for NAME, bound to the hosts your administrator allowed for it.
+
+` + substrateSourceHelp,
+		Example: "defenseclaw substrate secrets set GITHUB_TOKEN --from-gh\n" +
+			"defenseclaw substrate secrets set GITLAB_TOKEN --from-op op://eng/gitlab/token\n" +
+			"defenseclaw substrate secrets set NPM_TOKEN --from-keychain npm-publish",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			value, err := readSubstrateSecret(cmd, fromEnv, fromStdin)
+			value, _, err := src.read(cmd)
 			if err != nil {
 				return err
 			}
@@ -784,43 +798,9 @@ variable with --from-env VAR. It is never put on the command line.`,
 		},
 	}
 	com.add(cmd)
-	cmd.Flags().StringVar(&fromEnv, "from-env", "", "read the value from this environment variable")
+	src.add(cmd)
 	cmd.Flags().BoolVar(new(bool), "mine", true, "your own secret (the only kind this command acts on)")
-	cmd.Flags().BoolVar(&fromStdin, "stdin", false, "read the value from standard input")
 	return cmd
-}
-
-func readSubstrateSecret(cmd *cobra.Command, fromEnv string, fromStdin bool) (string, error) {
-	switch {
-	case fromEnv != "":
-		v := os.Getenv(fromEnv)
-		if v == "" {
-			return "", fmt.Errorf("the environment variable %s is empty or not set", fromEnv)
-		}
-		return v, nil
-	case fromStdin:
-		b, err := io.ReadAll(io.LimitReader(cmd.InOrStdin(), 64<<10))
-		if err != nil {
-			return "", err
-		}
-		v := strings.TrimRight(string(b), "\r\n")
-		if v == "" {
-			return "", errors.New("standard input was empty")
-		}
-		return v, nil
-	case term.IsTerminal(int(os.Stdin.Fd())):
-		fmt.Fprint(cmd.ErrOrStderr(), "Secret value (not shown): ")
-		b, err := term.ReadPassword(int(os.Stdin.Fd()))
-		fmt.Fprintln(cmd.ErrOrStderr())
-		if err != nil {
-			return "", err
-		}
-		if len(b) == 0 {
-			return "", errors.New("no value entered")
-		}
-		return string(b), nil
-	}
-	return "", errors.New("give the value with --stdin or --from-env VAR (there is no terminal to ask on)")
 }
 
 func newSubstrateSecretsRmCmd() *cobra.Command {
@@ -864,12 +844,13 @@ func newSubstrateSecretsRmCmd() *cobra.Command {
 
 func newSubstrateSecretsTestCmd() *cobra.Command {
 	var (
-		out substrateOutput
-		com substrateCommon
+		out   substrateOutput
+		com   substrateCommon
+		agent string
 	)
 	cmd := &cobra.Command{
 		Use:   "test <name>",
-		Short: "Check that a secret is bound and the cluster can use it",
+		Short: "Check that a secret is stored and usable, and whether an agent gets it",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			asJSON, err := out.wantJSON()
@@ -882,19 +863,28 @@ func newSubstrateSecretsTestCmd() *cobra.Command {
 			}
 			ctx, stop := substrateContext(cmd)
 			defer stop()
-			res, err := s.Client.TestSecret(ctx, args[0])
+			ref := ""
+			if agent != "" {
+				a, err := resolveSubstrateActor(ctx, s.Client, agent)
+				if err != nil {
+					return substrateFail(err)
+				}
+				ref = a.Atespace + "/" + a.Name
+			}
+			res, err := s.Client.TestSecret(ctx, args[0], ref)
 			if err != nil {
 				return substrateFail(err)
 			}
 			if asJSON {
 				return writeSubstrateJSON(cmd.OutOrStdout(), res)
 			}
-			printSubstrateMap(cmd.OutOrStdout(), res, "")
+			printSubstrateSecretTest(cmd.OutOrStdout(), res, time.Now())
 			return nil
 		},
 	}
 	out.add(cmd)
 	com.add(cmd)
+	cmd.Flags().StringVar(&agent, "agent", "", "also say whether this agent's policy carries the secret")
 	cmd.Flags().BoolVar(new(bool), "mine", true, "your own secret (the only kind this command acts on)")
 	return cmd
 }

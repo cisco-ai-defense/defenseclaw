@@ -53,7 +53,7 @@ func TestLauncherWritesPassTheAdminCSRFGate(t *testing.T) {
 		"rollback":    func() error { _, err := c.RollbackBundle(ctx, "all"); return err },
 		"policyreset": func() error { _, err := c.PolicyReset(ctx, "eng-web/a1", "conflict cleared"); return err },
 		"migrate":     func() error { _, err := c.Migrate(ctx, "eng-web", "a1"); return err },
-		"testsecret":  func() error { _, err := c.TestSecret(ctx, "NPM_TOKEN"); return err },
+		"testsecret":  func() error { _, err := c.TestSecret(ctx, "NPM_TOKEN", ""); return err },
 	}
 	for name, call := range calls {
 		if err := call(); err != nil {

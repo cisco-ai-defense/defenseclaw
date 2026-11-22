@@ -29,6 +29,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -108,6 +109,10 @@ type Options struct {
 	// secrets (see SettingsFromConfig and SecretsFromConfig).
 	Settings render.Settings
 	Secrets  []render.Secret
+	// Bindings returns one person's self-service bindings (see
+	// BindingsFrom); nil when self-service secrets are off. It is part of
+	// the first Live, so bindings render before any config change.
+	Bindings func(person string) []render.Secret
 	// LauncherAtespaces are the atespaces DefenseClaw owns.
 	LauncherAtespaces map[string]bool
 	// RequireAttestation gives no policy to an unattested template.
@@ -399,7 +404,7 @@ func New(o Options) (*Controller, error) {
 	c := &Controller{o: o, actors: map[string]*actorState{}, templates: map[string]cachedTemplate{},
 		unlisted: map[string]bool{}, warnedList: map[string]bool{}, uidByKey: map[string]string{}, retired: map[string]bool{},
 		startedAt: o.Now(), allowlisted: map[string]string{}, unseparated: map[string]bool{}}
-	lv := &Live{Settings: o.Settings, Secrets: o.Secrets, LauncherAtespaces: o.LauncherAtespaces, RequireAttestation: o.RequireAttestation,
+	lv := &Live{Settings: o.Settings, Secrets: o.Secrets, Bindings: o.Bindings, LauncherAtespaces: o.LauncherAtespaces, RequireAttestation: o.RequireAttestation,
 		Templates: o.Templates, Attestor: o.Attestor, Resolver: o.Resolver, IdleSuspendAfter: o.IdleSuspendAfter,
 		IdleSuspendWithoutCPU: o.IdleSuspendWithoutCPU, LoadedAt: o.Now()}
 	if o.Config != nil {
@@ -1630,7 +1635,11 @@ func (c *Controller) applyOnce(ctx context.Context, a *ateapi.Actor, st *actorSt
 	st.refused, st.refusedMsg = "", ""
 	ref := ateapi.RefOf(a.GetMetadata())
 	lv := c.live()
-	res, err := render.EgressPolicy(render.Input{Settings: lv.Settings, Profile: profile, Person: reg.Person, Approved: reg.Approved, Secrets: lv.Secrets})
+	secrets := lv.Secrets
+	if lv.Bindings != nil && reg.Person != "" {
+		secrets = append(slices.Clip(secrets), lv.Bindings(reg.Person)...)
+	}
+	res, err := render.EgressPolicy(render.Input{Settings: lv.Settings, Profile: profile, Person: reg.Person, Approved: reg.Approved, Secrets: secrets})
 	if err != nil {
 		c.fail(base, "render: "+err.Error())
 		return fmt.Errorf("%s: render: %w", st.key, err)

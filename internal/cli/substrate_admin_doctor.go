@@ -164,6 +164,9 @@ func runSubstrateDoctor(cmd *cobra.Command, out *substrateOutput, com *substrate
 		d.add("token_store", doctorOK, "your sign-in can be kept safely", "")
 	}
 
+	// 3. The optional tools the secret sources run (gh, op, security).
+	doctorSecretSources(d)
+
 	name := ""
 	if openErr != nil {
 		for _, id := range []string{"admin_address", "sign_in", "sign_in_server", "attach"} {

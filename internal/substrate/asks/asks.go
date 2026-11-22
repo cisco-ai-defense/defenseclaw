@@ -114,6 +114,31 @@ type Ask struct {
 // MaxAskTimeout bounds Ask.TimeoutSeconds (config ask_timeout).
 const MaxAskTimeout = 24 * time.Hour
 
+// KindSecretBinding is an administrator ask for a person's own secret
+// binding to a host no template covers (B1 S4). It has no actor: Tool is
+// the binding name, Rule is BindingRule(id), and only an administrator
+// decides it (the person who asked sees it and waits).
+const KindSecretBinding = "secret_binding"
+
+// MaxBindingAskTimeout bounds a secret_binding ask
+// (self_service_secrets.ask_timeout, at most 168h).
+const MaxBindingAskTimeout = 168 * time.Hour
+
+const bindingRulePrefix = "binding:"
+
+// BindingRule is the Rule of the secret_binding ask for binding id.
+func BindingRule(id string) string { return bindingRulePrefix + id }
+
+// BindingID is the binding a secret_binding ask is about, "" for any
+// other ask.
+func (a Ask) BindingID() string {
+	if a.Kind != KindSecretBinding {
+		return ""
+	}
+	id, _ := strings.CutPrefix(a.Rule, bindingRulePrefix)
+	return id
+}
+
 // Decision is one verdict that was not a plain allow.
 type Decision struct {
 	At        time.Time `json:"at"`
@@ -162,6 +187,15 @@ var ErrDecided = errors.New("asks: the ask was already answered")
 // IsNotFound reads either form of the error: the store's wire error (in
 // the leader process) or the client's sentinel.
 func IsNotFound(err error) bool { return errors.Is(err, ErrNotFound) || wireCode(err) == "not_found" }
+
+// ErrAdminOnly is an ask only an administrator may answer.
+var ErrAdminOnly = errors.New("asks: only an administrator answers this ask")
+
+// IsAdminOnly reports a person answering an ask only an administrator may
+// answer (a secret_binding ask, even their own).
+func IsAdminOnly(err error) bool {
+	return errors.Is(err, ErrAdminOnly) || wireCode(err) == "admin_only"
+}
 
 // IsDecided reports an ask that was already answered.
 func IsDecided(err error) bool { return errors.Is(err, ErrDecided) || wireCode(err) == "decided" }
@@ -294,7 +328,16 @@ func (s *Store) expire(now time.Time) {
 
 // Open raises an ask. The ID is minted here.
 func (s *Store) OpenAsk(_ context.Context, a Ask) (Ask, error) {
-	if a.Atespace == "" || a.UID == "" || (a.Host == "" && a.Tool == "") {
+	maxTimeout := MaxAskTimeout
+	if a.Kind == KindSecretBinding {
+		// No actor: the binding stands in for it, so the same binding is
+		// asked about once and the per-actor cap counts per binding.
+		if a.OwnerID == "" || a.Host == "" || a.Tool == "" || a.BindingID() == "" {
+			return Ask{}, &leader.WireError{Code: leader.CodeBadRequest, Message: "a binding ask names its owner, binding, name and host"}
+		}
+		a.Atespace, a.Actor, a.UID, a.Unattended = "", "", a.Rule, false
+		maxTimeout = MaxBindingAskTimeout
+	} else if a.Atespace == "" || a.UID == "" || (a.Host == "" && a.Tool == "") {
 		return Ask{}, &leader.WireError{Code: leader.CodeBadRequest, Message: "an ask names its actor and a host or tool"}
 	}
 	b := make([]byte, 12)
@@ -305,7 +348,7 @@ func (s *Store) OpenAsk(_ context.Context, a Ask) (Ask, error) {
 		exp = DefaultAskExpiry
 	}
 	if t := time.Duration(a.TimeoutSeconds) * time.Second; a.TimeoutSeconds > 0 {
-		exp = min(t, MaxAskTimeout)
+		exp = min(t, maxTimeout)
 	}
 	a.ID, a.Created, a.Expires, a.State = "ask-"+hex.EncodeToString(b), now, now.Add(exp), StatePending
 	a.DecidedBy, a.DecidedAt, a.Always = "", time.Time{}, false
@@ -353,12 +396,20 @@ func (s *Store) Resolve(ctx context.Context, in ResolveRequest) (Ask, error) {
 		s.mu.Unlock()
 		return Ask{}, &leader.WireError{Code: "decided", Message: ErrDecided.Error()}
 	}
+	if a.Kind == KindSecretBinding && !in.Admin {
+		s.mu.Unlock()
+		return Ask{}, &leader.WireError{Code: "admin_only", Message: ErrAdminOnly.Error()}
+	}
 	out := *a
 	s.mu.Unlock()
 	out.State, out.DecidedBy, out.DecidedAt, out.Note = StateDenied, in.CallerID, now, truncate(in.Note, 512)
 	if decision == "approve" {
 		out.State, out.Always = StateApproved, in.Always
-		if s.OnApprove != nil {
+		if out.Kind == KindSecretBinding {
+			// The gateway moves the binding (it writes the binding store);
+			// no registration changes and nothing is kept for later runs.
+			out.Always = false
+		} else if s.OnApprove != nil {
 			if err := s.OnApprove(ctx, out); err != nil {
 				return Ask{}, err
 			}

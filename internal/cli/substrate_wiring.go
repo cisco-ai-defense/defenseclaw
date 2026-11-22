@@ -51,7 +51,7 @@ func newSubstrateController(cfg *config.Config, client ateapi.Client, reg contro
 		Client: client, Attestor: lv.Attestor, Activity: act, CPU: cpu,
 		Registry: reg, Resolver: lv.Resolver,
 		Sink:     sink,
-		Settings: lv.Settings, Secrets: lv.Secrets,
+		Settings: lv.Settings, Secrets: lv.Secrets, Bindings: lv.Bindings,
 		LauncherAtespaces: lv.LauncherAtespaces, RequireAttestation: lv.RequireAttestation, Templates: lv.Templates,
 		KitVersion: appVersion, IdleSuspendAfter: lv.IdleSuspendAfter, IdleSuspendWithoutCPU: lv.IdleSuspendWithoutCPU,
 		Resets: resets, Namespace: namespace,
@@ -89,6 +89,7 @@ func substrateControllerLive(cfg *config.Config, idle bool, resolver controller.
 	}
 	return controller.Live{
 		Settings: controller.SettingsFromConfig(cfg), Secrets: controller.SecretsFromConfig(cfg),
+		Bindings:          controller.BindingsFrom(substrateBindingStore(cfg), cfg, time.Now),
 		LauncherAtespaces: controller.LauncherSet(cfg), RequireAttestation: sub.AttestationRequired(), Templates: sub.Templates,
 		Attestor: attestor, Resolver: resolver, IdleSuspendAfter: after, IdleSuspendWithoutCPU: sub.IdleSuspendWithoutCPU,
 	}

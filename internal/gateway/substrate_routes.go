@@ -163,6 +163,8 @@ func (a *APIServer) newSubstrateAdminHandler(st *substrateState) http.Handler {
 	mux.HandleFunc("GET /api/v1/substrate/decisions", a.substrateDecisions(st))
 	mux.HandleFunc("GET /api/v1/substrate/policy/explain", a.substratePolicyExplain(st))
 	mux.HandleFunc("GET /api/v1/substrate/secrets", a.substrateListSecrets(st))
+	mux.HandleFunc("POST /api/v1/substrate/secrets", a.substrateAddSecret(st))
+	mux.HandleFunc("GET /api/v1/substrate/secret-templates", a.substrateSecretTemplates(st))
 	mux.HandleFunc("PUT /api/v1/substrate/secrets/{name}", a.substrateSetSecret(st))
 	mux.HandleFunc("DELETE /api/v1/substrate/secrets/{name}", a.substrateRemoveSecret(st))
 	mux.HandleFunc("POST /api/v1/substrate/secrets/{name}/test", a.substrateTestSecret(st))

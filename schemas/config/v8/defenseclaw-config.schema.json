@@ -8363,6 +8363,15 @@
                 "minLength": 1,
                 "maxLength": 253
               }
+            },
+            "no_swap_hosts": {
+              "type": "array",
+              "maxItems": 1024,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 253
+              }
             }
           }
         },
@@ -8419,6 +8428,9 @@
                   "placeholder": {
                     "type": "string",
                     "pattern": "^[A-Z_][A-Z0-9_]*$"
+                  },
+                  "allow_echo": {
+                    "type": "boolean"
                   }
                 }
               },
@@ -8440,6 +8452,37 @@
                   "maxLength": 256
                 }
               }
+            }
+          }
+        },
+        "self_service_secrets": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "mode": {"type": "string", "enum": ["bindings", "values_only", "off"]},
+            "namespace": {"type": "string", "minLength": 1, "maxLength": 63},
+            "provider": {"type": "string", "minLength": 1, "maxLength": 253},
+            "max_per_person": {"type": "integer", "minimum": 1, "maximum": 200},
+            "outside_templates": {"type": "string", "enum": ["ask", "refuse"]},
+            "ask_timeout": {"type": "string", "minLength": 1, "maxLength": 32},
+            "allow_echo_bindings": {"type": "boolean"}
+          }
+        },
+        "secret_templates": {
+          "type": "array",
+          "maxItems": 256,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name"],
+            "properties": {
+              "name": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,62}$"},
+              "hosts": {"type": "array", "maxItems": 1024, "items": {"type": "string", "minLength": 1, "maxLength": 253}},
+              "header": {"type": "string", "minLength": 1, "maxLength": 64},
+              "form": {"type": "string", "enum": ["bearer", "basic", "raw"]},
+              "basic_user": {"type": "string", "minLength": 1, "maxLength": 128},
+              "profiles": {"type": "array", "maxItems": 256, "items": {"type": "string", "minLength": 1, "maxLength": 253}},
+              "registry": {"type": "string", "enum": ["none", "npm", "pypi"]}
             }
           }
         },
