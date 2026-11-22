@@ -41,11 +41,16 @@ type Revocation struct {
 }
 
 // EndSignin ends the caller's own sign-in on the cluster: scope "this" (the
-// token it sends) or "all" (every sign-in of the caller made before now).
-// A gateway that can't end sign-ins answers 404.
-func (c *Client) EndSignin(ctx context.Context, scope string) (Revocation, error) {
+// token it sends, and the other tokens of the same sign-in in also: the ID
+// token and the access token) or "all" (every sign-in of the caller made
+// before now). A gateway that can't end sign-ins answers 404.
+func (c *Client) EndSignin(ctx context.Context, scope string, also ...string) (Revocation, error) {
 	var out Revocation
-	return out, c.do(ctx, http.MethodPost, "signin/revoke", nil, map[string]string{"scope": scope}, &out)
+	in := map[string]any{"scope": scope}
+	if len(also) > 0 {
+		in["also"] = also
+	}
+	return out, c.do(ctx, http.MethodPost, "signin/revoke", nil, in, &out)
 }
 
 // EndSigninsOf ends every sign-in of user (a principal or issuer#subject)

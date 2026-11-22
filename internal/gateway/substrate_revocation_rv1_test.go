@@ -107,3 +107,30 @@ func TestRV106CallerWatermarkCoversFastIdP(t *testing.T) {
 	f.wantList(t, "p-fast", 401, "signin_ended", "the caller")
 	f.wantList(t, "p-fast-before", 401, "signin_ended", "a token issued 10 s before by the fast clock")
 }
+
+// RV1-03: with api_audience set the gateway accepts the access token as
+// well as the ID token; a logout ends both in one write. A token of
+// another person, or one that does not verify, ends nothing.
+func TestRV103LogoutEndsBothStoredTokens(t *testing.T) {
+	past := time.Now().Add(-time.Minute)
+	dev := func(p identity.Person, key string) identity.Person { p.TokenKey, p.IssuedAt = key, past; return p }
+	f := newRevocationPeopleFixture(t, fakePeople{
+		"p-id": dev(alice, "k-id"), "p-acc": dev(alice, "k-acc"), "p-other-device": dev(alice, "k-2"), "p-bob": dev(bob, "k-bob"),
+	})
+	rec := f.do(t, f.admin, http.MethodPost, "/api/v1/substrate/signin/revoke", "p-id",
+		`{"scope":"this","also":["p-id","p-acc","p-bob"]}`)
+	if rec.Code != 200 {
+		t.Fatalf("logout: %d %s", rec.Code, rec.Body)
+	}
+	f.wantList(t, "p-id", 401, "signin_ended", "the bearer")
+	f.wantList(t, "p-acc", 401, "signin_ended", "the other stored token")
+	f.wantList(t, "p-other-device", 200, "", "another device (scope this)")
+	f.wantList(t, "p-bob", 200, "", "another person's token in also")
+	if _, seq := f.snap.Cursor(); seq != 2 {
+		t.Fatalf("seq %d, want 2: both keys in one write", seq)
+	}
+	if rec := f.do(t, f.admin, http.MethodPost, "/api/v1/substrate/signin/revoke", "p-other-device",
+		`{"scope":"this","also":["a","b","c","d","e"]}`); rec.Code != 400 {
+		t.Fatalf("five also tokens: %d", rec.Code)
+	}
+}

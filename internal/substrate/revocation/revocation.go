@@ -68,7 +68,15 @@ type Entry struct {
 	Until  time.Time `json:"until"`
 	By     string    `json:"by,omitempty"`
 	Reason string    `json:"reason,omitempty"`
+	// Also, on a Put of a token entry, names more token keys of the same
+	// person to end in the same write (a logout ends the ID token and the
+	// access token it holds). The store keeps one entry per key and never
+	// stores Also.
+	Also []string `json:"also,omitempty"`
 }
+
+// maxAlso bounds Entry.Also.
+const maxAlso = 4
 
 // Delta is what a replica pulls: the entries after its cursor, or every
 // entry (Full) when its generation is not the store's.
@@ -156,17 +164,51 @@ func (s *FileStore) maxTokens() int {
 	return DefaultMaxTokensPerPerson
 }
 
-// Put adds e and returns it with its sequence number. A token entry past
-// the person's cap becomes a watermark at now for that person.
+// Put adds e, and a token entry for each key in e.Also, in one write, and
+// returns e with its sequence number. A token entry past the person's cap
+// becomes a watermark at now for that person.
 func (s *FileStore) Put(_ context.Context, e Entry) (Entry, error) {
 	if e.Person == "" || (e.Token == "" && e.NotBefore.IsZero() && !e.Lift) {
 		return Entry{}, errors.New("revocation: an entry names a person and a token, a time or a lift")
+	}
+	if len(e.Also) > 0 && e.Token == "" || len(e.Also) > maxAlso {
+		return Entry{}, errors.New("revocation: also names at most 4 more tokens of a token entry")
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := s.now()
 	s.purgeLocked(now)
+	prev, prevSeq := append([]Entry(nil), s.doc.Entries...), s.doc.Seq
+	also := e.Also
+	e.Also = nil
 	e.At, e.Until = now, now.Add(Life)
+	if e.Lift {
+		kept := s.doc.Entries[:0]
+		for _, x := range s.doc.Entries {
+			if x.Person != e.Person || x.Token != "" {
+				kept = append(kept, x)
+			}
+		}
+		s.doc.Entries = kept
+	}
+	out := s.addLocked(e, now)
+	for _, k := range also {
+		if k != "" && k != e.Token {
+			x := e
+			x.Token = k
+			s.addLocked(x, now)
+		}
+	}
+	if err := s.writeLocked(); err != nil {
+		s.doc.Entries, s.doc.Seq = prev, prevSeq
+		return Entry{}, err
+	}
+	return out, nil
+}
+
+// addLocked appends e with the next sequence number; a token entry past
+// the person's cap becomes a watermark at now.
+func (s *FileStore) addLocked(e Entry, now time.Time) Entry {
 	if e.Token != "" {
 		n := 0
 		for _, x := range s.doc.Entries {
@@ -178,24 +220,10 @@ func (s *FileStore) Put(_ context.Context, e Entry) (Entry, error) {
 			e.Token, e.NotBefore = "", Watermark(now)
 		}
 	}
-	if e.Lift {
-		kept := s.doc.Entries[:0]
-		for _, x := range s.doc.Entries {
-			if x.Person != e.Person || x.Token != "" {
-				kept = append(kept, x)
-			}
-		}
-		s.doc.Entries = kept
-	}
 	s.doc.Seq++
 	e.Seq = s.doc.Seq
 	s.doc.Entries = append(s.doc.Entries, e)
-	if err := s.writeLocked(); err != nil {
-		s.doc.Entries = s.doc.Entries[:len(s.doc.Entries)-1]
-		s.doc.Seq--
-		return Entry{}, err
-	}
-	return e, nil
+	return e
 }
 
 // Since returns the entries after seq, or all of them when generation is

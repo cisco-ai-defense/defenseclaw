@@ -34,6 +34,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/substrate/identity"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/reasons"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/registry"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/revocation"
@@ -114,7 +115,10 @@ func (a *APIServer) substrateAuditRevocation(st *substrateState, r *http.Request
 
 // substrateSigninRevoke is POST /api/v1/substrate/signin/revoke: the
 // caller ends its own sign-in ({"scope":"this"}, the default) or every
-// sign-in of itself made before now ({"scope":"all"}).
+// sign-in of itself made before now ({"scope":"all"}). With scope this,
+// "also" carries the other tokens the launcher holds for this sign-in
+// (the ID token and the access token, RV1-03): each one that verifies as
+// the caller is ended in the same write.
 func (a *APIServer) substrateSigninRevoke(st *substrateState) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !st.substrateRevocationOn() {
@@ -124,9 +128,10 @@ func (a *APIServer) substrateSigninRevoke(st *substrateState) http.HandlerFunc {
 			return
 		}
 		var in struct {
-			Scope string `json:"scope"`
+			Scope string   `json:"scope"`
+			Also  []string `json:"also"`
 		}
-		if err := json.NewDecoder(io.LimitReader(r.Body, 4<<10)).Decode(&in); err != nil && !errors.Is(err, io.EOF) {
+		if err := json.NewDecoder(io.LimitReader(r.Body, 64<<10)).Decode(&in); err != nil && !errors.Is(err, io.EOF) || len(in.Also) > 4 {
 			writeSubstrateJSONError(w, http.StatusBadRequest, "bad_request")
 			return
 		}
@@ -140,6 +145,7 @@ func (a *APIServer) substrateSigninRevoke(st *substrateState) http.HandlerFunc {
 				return
 			}
 			e.Token = c.person.TokenKey
+			e.Also = st.substrateAlsoKeys(r.Context(), c.person, in.Also)
 		case "all":
 			if c.person.IssuedAt.IsZero() {
 				// A Kubernetes token with no issue time (RV1-01): an end by
@@ -166,6 +172,23 @@ func (a *APIServer) substrateSigninRevoke(st *substrateState) http.HandlerFunc {
 		}
 		writeSubstrateJSON(w, http.StatusOK, v)
 	}
+}
+
+// substrateAlsoKeys is the token keys of the tokens in also that verify
+// as the caller's person, other than the caller's own. A token that does
+// not verify is not accepted anywhere, so there is nothing of it to end.
+func (st *substrateState) substrateAlsoKeys(ctx context.Context, caller identity.Person, also []string) []string {
+	var keys []string
+	for _, tok := range also {
+		if tok = strings.TrimSpace(tok); tok == "" || st.cfg.People == nil {
+			continue
+		}
+		p, err := st.cfg.People.Verify(ctx, tok)
+		if err == nil && p.ID() == caller.ID() && p.TokenKey != "" && p.TokenKey != caller.TokenKey {
+			keys = append(keys, p.TokenKey)
+		}
+	}
+	return keys
 }
 
 // substrateCallerWatermark is the not-before of a person's own logout

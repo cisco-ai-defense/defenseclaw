@@ -387,7 +387,7 @@ device, and closes their open terminals. Your agents keep running; sign in again
 
 // substrateSigninEnder is the cluster call logout makes (api.Client).
 type substrateSigninEnder interface {
-	EndSignin(ctx context.Context, scope string) (api.Revocation, error)
+	EndSignin(ctx context.Context, scope string, also ...string) (api.Revocation, error)
 }
 
 // substrateEndSignin ends the sign-in on the cluster before logout forgets
@@ -404,7 +404,17 @@ func substrateEndSignin(ctx context.Context, cl substrateSigninEnder, name strin
 		// Nothing stored: no token of this context to end.
 		return fmt.Sprintf("Signed out of %s.", name), nil
 	}
-	rev, err := cl.EndSignin(ctx, scope)
+	var also []string
+	if !all && saved != nil {
+		// Both stored tokens of this sign-in: the gateway accepts the
+		// access token too when api_audience is set (RV1-03).
+		for _, tok := range []string{saved.IDToken, saved.AccessToken} {
+			if tok != "" {
+				also = append(also, tok)
+			}
+		}
+	}
+	rev, err := cl.EndSignin(ctx, scope, also...)
 	if err == nil {
 		if all {
 			who := orWord(safetext.Line(rev.Principal), safetext.Line(rev.Person))

@@ -46,11 +46,15 @@ func TestLogoutEndsSigninOnCluster(t *testing.T) {
 	now := time.Date(2026, 11, 23, 14, 2, 0, 0, time.UTC)
 	saved := &auth.Token{AccessToken: "acc-marker", Expiry: now.Add(15 * time.Minute)}
 	var gotScope string
+	var gotAlso []string
 	answer := func(code int, body string) *api.Client {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			var in map[string]string
+			var in struct {
+				Scope string   `json:"scope"`
+				Also  []string `json:"also"`
+			}
 			_ = json.NewDecoder(r.Body).Decode(&in)
-			gotScope = in["scope"]
+			gotScope, gotAlso = in.Scope, in.Also
 			if r.Method != http.MethodPost || r.URL.Path != "/api/v1/substrate/signin/revoke" {
 				code, body = 404, `{"reason":"wrong_route"}`
 			}
@@ -111,6 +115,11 @@ func TestLogoutEndsSigninOnCluster(t *testing.T) {
 		}
 		if tc.wantScope != "" && gotScope != tc.wantScope {
 			t.Errorf("%s: scope %q", tc.name, gotScope)
+		}
+		// RV1-03: a one-sign-in logout names the stored tokens; --all
+		// needs none.
+		if wantAlso := !tc.all; tc.wantScope != "" && (len(gotAlso) == 1 && gotAlso[0] == "acc-marker") != wantAlso {
+			t.Errorf("%s: also %d tokens", tc.name, len(gotAlso))
 		}
 	}
 	if msg, err := substrateEndSignin(context.Background(), nil, "e1", nil, false, now); err != nil || msg != "Signed out of e1." {
