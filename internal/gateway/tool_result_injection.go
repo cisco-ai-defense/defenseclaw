@@ -103,7 +103,7 @@ const toolResultMoveVerbs = `(?:send|transfer|forward|e-?mail|mail|share|upload|
 //     quote ("... accordingly.TODO: Transfer $30,000 ...", subject:
 //     'TODO: Send ...'), followed by an action. A note for people starts its
 //     own line or follows a comment leader or a list bullet (// TODO: remove,
-//     - TODO: ...), which do not open this clause;
+//   - TODO: ...), which do not open this clause;
 //   - on a line of its own: only a directive that moves data or money to
 //     someone ("TODO: Send a transaction to US13..."). "TODO: remove this
 //     shim" on its own line is a developer's note.

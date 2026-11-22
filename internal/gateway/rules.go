@@ -54,6 +54,9 @@ type PatternRule struct {
 	// did (GAP-1480). markedMigratedLiteral is the rule's migrated_literal.
 	migratedLiteral       bool
 	markedMigratedLiteral bool
+	// assignmentKeys is SEC-SECRET-ASSIGN's key vocabulary from the pack's
+	// keys block, nil for the built-in one (GAP-0433).
+	assignmentKeys *secretAssignmentKeys
 }
 
 // RuleFinding is a structured finding produced by scanning tool args or content.
@@ -687,6 +690,7 @@ func mergeRulePackCategories(
 				Tags:         append([]string(nil), r.Tags...),
 
 				markedMigratedLiteral: r.MigratedLiteral,
+				assignmentKeys:        compileSecretAssignmentKeys(r.Keys),
 			})
 		}
 		// An explicitly disabled category replaces defaults with zero rules.
@@ -839,7 +843,7 @@ func countRuleEntitiesFor(ctx context.Context, connector, text string) int {
 				continue
 			}
 			for _, loc := range rule.Pattern.FindAllStringIndex(text, maxEntityMatchesPerRule) {
-				if match := text[loc[0]:loc[1]]; acceptedRuleMatchAt(rule.ID, text, match, loc[0], loc[1]) {
+				if match := text[loc[0]:loc[1]]; acceptedPatternRuleMatchAt(*rule, text, match, loc[0], loc[1]) {
 					seen[match] = struct{}{}
 				}
 			}
