@@ -90,7 +90,13 @@ func correlateLLMRailOccurrence(
 	meta := input.meta
 	meta = restoreLLMRailPendingState(ctx, repo, instance.ConnectorInstanceID,
 		input.spec, input.surface, input.lifecycle, meta)
-	if meta.TurnID == "" && input.lifecycle == connector.CorrelationLifecycleModelStart &&
+	// A replica of a Substrate gateway sees only the calls that land on it,
+	// so a turn it mints or keeps in its cursor for an actor session is not
+	// the other replicas': an actor's model calls carry the turn ID the agent
+	// sends, never a minted one, as its hook calls do (substrate-1 GAP-0444,
+	// GAP-0676).
+	_, actorCall := substrateActorFrom(ctx)
+	if meta.TurnID == "" && !actorCall && input.lifecycle == connector.CorrelationLifecycleModelStart &&
 		input.spec.Allows(connector.CorrelationInferencePromptBoundaryTurn) {
 		turn, turnErr := audit.NewSemanticEventID()
 		if turnErr != nil {
@@ -98,7 +104,7 @@ func correlateLLMRailOccurrence(
 		}
 		meta.TurnID = string(turn)
 	}
-	if meta.TurnID == "" && input.rail == audit.CorrelationRailStream && meta.SessionID != "" {
+	if meta.TurnID == "" && !actorCall && input.rail == audit.CorrelationRailStream && meta.SessionID != "" {
 		if cursor, found := uniqueLLMRailCursor(ctx, repo, instance.ConnectorInstanceID, meta); found {
 			meta.TurnID = cursor.ActiveTurnID
 			if meta.PromptID == "" {
