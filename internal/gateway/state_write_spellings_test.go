@@ -362,7 +362,9 @@ func TestWriteThroughALinkToStateIsAStateWrite(t *testing.T) {
 	// These rows block in the default pack for rules of their own, not as
 	// the HIGH state write alert (GAP-1563).
 	judgeHomeStateRuleRows(t, []homeStateRuleRow{
-		{"ln -s HOMEDIR/.defenseclaw hc; mv a.txt hc/config.yaml", []string{gap0747StateRule, gap0747SSHKeysRule}},
+		// A write through a link into the state tree is named by the state
+		// rule alone and keeps its block (GAP-1568).
+		{"ln -s HOMEDIR/.defenseclaw hc; mv a.txt hc/config.yaml", []string{gap0747StateRule, "!" + gap0747SSHKeysRule}},
 		{"ln -s ~/.ssh sd; cp a.txt sd/authorized_keys", []string{gap0747SSHKeysRule}},
 		{"nohup ln -s ~/.ssh sd; cp a.txt sd/authorized_keys", []string{gap0747SSHKeysRule}},
 	})
@@ -577,7 +579,9 @@ func TestEnvChdirHomeSpellingRunsTheCallInTheHome(t *testing.T) {
 	// the HIGH state write alert (GAP-1563).
 	judgeHomeStateRuleRows(t, []homeStateRuleRow{
 		{"env -C ~ cp project/a.txt .ssh/authorized_keys", []string{gap0747SSHKeysRule}},
-		{"env -C ~ ln -sf project/a.txt .defenseclaw/config.yaml", []string{gap0747SSHKeysRule, gap0747StateRule}},
+		// A link the call makes in the state tree is named by the state
+		// rule alone and keeps its block (GAP-1568).
+		{"env -C ~ ln -sf project/a.txt .defenseclaw/config.yaml", []string{gap0747StateRule, "!" + gap0747SSHKeysRule}},
 	})
 }
 

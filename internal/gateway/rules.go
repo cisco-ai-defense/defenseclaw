@@ -98,6 +98,10 @@ type RuleFinding struct {
 	// class on a shell command (markShellProtectedFileFindings). It is
 	// private and value-free; legacyFindingProof reads it.
 	shellProtectedFile bool
+	// linkHeld marks a state write the link walk held as a possible keys
+	// write (an unread link step, GAP-1568): it is named by the state rule
+	// and keeps the keys hold's severity (withProvenActiveStateMutation).
+	linkHeld bool
 	// omittedOperand marks the evaluation-limit finding that stands for a
 	// named write operand the hook client left out of its bounded map: a
 	// target the gateway cannot place, which may be a link to a protected

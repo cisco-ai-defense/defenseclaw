@@ -505,6 +505,11 @@ func dispatchTrustedActionOnce(
 	// begins nothing more, rel-1-0-10:GAP-0766).
 	defer hookpaths.HookCall()()
 	defer func() { findings = markShellProtectedFileFindings(request, findings) }()
+	// The rule name of a link-held state write is settled once, on the
+	// outermost call, after every reading (GAP-1568).
+	if parent == nil || parent.Value(effectShadowContextKey{}) == nil {
+		defer func() { findings = withLinkHeldStateWrites(findings) }()
+	}
 	defer recoverTrustedActionFault(request, &findings)
 	// A call whose shell the tool does not name is judged in the POSIX
 	// reading too, before any bound below decides the call: a credential

@@ -1567,9 +1567,22 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 			generation, request, input,
 		)
 	}
-	for _, finding := range findings {
+	// The rule name comes from the write's target (DESIGN D4): a write the
+	// link walk held only because it could not read every link operation
+	// of the call, whose every written name reaches the DefenseClaw state
+	// tree, is named by the state rule, not the SSH keys rule
+	// (rel-1-0-10:GAP-1568). The keys target is still a MAYBE (a link step
+	// went unread), and a MAYBE keeps the 1.0.10 verdict: the finding keeps
+	// the keys hold's severity and enforcement in every tier (DET111 ruling
+	// 2026-11-22T03:20Z).
+	heldStateOnly := symlinkWrite && !resolvedTarget && heldWriteReachesOnlyState(request, input, facts, unprovenTarget) &&
+		!trustedAuthorizedKeysSymlinkWrite(input) &&
+		!trustedAuthorizedKeysWriteProofWith(input, facts, false, clientGlobFacts(request), request.targetMemo) &&
+		!trustedSandboxGuestAuthorizedKeysWrite(request)
+	for index, finding := range findings {
 		if finding.RuleID == "persistence.ssh_authorized_keys_command" &&
 			finding.contributesToEnforcement() {
+			findings[index].linkHeld = findings[index].linkHeld || heldStateOnly
 			return findings
 		}
 	}
@@ -1651,6 +1664,7 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 				Tags: append([]string(nil), named.Tags...), LineNumber: 1,
 				Proof: enforcement,
 			})
+			finding.linkHeld = heldStateOnly && named.ID == rule.ID
 			if named.ID == rule.ID &&
 				(trustedAuthorizedKeysSymlinkWrite(input) || resolvedTarget && !overBudget && !unresolved) {
 				finding = finding.withTrustedActionProof(newResolvedTargetFindingProof(named.ID, true))
@@ -1730,6 +1744,107 @@ func unprovenKeyWriteMayWarn(request trustedActionRequest, commandText, home str
 // hookpaths.UnprovenWriteTitle class and the operand at fault, if one was.
 type unprovenWrite struct {
 	class, operand string
+}
+
+// linkHeldStateWriteNote follows the state rule title on a state write the
+// link walk held (GAP-1568): why the call keeps the keys hold's verdict.
+const linkHeldStateWriteNote = " (held: the call makes a link whose every step could not be read, so the write may reach other protected files)"
+
+// withLinkHeldStateWrites names a link-held keys hold by its target
+// (GAP-1568): the enforcing keys finding marked linkHeld becomes the state
+// rule's finding with the keys hold's severity, enforcement and evidence
+// (the keys target is still a MAYBE, and a MAYBE keeps the 1.0.10 verdict:
+// DET111 ruling 2026-11-22T03:20Z), and the call's other state, keys and ssh
+// folder findings go. It runs once, on the outermost call, after every
+// reading, so no later reading renames or re-grades it.
+func withLinkHeldStateWrites(findings []RuleFinding) []RuleFinding {
+	held := slices.IndexFunc(findings, func(f RuleFinding) bool {
+		return f.linkHeld && f.RuleID == "persistence.ssh_authorized_keys_command" && f.contributesToEnforcement()
+	})
+	if held < 0 {
+		return findings
+	}
+	finding := findings[held]
+	finding.RuleID, finding.Title = stateWriteRuleID, "DefenseClaw security state mutation"+linkHeldStateWriteNote
+	finding.Tags = []string{"cognitive-tampering", "tampering", "security-state"}
+	kept := findings[:0]
+	for i, f := range findings {
+		switch {
+		case i == held:
+			kept = append(kept, finding)
+		case f.RuleID == stateWriteRuleID, f.RuleID == "persistence.ssh_authorized_keys_command", f.RuleID == "PATH-SSH-DIR":
+		default:
+			kept = append(kept, f)
+		}
+	}
+	return kept
+}
+
+// heldWriteReachesOnlyState reports a link-unread hold (an unreadable link
+// operation of the call can affect the held operand) where the held operand
+// and every name the call writes, read through the links the call makes
+// (hookpaths.Links.AliasTargets), lie in the active home's DefenseClaw state
+// tree: ln -s ~/.defenseclaw hc; mv a.txt hc/config.yaml, or env -C ~
+// ln -sf project/a.txt .defenseclaw/config.yaml. A written name outside the
+// state tree that no read link leads into it (an ordinary file, an
+// unread link, a keys file) keeps the hold.
+func heldWriteReachesOnlyState(request trustedActionRequest, input actionfacts.Input, facts actionfacts.Facts, held unprovenWrite) bool {
+	home := facts.ActiveHome
+	if held.class != hookpaths.UnprovenLinkUnread || held.operand == "" || input.Command == "" ||
+		home == "" || !filepath.IsAbs(home) {
+		return false
+	}
+	root := filepath.Join(filepath.Clean(home), ".defenseclaw")
+	inState := func(name string) bool { return cleanPathWithin(name, root) }
+	links := hookpaths.CommandLinksWithFacts(input.Tool, input.Command, input.CWD, home, request.ResolvedWriteTargets)
+	reachesState := func(name string) bool {
+		if !filepath.IsAbs(name) {
+			return false
+		}
+		if inState(name) {
+			return true
+		}
+		reached := links.AliasTargets(name, false)
+		for _, target := range reached {
+			if !inState(target) {
+				return false
+			}
+		}
+		return len(reached) != 0
+	}
+	if !reachesState(held.operand) {
+		return false
+	}
+	ssh := filepath.Join(filepath.Clean(home), ".ssh")
+	for _, path := range facts.Paths {
+		switch path.Access {
+		case actionfacts.PathAccessDelete:
+			// Removing a name never writes through a link (mv's source), so
+			// an unread link step cannot make it a keys write; a name in the
+			// ssh folder, or one a link of the call leads from, keeps the hold.
+			if reachesState(path.Resolved) {
+				continue
+			}
+			if !filepath.IsAbs(path.Resolved) || len(links.AliasTargets(path.Resolved, false)) != 0 ||
+				cleanPathWithin(path.Resolved, ssh) {
+				return false
+			}
+		case actionfacts.PathAccessWrite, actionfacts.PathAccessAppend, actionfacts.PathAccessMetadata:
+			if !reachesState(path.Resolved) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// cleanPathWithin reports name at or under dir, without case on Windows.
+func cleanPathWithin(name, dir string) bool {
+	name, dir = filepath.Clean(name), filepath.Clean(dir)
+	if runtime.GOOS == "windows" {
+		name, dir = strings.ToLower(name), strings.ToLower(dir)
+	}
+	return name == dir || strings.HasPrefix(name, dir+string(filepath.Separator))
 }
 
 // unprovenOperandNearProtected reports an operand at or under the active
