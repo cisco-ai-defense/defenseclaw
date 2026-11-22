@@ -142,11 +142,10 @@ func g0672Tree(t *testing.T, n, subs, flat int) (string, []string) {
 // many folders the call names. 200 names of one tree read at most one
 // budget's worth of the tree: the walks past it are cut, and a cut marks
 // only the chain's unknown tier (no TRUNCATED, so no verdict change, the
-// round-1 P2-1 ruling). The analyses of one call (the hook makes about six)
-// reuse every walk of the first: a second analysis after the tree's .env
-// is removed still names what the first found, so it walked nothing again.
-// At a6f8f54ead each name had its own budget (200 walks, 200 files named)
-// and a 64-folder memo the second analysis re-walked.
+// round-1 P2-1 ruling). At a6f8f54ead each name had its own budget (200
+// walks, 200 files named). A later check of the call walks the tree as it
+// is then (rel-1-0-10:GAP-1045): with the tree's .env removed it names
+// none, within the same one budget.
 func TestGAP0672OneWalkBudgetPerCall(t *testing.T) {
 	for _, shape := range []struct {
 		name        string
@@ -178,11 +177,12 @@ func TestGAP0672OneWalkBudgetPerCall(t *testing.T) {
 			if err := os.Remove(filepath.Join(dir, "t", ".env")); err != nil {
 				t.Fatal(err)
 			}
-			for i := range 5 {
-				again := Analyze(in)
-				if got := again.CredentialPathReads(); !slices.Equal(got, first.CredentialPathReads()) {
-					t.Fatalf("analysis %d of the same call walked again: %d reads, first %d", i+2, len(got), len(first.CredentialPathReads()))
-				}
+			again := Analyze(in)
+			if named := g0671Named(again); len(named) != 0 {
+				t.Fatalf("the .env is gone, a later check still names %v", named)
+			}
+			if !g0671Unknown(again) {
+				t.Fatalf("a later check of %d names: no file-unknown read past the shared budget", n)
 			}
 		})
 	}

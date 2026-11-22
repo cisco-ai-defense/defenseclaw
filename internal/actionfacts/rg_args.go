@@ -18,7 +18,6 @@ package actionfacts
 
 import (
 	"slices"
-	"strconv"
 	"strings"
 )
 
@@ -347,8 +346,6 @@ func rgSearchFilterOf(command CommandFact, argv []string, cwd string) *rgFilter 
 	if len(globs)+len(iglobs) > 0 {
 		f.cwd = rgPhysicalFolder(cwd) // only an override glob reads it
 	}
-	var key strings.Builder
-	key.WriteString(strconv.FormatBool(f.hidden) + "\x00" + f.cwd)
 	add := func(option rgOption, fold bool) {
 		g := rgGlob{exclude: strings.HasPrefix(option.value, "!")}
 		if !runTime(option) {
@@ -368,7 +365,6 @@ func rgSearchFilterOf(command CommandFact, argv []string, cwd string) *rgFilter 
 			f.includes++
 		}
 		f.globs = append(f.globs, g)
-		key.WriteString("\x00g" + rgGlobKey(g))
 	}
 	for _, option := range globs {
 		add(option, fold)
@@ -383,29 +379,8 @@ func rgSearchFilterOf(command CommandFact, argv []string, cwd string) *rgFilter 
 			continue // matches no credentials file
 		}
 		f.types = append(f.types, rgTypeSelection{exclude: s.exclude, globs: t.globs, names: t.names})
-		key.WriteString("\x00t" + strconv.FormatBool(s.exclude))
-		for _, g := range t.globs {
-			key.WriteString("\x01" + rgGlobKey(g))
-		}
-		names := make([]string, 0, len(t.names))
-		for name := range t.names {
-			names = append(names, name)
-		}
-		slices.Sort(names)
-		key.WriteString("\x01" + strings.Join(names, "\x01"))
 	}
-	key.WriteString("\x00" + strconv.FormatBool(f.selected))
-	f.key = key.String()
 	return f
-}
-
-// rgGlobKey is one glob in a filter's memo key.
-func rgGlobKey(g rgGlob) string {
-	re := "?"
-	if g.re != nil {
-		re = g.re.String()
-	}
-	return strconv.FormatBool(g.exclude) + strconv.FormatBool(g.onlyDir) + re
 }
 
 // rgBuiltinTypes is rg's built-in file types that match a credentials file

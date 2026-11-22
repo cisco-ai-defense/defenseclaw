@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -45,6 +46,36 @@ func TestGAP0709WalkSkipsTheLevelPastTheBound(t *testing.T) {
 		}
 		if !slices.ContainsFunc(facts.CredentialPathReads(), func(p PathFact) bool { return p.Value == "" }) {
 			t.Fatalf("%s: reads %v, want the file-unknown read of the cut", command, facts.CredentialPathReads())
+		}
+	}
+}
+
+// TestGAP0709ParseWalksWhenTheRecordIsRead is substrate-1:GAP-0709: a parse
+// resolves its credentials-file reads, and walks the folders its recursive
+// searches name, only when the record is first read. The hook parses one
+// call about fifteen times and reads one record, so the other parses walk
+// nothing: a .env made after the parse and before the read is found. At
+// 02e880d943 the parse walked at once and missed it.
+func TestGAP0709ParseWalksWhenTheRecordIsRead(t *testing.T) {
+	for _, command := range []string{"grep -rn TODO .", "rg -uu TODO"} {
+		dir := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(dir, "src"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		facts := Analyze(Input{Tool: "exec", Command: command, CWD: dir, ActiveHome: t.TempDir()})
+		copied := facts
+		if err := os.WriteFile(filepath.Join(dir, "src", ".env"), []byte("KEY=1\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		found := false
+		for _, read := range copied.CredentialPathReads() {
+			found = found || strings.HasSuffix(read.Resolved, "/src/.env") || strings.HasSuffix(read.Value, "src/.env")
+		}
+		if !found {
+			t.Fatalf("%s: the parse walked before its record was read: %+v", command, copied.CredentialPathReads())
+		}
+		if got, again := facts.CredentialPathReads(), copied.CredentialPathReads(); !slices.Equal(got, again) {
+			t.Fatalf("%s: copies of one parse disagree: %v and %v", command, got, again)
 		}
 	}
 }

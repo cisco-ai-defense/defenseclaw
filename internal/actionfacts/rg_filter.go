@@ -50,12 +50,11 @@ type rgFilter struct {
 	types    []rgTypeSelection
 	selected bool // a -t selection: a file no selected type matches is skipped
 	cwd      string
-	key      string // the filter's memo key part (credentialPathWalkKey)
 }
 
 // rgFilterAll is the filter of an rg this model is unsure of (count when
 // unsure): every file is read, hidden or not. It is shared read-only.
-var rgFilterAll = &rgFilter{hidden: true, key: "all"}
+var rgFilterAll = &rgFilter{hidden: true}
 
 // rgGlob is one override glob, compiled as rg compiles it (rgOverrideGlob).
 // A nil re is a glob this model does not read exactly (count when unsure):

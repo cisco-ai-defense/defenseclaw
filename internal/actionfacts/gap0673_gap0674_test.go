@@ -20,11 +20,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
 	"testing"
-	"time"
 )
 
 // g0673Credentials is the credentials files of the ground-truth folder.
@@ -299,17 +299,14 @@ func TestGAP0673RgGroundTruthLive(t *testing.T) {
 	}
 }
 
-// TestGAP0674WalkMemoBounded is substrate-1:GAP-0674: the walk memo is
-// bounded by its stored size, not only by its count of walks, and a stale
-// walk is dropped on the next store, not only when the memo is full. 40
-// calls each walk a distinct name of one tree whose walk finds 960
-// credentials files at about 600-byte paths (some 0.6 MB a walk). The
-// stored size, counted from the memo's own paths after every call, stays
-// within 16 MiB; past credentialPathWalkReuse one more call leaves no
-// stale walk. At 453d859dc4 the memo keeps all 40 walks (about 24 MB) and
-// every stale one.
-func TestGAP0674WalkMemoBounded(t *testing.T) {
-	const bound = 16 << 20
+// TestGAP0674NoWalkKeptPastItsCall is substrate-1:GAP-0674: no walk of a
+// recursive search outlives the record that read it, so the memory of the
+// walks is bounded by the calls being checked, not by a memo. 40 calls each
+// walk a distinct name of one tree whose walk finds 960 credentials files at
+// about 600-byte paths (some 0.6 MB a walk); once their facts are dropped,
+// the heap they leave stays under 4 MiB. At 02e880d943 the walk memo kept
+// them for a second, up to its 16 MiB bound.
+func TestGAP0674NoWalkKeptPastItsCall(t *testing.T) {
 	long := strings.Repeat("d", 120)
 	deep := strings.Join([]string{long + "1", long + "2", long + "3", long + "4"}, "/")
 	var files []string
@@ -324,36 +321,22 @@ func TestGAP0674WalkMemoBounded(t *testing.T) {
 			t.Skipf("no symbolic links here: %v", err)
 		}
 	}
-	stored := func() (size int64, stale int) {
-		now := time.Now()
-		credentialPathWalks.Lock()
-		defer credentialPathWalks.Unlock()
-		for key, walk := range credentialPathWalks.walks {
-			size += int64(len(key.dir))
-			for _, file := range walk.found {
-				size += int64(len(file))
-			}
-			if now.Sub(walk.at) >= credentialPathWalkReuse {
-				stale++
-			}
-		}
-		return size, stale
+	home := t.TempDir()
+	heap := func() uint64 {
+		runtime.GC()
+		runtime.GC()
+		var m runtime.MemStats
+		runtime.ReadMemStats(&m)
+		return m.HeapAlloc
 	}
-	before, _ := stored()
+	before := heap()
 	for i := 1; i <= 40; i++ {
-		Analyze(Input{Tool: "exec", Command: "grep -r KEY h" + strconv.Itoa(i), CWD: dir, ActiveHome: t.TempDir()})
-		size, _ := stored()
-		if i == 1 && size-before < 400_000 {
-			t.Fatalf("one walk stores %d bytes: the tree is too small to test the bound", size-before)
-		}
-		if size > bound {
-			t.Fatalf("after %d walks the memo stores %d bytes, over %d", i, size, bound)
+		facts := Analyze(Input{Tool: "exec", Command: "grep -r KEY h" + strconv.Itoa(i), CWD: dir, ActiveHome: home})
+		if named := len(g0671Named(facts)); i == 1 && named < 900 {
+			t.Fatalf("one walk names %d files: the tree is too small to test the bound", named)
 		}
 	}
-	time.Sleep(credentialPathWalkReuse + 100*time.Millisecond)
-	small := g0671Folder(t, "src/a.go")
-	Analyze(Input{Tool: "exec", Command: "grep -r KEY src", CWD: small, ActiveHome: t.TempDir()})
-	if _, stale := stored(); stale != 0 {
-		t.Fatalf("the memo keeps %d stale walks after a store", stale)
+	if after := heap(); after > before && after-before > 4<<20 {
+		t.Fatalf("40 checked calls left %d bytes of heap: their walks were kept", after-before)
 	}
 }

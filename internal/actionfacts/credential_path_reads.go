@@ -12,7 +12,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"time"
 	"unicode"
 
 	"github.com/defenseclaw/defenseclaw/internal/awkprog"
@@ -76,15 +75,6 @@ const (
 	maxCredentialPathWalkEntries = 1 << 16
 	maxCredentialPathWalkLookups = 1024
 	credentialPathWalkWorkers    = 4
-	// The analyses of one hook evaluation (the call, its twins and its
-	// result event) reuse a walk of the same folder made within
-	// credentialPathWalkReuse: one walk per call. A later call walks again.
-	credentialPathWalkReuse   = time.Second
-	maxCredentialPathWalkMemo = 2 * maxCredentialPathLookups
-	// The memo stored-size bound (credentialPathWalkSize,
-	// substrate-1:GAP-0674): four resolves of walks at the most one can
-	// store, maxCredentialPathWalkLookups files at a 4,096-byte path.
-	maxCredentialPathWalkMemoBytes = 4 * maxCredentialPathWalkLookups * 4096
 )
 
 // MaxCredentialPathCandidates is the candidate cap of the resolve
@@ -106,24 +96,27 @@ var defaultCredentialPathLimits = credentialPathLimits{
 // credentials file the call does not name exactly (the chain's file-unknown
 // marker). Only the secret-read chain uses it, never path policy.
 func (f Facts) CredentialPathReads() []PathFact {
-	if f.credentialPaths == nil {
+	record := f.credentialPaths.get()
+	if record == nil {
 		return nil
 	}
-	return slices.Clone(f.credentialPaths.reads)
+	return slices.Clone(record.reads)
 }
 
 // HasCredentialPathReads reports a read in the private record.
 func (f Facts) HasCredentialPathReads() bool {
-	return f.credentialPaths != nil && len(f.credentialPaths.reads) != 0
+	record := f.credentialPaths.get()
+	return record != nil && len(record.reads) != 0
 }
 
 // CredentialPathReadCaps is the caps the resolve hit: TRUNCATED, the one
 // bound rule.
 func (f Facts) CredentialPathReadCaps() bounded.CapSet {
-	if f.credentialPaths == nil {
+	record := f.credentialPaths.get()
+	if record == nil {
 		return bounded.CapSet{}
 	}
-	return f.credentialPaths.caps
+	return record.caps
 }
 
 // PlaceCredentialPathReads is facts with each relative read of the private
@@ -131,10 +124,11 @@ func (f Facts) CredentialPathReadCaps() bounded.CapSet {
 // lexical rule the gateway places ordinary reads with. It adds no read and
 // leaves the facts it was called on as they are.
 func (f Facts) PlaceCredentialPathReads(reported string) Facts {
-	if f.credentialPaths == nil || len(f.credentialPaths.reads) == 0 {
+	record := f.credentialPaths.get()
+	if record == nil || len(record.reads) == 0 {
 		return f
 	}
-	placed := &credentialPathRecord{reads: slices.Clone(f.credentialPaths.reads), caps: f.credentialPaths.caps}
+	placed := &credentialPathRecord{reads: slices.Clone(record.reads), caps: record.caps}
 	for i, candidate := range placed.reads {
 		value := candidate.Value
 		if candidate.Absolute || candidate.Resolved != "" || candidate.Flavor == PathFlavorWindows ||
@@ -144,7 +138,7 @@ func (f Facts) PlaceCredentialPathReads(reported string) Facts {
 		}
 		placed.reads[i].Resolved = path.Join(reported, value)
 	}
-	f.credentialPaths = placed
+	f.credentialPaths = &credentialPathResult{record: placed}
 	return f
 }
 
@@ -467,6 +461,52 @@ type credentialPathResolver struct {
 	rgConfig bool
 	seen     map[PathFact]bool
 	reads    []PathFact
+}
+
+// credentialPathResult is the private record of one parse, made by the
+// resolve the first time it is read (substrate-1:GAP-0709). The hook parses
+// one call about fifteen times (the call, its twins, its rule packs) and
+// reads the record of one of them, so the other parses no longer resolve,
+// and a recursive search walks its folders once per call, from the
+// filesystem as it is then: no walk is kept for a later resolve
+// (rel-1-0-10:GAP-1045, substrate-1:GAP-0674). Copies of the Facts share
+// it; it is safe for concurrent use.
+type credentialPathResult struct {
+	once    sync.Once
+	record  *credentialPathRecord
+	pending bool // the resolve has not run: the input below is its own
+	// The resolve's input, a copy of the parse's, dropped once resolved.
+	words    []credentialPathWord
+	cwd      string
+	home     string
+	commands []CommandFact
+	paths    []PathFact
+}
+
+// lazyCredentialPathReads is the private record of a parse, resolved when
+// it is first read; nil when the call has nothing to resolve.
+func lazyCredentialPathReads(words []credentialPathWord, cwd, home string, commands []CommandFact, paths []PathFact) *credentialPathResult {
+	if !credentialPathResolveNeeded(words, commands) {
+		return nil
+	}
+	return &credentialPathResult{
+		pending: true,
+		words:   cloneSlice(words), cwd: cwd, home: home,
+		commands: cloneCommands(commands), paths: cloneSlice(paths),
+	}
+}
+
+func (l *credentialPathResult) get() *credentialPathRecord {
+	if l == nil {
+		return nil
+	}
+	l.once.Do(func() {
+		if l.pending {
+			l.record = resolveCredentialPathReads(l.words, l.cwd, l.home, l.commands, l.paths)
+		}
+		l.pending, l.words, l.commands, l.paths = false, nil, nil, nil
+	})
+	return l.record
 }
 
 // resolveCredentialPathReads makes the private record of one call (nil when
@@ -1331,28 +1371,6 @@ func (f credentialSearchFilter) enters(name string) bool {
 	return true
 }
 
-// key is the filter's memo key part: "" for the zero filter.
-func (f credentialSearchFilter) key() string {
-	if len(f.names) == 0 && len(f.excludeDir) == 0 {
-		return ""
-	}
-	var b strings.Builder
-	b.WriteString("grep")
-	for _, name := range f.names {
-		if name.include {
-			b.WriteString("\x00i")
-		} else {
-			b.WriteString("\x00e")
-		}
-		b.WriteString(name.glob)
-	}
-	for _, dir := range f.excludeDir {
-		b.WriteString("\x00d")
-		b.WriteString(dir)
-	}
-	return b.String()
-}
-
 // credentialWalkFilter is what a recursive search's walk reads: rg's
 // filter (its hidden rule, globs and types), or, with no rg filter, grep
 // -r's --include, --exclude and --exclude-dir globs.
@@ -1382,15 +1400,6 @@ func (f credentialWalkFilter) enters(shown, name string) bool {
 // glob.
 func (f credentialWalkFilter) readsPath() bool {
 	return f.rg != nil && len(f.rg.globs) > 0
-}
-
-// key is the filter's memo key part (credentialPathWalkKey); shown is the
-// folder as rg names it.
-func (f credentialWalkFilter) key(shown string) string {
-	if f.rg != nil {
-		return f.rg.key + "\x00" + shown
-	}
-	return f.grep.key()
 }
 
 func credentialProgramSeparator(r rune) bool {
@@ -1595,7 +1604,7 @@ func (r *credentialPathResolver) searchFolder(id int64, folder string, filter cr
 	if strings.HasPrefix(shown, "~/") && r.home != "" {
 		shown = r.home + shown[1:]
 	}
-	walk := credentialPathWalkOf(filepath.Clean(dir), filepath.ToSlash(shown), filter, left)
+	walk := credentialPathWalk(filepath.Clean(dir), filepath.ToSlash(shown), filter, left)
 	r.walkUsed = r.walkUsed.plus(walk.used)
 	for _, file := range walk.found {
 		if r.stopped() {
@@ -1638,105 +1647,6 @@ type credentialPathWalkResult struct {
 	found []string
 	cut   bool
 	used  credentialPathWalkLimits
-	at    time.Time
-}
-
-// credentialPathWalkKey is a walk of dir with a budget: the analyses of one
-// call make the same walks with the same budgets left, in the same order.
-type credentialPathWalkKey struct {
-	dir    string
-	filter string // credentialWalkFilter.key: "" for a grep -r that reads every name
-	limits credentialPathWalkLimits
-}
-
-// credentialPathWalks holds the walks of the last credentialPathWalkReuse:
-// every analysis of one hook call walks a folder once, and a reused walk
-// charges the resolve what it read. A result is shared read-only. The memo
-// is bounded by its stored size as well as its count (substrate-1:GAP-0674):
-// a stale walk is dropped when it is looked up and on every store, and the
-// oldest walks go first when a store would pass maxCredentialPathWalkMemo
-// walks or maxCredentialPathWalkMemoBytes.
-var credentialPathWalks struct {
-	sync.Mutex
-	walks map[credentialPathWalkKey]credentialPathWalkResult
-	bytes int64 // the stored size of walks, credentialPathWalkSize summed
-}
-
-// credentialPathWalkSize is the stored size of one memo walk: its folder
-// and filter key, the paths it found and a fixed cost per walk and per path.
-func credentialPathWalkSize(key credentialPathWalkKey, walk credentialPathWalkResult) int64 {
-	size := int64(len(key.dir)+len(key.filter)) + 128
-	for _, file := range walk.found {
-		size += int64(len(file)) + 16
-	}
-	return size
-}
-
-func credentialPathWalkFresh(walk credentialPathWalkResult, now time.Time) bool {
-	return !now.Before(walk.at) && now.Sub(walk.at) < credentialPathWalkReuse
-}
-
-// credentialPathWalkDrop removes one memo walk; the memo lock is held.
-func credentialPathWalkDrop(key credentialPathWalkKey) {
-	if walk, ok := credentialPathWalks.walks[key]; ok {
-		credentialPathWalks.bytes -= credentialPathWalkSize(key, walk)
-		delete(credentialPathWalks.walks, key)
-	}
-}
-
-func credentialPathWalkOf(dir, shown string, filter credentialWalkFilter, limits credentialPathWalkLimits) credentialPathWalkResult {
-	key := credentialPathWalkKey{dir: dir, filter: filter.key(shown), limits: limits}
-	now := time.Now()
-	credentialPathWalks.Lock()
-	walk, ok := credentialPathWalks.walks[key]
-	if ok && !credentialPathWalkFresh(walk, now) {
-		credentialPathWalkDrop(key)
-		ok = false
-	}
-	credentialPathWalks.Unlock()
-	if ok {
-		return walk
-	}
-	walk = credentialPathWalk(dir, shown, filter, limits)
-	walk.at = now
-	credentialPathWalkStore(key, walk, time.Now())
-	return walk
-}
-
-// credentialPathWalkStore keeps a walk: the stale walks are dropped, then
-// the oldest until the walk fits in the count and the stored size. A walk
-// larger than the whole size bound is not kept.
-func credentialPathWalkStore(key credentialPathWalkKey, walk credentialPathWalkResult, now time.Time) {
-	size := credentialPathWalkSize(key, walk)
-	if size > maxCredentialPathWalkMemoBytes {
-		return
-	}
-	credentialPathWalks.Lock()
-	defer credentialPathWalks.Unlock()
-	if credentialPathWalks.walks == nil {
-		credentialPathWalks.walks = make(map[credentialPathWalkKey]credentialPathWalkResult)
-	}
-	credentialPathWalkDrop(key) // a walk of the same key stored meanwhile
-	for other, kept := range credentialPathWalks.walks {
-		if !credentialPathWalkFresh(kept, now) {
-			credentialPathWalkDrop(other)
-		}
-	}
-	for len(credentialPathWalks.walks) > 0 &&
-		(len(credentialPathWalks.walks) >= maxCredentialPathWalkMemo ||
-			credentialPathWalks.bytes+size > maxCredentialPathWalkMemoBytes) {
-		var oldest credentialPathWalkKey
-		var at time.Time
-		first := true
-		for other, kept := range credentialPathWalks.walks {
-			if first || kept.at.Before(at) {
-				oldest, at, first = other, kept.at, false
-			}
-		}
-		credentialPathWalkDrop(oldest)
-	}
-	credentialPathWalks.walks[key] = walk
-	credentialPathWalks.bytes += size
 }
 
 // credentialPathWalk walks dir breadth first and reads each folder once, a
