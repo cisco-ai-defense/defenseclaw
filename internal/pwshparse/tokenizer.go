@@ -157,6 +157,21 @@ func (t *tokenizer) startNestedScan(nested *Token) tokenizerState {
 	}
 	t.curIndex = 0
 	t.nestedAdj = nested.Start
+	if p := t.p; p != nil {
+		if p.nestedWork += len(nested.Value); p.nestedWork > p.nestedBudget {
+			if !p.Unsupported {
+				p.Unsupported = true
+				p.reportError(extent{nested.Start, nested.Start}, "ParseTooDeep")
+			}
+			t.script = nil
+			t.tokenStart = 0
+			t.skipped = nil
+			if t.wantTokens {
+				t.tokenList = nil
+			}
+			return ts
+		}
+	}
 	t.script = toUTF16(nested.Value)
 	t.tokenStart = 0
 	if nested.x != nil {

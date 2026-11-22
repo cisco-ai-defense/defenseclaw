@@ -69,9 +69,21 @@ type Parser struct {
 	ascii    bool
 	// Unsupported is set when the input used a construct the port does not parse (configuration, dynamic keywords) or nested deeper than the budget.
 	Unsupported bool
+	// nestedWork counts the characters handed to nested scans (the text of a $( ) or a nested string that is
+	// tokenized again); past nestedBudget the parse is Unsupported and nested scans see no text. Every level
+	// of "$("$(..." nesting rescans the text inside it, so an unbounded parse is quadratic in the input
+	// (a 100 KB nest took 3 s on the hook path; the legacy reader stops at a linear budget too).
+	nestedWork, nestedBudget int
 }
 
 const maxParseDepth = 16000
+
+// nestedWorkFactor and nestedWorkSlack size the nested-scan budget: nestedWorkFactor full rescans of the
+// input plus nestedWorkSlack characters, far above real scripts (a few levels over a few KiB).
+const (
+	nestedWorkFactor = 16
+	nestedWorkSlack  = 1 << 16
+)
 
 func (p *Parser) tooDeep() {
 	p.Unsupported = true
@@ -110,6 +122,7 @@ func parse(input string, wantTokens bool) *Result {
 	ps := &parseState{}
 	p := &ps.p
 	p.src = src
+	p.nestedBudget = nestedWorkFactor*len(src) + nestedWorkSlack
 	if isASCII(input) {
 		p.ascii, p.asciiSrc = true, input
 	}
