@@ -60,7 +60,6 @@ func TestDET111R3LiteralPeerHomeCredentialRemainsKnown(t *testing.T) {
 	t.Fatal("literal absolute passwd-home credential tail was not Known")
 }
 
-
 func TestDET111R3LocalhostTripleSlashKeyWriteRaises(t *testing.T) {
 	useEffectsRulesMode(t, "on")
 	req := shadowLiveRequest(`Set-Content -Path localhost:///C:/Users/alice/.ssh/authorized_keys -Value k`)
@@ -75,4 +74,18 @@ func TestDET111R3LocalhostTripleSlashKeyWriteRaises(t *testing.T) {
 		}
 	}
 	t.Fatalf("literal localhost drive-path key write did not reach a live protected-target finding: %+v", res)
+}
+
+func TestDET111R3BenignIcaclsDisplayDoesNotRaise(t *testing.T) {
+	useEffectsRulesMode(t, "on")
+	req := shadowLiveRequest(`icacls C:\Users\alice\.defenseclaw\hooks\.hookcfg`)
+	req.Connector = "codex"
+	req.Input.ActiveHome = `C:\Users\alice`
+	req.Input.CWD = `C:\Users\alice\project`
+	req.Input.DialectHint = actionfacts.DialectCMD
+	res := effectShadowRun(req, effectRulesOn, tierRestricted)[0]
+	if res.Tier != string(effectTierClean) || len(res.RuleIDs) != 0 {
+		t.Fatalf("display-only icacls raised the effects lane: tier=%s action=%s known=%v reach=%v rules=%v",
+			res.Tier, res.Action, res.Known, res.Reach, res.RuleIDs)
+	}
 }
