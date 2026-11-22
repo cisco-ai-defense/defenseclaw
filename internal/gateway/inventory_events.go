@@ -317,7 +317,8 @@ func emitEndpointInventory(
 			discoveredEntriesFromReport(*discoveryReport, inventory.SignalSkill, "skill"),
 			skillsComplete,
 		)
-		if cfg != nil && cfg.AIDiscovery.IncludeSkillManifests {
+		// A partial skill list cannot prune saved receipts or advance a manifest.
+		if skillsComplete && cfg != nil && cfg.AIDiscovery.IncludeSkillManifests {
 			publish.cycle.refreshManifestReceipts(ctx, emitter, skillEntries)
 			publish.cycle.attachSkillManifests(skillEntries)
 		}

@@ -12,7 +12,6 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -45,12 +44,9 @@ type Runtime struct {
 	feed     bool
 	interval time.Duration
 	epoch    string
-	writer   string      // the last fleet writer id (device), kept while no fleet is set
-	syncW    *syncWorker // the running sync loop (nil: none)
+	writer   string // the last fleet writer id (device), kept while no fleet is set
+	syncing  bool
 	kick     chan struct{}
-	// budgeted mirrors len(ids) > 0, so For with no routing.admin (the
-	// per-request default) stays lock-free while no budget ever ran.
-	budgeted atomic.Bool
 	pushMu   sync.Mutex // one push at a time: snapshot and send stay in order
 
 	callsMu   sync.Mutex
@@ -280,17 +276,7 @@ func (rt *Runtime) Add(callID string, keys []string, usd float64, known bool, at
 // For returns the admin evaluator of cfg, or nil when cfg has no
 // routing.admin rules or budgets (the engine then skips it).
 func (rt *Runtime) For(cfg *config.Config) engine.AdminEvaluator {
-	if rt == nil || cfg == nil {
-		return nil
-	}
-	if cfg.Routing.Admin == nil {
-		// routing.admin removed: stop the sync loop of the budgets it had.
-		if rt.budgeted.Load() {
-			rt.mu.Lock()
-			rt.last, rt.lastEv = cfg, nil
-			rt.setIDsLocked(nil)
-			rt.mu.Unlock()
-		}
+	if rt == nil || cfg == nil || cfg.Routing.Admin == nil {
 		return nil
 	}
 	rt.mu.Lock()
@@ -307,8 +293,7 @@ func (rt *Runtime) For(cfg *config.Config) engine.AdminEvaluator {
 	policy := Compile(a.Rules, a.Budgets, cfg.StandaloneEnterprise())
 	if policy == nil {
 		rt.mu.Lock()
-		rt.last, rt.lastEv = cfg, nil
-		rt.setIDsLocked(nil)
+		rt.last, rt.lastEv, rt.ids = cfg, nil, nil
 		rt.mu.Unlock()
 		return nil
 	}
@@ -326,27 +311,10 @@ func (rt *Runtime) For(cfg *config.Config) engine.AdminEvaluator {
 	if rt.feed {
 		ev.ledger = rt.ledger
 	}
-	rt.last, rt.lastEv = cfg, ev
-	rt.setIDsLocked(policy.BudgetIDs())
+	rt.last, rt.lastEv, rt.ids = cfg, ev, policy.BudgetIDs()
 	rt.mu.Unlock()
 	rt.startSync()
 	return ev
-}
-
-// syncWorker is one run of the sync loop; stop ends it after a last push.
-type syncWorker struct{ stop context.CancelFunc }
-
-// setIDsLocked installs the budget ids of the newest generation. No ids (a
-// reload without budgets or without routing.admin) stops the sync loop, so
-// no SQLite read, spend write or fleet request outlives the budgets
-// (rel-1-0-10:GAP-1716). rt.mu is held.
-func (rt *Runtime) setIDsLocked(ids []string) {
-	rt.ids = ids
-	rt.budgeted.Store(len(ids) > 0)
-	if len(ids) == 0 && rt.syncW != nil {
-		rt.syncW.stop()
-		rt.syncW = nil
-	}
 }
 
 // startSync runs the sync loop once budgets and a counter exist, and asks a
@@ -357,28 +325,21 @@ func (rt *Runtime) startSync() {
 	if rt.ledger == nil || rt.local == nil || rt.ctx == nil || len(rt.ids) == 0 {
 		return
 	}
-	if rt.syncW != nil {
+	if rt.syncing {
 		select {
 		case rt.kick <- struct{}{}:
 		default:
 		}
 		return
 	}
-	ctx, stop := context.WithCancel(rt.ctx)
-	w := &syncWorker{stop: stop}
-	rt.syncW = w
-	go rt.syncLoop(ctx, w)
+	rt.syncing = true
+	go rt.syncLoop(rt.ctx)
 }
 
-// syncLoop syncs until ctx ends (the gateway stops, or the budgets went),
-// then stores this process's spend one last time.
-func (rt *Runtime) syncLoop(ctx context.Context, w *syncWorker) {
+func (rt *Runtime) syncLoop(ctx context.Context) {
 	defer func() {
-		w.stop()
 		rt.mu.Lock()
-		if rt.syncW == w {
-			rt.syncW = nil
-		}
+		rt.syncing = false
 		rt.mu.Unlock()
 	}()
 	rt.SyncOnce(ctx)

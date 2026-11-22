@@ -409,7 +409,7 @@ func (cycle *managedInventoryPublishCycle) manifestEmissionContext(ctx context.C
 	return observabilityruntime.WithManagedManifestDigest(ctx, component.skillManifestHash, digest, component.skillManifestPart, component.skillManifestParts), true
 }
 
-// Receipt metadata is optional in schema v1, so old progress survives upgrades.
+// Receipt metadata is optional in the current publish-state schema.
 // Reject impossible/unbounded recovery metadata without discarding Sent/Parts.
 func sanitizeManifestReceipts(file *managedInventoryPublishFile) {
 	if len(file.ManifestReceipts) > maxManifestReceiptHashes {

@@ -43184,6 +43184,11 @@ function Wait-DefenseClawFreshGuardianReconcile {
         # not a wait that ran out: its coverage is what was refused.
         throw "LocalSystem guardian finished its first reconcile ($waited s after Setup started it), but its coverage was not accepted; $guardianLog; last_status=$lastStatus$guardianError"
     }
+    if ($finishedRead) {
+        # GAP-0601: the first reconcile finished and published, so this is
+        # not a wait that ran out: its coverage is what was refused.
+        throw "LocalSystem guardian finished its first reconcile ($waited s after Setup started it), but its coverage was not accepted; $guardianLog; last_status=$lastStatus"
+    }
     if ($extended -or $guardianProcessId -ne 0) {
         throw "LocalSystem guardian restarted but did not publish fresh required coverage within $([Math]::Max($TimeoutSeconds, $waited)) seconds; $guardianLog; last_status=$lastStatus$guardianError"
     }

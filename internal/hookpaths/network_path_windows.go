@@ -6,47 +6,47 @@
 package hookpaths
 
 import (
+	"errors"
 	"os"
-	"path/filepath"
-	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/fixturefs"
+	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 )
 
-// Keep Windows directory, junction, share, and MSYS path handling unchanged.
+// pathOpenDirectory is pathOpen on Windows: directory, junction, share and
+// MSYS path handling stay as pathOpen reads them (#1486).
 func pathOpenDirectory(name string) (*os.File, error) {
 	return pathOpen(name)
 }
 
-// networkShareRoot is the \\server\share volume of a UNC path, also spelled
-// with forward slashes or in the \\?\UNC\ and \\.\UNC\ forms, as the path
+// networkShareRoot is the \\server\share volume of a path on a network share,
+// in every spelling Windows opens one by (windowsShareRoot), as the path
 // spells it; "" for a drive path, a relative path and every other device
 // path (\\?\C:\..., \\.\pipe\...).
 func networkShareRoot(path string) string {
-	// VolumeName answers with backslashes and ends a \\?\UNC\ path at
-	// \\?\UNC, so only its length is used and the share is read here.
-	n := len(filepath.VolumeName(path))
-	if n < 3 || !windowsSlash(path[0]) || !windowsSlash(path[1]) {
-		return ""
-	}
-	if (path[2] == '?' || path[2] == '.') && (n == 3 || windowsSlash(path[3])) {
-		if len(path) <= 8 || !strings.EqualFold(path[4:7], "UNC") || !windowsSlash(path[7]) {
-			return ""
-		}
-		return path[:8+uncShareLength(path[8:])]
-	}
-	return path[:n]
+	root, _ := windowsShareRoot(path)
+	return root
 }
 
-// uncShareLength is the length of the server and share names that begin rest.
-func uncShareLength(rest string) int {
-	separators := 0
-	for i := 0; i < len(rest); i++ {
-		if windowsSlash(rest[i]) {
-			if separators++; separators == 2 {
-				return i
-			}
-		}
+// gatedPath is the share gate for a read network_path.go does not make
+// itself (a Windows API call on the path: file identity, link count, DACL):
+// ok is false when it must not be made, and otherwise read is the path to
+// hand it, held as readGated holds it until release.
+func gatedPath(name string) (read string, release func() bool, ok bool) {
+	gate := networkPathGate(name, true)
+	if gate.unanswered {
+		return "", nil, false
 	}
-	return len(rest)
+	if !gate.proved {
+		return gate.read, func() bool { return true }, true
+	}
+	still, err := pathidentity.HoldUnlinked(fixturefs.Map(gate.read))
+	switch {
+	case errors.Is(err, pathidentity.ErrLinked):
+		return "", nil, false
+	case err != nil:
+		// Nothing to hold (a missing file): the call fails as it would.
+		return gate.read, func() bool { return true }, true
+	}
+	return gate.read, still, true
 }
-
-func windowsSlash(c byte) bool { return c == '\\' || c == '/' }

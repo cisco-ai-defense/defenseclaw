@@ -9,18 +9,20 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"fmt"
-	"github.com/defenseclaw/defenseclaw/internal/config"
-	"github.com/defenseclaw/defenseclaw/internal/observability"
-	"github.com/defenseclaw/defenseclaw/internal/observability/pipeline"
-	observabilityruntime "github.com/defenseclaw/defenseclaw/internal/observability/runtime"
-	"github.com/defenseclaw/defenseclaw/internal/observability/runtimegraph"
-	legacyredaction "github.com/defenseclaw/defenseclaw/internal/redaction"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/inventory"
+	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/observability/destinations/managedaid"
+	"github.com/defenseclaw/defenseclaw/internal/observability/pipeline"
+	observabilityruntime "github.com/defenseclaw/defenseclaw/internal/observability/runtime"
+	"github.com/defenseclaw/defenseclaw/internal/observability/runtimegraph"
+	legacyredaction "github.com/defenseclaw/defenseclaw/internal/redaction"
 )
 
 type durableManifestStore struct {
@@ -158,6 +160,70 @@ func TestManifestRecoveryRepairsOnlyDurablyMissingPart(t *testing.T) {
 	}
 	if *reads != 0 {
 		t.Fatalf("complete restart/daily path performed %d body reads", *reads)
+	}
+}
+
+func TestManifestRecoveryPartialScanPreservesCompletedReceipts(t *testing.T) {
+	withManagedEnterprise(t, true)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("USERPROFILE", t.TempDir())
+	t.Setenv("PATH", t.TempDir())
+
+	state := managedPublishTestState(t)
+	now := time.Now().UTC()
+	alpha := manifestTextDigest("alpha manifest")
+	beta := manifestTextDigest("beta manifest")
+	store := &durableManifestStore{parts: map[int]string{1: alpha}, total: 1}
+	state.SetSkillManifestReceiptReader(store)
+	reads := 0
+	state.SetSkillManifestReader(func(string) ([]byte, bool) {
+		reads++
+		return nil, false
+	})
+	state.file.SkillManifests = map[string]managedSkillManifest{
+		alpha: {Sent: 1, Parts: 1}, beta: {Sent: 1, Parts: 1},
+	}
+	state.file.ManifestReceipts = map[string]managedManifestReceiptState{
+		alpha: {State: "complete", Parts: 1, Digests: map[int]string{1: alpha}},
+		beta:  {State: "complete", Parts: 1, Digests: map[int]string{1: beta}, CheckedAt: now},
+	}
+	seed := state.beginCycle("seed", now, false)
+	seed.recordPublished(endpointSkillInventorySource, "fixture", 2)
+	seed.commit()
+
+	cfg := &config.Config{
+		Claw:        config.ClawConfig{Mode: config.ClawMode("codex")},
+		AIDiscovery: config.AIDiscoveryConfig{IncludeSkillManifests: true},
+	}
+	registry := connector.NewDefaultRegistry()
+	emit := func(report inventory.AIDiscoveryReport, manifestHashes ...string) {
+		t.Helper()
+		for i, hash := range manifestHashes {
+			report.Signals[i].Evidence[0].Skill = &inventory.AISkillFacts{ManifestHash: hash}
+		}
+		if err := emitEndpointInventory(t.Context(), cfg, registry, &endpointInventoryCapture{}, false, &report, state); err != nil {
+			t.Fatal(err)
+		}
+	}
+	partial := managedGateReport("partial", "alpha")
+	partial.Summary.Result = aiDiscoveryResultPartial
+	partial.Summary.DetectorErrors = map[string]string{"skill_dir": "incomplete scan"}
+	emit(partial, alpha)
+	state.file = loadManagedInventoryPublishFile(state.path)
+	if state.file.ManifestReceipts[beta].State != "complete" || state.file.SkillManifests[beta].Sent != 1 {
+		t.Fatal("partial scan discarded the omitted manifest's durable progress")
+	}
+	if store.calls != 0 || reads != 0 {
+		t.Fatalf("partial scan made %d receipt requests and %d manifest reads", store.calls, reads)
+	}
+
+	emit(managedGateReport("complete", "alpha", "beta"), alpha, beta)
+	state.file = loadManagedInventoryPublishFile(state.path)
+	if store.calls != 1 || reads != 0 {
+		t.Fatalf("complete scan made %d receipt requests and %d manifest reads, want 1 and 0", store.calls, reads)
+	}
+	if state.file.ManifestReceipts[alpha].State != "complete" || state.file.ManifestReceipts[beta].State != "complete" {
+		t.Fatal("complete scan lost a completed receipt")
 	}
 }
 
