@@ -192,7 +192,7 @@ func TestDetectSkillsAttachesFactsOncePerFolder(t *testing.T) {
 	}
 	want := AISkillFacts{
 		ContentHash: mustHashSkill(t, filepath.Join(home, ".agents", "skills", "pdf")), ContentStatus: SkillContentOK,
-		Scope: SkillScopeUser, Location: "~/.agents/skills/pdf",
+		Scope: SkillScopeUser, Location: "~/.agents/skills/pdf", ManifestHash: skillManifestHash([]byte("---\nname: pdf\n---\n")),
 	}
 	if *facts[0] != want || *facts[1] != want {
 		t.Fatalf("facts = %+v / %+v, want %+v", *facts[0], *facts[1], want)
@@ -251,6 +251,26 @@ func TestDetectSkillsSyncedAndManagedFolders(t *testing.T) {
 	}
 }
 
+func TestSkillManifestIsReadBackByHash(t *testing.T) {
+	home := t.TempDir()
+	dir := filepath.Join(home, ".claude", "skills", "pdf")
+	body := "---\nname: pdf\n---\n" + strings.Repeat("x", maxSkillManifest) // longer than the author read
+	writeSkillFiles(t, dir, map[string]string{"skill.md": body})
+	svc := NewContinuousDiscoveryServiceWithOptions(AIDiscoveryOptions{
+		Enabled: true, Mode: "enhanced", DataDir: filepath.Join(home, "data"), HomeDir: home,
+	}, nil)
+	cleanupPreparedDiscoveryService(t, svc)
+
+	facts := svc.skillFacts(dir, false)
+	if got, ok := svc.SkillManifest(facts.ManifestHash); !ok || string(got) != body || facts.ManifestHash != skillManifestHash([]byte(body)) {
+		t.Fatalf("manifest %q: %v, %d bytes", facts.ManifestHash, ok, len(got))
+	}
+	writeSkillFiles(t, dir, map[string]string{"skill.md": "edited"})
+	if _, ok := svc.SkillManifest(facts.ManifestHash); ok {
+		t.Fatal("an edited SKILL.md was returned for the old hash")
+	}
+}
+
 func TestValidateSkillFactsRejectsForgedFields(t *testing.T) {
 	good := AISkillFacts{ContentHash: "sha256:" + strings.Repeat("a", 64), ContentStatus: SkillContentOK, Scope: SkillScopeUser, Location: "~/.claude/skills/x"}
 	if err := validateSkillFacts(good); err != nil {
@@ -259,6 +279,7 @@ func TestValidateSkillFactsRejectsForgedFields(t *testing.T) {
 	for name, mutate := range map[string]func(*AISkillFacts){
 		"keyed hash":    func(f *AISkillFacts) { f.ContentHash = "hmac-sha256:" + strings.Repeat("a", 64) },
 		"short hash":    func(f *AISkillFacts) { f.ContentHash = "sha256:abc" },
+		"manifest hash": func(f *AISkillFacts) { f.ManifestHash = "md5:abc" },
 		"hash, not ok":  func(f *AISkillFacts) { f.ContentStatus = SkillContentTooLarge },
 		"status":        func(f *AISkillFacts) { f.ContentStatus = "fine" },
 		"scope":         func(f *AISkillFacts) { f.Scope = "system" },
