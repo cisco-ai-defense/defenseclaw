@@ -60,6 +60,7 @@ func TestGAP0299CountedWorkPerCall(t *testing.T) {
 		"walks":   before.Since(workcount.MemoWalk),
 		"keys":    before.Since(workcount.WalkKey),
 		"lookups": before.Since(workcount.WordLookup),
+		"regexes": before.Since(workcount.RegexRun),
 	}
 	t.Logf("COUNTED %v verdict=%.160s", got, verdict)
 	if strings.Contains(verdict, `"action":"block"`) {
@@ -80,6 +81,9 @@ func TestGAP0299CountedWorkPerCall(t *testing.T) {
 	if got["lookups"] > gap0299MaxWordLookups {
 		t.Errorf("file lookups of resolved words in one call = %d, bound %d (one per distinct word)", got["lookups"], gap0299MaxWordLookups)
 	}
+	if got["regexes"] > gap0299MaxRegexRuns {
+		t.Errorf("rule regex runs over a large text in one call = %d, bound %d", got["regexes"], gap0299MaxRegexRuns)
+	}
 	if got["walks"] > 0 && got["keys"] > 2*got["walks"] {
 		t.Errorf("memo key builds = %d for %d memo walks, bound 2 per walk", got["keys"], got["walks"])
 	}
@@ -96,4 +100,5 @@ const (
 	// again).
 	gap0299MaxMemoWalks   = 25000 // 48,238 at a64bfdb931
 	gap0299MaxWordLookups = 25000
+	gap0299MaxRegexRuns   = 26 // 31 at a64bfdb931
 )

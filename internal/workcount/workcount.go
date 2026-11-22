@@ -29,6 +29,8 @@ const (
 	// WordLookup is a file system lookup (lstat or stat) made while
 	// resolving a word of a command as a write target.
 	WordLookup
+	// RegexRun is a rule regex run over a text of 64 KiB or more.
+	RegexRun
 	kinds
 )
 
