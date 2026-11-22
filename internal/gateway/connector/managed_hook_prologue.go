@@ -142,8 +142,9 @@ unset _dc_diag_dir _dc_diag_log _dc_diag_size
 
 // shellExitGuardTemplate is the fail-mode exit guard of the Claude Code, Codex
 // and Cursor shell hooks that are not Secure Client renders: the per-user
-// hooks, where it replaces the boot trap, and the standalone managed hooks,
-// right after DEFENSECLAW_HOME is fixed (GAP-1734). defenseclaw_harden_env
+// hooks, where it replaces the boot trap, and the standalone managed hooks:
+// right after DEFENSECLAW_HOME is fixed (GAP-1734), and for Codex from the
+// first line of the hook (GAP-1755). defenseclaw_harden_env
 // keeps _dc_hook_on_exit as the EXIT trap, so the guard holds to the end.
 //
 //   - Every deliberate exit goes through the exit function, which marks it.

@@ -124,12 +124,12 @@ func TestShellHookUnexpectedFailureAfterHardeningFollowsFailMode(t *testing.T) {
 						}
 						return
 					}
-					switch {
-					case connectorName == "cursor":
+					switch connectorName {
+					case "cursor":
 						if run.exitCode != 2 || !strings.Contains(run.stdout, `"permission":"deny"`) {
 							t.Fatalf("closed cursor exit=%d stdout=%q, want 2 and the deny object (stderr %q)", run.exitCode, run.stdout, run.stderr)
 						}
-					case connectorName == "codex":
+					case "codex":
 						// Codex reads a non-zero UserPromptSubmit status as a
 						// hook failure; the block is its deny object, per-user
 						// (GAP-0949) and standalone managed (GAP-1755).
@@ -204,8 +204,6 @@ func TestCodexStandaloneManagedHookBlocksEveryEventItCanBlockInCodexsShape(t *te
 		breaks func(t *testing.T, hooks string)
 		// payload replaces the event's input.
 		payload string
-		// args replaces the registered arguments.
-		args []string
 	}{
 		{name: "the hardening helper is missing", breaks: func(t *testing.T, hooks string) {
 			if err := os.Remove(filepath.Join(hooks, "_hardening.sh")); err != nil {
