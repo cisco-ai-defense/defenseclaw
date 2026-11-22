@@ -225,11 +225,17 @@ def test_ci_shards_slow_gateway_package_and_combines_go_coverage(tmp_path, capsy
     assert 'go test -c -o "$RUNNER_TEMP/gateway-test/gateway.test" ./internal/gateway' in step["run"]
     assert "-vet=off" not in step["run"]
     assert "GOMEMLIMIT" not in str(build)
+    # Compiled from the macOS checkout path (the tests read repository files
+    # from their runtime.Caller source paths); each part checks that path.
+    mac_workspace = 'mac_workspace="/Users/runner/work/${GITHUB_REPOSITORY#*/}/${GITHUB_REPOSITORY#*/}"'
+    assert mac_workspace in step["run"]
+    assert 'sudo mount --bind "$GITHUB_WORKSPACE" "$mac_workspace"' in step["run"]
     gateway_parts = jobs["darwin-gateway"]
     assert gateway_parts["name"] == "Unix Standalone Lifecycle (macos-latest darwin gateway ${{ matrix.part }} of 6)"
     assert "darwin-gateway-test-binary" in gateway_parts["needs"]
     assert "needs.darwin-gateway-test-binary.result == 'success'" in gateway_parts["if"]
     run = next(s["run"] for s in gateway_parts["steps"] if "test2json" in s.get("run", ""))
+    assert mac_workspace in run and 'if [ "$GITHUB_WORKSPACE" != "$mac_workspace" ]; then' in run
     assert '(cd "$pkg" && go tool test2json -t -p "github.com/defenseclaw/defenseclaw/$pkg"' in run
     assert '"$RUNNER_TEMP/gateway.test" -test.paniconexit0 -test.v=test2json -test.count=1' in run
     assert '-test.timeout=10m -test.run="$pattern"' in run
