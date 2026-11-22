@@ -2711,13 +2711,13 @@ func (h *actionStateHome) active() (string, bool) {
 }
 
 func actionProtectedStatePath(value string, home *actionStateHome) bool {
-	resolved, ok := home.memo.resolveWriteTarget(value)
-	if !ok {
-		return false
-	}
-	activeHome, ok := home.active()
-	if !ok {
-		return false
+	resolved, ok, unanswered := home.memo.resolveWriteTargetWhy(value)
+	activeHome, homeOK := home.active()
+	if !ok || !homeOK {
+		// A target whose own local read did not answer is not proved free
+		// of the state, as a state read that did not answer (below): it is
+		// refused (rel-1-0-10:GAP-1804).
+		return !ok && unanswered && homeOK
 	}
 	relative, err := filepath.Rel(activeHome, resolved)
 	if err == nil && actionProtectedStateRelative(filepath.ToSlash(relative)) {
@@ -2746,7 +2746,10 @@ func actionProtectedStatePath(value string, home *actionStateHome) bool {
 		return false
 	}
 	info, err := pathStat(resolved)
-	if err != nil || !info.Mode().IsRegular() || linkCount(resolved, info) < 2 {
+	if err != nil {
+		return localReadUnanswered(resolved, err)
+	}
+	if !info.Mode().IsRegular() || linkCount(resolved, info) < 2 {
 		return false
 	}
 	// A target the index could not rule out (a read of the state did not
@@ -2768,16 +2771,23 @@ func actionProtectedStatePath(value string, home *actionStateHome) bool {
 // hold the file, so the target is not proved free of the state and the
 // caller refuses it, as an unfinished walk refuses a patch target
 // (ResolveActiveStateIdentity). Before, that miss read as no state file, an
-// allow (rel-1-0-10:GAP-1789). A target outside the entry bound is not
-// mapped and complete stays true: the bound never refuses ordinary shell
-// work.
+// allow (rel-1-0-10:GAP-1789). complete is false too for a target whose own
+// read did not answer while the gate places it on no network share
+// (localReadUnanswered): its link count is unknown, so it is not proved a
+// single link (rel-1-0-10:GAP-1804). A target on a share keeps complete
+// true: it cannot be a hard link to the local state. A target outside the
+// entry bound is not mapped and complete stays true: the bound never
+// refuses ordinary shell work.
 func ResolveActiveStateHardlinkTarget(value, home string) (state string, same, complete bool) {
-	resolved, ok := ResolveWriteTarget(value)
+	resolved, ok, unanswered := resolveWriteTargetWhy(value)
 	if !ok {
-		return "", false, true
+		return "", false, !unanswered
 	}
 	info, err := pathStat(resolved)
-	if err != nil || !info.Mode().IsRegular() || linkCount(resolved, info) < 2 {
+	if err != nil {
+		return "", false, !localReadUnanswered(resolved, err)
+	}
+	if !info.Mode().IsRegular() || linkCount(resolved, info) < 2 {
 		return "", false, true
 	}
 	activeRoot, ok := ResolveWriteTarget(filepath.Join(home, ".defenseclaw"))

@@ -90,7 +90,7 @@ func TestStateWalksCountEntriesNotTime(t *testing.T) {
 	if _, same, _ := ResolveActiveStateHardlinkTarget(alias, home); !same {
 		t.Fatal("the hard link to the last cache entry was not found on an idle box")
 	}
-	idle := builtActiveStateIndex(t)
+	idle := gap1789IndexNames(t)
 	if n := len(idle); n == 0 || idle[n-1] != "cache/entry-late" {
 		t.Fatalf("the idle index does not end at the late entry: %d files", n)
 	}
@@ -102,27 +102,9 @@ func TestStateWalksCountEntriesNotTime(t *testing.T) {
 		if !same {
 			t.Fatalf("run %d: the hard link to a state file inside the entry bound was not found on a loaded box (walk took %s)", run, took)
 		}
-		if files := builtActiveStateIndex(t); !slices.Equal(files, idle) {
+		if files := gap1789IndexNames(t); !slices.Equal(files, idle) {
 			t.Fatalf("run %d: the index built on a loaded box holds %d files, the idle-box index %d (walk took %s)", run, len(files), len(idle), took)
 		}
 		t.Logf("run %d: starved walk took %s", run, took)
 	}
-}
-
-// builtActiveStateIndex is the relative names of the one active state index
-// the last walk built, in walk order.
-func builtActiveStateIndex(t *testing.T) []string {
-	t.Helper()
-	activeStateIndex.Lock()
-	defer activeStateIndex.Unlock()
-	if len(activeStateIndex.byRoot) != 1 {
-		t.Fatalf("%d active state indexes built, want 1", len(activeStateIndex.byRoot))
-	}
-	var names []string
-	for _, index := range activeStateIndex.byRoot {
-		for _, file := range index.files {
-			names = append(names, file.relative)
-		}
-	}
-	return names
 }

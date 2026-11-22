@@ -4354,7 +4354,15 @@ func provenStateCandidateMatches(
 				physical, _ = hookpaths.WalkFactTarget(request.ResolvedWriteTargets, candidate.Resolved)
 			}
 		} else {
-			physical, _ = hookpaths.ResolveWriteTarget(driveFSPath(request, gitBashOperandSpelling(candidate)))
+			spelled := driveFSPath(request, gitBashOperandSpelling(candidate))
+			physical, _ = hookpaths.ResolveWriteTarget(spelled)
+			if physical == "" {
+				// A target whose own local read did not answer is not
+				// proved free of the state (rel-1-0-10:GAP-1804).
+				if _, same, complete := hookpaths.ResolveActiveStateHardlinkTarget(spelled, projected.ActiveHome); same || !complete {
+					return true
+				}
+			}
 			physical = driveViewPath(request, physical)
 		}
 	}
@@ -5553,6 +5561,13 @@ func linkedActiveStateWrite(
 			}
 		} else {
 			physical, ok = hookpaths.ResolveWriteTarget(target)
+			if !ok {
+				// A target whose own local read did not answer is not
+				// proved free of the state (rel-1-0-10:GAP-1804).
+				if _, same, complete := hookpaths.ResolveActiveStateHardlinkTarget(target, projected.ActiveHome); same || !complete {
+					return true
+				}
+			}
 		}
 		if !ok || physical == target {
 			continue
