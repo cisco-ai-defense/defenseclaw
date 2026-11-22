@@ -13,6 +13,7 @@
 package enterpriseunix
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -83,6 +84,7 @@ const (
 	codeOpenShell             = "openshell_failed"
 	codeOpenShellPrerequisite = "openshell_prerequisite_missing"
 	codeOpenShellPinRaised    = "openshell_pin_raised"
+	codeOpenShellDowngrade    = "openshell_downgrade"
 	codeLauncherConflict      = "openshell_launcher_conflict"
 	codeSandboxGroups         = "sandbox_user_groups"
 	codeSandboxPending        = "sandbox_pending_restart"
@@ -138,6 +140,10 @@ type openshellSettings struct {
 	// required_for, which the docker_group_members advisory then covers
 	// (GAP-0554).
 	RequiredFor bool
+	// AllowDowngrade is enterprise.openshell.allow_downgrade: a setup pin
+	// below a release an account ran is applied, with a warning per
+	// account, instead of refused (rel-1-0-10:GAP-1781).
+	AllowDowngrade bool
 }
 
 // openshellSettingsOf applies the defaults: prerequisite mode, the macOS
@@ -168,6 +174,7 @@ func openshellSettingsOf(goos string, cfg *config.Config) openshellSettings {
 	s.E2fsprogsDir = o.E2fsprogsDir
 	s.TelemetryAllowed = cfg.OpenShell.Admin.AllowUpstreamTelemetry != nil && *cfg.OpenShell.Admin.AllowUpstreamTelemetry
 	s.RequiredFor = requiredForConfigured(cfg)
+	s.AllowDowngrade = o.AllowDowngrade
 	return s
 }
 
@@ -448,11 +455,16 @@ type desiredLink struct {
 
 // openshellPlan is what one apply installs for the sandbox subsystem.
 type openshellPlan struct {
-	settings openshellSettings
-	rendered openshell.RenderedGateway
-	files    []desiredFile
-	dirs     []desiredDir
-	links    []desiredLink
+	// downgraded are the accounts that already ran a release above the
+	// setup pin, which enterprise.openshell.allow_downgrade let through:
+	// ensure warns for each (rel-1-0-10:GAP-1781). The switch then removes
+	// their install record, so only this plan still knows them.
+	downgraded []accountAbovePin
+	settings   openshellSettings
+	rendered   openshell.RenderedGateway
+	files      []desiredFile
+	dirs       []desiredDir
+	links      []desiredLink
 	// staleLinks are links the lifecycle owns that the plan no longer wants.
 	staleLinks []string
 	// digest is the digest of the rendered configuration.
@@ -470,7 +482,7 @@ type openshellPlan struct {
 // and links when openshell.enabled is set, and the links to remove when it
 // is not. Files the previous deployment wrote that are no longer wanted are
 // removed by the plan's stale list.
-func (l *lifecycle) planOpenShell(p *plan) error {
+func (l *lifecycle) planOpenShell(ctx context.Context, p *plan) error {
 	env := l.env
 	if p.payload != nil {
 		env.agentDigest = p.payload.Digests[binGateway]
@@ -503,6 +515,16 @@ func (l *lifecycle) planOpenShell(p *plan) error {
 	if settings.Install == config.EnterpriseOpenShellInstallSetup && openshell.TarballPins[settings.Version] == nil {
 		return fmt.Errorf("enterprise.openshell.version %q is not a release this DefenseClaw build can install in setup mode; set it to one of: %s",
 			settings.Version, strings.Join(openshell.PinnedTarballReleases(), ", "))
+	}
+	// OpenShell has no down migration: a pin below a release an account
+	// already ran leaves that account's gateway unable to open its
+	// database (rel-1-0-10:GAP-1781). describeOpenShell warns for each one
+	// that allow_downgrade lets through (op.downgraded).
+	if settings.Install == config.EnterpriseOpenShellInstallSetup {
+		op.downgraded = env.accountsAboveSetupPin(ctx, settings.Version)
+		if len(op.downgraded) > 0 && !settings.AllowDowngrade {
+			return errors.New(setupPinDowngradeRefusal(settings.Version, op.downgraded))
+		}
 	}
 	root := rootOwner()
 	op.dirs = append(op.dirs, desiredDir{Path: env.openshellDir(), Mode: 0o755, Owner: root})

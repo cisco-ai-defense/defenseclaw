@@ -177,6 +177,13 @@ func (l *lifecycle) describeOpenShell(ctx context.Context) {
 		for _, line := range env.userInstalls(ctx) {
 			row("user-installed", line+" (user-installed, unmanaged)")
 		}
+		// Only enterprise.openshell.allow_downgrade lets ensure apply such
+		// a pin (planOpenShell).
+		if l.osPlan != nil {
+			for _, a := range l.osPlan.downgraded {
+				r.AddWarning(codeOpenShellDowngrade, setupPinDowngradeWarning(settings.Version, a))
+			}
+		}
 	}
 	for _, entry := range state.sortedPending() {
 		l.describePending(ctx, entry)
