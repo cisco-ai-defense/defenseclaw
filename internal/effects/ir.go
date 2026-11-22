@@ -16,6 +16,9 @@ type Script struct {
 	// Funcs names the functions the text defines; a later call of one of these
 	// names is shadowed (review R2).
 	Funcs []string
+	// Unread is the text a frontend could not read (from the line of a syntax
+	// error on), with an invalid_syntax unknown; "" when the text was read.
+	Unread string
 }
 
 // Op is the control operator that joins a statement to the next.

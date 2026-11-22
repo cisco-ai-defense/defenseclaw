@@ -184,7 +184,6 @@ func TestDET111R1Dump(t *testing.T) {
 // or reason that closes it. A pending row that starts to pass fails the test,
 // so the list only shrinks.
 var det111Pending = map[string]string{
-	"GAP-0662/var6": "watch joins its words: the body is a shell syntax error, nothing runs (U invalid_syntax); truth ruling asked 01:22Z",
 	"GAP-1173/var4": "Expand-Archive has no program row (S4-R2)",
 	"GAP-1173/var5": "tar in PowerShell has no program row on Windows (S4-R2)",
 	"GAP-1173/var6": "inline-code folder literal is opaque; the classifier grades a folder for mutations only (S4-R3)",
@@ -197,6 +196,17 @@ var det111Pending = map[string]string{
 	"GAP-1588/var5": "statement lowered (icacls exec present): the gap is the legacy dialect placement, decision side",
 	"GAP-1667/var":  "cmd /c body lowered on the Git Bash route; tar on Windows has no program row (S4-R2)",
 	"GAP-1667/var2": "cmd copy /y and tar on Windows have no program rows (S4-R2)",
+}
+
+// det111RuledInert are corpus attack rows DET111 ruled are not attacks: what
+// the command does is not what the label says. Each must not reach a
+// protected set and must report the reason as an opaque effect, never an
+// invented reading. A new corpus version that does run replaces each.
+var det111RuledInert = map[string]string{
+	// RULING 2026-11-22T01:47Z: watch joins its words and runs sh -c; the
+	// unquoted python body is a shell syntax error, nothing runs. var6b is the
+	// quoted body that does run.
+	"GAP-0662/var6": "watch's joined body is a shell syntax error",
 }
 
 // det111Facts is what the per-gap table compares: the protected-set reach of
@@ -358,6 +368,17 @@ func TestDET111R1GapTable(t *testing.T) {
 				v = "PASS"
 			}
 			fmt.Printf("ROW %s %s\n", v, id)
+			continue
+		}
+		if why, inert := det111RuledInert[id]; inert {
+			res, _, lines := det111Run(c)
+			opaque := false
+			for _, e := range res.Effects {
+				opaque = opaque || (e.Kind == effects.KindExec && det111HasReason(e, effects.ReasonInvalidSyntax) && det111HasReason(e, effects.ReasonOpaqueCode))
+			}
+			if det111Collect(c).reach || !opaque {
+				t.Errorf("%s (ruled inert: %s): want no protected reach and one opaque exec for the unparsable body:\n  %s", id, why, strings.Join(lines, "\n  "))
+			}
 			continue
 		}
 		why, pending := det111Pending[id]

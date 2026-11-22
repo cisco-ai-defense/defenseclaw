@@ -5,6 +5,8 @@
 package effects
 
 import (
+	"errors"
+	"regexp"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/shellparse"
@@ -21,14 +23,135 @@ func parsePOSIX(command string, o Options) *Script {
 	s := &Script{Dialect: DialectPOSIX}
 	file, ok := shellparse.Parse(command)
 	if !ok || file == nil {
+		if text, closed := comsubHeredocClose(command); closed {
+			file, ok = shellparse.Parse(text)
+		}
+	}
+	if !ok || file == nil {
+		// The text from the line of the error on is not read (it may be a
+		// construct bash takes and the parser does not): the unknown stays, and
+		// the complete lines before it are lowered, because bash has run them.
 		s.Unknowns = append(s.Unknowns, UnknownNode{Reason: ReasonInvalidSyntax})
-		return s
+		file, s.Unread = linesBeforeSyntaxError(command)
+		if file == nil {
+			return s
+		}
 	}
 	w := &posixWalker{out: s}
 	for _, st := range file.Stmts {
 		w.stmt(st, false, false)
 	}
 	return s
+}
+
+// linesBeforeSyntaxError is what a non-interactive bash runs of a text with a
+// syntax error: it reads and runs one complete command at a time, so every
+// command on the lines before the line of the error has run, and nothing from
+// that line on runs (bash -c 'echo A\nfi' prints A; 'echo A; fi' prints
+// nothing). It returns the parse of those lines and the unread rest, or nil and
+// the whole text. A command still open at the cut (an if whose fi is on the
+// line of the error) did not run either: the cut moves to the line it starts
+// on, a few times at most.
+func linesBeforeSyntaxError(command string) (*syntax.File, string) {
+	if shellparse.TooDeep(command) || len(command) > shellparse.MaxCommandBytes {
+		return nil, command
+	}
+	text := command
+	for range 4 {
+		cut := lineStart(text, syntaxErrorLine(text))
+		if cut <= 0 {
+			return nil, command
+		}
+		text = text[:cut]
+		if file, ok := shellparse.Parse(text); ok && file != nil {
+			return file, command[cut:]
+		}
+	}
+	return nil, command
+}
+
+// syntaxErrorLine is the 1-based line of the first bash syntax error in text,
+// 0 when the parser gives no position.
+func syntaxErrorLine(text string) (line int) {
+	defer func() {
+		if recover() != nil {
+			line = 0
+		}
+	}()
+	_, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(text), "")
+	var pe syntax.ParseError
+	var le syntax.LangError
+	switch {
+	case errors.As(err, &pe):
+		return int(pe.Pos.Line())
+	case errors.As(err, &le):
+		return int(le.Pos.Line())
+	}
+	return 0
+}
+
+// lineStart is the byte offset where the 1-based line n of text starts; 0 for
+// line 1 or an unknown line.
+func lineStart(text string, n int) int {
+	off := 0
+	for i := 1; i < n; i++ {
+		j := strings.IndexByte(text[off:], '\n')
+		if j < 0 {
+			return 0
+		}
+		off += j + 1
+	}
+	return off
+}
+
+// heredocOpener matches a here-document operator and its delimiter word.
+var heredocOpener = regexp.MustCompile(`<<-?[ \t]*(?:'([^'\n]+)'|"([^"\n]+)"|\\?([A-Za-z0-9_.:+-]+))`)
+
+// comsubHeredocClose is bash's reading of a here-document inside a command
+// substitution: a line that starts with the delimiter and goes on to the
+// substitution's closing ) or ` ends the here-document there (bash warns and
+// runs it: x=$(cat <<EOF / hi / EOF) sets x to hi; the parser rejects it). It
+// returns the text with a newline between the delimiter and the rest of such a
+// line. Offsets after a split shift by one byte per split.
+func comsubHeredocClose(command string) (string, bool) {
+	if !strings.Contains(command, "<<") || (!strings.Contains(command, "$(") && !strings.Contains(command, "`")) {
+		return "", false
+	}
+	delims := map[string]bool{}
+	for _, m := range heredocOpener.FindAllStringSubmatchIndex(command, -1) {
+		if m[0] > 0 && command[m[0]-1] == '<' {
+			continue // a here-string (<<<), not a here-document
+		}
+		for g := 1; g <= 3; g++ {
+			if m[2*g] >= 0 {
+				delims[command[m[2*g]:m[2*g+1]]] = true
+			}
+		}
+	}
+	if len(delims) == 0 {
+		return "", false
+	}
+	lines := strings.SplitAfter(command, "\n")
+	changed := false
+	for i := 1; i < len(lines); i++ {
+		ln := lines[i]
+		body := strings.TrimLeft(ln, "\t")
+		for d := range delims {
+			if !strings.HasPrefix(body, d) {
+				continue
+			}
+			rest := body[len(d):]
+			if r := strings.TrimLeft(rest, " \t"); r != "" && (r[0] == ')' || r[0] == '`') {
+				lines[i] = ln[:len(ln)-len(rest)] + "\n" + rest
+				changed = true
+				break
+			}
+		}
+	}
+	if !changed {
+		return "", false
+	}
+	return strings.Join(lines, ""), true
 }
 
 type posixWalker struct {
@@ -518,10 +641,14 @@ func (w *posixWalker) redirs(st *syntax.Stmt, c *Cmd) {
 		// A here-string's text is the word after <<<; it is the body of that
 		// redirect (round 8 R: a shell fed `<<< "$(..)"` must not look empty).
 		if r.Op == syntax.WordHdoc && r.Word != nil {
-			red.Body, red.BodyExpands = heredocBody(r.Word)
+			red.Body, red.BodyExpands = heredocBody(r.Word, bodyHereString)
 		}
 		if r.Hdoc != nil {
-			red.Body, red.BodyExpands = heredocBody(r.Hdoc)
+			mode := bodyHeredocExpanding
+			if quotedDelimiter(r.Word) {
+				mode = bodyHeredocLiteral
+			}
+			red.Body, red.BodyExpands = heredocBody(r.Hdoc, mode)
 			// A command substitution in an expanding heredoc body runs (review D
 			// PX-3: C40/C41/V22). An unquoted-delimiter heredoc with $( ) / `` is
 			// walked; a quoted-delimiter body has no CmdSubst node, so nothing is
@@ -806,7 +933,64 @@ func span(n syntax.Node) [2]int {
 	return [2]int{int(n.Pos().Offset()), int(n.End().Offset())}
 }
 
-func heredocBody(w *syntax.Word) (string, bool) {
+// bodyMode is how the shell reads the text of a here-string or here-document.
+type bodyMode uint8
+
+const (
+	bodyHereString       bodyMode = iota // <<< WORD: quote removal of the word
+	bodyHeredocExpanding                 // <<E: \$ \` \\ and \newline are escapes
+	bodyHeredocLiteral                   // <<'E': the body as written
+)
+
+// quotedDelimiter reports a here-document delimiter with any quoting ('E',
+// "E", \E, E”): its body is literal.
+func quotedDelimiter(w *syntax.Word) bool {
+	if w == nil {
+		return false
+	}
+	for _, part := range w.Parts {
+		switch p := part.(type) {
+		case *syntax.SglQuoted, *syntax.DblQuoted:
+			return true
+		case *syntax.Lit:
+			if strings.Contains(p.Value, `\`) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// heredocUnescape is the backslash rule of an expanding here-document body:
+// \$, \`, \\ lose the backslash, \newline joins the lines, any other
+// backslash stays.
+func heredocUnescape(s string) string {
+	if !strings.Contains(s, `\`) {
+		return s
+	}
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\\' && i+1 < len(s) {
+			switch s[i+1] {
+			case '$', '`', '\\':
+				i++
+				b.WriteByte(s[i])
+				continue
+			case '\n':
+				i++
+				continue
+			}
+		}
+		b.WriteByte(s[i])
+	}
+	return b.String()
+}
+
+// heredocBody is the text a here-string or here-document feeds, read the way
+// the shell reads it (mode); the parser keeps every backslash of the source,
+// so a body read raw is not what the shell runs (bash <<E / rm -rf \\ ...,
+// bash <<< rm\ -rf\ ...). expands is true when a part is not static.
+func heredocBody(w *syntax.Word, mode bodyMode) (string, bool) {
 	if w == nil {
 		return "", false
 	}
@@ -815,7 +999,14 @@ func heredocBody(w *syntax.Word) (string, bool) {
 	for _, part := range w.Parts {
 		switch p := part.(type) {
 		case *syntax.Lit:
-			b.WriteString(p.Value)
+			switch mode {
+			case bodyHereString:
+				b.WriteString(unescapePOSIX(p.Value, false))
+			case bodyHeredocExpanding:
+				b.WriteString(heredocUnescape(p.Value))
+			default:
+				b.WriteString(p.Value)
+			}
 		case *syntax.SglQuoted:
 			if p.Dollar {
 				v, ok := decodeANSIC(p.Value)
@@ -831,7 +1022,11 @@ func heredocBody(w *syntax.Word) (string, bool) {
 			// "plain text" is static; anything with an expansion inside is not.
 			for _, q := range p.Parts {
 				if l, ok := q.(*syntax.Lit); ok {
-					b.WriteString(l.Value)
+					if mode == bodyHereString {
+						b.WriteString(unescapePOSIX(l.Value, true))
+					} else {
+						b.WriteString(l.Value)
+					}
 				} else {
 					expands = true
 				}

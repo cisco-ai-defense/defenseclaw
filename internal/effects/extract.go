@@ -3683,6 +3683,24 @@ func (w *walker) unwrapCodeScoped(code string, static bool, dialect Dialect, dep
 	default:
 		sub = parsePOSIX(code, w.o)
 	}
+	if hasUnknown(sub, ReasonInvalidSyntax) {
+		// A body the shell cannot parse runs nothing from the error on (watch's
+		// joined words, GAP-0662/var6 ruling), but the walk does not know what
+		// the program makes of it: one opaque exec carries the unread text
+		// (R-CODE), never an invented reading. The lines before the error are
+		// lowered as usual (parsePOSIX).
+		unread := code
+		if sub.Unread != "" {
+			unread = sub.Unread
+		}
+		e := Effect{Kind: KindExec, Cond: cond, TargetState: TargetStateUnknown, RoleState: RoleStateUnknown,
+			Target: Target{Type: TargetProcess, Link: LinkNotChecked}, Origin: origin,
+			Data: &Data{Kind: DataCode, Bytes: len(unread), Text: cap8k(unread)}}
+		e.Origin.Depth = depth + 1
+		e.addReason(ReasonInvalidSyntax, ScopeTarget)
+		e.addReason(ReasonOpaqueCode, ScopeTarget)
+		w.emit(e)
+	}
 	// Nested code has a concrete dialect, so place its leading-/ paths by it: a
 	// POSIX body under cmd/PowerShell (bash -c '... /etc/x') is virtual-rooted
 	// (review 6 #1).
@@ -5699,4 +5717,14 @@ func segTail(segs []WordSeg) string {
 		b.WriteString(s.Lit)
 	}
 	return b.String()
+}
+
+// hasUnknown reports an unknown node of the given reason in a parsed script.
+func hasUnknown(s *Script, r ReasonCode) bool {
+	for _, u := range s.Unknowns {
+		if u.Reason == r {
+			return true
+		}
+	}
+	return false
 }
