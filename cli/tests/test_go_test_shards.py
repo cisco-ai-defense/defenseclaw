@@ -808,3 +808,20 @@ def test_windows_gateway_jobs_plan_inside_their_job_budget() -> None:
         ]
         assert max(jobs) <= 480, (package, [round(seconds) for seconds in jobs])
         assert sum(jobs) / shard_count <= 420, (package, round(sum(jobs) / shard_count))
+
+
+def test_test_timing_files_have_no_duplicate_keys() -> None:
+    # json.loads keeps the last of two equal keys, so a duplicate made by a merge
+    # silently replaces a recorded time.
+    root = Path(__file__).resolve().parents[2]
+    files = sorted((root / "scripts/test-timings").glob("*.json"))
+    assert files
+
+    def reject_duplicates(pairs):
+        keys = [key for key, _ in pairs]
+        duplicates = sorted({key for key in keys if keys.count(key) > 1})
+        assert not duplicates, duplicates
+        return dict(pairs)
+
+    for path in files:
+        json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=reject_duplicates)

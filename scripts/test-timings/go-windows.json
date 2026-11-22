@@ -516,7 +516,6 @@
    "TestGAP1277PathArrays": 13.4,
    "TestGAP1278FileInfoReadsAndRebinds": 13.1,
    "TestGAP1301UnsureReceiverReplace": 25.7,
-   "TestGAP1307QuietOpenRunReachesClient": 274.4,
    "TestGAP1315SameFileRebinds": 5.6,
    "TestGAP1316WindowsReadingTwinAnswersAreUnchanged": 73.0,
    "TestGAP1320MaskedReleaseSendsNoRawRunStart": 30.4,
