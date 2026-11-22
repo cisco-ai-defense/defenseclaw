@@ -451,7 +451,9 @@ func classifyEffects(result effects.Result, facts []*semanticpb.EffectFact, flav
 		if kind == string(effects.KindLink) {
 			if i := int(f.GetIndex()) - 1; effectFactIsLinkTarget(result, f) {
 				c.linkTo = c.linkTo || effectLinkAliasUsed(result, i)
-			} else {
+			} else if len(known) > 0 {
+				// Only a link known to be put at a member: an unplaced link
+				// end (the destination may be a folder) touches by reach.
 				c.linkAt = true
 			}
 		}
