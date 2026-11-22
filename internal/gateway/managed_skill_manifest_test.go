@@ -87,6 +87,38 @@ func TestSkillManifestSentOncePerFileUntilPublished(t *testing.T) {
 	}
 }
 
+func TestSkillManifestNotReadPastTheBudget(t *testing.T) {
+	state := managedPublishTestState(t)
+	files := map[string][]byte{"b2": []byte(strings.Repeat("y\n", 100<<10))}
+	var skills []endpointInventoryComponent
+	for i := range 8 {
+		hash := fmt.Sprintf("a%d", i)
+		files[hash] = []byte(strings.Repeat("x\n", 125<<10))
+		skills = append(skills, manifestSkill(hash, hash))
+	}
+	skills = append(skills, manifestSkill("b", "b2"))
+	for i := range skills {
+		skills[i].skillManifestSize = int64(len(files[skills[i].skillManifestHash]))
+	}
+	reads := map[string]int{}
+	state.SetSkillManifestReader(func(hash string) ([]byte, bool) {
+		reads[hash]++
+		data, ok := files[hash]
+		return data, ok
+	})
+	at := time.Date(2026, 11, 15, 9, 0, 0, 0, time.UTC)
+	// Eight 250 KiB files leave 48 KiB of the budget: b2 (200 KiB) is not read.
+	got := manifestCycle(t, state, at, true, skills...)
+	if len(got) != 8 || reads["b2"] != 0 {
+		t.Fatalf("first cycle sent %d, b2 read %d times", len(got), reads["b2"])
+	}
+	// The next cycle starts with b2.
+	got = manifestCycle(t, state, at.Add(time.Hour), true, skills...)
+	if len(got) != 1 || got["b"].skillManifest != string(files["b2"]) || reads["b2"] != 1 {
+		t.Fatalf("second cycle sent %d, b2 read %d times", len(got), reads["b2"])
+	}
+}
+
 func TestSkillManifestLargeFilesGoInPartsWithinTheBudget(t *testing.T) {
 	state := managedPublishTestState(t)
 	big := strings.Repeat(strings.Repeat("é", 1000)+"\n", 140) // two parts
