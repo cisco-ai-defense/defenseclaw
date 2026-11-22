@@ -25,7 +25,9 @@ import (
 // this computer's managed deployment ran. Setup adds the release its prior
 // deployment record names at every install, upgrade and repair
 // (Update-DefenseClawReleaseHistory), so the first upgrade from 1.0.10 or
-// older seeds it with the release it replaces. Only an administrator or
+// older seeds it with the release it replaces. Only the standalone deployment
+// record names its release, so only the standalone profile has the history
+// and reads it (WindowsProtectedTargetFromOtherRelease). Only an administrator or
 // SYSTEM can write it. A target's hook-contract lock cannot stand in for it:
 // the lock is in the account's own DefenseClaw folder, which the account owns
 // and can write (GAP-1537, GAP-0644).

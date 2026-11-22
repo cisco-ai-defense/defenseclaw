@@ -110,12 +110,20 @@ func windowsProtectedTargetMachineRegistration(opts InstallOptions, requireClose
 // Client upgrade with a signed-out enrolled account failed the same way.
 //
 // The lock is in the account's own DefenseClaw folder, which the account
-// owns and can write, so the release it names counts only when the
-// administrator-only machine release history proves this computer ran it
-// (windowsMachineRanRelease). Otherwise an account that edited
-// defenseclaw_version to an older release turned its own tampering into a
-// sign-in wait (GAP-1537, GAP-0644). A release the history does not name, and
-// any error reading the history, is not another release.
+// owns and can write. The guardian counts its release only for a target this
+// release has not yet protected (internal/cli
+// enterpriseHookTargetReleaseNotProtectedHere, GAP-1762): an account this
+// release already protected that edited defenseclaw_version back to the
+// release it replaced turned its own tampering into a sign-in wait. On the
+// standalone profile the release also has to be one the administrator-only
+// machine release history proves this computer ran (windowsMachineRanRelease,
+// GAP-1537, GAP-0644): the Hermes earlier-matrix, prior-render and open-mode
+// waits there depend on which release it was. A release the history does not
+// name, and any error reading the history, is not another release. Secure
+// Client deployment records keep their historical field set and name no
+// release, so Setup records no history there; its one wait needs only that
+// the lock is another release's, and an account forging one earlier release
+// for another gains nothing.
 func WindowsProtectedTargetFromOtherRelease(opts InstallOptions) (string, bool, error) {
 	lock, err := windowsProtectedTargetLock(opts)
 	if err != nil {
@@ -124,6 +132,9 @@ func WindowsProtectedTargetFromOtherRelease(opts InstallOptions) (string, bool, 
 	written := strings.TrimSpace(lock.DefenseClawVersion)
 	if written == "" || written == strings.TrimSpace(version.Current().BinaryVersion) {
 		return "", false, nil
+	}
+	if !windowsEnterpriseStandaloneProcess() {
+		return written, true, nil
 	}
 	ran, err := windowsMachineRanRelease(written)
 	if err != nil || !ran {

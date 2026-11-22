@@ -33077,9 +33077,12 @@ function Update-DefenseClawReleaseHistory {
         record names to the administrator-only machine release history,
         <StateRoot>\install\release_history.json. A signed-out target's
         hook-contract lock is in the account's own DefenseClaw folder, which
-        the account owns and can write, so the guardian honours the release a
-        lock names (the other-release and Hermes earlier-matrix sign-in waits)
-        only when this history names it. The first upgrade from 1.0.10 or
+        the account owns and can write, so the standalone guardian honours the
+        release a lock names (the other-release and Hermes earlier-matrix
+        sign-in waits) only when this history names it, and every guardian
+        only for a target its own release has not protected yet (GAP-1762).
+        Secure Client deployment records name no release, so it writes
+        nothing there. The first upgrade from 1.0.10 or
         older seeds it with the release it replaces. Every entry is a release
         this computer ran, so a run that rolls back leaves only true entries.
         A history whose access list is not the canonical administrator-only

@@ -818,10 +818,13 @@ var (
 	enterpriseHookReconcileInstaller        = enterprisehooks.Install
 	enterpriseHookReconcileSessionAvailable = enterpriseHookTargetSessionAvailable
 	// enterpriseHookReconcileTargetRelease names the other DefenseClaw
-	// release whose hook-contract lock a target still carries, only when the
+	// release whose hook-contract lock a target still carries, only for a
+	// target this release has not yet protected (the account can write its
+	// lock, GAP-1762) and, on the standalone profile, only when the
 	// administrator-only machine release history proves this computer ran it
-	// (the account can write its lock, GAP-1537, GAP-0644). Tests replace it.
-	enterpriseHookReconcileTargetRelease = enterprisehooks.WindowsProtectedTargetFromOtherRelease
+	// (GAP-1537, GAP-0644): enterpriseHookTargetReleaseNotProtectedHere.
+	// Tests replace it.
+	enterpriseHookReconcileTargetRelease = enterpriseHookTargetReleaseNotProtectedHere
 	// enterpriseHookReconcileTargetRetireRender names this release when a
 	// target's lock is this release's render of a hook-image retire (an
 	// earlier image of this install recorded for it, GAP-1096). Only the
@@ -1130,8 +1133,9 @@ func enterpriseHookRepairAfterVerifyFailure(
 				// the account is guarded, only not fail-closed, until its
 				// next connect (GAP-2463). The account can write its Hermes
 				// config and its lock, so its matrix counts only when the
-				// release the machine release history proved this computer
-				// ran registered no fail_closed (GAP-1537).
+				// lock's release, proven by the machine release history and
+				// for a target this release has not protected yet, registered
+				// no fail_closed (GAP-1537, GAP-1762).
 				if connector.HermesReleaseRegisteredWithoutFailClosed(written) {
 					if earlier, matrixErr := enterpriseHookReconcileTargetEarlierMatrix(opts); matrixErr == nil && earlier {
 						return enterprisehooks.InstallResult{}, false, fmt.Errorf(
@@ -5655,6 +5659,12 @@ func writeEnterpriseHookGuardianState(
 		return fmt.Errorf("set hook guardian activation ownership: %w", err)
 	}
 	if err := enterpriseHookAuthorizationFileTrustCheck(activationPath); err != nil {
+		return err
+	}
+	// The targets this release protected bind the other-release sign-in
+	// waits to the target (GAP-1762). A failed write publishes again on the
+	// next pass: the process has not published a complete generation yet.
+	if err := recordEnterpriseHookReleaseProtection(authorizationDir, rows); err != nil {
 		return err
 	}
 	enterpriseHookGuardianPublishedByProcess.Store(true)

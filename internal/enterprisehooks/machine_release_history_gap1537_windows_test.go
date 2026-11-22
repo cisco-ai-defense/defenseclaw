@@ -26,15 +26,27 @@ import (
 // that edited it in place to an older release (owner and access list
 // unchanged) turned its own tampering into "pending". The release a lock
 // names now counts only when the administrator-only machine release history
-// beside the deployment record names it. An upgrade from 1.0.3, whose
+// beside the deployment record names it, on the standalone profile, whose
+// deployment record names its release. An upgrade from 1.0.3, whose
 // signed-out Hermes accounts still wait, has 1.0.3 in it. Fails on
 // d36e4f852b: the edited lock read as another release.
+//
+// GAP-1762: Secure Client deployment records name no release, so Setup keeps
+// no history there, and f29b6f6617 failed every Secure Client other-release
+// wait, a legit upgrade with a signed-out account included. On Secure Client
+// the lock's release counts without a history; the guardian binds it to the
+// target instead (internal/cli TestGAP1762OtherReleaseWaitIsBoundToTheTarget:
+// no wait for a target this release already protected, on both profiles).
+// Fails on f29b6f6617: the Secure Client lock read as no other release.
 func TestGAP1537AccountEditedLockReleaseNeedsTheMachineReleaseHistory(t *testing.T) {
 	// The account folders get their owner with the setup privilege and the
 	// history file an Administrators owner, which only an elevated token can
 	// set.
 	requireGAP633Elevated(t)
 	gap45AllowMutation(t)
+	previousStandalone := windowsEnterpriseStandaloneProcess
+	t.Cleanup(func() { windowsEnterpriseStandaloneProcess = previousStandalone })
+	windowsEnterpriseStandaloneProcess = func() bool { return true }
 	sid := currentWindowsTestSID(t)
 	home := newWindowsTargetOwnedTestHome(t, sid)
 	dataDir := filepath.Join(home, ".defenseclaw")
@@ -119,6 +131,13 @@ func TestGAP1537AccountEditedLockReleaseNeedsTheMachineReleaseHistory(t *testing
 	check("an upgrade from 1.0.3 with the account still signed out", "1.0.3", true, false)
 	writeHistory(adminOnly, "v1.0.3")
 	check("a recorded release with a leading v", "1.0.3", true, false)
+
+	// Secure Client: no history; the lock's release is another release.
+	windowsEnterpriseStandaloneProcess = func() bool { return false }
+	_ = os.Remove(historyPath)
+	check("GAP-1762: a Secure Client upgrade with no machine release history", "1.0.3", true, false)
+	writeHistory(adminOnly, "1.0.10")
+	check("GAP-1762: a Secure Client upgrade ignores the history", "1.0.3", true, false)
 }
 
 // gap1537SetLockRelease sets every defenseclaw_version in a decoded lock and
