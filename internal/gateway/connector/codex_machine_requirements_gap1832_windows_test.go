@@ -44,6 +44,7 @@ func TestGAP1832UnlockedAdministratorRequirementsAreNotManagedArtifacts(t *testi
 			"",
 		}, "\n"),
 		"empty file": "",
+		"administrator policy outside hooks names DefenseClaw": adminComments + "[rules]\ndeny = [\x27defenseclaw uninstall\x27]\n",
 	}
 	for name, body := range inactive {
 		t.Run("inactive: "+name, func(t *testing.T) {

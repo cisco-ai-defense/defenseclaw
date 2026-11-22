@@ -964,7 +964,7 @@ func ResolveWindowsCodexManagedRuntimeRegistry(
 		// directory, or a file that does not parse) still fails closed:
 		// DefenseClaw tables without the lock are a tampered or
 		// half-removed install.
-		owned, err := windowsCodexUnlockedRequirementsMayBeManaged(requirementsPath, hookExecutable)
+		owned, err := windowsCodexUnlockedRequirementsMayBeManaged(requirementsPath)
 		if err != nil {
 			return result, err
 		}
@@ -985,20 +985,24 @@ func ResolveWindowsCodexManagedRuntimeRegistry(
 }
 
 // windowsCodexUnlockedRequirementsMayBeManaged reads requirementsPath, found
-// without the machine policy writer lock, through the trusted reader the
-// locked path uses, and reports whether it may hold DefenseClaw content
-// (windowsCodexRequirementsMayHoldDefenseClaw).
-func windowsCodexUnlockedRequirementsMayBeManaged(requirementsPath, hookExecutable string) (bool, error) {
-	requirements, err := readWindowsCodexMachineFile(
+// without the machine policy writer lock, and reports whether it may hold
+// DefenseClaw content (windowsCodexRequirementsMayHoldDefenseClaw). The read
+// takes the trust checks of the locked path but never repairs: the file is
+// not known to be DefenseClaw's, so its descriptor is the administrator's
+// (a drifted file is still refused on standalone, as Setup refuses it). A
+// file removed since it was seen reads as empty.
+func windowsCodexUnlockedRequirementsMayBeManaged(requirementsPath string) (bool, error) {
+	requirements, err := readWindowsCodexMachineFileRepairable(
 		requirementsPath,
 		windowsCodexMachineRequirementsLimit,
+		true,
 		false,
 		"Codex machine requirements",
 	)
 	if err != nil {
 		return false, err
 	}
-	return windowsCodexRequirementsMayHoldDefenseClaw(requirements.data, hookExecutable), nil
+	return windowsCodexRequirementsMayHoldDefenseClaw(requirements.data), nil
 }
 
 // windowsCodexTransactionCounterRead reads the writer lock's transaction
@@ -2269,6 +2273,19 @@ func readWindowsCodexMachineFile(
 	allowMissing bool,
 	label string,
 ) (windowsCodexStableFile, error) {
+	return readWindowsCodexMachineFileRepairable(path, limit, allowMissing, true, label)
+}
+
+// readWindowsCodexMachineFileRepairable is readWindowsCodexMachineFile with
+// the permission repair of a drifted leaf (ensureWindowsCodexMachineFileTrust)
+// allowed only when repairable is set.
+func readWindowsCodexMachineFileRepairable(
+	path string,
+	limit int,
+	allowMissing bool,
+	repairable bool,
+	label string,
+) (windowsCodexStableFile, error) {
 	result := windowsCodexStableFile{}
 	info, err := pathidentity.LstatPinned(path)
 	if errors.Is(err, os.ErrNotExist) && allowMissing {
@@ -2283,7 +2300,7 @@ func readWindowsCodexMachineFile(
 	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Size() > int64(limit) {
 		return result, fmt.Errorf("%s is not a bounded regular file", label)
 	}
-	if err := ensureWindowsCodexMachineFileTrust(path, label, true); err != nil {
+	if err := ensureWindowsCodexMachineFileTrust(path, label, repairable); err != nil {
 		return result, err
 	}
 	handle, err := openWindowsCodexNoFollow(path, windows.GENERIC_READ, false)

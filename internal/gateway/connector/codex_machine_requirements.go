@@ -1015,42 +1015,35 @@ func windowsCodexRequirementsContainExactManagedHook(
 // windowsCodexRequirementsMayHoldDefenseClaw reports whether a Codex
 // requirements document may hold content a DefenseClaw release wrote, read
 // broadly so that only a plainly administrator-authored file reports false
-// (GAP-1832): a document that does not parse; a hooks.windows_managed_dir or
-// hooks.state key; a managed group of any release for hookBinary
-// (windowsCodexOwnedHookGroup); or any key or string value, or the decoded
-// script of a PowerShell -EncodedCommand in one, that names DefenseClaw or
-// its hook image. Comments and the shared isolation keys
-// (allow_managed_hooks_only, features.hooks) are not DefenseClaw's alone and
-// do not count.
-func windowsCodexRequirementsMayHoldDefenseClaw(raw []byte, hookBinary string) bool {
+// (GAP-1832): a document that does not parse, or a hooks table with a
+// windows_managed_dir or state key, or any key or string under hooks that
+// names DefenseClaw, in plain text or in a base64 PowerShell
+// -EncodedCommand script it carries. Every command any release renders
+// (bound cmd-direct, the encoded PowerShell bridge, the unbound and
+// call-operator forms, Secure Client) names defenseclaw-hook.exe or
+// defenseclaw-hook-guard.exe there. Comments, the shared isolation keys
+// (allow_managed_hooks_only, features.hooks) and the administrator's own
+// policy outside hooks are not DefenseClaw's and do not count.
+func windowsCodexRequirementsMayHoldDefenseClaw(raw []byte) bool {
 	cfg, err := parseWindowsCodexRequirements(raw)
 	if err != nil {
 		return true
 	}
-	if hooks, ok := cfg["hooks"].(map[string]interface{}); ok {
-		if _, ok := hooks["windows_managed_dir"]; ok {
-			return true
-		}
-		if _, ok := hooks["state"]; ok {
-			return true
-		}
-		if strings.TrimSpace(hookBinary) != "" {
-			for event, value := range hooks {
-				groups, _ := value.([]interface{})
-				for _, group := range groups {
-					if windowsCodexOwnedHookGroup(group, event, hookBinary) {
-						return true
-					}
-				}
-			}
-		}
+	hooks, ok := cfg["hooks"].(map[string]interface{})
+	if !ok {
+		return false
 	}
-	return windowsCodexValueNamesDefenseClaw(cfg)
+	if _, ok := hooks["windows_managed_dir"]; ok {
+		return true
+	}
+	if _, ok := hooks["state"]; ok {
+		return true
+	}
+	return windowsCodexValueNamesDefenseClaw(hooks)
 }
 
 // windowsCodexValueNamesDefenseClaw walks a parsed TOML value and reports a
-// key or string that names DefenseClaw or its hook image
-// (windowsCodexTextNamesDefenseClaw).
+// key or string that names DefenseClaw (windowsCodexTextNamesDefenseClaw).
 func windowsCodexValueNamesDefenseClaw(value interface{}) bool {
 	switch typed := value.(type) {
 	case map[string]interface{}:
@@ -1077,30 +1070,17 @@ func windowsCodexValueNamesDefenseClaw(value interface{}) bool {
 	return false
 }
 
-// windowsCodexTextNamesDefenseClaw reports text that names DefenseClaw or
-// its hook image, case-insensitively, in plain text or in the decoded
-// script of a PowerShell -EncodedCommand it carries.
+// windowsCodexTextNamesDefenseClaw reports text that names DefenseClaw,
+// case-insensitively, in plain text or in the decoded script of any of its
+// whitespace-separated words that is a base64 PowerShell -EncodedCommand
+// argument (any spelling or abbreviation of the parameter).
 func windowsCodexTextNamesDefenseClaw(text string) bool {
-	texts := []string{text}
-	lower := strings.ToLower(text)
-	for offset := 0; ; {
-		index := strings.Index(lower[offset:], "-encodedcommand")
-		if index < 0 {
-			break
-		}
-		offset += index + len("-encodedcommand")
-		fields := strings.Fields(text[offset:])
-		if len(fields) == 0 {
-			break
-		}
-		if script, ok := powershellDecodedCommand(strings.Trim(fields[0], "\"\x27")); ok {
-			texts = append(texts, script)
-		}
+	if strings.Contains(strings.ToLower(text), "defenseclaw") {
+		return true
 	}
-	for _, candidate := range texts {
-		candidate = strings.ToLower(candidate)
-		if strings.Contains(candidate, "defenseclaw") ||
-			strings.Contains(candidate, strings.ToLower(winpath.EnterpriseHookImageName)) {
+	for _, field := range strings.Fields(text) {
+		script, ok := powershellDecodedCommand(strings.Trim(field, "\"\x27"))
+		if ok && strings.Contains(strings.ToLower(script), "defenseclaw") {
 			return true
 		}
 	}
