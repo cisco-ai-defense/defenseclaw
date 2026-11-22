@@ -1159,9 +1159,9 @@ A `custom-providers.json` marked `_derived_from` is rendered from this section o
 | `substrate.default_sandbox_class` | `gvisor` | `gvisor` or `microvm`. |
 | `substrate.idle_suspend_after` | `30m` | Suspends an actor with no activity and low CPU; `0s` turns it off. Never with a pending ask. |
 | `substrate.launcher.key_replay` | `ask` | Keys typed while a launcher's terminal link is down (Preview): `ask`, `on` or `off`. `off` turns replay off for everyone; `--key-replay` can only tighten it. |
-| `substrate.launcher.upload_scan.secret_action` | `replace` | A file whose text holds a credential (Preview): `replace` uploads it with placeholders in place of the values, `hold_back` keeps the whole file on the computer. |
+| `substrate.launcher.upload_scan.secret_action` | `replace` | A file whose text holds a credential (Preview): `replace` uploads it with placeholders in place of the values, when every credential in it can be replaced; `hold_back` keeps the whole file on the computer. |
 | `substrate.launcher.upload_scan.placeholder_form` | `token` | `token` (`DC_SECRET_1`) or `env` (`${DC_SECRET_1}`) (Preview). |
-| `substrate.launcher.upload_scan.max_file_bytes` | `8388608` (8 MiB) | Largest file the upload's secret scan reads; bigger files go up unscanned and are named (Preview). |
+| `substrate.launcher.upload_scan.max_file_bytes` | `8388608` (8 MiB) | Largest file the upload's secret scan reads; bigger files go up unscanned and are named, as are files that look binary or could not be read (Preview). |
 | `substrate.launcher.upload_scan.time_budget` | `120s` | Time budget of the upload's secret scan; files it did not reach go up unscanned and are named (Preview). |
 | `substrate.workspace_max_bytes` | `1073741824` (1 GiB) | Workspace upload cap. The launcher displays the limit before it creates an actor and refuses oversized copies with the largest directories and an `--exclude` hint. |
 | `substrate.files.push`, `substrate.files.sync` | `true`, `true` | Sending more files into a running agent with `substrate push` and `substrate sync --watch` (Preview). `false` makes the gateway refuse those uploads; the first copy of a run is not affected. Sync needs both. This is a policy for the DefenseClaw client, not a security boundary. |
