@@ -322,7 +322,17 @@ class PushLabelsFailsLoudly(unittest.TestCase):
 class CorpusFilesAreNeverRewritten(unittest.TestCase):
     def run_cmd(self, e: Env):
         return e.run(
-            "run", "--bin", "/nonexistent/s7bench", "--policy-dir", e.root, "--corpora", e.cfg, "--out", e.root / "out"
+            "run",
+            "--bin",
+            "/nonexistent/s7bench",
+            "--policy-dir",
+            e.root,
+            "--corpora",
+            e.cfg,
+            "--out",
+            e.root / "out",
+            "--min-free-gb",
+            "1",
         )
 
     def register(self, e: Env, version: str = "v1"):
