@@ -104,6 +104,15 @@ type EffectShadowResult struct {
 	// 5.3); RoleHeld marks an R-ROLE unknown that was counted, not raised.
 	Reach    []string `json:"reach,omitempty"`
 	RoleHeld bool     `json:"role_held,omitempty"`
+	// LinkHeld marks a member reached only through a followed link: counted,
+	// not raised (effectProtectedSets).
+	LinkHeld bool `json:"link_held,omitempty"`
+	// Known marks a verdict with a Known protected mutation: a known
+	// mutating effect on a known member, by a listed command (the restricted
+	// tier) or not. Only a Known verdict raises the live answer; a Maybe one
+	// (a reach reason only) and a known read are shadow records
+	// (effectShadowFindings).
+	Known bool `json:"known,omitempty"`
 	// CostUS is the wall-clock cost of the run in microseconds; Effects is the
 	// number of effects the extractor produced.
 	CostUS  int64 `json:"cost_us,omitempty"`
@@ -140,9 +149,17 @@ func mutatingEffectKind(kind string) bool {
 }
 
 // effectCall builds the pure-extractor call and options from a trusted action
-// input. ok is false when there is nothing executable to analyze.
-func effectCall(connector string, in actionfacts.Input) (effects.Call, effects.Options, bool) {
+// input. ok is false when there is nothing executable to analyze. windows is
+// a call a Windows host runs (effectWindowsCall): its paths are Windows
+// paths in every dialect, so Git Bash (hint POSIX) keeps the POSIX grammar
+// with Windows path rules, and a shell call the hook placed in no dialect
+// (a Codex shell) is not read as POSIX: the extractor infers PowerShell or
+// cmd from its text, except Claude Code's Bash tool, which runs Git Bash.
+func effectCall(connector string, in actionfacts.Input, windows bool) (effects.Call, effects.Options, bool) {
 	flavor := effects.FlavorPOSIX
+	if windows {
+		flavor = effects.FlavorWindows
+	}
 	dialect := effects.DialectNone
 	switch in.DialectHint {
 	case actionfacts.DialectPowerShell:
@@ -151,6 +168,10 @@ func effectCall(connector string, in actionfacts.Input) (effects.Call, effects.O
 		flavor, dialect = effects.FlavorWindows, effects.DialectCMD
 	case actionfacts.DialectPOSIX:
 		dialect = effects.DialectPOSIX
+	default:
+		if windows && connector == "claudecode" && strings.EqualFold(in.Tool, "Bash") {
+			dialect = effects.DialectPOSIX
+		}
 	}
 	opts := effects.Options{Flavor: flavor, Dialect: dialect, Home: in.ActiveHome, CWD: in.CWD,
 		BSDUserland: effectBSDUserland(effectHostGOOS, flavor)}
@@ -171,6 +192,17 @@ func effectCall(connector string, in actionfacts.Input) (effects.Call, effects.O
 	default:
 		return effects.Call{}, opts, false
 	}
+}
+
+// effectWindowsCall reports a call judged as a Windows host runs it: a
+// Windows hook placed it (its shell dialect selection ran), or its working
+// folder or home is a drive-absolute or UNC path. The readers already read
+// such a call with Windows rules; before this the lane read a Codex shell on
+// a Windows host (no dialect hint) and Git Bash as POSIX paths, and the
+// POSIX lexer ate the backslashes of C:\Users\...
+func effectWindowsCall(request trustedActionRequest) bool {
+	return request.windowsShellDialect || request.windowsDialectReadings ||
+		windowsShapedPath(request.Input.CWD) || windowsShapedPath(request.Input.ActiveHome)
 }
 
 // effectPatchTool names the connectors' patch tools (apply_patch for Codex,
@@ -344,6 +376,12 @@ type effectClass struct {
 	// roleHeld: an unknown target of a known write or send (R-ROLE) that
 	// does not raise (effectReachRoleRaises is off), counted only.
 	roleHeld bool
+	// linkHeld: a target in a protected set only through a link the
+	// resolver followed, counted, not raised (effectProtectedSets).
+	linkHeld bool
+	// known: some effect is a known mutation of a known member (no reach
+	// reason), whatever else the call reached.
+	known bool
 }
 
 // classifyEffects applies the owner's three answers (2026-11-13): a known
@@ -360,11 +398,14 @@ func classifyEffects(result effects.Result, facts []*semanticpb.EffectFact, flav
 		if t.GetType() != "path" {
 			continue
 		}
-		known, maybe := protectedSetsByState(t)
+		kind := f.GetKind()
+		known, maybe, linkHeld := effectProtectedSets(t, kind)
+		if linkHeld {
+			c.linkHeld = true
+		}
 		if len(known) == 0 && len(maybe) == 0 {
 			continue
 		}
-		kind := f.GetKind()
 		mutating := mutatingEffectKind(kind)
 		unknownEffect := f.GetTargetState() != "known" || f.GetRoleState() != "known" || kind == string(effects.KindOpaque)
 		// Relevance: a mutation touching a protected set; a credential read; or
@@ -393,6 +434,12 @@ func classifyEffects(result effects.Result, facts []*semanticpb.EffectFact, flav
 		touchSets = append(touchSets, append(append([]string(nil), known...), maybe...)...)
 		if r != "" {
 			c.reach = append(c.reach, r)
+		} else if mutating {
+			// A known read of a credential is the credential readers' class
+			// and keeps their 1.0.10 tier (own credentials alert, GAP-0888):
+			// the lane raises a mutation, it does not move a read to
+			// another tier (that is decide's table).
+			c.known = true
 		}
 		if c.program == "" && c.kind == "" {
 			c.program, c.kind = f.GetOrigin().GetProgram(), kind
@@ -418,7 +465,11 @@ func classifyEffects(result effects.Result, facts []*semanticpb.EffectFact, flav
 				continue
 			}
 			c.restricted = true
-			if m.GetSet() == effectrules.SetSSHAuthorizedKeys || m.GetSet() == effectrules.SetSelfProtection {
+			// The authorized-keys ruling blocks in every pack. A state write
+			// keeps the 1.0.10 tier of tamper.detector_state_write (alert in
+			// the default packs, block in strict): the lane raises, it does
+			// not move a class to another tier (that is decide's table).
+			if m.GetSet() == effectrules.SetSSHAuthorizedKeys {
 				c.restrictedRuling = true
 			}
 		}
@@ -444,7 +495,8 @@ func factReach(f *semanticpb.EffectFact, known []string, unknownEffect bool, env
 	}
 	t := f.GetTarget()
 	for _, m := range t.GetProtected() {
-		if m.GetState() != semantic.ProtectedUnknown {
+		if m.GetState() != semantic.ProtectedUnknown || m.GetReason() == "link" ||
+			f.GetKind() == string(effects.KindRead) && m.GetReason() == "unresolved" {
 			continue
 		}
 		switch m.GetReason() {
@@ -556,24 +608,35 @@ func dedupeStrings(in []string) []string {
 	return out
 }
 
-// protectedSetsByState splits a target's protected matches into the sets it is
-// known to be in and the sets it may be in.
-func protectedSetsByState(t *semanticpb.EffectTarget) (known, maybe []string) {
+// effectProtectedSets splits a target's protected matches into the sets it
+// is known to be in and the sets it may be in, leaving out what the lane does
+// not raise on. A member reached only through a link the resolver followed
+// (basis link) is held: whether the program writes through the link or
+// replaces it (sed -i without --follow-symlinks, install, a write after a cd
+// the function body runs behind) is the program table's and the resolver's
+// reading, not yet the effect model's, and the legacy link reading
+// (GAP-1243) judges it. A read of a path whose links could not be read
+// (unresolved, /proc/self/cwd/...) is no credential read: a read reaches a
+// credential by its name only.
+func effectProtectedSets(t *semanticpb.EffectTarget, kind string) (known, maybe []string, linkHeld bool) {
 	for _, m := range t.GetProtected() {
-		switch m.GetState() {
-		case semantic.ProtectedKnown:
+		switch {
+		case m.GetReason() == "link":
+			linkHeld = true
+		case kind == string(effects.KindRead) && m.GetReason() == "unresolved":
+		case m.GetState() == semantic.ProtectedKnown:
 			known = append(known, m.GetSet())
-		case semantic.ProtectedUnknown:
+		case m.GetState() == semantic.ProtectedUnknown:
 			maybe = append(maybe, m.GetSet())
 		}
 	}
-	return known, maybe
+	return known, maybe, linkHeld
 }
 
 // effectAction maps the protected-tier read to the guardrail action. An effect
 // that touches a protected set blocks in the strict packs, and blocks in the
 // default packs (per-user and managed) only when a restricted-tier effect is
-// on a ruling family (authorized-keys / self-protection); otherwise it alerts.
+// on the authorized-keys ruling family; otherwise it alerts.
 // There is no ask yet (S8 owns the confirm path).
 func effectAction(touches, restrictedRuling, strict bool) string {
 	if !touches {
@@ -609,13 +672,25 @@ func markOutermostEffectDispatch(ctx context.Context) (context.Context, bool) {
 }
 
 // effectShadowFindings turns an effect verdict into rule findings for the ON
-// lane. Clean or allow verdicts carry no finding. An alert-tier verdict is
-// capped at an alert in every profile; a block-tier verdict contributes to
-// enforcement so the profile threshold maps its severity to the action. The
-// effect disposition lets S8 map the unknown tier to ask later; the effect
-// proof is authoritative only when the lane is ON.
+// lane. Clean or allow verdicts carry no finding, and neither does a Maybe
+// verdict: a protected target the lane reached only by a reach reason
+// (R-NAME, R-GLOB, R-CWD, R-CODE, ...) never raises the live answer above the
+// 1.0.10 readers, in any tier (DET111 ruling 2026-11-22, TRAIN T1: every one of
+// its 13,572 new benign blocks was such a verdict), and neither does a known
+// read (Known is a mutation). It stays a shadow record:
+// the reach counters, the harness's EffectShadow stamps and the audit row
+// (effectLiveFindings). A Known verdict (a known effect on a known member)
+// raises: an alert-tier verdict is capped at an alert in every profile; a
+// block-tier verdict contributes to enforcement so the profile threshold maps
+// its severity to the action. The effect disposition lets S8 map the unknown
+// tier to ask later; the effect proof is authoritative only when the lane is
+// ON.
 func effectShadowFindings(res EffectShadowResult, mode effectRulesMode) []RuleFinding {
 	if res.Tier == string(effectTierClean) || res.Action == guardrailActionAllow {
+		return nil
+	}
+	proof := effectFindingProof(res)
+	if proof.Certainty != decide.CertKnown {
 		return nil
 	}
 	rid := "effect.protected_target_" + res.Tier
@@ -640,7 +715,7 @@ func effectShadowFindings(res EffectShadowResult, mode effectRulesMode) []RuleFi
 		Tags:       tags,
 	}
 	f.disposition = disposition
-	f.Proof = effectFindingProof(res)
+	f.Proof = proof
 	f.proof = newFindingProof(findingProofEffect, rid, mode == effectRulesOn)
 	switch res.Action {
 	case guardrailActionAlert:
@@ -658,9 +733,10 @@ const effectProofSource = "effects"
 // effectFindingProof is the DET111 proof of an effect verdict (internal/
 // guardrail/decide): the deciding effect's kind, the strongest protected
 // class it reached, and how sure the lane is. A restricted-tier verdict, or
-// an unknown-tier one without a reach reason (a known effect on a known
-// member by a command the restricted list does not name), is known; one
-// with a reach reason is maybe and carries the first reason.
+// one with a known mutation of a known member (Known: also by a command the
+// restricted list does not name), is known, even when another effect of the
+// call was only reached; any other is maybe and carries the first reach
+// reason, if any (a known read has none).
 func effectFindingProof(res EffectShadowResult) decide.Proof {
 	p := decide.Proof{
 		Kind:      effectProofKind(res.Kind),
@@ -668,10 +744,26 @@ func effectFindingProof(res EffectShadowResult) decide.Proof {
 		Certainty: decide.CertKnown,
 		Source:    effectProofSource,
 	}
-	if res.Tier != string(effectTierRestricted) && len(res.Reach) > 0 {
-		p.Certainty, p.Reach = decide.CertMaybe, res.Reach[0]
+	if res.Tier != string(effectTierRestricted) && !res.Known {
+		p.Certainty = decide.CertMaybe
+		if len(res.Reach) > 0 {
+			p.Reach = res.Reach[0]
+		}
 	}
 	return p
+}
+
+// effectLiveFindings runs the ON lane for one outermost dispatch: the Known
+// verdict's findings join today's (raise only); a Maybe verdict adds none and
+// is handed to the shadow recorder off the hook's path instead, so the audit
+// log still shows what the lane reached.
+func effectLiveFindings(request trustedActionRequest, mode effectRulesMode, tier effectTierMode) []RuleFinding {
+	res := computeEffectShadow(request, mode, tier)
+	findings := effectShadowFindings(res, mode)
+	if len(findings) == 0 && res.Tier != string(effectTierClean) {
+		recordEffectShadowAsync(res, request.recordEffectShadow)
+	}
+	return findings
 }
 
 // effectProofKind maps an effect kind to a proof kind. An opaque program is

@@ -124,7 +124,7 @@ func effectShadowRun(request trustedActionRequest, mode effectRulesMode, tiers .
 			results = finish(effectShadowReasonPanic, 0)
 		}
 	}()
-	call, opts, ok := effectCall(request.Connector, request.Input)
+	call, opts, ok := effectCall(request.Connector, request.Input, effectWindowsCall(request))
 	if !ok {
 		return results
 	}
@@ -155,7 +155,7 @@ func effectShadowRun(request trustedActionRequest, mode effectRulesMode, tiers .
 		c := classifyEffects(result, facts, opts.Flavor, tier, reachEnv)
 		effectReachUnplaced(&c, result, facts, text, request.Input.ActiveHome, opts.Flavor)
 		res := &results[i]
-		res.Sets, res.Program, res.Kind, res.Reach, res.RoleHeld = c.sets, c.program, c.kind, c.reach, c.roleHeld
+		res.Sets, res.Program, res.Kind, res.Reach, res.RoleHeld, res.LinkHeld, res.Known = c.sets, c.program, c.kind, c.reach, c.roleHeld, c.linkHeld, c.known
 		switch {
 		case c.restricted:
 			res.Tier = string(effectTierRestricted)
@@ -192,6 +192,7 @@ func effectReachText(call effects.Call) string {
 var (
 	effectReachCounts   = map[string]*atomic.Int64{}
 	effectReachRoleHeld atomic.Int64
+	effectReachLinkHeld atomic.Int64
 )
 
 func init() {
@@ -211,16 +212,21 @@ func countEffectReach(res EffectShadowResult) {
 	if res.RoleHeld {
 		effectReachRoleHeld.Add(1)
 	}
+	if res.LinkHeld {
+		effectReachLinkHeld.Add(1)
+	}
 }
 
 // EffectReachCounts returns the per-reason counts since the process started,
-// plus "R-ROLE-held".
+// plus "R-ROLE-held" and "LINK-held" (a member reached only through a
+// followed link, counted, not raised).
 func EffectReachCounts() map[string]int64 {
-	out := make(map[string]int64, len(effectReachCounts)+1)
+	out := make(map[string]int64, len(effectReachCounts)+2)
 	for r, n := range effectReachCounts {
 		out[r] = n.Load()
 	}
 	out[effectrules.ReachRole+"-held"] = effectReachRoleHeld.Load()
+	out["LINK-held"] = effectReachLinkHeld.Load()
 	return out
 }
 
@@ -231,6 +237,13 @@ func scheduleEffectShadow(request trustedActionRequest, mode effectRulesMode, ti
 	if record == nil || effectShadowLiveOff {
 		return
 	}
+	goEffectShadow(func() { record(effectShadowRun(request, mode, tier)[0]) })
+}
+
+// goEffectShadow runs fn on its own goroutine in one of the bounded shadow
+// slots. It returns at once; when every slot is in use fn is dropped and
+// counted (effectShadowDropped), never queued behind the hook.
+func goEffectShadow(fn func()) {
 	select {
 	case effectShadowSlots <- struct{}{}:
 	default:
@@ -242,8 +255,18 @@ func scheduleEffectShadow(request trustedActionRequest, mode effectRulesMode, ti
 			<-effectShadowSlots
 			_ = recover() // a recorder failure is as neutral as a run failure
 		}()
-		record(effectShadowRun(request, mode, tier)[0])
+		fn()
 	}()
+}
+
+// recordEffectShadowAsync hands a finished run of the ON lane to record off
+// the hook's path, in the same bounded slots: the hook never waits for the
+// audit write.
+func recordEffectShadowAsync(res EffectShadowResult, record func(EffectShadowResult)) {
+	if record == nil || effectShadowLiveOff {
+		return
+	}
+	goEffectShadow(func() { record(res) })
 }
 
 // effectShadowRecordWorthy reports whether a finished run gets an audit row:
@@ -275,6 +298,12 @@ func effectShadowAuditDetails(res EffectShadowResult, dropped int64) string {
 	}
 	if res.RoleHeld {
 		b.WriteString(" role_held=1")
+	}
+	if res.LinkHeld {
+		b.WriteString(" link_held=1")
+	}
+	if res.Known {
+		b.WriteString(" known=1")
 	}
 	if len(res.RuleIDs) > 0 {
 		b.WriteString(" rules=" + strings.Join(res.RuleIDs, ","))

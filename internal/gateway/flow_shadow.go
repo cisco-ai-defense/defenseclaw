@@ -389,7 +389,7 @@ func runSecretFlowShadow(ctx context.Context, request trustedActionRequest) (fin
 		// a shared state. Skip it (recorded by its absence from the store).
 		return nil
 	}
-	call, opts, has := effectCall(request.Connector, request.Input)
+	call, opts, has := effectCall(request.Connector, request.Input, effectWindowsCall(request))
 	if !has {
 		return nil
 	}

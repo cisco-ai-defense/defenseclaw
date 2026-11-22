@@ -548,7 +548,7 @@ func dispatchTrustedActionOnce(
 			}
 			effectRequest := request
 			defer func() {
-				findings = append(findings, effectShadowFindings(computeEffectShadow(effectRequest, mode, effectsRulesTierFor()), mode)...)
+				findings = append(findings, effectLiveFindings(effectRequest, mode, effectsRulesTierFor())...)
 			}()
 		case effectRulesShadow:
 			// Shadow: compute and record beside today's rules, off the hook's
