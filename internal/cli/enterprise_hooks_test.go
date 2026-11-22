@@ -27,14 +27,12 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 var testEnterpriseHookManifestSHA256 = strings.Repeat("a", sha256.Size*2)
 
 func TestWriteEnterpriseHookGuardianState(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("enterprise hook guardian persistence is unsupported on native Windows; lifecycle gate coverage remains active")
-	}
 	stubEnterpriseHookAuthorizationTrustForTempDir(t)
 	dir := t.TempDir()
 	authorizationDir := t.TempDir()
@@ -76,13 +74,14 @@ func TestWriteEnterpriseHookGuardianState(t *testing.T) {
 	}
 	if info, statErr := os.Stat(authorizationDir); statErr != nil {
 		t.Fatalf("stat authorization dir: %v", statErr)
-	} else if got := info.Mode().Perm(); got != 0o750 {
+	} else if got := info.Mode().Perm(); runtime.GOOS != "windows" && got != 0o750 {
+		// Windows mode bits do not represent the folder's DACL.
 		t.Fatalf("authorization dir mode = %o, want 750", got)
 	}
 	authorizationPath := filepath.Join(authorizationDir, hookGuardianAuthorizationFile)
 	if info, statErr := os.Stat(authorizationPath); statErr != nil {
 		t.Fatalf("stat authorization file: %v", statErr)
-	} else if got := info.Mode().Perm(); got != 0o640 {
+	} else if got := info.Mode().Perm(); runtime.GOOS != "windows" && got != 0o640 {
 		t.Fatalf("authorization file mode = %o, want 640", got)
 	}
 	var authorization enterpriseHookGuardianAuthorization
@@ -144,9 +143,6 @@ func TestWriteEnterpriseHookGuardianState(t *testing.T) {
 }
 
 func TestWriteEnterpriseHookGuardianStateAcceptsExplicitPendingTarget(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("enterprise hook guardian persistence is unsupported on native Windows; lifecycle gate coverage remains active")
-	}
 	stubEnterpriseHookAuthorizationTrustForTempDir(t)
 	dataDir := t.TempDir()
 	authorizationDir := t.TempDir()
@@ -442,9 +438,6 @@ func TestEnterpriseHookGuardianFailureIssuesExposeTargetCause(t *testing.T) {
 }
 
 func TestWriteEnterpriseHookGuardianStateDoesNotAuthorizeFailedEnrollmentPublication(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("enterprise hook guardian persistence is unsupported on native Windows; lifecycle gate coverage remains active")
-	}
 	stubEnterpriseHookAuthorizationTrustForTempDir(t)
 	dataDir := t.TempDir()
 	authorizationDir := t.TempDir()
@@ -881,9 +874,6 @@ func TestCompareEnterpriseHookGuardianRecordsRequiresExactActivationIdentity(t *
 }
 
 func TestWriteEnterpriseHookGuardianStateRefusesSymlink(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("enterprise hook guardian symlink writer is unreachable on native Windows; lifecycle gate coverage remains active")
-	}
 	stubEnterpriseHookAuthorizationTrustForTempDir(t)
 	dir := t.TempDir()
 	t.Setenv(hookGuardianAuthorizationDirEnv, t.TempDir())
@@ -891,9 +881,7 @@ func TestWriteEnterpriseHookGuardianStateRefusesSymlink(t *testing.T) {
 	if err := os.WriteFile(outside, []byte("{}"), 0o600); err != nil {
 		t.Fatalf("write outside: %v", err)
 	}
-	if err := os.Symlink(outside, filepath.Join(dir, hookGuardianStateFile)); err != nil {
-		t.Fatalf("symlink: %v", err)
-	}
+	testenv.Symlink(t, outside, filepath.Join(dir, hookGuardianStateFile))
 	err := writeEnterpriseHookGuardianState(
 		dir,
 		"manifest.yaml",
@@ -911,11 +899,19 @@ func stubEnterpriseHookAuthorizationTrustForTempDir(t *testing.T) {
 	t.Helper()
 	originalDirTrust := enterpriseHookAuthorizationDirTrustCheck
 	originalFileTrust := enterpriseHookAuthorizationFileTrustCheck
+	originalOwnershipSetter := enterpriseHookAuthorizationOwnershipSetter
 	enterpriseHookAuthorizationDirTrustCheck = func(string) error { return nil }
 	enterpriseHookAuthorizationFileTrustCheck = func(string) error { return nil }
+	if runtime.GOOS == "windows" {
+		// The Windows setter hands the folder to the pinned gateway NT SERVICE
+		// account, which a test account does not have; the ownership step has
+		// its own native tests.
+		enterpriseHookAuthorizationOwnershipSetter = func(string) error { return nil }
+	}
 	t.Cleanup(func() {
 		enterpriseHookAuthorizationDirTrustCheck = originalDirTrust
 		enterpriseHookAuthorizationFileTrustCheck = originalFileTrust
+		enterpriseHookAuthorizationOwnershipSetter = originalOwnershipSetter
 	})
 }
 
