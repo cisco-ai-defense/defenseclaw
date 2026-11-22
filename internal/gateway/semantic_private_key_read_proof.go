@@ -71,7 +71,7 @@ func appendTrustedPrivateKeyReaderFinding(
 			return appendTrustedPrivateKeyHomeCopyAlert(findings, generation, request)
 		}
 	}
-	if !proved && request.StrictPolicy && request.EnforcementCapable &&
+	if !proved && request.tierEnforces(tierGateStrict) && request.EnforcementCapable &&
 		facts.Authoritative() && facts.EnforcementEligible() &&
 		trustedActionOtherHomeSSHPrivateKeyContentRead(facts.EnforcementProjection()) {
 		// A proven content read of another account's key: the strict pack

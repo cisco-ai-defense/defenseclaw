@@ -76,7 +76,7 @@ func nonShellToolFindings(ctx context.Context, request trustedActionRequest, fin
 	if generation == nil {
 		return findings
 	}
-	hard := request.StrictPolicy || request.ManagedInstall
+	hard := request.tierEnforces(tierGateManaged)
 	out := append([]RuleFinding(nil), findings...)
 	// add adds a rule's finding once. An uncertain finding (the call's own
 	// account or API host is unknown) alerts in every tier and never blocks.
@@ -445,7 +445,7 @@ func shellToolFindings(ctx context.Context, request trustedActionRequest, findin
 	}
 	request.Input.CWD = managedClientCWD(ctx, request.Input.CWD, request.ResolvedWriteTargets)
 	facts := actionfacts.Analyze(request.Input)
-	hard := request.StrictPolicy || request.ManagedInstall
+	hard := request.tierEnforces(tierGateManaged)
 	otherAccount := nonShellNamesOtherAccountCredential(facts)
 	out := append([]RuleFinding(nil), findings...)
 	// A finding of the lane is merged as the dispatch merges the finding of a

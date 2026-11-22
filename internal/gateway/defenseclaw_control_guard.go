@@ -63,8 +63,7 @@ func defenseClawControlFindings(ctx context.Context, request trustedActionReques
 	// A proven self-disable is an alert where the user runs DefenseClaw
 	// themselves with the default or permissive pack, a block under the strict
 	// pack and in every managed install.
-	provenAlertOnly := !request.StrictPolicy && !request.ManagedInstall
-	add := func(ruleID, note string, alertOnly bool) {
+	add := func(ruleID, note string, tiered bool) {
 		if slices.ContainsFunc(out, func(finding RuleFinding) bool { return finding.RuleID == ruleID }) {
 			return
 		}
@@ -77,13 +76,13 @@ func defenseClawControlFindings(ctx context.Context, request trustedActionReques
 			Evidence: "defenseclaw " + note, Tags: append([]string(nil), rule.Tags...), LineNumber: 1,
 			proof: newExactFallbackFindingProof(rule.ID, true, true, true, true),
 		})
-		if alertOnly {
-			out[len(out)-1].Proof = out[len(out)-1].Proof.Advise()
+		if tiered {
+			out[len(out)-1].Proof = request.tieredProof(out[len(out)-1].Proof, tierGateManaged)
 		}
 	}
 	for _, control := range controls {
 		if control.Proven {
-			add(defenseClawControlDisableRuleID, string(control.Kind), provenAlertOnly)
+			add(defenseClawControlDisableRuleID, string(control.Kind), true)
 		} else {
 			add(defenseClawControlUnprovenRuleID, string(control.Kind), false)
 		}

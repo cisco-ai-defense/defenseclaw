@@ -139,10 +139,8 @@ func withInlineHandoffTier(ctx context.Context, request trustedActionRequest, fi
 	switch {
 	case !request.EnforcementCapable:
 		finding.Proof = finding.Proof.Record()
-	case request.StrictPolicy:
-		finding.Proof = finding.Proof.Enforce()
 	default:
-		finding.Proof = finding.Proof.Advise()
+		finding.Proof = request.tieredProof(finding.Proof, tierGateStrict)
 	}
 	return append(slices.Clip(findings), finding)
 }

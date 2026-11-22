@@ -54,3 +54,18 @@ rows:
       floor: alert
     managed:
       floor: alert
+  - id: tiered-strict
+    source: rel-1-0-10:request.StrictPolicy readers (GAP-0810, GAP-1069)
+    per_user:
+      floor: allow
+      ceiling: alert
+    managed:
+      floor: allow
+      ceiling: alert
+  - id: tiered-managed
+    source: rel-1-0-10:request.StrictPolicy||ManagedInstall readers (GAP-0594, GAP-0843)
+    per_user:
+      floor: allow
+      ceiling: alert
+    managed:
+      floor: allow

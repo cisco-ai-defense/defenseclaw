@@ -1430,7 +1430,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 					// operand: the plain ones are allowed in the others. The
 					// statement-bounded reading leaves the omitted operands
 					// to the reading judged before it (GAP-1069).
-					if request.statementBounded || omittedPlain[target] && !request.StrictPolicy {
+					if request.statementBounded || omittedPlain[target] && !request.tierEnforces(tierGateStrict) {
 						return false
 					}
 					omitted := !windowsLocationOrdinaryWriteTarget(target)
@@ -1559,7 +1559,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		if request.nonWriteMention != nil && trustedShellCommandInput(request.Input) {
 			readsOnly := hookpaths.ActionMentionsNoWriteRole(input.Command, input.CWD, facts.ActiveHome, input.DialectHint, globFacts)
 			switch {
-			case readsOnly && !request.StrictPolicy && !request.ManagedInstall && !request.ProtectedHomeHook:
+			case readsOnly && !request.tierEnforces(tierGateManaged) && !request.ProtectedHomeHook:
 				*request.nonWriteMention = true
 			case !readsOnly && request.unknownMention != nil &&
 				hookpaths.ActionMentionsNoKnownWrite(input.Command, input.CWD, facts.ActiveHome, input.DialectHint, globFacts) &&

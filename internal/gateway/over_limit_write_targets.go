@@ -105,10 +105,7 @@ func appendUnknownKeyOverflowFinding(findings []RuleFinding, generation *compile
 	if !ok {
 		return findings
 	}
-	enforcement := advisoryProof
-	if request.StrictPolicy {
-		enforcement = enforcingProof
-	}
+	enforcement := request.tieredProof(enforcingProof, tierGateStrict)
 	return append(findings, adjustConfidence(request.Input.Tool, RuleFinding{
 		RuleID: rule.ID, Title: "Warning: file tool arguments exceed the target verification bound",
 		Severity: rule.Severity, Confidence: rule.Confidence,

@@ -1802,9 +1802,8 @@ func dispatchTrustedActionWith(
 			if request.EnforcementCapable && candidate.owner.alertOnly {
 				finding.Proof = finding.Proof.Advise()
 			}
-			if candidate.owner.strictEnforced && !request.StrictPolicy &&
-				finding.contributesToEnforcement() {
-				finding.Proof = finding.Proof.Advise()
+			if candidate.owner.strictEnforced && finding.contributesToEnforcement() {
+				finding.Proof = request.tieredProof(finding.Proof, tierGateStrict)
 			}
 			finding = finding.withTrustedActionProof(
 				newActionFactsSemanticFindingProof(
@@ -7427,11 +7426,7 @@ func withCradleUnknownTier(findings []RuleFinding, request trustedActionRequest)
 			return findings
 		}
 		proven = true
-		if request.StrictPolicy || request.ManagedInstall {
-			finding.Proof = finding.Proof.Enforce()
-		} else {
-			finding.Proof = finding.Proof.Advise()
-		}
+		finding.Proof = request.tieredProof(finding.Proof, tierGateManaged)
 	}
 	return findings
 }

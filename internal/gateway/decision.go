@@ -619,3 +619,45 @@ func decideRoute(route, connector string, in decide.Input) string {
 	}
 	return decideAction(out.Action)
 }
+
+// The tier gates (DET111 step 1, R5 item 1): a reader whose 1.0.10
+// conclusion depended on the tier names the gate row of the tier table
+// instead of reading request.StrictPolicy or request.ManagedInstall, and
+// the table cell of the request's deployment and tier grades it. The two
+// rows hold the 1.0.10 cells (decide.RowTieredStrict, RowTieredManaged).
+const (
+	tierGateStrict  = decide.RowTieredStrict
+	tierGateManaged = decide.RowTieredManaged
+)
+
+// gateCeiling is gate row's cell for the request: its hook or proxy tier
+// (StrictPolicy) and its deployment (ManagedInstall).
+func (request trustedActionRequest) gateCeiling(row string) decide.Ceiling {
+	tier, deployment := decide.TierDefault, decide.PerUser
+	if request.StrictPolicy {
+		tier = decide.TierStrict
+	}
+	if request.ManagedInstall {
+		deployment = decide.Managed
+	}
+	return decide.Builtin().GateCeiling(row, deployment, tier)
+}
+
+// tieredProof is p graded by gate row for the request: enforcing where the
+// cell has no ceiling, advisory under an alert ceiling, recorded under a
+// record ceiling.
+func (request trustedActionRequest) tieredProof(p decide.Proof, row string) decide.Proof {
+	switch request.gateCeiling(row) {
+	case decide.CeilingAlert:
+		return p.Advise()
+	case decide.CeilingRecord:
+		return p.Record()
+	}
+	return p.Enforce()
+}
+
+// tierEnforces reports whether gate row lets the reader's conclusion
+// enforce for the request.
+func (request trustedActionRequest) tierEnforces(row string) bool {
+	return request.gateCeiling(row) == decide.CeilingNone
+}

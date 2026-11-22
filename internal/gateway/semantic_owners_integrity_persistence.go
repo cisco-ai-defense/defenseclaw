@@ -1692,7 +1692,7 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 // files, so it keeps the block (owner rule: self-protection blocks whenever
 // an effect can plausibly reach the protected file).
 func unprovenKeyWriteMayWarn(request trustedActionRequest, commandText, home string, held unprovenWrite) bool {
-	if request.StrictPolicy || request.ManagedInstall || request.ProtectedHomeHook ||
+	if request.tierEnforces(tierGateManaged) || request.ProtectedHomeHook ||
 		!trustedShellCommandInput(request.Input) {
 		return false
 	}

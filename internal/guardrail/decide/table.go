@@ -57,6 +57,9 @@ type Row struct {
 	Unknown bool
 	// PackTier: the column is the pack posture (Input.PackTier).
 	PackTier bool
+	// Gate: the row grades a reader's tiered conclusion by name
+	// (Table.GateCeiling); it never matches a finding's proof.
+	Gate bool
 	// Source names the 1.0.10 rule or gap the row carries.
 	Source string
 	Cells  [deploymentCount][tierCount]Cell
@@ -74,6 +77,9 @@ func (t *Table) match(p Proof, surface Surface, secureClient bool) *Row {
 	}
 	for i := range t.Rows {
 		row := &t.Rows[i]
+		if row.Gate {
+			continue
+		}
 		if surface == SurfaceContent && !row.Content || secureClient && !row.SecureClient {
 			continue
 		}
@@ -117,6 +123,19 @@ const (
 	RowTruncated       = "truncated"
 	RowStateWrite      = "state-write"
 	RowProtectedFile   = "shell-protected-file"
+	// RowTieredStrict grades a conclusion the 1.0.10 readers enforced in the
+	// strict tier only (an alert in default and permissive, per-user and
+	// managed alike): an inline handoff of unknown state, file tool targets
+	// past the verification bound, a strict-enforced semantic owner, the
+	// omitted plain operands of a keys write, another account's key read.
+	RowTieredStrict = "tiered-strict"
+	// RowTieredManaged grades a conclusion the 1.0.10 readers enforced in
+	// the strict tier and in every managed install (an alert in a per-user
+	// default or permissive install): a proven DefenseClaw self-disable, a
+	// proven critical scope, a fetched-content execution, a non-shell tool
+	// credential or account reach, a read-only keys mention, an unproven
+	// key write that may warn.
+	RowTieredManaged = "tiered-managed"
 )
 
 var mutatingKinds = []ProofKind{KindWrite, KindAppend, KindDelete, KindLink, KindPerm}
@@ -202,6 +221,22 @@ var builtin = Table{Rows: []Row{
 		Certainty: []Certainty{CertKnown}, Source: "rel-1-0-6:GAP-0675",
 		Cells: [deploymentCount][tierCount]Cell{
 			uniform(Cell{Floor: Alert, Levels: true}), uniform(Cell{Floor: Alert, Levels: true}),
+		},
+	},
+	{
+		ID: RowTieredStrict, Gate: true, Content: true, SecureClient: true,
+		Source: "rel-1-0-10:request.StrictPolicy readers (GAP-0810, GAP-1069)",
+		Cells: [deploymentCount][tierCount]Cell{
+			{TierDefault: {Levels: true, Ceiling: CeilingAlert}, TierPermissive: {Levels: true, Ceiling: CeilingAlert}, TierStrict: {Levels: true}},
+			{TierDefault: {Levels: true, Ceiling: CeilingAlert}, TierPermissive: {Levels: true, Ceiling: CeilingAlert}, TierStrict: {Levels: true}},
+		},
+	},
+	{
+		ID: RowTieredManaged, Gate: true, Content: true, SecureClient: true,
+		Source: "rel-1-0-10:request.StrictPolicy||ManagedInstall readers (GAP-0594, GAP-0843)",
+		Cells: [deploymentCount][tierCount]Cell{
+			{TierDefault: {Levels: true, Ceiling: CeilingAlert}, TierPermissive: {Levels: true, Ceiling: CeilingAlert}, TierStrict: {Levels: true}},
+			uniform(Cell{Levels: true}),
 		},
 	},
 }}
@@ -418,4 +453,25 @@ func (t *Table) Severity(p Proof) Severity {
 		}
 	}
 	return sev
+}
+
+// GateCeiling is the ceiling the gate row id gives a reader's tiered
+// conclusion for deployment d in tier: CeilingNone enforces, CeilingAlert
+// is an alert at most, CeilingRecord records only. An id the table has no
+// row for enforces (fail closed).
+func (t *Table) GateCeiling(id string, d Deployment, tier Tier) Ceiling {
+	if t == nil {
+		t = Builtin()
+	}
+	row := t.row(id)
+	if row == nil {
+		return CeilingNone
+	}
+	if d >= deploymentCount {
+		d = PerUser
+	}
+	if tier >= tierCount {
+		tier = TierDefault
+	}
+	return row.Cells[d][tier].Ceiling
 }
