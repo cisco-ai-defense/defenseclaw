@@ -91,7 +91,62 @@ func Project(res effects.Result, env Env) []*semanticpb.EffectFact {
 		}
 		out = append(out, fact)
 	}
+	holdKnownOnNameMaybe(out)
 	return out
+}
+
+// holdKnownOnNameMaybe prevents one target/set from being both Known and
+// R-NAME Maybe across effects of the same call. Independent known targets keep
+// their own resolver proof.
+func holdKnownOnNameMaybe(facts []*semanticpb.EffectFact) {
+	// A resolver-known member is still Maybe when this same target/set also
+	// has an R-NAME path: another effect in the call can leave the target's
+	// role or placement unresolved. Keep independent Known targets intact.
+	maybeNames := make(map[string]bool)
+	for _, fact := range facts {
+		target := fact.GetTarget()
+		if fact.GetTargetState() != string(effects.TargetStateKnown) &&
+			fact.GetRoleState() == string(effects.RoleStateKnown) {
+			// A physical link walk, a passwd/conventional home-tail match, or
+			// an inode identity is a resolver fact. It can settle an otherwise
+			// lexical target; a bare exact spelling cannot.
+			for _, match := range target.GetProtected() {
+				switch match.GetReason() {
+				case "link", "other_home", "inode":
+					if match.GetState() == string(gradeKnown) {
+						fact.TargetState = string(effects.TargetStateKnown)
+						break
+					}
+				}
+				if fact.GetTargetState() == string(effects.TargetStateKnown) {
+					break
+				}
+			}
+		}
+		uncertainEffect := fact.GetTargetState() != string(effects.TargetStateKnown) ||
+			fact.GetRoleState() != string(effects.RoleStateKnown) ||
+			fact.GetKind() == string(effects.KindOpaque)
+		for _, match := range target.GetProtected() {
+			if uncertainEffect && match.GetState() == string(gradeKnown) {
+				match.State = string(gradeUnknown)
+				match.Reason = "call_maybe"
+			}
+			if match.GetState() == string(gradeUnknown) &&
+				ReachForMatch(match.GetReason(), fact.GetReasons()) == ReachName {
+				maybeNames[target.GetKey()+"\x00"+match.GetSet()] = true
+			}
+		}
+	}
+	for _, fact := range facts {
+		target := fact.GetTarget()
+		for _, match := range target.GetProtected() {
+			if match.GetState() == string(gradeKnown) &&
+				maybeNames[target.GetKey()+"\x00"+match.GetSet()] {
+				match.State = string(gradeUnknown)
+				match.Reason = "call_maybe"
+			}
+		}
+	}
 }
 
 func projectTarget(
