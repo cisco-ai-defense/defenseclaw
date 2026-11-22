@@ -57,11 +57,16 @@ const (
 	retentionPauseMax    = 250 * time.Millisecond
 	// RetentionMaxStoreMB is the largest observability.local.max_store_mb.
 	RetentionMaxStoreMB = 1 << 20
-	// RetentionSizeCapKeep is the newest history the size cap never deletes.
-	RetentionSizeCapKeep = time.Hour
-	// retentionSizeCapTargetDivisor: a size-capped run deletes down to nine
-	// tenths of the cap, so the next inserts do not cross it again at once.
-	retentionSizeCapTargetDivisor = 10
+	// A size-capped run starts once the used pages pass nine tenths of
+	// observability.local.max_store_mb and deletes the oldest history down to
+	// seven tenths of it, the newest hour too when that is what the cap takes.
+	// A hook post adds about 25 KiB of used pages (TestHookAuditBytesPerPost),
+	// so a gateway answering 50 posts a second writes about 75 MiB a minute,
+	// about 4.3 GiB an hour: the cap needs room for a check interval and a
+	// pass, and the newest hour alone was four times the 1 GiB Substrate cap
+	// (substrate-1:GAP-0570).
+	retentionSizeCapStartPercent  = 90
+	retentionSizeCapTargetPercent = 70
 )
 
 // RetentionTableClass is a fixed metric/reporting label. Values can only come
@@ -642,7 +647,7 @@ func (reaper *RetentionReaper) Run(ctx context.Context) (RetentionRunResult, err
 
 	var runErr error
 	if capBytes > 0 {
-		sizeCutoff, over, err := reaper.storeSizeCutoff(ctx, started, capBytes)
+		sizeCutoff, over, err := reaper.storeSizeCutoff(ctx, capBytes)
 		if err != nil {
 			runErr = retentionRunFailure(RetentionFailureAuditStore, err)
 		} else if over && sizeCutoff.After(cutoff) {
@@ -754,18 +759,21 @@ func (reaper *RetentionReaper) Run(ctx context.Context) (RetentionRunResult, err
 }
 
 // storeSizeCutoff returns the cutoff that brings the used pages of audit.db
-// under nine tenths of capBytes when they are over capBytes, and whether
-// they are (false too when audit_events has no dated rows). Rows are deleted oldest first and rowids grow with time, so the
-// cutoff is the time of the audit_events row at that fraction of the rowid
-// range: the same cutoff then also prunes the other history tables and the
-// correlation graph, as day retention does. It never reaches into the last
-// RetentionSizeCapKeep.
-func (reaper *RetentionReaper) storeSizeCutoff(ctx context.Context, now time.Time, capBytes int64) (time.Time, bool, error) {
+// down to retentionSizeCapTargetPercent of capBytes when they are past
+// retentionSizeCapStartPercent of it, and whether they are (false too when
+// audit_events has no dated rows). Rows are deleted oldest first and rowids
+// grow with time, so the cutoff is the time of the audit_events row at that
+// fraction of the rowid range: the same cutoff then also prunes the other
+// history tables and the correlation graph, as day retention does. The cap
+// wins over the age of the rows: the cutoff can be inside the newest hour
+// (substrate-1:GAP-0570). Open correlation state is still kept for the whole
+// day window (Run's staleActive).
+func (reaper *RetentionReaper) storeSizeCutoff(ctx context.Context, capBytes int64) (time.Time, bool, error) {
 	used, err := reaper.storeUsedBytes(ctx)
 	if err != nil {
 		return time.Time{}, false, err
 	}
-	if used <= capBytes {
+	if used <= retentionSizeCapStart(capBytes) {
 		return time.Time{}, false, nil
 	}
 	var first, last sql.NullInt64
@@ -776,7 +784,7 @@ func (reaper *RetentionReaper) storeSizeCutoff(ctx context.Context, now time.Tim
 	if !first.Valid || !last.Valid {
 		return time.Time{}, false, nil
 	}
-	target := capBytes - capBytes/retentionSizeCapTargetDivisor
+	target := capBytes / 100 * retentionSizeCapTargetPercent
 	fraction := float64(used-target) / float64(used)
 	at := first.Int64 + int64(fraction*float64(last.Int64-first.Int64))
 	var stamp sql.NullInt64
@@ -788,11 +796,37 @@ func (reaper *RetentionReaper) storeSizeCutoff(ctx context.Context, now time.Tim
 	if !stamp.Valid {
 		return time.Time{}, false, nil
 	}
-	cutoff := time.Unix(0, stamp.Int64).UTC()
-	if keepFrom := now.Add(-RetentionSizeCapKeep); cutoff.After(keepFrom) {
-		cutoff = keepFrom
+	return time.Unix(0, stamp.Int64).UTC(), true, nil
+}
+
+// retentionSizeCapStart is the used size past which a run deletes for the cap.
+func retentionSizeCapStart(capBytes int64) int64 {
+	return capBytes / 100 * retentionSizeCapStartPercent
+}
+
+// StoreOverCapStart reports whether the used pages of audit.db are past the
+// size at which a capped run starts deleting (nine tenths of
+// observability.local.max_store_mb); false without a cap. It reads three page
+// counts and nothing else, so the retention controller calls it every
+// RetentionSizeCapCheckInterval between full passes (substrate-1:GAP-0538).
+func (reaper *RetentionReaper) StoreOverCapStart(ctx context.Context) (bool, error) {
+	if reaper == nil || reaper.store == nil || reaper.store.db == nil {
+		return false, errors.New("audit: retention is not initialized")
 	}
-	return cutoff, true, nil
+	capBytes := reaper.maxStoreBytes.Load()
+	if capBytes <= 0 {
+		return false, nil
+	}
+	release, err := reaper.store.acquireReady()
+	if err != nil {
+		return false, err
+	}
+	defer release()
+	used, err := reaper.storeUsedBytes(ctx)
+	if err != nil {
+		return false, err
+	}
+	return used > retentionSizeCapStart(capBytes), nil
 }
 
 func (reaper *RetentionReaper) storeUsedBytes(ctx context.Context) (int64, error) {
@@ -1332,6 +1366,15 @@ func correlationRetentionDeleteStatement(class RetentionTableClass) (string, err
 				receipt.conflicts_with_semantic_event_id=event.semantic_event_id)
 			AND NOT EXISTS (SELECT 1 FROM correlation_cursors AS cursor
 				WHERE cursor.last_semantic_event_id=event.semantic_event_id)
+			-- A tool-call chain event holds its semantic event (ON DELETE RESTRICT) and
+			-- has its received time (tool_chain_state.go reads it from this row), so this
+			-- is a point lookup on idx_guardrail_chain_events_received. Without it a
+			-- size-capped cutoff, which moves into the live window, met a chain event
+			-- its own stage had not reached yet and the whole run failed on the foreign
+			-- key (substrate-1:GAP-0570). The chain stage deletes it, then this one.
+			AND NOT EXISTS (SELECT 1 FROM guardrail_chain_events AS chain
+				WHERE chain.received_time_unix_nano=event.received_time_unix_nano
+				AND chain.semantic_event_id=event.semantic_event_id)
 			AND NOT EXISTS (SELECT 1 FROM correlation_pending_operations AS operation WHERE
 				operation.start_semantic_event_id=event.semantic_event_id)
 			AND NOT EXISTS (SELECT 1 FROM correlation_pending_operations AS operation WHERE

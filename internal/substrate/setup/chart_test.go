@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -132,6 +133,10 @@ func TestChartRefusesBadValues(t *testing.T) {
 		"memory home, decimal limit short": memoryHomeExample + ",callout.resources.limits.memory=600M",                         // 572 MiB < 640 MiB
 		"memory home, unreadable limit":    memoryHomeExample + ",leader.resources.limits.memory=lots",
 		"bad namespace label":              "metrics.prometheusRule.enabled=true,metrics.prometheusRule.namespaceLabel=k8s.namespace.name",
+		// substrate-1:GAP-0578 (f): the headroom is never under the chart default
+		// request (controller 128Mi), so a 1Mi request does not make a 520Mi
+		// limit fit a 512Mi tmpfs.
+		"memory home, tiny request": memoryHomeExample + ",controller.resources.requests.memory=1Mi,controller.resources.limits.memory=520Mi",
 	} {
 		args := []string{"template", "dc", chartDir, "--kube-version", chartKubeVersion, "--set", set}
 		if err := exec.Command(helm, args...).Run(); err == nil {
@@ -711,5 +716,85 @@ func TestGAP0584PolicyAlertsReadEverySeriesUnlessScoped(t *testing.T) {
 		"--set", "metrics.prometheusRule.namespaceLabel=k8s_namespace_name"))
 	if !strings.Contains(scoped, `defenseclaw_substrate_policy_conflicts_total{k8s_namespace_name="defenseclaw-system"}[10m]`) {
 		t.Error("namespaceLabel set: the rules do not select the release's namespace")
+	}
+}
+
+// substrate-1:GAP-0578 (f): validate.yaml floors each pod's process headroom
+// at its chart default requests.memory, copied there by hand; a default that
+// changes without its floor must fail here.
+func TestChartMemoryHomeFloorsAreTheDefaultRequests(t *testing.T) {
+	tmpl, err := os.ReadFile(filepath.Join(chartDir, "templates", "validate.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := regexp.MustCompile(`\$floors := dict "gateway" (\d+) "leader" (\d+) "controller" (\d+) "callout" (\d+)`).FindStringSubmatch(string(tmpl))
+	if m == nil {
+		t.Fatal("validate.yaml has no $floors dict for gateway, leader, controller and callout")
+	}
+	raw, err := os.ReadFile(filepath.Join(chartDir, "values.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var values map[string]any
+	if err := yaml.Unmarshal(raw, &values); err != nil {
+		t.Fatal(err)
+	}
+	for i, pod := range []string{"gateway", "leader", "controller", "callout"} {
+		request, _ := dig(values, pod, "resources", "requests", "memory").(string)
+		mib, ok := strings.CutSuffix(request, "Mi")
+		if !ok {
+			t.Fatalf("%s.resources.requests.memory %q is not in Mi; teach this test the unit", pod, request)
+		}
+		if mib != m[i+1] {
+			t.Errorf("validate.yaml floors %s at %s MiB, but its default request is %s", pod, m[i+1], request)
+		}
+	}
+}
+
+// GAP-0609, GAP-0610: setup.LeftoverHookJobs is the one list of the chart's
+// hook Jobs other than pre-delete. The rendered hook Jobs (launcher renders
+// bootstrap too) and the uninstall Role's resourceNames must be exactly that
+// list, so a new or renamed hook Job cannot drift out of the uninstall.
+func TestChartUninstallRoleDeletesLeftoverHookJobs(t *testing.T) {
+	helm := helmBinary(t)
+	want := strings.Join(LeftoverHookJobs, ", ")
+	jobs := map[string]bool{}
+	for _, values := range []string{"default", "launcher"} {
+		out := string(renderChart(t, helm, values))
+		var role string
+		for _, doc := range strings.Split(out, "\n---") {
+			name := ""
+			if i := strings.Index(doc, "\nmetadata:\n  name: "); i >= 0 {
+				name = strings.TrimSpace(strings.SplitN(doc[i+len("\nmetadata:\n  name: "):], "\n", 2)[0])
+			}
+			switch {
+			// "\nkind: Role\n" at column 0: the RoleBinding's roleRef has
+			// an indented "kind: Role" and the same name.
+			case strings.Contains(doc, "\nkind: Role\n") && name == "defenseclaw-hooks-uninstall":
+				role = doc
+			case strings.Contains(doc, "\nkind: Job\n") && strings.Contains(doc, "helm.sh/hook: ") && name != "defenseclaw-pre-delete":
+				jobs[name] = true
+			}
+		}
+		if role == "" {
+			t.Fatalf("%s: no Role defenseclaw-hooks-uninstall", values)
+		}
+		rule := "- apiGroups: [batch]\n  resources: [jobs]\n  resourceNames: [" + want + "]\n  verbs: [delete]"
+		if !strings.Contains(role, rule) {
+			t.Errorf("%s: the uninstall Role's Job rule is not %q (setup.LeftoverHookJobs):\n%s", values, rule, role)
+		}
+		if strings.Contains(role, "defenseclaw-pre-delete") {
+			t.Errorf("%s: the uninstall Role must not delete its own Job:\n%s", values, role)
+		}
+	}
+	var got []string
+	for n := range jobs {
+		got = append(got, n)
+	}
+	slices.Sort(got)
+	listed := append([]string{}, LeftoverHookJobs...)
+	slices.Sort(listed)
+	if strings.Join(got, ",") != strings.Join(listed, ",") {
+		t.Errorf("the chart's hook Jobs %v are not setup.LeftoverHookJobs %v", got, listed)
 	}
 }

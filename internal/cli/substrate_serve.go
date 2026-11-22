@@ -516,7 +516,10 @@ func substrateGatewayBuilder(c *config.Config, src *configwatch.Watcher, ready *
 		regs := &registry.Remote{Client: toLeader}
 		// The idle feed: last hook, model call and relay byte per actor,
 		// sent to the leader every few seconds (A3's ActivitySource reads it).
-		recorder := &activity.Recorder{Leader: toLeader}
+		// Replica (the pod name) adds a heartbeat to every flush, so the leader
+		// can tell a replica that stopped reporting (substrate-1:GAP-0578 e).
+		replicaName, _ := os.Hostname()
+		recorder := &activity.Recorder{Leader: toLeader, Replica: replicaName}
 		go recorder.Run(context.Background())
 		// The create path's policy writer: the controller's own admission,
 		// profiles and render, run before the first resume.
