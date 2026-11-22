@@ -5,11 +5,11 @@ This directory measures the classifiers that can drive `routing.classifier`. It 
 | Path | What |
 | --- | --- |
 | `data/eval.jsonl` | 555 labelled prompts. Each has `expected_category` (coding, reasoning, chat, summarize, sensitive, tool_heavy, cheap_fast), `allowed_aliases` (the aliases that answer it acceptably and are permitted; sensitive is `["local"]` only) and `expected_alias` (the cheapest allowed alias). |
-| `data/adversarial.jsonl` | 360 route-flip items made by `scripts/make_adversarial.py` from 40 cheap and 30 sensitive base prompts. The labels are inherited from the base prompt. |
+| `data/adversarial.jsonl` | 358 route-flip items made by `scripts/make_adversarial.py` from 40 cheap and 30 sensitive base prompts. The labels are inherited from the base prompt. |
 | `data/label-agreement.json` | The independent spot check of 10% of the labels. |
 | `data/routing-reference.yaml` | A 1.0.9 `routing:` block: keyword signals plus one decision per category. The in-process keyword classifier reads it, and so does the vLLM SR container through `internal/routing.Translate`. |
 | `data/profiles.yaml` | Stand-ins for profile routing overlays (`default`, `restricted`, `local_only`). |
-| `data/prices.yaml` | A **placeholder** price table, used until the reviewed default table from item 10 is available. |
+| `data/prices.yaml` | A **placeholder** price table (not the shipped default prices). Dollar figures in the results show the order of the options, not real cost. |
 | `routingeval/` | Classifiers, the R1 routing pipeline, metrics and the report. |
 | `cmd/routing-eval/` | The harness command. |
 | `systemone-standin/server.py` | A loopback server that speaks the System One protocol and answers choice questions with a Bedrock model. |
@@ -24,7 +24,7 @@ A fresh Opus subagent labelled every prompt without seeing the generators' inten
 
 | Name | What is measured |
 | --- | --- |
-| `keyword` | The 1.0.9 keyword decisions, evaluated in process with the semantics measured on the pinned container (see below). It stands in for `rules` until the S1 rules classifier lands. |
+| `keyword` | The 1.0.9 keyword decisions, evaluated in process with the semantics measured on the pinned container (see below). It is **not** the shipped `rules` classifier of 1.0.10: that one matches keywords as case-insensitive substrings in the newest request text (`internal/routing/engine/rules.go`), while this row keeps the container's whole-word matching on the last user message. The harness accepts `rules` as another name for this row. |
 | `vllm_sr` | The pinned `vllm-sr:v0.3.0` container, called through `gateway.RemoteRouterClient` with the shipped 50 ms timeout. |
 | `systemone` | One System One call (`POST {model, state, questions}`) with one `route_category` choice question. The state is bounded like the decision model's (12,288 bytes). |
 | `hybrid` | R1: rules always. The System One answer is used only when it arrives within `-systemone-budget` (300 ms) with confidence at or above `-min-confidence` (0.6); otherwise the rules answer stands. `hybrid@1s` uses a 1 s budget to show the effect of a slower endpoint. |
@@ -52,7 +52,7 @@ Metrics:
 
 ## Run
 
-On <bench-host> (a Linux development host with Docker and Bedrock through the instance role):
+On a Linux host with Docker and Bedrock access (the 2026-11-12 results ran on a development host with Bedrock through the instance role):
 
 ```bash
 go build -o /tmp/routing-eval ./benchmarks/routing/cmd/routing-eval
@@ -68,4 +68,4 @@ python3 benchmarks/routing/systemone-standin/server.py --port 18791 --bedrock-mo
 
 The command writes `results.json`, `results.md` and `predictions.jsonl` (labels and routes only, no prompt text). With only `-classifiers keyword` it needs neither Docker nor the network, so it also runs on the build box through `dcb`. `go test ./benchmarks/routing/...` checks the metrics, the pipeline, the keyword semantics and the shipped data files.
 
-To add the S1 rules classifier, implement `routingeval.Classifier` for it and add a case to the switch in `cmd/routing-eval/main.go`.
+To measure the shipped `rules` classifier, implement `routingeval.Classifier` on top of `internal/routing/engine` and add a case to the switch in `cmd/routing-eval/main.go`. The published results do not include it.

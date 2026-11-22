@@ -18,7 +18,7 @@ routing:
         allow: [local]
         default: local
       - id: contractors-no-cloud
-        match: {groups: ["DCLAB\\contractors"]}
+        match: {groups: ["EXAMPLE\\contractors"]}
         action: deny
         message: "Contractors may not use cloud models. Contact IT."
 ```
@@ -49,7 +49,7 @@ routing:
         on_exceed: downgrade:fast
 ```
 
-- `on_exceed` is `warn`, `deny` (managed devices only) or `downgrade:<model>[,<model>]`.
+- `on_exceed` is `warn`, `deny` (managed devices only) or `downgrade:<alias>[,<alias>]` (aliases from `routing.models`).
 - Budgets count the cost of agent calls: the computed cost (tokens times `observability.pricing`), else the cost the provider reported. Judge and decision-model calls are not counted.
 - Budgets need `observability.tokenomics.enabled: true` with cost computed and the agent role recorded. On a managed device also set `observability.pricing.unknown_model: fallback`, so every model has a price.
 - Calls already running when a limit is reached still finish.
@@ -151,7 +151,28 @@ More:
 - Devices behind one NAT address share a high request limit (20 times `rate_limit_per_minute`); a busy host on that address can push them to per-device counting for a minute.
 - After a gateway restart, a user's spend on other devices is read within seconds; calls made in those seconds see only this device's spend.
 - The TLS key must be owned by the account that runs the store and readable only by it. It may be a link, for example into `/etc/letsencrypt/live`, when the file it points to meets that rule.
-- A stream that the user stops, or that the upstream breaks, after the answer started has no final token count: the user's own budget reads as unknown for 10 minutes (a deny budget then refuses on a managed device).
+- A stream that the user stops, or that the upstream breaks, after the answer started has no final token count. For most providers the user's own budget then reads as unknown for 10 minutes (a deny budget refuses on a managed device). In 1.0.10 an Anthropic Messages or Bedrock stream cut before its last message is not unknown: it is charged as its input plus one output token, so a client that drops the stream right after the answer arrives is under-charged. 1.0.11 charges it as unknown.
+
+
+{/* tv-demo:begin shots */}
+## What you see
+
+The models list, rules list and budgets list commands show what is set and the spend so far in the period.
+
+![The routing models list, rules list and budgets list output: three model aliases with their key names, no rules, and one daily budget for the codex connector with its spend and reset time](/images/routing/cli-routing-rules.png)
+
+The Routing, Savings & Budgets board in Grafana shows each budget against its limit. The bar turns red at the limit, and the stats count the budgets with a subject over the limit and the calls a rule or budget moved to another model.
+
+![The Budgets row of the Routing, Savings and Budgets board in Grafana: budgets configured, budgets with a subject over the limit, calls moved by a rule or budget, the user-daily budget over its limit, and the table of budgets by host](/images/routing/grafana-routing-budgets.png)
+
+The same board shows what the routed calls cost against the same calls on the model the agent asked for.
+
+![The Savings row: spent on compared calls, the same calls on the requested model, dollars saved and the saved share, with spend against the requested model over time](/images/routing/grafana-routing-savings.png)
+
+An administrator sees spend per user. Metrics carry no user, so the per-user table reads the usage records.
+
+![The Per user and per group row: spend per user with calls, the per-user limit and the number of users over their limit](/images/routing/grafana-routing-users.png)
+{/* tv-demo:end shots */}
 
 ## Check it
 
@@ -167,7 +188,7 @@ defenseclaw routing explain REQUEST_ID
 A routing command that changes the config (`enable`, `models add`, `rules add`, `budgets add`, `pricing set`) or a dry run (`routing test`) answers with the key the administrator config owns and exits 3; nothing is changed. To dry-run a rule, run it on a workstation with the per-user install and the same admin config:
 
 ```bash
-defenseclaw routing test "write a parser" --as-user DCLAB\\alice   # which model, which rule
+defenseclaw routing test "write a parser" --as-user EXAMPLE\\alice   # which model, which rule
 defenseclaw routing rules list      # rules and notes on rules that do less than they look
 ```
 

@@ -502,6 +502,7 @@
    "TestGAP1223RespelledExtractorIntoTheStateBlocks": 9.7,
    "TestGAP1224StagedArchiveIsNotListedAtHookTime": 2.6,
    "TestGAP1228PaddedWindowsCallAfterMovesThatMayFailKeepsItsReadingsFiveTiers": 300.0,
+   "TestGAP1307QuietOpenRunReachesClient": 330.0,
    "TestGAP1230UnplacedDotNetOpens": 39.4,
    "TestGAP1257FileInfoChildAndRebound": 4.2,
    "TestGAP1258BenignDotNetRows": 3.6,
