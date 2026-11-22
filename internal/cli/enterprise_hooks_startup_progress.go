@@ -11,6 +11,7 @@
 package cli
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -19,6 +20,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -38,9 +40,12 @@ const (
 	// hookGuardianStartupTimeFormat keeps to milliseconds, which Windows
 	// PowerShell 5.1 parses.
 	hookGuardianStartupTimeFormat = "2006-01-02T15:04:05.000Z07:00"
-	// hookGuardianStartupErrorMax bounds last_error; Setup ignores a record
-	// over 4096 bytes.
+	// hookGuardianStartupErrorMax bounds last_error before it is encoded.
 	hookGuardianStartupErrorMax = 1024
+	// hookGuardianStartupRecordMax bounds the encoded record, newline
+	// included. Setup ignores a record over 4096 bytes
+	// (Get-DefenseClawGuardianStartupProgress), so this keeps a margin.
+	hookGuardianStartupRecordMax = 3072
 )
 
 // enterpriseHookGuardianStartup is the startup record. TargetsDone counts
@@ -130,28 +135,68 @@ func (p *enterpriseHookStartupProgress) end(stderr io.Writer, reconcileErr error
 }
 
 // boundedHookGuardianStartupError puts an error on one line of at most
-// hookGuardianStartupErrorMax bytes, cut at a rune boundary.
+// hookGuardianStartupErrorMax bytes, cut at a rune boundary. Control
+// characters become spaces: JSON would write each as a 6-byte \u00XX.
 func boundedHookGuardianStartupError(message string) string {
-	message = strings.Join(strings.Fields(strings.ToValidUTF8(message, "?")), " ")
+	message = strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return ' '
+		}
+		return r
+	}, strings.ToValidUTF8(message, "?"))
+	message = strings.Join(strings.Fields(message), " ")
 	if message == "" {
 		return "the startup reconcile failed without an error message"
 	}
-	if len(message) <= hookGuardianStartupErrorMax {
+	return cutHookGuardianStartupError(message, hookGuardianStartupErrorMax)
+}
+
+// cutHookGuardianStartupError cuts message to at most limit bytes at a rune
+// boundary, ending in "...". It returns "" when no room is left for text.
+func cutHookGuardianStartupError(message string, limit int) string {
+	if len(message) <= limit {
 		return message
 	}
-	cut := hookGuardianStartupErrorMax - len("...")
+	cut := limit - len("...")
+	if cut <= 0 {
+		return ""
+	}
 	for cut > 0 && !utf8.RuneStart(message[cut]) {
 		cut--
 	}
 	return message[:cut] + "..."
 }
 
+// encodeHookGuardianStartup encodes the record on one line, without HTML
+// escaping (json.Marshal writes each & < > as a 6-byte \u00XX), and shortens
+// last_error until the encoded record fits hookGuardianStartupRecordMax, so
+// Setup's 4096-byte reader never drops a finished record and its error
+// (GAP-1506). Only quotes and backslashes are still escaped, to 2 bytes, so
+// a bounded error fits on the first pass; the loop is the backstop. No byte
+// of last_error encodes to more than 6, so each pass cuts at least
+// ceil(over/6) bytes and never more than the record needs.
+func encodeHookGuardianStartup(record enterpriseHookGuardianStartup) ([]byte, error) {
+	for {
+		var buf bytes.Buffer
+		encoder := json.NewEncoder(&buf)
+		encoder.SetEscapeHTML(false)
+		if err := encoder.Encode(record); err != nil {
+			return nil, err
+		}
+		over := buf.Len() - hookGuardianStartupRecordMax
+		if over <= 0 || record.LastError == "" {
+			return buf.Bytes(), nil
+		}
+		record.LastError = cutHookGuardianStartupError(record.LastError, len(record.LastError)-(over+5)/6)
+	}
+}
+
 // publish writes the record. A failed write is logged once and changes
 // nothing else: without the record Setup waits the usual time.
 func (p *enterpriseHookStartupProgress) publish(stderr io.Writer) {
-	data, err := json.Marshal(p.record)
+	data, err := encodeHookGuardianStartup(p.record)
 	if err == nil {
-		err = p.write(p.path, append(data, "\n"...))
+		err = p.write(p.path, data)
 	}
 	if err == nil {
 		p.lastErr = ""

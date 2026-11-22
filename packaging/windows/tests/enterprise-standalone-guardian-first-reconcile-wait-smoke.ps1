@@ -260,6 +260,17 @@ try {
             if ($null -eq $read -or (& $readError $read) -cne '') {
                 $failures.Add("record reader: a non-string last_error read as '$(& $readError $read)'")
             }
+            # GAP-1506 (RV-1506): the guardian writes last_error without HTML
+            # escaping, so a 1024-byte error of '&', '<' and '>' keeps the
+            # record under the 4096-byte limit and is read whole.
+            $wide = ('&' * 512) + ('<>' * 256)
+            [IO.File]::WriteAllText($script:SmokeRecordPath, ([IO.File]::ReadAllText($script:SmokeRecordPath) -replace '"last_error":\{"x":1\}', ('"last_error":"' + $wide + '"')))
+            $size = (Microsoft.PowerShell.Management\Get-Item -LiteralPath $script:SmokeRecordPath).Length
+            $read = Get-DefenseClawGuardianStartupProgress -Layout $layout -ProcessId 4242 -StartedAfter $script:SmokeStart.AddSeconds(-1)
+            $readText = & $readError $read
+            if ($size -gt 4096 -or $readText -cne $wide) {
+                $failures.Add("record reader: an unescaped 1024-byte last_error ($size bytes) read as $($readText.Length) chars '$($readText.Substring(0, [Math]::Min(40, $readText.Length)))'")
+            }
             if ($null -ne (Get-DefenseClawGuardianStartupProgress -Layout $layout -ProcessId 4242 -StartedAfter $script:SmokeStart.AddSeconds(5))) {
                 $failures.Add('record reader: a record from before this start was accepted')
             }
