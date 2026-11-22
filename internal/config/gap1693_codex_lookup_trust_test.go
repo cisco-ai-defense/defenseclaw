@@ -4,11 +4,13 @@
 package config
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/testenv"
@@ -17,6 +19,9 @@ import (
 const (
 	gap1693UserURL    = "http://127.0.0.1:28601/user"
 	gap1693ProjectURL = "http://127.0.0.1:28602/project"
+
+	// gap1693ErrorPrivilegeNotHeld is Windows ERROR_PRIVILEGE_NOT_HELD (1314).
+	gap1693ErrorPrivilegeNotHeld = 1314
 )
 
 // gap1693Layout writes a Codex user config that defines notes at the user
@@ -98,13 +103,16 @@ func TestGAP1693CodexPerCallLookupFollowsProjectTrust(t *testing.T) {
 		want(t, workspace, "calendar", "", false)
 	})
 	t.Run("trusted project symlink", func(t *testing.T) {
-		if runtime.GOOS == "windows" {
-			t.Skip("symlink creation needs a privilege on Windows")
-		}
 		workspace := gap1693Layout(t, true, func(path, body string) {
 			real := filepath.Join(filepath.Dir(filepath.Dir(path)), "real.toml")
 			gap1692Write(t, real, body)
 			if err := os.Symlink(real, path); err != nil {
+				// Windows creates a symlink only with SeCreateSymbolicLinkPrivilege (an
+				// elevated token or Developer Mode). Skip only for that error; the native
+				// run runs this test as an elevated row, and a skip there is NAT14_SKIPPED.
+				if runtime.GOOS == "windows" && errors.Is(err, syscall.Errno(gap1693ErrorPrivilegeNotHeld)) {
+					t.Skipf("symlink creation needs a privilege this token lacks: %v", err)
+				}
 				t.Fatal(err)
 			}
 		})
