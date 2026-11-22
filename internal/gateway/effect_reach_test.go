@@ -208,14 +208,53 @@ func TestEffectFindingProof(t *testing.T) {
 	if len(restricted) != 1 || restricted[0].Proof != want {
 		t.Fatalf("restricted proof = %+v, want %+v", restricted, want)
 	}
-	reached := effectShadowFindings(EffectShadowResult{Tier: string(effectTierUnknown), Action: guardrailActionAlert,
-		Sets: []string{effectrules.SetShellRC}, Reach: []string{effectrules.ReachCode}}, effectRulesOn)
+	// A reached (Maybe) verdict is a shadow record: its proof is maybe with
+	// the first reason, and it adds no live finding (DET111 ruling 11-22).
+	reachedRes := EffectShadowResult{Tier: string(effectTierUnknown), Action: guardrailActionAlert,
+		Sets: []string{effectrules.SetShellRC}, Reach: []string{effectrules.ReachCode}}
 	want = decide.Proof{Kind: decide.KindWrite, Target: decide.TargetAutostart, Certainty: decide.CertMaybe, Reach: decide.ReachCode, Source: "effects"}
-	if len(reached) != 1 || reached[0].Proof != want {
-		t.Fatalf("reached proof = %+v, want %+v", reached, want)
+	if got := effectFindingProof(reachedRes); got != want {
+		t.Fatalf("reached proof = %+v, want %+v", got, want)
 	}
-	if !slices.Contains(reached[0].Tags, "reach:"+effectrules.ReachCode) {
-		t.Fatalf("tags %v lack the reach reason", reached[0].Tags)
+	if reached := effectShadowFindings(reachedRes, effectRulesOn); len(reached) != 0 {
+		t.Fatalf("a Maybe verdict raised the live answer: %+v", reached)
+	}
+	// A known effect on a known member by an unlisted command is Known, also
+	// beside a reached effect of the same call, and raises with its reasons
+	// in the tags.
+	knownRes := reachedRes
+	knownRes.Known = true
+	known := effectShadowFindings(knownRes, effectRulesOn)
+	want = decide.Proof{Kind: decide.KindWrite, Target: decide.TargetAutostart, Certainty: decide.CertKnown, Source: "effects"}
+	if len(known) != 1 || known[0].Proof != want {
+		t.Fatalf("known proof = %+v, want %+v", known, want)
+	}
+	if !slices.Contains(known[0].Tags, "reach:"+effectrules.ReachCode) {
+		t.Fatalf("tags %v lack the reach reason", known[0].Tags)
+	}
+}
+
+// classifyEffects marks a call Known when one effect is a known effect on a
+// known member, even when another effect only reached a set.
+func TestClassifyEffectsKnownBesideReached(t *testing.T) {
+	useEffectsRulesMode(t, "on")
+	run := func(command string) EffectShadowResult {
+		return effectShadowRun(shadowLiveRequest(command), effectRulesOn, tierRestricted)[0]
+	}
+	if res := run(`sed -i s/a/b/ /home/u/.bashrc`); res.Tier != string(effectTierUnknown) || !res.Known {
+		t.Fatalf("sed -i on the known rc file: tier %s known %v, want unknown tier and Known", res.Tier, res.Known)
+	}
+	if res := run(shadowLiveWrite); !res.Known {
+		t.Fatalf("restricted write: known %v, want Known", res.Known)
+	}
+	// A known read of a credential is the credential readers' class: the
+	// lane touches it (shadow record) and does not raise it.
+	res := run(`cat /home/u/.aws/credentials`)
+	if res.Tier != string(effectTierUnknown) || res.Known {
+		t.Fatalf("credential read: tier %s known %v, want the unknown tier, not Known", res.Tier, res.Known)
+	}
+	if f := effectShadowFindings(res, effectRulesOn); len(f) != 0 {
+		t.Fatalf("credential read raised live: %+v", f)
 	}
 }
 
