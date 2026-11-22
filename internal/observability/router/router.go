@@ -804,6 +804,12 @@ func routeDestination(destination compiledDestination, metadata Metadata, floorO
 	if _, ok := destination.selected[metadata.identity.Signal]; !ok {
 		return nil
 	}
+	// A local inventory diagnostic (a partial or over-limit collection) stays
+	// in local SQLite in every product, whatever routes a destination has.
+	if metadata.action == config.ObservabilityV8LocalInventoryDiagnosticAction &&
+		destination.kind != config.ObservabilityV8DestinationLocalSQLite {
+		return nil
+	}
 	for _, route := range destination.routes {
 		if floorOnly && !route.includesMandatoryFloor {
 			continue
