@@ -1,0 +1,12 @@
+diff --git a/internal/psparse/parser.go b/internal/psparse/parser.go
+index 8826d8a283..b21bc4caf7 100644
+--- a/internal/psparse/parser.go
++++ b/internal/psparse/parser.go
+@@ -42,6 +42,7 @@ type parser struct {
+ // Parse parses PowerShell source into a Script. It always returns a non-nil
+ // Script; err is reserved for future use and is currently always nil.
+ func Parse(src string, opts Options) (*Script, error) {
++	recordOracle(src)
+ 	l := newLexer(src)
+ 	toks := l.lex()
+ 	p := &parser{toks: toks, dialect: opts.Dialect, src: src}

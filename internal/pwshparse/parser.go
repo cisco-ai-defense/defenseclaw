@@ -1,0 +1,281 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+//
+// SPDX-License-Identifier: Apache-2.0
+//
+// Portions of this package are a Go port of the PowerShell parser from
+// https://github.com/PowerShell/PowerShell (MIT, Copyright (c) Microsoft
+// Corporation); see THIRD_PARTY_LICENSES.txt.
+
+package pwshparse
+
+import "strings"
+
+// extent is a half-open UTF-16 offset range. Start < 0 is the empty extent.
+type extent struct{ Start, End int }
+
+func (e extent) empty() bool { return e.Start < 0 }
+
+var emptyExtent = extent{-1, -1}
+
+func extentOf(first, last extent) extent {
+	if first.empty() {
+		return last
+	}
+	if last.empty() {
+		return first
+	}
+	return extent{first.Start, last.End}
+}
+
+func before(e extent) extent {
+	o := e.Start - 1
+	if o < 0 {
+		o = 0
+	}
+	return extent{o, o}
+}
+
+func after(e extent) extent { return extent{e.End, e.End} }
+
+func lastCharacterOf(e extent) extent {
+	o := e.End - 1
+	if o < 0 {
+		o = 0
+	}
+	return extent{o, o}
+}
+
+func tokExt(t *Token) extent { return extent{t.Start, t.End} }
+
+// ParseError is one parser diagnostic (the message text is not reproduced).
+type ParseError struct {
+	ErrorID    string
+	Start, End int
+	Incomplete bool
+}
+
+// Parser is the PowerShell parser. Use Parse.
+type Parser struct {
+	tz              *tokenizer
+	src             []char
+	ungot           *Token
+	disableComma    bool
+	savingTokens    bool
+	inConfiguration bool
+	errors          []ParseError
+	tokens          []*Token
+}
+
+const verbatimArgument = "--%"
+const verbatimParameterName = "-%"
+
+// Result is the output of Parse: the AST root, the token stream and the errors.
+type Result struct {
+	Root   *Node
+	Tokens []*Token
+	Errors []ParseError
+	Source []char
+}
+
+// Parse parses PowerShell source text (the equivalent of Parser.ParseInput).
+func Parse(input string) *Result {
+	src := toUTF16(input)
+	p := &Parser{src: src}
+	p.tz = newTokenizer(p, src, true)
+	p.savingTokens = true
+	root := p.scriptBlockRule(nil, false, nil)
+	p.tokens = p.tz.tokenList
+	return &Result{Root: root, Tokens: p.tokens, Errors: p.errors, Source: src}
+}
+
+func (p *Parser) textOf(e extent) string { return fromUTF16(p.src[e.Start:e.End]) }
+
+func (p *Parser) skipNewlines() {
+	if p.ungot == nil || p.ungot.Kind == TkNewLine {
+		p.ungot = nil
+		p.tz.skipNewlines(false)
+	}
+}
+
+func (p *Parser) skipNewlinesAndSemicolons() {
+	if p.ungot == nil || p.ungot.Kind == TkNewLine || p.ungot.Kind == TkSemi {
+		p.ungot = nil
+		p.tz.skipNewlines(true)
+	}
+}
+
+func containsKind(ks []TokenKind, k TokenKind) bool {
+	for _, x := range ks {
+		if x == k {
+			return true
+		}
+	}
+	return false
+}
+
+func (p *Parser) syncOnError(consumeClosing bool, sync ...TokenKind) {
+	parens, curlies, braces := 0, 0, 0
+	if containsKind(sync, TkRParen) {
+		parens = 1
+	}
+	if containsKind(sync, TkRCurly) {
+		curlies = 1
+	}
+	if containsKind(sync, TkRBracket) {
+		braces = 1
+	}
+	for {
+		tok := p.nextToken()
+		switch tok.Kind {
+		case TkLParen:
+			parens++
+		case TkRParen:
+			parens--
+			if parens == 0 && containsKind(sync, TkRParen) {
+				if !consumeClosing {
+					p.ungetToken(tok)
+				}
+				return
+			}
+		case TkLCurly:
+			curlies++
+		case TkRCurly:
+			curlies--
+			if curlies == 0 && containsKind(sync, TkRCurly) {
+				if !consumeClosing {
+					p.ungetToken(tok)
+				}
+				return
+			}
+		case TkLBracket:
+			braces++
+		case TkRBracket:
+			braces--
+			if braces == 0 && containsKind(sync, TkRBracket) {
+				if !consumeClosing {
+					p.ungetToken(tok)
+				}
+				return
+			}
+		case TkEndOfInput:
+			p.ungetToken(tok)
+			return
+		}
+		if containsKind(sync, tok.Kind) && parens == 0 && curlies == 0 && braces == 0 {
+			break
+		}
+	}
+}
+
+func (p *Parser) nextToken() *Token {
+	tok := p.ungot
+	if tok == nil {
+		tok = p.tz.nextToken()
+	}
+	p.ungot = nil
+	return tok
+}
+
+func (p *Parser) peekToken() *Token {
+	tok := p.ungot
+	if tok == nil {
+		tok = p.tz.nextToken()
+	}
+	if p.ungot == nil {
+		p.ungot = tok
+	}
+	return tok
+}
+
+func (p *Parser) nextMemberAccessToken(allowLBracket bool) *Token {
+	if p.ungot != nil {
+		return nil
+	}
+	return p.tz.getMemberAccessOperator(allowLBracket)
+}
+
+func (p *Parser) nextInvokeMemberToken() *Token {
+	if p.ungot != nil {
+		return nil
+	}
+	return p.tz.getInvokeMemberOpenParen()
+}
+
+func (p *Parser) nextLBracket() *Token {
+	if p.ungot != nil {
+		if p.ungot.Kind == TkLBracket {
+			return p.nextToken()
+		}
+		return nil
+	}
+	return p.tz.getLBracket()
+}
+
+func (p *Parser) getVerbatimCommandArgumentToken() *Token {
+	if p.ungot == nil || p.ungot.Kind == TkParameter {
+		p.ungot = nil
+		return p.tz.getVerbatimCommandArgument()
+	}
+	return nil
+}
+
+func (p *Parser) skipToken() { p.ungot = nil }
+
+func (p *Parser) ungetToken(t *Token) { p.ungot = t }
+
+func (p *Parser) setTokenizerMode(mode tokenizerMode) {
+	if mode != p.tz.mode && p.ungot != nil {
+		if !p.ungot.Kind.hasTrait(tfParseModeInvariant) {
+			p.resyncToken(p.ungot)
+		}
+	}
+	p.tz.mode = mode
+}
+
+func (p *Parser) resyncToken(t *Token) {
+	p.ungot = nil
+	p.tz.resyncToken(t)
+}
+
+func (p *Parser) resync(point int) {
+	p.ungot = nil
+	p.tz.resync(point)
+}
+
+func isSpecificParameter(t *Token, parameter string) bool {
+	return len(parameter) >= len(t.Value) && strings.EqualFold(parameter[:len(t.Value)], t.Value)
+}
+
+func (p *Parser) requireStatementTerminator() {
+	t := p.peekToken()
+	if t.Kind == TkNewLine || t.Kind == TkSemi {
+		p.skipToken()
+	} else if t.Kind != TkEndOfInput {
+		p.reportIncomplete(tokExt(t), "MissingStatementTerminator")
+	}
+}
+
+func (p *Parser) saveError(e extent, id string, incomplete bool) {
+	for _, last := range p.errors {
+		if last.Start == e.Start && last.End == e.End && last.ErrorID == id {
+			return
+		}
+	}
+	p.errors = append(p.errors, ParseError{ErrorID: id, Start: e.Start, End: e.End, Incomplete: incomplete})
+}
+
+func (p *Parser) reportError(e extent, id string) { p.saveError(e, id, false) }
+
+// reportIncomplete reports an error that may only mean the input stopped early.
+func (p *Parser) reportIncomplete(e extent, id string) bool {
+	inc := p.tz.isAtEndOfScript(e, true)
+	p.saveError(e, id, inc)
+	return inc
+}
+
+// reportIncompleteAt is the overload with a separate error position and detection position.
+func (p *Parser) reportIncompleteAt(errPos, detected extent, id string) bool {
+	inc := p.tz.isAtEndOfScript(detected, true)
+	p.saveError(errPos, id, inc)
+	return inc
+}
