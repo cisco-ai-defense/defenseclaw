@@ -579,6 +579,7 @@ func substrateGatewayBuilder(c *config.Config, src *configwatch.Watcher, ready *
 		if c.Substrate.Usage.UsageEnabled() {
 			spend := &spendleader.Client{Leader: toLeader}
 			out.SpendLeader = spend
+			out.UsageSyncInterval = c.Substrate.Usage.EffectiveSyncInterval()
 			out.Usage = gateway.NewSubstrateLeaderUsage(spend, live, regs)
 		} else {
 			out.UsageDisabled = true

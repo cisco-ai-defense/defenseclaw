@@ -160,6 +160,8 @@ type SubstrateConfig struct {
 	// SpendLeader moves this replica's budget spend and usage onto the
 	// leader (nil: not a cluster replica, or usage disabled).
 	SpendLeader SubstrateSpendLeader
+	// UsageSyncInterval is substrate.usage.sync_interval (0: the default).
+	UsageSyncInterval time.Duration
 	// Bundles applies and shows signed policy bundles (nil: 501).
 	Bundles SubstrateBundles
 	// Activity receives the last-activity feed of A3's idle logic.
