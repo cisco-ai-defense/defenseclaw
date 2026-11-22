@@ -625,6 +625,11 @@ type ContinuousDiscoveryService struct {
 	// runtime remains the sole owner of signal records.
 	managedInventoryEmitMu sync.RWMutex
 	managedInventoryEmit   func(context.Context)
+	// skillInventoryEmit publishes the skill inventory after each full scan
+	// where managedInventoryEmit is not installed (an OSS per-user gateway).
+	// Unlike that hook it changes neither the scan cadence nor what a scan
+	// saves.
+	skillInventoryEmit func(context.Context)
 	// skillFactsSeen keeps one skill scan's folder facts by path: a shared
 	// folder such as ~/.agents/skills is walked once per agent reading it.
 	skillFactsMu   sync.Mutex
@@ -1500,7 +1505,7 @@ func (s *ContinuousDiscoveryService) fanoutReport(ctx context.Context, report AI
 	// the hook without an aiRestart. Hook-presence is the same
 	// live-mode indicator the hook-fire path below uses.
 	s.managedInventoryEmitMu.RLock()
-	emit := s.managedInventoryEmit
+	emit, skillEmit := s.managedInventoryEmit, s.skillInventoryEmit
 	s.managedInventoryEmitMu.RUnlock()
 	// managed_enterprise (live: hook installed) ships the endpoint
 	// inventory to AI Defense on the FULL-scan cadence
@@ -1554,6 +1559,8 @@ func (s *ContinuousDiscoveryService) fanoutReport(ctx context.Context, report AI
 	// the hook fire to disagree within one fanout.
 	if emit != nil {
 		emit(ctx)
+	} else if full && skillEmit != nil {
+		skillEmit(ctx)
 	}
 }
 
@@ -1575,6 +1582,18 @@ func (s *ContinuousDiscoveryService) SetManagedInventoryEmitHook(fn func(context
 	}
 	s.managedInventoryEmitMu.Lock()
 	s.managedInventoryEmit = fn
+	s.managedInventoryEmitMu.Unlock()
+}
+
+// SetSkillInventoryEmitHook installs the sidecar callback that publishes the
+// skill inventory after each full scan of a gateway outside
+// managed_enterprise. A nil callback clears it.
+func (s *ContinuousDiscoveryService) SetSkillInventoryEmitHook(fn func(context.Context)) {
+	if s == nil {
+		return
+	}
+	s.managedInventoryEmitMu.Lock()
+	s.skillInventoryEmit = fn
 	s.managedInventoryEmitMu.Unlock()
 }
 

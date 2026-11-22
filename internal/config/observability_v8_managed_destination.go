@@ -51,6 +51,13 @@ const (
 	// correlate skills / plugins with their parent agent (e.g. codex, claudecode).
 	ObservabilityV8ManagedSkillInventoryAction  observability.ProducerKey = "managed_skill_inventory"
 	ObservabilityV8ManagedPluginInventoryAction observability.ProducerKey = "managed_plugin_inventory"
+	// ObservabilityV8SkillInventoryAction is the routing identity of the
+	// per-skill inventory outside Secure Client: an OSS per-user gateway
+	// sends it to local audit and the user's own destinations, a managed
+	// standalone gateway to local audit and the administrator's destinations,
+	// each with its own redaction profile. It is never reserved or projected
+	// for AI Defense; a Secure Client endpoint sends the managed action above.
+	ObservabilityV8SkillInventoryAction observability.ProducerKey = "skill_inventory"
 	// ObservabilityV8LocalInventoryDiagnosticAction carries incomplete,
 	// overflowed, or otherwise non-authoritative scans to local SQLite only.
 	// It can never be projected as a managed inventory snapshot.

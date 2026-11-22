@@ -48,11 +48,10 @@ import (
 // guaranteed complete bundle every managedInventoryFullBundleInterval so a cloud
 // that missed the baseline always re-baselines within a day.
 //
-// The whole mechanism is managed_enterprise-exclusive:
-// newManagedInventoryPublishState returns nil for every other deployment mode,
-// and every method here is nil-receiver safe with "never suppress" semantics. A
-// nil gate therefore reproduces the pre-change behavior exactly, so OSS and
-// other non-managed deployments are untouched and no state file is created.
+// Outside Secure Client the same gate keeps the skill inventory
+// (emitSkillInventory) in its own file, skillInventoryPublishStateFile, so a
+// machine that later moves to Secure Client re-baselines AI Defense in full.
+// Every method here is nil-receiver safe with "never suppress" semantics.
 const (
 	// managedInventoryFullBundleInterval is release-owned: AI Defense receives
 	// one complete, self-consistent copy of the endpoint inventory at least
@@ -62,6 +61,9 @@ const (
 	managedInventoryFullBundleInterval = 24 * time.Hour
 
 	managedInventoryPublishStateFile = "managed_inventory_publish_state.json"
+	// skillInventoryPublishStateFile is the skill inventory state of an OSS
+	// per-user or managed standalone gateway, in that gateway's data dir.
+	skillInventoryPublishStateFile = "skill_inventory_publish_state.json"
 	// Version 2 invalidates v1 publish digests so the first complete scan after
 	// upgrade re-baselines AI Defense with connector-native MCP details. This is
 	// required because v1 could record a successful native publish before the
@@ -128,19 +130,23 @@ type managedInventoryPublishState struct {
 	receiptBinding    manifestReceiptRuntimeBinding
 }
 
-// newManagedInventoryPublishState returns nil outside managed_enterprise. A nil
-// state is the OSS/non-managed path: no digest is ever computed and no state
-// file is ever created or read.
+// newManagedInventoryPublishState returns the publish state of cfg's
+// gateway: the managed inventory state on a Secure Client endpoint, the skill
+// inventory state everywhere else. It returns nil without a data dir.
 func newManagedInventoryPublishState(cfg *config.Config) *managedInventoryPublishState {
-	if cfg == nil || !managed.IsManagedEnterprise(cfg.DeploymentMode) {
+	if cfg == nil {
 		return nil
 	}
 	dataDir := strings.TrimSpace(cfg.DataDir)
 	if dataDir == "" {
 		return nil
 	}
+	name := skillInventoryPublishStateFile
+	if managed.IsManagedEnterprise(cfg.DeploymentMode) && cfg.ManagedAIDOnly() {
+		name = managedInventoryPublishStateFile
+	}
 	state := &managedInventoryPublishState{
-		path: filepath.Join(dataDir, managedInventoryPublishStateFile),
+		path: filepath.Join(dataDir, name),
 	}
 	state.file = loadManagedInventoryPublishFile(state.path)
 	return state

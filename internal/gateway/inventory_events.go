@@ -225,8 +225,13 @@ func emitEndpointInventory(
 	gate *managedInventoryPublishState,
 	toolStates ...*mcpToolInventory,
 ) error {
-	if !ManagedEnterpriseActive() || ctx == nil || emitter == nil {
+	if ctx == nil || emitter == nil {
 		return nil
+	}
+	if !ManagedEnterpriseActive() {
+		// Outside Secure Client the skill inventory is the only endpoint
+		// collection, sent to the operator's own destinations.
+		return emitSkillInventory(ctx, cfg, emitter, discoveryReport, gate)
 	}
 	// bundleScope: only a cycle carrying a COMPLETE discovery report may satisfy
 	// the daily complete-bundle guarantee, and there are two ways to fail that.
@@ -297,8 +302,8 @@ func emitEndpointInventory(
 	// ai_component.observed record with defenseclaw.agent.discovery.connector
 	// pointing at the parent connector (e.g. codex, claudecode) so downstream
 	// can correlate skills / plugins / MCP servers with their owning agent.
-	// managed_enterprise gates the whole function above, so this whole block
-	// is inert in unmanaged mode.
+	// Only a Secure Client endpoint reaches this block; elsewhere the skill
+	// inventory is published by emitSkillInventory alone.
 	if discoveryReport != nil {
 		discoveryPartial := !aiDiscoveryReportComplete(discoveryReport)
 		mcpEntries := discoveredMCPEntriesFromReport(*discoveryReport)
@@ -309,22 +314,8 @@ func emitEndpointInventory(
 		); err != nil && firstErr == nil {
 			firstErr = err
 		}
-		// A failure in another detector does not make the skill collection
-		// partial. An incomplete skill scan stays diagnostic and cannot advance
-		// the endpoint's last successfully published skill state.
-		skillsComplete := skillScanComplete(discoveryReport)
-		skillEntries := publish.cycle.trackSkills(
-			discoveredEntriesFromReport(*discoveryReport, inventory.SignalSkill, "skill"),
-			skillsComplete,
-		)
-		// A partial skill list cannot prune saved receipts or advance a manifest.
-		if skillsComplete && cfg != nil && cfg.AIDiscovery.IncludeSkillManifests {
-			publish.cycle.refreshManifestReceipts(ctx, emitter, skillEntries)
-			publish.cycle.attachSkillManifests(skillEntries)
-		}
-		if err := emitEndpointInventorySnapshot(
-			ctx, emitter, endpointSkillInventorySource, skillEntries, !skillsComplete,
-			config.ObservabilityV8ManagedSkillInventoryAction, publish,
+		if err := emitSkillInventorySnapshot(
+			ctx, cfg, emitter, discoveryReport, publish, config.ObservabilityV8ManagedSkillInventoryAction,
 		); err != nil && firstErr == nil {
 			firstErr = err
 		}
@@ -1217,6 +1208,85 @@ func endpointMCPComponentsFromServers(servers []config.MCPServerEntry, fingerpri
 	return components
 }
 
+// emitSkillInventory publishes the per-skill inventory of one discovery scan
+// outside Secure Client: an OSS per-user gateway to local audit and the
+// user's own destinations, a managed standalone gateway to local audit and
+// the administrator's destinations. The records carry the same metadata as
+// the Secure Client inventory (ids, names, scope, home-relative location,
+// agents, content hash, publisher, plugin, declared version and description,
+// new/changed/unchanged/removed state) under ObservabilityV8SkillInventoryAction,
+// so each destination applies its own redaction profile. SKILL.md text is
+// added only with ai_discovery.include_skill_manifests; receipt recovery
+// stays with AI Defense. The publish state gate keeps an unchanged collection
+// to one copy a day.
+func emitSkillInventory(
+	ctx context.Context,
+	cfg *config.Config,
+	emitter sidecarRuntimeEmitter,
+	report *inventory.AIDiscoveryReport,
+	gate *managedInventoryPublishState,
+) error {
+	if ManagedEnterpriseActive() || ctx == nil || emitter == nil || cfg == nil || !cfg.AIDiscovery.Enabled ||
+		report == nil || strings.TrimSpace(report.Summary.ScanID) == "" {
+		return nil
+	}
+	scanID := strings.TrimSpace(report.Summary.ScanID)
+	publish := endpointInventoryCycle{
+		scanID: endpointInventoryCycleScanID(scanID),
+		cycle:  gate.beginCycle(scanID, time.Now().UTC(), skillScanComplete(report)),
+	}
+	defer publish.cycle.commit()
+	return emitSkillInventorySnapshot(ctx, cfg, emitter, report, publish, config.ObservabilityV8SkillInventoryAction)
+}
+
+// makeSkillInventoryEmitter is the scan hook of a gateway outside
+// managed_enterprise: after each full scan it publishes the latest report's
+// skill inventory (emitSkillInventory).
+func makeSkillInventoryEmitter(
+	cfg *config.Config,
+	emitter sidecarRuntimeEmitter,
+	snapshotFn func() inventory.AIDiscoveryReport,
+	gate *managedInventoryPublishState,
+) func(context.Context) {
+	return func(ctx context.Context) {
+		if snapshotFn == nil {
+			return
+		}
+		report := snapshotFn()
+		_ = emitSkillInventory(ctx, cfg, emitter, &report, gate)
+	}
+}
+
+// emitSkillInventorySnapshot publishes the skill collection of report under
+// action. A failure in another detector does not make the skill collection
+// partial. An incomplete skill scan stays diagnostic and cannot advance the
+// endpoint's last successfully published skill state.
+func emitSkillInventorySnapshot(
+	ctx context.Context,
+	cfg *config.Config,
+	emitter sidecarRuntimeEmitter,
+	report *inventory.AIDiscoveryReport,
+	publish endpointInventoryCycle,
+	action observability.ProducerKey,
+) error {
+	skillsComplete := skillScanComplete(report)
+	skillEntries := publish.cycle.trackSkills(
+		discoveredEntriesFromReport(*report, inventory.SignalSkill, "skill"),
+		skillsComplete,
+	)
+	// A partial skill list cannot prune saved receipts or advance a manifest.
+	if skillsComplete && cfg != nil && cfg.AIDiscovery.IncludeSkillManifests {
+		if action == config.ObservabilityV8ManagedSkillInventoryAction {
+			// Receipts are AI Defense's; no other destination has them.
+			publish.cycle.refreshManifestReceipts(ctx, emitter, skillEntries)
+		}
+		publish.cycle.attachSkillManifests(skillEntries)
+	}
+	return emitEndpointInventorySnapshot(
+		ctx, emitter, endpointSkillInventorySource, skillEntries, !skillsComplete, action, publish,
+	)
+}
+
 func emitEndpointInventorySnapshot(
 	ctx context.Context,
 	emitter sidecarRuntimeEmitter,
@@ -1358,7 +1428,8 @@ func emitInventorySnapshot(
 			componentContext, emitter, source, scanID, component,
 			recordSource, action, phase, detector,
 		)
-		if publish.cycle != nil && !managedInventoryPublishRejected(outcome) {
+		if publish.cycle != nil && action == config.ObservabilityV8ManagedSkillInventoryAction &&
+			!managedInventoryPublishRejected(outcome) {
 			publish.cycle.observeManifestProjection(component, outcome)
 		}
 		if managedInventoryPublishRejected(outcome) {
@@ -1387,7 +1458,8 @@ func managedInventoryLimit(action observability.ProducerKey) int {
 	case config.ObservabilityV8ManagedAgentInventoryAction:
 		return 64
 	case config.ObservabilityV8ManagedSkillInventoryAction,
-		config.ObservabilityV8ManagedPluginInventoryAction:
+		config.ObservabilityV8ManagedPluginInventoryAction,
+		config.ObservabilityV8SkillInventoryAction:
 		return 512
 	default:
 		return 0
@@ -1493,7 +1565,8 @@ func endpointInventoryCarrierFor(
 			agentMetadata:    observability.Present(observability.TelemetryStructuredDefenseClawInventoryAgentMetadata{Items: metadata}),
 		}, true
 	case config.ObservabilityV8ManagedSkillInventoryAction,
-		config.ObservabilityV8ManagedPluginInventoryAction:
+		config.ObservabilityV8ManagedPluginInventoryAction,
+		config.ObservabilityV8SkillInventoryAction:
 		// Per-entry skill / plugin inventories don't populate a structured
 		// aggregate carrier today — each component still flows through
 		// emitEndpointInventoryComponent below as its own ai_component.observed

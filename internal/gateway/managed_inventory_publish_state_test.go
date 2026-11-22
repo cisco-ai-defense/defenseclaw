@@ -681,14 +681,17 @@ func TestManagedInventoryPublishStateSurvivesRestart(t *testing.T) {
 // TestManagedInventoryPublishStateNilOutsideManagedEnterprise is the OSS pin:
 // no gate object, therefore no digest work and no state file, in every other
 // deployment mode.
-func TestManagedInventoryPublishStateNilOutsideManagedEnterprise(t *testing.T) {
+// Outside managed_enterprise the gate keeps only the skill inventory state,
+// in its own file, and creating it writes nothing.
+func TestManagedInventoryPublishStateOutsideManagedEnterpriseIsTheSkillState(t *testing.T) {
 	for _, mode := range []string{"", "standalone", "oss", "managed", "enterprise", "MANAGED-ENTERPRISE"} {
 		t.Run("mode="+mode, func(t *testing.T) {
 			dataDir := t.TempDir()
-			if state := newManagedInventoryPublishState(&config.Config{
+			state := newManagedInventoryPublishState(&config.Config{
 				DeploymentMode: mode, DataDir: dataDir,
-			}); state != nil {
-				t.Fatalf("mode %q produced a publish gate", mode)
+			})
+			if state == nil || state.path != filepath.Join(dataDir, skillInventoryPublishStateFile) {
+				t.Fatalf("mode %q: publish gate %+v, want the skill inventory state", mode, state)
 			}
 			entries, err := os.ReadDir(dataDir)
 			if err != nil {

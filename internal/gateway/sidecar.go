@@ -1146,6 +1146,14 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 			discovery.SetManagedInventoryEmitHook(inventoryEmit)
 		}
 		initialInventoryEmit = inventoryEmit
+	} else if discovery := s.aiDiscoverySnapshot(); discovery != nil {
+		// An OSS per-user gateway publishes the skill inventory, and only
+		// that, to local audit and the user's own destinations after each
+		// full scan.
+		s.inventoryPublish.SetSkillManifestReader(discovery.SkillManifest)
+		discovery.SetSkillInventoryEmitHook(makeSkillInventoryEmitter(
+			s.currentConfig(), s.observabilityV8Emitter(), discovery.Snapshot, s.inventoryPublish,
+		))
 	}
 
 	runID := gatewaylog.ProcessRunID()
@@ -2762,14 +2770,20 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 		)
 		if svc != nil {
 			s.inventoryPublish.SetSkillManifestReader(svc.SkillManifest)
+			svc.SetSkillInventoryEmitHook(nil)
 			svc.SetManagedInventoryEmitHook(inventoryEmit)
 		}
 		inventoryEmit(ctx)
 	} else if svc := s.aiDiscoverySnapshot(); svc != nil {
 		// The discovery service can survive a deployment-mode-only reload.
 		// Clear the generation-owned callback so later scan cadences cannot
-		// retain managed endpoint inventory behavior.
+		// retain managed endpoint inventory behavior, and publish the skill
+		// inventory the OSS way from the just-published config.
 		svc.SetManagedInventoryEmitHook(nil)
+		s.inventoryPublish.SetSkillManifestReader(svc.SkillManifest)
+		svc.SetSkillInventoryEmitHook(makeSkillInventoryEmitter(
+			s.currentConfig(), s.observabilityV8Emitter(), svc.Snapshot, s.inventoryPublish,
+		))
 	}
 
 	if watcherRestart {
