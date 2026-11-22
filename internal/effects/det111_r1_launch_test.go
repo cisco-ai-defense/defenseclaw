@@ -11,13 +11,7 @@ import (
 
 // det111LaunchPending are launcher rows the IR does not lower yet, with the
 // lane that closes each. A pending row that starts to pass fails the test.
-var det111LaunchPending = map[string]string{
-	"det111/GAP-1142/seed-abs-add-content/seed":        "pwsh has no POSIX program row (S4-R2)",
-	"det111/GAP-1142/linux-rel-dotdot-add-content/var": "pwsh has no POSIX program row (S4-R2)",
-	"det111/GAP-1142/linux-rel-set-content/var":        "pwsh has no POSIX program row (S4-R2)",
-	"det111/GAP-1142/macos-rel-dotdot-add-content/var": "pwsh has no POSIX program row (S4-R2)",
-	"det111/GAP-1142/macos-rel-set-content/var":        "pwsh has no POSIX program row (S4-R2)",
-}
+var det111LaunchPending = map[string]string{}
 
 // TestDET111R1LaunchTable is the fail-before table of the PowerShell launcher
 // rows routed to S3-R1 (DET111 ruling 22:32Z: GAP-1557 -wd and positional

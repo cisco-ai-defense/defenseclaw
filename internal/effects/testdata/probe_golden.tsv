@@ -970,7 +970,7 @@ psr10-H02 posix: pwsh -WorkingDirectory	U|
 psr10-H03 posix: pwsh -File	U|
 psr10-H04 posix: unknown option	U|
 psr10-H05 posix: -Option:value	U|
-psr10-H06 posix: known valued option	U|
+psr10-H06 posix: known valued option	K|delete:/home/u/.ssh/authorized_keys
 psr10-H07 posix: dynamic option	U|
 psr10-H08 cmd: pwsh -wd	U|
 psr9-G02 pwsh -nop -c in order	K|delete:/home/u/.ssh/authorized_keys,delete:/home/u/authorized_keys
