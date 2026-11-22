@@ -950,7 +950,7 @@ var builtinHookContracts = map[string][]HookContract{
 		Events: []string{
 			"defenseclaw.plugin.loaded",
 			"session.created", "session.status", "session.idle",
-			"session.error", "session.deleted",
+			"session.error", "session.deleted", "session.prompt",
 			"tool.execute.before", "tool.execute.after",
 		},
 		AIDSurfaces: []string{"tool_call", "tool_result"},
