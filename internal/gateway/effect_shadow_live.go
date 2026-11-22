@@ -163,7 +163,10 @@ func effectShadowRun(request trustedActionRequest, mode effectRulesMode, tiers .
 		res := &results[i]
 		res.Sets, res.Program, res.Kind, res.Reach, res.RoleHeld, res.LinkHeld, res.Known = c.sets, c.program, c.kind, c.reach, c.roleHeld, c.linkHeld, c.known
 		res.KnownMutation, res.LinkTo = c.knownMutation, c.linkTo && !c.linkAt
-		res.ReadProofs = c.readProofs
+		res.ReadProofs, res.RestrictedSets = c.readProofs, c.restrictedSets
+		if len(c.writtenCredentialSets) == 1 {
+			res.WrittenCredentialSet = c.writtenCredentialSets[0]
+		}
 		switch {
 		case c.restricted:
 			res.Tier = string(effectTierRestricted)

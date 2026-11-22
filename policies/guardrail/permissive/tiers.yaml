@@ -20,6 +20,14 @@ rows:
     managed:
       floor: allow
       ceiling: record
+  - id: effect-own-key-write
+    source: rel-1-0-10:no rule on an own SSH private key write (GAP-1878)
+    per_user:
+      floor: allow
+      ceiling: record
+    managed:
+      floor: allow
+      ceiling: record
   - id: effect-link
     source: DET111 effects link at a member (sweep T17)
     per_user:

@@ -115,6 +115,14 @@ type EffectShadowResult struct {
 	// LinkTo marks a call whose link names a protected member as its target
 	// and puts no link at a member (decide.Proof.LinkTo).
 	LinkTo bool `json:"-"`
+	// RestrictedSets are the sets of the exact members that made the call
+	// restricted (the restricted proof's target); Sets also has the sets the
+	// call touched otherwise.
+	RestrictedSets []string `json:"-"`
+	// WrittenCredentialSet is the one credential file class every exact
+	// credential member a restricted mutation of the call names belongs to
+	// (decide.Proof.Set of the mutation proof); "" when none or several.
+	WrittenCredentialSet string `json:"-"`
 	// ReadProofs are private decision inputs. Do not serialize member paths or
 	// credential classes into the shadow telemetry record.
 	ReadProofs []decide.Proof `json:"-"`
@@ -399,6 +407,15 @@ type effectClass struct {
 	known         bool
 	knownMutation bool
 	readProofs    []decide.Proof
+	// restrictedSets are the sets of the exact members that made the call
+	// restricted: the sets the restricted verdict is about. A file of ~/.ssh
+	// is also a known member of the authorized-keys set by its folder, but
+	// only an exact member decides the tier (GAP-1878).
+	restrictedSets []string
+	// writtenCredentialSets are the credential file classes
+	// (decide.CredentialSet) of the exact own-home credential members a
+	// restricted-eligible mutation of the call names.
+	writtenCredentialSets []string
 }
 
 // classifyEffects applies the owner's three answers (2026-11-13): a known
@@ -491,6 +508,10 @@ func classifyEffects(result effects.Result, facts []*semanticpb.EffectFact, flav
 				continue
 			}
 			c.restricted = true
+			c.restrictedSets = append(c.restrictedSets, m.GetSet())
+			if m.GetSet() == effectrules.SetCredentials {
+				c.writtenCredentialSets = append(c.writtenCredentialSets, decide.CredentialSet(effectCredentialMemberTail(t.GetPath())))
+			}
 			// The authorized-keys ruling blocks in every pack. A state write
 			// keeps the 1.0.10 tier of tamper.detector_state_write (alert in
 			// the default packs, block in strict): the lane raises, it does
@@ -502,6 +523,8 @@ func classifyEffects(result effects.Result, facts []*semanticpb.EffectFact, flav
 	}
 	c.sets = dedupeStrings(touchSets)
 	c.reach = dedupeStrings(c.reach)
+	c.restrictedSets = dedupeStrings(c.restrictedSets)
+	c.writtenCredentialSets = dedupeStrings(c.writtenCredentialSets)
 	return c
 }
 
@@ -858,12 +881,19 @@ const effectProofSource = "effects"
 // when the call has no Maybe reach; credential reads carry separate
 // member-specific Decide proofs.
 func effectFindingProof(res EffectShadowResult) decide.Proof {
+	sets := res.Sets
+	if res.Tier == string(effectTierRestricted) && len(res.RestrictedSets) > 0 {
+		sets = res.RestrictedSets
+	}
 	p := decide.Proof{
 		Kind:      effectProofKind(res.Kind),
-		Target:    effectProofTarget(res.Sets),
+		Target:    effectProofTarget(sets),
 		Certainty: decide.CertKnown,
 		Source:    effectProofSource,
 		LinkTo:    res.LinkTo,
+	}
+	if p.Target == decide.TargetCredential {
+		p.Set = res.WrittenCredentialSet
 	}
 	if res.Tier != string(effectTierRestricted) && (!res.KnownMutation || len(res.Reach) > 0) {
 		p.Certainty = decide.CertMaybe

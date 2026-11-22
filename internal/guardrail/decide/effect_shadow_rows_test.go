@@ -26,6 +26,7 @@ func TestEffectShadowOnlyRows(t *testing.T) {
 		return Finding{RuleID: rule, Severity: SevCritical, Proof: p}
 	}
 	linkTo := func(f Finding) Finding { f.Proof.LinkTo = true; return f }
+	inSet := func(f Finding, set string) Finding { f.Proof.Set = set; return f }
 	for _, tc := range []struct {
 		name   string
 		f      Finding
@@ -52,6 +53,18 @@ func TestEffectShadowOnlyRows(t *testing.T) {
 		// call can write through: it keeps its row (GAP-1530, GAP-1538).
 		{"restricted link to authorized_keys", linkTo(effect(RuleEffectRestricted, KindLink, TargetAuthorizedKeys, CertKnown)), false},
 		{"restricted link to credential", linkTo(effect(RuleEffectRestricted, KindLink, TargetCredential, CertKnown)), false},
+		// GAP-1878: an own SSH private key write, append or mode change no
+		// 1.0.10 rule names is recorded; a delete, another credential class,
+		// a write with no single class and another account's key keep rows.
+		{"restricted write own ssh key", inSet(effect(RuleEffectRestricted, KindWrite, TargetCredential, CertKnown), SetSSHPrivateKey), true},
+		{"restricted append own ssh key", inSet(effect(RuleEffectRestricted, KindAppend, TargetCredential, CertKnown), SetSSHPrivateKey), true},
+		{"restricted perm own ssh key", inSet(effect(RuleEffectRestricted, KindPerm, TargetCredential, CertKnown), SetSSHPrivateKey), true},
+		{"restricted delete own ssh key", inSet(effect(RuleEffectRestricted, KindDelete, TargetCredential, CertKnown), SetSSHPrivateKey), false},
+		{"restricted link own ssh key", inSet(effect(RuleEffectRestricted, KindLink, TargetCredential, CertKnown), SetSSHPrivateKey), true},
+		{"restricted write own aws credentials", inSet(effect(RuleEffectRestricted, KindWrite, TargetCredential, CertKnown), SetAWSCredentials), false},
+		{"restricted write credential no single class", effect(RuleEffectRestricted, KindWrite, TargetCredential, CertKnown), false},
+		{"restricted write other home ssh key", inSet(effect(RuleEffectRestricted, KindWrite, TargetOtherHomeCredential, CertKnown), SetSSHPrivateKey), false},
+		{"legacy write own ssh key", Finding{RuleID: RuleEffectRestricted, Severity: SevCritical, Proof: Proof{Kind: KindWrite, Target: TargetCredential, Certainty: CertKnown, Set: SetSSHPrivateKey, Source: "PATH-SSH-KEY"}}, false},
 		{"effects read ssh key", Finding{RuleID: "PATH-SSH-KEY", Severity: SevCritical, Proof: Proof{Kind: KindRead, Target: TargetCredential, Certainty: CertKnown, Set: SetSSHPrivateKey, Source: SourceEffects}}, true},
 		{"effects read aws", Finding{RuleID: "PATH-AWS-CREDS", Severity: SevCritical, Proof: Proof{Kind: KindRead, Target: TargetCredential, Certainty: CertKnown, Set: SetAWSCredentials, Source: SourceEffects}}, true},
 		{"effects read other home ssh key", Finding{RuleID: "PATH-SSH-KEY", Severity: SevCritical, Proof: Proof{Kind: KindRead, Target: TargetOtherHomeCredential, Certainty: CertKnown, Set: SetSSHPrivateKey, Source: SourceEffects}}, false},
