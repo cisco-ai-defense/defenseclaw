@@ -185,7 +185,7 @@ func substratePrepareCloneHere(cmd *cobra.Command, f *substrateRunFlags) (string
 		return dir, nil
 	}
 	if up.Commits > 0 || up.Dirty {
-		return "", cliusage.WithExitCode(errors.New("on Windows, --clone . does not send unpushed commits or uncommitted changes yet; commit and push them first, or use run without --clone ."), 2)
+		return "", cliusage.WithExitCode(errors.New("on Windows, --clone . does not send unpushed commits or uncommitted changes yet; commit and push them first, or leave out --clone"), 2)
 	}
 	f.clone, f.ref = up.URL, up.Base
 	if up.AtTip && up.Branch != "" && up.Branch != "HEAD" {

@@ -222,7 +222,7 @@ func TestSyncSuspendedWaitsAndGoneStops(t *testing.T) {
 
 func TestSyncStopsCleanNoGoroutines(t *testing.T) {
 	o, sb, _ := copyInActor(t)
-	sb.Client.HTTP.CloseIdleConnections()
+	sb.HTTP.CloseIdleConnections()
 	time.Sleep(100 * time.Millisecond)
 	before := runtime.NumGoroutine()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -235,7 +235,7 @@ func TestSyncStopsCleanNoGoroutines(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitFor(t, "goroutines to end", func() bool {
-		sb.Client.HTTP.CloseIdleConnections()
+		sb.HTTP.CloseIdleConnections()
 		return runtime.NumGoroutine() <= before
 	})
 }
