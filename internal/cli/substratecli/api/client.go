@@ -320,6 +320,9 @@ type LauncherGit struct {
 	HTTPSRewrite []config.SubstrateGitRewrite `json:"https_rewrite"`
 	Submodules   bool                         `json:"submodules"`
 	LFS          bool                         `json:"lfs"`
+	// PushBranch is the cluster's substrate.git.push_branch (allow, ask or
+	// deny; "" from a gateway before 1.0.11).
+	PushBranch string `json:"push_branch_effective,omitempty"`
 }
 
 // LauncherFiles is substrate.files as the gateway reports it.

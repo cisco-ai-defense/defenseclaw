@@ -129,6 +129,19 @@ const bindingRulePrefix = "binding:"
 // BindingRule is the Rule of the secret_binding ask for binding id.
 func BindingRule(id string) string { return bindingRulePrefix + id }
 
+// KindGitPush is a person's ask to push an actor's work to its origin as
+// a branch (B2 2.4, substrate pull --push-branch). Host is the git host,
+// Tool the branch and Rule GitPushRule(repo). Its approval adds no host to
+// the actor's policy; with Always it covers the same person, profile and
+// host.
+const KindGitPush = "git_push"
+
+const gitPushRulePrefix = "git_push:"
+
+// GitPushRule is the Rule of the git_push ask for repo (the path on its
+// host, such as team/app).
+func GitPushRule(repo string) string { return gitPushRulePrefix + repo }
+
 // BindingID is the binding a secret_binding ask is about, "" for any
 // other ask.
 func (a Ask) BindingID() string {
@@ -596,7 +609,8 @@ func firstNonEmpty(a, b string) string {
 // HostWide reports whether an approval of an ask raised by rule covers its
 // whole host (an ask_hosts rule, or no rule named): such an approval joins
 // the actor's approved hosts. A url_rules ask asks about some methods and a
-// path prefix only, so its approval covers that rule alone (GAP-0177).
+// path prefix only, so its approval covers that rule alone (GAP-0177). A
+// git_push ask is about one push, never the host's egress.
 func HostWide(rule string) bool {
-	return !strings.HasPrefix(rule, "url_rules:")
+	return !strings.HasPrefix(rule, "url_rules:") && !strings.HasPrefix(rule, gitPushRulePrefix)
 }

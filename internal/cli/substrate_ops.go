@@ -138,18 +138,18 @@ func runSubstratePull(cmd *cobra.Command, f *substratePullFlags, ref string) err
 		return err
 	}
 	modes := 0
-	for _, on := range []bool{f.apply, f.branch != "", f.patch != ""} {
+	for _, on := range []bool{f.apply, f.branch != "", f.patch != "", f.pushBranch != ""} {
 		if on {
 			modes++
 		}
 	}
 	if modes > 1 {
-		return cliusage.WithExitCode(errors.New("choose one of --apply, --branch NAME or --patch-out FILE"), 2)
+		return cliusage.WithExitCode(errors.New("choose one of --apply, --branch NAME, --patch-out FILE or --push-branch NAME"), 2)
 	}
-	if f.allowFlagged && !f.apply {
+	if f.allowFlagged && !f.apply && f.pushBranch == "" {
 		// Refused before anything is read, also on an empty pull
 		// (GAP-0531).
-		return cliusage.WithExitCode(errors.New("--allow-flagged goes with --apply (a branch or a patch writes nothing that runs)"), 2)
+		return cliusage.WithExitCode(errors.New("--allow-flagged goes with --apply or --push-branch (a branch or a patch writes nothing that runs)"), 2)
 	}
 	s, err := substrateOpen(cmd, &f.com)
 	if err != nil {
@@ -164,11 +164,14 @@ func runSubstratePull(cmd *cobra.Command, f *substratePullFlags, ref string) err
 	if a.State == substrateStateCrashed {
 		return substrateFail(substrateCrashedErr(a))
 	}
+	if f.pushBranch != "" {
+		return runSubstratePushBranch(ctx, cmd, f, s, a, asJSON)
+	}
 	name := substrateCopyName(a)
 	dataDir := auth.StateDir()
 	if !workspace.HasCopy(dataDir, name) {
 		return fmt.Errorf("this computer has no record of the folder you sent to %s/%s, so it cannot tell what the agent changed. "+
-			"Pull from the computer you ran it on, or push from inside the agent (defenseclaw substrate connect %s, then git push)", a.Atespace, a.Name, a.Name)
+			"Pull from the computer you ran it on, or push the work to its origin as a branch: defenseclaw substrate pull %s --push-branch NAME", a.Atespace, a.Name, a.Name)
 	}
 	rel, err := substrateOpenRelay(ctx, s, a)
 	if err != nil {

@@ -574,11 +574,15 @@ const (
 	SubstrateSandboxMicroVM = "microvm"
 	SubstrateAsksDeny       = "deny"
 	SubstrateAsksQueue      = "queue"
-	SubstrateFailClosed     = "closed"
-	SubstrateFailOpen       = "open"
-	SubstrateBodyAuto       = "auto"
-	SubstrateBodyOn         = "on"
-	SubstrateBodyOff        = "off"
+	// substrate.git.push_branch and the floor key git_push (B2 2.4).
+	SubstrateGitPushAllow = "allow"
+	SubstrateGitPushAsk   = "ask"
+	SubstrateGitPushDeny  = "deny"
+	SubstrateFailClosed   = "closed"
+	SubstrateFailOpen     = "open"
+	SubstrateBodyAuto     = "auto"
+	SubstrateBodyOn       = "on"
+	SubstrateBodyOff      = "off"
 )
 
 func orDefault(v, def string) string {
@@ -656,6 +660,10 @@ type SubstrateGitConfig struct {
 	// LFS: run --clone fetches Git LFS files when the template has git-lfs
 	// (true when unset); off leaves them as pointer files.
 	LFS *bool `mapstructure:"lfs" yaml:"lfs,omitempty"`
+	// PushBranch is allow, ask (unset) or deny: whether `substrate pull
+	// --push-branch` pushes an actor's work to its origin as a new branch
+	// (B2 2.4). deny is the admin-off switch: it wins over every profile.
+	PushBranch string `mapstructure:"push_branch" yaml:"push_branch,omitempty"`
 }
 
 // MaxSubstrateGitRewrites caps substrate.git.https_rewrite.
@@ -691,6 +699,14 @@ func (g SubstrateGitConfig) EffectiveHTTPSRewrite() []SubstrateGitRewrite {
 
 // SubmodulesOn is substrate.git.submodules, true when unset.
 func (g SubstrateGitConfig) SubmodulesOn() bool { return g.Submodules == nil || *g.Submodules }
+
+// EffectivePushBranch is substrate.git.push_branch, ask when unset.
+func (g SubstrateGitConfig) EffectivePushBranch() string {
+	if v := strings.ToLower(strings.TrimSpace(g.PushBranch)); v != "" {
+		return v
+	}
+	return SubstrateGitPushAsk
+}
 
 // LFSOn is substrate.git.lfs, true when unset.
 func (g SubstrateGitConfig) LFSOn() bool { return g.LFS == nil || *g.LFS }
@@ -911,6 +927,11 @@ func (s *SubstrateConfig) Validate() error {
 	case SubstrateKeyReplayAsk, SubstrateKeyReplayOn, SubstrateKeyReplayOff:
 	default:
 		bad("launcher.key_replay", "%q is not ask, on or off", s.Launcher.KeyReplay)
+	}
+	switch s.Git.EffectivePushBranch() {
+	case SubstrateGitPushAllow, SubstrateGitPushAsk, SubstrateGitPushDeny:
+	default:
+		bad("git.push_branch", "%q is not allow, ask or deny", s.Git.PushBranch)
 	}
 	if n := len(s.Git.HTTPSRewrite); n > MaxSubstrateGitRewrites {
 		bad("git.https_rewrite", "has %d entries; at most %d", n, MaxSubstrateGitRewrites)

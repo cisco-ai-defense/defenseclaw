@@ -144,6 +144,7 @@ func (a *APIServer) newSubstrateAdminHandler(st *substrateState) http.Handler {
 	mux.HandleFunc("DELETE /api/v1/substrate/actors/{atespace}/{name}", a.substrateDeleteActor(st))
 	mux.HandleFunc("POST /api/v1/substrate/actors/{atespace}/{name}/policy/reset", a.substratePolicyReset(st))
 	mux.HandleFunc("POST /api/v1/substrate/actors/{atespace}/{name}/recover", a.substrateRecoverActor(st))
+	mux.HandleFunc("POST /api/v1/substrate/actors/{atespace}/{name}/push", a.substrateGitPush(st))
 	mux.HandleFunc("POST /api/v1/substrate/session-cert", a.substrateSessionCert(st))
 	mux.HandleFunc("/api/v1/substrate/actors/{atespace}/{name}/attach", a.substrateAttach(st))
 	mux.HandleFunc("/api/v1/substrate/actors/{atespace}/{name}/attach/{rest...}", a.substrateAttach(st))
@@ -942,13 +943,15 @@ func readAllLimited(r io.Reader, n int64) ([]byte, bool) {
 func substrateSwitch(read func() bool) bool { return read == nil || read() }
 
 // substrateLauncherGit is substrate.git as launchers use it: the effective
-// rewrite map (the default when unset) and the two switches.
+// rewrite map (the default when unset), the two switches and the
+// cluster's push_branch (a profile can tighten it; the push route decides).
 func substrateLauncherGit(read func() config.SubstrateGitConfig) map[string]any {
 	var g config.SubstrateGitConfig
 	if read != nil {
 		g = read()
 	}
-	return map[string]any{"https_rewrite": g.EffectiveHTTPSRewrite(), "submodules": g.SubmodulesOn(), "lfs": g.LFSOn()}
+	return map[string]any{"https_rewrite": g.EffectiveHTTPSRewrite(), "submodules": g.SubmodulesOn(), "lfs": g.LFSOn(),
+		"push_branch_effective": g.EffectivePushBranch()}
 }
 
 // substrateKeyReplay is substrate.launcher.key_replay for launchers; ask when

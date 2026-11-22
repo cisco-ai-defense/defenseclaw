@@ -257,7 +257,7 @@ func Clone(ctx context.Context, c *Client, dataDir, name, rawURL, ref string, op
 	if err := cloneBaseline(ctx, c, dataDir, rec); err != nil {
 		rec.Baseline, rec.Files, rec.Bytes = "", 0, 0
 		res.Note = "pull cannot review this agent's work (" + lastLine(strings.TrimPrefix(err.Error(), "workspace: ")) +
-			"); push from inside the agent with git instead"
+			"); push it to its origin as a branch instead with pull --push-branch NAME"
 	}
 	if err := rec.save(dataDir); err != nil {
 		return nil, fmt.Errorf("workspace: record the clone: %w", err)

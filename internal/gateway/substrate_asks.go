@@ -509,7 +509,7 @@ func (st *substrateState) substrateRecordDecision(ctx context.Context, reg regis
 // and host-wide for a host-wide ask or the same rule covering every method
 // for a url_rules ask (as within one actor, GAP-0177).
 func alwaysApprovalCovers(approved, asked asks.Ask) bool {
-	return approved.Always && approved.State == asks.StateApproved && approved.Kind != "tool" &&
+	return approved.Always && approved.State == asks.StateApproved && approved.Kind != "tool" && approved.Kind != asks.KindGitPush &&
 		approved.OwnerID == asked.OwnerID && approved.Profile == asked.Profile && approved.Host == asked.Host &&
 		(urlRuleApprovalCovers(approved.Rule, asked.Rule) || (asks.HostWide(asked.Rule) && asks.HostWide(approved.Rule)))
 }

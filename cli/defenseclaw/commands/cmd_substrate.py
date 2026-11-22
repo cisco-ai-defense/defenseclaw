@@ -548,7 +548,11 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             "your folder\n"
             "until you choose: --apply writes the changes into the folder, --branch NAME puts them on a new git "
             "branch,\n"
-            "--patch-out FILE writes a patch.\n"
+            "--patch-out FILE writes a patch. --push-branch NAME (Preview) pushes the agent's work from inside "
+            "the\n"
+            "agent to its checkout's origin as a new branch, with the credential the cluster adds for that host; "
+            "it\n"
+            "asks first unless your profile allows it, and never forces.\n"
             "\n"
             "When a change can run code on this machine, --apply asks first (the default answer is no). --yes "
             "takes\n"
@@ -558,14 +562,15 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
         ),
         example=(
             "defenseclaw substrate pull fix-tests-7f3a\n"
-            "defenseclaw substrate pull fix-tests-7f3a --branch agent/fix-tests"
+            "defenseclaw substrate pull fix-tests-7f3a --branch agent/fix-tests\n"
+            "defenseclaw substrate pull fix-tests-7f3a --push-branch agent/fix-tests"
         ),
         args=(_Arg("name"),),
         flags=(
             _Flag(
                 "allow-flagged",
                 "bool",
-                "with --apply: also write the files flagged as able to run code (review them first)",
+                "with --apply or --push-branch: also take the flagged files (review them first)",
             ),
             _Flag("apply", "bool", "write the changes into this folder"),
             _Flag("branch", "string", "put the changes on a new git branch of this name", metavar="NAME"),
@@ -574,6 +579,9 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             _Flag("json", "bool", "same as --output json"),
             _Flag("output", "string", "output format: text or json", short="o", default="text", metavar="FORMAT"),
             _Flag("patch-out", "string", "write the changes as a patch to this file", metavar="FILE"),
+            _Flag(
+                "push-branch", "string", "push the agent's work to its origin as a new branch of this name (Preview)"
+            ),
             _Flag(
                 "timeout",
                 "duration",

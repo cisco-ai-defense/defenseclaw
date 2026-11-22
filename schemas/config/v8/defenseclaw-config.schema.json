@@ -1514,6 +1514,16 @@
             "queue"
           ]
         },
+        "git_push": {
+          "description": "Agent Substrate only: whether substrate pull --push-branch may push an actor's work to its origin: allow, ask or deny. Deny wins, then ask; unset takes substrate.git.push_branch, and push_branch deny wins over this key.",
+          "type": "string",
+          "enum": [
+            "",
+            "allow",
+            "ask",
+            "deny"
+          ]
+        },
         "ask_timeout": {
           "description": "Agent Substrate only: how long a queued ask waits before it is denied (a Go duration, 1m to 24h), instead of substrate.unattended.ask_timeout. The shortest wins.",
           "type": "string",
@@ -8115,6 +8125,17 @@
             "lfs": {
               "type": "boolean",
               "default": true
+            },
+            "push_branch": {
+              "description": "Whether substrate pull --push-branch pushes an actor's work to its origin as a new branch: allow, ask (the default) or deny. Deny is the off switch and wins over every profile.",
+              "type": "string",
+              "enum": [
+                "",
+                "allow",
+                "ask",
+                "deny"
+              ],
+              "default": "ask"
             }
           }
         },
