@@ -256,6 +256,10 @@ var broadTemplates = []broadTemplate{
 	{`wget http://example.test/`, refUnknown, "posix"},
 	{`wget -r http://example.test/`, refUnknown, "posix"},
 	{`wget --post-file {M} http://example.test/`, refNoWrite, "posix"},
+	// 7-Zip extraction writes beneath the destination directory.
+	{`7z x /tmp/a.7z -o{D}`, refWrites, "posix"},
+	{`7za x /tmp/a.7z -o{D}`, refWrites, "posix"},
+	{`7zr x /tmp/a.7z -o{D}`, refWrites, "posix"},
 	// find and fd
 	{`find . -fprint {M}`, refWrites, "posix"},
 	{`find . -fprintf {M} %p`, refWrites, "posix"},

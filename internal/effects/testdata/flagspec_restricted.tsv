@@ -192,3 +192,12 @@ install	bsd	-U	0	inert
 install	bsd	-v	0	inert
 tee	bsd	-a	0	inert
 tee	bsd	-i	0	inert
+sed	bsd	-e	1	inert
+sed	bsd	-f	1	role:read
+sed	bsd	-i	1	inert
+sed	bsd	-I	1	inert
+sed	bsd	-l	1	inert
+sed	bsd	-E	0	inert
+sed	bsd	-n	0	inert
+sed	bsd	-u	0	inert
+sed	bsd	-a	0	inert

@@ -19,6 +19,10 @@ type Env struct {
 	// Resolve follows a write path through links; nil falls back to
 	// hookpaths.ResolveWriteTarget.
 	Resolve func(string) (string, bool)
+	// Identity reads a file's device and inode to find a hard link of a
+	// protected member (one stat per resolved target); nil reads the disk
+	// (DiskIdentity). Tests pass a HardLinkFixture.
+	Identity IdentityFunc
 	// AgentCreated reports whether an earlier call of this session wrote the
 	// target keyed by effects.Target.Key(). Nil means no session memory.
 	AgentCreated func(key string) bool
@@ -38,6 +42,7 @@ func Project(res effects.Result, env Env) []*semanticpb.EffectFact {
 		flavor = effects.FlavorPOSIX
 	}
 	sets := buildSets(env.Home, flavor)
+	ids := newIdentityCache(env.Identity, sets)
 
 	effs := res.Effects
 	if len(effs) > semantic.MaxEffects {
@@ -64,7 +69,7 @@ func Project(res effects.Result, env Env) []*semanticpb.EffectFact {
 				Wrappers: append([]string(nil), e.Origin.Wrappers...),
 				Depth:    int64(e.Origin.Depth),
 			},
-			Target: projectTarget(e.Target, e.TargetState, e.Kind, sets, flavor, env.Home, rsv, env.AgentCreated),
+			Target: projectTarget(e.Target, e.TargetState, e.Kind, sets, flavor, env.Home, rsv, env.AgentCreated, ids),
 		}
 		if e.Data != nil {
 			fact.DataKind = string(e.Data.Kind)
@@ -84,6 +89,7 @@ func projectTarget(
 	home string,
 	rsv resolver,
 	agentCreated func(string) bool,
+	ids *identityCache,
 ) *semanticpb.EffectTarget {
 	pt := &semanticpb.EffectTarget{
 		Type:   string(t.Type),
@@ -106,7 +112,7 @@ func projectTarget(
 		return pt
 	}
 	for _, name := range AllSets {
-		grade := gradeTarget(t, state, sets[name], flavor, rsv)
+		grade := gradeTarget(t, state, kind, sets[name], flavor, rsv)
 		if grade == gradeNo {
 			continue // absence folds to "no" in protected(); keep the list bounded
 		}
@@ -115,6 +121,13 @@ func projectTarget(
 			State:  string(grade),
 			Reason: matchBasis(t, grade, sets[name], flavor),
 		})
+	}
+	// A hard link of a member is the member under another name: the name
+	// reading cannot see it, the file identity does (GAP-1288/1289/1317/1318).
+	if ids != nil {
+		if hit, known := ids.hardLinkSets(t, rsv); len(hit) > 0 {
+			addIdentityMatches(pt, hit, known)
+		}
 	}
 	if mutatingKind(kind) {
 		for _, name := range AllSets {

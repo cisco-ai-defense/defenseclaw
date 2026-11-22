@@ -31,7 +31,11 @@ func TestPSReview5_R51EmbeddedQuote(t *testing.T) {
 		if has(r, KindWrite, `c:\work\x`, TargetStateKnown) && !hasReasonCode(r, ReasonOpaqueCode) {
 			t.Errorf("R5-1 %q trusts the quoted-payload write: %s", c, fmtRes(r))
 		}
-		if has(r, KindDelete, `c:\windows`, TargetStateKnown) {
+		// DET111 R1: the Start-Process child line is split as the child splits
+		// it (CommandLineToArgvW drops the quotes, so Remove-Item C:\Windows runs):
+		// that delete is the child's real effect. It may be known only beside the
+		// opaque marker (the child's edition is not known).
+		if has(r, KindDelete, `c:\windows`, TargetStateKnown) && (r.FullyKnown() || !hasReasonCode(r, ReasonOpaqueCode)) {
 			t.Errorf("R5-1 %q leaked a known delete: %s", c, fmtRes(r))
 		}
 	}
@@ -44,8 +48,10 @@ func TestPSReview5_R52StringArgumentList(t *testing.T) {
 	if r.FullyKnown() || !hasReasonCode(r, ReasonOpaqueCode) {
 		t.Fatalf("R5-2 not opaque: %s", fmtRes(r))
 	}
-	if has(r, KindDelete, `c:\windows`, TargetStateKnown) {
-		t.Fatalf("R5-2 leaked a known delete: %s", fmtRes(r))
+	// DET111 R1: the child runs Remove-Item C:\Windows (its argv split drops the
+	// quotes); the delete is read, and the opaque marker above stays.
+	if !has(r, KindDelete, `c:\windows`, TargetStateKnown) {
+		t.Fatalf("R5-2 child delete not read: %s", fmtRes(r))
 	}
 }
 

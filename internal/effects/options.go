@@ -33,6 +33,14 @@ type Options struct {
 	Dialect Dialect
 	Home    string
 	CWD     string
+	// Login is the active account's login name: ~Login names Home, as the
+	// shell's passwd lookup does (rel-1-0-10:GAP-1678). Empty: ~name is never
+	// the active account.
+	Login string
+	// Accounts maps another account's login name to its home, from a lookup
+	// the caller vouches for (passwd, the managed identity map). A ~name not
+	// here is unknown (rel-1-0-10:GAP-1677, GAP-0898).
+	Accounts map[string]string
 	// Drive is the current Windows drive letter ("C") used to place a Windows
 	// path that names no drive of its own. Ignored for POSIX.
 	Drive string
@@ -80,9 +88,13 @@ func (o Options) maxEffects() int {
 
 const (
 	defaultMaxEffects = 256
-	maxNestedDepth    = 1 // one unwrapped level of nested script text (lead)
-	maxDataText       = 8 << 10
-	maxSpellingBytes  = 4 << 10
-	maxMCPDepth       = 6
-	maxMCPNodes       = 256
+	// maxNestedDepth is how many levels of nested script text are lowered
+	// (sh -c inside eval inside source ...). Each level is counted work under
+	// walkWorkBudget; past it the call has a nesting_limit unknown (DET111 D1:
+	// a nested body is read, not judged as another spelling).
+	maxNestedDepth   = 4
+	maxDataText      = 8 << 10
+	maxSpellingBytes = 4 << 10
+	maxMCPDepth      = 6
+	maxMCPNodes      = 256
 )
