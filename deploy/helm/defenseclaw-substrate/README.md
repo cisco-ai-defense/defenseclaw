@@ -13,7 +13,7 @@ kubectl label namespace defenseclaw-system ate.dev/api-access=true   # Substrate
 kubectl -n defenseclaw-system create secret generic ate-bootstrap-owner --from-file=token=owner.token
 helm install defenseclaw oci://ghcr.io/cisco-ai-defense/charts/defenseclaw-substrate --version 1.0.11 \
   -n defenseclaw-system --set bootstrap.ownerTokenSecret=ate-bootstrap-owner -f my-values.yaml
-defenseclaw substrate setup     # the SubstrateInstall overlay for ate-setup (callout, router client)
+defenseclaw substrate setup     # the SubstrateInstall overlay for ate-setup (callout, router client); GitOps: add --overlay-only
 defenseclaw substrate doctor
 ```
 

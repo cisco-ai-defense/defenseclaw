@@ -768,11 +768,19 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             "as commands and\n"
             "manifests a global owner can apply, and reads no install file.\n"
             "\n"
-            "Next: run ate-setup deploy with the new file, then install the chart with helm install."
+            "Next: run ate-setup deploy with the new file, then install the chart with helm install.\n"
+            "\n"
+            "With --overlay-only (also spelled --no-chart) the chart belongs to Argo CD or Flux, not to this "
+            "command. It makes the same\n"
+            "checks and writes the same file, and then names the chart values the overlay assumes so the values "
+            "in your repo can match.\n"
+            "It never runs helm. The next step is to commit the file and let ate-setup deploy apply it."
         ),
         example=(
             "defenseclaw substrate setup --install-file install.yaml --namespace defenseclaw --dry-run\n"
             "defenseclaw substrate setup --install-file install.yaml --capability route-timeouts --yes\n"
+            "defenseclaw substrate setup --install-file install.yaml --overlay-only --issuer "
+            "https://cluster-a.example --yes\n"
             "defenseclaw substrate setup --print-access-policies --plan plan.json"
         ),
         flags=(
@@ -804,6 +812,14 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             _Flag("kubeconfig", "string", "kubectl configuration file for the --issuer check (default: kubectl's own)"),
             _Flag("namespace", "string", "the namespace DefenseClaw is installed in", default="defenseclaw"),
             _Flag("output", "string", "output format: text or json", short="o", default="text", metavar="FORMAT"),
+            _Flag(
+                "overlay-only",
+                "bool",
+                (
+                    "GitOps: write the overlay only and name the chart values it assumes; Argo CD or Flux owns the chart "
+                    "(alias --no-chart)"
+                ),
+            ),
             _Flag(
                 "plan",
                 "string",

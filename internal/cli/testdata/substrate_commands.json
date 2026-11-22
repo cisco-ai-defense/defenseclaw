@@ -1203,8 +1203,8 @@
     "path": "substrate setup",
     "use": "setup",
     "short": "Add DefenseClaw's settings to the SubstrateInstall file (administrators)",
-    "long": "Reads the SubstrateInstall document you give to ate-setup and adds the settings DefenseClaw needs: the egress\ncallout, the router client the gateway attaches launchers through, and, only when you say your Substrate build has them,\nthe callout body opt-in and the long-stream timeouts. It refuses when Substrate already sends egress to another callout,\nand says what to do. Nothing here changes the cluster. With --issuer it reads, with kubectl when it can, the key set the\ngateway verifies actor tokens with (--keys-url, the idp Service by default) and warns when it does not answer.\n\nThe result is written next to the file as FILE.new (mode 0600) for you to read. With --yes it replaces the file and keeps\nthe old one as FILE.bak. With --dry-run it only shows the changes. With --remove it takes DefenseClaw's settings out again.\n\nWith --print-access-policies and --plan FILE it prints the access policies the install would write, as commands and\nmanifests a global owner can apply, and reads no install file.\n\nNext: run ate-setup deploy with the new file, then install the chart with helm install.",
-    "example": "defenseclaw substrate setup --install-file install.yaml --namespace defenseclaw --dry-run\ndefenseclaw substrate setup --install-file install.yaml --capability route-timeouts --yes\ndefenseclaw substrate setup --print-access-policies --plan plan.json",
+    "long": "Reads the SubstrateInstall document you give to ate-setup and adds the settings DefenseClaw needs: the egress\ncallout, the router client the gateway attaches launchers through, and, only when you say your Substrate build has them,\nthe callout body opt-in and the long-stream timeouts. It refuses when Substrate already sends egress to another callout,\nand says what to do. Nothing here changes the cluster. With --issuer it reads, with kubectl when it can, the key set the\ngateway verifies actor tokens with (--keys-url, the idp Service by default) and warns when it does not answer.\n\nThe result is written next to the file as FILE.new (mode 0600) for you to read. With --yes it replaces the file and keeps\nthe old one as FILE.bak. With --dry-run it only shows the changes. With --remove it takes DefenseClaw's settings out again.\n\nWith --print-access-policies and --plan FILE it prints the access policies the install would write, as commands and\nmanifests a global owner can apply, and reads no install file.\n\nNext: run ate-setup deploy with the new file, then install the chart with helm install.\n\nWith --overlay-only (also spelled --no-chart) the chart belongs to Argo CD or Flux, not to this command. It makes the same\nchecks and writes the same file, and then names the chart values the overlay assumes so the values in your repo can match.\nIt never runs helm. The next step is to commit the file and let ate-setup deploy apply it.",
+    "example": "defenseclaw substrate setup --install-file install.yaml --namespace defenseclaw --dry-run\ndefenseclaw substrate setup --install-file install.yaml --capability route-timeouts --yes\ndefenseclaw substrate setup --install-file install.yaml --overlay-only --issuer https://cluster-a.example --yes\ndefenseclaw substrate setup --print-access-policies --plan plan.json",
     "flags": [
       {
         "name": "callout-port",
@@ -1271,6 +1271,12 @@
         "default": "text",
         "usage": "output format: text or json",
         "metavar": "FORMAT"
+      },
+      {
+        "name": "overlay-only",
+        "type": "bool",
+        "default": "false",
+        "usage": "GitOps: write the overlay only and name the chart values it assumes; Argo CD or Flux owns the chart (alias --no-chart)"
       },
       {
         "name": "plan",

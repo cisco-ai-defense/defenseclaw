@@ -24,10 +24,13 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/fleet"
@@ -52,6 +55,7 @@ type substrateSetupOptions struct {
 	capabilities []string
 	remove       bool
 	printPolicy  bool
+	overlayOnly  bool
 	plan         string
 	dryRun       bool
 	yes          bool
@@ -70,6 +74,12 @@ type substrateSetupResult struct {
 	Backup  string `json:"backup,omitempty"`
 	// AccessPolicies is the --print-access-policies text.
 	AccessPolicies string `json:"access_policies,omitempty"`
+	// Mode is "overlay-only" for the GitOps path (--overlay-only), where the
+	// chart belongs to Argo CD or Flux; empty otherwise.
+	Mode string `json:"mode,omitempty"`
+	// ChartValues are the chart values the overlay assumes (overlay-only
+	// setup, not --remove): the GitOps repo's values must agree with them.
+	ChartValues map[string]string `json:"chart_values,omitempty"`
 }
 
 func newSubstrateSetupCmd() *cobra.Command {
@@ -89,9 +99,14 @@ the old one as FILE.bak. With --dry-run it only shows the changes. With --remove
 With --print-access-policies and --plan FILE it prints the access policies the install would write, as commands and
 manifests a global owner can apply, and reads no install file.
 
-Next: run ate-setup deploy with the new file, then install the chart with helm install.`,
+Next: run ate-setup deploy with the new file, then install the chart with helm install.
+
+With --overlay-only (also spelled --no-chart) the chart belongs to Argo CD or Flux, not to this command. It makes the same
+checks and writes the same file, and then names the chart values the overlay assumes so the values in your repo can match.
+It never runs helm. The next step is to commit the file and let ate-setup deploy apply it.`,
 		Example: "defenseclaw substrate setup --install-file install.yaml --namespace defenseclaw --dry-run\n" +
 			"defenseclaw substrate setup --install-file install.yaml --capability route-timeouts --yes\n" +
+			"defenseclaw substrate setup --install-file install.yaml --overlay-only --issuer https://cluster-a.example --yes\n" +
 			"defenseclaw substrate setup --print-access-policies --plan plan.json",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error { return runSubstrateSetup(cmd, o) },
@@ -106,11 +121,20 @@ Next: run ate-setup deploy with the new file, then install the chart with helm i
 	f.StringVar(&o.kubeconfig, "kubeconfig", "", "kubectl configuration file for the --issuer check (default: kubectl's own)")
 	f.StringVar(&o.kubeContext, "kube-context", "", "kubectl context for the --issuer check")
 	f.StringSliceVar(&o.capabilities, "capability", nil, "a setting your Substrate build has: body-mode or route-timeouts (repeatable; off by default)")
+	f.BoolVar(&o.overlayOnly, "overlay-only", false, "GitOps: write the overlay only and name the chart values it assumes; Argo CD or Flux owns the chart (alias --no-chart)")
 	f.BoolVar(&o.remove, "remove", false, "take DefenseClaw's settings out of the file")
 	f.BoolVar(&o.printPolicy, "print-access-policies", false, "print the access policies for --plan and stop")
 	f.StringVar(&o.plan, "plan", "", "the chart's plan.json (a file, or env:NAME), for --print-access-policies")
 	f.BoolVar(&o.dryRun, "dry-run", false, "show the changes and write nothing")
 	f.BoolVarP(&o.yes, "yes", "y", false, "replace the install file (the old one is kept as FILE.bak)")
+	// --no-chart is the same switch: setup never installs the chart, so the two
+	// names say one thing (the chart is not this command's).
+	f.SetNormalizeFunc(func(_ *pflag.FlagSet, name string) pflag.NormalizedName {
+		if name == "no-chart" {
+			name = "overlay-only"
+		}
+		return pflag.NormalizedName(name)
+	})
 	return cmd
 }
 
@@ -138,6 +162,9 @@ func runSubstrateSetup(cmd *cobra.Command, o *substrateSetupOptions) error {
 		return err
 	}
 	w := cmd.OutOrStdout()
+	if o.overlayOnly && o.printPolicy {
+		return cliusage.WithExitCode(errors.New("--overlay-only writes the SubstrateInstall overlay; --print-access-policies prints access policies and reads no install file: run them one at a time"), 2)
+	}
 
 	if o.printPolicy {
 		if o.plan == "" {
@@ -214,6 +241,12 @@ func runSubstrateSetup(cmd *cobra.Command, o *substrateSetupOptions) error {
 	if res.Notes == nil {
 		res.Notes = []string{}
 	}
+	if o.overlayOnly {
+		res.Mode = "overlay-only"
+		if !o.remove {
+			res.ChartValues = substrateOverlayChartValues(o)
+		}
+	}
 	if len(report.Changes) > 0 && !o.dryRun {
 		target := o.installFile + ".new"
 		if o.yes {
@@ -270,6 +303,17 @@ func substrateSetupKeysNote(parent context.Context, o *substrateSetupOptions) st
 		"need not resolve. %s", o.keysURL, *obs.Keys, same)
 }
 
+// substrateOverlayChartValues are the chart values the overlay assumes: the
+// callout port it registers and, with --issuer, the issuer the gateway must
+// compare actor tokens with. A GitOps repo keeps them equal to the overlay.
+func substrateOverlayChartValues(o *substrateSetupOptions) map[string]string {
+	v := map[string]string{"callout.port": strconv.Itoa(o.calloutPort)}
+	if iss := strings.TrimSpace(o.issuer); iss != "" {
+		v["config.substrate.identity.issuer"] = iss
+	}
+	return v
+}
+
 func printSubstrateSetup(w io.Writer, res substrateSetupResult, isNew bool, o *substrateSetupOptions) {
 	if isNew {
 		fmt.Fprintf(w, "%s does not exist; starting a new SubstrateInstall document.\n", res.InstallFile)
@@ -307,11 +351,34 @@ func printSubstrateSetup(w io.Writer, res substrateSetupResult, isNew bool, o *s
 	if res.Written != "" {
 		file = res.Written
 	}
+	if res.Mode == "overlay-only" {
+		printSubstrateGitOpsNext(w, res, file, o)
+		return
+	}
 	if res.Action == "remove" {
 		fmt.Fprintf(w, "Next: run ate-setup deploy --config %s, then remove the chart with helm uninstall.\n", file)
 		return
 	}
 	fmt.Fprintf(w, "Next: run ate-setup deploy --config %s, then install DefenseClaw with helm install (namespace %s).\n", file, o.namespace)
+}
+
+// printSubstrateGitOpsNext is the next step of --overlay-only: no helm, the
+// repo owns the chart.
+func printSubstrateGitOpsNext(w io.Writer, res substrateSetupResult, file string, o *substrateSetupOptions) {
+	if res.Action == "remove" {
+		fmt.Fprintf(w, "Next: commit %s, run ate-setup deploy --config %s, then remove the chart from the repo Argo CD or Flux reads. This command did not touch the chart.\n", file, file)
+		return
+	}
+	fmt.Fprintf(w, "Next: commit %s and run ate-setup deploy --config %s. Argo CD or Flux installs the chart; this command did not touch it.\n", file, file)
+	keys := make([]string, 0, len(res.ChartValues))
+	for k := range res.ChartValues {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	fmt.Fprintf(w, "Keep these chart values in step with the overlay (namespace %s):\n", o.namespace)
+	for _, k := range keys {
+		fmt.Fprintf(w, "  %s: %s\n", k, res.ChartValues[k])
+	}
 }
 
 func substrateChangeWords(c setup.Change) string {
