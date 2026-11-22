@@ -39,6 +39,7 @@ _FULL = {
         "actor_cert_oid": "1.3.6.1.4.1.11129.2.12.2",
         "keys_url": "https://idp.ate-system.svc/openid/v1/jwks",
         "keys_ca_file": "/run/servicedns.podcert.ate.dev/trust-bundle.pem",
+        "revocation": {"enabled": False, "sync_interval": "2s", "max_stale": "30s", "max_tokens_per_person": 16},
         "oidc": {"issuer": "https://login.example.com", "client_id": "defenseclaw-launcher", "groups_claim": "groups"},
         "workload_oidc": [
             {
@@ -158,6 +159,9 @@ class TestSubstrateLoadSave(unittest.TestCase):
             self.assertEqual(sub.templates.min_policy_generation, 3)
             self.assertEqual(sub.templates.profile_images, {"ci": ["registry.example.com/defenseclaw/ci-*"]})
             self.assertEqual(sub.identity.workload_oidc[0].audience, "defenseclaw-prod")
+            self.assertIs(sub.identity.revocation.enabled, False)
+            self.assertEqual(sub.identity.revocation.max_stale, "30s")
+            self.assertEqual(sub.identity.revocation.max_tokens_per_person, 16)
             self.assertEqual(sub.identity.workload_oidc[0].subject, "repo:acme/web:ref:refs/heads/*")
             self.assertEqual(sub.identity.workload_oidc[0].claims, {"repository": "acme/web"})
             self.assertEqual(sub.secrets[1].scope, "per_person")

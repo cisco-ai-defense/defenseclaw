@@ -43,6 +43,7 @@ Every value is checked by `values.schema.json`. The main ones:
 |---|---|---|
 | `image.repository`, `image.tag`, `image.digest` | ghcr.io/cisco-ai-defense/defenseclaw-gateway, appVersion, "" | the digest wins over the tag; the release chart pins it |
 | `config` | substrate section on | DefenseClaw config.yaml; the chart fills `substrate.services` and `substrate.api` |
+| `config.substrate.identity.revocation` | `{enabled: true, sync_interval: 5s, max_stale: 60s, max_tokens_per_person: 64}` | ended sign-ins: the leader keeps the list on its volume, each gateway replica pulls it every `sync_interval` and refuses sign-ins with `revocation_unavailable` when its copy is older than `max_stale`; `enabled` takes a gateway restart, and managed installs may not turn it off |
 | `config.substrate.launcher_atespaces` | {} | profile to atespaces; only DefenseClaw edits these |
 | `managedAtespaces` | [] | other atespaces DefenseClaw writes egress policy in |
 | `substrate.namespace`, `substrate.apiAddress`, `substrate.apiAudience` | ate-system | where Substrate runs |

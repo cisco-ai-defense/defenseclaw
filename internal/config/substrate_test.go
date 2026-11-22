@@ -128,6 +128,7 @@ substrate:
     keys_ca_file: /run/servicedns.podcert.ate.dev/trust-bundle.pem
     oidc: {issuer: https://login.example.com, client_id: defenseclaw-launcher, groups_claim: groups}
     workload_oidc: [{issuer: https://token.actions.githubusercontent.com, audience: defenseclaw-prod, claims: {repository: acme/web}}]
+    revocation: {enabled: true, sync_interval: 5s, max_stale: 60s, max_tokens_per_person: 64}
   services: {actor: defenseclaw-actor.defenseclaw-system.svc, admin: defenseclaw-admin.defenseclaw-system.svc}
   launcher_atespaces: {engineering: [eng-payments, eng-web]}
   require_attested_templates: true

@@ -190,6 +190,13 @@ func (st *substrateState) substrateResolvePerson(ctx context.Context, user strin
 // a person's end early (HIGH).
 func (a *APIServer) substrateAdminRevocations(st *substrateState) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet, http.MethodPost, http.MethodDelete:
+		default:
+			w.Header().Set("Allow", "GET, POST, DELETE")
+			writeSubstrateJSONError(w, http.StatusMethodNotAllowed, "method")
+			return
+		}
 		c, _ := substrateCallerFrom(r.Context())
 		if !c.admin {
 			writeSubstrateJSONError(w, http.StatusForbidden, "admin_only")
