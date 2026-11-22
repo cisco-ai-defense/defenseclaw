@@ -24,25 +24,32 @@
   },
   "connectors/cowork-vm-sensor": {
     "videos": [
-      "cowork-vm-sensor-standin"
+      "cowork-claude-desktop"
     ],
     "images": [
+      "/images/cowork/cowork-desktop-sensor-status.png",
+      "/images/cowork/cowork-desktop-vendor-refusal.png",
       "/images/cowork/cowork-standin-grafana-findings.png",
       "/images/cowork/cowork-standin-grafana-tactics.png",
       "/images/cowork/cowork-standin-install.png",
-      "/images/posters/cowork-vm-sensor-standin.jpg"
+      "/images/posters/cowork-claude-desktop.jpg"
     ],
     "demos": [],
     "replays": 0
   },
   "connectors/cowork": {
-    "videos": [],
+    "videos": [
+      "cowork-claude-desktop"
+    ],
     "images": [
       "/images/cowork/block-in-cowork-windows.png",
+      "/images/cowork/cowork-desktop-deny-block.png",
+      "/images/cowork/cowork-desktop-grafana-hook-decisions.png",
       "/images/cowork/managed-verify-windows.png",
       "/images/cowork/setup-cowork-windows.png",
       "/images/cowork/status-doctor-windows.png",
-      "/images/cowork/tui-overview-cowork-macos.png"
+      "/images/cowork/tui-overview-cowork-macos.png",
+      "/images/posters/cowork-claude-desktop.jpg"
     ],
     "demos": [],
     "replays": 0

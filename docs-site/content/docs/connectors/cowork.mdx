@@ -27,7 +27,7 @@ These parts of Cowork support are Preview: they are available but may change.
 
 ## How Cowork runs
 
-What the measurement on a real Cowork computer showed (macOS, Apple silicon, Claude Desktop 4.4212.0, engine 2.1.309):
+How Cowork runs (macOS, Apple silicon, Claude Desktop 4.4212.0, engine 2.1.309):
 
 | Question | Answer |
 | --- | --- |
@@ -127,7 +127,7 @@ DefenseClaw cannot add a plugin to your Claude account. `defenseclaw setup cowor
    | Windows | Paste the path into the File name box |
    | Linux | Press Ctrl+L and paste the path |
 
-4. Wait until Claude finishes checking the plugin. That took about 2 minutes in the measurement. Then start a Cowork task.
+4. Wait until Claude finishes checking the plugin. That takes about 2 minutes. Then start a Cowork task.
 
 5. Setup, still waiting, prints `Cowork is protected` with the time of the first Cowork event, and the Claude Code mode. If you pressed Ctrl+C or used `--no-wait`, check with `defenseclaw status`.
 
@@ -178,7 +178,7 @@ In Claude Desktop, open **Customize > Plugins**, then the **...** menu on Defens
 
 Remove the plugin before you uninstall DefenseClaw. A plugin built with DefenseClaw 1.0.9 lets Cowork calls continue after a completed per-user `uninstall --all` or `reset`. The printed step is the reminder you can count on: `defenseclaw uninstall` (also with `--dry-run`) and `defenseclaw reset` print "The DefenseClaw Cowork plugin stays in your Claude account. Remove it in Claude: Customize > Plugins." whenever `setup cowork` built a plugin.
 
-The plugin also sends a one-time notice into the chat after an uninstall, but that is best effort. Claude Desktop shows no banner, and the notice goes to the model, which may not repeat it to you. In testing the model relayed it once, and once flagged it as not coming from you. A plugin built with 1.0.8 still blocks calls after the data folder is removed; remove it in Claude or rebuild and upload the 1.0.9 plugin before uninstalling. While DefenseClaw is installed, a missing hook still blocks the call.
+The plugin also sends a one-time notice into the chat after an uninstall, but that is best effort. Claude Desktop shows no banner, and the notice goes to the model, which may not repeat it to you. A plugin built with 1.0.8 still blocks calls after the data folder is removed; remove it in Claude or rebuild and upload the 1.0.9 plugin before uninstalling. While DefenseClaw is installed, a missing hook still blocks the call.
 
 How each command treats the plugin:
 
@@ -192,7 +192,7 @@ All three leave the plugin in your Claude account. Only you can remove it.
 
 ## Managed computers
 
-On a managed standalone install, DefenseClaw's Claude Code machine policy drop-in covers Cowork, because Cowork's host loop reads Claude Code machine policy. In a measurement on macOS, test hooks in `/Library/Application Support/ClaudeCode/managed-settings.json` and in a `managed-settings.d/90-*.json` drop-in (the layout DefenseClaw writes as `90-defenseclaw.json`) fired in Cowork turns, and a managed deny was honored. A managed deny wins before plugin hooks.
+On a managed standalone install, DefenseClaw's Claude Code machine policy drop-in covers Cowork, because Cowork's host loop reads Claude Code machine policy. Hooks in `/Library/Application Support/ClaudeCode/managed-settings.json` and in a `managed-settings.d/90-*.json` drop-in (the layout DefenseClaw writes as `90-defenseclaw.json`) fire in Cowork turns on macOS, and a managed deny is honored. A managed deny wins before plugin hooks.
 
 | OS | Drop-in |
 | --- | --- |
@@ -204,7 +204,7 @@ On a managed standalone install, DefenseClaw's Claude Code machine policy drop-i
 
 ### Configured versus covered
 
-`status` and `verify` print a `cowork` line and a `cowork` JSON member. In 1.0.8 the member is `configured`, not `covered`, because DefenseClaw can check its own side but not what Cowork runs.
+`status` and `verify` print a `cowork` line and a `cowork` JSON member. In 1.0.10 the member is `configured`, not `covered`, because DefenseClaw can check its own side but not what Cowork runs.
 
 ![The cowork lines of defenseclaw-gateway enterprise windows verify on a managed Windows computer: cowork is configured, managed_hooks_only is preserve, the account's last Cowork call, and the Claude Desktop data folders with their engine builds](/images/cowork/managed-verify-windows.png)
 
@@ -287,7 +287,29 @@ The user's identity comes from the operating system, never from Cowork's environ
 
 ## VM sensor
 
-The hook route sees a tool call before it runs. It does not show what happens inside the Cowork VM after the command starts. For that, DefenseClaw ships a separate sensor that Claude Desktop installs in the VM. It is available on managed standalone macOS and Windows only. It watches processes, files, network connections and DNS in the VM, and it only observes: it blocks nothing. It sends its events to your own OTLP collector, not to the computer's DefenseClaw gateway, and it does not need the Claude Code connector. In 1.0.10 the packages in the release are unsigned, which Claude Desktop does not install, and no run has had Claude Desktop install DefenseClaw's sensor in a real VM. See [Cowork VM sensor](/docs/connectors/cowork-vm-sensor).
+The hook route sees a tool call before it runs. It does not show what happens inside the Cowork VM after the command starts. For that, DefenseClaw ships a separate sensor that Claude Desktop installs in the VM. It is available on managed standalone macOS and Windows only. It watches processes, files, network connections and DNS in the VM, and it only observes: it blocks nothing. It sends its events to your own OTLP collector, not to the computer's DefenseClaw gateway, and it does not need the Claude Code connector. The packages in the 1.0.10 release are unsigned, and Claude Desktop installs only signed packages from a vendor that Anthropic lists, so it does not install them. See [Cowork VM sensor](/docs/connectors/cowork-vm-sensor).
+
+## See it in Claude Desktop
+
+<Callout title="Preview" type="info">
+Preview: the Cowork VM sensor is available but may change. Claude Desktop needs Anthropic vendor registration before it installs the sensor.
+</Callout>
+
+<Video
+  src="cowork-claude-desktop"
+  aspect="16/9"
+  caption="Claude Desktop in Bedrock mode runs Cowork on a managed Mac. DefenseClaw allows a harmless command and blocks a command that matches an administrator deny rule, and each decision appears in Grafana. Claude Desktop needs Anthropic vendor registration before it installs the sensor. The last part shows the sensor package on a stand-in Linux VM."
+/>
+
+A managed Mac runs Claude Desktop in Bedrock mode. A harmless shell command runs. A shell command that matches an administrator deny rule is blocked before it runs, and Claude tells the user which rule blocked it.
+
+![Claude Desktop in Cowork. The user asked to run a shell command containing dc-deny-test. Claude answers that the organization's DefenseClaw policy blocked it under rule CMD-ADMIN-DENY-DC-TEST.](/images/cowork/cowork-desktop-deny-block.png)
+
+Every hook decision reaches your observability stack. In Grafana Explore on Loki, `hook_decision` events for surface `cowork` list the allowed and the blocked command, with the rule that matched.
+
+![Grafana Explore on Loki lists hook_decision events for surface cowork and the user: action allow, or action block with rule CMD-ADMIN-DENY-DC-TEST.](/images/cowork/cowork-desktop-grafana-hook-decisions.png)
+
+Claude Desktop does not install the sensor for a vendor it does not list. See [Cowork VM sensor](/docs/connectors/cowork-vm-sensor).
 
 ## Limits
 
