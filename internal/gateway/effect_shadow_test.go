@@ -5,9 +5,11 @@
 package gateway
 
 import (
+	"reflect"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/decide"
 	"github.com/defenseclaw/defenseclaw/internal/effectrules"
 	"github.com/defenseclaw/defenseclaw/internal/effects"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/semanticpb"
@@ -154,6 +156,18 @@ func TestEffectShadowFindingsEnforcement(t *testing.T) {
 		Sets: []string{effectrules.SetSSHAuthorizedKeys}, Known: true, Reach: []string{effectrules.ReachName}}, effectRulesOn)
 	if len(maybe) != 0 {
 		t.Fatalf("unknown-tier MAYBE result created live findings: %+v", maybe)
+	}
+	knownMutation := EffectShadowResult{Tier: string(effectTierUnknown), Action: guardrailActionAlert,
+		Kind: "write", Sets: []string{effectrules.SetSelfProtection}, Known: true}
+	knownFlag := reflect.ValueOf(&knownMutation).Elem().FieldByName("KnownMutation")
+	if knownFlag.IsValid() && knownFlag.CanSet() {
+		knownFlag.SetBool(true)
+	}
+	if proof := effectFindingProof(knownMutation); proof.Certainty != decide.CertKnown {
+		t.Fatalf("Known mutation proof = %+v, want Known", proof)
+	}
+	if findings := effectShadowFindings(knownMutation, effectRulesOn); len(findings) != 1 || findings[0].RuleID != "effect.protected_target_unknown" {
+		t.Fatalf("Known mutation at unknown tier = %+v, want its live advisory finding", findings)
 	}
 	if got := effectShadowFindings(EffectShadowResult{Tier: string(effectTierClean), Action: guardrailActionAllow}, effectRulesOn); got != nil {
 		t.Fatalf("clean findings = %+v, want nil", got)

@@ -110,6 +110,8 @@ type EffectShadowResult struct {
 	// Known marks a Known protected effect, including a credential read
 	// routed through its decide credential row.
 	Known bool `json:"known,omitempty"`
+	// KnownMutation distinguishes known writes from read proofs during handoff.
+	KnownMutation bool `json:"-"`
 	// ReadProofs are private decision inputs. Do not serialize member paths or
 	// credential classes into the shadow telemetry record.
 	ReadProofs []decide.Proof `json:"-"`
@@ -380,8 +382,9 @@ type effectClass struct {
 	// resolver followed, counted, not raised (effectProtectedSets).
 	linkHeld bool
 	// known: some protected effect is known (mutation or credential read).
-	known      bool
-	readProofs []decide.Proof
+	known         bool
+	knownMutation bool
+	readProofs    []decide.Proof
 }
 
 // classifyEffects applies the owner's three answers (2026-11-13): a known
@@ -436,6 +439,7 @@ func classifyEffects(result effects.Result, facts []*semanticpb.EffectFact, flav
 			c.reach = append(c.reach, r)
 		} else if mutating {
 			c.known = true
+			c.knownMutation = true
 		} else if proof, ok := knownCredentialReadProof(f); ok {
 			c.known = true
 			c.readProofs = appendCredentialReadProof(c.readProofs, proof)
@@ -670,10 +674,9 @@ func markOutermostEffectDispatch(ctx context.Context) (context.Context, bool) {
 	return context.WithValue(ctx, effectShadowContextKey{}, struct{}{}), true
 }
 
-// effectShadowFindings turns a restricted effect verdict or a Known
-// credential read into findings for the ON lane. Unknown-tier effects,
-// including a call that mixes a Known mutation with a Maybe reach, remain in
-// the shadow record. Credential reads go through Decide with a member-specific
+// effectShadowFindings turns a Known mutation or credential read into
+// findings for the ON lane. A mutation with any Maybe reach remains in the
+// shadow record. Credential reads go through Decide with a member-specific
 // proof, so the existing 1.0.10 read row supplies the verdict.
 func effectShadowFindings(res EffectShadowResult, mode effectRulesMode) []RuleFinding {
 	var findings []RuleFinding
@@ -686,7 +689,8 @@ func effectShadowFindings(res EffectShadowResult, mode effectRulesMode) []RuleFi
 		f.proof = newFindingProof(findingProofEffect, ruleID, mode == effectRulesOn)
 		findings = append(findings, f)
 	}
-	if res.Tier != string(effectTierRestricted) || res.Action == guardrailActionAllow {
+	if res.Tier == string(effectTierClean) || res.Action == guardrailActionAllow ||
+		(res.Tier != string(effectTierRestricted) && !res.KnownMutation) {
 		return findings
 	}
 	proof := effectFindingProof(res)
@@ -786,11 +790,11 @@ func appendCredentialReadProof(proofs []decide.Proof, next decide.Proof) []decid
 // shadow report's key for the effect model beside the legacy readers.
 const effectProofSource = "effects"
 
-// effectFindingProof is the DET111 proof of a restricted effect verdict
+// effectFindingProof is the DET111 proof of an effect verdict
 // (internal/guardrail/decide): the deciding effect's kind, the strongest
-// protected class it reached, and its certainty. Unknown-tier effects are
-// shadow-only; known credential reads carry separate member-specific Decide
-// proofs.
+// protected class it reached, and its certainty. A Known mutation raises only
+// when the call has no Maybe reach; credential reads carry separate
+// member-specific Decide proofs.
 func effectFindingProof(res EffectShadowResult) decide.Proof {
 	p := decide.Proof{
 		Kind:      effectProofKind(res.Kind),
@@ -798,7 +802,7 @@ func effectFindingProof(res EffectShadowResult) decide.Proof {
 		Certainty: decide.CertKnown,
 		Source:    effectProofSource,
 	}
-	if res.Tier != string(effectTierRestricted) {
+	if res.Tier != string(effectTierRestricted) && (!res.KnownMutation || len(res.Reach) > 0) {
 		p.Certainty = decide.CertMaybe
 		if len(res.Reach) > 0 {
 			p.Reach = res.Reach[0]

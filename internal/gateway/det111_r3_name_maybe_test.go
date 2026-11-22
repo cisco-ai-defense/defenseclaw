@@ -6,6 +6,8 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+
 	"github.com/defenseclaw/defenseclaw/internal/effectrules"
 	"github.com/defenseclaw/defenseclaw/internal/effects"
 )
@@ -56,4 +58,21 @@ func TestDET111R3LiteralPeerHomeCredentialRemainsKnown(t *testing.T) {
 		}
 	}
 	t.Fatal("literal absolute passwd-home credential tail was not Known")
+}
+
+
+func TestDET111R3LocalhostTripleSlashKeyWriteRaises(t *testing.T) {
+	useEffectsRulesMode(t, "on")
+	req := shadowLiveRequest(`Set-Content -Path localhost:///C:/Users/alice/.ssh/authorized_keys -Value k`)
+	req.Connector = "codex"
+	req.Input.ActiveHome = `C:\Users\alice`
+	req.Input.CWD = `C:\Users\alice\project`
+	req.Input.DialectHint = actionfacts.DialectPowerShell
+	res := effectShadowRun(req, effectRulesOn, tierRestricted)[0]
+	for _, finding := range effectShadowFindings(res, effectRulesOn) {
+		if finding.RuleID == "effect.protected_target_unknown" || finding.RuleID == "effect.protected_target_restricted" {
+			return
+		}
+	}
+	t.Fatalf("literal localhost drive-path key write did not reach a live protected-target finding: %+v", res)
 }
