@@ -336,7 +336,7 @@ test('deterministic docs: profile totals and chain posture match canonical sourc
     `The balanced/default enabled rule catalog contains ${balanced.enabled} local rules`,
   ));
   assert.ok(index.includes(
-    `The balanced/default enabled catalog currently contains ${balanced.enabled} local rules`,
+    `The \`default\` pack enables ${balanced.enabled} local rules`,
   ));
   // Counts live in the reference and policy overview. The creator guide
   // defines the boundary of its browser replay, not a second rule catalog.
