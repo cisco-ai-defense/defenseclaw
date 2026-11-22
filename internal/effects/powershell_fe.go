@@ -5,6 +5,7 @@
 package effects
 
 import (
+	"os"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/psparse"
@@ -21,13 +22,33 @@ func parsePowerShell(command string, o Options) *Script {
 	return lowerPSScript(command, o, true)
 }
 
+// psFrontendPwshparse selects the PowerShell reader of the effects frontend:
+// true (the default) parses with the pure-Go port of the Microsoft PowerShell
+// parser (internal/pwshparse) through psparse.FromPwshparse; false
+// (DEFENSECLAW_PS_FRONTEND=psparse) keeps psparse.Parse. The legacy 1.0.10
+// PowerShell readers always use psparse.Parse (the raise-only floor).
+var psFrontendPwshparse = os.Getenv("DEFENSECLAW_PS_FRONTEND") != "psparse"
+
+// parsePSSource parses a PowerShell script for lowering. When the port declines
+// the input (a construct it does not parse, or nesting past its depth budget)
+// psparse.Parse reads it, so every input still gets a Script.
+func parsePSSource(command string) (*psparse.Script, error) {
+	opts := psparse.Options{Dialect: psparse.DialectUnknown}
+	if psFrontendPwshparse {
+		if sc, ok := psparse.FromPwshparse(command, opts); ok {
+			return sc, nil
+		}
+	}
+	return psparse.Parse(command, opts)
+}
+
 func lowerPSScript(command string, o Options, expandNested bool) *Script {
 	s := &Script{Dialect: DialectPowerShell}
 	// The PowerShell edition is unknown unless the connector proves it, so a
 	// dialect-divergent escape (backtick-e, \u{}) is not treated as static
 	// (psparse review 3 / R4). A future caller that knows the host edition can
 	// pass DialectPwsh7 / DialectWindowsPS51.
-	sc, err := psparse.Parse(command, psparse.Options{Dialect: psparse.DialectUnknown})
+	sc, err := parsePSSource(command)
 	if err != nil || sc == nil {
 		s.Unknowns = append(s.Unknowns, UnknownNode{Reason: ReasonInvalidSyntax})
 		return s
