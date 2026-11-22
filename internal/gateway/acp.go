@@ -977,3 +977,5 @@ func (a *APIServer) acpScopedTokenReadyUncached() bool {
 	permissionsSafe := runtime.GOOS == "windows" || info.Mode().Perm()&0o077 == 0
 	return permissionsSafe && safefile.ValidatePrivateFile(path) == nil
 }
+
+// CI timing probe for PR 1488 (Go-only path); not for merge.
