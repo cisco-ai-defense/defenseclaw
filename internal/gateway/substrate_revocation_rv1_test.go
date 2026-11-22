@@ -169,3 +169,30 @@ func TestRV107ListResetIsAuditedHigh(t *testing.T) {
 	}
 	t.Fatal("no substrate.signin.list_reset audit row")
 }
+
+// RV1-11: a person ending their own sign-in is audited at MEDIUM, as the
+// docs say.
+func TestRV111SelfLogoutAuditedMedium(t *testing.T) {
+	past := time.Now().Add(-time.Minute)
+	f := newRevocationPeopleFixture(t, fakePeople{"p-alice": func() identity.Person { p := alice; p.TokenKey, p.IssuedAt = "k-1", past; return p }()})
+	store, logger := testStoreAndLogger(t)
+	f.api.store, f.api.logger = store, logger
+	if rec := f.do(t, f.admin, http.MethodPost, "/api/v1/substrate/signin/revoke", "p-alice", `{"scope":"this"}`); rec.Code != 200 {
+		t.Fatalf("logout: %d %s", rec.Code, rec.Body)
+	}
+	for deadline := time.Now().Add(3 * time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+		events, err := store.ListEvents(100)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, e := range events {
+			if strings.Contains(e.Details, `"event":"substrate.signin.revoked"`) {
+				if e.Severity != "MEDIUM" {
+					t.Fatalf("self-logout audited at %s", e.Severity)
+				}
+				return
+			}
+		}
+	}
+	t.Fatal("no substrate.signin.revoked audit row")
+}

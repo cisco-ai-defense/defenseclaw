@@ -223,8 +223,9 @@ type SubstrateRevocationConfig struct {
 	// duration, 1s to 60s, default 5s).
 	SyncInterval string `mapstructure:"sync_interval" yaml:"sync_interval,omitempty"`
 	// MaxStale is how old a replica's copy may get before it refuses
-	// sign-ins with revocation_unavailable (default 60s; at least
-	// sync_interval, at most 1h).
+	// sign-ins with revocation_unavailable (default 60s or 2 x
+	// sync_interval, whichever is longer; at least 2 x sync_interval, so
+	// one slow pull does not make the replica refuse, at most 1h).
 	MaxStale string `mapstructure:"max_stale" yaml:"max_stale,omitempty"`
 	// MaxTokensPerPerson is how many single-token ends the leader keeps
 	// per person before it turns them into one person-wide end (default
@@ -249,9 +250,10 @@ func (r SubstrateRevocationConfig) EffectiveSyncInterval() time.Duration {
 	return durationOr(r.SyncInterval, DefaultSubstrateRevocationSyncInterval)
 }
 
-// EffectiveMaxStale is the age past which a replica refuses sign-ins.
+// EffectiveMaxStale is the age past which a replica refuses sign-ins:
+// max_stale, or 60s or 2 x sync_interval, whichever is longer (RV1-09).
 func (r SubstrateRevocationConfig) EffectiveMaxStale() time.Duration {
-	return durationOr(r.MaxStale, DefaultSubstrateRevocationMaxStale)
+	return durationOr(r.MaxStale, max(DefaultSubstrateRevocationMaxStale, 2*r.EffectiveSyncInterval()))
 }
 
 // EffectiveMaxTokensPerPerson is the per-person single-token cap.
@@ -784,8 +786,8 @@ func (s *SubstrateConfig) Validate() error {
 		}
 	}
 	if v := rv.MaxStale; v != "" {
-		if d, err := time.ParseDuration(strings.TrimSpace(v)); err != nil || d < rv.EffectiveSyncInterval() || d > time.Hour {
-			bad("identity.revocation.max_stale", "%q must be a Go duration of at least sync_interval (%s) and at most 1h", v, rv.EffectiveSyncInterval())
+		if d, err := time.ParseDuration(strings.TrimSpace(v)); err != nil || d < 2*rv.EffectiveSyncInterval() || d > time.Hour {
+			bad("identity.revocation.max_stale", "%q must be a Go duration of at least 2 x sync_interval (%s) and at most 1h", v, 2*rv.EffectiveSyncInterval())
 		}
 	}
 	if n := rv.MaxTokensPerPerson; n < 0 || n > 4096 {

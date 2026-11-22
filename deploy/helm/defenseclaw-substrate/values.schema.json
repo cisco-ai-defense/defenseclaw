@@ -257,7 +257,7 @@
                   "properties": {
                     "enabled": {"type": "boolean"},
                     "sync_interval": {"type": "string", "pattern": "^[0-9]+(ms|s|m)$"},
-                    "max_stale": {"type": "string", "pattern": "^[0-9]+(ms|s|m|h)$"},
+                    "max_stale": {"type": "string", "pattern": "^[0-9]+(ms|s|m|h)$", "description": "at least 2 x sync_interval, at most 1h"},
                     "max_tokens_per_person": {"type": "integer", "minimum": 1, "maximum": 4096}
                   }
                 }

@@ -102,7 +102,8 @@ config:
       audience: defenseclaw
       token_lifetime_seconds: 300
       # Ended sign-ins (logout, logout --all, admin revoke). enabled is read
-      # at gateway start; managed_enterprise may not turn it off.
+      # at gateway start; managed_enterprise may not turn it off. max_stale
+      # is at least 2 x sync_interval (the gateway refuses to start otherwise).
       revocation:
         enabled: true
         sync_interval: 5s

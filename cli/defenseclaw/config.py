@@ -4635,13 +4635,41 @@ class SubstrateRevocationConfig:
     """substrate.identity.revocation (mirror of Go SubstrateRevocationConfig).
 
     enabled None is the default (on); managed_enterprise may not turn it
-    off. Durations are Go duration strings; "" is the default (5s, 60s).
-    max_tokens_per_person None is the default (64)."""
+    off. Durations are Go duration strings; "" is the default (5s, and for
+    max_stale 60s or 2 x sync_interval, whichever is longer). max_stale is
+    at least 2 x sync_interval. max_tokens_per_person None is the default
+    (64)."""
 
     enabled: bool | None = None
     sync_interval: str = ""
     max_stale: str = ""
     max_tokens_per_person: int | None = None
+
+    def effective_sync_interval_ns(self) -> int:
+        """Go EffectiveSyncInterval, in nanoseconds."""
+        ns = _go_duration_ns(self.sync_interval.strip()) if self.sync_interval.strip() else None
+        return ns if ns and ns > 0 else 5 * 10**9
+
+    def effective_max_stale_ns(self) -> int:
+        """Go EffectiveMaxStale, in nanoseconds: max_stale, or 60s or
+        2 x sync_interval, whichever is longer."""
+        ns = _go_duration_ns(self.max_stale.strip()) if self.max_stale.strip() else None
+        if ns and ns > 0:
+            return ns
+        return max(60 * 10**9, 2 * self.effective_sync_interval_ns())
+
+    def max_stale_error(self) -> str | None:
+        """The Go validation of max_stale (at least 2 x sync_interval, at
+        most 1h), or None when it is unset or valid."""
+        if not self.max_stale.strip():
+            return None
+        ns, floor = _go_duration_ns(self.max_stale.strip()), 2 * self.effective_sync_interval_ns()
+        if ns is None or ns < floor or ns > 3600 * 10**9:
+            return (
+                f"identity.revocation.max_stale: {self.max_stale!r} must be a Go duration of at least "
+                f"2 x sync_interval ({floor // 10**9}s) and at most 1h"
+            )
+        return None
 
 
 @dataclass

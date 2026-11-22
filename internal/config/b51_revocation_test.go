@@ -38,6 +38,9 @@ func TestSubstrateRevocationConfig(t *testing.T) {
 		"sync too fast": {SubstrateRevocationConfig{SyncInterval: "500ms"}, "identity.revocation.sync_interval"},
 		"sync too slow": {SubstrateRevocationConfig{SyncInterval: "2m"}, "identity.revocation.sync_interval"},
 		"stale < sync":  {SubstrateRevocationConfig{SyncInterval: "10s", MaxStale: "5s"}, "identity.revocation.max_stale"},
+		"stale = sync":  {SubstrateRevocationConfig{SyncInterval: "5s", MaxStale: "5s"}, "identity.revocation.max_stale"},
+		"stale < 2sync": {SubstrateRevocationConfig{SyncInterval: "5s", MaxStale: "9s"}, "identity.revocation.max_stale"},
+		"stale = 2sync": {SubstrateRevocationConfig{SyncInterval: "5s", MaxStale: "10s"}, ""},
 		"stale > 1h":    {SubstrateRevocationConfig{MaxStale: "2h"}, "identity.revocation.max_stale"},
 		"tokens":        {SubstrateRevocationConfig{MaxTokensPerPerson: 5000}, "identity.revocation.max_tokens_per_person"},
 	} {
@@ -57,5 +60,15 @@ func TestSubstrateRevocationConfig(t *testing.T) {
 	}
 	if err := s.ValidateManaged("standalone"); err != nil {
 		t.Fatalf("standalone may: %v", err)
+	}
+}
+
+// RV1-09: unset, max_stale is 60s or 2 x sync_interval, whichever is longer.
+func TestRV109MaxStaleDefaultFollowsSyncInterval(t *testing.T) {
+	if got := (SubstrateRevocationConfig{SyncInterval: "40s"}).EffectiveMaxStale(); got != 80*time.Second {
+		t.Fatalf("sync 40s: max_stale %v, want 80s", got)
+	}
+	if got := (SubstrateRevocationConfig{SyncInterval: "2s"}).EffectiveMaxStale(); got != time.Minute {
+		t.Fatalf("sync 2s: max_stale %v, want 60s", got)
 	}
 }

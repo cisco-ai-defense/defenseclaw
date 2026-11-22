@@ -7852,7 +7852,7 @@
             "revocation": {
               "type": "object",
               "additionalProperties": false,
-              "description": "Ended sign-ins (logout, logout --all, admin revoke). enabled is read at gateway start; managed_enterprise may not turn it off.",
+              "description": "Ended sign-ins (logout, logout --all, admin revoke). enabled is read at gateway start; managed_enterprise may not turn it off. max_stale is at least 2 x sync_interval and at most 1h (unset: 60s or 2 x sync_interval, whichever is longer).",
               "properties": {
                 "enabled": {
                   "type": "boolean",

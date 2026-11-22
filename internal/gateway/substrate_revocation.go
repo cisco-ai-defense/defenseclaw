@@ -168,7 +168,7 @@ func (a *APIServer) substrateSigninRevoke(st *substrateState) http.HandlerFunc {
 			writeSubstrateJSONError(w, http.StatusServiceUnavailable, substrateReasonRevocationOff)
 			return
 		}
-		a.substrateAuditRevocation(st, r, c, "substrate.signin.revoked", "INFO",
+		a.substrateAuditRevocation(st, r, c, "substrate.signin.revoked", "MEDIUM",
 			fmt.Sprintf("person ended their own sign-in (scope %v)", substrateRevocationView(out, 0)["scope"]), out)
 		v := substrateRevocationView(out, closed)
 		if principal != "" {
