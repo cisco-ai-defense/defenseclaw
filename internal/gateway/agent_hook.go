@@ -3878,11 +3878,12 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 		}
 	}
 
-	// Copilot's native prompt events cannot deny a prompt, but Secure Client
-	// enforces an action-mode block by replacing userPromptTransformed before
-	// the model sees it. Record that completed replacement as the effective
-	// block; observe mode and every non-rewrite path keep their mapped outcome.
-	if a.copilotSecureClientPromptRewrite(ctx, req, mode, rawAction) {
+	// Copilot's native prompt events cannot deny a prompt, but on every
+	// profile an action-mode block replaces userPromptTransformed before the
+	// model sees it (GAP-1730). Record that completed replacement as the
+	// effective block; observe mode and every non-rewrite path keep their
+	// mapped outcome.
+	if copilotBlockedPromptRewrite(req, mode, rawAction) {
 		action, wouldBlock = "block", false
 		aiDefenseEnforced = verdict.aiDefenseBlock
 	}
@@ -3908,7 +3909,7 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 	resp := agentHookResponseForProfile(
 		profile, req, action, rawAction, severity, responseReason, findings, mode, wouldBlock, caps, responsePolicy,
 	)
-	resp.HookOutput = a.copilotSecureClientPromptOutput(ctx, req, mode, rawAction, findings, resp.HookOutput)
+	resp.HookOutput = copilotBlockedPromptOutput(req, mode, rawAction, findings, resp.HookOutput)
 	// Secure Client keeps the block message as the reason of the hook
 	// records (issue #1092).
 	if !a.managedAIDOnly() {
