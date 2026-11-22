@@ -5455,8 +5455,21 @@ func hashHex(value string) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// hashEvidence leaves out the skill folder facts: they describe a skill's
+// content, not which signal it is, so editing a skill or a scan that cannot
+// read its folder (a brokered home) keeps the signal's fingerprint and id.
 func hashEvidence(evidence []AIEvidence) string {
-	raw, _ := json.Marshal(evidence)
+	rows, cloned := evidence, false
+	for i := range rows {
+		if rows[i].Skill == nil {
+			continue
+		}
+		if !cloned {
+			rows, cloned = slices.Clone(evidence), true
+		}
+		rows[i].Skill = nil
+	}
+	raw, _ := json.Marshal(rows)
 	return hashValue(string(raw))
 }
 

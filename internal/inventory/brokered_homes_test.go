@@ -140,3 +140,37 @@ func TestBrokeredSkillRowsReadNoSkillFolder(t *testing.T) {
 		t.Fatalf("want one brokered skill row, got %d: %+v", rows, signal.Evidence)
 	}
 }
+
+// A skill signal's fingerprint (and id) names the skills folder, not its
+// content: editing a SKILL.md does not make the signal gone and new.
+func TestSkillSignalFingerprintIgnoresSkillContent(t *testing.T) {
+	skills := filepath.Join(t.TempDir(), ".claude", "skills")
+	manifest := filepath.Join(skills, "pdf", "SKILL.md")
+	if err := os.MkdirAll(filepath.Dir(manifest), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	scan := func(text string) AISignal {
+		t.Helper()
+		if err := os.WriteFile(manifest, []byte(text), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		service := &ContinuousDiscoveryService{opts: AIDiscoveryOptions{Mode: "passive"}}
+		return service.signalFromDirectoryChildren(AISignature{ID: "claudecode"}, SignalSkill, "skill", skills)
+	}
+	before := scan("---\nname: pdf\nversion: 1\n---\n")
+	after := scan("---\nname: pdf\nversion: 2\n---\n")
+	if before.Fingerprint == "" || before.Fingerprint != after.Fingerprint {
+		t.Fatalf("editing a skill changed its signal fingerprint: %q -> %q", before.Fingerprint, after.Fingerprint)
+	}
+	facts := func(sig AISignal) *AISkillFacts {
+		for _, ev := range sig.Evidence {
+			if ev.Skill != nil {
+				return ev.Skill
+			}
+		}
+		return nil
+	}
+	if b, a := facts(before), facts(after); b == nil || a == nil || b.ContentHash == a.ContentHash {
+		t.Fatalf("want skill facts with a changed content hash, got %+v / %+v", b, a)
+	}
+}
