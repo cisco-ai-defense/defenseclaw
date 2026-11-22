@@ -35,8 +35,19 @@ import (
 // det111R1VerdictPending are attack rows whose verdict does not reach the
 // unknown tier yet, with the lane that closes each (the IR table's
 // det111Pending, plus rows whose IR is green but whose verdict is decided
-// elsewhere). A pending row that starts to pass fails the test.
+// elsewhere). A pending row is still held to its lane-off (1.0.10) verdict;
+// one that reaches the unknown tier in every cell fails the test (finish).
 var det111R1VerdictPending = map[string]string{
+	"GAP-0662/var6b": "watch's inline interpreter append body stays opaque until it is read (S3-R1)",
+	"GAP-0893/var2":  "python -c open(...).read() of a key file is not a known read; a known read reaches Decide's read row (S3-R1, S1-MECH)",
+	"GAP-1273/var":   "newgrp's stdin here-document is not lowered as a nested shell body (S3-R1 lowering, S4-R2 newgrp row)",
+	"GAP-1502/var":   "a script written by a here-document and run in the same call is not read as the run body (S3-R1)",
+	"GAP-1502/var3":  "a script written by a here-document and run as ./x is not read as the run body (S3-R1)",
+	"GAP-1538/var":   "$SHELL stays unknown until the hook account's login shell is supplied (S3-R1, ruling 04:25Z)",
+	"det111/GAP-1142/linux-rel-dotdot-add-content/var": "the nested PowerShell Add-Content body is a Maybe target (S3-R1)",
+	"det111/GAP-1142/linux-rel-set-content/var":        "the nested PowerShell Set-Content body is a Maybe target (S3-R1)",
+	"det111/GAP-1142/macos-rel-dotdot-add-content/var": "the nested PowerShell Add-Content body is a Maybe target (S3-R1)",
+	"det111/GAP-1142/macos-rel-set-content/var":        "the nested PowerShell Set-Content body is a Maybe target (S3-R1)",
 	"GAP-1502/var2":  "the file a staged curl -d @FILE sends is not graded (send source, S3-PRE flow lane)",
 	"GAP-1508/seed":  "fetch piped to a shell is the remote-code verdict, not an effect target (decision side)",
 	"GAP-1508/var":   "fetch piped to a shell under coproc: remote-code verdict, not an effect target (decision side)",
@@ -54,6 +65,16 @@ var det111R1VerdictPending = map[string]string{
 // det111R1WindowsPending are the Windows host rows (managed cells) whose
 // verdict does not reach the unknown tier yet, with the lane that closes each.
 var det111R1WindowsPending = map[string]string{
+	"GAP-0998/seed":                          "$env:USERPROFILE as one PowerShell bareword stays dynamic (S3-R1)",
+	"GAP-0998/seed2":                         "$env:USERPROFILE as one PowerShell bareword stays dynamic (S3-R1)",
+	"GAP-1173/var2":                          "Git Bash: the nested path value is not kept as a Windows-host operand (S3-R1)",
+	"GAP-1173/var7":                          "Git Bash: the nested python path value is not kept as a Windows-host operand (S3-R1)",
+	"GAP-1550/seed":                          "the automatic PowerShell $HOME stays dynamic (S3-R1)",
+	"GAP-1577/var":                           "*>&1 >> to authorized_keys: the known append does not reach the verdict yet (S3-R1, Decide row)",
+	"GAP-1577/var2":                          "*>> to authorized_keys: the known append does not reach the verdict yet (S3-R1, Decide row)",
+	"GAP-1577/var3":                          "Tee-Object -Append -FilePath has no program row (S4-R2)",
+	"GAP-1577/var4":                          "Start-Process cmd /c >> keys: the known append does not reach the verdict yet (S3-R1, Decide row)",
+	"GAP-1577/var5":                          "PowerShell append redirect to authorized_keys does not reach the verdict yet (S3-R1)",
 	"GAP-0998/var":                           "codex shell on a Windows host: the effects call gets no PowerShell dialect (S3-PRE effectCall); claudecode PowerShell reaches",
 	"GAP-0998/var2":                          "codex shell on a Windows host: no PowerShell dialect for the effects call (S3-PRE effectCall)",
 	"GAP-0998/var3":                          "codex shell on a Windows host: no PowerShell dialect for the effects call (S3-PRE effectCall)",
@@ -241,10 +262,11 @@ func TestDET111R1BodiesVerdictFiveTiers(t *testing.T) {
 type det111R1Judge struct {
 	attacks int
 	failed  map[string]bool
+	pending map[string]bool // pending attack rows judged in this run
 }
 
 func newDET111R1Judge(t *testing.T) *det111R1Judge {
-	return &det111R1Judge{failed: map[string]bool{}}
+	return &det111R1Judge{failed: map[string]bool{}, pending: map[string]bool{}}
 }
 
 func (j *det111R1Judge) judge(t *testing.T, api *APIServer, ctx context.Context, tierName string, floor bounded.Action, route det111R1Route, cwd string, row det111R1Row, command string, laneOff, probe bool) {
@@ -263,6 +285,9 @@ func (j *det111R1Judge) judge(t *testing.T, api *APIServer, ctx context.Context,
 	switch {
 	case row.attack:
 		j.attacks++
+		if _, pending := det111R1VerdictPending[row.id]; pending && !laneOff {
+			j.pending[row.id] = true
+		}
 		if bounded.Stricter(on, off) != on {
 			t.Errorf("%s: lane on %s is below lane off %s (raise-only)", where, on, off)
 		}
@@ -279,39 +304,18 @@ func (j *det111R1Judge) judge(t *testing.T, api *APIServer, ctx context.Context,
 	}
 }
 
+// finish keeps the pending table honest (DET111 ruling 2026-11-22 04:21Z: the
+// verdict tests are ratchets): every row is held to at least its lane-off
+// (1.0.10) verdict in judge, and a pending row that now reaches the unknown
+// tier in every cell of the run must leave the table.
 func (j *det111R1Judge) finish(t *testing.T) {
 	t.Helper()
 	if j.attacks == 0 {
 		t.Fatal("no attack rows judged")
 	}
-}
-
-// TestDET111R1BodiesPendingRowsStillFail keeps det111R1VerdictPending honest:
-// a pending row that reaches the unknown tier in every cell must leave it.
-func TestDET111R1BodiesPendingRowsStillFail(t *testing.T) {
-	home := det111R1Home(t)
-	rewrite := strings.NewReplacer("/home/alice", home, "/Users/alice", home)
-	cwd := filepath.Join(home, "proj")
-	rows := loadDET111R1Rows(t, func(platform, dialect string) bool {
-		return dialect == "posix" && (platform == "linux" || platform == "macos")
-	})
-	j := newDET111R1Judge(t)
-	seen := map[string]bool{}
-	for _, tier := range boundedTestTiers {
-		for _, route := range det111R1Routes() {
-			api := gap0589TierAPI(t, route.connector, tier.posture, tier.managed, tier.tier)
-			for _, row := range rows {
-				if _, pending := det111R1VerdictPending[row.id]; !pending || !row.attack {
-					continue
-				}
-				seen[row.id] = true
-				j.judge(t, api, t.Context(), tier.name, bounded.Unknown(tier.tier), route, cwd, row, rewrite.Replace(row.command), false, false)
-			}
-		}
-	}
-	for id, why := range det111R1VerdictPending {
-		if seen[id] && !j.failed[id] {
-			t.Errorf("%s reaches the unknown tier in every cell now: remove it from det111R1VerdictPending (%s)", id, why)
+	for id := range j.pending {
+		if !j.failed[id] {
+			t.Errorf("%s reaches the unknown tier in every cell now: remove it from the pending table (%s)", id, det111R1VerdictPending[id])
 		}
 	}
 }
