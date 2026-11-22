@@ -85,6 +85,7 @@ type UsageQueryRequest struct {
 	To        int64  `json:"to,omitempty"`
 	Owner     string `json:"owner,omitempty"`
 	AllOwners bool   `json:"all_owners,omitempty"`
+	Batch     string `json:"batch,omitempty"`
 	Limit     int    `json:"limit,omitempty"`
 }
 
@@ -180,7 +181,7 @@ func (s *Service) usagePush(_ context.Context, in UsagePushRequest) (struct{}, e
 }
 
 func (s *Service) usageQuery(ctx context.Context, in UsageQueryRequest) (UsageQueryAnswer, error) {
-	q := modelusage.Query{By: strings.TrimSpace(in.By), Owner: in.Owner, AllOwners: in.AllOwners, Limit: in.Limit}
+	q := modelusage.Query{By: strings.TrimSpace(in.By), Owner: in.Owner, AllOwners: in.AllOwners, Batch: in.Batch, Limit: in.Limit}
 	if in.From > 0 {
 		q.From = time.Unix(in.From, 0).UTC()
 	}

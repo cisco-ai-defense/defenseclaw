@@ -55,6 +55,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/substrate/podcert"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/ratelimit"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/registry"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/spendleader"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/telemetryrelay"
 	policyassets "github.com/defenseclaw/defenseclaw/policies"
 )
@@ -572,6 +573,16 @@ func substrateGatewayBuilder(c *config.Config, src *configwatch.Watcher, ready *
 			SecretPlaceholders: substrateSecretPlaceholders(c.Substrate.Secrets),
 		}
 		out.PolicyReset = substratePolicyResetter()
+		// T-COST: spend and usage live on the leader. substrate.usage.enabled
+		// false leaves both unset: no counter swap, no usage sink, no push
+		// loop, and the usage API answers usage_disabled.
+		if c.Substrate.Usage.UsageEnabled() {
+			spend := &spendleader.Client{Leader: toLeader}
+			out.SpendLeader = spend
+			out.Usage = gateway.NewSubstrateLeaderUsage(spend, live, regs)
+		} else {
+			out.UsageDisabled = true
+		}
 		if people != nil {
 			adminTLS := servingTLS
 			if !serveFlags.plainHTTP {

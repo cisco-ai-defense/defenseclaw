@@ -58,7 +58,7 @@ func (c *Client) UsagePush(ctx context.Context, epoch string, rows []modelusage.
 // UsageQuery reads a rollup. q.Owner and q.AllOwners must come from the
 // verified caller of the usage API.
 func (c *Client) UsageQuery(ctx context.Context, q modelusage.Query) ([]modelusage.Row, error) {
-	in := UsageQueryRequest{By: q.By, Owner: q.Owner, AllOwners: q.AllOwners, Limit: q.Limit}
+	in := UsageQueryRequest{By: q.By, Owner: q.Owner, AllOwners: q.AllOwners, Batch: q.Batch, Limit: q.Limit}
 	if !q.From.IsZero() {
 		in.From = q.From.Unix()
 	}

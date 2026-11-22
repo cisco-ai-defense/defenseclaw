@@ -77,6 +77,7 @@ type LeaderSink struct {
 	mu       sync.Mutex
 	epoch    string
 	entries  map[leaderKey]*leaderEntry
+	dirty    map[leaderKey]struct{} // entries the leader has not acknowledged
 	overflow int64
 	now      func() time.Time
 }
@@ -84,7 +85,7 @@ type LeaderSink struct {
 // NewLeaderSink returns a sink that reports under epoch (one gateway
 // process).
 func NewLeaderSink(epoch string) *LeaderSink {
-	return &LeaderSink{epoch: epoch, entries: map[leaderKey]*leaderEntry{}, now: time.Now}
+	return &LeaderSink{epoch: epoch, entries: map[leaderKey]*leaderEntry{}, dirty: map[leaderKey]struct{}{}, now: time.Now}
 }
 
 // Epoch names this process to the leader.
@@ -115,6 +116,7 @@ func (s *LeaderSink) Emit(_ context.Context, rec Record) {
 	}
 	addRecord(&e.agg, rec)
 	e.ver++
+	s.dirty[k] = struct{}{}
 }
 
 // dimOrEmpty is dim for a dimension that is empty off a cluster.
@@ -145,8 +147,10 @@ func (s *LeaderSink) Pending() []PendingRow {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var out []PendingRow
-	for k, e := range s.entries {
-		if e.sent == e.ver {
+	for k := range s.dirty {
+		e := s.entries[k]
+		if e == nil || e.sent == e.ver {
+			delete(s.dirty, k)
 			continue
 		}
 		out = append(out, PendingRow{RemoteRow: e.row(k), ver: e.ver, key: k})
@@ -185,12 +189,16 @@ func (s *LeaderSink) Acked(rows []PendingRow) {
 	for _, r := range rows {
 		if e := s.entries[r.key]; e != nil && e.sent < r.ver {
 			e.sent = r.ver
+			if e.sent == e.ver {
+				delete(s.dirty, r.key)
+			}
 		}
 	}
 	cutoff := s.now().UTC().Add(-leaderSinkKeepHours * time.Hour).Truncate(time.Hour).Unix()
 	for k, e := range s.entries {
 		if k.hour < cutoff && e.sent == e.ver {
 			delete(s.entries, k)
+			delete(s.dirty, k)
 		}
 	}
 }

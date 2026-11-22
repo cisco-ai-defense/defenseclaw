@@ -151,8 +151,15 @@ type SubstrateConfig struct {
 	// subject matches and its profile (SubstrateWorkloadEntry over the live
 	// config); nil leaves the workload answer out of the actor list.
 	WorkloadEntry func(subject string) (entry, profile string)
-	// Usage answers own-only usage (stream 10 seam; nil: 501).
+	// Usage answers the usage API (own rows; an administrator's all=1 reads
+	// every owner). Nil: 501 usage_unavailable.
 	Usage SubstrateUsage
+	// UsageDisabled is substrate.usage.enabled: false: the usage API answers
+	// 501 usage_disabled, and the replica counts no spend on the leader.
+	UsageDisabled bool
+	// SpendLeader moves this replica's budget spend and usage onto the
+	// leader (nil: not a cluster replica, or usage disabled).
+	SpendLeader SubstrateSpendLeader
 	// Bundles applies and shows signed policy bundles (nil: 501).
 	Bundles SubstrateBundles
 	// Activity receives the last-activity feed of A3's idle logic.

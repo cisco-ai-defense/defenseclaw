@@ -485,7 +485,10 @@ type Query struct {
 	// is applied in the SQL WHERE clause, never after the fetch.
 	Owner     string
 	AllOwners bool
-	Limit     int
+	// Batch limits the rollup to one batch id (the cluster leader's rows;
+	// a laptop row has none).
+	Batch string
+	Limit int
 }
 
 // Row is one rolled-up line. CostUSD is nil when no call in the bucket had a
@@ -588,6 +591,10 @@ func (s *Store) Run(ctx context.Context, q Query) ([]Row, error) {
 		}
 		where += " AND owner = ?"
 		args = append(args, q.Owner)
+	}
+	if q.Batch != "" {
+		where += " AND batch = ?"
+		args = append(args, q.Batch)
 	}
 	if q.By == "user" && !q.AllOwners {
 		col = "owner" // the caller own bucket only

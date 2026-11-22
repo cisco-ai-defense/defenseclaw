@@ -57,9 +57,9 @@ func TestSubstrateUsageTelemetryKeepsSubject(t *testing.T) {
 
 type fakeSubstrateUsage struct{ owners []string }
 
-func (f *fakeSubstrateUsage) Usage(_ context.Context, owner, _ string) (any, error) {
-	f.owners = append(f.owners, owner)
-	return map[string]any{"owner": owner}, nil
+func (f *fakeSubstrateUsage) Usage(_ context.Context, q SubstrateUsageQuery) (SubstrateUsageAnswer, error) {
+	f.owners = append(f.owners, q.Owner)
+	return SubstrateUsageAnswer{By: q.By}, nil
 }
 
 // TestSubstrateUsageNoPersonForbidden: "" is every owner, so a caller with

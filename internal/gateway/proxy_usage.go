@@ -85,6 +85,12 @@ func usageIdentity(ctx context.Context, f *modelusage.CallFacts) {
 			f.OwnerKey, f.OwnerKind = key, substrateUsageOwnerKind
 		}
 	}
+	if reg, ok := substrateRegistrationFrom(ctx); ok && isSubstrateActorRequest(ctx) {
+		// The cluster usage rows are by actor, batch and atespace, from the
+		// registration on the actor listener, never from headers. An
+		// attributed actor has them too (no person).
+		f.Actor, f.BatchID, f.Atespace = reg.Name, reg.BatchID, reg.Atespace
+	}
 	if resolved := resolvedGuardrailProfileFrom(ctx); resolved != nil && f.IdentityVerified {
 		f.ProfileName, f.ProfileDigest = resolved.decision.Name, resolved.decision.Digest
 	}

@@ -269,7 +269,14 @@ func (s *Sidecar) startRoutingAdmin(ctx context.Context) {
 		return
 	}
 	s.applyRoutingAdmin(cfg)
-	routingAdminRuntime.SetCounters(ctx, routingadmin.NewLocalCounter(cfg.DataDir), routingAdminFleet.counter(), routingAdminSyncInterval(cfg))
+	var local routingadmin.SpendCounter = routingadmin.NewLocalCounter(cfg.DataDir)
+	if s.substrateBuild != nil && cfg.Substrate.Usage.UsageEnabled() {
+		// A cluster replica keeps its spend on the leader (SetCounters in
+		// startSubstrateSpend). The pod-local file was lost on every restart
+		// and never shared, so it is not opened.
+		local = nil
+	}
+	routingAdminRuntime.SetCounters(ctx, local, routingAdminFleet.counter(), routingAdminSyncInterval(cfg))
 	if routingAdminRuntime.For(cfg) != nil {
 		first, cancel := context.WithTimeout(ctx, 2*time.Second)
 		routingAdminRuntime.SyncOnce(first)
