@@ -350,6 +350,9 @@ func (p *wrapperParse) child(words []Word, i int) ([]Word, int) {
 		// watch CMD ARGS: the words are joined with spaces and run by sh -c.
 		rest := words[i:]
 		if len(rest) == 0 {
+			if row.kind == wrapForeign {
+				return nil, i // ssh HOST: an interactive login, no child word
+			}
 			return []Word{}, len(words)
 		}
 		parts := make([]string, 0, len(rest))

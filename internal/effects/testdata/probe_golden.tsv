@@ -834,7 +834,7 @@ W4 gb HOME cd ~	K|append:c:\users\u\.ssh\authorized_keys,append:c:\work\authoriz
 W5 gb HOME prefix cd	K|append:c:\users\u\.ssh\authorized_keys
 W5 xargs -n	U|
 W6 lin HOME prefix cd	K|append:/home/u/.ssh/authorized_keys
-W6 ssh -i	U|delete:/x
+W6 ssh -i	U|
 W7 cmd-dialect unrelated HOME	U|append:c:\work\authorized_keys
 W7 command -v	K|
 W8 ps HOME var cd	U|

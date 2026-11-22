@@ -605,7 +605,9 @@ var wrapperTable = map[string]Wrapper{
 		valued: []string{"--with", "--python", "-p", "--project", "--group", "--extra", "--env-file", "--index", "--default-index", "--with-requirements", "--directory"},
 		longs:  []string{"--quiet", "--frozen", "--locked", "--isolated", "--no-sync", "--no-project", "--active", "--no-dev", "--all-extras", "--offline", "--no-config", "--no-cache"},
 		chdir:  []string{"--directory"}, outputs: map[string]Role{"--env-file": RoleRead, "--with-requirements": RoleRead}},
-	"ssh": {kind: wrapForeign, shorts: "46AaCfGgKkMNnqsTtVvXxYy", posSkip: 1,
+	// ssh HOST CMD ARGS: the words are joined with spaces and run by the login
+	// shell of HOST (GAP-0662 ruling); with no CMD it is an interactive login.
+	"ssh": {kind: wrapForeign, shorts: "46AaCfGgKkMNnqsTtVvXxYy", posSkip: 1, joinShell: true,
 		valued: []string{"-i", "-p", "-o", "-l", "-F", "-L", "-R", "-D", "-b", "-c", "-m", "-O", "-Q", "-w", "-e", "-J", "-W"}},
 	"wsl": {kind: wrapForeign, valued: []string{"-u", "-d", "--user", "--distribution"}},
 }

@@ -185,7 +185,6 @@ func TestDET111R1Dump(t *testing.T) {
 // so the list only shrinks.
 var det111Pending = map[string]string{
 	"GAP-0662/var6": "watch is not a wrapper row yet (S4-R2 program table)",
-	"GAP-0662/var8": "ssh host body runs remotely: a remote target, ruling needed",
 	"GAP-1173/var4": "Expand-Archive has no program row (S4-R2)",
 	"GAP-1173/var5": "tar in PowerShell has no program row on Windows (S4-R2)",
 	"GAP-1173/var6": "inline-code folder literal is opaque; the classifier grades a folder for mutations only (S4-R3)",

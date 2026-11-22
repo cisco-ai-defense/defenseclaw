@@ -193,6 +193,10 @@ type walker struct {
 	aliasAll   bool
 	// varsOwned: env and exported are this scope's own copies (see ownVars).
 	varsOwned bool
+	// remote counts the remote-host bodies being walked (ssh HOST CMD...: the
+	// joined words run in the login shell of another host, GAP-0662 ruling).
+	// Every effect emitted inside one is placed on that host (remoteTarget).
+	remote int
 	// cdUnreliable: the cd builtin was disabled or made to resolve names as
 	// variables (enable -n cd, shopt -s cdable_vars), or cd was aliased: its
 	// target and effect are no longer what the argument says.
@@ -737,6 +741,9 @@ func (w *walker) emit(e Effect) int {
 		w.res.addUnknown(ReasonLimit)
 		return 0
 	}
+	if w.remote > 0 {
+		remoteTarget(&e)
+	}
 	if (w.execState || w.debugTrap || w.dead > 0) && mutatesTarget(e.Kind) {
 		// The shell may never run it: not a fully known mutation (GAP-0218). A
 		// read or run that may not happen keeps its reading, as before.
@@ -829,7 +836,7 @@ func (w *walker) resolveWord(wd Word) Word {
 		if i == 0 && !s.Quoted && strings.HasPrefix(lit, "~") && !isTilde(lit, w.o.flavor()) {
 			v, ok := w.tildePrefix(lit)
 			if !ok {
-				return Word{Static: false, Reason: ReasonDynamicExpansion, Span: wd.Span}
+				return Word{Static: false, Reason: ReasonDynamicExpansion, Span: wd.Span, Tail: tildeTail(lit, wd.Segs[1:])}
 			}
 			if s.Glob {
 				glob = true
@@ -839,7 +846,7 @@ func (w *walker) resolveWord(wd Word) Word {
 		}
 		if i == 0 && isTilde(lit, w.o.flavor()) {
 			if w.curHome == "" {
-				return Word{Static: false, Reason: ReasonDynamicExpansion, Span: wd.Span}
+				return Word{Static: false, Reason: ReasonDynamicExpansion, Span: wd.Span, Tail: tildeTail(lit, wd.Segs[1:])}
 			}
 			// a glob/brace after the tilde still globs (review N10 V16).
 			if s.Glob && !s.Quoted {
@@ -3587,14 +3594,69 @@ func (w *walker) unwrapCodeScoped(code string, static bool, dialect Dialect, dep
 	}
 	s := w.saveScope()
 	env, exp, home := w.childEnvironment(dialect)
+	remote := remoteOrigin(origin)
+	if remote {
+		// ssh HOST CMD...: the login shell of another host runs the body. Its
+		// environment, home and folder are that host's, none of them ours; the
+		// body is still read, and each effect is placed on that host.
+		env, exp, home = map[string]string{}, map[string]bool{}, ""
+		w.setCWDDynamic()
+		w.remote++
+	}
 	w.env, w.exported = env, exp
 	w.varsOwned = true
 	w.bindPositional()
-	if dialect == DialectPOSIX {
+	if dialect == DialectPOSIX || remote {
 		w.curHome = home
 	}
 	w.walkScript(sub, depth+1)
+	if remote {
+		w.remote--
+	}
 	w.restoreScope(s)
+}
+
+// remoteOrigin reports that origin's command was started by a wrapper that
+// runs its joined words as shell text on another host (ssh).
+func remoteOrigin(o Origin) bool {
+	for _, n := range o.Wrappers {
+		if r, ok := wrapperTable[n]; ok && r.kind == wrapForeign && r.joinShell {
+			return true
+		}
+	}
+	return false
+}
+
+// remoteTarget places an effect of a remote-host body on that host (GAP-0662
+// ruling: ssh runs its body on a remote host). The host may be this one (ssh
+// localhost), so the effect is still graded, but nothing of the local file
+// system names it: a placed path keeps only its spelling behind an unknown
+// root ("$?/home/u/.ssh/authorized_keys"), which the protected-set
+// classifier reads by name (Maybe, R-NAME), never as a known local member.
+func remoteTarget(e *Effect) {
+	e.addReason(ReasonForeignContext, ScopeTarget)
+	t := &e.Target
+	if t.Type != TargetPath || t.Path == "" {
+		return
+	}
+	p := t.Path
+	if !strings.HasPrefix(p, "/") && !strings.HasPrefix(p, `\`) {
+		p = "/" + p
+	}
+	t.Spelling = cap4k("$?" + p)
+	t.Path, t.Physical, t.Lexical = "", "", ""
+}
+
+// tildeTail is the Word.Tail of a leading tilde the walker cannot expand (no
+// known home, or another account's): the literal path after the tilde
+// prefix, so the classifier can still read a protected name in it
+// (~/.ssh/authorized_keys under an unknown home).
+func tildeTail(lit string, rest []WordSeg) string {
+	i := strings.IndexAny(lit, `/\`)
+	if i < 0 {
+		return segTail(rest)
+	}
+	return segTail(append([]WordSeg{{Lit: lit[i:]}}, rest...))
 }
 
 // childEnvironment is the environment a child shell starts with: what the
