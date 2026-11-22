@@ -20,6 +20,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"path"
+	"slices"
 	"strings"
 	"time"
 
@@ -216,16 +217,27 @@ func SecretFor(t Template, provider, namespace string, b Binding, allowEcho bool
 
 // Secrets turns the active, unexpired bindings of one person into
 // substrate.secrets entries, as the controller renders them. A binding
-// whose template is gone is left out.
+// whose template is gone is left out. A binding no administrator approved
+// (no ask id) keeps only the hosts its template covers now, so a template
+// an administrator narrows later narrows its bindings too (RV3 P2-2); one
+// with no host left is left out. An approved binding keeps its host.
 func Secrets(catalog []Template, provider, namespace string, bindings []Binding, allowEcho bool, now time.Time) []config.SubstrateSecret {
 	var out []config.SubstrateSecret
 	for _, b := range bindings {
 		if b.State != Active || b.Expired(now) {
 			continue
 		}
-		if t, ok := Find(catalog, b.Template); ok {
-			out = append(out, SecretFor(t, provider, namespace, b, allowEcho))
+		t, ok := Find(catalog, b.Template)
+		if !ok {
+			continue
 		}
+		if b.AskID == "" {
+			b.Hosts = slices.DeleteFunc(slices.Clone(b.Hosts), func(h string) bool { return !t.Covers(h) })
+			if len(b.Hosts) == 0 {
+				continue
+			}
+		}
+		out = append(out, SecretFor(t, provider, namespace, b, allowEcho))
 	}
 	return out
 }

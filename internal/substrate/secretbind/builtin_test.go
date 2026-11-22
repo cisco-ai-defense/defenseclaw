@@ -18,6 +18,7 @@ package secretbind
 
 import (
 	"encoding/base64"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -172,5 +173,30 @@ func TestB1StoredValueBasicForm(t *testing.T) {
 	b.BasicUser = "svc-ci@corp"
 	if err := b.Check(); err != nil {
 		t.Fatalf("Check refused %q: %v", b.BasicUser, err)
+	}
+}
+
+// TestB1SecretsNarrowedTemplateRV3P22: an administrator narrows a template
+// after bindings were made under it. A binding nobody approved keeps only
+// the hosts the template covers now (none left: not rendered); a binding an
+// administrator approved through an ask keeps its host.
+func TestB1SecretsNarrowedTemplateRV3P22(t *testing.T) {
+	now := time.Date(2026, 11, 22, 12, 0, 0, 0, time.UTC)
+	catalog := Catalog([]config.SubstrateSecretTemplate{{Name: "github", Hosts: []string{"github.com"}}})
+	in := []Binding{
+		{ID: "a", Name: "api-only", Owner: "k1", Template: "github", Hosts: []string{"api.github.com"}, State: Active},
+		{ID: "b", Name: "both", Owner: "k1", Template: "github", Hosts: []string{"github.com", "api.github.com"}, State: Active},
+		{ID: "c", Name: "approved", Owner: "k1", Template: "github", Hosts: []string{"api.github.com"}, State: Active, AskID: "A-1"},
+	}
+	got := map[string][]string{}
+	for _, s := range Secrets(catalog, "p", "ns", in, false, now) {
+		got[s.Name] = s.Inject.Hosts
+	}
+	want := map[string][]string{"both": {"github.com"}, "approved": {"api.github.com"}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("rendered %v, want %v", got, want)
+	}
+	if in[1].Hosts[1] != "api.github.com" {
+		t.Fatalf("Secrets changed its input: %v", in[1].Hosts)
 	}
 }

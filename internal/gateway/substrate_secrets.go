@@ -32,6 +32,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/egressspec"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/render"
 )
@@ -274,6 +275,26 @@ func (a *APIServer) substrateTestSecret(st *substrateState) http.HandlerFunc {
 	}
 }
 
+// substratePayloadHMAC is the gateway's keyed digest (the telemetry HMAC
+// of the device key); a test replaces it.
+var substratePayloadHMAC = gatewaylog.ComputePayloadHMAC
+
+// substrateSubjectKey is the keyed pseudonym of a person's OIDC subject
+// (hmac-sha256:<64 hex>), "" with no subject or no telemetry key.
+func substrateSubjectKey(subject string) string {
+	if subject == "" {
+		return ""
+	}
+	d := substratePayloadHMAC(struct {
+		Kind    string `json:"kind"`
+		Subject string `json:"subject"`
+	}{Kind: "substrate_person", Subject: subject})
+	if d == "" {
+		return ""
+	}
+	return "hmac-sha256:" + d
+}
+
 // recordSubstrateSecretChange writes the typed audit record of one secret
 // value or binding change (log.substrate.secret.changed, B1 M-OBS-1). It
 // carries the name, the operation and the bound host, never the value; it
@@ -282,6 +303,11 @@ func (a *APIServer) substrateTestSecret(st *substrateState) http.HandlerFunc {
 func (a *APIServer) recordSubstrateSecretChange(ctx context.Context, st *substrateState, name string,
 	op audit.SubstrateSecretOperation, host string, failed bool) {
 	ev := audit.SubstrateSecretChangeEvent{Name: name, Operation: op, Host: host, Failed: failed, Timestamp: time.Now()}
+	// The record says who made the change (RV3 P2-4): the acting person,
+	// as a keyed pseudonym, never the subject itself.
+	if c, ok := substrateCallerFrom(ctx); ok {
+		ev.SubjectKey = substrateSubjectKey(c.person.Subject)
+	}
 	if st != nil && st.cfg.SecretAudit != nil {
 		st.cfg.SecretAudit(ctx, ev)
 		return

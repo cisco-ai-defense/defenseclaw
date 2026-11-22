@@ -14,6 +14,8 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+//go:build !windows
+
 package gateway
 
 import (
@@ -140,6 +142,9 @@ func TestB1BindingAdd(t *testing.T) {
 		{"name taken vs admin", `{"name":"github-push","template":"gitlab","host":"gitlab.com","value":"v"}`, 409, "secret_name_taken"},
 		{"name taken vs own", `{"name":"gl-work","template":"gitlab","host":"gitlab.com","value":"v"}`, 409, "secret_name_taken"},
 		{"echo host", `{"name":"e1","template":"generic-bearer","host":"httpbin.org","value":"v"}`, 403, "secret_echo_host"},
+		// RV3 P2-1: request bins sit two labels under a listed entry.
+		{"echo host two labels deep", `{"name":"e3","template":"generic-bearer","host":"eo123.m.pipedream.net","value":"v"}`, 403, "secret_echo_host"},
+		{"echo wildcard two labels deep", `{"name":"e4","template":"generic-bearer","host":"*.free.beeceptor.com","value":"v"}`, 403, "secret_echo_host"},
 		{"echo host, allow_echo without the admin switch", `{"name":"e2","template":"generic-bearer","host":"httpbin.org","value":"v","allow_echo":true}`, 403, "secret_echo_host"},
 		{"unknown template", `{"name":"x1","template":"nope","host":"gitlab.com","value":"v"}`, 400, "secret_template_unknown"},
 		{"template of another profile", `{"name":"x2","template":"ops-only","host":"ops.example.com","value":"v"}`, 400, "secret_template_unknown"},

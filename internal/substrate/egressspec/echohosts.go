@@ -36,13 +36,10 @@ var EchoHosts = []string{
 	"webhook.site", "*.pipedream.net", "*.requestcatcher.com", "*.beeceptor.com",
 }
 
-// EchoHostsCovered returns the entries of EchoHosts that some host the
-// pattern raw matches is also matched by (an overlap), in list order.
-func EchoHostsCovered(raw string) []string { return EchoHostsCoveredWith(raw, nil) }
-
-// EchoHostsCoveredWith is EchoHostsCovered over EchoHosts followed by extra
-// (substrate.egress.no_swap_hosts). An extra entry that is not a valid
-// pattern is skipped (config validation refuses it).
+// EchoHostsCoveredWith returns the entries of EchoHosts followed by extra
+// (substrate.egress.no_swap_hosts) that cover some host the pattern raw
+// matches, in list order. An extra entry that is not a valid pattern is
+// skipped (config validation refuses it).
 func EchoHostsCoveredWith(raw string, extra []string) []string {
 	p, ok := ParsePattern(raw)
 	if !ok {
@@ -51,27 +48,34 @@ func EchoHostsCoveredWith(raw string, extra []string) []string {
 	var out []string
 	for _, e := range append(slices.Clip(EchoHosts), extra...) {
 		ep, ok := ParsePattern(e)
-		if ok && patternsOverlap(p, ep) && !slices.Contains(out, e) {
+		if ok && echoCovers(p, ep) && !slices.Contains(out, e) {
 			out = append(out, e)
 		}
 	}
 	return out
 }
 
-// patternsOverlap reports whether one hostname matches both patterns. A
-// wildcard "*.N" matches exactly one more label than N.
-func patternsOverlap(a, b Pattern) bool {
-	switch {
-	case a.Any || b.Any:
-		return true
-	case !a.Wildcard && !b.Wildcard:
-		return a.Name == b.Name
-	case a.Wildcard && b.Wildcard:
-		return a.Name == b.Name
-	case a.Wildcard:
-		return oneLabelUnder(b.Name, a.Name)
+// echoCovers reports whether the echo entry e covers some host the binding
+// pattern p matches. An echo entry covers its whole subtree, at any depth:
+// an exact entry N is N and every name below it, "*.N" every name below N
+// (request bins live two labels deep, eoX.m.pipedream.net and
+// NAME.free.beeceptor.com). A binding "*.M" still matches exactly one
+// label below M.
+func echoCovers(p, e Pattern) bool {
+	covered := func(host string) bool {
+		return (!e.Wildcard && host == e.Name) || strings.HasSuffix(host, "."+e.Name)
 	}
-	return oneLabelUnder(a.Name, b.Name)
+	switch {
+	case p.Any || e.Any:
+		return true
+	case !p.Wildcard:
+		return covered(p.Name)
+	case p.Name == e.Name || strings.HasSuffix(p.Name, "."+e.Name):
+		// Every host one label below M is below N.
+		return true
+	}
+	// "*.M" reaches the exact entry N one label below M.
+	return !e.Wildcard && oneLabelUnder(e.Name, p.Name)
 }
 
 // oneLabelUnder reports whether host is exactly one label below parent.
