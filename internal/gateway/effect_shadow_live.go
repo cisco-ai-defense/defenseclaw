@@ -154,7 +154,7 @@ func effectShadowRun(request trustedActionRequest, mode effectRulesMode, tiers .
 		c := classifyEffects(result, facts, opts.Flavor, tier, reachEnv)
 		effectReachUnplaced(&c, result, facts, text, request.Input.ActiveHome, opts.Flavor)
 		res := &results[i]
-		res.Sets, res.Program, res.Kind, res.Reach, res.RoleHeld, res.LinkHeld = c.sets, c.program, c.kind, c.reach, c.roleHeld, c.linkHeld
+		res.Sets, res.Program, res.Kind, res.Reach, res.RoleHeld, res.LinkHeld, res.Known = c.sets, c.program, c.kind, c.reach, c.roleHeld, c.linkHeld, c.known
 		switch {
 		case c.restricted:
 			res.Tier = string(effectTierRestricted)
@@ -236,6 +236,13 @@ func scheduleEffectShadow(request trustedActionRequest, mode effectRulesMode, ti
 	if record == nil || effectShadowLiveOff {
 		return
 	}
+	goEffectShadow(func() { record(effectShadowRun(request, mode, tier)[0]) })
+}
+
+// goEffectShadow runs fn on its own goroutine in one of the bounded shadow
+// slots. It returns at once; when every slot is in use fn is dropped and
+// counted (effectShadowDropped), never queued behind the hook.
+func goEffectShadow(fn func()) {
 	select {
 	case effectShadowSlots <- struct{}{}:
 	default:
@@ -247,8 +254,18 @@ func scheduleEffectShadow(request trustedActionRequest, mode effectRulesMode, ti
 			<-effectShadowSlots
 			_ = recover() // a recorder failure is as neutral as a run failure
 		}()
-		record(effectShadowRun(request, mode, tier)[0])
+		fn()
 	}()
+}
+
+// recordEffectShadowAsync hands a finished run of the ON lane to record off
+// the hook's path, in the same bounded slots: the hook never waits for the
+// audit write.
+func recordEffectShadowAsync(res EffectShadowResult, record func(EffectShadowResult)) {
+	if record == nil || effectShadowLiveOff {
+		return
+	}
+	goEffectShadow(func() { record(res) })
 }
 
 // effectShadowRecordWorthy reports whether a finished run gets an audit row:
@@ -283,6 +300,9 @@ func effectShadowAuditDetails(res EffectShadowResult, dropped int64) string {
 	}
 	if res.LinkHeld {
 		b.WriteString(" link_held=1")
+	}
+	if res.Known {
+		b.WriteString(" known=1")
 	}
 	if len(res.RuleIDs) > 0 {
 		b.WriteString(" rules=" + strings.Join(res.RuleIDs, ","))

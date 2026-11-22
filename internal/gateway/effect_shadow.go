@@ -104,6 +104,12 @@ type EffectShadowResult struct {
 	// LinkHeld marks a member reached only through a followed link: counted,
 	// not raised (effectProtectedSets).
 	LinkHeld bool `json:"link_held,omitempty"`
+	// Known marks a verdict with a Known protected mutation: a known
+	// mutating effect on a known member, by a listed command (the restricted
+	// tier) or not. Only a Known verdict raises the live answer; a Maybe one
+	// (a reach reason only) and a known read are shadow records
+	// (effectShadowFindings).
+	Known bool `json:"known,omitempty"`
 	// CostUS is the wall-clock cost of the run in microseconds; Effects is the
 	// number of effects the extractor produced.
 	CostUS  int64 `json:"cost_us,omitempty"`
@@ -249,6 +255,9 @@ type effectClass struct {
 	// linkHeld: a target in a protected set only through a link the
 	// resolver followed, counted, not raised (effectProtectedSets).
 	linkHeld bool
+	// known: some effect is a known mutation of a known member (no reach
+	// reason), whatever else the call reached.
+	known bool
 }
 
 // classifyEffects applies the owner's three answers (2026-11-13): a known
@@ -301,6 +310,12 @@ func classifyEffects(result effects.Result, facts []*semanticpb.EffectFact, flav
 		touchSets = append(touchSets, append(append([]string(nil), known...), maybe...)...)
 		if r != "" {
 			c.reach = append(c.reach, r)
+		} else if mutating {
+			// A known read of a credential is the credential readers' class
+			// and keeps their 1.0.10 tier (own credentials alert, GAP-0888):
+			// the lane raises a mutation, it does not move a read to
+			// another tier (that is decide's table).
+			c.known = true
 		}
 		if c.program == "" && c.kind == "" {
 			c.program, c.kind = f.GetOrigin().GetProgram(), kind
@@ -533,13 +548,25 @@ func markOutermostEffectDispatch(ctx context.Context) (context.Context, bool) {
 }
 
 // effectShadowFindings turns an effect verdict into rule findings for the ON
-// lane. Clean or allow verdicts carry no finding. An alert-tier verdict is
-// capped at an alert in every profile; a block-tier verdict contributes to
-// enforcement so the profile threshold maps its severity to the action. The
-// effect disposition lets S8 map the unknown tier to ask later; the effect
-// proof is authoritative only when the lane is ON.
+// lane. Clean or allow verdicts carry no finding, and neither does a Maybe
+// verdict: a protected target the lane reached only by a reach reason
+// (R-NAME, R-GLOB, R-CWD, R-CODE, ...) never raises the live answer above the
+// 1.0.10 readers, in any tier (DET111 ruling 2026-11-22, TRAIN T1: every one of
+// its 13,572 new benign blocks was such a verdict), and neither does a known
+// read (Known is a mutation). It stays a shadow record:
+// the reach counters, the harness's EffectShadow stamps and the audit row
+// (effectLiveFindings). A Known verdict (a known effect on a known member)
+// raises: an alert-tier verdict is capped at an alert in every profile; a
+// block-tier verdict contributes to enforcement so the profile threshold maps
+// its severity to the action. The effect disposition lets S8 map the unknown
+// tier to ask later; the effect proof is authoritative only when the lane is
+// ON.
 func effectShadowFindings(res EffectShadowResult, mode effectRulesMode) []RuleFinding {
 	if res.Tier == string(effectTierClean) || res.Action == guardrailActionAllow {
+		return nil
+	}
+	proof := effectFindingProof(res)
+	if proof.Certainty != decide.CertKnown {
 		return nil
 	}
 	rid := "effect.protected_target_" + res.Tier
@@ -564,7 +591,7 @@ func effectShadowFindings(res EffectShadowResult, mode effectRulesMode) []RuleFi
 		Tags:       tags,
 	}
 	f.disposition = disposition
-	f.Proof = effectFindingProof(res)
+	f.Proof = proof
 	f.proof = newFindingProof(findingProofEffect, rid, mode == effectRulesOn)
 	switch res.Action {
 	case guardrailActionAlert:
@@ -582,9 +609,10 @@ const effectProofSource = "effects"
 // effectFindingProof is the DET111 proof of an effect verdict (internal/
 // guardrail/decide): the deciding effect's kind, the strongest protected
 // class it reached, and how sure the lane is. A restricted-tier verdict, or
-// an unknown-tier one without a reach reason (a known effect on a known
-// member by a command the restricted list does not name), is known; one
-// with a reach reason is maybe and carries the first reason.
+// one with a known mutation of a known member (Known: also by a command the
+// restricted list does not name), is known, even when another effect of the
+// call was only reached; any other is maybe and carries the first reach
+// reason, if any (a known read has none).
 func effectFindingProof(res EffectShadowResult) decide.Proof {
 	p := decide.Proof{
 		Kind:      effectProofKind(res.Kind),
@@ -592,10 +620,26 @@ func effectFindingProof(res EffectShadowResult) decide.Proof {
 		Certainty: decide.CertKnown,
 		Source:    effectProofSource,
 	}
-	if res.Tier != string(effectTierRestricted) && len(res.Reach) > 0 {
-		p.Certainty, p.Reach = decide.CertMaybe, res.Reach[0]
+	if res.Tier != string(effectTierRestricted) && !res.Known {
+		p.Certainty = decide.CertMaybe
+		if len(res.Reach) > 0 {
+			p.Reach = res.Reach[0]
+		}
 	}
 	return p
+}
+
+// effectLiveFindings runs the ON lane for one outermost dispatch: the Known
+// verdict's findings join today's (raise only); a Maybe verdict adds none and
+// is handed to the shadow recorder off the hook's path instead, so the audit
+// log still shows what the lane reached.
+func effectLiveFindings(request trustedActionRequest, mode effectRulesMode, tier effectTierMode) []RuleFinding {
+	res := computeEffectShadow(request, mode, tier)
+	findings := effectShadowFindings(res, mode)
+	if len(findings) == 0 && res.Tier != string(effectTierClean) {
+		recordEffectShadowAsync(res, request.recordEffectShadow)
+	}
+	return findings
 }
 
 // effectProofKind maps an effect kind to a proof kind. An opaque program is
