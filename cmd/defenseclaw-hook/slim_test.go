@@ -46,6 +46,15 @@ var slimHookForbidden = []string{
 	"github.com/maximhq/bifrost/",
 	"github.com/open-policy-agent/opa/v1/rego",
 	"github.com/open-policy-agent/opa/v1/topdown",
+	// The JSON Schema library compiles its meta-schemas at package init
+	// (1.7 ms and 1 MB per hook start), and its two users here: the OpenClaw
+	// plugin config check of connector Setup, which the hook never runs (the
+	// gateway and the CLI register it), and the v8 config schema check, which
+	// the hook never reaches (every other program that links internal/config
+	// registers it: TestEveryConfigProgramLinksTheV8SchemaCheck).
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/openclawschema",
+	"github.com/defenseclaw/defenseclaw/internal/config/v8schema",
+	"github.com/santhosh-tekuri/jsonschema/",
 }
 
 // slimHookAllowed are the packages under a forbidden prefix the hook needs:
@@ -140,6 +149,88 @@ func TestSlimHookLinksNoGatewayPackages(t *testing.T) {
 			}
 			t.Logf("%s: %d packages", goos, len(deps))
 		})
+	}
+}
+
+// TestOpenClawPluginConfigCheckLinkedWhereSetupRuns pins the other half of
+// the split above: every connector Setup runs from internal/gateway or
+// internal/cli (enterprisehooks.Install is called from the CLI), and both
+// link the package that registers the OpenClaw plugin config check
+// (internal/gateway/openclaw_schema_link.go). Without it, Setup refuses an
+// openclaw.json that carries a plugin config.
+func TestOpenClawPluginConfigCheckLinkedWhereSetupRuns(t *testing.T) {
+	gotool := goToolOrSkip(t)
+	const check = "github.com/defenseclaw/defenseclaw/internal/gateway/connector/openclawschema"
+	for _, goos := range []string{"linux", "darwin", "windows"} {
+		for _, pkg := range []string{"../../internal/gateway", "../../internal/cli", "../defenseclaw"} {
+			cmd := exec.Command(gotool, "list", "-deps", pkg)
+			cmd.Env = append(os.Environ(), "GOOS="+goos, "CGO_ENABLED=0")
+			out, err := cmd.Output()
+			if err != nil {
+				t.Fatalf("%s go list -deps %s: %v", goos, pkg, err)
+			}
+			found := false
+			for _, dep := range strings.Fields(string(out)) {
+				found = found || dep == check
+			}
+			if !found {
+				t.Errorf("%s: %s does not link %s", goos, pkg, check)
+			}
+		}
+	}
+}
+
+// TestEveryConfigProgramLinksTheV8SchemaCheck pins the other half of the
+// v8 schema split: internal/config checks a v8 document with the check that
+// internal/config/v8schema registers, and fails the check where it is not
+// linked. Every main package that links internal/config, on every OS, links
+// it too, as each linked the schema library before the split; the hook is
+// the one program that does not, and it never checks a v8 document.
+func TestEveryConfigProgramLinksTheV8SchemaCheck(t *testing.T) {
+	gotool := goToolOrSkip(t)
+	const (
+		module = "github.com/defenseclaw/defenseclaw"
+		cfg    = module + "/internal/config"
+		check  = module + "/internal/config/v8schema"
+		hook   = module + "/cmd/defenseclaw-hook"
+	)
+	for _, goos := range []string{"linux", "darwin", "windows"} {
+		cmd := exec.Command(gotool, "list", "-f", `{{if eq .Name "main"}}{{.ImportPath}} {{join .Deps " "}}{{end}}`, "./...")
+		cmd.Dir = "../.."
+		cmd.Env = append(os.Environ(), "GOOS="+goos, "CGO_ENABLED=0")
+		out, err := cmd.Output()
+		if err != nil {
+			t.Fatalf("%s go list ./...: %v", goos, err)
+		}
+		programs := 0
+		for _, line := range strings.Split(string(out), "\n") {
+			fields := strings.Fields(line)
+			if len(fields) == 0 {
+				continue
+			}
+			deps := map[string]bool{}
+			for _, dep := range fields[1:] {
+				deps[dep] = true
+			}
+			if !deps[cfg] {
+				continue
+			}
+			programs++
+			if fields[0] == hook {
+				if deps[check] {
+					t.Errorf("%s: %s links %s", goos, hook, check)
+				}
+				continue
+			}
+			if !deps[check] {
+				t.Errorf("%s: %s links internal/config but not %s", goos, fields[0], check)
+			}
+		}
+		// 13 programs linked internal/config on each OS at the split.
+		if programs < 13 {
+			t.Errorf("%s: go list found %d programs that link internal/config, want at least 13", goos, programs)
+		}
+		t.Logf("%s: %d programs link internal/config", goos, programs)
 	}
 }
 
