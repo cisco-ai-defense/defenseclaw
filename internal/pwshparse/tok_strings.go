@@ -125,11 +125,11 @@ func (t *tokenizer) scanSubExpression(hereString bool) *Token {
 	}
 	e := t.currentExtent()
 	tok := &Token{Kind: TkStringLiteral, Flags: flags | staticTokenFlags[TkStringLiteral], Start: e.Start, End: e.End,
-		Value: sb.String(), class: tcString, skipped: bits, unscanned: true}
+		Value: sb.String(), class: tcString, x: &tokExtra{skipped: bits}}
 	return tok
 }
 
-func (t *tokenizer) scanStringExpandableInto(sb, formatSb *sbuf, nested *[]*Token) TokenFlags {
+func (t *tokenizer) scanStringExpandableInto(sb *sbuf, nested *[]*Token) TokenFlags {
 	flags := TokenFlags(0)
 	errorIndex := t.curIndex - 1
 	c := t.getChar()
@@ -140,7 +140,7 @@ func (t *tokenizer) scanStringExpandableInto(sb, formatSb *sbuf, nested *[]*Toke
 			}
 			c = t.getChar()
 		} else if c == '$' {
-			if t.scanDollarInStringExpandable(sb, formatSb, false, nested) {
+			if t.scanDollarInStringExpandable(sb, false, nested) {
 				continue
 			}
 		} else if c == '`' {
@@ -152,17 +152,11 @@ func (t *tokenizer) scanStringExpandableInto(sb, formatSb *sbuf, nested *[]*Toke
 				if sur != invalidChar {
 					sb.add(c)
 					sb.add(sur)
-					formatSb.add(c)
-					formatSb.add(sur)
 					continue
 				}
 			}
 		}
-		if c == '{' || c == '}' {
-			formatSb.add(c)
-		}
 		sb.add(c)
-		formatSb.add(c)
 	}
 	if c == 0 {
 		t.ungetChar()
@@ -172,7 +166,7 @@ func (t *tokenizer) scanStringExpandableInto(sb, formatSb *sbuf, nested *[]*Toke
 	return flags
 }
 
-func (t *tokenizer) scanDollarInStringExpandable(sb, formatSb *sbuf, hereString bool, nested *[]*Token) bool {
+func (t *tokenizer) scanDollarInStringExpandable(sb *sbuf, hereString bool, nested *[]*Token) bool {
 	dollarIndex := t.curIndex - 1
 	c1 := t.peekChar()
 	saveTokenStart := t.tokenStart
@@ -196,9 +190,6 @@ func (t *tokenizer) scanDollarInStringExpandable(sb, formatSb *sbuf, hereString 
 	t.mode = oldMode
 	if nestedToken != nil {
 		sb.addAll(t.script[dollarIndex:t.curIndex])
-		formatSb.add('{')
-		formatSb.addStr(itoa(len(*nested)))
-		formatSb.add('}')
 		*nested = append(*nested, nestedToken)
 		return true
 	}
@@ -206,10 +197,10 @@ func (t *tokenizer) scanDollarInStringExpandable(sb, formatSb *sbuf, hereString 
 }
 
 func (t *tokenizer) scanStringExpandable() *Token {
-	sb, fsb := make(sbuf, 0, 48), make(sbuf, 0, 48)
+	sb := make(sbuf, 0, 48)
 	var nested []*Token
-	flags := t.scanStringExpandableInto(&sb, &fsb, &nested)
-	return t.newStringExpandableToken(sb.String(), fsb.String(), TkStringExpandable, nested, flags)
+	flags := t.scanStringExpandableInto(&sb, &nested)
+	return t.newStringExpandableToken(sb.String(), TkStringExpandable, nested, flags)
 }
 
 func (t *tokenizer) scanAfterHereStringHeader(header string) bool {
@@ -316,35 +307,31 @@ func (t *tokenizer) scanHereStringLiteral() *Token {
 func (t *tokenizer) scanHereStringExpandable() *Token {
 	headerOffset := t.curIndex - 2
 	if !t.scanAfterHereStringHeader("@\"") {
-		return t.newStringExpandableToken("", "", TkHereStringExpandable, nil, tfTokenInError)
+		return t.newStringExpandableToken("", TkHereStringExpandable, nil, tfTokenInError)
 	}
 	flags := TokenFlags(0)
 	var nested []*Token
 	falseFooterOffset := -1
-	sb, fsb := make(sbuf, 0, 48), make(sbuf, 0, 48)
-	appendChar := func(c char) { sb.add(c); fsb.add(c) }
+	sb := make(sbuf, 0, 48)
+	appendChar := func(c char) { sb.add(c) }
 	if !t.scanPossibleHereStringFooter(isDoubleQuote, appendChar, &falseFooterOffset) {
 		for {
 			c := t.getChar()
 			if c == '\r' || c == '\n' {
 				length := sb.length()
-				flen := fsb.length()
 				sb.add(c)
-				fsb.add(c)
 				if c == '\r' && t.peekChar() == '\n' {
 					t.skipChar()
 					sb.add('\n')
-					fsb.add('\n')
 				}
 				if t.scanPossibleHereStringFooter(isDoubleQuote, appendChar, &falseFooterOffset) {
 					sb.truncate(length)
-					fsb.truncate(flen)
 					break
 				}
 				continue
 			}
 			if c == '$' {
-				if t.scanDollarInStringExpandable(&sb, &fsb, true, &nested) {
+				if t.scanDollarInStringExpandable(&sb, true, &nested) {
 					continue
 				}
 			} else if c == '`' {
@@ -356,18 +343,12 @@ func (t *tokenizer) scanHereStringExpandable() *Token {
 					if sur != invalidChar {
 						sb.add(c)
 						sb.add(sur)
-						fsb.add(c)
-						fsb.add(sur)
 						continue
 					}
 				}
 			}
-			if c == '{' || c == '}' {
-				fsb.add(c)
-			}
 			if c != 0 || !t.atEOF() {
 				sb.add(c)
-				fsb.add(c)
 			} else {
 				t.ungetChar()
 				if falseFooterOffset != -1 {
@@ -380,5 +361,5 @@ func (t *tokenizer) scanHereStringExpandable() *Token {
 			}
 		}
 	}
-	return t.newStringExpandableToken(sb.String(), fsb.String(), TkHereStringExpandable, nested, flags)
+	return t.newStringExpandableToken(sb.String(), TkHereStringExpandable, nested, flags)
 }

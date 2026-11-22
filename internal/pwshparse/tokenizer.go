@@ -132,7 +132,11 @@ func (t *tokenizer) startNestedScan(nested *Token) tokenizerState {
 	t.nestedAdj = nested.Start
 	t.script = toUTF16(nested.Value)
 	t.tokenStart = 0
-	t.skipped = nested.skipped
+	if nested.x != nil {
+		t.skipped = nested.x.skipped
+	} else {
+		t.skipped = nil
+	}
 	if t.wantTokens {
 		t.tokenList = nil
 	}
@@ -422,7 +426,7 @@ func (t *tokenizer) newStringLiteralToken(value string, kind TokenKind, flags To
 	return t.saveToken(tok)
 }
 
-func (t *tokenizer) newStringExpandableToken(value, format string, kind TokenKind, nested []*Token, flags TokenFlags) *Token {
+func (t *tokenizer) newStringExpandableToken(value string, kind TokenKind, nested []*Token, flags TokenFlags) *Token {
 	if nested != nil && len(nested) == 0 {
 		nested = nil
 	} else if flags&tfTokenInError == 0 {
@@ -435,14 +439,15 @@ func (t *tokenizer) newStringExpandableToken(value, format string, kind TokenKin
 	}
 	tok := t.mkToken(kind, flags)
 	tok.Value = value
-	tok.Format = format
-	tok.Nested = nested
+	if len(nested) > 0 {
+		tok.extra().Nested = nested
+	}
 	tok.class = tcString
 	return t.saveToken(tok)
 }
 
-func (t *tokenizer) newGenericExpandableToken(value, format string, nested []*Token) *Token {
-	return t.newStringExpandableToken(value, format, TkGeneric, nested, 0)
+func (t *tokenizer) newGenericExpandableToken(value string, nested []*Token) *Token {
+	return t.newStringExpandableToken(value, TkGeneric, nested, 0)
 }
 
 func (t *tokenizer) newGenericToken(value string) *Token {
@@ -451,7 +456,7 @@ func (t *tokenizer) newGenericToken(value string) *Token {
 
 func (t *tokenizer) newInputRedirectionToken() *Token {
 	tok := t.mkToken(TkRedirectInStd, 0)
-	tok.redirKind = 1
+	tok.extra().redirKind = 1
 	return t.saveToken(tok)
 }
 
@@ -464,17 +469,19 @@ func (t *tokenizer) newFileRedirectionToken(from int, appendMode, fromExplicit b
 		return t.newNumberToken(&NumberValue{Type: "Int32", Text: itoa(from)})
 	}
 	tok := t.mkToken(TkRedirection, 0)
-	tok.redirKind = 3
-	tok.FromStream = RedirectionStream(from)
-	tok.Append = appendMode
+	x := tok.extra()
+	x.redirKind = 3
+	x.FromStream = RedirectionStream(from)
+	x.Append = appendMode
 	return t.saveToken(tok)
 }
 
 func (t *tokenizer) newMergingRedirectionToken(from, to int) *Token {
 	tok := t.mkToken(TkRedirection, 0)
-	tok.redirKind = 2
-	tok.FromStream = RedirectionStream(from)
-	tok.ToStream = RedirectionStream(to)
+	x := tok.extra()
+	x.redirKind = 2
+	x.FromStream = RedirectionStream(from)
+	x.ToStream = RedirectionStream(to)
 	return t.saveToken(tok)
 }
 

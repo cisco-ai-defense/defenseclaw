@@ -17,13 +17,12 @@ type Node struct {
 	Start int
 	End   int
 	Kids  []*Node
-	// props holds the scalar properties detection reads, in insertion order: three inline, the rest in moreProps.
-	props     [3]propKV
+	// props holds the scalar properties detection reads, in insertion order: two inline, the rest in moreProps.
+	props     [2]propKV
 	nprops    uint8
 	moreProps []propKV
-	// Str is the Value of a (Expandable)StringConstantExpressionAst; SCT its StringConstantType.
+	// Str is the Value of a (Expandable)StringConstantExpressionAst; its StringConstantType is the property of that name.
 	Str string
-	SCT string
 	// Num is the value of a ConstantExpressionAst.
 	Num *NumberValue
 	// kidsBuf is the backing store of the first two children (most nodes have at most two).

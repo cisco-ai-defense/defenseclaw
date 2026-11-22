@@ -234,7 +234,6 @@ func newConstBool(e extent, v bool) *Node {
 func newStringConst(e extent, v string, sct string) *Node {
 	n := newNode("StringConstantExpressionAst", e)
 	n.Str = v
-	n.SCT = sct
 	n.prop("StringConstantType", sct).prop("Value", v)
 	return n
 }

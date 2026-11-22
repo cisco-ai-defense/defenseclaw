@@ -88,15 +88,6 @@ func (t *tokenizer) scanGenericTokenSur(first, sur char) *Token {
 
 func (t *tokenizer) scanGenericTokenSB(sb sbuf) *Token {
 	var nested []*Token
-	// formatSb equals sb until a brace is doubled or an expandable part is read; it is built on first need.
-	var formatSb sbuf
-	same := true
-	diverge := func() {
-		if same {
-			formatSb = append(make(sbuf, 0, len(sb)+16), sb...)
-			same = false
-		}
-	}
 	c := t.getChar()
 	for ; !forceStartNewToken(c); c = t.getChar() {
 		if c == '`' {
@@ -108,47 +99,26 @@ func (t *tokenizer) scanGenericTokenSB(sb sbuf) *Token {
 				if sur != invalidChar {
 					sb.add(c)
 					sb.add(sur)
-					if !same {
-						formatSb.add(c)
-						formatSb.add(sur)
-					}
 					continue
 				}
 			}
 		} else if isSingleQuote(c) {
-			l := sb.length()
 			t.scanStringLiteralInto(&sb)
-			if !same {
-				for i := l; i < sb.length(); i++ {
-					formatSb.add(sb[i])
-				}
-			}
 			continue
 		} else if isDoubleQuote(c) {
-			diverge()
-			t.scanStringExpandableInto(&sb, &formatSb, &nested)
+			t.scanStringExpandableInto(&sb, &nested)
 			continue
 		} else if c == '$' {
-			diverge()
-			if t.scanDollarInStringExpandable(&sb, &formatSb, false, &nested) {
+			if t.scanDollarInStringExpandable(&sb, false, &nested) {
 				continue
 			}
 		}
 		sb.add(c)
-		if c == '{' || c == '}' {
-			diverge()
-		}
-		if !same {
-			formatSb.add(c)
-			if c == '{' || c == '}' {
-				formatSb.add(c)
-			}
-		}
 	}
 	t.ungetChar()
 	str := sb.String()
 	if len(nested) > 0 {
-		return t.newGenericExpandableToken(str, formatSb.String(), nested)
+		return t.newGenericExpandableToken(str, nested)
 	}
 	return t.newGenericToken(str)
 }

@@ -164,7 +164,7 @@ func (p *Parser) pipelineRule(startExpression *Node, allowBackground bool) *Node
 			var lastRedirection *Node
 			for {
 				rt := p.peekToken()
-				if rt.redirKind == 0 {
+				if rt.redir() == 0 {
 					break
 				}
 				p.skipToken()
@@ -244,23 +244,23 @@ var streamNamesAST = [...]string{"All", "Output", "Error", "Warning", "Verbose",
 func (p *Parser) redirectionRule(rt *Token, redirections *[maxRedirections]*Node, ext *extent) (*Node, int) {
 	var result *Node
 	var from int
-	if rt.redirKind == 3 || rt.redirKind == 1 {
+	if rt.redir() == 3 || rt.redir() == 1 {
 		filename := p.getSingleCommandArgument(argFileName)
 		if filename == nil {
 			p.reportError(after(tokExt(rt)), "MissingFileSpecification")
 			filename = newErrorExpr(tokExt(rt))
 		}
-		if rt.redirKind != 3 {
+		if rt.redir() != 3 {
 			p.reportError(tokExt(rt), "RedirectionNotSupported")
 			*ext = extentOf(tokExt(rt), filename.ext())
 			return nil, 0
 		}
 		result = newNode("FileRedirectionAst", extentOf(tokExt(rt), filename.ext()), filename)
-		result.prop("FromStream", rt.FromStream.String()).prop("Append", boolStr(rt.Append))
-		from = int(rt.FromStream)
+		result.prop("FromStream", rt.fromStream().String()).prop("Append", boolStr(rt.appendMode()))
+		from = int(rt.fromStream())
 	} else {
-		fromStream := rt.FromStream
-		toStream := rt.ToStream
+		fromStream := rt.fromStream()
+		toStream := rt.toStream()
 		if toStream != StreamOutput {
 			p.reportError(tokExt(rt), "RedirectionNotSupported")
 			toStream = StreamOutput
@@ -319,7 +319,7 @@ func (p *Parser) getCommandArgument(ctx int, token *Token) *Node {
 			if ctx&argCommandName != 0 {
 				token.Flags |= tfCommandName
 			}
-			if len(token.Nested) > 0 && ctx != argCommandName {
+			if len(token.nested()) > 0 && ctx != argCommandName {
 				nested := p.parseNestedExpressions(token)
 				exprAst = p.newExpandableString(token, nested)
 			} else {

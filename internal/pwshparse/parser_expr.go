@@ -359,8 +359,7 @@ func newNumberConst(t *Token) *Node {
 func (p *Parser) newExpandableString(t *Token, nested []*Node) *Node {
 	n := newNode("ExpandableStringExpressionAst", tokExt(t), nested...)
 	n.Str = t.Value
-	n.SCT = stringConstTypeOf(t.Kind)
-	n.prop("StringConstantType", n.SCT).prop("Value", t.Value)
+	n.prop("StringConstantType", stringConstTypeOf(t.Kind)).prop("Value", t.Value)
 	return n
 }
 
@@ -531,7 +530,7 @@ func (p *Parser) parenthesizedExpressionRule(lParen *Token) *Node {
 
 func (p *Parser) parseNestedExpressions(t *Token) []*Node {
 	var nested []*Node
-	for _, tok := range t.Nested {
+	for _, tok := range t.nested() {
 		var expr *Node
 		if tok.class == tcVariable {
 			expr = p.checkUsingVariable(tok, false)
@@ -547,7 +546,7 @@ func (p *Parser) parseNestedExpressions(t *Token) []*Node {
 }
 
 func (p *Parser) expandableStringRule(t *Token) *Node {
-	if len(t.Nested) > 0 {
+	if len(t.nested()) > 0 {
 		nested := p.parseNestedExpressions(t)
 		return p.newExpandableString(t, nested)
 	}

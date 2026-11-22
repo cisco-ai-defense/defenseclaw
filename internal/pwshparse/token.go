@@ -51,23 +51,60 @@ type Token struct {
 	Num *NumberValue
 	// UsedColon is set for a parameter token written as -name:.
 	UsedColon bool
-	// Nested are the tokens inside an expandable string.
-	Nested []*Token
-	// Format is the format string of an expandable string.
-	Format string
-	// Redirection payloads.
-	FromStream RedirectionStream
-	ToStream   RedirectionStream
-	Append     bool
-	// skipped is the offset map of an unscanned sub-expression token.
-	skipped *bitSet
-	// unscanned marks an UnscannedSubExprToken.
-	unscanned bool
-	// redirKind: 0 none, 1 input, 2 merging, 3 file
-	redirKind uint8
+	// x holds the fields only expandable strings, unscanned sub-expressions and redirections use.
+	x *tokExtra
 	// class: 0 plain, 1 string, 2 number, 3 parameter, 4 variable, 5 label
 	class uint8
 }
+
+// tokExtra is the rarely used part of a Token.
+type tokExtra struct {
+	// Nested are the tokens inside an expandable string.
+	Nested []*Token
+	// Redirection payloads; redirKind: 0 none, 1 input, 2 merging, 3 file.
+	FromStream, ToStream RedirectionStream
+	Append               bool
+	redirKind            uint8
+	// skipped is the offset map of an unscanned sub-expression token.
+	skipped *bitSet
+}
+
+func (t *Token) extra() *tokExtra {
+	if t.x == nil {
+		t.x = &tokExtra{}
+	}
+	return t.x
+}
+
+func (t *Token) nested() []*Token {
+	if t.x == nil {
+		return nil
+	}
+	return t.x.Nested
+}
+
+func (t *Token) redir() uint8 {
+	if t.x == nil {
+		return 0
+	}
+	return t.x.redirKind
+}
+
+func (t *Token) fromStream() RedirectionStream {
+	if t.x == nil {
+		return 0
+	}
+	return t.x.FromStream
+}
+
+func (t *Token) toStream() RedirectionStream {
+	if t.x == nil {
+		return 0
+	}
+	return t.x.ToStream
+}
+
+func (t *Token) appendMode() bool { return t.x != nil && t.x.Append }
 
 const (
 	tcPlain uint8 = iota
