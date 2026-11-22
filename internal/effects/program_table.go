@@ -129,6 +129,7 @@ type Program struct {
 	MovesSources   bool     // the sources are removed from where they were (mv, move, ren, Move-Item): each is also a delete
 	AppendFlag     string   // switch that turns the file operands into appends (tee -a)
 	InertOperands  bool     // a PosNone program whose positionals are inert data (echo, true) -- else a positional is unaccounted (review R5-2)
+	MetadataOnly   bool     // a PosAllRead program that inspects its operands' metadata (stat, du, find), never their content: no read effect (DET111 ruling 3a)
 	BuiltinUnknown bool     // fallback shell builtin: positional words are unknown reads, never assumed data
 	OptionsFirst   bool     // options end at the first operand (BSD getopt, no permutation): later words are operands (GAP-0219)
 	// Longs are every long option of the GNU tool (gnuLongOptions): a long
@@ -787,7 +788,7 @@ func buildPOSIXTable() {
 			"--atimes", "--crtimes", "--backup", "--dirs", "--fuzzy", "--stats", "--ignore-existing", "--existing", "--size-only",
 			"--inplace", "--append", "--append-verify", "--delay-updates", "--no-motd", "--numeric-ids", "--safe-links", "--munge-links",
 			"--protect-args", "--secluded-args", "--mkpath", "--8-bit-output", "--no-inc-recursive", "--ignore-times", "--super", "--fake-super")})
-	add(Program{Names: []string{"find"}, Pos: PosAllRead, DeleteFlag: "-delete",
+	add(Program{Names: []string{"find"}, Pos: PosAllRead, MetadataOnly: true, DeleteFlag: "-delete",
 		Flags: fl(map[string]Flag{
 			"-exec": {Role: RoleExecProgram}, "-execdir": {Role: RoleExecProgram}, "-ok": {Role: RoleExecProgram}, "-okdir": {Role: RoleExecProgram},
 			"-fprint": {Value: true, Role: RoleWrite}, "-fprintf": {Value: true, Extra: 1, Role: RoleWrite}, "-fls": {Value: true, Role: RoleWrite},
@@ -852,7 +853,12 @@ func buildPOSIXTable() {
 	// file named by a flag. uniq and xxd take an OUTPUT operand and are split out.
 	readerFlags := fl(map[string]Flag{"-o": {Value: true, Role: RoleIgnore}, "-f": {Value: true, Role: RoleIgnore}, "-d": {Value: true, Role: RoleIgnore}, "-t": {Value: true, Role: RoleIgnore}, "-w": {Value: true, Role: RoleIgnore}, "-c": {Value: true, Role: RoleIgnore}, "-n": {Value: true, Role: RoleIgnore}},
 		"-l", "-m", "-L", "-h", "-a", "-b", "-s", "-k", "-v", "-i", "-r", "-u", "-z", "-x", "-p", "-g", "-H", "-P", "-A", "-B", "-C", "-D", "-q", "-y", "-e")
-	add(Program{Names: []string{"wc", "cut", "comm", "join", "paste", "fold", "fmt", "rev", "column", "expand", "unexpand", "strings", "od", "hexdump", "md5sum", "sha1sum", "sha256sum", "sha512sum", "cksum", "b2sum", "du", "df", "stat", "file", "readlink", "realpath", "diff", "cmp", "look", "shasum"}, Pos: PosAllRead, Flags: readerFlags})
+	add(Program{Names: []string{"wc", "cut", "comm", "join", "paste", "fold", "fmt", "rev", "column", "expand", "unexpand", "strings", "od", "hexdump", "md5sum", "sha1sum", "sha256sum", "sha512sum", "cksum", "b2sum", "diff", "cmp", "look", "shasum"}, Pos: PosAllRead, Flags: readerFlags})
+	// Metadata-only programs: they report a file's size, type, inode data or
+	// resolved name, never its bytes, so an operand is accounted but carries no
+	// content-read effect (DET111 ruling 3a: stat of a credential file is not a
+	// credential read). file reads magic bytes but prints only a type label.
+	add(Program{Names: []string{"du", "df", "stat", "file", "readlink", "realpath"}, Pos: PosAllRead, MetadataOnly: true, Flags: readerFlags})
 	// uniq and xxd get their own exact flag sets: the union above makes -c a
 	// valued flag, which for uniq (a count switch) would swallow the next operand.
 	inert := func(names ...string) map[string]Flag {

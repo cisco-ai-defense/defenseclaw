@@ -320,15 +320,15 @@ func analyze(input Input, twinCommand string, capture *redirectTargetCapture) Fa
 		projectStructuredTextReplacements(input)
 	facts.SQLServerCommandExecutions =
 		projectSQLServerCommandExecutions(input)
-	facts.PostgreSQLCopyPrograms = projectPostgreSQLCopyPrograms(input)
+	facts.PostgreSQLCopyPrograms = projectPostgreSQLCopyPrograms(input, facts)
 	facts.SQLSensitiveServerFileReads =
-		projectSQLSensitiveServerFileReads(input)
+		projectSQLSensitiveServerFileReads(input, facts)
 	facts.SensitiveSQLRowsetReads = projectSensitiveSQLRowsetReads(input)
 	facts.SQLDirectExternalEgresses = projectSQLDirectExternalEgresses(input)
 	facts.StructuredLiteralPersistences =
 		projectStructuredLiteralPersistences(input)
 	facts.SQLCommandUDFOperations = projectSQLCommandUDFOperations(input, facts)
-	facts.SQLMutations = projectSQLMutations(input, facts)
+	facts.SQLMutations, facts.SQLFacts = projectSQLAnalysis(input, facts)
 	facts.HTTPSQLInjections = projectHTTPSQLInjections(input)
 	facts.HTTPCommandInjections = projectHTTPCommandInjections(input)
 	facts.SQLClientShellEscapes = projectSQLClientShellEscapes(facts)
@@ -341,6 +341,7 @@ func analyze(input Input, twinCommand string, capture *redirectTargetCapture) Fa
 		projectKubernetesCronJobReverseShells(input, facts)
 	facts.KubernetesSensitiveAccesses =
 		projectKubernetesSensitiveAccesses(input, facts)
+	facts.KubeRequests = projectKubeRequests(input, facts)
 	facts.StructuredPortForwards = projectStructuredPortForwards(input)
 	facts.WirelessCaptureDeauthOperations =
 		projectWirelessCaptureDeauthOperations(input)

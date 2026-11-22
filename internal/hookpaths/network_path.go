@@ -281,6 +281,40 @@ func HookCall() (end func()) {
 	return end
 }
 
+// Call is the hook call a goroutine runs, found once (the zero Call: none).
+// A caller that reads the call more than once keeps the Call instead of
+// finding it again: off Windows each find is a traceback of the goroutine's
+// stack (goroutineID), and a decision found its call four times per dispatch
+// (DET111-PERF-A). Its readings are those of HookCallState and
+// ShareBodyUnreadCauses for the same call.
+type Call struct{ call *hookCall }
+
+// BeginHookCall is HookCall that also returns the Call the goroutine runs
+// until end: the one it began or the one already open.
+func BeginHookCall() (Call, func()) {
+	call, end := beginHookCall()
+	return Call{call}, end
+}
+
+// CurrentHookCall is the Call the calling goroutine runs (the zero Call: none).
+func CurrentHookCall() Call { return Call{currentHookCall()} }
+
+// State is the CallState of the call (the zero CallState: none).
+func (c Call) State() CallState {
+	if c.call == nil {
+		return CallState{}
+	}
+	return c.call.state()
+}
+
+// ShareBodyUnreadCauses is ShareBodyUnreadCauses for the call.
+func (c Call) ShareBodyUnreadCauses() (budget, linkBound bool) {
+	if c.call == nil {
+		return false, false
+	}
+	return c.call.bodyUnread, c.call.bodyLinks
+}
+
 // beginHookCall is HookCall that also returns the call the goroutine runs
 // from then on (nil: none), the one it began or the one already open, so a
 // caller that uses the call does not read the goroutine's key a second time:
@@ -617,11 +651,7 @@ func ShareBodyUnread() bool {
 // links than the walk follows, so a share on it may not have been asked
 // (rel-1-0-9:GAP-0621). Both can hold in one call.
 func ShareBodyUnreadCauses() (budget, linkBound bool) {
-	call := currentHookCall()
-	if call == nil {
-		return false, false
-	}
-	return call.bodyUnread, call.bodyLinks
+	return CurrentHookCall().ShareBodyUnreadCauses()
 }
 
 // evictNetworkShareProbesLocked drops the finished probes and reports
@@ -1001,13 +1031,7 @@ type CallState struct {
 func (s CallState) GlobCut() bounded.CapSet { return s.globCut }
 
 // HookCallState is the CallState of the hook call the goroutine runs.
-func HookCallState() CallState {
-	call := currentHookCall()
-	if call == nil {
-		return CallState{}
-	}
-	return call.state()
-}
+func HookCallState() CallState { return CurrentHookCall().State() }
 
 // state is the CallState of call (not nil).
 func (call *hookCall) state() CallState {

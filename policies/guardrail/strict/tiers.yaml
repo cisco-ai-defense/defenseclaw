@@ -20,6 +20,22 @@ rows:
     managed:
       floor: allow
       ceiling: record
+  - id: effect-link
+    source: DET111 effects link at a member (sweep T17)
+    per_user:
+      floor: allow
+      ceiling: record
+    managed:
+      floor: allow
+      ceiling: record
+  - id: effect-read
+    source: DET111 effects credential read (GAP-1825, GAP-1826)
+    per_user:
+      floor: allow
+      ceiling: record
+    managed:
+      floor: allow
+      ceiling: record
   - id: record
     source: rel-1-0-10:detection-only
     per_user:

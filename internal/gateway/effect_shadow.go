@@ -112,6 +112,9 @@ type EffectShadowResult struct {
 	Known bool `json:"known,omitempty"`
 	// KnownMutation distinguishes known writes from read proofs during handoff.
 	KnownMutation bool `json:"-"`
+	// LinkTo marks a call whose link names a protected member as its target
+	// and puts no link at a member (decide.Proof.LinkTo).
+	LinkTo bool `json:"-"`
 	// ReadProofs are private decision inputs. Do not serialize member paths or
 	// credential classes into the shadow telemetry record.
 	ReadProofs []decide.Proof `json:"-"`
@@ -386,6 +389,12 @@ type effectClass struct {
 	// linkHeld: a target in a protected set only through a link the
 	// resolver followed, counted, not raised (effectProtectedSets).
 	linkHeld bool
+	// linkTo: a touching link effect names a protected member as the link's
+	// target (an alias of the member) and a later command of the call uses
+	// that alias (effectLinkAliasUsed); linkAt: one names a member as the
+	// place a link is put. A call that puts a link at a member is judged by
+	// that placement (decide.RowEffectLink), whatever the link points to.
+	linkTo, linkAt bool
 	// known: some protected effect is known (mutation or credential read).
 	known         bool
 	knownMutation bool
@@ -439,6 +448,15 @@ func classifyEffects(result effects.Result, facts []*semanticpb.EffectFact, flav
 			continue
 		}
 		c.touches = true
+		if kind == string(effects.KindLink) {
+			if i := int(f.GetIndex()) - 1; effectFactIsLinkTarget(result, f) {
+				c.linkTo = c.linkTo || effectLinkAliasUsed(result, i)
+			} else if len(known) > 0 {
+				// Only a link known to be put at a member: an unplaced link
+				// end (the destination may be a folder) touches by reach.
+				c.linkAt = true
+			}
+		}
 		touchSets = append(touchSets, append(append([]string(nil), known...), maybe...)...)
 		if r != "" {
 			c.reach = append(c.reach, r)
@@ -626,6 +644,45 @@ func dedupeStrings(in []string) []string {
 // (GAP-1243) judges it. A read of a path whose links could not be read
 // (unresolved, /proc/self/cwd/...) is no credential read: a read reaches a
 // credential by its name only.
+// effectFactIsLinkTarget reports a link fact that names the link's target
+// (effects.Effect.LinkTarget); a fact's Index is its 1-based effect index.
+func effectFactIsLinkTarget(result effects.Result, f *semanticpb.EffectFact) bool {
+	i := int(f.GetIndex()) - 1
+	return i >= 0 && i < len(result.Effects) && result.Effects[i].LinkTarget
+}
+
+// effectLinkAliasUsed reports that the link whose target end is effect i is
+// used later in the same call: a later effect reads, writes, copies or links
+// the link's own known path (ln -s ~/.ssh/authorized_keys s && cp -a s n;
+// ln ~/.ssh/authorized_keys n && echo k >> n). An alias that is only made
+// (a dotfiles script linking its own authorized_keys into its repo) moves
+// nothing through the member in this call. The link end is the next link
+// effect of the same command (effects emits target, then link).
+func effectLinkAliasUsed(result effects.Result, i int) bool {
+	if i < 0 || i+1 >= len(result.Effects) {
+		return false
+	}
+	at := result.Effects[i+1]
+	// The link end's path is placed even when its state is not known (the
+	// destination may be a folder): a later effect on that exact path uses
+	// the alias either way. With no working folder the end is not placed;
+	// a later effect on the same relative spelling then uses it.
+	if at.Kind != effects.KindLink || at.LinkTarget || at.Origin.Command != result.Effects[i].Origin.Command ||
+		(at.Target.Path == "" && at.Target.Spelling == "") {
+		return false
+	}
+	for _, e := range result.Effects[i+2:] {
+		if e.Origin.Command == at.Origin.Command {
+			continue
+		}
+		if at.Target.Path != "" && e.Target.Path == at.Target.Path ||
+			at.Target.Path == "" && e.Target.Path == "" && e.Target.Spelling == at.Target.Spelling {
+			return true
+		}
+	}
+	return false
+}
+
 func effectProtectedSets(t *semanticpb.EffectTarget, kind string) (known, maybe []string, linkHeld bool) {
 	for _, m := range t.GetProtected() {
 		switch {
@@ -806,6 +863,7 @@ func effectFindingProof(res EffectShadowResult) decide.Proof {
 		Target:    effectProofTarget(res.Sets),
 		Certainty: decide.CertKnown,
 		Source:    effectProofSource,
+		LinkTo:    res.LinkTo,
 	}
 	if res.Tier != string(effectTierRestricted) && (!res.KnownMutation || len(res.Reach) > 0) {
 		p.Certainty = decide.CertMaybe

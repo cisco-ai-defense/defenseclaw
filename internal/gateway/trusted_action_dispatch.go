@@ -517,8 +517,10 @@ func dispatchTrustedActionOnce(
 	// hook request, an ACP frame, a direct evaluation): the file system reads
 	// of its reach scans are remembered for the decision (hookpaths.HookCall;
 	// nested in the handler's own call, or in a twin of this dispatch, it
-	// begins nothing more, rel-1-0-10:GAP-0766).
-	defer hookpaths.HookCall()()
+	// begins nothing more, rel-1-0-10:GAP-0766). The call is found once here
+	// and read below from what is kept (hookpaths.Call).
+	call, endCall := hookpaths.BeginHookCall()
+	defer endCall()
 	// Every cap a pattern expansion of the call hit is the call's one
 	// TRUNCATED reading (the one bound rule): a walk that stopped at its
 	// bound with no protected match before it is at least the unknown tier,
@@ -526,7 +528,7 @@ func dispatchTrustedActionOnce(
 	// no longer holds it as a protected target (rel-1-0-10:GAP-1324). It is
 	// read while the call is open, after every reading and twin below.
 	defer func() {
-		findings = withBoundedTruncation(findings, hookpaths.HookCallState().GlobCut(), request)
+		findings = withBoundedTruncation(findings, call.State().GlobCut(), request)
 	}()
 	defer func() { findings = markShellProtectedFileFindings(request, findings) }()
 	// The rule name of a link-held state write is settled once, on the
@@ -613,7 +615,7 @@ func dispatchTrustedActionOnce(
 	// one it left unread in its evidence, which is judged the same way
 	// (hookpaths.ShareBodyUnreadKey, rel-1-0-9:GAP-0950).
 	defer func() {
-		budget, linkBound := hookpaths.ShareBodyUnreadCauses()
+		budget, linkBound := call.ShareBodyUnreadCauses()
 		clientBudget, clientLinkBound := hookpaths.ClientShareBodyUnread(request.ResolvedWriteTargets)
 		budget, linkBound = budget || clientBudget, linkBound || clientLinkBound
 		if budget || linkBound {
@@ -6062,11 +6064,11 @@ var exactFallbackContracts = map[string]exactFallbackContract{
 	"credential.kubernetes_named_secret_content_read": {
 		proves: func(input actionfacts.Input, facts actionfacts.Facts) bool {
 			_, ok := actionfacts.ExactKubernetesSecretContentRead(input, facts)
-			return ok
+			return ok || actionfacts.KubernetesSecretContentRequest(facts)
 		},
 		boundedSubgraphProves: func(input actionfacts.Input, facts actionfacts.Facts) bool {
 			_, ok := actionfacts.ExactKubernetesSecretContentRead(input, facts)
-			return ok
+			return ok || actionfacts.KubernetesSecretContentRequest(facts)
 		},
 		requiresExactDetectionProof: true,
 		codeOwnedDetection:          true,
@@ -6078,11 +6080,11 @@ var exactFallbackContracts = map[string]exactFallbackContract{
 	"credential.protected_kubernetes_named_secret_content_read": {
 		proves: func(input actionfacts.Input, facts actionfacts.Facts) bool {
 			_, ok := actionfacts.ExactKubernetesSecretContentRead(input, facts)
-			return ok
+			return ok || actionfacts.KubernetesSecretContentRequest(facts)
 		},
 		boundedSubgraphProves: func(input actionfacts.Input, facts actionfacts.Facts) bool {
 			_, ok := actionfacts.ExactKubernetesSecretContentRead(input, facts)
-			return ok
+			return ok || actionfacts.KubernetesSecretContentRequest(facts)
 		},
 		requiresExactDetectionProof: true,
 		codeOwnedDetection:          true,
@@ -6810,7 +6812,8 @@ var exactFallbackContracts = map[string]exactFallbackContract{
 	},
 	"lateral.workload_exec": {
 		proves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
-			return workloadExecFallbackProof(facts)
+			return workloadExecFallbackProof(facts) ||
+				actionfacts.KubernetesStdinExecRequest(facts)
 		},
 		detectionOnly: true,
 	},

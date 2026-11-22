@@ -72,7 +72,7 @@ const (
 
 // ShadowOnly reports an effects-lane finding the built-in table records in
 // every tier and deployment (RowRecord, RowEffectUnknown,
-// RowEffectContentDecided): it never moves the live verdict, so the effect
+// RowEffectContentDecided, RowEffectLink, RowEffectRead): it never moves the live verdict, so the effect
 // join keeps it out of the call's findings, the one place the rule holds
 // for every route.
 func ShadowOnly(f Finding) bool {

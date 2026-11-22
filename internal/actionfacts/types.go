@@ -240,6 +240,9 @@ type Facts struct {
 	// boundary. The projection exists only to support a bounded same-function,
 	// same-connection chain after a successful create result.
 	SQLCommandUDFOperations []SQLCommandUDFOperationFact `json:"-"`
+	// SQLFacts contains bounded syntactic facts from one authenticated SQL source.
+	// It never stores SQL literals or connection credentials.
+	SQLFacts []SQLFact `json:"-"`
 	// SQLMutations contains only exact destructive mutation classes and
 	// domain-separated SHA-256 identity digests. SQL text, connection strings,
 	// usernames, passwords, and raw database/object names are discarded before
@@ -286,6 +289,10 @@ type Facts struct {
 	// class for exact kubectl requests. Tokens, selectors, contexts,
 	// namespaces, output formats, and other argument values are discarded.
 	KubernetesSensitiveAccesses []KubernetesSensitiveAccessFact `json:"-"`
+	// KubeRequests is every Kubernetes API request the action issues, from
+	// kubectl argv and from curl or wget URLs addressed to an apiserver
+	// (kube_request.go, GAP-1824).
+	KubeRequests []KubeRequestFact `json:"-"`
 	// StructuredPortForwards contains a closed forward class, bounded ports,
 	// and an opaque destination identity. Raw target hosts are discarded.
 	StructuredPortForwards []StructuredPortForwardFact `json:"-"`
@@ -875,11 +882,21 @@ type DirectoryCredentialAcquisitionFact struct {
 	Operation DirectoryCredentialAcquisition
 }
 
+// SQLFact contains the bounded, value-free syntactic facts of one SQL input.
+type SQLFact struct {
+	Verbs []string
+	Tables []string
+	Functions []string
+	Database string
+	StatementCount int
+}
+
 // SQLMutationOperation is the closed destructive SQL operation vocabulary.
 type SQLMutationOperation string
 
 const (
 	SQLMutationDeleteUnbounded SQLMutationOperation = "delete_unbounded"
+	SQLMutationUpdateUnbounded SQLMutationOperation = "update_unbounded"
 	SQLMutationTruncate        SQLMutationOperation = "truncate"
 	SQLMutationDropTable       SQLMutationOperation = "drop_table"
 	SQLMutationDropSchema      SQLMutationOperation = "drop_schema"
