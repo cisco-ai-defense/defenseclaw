@@ -28,6 +28,7 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -71,10 +72,13 @@ var (
 // resource anchor; body-level device IDs and hostnames are deliberately not
 // duplicated.
 type endpointInventoryComponent struct {
-	id                          string
-	componentType               string
-	signal                      string
-	product                     string
+	id            string
+	componentType string
+	signal        string
+	product       string
+	// vendor is the catalog vendor of the agent whose folder holds a skill or
+	// plugin entry; who published the skill is skillPublisher.
+	vendor                      string
 	active                      bool
 	itemName                    string
 	itemDescription             string
@@ -114,6 +118,30 @@ type endpointInventoryComponent struct {
 	userIDKind string
 	userName   string
 	userEmail  string
+	// Skill rows only (inventory.AISkillFacts).
+	skillContentHash   string
+	skillContentStatus string
+	skillState         string
+	skillFirstSeen     string
+	skillLastSeen      string
+	skillScope         string
+	skillLocation      string
+	skillAgents        []string
+	// skillPublisherSource: vendor_bundled, plugin_manifest, declared, unknown.
+	skillPublisher       string
+	skillPublisherSource string
+	skillPlugin          string
+	skillPluginVersion   string
+	skillPluginEnabled   *bool
+	// skillManifestHash names the skill's SKILL.md; skillManifest carries
+	// part skillManifestPart of skillManifestParts of its text
+	// (managed_skill_manifest.go).
+	skillManifestHash  string
+	skillManifestSize  int64
+	skillVersion       string
+	skillManifest      string
+	skillManifestPart  int
+	skillManifestParts int
 }
 
 // endpointInventoryCarrier is an atomic, typed snapshot split into parallel
@@ -187,6 +215,17 @@ func aiDiscoveryReportComplete(report *inventory.AIDiscoveryReport) bool {
 	return result != "" && !strings.EqualFold(result, aiDiscoveryResultPartial)
 }
 
+// emitEndpointInventory publishes the endpoint inventory (connectors, MCP
+// servers and their tools, skills, plugins) of one cycle. On a Secure Client
+// endpoint the collections carry the managed actions, which only the AI
+// Defense destination receives. Everywhere else they carry the operator
+// actions (endpointInventoryAction): an OSS per-user gateway sends them to
+// local audit and the user's own destinations, a managed standalone gateway
+// to local audit and the administrator's destinations, each with its own
+// redaction profile. SKILL.md text is added only with
+// ai_discovery.include_skill_manifests; receipt recovery stays with AI
+// Defense. The publish state gate keeps an unchanged collection to one copy
+// a day.
 func emitEndpointInventory(
 	ctx context.Context,
 	cfg *config.Config,
@@ -197,8 +236,15 @@ func emitEndpointInventory(
 	gate *managedInventoryPublishState,
 	toolStates ...*mcpToolInventory,
 ) error {
-	if !ManagedEnterpriseActive() || ctx == nil || emitter == nil {
+	if ctx == nil || emitter == nil {
 		return nil
+	}
+	if !endpointInventoryOn(cfg) {
+		return nil
+	}
+	secureClient := ManagedEnterpriseActive()
+	inventoryAction := func(managedAction observability.ProducerKey) observability.ProducerKey {
+		return endpointInventoryAction(managedAction, secureClient)
 	}
 	// bundleScope: only a cycle carrying a COMPLETE discovery report may satisfy
 	// the daily complete-bundle guarantee, and there are two ways to fail that.
@@ -228,14 +274,14 @@ func emitEndpointInventory(
 		endpointConnectorInventorySource,
 		connectorComponents,
 		connectorPartial || connectorDiscoveryPartial,
-		config.ObservabilityV8ManagedConnectorInventoryAction,
+		inventoryAction(config.ObservabilityV8ManagedConnectorInventoryAction),
 		publish,
 	)
 
 	mcpComponents, partial := endpointMCPComponents(cfg)
 	if err := emitEndpointInventorySnapshot(
 		ctx, emitter, endpointMCPInventorySource, mcpComponents, partial,
-		config.ObservabilityV8ManagedMCPInventoryAction, publish,
+		inventoryAction(config.ObservabilityV8ManagedMCPInventoryAction), publish,
 	); err != nil && firstErr == nil {
 		firstErr = err
 	}
@@ -269,29 +315,25 @@ func emitEndpointInventory(
 	// ai_component.observed record with defenseclaw.agent.discovery.connector
 	// pointing at the parent connector (e.g. codex, claudecode) so downstream
 	// can correlate skills / plugins / MCP servers with their owning agent.
-	// managed_enterprise gates the whole function above, so this whole block
-	// is inert in unmanaged mode.
 	if discoveryReport != nil {
 		discoveryPartial := !aiDiscoveryReportComplete(discoveryReport)
 		mcpEntries := discoveredMCPEntriesFromReport(*discoveryReport)
 		mcpEntries = preferNativeMCPInventory(mcpEntries, perConnectorMCP, perConnectorPartial)
 		if err := emitEndpointInventorySnapshot(
 			ctx, emitter, "endpoint_discovered_mcp_inventory", mcpEntries, discoveryPartial,
-			config.ObservabilityV8ManagedMCPInventoryAction, publish,
+			inventoryAction(config.ObservabilityV8ManagedMCPInventoryAction), publish,
 		); err != nil && firstErr == nil {
 			firstErr = err
 		}
-		skillEntries := discoveredEntriesFromReport(*discoveryReport, inventory.SignalSkill, "skill")
-		if err := emitEndpointInventorySnapshot(
-			ctx, emitter, "endpoint_skill_inventory", skillEntries, discoveryPartial,
-			config.ObservabilityV8ManagedSkillInventoryAction, publish,
+		if err := emitSkillInventorySnapshot(
+			ctx, cfg, emitter, discoveryReport, publish, inventoryAction(config.ObservabilityV8ManagedSkillInventoryAction),
 		); err != nil && firstErr == nil {
 			firstErr = err
 		}
 		pluginEntries := discoveredEntriesFromReport(*discoveryReport, inventory.SignalPlugin, "plugin")
 		if err := emitEndpointInventorySnapshot(
 			ctx, emitter, "endpoint_plugin_inventory", pluginEntries, discoveryPartial,
-			config.ObservabilityV8ManagedPluginInventoryAction, publish,
+			inventoryAction(config.ObservabilityV8ManagedPluginInventoryAction), publish,
 		); err != nil && firstErr == nil {
 			firstErr = err
 		}
@@ -328,7 +370,7 @@ func emitEndpointInventory(
 		var err error
 		acceptedParentIDs, err = emitEndpointInventoryComponents(
 			ctx, emitter, perConnectorMCPSource, completeRows,
-			config.ObservabilityV8ManagedMCPInventoryAction, publish,
+			inventoryAction(config.ObservabilityV8ManagedMCPInventoryAction), publish,
 		)
 		if err != nil && firstErr == nil {
 			firstErr = err
@@ -336,7 +378,7 @@ func emitEndpointInventory(
 	}
 	parentSnapshotErr := emitEndpointInventorySnapshot(
 		ctx, emitter, perConnectorMCPSource, perConnectorMCP, perConnectorPartial,
-		config.ObservabilityV8ManagedMCPInventoryAction, publish,
+		inventoryAction(config.ObservabilityV8ManagedMCPInventoryAction), publish,
 	)
 	if parentSnapshotErr != nil && firstErr == nil {
 		firstErr = parentSnapshotErr
@@ -385,7 +427,7 @@ func emitEndpointInventory(
 			// when a small child collection would pass its independent limit.
 			snapshotPartial := readPartial || toolPartial || !parentsEligible
 			err := emitEndpointInventorySnapshot(ctx, emitter, collection.source, rows, snapshotPartial,
-				config.ObservabilityV8ManagedMCPInventoryAction, publish)
+				inventoryAction(config.ObservabilityV8ManagedMCPInventoryAction), publish)
 			if err != nil && firstErr == nil {
 				firstErr = err
 			}
@@ -1041,8 +1083,8 @@ func readMCPServersUnderHomeForOSWithStatus(connectorName, home, goos string) ([
 // ai_component.observed record with defenseclaw.agent.discovery.connector set
 // so downstream can correlate MCP / skills / plugins with the owning agent.
 //
-// gate is the managed_enterprise change gate; it is nil in every other
-// deployment mode, and a nil gate publishes unconditionally as before.
+// gate is the endpoint inventory change gate, in every product; it is nil
+// only without a data folder, and a nil gate publishes unconditionally.
 func makeEndpointInventoryEmitter(
 	cfg *config.Config,
 	emitter sidecarRuntimeEmitter,
@@ -1057,7 +1099,10 @@ func makeEndpointInventoryEmitter(
 			// A broken plugin directory must not hide built-in connectors or
 			// masquerade as an authoritative complete inventory. The bounded
 			// partial summary carries no path or loader error.
-			if managed.RequireWindowsGatewayPathOutsideUserProfiles(cfg.PluginDir) != nil {
+			// The plugin folder of a managed gateway must be outside every
+			// user profile; an OSS gateway's lives in its user's profile.
+			if managed.IsManagedEnterprise(cfg.DeploymentMode) &&
+				managed.RequireWindowsGatewayPathOutsideUserProfiles(cfg.PluginDir) != nil {
 				partial = true
 			} else {
 				partial = reg.DiscoverPlugins(cfg.PluginDir) != nil
@@ -1177,6 +1222,36 @@ func endpointMCPComponentsFromServers(servers []config.MCPServerEntry, fingerpri
 	return components
 }
 
+// emitSkillInventorySnapshot publishes the skill collection of report under
+// action. A failure in another detector does not make the skill collection
+// partial. An incomplete skill scan stays diagnostic and cannot advance the
+// endpoint's last successfully published skill state.
+func emitSkillInventorySnapshot(
+	ctx context.Context,
+	cfg *config.Config,
+	emitter sidecarRuntimeEmitter,
+	report *inventory.AIDiscoveryReport,
+	publish endpointInventoryCycle,
+	action observability.ProducerKey,
+) error {
+	skillsComplete := skillScanComplete(report)
+	skillEntries := publish.cycle.trackSkills(
+		discoveredEntriesFromReport(*report, inventory.SignalSkill, "skill"),
+		skillsComplete,
+	)
+	// A partial skill list cannot prune saved receipts or advance a manifest.
+	if skillsComplete && cfg != nil && cfg.AIDiscovery.IncludeSkillManifests {
+		if action == config.ObservabilityV8ManagedSkillInventoryAction {
+			// Receipts are AI Defense's; no other destination has them.
+			publish.cycle.refreshManifestReceipts(ctx, emitter, skillEntries)
+		}
+		publish.cycle.attachSkillManifests(skillEntries)
+	}
+	return emitEndpointInventorySnapshot(
+		ctx, emitter, endpointSkillInventorySource, skillEntries, !skillsComplete, action, publish,
+	)
+}
+
 func emitEndpointInventorySnapshot(
 	ctx context.Context,
 	emitter sidecarRuntimeEmitter,
@@ -1290,7 +1365,7 @@ func emitInventorySnapshot(
 	switch {
 	case gated:
 		digest = managedInventoryComponentsDigest(source, components)
-		if !publish.cycle.shouldPublish(source, digest) {
+		if !publish.cycle.shouldPublish(source, digest) && !hasRemovedSkill(components) && !hasSkillManifest(components) {
 			// Unchanged since the last successful publish and no bundle due:
 			// emit neither the summary nor any component record.
 			return nil
@@ -1309,10 +1384,19 @@ func emitInventorySnapshot(
 	// digest nor count toward the daily bundle.
 	managedRejected := managedInventoryPublishRejected(summaryOutcome)
 	for _, component := range components {
+		componentContext, current := publish.cycle.manifestEmissionContext(ctx, component)
+		if !current {
+			component.skillManifest = ""
+			managedRejected = true
+		}
 		outcome, err := emitEndpointInventoryComponent(
-			ctx, emitter, source, scanID, component,
+			componentContext, emitter, source, scanID, component,
 			recordSource, action, phase, detector,
 		)
+		if publish.cycle != nil && action == config.ObservabilityV8ManagedSkillInventoryAction &&
+			!managedInventoryPublishRejected(outcome) {
+			publish.cycle.observeManifestProjection(component, outcome)
+		}
 		if managedInventoryPublishRejected(outcome) {
 			managedRejected = true
 		}
@@ -1330,8 +1414,48 @@ func emitInventorySnapshot(
 	return firstErr
 }
 
+// operatorInventoryActions maps each operator inventory action to the
+// managed action of the same collection.
+var operatorInventoryActions = map[observability.ProducerKey]observability.ProducerKey{
+	config.ObservabilityV8ConnectorInventoryAction: config.ObservabilityV8ManagedConnectorInventoryAction,
+	config.ObservabilityV8MCPInventoryAction:       config.ObservabilityV8ManagedMCPInventoryAction,
+	config.ObservabilityV8SkillInventoryAction:     config.ObservabilityV8ManagedSkillInventoryAction,
+	config.ObservabilityV8PluginInventoryAction:    config.ObservabilityV8ManagedPluginInventoryAction,
+	config.ObservabilityV8AgentInventoryAction:     config.ObservabilityV8ManagedAgentInventoryAction,
+}
+
+// endpointInventoryOn reports whether the gateway sends the endpoint inventory
+// with cfg: always on a Secure Client endpoint; elsewhere (a per-user or a
+// standalone enterprise install) only with ai_discovery.enabled.
+func endpointInventoryOn(cfg *config.Config) bool {
+	return ManagedEnterpriseActive() || cfg != nil && cfg.AIDiscovery.Enabled
+}
+
+// endpointInventoryAction is the action of a managed inventory collection on
+// this gateway: the managed action on a Secure Client endpoint, the operator
+// action everywhere else.
+func endpointInventoryAction(managedAction observability.ProducerKey, secureClient bool) observability.ProducerKey {
+	if !secureClient {
+		for operator, managedOf := range operatorInventoryActions {
+			if managedOf == managedAction {
+				return operator
+			}
+		}
+	}
+	return managedAction
+}
+
+// managedInventoryActionOf is the managed action of action's collection:
+// limits and carriers are the same in every product.
+func managedInventoryActionOf(action observability.ProducerKey) observability.ProducerKey {
+	if managedOf, ok := operatorInventoryActions[action]; ok {
+		return managedOf
+	}
+	return action
+}
+
 func managedInventoryLimit(action observability.ProducerKey) int {
-	switch action {
+	switch managedInventoryActionOf(action) {
 	case config.ObservabilityV8ManagedConnectorInventoryAction:
 		return maxManagedConnectorInventory
 	case config.ObservabilityV8ManagedMCPInventoryAction:
@@ -1347,7 +1471,7 @@ func managedInventoryLimit(action observability.ProducerKey) int {
 }
 
 func managedInventoryComponentLimit(action observability.ProducerKey, components []endpointInventoryComponent) int {
-	if action == config.ObservabilityV8ManagedMCPInventoryAction &&
+	if managedInventoryActionOf(action) == config.ObservabilityV8ManagedMCPInventoryAction &&
 		(len(components) == 0 || components[0].componentType == "mcp_tool") {
 		return maxMCPToolCollection
 	}
@@ -1358,7 +1482,7 @@ func endpointInventoryCarrierFor(
 	action observability.ProducerKey,
 	components []endpointInventoryComponent,
 ) (endpointInventoryCarrier, bool) {
-	switch action {
+	switch managedInventoryActionOf(action) {
 	case config.ObservabilityV8ManagedConnectorInventoryAction:
 		identifiers := make([]observability.TelemetryStructuredDefenseClawInventoryConnectorIdentifier, 0, len(components))
 		metadata := make([]observability.TelemetryStructuredDefenseClawInventoryConnectorMetadataItem, 0, len(components))
@@ -1579,6 +1703,7 @@ func emitEndpointInventoryComponent(
 			DefenseClawAIDiscoveryScanID:                    observability.Present(scanID),
 			DefenseClawAIDiscoverySignalID:                  observability.Present(component.id),
 			DefenseClawAIDiscoverySource:                    observability.Present(source),
+			DefenseClawAIComponentVendor:                    aiDiscoveryV8OptionalText(component.vendor),
 			DefenseClawAIComponentProduct:                   aiDiscoveryV8OptionalText(component.product),
 			DefenseClawInventoryItemName:                    aiDiscoveryV8OptionalText(component.itemName),
 			DefenseClawInventoryItemDescription:             aiDiscoveryV8OptionalText(component.itemDescription),
@@ -1613,6 +1738,33 @@ func emitEndpointInventoryComponent(
 			DefenseClawAgentDiscoveryProbeStatus:            aiDiscoveryV8OptionalText(component.agentProbeStatus),
 			DefenseClawAgentDiscoveryScannedAt:              aiDiscoveryV8OptionalText(component.agentScannedAt),
 			DefenseClawAgentIdentityID:                      agentIdentityV8(inventoryAgentIdentityID(component.agentConnector, component.userID, component.userName)),
+			DefenseClawInventorySkillContentHash:            aiDiscoveryV8OptionalText(component.skillContentHash),
+			DefenseClawInventorySkillContentStatus:          aiDiscoveryV8OptionalText(component.skillContentStatus),
+			DefenseClawInventorySkillState:                  aiDiscoveryV8OptionalText(component.skillState),
+			DefenseClawInventorySkillFirstSeen:              aiDiscoveryV8OptionalText(component.skillFirstSeen),
+			DefenseClawInventorySkillLastSeen:               aiDiscoveryV8OptionalText(component.skillLastSeen),
+			DefenseClawInventorySkillScope:                  aiDiscoveryV8OptionalText(component.skillScope),
+			DefenseClawInventorySkillLocation:               aiDiscoveryV8OptionalText(component.skillLocation),
+			DefenseClawInventorySkillPublisher:              aiDiscoveryV8OptionalText(component.skillPublisher),
+			DefenseClawInventorySkillPublisherSource:        aiDiscoveryV8OptionalText(component.skillPublisherSource),
+			DefenseClawInventorySkillPlugin:                 aiDiscoveryV8OptionalText(component.skillPlugin),
+			DefenseClawInventorySkillPluginVersion:          aiDiscoveryV8OptionalText(component.skillPluginVersion),
+			DefenseClawInventorySkillPluginEnabled:          inventoryOptionalBool(component.skillPluginEnabled),
+		}
+		if len(component.skillAgents) > 0 {
+			input.DefenseClawInventorySkillAgents = observability.Present(component.skillAgents)
+		}
+		if component.skillManifestHash != "" {
+			input.DefenseClawInventorySkillManifestHash = observability.Present(component.skillManifestHash)
+			input.DefenseClawInventorySkillManifestSize = observability.Present(component.skillManifestSize)
+		}
+		if component.skillVersion != "" {
+			input.DefenseClawInventorySkillVersion = observability.Present(component.skillVersion)
+		}
+		if component.skillManifest != "" {
+			input.DefenseClawInventorySkillManifest = observability.Present(component.skillManifest)
+			input.DefenseClawInventorySkillManifestPart = observability.Present(int64(component.skillManifestPart))
+			input.DefenseClawInventorySkillManifestParts = observability.Present(int64(component.skillManifestParts))
 		}
 		inventoryIdentityFor(component.userID, component.userName).applyTo(&input)
 		return builder.BuildLogAIComponentObserved(input)
@@ -1623,13 +1775,16 @@ func emitEndpointInventoryComponent(
 // the force-enabled ai.discovery family. The release-owned action is reserved
 // by the managed plan: SQLite remains authoritative locally and only the
 // CMID-authenticated AI Defense destination receives optional export work.
+// Outside Secure Client the snapshot carries the operator agent_inventory
+// action to local audit and the operator's own destinations, and only with
+// ai_discovery on, as the other collections (endpointInventoryOn).
 func (a *APIServer) emitManagedAgentInventory(
 	ctx context.Context,
 	report *agentDiscoveryReport,
 	installed int,
 	partial bool,
 ) error {
-	if a == nil || report == nil || ctx == nil || !ManagedEnterpriseActive() {
+	if a == nil || report == nil || ctx == nil || !endpointInventoryOn(a.liveConfig()) {
 		return nil
 	}
 	emitter := a.observabilityV8RuntimeEmitter()
@@ -1638,7 +1793,7 @@ func (a *APIServer) emitManagedAgentInventory(
 	}
 	source := discoverySourceOrUnknown(report.Source)
 	recordSource := agentDiscoverySource(source)
-	action := config.ObservabilityV8ManagedAgentInventoryAction
+	action := endpointInventoryAction(config.ObservabilityV8ManagedAgentInventoryAction, ManagedEnterpriseActive())
 	names := make([]string, 0, len(report.Agents))
 	for name := range report.Agents {
 		names = append(names, name)
@@ -1719,21 +1874,29 @@ func endpointInventoryScopeKey(path string) string {
 }
 
 // endpointInventoryScopeFromEvidence extracts the scope key from a
-// signal produced by the AI-Discovery walker. The walker's evidence[0]
-// is always the parent-surface row and carries the PathHash of the
-// full home-prefixed path (see signalFromDirectoryChildren and
-// signalFromMCPConfigPath) — reusing that hash means report-derived
-// component IDs are stable across walker restarts even when the raw
-// path-hash key rotates, and it costs zero extra hashing. Returns ""
-// when the signal has no evidence (walker bug guard).
+// signal produced by the AI-Discovery walker: the PathHash of the
+// parent-surface row, the full home-prefixed path (see
+// signalFromDirectoryChildren and signalFromMCPConfigPath) — reusing
+// that hash means report-derived component IDs are stable across walker
+// restarts even when the raw path-hash key rotates, and it costs zero
+// extra hashing. Evidence is sorted by type and hash, so an entry row
+// ("skill_entry" sorts before "skill") can come first; it is skipped,
+// or every id in a folder would move when a sibling entry is added or
+// removed. Returns "" when the signal has no evidence (walker bug guard).
 func endpointInventoryScopeFromEvidence(evidence []inventory.AIEvidence) string {
 	if len(evidence) == 0 {
 		return ""
 	}
+	h := evidence[0].PathHash
+	for _, ev := range evidence {
+		if !strings.HasSuffix(ev.Type, "_entry") {
+			h = ev.PathHash
+			break
+		}
+	}
 	// Trim the "hmac-sha256:" / "sha256:" prefix — the identity
 	// hasher folds this token into the wider digest so the prefix
 	// adds no information beyond length.
-	h := evidence[0].PathHash
 	if i := strings.LastIndex(h, ":"); i >= 0 {
 		h = h[i+1:]
 	}
@@ -1890,8 +2053,11 @@ func discoveredEntriesFromReport(
 	kind string,
 ) []endpointInventoryComponent {
 	components := make([]endpointInventoryComponent, 0)
+	shared := map[string][]int{}
 	for _, signal := range report.Signals {
-		if signal.Category != category {
+		// A gone signal is the folder as the previous scan saw it: its
+		// entries are not on the endpoint any more, or not in that form.
+		if signal.Category != category || signal.State == inventory.AIStateGone {
 			continue
 		}
 		connectorSlug := inventoryStableToken(signal.SupportedConnector, 128)
@@ -1920,28 +2086,74 @@ func discoveredEntriesFromReport(
 			// across scans (PathHash of the parent surface is
 			// deterministic within a single walker configuration).
 			scope := endpointInventoryScopeFromEvidence(signal.Evidence)
+			shared[scope+"/"+name] = append(shared[scope+"/"+name], len(components))
 			components = append(components, endpointInventoryComponent{
-				id:              endpointInventoryComponentID(kind+"-entry", signal.SignatureID+"/"+scope+"/"+name),
-				componentType:   kind,
-				signal:          inventoryStableToken(signal.SignatureID, 128),
-				product:         inventoryStableToken(signal.Product, 128),
-				active:          true,
-				itemName:        name,
-				itemDescription: "",
-				agentConnector:  connectorSlug,
-				agentInstalled:  &installed,
-				userID:          signal.UserID,
-				userIDKind:      discoveryUserIDKind(signal.UserID),
-				userName:        signal.UserName,
-				userEmail:       discoveryUserEmail(signal),
+				id:             endpointInventoryComponentID(kind+"-entry", signal.SignatureID+"/"+scope+"/"+name),
+				componentType:  kind,
+				signal:         inventoryStableToken(signal.SignatureID, 128),
+				product:        inventoryStableToken(signal.Product, 128),
+				vendor:         inventorySafeBounded(signal.Vendor, 256),
+				active:         true,
+				itemName:       name,
+				agentConnector: connectorSlug,
+				agentInstalled: &installed,
+				userID:         signal.UserID,
+				userIDKind:     discoveryUserIDKind(signal.UserID),
+				userName:       signal.UserName,
+				userEmail:      discoveryUserEmail(signal),
 				// agent.discovery.config_path_hash requires sha256:<64hex>.
 				// Our evidence.PathHash uses hmac-sha256:... which fails
 				// that pattern, so leave it empty rather than fail record
 				// build.
 			})
+			if facts := evidence.Skill; facts != nil {
+				row := &components[len(components)-1]
+				row.skillContentHash, row.skillContentStatus = facts.ContentHash, facts.ContentStatus
+				row.skillScope, row.skillLocation = facts.Scope, facts.Location
+				row.skillManifestHash = facts.ManifestHash
+				if facts.ManifestHash != "" {
+					row.skillManifestSize = facts.ManifestSize
+				}
+				row.itemDescription = inventorySafeBounded(facts.Description, 512)
+				row.skillVersion = inventorySafeBounded(facts.Version, 64)
+				applySkillPublisher(row, signal.Vendor, *facts)
+			}
+		}
+	}
+	if kind == "skill" {
+		// One folder several agents read (~/.agents/skills) lists them all.
+		for _, rows := range shared {
+			var agents []string
+			for _, row := range rows {
+				if agent := components[row].agentConnector; agent != "" && !slices.Contains(agents, agent) {
+					agents = append(agents, agent)
+				}
+			}
+			sort.Strings(agents)
+			for _, row := range rows {
+				components[row].skillAgents = agents[:min(len(agents), 16)]
+			}
 		}
 	}
 	return components
+}
+
+// applySkillPublisher names the best publisher evidence the endpoint has: the
+// agent vendor for a skill it ships, the plugin manifest author for a plugin
+// skill, else the skill's own SKILL.md claim.
+func applySkillPublisher(row *endpointInventoryComponent, vendor string, facts inventory.AISkillFacts) {
+	row.skillPublisherSource = "unknown"
+	if plugin := facts.Plugin; plugin != nil {
+		row.skillPlugin, row.skillPluginVersion, row.skillPluginEnabled = plugin.ID, plugin.Version, plugin.Enabled
+	}
+	switch {
+	case facts.Scope == inventory.SkillScopeBundled && vendor != "":
+		row.skillPublisher, row.skillPublisherSource = inventorySafeBounded(vendor, 128), "vendor_bundled"
+	case facts.Plugin != nil && facts.Plugin.Author != "":
+		row.skillPublisher, row.skillPublisherSource = facts.Plugin.Author, "plugin_manifest"
+	case facts.Author != "":
+		row.skillPublisher, row.skillPublisherSource = facts.Author, "declared"
+	}
 }
 
 // discoveredMCPEntriesFromReport enumerates per-server MCP inventory

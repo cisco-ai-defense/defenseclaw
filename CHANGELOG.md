@@ -8,6 +8,100 @@ for released versions and assets, and the
 [documentation website](https://cisco-ai-defense.github.io/defenseclaw/docs/)
 for current behavior.
 
+## [Unreleased] — 1.0.11
+
+DefenseClaw 1.0.11 follows 1.0.10. It is a fix release. It updates OpenShell to 0.1.9 and adds one managed config key, `enterprise.openshell.allow_downgrade`. It fixes how blocked tool calls end a streamed reply, Windows managed install, upgrade and uninstall, routing budgets and cost records, sandbox setup on macOS, and a set of smaller connector and CLI issues.
+
+### Upgrading
+
+- **From 1.0.10 or an earlier 1.0.x:** run the 1.0.11 installer for your install type: `install.sh`, `install.ps1`, `defenseclaw upgrade`, the rpm, the deb, the macOS pkg or the Windows Setup. Your config and saved modes are kept. The only new config key is `enterprise.openshell.allow_downgrade`; `defenseclaw rollback` to 1.0.10 sets it aside for you, because 1.0.10 does not know it.
+- **gpt-5.2 prices:** an install that seeded its price table from the 1.0.10 default keeps its old gpt-5.2 row, so gpt-5.2 calls still show no cost after the upgrade. Run `defenseclaw setup tokenomics` again to re-seed the table, or add the gpt-5.2 rows by hand.
+- **OpenShell 0.1.9:** DefenseClaw now installs OpenShell 0.1.9, and sandboxes still run on OpenShell 0.1.6 or later. `defenseclaw sandbox setup` offers the upgrade. An OpenShell upgrade cannot be undone; see Known issues before you upgrade a computer you may roll back.
+- **Managed OpenShell version:** `ensure` refuses an `enterprise.openshell.version` below a release an account on the computer already ran, and names those accounts. Set `enterprise.openshell.allow_downgrade: true` to apply it anyway; each of those accounts then has to move its OpenShell gateway database aside before its sandboxes start (see Known issues).
+- **Managed Windows, signed-out accounts:** an account that stayed signed out across two upgrades from a release before 1.0.11 must sign in once before DefenseClaw re-applies its hooks.
+
+### Added
+- **The managed skill inventory sends each skill's declared description and version, its SKILL.md size and the agent's vendor.** The description the SKILL.md frontmatter declares goes in `defenseclaw.inventory.item.description` (it was empty for skills), folded to one line; the version in `defenseclaw.inventory.skill.version`; the file size in `defenseclaw.inventory.skill.manifest_size`; and the record's `defenseclaw.ai.component.vendor` is the vendor of the agent that reads the folder, from the discovery catalog, so AI Defense can name the agent's vendor. The description and version are the skill author's text and content fields: the managed destination's redaction profile masks a secret in them like in the SKILL.md.
+- **The managed skill inventory sends a content hash for each skill.** `defenseclaw.inventory.skill.content_hash` is a SHA-256 over every file of the skill folder, scripts and binaries included, so the same skill has the same hash on every endpoint. `content_status` says why a record has none (`symlink`, `too_large`, `unreadable`). Links are never followed.
+- **The managed skill inventory says whether a skill is new, changed, unchanged or removed.** The endpoint keeps the state, so each skill record carries `state`, `first_seen` and `last_seen`, and a removed skill is sent once as removed.
+- **Skill records say where a skill is installed and which agents read it.** `scope` (user, project, bundled or managed), a home-relative `location` such as `~/.claude/skills/pdf` with no account name, and `agents`. Discovery also reads the skill folders each agent documents and the catalog missed, and Claude Code synced skills.
+- **Skills that Claude Code, Codex, Cursor and Copilot CLI plugins ship are in the skill inventory.** They have scope `plugin`, the plugin name, version and enabled state, and every skill record names its `publisher` and `publisher_source`.
+- **A Secure Client admin can read the SKILL.md of the skills on an endpoint.** With `ai_discovery.include_skill_manifests` on (off by default), the record of a new or changed skill carries its SKILL.md text, once per file version, through the destination's redaction profile. A file over 256 KiB goes in ordered parts, and at most 2 MiB of text goes out in one scan.
+- **Managed scans follow agent folders moved with `CODEX_HOME`, `CLAUDE_CONFIG_DIR` or `COPILOT_HOME`.** A managed scan reads where each user saved the variable (shell startup files, or the persistent environment on Windows) and inventories the skills and plugins there when the folder is inside that user's home.
+- **Per-user and standalone enterprise installs send the endpoint inventory too (Preview).** With `ai_discovery` on, the gateway sends the connector, MCP server and tool, skill and plugin inventories after each full scan, and the coding-agent inventory on each agent discovery request, under the actions `connector_inventory`, `mcp_inventory`, `skill_inventory`, `plugin_inventory` and `agent_inventory`: a per-user install to the local audit log and your own observability destinations, a standalone enterprise machine to the local audit log and the administrator's destinations. Each destination applies its own redaction profile; the default profile of your own destinations, `none`, sends the records as they are. The gateway keeps the new, changed and removed state in its data folder (`endpoint_inventory_publish_state.json`) and sends an unchanged collection once a day. SKILL.md text stays off unless `ai_discovery.include_skill_manifests` is on. A Secure Client endpoint is unchanged.
+- **A partial inventory collection stays local.** A collection a scan could not read in full is kept in the local audit log and is not sent to any other destination, in every product.
+- **Scope `managed` means an administrator owns the skill folder.** A skill folder outside every user home is reported as `managed` only when SYSTEM, Administrators or TrustedInstaller (Windows) or root (macOS, Linux) owns it; a folder a user created there is reported as `user`.
+- **A managed scan does not follow a link to a plugin folder.** A plugin's skills are read only when every folder from the user's home down to the plugin is a real folder.
+- **A Windows user's moved agent folder is still scanned after sign-out.** A managed scan keeps using the last `CODEX_HOME`, `CLAUDE_CONFIG_DIR` or `COPILOT_HOME` folder it read for a user, so their skills are not reported removed at sign-out and new at sign-in.
+- **The skill publisher is a content field.** A publisher a SKILL.md declares is the skill author's own text, so a redacting profile now masks a secret in `defenseclaw.inventory.skill.publisher`, as it already did in the declared description and version.
+- **A skill folder that has not changed is not read again on every scan.** Discovery keeps each folder's hash while none of its files changed and reads every folder in full at least once a day. On a managed Windows machine every scan still reads every folder.
+- **Managed scans on macOS and Linux report every install of an agent.** Each copy of an agent binary in a user's bin folders or the machine prefixes is its own discovery signal, with `defenseclaw.ai.component.location` (`~/.local/bin/claude`, or `/opt/homebrew/bin/codex` for a system location).
+
+### Security
+
+- **GitHub Copilot CLI:** when the guardrail blocks a prompt in action mode, the prompt is now replaced before it reaches the model on every install (Copilot CLI 1.0.76 or later), not only on some profiles.
+- **Streamed tool calls:** when DefenseClaw refuses a tool call in the middle of a streamed reply, the stream now ends with an error the agent shows as a failed turn. Before, the agent could receive the refused call as complete.
+- **Shell hooks:** per-user and standalone managed shell hooks now follow the configured fail mode when the hook exits unexpectedly.
+- **Codex on standalone managed installs and in sandboxes:** every block of the Codex hook is now the block answer Codex reads, so Codex stops the prompt or tool call. Before, a block on a standalone managed install or inside an OpenShell sandbox ended with a non-zero exit, which current Codex releases treat as a hook failure and then go on. In fail mode open, the hook that catches an unexpected exit now logs it and never blocks.
+- **Sandbox hooks:** a program inside an OpenShell sandbox could set one shell variable that silenced the DefenseClaw hook answer, so a block was taken as an allow for Claude Code, Codex, Hermes and Antigravity sandboxes (Copilot, Cursor and Devin still blocked but lost the reason). This affects only agents that run inside a DefenseClaw sandbox.
+- **Per-user gateway check:** when the check of which process holds the gateway port is slow, a hook no longer treats another program of the same account on that port as a gateway outage.
+- **Windows managed sign-in waits:** a hook that waits for a user to sign in after an upgrade now checks the machine's own record of the upgrade, not a file the account can write.
+- **Command reading:** a `cp` whose destination is a link, and a PowerShell `-Command` body made of several words, are now read in full.
+- **MCP:** a block rule written while the gateway reloads now applies to the first pending call; Codex per-call lookups follow the project's trust setting.
+- **Protected state on busy Windows machines (1.0.10 and earlier):** a busy Windows machine could let a write through a hard link into DefenseClaw's protected state. A folder read that the system delayed, on the way to the link or the write target, was taken as a network share that did not answer, so the link was not found. Such a write is now refused.
+- **A Secure Client endpoint with no AI Defense endpoint set keeps its endpoint inventory local.** During enrollment, or after a reload that cleared the endpoint, the connector, MCP, skill, plugin and agent inventory records of a Secure Client endpoint (with user ids, and SKILL.md text when `ai_discovery.include_skill_manifests` is on) also went to the operator's own log destinations. They now go only to the local audit log and to AI Defense. Affects 1.0.8 to 1.0.10.
+
+### Fixed
+
+#### Windows managed install, upgrade and uninstall
+- Setup `/uninstall` asks again after waiting for the managed lock instead of failing.
+- Setup renders the recorded Claude policy before it takes the install lock, so a slow policy read no longer stops the install.
+- Standalone Setup `/install` without a config file writes a standalone starting config.
+- The Setup coverage error now names a failed guardian startup check, and the guardian's startup record fits the size Setup reads.
+- Codex `requirements.toml` keeps the administrator's own text on every DefenseClaw write.
+- A rollback removes the per-user Codex hooks a newer install left.
+- The config owner repair accepts only a file that a privileged writer created in the guardian folder.
+- An administrator shell on a standalone Windows machine reads the guardian records from the right place.
+- Standalone Setup no longer takes over a user's own earlier per-user DefenseClaw folder; it leaves that account as it found it. One busy or unusable profile no longer stops the install for every other user.
+- Managed Claude Code enrollment accepts an existing ClaudeCode policy in the machine registry that merges managed sources, instead of failing on any such policy.
+- A standalone reinstall keeps the shared hook files' owner when Intune or an administrator edited `requirements.toml` or `90-defenseclaw.json`, instead of failing with error 1603.
+
+#### Routing, budgets and cost
+- A Claude stream that stops before its usage record is charged to budgets as unknown spend, not as its opening token count.
+- A reload that removes all budgets stops the budget sync.
+- The default price table prices gpt-5.2 at its list price and names the source of every row.
+- A config reload refreshes routing health when routing is turned on or its backends change.
+- The group budget warning reads only the guardian record of the account that owns the user id.
+- On a managed Mac, `config validate` reads the same guardian records the gateway uses for group budgets.
+
+#### Sandbox
+- On a Mac with OpenShell 0.1.9, sandbox setup no longer says MicroVM sandboxes do not start, and offers the vm driver as a choice that works (Preview). The default stays docker: `--yes` and non-interactive setup never pick vm.
+- On macOS, setup moves a gateway that still uses the vm driver to docker, checks the docker driver first, and `--yes` never selects vm.
+- The Docker Desktop message about a missing probe image tells you to build the image.
+- `doctor` and `sandbox run` agree on Docker Desktop's Landlock support.
+
+#### Connectors and CLI
+- Kiro: `setup remove kiro` also removes this install's older hooks from the user's earlier default agent; a broken Kiro agent file is reported once.
+- OpenClaw: the permission message for `openclaw.json` names the first folder the account cannot open.
+- A Claude Code tool call that the guardrail allows now writes one local hook row on a per-user gateway, not two.
+- The agent process scan skips a process that ended while it was read.
+- Agent Substrate attach: keys typed just before a dropped connection are counted correctly, so the launcher says when they may not have reached the agent.
+- Hook resends with less than a second left still go out; state walks are limited by entry count, not time.
+- Cowork VM sensor: `config validate` refuses a collector host name the VM installer would refuse (ending in `-` or `.`, or over 200 characters).
+- The AI Runtime and AI Discovery dashboards also show the Cowork VM sensor.
+- Native Windows: `setup routing` refuses only the classifier that does not run on Windows, and says why. `config set routing.enabled` says the change applies on reload when the classifier runs in the gateway.
+- Errors name their cause when removing a connector fails, and the gateway start error says why a removed connector's teardown failed.
+
+#### Endpoint inventory
+- **Adding or removing a skill no longer changes the ids of the other skills in its folder.** The managed inventory built the id of a skill, plugin or rule from whichever entry of its folder hashed lowest; it now uses the folder itself. Skill, plugin and rule ids change once on upgrade; MCP server ids do not.
+- **The plugin inventory no longer reports Codex's install staging folder as a plugin.** Hidden folders in an agent's plugins folder, such as Codex's `.remote-plugin-install-staging`, are the agent's own working state; discovery, and the Linux sensor helper's read of a home, now leave them out.
+
+### Known limits
+
+- **An OpenShell upgrade cannot be undone.** Rolling DefenseClaw back keeps OpenShell 0.1.9. An older OpenShell starts only after its gateway database (`~/.local/state/openshell/gateway/openshell.db`) is moved aside, which drops the records of your sandboxes, so pull their work back first.
+
+- **Cowork VM sensor packages are not signed yet.** The readiness check reports the missing signature. Until signed packages ship, pin `package_sha256` to the archive hash from the release checksums.
+
 ## [Unreleased] — 1.0.10
 
 DefenseClaw 1.0.10 lets you decide what each guardrail layer does, adds model routing with budgets and cost records, and adds native OpenClaw hooks and Agent Substrate support. It reads shell and PowerShell commands more completely, keeps hook answers fast under bursts of tool calls, and makes managed Windows and macOS installs more reliable. Secure Client is not part of 1.0.x. The release notes on GitHub Releases have the upgrade steps and the checksum and signature commands.

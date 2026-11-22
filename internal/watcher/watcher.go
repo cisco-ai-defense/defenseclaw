@@ -607,7 +607,7 @@ func (w *InstallWatcher) setRootCoverage(kind, path string, cause error) {
 	}
 }
 
-// SetMCPToolObserver attaches the managed inventory sink before Run starts.
+// SetMCPToolObserver attaches the endpoint inventory sink before Run starts.
 func (w *InstallWatcher) SetMCPToolObserver(observer func(context.Context, string, string, *scanner.ScanResult, error)) {
 	w.mcpToolObserver = observer
 }
