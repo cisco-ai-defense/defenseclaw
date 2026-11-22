@@ -111,7 +111,7 @@ type Sidecar struct {
 	// gateway report, which its install watcher admits (GAP-2591).
 	hookMCP hookReportedMCPServers
 	// mcpTools joins scanner listings and authenticated hook observations to
-	// currently configured server IDs for managed inventory publication.
+	// currently configured server IDs for endpoint inventory publication.
 	mcpTools mcpToolInventory
 
 	// modelUsageRT is the model usage engine and its local store (inert until
@@ -4456,7 +4456,7 @@ func (s *Sidecar) observeMCPToolListing(ctx context.Context, connectorName, serv
 	if !endpointInventoryOn(s.currentConfig()) {
 		return
 	}
-	// Managed inventory publication refreshes parent identities on startup
+	// Endpoint inventory publication refreshes parent identities on startup
 	// and on config changes; avoid re-reading every connector on each scan.
 	// A judge can reject a scan after the scanner returned a valid tools/list
 	// projection. Keep that content-free listing; the admission verdict does

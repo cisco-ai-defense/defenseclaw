@@ -837,16 +837,16 @@ func (m *mcpToolInventory) restoreToolLocked(key string, tool audit.MCPObservedT
 }
 
 // attachStore makes store the durable state of the tool inventory, in every
-// product. The gateway reads it now when it may send the endpoint inventory
-// (a managed machine, or ai_discovery on); otherwise the first inventory cycle
-// reads it (retryRestoreFromStore), so an install with the inventory off
-// reads nothing.
+// product. The gateway reads it now when it sends the endpoint inventory (a
+// Secure Client endpoint, or ai_discovery on; ManagedEnterpriseActive is not
+// set yet here); otherwise the first inventory cycle reads it
+// (retryRestoreFromStore), so an install with the inventory off reads nothing.
 func (m *mcpToolInventory) attachStore(ctx context.Context, cfg *config.Config, store mcpObservedToolStore) error {
 	if m == nil || store == nil || cfg == nil {
 		return nil
 	}
 	m.store = store
-	if managed.IsManagedEnterprise(cfg.DeploymentMode) || cfg.AIDiscovery.Enabled {
+	if managed.IsManagedEnterprise(cfg.DeploymentMode) && cfg.ManagedAIDOnly() || cfg.AIDiscovery.Enabled {
 		return m.restoreFromStore(ctx)
 	}
 	m.mu.Lock()
