@@ -73,11 +73,16 @@ func substrateAttachBodyCap(r *http.Request, workspaceMax int64) int64 {
 	return substrateAttachFrameMax
 }
 
+// substrateWorkspaceMin is the smallest workspace cap (design 2.6: 1 MiB
+// to 64 GiB): a value meant as megabytes (workspace_max_bytes: 512) would
+// otherwise refuse every upload (RV1 P4-1).
+const substrateWorkspaceMin int64 = 1 << 20
+
 func substrateWorkspaceMax(configured int64) int64 {
 	if configured <= 0 {
 		return config.DefaultSubstrateWorkspaceMaxBytes
 	}
-	return min(configured, relay.MaxFilesBytes)
+	return max(min(configured, relay.MaxFilesBytes), substrateWorkspaceMin)
 }
 
 // substrateAttachCSRF is the browser gate of attach traffic: a request
