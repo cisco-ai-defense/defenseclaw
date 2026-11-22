@@ -317,6 +317,9 @@ func newWalker(res *Result, o Options) *walker {
 	if o.Home != "" {
 		exported["HOME"] = true // the shell's HOME is inherited from the process
 	}
+	if o.loginHome == "" {
+		o.loginHome = o.Home // ~Login stays the passwd home when the call sets HOME
+	}
 	return &walker{res: res, o: o, funcs: map[string]bool{}, aliases: map[string]string{},
 		links: map[string]string{}, writeByKey: map[string]int{},
 		env: env, exported: exported, varsOwned: true, spec: &childSpec{},

@@ -4,7 +4,10 @@
 
 package effects
 
-import "strings"
+import (
+	"slices"
+	"strings"
+)
 
 // This file resolves and cleans paths under an explicit Flavor, with no use of
 // path/filepath (which follows the build OS) and no filesystem access. Windows
@@ -128,16 +131,47 @@ func tildeAccount(s string, o Options) (string, bool, ReasonCode) {
 		return "", false, ReasonDynamicExpansion
 	case !validLoginName(name):
 		return "./" + s, true, ""
-	case o.Login != "" && name == o.Login:
-		if o.Home == "" {
+	case o.Login != "" && strings.EqualFold(name, o.Login):
+		home := o.loginHome
+		if home == "" {
+			home = o.Home
+		}
+		if home == "" {
 			return "", false, ReasonDynamicExpansion
 		}
-		return strings.TrimRight(o.Home, "/") + rest, true, ""
+		return strings.TrimRight(home, "/") + rest, true, ""
 	}
 	if h, ok := o.Accounts[name]; ok && strings.HasPrefix(h, "/") {
 		return strings.TrimRight(h, "/") + rest, true, ""
 	}
 	return "", false, ReasonDynamicExpansion
+}
+
+// TildeAccountNames lists, once each and in order, the login names text spells
+// as a POSIX ~name prefix: a ~ at the start of the text or after a blank, an
+// operator, a quote, = or : (an over-reading: the caller looks each name up for
+// Options.Accounts, and a name the walk never expands costs only that lookup).
+// ~, ~/, ~+, ~- and names no login can have are not listed.
+func TildeAccountNames(text string) []string {
+	const before, after = " \t\n\r;&|()<>=:`\"'{},", "/ \t\n\r;&|()<>`\"'{},:"
+	var names []string
+	for i := strings.IndexByte(text, '~'); i >= 0; {
+		if i == 0 || strings.IndexByte(before, text[i-1]) >= 0 {
+			name := text[i+1:]
+			if j := strings.IndexAny(name, after); j >= 0 {
+				name = name[:j]
+			}
+			if validLoginName(name) && !slices.Contains(names, name) {
+				names = append(names, name)
+			}
+		}
+		j := strings.IndexByte(text[i+1:], '~')
+		if j < 0 {
+			break
+		}
+		i += 1 + j
+	}
+	return names
 }
 
 // validLoginName reports a name the passwd lookup of a tilde prefix can find:

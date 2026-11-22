@@ -6,6 +6,7 @@ package effectrules
 
 import (
 	"github.com/defenseclaw/defenseclaw/internal/effects"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/semantic"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/semanticpb"
 )
@@ -17,7 +18,8 @@ type Env struct {
 	Home   string
 	Flavor effects.Flavor
 	// Resolve follows a write path through links; nil falls back to
-	// hookpaths.ResolveWriteTarget.
+	// hookpaths.ResolveWriteTarget for the host's own path flavor and to the
+	// placed path for the other flavor (resolverFor).
 	Resolve func(string) (string, bool)
 	// Identity reads a file's device and inode to find a hard link of a
 	// protected member (one stat per resolved target); nil reads the disk
@@ -26,6 +28,10 @@ type Env struct {
 	// AgentCreated reports whether an earlier call of this session wrote the
 	// target keyed by effects.Target.Key(). Nil means no session memory.
 	AgentCreated func(key string) bool
+	// Truncated is the call's one bound record: a cap of the projection
+	// (maxIdentityStats) that cut the reading short hits it. Nil: the hit is
+	// only counted (IdentityCounts).
+	Truncated *bounded.Truncated
 }
 
 // Project maps a pure effect result onto the CEL activation's effect list and
@@ -33,16 +39,16 @@ type Env struct {
 // mutates anything the extractor already decided; only link following and the
 // protected-set grade touch the file system, read-only.
 func Project(res effects.Result, env Env) []*semanticpb.EffectFact {
-	rsv := env.Resolve
-	if rsv == nil {
-		rsv = defaultResolver
-	}
 	flavor := env.Flavor
 	if flavor == "" {
 		flavor = effects.FlavorPOSIX
 	}
+	rsv := env.Resolve
+	if rsv == nil {
+		rsv = resolverFor(flavor)
+	}
 	sets := buildSets(env.Home, flavor)
-	ids := newIdentityCache(env.Identity, sets)
+	ids := newIdentityCache(env.Identity, sets, env.Truncated)
 
 	effs := res.Effects
 	if len(effs) > semantic.MaxEffects {

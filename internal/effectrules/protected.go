@@ -6,6 +6,7 @@ package effectrules
 
 import (
 	"path"
+	"runtime"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/effects"
@@ -274,6 +275,23 @@ func atOrUnder(child, base string) bool {
 // defaultResolver reads the file system through the hook's bounded reader.
 func defaultResolver(p string) (string, bool) {
 	return hookpaths.ResolveWriteTarget(p)
+}
+
+// hostGOOS is the system whose file system the resolver reads; a test pins it.
+var hostGOOS = runtime.GOOS
+
+// resolverFor is the link resolver of a call's path flavor: the hook's file
+// system reader for the host's own flavor, else the placed path itself. A
+// Windows path judged on a POSIX host (or a POSIX path on Windows) names no
+// file of this file system, so there is no link to follow: its placed path is
+// the whole answer, a member or not by name, never an unresolved target that
+// reaches every set (DET111 D3; it graded every Windows home write the
+// unknown tier).
+func resolverFor(flavor effects.Flavor) resolver {
+	if (flavor == effects.FlavorWindows) != (hostGOOS == "windows") {
+		return func(p string) (string, bool) { return p, true }
+	}
+	return defaultResolver
 }
 
 // matchBasis names why a target matched a set, so the restricted tier can

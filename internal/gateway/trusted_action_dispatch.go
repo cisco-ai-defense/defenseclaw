@@ -279,6 +279,10 @@ type trustedActionRequest struct {
 	// the dispatch takes it once, at the outermost call, and clears it so a
 	// twin or child request never runs the lane again.
 	recordEffectShadow func(EffectShadowResult)
+	// effectLogin is the hook account's login for the effect lane
+	// (effects.Options.Login), set at the outermost dispatch from the trusted
+	// identity (effectActiveLogin).
+	effectLogin string
 	// Prevent recursive standalone evaluation of an already flattened command.
 	simpleCommandPass bool
 	// stateProofOnly limits the judgment to the rule that proves a write to
@@ -536,6 +540,7 @@ func dispatchTrustedActionOnce(
 	// the lane adds nothing there either: it only raises where they judge.
 	if octx, outermost := markOutermostEffectDispatch(parent); outermost {
 		parent = octx
+		request.effectLogin = effectActiveLogin(parent, request.Input)
 		switch mode := effectsRulesModeFor(); mode {
 		case effectRulesOn:
 			if ManagedEnterpriseActive() && !isSubstrateActorRequest(parent) {
