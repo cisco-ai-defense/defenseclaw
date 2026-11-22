@@ -6064,11 +6064,11 @@ var exactFallbackContracts = map[string]exactFallbackContract{
 	"credential.kubernetes_named_secret_content_read": {
 		proves: func(input actionfacts.Input, facts actionfacts.Facts) bool {
 			_, ok := actionfacts.ExactKubernetesSecretContentRead(input, facts)
-			return ok
+			return ok || actionfacts.KubernetesSecretContentRequest(facts)
 		},
 		boundedSubgraphProves: func(input actionfacts.Input, facts actionfacts.Facts) bool {
 			_, ok := actionfacts.ExactKubernetesSecretContentRead(input, facts)
-			return ok
+			return ok || actionfacts.KubernetesSecretContentRequest(facts)
 		},
 		requiresExactDetectionProof: true,
 		codeOwnedDetection:          true,
@@ -6080,11 +6080,11 @@ var exactFallbackContracts = map[string]exactFallbackContract{
 	"credential.protected_kubernetes_named_secret_content_read": {
 		proves: func(input actionfacts.Input, facts actionfacts.Facts) bool {
 			_, ok := actionfacts.ExactKubernetesSecretContentRead(input, facts)
-			return ok
+			return ok || actionfacts.KubernetesSecretContentRequest(facts)
 		},
 		boundedSubgraphProves: func(input actionfacts.Input, facts actionfacts.Facts) bool {
 			_, ok := actionfacts.ExactKubernetesSecretContentRead(input, facts)
-			return ok
+			return ok || actionfacts.KubernetesSecretContentRequest(facts)
 		},
 		requiresExactDetectionProof: true,
 		codeOwnedDetection:          true,
@@ -6812,7 +6812,8 @@ var exactFallbackContracts = map[string]exactFallbackContract{
 	},
 	"lateral.workload_exec": {
 		proves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
-			return workloadExecFallbackProof(facts)
+			return workloadExecFallbackProof(facts) ||
+				actionfacts.KubernetesStdinExecRequest(facts)
 		},
 		detectionOnly: true,
 	},

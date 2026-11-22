@@ -33,6 +33,7 @@ func Project(facts actionfacts.Facts) (*semanticpb.Facts, ProjectionCode) {
 		len(facts.Network) > maxNetwork ||
 		len(facts.DataFlows) > maxDataFlows ||
 		len(facts.Artifacts) > maxArtifacts ||
+		len(facts.KubeRequests) > maxKube ||
 		len(facts.Parse.Issues) > maxIssues {
 		return nil, ProjectionCountLimit
 	}
@@ -164,6 +165,37 @@ func Project(facts actionfacts.Facts) (*semanticpb.Facts, ProjectionCode) {
 			Scope:          scope,
 			TargetKind:     target,
 			PrefixLength:   fact.PrefixLength,
+		})
+	}
+
+	for _, fact := range facts.KubeRequests {
+		if !knownCommandReference(fact.CommandID, commandIDs) {
+			return nil, ProjectionInvalidReference
+		}
+		source := string(fact.Source)
+		for _, value := range []string{source, fact.Verb, fact.Group, fact.Version,
+			fact.Resource, fact.Subresource, fact.Namespace, fact.Name} {
+			if !validScalar(value) {
+				return nil, ProjectionScalarLimit
+			}
+		}
+		projected.Kube = append(projected.Kube, &semanticpb.KubeFact{
+			CommandId:      fact.CommandID,
+			Source:         source,
+			Verb:           fact.Verb,
+			Group:          fact.Group,
+			Version:        fact.Version,
+			Resource:       fact.Resource,
+			Subresource:    fact.Subresource,
+			Namespace:      fact.Namespace,
+			Name:           fact.Name,
+			AllNamespaces:  fact.AllNamespaces,
+			Stdin:          fact.Stdin,
+			Tty:            fact.TTY,
+			Command:        fact.Command,
+			LabelSelector:  fact.LabelSelector,
+			RevealsContent: fact.RevealsContent,
+			Unknown:        fact.Unknown,
 		})
 	}
 

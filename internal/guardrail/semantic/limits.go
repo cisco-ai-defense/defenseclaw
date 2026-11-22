@@ -45,6 +45,7 @@ const (
 	maxWrappersPerCommand   = 4
 	maxPaths                = 256
 	maxNetwork              = 128
+	maxKube                 = 32
 	maxDataFlows            = 256
 	maxArtifacts            = 64
 	maxArchiveLineages      = 64
