@@ -6034,6 +6034,9 @@ func (s *Sidecar) runGuardrailMulti(ctx context.Context) error {
 	// persisted state, and idle until shutdown.
 	if !s.currentConfig().Guardrail.Enabled {
 		failedTeardown := append([]string(nil), failedRemoved...)
+		if removedWhy == nil {
+			removedWhy = map[string]string{}
+		}
 		for _, conn := range conns {
 			teardownErr := conn.Teardown(ctx, baseOpts)
 			if teardownErr != nil {
@@ -6041,12 +6044,12 @@ func (s *Sidecar) runGuardrailMulti(ctx context.Context) error {
 			}
 			if err := verifyConnectorRemoved(conn, baseOpts, teardownErr); err != nil {
 				fmt.Fprintf(os.Stderr, "[guardrail] WARNING: teardown of %s left stale state: %v\n", conn.Name(), err)
-				failedTeardown = append(failedTeardown, conn.Name())
+				failedTeardown, removedWhy[conn.Name()] = append(failedTeardown, conn.Name()), err.Error()
 				continue
 			}
 			if err := connector.ClearHookContractLockEntry(s.currentConfig().DataDir, conn.Name()); err != nil {
 				fmt.Fprintf(os.Stderr, "[guardrail] WARNING: clear hook contract lock for %s: %v\n", conn.Name(), err)
-				failedTeardown = append(failedTeardown, conn.Name())
+				failedTeardown, removedWhy[conn.Name()] = append(failedTeardown, conn.Name()), err.Error()
 				continue
 			}
 			RemoveConnectorRulePackOverrides(conn.Name())
@@ -6896,12 +6899,7 @@ func (s *Sidecar) teardownPreviousConnectorTransaction(
 	// A dropped name left the roster without a teardown, so it needs no
 	// rollback authority; requested Setup publishes the roster without it.
 	if len(unavailable) > 0 || len(candidates)+len(dropped) != len(previousNames) {
-		return fmt.Errorf(
-			"refuse connector switch %s to %s without complete prior-registration rollback authority%s",
-			previousName,
-			requested.Name(),
-			connectorCausesSuffix(unavailable, unavailableWhy),
-		)
+		return connectorSwitchRefusal(previousName, requested.Name(), unavailable, unavailableWhy)
 	}
 	removed, failed, why := teardownRemovedConnectorCandidates(candidates, ctx, func(conn connector.Connector, priorOpts connector.SetupOpts) error {
 		return removeTeardownHookFiles(registry, conn, []string{requested.Name()}, priorOpts)
@@ -6915,21 +6913,7 @@ func (s *Sidecar) teardownPreviousConnectorTransaction(
 		restore.applied = nil
 		restore.removed = candidates
 		rollbackErr := rollbackMultiConnectorPublication(ctx, restore)
-		if rollbackErr != nil {
-			return fmt.Errorf(
-				"connector switch %s to %s teardown failed: %s; prior-registration rollback incomplete: %w",
-				previousName,
-				requested.Name(),
-				connectorTeardownCauses(failed, why),
-				rollbackErr,
-			)
-		}
-		return fmt.Errorf(
-			"connector switch %s to %s teardown failed: %s; restored the prior connector registration",
-			previousName,
-			requested.Name(),
-			connectorTeardownCauses(failed, why),
-		)
+		return connectorSwitchTeardownFailure(previousName, requested.Name(), failed, why, rollbackErr)
 	}
 	transaction.removed = removed
 	return nil
@@ -8251,14 +8235,7 @@ func verifyEffectiveHookRegistration(opts connector.SetupOpts, conn connector.Co
 	return nil
 }
 
-// teardownRemovedConnectorsReport is teardownRemovedConnectorsWhy without the
-// causes.
-func teardownRemovedConnectorsReport(registry *connector.Registry, previous, current []string, opts connector.SetupOpts, retiredWorkspace string, ctx context.Context, configured ...[]string) (failed, dropped []string) {
-	failed, dropped, _ = teardownRemovedConnectorsWhy(registry, previous, current, opts, retiredWorkspace, ctx, configured...)
-	return failed, dropped
-}
-
-// teardownRemovedConnectorsReport tears down connectors that were active on
+// teardownRemovedConnectorsWhy tears down connectors that were active on
 // a previous boot but are absent from the current active set — the
 // set-difference path for the multi-connector boot path (removed = previous − current). It is intended to
 // run once, before the per-connector setup loop.
@@ -8266,7 +8243,8 @@ func teardownRemovedConnectorsReport(registry *connector.Registry, previous, cur
 // Failures are logged and collected (continue-on-error): stale state left by a
 // connector being REMOVED must never block bringing up the connectors that
 // are still active (DN1), while the returned names remain persisted for a
-// later cleanup retry. Membership is compared case-insensitively so a case
+// later cleanup retry. why names, for each returned name, the error that kept it
+// (rel-1-0-10 GAP-1745). Membership is compared case-insensitively so a case
 // mismatch can never tear down a connector that is in fact still active.
 //
 // A previous name the registry cannot resolve is a connector this build no
@@ -8923,6 +8901,32 @@ func connectorTeardownCauses(failed []string, why map[string]string) string {
 		}
 	}
 	return strings.Join(parts, "; ")
+}
+
+// connectorSwitchRefusal is the error of a switch refused before any teardown:
+// a previous connector has no complete rollback authority.
+func connectorSwitchRefusal(previousName, requestedName string, unavailable []string, why map[string]string) error {
+	return fmt.Errorf(
+		"refuse connector switch %s to %s without complete prior-registration rollback authority%s",
+		previousName, requestedName, connectorCausesSuffix(unavailable, why),
+	)
+}
+
+// connectorSwitchTeardownFailure is the error of a switch whose teardown
+// failed: the prior registration was restored (rollbackErr nil) or the
+// restore itself failed.
+func connectorSwitchTeardownFailure(previousName, requestedName string, failed []string, why map[string]string, rollbackErr error) error {
+	causes := connectorTeardownCauses(failed, why)
+	if rollbackErr != nil {
+		return fmt.Errorf(
+			"connector switch %s to %s teardown failed: %s; prior-registration rollback incomplete: %w",
+			previousName, requestedName, causes, rollbackErr,
+		)
+	}
+	return fmt.Errorf(
+		"connector switch %s to %s teardown failed: %s; restored the prior connector registration",
+		previousName, requestedName, causes,
+	)
 }
 
 // connectorCausesSuffix is ": <connector> (<cause>); ..." for the connectors in

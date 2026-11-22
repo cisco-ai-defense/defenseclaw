@@ -158,8 +158,29 @@ func (c *KiroConnector) Setup(ctx context.Context, opts SetupOpts) error {
 // kiroPathError wraps err with what failed and the file. A parse error names
 // the file itself, and naming it again made one broken file read as two
 // (rel-1-0-10 GAP-1745).
+// kiroErrorNamesPath reports whether msg holds path as a whole path element:
+// not inside a longer path such as <path>.bak or a parent folder's name.
+func kiroErrorNamesPath(msg, path string) bool {
+	isPathChar := func(b byte) bool {
+		return b == '/' || b == '\\' || b == '.' || b == '_' || b == '-' || b == '~' ||
+			b >= '0' && b <= '9' || b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z'
+	}
+	for from := 0; from < len(msg); {
+		at := strings.Index(msg[from:], path)
+		if at < 0 || path == "" {
+			return false
+		}
+		start, end := from+at, from+at+len(path)
+		if (start == 0 || !isPathChar(msg[start-1])) && (end == len(msg) || !isPathChar(msg[end]) || msg[end] == '.' && (end+1 == len(msg) || !isPathChar(msg[end+1]))) {
+			return true
+		}
+		from = start + 1
+	}
+	return false
+}
+
 func kiroPathError(what, path string, err error) error {
-	if strings.Contains(err.Error(), path) {
+	if kiroErrorNamesPath(err.Error(), path) {
 		return fmt.Errorf("%s: %w", what, err)
 	}
 	return fmt.Errorf("%s %s: %w", what, path, err)

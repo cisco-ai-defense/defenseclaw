@@ -56,7 +56,7 @@ func TestRemovedConnectorWithAFailedCredentialRevocationStaysPending(t *testing.
 				var pending bool
 				var detail string
 				if path == "multi-connector removal" {
-					failed, _ := teardownRemovedConnectorsReport(reg, []string{"codex", "cursor"}, []string{"cursor"}, opts, "", context.Background())
+					failed, _, _ := teardownRemovedConnectorsWhy(reg, []string{"codex", "cursor"}, []string{"cursor"}, opts, "", context.Background())
 					pending = len(failed) == 1 && failed[0] == "codex"
 					detail = strings.Join(failed, ",")
 				} else {
@@ -143,7 +143,7 @@ func TestRemovedConnectorCredentialIsRefusedWhileItsRevocationIsPending(t *testi
 			opts := connector.SetupOpts{DataDir: dataDir, ManagedEnterprise: tc.managed}
 			conn := &recordingConnector{stubConnector: stubConnector{name: "codex"}, teardownErr: revokeFailed}
 			other := &recordingConnector{stubConnector: stubConnector{name: "claudecode"}}
-			failed, _ := teardownRemovedConnectorsReport(newRecordingRegistry(conn, other), []string{"codex", "claudecode"}, []string{"claudecode"}, opts, "", context.Background())
+			failed, _, _ := teardownRemovedConnectorsWhy(newRecordingRegistry(conn, other), []string{"codex", "claudecode"}, []string{"claudecode"}, opts, "", context.Background())
 			if pending := len(failed) == 1 && failed[0] == "codex"; pending != !tc.managed {
 				t.Fatalf("removal pending = %t (%v), want %t", pending, failed, !tc.managed)
 			}
