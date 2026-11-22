@@ -131,10 +131,9 @@ type PushPlan struct {
 	HeldBack []string
 	Warnings []string
 
-	opts    PushPlanOptions
-	rec     *CopyRecord
-	stage   gitCmd
-	newTree string
+	opts  PushPlanOptions
+	rec   *CopyRecord
+	stage gitCmd
 }
 
 // Conflicts lists the paths both sides changed to different content.
