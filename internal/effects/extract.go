@@ -130,7 +130,6 @@ type walker struct {
 	aliases    map[string]string
 	links      map[string]string // link key -> target physical path (review R7)
 	writeByKey map[string]int    // path key -> 1-based effect index that wrote it
-	pathShadow bool
 
 	env      map[string]string
 	curCWD   string
@@ -159,6 +158,13 @@ type walker struct {
 	// cd/pushd is then dynamic, because CDPATH can resolve it elsewhere (review 6
 	// B).
 	cdpathMaybeSet bool
+	// allExportMaybe is sticky once `set -a` / `set -o allexport` (or a dynamic
+	// set argument) is seen: every later plain assignment may be exported, so
+	// it reaches the environment of later programs (GAP-0217).
+	allExportMaybe bool
+	// pathMaybeSet is sticky once PATH is assigned in the shell (bare, export,
+	// declare): a later bare program name may run another binary (GAP-0217).
+	pathMaybeSet bool
 	// cmdHome carries a prefix HOME= assignment to the cd builtin of the current
 	// command (POSIX only); cmdHomeSet is reset per command (review 6 C).
 	cmdHome    string
@@ -1129,6 +1135,11 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 		if a.Name == "CDPATH" {
 			w.cdpathMaybeSet = true
 		}
+		// The shell looks programs up in its own PATH, exported or not: any
+		// assignment can move a later bare program name (GAP-0217).
+		if a.Name == "PATH" && !prefix {
+			w.pathMaybeSet = true
+		}
 		if prefix {
 			// A prefix HOME= applies to the cd builtin of this command (POSIX): a
 			// bare cd then follows it (review 6 C, W5/W6). The assignment is also
@@ -1140,7 +1151,7 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 			w.spec.set(a.Name, rv.Value, rv.Static)
 			continue
 		}
-		if a.Exported {
+		if a.Exported || (w.allExportMaybe && !a.Unexport) {
 			w.ownVars()
 			w.exported[a.Name] = true
 		}
@@ -1268,9 +1279,6 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 
 	// 4. Shadowing.
 	shadowed := w.funcs[lprog] || w.aliases[program] != ""
-	if w.pathShadow && !strings.Contains(prog.Value, "/") {
-		shadowed = true
-	}
 	if program == "alias" {
 		for _, wd := range inner[1:] {
 			if wd.Static {
@@ -1323,7 +1331,21 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 	}
 	prevPrim := w.lastPrim
 	cmdStart := len(w.res.Effects) // first effect index (0-based) of this command
-	unaccounted := wrapperUA || declUA || bsdReject
+	// 4c. Environment and startup-file inputs (GAP-0217): a name the call puts
+	// in the program's environment that the allow list does not account for,
+	// or a shell that sources startup files. A program's own effects are then
+	// unaccounted; a shell or code runner keeps the effects of the code it
+	// runs and gets one unaccounted exec for the input.
+	envUA, envShell := false, false
+	shellCode := known && entry.ShellCode
+	if dialect == DialectPOSIX && (w.unreviewedEnvInput(program, strings.Contains(prog.Value, "/"), shellCode, spec) != "" || shellStartupFlag(program, inner[1:])) {
+		if shellCode {
+			envShell = true
+		} else {
+			envUA = true
+		}
+	}
+	unaccounted := wrapperUA || declUA || bsdReject || envUA
 	nestedStart := -1
 	// Single choke point (review N4-1 / R5-1): any step that leaves an argv
 	// token unaccounted (wrapper, launcher, tar, operands) sets unaccounted;
@@ -1343,6 +1365,9 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 	}()
 	baseIdx := w.emit(base)
 	w.lastPrim = baseIdx
+	if envShell {
+		w.envInputEffect(origin, cond)
+	}
 
 	// 6. Interpreter reading piped / heredoc stdin as code (review PX-5).
 	w.interpreterStdin(c, entry, known, inner[1:], dialect, depth, cond, origin, prevPrim)
@@ -2100,6 +2125,7 @@ func (w *walker) classifyOperands(words []Word, p Program, dialect Dialect) ([]o
 	i := 0
 	unknownFlag := false
 	inPlace := false
+	inPlaceSuffix := "" // sed -i[SUFFIX] / --in-place=SUFFIX: the backup name
 	del := false
 	findName, findOpaque := "", false
 	hasExpr := false
@@ -2146,7 +2172,7 @@ func (w *walker) classifyOperands(words []Word, p Program, dialect Dialect) ([]o
 			// POSIX combined short flags (-xzf, -sSLo): the split marks the
 			// token unaccounted if any component is unlisted.
 			if dialect == DialectPOSIX && len(name) > 2 && name[0] == '-' && name[1] != '-' {
-				_, uf := w.splitShortFlags(name, words, &i, p, &out, &inPlace, &destDir)
+				_, uf := w.splitShortFlags(name, words, &i, p, &out, &inPlace, &inPlaceSuffix, &destDir)
 				if uf {
 					unknownFlag = true
 				}
@@ -2201,6 +2227,28 @@ func (w *walker) classifyOperands(words []Word, p Program, dialect Dialect) ([]o
 		if hasInline && textBad(fl.Text, Word{Value: inlineVal, Static: true}) {
 			unknownFlag = true // a script / format / config the closed grammar does not accept
 		}
+		if hasInline && dialect == DialectPOSIX && !fl.Value {
+			// A switch with a value attached (--in-place=SUFFIX, --color=WHEN):
+			// only an Optional switch takes one. The sed backup suffix is read by
+			// the row; any other non-empty value is not modeled, and a plain
+			// switch given a value makes getopt reject the call (GAP-0216).
+			// A short option has no '=' separator: -i=bak is -i with suffix "=bak".
+			val := inlineVal
+			if !strings.HasPrefix(fname, "--") {
+				val = name[len(fname):]
+			}
+			switch {
+			case fl.Optional && val == "":
+			case fl.Optional && inPlace && p.InPlace != "" && (fname == p.InPlace || fname == "--in-place"):
+				inPlaceSuffix = val
+			case fl.Optional && fl.Role == RoleNone && fl.Text == TextNone && p.InPlace == "":
+				// grep --color=WHEN: the value only selects output colouring
+			default:
+				unknownFlag = true
+			}
+			i++
+			continue
+		}
 		if hasInline {
 			if routeSourcesDestFlag(p, fl, Word{Value: inlineVal, Static: true}, &srcFlags, &destFlag) {
 				if fl.Role == RoleWrite {
@@ -2211,12 +2259,22 @@ func (w *walker) classifyOperands(words []Word, p Program, dialect Dialect) ([]o
 			}
 			out = append(out, operandValue(fl, Word{Value: inlineVal, Static: true}, p))
 			i++
+			if fl.Extra > 0 {
+				i, unknownFlag = skipExtraValues(words, i, fl.Extra, unknownFlag)
+			}
 			continue
 		}
 		if fl.Value {
 			if i+1 < len(words) {
 				if textBad(fl.Text, words[i+1]) {
 					unknownFlag = true
+				}
+				if fl.Extra > 0 {
+					// find -fprintf FILE FORMAT: the first value has the flag's role,
+					// the next Extra words are inert data (GAP-0216).
+					out = append(out, operandValue(fl, words[i+1], p))
+					i, unknownFlag = skipExtraValues(words, i+2, fl.Extra, unknownFlag)
+					continue
 				}
 				if routeSourcesDestFlag(p, fl, words[i+1], &srcFlags, &destFlag) {
 					if fl.Role == RoleWrite {
@@ -2261,10 +2319,25 @@ func (w *walker) classifyOperands(words []Word, p Program, dialect Dialect) ([]o
 			}
 		}
 	}
-	out = append(out, w.positionalOperands(positionals, p, posCtx{unknownFlag: unknownFlag, inPlace: inPlace, del: del, findName: findName, findOpaque: findOpaque, hasExpr: hasExpr, destDir: destDir,
+	// A backup suffix with '*' (the file's base name) or '/' (a backup folder)
+	// names the backup by a rule the table does not model (GAP-0216).
+	if inPlace && strings.ContainsAny(inPlaceSuffix, "*/") {
+		unknownFlag, inPlaceSuffix = true, ""
+	}
+	out = append(out, w.positionalOperands(positionals, p, posCtx{unknownFlag: unknownFlag, inPlace: inPlace, inPlaceSuffix: inPlaceSuffix, del: del, findName: findName, findOpaque: findOpaque, hasExpr: hasExpr, destDir: destDir,
 		appendMode: p.AppendFlag != "" && hasAppendFlag(words, p.AppendFlag),
 		upload:     p.Pos == PosBits && hasWordFold(words, "/upload"), program: w.curProgram, words: words})...)
 	return out, inner, unknownFlag
+}
+
+// skipExtraValues steps over the n inert extra value words of a multi-value
+// flag starting at words[i]. Fewer than n words left: the program rejects the
+// call, so it is not accounted.
+func skipExtraValues(words []Word, i, n int, unknownFlag bool) (int, bool) {
+	if i+n > len(words) {
+		return len(words), true
+	}
+	return i + n, unknownFlag
 }
 
 // execPlaceholders marks the {} and stdin (-) operands of a find/xargs inner
@@ -2317,7 +2390,7 @@ func splitInlineFlagValue(name string, dialect Dialect) (flag, value string, has
 // splitShortFlags expands a combined POSIX short-flag token (-xzf, -sSLo). A
 // known value-taking short flag binds the rest of the token or the next arg;
 // unknown single chars are harmless mode flags (no strict taint).
-func (w *walker) splitShortFlags(name string, words []Word, i *int, p Program, out *[]operand, inPlace *bool, destDir *string) (consumed bool, unknownFlag bool) {
+func (w *walker) splitShortFlags(name string, words []Word, i *int, p Program, out *[]operand, inPlace *bool, inPlaceSuffix *string, destDir *string) (consumed bool, unknownFlag bool) {
 	body := name[1:]
 	for j := 0; j < len(body); j++ {
 		fn := "-" + string(body[j])
@@ -2328,6 +2401,19 @@ func (w *walker) splitShortFlags(name string, words []Word, i *int, p Program, o
 		if !ok {
 			unknownFlag = true // an unlisted short flag -> not fully modeled (round 3)
 			continue
+		}
+		if fl.Optional {
+			// -iSUFFIX: the rest of the token is the optional value, never the
+			// next word and never more flags (sed -ie is -i with suffix "e").
+			if rest := body[j+1:]; rest != "" {
+				if fn == p.InPlace {
+					*inPlaceSuffix = rest
+				} else {
+					unknownFlag = true
+				}
+			}
+			*i++
+			return true, unknownFlag
 		}
 		if fl.Role == RoleExecProgram {
 			rest := collectExecArgv(words[*i+1:])
@@ -2416,15 +2502,18 @@ func operandValue(fl Flag, v Word, p Program) operand {
 type posCtx struct {
 	unknownFlag bool
 	inPlace     bool
-	del         bool
-	findName    string
-	findOpaque  bool
-	hasExpr     bool
-	destDir     string
-	appendMode  bool // tee -a: the file operands are appended to, not rewritten
-	words       []Word
-	upload      bool // bitsadmin /upload: the local file is read and sent
-	program     string
+	// inPlaceSuffix is the sed backup suffix: each file is also written at
+	// FILE+suffix (GAP-0216). Empty: no backup.
+	inPlaceSuffix string
+	del           bool
+	findName      string
+	findOpaque    bool
+	hasExpr       bool
+	destDir       string
+	appendMode    bool // tee -a: the file operands are appended to, not rewritten
+	words         []Word
+	upload        bool // bitsadmin /upload: the local file is read and sent
+	program       string
 }
 
 func (w *walker) positionalOperands(ps []Word, p Program, ctx posCtx) []operand {
@@ -2448,6 +2537,13 @@ func (w *walker) positionalOperands(ps []Word, p Program, ctx posCtx) []operand 
 		}
 		for _, wd := range ps {
 			out = append(out, mk(wd, role))
+			if ctx.inPlace && ctx.inPlaceSuffix != "" {
+				bk := wd
+				if bk.Static {
+					bk.Value += ctx.inPlaceSuffix
+				}
+				out = append(out, mk(bk, RoleWrite)) // the backup copy
+			}
 			if ctx.del { // find -delete: the roots and the files below them are deleted
 				d := mk(wd, RoleDelete)
 				d.subtree = true
@@ -3421,6 +3517,8 @@ func (w *walker) unsetVar(name string) {
 		if w.curDialect == DialectPOSIX {
 			w.curHome = ""
 		}
+	case "PATH":
+		w.pathMaybeSet = true
 	case "CDPATH":
 		w.cdpathMaybeSet = true
 	case "PWD":
@@ -3441,6 +3539,7 @@ func (w *walker) unbindReader(program string, inner []Word) (opaque bool) {
 			opaque = true
 			w.unsetVar("HOME")
 			w.unsetVar("CDPATH")
+			w.unsetVar("PATH") // a computed name may be PATH (GAP-0217)
 			return
 		}
 		w.unsetVar(wd.Value)
@@ -3486,6 +3585,7 @@ func (w *walker) unbindReader(program string, inner []Word) (opaque bool) {
 			} else if !wd.Static {
 				w.unsetVar("HOME")
 				w.unsetVar("CDPATH")
+				w.unsetVar("PATH") // a computed name may be PATH (GAP-0217)
 			}
 		}
 	case "printf":
@@ -4580,6 +4680,8 @@ func isCDName(p string) bool {
 // an alias for cd redirects it.
 func (w *walker) noteShellOptions(program string, args []Word) {
 	switch program {
+	case "set":
+		w.allExportMaybe = w.allExportMaybe || setAllExport(args)
 	case "enable":
 		for _, a := range args {
 			if !a.Static || a.Value == "cd" || a.Value == "pushd" || a.Value == "popd" || a.Value == "-n" {
@@ -4632,6 +4734,38 @@ func (w *walker) noteShellOptions(program string, args []Word) {
 	}
 }
 
+// setAllExport reports set arguments that may turn on allexport: -a in an
+// option cluster, -o allexport, or a dynamic word (GAP-0217).
+func setAllExport(args []Word) bool {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if !a.Static {
+			return true
+		}
+		v := a.Value
+		if v == "--" || v == "-" || len(v) < 2 || (v[0] != '-' && v[0] != '+') {
+			return false
+		}
+		if v[0] == '+' {
+			if strings.ContainsRune(v[1:], 'o') {
+				i++ // +o NAME turns NAME off
+			}
+			continue
+		}
+		if strings.ContainsRune(v[1:], 'a') {
+			return true
+		}
+		if strings.ContainsRune(v[1:], 'o') {
+			// -o NAME, also in a cluster (-eo NAME): NAME is the next word.
+			i++
+			if i < len(args) && (!args[i].Static || args[i].Value == "allexport") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // isDeclBuiltin reports a builtin that assigns variables by name when it is
 // reached as a program word (after command / builtin / exec): the frontend
 // lowers the direct form to assignments, but `command export HOME=x` arrives as
@@ -4681,6 +4815,7 @@ func (w *walker) declWords(program string, args []Word) (ok, opaque bool) {
 			ok = false
 			w.unsetVar("HOME")
 			w.unsetVar("CDPATH")
+			w.unsetVar("PATH") // a computed name may be PATH (GAP-0217)
 			continue
 		}
 		name, val, hasVal := a.Value, "", false
@@ -4692,6 +4827,7 @@ func (w *walker) declWords(program string, args []Word) (ok, opaque bool) {
 			ok, opaque = false, true
 			w.unsetVar("HOME")
 			w.unsetVar("CDPATH")
+			w.unsetVar("PATH") // a computed name may be PATH (GAP-0217)
 			continue
 		}
 		w.ownVars()
@@ -4703,6 +4839,9 @@ func (w *walker) declWords(program string, args []Word) (ok, opaque bool) {
 		}
 		if name == "CDPATH" {
 			w.cdpathMaybeSet = true
+		}
+		if name == "PATH" {
+			w.pathMaybeSet = true
 		}
 		if nameref {
 			w.noteNameRef()
@@ -4749,6 +4888,7 @@ func (w *walker) noteNameRef() {
 		w.curHome = ""
 	}
 	w.cdpathMaybeSet = true
+	w.pathMaybeSet = true // a nameref may alias PATH (GAP-0217)
 }
 
 // persistentPrefixBuiltins are the builtins whose prefix assignment is not
@@ -4786,6 +4926,8 @@ func (w *walker) makeUncertain(name string) {
 		if w.curDialect == DialectPOSIX {
 			w.curHome = ""
 		}
+	case "PATH":
+		w.pathMaybeSet = true
 	case "CDPATH":
 		w.cdpathMaybeSet = true
 	case "PWD":

@@ -31,7 +31,8 @@ func TestCascadeLaneHotReloadEveryLane(t *testing.T) {
 		"judge_unmodeled_alert":     {"on", "on", []string{"\"\"", "garbage", "1", "true", "null", "yes", "Shadow", "ON"}, "off", "off"},
 		"judge_tool_result_context": {"on", "on", []string{"\"\"", "garbage", "1", "true", "null", "yes", "Shadow", "ON"}, "off", "off"},
 
-		"effects":     {"off", "off", []string{"on", "ON", "\"\"", "garbage", "1", "true", "null", "Off", "\" Shadow \""}, "shadow", "shadow"},
+		// The effects lane ships on (DET111): a reload turns it off.
+		"effects":     {"on", "on", []string{"ON", "\"\"", "garbage", "1", "true", "null", "Off", "\" Shadow \""}, "off", "off"},
 		"secret_flow": {"off", "off", []string{"on", "ON", "\"\"", "garbage", "1", "true", "null", "Off", "Shadow"}, "shadow", "shadow"},
 		"nonshell":    {"shadow", "shadow", []string{"\"\"", "garbage", "1", "true", "null", "yes", "Shadow", "ON"}, "on", "on"},
 		// The opt-in alignment check: off to alert by a reload, and none of
