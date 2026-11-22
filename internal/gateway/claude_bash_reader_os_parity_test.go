@@ -131,7 +131,8 @@ func TestClaudeBashDirectoryStackCopyMatchesAcrossOS(t *testing.T) {
 		{name: "pushd rsync through the link", command: `pushd src && rsync -a ~1/a.txt ~1/alias`, block: true},
 		{name: "rsync out of .ssh by the stack", command: `pushd ~/.ssh && pushd ~/project && rsync -a ~1/ k/`, block: true},
 		{name: "cp out of .ssh by the stack", command: `pushd ~/.ssh && pushd ~/project && cp -r ~1 k`, block: true},
-		{name: "rsync after a cd that may fail", command: `cd /nonexistent-zz && true; rsync -a ~-/ x/`, block: true},
+		// The failed cd leaves an unverified old-directory alias, not a protected-path fact.
+		{name: "rsync after a cd that may fail", command: `cd /nonexistent-zz && true; rsync -a ~-/ x/`, block: false},
 	})
 }
 

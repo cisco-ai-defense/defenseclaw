@@ -4739,6 +4739,9 @@ func commandLinksRead(command, cwd, home string, facts map[string]string, record
 		}
 		return links, false
 	}
+	if normalized, ok := resolveKnownShellLinkTargets(file, command, cwd, home); ok && normalized != command {
+		return commandLinksRead(normalized, cwd, home, facts, record, nested, readDisk)
+	}
 	if opaqueLinkText(file, maskCmdMklinkCalls(file, command, home), home) || newItemLinkText(file, command, home) {
 		// A PowerShell New-Item link and Move-Item with static operands are
 		// read as the ln and mv they are (rel-1-0-10:GAP-0749); every other

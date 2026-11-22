@@ -28,9 +28,11 @@ import (
 //   - assigned: a cp destination spelled with a name a top-level assignment
 //     fixed (at/claude-code/e8246b44e638b28f/169).
 //
-// The controls keep their reading: a name the body or a later statement may
-// rebind, a program word read from a name before the copy, a pattern that
-// may start with a dash, a relative dynamic target, a body that writes in the background.
+// The relative dynamic target and background-write controls still block. On
+// the Claude Code route, the three controls that surface the finding only
+// through an unresolved /tmp link hold are MAYBE under GAP-1792; the
+// resolved protected-link cases remain covered by the dedicated symlink and
+// hard-link tests.
 func TestGAP0839CopyAndArchiveWordsClaudeCode(t *testing.T) {
 	gap0839EveryCell(t, "claudecode")
 }
@@ -76,6 +78,14 @@ func gap0839EveryCell(t *testing.T, connectorName string) {
 		{"control: the nested body writes in the background", "sudo bash -c 'cd ~/evidence/a04 && { sleep 2; cat x.raw >> 04-n.raw; } &'; " +
 			"scp -q box:/tmp/g0839a.tgz /tmp/g0839a.tgz; tar -C ~/evidence/a04 -xzf /tmp/g0839a.tgz", false},
 	}
+	// These controls can surface the SSH finding only through an unresolved
+	// link hold under /tmp. Under GAP-1792 that hold is MAYBE in every tier;
+	// it does not establish an authorized_keys write.
+	maybeControls := map[string]bool{
+		"control: a statement may rebind the assigned name":        true,
+		"control: a program word read from a name before the copy": true,
+		"control: a pattern that may start with a dash":            true,
+	}
 	for _, row := range rows {
 		for _, cell := range []string{"default", "permissive", "strict", "managed"} {
 			posture, managed := cell, false
@@ -84,6 +94,12 @@ func gap0839EveryCell(t *testing.T, connectorName string) {
 			}
 			t.Run(fmt.Sprintf("%s %s %s", connectorName, cell, row.name), func(t *testing.T) {
 				action, rules := shellProtectedFileRoute(t, home, home, connectorName, posture, managed, row.command)
+				if maybeControls[row.name] {
+					if action == "block" {
+						t.Fatalf("action = block (rules %v), want MAYBE/nonblocking", rules)
+					}
+					return
+				}
 				if row.fixed && notBlocked[cell] {
 					if action == "block" {
 						t.Fatalf("action = block (rules %v), want no block", rules)

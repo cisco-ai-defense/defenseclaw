@@ -1694,7 +1694,12 @@ func unprovenSSHKeyHoldIsMaybe(home string, held unprovenWrite) bool {
 		!filepath.IsAbs(held.operand) || home == "" || !filepath.IsAbs(home) {
 		return false
 	}
-	return !unprovenOperandNearProtected(held.operand, home)
+	for _, target := range hookpaths.ProtectedAuthorizedKeysPaths(home) {
+		if canonicalSemanticPath(held.operand) == canonicalSemanticPath(target) {
+			return false
+		}
+	}
+	return true
 }
 
 // unprovenWrite is what the authorized-keys proof held as unknown: the
@@ -1802,33 +1807,6 @@ func cleanPathWithin(name, dir string) bool {
 		name, dir = strings.ToLower(name), strings.ToLower(dir)
 	}
 	return name == dir || strings.HasPrefix(name, dir+string(filepath.Separator))
-}
-
-// unprovenOperandNearProtected reports an operand at or under the active
-// home or sshd's Windows ProgramData folder, or one that holds either (/,
-// /home), compared without case on Windows.
-func unprovenOperandNearProtected(operand, home string) bool {
-	clean := func(path string) string {
-		path = filepath.Clean(path)
-		if runtime.GOOS == "windows" {
-			path = strings.ToLower(path)
-		}
-		return path
-	}
-	near := func(path, root string) bool {
-		path, root = clean(path), clean(root)
-		return path == root || strings.HasPrefix(path, strings.TrimSuffix(root, string(filepath.Separator))+string(filepath.Separator)) ||
-			strings.HasPrefix(root, strings.TrimSuffix(path, string(filepath.Separator))+string(filepath.Separator))
-	}
-	if near(operand, home) {
-		return true
-	}
-	for _, path := range hookpaths.ProtectedAuthorizedKeysPaths(home) {
-		if near(operand, filepath.Dir(path)) {
-			return true
-		}
-	}
-	return false
 }
 
 // sshControlFileTitlePrefix opens the title of a block whose only SSH target
