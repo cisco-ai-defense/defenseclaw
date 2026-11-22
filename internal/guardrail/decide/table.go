@@ -49,6 +49,9 @@ type Row struct {
 	Targets   []TargetClass
 	Certainty []Certainty
 	Reach     []string
+	// Sets: the row matches only a proof naming one of these file classes
+	// (Proof.Set); empty matches any proof, with or without a set.
+	Sets []string
 	// Content: the row applies on the content surface too.
 	Content bool
 	// SecureClient: the row applies under the Secure Client integration.
@@ -94,7 +97,8 @@ func (r *Row) matches(p Proof) bool {
 	return (len(r.Kinds) == 0 || slices.Contains(r.Kinds, p.Kind)) &&
 		(len(r.Targets) == 0 || slices.Contains(r.Targets, p.Target)) &&
 		(len(r.Certainty) == 0 || slices.Contains(r.Certainty, p.Certainty)) &&
-		(len(r.Reach) == 0 || slices.Contains(r.Reach, p.Reach))
+		(len(r.Reach) == 0 || slices.Contains(r.Reach, p.Reach)) &&
+		(len(r.Sets) == 0 || slices.Contains(r.Sets, p.Set))
 }
 
 // cell is the row's cell for d, reading the tier only when the row's cells
@@ -123,6 +127,16 @@ const (
 	RowTruncated       = "truncated"
 	RowStateWrite      = "state-write"
 	RowProtectedFile   = "shell-protected-file"
+	// The known credential reads (GAP-1244, GAP-0888, GAP-0898/0899): a
+	// read proven on a credential file class takes the cell the 1.0.10
+	// rule naming that class gives its plain spelling (cat <the file>),
+	// characterized at a64bfdb931 in the five tiers, so a spelling only the
+	// effects reader resolves gets the plain spelling's verdict.
+	RowReadSSHPrivateKey          = "read-ssh-private-key"
+	RowReadCredential             = "read-credential"
+	RowReadOtherHomeSSHPrivateKey = "read-other-home-ssh-private-key"
+	RowReadOtherHomeGitCredential = "read-other-home-git-credential"
+	RowReadOtherHomeCredential    = "read-other-home-credential"
 	// RowTieredStrict grades a conclusion the 1.0.10 readers enforced in the
 	// strict tier only (an alert in default and permissive, per-user and
 	// managed alike): an inline handoff of unknown state, file tool targets
@@ -139,6 +153,16 @@ const (
 )
 
 var mutatingKinds = []ProofKind{KindWrite, KindAppend, KindDelete, KindLink, KindPerm}
+
+// cloudCredentialSets are the credential classes 1.0.10 grades alike in
+// one's own and another account's home: an alert MEDIUM, nothing in
+// permissive (GAP-0888).
+var cloudCredentialSets = []string{SetAWSCredentials, SetNpmrc, SetPypirc, SetKubeConfig, SetDockerConfig}
+
+// alertMedium is the GAP-0888 cell: the read maps as MEDIUM and is an
+// alert at most (an alert in default, strict and managed; nothing in
+// permissive, which alerts from HIGH).
+var alertMedium = Cell{Levels: true, Severity: SevMedium, Ceiling: CeilingAlert}
 
 func uniform(c Cell) [tierCount]Cell { return [tierCount]Cell{c, c, c} }
 
@@ -222,6 +246,59 @@ var builtin = Table{Rows: []Row{
 		Cells: [deploymentCount][tierCount]Cell{
 			uniform(Cell{Floor: Alert, Levels: true}), uniform(Cell{Floor: Alert, Levels: true}),
 		},
+	},
+	{
+		// One's own SSH private key: CRITICAL, a block in every pack
+		// (PATH-SSH-KEY on cat ~/.ssh/id_rsa).
+		ID: RowReadSSHPrivateKey, Kinds: []ProofKind{KindRead}, Targets: []TargetClass{TargetCredential},
+		Certainty: []Certainty{CertKnown}, Sets: []string{SetSSHPrivateKey}, SecureClient: true,
+		Source: "rel-1-0-10:PATH-SSH-KEY",
+		Cells: [deploymentCount][tierCount]Cell{
+			uniform(Cell{Levels: true, Severity: SevCritical}), uniform(Cell{Levels: true, Severity: SevCritical}),
+		},
+	},
+	{
+		// One's own cloud, git and package credentials: the GAP-0888 cell.
+		ID: RowReadCredential, Kinds: []ProofKind{KindRead}, Targets: []TargetClass{TargetCredential},
+		Certainty: []Certainty{CertKnown}, Sets: append([]string{SetGitCredentials}, cloudCredentialSets...), SecureClient: true,
+		Source: "rel-1-0-10:GAP-0888",
+		Cells:  [deploymentCount][tierCount]Cell{uniform(alertMedium), uniform(alertMedium)},
+	},
+	{
+		// Another account's SSH private key: an alert MEDIUM in default and
+		// managed default, nothing in permissive, a CRITICAL block in strict
+		// (PATH-SSH-KEY on cat /home/<other>/.ssh/id_rsa).
+		ID: RowReadOtherHomeSSHPrivateKey, Kinds: []ProofKind{KindRead}, Targets: []TargetClass{TargetOtherHomeCredential},
+		Certainty: []Certainty{CertKnown}, Sets: []string{SetSSHPrivateKey}, SecureClient: true,
+		Source: "rel-1-0-10:PATH-SSH-KEY other home (GAP-0837)",
+		Cells: [deploymentCount][tierCount]Cell{
+			{TierDefault: alertMedium, TierPermissive: alertMedium, TierStrict: {Levels: true, Severity: SevCritical}},
+			{TierDefault: alertMedium, TierPermissive: alertMedium, TierStrict: {Levels: true, Severity: SevCritical}},
+		},
+	},
+	{
+		// Another account's .git-credentials or .netrc: CRITICAL, an alert
+		// per-user (default and permissive), a block in strict and in every
+		// managed install (PATH-GIT-CREDS, GAP-0835).
+		ID: RowReadOtherHomeGitCredential, Kinds: []ProofKind{KindRead}, Targets: []TargetClass{TargetOtherHomeCredential},
+		Certainty: []Certainty{CertKnown}, Sets: []string{SetGitCredentials}, SecureClient: true,
+		Source: "rel-1-0-10:PATH-GIT-CREDS other home (GAP-0835)",
+		Cells: [deploymentCount][tierCount]Cell{
+			{
+				TierDefault:    {Levels: true, Severity: SevCritical, Ceiling: CeilingAlert},
+				TierPermissive: {Levels: true, Severity: SevCritical, Ceiling: CeilingAlert},
+				TierStrict:     {Levels: true, Severity: SevCritical},
+			},
+			uniform(Cell{Levels: true, Severity: SevCritical}),
+		},
+	},
+	{
+		// Another account's cloud and package credentials: as one's own
+		// (GAP-0888 cell).
+		ID: RowReadOtherHomeCredential, Kinds: []ProofKind{KindRead}, Targets: []TargetClass{TargetOtherHomeCredential},
+		Certainty: []Certainty{CertKnown}, Sets: cloudCredentialSets, SecureClient: true,
+		Source: "rel-1-0-10:PATH-AWS-CREDS other home (GAP-0837)",
+		Cells:  [deploymentCount][tierCount]Cell{uniform(alertMedium), uniform(alertMedium)},
 	},
 	{
 		ID: RowTieredStrict, Gate: true, Content: true, SecureClient: true,

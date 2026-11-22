@@ -54,6 +54,53 @@ rows:
       floor: alert
     managed:
       floor: alert
+  - id: read-ssh-private-key
+    source: rel-1-0-10:PATH-SSH-KEY
+    per_user:
+      floor: allow
+      severity: CRITICAL
+    managed:
+      floor: allow
+      severity: CRITICAL
+  - id: read-credential
+    source: rel-1-0-10:GAP-0888
+    per_user:
+      floor: allow
+      severity: MEDIUM
+      ceiling: alert
+    managed:
+      floor: allow
+      severity: MEDIUM
+      ceiling: alert
+  - id: read-other-home-ssh-private-key
+    source: rel-1-0-10:PATH-SSH-KEY other home (GAP-0837)
+    per_user:
+      floor: allow
+      severity: MEDIUM
+      ceiling: alert
+    managed:
+      floor: allow
+      severity: MEDIUM
+      ceiling: alert
+  - id: read-other-home-git-credential
+    source: rel-1-0-10:PATH-GIT-CREDS other home (GAP-0835)
+    per_user:
+      floor: allow
+      severity: CRITICAL
+      ceiling: alert
+    managed:
+      floor: allow
+      severity: CRITICAL
+  - id: read-other-home-credential
+    source: rel-1-0-10:PATH-AWS-CREDS other home (GAP-0837)
+    per_user:
+      floor: allow
+      severity: MEDIUM
+      ceiling: alert
+    managed:
+      floor: allow
+      severity: MEDIUM
+      ceiling: alert
   - id: tiered-strict
     source: rel-1-0-10:request.StrictPolicy readers (GAP-0810, GAP-1069)
     per_user:

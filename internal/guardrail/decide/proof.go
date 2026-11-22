@@ -200,6 +200,11 @@ type Proof struct {
 	// Source is the reader, twin or rule id that made the proof. It is the
 	// key of the effects shadow report; Decide does not read it.
 	Source string
+	// Set is the protected file class a known read names (the Set*
+	// constants, CredentialSet). A row with Sets matches only a proof that
+	// names one of them, so a read takes the cell of the 1.0.10 rule that
+	// names the same file class whatever the spelling (GAP-1244).
+	Set string
 }
 
 // IsZero reports a finding with no proof: no kind and no uncertainty mark
@@ -215,6 +220,11 @@ func (p Proof) String() string {
 	b.WriteString(p.Target.String())
 	b.WriteByte('/')
 	b.WriteString(p.Certainty.String())
+	if p.Set != "" {
+		b.WriteByte('{')
+		b.WriteString(p.Set)
+		b.WriteByte('}')
+	}
 	switch {
 	case p.Reach != "":
 		b.WriteByte('(')
@@ -257,11 +267,66 @@ const (
 	RuleEvaluationLimit     = "ACTION-COMPOUND-LIMIT"
 )
 
-// RuleFor is the rule id a proof's target names for a mutating proof
-// (write, append, delete, link, perm) known on the target, or "" when the
-// target class names no single rule (the reader's own rule id stands).
+// Credential file classes (Proof.Set) of a known read: one per 1.0.10 rule
+// that names the file, so the read is named and graded by that rule's row
+// whatever the spelling (DET111 ruling 2026-11-22T04:12Z, GAP-1244).
+const (
+	SetSSHPrivateKey  = "ssh_private_key"
+	SetAWSCredentials = "aws_credentials"
+	// SetGitCredentials is .git-credentials and .netrc: 1.0.10 names both
+	// PATH-GIT-CREDS and grades them alike.
+	SetGitCredentials = "git_credentials"
+	SetNpmrc          = "npmrc"
+	SetPypirc         = "pypirc"
+	SetKubeConfig     = "kube_config"
+	SetDockerConfig   = "docker_config"
+)
+
+// setRules is the rule a credential file class names.
+var setRules = map[string]string{
+	SetSSHPrivateKey:  "PATH-SSH-KEY",
+	SetAWSCredentials: "PATH-AWS-CREDS",
+	SetGitCredentials: "PATH-GIT-CREDS",
+	SetNpmrc:          "PATH-NPMRC",
+	SetPypirc:         "PATH-PYPIRC",
+	SetKubeConfig:     "PATH-KUBE",
+	SetDockerConfig:   "PATH-DOCKER",
+}
+
+// credentialTails are the home-relative files of each class.
+var credentialTails = map[string]string{
+	".ssh/id_rsa": SetSSHPrivateKey, ".ssh/id_ed25519": SetSSHPrivateKey,
+	".ssh/id_ecdsa": SetSSHPrivateKey, ".ssh/id_dsa": SetSSHPrivateKey,
+	".aws/credentials": SetAWSCredentials,
+	".git-credentials": SetGitCredentials, ".netrc": SetGitCredentials,
+	".npmrc": SetNpmrc, ".pypirc": SetPypirc,
+	".kube/config": SetKubeConfig, ".docker/config.json": SetDockerConfig,
+}
+
+// CredentialSet is the credential file class of a protected credential
+// member, given as its path relative to the home that holds it (".ssh/id_rsa",
+// `.aws\credentials`), or "" for a member of no class. It reads no file: the
+// caller has already proven the member (the protected-set classifier); this
+// only names its row. Separators and letter case are folded (the classifier
+// decides whether the spelling is the file on the host).
+func CredentialSet(tail string) string {
+	t := strings.ToLower(strings.ReplaceAll(strings.Trim(tail, `/\`), `\`, "/"))
+	return credentialTails[t]
+}
+
+// RuleFor is the rule id a proof's target names: for a mutating proof
+// (write, append, delete, link, perm) known on the target, the target
+// class's rule; for a known read naming a credential file class, that
+// class's 1.0.10 rule. "" when the proof names no single rule (the
+// reader's own rule id stands).
 func RuleFor(p Proof) string {
 	if p.Certainty != CertKnown {
+		return ""
+	}
+	if p.Kind == KindRead {
+		if p.Target == TargetCredential || p.Target == TargetOtherHomeCredential {
+			return setRules[p.Set]
+		}
 		return ""
 	}
 	switch p.Kind {
