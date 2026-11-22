@@ -99,11 +99,18 @@ func TestWindowsStandaloneStatusNamesAnAccountPerUserInstall(t *testing.T) {
 	t.Cleanup(func() {
 		windowsEnterpriseManifestAccounts, windowsEnterpriseAccountDeleted, windowsEnterpriseAccountCreatedDataDir, windowsEnterpriseAccountOwnedDataDirLink, windowsEnterpriseAccountForeignDataDirLink, windowsEnterpriseAccountPerUserInstall = previousAccounts, previousDeleted, previousFolder, previousOwned, previousForeign, previousPerUser
 	})
-	perUser, plain := t.TempDir(), t.TempDir()
+	previousEnrolled := windowsEnterpriseEnrolledAccounts
+	t.Cleanup(func() { windowsEnterpriseEnrolledAccounts = previousEnrolled })
+	const enrolledSID = "S-1-5-21-1-2-3-1003"
+	windowsEnterpriseEnrolledAccounts = func() func(string) bool {
+		return func(sid string) bool { return sid == enrolledSID }
+	}
+	perUser, plain, enrolledHome := t.TempDir(), t.TempDir(), t.TempDir()
 	windowsEnterpriseManifestAccounts = func() ([]windowsEnterpriseManifestAccount, error) {
 		return []windowsEnterpriseManifestAccount{
 			{User: "alice", SID: "S-1-5-21-1-2-3-1001", Home: perUser, Rows: 1},
 			{User: "bob", SID: "S-1-5-21-1-2-3-1002", Home: plain, Rows: 1},
+			{User: "carol", SID: enrolledSID, Home: enrolledHome, Rows: 2},
 		}, nil
 	}
 	windowsEnterpriseAccountDeleted = func(string) bool { return false }
@@ -115,14 +122,21 @@ func TestWindowsStandaloneStatusNamesAnAccountPerUserInstall(t *testing.T) {
 		if home == perUser && sid == "S-1-5-21-1-2-3-1001" {
 			return "config.yaml"
 		}
+		if home == enrolledHome && sid == enrolledSID {
+			// Planted by the enrolled account in its own managed folder.
+			return "installer"
+		}
 		return ""
 	}
 	status := enterprisestatus.New("status", managed.ProfileStandalone, "windows", "1.0.11")
 	applyWindowsEnterpriseAccountFolders(status)
-	var found []string
+	var found, tamper []string
 	for _, warning := range status.Warnings {
 		if warning.Code == "enrollment_skipped_per_user_install" {
 			found = append(found, warning.Message)
+		}
+		if warning.Code == "per_user_install_tamper" {
+			tamper = append(tamper, warning.Message)
 		}
 		if warning.Code == "enrollment_pending_account_folder" {
 			t.Fatalf("a per-user install folder was reported as one the guardian takes over: %+v", warning)
@@ -132,6 +146,13 @@ func TestWindowsStandaloneStatusNamesAnAccountPerUserInstall(t *testing.T) {
 		!strings.Contains(found[0], filepath.Join(perUser, ".defenseclaw")) || !strings.Contains(found[0], "not protected") ||
 		strings.Contains(found[0], "bob") {
 		t.Fatalf("warnings = %+v, want one enrollment_skipped_per_user_install naming only alice", status.Warnings)
+	}
+	// GAP-1733 review: on an enrolled account the entry is tamper, and status
+	// never tells the administrator to remove a per-user install there.
+	if len(tamper) != 1 || !strings.Contains(tamper[0], "carol ("+enrolledSID+")") ||
+		!strings.Contains(tamper[0], filepath.Join(enrolledHome, ".defenseclaw")) || !strings.Contains(tamper[0], "installer") ||
+		!strings.Contains(tamper[0], "verify fails") || strings.Contains(tamper[0], "uninstall") {
+		t.Fatalf("warnings = %+v, want one per_user_install_tamper naming only carol", status.Warnings)
 	}
 	if len(status.Errors) != 0 {
 		t.Fatalf("errors = %+v, want none for one account's per-user install", status.Errors)

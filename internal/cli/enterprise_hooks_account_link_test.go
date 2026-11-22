@@ -223,15 +223,22 @@ func TestGAP1733PerUserInstallFolderExcusesOnlyItsOwnFailedRow(t *testing.T) {
 		return perUser && gotHome == home && gotSID == sid
 	}
 	target := enterprisehooks.ManifestTarget{UserHome: home, SID: sid, Connector: "claudecode", Deferred: true}
+	// The folder rule of one pass: a skip on an account never protected,
+	// tamper on an enrolled one
+	// (TestGAP1733PlantedPerUserEntryOnAnEnrolledAccountIsRepairedAndNotExcused).
+	perUserFolder := func(target enterprisehooks.ManifestTarget, home, sid string) bool {
+		skip, tamper := newEnterpriseHookPerUserInstallPass(t.TempDir()).classify(target, home, sid, false)
+		return skip || tamper
+	}
 	for _, dir := range []string{"", filepath.Join(home, ".defenseclaw")} {
 		target.DataDir = dir
-		if !enterpriseHookTargetPerUserInstall(target, home, sid) || enterpriseHookTargetForeignLink(target, home, sid) {
+		if !perUserFolder(target, home, sid) || enterpriseHookTargetForeignLink(target, home, sid) {
 			t.Fatalf("data_dir %q: the per-user install folder was not classified apart from a link", dir)
 		}
 	}
 	otherDir := target
 	otherDir.DataDir = filepath.Join(home, "other")
-	if enterpriseHookTargetPerUserInstall(otherDir, home, sid) || enterpriseHookTargetPerUserInstall(target, home, "S-1-5-21-1-2-3-1002") {
+	if perUserFolder(otherDir, home, sid) || perUserFolder(target, home, "S-1-5-21-1-2-3-1002") {
 		t.Fatal("another folder or account was classified as the per-user install")
 	}
 	row := enterpriseHookReconcileRow{User: "alice", UserHome: home, SID: sid,
@@ -266,7 +273,7 @@ func TestGAP1733PerUserInstallFolderExcusesOnlyItsOwnFailedRow(t *testing.T) {
 		t.Fatal("an ordinary failure on the per-user account was excused")
 	}
 	cfg.Enterprise.Profile = managed.ProfileSecureClient
-	if enterpriseHookTargetPerUserInstall(target, home, sid) || enterpriseHookAccountLinkRow(row) {
+	if perUserFolder(target, home, sid) || enterpriseHookAccountLinkRow(row) {
 		t.Fatal("Secure Client adopted the standalone per-user install rule")
 	}
 }

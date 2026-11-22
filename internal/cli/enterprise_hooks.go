@@ -880,12 +880,14 @@ const enterpriseHookAccountForeignLinkFailure = "enterprise hooks: the account's
 
 // enterpriseHookAccountPerUserInstallFailure is the guardian error of an
 // account whose canonical DefenseClaw folder holds a per-user DefenseClaw
-// install (GAP-1733). The guardian's signed-out repair re-stamped that folder
+// install and that DefenseClaw never protected (GAP-1733). The guardian's
+// signed-out repair re-stamped that folder
 // with the managed DACL and admitted the account as pending, so its next
 // sign-in enrolled it over the per-user install. The folder is never
 // repaired, adopted or enrolled; like enterpriseHookAccountForeignLinkFailure
 // it fails only that account's rows, and status, verify and the
-// administrator lifecycle name the account as not protected.
+// administrator lifecycle name the account as not protected. An account
+// DefenseClaw protects gets enterpriseHookPerUserInstallTamperError instead.
 const enterpriseHookAccountPerUserInstallFailure = "enterprise hooks: the account's DefenseClaw folder holds a per-user DefenseClaw install; it was left untouched and the account is not protected until that install is removed"
 
 // enterpriseHookStandaloneCanonicalDataDir reports, on a standalone
@@ -910,11 +912,6 @@ func enterpriseHookTargetAccountLink(target enterprisehooks.ManifestTarget, home
 func enterpriseHookTargetForeignLink(target enterprisehooks.ManifestTarget, home, sid string) bool {
 	return enterpriseHookStandaloneCanonicalDataDir(target, home, sid) &&
 		enterpriseHookForeignDataDirLink(home, sid)
-}
-
-func enterpriseHookTargetPerUserInstall(target enterprisehooks.ManifestTarget, home, sid string) bool {
-	return enterpriseHookStandaloneCanonicalDataDir(target, home, sid) &&
-		enterpriseHookPerUserInstallFolder(home, sid)
 }
 
 // enterpriseHookAccountLinkRow reports a failed standalone row that status,
@@ -947,10 +944,106 @@ func enterpriseHookAccountForeignLinkRow(row enterpriseHookReconcileRow) bool {
 // for a folder that holds a per-user DefenseClaw install (GAP-1733). It
 // rechecks the folder now, so the excuse ends once that install is removed.
 func enterpriseHookAccountPerUserInstallRow(row enterpriseHookReconcileRow) bool {
+	return enterpriseHookAccountPerUserInstallRowWith(row, enterpriseHookPerUserInstallFolder)
+}
+
+// enterpriseHookAccountPerUserInstallRowWith is
+// enterpriseHookAccountPerUserInstallRow with the folder check of one pass
+// (enterpriseHookPerUserInstallPass.folder).
+func enterpriseHookAccountPerUserInstallRowWith(row enterpriseHookReconcileRow, folder func(home, sid string) bool) bool {
 	return !row.OK && !row.Pending && row.Result == nil &&
 		row.Error == enterpriseHookAccountPerUserInstallFailure &&
 		strings.TrimSpace(row.UserHome) != "" && strings.TrimSpace(row.SID) != "" &&
-		enterpriseHookPerUserInstallFolder(row.UserHome, row.SID)
+		folder(row.UserHome, row.SID)
+}
+
+// enterpriseHookAccountPerUserInstallTamper starts the guardian and verify
+// error of an enrolled account whose managed DefenseClaw folder holds an
+// entry a per-user DefenseClaw install leaves (GAP-1733 review). The managed
+// folder grants its own account write access, so that account can create
+// such an entry. Were it read as a per-user install, the account would switch
+// off its own protection: its rows would fail before repair and watch, stay
+// enrolled, and be excused by verify. It is tamper instead: the guardian
+// repairs and watches the account as usual, and it keeps its protection. Its
+// rows fail with this error, which no rule excuses.
+const enterpriseHookAccountPerUserInstallTamper = "enterprise hooks: tamper: the managed DefenseClaw folder of this enrolled account holds an entry only a per-user DefenseClaw install leaves"
+
+// enterpriseHookPerUserInstallTamperError is the tamper error for home's
+// folder. A failure of the same pass is kept in the text, not wrapped, so no
+// rule that reads the cause (a signed-out account, a pending session) applies
+// to the row.
+func enterpriseHookPerUserInstallTamperError(home string, cause error) error {
+	message := fmt.Sprintf("%s (%s); DefenseClaw did not write it, keeps repairing and protecting the account, "+
+		"and verify fails until an administrator removes that entry", enterpriseHookAccountPerUserInstallTamper,
+		filepath.Join(filepath.Clean(home), ".defenseclaw"))
+	if cause != nil {
+		message += "; this pass also failed: " + cause.Error()
+	}
+	return errors.New(message)
+}
+
+// enterpriseHookPerUserInstallPass decides, for one guardian or verify pass,
+// what an entry a per-user DefenseClaw install leaves in an account's
+// canonical folder means. On an account DefenseClaw never protected it is a
+// per-user install. That is the first adoption, the same rule as the
+// enumerator's new-row skip: the account is skipped and its folder is left as
+// found. On an account DefenseClaw protects, it is tamper. Each folder is
+// probed once per pass and the protection ledger is read once (GAP-1733
+// review P4).
+type enterpriseHookPerUserInstallPass struct {
+	dataDir   string
+	folders   map[string]bool
+	loaded    bool
+	ledgerErr error
+	protected map[string]bool
+}
+
+func newEnterpriseHookPerUserInstallPass(dataDir string) *enterpriseHookPerUserInstallPass {
+	return &enterpriseHookPerUserInstallPass{dataDir: dataDir, folders: map[string]bool{}}
+}
+
+// folder is enterpriseHookPerUserInstallFolder, once per account and home in
+// the pass.
+func (p *enterpriseHookPerUserInstallPass) folder(home, sid string) bool {
+	key := strings.ToUpper(strings.TrimSpace(sid)) + "\x00" + strings.ToLower(filepath.Clean(strings.TrimSpace(home)))
+	found, known := p.folders[key]
+	if !known {
+		found = enterpriseHookPerUserInstallFolder(home, sid)
+		p.folders[key] = found
+	}
+	return found
+}
+
+// accountProtected reports whether the protection ledger holds a row of sid
+// for any connector. A ledger that cannot be read counts as protected, so
+// the folder is repaired and reported, never skipped.
+func (p *enterpriseHookPerUserInstallPass) accountProtected(sid string) bool {
+	if !p.loaded {
+		p.loaded = true
+		p.protected = map[string]bool{}
+		authorization, _, err := loadEnterpriseHookGuardianAuthorization(p.dataDir)
+		p.ledgerErr = err
+		for _, row := range authorization.ProtectedTargets {
+			if key := strings.ToUpper(strings.TrimSpace(row.SID)); key != "" {
+				p.protected[key] = true
+			}
+		}
+	}
+	return p.ledgerErr != nil || p.protected[strings.ToUpper(strings.TrimSpace(sid))]
+}
+
+// classify reports, for a target whose canonical folder holds a per-user
+// install entry, skip when its account was never protected and tamper when it
+// was. rowProtected is the target's own ledger lookup, which also matches a
+// row recorded before platform identities existed.
+func (p *enterpriseHookPerUserInstallPass) classify(target enterprisehooks.ManifestTarget, home, sid string, rowProtected bool) (skip, tamper bool) {
+	if !enterpriseHookStandaloneCanonicalDataDir(target, home, sid) || !p.folder(home, sid) {
+		return false, false
+	}
+	if rowProtected || p.accountProtected(sid) {
+		return false, true
+	}
+	return true, false
 }
 
 // enterpriseHookAwaitingSignInPrefix starts the guardian error of a target
@@ -2806,6 +2899,7 @@ func runEnterpriseHookVerifyAttemptRows(ctx context.Context, registrationOnly bo
 	unenrolled := map[string]struct{}{}
 	registry := newEnterpriseHooksConnectorRegistry()
 	claudeMachineContract := enterpriseHookMachinePolicyContract(manifest)
+	perUserInstalls := newEnterpriseHookPerUserInstallPass(cfg.DataDir)
 	for _, target := range manifest.Targets {
 		if !target.IsEnabled() {
 			continue
@@ -2848,8 +2942,13 @@ func runEnterpriseHookVerifyAttemptRows(ctx context.Context, registrationOnly bo
 		if targetErr == nil && enterpriseHookTargetForeignLink(target, resolved.home, resolved.sid) {
 			targetErr = errors.New(enterpriseHookAccountForeignLinkFailure)
 		}
-		if targetErr == nil && enterpriseHookTargetPerUserInstall(target, resolved.home, resolved.sid) {
-			targetErr = errors.New(enterpriseHookAccountPerUserInstallFailure)
+		perUserTamper := false
+		if targetErr == nil {
+			var perUserSkip bool
+			perUserSkip, perUserTamper = perUserInstalls.classify(target, resolved.home, resolved.sid, previousProtection.PreviouslyProtected)
+			if perUserSkip {
+				targetErr = errors.New(enterpriseHookAccountPerUserInstallFailure)
+			}
 		}
 		if targetErr == nil && target.IsDeferred() &&
 			!previousProtection.PreviouslyProtected {
@@ -2932,6 +3031,16 @@ func runEnterpriseHookVerifyAttemptRows(ctx context.Context, registrationOnly bo
 				targetErr = fmt.Errorf("protected authorization does not cover target")
 			}
 		}
+		if perUserTamper {
+			// An enrolled account's entry in its own managed folder: the row
+			// fails with the tamper error, before any rule that excuses a
+			// row (GAP-1733 review).
+			row.OK, row.Pending, row.Result = false, false, nil
+			row.Error = enterpriseHookPerUserInstallTamperError(resolved.home, targetErr).Error()
+			run.Failures++
+			run.Rows = append(run.Rows, row)
+			continue
+		}
 		if waiting, ok := enterpriseHookHermesSignedOutRow(target, row, targetErr, recorded); ok {
 			// Unobservable, not failed: reported pending until the
 			// account signs in (Hermes NOT COVERED), never protected,
@@ -3001,8 +3110,7 @@ func runEnterpriseHookVerifyAttemptRows(ctx context.Context, registrationOnly bo
 				enterpriseHookTargetForeignLink(target, row.UserHome, row.SID) {
 				run.Excused = append(run.Excused, row)
 			} else if excused > 0 && row.Error == enterpriseHookAccountPerUserInstallFailure &&
-				enterpriseHookAccountPerUserInstallRow(recorded[enterpriseHookProtectedTargetKey(row)]) &&
-				enterpriseHookTargetPerUserInstall(target, row.UserHome, row.SID) {
+				enterpriseHookAccountPerUserInstallRowWith(recorded[enterpriseHookProtectedTargetKey(row)], perUserInstalls.folder) {
 				run.Excused = append(run.Excused, row)
 			} else if excused > 0 && enterpriseHookRemovedAccountRow(row) {
 				run.Excused = append(run.Excused, row)
@@ -3404,6 +3512,7 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 		watchPathOwners = map[string][]string{}
 	}
 	claudeMachineContract := enterpriseHookMachinePolicyContract(manifest)
+	perUserInstalls := newEnterpriseHookPerUserInstallPass(cfg.DataDir)
 	// The targets that verified in a pass a filesystem event armed, checked
 	// again over one shared window after the loop (GAP-1825).
 	recheckWindow := enterpriseHookReconcileRecheckWindow
@@ -3479,12 +3588,20 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 			// the administrator lifecycle goes on (GAP-0585).
 			err = errors.New(enterpriseHookAccountForeignLinkFailure)
 		}
-		if err == nil && enterpriseHookTargetPerUserInstall(target, resolved.home, resolved.sid) {
-			// A per-user DefenseClaw install in the account's folder is never
-			// repaired, adopted or enrolled, signed in or not: the signed-out
-			// repair took both such folders over (GAP-1733). Fail only this
-			// account's rows, by name.
-			err = errors.New(enterpriseHookAccountPerUserInstallFailure)
+		perUserTamper := false
+		if err == nil {
+			// A per-user DefenseClaw install in the folder of an account
+			// DefenseClaw never protected is never repaired, adopted or
+			// enrolled, signed in or not: the signed-out repair took both
+			// such folders over (GAP-1733). Fail only this account's rows, by
+			// name. In the managed folder of an enrolled account the same
+			// entry is tamper: the account is repaired and watched as usual,
+			// and the row fails below with an error nothing excuses.
+			var perUserSkip bool
+			perUserSkip, perUserTamper = perUserInstalls.classify(target, resolved.home, resolved.sid, previousProtection.PreviouslyProtected)
+			if perUserSkip {
+				err = errors.New(enterpriseHookAccountPerUserInstallFailure)
+			}
 		}
 		if err == nil {
 			if linkRow, linked := linkRows[strings.ToLower(strings.TrimSpace(target.Connector))]; linked {
@@ -3631,6 +3748,14 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 			enterpriseHookTargetHealth.clear(row)
 			rows = append(rows, row)
 			continue
+		}
+		if perUserTamper {
+			// Repaired and watched above; the account keeps its protection
+			// (a failed row of a protected target carries it forward), and
+			// status and verify name the tamper (GAP-1733 review).
+			err = enterpriseHookPerUserInstallTamperError(resolved.home, err)
+			row.Result = nil
+			recheck = false
 		}
 		if watchPathErr != nil {
 			err = errors.Join(err, fmt.Errorf("watch target paths: %w", watchPathErr))

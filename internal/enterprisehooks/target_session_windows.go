@@ -226,18 +226,21 @@ func WindowsPerUserInstallDataDir(home, sid string) string {
 // link and type checks refuse it without following or repairing it. A
 // token that is neither an elevated Administrator nor LocalSystem cannot
 // take the plan's backup-intent handles; it reads the entries by path
-// instead, which also names an entry it cannot check
-// (windowsPerUserInstallLeftover).
+// instead and names only an entry it can see. Another account's folder is
+// denied to it, and what it cannot read is unknown, not a per-user install
+// (GAP-1733 review: a non-elevated status named every other account).
 func windowsPerUserInstallDataDirFinding(target windowsManagedRuntimeTarget) string {
 	if requireWindowsEnterpriseAdministrator() != nil {
 		info, err := os.Lstat(target.data)
-		if errors.Is(err, os.ErrNotExist) || (err == nil && (!info.IsDir() || info.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0)) {
+		if err != nil || !info.IsDir() || info.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0 {
 			return ""
 		}
-		if err != nil {
-			return "an entry that could not be checked (" + err.Error() + ")"
+		for _, name := range windowsPerUserInstallLeftovers {
+			if _, err := os.Lstat(filepath.Join(target.data, name)); err == nil {
+				return name
+			}
 		}
-		return windowsPerUserInstallLeftover(target.data)
+		return ""
 	}
 	var finding string
 	err := windowsManagedRuntimeSetupPrivilege(func() error {
