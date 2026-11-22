@@ -171,7 +171,11 @@ Known limits in 1.0.10:
 
 - `helm upgrade` checks the new config, refuses a skipped minor (N-1 to N only) and rolls under the PDBs. The leader
   migrates the store at start after a backup.
-- `helm rollback` to a release with an older store schema is refused, naming the backup.
+- `helm rollback` to a release with an older store schema is refused, naming the backup. helm keeps the refused
+  rollback as a revision in status pending-rollback (it writes the revision before it runs the hook), and every later
+  `helm upgrade` fails with another operation in progress. Clear it with `helm rollback RELEASE N`, where N is the
+  revision `helm history RELEASE` shows as deployed: that release passes the check and nothing changes. helm prints only
+  that the hook failed; the refusal, with these steps, is in `kubectl logs job/defenseclaw-pre-rollback`.
 - Outside managed mode every pod (gateway, leader, controller, callout) runs a root init container, `substrate-datadir`,
   with only `CHOWN` and `FOWNER`. A namespace that enforces the Pod Security `restricted` level, or OpenShift's
   `restricted` SCC, refuses those pods: on an upgrade from a chart without it, `helm upgrade` stalls with the old pods

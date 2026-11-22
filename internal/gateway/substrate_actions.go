@@ -460,6 +460,17 @@ var ErrSubstrateNoWorker = errors.New("no worker has room for the actor")
 // the node or the control plane is busy (GAP-0468): a retry can work.
 var ErrSubstrateResumeBusy = errors.New("the cluster is busy starting other agents")
 
+// Snapshots implements SubstrateSnapshotCounter: how many snapshots the
+// cluster holds for the actor (ActorStatus.snapshots), which a delete
+// removes with it (GAP-0474).
+func (s *SubstrateATEActions) Snapshots(ctx context.Context, atespace, name string) (int, error) {
+	a, err := s.Client.GetActor(ctx, ateapi.Ref(atespace, name))
+	if err != nil {
+		return 0, err
+	}
+	return len(a.GetStatus().GetSnapshots()), nil
+}
+
 // Delete implements SubstrateActorActions.
 func (s *SubstrateATEActions) Delete(ctx context.Context, atespace, name string) error {
 	_, err := s.Client.DeleteActor(ctx, ateapi.Ref(atespace, name), nil)

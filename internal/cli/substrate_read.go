@@ -436,9 +436,10 @@ func newSubstrateDeleteCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "delete [name...]",
 		Short: "Delete agents with their work and snapshots",
-		Long: `Deletes the named agents (or every agent of --batch) and the snapshots the cluster
-holds for them. Pull the changes first with "defenseclaw substrate pull": what is not pulled
-is gone.`,
+		Long: `Deletes the named agents (or every agent of --batch), the snapshots the cluster
+holds for them and the checkpoints saved inside them. The question and the output say how
+many snapshots each agent had. Pull the changes first with "defenseclaw substrate pull":
+what is not pulled is gone.`,
 		Args: func(_ *cobra.Command, args []string) error {
 			if len(args) == 0 && batch == "" {
 				return errors.New("name the agents to delete (list them with: defenseclaw substrate list), or pass --batch ID")
@@ -476,11 +477,13 @@ is gone.`,
 			}
 			w := cmd.OutOrStdout()
 			if !yes {
-				var names []string
-				for _, a := range targets {
-					names = append(names, a.Atespace+"/"+a.Name)
+				// One actor's status carries its snapshot count (GAP-0474).
+				for i, a := range targets {
+					if got, err := s.Client.Get(ctx, a.Atespace, a.Name); err == nil && got.Snapshots != nil {
+						targets[i].Snapshots = got.Snapshots
+					}
 				}
-				ok, err := substrateConfirm(cmd, fmt.Sprintf("Delete %s? Changes you have not pulled will be lost.", strings.Join(names, ", ")))
+				ok, err := substrateConfirm(cmd, substrateDeletePrompt(targets))
 				if err != nil {
 					return err
 				}
@@ -491,11 +494,12 @@ is gone.`,
 			}
 			var failed []string
 			for _, a := range targets {
-				if err := s.Client.Delete(ctx, a.Atespace, a.Name); err != nil {
+				got, err := s.Client.Delete(ctx, a.Atespace, a.Name)
+				if err != nil {
 					failed = append(failed, fmt.Sprintf("%s/%s: %v", a.Atespace, a.Name, substrateFail(err)))
 					continue
 				}
-				fmt.Fprintf(w, "Deleted %s/%s\n", a.Atespace, a.Name)
+				fmt.Fprintf(w, "Deleted %s/%s: %s\n", a.Atespace, a.Name, substratePurged(got.Snapshots))
 			}
 			if len(failed) > 0 {
 				return fmt.Errorf("could not delete:\n  %s", strings.Join(failed, "\n  "))
@@ -507,6 +511,38 @@ is gone.`,
 	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "do not ask")
 	cmd.Flags().StringVar(&batch, "batch", "", "delete every agent of this batch")
 	return cmd
+}
+
+// substratePurged names what a delete removes with an agent: its snapshots
+// (with the count when the cluster gave one) and the checkpoints saved
+// inside it (GAP-0474).
+func substratePurged(snapshots *int) string {
+	switch {
+	case snapshots == nil:
+		return "the agent, its snapshots and the checkpoints saved inside it"
+	case *snapshots == 1:
+		return "the agent, 1 snapshot and the checkpoints saved inside it"
+	default:
+		return fmt.Sprintf("the agent, %d snapshots and the checkpoints saved inside it", *snapshots)
+	}
+}
+
+// substrateDeletePrompt is the delete question: every agent with what goes
+// with it, and what is lost (GAP-0474).
+func substrateDeletePrompt(targets []api.Actor) string {
+	var b strings.Builder
+	if len(targets) == 1 {
+		a := targets[0]
+		fmt.Fprintf(&b, "Delete %s/%s? This removes %s. ", a.Atespace, a.Name, substratePurged(a.Snapshots))
+	} else {
+		fmt.Fprintf(&b, "Delete %d agents? This removes:", len(targets))
+		for _, a := range targets {
+			fmt.Fprintf(&b, "\n  %s/%s: %s", a.Atespace, a.Name, substratePurged(a.Snapshots))
+		}
+		b.WriteString("\n")
+	}
+	b.WriteString("Changes you have not pulled will be lost.")
+	return b.String()
 }
 
 // substrateConfirm asks a yes/no question on a terminal; without one it

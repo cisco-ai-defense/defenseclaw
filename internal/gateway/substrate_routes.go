@@ -111,6 +111,24 @@ type SubstrateActorActions interface {
 	Delete(ctx context.Context, atespace, name string) error
 }
 
+// SubstrateSnapshotCounter is optional on SubstrateActorActions: how many
+// snapshots the cluster holds for an actor. Status shows the count and a
+// delete names how many it removed (GAP-0474).
+type SubstrateSnapshotCounter interface {
+	Snapshots(ctx context.Context, atespace, name string) (int, error)
+}
+
+// substrateSnapshots is the actor's snapshot count, ok false when the
+// actions cannot count them or the cluster did not answer.
+func (st *substrateState) substrateSnapshots(ctx context.Context, reg registry.Registration) (int, bool) {
+	sc, ok := st.cfg.Actions.(SubstrateSnapshotCounter)
+	if !ok {
+		return 0, false
+	}
+	n, err := sc.Snapshots(ctx, reg.Atespace, reg.Name)
+	return n, err == nil
+}
+
 // SubstrateUsage answers usage for one owner ("" for every owner).
 type SubstrateUsage interface {
 	Usage(ctx context.Context, ownerID, batchID string) (any, error)
@@ -755,6 +773,10 @@ func (a *APIServer) substrateGetActor(st *substrateState) http.HandlerFunc {
 		}
 		a.substrateAuditAdminTarget(st, r, reg, "actor", "INFO")
 		v := st.actorView(reg)
+		// What a delete would remove with it (GAP-0474).
+		if n, ok := st.substrateSnapshots(r.Context(), reg); ok {
+			v["snapshots"] = n
+		}
 		// GAP-0410: status shows a crashed agent as crashed.
 		if st.cfg.Lookup == nil {
 			writeSubstrateJSON(w, http.StatusOK, v)
@@ -779,6 +801,9 @@ func (a *APIServer) substrateDeleteActor(st *substrateState) http.HandlerFunc {
 			return
 		}
 		a.substrateAuditAdminTarget(st, r, reg, "delete", "HIGH")
+		// The snapshots go with the actor: count them first, so the
+		// launcher and the audit row say how many were removed (GAP-0474).
+		snaps, counted := st.substrateSnapshots(r.Context(), reg)
 		if err := st.cfg.Actions.Delete(r.Context(), reg.Atespace, reg.Name); err != nil {
 			writeSubstrateJSONError(w, http.StatusBadGateway, "delete_failed")
 			return
@@ -791,8 +816,41 @@ func (a *APIServer) substrateDeleteActor(st *substrateState) http.HandlerFunc {
 		if inv, ok := st.cfg.Actors.(interface{ Invalidate(string, string) }); ok {
 			inv.Invalidate(reg.Atespace, reg.Name)
 		}
-		writeSubstrateJSON(w, http.StatusOK, st.actorView(reg))
+		v := st.actorView(reg)
+		a.substrateAuditDeleted(st, r, reg, snaps, counted)
+		if counted {
+			v["snapshots"] = snaps
+		}
+		writeSubstrateJSON(w, http.StatusOK, v)
 	}
+}
+
+// substrateAuditDeleted writes the person-level audit row of a delete: who
+// deleted which actor (UID) and how many snapshots went with it, so the
+// audit store, not only the controller's sandbox event, records the purge
+// (GAP-0474). snapshots is -1 in the row when the cluster did not count
+// them.
+func (a *APIServer) substrateAuditDeleted(st *substrateState, r *http.Request, reg registry.Registration, snaps int, counted bool) {
+	if st.audit == nil {
+		return
+	}
+	c, _ := substrateCallerFrom(r.Context())
+	who := c.person.Principal
+	if who == "" {
+		who = ownerOf(c.person).ID()
+	}
+	what := "the agent and its snapshots"
+	if counted {
+		what = fmt.Sprintf("the agent and %d snapshot(s)", snaps)
+	} else {
+		snaps = -1
+	}
+	summary := fmt.Sprintf("%s deleted %s/%s (uid %s): %s, with the checkpoints inside it", who, reg.Atespace, reg.Name, reg.UID, what)
+	st.audit(context.WithoutCancel(r.Context()), "INFO", summary, map[string]any{
+		"event": "actor_deleted", "atespace": reg.Atespace, "actor": reg.Atespace + "/" + reg.Name, "actor_uid": reg.UID,
+		"principal": c.person.Principal, "person_id": ownerOf(c.person).ID(), "owner": reg.Person.Principal,
+		"admin": c.admin && !substrateOwnedBy(c, reg), "snapshots": snaps, "batch_id": reg.BatchID,
+	})
 }
 
 func (a *APIServer) substrateSessionCert(st *substrateState) http.HandlerFunc {

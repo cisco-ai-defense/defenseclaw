@@ -277,14 +277,32 @@ func PreUpgrade(ctx context.Context, plan ChartPlan, config []byte, validate fun
 }
 
 // PreRollback refuses a rollback to a release that reads an older store
-// schema than the store has, naming the backup (E25).
+// schema than the store has, naming the backup (E25), and how to clear the
+// revision helm keeps for the refused rollback (GAP-0448).
 func PreRollback(ctx context.Context, plan ChartPlan, kube KubeAPI) (StepReport, error) {
 	r := StepReport{Step: "pre-rollback"}
 	st, err := storeState(ctx, plan, kube)
 	if err != nil {
 		return r, err
 	}
-	return r, CheckRollback(plan.StoreSchema, st)
+	if err := CheckRollback(plan.StoreSchema, st); err != nil {
+		return r, fmt.Errorf("%w. %s", err, RefusedRollbackRecovery(plan))
+	}
+	return r, nil
+}
+
+// RefusedRollbackRecovery says how to clear a refused rollback. helm
+// writes the rollback revision (status pending-rollback) before it runs
+// the pre-rollback hook and leaves it there when the hook fails, so every
+// later helm upgrade fails with "another operation (install/upgrade/
+// rollback) is in progress" (GAP-0448). A rollback to the revision that is
+// deployed now is allowed over it (helm checks no pending state on a
+// rollback), passes this check (that release reads the store's schema) and
+// changes nothing; then upgrades work again.
+func RefusedRollbackRecovery(plan ChartPlan) string {
+	return fmt.Sprintf("Nothing was rolled back, but helm keeps this rollback as a pending-rollback revision and refuses "+
+		"every helm upgrade until it is cleared: run helm -n %[1]s rollback %[2]s N, where N is the revision helm -n %[1]s "+
+		"history %[2]s shows as deployed (it changes nothing), then upgrade as usual", plan.Namespace, plan.Release)
 }
 
 // ErrPoliciesLeft fails the uninstall while DefenseClaw-written egress
