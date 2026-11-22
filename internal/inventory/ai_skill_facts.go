@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
@@ -31,6 +32,7 @@ const (
 	SkillScopeProject = "project"
 	SkillScopeBundled = "bundled"
 	SkillScopeManaged = "managed"
+	SkillScopePlugin  = "plugin"
 )
 
 // Skill content status values (defenseclaw.inventory.skill.content_status).
@@ -42,11 +44,13 @@ const (
 )
 
 const (
-	maxSkillEntries   = 1000 // files and folders
-	maxSkillBytes     = 32 << 20
-	maxSkillScanBytes = 256 << 20
-	maxSkillDepth     = 12
-	maxSkillLocation  = 512
+	maxSkillEntries     = 1000 // files and folders
+	maxSkillBytes       = 32 << 20
+	maxSkillScanBytes   = 256 << 20
+	maxSkillDepth       = 12
+	maxSkillLocation    = 512
+	maxSkillManifest    = 64 << 10
+	maxSkillAuthorBytes = 128
 )
 
 var errSkillTooLarge = errors.New("skill folder exceeds the hash limits")
@@ -60,6 +64,9 @@ type AISkillFacts struct {
 	// Location is the folder below the user's home ("~/..."); the absolute
 	// path never leaves the endpoint.
 	Location string `json:"location,omitempty"`
+	// Author is the skill's own unverified SKILL.md claim.
+	Author string         `json:"author,omitempty"`
+	Plugin *AISkillPlugin `json:"plugin,omitempty"`
 }
 
 func (s *ContinuousDiscoveryService) resetSkillFacts() {
@@ -78,9 +85,12 @@ func (s *ContinuousDiscoveryService) skillFacts(path string, bundled bool) *AISk
 	if seen {
 		return &facts
 	}
-	hash, status, read := hashSkillFolder(path, limit)
+	hash, status, manifest, read := hashSkillFolder(path, limit)
 	location, inHome := s.skillLocation(path)
-	facts = AISkillFacts{ContentHash: hash, ContentStatus: status, Scope: SkillScopeUser, Location: location}
+	facts = AISkillFacts{
+		ContentHash: hash, ContentStatus: status, Scope: SkillScopeUser,
+		Location: location, Author: skillAuthor(manifest),
+	}
 	switch {
 	case bundled:
 		facts.Scope = SkillScopeBundled
@@ -125,13 +135,13 @@ func min64(a, b int64) int64 {
 // Links are recorded by target and never followed, and each file is read
 // through safefile, so a scan running as root or SYSTEM reads only what is
 // inside the folder.
-func hashSkillFolder(root string, limit int64) (hash, status string, total int64) {
+func hashSkillFolder(root string, limit int64) (hash, status string, manifest []byte, total int64) {
 	info, err := os.Lstat(root)
 	if err != nil {
-		return "", SkillContentUnreadable, 0
+		return "", SkillContentUnreadable, nil, 0
 	}
 	if info.Mode()&(fs.ModeSymlink|fs.ModeIrregular) != 0 {
-		return "", SkillContentSymlink, 0
+		return "", SkillContentSymlink, nil, 0
 	}
 	var lines []string
 	entries := 0
@@ -186,6 +196,9 @@ func hashSkillFolder(root string, limit int64) (hash, status string, total int64
 			}
 			total += int64(len(data))
 			kind, payload = "file", data
+			if strings.EqualFold(rel, "SKILL.md") {
+				manifest = data[:min(len(data), maxSkillManifest)]
+			}
 		}
 		sum := sha256.Sum256(payload)
 		lines = append(lines, rel+"\x00"+kind+"\x00"+hex.EncodeToString(sum[:])+"\n")
@@ -193,16 +206,59 @@ func hashSkillFolder(root string, limit int64) (hash, status string, total int64
 	})
 	switch {
 	case errors.Is(err, errSkillTooLarge):
-		return "", SkillContentTooLarge, total
+		return "", SkillContentTooLarge, manifest, total
 	case err != nil:
-		return "", SkillContentUnreadable, total
+		return "", SkillContentUnreadable, manifest, total
 	}
 	sort.Strings(lines)
 	digest := sha256.New()
 	for _, line := range lines {
 		_, _ = io.WriteString(digest, line)
 	}
-	return "sha256:" + hex.EncodeToString(digest.Sum(nil)), SkillContentOK, total
+	return "sha256:" + hex.EncodeToString(digest.Sum(nil)), SkillContentOK, manifest, total
+}
+
+// skillAuthor returns the author a SKILL.md frontmatter declares at the top
+// level or under metadata.
+func skillAuthor(manifest []byte) string {
+	lines := strings.Split(strings.TrimPrefix(string(manifest), "\ufeff"), "\n")
+	if len(lines) == 0 || strings.TrimSpace(lines[0]) != "---" {
+		return ""
+	}
+	inMetadata := false
+	for _, line := range lines[1:] {
+		line = strings.TrimRight(line, "\r")
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "---" || trimmed == "..." {
+			break
+		}
+		key, value, ok := strings.Cut(trimmed, ":")
+		if !ok {
+			continue
+		}
+		value = strings.TrimSpace(value)
+		indented := line[0] == ' ' || line[0] == '\t'
+		if !indented {
+			inMetadata = key == "metadata" && value == ""
+		}
+		if key != "author" || (indented && !inMetadata) {
+			continue
+		}
+		if len(value) >= 2 && (value[0] == '"' || value[0] == '\'') && value[len(value)-1] == value[0] {
+			value = value[1 : len(value)-1]
+		} else if comment := strings.Index(value, " #"); comment >= 0 {
+			value = strings.TrimSpace(value[:comment])
+		}
+		if !utf8.ValidString(value) || containsUnicodeControl(value) {
+			return ""
+		}
+		for len(value) > maxSkillAuthorBytes {
+			_, size := utf8.DecodeLastRuneInString(value)
+			value = value[:len(value)-size]
+		}
+		return value
+	}
+	return ""
 }
 
 // skillLocation is path below the scanned home that holds it, as "~/rel"
@@ -238,12 +294,19 @@ func validateSkillFacts(facts AISkillFacts) error {
 		return fmt.Errorf("unknown skill content status %q", facts.ContentStatus)
 	}
 	switch facts.Scope {
-	case SkillScopeUser, SkillScopeProject, SkillScopeBundled, SkillScopeManaged:
+	case SkillScopeUser, SkillScopeProject, SkillScopeBundled, SkillScopeManaged, SkillScopePlugin:
 	default:
 		return fmt.Errorf("unknown skill scope %q", facts.Scope)
 	}
 	if facts.Location != "" && (!strings.HasPrefix(facts.Location, "~/") || !userScanText(facts.Location, maxSkillLocation)) {
 		return errors.New("skill location must be a printable home-relative path")
+	}
+	if !userScanText(facts.Author, maxSkillAuthorBytes) {
+		return errors.New("skill author must be short printable text")
+	}
+	if plugin := facts.Plugin; plugin != nil && (!validPluginID(plugin.ID) ||
+		!userScanText(plugin.Version, 64) || !userScanText(plugin.Author, maxSkillAuthorBytes)) {
+		return errors.New("skill plugin fields must be short printable text")
 	}
 	return nil
 }

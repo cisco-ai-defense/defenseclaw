@@ -2672,7 +2672,7 @@ func (s *ContinuousDiscoveryService) detectSkills() []AISignal {
 			}
 		}
 	}
-	return out
+	return append(out, s.detectPluginSkills()...)
 }
 
 func relativeCandidate(candidate string) bool {
