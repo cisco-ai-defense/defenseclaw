@@ -311,3 +311,11 @@ so they are never replayed; the launcher says how many to check.
 
 Use `--key-replay on` to send them without asking, or `--key-replay off` to drop them. Administrators set `substrate.launcher.key_replay`;
 the flag can only tighten it.
+
+### `pull --push-branch` is refused (Preview)
+
+- **"branch ... already exists on origin"** or **"has commits the agent's work does not have"**: the push never forces. Pick a new branch name.
+- **"your profile does not allow pushes from agents"** or **"this cluster does not allow pushes from agents"**: `git_push: deny` or `substrate.git.push_branch: deny`. Bring the work home with `pull NAME --branch BRANCH` and push from your computer.
+- **"... refused the push"**: the credential the cluster binds to that host cannot write to the repository. Ask your administrator for one with write access, or push from your computer.
+- **"the agent's checkout has no origin remote"**: the agent was not started with `run --clone`. Use `--branch` instead.
+- **"not pushed: the review flagged files"**: look at the flagged files, then run again with `--allow-flagged`.

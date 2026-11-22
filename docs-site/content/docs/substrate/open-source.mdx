@@ -254,6 +254,8 @@ Prefer git to an upload? `defenseclaw substrate run claude --clone https://git.e
 
 In a checkout of your own, `defenseclaw substrate run claude --clone .` gives the agent the full history of your branch (Preview). The agent fetches the branch from its https remote, and only your unpushed commits and uncommitted changes are sent from your computer, with the same rules as a copy: secret files, and their committed versions, stay behind. `pull` works as for a copy. A remote that is a local path, an ssh address or a plain http:// address, or a branch that shares no commit with its remote, is refused; use `run` without `--clone .`. On Windows, push and commit your work first.
 
+An ssh address clones too when the cluster turns it into https, because the agent's network carries no ssh. The `git@github.com:`, `git@gitlab.com:` and `git@bitbucket.org:` forms and every `ssh://git@` address always are; your administrator can add your company's git servers (Preview, see [Secrets](/docs/substrate/secrets)). Submodules are cloned too, and Git LFS files are fetched when the image has git-lfs.
+
 </Step>
 
 <Step>
@@ -330,6 +332,8 @@ As in OpenShell copy mode, you see the changed files first, with any file that c
 To send your own newer changes to the agent, run `defenseclaw substrate push claude-b66c97d1` in the folder (Preview). It sends what you changed since the last send, with the same rules as the first copy, after a restore point. If the agent changed one of the same files, it sends nothing and lists them; choose `--mine`, `--theirs` or `--patch-out FILE`.
 
 To keep sending while you work, run `defenseclaw substrate sync claude-b66c97d1 --watch` in the folder (Preview). It sends each change a second after you save it, with the same rules, until you press Ctrl-C. A file the agent also changed keeps the agent's version, and sync names it once.
+
+When the agent works in a git checkout (`run --clone`), `defenseclaw substrate pull claude-b66c97d1 --push-branch agent/fix-tests` pushes its work from inside the agent to the checkout's origin as a new branch (Preview). The credential is the one the cluster adds for that host, so it never passes through your computer. The agent's uncommitted changes go in one commit. You see the commits and files first, with the same flags as `pull`, and flagged files get a second question (with no terminal to ask, they need `--allow-flagged`). It then asks, unless your profile allows pushes; `a` allows pushes to that host from now on. It never forces: a branch name the origin already has is refused, so pick a new one. At the end it prints a link to open a pull request. If your administrator turned pushes off, bring the work home with `--branch NAME` and push from your computer.
 
 To go back in time, `defenseclaw substrate checkpoint claude-b66c97d1` saves a restore point of the agent's folder, and `defenseclaw substrate undo claude-b66c97d1` returns the folder to the last one and discards what the agent changed since. It asks first.
 
