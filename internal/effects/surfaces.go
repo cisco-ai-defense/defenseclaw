@@ -101,7 +101,14 @@ func extractPatch(call Call, o Options) Result {
 			Target: Target{Type: TargetPath, Spelling: cap4k(pt.path), Flavor: o.flavor(), Link: LinkNotChecked},
 			Origin: Origin{Surface: SurfacePatch, Command: 1, Program: "apply_patch"},
 			Data:   &Data{Kind: DataPatchText}}
-		if abs, ok, reason := placePath(pt.path, o); ok {
+		// A $ or % in a header path is not expanded by the patch tool, but a
+		// runner that does would write elsewhere: the target is unknown, and
+		// its spelling stays on the effect so the protected-set grade still
+		// reads the name (a \\host\c$ share to a credential file is the same
+		// name as the file tool's write of it).
+		if strings.ContainsAny(pt.path, "$%") {
+			e.addReason(ReasonDynamicExpansion, ScopeTarget)
+		} else if abs, ok, reason := placePath(pt.path, o); ok {
 			e.Target.Path = abs
 		} else {
 			e.addReason(reason, ScopeTarget)
@@ -147,7 +154,7 @@ func parsePatchEnvelope(text string) ([]patchTarget, bool) {
 		return nil, false // an unterminated or empty envelope: unknown targets
 	}
 	for _, pt := range out {
-		if pt.path == "" || strings.ContainsAny(pt.path, "$%") {
+		if pt.path == "" {
 			return nil, false
 		}
 	}

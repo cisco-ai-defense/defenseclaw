@@ -1373,10 +1373,10 @@ def test_every_policy_source_compiles_a_chosen_quarantine_as_written(tmp_path, m
     assert not failures, "\n".join(failures)
 
 
-@pytest.mark.parametrize("lane", ["effects", "secret_flow"])
+@pytest.mark.parametrize("lane", ["secret_flow"])
 @pytest.mark.parametrize("value", ["on", "ON", " On "])
 def test_shadow_only_cascade_lane_refusal_says_on_is_not_available(tmp_path, monkeypatch, lane, value):
-    # GAP-0546: `config set guardrail.cascade.lanes.effects on` said only "not in the expected
+    # GAP-0546: `config set guardrail.cascade.lanes.secret_flow on` said only "not in the expected
     # format"; the gateway says "not available in 1.0.10". The CLI names the same reason.
     monkeypatch.delenv("DEFENSECLAW_DEPLOYMENT_MODE", raising=False)
     path = _config(tmp_path)
@@ -1404,7 +1404,15 @@ def test_cascade_lane_refusal_of_a_garbage_value_lists_the_allowed_values(tmp_pa
     message = config_writer.plain_error(refused.value, value="garbage")
     assert message.startswith(f"{key} must be one of ")
     assert "expected format" not in message
-    assert ("on, shadow, off" in message) == (lane == "nonshell")
+    assert ("on, shadow, off" in message) == (lane != "secret_flow")
+
+
+def test_effects_cascade_lane_takes_on(tmp_path, monkeypatch):
+    # DET111: the effects lane ships on (raise-only); config set takes on, shadow and off.
+    monkeypatch.delenv("DEFENSECLAW_DEPLOYMENT_MODE", raising=False)
+    path = _config(tmp_path)
+    for value in ("on", "shadow", "off"):
+        config_writer.apply([Change("guardrail.cascade.lanes.effects", value)], "cli:test", "t", path=path)
 
 
 @pytest.mark.parametrize("value", ["http://127.0.0.1:8765/defenseclaw", "mirror.example.com/dc", "ftp://mirror.example/dc"])
