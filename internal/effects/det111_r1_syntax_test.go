@@ -111,3 +111,29 @@ func TestDET111R1SyntaxComsubHeredocClose(t *testing.T) {
 		}
 	}
 }
+
+// A here-document with an unquoted delimiter and a here-string are fed to the
+// shell after the shell's own backslash reading; the parser keeps every
+// backslash of the source, so a body read raw is not what runs (census row
+// r1/heredoc-plain wsh/variant/1030494d35489287: the doubled backslashes of a
+// heredoc-plain body made the nested text unparsable).
+func TestDET111R1HeredocBodyIsWhatTheShellReads(t *testing.T) {
+	const state = "/home/alice/.defenseclaw"
+	for _, tc := range []struct{ name, cmd string }{
+		{"heredoc \\\\", "bash <<E\nrm -rf ~/.defense\\\\claw\nE"},
+		{"heredoc line join", "bash <<E\nrm -rf \\\n  ~/.defenseclaw\nE"},
+		{"heredoc-plain sh -c body", "bash <<E\nsh -c 'rm -rf '\\\\''/home/alice/.defenseclaw'\\\\'''\nE"},
+		{"here-string escaped blanks", "bash <<< rm\\ -rf\\ /home/alice/.defenseclaw"},
+		{"here-string escaped quotes", "bash <<< \"rm -rf \\\"/home/alice/.defenseclaw\\\"\""},
+	} {
+		res := det111SyntaxRun(tc.cmd)
+		if !det111SyntaxHas(res, effects.KindDelete, state) {
+			t.Errorf("%s: %q: want the delete of %s%s", tc.name, tc.cmd, state, det111SyntaxDump(res))
+		}
+	}
+	// a quoted delimiter keeps its body as written: \\claw stays two bytes, so
+	// the inner shell deletes ~/.defense\claw, not the state folder
+	if res := det111SyntaxRun("bash <<'E'\nrm -rf ~/.defense\\\\claw\nE"); det111SyntaxHas(res, effects.KindDelete, state) {
+		t.Errorf("quoted delimiter body was unescaped%s", det111SyntaxDump(res))
+	}
+}

@@ -641,10 +641,14 @@ func (w *posixWalker) redirs(st *syntax.Stmt, c *Cmd) {
 		// A here-string's text is the word after <<<; it is the body of that
 		// redirect (round 8 R: a shell fed `<<< "$(..)"` must not look empty).
 		if r.Op == syntax.WordHdoc && r.Word != nil {
-			red.Body, red.BodyExpands = heredocBody(r.Word)
+			red.Body, red.BodyExpands = heredocBody(r.Word, bodyHereString)
 		}
 		if r.Hdoc != nil {
-			red.Body, red.BodyExpands = heredocBody(r.Hdoc)
+			mode := bodyHeredocExpanding
+			if quotedDelimiter(r.Word) {
+				mode = bodyHeredocLiteral
+			}
+			red.Body, red.BodyExpands = heredocBody(r.Hdoc, mode)
 			// A command substitution in an expanding heredoc body runs (review D
 			// PX-3: C40/C41/V22). An unquoted-delimiter heredoc with $( ) / `` is
 			// walked; a quoted-delimiter body has no CmdSubst node, so nothing is
@@ -929,7 +933,64 @@ func span(n syntax.Node) [2]int {
 	return [2]int{int(n.Pos().Offset()), int(n.End().Offset())}
 }
 
-func heredocBody(w *syntax.Word) (string, bool) {
+// bodyMode is how the shell reads the text of a here-string or here-document.
+type bodyMode uint8
+
+const (
+	bodyHereString       bodyMode = iota // <<< WORD: quote removal of the word
+	bodyHeredocExpanding                 // <<E: \$ \` \\ and \newline are escapes
+	bodyHeredocLiteral                   // <<'E': the body as written
+)
+
+// quotedDelimiter reports a here-document delimiter with any quoting ('E',
+// "E", \E, E”): its body is literal.
+func quotedDelimiter(w *syntax.Word) bool {
+	if w == nil {
+		return false
+	}
+	for _, part := range w.Parts {
+		switch p := part.(type) {
+		case *syntax.SglQuoted, *syntax.DblQuoted:
+			return true
+		case *syntax.Lit:
+			if strings.Contains(p.Value, `\`) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// heredocUnescape is the backslash rule of an expanding here-document body:
+// \$, \`, \\ lose the backslash, \newline joins the lines, any other
+// backslash stays.
+func heredocUnescape(s string) string {
+	if !strings.Contains(s, `\`) {
+		return s
+	}
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\\' && i+1 < len(s) {
+			switch s[i+1] {
+			case '$', '`', '\\':
+				i++
+				b.WriteByte(s[i])
+				continue
+			case '\n':
+				i++
+				continue
+			}
+		}
+		b.WriteByte(s[i])
+	}
+	return b.String()
+}
+
+// heredocBody is the text a here-string or here-document feeds, read the way
+// the shell reads it (mode); the parser keeps every backslash of the source,
+// so a body read raw is not what the shell runs (bash <<E / rm -rf \\ ...,
+// bash <<< rm\ -rf\ ...). expands is true when a part is not static.
+func heredocBody(w *syntax.Word, mode bodyMode) (string, bool) {
 	if w == nil {
 		return "", false
 	}
@@ -938,7 +999,14 @@ func heredocBody(w *syntax.Word) (string, bool) {
 	for _, part := range w.Parts {
 		switch p := part.(type) {
 		case *syntax.Lit:
-			b.WriteString(p.Value)
+			switch mode {
+			case bodyHereString:
+				b.WriteString(unescapePOSIX(p.Value, false))
+			case bodyHeredocExpanding:
+				b.WriteString(heredocUnescape(p.Value))
+			default:
+				b.WriteString(p.Value)
+			}
 		case *syntax.SglQuoted:
 			if p.Dollar {
 				v, ok := decodeANSIC(p.Value)
@@ -954,7 +1022,11 @@ func heredocBody(w *syntax.Word) (string, bool) {
 			// "plain text" is static; anything with an expansion inside is not.
 			for _, q := range p.Parts {
 				if l, ok := q.(*syntax.Lit); ok {
-					b.WriteString(l.Value)
+					if mode == bodyHereString {
+						b.WriteString(unescapePOSIX(l.Value, true))
+					} else {
+						b.WriteString(l.Value)
+					}
 				} else {
 					expands = true
 				}
