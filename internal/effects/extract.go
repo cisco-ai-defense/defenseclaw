@@ -797,8 +797,11 @@ func (w *walker) resolveWord(wd Word) Word {
 		}
 		if s.Var != "" {
 			v, ok := w.env[s.Var]
-			if s.Var == psHomeVar {
-				v, ok = w.curHome, w.curHome != "" // PowerShell's automatic $HOME
+			if s.Var == psHomeVar && !ok {
+				v, ok = w.curHome, w.curHome != "" // PowerShell's automatic $HOME, unless this call assigned it
+			}
+			if s.Var == "SHELL" && !ok && w.o.Account.Shell != "" {
+				v, ok = w.o.Account.Shell, true
 			}
 			if s.Var == "PWD" && !w.pwdOwn && !w.namerefSeen {
 				v, ok = w.cwdWord(i == 0)
@@ -810,7 +813,7 @@ func (w *walker) resolveWord(wd Word) Word {
 					v, ok = applyParamOp(v, s.Op)
 				}
 			}
-			if !ok {
+			if !ok || (s.Var == psHomeVar && v == "") {
 				// The segments stay on the word, so a reader of its literal part
 				// (env NAME=$V: the name) still sees them; the Reason keeps the
 				// word unresolved. Tail is the literal after the dynamic part.
@@ -1214,7 +1217,11 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 			}
 		} else {
 			w.ownVars()
-			delete(w.env, a.Name)
+			if a.Name == psHomeVar && dialect == DialectPowerShell {
+				w.env[a.Name] = "" // explicitly reassigned to a dynamic value; do not restore the automatic home
+			} else {
+				delete(w.env, a.Name)
+			}
 			if a.Name == "HOME" && dialect == DialectPOSIX {
 				w.curHome = "" // a dynamic home makes ~ dynamic (review N3 E2)
 			}
@@ -2978,6 +2985,13 @@ func (w *walker) positionalOperands(ps []Word, p Program, ctx posCtx) []operand 
 		role := RoleRead
 		if ctx.inPlace {
 			role = RoleWrite
+		}
+		// find defaults its search root to the current directory. Preserve that
+		// root for -delete too: a nested shell may cd before running a rootless
+		// find, whose predicate can then delete matching descendants anywhere
+		// under the resulting cwd.
+		if len(ps) == 0 && p.DeleteFlag != "" && ctx.del {
+			ps = []Word{{Value: ".", Static: true}}
 		}
 		for _, wd := range ps {
 			out = append(out, mk(wd, role))

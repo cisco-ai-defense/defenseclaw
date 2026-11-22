@@ -155,7 +155,8 @@ func mutatingEffectKind(kind string) bool {
 // with Windows path rules, and a shell call the hook placed in no dialect
 // (a Codex shell) is not read as POSIX: the extractor infers PowerShell or
 // cmd from its text, except Claude Code's Bash tool, which runs Git Bash.
-func effectCall(connector string, in actionfacts.Input, windows bool) (effects.Call, effects.Options, bool) {
+func effectCall(connector string, in actionfacts.Input, windowsArg ...bool) (effects.Call, effects.Options, bool) {
+	windows := len(windowsArg) > 0 && windowsArg[0]
 	flavor := effects.FlavorPOSIX
 	if windows {
 		flavor = effects.FlavorWindows
@@ -174,7 +175,11 @@ func effectCall(connector string, in actionfacts.Input, windows bool) (effects.C
 		}
 	}
 	opts := effects.Options{Flavor: flavor, Dialect: dialect, Home: in.ActiveHome, CWD: in.CWD,
+		Account:     effects.AccountRecord{Home: in.ActiveHome, Shell: in.ActiveShell},
 		BSDUserland: effectBSDUserland(effectHostGOOS, flavor)}
+	if flavor == effects.FlavorWindows && windowsShapedPath(in.ActiveHome) {
+		opts.Env = map[string]string{"USERPROFILE": in.ActiveHome}
+	}
 
 	switch {
 	case effectPatchTool(in.Tool) && effectPatchText(in) != "":

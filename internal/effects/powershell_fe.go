@@ -379,6 +379,7 @@ func (lw *psLower) pipeline(p *psparse.Pipeline, cond bool) {
 				lastCmd = c
 				lw.noteEnvDrive(c)
 				lw.flushEnv(segCond)
+				lw.noteSessionHome(c, segCond)
 			case *psparse.ExprStatement:
 				lw.exprCommands(e.Expr, segCond)
 			}
@@ -401,10 +402,19 @@ func (lw *psLower) pipeline(p *psparse.Pipeline, cond bool) {
 
 func (lw *psLower) assignment(a *psparse.Assignment, cond bool) {
 	// $env:NAME = value updates the running environment (review PS-7).
-	if v, ok := a.LHS.(*psparse.Variable); ok && strings.EqualFold(v.Scope, "env") {
-		c := &Cmd{Cond: cond, Assigns: []Assign{{Name: v.Name, ValueWord: lw.exprWord(rhsExpr(a.RHS))}}}
-		lw.out.Stmts = append(lw.out.Stmts, &Stmt{Cmds: []*Cmd{c}, Cond: cond})
-		return
+	if v, ok := a.LHS.(*psparse.Variable); ok {
+		name := ""
+		switch {
+		case strings.EqualFold(v.Scope, "env"):
+			name = v.Name
+		case v.Scope == "" && strings.EqualFold(v.Name, "home"):
+			name = psHomeVar
+		}
+		if name != "" {
+			c := &Cmd{Cond: cond, Assigns: []Assign{{Name: name, ValueWord: lw.exprWord(rhsExpr(a.RHS))}}}
+			lw.out.Stmts = append(lw.out.Stmts, &Stmt{Cmds: []*Cmd{c}, Cond: cond})
+			return
+		}
 	}
 	// any command on the RHS still runs.
 	lw.statement(a.RHS, cond)

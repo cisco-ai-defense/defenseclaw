@@ -59,6 +59,20 @@ func TestDET111EffectLaneReadsWindowsHostCallsWithWindowsPaths(t *testing.T) {
 			t.Errorf("%s: no write of %s: %+v", tc.name, keys, effects.Extract(call, opts).Effects)
 		}
 	}
+	// PowerShell expands a bare $env:USERPROFILE\x word from the trusted hook home.
+	call, opts, ok := effectCall("claudecode", actionfacts.Input{Tool: "PowerShell", Command: `Set-Content $env:USERPROFILE\x\.aws\credentials k`, ActiveHome: home, DialectHint: actionfacts.DialectPowerShell}, true)
+	if !ok || opts.Env["USERPROFILE"] != home {
+		t.Fatalf("Windows hook did not supply the trusted USERPROFILE: ok=%v env=%v", ok, opts.Env)
+	}
+	found := false
+	for _, e := range effects.Extract(call, opts).Effects {
+		if e.Kind == effects.KindWrite && strings.EqualFold(e.Target.Path, home+`\x\.aws\credentials`) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("Windows hook USERPROFILE write did not resolve: %+v", effects.Extract(call, opts).Effects)
+	}
 	// A POSIX host call keeps POSIX paths.
 	request := shadowLiveRequest(`echo k >> ~/.ssh/authorized_keys`)
 	if _, opts, _ := effectCall(request.Connector, request.Input, effectWindowsCall(request)); opts.Flavor != effects.FlavorPOSIX {

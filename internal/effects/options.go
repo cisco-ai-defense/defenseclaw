@@ -27,12 +27,19 @@ type Call struct {
 
 // Options carries everything that is otherwise OS- or context-dependent, as
 // explicit inputs, so Extract stays pure and testable anywhere.
+// AccountRecord is trusted account data from the hook's counted identity lookup.
+type AccountRecord struct {
+	Home  string
+	Shell string
+}
+
 type Options struct {
 	Flavor Flavor
 	// Dialect forces the shell grammar; DialectNone infers it.
 	Dialect Dialect
 	Home    string
 	CWD     string
+	Account AccountRecord
 	// Login is the active account's login name: ~Login names the account's
 	// home (Home as the call starts, whatever HOME the call later sets), as the
 	// shell's passwd lookup does (rel-1-0-10:GAP-1678). It is matched without

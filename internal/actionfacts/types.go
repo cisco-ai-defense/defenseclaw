@@ -41,6 +41,9 @@ type Input struct {
 	// action. It must be an absolute POSIX or Windows filesystem path.
 	// ActionFacts never discovers it from process state.
 	ActiveHome string
+	// ActiveShell is trusted hook-account context from the same counted identity
+	// lookup as ActiveHome. Empty when that account's login shell is unknown.
+	ActiveShell string `json:"-"`
 	// ActiveAgentFiles is trusted connector context containing the exact files
 	// whose instructions are active for this action. Entries must be absolute
 	// filesystem paths. ActionFacts validates, canonicalizes, bounds, and copies
