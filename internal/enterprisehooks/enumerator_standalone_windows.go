@@ -66,6 +66,8 @@ type windowsStandaloneRowContext struct {
 	user string
 	// report receives agents found installed but not enrollable.
 	report func(UnprotectedAgent)
+	// enrolled is EnumerateOptions.Enrolled.
+	enrolled func(sid string) bool
 }
 
 // surfacesReadable reports whether the owner's app and extension surfaces
@@ -343,7 +345,7 @@ func applyStandaloneRowStateFor(row *ManifestTarget, previous map[string]Manifes
 	// first /ensure on the guardian's activation evidence (GAP-1733). The
 	// account gets no row, is reported as not protected, and its folder is
 	// left as found.
-	if finding := windowsStandaloneNewRowPerUserInstall(row, previous); finding != "" {
+	if finding := windowsStandaloneNewRowPerUserInstall(row, previous, rowContext.enrolled); finding != "" {
 		reason := fmt.Sprintf(
 			"%s holds %s, which a per-user DefenseClaw install leaves; DefenseClaw leaves that folder untouched and this account out until that install is removed",
 			filepath.Join(filepath.Clean(row.UserHome), ".defenseclaw"), finding,
@@ -371,12 +373,15 @@ func applyStandaloneRowStateFor(row *ManifestTarget, previous map[string]Manifes
 // windowsStandaloneNewRowPerUserInstall names the per-user install entry in
 // the canonical data folder of a newly discovered row
 // (WindowsPerUserInstallDataDir), or "". Only an account the manifest holds no
-// row for is checked: the managed folder of an adopted account is writable by
-// that account, so there such an entry is tamper, which the guardian reports,
-// and the new row is written (GAP-1733 review). A row with another data_dir is
-// not checked here; the plan refuses it.
-func windowsStandaloneNewRowPerUserInstall(row *ManifestTarget, previous map[string]ManifestTarget) string {
-	if windowsHasPreviousRows(previous, canonicalManifestTargetSID(row.SID)) {
+// row for and the guardian never protected (enrolled) is checked: the managed
+// folder of an adopted account is writable by that account, so there such an
+// entry is tamper, which the guardian reports, and the new row is written
+// (GAP-1733 review). An adopted account that lost its last row, say while its
+// agent was moved aside, is still adopted (GAP-1733 review 2). A row with
+// another data_dir is not checked here; the plan refuses it.
+func windowsStandaloneNewRowPerUserInstall(row *ManifestTarget, previous map[string]ManifestTarget, enrolled func(string) bool) string {
+	sid := canonicalManifestTargetSID(row.SID)
+	if windowsHasPreviousRows(previous, sid) || (enrolled != nil && enrolled(sid)) {
 		return ""
 	}
 	home := filepath.Clean(strings.TrimSpace(row.UserHome))

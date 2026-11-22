@@ -1024,36 +1024,41 @@ func (p *enterpriseHookPerUserInstallPass) accountProtected(sid string) bool {
 }
 
 // enterpriseHookEnrolledAccounts reads the guardian's records once, its
-// protection ledger and activation record in authorizationDir and its state
-// in dataDir, and reports whether an account is enrolled: the ledger holds a
-// row of it, for any connector. The guardian reconcile, verify and status all
-// decide "first adoption" with it. It fails closed. A ledger that cannot be
-// read reports every account as enrolled. So does a missing ledger once the
+// protection ledger, enrolled-accounts record and activation record in
+// authorizationDir and its state in dataDir, and reports whether an account
+// is enrolled: the enrolled-accounts record names it, or the ledger holds a
+// row of it, for any connector. The guardian reconcile, verify, status and
+// the standalone Windows enumerator all decide "first adoption" with it. It
+// fails closed. A ledger or enrolled-accounts record that cannot be read
+// reports every account as enrolled. So does a missing ledger once the
 // guardian has published on this host: the publish writes the ledger before
 // the state and the activation record, so either of those, present or
 // unreadable, without the ledger means the ledger was removed, not that no
 // account was ever protected. Only a host with none of the three records, the
 // first adoption, reports no account enrolled (rel-1-0-10 GAP-1733 review).
+// The enrolled-accounts record keeps an account whose last ledger row is gone
+// (GAP-1733 review 2, enterprise_hooks_enrolled_accounts.go).
 func enterpriseHookEnrolledAccounts(dataDir, authorizationDir string) func(sid string) bool {
 	if strings.TrimSpace(authorizationDir) == "" {
 		return func(string) bool { return true }
 	}
 	authorization, exists, err := loadEnterpriseHookGuardianAuthorizationFile(
 		filepath.Join(authorizationDir, hookGuardianAuthorizationFile))
-	every := err != nil
+	recorded, _, recordErr := loadEnterpriseHookEnrolledAccounts(authorizationDir)
+	every := err != nil || recordErr != nil
 	if err == nil && !exists {
 		_, activationExists, activationErr := loadEnterpriseHookGuardianActivationFile(
 			filepath.Join(authorizationDir, hookGuardianActivationFile))
 		_, stateExists, stateErr := loadEnterpriseHookGuardianState(dataDir)
 		every = activationExists || activationErr != nil || stateExists || stateErr != nil
 	}
-	protected := map[string]bool{}
+	protected := recorded
 	for _, row := range authorization.ProtectedTargets {
-		if key := strings.ToUpper(strings.TrimSpace(row.SID)); key != "" {
+		if key := enterpriseHookEnrolledAccountKey(row.SID); key != "" {
 			protected[key] = true
 		}
 	}
-	return func(sid string) bool { return every || protected[strings.ToUpper(strings.TrimSpace(sid))] }
+	return func(sid string) bool { return every || protected[enterpriseHookEnrolledAccountKey(sid)] }
 }
 
 // classify reports, for a target whose canonical folder holds a per-user
@@ -3775,8 +3780,8 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 		}
 		if perUserTamper {
 			// Repaired and watched above; the account keeps its protection
-			// (a failed row of a protected target carries it forward), and
-			// status and verify name the tamper (GAP-1733 review).
+			// (below), and status and verify name the tamper (GAP-1733
+			// review).
 			err = enterpriseHookPerUserInstallTamperError(resolved.home, err)
 			row.Result = nil
 			recheck = false
@@ -3803,6 +3808,14 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 				if ledgerErr != nil {
 					ledgerUnreadable = true
 				}
+			}
+			if perUserTamper {
+				// A tamper row is a protected account's row, also when only
+				// the fail-closed rule of a removed ledger made it one: it is
+				// not unenrolled and never reads as pending, and the
+				// enrolled-accounts record carries its account into the next
+				// pass (GAP-1733 review 2).
+				protected = true
 			}
 			failures++
 			row.OK = false
@@ -5823,6 +5836,12 @@ func writeEnterpriseHookGuardianState(
 
 	authorizationDir, err := prepareEnterpriseHookAuthorizationDir(dataDir)
 	if err != nil {
+		return err
+	}
+	// The enrolled accounts are recorded first and on every pass, even one
+	// that keeps its generation: the record only grows, so a crash after it
+	// over-protects and never drops an account (GAP-1733 review 2).
+	if err := recordEnterpriseHookEnrolledAccounts(authorizationDir, now, previous.ProtectedTargets, protected, rows); err != nil {
 		return err
 	}
 	// An unchanged outcome keeps its published generation once this process

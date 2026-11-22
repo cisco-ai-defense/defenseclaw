@@ -26,6 +26,11 @@ const (
 	// the DefenseClaw per-user registrations the hook guardian still has to
 	// remove from the homes of users it no longer enrolls.
 	HookGuardianUserCleanupFile = "user-cleanup.json"
+	// HookGuardianEnrolledAccountsFile, next to the authorization ledger,
+	// lists every account the hook guardian has protected. An account stays
+	// in it after its last ledger row is gone, until its account or profile
+	// is removed, so it is never again a first adoption (GAP-1733 review 2).
+	HookGuardianEnrolledAccountsFile = "enrolled-accounts.json"
 	// HookGuardianCredentialAttestationFile, next to the ledger, is the
 	// standalone Unix guardian's root-only record of what its last reconcile
 	// did to each target and which per-user credential key it rendered from
