@@ -4,8 +4,8 @@ description: DefenseClaw for Agent Substrate actors (gateway, controller and egr
 type: application
 # The chart version follows the DefenseClaw release; the release workflow sets
 # both from its version input.
-version: 1.0.10
-appVersion: "1.0.10"
+version: 1.0.11
+appVersion: "1.0.11"
 kubeVersion: ">=1.34.0-0"
 home: https://github.com/cisco-ai-defense/defenseclaw
 sources:

@@ -23,6 +23,7 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -115,6 +116,17 @@ func managedPublishFullComponent() endpointInventoryComponent {
 		agentVersion:                "1.2.3",
 		agentProbeStatus:            "ok",
 		agentScannedAt:              "2026-09-15T10:00:00Z",
+		skillContentHash:            "sha256:" + strings.Repeat("a", 64),
+		skillContentStatus:          "ok",
+		skillFirstSeen:              "2026-11-11T09:00:00Z",
+		skillScope:                  "user",
+		skillLocation:               "~/.claude/skills/pdf",
+		skillAgents:                 []string{"claudecode"},
+		skillPublisher:              "Anthropic",
+		skillPublisherSource:        "plugin_manifest",
+		skillPlugin:                 "pr-review@official",
+		skillPluginVersion:          "1.0.1",
+		skillPluginEnabled:          &installed,
 	}
 }
 
@@ -230,6 +242,17 @@ func TestManagedInventoryDigestDetectsMeaningfulFields(t *testing.T) {
 		"agentBinaryBasename":         func(c *endpointInventoryComponent) { c.agentBinaryBasename = "codex" },
 		"agentBinaryPathHash":         func(c *endpointInventoryComponent) { c.agentBinaryPathHash = "bin-hash-2" },
 		"agentVersion":                func(c *endpointInventoryComponent) { c.agentVersion = "1.2.4" },
+		"skillContentHash":            func(c *endpointInventoryComponent) { c.skillContentHash = "sha256:" + strings.Repeat("b", 64) },
+		"skillContentStatus":          func(c *endpointInventoryComponent) { c.skillContentStatus = "too_large" },
+		"skillFirstSeen":              func(c *endpointInventoryComponent) { c.skillFirstSeen = "2026-11-11T10:00:00Z" },
+		"skillScope":                  func(c *endpointInventoryComponent) { c.skillScope = "bundled" },
+		"skillLocation":               func(c *endpointInventoryComponent) { c.skillLocation = "~/.agents/skills/pdf" },
+		"skillAgents":                 func(c *endpointInventoryComponent) { c.skillAgents = []string{"claudecode", "codex"} },
+		"skillPublisher":              func(c *endpointInventoryComponent) { c.skillPublisher = "Other" },
+		"skillPublisherSource":        func(c *endpointInventoryComponent) { c.skillPublisherSource = "declared" },
+		"skillPlugin":                 func(c *endpointInventoryComponent) { c.skillPlugin = "other@official" },
+		"skillPluginVersion":          func(c *endpointInventoryComponent) { c.skillPluginVersion = "1.0.2" },
+		"skillPluginEnabled":          func(c *endpointInventoryComponent) { c.skillPluginEnabled = nil },
 	}
 	for name, mutate := range componentCases {
 		t.Run("component/"+name, func(t *testing.T) {
@@ -547,6 +570,31 @@ func TestManagedInventoryPublishStateDegradedCycleDoesNotConsumeBundle(t *testin
 	}
 }
 
+// Outside Secure Client the daily bundle is a refresh of the operator's own
+// destinations: a forced scan cycle stamps it even when a collection was
+// partial, so a collection that stays partial does not make every scan send
+// every collection again.
+func TestOperatorInventoryDailyRefreshIsStampedByADegradedScan(t *testing.T) {
+	state := newManagedInventoryPublishState(&config.Config{DataDir: t.TempDir()})
+	now := time.Now().UTC()
+	cycle := state.beginCycle("scan-1", now, false)
+	if !cycle.forcedBundle() {
+		t.Fatal("fresh state was not forced")
+	}
+	cycle.recordPublished("collection", "digest-a", 1)
+	cycle.markDegraded()
+	cycle.commit()
+	if next := state.beginCycle("scan-2", now.Add(30*time.Minute), true); next.forcedBundle() {
+		t.Fatal("every scan after a degraded one is forced")
+	}
+	// A cycle with no scan (startup, reload) does not stamp it.
+	fresh := newManagedInventoryPublishState(&config.Config{DataDir: t.TempDir()})
+	fresh.beginCycle("", now, true).commit()
+	if !fresh.beginCycle("scan-1", now.Add(time.Minute), true).forcedBundle() {
+		t.Fatal("a cycle without a scan stamped the daily refresh")
+	}
+}
+
 // TestManagedInventoryPublishStateFutureStampIsDue: a clock that jumped forward
 // and was then corrected must not wedge the daily bundle until the skew elapses.
 func TestManagedInventoryPublishStateFutureStampIsDue(t *testing.T) {
@@ -658,14 +706,17 @@ func TestManagedInventoryPublishStateSurvivesRestart(t *testing.T) {
 // TestManagedInventoryPublishStateNilOutsideManagedEnterprise is the OSS pin:
 // no gate object, therefore no digest work and no state file, in every other
 // deployment mode.
-func TestManagedInventoryPublishStateNilOutsideManagedEnterprise(t *testing.T) {
+// Outside managed_enterprise the gate keeps only the skill inventory state,
+// in its own file, and creating it writes nothing.
+func TestManagedInventoryPublishStateOutsideManagedEnterpriseIsTheSkillState(t *testing.T) {
 	for _, mode := range []string{"", "standalone", "oss", "managed", "enterprise", "MANAGED-ENTERPRISE"} {
 		t.Run("mode="+mode, func(t *testing.T) {
 			dataDir := t.TempDir()
-			if state := newManagedInventoryPublishState(&config.Config{
+			state := newManagedInventoryPublishState(&config.Config{
 				DeploymentMode: mode, DataDir: dataDir,
-			}); state != nil {
-				t.Fatalf("mode %q produced a publish gate", mode)
+			})
+			if state == nil || state.path != filepath.Join(dataDir, endpointInventoryPublishStateFile) {
+				t.Fatalf("mode %q: publish gate %+v, want the skill inventory state", mode, state)
 			}
 			entries, err := os.ReadDir(dataDir)
 			if err != nil {

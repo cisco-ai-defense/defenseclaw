@@ -20,10 +20,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
 spec:
   podSelector:
     matchLabels:
@@ -42,10 +42,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: gateway
 spec:
   podSelector:
@@ -99,10 +99,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: leader
 spec:
   podSelector:
@@ -154,10 +154,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: callout
 spec:
   podSelector:
@@ -203,10 +203,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: controller
 spec:
   podSelector:
@@ -261,10 +261,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: gateway
 spec:
   podSelector:
@@ -304,10 +304,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: callout
 spec:
   podSelector:
@@ -338,10 +338,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: leader
 spec:
   podSelector:
@@ -369,10 +369,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: otel-collector
 spec:
   podSelector:
@@ -398,10 +398,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: callout
 spec:
   minAvailable: 1
@@ -419,10 +419,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: gateway
 spec:
   minAvailable: 1
@@ -446,10 +446,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: hooks
 automountServiceAccountToken: false
 ---
@@ -461,10 +461,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: gateway
 automountServiceAccountToken: false
 ---
@@ -476,10 +476,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: controller
 automountServiceAccountToken: false
 ---
@@ -491,10 +491,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: callout
 automountServiceAccountToken: false
 ---
@@ -506,10 +506,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: callout
 data:
   callout.yaml: |
@@ -568,10 +568,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
 data:
   config.yaml: |
     config_version: 9
@@ -650,10 +650,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: gateway
 data:
   admin_url: "https://defenseclaw.example.com"
@@ -670,10 +670,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: otel-collector
 data:
   config.yaml: |
@@ -701,10 +701,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: gateway
   annotations:
     helm.sh/resource-policy: keep
@@ -717,10 +717,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: leader
 spec:
   accessModes: [ReadWriteOnce]
@@ -743,10 +743,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: gateway
 roleRef:
   apiGroup: rbac.authorization.k8s.io
@@ -765,10 +765,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: gateway
 rules:
 - apiGroups: [""]
@@ -788,10 +788,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: gateway
 rules:
 - apiGroups: [coordination.k8s.io]
@@ -829,10 +829,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: controller
 rules:
 - apiGroups: [""]
@@ -858,10 +858,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: gateway
 rules:
 - apiGroups: [""]
@@ -881,10 +881,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: gateway
 rules:
 - apiGroups: [""]
@@ -902,10 +902,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: gateway
 roleRef:
   apiGroup: rbac.authorization.k8s.io
@@ -924,10 +924,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: gateway
 roleRef:
   apiGroup: rbac.authorization.k8s.io
@@ -946,10 +946,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: controller
 roleRef:
   apiGroup: rbac.authorization.k8s.io
@@ -969,10 +969,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: gateway
 roleRef:
   apiGroup: rbac.authorization.k8s.io
@@ -992,10 +992,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: gateway
 roleRef:
   apiGroup: rbac.authorization.k8s.io
@@ -1014,10 +1014,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: callout
 spec:
   type: ClusterIP
@@ -1046,10 +1046,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: gateway
     defenseclaw.cisco.com/listener: actor
 spec:
@@ -1073,10 +1073,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: gateway
     defenseclaw.cisco.com/listener: admin
 spec:
@@ -1099,10 +1099,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: leader
 spec:
   type: ClusterIP
@@ -1123,10 +1123,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: otel-collector
 spec:
   selector:
@@ -1148,10 +1148,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: callout
 spec:
   revisionHistoryLimit: 5
@@ -1376,10 +1376,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: controller
 spec:
   replicas: 1
@@ -1560,10 +1560,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: gateway
 spec:
   revisionHistoryLimit: 5
@@ -1848,10 +1848,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: leader
 spec:
   replicas: 1
@@ -2100,10 +2100,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: otel-collector
 spec:
   replicas: 1
@@ -2161,10 +2161,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: callout
 spec:
   scaleTargetRef:
@@ -2189,10 +2189,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: gateway
 spec:
   scaleTargetRef:
@@ -2219,10 +2219,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: gateway
 spec:
   ingressClassName: nginx
@@ -2252,10 +2252,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     release: kube-prometheus
 spec:
   groups:
@@ -2320,10 +2320,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: hooks
   annotations:
     helm.sh/hook: pre-upgrade,pre-rollback
@@ -2341,10 +2341,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: hooks
   annotations:
     helm.sh/hook: pre-install,pre-upgrade
@@ -2363,10 +2363,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: hooks
   annotations:
     helm.sh/hook: pre-install,pre-upgrade
@@ -2382,10 +2382,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: hooks
   annotations:
     helm.sh/hook: pre-upgrade,pre-rollback
@@ -2408,10 +2408,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: hooks
   annotations:
     helm.sh/hook: pre-install,pre-upgrade
@@ -2434,10 +2434,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: hooks
   annotations:
     helm.sh/hook: pre-install,pre-upgrade
@@ -2462,10 +2462,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: hooks
   annotations:
     helm.sh/hook: pre-delete
@@ -2496,10 +2496,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: hooks
   annotations:
     helm.sh/hook: pre-delete
@@ -2523,10 +2523,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: hooks
   annotations:
     helm.sh/hook: pre-upgrade,pre-rollback
@@ -2549,10 +2549,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: hooks
   annotations:
     helm.sh/hook: pre-install,pre-upgrade
@@ -2575,10 +2575,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: hooks
   annotations:
     helm.sh/hook: pre-install,pre-upgrade
@@ -2601,10 +2601,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: hooks
   annotations:
     helm.sh/hook: pre-delete
@@ -2628,10 +2628,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: hooks
   annotations:
     helm.sh/hook: pre-delete
@@ -2654,10 +2654,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: hooks
   annotations:
     helm.sh/hook: pre-install,pre-upgrade
@@ -2700,7 +2700,7 @@ spec:
         # outlive the release (Helm keeps hook resources), and each hook
         # must see its own release's plan (the target one in a rollback).
         - name: DEFENSECLAW_CHART_PLAN
-          value: "{\n  \"actor_host\": \"defenseclaw-actor.defenseclaw-system.svc.cluster.local\",\n  \"api\": {\n    \"address\": \"api.ate-system.svc:443\",\n    \"audience\": \"api.ate-system.svc\"\n  },\n  \"app_version\": \"1.0.10\",\n  \"auth_delegator_binding\": \"defenseclaw-auth-delegator-defenseclaw-system-dc\",\n  \"chart_version\": \"1.0.10\",\n  \"controller_deployment\": \"defenseclaw-controller\",\n  \"credential_provider\": {\n    \"config_map\": \"k8s-credential-provider-namespace-policy\",\n    \"deployment\": \"k8s-credential-provider\",\n    \"grant\": true,\n    \"secrets_namespace\": \"defenseclaw-actor-secrets\",\n    \"user_secrets\": true,\n    \"user_secrets_namespace\": \"defenseclaw-user-secrets\"\n  },\n  \"delete_owner_token\": true,\n  \"editors\": [\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-gateway\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-controller\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-hooks\"\n  ],\n  \"global_viewers\": [\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-gateway\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-controller\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-callout\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-hooks\"\n  ],\n  \"launcher_atespaces\": [\n    \"data-ml\",\n    \"eng-web\"\n  ],\n  \"namespace\": \"defenseclaw-system\",\n  \"owner_token_secret\": \"\",\n  \"relay_session_secret\": \"defenseclaw-relay-session\",\n  \"release\": \"dc\",\n  \"schema\": 1,\n  \"store_schema\": 1,\n  \"store_state_config_map\": \"defenseclaw-store-state\",\n  \"substrate_namespace\": \"ate-system\",\n  \"supported_versions\": \"\\u003e=1.0.0 \\u003c1.1.0\",\n  \"writable_atespaces\": [\n    \"data-ml\",\n    \"eng-web\"\n  ]\n}"
+          value: "{\n  \"actor_host\": \"defenseclaw-actor.defenseclaw-system.svc.cluster.local\",\n  \"api\": {\n    \"address\": \"api.ate-system.svc:443\",\n    \"audience\": \"api.ate-system.svc\"\n  },\n  \"app_version\": \"1.0.11\",\n  \"auth_delegator_binding\": \"defenseclaw-auth-delegator-defenseclaw-system-dc\",\n  \"chart_version\": \"1.0.11\",\n  \"controller_deployment\": \"defenseclaw-controller\",\n  \"credential_provider\": {\n    \"config_map\": \"k8s-credential-provider-namespace-policy\",\n    \"deployment\": \"k8s-credential-provider\",\n    \"grant\": true,\n    \"secrets_namespace\": \"defenseclaw-actor-secrets\",\n    \"user_secrets\": true,\n    \"user_secrets_namespace\": \"defenseclaw-user-secrets\"\n  },\n  \"delete_owner_token\": true,\n  \"editors\": [\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-gateway\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-controller\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-hooks\"\n  ],\n  \"global_viewers\": [\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-gateway\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-controller\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-callout\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-hooks\"\n  ],\n  \"launcher_atespaces\": [\n    \"data-ml\",\n    \"eng-web\"\n  ],\n  \"namespace\": \"defenseclaw-system\",\n  \"owner_token_secret\": \"\",\n  \"relay_session_secret\": \"defenseclaw-relay-session\",\n  \"release\": \"dc\",\n  \"schema\": 1,\n  \"store_schema\": 1,\n  \"store_state_config_map\": \"defenseclaw-store-state\",\n  \"substrate_namespace\": \"ate-system\",\n  \"supported_versions\": \"\\u003e=1.0.0 \\u003c1.1.0\",\n  \"writable_atespaces\": [\n    \"data-ml\",\n    \"eng-web\"\n  ]\n}"
         - name: DEFENSECLAW_CHART_CONFIG
           value: "config_version: 9\nobservability:\n  defaults:\n    redaction_profile: sensitive\n  destinations:\n  - endpoint: http://defenseclaw-otel-collector.defenseclaw-system.svc:4318\n    kind: otlp\n    name: chart-collector\n    network_safety:\n      allow_private_networks: true\n    protocol: http/protobuf\n    tls:\n      insecure: true\n  local:\n    max_store_mb: 1024\nsubstrate:\n  api:\n    address: api.ate-system.svc:443\n    auth: serviceaccount\n    ca_file: /var/run/ate/ca.crt\n    server_name: api.ate-system.svc\n    token_file: /var/run/ate/token\n  default_sandbox_class: gvisor\n  egress:\n    allow:\n    - github.com\n    - pypi.org\n  enabled: true\n  extproc:\n    actor_secrets_dir: /run/defenseclaw/actor-secrets\n    body_inspection: auto\n    body_max_bytes: 1048576\n    enabled: true\n    failure_mode: closed\n    mcp_hosts:\n    - mcp.example.com=tickets\n  identity:\n    audience: defenseclaw\n    issuer: https://idp.cluster-a.example\n    token_lifetime_seconds: 300\n  idle_suspend_after: 30m\n  launcher_atespaces:\n    data:\n    - data-ml\n    engineering:\n    - eng-web\n  require_attested_templates: true\n  secrets:\n  - inject:\n      header: Authorization\n      hosts:\n      - github.com\n      - api.github.com\n      placeholder: DC_SECRET_GITHUB\n      prefix: 'Bearer '\n    name: github-push\n    profiles:\n    - engineering\n    scope: shared\n    source: ate-secret://k8s.io/default/defenseclaw-actor-secrets/github-app/token\n  services:\n    actor: defenseclaw-actor.defenseclaw-system.svc.cluster.local\n    admin: defenseclaw-admin.defenseclaw-system.svc.cluster.local\n  supported_versions: '>=1.0.0 <1.1.0'\n  unattended:\n    ask_timeout: 30m\n    asks: deny"
         - name: DEFENSECLAW_HOME
@@ -2770,10 +2770,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: hooks
   annotations:
     helm.sh/hook: pre-install,pre-upgrade
@@ -2816,7 +2816,7 @@ spec:
         # outlive the release (Helm keeps hook resources), and each hook
         # must see its own release's plan (the target one in a rollback).
         - name: DEFENSECLAW_CHART_PLAN
-          value: "{\n  \"actor_host\": \"defenseclaw-actor.defenseclaw-system.svc.cluster.local\",\n  \"api\": {\n    \"address\": \"api.ate-system.svc:443\",\n    \"audience\": \"api.ate-system.svc\"\n  },\n  \"app_version\": \"1.0.10\",\n  \"auth_delegator_binding\": \"defenseclaw-auth-delegator-defenseclaw-system-dc\",\n  \"chart_version\": \"1.0.10\",\n  \"controller_deployment\": \"defenseclaw-controller\",\n  \"credential_provider\": {\n    \"config_map\": \"k8s-credential-provider-namespace-policy\",\n    \"deployment\": \"k8s-credential-provider\",\n    \"grant\": true,\n    \"secrets_namespace\": \"defenseclaw-actor-secrets\",\n    \"user_secrets\": true,\n    \"user_secrets_namespace\": \"defenseclaw-user-secrets\"\n  },\n  \"delete_owner_token\": true,\n  \"editors\": [\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-gateway\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-controller\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-hooks\"\n  ],\n  \"global_viewers\": [\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-gateway\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-controller\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-callout\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-hooks\"\n  ],\n  \"launcher_atespaces\": [\n    \"data-ml\",\n    \"eng-web\"\n  ],\n  \"namespace\": \"defenseclaw-system\",\n  \"owner_token_secret\": \"\",\n  \"relay_session_secret\": \"defenseclaw-relay-session\",\n  \"release\": \"dc\",\n  \"schema\": 1,\n  \"store_schema\": 1,\n  \"store_state_config_map\": \"defenseclaw-store-state\",\n  \"substrate_namespace\": \"ate-system\",\n  \"supported_versions\": \"\\u003e=1.0.0 \\u003c1.1.0\",\n  \"writable_atespaces\": [\n    \"data-ml\",\n    \"eng-web\"\n  ]\n}"
+          value: "{\n  \"actor_host\": \"defenseclaw-actor.defenseclaw-system.svc.cluster.local\",\n  \"api\": {\n    \"address\": \"api.ate-system.svc:443\",\n    \"audience\": \"api.ate-system.svc\"\n  },\n  \"app_version\": \"1.0.11\",\n  \"auth_delegator_binding\": \"defenseclaw-auth-delegator-defenseclaw-system-dc\",\n  \"chart_version\": \"1.0.11\",\n  \"controller_deployment\": \"defenseclaw-controller\",\n  \"credential_provider\": {\n    \"config_map\": \"k8s-credential-provider-namespace-policy\",\n    \"deployment\": \"k8s-credential-provider\",\n    \"grant\": true,\n    \"secrets_namespace\": \"defenseclaw-actor-secrets\",\n    \"user_secrets\": true,\n    \"user_secrets_namespace\": \"defenseclaw-user-secrets\"\n  },\n  \"delete_owner_token\": true,\n  \"editors\": [\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-gateway\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-controller\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-hooks\"\n  ],\n  \"global_viewers\": [\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-gateway\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-controller\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-callout\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-hooks\"\n  ],\n  \"launcher_atespaces\": [\n    \"data-ml\",\n    \"eng-web\"\n  ],\n  \"namespace\": \"defenseclaw-system\",\n  \"owner_token_secret\": \"\",\n  \"relay_session_secret\": \"defenseclaw-relay-session\",\n  \"release\": \"dc\",\n  \"schema\": 1,\n  \"store_schema\": 1,\n  \"store_state_config_map\": \"defenseclaw-store-state\",\n  \"substrate_namespace\": \"ate-system\",\n  \"supported_versions\": \"\\u003e=1.0.0 \\u003c1.1.0\",\n  \"writable_atespaces\": [\n    \"data-ml\",\n    \"eng-web\"\n  ]\n}"
         - name: DEFENSECLAW_CHART_CONFIG
           value: "config_version: 9\nobservability:\n  defaults:\n    redaction_profile: sensitive\n  destinations:\n  - endpoint: http://defenseclaw-otel-collector.defenseclaw-system.svc:4318\n    kind: otlp\n    name: chart-collector\n    network_safety:\n      allow_private_networks: true\n    protocol: http/protobuf\n    tls:\n      insecure: true\n  local:\n    max_store_mb: 1024\nsubstrate:\n  api:\n    address: api.ate-system.svc:443\n    auth: serviceaccount\n    ca_file: /var/run/ate/ca.crt\n    server_name: api.ate-system.svc\n    token_file: /var/run/ate/token\n  default_sandbox_class: gvisor\n  egress:\n    allow:\n    - github.com\n    - pypi.org\n  enabled: true\n  extproc:\n    actor_secrets_dir: /run/defenseclaw/actor-secrets\n    body_inspection: auto\n    body_max_bytes: 1048576\n    enabled: true\n    failure_mode: closed\n    mcp_hosts:\n    - mcp.example.com=tickets\n  identity:\n    audience: defenseclaw\n    issuer: https://idp.cluster-a.example\n    token_lifetime_seconds: 300\n  idle_suspend_after: 30m\n  launcher_atespaces:\n    data:\n    - data-ml\n    engineering:\n    - eng-web\n  require_attested_templates: true\n  secrets:\n  - inject:\n      header: Authorization\n      hosts:\n      - github.com\n      - api.github.com\n      placeholder: DC_SECRET_GITHUB\n      prefix: 'Bearer '\n    name: github-push\n    profiles:\n    - engineering\n    scope: shared\n    source: ate-secret://k8s.io/default/defenseclaw-actor-secrets/github-app/token\n  services:\n    actor: defenseclaw-actor.defenseclaw-system.svc.cluster.local\n    admin: defenseclaw-admin.defenseclaw-system.svc.cluster.local\n  supported_versions: '>=1.0.0 <1.1.0'\n  unattended:\n    ask_timeout: 30m\n    asks: deny"
         - name: DEFENSECLAW_HOME
@@ -2886,10 +2886,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: hooks
   annotations:
     helm.sh/hook: pre-upgrade
@@ -2932,7 +2932,7 @@ spec:
         # outlive the release (Helm keeps hook resources), and each hook
         # must see its own release's plan (the target one in a rollback).
         - name: DEFENSECLAW_CHART_PLAN
-          value: "{\n  \"actor_host\": \"defenseclaw-actor.defenseclaw-system.svc.cluster.local\",\n  \"api\": {\n    \"address\": \"api.ate-system.svc:443\",\n    \"audience\": \"api.ate-system.svc\"\n  },\n  \"app_version\": \"1.0.10\",\n  \"auth_delegator_binding\": \"defenseclaw-auth-delegator-defenseclaw-system-dc\",\n  \"chart_version\": \"1.0.10\",\n  \"controller_deployment\": \"defenseclaw-controller\",\n  \"credential_provider\": {\n    \"config_map\": \"k8s-credential-provider-namespace-policy\",\n    \"deployment\": \"k8s-credential-provider\",\n    \"grant\": true,\n    \"secrets_namespace\": \"defenseclaw-actor-secrets\",\n    \"user_secrets\": true,\n    \"user_secrets_namespace\": \"defenseclaw-user-secrets\"\n  },\n  \"delete_owner_token\": true,\n  \"editors\": [\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-gateway\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-controller\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-hooks\"\n  ],\n  \"global_viewers\": [\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-gateway\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-controller\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-callout\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-hooks\"\n  ],\n  \"launcher_atespaces\": [\n    \"data-ml\",\n    \"eng-web\"\n  ],\n  \"namespace\": \"defenseclaw-system\",\n  \"owner_token_secret\": \"\",\n  \"relay_session_secret\": \"defenseclaw-relay-session\",\n  \"release\": \"dc\",\n  \"schema\": 1,\n  \"store_schema\": 1,\n  \"store_state_config_map\": \"defenseclaw-store-state\",\n  \"substrate_namespace\": \"ate-system\",\n  \"supported_versions\": \"\\u003e=1.0.0 \\u003c1.1.0\",\n  \"writable_atespaces\": [\n    \"data-ml\",\n    \"eng-web\"\n  ]\n}"
+          value: "{\n  \"actor_host\": \"defenseclaw-actor.defenseclaw-system.svc.cluster.local\",\n  \"api\": {\n    \"address\": \"api.ate-system.svc:443\",\n    \"audience\": \"api.ate-system.svc\"\n  },\n  \"app_version\": \"1.0.11\",\n  \"auth_delegator_binding\": \"defenseclaw-auth-delegator-defenseclaw-system-dc\",\n  \"chart_version\": \"1.0.11\",\n  \"controller_deployment\": \"defenseclaw-controller\",\n  \"credential_provider\": {\n    \"config_map\": \"k8s-credential-provider-namespace-policy\",\n    \"deployment\": \"k8s-credential-provider\",\n    \"grant\": true,\n    \"secrets_namespace\": \"defenseclaw-actor-secrets\",\n    \"user_secrets\": true,\n    \"user_secrets_namespace\": \"defenseclaw-user-secrets\"\n  },\n  \"delete_owner_token\": true,\n  \"editors\": [\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-gateway\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-controller\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-hooks\"\n  ],\n  \"global_viewers\": [\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-gateway\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-controller\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-callout\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-hooks\"\n  ],\n  \"launcher_atespaces\": [\n    \"data-ml\",\n    \"eng-web\"\n  ],\n  \"namespace\": \"defenseclaw-system\",\n  \"owner_token_secret\": \"\",\n  \"relay_session_secret\": \"defenseclaw-relay-session\",\n  \"release\": \"dc\",\n  \"schema\": 1,\n  \"store_schema\": 1,\n  \"store_state_config_map\": \"defenseclaw-store-state\",\n  \"substrate_namespace\": \"ate-system\",\n  \"supported_versions\": \"\\u003e=1.0.0 \\u003c1.1.0\",\n  \"writable_atespaces\": [\n    \"data-ml\",\n    \"eng-web\"\n  ]\n}"
         - name: DEFENSECLAW_CHART_CONFIG
           value: "config_version: 9\nobservability:\n  defaults:\n    redaction_profile: sensitive\n  destinations:\n  - endpoint: http://defenseclaw-otel-collector.defenseclaw-system.svc:4318\n    kind: otlp\n    name: chart-collector\n    network_safety:\n      allow_private_networks: true\n    protocol: http/protobuf\n    tls:\n      insecure: true\n  local:\n    max_store_mb: 1024\nsubstrate:\n  api:\n    address: api.ate-system.svc:443\n    auth: serviceaccount\n    ca_file: /var/run/ate/ca.crt\n    server_name: api.ate-system.svc\n    token_file: /var/run/ate/token\n  default_sandbox_class: gvisor\n  egress:\n    allow:\n    - github.com\n    - pypi.org\n  enabled: true\n  extproc:\n    actor_secrets_dir: /run/defenseclaw/actor-secrets\n    body_inspection: auto\n    body_max_bytes: 1048576\n    enabled: true\n    failure_mode: closed\n    mcp_hosts:\n    - mcp.example.com=tickets\n  identity:\n    audience: defenseclaw\n    issuer: https://idp.cluster-a.example\n    token_lifetime_seconds: 300\n  idle_suspend_after: 30m\n  launcher_atespaces:\n    data:\n    - data-ml\n    engineering:\n    - eng-web\n  require_attested_templates: true\n  secrets:\n  - inject:\n      header: Authorization\n      hosts:\n      - github.com\n      - api.github.com\n      placeholder: DC_SECRET_GITHUB\n      prefix: 'Bearer '\n    name: github-push\n    profiles:\n    - engineering\n    scope: shared\n    source: ate-secret://k8s.io/default/defenseclaw-actor-secrets/github-app/token\n  services:\n    actor: defenseclaw-actor.defenseclaw-system.svc.cluster.local\n    admin: defenseclaw-admin.defenseclaw-system.svc.cluster.local\n  supported_versions: '>=1.0.0 <1.1.0'\n  unattended:\n    ask_timeout: 30m\n    asks: deny"
         - name: DEFENSECLAW_HOME
@@ -3002,10 +3002,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: hooks
   annotations:
     helm.sh/hook: pre-rollback
@@ -3048,7 +3048,7 @@ spec:
         # outlive the release (Helm keeps hook resources), and each hook
         # must see its own release's plan (the target one in a rollback).
         - name: DEFENSECLAW_CHART_PLAN
-          value: "{\n  \"actor_host\": \"defenseclaw-actor.defenseclaw-system.svc.cluster.local\",\n  \"api\": {\n    \"address\": \"api.ate-system.svc:443\",\n    \"audience\": \"api.ate-system.svc\"\n  },\n  \"app_version\": \"1.0.10\",\n  \"auth_delegator_binding\": \"defenseclaw-auth-delegator-defenseclaw-system-dc\",\n  \"chart_version\": \"1.0.10\",\n  \"controller_deployment\": \"defenseclaw-controller\",\n  \"credential_provider\": {\n    \"config_map\": \"k8s-credential-provider-namespace-policy\",\n    \"deployment\": \"k8s-credential-provider\",\n    \"grant\": true,\n    \"secrets_namespace\": \"defenseclaw-actor-secrets\",\n    \"user_secrets\": true,\n    \"user_secrets_namespace\": \"defenseclaw-user-secrets\"\n  },\n  \"delete_owner_token\": true,\n  \"editors\": [\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-gateway\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-controller\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-hooks\"\n  ],\n  \"global_viewers\": [\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-gateway\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-controller\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-callout\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-hooks\"\n  ],\n  \"launcher_atespaces\": [\n    \"data-ml\",\n    \"eng-web\"\n  ],\n  \"namespace\": \"defenseclaw-system\",\n  \"owner_token_secret\": \"\",\n  \"relay_session_secret\": \"defenseclaw-relay-session\",\n  \"release\": \"dc\",\n  \"schema\": 1,\n  \"store_schema\": 1,\n  \"store_state_config_map\": \"defenseclaw-store-state\",\n  \"substrate_namespace\": \"ate-system\",\n  \"supported_versions\": \"\\u003e=1.0.0 \\u003c1.1.0\",\n  \"writable_atespaces\": [\n    \"data-ml\",\n    \"eng-web\"\n  ]\n}"
+          value: "{\n  \"actor_host\": \"defenseclaw-actor.defenseclaw-system.svc.cluster.local\",\n  \"api\": {\n    \"address\": \"api.ate-system.svc:443\",\n    \"audience\": \"api.ate-system.svc\"\n  },\n  \"app_version\": \"1.0.11\",\n  \"auth_delegator_binding\": \"defenseclaw-auth-delegator-defenseclaw-system-dc\",\n  \"chart_version\": \"1.0.11\",\n  \"controller_deployment\": \"defenseclaw-controller\",\n  \"credential_provider\": {\n    \"config_map\": \"k8s-credential-provider-namespace-policy\",\n    \"deployment\": \"k8s-credential-provider\",\n    \"grant\": true,\n    \"secrets_namespace\": \"defenseclaw-actor-secrets\",\n    \"user_secrets\": true,\n    \"user_secrets_namespace\": \"defenseclaw-user-secrets\"\n  },\n  \"delete_owner_token\": true,\n  \"editors\": [\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-gateway\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-controller\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-hooks\"\n  ],\n  \"global_viewers\": [\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-gateway\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-controller\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-callout\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-hooks\"\n  ],\n  \"launcher_atespaces\": [\n    \"data-ml\",\n    \"eng-web\"\n  ],\n  \"namespace\": \"defenseclaw-system\",\n  \"owner_token_secret\": \"\",\n  \"relay_session_secret\": \"defenseclaw-relay-session\",\n  \"release\": \"dc\",\n  \"schema\": 1,\n  \"store_schema\": 1,\n  \"store_state_config_map\": \"defenseclaw-store-state\",\n  \"substrate_namespace\": \"ate-system\",\n  \"supported_versions\": \"\\u003e=1.0.0 \\u003c1.1.0\",\n  \"writable_atespaces\": [\n    \"data-ml\",\n    \"eng-web\"\n  ]\n}"
         - name: DEFENSECLAW_CHART_CONFIG
           value: "config_version: 9\nobservability:\n  defaults:\n    redaction_profile: sensitive\n  destinations:\n  - endpoint: http://defenseclaw-otel-collector.defenseclaw-system.svc:4318\n    kind: otlp\n    name: chart-collector\n    network_safety:\n      allow_private_networks: true\n    protocol: http/protobuf\n    tls:\n      insecure: true\n  local:\n    max_store_mb: 1024\nsubstrate:\n  api:\n    address: api.ate-system.svc:443\n    auth: serviceaccount\n    ca_file: /var/run/ate/ca.crt\n    server_name: api.ate-system.svc\n    token_file: /var/run/ate/token\n  default_sandbox_class: gvisor\n  egress:\n    allow:\n    - github.com\n    - pypi.org\n  enabled: true\n  extproc:\n    actor_secrets_dir: /run/defenseclaw/actor-secrets\n    body_inspection: auto\n    body_max_bytes: 1048576\n    enabled: true\n    failure_mode: closed\n    mcp_hosts:\n    - mcp.example.com=tickets\n  identity:\n    audience: defenseclaw\n    issuer: https://idp.cluster-a.example\n    token_lifetime_seconds: 300\n  idle_suspend_after: 30m\n  launcher_atespaces:\n    data:\n    - data-ml\n    engineering:\n    - eng-web\n  require_attested_templates: true\n  secrets:\n  - inject:\n      header: Authorization\n      hosts:\n      - github.com\n      - api.github.com\n      placeholder: DC_SECRET_GITHUB\n      prefix: 'Bearer '\n    name: github-push\n    profiles:\n    - engineering\n    scope: shared\n    source: ate-secret://k8s.io/default/defenseclaw-actor-secrets/github-app/token\n  services:\n    actor: defenseclaw-actor.defenseclaw-system.svc.cluster.local\n    admin: defenseclaw-admin.defenseclaw-system.svc.cluster.local\n  supported_versions: '>=1.0.0 <1.1.0'\n  unattended:\n    ask_timeout: 30m\n    asks: deny"
         - name: DEFENSECLAW_HOME
@@ -3118,10 +3118,10 @@ metadata:
   labels:
     app.kubernetes.io/name: defenseclaw-substrate
     app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/version: "1.0.11"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
+    helm.sh/chart: defenseclaw-substrate-1.0.11
     app.kubernetes.io/component: hooks
   annotations:
     helm.sh/hook: pre-delete
@@ -3164,7 +3164,7 @@ spec:
         # outlive the release (Helm keeps hook resources), and each hook
         # must see its own release's plan (the target one in a rollback).
         - name: DEFENSECLAW_CHART_PLAN
-          value: "{\n  \"actor_host\": \"defenseclaw-actor.defenseclaw-system.svc.cluster.local\",\n  \"api\": {\n    \"address\": \"api.ate-system.svc:443\",\n    \"audience\": \"api.ate-system.svc\"\n  },\n  \"app_version\": \"1.0.10\",\n  \"auth_delegator_binding\": \"defenseclaw-auth-delegator-defenseclaw-system-dc\",\n  \"chart_version\": \"1.0.10\",\n  \"controller_deployment\": \"defenseclaw-controller\",\n  \"credential_provider\": {\n    \"config_map\": \"k8s-credential-provider-namespace-policy\",\n    \"deployment\": \"k8s-credential-provider\",\n    \"grant\": true,\n    \"secrets_namespace\": \"defenseclaw-actor-secrets\",\n    \"user_secrets\": true,\n    \"user_secrets_namespace\": \"defenseclaw-user-secrets\"\n  },\n  \"delete_owner_token\": true,\n  \"editors\": [\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-gateway\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-controller\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-hooks\"\n  ],\n  \"global_viewers\": [\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-gateway\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-controller\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-callout\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-hooks\"\n  ],\n  \"launcher_atespaces\": [\n    \"data-ml\",\n    \"eng-web\"\n  ],\n  \"namespace\": \"defenseclaw-system\",\n  \"owner_token_secret\": \"\",\n  \"relay_session_secret\": \"defenseclaw-relay-session\",\n  \"release\": \"dc\",\n  \"schema\": 1,\n  \"store_schema\": 1,\n  \"store_state_config_map\": \"defenseclaw-store-state\",\n  \"substrate_namespace\": \"ate-system\",\n  \"supported_versions\": \"\\u003e=1.0.0 \\u003c1.1.0\",\n  \"writable_atespaces\": [\n    \"data-ml\",\n    \"eng-web\"\n  ]\n}"
+          value: "{\n  \"actor_host\": \"defenseclaw-actor.defenseclaw-system.svc.cluster.local\",\n  \"api\": {\n    \"address\": \"api.ate-system.svc:443\",\n    \"audience\": \"api.ate-system.svc\"\n  },\n  \"app_version\": \"1.0.11\",\n  \"auth_delegator_binding\": \"defenseclaw-auth-delegator-defenseclaw-system-dc\",\n  \"chart_version\": \"1.0.11\",\n  \"controller_deployment\": \"defenseclaw-controller\",\n  \"credential_provider\": {\n    \"config_map\": \"k8s-credential-provider-namespace-policy\",\n    \"deployment\": \"k8s-credential-provider\",\n    \"grant\": true,\n    \"secrets_namespace\": \"defenseclaw-actor-secrets\",\n    \"user_secrets\": true,\n    \"user_secrets_namespace\": \"defenseclaw-user-secrets\"\n  },\n  \"delete_owner_token\": true,\n  \"editors\": [\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-gateway\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-controller\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-hooks\"\n  ],\n  \"global_viewers\": [\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-gateway\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-controller\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-callout\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-hooks\"\n  ],\n  \"launcher_atespaces\": [\n    \"data-ml\",\n    \"eng-web\"\n  ],\n  \"namespace\": \"defenseclaw-system\",\n  \"owner_token_secret\": \"\",\n  \"relay_session_secret\": \"defenseclaw-relay-session\",\n  \"release\": \"dc\",\n  \"schema\": 1,\n  \"store_schema\": 1,\n  \"store_state_config_map\": \"defenseclaw-store-state\",\n  \"substrate_namespace\": \"ate-system\",\n  \"supported_versions\": \"\\u003e=1.0.0 \\u003c1.1.0\",\n  \"writable_atespaces\": [\n    \"data-ml\",\n    \"eng-web\"\n  ]\n}"
         - name: DEFENSECLAW_CHART_CONFIG
           value: "config_version: 9\nobservability:\n  defaults:\n    redaction_profile: sensitive\n  destinations:\n  - endpoint: http://defenseclaw-otel-collector.defenseclaw-system.svc:4318\n    kind: otlp\n    name: chart-collector\n    network_safety:\n      allow_private_networks: true\n    protocol: http/protobuf\n    tls:\n      insecure: true\n  local:\n    max_store_mb: 1024\nsubstrate:\n  api:\n    address: api.ate-system.svc:443\n    auth: serviceaccount\n    ca_file: /var/run/ate/ca.crt\n    server_name: api.ate-system.svc\n    token_file: /var/run/ate/token\n  default_sandbox_class: gvisor\n  egress:\n    allow:\n    - github.com\n    - pypi.org\n  enabled: true\n  extproc:\n    actor_secrets_dir: /run/defenseclaw/actor-secrets\n    body_inspection: auto\n    body_max_bytes: 1048576\n    enabled: true\n    failure_mode: closed\n    mcp_hosts:\n    - mcp.example.com=tickets\n  identity:\n    audience: defenseclaw\n    issuer: https://idp.cluster-a.example\n    token_lifetime_seconds: 300\n  idle_suspend_after: 30m\n  launcher_atespaces:\n    data:\n    - data-ml\n    engineering:\n    - eng-web\n  require_attested_templates: true\n  secrets:\n  - inject:\n      header: Authorization\n      hosts:\n      - github.com\n      - api.github.com\n      placeholder: DC_SECRET_GITHUB\n      prefix: 'Bearer '\n    name: github-push\n    profiles:\n    - engineering\n    scope: shared\n    source: ate-secret://k8s.io/default/defenseclaw-actor-secrets/github-app/token\n  services:\n    actor: defenseclaw-actor.defenseclaw-system.svc.cluster.local\n    admin: defenseclaw-admin.defenseclaw-system.svc.cluster.local\n  supported_versions: '>=1.0.0 <1.1.0'\n  unattended:\n    ask_timeout: 30m\n    asks: deny"
         - name: DEFENSECLAW_HOME

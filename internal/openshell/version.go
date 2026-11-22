@@ -21,7 +21,7 @@ import (
 	"strconv"
 	"strings"
 
-	v1 "github.com/NVIDIA/OpenShell/sdk/go/openshell/v1"
+	v1 "github.com/ai-openshell/sdk-go/openshell/v1"
 )
 
 // Supported OpenShell releases. 0.1.0 broke every 0.0.x peer, and the
