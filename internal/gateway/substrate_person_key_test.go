@@ -88,3 +88,27 @@ func TestSubstrateCallerKeyIncludesIssuer(t *testing.T) {
 		t.Fatalf("host caller key %q, want 1001", c.Key)
 	}
 }
+
+// TestSubstrateRouteActorFromRegistration: routing.admin reads an actor
+// call's registration key and match.substrate facts from the verified
+// registration (never headers); a workload actor names its workload, and a
+// host call has no actor.
+func TestSubstrateRouteActorFromRegistration(t *testing.T) {
+	prev := identityFactsEnabled.Load()
+	t.Cleanup(func() { setIdentityFactsEnabled(prev) })
+	setIdentityFactsEnabled(true)
+
+	human := identity.Person{Kind: identity.PersonHuman, Issuer: "https://idp-a.example", Subject: "alice"}
+	caller, _ := routeCallerFromContext(substrateActorCallContext(t, human, "fix-login", "4f9c3a1e-8d2b-4c77-9e0a-6b5f1d2c3e4a"))
+	if a := caller.Actor; a == nil || !a.Person || a.Atespace != "eng-web" || a.Workload != "" || !strings.HasPrefix(a.Key, sandboxreg.SubstrateKeyPrefix) {
+		t.Fatalf("person actor facts = %+v", a)
+	}
+	workload := identity.Person{Kind: identity.PersonWorkload, Issuer: "https://k8s.example", Subject: "system:serviceaccount:ci:runner"}
+	caller, _ = routeCallerFromContext(substrateActorCallContext(t, workload, "nightly", "5f9c3a1e-8d2b-4c77-9e0a-6b5f1d2c3e4b"))
+	if a := caller.Actor; a == nil || !a.Person || a.Workload != workload.Subject {
+		t.Fatalf("workload actor facts = %+v", a)
+	}
+	if c, _ := routeCallerFromContext(context.Background()); c.Actor != nil {
+		t.Fatalf("a host call has an actor: %+v", c.Actor)
+	}
+}

@@ -20,7 +20,6 @@ import (
 	"context"
 	"fmt"
 	"net/url"
-	"path"
 	"slices"
 	"sort"
 	"strings"
@@ -185,24 +184,10 @@ func (r *ConfigResolver) ManagedAtespaces() []string {
 	return out
 }
 
+// substrateMatches applies the shared match.substrate matcher
+// (config.ProfileMatchSubstrate.Matches) to a registration.
 func substrateMatches(m *config.ProfileMatchSubstrate, reg Registration, owned bool) (bool, string) {
-	warn := ""
-	if len(m.Atespaces) > 0 {
-		ok, w := MatchAtespace(m.Atespaces, reg.Atespace, owned)
-		if !ok {
-			return false, w
-		}
-	}
-	if len(m.Templates) > 0 && !slices.ContainsFunc(m.Templates, func(p string) bool {
-		ok, err := path.Match(p, reg.Template)
-		return err == nil && ok
-	}) {
-		return false, warn
-	}
-	if len(m.Workloads) > 0 && (reg.Workload == "" || !slices.Contains(m.Workloads, reg.Workload)) {
-		return false, warn
-	}
-	return true, ""
+	return m.Matches(config.SubstrateActorFacts{Atespace: reg.Atespace, Template: reg.Template, Workload: reg.Workload, AtespaceOwned: owned})
 }
 
 func (r *ConfigResolver) warnOnce(k string) bool {
@@ -216,27 +201,6 @@ func (r *ConfigResolver) warnOnce(k string) bool {
 	}
 	r.warned[k] = true
 	return true
-}
-
-// MatchAtespace applies E3: an exact name matches; a glob matches only an
-// owned atespace and otherwise returns a warning.
-func MatchAtespace(patterns []string, atespace string, owned bool) (bool, string) {
-	warn := ""
-	for _, p := range patterns {
-		if p == atespace {
-			return true, ""
-		}
-		if !strings.ContainsAny(p, "*?[") {
-			continue
-		}
-		if ok, err := path.Match(p, atespace); err == nil && ok {
-			if owned {
-				return true, ""
-			}
-			warn = fmt.Sprintf("atespace %s matches the glob %q but DefenseClaw neither created nor lists it; the profile does not apply (list it by name)", atespace, p)
-		}
-	}
-	return false, warn
 }
 
 // MemoryRegistry is an in-process Registry.

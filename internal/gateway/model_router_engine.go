@@ -483,6 +483,9 @@ func routeCallerFromContext(ctx context.Context) (engine.Caller, []string) {
 		facts := profileSubjectFromVerified(s, identityLookupBlocking.Load())
 		caller.LookupFailed, caller.GroupsUnknown = facts.LookupFailed, facts.GroupsUnknown
 	}
+	// An actor call names its actor whether or not a person owns it: an
+	// attributed actor is still an actor call (enforced, actor budgets).
+	caller.Actor = substrateRouteActor(ctx)
 	resolved := resolvedGuardrailProfileFrom(ctx)
 	if resolved == nil || !caller.Verified {
 		return caller, nil

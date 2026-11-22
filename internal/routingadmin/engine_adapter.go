@@ -305,6 +305,7 @@ func (rt *Runtime) For(cfg *config.Config) engine.AdminEvaluator {
 	rt.mu.Unlock()
 	a := cfg.Routing.Admin
 	policy := Compile(a.Rules, a.Budgets, cfg.StandaloneEnterprise())
+	policy.SetLauncherAtespaces(cfg.Substrate.LauncherAtespaces)
 	if policy == nil {
 		rt.mu.Lock()
 		rt.last, rt.lastEv = cfg, nil
@@ -585,7 +586,8 @@ func (e *evaluator) Policy() *Policy { return e.policy }
 // Evaluate narrows p by the rules and budgets that apply to r.
 func (e *evaluator) Evaluate(_ context.Context, p engine.Policy, r engine.Request, category string, classifierFailed bool) engine.AdminVerdict {
 	req := Request{
-		Caller:           CallerFromEngine(r.Caller, e.policy.Managed),
+		Caller:           CallerFromEngine(r.Caller, e.policy.Managed || r.Caller.Actor != nil),
+		Actor:            r.Caller.Actor,
 		Connector:        config.NormalizeConnectorName(r.Connector),
 		Category:         category,
 		ClassifierFailed: classifierFailed,
@@ -624,9 +626,10 @@ func (e *evaluator) Gate(v engine.AdminVerdict, target engine.GateTarget, manage
 
 // CallerFromEngine maps the engine caller. On OSS every request of a
 // per-user gateway is its owner's: one key for * budgets, and identity
-// selectors (meant for managed multi-user devices) do not match.
-func CallerFromEngine(c engine.Caller, managed bool) Caller {
-	if !managed {
+// selectors (meant for managed multi-user devices) do not match. perCaller
+// is true on a managed device and for an actor call (its person key).
+func CallerFromEngine(c engine.Caller, perCaller bool) Caller {
+	if !perCaller {
 		return Caller{Verified: true, Key: OwnerKey, Match: func(config.ProfileMatch) MatchState { return No }}
 	}
 	out := Caller{Verified: c.Verified, Key: c.Key}
@@ -683,7 +686,7 @@ func ToEngineVerdict(p engine.Policy, v Verdict) engine.AdminVerdict {
 		}
 	}
 	out := engine.AdminVerdict{Policy: narrowed, Bind: v.Bind, Force: clone(v.Force), Warnings: clone(v.Warnings),
-		RuleIDs: clone(v.RuleIDs), BindRuleIDs: clone(v.BindRuleIDs), ChargeKeys: clone(v.ChargeKeys)}
+		RuleIDs: clone(v.RuleIDs), BindRuleIDs: clone(v.BindRuleIDs), ChargeKeys: clone(v.ChargeKeys), Enforce: v.Enforce}
 	if v.Deny != nil {
 		out.Deny = &engine.DenyReason{Code: v.Deny.Code, Message: v.Deny.Message}
 	}

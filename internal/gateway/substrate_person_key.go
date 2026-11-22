@@ -14,6 +14,8 @@ import (
 	"context"
 
 	"github.com/defenseclaw/defenseclaw/internal/modelusage"
+	"github.com/defenseclaw/defenseclaw/internal/routing/engine"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/identity"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/registry"
 )
 
@@ -46,4 +48,25 @@ func substrateUsageOwner(p registry.Person) string {
 		return ""
 	}
 	return modelusage.OwnerID(modelusage.CallFacts{Subject: key, SubjectKind: substrateUsageOwnerKind, IdentityVerified: true})
+}
+
+// substrateRouteActor is the routing.admin view of a verified actor call:
+// its registration key and match.substrate facts, from the registration
+// on the actor listener context, never from headers. Nil for a host call.
+func substrateRouteActor(ctx context.Context) *engine.Actor {
+	if !isSubstrateActorRequest(ctx) {
+		return nil
+	}
+	reg, ok := substrateRegistrationFrom(ctx)
+	if !ok || reg.Key == "" {
+		return nil
+	}
+	a := &engine.Actor{Key: reg.Key, Atespace: reg.Atespace, Template: reg.Template}
+	if !reg.Attributed && reg.Person.Key() != "" {
+		a.Person = true
+		if reg.Person.Kind == identity.PersonWorkload {
+			a.Workload = reg.Person.Subject
+		}
+	}
+	return a
 }
