@@ -124,10 +124,15 @@ type Options struct {
 	// ReconnectFor bounds how long a lost connection is retried, as when
 	// the agent is suspended and resumes (default 3m, GAP-0003).
 	ReconnectFor time.Duration
-	Now          func() time.Time
-	Sleep        func(context.Context, time.Duration) error
-	NoBanner     bool
-	NoAsks       bool
+	// KeyReplay is what happens to keys typed while the link is down
+	// (B3.1): ask (the default) offers them after the reconnect, on sends
+	// them, off drops them and says how many. The caller passes the tighter
+	// of the cluster value and the launcher flag (TightestKeyReplay).
+	KeyReplay string
+	Now       func() time.Time
+	Sleep     func(context.Context, time.Duration) error
+	NoBanner  bool
+	NoAsks    bool
 	// InitialSize is the terminal size when In is not a terminal
 	// (default 80x24).
 	InitialSize relay.Resize
@@ -169,9 +174,16 @@ func connectHint(name string) string { return "defenseclaw substrate connect " +
 
 // lostStatus is the reconnect line: the attempt, the backoff before the
 // next one and how long the link has been down (GAP-0423).
-func lostStatus(attempt int, next, down time.Duration) string {
-	return fmt.Sprintf("%s: attempt %d, next in %s, down %s (Ctrl-] detaches; keys typed now are not sent)...",
-		lostMsg, attempt, fmtDur(next), fmtDur(down.Truncate(time.Second)))
+func lostStatus(attempt int, next, down time.Duration, replay string) string {
+	keys := "keys typed now are not sent"
+	switch replay {
+	case KeyReplayAsk:
+		keys = "keys typed now are offered when it is back"
+	case KeyReplayOn:
+		keys = "keys typed now are sent when it is back"
+	}
+	return fmt.Sprintf("%s: attempt %d, next in %s, down %s (Ctrl-] detaches; %s)...",
+		lostMsg, attempt, fmtDur(next), fmtDur(down.Truncate(time.Second)), keys)
 }
 
 func (o *Options) normalize() error {
@@ -196,6 +208,13 @@ func (o *Options) normalize() error {
 	case TransportAuto, TransportWebSocket, TransportLongPoll:
 	default:
 		return fmt.Errorf("unknown transport %q: use auto, websocket or longpoll", o.Transport)
+	}
+	switch o.KeyReplay {
+	case "":
+		o.KeyReplay = KeyReplayAsk
+	case KeyReplayAsk, KeyReplayOn, KeyReplayOff:
+	default:
+		return fmt.Errorf("unknown key replay %q: use ask, on or off", o.KeyReplay)
 	}
 	o.Backoff = o.Backoff.withDefaults()
 	if o.MaxWait <= 0 {
@@ -289,14 +308,13 @@ type attacher struct {
 
 	wsBlocked int
 
-	// Input while the link is down (GAP-0003): what was typed then is not
-	// sent (it would land on a screen the person cannot see), and the
-	// person is told. unsent counts bytes the relay client read but could
-	// not send when the connection ended, and bytes it sent that the relay
-	// never got (the next hello's received count, GAP-0170); dropped the
-	// bytes typed during the outage; lost is set while a lost connection is
-	// retried.
-	unsent, dropped atomic.Int64
+	// Input while the link is down (GAP-0003): it never goes to a screen
+	// the person cannot see. outage keeps, in memory, the chunks the relay
+	// client read but could not send when the connection ended and the
+	// keys typed during the outage; after the reconnect they are offered
+	// or sent (KeyReplay, B3.1) within the replay limits, or counted and
+	// the person is told. lost is set while a lost connection is retried.
+	outage outageBuf
 	// maybe counts bytes sent that the relay's next hello does not count
 	// (GAP-0170): it can read that count while the old connection still
 	// drains keys it got, so they are only possibly lost.
@@ -517,7 +535,7 @@ func (a *attacher) run(ctx context.Context) (Result, error) {
 		switch {
 		case connections > 0:
 			// Every attempt updates the line (GAP-0423).
-			a.say(lostStatus(failures, wait, o.Now().Sub(outageStart)), false)
+			a.say(lostStatus(failures, wait, o.Now().Sub(outageStart), o.KeyReplay), false)
 		case !lostShown && kerr != nil:
 			lostShown = true
 			a.say("Could not connect yet ("+kerr.Error()+"); retrying...", false)
@@ -604,16 +622,16 @@ func (a *attacher) drainInput(ctx context.Context) (context.Context, func(), con
 				for i, c := range b {
 					switch c {
 					case relay.DetachKey:
-						a.dropped.Add(int64(i))
+						a.outage.addTyped(b[:i], a.o.Now())
 						cancel(errOutageDetach)
 						return
 					case 0x03:
-						a.dropped.Add(int64(i))
+						a.outage.addTyped(b[:i], a.o.Now())
 						cancel(errOutageStop)
 						return
 					}
 				}
-				a.dropped.Add(int64(len(b)))
+				a.outage.addTyped(b, a.o.Now())
 				if a.errTTY || !noted {
 					noted = true
 					a.say("Connection lost; reconnecting (Ctrl-] detaches)..."+a.notSentNote(" ", false), false)
@@ -644,18 +662,29 @@ func (a *attacher) outageStopped(wctx context.Context, res *Result) bool {
 // notSentNote says how much input was not sent (and with reset, starts
 // counting again); "" when nothing was lost.
 func (a *attacher) notSentNote(sep string, reset bool) string {
-	n := a.unsent.Load() + a.dropped.Load()
+	n := a.outage.pending()
+	if reset {
+		var b []byte
+		b, n = a.outage.take(a.o.Now())
+		zero(b)
+	} else if n > 0 && a.o.KeyReplay != KeyReplayOff && a.outage.held() {
+		return sep + fmt.Sprintf("(%d typed character(s) held until it is back)", n)
+	}
+	return a.countNote(sep, n, reset)
+}
+
+// countNote says that n typed bytes were not sent and, with reset, names
+// the bytes that may not have arrived (and starts counting them again).
+func (a *attacher) countNote(sep string, n int64, reset bool) string {
 	maybe := a.maybe.Load()
 	if reset {
-		a.unsent.Store(0)
-		a.dropped.Store(0)
 		a.maybe.Store(0)
 	}
 	note := ""
 	switch {
 	case n == 0:
 	case reset:
-		note = sep + fmt.Sprintf("%d typed character(s) were not sent; type them again.", n)
+		note = sep + notSentText(n)
 	default:
 		note = sep + fmt.Sprintf("(%d typed character(s) not sent)", n)
 	}
@@ -741,21 +770,16 @@ func (a *attacher) once(ctx context.Context) (relay.AttachResult, bool, error) {
 			if c.Type == relay.CtlHello {
 				connected.Store(true)
 				a.noteWarning(c.Warning)
-				if c.Received != nil && resume != "" {
-					// Sent before the cut but never written to the
-					// agent: lost on the way (a suspend).
-					if lost := prevSent - *c.Received; lost > 0 {
-						a.maybe.Add(lost)
-					}
-				}
+				a.resumeHello(resume, prevSent, c.Received)
 				a.endDrain()
-				in.openGate()
 				if a.lost.Swap(false) {
-					a.say(backMsg+a.notSentNote(" ", true), true)
+					a.replayAfterReconnect(in)
+				} else {
+					in.openGate()
 				}
 			}
 		},
-		OnUnsent: func(n int) { a.unsent.Add(int64(n)) },
+		OnUnsent: func(b []byte) { a.outage.addUnsent(b, a.o.Now()) },
 	}
 	if err := a.term.raw(); err != nil {
 		return relay.AttachResult{}, false, &fatalError{fmt.Errorf("could not switch the terminal to raw mode: %w", err)}
@@ -773,6 +797,61 @@ func (a *attacher) once(ctx context.Context) (relay.AttachResult, bool, error) {
 		a.prevInput, a.prevSent = ar.Input, ar.Sent
 	}
 	return ar, connected.Load(), err
+}
+
+// resumeHello squares what this launcher counted as sent on the input it
+// resumes with what the relay's hello says it received. Fewer: the rest
+// was lost on the way (a suspend) and may not have reached the agent.
+// More: a chunk reported unsent did arrive (the reply was lost, long-poll
+// through a proxy 502 or a gateway restart); those bytes lead the unsent
+// part and are dropped, never replayed (RV1 P2-2). No count at all on a
+// resumed input: the relay started a fresh session (the actor restarted),
+// so the keys typed for the old prompt are never replayed into it, only
+// counted (RV1 P3-1).
+func (a *attacher) resumeHello(resume string, prevSent int64, received *int64) {
+	if resume == "" {
+		return
+	}
+	if received == nil {
+		a.outage.spoil()
+		return
+	}
+	switch got := *received; {
+	case got < prevSent:
+		a.maybe.Add(prevSent - got)
+	case got > prevSent:
+		a.outage.arrived(got - prevSent)
+	}
+}
+
+// replayAfterReconnect opens the input of a connection the relay greeted
+// after an outage (B3.1). The keys that did not reach the agent go first,
+// before any live key, and only within the replay limits: in ask mode they
+// are shown and the person's next key decides (Enter sends them), in on
+// mode they are sent at once. Otherwise, or when nothing may be replayed,
+// the person is told how many were not sent. The bytes that may have
+// arrived (maybe) are never replayed.
+func (a *attacher) replayAfterReconnect(in *inReader) {
+	b, n := a.outage.take(a.o.Now())
+	if b == nil || a.o.KeyReplay == KeyReplayOff || !in.gated() {
+		zero(b)
+		in.openGate()
+		a.say(backMsg+a.countNote(" ", n, true), true)
+		return
+	}
+	k := int64(len(b))
+	if a.o.KeyReplay == KeyReplayOn {
+		in.openGateReplay(b, false, nil)
+		a.say(backMsg+fmt.Sprintf(" Sent %d key(s) typed while disconnected.", k)+a.countNote(" ", 0, true), true)
+		return
+	}
+	text := replayAskText(b)
+	in.openGateReplay(b, true, func(sent bool) {
+		if !sent {
+			a.say(notSentText(k), true)
+		}
+	})
+	a.say(backMsg+a.countNote(" ", 0, true)+" "+text, true)
 }
 
 // classify sorts how a connection ended and gives the error to show.

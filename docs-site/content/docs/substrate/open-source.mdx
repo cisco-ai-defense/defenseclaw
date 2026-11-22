@@ -234,6 +234,8 @@ Claude Code starts below the banner, in `/work/myapp`. The first start takes abo
 
 Prefer git to an upload? `defenseclaw substrate run claude --clone https://git.example.test/me/myapp.git --ref agent/fix-tests` clones inside the agent. The clone goes through the cluster's network rules, so the git host must be one your profile allows. The credential is added by the cluster's egress gateway on that host only, so the agent never holds it. Put no user name or token in the address. See [Secrets](/docs/substrate/secrets).
 
+In a checkout of your own, `defenseclaw substrate run claude --clone .` gives the agent the full history of your branch (Preview). The agent fetches the branch from its https remote, and only your unpushed commits and uncommitted changes are sent from your computer, with the same rules as a copy: secret files, and their committed versions, stay behind. `pull` works as for a copy. A remote that is a local path or an ssh address, or a branch that shares no commit with its remote, is refused; use `run` without `--clone .`. On Windows, push and commit your work first.
+
 </Step>
 
 <Step>
@@ -307,6 +309,10 @@ your previous working tree is kept at refs/defenseclaw/copy/sub-55cccd5ce016/pre
 
 As in OpenShell copy mode, you see the changed files first, with any file that could run code on your machine flagged (git hooks, build scripts, shell startup files, agent settings that register hooks, MCP server configs). `--diff` prints the full diff. Nothing touches your folder until you choose: `--apply` writes the changes into it (after a question whose default is no; `--yes` takes that no, so flagged files are written only with `--allow-flagged`), `--branch NAME` puts them on a new git branch, `--patch-out FILE` writes a patch. If you cloned with `--clone`, `pull` has no folder of its own to compare with: run it in a checkout of the same repository, and it writes the changes there. Or have the agent push a branch.
 
+To send your own newer changes to the agent, run `defenseclaw substrate push claude-b66c97d1` in the folder (Preview). It sends what you changed since the last send, with the same rules as the first copy, after a restore point. If the agent changed one of the same files, it sends nothing and lists them; choose `--mine`, `--theirs` or `--patch-out FILE`.
+
+To keep sending while you work, run `defenseclaw substrate sync claude-b66c97d1 --watch` in the folder (Preview). It sends each change a second after you save it, with the same rules, until you press Ctrl-C. A file the agent also changed keeps the agent's version, and sync names it once.
+
 To go back in time, `defenseclaw substrate checkpoint claude-b66c97d1` saves a restore point of the agent's folder, and `defenseclaw substrate undo claude-b66c97d1` returns the folder to the last one and discards what the agent changed since. It asks first.
 
 </Step>
@@ -349,7 +355,7 @@ Error: the cluster has no free worker for a new agent right now; nothing was sta
 
 ## What you give up compared with OpenShell
 
-- No live folder. The agent works on a copy or a clone.
+- No live folder. The agent works on a copy or a clone; `push` sends your newer changes when you ask (Preview).
 - No ports on your machine (`--host-port`) and no local MCP servers. MCP servers must be in the image or reachable over the network.
 - No process-tree or kernel feed. Substrate reports each agent's CPU and memory, not its processes.
 

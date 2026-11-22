@@ -241,6 +241,14 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
         args=(_Arg("name"),),
         flags=(
             _Flag("context", "string", "cluster to use (default: the one you signed in to last)", metavar="NAME"),
+            _Flag(
+                "key-replay",
+                "string",
+                (
+                    "keys typed while the connection is down: ask (show them, Enter sends), on (send) or off (drop); "
+                    "only tightens the cluster setting"
+                ),
+            ),
             _Flag("no-asks", "bool", "do not show guard questions on this terminal"),
             _Flag(
                 "transport",
@@ -577,6 +585,51 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
         ),
     ),
     _Cmd(
+        ("push",),
+        "Send your newer changes into a running agent (Preview)",
+        long=(
+            "Sends the changes you made in this folder since the last send (the run or an earlier push) into the\n"
+            "agent's copy. Paths limit it to those files or folders. The rules of run apply: secret files are "
+            "held\n"
+            "back (share one with --unmask), --exclude holds more back, and the cluster's upload limit counts.\n"
+            "\n"
+            'Before it writes, it saves a restore point: "defenseclaw substrate undo NAME --to N" goes back to '
+            "it.\n"
+            "When the agent also changed a file you changed, nothing is sent and the files are listed (exit 3).\n"
+            "Then choose: --mine sends yours (the agent's version stays in the restore point), --theirs keeps "
+            "the\n"
+            "agent's and sends the rest, and --patch-out FILE keeps the agent's and writes your change to FILE.\n"
+            "What you send is not shown as the agent's work in a later pull. This command is a Preview."
+        ),
+        example=(
+            "defenseclaw substrate push fix-tests-7f3a\ndefenseclaw substrate push fix-tests-7f3a src/app.py --mine"
+        ),
+        args=(_Arg("name"), _Arg("path", required=False, many=True)),
+        flags=(
+            _Flag("context", "string", "cluster to use (default: the one you signed in to last)", metavar="NAME"),
+            _Flag("dry-run", "bool", "show what would be sent and the conflicts; send nothing"),
+            _Flag(
+                "exclude",
+                "stringArray",
+                "hold a path or glob back too (repeatable, for example 'data/**')",
+                metavar="GLOB",
+            ),
+            _Flag("json", "bool", "same as --output json"),
+            _Flag("mine", "bool", "on a conflict, send your version (the agent's stays in the restore point)"),
+            _Flag("output", "string", "output format: text or json", short="o", default="text", metavar="FORMAT"),
+            _Flag(
+                "patch-out",
+                "string",
+                "on a conflict, keep the agent's version and write your change to this file",
+                metavar="FILE",
+            ),
+            _Flag("theirs", "bool", "on a conflict, keep the agent's version and send the rest"),
+            _Flag(
+                "unmask", "stringArray", "send a held-back secret file or pattern anyway (repeatable)", metavar="GLOB"
+            ),
+        ),
+    ),
+    _Cmd(
         ("reject",),
         "Deny a waiting question",
         long='Denies one question from "defenseclaw substrate approvals". The agent is told no.',
@@ -614,26 +667,50 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             'running and follow it with "defenseclaw substrate logs -f NAME".\n'
             "With --batch FILE every task gets its own agent on the same folder; --parallel limits how many run "
             "at once.\n"
-            "With --clone URL the agent starts from a repository instead of a copy of the folder. Arguments "
-            "after -- go\n"
-            "to the agent."
+            "With --clone URL the agent starts from a repository instead of a copy of the folder. With --clone . "
+            "(Preview)\n"
+            "it starts from this checkout: the agent fetches the branch's history from its remote, and only the "
+            "unpushed\n"
+            "commits and uncommitted changes are sent from here. Arguments after -- go to the agent."
         ),
         example=(
             "defenseclaw substrate run claude\n"
             'defenseclaw substrate run codex --task "fix the failing tests" --detach\n'
             "defenseclaw substrate run claude --batch tasks.yaml --parallel 5\n"
-            "defenseclaw substrate run claude --clone https://git.example.test/team/app.git"
+            "defenseclaw substrate run claude --clone https://git.example.test/team/app.git\n"
+            "defenseclaw substrate run claude --clone ."
         ),
         args=(_Arg("agent"), _Arg("agent_args", required=False, many=True)),
         flags=(
             _Flag("batch", "string", "run every task in this YAML file, one agent each", metavar="ID"),
-            _Flag("clone", "string", "start from this repository instead of a copy of the folder", metavar="URL"),
+            _Flag(
+                "clone",
+                "string",
+                (
+                    "start from this repository instead of a copy of the folder; . for this checkout with its history "
+                    "(Preview)"
+                ),
+                metavar="URL",
+            ),
             _Flag("context", "string", "cluster to use (default: the one you signed in to last)", metavar="NAME"),
             _Flag("detach", "bool", "with --task, start it and return; follow it with logs -f", short="d"),
-            _Flag("exclude", "stringArray", "hold a path or pattern back from the copy (repeatable)", metavar="GLOB"),
+            _Flag(
+                "exclude",
+                "stringArray",
+                "exclude a path or glob from the copy (repeatable, for example 'data/**')",
+                metavar="GLOB",
+            ),
             _Flag("json", "bool", "same as --output json"),
             _Flag("keep", "bool", "keep the agent after a finished --task (default: it stays until you delete it)"),
-            _Flag("max-upload-mb", "int", "refuse a copy larger than this many MB (default 500)", default="0"),
+            _Flag(
+                "key-replay",
+                "string",
+                (
+                    "keys typed while the connection is down: ask (show them, Enter sends), on (send) or off (drop); "
+                    "only tightens the cluster setting"
+                ),
+            ),
+            _Flag("max-upload-mb", "int", "lower the cluster upload limit for this copy, in MiB", default="0"),
             _Flag(
                 "name",
                 "string",
@@ -940,6 +1017,40 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             _Flag("output", "string", "output format: text or json", short="o", default="text", metavar="FORMAT"),
             _Flag("substrate-namespace", "string", "namespace Agent Substrate runs in", default="ate-system"),
             _Flag("timeout", "duration", "give up on the cluster after this long", default="30s", metavar="DURATION"),
+        ),
+    ),
+    _Cmd(
+        ("sync",),
+        "Keep sending your changes into a running agent while you work (Preview)",
+        long=(
+            "Watches this folder and sends each change into the agent's copy, one way, until Ctrl-C, --for, or\n"
+            "the agent is deleted. It sends 1 second after the last change, and at most 5 seconds after the "
+            "first.\n"
+            "Each batch follows the rules of push: secret files are held back, ignored files, .git and package\n"
+            "caches are not sent, and a file the agent also changed keeps the agent's version (it is named once;\n"
+            "send yours with push NAME --mine FILE). It saves a restore point at the start, then one every\n"
+            "10 minutes in which something was sent. A suspended agent is not woken: changes wait until it is "
+            "back.\n"
+            "Nothing keeps running after it stops. --watch is required. This command is a Preview."
+        ),
+        example=(
+            "defenseclaw substrate sync fix-tests-7f3a --watch\n"
+            "defenseclaw substrate sync fix-tests-7f3a --watch --for 2h"
+        ),
+        args=(_Arg("name"),),
+        flags=(
+            _Flag("context", "string", "cluster to use (default: the one you signed in to last)", metavar="NAME"),
+            _Flag(
+                "exclude",
+                "stringArray",
+                "hold a path or glob back too (repeatable, for example 'data/**')",
+                metavar="GLOB",
+            ),
+            _Flag("for", "duration", "stop after this long, for example 2h", default="0s"),
+            _Flag(
+                "unmask", "stringArray", "send a held-back secret file or pattern anyway (repeatable)", metavar="GLOB"
+            ),
+            _Flag("watch", "bool", "watch the folder and send changes as you save (required)"),
         ),
     ),
     _Cmd(

@@ -59,7 +59,7 @@ func runSubstrateLogs(cmd *cobra.Command, out *substrateOutput, com *substrateCo
 		// GAP-0420: no wait for an agent that cannot answer.
 		return substrateFail(substrateCrashedErr(a))
 	}
-	o, err := substrateAttachOptions(cmd, s, a, "auto", true)
+	o, err := substrateAttachOptions(cmd, s, a, "auto", true, attach.KeyReplayOff)
 	if err != nil {
 		return err
 	}
@@ -440,6 +440,9 @@ func runSubstrateUndo(cmd *cobra.Command, com *substrateCommon, ref, to string, 
 		return err
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "Put %s/%s back to restore point %s.\n", a.Atespace, a.Name, info.ID)
+	if info.Pushes > 0 {
+		fmt.Fprintf(cmd.OutOrStdout(), "It also took back %d push(es) made after that point.\n", info.Pushes)
+	}
 	// GAP-0415: what the agent was asking about is gone with the folder it
 	// changed; its pending asks close now instead of waiting out their time.
 	if n := substrateCloseAsks(ctx, s.Client, a, "the agent was put back to a restore point with undo"); n > 0 {

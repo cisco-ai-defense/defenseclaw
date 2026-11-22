@@ -93,8 +93,15 @@ type StageOptions struct {
 	StateDir string
 	// GitDepth is the history depth of the shallow clone (200).
 	GitDepth int
+	// Upstream stages a "this checkout" copy (run --clone .): the history
+	// is only the commits after the merge-base with the remote-tracking
+	// branch, and the sandbox fetches the rest from the remote
+	// (FetchUpstream). The folder must be the top of a checkout.
+	Upstream bool
 	// MaxBytes caps the staged copy, history included (500 MiB).
 	MaxBytes int64
+	// Summary optionally collects working-tree sizes after exclusions and masking.
+	Summary *CopySummary
 	// MaxWalkEntries caps the files and directories of a non-git folder
 	// (default 250k); a larger folder is refused rather than copied in part.
 	MaxWalkEntries int
@@ -112,6 +119,11 @@ type StageOptions struct {
 	// (committed templates such as .env.example) most projects do not have,
 	// so a warning for each was noise on every copy run (GAP-0308).
 	UnmaskAsked []string
+	// UnmaskExact shares files by exact relative path (slash-separated),
+	// never as a glob or a base name: a push passes the run's shared files
+	// (CopyRecord.Unmasked) here, so sharing the root .env does not share
+	// a deploy/prod/.env added later.
+	UnmaskExact []string
 	// Replace discards an existing copy record of the same name once the
 	// new copy is staged (a failed Stage leaves it as it was). A replaced
 	// uploaded copy is remembered (CopyRecord.Replaced) until the new one is
@@ -151,12 +163,17 @@ type CopyRecord struct {
 	// applied to the copy and to the capture Apply merges into.
 	LineEndings map[string]string `json:"line_endings,omitempty"`
 	HeldBack    []string          `json:"held_back,omitempty"`
+	// Masks are the extra exclude patterns of the copy (run --exclude);
+	// push stages with them too.
+	Masks []string `json:"masks,omitempty"`
 	// Unmasked are the files that look like secrets --unmask shared with
 	// the sandbox, which the run names so the user can confirm them.
 	Unmasked []string `json:"unmasked,omitempty"`
 	// Withheld counts the committed blobs left out of the shipped history
 	// (see withholdHistory); the copy is then a partial clone.
-	Withheld   int        `json:"withheld,omitempty"`
+	Withheld int `json:"withheld,omitempty"`
+	// Upstream is set for a "this checkout" copy (StageOptions.Upstream).
+	Upstream   *Upstream  `json:"upstream,omitempty"`
 	Files      int        `json:"files"`
 	Bytes      int64      `json:"bytes"`
 	StagedAt   time.Time  `json:"staged_at"`
@@ -362,6 +379,80 @@ func Stage(ctx context.Context, opts StageOptions) (*CopyRecord, error) {
 	return rec, nil
 }
 
+// PreparedCopy holds a local stage before its actor has been created.
+type PreparedCopy struct {
+	layout layout
+	rec    *CopyRecord
+	dir    string
+	parent string
+}
+
+// PrepareCopy stages the project without installing a copy record.
+func PrepareCopy(ctx context.Context, opts StageOptions) (*PreparedCopy, error) {
+	lay, err := newLayout(opts.DataDir)
+	if err != nil {
+		return nil, err
+	}
+	opts.Name = "preflight-" + randomSuffix()
+	rec, dir, err := stageCopy(ctx, lay, opts)
+	if err != nil {
+		return nil, err
+	}
+	return &PreparedCopy{layout: lay, rec: rec, dir: dir, parent: lay.sandboxDir(opts.Name)}, nil
+}
+
+// Close discards a stage which was not installed.
+func (p *PreparedCopy) Close() {
+	if p.dir != "" {
+		_ = removeTree(p.dir)
+		p.dir = ""
+	}
+	_ = os.Remove(p.parent)
+}
+
+// Record returns the staged copy metadata.
+func (p *PreparedCopy) Record() CopyRecord { return *p.rec }
+
+// Install binds the stage to a newly created actor and installs its local record.
+func (p *PreparedCopy) Install(name, root, stateDir string, replace bool) error {
+	if p.dir == "" {
+		return errors.New("workspace: preflight has already been consumed")
+	}
+	if err := ValidateName(name); err != nil {
+		return err
+	}
+	if !path.IsAbs(root) || path.Clean(root) == "/" {
+		return fmt.Errorf("workspace: remote root %q must be an absolute directory below /", root)
+	}
+	rec := *p.rec
+	rec.Name = name
+	rec.RemoteDir = path.Join(root, rec.RepoName)
+	var err error
+	if rec.StateDir, err = checkStateDir(stateDir, rec.RemoteDir); err != nil {
+		return err
+	}
+	rec.RemoteGitDir = path.Join(rec.RemoteDir, ".git")
+	if rec.Kind == CopyPlain {
+		rec.RemoteGitDir = path.Join(rec.stateDir(), "git")
+	}
+	if pathExists(p.layout.copyRecord(name)) {
+		if !replace {
+			return fmt.Errorf("workspace: copy %s already exists", name)
+		}
+		prev, _ := LoadCopy(p.layout.dataDir, name)
+		rec.replacing(prev)
+	}
+	if err := ensurePrivateDir(p.layout.sandboxDir(name)); err != nil {
+		return err
+	}
+	if err := installCopyDir(p.layout, &rec, p.dir); err != nil {
+		return err
+	}
+	p.dir = ""
+	p.rec = &rec
+	return nil
+}
+
 // stageCopy builds a complete copy directory for opts beside the live one
 // (<copy>.new-<random>) and returns its record, whose paths point into it.
 // Nothing else is touched: the caller installs the directory
@@ -400,7 +491,7 @@ func stageCopy(ctx context.Context, lay layout, opts StageOptions) (*CopyRecord,
 	rec := &CopyRecord{
 		Version: 1, Name: opts.Name, Project: real, RepoName: repo,
 		RemoteDir: path.Join(path.Clean(root), repo), StateDir: stateDir, StagedAt: now().UTC(),
-		Warnings: warnings,
+		Warnings: warnings, Masks: append([]string(nil), opts.Masks...),
 	}
 	dir := lay.copyDir(opts.Name) + copyNewInfix + randomSuffix()
 	// A refused copy (too large, a secret it cannot hold back) of a
@@ -430,12 +521,16 @@ func stageCopy(ctx context.Context, lay layout, opts StageOptions) (*CopyRecord,
 	scanOpts := secretScanOptions{
 		patterns: opts.Masks, unmask: normalizeUnmask(opts.Unmask, real), maskTracked: true,
 		detector: opts.Detector, contentScan: !opts.DisableContentScan,
-		unmaskAsked: normalizeUnmask(opts.UnmaskAsked, real),
+		unmaskAsked: normalizeUnmask(opts.UnmaskAsked, real), unmaskExact: exactRels(opts.UnmaskExact),
 	}
 	if scanOpts.detector == nil {
 		scanOpts.detector = DefaultSecretDetector()
 	}
-	if isGitTopLevel(ctx, real) {
+	gitTop := isGitTopLevel(ctx, real)
+	if opts.Upstream && !gitTop {
+		return nil, "", &UpstreamError{Msg: real + " is not the top folder of a git checkout; --clone . needs one (or use run without --clone .)"}
+	}
+	if gitTop {
 		rec.Kind = CopyGit
 		rec.RemoteGitDir = path.Join(rec.RemoteDir, ".git")
 		err = stageGit(ctx, rec, opts, scanOpts, maxBytes)
@@ -445,7 +540,7 @@ func stageCopy(ctx context.Context, lay layout, opts StageOptions) (*CopyRecord,
 		if parent := enclosingRepo(real); parent != "" {
 			rec.Warnings = append(rec.Warnings, fmt.Sprintf("%s is inside the git repository at %s; it is copied as a plain folder", real, parent))
 		}
-		err = stagePlain(ctx, rec, stageRoot, scanOpts, maxBytes, opts.MaxWalkEntries)
+		err = stagePlain(ctx, rec, stageRoot, scanOpts, maxBytes, opts.MaxWalkEntries, opts.Summary)
 	}
 	if err != nil {
 		return nil, "", err
@@ -572,6 +667,11 @@ func stageGit(ctx context.Context, rec *CopyRecord, opts StageOptions, scanOpts 
 		return err
 	}
 	rec.Head, rec.Branch = head, branch
+	if opts.Upstream {
+		if rec.Upstream, err = resolveUpstream(ctx, proj, head, branch); err != nil {
+			return err
+		}
+	}
 
 	// The working tree to ship: tracked files still present plus untracked
 	// files git does not ignore.
@@ -621,7 +721,7 @@ func stageGit(ctx context.Context, rec *CopyRecord, opts StageOptions, scanOpts 
 	if w := leftOutWarning(leftOut); w != "" {
 		rec.Warnings = append(rec.Warnings, w)
 	}
-	files, heldBack, err := selectFiles(rec.Project, candidates, scanOpts, maxBytes, rec)
+	files, heldBack, err := selectFiles(rec.Project, candidates, scanOpts, maxBytes, rec, opts.Summary)
 	if err != nil {
 		return err
 	}
@@ -650,6 +750,12 @@ func stageGit(ctx context.Context, rec *CopyRecord, opts StageOptions, scanOpts 
 	depth := opts.GitDepth
 	if depth <= 0 {
 		depth = DefaultGitDepth
+	}
+	if rec.Upstream != nil {
+		// Every commit of base..HEAD is at most Commits-1 steps from HEAD
+		// and base at most Commits, so this depth ships them and base and
+		// stops there; the sandbox fetches the rest (FetchUpstream).
+		depth = rec.Upstream.Commits + 1
 	}
 	if head != "" {
 		source := "file://" + rec.Project
@@ -759,6 +865,13 @@ func stageGit(ctx context.Context, rec *CopyRecord, opts StageOptions, scanOpts 
 		return err
 	}
 	rec.Baseline = baseline
+	if rec.Upstream != nil {
+		changed, err := sg.output(ctx, "diff-tree", "-r", "-z", "--name-only", "--no-commit-id", head, baseline)
+		if err != nil {
+			return err
+		}
+		rec.Upstream.Changes = len(splitNUL(changed))
+	}
 	if head != "" {
 		// Held-back files stay out of the shipped history as well, and so
 		// does every version of a path the name rules cover.
@@ -767,7 +880,7 @@ func stageGit(ctx context.Context, rec *CopyRecord, opts StageOptions, scanOpts 
 			if _, ok := held[rel]; ok {
 				return true
 			}
-			return !unmaskedBy(scanOpts.unmask, rel) && secretByName(scanOpts.patterns, rel)
+			return !scanOpts.isUnmasked(rel) && secretByName(scanOpts.patterns, rel)
 		}
 		n, err := withholdHistory(ctx, sg, stage, filepath.Dir(stage), withheld)
 		if err != nil {
@@ -843,7 +956,7 @@ func gitConfigPath(ctx context.Context, g gitCmd) string {
 	return filepath.Join(p, "config")
 }
 
-func stagePlain(ctx context.Context, rec *CopyRecord, stageRoot string, scanOpts secretScanOptions, maxBytes int64, maxEntries int) error {
+func stagePlain(ctx context.Context, rec *CopyRecord, stageRoot string, scanOpts secretScanOptions, maxBytes int64, maxEntries int, summary *CopySummary) error {
 	var candidates []string
 	var opaque []string
 	truncated, err := walkProject(rec.Project, maxEntries, func(rel string, d fs.DirEntry) error {
@@ -866,7 +979,7 @@ func stagePlain(ctx context.Context, rec *CopyRecord, stageRoot string, scanOpts
 		sort.Strings(opaque)
 		rec.Warnings = append(rec.Warnings, "not copied: "+strings.Join(firstN(opaque, 5), ", "))
 	}
-	files, heldBack, err := selectFiles(rec.Project, candidates, scanOpts, maxBytes, rec)
+	files, heldBack, err := selectFiles(rec.Project, candidates, scanOpts, maxBytes, rec, summary)
 	if err != nil {
 		return err
 	}
@@ -917,7 +1030,7 @@ func stagePlain(ctx context.Context, rec *CopyRecord, stageRoot string, scanOpts
 // candidate paths. It returns the files to copy and the ones held back,
 // which the record lists once (CopyRecord.HeldBack), not among its
 // warnings.
-func selectFiles(root string, candidates []string, scanOpts secretScanOptions, maxBytes int64, rec *CopyRecord) ([]stagedFile, []string, error) {
+func selectFiles(root string, candidates []string, scanOpts secretScanOptions, maxBytes int64, rec *CopyRecord, summary *CopySummary) ([]stagedFile, []string, error) {
 	sort.Strings(candidates)
 	held, err := detectSecretsIn(root, candidates, scanOpts)
 	if err != nil {
@@ -930,16 +1043,16 @@ func selectFiles(root string, candidates []string, scanOpts secretScanOptions, m
 	// covers) counts only when its content looks like a secret: a template of
 	// names was named on every run as if the user had unmasked it (GAP-0351).
 	unmaskOnly := scanOpts
-	unmaskOnly.unmask = nil
+	unmaskOnly.unmask, unmaskOnly.unmaskExact = nil, nil
 	contentOnly := unmaskOnly
 	contentOnly.patterns = nil
 	rec.Unmasked = nil
 	for _, rel := range candidates {
-		if !unmaskedBy(scanOpts.unmask, rel) {
+		if !scanOpts.isUnmasked(rel) {
 			continue
 		}
 		check := contentOnly
-		if unmaskedBy(scanOpts.unmaskAsked, rel) {
+		if unmaskedBy(scanOpts.unmaskAsked, rel) || slices.Contains(scanOpts.unmaskExact, rel) {
 			check = unmaskOnly
 		}
 		if would, err := detectSecretsIn(root, []string{rel}, check); err == nil && len(would) > 0 {
@@ -968,10 +1081,15 @@ func selectFiles(root string, candidates []string, scanOpts secretScanOptions, m
 			continue
 		}
 		total += info.Size()
-		if total > maxBytes {
+		if summary != nil {
+			summary.Add(rel, info.Size())
+		} else if total > maxBytes {
 			return nil, nil, &TooLargeError{What: "the working tree", Size: total, Limit: maxBytes}
 		}
 		files = append(files, stagedFile{rel: rel, info: info})
+	}
+	if total > maxBytes {
+		return nil, nil, &TooLargeError{What: "the working tree", Size: total, Limit: maxBytes}
 	}
 	return files, held, nil
 }
@@ -983,7 +1101,7 @@ func detectSecretsIn(root string, rels []string, opts secretScanOptions) ([]stri
 	var held []string
 	budget := defaultMaxContentScanFiles
 	for _, rel := range rels {
-		if unmaskedBy(opts.unmask, rel) {
+		if opts.isUnmasked(rel) {
 			continue
 		}
 		if secretByName(opts.patterns, rel) {
@@ -1479,6 +1597,20 @@ func parseKV(b []byte) map[string]string {
 		} else {
 			out[k] = v
 		}
+	}
+	return out
+}
+
+// exactRels cleans exact shared paths to the slash-separated relative form
+// the copy compares against; empty, absolute and escaping entries are dropped.
+func exactRels(in []string) []string {
+	var out []string
+	for _, p := range in {
+		p = path.Clean(filepath.ToSlash(p))
+		if p == "." || p == "" || strings.HasPrefix(p, "/") || p == ".." || strings.HasPrefix(p, "../") {
+			continue
+		}
+		out = append(out, p)
 	}
 	return out
 }

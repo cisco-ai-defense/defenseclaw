@@ -4654,6 +4654,20 @@ class SubstrateServicesConfig:
 
 
 @dataclass
+class SubstrateLauncherConfig:
+    # ask (default), on or off: keys typed while a launcher's terminal link
+    # is down (B3.1); a launcher flag only tightens it.
+    key_replay: str = ""
+
+
+@dataclass
+class SubstrateFilesConfig:
+    # Admin switches of substrate push and sync --watch; None means on.
+    push: bool | None = None
+    sync: bool | None = None
+
+
+@dataclass
 class SubstrateUnattendedConfig:
     asks: str = ""
     ask_timeout: str = ""
@@ -4865,6 +4879,8 @@ class SubstrateConfig:
     chain_egress_action: str = ""
     # Workspace upload cap through the admin attach route (E23); None = 1 GiB.
     workspace_max_bytes: int | None = None
+    launcher: SubstrateLauncherConfig = field(default_factory=SubstrateLauncherConfig)
+    files: SubstrateFilesConfig = field(default_factory=SubstrateFilesConfig)
     unattended: SubstrateUnattendedConfig = field(default_factory=SubstrateUnattendedConfig)
     rate_limits: SubstrateRateLimitsConfig = field(default_factory=SubstrateRateLimitsConfig)
     extproc: SubstrateExtprocConfig = field(default_factory=SubstrateExtprocConfig)
@@ -8214,6 +8230,13 @@ def _merge_substrate(raw: Any) -> SubstrateConfig:
         idle_suspend_without_cpu=_optional_bool(raw.get("idle_suspend_without_cpu")),
         chain_egress_action=str(raw.get("chain_egress_action", "") or ""),
         workspace_max_bytes=_optional_number(raw.get("workspace_max_bytes"), int),
+        launcher=SubstrateLauncherConfig(
+            key_replay=str(_mapping(raw.get("launcher")).get("key_replay", "") or ""),
+        ),
+        files=SubstrateFilesConfig(
+            push=_optional_bool(_mapping(raw.get("files")).get("push")),
+            sync=_optional_bool(_mapping(raw.get("files")).get("sync")),
+        ),
         unattended=SubstrateUnattendedConfig(
             asks=str(unattended.get("asks", "") or ""),
             ask_timeout=_duration_text(unattended.get("ask_timeout")),

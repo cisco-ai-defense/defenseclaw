@@ -55,7 +55,7 @@ func TestPollKeysDeliveredBeforeTheEndAreNotReportedUnsent(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	res, err := Attach(ctx, pr, io.Discard, AttachOptions{BaseURL: srv.URL, Token: "t", LongPoll: true, FlatRoutes: true,
-		OnUnsent: func(n int) { unsent.Add(int64(n)) }})
+		OnUnsent: func(b []byte) { unsent.Add(int64(len(b))) }})
 	if err != nil {
 		t.Fatal(err)
 	}

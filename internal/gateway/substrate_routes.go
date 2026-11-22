@@ -33,6 +33,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/calloutapi"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/chainstate"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/identity"
@@ -150,6 +151,13 @@ func (a *APIServer) newSubstrateAdminHandler(st *substrateState) http.Handler {
 	mux.HandleFunc("GET /api/v1/substrate/batches/{id}", a.substrateGetBatch(st))
 	mux.HandleFunc("GET /api/v1/substrate/usage", a.substrateUsage(st))
 	mux.HandleFunc("GET /api/v1/substrate/doctor", a.substrateDoctor(st))
+	mux.HandleFunc("GET /api/v1/substrate/launcher", func(w http.ResponseWriter, _ *http.Request) {
+		writeSubstrateJSON(w, http.StatusOK, map[string]any{
+			"workspace_max_bytes": substrateWorkspaceMax(st.cfg.WorkspaceMaxBytes),
+			"key_replay":          substrateKeyReplay(st.cfg.KeyReplay),
+			"files":               map[string]bool{"push": substrateSwitch(st.cfg.FilesPush), "sync": substrateSwitch(st.cfg.FilesSync)},
+		})
+	})
 	mux.HandleFunc("GET /api/v1/substrate/asks", a.substrateListAsks(st))
 	mux.HandleFunc("POST /api/v1/substrate/asks/{id}", a.substrateDecideAsk(st))
 	mux.HandleFunc("GET /api/v1/substrate/decisions", a.substrateDecisions(st))
@@ -184,7 +192,7 @@ func (a *APIServer) newSubstrateAdminHandler(st *substrateState) http.Handler {
 			// long-poll frames and a streaming tar upload. Person sign-in and
 			// ownership are checked as for every admin route; the JSON body
 			// gate and the 1 MiB cap do not fit it, so it has its own.
-			r.Body = http.MaxBytesReader(w, r.Body, substrateAttachBodyCap(r, st.cfg.WorkspaceMaxBytes))
+			r.Body = http.MaxBytesReader(w, r.Body, substrateAttachBodyCap(r, substrateWorkspaceMax(st.cfg.WorkspaceMaxBytes)))
 			attach.ServeHTTP(w, r)
 			return
 		}
@@ -927,4 +935,16 @@ func substrateCalloutAuthorized(st *substrateState, r *http.Request) bool {
 func readAllLimited(r io.Reader, n int64) ([]byte, bool) {
 	b, err := io.ReadAll(io.LimitReader(r, n+1))
 	return b, err == nil && int64(len(b)) <= n
+}
+
+// substrateSwitch reads a live admin switch; on when not wired.
+func substrateSwitch(read func() bool) bool { return read == nil || read() }
+
+// substrateKeyReplay is substrate.launcher.key_replay for launchers; ask when
+// the listener has no live reader.
+func substrateKeyReplay(read func() string) string {
+	if read == nil {
+		return config.SubstrateKeyReplayAsk
+	}
+	return read()
 }

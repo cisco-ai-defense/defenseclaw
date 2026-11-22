@@ -247,6 +247,11 @@
         "metavar": "NAME"
       },
       {
+        "name": "key-replay",
+        "type": "string",
+        "usage": "keys typed while the connection is down: ask (show them, Enter sends), on (send) or off (drop); only tightens the cluster setting"
+      },
+      {
         "name": "no-asks",
         "type": "bool",
         "default": "false",
@@ -860,6 +865,84 @@
     ]
   },
   {
+    "path": "substrate push",
+    "use": "push \u003cname\u003e [path...]",
+    "short": "Send your newer changes into a running agent (Preview)",
+    "long": "Sends the changes you made in this folder since the last send (the run or an earlier push) into the\nagent's copy. Paths limit it to those files or folders. The rules of run apply: secret files are held\nback (share one with --unmask), --exclude holds more back, and the cluster's upload limit counts.\n\nBefore it writes, it saves a restore point: \"defenseclaw substrate undo NAME --to N\" goes back to it.\nWhen the agent also changed a file you changed, nothing is sent and the files are listed (exit 3).\nThen choose: --mine sends yours (the agent's version stays in the restore point), --theirs keeps the\nagent's and sends the rest, and --patch-out FILE keeps the agent's and writes your change to FILE.\nWhat you send is not shown as the agent's work in a later pull. This command is a Preview.",
+    "example": "defenseclaw substrate push fix-tests-7f3a\ndefenseclaw substrate push fix-tests-7f3a src/app.py --mine",
+    "args": [
+      {
+        "name": "name",
+        "required": true
+      },
+      {
+        "name": "path",
+        "required": false,
+        "many": true
+      }
+    ],
+    "flags": [
+      {
+        "name": "context",
+        "type": "string",
+        "usage": "cluster to use (default: the one you signed in to last)",
+        "metavar": "NAME"
+      },
+      {
+        "name": "dry-run",
+        "type": "bool",
+        "default": "false",
+        "usage": "show what would be sent and the conflicts; send nothing"
+      },
+      {
+        "name": "exclude",
+        "type": "stringArray",
+        "default": "[]",
+        "usage": "hold a path or glob back too (repeatable, for example 'data/**')",
+        "metavar": "GLOB"
+      },
+      {
+        "name": "json",
+        "type": "bool",
+        "default": "false",
+        "usage": "same as --output json"
+      },
+      {
+        "name": "mine",
+        "type": "bool",
+        "default": "false",
+        "usage": "on a conflict, send your version (the agent's stays in the restore point)"
+      },
+      {
+        "name": "output",
+        "shorthand": "o",
+        "type": "string",
+        "default": "text",
+        "usage": "output format: text or json",
+        "metavar": "FORMAT"
+      },
+      {
+        "name": "patch-out",
+        "type": "string",
+        "usage": "on a conflict, keep the agent's version and write your change to this file",
+        "metavar": "FILE"
+      },
+      {
+        "name": "theirs",
+        "type": "bool",
+        "default": "false",
+        "usage": "on a conflict, keep the agent's version and send the rest"
+      },
+      {
+        "name": "unmask",
+        "type": "stringArray",
+        "default": "[]",
+        "usage": "send a held-back secret file or pattern anyway (repeatable)",
+        "metavar": "GLOB"
+      }
+    ]
+  },
+  {
     "path": "substrate reject",
     "use": "reject \u003cid\u003e",
     "short": "Deny a waiting question",
@@ -889,8 +972,8 @@
     "path": "substrate run",
     "use": "run \u003cagent\u003e [agent_args...]",
     "short": "Run a coding agent in the cluster on a copy of this folder",
-    "long": "Starts the coding agent in a sandbox in the cluster, on a copy of the current folder (secret\nfiles such as .env and keys are held back), and puts the agent on your terminal. The agent is claude,\ncodex, copilot, opencode, hermes, kiro, antigravity, cursor-agent, amp or devin. The agents that sign in to a\nvendor account (kiro, antigravity, cursor-agent, amp, devin) run with a warning in open source, because the\nsign-in token stays in the agent and its snapshots; a managed cluster refuses them. A banner shows the guard profile, model, allowed hosts and how to leave. When the\nguard asks before a step, the question appears on the last line: press Ctrl-\\ to answer once, always or deny.\n\nPress Ctrl-] to detach; the agent keeps running and suspends when idle. Come back from any machine with\n\"defenseclaw substrate connect NAME\". Bring the changes home with \"defenseclaw substrate pull NAME\".\n\nWith --task the agent runs headless without you: asks are denied, or queued for approval when the profile's\nunattended_asks is queue, and the run is checked as strictly as an unattended job. Add --detach to leave it\nrunning and follow it with \"defenseclaw substrate logs -f NAME\".\nWith --batch FILE every task gets its own agent on the same folder; --parallel limits how many run at once.\nWith --clone URL the agent starts from a repository instead of a copy of the folder. Arguments after -- go\nto the agent.",
-    "example": "defenseclaw substrate run claude\ndefenseclaw substrate run codex --task \"fix the failing tests\" --detach\ndefenseclaw substrate run claude --batch tasks.yaml --parallel 5\ndefenseclaw substrate run claude --clone https://git.example.test/team/app.git",
+    "long": "Starts the coding agent in a sandbox in the cluster, on a copy of the current folder (secret\nfiles such as .env and keys are held back), and puts the agent on your terminal. The agent is claude,\ncodex, copilot, opencode, hermes, kiro, antigravity, cursor-agent, amp or devin. The agents that sign in to a\nvendor account (kiro, antigravity, cursor-agent, amp, devin) run with a warning in open source, because the\nsign-in token stays in the agent and its snapshots; a managed cluster refuses them. A banner shows the guard profile, model, allowed hosts and how to leave. When the\nguard asks before a step, the question appears on the last line: press Ctrl-\\ to answer once, always or deny.\n\nPress Ctrl-] to detach; the agent keeps running and suspends when idle. Come back from any machine with\n\"defenseclaw substrate connect NAME\". Bring the changes home with \"defenseclaw substrate pull NAME\".\n\nWith --task the agent runs headless without you: asks are denied, or queued for approval when the profile's\nunattended_asks is queue, and the run is checked as strictly as an unattended job. Add --detach to leave it\nrunning and follow it with \"defenseclaw substrate logs -f NAME\".\nWith --batch FILE every task gets its own agent on the same folder; --parallel limits how many run at once.\nWith --clone URL the agent starts from a repository instead of a copy of the folder. With --clone . (Preview)\nit starts from this checkout: the agent fetches the branch's history from its remote, and only the unpushed\ncommits and uncommitted changes are sent from here. Arguments after -- go to the agent.",
+    "example": "defenseclaw substrate run claude\ndefenseclaw substrate run codex --task \"fix the failing tests\" --detach\ndefenseclaw substrate run claude --batch tasks.yaml --parallel 5\ndefenseclaw substrate run claude --clone https://git.example.test/team/app.git\ndefenseclaw substrate run claude --clone .",
     "args": [
       {
         "name": "agent",
@@ -912,7 +995,7 @@
       {
         "name": "clone",
         "type": "string",
-        "usage": "start from this repository instead of a copy of the folder",
+        "usage": "start from this repository instead of a copy of the folder; . for this checkout with its history (Preview)",
         "metavar": "URL"
       },
       {
@@ -932,7 +1015,7 @@
         "name": "exclude",
         "type": "stringArray",
         "default": "[]",
-        "usage": "hold a path or pattern back from the copy (repeatable)",
+        "usage": "exclude a path or glob from the copy (repeatable, for example 'data/**')",
         "metavar": "GLOB"
       },
       {
@@ -948,10 +1031,15 @@
         "usage": "keep the agent after a finished --task (default: it stays until you delete it)"
       },
       {
+        "name": "key-replay",
+        "type": "string",
+        "usage": "keys typed while the connection is down: ask (show them, Enter sends), on (send) or off (drop); only tightens the cluster setting"
+      },
+      {
         "name": "max-upload-mb",
         "type": "int",
         "default": "0",
-        "usage": "refuse a copy larger than this many MB (default 500)"
+        "usage": "lower the cluster upload limit for this copy, in MiB"
       },
       {
         "name": "name",
@@ -1549,6 +1637,53 @@
         "default": "30s",
         "usage": "give up on the cluster after this long",
         "metavar": "DURATION"
+      }
+    ]
+  },
+  {
+    "path": "substrate sync",
+    "use": "sync \u003cname\u003e",
+    "short": "Keep sending your changes into a running agent while you work (Preview)",
+    "long": "Watches this folder and sends each change into the agent's copy, one way, until Ctrl-C, --for, or\nthe agent is deleted. It sends 1 second after the last change, and at most 5 seconds after the first.\nEach batch follows the rules of push: secret files are held back, ignored files, .git and package\ncaches are not sent, and a file the agent also changed keeps the agent's version (it is named once;\nsend yours with push NAME --mine FILE). It saves a restore point at the start, then one every\n10 minutes in which something was sent. A suspended agent is not woken: changes wait until it is back.\nNothing keeps running after it stops. --watch is required. This command is a Preview.",
+    "example": "defenseclaw substrate sync fix-tests-7f3a --watch\ndefenseclaw substrate sync fix-tests-7f3a --watch --for 2h",
+    "args": [
+      {
+        "name": "name",
+        "required": true
+      }
+    ],
+    "flags": [
+      {
+        "name": "context",
+        "type": "string",
+        "usage": "cluster to use (default: the one you signed in to last)",
+        "metavar": "NAME"
+      },
+      {
+        "name": "exclude",
+        "type": "stringArray",
+        "default": "[]",
+        "usage": "hold a path or glob back too (repeatable, for example 'data/**')",
+        "metavar": "GLOB"
+      },
+      {
+        "name": "for",
+        "type": "duration",
+        "default": "0s",
+        "usage": "stop after this long, for example 2h"
+      },
+      {
+        "name": "unmask",
+        "type": "stringArray",
+        "default": "[]",
+        "usage": "send a held-back secret file or pattern anyway (repeatable)",
+        "metavar": "GLOB"
+      },
+      {
+        "name": "watch",
+        "type": "bool",
+        "default": "false",
+        "usage": "watch the folder and send changes as you save (required)"
       }
     ]
   },

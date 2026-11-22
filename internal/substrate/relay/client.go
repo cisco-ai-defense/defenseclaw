@@ -43,10 +43,11 @@ type AttachOptions struct {
 	// and says so) when no frame or pong arrives for KeepaliveDead.
 	// Defaults 10 s and 30 s.
 	KeepaliveEvery, KeepaliveDead time.Duration
-	// OnUnsent sees the size of every chunk of input that was read but
-	// could not be sent because the connection ended (GAP-0003), so the
-	// caller can say so instead of losing keys silently.
-	OnUnsent func(n int)
+	// OnUnsent sees a copy of every chunk of input that was read but could
+	// not be sent because the connection ended (GAP-0003), so the caller
+	// can say so or offer it again after a reconnect (B3.1) instead of
+	// losing keys silently. The copy is the caller's to keep and clear.
+	OnUnsent func(b []byte)
 	// Dir is the folder in the actor the agent starts in when it is not
 	// running yet (the copy of the project); "" keeps the relay default.
 	Dir string
@@ -437,7 +438,7 @@ func (o AttachOptions) tracked(sent *sendCount, send func([]byte) error) func([]
 		case err == nil, errors.Is(err, errWriteCutAtEnd):
 			sent.n += int64(len(b))
 		case o.OnUnsent != nil && len(b) > 0:
-			o.OnUnsent(len(b))
+			o.OnUnsent(append([]byte(nil), b...))
 		}
 		return err
 	}
