@@ -15,6 +15,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import importlib.util
+import json
+import os
 import re
 import subprocess
 import sys
@@ -78,7 +80,7 @@ def test_windows_shards_never_carry_the_exhaustive_telemetry_suites() -> None:
     assert "env" not in shard_job or "WINDOWS_TELEMETRY_REGISTRY_MODE" not in shard_job["env"]
     shard_step = next(step for step in shard_job["steps"] if "python_test_shards.py" in step.get("run", ""))
     shard_run = shard_step["run"]
-    assert "'scripts/python_test_shards.py', '--shard-count', '12'" in shard_run
+    assert "'scripts/python_test_shards.py', '--shard-count', '18'" in shard_run
     for test_file in exhaustive_files:
         assert f"'{test_file}'" in shard_run
     # Every run excludes both modules; no event re-admits them.
@@ -157,14 +159,15 @@ def test_ci_shards_slow_gateway_package_and_combines_go_coverage(tmp_path, capsy
     assert "--package-dir internal/audit" in workflow
     assert "name: Go Test (remaining packages / shard ${{ matrix.shard }})" in workflow
     assert "GO_PACKAGE_SHARD: ${{ matrix.shard }}" in workflow
-    assert "GO_PACKAGE_SHARDS: 19" in workflow
+    assert "GO_PACKAGE_SHARDS: 32" in workflow
     assert "GO_TEST_SHARDS: 124" in workflow
     assert "--exclude github.com/defenseclaw/defenseclaw/internal/audit" in workflow
     assert "--exclude github.com/defenseclaw/defenseclaw/internal/gateway" in workflow
-    # The three Linux jobs, and the six darwin gateway parts, which weigh the
-    # unix and darwin tests by their macOS times once go-darwin.json records
-    # internal/gateway and by their Linux times until then.
-    assert workflow.count("--timings scripts/test-timings/go-linux.json") == 4
+    # The three Linux jobs, the Go Pinned Tests shards, and the six darwin
+    # gateway parts, which weigh the unix and darwin tests by their macOS
+    # times once go-darwin.json records internal/gateway and by their Linux
+    # times until then.
+    assert workflow.count("--timings scripts/test-timings/go-linux.json") == 5
     jobs = yaml.safe_load(workflow)["jobs"]
     parts = jobs["darwin-gateway"]["strategy"]["matrix"]["include"]
     assert parts == [{"part": shard + 1, "shard": shard} for shard in range(6)]
@@ -180,7 +183,7 @@ def test_ci_shards_slow_gateway_package_and_combines_go_coverage(tmp_path, capsy
     profiles = sum(
         len(jobs[name]["strategy"]["matrix"]["shard"]) for name in ("go-test-gateway", "go-test-audit", "go-test-other")
     )
-    assert profiles == 148
+    assert profiles == 161
     # The frozen-gateway job adds one more profile (it runs the three tests
     # that no longer run in the shards).
     profiles += 1
@@ -211,22 +214,31 @@ def test_ci_shards_slow_gateway_package_and_combines_go_coverage(tmp_path, capsy
     assert "--timings scripts/test-timings/go-darwin.json \\\n            --shard-count 4 \\" in workflow
     assert "name: go-test-timings-darwin-connector-${{ matrix.shard }}" in workflow
     assert "name: go-test-timings-darwin-gateway-${{ matrix.shard }}" in workflow
-    # The darwin gateway parts share one test binary. go test -c runs go
-    # test's vet checks for the whole package once, under a memory limit that
-    # keeps the 8 GB compile inside the 7 GB macOS runner; every part runs the
-    # binary through test2json the way go test -json runs it, and keeps the
-    # check name of its old Unix Standalone Lifecycle part.
+    # The darwin gateway parts share one test binary, cross-compiled on the
+    # 16 GB Linux runner (the 8 GB compile ran paced for 26.6 minutes on the
+    # 7 GB macOS runner, CI run 44948629340) with CGO_ENABLED=0, as release
+    # builds darwin. go test -c runs go test's vet checks for the whole
+    # package once; every part runs the binary through test2json the way go
+    # test -json runs it, and keeps the check name of its old Unix Standalone
+    # Lifecycle part.
     build = jobs["darwin-gateway-test-binary"]
-    assert build["runs-on"] == "macos-latest"
+    assert build["runs-on"] == "ubuntu-latest"
     step = next(s for s in build["steps"] if s.get("name") == "Build the internal/gateway test binary")
-    assert step["env"]["GOMEMLIMIT"] == "3GiB"
-    assert "go test -c -gcflags=github.com/defenseclaw/defenseclaw/internal/gateway=-c=1 " in step["run"]
+    assert step["env"] == {"CGO_ENABLED": "0", "GOOS": "darwin", "GOARCH": "arm64"}
+    assert 'go test -c -o "$RUNNER_TEMP/gateway-test/gateway.test" ./internal/gateway' in step["run"]
     assert "-vet=off" not in step["run"]
+    assert "GOMEMLIMIT" not in str(build)
+    # Compiled from the macOS checkout path (the tests read repository files
+    # from their runtime.Caller source paths); each part checks that path.
+    mac_workspace = 'mac_workspace="/Users/runner/work/${GITHUB_REPOSITORY#*/}/${GITHUB_REPOSITORY#*/}"'
+    assert mac_workspace in step["run"]
+    assert 'sudo mount --bind "$GITHUB_WORKSPACE" "$mac_workspace"' in step["run"]
     gateway_parts = jobs["darwin-gateway"]
     assert gateway_parts["name"] == "Unix Standalone Lifecycle (macos-latest darwin gateway ${{ matrix.part }} of 6)"
     assert "darwin-gateway-test-binary" in gateway_parts["needs"]
     assert "needs.darwin-gateway-test-binary.result == 'success'" in gateway_parts["if"]
     run = next(s["run"] for s in gateway_parts["steps"] if "test2json" in s.get("run", ""))
+    assert mac_workspace in run and 'if [ "$GITHUB_WORKSPACE" != "$mac_workspace" ]; then' in run
     assert '(cd "$pkg" && go tool test2json -t -p "github.com/defenseclaw/defenseclaw/$pkg"' in run
     assert '"$RUNNER_TEMP/gateway.test" -test.paniconexit0 -test.v=test2json -test.count=1' in run
     assert '-test.timeout=10m -test.run="$pattern"' in run
@@ -301,6 +313,85 @@ def test_ci_shards_slow_gateway_package_and_combines_go_coverage(tmp_path, capsy
     assert "Test|Fuzz|Example" in sharder
 
 
+def _pinned_step(jobs: dict) -> str:
+    job = jobs["go-pinned"]
+    assert job["strategy"]["matrix"]["shard"] == list(range(8))
+    step = next(
+        step for step in job["steps"] if step.get("name") == "Run this shard of the Go tests that name a changed file"
+    )
+    assert step["env"]["PINNED_SHARDS"] == 8
+    assert step["env"]["PINNED_SHARD"] == "${{ matrix.shard }}"
+    return step["run"]
+
+
+def _bash_major_version() -> int:
+    # `mapfile` needs Bash 4+; macOS ships Bash 3.2 as /bin/bash. CI runs the
+    # pinned script on ubuntu (Bash 5), so the test only skips on old shells.
+    try:
+        out = subprocess.run(
+            ["bash", "-c", "echo ${BASH_VERSINFO[0]}"], capture_output=True, text=True, check=True, timeout=30
+        ).stdout.strip()
+        return int(out)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return 0
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the Go Pinned Tests job runs this bash script on ubuntu")
+@pytest.mark.skipif(
+    sys.platform != "win32" and _bash_major_version() < 4,
+    reason="the pinned script uses mapfile, which needs Bash 4+ (macOS system bash is 3.2); the ubuntu CI job runs it",
+)
+def test_go_pinned_tests_run_every_selected_test_once_over_the_shards(tmp_path) -> None:
+    # A README.md edit pins 490 internal/gateway tests: one go test process
+    # ran them for 840 s and hit the 14m -timeout (#1489). The shards must
+    # still run every selected test exactly once: a large target split by
+    # go_test_shards.py --match, a small one (or one the script cannot split)
+    # whole in one shard.
+    workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    run = _pinned_step(yaml.safe_load(workflow)["jobs"])
+    go_test = 'go test -count=1 -timeout 14m -run "$regex" "$package" || status=1'
+    assert run.count(go_test) == 1
+    record = tmp_path / "runs.tsv"
+    script = tmp_path / "pinned.sh"
+    script.write_text(run.replace(go_test, f'printf "%s\\t%s\\n" "$package" "$regex" >> "{record}"'), encoding="utf-8")
+    shards = importlib.util.spec_from_file_location("go_test_shards", ROOT / "scripts/go_test_shards.py")
+    module = importlib.util.module_from_spec(shards)
+    assert shards.loader is not None
+    shards.loader.exec_module(module)
+    gateway = sorted({name for _, names in module.discover_test_files(ROOT / "internal/gateway") for name in names})
+    picked = gateway[::4]
+    targets = [
+        {"package": "./internal/gateway", "run": "^(" + "|".join(picked) + ")$"},
+        {"package": "./internal/hookpaths", "run": "^(TestA|TestB)$"},
+        {"package": "./internal/flow", "run": "."},
+    ]
+    env = {"GO_TESTS": json.dumps(targets), "PINNED_SHARDS": "8", "PATH": os.environ["PATH"]}
+    for shard in range(8):
+        subprocess.run(["bash", str(script)], cwd=ROOT, env={**env, "PINNED_SHARD": str(shard)}, check=True)
+    lines = [line.split("\t") for line in record.read_text(encoding="utf-8").splitlines()]
+    gateway_regexes = [regex for package, regex in lines if package == "./internal/gateway"]
+    assert len(gateway_regexes) >= 8
+    ran = [name for regex in gateway_regexes for name in gateway if re.search(regex, name)]
+    assert sorted(ran) == picked
+    assert [regex for package, regex in lines if package != "./internal/gateway"] == ["^(TestA|TestB)$", "."]
+
+
+def test_go_lint_restores_the_pinned_golangci_lint_and_only_main_saves_it() -> None:
+    # Go Lint keeps the Makefile's pinned golangci-lint and its whole gate
+    # (make go-lint); the binary and the analysis cache come from main's
+    # latest entry, and a pull request never writes one.
+    workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    steps = yaml.safe_load(workflow)["jobs"]["go-lint"]["steps"]
+    lint = next(step for step in steps if step.get("name") == "Go lint (gofmt, go vet, golangci-lint on changed lines)")
+    assert 'make go-lint GOLANGCI_LINT="$bin"' in lint["run"]
+    assert '"$bin" version 2>/dev/null | grep -qF " ${GOLANGCI_VERSION#v} "' in lint["run"]
+    assert "sed -n 's/^GOLANGCI_LINT_VERSION := //p' Makefile" in workflow
+    saves = [step for step in steps if str(step.get("uses", "")).startswith("actions/cache/save@")]
+    assert len(saves) == 1
+    assert "github.ref == 'refs/heads/main'" in saves[0]["if"]
+    assert "github.event_name == 'push'" in saves[0]["if"]
+
+
 def test_release_validates_reviewed_macos_pin_without_freshness_block() -> None:
     workflow = (ROOT / ".github/workflows/release.yaml").read_text(encoding="utf-8")
 
@@ -365,11 +456,11 @@ LIVE_ONLY_JOBS = {
 
 # Jobs whose one step is a whole-package compile that a slow hosted runner
 # cannot finish in 20 minutes keep a measured, longer budget (GAP-1090:
-# rel/1.0.10 push 5 cancelled Go Lint at 15m17s and the Darwin gateway test
-# binary at 20m32s, neither with a finding). Nothing else may exceed 20.
+# rel/1.0.10 push 5 cancelled Go Lint at 15m17s with no finding). Nothing
+# else may exceed 20. The Darwin gateway test binary left this list when it
+# moved to a Linux cross-compile (15 minutes).
 LONG_COMPILE_JOBS = {
     ("ci.yml", "go-lint"): 25,
-    ("ci.yml", "darwin-gateway-test-binary"): 35,
     # Not a compile: the Windows upgrade lane installs, upgrades, converges and
     # removes the standalone services on a hosted runner. On rel/1.0.10
     # da4177e225 (CI run 44074568058) every step passed and the job was
