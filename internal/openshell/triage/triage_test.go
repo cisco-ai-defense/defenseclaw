@@ -28,8 +28,8 @@ import (
 	"testing"
 	"unicode/utf8"
 
-	v1 "github.com/NVIDIA/OpenShell/sdk/go/openshell/v1"
-	"github.com/NVIDIA/OpenShell/sdk/go/openshell/v1/types"
+	v1 "github.com/ai-openshell/sdk-go/openshell/v1"
+	"github.com/ai-openshell/sdk-go/openshell/v1/types"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
