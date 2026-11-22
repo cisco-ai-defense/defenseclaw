@@ -138,6 +138,11 @@ const profileExplainUPNWait = 5 * time.Second
 // asked for first, within profileExplainUPNWait: the answer is kept, so the
 // lookup that refreshes the cache has it even where requests do not wait
 // for it (no users or groups assignment).
+// profileExplainAccountName is the unix lookup of the account holding a uid,
+// for verifiedGroupDomains, which reads no records on Windows: standalone
+// Windows matches a group by its SID and folds no spelling.
+var profileExplainAccountName = func(string) (string, bool) { return "", false }
+
 var profileExplainDirectoryFacts = func(id string) (useridentity.DirectoryFacts, error) {
 	sid := strings.ToUpper(strings.TrimSpace(id))
 	useridentity.WindowsDirectoryFacts(sid, profileExplainUPNWait)

@@ -352,13 +352,15 @@ func TestReadPIDInfoMissingFile(t *testing.T) {
 // GAP-0399: a plain gateway.pid whose PID the OS gave to another program is
 // stale; start must not report that program as the running gateway.
 func TestIsRunningReplacesLegacyPIDOfAnotherProgram(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("uses sleep")
-	}
 	d := New(t.TempDir())
+	// Any long-lived program that is not the gateway; Windows has no sleep
+	// (rel-1-0-10:GAP-1531).
 	other := exec.Command("sleep", "30")
+	if runtime.GOOS == "windows" {
+		other = exec.Command("ping", "-n", "30", "127.0.0.1")
+	}
 	if err := other.Start(); err != nil {
-		t.Skipf("sleep: %v", err)
+		t.Fatalf("start %s: %v", other.Path, err)
 	}
 	t.Cleanup(func() {
 		_ = other.Process.Kill()

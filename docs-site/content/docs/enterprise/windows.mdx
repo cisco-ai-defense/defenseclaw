@@ -1087,9 +1087,15 @@ have an administrator delete it, and run `defenseclaw init` again.
 
 Nothing migrates a per-user install. Before you deploy, have each user run
 `defenseclaw uninstall --all --binaries --yes`. If a user set up Claude Cowork, they also remove the DefenseClaw plugin in Claude Desktop (**Customize > Plugins**, then the **...** menu on DefenseClaw, **Remove**); until then Cowork tool calls are blocked. Setup needs `--all`: it does not
-adopt a `%USERPROFILE%\.defenseclaw` folder a per-user install left, and a first
-install checks every enrolled profile and stops in seconds, naming the folder and
-this command. A folder the account created itself without a per-user product is
+adopt a `%USERPROFILE%\.defenseclaw` folder a per-user install left. Install,
+Upgrade and Repair leave that one user out, untouched and not protected, and finish
+for the other users; the output names the user and the folder in a
+`target_runtime_profile_skipped` warning, and the guardian enrolls the user once the
+folder is gone. The same goes for a profile that stays busy or that Setup cannot
+use. A first install whose every enrolled profile holds such a folder stops in
+seconds, naming the folder and this command, and so does any install with
+`DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS` set (strict mode). Releases before 1.0.11 stopped a
+standalone install for every user. A folder the account created itself without a per-user product is
 taken over. A link or junction the account made at that folder, or at its `hooks`
 folder, is moved aside when the account enrolls, without opening what it names,
 and the folder is created. Until that account signs in it stays pending, not
@@ -1387,7 +1393,7 @@ Limits:
 | Connector | Route on Windows | Notes |
 | --- | --- | --- |
 | Codex | Machine policy | Codex requirements file. DefenseClaw always sets `allow_managed_hooks_only = true`; an administrator value of `false` fails the run |
-| Claude Code | Machine policy | Managed-settings drop-in with DefenseClaw's hooks and, under `managed_hooks_only: enforce`, the `allowManagedHooksOnly` lock. `preserve` leaves the lock out and turns the foreign-hook guard on. A non-empty `HKLM\SOFTWARE\Policies\ClaudeCode\Settings` is refused |
+| Claude Code | Machine policy | Managed-settings drop-in with DefenseClaw's hooks and, under `managed_hooks_only: enforce`, the `allowManagedHooksOnly` lock. `preserve` leaves the lock out and turns the foreign-hook guard on. An `HKLM\SOFTWARE\Policies\ClaudeCode\Settings` value is refused unless it sets `"managedSourcesBehavior": "merge"`, holds only source-control keys or carries DefenseClaw's hook matrix (see [Machine policy](/docs/enterprise/machine-policy#windows-differences)) |
 | Cursor | Machine policy | Cursor enterprise hooks |
 | GitHub Copilot | Machine policy | `%ProgramData%\GitHub\Copilot\policy.d`, plus a per-user hook runtime |
 | OpenCode | Machine policy | `%ProgramData%\opencode` loads the managed plugin, plus a per-user hook runtime. Falls back to the per-user plugin while the managed plugin is not in force |

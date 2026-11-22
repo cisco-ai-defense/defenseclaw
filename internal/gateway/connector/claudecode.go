@@ -1629,7 +1629,7 @@ func (c *ClaudeCodeConnector) ManagedHookPolicy(opts SetupOpts) ([]byte, error) 
 	if !opts.ManagedEnterprise {
 		return nil, fmt.Errorf("Claude Code managed hook policy requires managed enterprise setup") //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
-	if err := validateClaudeCodeManagedFileDestination(); err != nil {
+	if err := validateClaudeCodeManagedFileDestination(opts); err != nil {
 		return nil, err
 	}
 	hookExecutable := strings.TrimSpace(opts.HookExecutable)

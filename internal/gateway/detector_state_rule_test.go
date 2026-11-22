@@ -193,7 +193,7 @@ func TestGAP1409ObserveSelfProtectionWindows(t *testing.T) {
 	if err := os.Link(state, hardlink); err != nil {
 		t.Fatal(err)
 	}
-	if mapped, same := hookpaths.ResolveActiveStateHardlinkTarget(hardlink, home); !same {
+	if mapped, same, _ := hookpaths.ResolveActiveStateHardlinkTarget(hardlink, home); !same {
 		t.Fatalf("active state hardlink not mapped: %q", mapped)
 	}
 	ordinary := filepath.Join(cwd, "ordinary.txt")

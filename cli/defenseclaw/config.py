@@ -2334,9 +2334,10 @@ class EnterpriseOpenShellConfig:
     """``enterprise.openshell`` as far as Python reads it: the compute driver.
 
     The other keys (``install``, ``driver_fallback``, ``version``,
-    ``gateway_port``, ``e2fsprogs_dir``) are the administrator's and the
-    lifecycle's (internal/config/enterprise.go); Python never reads them, so
-    it does not model them. They are not per-user ``openshell.*`` keys: a
+    ``gateway_port``, ``e2fsprogs_dir``, ``allow_downgrade``) are the
+    administrator's and the lifecycle's (internal/config/enterprise.go);
+    Python never reads them, so it does not model them. They are not
+    per-user ``openshell.*`` keys: a
     per-user config.yaml that carries one under ``openshell:`` is refused by
     the schema, and the per-user OpenShell gateway port is fixed (17670).
     """
@@ -8859,7 +8860,7 @@ def _validate_enterprise_cowork_vm_sensor(raw: Mapping[str, Any]) -> None:
     patterns = {
         "tenant": (r"[A-Za-z0-9][A-Za-z0-9._-]*", 128),
         "device": (r"[A-Za-z0-9][A-Za-z0-9._-]*", 128),
-        "collector": (r"[A-Za-z0-9][A-Za-z0-9.-]*:[0-9]{1,5}", 253),
+        "collector": (r"[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?:[0-9]{1,5}", 200),
         "vendor": (r"[a-z][a-z0-9_-]*", 64),
         "package_sha256": (r"[0-9a-f]{64}", 64),
         "signature_sha256": (r"[0-9a-f]{64}", 64),

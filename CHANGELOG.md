@@ -8,6 +8,78 @@ for released versions and assets, and the
 [documentation website](https://cisco-ai-defense.github.io/defenseclaw/docs/)
 for current behavior.
 
+## [Unreleased] — 1.0.11
+
+DefenseClaw 1.0.11 follows 1.0.10. It is a fix release. It updates OpenShell to 0.1.9 and adds one managed config key, `enterprise.openshell.allow_downgrade`. It fixes how blocked tool calls end a streamed reply, Windows managed install, upgrade and uninstall, routing budgets and cost records, sandbox setup on macOS, and a set of smaller connector and CLI issues.
+
+### Upgrading
+
+- **From 1.0.10 or an earlier 1.0.x:** run the 1.0.11 installer for your install type: `install.sh`, `install.ps1`, `defenseclaw upgrade`, the rpm, the deb, the macOS pkg or the Windows Setup. Your config and saved modes are kept. The only new config key is `enterprise.openshell.allow_downgrade`; `defenseclaw rollback` to 1.0.10 sets it aside for you, because 1.0.10 does not know it.
+- **gpt-5.2 prices:** an install that seeded its price table from the 1.0.10 default keeps its old gpt-5.2 row, so gpt-5.2 calls still show no cost after the upgrade. Run `defenseclaw setup tokenomics` again to re-seed the table, or add the gpt-5.2 rows by hand.
+- **OpenShell 0.1.9:** DefenseClaw now installs OpenShell 0.1.9, and sandboxes still run on OpenShell 0.1.6 or later. `defenseclaw sandbox setup` offers the upgrade. An OpenShell upgrade cannot be undone; see Known issues before you upgrade a computer you may roll back.
+- **Managed OpenShell version:** `ensure` refuses an `enterprise.openshell.version` below a release an account on the computer already ran, and names those accounts. Set `enterprise.openshell.allow_downgrade: true` to apply it anyway; each of those accounts then has to move its OpenShell gateway database aside before its sandboxes start (see Known issues).
+- **Managed Windows, signed-out accounts:** an account that stayed signed out across two upgrades from a release before 1.0.11 must sign in once before DefenseClaw re-applies its hooks.
+
+### Security
+
+- **GitHub Copilot CLI:** when the guardrail blocks a prompt in action mode, the prompt is now replaced before it reaches the model on every install (Copilot CLI 1.0.76 or later), not only on some profiles.
+- **Streamed tool calls:** when DefenseClaw refuses a tool call in the middle of a streamed reply, the stream now ends with an error the agent shows as a failed turn. Before, the agent could receive the refused call as complete.
+- **Shell hooks:** per-user and standalone managed shell hooks now follow the configured fail mode when the hook exits unexpectedly.
+- **Codex on standalone managed installs and in sandboxes:** every block of the Codex hook is now the block answer Codex reads, so Codex stops the prompt or tool call. Before, a block on a standalone managed install or inside an OpenShell sandbox ended with a non-zero exit, which current Codex releases treat as a hook failure and then go on. In fail mode open, the hook that catches an unexpected exit now logs it and never blocks.
+- **Sandbox hooks:** a program inside an OpenShell sandbox could set one shell variable that silenced the DefenseClaw hook answer, so a block was taken as an allow for Claude Code, Codex, Hermes and Antigravity sandboxes (Copilot, Cursor and Devin still blocked but lost the reason). This affects only agents that run inside a DefenseClaw sandbox.
+- **Per-user gateway check:** when the check of which process holds the gateway port is slow, a hook no longer treats another program of the same account on that port as a gateway outage.
+- **Windows managed sign-in waits:** a hook that waits for a user to sign in after an upgrade now checks the machine's own record of the upgrade, not a file the account can write.
+- **Command reading:** a `cp` whose destination is a link, and a PowerShell `-Command` body made of several words, are now read in full.
+- **MCP:** a block rule written while the gateway reloads now applies to the first pending call; Codex per-call lookups follow the project's trust setting.
+- **Protected state on busy Windows machines (1.0.10 and earlier):** a busy Windows machine could let a write through a hard link into DefenseClaw's protected state. A folder read that the system delayed, on the way to the link or the write target, was taken as a network share that did not answer, so the link was not found. Such a write is now refused.
+
+### Fixed
+
+#### Windows managed install, upgrade and uninstall
+- Setup `/uninstall` asks again after waiting for the managed lock instead of failing.
+- Setup renders the recorded Claude policy before it takes the install lock, so a slow policy read no longer stops the install.
+- Standalone Setup `/install` without a config file writes a standalone starting config.
+- The Setup coverage error now names a failed guardian startup check, and the guardian's startup record fits the size Setup reads.
+- Codex `requirements.toml` keeps the administrator's own text on every DefenseClaw write.
+- A rollback removes the per-user Codex hooks a newer install left.
+- The config owner repair accepts only a file that a privileged writer created in the guardian folder.
+- An administrator shell on a standalone Windows machine reads the guardian records from the right place.
+- Standalone Setup no longer takes over a user's own earlier per-user DefenseClaw folder; it leaves that account as it found it. One busy or unusable profile no longer stops the install for every other user.
+- Managed Claude Code enrollment accepts an existing ClaudeCode policy in the machine registry that merges managed sources, instead of failing on any such policy.
+- A standalone reinstall keeps the shared hook files' owner when Intune or an administrator edited `requirements.toml` or `90-defenseclaw.json`, instead of failing with error 1603.
+
+#### Routing, budgets and cost
+- A Claude stream that stops before its usage record is charged to budgets as unknown spend, not as its opening token count.
+- A reload that removes all budgets stops the budget sync.
+- The default price table prices gpt-5.2 at its list price and names the source of every row.
+- A config reload refreshes routing health when routing is turned on or its backends change.
+- The group budget warning reads only the guardian record of the account that owns the user id.
+- On a managed Mac, `config validate` reads the same guardian records the gateway uses for group budgets.
+
+#### Sandbox
+- On a Mac with OpenShell 0.1.9, sandbox setup no longer says MicroVM sandboxes do not start, and offers the vm driver as a choice that works (Preview). The default stays docker: `--yes` and non-interactive setup never pick vm.
+- On macOS, setup moves a gateway that still uses the vm driver to docker, checks the docker driver first, and `--yes` never selects vm.
+- The Docker Desktop message about a missing probe image tells you to build the image.
+- `doctor` and `sandbox run` agree on Docker Desktop's Landlock support.
+
+#### Connectors and CLI
+- Kiro: `setup remove kiro` also removes this install's older hooks from the user's earlier default agent; a broken Kiro agent file is reported once.
+- OpenClaw: the permission message for `openclaw.json` names the first folder the account cannot open.
+- A Claude Code tool call that the guardrail allows now writes one local hook row on a per-user gateway, not two.
+- The agent process scan skips a process that ended while it was read.
+- Agent Substrate attach: keys typed just before a dropped connection are counted correctly, so the launcher says when they may not have reached the agent.
+- Hook resends with less than a second left still go out; state walks are limited by entry count, not time.
+- Cowork VM sensor: `config validate` refuses a collector host name the VM installer would refuse (ending in `-` or `.`, or over 200 characters).
+- The AI Runtime and AI Discovery dashboards also show the Cowork VM sensor.
+- Native Windows: `setup routing` refuses only the classifier that does not run on Windows, and says why. `config set routing.enabled` says the change applies on reload when the classifier runs in the gateway.
+- Errors name their cause when removing a connector fails, and the gateway start error says why a removed connector's teardown failed.
+
+### Known limits
+
+- **An OpenShell upgrade cannot be undone.** Rolling DefenseClaw back keeps OpenShell 0.1.9. An older OpenShell starts only after its gateway database (`~/.local/state/openshell/gateway/openshell.db`) is moved aside, which drops the records of your sandboxes, so pull their work back first.
+
+- **Cowork VM sensor packages are not signed yet.** The readiness check reports the missing signature. Until signed packages ship, pin `package_sha256` to the archive hash from the release checksums.
+
 ## [Unreleased] — 1.0.10
 
 DefenseClaw 1.0.10 lets you decide what each guardrail layer does, adds model routing with budgets and cost records, and adds native OpenClaw hooks and Agent Substrate support. It reads shell and PowerShell commands more completely, keeps hook answers fast under bursts of tool calls, and makes managed Windows and macOS installs more reliable. Secure Client is not part of 1.0.x. The release notes on GitHub Releases have the upgrade steps and the checksum and signature commands.

@@ -30,6 +30,9 @@ var managedWindowsBareCommandAllowed = map[string][]string{
 	// The other account's per-user gateway holds the managed port: that
 	// user removes the per-user install.
 	"internal/cli/windows_enterprise_port_holder.go": {"`defenseclaw uninstall --all --binaries --yes`"},
+	// An account status leaves out for its per-user install (GAP-1733): that
+	// user removes the per-user install.
+	"internal/cli/windows_enterprise_standalone.go": {"`defenseclaw uninstall --all --binaries --yes`"},
 	// Per-user Codex setup refuses a linked CODEX_HOME.
 	"internal/gateway/connector/codex_config_dir_windows.go": {"run: defenseclaw setup codex"},
 	// The per-user stable hook launcher (LocalAppData\DefenseClaw\HookRuntime);

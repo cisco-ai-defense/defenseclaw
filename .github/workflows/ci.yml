@@ -101,26 +101,21 @@ jobs:
       # check does not pin or preselect the next release number.
       - run: make check-version-sync
 
-  go-lint:
-    name: Go Lint
+  # Go Lint is make go-lint in two jobs side by side: go vet (gofmt and
+  # both go vet runs, make go-vet) and golangci-lint on the changed lines
+  # (make go-lint-analyzers). As one job it took 12.2-15.5 min, 3.2 of them
+  # in go vet ./... (CI run 44977112541). make go-lint runs both, in order.
+  go-vet:
+    name: Go Lint (go vet)
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.go != 'false' }}
     runs-on: ubuntu-latest
-    # make go-lint type-checks and vets the whole module (internal/gateway is
-    # one large compile unit); rel/1.0.10 push 5 (CI run 44013773983) was
-    # cancelled at 15m17s of a 15-minute budget with no finding (GAP-1090).
-    timeout-minutes: 25
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
-          # A PR checks out its merge commit. Its first parent is the target
-          # branch tip used for this check, so two commits retain the exact
-          # changed-line baseline without fetching every branch and tag.
-          # Push and dispatch jobs keep their original full-history baseline.
-          fetch-depth: ${{ github.event_name == 'pull_request' && 2 || 0 }}
           persist-credentials: false
       - uses: ./.github/actions/setup-go
-        id: go
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
           node-version: "24"
@@ -131,6 +126,35 @@ jobs:
       - run: make plugin
       - name: Type-check Amp policy plugin against official API
         run: make amp-plugin-typecheck
+      - name: Go vet (gofmt, go vet, the openshell_integration tag)
+        run: make go-vet
+
+  go-lint-analyzers:
+    name: Go Lint (golangci-lint)
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.go != 'false' }}
+    runs-on: ubuntu-latest
+    # golangci-lint type-checks the whole module (internal/gateway is one
+    # large compile unit); cold on a 4 vCPU runner it took about 8 min.
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          # A PR checks out its merge commit. Its first parent is the target
+          # branch tip used for this check, so two commits retain the exact
+          # changed-line baseline without fetching every branch and tag.
+          # Push and dispatch jobs keep their original full-history baseline.
+          fetch-depth: ${{ github.event_name == 'pull_request' && 2 || 0 }}
+          persist-credentials: false
+      - uses: ./.github/actions/setup-go
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: extensions/defenseclaw/package-lock.json
+      # golangci-lint type-checks the embedded OpenClaw extension tree that
+      # make go-lint syncs before it lints.
+      - run: make plugin sync-openclaw-extension
       # golangci-lint itself and its analysis cache: on a 4 vCPU runner the
       # pinned golangci-lint took 409 s cold (go run built it, then analysed
       # every package) and 8 s with the analysis cache warm (dc-build-1, 4
@@ -159,7 +183,7 @@ jobs:
           key: ${{ steps.golangci.outputs.key }}
           restore-keys: |
             ${{ steps.golangci.outputs.prefix }}
-      - name: Go lint (gofmt, go vet, golangci-lint on changed lines)
+      - name: Go lint (golangci-lint on changed lines)
         env:
           GOLANGCI_LINT_BASE: ${{ github.event_name == 'pull_request' && 'HEAD^1' || 'origin/main' }}
           GOLANGCI_DIR: ${{ steps.golangci.outputs.dir }}
@@ -172,12 +196,36 @@ jobs:
             GOBIN="$GOLANGCI_DIR/bin" go install "github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$GOLANGCI_VERSION"
           fi
           "$bin" version
-          GOLANGCI_LINT_CACHE="$GOLANGCI_DIR/cache" make go-lint GOLANGCI_LINT="$bin"
+          GOLANGCI_LINT_CACHE="$GOLANGCI_DIR/cache" make go-lint-analyzers GOLANGCI_LINT="$bin"
       - if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.golangci-cache.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
           path: ${{ steps.golangci.outputs.dir }}
           key: ${{ steps.golangci.outputs.key }}
+
+  go-lint:
+    # The required check: passes when go vet and golangci-lint both passed,
+    # or when the pull request changes no Go and both were skipped.
+    name: Go Lint
+    needs: [changes, go-vet, go-lint-analyzers]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require go vet and golangci-lint
+        env:
+          GO_SUITE: ${{ needs.changes.outputs.go }}
+          VET_RESULT: ${{ needs.go-vet.result }}
+          ANALYZERS_RESULT: ${{ needs.go-lint-analyzers.result }}
+        run: |
+          set -euo pipefail
+          echo "go vet: $VET_RESULT, golangci-lint: $ANALYZERS_RESULT"
+          if [ "$GO_SUITE" = false ] && [ "$VET_RESULT" = skipped ] && [ "$ANALYZERS_RESULT" = skipped ]; then
+            echo "No Go change in this pull request: Go Lint was skipped."
+            exit 0
+          fi
+          test "$VET_RESULT" = success
+          test "$ANALYZERS_RESULT" = success
 
   # The defenseclaw-substrate Helm chart: lint, goldens and render
   # invariants with a pinned helm (the general Go shards have no helm and
@@ -806,7 +854,7 @@ jobs:
           mapfile -t coverage_parts < <(
             find coverage-parts -type f -name 'coverage-go-*.out' -print | sort
           )
-          # 124 gateway + 5 audit + 19 remaining-package shards, plus the
+          # 124 gateway + 5 audit + 32 remaining-package shards, plus the
           # frozen-gateway job.
           test "${#coverage_parts[@]}" -eq 162
           python3 scripts/merge_go_coverage.py \
@@ -946,6 +994,11 @@ jobs:
           save-cache: ${{ github.ref == 'refs/heads/main' }}
       - run: uv sync
       - run: make py-lint
+      # The S7 benchmark scorer and its tools (benchmarks/s7) had tests that no CI job ran, so the scorer the
+      # bench gate uses drifted from them (rel-1-0-10 GAP-1578, GAP-1581). Stdlib only, about 25 s.
+      - name: S7 benchmark tooling tests
+        # Explicit files (the CI-strategy guard wants named test files on every pytest line); add new benchmarks/s7 test files here.
+        run: uv run --frozen python -m pytest -q -p no:cacheprovider benchmarks/s7/gate/test_addr_consistency.py benchmarks/s7/gate/test_labelfold_inputs.py benchmarks/s7/gate/test_s7gate_checks.py benchmarks/s7/gate/test_s7gate_failclosed.py benchmarks/s7/gate/test_s7gate_fixtureroot.py benchmarks/s7/gate/test_s7gate_labels.py benchmarks/s7/gate/test_s7gate_one_scorer.py benchmarks/s7/gate/test_s7gate_rework.py benchmarks/s7/wincorpus/test_wincorpus.py
 
   python-lint-test:
     # Preserve the existing required-check name while making it the single
@@ -2204,10 +2257,25 @@ jobs:
   enterprise-windows-install:
     # Setup /ensure, /ensure (no-op), verify, status, detect.ps1, the
     # installed CLI's ensure and /uninstall with the four Windows services.
-    name: Enterprise Install Lane (Windows services)
+    # One lane in two jobs on fresh runners (CI run 44977112541: 18.4 min
+    # as one job, the two Setup installs about 3 min each): each part runs
+    # the preflight and the install, then its step groups
+    # (scripts/test-enterprise-windows-install.ps1 -Groups). Together the
+    # parts run every step once, in order (test_ci_workflow_efficiency).
+    name: Enterprise Install Lane (Windows services, ${{ matrix.part }})
     needs: enterprise-install-assets-windows
     runs-on: windows-latest
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - part: drift and refused config
+            key: drift-refusal
+            groups: drift refusal
+          - part: operate and reinstall
+            key: operate-reinstall
+            groups: operate reinstall
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -2232,14 +2300,17 @@ jobs:
           icacls $logs
       - name: Install, converge, verify and remove the standalone services
         shell: pwsh
+        env:
+          LANE_GROUPS: ${{ matrix.groups }}
         run: >-
           ./scripts/test-enterprise-windows-install.ps1
           -Setup (Join-Path $env:RUNNER_TEMP 'enterprise-install\DefenseClawSetup-Enterprise-Standalone-x64.exe')
           -Version 9.9.9 -ResultsRoot (Join-Path $env:RUNNER_TEMP 'lane-results')
+          -Groups ($env:LANE_GROUPS -split ' ')
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
-          name: enterprise-install-results-windows
+          name: enterprise-install-results-windows-${{ matrix.key }}
           path: ${{ runner.temp }}/lane-results/
           if-no-files-found: ignore
           retention-days: 5
@@ -2397,12 +2468,26 @@ jobs:
 
   enterprise-upgrade-windows:
     # The Windows lane of Enterprise Upgrade Lane: it needs only the
-    # standalone Setup, not the GoReleaser packages.
-    name: Enterprise Upgrade Lane (Windows)
+    # standalone Setup, not the GoReleaser packages. One lane in two jobs on
+    # fresh runners (CI run 44977112541: 14.1 min as one job): each part
+    # installs the previous release, stores the credential and upgrades,
+    # then runs its step groups; together they run every step once, in
+    # order (test_ci_workflow_efficiency).
+    name: Enterprise Upgrade Lane (Windows, ${{ matrix.part }})
     needs: [changes, enterprise-install-assets-windows]
     if: ${{ !cancelled() && needs.changes.outputs.enterprise != 'false' && needs.enterprise-install-assets-windows.result == 'success' }}
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - part: drift
+            key: drift
+            groups: drift
+          - part: refused config and operate
+            key: refusal-operate
+            groups: refusal operate
     env:
       GH_TOKEN: ${{ github.token }}
       LANE_ASSET: setup
@@ -2439,11 +2524,14 @@ jobs:
       - name: Upgrade, converge, verify and remove the standalone services
         if: steps.previous.outputs.version != ''
         shell: pwsh
+        env:
+          LANE_GROUPS: ${{ matrix.groups }}
         run: >-
           ./scripts/test-enterprise-windows-install.ps1
           -Setup (Join-Path $env:RUNNER_TEMP 'enterprise-install\DefenseClawSetup-Enterprise-Standalone-x64.exe')
           -Version 9.9.9 -ResultsRoot (Join-Path $env:RUNNER_TEMP 'lane-results')
           -UpgradeFrom '${{ steps.previous.outputs.package }}' -PreviousVersion '${{ steps.previous.outputs.version }}'
+          -Groups ($env:LANE_GROUPS -split ' ')
       - name: The upgrade kept the administrator config intent
         if: steps.previous.outputs.version != ''
         shell: bash
@@ -2453,7 +2541,7 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
-          name: enterprise-upgrade-results-Windows
+          name: enterprise-upgrade-results-Windows-${{ matrix.key }}
           path: ${{ runner.temp }}/lane-results/
           if-no-files-found: ignore
           retention-days: 5

@@ -149,8 +149,14 @@ func TestSlimHookLinksNoGatewayPackages(t *testing.T) {
 // full-CLI main. The 6.5 MB over the first estimate is the CEL compiler of
 // the rule loader, which the hook links so that a pinned custom pack sets
 // the outage mode exactly as the gateway reads it (rel-1-0-10:GAP-0603); it
-// costs about 1 ms of start CPU. The budget leaves 2 MiB of room.
-const slimHookMaxBytes = 50 << 20
+// costs about 1 ms of start CPU. Shared modules the hook links (otel,
+// golang.org/x/net, x/text, x/crypto, genproto, cel.dev/expr) grow it with
+// every version bump: with the OpenShell SDK at github.com/ai-openshell/sdk-go
+// v0.1.9 (rel-1-0-10:GAP-1773), whose floors raise those modules, the
+// windows/amd64 hook is 52,456,448 bytes and linux/amd64 48,140,450 (from
+// 52,419,072 and 48,103,586), with no SDK or gRPC package in the hook graph.
+// The budget is 52 MiB: about 1.97 MiB of room on Windows, the larger build.
+const slimHookMaxBytes = 52 << 20
 
 func TestSlimHookSizeBudget(t *testing.T) {
 	if testing.Short() {

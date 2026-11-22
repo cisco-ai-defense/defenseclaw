@@ -29,10 +29,19 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 func managedPublishTestState(t *testing.T) *managedInventoryPublishState {
 	t.Helper()
+	// The publish gate reads the per-connector MCP files of the account home.
+	// HOME alone does not move os.UserHomeDir on Windows (USERPROFILE does), so
+	// the tests read the real profile of whoever ran them (rel-1-0-10:GAP-1691).
+	home := t.TempDir()
+	testenv.SetHome(t, home)
+	if got, err := os.UserHomeDir(); err != nil || got != home {
+		t.Fatalf("test home not isolated: os.UserHomeDir() = %q, %v; want %q", got, err, home)
+	}
 	state := newManagedInventoryPublishState(&config.Config{
 		DeploymentMode: managed.DeploymentModeManagedEnterprise,
 		DataDir:        t.TempDir(),

@@ -322,6 +322,10 @@ type ManagedStatus struct {
 	// Unavailable is why sandboxes can't run for the caller ("" = they
 	// can).
 	Unavailable string `json:"unavailable,omitempty"`
+	// Recovery, when set, is what the caller can do about Unavailable
+	// themselves (the gateway database a newer OpenShell migrated,
+	// rel-1-0-10:GAP-1781); "" leaves it to the organization.
+	Recovery string `json:"recovery,omitempty"`
 }
 
 // UnmarshalJSON preserves the difference between an older daemon omitting

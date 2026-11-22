@@ -149,6 +149,9 @@ type Record struct {
 	// provider name (else other). The local store and the labels key on these,
 	// never on the client-chosen model string.
 	ModelKey, ProviderKey string
+	// openingUsage is set when Usage is only the opening count of a stream
+	// that ended before its final usage: what the call cost is unknown.
+	openingUsage bool
 }
 
 // DropSource is a sink that counts records it lost (cumulative, by kind).

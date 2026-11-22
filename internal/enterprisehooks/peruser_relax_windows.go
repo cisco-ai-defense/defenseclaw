@@ -26,6 +26,7 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"golang.org/x/sys/windows"
 )
@@ -149,9 +150,8 @@ func restoreWindowsRelaxedPerUserDirectories(target windowsGenericManagedTarget,
 }
 
 // windowsSetupRelaxedDirectorySDDL is the owner-private DACL a connector
-// setup needs on a guardian-hardened directory: LocalSystem and OWNER RIGHTS
-// full control, inherited by new children.
-const windowsSetupRelaxedDirectorySDDL = "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;OW)"
+// setup needs on a guardian-hardened directory (managed.WindowsSetupRelaxedDirectorySDDL).
+const windowsSetupRelaxedDirectorySDDL = managed.WindowsSetupRelaxedDirectorySDDL
 
 // relaxWindowsStandalonePerUserDirectory returns one guardian-hardened
 // directory to the owner-private setup shape and reports whether it changed

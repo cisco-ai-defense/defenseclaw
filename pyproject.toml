@@ -331,6 +331,10 @@ select = ["E", "F", "I", "N", "W", "UP"]
 # TUI panels embed wide ASCII tables / banner strings that we want
 # kept on one line for readability.
 "cli/defenseclaw/tui/**" = ["E501"]
+# S7 benchmark tooling (scorer, corpus builders, research scripts) runs on the bench boxes only. It is linted
+# (make py-lint) and formatted with ruff format; its long help/report lines, short loop names (l, P/R/F) and
+# %-formatted report strings stay as they read in the gate output (rel-1-0-10 GAP-1578).
+"benchmarks/s7/**" = ["E501", "E731", "E741", "N803", "N806", "N812", "UP031"]
 
 [tool.pytest.ini_options]
 testpaths = ["cli/tests"]

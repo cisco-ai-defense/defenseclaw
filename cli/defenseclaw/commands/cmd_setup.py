@@ -22295,10 +22295,12 @@ def setup_routing(app: AppContext, enable: bool, disable: bool, status: bool, ye
         _print_routing_status(app)
         return
 
-    if enable and _routing_unsupported_on_host():
-        # Routing only applies to OpenClaw and ZeptoClaw proxy traffic, and
-        # DefenseClaw runs no guardrail proxy on native Windows (rel-1-0-4
-        # GAP-2260). --disable still works, to turn off a copied config.
+    if enable and _routing_unsupported_on_host(app.cfg.routing):
+        # Only the vllm_sr classifier needs the router container (Docker or a
+        # remote router), which native Windows does not run (rel-1-0-4
+        # GAP-2260); rules and systemone run inside the gateway there as
+        # everywhere (rel-1-0-10 GAP-1724). --disable still works, to turn
+        # off a copied config.
         raise click.ClickException(_ROUTING_UNSUPPORTED_ON_WINDOWS)
 
     if enable:
@@ -22416,21 +22418,29 @@ def setup_routing(app: AppContext, enable: bool, disable: bool, status: bool, ye
 
 
 _ROUTING_UNSUPPORTED_ON_WINDOWS = (
-    "Semantic routing is not supported on native Windows: it routes OpenClaw and "
-    "ZeptoClaw proxy traffic, and DefenseClaw runs no guardrail proxy on Windows."
+    "The vllm_sr classifier is not available on native Windows: it needs Docker or a remote "
+    "router. Routing works here with a classifier that runs in the gateway: "
+    "defenseclaw routing setup --classifier rules"
 )
 
 
-def _routing_unsupported_on_host() -> bool:
-    """Native Windows runs hook connectors only, so routing has no traffic."""
+def _native_windows() -> bool:
     return os.name == "nt"
+
+
+def _routing_unsupported_on_host(routing: Any) -> bool:
+    """Native Windows has no router container, so only the vllm_sr classifier
+    cannot run there; rules and systemone run inside the gateway."""
+    from defenseclaw.commands.cmd_routing import DEFAULT_CLASSIFIER, routing_classifier  # noqa: PLC0415
+
+    return _native_windows() and routing_classifier(routing) == DEFAULT_CLASSIFIER
 
 
 def _print_routing_status(app: AppContext) -> None:
     click.echo()
     click.echo("  Semantic Router Status")
     ux.echo("  ══════════════════════")
-    if _routing_unsupported_on_host():
+    if _routing_unsupported_on_host(app.cfg.routing):
         configured = "enabled" if app.cfg.routing.enabled else "disabled"
         click.echo(f"    Configured: {configured}")
         click.echo(f"    {_ROUTING_UNSUPPORTED_ON_WINDOWS}")

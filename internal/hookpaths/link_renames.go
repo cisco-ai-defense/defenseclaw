@@ -9,7 +9,6 @@ import (
 	"slices"
 	"strings"
 	"syscall"
-	"time"
 
 	"mvdan.cc/sh/v3/expand"
 	"mvdan.cc/sh/v3/syntax"
@@ -615,12 +614,10 @@ func (s stateReach) movedMatchHits(dir, pattern string) bool {
 }
 
 // maxLinkedTreeEntries bounds the walk of the directories the links name;
-// a larger tree is read as one that may hold a link to state.
+// a larger tree is read as one that may hold a link to state. The bound counts
+// entries, never time: the answer of a call does not depend on the load of
+// the box (GAP-0339).
 const maxLinkedTreeEntries = 20000
-
-// linkedTreeBudget bounds the time of that walk on a hook call; a walk that
-// runs longer is read the same way (RV-c5-2 note: /usr/lib took 3.8 s).
-const linkedTreeBudget = 1500 * time.Millisecond
 
 // linkedTreesClear reports that a directory change in a nested shell or a
 // wrapper, or a find -exec mv, cannot reach SSH or DefenseClaw state through
@@ -849,13 +846,12 @@ func movedEntriesAwayFromState(ops []renameOp, moves []findMove, home string) bo
 		}
 	}
 	entries := 0
-	deadline := time.Now().Add(linkedTreeBudget)
 	for _, move := range moves {
 		for _, start := range move.starts {
 			clear := true
 			err := pathWalkDir(start, func(path string, entry fs.DirEntry, err error) error {
 				entries++
-				if err != nil || entries > maxLinkedTreeEntries || entries%256 == 0 && time.Now().After(deadline) {
+				if err != nil || entries > maxLinkedTreeEntries {
 					clear = false
 					return filepath.SkipAll
 				}
@@ -879,7 +875,6 @@ func treesAwayFromState(dirs []string, state stateReach) bool {
 	seen := make(map[string]bool)
 	queue := slices.Clone(dirs)
 	entries := 0
-	deadline := time.Now().Add(linkedTreeBudget)
 	for len(queue) > 0 {
 		dir := queue[0]
 		queue = queue[1:]
@@ -890,7 +885,7 @@ func treesAwayFromState(dirs []string, state stateReach) bool {
 		clear := true
 		err := pathWalkDir(dir, func(path string, entry fs.DirEntry, err error) error {
 			entries++
-			if err != nil || entries > maxLinkedTreeEntries || entries%256 == 0 && time.Now().After(deadline) {
+			if err != nil || entries > maxLinkedTreeEntries {
 				clear = false
 				return filepath.SkipAll
 			}

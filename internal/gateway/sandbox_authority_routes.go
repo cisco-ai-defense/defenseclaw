@@ -241,7 +241,7 @@ func sandboxEnterprise(cfg *config.Config, floor config.OpenShellAdminConfig) sa
 		out.Install = "prerequisite"
 	}
 	// Use the same effective version requirement as managed ensure.
-	out.Version, _, _ = openshell.ManagedVersionPin(out.Version)
+	out.Version, _, _ = openshell.ManagedVersionPin(out.Version, out.Install == config.EnterpriseOpenShellInstallSetup)
 	if out.GatewayPort == 0 {
 		out.GatewayPort = config.DefaultEnterpriseOpenShellGatewayPort
 	}

@@ -41,14 +41,22 @@ func VerifyWindowsClaudeManagedPolicyIdentity(
 
 		SecureClientHookDelivery: secureClientHookDelivery(),
 	})
-	provider := connector.NewClaudeCodeConnector()
+	provider := windowsClaudeManagedPolicyIdentityProvider()
 	if kept, keptErr := windowsClaudeManagedPolicyLinkKept(); keptErr != nil || kept {
 		if keptErr != nil {
 			return keptErr
 		}
 		return errors.New("enterprise hooks: Claude managed policy is absent: a link sits at the managed-settings folder")
 	}
-	return withWindowsClaudeManagedPolicyTeardownTransaction(func() error {
+	// The lock gives one consistent read of the drop-in and its ownership
+	// record; the drop-in bytes read under it are checked after it is
+	// released. Checking them renders the policy up to once per contract,
+	// lock and guard form, each rendering checking the hook executables:
+	// 5 s under the lock on a managed host, every deferred-staging pass,
+	// which Setup /uninstall's 10 s lock wait could lose (rel-1-0-10
+	// GAP-1713).
+	var published []byte
+	err = withWindowsClaudeManagedPolicyTeardownTransaction(func() error {
 		path, err := windowsClaudeManagedPolicyPath()
 		if err != nil {
 			return err
@@ -84,24 +92,35 @@ func VerifyWindowsClaudeManagedPolicyIdentity(
 		// during a retire the caller names the transition image while the
 		// drop-in can still name a launch folder (rel-1-0-10 GAP-1567).
 		setup.HookExecutable = parsed.HookExecutable
-		setup = withWindowsClaudeManagedHooksOnly(setup)
-		if err := provider.VerifyManagedHookPolicy(policy.data, setup); err != nil {
-			// The policy was rendered for the enrolled Claude version's hook
-			// contract (for example with DirectoryAdded from 2.1.219), which
-			// this version-less setup cannot know, under either profile. It
-			// is still this deployment's policy if it is byte-for-byte the
-			// rendering of one registered contract for the same executable
-			// and gateway, with or without the managed-hooks-only lock: a
-			// policy an older release published without the lock still
-			// belongs to this deployment, and the guardian's canonical check
-			// re-renders it. So is the drop-in in the other guard texts (the
-			// 1.0.9 form a retire writes, or the current one), GAP-1567.
-			if !claudeManagedPolicyMatchesKnownContract(provider, policy.data, setup) {
-				return fmt.Errorf("enterprise hooks: verify current Claude managed policy identity: %w", err)
-			}
-		}
+		published = policy.data
 		return nil
 	})
+	if err != nil {
+		return err
+	}
+	setup = withWindowsClaudeManagedHooksOnly(setup)
+	if err := provider.VerifyManagedHookPolicy(published, setup); err != nil {
+		// The policy was rendered for the enrolled Claude version's hook
+		// contract (for example with DirectoryAdded from 2.1.219), which
+		// this version-less setup cannot know, under either profile. It
+		// is still this deployment's policy if it is byte-for-byte the
+		// rendering of one registered contract for the same executable
+		// and gateway, with or without the managed-hooks-only lock: a
+		// policy an older release published without the lock still
+		// belongs to this deployment, and the guardian's canonical check
+		// re-renders it. So is the drop-in in the other guard texts (the
+		// 1.0.9 form a retire writes, or the current one), GAP-1567.
+		if !claudeManagedPolicyMatchesKnownContract(provider, published, setup) {
+			return fmt.Errorf("enterprise hooks: verify current Claude managed policy identity: %w", err)
+		}
+	}
+	return nil
+}
+
+// windowsClaudeManagedPolicyIdentityProvider is the Claude provider the
+// identity proof checks the published drop-in with. Tests replace it.
+var windowsClaudeManagedPolicyIdentityProvider = func() connector.ManagedHookPolicyProvider {
+	return connector.NewClaudeCodeConnector()
 }
 
 func claudeManagedPolicyMatchesKnownContract(

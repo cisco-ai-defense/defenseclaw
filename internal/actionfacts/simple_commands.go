@@ -2540,7 +2540,7 @@ func callBindsNames(call *syntax.CallExpr, match func(string) bool, every []stri
 			}
 			words = append(words, text)
 		}
-		for _, name := range evalCodeBindsNames(strings.Join(words, " "), 0, match, every) {
+		for _, name := range evalCodeBindsNames(strings.Join(words, " "), match, every) {
 			add(name)
 		}
 	}
@@ -2566,18 +2566,13 @@ func simpleStaticWordOrEmpty(word *syntax.Word, prefix byte) bool {
 	return known && text != "" && text[0] == prefix
 }
 
-// evalCodeBindsUser returns the names of USER and LOGNAME that the shell
-// code text binds: an assignment, a loop name, or a call that binds one
-// (CallBindsUserNames). Code that does not parse may bind any.
-func evalCodeBindsUser(text string, depth int) []string {
-	return evalCodeBindsNames(text, depth, func(name string) bool { return slices.Contains(simpleUserNames, name) }, simpleUserNames)
-}
-
-// evalCodeBindsNames is evalCodeBindsUser for the names match accepts
-// (every, when the code does not parse).
-func evalCodeBindsNames(text string, depth int, match func(string) bool, every []string) []string {
+// evalCodeBindsNames returns the names match accepts that the shell code
+// text binds: an assignment, a loop name, or a call that binds one
+// (callBindsNames, so a nested eval is read the same way; its code is part
+// of text, so the walk ends). Code that does not parse may bind any: every.
+func evalCodeBindsNames(text string, match func(string) bool, every []string) []string {
 	file, ok := shellparse.Parse(text)
-	if !ok || depth >= 4 {
+	if !ok {
 		return every
 	}
 	var names []string

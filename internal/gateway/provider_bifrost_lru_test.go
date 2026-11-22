@@ -168,3 +168,37 @@ func TestEvictOldestBifrostTenantLockedShutsDownOnlyRealClients(t *testing.T) {
 // observable contracts that matter; reproducing the deleted TOCTOU
 // race would require a SDK mock infrastructure disproportionate to
 // the value.
+
+// closeBifrostTenantsAfter shuts down, when t ends, the tenant clients t added
+// to the process-wide cache. Each holds schemas.DefaultConcurrency (1000)
+// request workers until it is evicted, and a test's upstream (a new
+// httptest URL, so a new tenant) is gone once the test ends: in a whole
+// internal/gateway run the 13 tests that call this left 57 clients, 57,000 of
+// the 57,116 goroutines alive when later tests started, and the heap they
+// measured (rel-1-0-10:GAP-1659, GAP-1558). Only for tests that do not run in
+// parallel: no other test adds a client while they run.
+func closeBifrostTenantsAfter(t *testing.T) {
+	t.Helper()
+	bifrostTenantsMu.Lock()
+	before := make(map[tenantKey]bool, len(bifrostTenants))
+	for k := range bifrostTenants {
+		before[k] = true
+	}
+	bifrostTenantsMu.Unlock()
+	t.Cleanup(func() {
+		var added []*bifrost.Bifrost
+		bifrostTenantsMu.Lock()
+		for k, e := range bifrostTenants {
+			if !before[k] {
+				delete(bifrostTenants, k)
+				if e != nil && e.client != nil {
+					added = append(added, e.client)
+				}
+			}
+		}
+		bifrostTenantsMu.Unlock()
+		for _, c := range added {
+			c.Shutdown()
+		}
+	})
+}

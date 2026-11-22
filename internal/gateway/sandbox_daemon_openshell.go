@@ -180,6 +180,9 @@ type accountOpenShell struct {
 	// macOS stop runs them: launchd gives the LaunchAgent no stop command.
 	stopSync       func(ctx context.Context, gateway string, out io.Writer) error
 	recordUnsynced func(names []string)
+	// gatewayDB reads the newest migration of the account's gateway
+	// database (readGatewayDBMigration).
+	gatewayDB func(ctx context.Context, path string) (level int, exists bool, err error)
 
 	// installed is the release this process installed or found intact.
 	mu        sync.Mutex
@@ -211,8 +214,9 @@ func newAccountOpenShell(goos string, uid int, home string, logf func(string, ..
 		stopSync: func(ctx context.Context, gateway string, out io.Writer) error {
 			return openshell.SyncGatewaySandboxes(ctx, openshell.DiscoverOptions{Gateway: gateway}, out)
 		},
-		portPID:  loopbackPortPID,
-		procArgs: processArgs,
+		portPID:   loopbackPortPID,
+		procArgs:  processArgs,
+		gatewayDB: readGatewayDBMigration,
 		accountProcs: func(ctx context.Context) (string, error) {
 			return runServiceCommand(ctx, "/bin/ps", []string{"-ww", "-u", strconv.Itoa(uid), "-o", "pid=,args="}, nil)
 		},
@@ -561,6 +565,13 @@ func (o *accountOpenShell) ensureInstalled(ctx context.Context, version string, 
 	}
 	if o.installed == version && !recheck {
 		return nil
+	}
+	// Never a lower release over a database a newer one migrated: its
+	// gateway would not start, and the start would only time out
+	// (rel-1-0-10:GAP-1781).
+	if reason, recovery := o.setupConflict(ctx, version); reason != "" {
+		o.logf("%s: OpenShell %s is not installed", reason, version)
+		return openShellPrerequisiteError("%s; %s", reason, recovery)
 	}
 	res, err := o.install(ctx, version, o.home)
 	if err != nil {

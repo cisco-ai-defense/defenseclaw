@@ -96,7 +96,10 @@ MANAGED_NOT_INITIALIZED = (
 # routing and plugin_dir, read once at start; the guardrail listener and
 # enablement; the hook self-heal settings; the enterprise sandbox runtime,
 # enterprise.openshell). "*" matches one segment. Everything else is hot, the
-# connector set (guardrail.connectors.<c>.enabled) too. Mirrors
+# connector set (guardrail.connectors.<c>.enabled) too. The routing keys stay
+# listed because the writer cannot see the classifier the gateway runs: `config
+# set` says routing.enabled applies on reload, not on a restart, only when
+# config.yaml names an in-gateway classifier (cmd_config, rel-1-0-10 GAP-1669). Mirrors
 # internal/config/configwrite restartKeys, in the same order (a test compares
 # them).
 RESTART_KEYS = (
