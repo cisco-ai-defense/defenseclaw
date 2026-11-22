@@ -4,37 +4,59 @@
 package gateway
 
 import (
+	"context"
+	"runtime"
 	"sort"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/config"
 )
 
-// GitHub Copilot drops the output of a userPromptSubmitted hook, so that
-// event cannot stop a prompt. Its mutation-only userPromptTransformed event
-// can replace the content the model receives, so on every profile (per-user,
-// standalone managed and Secure Client) the gateway answers that event, when
-// the guardrail blocks it in action mode, with DefenseClaw's notice in place
-// of the prompt. That successful replacement is the enforcement mechanism, so
-// the effective verdict is block (not would-block). Copilot's timeline still
-// shows the user's prompt. Observe mode keeps the no-modification contract
-// (GAP-1730; it reverses the GAP-0786 record-only ruling for Copilot).
+// On the Secure Client profile (Windows and macOS) a GitHub Copilot prompt
+// that the guardrail blocks in action mode cannot be blocked: Copilot drops
+// the output of a config-file userPromptSubmitted hook. Its mutation-only
+// userPromptTransformed event can replace the content the model receives, so
+// the gateway answers that event with DefenseClaw's notice in place of the
+// prompt. That successful replacement is the enforcement mechanism, so the
+// effective verdict is block (not would-block). Copilot's timeline still
+// shows the user's prompt, and every other profile keeps the no-modification
+// contract.
 
-// copilotBlockedPromptRewrite reports whether this decision will replace the
-// prompt Copilot sends to the model. Callers use the same predicate for the
-// returned vendor payload and the effective audit/telemetry outcome.
-func copilotBlockedPromptRewrite(req agentHookRequest, mode, rawAction string) bool {
-	return req.ConnectorName == "copilot" && canonicalEvent(req.HookEventName) == "userprompttransformed" &&
-		mode == "action" && normalizeCodexAction(rawAction) == "block"
+// copilotSecureClientPromptRewriteActive reports a gateway serving the
+// Secure Client profile. Replaced in tests.
+var copilotSecureClientPromptRewriteActive = func(cfg *config.Config) bool {
+	return copilotSecureClientPromptRewriteOS(runtime.GOOS) && cfg != nil && cfg.SecureClientIntegration()
 }
 
-// copilotBlockedPromptOutput returns the hook output for req: the rewrite of
-// a blocked Copilot prompt, otherwise output.
-func copilotBlockedPromptOutput(
+// copilotSecureClientPromptRewriteOS reports the platforms Secure Client
+// deploys GitHub Copilot on.
+func copilotSecureClientPromptRewriteOS(goos string) bool {
+	return goos == "windows" || goos == "darwin"
+}
+
+// copilotSecureClientPromptRewrite reports whether this decision will replace
+// the prompt Copilot sends to the model. Callers use the same predicate for
+// the returned vendor payload and the effective audit/telemetry outcome.
+func (a *APIServer) copilotSecureClientPromptRewrite(
+	ctx context.Context,
+	req agentHookRequest,
+	mode, rawAction string,
+) bool {
+	return req.ConnectorName == "copilot" && canonicalEvent(req.HookEventName) == "userprompttransformed" &&
+		mode == "action" && normalizeCodexAction(rawAction) == "block" &&
+		copilotSecureClientPromptRewriteActive(a.decisionConfig(ctx))
+}
+
+// copilotSecureClientPromptOutput returns the hook output for req: the
+// rewrite of a blocked Copilot prompt on Secure Client, otherwise output.
+func (a *APIServer) copilotSecureClientPromptOutput(
+	ctx context.Context,
 	req agentHookRequest,
 	mode, rawAction string,
 	findings []string,
 	output map[string]interface{},
 ) map[string]interface{} {
-	if !copilotBlockedPromptRewrite(req, mode, rawAction) {
+	if !a.copilotSecureClientPromptRewrite(ctx, req, mode, rawAction) {
 		return output
 	}
 	return map[string]interface{}{"modifiedTransformedPrompt": copilotBlockedPromptText(findings)}

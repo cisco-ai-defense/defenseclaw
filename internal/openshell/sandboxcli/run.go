@@ -225,7 +225,7 @@ func (a *App) Run(ctx context.Context, o RunOptions) (err error) {
 	}
 	// The organization's refusals come first; then what this gateway
 	// cannot do, and what the run needs from this terminal.
-	if err := a.dockerDesktopRefusal(ctx, drv, spec); err != nil {
+	if err := a.dockerDesktopRefusal(ctx, drv); err != nil {
 		return err
 	}
 	if len(o.Context) > 0 && !drv.HostMounts {
@@ -939,16 +939,10 @@ func (a *App) checkNameFree(ctx context.Context, api API, name string, headless 
 // 29.8) has ABI 8, and a refusal by name alone kept every Mac on a newer
 // Docker Desktop from running a docker-driver sandbox (rel-1-0-10:GAP-0007).
 // A VM that cannot be checked is refused too, with the doctor fix that
-// downloads the image to check in (GAP-1705: the image build, which a
-// managed account's doctor does not do). A Docker VM that is not Docker Desktop
+// downloads the image to check in. A Docker VM that is not Docker Desktop
 // (Colima, OrbStack), and a Docker that does not answer, are left to try,
 // as on Linux.
-//
-// It is the one verdict on that VM: the doctor's last line asks it too
-// (spec nil), with the same probe (App.DockerVMLandlock, which the doctor's
-// Landlock row reads), so the doctor never calls ready a Mac where every
-// run is refused (rel-1-0-10:GAP-1746).
-func (a *App) dockerDesktopRefusal(ctx context.Context, d openshell.Driver, spec *harness.Spec) error {
+func (a *App) dockerDesktopRefusal(ctx context.Context, d openshell.Driver) error {
 	if a.GOOS != "darwin" || d.Name != openshell.DriverDocker {
 		return nil
 	}
@@ -960,27 +954,20 @@ func (a *App) dockerDesktopRefusal(ctx context.Context, d openshell.Driver, spec
 		return nil
 	}
 	why := "Docker Desktop's Linux VM has no Landlock, which OpenShell sandboxes need"
-	step := "update Docker Desktop, or run sandboxes in OpenShell MicroVMs, which have their own kernel: `" + CommandName + " setup` switches the gateway to them (or `" +
-		CommandName + " doctor --fix`; details: " + setupTroubleshootingURL + ")"
 	switch {
 	case errors.Is(err, openshell.ErrLandlockDisabled):
 		why = "Docker Desktop's Linux VM has Landlock turned off, and OpenShell sandboxes need it"
 	case errors.Is(err, openshell.ErrNoProbeImage):
-		// The harness image is built on the base image: its build downloads
-		// it, on a managed account too, whose doctor leaves the host to the
-		// administrator and downloads nothing (GAP-1705).
 		why = "DefenseClaw could not check Docker Desktop's Linux VM for the Landlock OpenShell sandboxes need: the OpenShell base image it checks in " +
-			"is not on this machine yet"
-		step = "`" + CommandName + " image build` downloads it (about 4 GB) with the harness images; then check again"
-		if spec != nil {
-			step = "`" + CommandName + " image build " + HarnessArg(spec) + "` downloads it (about 4 GB) with the " + spec.DisplayName + " image; then run this again"
-		}
+			"is not on this machine yet (`" + CommandName + " doctor --fix` downloads it and checks)"
 	case err != nil && !errors.Is(err, openshell.ErrLandlockMissing):
 		why = "DefenseClaw could not check Docker Desktop's Linux VM for the Landlock OpenShell sandboxes need (" + err.Error() + ")"
 	case err == nil && abi > 0:
 		why = fmt.Sprintf("Docker Desktop's Linux VM has Landlock ABI %d, and OpenShell sandboxes need ABI %d or newer", abi, openshell.MinLandlockABI)
 	}
-	return withNextStep(errors.New("no sandbox can start on this gateway: it runs sandboxes on the docker driver, and "+why+"; nothing was built or created"), step)
+	return withNextStep(errors.New("no sandbox can start on this gateway: it runs sandboxes on the docker driver, and "+why+"; nothing was built or created"),
+		"update Docker Desktop, or run sandboxes in OpenShell MicroVMs, which have their own kernel: `"+CommandName+" setup` switches the gateway to them (or `"+
+			CommandName+" doctor --fix`; details: "+setupTroubleshootingURL+")")
 }
 
 // withNextStep puts DefenseClaw's way on after err on a line of its own
