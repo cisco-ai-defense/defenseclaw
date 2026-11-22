@@ -67,6 +67,12 @@ var Table = []Reason{
 	{"secret_store_unavailable", 503, API, "The gateway cannot reach the Kubernetes secret store.", "Try again in a minute; an administrator can check it with: defenseclaw-gateway substrate doctor --cluster", Admin},
 	{"secret_not_stored", 502, API, "The secret store refused the write.", "Try again in a minute.", Person},
 	{"secret_not_removed", 502, API, "The secret store refused the removal.", "Try again in a minute.", Person},
+	{"secret_binding_outside_templates", 202, API, "No approved template covers that host, so an administrator was asked; your value is stored and is not used until then.", "See the ask with: defenseclaw substrate approvals", Person},
+	{"secret_bindings_locked", 403, API, "Your administrator allows values only: you can set the value of a secret they listed, not add your own binding.", "Set a listed secret with: defenseclaw substrate secrets set NAME", Person},
+	{"secret_bindings_off", 404, API, "Self-service secrets are off on this cluster.", "Ask your administrator.", Person},
+	{"secret_template_unknown", 400, API, "No approved template by that name is open to your profile.", "See the templates you can use with: defenseclaw substrate secrets templates", Person},
+	{"secret_binding_limit", 409, API, "You have the most bindings allowed.", "Remove one with: defenseclaw substrate secrets rm NAME", Person},
+	{"secret_name_taken", 409, API, "You or your administrator already have a secret by that name.", "Pick another name.", Person},
 
 	{"secret_on_passthrough", 0, Render, "That host is not inspected (it is in allow_passthrough_for), so no secret is added there.", "An administrator can remove the host from allow_passthrough_for.", Admin},
 	{"secret_not_for_profile", 0, Render, "The agent's profile is not one this secret is for.", "Run the agent with one of the secret's profiles.", Person},

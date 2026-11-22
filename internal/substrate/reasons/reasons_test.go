@@ -34,6 +34,7 @@ const repoRoot = "../../.."
 // sources are the files whose secret reason codes must all be in Table.
 var sources = []string{
 	"internal/gateway/substrate_secrets*.go",
+	"internal/gateway/substrate_secret_*.go",
 	"internal/substrate/render/*.go",
 	"internal/substrate/secretbind/*.go",
 	"internal/cli/substrate_*.go",
@@ -118,7 +119,7 @@ func usedCodes(t *testing.T) map[string]string {
 func TestB1ReasonTableCoversEverySecretCode(t *testing.T) {
 	used := usedCodes(t)
 	// Guard the walker itself: these codes are known to be in the code.
-	for _, c := range []string{"shared_secret_admin_only", "value_required", "secret_on_passthrough", "not_in_allow_only"} {
+	for _, c := range []string{"shared_secret_admin_only", "value_required", "secret_on_passthrough", "not_in_allow_only", "secret_bindings_off", "secret_binding_limit"} {
 		if _, ok := used[c]; !ok {
 			t.Fatalf("drift walk did not find %q; the walker is broken", c)
 		}
