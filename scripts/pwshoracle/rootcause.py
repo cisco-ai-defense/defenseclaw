@@ -34,6 +34,12 @@ def causes(rid, cs):
     if 'ours flags, oracle clean' in joined: out.add('ours flags a diagnostic on a script the real parser accepts')
     if 'cmd-span-origin' in joined: out.add('(not a disagreement) spans inside expandable strings are relative to the string')
     if 'dqx' in joined or 'bare vs ours dqx' in joined: out.add('(representation) bare expandable word is a dqx string in ours')
+    if re.search(r'(^|[\n;|(])\s*[=\]?]', s) and ('cmd-missed' in joined or 'cmd-extra' in joined or 'name-' in joined or 'arg-count' in joined): out.add('command word that starts with an operator character ("=", "]", "?"): real parser reads it as a command name, ours splits or drops it')
+    if '--%' in s and ('param' in joined or 'arg-' in joined): out.add('a quoted or later "--%" word: ours reads the words after it as parameters, the real parser AST omits them or keeps them as one word')
+    if re.search(r'(^|\s)--(\s|$)', s) and 'arg-' in joined: out.add('"--" end-of-parameters word: real parser makes it a parameter, ours a string')
+    if re.search(r'<#', s) and 'cmd-missed' in joined: out.add('"<#" block comment start right after an operator ("=<# x #>"): ours reads "<" as a redirection and loses the rest of the line')
+    if not out and ('arg-value-differs' in joined or 'name-value' in joined): out.add('fused word value differs: ours drops inner quotes or a doubled quote of a word built from several quoted pieces')
+    if not out and any(x in joined for x in ('param', 'dash-word', 'arg-count', 'arg-kind')): out.add('word glued from adjacent pieces (a word touching a quote or a "-" word, 2-of, 0x10-of): one word in the real parser, ours splits it')
     if not out: out.add('UNASSIGNED')
     return [('[%s] ' % st) + o for o in sorted(out)]
 agg = defaultdict(list)
