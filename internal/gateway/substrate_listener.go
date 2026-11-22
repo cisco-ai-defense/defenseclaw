@@ -215,6 +215,10 @@ type SubstrateConfig struct {
 	Bindings        *secretbind.Store
 	SelfService     config.SubstrateSelfServiceSecretsConfig
 	SecretTemplates []config.SubstrateSecretTemplate
+	// LiveSelfService, when set, is the self-service config and template
+	// catalog in force now (config.yaml applied live): mode, limits, asks
+	// and templates follow it; namespace and provider stay the boot ones.
+	LiveSelfService func() (config.SubstrateSelfServiceSecretsConfig, []config.SubstrateSecretTemplate)
 	NoSwapHosts     []string
 	// SecretAudit receives each typed secret change record
 	// (log.substrate.secret.changed); nil sends it to the gateway's

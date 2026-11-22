@@ -120,3 +120,28 @@ func TestB1BindingOwnerFilter(t *testing.T) {
 		t.Fatal("nil store renders bindings")
 	}
 }
+
+// TestB1BindingsClosedUnlessBindingsMode: values_only and off give no
+// self-service binding to any actor, whatever the store holds.
+func TestB1BindingsClosedUnlessBindingsMode(t *testing.T) {
+	store := secretbind.New(&cmBindings{})
+	now := time.Date(2026, 11, 12, 20, 0, 0, 0, time.UTC)
+	if err := store.Update(context.Background(), func(d *secretbind.Doc) error {
+		d.Bindings = append(d.Bindings, secretbind.Binding{ID: "b-00000000a1", Name: "gl-work", Owner: render.PersonKey("sub-alice"),
+			Template: "gitlab", Hosts: []string{"gitlab.com"}, State: secretbind.Active, Created: now})
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for mode, want := range map[string]int{config.SelfServiceBindings: 1, config.SelfServiceValuesOnly: 0, config.SelfServiceOff: 0} {
+		cfg := &config.Config{}
+		cfg.Substrate.SelfServiceSecrets.Mode = mode
+		got := 0
+		if f := controller.BindingsFrom(store, cfg, func() time.Time { return now }); f != nil {
+			got = len(f("sub-alice"))
+		}
+		if got != want {
+			t.Errorf("mode %s: %d bindings, want %d", mode, got, want)
+		}
+	}
+}

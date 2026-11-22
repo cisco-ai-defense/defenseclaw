@@ -87,7 +87,10 @@ func SecretsFrom(in []config.SubstrateSecret) []render.Secret {
 // BindingsFrom is Live.Bindings over the binding store: the person's
 // active, unexpired bindings under the templates of cfg.
 func BindingsFrom(store *secretbind.Store, cfg *config.Config, now func() time.Time) func(string) []render.Secret {
-	if store == nil || cfg.Substrate.SelfServiceSecrets.EffectiveMode() == config.SelfServiceOff {
+	// values_only and off both close the bindings: no self-service binding
+	// reaches a policy (and so no new host opens through one), whatever the
+	// store holds. Live: a config change rebuilds this.
+	if store == nil || cfg.Substrate.SelfServiceSecrets.EffectiveMode() != config.SelfServiceBindings {
 		return nil
 	}
 	catalog := secretbind.Catalog(cfg.Substrate.SecretTemplates)

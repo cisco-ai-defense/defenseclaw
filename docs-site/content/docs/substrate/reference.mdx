@@ -137,8 +137,10 @@ The `substrate` section of the DefenseClaw configuration. On a cluster it comes 
 | `substrate.egress.no_swap_hosts` | `[]` | Preview. Hosts that return the requests they get, added to the built-in echo list. No secret is added on them (`secret_echo_host`), for administrator and personal secrets alike |
 | `substrate.secrets` | `[]` | See [Secrets](/docs/substrate/secrets) |
 | `substrate.secrets[].inject.allow_echo` | `false` | Preview. Adds this one secret on an echo host anyway. The gateway warns at start for each such entry |
-| `substrate.self_service_secrets.mode` | `bindings` | Preview. `bindings`: people add their own secrets under a template. `values_only`: they only store values for the secrets in `substrate.secrets`. `off`: neither. Changing it from `off` needs a restart of the gateway and the controller |
+| `substrate.self_service_secrets.mode` | `bindings` | Preview. `bindings`: people add their own secrets under a template. `values_only`: they only store values for the secrets in `substrate.secrets`. `off`: neither. `values_only` and `off` also stop the secrets people added from being used. Changes apply without a restart, except from `off`, which needs a restart of the gateway and the controller |
 | `substrate.self_service_secrets.namespace` | `defenseclaw-user-secrets` | Preview. Where people's own values live. Not the release or the Substrate namespace |
+| `substrate.self_service_secrets.outside_templates` | `ask` | Preview. A host no template covers: `ask` opens an ask only an administrator answers; `refuse` refuses it |
+| `substrate.self_service_secrets.ask_timeout` | `72h` | Preview. How long such an ask waits for an administrator (at most `168h`) |
 | `substrate.self_service_secrets.max_per_person` | `20` | Preview. Secrets one person may add (1 to 200) |
 | `substrate.self_service_secrets.allow_echo_bindings` | `false` | Preview. Lets a person bind their own secret to an echo host with `--allow-echo` |
 | `substrate.secret_templates` | `[]` | Preview. The templates people may use. Each entry has `name`, and optionally `hosts`, `header`, `form` (`bearer`, `basic` or `raw`), `basic_user` and `profiles`. A built-in name keeps its built-in values for any field left out |

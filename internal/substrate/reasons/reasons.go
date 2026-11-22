@@ -68,6 +68,8 @@ var Table = []Reason{
 	{"secret_not_stored", 502, API, "The secret store refused the write.", "Try again in a minute.", Person},
 	{"secret_not_removed", 502, API, "The secret store refused the removal.", "Try again in a minute.", Person},
 	{"secret_binding_outside_templates", 202, API, "No approved template covers that host, so an administrator was asked; your value is stored and is not used until then.", "See the ask with: defenseclaw substrate approvals", Person},
+	{"secret_binding_outside_refused", 403, API, "No approved template covers that host, and your administrator does not take asks for other hosts.", "Use a host a template covers (see: defenseclaw substrate secrets templates), or ask your administrator to add a template.", Person},
+	{"ask_admin_only", 403, API, "Only an administrator answers an ask for a secret binding, including your own.", "Wait for an administrator, or remove the binding with: defenseclaw substrate secrets rm NAME", Person},
 	{"secret_bindings_locked", 403, API, "Your administrator allows values only: you can set the value of a secret they listed, not add your own binding.", "Set a listed secret with: defenseclaw substrate secrets set NAME", Person},
 	{"secret_bindings_off", 404, API, "Self-service secrets are off on this cluster.", "Ask your administrator.", Person},
 	{"secret_template_unknown", 400, API, "No approved template by that name is open to your profile.", "See the templates you can use with: defenseclaw substrate secrets templates", Person},

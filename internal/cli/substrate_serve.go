@@ -538,6 +538,10 @@ func substrateGatewayBuilder(c *config.Config, src *configwatch.Watcher, ready *
 			Secrets: c.Substrate.Secrets, SecretStore: substrateKubeSecrets(),
 			Bindings: substrateBindingStore(c), SelfService: c.Substrate.SelfServiceSecrets,
 			SecretTemplates: c.Substrate.SecretTemplates, NoSwapHosts: c.Substrate.Egress.NoSwapHosts,
+			LiveSelfService: func() (config.SubstrateSelfServiceSecretsConfig, []config.SubstrateSecretTemplate) {
+				l := live()
+				return l.Substrate.SelfServiceSecrets, l.Substrate.SecretTemplates
+			},
 			Relays: relayDialer(router),
 			Skills: runtimeScan,
 			// E20, GAP-0185: the runtime MCP scan of hook events.

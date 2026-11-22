@@ -154,7 +154,11 @@ the cluster adds the user name. generic-basic needs --user.
 			w := cmd.OutOrStdout()
 			if res.Reason != "" {
 				fmt.Fprintf(w, "%s is not covered by the %s template, so an administrator must approve it.\n", res.Host, res.Template)
-				fmt.Fprintln(w, "Your value is stored and is not used until then. See it with: defenseclaw substrate approvals")
+				asked := ""
+				if res.AskID != "" {
+					asked = "Asked as " + res.AskID + ". "
+				}
+				fmt.Fprintln(w, asked+"Your value is stored and is not used until then. See it with: defenseclaw substrate approvals")
 				return nil
 			}
 			fmt.Fprintf(w, "Stored %s for %s (template %s). Your agents use it from their next request.\n", res.Name, res.Host, res.Template)

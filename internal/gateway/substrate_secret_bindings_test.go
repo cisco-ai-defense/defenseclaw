@@ -29,6 +29,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/asks"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/identity"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/render"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/secretbind"
@@ -63,16 +64,18 @@ type bindingFixture struct {
 	values *memSecrets
 	cm     *memBindings
 	store  *secretbind.Store
+	asks   *asks.Store
 	audits []audit.SubstrateSecretChangeEvent
 }
 
 func newBindingFixture(t *testing.T, edit func(*SubstrateConfig)) *bindingFixture {
 	t.Helper()
-	bf := &bindingFixture{values: &memSecrets{m: map[string][]byte{}}, cm: &memBindings{}}
+	bf := &bindingFixture{values: &memSecrets{m: map[string][]byte{}}, cm: &memBindings{}, asks: asks.NewMemory()}
 	bf.store = secretbind.New(bf.cm)
 	bf.substrateFixture = newSubstrateFixture(t, func(c *SubstrateConfig) {
 		c.SecretStore = bf.values
 		c.Bindings = bf.store
+		c.Asks = asksDirect{bf.asks}
 		c.SecretAudit = func(_ context.Context, ev audit.SubstrateSecretChangeEvent) { bf.audits = append(bf.audits, ev) }
 		c.Profiles = func(identity.Person, string, string, bool) (string, string, error) { return "eng", "eng-web", nil }
 		c.Secrets = []config.SubstrateSecret{

@@ -439,6 +439,7 @@ type AddSecretResult struct {
 	Host     string    `json:"host"`
 	Status   string    `json:"status"`
 	Reason   string    `json:"reason,omitempty"`
+	AskID    string    `json:"ask_id,omitempty"`
 	Expires  time.Time `json:"expires,omitzero"`
 }
 
