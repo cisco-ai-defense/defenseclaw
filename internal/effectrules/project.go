@@ -17,6 +17,8 @@ import (
 type Env struct {
 	Home   string
 	Flavor effects.Flavor
+	// AccountHomes are passwd homes the effects frontend resolved from Options.Accounts.
+	AccountHomes []string
 	// Resolve follows a write path through links; nil falls back to
 	// hookpaths.ResolveWriteTarget for the host's own path flavor and to the
 	// placed path for the other flavor (resolverFor).
@@ -48,6 +50,12 @@ func Project(res effects.Result, env Env) []*semanticpb.EffectFact {
 		rsv = resolverFor(flavor)
 	}
 	sets := buildSets(env.Home, flavor)
+	if len(env.AccountHomes) > 0 {
+		for name, set := range sets {
+			set.homeRoots = append([]string(nil), env.AccountHomes...)
+			sets[name] = set
+		}
+	}
 	ids := newIdentityCache(env.Identity, sets, env.Truncated)
 
 	effs := res.Effects

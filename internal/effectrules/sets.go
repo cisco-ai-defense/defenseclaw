@@ -66,6 +66,8 @@ type protectedSet struct {
 	// readReach: a read of a member behind an unread word prefix reaches the
 	// set (credentials only).
 	readReach bool
+	// homeRoots are passwd homes resolved from this call's Options.Accounts.
+	homeRoots []string
 }
 
 // agentConfigFolders are the per-connector configuration folders whose hook
