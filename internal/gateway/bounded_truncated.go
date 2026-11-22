@@ -1,0 +1,266 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+// SPDX-License-Identifier: Apache-2.0
+
+package gateway
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"slices"
+	"strings"
+	"sync"
+	"sync/atomic"
+
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
+)
+
+// The one place every reader's truncation reaches the hook decision (the
+// bound rule, internal/guardrail/bounded). A reader that hit a cap returns
+// its bounded.CapSet beside what it read; its caller judges what was read as
+// before and then calls withBoundedTruncation (findings that the profile
+// maps) or floorBoundedTruncated (a verdict a lane already decided). Both add
+// the evaluation-limit finding (ACTION-COMPOUND-LIMIT) with the audit reason
+// "bounded_truncated cap=<kinds>" in its title and evidence, so the audit
+// row, the finding events and the agent notice name the cap. No new audit
+// action, finding id or telemetry field.
+//
+// The unknown tier follows the pack (rel-1-0-6:GAP-0675): an alert in the
+// default and permissive packs, a managed install's included, and a block in
+// the strict pack. The truncation is a floor, not a final verdict: under
+// regex_judge a call whose only basis is the limit still goes to the judge
+// where one is configured (regexJudgeLocalVerdictDecisive), and the floor
+// stands when the judge fails or answers lower (rel-1-0-10:GAP-0320).
+
+// An internal bound misuse (a reader's Counter never bound with NewCounter,
+// or bound to another call's Truncated) floors the call it read: the misuse
+// mark is in that call's CapSet, its reason names "internal bound misuse",
+// and on the trusted-action path it counts once in the parser uncertainty
+// metric (no new telemetry field). The process logs each kind once.
+func init() { bounded.OnMisuse(logBoundedMisuse) }
+
+var (
+	boundedMisuseLogged [3]sync.Once
+	boundedMisuses      atomic.Int64
+)
+
+func logBoundedMisuse(m bounded.Misuse) {
+	boundedMisuses.Add(1)
+	if int(m) >= len(boundedMisuseLogged) {
+		m = 0
+	}
+	boundedMisuseLogged[m].Do(func() {
+		fmt.Fprintf(os.Stderr, "[guardrail] %s: %s; the call is judged as truncated (a reader bug: please report it)\n",
+			bounded.MisuseReason, m)
+	})
+}
+
+// boundedTruncatedTitle is the ship-authored title of a truncated input. The
+// reason (a closed set of cap names) follows it; it carries no input text.
+const boundedTruncatedTitle = "Input exceeds policy evaluation limit, judged as unknown"
+
+// boundedTier is the tier a call of connectorName is judged in, from the one
+// tier source of the hook routes: strict when the request's pack is strict or
+// a member of its profile meet that enforces on the hook path is
+// (shareBodyStrictTier, as the shell limit and share-body paths read it),
+// else the posture of the connector's pack.
+//
+// guardrail.cascade.unknown replaces the pack's tier when it is set (alert,
+// confirm, block; cascadeBoundedTier).
+func (a *APIServer) boundedTier(ctx context.Context, connectorName string) bounded.Tier {
+	cfg := a.decisionConfig(ctx)
+	if a.shareBodyStrictTier(ctx, connectorName) {
+		return cascadeBoundedTier(cfg, connectorName, bounded.TierStrict)
+	}
+	if cfg == nil {
+		return bounded.TierDefault
+	}
+	return cascadeBoundedTier(cfg, connectorName, bounded.TierOf(cfg.HookPolicyTierForConnector(connectorName)))
+}
+
+// boundedTruncatedFinding is the evaluation-limit finding of an input read up
+// to the caps in set. A call whose projection cannot authorize a block
+// (enforcementCapable false) still alerts: a truncated input is never a
+// silent allow.
+func boundedTruncatedFinding(set bounded.CapSet, enforcementCapable bool) RuleFinding {
+	finding := unknownReasonFinding(boundedTruncatedTitle, set.Reason(), enforcementCapable)
+	finding.boundedCaps = set
+	return finding
+}
+
+// unknownReasonFinding is the evaluation-limit finding of an input the
+// readers cannot judge, with a ship-authored title and a reason from a closed
+// set (a cap name, awkprog.DynamicReason). The profile maps it to the
+// unknown tier of the pack.
+func unknownReasonFinding(title, reason string, enforcementCapable bool) RuleFinding {
+	finding := trustedActionLimitFindings(enforcementCapable)[0]
+	finding.Title = title + " (" + reason + ")"
+	finding.Evidence = reason
+	if !enforcementCapable {
+		finding.enforcement = findingEnforcementAlertOnly
+	}
+	return finding
+}
+
+// withBoundedReason appends the bounded reason to an evaluation-limit
+// finding the call already carries, keeping its own title (an omitted
+// operand, a statement budget) and adding the cap.
+func withBoundedReason(finding *RuleFinding, reason string) {
+	if strings.Contains(finding.Evidence, reason) {
+		return
+	}
+	finding.Title += " (" + reason + ")"
+	if finding.Evidence == "" {
+		finding.Evidence = reason
+	} else {
+		finding.Evidence += "; " + reason
+	}
+}
+
+// boundedLimitIndex is the index of the evaluation-limit finding in
+// findings, or -1. The detection-only record of a data word
+// (RuleFinding.dataWordRecord) is not a limit the call hit and is skipped:
+// only an enforcing cap or a truncated reading counts, so a record never
+// makes a call capped or stands in for its limit finding (rel-1-0-10:GAP-0760).
+func boundedLimitIndex(findings []RuleFinding) int {
+	return slices.IndexFunc(findings, func(finding RuleFinding) bool {
+		return !finding.dataWordRecord && canonicalTrustedRuleID(finding.RuleID) == evaluationLimitRuleID
+	})
+}
+
+// withBoundedTruncation adds the truncation in set to the findings of what
+// was read before the caps, which keep deciding on their own: the profile
+// maps the result to at least the unknown tier of the pack and never below
+// those findings (guardrailActionForProfile). An evaluation-limit finding the
+// call already carries is kept, title included, and gains the bounded reason,
+// so a call has one limit finding; a data-word record beside it is not one
+// and stays detection-only (GAP-0760). The caller's slice is not changed. No cap
+// hit: findings as they are, without allocation.
+func withBoundedTruncation(findings []RuleFinding, set bounded.CapSet, request trustedActionRequest) []RuleFinding {
+	if !set.Any() {
+		return findings
+	}
+	if set.Misuse() && request.recordTelemetry != nil {
+		request.recordTelemetry(trustedActionTelemetry{ParserUncertaintyCount: 1})
+	}
+	return withUnknownFinding(findings, boundedTruncatedFinding(set, request.EnforcementCapable))
+}
+
+// withUnknownFinding adds the unknown-tier finding bound to what was read
+// before it, which keeps deciding on its own (the profile maps the result to
+// at least the unknown tier of the pack and never below those findings). An
+// evaluation-limit finding the call already carries is kept, title included,
+// and gains the reason, so a call has one limit finding.
+func withUnknownFinding(findings []RuleFinding, bound RuleFinding) []RuleFinding {
+	index := boundedLimitIndex(findings)
+	if index < 0 {
+		return append(slices.Clip(findings), bound)
+	}
+	out := slices.Clone(findings)
+	existing := &out[index]
+	withBoundedReason(existing, bound.Evidence)
+	existing.boundedCaps = existing.boundedCaps.Union(bound.boundedCaps)
+	if !existing.contributesToEnforcement() && !existing.contributesToAlertOnly() {
+		// A detection-only limit finding would leave the call allowed.
+		existing.enforcement = bound.enforcement
+		existing.proof = bound.proof
+	}
+	return out
+}
+
+// boundedCapsOf is the union of the caps the evaluation-limit findings in
+// findings stand for: the truncation a reading hit, wherever in its own
+// readings it was hit.
+func boundedCapsOf(findings []RuleFinding) bounded.CapSet {
+	var set bounded.CapSet
+	for _, finding := range findings {
+		if canonicalTrustedRuleID(finding.RuleID) == evaluationLimitRuleID {
+			set = set.Union(finding.boundedCaps)
+		}
+	}
+	return set
+}
+
+// withCarriedBoundedCaps keeps the truncation of a second reading in the call
+// it was joined to: a join keeps the call's own evaluation-limit finding over
+// the reading's, so the call's finding gains the reading's caps and their
+// reason (rel-1-0-10:GAP-0477). The join already holds a limit finding when
+// the reading had one; without one the findings are returned as they are.
+func withCarriedBoundedCaps(joined, reading []RuleFinding) []RuleFinding {
+	set := boundedCapsOf(reading)
+	index := boundedLimitIndex(joined)
+	if !set.Any() || index < 0 {
+		return joined
+	}
+	out := slices.Clone(joined)
+	withBoundedReason(&out[index], set.Reason())
+	out[index].boundedCaps = out[index].boundedCaps.Union(set)
+	return out
+}
+
+// floorBoundedTruncated raises a verdict a lane decided for an input read up
+// to the caps in set to bounded.Floor: at least the unknown tier of the pack,
+// never below the verdict. An action name in any case is read (and written
+// back in its canonical spelling); a name the floor cannot read is kept as it
+// is where the floor alerts and becomes block where the floor blocks. The
+// verdict carries one evaluation-limit finding whose severity agrees with
+// the floor (MEDIUM and alert-only where the floor alerts, HIGH where it
+// blocks). A verdict applyMode already mapped is floored on its raw action
+// and mapped again, so the order of the two calls cannot drop the floor.
+func (v *ToolInspectVerdict) floorBoundedTruncated(set bounded.CapSet, tier bounded.Tier) {
+	if v == nil || !set.Any() {
+		return
+	}
+	mode := v.Mode
+	if mode != "" {
+		// applyMode ran: floor the raw verdict, then map the mode again. A
+		// verdict with a mode but no raw action (a literal an adopter built)
+		// is its own raw verdict, so a block is never lowered.
+		if v.RawAction != "" {
+			v.Action = v.RawAction
+		}
+		v.WouldBlock = false
+	}
+	floor := bounded.Unknown(tier)
+	bound := boundedTruncatedFinding(set, true)
+	bound.Severity = "HIGH"
+	if floor == bounded.Alert {
+		bound.Severity = "MEDIUM"
+		bound.enforcement = findingEnforcementAlertOnly
+	}
+	before, known := bounded.ParseAction(v.Action)
+	after := bounded.Floor(before, set, tier)
+	if known || floor == bounded.Block {
+		// A name the floor cannot read is kept where the floor alerts (it may
+		// name a block); where the floor blocks it becomes the block.
+		v.Action = after.String()
+	}
+	if after > before {
+		v.Reason = bound.Title
+		if v.Confidence < bound.Confidence {
+			v.Confidence = bound.Confidence
+		}
+	} else if v.Reason == "" {
+		v.Reason = bound.Title
+	} else {
+		v.Reason += "; " + bound.Evidence
+	}
+	if guardrailSeverityRank(bound.Severity) > guardrailSeverityRank(v.Severity) {
+		v.Severity = bound.Severity
+	}
+	if index := boundedLimitIndex(v.DetailedFindings); index >= 0 {
+		withBoundedReason(&v.DetailedFindings[index], bound.Evidence)
+		for i, finding := range v.Findings {
+			if strings.HasPrefix(finding, evaluationLimitRuleID+":") && !strings.Contains(finding, bound.Evidence) {
+				v.Findings[i] = finding + " (" + bound.Evidence + ")"
+				break
+			}
+		}
+	} else {
+		v.Findings = append(v.Findings, bound.RuleID+":"+bound.Title)
+		v.DetailedFindings = append(v.DetailedFindings, bound)
+	}
+	if mode != "" {
+		v.applyMode(mode)
+	}
+}

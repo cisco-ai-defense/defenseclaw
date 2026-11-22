@@ -66,10 +66,10 @@ from defenseclaw import (
     codex_toml,
     credential_provenance,
     envvars,
-    gateway_token_adoption,
     legacy_connector,
     rulepack_validation,
     ux,
+    venv_integrity,
 )
 from defenseclaw.audit_actions import ACTION_DOCTOR
 from defenseclaw.audit_time_order import audit_time_order
@@ -299,6 +299,7 @@ class _DoctorResult:
         "list_processes",
         "quiet",
         "gateway_down",
+        "gateway_holder",
         "sidecar_unverified",
         "gateway_start_waited",
     )
@@ -334,6 +335,8 @@ class _DoctorResult:
         # supervised gateway is not serving the API port; later rows that
         # would only repeat it stay quiet.
         self.gateway_down = ""
+        # The process the Sidecar API row named when gateway_down is "foreign".
+        self.gateway_holder = ""
         # True once the Sidecar API row found a listener on the API port that
         # is not this account's verified gateway (its /health still answers).
         self.sidecar_unverified = False
@@ -1314,6 +1317,27 @@ def _prefetch_sandbox_report(
     return pool, (binary, pool.submit(sandbox_doctor_report, binary), signature)
 
 
+def _prefetch_audit_db_health(cfg) -> tuple[ThreadPoolExecutor, tuple[str, str, Future]]:
+    """Start the read-only audit database inspection in one worker.
+
+    The integrity walk of a large store is the longest step of a check run
+    (1.8 s of 4.35 s for 590 MiB, rel-1-0-10:GAP-0938). It reads the file
+    only, so it can run while the earlier configuration checks do; the row is
+    still emitted at its usual position, and only ordinary checks prefetch it,
+    because a repair can create or replace the database.
+    """
+    # Import in this thread: a worker never runs a first import of these.
+    from defenseclaw import file_permissions  # noqa: F401
+    from defenseclaw.doctor_recovery import inspect_audit_db
+
+    if os.name == "nt":
+        from defenseclaw import windows_acl  # noqa: F401
+    db_path = str(getattr(cfg, "audit_db", "") or "")
+    data_dir = str(getattr(cfg, "data_dir", "") or "")
+    pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="doctor-audit-db")
+    return pool, (db_path, data_dir, pool.submit(inspect_audit_db, db_path, data_dir=data_dir))
+
+
 def _check_sandbox(
     cfg,
     r: _DoctorResult,
@@ -1543,6 +1567,55 @@ def _doctor_secure_client(cfg) -> bool:
     return _enterprise_profile(cfg) == "secure_client"
 
 
+# The config.yaml bytes the validator accepted in this Doctor check run, by
+# path; None outside a check run. See _config_validated_this_run.
+_config_validation_run: dict[str, tuple] | None = None
+
+
+def _begin_config_validation_run() -> None:
+    global _config_validation_run
+    _config_validation_run = {}
+
+
+def _end_config_validation_run() -> None:
+    global _config_validation_run
+    _config_validation_run = None
+
+
+def _config_fingerprint(path: str) -> tuple | None:
+    """The identity and content of config.yaml: path, (dev, ino, size, mtime_ns), sha256."""
+    try:
+        with open(path, "rb") as stream:
+            info = os.fstat(stream.fileno())
+            digest = hashlib.sha256(stream.read()).hexdigest()
+    except OSError:
+        return None
+    return (os.path.abspath(path), info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, digest)
+
+
+def _remember_config_valid(path: str, before: tuple | None) -> None:
+    """Keep a positive decision only when the file did not change while the validator read it."""
+    run = _config_validation_run
+    if run is None or before is None or _config_fingerprint(path) != before:
+        return
+    run[before[0]] = before
+
+
+def _config_validated_this_run(path: str) -> bool:
+    """True when this check run's validator already accepted these exact bytes.
+
+    The repair preflight then needs no second Go helper run (0.34 s each on
+    dc-rhel, rel-1-0-10:GAP-0938). Only a positive decision is kept, only for
+    one check run (never --fix, never on disk), and any change to the file's
+    identity, size, mtime or content runs the validator again.
+    """
+    run = _config_validation_run
+    if not run:
+        return False
+    fingerprint = _config_fingerprint(path)
+    return fingerprint is not None and run.get(fingerprint[0]) == fingerprint
+
+
 def _check_config(cfg, r: _DoctorResult) -> None:
     from defenseclaw.config import config_path_for_data_dir
     from defenseclaw.config_inspect import ConfigInspectError, ConfigInspectTimeoutError, inspect_v8_config
@@ -1553,6 +1626,7 @@ def _check_config(cfg, r: _DoctorResult) -> None:
     if not os.path.isfile(cfg_path):
         _emit("fail", "Config file", "not found — run 'defenseclaw init'", r=r)
         return
+    fingerprint = _config_fingerprint(cfg_path) if _config_validation_run is not None else None
     try:
         validation = inspect_v8_config("validate", config_path=cfg_path)
     except ConfigInspectTimeoutError as exc:
@@ -1627,6 +1701,7 @@ def _check_config(cfg, r: _DoctorResult) -> None:
             remediation="defenseclaw config validate",
         )
         return
+    _remember_config_valid(cfg_path, fingerprint)
     _emit(
         "pass",
         "Config file",
@@ -1634,6 +1709,24 @@ def _check_config(cfg, r: _DoctorResult) -> None:
         r=r,
         check_id=check_id,
     )
+    # A routing.admin group this host knows by no spelling the matcher
+    # selects: its deny never acts here (rel-1-0-10:GAP-1124).
+    for warning in getattr(validation, "warnings", None) or []:
+        if isinstance(warning, str) and warning.endswith(f"({_ROUTING_GROUP_UNMATCHED})"):
+            _emit(
+                "warn",
+                "Routing policy",
+                warning.removesuffix(f" ({_ROUTING_GROUP_UNMATCHED})"),
+                r=r,
+                remediation=(
+                    "write the group as this host lists an account's groups (id -Gn on Linux and macOS, "
+                    "whoami /groups on Windows); name@domain and DOMAIN\\name of one domain both match"
+                ),
+            )
+
+
+# The Go config validate code of a routing.admin group no spelling matches.
+_ROUTING_GROUP_UNMATCHED = "routing_admin_group_unmatched"
 
 
 # The managed enumerator's unprotected-agents record and the command that runs
@@ -2562,6 +2655,8 @@ def _plan_canonical_config_preflight(cfg) -> RepairDecision:
     if not os.path.isfile(config_path):
         reason = "config.yaml is missing; run `defenseclaw init` before applying repairs"
         return RepairDecision("blocked", reason, blockers=(reason,))
+    if _config_validated_this_run(str(config_path)):
+        return RepairDecision("noop", f"{config_path}; canonical schema valid")
     try:
         validation = inspect_v8_config("validate", config_path=str(config_path))
     except ConfigInspectError as exc:
@@ -2625,12 +2720,12 @@ def _env_names_equal(left: str, right: str, *, platform_name: str | None = None)
 
 
 _CANONICAL_GATEWAY_TOKEN_ENV = "DEFENSECLAW_GATEWAY_TOKEN"
-_LEGACY_GATEWAY_TOKEN_ENV = "OPENCLAW_GATEWAY_TOKEN"
+_OPENCLAW_GATEWAY_TOKEN_ENV = "OPENCLAW_GATEWAY_TOKEN"
 
 
 def _known_gateway_token_env(name: str) -> str:
     """Return the canonical spelling for a built-in gateway token env name."""
-    for candidate in (_CANONICAL_GATEWAY_TOKEN_ENV, _LEGACY_GATEWAY_TOKEN_ENV):
+    for candidate in (_CANONICAL_GATEWAY_TOKEN_ENV, _OPENCLAW_GATEWAY_TOKEN_ENV):
         if _env_names_equal(name, candidate):
             return candidate
     return ""
@@ -2669,8 +2764,6 @@ def _gateway_dotenv_tokens(data_dir: str) -> dict[str, str]:
     path = os.path.join(normalized_data_dir, ".env")
     try:
         body = read_regular_file_no_follow(path, max_bytes=MAX_DOTENV_BYTES)
-        # The daemon leaves out an adopted copy that a one-spelling edit outdated.
-        shadowed = gateway_token_adoption.shadowed_names(body)
         for raw_line in body.splitlines():
             line = raw_line.strip()
             if not line or line.startswith(b"#"):
@@ -2683,7 +2776,7 @@ def _gateway_dotenv_tokens(data_dir: str) -> dict[str, str]:
             except UnicodeError:
                 continue
             canonical_key = _known_gateway_token_env(key)
-            if not canonical_key or gateway_token_adoption.is_shadowed(shadowed, canonical_key):
+            if not canonical_key:
                 continue
             value = raw_value.strip()
             if len(value) >= 2 and value[:1] == value[-1:] and value[:1] in {b'"', b"'"}:
@@ -2778,13 +2871,15 @@ def _gateway_dotenv_safety_problem(cfg) -> str:
 
 
 def _daemon_effective_gateway_token(cfg) -> tuple[str, str, str]:
-    """Resolve the token a newly started gateway child will actually use.
+    """Resolve the master token a newly started gateway child will actually use.
 
-    The Go daemon replaces inherited canonical/legacy token variables with
-    values from ``.env`` whenever that file contains either token. A custom
-    ``gateway.token_env`` remains externally managed and retains precedence.
-    Return ``(token, env_name, source_label)`` without ever rendering the
-    token itself.
+    The Go daemon replaces inherited gateway token variables with values from
+    ``.env`` whenever that file contains them. A custom ``gateway.token_env``
+    remains externally managed and retains precedence. ``OPENCLAW_GATEWAY_TOKEN``
+    is the OpenClaw WebSocket credential, never the master (R-TOK), and a
+    ``DEFENSECLAW_GATEWAY_TOKEN`` equal to it does not count either: the gateway
+    mints a separate one. Return ``(token, env_name, source_label)`` without
+    ever rendering the token itself.
     """
     gateway = getattr(cfg, "gateway", None)
     if gateway is None:
@@ -2798,26 +2893,24 @@ def _daemon_effective_gateway_token(cfg) -> tuple[str, str, str]:
             return custom_value, custom_env, "configured token provider"
 
     dotenv_values = _gateway_dotenv_tokens(str(getattr(cfg, "data_dir", "") or ""))
-    if dotenv_values:
-        configured_known = _known_gateway_token_env(configured_env)
-        if configured_known and dotenv_values.get(configured_known):
-            return (
-                dotenv_values[configured_known],
-                configured_known,
-                "gateway dotenv",
-            )
-        for candidate in (_CANONICAL_GATEWAY_TOKEN_ENV, _LEGACY_GATEWAY_TOKEN_ENV):
-            if dotenv_values.get(candidate):
-                return dotenv_values[candidate], candidate, "gateway dotenv"
+    openclaw = dotenv_values.get(_OPENCLAW_GATEWAY_TOKEN_ENV) or _normalized_gateway_token(
+        os.environ.get(_OPENCLAW_GATEWAY_TOKEN_ENV, "")
+    )
+    canonical = dotenv_values.get(_CANONICAL_GATEWAY_TOKEN_ENV, "")
+    if canonical and not (openclaw and _gateway_tokens_equal(canonical, openclaw)):
+        return canonical, _CANONICAL_GATEWAY_TOKEN_ENV, "gateway dotenv"
 
     resolved = _normalized_gateway_token(gateway.resolved_token())
     if not resolved:
-        return "", configured_env, ""
-    if configured_env and _normalized_gateway_token(os.environ.get(configured_env, "")):
+        return "", "" if _env_names_equal(configured_env, _OPENCLAW_GATEWAY_TOKEN_ENV) else configured_env, ""
+    if (
+        configured_env
+        and not _env_names_equal(configured_env, _OPENCLAW_GATEWAY_TOKEN_ENV)
+        and _gateway_tokens_equal(_normalized_gateway_token(os.environ.get(configured_env, "")), resolved)
+    ):
         return resolved, configured_env, "configured environment"
-    for candidate in (_CANONICAL_GATEWAY_TOKEN_ENV, _LEGACY_GATEWAY_TOKEN_ENV):
-        if _gateway_tokens_equal(_normalized_gateway_token(os.environ.get(candidate, "")), resolved):
-            return resolved, candidate, "process environment"
+    if _gateway_tokens_equal(_normalized_gateway_token(os.environ.get(_CANONICAL_GATEWAY_TOKEN_ENV, "")), resolved):
+        return resolved, _CANONICAL_GATEWAY_TOKEN_ENV, "process environment"
     return resolved, "", "gateway config"
 
 
@@ -2844,6 +2937,13 @@ def _missing_gateway_token_detail(cfg) -> str:
             f"custom token provider {custom_env!r} is empty — populate it or "
             "explicitly change gateway.token_env; auto-fix preserves custom providers"
         )
+    canonical = _normalized_gateway_token(os.environ.get(_CANONICAL_GATEWAY_TOKEN_ENV, ""))
+    openclaw = _normalized_gateway_token(os.environ.get(_OPENCLAW_GATEWAY_TOKEN_ENV, ""))
+    if canonical and openclaw and _gateway_tokens_equal(canonical, openclaw):
+        return (
+            "DEFENSECLAW_GATEWAY_TOKEN holds the OpenClaw gateway token, which the DefenseClaw "
+            "gateway no longer accepts as its own — run `defenseclaw doctor --fix` to generate a separate one"
+        )
     # The token is in a .env this account cannot read: a new token would
     # replace the file and its other secrets (GAP-0662).
     unreadable = _unreadable_gateway_dotenv(cfg)
@@ -2856,20 +2956,26 @@ def _missing_gateway_token_detail(cfg) -> str:
 
 
 def _cli_effective_gateway_token(cfg) -> tuple[str, str]:
-    """Return the token/source normal Python gateway clients will use."""
+    """Return the token/source normal Python gateway clients will use.
+
+    Same ladder as ``GatewayConfig.resolved_token`` (R-TOK).
+    """
     gateway = getattr(cfg, "gateway", None)
     if gateway is None:
         return "", ""
+    openclaw = _normalized_gateway_token(os.environ.get(_OPENCLAW_GATEWAY_TOKEN_ENV, ""))
+
+    def usable(value: str) -> str:
+        return value if value and not (openclaw and _gateway_tokens_equal(value, openclaw)) else ""
+
     configured_env = str(getattr(gateway, "token_env", "") or "").strip()
-    if configured_env:
-        value = _normalized_gateway_token(os.environ.get(configured_env, ""))
-        if value:
-            return value, configured_env
-    for name in (_CANONICAL_GATEWAY_TOKEN_ENV, _LEGACY_GATEWAY_TOKEN_ENV):
-        value = _normalized_gateway_token(os.environ.get(name, ""))
+    for name in (configured_env, _CANONICAL_GATEWAY_TOKEN_ENV):
+        if not name or _env_names_equal(name, _OPENCLAW_GATEWAY_TOKEN_ENV):
+            continue
+        value = usable(_normalized_gateway_token(os.environ.get(name, "")))
         if value:
             return value, name
-    literal = _normalized_gateway_token(getattr(gateway, "token", ""))
+    literal = usable(_normalized_gateway_token(getattr(gateway, "token", "")))
     return (literal, "gateway.token") if literal else ("", "")
 
 
@@ -2899,9 +3005,13 @@ def _gateway_cli_token_mismatch_detail(cfg, daemon_token: str) -> str:
 
 
 def _gateway_rotated_provider_converged(cfg) -> bool:
-    """Return whether a rotated canonical token has effective precedence."""
+    """Return whether a rotated canonical token has effective precedence.
+
+    A ``token_env`` naming ``OPENCLAW_GATEWAY_TOKEN`` is ignored by every
+    resolver (R-TOK), so the canonical token has precedence then too.
+    """
     configured = str(getattr(getattr(cfg, "gateway", None), "token_env", "") or "").strip()
-    return not configured or _env_names_equal(configured, _CANONICAL_GATEWAY_TOKEN_ENV)
+    return not configured or bool(_known_gateway_token_env(configured))
 
 
 def _hilt_observe_remediation(profiles: list[str], connector: str = "<name>") -> str:
@@ -3186,9 +3296,48 @@ def _human_size(num_bytes: int) -> str:
     return f"{mib:.1f} MiB" if mib < 10 else f"{mib:.0f} MiB"
 
 
-def _check_audit_db(cfg, r: _DoctorResult) -> None:
-    _check_audit_db_store(cfg, r)
+def _check_audit_db(cfg, r: _DoctorResult, *, prefetched: tuple[str, str, Future] | None = None) -> None:
+    _check_audit_db_store(cfg, r, prefetched=prefetched)
     _check_moved_aside_audit_stores(str(getattr(cfg, "audit_db", "") or ""), r)
+    _check_unread_calls(cfg, r)
+
+
+def _check_unread_calls(cfg, r: _DoctorResult) -> None:
+    """Count the tool calls the gateway read only in part (ACTION-PARSE-FAILURE
+    records, rel-1-0-10:GAP-0526): a shell syntax error or a shell body it could
+    not resolve. Their readable statements were judged; the rest is allowed in
+    the default and permissive packs, so the admin sees how many there are.
+    A warning when there are any; nothing when the audit store is unreadable
+    (its own check reports that)."""
+    import sqlite3
+
+    from defenseclaw.db import UNREAD_CALLS_SQL
+
+    db_path = str(getattr(cfg, "audit_db", "") or "")
+    if not db_path or not os.path.isfile(db_path):
+        return
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=2)
+        try:
+            count = int(conn.execute(UNREAD_CALLS_SQL).fetchone()[0] or 0)
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return
+    if count == 0:
+        _emit("pass", "Unread tool calls", "none recorded", r=r, check_id="doctor.guardrail.unread-calls")
+        return
+    _emit(
+        "warn",
+        "Unread tool calls",
+        f"{count} tool call(s) were read only in part (ACTION-PARSE-FAILURE): a shell syntax error or a shell "
+        "body that could not be resolved. Their readable statements were checked; the rest was allowed outside "
+        "the strict pack",
+        r=r,
+        check_id="doctor.guardrail.unread-calls",
+        reason_code="unread-tool-calls",
+        remediation="list them: defenseclaw alerts, or search the audit log for ACTION-PARSE-FAILURE",
+    )
 
 
 _CARRY_OVER_NOTE_SUFFIX = ".carryover.json"
@@ -4413,7 +4562,7 @@ def _fix_private_state_files(cfg, *, assume_yes: bool, plan_only: bool = False) 
     return ("pass", f"made {names} readable by this account only")
 
 
-def _check_audit_db_store(cfg, r: _DoctorResult) -> None:
+def _check_audit_db_store(cfg, r: _DoctorResult, *, prefetched: tuple[str, str, Future] | None = None) -> None:
     from defenseclaw.doctor_recovery import (
         _AUDIT_INTEGRITY_TIME_BUDGET_SECONDS,
         AuditDBHealthStatus,
@@ -4421,10 +4570,13 @@ def _check_audit_db_store(cfg, r: _DoctorResult) -> None:
     )
 
     db_path = str(getattr(cfg, "audit_db", "") or "")
-    health = inspect_audit_db(
-        db_path,
-        data_dir=str(getattr(cfg, "data_dir", "") or ""),
-    )
+    data_dir = str(getattr(cfg, "data_dir", "") or "")
+    if prefetched is not None and prefetched[:2] == (db_path, data_dir):
+        # Started at Doctor start (_prefetch_audit_db_health); an exception
+        # from the worker is raised here, as an inline call would raise it.
+        health = prefetched[2].result()
+    else:
+        health = inspect_audit_db(db_path, data_dir=data_dir)
     if health.status is AuditDBHealthStatus.MISSING:
         # A running gateway still writes to the deleted file, and the
         # initialize repair refuses while it runs (GAP-0325).
@@ -4527,17 +4679,26 @@ def _check_audit_db_store(cfg, r: _DoctorResult) -> None:
     retention_days = _configured_local_retention_days(cfg)
     if health.file_bytes >= 1024 * 1024 * 1024:
         reclaim_mib = max(health.freelist_bytes, 0) // (1024 * 1024)
-        quoted_db = shlex.quote(db_path)
         if reclaim_mib >= 64:
-            size_remediation = (
-                f"to give back the {reclaim_mib} MiB: run 'defenseclaw-gateway stop', then "
-                f"sqlite3 {quoted_db} 'VACUUM;', then 'defenseclaw-gateway start'"
-            )
+            # audit compact replaces the manual sqlite3 VACUUM (issue #1440):
+            # sqlite3 is often not installed, and a plain VACUUM keeps
+            # auto_vacuum off, so the next retention pass left free pages again.
+            if _doctor_managed(cfg):
+                size_remediation = (
+                    f"to give back the {reclaim_mib} MiB, an administrator stops the gateway service, runs "
+                    "'defenseclaw audit compact' and starts the service again (the command names the service commands)"
+                )
+            else:
+                size_remediation = (
+                    f"to give back the {reclaim_mib} MiB: run 'defenseclaw-gateway stop', then "
+                    "'defenseclaw audit compact', then 'defenseclaw-gateway start' "
+                    "('defenseclaw audit compact --dry-run' shows what it reclaims)"
+                )
         elif retention_days == 0:
             size_remediation = (
                 "local retention is off (observability.local.retention_days: 0 keeps every event); set it "
                 "to the days of history you need in config.yaml, run 'defenseclaw-gateway restart', and "
-                "once older events are deleted, run this check again for the VACUUM step"
+                "once older events are deleted, run this check again for the compact step"
             )
         else:
             size_remediation = (
@@ -4966,7 +5127,17 @@ def _check_component_connector_compatibility(
             )
         elif finding.installed_version:
             detail += f"; installed={finding.installed_version}"
-            if finding.connector in rechecked.changed:
+            if finding.connector in rechecked.moved:
+                # Another install answered, not an update of the recorded one
+                # (GAP-0195): name the executable read and the one recorded.
+                recorded_path, read_path = rechecked.moved[finding.connector]
+                was = rechecked.changed.get(finding.connector, "")
+                detail += (
+                    f" (read from {read_path}, the install this shell launches first; recorded"
+                    + (f" as {was}" if was else "")
+                    + f" from {recorded_path}, another install)"
+                )
+            elif finding.connector in rechecked.changed:
                 # Only a plain semver of the recorded text reaches the row.
                 was = rechecked.changed[finding.connector]
                 detail += (
@@ -5057,6 +5228,25 @@ def _check_component_connector_compatibility(
                 remediation += (
                     " to verify the version and turn action mode back on (or --mode observe to keep observing)"
                 )
+        if finding.connector in rechecked.changed and finding.installed_version:
+            # The gateway and its hook events keep the version setup recorded
+            # (agent_version_normalized) until setup records the one installed
+            # now. Say so when that matters: a verdict that is not a pass, or a
+            # contract other than the one recorded (GAP-0164).
+            was = rechecked.changed[finding.connector]
+            before = resolve_connector_contract(finding.connector, was) if was else None
+            before_contract = before.contract.contract_id if before is not None and before.contract is not None else ""
+            if tag != "pass" or (before is not None and before_contract != (finding.contract_id or "")):
+                from defenseclaw.hook_integrity import setup_command
+
+                if tag == "pass":
+                    tag = "warn"
+                detail += (
+                    f"; the gateway and its hook events still use the recorded version "
+                    f"{was or 'from before the update'} until setup records this one"
+                )
+                step = f"run '{setup_command(finding.connector)} --yes' to record the version installed now"
+                remediation = f"{remediation}; {step}" if remediation else step
         unverified_detail, unverified_step = _unverified_executable_note(cfg, finding.connector)
         if unverified_detail:
             detail += unverified_detail
@@ -5072,30 +5262,61 @@ def _check_component_connector_compatibility(
             reason_code=finding.reason_code,
             remediation=remediation,
         )
+    if "cursor" in enabled:
+        _emit_cursor_agent_cli_compatibility(discovery, data_dir, r)
 
 
-_DOCS_URL = "https://cisco-ai-defense.github.io/defenseclaw/docs"
+def _emit_cursor_agent_cli_compatibility(discovery: object, data_dir: str, r: _DoctorResult) -> None:
+    """Judge Cursor's Agent CLI against its own pins beside the Desktop (GAP-0196).
+
+    The cursor row judges the executable discovery recorded, which is the
+    Desktop hook host when both are installed. The Agent CLI runs the same
+    hooks.json, so it gets its own row, naming the executable read.
+    """
+
+    from defenseclaw.doctor_health import (
+        HealthStatus,
+        build_health_report,
+        cursor_agent_cli_discovery,
+        supported_range_text,
+    )
+
+    found = cursor_agent_cli_discovery(discovery, data_dir)
+    if found is None:
+        return
+    cli_discovery, executable = found
+    for finding in build_health_report(("cursor",), cli_discovery, components=()).connectors:
+        detail = finding.summary
+        if finding.installed_version:
+            detail += f"; installed={finding.installed_version} ({executable})"
+        if finding.contract_id:
+            detail += f"; contract={finding.contract_id}"
+        if finding.supported_agent_ranges:
+            detail += f"; supported={supported_range_text(finding.supported_agent_ranges)}"
+        if finding.status is HealthStatus.SUPPORTED:
+            tag = "pass"
+        elif finding.status is HealthStatus.UNSUPPORTED:
+            tag = "fail"
+        else:
+            tag = "warn"
+        _emit(
+            tag,
+            "Connector compatibility: cursor Agent CLI",
+            detail,
+            r=r,
+            check_id="doctor.connector.cursor.agent_cli.compatibility",
+            reason_code=finding.reason_code,
+            remediation=_health_remediation_text(finding.remediations),
+        )
+
+
+_DOCS_URL = venv_integrity.DOCS_URL
 
 
 def _install_repair_hint(what: str) -> str:
-    """The command that repairs *what* (a part of this install).
+    """The command that repairs *what* on this host (Windows: the install command)."""
 
-    On macOS and Linux the release upgrade resolver reinstalls the release at
-    the installed version too (the built-in ``defenseclaw upgrade`` stops early
-    when the version is already current, so it cannot repair a missing part);
-    on Windows, running the install command again does (from 1.0 the 0.8.x
-    Setup package and its ``/repair`` are retired).
-    """
-
-    if os.name == "nt":
-        return (
-            "repair the install by running the install command again "
-            f"({_DOCS_URL}/get-started/windows/install-lifecycle/#repair)"
-        )
-    return (
-        f"repair {what} with the release upgrade resolver, `bash defenseclaw-upgrade.sh --yes` "
-        f"(get and verify it as {_DOCS_URL}/get-started/upgrade/ shows)"
-    )
+    return venv_integrity.install_repair_hint(what, windows=os.name == "nt")
 
 
 def _scanner_repair_hint() -> str:
@@ -5115,6 +5336,46 @@ def _scanner_version_note(dist: str, expected: str) -> tuple[str, str]:
     if installed != expected:
         return "warn", f"{dist} {installed} (this release pins {expected}); {_scanner_repair_hint()}"
     return "pass", f"{dist} {installed}"
+
+
+def _mcp_scanner_import_note(status: str, note: str, dist: str, data_dir: str = "") -> tuple[str, str, str]:
+    """``(status, note, remediation)`` once the MCP scanner SDK imports.
+
+    The installed metadata said cisco-ai-mcp-scanner was there while the SDK
+    failed to import (an upgrade had left files of an older LiteLLM wheel), so
+    doctor passed and `defenseclaw mcp scan` failed (GAP-0006). The import runs
+    in a child interpreter, as `defenseclaw mcp scan` would, so a damaged
+    package cannot break this run; a failure names the files that differ from
+    their wheels and the repair, which rebuilds the environment.
+
+    The import takes seconds (it loads LiteLLM), so the result is remembered in
+    *data_dir* while the environment is unchanged (GAP-0938,
+    :func:`venv_integrity.cached_import_error`).
+    """
+    try:
+        # The first import after an install compiles and scans LiteLLM.
+        from defenseclaw import __version__ as defenseclaw_version
+        from defenseclaw.scanner import settings as scanner_settings
+
+        error = venv_integrity.cached_import_error(
+            "from mcpscanner import Config, Scanner",
+            os.path.join(data_dir, venv_integrity.PROBE_CACHE_NAME) if data_dir else "",
+            venv_integrity.probe_key("mcpscanner", (dist, scanner_settings.LITELLM_DIST), defenseclaw_version),
+            env=trusted_system_subprocess_env(),
+        )
+    except OSError as exc:
+        return "warn", f"{note}; could not start {sys.executable} to import it: {exc}", ""
+    if error is None:
+        slow = "its import did not finish within 60 s (a first start after an install can take longer)"
+        return "warn", f"{note}; {slow}, so run `defenseclaw doctor` again", ""
+    if not error:
+        return status, f"{note}, imports", ""
+    detail = f"{dist} is installed but does not import ({error})"
+    damaged = venv_integrity.damaged_files(venv_integrity.site_packages())
+    if damaged:
+        detail += "; files that differ from their wheels: " + venv_integrity.describe(damaged)
+    repair = _install_repair_hint("the Python environment")
+    return "fail", f"{detail}; {repair}", repair
 
 
 def _litellm_version_note() -> tuple[str, str]:
@@ -5153,7 +5414,12 @@ def _check_scanners(cfg, r: _DoctorResult) -> None:
     # The gateway scans MCP servers with `defenseclaw mcp scan`, the SDK in
     # this environment, not a standalone mcp-scanner launcher.
     status, note = _scanner_version_note(scanner_settings.MCP_SCANNER_DIST, scanner_settings.MCP_SCANNER_VERSION)
-    _emit(status, "Scanner: mcp-scanner", note, r=r)
+    remediation = ""
+    if status != "fail":
+        status, note, remediation = _mcp_scanner_import_note(
+            status, note, scanner_settings.MCP_SCANNER_DIST, str(getattr(cfg, "data_dir", "") or "")
+        )
+    _emit(status, "Scanner: mcp-scanner", note, r=r, remediation=remediation)
     status, note = _litellm_version_note()
     _emit(status, "Scanner: litellm", note, r=r)
 
@@ -5837,7 +6103,7 @@ def _check_sidecar(cfg, r: _DoctorResult) -> dict | None:
                 r=r,
                 remediation=_foreign_gateway_port_remediation(cfg, holder=holder),
             )
-            r.gateway_down = "foreign"
+            r.gateway_down, r.gateway_holder = "foreign", holder
             return None
         else:
             # /health is public: any process on the port answers it. This row
@@ -6083,7 +6349,7 @@ def _check_sidecar(cfg, r: _DoctorResult) -> dict | None:
                 r=r,
                 remediation=_foreign_gateway_port_remediation(cfg, holder=holder),
             )
-            r.gateway_down = "foreign"
+            r.gateway_down, r.gateway_holder = "foreign", holder
         elif trust.code == "missing":
             start, remediation = _stopped_gateway_start_advice(cfg)
             _emit(
@@ -6109,7 +6375,7 @@ def _check_sidecar(cfg, r: _DoctorResult) -> dict | None:
             r=r,
             remediation=_foreign_gateway_port_remediation(cfg, holder=holder),
         )
-        r.gateway_down = "foreign"
+        r.gateway_down, r.gateway_holder = "foreign", holder
     elif code == 0 and "refused" in body.lower():
         start, remediation = _stopped_gateway_start_advice(cfg)
         _emit(
@@ -6294,40 +6560,16 @@ def _check_openclaw_gateway(cfg, r: _DoctorResult) -> None:
         _emit("fail", "OpenClaw gateway", detail, r=r)
 
 
-def _openclaw_active(cfg) -> bool:
-    """True only when OpenClaw is positively among the active connectors.
-
-    Drives the connector-aware token-env messaging (D1): the legacy
-    ``OPENCLAW_GATEWAY_TOKEN`` var is "the configured var" only on a genuine
-    OpenClaw install; on a hook install it is stale drift. Reuses
-    :func:`_doctor_active_connectors`, so an ambiguous/legacy config that
-    floors to the singular ``openclaw`` path default still reads as active —
-    conservative on purpose: we treat OpenClaw as *inactive* only when we can
-    see a real, OpenClaw-free active set.
-    """
-    return "openclaw" in _doctor_active_connectors(cfg)
-
-
 def _check_gateway_token_env_alignment(cfg, r: _DoctorResult) -> None:
-    """Detect the OPENCLAW_/DEFENSECLAW_ token-env drift the user hit.
+    """Check that ``gateway.token_env`` names a DefenseClaw master token.
 
-    This is the doctor surface for the rebranding fix
-    (cmd_agent/_resolve_gateway_target + config/GatewayConfig). The
-    auto-detect ladder in Phase 1-2 already MASKS the misconfig at
-    runtime — `agent usage` works either way — but doctor should
-    still flag the stale ``token_env`` so operators can clean it up
-    via `--fix` and rely on the explicit (faster, no-fallthrough)
-    path going forward.
-
-    Triggers when ALL of these hold:
-
-    * ``cfg.gateway.token_env`` is set to a non-empty string.
-    * That env var is empty in ``os.environ``.
-    * The CANONICAL var (``DEFENSECLAW_GATEWAY_TOKEN``) IS populated.
-
-    "fail" tag (not "warn") is intentional — without the auto-detect
-    fall-through, this exact config would fail every `agent usage`
-    call. The fall-through is a safety net, not the design.
+    ``OPENCLAW_GATEWAY_TOKEN`` is the OpenClaw WebSocket credential: the
+    OpenClaw account, its plugins and any tool that reads openclaw.json hold
+    it, so no resolver uses it as the DefenseClaw master any more (R-TOK).
+    DefenseClaw 1.0.9 and earlier saved ``token_env: OPENCLAW_GATEWAY_TOKEN``;
+    ``doctor --fix`` (and the upgrade) repoint it at the canonical
+    ``DEFENSECLAW_GATEWAY_TOKEN``. A custom ``token_env`` that is empty while
+    the canonical var is populated is reported too.
     """
     gw = getattr(cfg, "gateway", None)
     if gw is None:
@@ -6335,95 +6577,44 @@ def _check_gateway_token_env_alignment(cfg, r: _DoctorResult) -> None:
 
     configured_env = getattr(gw, "token_env", "") or ""
     if not configured_env:
-        # No env var configured at all — handled by other checks
-        # (e.g. _check_sidecar's auth probe). Not our concern here.
+        # No env var configured at all: the sidecar auth probe covers it.
+        return
+
+    if _env_names_equal(configured_env, _OPENCLAW_GATEWAY_TOKEN_ENV):
+        _emit(
+            "warn",
+            "Gateway token env",
+            "gateway.token_env names the OpenClaw credential; the DefenseClaw gateway no longer "
+            "uses it as its token. Run `defenseclaw doctor --fix` to repoint it at "
+            "DEFENSECLAW_GATEWAY_TOKEN.",
+            r=r,
+            remediation="defenseclaw doctor --fix",
+        )
         return
 
     configured_val = _normalized_gateway_token(os.environ.get(configured_env, ""))
     if configured_val:
-        # Configured var IS populated — happy path. Nothing to flag.
         _emit("pass", "Gateway token env", f"{configured_env} is set", r=r)
         return
 
-    # Stale token_env: configured var is empty. Check whether the
-    # canonical DEFENSECLAW_ var is populated instead — that's the
-    # drift case worth fixing.
-    canonical = _normalized_gateway_token(os.environ.get("DEFENSECLAW_GATEWAY_TOKEN", ""))
-    if canonical:
-        custom_env = _custom_gateway_token_env(cfg)
-        if custom_env:
-            _emit(
-                "warn",
-                "Gateway token env",
-                f"custom token provider {custom_env!r} is empty; the canonical "
-                "fallback is populated. Auto-fix preserves custom providers — "
-                "populate that provider or intentionally change gateway.token_env.",
-                r=r,
-            )
-            return
-        _emit(
-            "fail",
-            "Gateway token env",
-            f"cfg.gateway.token_env={configured_env!r} is empty in env, "
-            "but DEFENSECLAW_GATEWAY_TOKEN is set. Run `defenseclaw doctor "
-            "--fix` to repoint token_env at the canonical var.",
-            r=r,
-        )
-        return
-
-    legacy = _normalized_gateway_token(os.environ.get("OPENCLAW_GATEWAY_TOKEN", ""))
-    if legacy and not _env_names_equal(configured_env, "OPENCLAW_GATEWAY_TOKEN"):
-        # Custom token_env that's empty, but legacy OPENCLAW_ has a
-        # value. Rare; flag as warn so the operator can decide.
-        _emit(
-            "warn",
-            "Gateway token env",
-            f"cfg.gateway.token_env={configured_env!r} is empty, but "
-            "OPENCLAW_GATEWAY_TOKEN has a legacy value. Migrate via "
-            "`defenseclaw keys set DEFENSECLAW_GATEWAY_TOKEN <value>`.",
-            r=r,
-        )
-        return
-
-    # Both vars empty — no token configured anywhere. When token_env still
-    # carries the legacy ``OPENCLAW_GATEWAY_TOKEN`` default on an install that
-    # is NOT running OpenClaw, don't present that var as the one the operator
-    # must set (D1): the gateway auto-generates the canonical
-    # ``DEFENSECLAW_GATEWAY_TOKEN`` on first boot, so the only real action is
-    # to repoint the stale token_env. Only when OpenClaw is genuinely active is
-    # ``OPENCLAW_GATEWAY_TOKEN`` the legitimate var to set.
-    if _env_names_equal(configured_env, "OPENCLAW_GATEWAY_TOKEN") and not _openclaw_active(cfg):
-        _emit(
-            "warn",
-            "Gateway token env",
-            "the gateway auto-generates DEFENSECLAW_GATEWAY_TOKEN on first "
-            "boot, but cfg.gateway.token_env still points at legacy "
-            "OPENCLAW_GATEWAY_TOKEN on a non-OpenClaw install — run "
-            "`defenseclaw doctor --fix` to repoint it.",
-            r=r,
-        )
-        return
-
+    canonical = _normalized_gateway_token(os.environ.get(_CANONICAL_GATEWAY_TOKEN_ENV, ""))
     custom_env = _custom_gateway_token_env(cfg)
     if custom_env:
+        fallback = "; the canonical fallback is populated" if canonical else ""
         _emit(
             "warn",
             "Gateway token env",
-            f"custom token provider {custom_env!r} is empty — populate it or "
+            f"custom token provider {custom_env!r} is empty{fallback} — populate it or "
             "intentionally change gateway.token_env; auto-fix preserves custom providers",
             r=r,
         )
         return
 
-    # Generic "no token anywhere" state (custom token_env, or OpenClaw is
-    # genuinely active). Other checks (sidecar /health probe) catch the
-    # downstream effect; we just report the local config state.
     _emit(
         "warn",
         "Gateway token env",
-        f"{configured_env} is empty and no DEFENSECLAW_GATEWAY_TOKEN "
-        "fallback is present. Start the gateway (auto-generates a "
-        "token) or run `defenseclaw keys set DEFENSECLAW_GATEWAY_TOKEN`.",
+        f"{configured_env} is empty. Start the gateway (it generates the token) or run "
+        "`defenseclaw doctor --fix`.",
         r=r,
     )
 
@@ -7687,12 +7878,15 @@ def _check_windows_gateway_diagnostics(
         status_error = ""
 
     runtime: dict = {}
+    peer_broker = None
     if status_code == 200:
         try:
             payload = json.loads(status_body)
             candidate = payload.get("runtime", {}) if isinstance(payload, dict) else {}
             if isinstance(candidate, dict):
                 runtime = candidate
+            if isinstance(payload, dict):
+                peer_broker = payload.get("route_peer_broker")
         except (json.JSONDecodeError, TypeError):
             runtime = {}
 
@@ -7775,7 +7969,120 @@ def _check_windows_gateway_diagnostics(
         _emit("fail", "Gateway home", "running gateway uses a different canonical data home", r=r)
     else:
         _emit("pass", "Gateway home", "running gateway uses this canonical data home", r=r)
+    _emit_route_peer_broker_row(peer_broker, r)
     return True
+
+
+def _capacity_count(counts, key: str) -> int:
+    value = counts.get(key) if isinstance(counts, dict) else None
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
+
+
+def _check_hook_capacity(cfg, health: dict | None, r: _DoctorResult) -> None:
+    """The Hook capacity row on every OS (S8 DESIGN 18, review P2-2).
+
+    A managed gateway gives its administrator the window in /health. A
+    per-user gateway serves it only in its authenticated /status, because
+    its /health needs no credential and the counts are this account load
+    (review P3-2), so it is read there with the gateway token, the way the
+    runtime rows are. No row without a credential or on an older gateway.
+    """
+    capacity = health.get("hook_capacity") if isinstance(health, dict) else None
+    if not isinstance(capacity, dict):
+        document, _problem, _checked = _authenticated_gateway_status_document(cfg)
+        capacity = document.get("hook_capacity") if isinstance(document, dict) else None
+    _emit_hook_capacity_row(capacity, r)
+
+
+def _emit_hook_capacity_row(capacity, r: _DoctorResult) -> None:
+    """Hook capacity: tool calls that ended at their answer budget (S8 DESIGN 18).
+
+    The gateway counts, per minute over its last hour, the hook calls it
+    answered in time and the ones that ran out of their answer budget: a
+    deadline deny (the hook blocked the call, the managed and strict
+    answer) or a late allow (the call ran without a check, the default
+    per-user answer). Any of them means the host got more tool calls than it
+    can check in time; the sizing page gives the measured rate per host.
+    """
+    if not isinstance(capacity, dict):
+        return
+    window = capacity.get("window") if isinstance(capacity.get("window"), dict) else {}
+    peak = capacity.get("peak_minute") if isinstance(capacity.get("peak_minute"), dict) else {}
+    minutes = _capacity_count(capacity, "window_minutes") or 60
+    doc = str(capacity.get("sizing_doc") or "")[:200]
+    carried = _capacity_count(capacity, "answered_per_minute_peak")
+    denies, late = _capacity_count(window, "deadline_denies"), _capacity_count(window, "late_allows")
+    shed = _capacity_count(window, "shed")
+    if denies + late + shed == 0:
+        detail = (
+            f"no tool call ran out of its answer budget in the last {minutes} min "
+            f"(peak {carried} calls answered in one minute)"
+        )
+        _emit("pass", "Hook capacity", detail, r=r)
+        return
+    start = str(capacity.get("peak_minute_start") or "")[:40]
+    peak_denies = _capacity_count(peak, "deadline_denies")
+    peak_late = _capacity_count(peak, "late_allows")
+    peak_shed = _capacity_count(peak, "shed")
+    peak_answered = _capacity_count(peak, "answered")
+    clauses = []
+    if denies + late:
+        clauses.append(
+            f"{denies} tool call(s) were denied and {late} ran unchecked "
+            "because DefenseClaw could not check them in time"
+        )
+    if shed:
+        # A refused call is blocked by its hook when its budget ends unless a
+        # resend is admitted (review P2-3); the clause is the status one.
+        from defenseclaw.commands.cmd_status import _hook_capacity_shed_clause
+
+        clauses.append(_hook_capacity_shed_clause(shed))
+    verdict = (
+        "This host is over its hook capacity"
+        if denies + late
+        else "An account is over its hook budget or this host is over its hook capacity"
+    )
+    detail = (
+        f"in the last {minutes} min " + "; and ".join(clauses) + f" (busiest minute {start}: "
+        f"{peak_denies} denied, {peak_late} unchecked, {peak_shed} refused, "
+        f"{peak_answered} answered). {verdict}, not a policy result; "
+        f"run fewer agents at once or use a larger host"
+    )
+    if doc:
+        detail += f" (sizing: {doc})"
+    _emit("warn", "Hook capacity", detail, r=r)
+
+
+def _emit_route_peer_broker_row(broker, r: _DoctorResult) -> None:
+    """Managed Windows route-only: the hook guardian peer SID broker.
+
+    The gateway adds ``route_peer_broker`` to its authenticated status only
+    on a managed Windows host with route-only connectors; it asks the broker
+    about the status connection itself. While the broker does not answer the
+    gateway refuses every route-only caller.
+    """
+    if not isinstance(broker, dict):
+        return
+    state = broker.get("state")
+    detail = str(broker.get("detail") or "")[:300]
+    suffix = f" ({detail})" if detail else ""
+    if state == "ok":
+        _emit("pass", "Route-only peer broker", "the hook guardian proves the account of each route-only caller", r=r)
+    elif state == "unavailable":
+        _emit(
+            "fail",
+            "Route-only peer broker",
+            "the hook guardian peer broker does not answer, so the gateway refuses every route-only "
+            "Claude Code and Codex call (401); start or repair the DefenseClaw hook guardian service" + suffix,
+            r=r,
+        )
+    else:
+        _emit(
+            "warn",
+            "Route-only peer broker",
+            "the hook guardian peer broker did not verify this connection" + suffix,
+            r=r,
+        )
 
 
 def _watchdog_enabled(cfg) -> bool:
@@ -10814,10 +11121,62 @@ _OPENCODE_PLUGIN_SUFFIXES = (".js", ".ts")
 def _authenticated_gateway_health(cfg) -> tuple[dict | None, str, bool]:
     """The gateway's health from its authenticated ``/status`` document.
 
+    Returns ``(health, "", True)``, or ``(None, reason, checked)`` as
+    ``_authenticated_gateway_status_document`` does.
+    """
+    document, problem, checked = _authenticated_gateway_status_document(cfg)
+    if document is None:
+        return None, problem, checked
+    health = document.get("health")
+    if not isinstance(health, dict):
+        return None, "authenticated status health is malformed", True
+    return health, "", True
+
+
+#: The authenticated ``/status`` documents of the current Doctor run, by
+#: config object, or None outside a run. Several rows read the document (hook
+#: capacity, connector activity, Cowork, the OpenCode heartbeat); each read
+#: was a trusted-listener check, a runtime binding and an HTTP probe of up to
+#: 3 s, so a per-user run fetched it two or more times (GAP-0742 N4). A run
+#: fetches it once, after its repairs (a repair may restart the gateway).
+_status_document_run: dict[int, tuple[dict | None, str, bool]] | None = None
+
+
+def _begin_status_document_run() -> None:
+    """Share one authenticated /status fetch until the Doctor run ends."""
+
+    global _status_document_run
+    _status_document_run = {}
+
+
+def _end_status_document_run() -> None:
+    """Forget the run's /status document; every later call fetches again."""
+
+    global _status_document_run
+    _status_document_run = None
+
+
+def _authenticated_gateway_status_document(cfg) -> tuple[dict | None, str, bool]:
+    """The gateway's authenticated ``/status`` document, once per Doctor run.
+
+    See ``_fetch_authenticated_gateway_status_document``.
+    """
+    run = _status_document_run
+    if run is None:
+        return _fetch_authenticated_gateway_status_document(cfg)
+    key = id(cfg)
+    if key not in run:
+        run[key] = _fetch_authenticated_gateway_status_document(cfg)
+    return run[key]
+
+
+def _fetch_authenticated_gateway_status_document(cfg) -> tuple[dict | None, str, bool]:
+    """The gateway's authenticated ``/status`` document.
+
     The document counts only when the listener is this profile's gateway
     process and the runtime it reports binds back to it, the same trust as
     ``cmd_status._fetch_runtime_bound_health``. Returns
-    ``(health, "", True)``, or ``(None, reason, checked)``: ``checked`` is
+    ``(document, "", True)``, or ``(None, reason, checked)``: ``checked`` is
     False when no gateway runs.
     """
     gateway = getattr(cfg, "gateway", None)
@@ -10853,12 +11212,11 @@ def _authenticated_gateway_health(cfg) -> tuple[dict | None, str, bool]:
         return None, runtime_detail, True
     try:
         document = json.loads(body)
-        health = document.get("health") if isinstance(document, dict) else None
     except (json.JSONDecodeError, TypeError):
-        health = None
-    if not isinstance(health, dict):
+        document = None
+    if not isinstance(document, dict):
         return None, "authenticated status health is malformed", True
-    return health, "", True
+    return document, "", True
 
 
 def _opencode_load_heartbeat_status(cfg) -> tuple[str, str]:
@@ -13016,6 +13374,73 @@ def _check_openclaw_gateway_host(cfg, r: _DoctorResult) -> None:
     )
 
 
+def _check_openclaw_plugin_rows(cfg, r: _DoctorResult, *, live_health: dict | None = None) -> str:
+    """The OpenClaw plugin rows: hook mode, remediation and install admission.
+
+    Returns the configured hook mode.
+    """
+    from defenseclaw.openclaw_plugin_config import (
+        configured_openclaw_hook_mode,
+        openclaw_plugin_evidence,
+    )
+
+    hook_mode = configured_openclaw_hook_mode(cfg)
+    if hook_mode != "proxy":
+        # Proxy mode has the interception row below as its evidence.
+        live_mode, live_detail, _seen = openclaw_plugin_evidence(cfg, live_health)
+        if live_mode == "unverified":
+            _emit("warn", "OpenClaw hook mode", live_detail, r=r)
+        else:
+            _emit("pass", "OpenClaw hook mode", f"{live_mode}: {live_detail}", r=r)
+    from defenseclaw.openclaw_plugin_config import (
+        openclaw_install_policy_recorded_state,
+        openclaw_install_policy_remediation,
+        openclaw_install_policy_stale_remediation,
+        openclaw_install_policy_stale_version,
+        openclaw_install_policy_state,
+        openclaw_install_policy_wanted,
+        openclaw_operator_admin_off,
+    )
+
+    if openclaw_operator_admin_off():
+        _emit(
+            "skip",
+            "OpenClaw remediation",
+            "off (no operator.admin): blocks are enforced by DefenseClaw, OpenClaw is not told to disable them",
+            r=r,
+        )
+
+    policy_state = openclaw_install_policy_state(cfg)
+    stale, _certain = openclaw_install_policy_stale_version(cfg) if policy_state == "ours" else ("", False)
+    if stale:
+        # GAP-1198: registered under a newer OpenClaw than the one installed
+        # now; the gateway re-checks within 30 seconds, and this says so
+        # until it has.
+        _emit(
+            "warn",
+            "OpenClaw install admission",
+            stale,
+            remediation=openclaw_install_policy_stale_remediation(),
+            r=r,
+        )
+    elif policy_state == "ours":
+        _emit(
+            "pass", "OpenClaw install admission", "OpenClaw asks DefenseClaw before a skill or plugin install", r=r
+        )
+    elif openclaw_install_policy_wanted(cfg):
+        recorded = openclaw_install_policy_recorded_state(cfg)
+        _emit(
+            "warn",
+            "OpenClaw install admission",
+            "connectors.openclaw.install_policy is on, but OpenClaw does not ask DefenseClaw before installs"
+            + (" (another security.installPolicy is configured)" if policy_state == "operator" else "")
+            + (f"; {recorded}" if recorded.startswith("not registered:") else ""),
+            remediation=openclaw_install_policy_remediation(policy_state, recorded=recorded),
+            r=r,
+        )
+    return hook_mode
+
+
 def _check_proxy_interception(cfg, r: _DoctorResult, *, live_health: dict | None = None) -> None:
     """Fail closed when a proxy connector's :4000 listener is unused.
 
@@ -13026,14 +13451,18 @@ def _check_proxy_interception(cfg, r: _DoctorResult, *, live_health: dict | None
     """
     if not cfg.guardrail.enabled:
         return
-    if _guardrail_proxy_intentionally_closed(cfg):
-        return
     connectors = [
         c
         for c in _doctor_active_connectors(cfg)
         if c in _PROXY_DOCTOR_CONNECTORS and _connector_enabled(cfg, c)
     ]
     if not connectors:
+        return
+    # The OpenClaw plugin rows (hook mode, remediation, install admission)
+    # are not about the proxy port: native OpenClaw (Windows) closes it on
+    # purpose, and doctor skipped them there (GAP-1139).
+    hook_mode = _check_openclaw_plugin_rows(cfg, r, live_health=live_health) if "openclaw" in connectors else ""
+    if _guardrail_proxy_intentionally_closed(cfg):
         return
 
     label = "OpenClaw interception" if connectors == ["openclaw"] else "Proxy interception"
@@ -13042,6 +13471,11 @@ def _check_proxy_interception(cfg, r: _DoctorResult, *, live_health: dict | None
             configured_openclaw_plugin_config_issue,
             openclaw_plugin_config_unreadable,
         )
+
+        if hook_mode == "native" and connectors == ["openclaw"]:
+            # No guardrail proxy carries OpenClaw traffic in native mode, so
+            # there is no proxy hop to prove; the plugin hooks guard it.
+            return
 
         if issue := configured_openclaw_plugin_config_issue(cfg):
             _emit(
@@ -13118,7 +13552,7 @@ def _check_proxy_interception(cfg, r: _DoctorResult, *, live_health: dict | None
         detail = "plugin self-test rewrote an LLM URL onto the local guardrail proxy"
         last_traffic = info.get("last_agent_traffic_at")
         if isinstance(last_traffic, str) and last_traffic.strip():
-            detail += "; agent traffic has reached :4000"
+            detail += f"; agent traffic has reached :{cfg.guardrail.port}"
         _emit("pass", label, detail, r=r)
         return
     if info.get("verified") is True:
@@ -13219,18 +13653,274 @@ def _check_agent_identity_ledger(health: dict | None, r: _DoctorResult) -> None:
         )
 
 
+def _check_routing_aliases(cfg, r: _DoctorResult) -> None:
+    """A routed alias whose calls failed before their first byte and were served
+    by the original model instead: one WARN row per alias. Routing looks healthy
+    while a dead endpoint sends everything to the original model
+    (rel-1-0-10:GAP-1099, GAP-1101)."""
+    routing = getattr(cfg, "routing", None)
+    if routing is None or not bool(getattr(routing, "enabled", False)):
+        return
+    from defenseclaw.commands.cmd_routing import doctor_alias_rows
+
+    for status, detail in doctor_alias_rows(cfg):
+        _emit(
+            status,
+            "Routed alias",
+            detail,
+            remediation="fix or remove the alias: defenseclaw routing models list; routing models remove NAME",
+            r=r,
+        )
+
+
+def _check_routing_policy(r: _DoctorResult) -> None:
+    """routing.admin rules and budgets that do less than they look (defenseclaw routing rules list)."""
+    from defenseclaw.commands.cmd_routing import doctor_rows
+
+    for status, detail in doctor_rows():
+        remediation = "see defenseclaw routing rules list" if status == "warn" else ""
+        _emit(status, "Routing policy", detail, remediation=remediation, r=r)
+
+
+def routing_sensitive_row(cfg) -> tuple[str, str, str] | None:
+    """The routing.sensitive row (GAP-0003): what keeps sensitive prompts
+    local, and how to add the decision-model check. None when routing or
+    routing.sensitive is off."""
+    routing = getattr(cfg, "routing", None)
+    if routing is None or not bool(getattr(routing, "enabled", False)):
+        return None
+    sens = getattr(routing, "sensitive", None) or {}
+    if not isinstance(sens, dict) or not sens.get("aliases"):
+        return None
+    floor = []
+    if sens.get("severity_at_least"):
+        floor.append(f"guardrail severity {str(sens['severity_at_least']).upper()}+")
+    if sens.get("signals"):
+        floor.append(f"{len(sens['signals'])} signal(s)")
+    floor_text = " and ".join(floor) or "no regex floor"
+    check = str(sens.get("check") or "off").strip().lower()
+    if check == "off":
+        return (
+            "info",
+            f"{floor_text}; decision-model check off (regex and keywords miss personal data written in prose)",
+            "to also ask the decision model: defenseclaw config set routing.sensitive.check auto "
+            "(needs decision_model or a judge; adds about 0.4 s per routed request)",
+        )
+    dm = getattr(cfg, "decision_model", None)
+    has_dm = bool(getattr(dm, "enabled", False)) and bool(str(getattr(dm, "base_url", "") or "").strip())
+    s1 = getattr(routing, "systemone", None) or {}
+    if str(getattr(routing, "classifier", "") or "").strip().lower() == "systemone" and isinstance(s1, dict):
+        has_dm = has_dm or bool(str(s1.get("base_url") or "").strip())
+    judge = getattr(getattr(cfg, "guardrail", None), "judge", None)
+    has_judge = bool(getattr(judge, "enabled", False))
+    if check == "auto":
+        source = "the decision model" if has_dm else ("the guardrail judge" if has_judge else "")
+    else:
+        source = {
+            "decision_model": "the decision model" if has_dm else "",
+            "judge": "the guardrail judge" if has_judge else "",
+        }.get(check, "")
+    if not source:
+        return (
+            "warn",
+            f"{floor_text}; routing.sensitive.check is {check} but no model answers it: regex-only",
+            "set up the decision model (defenseclaw setup decision-model) or the guardrail judge, "
+            "or set routing.sensitive.check off",
+        )
+    unavailable = str(sens.get("on_unavailable") or "local").strip().lower()
+    return (
+        "pass",
+        f"{floor_text}; sensitive-data check by {source} (the newest turns go to it on every routed request), "
+        f"unavailable -> {unavailable}",
+        "",
+    )
+
+
+def _check_routing_sensitive(cfg, r: _DoctorResult) -> None:
+    row = routing_sensitive_row(cfg)
+    if row is not None:
+        status, detail, remediation = row
+        _emit(status, "Routing sensitive data", detail, remediation=remediation, r=r)
+
+
+def _check_routing_tokenomics(cfg, r: _DoctorResult) -> None:
+    """Routing or a budget is on while tokenomics is off (GAP-0932): the dashboard
+    panels and budgets stay empty. It stays off by default; say how to turn it on."""
+    from defenseclaw.routing_tokenomics import note_from_cfg
+
+    note = note_from_cfg(cfg)
+    if note:
+        _emit(
+            "warn" if note.budgets else "info",
+            "Routing tokenomics",
+            note.detail,
+            remediation=note.remedy,
+            r=r,
+        )
+
+
+def _check_routing_managed_key_env(cfg, r: _DoctorResult) -> None:
+    """Warn about routed models a managed host keys by api_key_env.
+
+    1.0.9 and 1.0.8 managed configs name routed keys by api_key_env; 1.0.10
+    keeps them working (the gateway service environment or its .env), and
+    asks for a protected credential instead (S1 lead item 1).
+    """
+    if str(getattr(cfg, "deployment_mode", "") or "").strip().lower() != "managed_enterprise":
+        return
+    enterprise = getattr(cfg, "enterprise", None)
+    if str(getattr(enterprise, "profile", "") or "").strip().lower() == "secure_client":
+        return
+    routing = getattr(cfg, "routing", None)
+    if routing is None or not bool(getattr(routing, "enabled", False)):
+        return
+    models = getattr(routing, "models", []) or []
+    legacy = [
+        str(m.get("name") or i)
+        for i, m in enumerate(models)
+        if isinstance(m, dict)
+        and str(m.get("api_key_env") or "").strip()
+        and not str(m.get("credential") or "").strip()
+    ]
+    if not legacy:
+        return
+    names = ", ".join(legacy[:8])
+    _emit(
+        "warn",
+        "Routing model keys",
+        f"{len(legacy)} routed model(s) read their key from the gateway service environment: {names}",
+        remediation=(
+            "store each key with defenseclaw-gateway enterprise secret set --name <name> --from-stdin "
+            "and name it in routing.models[].credential in the admin config"
+        ),
+        r=r,
+    )
+
+
+def _systemone_endpoint(routing, cfg) -> str:
+    """The endpoint routing.classifier systemone calls: its own base_url, or
+    the decision model when routing.systemone.use_decision_model is on (the
+    default)."""
+    own = getattr(routing, "systemone", None) or {}
+    own = own if isinstance(own, dict) else {}
+    if own.get("use_decision_model", True) is False:
+        return str(own.get("base_url") or "").strip()
+    return str(getattr(getattr(cfg, "decision_model", None), "base_url", "") or "").strip()
+
+
+def _systemone_categories(routing) -> dict:
+    """routing.categories (category -> alias), {} when unset or malformed."""
+    categories = getattr(routing, "categories", None)
+    return categories if isinstance(categories, dict) else {}
+
+
+def _endpoint_origin(url: str) -> str:
+    """scheme://host[:port] of url: no path, query or credentials in a row."""
+    from urllib.parse import urlsplit
+
+    parts = urlsplit(url)
+    host = parts.hostname or ""
+    port = f":{parts.port}" if parts.port else ""
+    return f"{parts.scheme}://{host}{port}" if parts.scheme and host else "the configured endpoint"
+
+
+def _check_systemone_reachable(routing, cfg, r: _DoctorResult) -> None:
+    """One real request to the System One endpoint (any HTTP answer means it
+    is up; the classifier has its own breaker, so a healthy gateway can still
+    be routing on the rules fallback: GAP-0591)."""
+    if not _systemone_categories(routing):
+        # System One picks one of routing.categories; without them the gateway
+        # never asks it, so every request falls back with reason
+        # configuration_failure whether or not the endpoint is up (GAP-0591).
+        _emit(
+            "fail",
+            "System One classifier",
+            "routing.categories is empty, so System One has nothing to choose from: every request takes "
+            "on_classifier_error (reason configuration_failure)",
+            remediation=(
+                "add categories with defenseclaw routing setup --classifier systemone --route coding=<alias> "
+                "(or set routing.categories), or use defenseclaw routing setup --classifier rules"
+            ),
+            r=r,
+        )
+        return
+    endpoint = _systemone_endpoint(routing, cfg)
+    if not endpoint:
+        _emit(
+            "warn",
+            "System One classifier",
+            "no endpoint: every request takes the classifier-failure path",
+            remediation=(
+                "set decision_model.base_url and decision_model.model, or set "
+                "routing.systemone.use_decision_model false with routing.systemone.base_url and model"
+            ),
+            r=r,
+        )
+        return
+    code, _detail = _http_probe(endpoint, timeout=2.0)
+    mode = getattr(routing, 'on_classifier_error', '') or 'original'
+    origin = _endpoint_origin(endpoint)
+    if code > 0:
+        _emit("pass", "System One classifier", f"{origin} answers (HTTP {code})", r=r)
+        return
+    _emit(
+        "fail",
+        "System One classifier",
+        f"{origin} is not reachable: routing uses on_classifier_error ({mode}) for every request",
+        remediation=(
+            "start the System One endpoint, or check its URL with defenseclaw setup decision-model --ping; "
+            "routing.on_classifier_error rules keeps keyword routing while it is down"
+        ),
+        r=r,
+    )
+
+
+def _check_inprocess_routing(routing, classifier: str, models: list, r: _DoctorResult, cfg=None) -> None:
+    """The rules and systemone classifiers run inside the gateway: there is no
+    container or router endpoint to probe (GAP-0567). A rules classifier with
+    no routing.decisions sends every request to default_alias (GAP-0565)."""
+    default = str(getattr(routing, "default_alias", "") or "")
+    label = "rules classifier, in process" if classifier == "rules" else f"{classifier} classifier"
+    detail = f"{label}; {len(models)} model(s)" + (f"; default {default}" if default else "")
+    decisions = getattr(routing, "decisions", []) or []
+    if classifier == "rules" and not decisions:
+        first = default or (str(models[0].get("name") or "") if models and isinstance(models[0], dict) else "")
+        first = first or "the default model"
+        _emit(
+            "warn",
+            "Semantic routing",
+            f"{detail}; no route rules (routing.decisions is empty), so every request goes to "
+            f"{first}",
+            remediation=(
+                "add rules: defenseclaw routing setup --route coding=ALIAS (and reasoning, summarize), "
+                "or write routing.signals and routing.decisions in config.yaml"
+            ),
+            r=r,
+        )
+        return
+    _emit("pass", "Semantic routing", detail, r=r)
+    if classifier == "systemone":
+        _check_systemone_reachable(routing, cfg, r)
+
+
 def _check_semantic_routing(cfg, r: _DoctorResult, *, live_health: dict | None = None) -> None:
     routing = getattr(cfg, "routing", None)
     if routing is None or not bool(getattr(routing, "enabled", False)):
         _emit("skip", "Semantic routing", "disabled", r=r)
         return
 
+    from defenseclaw.commands.cmd_routing import DEFAULT_CLASSIFIER, routing_classifier  # noqa: PLC0415
+
+    classifier = routing_classifier(routing)
     remote = getattr(routing, "remote", {}) or {}
     remote_endpoint = str(remote.get("endpoint") or "").strip() if isinstance(remote, dict) else ""
     port = int(getattr(routing, "port", 0) or 8080)
     endpoint = remote_endpoint or f"http://127.0.0.1:{port}"
-    mode = "remote" if remote_endpoint else "managed Docker"
     models = getattr(routing, "models", []) or []
+    if classifier != DEFAULT_CLASSIFIER:
+        _check_inprocess_routing(routing, classifier, models, r, cfg)
+        return
+    mode = "remote" if remote_endpoint else "managed Docker"
 
     live = live_health.get("routing") if isinstance(live_health, dict) else None
     if isinstance(live, dict):
@@ -13280,6 +13970,103 @@ def _check_semantic_routing(cfg, r: _DoctorResult, *, live_health: dict | None =
         )
 
 
+def _administrator_health(cfg, r: _DoctorResult, live_health: dict | None) -> dict | None:
+    """live_health as an administrator reads it: the AUTHENTICATED /health.
+
+    Only the verified gateway of this account is asked: a foreground gateway, a
+    port another process holds and an unverified listener keep the public body
+    (their own state rows say why)."""
+    if r.gateway_down in {"foreground", "foreign"}:
+        return live_health
+    if r.sidecar_unverified and r.gateway_down != "stopped":
+        return live_health
+    return _administrator_route_only_health(cfg, live_health)
+
+
+def _administrator_route_only_health(cfg, live_health: dict | None) -> dict | None:
+    """live_health with the routing subsystem of the AUTHENTICATED /health.
+
+    On a managed (standalone) host the unauthenticated /health gives an ordinary
+    account closed codes and a closed start error, so a doctor run by an
+    administrator would read "run doctor as an administrator" back to itself
+    (GAP-0989, GAP-1008). With the gateway token, which only an administrator can
+    read, the gateway answers the full rows (the rule, the model and the
+    credential to store) and the real routing state and start error. The token
+    is never printed. When it cannot be read, or the call fails, the public body
+    stays, so the answer is the one an ordinary account gets (its text points to
+    the administrator's own commands), never a better one.
+    """
+    from defenseclaw.commands.cmd_status import _enterprise_profile
+
+    routing = live_health.get("routing") if isinstance(live_health, dict) else None
+    if not isinstance(routing, dict):
+        return live_health
+    details = routing.get("details")
+    has_rows = isinstance(details, dict) and isinstance(details.get("route_only"), list)
+    if not has_rows and str(routing.get("state") or "").strip().lower() != "error":
+        return live_health
+    if _enterprise_profile(cfg) != "standalone":
+        return live_health
+    try:
+        token = cfg.gateway.resolved_token()
+        if not token:
+            return live_health
+        from defenseclaw.gateway import OrchestratorClient
+
+        full = OrchestratorClient(
+            host=_gateway_api_host(cfg), port=int(cfg.gateway.api_port), timeout=3, token=token
+        ).health()
+    except Exception:  # noqa: BLE001 - no token, no gateway, a refusal: keep the public body
+        return live_health
+    full_routing = full.get("routing") if isinstance(full, dict) else None
+    if not isinstance(full_routing, dict):
+        return live_health
+    merged = dict(live_health)
+    merged["routing"] = dict(routing)
+    for key in ("state", "last_error"):
+        if isinstance(full_routing.get(key), str):
+            merged["routing"][key] = full_routing[key]
+    rows = (full_routing.get("details") or {}).get("route_only")
+    if isinstance(rows, list):
+        merged["routing"]["details"] = {**(details if isinstance(details, dict) else {}), "route_only": rows}
+    return merged
+
+
+def _check_route_only(cfg, r: _DoctorResult, *, live_health: dict | None = None) -> None:
+    """Route-only rows per connector (S1 DESIGN 7.2, 7.4, 17.1): readiness the
+    gateway reports in /health (custody without a gateway key fails), the
+    agent config, gateway Bedrock signing, a held API port, a shared Mac.
+
+    Live readiness is read only from this account's verified gateway: a
+    foreground gateway, a port another process holds and an unverified
+    listener each get their own state row (REVIEW-code-doctor P2-2)."""
+    from defenseclaw import doctor_route_only as dro
+    from defenseclaw.commands.cmd_status import _enterprise_profile
+
+    gateway = ""
+    if r.gateway_down == "foreground":
+        gateway = dro.GATEWAY_FOREGROUND
+    elif r.gateway_down == "foreign":
+        gateway = dro.GATEWAY_FOREIGN
+    elif r.sidecar_unverified and r.gateway_down != "stopped":
+        gateway = dro.GATEWAY_UNVERIFIED
+    holder = r.gateway_holder if gateway == dro.GATEWAY_FOREIGN else ""
+    try:
+        rows = dro.route_only_rows(
+            cfg,
+            live_health,
+            profile=_enterprise_profile(cfg),
+            gateway=gateway,
+            holder="" if holder == ROOT_GATEWAY_REASON else holder,
+            holder_fix=_foreign_gateway_port_remediation(cfg, holder=holder) if gateway == dro.GATEWAY_FOREIGN else "",
+        )
+    except Exception as exc:  # a broken agent file must not stop doctor
+        _emit("warn", "Route-only", f"could not check route-only: {single_line(str(exc))[:200]}", r=r)
+        return
+    for row in rows:
+        _emit(row.tag, row.label, row.detail, r=r, remediation=row.fix)
+
+
 # Connectors that enforce in-process via an agent-native lifecycle surface
 # (hook bus or a native policy API) and talk directly to their
 # upstream provider. They do NOT bind the guardrail proxy listener on port
@@ -13298,6 +14085,14 @@ _HOOK_ENFORCED_CONNECTORS = frozenset(
         "kiro",
     }
 )
+
+
+def _openclaw_runs_native_hooks(cfg) -> bool:
+    """Whether the OpenClaw plugin runs in native hook mode (Windows, no proxy)."""
+    from defenseclaw.openclaw_plugin_config import configured_openclaw_hook_mode
+    from defenseclaw.platform_support import uses_guardrail_proxy
+
+    return not uses_guardrail_proxy("openclaw") or configured_openclaw_hook_mode(cfg) == "native"
 
 
 def _guardrail_proxy_intentionally_closed(cfg) -> str:
@@ -13324,9 +14119,18 @@ def _guardrail_proxy_intentionally_closed(cfg) -> str:
     connectors = _doctor_active_connectors(cfg)
     if not connectors:
         return ""
-    if any(c not in _HOOK_ENFORCED_CONNECTORS for c in connectors):
+    native_openclaw = "openclaw" in connectors and _openclaw_runs_native_hooks(cfg)
+    if any(c not in _HOOK_ENFORCED_CONNECTORS and not (c == "openclaw" and native_openclaw) for c in connectors):
         return ""
     modes = {c: _doctor_effective_guardrail_mode(gc, c) for c in sorted(connectors)}
+    if native_openclaw:
+        # Native Windows OpenClaw: the plugin hooks guard it and DefenseClaw
+        # hosts no guardrail proxy there.
+        parts = [
+            f"{c} (mode={mode} via native plugin hooks)" if c == "openclaw" else f"{c} (mode={mode})"
+            for c, mode in modes.items()
+        ]
+        return "plugin-enforced for " + ", ".join(parts) + " — no guardrail proxy in native hook mode"
     # Preserve the exact single-connector wording; aggregate (sorted, stable)
     # for a multi-connector all-hook-enforced fan-out.
     label = connectors[0] if len(connectors) == 1 else ", ".join(sorted(connectors))
@@ -13589,33 +14393,48 @@ def _llm_identity(llm) -> tuple[str, str, str, str]:
     )
 
 
-def _check_decision_model(cfg, r: _DoctorResult) -> None:
+def _check_decision_model(cfg, r: _DoctorResult, *, live_health: dict | None = None) -> None:
     """``Decision model`` row: one benign System One request when
     ``decision_model`` is on. Silent while it is off (the default). It names
     the tool-call cascade each active connector runs. An unreachable model
     warns, never fails: tool calls are then decided without it (the rules
-    verdict, and the LLM judge where it runs)."""
+    verdict, and the LLM judge where it runs). Failed calls in the running
+    gateway warn too, even when this one request answers (GAP-0604)."""
     dm = getattr(cfg, "decision_model", None)
     if dm is None or not dm.enabled:
         return
     from defenseclaw import decision_model as dmod
+    from defenseclaw.commands.cmd_status import decision_model_health_note
+
+    gateway_note = decision_model_health_note(live_health)
+    if gateway_note:
+        gateway_note = "; in the gateway it is " + gateway_note
 
     problem = dm.validation_error()
     if problem:
         _emit("fail", "Decision model", problem, r=r, remediation="defenseclaw setup decision-model")
         return
+    if dm.effective_on_confident_block() == "decide":
+        _emit(
+            "warn",
+            "Decision model",
+            "decision_model.on_confident_block: decide is retired in 1.0.10 and acts as escalate "
+            "(a confident block always goes to the LLM judge); remove the key",
+            r=r,
+            remediation="defenseclaw setup decision-model --on-confident-block escalate",
+        )
     if dmod.managed_host(cfg) and dm.credential:
         detail = f"{dm.model}: token from the managed credential {dm.credential} (the gateway checks it)"
         if dmod.cascade_lines(cfg):
             detail += "; " + "; ".join(dmod.cascade_lines(cfg))
-        _emit("pass", "Decision model", detail, r=r)
+        _emit("warn" if gateway_note else "pass", "Decision model", detail + gateway_note, r=r)
         return
     result = dmod.ping(dm, cfg.data_dir, send_token=not dmod.managed_host(cfg))
     if not result.ok:
         _emit(
             "warn",
             "Decision model",
-            f"{dm.model}: {result.detail}; tool calls are decided without it until it is reachable",
+            f"{dm.model}: {result.detail}; tool calls are decided without it until it is reachable{gateway_note}",
             r=r,
             remediation="defenseclaw setup decision-model --show --ping",
         )
@@ -13627,9 +14446,86 @@ def _check_decision_model(cfg, r: _DoctorResult) -> None:
     cascade_names = {dmod.cascade_for(cfg, c) for c in cfg.active_connectors()}
     if cascade_names == {dmod.CASCADE_RULES_ONLY}:
         # Reachable, but it answers no connector's tool calls.
-        _emit("warn", "Decision model", detail + "; " + dmod.judge_note(cfg), r=r)
+        _emit("warn", "Decision model", detail + "; " + dmod.judge_note(cfg) + gateway_note, r=r)
+        return
+    if gateway_note:
+        # This request answered, but the gateway's recent calls failed.
+        _emit(
+            "warn",
+            "Decision model",
+            detail + gateway_note,
+            r=r,
+            remediation="defenseclaw setup decision-model --show --ping",
+        )
         return
     _emit("pass", "Decision model", detail, r=r)
+
+
+
+def _check_guardrail_cascade(cfg, r: _DoctorResult) -> None:
+    """``Guardrail cascade`` row, only when guardrail.cascade is set at some
+    scope. FAIL when the gateway found it invalid (the guardrail then decides
+    with the last-known-good cascade or the pack defaults, which the row
+    names, and says when that is weaker); WARN on settings that let the
+    guardrail do less than its pack."""
+    from defenseclaw import cascade
+
+    if not cascade.configured(cfg):
+        return
+    payload, error = cascade.gateway_explain()
+    if error:
+        _emit("warn", "Guardrail cascade", f"could not resolve: {error}", r=r,
+              remediation="defenseclaw guardrail cascade explain")
+        return
+    view = (payload or {}).get("cascade") or {}
+    invalid = view.get("invalid")
+    if invalid:
+        fallback = (
+            "the last-known-good cascade" if invalid.get("fallback") == "last_known_good" else "the rule pack defaults"
+        )
+        detail = (
+            f"invalid: {invalid.get('error')}; a running gateway refuses the reload and keeps its current "
+            f"configuration; a gateway started now decides with {fallback}"
+        )
+        if invalid.get("weaker"):
+            detail += "; WEAKER than your configuration: " + "; ".join(invalid["weaker"])
+        _emit("fail", "Guardrail cascade", detail, r=r,
+              remediation="fix the named guardrail.cascade key, then: defenseclaw guardrail cascade explain")
+        return
+    notes = cascade.loosening_notes(view)
+    ignored = view.get("ignored") or []
+    if ignored:
+        # A locked key or an invalid connector/profile cascade: the
+        # administrator's top-level values apply, the narrower one does not.
+        shown = "; ".join(f"{i.get('path')}: {i.get('reason')}" for i in ignored[:5])
+        if len(ignored) > 5:
+            shown += f"; and {len(ignored) - 5} more"
+        notes = [f"{len(ignored)} narrower-scope setting(s) not applied: {shown}", *notes]
+    summary = (
+        f"unknown {(view.get('unknown') or {}).get('action')}, judge {(view.get('judge') or {}).get('runs')}, "
+        f"System One {(view.get('system_one') or {}).get('runs')}, Rego policy "
+        f"{'on' if (view.get('policy') or {}).get('active') else 'off'}, CRITICAL floor {view.get('critical_floor')}"
+    )
+    lanes = cascade.lane_summary(view)
+    if lanes:
+        summary += f", lanes {lanes}"
+    if notes:
+        _emit("warn", "Guardrail cascade", summary + "; " + "; ".join(notes), r=r,
+              remediation="defenseclaw guardrail cascade explain")
+        return
+    _emit("pass", "Guardrail cascade", summary, r=r)
+
+
+def _active_route_only_connectors(cfg) -> list[str]:
+    """Set-up connectors that route their model traffic through the gateway (route-only)."""
+
+    if not getattr(getattr(cfg, "routing", None), "enabled", False):
+        return []
+    from defenseclaw import routing_route_only
+
+    connectors, _upstreams = routing_route_only._route_only(cfg)
+    active = set(_doctor_active_connectors(cfg))
+    return [c for c in connectors if c in active]
 
 
 def _check_llm_reachable(cfg, r: _DoctorResult) -> None:
@@ -13653,13 +14549,20 @@ def _check_llm_reachable(cfg, r: _DoctorResult) -> None:
     judge = getattr(gc, "judge", None)
     if _guardrail_proxy_intentionally_closed(cfg) and not bool(getattr(judge, "enabled", False)):
         # As for the LLM API key: hook/policy connectors send no model traffic
-        # through DefenseClaw, and with the judge off nothing calls this LLM.
-        _emit(
-            "skip",
-            "LLM reachable",
-            "not used: the LLM judge is disabled and no connector routes through the proxy",
-            r=r,
-        )
+        # through the guardrail proxy, and with the judge off nothing calls this
+        # LLM. A route-only connector does send its model traffic through the
+        # gateway, so the row says so and points at the Route-only rows that
+        # check that path (GAP-0915).
+        routed = _active_route_only_connectors(cfg)
+        if routed:
+            detail = (
+                "not used: the LLM judge is disabled; "
+                f"{', '.join(routed)} {'reaches its model' if len(routed) == 1 else 'reach their models'} "
+                "through route-only routing (the Route-only rows check it)"
+            )
+        else:
+            detail = "not used: the LLM judge is disabled and no connector routes through the proxy"
+        _emit("skip", "LLM reachable", detail, r=r)
         return
     llm = cfg.resolve_llm("guardrail")
     prefix = ""
@@ -14916,8 +15819,20 @@ def _check_cisco_ai_defense(cfg, r: _DoctorResult) -> None:
         return
 
     dotenv_path = os.path.join(cfg.data_dir, ".env")
-    api_key = _resolve_api_key(key_env, dotenv_path) if key_env else ""
+    api_key = _resolve_api_key(key_env, dotenv_path) if key_env else cfg.cisco_ai_defense.resolved_api_key()
 
+    if not key_env and not api_key:
+        # GAP-0464: a configuration error, not an outage. The gateway builds no
+        # AI Defense client without a key, so the remote scan never runs.
+        _emit(
+            "fail",
+            "Cisco AI Defense",
+            f"guardrail.scanner_mode is {gc.scanner_mode} but no AI Defense API key is configured "
+            "(cisco_ai_defense.api_key_env), so the remote scan never runs; set the key, "
+            "or set guardrail.scanner_mode to local",
+            r=r,
+        )
+        return
     if not api_key:
         display = key_env if key_env.isupper() and len(key_env) < 50 else "(env var not configured properly)"
         _emit("fail", "Cisco AI Defense", f"{display} not set", r=r)
@@ -16141,6 +17056,7 @@ def doctor(
     begin_installed_version_run()
     if (click_ctx := click.get_current_context(silent=True)) is not None:
         click_ctx.call_on_close(end_installed_version_run)
+        click_ctx.call_on_close(_end_status_document_run)
     if dry_run and not do_fix:
         raise click.UsageError("--dry-run requires --fix")
     if assume_yes and not do_fix:
@@ -16202,6 +17118,15 @@ def doctor(
             )
         )
 
+    if not do_fix and click_ctx is not None:
+        # The repair preflight reuses this run's positive validate decision.
+        _begin_config_validation_run()
+        click_ctx.call_on_close(_end_config_validation_run)
+
+    # The audit database walk only reads; start it now and render its row at
+    # the usual position (rel-1-0-10:GAP-0938). Repairs run it inline.
+    audit_pool, audit_probe = _prefetch_audit_db_health(cfg) if not do_fix else (None, None)
+
     # Sandbox doctor is an independent, read-only subprocess. Start it while
     # the earlier sections run, then render its rows at the usual position.
     # Repairs can change the gateway, so only ordinary checks prefetch it.
@@ -16227,12 +17152,20 @@ def doctor(
             fix_ids=fix_ids,
         )
 
+    # The checks share one authenticated /status fetch (after the repairs).
+    if click_ctx is not None:
+        _begin_status_document_run()
+
     r.set_section("configuration")
-    _check_config(cfg, r)
-    _check_ignored_dotenv_keys(cfg, r)
-    _check_sudo_runtime_leftovers(cfg, r)
-    _check_vendor_policy_dirs(cfg, r)
-    _check_audit_db(cfg, r)
+    try:
+        _check_config(cfg, r)
+        _check_ignored_dotenv_keys(cfg, r)
+        _check_sudo_runtime_leftovers(cfg, r)
+        _check_vendor_policy_dirs(cfg, r)
+        _check_audit_db(cfg, r, prefetched=audit_probe)
+    finally:
+        if audit_pool is not None:
+            audit_pool.shutdown(wait=True)
     _check_inventory_storage(cfg, r)
     _check_device_identity(cfg, r)
     _check_private_file_exposure(cfg, r)
@@ -16315,6 +17248,8 @@ def doctor(
                 live_health=inventory_health,
             )
             _check_hook_contract_lock(cfg, _c, r)
+            if _c == "hermes":
+                _check_hermes_shipped_plugins(cfg, r)
             _check_hook_runtime_integrity(cfg, _c, r)
     # S7.5 — surface inactive-connector residue (backup files / hook
     # scripts left over from a previous connector). Without this check
@@ -16345,10 +17280,18 @@ def doctor(
         _check_guardrail_profile(cfg, r)
         _check_agent_identity_ledger(sidecar_health, r)
         _check_live_audit_store(sidecar_health, r)
+        _check_hook_capacity(cfg, sidecar_health, r)
     _check_policy_state(cfg, r, live_health=sidecar_health)
     _check_policy_evidence_files(cfg, r)
     _check_signature_packs(cfg, r)
-    _check_semantic_routing(cfg, r, live_health=sidecar_health)
+    routing_health = _administrator_health(cfg, r, sidecar_health)
+    _check_semantic_routing(cfg, r, live_health=routing_health)
+    _check_routing_aliases(cfg, r)
+    _check_routing_policy(r)
+    _check_routing_sensitive(cfg, r)
+    _check_routing_tokenomics(cfg, r)
+    _check_route_only(cfg, r, live_health=routing_health)
+    _check_routing_managed_key_env(cfg, r)
     _check_gateway_token_env_alignment(cfg, r)
     if not _check_windows_gateway_diagnostics(cfg, r):
         # Preserve the established Linux/macOS evidence collectors. Windows
@@ -16417,7 +17360,8 @@ def doctor(
     r.set_section("credentials")
     _check_llm_api_key(cfg, r)
     _check_llm_reachable(cfg, r)
-    _check_decision_model(cfg, r)
+    _check_decision_model(cfg, r, live_health=sidecar_health)
+    _check_guardrail_cascade(cfg, r)
     _check_private_upstream_refusals(cfg, r)
     if not _check_judge_running(sidecar_health, r):
         _check_judge_calls(cfg, r)
@@ -16606,7 +17550,7 @@ def _plan_existing_fixer(
         if fixer is _fix_gateway_token:
             if _CANONICAL_GATEWAY_TOKEN_ENV in detail:
                 state_key = "gateway-token-canonical-present"
-            elif _LEGACY_GATEWAY_TOKEN_ENV in detail:
+            elif _OPENCLAW_GATEWAY_TOKEN_ENV in detail:
                 state_key = "gateway-token-legacy-present"
         return RepairDecision(
             "applicable",
@@ -17152,10 +18096,13 @@ def _hook_binary_release_check(hook_path: str, cli_version: str) -> tuple[str, s
     backup can leave an older hook beside a newer gateway; every agent hook
     call runs it, so doctor names it instead of reporting healthy hooks.
     """
-    from defenseclaw.doctor_health import _safe_semver
+    from defenseclaw.doctor_health import _safe_semver, _safe_token
 
     reinstall = "rerun the DefenseClaw installer (install.ps1) for this release to replace it"
     expected = _safe_semver(cli_version)
+    installed = ""
+    # GAP-0252: say why no release came back, instead of only that it did not.
+    why = ""
     try:
         proc = subprocess.run(
             [hook_path, "--version-json"],
@@ -17163,13 +18110,36 @@ def _hook_binary_release_check(hook_path: str, cli_version: str) -> tuple[str, s
             text=True,
             timeout=10.0,
             check=False,
+            # The hook is a GUI-subsystem program: give it a closed stdin, as
+            # setup does, rather than whatever this console has inherited.
+            stdin=subprocess.DEVNULL,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
-        installed = _safe_semver(json.loads(proc.stdout or "{}").get("version")) if proc.returncode == 0 else ""
-    except (OSError, subprocess.SubprocessError, ValueError, AttributeError):
-        installed = ""
+        if proc.returncode != 0:
+            why = f"it exited {proc.returncode} for --version-json"
+        else:
+            try:
+                identity = json.loads(proc.stdout or "{}")
+            except ValueError:
+                identity = None
+            if not isinstance(identity, dict):
+                why = "it printed no JSON for --version-json"
+            else:
+                installed = _safe_semver(identity.get("version"))
+                if not installed:
+                    reported = _safe_token(identity.get("version"))
+                    why = (
+                        f"it reported version {reported!r}, which is not a release number "
+                        "(a build made without the release version)"
+                        if reported
+                        else "it reported no version"
+                    )
+    except subprocess.TimeoutExpired:
+        why = "it did not answer --version-json within 10 seconds"
+    except (OSError, subprocess.SubprocessError, ValueError, AttributeError) as exc:
+        why = f"it could not be started ({type(exc).__name__})"
     if not installed:
-        return "warn", f"{hook_path} did not report its release", reinstall
+        return "warn", f"{hook_path} did not report its release: {why}", reinstall
     if expected and installed != expected:
         return "warn", f"{hook_path} is {installed}; this CLI is {expected}", reinstall
     return "pass", f"{installed}, the same release as this CLI", ""
@@ -17499,7 +18469,10 @@ def _doctor_repair_specs() -> tuple[RepairSpec, ...]:
             "safe",
             _fix_acp_guard_pins,
             (),
-            ("re-pin the upgraded DefenseClaw ACP guard in the editor entries DefenseClaw wrote",),
+            (
+                "re-pin the upgraded DefenseClaw ACP guard, or an agent you updated once you confirm it, "
+                "in the editor entries DefenseClaw wrote",
+            ),
             False,
             False,
         ),
@@ -17870,7 +18843,7 @@ def _run_fixers(
     dotenv_safety_problem = ""
     external_gateway_env_names: list[str] = []
     data_dir = str(getattr(cfg, "data_dir", "") or "")
-    for env_name in (_CANONICAL_GATEWAY_TOKEN_ENV, _LEGACY_GATEWAY_TOKEN_ENV):
+    for env_name in (_CANONICAL_GATEWAY_TOKEN_ENV, _OPENCLAW_GATEWAY_TOKEN_ENV):
         value = _normalized_gateway_token(os.environ.get(env_name, ""))
         if value and not credential_provenance.was_injected_from_dotenv(
             data_dir,
@@ -18263,12 +19236,13 @@ def _guardrail_enable_command(cfg, connector: str) -> str:
     ``guardrail enable`` refuses a proxy connector (OpenClaw, ZeptoClaw) with
     no ``guardrail.model``: it would forward model traffic to an unset
     upstream. Their setup command asks for it (docs guardrail/disabling).
+    Native Windows OpenClaw has no proxy, so it needs no model.
     """
-    from defenseclaw.platform_support import is_proxy_connector
+    from defenseclaw.platform_support import uses_guardrail_proxy
 
     gc = getattr(cfg, "guardrail", None)
     llm = getattr(cfg, "llm", None)
-    if is_proxy_connector(connector) and not (getattr(gc, "model", "") or getattr(llm, "model", "")):
+    if uses_guardrail_proxy(connector) and not (getattr(gc, "model", "") or getattr(llm, "model", "")):
         return f"defenseclaw setup {connector}"
     return "defenseclaw guardrail enable"
 
@@ -18513,6 +19487,72 @@ def _prompt_block_capability(connector: str) -> str:
     return _PROMPT_UNKNOWN
 
 
+# Tool-result hook events whose block answer the agent honours (contract
+# block_events, compared without case and punctuation): Claude Code and Codex
+# PostToolUse, Amp tool.result (rel-1-0-10 GAP-0605).
+_TOOL_RESULT_BLOCK_EVENTS = frozenset({"posttooluse", "toolresult"})
+
+
+def tool_result_block_capability(connector: str) -> str:
+    """Whether *connector* has a block form for a tool result, from the hook contract manifest.
+
+    A proxy connector refuses the model call that would carry the output. A
+    hook connector has one when every contract lists a tool-result event in
+    ``block_events``. Every other connector can only alert on a tool-result
+    finding (a prompt injection in a file, page or command output): the
+    output reaches the model. Returns the _PROMPT_* values.
+    """
+    name = normalize_connector(connector)
+    if name in PROXY_CONNECTORS:
+        return _PROMPT_BLOCKS
+    event_sets = [contract.capabilities.get("block_events") for contract in HOOK_CONTRACTS.get(name, ())]
+    if not event_sets:
+        spec = (HOOK_CONTRACT_MANIFEST.get("connectors") or {}).get(name)
+        inventory = spec.get("native_hook_inventory") if isinstance(spec, dict) else None
+        if isinstance(inventory, dict):
+            event_sets = [inventory.get("block_events")]
+    answers = {
+        any(
+            isinstance(event, str) and "".join(ch for ch in event.lower() if ch.isalnum()) in _TOOL_RESULT_BLOCK_EVENTS
+            for event in events
+        )
+        for events in event_sets
+        if isinstance(events, list)
+    }
+    if answers == {True}:
+        return _PROMPT_BLOCKS
+    if answers == {False}:
+        return _PROMPT_NO_HOOK
+    return _PROMPT_UNKNOWN
+
+
+def tool_result_injection_limit(connector: str) -> str:
+    """The documented limit line for a connector with no tool-result block form, else ""."""
+    if tool_result_block_capability(connector) != _PROMPT_NO_HOOK:
+        return ""
+    label = _CONNECTOR_LABELS.get(normalize_connector(connector), connector)
+    return f"tool-result injection: alert only on {label}"
+
+
+def _emit_tool_result_row(connector: str, r: _DoctorResult) -> None:
+    """One row: what a prompt injection in this connector's tool results gets (GAP-0605)."""
+    capability = tool_result_block_capability(connector)
+    label = _CONNECTOR_LABELS.get(normalize_connector(connector), connector)
+    if capability == _PROMPT_BLOCKS:
+        _emit(
+            "pass", "Tool-result injection",
+            "alerts in default and permissive, blocks in strict; the agent is told not to follow it",
+            r=r,
+        )
+    elif capability == _PROMPT_NO_HOOK:
+        _emit(
+            "skip", "Tool-result injection",
+            f"{tool_result_injection_limit(connector)}: {label} has no hook that can block a tool result, "
+            "so the output reaches the model in every posture (see defenseclaw alerts)",
+            r=r,
+        )
+
+
 def _detection_only_prompt_clause(connector: str) -> str:
     """The prompt half of the detection-only rule-pack warning for *connector*.
 
@@ -18707,16 +19747,20 @@ def _check_connector_mode(cfg, gc, connector: str, r: _DoctorResult) -> None:
             try:
                 from defenseclaw.fail_mode import (
                     connector_fail_mode_report,
+                    failure_outcomes_summary,
                     managed_windows_verify_command,
                     rendered_fail_mode,
                     report_renders_fail_mode,
                 )
 
                 fail_mode = connector_fail_mode_report(cfg, connector)
+                # What each kind of hook failure does (#1441).
+                outcomes = failure_outcomes_summary(fail_mode.get("on_failure"))
                 rendered = rendered_fail_mode(fail_mode)
                 renders = report_renders_fail_mode(fail_mode)
             except Exception:  # noqa: BLE001 - doctor must still report partial state.
                 fail_mode = {"effective": "unknown", "provenance": "unavailable"}
+                outcomes = ""
                 rendered = None
                 renders = False
             if mode in {"observe", "action"}:
@@ -18725,6 +19769,8 @@ def _check_connector_mode(cfg, gc, connector: str, r: _DoctorResult) -> None:
                     f"{mode}; fail-mode={fail_mode['effective']}{fail_mode_note}; "
                     f"provenance={fail_mode['provenance']}"
                 )
+                if outcomes:
+                    detail += f"; on failure: {outcomes}"
                 desired = fail_mode.get("desired")
                 # Check the installed render against the desired policy;
                 # neither doctor's nor the agent's environment changes it.
@@ -18980,6 +20026,8 @@ def _check_connector_inventory(
                     r=r,
                 )
 
+    _emit_tool_result_row(connector, r)
+
     # Detection strategy + judge gating for this connector (read-only). This
     # is root #4 in the doctor fix-plan made visible: the judge can be
     # configured globally yet silently NOT run for a given connector, so
@@ -19000,6 +20048,10 @@ def _check_connector_inventory(
         judge_details = guardrail_health.get("details") if isinstance(guardrail_health, dict) else None
         judge_failing = isinstance(judge_details, dict) and judge_details.get("judge_state") == "failing"
         detail = f"strategy={strategy}"
+        # An enabled judge with an empty hook gate judges no hook connector:
+        # setup, the TUI and ``guardrail judge add`` write the gate, a
+        # hand-written or pushed config may not (rel-1-0-10:GAP-0247).
+        gate_empty = False
         if not judge_enabled:
             detail += "; judge disabled (regex and Cisco AI Defense lanes only)"
         elif connector not in _HOOK_ENFORCED_CONNECTORS:
@@ -19011,11 +20063,17 @@ def _check_connector_inventory(
             if gated_on:
                 detail += "; judge active (hook lane)"
             else:
+                gate_empty = not any(str(entry).strip() for entry in hook_conns)
                 detail += (
                     "; judge enabled but not turned on for this connector's hook "
                     "lane (regex and Cisco AI Defense lanes only); opt in: "
                     f"defenseclaw guardrail judge add {connector}"
                 )
+                if gate_empty:
+                    detail += (
+                        "; no hook connector is turned on, so the judge reviews proxy traffic only "
+                        "(all: defenseclaw guardrail judge add all)"
+                    )
         if judge_enabled and judge_failing:
             detail += "; judge failing: all recent calls failed, so only the rules decide"
         by_connector = judge_details.get("judge_fallbacks_by_connector") if isinstance(judge_details, dict) else None
@@ -19028,7 +20086,7 @@ def _check_connector_inventory(
             hint = judge_max_parallel_hint(cfg)
             if hint:
                 detail += f" ({hint})"
-        _emit("warn" if judge_enabled and judge_failing else "pass", "Detection", detail, r=r)
+        _emit("warn" if judge_enabled and (judge_failing or gate_empty) else "pass", "Detection", detail, r=r)
 
 
 def _check_hook_contract_lock(
@@ -19043,7 +20101,14 @@ def _check_hook_contract_lock(
     pathext: str | None = None,
 ) -> None:
     if connector in {"openclaw", "zeptoclaw"}:
-        _emit("skip", "Hook contract", f"{connector} uses proxy/chat surfaces", r=r)
+        detail = f"{connector} uses proxy/chat surfaces"
+        if connector == "openclaw":
+            from defenseclaw.openclaw_plugin_config import configured_openclaw_hook_mode
+
+            mode = configured_openclaw_hook_mode(cfg)
+            if mode != "proxy":
+                detail = f"openclaw uses its plugin hooks in {mode} mode, which need no hook contract lock"
+        _emit("skip", "Hook contract", detail, r=r)
         return
     if connector == "kiro":
         _emit(
@@ -19416,6 +20481,27 @@ def _check_hook_runtime_integrity(cfg, connector: str, r: _DoctorResult) -> None
         )
 
 
+def _check_hermes_shipped_plugins(cfg, r: _DoctorResult) -> None:
+    """Say whether the gateway recognizes the shipped plugins of the installed Hermes (rel-1-0-10:GAP-0765).
+
+    DefenseClaw ships the shipped-plugin digests of every Hermes release a
+    hook contract covers. A Hermes newer than all of them makes every shipped
+    plugin an unknown plugin that the gateway scans; this row says so.
+    """
+    from defenseclaw.hermes_vendor_plugins import COVERED, shipped_plugin_coverage
+
+    if _gateway_store_unknown(cfg):
+        return
+    version, _proven = _agent_version_now(_gateway_store_dir(cfg), "hermes")
+    coverage = shipped_plugin_coverage(version)
+    if not coverage.state:
+        _emit("skip", "Hermes shipped plugins", coverage.detail, r=r)
+    elif coverage.state == COVERED:
+        _emit("pass", "Hermes shipped plugins", coverage.detail, r=r)
+    else:
+        _emit("warn", "Hermes shipped plugins", coverage.detail, r=r, remediation=coverage.step)
+
+
 def _agent_version_now(data_dir: str, connector: str) -> tuple[str, bool]:
     """The agent version for a row, and whether the agent itself just reported it.
 
@@ -19576,6 +20662,7 @@ def _check_acp_bindings(cfg, r: _DoctorResult) -> None:
     if acp is None:
         return
     try:
+        from defenseclaw.acp_catalog import own_tools_notice
         from defenseclaw.commands import cmd_acp
 
         data_dir = str(Path(str(getattr(cfg, "data_dir", "") or "")).expanduser().resolve())
@@ -19606,13 +20693,19 @@ def _check_acp_bindings(cfg, r: _DoctorResult) -> None:
         except Exception as exc:
             problems, profile, mode = [f"could not be checked: {exc}"], "?", "?"
         if not problems:
-            _emit("pass", label, f"healthy; profile {profile} ({mode})", r=r)
+            notice = own_tools_notice(agent)
+            _emit("pass", label, f"healthy; profile {profile} ({mode})" + (f"; {notice}" if notice else ""), r=r)
             continue
         if all("acp refresh" in problem for problem in problems):
-            fix = "re-pin the upgraded guard: defenseclaw doctor --fix (or defenseclaw acp refresh)"
+            # The upgraded guard, or an agent the user updated (acp refresh
+            # --agent re-pins it after its custody check, rel-1-0-10:GAP-0250).
+            fix = (
+                "re-pin it: defenseclaw doctor --fix (or defenseclaw acp refresh"
+                + (f" --agent {agent}" if any("--agent" in problem for problem in problems) else "")
+                + ")"
+            )
         else:
-            # Setup re-pins the agent and the guard; refresh never re-pins
-            # a changed agent binary.
+            # Setup re-pins the agent and the guard.
             fix = cmd_acp.setup_repair_command(cfg, client, agent, data_dir)
             if os.name == "nt":
                 fix = run_instruction(fix)
@@ -20217,6 +21310,9 @@ def _fix_gateway_token_after_cleanup(
     rotate_required: bool,
     active_connector: str,
 ) -> tuple[str, str]:
+    # The OpenClaw WebSocket credential is kept in sync first. It is never the
+    # DefenseClaw master (R-TOK), so the master is still ensured below.
+    synced = ""
     if active_connector == "openclaw" and not rotate_required:
         from defenseclaw.commands.cmd_setup import (
             _detect_openclaw_gateway_token,
@@ -20224,37 +21320,34 @@ def _fix_gateway_token_after_cleanup(
         )
 
         token = _normalized_gateway_token(_detect_openclaw_gateway_token(cfg.claw.config_file, cfg=cfg))
-        if token:
-            env_var = "OPENCLAW_GATEWAY_TOKEN"
-            current = _gateway_dotenv_tokens(cfg.data_dir).get(env_var, "")
-            if _gateway_tokens_equal(current, token):
-                return ("skip", "token already persisted and in sync")
+        oc_var = _OPENCLAW_GATEWAY_TOKEN_ENV
+        if token and not _gateway_tokens_equal(_gateway_dotenv_tokens(cfg.data_dir).get(oc_var, ""), token):
             if plan_only:
-                return ("plan", f"persist {env_var} from the trusted OpenClaw configuration")
-            if not assume_yes and not click.confirm(
-                f"    Update {env_var} in ~/.defenseclaw/.env from OpenClaw?",
+                synced = f"persist {oc_var} (the OpenClaw credential) from the trusted OpenClaw configuration"
+            elif assume_yes or click.confirm(
+                f"    Update {oc_var} (the OpenClaw credential) in ~/.defenseclaw/.env from OpenClaw?",
                 default=True,
             ):
-                return ("skip", "declined by user")
-            from defenseclaw.logger import keep_running_gateway_token
+                _save_secret_to_dotenv(oc_var, token, cfg.data_dir)
+                synced = f"{oc_var} updated from openclaw.json"
 
-            keep_running_gateway_token(None, cfg.data_dir, cfg.gateway.resolved_token(), token)
-            _save_secret_to_dotenv(env_var, token, cfg.data_dir)
-            return ("pass", f"{env_var} updated from openclaw.json")
-        # OpenClaw can be local and unauthenticated while the DefenseClaw
-        # sidecar still requires its own canonical token. Fall through to
-        # canonical generation instead of leaving that sidecar broken.
+    def _with_sync(status: str, detail: str) -> tuple[str, str]:
+        if not synced:
+            return status, detail
+        if status == "skip":
+            return ("plan" if plan_only else "pass"), synced
+        return status, f"{synced}; {detail}"
 
     env_var = _CANONICAL_GATEWAY_TOKEN_ENV
     current, _current_env, _current_source = _daemon_effective_gateway_token(cfg)
     if current and not rotate_required:
-        return ("skip", f"{env_var} already set")
+        return _with_sync("skip", f"{env_var} already set")
     if _unreadable_gateway_dotenv(cfg):
-        return ("fail", _missing_gateway_token_detail(cfg))
+        return _with_sync("fail", _missing_gateway_token_detail(cfg))
 
     configured_env = (getattr(cfg.gateway, "token_env", "") or "").strip()
     if configured_env and not any(
-        _env_names_equal(configured_env, allowed) for allowed in (_LEGACY_GATEWAY_TOKEN_ENV, env_var)
+        _env_names_equal(configured_env, allowed) for allowed in (_OPENCLAW_GATEWAY_TOKEN_ENV, env_var)
     ):
         if rotate_required:
             return (
@@ -20262,7 +21355,7 @@ def _fix_gateway_token_after_cleanup(
                 f"token_env={configured_env!r} is externally managed and may have "
                 "been exposed; rotate that provider manually before restarting",
             )
-        return ("skip", f"token_env={configured_env!r} is externally managed; not generating a replacement")
+        return _with_sync("skip", f"token_env={configured_env!r} is externally managed; not generating a replacement")
 
     action = "Rotate" if rotate_required else "Generate and store"
     if plan_only:
@@ -20270,13 +21363,13 @@ def _fix_gateway_token_after_cleanup(
         provider_effect = ""
         if rotate_required and _env_names_equal(
             configured_env,
-            _LEGACY_GATEWAY_TOKEN_ENV,
+            _OPENCLAW_GATEWAY_TOKEN_ENV,
         ):
             provider_effect = (
-                f"; repoint gateway.token_env from {_LEGACY_GATEWAY_TOKEN_ENV!r} "
+                f"; repoint gateway.token_env from {_OPENCLAW_GATEWAY_TOKEN_ENV!r} "
                 f"to {_CANONICAL_GATEWAY_TOKEN_ENV!r} in config.yaml"
             )
-        return (
+        return _with_sync(
             "plan",
             f"{verb} {env_var} in {os.path.join(cfg.data_dir, '.env')} "
             f"({'restart and authenticate replacement gateway' if rotate_required else 'value remains redacted'})"
@@ -20286,7 +21379,7 @@ def _fix_gateway_token_after_cleanup(
         f"    {action} {env_var} in {cfg.data_dir}/.env?",
         default=True,
     ):
-        return ("skip", "declined by user")
+        return _with_sync("skip", "declined by user")
 
     import secrets
 
@@ -20299,8 +21392,8 @@ def _fix_gateway_token_after_cleanup(
     try:
         _save_secret_to_dotenv(env_var, token, cfg.data_dir)
     except OSError as exc:
-        return ("fail", f"could not persist gateway token: {exc}")
-    return ("pass", f"generated {env_var} in {os.path.join(cfg.data_dir, '.env')} (value redacted)")
+        return _with_sync("fail", f"could not persist gateway token: {exc}")
+    return _with_sync("pass", f"generated {env_var} in {os.path.join(cfg.data_dir, '.env')} (value redacted)")
 
 
 def _rotate_exposed_gateway_token(cfg, token: str) -> tuple[str, str]:
@@ -20312,7 +21405,7 @@ def _rotate_exposed_gateway_token(cfg, token: str) -> tuple[str, str]:
     configured_env = str(getattr(gateway, "token_env", "") or "").strip()
     repointed = bool(configured_env) and _env_names_equal(
         configured_env,
-        _LEGACY_GATEWAY_TOKEN_ENV,
+        _OPENCLAW_GATEWAY_TOKEN_ENV,
     )
 
     # The transaction starts B from an authoritative reload of config.yaml.
@@ -20423,7 +21516,7 @@ def _fix_gateway_token_env(
         plan_only
         and canonical_projected
         and bool(getattr(cfg, "_doctor_gateway_token_rotation_required", False))
-        and _env_names_equal(configured_env, _LEGACY_GATEWAY_TOKEN_ENV)
+        and _env_names_equal(configured_env, _OPENCLAW_GATEWAY_TOKEN_ENV)
     ):
         return (
             "skip",
@@ -20431,15 +21524,21 @@ def _fix_gateway_token_env(
             f"performs the gateway.token_env repoint to {canonical}",
         )
 
-    # A populated configured provider is working and retains precedence. In
-    # particular, do not rewrite an active OpenClaw token merely because the
-    # canonical fallback is also present.
-    if not exposure_rotation and configured_env and _normalized_gateway_token(os.environ.get(configured_env, "")):
+    # OPENCLAW_GATEWAY_TOKEN is the OpenClaw credential, never the master
+    # (R-TOK): it is repointed even when populated. Any other populated
+    # provider is working and retains precedence.
+    legacy = _env_names_equal(configured_env, _OPENCLAW_GATEWAY_TOKEN_ENV)
+    if (
+        not exposure_rotation
+        and configured_env
+        and not legacy
+        and _normalized_gateway_token(os.environ.get(configured_env, ""))
+    ):
         return ("skip", f"configured token provider {configured_env} is populated")
 
-    # Don't touch a custom operator override. Only auto-repoint the
+    # Do not touch a custom operator override. Only auto-repoint the
     # legacy OPENCLAW_ default.
-    if configured_env and not _env_names_equal(configured_env, "OPENCLAW_GATEWAY_TOKEN"):
+    if configured_env and not legacy:
         return (
             "skip",
             f"token_env={configured_env!r} is a custom override; not auto-rewriting",
@@ -21849,9 +22948,12 @@ def _fix_acp_guard_pins(
     """Re-pin the upgraded DefenseClaw ACP guard, as ``defenseclaw acp refresh`` does.
 
     Companion to :func:`_check_acp_bindings`. Only the editor entries
-    DefenseClaw wrote are touched, and only their guard digest: an agent
-    executable that changed since setup is named with its setup command,
-    never re-pinned. Managed enrollments keep their locks in a per-user
+    DefenseClaw wrote are touched, and only their pins. An agent that changed
+    since setup is re-pinned only when you confirm it at the prompt and it
+    passes the custody check of ``acp refresh --agent`` (rel-1-0-10:GAP-0250);
+    with --yes, or when it fails that check, it is named with its command and
+    left for you to review, so an unattended repair never accepts agent bytes
+    nobody looked at. Managed enrollments keep their locks in a per-user
     runtime directory that doctor does not know, so they are left alone.
     """
     if getattr(cfg, "acp", None) is None:
@@ -21868,40 +22970,85 @@ def _fix_acp_guard_pins(
         if not pairs:
             return ("skip", "no ACP binding is configured")
         pending = cmd_acp.refresh_guard_pins(data_dir, apply=False)
-        agent_drift = [
-            f"{client}/{agent}"
+        drifted = {
+            (client, agent)
             for client, agent in pairs
-            if "agent executable digest has drifted" in cmd_acp._verify_binding(data_dir, client, agent)
-        ]
+            if "agent executable digest has drifted" in " ".join(cmd_acp._verify_binding(data_dir, client, agent))
+        }
+        # An agent the user updated is re-pinned at its pinned path after
+        # the custody check (rel-1-0-10:GAP-0250); one that fails it keeps
+        # its setup command.
+        agent_pending, agent_refused = (
+            cmd_acp.refresh_agent_pins(data_dir, pairs=drifted, apply=False) if drifted else ([], [])
+        )
     except Exception as exc:  # noqa: BLE001 - unreadable editor settings must not abort the repair run.
         return ("skip", f"could not read the editor ACP settings: {exc}")
+    if agent_pending and assume_yes:
+        # An unattended repair (--yes, the TUI auto-repair) does not accept
+        # changed agent bytes: it names the refresh instead.
+        agent_refused = agent_refused + [
+            (pair, f"the agent changed since setup ({old[:12]} to {new[:12]}); "
+             f"review it and run: defenseclaw acp refresh --agent {pair.split('/', 1)[1]}")
+            for pair, _path, old, new in agent_pending
+        ]
+        agent_pending = []
     agent_note = ""
-    if agent_drift:
-        commands = ", ".join(
-            f"`{cmd_acp.setup_repair_command(cfg, *pair.split('/'), data_dir)}`" for pair in agent_drift
+    if agent_refused:
+        agent_note = "; ".join(
+            f"{pair}: the agent changed since setup and cannot be re-pinned ({reason}); review it and "
+            + run_instruction(f"`{cmd_acp.setup_repair_command(cfg, *pair.split('/'), data_dir)}`")
+            for pair, reason in agent_refused
         )
-        agent_note = (
-            f"{', '.join(agent_drift)}: the agent executable changed since setup (for example, it updated); "
-            f"doctor does not re-pin it, so review it and {run_instruction(commands)}"
-        )
-    if not pending:
+    agent_pairs = [pair for pair, _path, _old, _new in agent_pending]
+    work = []
+    if pending:
+        work.append(f"the DefenseClaw ACP guard for {', '.join(pending)}")
+    if agent_pairs:
+        changes = ", ".join(f"{pair} ({old[:12]} to {new[:12]})" for pair, _path, old, new in agent_pending)
+        work.append(f"the updated agent for {changes}")
+    if not work:
         current = "the ACP guard pins are current"
         return ("skip", f"{current}; {agent_note}" if agent_note else current)
     suffix = f"; {agent_note}" if agent_note else ""
     if plan_only:
         return (
             "plan",
-            f"re-pin the DefenseClaw ACP guard for {', '.join(pending)} (as 'defenseclaw acp refresh'){suffix}",
+            f"re-pin {' and '.join(work)} (as 'defenseclaw acp refresh' [--agent]){suffix}",
         )
-    if not assume_yes and not click.confirm(
-        f"    Re-pin the DefenseClaw ACP guard for {', '.join(pending)}?",
-        default=True,
-    ):
+    if not assume_yes and not click.confirm(f"    Re-pin {' and '.join(work)}?", default=True):
         return ("skip", "declined by user")
     try:
-        done = cmd_acp.refresh_guard_pins(data_dir)
+        done = cmd_acp.refresh_guard_pins(data_dir) if pending else []
+        agent_done = (
+            cmd_acp.refresh_agent_pins(data_dir, pairs={tuple(pair.split("/", 1)) for pair in agent_pairs})[0]
+            if agent_pairs
+            else []
+        )
     except (OSError, click.ClickException) as exc:
-        return ("fail", f"could not re-pin the ACP guard: {exc}")
-    if not done:
+        return ("fail", f"could not re-pin the ACP pins: {exc}")
+    _log_acp_agent_repins(cfg, agent_done)
+    parts = []
+    if done:
+        parts.append(f"the DefenseClaw ACP guard for {', '.join(done)}")
+    if agent_done:
+        parts.append(f"the updated agent for {', '.join(pair for pair, _p, _o, _n in agent_done)}")
+    if not parts:
         return ("skip", "the ACP guard pins are current")
-    return ("pass", f"re-pinned the DefenseClaw ACP guard for {', '.join(done)}{suffix}")
+    return ("pass", f"re-pinned {' and '.join(parts)}{suffix}")
+
+
+def _log_acp_agent_repins(cfg, repinned) -> None:
+    """Record each agent doctor re-pinned, as 'acp refresh --agent' does (rel-1-0-10:GAP-0250)."""
+    if not repinned:
+        return
+    from defenseclaw.logger import CanonicalObservabilityError, Logger
+
+    try:
+        logger = Logger(_VerifiedGatewayRecorder(cfg))
+        for pair, path_value, previous, digest in repinned:
+            logger.log_config_change(
+                "acp-agent-repin",
+                f"scope={pair} agent={path_value} previous_sha256={previous} sha256={digest} source=doctor",
+            )
+    except (CanonicalObservabilityError, OSError) as exc:
+        ux.echo(f"    ⚠ Re-pinned, but the audit event was not recorded ({exc}).", err=True)

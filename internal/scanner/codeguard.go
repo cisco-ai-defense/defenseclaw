@@ -19,6 +19,7 @@ package scanner
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -26,6 +27,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -117,9 +119,11 @@ func (s *CodeGuardScanner) ScanContentWithProvenance(filename, content string) C
 	ext := filepath.Ext(filename)
 	var findings []Finding
 	rules := s.allRules()
+	receivers := newJSRegExpReceivers(ext)
 
 	lines := strings.Split(content, "\n")
 	for lineNum, line := range lines {
+		receivers.observe(line)
 		for _, r := range rules {
 			if len(r.extensions) > 0 && !extMatch(ext, r.extensions) {
 				continue
@@ -144,7 +148,7 @@ func (s *CodeGuardScanner) ScanContentWithProvenance(filename, content string) C
 		}
 	}
 
-	return CodeGuardContentScan{findings: findings, complete: true}
+	return CodeGuardContentScan{findings: receivers.drop(findings), complete: true}
 }
 
 func (s *CodeGuardScanner) Scan(ctx context.Context, target string) (*ScanResult, error) {
@@ -289,7 +293,7 @@ type rule struct {
 	id          string
 	severity    Severity
 	title       string
-	pattern     *regexp.Regexp
+	pattern     *lazyregexp.Regexp
 	remediation string
 	extensions  []string
 	provenance  codeGuardFindingProvenance
@@ -332,28 +336,29 @@ var builtinRules = codeOwnedBuiltinRules([]rule{
 		id:          "CG-CRED-001",
 		severity:    SeverityHigh,
 		title:       "Hardcoded API key or secret",
-		pattern:     regexp.MustCompile(`(?i)(api[_-]?key|secret[_-]?key|access[_-]?token|private[_-]?key)\s*[:=]\s*["'][^\s"']{16,}["']`),
+		pattern:     hardcodedCredentialAssignment,
 		remediation: "Move credentials to environment variables or a secrets manager",
+		view:        hardcodedCredentialView,
 	},
 	{
 		id:          "CG-CRED-002",
 		severity:    SeverityHigh,
 		title:       "AWS access key ID",
-		pattern:     regexp.MustCompile(`AKIA[0-9A-Z]{16}`),
+		pattern:     lazyregexp.New(`AKIA[0-9A-Z]{16}`),
 		remediation: "Rotate the key and store in AWS Secrets Manager or environment variables",
 	},
 	{
 		id:          "CG-CRED-003",
 		severity:    SeverityCritical,
 		title:       "Private key embedded in source",
-		pattern:     regexp.MustCompile(`-----BEGIN (RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----`),
+		pattern:     lazyregexp.New(`-----BEGIN (RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----`),
 		remediation: "Remove the private key from source code; use a certificate store or secrets manager",
 	},
 	{
 		id:          "CG-EXEC-001",
 		severity:    SeverityHigh,
 		title:       "Unsafe command execution",
-		pattern:     regexp.MustCompile(`(?i)(os\.system|subprocess\.call|exec\(|child_process\.exec|eval\(|system\()`),
+		pattern:     lazyregexp.New(`(?i)(os\.system|subprocess\.call|exec\(|child_process\.exec|eval\(|system\()`),
 		remediation: "Use parameterized execution or an allowlist of commands",
 		extensions:  []string{".py", ".js", ".ts", ".rb", ".php"},
 	},
@@ -361,7 +366,7 @@ var builtinRules = codeOwnedBuiltinRules([]rule{
 		id:          "CG-EXEC-002",
 		severity:    SeverityMedium,
 		title:       "Shell=True in subprocess",
-		pattern:     regexp.MustCompile(`subprocess\.\w+\(.*shell\s*=\s*True`),
+		pattern:     lazyregexp.New(`subprocess\.\w+\(.*shell\s*=\s*True`),
 		remediation: "Avoid shell=True; pass arguments as a list",
 		extensions:  []string{".py"},
 	},
@@ -369,7 +374,7 @@ var builtinRules = codeOwnedBuiltinRules([]rule{
 		id:          "CG-NET-001",
 		severity:    SeverityMedium,
 		title:       "Outbound HTTP request to variable URL",
-		pattern:     regexp.MustCompile(`(?i)(requests\.(get|post|put|delete)|urllib\.request\.urlopen|fetch\(|http\.Get)\s*\(`),
+		pattern:     lazyregexp.New(`(?i)(requests\.(get|post|put|delete)|urllib\.request\.urlopen|fetch\(|http\.Get)\s*\(`),
 		remediation: "Validate and allowlist outbound URLs",
 		extensions:  []string{".py", ".js", ".ts", ".go"},
 	},
@@ -377,7 +382,7 @@ var builtinRules = codeOwnedBuiltinRules([]rule{
 		id:          "CG-DESER-001",
 		severity:    SeverityHigh,
 		title:       "Unsafe deserialization (pickle/yaml.load)",
-		pattern:     regexp.MustCompile(`(?i)(pickle\.loads?|yaml\.load\(|yaml\.unsafe_load)`),
+		pattern:     lazyregexp.New(`(?i)(pickle\.loads?|yaml\.load\(|yaml\.unsafe_load)`),
 		remediation: "Use yaml.safe_load or json for deserialization; never unpickle untrusted data",
 		extensions:  []string{".py"},
 	},
@@ -385,7 +390,7 @@ var builtinRules = codeOwnedBuiltinRules([]rule{
 		id:          "CG-SQL-001",
 		severity:    SeverityHigh,
 		title:       "Potential SQL injection (string formatting in query)",
-		pattern:     regexp.MustCompile(`(?i)(execute|cursor\.execute|query)\s*\(\s*(f["']|["'].*%s|["'].*\+)`),
+		pattern:     lazyregexp.New(`(?i)(execute|cursor\.execute|query)\s*\(\s*(f["']|["'].*%s|["'].*\+)`),
 		remediation: "Use parameterized queries with bind variables",
 		extensions:  []string{".py", ".js", ".ts", ".rb", ".php", ".java"},
 	},
@@ -393,7 +398,7 @@ var builtinRules = codeOwnedBuiltinRules([]rule{
 		id:          "CG-CRYPTO-001",
 		severity:    SeverityMedium,
 		title:       "Weak cryptographic algorithm (MD5/SHA1)",
-		pattern:     regexp.MustCompile(`(?i)(hashlib\.md5|hashlib\.sha1|MD5\.Create|SHA1\.Create|crypto\.createHash\(['"]md5|crypto\.createHash\(['"]sha1)`),
+		pattern:     lazyregexp.New(`(?i)(hashlib\.md5|hashlib\.sha1|MD5\.Create|SHA1\.Create|crypto\.createHash\(['"]md5|crypto\.createHash\(['"]sha1)`),
 		remediation: "Use SHA-256 or stronger; see codeguard-0-additional-cryptography",
 		extensions:  []string{".py", ".js", ".ts", ".java", ".go", ".rb"},
 	},
@@ -401,7 +406,7 @@ var builtinRules = codeOwnedBuiltinRules([]rule{
 		id:          "CG-PATH-001",
 		severity:    SeverityMedium,
 		title:       "Potential path traversal",
-		pattern:     regexp.MustCompile(`(?i)(\.\.\/|\.\.\\|path\.join\(.*\.\.|os\.path\.join\(.*\.\.|filepath\.Join\(.*\.\.)`),
+		pattern:     lazyregexp.New(`(?i)(\.\.\/|\.\.\\|path\.join\(.*\.\.|os\.path\.join\(.*\.\.|filepath\.Join\(.*\.\.)`),
 		remediation: "Canonicalize paths and validate against an allowed root directory",
 		view:        pathTraversalView,
 	},
@@ -440,10 +445,12 @@ func scanFileWithRules(path string, rules []rule) ([]Finding, error) {
 	// scanner-invisible. Raise the buffer to 8 MiB which is well
 	// above any realistic source-line length.
 	sc.Buffer(make([]byte, 64*1024), 8*1024*1024)
+	receivers := newJSRegExpReceivers(ext)
 	lineNum := 0
 	for sc.Scan() {
 		lineNum++
 		line := sc.Text()
+		receivers.observe(line)
 
 		for _, r := range rules {
 			if len(r.extensions) > 0 && !extMatch(ext, r.extensions) {
@@ -469,7 +476,7 @@ func scanFileWithRules(path string, rules []rule) ([]Finding, error) {
 		}
 	}
 
-	return findings, sc.Err()
+	return receivers.drop(findings), sc.Err()
 }
 
 // RuleMeta exposes rule metadata for skill generation without leaking the
@@ -512,6 +519,25 @@ type customRuleYAML struct {
 	Extensions  []string `yaml:"extensions"`
 }
 
+// customRulesCache keeps the compiled custom rules of a rules folder for as
+// long as its rule files keep their names and their bytes. The gateway builds
+// a CodeGuard scanner for every write it inspects, and each one parsed and
+// compiled every custom rule file again (#1384); the files are still read on
+// every call (cheap), so an edited, replaced or relinked rule file is
+// compiled anew, and the rules a call is checked against are the same either
+// way.
+var customRulesCache sync.Map // dir -> customRulesEntry
+
+type customRulesEntry struct {
+	digest [sha256.Size]byte
+	rules  []rule
+}
+
+type customRuleFile struct {
+	name string
+	data []byte
+}
+
 func loadCustomRules(dir string) []rule {
 	if dir == "" {
 		return nil
@@ -520,7 +546,8 @@ func loadCustomRules(dir string) []rule {
 	if err != nil {
 		return nil
 	}
-	var custom []rule
+	sum := sha256.New()
+	var files []customRuleFile
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".yaml") {
 			continue
@@ -529,8 +556,27 @@ func loadCustomRules(dir string) []rule {
 		if err != nil {
 			continue
 		}
+		fmt.Fprintf(sum, "%d:%s:%d:", len(e.Name()), e.Name(), len(data))
+		sum.Write(data)
+		files = append(files, customRuleFile{name: e.Name(), data: data})
+	}
+	var digest [sha256.Size]byte
+	copy(digest[:], sum.Sum(nil))
+	if cached, ok := customRulesCache.Load(dir); ok && cached.(customRulesEntry).digest == digest {
+		return cached.(customRulesEntry).rules
+	}
+	rules := compileCustomRules(files)
+	customRulesCache.Store(dir, customRulesEntry{digest: digest, rules: rules})
+	return rules
+}
+
+// compileCustomRules parses and compiles the custom rule files read from a
+// rules folder, in folder order.
+func compileCustomRules(files []customRuleFile) []rule {
+	var custom []rule
+	for _, file := range files {
 		var rf customRuleFileYAML
-		if err := yaml.Unmarshal(data, &rf); err != nil {
+		if err := yaml.Unmarshal(file.data, &rf); err != nil {
 			continue
 		}
 		for _, cr := range rf.Rules {
@@ -543,7 +589,7 @@ func loadCustomRules(dir string) []rule {
 				id:          cr.ID,
 				severity:    sev,
 				title:       cr.Title,
-				pattern:     compiled,
+				pattern:     lazyregexp.Of(compiled),
 				remediation: cr.Remediation,
 				extensions:  cr.Extensions,
 			})

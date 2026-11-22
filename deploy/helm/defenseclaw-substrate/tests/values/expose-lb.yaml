@@ -1,0 +1,11 @@
+# The admin listener on a load balancer for laptops (GAP-0086): only the
+# admin port, TLS with an external certificate, launcher networks only.
+admin:
+  expose:
+    type: LoadBalancer
+    loadBalancer:
+      sourceRanges: [203.0.113.0/24, 198.51.100.7/32]
+      annotations:
+        service.beta.kubernetes.io/aws-load-balancer-scheme: internet-facing
+  url: https://defenseclaw.lb.example.com
+  tlsSecretName: defenseclaw-admin-external-tls

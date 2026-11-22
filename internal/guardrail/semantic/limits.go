@@ -49,4 +49,11 @@ const (
 	maxArtifacts            = 64
 	maxArchiveLineages      = 64
 	maxIssues               = 8
+	// MaxEffects bounds f.effects; the effect projection truncates past it
+	// and marks the call unknown (effectrules).
+	MaxEffects          = 256
+	maxEffects          = MaxEffects
+	maxEffectReasons    = 8
+	maxEffectSources    = 16
+	maxProtectedMatches = 16
 )

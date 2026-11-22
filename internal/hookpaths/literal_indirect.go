@@ -17,10 +17,27 @@ import (
 
 const maxIndirectSourceBytes = 16 << 10
 
+// indirectRead is the size rule of one bounded file read: a file larger than
+// limit is refused whole, or with prefix the first limit+1 bytes are returned
+// (the caller sees the text is past its own bound and judges the part it
+// holds: the bound rule, rel-1-0-10:GAP-0734).
+type indirectRead struct {
+	limit  int
+	prefix bool
+}
+
+// scriptRead is the size rule of a script a shell runs: refused whole past
+// maxIndirectSourceBytes.
+var scriptRead = indirectRead{limit: maxIndirectSourceBytes}
+
 // readIndirectSource reads only one regular file under cwd (the volume root,
-// for readIndirectSourceAnywhere).
+// for readIndirectSourceAnywhereWith).
 // These reads occur only for an explicit source, make, or AWK -f command.
 func readIndirectSource(name, cwd string) (string, bool) {
+	return readIndirectSourceWith(name, cwd, scriptRead)
+}
+
+func readIndirectSourceWith(name, cwd string, lim indirectRead) (string, bool) {
 	if !filepath.IsAbs(cwd) || name == "" || strings.ContainsAny(name, "\x00\r\n") {
 		return "", false
 	}
@@ -50,21 +67,21 @@ func readIndirectSource(name, cwd string) (string, bool) {
 	}
 	before, err := root.Lstat(relative)
 	if err != nil && strings.ContainsAny(relative, `/\`) && !errors.Is(err, fs.ErrNotExist) {
-		return readIndirectSourceThroughLinks(cwd, relative)
+		return readIndirectSourceThroughLinks(cwd, relative, lim)
 	}
 	noteBodyLinkLimit(err)
-	return readIndirectSourceIn(root, relative, before, err)
+	return readIndirectSourceIn(root, relative, before, err, lim)
 }
 
-// readIndirectSourceAnywhere reads the regular file a script operand names as
+// readIndirectSourceAnywhereWith reads the regular file a script operand names as
 // the system opens it, wherever it lies: a name relative to cwd is joined to
 // it unchanged (a .. climbs the physical parent, as the shell does), and the
 // read starts at the root of the volume the path is on, so a script beside
 // the project or in the user home is read as one in the project is. It is
 // the same bounded read (a regular file of at most maxIndirectSourceBytes; a
 // link past the system bound or a share that does not answer is an unread
-// body).
-func readIndirectSourceAnywhere(name, cwd string) (string, bool) {
+// body); lim bounds the read.
+func readIndirectSourceAnywhereWith(name, cwd string, lim indirectRead) (string, bool) {
 	if !filepath.IsAbs(cwd) || name == "" || strings.ContainsAny(name, "\x00\r\n") {
 		return "", false
 	}
@@ -75,12 +92,12 @@ func readIndirectSourceAnywhere(name, cwd string) (string, bool) {
 	if !filepath.IsAbs(path) {
 		path = joinPathElement(cwd, name)
 	}
-	return readIndirectSource(path, filepath.VolumeName(path)+string(filepath.Separator))
+	return readIndirectSourceWith(path, filepath.VolumeName(path)+string(filepath.Separator), lim)
 }
 
 // readIndirectSourceIn reads relative below root once its Lstat answered.
-func readIndirectSourceIn(root *os.Root, relative string, before os.FileInfo, err error) (string, bool) {
-	if err != nil || !before.Mode().IsRegular() || before.Size() > maxIndirectSourceBytes {
+func readIndirectSourceIn(root *os.Root, relative string, before os.FileInfo, err error, lim indirectRead) (string, bool) {
+	if err != nil || !before.Mode().IsRegular() || !lim.prefix && before.Size() > int64(lim.limit) {
 		return "", false
 	}
 	file, err := root.Open(relative)
@@ -90,11 +107,11 @@ func readIndirectSourceIn(root *os.Root, relative string, before os.FileInfo, er
 	}
 	defer file.Close()
 	after, err := file.Stat()
-	if err != nil || !os.SameFile(before, after) || !after.Mode().IsRegular() || after.Size() > maxIndirectSourceBytes {
+	if err != nil || !os.SameFile(before, after) || !after.Mode().IsRegular() || !lim.prefix && after.Size() > int64(lim.limit) {
 		return "", false
 	}
-	content, err := io.ReadAll(io.LimitReader(file, maxIndirectSourceBytes+1))
-	if err != nil || len(content) > maxIndirectSourceBytes {
+	content, err := io.ReadAll(io.LimitReader(file, int64(lim.limit)+1))
+	if err != nil || !lim.prefix && len(content) > lim.limit {
 		return "", false
 	}
 	return string(content), true
@@ -112,7 +129,7 @@ func readIndirectSourceIn(root *os.Root, relative string, before os.FileInfo, er
 // every body is; one that leaves the project stays unread, as a name with ..
 // does. The file is taken from a Root on the physical folder and checked
 // against the file opened.
-func readIndirectSourceThroughLinks(cwd, relative string) (string, bool) {
+func readIndirectSourceThroughLinks(cwd, relative string, lim indirectRead) (string, bool) {
 	joined := joinPathElement(cwd, relative)
 	if _, err := pathStat(joined); err != nil {
 		noteBodyLinkLimit(err)
@@ -136,7 +153,7 @@ func readIndirectSourceThroughLinks(cwd, relative string) (string, bool) {
 	}
 	defer root.Close()
 	before, err := root.Lstat(below)
-	return readIndirectSourceIn(root, below, before, err)
+	return readIndirectSourceIn(root, below, before, err, lim)
 }
 
 // literalSourceFileOperands reads the script a . or source command names:

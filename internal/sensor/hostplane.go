@@ -97,6 +97,9 @@ type hostPlane struct {
 	// coldHold is how long a client exec's record waits for its release
 	// manifest, polled every coldPoll; zero records it at once.
 	coldHold, coldPoll time.Duration
+	// providerConfig decides an agent's read of its own provider config
+	// (ownProviderConfigRead).
+	providerConfig providerConfigFacts
 
 	mu sync.Mutex
 	// wrappers are the transparent wrapper records waiting for their
@@ -210,6 +213,7 @@ func newHostPlane(
 		wrapperDirs:     wrapperBinaryDirs,
 		coldHold:        coldClientHold,
 		coldPoll:        coldClientPoll,
+		providerConfig:  defaultProviderConfigFacts(),
 		window:          window, minStages: minStages,
 		sessions: make(map[hostSessionKey]*agentchain.Session),
 		meta:     make(map[hostSessionKey]*sessionMeta),
@@ -357,6 +361,11 @@ func (h *hostPlane) handle(event plane.Event) {
 			ExecID: event.ExecID, ParentExecID: event.ParentExecID, StartNS: event.StartNS,
 			Created: agentchain.Creation{At: at, SID: event.UserSID},
 		})
+		if event.UID != nil {
+			// Starts the account lookup a provider config read is checked
+			// against, where the source did not (Tetragon).
+			_ = h.providerConfig.home(*event.UID)
+		}
 		h.noteLifecycle(event, at)
 		if event.Hook == plane.HookUnexpected {
 			h.hookUnexpected.Add(1)
@@ -458,6 +467,11 @@ func (h *hostPlane) handle(event plane.Event) {
 		h.settleWrappersLocked(event, verifiedClient, true, nil)
 		h.gated++
 		h.mu.Unlock()
+		return
+	}
+	if ownProviderConfigRead(event, lineage, match, h.indicators, h.providerConfig) {
+		// The agent itself loading its own account's config of its model
+		// provider (Claude Code on Bedrock, GAP-1189): not credential access.
 		return
 	}
 

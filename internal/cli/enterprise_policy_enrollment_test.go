@@ -22,6 +22,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
@@ -132,7 +133,7 @@ func TestEnterprisePolicyJSONUnknownUserPrintsOnlyJSON(t *testing.T) {
 			cmd := &cobra.Command{}
 			cmd.SetOut(&out)
 			err := run(cmd, nil)
-			if err == nil || !strings.Contains(err.Error(), "dc-no-such-user-gap2456") || commandExitCode(err) != 1 {
+			if err == nil || !strings.Contains(err.Error(), "dc-no-such-user-gap2456") || cliusage.ExitCode(err) != 1 {
 				t.Fatalf("json %t: error %v", asJSON, err)
 			}
 			if cmd.SilenceErrors != asJSON {

@@ -26,6 +26,7 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/sys/windows"
 
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/daemon"
@@ -727,7 +728,7 @@ func TestWindowsEnterpriseStandalonePreflightFailureIsSchemaTwo(t *testing.T) {
 		var stdout bytes.Buffer
 		command.SetOut(&stdout)
 		err := writeWindowsEnterpriseStandalonePreflightFailure(command, "install", &windowsEnterpriseLifecycleOptions{jsonOutput: true}, tc.cause)
-		if got := commandExitCode(err); got != tc.exit {
+		if got := cliusage.ExitCode(err); got != tc.exit {
 			t.Fatalf("%v: exit %d, want %d", tc.cause, got, tc.exit)
 		}
 		var result enterprisestatus.Result
@@ -751,8 +752,8 @@ func TestWindowsEnterpriseConfigRefusalReportsTheInstalledHost(t *testing.T) {
 	command.SetOut(&stdout)
 	cause := fmt.Errorf("%w: %w", errWindowsEnterpriseInvalidArguments, errors.New("the gateway cannot load the config"))
 	err := writeWindowsEnterpriseStandaloneConfigRefusal(context.Background(), command, "ensure", ensureTestOptions(), `C:\stage\install-enterprise.ps1`, cause)
-	if commandExitCode(err) != 1639 || len(stub.calls) != 1 || !strings.EqualFold(stub.calls[0][1], "status") {
-		t.Fatalf("exit %d, installer runs %q", commandExitCode(err), stub.calls)
+	if cliusage.ExitCode(err) != 1639 || len(stub.calls) != 1 || !strings.EqualFold(stub.calls[0][1], "status") {
+		t.Fatalf("exit %d, installer runs %q", cliusage.ExitCode(err), stub.calls)
 	}
 	var result enterprisestatus.Result
 	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
@@ -776,7 +777,7 @@ func TestWindowsEnterpriseEnsureNamesARuntimeFolderAnotherAccountCanWrite(t *tes
 	var stdout bytes.Buffer
 	command.SetOut(&stdout)
 	err := runWindowsEnterpriseStandaloneEnsure(context.Background(), command, ensureTestOptions(), `C:\stage\install-enterprise.ps1`)
-	if got := commandExitCode(err); got != 1603 || len(stub.calls) != 1 {
+	if got := cliusage.ExitCode(err); got != 1603 || len(stub.calls) != 1 {
 		t.Fatalf("exit %d after %d installer runs (%v), want 1603 after the status probe only", got, len(stub.calls), err)
 	}
 	var result enterprisestatus.Result
@@ -818,7 +819,7 @@ func TestWindowsEnterpriseInstallUnsupportedConnectorIsInvalidArguments(t *testi
 	if decodeErr := json.Unmarshal(stdout.Bytes(), &result); decodeErr != nil {
 		t.Fatal(decodeErr)
 	}
-	if !refused || commandExitCode(err) != 1639 || result.ExitCode != 1639 || result.OK ||
+	if !refused || cliusage.ExitCode(err) != 1639 || result.ExitCode != 1639 || result.OK ||
 		len(result.Errors) != 1 || result.Errors[0].Code != "invalid_arguments" ||
 		!strings.Contains(result.Errors[0].Message, "openhands") || len(stub.calls) != 1 || stub.calls[0][1] != "Status" {
 		t.Fatalf("refused=%t err=%v result=%+v calls=%v", refused, err, result, stub.calls)
@@ -876,8 +877,8 @@ func TestWindowsEnterpriseUnparseableConfigRefusalReportsTheRunningDeployment(t 
 	opts := ensureTestOptions()
 	opts.suppliedConfigRefusal = errors.New("the gateway cannot load bad.yaml at line 63: [yaml_syntax_invalid] invalid YAML")
 	refused, err := refuseWindowsEnterpriseStandaloneSuppliedConfig(context.Background(), command, "ensure", opts, `C:\stage\install-enterprise.ps1`)
-	if !refused || commandExitCode(err) != 1639 || len(stub.calls) != 1 || stub.calls[0][1] != "Status" {
-		t.Fatalf("refused=%v exit %d, installer runs %q", refused, commandExitCode(err), stub.calls)
+	if !refused || cliusage.ExitCode(err) != 1639 || len(stub.calls) != 1 || stub.calls[0][1] != "Status" {
+		t.Fatalf("refused=%v exit %d, installer runs %q", refused, cliusage.ExitCode(err), stub.calls)
 	}
 	var result enterprisestatus.Result
 	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
@@ -929,8 +930,8 @@ func TestWindowsEnterpriseMissingConfigRefusalReportsTheRunningDeployment(t *tes
 	var stdout bytes.Buffer
 	command.SetOut(&stdout)
 	refused, err := refuseWindowsEnterpriseStandaloneSuppliedConfig(context.Background(), command, "ensure", opts, `C:\stage\install-enterprise.ps1`)
-	if !refused || commandExitCode(err) != 1603 || len(stub.calls) != 1 || stub.calls[0][1] != "Status" {
-		t.Fatalf("refused=%v exit %d, installer runs %q", refused, commandExitCode(err), stub.calls)
+	if !refused || cliusage.ExitCode(err) != 1603 || len(stub.calls) != 1 || stub.calls[0][1] != "Status" {
+		t.Fatalf("refused=%v exit %d, installer runs %q", refused, cliusage.ExitCode(err), stub.calls)
 	}
 	var result enterprisestatus.Result
 	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
@@ -993,9 +994,9 @@ func TestWindowsEnterpriseConfigRefusalRecoversAPendingTransaction(t *testing.T)
 		for _, call := range stub.calls {
 			runs = append(runs, call[1])
 		}
-		if !refused || commandExitCode(err) != 1639 || strings.Join(runs, " ") != tc.runs ||
+		if !refused || cliusage.ExitCode(err) != 1639 || strings.Join(runs, " ") != tc.runs ||
 			(pending && strings.Contains(strings.Join(stub.calls[0], " "), configPath)) {
-			t.Fatalf("%s pending=%v: refused=%v exit %d, installer runs %q", tc.action, pending, refused, commandExitCode(err), stub.calls)
+			t.Fatalf("%s pending=%v: refused=%v exit %d, installer runs %q", tc.action, pending, refused, cliusage.ExitCode(err), stub.calls)
 		}
 		var result enterprisestatus.Result
 		if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
@@ -1158,7 +1159,7 @@ func TestWindowsEnterpriseMisusePreflightKeepsSecureClientText(t *testing.T) {
 			command.SetOut(&stdout)
 			opts := tc.opts
 			err := runWindowsEnterpriseLifecycle(context.Background(), command, tc.action, &opts)
-			if got := commandExitCode(err); got != 1639 {
+			if got := cliusage.ExitCode(err); got != 1639 {
 				t.Fatalf("exit %d (%v), want 1639", got, err)
 			}
 			var result enterprisestatus.Result
@@ -1525,7 +1526,7 @@ func TestWindowsEnsureRepairRefusesUnloadableRulePacksBeforeItStops(t *testing.T
 			if !reflect.DeepEqual(calls, []string{"Status", "Verify"}) {
 				t.Fatalf("installer calls %v, want Status and Verify only (no Repair)", calls)
 			}
-			if commandExitCode(err) == 0 {
+			if cliusage.ExitCode(err) == 0 {
 				t.Fatalf("ensure = %v, want a failed exit", err)
 			}
 			var result enterprisestatus.Result
@@ -1682,7 +1683,7 @@ func TestWindowsEnterpriseEnsureRefusesToPlanFromAFailedProbe(t *testing.T) {
 	command.SetOut(&stdout)
 	command.SetErr(&bytes.Buffer{})
 	err := runWindowsEnterpriseStandaloneEnsure(context.Background(), command, ensureTestOptions(), `C:\stage\install-enterprise.ps1`)
-	if got := commandExitCode(err); got != 1603 {
+	if got := cliusage.ExitCode(err); got != 1603 {
 		t.Fatalf("exit %d (%v), want 1603", got, err)
 	}
 	if len(stub.calls) != 1 {
@@ -1709,7 +1710,7 @@ func TestWindowsEnterpriseEnsureRecordOwnerMismatchNamesRecovery(t *testing.T) {
 	command.SetOut(&stdout)
 	command.SetErr(&bytes.Buffer{})
 	err := runWindowsEnterpriseStandaloneEnsure(context.Background(), command, ensureTestOptions(), `C:\stage\install-enterprise.ps1`)
-	if got := commandExitCode(err); got != 1603 {
+	if got := cliusage.ExitCode(err); got != 1603 {
 		t.Fatalf("exit %d (%v), want 1603", got, err)
 	}
 	if len(stub.calls) != 1 {
@@ -1783,7 +1784,7 @@ func TestWindowsEnterpriseEnsureTimesOutAndRestoresServiceStartModes(t *testing.
 	if elapsed := time.Since(started); elapsed >= 200*time.Millisecond {
 		t.Fatalf("ensure exceeded its deadline: %s", elapsed)
 	}
-	if commandExitCode(err) != 1603 || !restored {
+	if cliusage.ExitCode(err) != 1603 || !restored {
 		t.Fatalf("ensure error = %v, restored = %v", err, restored)
 	}
 	var result enterprisestatus.Result
@@ -1945,7 +1946,7 @@ func TestWindowsEnterpriseEnsureReplansAfterLosingAnInstallRace(t *testing.T) {
 	stub.install(t)
 	stdout.Reset()
 	err := runWindowsEnterpriseStandaloneEnsure(context.Background(), command, ensureTestOptions(), `C:\stage\install-enterprise.ps1`)
-	if got := commandExitCode(err); got != 1603 || len(stub.calls) != 5 || stub.calls[4][1] != "Status" {
+	if got := cliusage.ExitCode(err); got != 1603 || len(stub.calls) != 5 || stub.calls[4][1] != "Status" {
 		t.Fatalf("exit %d after %d runs (%v)", got, len(stub.calls), err)
 	}
 }
@@ -2793,7 +2794,7 @@ func TestWindowsEnterpriseEnsureFailsWhenInstallLeavesNothingInstalled(t *testin
 	command.SetOut(&stdout)
 	command.SetErr(&bytes.Buffer{})
 	err := runWindowsEnterpriseStandaloneEnsure(context.Background(), command, ensureTestOptions(), `C:\stage\install-enterprise.ps1`)
-	if got := commandExitCode(err); got != 1603 || len(stub.calls) != 2 || stub.calls[1][1] != "Install" {
+	if got := cliusage.ExitCode(err); got != 1603 || len(stub.calls) != 2 || stub.calls[1][1] != "Install" {
 		t.Fatalf("exit %d after runs %q (%v)", got, stub.calls, err)
 	}
 	var result enterprisestatus.Result
@@ -3125,7 +3126,7 @@ func TestWindowsEnterpriseLifecycleCallerErrorsExitCodes(t *testing.T) {
 			command.SetOut(&stdout)
 			command.SetErr(&stderr)
 			_ = command.Execute()
-			if got := commandExitCode(err); got != tc.exit {
+			if got := cliusage.ExitCode(err); got != tc.exit {
 				t.Fatalf("%s --profile %s (json %t): exit %d, want %d (%v)", tc.action, tc.profile, jsonOutput, got, tc.exit, err)
 			}
 			// GAP-2445: --json prints only the JSON result, whose errors[]
@@ -3175,8 +3176,8 @@ func TestWindowsEnterpriseLifecycleCallerErrorsExitCodes(t *testing.T) {
 
 	err := runWindowsEnterpriseLifecycle(context.Background(), &cobra.Command{}, "verify",
 		&windowsEnterpriseLifecycleOptions{profile: "secure_client"})
-	if commandExitCode(err) != 1639 || !strings.Contains(fmt.Sprint(err), "This computer runs the standalone profile: use --profile standalone, or omit --profile") {
-		t.Fatalf("verify --profile secure_client on a standalone host: exit %d, %v", commandExitCode(err), err)
+	if cliusage.ExitCode(err) != 1639 || !strings.Contains(fmt.Sprint(err), "This computer runs the standalone profile: use --profile standalone, or omit --profile") {
+		t.Fatalf("verify --profile secure_client on a standalone host: exit %d, %v", cliusage.ExitCode(err), err)
 	}
 	// GAP-2445: with --json the preflight JSON is the whole answer; cobra's
 	// "Error: profile_conflict: ..." line no longer follows it.
@@ -3193,8 +3194,8 @@ func TestWindowsEnterpriseLifecycleCallerErrorsExitCodes(t *testing.T) {
 		_ = command.Execute()
 		var preflight windowsEnterpriseLifecyclePreflightFailure
 		if jsonErr := json.Unmarshal(stdout.Bytes(), &preflight); jsonErr != nil || preflight.OK ||
-			!strings.HasPrefix(preflight.Error, "profile_conflict: ") || commandExitCode(err) != 1639 || stderr.Len() != 0 {
-			t.Fatalf("%s --profile secure_client --json: exit %d, stdout %q, stderr %q", action, commandExitCode(err), stdout.String(), stderr.String())
+			!strings.HasPrefix(preflight.Error, "profile_conflict: ") || cliusage.ExitCode(err) != 1639 || stderr.Len() != 0 {
+			t.Fatalf("%s --profile secure_client --json: exit %d, stdout %q, stderr %q", action, cliusage.ExitCode(err), stdout.String(), stderr.String())
 		}
 	}
 
@@ -3293,9 +3294,9 @@ func TestWindowsEnterpriseStandardUserStatusReportsRecordedDeployment(t *testing
 			command.SetOut(&stdout)
 			opts := &windowsEnterpriseLifecycleOptions{resolvedProfile: "standalone", jsonOutput: jsonOutput}
 			err := runWindowsEnterpriseStandaloneAction(context.Background(), command, action, opts, `C:\x\install-enterprise.ps1`, nil)
-			if commandExitCode(err) != 5 || strings.Contains(err.Error(), "the standalone enterprise") ||
+			if cliusage.ExitCode(err) != 5 || strings.Contains(err.Error(), "the standalone enterprise") ||
 				!strings.HasPrefix(err.Error(), "the managed deployment's "+action+" needs an elevated prompt") {
-				t.Fatalf("%s (json %t): exit %d, error %v", action, jsonOutput, commandExitCode(err), err)
+				t.Fatalf("%s (json %t): exit %d, error %v", action, jsonOutput, cliusage.ExitCode(err), err)
 			}
 			if !jsonOutput {
 				if stdout.Len() != 0 {
@@ -3816,7 +3817,7 @@ func TestWindowsEnterpriseDirectUpgradeRefusesAnAPIPortChange(t *testing.T) {
 	var stdout bytes.Buffer
 	command.SetOut(&stdout)
 	err := runWindowsEnterpriseStandaloneAction(context.Background(), command, "upgrade", opts, "installer.ps1", nil)
-	if called || commandExitCode(err) != enterprisestatus.WindowsExitInvalidArgs {
+	if called || cliusage.ExitCode(err) != enterprisestatus.WindowsExitInvalidArgs {
 		t.Fatalf("installer called = %v, refusal = %v", called, err)
 	}
 	var result enterprisestatus.Result
@@ -4196,7 +4197,7 @@ func TestWindowsEnsureFailsWhenItCannotReadTheCursorRecord(t *testing.T) {
 				t.Fatalf("config=%v: installer calls %v, want no change action", withConfig, stub.calls)
 			}
 		}
-		if commandExitCode(err) == 0 {
+		if cliusage.ExitCode(err) == 0 {
 			t.Fatalf("config=%v: ensure = %v, want a failed exit", withConfig, err)
 		}
 		var result enterprisestatus.Result
@@ -4324,8 +4325,8 @@ func TestWindowsRepairConfigRefusalRunsOnlyTheTransactionRecovery(t *testing.T) 
 		if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
 			t.Fatal(err)
 		}
-		if commandExitCode(err) != 1639 || len(result.Errors) != 1 || result.Errors[0].Code != "invalid_arguments" {
-			t.Fatalf("%s: exit %d, result %+v", tc.name, commandExitCode(err), result)
+		if cliusage.ExitCode(err) != 1639 || len(result.Errors) != 1 || result.Errors[0].Code != "invalid_arguments" {
+			t.Fatalf("%s: exit %d, result %+v", tc.name, cliusage.ExitCode(err), result)
 		}
 		if reported := strings.Join(result.Changes, " | "); (tc.changes == "") != (reported == "") || !strings.HasPrefix(reported, tc.changes) {
 			t.Fatalf("%s: the refusal reports changes %q", tc.name, reported)
@@ -4372,8 +4373,8 @@ func TestWindowsEnterpriseEnsureDeadlineFollowsSetupTimeoutSeconds(t *testing.T)
 		opts := ensureTestOptions()
 		opts.timeoutSeconds = seconds
 		err := runWindowsEnterpriseStandaloneEnsure(context.Background(), command, opts, `C:\stage\install-enterprise.ps1`)
-		if called || commandExitCode(err) != enterprisestatus.WindowsExitInvalidArgs {
-			t.Fatalf("--timeout-seconds %d: ran=%v exit=%d (%v)", seconds, called, commandExitCode(err), err)
+		if called || cliusage.ExitCode(err) != enterprisestatus.WindowsExitInvalidArgs {
+			t.Fatalf("--timeout-seconds %d: ran=%v exit=%d (%v)", seconds, called, cliusage.ExitCode(err), err)
 		}
 		var result enterprisestatus.Result
 		if err := json.Unmarshal(output.Bytes(), &result); err != nil {

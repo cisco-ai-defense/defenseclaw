@@ -160,7 +160,10 @@ type UnixEnumerateOptions struct {
 	// directory; nil means they may.
 	DirectoryConfigured func() bool
 	// MachinePolicyConnectors come from the runtime descriptor; they get
-	// per-user rows only when enrollment.unenrolled_users is "deny".
+	// per-user rows only when enrollment.unenrolled_users is "deny", or
+	// when route-only routes them on a standalone managed host (the row
+	// carries the account's own route render and the route credential the
+	// gateway verifies, rel-1-0-10 GAP-0568).
 	MachinePolicyConnectors []string
 	// OwnershipOffConnectors are machine-policy connectors whose machine
 	// policy the administrator leaves alone (ownership: "off"). They get
@@ -348,7 +351,8 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 			continue
 		}
 		if _, isMachine := machinePolicy[name]; isMachine &&
-			!strings.EqualFold(strings.TrimSpace(enrollment.UnenrolledUsers), config.EnterpriseUnenrolledDeny) {
+			!strings.EqualFold(strings.TrimSpace(enrollment.UnenrolledUsers), config.EnterpriseUnenrolledDeny) &&
+			!MachinePolicyRouteOnly(cfg, name) {
 			continue
 		}
 		perUser = append(perUser, name)
@@ -634,7 +638,7 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 			// home before they are first enrolled: report them, or the
 			// account itself when no agent is found, so status and verify
 			// name it (GAP-0646).
-			agents := unixUntrustedHomeAgents(ctx, opts, account, perUser, machinePolicy, check)
+			agents := unixUntrustedHomeAgents(ctx, opts, account, perUser, machinePolicy, check, machinePolicyRowConsequence(cfg))
 			if len(agents) == 0 {
 				agents = append(agents, UnprotectedAgent{
 					User: name, UID: intPointer(account.UID), Code: UnprotectedCodeHomeUntrusted,
@@ -768,11 +772,22 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 			// surfaces gets a refusal row: its hooks are installed so the
 			// gateway can refuse the user's calls, instead of the agent
 			// running without DefenseClaw.
+			// A route-only routed machine-policy connector (GAP-0568) keeps
+			// the refused-surface check its inspect handling gave it: its
+			// refused user is recorded and gets no row (no route render).
+			routedMachine := isMachine && MachinePolicyRouteOnly(cfg, conn)
 			refusalVersion := ""
-			if check.State == HomeAvailable && !isMachine && versions[conn] == "" {
+			if check.State == HomeAvailable && (!isMachine || routedMachine) && versions[conn] == "" {
 				refusalVersion = unixRefusalRowVersion(conn, admission)
 			}
-			if refusalVersion != "" {
+			if refusalVersion != "" && routedMachine {
+				report.RefusedSurfaces = append(report.RefusedSurfaces, UnixRefusedSurface{User: name, UID: intPointer(account.UID), Connector: conn})
+				for _, rejected := range admission.rejected {
+					report.Unprotected = append(report.Unprotected, rejected.unprotected(account.Name, "", intPointer(account.UID), conn,
+						"it is the user's only "+conn+" install, so the gateway refuses this user's "+conn+" hook calls (surface_unverified)", RefusalEnforced))
+				}
+				refusalVersion = ""
+			} else if refusalVersion != "" {
 				report.RefusedSurfaces = append(report.RefusedSurfaces, UnixRefusedSurface{User: name, UID: intPointer(account.UID), Connector: conn})
 				for _, rejected := range admission.rejected {
 					report.Unprotected = append(report.Unprotected, rejected.unprotected(account.Name, "", intPointer(account.UID), conn,
@@ -780,9 +795,9 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 				}
 			} else if check.State == HomeAvailable {
 				_, known := previous[key]
-				report.Unprotected = append(report.Unprotected, unixRejectedSurfaces(account, conn, isMachine, known || versions[conn] != "", admission)...)
+				report.Unprotected = append(report.Unprotected, unixRejectedSurfaces(account, conn, isMachine, known || versions[conn] != "", admission, machinePolicyRowConsequence(cfg))...)
 			}
-			if refusalVersion == "" && !isMachine && !surfacesKnown && opts.DiscoverSurfaces != nil &&
+			if refusalVersion == "" && (!isMachine || routedMachine) && !surfacesKnown && opts.DiscoverSurfaces != nil &&
 				previouslyRefusedSurface(opts.PreviousRefusedSurfaces, name, account.UID, conn) {
 				// Discovery failed or the home is unavailable: the kept
 				// refusal row keeps its refusal.
@@ -843,7 +858,7 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 				}
 				consequence := "it runs without DefenseClaw hooks"
 				if _, isMachine := machinePolicy[conn]; isMachine {
-					consequence = "it is not enrolled, so the gateway refuses its tool calls (enrollment.unenrolled_users: deny)"
+					consequence = machinePolicyRowConsequence(cfg)
 				}
 				if check.State != HomeAvailable {
 					reason = check.Reason
@@ -878,7 +893,7 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 			if refused := unixNewRowVersionRefused(conn, version); refused != "" {
 				consequence := "DefenseClaw installs no hooks for it, so it runs without DefenseClaw hooks"
 				if isMachine {
-					consequence = "it is not enrolled, so the gateway refuses its tool calls (enrollment.unenrolled_users: deny)"
+					consequence = machinePolicyRowConsequence(cfg)
 				}
 				report.Unprotected = append(report.Unprotected, UnprotectedAgent{
 					User:      name,
@@ -1430,7 +1445,7 @@ func unixNewRowVersionRefused(connectorName, version string) string {
 // not admit still runs the hooks rendered for the row, so it is reported
 // when it is refused or its explicit engine version predates every known
 // hook contract. The latter is a report without a new refusal.
-func unixRejectedSurfaces(account unixidentity.Account, conn string, isMachine, enrolled bool, admission surfaceAdmission) []UnprotectedAgent {
+func unixRejectedSurfaces(account unixidentity.Account, conn string, isMachine, enrolled bool, admission surfaceAdmission, machineMsg string) []UnprotectedAgent {
 	var out []UnprotectedAgent
 	for _, rejected := range admission.rejected {
 		consequence, refusal := "it runs without DefenseClaw hooks", RefusalMissing
@@ -1442,7 +1457,10 @@ func unixRejectedSurfaces(account unixidentity.Account, conn string, isMachine, 
 		case enrolled:
 			consequence, refusal = surfaceRefusalConsequence(conn, rejected)
 		case isMachine:
-			consequence, refusal = "it is not enrolled, so the gateway refuses its tool calls (enrollment.unenrolled_users: deny)", RefusalEnforced
+			consequence, refusal = machineMsg, RefusalEnforced
+			if !strings.Contains(machineMsg, "refuses") {
+				refusal = RefusalMissing
+			}
 		}
 		out = append(out, rejected.unprotected(account.Name, "", intPointer(account.UID), conn, consequence, refusal))
 	}
@@ -1543,7 +1561,7 @@ func budgetedUnixDiscover(discover UnixDiscoverFunc, deadline time.Time) UnixDis
 // covered by a user mount). Discovery there is static: it reads package
 // metadata and checks for the CLIs as the user, and executes nothing in a
 // home others may have written to.
-func unixUntrustedHomeAgents(ctx context.Context, opts UnixEnumerateOptions, account unixidentity.Account, perUser []string, machinePolicy map[string]struct{}, check HomeCheck) []UnprotectedAgent {
+func unixUntrustedHomeAgents(ctx context.Context, opts UnixEnumerateOptions, account unixidentity.Account, perUser []string, machinePolicy map[string]struct{}, check HomeCheck, machineMsg string) []UnprotectedAgent {
 	if (opts.DiscoverStatic == nil && opts.DiscoverStaticSurfaces == nil) || len(perUser) == 0 {
 		return nil
 	}
@@ -1573,9 +1591,9 @@ func unixUntrustedHomeAgents(ctx context.Context, opts UnixEnumerateOptions, acc
 		}
 		consequence := "it runs without DefenseClaw hooks"
 		if _, isMachine := machinePolicy[conn]; isMachine {
-			// Machine-policy connectors are enrolled per user only
-			// with unenrolled_users: deny.
-			consequence = "it is not enrolled, so the gateway refuses its tool calls (enrollment.unenrolled_users: deny)"
+			// Machine-policy connectors are enrolled per user with
+			// unenrolled_users: deny, or when route-only routes them.
+			consequence = machineMsg
 		}
 		out = append(out, UnprotectedAgent{
 			User:      account.Name,

@@ -94,7 +94,8 @@ profiles. Select them by their repository name; each runs with the balanced
 
 Supported names are `cloud-production-protection`,
 `database-destruction-protection`, `infrastructure-destruction-protection`,
-`kubernetes-production-protection`, and `privacy-high-assurance`. The output
+`kubernetes-production-protection`, `privacy-high-assurance`, and
+`active-directory-protection`. The output
 environment records each lane's policy digest, policy root, and action posture.
 Standard `default`, `permissive`, and `strict` runs are unchanged when
 `--opt-in-packs` is omitted.
@@ -149,6 +150,20 @@ therefore limitations. A source-level attack label is never copied onto every
 tool call. Dynamic operands, missing identity, uncertain result status,
 conditional execution, and incomplete chains remain contextual or out of
 scope.
+
+## Other benchmark lanes
+
+- [`cmd/s7bench`](cmd/s7bench/README.md) (build tag `s7bench`) and
+  [`s7/gate`](s7/gate): the end-to-end harness and scorer. They replay
+  labelled tool calls, prompts and tool results through the real hook code with
+  the rules, the decision model and the judge. Results of the 1.0.10 run:
+  [`results/s7-e2e-1.0.10.json`](results/s7-e2e-1.0.10.json). The corpora and
+  the saved model answers are not in the repository.
+- [`routing/`](routing/README.md): the routing classifier evaluation and its
+  2026-11-12 results.
+
+The consolidated page for all of them is
+`docs-site/content/docs/guardrail/benchmarks.mdx`.
 
 ## Published results
 

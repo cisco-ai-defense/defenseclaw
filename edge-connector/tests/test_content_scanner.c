@@ -117,6 +117,61 @@ static void test_detect_credit_card_pii(void) {
     printf("  PASS: detect credit card PII\n");
 }
 
+static int count_pii_high(const char *content) {
+    dclaw_scan_context_t ctx;
+    (void)dclaw_content_scan(content, (uint16_t)strlen(content),
+                             DCLAW_CONTENT_SCOPE_USER_INPUT, &ctx);
+    int n = 0;
+    for (uint8_t i = 0; i < ctx.finding_count; i++) {
+        if (ctx.findings[i].category == DCLAW_CONTENT_CATEGORY_PII &&
+            ctx.findings[i].severity == DCLAW_SEV_HIGH) n++;
+    }
+    return n;
+}
+
+/* substrate-1:GAP-0132: digit runs inside UUIDs, hashes and ids are not
+ * cards; real test PANs in card layouts still are. */
+static void test_credit_card_shape_and_boundaries(void) {
+    const char *benign[] = {
+        "curl https://webhook.site/11111111-2222-3333-4444-555555555555 -d test",
+        "request id 7d2a1c3e-4444-555555555555 failed",
+        "uid 45320151-1283-0366-9a1b-2c3d4e5f6a7b",
+        "trace 4111111111111111aa0f00ff11223344 done",
+        "version v1.4532015112830366",
+        "value 0.4532015112830366",
+        "order 4532 0151-1283 0366",
+        "count 1234567890123456",
+        "id ord_4000056655665556 ok",
+        "span 4000056655665556.9fa1c3d2",
+        "ref deadbeef-4000056655665556",
+    };
+    for (size_t i = 0; i < sizeof(benign) / sizeof(benign[0]); i++) {
+        if (count_pii_high(benign[i]) != 0) {
+            printf("  FAIL: benign flagged as card: %s\n", benign[i]);
+            assert(0);
+        }
+    }
+    const char *cards[] = {
+        "Card number: 4000056655665556 expires 12/30",
+        "pay with 4000 0566 5566 5556 please",
+        "mc 5200-8282-8282-8210 ok",
+        "amex 3714 496353 98431.",
+        "card 2223003122003222",
+        "Card no.4000056655665556",
+        "VISA-4000 0566 5566 5556",
+        "card 4000056655665556-12/27",
+        "tsv 4000\t0566\t5566\t5556",
+        "rupay 6070 1234 1234 1234",
+    };
+    for (size_t i = 0; i < sizeof(cards) / sizeof(cards[0]); i++) {
+        if (count_pii_high(cards[i]) < 1) {
+            printf("  FAIL: card not detected: %s\n", cards[i]);
+            assert(0);
+        }
+    }
+    printf("  PASS: credit card shape and token boundaries\n");
+}
+
 static void test_detect_username_credential(void) {
     dclaw_scan_context_t ctx;
     /* "username:" with the colon should trigger (reduced false-positive rule) */
@@ -465,6 +520,7 @@ int main(void) {
     test_detect_ssn_pii();
     test_detect_email_pii();
     test_detect_credit_card_pii();
+    test_credit_card_shape_and_boundaries();
     test_detect_username_credential();
     test_detect_bearer_token_credential();
     test_detect_base64_exfil();

@@ -17,6 +17,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"golang.org/x/sys/windows"
@@ -179,7 +180,7 @@ var windowsManagedClaudeGuardianLeftoverRemover = func() error {
 	if _, err := os.Lstat(dir); errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
-	roots, err := windowsManagedLayout.roots(winpath.EnterpriseProfileStandalone)
+	roots, err := hookcli.WindowsManagedLayout.Roots(winpath.EnterpriseProfileStandalone)
 	if err != nil {
 		return err
 	}
@@ -296,7 +297,7 @@ const windowsEnterpriseCodexKeptLinkReason = windowsEnterpriseKeptLinkReason +
 // may have kept. It only reads. Replaceable in tests.
 var windowsManagedHooksKeptLinkedFolders = func() []string {
 	var goOwned []string
-	if layout, programFiles, programData, err := standaloneEnterprisePolicyLayout(); err == nil {
+	if layout, programFiles, programData, err := hookcli.StandaloneEnterprisePolicyLayout(); err == nil {
 		opts := enterprisepolicy.LayoutOptions(layout, programFiles, programData)
 		goOwned = enterprisepolicy.WindowsGoOwnedLinkedFolders(opts)
 	}
@@ -420,7 +421,7 @@ func removeWindowsManagedHooksStandalonePerUserWiring(identity windowsManagedHoo
 	); err != nil {
 		return err
 	}
-	layout, programFiles, programData, err := standaloneEnterprisePolicyLayout()
+	layout, programFiles, programData, err := hookcli.StandaloneEnterprisePolicyLayout()
 	if err != nil {
 		return err
 	}
@@ -464,7 +465,7 @@ var windowsManagedHooksStandaloneFloorPurger = purgeWindowsManagedHooksUnrecorde
 // (GAP-0758 round 2, the g091 record-only rule). A by-name removal used to
 // run here.
 func purgeWindowsManagedHooksUnrecordedClaudeFloor() error {
-	layout, programFiles, programData, err := standaloneEnterprisePolicyLayout()
+	layout, programFiles, programData, err := hookcli.StandaloneEnterprisePolicyLayout()
 	if err != nil {
 		return err
 	}
@@ -515,7 +516,7 @@ func verifyWindowsManagedHooksStandalonePerUserClean() error {
 	if !enterprisehooks.WindowsStandaloneProcess() {
 		return nil
 	}
-	layout, programFiles, programData, err := standaloneEnterprisePolicyLayout()
+	layout, programFiles, programData, err := hookcli.StandaloneEnterprisePolicyLayout()
 	if err != nil {
 		return err
 	}

@@ -43,7 +43,7 @@ import (
 // moved in the meantime starts over instead of failing, which dropped the
 // verdict's audit row.
 func TestHookCorrelationSurvivesConcurrentSessionHooks(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	server, store := newHookCorrelationServer(t, filepath.Join(t.TempDir(), "audit.db"))
 	defer store.Close() //nolint:errcheck
 	for _, name := range []string{"claudecode", "codex"} {
@@ -127,7 +127,7 @@ func TestHookVerdictKeepsItsAuditRowWhenCorrelationFails(t *testing.T) {
 // its correlation, its hook_decision and its audit row: they used to be
 // written with the request context, which the disconnect had cancelled.
 func TestHookVerdictIsRecordedAfterTheClientDisconnects(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	installDefaultProfileConnector(t, "claudecode")
 	fixture := newSidecarRuntimeFixture(t, true)
 	fingerprints, err := observabilityredaction.NewEngine(bytes.Repeat([]byte{0x42}, 32))
@@ -212,13 +212,15 @@ func TestHookVerdictIsRecordedAfterTheClientDisconnects(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	for _, event := range []string{"tool_start", "tool.invocation.requested"} {
+	// The tool call of each audited PreToolUse is in its hook_decision row;
+	// tool_start and tool.invocation.requested are exported only (#1384).
+	for event, want := range map[string]int{"hook_decision": 2, "tool_start": 0, "tool.invocation.requested": 0} {
 		var count int
 		if err := db.QueryRow(`SELECT COUNT(*) FROM audit_events WHERE event_name = ?`, event).Scan(&count); err != nil {
 			t.Fatal(err)
 		}
-		if count != 2 {
-			t.Errorf("%s rows after two audited PreToolUse calls = %d, want 2", event, count)
+		if count != want {
+			t.Errorf("%s rows after two audited PreToolUse calls = %d, want %d", event, count, want)
 		}
 	}
 }
@@ -228,7 +230,7 @@ func TestHookVerdictIsRecordedAfterTheClientDisconnects(t *testing.T) {
 // an enterprise-exempt-user row is written once per account and connector
 // each ten minutes.
 func TestExemptUserCallsAreInTheAuditStore(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	installDefaultProfileConnector(t, "claudecode")
 	fixture := newSidecarRuntimeFixture(t, true)
 	fingerprints, err := observabilityredaction.NewEngine(bytes.Repeat([]byte{0x42}, 32))
@@ -304,7 +306,7 @@ func (history *countingLifecycleHistory) LatestLifecycleProjection(
 // hook read the session's lifecycle history from the audit store, a query over
 // every audit row of the session. The hook path reads it once per session.
 func TestHookPathReadsLifecycleHistoryOncePerSession(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	installDefaultProfileConnector(t, "claudecode")
 	fixture := newSidecarRuntimeFixture(t, true)
 	fingerprints, err := observabilityredaction.NewEngine(bytes.Repeat([]byte{0x42}, 32))

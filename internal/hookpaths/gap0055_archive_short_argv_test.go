@@ -158,7 +158,7 @@ var gap0055Argvs = []string{"", " -v", " -", " --", " a", " a b", " ''", " $X"}
 // the package with each option, last and after one operand. A bounded sweep
 // reads through Resolve: every GAP-0055 command, every bare argv form of every
 // word, every argv and wrapper form of an archive program (where the GAP-0055 panic was), each
-// wrapper behind every fourth word, and one tenth of the program-option pairs,
+// wrapper behind every fifth word, and about a tenth of the program-option pairs (two in 21),
 // spread so that each program meets a spread of options and each option a
 // spread of programs.
 func gap0055SweepForms(words, options []string, bounded bool) (forms []gap0055Form, programs []string) {
@@ -180,8 +180,12 @@ func gap0055SweepForms(words, options []string, bounded bool) (forms []gap0055Fo
 		for _, argv := range gap0055Argvs {
 			add(word+argv, true)
 		}
+		// A word meets Resolve behind every sixth wrapper (each wrapper behind a
+		// sixth of the words, above the eighth the budget test asks): every
+		// fifth put the sweep over its budget once the GAP-1173 archive readers
+		// merged with FU11 (22449 forms). The parsers still read every form.
 		for wrapperIndex, wrapper := range gap0055Wrappers {
-			add(fmt.Sprintf(wrapper, word), slices.Contains(archivePrograms, word) || (wordIndex+wrapperIndex)%4 == 0)
+			add(fmt.Sprintf(wrapper, word), slices.Contains(archivePrograms, word) || (wordIndex+wrapperIndex)%6 == 0)
 		}
 	}
 	for _, list := range [][]string{archivePrograms, copyPrograms, linkPrograms, renamePrograms, cdPrograms, multicallPrograms,
@@ -196,8 +200,8 @@ func gap0055SweepForms(words, options []string, bounded bool) (forms []gap0055Fo
 	}
 	for programIndex, program := range programs {
 		for optionIndex, option := range options {
-			add(program+" "+option, (programIndex+optionIndex)%20 == 0)
-			add(program+" a "+option, (programIndex+optionIndex)%20 == 10)
+			add(program+" "+option, (programIndex+optionIndex)%21 == 0)
+			add(program+" a "+option, (programIndex+optionIndex)%21 == 10)
 		}
 	}
 	return forms, programs

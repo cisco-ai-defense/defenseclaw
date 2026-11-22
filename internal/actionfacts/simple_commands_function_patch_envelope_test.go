@@ -122,7 +122,9 @@ func TestSimpleCommandsStraightLineFunctionsReadOnlyCalledBodies(t *testing.T) {
 				}
 				envelopes := 0
 				for _, child := range SimpleCommands(input, Analyze(input)) {
-					if strings.HasPrefix(child.Text, "apply_patch <<") {
+					// A reading of a statement in another folder it may run in
+					// (OtherFolder) is not a further envelope.
+					if strings.HasPrefix(child.Text, "apply_patch <<") && !child.OtherFolder {
 						envelopes++
 					}
 					if straightLine && strings.Contains(child.Text, "rm -rf") {

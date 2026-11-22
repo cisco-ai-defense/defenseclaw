@@ -233,6 +233,9 @@
     },
     "connectors": {
       "$ref": "#/$defs/connectors"
+    },
+    "substrate": {
+      "$ref": "#/$defs/substrate"
     }
   },
   "$defs": {
@@ -455,6 +458,29 @@
         "base_url": {
           "type": "string",
           "maxLength": 8192
+        },
+        "block_risk_score": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 2
+        },
+        "escalate_rule_flagged": {
+          "type": "boolean"
+        },
+        "history_turns": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "history_tool_results": {
+          "type": "boolean"
+        },
+        "flow_guard": {
+          "type": "boolean"
+        },
+        "protocol": {
+          "type": "string",
+          "enum": ["", "system-one", "gemini-decisions"]
         },
         "api_key_env": {
           "$ref": "#/$defs/envNameOrEmpty"
@@ -1444,6 +1470,120 @@
             "docker",
             "none"
           ]
+        },
+        "runtimes": {
+          "description": "The sandbox runtimes the subject's agents may use: openshell (a sandbox on the computer) and substrate (an Agent Substrate actor). Unset allows both; profiles intersect it. With required_for, [substrate] points a refused host run to defenseclaw substrate run and refuses an OpenShell sandbox.",
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "enum": [
+              "openshell",
+              "substrate"
+            ]
+          }
+        },
+        "sandbox_class": {
+          "description": "Agent Substrate only: the weakest isolation an actor may run in (gvisor or microvm; microvm wins). Unset takes substrate.default_sandbox_class.",
+          "type": "string",
+          "enum": [
+            "",
+            "gvisor",
+            "microvm"
+          ]
+        },
+        "idle_suspend_after": {
+          "description": "Agent Substrate only: suspend an idle actor after this Go duration (at least 1m), instead of substrate.idle_suspend_after. The shortest wins.",
+          "type": "string",
+          "pattern": "^(|[0-9]+(?:\\.[0-9]+)?(?:ns|us|\u00b5s|ms|s|m|h)(?:[0-9]+(?:\\.[0-9]+)?(?:ns|us|\u00b5s|ms|s|m|h))*)$"
+        },
+        "idle_suspend_tasks": {
+          "description": "Agent Substrate only: true lets idle suspend apply to a running --task or --batch run, which is exempt by default. true wins.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "unattended_asks": {
+          "description": "Agent Substrate only: what an ask of an unattended (--task, --batch) actor does: deny, or queue it for a person (a timeout denies). Deny wins; unset takes substrate.unattended.asks.",
+          "type": "string",
+          "enum": [
+            "",
+            "deny",
+            "queue"
+          ]
+        },
+        "ask_timeout": {
+          "description": "Agent Substrate only: how long a queued ask waits before it is denied (a Go duration, 1m to 24h), instead of substrate.unattended.ask_timeout. The shortest wins.",
+          "type": "string",
+          "pattern": "^(|[0-9]+(?:\\.[0-9]+)?(?:ns|us|\u00b5s|ms|s|m|h)(?:[0-9]+(?:\\.[0-9]+)?(?:ns|us|\u00b5s|ms|s|m|h))*)$"
+        },
+        "actor_secrets": {
+          "description": "Agent Substrate only: the values a program inside the actor may read, keys of the callout's actor-secrets Secret. Each is marked exposed and matched by exact value on prompts and egress. Unset exposes none; profiles intersect it.",
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,252}$"
+          }
+        },
+        "ask_hosts": {
+          "description": "Agent Substrate only: allowed hosts an actor reaches only after a person approves; the egress callout raises the ask. A host name or \"*.<host>\". They never open a host the actor's egress policy does not allow. Profiles add to them.",
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 256,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "maxLength": 253,
+            "pattern": "^(\\*\\.)?[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$"
+          }
+        },
+        "url_rules": {
+          "description": "Agent Substrate only: requests to a host the egress callout refuses (deny) or asks a person about (ask), by method and path prefix. Profiles add to them; substrate.admin's come first.",
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["hosts", "action"],
+            "properties": {
+              "name": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+              },
+              "hosts": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 64,
+                "items": {
+                  "type": "string",
+                  "maxLength": 253,
+                  "pattern": "^(\\*\\.)?[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$"
+                }
+              },
+              "methods": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "pattern": "^[A-Z]{3,10}$"
+                }
+              },
+              "path_prefix": {
+                "type": "string",
+                "maxLength": 512,
+                "pattern": "^(/[!-~]*)?$"
+              },
+              "action": {
+                "type": "string",
+                "pattern": "^(?i:deny|ask)$"
+              }
+            }
+          }
         }
       }
     },
@@ -1519,6 +1659,48 @@
       "pattern": "^(|[Cc][Rr][Ii][Tt][Ii][Cc][Aa][Ll]|[Hh][Ii][Gg][Hh]|[Mm][Ee][Dd][Ii][Uu][Mm]|[Ll][Oo][Ww])$",
       "description": "Lowest severity that takes the action: CRITICAL, HIGH, MEDIUM or LOW, in any case. Empty inherits: a connector falls back to the global value, and the global value to the rule pack's level."
     },
+    "effectsRulesTier": {
+      "type": "string",
+      "enum": [
+        "restricted",
+        "full"
+      ]
+    },
+    "secretFlow": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Secret flow tracking (guardrail.secret_flow): label the secrets a session reads and alert or block when a labeled secret reaches an external sink. Its live/shadow switch is guardrail.cascade.lanes.secret_flow; these are the feature's own settings.",
+      "properties": {
+        "label_sets": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "credentials": { "type": "boolean", "default": true, "description": "Label the built-in credential set (.env, SSH private keys, cloud/token files, keychain exports, /proc/*/environ)." },
+            "extra_path_globs": { "type": "array", "items": { "type": "string" }, "description": "Extra absolute or ~ path globs to label as secret." },
+            "extra_secret_patterns": { "type": "array", "items": { "type": "string" }, "description": "Extra basename globs to label as secret." }
+          }
+        },
+        "sink_action": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Action per pack when a labeled secret reaches an external sink. The default pack never blocks; a managed install follows its pack.",
+          "properties": {
+            "default": { "type": "string", "enum": ["alert"], "default": "alert", "description": "The default pack never blocks; alert only." },
+            "strict": { "type": "string", "enum": ["alert", "block"], "default": "block" }
+          }
+        },
+        "reencodings": { "type": "boolean", "default": true, "description": "Index base64/hex/URL-encoded forms of each secret value so a re-encoded secret still matches." },
+        "memory": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "max_labeled_paths": { "type": "integer", "minimum": 0, "maximum": 100000, "default": 512, "description": "Max labeled file paths held per session (LRU). 0 uses the default." },
+            "max_value_digests": { "type": "integer", "minimum": 0, "maximum": 100000, "default": 256, "description": "Max secret-value digests held per session. 0 uses the default." }
+          }
+        },
+        "destination_allowlist": { "type": "array", "items": { "type": "string" }, "description": "Hosts (and dotted suffixes) that do not count as external sinks, e.g. your own git remote or a package registry." }
+      }
+    },
     "detectionStrategy": {
       "type": "string",
       "enum": [
@@ -1535,6 +1717,196 @@
         "regex_judge",
         "judge_first"
       ]
+    },
+    "cascadeJudge": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "The LLM judge's role in the guardrail cascade. Values are checked by the gateway: an invalid value makes the cascade fall back (last-known-good, else the pack defaults).",
+      "properties": {
+        "max_action": {
+          "type": "string",
+          "maxLength": 32,
+          "description": "Highest action the judge lane can decide: block (default), confirm, alert or log."
+        },
+        "block_needs_system_one": {
+          "type": "boolean",
+          "description": "A judge block stands only when System One also confidently blocked the call; otherwise it is a confirm. Default false."
+        },
+        "no_verdict": {
+          "type": "string",
+          "maxLength": 32,
+          "description": "What a call gets when the judge gives no verdict: rules (default, the rule verdict) or unknown (at least the unknown tier)."
+        }
+      }
+    },
+    "cascadeSystemOne": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "System One outcome handling. on_unsure at every scope; the routing overrides (allow_threshold, block_threshold, block_risk_score, escalate_rule_flagged) only under a connector or profile scope: the global values are in decision_model.",
+      "properties": {
+        "allow_threshold": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "block_threshold": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "block_risk_score": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 2
+        },
+        "escalate_rule_flagged": {
+          "type": "boolean"
+        },
+        "on_unsure": {
+          "type": "string",
+          "maxLength": 32,
+          "description": "Cascade 2 (System One without the judge): confirm (default), alert, or rules (the rule verdict stands)."
+        }
+      }
+    },
+    "cascadeLane": {
+      "type": "string",
+      "description": "A cascade lane switch: off, or shadow (compute and record beside today's rules, never change the answer). The lane ships shadow-only in 1.0.10, so on is refused (internal/config/cascade_lanes.go lists the open gaps).",
+      "enum": [
+        "off",
+        "shadow"
+      ]
+    },
+    "cascadeLiveLane": {
+      "type": "string",
+      "description": "A cascade lane switch that ships live: on, shadow or off. Only on is live; shadow and off add nothing, so the verdicts are those of a build without the lane.",
+      "enum": [
+        "on",
+        "shadow",
+        "off"
+      ]
+    },
+    "cascadeLanes": {
+      "type": "object",
+      "maxProperties": 64,
+      "description": "Live/shadow switch per registered lane: off, shadow or on. A lane that ships shadow-only (effects, secret_flow) accepts off and shadow. The alignment lane (alignment check) accepts off, shadow, alert or block. The gateway refuses any other value or lane name.",
+      "propertyNames": {
+        "pattern": "^[a-z][a-z0-9_]{0,63}$"
+      },
+      "properties": {
+        "effects": {
+          "$ref": "#/$defs/cascadeLane",
+          "default": "shadow"
+        },
+        "secret_flow": {
+          "$ref": "#/$defs/cascadeLane",
+          "default": "shadow"
+        },
+        "nonshell": {
+          "$ref": "#/$defs/cascadeLiveLane",
+          "default": "on",
+          "description": "The MCP and app tool lane (tool-call effects and the table rules on shell and native file-tool calls). on (default) judges them; shadow and off compute nothing and add nothing, so the verdicts are those of a build without the lane. Any other value is refused at load. Top level only (process-wide)."
+        }
+      },
+      "additionalProperties": {
+        "type": "string",
+        "maxLength": 16
+      }
+    },
+    "cascadeScope": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "guardrail.cascade settings a connector or profile scope may set (docs: guardrail/configure-cascade).",
+      "properties": {
+        "unknown": {
+          "type": "string",
+          "maxLength": 32,
+          "description": "Unknown and TRUNCATED tier: pack (default), alert, confirm or block. Never below alert."
+        },
+        "judge": {
+          "$ref": "#/$defs/cascadeJudge"
+        },
+        "system_one": {
+          "$ref": "#/$defs/cascadeSystemOne"
+        },
+        "lanes": {
+          "$ref": "#/$defs/cascadeLanes"
+        }
+      }
+    },
+    "cascadePolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Rego final-decision policy (package defenseclaw.cascade, rule decisions). Off while module is unset.",
+      "properties": {
+        "module": {
+          "$ref": "#/$defs/assetFileRef"
+        },
+        "lowest": {
+          "type": "string",
+          "maxLength": 32,
+          "description": "Lowest action the policy may set on a call a layer flagged: allow, log, alert (default) or confirm."
+        },
+        "highest": {
+          "type": "string",
+          "maxLength": 32,
+          "description": "Highest action the policy may set: alert, confirm or block (default)."
+        },
+        "timeout_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 50,
+          "description": "Bound of one evaluation; 0 = 5 ms."
+        }
+      }
+    },
+    "cascadeAdmin": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Administrator locks (top level only).",
+      "properties": {
+        "locked": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "type": "string",
+            "maxLength": 96
+          },
+          "description": "Keys no connector or profile scope may set."
+        },
+        "critical_floor": {
+          "type": "string",
+          "maxLength": 32,
+          "description": "Lowest action a proven CRITICAL finding can end at: alert (default), confirm, block, or log (explicit opt-out)."
+        }
+      }
+    },
+    "cascade": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "guardrail.cascade: what each layer of the cascade does with its outcome, the unknown tier, lane switches, the Rego policy and admin locks. Empty = today's decisions.",
+      "properties": {
+        "unknown": {
+          "type": "string",
+          "maxLength": 32,
+          "description": "Unknown and TRUNCATED tier: pack (default), alert, confirm or block. Never below alert."
+        },
+        "judge": {
+          "$ref": "#/$defs/cascadeJudge"
+        },
+        "system_one": {
+          "$ref": "#/$defs/cascadeSystemOne"
+        },
+        "lanes": {
+          "$ref": "#/$defs/cascadeLanes"
+        },
+        "policy": {
+          "$ref": "#/$defs/cascadePolicy"
+        },
+        "admin": {
+          "$ref": "#/$defs/cascadeAdmin"
+        }
+      }
     },
     "hilt": {
       "type": "object",
@@ -1616,6 +1988,11 @@
           "minimum": 0,
           "maximum": 86400
         },
+        "intent_scope": {
+          "type": "string",
+          "enum": ["", "shadow", "off"],
+          "description": "What DefenseClaw does with a tool call that sends data to a destination the user's task does not name (INTENT-SCOPE-SEND): shadow records it in a judge event and a log line and leaves the verdict alone, off does not look. Empty is the built-in default (shadow). The lane is shadow-only in 1.0.10. Releases before 1.0.10 refuse this key."
+        },
         "max_parallel": {
           "type": "integer",
           "minimum": 0,
@@ -1662,6 +2039,9 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
+        "cascade": {
+          "$ref": "#/$defs/cascadeScope"
+        },
         "mode": {
           "$ref": "#/$defs/guardrailModeOrInherit"
         },
@@ -1707,6 +2087,9 @@
       "additionalProperties": false,
       "description": "Named guardrail policy overrides for the subjects guardrail.profile_assignments selects. Precedence: profile.connectors[c], then the profile field, then guardrail.connectors[c], then the application_protection overlay, then guardrail.*. enabled and hook_fail_mode are not allowed: both are baked into the installed hooks.",
       "properties": {
+        "cascade": {
+          "$ref": "#/$defs/cascadeScope"
+        },
         "description": {
           "$ref": "#/$defs/boundedString"
         },
@@ -1750,6 +2133,220 @@
         "sandbox": {
           "description": "Tightens openshell.admin for the subjects of this profile; only request_access overrides.",
           "$ref": "#/$defs/openShellAdmin"
+        },
+        "routing": {
+          "description": "Tightens routing.admin for the subjects of this profile.",
+          "$ref": "#/$defs/routingPolicy"
+        }
+      }
+    },
+    "routingPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Tighten-only routing overlay (guardrail.profiles.<name>.routing).",
+      "properties": {
+        "allowed_aliases": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 256,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "description": "Limit routing to these routing.models aliases (intersected with every other layer)."
+        },
+        "denied_providers": {
+          "description": "Remove every alias of these providers.",
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 256,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          }
+        },
+        "default_alias": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "description": "Alias used when the classifier picks nothing that survives."
+        },
+        "categories": {
+          "type": "object",
+          "maxProperties": 256,
+          "propertyNames": {
+            "pattern": "^[a-z0-9][a-z0-9_.-]{0,63}$"
+          },
+          "additionalProperties": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "description": "Classifier category to alias."
+        },
+        "allow_user_override": {
+          "type": "boolean",
+          "description": "A request that names an allowed alias as its model keeps it; false from any layer wins."
+        }
+      }
+    },
+    "routingAdmin": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Organization routing floor; profiles only tighten it.",
+      "properties": {
+        "budget_store": {
+          "$ref": "#/$defs/routingBudgetStore"
+        },
+        "rules": {
+          "type": "array",
+          "maxItems": 256,
+          "description": "Per-subject routing rules. Every matching rule applies: a deny wins, allow lists intersect, the first matching default that survives is used.",
+          "items": {
+            "$ref": "#/$defs/routingAdminRule"
+          }
+        },
+        "budgets": {
+          "type": "array",
+          "maxItems": 64,
+          "description": "Spend limits per user, group or connector, counted on this device from the computed cost of agent calls.",
+          "items": {
+            "$ref": "#/$defs/routingBudget"
+          }
+        },
+        "visibility": {
+          "$ref": "#/$defs/routingVisibility"
+        },
+        "allowed_aliases": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 256,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "description": "Limit routing to these routing.models aliases (intersected with every other layer)."
+        },
+        "denied_providers": {
+          "description": "Remove every alias of these providers.",
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 256,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          }
+        },
+        "default_alias": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "description": "Alias used when the classifier picks nothing that survives."
+        },
+        "categories": {
+          "type": "object",
+          "maxProperties": 256,
+          "propertyNames": {
+            "pattern": "^[a-z0-9][a-z0-9_.-]{0,63}$"
+          },
+          "additionalProperties": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "description": "Classifier category to alias."
+        },
+        "allow_user_override": {
+          "type": "boolean",
+          "description": "A request that names an allowed alias as its model keeps it; false from any layer wins."
+        },
+        "locked": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "enum": [
+              "default_alias",
+              "categories",
+              "allow_user_override",
+              "classifier",
+              "models",
+              "min_confidence",
+              "on_classifier_error",
+              "sensitive",
+              "systemone",
+              "route_only",
+              "context"
+            ]
+          }
+        }
+      }
+    },
+    "routingBedrockAuth": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "How the gateway authenticates a routed Bedrock call.",
+      "properties": {
+        "region": {
+          "type": "string",
+          "maxLength": 64,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+        },
+        "auth": {
+          "type": "string",
+          "enum": [
+            "passthrough",
+            "profile",
+            "instance_role",
+            "iam_credentials"
+          ]
+        },
+        "profile": {
+          "$ref": "#/$defs/boundedString"
+        },
+        "access_key_env": {
+          "$ref": "#/$defs/envName"
+        },
+        "secret_key_env": {
+          "$ref": "#/$defs/envName"
+        },
+        "session_token_env": {
+          "$ref": "#/$defs/envName"
+        },
+        "access_key_credential": {"$ref": "#/$defs/credentialName"},
+        "secret_key_credential": {"$ref": "#/$defs/credentialName"},
+        "session_token_credential": {"$ref": "#/$defs/credentialName"}
+      }
+    },
+    "routingUpstream": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "base_url"
+      ],
+      "properties": {
+        "base_url": {
+          "$ref": "#/$defs/boundedString"
+        },
+        "api": {
+          "type": "string",
+          "enum": [
+            "chat",
+            "messages",
+            "responses",
+            "converse",
+            "invoke"
+          ]
+        },
+        "bedrock": {
+          "$ref": "#/$defs/routingBedrockAuth"
         }
       }
     },
@@ -1758,6 +2355,9 @@
       "additionalProperties": false,
       "description": "Per-connector overrides inside one guardrail profile. enabled and hook_fail_mode are not allowed: both are baked into the installed hooks.",
       "properties": {
+        "cascade": {
+          "$ref": "#/$defs/cascadeScope"
+        },
         "mode": {
           "$ref": "#/$defs/guardrailModeOrInherit"
         },
@@ -1809,6 +2409,47 @@
       "minProperties": 1,
       "description": "Subjects an assignment selects. Keys combine with AND, the values of one key with OR. Only verified identity facts are compared; headers, hook payloads and claimed facts never select a profile.",
       "properties": {
+        "substrate": {
+            "type": "object",
+            "additionalProperties": false,
+            "minProperties": 1,
+            "description": "Agent Substrate actors: atespaces (an atespace glob matches only atespaces DefenseClaw created or lists), templates (<atespace>/<template>) and verified workload principals. Never selects a host subject.",
+            "properties": {
+              "atespaces": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 4096,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 63,
+                  "pattern": "^[a-z0-9*?\\[\\]-]{1,63}$"
+                }
+              },
+              "templates": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 4096,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128,
+                  "pattern": "^[a-z0-9*?\\[\\]-]{1,63}/[a-z0-9*?\\[\\]-]{1,63}$"
+                }
+              },
+              "workloads": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 4096,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 512,
+                  "pattern": "^(?:[^*]+|[^*]*[:/][^*]+[:/]\\*)$"
+                }
+              }
+            }
+          },
         "groups": {
           "type": "array",
           "minItems": 1,
@@ -1852,6 +2493,9 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
+        "cascade": {
+          "$ref": "#/$defs/cascade"
+        },
         "enabled": {
           "type": "boolean"
         },
@@ -1918,6 +2562,18 @@
           "type": "integer",
           "minimum": 0,
           "maximum": 1073741824
+        },
+        "max_body_values": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100000000,
+          "description": "Most JSON values the guardrail proxy reads in one request body or reply event. A larger body is refused on managed and strict installs and forwarded with an alert otherwise. 0 means 400000."
+        },
+        "history_seen_max": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000,
+          "description": "Most history segments (earlier turns of a request) the guardrail proxy remembers as inspected per actor or session. A remembered segment is not inspected again; any other one is. 0 means 2048."
         },
         "rule_pack_dir": {
           "$ref": "#/$defs/boundedString",
@@ -1986,6 +2642,12 @@
         },
         "detection_strategy_tool_call": {
           "$ref": "#/$defs/detectionStrategyOrInherit"
+        },
+        "effects_rules_tier": {
+          "$ref": "#/$defs/effectsRulesTier"
+        },
+        "secret_flow": {
+          "$ref": "#/$defs/secretFlow"
         },
         "judge_sweep": {
           "type": "boolean"
@@ -3193,6 +3855,12 @@
         "connectors": {
           "$ref": "#/$defs/connectorObservabilityMap"
         },
+        "tokenomics": {
+          "$ref": "#/$defs/tokenomics"
+        },
+        "pricing": {
+          "$ref": "#/$defs/pricing"
+        },
         "local": {
           "$ref": "#/$defs/localStore"
         },
@@ -3571,6 +4239,239 @@
         }
       }
     },
+    "tokenomics": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Per-call model usage records, cost and the local usage aggregate. Off by default; an absent block is the pre-1.0.10 behaviour.",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Master switch. Off: no usage record, no store, no goroutine."
+        },
+        "record_routing_provenance": {
+          "type": "boolean",
+          "default": true,
+          "description": "Put requested and selected model, route decision and profile on each usage record."
+        },
+        "roles": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "agent",
+              "judge",
+              "decision_model",
+              "ai_defense",
+              "router_classifier"
+            ]
+          },
+          "description": "Call roles to record. Empty or absent: all."
+        },
+        "native_otel_import": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "claudecode": {
+              "type": "boolean",
+              "default": true,
+              "description": "Import per-call usage from the Claude Code OTLP stream (cross-check only while the proxy carries the connector)."
+            },
+            "codex": {
+              "type": "boolean",
+              "default": true,
+              "description": "Import per-call usage from the Codex OTLP stream (cross-check only while the proxy carries the connector)."
+            }
+          }
+        },
+        "cost": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "compute": {
+              "type": "boolean",
+              "default": true,
+              "description": "Compute cost from observability.pricing."
+            },
+            "currency": {
+              "const": "USD",
+              "default": "USD"
+            },
+            "keep_reported": {
+              "type": "boolean",
+              "default": true,
+              "description": "Keep a per-call provider or agent reported cost and mark its basis as reported."
+            }
+          }
+        },
+        "local_store": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": false,
+              "description": "Keep an hourly usage aggregate in <data_dir>/model_usage/model_usage.db for the usage API and status."
+            },
+            "retention_days": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 3650,
+              "default": 30
+            },
+            "granularity": {
+              "const": "hour",
+              "default": "hour"
+            }
+          }
+        },
+        "metrics": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "labels": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {
+                "enum": [
+                  "connector",
+                  "provider",
+                  "model",
+                  "route_decision",
+                  "call_role",
+                  "profile"
+                ]
+              },
+              "description": "Labels on defenseclaw.model.cost and defenseclaw.model.tokens. A closed set: identity labels are refused."
+            }
+          }
+        }
+      }
+    },
+    "pricing": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Versioned price table. The gateway prices only from this table; no price is compiled into a binary. Managed hosts take it from the admin config in the signed bundle.",
+      "properties": {
+        "version": {
+          "type": "string",
+          "maxLength": 64,
+          "description": "Table version stamped on every record. Required when models are listed."
+        },
+        "models": {
+          "type": "array",
+          "maxItems": 2000,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "provider",
+              "model",
+              "input_per_mtok",
+              "output_per_mtok"
+            ],
+            "properties": {
+              "provider": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "model": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256,
+                "description": "Exact model id, or a prefix ending in * (longest prefix wins)."
+              },
+              "input_per_mtok": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 100000,
+                "description": "USD per million input tokens (uncached)."
+              },
+              "output_per_mtok": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 100000,
+                "description": "USD per million output tokens (reasoning included unless reasoning_per_mtok is set)."
+              },
+              "cache_read_per_mtok": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 100000,
+                "description": "USD per million cache-read input tokens. Absent: priced at input_per_mtok."
+              },
+              "cache_write_per_mtok": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 100000,
+                "description": "USD per million cache-creation input tokens. Absent: priced at input_per_mtok."
+              },
+              "reasoning_per_mtok": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 100000,
+                "description": "USD per million reasoning output tokens. Absent: priced at output_per_mtok."
+              }
+            }
+          }
+        },
+        "ai_defense": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "per_call_usd": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 100000
+            }
+          }
+        },
+        "unknown_model": {
+          "enum": [
+            "omit",
+            "fallback"
+          ],
+          "default": "omit",
+          "description": "omit: a model without a price entry has no cost. fallback: price it with fallback."
+        },
+        "fallback": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "input_per_mtok": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 100000,
+              "description": "USD per million input tokens (uncached)."
+            },
+            "output_per_mtok": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 100000,
+              "description": "USD per million output tokens (reasoning included unless reasoning_per_mtok is set)."
+            },
+            "cache_read_per_mtok": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 100000,
+              "description": "USD per million cache-read input tokens. Absent: priced at input_per_mtok."
+            },
+            "cache_write_per_mtok": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 100000,
+              "description": "USD per million cache-creation input tokens. Absent: priced at input_per_mtok."
+            },
+            "reasoning_per_mtok": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 100000,
+              "description": "USD per million reasoning output tokens. Absent: priced at output_per_mtok."
+            }
+          }
+        }
+      }
+    },
     "localStore": {
       "type": "object",
       "additionalProperties": false,
@@ -3596,6 +4497,18 @@
           "maximum": 1048576,
           "default": 0,
           "description": "Opt-in size cap for the audit database in MiB. 0 (the default) keeps retention by days only. A value from 64 to 1048576 (1 to 63 are refused) makes each retention run also delete the oldest history, through the same path as retention_days, until the used pages of the audit database are under the cap; the newest hour is always kept. Releases before 1.0.6 refuse this key: remove it before going back with defenseclaw upgrade --version (defenseclaw rollback restores the previous configuration)."
+        },
+        "keep_rejected_records": {
+          "type": "boolean",
+          "default": false,
+          "description": "Opt-in. When true, each record the v8 schema gate refuses (a field value outside its family contract) is also kept in the rejected_records table of the audit database: time, signal, family, event name, reason code, the failing field and a copy of its fields redacted with, per field class, the stricter of the sensitive profile and the local profile of the record's bucket (at most 16 KiB per record; larger copies keep only the field names). Until the gateway redacts it, the copy is held in its memory only. The gateway writes them off the producer path through a bounded queue that drops and counts when full; each run of the store (from turning it on, or a reload that keeps it on, to the next) keeps at most rejected_records_max_rows rows. retention_days and max_store_mb prune the table with the other history. false (the default) only counts refused records and starts no writer. Read them with defenseclaw audit rejected. Not used on Secure Client. Releases before 1.0.10 refuse this key: remove it before going back with defenseclaw upgrade --version (defenseclaw rollback restores the previous configuration). Those releases also neither prune nor show the table, while their max_store_mb pass counts its pages: before going back, keep the store on with rejected_records_max_rows: 100 until the gateway has applied it (it trims the table at once), then remove both keys (or, with the gateway stopped, delete the rows with sqlite3 audit.db 'DELETE FROM rejected_records')."
+        },
+        "rejected_records_max_rows": {
+          "type": "integer",
+          "minimum": 100,
+          "maximum": 1000000,
+          "default": 10000,
+          "description": "Row cap of the rejected-record store (keep_rejected_records): the writer deletes the oldest rows past it in small batches, at once when a reload lowers it, and one run of the store queues at most this many rows. Ignored while keep_rejected_records is false. Releases before 1.0.10 refuse this key."
         }
       },
       "x-defenseclaw-semantic-constraint": "The two database paths must be distinct from each other and every other configured file after lexical, real-path, symlink, hard-link, and inode checks."
@@ -3728,6 +4641,7 @@
         },
         "listen": {
           "type": "string",
+          "description": "A loopback `host:port` (`127.0.0.1`, `[::1]` or `localhost`): the page has no authentication, so another address is refused at load.",
           "minLength": 1,
           "maxLength": 512
         },
@@ -4667,10 +5581,353 @@
         "CRITICAL"
       ]
     },
+    "routingAdminRule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "match"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$"
+        },
+        "match": {
+          "$ref": "#/$defs/routingAdminMatch"
+        },
+        "action": {
+          "type": "string",
+          "enum": [
+            "constrain",
+            "deny"
+          ],
+          "description": "constrain (default) narrows the models; deny refuses the request on a managed device."
+        },
+        "allow": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 256,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "description": "routing.models aliases the matched requests may use; a request that is not routed must use one of them too."
+        },
+        "default": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "description": "Alias used when nothing else the caller may use was chosen; must be in allow when allow is set."
+        },
+        "message": {
+          "type": "string",
+          "maxLength": 512,
+          "pattern": "^[^\\x00-\\x1f\\x7f]*$",
+          "description": "Refusal text of a deny rule: one line, at most 512 characters."
+        }
+      },
+      "if": {
+        "required": [
+          "action"
+        ],
+        "properties": {
+          "action": {
+            "const": "deny"
+          }
+        }
+      },
+      "then": {
+        "not": {
+          "anyOf": [
+            {
+              "required": [
+                "allow"
+              ]
+            },
+            {
+              "required": [
+                "default"
+              ]
+            }
+          ]
+        }
+      },
+      "else": {
+        "anyOf": [
+          {
+            "required": [
+              "allow"
+            ]
+          },
+          {
+            "required": [
+              "default"
+            ]
+          }
+        ],
+        "not": {
+          "required": [
+            "message"
+          ]
+        }
+      }
+    },
+    "routingAdminMatch": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "description": "Requests a rule selects. Keys combine with AND, the values of one key with OR. groups, users and agents compare against a verified caller only.",
+      "properties": {
+        "groups": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 4096,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512,
+            "pattern": "\\S"
+          }
+        },
+        "users": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 4096,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512,
+            "pattern": "\\S"
+          }
+        },
+        "connectors": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 256,
+          "items": {
+            "$ref": "#/$defs/connectorName"
+          }
+        },
+        "agents": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 4096,
+          "items": {
+            "type": "string",
+            "pattern": "^agt-[0-9a-f]{16}$"
+          }
+        },
+        "categories": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 256,
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9_.-]{0,63}$"
+          }
+        },
+        "severity_at_least": {
+          "type": "string",
+          "pattern": "^([Cc][Rr][Ii][Tt][Ii][Cc][Aa][Ll]|[Hh][Ii][Gg][Hh]|[Mm][Ee][Dd][Ii][Uu][Mm]|[Ll][Oo][Ww])$",
+          "description": "LOW, MEDIUM, HIGH or CRITICAL, in any case."
+        }
+      }
+    },
+    "routingBudget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "scope",
+        "subject",
+        "period",
+        "limit_usd",
+        "on_exceed"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$"
+        },
+        "scope": {
+          "type": "string",
+          "enum": [
+            "user",
+            "group",
+            "connector"
+          ]
+        },
+        "subject": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "pattern": "^\\S(.*\\S)?$",
+          "description": "user: a users entry or * (each user its own limit); group: one groups entry (pooled); connector: a connector name or *."
+        },
+        "period": {
+          "type": "string",
+          "enum": [
+            "day",
+            "week",
+            "month"
+          ],
+          "description": "UTC calendar window; a week starts Monday."
+        },
+        "limit_usd": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 10000000
+        },
+        "on_exceed": {
+          "type": "string",
+          "pattern": "^(warn|deny|downgrade:[^,\\s]+(,[^,\\s]+)*)$",
+          "description": "warn, deny (managed devices only; OSS reports it) or downgrade:<alias>[,<alias>...]."
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "scope": {
+                "const": "group"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "subject": {
+                "not": {
+                  "const": "*"
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "scope": {
+                "const": "connector"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "subject": {
+                "pattern": "^(\\*|[A-Za-z0-9][A-Za-z0-9._-]{0,127})$"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "routingVisibility": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "users_see": {
+          "type": "string",
+          "enum": [
+            "own",
+            "none"
+          ],
+          "description": "own (default): a user reads only their own usage; none: only administrators read usage."
+        }
+      }
+    },
+    "routingBudgetStore": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Opt-in fleet budget store (defenseclaw-gateway budget-store serve). Absent: budgets count on each device. Each device uses its own credential (budget-store device issue, installed by MDM) and sends only the pseudonymous charge keys it was issued, UTC days and dollar amounts, over HTTPS.",
+      "properties": {
+        "url": {
+          "type": "string",
+          "maxLength": 2048,
+          "pattern": "^https://[^/?#@\\s]+/?$",
+          "description": "https://host[:port] of the store."
+        },
+        "credential": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "description": "Protected credential with this device's own credential; default routing-budget-store-device."
+        },
+        "ca_file": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 4096,
+          "pattern": "^(/|[A-Za-z]:[\\\\/])",
+          "description": "PEM file of the only CA trusted for the store; empty: the system roots."
+        },
+        "sync_interval": {
+          "type": "string",
+          "pattern": "^[0-9]+(ms|s|m)$",
+          "description": "How often a device sends its spend and reads the fleet's: 10s to 10m (default 30s)."
+        },
+        "timeout_ms": {
+          "type": "integer",
+          "minimum": 100,
+          "maximum": 10000
+        },
+        "server": {
+          "$ref": "#/$defs/routingBudgetStoreServer"
+        }
+      }
+    },
+    "routingBudgetStoreServer": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Read only by budget-store serve on the store host; refused in a device config.",
+      "required": [
+        "listen",
+        "tls_cert_file",
+        "tls_key_file",
+        "db_path"
+      ],
+      "properties": {
+        "listen": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 256
+        },
+        "tls_cert_file": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 4096,
+          "pattern": "^(/|[A-Za-z]:[\\\\/])"
+        },
+        "tls_key_file": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 4096,
+          "pattern": "^(/|[A-Za-z]:[\\\\/])"
+        },
+        "db_path": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 4096,
+          "pattern": "^(/|[A-Za-z]:[\\\\/])"
+        },
+        "rate_limit_per_minute": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100000,
+          "description": "Requests per device per minute (default 600)."
+        },
+        "device_daily_cap_usd": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 10000000,
+          "description": "Spend one device may add per UTC day (default 500)."
+        }
+      }
+    },
     "routing": {
       "type": "object",
       "additionalProperties": false,
-      "description": "Semantic model router configuration for intelligent LLM request routing via vLLM Semantic Router sidecar.",
+      "description": "Semantic model routing: the in-process rules classifier, System One or the vLLM Semantic Router, profile and admin routing policy, and route-only mode for hook connectors.",
       "allOf": [
         {
           "if": {
@@ -4696,6 +5953,199 @@
         }
       ],
       "properties": {
+        "classifier": {
+          "type": "string",
+          "enum": [
+            "rules",
+            "systemone",
+            "vllm_sr"
+          ],
+          "description": "Router classifier; absent = vllm_sr (1.0.9 meaning)."
+        },
+        "min_confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "on_classifier_error": {
+          "type": "string",
+          "enum": [
+            "original",
+            "rules"
+          ]
+        },
+        "default_alias": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "categories": {
+          "type": "object",
+          "maxProperties": 256,
+          "propertyNames": {
+            "pattern": "^[a-z0-9][a-z0-9_.-]{0,63}$"
+          },
+          "additionalProperties": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          }
+        },
+        "allow_user_override": {
+          "type": "boolean"
+        },
+        "sensitive": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["aliases"],
+          "anyOf": [{"required": ["severity_at_least"]}, {"required": ["signals"]}, {"required": ["check"], "properties": {"check": {"enum": ["auto", "decision_model", "judge"]}}}],
+          "properties": {
+            "check": {
+              "type": "string",
+              "enum": ["off", "auto", "decision_model", "judge"],
+              "description": "One bounded yes/no sensitive-data question per request to the decision model or the judge, besides the regex floor (off by default)."
+            },
+            "on_unavailable": {
+              "type": "string",
+              "enum": ["local", "ignore"],
+              "description": "A check that failed or timed out: local (default) routes to the sensitive aliases, ignore keeps the floor-only decision. Never a block."
+            },
+            "timeout_ms": {
+              "type": "integer",
+              "anyOf": [{"const": 0}, {"minimum": 50, "maximum": 5000}],
+              "description": "0 means the default."
+            },
+            "max_bytes": {
+              "type": "integer",
+              "anyOf": [{"const": 0}, {"minimum": 256, "maximum": 65536}],
+              "description": "0 means the default."
+            },
+            "definition": {
+              "type": "string",
+              "maxLength": 1024,
+              "pattern": "^[^\u0000-\u0008\u000b-\u001f]*$"
+            },
+            "signals": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              }
+            },
+            "severity_at_least": {
+              "type": "string",
+              "enum": [
+                "LOW",
+                "MEDIUM",
+                "HIGH",
+                "CRITICAL",
+                "low",
+                "medium",
+                "high",
+                "critical"
+              ]
+            },
+            "aliases": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 256,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              }
+            }
+          }
+        },
+        "systemone": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "use_decision_model": {
+              "type": "boolean"
+            },
+            "base_url": {
+              "$ref": "#/$defs/boundedString"
+            },
+            "model": {
+              "$ref": "#/$defs/boundedString"
+            },
+            "api_key_env": {
+              "$ref": "#/$defs/envName"
+            },
+            "credential": {"$ref": "#/$defs/credentialName"},
+            "timeout_ms": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1000
+            }
+          }
+        },
+        "route_only": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "connectors": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "enum": [
+                  "claudecode",
+                  "codex"
+                ]
+              }
+            },
+            "upstreams": {
+              "type": "object",
+              "propertyNames": {
+                "enum": [
+                  "claudecode",
+                  "codex"
+                ]
+              },
+              "additionalProperties": {
+                "$ref": "#/$defs/routingUpstream"
+              }
+            }
+          }
+        },
+        "admin": {
+          "$ref": "#/$defs/routingAdmin"
+        },
+        "context": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Bounded recent context for the router: older human-typed user turns and tool names (never tool results, assistant or system text). Absent or zero = the newest user turn only.",
+          "properties": {
+            "recent_user_turns": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 8
+            },
+            "include_first_user_turn": {
+              "type": "boolean"
+            },
+            "max_bytes": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 65536
+            },
+            "per_turn_bytes": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 65536
+            },
+            "include_tool_names": {
+              "type": "boolean"
+            }
+          }
+        },
         "enabled": {
           "type": "boolean"
         },
@@ -4764,6 +6214,25 @@
               },
               "capabilities": {
                 "$ref": "#/$defs/stringList"
+              },
+              "apis": {
+                "type": "array",
+                "minItems": 1,
+                "uniqueItems": true,
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "chat",
+                    "messages",
+                    "responses",
+                    "converse",
+                    "invoke"
+                  ]
+                }
+              },
+              "credential": {"$ref": "#/$defs/credentialName"},
+              "bedrock": {
+                "$ref": "#/$defs/routingBedrockAuth"
               }
             }
           }
@@ -4845,7 +6314,10 @@
                       "type": "string",
                       "enum": [
                         "keyword",
-                        "KEYWORD"
+                        "KEYWORD",
+                        "connector",
+                        "api_family",
+                        "request"
                       ]
                     },
                     "name": {
@@ -6243,6 +7715,735 @@
               "type": "string",
               "pattern": "^[a-z][a-z0-9_-]{0,31}$",
               "description": "Label of the calling gateway in audit on a per-user install."
+            }
+          }
+        },
+        "openclaw": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "OpenClaw connector trust settings (1.0.10). Absent keeps the 1.0.9 behaviour. Requires min_product_version 1.0.10 in a bundle.",
+          "properties": {
+            "plugin_install": {"type": "string", "enum": ["managed", "external"], "default": "managed", "description": "managed: DefenseClaw writes its plugin into <claw.home_dir>/extensions/defenseclaw. external: an administrator installed it at plugin_dir; DefenseClaw checks its files equal this build and never writes or deletes them."},
+            "plugin_dir": {"$ref": "#/$defs/pathString", "description": "Absolute path of the administrator-installed plugin (plugin_install: external only)."},
+            "operator_admin": {"type": "boolean", "default": true, "description": "Request the OpenClaw operator.admin scope (used only to turn off a skill, plugin or MCP server through OpenClaw). false keeps read, write and approvals."},
+            "plugin_account": {"type": "string", "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}$", "description": "OS account of the OpenClaw gateway when it is not the sidecar account (separate-user layout)."},
+            "plugin_token_file": {"$ref": "#/$defs/pathString", "description": "Separate-user layout: where the sidecar publishes the plugin credential for plugin_account."},
+            "plugin_token_group": {"type": "string", "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}$", "description": "Separate-user layout (Linux, macOS): group allowed to read plugin_token_file."},
+            "hooks": {
+              "type": "object",
+              "additionalProperties": false,
+              "description": "OpenClaw native plugin hooks.",
+              "properties": {
+                "mode": {"type": "string", "enum": ["auto", "proxy"], "default": "auto", "description": "auto: native plugin hooks on OpenClaw 2026.8.35 and later (with the guardrail proxy on Linux and macOS, alone on Windows), the guardrail proxy below that release. proxy: the 1.0.9 behaviour (not on Windows)."},
+                "prompt_gate": {"type": "boolean", "default": false, "description": "Inspect every user prompt in before_agent_run before the model reads it; blocks it in action mode."}
+              }
+            },
+            "install_policy": {"type": "string", "enum": ["auto", "on", "off"], "default": "auto", "description": "Register DefenseClaw as OpenClaw security.installPolicy (OpenClaw 2026.8.35 and later), so OpenClaw asks DefenseClaw admission before a skill or plugin install or update. auto: on in the strict tier and on managed installs, off in the default and permissive tiers."}
+          }
+        }
+      }
+    },
+    "substrate": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "DefenseClaw on Agent Substrate (cluster only; off by default).",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false
+        },
+        "api": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "address": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512,
+              "default": "api.ate-system.svc:443"
+            },
+            "server_name": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 253
+            },
+            "ca_file": {
+              "$ref": "#/$defs/pathString"
+            },
+            "auth": {
+              "type": "string",
+              "enum": [
+                "serviceaccount",
+                "mtls"
+              ],
+              "default": "serviceaccount"
+            },
+            "token_file": {
+              "$ref": "#/$defs/pathString"
+            },
+            "credential_bundle": {
+              "$ref": "#/$defs/pathString"
+            }
+          }
+        },
+        "supported_versions": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "default": ">=1.0.0 <1.1.0"
+        },
+        "identity": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "issuer": {
+              "type": "string",
+              "pattern": "^https://",
+              "maxLength": 2048
+            },
+            "audience": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512,
+              "default": "defenseclaw"
+            },
+            "token_lifetime_seconds": {
+              "type": "integer",
+              "minimum": 300,
+              "maximum": 300,
+              "default": 300
+            },
+            "actor_cert_oid": {
+              "type": "string",
+              "pattern": "^[0-2](\\.(0|[1-9][0-9]*))+$",
+              "default": "1.3.6.1.4.1.11129.2.12.2"
+            },
+            "keys_url": {
+              "type": "string",
+              "pattern": "^https://[^?#]+$",
+              "maxLength": 2048
+            },
+            "keys_ca_file": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            },
+            "oidc": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "issuer": {
+                  "type": "string",
+                  "pattern": "^https://",
+                  "maxLength": 2048
+                },
+                "client_id": {
+                  "$ref": "#/$defs/boundedString"
+                },
+                "groups_claim": {
+                  "$ref": "#/$defs/boundedString"
+                }
+              }
+            },
+            "admin_groups": {
+              "type": "array",
+              "maxItems": 256,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256
+              }
+            },
+            "workload_oidc": {
+              "type": "array",
+              "maxItems": 64,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "issuer",
+                  "audience"
+                ],
+                "properties": {
+                  "issuer": {
+                    "type": "string",
+                    "pattern": "^https://",
+                    "maxLength": 2048
+                  },
+                  "audience": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 512
+                  },
+                  "subject": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 1024,
+                    "pattern": "^(?:[^*]+|[^*]*[:/][^*]+[:/]\\*)$"
+                  },
+                  "claims": {
+                    "type": "object",
+                    "minProperties": 1,
+                    "maxProperties": 16,
+                    "additionalProperties": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 1024
+                    }
+                  }
+                },
+                "anyOf": [
+                  {
+                    "required": [
+                      "subject"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "claims"
+                    ]
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "services": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "actor": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 253
+            },
+            "admin": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 253
+            }
+          }
+        },
+        "launcher_atespaces": {
+          "type": "object",
+          "maxProperties": 1024,
+          "additionalProperties": {
+            "type": "array",
+            "maxItems": 1024,
+            "items": {
+              "type": "string",
+              "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$",
+              "maxLength": 63
+            }
+          }
+        },
+        "require_attested_templates": {
+          "type": "boolean",
+          "default": true
+        },
+        "templates": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "trust_anchors": {
+              "type": "string",
+              "default": "/etc/defenseclaw/substrate/template-anchors/anchors.pem"
+            },
+            "min_policy_generation": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "max_age": {
+              "$ref": "#/$defs/duration"
+            },
+            "allow_unverified_base": {
+              "type": "boolean",
+              "default": false
+            },
+            "allowed_images": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "profile_images": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "volume_images": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "plain_http_registries": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "revoked_digests": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "pattern": "^sha256:[0-9a-f]{64}$"
+              }
+            },
+            "registry_auth": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "docker_config": {
+                  "type": "string",
+                  "maxLength": 4096
+                },
+                "ecr_hosts": {
+                  "type": "array",
+                  "maxItems": 64,
+                  "items": {
+                    "type": "string",
+                    "pattern": "^[0-9]{12}\\.dkr\\.ecr(-fips)?\\.[a-z]{2}(-[a-z]+)+-[0-9]+\\.amazonaws\\.com(\\.cn)?$"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "default_sandbox_class": {
+          "type": "string",
+          "enum": [
+            "gvisor",
+            "microvm"
+          ],
+          "default": "gvisor"
+        },
+        "idle_suspend_after": {
+          "$ref": "#/$defs/duration"
+        },
+        "idle_suspend_without_cpu": {
+          "description": "Opt-in: when the controller has no CPU feed (no --usage-listen), silence alone is idle, an attached actor's too. Off (default), such a controller never suspends an actor with a terminal attached (GAP-0534).",
+          "type": "boolean",
+          "default": false
+        },
+        "chain_egress_action": {
+          "description": "What a request that leaves the cluster after a secret read gets at the egress callout: block (default, every mode) or alert (opt-in). The leader answers the callout's chain check with it (GAP-0250).",
+          "type": "string",
+          "enum": [
+            "block",
+            "alert"
+          ],
+          "default": "block"
+        },
+        "workspace_max_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 68719476736
+        },
+        "unattended": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "asks": {
+              "type": "string",
+              "enum": [
+                "deny",
+                "queue"
+              ],
+              "default": "deny"
+            },
+            "ask_timeout": {
+              "$ref": "#/$defs/duration"
+            },
+            "telemetry_sampling": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1,
+              "default": 1.0
+            }
+          }
+        },
+        "rate_limits": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "per_actor_rps": {
+              "type": "number",
+              "minimum": 0,
+              "default": 20
+            },
+            "per_atespace_rps": {
+              "type": "number",
+              "minimum": 0,
+              "default": 500
+            }
+          }
+        },
+        "extproc": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": true
+            },
+            "failure_mode": {
+              "type": "string",
+              "enum": [
+                "closed",
+                "open"
+              ],
+              "default": "closed"
+            },
+            "body_inspection": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "on",
+                "off"
+              ],
+              "default": "auto"
+            },
+            "body_max_bytes": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1048576,
+              "default": 1048576
+            },
+            "mcp_hosts": {
+              "type": "array",
+              "maxItems": 1024,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              }
+            },
+            "body_hosts": {
+              "type": "array",
+              "maxItems": 1024,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 253
+              }
+            },
+            "cluster_domains": {
+              "type": "array",
+              "maxItems": 64,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 253
+              }
+            },
+            "actor_trust_domain": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 253
+            },
+            "egress_peers": {
+              "type": "array",
+              "maxItems": 64,
+              "items": {
+                "type": "string",
+                "pattern": "^spiffe://",
+                "maxLength": 2048
+              }
+            },
+            "request_access": {
+              "$ref": "#/$defs/boundedString"
+            },
+            "log_headers": {
+              "type": "boolean",
+              "default": false
+            },
+            "redact_headers": {
+              "type": "array",
+              "maxItems": 256,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256
+              }
+            },
+            "blocklist_files": {
+              "type": "array",
+              "maxItems": 64,
+              "items": {
+                "$ref": "#/$defs/pathString"
+              }
+            },
+            "actor_secrets_dir": {
+              "$ref": "#/$defs/pathString"
+            },
+            "uid": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "cache_ttl": {
+                  "$ref": "#/$defs/duration"
+                },
+                "stale_max": {
+                  "$ref": "#/$defs/duration"
+                }
+              }
+            },
+            "chain": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "check_budget": {
+                  "$ref": "#/$defs/duration"
+                },
+                "send_budget": {
+                  "$ref": "#/$defs/duration"
+                },
+                "queue_size": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 1048576,
+                  "default": 4096
+                },
+                "failure_mode": {
+                  "type": "string",
+                  "enum": ["auto", "closed", "open"],
+                  "default": "auto"
+                }
+              }
+            },
+            "ask": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "hold": {
+                  "$ref": "#/$defs/duration"
+                }
+              }
+            },
+            "judge": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "url": {
+                  "type": "string",
+                  "pattern": "^https://",
+                  "maxLength": 2048
+                },
+                "token_file": {
+                  "$ref": "#/$defs/pathString"
+                },
+                "ca_file": {
+                  "$ref": "#/$defs/pathString"
+                },
+                "timeout": {
+                  "$ref": "#/$defs/duration"
+                }
+              }
+            },
+            "dlp": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "credential_headers": {
+                  "type": "string",
+                  "enum": [
+                    "alert",
+                    "deny"
+                  ],
+                  "default": "alert"
+                }
+              }
+            }
+          }
+        },
+        "llm": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "providers": {
+              "type": "array",
+              "maxItems": 64,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              }
+            },
+            "credential": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "provider_uri": {
+                  "type": "string",
+                  "pattern": "^ate-secret://",
+                  "maxLength": 2048
+                }
+              }
+            },
+            "bedrock_models": {
+              "type": "array",
+              "maxItems": 64,
+              "items": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9._:-]{1,256}$"
+              }
+            }
+          }
+        },
+        "egress": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "allow": {
+              "type": "array",
+              "maxItems": 1024,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 253
+              }
+            },
+            "ecosystem_packs": {
+              "type": "array",
+              "maxItems": 16,
+              "items": {
+                "type": "string",
+                "enum": [
+                  "crates",
+                  "go",
+                  "npm",
+                  "pypi"
+                ]
+              }
+            },
+            "registries": {
+              "type": "array",
+              "maxItems": 1024,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 253
+              }
+            }
+          }
+        },
+        "secrets": {
+          "type": "array",
+          "maxItems": 1024,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "name",
+              "source",
+              "inject",
+              "profiles"
+            ],
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 253
+              },
+              "source": {
+                "type": "string",
+                "pattern": "^ate-secret://",
+                "maxLength": 2048
+              },
+              "inject": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "hosts",
+                  "header"
+                ],
+                "properties": {
+                  "hosts": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 256,
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 253
+                    }
+                  },
+                  "header": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256
+                  },
+                  "prefix": {
+                    "type": "string",
+                    "maxLength": 256
+                  },
+                  "placeholder": {
+                    "type": "string",
+                    "pattern": "^[A-Z_][A-Z0-9_]*$"
+                  }
+                }
+              },
+              "scope": {
+                "type": "string",
+                "enum": [
+                  "shared",
+                  "per_person"
+                ],
+                "default": "shared"
+              },
+              "profiles": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 256,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 256
+                }
+              }
+            }
+          }
+        },
+        "allow_passthrough_for": {
+          "type": "array",
+          "maxItems": 1024,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 253
+          }
+        },
+        "admin": {
+          "$ref": "#/$defs/openShellAdmin"
+        },
+        "bundles": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": false
+            },
+            "anchors_file": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096,
+              "default": "/etc/defenseclaw-substrate/bundle-anchors/bundle-anchors.json"
+            },
+            "inbox": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 253,
+              "default": "defenseclaw-bundle-inbox"
+            },
+            "refresh_interval": {
+              "$ref": "#/$defs/duration"
             }
           }
         }

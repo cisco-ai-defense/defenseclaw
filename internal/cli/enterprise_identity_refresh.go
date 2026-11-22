@@ -20,7 +20,9 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 )
 
 // `enterprise identity refresh`: a root or SYSTEM management
@@ -51,7 +53,7 @@ var (
 	// named account only when name is set, else all of it.
 	identityRefreshFlushOSCache = identityRefreshPlatformFlushOSCache
 	identityRefreshPost         = enterpriseGatewayPost
-	identityRefreshSecureClient = func() bool { return secureClientHost() }
+	identityRefreshSecureClient = func() bool { return hookcli.SecureClientHost() }
 )
 
 type identityRefreshOptions struct {
@@ -129,7 +131,7 @@ func newEnterpriseIdentityCommand() *cobra.Command {
 		Use:   "identity",
 		Short: "Re-read the directory facts of a standalone managed deployment",
 		// Secure Client computers keep the command tree of main.
-		Annotations:       map[string]string{secureClientAbsentAnnotation: "true"},
+		Annotations:       map[string]string{hookcli.SecureClientAbsentAnnotation: "true"},
 		PersistentPreRunE: func(*cobra.Command, []string) error { return nil },
 	}
 	group.AddCommand(newEnterpriseIdentityRefreshCommand())
@@ -186,7 +188,7 @@ func runEnterpriseIdentityRefresh(cmd *cobra.Command, opts *identityRefreshOptio
 	fail := func(code, message string, exit int) error {
 		res.Errors = append(res.Errors, enterprisestatus.Message{Code: code, Message: message})
 		res.ExitCode = exit
-		return printIdentityRefresh(cmd, opts, res, withExitCode(errors.New(code+": "+message), exit))
+		return printIdentityRefresh(cmd, opts, res, cliusage.WithExitCode(errors.New(code+": "+message), exit))
 	}
 	// Refuse first: a standard user learns nothing about any account.
 	if !identityRefreshPrivileged() {

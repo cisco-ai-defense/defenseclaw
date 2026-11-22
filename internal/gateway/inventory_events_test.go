@@ -78,7 +78,7 @@ func (*endpointInventoryPluginConnector) Route(
 ) (*connector.ConnectorSignals, error) {
 	return &connector.ConnectorSignals{}, nil
 }
-func (*endpointInventoryPluginConnector) SetCredentials(string, string) {}
+func (*endpointInventoryPluginConnector) SetCredentials(string) {}
 func (*endpointInventoryPluginConnector) VerifyClean(connector.SetupOpts) error {
 	return nil
 }
@@ -726,6 +726,205 @@ drain:
 	}
 }
 
+func TestPerConnectorMCPInventoryMarksMalformedDaemonCodexConfigPartial(t *testing.T) {
+	withManagedEnterprise(t, true)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	codexHome := filepath.Join(home, ".codex")
+	if err := os.MkdirAll(codexHome, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CODEX_HOME", codexHome)
+	path := filepath.Join(codexHome, "config.toml")
+	if err := os.WriteFile(path, []byte("[mcp_servers"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	registry := connector.NewRegistry()
+	if err := registry.RegisterPlugin(&endpointInventoryPluginConnector{name: "codex", description: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{}
+	rows, partial := perConnectorMCPEntriesWithStatus(cfg, registry)
+	if !partial || len(rows) != 0 {
+		t.Fatalf("malformed daemon Codex config: rows=%+v partial=%v", rows, partial)
+	}
+	workspace := t.TempDir()
+	projectDir := filepath.Join(workspace, ".codex")
+	if err := os.MkdirAll(projectDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(projectDir, "config.toml"), []byte("[mcp_servers.project]\ncommand = \"uvx\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Claw.WorkspaceDir = workspace
+	rows, partial = perConnectorMCPEntriesWithStatus(cfg, registry)
+	if !partial || len(rows) != 1 || rows[0].itemName != "project" {
+		t.Fatalf("valid project entry with malformed user config: rows=%+v partial=%v", rows, partial)
+	}
+	cfg.Claw.WorkspaceDir = ""
+	if err := os.WriteFile(path, []byte("[mcp_servers.notes]\ncommand = \"node\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rows, partial = perConnectorMCPEntriesWithStatus(cfg, registry)
+	if partial || len(rows) != 1 || rows[0].itemName != "notes" {
+		t.Fatalf("repaired daemon Codex config: rows=%+v partial=%v", rows, partial)
+	}
+}
+
+func TestPerConnectorMCPInventoryScopesPartialStateByConnector(t *testing.T) {
+	withManagedEnterprise(t, true)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("CODEX_HOME", filepath.Join(t.TempDir(), ".codex"))
+	originalClaudeConfigDir := os.Getenv("CLAUDE_CONFIG_DIR")
+	t.Setenv("CLAUDE_CONFIG_DIR", originalClaudeConfigDir)
+	if err := os.Unsetenv("CLAUDE_CONFIG_DIR"); err != nil {
+		t.Fatal(err)
+	}
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, ".codex"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".codex", "config.toml"), []byte("[mcp_servers"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".claude.json"), []byte(`{"mcpServers":{"notes":{"command":"npx"},"docs":{"type":"http","url":"https://example.com/private/path?token=secret"}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	registry := connector.NewRegistry()
+	for _, name := range []string{"codex", "claudecode"} {
+		if err := registry.RegisterPlugin(&endpointInventoryPluginConnector{name: name, description: "test"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg := &config.Config{
+		AIDiscovery: config.AIDiscoveryConfig{HomeDirs: []string{home}},
+		Gateway:     config.GatewayConfig{Token: "test-identity-key"},
+	}
+	rows, status := perConnectorMCPEntriesWithReadStatus(cfg, registry)
+	if !status.partial {
+		t.Fatal("malformed Codex config did not mark the aggregate inventory partial")
+	}
+	if _, ok := status.incompleteConnectors["codex"]; !ok {
+		t.Fatalf("incomplete connectors=%v, want codex", status.incompleteConnectors)
+	}
+	if _, ok := status.incompleteConnectors["claudecode"]; ok {
+		t.Fatalf("valid Claude config inherited Codex partial state: %v", status.incompleteConnectors)
+	}
+	if got := completeConnectorMCPEntriesFromPartial(rows, nil); len(got) != 0 {
+		t.Fatalf("unattributed partial read exposed managed rows: %+v", got)
+	}
+	completeRows := completeConnectorMCPEntriesFromPartial(rows, status.incompleteConnectors)
+	if len(completeRows) != 2 {
+		t.Fatalf("complete Claude rows=%d, want 2: %+v", len(completeRows), completeRows)
+	}
+	for _, row := range completeRows {
+		if row.agentConnector != "claudecode" {
+			t.Fatalf("incomplete connector escaped managed subset: %+v", row)
+		}
+	}
+	var tools mcpToolInventory
+	tools.refreshCompleteParents(rows, status.incompleteConnectors)
+	if parent, recorded := tools.recordObserved("claudecode", "notes", "search", time.Now()); !recorded || parent == "" {
+		t.Fatalf("complete Claude inventory did not establish its parent: parent=%q recorded=%v rows=%+v", parent, recorded, rows)
+	}
+	capture := &endpointInventoryCapture{}
+	if err := emitEndpointInventory(t.Context(), cfg, registry, capture, false, nil, nil, &tools); err != nil {
+		t.Fatal(err)
+	}
+	managedServer := false
+	observedTool := false
+	for _, record := range capture.snapshot() {
+		if record.Action() != string(config.ObservabilityV8ManagedMCPInventoryAction) ||
+			record.EventName() != "ai_component.observed" {
+			continue
+		}
+		body, ok := record.Body()
+		if !ok {
+			continue
+		}
+		fields, err := body.Object()
+		if err != nil {
+			t.Fatal(err)
+		}
+		source, _ := fields[observability.TelemetryAttributeDefenseClawAIDiscoverySource].(string)
+		itemName, _ := fields[observability.TelemetryAttributeDefenseClawInventoryItemName].(string)
+		switch {
+		case source == "endpoint_per_connector_mcp_inventory" && itemName == "docs":
+			managedServer = true
+			if got := fields[observability.TelemetryAttributeDefenseClawInventoryMcpServerURL]; got != "https://example.com" {
+				t.Fatalf("managed Claude server URL=%v, want redacted origin", got)
+			}
+			encoded, err := json.Marshal(fields)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if bytes.Contains(encoded, []byte("token")) || bytes.Contains(encoded, []byte("secret")) || bytes.Contains(encoded, []byte("private/path")) {
+				t.Fatalf("managed Claude server leaked URL path or query: %s", encoded)
+			}
+		case source == "endpoint_local_mcp_observed_tool_inventory" && itemName == "search":
+			observedTool = true
+		}
+	}
+	if !managedServer {
+		t.Error("unrelated malformed Codex config suppressed managed Claude native-server inventory")
+	}
+	if !observedTool {
+		t.Error("unrelated malformed Codex config suppressed managed Claude observed-tool inventory")
+	}
+}
+
+func TestPreferNativeMCPInventory(t *testing.T) {
+	disabled := false
+	discovered := []endpointInventoryComponent{
+		{id: "shared", itemName: "thin-duplicate"},
+		{id: "discovery-only", itemName: "discovery-only"},
+	}
+	native := []endpointInventoryComponent{
+		{id: "shared", componentType: "mcp_server", itemName: "rich-native", mcpTransport: "stdio", mcpDisabled: &disabled},
+		{id: "native-only", componentType: "mcp_server", itemName: "native-only", mcpTransport: "http", mcpDisabled: &disabled},
+	}
+
+	complete := preferNativeMCPInventory(discovered, native, false)
+	if len(complete) != 1 || complete[0].id != "discovery-only" {
+		t.Fatalf("complete native scan did not suppress only the duplicate: %+v", complete)
+	}
+
+	partial := preferNativeMCPInventory(discovered, native, true)
+	if !reflect.DeepEqual(partial, discovered) {
+		t.Fatalf("partial native scan removed discovery fallback: %+v", partial)
+	}
+
+	invalid := append([]endpointInventoryComponent(nil), native...)
+	invalid[0].mcpDisabled = nil
+	if got := preferNativeMCPInventory(discovered, invalid, false); !reflect.DeepEqual(got, discovered) {
+		t.Fatalf("managed-ineligible native scan removed discovery fallback: %+v", got)
+	}
+}
+
+func TestPerConnectorMCPInventoryKeepsValidAmpRowsOnPartialRead(t *testing.T) {
+	home := t.TempDir()
+	settingsDir := filepath.Join(home, ".config", "amp")
+	skillDir := filepath.Join(home, ".agents", "skills", "bad")
+	for _, dir := range []string{settingsDir, skillDir} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for path, body := range map[string]string{
+		filepath.Join(settingsDir, "settings.json"): `{"amp.mcpServers":{"good":{"command":"node"}}}`,
+		filepath.Join(skillDir, "mcp.json"):         `{"bad":{"args":"invalid"}}`,
+	} {
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	groups, partial := readMCPServersUnderHomeForOSWithStatus("amp", home, runtime.GOOS)
+	if !partial || len(groups) != 1 || len(groups[0]) != 1 || groups[0][0].Name != "good" {
+		t.Fatalf("Amp partial read discarded valid rows: groups=%+v partial=%v", groups, partial)
+	}
+}
+
 func TestManagedAgentInventoryPersistsAndExportsWhenAgentLifecycleDisabled(t *testing.T) {
 	withManagedEnterprise(t, true)
 	runtime, path, adapter := newManagedAIDFailOpenRuntime(t)
@@ -965,7 +1164,7 @@ func TestEndpointMCPComponentsRetainOnlyBoundedIdentifiersBasenamesAndHosts(t *t
 			URL:       "https://user:password@mcp.example.com:8443/v1?token=secret#fragment",
 			Transport: "http", AuthProviderType: "oauth", Disabled: true,
 		},
-	})
+	}, []byte("0123456789abcdef0123456789abcdef"))
 	if len(components) != 1 {
 		t.Fatalf("components=%d want=1", len(components))
 	}
@@ -973,6 +1172,7 @@ func TestEndpointMCPComponentsRetainOnlyBoundedIdentifiersBasenamesAndHosts(t *t
 	if component.product != "payments-mcp" || component.itemName != "payments-mcp" ||
 		component.mcpTransport != "http" || component.mcpCommandBasename != "mcp-server" ||
 		component.mcpURLHost != "mcp.example.com:8443" || component.mcpAuthProviderType != "oauth" ||
+		component.mcpServerURL != "https://mcp.example.com:8443" ||
 		component.mcpDisabled == nil || !*component.mcpDisabled || component.active {
 		t.Fatalf("sanitized component=%+v", component)
 	}
@@ -980,11 +1180,202 @@ func TestEndpointMCPComponentsRetainOnlyBoundedIdentifiersBasenamesAndHosts(t *t
 		component.id, component.componentType, component.signal, component.product,
 		component.itemName, component.mcpTransport, component.mcpCommandBasename,
 		component.mcpURLHost, component.mcpAuthProviderType,
+		component.mcpServerURL,
 	}, " ")
 	for _, forbidden := range []string{"/Users/alice", "private", "password", "token", "secret", "--token"} {
 		if strings.Contains(joined, forbidden) {
 			t.Fatalf("canonical component leaked %q: %q", forbidden, joined)
 		}
+	}
+}
+
+func TestEndpointLocalMCPIdentityRemainsStableAcrossConfigurationChanges(t *testing.T) {
+	key := []byte("0123456789abcdef0123456789abcdef")
+	component := func(name, command string, args ...string) endpointInventoryComponent {
+		t.Helper()
+		components := endpointMCPComponentsFromServers([]config.MCPServerEntry{{
+			Name: name, Command: command, Args: args,
+		}}, key)
+		if len(components) != 1 {
+			t.Fatalf("components=%d", len(components))
+		}
+		return components[0]
+	}
+	base := component("alias-a", "/private/bin/mcp", "--mode", "safe")
+	if want := endpointInventoryComponentID("mcp", "alias-a"); base.id != want {
+		t.Fatalf("local component ID = %q, want historical alias identity %q", base.id, want)
+	}
+	if renamed := component("alias-b", "/private/bin/mcp", "--mode", "safe"); renamed.id == base.id {
+		t.Fatalf("distinct server aliases shared identity: %q", base.id)
+	}
+	if changed := component("alias-a", "/other/bin/mcp", "--mode", "safe"); changed.id != base.id {
+		t.Fatal("changing the full command replaced the alias-based identity")
+	}
+	if reordered := component("alias-a", "/private/bin/mcp", "safe", "--mode"); reordered.id != base.id {
+		t.Fatal("changing argument order replaced the alias-based identity")
+	}
+	rotated := endpointMCPComponentsFromServers([]config.MCPServerEntry{{
+		Name: "alias-a", Command: "/private/bin/mcp", Args: []string{"--mode", "safe"},
+	}}, []byte("abcdef0123456789abcdef0123456789"))
+	if len(rotated) != 1 || rotated[0].id != base.id {
+		t.Fatalf("rotating the fingerprint key replaced identity: %+v", rotated)
+	}
+	if strings.Contains(base.id, "/private") || strings.Contains(base.id, "--mode") {
+		t.Fatalf("local component ID disclosed raw identity material: %q", base.id)
+	}
+}
+
+func TestEndpointLocalMCPIdentityDistinguishesCollidingAliases(t *testing.T) {
+	key := []byte("0123456789abcdef0123456789abcdef")
+	servers := []config.MCPServerEntry{
+		{Name: "alpha", Command: "uvx", Args: []string{"notes-mcp"}},
+		{Name: "beta", Command: "uvx", Args: []string{"notes-mcp"}},
+	}
+	rows := endpointMCPComponentsFromServers(servers, key)
+	if len(rows) != 2 || rows[0].id == rows[1].id {
+		t.Fatalf("colliding endpoint MCP aliases share an ID: %+v", rows)
+	}
+}
+
+func TestMCPInventoryServerURLDropsCredentialsQueryAndFragment(t *testing.T) {
+	for raw, want := range map[string]string{
+		"HTTPS://user:password@MCP.example.com:8443/v1?token=private#fragment": "https://mcp.example.com:8443",
+		"http://mcp.example.com/stream%2Fv1?key=private":                       "http://mcp.example.com",
+		"file:///private/mcp": "",
+		"https://":            "",
+	} {
+		if got := mcpInventoryServerURL(raw); got != want {
+			t.Fatalf("mcpInventoryServerURL(%q)=%q, want %q", raw, got, want)
+		}
+	}
+}
+
+func TestEndpointRemoteMCPIdentityRemainsStableAcrossEndpointChanges(t *testing.T) {
+	key := []byte("0123456789abcdef0123456789abcdef")
+	component := func(name, url string) endpointInventoryComponent {
+		t.Helper()
+		components := endpointMCPComponentsFromServers([]config.MCPServerEntry{{Name: name, URL: url}}, key)
+		if len(components) != 1 {
+			t.Fatalf("components=%d", len(components))
+		}
+		return components[0]
+	}
+	base := component("first", "https://user:password@mcp.example.com/v1?token=secret")
+	if sanitized := component("first", "https://mcp.example.com/v1?token=other"); sanitized.id != base.id {
+		t.Fatalf("removed URL credentials changed remote identity: %q / %q", base.id, sanitized.id)
+	}
+	if renamed := component("second", "https://mcp.example.com/v1?token=other"); renamed.id == base.id {
+		t.Fatalf("distinct remote aliases shared identity: %q", base.id)
+	}
+	if changed := component("first", "https://other.example.com/v2"); changed.id != base.id {
+		t.Fatal("different endpoint replaced the alias-based remote identity")
+	}
+	if strings.Contains(base.id, "password") || strings.Contains(base.id, "secret") || strings.Contains(base.mcpServerURL, "/v1") {
+		t.Fatalf("component ID disclosed URL credential: %q", base.id)
+	}
+}
+
+func TestPerConnectorMCPInventoryDistinguishesIdenticalCommandsWithDifferentAliases(t *testing.T) {
+	withManagedEnterprise(t, true)
+	home := t.TempDir()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("CODEX_HOME", t.TempDir())
+	if err := os.MkdirAll(filepath.Join(home, ".codex"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(home, ".codex", "config.toml")
+	write := func(first, second string) {
+		t.Helper()
+		body := fmt.Sprintf("[mcp_servers.%s]\ncommand = 'uvx'\nargs = ['notes-mcp']\n[mcp_servers.%s]\ncommand = 'uvx'\nargs = ['notes-mcp']\n", first, second)
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg := &config.Config{AIDiscovery: config.AIDiscoveryConfig{HomeDirs: []string{home}}, Gateway: config.GatewayConfig{Token: "test-identity-key"}}
+	registry := connector.NewRegistry()
+	if err := registry.RegisterPlugin(&endpointInventoryPluginConnector{name: "codex", description: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	ids := func() map[string]string {
+		t.Helper()
+		rows, partial := perConnectorMCPEntriesWithStatus(cfg, registry)
+		if partial || len(rows) != 2 {
+			t.Fatalf("colliding server rows=%+v partial=%v", rows, partial)
+		}
+		return map[string]string{rows[0].itemName: rows[0].id, rows[1].itemName: rows[1].id}
+	}
+	write("alpha", "beta")
+	initial := ids()
+	if initial["alpha"] == "" || initial["beta"] == "" || initial["alpha"] == initial["beta"] {
+		t.Fatalf("colliding commands lost alias identity: %v", initial)
+	}
+	if want := endpointInventoryComponentID("mcp-entry", "codex/"+endpointInventoryScopeKey(home)+"/alpha"); initial["alpha"] != want {
+		t.Fatalf("per-connector component ID = %q, want historical alias identity %q", initial["alpha"], want)
+	}
+	cfg.Gateway.Token = "rotated-test-identity-key"
+	if rotated := ids(); !reflect.DeepEqual(initial, rotated) {
+		t.Fatalf("fingerprint-key rotation changed component IDs: %v / %v", initial, rotated)
+	}
+	write("beta", "alpha")
+	reordered := ids()
+	if !reflect.DeepEqual(initial, reordered) {
+		t.Fatalf("reordered config changed colliding IDs: %v / %v", initial, reordered)
+	}
+}
+
+func TestPerConnectorMCPInventoryCountsCollisionsAcrossClaudeFiles(t *testing.T) {
+	withManagedEnterprise(t, true)
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	if err := os.Unsetenv("CLAUDE_CONFIG_DIR"); err != nil {
+		t.Fatal(err)
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", t.TempDir())
+	for path, body := range map[string]string{
+		filepath.Join(home, ".claude.json"):             `{"mcpServers":{"alpha":{"command":"uvx","args":["notes-mcp"]}}}`,
+		filepath.Join(home, ".claude", "settings.json"): `{"mcpServers":{"alpha":{"command":"npx","args":["ignored"]},"beta":{"command":"uvx","args":["notes-mcp"]}}}`,
+		filepath.Join(home, ".mcp.json"):                `{"mcpServers":{"alpha":{"command":"uvx","args":["notes-mcp"]}}}`,
+	} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg := &config.Config{AIDiscovery: config.AIDiscoveryConfig{HomeDirs: []string{home}}, Gateway: config.GatewayConfig{Token: "test-identity-key"}}
+	registry := connector.NewRegistry()
+	if err := registry.RegisterPlugin(&endpointInventoryPluginConnector{name: "claudecode", description: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	rows, partial := perConnectorMCPEntriesWithStatus(cfg, registry)
+	if partial || len(rows) != 2 {
+		t.Fatalf("Claude rows=%+v partial=%v, want two distinct aliases", rows, partial)
+	}
+	if rows[0].id == rows[1].id || rows[0].itemName == rows[1].itemName {
+		t.Fatalf("cross-file aliases lost distinct IDs: %+v", rows)
+	}
+	for _, row := range rows {
+		if row.itemName == "alpha" && row.mcpCommandBasename != "uvx" {
+			t.Fatalf("later Claude definition replaced first source: %+v", row)
+		}
+	}
+}
+
+func TestMCPHomeReaderMarksDanglingConfigSymlinkPartial(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation requires elevated Windows permissions")
+	}
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, ".codex"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(home, "missing.toml"), filepath.Join(home, ".codex", "config.toml")); err != nil {
+		t.Fatal(err)
+	}
+	_, partial := readMCPServersUnderHomeForOSWithStatus("codex", home, runtime.GOOS)
+	if !partial {
+		t.Fatal("dangling MCP config symlink was treated as an authoritative empty listing")
 	}
 }
 
@@ -1005,7 +1396,10 @@ func TestEmitEndpointInventoryPreservesPR471SafeMCPFields(t *testing.T) {
 }`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cfg := &config.Config{Claw: config.ClawConfig{Mode: config.ClawMode("openclaw"), ConfigFile: configPath}}
+	cfg := &config.Config{
+		Claw:    config.ClawConfig{Mode: config.ClawMode("openclaw"), ConfigFile: configPath},
+		Gateway: config.GatewayConfig{Token: "inventory-test-installation"},
+	}
 	capture := &endpointInventoryCapture{}
 	if err := EmitEndpointInventory(t.Context(), cfg, connector.NewDefaultRegistry(), capture); err != nil {
 		t.Fatal(err)
@@ -1042,6 +1436,42 @@ func TestEmitEndpointInventoryPreservesPR471SafeMCPFields(t *testing.T) {
 		if got := mcpBody[field]; got != expected {
 			t.Fatalf("MCP field %s=%T(%v) want=%T(%v)", field, got, got, expected, expected)
 		}
+	}
+	for _, field := range []string{
+		observability.TelemetryAttributeDefenseClawInventoryMcpCommandFingerprint,
+		observability.TelemetryAttributeDefenseClawInventoryMcpArgumentsFingerprint,
+	} {
+		if got, ok := mcpBody[field].(string); !ok || !strings.HasPrefix(got, "hmac-sha256:") || len(got) != 76 {
+			t.Fatalf("MCP field %s=%v, want keyed fingerprint", field, mcpBody[field])
+		}
+	}
+	var mcpSummary map[string]any
+	for _, record := range capture.snapshot() {
+		if record.EventName() != "ai.discovery.completed" {
+			continue
+		}
+		body, ok := record.Body()
+		if !ok {
+			continue
+		}
+		bodyMap, err := body.Object()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if bodyMap[observability.TelemetryAttributeDefenseClawAIDiscoverySource] == endpointMCPInventorySource {
+			mcpSummary = bodyMap
+			break
+		}
+	}
+	if mcpSummary == nil {
+		t.Fatal("no managed MCP summary")
+	}
+	identifiers := canonicalObjectArray(t, mcpSummary[observability.TelemetryAttributeDefenseClawInventoryMcpIdentifiers])
+	if len(identifiers) != 1 || identifiers[0]["command_fingerprint"] != mcpBody[observability.TelemetryAttributeDefenseClawInventoryMcpCommandFingerprint] ||
+		mcpBody[observability.TelemetryAttributeDefenseClawInventoryMcpServerURL] != "https://mcp.example.com:8443" ||
+		identifiers[0]["server_url"] != "https://mcp.example.com:8443" ||
+		identifiers[0]["arguments_fingerprint"] != mcpBody[observability.TelemetryAttributeDefenseClawInventoryMcpArgumentsFingerprint] {
+		t.Fatalf("MCP aggregate identifiers do not match per-component fingerprints: %+v", identifiers)
 	}
 	encoded, err := json.Marshal(mcpBody)
 	if err != nil {
@@ -1103,6 +1533,39 @@ func TestEndpointMCPReadFailureIsPartialNotAuthoritativeEmpty(t *testing.T) {
 	t.Fatal("no partial MCP summary")
 }
 
+func TestPerConnectorMCPInventoryKeepsValidRowsFromPartialNativeRead(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix HOME-based Antigravity fixture; Windows profile reads are covered separately")
+	}
+	withManagedEnterprise(t, true)
+	home := t.TempDir()
+	workspace := t.TempDir()
+	t.Setenv("HOME", home)
+	validPath := filepath.Join(home, ".gemini", "config", "mcp_config.json")
+	if err := os.MkdirAll(filepath.Dir(validPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(validPath, []byte(`{"mcpServers":{"notes":{"command":"uvx"}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	invalidPath := filepath.Join(workspace, ".agents", "mcp_config.json")
+	if err := os.MkdirAll(filepath.Dir(invalidPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(invalidPath, []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{Claw: config.ClawConfig{WorkspaceDir: workspace}}
+	registry := connector.NewRegistry()
+	if err := registry.RegisterPlugin(&endpointInventoryPluginConnector{name: "antigravity", description: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	rows, partial := perConnectorMCPEntriesWithStatus(cfg, registry)
+	if !partial || len(rows) != 1 || rows[0].itemName != "notes" {
+		t.Fatalf("partial native read lost valid MCP row: %+v partial=%v", rows, partial)
+	}
+}
+
 func TestEndpointPluginDiscoveryFailureIsPartialAndKeepsBuiltins(t *testing.T) {
 	withManagedEnterprise(t, true)
 	pluginRoot := filepath.Join(t.TempDir(), "configured-plugin-root")
@@ -1111,7 +1574,7 @@ func TestEndpointPluginDiscoveryFailureIsPartialAndKeepsBuiltins(t *testing.T) {
 	}
 	cfg := &config.Config{PluginDir: pluginRoot}
 	capture := &endpointInventoryCapture{}
-	makeEndpointInventoryEmitter(cfg, capture, nil, nil)(t.Context())
+	makeEndpointInventoryEmitter(cfg, capture, nil, nil, nil)(t.Context())
 
 	builtinComponents, _ := endpointConnectorComponents(connector.NewDefaultRegistry())
 	wantBuiltins := len(builtinComponents)
@@ -1188,6 +1651,7 @@ func TestEndpointConnectorComponentsWindowsExactNativeRoster(t *testing.T) {
 		"devin",
 		"hermes",
 		"kiro",
+		"openclaw",
 		"opencode",
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -1256,15 +1720,18 @@ func TestReadMCPServersUnderHomeHonorsClaudeConfigDirOverride(t *testing.T) {
 
 	// With CLAUDE_CONFIG_DIR set, both default files must be skipped.
 	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(tmp, "custom-claude"))
-	if got := readMCPServersUnderHome("claudecode", tmp); len(got) != 0 {
-		t.Fatalf("with CLAUDE_CONFIG_DIR set, got servers=%+v want none", got)
+	if got, partial := readMCPServersUnderHomeForOSWithStatus("claudecode", tmp, runtime.GOOS); partial || len(got) != 0 {
+		t.Fatalf("with CLAUDE_CONFIG_DIR set, got servers=%+v partial=%t want none", got, partial)
 	}
 
 	// Without the override, both default files should surface.
 	if err := os.Unsetenv("CLAUDE_CONFIG_DIR"); err != nil {
 		t.Fatal(err)
 	}
-	got := readMCPServersUnderHome("claudecode", tmp)
+	got, partial := readMCPServersUnderHomeForOSWithStatus("claudecode", tmp, runtime.GOOS)
+	if partial {
+		t.Fatal("Claude Code native config read was partial")
+	}
 	var names []string
 	for _, group := range got {
 		for _, entry := range group {
@@ -1327,7 +1794,10 @@ func TestReadMCPServersUnderHomeDevinUsesPlatformNativeConfigRoot(t *testing.T) 
 			write(test.canonical, "canonical")
 			write(test.foreign, "foreign")
 
-			groups := readMCPServersUnderHomeForOS("devin", home, test.goos)
+			groups, partial := readMCPServersUnderHomeForOSWithStatus("devin", home, test.goos)
+			if partial {
+				t.Fatal("Devin native config read was partial")
+			}
 			if len(groups) != 1 || len(groups[0]) != 1 || groups[0][0].Name != "canonical" {
 				t.Fatalf("Devin %s per-home inventory = %+v, want only canonical config", test.goos, groups)
 			}
@@ -1362,7 +1832,11 @@ func TestReadMCPServersUnderHomeUsesCanonicalUserConfigs(t *testing.T) {
 		write(t, home, ".copilot/mcp-config.json", `{"mcpServers":{"canonical":{"command":"copilot-mcp"}}}`)
 		write(t, home, ".config/github-copilot/mcp.json", `{"mcpServers":{"stale":{"command":"stale-mcp"}}}`)
 
-		if got, want := serverNames(readMCPServersUnderHomeForOS("copilot", home, "windows")), []string{"canonical"}; !reflect.DeepEqual(got, want) {
+		groups, partial := readMCPServersUnderHomeForOSWithStatus("copilot", home, "windows")
+		if partial {
+			t.Fatal("Copilot native config read was partial")
+		}
+		if got, want := serverNames(groups), []string{"canonical"}; !reflect.DeepEqual(got, want) {
 			t.Fatalf("Copilot per-home inventory = %v, want %v", got, want)
 		}
 	})
@@ -1376,7 +1850,11 @@ func TestReadMCPServersUnderHomeUsesCanonicalUserConfigs(t *testing.T) {
 			},
 		}`)
 
-		if got, want := serverNames(readMCPServersUnderHomeForOS("opencode", home, "windows")), []string{"canonical"}; !reflect.DeepEqual(got, want) {
+		groups, partial := readMCPServersUnderHomeForOSWithStatus("opencode", home, "windows")
+		if partial {
+			t.Fatal("OpenCode native config read was partial")
+		}
+		if got, want := serverNames(groups), []string{"canonical"}; !reflect.DeepEqual(got, want) {
 			t.Fatalf("OpenCode per-home inventory = %v, want %v", got, want)
 		}
 	})
@@ -1391,7 +1869,11 @@ func TestReadMCPServersUnderHomeUsesCanonicalUserConfigs(t *testing.T) {
 			"mcpServers": {"skill": {"command":"skill-mcp"}}
 		}`)
 
-		if got, want := serverNames(readMCPServersUnderHomeForOS("amp", home, "windows")), []string{"settings", "skill"}; !reflect.DeepEqual(got, want) {
+		groups, partial := readMCPServersUnderHomeForOSWithStatus("amp", home, "windows")
+		if partial {
+			t.Fatal("Amp native config read was partial")
+		}
+		if got, want := serverNames(groups), []string{"settings", "skill"}; !reflect.DeepEqual(got, want) {
 			t.Fatalf("Amp per-home inventory = %v, want %v", got, want)
 		}
 	})
@@ -1415,7 +1897,10 @@ func TestPerConnectorMCPEntriesWindowsExcludesUnsupportedAndDeprecated(t *testin
 		}},
 	}
 
-	components := perConnectorMCPEntriesForOS(cfg, nil, "windows")
+	components, partial := perConnectorMCPEntriesForOSWithStatus(cfg, nil, "windows")
+	if partial {
+		t.Fatal("Windows per-connector MCP read was partial")
+	}
 	foundNative := false
 	for _, component := range components {
 		if component.agentConnector != "copilot" {
@@ -1427,6 +1912,33 @@ func TestPerConnectorMCPEntriesWindowsExcludesUnsupportedAndDeprecated(t *testin
 	}
 	if !foundNative {
 		t.Fatalf("Windows MCP fanout did not include canonical Copilot entry: %+v", components)
+	}
+}
+
+func TestPerConnectorMCPEntriesForbiddenProfileIsPartial(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	home := t.TempDir()
+	configPath := filepath.Join(home, ".codex", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, []byte("[mcp_servers.private]\ncommand = 'node'\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{
+		AIDiscovery: config.AIDiscoveryConfig{HomeDirs: []string{home}},
+		Guardrail: config.GuardrailConfig{Connectors: map[string]config.PerConnectorGuardrailConfig{
+			"codex": {},
+		}},
+	}
+	components, partial := perConnectorMCPEntriesForOSWithHomeGuard(cfg, nil, "windows", func(path string) error {
+		if path == home {
+			return fmt.Errorf("profile access denied")
+		}
+		return nil
+	})
+	if !partial || len(components) != 0 {
+		t.Fatalf("forbidden profile: components=%+v partial=%t, want empty partial collection", components, partial)
 	}
 }
 
@@ -1463,7 +1975,10 @@ func TestPerConnectorMCPEntriesAttributeEachHomeToItsOwner(t *testing.T) {
 			"claudecode": {},
 		}},
 	}
-	components := perConnectorMCPEntriesForOS(cfg, nil, runtime.GOOS)
+	components, partial := perConnectorMCPEntriesForOSWithStatus(cfg, nil, runtime.GOOS)
+	if partial {
+		t.Fatal("per-connector MCP read was partial")
+	}
 
 	self := useridentity.Current()
 	var attributed int

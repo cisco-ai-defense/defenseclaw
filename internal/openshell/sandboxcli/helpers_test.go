@@ -1083,6 +1083,12 @@ type testApp struct {
 	// not Docker Desktop), and dockerAsked how often it was asked.
 	dockerEngine string
 	dockerAsked  int
+	// dockerLandlock and dockerLandlockErr are what App.DockerVMLandlock
+	// reports (0, nil: a VM without Landlock), and landlockAsked how often
+	// it was asked.
+	dockerLandlock    int
+	dockerLandlockErr error
+	landlockAsked     int
 }
 
 // newTestApp is an App wired to fakes, whose daemon holds sandboxes and
@@ -1142,6 +1148,10 @@ func newTestApp(t *testing.T, input string, sandboxes ...sandboxapi.Sandbox) *te
 		DockerEngine: func(context.Context) (string, error) {
 			ta.dockerAsked++
 			return ta.dockerEngine, nil
+		},
+		DockerVMLandlock: func(context.Context) (int, string, error) {
+			ta.landlockAsked++
+			return ta.dockerLandlock, "7.0.14-linuxkit", ta.dockerLandlockErr
 		},
 		Sleep: func(context.Context, time.Duration) error { return nil },
 		OpenShell: func(context.Context) (openshell.Client, *openshell.Registration, error) {

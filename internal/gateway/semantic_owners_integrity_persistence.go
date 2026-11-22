@@ -1484,12 +1484,15 @@ func sshDirectoryPrerequisite(facts actionfacts.Facts) bool {
 }
 
 // sshPrivateKeyMutationPrerequisite reports a write, append or delete of the
-// active user's SSH private key by anything but ssh-keygen.
+// active user's SSH private key by anything but ssh-keygen. It names the
+// standard key files only (id_rsa, id_ed25519, ...): removing a scratch pair
+// such as ~/.ssh/id_test is routine (rel HP4 review row r4-rm-test-keypair),
+// while a read of any id_* key in ~/.ssh is still a key read.
 func sshPrivateKeyMutationPrerequisite(facts actionfacts.Facts) bool {
 	for _, candidate := range facts.Paths {
 		command, ok := integrityCommandByID(facts, candidate.CommandID)
 		if ok && !strings.EqualFold(command.Program, "ssh-keygen") &&
-			matchesActiveSSHPrivateKey(facts, candidate) &&
+			matchesActiveStandardSSHPrivateKey(facts, candidate) &&
 			integrityCommandMutatesPath(command, candidate) {
 			return true
 		}
@@ -1514,7 +1517,7 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 		}
 	}
 	if trustedNoDereferenceTouchSafe(input.Command, input.CWD, facts.ActiveHome,
-		request.ResolvedWriteTargets, request.ProtectedHomeHook) {
+		request.ResolvedWriteTargets, request.ProtectedHomeHook, request.ShellStartup) {
 		// A pattern in a complete entry-only touch can leave an earlier
 		// path finding that followed a link. Keep unrelated findings.
 		kept := findings[:0]
@@ -1526,11 +1529,15 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 		return kept
 	}
 	commandText := strings.ToLower(input.Command)
-	overBudget, unresolved, resolvedTarget := false, false, false
+	overBudget, unresolved, resolvedTarget, nonWriteMention, unknownMention := false, false, false, false, false
+	var unprovenTarget unprovenWrite
 	evidence := request
+	evidence.nonWriteMention = &nonWriteMention
+	evidence.unknownMention = &unknownMention
 	evidence.overBudgetOmission = &overBudget
 	evidence.unresolvedTarget = &unresolved
 	evidence.resolvedTarget = &resolvedTarget
+	evidence.unprovenTarget = &unprovenTarget
 	symlinkWrite := trustedExistingAuthorizedKeysSymlinkWrite(evidence, facts)
 	if !symlinkWrite && !request.ProtectedHomeHook && trustedPOSIXShellCall(input, facts) &&
 		(request.Connector == "claudecode" || request.Connector == "codex") &&
@@ -1590,8 +1597,46 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 				}
 			}
 			title := named.Title
-			if hookpaths.ArchiveBeforeWrite(input.Command, input.ActiveHome) {
+			enforcement := findingEnforcementAllowed
+			// A write the link walk held only because it could not resolve
+			// the target is not a known key write: outside the strict and
+			// managed tiers it warns (rel-1-0-10:GAP-0013, GAP-0004).
+			unprovenOnly := symlinkWrite && unprovenTarget.class != "" && named.ID == rule.ID &&
+				unprovenKeyWriteMayWarn(request, commandText, facts.ActiveHome, unprovenTarget) &&
+				!trustedAuthorizedKeysSymlinkWrite(input) &&
+				!trustedAuthorizedKeysWriteProofWith(input, facts, false, clientGlobFacts(request), request.targetMemo) &&
+				!trustedSandboxGuestAuthorizedKeysWrite(request)
+			if unprovenOnly {
+				enforcement = findingEnforcementAlertOnly
+			}
+			// A command held as a key write only because words of statements
+			// that read the keys file name it, in a per-user default or
+			// permissive install, alerts: reading the file is not writing it
+			// (S7 lead 2026-11-13, rel-1-0-10:GAP-0018). Strict and managed
+			// installs keep the block. A mention beside a program the scan
+			// has no write model of is the unknown tier: the finding alerts
+			// and the shared unknown-tier finding below decides in every
+			// pack (rel-1-0-10:GAP-0843).
+			readsOnly := (nonWriteMention || unknownMention) && !unprovenOnly && named.ID == rule.ID
+			if readsOnly {
+				enforcement = findingEnforcementAlertOnly
+			}
+			// A copy of the user's own SSH folder content to a private place of the
+			// same home, with nothing else written, alerts in every pack: it is
+			// no mutation of the keys the user's ssh reads (rel-1-0-10:GAP-0018).
+			ownFolderCopy := !unprovenOnly && !readsOnly && named.ID == rule.ID &&
+				trustedActionOwnSSHFolderCopy(request, input)
+			if ownFolderCopy {
+				enforcement = findingEnforcementAlertOnly
+			}
+			if ownFolderCopy {
+				title = ownSSHFolderCopyTitle
+			} else if readsOnly {
+				title = nonWriteKeyMentionTitle
+			} else if hookpaths.ArchiveBeforeWrite(input.Command, input.ActiveHome) {
 				title = archiveBeforeWriteTitle
+			} else if unprovenOnly && !unresolved {
+				title = hookpaths.UnprovenWriteTitle(unprovenTarget.class) + unprovenWriteGuidance
 			} else if symlinkWrite && unresolved && named.ID == rule.ID &&
 				!trustedAuthorizedKeysWriteProofWith(input, facts, false, clientGlobFacts(request), request.targetMemo) &&
 				!trustedSandboxGuestAuthorizedKeysWrite(request) {
@@ -1604,11 +1649,15 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 				RuleID: named.ID, Title: title, Severity: rule.Severity,
 				Confidence: rule.Confidence, Evidence: trustedActionInputText(input, ""),
 				Tags: append([]string(nil), named.Tags...), LineNumber: 1,
-				enforcement: findingEnforcementAllowed,
+				enforcement: enforcement,
 			})
 			if named.ID == rule.ID &&
 				(trustedAuthorizedKeysSymlinkWrite(input) || resolvedTarget && !overBudget && !unresolved) {
 				finding = finding.withTrustedActionProof(newResolvedTargetFindingProof(named.ID, true))
+			}
+			if readsOnly && unknownMention {
+				return withUnknownFinding(append(kept, finding),
+					unknownReasonFinding(unknownKeyMentionTitle, unknownKeyMentionReason, request.EnforcementCapable))
 			}
 			return append(kept, finding)
 		}
@@ -1617,6 +1666,97 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 		appendTrustedSSHPrivateKeyWriteFinding(findings, generation, request, facts),
 		generation, request, input,
 	)
+}
+
+// unprovenKeyWriteMayWarn reports a call whose authorized-keys finding
+// warns, not blocks, when the proof could only hold its write as unknown:
+// a shell command (a native write or patch tool keeps its enforcement) in
+// the default or permissive tier of a per-user install (no managed hook
+// peer) that does not name
+// an authorized-keys file or carry base64 text that could spell one. The
+// strict tier and every managed install keep the block (owner 2026-11-06
+// ruling on rel-1-0-6:GAP-0675; S7 plan: unknown effects never block in
+// default; lead answer 2026-11-12 for rel-1-0-10:GAP-0013). A target the
+// proof found protected blocks in every tier. The confirm ("ask") ceiling
+// for these calls belongs to the hook answer path (S8), so they alert.
+//
+// The call must make no link itself (hookpaths.CommandMayMakeLink): only an
+// operand it cannot resolve, or an archive or copy scope it cannot read,
+// is lowered (the archive-before-write class the owner ruled a balanced
+// warning on rel-1-0-6:GAP-0675). The held write must also be away from
+// every protected file: its operand
+// is outside the active home (where the key files, DefenseClaw state and the
+// agent hook configs live) and outside sshd's ProgramData folder, and the
+// command names no home spelling (~, $HOME, %USERPROFILE%, the home path,
+// OLDPWD). An unreadable link or copy scope inside the home can reach those
+// files, so it keeps the block (owner rule: self-protection blocks whenever
+// an effect can plausibly reach the protected file).
+func unprovenKeyWriteMayWarn(request trustedActionRequest, commandText, home string, held unprovenWrite) bool {
+	if request.StrictPolicy || request.ManagedInstall || request.ProtectedHomeHook ||
+		!trustedShellCommandInput(request.Input) {
+		return false
+	}
+	if held.operand == "" || !filepath.IsAbs(held.operand) || home == "" || !filepath.IsAbs(home) ||
+		unprovenOperandNearProtected(held.operand, home) {
+		return false
+	}
+	command, _ := trustedBashCommandInput(request.Input)
+	if command == "" {
+		command = request.Input.Command
+	}
+	if hookpaths.CommandMayMakeLink(command) {
+		// The unknown may be where a link the call makes points, not where
+		// its name sits: a target built at run time reaches the home from
+		// /tmp as easily (review F1: python os.symlink, ln -s "$(cd;pwd)").
+		return false
+	}
+	// Quote and escape characters split a word without changing it
+	// (authorized_''keys), so the spellings are read without them.
+	lower := strings.NewReplacer("'", "", "\"", "", "\\", "", "`", "").Replace(strings.ToLower(commandText))
+	for _, spelling := range []string{
+		"authorized_k", "administrators_authorized", "base64", "~", "$home", "${home", "%userprofile%",
+		"%homepath%", "%homedrive%", "$env:userprofile", "${env:userprofile", "$env:home", "${env:home",
+		"getfolderpath", "oldpwd", "programdata", ".ssh", ".defenseclaw", ".claude", ".codex", ".cursor",
+		strings.ToLower(filepath.ToSlash(home)), strings.ToLower(home),
+	} {
+		if strings.Contains(lower, spelling) {
+			return false
+		}
+	}
+	return true
+}
+
+// unprovenWrite is what the authorized-keys proof held as unknown: the
+// hookpaths.UnprovenWriteTitle class and the operand at fault, if one was.
+type unprovenWrite struct {
+	class, operand string
+}
+
+// unprovenOperandNearProtected reports an operand at or under the active
+// home or sshd's Windows ProgramData folder, or one that holds either (/,
+// /home), compared without case on Windows.
+func unprovenOperandNearProtected(operand, home string) bool {
+	clean := func(path string) string {
+		path = filepath.Clean(path)
+		if runtime.GOOS == "windows" {
+			path = strings.ToLower(path)
+		}
+		return path
+	}
+	near := func(path, root string) bool {
+		path, root = clean(path), clean(root)
+		return path == root || strings.HasPrefix(path, strings.TrimSuffix(root, string(filepath.Separator))+string(filepath.Separator)) ||
+			strings.HasPrefix(root, strings.TrimSuffix(path, string(filepath.Separator))+string(filepath.Separator))
+	}
+	if near(operand, home) {
+		return true
+	}
+	for _, path := range hookpaths.ProtectedAuthorizedKeysPaths(home) {
+		if near(operand, filepath.Dir(path)) {
+			return true
+		}
+	}
+	return false
 }
 
 // sshControlFileTitlePrefix opens the title of a block whose only SSH target
@@ -1737,7 +1877,7 @@ func trustedAuthorizedKeysWriteProof(input actionfacts.Input, facts actionfacts.
 // trustedAuthorizedKeysWriteProofWith is trustedAuthorizedKeysWriteProof
 // with the evaluation's file system answers (trustedActionRequest.targetMemo).
 func trustedAuthorizedKeysWriteProofWith(input actionfacts.Input, facts actionfacts.Facts, symlinkWrite bool, globFacts map[string]string, memo *hookpaths.TargetMemo) bool {
-	if trustedNoDereferenceTouchSafe(input.Command, input.CWD, facts.ActiveHome, globFacts, globFacts != nil) {
+	if trustedNoDereferenceTouchSafe(input.Command, input.CWD, facts.ActiveHome, globFacts, globFacts != nil, memo.ShellStartup()) {
 		return false
 	}
 	if input.Command != "" &&
@@ -1769,22 +1909,32 @@ func trustedAuthorizedKeysWriteProofWith(input actionfacts.Input, facts actionfa
 		trustedInlineAuthorizedKeysWrite(input, facts) ||
 		trustedPOSIXPowerShellAuthorizedKeysWrite(input, facts) ||
 		trustedCMDAuthorizedKeysWrite(input) ||
+		trustedLauncherRedirectAuthorizedKeysWrite(facts) ||
 		trustedNamedOutFileAuthorizedKeysWrite(input) ||
 		trustedGitBashAuthorizedKeysWrite(input) ||
 		trustedNestedAuthorizedKeysWrite(input, facts)
 }
 
-func trustedNoDereferenceTouchSafe(command, cwd, home string, evidence map[string]string, managed bool) bool {
+func trustedNoDereferenceTouchSafe(command, cwd, home string, evidence map[string]string, managed bool, startup *hookpaths.ShellStartup) bool {
 	if managed && !filepath.IsAbs(cwd) {
 		cwd = evidence[hookpaths.CWDKey]
 	}
-	if !hookpaths.NoDereferenceTouchShape(command, cwd, home) {
+	// One key carries the entry-only proof: touch -h and the replace verbs
+	// (mv, install, sed -i) change the name an operand holds, not the file a
+	// link reaches.
+	touch := hookpaths.NoDereferenceTouchShape(command, cwd, home)
+	if !touch && !hookpaths.ReplaceVerbShape(command, cwd, home) {
 		return false
 	}
 	if managed {
 		return evidence[hookpaths.NoDereferenceTouchSafeKey] == "1"
 	}
-	return hookpaths.NoDereferenceTouchSafe(command, cwd, home)
+	// A per-user gateway judges the startup the agent's shell has, which the
+	// hook client sent, not its own service's (F6).
+	if touch {
+		return hookpaths.NoDereferenceTouchSafeIn(command, cwd, home, startup)
+	}
+	return hookpaths.ReplaceVerbSafe(command, cwd, home, startup)
 }
 
 // An unmodeled program's output option cannot prove a safe read. When that
@@ -1848,6 +1998,18 @@ func trustedAwkOutputAuthorizedKeysWrite(facts actionfacts.Facts) bool {
 	}
 	return false
 }
+
+// nonWriteKeyMentionTitle is the title of the alert for a command whose only
+// statements naming the keys file read it.
+const nonWriteKeyMentionTitle = "A command names an SSH key file only as a read or as data of an unknown program"
+
+// unknownKeyMentionTitle and unknownKeyMentionReason name the unknown-tier
+// finding of a command that names the keys file only in reader statements
+// beside a program the analysis has no write model of (rel-1-0-10:GAP-0843).
+const (
+	unknownKeyMentionTitle  = "A command names an SSH key file beside a program the analysis cannot read"
+	unknownKeyMentionReason = "key_mention_unknown_program"
+)
 
 // unresolvedWriteTargetTitle is the title of the authorized-keys block of a
 // write whose target neither the managed hook client nor the gateway could
@@ -3447,7 +3609,8 @@ func findAttachedPathOption(word string) bool {
 func findAncestorStartChangesState(facts actionfacts.Facts, candidate actionfacts.PathFact, lineStaysOff func() bool, clientTargets map[string]string) bool {
 	command, ok := integrityCommandByID(facts, candidate.CommandID)
 	if !ok || !strings.EqualFold(command.Program, "find") ||
-		candidate.Flavor != "" && candidate.Flavor != actionfacts.PathFlavorPOSIX || facts.ActiveHome == "" {
+		candidate.Flavor != "" && candidate.Flavor != actionfacts.PathFlavorPOSIX || facts.ActiveHome == "" ||
+		!findStartingPoint(command, candidate) {
 		return false
 	}
 	acted := command
@@ -3465,10 +3628,19 @@ func findAncestorStartChangesState(facts actionfacts.Facts, candidate actionfact
 	default:
 		return false
 	}
-	start := path.Clean(exactSemanticPathValue(candidate))
+	value := exactSemanticPathValue(candidate)
+	start := path.Clean(value)
 	root := path.Join(path.Clean(facts.ActiveHome), ".defenseclaw")
 	prefix := strings.TrimRight(start, "/") + "/"
-	if !path.IsAbs(start) && !actionfacts.DriveSlashPath(start) || !strings.HasPrefix(root, prefix) {
+	// A Git Bash find from a drive root (find C:/ -delete) cleans to C:,
+	// the drive's current folder, so the start is read as written. A drive
+	// home is compared as Windows compares names, without case (find c:/,
+	// find C:/users; rel-1-0-10:GAP-0945).
+	under := strings.HasPrefix(root, prefix)
+	if actionfacts.DriveSlashPath(root) && actionfacts.DriveSlashPath(prefix) {
+		under = len(root) >= len(prefix) && strings.EqualFold(root[:len(prefix)], prefix)
+	}
+	if !path.IsAbs(start) && !actionfacts.DriveSlashPath(value) || !under {
 		return false
 	}
 	// Above the root a find also reaches every other file of the
@@ -3490,12 +3662,32 @@ func findAncestorStartChangesState(facts actionfacts.Facts, candidate actionfact
 		return false
 	}
 	// The root is at depth `depth` below the start; its entries one deeper.
-	depth := strings.Count(strings.TrimPrefix(root, prefix), "/") + 1
+	depth := strings.Count(root[len(prefix):], "/") + 1
 	if maxDepth, ok := findMaxDepth(command.Argv); ok &&
 		(maxDepth < depth || maxDepth == depth && findTypeSkipsDirectories(command.Argv)) {
 		return false
 	}
 	return true
+}
+
+// findStartingPoint reports a path fact that names one of the starting points
+// of the find: a word before its first expression primary. A path of an
+// -exec program (the folder find -exec mv {} / moves into) is no starting
+// point, so it cannot make the find reach the state root from above
+// (rel-1-0-10:GAP-0018).
+func findStartingPoint(command actionfacts.CommandFact, candidate actionfacts.PathFact) bool {
+	if len(command.Argv) < 2 {
+		return false
+	}
+	end := min(findExpressionStart(command.Argv), len(command.Argv))
+	for _, word := range command.Argv[1:end] {
+		// The argv holds the word as the shell expands it (~ is the home),
+		// the path fact holds it as written and as resolved.
+		if word != "" && (word == candidate.Value || word == candidate.Normalized || word == candidate.Resolved) {
+			return true
+		}
+	}
+	return false
 }
 
 // findPatternMatchesNoStateName reports a -name/-iname pattern that
@@ -4040,7 +4232,8 @@ func integrityPathHasFixtureSegment(value string) bool {
 	) {
 		switch component {
 		case "testdata", "test-data", "fixture", "fixtures",
-			"example", "examples", "docs":
+			"example", "examples", "docs",
+			"__tests__", "__fixtures__", "__mocks__":
 			return true
 		}
 	}

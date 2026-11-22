@@ -53,6 +53,9 @@ type anchors struct {
 	clauses []clause
 	ok      bool
 	fold    bool
+	// never marks an expression no text can match (the inert "a^" a rule
+	// carries when a code-owned proof selects it, not its regex).
+	never bool
 }
 
 var cache sync.Map // *regexp.Regexp -> anchors
@@ -63,8 +66,9 @@ func anchorsFor(re *regexp.Regexp) anchors {
 	}
 	set := anchors{}
 	if parsed, err := syntax.Parse(re.String(), syntax.Perl); err == nil {
+		set.never = neverMatches(parsed.Simplify())
 		if clauses := required(parsed.Simplify()); len(clauses) > 0 {
-			set = anchors{clauses: clauses, ok: true}
+			set = anchors{clauses: clauses, ok: true, never: set.never}
 			for _, c := range clauses {
 				for _, l := range c {
 					set.fold = set.fold || l.fold
@@ -74,6 +78,26 @@ func anchorsFor(re *regexp.Regexp) anchors {
 	}
 	cache.Store(re, set)
 	return set
+}
+
+// neverMatches reports an expression that no text matches: a concatenation
+// in which a start-of-text anchor follows something that consumes a
+// character, such as "a^". It is deliberately narrow; false means unknown.
+func neverMatches(re *syntax.Regexp) bool {
+	if re.Op != syntax.OpConcat {
+		return false
+	}
+	for i, sub := range re.Sub {
+		if sub.Op != syntax.OpBeginText || i == 0 {
+			continue
+		}
+		for _, before := range re.Sub[:i] {
+			if shortestMatch(before) >= 1 {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // required returns clauses every match of re satisfies (nil: none known).
@@ -259,6 +283,9 @@ func (t *Text) MayMatch(re *regexp.Regexp) bool {
 
 func (t *Text) holds(re *regexp.Regexp) bool {
 	set := anchorsFor(re)
+	if set.never {
+		return false
+	}
 	if !set.ok {
 		return true
 	}

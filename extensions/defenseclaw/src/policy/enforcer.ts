@@ -33,6 +33,20 @@ import type {
 } from "../types.js";
 import { compareSeverity, maxSeverity } from "../types.js";
 
+// The message of a failed `defenseclaw <noun> scan`. execFile reports a command
+// it could not start (not on this account's PATH) with the string code ENOENT
+// and no exit status; the OpenClaw account of the separate-user layout has no
+// DefenseClaw CLI (GAP-1161).
+function scanFailureMessage(noun: string, code: unknown, stderr: string): string {
+  if (code === "ENOENT") {
+    return (
+      "the defenseclaw command is not available to this account; " +
+      "run the scan from the DefenseClaw account terminal"
+    );
+  }
+  return `defenseclaw ${noun} scan exited ${String(code)}: ${stderr.trim().slice(0, 200)}`;
+}
+
 export function runSkillScan(
   target: string,
   timeoutMs = 120_000,
@@ -43,13 +57,9 @@ export function runSkillScan(
       ["skill", "scan", target, "--json"],
       { timeout: timeoutMs, maxBuffer: 10 * 1024 * 1024 },
       (error, stdout, stderr) => {
-        const code = error && "code" in error ? (error.code as number) : 0;
+        const code = error && "code" in error ? (error.code as number | string) : 0;
         if (code !== 0) {
-          reject(
-            new Error(
-              `defenseclaw skill scan exited ${code}: ${stderr.trim().slice(0, 200)}`,
-            ),
-          );
+          reject(new Error(scanFailureMessage("skill", code, stderr)));
           return;
         }
         try {
@@ -94,13 +104,9 @@ export function runPluginScan(
       ["plugin", "scan", target, "--json"],
       { timeout: timeoutMs, maxBuffer: 10 * 1024 * 1024 },
       (error, stdout, stderr) => {
-        const code = error && "code" in error ? (error.code as number) : 0;
+        const code = error && "code" in error ? (error.code as number | string) : 0;
         if (code !== 0) {
-          reject(
-            new Error(
-              `defenseclaw plugin scan exited ${code}: ${stderr.trim().slice(0, 200)}`,
-            ),
-          );
+          reject(new Error(scanFailureMessage("plugin", code, stderr)));
           return;
         }
         try {
@@ -429,7 +435,6 @@ export class PolicyEnforcer {
     this.localBlockList.set(key, reason);
     this.localAllowList.delete(key);
 
-    await this.client.block(targetType, name, reason).catch(() => {});
   }
 
   /**
@@ -458,14 +463,12 @@ export class PolicyEnforcer {
     });
     this.localBlockList.delete(key);
 
-    await this.client.allow(targetType, name, reason).catch(() => {});
   }
 
   async unblock(targetType: InstallType, name: string): Promise<void> {
     const key = `${targetType}:${name}`;
     this.localBlockList.delete(key);
 
-    await this.client.unblock(targetType, name).catch(() => {});
   }
 
   isBlockedLocally(targetType: InstallType, name: string): boolean {

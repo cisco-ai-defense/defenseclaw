@@ -284,6 +284,16 @@ class TestMigrate030Surgical(unittest.TestCase):
         _migrate_0_3_0_surgical(self.oc_json)
 
 
+class TestMigrate030NeverCreatesAllowList(unittest.TestCase):
+    # rel-1-0-10 GAP-0069 / REVIEW-6 P3-6: plugins.allow is exclusive.
+    def test_no_allow_list_is_created(self):
+        tmp = tempfile.mkdtemp()
+        oc_json = os.path.join(tmp, "openclaw.json")
+        _write_json(oc_json, {"models": {"providers": {"defenseclaw": {"url": "x"}}}, "plugins": {"entries": {}}})
+        _migrate_0_3_0_surgical(oc_json)
+        self.assertNotIn("allow", _read_json(oc_json).get("plugins", {}))
+
+
 class TestMigrate030Dispatch(unittest.TestCase):
     """Tests for the top-level _migrate_0_3_0 dispatch logic."""
 
@@ -368,9 +378,10 @@ class TestMigrate040TokenBootstrap(unittest.TestCase):
             msg=ctx.changes,
         )
 
-    def test_renames_legacy_openclaw_token_var(self):
-        """Operators on 0.2.x had OPENCLAW_GATEWAY_TOKEN; we promote to
-        the new canonical name without rotating the secret value."""
+    def test_keeps_the_openclaw_token_and_generates_a_separate_master(self):
+        """R-TOK: OPENCLAW_GATEWAY_TOKEN is the OpenClaw gateway token, so the
+        0.x import keeps it and generates a DefenseClaw token of its own (it
+        used to rename it, which made the OpenClaw token the master)."""
         env_path = os.path.join(self.data_dir, ".env")
         with open(env_path, "w") as f:
             f.write("OPENCLAW_GATEWAY_TOKEN=legacy-secret-123\n")
@@ -379,12 +390,8 @@ class TestMigrate040TokenBootstrap(unittest.TestCase):
         _migrate_0_4_0(ctx)
 
         kv = _parse_dotenv(env_path)
-        self.assertEqual(kv.get("DEFENSECLAW_GATEWAY_TOKEN"), "legacy-secret-123")
-        self.assertNotIn("OPENCLAW_GATEWAY_TOKEN", kv)
-        self.assertTrue(
-            any("renamed legacy OPENCLAW_GATEWAY_TOKEN" in c for c in ctx.changes),
-            msg=ctx.changes,
-        )
+        self.assertEqual(kv.get("OPENCLAW_GATEWAY_TOKEN"), "legacy-secret-123")
+        self.assertRegex(kv.get("DEFENSECLAW_GATEWAY_TOKEN", ""), r"^[0-9a-f]{64}$")
 
     def test_token_bootstrap_preserves_comments_and_unrelated_lines(self):
         env_path = os.path.join(self.data_dir, ".env")
@@ -403,8 +410,9 @@ class TestMigrate040TokenBootstrap(unittest.TestCase):
         self.assertIn("# operator note\n", text)
         self.assertIn("export CUSTOM_SETTING=keep-me\n", text)
         self.assertIn("not dotenv syntax but intentional\n", text)
-        self.assertIn("DEFENSECLAW_GATEWAY_TOKEN=legacy-secret-123\n", text)
-        self.assertNotIn("OPENCLAW_GATEWAY_TOKEN", text)
+        self.assertIn("OPENCLAW_GATEWAY_TOKEN=legacy-secret-123\n", text)
+        self.assertNotIn("DEFENSECLAW_GATEWAY_TOKEN=legacy-secret-123", text)
+        self.assertIn("DEFENSECLAW_GATEWAY_TOKEN=", text)
 
     def test_idempotent(self):
         ctx1 = _ctx(self.oc_home, self.data_dir)

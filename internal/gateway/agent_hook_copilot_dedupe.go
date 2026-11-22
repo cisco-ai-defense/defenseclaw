@@ -29,6 +29,15 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
+// One Kiro tool call can also reach the gateway twice: kiro-cli 3.x loads the
+// agent file's hooks and ~/.kiro/hooks together and runs both (GAP-0165),
+// while kiro-cli --v2 reads the agent file alone. DefenseClaw keeps both
+// registrations so every engine a 3.x CLI can run stays protected, and the
+// second delivery (the other surface: v3 marker or none, same session,
+// phase, tool and arguments, within the content window) takes the first
+// one's verdict, so the call is evaluated and audited once. A call that only
+// one surface delivers is never matched.
+//
 // One Copilot tool call can reach the gateway twice:
 //
 //   - VS Code's Local harness runs both DefenseClaw's per-user hook file and
@@ -104,10 +113,10 @@ func copilotDedupeScope(ctx context.Context) string {
 // delivery (a third envelope, not one of the two paired CLI dialects) and a
 // call the gateway could not read take no keys.
 func copilotDedupeKeys(ctx context.Context, connectorName string, req agentHookRequest, policy string) (exact, content, dialect, request string) {
-	if connectorName != "copilot" || isSandboxHookRequest(ctx) || req.ToolCallUnparsed {
+	if (connectorName != "copilot" && connectorName != "kiro") || isSandboxHookRequest(ctx) || req.ToolCallUnparsed {
 		return "", "", "", ""
 	}
-	if _, native := req.Payload["toolCalls"]; native {
+	if _, native := req.Payload["toolCalls"]; native && connectorName == "copilot" {
 		return "", "", "", ""
 	}
 	phase := canonicalEvent(req.HookEventName)
@@ -125,6 +134,9 @@ func copilotDedupeKeys(ctx context.Context, connectorName string, req agentHookR
 		dialect = "camel"
 	}
 	tool := strings.ToLower(strings.TrimSpace(req.ToolName))
+	if connectorName == "kiro" {
+		dialect, tool = kiroDedupeSurface(req.HookSurface), kiroDedupeTool(tool)
+	}
 	digest, ok := copilotToolArgsDigest(req.ToolArgs)
 	if !ok || tool == "" {
 		return "", "", "", ""
@@ -137,13 +149,33 @@ func copilotDedupeKeys(ctx context.Context, connectorName string, req agentHookR
 	// Both keys carry the call itself, so a reused or colliding id never
 	// answers a different call or a different resolved write target.
 	policyHash := sha256.Sum256([]byte(policy))
-	call := scope + "\x00" + session + "\x00" + phase + "\x00" + tool + "\x00" + digest + "\x00" + cwd + "\x00" + hex.EncodeToString(evidenceHash[:]) +
+	call := connectorName + "\x00" + scope + "\x00" + session + "\x00" + phase + "\x00" + tool + "\x00" + digest + "\x00" + cwd + "\x00" + hex.EncodeToString(evidenceHash[:]) +
 		"\x00" + hex.EncodeToString(policyHash[:])
 	if id := firstString(req.Payload, "tool_use_id", "toolUseId"); id != "" {
 		request = scope + "\x00" + session + "\x00" + id
 		exact = "id\x00" + request + "\x00" + call
 	}
 	return exact, "args\x00" + call, dialect, request
+}
+
+// kiroDedupeSurface names the hook configuration a Kiro delivery came from:
+// the .kiro/hooks command carries the v3 marker, the agent file's bare
+// command does not (connector.KiroHookSurfaceV2).
+func kiroDedupeSurface(surface string) string {
+	if strings.EqualFold(strings.TrimSpace(surface), connector.KiroHookSurfaceV3) {
+		return connector.KiroHookSurfaceV3
+	}
+	return connector.KiroHookSurfaceV2
+}
+
+// kiroDedupeTool gives the two names of Kiro's shell tool one name, so a
+// delivery that spells it differently still matches (agentHookTrustedActionTool).
+func kiroDedupeTool(tool string) string {
+	switch tool {
+	case "execute_bash", "execute_pwsh", "shell", "bash":
+		return "shell"
+	}
+	return tool
 }
 
 // copilotToolArgsDigest hashes the call's arguments in one form for both
@@ -193,6 +225,17 @@ func (d *copilotHookDedupe) begin(ctx context.Context, connectorName string, req
 		earlier = entry
 	} else if entry := d.entries[content]; content != "" && entry != nil && entry.dialect != dialect {
 		earlier = entry
+	}
+	if earlier != nil && connectorName == "kiro" {
+		// A Kiro call is delivered once per hook surface, so the first
+		// delivery's entry answers one second delivery. The next identical
+		// call (same arguments within the window) is then evaluated and
+		// audited on its own.
+		for key, entry := range d.entries {
+			if entry == earlier {
+				delete(d.entries, key)
+			}
+		}
 	}
 	if earlier == nil {
 		for _, claim := range []struct {

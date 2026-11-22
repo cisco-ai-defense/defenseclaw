@@ -97,6 +97,14 @@ const (
 	// account; enterprisehooks.UnblockPersonalClaudeHook).
 	enterpriseHookWorkerModeUnblockPersonalClaude     = "unblock_personal_claude"
 	enterpriseHookWorkerModeRepairManagedCodexFeature = "repair_managed_codex_feature"
+	// enterpriseHookWorkerModeVerifyMachineRoute reads, as the user, the
+	// route-only render of a machine-policy connector (route_config_drift
+	// when it differs from what config.yaml selects, rel-1-0-10 GAP-0568).
+	enterpriseHookWorkerModeVerifyMachineRoute = "verify_machine_route"
+	// enterpriseHookWorkerModeRestoreMachineRoute takes back, as the user,
+	// the route-only render of a machine-policy connector whose row left
+	// (rel-1-0-10 GAP-0568).
+	enterpriseHookWorkerModeRestoreMachineRoute = "restore_machine_route"
 	// enterpriseHookWorkerModeRemoveUserNativeOTLP removes, as the user, a
 	// native OTLP exporter in the user's own Codex or Claude Code
 	// configuration that carries a DefenseClaw credential (GAP-2376).
@@ -128,6 +136,7 @@ var enterpriseHookWorkerWritingModes = map[string]bool{
 	enterpriseHookWorkerModeBlockPersonalClaude:       true,
 	enterpriseHookWorkerModeRepairManagedCodexFeature: true,
 	enterpriseHookWorkerModeRemoveUserNativeOTLP:      true,
+	enterpriseHookWorkerModeRestoreMachineRoute:       true,
 }
 
 // preserveOwnInstallForJob runs enterprisehooks.PreserveOwnInstall for each
@@ -212,6 +221,8 @@ type enterpriseHookWorkerOptions struct {
 	HookCredentialIdentity             string `json:"hook_credential_identity,omitempty"`
 	ForeignHookGuardBinary             string `json:"foreign_hook_guard_binary,omitempty"`
 	ManagedHookBinary                  string `json:"managed_hook_binary,omitempty"`
+	// RouteOnly is the route-only rendering of the target (nil: none).
+	RouteOnly *connector.RouteOnlySetup `json:"route_only,omitempty"`
 	// ProductCredentials are the digests of the product credentials a
 	// remove_user_native_otlp target knows an exporter by; the credentials
 	// themselves never reach a process that runs as the user.
@@ -235,6 +246,9 @@ type enterpriseHookWorkerTarget struct {
 	// (enterpriseHookPriorUserTokens). They only classify a reinstall as
 	// configuration; nothing is rendered from them.
 	PriorCredentials *enterprisehooks.HookCredentials `json:"prior_credentials,omitempty"`
+	// MachineRoute: this machine-policy target also applies the account's
+	// route-only render (Options.RouteOnly; nil takes it back), GAP-0568.
+	MachineRoute bool `json:"machine_route,omitempty"`
 }
 
 type enterpriseHookWorkerRequest struct {
@@ -385,6 +399,9 @@ type enterpriseHookWorkerTargetResult struct {
 	PathsReported bool     `json:"paths_reported,omitempty"`
 	Remaining     string   `json:"remaining,omitempty"`
 	Unverified    string   `json:"unverified,omitempty"`
+	// RouteDrift is why the account's route-only render of a machine-policy
+	// target was not applied (GAP-0568); the target result stands.
+	RouteDrift string `json:"route_drift,omitempty"`
 }
 
 // enterpriseHookPurgeDetail is what uninstall --purge removed for one
@@ -585,7 +602,7 @@ func enterpriseHookWorkerMain(ctx context.Context, stdin io.Reader, stdout, stde
 		// deadline. Give discovery its own deadline so the private-home
 		// walk can return an incomplete result while there is still time
 		// to write the response.
-		scanCtx, cancel := context.WithTimeout(ctx, workerTimeout(request)*3/4)
+		scanCtx, cancel := context.WithTimeout(ctx, enterpriseHookWorkerScanTimeout(workerTimeout(request)))
 		defer cancel()
 		return respond(enterpriseHookWorkerDiscoverWithin(scanCtx, request), 0)
 	case enterpriseHookWorkerOpForeignCleanup:
@@ -866,6 +883,18 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 		case enterpriseHookWorkerModeBlockPersonalClaude:
 			err = blockPersonalClaudeHook(opts)
 			result = enterprisehooks.InstallResult{Connector: opts.ConnectorName, UserHome: opts.UserHome}
+			if err == nil && request.Standalone && target.MachineRoute {
+				outcome.RouteDrift = applyMachinePolicyRouteOnly(registry, opts)
+			}
+		case enterpriseHookWorkerModeVerifyMachineRoute:
+			err = verifyMachinePolicyRouteOnly(registry, opts)
+			result = enterprisehooks.InstallResult{Connector: opts.ConnectorName, UserHome: opts.UserHome}
+		case enterpriseHookWorkerModeRestoreMachineRoute:
+			opts.RouteOnly = nil
+			if drift := applyMachinePolicyRouteOnly(registry, opts); drift != "" {
+				err = errors.New(drift)
+			}
+			result = enterprisehooks.InstallResult{Connector: opts.ConnectorName, UserHome: opts.UserHome}
 		case enterpriseHookWorkerModeUnblockPersonalClaude:
 			dataDir := strings.TrimSpace(opts.DataDir)
 			if dataDir == "" {
@@ -877,6 +906,9 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 				err = errors.New("managed Codex feature repair requires the standalone guardian")
 			} else {
 				err = repairManagedCodexUserFeature(opts)
+				if err == nil && target.MachineRoute {
+					outcome.RouteDrift = applyMachinePolicyRouteOnly(registry, opts)
+				}
 			}
 			result = enterprisehooks.InstallResult{Connector: opts.ConnectorName, UserHome: opts.UserHome}
 		case enterpriseHookWorkerModeRemoveUserNativeOTLP:
@@ -1015,6 +1047,77 @@ func reinstallEnterpriseHookTarget(ctx context.Context, opts enterprisehooks.Ins
 // repairManagedCodexUserFeature runs with the target user's uid. The machine
 // requirements already pin hooks=true; this removes only the conflicting user
 // key that makes Codex refuse an unrelated project trust write.
+// applyMachinePolicyRouteOnly writes, as the account (the worker runs as
+// it), the route-only keys of a machine-policy connector into the
+// account's own agent file: opts.RouteOnly renders, nil takes an earlier
+// render back and touches no file when nothing was rendered. It returns
+// why the render failed ("" on success); the failure never fails the
+// enrollment row (rel-1-0-10 GAP-0568).
+func applyMachinePolicyRouteOnly(registry *connector.Registry, opts enterprisehooks.InstallOptions) string {
+	if registry == nil {
+		return ""
+	}
+	conn, ok := registry.Get(opts.ConnectorName)
+	if !ok {
+		return ""
+	}
+	routed, ok := conn.(connector.RouteOnlyConnector)
+	if !ok {
+		return ""
+	}
+	dataDir := strings.TrimSpace(opts.DataDir)
+	if dataDir == "" {
+		dataDir = filepath.Join(opts.UserHome, ".defenseclaw")
+	}
+	if opts.RouteOnly != nil {
+		// An agent installed but never run has no config folder yet; the
+		// render (and its lock file) needs it. The worker runs as the user.
+		folder := map[string]string{"claudecode": ".claude", "codex": ".codex"}[strings.ToLower(opts.ConnectorName)]
+		if folder != "" {
+			if err := os.MkdirAll(filepath.Join(opts.UserHome, folder), 0o700); err != nil {
+				return boundedEnterpriseHookRouteDrift(err.Error())
+			}
+		}
+	}
+	setup := connector.SetupOpts{DataDir: dataDir, ManagedEnterprise: true, RouteOnly: opts.RouteOnly}
+	err := connector.WithUserHomeDir(opts.UserHome, func() error {
+		return routed.ApplyRouteOnly(setup, opts.RouteOnly)
+	})
+	if err != nil {
+		return boundedEnterpriseHookRouteDrift(err.Error())
+	}
+	return ""
+}
+
+// verifyMachinePolicyRouteOnly fails with route_config_drift when the
+// account's route-only render of a machine-policy connector differs from
+// the one config.yaml selects (missing, edited, stale credential, or left
+// after routing was turned off). Read only.
+func verifyMachinePolicyRouteOnly(registry *connector.Registry, opts enterprisehooks.InstallOptions) error {
+	conn, ok := registry.Get(opts.ConnectorName)
+	if !ok {
+		return fmt.Errorf("enterprise hooks: unknown connector %q", opts.ConnectorName)
+	}
+	dataDir := strings.TrimSpace(opts.DataDir)
+	if dataDir == "" {
+		dataDir = filepath.Join(opts.UserHome, ".defenseclaw")
+	}
+	return connector.WithUserHomeDir(opts.UserHome, func() error {
+		if err := connector.RouteOnlyDrift(conn, connector.SetupOpts{DataDir: dataDir, ManagedEnterprise: true, RouteOnly: opts.RouteOnly}, opts.RouteOnly); err != nil {
+			return fmt.Errorf("enterprise hooks: %w", err)
+		}
+		return nil
+	})
+}
+
+// boundedEnterpriseHookRouteDrift keeps a worker route error short.
+func boundedEnterpriseHookRouteDrift(s string) string {
+	if len(s) > 240 {
+		return s[:240]
+	}
+	return s
+}
+
 func repairManagedCodexUserFeature(opts enterprisehooks.InstallOptions) error {
 	if !strings.EqualFold(strings.TrimSpace(opts.ConnectorName), "codex") {
 		return errors.New("managed Codex feature repair requires the Codex connector")
@@ -1518,6 +1621,7 @@ func (o enterpriseHookWorkerOptions) installOptions(registry *connector.Registry
 		HookCredentialIdentity:             o.HookCredentialIdentity,
 		ForeignHookGuardBinary:             o.ForeignHookGuardBinary,
 		ManagedHookBinary:                  o.ManagedHookBinary,
+		RouteOnly:                          o.RouteOnly,
 	}
 }
 
@@ -1546,6 +1650,7 @@ func enterpriseHookWorkerOptionsFrom(opts enterprisehooks.InstallOptions) enterp
 		HookCredentialIdentity:             opts.HookCredentialIdentity,
 		ForeignHookGuardBinary:             opts.ForeignHookGuardBinary,
 		ManagedHookBinary:                  opts.ManagedHookBinary,
+		RouteOnly:                          opts.RouteOnly,
 	}
 }
 
@@ -2072,9 +2177,43 @@ func sortedWorkerJobs(byUID map[int]*enterpriseHookWorkerJob) []enterpriseHookWo
 
 var errEnterpriseHookWorkerNoResult = errors.New("worker returned no result for this target")
 
-// enterpriseHookWorkerScanGrace is how long a discover worker waits, after
+// enterpriseHookWorkerScanGrace is the longest a discover worker waits, after
 // its scan deadline, for a scan that observes the deadline to return.
 var enterpriseHookWorkerScanGrace = 2 * time.Second
+
+// enterpriseHookWorkerAnswerMargin is the part of a discover worker's limit
+// kept free after the scan deadline and the grace, for the worker to start,
+// write its answer and the parent to read it.
+const enterpriseHookWorkerAnswerMargin = time.Second
+
+// enterpriseHookWorkerScanShare splits a discover worker's limit into its
+// scan deadline and the grace after it, so that the scan, the grace and a
+// margin always end before the parent kills the worker at limit. A long limit
+// gets three quarters for the scan, less if the grace and
+// enterpriseHookWorkerAnswerMargin do not fit after it. A short limit (a
+// discovery called near the end of a cycle's budget passes what is left, down
+// to 1 s) gets half for the scan, a quarter for the grace and a quarter for
+// the answer: before, 3/4 of a limit of 8 s or less plus the full 2 s grace
+// ran past the limit, and the parent discarded the partial answer of a
+// blocked scan (GAP-0332).
+func enterpriseHookWorkerScanShare(limit, grace time.Duration) (time.Duration, time.Duration) {
+	scan := limit * 3 / 4
+	if scan+grace+enterpriseHookWorkerAnswerMargin > limit {
+		scan = limit - grace - enterpriseHookWorkerAnswerMargin
+	}
+	if scan < limit/2 {
+		scan, grace = limit/2, min(grace, limit/4)
+	}
+	return scan, grace
+}
+
+// enterpriseHookWorkerScanTimeout is the scan deadline of a discover worker
+// whose limit is timeout (enterpriseHookWorkerScanShare). The test worker
+// replaces it so that a blocked scan does not take seconds.
+var enterpriseHookWorkerScanTimeout = func(timeout time.Duration) time.Duration {
+	scan, _ := enterpriseHookWorkerScanShare(timeout, enterpriseHookWorkerScanGrace)
+	return scan
+}
 
 // enterpriseHookWorkerDiscovery is what one discover worker has found so far.
 type enterpriseHookWorkerDiscovery struct {
@@ -2116,7 +2255,8 @@ func enterpriseHookWorkerDiscoverWithin(ctx context.Context, request enterpriseH
 	select {
 	case <-done:
 	case <-ctx.Done():
-		grace := time.NewTimer(enterpriseHookWorkerScanGrace)
+		_, wait := enterpriseHookWorkerScanShare(workerTimeout(request), enterpriseHookWorkerScanGrace)
+		grace := time.NewTimer(wait)
 		select {
 		case <-done:
 		case <-grace.C:

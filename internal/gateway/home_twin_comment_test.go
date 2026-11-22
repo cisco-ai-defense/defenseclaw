@@ -76,7 +76,7 @@ func TestHomeSpellingWriteWithACommentThatNamesHomeBlocks(t *testing.T) {
 				findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
 					Input: input, Connector: connectorName, EnforcementCapable: true,
 				})
-				blocked := buildVerdict(findings, "tool_call").Action == "block"
+				blocked := gap0747Blocked(findings, row.block)
 				if blocked != row.block {
 					t.Errorf("%s hint=%q %q: block=%v, want %v", connectorName, hint, row.command, blocked, row.block)
 				}
@@ -126,7 +126,7 @@ func TestWindowsHomeSpellingWriteWithACommentThatNamesHomeBlocks(t *testing.T) {
 				findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
 					Input: input, Connector: connectorName, EnforcementCapable: true,
 				})
-				blocked := buildVerdict(findings, "tool_call").Action == "block"
+				blocked := gap0747Blocked(findings, row.block)
 				if blocked != row.block {
 					t.Errorf("%s hint=%q %q: block=%v, want %v", connectorName, hint, row.command, blocked, row.block)
 				}

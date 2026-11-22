@@ -134,7 +134,7 @@ var hermesExecutionContainmentUnavailable = func() string {
 	return ""
 }
 
-// runHermesExecutionProbe keeps no more stdout than the proof itself: one
+// runHermesExecutionProbeResult keeps no more stdout than the proof itself: one
 // byte more fails the write, which closes the pipe and ends the probe.
 // RunContained ends the process tree when the probe exits and at the
 // timeout (a Job Object on Windows, a PID namespace on Linux, a
@@ -143,13 +143,7 @@ var hermesExecutionContainmentUnavailable = func() string {
 // establish that nothing the hook started still runs: a hook that started a
 // child in a session of its own passed while the child kept running (r104
 // W5b). Stdout left open by a descendant is closed after
-// hermesExecutionProbePipeWait.
-func runHermesExecutionProbe(target string, args []string) bool {
-	ok, _ := runHermesExecutionProbeResult(target, args)
-	return ok
-}
-
-// runHermesExecutionProbeResult is runHermesExecutionProbe with the
+// hermesExecutionProbePipeWait. The error is the
 // RunContained error, so the caller can tell a probe that never ran.
 func runHermesExecutionProbeResult(target string, args []string) (bool, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), hermesExecutionProbeTimeout)

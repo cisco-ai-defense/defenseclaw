@@ -38,6 +38,11 @@ type PerConnectorObservability struct {
 // overrides.
 type ObservabilityConfig struct {
 	Connectors map[string]PerConnectorObservability `mapstructure:"connectors" yaml:"connectors,omitempty"`
+	// Tokenomics and Pricing are observability.tokenomics and
+	// observability.pricing (tokenomics.go). They stay outside
+	// ObservabilityV8Source, so the exporter plan digest does not change.
+	Tokenomics TokenomicsConfig `mapstructure:"tokenomics" yaml:"tokenomics,omitempty"`
+	Pricing    PricingConfig    `mapstructure:"pricing" yaml:"pricing,omitempty"`
 }
 
 // connectorOverride returns the override block for connector if configured.
@@ -102,7 +107,16 @@ func (o *ObservabilityConfig) ConnectorNames() []string {
 // config.py — it never touches the connector registry. Returns the first
 // violation.
 func (o *ObservabilityConfig) Validate() error {
-	if o == nil || len(o.Connectors) == 0 {
+	if o == nil {
+		return nil
+	}
+	if err := o.Tokenomics.Validate(); err != nil {
+		return err
+	}
+	if err := o.Pricing.Validate(); err != nil {
+		return err
+	}
+	if len(o.Connectors) == 0 {
 		return nil
 	}
 	seen := make(map[string]string, len(o.Connectors))

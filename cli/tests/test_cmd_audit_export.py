@@ -87,10 +87,21 @@ def test_findings_alias_execs_the_gateway_findings_without_loading_config(
     assert exec_capture == [[GATEWAY, GATEWAY, *argv]]
 
 
-def test_audit_help_names_findings_and_logs() -> None:
+def test_compact_alias_execs_the_gateway_compact_without_loading_config(
+    exec_capture: list[list[str]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    argv = ["audit", "compact", "--dry-run", "--json"]
+    monkeypatch.setattr(sys, "argv", ["defenseclaw", *argv])
+    result = CliRunner().invoke(main_module.cli, argv, catch_exceptions=False)
+    assert result.exit_code == 0, result.output
+    assert exec_capture == [[GATEWAY, GATEWAY, *argv]]
+
+
+def test_audit_help_names_findings_compact_and_logs() -> None:
     result = CliRunner().invoke(cmd_audit.audit, ["--help"])
     assert result.exit_code == 0
     assert "findings" in result.output
+    assert "compact" in result.output
     assert "logs" in result.output
 
 

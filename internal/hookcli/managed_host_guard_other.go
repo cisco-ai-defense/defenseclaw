@@ -1,0 +1,39 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// SPDX-License-Identifier: Apache-2.0
+
+//go:build !windows
+
+package hookcli
+
+import (
+	"runtime"
+
+	"github.com/defenseclaw/defenseclaw/internal/managed"
+)
+
+// SecureClientHost reports a Secure Client DefenseClaw install (macOS only);
+// a seam for tests.
+var SecureClientHost = func() bool {
+	if runtime.GOOS != "darwin" {
+		return false
+	}
+	return managed.ValidateTrustedInstallMarkerDir("/opt/cisco/secureclient/defenseclaw", "Secure Client install marker") == nil
+}
+
+// ManagedHostWindowsStandalone is Windows-only; unix hosts use the runtime
+// descriptor.
+var ManagedHostWindowsStandalone = func() (string, bool) { return "", false }
+
+// Unix hosts use the runtime descriptor above the per-user hook runtime.
+var ManagedHostWindowsMarkerUncertain = func() bool { return false }
+
+// ManagedHostRecordTrusted accepts every record outside Windows: the unix
+// descriptor lives in a root-owned directory no standard user can write.
+var ManagedHostRecordTrusted = func(string) error { return nil }

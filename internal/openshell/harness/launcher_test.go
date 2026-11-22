@@ -213,6 +213,16 @@ func TestLaunchersPinTheirEnvironment(t *testing.T) {
 			"AMP_PLUGIN_SOURCE_BASE64=eA==", "AMP_SETTINGS_FILE=/tmp/s.json"}, []string{"--dangerously-allow-all", "-x", "hi"},
 			map[string]string{"HOME": "{dir}", "XDG_CONFIG_HOME": unset, "AMP_DISABLE_PLUGINS": unset, "AMP_PLUGIN_URI": unset,
 				"AMP_PLUGIN_SOURCE_BASE64": unset, "AMP_SETTINGS_FILE": unset, "AMP_SKIP_UPDATE_CHECK": "1"}},
+		// Claude reads CLAUDE_CODE_RESTRICT_PERSONAL_CONFIG before any
+		// settings file, so a Claude not started by sandbox create --env
+		// gets it from the launcher, and a caller 0 or empty is replaced
+		// (GAP-1200).
+		{"claude code restrict personal config unset", ClaudeCode, nil, []string{"-p", "hi"},
+			map[string]string{"CLAUDE_CODE_RESTRICT_PERSONAL_CONFIG": "1"}},
+		{"claude code restrict personal config 0", ClaudeCode, []string{"CLAUDE_CODE_RESTRICT_PERSONAL_CONFIG=0"}, []string{"-p", "hi"},
+			map[string]string{"CLAUDE_CODE_RESTRICT_PERSONAL_CONFIG": "1"}},
+		{"claude code restrict personal config empty", ClaudeCode, []string{"CLAUDE_CODE_RESTRICT_PERSONAL_CONFIG="}, []string{"-p", "hi"},
+			map[string]string{"CLAUDE_CODE_RESTRICT_PERSONAL_CONFIG": "1"}},
 		{"codex", Codex, []string{"OPENAI_API_KEY=sk-placeholder"}, []string{"exec", "--skip-git-repo-check", "prompt"},
 			map[string]string{"CODEX_API_KEY": "sk-placeholder"}},
 		{"hermes", Hermes, []string{"BEDROCK_MANTLE_API_KEY=openshell:resolve:env:v4_BEDROCK_MANTLE_API_KEY", "HERMES_SAFE_MODE=1",

@@ -6,6 +6,7 @@ package hookpaths
 import (
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 
 	"mvdan.cc/sh/v3/syntax"
@@ -57,25 +58,50 @@ func registrationFlowMembers(file *syntax.File, command, cwd, home string, prote
 	if !registrationWriteCapable(file, home) || !registrationHasFlow(file, home) {
 		return named
 	}
-	text := registrationHomeText(command, home)
-	words := registrationStaticWords(file, home)
+	// The words a call only reads are left out of the match: a name that
+	// only a reader, a cp source or a tar member spells is not a write of
+	// it (registrationFlowReadSpans, rel-1-0-10:GAP-0104).
+	blanked, readOnly := registrationFlowBlank(command, registrationFlowReadSpans(file, cwd, home, protected))
+	text := registrationFlowSpelling(registrationHomeText(blanked, home))
+	words := registrationStaticWords(file, home, readOnly)
+	// resolved holds each distinct word of the command as the hook resolves it,
+	// read once for the whole registration set: the answer for a word does not
+	// depend on the member it is compared with, and a long script cost one
+	// file system walk of every word for every member (446,000 lstat calls
+	// for 100 lines, 27 s on a Windows host, rel-1-0-10:GAP-0766).
+	var resolved []string
+	resolvedWords := false
 	for index, entry := range protected {
 		if registrationIsFolder(entry, protected) {
 			continue
 		}
 		path := entry.path
 		base, parent := filepath.Base(path), filepath.Dir(path)
+		spelledPath, spelledBase, spelledParent := registrationFlowSpelling(path), registrationFlowSpelling(base), registrationFlowSpelling(parent)
 		switch {
-		case registrationMentions(text, path, false):
+		case registrationMentions(text, spelledPath, false):
 			named[index] = true
-		case registrationMentions(text, base, true) &&
-			(cwd == parent || registrationMentions(text, parent, false)):
+		case registrationMentions(text, spelledBase, true) &&
+			(registrationFlowSpelling(cwd) == spelledParent || registrationMentions(text, spelledParent, false)):
 			named[index] = true
 		default:
 			// A word that is a link the hook resolves.
+			if !resolvedWords {
+				resolvedWords = true
+				seen := make(map[string]bool, len(words))
+				for _, word := range words {
+					if seen[word] {
+						continue
+					}
+					seen[word] = true
+					if path, ok := ResolveWriteTarget(OperandPath(word, cwd)); ok {
+						resolved = append(resolved, path)
+					}
+				}
+			}
 			single := protectedFiles{entry}
-			for _, word := range words {
-				if protectedReachPath(OperandPath(word, cwd), single, "") {
+			for _, path := range resolved {
+				if protectedReachResolved(path, single, "") {
 					named[index] = true
 					break
 				}
@@ -99,6 +125,21 @@ func registrationIsFolder(entry protectedFile, set protectedFiles) bool {
 		}
 	}
 	return false
+}
+
+// registrationFlowSpelling is a path or command text as the flow net
+// compares it. On Windows a hook config path is C:\Users\x\.codex\config.toml
+// while the text spells the home as Git Bash and PowerShell do (~/.codex/
+// config.toml, $HOME/.codex/..., C:/Users/x/.codex/...): compared as written,
+// the home's backslashes never matched the slashes of the rest, so eval "..."
+// > f and tar -xf x.tar -C ~/.codex config.toml reached no hook config. Both
+// sides are read in the slash spelling and the case a Windows path ignores
+// (rel-1-0-10:GAP-0154). Elsewhere text is kept as written.
+func registrationFlowSpelling(value string) string {
+	if runtime.GOOS != "windows" {
+		return value
+	}
+	return strings.ToLower(filepath.ToSlash(value))
 }
 
 // registrationHomeText spells ~ and $HOME with the home folder.
@@ -148,11 +189,15 @@ func registrationMentions(text, name string, component bool) bool {
 	return false
 }
 
-// registrationStaticWords lists the literal words of the command.
-func registrationStaticWords(file *syntax.File, home string) []string {
+// registrationStaticWords lists the literal words of the command but the
+// ones skip reports.
+func registrationStaticWords(file *syntax.File, home string, skip func(*syntax.Word) bool) []string {
 	var out []string
 	syntax.Walk(file, func(node syntax.Node) bool {
 		if word, ok := node.(*syntax.Word); ok {
+			if skip(word) {
+				return false
+			}
 			if value, fixed := StaticWord(word, home); fixed && value != "" && !strings.HasPrefix(value, "-") {
 				out = append(out, value)
 			}
@@ -385,6 +430,9 @@ func registrationCallWrites(call *syntax.CallExpr, home string) bool {
 	if !fixed {
 		return true
 	}
+	if handed, fed, hands := inlineHandedWords(words, home); hands && (len(handed) != 0 || fed) {
+		return true // inline code handed words: no reader proves it read-only
+	}
 	base := programBase(program)
 	if base == "find" {
 		return registrationFindWrites(words[1:], home)
@@ -426,7 +474,13 @@ func registrationNamesWriter(words []*syntax.Word, home string, command bool) bo
 }
 
 // registrationEditsInPlace reports whether a sed or perl call edits a file in
-// place (or sed runs a w / e command): without that the two only read.
+// place (or sed runs a w / e command): without that the two only read. Only a
+// sed script word is read for a w / e command (sedScriptWords): a file sed
+// reads is no script, so a hook path with a folder such as /etc or x0e-base
+// is not a write (rel-1-0-10:GAP-0849, native: the run tag n7…c30e-base in the
+// temporary folder made sed -n 1p <hook>; echo done reach the hook). A call
+// with a word that is not static, or with an option this reading does not
+// know, keeps the reading of every static word.
 func registrationEditsInPlace(call *syntax.CallExpr, home string) bool {
 	if len(call.Args) == 0 {
 		return false
@@ -435,17 +489,113 @@ func registrationEditsInPlace(call *syntax.CallExpr, home string) bool {
 	if !fixed || programBase(program) != "sed" && programBase(program) != "perl" {
 		return false
 	}
+	words := make([]string, 0, len(call.Args)-1)
+	allStatic := true
 	for _, word := range call.Args[1:] {
 		value, fixed := StaticWord(word, home)
 		if !fixed {
+			allStatic = false
 			continue
 		}
-		if registrationInPlaceFlag.MatchString(value) ||
-			programBase(program) == "sed" && !strings.HasPrefix(value, "-") && registrationSedWrites.MatchString(value) {
+		if registrationInPlaceFlag.MatchString(value) {
+			return true
+		}
+		words = append(words, value)
+	}
+	if programBase(program) != "sed" {
+		return false
+	}
+	scripts := words
+	if allStatic {
+		if read, ok := sedScriptWords(words); ok {
+			scripts = read
+		}
+	}
+	for _, value := range scripts {
+		if !strings.HasPrefix(value, "-") && registrationSedWrites.MatchString(value) {
 			return true
 		}
 	}
 	return false
+}
+
+// sedScriptWords reads the script words of a sed call from its words: each
+// -e / --expression value, each -f / --file name, and the first operand when
+// no -e or -f comes before it. GNU sed reads that operand as a file when -e
+// or -f comes anywhere, BSD sed only when one comes before it (its options
+// end at the first operand), so the BSD reading is kept; every other operand
+// is a file sed reads. A separate word after short -l counts as a script word
+// too (GNU reads a line length, BSD a script). ok is false for an option this reading does not know (a
+// short letter outside GNU sed's, a long name or an ambiguous prefix of one,
+// sedLongOption), so the caller keeps reading every word.
+func sedScriptWords(args []string) (scripts []string, ok bool) {
+	first, given := true, false
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		next := func() string {
+			if i+1 < len(args) {
+				i++
+				return args[i]
+			}
+			return ""
+		}
+		switch {
+		case arg == "--":
+			if i+1 < len(args) && first && !given {
+				scripts = append(scripts, args[i+1])
+			}
+			return scripts, true
+		case strings.HasPrefix(arg, "--"):
+			_, value, inline := strings.Cut(arg, "=")
+			switch sedLongOption(arg) {
+			case "":
+				return nil, false
+			case "expression", "file":
+				if !inline {
+					value = next()
+				}
+				scripts, given = append(scripts, value), true
+			case "line-length":
+				if !inline {
+					next()
+				}
+			}
+		case len(arg) > 1 && arg[0] == '-':
+		cluster:
+			for j := 1; j < len(arg); j++ {
+				switch arg[j] {
+				case 'l':
+					// GNU -l takes a line length, BSD -l none: a separate
+					// word after it is read both ways, as a script word
+					// that keeps the first-operand slot open
+					// (rel-1-0-10:GAP-1499). An option word after it is an
+					// option (BSD); an attached value is GNU's -lN.
+					if j+1 == len(arg) && i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+						scripts = append(scripts, next())
+					}
+					break cluster
+				case 'e', 'f':
+					value := arg[j+1:]
+					if value == "" {
+						value = next()
+					}
+					scripts, given = append(scripts, value), true
+					break cluster
+				case 'i':
+					break cluster
+				case 'n', 'r', 'E', 's', 'u', 'z', 'b':
+				default:
+					return nil, false
+				}
+			}
+		default:
+			if first && !given {
+				scripts = append(scripts, arg)
+			}
+			first = false
+		}
+	}
+	return scripts, true
 }
 
 // registrationHasFlow reports whether the command contains a construct that

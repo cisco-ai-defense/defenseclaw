@@ -13,17 +13,19 @@ import (
 )
 
 // GAP-1352: a Codex session that was already running when the gateway
-// stopped got no outage warning. Its UserPromptSubmit hook took the
+// stopped got no outage warning. Its first outage hook took the
 // once-per-session marker without showing anything, so every later
 // PreToolUse found it spent. Claude Code lost it the same way through
 // PostToolUse and Stop. Only a call that shows the warning takes the marker:
-// a running session sees exactly one warning, whichever event comes first.
+// a running session sees exactly one warning, whichever event comes first
+// (a Codex prompt shows it since rel-1-0-10 GAP-1168).
 func TestRunningSessionOutageWarnsOnceWhicheverEventComesFirst(t *testing.T) {
 	for _, tc := range []struct {
 		conn   Connector
 		events []string
 	}{
-		{NewCodexConnector(), []string{"UserPromptSubmit", "Stop", "PreToolUse", "PreToolUse"}},
+		{NewCodexConnector(), []string{"Stop", "PostToolUse", "PreToolUse", "PreToolUse"}},
+		{NewCodexConnector(), []string{"Stop", "UserPromptSubmit", "PreToolUse"}},
 		{NewClaudeCodeConnector(), []string{"PostToolUse", "Stop", "UserPromptSubmit", "PreToolUse", "PreToolUse"}},
 		{NewClaudeCodeConnector(), []string{"PostToolUse", "PreToolUse", "PreToolUse"}},
 	} {

@@ -497,10 +497,246 @@ def _remove_after_exit(
     return writes_result
 
 
+_FILE_ATTRIBUTE_READONLY = 0x1
+_FILE_ATTRIBUTE_NORMAL = 0x80
+_FILE_READ_ATTRIBUTES = 0x0080
+_FILE_WRITE_ATTRIBUTES = 0x0100
+_FILE_BASIC_INFO_CLASS = 0
+_FILE_DISPOSITION_INFO_EX_CLASS = 21
+_FILE_DISPOSITION_FLAG_DELETE = 0x1
+_FILE_DISPOSITION_FLAG_POSIX_SEMANTICS = 0x2
+_FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE = 0x10
+# FileDispositionInfoEx with these flags: Windows 10 1809 / Server 2019 (build 17763) on, on NTFS.
+_DISPOSITION_EX_MIN_BUILD = 17763
+# What an older Windows or another file system answers to FileDispositionInfoEx:
+# ERROR_INVALID_FUNCTION, ERROR_NOT_SUPPORTED, ERROR_INVALID_PARAMETER, ERROR_INVALID_LEVEL.
+_DISPOSITION_EX_UNSUPPORTED = frozenset({1, 50, 87, 124})
+_READONLY_DELETED = "deleted"
+_READONLY_NOT_SET = "not-readonly"
+_READONLY_UNSUPPORTED = "unsupported"
+_READONLY_REFUSED = "refused"
+
+
+class _FileBasicInfo(ctypes.Structure):
+    # A time of 0 leaves that time unchanged.
+    _fields_ = [
+        ("CreationTime", ctypes.c_int64),
+        ("LastAccessTime", ctypes.c_int64),
+        ("LastWriteTime", ctypes.c_int64),
+        ("ChangeTime", ctypes.c_int64),
+        ("FileAttributes", wintypes.DWORD),
+    ]
+
+
+class _ByHandleFileInformation(ctypes.Structure):
+    _fields_ = [
+        ("FileAttributes", wintypes.DWORD),
+        ("CreationTime", wintypes.FILETIME),
+        ("LastAccessTime", wintypes.FILETIME),
+        ("LastWriteTime", wintypes.FILETIME),
+        ("VolumeSerialNumber", wintypes.DWORD),
+        ("FileSizeHigh", wintypes.DWORD),
+        ("FileSizeLow", wintypes.DWORD),
+        ("NumberOfLinks", wintypes.DWORD),
+        ("FileIndexHigh", wintypes.DWORD),
+        ("FileIndexLow", wintypes.DWORD),
+    ]
+
+
+def _file_attributes(path: str) -> int:
+    """The Windows attributes of path itself (a link or junction is not followed); 0 off Windows."""
+    try:
+        return int(getattr(os.lstat(path), "st_file_attributes", 0))
+    except OSError:
+        return 0
+
+
+def _file_kernel32():
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateFileW.argtypes = (
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    )
+    kernel32.CreateFileW.restype = wintypes.HANDLE
+    kernel32.GetFileInformationByHandle.argtypes = (wintypes.HANDLE, wintypes.LPVOID)
+    kernel32.GetFileInformationByHandle.restype = wintypes.BOOL
+    kernel32.SetFileInformationByHandle.argtypes = (wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD)
+    kernel32.SetFileInformationByHandle.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    return kernel32
+
+
+def _open_no_follow(kernel32, path: str, access: int):
+    """A handle to path itself: a link or junction is opened, never its target; None if refused."""
+    handle = kernel32.CreateFileW(
+        path,
+        access,
+        _FILE_SHARE_ALL,
+        None,
+        _OPEN_EXISTING,
+        _FILE_FLAG_BACKUP_SEMANTICS | _FILE_FLAG_OPEN_REPARSE_POINT,
+        None,
+    )
+    if handle is None or handle == _INVALID_HANDLE_VALUE:
+        return None
+    return handle
+
+
+def _handle_information(kernel32, handle) -> _ByHandleFileInformation | None:
+    info = _ByHandleFileInformation()
+    if not kernel32.GetFileInformationByHandle(handle, ctypes.byref(info)):
+        return None
+    return info
+
+
+def _delete_readonly_entry(path: str) -> str:
+    """Delete a ReadOnly path itself through one handle, leaving every attribute as it is (GAP-1609).
+
+    The handle does not follow a link or junction, and FileDispositionInfoEx
+    with IGNORE_READONLY_ATTRIBUTE removes this name without clearing
+    ReadOnly. So a hard link to a file outside the tree goes and the outside
+    file keeps its ReadOnly attribute and its content; nothing is opened by
+    path again between the check and the delete. One of _READONLY_DELETED,
+    _READONLY_NOT_SET (path itself is not ReadOnly), _READONLY_UNSUPPORTED
+    (Windows before 1809 or a file system without it) or _READONLY_REFUSED.
+    """
+    kernel32 = _file_kernel32()
+    handle = _open_no_follow(kernel32, path, _DELETE | _FILE_READ_ATTRIBUTES)
+    if handle is None:
+        return _READONLY_REFUSED
+    try:
+        info = _handle_information(kernel32, handle)
+        if info is None:
+            return _READONLY_REFUSED
+        if not info.FileAttributes & _FILE_ATTRIBUTE_READONLY:
+            return _READONLY_NOT_SET
+        flags = wintypes.DWORD(
+            _FILE_DISPOSITION_FLAG_DELETE
+            | _FILE_DISPOSITION_FLAG_POSIX_SEMANTICS
+            | _FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE
+        )
+        if kernel32.SetFileInformationByHandle(
+            handle, _FILE_DISPOSITION_INFO_EX_CLASS, ctypes.byref(flags), ctypes.sizeof(flags)
+        ):
+            return _READONLY_DELETED
+        if ctypes.get_last_error() in _DISPOSITION_EX_UNSUPPORTED:
+            return _READONLY_UNSUPPORTED
+        return _READONLY_REFUSED
+    finally:
+        # A POSIX delete takes the name away when this handle closes.
+        kernel32.CloseHandle(handle)
+
+
+def _clear_readonly_attribute(path: str) -> bool:
+    """Clear ReadOnly on path itself, through a handle that does not follow a link or junction.
+
+    A file with more than one name (a hard link) is left as it is: its
+    attributes are shared with the other names, which may be outside the
+    trees uninstall removes, so it stays and the caller reports it.
+    """
+    kernel32 = _file_kernel32()
+    handle = _open_no_follow(kernel32, path, _FILE_READ_ATTRIBUTES | _FILE_WRITE_ATTRIBUTES)
+    if handle is None:
+        return False
+    try:
+        current = _handle_information(kernel32, handle)
+        if current is None or not current.FileAttributes & _FILE_ATTRIBUTE_READONLY:
+            return False
+        if current.NumberOfLinks > 1:
+            return False
+        # Attributes of 0 would mean "unchanged"; NORMAL is the "none" value.
+        cleared = (current.FileAttributes & ~_FILE_ATTRIBUTE_READONLY) or _FILE_ATTRIBUTE_NORMAL
+        info = _FileBasicInfo(0, 0, 0, 0, cleared)
+        return bool(
+            kernel32.SetFileInformationByHandle(handle, _FILE_BASIC_INFO_CLASS, ctypes.byref(info), ctypes.sizeof(info))
+        )
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def _link_count(path: str) -> int:
+    """How many names (hard links) the file path itself has; 1 when it cannot be read."""
+    kernel32 = _file_kernel32()
+    handle = _open_no_follow(kernel32, path, _FILE_READ_ATTRIBUTES)
+    if handle is None:
+        return 1
+    try:
+        info = _handle_information(kernel32, handle)
+        return int(info.NumberOfLinks) if info is not None else 1
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def _readonly_delete_by_handle_expected() -> bool:
+    """Whether this Windows deletes a ReadOnly entry through its handle (1809 / Server 2019 on)."""
+    getwindowsversion = getattr(sys, "getwindowsversion", None)
+    if sys.platform != "win32" or getwindowsversion is None:
+        return False
+    return getwindowsversion().build >= _DISPOSITION_EX_MIN_BUILD
+
+
+def clear_readonly(path: str) -> bool:
+    """Clear the ReadOnly attribute of path itself; whether it was set and is cleared now (GAP-1609).
+
+    The fallback where Windows cannot delete a ReadOnly entry through its
+    handle (remove_refused_readonly). The attribute of a link or junction is
+    cleared on the link itself; its target is never opened. A file with
+    another name (a hard link) is never changed: that name may be outside.
+    Off Windows nothing is set.
+    """
+    if not _file_attributes(path) & _FILE_ATTRIBUTE_READONLY:
+        return False
+    return _clear_readonly_attribute(path)
+
+
+def remove_refused_readonly(path: str, remove, error: OSError) -> bool:
+    """After Windows refused remove(path): remove a ReadOnly path itself; whether it went (GAP-1609).
+
+    Windows refuses to delete a ReadOnly file or folder with "Access is
+    denied". Git writes its objects ReadOnly, and a rollback keeps git
+    folders under backups, so the deferred cleanup failed on them and the
+    whole data folder stayed (.env with the API keys, device.key). Only an
+    access-denied refusal of an entry that really is ReadOnly is retried, at
+    most once: through one no-follow handle that deletes the name and leaves
+    the attribute as it is; where Windows cannot do that, by clearing ReadOnly
+    on the entry itself (never on a file with another name) and calling
+    remove(path) again. False means nothing changed and the refusal stands.
+    The callers pass only the entries of the trees uninstall removes.
+    Off Windows nothing is ever ReadOnly here.
+    """
+    if getattr(error, "winerror", _ERROR_ACCESS_DENIED) != _ERROR_ACCESS_DENIED:
+        return False
+    if not _file_attributes(path) & _FILE_ATTRIBUTE_READONLY:
+        return False
+    outcome = _delete_readonly_entry(path)
+    if outcome == _READONLY_DELETED:
+        return True
+    if outcome != _READONLY_UNSUPPORTED or not _clear_readonly_attribute(path):
+        return False
+    remove(path)
+    return True
+
+
+def remove_clearing_readonly(path: str, remove) -> None:
+    """remove(path) (os.unlink or os.rmdir); a ReadOnly path refused that way still goes (GAP-1609)."""
+    try:
+        remove(path)
+    except PermissionError as error:
+        if not remove_refused_readonly(path, remove, error):
+            raise
+
+
 def _remove_tree(path: str, *, marker_names: set[str] | None = None, skip: set[str] | None = None) -> None:
     """Remove a tree without traversing a reparse-point entry.
 
     The paths in skip (normalized) stay, and so does each folder above them.
+    A ReadOnly entry loses the attribute first (GAP-1609).
     """
     if _is_reparse(path):
         raise ValueError(f"refusing reparse-point data root: {path}")
@@ -518,16 +754,16 @@ def _remove_tree(path: str, *, marker_names: set[str] | None = None, skip: set[s
                 continue
             if _is_reparse(entry.path):
                 if entry.is_dir(follow_symlinks=False):
-                    os.rmdir(entry.path)
+                    remove_clearing_readonly(entry.path, os.rmdir)
                 else:
-                    os.unlink(entry.path)
+                    remove_clearing_readonly(entry.path, os.unlink)
             elif entry.is_dir(follow_symlinks=False):
                 _remove_tree(entry.path, skip=skip)
             else:
-                os.unlink(entry.path)
+                remove_clearing_readonly(entry.path, os.unlink)
     if any(_contains(_norm(path), kept) for kept in skip):
         return
-    os.rmdir(path)
+    remove_clearing_readonly(path, os.rmdir)
 
 
 def _contains(parent: str, child: str) -> bool:
@@ -659,8 +895,8 @@ def denied_entries(root: str, skip: set[str] | None = None, *, prober=None) -> l
     return sorted(denied)
 
 
-def _open_for_delete_error(path: str) -> int:
-    """Open path for delete with full sharing and close it; 0 or the Windows error."""
+def _open_for_delete_error(path: str, access: int = _DELETE) -> int:
+    """Open path for delete (or access) with full sharing and close it; 0 or the Windows error."""
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     kernel32.CreateFileW.argtypes = (
         wintypes.LPCWSTR,
@@ -676,7 +912,7 @@ def _open_for_delete_error(path: str) -> int:
     kernel32.CloseHandle.restype = wintypes.BOOL
     handle = kernel32.CreateFileW(
         path,
-        _DELETE,
+        access,
         _FILE_SHARE_ALL,
         None,
         _OPEN_EXISTING,
@@ -695,8 +931,22 @@ def _folder_held(path: str) -> bool:
 
 
 def _delete_denied(path: str) -> bool:
-    """Whether Windows refuses this account the right to delete path."""
-    return _open_for_delete_error(path) == _ERROR_ACCESS_DENIED
+    """Whether Windows refuses this account the right to delete path.
+
+    A ReadOnly file goes only for an account that may write its attributes
+    (GAP-1609): Windows refuses deleting it through its handle without that
+    right too, so one whose attributes this account cannot write is denied.
+    Before Windows 1809 / Server 2019 the attribute must be cleared first, so
+    a file with another name (a hard link), whose shared attribute is never
+    cleared, is denied as well.
+    """
+    if _open_for_delete_error(path) == _ERROR_ACCESS_DENIED:
+        return True
+    if not _file_attributes(path) & _FILE_ATTRIBUTE_READONLY:
+        return False
+    if _open_for_delete_error(path, _FILE_WRITE_ATTRIBUTES) == _ERROR_ACCESS_DENIED:
+        return True
+    return not _readonly_delete_by_handle_expected() and _link_count(path) > 1
 
 
 def _data_left_detail(plan: dict[str, object], data_dir: str, error: OSError) -> str:
@@ -831,7 +1081,7 @@ def main() -> int:
             def remove_target(target=target):
                 _validate_plan(targets_plan)
                 _check_not_superseded(data_dir, started_at)
-                os.unlink(target)
+                remove_clearing_readonly(target, os.unlink)
 
             _retry(remove_target, f"remove {target}")
         if bool(plan.get("remove_empty_install_root")) and targets:

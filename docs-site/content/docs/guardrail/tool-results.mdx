@@ -1,0 +1,143 @@
+---
+title: Tool results
+description: A tool's output is untrusted data. DefenseClaw checks every tool result for instructions aimed at the agent, alerts on them in the default posture, blocks in strict, and always tells the agent not to follow them and shows you a line.
+keywords:
+  - indirect prompt injection
+  - tool output
+  - PostToolUse
+  - tool_result
+---
+
+A web page, a file, an email or an API response can carry text written to
+steer the agent that reads it. That is indirect prompt injection. The tool
+call has already run when its output comes back, so DefenseClaw treats the
+output as a warning about what the agent reads next, not as an action to
+stop.
+
+**How good it is.** On the end-to-end benchmark, the rules alone found 0.64 of the AgentDojo tool-result attacks and 0.01 of the BIPIA email ones, with no benign result alerted. With the full cascade behind them (the decision model and the LLM judge), recall is 0.97 and 0.91, and 0.7% and 0.0% of benign results alert. See [Benchmarks](/docs/guardrail/benchmarks#the-whole-cascade-end-to-end).
+
+## What is checked
+
+Every tool result goes through one set of checks, whichever way it reaches
+DefenseClaw:
+
+- the PostToolUse (or equivalent) hook of every hook connector;
+- the tool results a request to the `/llm` proxy carries for the first time:
+  tool-role messages, Anthropic `tool_result` blocks, Responses API
+  `function_call_output` items and Gemini `functionResponse` parts. Results
+  from earlier turns were checked on the request that first carried them.
+
+The checks:
+
+- **Prompt-injection rules** (`trust-exploit`), on the text as written and on
+  a decoded view: string escapes such as `\n` and `\u0041` decoded and
+  look-alike letters folded, because tool output is often JSON or YAML and
+  the model reads the escape as the character.
+- **Structural checks.** They look for text that addresses the agent, not for
+  words: data that calls the AI agent by role or model name and tells it to
+  do something, that refers to the agent's own instructions or task, that
+  opens a new chat role (chat-template tokens, a closing tool-output tag, a
+  "system message" header), or that tells the reader to discard its
+  instructions. Ordinary content that addresses people (an email asking a
+  colleague for a report, a README telling you to run a command) does not
+  match. Rule IDs: `TOOLRESULT-AGENT-DIRECTIVE`, `TOOLRESULT-ROLE-SWITCH`,
+  `TOOLRESULT-DISCARD-INSTRUCTIONS`.
+- **Secrets** (`secret` rules), as before.
+- **C2 and exfil hosts** (`c2` rules: webhook.site, ngrok, Pipedream, cloud
+  metadata and the like), recorded as LOW telemetry: a host named in a
+  document or a test file is not an action. The call to the host, if the agent
+  makes it, is judged on its own.
+- **The judge, when you turn it on.** The injection judge reads a tool result
+  as untrusted data with its own prompt ("does this data try to direct the
+  agent?"), next to the tool, its call and your request for the turn (see the
+  `judge_tool_result_context` lane). It runs under
+  `detection_strategy_completion`, the setting that
+  already governs tool output (setup sets it with the judge): `regex_judge`
+  judges every result the rules did not already block, `judge_first` every
+  result.
+
+Not checked on tool output: the enterprise-data rules tagged `contact`, `pci`
+or `financial`, that is email addresses (`ENT-EMAIL-BULK`, `PII-EMAIL-FIELD`,
+`PII-EMAIL-LIST`), phone numbers (`ENT-US-PHONE`, `ENT-PHONE-E164`), card
+numbers and IBANs. In a tool's output (an inbox, a contact list, a calendar
+event, a CRM record) those are the data you asked the tool for. The same
+rules still run on prompts, model replies and tool-call arguments, so an
+address the agent sends out in a call is still checked. The regulated
+identifiers (Social Security, passport, licence and NHS numbers, medical
+records, dates of birth), the bulk SSN and account-record rules and your own
+rules stay checked; a rule of yours is left out only if you tag it `contact`,
+`pci` or `financial`. The PII judge likewise reads a tool's output only when
+the pack lists the tool in `sensitive-tools.yaml` with `judge_result: true`.
+To alert on personal data in the output of particular tools, list them there
+(`result_inspection`, `min_entities_for_alert`). Command and path rules
+never run on output text; they judge tool calls.
+
+## What happens
+
+The tool has already run when its output comes back, and on most agents the
+output has already reached the model when the hook answers. A verdict on a
+tool result cannot undo the call, and a result cannot be unread. So
+enforcement on this surface means telling the agent and the user:
+
+- the agent is told that the result is untrusted and that it must not follow
+  the instructions in it, and
+- on Claude Code and Codex you see a DefenseClaw line in the agent's own
+  window, on every alert and on every block, in every posture. The other
+  connectors show nothing in the agent window (table below); the finding goes
+  to `defenseclaw alerts`, the TUI Alerts panel and the audit log.
+
+Every tool-result finding (rules, structural checks, judge) is HIGH at most,
+so the default pack never blocks a tool result:
+
+| posture | what you get |
+|---|---|
+| default, permissive, managed (default pack) | an alert. The agent gets a context note that the result contains instructions it must not follow; on Claude Code and Codex you see the DefenseClaw line. Never a block: managed on the default pack alerts. |
+| strict, managed strict | a block answer: the agent's tool-result block form, with a reason that says the result contains instructions the agent must not follow; on Claude Code and Codex you see the DefenseClaw line. Managed strict blocks (managed on the default pack only alerts). Where the agent can withhold the output (below), it does. |
+
+In observe mode nothing is blocked; a finding that would block says so in the
+same context note and line.
+
+Secrets in a tool's output are an alert today; redacting them where the agent
+can replace the output is planned.
+
+What each agent does with a tool-result alert and block:
+
+| agent | the agent is told | you see | a block in strict |
+|---|---|---|---|
+| Claude Code (PostToolUse) | alert: `hookSpecificOutput.additionalContext`; block: the `reason` of `decision: block` | `systemMessage` | `decision: block` with the reason. The output has already reached the model; Claude Code gives the model the reason with it. |
+| Codex (PostToolUse) | alert: `hookSpecificOutput.additionalContext`; block: the `reason` of `decision: block` | `systemMessage` | `decision: block`. In interactive use Codex feeds the reason to the model in place of the tool result; in code mode the tool promise rejects. |
+| `/llm` proxy (OpenClaw and every proxy-routed agent) | block: the refusal message | the refusal message | The model call that would carry the output is refused, so the model never reads it. |
+| Amp (`tool.result`) | block: the withheld notice in place of the output. On an alert the agent is told nothing | an Amp notification on an alert, shown only to a foreground user; the withheld notice (block) | Enforced: the plugin replaces the output with a withheld notice before Amp sends it to the model. |
+| Cursor (`postToolUse`) | `additional_context`, ending with the limit line below | nothing in Cursor: the post-tool event has no user field | Alert only. |
+| Copilot CLI, Devin (`postToolUse`, `PostToolUse`) | `additionalContext`, ending with the limit line below | nothing in the agent: the post-tool event has no user field | Alert only. |
+| Antigravity | nothing: its `PostToolUse` payload carries only the step index and an error, no tool output, so tool results are not inspected at all | nothing | No tool-result inspection. |
+| Hermes, OpenCode, Kiro | nothing: their post-tool events take no context field DefenseClaw can use | nothing in the agent | Alert only. |
+
+**Antigravity does not inspect tool results.** Its `PostToolUse` event
+carries no tool output, so there is nothing to scan and no finding in any
+posture.
+
+**Alert only.** Cursor, Copilot CLI, Devin, Hermes, OpenCode
+and Kiro have no hook that can block a tool result, so on them a tool-result
+injection is an alert in every posture, strict included, and the output
+reaches the model. DefenseClaw says so in three places:
+
+- the agent's note (where the agent takes one) ends with "Tool-result
+  injection is alert only on `<connector>`: DefenseClaw cannot block a tool
+  result there, and the output reached the agent.";
+- `defenseclaw doctor` prints a "Tool-result injection" row per connector:
+  "tool-result injection: alert only on `<connector>`" for these, and the
+  alert-and-block summary for the others;
+- `defenseclaw status` prints the same "alert only" line under the connector
+  list for each enabled connector it applies to.
+
+The finding itself is in `defenseclaw alerts`, the TUI Alerts panel and the
+audit log on every agent. Desktop notifications cover blocks and pending
+approvals, not alerts.
+
+Before 1.0.10 a Claude Code PostToolUse finding reached only the model:
+`additionalContext` is not shown in the Claude Code window, so the injection
+alert looked silent, and a strict block was answered as an allow.
+
+Managed enterprise (AI Defense only) is unchanged: AI Defense receives the
+conversation, tool messages included.

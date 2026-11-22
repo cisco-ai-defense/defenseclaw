@@ -1626,7 +1626,7 @@ func TestResolveReservesPrometheusListeners(t *testing.T) {
 	plan, err := config.CompileObservabilityV8(&config.ObservabilityV8Source{
 		Destinations: []config.ObservabilityV8DestinationSource{
 			{Name: "metrics", Kind: config.ObservabilityV8DestinationPrometheus, Listen: "127.0.0.1:9464", Path: "/metrics"},
-			{Name: "all-interfaces", Kind: config.ObservabilityV8DestinationPrometheus, Listen: ":9465", Path: "/metrics"},
+			{Name: "localhost", Kind: config.ObservabilityV8DestinationPrometheus, Listen: "localhost:9465", Path: "/metrics"},
 			{Name: "off", Kind: config.ObservabilityV8DestinationPrometheus, Listen: "127.0.0.1:9466", Path: "/metrics",
 				Enabled: boolPtr(false)},
 		},

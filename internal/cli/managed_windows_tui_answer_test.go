@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/spf13/cobra"
 )
 
@@ -17,9 +19,9 @@ import (
 // answers that and names the administrator's checks, with exit 3 like the
 // other managed answers.
 func TestManagedWindowsTUISaysItIsNotInstalledAndNamesTheNextStep(t *testing.T) {
-	restoreHost, restoreCLI := managedHostWindowsStandalone, managedWindowsAdminCLI
-	t.Cleanup(func() { managedHostWindowsStandalone, managedWindowsAdminCLI = restoreHost, restoreCLI })
-	managedHostWindowsStandalone = func() (string, bool) { return `HKLM\SOFTWARE\Cisco\DefenseClaw\Enterprise`, true }
+	restoreHost, restoreCLI := hookcli.ManagedHostWindowsStandalone, managedWindowsAdminCLI
+	t.Cleanup(func() { hookcli.ManagedHostWindowsStandalone, managedWindowsAdminCLI = restoreHost, restoreCLI })
+	hookcli.ManagedHostWindowsStandalone = func() (string, bool) { return `HKLM\SOFTWARE\Cisco\DefenseClaw\Enterprise`, true }
 	managedWindowsAdminCLI = func() string { return `C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe` }
 	root := &cobra.Command{Use: "defenseclaw", PersistentPreRunE: rootPersistentPreRunE}
 	addManagedWindowsSetupAnswer(root)
@@ -27,8 +29,8 @@ func TestManagedWindowsTUISaysItIsNotInstalledAndNamesTheNextStep(t *testing.T) 
 	root.SetErr(io.Discard)
 	root.SetArgs([]string{"tui"})
 	err := root.Execute()
-	if commandExitCode(err) != 3 || err == nil {
-		t.Fatalf("tui on a managed Windows computer: exit %d, %v", commandExitCode(err), err)
+	if cliusage.ExitCode(err) != 3 || err == nil {
+		t.Fatalf("tui on a managed Windows computer: exit %d, %v", cliusage.ExitCode(err), err)
 	}
 	for _, want := range []string{
 		"managed by your organization",

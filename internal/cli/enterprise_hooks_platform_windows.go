@@ -18,6 +18,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 	"github.com/spf13/cobra"
@@ -235,7 +236,7 @@ func enterpriseHookMachinePolicyContract(manifest enterprisehooks.Manifest) stri
 // enterpriseHookStandaloneManifestPath is the standalone guardian's
 // targets.yaml, the manifest the deployment-wide Claude contract comes from.
 var enterpriseHookStandaloneManifestPath = func() (string, error) {
-	layout, err := windowsManagedLayout.standalone()
+	layout, err := hookcli.WindowsManagedLayout.Standalone()
 	if err != nil {
 		return "", err
 	}

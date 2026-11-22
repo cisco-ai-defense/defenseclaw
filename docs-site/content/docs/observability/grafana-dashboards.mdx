@@ -8,7 +8,7 @@ keywords:
   - dashboard catalog
 ---
 
-DefenseClaw provisions 18 Grafana dashboards into a **DefenseClaw** folder, or 19 from a source checkout (editable install), which also seeds the optional Fleet dashboard. The IoT Fleet board is the 19th: it is not in the installed package and is added with the separate Fleet assets ([Fleet dashboard](/docs/edge-connector/api-reference#prometheus-metrics)). Start the stack with [Run Grafana locally](/docs/observability/local-observability); the links on this page assume `localhost:3000`.
+DefenseClaw provisions 21 Grafana dashboards into a **DefenseClaw** folder, or 22 from a source checkout (editable install), which also seeds the optional Fleet dashboard. The IoT Fleet board is the 22nd: it is not in the installed package and is added with the separate Fleet assets ([Fleet dashboard](/docs/edge-connector/api-reference#prometheus-metrics)). Start the stack with [Run Grafana locally](/docs/observability/local-observability); the links on this page assume `localhost:3000`.
 
 ## Complete inventory
 
@@ -31,7 +31,30 @@ DefenseClaw provisions 18 Grafana dashboards into a **DefenseClaw** folder, or 1
 | **DefenseClaw — Scanners (Ops)** (`defenseclaw-scanners`) | Are scans healthy and producing the expected findings? | Prometheus |
 | **DefenseClaw — Proxy & LLM Guard** (`defenseclaw-traffic`) | What happens on proxy and router deployments? Empty unless proxy mode is active. | Prometheus, Loki, Tempo |
 | **DefenseClaw — Sandboxes** (`defenseclaw-sandboxes`) | What are OpenShell sandboxes doing, reaching and being refused? See [Sandboxes board](#sandboxes-board). | Prometheus, Loki |
+| **DefenseClaw — Substrate agents** (`defenseclaw-substrate`) | Is DefenseClaw healthy on Agent Substrate, and what are the actors doing? See [Substrate agents board](#substrate-agents-board). | Prometheus, Loki |
+| **DefenseClaw — Tokenomics** (`defenseclaw-tokenomics`) | What do model calls cost, by model, provider, route, connector and profile, how many calls have no known cost, and were any usage records dropped? Per-user cost reads `model.usage` logs and is an administrator view; a person sees their own usage from `GET /usage`. | Prometheus, Loki |
+| **DefenseClaw — Routing, Savings & Budgets** (`defenseclaw-routing`) | What is the semantic router deciding, how often does it fall back or refuse, what did routing save against sending every call to the model the client asked for, and how close is each budget to its limit? See [Routing, savings and budgets board](#routing-savings-and-budgets-board). | Prometheus, Loki |
 | **DefenseClaw — Runtime & Reliability** (`defenseclaw-runtime`) | Is the process, database, exporter or destination delivery unhealthy? | Prometheus, Loki |
+
+## Routing, savings and budgets board
+
+**DefenseClaw — Routing, Savings & Budgets** shows what [semantic routing](/docs/routing/semantic-routing) and [routing budgets](/docs/routing/routing-budgets) are doing. It reads the `defenseclaw.semantic_routing.decision` counter, the cost counters of [Tokenomics](/docs/observability/tokenomics), the `defenseclaw.budget.*` gauges, and the `model.usage` logs.
+
+| Row | Panels | Answers |
+| --- | --- | --- |
+| Routing decisions | Decisions, routed share, fallbacks, refusals, sensitive narrowing, routing latency p95 | How much traffic does the router decide, and how often does it not route? |
+| Decisions over time | By result, by reason (route source), by listener, top routed categories, calls by routed model, calls by route decision | Which rule or classifier picked the route (`rules`, `systemone`, `force`, `default`), which listener (`route_only` or `guardrail`), and where did the calls go? |
+| Fallbacks, refusals and fail-closed | Fallbacks by cause (at decision time and per call), refusals by reason, sensitive requests kept local, sent to the original model, or refused | Why a request kept its original model, what a managed policy refused, and whether sensitive requests stayed local. |
+| Savings | Spent, the same calls on the requested model, saved (USD and share), saved per interval and by model, calls with no comparison | What routing saved, and for which calls there is no honest comparison. |
+| Budgets | Used share per budget, limit and spend table, spend and limit over time, budget stops, subjects over the limit, fleet budget store state | How close each budget is, and what a budget stopped. |
+| Per user and per group | Spend per user (logs), users over their limit, group budgets | Who spent what in the range, and which pooled budgets are close. |
+| Managed fleet | Decisions, spend and savings by host | Which hosts route, fall back and save. |
+
+The variables are **Connector**, **Host**, **Budget**, **Group budget** and **User regex**. Host is the reporting gateway, so on a managed fleet it separates the machines. The User box narrows the log panels only: metrics carry no user, by design. A group is named by its budget id, because directory group names never leave the endpoint.
+
+**How the saving is computed.** For each agent call the gateway prices the call's own tokens on the model the client asked for, from your `observability.pricing` table, next to what the call really cost. A call counts on both sides only when both prices are known (a free side adds nothing to its counter), so **Spent** and **The same calls on the requested model** always cover the same calls. The saving is the difference. It is negative when routing sent a call to a more expensive model, and the panel shows it in red. The same token counts are used for both models; a different tokenizer would count slightly differently. A call whose requested model has no price is not counted and appears in **Calls with no comparison** and the table of models to add. A missing price is never shown as a saving of zero.
+
+**Budgets.** The budget gauges are reported every 15 seconds for each budget in `routing.admin.budgets`, named by its id. A budget whose spend is still loading, or that the fleet store answers with "over the limit" only, shows a limit and no spend. **Budget stops** and **Refusals by reason** count requests a managed gateway refused; an open source gateway reports an exceeded `deny` budget and keeps routing, so those panels stay at 0 there. **Fleet budget store** reads `not enabled` until `routing.admin.budget_store` is set.
 
 ## Kernel controls and your Tetragon policies
 
@@ -125,6 +148,21 @@ Things to know when you read it:
 ![Grafana Sandboxes board, Egress decisions and Traffic volume rows: egress by source and decision as logs and as a metric (all names), the top blocked host (webhook.site) and the top allowed hosts, and bytes up and down by destination and over time](/images/grafana/sandboxes-egress.png)
 
 ![Grafana Sandboxes board, Process starts row: process starts over time and the top started programs, filled because the sandbox ran with the process tree on](/images/grafana/sandboxes-processes.png)
+
+## Substrate agents board
+
+The **Substrate agents** board (`defenseclaw-substrate`) shows [Agent Substrate](/docs/substrate) clusters. It has the **Environment** box (`$environment`) and four rows:
+
+| Row | Panels | What it shows |
+| --- | --- | --- |
+| Control plane health | Policy lag p99, Unattested templates, Policy conflicts, Idle suspends, Rate limited, Actors seen | Whether policy reaches new actors in time, whether any template or actor has no valid policy, and how often the controller, the idle rule and the rate limit act. Zero conflicts and zero unattested templates are healthy |
+| Latency | Hook round trip, Policy lag, Leader observe latency | The 50th and 99th percentile of each histogram |
+| Actor lifecycle | Lifecycle changes by trigger, Phase transitions, Recent lifecycle records | What caused each change (create, resume re-check, fork, drift, idle suspend) and which phase it entered |
+| Egress through the callout | Egress decisions, Bodies read and bodies over the cap, Secrets injected, Recent blocked requests | What the callout allowed and refused, how often it read a body, and which secrets it injected (names only) |
+
+The board has no panel for `defenseclaw.substrate.first_hook_after_resume`: no component records it in this release (see [Agent Substrate metrics](/docs/observability/sandbox-telemetry)).
+
+The metric panels have no actor, atespace or person label, because those are never metric labels. Actor names appear only in the log panels. Alert rules for the same signals are in the chart (`metrics.prometheusRule.enabled`).
 
 ## How the drill-down works
 

@@ -108,8 +108,14 @@ func TestManagedAgentSettingsAreSelfProtection(t *testing.T) {
 				for _, row := range rows {
 					got := postManagedSettingsShellCell(t, home, project, connector, pack, managed, row.command)
 					block := strings.HasPrefix(got, `{"action":"block"`)
+					// A protected row is a block in strict and a HIGH alert
+					// outside it (GAP-0747 owner tiering 2026-11-15T15:20Z).
+					protectedVerdict := strings.HasPrefix(got, `{"action":"alert"`)
+					if pack == "strict" {
+						protectedVerdict = block
+					}
 					switch {
-					case row.protected && (!block || !strings.Contains(got, "tamper.detector_state_write")):
+					case row.protected && (!protectedVerdict || !strings.Contains(got, "tamper.detector_state_write")):
 						t.Errorf("%s managed=%t pack=%s: %s = %.200s, want protected block", connector, managed, pack, row.command, got)
 					case !row.protected && block && pack != "strict":
 						t.Errorf("%s managed=%t pack=%s: %s = %.200s, want allow", connector, managed, pack, row.command, got)

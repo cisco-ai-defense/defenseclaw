@@ -37,6 +37,21 @@ var ampPin = npmPin{
 	},
 }
 
+// ampPinSubstrate is the @ampcode/cli release of the Agent Substrate actor kit
+// (lane K1): the cert hosts' release. The package installs the platform
+// package's executable as bin/amp.exe.
+var ampPinSubstrate = npmPin{
+	Package:   "@ampcode/cli",
+	Version:   "0.0.1794542441-g4e0611",
+	Integrity: "sha512-9oIw4X9kzzH8rjlU3j8gFfvTBnKUJLMd+RsalDPMkz6f3mXiiCCWXbi77RA/rQQmtjDJJgOpXD/PTpkRV0YSlQ==",
+	Native: map[string]npmNative{
+		"aarch64": {Path: "lib/node_modules/@ampcode/cli/bin/amp.exe", SHA256: "098a5b354543a2cef26e8756da658f0dcc3f48d252d73a1b134caed0c4449e53"},
+		"x86_64":  {Path: "lib/node_modules/@ampcode/cli/bin/amp.exe", SHA256: "c2268db73802baa5e432feae3f2bfad79f902352c207f7b9ae371dbb1d91ee18"},
+	},
+}
+
+var ampPins = npmPins{ampPin, ampPinSubstrate}
+
 // ampVersionRE matches Amp's build-suffixed releases.
 var ampVersionRE = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+-g[0-9a-f]{6,40}$`)
 
@@ -70,7 +85,7 @@ var Amp = register(&Spec{
 	},
 	install: func(version string) ([]InstallStep, error) {
 		root := InstallRootBase + "/amp"
-		run, err := ampPin.installRun(root, version, "amp", "")
+		run, err := ampPins.installRun(root, version, "amp", "")
 		if err != nil {
 			return nil, err
 		}

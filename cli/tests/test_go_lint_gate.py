@@ -61,10 +61,21 @@ def test_go_lint_runs_vet_then_golangci_lint() -> None:
     assert recipe.index("go vet ./...") < recipe.index("$(MAKE) --no-print-directory go-lint-analyzers")
 
 
+def test_go_lint_vets_the_openshell_integration_tag() -> None:
+    # The live Claude Code run-config test sits behind the openshell_integration
+    # build tag, so a plain `go vet ./...` never compiles it (GAP-0280).
+    makefile = MAKEFILE.read_text(encoding="utf-8")
+    recipe = makefile[makefile.index("\ngo-lint: ") : makefile.index("\ngo-lint-analyzers:")]
+    tagged = "go vet -tags openshell_integration ./internal/openshell/image/"
+    assert tagged in recipe
+    assert recipe.index("go vet ./...") < recipe.index(tagged) < recipe.index("go-lint-analyzers")
+
+
 def test_ci_go_lint_has_the_history_for_changed_lines() -> None:
     ci = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8"))
     job = ci["jobs"]["go-lint"]
-    assert job["timeout-minutes"] == 15
+    # GAP-1090: push 5 cancelled the job at 15m17s with no finding.
+    assert job["timeout-minutes"] == 25
     steps = job["steps"]
     checkout = next(step for step in steps if str(step.get("uses", "")).startswith("actions/checkout@"))
     assert checkout["with"]["fetch-depth"] == "${{ github.event_name == 'pull_request' && 2 || 0 }}"

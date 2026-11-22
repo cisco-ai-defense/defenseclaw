@@ -33,24 +33,6 @@ func atomicTransformFileLegacy(
 	return atomicTransformFileLegacyPrepared(path, stateDir, perm, transform)
 }
 
-// atomicTransformFileLegacyWithStateDir retains the V1 engine on platforms
-// without the Windows handle-bound namespace primitives while honoring the
-// caller's protected stable transaction directory. This preserves the public
-// stable-state contract without compiling the Windows-only V2 protocol into a
-// POSIX build.
-func atomicTransformFileLegacyWithStateDir(
-	path string,
-	transactionDir string,
-	perm os.FileMode,
-	transform func(current []byte, exists bool) (atomicTransformResult, error),
-) error {
-	stateDir, err := prepareAtomicTransformStateDir(transactionDir)
-	if err != nil {
-		return err
-	}
-	return atomicTransformFileLegacyPrepared(path, stateDir, perm, transform)
-}
-
 func atomicTransformFileLegacyPrepared(
 	path string,
 	stateDir string,

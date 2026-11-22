@@ -35,8 +35,10 @@ import (
 	"github.com/open-policy-agent/opa/v1/tester"
 	"github.com/spf13/cobra"
 
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
 )
@@ -97,7 +99,7 @@ func policyConfigOnlyPostRun(*cobra.Command, []string) {}
 // leaves the audit store, which the gateway service account owns, to the
 // gateway.
 func managedStandaloneHost() bool {
-	if _, windows := managedHostWindowsStandalone(); windows {
+	if _, windows := hookcli.ManagedHostWindowsStandalone(); windows {
 		return true
 	}
 	_, unix := managedHostUnixRecord(nil)
@@ -358,20 +360,20 @@ var policyEvaluateCmd = &cobra.Command{
 		severity, _ := cmd.Flags().GetString("severity")
 		findings, _ := cmd.Flags().GetInt("findings")
 		if targetType != "skill" && targetType != "mcp" && targetType != "plugin" {
-			return usageError(cmd, fmt.Errorf("--target-type must be skill, mcp or plugin"))
+			return cliusage.UsageError(cmd, fmt.Errorf("--target-type must be skill, mcp or plugin"))
 		}
 		severity = strings.ToUpper(severity)
 		switch severity {
 		case "", "INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL":
 		default:
-			return usageError(cmd, fmt.Errorf("--severity must be INFO, LOW, MEDIUM, HIGH or CRITICAL (or empty for pre-scan)"))
+			return cliusage.UsageError(cmd, fmt.Errorf("--severity must be INFO, LOW, MEDIUM, HIGH or CRITICAL (or empty for pre-scan)"))
 		}
 		if findings < 0 {
-			return usageError(cmd, fmt.Errorf("--findings must be zero or greater"))
+			return cliusage.UsageError(cmd, fmt.Errorf("--findings must be zero or greater"))
 		}
 
 		if targetName == "" {
-			return usageError(cmd, fmt.Errorf("--target-name is required"))
+			return cliusage.UsageError(cmd, fmt.Errorf("--target-name is required"))
 		}
 		paths, err := resolvePolicyPaths()
 		if err != nil {

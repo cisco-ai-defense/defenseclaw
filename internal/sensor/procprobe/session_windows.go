@@ -95,6 +95,18 @@ func parseProcessFacts(buffer []byte) map[uint32]processFact {
 	return facts
 }
 
+// CreationTime is the kernel's creation time of process pid, read from the
+// process list without a handle, so it answers for a process this caller
+// cannot open (an elevated one, another logon session's, another
+// account's). False when the list names no such process or no time.
+func CreationTime(pid int) (time.Time, bool) {
+	if pid <= 0 {
+		return time.Time{}, false
+	}
+	fact, ok := processFacts()[uint32(pid)]
+	return fact.created, ok && !fact.created.IsZero()
+}
+
 // SessionUser names the account signed in to a Windows session as
 // DOMAIN\name (COMPUTER\name for a local account) with its SID. It returns
 // empty strings for session 0, a session nobody is signed in to, and when

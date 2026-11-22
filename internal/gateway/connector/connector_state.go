@@ -2801,11 +2801,29 @@ func CachedAgentNotFound(dataDir, connectorName string) bool {
 	return ok && signal.Installed != nil && !*signal.Installed && strings.TrimSpace(signal.BinaryPath) == ""
 }
 
+// LoadCachedOpenClawSignal is the OpenClaw version and executable the last
+// discovery cached, from one read of the cache so the two belong together
+// ("" for what it does not record). OpenClaw takes both from the discovery
+// cache on every platform (LoadCachedAgentVersion, LoadCachedAgentExecutable).
+func LoadCachedOpenClawSignal(dataDir string) (version, binaryPath string) {
+	signal, ok := loadCachedAgentSignal(dataDir, "openclaw")
+	if !ok {
+		return "", ""
+	}
+	return strings.TrimSpace(signal.Version), strings.TrimSpace(signal.BinaryPath)
+}
+
 func loadCachedAgentSignal(dataDir, connectorName string) (cachedAgentSignal, bool) {
 	if strings.TrimSpace(dataDir) == "" {
 		return cachedAgentSignal{}, false
 	}
-	data, err := os.ReadFile(filepath.Join(dataDir, "agent_discovery.json"))
+	// Read as the other connector state files are: on Windows os.ReadFile
+	// does not share delete, so while the gateway read the cache (the
+	// OpenClaw install policy watch looks every 30 seconds) a discovery's
+	// atomic replace of it failed with access denied and the CLI dropped
+	// that scan (GAP-1242). A read that fails is no cached signal: no
+	// version, never a version that changes anything.
+	data, err := readConnectorStateFile(filepath.Join(dataDir, "agent_discovery.json"))
 	if err != nil {
 		return cachedAgentSignal{}, false
 	}

@@ -16,6 +16,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/spf13/cobra"
 )
@@ -67,7 +68,7 @@ func TestUnixLifecycleInvalidArgumentsExitTwo(t *testing.T) {
 					t.Fatalf("%s %s accepted %v", group, action, flags)
 				}
 				flagErr := cmd.FlagErrorFunc()(cmd, parseErr)
-				if got := commandExitCode(flagErr); got != want {
+				if got := cliusage.ExitCode(flagErr); got != want {
 					t.Fatalf("enterprise %s %s %v exits %d, want %d", group, action, flags, got, want)
 				}
 				// GAP-1943: the usage line and the --help pointer, as on every
@@ -78,8 +79,8 @@ func TestUnixLifecycleInvalidArgumentsExitTwo(t *testing.T) {
 				}
 			}
 			argsErr := cmd.ValidateArgs([]string{"extra"})
-			if argsErr == nil || commandExitCode(argsErr) != want || !strings.Contains(argsErr.Error(), cmd.CommandPath()+" --help") {
-				t.Fatalf("enterprise %s %s extra: %v exits %d, want %d", group, action, argsErr, commandExitCode(argsErr), want)
+			if argsErr == nil || cliusage.ExitCode(argsErr) != want || !strings.Contains(argsErr.Error(), cmd.CommandPath()+" --help") {
+				t.Fatalf("enterprise %s %s extra: %v exits %d, want %d", group, action, argsErr, cliusage.ExitCode(argsErr), want)
 			}
 		}
 		groupCmd, _, err := rootCmd.Find([]string{"enterprise", group})
@@ -90,7 +91,7 @@ func TestUnixLifecycleInvalidArgumentsExitTwo(t *testing.T) {
 			t.Fatalf("enterprise %s bogus is not refused", group)
 		}
 		runErr := groupCmd.RunE(groupCmd, []string{"bogus"})
-		var coded *exitCodeError
+		var coded *cliusage.ExitCodeError
 		if !errors.As(runErr, &coded) || coded.ExitCode() != want {
 			t.Fatalf("enterprise %s bogus: %v", group, runErr)
 		}
@@ -108,10 +109,10 @@ func TestUnixEnterpriseSecretInvalidArgumentsExitTwo(t *testing.T) {
 			t.Fatalf("enterprise secret %s %s: no error", cmd.Name(), what)
 		}
 		msg := err.Error()
-		if got := commandExitCode(err); got != want ||
+		if got := cliusage.ExitCode(err); got != want ||
 			!strings.Contains(msg, "\nUsage: "+cmd.UseLine()) ||
 			!strings.HasSuffix(msg, "Try '"+cmd.CommandPath()+" --help' for help.") {
-			t.Fatalf("enterprise secret %s %s: exit %d, %q", cmd.Name(), what, commandExitCode(err), msg)
+			t.Fatalf("enterprise secret %s %s: exit %d, %q", cmd.Name(), what, cliusage.ExitCode(err), msg)
 		}
 	}
 	for _, action := range []string{"set", "status", "remove"} {
@@ -131,7 +132,7 @@ func TestUnixEnterpriseSecretInvalidArgumentsExitTwo(t *testing.T) {
 			check(cmd, strings.Join(flags, " "), cmd.FlagErrorFunc()(cmd, parseErr))
 		}
 		if action == "set" {
-			if !strings.HasPrefix(plainFlagValueError(cmd.ParseFlags([]string{"--lock-wait=banana"})), "--lock-wait takes a duration") {
+			if !strings.HasPrefix(cliusage.PlainFlagValueError(cmd.ParseFlags([]string{"--lock-wait=banana"})), "--lock-wait takes a duration") {
 				t.Fatal("--lock-wait=banana lost its plain message")
 			}
 		}

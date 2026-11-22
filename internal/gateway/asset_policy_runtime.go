@@ -2046,6 +2046,26 @@ func hookResponseRuleIDs(hookRuleIDs []string, rawActionBeforeAssets string, ass
 	return mergeBoundedRuleIDs(8, assetRuleIDs, hookRuleIDs)
 }
 
+func hookResponseRuleNames(finalIDs []string, evaluation hookEvaluationContext) []string {
+	if len(finalIDs) == 0 {
+		return nil
+	}
+	byID := make(map[string]string, len(evaluation.RuleIDs))
+	for i, id := range evaluation.RuleIDs {
+		if i < len(evaluation.RuleNames) && evaluation.RuleNames[i] != "" {
+			byID[id] = evaluation.RuleNames[i]
+		}
+	}
+	names := make([]string, len(finalIDs))
+	for i, id := range finalIDs {
+		names[i] = byID[id]
+		if names[i] == "" {
+			names[i] = id
+		}
+	}
+	return names
+}
+
 // dispatchAssetPolicyNotification fires an OS toast for an asset
 // policy block / would-block decision. Only the runtime evaluators
 // call this helper, and only after they have already decided the

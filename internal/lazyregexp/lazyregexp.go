@@ -62,6 +62,15 @@ func New(str string) *Regexp {
 	return lr
 }
 
+// Of wraps a pattern compiled at run time (a custom rule read from a file),
+// so a table of lazy patterns can hold it. It is not registered: CompileAll
+// has nothing to do for it.
+func Of(rx *regexp.Regexp) *Regexp {
+	lr := &Regexp{str: rx.String(), rx: rx}
+	lr.once.Do(func() {})
+	return lr
+}
+
 // CompileAll compiles every pattern made with New so far. A long-running
 // process (the gateway) calls it in the background after start so that its
 // first hook does not compile the patterns it needs.

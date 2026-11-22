@@ -52,7 +52,7 @@ describe('command generator shell safety', () => {
       matrix.connectors.map((connector) => [connector.id, connector.windowsSupport]),
     );
     assert.equal(statuses.size, matrix.connectors.length);
-    assert.equal(statuses.get('openclaw'), 'unsupported');
+    assert.equal(statuses.get('openclaw'), 'supported'); // native hook mode on OpenClaw 2026.8.35+ (oc/integ, Go Windows roster)
     assert.equal(statuses.get('zeptoclaw'), 'unsupported');
     assert.equal(statuses.get('opencode'), 'supported');
     for (const status of statuses.values()) {
@@ -332,7 +332,7 @@ describe('feature demo catalog', () => {
       assert.ok(curl && credential, `${pack} must contain both rule definitions`);
       assert.match(credential.expression ?? '', /OPERATION_KIND_UPLOAD/);
       assert.equal(credential.severity, 'HIGH');
-      assert.ok(credential.tags?.includes('detection-only'));
+      assert.ok(!credential.tags?.includes('detection-only'));
       if (pack === 'strict') {
         assert.match(curl.expression ?? '', /OPERATION_KIND_UPLOAD/);
       } else {

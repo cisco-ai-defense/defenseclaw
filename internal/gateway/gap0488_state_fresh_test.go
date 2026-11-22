@@ -60,7 +60,7 @@ func TestG622b8LateStateHardlinkBlocksNativePatches(t *testing.T) {
 					body := opencodeV2PatchBody(t, project, "patch", patch)
 					got = managedOpenCodeHook(t, home, pack, body)
 				}
-				if got.action != "block" || !got.rules["tamper.detector_state_write"] {
+				if got.action != gap0747WantAction(pack == "strict") || !got.rules["tamper.detector_state_write"] {
 					t.Errorf("protected policy hard link allowed after index cache was built: %s", got)
 				}
 			})
@@ -98,12 +98,12 @@ func TestG622b8StateBeyondIndexBoundBlocksNativePatches(t *testing.T) {
 	}
 	for _, pack := range []string{"", "strict"} {
 		hermes := hermesPatchBody(t, project, "patch", map[string]any{"mode": "patch", "patch": hermesV4AUpdate("state-link.txt")})
-		if got := managedHermesHook(t, home, pack, hermes); got.action != "block" || !got.rules["tamper.detector_state_write"] {
+		if got := managedHermesHook(t, home, pack, hermes); got.action != gap0747WantAction(pack == "strict") || !got.rules["tamper.detector_state_write"] {
 			t.Errorf("Hermes pack %q allowed protected policy file beyond index bound: %s", pack, got)
 		}
 		patch := "*** Begin Patch\n*** Update File: state-link.txt\n@@\n # base\n+changed\n*** End Patch\n"
 		opencode := opencodeV2PatchBody(t, project, "patch", patch)
-		if got := managedOpenCodeHook(t, home, pack, opencode); got.action != "block" || !got.rules["tamper.detector_state_write"] {
+		if got := managedOpenCodeHook(t, home, pack, opencode); got.action != gap0747WantAction(pack == "strict") || !got.rules["tamper.detector_state_write"] {
 			t.Errorf("OpenCode pack %q allowed protected policy file beyond index bound: %s", pack, got)
 		}
 	}

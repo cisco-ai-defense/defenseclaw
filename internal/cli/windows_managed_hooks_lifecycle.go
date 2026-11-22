@@ -24,6 +24,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
@@ -750,7 +751,7 @@ func resolveWindowsManagedHooksLifecycleContext(stagedRetire bool) (
 		pendingPath:      filepath.Join(installState, "pending.json"),
 		deploymentPath:   filepath.Join(installState, "deployment.json"),
 		transactionsPath: transactionsPath,
-		gatewayPath:      filepath.Join(opts.ManagedDir, "defenseclaw-gateway.exe"),
+		gatewayPath:      filepath.Join(windowsCodexRequirementsBin(opts), "defenseclaw-gateway.exe"),
 		runtimePath:      runtimeDir,
 		targets:          targets,
 		claudeTargets:    claudeTargets,
@@ -2379,7 +2380,7 @@ var windowsManagedHooksVendorFolderTakeBack = func() error {
 	if !enterprisehooks.WindowsStandaloneProcess() {
 		return nil
 	}
-	layout, programFiles, programData, err := standaloneEnterprisePolicyLayout()
+	layout, programFiles, programData, err := hookcli.StandaloneEnterprisePolicyLayout()
 	if err != nil {
 		return err
 	}
@@ -2996,7 +2997,7 @@ func validateWindowsManagedHooksLifecycleJournal(
 		!validWindowsManagedHooksLifecycleTransactionID(journal.TransactionID) ||
 		journal.TransactionID != identity.TransactionID ||
 		journal.ManifestPath != identity.ManifestPath ||
-		journal.HookBinary != identity.HookBinary ||
+		!sameWindowsManagedHookImage(journal.HookBinary, identity.HookBinary) ||
 		journal.GatewayServiceName != identity.GatewayServiceName {
 		return errors.New("managed-hook lifecycle snapshot does not match the protected deployment")
 	}

@@ -1,0 +1,125 @@
+---
+title: Human approval
+description: Let a risky call pause and ask you instead of running or blocking silently. Which findings ask, which agents can ask, how to turn it on, and what happens where an agent cannot ask.
+keywords:
+  - human approval
+  - HITL
+  - HILT
+  - guardrail hilt
+  - min_severity
+  - confirm
+  - approve tool call
+  - native ask
+---
+
+Human approval (HITL) pauses a risky call and asks you before the agent runs it. Without it, a HIGH finding alerts and the call runs. With it, the agent shows its own permission prompt, and you approve or deny.
+
+It is off by default. When you turn it on, the minimum severity is HIGH.
+
+## When it asks
+
+Approval applies in action mode, to a finding that is at or above your minimum severity and below the block level:
+
+| Finding | Approval off | Approval on, minimum HIGH |
+| --- | --- | --- |
+| CRITICAL | Block | Block. It never asks. |
+| HIGH | Alert | Ask |
+| MEDIUM | Alert | Alert |
+| LOW | Allow | Allow |
+
+These are the `default` pack's levels (blocks at CRITICAL). Three more things decide whether a call asks:
+
+- **Blocking wins.** If `block_at` is at or below your minimum, a finding blocks before it can ask. In the `strict` pack (blocks at MEDIUM), approval at HIGH never fires. DefenseClaw warns about this in `defenseclaw doctor`: `human approval at HIGH cannot ask: block_at MEDIUM blocks those findings first; lower hilt.min_severity or raise block_at`.
+- **Alert-only rules never ask.** A HIGH rule that only alerts (such as `impact.sql_destructive_mutation`) shows a notice and records `alert`.
+- **Observe mode never asks.** Observe records the verdict and lets the call run.
+
+The cascade can also produce an ask, when you set it to: an unsure [decision model](/docs/guardrail/decision-model) answer without the judge, an unknown tier set to `confirm`, a judge block that the decision model did not confirm, or a Rego decision of `confirm`. See [Configure the cascade](/docs/guardrail/configure-cascade#settings).
+
+## Turn it on
+
+```bash
+defenseclaw guardrail hilt on --min-severity HIGH
+```
+
+The command lists the agents it changes and asks `Proceed? [Y/n]`. Add `--yes` to skip the prompt in a script. The running gateway applies the change without a restart.
+
+```bash
+defenseclaw guardrail hilt                        # show the setting, and the effective value per agent
+defenseclaw guardrail hilt on --connector codex   # one agent only
+defenseclaw guardrail hilt off
+```
+
+`--min-severity` takes `low`, `medium`, `high` or `critical`. A connector's own `hilt` block **replaces** the global one as a whole: it does not inherit the global minimum for the field you left out.
+
+In one step with setup:
+
+```bash
+defenseclaw setup guardrail --non-interactive --connector claudecode --mode action \
+  --human-approval --hilt-min-severity high --restart
+```
+
+The same in `config.yaml`, global and for one connector:
+
+```yaml
+guardrail:
+  hilt:
+    enabled: true
+    min_severity: HIGH
+  connectors:
+    codex:
+      hilt:
+        enabled: false      # Codex cannot ask; leave it off
+```
+
+On a managed computer these per-user commands refuse. The administrator sets `guardrail.connectors.ID.hilt` in the managed config and applies it through the [enterprise lifecycle](/docs/enterprise/lifecycle#change-the-config). The cascade key `admin.locked: [hilt]` keeps a connector or profile from changing it.
+
+## Which agents can ask
+
+Only these agent events can pause for your approval:
+
+| Agent | Event that can ask |
+| --- | --- |
+| Claude Code | `PreToolUse`, in Manual permission mode only. Claude Cowork shows its own approval card, without the DefenseClaw reason ([Cowork](/docs/connectors/cowork#approval-prompts)). |
+| Antigravity | `PreToolUse` |
+| Amp | `tool.call` and `tool.result` in the active foreground thread |
+| OpenClaw | `before_tool_call` |
+
+Every other agent takes its fallback at once, and nothing in DefenseClaw can resume the call later. The audit log keeps `raw_action: confirm` either way:
+
+- **Codex, Cursor, Hermes, OpenCode, Devin, Kiro, ZeptoClaw:** an alert and a notice, or an explicit allow. They cannot ask.
+- **GitHub Copilot CLI:** the confirmation blocks, because its hook does not show whether an approval prompt is available. Copilot in VS Code (Local) uses its own native ask.
+
+The [capability matrix](/docs/connectors/capability-matrix) lists block and ask support for every agent. A per-agent table is on the [HITL walkthrough](/docs/hitl).
+
+## What you see
+
+In Claude Code's Manual mode, the prompt carries the reason:
+
+```text
+DefenseClaw policy needs your confirmation for this action (rule C2-WEBHOOK-SITE: webhook.site (known exfil)).
+```
+
+In any other Claude Code permission mode (accept edits, plan, auto, bypass permissions, don't ask), Claude Code may run or deny the call without showing the prompt. DefenseClaw then blocks it, and the reason ends with the next step: switch Claude Code to Manual mode (Shift+Tab) and ask again.
+
+On a standalone enterprise computer, the text says the confirmation is needed under your organization's policy.
+
+## Check it worked
+
+```bash
+defenseclaw alerts --connector claudecode --limit 5
+defenseclaw alerts --connector claudecode --limit 5 --show 2    # the number of the confirm row
+```
+
+A call that asked has a `claudecode:PreToolUse` row with `Decision: confirm`. On Claude Code your approve or deny answer is handled inside the agent, so DefenseClaw records the finding and the verdict, not who approved. OpenClaw approvals are recorded as `approval_approved` and `approval_denied`. A call that could not ask shows `blocked` instead.
+
+## Limits
+
+- The TUI shows alerts and audit events but has no pending-approval queue. It cannot hold or resume a call.
+- On an agent that cannot ask, a finding you want stopped must block: lower `block_at` for that agent, or use a rule that blocks. See [thresholds](/docs/policies/thresholds).
+- CRITICAL findings cannot be approved. Change the rule, not the call ([fix a false block](/docs/guardrail/false-blocks)).
+
+## Undo
+
+```bash
+defenseclaw guardrail hilt off
+```

@@ -139,7 +139,7 @@ The symptom of a missed step is a finding with CRITICAL severity, `raw_action=al
 | hermes | `{"decision":"block"}` on `pre_tool_call` only | none | `styleHookEcho`, `failOpenOnly` |
 | openhands | `{"decision":"deny"}` + exit 2 | none | `styleHookEchoDecision` |
 | antigravity | PreToolUse `{"decision":"deny"}`; stdout decides, not the exit code | `{"decision":"ask"}` on PreToolUse | `styleHookEcho` |
-| kiro | exit 2 + stderr; no stdout (stdout is appended to the agent context) | none | `styleHookDecisionStderr` |
+| kiro | exit 2 + stderr; no stdout (stdout is appended to the agent context), except the one-line v3 prompt note (`hookexec.KiroV3PromptCheckedNote`, GAP-0248) | none | `styleHookDecisionStderr` |
 | opencode | `hook_output.decision=deny`; the plugin throws | none | plugin / `stylePluginBridge` |
 | amp | top-level `action=block`; the plugin rejects | plugin `ctx.ui.confirm` | `styleActionStderr` |
 | omnigent | top-level action gives DENY | ASK on UserPromptSubmit/PreToolUse/BeforeModel | Python policy |

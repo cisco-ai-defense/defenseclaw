@@ -39,13 +39,6 @@ func TestClaudeCodeNativeUnixRollbackKeepsEarlierHookShape(t *testing.T) {
 			command, _ := claudeCodeHookInvocation(SetupOpts{
 				DataDir: home, HookExecutable: native, APIAddr: addr,
 			}, script)
-			if runtime.GOOS != "linux" {
-				// macOS registers the shell hook (GAP-0559); still check that
-				// rollback converts the form a Linux install writes.
-				command = claudeCodeMissingHookGuard(posixHookCommandWord(native) +
-					" hook --connector claudecode --hook-home " + posixHookCommandWord(home) +
-					" --api-addr " + posixHookCommandWord(addr))
-			}
 			if !strings.HasPrefix(command, posixHookCommandWord(native)) {
 				t.Fatalf("native registration was not selected: %q", command)
 			}

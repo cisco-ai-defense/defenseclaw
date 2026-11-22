@@ -24,6 +24,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 )
 
 // runKiroHookForTest runs the hook command in-process against gatewayURL
@@ -56,11 +59,11 @@ func runKiroHookForTest(t *testing.T, gatewayAddr, payload string, args ...strin
 	t.Cleanup(func() { os.Stdin = previousStdin })
 
 	code := -1
-	previousExit := hookProcessExit
-	hookProcessExit = func(status int) { code = status }
-	t.Cleanup(func() { hookProcessExit = previousExit })
+	previousExit := hookcli.HookProcessExit
+	hookcli.HookProcessExit = func(status int) { code = status }
+	t.Cleanup(func() { hookcli.HookProcessExit = previousExit })
 
-	cmd := newHookCmd()
+	cmd := hookcli.NewHookCmd()
 	cmd.SetArgs(append([]string{"--api-addr", gatewayAddr, "--fail-mode", "open"}, args...))
 	cmd.SetOut(io.Discard)
 	cmd.SetErr(io.Discard)
@@ -151,11 +154,11 @@ func TestHookPreRunFailureUsesTheConnectorsBlockingExit(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			previous, previousIO := hookRawArgs, hookFailureIO
-			hookRawArgs = func() []string { return tc.args }
-			hookFailureIO = func() (io.Reader, io.Writer, io.Writer) { return strings.NewReader("{}"), io.Discard, io.Discard }
-			t.Cleanup(func() { hookRawArgs, hookFailureIO = previous, previousIO })
-			cmd := newHookCmd()
+			previous, previousIO := hookcli.HookRawArgs, hookcli.HookFailureIO
+			hookcli.HookRawArgs = func() []string { return tc.args }
+			hookcli.HookFailureIO = func() (io.Reader, io.Writer, io.Writer) { return strings.NewReader("{}"), io.Discard, io.Discard }
+			t.Cleanup(func() { hookcli.HookRawArgs, hookcli.HookFailureIO = previous, previousIO })
+			cmd := hookcli.NewHookCmd()
 			cmd.SetArgs(tc.args)
 			cmd.SetOut(io.Discard)
 			cmd.SetErr(io.Discard)
@@ -165,7 +168,7 @@ func TestHookPreRunFailureUsesTheConnectorsBlockingExit(t *testing.T) {
 			if err == nil {
 				t.Fatalf("hook %v succeeded, want a usage failure", tc.args)
 			}
-			if got := commandExitCode(err); got != tc.want {
+			if got := cliusage.ExitCode(err); got != tc.want {
 				t.Fatalf("hook %v exit = %d, want %d (err=%v)", tc.args, got, tc.want, err)
 			}
 		})

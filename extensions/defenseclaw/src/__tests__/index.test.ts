@@ -188,6 +188,86 @@ describe("DefenseClaw OpenClaw Plugin", () => {
     });
   });
 
+  // GAP-0177: the text of a message call can sit in any string field.
+  describe("before_tool_call message text", () => {
+    const ctx = { sessionKey: "agent:main:main", runId: "run-1", toolName: "message" };
+    const allow = () => rawAnswer(JSON.stringify({ action: "allow", severity: "NONE", reason: "", mode: "action" }));
+    const sent = (): Record<string, unknown> => mockDaemonClient.postRaw.mock.calls[0][1] as Record<string, unknown>;
+
+    it.each([
+      ["content", { to: "+1", content: "hello one" }],
+      ["body", { to: "+1", body: "hello one" }],
+      ["text", { to: "+1", text: "hello one" }],
+      ["message", { to: "+1", message: "hello one" }],
+      ["nested blocks", { to: "+1", blocks: [{ type: "text", text: "hello one" }] }],
+    ])("inspects the text in %s as an outbound message", async (_name, params) => {
+      mockDaemonClient.postRaw.mockResolvedValue(allow());
+      await listeners.before_tool_call({ toolName: "message", params }, ctx);
+      expect(mockDaemonClient.postRaw).toHaveBeenCalledTimes(1);
+      // The gateway reads the text out of the params: nothing is copied into content.
+      expect(sent()).toMatchObject({ tool: "message", direction: "outbound", args: params });
+      expect(sent()).not.toHaveProperty("content");
+    });
+
+    it("blocks an outbound message whose secret is not in content or body", async () => {
+      mockDaemonClient.postRaw.mockResolvedValue(
+        rawAnswer(JSON.stringify({ action: "block", severity: "HIGH", reason: "secret", mode: "action" })),
+      );
+      const log = vi.spyOn(console, "log").mockImplementation(() => {});
+      try {
+        const result = await listeners.before_tool_call(
+          { toolName: "message", params: { to: "+1", text: "token for the demo account" } },
+          ctx,
+        );
+        expect(result).toMatchObject({ block: true, blockReason: expect.stringContaining("outbound blocked") });
+      } finally {
+        log.mockRestore();
+      }
+    });
+
+    it("sends a call with no text too: the gateway applies the tool policy to its args", async () => {
+      mockDaemonClient.postRaw.mockResolvedValue(allow());
+      const params = { action: "send", to: "+1", silent: true, count: null };
+      await listeners.before_tool_call({ toolName: "message", toolCallId: "call_9", params }, ctx);
+      expect(mockDaemonClient.postRaw).toHaveBeenCalledTimes(1);
+      const body = sent();
+      expect(body).toMatchObject({ tool: "message", args: params, tool_call_id: "call_9", direction: "outbound" });
+      expect(body).not.toHaveProperty("content");
+    });
+
+    it("cuts an attachment over the body limit down to its descriptor and says the call is partial (GAP-0356)", async () => {
+      mockDaemonClient.postRaw.mockResolvedValue(allow());
+      const params = { to: "+1", message: "photo", buffer: "AAEC".repeat((4 << 20) / 4) };
+      await listeners.before_tool_call({ toolName: "message", params }, ctx);
+      expect(mockDaemonClient.postRaw).toHaveBeenCalledTimes(1);
+      const body = sent();
+      expect(Buffer.byteLength(JSON.stringify(body))).toBeLessThan(1 << 20);
+      expect(body).toMatchObject({ tool: "message", args_partial: true });
+      expect((body.args as Record<string, string>).message).toBe("photo");
+      expect((body.args as Record<string, string>).buffer).toMatch(/^\[attachment bytes not sent: 4194304 characters/);
+    });
+
+    it.each([
+      ["body", { to: "+1", body: "status ".repeat(200_000) }],
+      ["message next to a photo", { to: "+1", message: "status ".repeat(200_000), buffer: "AAEC".repeat(1 << 18) }],
+    ])("blocks a message whose text (%s) is over the body limit without sending it, its text never cut", async (_name, params) => {
+      const log = vi.spyOn(console, "log").mockImplementation(() => {});
+      try {
+        const result = await listeners.before_tool_call({ toolName: "message", params }, ctx);
+        expect(mockDaemonClient.postRaw).not.toHaveBeenCalled();
+        expect(result).toMatchObject({ block: true, blockReason: expect.stringContaining("message text exceeds the inspection limit") });
+      } finally {
+        log.mockRestore();
+      }
+    });
+
+    it("sends a message call with no params at all", async () => {
+      mockDaemonClient.postRaw.mockResolvedValue(allow());
+      await listeners.before_tool_call({ toolName: "message" }, ctx);
+      expect(mockDaemonClient.postRaw).toHaveBeenCalledTimes(1);
+    });
+  });
+
   describe("before_tool_call approvals", () => {
     it("uses the shared inspect contract for every known action and severity (GAP-0609)", async () => {
       const contract = JSON.parse(readFileSync(
@@ -767,65 +847,22 @@ describe("DefenseClaw OpenClaw Plugin", () => {
 
   // ─── Command: /block ───
 
-  describe("command: /block", () => {
-    it("blocks target via enforcer", async () => {
-      const result = await commands["block"].handler({
-        args: { type: "skill", name: "bad-skill", reason: "malicious content" },
+  describe.each(["block", "allow"])("command: /%s", (name) => {
+    it("prints the terminal command and changes nothing", async () => {
+      const result = await commands[name].handler({
+        args: { type: "skill", name: "some-skill", reason: "chat says so" },
       });
 
-      expect(mockEnforcer.block).toHaveBeenCalledWith("skill", "bad-skill", "malicious content");
-      expect(result.text).toContain("Blocked");
-      expect(result.text).toContain("bad-skill");
+      expect(mockEnforcer.block).not.toHaveBeenCalled();
+      expect(mockEnforcer.allow).not.toHaveBeenCalled();
+      expect(result.text).toContain(`defenseclaw skill ${name} some-skill`);
+      expect(result.text).toContain("terminal");
     });
 
-    it("uses default reason when not provided", async () => {
-      await commands["block"].handler({ args: { type: "mcp", name: "some-mcp" } });
+    it("fills placeholders when arguments are missing", async () => {
+      const result = await commands[name].handler({ args: {} });
 
-      expect(mockEnforcer.block).toHaveBeenCalledWith("mcp", "some-mcp", "Blocked via /block command");
-    });
-
-    it("returns usage when type is missing", async () => {
-      const result = await commands["block"].handler({ args: { name: "test" } });
-
-      expect(result.text).toContain("Usage");
-    });
-
-    it("returns usage when name is missing", async () => {
-      const result = await commands["block"].handler({ args: { type: "skill" } });
-
-      expect(result.text).toContain("Usage");
-    });
-  });
-
-  // ─── Command: /allow ───
-
-  describe("command: /allow", () => {
-    it("allow-lists target via enforcer", async () => {
-      const result = await commands["allow"].handler({
-        args: { type: "skill", name: "safe-skill", reason: "reviewed and approved" },
-      });
-
-      expect(mockEnforcer.allow).toHaveBeenCalledWith("skill", "safe-skill", "reviewed and approved");
-      expect(result.text).toContain("Allow-listed");
-      expect(result.text).toContain("safe-skill");
-    });
-
-    it("uses default reason when not provided", async () => {
-      await commands["allow"].handler({ args: { type: "plugin", name: "good-plugin" } });
-
-      expect(mockEnforcer.allow).toHaveBeenCalledWith("plugin", "good-plugin", "Allowed via /allow command");
-    });
-
-    it("returns usage when type is missing", async () => {
-      const result = await commands["allow"].handler({ args: { name: "test" } });
-
-      expect(result.text).toContain("Usage");
-    });
-
-    it("returns usage when name is missing", async () => {
-      const result = await commands["allow"].handler({ args: { type: "skill" } });
-
-      expect(result.text).toContain("Usage");
+      expect(result.text).toContain(`defenseclaw <skill|mcp|plugin> ${name} <name>`);
     });
   });
 });
@@ -890,5 +927,24 @@ describe("plugin agent identity from api.pluginConfig", () => {
       expect(c.agentName).toBeUndefined();
       expect(c.policyId).toBeUndefined();
     }
+  });
+});
+
+describe("slash commands echo only safe arguments", () => {
+  it("replaces a crafted name or type with a placeholder", async () => {
+    const commands: Record<string, { handler: (ctx: { args: Record<string, unknown> }) => Promise<{ text: string }> }> = {};
+    const api = {
+      config: {},
+      pluginConfig: {},
+      on: vi.fn(),
+      registerService: vi.fn(),
+      registerCommand: vi.fn((def: { name: string; handler: (ctx: { args: Record<string, unknown> }) => Promise<{ text: string }> }) => {
+        commands[def.name] = def;
+      }),
+    };
+    (pluginSetup as (api: unknown) => void)(api);
+    const out = await commands["allow"].handler({ args: { type: "skill; rm -rf ~", name: "x`$(id)`" } });
+    expect(out.text).toContain("defenseclaw <skill|mcp|plugin> allow <name>");
+    expect(out.text).not.toContain("$(");
   });
 });
