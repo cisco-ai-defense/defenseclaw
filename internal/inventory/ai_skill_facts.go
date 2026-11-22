@@ -197,6 +197,7 @@ func hashSkillFolder(root string, limit int64) (hash, status string, manifest []
 	if info.Mode()&(fs.ModeSymlink|fs.ModeIrregular) != 0 {
 		return "", SkillContentSymlink, nil, 0
 	}
+	rootInfo := info
 	var lines []string
 	entries := 0
 	err = filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
@@ -250,7 +251,7 @@ func hashSkillFolder(root string, limit int64) (hash, status string, manifest []
 			}
 			total += int64(len(data))
 			kind, payload = "file", data
-			if strings.EqualFold(rel, "SKILL.md") {
+			if strings.EqualFold(rel, "SKILL.md") && skillManifestOwned(path, rootInfo, data) {
 				manifest = data
 			}
 		}
