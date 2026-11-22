@@ -111,7 +111,9 @@ value before it asks.
   with the new value (the same value is refused). A sandbox started with it
   before keeps it until you delete that sandbox. Only a
   value written out in the tool call is seen: a command that makes up a value
-  as it runs (from `/dev/urandom`, say) is not.
+  as it runs (from `/dev/urandom`, say) or builds it from parts (a `printf`
+  format and a separate argument) is not. DefenseClaw's secret rules still flag
+  such a value when it shows up in a file or in output.
 
 ![Claude Code in a sandbox: a prompt with a Stripe-shaped key is stopped by the UserPromptSubmit hook, and DefenseClaw says it moved the secret into the vault as STRIPE_API_KEY, sent only to api.stripe.com](/images/sandboxes/screens/vault-capture-claude.png)
 
