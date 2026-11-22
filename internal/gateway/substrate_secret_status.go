@@ -37,6 +37,8 @@ const (
 	substrateSecretAskExpired = "ask expired"
 	substrateSecretExpired    = "expired"
 	substrateSecretUncovered  = "not covered"
+	substrateSecretNotApplied = "approved, not applied"
+	substrateSecretLocked     = "locked"
 )
 
 // substrateSecretEntry is one secret as list and test show it to the
@@ -106,6 +108,9 @@ func (a *APIServer) substrateSecretState(ctx context.Context, st *substrateState
 	askStates map[string]string, now time.Time) (status, reason string) {
 	if b := e.binding; b != nil {
 		switch {
+		case st.selfService().EffectiveMode() != config.SelfServiceBindings:
+			// values_only renders no binding, whatever its state (RV4 F3).
+			return substrateSecretLocked, "secret_bindings_locked"
 		case b.State == secretbind.Denied:
 			return substrateSecretDenied, "secret_binding_denied"
 		case b.State == secretbind.Waiting:
@@ -115,6 +120,9 @@ func (a *APIServer) substrateSecretState(ctx context.Context, st *substrateState
 			switch state, ok := askStates[b.AskID]; {
 			case ok && state == asks.StateDenied:
 				return substrateSecretDenied, "secret_binding_denied"
+			case ok && state == asks.StateApproved:
+				// The approval did not reach the binding store (RV4 F2).
+				return substrateSecretNotApplied, "secret_binding_not_applied"
 			case !ok || state == asks.StateExpired:
 				return substrateSecretAskExpired, "secret_binding_ask_expired"
 			}

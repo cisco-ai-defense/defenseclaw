@@ -73,7 +73,7 @@ const (
 	substrateSecretNotSet  = "not set"
 	substrateSecretManaged = "managed outside DefenseClaw"
 	substrateSecretUnknown = "unknown"
-	substrateSecretMaxSize = 64 << 10
+	substrateSecretMaxSize = secretbind.MaxStoredValue
 )
 
 // substrateK8sSource splits ate-secret://k8s.io/<provider>/<ns>/<secret>/<key>.
@@ -314,6 +314,7 @@ func (a *APIServer) substrateTestSecret(st *substrateState) http.HandlerFunc {
 					return
 				}
 				reg = got
+				a.substrateAuditAdminTarget(st, r, reg, "secret test", "INFO")
 			}
 			status, reason := a.substrateSecretState(r.Context(), st, e, c.person.Subject, a.substrateBindingAsks(r.Context(), st, c), time.Now())
 			out := substrateSecretView(e, status, reason, nil, false)

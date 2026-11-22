@@ -53,13 +53,54 @@ func DocsTable() string {
 	return b.String()
 }
 
-// cell escapes a table cell and puts a command in code font.
+// cell escapes a table cell and puts each command in code font. A command
+// starts at "defenseclaw substrate" or "defenseclaw-gateway substrate" and
+// ends at ", ", ")" or the end of the text (a final period stays prose), so
+// the words after it are not in code font (RV4 F9).
 func cell(s string) string {
 	s = strings.ReplaceAll(s, "|", "\\|")
-	if i := strings.Index(s, "defenseclaw"); i >= 0 && (i == 0 || s[i-1] == ' ') {
-		return s[:i] + "`" + strings.TrimSuffix(s[i:], ".") + "`"
+	var b strings.Builder
+	for {
+		i := commandStart(s)
+		if i < 0 {
+			b.WriteString(s)
+			return b.String()
+		}
+		end := len(s)
+		for _, stop := range []string{", ", ")"} {
+			if j := strings.Index(s[i:], stop); j >= 0 && i+j < end {
+				end = i + j
+			}
+		}
+		cmd := s[i:end]
+		tail := ""
+		if end == len(s) && strings.HasSuffix(cmd, ".") {
+			cmd, tail = strings.TrimSuffix(cmd, "."), "."
+		}
+		b.WriteString(s[:i] + "`" + cmd + "`" + tail)
+		s = s[end:]
 	}
-	return s
+}
+
+// commandStart is the index of the first command in s, or -1.
+func commandStart(s string) int {
+	best := -1
+	for _, p := range []string{"defenseclaw substrate ", "defenseclaw-gateway substrate "} {
+		for off := 0; ; {
+			j := strings.Index(s[off:], p)
+			if j < 0 {
+				break
+			}
+			if k := off + j; k == 0 || s[k-1] == ' ' || s[k-1] == '(' {
+				if best < 0 || k < best {
+					best = k
+				}
+				break
+			}
+			off += j + 1
+		}
+	}
+	return best
 }
 
 // ErrNoSentinels is returned when a page has no generated block.

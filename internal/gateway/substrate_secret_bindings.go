@@ -293,6 +293,19 @@ func (a *APIServer) substrateAddSecret(st *substrateState) http.HandlerFunc {
 		code := http.StatusCreated
 		if reason != "" {
 			out["status"], out["reason"], out["ask_id"], code = substrateSecretWaiting, reason, ask.ID, http.StatusAccepted
+			// An administrator may have answered the ask before the binding
+			// was written; that answer found no binding to move, so it is
+			// applied now (RV4 F2).
+			if got, ok := a.substrateFindAsk(r.Context(), st, ownerOf(c.person).ID(), ask.ID); ok && got.State != asks.StatePending {
+				if err := a.substrateBindingDecided(r.Context(), st, got); err != nil {
+					fmt.Fprintf(os.Stderr, "[substrate] binding %s: answered ask not applied: %v\n", b.Name, err)
+				} else if got.State == asks.StateApproved {
+					delete(out, "reason")
+					out["status"], code = substrateSecretSet, http.StatusCreated
+				} else {
+					out["status"], out["reason"] = substrateSecretDenied, "secret_binding_denied"
+				}
+			}
 		}
 		if !b.Expires.IsZero() {
 			out["expires"] = b.Expires
@@ -371,6 +384,44 @@ func slicesDeleteBinding(in []secretbind.Binding, owner, name string) []secretbi
 		}
 	}
 	return out
+}
+
+// substrateFindAsk returns the ask id of the person ownerID, read again
+// from the ask store.
+func (a *APIServer) substrateFindAsk(ctx context.Context, st *substrateState, ownerID, id string) (asks.Ask, bool) {
+	if st.cfg.Asks == nil || id == "" {
+		return asks.Ask{}, false
+	}
+	list, err := st.cfg.Asks.List(ctx, asks.ListRequest{OwnerID: ownerID, All: ownerID == ""})
+	if err != nil {
+		return asks.Ask{}, false
+	}
+	for _, x := range list {
+		if x.ID == id {
+			return x, true
+		}
+	}
+	return asks.Ask{}, false
+}
+
+// substrateReapplyBindingDecision handles an administrator's decision on a
+// binding ask that is already answered: when the ask was answered the same
+// way, it moves the binding again and reports ok (RV4 F2). A binding that
+// already moved stays as it is, so a repeat is harmless.
+func (a *APIServer) substrateReapplyBindingDecision(ctx context.Context, st *substrateState, c substrateCaller,
+	id, decision string) (asks.Ask, bool, error) {
+	if !c.admin || st.cfg.Bindings == nil {
+		return asks.Ask{}, false, nil
+	}
+	got, ok := a.substrateFindAsk(ctx, st, "", id)
+	want := asks.StateDenied
+	if decision == "approve" {
+		want = asks.StateApproved
+	}
+	if !ok || got.Kind != asks.KindSecretBinding || got.State != want {
+		return asks.Ask{}, false, nil
+	}
+	return got, true, a.substrateBindingDecided(ctx, st, got)
 }
 
 // errSubstrateBindingGone is an answered binding ask whose binding was
