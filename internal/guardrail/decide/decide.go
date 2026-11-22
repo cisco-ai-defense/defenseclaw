@@ -251,6 +251,10 @@ type Input struct {
 	Unknown func() (Action, bool)
 	// Table is the tier table; nil is Builtin().
 	Table *Table
+	// Confirmable: the caller can put a confirmation to a person (a hook
+	// or inspect call). A confirm floor is an alert where it cannot (the
+	// LLM proxy reading tool calls in a response).
+	Confirmable bool
 }
 
 // Output is the verdict.
@@ -263,6 +267,10 @@ type Output struct {
 	// RuleIDs are the findings that set Action, in input order: the floor
 	// rows and the findings whose severity maps to it.
 	RuleIDs []string
+	// FloorConfirm: Action is a confirm that only a confirm floor gave (the
+	// levels alone would not confirm). Where the agent cannot ask, such a
+	// confirm is an alert, never the hook's block fallback.
+	FloorConfirm bool
 }
 
 // Decide is the one decision function. The order, documented once:
@@ -291,6 +299,10 @@ func Decide(in Input) Output {
 	unknownSet := false
 	var unknown Action
 	unknownRead := false
+	// unknownConfirm: guardrail.cascade.unknown set a confirm floor (the
+	// operator's choice: the hook's own fallback where the agent cannot
+	// ask, as in 1.0.10).
+	unknownConfirm := false
 
 	var out Output
 	floor := Allow
@@ -306,12 +318,13 @@ func Decide(in Input) Output {
 		mapsBySeverity := true
 		sev := f.Severity
 		ceiling := CeilingNone
-		if row := table.match(f.Proof, in.Surface, in.SecureClient); row != nil {
+		if row := table.match(f, in.Surface, in.SecureClient); row != nil {
 			tier := tierOf
 			if row.PackTier {
 				tier = packTierOf
 			}
 			cell := row.cell(in.Deployment, tier)
+			fromUnknown := false
 			if row.Unknown {
 				if !unknownRead {
 					if in.Unknown != nil {
@@ -321,6 +334,7 @@ func Decide(in Input) Output {
 				}
 				if unknownSet {
 					cell = Cell{Floor: unknown, Severity: cell.Severity}
+					fromUnknown = true
 				}
 			}
 			if cell.Ceiling == CeilingRecord {
@@ -331,8 +345,11 @@ func Decide(in Input) Output {
 				sev = cell.Severity
 			}
 			floorOf := cell.Floor
-			if ceiling == CeilingAlert {
+			if ceiling == CeilingAlert || floorOf == Confirm && !fromUnknown && !in.Confirmable {
 				floorOf = min(floorOf, Alert)
+			}
+			if floorOf == Confirm && fromUnknown {
+				unknownConfirm = true
 			}
 			if floorOf > Allow {
 				if floorOf > floor {
@@ -370,6 +387,7 @@ func Decide(in Input) Output {
 	}
 	out.Action = Stronger(floor, levels)
 	out.Severity = verdictSev
+	out.FloorConfirm = out.Action == Confirm && levels < Confirm && !unknownConfirm
 	if out.Action == Allow {
 		return out
 	}
