@@ -232,6 +232,24 @@ Claude Code starts below the banner, in `/work/myapp`. The first start takes abo
 
 ![defenseclaw substrate run claude in Terminal on a Mac: Started dc-eng/claude-955e765b (Claude Code, profile eng), Copying this folder into the agent, Held back from the copy: .env (1 file) with the --unmask hint, the DefenseClaw agent banner with the profile eng, the notes that asks appear on the bottom line (Ctrl-\ answers) and Ctrl-) detaches, then Claude Code's own first screen in /work/myapp asking whether you trust the folder](/images/substrate/oss/run-banner-macos.png)
 
+**Secrets inside source files (Preview).** On Linux and macOS, a file whose text holds a credential (a key in `config.py`, a token in `deploy/aws.ini`) is no longer held back whole. The uploaded copy gets the file with each value replaced by a placeholder, `DC_SECRET_1`, `DC_SECRET_2` and so on, so the agent can still read and change the rest of it. Your own file is not changed, and the map from placeholder to line stays on your computer: the agent and the cluster never get the value. `run` says what it replaced:
+
+```text
+Replaced with placeholders in the copy (your files are unchanged; the agent sees only DC_SECRET_<n>): 2 secrets replaced in config.py, 1 secret replaced in deploy/aws.ini.
+```
+
+Files bigger than 8 MiB, and files the scan did not reach in its 120-second budget, are uploaded without a scan and named in the same report. The Windows host copy holds such files back whole, as before. Signing keys (an AWS secret key, a private key) get a note: the cluster cannot add them for the agent on the way out, so use workload identity or [actor secrets](/docs/substrate/secrets) for them.
+
+When you `pull`, DefenseClaw puts your value back and never writes a placeholder into your folder:
+
+- A line the agent left alone gets your line back.
+- A line the agent changed that holds a placeholder keeps your line, and `pull` says so: `config.py: kept your line 2; the agent changed the line that holds a replaced credential (--restore-secret-lines takes the agent's line)`. With `--restore-secret-lines` the agent's line lands, with your value in place of the placeholder.
+- When the agent removed such a line, its change to that file is not brought back unless you pass `--restore-secret-lines`, which takes the agent's lines as they are.
+- When you changed one of those lines yourself since the upload, the agent's change to that file is not brought back, so your newer value is never overwritten.
+- A placeholder that shows up in any other file keeps that file's change out.
+
+These files are brought back only by `pull --apply`. `--patch-out` and `--branch` leave their changes out and say so, because a patch file or a branch commit would put the value somewhere new. `push` sends such a file back to the agent only as the placeholder copy it already has.
+
 Prefer git to an upload? `defenseclaw substrate run claude --clone https://git.example.test/me/myapp.git --ref agent/fix-tests` clones inside the agent. The clone goes through the cluster's network rules, so the git host must be one your profile allows. The credential is added by the cluster's egress gateway on that host only, so the agent never holds it. Put no user name or token in the address. See [Secrets](/docs/substrate/secrets).
 
 In a checkout of your own, `defenseclaw substrate run claude --clone .` gives the agent the full history of your branch (Preview). The agent fetches the branch from its https remote, and only your unpushed commits and uncommitted changes are sent from your computer, with the same rules as a copy: secret files, and their committed versions, stay behind. `pull` works as for a copy. A remote that is a local path or an ssh address, or a branch that shares no commit with its remote, is refused; use `run` without `--clone .`. On Windows, push and commit your work first.
