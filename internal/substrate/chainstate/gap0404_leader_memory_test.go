@@ -61,17 +61,20 @@ func settledRSS() int64 {
 // (the E1 cell's per-call bound) plus the open stores' capped page caches
 // and 16 MiB, once the stores are open; and every actor's log stays at most
 // a few passes of writes (16 MiB here).
+//
+// The test makes the passes, one every walPassCalls rounds of calls, so the
+// log bound counts the writes between two passes and not how many calls the
+// box made between two of Run's 2 s ticks: with Run's ticker as the only
+// pass, a fast or loaded box wrote 16.6-26.4 MiB between passes in 30 of 200
+// runs while the guard copied every log it saw (rel-1-0-10:GAP-1694). That
+// Run makes the passes is the test's last step.
 func TestGAP0404LeaderMemoryStaysBoundedPerToolCall(t *testing.T) {
 	if leaderRSS() < 0 {
 		t.Skip("resident memory is read from /proc/self/statm (Linux)")
 	}
-	h := newHarness(t, t.TempDir(), Options{})
+	const walBound = 16 << 20
+	h := newHarness(t, t.TempDir(), Options{WALGuardEvery: 20 * time.Millisecond})
 	ctx := context.Background()
-	// The leader runs the service's loop (substrate_serve.go).
-	runCtx, stop := context.WithCancel(ctx)
-	ran := make(chan struct{})
-	go func() { defer close(ran); _ = h.svc.Run(runCtx) }()
-	defer func() { stop(); <-ran }()
 	actors := make([]Actor, 8)
 	for i := range actors {
 		actors[i] = Actor{Atespace: "dc-eng", UID: fmt.Sprintf("25a1da0f-1c9b-4ef7-8248-c276138c7f%02d", i)}
@@ -113,18 +116,38 @@ func TestGAP0404LeaderMemoryStaysBoundedPerToolCall(t *testing.T) {
 		}
 		h.advance(50 * time.Millisecond)
 	}
+	walOf := func(a Actor) int64 {
+		info, err := os.Stat(h.svc.dbPath(a) + "-wal")
+		if err != nil {
+			return 0
+		}
+		return info.Size()
+	}
+	// largest is the largest log an actor had when a pass began (its peak).
+	var largest int64
+	pass := func() {
+		for _, a := range actors {
+			largest = max(largest, walOf(a))
+		}
+		h.svc.guardWALs(ctx)
+	}
 	// Open every actor's store first: what an open store costs is bounded
 	// by MaxOpenStores, not by the calls.
-	for range 10 {
+	const walPassCalls = 10
+	for range walPassCalls {
 		for _, a := range actors {
 			call(a)
 		}
 	}
+	pass()
 	before := settledRSS()
 	const perActor = 150
-	for range perActor {
+	for i := range perActor {
 		for _, a := range actors {
 			call(a)
+		}
+		if (i+1)%walPassCalls == 0 {
+			pass()
 		}
 	}
 	calls := int64(perActor * len(actors))
@@ -134,23 +157,34 @@ func TestGAP0404LeaderMemoryStaysBoundedPerToolCall(t *testing.T) {
 	// 512 KiB each), and 16 MiB for the runtime.
 	bound := calls*2<<10 + 8*2*512<<10 + 16<<20
 	t.Logf("%d calls: leader memory +%d KiB (%d B per call), bound %d KiB", calls, grew>>10, grew/calls, bound>>10)
-	var largest int64
-	for _, a := range actors {
-		if info, err := os.Stat(h.svc.dbPath(a) + "-wal"); err == nil && info.Size() > largest {
-			largest = info.Size()
-		}
-	}
-	t.Logf("largest actor write-ahead log: %d KiB", largest>>10)
-	if largest > 16<<20 {
-		t.Fatalf("an actor's write-ahead log is %d KiB after %d calls of its actor: nothing copies it into the store", largest>>10, perActor+10)
+	t.Logf("largest actor write-ahead log: %d KiB (a pass every %d calls of each actor)", largest>>10, walPassCalls)
+	if largest > walBound {
+		t.Fatalf("an actor's write-ahead log reached %d KiB with a pass every %d calls of its actor (%d calls): the pass does not copy it into the store", largest>>10, walPassCalls, perActor+walPassCalls)
 	}
 	if raceEnabled {
 		// The race detector's shadow memory grows with every address touched.
 		t.Logf("resident memory bound not checked under -race")
-		return
-	}
-	if grew > bound {
-		t.Fatalf("leader memory grew %d KiB over %d calls (%d B per call), over the bound of %d KiB",
+	} else if grew > bound {
+		t.Errorf("leader memory grew %d KiB over %d calls (%d B per call), over the bound of %d KiB",
 			grew>>10, calls, grew/calls, bound>>10)
+	}
+	// The leader's Run loop makes the passes (substrate_serve.go): one actor
+	// writes past the bound with no pass, then Run cuts its idle log.
+	busy := actors[0]
+	for i := 0; walOf(busy) <= walBound; i++ {
+		if i == 1000 {
+			t.Fatalf("1000 calls with no pass left the log at %d KiB: the calls do not write it", walOf(busy)>>10)
+		}
+		call(busy)
+	}
+	grown := walOf(busy)
+	runCtx, stop := context.WithCancel(ctx)
+	ran := make(chan struct{})
+	go func() { defer close(ran); _ = h.svc.Run(runCtx) }()
+	defer func() { stop(); <-ran }()
+	for deadline := time.Now().Add(30 * time.Second); walOf(busy) > 1<<20; time.Sleep(20 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("the leader's Run loop left an idle actor's write-ahead log at %d KiB (%d KiB before it ran) for 30 s: nothing copies it into the store", walOf(busy)>>10, grown>>10)
+		}
 	}
 }

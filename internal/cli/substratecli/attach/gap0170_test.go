@@ -14,6 +14,11 @@ import (
 // the person checks the prompt instead of retyping keys that did arrive.
 func TestKeysLostBeforeASuspendAreCounted(t *testing.T) {
 	r, _, o := suspendRig(t)
+	t.Cleanup(func() {
+		if t.Failed() {
+			t.Logf("launcher stderr: %q", r.errb.String())
+		}
+	})
 	run := r.start(o)
 	waitFor(t, "screen 1", func() bool { return strings.Contains(r.out.String(), "screen:1") })
 	r.typ("ok\r")
