@@ -127,16 +127,16 @@ Claude Code and Codex are set up by default. GitHub Copilot CLI, OpenCode, Kiro 
 
 | Agent | `sandbox run` name | Hook tier | Status |
 | --- | --- | --- | --- |
-| Claude Code | `claude` | managed | Verified |
-| Codex | `codex` | managed | Verified |
-| GitHub Copilot CLI | `copilot` | managed | Verified through bring-your-own-provider mode |
-| OpenCode | `opencode` | user | Verified |
-| Kiro CLI | `kiro` | user | Verified in scripted mode |
-| Hermes Agent | `hermes` | user | Verified with a mock model |
-| Antigravity | `antigravity` (or `agy`) | user | Verified with a mock Gemini API |
-| Cursor Agent | `cursor-agent` | managed | Unverified |
-| Amp | `amp` | user | Unverified |
-| Devin CLI | `devin` | user | Unverified |
+| Claude Code | `claude` | managed | Supported |
+| Codex | `codex` | managed | Supported |
+| GitHub Copilot CLI | `copilot` | managed | Supported through bring-your-own-provider mode |
+| OpenCode | `opencode` | user | Supported |
+| Kiro CLI | `kiro` | user | Supported in scripted mode |
+| Hermes Agent | `hermes` | user | Preview |
+| Antigravity | `antigravity` (or `agy`) | user | Preview |
+| Cursor Agent | `cursor-agent` | managed | Not available yet |
+| Amp | `amp` | user | Not available yet |
+| Devin CLI | `devin` | user | Not available yet |
 
 The hook tier says whether the agent could switch DefenseClaw's hooks off. **Managed**: the hook configuration is a root-owned file that user and project settings cannot override. **User**: the configuration lives where the agent could edit it, so the run banner says so and DefenseClaw watches for hooks that go silent. The [capability matrix](/docs/connectors/capability-matrix) lists each harness's hook file and version. Add another agent with `defenseclaw sandbox setup --harness NAME`.
 

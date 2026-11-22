@@ -1,0 +1,38 @@
+---
+title: Model routing
+description: Send each model call to the model that fits it, limit which models a group may use, cap spend, and see what every call cost. Where to start, and which page covers what.
+keywords:
+  - DefenseClaw model routing
+  - semantic routing
+  - route-only mode
+  - routing budgets
+  - tokenomics
+  - model cost
+---
+
+Model routing lets the gateway pick the model for a call after it reads the request and before it forwards it. A classifier names the kind of work, for example coding or summarize, and the model you mapped to that kind answers. The guardrail, administrator rules and budgets still apply to the model that is picked. If the classifier fails, the original request goes through unchanged.
+
+Routing is off until you turn it on.
+
+## Start here
+
+| You want to | Page |
+| --- | --- |
+| Send each call to the model that fits it, with the built-in rules classifier, System One or the vLLM Semantic Router | [Semantic model routing](/docs/routing/semantic-routing) |
+| Route the model calls of Claude Code or Codex, which have hooks but do not send model traffic through the guardrail proxy | [Route-only mode](/docs/routing/semantic-routing#choose-a-classifier-and-a-way-in) |
+| Limit which models a user, group or connector may use, or cap spend | [Routing rules and budgets](/docs/routing/routing-budgets) |
+| See what every model call used and cost | [Tokenomics](/docs/observability/tokenomics) |
+| Set the model key that the router, the judge and the scanners share | [LLM key and providers](/docs/get-started/unified-llm-key) |
+| Use a decision model as the classifier | [Decision model](/docs/guardrail/decision-model) |
+| See how well routing works | [Benchmarks: model routing](/docs/guardrail/benchmarks#model-routing) |
+
+## The commands
+
+```bash
+defenseclaw routing setup          # choose a classifier and map kinds of work to models
+defenseclaw routing test "refactor this function"   # a dry run: no model is called
+defenseclaw routing status         # what routing is doing now
+defenseclaw routing usage          # what calls used (needs observability.tokenomics)
+```
+
+`defenseclaw routing enable --connector claudecode` (or `codex`) turns on route-only mode for that agent. `defenseclaw routing disable --connector NAME` puts the agent's own settings back. See [Semantic model routing](/docs/routing/semantic-routing) for the flags.

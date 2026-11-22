@@ -232,7 +232,7 @@ Teardown, in this order:
 2. As the OpenClaw account or an administrator, remove `plugins.entries.defenseclaw`, `defenseclaw` from a `plugins.allow` list if you added it there, and the `plugin_dir` path from `plugins.load.paths`, then restart the OpenClaw gateway. Until you do, the plugin has no credential and blocks every tool call.
 3. As an administrator, delete the `plugin_dir` folder when you no longer need it.
 
-### Tested OpenClaw versions
+### Supported OpenClaw versions
 
 We test DefenseClaw with OpenClaw 2026.6.8, 2026.9.8 and 2026.10.9. DefenseClaw 1.0.10 adds 2026.8.35, the first release with the plugin hooks DefenseClaw uses (the hook floor), and 2026.11.3, the release `install.sh` installs. We test against new OpenClaw releases as they come out.
 
@@ -266,7 +266,7 @@ DefenseClaw asks OpenClaw for these scopes:
 
 #### What this command sets vs. leaves at defaults
 
-`defenseclaw setup openclaw` is the dedicated alias. It delegates to the shared guardrail setup and exposes the common options, not every `setup guardrail` flag ([quick-alias reference](/docs/guardrail/aliases), [full guardrail setup](/docs/guardrail)). The flags above set the connector, mode, optional HITL and optional rule pack. Everything else uses the shipped defaults ([Defaults](/docs/policies/defaults)).
+`defenseclaw setup openclaw` is the dedicated alias. It delegates to the shared guardrail setup and exposes the common options, not every `setup guardrail` flag ([quick-alias reference](/docs/connectors/aliases), [full guardrail setup](/docs/guardrail)). The flags above set the connector, mode, optional HITL and optional rule pack. Everything else uses the shipped defaults ([Defaults](/docs/policies/defaults)).
 
 | Knob | Value when omitted | Flag to override |
 | --- | --- | --- |

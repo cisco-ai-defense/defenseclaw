@@ -565,7 +565,7 @@ unprotected until the user or an administrator fixes them: a link or non-directo
 where an agent's config folder belongs, an agent config the agent cannot parse, a
 special file such as a named pipe at a config path, and files another account owns.
 
-A file event starts a guardian pass at once, and the pass watches every protected target for 300 ms, so a program that rewrites an agent's hook block over and over (Hermes was the case tested) is repaired within about 3 seconds of its first damaged write. Faster restores can still undo the repair. On macOS the guardian reads an account's launchd `HERMES_HOME` (set with `launchctl setenv`), so a Hermes home outside `~/.hermes` is protected.
+A file event starts a guardian pass at once, and the pass watches every protected target for 300 ms, so a program that rewrites an agent's hook block over and over (Hermes is an example) is repaired within about 3 seconds of its first damaged write. Faster restores can still undo the repair. On macOS the guardian reads an account's launchd `HERMES_HOME` (set with `launchctl setenv`), so a Hermes home outside `~/.hermes` is protected.
 
 To find the account, read `warnings[]` in `status --json` or `verify --json`: each
 `guardian_target_user_path` and `guardian_target_failed` entry names the user, the

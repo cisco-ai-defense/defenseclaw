@@ -47,7 +47,7 @@ test('OpenCode V2 live certification reaches every displayed platform (GAP-0552)
     assert.equal(opencode.enterprise[os].status, 'supported');
     assert.equal(home.os[os], 'supported');
   }
-  assert.match(opencode.versionNote ?? '', /2\.2\.5.*Linux, macOS and native Windows.*per-user and managed/);
+  assert.match(opencode.versionNote ?? '', /2\.0\.0 up to 2\.3\.0.*untested newer versions/);
   const connectorPage = readFileSync(new URL('../content/docs/connectors/opencode.mdx', import.meta.url), 'utf8');
   const compatibilityPage = readFileSync(new URL('../content/docs/connectors/compatibility.mdx', import.meta.url), 'utf8');
   assert.match(connectorPage, /\| macOS and Linux \| \*\*Supported\*\*/);
