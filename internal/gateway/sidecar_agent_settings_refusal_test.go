@@ -353,8 +353,12 @@ type agentSettingsRefusalFixture struct {
 
 // newAgentSettingsRefusalFixture is a per-user action-mode install of real
 // Codex and Claude Code connectors whose settings files live in a temp home.
+// Its boots register each connector's rule pack for the process;
+// restoreGatewayProcessPosture puts them back after the test, so a later test
+// does not scan claudecode with this test's marker pack (rel-1-0-10:GAP-1305).
 func newAgentSettingsRefusalFixture(t *testing.T) *agentSettingsRefusalFixture {
 	t.Helper()
+	restoreGatewayProcessPosture(t)
 	dataDir := testenv.PrivateTempDir(t)
 	agentHome := testenv.PrivateTempDir(t)
 	f := &agentSettingsRefusalFixture{
