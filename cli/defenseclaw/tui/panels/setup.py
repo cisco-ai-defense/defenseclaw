@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import stat
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -5342,9 +5343,28 @@ class SandboxMachineCheck:
     # The release setup installs (the report's ``openshell_install_version``;
     # "" from a doctor that does not say).
     openshell_release: str = ""
+    # On a Mac, this OpenShell (the release setup installs when none is)
+    # starts MicroVMs (openshell.MicroVMStartsOnMac, GAP-1775). Only the
+    # wizard's text follows it: the default stays the docker driver.
+    microvm_starts: bool = False
 
 
 _DOCTOR_GLYPHS = {"pass": "✓", "warn": "⚠", "fail": "✗"}
+
+# The first OpenShell release whose MicroVMs start on a Mac
+# (openshell.MicroVMStartsOnMacMin, GAP-1775).
+_MICROVM_STARTS_ON_MAC_MIN = (0, 1, 9)
+
+
+def microvm_starts_on_mac(version: str) -> bool:
+    """Whether OpenShell ``version`` (a prerelease is before its release) starts MicroVMs on a Mac."""
+    match = re.match(r"^v?(\d+)\.(\d+)\.(\d+)(.*)$", version.strip())
+    if not match:
+        return False
+    found = tuple(int(part) for part in match.groups()[:3])
+    if found == _MICROVM_STARTS_ON_MAC_MIN:
+        return not match.group(4).startswith(("-", "~"))
+    return found > _MICROVM_STARTS_ON_MAC_MIN
 
 # The checks setup stops on, in its order, when it does not install
 # OpenShell (sandboxcli/setup.go, after step 3).
@@ -5520,6 +5540,7 @@ def sandbox_machine_check(report: Mapping[str, Any] | None, error: str = "") -> 
         openshell_attention=attention,
         openshell_upgrade=upgrade,
         openshell_release=release,
+        microvm_starts=mac and microvm_starts_on_mac(str(report.get("cli_version") or release).strip()),
     )
 
 
@@ -5680,8 +5701,13 @@ def sandbox_wizard_fields(
                 "Compute Driver",
                 "section",
                 value="docker (Docker Desktop 29.8 or newer)",
-                hint="MicroVMs do not start on a Mac until OpenShell fixes its MicroVM driver, so setup runs sandboxes on "
-                'the docker driver and moves a gateway on the MicroVM driver to it (compute_driver = "docker"'
+                hint=(
+                    "This OpenShell starts MicroVMs on a Mac: run `defenseclaw sandbox setup` and answer yes to its MicroVM "
+                    "question to use them. This form keeps sandboxes on "
+                    if machine is not None and machine.microvm_starts
+                    else "MicroVMs do not start on a Mac until OpenShell fixes its MicroVM driver, so setup runs sandboxes on "
+                )
+                + 'the docker driver and moves a gateway on the MicroVM driver to it (compute_driver = "docker"'
                 + driver_restart
                 + "; sandboxes made on the MicroVM driver cannot start after the switch). Setup first checks Docker "
                 "Desktop's Landlock, host networking and file sharing.",

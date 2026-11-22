@@ -151,15 +151,19 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) (retErr error) {
 	a.printf("  Checking this machine…  ")
 	rep := a.runDoctor(ctx)
 	a.printf("%s\n", a.machineLine(rep))
-	// On a Mac MicroVMs do not start until OpenShell fixes its MicroVM
-	// driver (GAP-0007), and the docker driver needs the Landlock of the
-	// Linux VM Docker runs in. Setup asks on every Mac, also when the
-	// gateway already runs the vm driver (the upstream default of a fresh
-	// OpenShell): a no, or --yes, moves it to docker rather than writing
-	// vm (GAP-1704). No reason to stop at the Landlock check before that
-	// question (step 2).
+	// On a Mac MicroVMs do not start with OpenShell 0.1.6 to 0.1.8
+	// (GAP-0007), and start with 0.1.9 (GAP-1775, openshell.MicroVMStartsOnMac);
+	// the docker driver needs the Landlock of the Linux VM Docker runs in.
+	// Setup asks on every Mac, also when the gateway already runs the vm
+	// driver (the upstream default of a fresh OpenShell): a no, or --yes,
+	// moves it to docker rather than writing vm (GAP-1704), also from 0.1.9,
+	// which only drops the claim that they do not start. No reason to stop at the Landlock check before that question (step 2).
 	macOS := a.GOOS == "darwin"
 	onVM := rep.Driver == openshell.DriverVM
+	// vmStarts: this OpenShell (the one setup installs, when none is) starts
+	// MicroVMs on a Mac. Read again where the end of setup says what a vm
+	// gateway does (the install in between may have changed it).
+	vmStarts := macOS && openshell.MicroVMStartsOnMac(rep.CLIVersion)
 	microVM := onVM
 	// A Linux host with KVM may run them too; there the docker driver stays
 	// the default, and the kernel's missing Landlock is what makes
@@ -235,6 +239,16 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) (retErr error) {
 			question = `Run sandboxes in OpenShell MicroVMs? This gateway runs the MicroVM driver, but on a Mac MicroVMs do not start until OpenShell fixes it; ` +
 				`no switches it to the docker driver, which runs sandboxes on Docker Desktop 29.8 or newer (the run-time Landlock check decides) (sets compute_driver = "docker" in ` +
 				where + restarts + `; sandboxes made on the MicroVM driver cannot start after the switch)`
+		}
+		if macOS && vmStarts {
+			// OpenShell 0.1.9 starts them: a choice that works, not a claim
+			// that it does not. The default stays docker (GAP-1704).
+			question = `Run sandboxes in OpenShell MicroVMs? Each sandbox gets its own kernel and disk (sets compute_driver = "vm" in ` + where + restarts +
+				`; OpenShell calls this driver experimental, and sandboxes made on the docker driver cannot start after the switch)`
+			if onVM {
+				question = `Run sandboxes in OpenShell MicroVMs? This gateway runs the MicroVM driver; no switches it to the docker driver, which runs sandboxes on Docker Desktop 29.8 or newer ` +
+					`(the run-time Landlock check decides) (sets compute_driver = "docker" in ` + where + restarts + `; sandboxes made on the MicroVM driver cannot start after the switch)`
+			}
 		}
 		if linuxKVM {
 			// The docker driver is a Linux host's default: MicroVMs are the
@@ -666,11 +680,16 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) (retErr error) {
 	}
 	// Without bind mounts no harness whose settings are mounted can start.
 	noMounts := !microVM && copyOnly && !state.BindMounts.Enabled() && !changes.EnableBindMounts
+	// Where no sandbox starts on a Mac: not with OpenShell 0.1.9 or later.
+	vmWhere := ", where no sandbox starts on a Mac"
+	if openshell.MicroVMStartsOnMac(rep.CLIVersion) {
+		vmWhere = ""
+	}
 	switch {
 	case onMicroVMs:
 		a.note("every run works on a copy (the MicroVM driver mounts no host folders); `" + CommandName + " pull NAME --apply` brings the changes back")
 	case switchTo == openshell.DriverDocker && !leftVM:
-		a.warn("the gateway still runs the MicroVM driver, where no sandbox starts on a Mac; it runs sandboxes on the docker driver " + once)
+		a.warn("the gateway still runs the MicroVM driver" + vmWhere + "; it runs sandboxes on the docker driver " + once)
 	case stuck:
 		kernel := "the Linux VM Docker runs in"
 		if a.GOOS == "linux" {
@@ -862,7 +881,7 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) (retErr error) {
 			CommandName + " run " + cmd + "`")
 		return errSetupNotReady()
 	case switchTo == openshell.DriverDocker && !leftVM && unwritten:
-		a.warn("not ready for sandboxes yet: the gateway change was not written, so a restart alone leaves the gateway on the MicroVM driver, where no sandbox starts on a Mac. Rerun `" +
+		a.warn("not ready for sandboxes yet: the gateway change was not written, so a restart alone leaves the gateway on the MicroVM driver" + vmWhere + ". Rerun `" +
 			CommandName + " setup` and let it write the change, then restart the OpenShell gateway yourself, the way you started it; then `" +
 			CommandName + " run " + cmd + "`")
 		return errSetupNotReady()
@@ -871,7 +890,7 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) (retErr error) {
 			CommandName + " run " + cmd + "`")
 		return errSetupNotReady()
 	case switchTo == openshell.DriverDocker && !leftVM:
-		a.warn("not ready for sandboxes yet: the gateway still runs the MicroVM driver, where no sandbox starts on a Mac; restart it on the docker driver (`" +
+		a.warn("not ready for sandboxes yet: the gateway still runs the MicroVM driver" + vmWhere + "; restart it on the docker driver (`" +
 			CommandName + " setup --restart-gateway`), then `" + CommandName + " run " + cmd + "`")
 		return errSetupNotReady()
 	case len(unmet) > 0:
@@ -1017,6 +1036,16 @@ func (a *App) installerHow() string {
 // installed another way is
 // its user's to upgrade: the check's fix says how. It returns the doctor
 // report of the machine as it is then.
+
+// openShellUpgradeOneWay is said with every OpenShell upgrade: a newer
+// gateway migrates its database, an older one refuses to open it ("migration
+// N was previously applied but is missing"), and OpenShell has no down
+// migration. Rolling DefenseClaw back leaves OpenShell as it is
+// (rel-1-0-10:GAP-1777).
+const openShellUpgradeOneWay = "OpenShell upgrades are one-way: rolling DefenseClaw back keeps this OpenShell, " +
+	"and an older OpenShell starts only after its gateway database (~/.local/state/openshell/gateway/openshell.db) is moved aside, " +
+	"which drops the records of the sandboxes on it"
+
 func (a *App) offerOpenShellUpgrade(ctx context.Context, o SetupOptions, rep *openshell.DoctorReport, cli openshell.Check) (*openshell.DoctorReport, error) {
 	keep := func() (*openshell.DoctorReport, error) {
 		a.note("OpenShell " + cli.Detail)
@@ -1061,12 +1090,12 @@ func (a *App) offerOpenShellUpgrade(ctx context.Context, o SetupOptions, rep *op
 		}
 		var err error
 		upgrade, err = a.ask("Upgrade OpenShell "+rep.CLIVersion+" to "+openshell.InstallerVersion+" in place with NVIDIA's installer? ("+
-			why+how+"restarts the gateway: "+stops+")", legacy, o.Yes)
+			why+how+"restarts the gateway: "+stops+"; "+openShellUpgradeOneWay+")", legacy, o.Yes)
 		if err != nil {
 			return nil, err
 		}
 	} else if upgrade {
-		a.warn("upgrading OpenShell " + rep.CLIVersion + " to " + openshell.InstallerVersion + " restarts the gateway: " + stops)
+		a.warn("upgrading OpenShell " + rep.CLIVersion + " to " + openshell.InstallerVersion + " restarts the gateway: " + stops + "; " + openShellUpgradeOneWay)
 	}
 	if !upgrade {
 		return keep()

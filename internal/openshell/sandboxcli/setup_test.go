@@ -599,7 +599,7 @@ func TestSetupOffersTheUpgrade(t *testing.T) {
 	const later = "→ upgrade OpenShell to " + openshell.InstallerVersion + " in place: defenseclaw sandbox setup --install-openshell\n"
 	const names = "(dc-claude-theirs-a, dc-claude-theirs-b)"
 	question := "Upgrade OpenShell 0.1.1 to " + openshell.InstallerVersion + " in place with NVIDIA's installer? (OpenShell 0.1.1 runs no DefenseClaw sandbox; sudo; sha256 verified; pulls OpenShell's " +
-		openshell.InstallerVersion + " supervisor images from ghcr.io; restarts the gateway: it drops the connections of the 2 sandboxes running on it " + names + ") [Y/n]"
+		openshell.InstallerVersion + " supervisor images from ghcr.io; restarts the gateway: it drops the connections of the 2 sandboxes running on it " + names + "; " + openShellUpgradeOneWay + ") [Y/n]"
 	flag := SetupOptions{NonInteractive: true, InstallOpenShell: true}
 	for _, tc := range []struct {
 		name     string

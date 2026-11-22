@@ -6874,6 +6874,10 @@
               "description": "macOS only: the administrator's e2fsprogs directory (absolute, root-owned chain).",
               "type": "string",
               "maxLength": 4096
+            },
+            "allow_downgrade": {
+              "description": "install: setup only. Lets ensure apply a version below a release an account already ran; that account's sandboxes start only after its OpenShell gateway database is moved aside, which loses its sandbox records. Default false: ensure refuses and names the accounts.",
+              "type": "boolean"
             }
           }
         },
