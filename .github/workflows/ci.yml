@@ -1714,42 +1714,45 @@ jobs:
           cache-hit: ${{ steps.go.outputs.cache-hit }}
 
   darwin-gateway-test-binary:
-    # One internal/gateway test binary for the six darwin-gateway parts.
-    # The package's test compile (about 2,000 test files, 18 MB of test
-    # source in one compile unit) peaks at 7.8 to 8.4 GB, more than the 7 GB
-    # of the hosted macOS runner. With the same commit and restored cache it
-    # took 74 s on one runner and 900 to 1,000 s on others (rel/1.0.10 run
-    # 43831888457: parts 1 and 4 at 1,130 and 1,195 s of their 1,200 s;
-    # PR #1456 run 43864447390: every part 700 to 1,000 s before its first
-    # test, parts 1 and 5 cancelled), and every part paid it. Here it runs
-    # once, under a 3 GiB GOMEMLIMIT with one compiler backend worker
-    # (-c=1): 4.6 GB at its peak and 154 s on 3 CPUs of defenseclaw-dev,
-    # against 7.8 GB and 70 s by default. Both only pace the compiler's
-    # memory; the tests are the same. go test -c runs go test's vet checks
-    # for the whole package, which part 1 used to run.
+    # One internal/gateway test binary for the six darwin-gateway parts,
+    # cross-compiled on Linux. The package's test compile (about 2,000 test
+    # files, 18 MB of test source in one compile unit) peaks at 7.8 to 8.4 GB.
+    # On the 7 GB hosted macOS runner it had to run paced (one compiler
+    # backend worker under a 3 GiB GOMEMLIMIT) and took 26.6 of the job's 27.9
+    # minutes (CI run 44948629340), the critical path of the whole run; the
+    # six parts waited on it. The 16 GB Linux runner compiles it unpaced.
+    # CGO_ENABLED=0 is how release builds every darwin binary
+    # (.goreleaser.yaml, make dist), so the parts run the code that ships;
+    # the one darwin cgo file (internal/useridentity/kerberoslink, a link
+    # flag for cgo builds) is outside the package's test dependencies either
+    # way. Go's linker ad-hoc signs darwin/arm64 executables, so the binary
+    # runs on the macOS runner as built. go test -c runs go test's vet checks
+    # for the whole package (GOOS=darwin), which part 1 used to run.
     name: Darwin Gateway Test Binary
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.enterprise != 'false' }}
-    runs-on: macos-latest
-    # The paced compile above still takes up to about 20 minutes on a slow
-    # macOS runner: rel/1.0.10 push 5 (CI run 44013773983) was cancelled at
-    # 20m32s of a 20-minute budget (GAP-1090).
-    timeout-minutes: 35
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           persist-credentials: false
+      # Its own cache entry: the shared Linux entry holds linux/amd64
+      # objects, and this job compiles every dependency for darwin/arm64.
       - uses: ./.github/actions/setup-go
+        id: go
+        with:
+          cache-name: darwin-cross
       - name: Build the internal/gateway test binary
         shell: bash
         env:
-          GOMEMLIMIT: 3GiB
+          CGO_ENABLED: "0"
+          GOOS: darwin
+          GOARCH: arm64
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/gateway-test"
-          # time -l logs the compile's time and peak memory.
-          /usr/bin/time -l go test -c -gcflags=github.com/defenseclaw/defenseclaw/internal/gateway=-c=1 \
-            -o "$RUNNER_TEMP/gateway-test/gateway.test" ./internal/gateway
+          time go test -c -o "$RUNNER_TEMP/gateway-test/gateway.test" ./internal/gateway
           # upload-artifact drops the executable bit; the tar keeps it.
           tar -C "$RUNNER_TEMP/gateway-test" -cf "$RUNNER_TEMP/darwin-gateway-test.tar" gateway.test
       - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
@@ -1761,6 +1764,10 @@ jobs:
           if-no-files-found: error
           # A re-run of this job replaces the binary of its first attempt.
           overwrite: true
+      - uses: ./.github/actions/go-cache-save
+        with:
+          cache-name: darwin-cross
+          cache-hit: ${{ steps.go.outputs.cache-hit }}
 
   darwin-gateway:
     # The unix and darwin tests of internal/gateway in six time-balanced

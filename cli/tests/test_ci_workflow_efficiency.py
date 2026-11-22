@@ -78,7 +78,7 @@ def test_windows_shards_never_carry_the_exhaustive_telemetry_suites() -> None:
     assert "env" not in shard_job or "WINDOWS_TELEMETRY_REGISTRY_MODE" not in shard_job["env"]
     shard_step = next(step for step in shard_job["steps"] if "python_test_shards.py" in step.get("run", ""))
     shard_run = shard_step["run"]
-    assert "'scripts/python_test_shards.py', '--shard-count', '12'" in shard_run
+    assert "'scripts/python_test_shards.py', '--shard-count', '18'" in shard_run
     for test_file in exhaustive_files:
         assert f"'{test_file}'" in shard_run
     # Every run excludes both modules; no event re-admits them.
@@ -211,17 +211,20 @@ def test_ci_shards_slow_gateway_package_and_combines_go_coverage(tmp_path, capsy
     assert "--timings scripts/test-timings/go-darwin.json \\\n            --shard-count 4 \\" in workflow
     assert "name: go-test-timings-darwin-connector-${{ matrix.shard }}" in workflow
     assert "name: go-test-timings-darwin-gateway-${{ matrix.shard }}" in workflow
-    # The darwin gateway parts share one test binary. go test -c runs go
-    # test's vet checks for the whole package once, under a memory limit that
-    # keeps the 8 GB compile inside the 7 GB macOS runner; every part runs the
-    # binary through test2json the way go test -json runs it, and keeps the
-    # check name of its old Unix Standalone Lifecycle part.
+    # The darwin gateway parts share one test binary, cross-compiled on the
+    # 16 GB Linux runner (the 8 GB compile ran paced for 26.6 minutes on the
+    # 7 GB macOS runner, CI run 44948629340) with CGO_ENABLED=0, as release
+    # builds darwin. go test -c runs go test's vet checks for the whole
+    # package once; every part runs the binary through test2json the way go
+    # test -json runs it, and keeps the check name of its old Unix Standalone
+    # Lifecycle part.
     build = jobs["darwin-gateway-test-binary"]
-    assert build["runs-on"] == "macos-latest"
+    assert build["runs-on"] == "ubuntu-latest"
     step = next(s for s in build["steps"] if s.get("name") == "Build the internal/gateway test binary")
-    assert step["env"]["GOMEMLIMIT"] == "3GiB"
-    assert "go test -c -gcflags=github.com/defenseclaw/defenseclaw/internal/gateway=-c=1 " in step["run"]
+    assert step["env"] == {"CGO_ENABLED": "0", "GOOS": "darwin", "GOARCH": "arm64"}
+    assert 'go test -c -o "$RUNNER_TEMP/gateway-test/gateway.test" ./internal/gateway' in step["run"]
     assert "-vet=off" not in step["run"]
+    assert "GOMEMLIMIT" not in str(build)
     gateway_parts = jobs["darwin-gateway"]
     assert gateway_parts["name"] == "Unix Standalone Lifecycle (macos-latest darwin gateway ${{ matrix.part }} of 6)"
     assert "darwin-gateway-test-binary" in gateway_parts["needs"]
@@ -365,11 +368,11 @@ LIVE_ONLY_JOBS = {
 
 # Jobs whose one step is a whole-package compile that a slow hosted runner
 # cannot finish in 20 minutes keep a measured, longer budget (GAP-1090:
-# rel/1.0.10 push 5 cancelled Go Lint at 15m17s and the Darwin gateway test
-# binary at 20m32s, neither with a finding). Nothing else may exceed 20.
+# rel/1.0.10 push 5 cancelled Go Lint at 15m17s with no finding). Nothing
+# else may exceed 20. The Darwin gateway test binary left this list when it
+# moved to a Linux cross-compile (15 minutes).
 LONG_COMPILE_JOBS = {
     ("ci.yml", "go-lint"): 25,
-    ("ci.yml", "darwin-gateway-test-binary"): 35,
     # Not a compile: the Windows upgrade lane installs, upgrades, converges and
     # removes the standalone services on a hosted runner. On rel/1.0.10
     # da4177e225 (CI run 44074568058) every step passed and the job was
