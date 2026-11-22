@@ -174,8 +174,8 @@ Known limits in 1.0.10:
 - `helm rollback` to a release with an older store schema is refused, naming the backup. A pre-rollback hook that
   fails for another reason (the store state cannot be read) leaves the same trouble. helm keeps the failed
   rollback as a revision in status pending-rollback (it writes the revision before it runs the hook), and every later
-  `helm upgrade` fails with another operation in progress. Clear it with `helm rollback RELEASE N`, where N is the
-  revision `helm history RELEASE` shows as deployed: that release passes the check and nothing changes. Every failed
+  `helm upgrade` fails with another operation in progress. Clear it with `helm -n NAMESPACE rollback RELEASE N`, where N is the
+  revision `helm -n NAMESPACE history RELEASE` shows as deployed: that release passes the check and nothing changes. Every failed
   pre-rollback hook says this too. helm prints only that the hook failed; the refusal, with these steps, is in
   `kubectl logs job/defenseclaw-pre-rollback`.
 - Outside managed mode every pod (gateway, leader, controller, callout) runs a root init container, `substrate-datadir`,
