@@ -470,6 +470,26 @@
       "since": "1.0.10"
     },
     {
+      "name": "DEFENSECLAW_TEST_GAP1733_LOCALSYSTEM_CHILD",
+      "category": "test_fixture",
+      "purpose": "Marks the LocalSystem child run that the elevated Windows test TestGAP1733PerUserInstallFoldersWithTheirOwnDACLAreSkipped starts, so the child runs the per-user install folder checks as LocalSystem.",
+      "default": "unset",
+      "accepted_values": [
+        "1",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/enterprisehooks/target_runtime_peruser_dacl_gap1733_windows_test.go",
+          "description": "TestGAP1733PerUserInstallFoldersWithTheirOwnDACLAreSkipped sets it on the LocalSystem child process it starts"
+        }
+      ],
+      "since": "1.0.11"
+    },
+    {
       "name": "DEFENSECLAW_TEST_SIDECAR_HOOK_PRIORITY",
       "category": "test_fixture",
       "purpose": "Marks the child process of the Windows gateway priority-class test (GAP-0050), so the class checks run in a child and the test binary keeps its own priority class.",
