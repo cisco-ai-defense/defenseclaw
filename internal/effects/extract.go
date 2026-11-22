@@ -1290,6 +1290,8 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 		i := p.options(inner, 1)
 		if i < len(inner) && inner[i].Static && inner[i].Value != "" && !strings.HasPrefix(inner[i].Value, "-") {
 			p.markForeignUser(inner[i])
+		} else if i < len(inner) && !inner[i].Static {
+			wrapperUA = true
 		}
 		foreign = foreign || p.foreignUser
 	}

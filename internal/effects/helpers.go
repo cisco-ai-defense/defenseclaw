@@ -69,11 +69,14 @@ func (w *walker) stripWrappers(words []Word) (inner []Word, wrappers []string, f
 		}
 		p := wrapperParse{w: w, row: row, name: name}
 		i = p.options(words, i)
-		if row.userOperand && i < len(words) && words[i].Static &&
-			words[i].Value != "" && !strings.HasPrefix(words[i].Value, "-") {
-			p.markForeignUser(words[i])
-			i++
-			i = p.options(words, i)
+		if row.userOperand && i < len(words) {
+			if words[i].Static && words[i].Value != "" && !strings.HasPrefix(words[i].Value, "-") {
+				p.markForeignUser(words[i])
+				i++
+				i = p.options(words, i)
+			} else if !words[i].Static {
+				p.unaccounted = true // an unknown account cannot be graded as a named foreign user
+			}
 		}
 		foreign = foreign || p.foreignUser
 		unaccounted = unaccounted || p.unaccounted
@@ -289,7 +292,11 @@ func (p *wrapperParse) apply(fn string, val Word, has bool) {
 }
 
 func (p *wrapperParse) markForeignUser(user Word) {
-	if !user.Static || (user.Value != "root" && user.Value != "0") {
+	if !user.Static {
+		p.unaccounted = true
+		return
+	}
+	if user.Value != "root" && user.Value != "0" {
 		p.foreignUser = true
 	}
 }
