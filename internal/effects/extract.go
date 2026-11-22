@@ -259,8 +259,9 @@ type walker struct {
 	literalKind DataKind
 	// positional, when positionalSet, are the $0 $1 ... the next child body
 	// lowered by unwrapCodeScoped binds (sh -c BODY ARG0 ARG1, sh FILE ARG1).
-	positional    []Word
-	positionalSet bool
+	positional     []Word
+	positionalSet  bool
+	foreignContext bool // a nested shell body runs under a named non-root account wrapper
 }
 
 // cwdState is one cwd certainty value: the primary candidate and the others.
@@ -1237,6 +1238,7 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 
 	// 2. Strip wrappers.
 	inner, wrappers, foreign, fromInput, wrapperUA := w.stripWrappers(words)
+	foreign = foreign || w.foreignContext
 	spec := w.spec // the child-process environment this command applies (round 8 E)
 	if len(inner) == 0 {
 		if n := len(wrappers); n > 0 && wrappers[n-1] != "exec" && wrappers[n-1] != "command" && wrappers[n-1] != "builtin" {
@@ -1282,6 +1284,21 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 		return
 	}
 	program := programBasename(prog.Value, w.o.flavor())
+	// su's -c body may be lowered through the program's ShellCode row before
+	// stripWrappers can carry the account context. Use the same wrapper metadata
+	// to identify its account operand, then carry that context only while this
+	// command's nested body is being walked.
+	prevForeignContext := w.foreignContext
+	if row, ok := wrapperTable[program]; ok && row.userOperand {
+		p := wrapperParse{w: w, row: row, name: program}
+		i := p.options(inner, 1)
+		if i < len(inner) && inner[i].Static && inner[i].Value != "" && !strings.HasPrefix(inner[i].Value, "-") {
+			p.markForeignUser(inner[i])
+		}
+		foreign = foreign || p.foreignUser
+	}
+	w.foreignContext = prevForeignContext || foreign
+	defer func() { w.foreignContext = prevForeignContext }()
 	origin := Origin{Surface: w.res.Surface, Dialect: dialect, Command: cmdNo, Program: program, Wrappers: wrappers, Depth: depth, Span: c.Span}
 	w.literalOut = literalPrinted(program, inner[1:], dialect)
 	if dialect == DialectPOSIX {
