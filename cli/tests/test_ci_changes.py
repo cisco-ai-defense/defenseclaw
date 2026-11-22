@@ -437,7 +437,7 @@ def test_required_checks_always_report(workflow: str) -> None:
 
 def test_aggregates_accept_skips_only_from_the_classifier() -> None:
     ci = _workflow("ci.yml")["jobs"]
-    for job_id in ("go-test", "python-lint-test", "enterprise-required"):
+    for job_id in ("go-test", "go-lint", "python-lint-test", "enterprise-required"):
         job = ci[job_id]
         assert job["if"] == "${{ always() }}"
         assert "changes" in job["needs"]

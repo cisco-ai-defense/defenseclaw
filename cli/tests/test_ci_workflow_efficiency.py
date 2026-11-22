@@ -15,6 +15,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import importlib.util
+import json
+import os
 import re
 import subprocess
 import sys
@@ -78,7 +80,7 @@ def test_windows_shards_never_carry_the_exhaustive_telemetry_suites() -> None:
     assert "env" not in shard_job or "WINDOWS_TELEMETRY_REGISTRY_MODE" not in shard_job["env"]
     shard_step = next(step for step in shard_job["steps"] if "python_test_shards.py" in step.get("run", ""))
     shard_run = shard_step["run"]
-    assert "'scripts/python_test_shards.py', '--shard-count', '12'" in shard_run
+    assert "'scripts/python_test_shards.py', '--shard-count', '18'" in shard_run
     for test_file in exhaustive_files:
         assert f"'{test_file}'" in shard_run
     # Every run excludes both modules; no event re-admits them.
@@ -157,14 +159,15 @@ def test_ci_shards_slow_gateway_package_and_combines_go_coverage(tmp_path, capsy
     assert "--package-dir internal/audit" in workflow
     assert "name: Go Test (remaining packages / shard ${{ matrix.shard }})" in workflow
     assert "GO_PACKAGE_SHARD: ${{ matrix.shard }}" in workflow
-    assert "GO_PACKAGE_SHARDS: 19" in workflow
-    assert "GO_TEST_SHARDS: 124" in workflow
+    assert "GO_PACKAGE_SHARDS: 32" in workflow
+    assert "GO_TEST_SHARDS: 132" in workflow
     assert "--exclude github.com/defenseclaw/defenseclaw/internal/audit" in workflow
     assert "--exclude github.com/defenseclaw/defenseclaw/internal/gateway" in workflow
-    # The three Linux jobs, and the six darwin gateway parts, which weigh the
-    # unix and darwin tests by their macOS times once go-darwin.json records
-    # internal/gateway and by their Linux times until then.
-    assert workflow.count("--timings scripts/test-timings/go-linux.json") == 4
+    # The three Linux jobs, the Go Pinned Tests shards, and the six darwin
+    # gateway parts, which weigh the unix and darwin tests by their macOS
+    # times once go-darwin.json records internal/gateway and by their Linux
+    # times until then.
+    assert workflow.count("--timings scripts/test-timings/go-linux.json") == 5
     jobs = yaml.safe_load(workflow)["jobs"]
     parts = jobs["darwin-gateway"]["strategy"]["matrix"]["include"]
     assert parts == [{"part": shard + 1, "shard": shard} for shard in range(6)]
@@ -180,7 +183,7 @@ def test_ci_shards_slow_gateway_package_and_combines_go_coverage(tmp_path, capsy
     profiles = sum(
         len(jobs[name]["strategy"]["matrix"]["shard"]) for name in ("go-test-gateway", "go-test-audit", "go-test-other")
     )
-    assert profiles == 148
+    assert profiles == 169
     # The frozen-gateway job adds one more profile (it runs the three tests
     # that no longer run in the shards).
     profiles += 1
@@ -211,22 +214,31 @@ def test_ci_shards_slow_gateway_package_and_combines_go_coverage(tmp_path, capsy
     assert "--timings scripts/test-timings/go-darwin.json \\\n            --shard-count 4 \\" in workflow
     assert "name: go-test-timings-darwin-connector-${{ matrix.shard }}" in workflow
     assert "name: go-test-timings-darwin-gateway-${{ matrix.shard }}" in workflow
-    # The darwin gateway parts share one test binary. go test -c runs go
-    # test's vet checks for the whole package once, under a memory limit that
-    # keeps the 8 GB compile inside the 7 GB macOS runner; every part runs the
-    # binary through test2json the way go test -json runs it, and keeps the
-    # check name of its old Unix Standalone Lifecycle part.
+    # The darwin gateway parts share one test binary, cross-compiled on the
+    # 16 GB Linux runner (the 8 GB compile ran paced for 26.6 minutes on the
+    # 7 GB macOS runner, CI run 44948629340) with CGO_ENABLED=0, as release
+    # builds darwin. go test -c runs go test's vet checks for the whole
+    # package once; every part runs the binary through test2json the way go
+    # test -json runs it, and keeps the check name of its old Unix Standalone
+    # Lifecycle part.
     build = jobs["darwin-gateway-test-binary"]
-    assert build["runs-on"] == "macos-latest"
+    assert build["runs-on"] == "ubuntu-latest"
     step = next(s for s in build["steps"] if s.get("name") == "Build the internal/gateway test binary")
-    assert step["env"]["GOMEMLIMIT"] == "3GiB"
-    assert "go test -c -gcflags=github.com/defenseclaw/defenseclaw/internal/gateway=-c=1 " in step["run"]
+    assert step["env"] == {"CGO_ENABLED": "0", "GOOS": "darwin", "GOARCH": "arm64"}
+    assert 'go test -c -o "$RUNNER_TEMP/gateway-test/gateway.test" ./internal/gateway' in step["run"]
     assert "-vet=off" not in step["run"]
+    assert "GOMEMLIMIT" not in str(build)
+    # Compiled from the macOS checkout path (the tests read repository files
+    # from their runtime.Caller source paths); each part checks that path.
+    mac_workspace = 'mac_workspace="/Users/runner/work/${GITHUB_REPOSITORY#*/}/${GITHUB_REPOSITORY#*/}"'
+    assert mac_workspace in step["run"]
+    assert 'sudo mount --bind "$GITHUB_WORKSPACE" "$mac_workspace"' in step["run"]
     gateway_parts = jobs["darwin-gateway"]
     assert gateway_parts["name"] == "Unix Standalone Lifecycle (macos-latest darwin gateway ${{ matrix.part }} of 6)"
     assert "darwin-gateway-test-binary" in gateway_parts["needs"]
     assert "needs.darwin-gateway-test-binary.result == 'success'" in gateway_parts["if"]
     run = next(s["run"] for s in gateway_parts["steps"] if "test2json" in s.get("run", ""))
+    assert mac_workspace in run and 'if [ "$GITHUB_WORKSPACE" != "$mac_workspace" ]; then' in run
     assert '(cd "$pkg" && go tool test2json -t -p "github.com/defenseclaw/defenseclaw/$pkg"' in run
     assert '"$RUNNER_TEMP/gateway.test" -test.paniconexit0 -test.v=test2json -test.count=1' in run
     assert '-test.timeout=10m -test.run="$pattern"' in run
@@ -301,6 +313,85 @@ def test_ci_shards_slow_gateway_package_and_combines_go_coverage(tmp_path, capsy
     assert "Test|Fuzz|Example" in sharder
 
 
+def _pinned_step(jobs: dict) -> str:
+    job = jobs["go-pinned"]
+    assert job["strategy"]["matrix"]["shard"] == list(range(8))
+    step = next(
+        step for step in job["steps"] if step.get("name") == "Run this shard of the Go tests that name a changed file"
+    )
+    assert step["env"]["PINNED_SHARDS"] == 8
+    assert step["env"]["PINNED_SHARD"] == "${{ matrix.shard }}"
+    return step["run"]
+
+
+def _bash_major_version() -> int:
+    # `mapfile` needs Bash 4+; macOS ships Bash 3.2 as /bin/bash. CI runs the
+    # pinned script on ubuntu (Bash 5), so the test only skips on old shells.
+    try:
+        out = subprocess.run(
+            ["bash", "-c", "echo ${BASH_VERSINFO[0]}"], capture_output=True, text=True, check=True, timeout=30
+        ).stdout.strip()
+        return int(out)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return 0
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the Go Pinned Tests job runs this bash script on ubuntu")
+@pytest.mark.skipif(
+    sys.platform != "win32" and _bash_major_version() < 4,
+    reason="the pinned script uses mapfile, which needs Bash 4+ (macOS system bash is 3.2); the ubuntu CI job runs it",
+)
+def test_go_pinned_tests_run_every_selected_test_once_over_the_shards(tmp_path) -> None:
+    # A README.md edit pins 490 internal/gateway tests: one go test process
+    # ran them for 840 s and hit the 14m -timeout (#1489). The shards must
+    # still run every selected test exactly once: a large target split by
+    # go_test_shards.py --match, a small one (or one the script cannot split)
+    # whole in one shard.
+    workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    run = _pinned_step(yaml.safe_load(workflow)["jobs"])
+    go_test = 'go test -count=1 -timeout 14m -run "$regex" "$package" || status=1'
+    assert run.count(go_test) == 1
+    record = tmp_path / "runs.tsv"
+    script = tmp_path / "pinned.sh"
+    script.write_text(run.replace(go_test, f'printf "%s\\t%s\\n" "$package" "$regex" >> "{record}"'), encoding="utf-8")
+    shards = importlib.util.spec_from_file_location("go_test_shards", ROOT / "scripts/go_test_shards.py")
+    module = importlib.util.module_from_spec(shards)
+    assert shards.loader is not None
+    shards.loader.exec_module(module)
+    gateway = sorted({name for _, names in module.discover_test_files(ROOT / "internal/gateway") for name in names})
+    picked = gateway[::4]
+    targets = [
+        {"package": "./internal/gateway", "run": "^(" + "|".join(picked) + ")$"},
+        {"package": "./internal/hookpaths", "run": "^(TestA|TestB)$"},
+        {"package": "./internal/flow", "run": "."},
+    ]
+    env = {"GO_TESTS": json.dumps(targets), "PINNED_SHARDS": "8", "PATH": os.environ["PATH"]}
+    for shard in range(8):
+        subprocess.run(["bash", str(script)], cwd=ROOT, env={**env, "PINNED_SHARD": str(shard)}, check=True)
+    lines = [line.split("\t") for line in record.read_text(encoding="utf-8").splitlines()]
+    gateway_regexes = [regex for package, regex in lines if package == "./internal/gateway"]
+    assert len(gateway_regexes) >= 8
+    ran = [name for regex in gateway_regexes for name in gateway if re.search(regex, name)]
+    assert sorted(ran) == picked
+    assert [regex for package, regex in lines if package != "./internal/gateway"] == ["^(TestA|TestB)$", "."]
+
+
+def test_go_lint_restores_the_pinned_golangci_lint_and_only_main_saves_it() -> None:
+    # Go Lint (golangci-lint) keeps the Makefile's pinned golangci-lint and
+    # its recipe (make go-lint-analyzers); the binary and the analysis cache
+    # come from main's latest entry, and a pull request never writes one.
+    workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    steps = yaml.safe_load(workflow)["jobs"]["go-lint-analyzers"]["steps"]
+    lint = next(step for step in steps if step.get("name") == "Go lint (golangci-lint on changed lines)")
+    assert 'make go-lint-analyzers GOLANGCI_LINT="$bin"' in lint["run"]
+    assert '"$bin" version 2>/dev/null | grep -qF " ${GOLANGCI_VERSION#v} "' in lint["run"]
+    assert "sed -n 's/^GOLANGCI_LINT_VERSION := //p' Makefile" in workflow
+    saves = [step for step in steps if str(step.get("uses", "")).startswith("actions/cache/save@")]
+    assert len(saves) == 1
+    assert "github.ref == 'refs/heads/main'" in saves[0]["if"]
+    assert "github.event_name == 'push'" in saves[0]["if"]
+
+
 def test_release_validates_reviewed_macos_pin_without_freshness_block() -> None:
     workflow = (ROOT / ".github/workflows/release.yaml").read_text(encoding="utf-8")
 
@@ -363,40 +454,18 @@ LIVE_ONLY_JOBS = {
     ("connector-live-e2e.yml", "live-matrix"),
 }
 
-# Jobs whose one step is a whole-package compile that a slow hosted runner
-# cannot finish in 20 minutes keep a measured, longer budget (GAP-1090:
-# rel/1.0.10 push 5 cancelled Go Lint at 15m17s and the Darwin gateway test
-# binary at 20m32s, neither with a finding). Nothing else may exceed 20.
-LONG_COMPILE_JOBS = {
-    ("ci.yml", "go-lint"): 25,
-    ("ci.yml", "darwin-gateway-test-binary"): 35,
-    # Not a compile: the Windows upgrade lane installs, upgrades, converges and
-    # removes the standalone services on a hosted runner. On rel/1.0.10
-    # da4177e225 (CI run 44074568058) every step passed and the job was
-    # cancelled at 20m07s inside the last step, Setup /uninstall.
-    ("ci.yml", "enterprise-upgrade-windows"): 30,
-}
-
 
 def test_every_pull_request_job_has_a_twenty_minute_budget() -> None:
     # A hung test or lane fails within the pull request's 20-minute budget
-    # instead of holding the PR for the default six hours.
+    # instead of holding the PR for the default six hours. No job has an
+    # exception: Go Lint runs go vet and golangci-lint as two jobs, and the
+    # Windows enterprise lanes run in parts.
     for name, job_id, job in _pull_request_jobs():
         if (name, job_id) in LIVE_ONLY_JOBS:
             continue
         budget = job.get("timeout-minutes")
         assert isinstance(budget, int), f"{name}:{job_id} has no timeout-minutes"
-        limit = LONG_COMPILE_JOBS.get((name, job_id), 20)
-        assert budget <= limit, f"{name}:{job_id} timeout-minutes {budget} is over {limit}"
-
-
-def test_long_compile_jobs_keep_exactly_their_measured_budget() -> None:
-    # The exceptions name existing jobs and their exact budget, so a renamed
-    # job or a quietly raised budget fails here.
-    jobs = {(name, job_id): job for name, job_id, job in _pull_request_jobs()}
-    for key, minutes in LONG_COMPILE_JOBS.items():
-        assert key in jobs, f"{key} is not a pull request job"
-        assert jobs[key].get("timeout-minutes") == minutes, f"{key} timeout-minutes is not {minutes}"
+        assert budget <= 20, f"{name}:{job_id} timeout-minutes {budget} is over 20"
 
 
 def test_go_test_timeouts_stay_inside_the_job_budget() -> None:
@@ -502,3 +571,112 @@ def test_connector_matrix_runs_the_gateway_matrix_tests_in_guarded_parts() -> No
     assert "go test -json" in connector
     assert '--expect-run "$$run"' in connector
     assert "go-connector-matrix-test: .SHELLFLAGS := -o pipefail -c" in makefile
+
+
+# The Windows enterprise lanes run scripts/test-enterprise-windows-install.ps1
+# in parts on fresh runners. Each part runs the lane's prelude (the preflight
+# and the install, or the previous release's install and the upgrade), then a
+# contiguous run of step groups (-Groups). These pin that the parts of a lane
+# run every step of the lane exactly once, in the script's order.
+WINDOWS_LANE = ROOT / "scripts/test-enterprise-windows-install.ps1"
+WINDOWS_LANE_GROUPS = {
+    "install": ["drift", "refusal", "operate", "reinstall"],
+    "upgrade": ["drift", "refusal", "operate"],
+}
+WINDOWS_LANE_JOBS = {"enterprise-windows-install": "install", "enterprise-upgrade-windows": "upgrade"}
+
+
+def _windows_lane_steps() -> list[tuple[str, str | None, str | None]]:
+    """(title, group, prelude lane) of every Step in the script, in file order.
+
+    group is None for a prelude step; the prelude lane is "upgrade" inside the
+    top-level `if ($UpgradeFrom) {`, "install" in its `else {`, else None.
+    """
+    lines = WINDOWS_LANE.read_text(encoding="utf-8").splitlines()
+    body = lines.index("try {")
+    steps: list[tuple[str, str | None, str | None]] = []
+    group = lane = None
+    for line in lines[body + 1 : lines.index("catch {", body)]:
+        opened = re.fullmatch(r"    if \(Test-StepGroup '(\w+)'\) \{", line)
+        if opened:
+            assert group is None and lane is None, line
+            group = opened.group(1)
+        elif line == "    if ($UpgradeFrom) {":
+            assert group is None and lane is None, line
+            lane = "upgrade"
+        elif line == "    else {" and lane == "upgrade":
+            lane = "install"
+        elif line == "    }":
+            group = None
+            if lane == "install":
+                lane = None
+        step = re.fullmatch(r"\s+Step (['\"])(.+)\1", line)
+        if step:
+            steps.append((step.group(2), group, lane))
+        else:
+            assert not re.match(r"\s+Step\b", line), f"unparsed Step call: {line}"
+    return steps
+
+
+def _windows_lane_part(lane: str, groups: list[str]) -> list[str]:
+    steps = _windows_lane_steps()
+    prelude = [title for title, group, only in steps if group is None and only in (None, lane)]
+    return prelude + [title for title, group, _ in steps if group in groups]
+
+
+def test_windows_lane_script_runs_every_step_in_one_group_after_its_prelude() -> None:
+    steps = _windows_lane_steps()
+    text = WINDOWS_LANE.read_text(encoding="utf-8")
+    # Every step after the first group is in a group; the groups are written
+    # in their run order and each is one block.
+    first = next(i for i, (_, group, _) in enumerate(steps) if group is not None)
+    assert all(group is not None for _, group, _ in steps[first:])
+    order = [group for _, group, _ in steps[first:]]
+    assert list(dict.fromkeys(order)) == WINDOWS_LANE_GROUPS["install"]
+    assert order == sorted(order, key=WINDOWS_LANE_GROUPS["install"].index)
+    assert all(text.count(f"if (Test-StepGroup '{name}') {{") == 1 for name in WINDOWS_LANE_GROUPS["install"])
+    prelude = [(title, lane) for title, group, lane in steps if group is None]
+    assert [lane for _, lane in prelude] == [None, "upgrade", "upgrade", "upgrade", "install"], prelude
+    assert prelude[0][0].startswith("preflight:")
+    # Nothing was dropped when the steps moved into groups: the install lane
+    # ran 17 steps and the upgrade lane 16 as one job.
+    assert len(_windows_lane_part("install", WINDOWS_LANE_GROUPS["install"])) == 17
+    assert len(_windows_lane_part("upgrade", WINDOWS_LANE_GROUPS["upgrade"])) == 16
+    # The script takes only a contiguous, ordered run of its lane's groups.
+    assert "[ValidateSet('drift', 'refusal', 'operate', 'reinstall')][string[]]$Groups = @()" in text
+    assert "[string[]]$laneGroups = @('drift', 'refusal', 'operate')" in text
+    assert "if (-not $UpgradeFrom) { $laneGroups += 'reinstall' }" in text
+    assert "if ($Groups.Count -eq 0) { $Groups = $laneGroups }" in text
+    assert "pass a contiguous run of" in text and "-Groups reinstall needs operate" in text
+
+
+@pytest.mark.parametrize("job_id", sorted(WINDOWS_LANE_JOBS))
+def test_windows_enterprise_lane_parts_run_every_step_once(job_id: str) -> None:
+    lane = WINDOWS_LANE_JOBS[job_id]
+    job = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8"))["jobs"][job_id]
+    assert job["strategy"]["fail-fast"] is False
+    legs = job["strategy"]["matrix"]["include"]
+    assert len(legs) >= 2
+    assert set(job["strategy"]["matrix"]) == {"include"}
+    assert "${{ matrix.part }}" in job["name"]
+    assert len({leg["part"] for leg in legs}) == len({leg["key"] for leg in legs}) == len(legs)
+    # The legs' groups, in matrix order, are the lane's groups, each once.
+    groups = [leg["groups"].split(" ") for leg in legs]
+    assert [name for part in groups for name in part] == WINDOWS_LANE_GROUPS[lane]
+    # So every step outside the prelude runs in exactly one leg, in order.
+    full = _windows_lane_part(lane, WINDOWS_LANE_GROUPS[lane])
+    prelude = _windows_lane_part(lane, [])
+    ran = []
+    for part in groups:
+        steps = _windows_lane_part(lane, part)
+        assert steps[: len(prelude)] == prelude
+        assert len(steps) > len(prelude), part
+        ran += steps[len(prelude) :]
+    assert ran == full[len(prelude) :]
+    lanes = [step for step in job["steps"] if "test-enterprise-windows-install.ps1" in str(step.get("run", ""))]
+    assert len(lanes) == 1
+    assert lanes[0]["env"]["LANE_GROUPS"] == "${{ matrix.groups }}"
+    assert "-Groups ($env:LANE_GROUPS -split ' ')" in lanes[0]["run"]
+    assert ("-UpgradeFrom" in lanes[0]["run"]) is (lane == "upgrade")
+    uploads = [step for step in job["steps"] if str(step.get("uses", "")).startswith("actions/upload-artifact@")]
+    assert uploads and all("${{ matrix.key }}" in step["with"]["name"] for step in uploads)
