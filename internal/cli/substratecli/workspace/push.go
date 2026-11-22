@@ -83,7 +83,9 @@ func Push(ctx context.Context, opts PushOptions) (*PushOutcome, error) {
 	// The run's own rules carry over: what it excluded stays out and what
 	// it shared stays shared, so a push does not see them as new changes.
 	start.Masks = append(append([]string(nil), rec.Masks...), start.Masks...)
-	start.Unmask = append(append([]string(nil), rec.Unmasked...), start.Unmask...)
+	// The run's shared files carry over by exact path: as patterns, a
+	// shared root .env would share every .env added below it (RV1 P1-1).
+	start.UnmaskExact = append(append([]string(nil), rec.Unmasked...), start.UnmaskExact...)
 	start.UnmaskAsked = start.Unmask
 	prepared, err := Preflight(ctx, start)
 	if err != nil {

@@ -67,8 +67,10 @@ type StartOptions struct {
 	// held-back file after all, UnmaskAsked being the person's own
 	// --unmask values (a warning for each that matches nothing).
 	Masks, Unmask, UnmaskAsked []string
-	Detector                   osw.SecretDetector
-	DisableContentScan         bool
+	// UnmaskExact shares files by exact path (push: the run's shared files).
+	UnmaskExact        []string
+	Detector           osw.SecretDetector
+	DisableContentScan bool
 	// Replace discards an earlier copy of the same name once the new one is
 	// staged.
 	Replace bool
@@ -179,7 +181,7 @@ func Preflight(ctx context.Context, opts StartOptions) (*PreparedUpload, error) 
 			Project: opts.Project, DataDir: opts.DataDir, Home: opts.Home, Protected: opts.Protected,
 			RemoteRoot: opts.RemoteRoot, GitDepth: opts.GitDepth, MaxBytes: opts.MaxBytes, Upstream: opts.Upstream,
 			FolderName: hostFolderName(opts.Project), Summary: &p.summary,
-			Masks: opts.Masks, Unmask: opts.Unmask, UnmaskAsked: opts.UnmaskAsked,
+			Masks: opts.Masks, Unmask: opts.Unmask, UnmaskAsked: opts.UnmaskAsked, UnmaskExact: opts.UnmaskExact,
 			Detector: opts.Detector, DisableContentScan: opts.DisableContentScan,
 		})
 		if err == nil {

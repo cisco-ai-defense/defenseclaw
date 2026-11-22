@@ -56,6 +56,7 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -701,7 +702,11 @@ func (c *Client) downloadHostTree(ctx context.Context, rec *hostRecord, dir stri
 		if heldSet[rel] {
 			return true
 		}
-		_, h := osw.HeldBack(rel, nil, rec.Unmasked, nil, nil)
+		// The shared files are exact paths, not patterns (RV1 P1-1).
+		if slices.Contains(rec.Unmasked, rel) {
+			return false
+		}
+		_, h := osw.HeldBack(rel, nil, nil, nil, nil)
 		return h
 	})
 }

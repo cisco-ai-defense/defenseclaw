@@ -119,6 +119,11 @@ type StageOptions struct {
 	// (committed templates such as .env.example) most projects do not have,
 	// so a warning for each was noise on every copy run (GAP-0308).
 	UnmaskAsked []string
+	// UnmaskExact shares files by exact relative path (slash-separated),
+	// never as a glob or a base name: a push passes the run's shared files
+	// (CopyRecord.Unmasked) here, so sharing the root .env does not share
+	// a deploy/prod/.env added later.
+	UnmaskExact []string
 	// Replace discards an existing copy record of the same name once the
 	// new copy is staged (a failed Stage leaves it as it was). A replaced
 	// uploaded copy is remembered (CopyRecord.Replaced) until the new one is
@@ -516,7 +521,7 @@ func stageCopy(ctx context.Context, lay layout, opts StageOptions) (*CopyRecord,
 	scanOpts := secretScanOptions{
 		patterns: opts.Masks, unmask: normalizeUnmask(opts.Unmask, real), maskTracked: true,
 		detector: opts.Detector, contentScan: !opts.DisableContentScan,
-		unmaskAsked: normalizeUnmask(opts.UnmaskAsked, real),
+		unmaskAsked: normalizeUnmask(opts.UnmaskAsked, real), unmaskExact: exactRels(opts.UnmaskExact),
 	}
 	if scanOpts.detector == nil {
 		scanOpts.detector = DefaultSecretDetector()
@@ -875,7 +880,7 @@ func stageGit(ctx context.Context, rec *CopyRecord, opts StageOptions, scanOpts 
 			if _, ok := held[rel]; ok {
 				return true
 			}
-			return !unmaskedBy(scanOpts.unmask, rel) && secretByName(scanOpts.patterns, rel)
+			return !scanOpts.isUnmasked(rel) && secretByName(scanOpts.patterns, rel)
 		}
 		n, err := withholdHistory(ctx, sg, stage, filepath.Dir(stage), withheld)
 		if err != nil {
@@ -1038,16 +1043,16 @@ func selectFiles(root string, candidates []string, scanOpts secretScanOptions, m
 	// covers) counts only when its content looks like a secret: a template of
 	// names was named on every run as if the user had unmasked it (GAP-0351).
 	unmaskOnly := scanOpts
-	unmaskOnly.unmask = nil
+	unmaskOnly.unmask, unmaskOnly.unmaskExact = nil, nil
 	contentOnly := unmaskOnly
 	contentOnly.patterns = nil
 	rec.Unmasked = nil
 	for _, rel := range candidates {
-		if !unmaskedBy(scanOpts.unmask, rel) {
+		if !scanOpts.isUnmasked(rel) {
 			continue
 		}
 		check := contentOnly
-		if unmaskedBy(scanOpts.unmaskAsked, rel) {
+		if unmaskedBy(scanOpts.unmaskAsked, rel) || slices.Contains(scanOpts.unmaskExact, rel) {
 			check = unmaskOnly
 		}
 		if would, err := detectSecretsIn(root, []string{rel}, check); err == nil && len(would) > 0 {
@@ -1096,7 +1101,7 @@ func detectSecretsIn(root string, rels []string, opts secretScanOptions) ([]stri
 	var held []string
 	budget := defaultMaxContentScanFiles
 	for _, rel := range rels {
-		if unmaskedBy(opts.unmask, rel) {
+		if opts.isUnmasked(rel) {
 			continue
 		}
 		if secretByName(opts.patterns, rel) {
@@ -1592,6 +1597,20 @@ func parseKV(b []byte) map[string]string {
 		} else {
 			out[k] = v
 		}
+	}
+	return out
+}
+
+// exactRels cleans exact shared paths to the slash-separated relative form
+// the copy compares against; empty, absolute and escaping entries are dropped.
+func exactRels(in []string) []string {
+	var out []string
+	for _, p := range in {
+		p = path.Clean(filepath.ToSlash(p))
+		if p == "." || p == "" || strings.HasPrefix(p, "/") || p == ".." || strings.HasPrefix(p, "../") {
+			continue
+		}
+		out = append(out, p)
 	}
 	return out
 }
