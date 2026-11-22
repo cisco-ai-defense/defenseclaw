@@ -324,7 +324,23 @@ def _pinned_step(jobs: dict) -> str:
     return step["run"]
 
 
+def _bash_major_version() -> int:
+    # `mapfile` needs Bash 4+; macOS ships Bash 3.2 as /bin/bash. CI runs the
+    # pinned script on ubuntu (Bash 5), so the test only skips on old shells.
+    try:
+        out = subprocess.run(
+            ["bash", "-c", "echo ${BASH_VERSINFO[0]}"], capture_output=True, text=True, check=True, timeout=30
+        ).stdout.strip()
+        return int(out)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return 0
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="the Go Pinned Tests job runs this bash script on ubuntu")
+@pytest.mark.skipif(
+    sys.platform != "win32" and _bash_major_version() < 4,
+    reason="the pinned script uses mapfile, which needs Bash 4+ (macOS system bash is 3.2); the ubuntu CI job runs it",
+)
 def test_go_pinned_tests_run_every_selected_test_once_over_the_shards(tmp_path) -> None:
     # A README.md edit pins 490 internal/gateway tests: one go test process
     # ran them for 840 s and hit the 14m -timeout (#1489). The shards must
