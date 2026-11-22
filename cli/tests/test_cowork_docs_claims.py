@@ -17,7 +17,6 @@ import json
 import re
 from pathlib import Path
 
-import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 PAGE = ROOT / "docs-site/content/docs/connectors/cowork.mdx"
