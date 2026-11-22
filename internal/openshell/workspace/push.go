@@ -378,6 +378,35 @@ type PushEntry struct {
 	New        string    `json:"new"`
 	Files      int       `json:"files"`
 	At         time.Time `json:"at"`
+	// SecretLines are the record's replaced credentials before the push:
+	// undo past it puts them back with the baseline.
+	SecretLines []SecretLine `json:"secret_lines,omitempty"`
+}
+
+// mergeSecretLines is the record's replaced credentials after a push: the
+// pushed paths take the stage's entries (none for a deleted path), the
+// others keep theirs. Send kept only the baseline, so a credential a push
+// replaced was not a replaced file on pull: its placeholder went into the
+// branch and the patch, and apply could put it over the person's value
+// (RV6-1).
+func mergeSecretLines(rec, stage []SecretLine, pushed []PushChange) []SecretLine {
+	touched := map[string]bool{}
+	for _, c := range pushed {
+		touched[c.Path] = true
+	}
+	var out []SecretLine
+	for _, l := range rec {
+		if !touched[l.Rel] {
+			out = append(out, l)
+		}
+	}
+	for _, l := range stage {
+		if touched[l.Rel] {
+			out = append(out, l)
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].Rel < out[j].Rel })
+	return out
 }
 
 func (l layout) pushLog(name string) string { return filepath.Join(l.copyDir(name), "pushes.json") }
@@ -556,8 +585,10 @@ func (p *PushPlan) Send(ctx context.Context, up Uploader, mode PushMode, checkpo
 		n = log[len(log)-1].Number + 1
 	}
 	_ = base0.run(ctx, "update-ref", "refs/defenseclaw/push-"+strconv.Itoa(n), newBase)
-	log = append(log, PushEntry{Number: n, Checkpoint: checkpoint, Old: p.rec.Baseline, New: newBase, Files: len(write), At: time.Now().UTC()})
+	log = append(log, PushEntry{Number: n, Checkpoint: checkpoint, Old: p.rec.Baseline, New: newBase, Files: len(write), At: time.Now().UTC(),
+		SecretLines: p.rec.SecretLines})
 	p.rec.Baseline = newBase
+	p.rec.SecretLines = mergeSecretLines(p.rec.SecretLines, p.opts.Stage.rec.SecretLines, base)
 	if err := saveCopy(p.opts.DataDir, p.rec); err != nil {
 		return nil, err
 	}
@@ -689,6 +720,7 @@ func RewindPushes(ctx context.Context, dataDir, name string, ex Execer, checkpoi
 		return 0, fmt.Errorf("workspace: put the agent's baseline back (exit %d): %s", r.ExitCode, stderrReason(r.Stderr))
 	}
 	rec.Baseline = old
+	rec.SecretLines = log[cut].SecretLines
 	if err := saveCopy(dataDir, rec); err != nil {
 		return 0, err
 	}

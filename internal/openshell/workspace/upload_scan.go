@@ -25,6 +25,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf16"
@@ -128,7 +129,7 @@ func detectSecretsIn(root string, rels []string, opts secretScanOptions) (*copyS
 	}
 	deadline := clock().Add(budget)
 	spanner, _ := opts.detector.(SpanDetector)
-	next := 0
+	num := newNumbering(opts.prior)
 	for _, rel := range rels {
 		if opts.isUnmasked(rel) {
 			continue
@@ -173,7 +174,7 @@ func detectSecretsIn(root string, rels []string, opts secretScanOptions) (*copyS
 			res.held = append(res.held, rel)
 			continue
 		}
-		out, lines, ok := replaceSpans(rel, content, spanner.SecretSpans(rel, content), opts.rewrite, &next)
+		out, lines, ok := replaceSpans(rel, content, spanner.SecretSpans(rel, content), opts.rewrite, num)
 		if !ok {
 			res.held = append(res.held, rel)
 			continue
@@ -208,10 +209,47 @@ func decodeUTF16(b []byte) ([]byte, bool) {
 	return []byte(string(utf16.Decode(u))), true
 }
 
-// replaceSpans writes content with each span replaced by the next
-// placeholder. It refuses (ok false) when there is no span or a span is
-// the whole file, so the caller holds the file back.
-func replaceSpans(rel string, content []byte, spans []scanner.SecretSpan, form string, next *int) ([]byte, []SecretLine, bool) {
+// numbering hands out placeholders. A credential the copy already
+// replaced keeps its placeholder: the same file, rule, line text (its
+// digest) and place in the line, each prior entry used once. A new one gets
+// the next number after the highest the copy holds. A push numbered from 1
+// again: a new credential took a number the sandbox already had, and one
+// in a file that sorts first renumbered the others (RV6-1).
+type numbering struct {
+	next  int
+	prior []SecretLine
+	used  []bool
+}
+
+func newNumbering(prior []SecretLine) *numbering {
+	n := &numbering{prior: prior, used: make([]bool, len(prior))}
+	for _, l := range prior {
+		if m := placeholderRE.FindString(l.Placeholder); m != "" {
+			if v, err := strconv.Atoi(strings.TrimPrefix(m, "DC_SECRET_")); err == nil && v > n.next {
+				n.next = v
+			}
+		}
+	}
+	return n
+}
+
+// take returns the placeholder for l (its Placeholder not yet set).
+func (n *numbering) take(l SecretLine, form string) string {
+	for i, p := range n.prior {
+		if !n.used[i] && p.Rel == l.Rel && p.Rule == l.Rule && p.LinesSHA256 == l.LinesSHA256 &&
+			p.Column == l.Column && p.Length == l.Length && p.Placeholder != "" {
+			n.used[i] = true
+			return p.Placeholder
+		}
+	}
+	n.next++
+	return placeholder(form, n.next)
+}
+
+// replaceSpans writes content with each span replaced by its placeholder
+// (numbering.take). It refuses (ok false) when there is no span or a span
+// is the whole file, so the caller holds the file back.
+func replaceSpans(rel string, content []byte, spans []scanner.SecretSpan, form string, num *numbering) ([]byte, []SecretLine, bool) {
 	if len(spans) == 0 {
 		return nil, nil, false
 	}
@@ -225,22 +263,23 @@ func replaceSpans(rel string, content []byte, spans []scanner.SecretSpan, form s
 	var lines []SecretLine
 	at := 0
 	for _, sp := range spans {
-		*next++
-		ph := placeholder(form, *next)
 		lineStart := bytes.LastIndexByte(content[:sp.Start], '\n') + 1
 		lineEnd := len(content)
 		if i := bytes.IndexByte(content[sp.End:], '\n'); i >= 0 {
 			lineEnd = sp.End + i
 		}
 		sum := sha256.Sum256(content[lineStart:lineEnd])
-		lines = append(lines, SecretLine{
+		l := SecretLine{
 			Rel: rel, Rule: sp.RuleID,
 			Line:   bytes.Count(content[:lineStart], []byte{'\n'}) + 1,
 			Lines:  bytes.Count(content[lineStart:lineEnd], []byte{'\n'}) + 1,
 			Column: sp.Start - lineStart, Length: sp.End - sp.Start,
-			Placeholder: ph, LinesSHA256: hex.EncodeToString(sum[:]),
-			Signing: scanner.SigningKeyRule(sp.RuleID),
-		})
+			LinesSHA256: hex.EncodeToString(sum[:]),
+			Signing:     scanner.SigningKeyRule(sp.RuleID),
+		}
+		l.Placeholder = num.take(l, form)
+		ph := l.Placeholder
+		lines = append(lines, l)
 		out.Write(content[at:sp.Start])
 		out.WriteString(ph)
 		at = sp.End

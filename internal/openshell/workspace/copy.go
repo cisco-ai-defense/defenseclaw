@@ -144,6 +144,12 @@ type StageOptions struct {
 	// uploaded, since the sandbox still holds it.
 	Replace bool
 	Now     func() time.Time
+	// prior are the replaced credentials of the copy a push stages into
+	// (PrepareCopy reads them from its record): a credential line it already
+	// replaced (same file, rule, line text and place in the line) keeps its
+	// placeholder and a new one is numbered after the highest, so a push
+	// never renumbers what the sandbox holds (RV6-1).
+	prior []SecretLine
 }
 
 // CopyRecord is the persisted state of one copy-mode sandbox.
@@ -433,6 +439,9 @@ func PrepareCopy(ctx context.Context, opts StageOptions) (*PreparedCopy, error) 
 	if err != nil {
 		return nil, err
 	}
+	if old, err := LoadCopy(opts.DataDir, opts.Name); err == nil {
+		opts.prior = old.SecretLines
+	}
 	opts.Name = "preflight-" + randomSuffix()
 	rec, dir, err := stageCopy(ctx, lay, opts)
 	if err != nil {
@@ -563,6 +572,7 @@ func stageCopy(ctx context.Context, lay layout, opts StageOptions) (*CopyRecord,
 		detector: opts.Detector, contentScan: !opts.DisableContentScan,
 		unmaskAsked: normalizeUnmask(opts.UnmaskAsked, real), unmaskExact: exactRels(opts.UnmaskExact),
 		rewrite: opts.RewriteSecrets, maxFileBytes: opts.ScanMaxFileBytes, timeBudget: opts.ScanTimeBudget,
+		prior: opts.prior,
 	}
 	if scanOpts.detector == nil {
 		scanOpts.detector = DefaultSecretDetector()
