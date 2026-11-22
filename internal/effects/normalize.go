@@ -18,7 +18,13 @@ func Normalize(connector, tool string, args json.RawMessage) Call {
 	case isShellTool(lt):
 		return shellCall(tool, args)
 	case lt == "apply_patch" || lt == "applypatch":
-		return Call{Surface: SurfacePatch, Tool: tool, Args: args, Command: shellStringArg(args)}
+		// Every field that holds an envelope is read (patchEnvelopeArg); a call
+		// with none keeps its one command string.
+		text := patchEnvelopeArg(args)
+		if text == "" {
+			text = shellStringArg(args)
+		}
+		return Call{Surface: SurfacePatch, Tool: tool, Args: args, Command: text}
 	case lt == "patch":
 		// Hermes' patch tool in patch mode carries a V4A envelope (*** Begin
 		// Patch ... *** End Patch): it is the same patch frontend as Codex's
@@ -179,14 +185,20 @@ func baseName(p string) string {
 	return strings.ToLower(p)
 }
 
-// patchEnvelopeArg is the V4A envelope a patch tool carries in one of its
-// string fields, or "".
+// patchEnvelopeArg is the V4A envelope text a patch tool carries in its string
+// fields (patch, input, content, command, and OpenCode's patchText /
+// patch_text), or "". Every field that holds an envelope is read, joined in
+// field order: the tool may apply any of them, so none is left unread (S3-PRE
+// security review, DET111 R1).
 func patchEnvelopeArg(args json.RawMessage) string {
 	m := decodeArgs(args)
-	for _, k := range []string{"patch", "input", "content", "command"} {
-		if v, ok := m[k].(string); ok && strings.Contains(v, "*** Begin Patch") {
-			return v
+	var parts []string
+	seen := map[string]bool{}
+	for _, k := range []string{"patch", "input", "content", "command", "patchText", "patch_text"} {
+		if v, ok := m[k].(string); ok && strings.Contains(v, "*** Begin Patch") && !seen[v] {
+			seen[v] = true
+			parts = append(parts, v)
 		}
 	}
-	return ""
+	return strings.Join(parts, "\n")
 }
