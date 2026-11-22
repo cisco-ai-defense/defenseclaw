@@ -63,7 +63,9 @@ func r3Rows() []r3Row {
 	return []r3Row{
 		// home spellings
 		{gap: "GAP-1678 ~login hook config", o: px, c: sh(`echo k >> ~dcku/.claude/settings.json`), want: map[string]string{SetAgentHookConfig: K}},
-		{gap: "GAP-1678 ~login keys", o: px, c: sh(`cp x ~dcku/.ssh/authorized_keys`), want: map[string]string{SetSSHAuthorizedKeys: K}},
+		// cp cannot decide whether the destination names a file or directory;
+		// keep this active-login operand at Maybe until its target is resolved.
+		{gap: "GAP-1678 ~login keys", o: px, c: sh(`cp x ~dcku/.ssh/authorized_keys`), want: map[string]string{SetSSHAuthorizedKeys: U}},
 		{gap: "GAP-1677 ~other/../login keys", o: acct, c: sh(`echo k >> ~other/../dcku/.ssh/authorized_keys`),
 			links: map[string]string{"/home/other/../dcku/.ssh/authorized_keys": "/home/dcku/.ssh/authorized_keys"},
 			want:  map[string]string{SetSSHAuthorizedKeys: K}},

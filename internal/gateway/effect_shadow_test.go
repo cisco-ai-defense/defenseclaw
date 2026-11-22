@@ -5,11 +5,13 @@
 package gateway
 
 import (
+	"reflect"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/effectrules"
 	"github.com/defenseclaw/defenseclaw/internal/effects"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/decide"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/semanticpb"
 )
 
@@ -34,8 +36,8 @@ func unaccounted() effects.Result {
 }
 
 // A listed command, every token accounted, an exact canonical known member of
-// each set is the restricted tier; the authorized-keys ruling additionally
-// blocks in the OSS default (a state write keeps the 1.0.10 tier: alert).
+// each set is the restricted tier; a ruling family (SSH / self-protection)
+// additionally blocks in the OSS default.
 func TestClassifyRestrictedListedCommands(t *testing.T) {
 	listed := []struct{ program, surface string }{
 		{"", "shell"}, // redirection
@@ -47,11 +49,11 @@ func TestClassifyRestrictedListedCommands(t *testing.T) {
 	for _, set := range effectrules.AllSets {
 		for _, lc := range listed {
 			facts := []*semanticpb.EffectFact{mkFact("write", "known", "known", lc.program, lc.surface, nil, exactKnown(set))}
-			c := classifyEffects(accounted(), facts, effects.FlavorPOSIX, tierRestricted, effectReachEnv{Home: "/home/u"})
+			c := classifyEffects(accounted(), facts, effects.FlavorPOSIX, tierRestricted, effectReachEnv{})
 			if !c.restricted {
 				t.Fatalf("set %s cmd %q/%q: expected restricted tier", set, lc.program, lc.surface)
 			}
-			wantRuling := set == effectrules.SetSSHAuthorizedKeys
+			wantRuling := set == effectrules.SetSSHAuthorizedKeys || set == effectrules.SetSelfProtection
 			if c.restrictedRuling != wantRuling {
 				t.Fatalf("set %s cmd %q: restrictedRuling=%v want %v", set, lc.program, c.restrictedRuling, wantRuling)
 			}
@@ -65,7 +67,7 @@ func TestClassifyUnlistedCommandIsUnknownTier(t *testing.T) {
 	for _, set := range effectrules.AllSets {
 		for _, prog := range []string{"python", "dd", "awk", "sqlite3"} {
 			facts := []*semanticpb.EffectFact{mkFact("write", "known", "known", prog, "shell", nil, exactKnown(set))}
-			c := classifyEffects(accounted(), facts, effects.FlavorPOSIX, tierRestricted, effectReachEnv{Home: "/home/u"})
+			c := classifyEffects(accounted(), facts, effects.FlavorPOSIX, tierRestricted, effectReachEnv{})
 			if c.restricted {
 				t.Fatalf("set %s unlisted cmd %q: must not be restricted", set, prog)
 			}
@@ -81,12 +83,12 @@ func TestClassifyUnlistedCommandIsUnknownTier(t *testing.T) {
 func TestClassifyUnaccountedFlagIsUnknownTier(t *testing.T) {
 	// call-level: an unresolved token somewhere in the command.
 	facts := []*semanticpb.EffectFact{mkFact("write", "known", "known", "cp", "shell", nil, exactKnown(effectrules.SetSSHAuthorizedKeys))}
-	if c := classifyEffects(unaccounted(), facts, effects.FlavorPOSIX, tierRestricted, effectReachEnv{Home: "/home/u"}); c.restricted || !c.touches {
+	if c := classifyEffects(unaccounted(), facts, effects.FlavorPOSIX, tierRestricted, effectReachEnv{}); c.restricted || !c.touches {
 		t.Fatalf("call-level unaccounted: restricted=%v touches=%v, want restricted=false touches=true", c.restricted, c.touches)
 	}
 	// effect-level: an unknown-flag reason on the effect itself.
 	facts = []*semanticpb.EffectFact{mkFact("write", "known", "known", "cp", "shell", []string{"role:unknown_flag"}, exactKnown(effectrules.SetSSHAuthorizedKeys))}
-	if c := classifyEffects(accounted(), facts, effects.FlavorPOSIX, tierRestricted, effectReachEnv{Home: "/home/u"}); c.restricted || !c.touches {
+	if c := classifyEffects(accounted(), facts, effects.FlavorPOSIX, tierRestricted, effectReachEnv{}); c.restricted || !c.touches {
 		t.Fatalf("effect-level unaccounted: restricted=%v touches=%v, want restricted=false touches=true", c.restricted, c.touches)
 	}
 }
@@ -96,7 +98,7 @@ func TestClassifyUnaccountedFlagIsUnknownTier(t *testing.T) {
 func TestClassifyUnknownEffectReachesUnknownTier(t *testing.T) {
 	facts := []*semanticpb.EffectFact{mkFact("write", "unknown", "known", "cp", "shell",
 		[]string{"target:dynamic_cwd"}, &semanticpb.ProtectedMatch{Set: effectrules.SetOutsideHome, State: "unknown", Reason: "unresolved"})}
-	c := classifyEffects(accounted(), facts, effects.FlavorPOSIX, tierRestricted, effectReachEnv{Home: "/home/u"})
+	c := classifyEffects(accounted(), facts, effects.FlavorPOSIX, tierRestricted, effectReachEnv{})
 	if c.restricted {
 		t.Fatalf("unknown effect must not be restricted")
 	}
@@ -109,29 +111,29 @@ func TestClassifyUnknownEffectReachesUnknownTier(t *testing.T) {
 // not escalated; a credential read is.
 func TestClassifyReadRelevance(t *testing.T) {
 	shellRead := []*semanticpb.EffectFact{mkFact("read", "known", "known", "cat", "shell", nil, exactKnown(effectrules.SetShellRC))}
-	if classifyEffects(accounted(), shellRead, effects.FlavorPOSIX, tierRestricted, effectReachEnv{Home: "/home/u"}).touches {
+	if classifyEffects(accounted(), shellRead, effects.FlavorPOSIX, tierRestricted, effectReachEnv{}).touches {
 		t.Fatalf("a benign shell-rc read must not touch the protected tier")
 	}
 	credRead := []*semanticpb.EffectFact{mkFact("read", "known", "known", "cat", "shell", nil, exactKnown(effectrules.SetCredentials))}
-	if !classifyEffects(accounted(), credRead, effects.FlavorPOSIX, tierRestricted, effectReachEnv{Home: "/home/u"}).touches {
+	if !classifyEffects(accounted(), credRead, effects.FlavorPOSIX, tierRestricted, effectReachEnv{}).touches {
 		t.Fatalf("a credential read must touch the protected tier")
 	}
 }
 
 func TestEffectAction(t *testing.T) {
 	cases := []struct {
-		name                    string
-		touches, ruling, strict bool
-		want                    string
+		name                       string
+		touches, ruling, strictMgd bool
+		want                       string
 	}{
 		{"clean allows", false, false, false, guardrailActionAllow},
 		{"ruling restricted blocks in default", true, true, false, guardrailActionBlock},
 		{"non-ruling touch alerts in default", true, false, false, guardrailActionAlert},
-		{"any touch blocks in strict", true, false, true, guardrailActionBlock},
+		{"any touch blocks in strict/managed", true, false, true, guardrailActionBlock},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := effectAction(tc.touches, tc.ruling, tc.strict); got != tc.want {
+			if got := effectAction(tc.touches, tc.ruling, tc.strictMgd); got != tc.want {
 				t.Fatalf("effectAction = %q, want %q", got, tc.want)
 			}
 		})
@@ -150,10 +152,22 @@ func TestEffectShadowFindingsEnforcement(t *testing.T) {
 	if restricted[0].disposition != findingDispositionEffectKnown {
 		t.Fatalf("restricted disposition = %v, want effect_known", restricted[0].disposition)
 	}
-	alert := effectShadowFindings(EffectShadowResult{Tier: string(effectTierUnknown), Action: guardrailActionAlert, Kind: "delete",
-		Sets: []string{effectrules.SetSSHAuthorizedKeys}, Known: true}, effectRulesOn)
-	if len(alert) != 1 || !alert[0].Proof.Advisory() || alert[0].disposition != findingDispositionEffectUnknown {
-		t.Fatalf("unknown-tier finding = %+v, want one alert-only effect_unknown finding", alert)
+	maybe := effectShadowFindings(EffectShadowResult{Tier: string(effectTierUnknown), Action: guardrailActionAlert, Kind: "delete",
+		Sets: []string{effectrules.SetSSHAuthorizedKeys}, Known: true, Reach: []string{effectrules.ReachName}}, effectRulesOn)
+	if len(maybe) != 0 {
+		t.Fatalf("unknown-tier MAYBE result created live findings: %+v", maybe)
+	}
+	knownMutation := EffectShadowResult{Tier: string(effectTierUnknown), Action: guardrailActionAlert,
+		Kind: "write", Sets: []string{effectrules.SetSelfProtection}, Known: true}
+	knownFlag := reflect.ValueOf(&knownMutation).Elem().FieldByName("KnownMutation")
+	if knownFlag.IsValid() && knownFlag.CanSet() {
+		knownFlag.SetBool(true)
+	}
+	if proof := effectFindingProof(knownMutation); proof.Certainty != decide.CertKnown {
+		t.Fatalf("Known mutation proof = %+v, want Known", proof)
+	}
+	if findings := effectShadowFindings(knownMutation, effectRulesOn); len(findings) != 1 || findings[0].RuleID != "effect.protected_target_unknown" {
+		t.Fatalf("Known mutation at unknown tier = %+v, want its live advisory finding", findings)
 	}
 	if got := effectShadowFindings(EffectShadowResult{Tier: string(effectTierClean), Action: guardrailActionAllow}, effectRulesOn); got != nil {
 		t.Fatalf("clean findings = %+v, want nil", got)
@@ -185,10 +199,10 @@ func TestComputeEffectShadowRestrictedAuthorizedKeys(t *testing.T) {
 // protected member, where the restricted tier only alerts (unknown tier).
 func TestClassifyFullTierUnlistedCommand(t *testing.T) {
 	facts := []*semanticpb.EffectFact{mkFact("write", "known", "known", "python", "shell", nil, exactKnown(effectrules.SetSSHAuthorizedKeys))}
-	if c := classifyEffects(accounted(), facts, effects.FlavorPOSIX, tierRestricted, effectReachEnv{Home: "/home/u"}); c.restricted {
+	if c := classifyEffects(accounted(), facts, effects.FlavorPOSIX, tierRestricted, effectReachEnv{}); c.restricted {
 		t.Fatalf("restricted tier must not block an unlisted command")
 	}
-	c := classifyEffects(accounted(), facts, effects.FlavorPOSIX, tierFull, effectReachEnv{Home: "/home/u"})
+	c := classifyEffects(accounted(), facts, effects.FlavorPOSIX, tierFull, effectReachEnv{})
 	if !c.restricted || !c.restrictedRuling {
 		t.Fatalf("full tier must block an unlisted command on a ruling family: %+v", c)
 	}
