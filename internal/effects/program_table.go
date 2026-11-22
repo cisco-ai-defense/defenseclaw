@@ -82,34 +82,36 @@ type Flag struct {
 type PosMode string
 
 const (
-	PosNone           PosMode = "none"
-	PosAllRead        PosMode = "all_read"
-	PosAllDelete      PosMode = "all_delete"
-	PosAllWrite       PosMode = "all_write"
-	PosAllPerm        PosMode = "all_perm"
-	PosSourcesDest    PosMode = "sources_dest"
-	PosLinkTargetLink PosMode = "linktgt_link"
-	PosReverseLink    PosMode = "link_linktgt" // mklink LINK TARGET
-	PosFirstCode      PosMode = "first_code"
-	PosFirstExec      PosMode = "first_exec"
-	PosURLArgs        PosMode = "url_args"
-	PosRobocopy       PosMode = "robocopy"
-	PosGit            PosMode = "git"
-	PosFirstWrite     PosMode = "first_write"
-	PosBits           PosMode = "bits"     // bitsadmin: URL then local file; /upload sends the file
-	PosInOut          PosMode = "in_out"   // uniq / xxd [INPUT [OUTPUT]]: the second operand is written
-	PosZip            PosMode = "zip"      // zip ARCHIVE FILE...: the archive is written, the files are read
-	PosArchive        PosMode = "archive"  // 7z command ARCHIVE [MEMBER...]: role follows the command word
-	PosCompress       PosMode = "compress" // gzip/xz/bzip2: each operand is replaced by its (de)compressed file
+	PosNone            PosMode = "none"
+	PosAllRead         PosMode = "all_read"
+	PosAllDelete       PosMode = "all_delete"
+	PosAllWrite        PosMode = "all_write"
+	PosAllPerm         PosMode = "all_perm"
+	PosConditionalPerm PosMode = "conditional_perm" // permission options determine whether positionals mutate ACLs
+	PosSourcesDest     PosMode = "sources_dest"
+	PosLinkTargetLink  PosMode = "linktgt_link"
+	PosReverseLink     PosMode = "link_linktgt" // mklink LINK TARGET
+	PosFirstCode       PosMode = "first_code"
+	PosFirstExec       PosMode = "first_exec"
+	PosURLArgs         PosMode = "url_args"
+	PosRobocopy        PosMode = "robocopy"
+	PosGit             PosMode = "git"
+	PosFirstWrite      PosMode = "first_write"
+	PosBits            PosMode = "bits"     // bitsadmin: URL then local file; /upload sends the file
+	PosInOut           PosMode = "in_out"   // uniq / xxd [INPUT [OUTPUT]]: the second operand is written
+	PosZip             PosMode = "zip"      // zip ARCHIVE FILE...: the archive is written, the files are read
+	PosArchive         PosMode = "archive"  // 7z command ARCHIVE [MEMBER...]: role follows the command word
+	PosCompress        PosMode = "compress" // gzip/xz/bzip2: each operand is replaced by its (de)compressed file
 )
 
 // Program is one table row.
 type Program struct {
-	Names   []string
-	Flags   map[string]Flag
-	Pos     PosMode
-	Pattern bool // positional operands are patterns (find/fd globs its own operands)
-	Strict  bool // an unknown flag taints operand roles
+	Names           []string
+	Flags           map[string]Flag
+	Pos             PosMode
+	Pattern         bool     // positional operands are patterns (find/fd globs its own operands)
+	Strict          bool     // an unknown flag taints operand roles
+	PermissionFlags []string // options that make PosConditionalPerm positionals permission changes
 
 	ShellCode      bool     // the code operand is shell text we can unwrap
 	StdinCode      bool     // stdin is code even when other args name an account
@@ -885,7 +887,13 @@ func buildWindowsTable() {
 	add(Program{Names: []string{"del", "erase", "rd", "rmdir"}, Pos: PosAllDelete, Strict: true})
 	add(Program{Names: []string{"type"}, Pos: PosAllRead})
 	add(Program{Names: []string{"mklink"}, Pos: PosReverseLink})
-	add(Program{Names: []string{"icacls", "cacls", "takeown", "attrib"}, Pos: PosAllPerm, Strict: true})
+	add(Program{Names: []string{"icacls"}, Pos: PosConditionalPerm, Strict: true,
+		PermissionFlags: []string{"/grant", "/deny", "/remove", "/setowner", "/reset", "/inheritance", "/substitute", "/restore"},
+		Flags: map[string]Flag{
+			"/verify": {Role: RoleIgnore}, "/c": {Role: RoleIgnore}, "/t": {Role: RoleIgnore},
+			"/l": {Role: RoleIgnore}, "/q": {Role: RoleIgnore},
+		}})
+	add(Program{Names: []string{"cacls", "takeown", "attrib"}, Pos: PosAllPerm, Strict: true})
 	add(Program{Names: []string{"certutil"}, Pos: PosURLArgs,
 		Flags: map[string]Flag{"-urlcache": {Role: RoleNone}, "-decode": {Role: RoleNone}, "-f": {Role: RoleNone}, "-split": {Role: RoleNone}}})
 	add(Program{Names: []string{"bitsadmin"}, Pos: PosBits,
