@@ -290,8 +290,12 @@ func (c *failingOpenCodeConnector) Teardown(context.Context, connector.SetupOpts
 	return nil
 }
 
+// multiBootSidecar is a sidecar for connector setup tests. A setup registers
+// the connector's rule pack for the process; restoreGatewayProcessPosture puts
+// it back so a later test does not scan with it (rel-1-0-10:GAP-1305).
 func multiBootSidecar(t *testing.T) *Sidecar {
 	t.Helper()
+	restoreGatewayProcessPosture(t)
 	return &Sidecar{
 		cfg: &config.Config{
 			DataDir:   t.TempDir(),
