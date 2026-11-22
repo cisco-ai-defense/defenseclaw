@@ -7394,6 +7394,28 @@
       "since": "0.8.0"
     },
     {
+      "name": "DEFENSECLAW_VAULT_STORE",
+      "category": "runtime_path",
+      "purpose": "Where the CLI keeps the sandbox credential vault: auto seals it with a key in the operating system keystore (macOS Keychain, Linux Secret Service) when one is usable; file keeps it in a file readable only by you, not encrypted.",
+      "default": "unset (auto: sealed when a keystore is usable, else the owner-only file)",
+      "accepted_values": [
+        "auto",
+        "file",
+        "unset"
+      ],
+      "security_impact": "medium",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "internal/vault/keys.go",
+          "description": "Selects the vault keystore for the CLI"
+        }
+      ],
+      "since": "1.0.11",
+      "security_note": "file keeps new vault values unencrypted in a 0600 file; a vault already sealed stays sealed, and changes that need its values fail until the variable is unset."
+    },
+    {
       "name": "DEFENSECLAW_VENV",
       "category": "runtime_path",
       "purpose": "Absolute Python runtime path selected by the macOS app and passed to its upgrade and gateway actions so each action stays on the selected installation.",
