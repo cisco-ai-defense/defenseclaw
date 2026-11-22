@@ -47,27 +47,20 @@ type r3TierRoute struct {
 // r3VerdictPending are rows whose verdict does not reach their target yet
 // (DET111 ruling 2026-11-22 04:21Z: the verdict tests are ratchets; a Maybe
 // never raises live, so these rows close only when the effect becomes KNOWN).
-// Keyed by row label, with the lane that closes each. Every row, pending or
+// Keyed by gap id, with the lane that closes each. Every row, pending or
 // not, is held to at least its lane-off (1.0.10) verdict; a pending row that
 // reaches its target in every cell of a run fails the run (r3Ratchet.finish).
 var r3VerdictPending = map[string]string{
-	"GAP-0898 ~peer aws credential":       "a peer home credential read is not KNOWN yet (S4-R3 resolver; read row in Decide, S1-MECH)",
-	"GAP-0898 ~peer credential":           "a peer home credential read is not KNOWN yet (S4-R3 resolver; read row in Decide, S1-MECH)",
-	"GAP-1677 ~alias hook config":         "the alias login of the active home is a Maybe target (S4-R3)",
-	"GAP-1677 ~peer/../login hook config": "~peer/../login is a Maybe target (S4-R3)",
-	"GAP-1677 ~peer/../login keys":        "~peer/../login is a Maybe target (S4-R3)",
-	"GAP-0443 .. after a wildcard":        "a .. after a wildcard is a file-system answer, Maybe (S4-R3)",
-	"GAP-0898 other account credential":   "a credential under another home-shaped root is not KNOWN yet (S4-R3 resolver; read row in Decide, S1-MECH)",
-	"GAP-0899 mounted home credential":    "a credential under a mounted home is not KNOWN yet (S4-R3 resolver; read row in Decide, S1-MECH)",
-	"GAP-1244 ${PWD%suffix}":              "a credential read through ${PWD%...} is a Maybe target (S4-R3; tiers row via Decide, ruling 04:12Z)",
-	"GAP-1244 ${PWD/proj/}":               "a credential read through ${PWD/.../} is a Maybe target (S4-R3; tiers row via Decide, ruling 04:12Z)",
-	"GAP-1573c in-call link find root":    "find -delete below an in-call link is a Maybe target (S4-R3)",
-	"GAP-1677 ~other/../login keys":       "~other/../login is a Maybe target (S4-R3)",
-	"GAP-1678 ~login cp operand":          "cp onto ~login/.claude/settings.json is weaker than its ~/ control (S4-R3)",
-	"GAP-1156 cd in a function body":      "a cd inside a PowerShell function body is not tracked (S4-R3, S3-R1)",
-	"GAP-1553 SSH~1 short name":           "an 8.3 short name is a Maybe target until the resolver reads it (S4-R3)",
-	"GAP-1556 $env:X folder, keys":        "an unknown $env:X folder is a Maybe target (S4-R3)",
-	"GAP-1671 localhost:/// key write":    "localhost:/// is a Maybe target (S4-R3)",
+	"GAP-0898":  "peer and mounted-home credential reads need resolver passwd-home facts (S4-R3; read row in Decide, S1-MECH)",
+	"GAP-0899":  "mounted-home credential read needs a resolver passwd-home fact (S4-R3; read row in Decide, S1-MECH)",
+	"GAP-1677":  "alias/peer tilde targets remain Maybe until every row is resolver-known (S4-R3)",
+	"GAP-0443":  "wildcard followed by .. is a file-system answer and stays Maybe (S4-R3)",
+	"GAP-1573c": "find below an in-call link stays Maybe until subtree resolution is known (S4-R3)",
+	"GAP-1244":  "the PWD pattern replacement form remains Maybe (S4-R3)",
+	"GAP-1678":  "cp destination file/directory ambiguity remains Maybe (S4-R3)",
+	"GAP-1156":  "cd inside a PowerShell function body is not tracked (S4-R3, S3-R1)",
+	"GAP-1553":  "an 8.3 short name stays Maybe until the resolver reads it (S4-R3)",
+	"GAP-1556":  "an unknown PowerShell environment folder stays Maybe (S4-R3)",
 }
 
 // r3Ratchet judges R3 rows cell by cell: the lane-off floor, the target, and
@@ -87,12 +80,13 @@ func (r *r3Ratchet) judge(t *testing.T, where string, row r3TierRow, got, off, w
 	if bounded.Stricter(got, off) != got {
 		t.Errorf("%s %q: %s is below its lane-off (1.0.10) verdict %s; findings %v", where, row.command, action, off, findings)
 	}
-	_, pending := r3VerdictPending[row.gap]
+	gapID := strings.Fields(row.gap)[0]
+	_, pending := r3VerdictPending[gapID]
 	if pending {
-		r.pending[row.gap] = true
+		r.pending[gapID] = true
 	}
 	if bounded.Stricter(got, want) != got {
-		r.failed[row.gap] = true
+		r.failed[gapID] = true
 		if !pending {
 			t.Errorf("%s %q: %s, want at least %s; findings %v", where, row.command, action, want, findings)
 		}

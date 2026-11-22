@@ -421,7 +421,6 @@ func runSecretFlowShadow(ctx context.Context, request trustedActionRequest) (fin
 	opts = secretFlowHostOptions(call, opts)
 	cfg.Flavor = opts.Flavor
 	opts.CaseInsensitive = secretFlowCaseInsensitive(cfg.Flavor)
-	opts.Deadline = bound.deadline
 	res := effects.Extract(call, opts)
 	if !bound.alive() {
 		return nil

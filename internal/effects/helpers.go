@@ -43,6 +43,13 @@ func (w *walker) stripWrappers(words []Word) (inner []Word, wrappers []string, f
 		if !ok || !row.applies(words[i+1:]) {
 			break
 		}
+		if row.userOperand {
+			p := wrapperParse{w: w, row: row, name: name}
+			user := p.options(words, i+1)
+			if user < len(words) && words[user].Static && (words[user].Value == "root" || words[user].Value == "0") {
+				break // keep the root su form at its existing program-row floor
+			}
+		}
 		start := i
 		wrappers = append(wrappers, name)
 		switch row.kind {
@@ -62,6 +69,16 @@ func (w *walker) stripWrappers(words []Word) (inner []Word, wrappers []string, f
 		}
 		p := wrapperParse{w: w, row: row, name: name}
 		i = p.options(words, i)
+		if row.userOperand && i < len(words) {
+			if words[i].Static && words[i].Value != "" && !strings.HasPrefix(words[i].Value, "-") {
+				p.markForeignUser(words[i])
+				i++
+				i = p.options(words, i)
+			} else if !words[i].Static {
+				p.unaccounted = true // an unknown account cannot be graded as a named foreign user
+			}
+		}
+		foreign = foreign || p.foreignUser
 		unaccounted = unaccounted || p.unaccounted
 		var child []Word
 		child, i = p.child(words, i)
@@ -93,6 +110,7 @@ type wrapperParse struct {
 	unaccounted bool
 	login       bool
 	appendOut   bool
+	foreignUser bool
 	shellText   *Word  // the value of a shell-text option (script -c, flock -c)
 	execMode    bool   // watch -x: the child words are an argv, not shell text
 	replace     string // xargs -I STR: the child words holding STR get a name from input
@@ -228,6 +246,8 @@ func (p *wrapperParse) shorts(words []Word, i int) int {
 func (p *wrapperParse) apply(fn string, val Word, has bool) {
 	row := p.row
 	switch {
+	case has && hasName(row.userOptions, fn):
+		p.markForeignUser(val)
 	case has && hasName(row.chdir, fn):
 		if val.Static {
 			p.w.spec.chdir, p.w.spec.chdirSet = val.Value, true
@@ -268,6 +288,16 @@ func (p *wrapperParse) apply(fn string, val Word, has bool) {
 	}
 	if role, ok := row.outputs[fn]; ok && has {
 		p.outs = append(p.outs, wrapperOutput{word: val, role: role})
+	}
+}
+
+func (p *wrapperParse) markForeignUser(user Word) {
+	if !user.Static {
+		p.unaccounted = true
+		return
+	}
+	if user.Value != "root" && user.Value != "0" {
+		p.foreignUser = true
 	}
 }
 

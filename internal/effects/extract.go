@@ -7,7 +7,6 @@ package effects
 import (
 	"path"
 	"strings"
-	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/awkprog"
 	"github.com/defenseclaw/defenseclaw/internal/psparse"
@@ -259,8 +258,9 @@ type walker struct {
 	literalKind DataKind
 	// positional, when positionalSet, are the $0 $1 ... the next child body
 	// lowered by unwrapCodeScoped binds (sh -c BODY ARG0 ARG1, sh FILE ARG1).
-	positional    []Word
-	positionalSet bool
+	positional     []Word
+	positionalSet  bool
+	foreignContext bool // a nested shell body runs under a named non-root account wrapper
 }
 
 // cwdState is one cwd certainty value: the primary candidate and the others.
@@ -301,10 +301,6 @@ func (s *childSpec) set(name, val string, ok bool) {
 
 const walkWorkBudget = 20000
 
-// deadlineCheckEvery is how many units of work pass between two reads of the
-// clock for Options.Deadline.
-const deadlineCheckEvery = 32
-
 func newWalker(res *Result, o Options) *walker {
 	env := map[string]string{}
 	for k, v := range o.Env {
@@ -335,11 +331,6 @@ func (w *walker) spend() bool {
 	}
 	w.work--
 	if w.work <= 0 {
-		w.overBudget = true
-		w.res.addUnknown(ReasonLimit)
-		return false
-	}
-	if !w.o.Deadline.IsZero() && w.work%deadlineCheckEvery == 0 && time.Now().After(w.o.Deadline) {
 		w.overBudget = true
 		w.res.addUnknown(ReasonLimit)
 		return false
@@ -1243,6 +1234,7 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 
 	// 2. Strip wrappers.
 	inner, wrappers, foreign, fromInput, wrapperUA := w.stripWrappers(words)
+	foreign = foreign || w.foreignContext
 	spec := w.spec // the child-process environment this command applies (round 8 E)
 	if len(inner) == 0 {
 		if n := len(wrappers); n > 0 && wrappers[n-1] != "exec" && wrappers[n-1] != "command" && wrappers[n-1] != "builtin" {
@@ -1288,6 +1280,23 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 		return
 	}
 	program := programBasename(prog.Value, w.o.flavor())
+	// su's -c body may be lowered through the program's ShellCode row before
+	// stripWrappers can carry the account context. Use the same wrapper metadata
+	// to identify its account operand, then carry that context only while this
+	// command's nested body is being walked.
+	prevForeignContext := w.foreignContext
+	if row, ok := wrapperTable[program]; ok && row.userOperand {
+		p := wrapperParse{w: w, row: row, name: program}
+		i := p.options(inner, 1)
+		if i < len(inner) && inner[i].Static && inner[i].Value != "" && !strings.HasPrefix(inner[i].Value, "-") {
+			p.markForeignUser(inner[i])
+		} else if i < len(inner) && !inner[i].Static {
+			wrapperUA = true
+		}
+		foreign = foreign || p.foreignUser
+	}
+	w.foreignContext = prevForeignContext || foreign
+	defer func() { w.foreignContext = prevForeignContext }()
 	origin := Origin{Surface: w.res.Surface, Dialect: dialect, Command: cmdNo, Program: program, Wrappers: wrappers, Depth: depth, Span: c.Span}
 	w.literalOut = literalPrinted(program, inner[1:], dialect)
 	if dialect == DialectPOSIX {
@@ -2299,6 +2308,7 @@ func (w *walker) classifyOperands(words []Word, p Program, dialect Dialect) ([]o
 	var positionals []Word
 	i := 0
 	unknownFlag := false
+	permissionChange := p.Pos == PosConditionalPerm && hasPermissionMode(words, p.PermissionFlags)
 	inPlace := false
 	inPlaceSuffix := "" // sed -i[SUFFIX] / --in-place=SUFFIX: the backup name
 	del := false
@@ -2547,8 +2557,9 @@ func (w *walker) classifyOperands(words []Word, p Program, dialect Dialect) ([]o
 		unknownFlag, inPlaceSuffix = true, ""
 	}
 	posOps := w.positionalOperands(positionals, p, posCtx{unknownFlag: unknownFlag, inPlace: inPlace, inPlaceSuffix: inPlaceSuffix, del: del, findName: findName, findOpaque: findOpaque, hasExpr: hasExpr, destDir: destDir,
-		appendMode: p.AppendFlag != "" && hasAppendFlag(words, p.AppendFlag, dialect),
-		upload:     p.Pos == PosBits && hasWordFold(words, "/upload"), program: w.curProgram, words: words})
+		appendMode:       p.AppendFlag != "" && hasAppendFlag(words, p.AppendFlag, dialect),
+		permissionChange: permissionChange,
+		upload:           p.Pos == PosBits && hasWordFold(words, "/upload"), program: w.curProgram, words: words})
 	recursive := hasRowFlag(words, p, p.Recursive)
 	dry := hasRowFlag(words, p, p.DryRun)
 	for _, op := range posOps {
@@ -2568,6 +2579,25 @@ func (w *walker) classifyOperands(words []Word, p Program, dialect Dialect) ([]o
 		}
 	}
 	return out, inner, unknownFlag
+}
+
+func hasPermissionMode(words []Word, flags []string) bool {
+	for _, word := range words {
+		if !word.Static {
+			continue
+		}
+		value := strings.ToLower(word.Value)
+		if value == "--" {
+			break
+		}
+		for _, flag := range flags {
+			flag = strings.ToLower(flag)
+			if value == flag || strings.HasPrefix(value, flag+":") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func isInPlaceFlag(p Program, name string) bool {
@@ -2962,16 +2992,17 @@ type posCtx struct {
 	inPlace     bool
 	// inPlaceSuffix is the sed backup suffix: each file is also written at
 	// FILE+suffix (GAP-0216). Empty: no backup.
-	inPlaceSuffix string
-	del           bool
-	findName      string
-	findOpaque    bool
-	hasExpr       bool
-	destDir       string
-	appendMode    bool // tee -a: the file operands are appended to, not rewritten
-	words         []Word
-	upload        bool // bitsadmin /upload: the local file is read and sent
-	program       string
+	inPlaceSuffix    string
+	del              bool
+	findName         string
+	findOpaque       bool
+	hasExpr          bool
+	destDir          string
+	appendMode       bool // tee -a: the file operands are appended to, not rewritten
+	words            []Word
+	upload           bool // bitsadmin /upload: the local file is read and sent
+	program          string
+	permissionChange bool
 }
 
 func (w *walker) positionalOperands(ps []Word, p Program, ctx posCtx) []operand {
@@ -3081,6 +3112,14 @@ func (w *walker) positionalOperands(ps []Word, p Program, ctx posCtx) []operand 
 		role := RoleWrite
 		if ctx.appendMode {
 			role = RoleAppend
+		}
+		for _, wd := range ps {
+			out = append(out, mk(wd, role))
+		}
+	case PosConditionalPerm:
+		role := RoleRead
+		if ctx.permissionChange {
+			role = RolePerm
 		}
 		for _, wd := range ps {
 			out = append(out, mk(wd, role))
@@ -5020,6 +5059,8 @@ func posModeRole(p PosMode) Role {
 		return RoleWrite
 	case PosAllPerm:
 		return RolePerm
+	case PosConditionalPerm:
+		return RoleRead
 	}
 	return RoleNone
 }

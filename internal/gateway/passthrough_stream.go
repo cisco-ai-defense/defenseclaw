@@ -218,6 +218,11 @@ func (s *passthroughStream) run() {
 	var bedrockPending []byte // the start of a Bedrock frame whose end has not come
 	var queue [][]byte        // events read and not yet sent
 	var queueAt []time.Time   // when each event of the queue was read
+	var queueMark []int       // the text length once each event of the queue was read (GAP-1306)
+	// heldCut: the held bound behind an open token or digit run was passed;
+	// only the first heldCut events may go out, the rest holds the run
+	// (GAP-1306). -1: no cut.
+	heldCut := -1
 	queueBytes := 0
 	relN := 0      // the first relN events of the queue are not held behind an open tool call
 	heldBytes := 0 // bytes of the events held behind an open tool call
@@ -261,19 +266,23 @@ func (s *passthroughStream) run() {
 	maskedRuns := map[int][2]int{}
 
 	writeQueue := func() {
-		if relN == 0 {
+		n := relN
+		if heldCut >= 0 {
+			n, heldCut = min(n, heldCut), -1
+		}
+		if n == 0 {
 			return
 		}
-		for _, ev := range queue[:relN] {
+		for _, ev := range queue[:n] {
 			_, _ = w.Write(ev)
 			queueBytes -= len(ev)
 			released += len(ev)
 		}
-		queue, queueAt = queue[relN:], queueAt[relN:]
+		queue, queueAt, queueMark = queue[n:], queueAt[n:], queueMark[n:]
 		if len(queue) == 0 {
-			queue, queueAt = nil, nil
+			queue, queueAt, queueMark = nil, nil, nil
 		}
-		relN = 0
+		relN -= n
 		if flusher != nil {
 			flusher.Flush()
 		}
@@ -397,6 +406,7 @@ func (s *passthroughStream) run() {
 	// an open secret (rel-1-0-10:GAP-0429, stream_secret_hold.go). ok is
 	// false when a bound on it blocked.
 	secretWait := func() (wait, ok bool) {
+		heldCut = -1
 		if !tailHold {
 			return false, true
 		}
@@ -410,9 +420,13 @@ func (s *passthroughStream) run() {
 		case queueBytes > streamSecretMaxHeld && o.pem:
 			return false, secretBound(bounded.Bytes, fmt.Sprintf("over %d reply stream bytes held behind an open secret", streamSecretMaxHeld))
 		case queueBytes > streamSecretMaxHeld:
-			// Only a token or a digit run is open (GAP-1265): what is held
-			// goes out once the check has read it, with no verdict, and
-			// what comes next is held behind it again.
+			// Only a token or a digit run is open (GAP-1265): the events
+			// before the one with the run's first byte go out once the
+			// check has read them, with no verdict, and the run stays held
+			// (GAP-1306). When the rest is over the bound itself, all go.
+			if k := heldBeforeRun(queueMark, accumulated.OpenRunFrom()); k > 0 && queueBytes-bufferedBytes(queue[:k]) <= streamSecretMaxHeld {
+				heldCut = k
+			}
 			return false, true
 		}
 		return true, true
@@ -597,6 +611,7 @@ func (s *passthroughStream) run() {
 		}
 		queue = append(queue, ev.Raw)
 		queueAt = append(queueAt, lastRead)
+		queueMark = append(queueMark, accumulated.Len())
 		queueBytes += len(ev.Raw)
 		if sseCalls != nil && mode == "action" && !holdOff {
 			if sseCalls.Open() {
