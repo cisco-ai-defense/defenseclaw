@@ -63,7 +63,33 @@ type PushChange struct {
 	Same bool `json:"same,omitempty"`
 
 	oldOID, newOID, newMode string
+	// seen is the agent's state of the path at the check, as agentProbe
+	// prints it; the write re-checks it and stops when it moved (RV1 P3-3).
+	seen string
+	// badParent: a leading directory of the path is, in the agent, a
+	// symlink or not a directory. The path is never deleted (a delete
+	// would follow the link out of the project) and conflicts unless
+	// the push itself deletes that parent (RV1 P2-1, P3-2).
+	badParent bool
 }
+
+// agentProbe is the shell function both the check and the write use to
+// read one path in the agent: "parent:Q" when a leading directory Q is a
+// symlink or not a directory (checked before the path, so nothing is read
+// through it), else the blob id of the file or link, "other" for anything
+// else, "-" for nothing there.
+const agentProbe = `probe() {
+  q=$1
+  while :; do
+    case $q in */*) q=${q%/*} ;; *) break ;; esac
+    if [ -L "$W/$q" ] || { [ -e "$W/$q" ] && ! [ -d "$W/$q" ]; }; then printf 'parent:%s' "$q"; return; fi
+  done
+  f="$W/$1"
+  if [ -L "$f" ]; then printf '%s' "$(readlink -- "$f")" | g hash-object --stdin
+  elif [ -f "$f" ]; then g hash-object --path="$1" -- "$f"
+  elif [ -e "$f" ]; then printf other
+  else printf -; fi
+}`
 
 // PushPlanOptions configures PlanPush.
 type PushPlanOptions struct {
@@ -252,14 +278,8 @@ func (p *PushPlan) checkAgent(ctx context.Context) error {
 	script := remoteGitPrelude(p.rec) + "\n" + strings.Join([]string{
 		`b=$(g rev-parse -q --verify '` + baselineRef + `^{commit}' || true)`,
 		`printf 'baseline=%s\n' "$b"`,
-		`for p do`,
-		`  f="$W/$p"`,
-		`  if [ -L "$f" ]; then o=$(printf '%s' "$(readlink -- "$f")" | g hash-object --stdin)`,
-		`  elif [ -f "$f" ]; then o=$(g hash-object --path="$p" -- "$f")`,
-		`  elif [ -e "$f" ]; then o=other`,
-		`  else o=-; fi`,
-		`  printf 'o=%s\n' "$o"`,
-		`done`,
+		agentProbe,
+		`for p do printf 'o=%s\n' "$(probe "$p")"; done`,
 	}, "\n")
 	timeout := p.opts.Timeout
 	if timeout <= 0 {
@@ -288,6 +308,11 @@ func (p *PushPlan) checkAgent(ctx context.Context) error {
 		}
 		for i, o := range oids {
 			c := &p.Changes[start+i]
+			c.seen = o
+			if strings.HasPrefix(o, "parent:") {
+				c.badParent = true
+				continue // decided below, once every path is read
+			}
 			now := o
 			if o == "-" {
 				now = ""
@@ -301,6 +326,27 @@ func (p *PushPlan) checkAgent(ctx context.Context) error {
 			}
 			c.Conflict = true
 		}
+	}
+	// A path under an agent file or symlink conflicts, unless the push
+	// deletes that parent and the agent left it alone (a laptop file that
+	// became a folder): then the path is new under a parent the push
+	// removes first. Writing it would unlink the agent's file (RV1 P2-1).
+	deleted := map[string]bool{}
+	for _, c := range p.Changes {
+		if c.Status == "deleted" && !c.Conflict && !c.badParent {
+			deleted[c.Path] = true
+		}
+	}
+	for i := range p.Changes {
+		c := &p.Changes[i]
+		if !c.badParent {
+			continue
+		}
+		if q := strings.TrimPrefix(c.seen, "parent:"); deleted[q] && c.oldOID == "" {
+			c.badParent = false
+			continue
+		}
+		c.Conflict = true
 	}
 	return nil
 }
@@ -422,18 +468,27 @@ func (p *PushPlan) Send(ctx context.Context, up Uploader, mode PushMode, checkpo
 		return nil, err
 	}
 	defer os.RemoveAll(bundleDir)
-	var writes, deletes bytes.Buffer
+	var writes, deletes, expect bytes.Buffer
+	var touched []string
 	for _, c := range write {
 		if c.Status == "deleted" {
+			if c.badParent {
+				continue // nothing of ours is there; a delete would follow the link (RV1 P3-2)
+			}
 			deletes.WriteString(c.Path + "\x00")
 		} else {
 			writes.WriteString(c.Path + "\x00")
 		}
+		touched = append(touched, c.Path)
+		expect.WriteString(c.seen + " " + octalEscape(c.Path) + "\n")
 	}
 	if err := os.WriteFile(filepath.Join(bundleDir, "writes"), writes.Bytes(), 0o600); err != nil {
 		return nil, err
 	}
 	if err := os.WriteFile(filepath.Join(bundleDir, "deletes"), deletes.Bytes(), 0o600); err != nil {
+		return nil, err
+	}
+	if err := os.WriteFile(filepath.Join(bundleDir, "expect"), expect.Bytes(), 0o600); err != nil {
 		return nil, err
 	}
 	// The laptop's record learns the commit first, so a pull can verify
@@ -451,10 +506,20 @@ func (p *PushPlan) Send(ctx context.Context, up Uploader, mode PushMode, checkpo
 	script := remoteGitPrelude(p.rec) + "\n" + strings.Join([]string{
 		"export GIT_LITERAL_PATHSPECS=1",
 		"old=" + shellQuote(p.rec.Baseline) + " new=" + shellQuote(newBase) + " bd=" + shellQuote(rd),
-		`cleanup() { rm -rf -- "$bd" "$D/push.idx"; g update-ref -d ` + pushRef + ` 2>/dev/null || true; }`,
+		agentProbe,
+		// One writer at a time (a push while sync runs, two computers):
+		// the lock covers check, write and the baseline move. A lock left
+		// by a killed write is older than any write may run (RV1 P3-3).
+		`L="$D/push.lock"`,
+		`find "$D" -maxdepth 1 -name push.lock -mmin +` + strconv.Itoa(pushLockStaleMinutes) + ` -exec rm -rf -- {} + 2>/dev/null || true`,
+		`mkdir -- "$L" 2>/dev/null || { rm -rf -- "$bd"; echo "another push or sync is writing into this agent" >&2; exit 98; }`,
+		`cleanup() { rm -rf -- "$bd" "$D/push.idx" "$L"; g update-ref -d ` + pushRef + ` 2>/dev/null || true; }`,
 		`trap cleanup EXIT`,
 		`cur=$(g rev-parse -q --verify '` + baselineRef + `^{commit}' || true)`,
 		`[ "$cur" = "$old" ] || { echo "the copy in the agent moved (baseline $cur)" >&2; exit 95; }`,
+		// Every path the push touches must still be as the check saw it.
+		`n=0`,
+		`while IFS=' ' read -r e enc; do n=$((n+1)); p=$(printf "%bx" "$enc"); p=${p%x}; [ "$(probe "$p")" = "$e" ] || { printf 'changed=%s\n' "$n"; exit 97; }; done < "$bd/expect"`,
 		`g fetch -q --no-tags "$bd/push.bundle" "+` + pushRef + `:` + pushRef + `"`,
 		`[ "$(g rev-parse -q --verify '` + pushRef + `^{commit}')" = "$new" ] || { echo "the push did not arrive whole" >&2; exit 96; }`,
 		`if [ -s "$bd/deletes" ]; then GIT_INDEX_FILE="$D/push.idx" g read-tree "$old" && GIT_INDEX_FILE="$D/push.idx" g rm -q -f --ignore-unmatch --pathspec-from-file="$bd/deletes" --pathspec-file-nul; rm -f -- "$D/push.idx"; fi`,
@@ -469,6 +534,16 @@ func (p *PushPlan) Send(ctx context.Context, up Uploader, mode PushMode, checkpo
 	r, err := p.opts.Exec.Exec(ctx, p.rec.Name, ExecRequest{Argv: []string{"sh", "-c", script}, Timeout: timeout})
 	if err != nil {
 		return nil, err
+	}
+	if r.ExitCode == 97 {
+		what := "a file"
+		if n, err := strconv.Atoi(parseKV(r.Stdout)["changed"]); err == nil && n >= 1 && n <= len(touched) {
+			what = touched[n-1]
+		}
+		return nil, &AgentChangedError{Path: what}
+	}
+	if r.ExitCode == 98 {
+		return nil, ErrPushBusy
 	}
 	if r.ExitCode != 0 {
 		return nil, fmt.Errorf("workspace: write the push in the agent (exit %d): %s", r.ExitCode, stderrReason(r.Stderr))
@@ -495,6 +570,32 @@ func (p *PushPlan) Send(ctx context.Context, up Uploader, mode PushMode, checkpo
 }
 
 const pushRef = "refs/defenseclaw/push"
+
+// pushLockStaleMinutes: a write lock older than this was left by a killed
+// write (a write runs at most 5 minutes) and is taken over.
+const pushLockStaleMinutes = 15
+
+// ErrPushBusy: another push or sync was writing into the agent; nothing
+// was written.
+var ErrPushBusy = errors.New("workspace: another push or sync is writing into this agent; nothing was sent, try again")
+
+// AgentChangedError: the agent changed a path between the check and the
+// write; nothing was written.
+type AgentChangedError struct{ Path string }
+
+func (e *AgentChangedError) Error() string {
+	return "workspace: the agent changed " + e.Path + " while the push was being prepared; nothing was sent, push again"
+}
+
+// octalEscape spells every byte of s as \0ooo for the shell's printf %b,
+// so any path (spaces, newlines) travels on one line.
+func octalEscape(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		fmt.Fprintf(&b, "\\0%03o", s[i])
+	}
+	return b.String()
+}
 
 // commit builds the new baseline in the stage repository: the old
 // baseline with the pushed paths at their staged content, and bundles it.
