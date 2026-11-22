@@ -47,7 +47,7 @@ func substrateUsageOwner(p registry.Person) string {
 	if key == "" {
 		return ""
 	}
-	return modelusage.OwnerID(modelusage.CallFacts{Subject: key, SubjectKind: substrateUsageOwnerKind, IdentityVerified: true})
+	return modelusage.OwnerID(modelusage.CallFacts{OwnerKey: key, OwnerKind: substrateUsageOwnerKind, IdentityVerified: true})
 }
 
 // substrateRouteActor is the routing.admin view of a verified actor call:

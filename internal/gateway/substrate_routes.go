@@ -890,10 +890,15 @@ func (a *APIServer) substrateUsage(st *substrateState) http.HandlerFunc {
 			writeSubstrateJSONError(w, http.StatusNotImplemented, "usage_unavailable")
 			return
 		}
-		c, _ := substrateCallerFrom(r.Context())
-		owner := substrateUsageOwner(ownerOf(c.person))
-		if c.admin && r.URL.Query().Get("all") == "1" {
-			owner = ""
+		c, ok := substrateCallerFrom(r.Context())
+		owner := ""
+		if !ok || !c.admin || r.URL.Query().Get("all") != "1" {
+			// "" means every owner: a caller with no person (or a route
+			// without the person middleware) must not read it.
+			if owner = substrateUsageOwner(ownerOf(c.person)); !ok || owner == "" {
+				writeSubstrateJSONError(w, http.StatusForbidden, "usage_forbidden")
+				return
+			}
 		}
 		u, err := st.cfg.Usage.Usage(r.Context(), owner, r.URL.Query().Get("batch"))
 		if err != nil {

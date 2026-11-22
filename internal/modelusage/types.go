@@ -75,6 +75,11 @@ type CallFacts struct {
 	// model.usage log, so per-user panels show a name, not a uid; "" when no
 	// name resolved, and the id stays). It is never stored or used as a key.
 	SubjectName string
+	// OwnerKey and OwnerKind name the usage owner when it is not the
+	// subject: an Agent Substrate actor call is owned by its person's key
+	// (kind substrate_person). Only OwnerID reads them; telemetry and every
+	// other reader keep Subject, the verified subject hook events carry.
+	OwnerKey, OwnerKind string
 
 	// Correlation of a call imported from the OTLP telemetry of the agent
 	// (Engine.RecordNative): the session, turn and agent it joined on the hook

@@ -246,11 +246,14 @@ func dim(v string) string {
 // OwnerID is the stable owner key of a verified caller: kind and subject.
 // An unverified call has the empty owner, which only an admin query reads.
 func OwnerID(f CallFacts) string {
-	subject := strings.TrimSpace(f.Subject)
+	subject, kind := strings.TrimSpace(f.Subject), f.SubjectKind
+	if key := strings.TrimSpace(f.OwnerKey); key != "" {
+		subject, kind = key, f.OwnerKind
+	}
 	if !f.IdentityVerified || subject == "" {
 		return ""
 	}
-	return dim(ownerKind(f.SubjectKind, subject) + ":" + subject)
+	return dim(ownerKind(kind, subject) + ":" + subject)
 }
 
 // ownerKind is the useridentity kind of an owner: posix_uid, windows_sid, or

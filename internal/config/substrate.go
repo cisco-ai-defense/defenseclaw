@@ -1052,7 +1052,9 @@ const substrateWorkloadSubjectHint = `%q must be exact or end in ":*" or "/*" (f
 
 func httpsURL(raw string) bool {
 	u, err := url.Parse(raw)
-	return err == nil && u.Scheme == "https" && u.Host != "" && u.User == nil && u.RawQuery == "" && u.Fragment == ""
+	// '#' and '?' anywhere, empty ones too: the person key is
+	// issuer#subject, so an issuer ending in '#' would be ambiguous.
+	return err == nil && u.Scheme == "https" && u.Host != "" && u.User == nil && !strings.ContainsAny(raw, "#?")
 }
 
 // SubstrateVersionRange is a space-separated list of comparisons, every one

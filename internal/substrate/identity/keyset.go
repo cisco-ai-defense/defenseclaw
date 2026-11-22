@@ -154,7 +154,7 @@ func NewKeySet(opts KeySetOptions) (*KeySet, error) {
 // validIssuer requires https, a host, and no query, fragment or user info.
 func validIssuer(raw string) (string, error) {
 	u, err := url.Parse(raw)
-	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" ||
+	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || strings.ContainsAny(raw, "#?") ||
 		strings.HasSuffix(raw, "/") {
 		return "", fmt.Errorf("identity: issuer %q must be https://host[:port][/path] with no trailing slash, query or fragment", raw)
 	}

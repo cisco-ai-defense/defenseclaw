@@ -79,8 +79,10 @@ func usageIdentity(ctx context.Context, f *modelusage.CallFacts) {
 		f.SubjectName = s.UserName
 		if key, ok := substrateActorPersonKey(ctx); ok {
 			// The owner of an actor call is its person's key, the same
-			// one the usage API reads for that person.
-			f.Subject, f.SubjectKind = key, substrateUsageOwnerKind
+			// one the usage API reads for that person. Subject stays the
+			// verified subject, so model.usage user.id matches the hook
+			// and llm events of the same actor.
+			f.OwnerKey, f.OwnerKind = key, substrateUsageOwnerKind
 		}
 	}
 	if resolved := resolvedGuardrailProfileFrom(ctx); resolved != nil && f.IdentityVerified {

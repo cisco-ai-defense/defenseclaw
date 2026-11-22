@@ -10,7 +10,11 @@
 
 package config
 
-import "time"
+import (
+	"strconv"
+	"strings"
+	"time"
+)
 
 // SubstrateUsageConfig is substrate.usage: model spend and usage of actor
 // calls, counted per person and per actor across gateway replicas through
@@ -20,8 +24,8 @@ type SubstrateUsageConfig struct {
 	// Enabled (nil = true).
 	Enabled *bool `mapstructure:"enabled" yaml:"enabled,omitempty"`
 	// SyncInterval is how often a replica sends its spend and usage to the
-	// leader (Go duration, 1s to 30s; default 5s). On a cluster it replaces
-	// routing.admin.budget_store.sync_interval.
+	// leader (Go duration or integer seconds, 1s to 30s; default 5s). A
+	// cluster has no routing.admin.budget_store; this is its interval.
 	SyncInterval string `mapstructure:"sync_interval" yaml:"sync_interval,omitempty"`
 }
 
@@ -40,19 +44,30 @@ func (u SubstrateUsageConfig) UsageEnabled() bool {
 // EffectiveSyncInterval returns substrate.usage.sync_interval, or the
 // default when it is unset or out of bounds (Validate refuses those).
 func (u SubstrateUsageConfig) EffectiveSyncInterval() time.Duration {
-	d, err := time.ParseDuration(u.SyncInterval)
+	d, err := parseSubstrateUsageInterval(u.SyncInterval)
 	if err != nil || d < MinSubstrateUsageSyncInterval || d > MaxSubstrateUsageSyncInterval {
 		return DefaultSubstrateUsageSyncInterval
 	}
 	return d
 }
 
+// parseSubstrateUsageInterval reads sync_interval as the schema's duration
+// allows it, a Go duration or integer seconds, spaces trimmed (Python keeps
+// an integer as its text).
+func parseSubstrateUsageInterval(v string) (time.Duration, error) {
+	v = strings.TrimSpace(v)
+	if n, err := strconv.ParseUint(v, 10, 31); err == nil {
+		return time.Duration(n) * time.Second, nil
+	}
+	return time.ParseDuration(v)
+}
+
 func (u SubstrateUsageConfig) validate(bad func(key, format string, a ...any)) {
-	if u.SyncInterval == "" {
+	if strings.TrimSpace(u.SyncInterval) == "" {
 		return
 	}
-	d, err := time.ParseDuration(u.SyncInterval)
+	d, err := parseSubstrateUsageInterval(u.SyncInterval)
 	if err != nil || d < MinSubstrateUsageSyncInterval || d > MaxSubstrateUsageSyncInterval {
-		bad("usage.sync_interval", "%q must be a Go duration from 1s to 30s", u.SyncInterval)
+		bad("usage.sync_interval", "%q must be a Go duration or integer seconds from 1s to 30s", u.SyncInterval)
 	}
 }
