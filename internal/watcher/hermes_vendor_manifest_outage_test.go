@@ -201,10 +201,8 @@ func TestHermesManifestOutageInWatcherFollowsTheRule(t *testing.T) {
 				// The scanner is asked once, because a cache file exists.
 				writePluginFile(t, generated, "one")
 			}
-			f.pinVendor("web/ddgs", path)
 			f.w.hermesManifests = healthyManifestLoader
-			f.w.runRescanCycle(context.Background())
-			f.unscannedVendor(path)
+			f.scannedBaseline(path)
 			f.w.hermesManifests = failingManifestLoader
 			admitted := len(f.admitted[path])
 			writePluginFile(t, generated, "two")
@@ -395,9 +393,7 @@ func TestHermesManifestOutageDamagedSiblingInPerUserWatcher(t *testing.T) {
 	f := newHermesPluginFixture(t)
 	path := f.plugin(f.bundledRoot, "web/ddgs")
 	writePluginFile(t, filepath.Join(path, "plugin.yaml"), string(protectedManifests["plugin.yaml"]))
-	f.pinVendor("web/ddgs", path)
-	f.w.runRescanCycle(context.Background())
-	f.unscannedVendor(path)
+	f.scannedBaseline(path)
 	digest := hermesManifestDigest(protectedManifests)
 	writePluginFile(t, filepath.Join(f.w.cfg.DataDir, hermesStoreFileName),
 		`{"answers":{"sibling":{"entrypoints":"x","seen":"y"},"`+digest+`":{"entrypoints":["`+cachedProtected+`"],"seen":123}}}`)

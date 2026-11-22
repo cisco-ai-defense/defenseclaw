@@ -10,7 +10,6 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -691,21 +690,12 @@ func startImage(t *testing.T, path string, data []byte) int {
 }
 
 // startWrittenImage starts the command newCmd builds for an image the test
-// has just written. A fork in a parallel test that lands while the write
-// descriptor of the image is open keeps a copy of it until that child execs,
-// and an exec of the image fails with ETXTBSY meanwhile (golang/go#22315).
-// The image bytes are final once written, so a fresh command for the same
-// image starts the same program; any other error still fails the test.
+// has just written (testenv.StartWritten: retries ETXTBSY only).
 func startWrittenImage(t *testing.T, newCmd func() *exec.Cmd) *exec.Cmd {
 	t.Helper()
-	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(10 * time.Millisecond) {
-		process := newCmd()
-		err := process.Start()
-		if err == nil {
-			return process
-		}
-		if !errors.Is(err, syscall.ETXTBSY) || time.Now().After(deadline) {
-			t.Fatal(err)
-		}
+	process, err := testenv.StartWritten(newCmd)
+	if err != nil {
+		t.Fatal(err)
 	}
+	return process
 }

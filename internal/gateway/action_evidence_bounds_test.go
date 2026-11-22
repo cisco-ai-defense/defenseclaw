@@ -15,6 +15,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // b36ManagedHookFixture is a managed user's home that the gateway cannot
@@ -43,13 +44,30 @@ func (f b36ManagedHookFixture) strict(t *testing.T) b36ManagedHookFixture {
 
 func newB36ManagedHookFixture(t *testing.T) b36ManagedHookFixture {
 	t.Helper()
+	return newB36ManagedHookFixtureIn(t, "")
+}
+
+// newB36ManagedHookFixtureIn is newB36ManagedHookFixture in a new folder
+// under parent, or in t.TempDir() when parent is empty. t.TempDir() is not
+// under TMPDIR when GOTMPDIR is set (the gate boxes set it), so a caller
+// that needs the fixture at a given depth names the parent.
+func newB36ManagedHookFixtureIn(t *testing.T, parent string) b36ManagedHookFixture {
+	t.Helper()
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX managed hook evidence")
 	}
 	if os.Geteuid() == 0 {
 		t.Skip("root can search a mode 0 directory")
 	}
-	root := t.TempDir()
+	root := parent
+	if root == "" {
+		root = t.TempDir()
+	} else {
+		var err error
+		if root, err = os.MkdirTemp(parent, "b36"); err != nil {
+			t.Fatal(err)
+		}
+	}
 	f := b36ManagedHookFixture{homes: filepath.Join(root, "homes")}
 	f.home = filepath.Join(f.homes, "alice")
 	f.project = filepath.Join(f.home, "project")
@@ -66,9 +84,17 @@ func newB36ManagedHookFixture(t *testing.T) b36ManagedHookFixture {
 		t.Fatal(err)
 	}
 	t.Setenv("HOME", f.home)
+	clearShellStartupEnv(t)
 	t.Cleanup(func() { _ = os.Chmod(f.homes, 0o700) })
 	return f
 }
+
+// clearShellStartupEnv removes the shell startup the hook reads from the
+// environment of whoever runs the test: a dcenv or profile that exports bash
+// functions, BASH_ENV or ENV changes the hook's startup readings (GAP-0293:
+// the shared dev host exports two helpers). A test that needs a startup sets
+// it after the fixture.
+func clearShellStartupEnv(t *testing.T) { testenv.ClearShellStartupT(t) }
 
 func (f b36ManagedHookFixture) payload(t *testing.T, command string) []byte {
 	t.Helper()
@@ -89,6 +115,13 @@ func (f b36ManagedHookFixture) clientHeader(t *testing.T, payload []byte) string
 // post sends the hook request with the user's home hidden from the gateway.
 func (f b36ManagedHookFixture) post(t *testing.T, connector string, payload []byte, header string) string {
 	t.Helper()
+	body, code := f.postBody(t, connector, payload, header)
+	return hookBodyVerdict(body, code)
+}
+
+// postBody is post that returns the response body and status.
+func (f b36ManagedHookFixture) postBody(t *testing.T, connector string, payload []byte, header string) (string, int) {
+	t.Helper()
 	if err := os.Chmod(f.homes, 0); err != nil {
 		t.Fatal(err)
 	}
@@ -107,7 +140,12 @@ func (f b36ManagedHookFixture) post(t *testing.T, connector string, payload []by
 	req = req.WithContext(withManagedHookPeer(req.Context(), managedHookPeer{Home: f.home}))
 	recorder := httptest.NewRecorder()
 	api.handleAgentHook(connector).ServeHTTP(recorder, req)
-	body := recorder.Body.String()
+	return recorder.Body.String(), recorder.Code
+}
+
+// hookBodyVerdict is the action of a hook response body, or the status and
+// the start of the body when it names none.
+func hookBodyVerdict(body string, code int) string {
 	switch {
 	case strings.HasPrefix(body, `{"action":"block"`):
 		return "block"
@@ -116,7 +154,7 @@ func (f b36ManagedHookFixture) post(t *testing.T, connector string, payload []by
 	case strings.HasPrefix(body, `{"action":"allow"`):
 		return "allow"
 	}
-	return fmt.Sprintf("status %d body %.200s", recorder.Code, body)
+	return fmt.Sprintf("status %d body %.200s", code, body)
 }
 
 // TestR103B36RealBoundedHeaderKeepsTruncation is the B-36 review proof: the

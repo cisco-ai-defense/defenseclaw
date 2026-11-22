@@ -69,7 +69,7 @@ func TestPushdAndSubshellLinkToStateIsStateWrite(t *testing.T) {
 					ids += finding.RuleID + " "
 					state = state || finding.RuleID == stateRule
 				}
-				if blocked := buildVerdict(findings, "tool_call").Action == "block"; blocked != row.block || state != row.block {
+				if blocked := gap0747Blocked(findings, row.block); blocked != row.block || state != row.block {
 					t.Errorf("%s hint=%q %q: block=%v state rule=%v, want %v (%s)", connector, hint, row.command, blocked, state, row.block, ids)
 				}
 			}

@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -384,9 +385,9 @@ func TestEnterpriseWindowsEnumerateRevokesInventoryReadOfExcludedProfilesOnce(t 
 		enterpriseWindowsEnumerateProfileEnumerator = previousEnumerator
 		enterpriseWindowsEnumerateManifestWriter = previousWriter
 		enterpriseWindowsInventoryReadRevoker = previousRevoker
-		enterpriseWindowsExcludedRevoked.sids = map[string]bool{}
+		resetEnterpriseWindowsExcludedRevoked()
 	})
-	enterpriseWindowsExcludedRevoked.sids = map[string]bool{}
+	resetEnterpriseWindowsExcludedRevoked()
 	enterpriseWindowsEnumerateConfigLoader = func() (*config.Config, error) { return cfg, nil }
 	enterpriseWindowsEnumerateProfileEnumerator = func(_ context.Context, _ *config.Config, opts enterprisehooks.EnumerateOptions) (enterprisehooks.Manifest, error) {
 		opts.ReportExcluded(carol)
@@ -394,11 +395,15 @@ func TestEnterpriseWindowsEnumerateRevokesInventoryReadOfExcludedProfilesOnce(t 
 	}
 	enterpriseWindowsEnumerateManifestWriter = func(string, enterprisehooks.Manifest) (bool, error) { return false, nil }
 	revoked := 0
+	var revokedMu sync.Mutex
 	enterpriseWindowsInventoryReadRevoker = func(excluded enterprisehooks.Manifest) error {
+		// The revoke runs on a background goroutine: no t.Fatalf here.
 		if len(excluded.Targets) != 1 || excluded.Targets[0].SID != carol.SID {
-			t.Fatalf("revoked %+v, want carol", excluded.Targets)
+			t.Errorf("revoked %+v, want carol", excluded.Targets)
 		}
+		revokedMu.Lock()
 		revoked++
+		revokedMu.Unlock()
 		return nil
 	}
 	for cycle := 0; cycle < 2; cycle++ {
@@ -406,6 +411,8 @@ func TestEnterpriseWindowsEnumerateRevokesInventoryReadOfExcludedProfilesOnce(t 
 			t.Fatalf("cycle %d: %v", cycle, err)
 		}
 	}
+	revokedMu.Lock()
+	defer revokedMu.Unlock()
 	if revoked != 1 {
 		t.Fatalf("revoked %d times over two cycles, want once", revoked)
 	}

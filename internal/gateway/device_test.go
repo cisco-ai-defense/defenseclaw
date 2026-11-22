@@ -348,65 +348,70 @@ func TestReadCodexAPIKey_FromOpenAIEnv(t *testing.T) {
 	})
 }
 
-// TestPersistRefreshedToken covers the on-disk side of the auth
-// auto-repair path. When the sidecar refreshes Gateway.Token from
-// openclaw.json in-memory, consumers of the old token (hook scripts
-// reading hooks/.token, operator scripts sourcing .env) must see the
-// new value or they'll 401 on every call until the next full sidecar
-// restart.
-func TestPersistRefreshedToken(t *testing.T) {
-	t.Run("rewrites existing token lines in .env", func(t *testing.T) {
+// TestAdoptOpenClawTokenPersistence covers the on-disk side of auth repair
+// under R-TOK: the token re-read from openclaw.json is saved only as
+// OPENCLAW_GATEWAY_TOKEN in .env. The DefenseClaw gateway token line and
+// hooks/.token are never touched.
+func TestAdoptOpenClawTokenPersistence(t *testing.T) {
+	adopt := func(t *testing.T, dir, token string) *Client {
+		t.Helper()
+		c := &Client{cfg: &config.GatewayConfig{Token: "master-token"}, dataDir: dir}
+		c.adoptOpenClawToken(token)
+		if got := c.wsToken(); got != token {
+			t.Fatalf("wsToken = %q, want %q", got, token)
+		}
+		if c.cfg.Token != "master-token" {
+			t.Fatalf("cfg.Token = %q, want master-token unchanged", c.cfg.Token)
+		}
+		return c
+	}
+
+	t.Run("rewrites the OpenClaw line and keeps the master", func(t *testing.T) {
 		dir := t.TempDir()
 		envPath := filepath.Join(dir, ".env")
 		original := "DEFENSECLAW_LLM_KEY=sk-or-v1-keep-me\n" +
 			"OPENCLAW_GATEWAY_TOKEN=old-stale-token\n" +
-			"DEFENSECLAW_GATEWAY_TOKEN=\"old-stale-token\"\n"
+			"DEFENSECLAW_GATEWAY_TOKEN=\"master-token\"\n"
 		os.WriteFile(envPath, []byte(original), 0o600)
 
-		if err := persistRefreshedToken(dir, "new-fresh-token"); err != nil {
-			t.Fatalf("persistRefreshedToken: %v", err)
-		}
+		adopt(t, dir, "new-fresh-token")
 
 		got, _ := os.ReadFile(envPath)
 		content := string(got)
 		for _, want := range []string{
 			"DEFENSECLAW_LLM_KEY=sk-or-v1-keep-me\n",
 			"OPENCLAW_GATEWAY_TOKEN=new-fresh-token\n",
-			"DEFENSECLAW_GATEWAY_TOKEN=new-fresh-token\n",
+			"DEFENSECLAW_GATEWAY_TOKEN=\"master-token\"\n",
 		} {
 			if !containsLine(content, want) {
 				t.Errorf(".env missing line %q\nfile:\n%s", want, content)
 			}
 		}
-		if containsLine(content, "old-stale-token") {
+		if strings.Contains(content, "old-stale-token") {
 			t.Errorf(".env still contains old token\nfile:\n%s", content)
 		}
 	})
 
-	t.Run("appends token lines when .env missing the keys", func(t *testing.T) {
+	t.Run("appends only the OpenClaw line when it is missing", func(t *testing.T) {
 		dir := t.TempDir()
 		envPath := filepath.Join(dir, ".env")
 		os.WriteFile(envPath, []byte("DEFENSECLAW_LLM_KEY=sk-existing\n"), 0o600)
 
-		if err := persistRefreshedToken(dir, "appended-token"); err != nil {
-			t.Fatalf("persistRefreshedToken: %v", err)
-		}
+		adopt(t, dir, "appended-token")
 
 		content, _ := os.ReadFile(envPath)
 		s := string(content)
 		if !containsLine(s, "OPENCLAW_GATEWAY_TOKEN=appended-token\n") {
 			t.Errorf("missing OPENCLAW_GATEWAY_TOKEN line\nfile:\n%s", s)
 		}
-		if !containsLine(s, "DEFENSECLAW_GATEWAY_TOKEN=appended-token\n") {
-			t.Errorf("missing DEFENSECLAW_GATEWAY_TOKEN line\nfile:\n%s", s)
+		if strings.Contains(s, "DEFENSECLAW_GATEWAY_TOKEN") {
+			t.Errorf("adoption wrote DEFENSECLAW_GATEWAY_TOKEN\nfile:\n%s", s)
 		}
 	})
 
-	t.Run("creates .env when it doesn't exist", func(t *testing.T) {
+	t.Run("creates .env when it does not exist", func(t *testing.T) {
 		dir := t.TempDir()
-		if err := persistRefreshedToken(dir, "brand-new-token"); err != nil {
-			t.Fatalf("persistRefreshedToken: %v", err)
-		}
+		adopt(t, dir, "brand-new-token")
 		content, err := os.ReadFile(filepath.Join(dir, ".env"))
 		if err != nil {
 			t.Fatalf(".env not created: %v", err)
@@ -416,30 +421,19 @@ func TestPersistRefreshedToken(t *testing.T) {
 		}
 	})
 
-	t.Run("rewrites hooks/.token with new value", func(t *testing.T) {
+	t.Run("never rewrites hooks/.token", func(t *testing.T) {
 		dir := t.TempDir()
 		hookDir := filepath.Join(dir, "hooks")
 		os.MkdirAll(hookDir, 0o755)
 		tokenPath := filepath.Join(hookDir, ".token")
-		os.WriteFile(tokenPath, []byte(`DEFENSECLAW_GATEWAY_TOKEN="old-stale"`+"\n"), 0o600)
+		before := `DEFENSECLAW_GATEWAY_TOKEN="master-token"` + "\n"
+		os.WriteFile(tokenPath, []byte(before), 0o600)
 
-		if err := persistRefreshedToken(dir, "hook-refreshed"); err != nil {
-			t.Fatalf("persistRefreshedToken: %v", err)
-		}
+		adopt(t, dir, "hook-refreshed")
 
 		content, _ := os.ReadFile(tokenPath)
-		s := string(content)
-		if !containsLine(s, `DEFENSECLAW_GATEWAY_TOKEN="hook-refreshed"`+"\n") {
-			t.Errorf("hooks/.token content:\n%s", s)
-		}
-
-		testenv.AssertPrivateFile(t, tokenPath)
-	})
-
-	t.Run("silently skips hooks/.token when hooks dir missing", func(t *testing.T) {
-		dir := t.TempDir()
-		if err := persistRefreshedToken(dir, "tok"); err != nil {
-			t.Errorf("should not error when hooks dir missing: %v", err)
+		if string(content) != before {
+			t.Errorf("hooks/.token changed:\n%s", content)
 		}
 	})
 }

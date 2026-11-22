@@ -26,6 +26,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 
@@ -356,12 +357,14 @@ func matchesVendorDigest(root, skillDir, name string) bool {
 	if name != filepath.Base(relative) {
 		return false
 	}
+	// One digest per distinct tree of this skill in the Hermes releases
+	// DefenseClaw ships (vendor_digests.go).
 	want := vendorDigests[filepath.ToSlash(relative)]
-	if want == "" {
+	if len(want) == 0 {
 		return false
 	}
 	current, err := treeSHA256(skillDir)
-	return err == nil && current == want
+	return err == nil && slices.Contains(want, current)
 }
 
 func readSkillName(skillDir string) (string, bool) {

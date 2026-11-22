@@ -92,6 +92,7 @@ type HookAuditEnvelope struct {
 	// clean evaluation (no rules matched) carry neither.
 	EvaluationID string   `json:"evaluation_id,omitempty"`
 	RuleIDs      []string `json:"rule_ids,omitempty"`
+	RuleNames    []string `json:"rule_names,omitempty"`
 
 	// Multi-connector identity fields. logConnectorHookAuditEnvelope
 	// mirrors these onto the audit.Event columns of the same name

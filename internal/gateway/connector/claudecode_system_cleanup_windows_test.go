@@ -139,8 +139,27 @@ func TestWindowsClaudeSettingsUninstallEnrolledOwner(t *testing.T) {
 	}
 	afterProtection, err := windows.GetNamedSecurityInfo(settings, windows.SE_FILE_OBJECT,
 		windows.OWNER_SECURITY_INFORMATION|windows.GROUP_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
-	if err != nil || before.String() != afterProtection.String() {
+	// Owner, group and every ACE must be the same. The DACL control bits
+	// SE_DACL_AUTO_INHERITED (AI) and AUTO_INHERIT_REQ (AR) are set by Windows when
+	// the file is replaced under an inheriting folder and change no access
+	// (rel-1-0-10 GAP-1520), so they are not compared; P (protected) still is.
+	if err != nil || withoutAutoInheritFlags(before.String()) != withoutAutoInheritFlags(afterProtection.String()) {
 		t.Fatalf("owner or DACL changed: before=%s after=%v err=%v", before.String(), afterProtection, err)
 	}
 	t.Logf("removed=%d settings=%s", removed, after)
+}
+
+// withoutAutoInheritFlags drops the AI and AR control flags that follow "D:"
+// in an SDDL string and keeps everything else.
+func withoutAutoInheritFlags(sddl string) string {
+	i := strings.Index(sddl, "D:")
+	if i < 0 {
+		return sddl
+	}
+	j := i + 2
+	for j < len(sddl) && sddl[j] != 0x28 {
+		j++
+	}
+	flags := strings.NewReplacer("AI", "", "AR", "").Replace(sddl[i+2 : j])
+	return sddl[:i+2] + flags + sddl[j:]
 }

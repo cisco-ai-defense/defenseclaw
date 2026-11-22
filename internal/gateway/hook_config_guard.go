@@ -75,6 +75,12 @@ type hookRuntimePolicy struct {
 	policyTier    string
 	guardrailMode string
 	hiltEnabled   bool
+	// routeOnly is the route-only rendering of the connector in the same
+	// published config (nil: restore) for the API address of the guard's
+	// setup options. A repair renders it, not the route the guard started
+	// with: a routing change between the two would otherwise be undone by
+	// the next policy refresh or heal (rel-1-0-10:GAP-1664).
+	routeOnly func(apiAddr string) *connector.RouteOnlySetup
 }
 
 type hookRuntimePolicyResolver func(connectorName string) (hookRuntimePolicy, func(), bool)
@@ -663,6 +669,7 @@ func (g *HookConfigGuard) repairCurrent(
 	installedOutage := connector.OutageHookFailMode(opts, conn)
 	renderedOpts := opts
 	var releasePolicy func()
+	var routeFor func(apiAddr string) *connector.RouteOnlySetup
 	if policyResolver != nil {
 		policy, release, ok := policyResolver(conn.Name())
 		if !ok {
@@ -684,6 +691,7 @@ func (g *HookConfigGuard) repairCurrent(
 		}
 		opts.GuardrailMode = policy.guardrailMode
 		opts.HILTEnabled = policy.hiltEnabled
+		routeFor = policy.routeOnly
 	}
 	if connector.ConnectorExplicitlyInactive(opts.DataDir, conn.Name()) {
 		return fmt.Errorf("connector %s is explicitly inactive", conn.Name())
@@ -785,6 +793,12 @@ func (g *HookConfigGuard) repairCurrent(
 	}
 	if baseCtx == nil {
 		baseCtx = context.Background()
+	}
+	if routeFor != nil {
+		// Setup writes the route in opts: take it from the published config
+		// now, so a connector that config no longer routes is restored, not
+		// routed again (rel-1-0-10:GAP-1664).
+		opts.RouteOnly = routeFor(opts.APIAddr)
 	}
 	if present && evidenceCurrent {
 		err = g.refreshPolicyLocked(baseCtx, conn, opts, releasePolicy)
@@ -890,6 +904,7 @@ func (g *HookConfigGuard) adoptRenderedPolicy(opts connector.SetupOpts) {
 	g.opts.PolicyTier = opts.PolicyTier
 	g.opts.GuardrailMode = opts.GuardrailMode
 	g.opts.HILTEnabled = opts.HILTEnabled
+	g.opts.RouteOnly = opts.RouteOnly
 	g.mu.Unlock()
 }
 

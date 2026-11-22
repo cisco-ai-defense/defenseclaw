@@ -31,12 +31,8 @@ func TestPatchDeleteListsTheEntryItRemoves(t *testing.T) {
 		t.Fatal(err)
 	}
 	directoryLink, finalLink := filepath.Join(project, "homelink"), filepath.Join(project, "finalnet")
-	if err := os.Symlink(home, directoryLink); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(secret, finalLink); err != nil {
-		t.Fatal(err)
-	}
+	testSymlink(t, home, directoryLink)
+	testSymlink(t, secret, finalLink)
 	t.Setenv("HOME", home)
 	patch := func(directive, file string) map[string]string {
 		body := ""
@@ -79,12 +75,8 @@ func TestShellPatchDeleteListsTheEntryItRemoves(t *testing.T) {
 		t.Fatal(err)
 	}
 	directoryLink, finalLink := filepath.Join(project, "homelink"), filepath.Join(project, "finalnet")
-	if err := os.Symlink(home, directoryLink); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(secret, finalLink); err != nil {
-		t.Fatal(err)
-	}
+	testSymlink(t, home, directoryLink)
+	testSymlink(t, secret, finalLink)
 	t.Setenv("HOME", home)
 	shellPatch := func(directive, file string) map[string]string {
 		body := ""

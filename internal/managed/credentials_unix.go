@@ -26,6 +26,15 @@ import (
 const systemdCredentialsRoot = "/run/credentials/"
 
 func resolvePlatformServiceCredential(name, secretsDir string) ([]byte, CredentialSource, error) {
+	if dir := clusterCredentialDirectory(); dir != "" {
+		data, err := readClusterCredential(dir, name)
+		if err == nil {
+			return data, CredentialFromCluster, nil
+		}
+		if !errors.Is(err, ErrNoServiceCredential) {
+			return nil, "", err
+		}
+	}
 	if dir := strings.TrimSpace(os.Getenv("CREDENTIALS_DIRECTORY")); dir != "" {
 		data, err := readSystemdCredential(dir, name)
 		if err == nil {
@@ -50,6 +59,42 @@ func resolvePlatformServiceCredential(name, secretsDir string) ([]byte, Credenti
 		return nil, "", err
 	}
 	return data, CredentialFromFile, nil
+}
+
+// readClusterCredential reads key name of the mounted credentials Secret
+// in dir. Kubernetes writes a Secret volume as <dir>/<name> ->
+// ..data/<name> -> ..<timestamp>/<name>; the link chain must stay inside
+// dir and end at a regular file that no group or other account can write.
+func readClusterCredential(dir, name string) ([]byte, error) {
+	root, err := filepath.EvalSymlinks(filepath.Clean(dir))
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, ErrNoServiceCredential
+		}
+		return nil, fmt.Errorf("inspect cluster credentials %s: %w", dir, err)
+	}
+	resolved, err := filepath.EvalSymlinks(filepath.Join(root, name))
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, ErrNoServiceCredential
+		}
+		return nil, fmt.Errorf("inspect cluster credential %s: %w", name, err)
+	}
+	if rel, err := filepath.Rel(root, resolved); err != nil || rel == ".." || strings.HasPrefix(rel, "../") {
+		return nil, credentialVerdict(fmt.Errorf("cluster credential %s points outside %s", name, dir))
+	}
+	info, err := os.Stat(resolved)
+	if err != nil {
+		return nil, fmt.Errorf("inspect cluster credential %s: %w", name, err)
+	}
+	if !info.Mode().IsRegular() || info.Mode().Perm()&0o022 != 0 {
+		return nil, credentialVerdict(fmt.Errorf("cluster credential %s is not a regular file only its owner can write", name))
+	}
+	data, err := readBoundedCredential(resolved)
+	if err != nil {
+		return nil, credentialVerdict(fmt.Errorf("credential %s: %w", name, err))
+	}
+	return data, nil
 }
 
 // readSystemdCredential reads a LoadCredential= file. systemd creates the

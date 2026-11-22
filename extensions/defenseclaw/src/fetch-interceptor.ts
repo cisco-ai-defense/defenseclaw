@@ -420,10 +420,9 @@ export const TARGET_URL_HEADER = "X-DC-Target-URL";
 export const AI_AUTH_HEADER = "X-AI-Auth";
 
 /**
- * Header carrying the defenseclaw proxy authentication token (the openclaw
- * gateway token from OPENCLAW_GATEWAY_TOKEN / gateway.token in config.yaml).
- * The proxy validates this for non-loopback connections; loopback connections
- * are trusted by network topology alone.
+ * Header carrying the plugin credential to the guardrail proxy: the openclaw
+ * connector-scoped token from <DEFENSECLAW_HOME>/hooks/.hook-openclaw.token
+ * (sidecar-config.ts), sent only after the listener proof.
  */
 export const DC_AUTH_HEADER = "X-DC-Auth";
 

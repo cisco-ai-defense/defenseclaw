@@ -55,7 +55,7 @@ func TestLoopVariableInWriterTargetIsAnyNameWhateverRunsBefore(t *testing.T) {
 							continue
 						}
 						got := postSelfProtectionPackCell(t, home, project, connector, pack, managed, false, row.command)
-						block := strings.HasPrefix(got, `{"action":"block"`)
+						block := gap0747HookBlocked(got, pack)
 						if row.protected && (!block || !strings.Contains(got, "tamper.detector_state_write")) {
 							t.Errorf("%s managed=%t pack=%q: %s = %.200s, want protected block", connector, managed, pack, row.command, got)
 						}

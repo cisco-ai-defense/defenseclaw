@@ -261,6 +261,9 @@ func DynamicRedirectTargetReduction(input Input, facts Facts) (view, twin Facts,
 		len(twinCapture.spans) != 0 || twinCapture.unsafe {
 		return Facts{}, Facts{}, false
 	}
+	// The lists of the twin run as sequences: read its paths in the folders
+	// of the action (Facts.withWorkFoldersOf, rel-1-0-10:GAP-0869).
+	twin = twin.withWorkFoldersOf(original, input.MovedWindowsShellCWD)
 	seen := make(map[string]bool, len(placeholders))
 	commands := cloneCommands(twin.Commands)
 	for index := range commands {

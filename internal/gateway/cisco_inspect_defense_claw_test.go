@@ -225,6 +225,43 @@ func TestDefenseClawInspect_UnauthorizedRefreshAndRetry(t *testing.T) {
 	}
 }
 
+// TestDefenseClawInspect_ReportsTheRequestOutcome: availability follows the
+// inspection request, not the token. A token with a failing AI Defense
+// reports the failure; a completed inspection reports success.
+func TestDefenseClawInspect_ReportsTheRequestOutcome(t *testing.T) {
+	var fail atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if fail.Load() {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"is_safe":true,"action":"Allow"}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	c := NewCiscoDefenseClawInspectClient(&config.CiscoAIDefenseConfig{Endpoint: srv.URL, TimeoutMs: 3000},
+		newFakeCloudProvider("t1"))
+	var outcomes []error
+	c.bindAvailabilityObserver(func(err error) { outcomes = append(outcomes, err) })
+
+	fail.Store(true)
+	if verdict := c.Inspect(t.Context(), []ChatMessage{{Role: "user", Content: "hi"}}); verdict != nil {
+		t.Fatalf("expected no verdict from a failing AI Defense, got %#v", verdict)
+	}
+	if len(outcomes) != 1 || outcomes[0] == nil {
+		t.Fatalf("outcomes after a 500 = %v, want one failure", outcomes)
+	}
+
+	fail.Store(false)
+	if verdict := c.Inspect(t.Context(), []ChatMessage{{Role: "user", Content: "hi"}}); verdict == nil {
+		t.Fatal("expected a verdict")
+	}
+	if len(outcomes) != 2 || outcomes[1] != nil {
+		t.Fatalf("outcomes after a verdict = %v, want a success last", outcomes)
+	}
+}
+
 // TestDefenseClawInspect_UnauthorizedTwiceReturnsNil: if the retry also
 // 401s, the client must give up and return a nil verdict.
 func TestDefenseClawInspect_UnauthorizedTwiceReturnsNil(t *testing.T) {

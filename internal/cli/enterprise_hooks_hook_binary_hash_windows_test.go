@@ -38,6 +38,9 @@ func windowsHookBinaryLinkCount(t *testing.T, path string) uint32 {
 }
 
 func TestKeepWindowsManagedFileCopyBreaksHardLinkedTarget(t *testing.T) {
+	// A standard user cannot open the second name of the linked file after the
+	// restore (rel-1-0-10 GAP-1516); the elevated native part and CI run it.
+	requireAdministratorTestToken(t, "the second name of a restored hard link cannot be opened by a standard user")
 	for _, tc := range []struct {
 		name    string
 		tamper  bool

@@ -62,7 +62,7 @@ func (c *hydratingTestConnector) Teardown(_ context.Context, _ connector.SetupOp
 	return nil
 }
 func (c *hydratingTestConnector) VerifyClean(_ connector.SetupOpts) error { return nil }
-func (c *hydratingTestConnector) SetCredentials(_, _ string)              {}
+func (c *hydratingTestConnector) SetCredentials(_ string)                 {}
 func (c *hydratingTestConnector) Route(_ *http.Request, _ []byte) (*connector.ConnectorSignals, error) {
 	return &connector.ConnectorSignals{
 		RawUpstream: c.upstream,

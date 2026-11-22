@@ -14,6 +14,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/testenv"
@@ -137,7 +138,7 @@ func TestConnectorReconcileEveryNamesEachConnectorNotOnItsCurrentHook(t *testing
 	if err == nil {
 		t.Fatalf("reconcile --every-connector exited 0 with connectors not on their hooks:\n%s", stdout)
 	}
-	if code := commandExitCode(err); code != gatewayStartAdmissionRefusedExitCode {
+	if code := cliusage.ExitCode(err); code != gatewayStartAdmissionRefusedExitCode {
 		t.Fatalf("exit code = %d, want %d (%v)", code, gatewayStartAdmissionRefusedExitCode, err)
 	}
 	message := err.Error()

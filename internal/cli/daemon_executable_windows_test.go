@@ -35,6 +35,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/daemon"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 )
 
 const executableExitMarker = "__DEFENSECLAW_LASTEXITCODE__="
@@ -43,10 +44,10 @@ func TestNativeWindowsExecutableForeignCollisionAndRecovery(t *testing.T) {
 	// The built gateway is a separate process that reads this computer's
 	// own machine marker (isolateTestHost cannot reach it): on a managed
 	// computer it refuses every per-user start by design (GAP-2572).
-	if where, managed := managedHostStandaloneMarker(); managed {
+	if where, managed := hookcli.ManagedHostStandaloneMarker(); managed {
 		t.Skip("skipped on a managed computer: the per-user gateway this test builds refuses to start here (" + where + ")")
 	}
-	if where, managed := managedHostStandaloneRecord(); managed {
+	if where, managed := hookcli.ManagedHostStandaloneRecord(); managed {
 		t.Skip("skipped on a managed computer: the per-user gateway this test builds refuses to start here (" + where + ")")
 	}
 	binary := buildGatewayExecutable(t)

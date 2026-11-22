@@ -37,6 +37,7 @@ var permittedCalls = map[string]struct{}{
 	overloads.EndsWith:         {},
 	overloads.Contains:         {},
 	overloads.Matches:          {},
+	protectedFunction:          {},
 }
 
 func validateSurface(ast *cel.Ast) bool {

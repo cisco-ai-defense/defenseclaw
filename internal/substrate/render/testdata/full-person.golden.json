@@ -1,0 +1,229 @@
+{
+  "policy": {
+    "rules": [
+      {
+        "http": {
+          "effects": {
+            "replaceHeaders": [
+              {
+                "actorJwt": {
+                  "audiences": [
+                    "defenseclaw"
+                  ],
+                  "expirationSeconds": "300"
+                },
+                "header": "x-defenseclaw-actor",
+                "prefix": "Bearer "
+              }
+            ]
+          },
+          "hostnames": [
+            "defenseclaw-actor.defenseclaw-system.svc"
+          ],
+          "ports": {
+            "numbers": [
+              80
+            ]
+          }
+        }
+      },
+      {
+        "https": {
+          "effects": {
+            "replaceHeaders": [
+              {
+                "credentialUri": "ate-secret://k8s.io/default/dc-secrets/github/token",
+                "header": "Authorization",
+                "prefix": "Bearer "
+              }
+            ]
+          },
+          "hostnames": [
+            "api.github.com"
+          ],
+          "ports": {
+            "numbers": [
+              443
+            ]
+          }
+        }
+      },
+      {
+        "https": {
+          "effects": {
+            "replaceHeaders": [
+              {
+                "credentialUri": "ate-secret://k8s.io/default/dc-secrets/gh2/token",
+                "header": "authorization"
+              }
+            ]
+          },
+          "hostnames": [
+            "github.com"
+          ],
+          "ports": {
+            "numbers": [
+              443
+            ]
+          }
+        }
+      },
+      {
+        "https": {
+          "effects": {
+            "replaceHeaders": [
+              {
+                "credentialUri": "ate-secret://k8s.io/default/dc-people/p-8def678da0d076709ba7-npm/token",
+                "header": "Authorization",
+                "prefix": "Bearer "
+              }
+            ]
+          },
+          "hostnames": [
+            "registry.npmjs.org"
+          ],
+          "ports": {
+            "numbers": [
+              443
+            ]
+          }
+        }
+      },
+      {
+        "https": {
+          "hostnames": [
+            "*.githubusercontent.com",
+            "crates.io",
+            "docs.example.com",
+            "files.pythonhosted.org",
+            "ghcr.io",
+            "index.crates.io",
+            "mcp.internal.example.com",
+            "proxy.golang.org",
+            "pypi.org",
+            "registry.example.com",
+            "registry.yarnpkg.com",
+            "static.crates.io",
+            "status.example.net",
+            "sum.golang.org"
+          ],
+          "ports": {
+            "numbers": [
+              443
+            ]
+          }
+        }
+      },
+      {
+        "tlsPassthrough": {
+          "hostnames": [
+            "pins.example.org"
+          ],
+          "ports": {
+            "numbers": [
+              443
+            ]
+          }
+        }
+      }
+    ]
+  },
+  "dropped": [
+    {
+      "host": "api.openai.com",
+      "source": "allow",
+      "reason": "provider_host",
+      "detail": "openai.com"
+    },
+    {
+      "host": "*",
+      "source": "allow",
+      "reason": "defenseclaw_internal",
+      "detail": "defenseclaw-actor.defenseclaw-system.svc"
+    },
+    {
+      "host": "10.0.0.1",
+      "source": "allow",
+      "reason": "invalid_pattern"
+    },
+    {
+      "host": "*.us-east-1.amazonaws.com",
+      "source": "allow",
+      "reason": "provider_host",
+      "detail": "^bedrock(-runtime|-agent|-agent-runtime)?(-fips)?\\.[a-z0-9-]+\\.amazonaws\\.com$"
+    },
+    {
+      "host": "defenseclaw-admin.defenseclaw-system.svc",
+      "source": "allow",
+      "reason": "defenseclaw_internal",
+      "detail": "defenseclaw-system.svc"
+    },
+    {
+      "host": "*.defenseclaw-system.svc",
+      "source": "allow",
+      "reason": "defenseclaw_internal",
+      "detail": "defenseclaw-actor.defenseclaw-system.svc"
+    },
+    {
+      "host": "bad_host",
+      "source": "allow",
+      "reason": "invalid_pattern"
+    },
+    {
+      "secret": "bad-uri",
+      "source": "secret",
+      "reason": "secret_invalid",
+      "detail": "credential_uri must be ate-secret://\u003cprovider-class\u003e/\u003cprovider-name\u003e/\u003cprovider-specific-tail\u003e"
+    },
+    {
+      "host": "github.com",
+      "secret": "github-push",
+      "source": "secret",
+      "reason": "secret_header_conflict"
+    },
+    {
+      "secret": "no-profiles",
+      "source": "secret",
+      "reason": "secret_not_for_profile"
+    },
+    {
+      "host": "pins.example.org",
+      "secret": "pinned",
+      "source": "secret",
+      "reason": "secret_on_passthrough"
+    },
+    {
+      "secret": "sales-only",
+      "source": "secret",
+      "reason": "secret_not_for_profile"
+    },
+    {
+      "host": "api.openai.com",
+      "secret": "to-provider",
+      "source": "secret",
+      "reason": "provider_host",
+      "detail": "openai.com"
+    },
+    {
+      "host": "llm.internal.example.com",
+      "secret": "to-provider",
+      "source": "secret",
+      "reason": "provider_host",
+      "detail": "llm.internal.example.com"
+    }
+  ],
+  "bindings": [
+    {
+      "secret": "dup-header",
+      "host": "github.com"
+    },
+    {
+      "secret": "github-push",
+      "host": "api.github.com"
+    },
+    {
+      "secret": "mine-npm",
+      "host": "registry.npmjs.org"
+    }
+  ]
+}

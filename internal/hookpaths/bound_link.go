@@ -4,6 +4,7 @@
 package hookpaths
 
 import (
+	"iter"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -43,13 +44,22 @@ func BoundCallReachesProtectedLink(command, cwd, home string) bool {
 	protected := newProtectedFiles(home)
 	ssh := filepath.Join(home, ".ssh")
 	seen := map[string]bool{}
-	words := strings.FieldsFunc(text, boundLinkWordSeparator)
+	// The words are read one at a time, not split into a list first: the
+	// list of a 1 MiB command was most of what this check allocated
+	// (rel-1-0-10:GAP-0299).
+	words := strings.FieldsFuncSeq(text, boundLinkWordSeparator)
 	if strings.Contains(text, "$") {
 		// A word the call builds from values is looked up as the text
 		// shows it built too (GAP-0677 review 6).
-		words = append(words, strings.FieldsFunc(boundKnownValuesText(text, cwd, home), boundLinkWordSeparator)...)
+		words = seqConcat(words, func(yield func(string) bool) {
+			for word := range strings.FieldsFuncSeq(boundKnownValuesText(text, cwd, home), boundLinkWordSeparator) {
+				if !yield(word) {
+					return
+				}
+			}
+		})
 	}
-	for _, word := range words {
+	for word := range words {
 		if seen[word] || len(word) > MaxWriteTargetPathBytes ||
 			strings.ContainsAny(word, "*?[]$\x00") || strings.HasPrefix(word, "-") && !strings.Contains(word, "/") {
 			continue
@@ -82,6 +92,22 @@ func BoundCallReachesProtectedLink(command, cwd, home string) bool {
 		}
 	}
 	return false
+}
+
+// seqConcat yields the values of first, then those of second.
+func seqConcat(first, second iter.Seq[string]) iter.Seq[string] {
+	return func(yield func(string) bool) {
+		for value := range first {
+			if !yield(value) {
+				return
+			}
+		}
+		for value := range second {
+			if !yield(value) {
+				return
+			}
+		}
+	}
 }
 
 func boundLinkWordSeparator(r rune) bool {

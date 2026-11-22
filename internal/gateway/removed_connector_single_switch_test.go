@@ -72,7 +72,7 @@ func TestSingleConnectorSwitchDropsAStaleNoLockNameGap2617(t *testing.T) {
 			transaction := multiConnectorSetupTransaction{hookLockState: lock}
 			err = s.teardownPreviousConnectorTransaction(
 				context.Background(), registry, requested,
-				"synthetic gateway token", "127.0.0.1:0", "127.0.0.1:0", "synthetic master key",
+				"synthetic gateway token", "127.0.0.1:0", "127.0.0.1:0",
 				&transaction,
 			)
 			if tc.wantRefuse {

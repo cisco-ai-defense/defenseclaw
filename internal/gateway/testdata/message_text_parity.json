@@ -1,0 +1,519 @@
+{
+ "comment": "Cases for extractMessageArgs in internal/gateway/message_text_test.go (the gateway reads a message call's params; the OpenClaw plugin sends them and cuts nothing it does not have to). rel-1-0-10:GAP-0177, GAP-0290..0292, GAP-0436. gen builds a large input: strings N short strings in blocks; table N rows of two cells; nodes N empty objects in one array followed by one string; nodes_empty N empty objects; depth N nested objects around one string; depth_empty N nested objects around an empty array; pad N: body of N a's and text of N z's; multibyte N two-byte characters in text; plainbuf N repeats of five-character words under buffer; routing_strings N recipients in to beside text x; payload_buffer N / payload_dataurl N base64 characters of binary bytes under buffer / behind a data URL under media (message hi beside each); payload_then_text N base64 characters plus ' tail words' in buffer; dataurl_message N groups behind a data URL in message; nested_buffer N groups under attachments[0].Buffer; payload_text N / payload_text_dataurl N / payload_hidden: attachments that decode to text. Routing keys are dotted paths; a repeated path gets #2, #3. text_len counts UTF-8 bytes. Blank means ASCII white space only. Synthetic values only.",
+ "cases": [
+  {
+   "name": "content",
+   "params": {
+    "content": "one"
+   },
+   "text": "one"
+  },
+  {
+   "name": "body",
+   "params": {
+    "body": "two"
+   },
+   "text": "two"
+  },
+  {
+   "name": "text",
+   "params": {
+    "text": "three"
+   },
+   "text": "three"
+  },
+  {
+   "name": "message",
+   "params": {
+    "message": "four"
+   },
+   "text": "four"
+  },
+  {
+   "name": "caption and media",
+   "params": {
+    "media": "x",
+    "caption": "five"
+   },
+   "text": "five\nx"
+  },
+  {
+   "name": "known keys first then the rest sorted",
+   "params": {
+    "zz": "last",
+    "aa": "mid",
+    "content": "first"
+   },
+   "text": "first\nmid\nlast"
+  },
+  {
+   "name": "nested blocks and attachments",
+   "params": {
+    "blocks": [
+     {
+      "type": "text",
+      "text": "b1"
+     },
+     {
+      "type": "text",
+      "text": "b2"
+     }
+    ],
+    "attachments": [
+     {
+      "title": "a1"
+     }
+    ]
+   },
+   "text": "b1\nb2\na1",
+   "routing": {
+    "blocks.type": "text",
+    "blocks.type#2": "text"
+   }
+  },
+  {
+   "name": "routing keys alone are no text",
+   "params": {
+    "action": "send",
+    "channel": "sms",
+    "to": "+15551230000",
+    "accountId": "acct"
+   },
+   "text": "",
+   "routing": {
+    "action": "send",
+    "channel": "sms",
+    "to": "+15551230000",
+    "accountId": "acct"
+   }
+  },
+  {
+   "name": "routing keys inside blocks",
+   "params": {
+    "blocks": [
+     {
+      "type": "text",
+      "id": "blk",
+      "text": "hello"
+     }
+    ]
+   },
+   "text": "hello",
+   "routing": {
+    "blocks.type": "text",
+    "blocks.id": "blk"
+   }
+  },
+  {
+   "name": "a target object holds text and its own routing",
+   "params": {
+    "to": "+1",
+    "target": {
+     "id": "u1",
+     "text": "hello"
+    }
+   },
+   "text": "hello",
+   "routing": {
+    "to": "+1",
+    "target.id": "u1"
+   }
+  },
+  {
+   "name": "a routing array of strings",
+   "params": {
+    "targets": [
+     "a",
+     "b"
+    ],
+    "text": "hi"
+   },
+   "text": "hi",
+   "routing": {
+    "targets": "a",
+    "targets#2": "b"
+   }
+  },
+  {
+   "name": "a routing array of objects is read as text",
+   "params": {
+    "recipients": [
+     {
+      "name": "n1"
+     }
+    ]
+   },
+   "text": "n1"
+  },
+  {
+   "name": "a mixed routing array is read as text",
+   "params": {
+    "recipients": [
+     "a",
+     {
+      "x": "y"
+     }
+    ]
+   },
+   "text": "a\ny"
+  },
+  {
+   "name": "blank strings are not text",
+   "params": {
+    "text": "   ",
+    "body": ""
+   },
+   "text": ""
+  },
+  {
+   "name": "empty object",
+   "params": {},
+   "text": ""
+  },
+  {
+   "name": "a bare string",
+   "params": "plain",
+   "text": "plain"
+  },
+  {
+   "name": "shallow nesting",
+   "params": {
+    "a": {
+     "b": {
+      "c": "seen"
+     }
+    }
+   },
+   "text": "seen"
+  },
+  {
+   "name": "a string below the depth limit",
+   "gen": {
+    "depth": 12
+   },
+   "text_len": 0,
+   "over_cap": true
+  },
+  {
+   "name": "an empty container below the depth limit holds no text, so no cap hit",
+   "gen": {
+    "depth_empty": 12
+   },
+   "text_len": 0
+  },
+  {
+   "name": "text of 280 KB is read whole",
+   "gen": {
+    "pad": 140000
+   },
+   "text_len": 280001,
+   "head": "aaa",
+   "tail": "zzz"
+  },
+  {
+   "name": "text under the size limit",
+   "gen": {
+    "pad": 100000
+   },
+   "text_len": 200001
+  },
+  {
+   "name": "non-string values: numbers are text, flags and nulls are not",
+   "params": {
+    "text": 42,
+    "b": true,
+    "n": null,
+    "a": [
+     1.5
+    ]
+   },
+   "text": "42\n1.5"
+  },
+  {
+   "name": "a number beside a message",
+   "params": {
+    "message": "hi",
+    "n": 1234567,
+    "price": 19.5,
+    "flag": true
+   },
+   "text": "hi\n1234567\n19.5"
+  },
+  {
+   "name": "a number under a routing key is a routing value, not text",
+   "params": {
+    "to": 15551230000,
+    "text": "x",
+    "timeoutMs": 5000
+   },
+   "text": "x",
+   "routing": {
+    "to": "15551230000",
+    "timeoutMs": "5000"
+   }
+  },
+  {
+   "name": "priority then sorted",
+   "params": {
+    "zz": "last",
+    "aa": "mid",
+    "content": "first",
+    "caption": "cap"
+   },
+   "text": "first\ncap\nmid\nlast"
+  },
+  {
+   "name": "nested arrays in blocks",
+   "params": {
+    "to": "+1",
+    "blocks": [
+     {
+      "type": "text",
+      "id": "b",
+      "text": "b1"
+     },
+     [
+      "x",
+      [
+       "y"
+      ]
+     ]
+    ]
+   },
+   "text": "b1\nx\ny",
+   "routing": {
+    "to": "+1",
+    "blocks.type": "text",
+    "blocks.id": "b"
+   }
+  },
+  {
+   "name": "routing keys in any case",
+   "params": {
+    "To": "a",
+    "CHANNEL": "b",
+    "accountId": "c"
+   },
+   "text": "",
+   "routing": {
+    "To": "a",
+    "CHANNEL": "b",
+    "accountId": "c"
+   }
+  },
+  {
+   "name": "mixed-case duplicates are both read",
+   "params": {
+    "Text": "x",
+    "text": "y"
+   },
+   "text": "x\ny"
+  },
+  {
+   "name": "non-ASCII keys sort by code point",
+   "params": {
+    "～": "fullwidth",
+    "😀": "emoji"
+   },
+   "text": "fullwidth\nemoji"
+  },
+  {
+   "name": "a dotted capital I is not an ASCII id key",
+   "params": {
+    "İd": "dotted"
+   },
+   "text": "dotted"
+  },
+  {
+   "name": "OpenClaw send fields rank after the generic ones",
+   "params": {
+    "voiceText": "v",
+    "quoteText": "q",
+    "presentation": {
+     "title": "t",
+     "blocks": [
+      {
+       "text": "p"
+      }
+     ]
+    },
+    "message": "m"
+   },
+   "text": "m\nv\nq\nt\np",
+   "routing": {}
+  },
+  {
+   "name": "a text past the node limit is dropped and flagged",
+   "gen": {
+    "nodes": 5000
+   },
+   "text_len": 0,
+   "over_cap": true
+  },
+  {
+   "name": "multibyte text under the byte limit is whole",
+   "gen": {
+    "multibyte": 100000
+   },
+   "text_len": 200000,
+   "valid_utf8": true
+  },
+  {
+   "name": "multibyte text over 256 KiB is read whole, no character cut",
+   "gen": {
+    "multibyte": 140000
+   },
+   "text_len": 280000,
+   "valid_utf8": true
+  },
+  {
+   "name": "600 short strings are under the node limit",
+   "gen": {
+    "strings": 600
+   },
+   "text_len": 1199
+  },
+  {
+   "name": "a 700-row table is text, not a cap hit",
+   "gen": {
+    "table": 700
+   },
+   "text_len": 2799
+  },
+  {
+   "name": "a 300 KB binary base64 buffer is an attachment, not text",
+   "gen": {
+    "payload_buffer": 300000
+   },
+   "text": "hi"
+  },
+  {
+   "name": "a base64 image data URL in a media field is an attachment",
+   "gen": {
+    "payload_dataurl": 300000
+   },
+   "text": "hi"
+  },
+  {
+   "name": "a plain-text buffer of 300 KB is text, read whole",
+   "gen": {
+    "plainbuf": 60000
+   },
+   "text_len": 300000
+  },
+  {
+   "name": "a short base64 buffer is text",
+   "params": {
+    "buffer": "QUJD"
+   },
+   "text": "QUJD"
+  },
+  {
+   "name": "a data URL that is not base64 is text",
+   "params": {
+    "media": "data:text/plain,hello"
+   },
+   "text": "data:text/plain,hello"
+  },
+  {
+   "name": "routing strings spend the node budget",
+   "gen": {
+    "routing_strings": 5000
+   },
+   "text": "x",
+   "over_cap": true
+  },
+  {
+   "name": "a buffer of 4096 base64 characters then plain words is text",
+   "gen": {
+    "payload_then_text": 4096
+   },
+   "text_len": 4107,
+   "tail": " tail words"
+  },
+  {
+   "name": "a data URL in the message field is text, never skipped",
+   "gen": {
+    "dataurl_message": 400
+   },
+   "text_len": 1622,
+   "head": "data:image/png"
+  },
+  {
+   "name": "a Buffer key nested in attachments is an attachment, any case",
+   "gen": {
+    "nested_buffer": 400
+   },
+   "text": ""
+  },
+  {
+   "name": "a buffer that decodes to text is read as that text",
+   "gen": {
+    "payload_text": 300
+   },
+   "text_len": 1203,
+   "head": "hi\nabc ",
+   "tail": "abc "
+  },
+  {
+   "name": "a text data URL decodes to its text",
+   "gen": {
+    "payload_text_dataurl": 300
+   },
+   "text_len": 1203,
+   "head": "hi\nabc ",
+   "tail": "abc "
+  },
+  {
+   "name": "5000 empty objects hold no text, so no cap hit",
+   "gen": {
+    "nodes_empty": 5000
+   },
+   "text": ""
+  },
+  {
+   "name": "text 100 levels deep is past the depth limit",
+   "gen": {
+    "depth": 100
+   },
+   "text_len": 0,
+   "over_cap": true
+  },
+  {
+   "name": "a no-break space is text, not blank",
+   "params": {
+    "text": " "
+   },
+   "text": " "
+  },
+  {
+   "name": "a byte order mark is text, not blank",
+   "params": {
+    "text": "﻿"
+   },
+   "text": "﻿"
+  },
+  {
+   "name": "a next-line character is text, not blank",
+   "params": {
+    "text": ""
+   },
+   "text": ""
+  },
+  {
+   "name": "ASCII white space only is blank",
+   "params": {
+    "text": " \t\r\n\f\u000b",
+    "body": "x"
+   },
+   "text": "x"
+  },
+  {
+   "name": "text behind a binary header in a buffer is read",
+   "gen": {
+    "payload_hidden": 1
+   },
+   "text": "hi\nkey words here and more text"
+  }
+ ]
+}

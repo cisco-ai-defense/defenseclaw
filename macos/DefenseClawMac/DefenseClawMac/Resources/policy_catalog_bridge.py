@@ -84,9 +84,24 @@ def snapshot(config, sandbox_json="", sandbox_error=""):
                     detail += "\nThese levels govern tool calls, prompts, completions and LLM traffic in this scope."
                     out.append(action(p.level_intent(kind, level, connector), "Guardrail " + kind + " level", detail, bool(change.weakened())))
             for level in p.HILT_LEVELS:
-                out.append(action(p.hilt_intent(level, connector), "Human approval",
-                                  f"Set {scope} human approval from {row.hilt} to {level}. This changes when tool calls wait for a human.",
-                                  p.hilt_weakens(row.hilt, level)))
+                # Reuse the selected runtime's actual consequence preview: an
+                # unscoped hilt command can change every connector override.
+                from defenseclaw.tui.policy_panel import hilt_change_modal
+                try:
+                    from defenseclaw.enforce import asset_lists as _asset_lists
+                    secure = bool(_asset_lists.is_secure_client(config))
+                except Exception:  # noqa: BLE001 - older runtimes have no secure-client notion here
+                    secure = False
+                try:
+                    preview = hilt_change_modal(model, row, level, secure_client=secure)
+                except TypeError:  # runtime before 1.0.7: no secure_client keyword
+                    preview = hilt_change_modal(model, row, level)
+                targets = (model.approval_targets(row) if hasattr(model, "approval_targets") else
+                           ((row,) if connector else tuple(model.postures)))
+                weakened = any(p.hilt_weakens(str(target.hilt or "off"), level) for target in targets)
+                detail = "\n".join(part for part in
+                                   (preview.summary, *preview.details, preview.consequence) if part)
+                out.append(action(p.hilt_intent(level, connector), "Human approval", detail, weakened))
             return out + pack_actions(model.connector_of(row))
         if model.view == "optin":
             pack = model.selected_protection()

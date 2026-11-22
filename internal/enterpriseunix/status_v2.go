@@ -153,6 +153,9 @@ func (l *lifecycle) describeConnectors(record *Deployment) {
 	}
 	r.AddHookProcessFailureWarnings(block)
 	l.describeCowork(cfg, raw, block, record, targets)
+	if l.statusV2() && r.Profile == managed.ProfileStandalone {
+		r.Routing = enterprisestatus.BuildRouting(enterprisestatus.RoutingInputs{Config: cfg, Connectors: block, Health: l.gatewayHealthBody})
+	}
 	if l.statusV2() {
 		r.Connectors = block
 		if hidden > 0 {

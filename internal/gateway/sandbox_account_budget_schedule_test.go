@@ -11,7 +11,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
 )
@@ -63,8 +62,10 @@ func runBudgetSchedule(t *testing.T, s budgetSchedule) budgetOutcome {
 	bindings := sandboxauth.NewLimiter(cfg)
 	account := &hookCallerLimiter{now: clock}
 
-	first, retry := connector.SandboxHookAttemptBudgets()
-	answer, receiptOpen := max(first, retry), sandboxHookReceiptWindow
+	// Every request stays open as long as its answer is still of use to the
+	// sandbox hook: to the end of the answer window, which sizes the
+	// in-flight bounds (sandboxInFlightWindow, S8 lead review P2-1).
+	answer, receiptOpen := sandboxInFlightWindow-100*time.Millisecond, sandboxInFlightWindow-100*time.Millisecond
 
 	const identity = "1000"
 	admissionKey := func(receipt bool) string {
@@ -225,9 +226,10 @@ func TestSandboxAccountBudgetSchedule(t *testing.T) {
 // its sustained rate are admitted, the refusals name the rate (not the open
 // request bounds), and none comes before the burst is spent.
 func TestSandboxAccountBudgetRefusesOnlyTheExcess(t *testing.T) {
-	// Four sandboxes at 24 a second (96 together) for 10 s: the account
-	// bucket holds a burst of 100 and refills 40 a second.
-	out := runBudgetSchedule(t, budgetSchedule{4, 24, 10 * time.Second})
+	// Six sandboxes at 24 a second (144 together, each under its binding
+	// rate) for 10 s: the account bucket holds a burst of 200 and refills
+	// 100 a second.
+	out := runBudgetSchedule(t, budgetSchedule{6, 24, 10 * time.Second})
 	accountRate := "account " + managedHookReasonRateLimited
 	admitted := out.calls - out.refused[accountRate]
 	if other := out.refusedTotal() - out.refused[accountRate]; other != 0 {

@@ -120,6 +120,9 @@ func TestShellHeredocApplyPatchProjectsNativePathFacts(t *testing.T) {
 }
 
 func TestAnalyzeApplyPatchRejectsUncertainEnvelopes(t *testing.T) {
+	// The drive-relative and share-root rows are unplaced names of a Windows
+	// host (patchTargetsAreWindowsNames).
+	windowsPatchNames(t)
 	valid := "*** Begin Patch\n*** Add File: safe.go\n+safe\n*** End Patch"
 	many := strings.Builder{}
 	many.WriteString("*** Begin Patch\n")
@@ -151,7 +154,9 @@ func TestAnalyzeApplyPatchRejectsUncertainEnvelopes(t *testing.T) {
 		{name: "explicit path conflict", fields: map[string]any{"patch": valid, "path": "other.go"}, status: StatusAmbiguous},
 		{name: "home path", fields: map[string]any{"patch": "*** Begin Patch\n*** Delete File: ~/.zshrc\n*** End Patch"}, status: StatusInvalid},
 		{name: "drive-relative path", fields: map[string]any{"patch": "*** Begin Patch\n*** Delete File: C:win.ini\n*** End Patch"}, status: StatusInvalid},
-		{name: "UNC absolute path", fields: map[string]any{"patch": "*** Begin Patch\n*** Delete File: \\\\server\\share\\file.txt\n*** End Patch"}, status: StatusInvalid},
+		// A file of a share is a write fact (TestPatchHeaderOfAShareIsAWriteFact);
+		// a share without a file names nothing the rules read.
+		{name: "UNC share root", fields: map[string]any{"patch": "*** Begin Patch\n*** Delete File: \\\\server\\share\n*** End Patch"}, status: StatusInvalid},
 		{name: "nul path", fields: map[string]any{"patch": "*** Begin Patch\n*** Add File: a\x00.go\n+x\n*** End Patch"}, status: StatusInvalid},
 		{name: "path limit", fields: map[string]any{"patch": "*** Begin Patch\n*** Add File: " + strings.Repeat("a", maxScalarBytes+1) + "\n+x\n*** End Patch"}, status: StatusLimitExceeded},
 		{name: "directive limit", fields: map[string]any{"patch": many.String()}, status: StatusLimitExceeded},

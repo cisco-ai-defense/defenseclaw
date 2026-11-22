@@ -105,7 +105,10 @@ if [[ -n "${SELF_TMP}" && -n "$(find "${SELF_TMP}" -mindepth 1 -maxdepth 1 \
     SELF_TMP=""
 fi
 [[ -z "${SELF_TMP}" ]] || trap 'rm -rf "${SELF_TMP}"' EXIT
-readonly OPENCLAW_VERSION="2026.3.24"
+readonly OPENCLAW_VERSION="2026.11.3"
+# OpenClaw 2026.9 and later need Node.js 24.16 (or 26.1); 2026.8.35, the first
+# release with the native plugin hooks DefenseClaw uses, still runs on Node 22.
+readonly OPENCLAW_NODE22_VERSION="2026.8.35"
 # The PATH the user's shell has. Installing uv adds BIN_DIR to this process's
 # PATH, so the PATH hint at the end checks this copy instead.
 readonly CALLER_PATH="${PATH}"
@@ -864,8 +867,8 @@ installed_version() {
 # gateway swap only when the process is the exact entry installed for that
 # agent. Unproven candidates are audited and do not block the upgrade. The
 # audit line goes to the install log only: the console shows the installer's
-# own steps, and a process that exits between the listing and the lookup (the
-# listing's own ps, say) is not something the user can act on (GAP-0103).
+# own steps (GAP-0103). A process that exits between the listing and the
+# lookup is not audited at all: it cannot hold a plugin (GAP-0916).
 # Without a log (a unit test, a sourced call) it falls back to stderr.
 agent_identity_audit() {
     local line
@@ -1173,10 +1176,13 @@ loaded_plugin_agents() {
     [[ -n "${installed}" ]] || return 0
     while IFS=$'\t' read -r pid program; do
         [[ "${pid}" =~ ^[0-9]+$ ]] || continue
-        if [[ -z "${program}" ]]; then
-            kill -0 "${pid}" 2>/dev/null || agent_identity_audit "${pid}" 'process vanished during lookup'
-            continue
-        fi
+        # No program path: the process exited after the listing (the listing's
+        # own ps and the subshells of this scan are in it), or it is alive but
+        # its path is unreadable to this account (a privileged or unrelated
+        # process). Neither can be one of the agents this scan looks for, which
+        # all run as this account with a readable path, so there is nothing to
+        # audit (GAP-0916).
+        [[ -n "${program}" ]] || continue
         argv=()
         word="${program% (deleted)}"
         case "${word##*/}" in
@@ -1516,6 +1522,16 @@ if [[ "${ROLLBACK}" == true ]]; then
     elif [[ -z "${current}" ]] || ! version_lt "${current}" "${back_to}"; then
         convert_hooks_for_rollback
     fi
+    # rel-1-0-10 GAP-0602: a release before 1.0.10 has no route-only
+    # listener; an agent left pointing at it gets 401 on every call.
+    if [[ -n "${back_to}" ]] && version_lt "${back_to}" 1.0.10 && route_only_left; then
+        # This install stays; its gateway start writes back any hook entries
+        # the conversion above changed.
+        if [[ "${was_running}" == true || -n "${LEGACY_TORN_DOWN:-}" ]]; then
+            start_gateway || true
+        fi
+        die "The Claude Code or Codex settings still point at the DefenseClaw route-only listener, which ${back_to} does not have; run 'defenseclaw routing disable --connector claudecode' (and codex), or remove the DefenseClaw base URL and route header from those settings by hand, then roll back again. DefenseClaw ${current:-} stays installed"
+    fi
     swapped=0
     swap_with_previous || swapped=$?
     if [[ "${swapped}" -ne 0 ]]; then
@@ -1746,17 +1762,51 @@ if [[ -n "${PREV_VERSION}" && -n "$(gateway_pid || true)" ]] \
 fi
 
 info "Building the Python environment (a first install can take several minutes)"
-make_venv() {
+# install_venv_packages VENV [UV_ARGS...] installs the locked packages and the
+# DefenseClaw wheel into VENV. The requirements file is the complete hashed
+# lock, so nothing resolves. --compile-bytecode: uv skips compiling by
+# default, which moves that cost to the first start of the CLI and the scanners.
+install_venv_packages() {
     local venv="$1"
+    shift
+    uv pip install --quiet --compile-bytecode "$@" --python "${venv}/bin/python" --require-hashes --no-deps -r "${STAGING}/${REQUIREMENTS}" \
+        && uv pip install --quiet --compile-bytecode "$@" --python "${venv}/bin/python" --no-deps "${STAGING}/${WHEEL}"
+}
+make_venv() {
+    local venv="$1" site damaged rc name
+    local -a again=()
     rm -rf "${venv}"
     uv venv "${venv}" --quiet --python 3.12 2>/dev/null \
         || uv venv "${venv}" --quiet --python '>=3.11,<3.14' \
         || return 1
-    # The requirements file is the complete hashed lock, so nothing resolves.
-    # --compile-bytecode: uv skips compiling by default, which moves that cost
-    # to the first start of the CLI and the scanners.
-    uv pip install --quiet --compile-bytecode --python "${venv}/bin/python" --require-hashes --no-deps -r "${STAGING}/${REQUIREMENTS}" \
-        && uv pip install --quiet --compile-bytecode --python "${venv}/bin/python" --no-deps "${STAGING}/${WHEEL}"
+    install_venv_packages "${venv}" || return 1
+    # uv hard-links each package from its long-lived cache (Linux), so a write
+    # into an installed file in any environment built from that cache changes
+    # the cached copy, and uv puts it into every later environment without
+    # reading it again: an upgrade got the files of an older LiteLLM wheel
+    # and the MCP scanner no longer imported (rel-1-0-10 GAP-0006). Compare
+    # every package with its wheel RECORD; a damaged one leaves the cache and
+    # is downloaded again.
+    site=$("${venv}/bin/python" -I -c 'import sysconfig; print(sysconfig.get_path("purelib"))') || return 1
+    rc=0
+    damaged=$("${venv}/bin/python" -I "${site}/defenseclaw/venv_integrity.py" "${site}") || rc=$?
+    [[ ${rc} -eq 0 ]] && return 0
+    if [[ ${rc} -ne 3 || -z "${damaged}" ]]; then
+        err "Could not check the Python packages in ${venv} against their wheels"
+        return 1
+    fi
+    warn "The installed files of $(printf '%s\n' "${damaged}" | tr '\n' ' ')in ${venv} differ from their wheels (the uv cache they come from was changed); downloading them again"
+    while IFS= read -r name; do
+        [[ -n "${name}" ]] || continue
+        again+=(--reinstall-package "${name}")
+        uv cache clean "${name}" >/dev/null 2>&1 || true
+    done <<<"${damaged}"
+    install_venv_packages "${venv}" "${again[@]}" || return 1
+    rc=0
+    damaged=$("${venv}/bin/python" -I "${site}/defenseclaw/venv_integrity.py" "${site}") || rc=$?
+    [[ ${rc} -eq 0 ]] && return 0
+    err "The Python packages $(printf '%s\n' "${damaged}" | tr '\n' ' ')in ${venv} still differ from their wheels after a fresh download; delete the uv cache ${UV_CACHE_DIR:-${DEFENSECLAW_HOME}/.uv/cache} and run the installer again"
+    return 1
 }
 if ! make_venv "${STAGING}/venv"; then
     # Leave nothing of a failed build behind, and name what stays (GAP-1438).
@@ -3328,6 +3378,15 @@ undo_rollback() {
 # GAP-1284) outlived that release's uninstall. This install's gateway rewrites
 # those entries in the shape the older release removes; rolling forward runs
 # setup, which writes the current shape again.
+# route_only_left: true when Claude Code or Codex settings still hold a
+# route-only render (the gateway route URL or route header).
+route_only_left() {
+    local claude="${CLAUDE_CONFIG_DIR:-${HOME}/.claude}/settings.json" codex="${CODEX_HOME:-${HOME}/.codex}/config.toml"
+    { [[ -f "${claude}" ]] && grep -qE '/r/claudecode|X-DC-Route-Auth' "${claude}"; } && return 0
+    { [[ -f "${codex}" ]] && grep -q 'defenseclaw_route' "${codex}"; } && return 0
+    return 1
+}
+
 convert_hooks_for_rollback() {
     local gateway="${BIN_DIR}/defenseclaw-gateway" help
     [[ -x "${gateway}" ]] || return 0
@@ -3338,7 +3397,7 @@ convert_hooks_for_rollback() {
     help="$("${gateway}" connector prepare-rollback --help 2>/dev/null || true)"
     [[ "${help}" != *--to-version* || -z "${back_to:-}" ]] || to=(--to-version "${back_to}")
     "${gateway}" connector prepare-rollback --data-dir "${DEFENSECLAW_HOME}" ${to[@]+"${to[@]}"} 2>>"${LOG}" \
-        || warn "Could not rewrite the agent hook entries of DefenseClaw ${current:-?} in the form ${back_to} reads (see ${LOG}); after the rollback, 'defenseclaw uninstall' may leave those DefenseClaw entries in the agent settings, such as ~/.claude/settings.json; remove them by hand"
+        || warn "Could not rewrite the agent hook entries, or put back the route-only model settings, of DefenseClaw ${current:-?} for ${back_to} (see ${LOG}); a route-only agent then gets 401 until you remove the DefenseClaw base URL and route header from its settings by hand; after the rollback, 'defenseclaw uninstall' may leave those DefenseClaw entries in the agent settings, such as ~/.claude/settings.json; remove them by hand"
 }
 
 # drop_newer_hook_helper LEFT_DATA: remove the live hooks/_hardening.sh when
@@ -3478,7 +3537,16 @@ PY
 # when its own gateway restarts.
 restart_openclaw() {
     openclaw_connector_active && has openclaw || return 0
-    local out
+    local out found want
+    # An upgrade keeps the installed OpenClaw. Before 2026.8.35 it runs the
+    # guardrail proxy only (the 1.0.9 behaviour); say how to get the native
+    # plugin hooks (rel-1-0-10 GAP-0079). No automatic update: a new OpenClaw
+    # can need its own `openclaw doctor --fix` and provider consents.
+    found="$(openclaw --version 2>/dev/null | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
+    want="$(declare -F openclaw_version_for_node >/dev/null && openclaw_version_for_node || true)"
+    if [[ -n "${found}" && -n "${want}" ]] && version_lt "${found}" "${OPENCLAW_NODE22_VERSION}"; then
+        info "OpenClaw ${found} keeps the guardrail proxy only. For the native plugin hooks, update OpenClaw (npm install -g openclaw@${want}, then openclaw doctor --fix if it asks) and run: defenseclaw setup openclaw"
+    fi
     if ! out="$(openclaw gateway restart 2>&1)"; then
         warn "Restart the OpenClaw gateway to load the updated plugin: openclaw gateway restart"
         return 0
@@ -3581,29 +3649,53 @@ first_install_extras() {
 }
 
 ensure_openclaw() {
-    local found
+    local found want
+    want="$(declare -F openclaw_version_for_node >/dev/null && openclaw_version_for_node || true)"
+    if [[ -z "${want}" ]]; then
+        warn "OpenClaw needs Node.js 22.22.3 or later (24.16 or later for OpenClaw ${OPENCLAW_VERSION}); found $(node -v 2>/dev/null || echo none). Update Node.js, then run this installer again"
+        has openclaw || OPENCLAW_MISSING=true
+        return
+    fi
     # GAP-1523: a system Node (/usr, /opt/node22) has a root-owned global
     # prefix; a standard user installs into ~/.local, whose bin is BIN_DIR.
     # GAP-1798: every hint names the command this run would use.
     local cmd=(npm install -g)
     if has npm && ! npm_global_prefix_writable; then cmd+=(--prefix "${HOME}/.local"); fi
-    cmd+=("openclaw@${OPENCLAW_VERSION}")
+    cmd+=("openclaw@${want}")
     if has openclaw; then
         found="$(openclaw --version 2>/dev/null | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
-        if [[ -n "${found}" ]] && ! version_lt "${found}" "${OPENCLAW_VERSION}"; then
+        if [[ -n "${found}" ]] && ! version_lt "${found}" "${want}"; then
             ok "OpenClaw ${found} found"; return
         fi
-        ask_yes_no "Update OpenClaw ${found:-?} to ${OPENCLAW_VERSION}?" || { warn "Keeping OpenClaw ${found:-?}"; return; }
+        ask_yes_no "Update OpenClaw ${found:-?} to ${want}?" || { warn "Keeping OpenClaw ${found:-?}"; return; }
     else
-        ask_yes_no "Install OpenClaw ${OPENCLAW_VERSION}?" || { warn "Skipping OpenClaw; install it later with: ${cmd[*]}"; OPENCLAW_MISSING=true; return; }
+        ask_yes_no "Install OpenClaw ${want}?" || { warn "Skipping OpenClaw; install it later with: ${cmd[*]}"; OPENCLAW_MISSING=true; return; }
     fi
     has npm || { warn "npm is not installed; install Node.js with npm, then run: ${cmd[*]}"; OPENCLAW_MISSING=true; return; }
-    info "Installing OpenClaw ${OPENCLAW_VERSION} with npm (this can take a minute)"
+    info "Installing OpenClaw ${want} with npm (this can take a minute)"
     if "${cmd[@]}" --no-fund --no-audit --no-update-notifier --loglevel=error; then
         OPENCLAW_INSTALLED=true
     else
         warn "Could not install OpenClaw; run: ${cmd[*]}"
         PATH="${BIN_DIR}:${PATH}" has openclaw || OPENCLAW_MISSING=true
+    fi
+}
+
+# openclaw_version_for_node prints the OpenClaw release this Node.js runs:
+# OPENCLAW_VERSION on Node 24.16+ (or 26.1+), OPENCLAW_NODE22_VERSION on Node
+# 22.22.3+, 24.15 or 25.9+, nothing on an older Node. Without node it prints
+# OPENCLAW_VERSION (the npm check names the missing Node.js).
+openclaw_version_for_node() {
+    local v major minor patch
+    if ! has node; then echo "${OPENCLAW_VERSION}"; return; fi
+    v="$(node -v 2>/dev/null | sed -e "s/^v//")"
+    IFS=. read -r major minor patch <<<"${v}"
+    major="${major//[!0-9]/}"; minor="${minor//[!0-9]/}"; patch="${patch//[!0-9]/}"
+    major="${major:-0}"; minor="${minor:-0}"; patch="${patch:-0}"
+    if (( major > 26 || (major == 26 && minor >= 1) || (major == 24 && minor >= 16) )); then
+        echo "${OPENCLAW_VERSION}"
+    elif (( major == 26 || major == 25 && minor >= 9 || major == 24 && minor >= 15 || major == 22 && (minor > 22 || (minor == 22 && patch >= 3)) )); then
+        echo "${OPENCLAW_NODE22_VERSION}"
     fi
 }
 

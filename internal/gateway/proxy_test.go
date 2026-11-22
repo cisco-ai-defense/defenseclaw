@@ -33,7 +33,6 @@ type mockProvider struct {
 	lastRawBody  []byte
 	lastReq      *ChatRequest
 	response     *ChatResponse
-	rawResponse  []byte
 	streamChunks []StreamChunk
 	streamUsage  *ChatUsage
 	err          error
@@ -69,9 +68,6 @@ func (m *mockProvider) ChatCompletion(_ context.Context, req *ChatRequest) (*Cha
 				FinishReason: strPtr("stop"),
 			}},
 		}
-	}
-	if m.rawResponse != nil {
-		resp.RawResponse = m.rawResponse
 	}
 	return resp, nil
 }
@@ -165,6 +161,15 @@ func (m *mockInspector) setVerdict(direction string, v *ScanVerdict) {
 
 func newTestProxy(t *testing.T, prov LLMProvider, insp ContentInspector, mode string) *GuardrailProxy {
 	t.Helper()
+	// A test proxy has no gateway generation of its own, so guardrail
+	// profiles another test left in liveGuardrailProfiles (NewAPIServer
+	// publishes its set there) are not its profiles: with a default profile
+	// in action mode they turned this proxy's observe mode into action, but
+	// only when such a test ran earlier in the same binary (Windows shard
+	// gw14, push 12). It starts with none; the previous set comes back after.
+	previousProfiles := liveGuardrailProfiles.Load()
+	liveGuardrailProfiles.Store(nil)
+	t.Cleanup(func() { liveGuardrailProfiles.Store(previousProfiles) })
 	cfg := &config.GuardrailConfig{
 		Enabled:   true,
 		Model:     "openai/gpt-4",
@@ -334,66 +339,6 @@ func TestProxyFieldPassThrough(t *testing.T) {
 		}
 		if *resp.Choices[0].FinishReason != "tool_calls" {
 			t.Errorf("finish_reason = %q, want %q", *resp.Choices[0].FinishReason, "tool_calls")
-		}
-	})
-
-	t.Run("response_system_fingerprint_preserved", func(t *testing.T) {
-		rawResp := []byte(`{
-			"id": "chatcmpl-fp",
-			"object": "chat.completion",
-			"created": 1700000000,
-			"model": "gpt-4",
-			"system_fingerprint": "fp_abc123",
-			"service_tier": "default",
-			"choices": [{"index":0,"message":{"role":"assistant","content":"Hi"},"finish_reason":"stop"}],
-			"usage": {"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}
-		}`)
-
-		prov := &mockProvider{
-			response: &ChatResponse{
-				ID:     "chatcmpl-fp",
-				Object: "chat.completion",
-				Model:  "gpt-4",
-				Choices: []ChatChoice{{
-					Index:        0,
-					Message:      &ChatMessage{Role: "assistant", Content: "Hi"},
-					FinishReason: strPtr("stop"),
-				}},
-				Usage: &ChatUsage{PromptTokens: 5, CompletionTokens: 2, TotalTokens: 7},
-			},
-			rawResponse: rawResp,
-		}
-		insp := newMockInspector()
-		proxy := newTestProxy(t, prov, insp, "action")
-
-		reqBody := mustJSON(t, map[string]interface{}{
-			"model":    "gpt-4",
-			"messages": []map[string]interface{}{{"role": "user", "content": "Hi"}},
-		})
-
-		rec := postChat(t, proxy, reqBody)
-		if rec.Code != http.StatusOK {
-			t.Fatalf("status = %d; body: %s", rec.Code, rec.Body.String())
-		}
-
-		var raw map[string]json.RawMessage
-		if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
-			t.Fatalf("decode response: %v", err)
-		}
-
-		if _, ok := raw["system_fingerprint"]; !ok {
-			t.Error("system_fingerprint missing from response")
-		}
-		if _, ok := raw["service_tier"]; !ok {
-			t.Error("service_tier missing from response")
-		}
-
-		var fp string
-		if err := json.Unmarshal(raw["system_fingerprint"], &fp); err != nil {
-			t.Fatalf("unmarshal system_fingerprint: %v", err)
-		}
-		if fp != "fp_abc123" {
-			t.Errorf("system_fingerprint = %q, want %q", fp, "fp_abc123")
 		}
 	})
 
@@ -807,7 +752,7 @@ func TestProxyPreCallInspection(t *testing.T) {
 		}
 	})
 
-	t.Run("ordinary_user_keeps_last_user_only", func(t *testing.T) {
+	t.Run("ordinary_user_request_inspects_system_and_last_user", func(t *testing.T) {
 		prov := &mockProvider{}
 		insp := newMockInspector()
 		proxy := newTestProxy(t, prov, insp, "action")
@@ -824,8 +769,10 @@ func TestProxyPreCallInspection(t *testing.T) {
 		if rec.Code != http.StatusOK {
 			t.Fatalf("status = %d", rec.Code)
 		}
-		if insp.lastContent != "What is 2+2?" {
-			t.Errorf("ordinary user request inspected %q, want last user text only", insp.lastContent)
+		// The system text is prompt-side text too (substrate-1 GAP-0196): the
+		// guardrail sees it with the last user turn.
+		if !strings.Contains(insp.lastContent, "What is 2+2?") || !strings.Contains(insp.lastContent, "You are a helpful assistant.") {
+			t.Errorf("ordinary user request inspected %q, want the system text and the last user text", insp.lastContent)
 		}
 		if prov.getLastReq() == nil {
 			t.Error("allowed ordinary user request should be forwarded")
@@ -1231,7 +1178,7 @@ func TestProxyEdgeCases(t *testing.T) {
 		prov := &mockProvider{}
 		insp := newMockInspector()
 		proxy := newTestProxy(t, prov, insp, "action")
-		proxy.masterKey = "secret-key-123"
+		proxy.gatewayToken = "secret-key-123"
 		// This sub-test specifically exercises the auth path, so
 		// undo the test-only bypass that newTestProxy installs.
 		proxy.skipAuthForTest = false
@@ -1265,7 +1212,7 @@ func TestProxyEdgeCases(t *testing.T) {
 		// Correct auth header
 		req3 := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(reqBody))
 		req3.Header.Set("Content-Type", "application/json")
-		req3.Header.Set("Authorization", "Bearer secret-key-123")
+		req3.Header.Set("X-DC-Auth", "Bearer secret-key-123")
 		rec3 := httptest.NewRecorder()
 		proxy.handleChatCompletion(rec3, req3)
 
@@ -1392,41 +1339,6 @@ func TestPatchRawBody(t *testing.T) {
 		json.Unmarshal(m["seed"], &seed)
 		if seed != 42 {
 			t.Errorf("seed = %v, want 42", seed)
-		}
-	})
-}
-
-func TestPatchRawResponseModel(t *testing.T) {
-	t.Run("patches_model_preserves_rest", func(t *testing.T) {
-		raw := json.RawMessage(`{
-			"id": "chatcmpl-1",
-			"object": "chat.completion",
-			"model": "gpt-4-0613",
-			"system_fingerprint": "fp_abc",
-			"service_tier": "default",
-			"choices": [{"index":0,"message":{"role":"assistant","content":"Hi"},"finish_reason":"stop"}]
-		}`)
-
-		patched, err := patchRawResponseModel(raw, "my-alias")
-		if err != nil {
-			t.Fatalf("patchRawResponseModel error: %v", err)
-		}
-
-		var m map[string]json.RawMessage
-		if err := json.Unmarshal(patched, &m); err != nil {
-			t.Fatalf("unmarshal: %v", err)
-		}
-
-		var model string
-		json.Unmarshal(m["model"], &model)
-		if model != "my-alias" {
-			t.Errorf("model = %q, want %q", model, "my-alias")
-		}
-
-		for _, field := range []string{"system_fingerprint", "service_tier", "choices"} {
-			if _, ok := m[field]; !ok {
-				t.Errorf("field %q missing after model patch", field)
-			}
 		}
 	})
 }
@@ -3251,7 +3163,7 @@ func TestEnqueueBlockNotification_PushesToQueue(t *testing.T) {
 		Reason:   "regex matched 'password=hunter2'",
 		Findings: []string{"secret in prompt"},
 	}
-	proxy.enqueueBlockNotification(verdict, "prompt", "gpt-4")
+	proxy.enqueueBlockNotification(context.Background(), verdict, "prompt", "gpt-4")
 
 	sysMsg := q.FormatSystemMessage()
 	if sysMsg == "" {
@@ -3276,11 +3188,11 @@ func TestEnqueueBlockNotification_PushesToQueue(t *testing.T) {
 func TestEnqueueBlockNotification_NilGuards(t *testing.T) {
 	t.Run("nil notify queue", func(t *testing.T) {
 		proxy := &GuardrailProxy{notify: nil}
-		proxy.enqueueBlockNotification(&ScanVerdict{Action: "block", Severity: "HIGH", Reason: "x"}, "prompt", "m")
+		proxy.enqueueBlockNotification(context.Background(), &ScanVerdict{Action: "block", Severity: "HIGH", Reason: "x"}, "prompt", "m")
 	})
 	t.Run("nil verdict", func(t *testing.T) {
 		proxy := &GuardrailProxy{notify: NewNotificationQueue()}
-		proxy.enqueueBlockNotification(nil, "prompt", "m")
+		proxy.enqueueBlockNotification(context.Background(), nil, "prompt", "m")
 		if proxy.notify.FormatSystemMessage() != "" {
 			t.Error("expected queue to remain empty on nil verdict")
 		}
@@ -3891,13 +3803,12 @@ func TestSwitchConnectorLocked_TearsDownOldAndSetsUpNew(t *testing.T) {
 
 	// Start with codex as the active connector.
 	codexConn, _ := reg.Get("codex")
-	codexConn.SetCredentials("tok", "mk")
+	codexConn.SetCredentials("tok")
 
 	p := &GuardrailProxy{
 		connector:    codexConn,
 		registry:     reg,
 		gatewayToken: "tok",
-		masterKey:    "mk",
 		setupOpts: connector.SetupOpts{
 			DataDir:   dir,
 			ProxyAddr: "127.0.0.1:4000",
@@ -3970,13 +3881,12 @@ func TestSwitchConnectorLocked(t *testing.T) {
 	dir := t.TempDir()
 	reg := connector.NewDefaultRegistry()
 	codexConn, _ := reg.Get("codex")
-	codexConn.SetCredentials("tok", "mk")
+	codexConn.SetCredentials("tok")
 
 	p := &GuardrailProxy{
 		connector:    codexConn,
 		registry:     reg,
 		gatewayToken: "tok",
-		masterKey:    "mk",
 		setupOpts: connector.SetupOpts{
 			DataDir:   dir,
 			ProxyAddr: "127.0.0.1:4000",

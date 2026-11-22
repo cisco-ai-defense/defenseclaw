@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -566,5 +567,37 @@ func TestAgentHookTrustedActionShellShapes(t *testing.T) {
 		if got := agentHookTrustedActionCWDReported(context.Background(), "", tc.request, "", tc.tool); got != "" {
 			t.Errorf("tool cwd %q in %q = %q, want none", tc.tool, tc.request, got)
 		}
+	}
+}
+
+// TestMergeSandboxShellCommandVerdictKeepsBothReadings: a second reading that
+// is not stronger than the verdict keeps the verdict's action, severity and
+// reason, and its deciding findings are recorded next to the verdict's own,
+// so a conservative finding is never silently dropped (rel-1-0-10:GAP-0833).
+func TestMergeSandboxShellCommandVerdictKeepsBothReadings(t *testing.T) {
+	proven := RuleFinding{RuleID: "CMD-RM-RF", Title: "Recursive force delete from critical root path", Severity: "CRITICAL",
+		Confidence: 1, enforcement: findingEnforcementAllowed}
+	block := &ToolInspectVerdict{Action: "block", Severity: "CRITICAL", Reason: "matched: CMD-RM-RF:Recursive force delete from critical root path",
+		Findings: []string{"CMD-RM-RF:Recursive force delete from critical root path"}, DetailedFindings: []RuleFinding{proven}}
+	for _, conservative := range []RuleFinding{unverifiedShellCommandFinding(true), {
+		RuleID: conflictingToolArgumentsRuleID, Title: conflictingToolArgumentsTitle, Severity: "CRITICAL", Confidence: 1,
+		enforcement: findingEnforcementAllowed,
+	}} {
+		got := mergeSandboxShellCommandVerdict(t.Context(), nil, "opencode", block, []RuleFinding{proven, conservative})
+		if got == block || got.Action != "block" || got.Severity != "CRITICAL" || got.Reason != block.Reason {
+			t.Fatalf("%s: merged = %+v", conservative.RuleID, got)
+		}
+		want := []string{"CMD-RM-RF:Recursive force delete from critical root path", conservative.RuleID + ":" + conservative.Title}
+		if !slices.Equal(got.Findings, want) || len(got.DetailedFindings) != 2 || got.DetailedFindings[1].RuleID != conservative.RuleID {
+			t.Fatalf("%s: findings = %v, detailed = %+v", conservative.RuleID, got.Findings, got.DetailedFindings)
+		}
+		if len(block.Findings) != 1 || len(block.DetailedFindings) != 1 {
+			t.Fatalf("the call's verdict changed: %+v", block)
+		}
+	}
+	// A candidate only (detection-only) is not a deciding finding.
+	candidate := unverifiedShellCommandFinding(false)
+	if got := mergeSandboxShellCommandVerdict(t.Context(), nil, "opencode", block, []RuleFinding{candidate}); got != block {
+		t.Fatalf("candidate merged = %+v", got)
 	}
 }

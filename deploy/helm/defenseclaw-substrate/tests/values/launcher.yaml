@@ -1,0 +1,14 @@
+# Launcher atespaces, a managed atespace and the OpenFGA bootstrap.
+config:
+  substrate:
+    launcher_atespaces:
+      engineering: [eng-payments, eng-web]
+      data: [data-ml]
+managedAtespaces: [platform-ci]
+bootstrap:
+  ownerTokenSecret: ate-bootstrap-owner
+networkPolicy:
+  adminFrom:
+  - namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: ingress-nginx

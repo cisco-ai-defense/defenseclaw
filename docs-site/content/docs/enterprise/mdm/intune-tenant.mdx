@@ -14,10 +14,10 @@ This page covers what has to be true in the tenant before the Intune recipes wor
 and a helper that checks it and does the repeatable parts with Microsoft Graph.
 DefenseClaw never calls Intune or Graph; the helper is for you, the administrator.
 
-<Callout type="warn" title="Validation status">
-Run on a test tenant in the PR #1304 pass: licences, users and groups, automatic
+<Callout type="warn" title="Status">
+This page covers licences, users and groups, automatic
 enrollment, the Apple push certificate, enrolled Windows 11, Ubuntu 24.04 Desktop and
-macOS devices, every helper command with throwaway objects, and delivery of
+macOS devices, every helper command, and delivery of
 DefenseClaw to all three OSes.
 </Callout>
 
@@ -111,7 +111,7 @@ created in the admin center ([Intune on Linux](/docs/enterprise/mdm/intune-linux
 python3 intune_tenant.py check --platform windows --group defenseclaw-windows
 ```
 
-`check` exits 1 when a check fails. A trimmed run against the test tenant:
+`check` exits 1 when a check fails. A trimmed example run:
 
 ```text
 INFO  tenant                              Contoso
@@ -182,12 +182,12 @@ group into a built-in local group, with the group's SID. The recipe (an Account
 protection policy, Local user group membership, the group **Users**, action
 **Add (Update)**) is in
 [Entra groups on Windows](/docs/enterprise/identity-sources);
-delivering it through Intune has not been tested. On a single computer,
+delivering it through Intune is Preview. On a single computer,
 `Add-EntraGroupToLocalGroup.ps1` in `packaging/identity/entra` makes the same
 membership with the same Windows API. After the mapping and the user's Entra
 membership are in place, sign out and back in. If the new token still lacks the
 SID, run `dsregcmd /refreshprt` in the user's session, wait for the refresh, then
-sign out and back in again; in two live checks a plain sign-in alone still lacked
+sign out and back in again; a plain sign-in alone can still lack
 the SID. Live hook decisions can then wait up to 15 minutes for the gateway's
 directory cache.
 

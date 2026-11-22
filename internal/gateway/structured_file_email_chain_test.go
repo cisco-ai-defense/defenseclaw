@@ -103,7 +103,7 @@ func TestStructuredFileEmailChainRequiresExactSingleArtifactIdentity(t *testing.
 }
 
 func TestAuthenticatedStructuredFileEmailChainRequiresBothSuccessfulOutcomes(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	installDefaultProfileConnector(t, "claudecode")
 	store, logger := testStoreAndV8Logger(t)
 	cfg := &config.Config{}

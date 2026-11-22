@@ -46,7 +46,6 @@ func TestPowerShellBoundWriteThroughAJunctionToStateIsProven(t *testing.T) {
 	linked := filepath.Join(project, "lnkD", "config.yaml")
 	other := filepath.Join(sibling, "config.yaml")
 	write := func(path string) string { return `$p='` + path + `'; [System.IO.File]::WriteAllText($p,'x')` }
-	api := &APIServer{}
 	for _, tc := range []struct {
 		name, command string
 		block         bool
@@ -79,9 +78,15 @@ func TestPowerShellBoundWriteThroughAJunctionToStateIsProven(t *testing.T) {
 				}
 				findings := dispatchTrustedAction(t.Context(), request)
 				verdict := buildVerdict(findings, "tool_call")
-				if got := verdict.Action == "block" && api.provenActiveStateMutation(t.Context(), verdict); got != tc.block {
-					t.Fatalf("observe-mode hard block=%t, want %t (action %q, findings %v, client map %q)",
+				// The default pack: a proven state write is the HIGH alert,
+				// not the observe-mode hard block of a blocking verdict
+				// (GAP-0747 owner tiering 2026-11-15T15:20Z); the write must still be the proven one.
+				if got := gap0747StateProven(findings); got != tc.block {
+					t.Fatalf("proven state write=%t, want %t (action %q, findings %v, client map %q)",
 						got, tc.block, verdict.Action, findingIDs(findings), request.ResolvedWriteTargets)
+				}
+				if why := gap0747DefaultTierCheck(findings, tc.block); why != "" {
+					t.Fatalf("%s (findings %v, client map %q)", why, findingIDs(findings), request.ResolvedWriteTargets)
 				}
 			})
 		}

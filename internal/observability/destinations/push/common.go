@@ -51,12 +51,19 @@ const (
 	WarningPrivateNetworksAllowed  WarningCode = "private_networks_allowed"
 	WarningCGNATAllowed            WarningCode = "cgnat_allowed"
 	WarningActivationDNSDegraded   WarningCode = "activation_dns_degraded"
-	WarningPlaintextCredentials    WarningCode = "plaintext_credentials"
+	// WarningActivationAddressProhibited is a destination started deferred
+	// because its endpoint's DNS answer is an address its network_safety
+	// refuses (NetworkOptions.DeferProhibitedAnswer). Option names the
+	// network_safety option that would allow it, or is empty.
+	WarningActivationAddressProhibited WarningCode = "activation_address_prohibited"
+	WarningPlaintextCredentials        WarningCode = "plaintext_credentials"
 )
 
 type Warning struct {
 	Destination string
 	Code        WarningCode
+	// Option is set only on WarningActivationAddressProhibited.
+	Option string
 }
 
 type WarningObserver interface{ ObservePushWarning(Warning) }
@@ -67,8 +74,9 @@ func (function WarningObserverFunc) ObservePushWarning(warning Warning) { functi
 
 // ActivationState records whether activation-time resolution succeeded. A
 // temporary resolver failure prepares a degraded adapter so the delivery
-// worker can retry through the same guard. An unsafe answer never prepares an
-// adapter.
+// worker can retry through the same guard. An unsafe answer prepares no
+// adapter unless NetworkOptions.DeferProhibitedAnswer asks for a degraded one
+// (every dial still refuses the address).
 type ActivationState string
 
 const (
@@ -91,6 +99,11 @@ type NetworkOptions struct {
 	AllowCGNAT           bool
 	Resolver             netguard.V8Resolver
 	Dialer               netguard.V8Dialer
+	// DeferProhibitedAnswer prepares a degraded adapter, and warns
+	// WarningActivationAddressProhibited, when the endpoint's DNS answer is an
+	// address this policy refuses: config validate cannot see DNS answers, so
+	// failing here crashed a gateway on a config validate accepted (GAP-0272).
+	DeferProhibitedAnswer bool
 }
 
 type baseConfig struct {
@@ -165,6 +178,12 @@ func prepareTransport(ctx context.Context, config baseConfig) (preparedTransport
 		case errors.Is(err, netguard.ErrV8ResolutionFailed), errors.Is(err, netguard.ErrV8ConnectionFailed):
 			activation = ActivationDegraded
 			emitWarning(config.observer, Warning{Destination: config.destination, Code: WarningActivationDNSDegraded})
+		case errors.Is(err, netguard.ErrV8AddressProhibited) && config.network.DeferProhibitedAnswer:
+			activation = ActivationDegraded
+			emitWarning(config.observer, Warning{
+				Destination: config.destination, Code: WarningActivationAddressProhibited,
+				Option: netguard.V8ProhibitedOption(err),
+			})
 		case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 			return preparedTransport{}, err
 		default:

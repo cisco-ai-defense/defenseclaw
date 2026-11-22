@@ -24,7 +24,7 @@
  *     overlay.
  */
 
-import { mkdtempSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
@@ -198,17 +198,16 @@ describe("bootstrapProviderOverlay", () => {
   });
 });
 
+const PLUGIN_TOKEN = "d".repeat(64);
+
 describe("provider overlay bootstrap across module instances", () => {
   const savedFetch = globalThis.fetch;
   const savedHome = process.env.DEFENSECLAW_HOME;
-  const savedToken = process.env.DEFENSECLAW_GATEWAY_TOKEN;
 
   afterEach(() => {
     globalThis.fetch = savedFetch;
     if (savedHome === undefined) delete process.env.DEFENSECLAW_HOME;
     else process.env.DEFENSECLAW_HOME = savedHome;
-    if (savedToken === undefined) delete process.env.DEFENSECLAW_GATEWAY_TOKEN;
-    else process.env.DEFENSECLAW_GATEWAY_TOKEN = savedToken;
     _resetSidecarConfigCache();
   });
 
@@ -216,7 +215,8 @@ describe("provider overlay bootstrap across module instances", () => {
   // instances must not call the authenticated endpoint without a token.
   it("sends the sidecar token from every instance", async () => {
     process.env.DEFENSECLAW_HOME = mkdtempSync(join(tmpdir(), "dc-overlay-"));
-    process.env.DEFENSECLAW_GATEWAY_TOKEN = "sidecar-token";
+    mkdirSync(join(process.env.DEFENSECLAW_HOME, "hooks"));
+    writeFileSync(join(process.env.DEFENSECLAW_HOME, "hooks", ".hook-openclaw.token"), PLUGIN_TOKEN);
     _resetSidecarConfigCache();
     const auth: Array<string | undefined> = [];
     globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -234,6 +234,6 @@ describe("provider overlay bootstrap across module instances", () => {
     second.stop();
     first.stop();
 
-    expect(auth).toEqual(["Bearer sidecar-token", "Bearer sidecar-token"]);
+    expect(auth).toEqual([`Bearer ${PLUGIN_TOKEN}`, `Bearer ${PLUGIN_TOKEN}`]);
   });
 });

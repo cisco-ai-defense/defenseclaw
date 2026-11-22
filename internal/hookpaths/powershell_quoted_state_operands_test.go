@@ -14,13 +14,15 @@ import (
 
 // The hook client lists the quoted path literals of a PowerShell call for a
 // managed gateway: as their value, also inside a pwsh -Command body and
-// between typographic quotes; not text that expands, and not plain words.
+// between typographic quotes; a double-quoted path that expands only the home
+// it starts with, as the path in the home (rel-1-0-10:GAP-1115); not other
+// text that expands, and not plain words.
 // Past the bound the call is described as incomplete.
 func TestPowerShellQuotedPathOperandsReadEachQuotedPath(t *testing.T) {
 	t.Parallel()
 	cwd := t.TempDir()
 	paths := func(command string) ([]string, bool) {
-		operands, over := powerShellQuotedPathOperands(command, cwd)
+		operands, over := powerShellQuotedPathOperands(command, cwd, `C:\u`)
 		var out []string
 		for _, operand := range operands {
 			out = append(out, operand.path)
@@ -36,6 +38,14 @@ func TestPowerShellQuotedPathOperandsReadEachQuotedPath(t *testing.T) {
 		{`$p="C:\u\v.txt"; $q="$env:TEMP\v.txt"; '"'`, []string{`C:\u\v.txt`}},
 		{"$p=\u2018C:\\u\\t.txt\u2019", []string{`C:\u\t.txt`}},
 		{`Write-Output 'hello world' "plain"`, nil},
+		{`[IO.File]::WriteAllText("$HOME\.defenseclaw\config.yaml", 'x')`, []string{`C:\u\.defenseclaw\config.yaml`}},
+		{`$w = New-Object IO.StreamWriter("${env:USERPROFILE}\.codex\config.toml")`, []string{`C:\u\.codex\config.toml`}},
+		{`"$env:UserProfile/.copilot/config.json"`, []string{`C:\u/.copilot/config.json`}},
+		{`"$HOMEDIR\x.txt" "$HOME\$name.txt" "$HOME"`, nil},
+		{`Add-Content -Path $HOME\.codex\config.toml -Value x; ac -LiteralPath:${HOME}\.ssh\authorized_keys k`,
+			[]string{`C:\u\.codex\config.toml`, `C:\u\.ssh\authorized_keys`}},
+		{`New-Item -Path $env:USERPROFILE\.defenseclaw\config.yaml -Value x -Force | Out-Null`, []string{`C:\u\.defenseclaw\config.yaml`}},
+		{`Write-Output $HOME $HOMEPATH\x.txt $HOME\$x\y.txt x$HOME\z.txt`, nil},
 	} {
 		got, over := paths(tc.command)
 		var want []string

@@ -27,8 +27,14 @@ struct AIRuntimePlane: Identifiable, Sendable, Hashable {
 
     /// Short state word for a status chip.
     var badge: String {
-        if running { return "up" }
+        if running { return reason.isEmpty ? "up" : "partial" }
+        if !isSelected { return "off" }
         return available ? "idle" : "blind"
+    }
+
+    var isSelected: Bool {
+        let text = reason.lowercased()
+        return !text.contains("not selected") && !text.contains("enable_host_plane")
     }
 
     /// One line an operator can act on. A blind or idle plane always states
@@ -36,9 +42,11 @@ struct AIRuntimePlane: Identifiable, Sendable, Hashable {
     /// clean host.
     var summary: String {
         if running {
-            return "\(name): up via \(mechanism.isEmpty ? "unknown mechanism" : mechanism)"
+            let via = mechanism.isEmpty ? "unknown mechanism" : mechanism
+            return reason.isEmpty ? "\(name): up via \(via)" : "\(name): partial via \(via) — \(reason)"
         }
         let detail = reason.isEmpty ? "no reason reported" : reason
+        if !isSelected { return "\(name): off — \(detail)" }
         return available
             ? "\(name): available but not running — \(detail)"
             : "\(name): unavailable — \(detail)"
@@ -163,6 +171,29 @@ struct AIRuntimeSnapshot: Sendable {
         parts.append("\(connectionsObserved) connections")
         if connectionsUnattributed > 0 { parts.append("\(connectionsUnattributed) unattributed") }
         return parts.joined(separator: ", ")
+    }
+
+    /// Mirrors the selected runtime's RuntimePanelModel health states.
+    var healthState: String {
+        if !enabled { return "off" }
+        if scannedAt == nil { return "waiting" }
+        if degraded {
+            if !degradedReasons.isEmpty && degradedReasons.allSatisfy({ $0.contains(" partially covered:") }) {
+                return "partial"
+            }
+            return "degraded"
+        }
+        return "healthy"
+    }
+
+    var healthLabel: String {
+        switch healthState {
+        case "off": return "OFF"
+        case "waiting": return "STARTING"
+        case "partial": return "WATCHING"
+        case "degraded": return "DEGRADED"
+        default: return "HEALTHY"
+        }
     }
 
     var planesNotRunning: [AIRuntimePlane] { planes.filter { !$0.running } }

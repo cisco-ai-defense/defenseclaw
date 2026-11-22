@@ -62,13 +62,16 @@ func kiroSandboxHookScript() string {
 // default agent, not for one selected with --agent, and carries no tool call.
 var kiroSandboxHookEvents = []string{"userPromptSubmit", "preToolUse", "postToolUse", "stop"}
 
+// KiroSandboxHookContractID is the sandbox images' Kiro hook contract.
+const KiroSandboxHookContractID = "kiro-cli-hooks-v1"
+
 // kiroSandboxHookContracts is the reviewed Kiro CLI hook surface of
 // DefenseClaw's OpenShell images. Host Kiro hooks are not version-gated;
 // a sandbox image always pins the build its hooks were measured on.
 func kiroSandboxHookContracts() []HookContract {
 	return []HookContract{{
 		Connector:               "kiro",
-		ContractID:              "kiro-cli-hooks-v1",
+		ContractID:              KiroSandboxHookContractID,
 		ExactAgentVersions:      []string{"2.24.1"},
 		HookScriptVersion:       "v1",
 		HookConfigPathTemplates: []string{KiroSandboxAgentPath},
@@ -90,6 +93,7 @@ func kiroSandboxHookContracts() []HookContract {
 			ConfigPath:         KiroSandboxAgentPath,
 		},
 		SupportsTraceparent: true,
+		ToolCallLifecycle:   kiroSandboxToolCallLifecycle(),
 		Notes: []string{
 			"Sandbox-only contract for the pinned Kiro CLI 2.24.1 (kiro-cli-chat) running headless with --agent defenseclaw: the agent-hook triggers userPromptSubmit, preToolUse, postToolUse and stop fire, and exit 2 from preToolUse is the only veto (every other exit code is a warning and the tool runs).",
 			"Kiro selects an agent by its name field from any file in ~/.kiro/agents or a project's .kiro/agents, and runs without hooks when the selected agent fails to load, so the agent lives alone in a root-owned directory the launcher forces KIRO_AGENT_CONFIG_DIR to (Kiro then reads no other agents directory).",
@@ -125,7 +129,7 @@ func (c *KiroConnector) SandboxArtifacts(target SandboxRenderTarget) (SandboxArt
 		SandboxFile{Path: KiroSandboxAgentPath, Mode: 0o644, Owner: SandboxOwnerRoot, Data: agent},
 		SandboxFile{Path: KiroSandboxSettingsPath, Mode: 0o644, Owner: SandboxOwnerUser, Data: append(settings, '\n')},
 	)
-	return finalizeSandboxArtifacts(SandboxArtifacts{
+	return finalizeSandboxArtifactsFor(rt, SandboxArtifacts{
 		Connector:    c.Name(),
 		HookContract: rt.contract.ContractID,
 		TamperTier:   SandboxTamperTierUser,

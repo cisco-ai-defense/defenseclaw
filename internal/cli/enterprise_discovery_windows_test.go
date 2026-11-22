@@ -14,6 +14,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 )
 
 // GAP-2445: a standard account's `enterprise windows discovery --json`
@@ -23,7 +25,7 @@ func TestWindowsDiscoveryJSONRefusalPrintsOnlyJSON(t *testing.T) {
 	original := enterpriseDiscoveryGatewayReport
 	t.Cleanup(func() { enterpriseDiscoveryGatewayReport = original })
 	enterpriseDiscoveryGatewayReport = func() (enterpriseGatewayAIUsage, string, error) {
-		return enterpriseGatewayAIUsage{}, "", withExitCode(&managedViewRefusal{code: "elevation_required", message: "ask your administrator"}, 5)
+		return enterpriseGatewayAIUsage{}, "", cliusage.WithExitCode(&managedViewRefusal{code: "elevation_required", message: "ask your administrator"}, 5)
 	}
 	for _, args := range [][]string{{"--json"}, {}} {
 		var stdout, stderr bytes.Buffer
@@ -32,8 +34,8 @@ func TestWindowsDiscoveryJSONRefusalPrintsOnlyJSON(t *testing.T) {
 		command.SetOut(&stdout)
 		command.SetErr(&stderr)
 		err := command.Execute()
-		if commandExitCode(err) != 5 {
-			t.Fatalf("%v: exit %d (%v)", args, commandExitCode(err), err)
+		if cliusage.ExitCode(err) != 5 {
+			t.Fatalf("%v: exit %d (%v)", args, cliusage.ExitCode(err), err)
 		}
 		if len(args) == 0 {
 			if stdout.Len() != 0 || stderr.String() != "Error: ask your administrator\n" {

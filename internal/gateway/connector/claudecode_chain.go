@@ -427,6 +427,13 @@ func claudeManagedGuardPath(launcher string) string {
 // answer. If the guard itself cannot start, cmd.exe gives the same event's
 // documented unavailable answer.
 func claudeManagedGuardWrapperInvocation(event, launcher string, hookArgs []string) (string, []string) {
+	return claudeManagedGuardWrapperInvocationTexts(event, launcher, hookArgs, false)
+}
+
+// claudeManagedGuardWrapperInvocationTexts is claudeManagedGuardWrapperInvocation
+// with the texts 1.0.9 Setup wrote when texts109 is set
+// (SetupOpts.ClaudeManagedGuardTexts109).
+func claudeManagedGuardWrapperInvocationTexts(event, launcher string, hookArgs []string, texts109 bool) (string, []string) {
 	if !slices.Equal(hookArgs, []string{"hook", "--connector", "claudecode", "--enterprise-managed"}) ||
 		!hookguard.AbsoluteHookExecutable(launcher) || !claudeWrapperSafe(launcher) {
 		return launcher, hookArgs
@@ -435,40 +442,85 @@ func claudeManagedGuardWrapperInvocation(event, launcher string, hookArgs []stri
 	if !claudeWrapperSafe(guard) {
 		return launcher, hookArgs
 	}
+	if texts109 {
+		return claudeCodeWindowsCommandProcessor(), claudeManagedGuardWrapperArgs109(guard, launcher, event, hookArgs)
+	}
 	return claudeCodeWindowsCommandProcessor(), claudeManagedGuardWrapperArgs(guard, launcher, event, hookArgs)
 }
 
-// claudeManagedGuardMissingWords is what the managed wrapper prints when the
-// guard image is absent from the install folder: it names the guard and the
-// one repair that can restore it. Only Setup carries the guard payload: the
-// installed CLI has no source to copy it from and refuses a repair while the
-// recorded guard is missing. No word may hold a cmd.exe metacharacter, since
-// the text sits inside the wrapper's parenthesised block. The Python mirror
-// is _CLAUDE_MANAGED_GUARD_MISSING in cli/defenseclaw/hook_integrity.py.
-var claudeManagedGuardMissingWords = strings.Fields("DefenseClaw could not start its Claude Code hook guard " +
-	windowsHookGuardBinaryName + " because it is missing from the install folder. " +
-	"Run " + managed.WindowsStandaloneSetupName + " /repair as an administrator to restore it. " + managed.WindowsSetupSource + ".")
+// The managed wrapper prints claudeManagedGuardMissingWords when the guard
+// image is absent from the install folder and claudeManagedGuardStartWords
+// when the guard is there but does not run. Each text names its own
+// condition: when Claude Code reports a block or a hook error it shows the
+// whole registered command beside the hook's own answer, so both texts are on
+// screen whichever branch ran. Worded as plain claims they told a user whose
+// credentials were not accepted yet that the guard was missing and sent them
+// to an administrator repair (rel-1-0-10 GAP-0119). Only Setup carries the
+// guard payload: the installed CLI has no source to copy it from and refuses
+// a repair while the recorded guard is missing. No word may hold a cmd.exe
+// metacharacter, since the texts sit inside the wrapper's parenthesised
+// blocks. The Python mirrors are _CLAUDE_MANAGED_GUARD_MISSING and
+// _CLAUDE_MANAGED_GUARD_START in cli/defenseclaw/hook_integrity.py.
+var claudeManagedGuardMissingWords = strings.Fields("If " + windowsHookGuardBinaryName + " is missing from the install folder: " +
+	ClaudeCodeManagedGuardUnavailableText + " " + managed.WindowsStandaloneSetupName + " /repair to restore it. " +
+	managed.WindowsSetupSource + ".")
+
+var claudeManagedGuardStartWords = strings.Fields("If " + windowsHookGuardBinaryName + " is in the install folder but does not run: " +
+	ClaudeCodeManagedGuardUnavailableText + " " + managed.WindowsStandaloneSetupName + " /repair.")
+
+// ClaudeCodeManagedGuardUnavailableText is in both texts the managed wrapper
+// prints when its guard gives no answer. The Windows hook image self test
+// reads it as a guard that did not start.
+const ClaudeCodeManagedGuardUnavailableText = "DefenseClaw cannot check Claude Code until an administrator runs"
+
+// The texts 1.0.9 Setup wrote. A 1.0.9 managed policy runs the same branches
+// with the same answers, so it still reads as DefenseClaw's managed guard
+// (enterprise status, the exec view, uninstall) until Setup renders it again.
+// Keep them while 1.0.9 is a supported upgrade source.
+var claudeManagedGuardMissingWords109 = strings.Fields("DefenseClaw could not start its Claude Code hook guard defenseclaw-hook-guard.exe " +
+	"because it is missing from the install folder. Run DefenseClawSetup-Enterprise-Standalone-x64.exe /repair " +
+	"as an administrator to restore it. Setup is not installed on this computer: use the copy in your MDM package or the release download.")
+
+var claudeManagedGuardStartWords109 = strings.Fields("DefenseClaw could not start its Claude Code hook guard. " +
+	"Run the DefenseClaw installer again to repair it.")
 
 func claudeManagedGuardWrapperArgs(guard, launcher, event string, hookArgs []string) []string {
+	return claudeManagedGuardWrapperArgsWith(claudeManagedGuardMissingWords, claudeManagedGuardStartWords, guard, launcher, event, hookArgs)
+}
+
+// claudeManagedGuardWrapperArgs109 is the wrapper 1.0.9 Setup wrote.
+func claudeManagedGuardWrapperArgs109(guard, launcher, event string, hookArgs []string) []string {
+	return claudeManagedGuardWrapperArgsWith(claudeManagedGuardMissingWords109, claudeManagedGuardStartWords109, guard, launcher, event, hookArgs)
+}
+
+func claudeManagedGuardWrapperArgsWith(missingWords, startWords []string, guard, launcher, event string, hookArgs []string) []string {
 	failCode := "2"
 	if hookguard.NeutralEvent(event) {
 		failCode = "1"
 	}
-	missing := append([]string{"echo"}, claudeManagedGuardMissingWords...)
-	missing = append(missing, "1>&2", "&", "exit", "/b", failCode)
-	warning := []string{"echo", "DefenseClaw", "could", "not", "start", "its", "Claude", "Code", "hook", "guard.",
-		"Run", "the", "DefenseClaw", "installer", "again", "to", "repair", "it.", "1>&2", "&", "exit", "/b", failCode}
+	answer := func(words []string) []string {
+		out := append([]string{"echo"}, words...)
+		return append(out, "1>&2", "&", "exit", "/b", failCode)
+	}
 	args := []string{"/d", "/v:on", "/c", "if", "not", "exist", guard, "("}
-	args = append(args, missing...)
+	args = append(args, answer(missingWords)...)
 	args = append(args, ")", "else", "(", guard)
 	args = append(args, claudeGuardEventArgs(launcher, hookArgs, event, true)...)
 	args = append(args, claudeWrapperStatusWords()...)
-	args = append(args, warning...)
+	args = append(args, answer(startWords)...)
 	return append(args, ")")
 }
 
+// claudeManagedGuardWrapperKnown reports args as the managed form this
+// release renders or the one 1.0.9 Setup wrote.
+func claudeManagedGuardWrapperKnown(args []string, guard, launcher, event string, hookArgs []string) bool {
+	return slices.Equal(args, claudeManagedGuardWrapperArgs(guard, launcher, event, hookArgs)) ||
+		slices.Equal(args, claudeManagedGuardWrapperArgs109(guard, launcher, event, hookArgs))
+}
+
 // ClaudeCodeManagedGuardLauncher reads a managed policy handler that is
-// exactly the guarded cmd.exe form Windows managed Setup writes, and returns
+// exactly the guarded cmd.exe form Windows managed Setup writes (or the 1.0.9
+// form, claudeManagedGuardWrapperKnown), and returns
 // the launcher and hook arguments it runs. The policy checks of the enterprise
 // status read the handler through it, so the form they verify is the form
 // Setup installs.
@@ -494,7 +546,7 @@ func claudeManagedGuardWrapperParts(hook map[string]interface{}) (string, []stri
 		if valid && wrapped && !open &&
 			slices.Equal(hookArgs, []string{"hook", "--connector", "claudecode", "--enterprise-managed"}) &&
 			claudeManagedGuardPath(launcher) == guard &&
-			slices.Equal(args, claudeManagedGuardWrapperArgs(guard, launcher, event, hookArgs)) {
+			claudeManagedGuardWrapperKnown(args, guard, launcher, event, hookArgs) {
 			return launcher, hookArgs, true
 		}
 	}

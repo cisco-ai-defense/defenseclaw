@@ -4,6 +4,7 @@
 package gateway
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -228,6 +229,36 @@ func newIdentityCache[T any](resolve func(string) (T, error)) *identityCache[T] 
 // key, the caller did not ask to block).
 func (c *identityCache[T]) get(key string, block bool) (T, bool) {
 	return c.getWithColdWait(key, block, true)
+}
+
+// awaitCold waits for the first lookup of a key no facts are cached for yet
+// (starting it when one is due), at most wait or until ctx ends, and reports
+// whether facts are cached then. A key with cached facts, current or not,
+// returns at once (get serves them), and so does one whose lookup failed and
+// waits for its retry. It is for callers that can wait longer than the
+// hook-sized identityDirectoryBudget: a managed route-only model call
+// (routeOnlyIdentityWait, rel-1-0-10:GAP-1155).
+func (c *identityCache[T]) awaitCold(ctx context.Context, key string, wait time.Duration) bool {
+	if c == nil || key == "" || c.resolve == nil {
+		return false
+	}
+	c.mu.Lock()
+	entry, _, _, _ := c.serveLocked(key)
+	ok, inflight := entry.ok, entry.inflight
+	c.mu.Unlock()
+	if ok || inflight == nil {
+		return ok
+	}
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case <-inflight:
+	case <-timer.C:
+	case <-ctx.Done():
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return entry.ok
 }
 
 func (c *identityCache[T]) getWithColdWait(key string, block, waitCold bool) (T, bool) {

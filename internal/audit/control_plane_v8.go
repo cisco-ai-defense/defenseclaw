@@ -796,6 +796,9 @@ func controlPlaneV8StateSummary(value map[string]any) observability.Optional[str
 
 func controlPlaneV8Correlation(event Event) observability.Correlation {
 	return observability.Correlation{
+		SemanticEventID:     event.SemanticEventID,
+		LogicalEventID:      event.LogicalEventID,
+		ConnectorInstanceID: event.ConnectorInstanceID,
 		RunID:               event.RunID,
 		RequestID:           event.RequestID,
 		SessionID:           event.SessionID,

@@ -109,6 +109,7 @@ func TestWindowsEnterpriseHotConfigUndoRepublishesTheTargets(t *testing.T) {
 // under lifecycle.lock. A config another run committed while the preflight
 // ran stays installed, and the stale broken bytes are not kept.
 func TestWindowsEnterpriseUnparseableRescueKeepsAConcurrentCommit(t *testing.T) {
+	requireAdministratorTestToken(t, "rejected-config.yaml is written under the Administrators-owned AdminFile descriptor (keepWindowsEnterpriseRejectedFile)")
 	const broken = "invalid: [\n"
 	const committed = "config_version: 9\nguardrail:\n  block_at: HIGH\n"
 	candidate := strings.Replace(standaloneGatewayCheckConfig, "config_version: 8\n", "config_version: 9\n", 1)
@@ -214,21 +215,24 @@ func TestWindowsEnterpriseHotConfigUnprovenUndoFailsClosed(t *testing.T) {
 			installed: previous, putBack: 1, warning: "targets_restored_from_record", proofs: 1},
 		// GAP-0905: the guardian removed bob's hook for the candidate and
 		// stopped before it read the targets put back, so a published
-		// targets.yaml proves nothing. Before, the undo was declared restored
-		// with bob still lacking a hook; now his hook must be verified back.
+		// targets.yaml proves nothing: the undo still waits for his hook.
+		// rel-1-0-10 GAP-1646: this plain change goes on to the upgrade
+		// transaction, which drops bob again, so a hook the undo could not
+		// prove back is a warning that names him, not targets_restore_failed
+		// with the gateway stopped and every other hook closed (a closure
+		// that never reached bob). A signed bundle still fails closed:
+		// TestWindowsEnterpriseHotConfigBundleUndoDroppedHookFailsClosed.
 		{name: "targets put back but the dropped hook is not back", refreshFails: 2, hookUnproven: true, adopted: true, verify: true,
-			code: "targets_restore_failed", installed: previous, stops: 1, putBack: 1, proofs: 1,
-			state: "holds the previous config", targets: "published again for the previous config",
-			unprotected: "these previously enrolled targets have no DefenseClaw hook now: bob (S-1-5-21-1-2-3-1002) claudecode"},
+			installed: previous, putBack: 1, proofs: 1, warning: "dropped_target_hooks_unproven",
+			unprotected: "bob (S-1-5-21-1-2-3-1002) claudecode"},
 		{name: "targets published again but the dropped hook is not back", hookUnproven: true, adopted: true, verify: true,
-			code: "targets_restore_failed", installed: previous, stops: 1, proofs: 1,
-			state: "holds the previous config", targets: "published again for the previous config",
-			unprotected: "these previously enrolled targets have no DefenseClaw hook now: bob (S-1-5-21-1-2-3-1002) claudecode"},
-		// GAP-0967: the same unproven undo while a program holds the guardian's
+			installed: previous, proofs: 1, warning: "dropped_target_hooks_unproven",
+			unprotected: "bob (S-1-5-21-1-2-3-1002) claudecode"},
+		// GAP-0967: an unproven undo while a program holds the guardian's
 		// state file: the services are left running and nothing is closed; the
 		// error names the holder and the repair.
-		{name: "dropped hook not back while a guardian state file is held", hookUnproven: true, held: true, adopted: true, verify: true,
-			code: "guardian_state_held", installed: previous, stops: 0, proofs: 1,
+		{name: "targets not back while a guardian state file is held", refreshFails: 2, putBackFails: true, held: true, adopted: true, verify: true,
+			code: "guardian_state_held", installed: previous, stops: 0, putBack: 1,
 			unprotected: "these previously enrolled targets have no DefenseClaw hook until the repair: bob (S-1-5-21-1-2-3-1002) claudecode"},
 		{name: "targets cannot be published again nor put back", refreshFails: 2, putBackFails: true, adopted: true, verify: true,
 			code: "targets_restore_failed", installed: previous, stops: 1, putBack: 1,
@@ -361,6 +365,12 @@ func TestWindowsEnterpriseHotConfigUnprovenUndoFailsClosed(t *testing.T) {
 				if windowsBundleHasCode(result.Errors, "config_restore_failed") || windowsBundleHasCode(result.Errors, "targets_restore_failed") {
 					t.Fatalf("a proven undo reported a failed restore: %+v", result.Errors)
 				}
+				if tc.unprotected != "" {
+					if host.closes != 0 || len(stub.calls) != len(replies) || !strings.Contains(fmt.Sprint(result.Warnings), tc.unprotected) {
+						t.Fatalf("closes=%d installer runs %q warnings %+v: want no closure, the upgrade transaction and a warning naming %q",
+							host.closes, stub.calls, result.Warnings, tc.unprotected)
+					}
+				}
 				return
 			}
 			if result.OK || !windowsBundleHasCode(result.Errors, tc.code) {
@@ -454,6 +464,7 @@ func TestWindowsEnterpriseHotConfigUnprovenUndoIsNotRestarted(t *testing.T) {
 // guardian then finds the bytes recorded and never takes the repair's own
 // write for a hand edit (it did, and the gateway refused to start on it).
 func TestWindowsEnterpriseUnparseableRescueRecordsTheSuppliedConfigAsTheLifecycleGeneration(t *testing.T) {
+	requireAdministratorTestToken(t, "rejected-config.yaml is written under the Administrators-owned AdminFile descriptor (keepWindowsEnterpriseRejectedFile)")
 	t.Cleanup(func() { managedConfigRecordDeferredTo = "" })
 	const broken = "invalid: [\n"
 	const recorded = "config_version: 9\n# the recorded generation\n"
@@ -494,5 +505,75 @@ func TestWindowsEnterpriseUnparseableRescueRecordsTheSuppliedConfigAsTheLifecycl
 	recordUnrecordedManagedConfig(host.configPath, &log, nil)
 	if after, err := configwrite.ReadGenerationState(host.configPath); err != nil || after != state || log.Len() != 0 {
 		t.Fatalf("the guardian recorded the rescue's own write: %+v, %v\n%s", after, err, log.String())
+	}
+}
+
+// rel-1-0-10 GAP-1646: a Setup /ensure CONFIG= that removes a connector
+// (kiro) from guardrail.connectors and whose hot apply fails is undone and
+// handed to the upgrade transaction. The guardian had already removed the
+// dropped target's kiro hook, and the undo's live proof that it is back
+// failed (enterprise hooks readiness exit status 1). Before, that ended
+// 1603 targets_restore_failed: every standalone hook forced closed, the
+// gateway stopped, and no transaction to apply the removal. Now the
+// previous config is back and proven live, the transaction applies the
+// removal, and the warning names the target.
+func TestWindowsEnterpriseHotConfigConnectorRemovalUndoGoesToTheTransaction(t *testing.T) {
+	const previous = "config_version: 9\nguardrail:\n  block_at: MEDIUM\n  connectors:\n    hermes: {}\n    kiro: {}\n"
+	const next = "config_version: 9\nguardrail:\n  block_at: MEDIUM\n  connectors:\n    hermes: {}\n"
+	host, opts := newHotConfigHost(t, previous, next)
+	host.adopted = true
+	host.dropped = []enterprisehooks.ManifestTarget{{User: "dcw-std2", SID: "S-1-5-21-1-2-3-1018", Connector: "kiro"}}
+	host.hookProofErr = errors.New("enterprise hooks readiness: exit status 1")
+	failedVerify := installedStatus("Verify")
+	failedVerify["ok"], failedVerify["gateway_ready"] = false, false
+	stub := &ensureStub{t: t, replies: []map[string]any{installedStatus("status"), failedVerify, installedStatus("Upgrade")}}
+	result := runHotConfigEnsure(t, host, opts, stub)
+	if host.refreshes != 2 || len(host.hookProofs) != 1 {
+		t.Fatalf("refreshes=%d proofs=%d: want the apply's and the undo's refresh and one proof of the dropped hook", host.refreshes, len(host.hookProofs))
+	}
+	if host.stops != 0 || host.closes != 0 || opts.hotConfigRestoreFailed {
+		t.Fatalf("stops=%d closes=%d restoreFailed=%t errors=%+v: a connector removal must not stop the gateway or close every hook",
+			host.stops, host.closes, opts.hotConfigRestoreFailed, result.Errors)
+	}
+	if !result.OK || windowsBundleHasCode(result.Errors, "targets_restore_failed") {
+		t.Fatalf("ok=%t errors=%+v, want the upgrade transaction's result", result.OK, result.Errors)
+	}
+	if len(stub.calls) != 3 || !strings.Contains(strings.Join(stub.calls[2], " "), "Upgrade") {
+		t.Fatalf("installer runs %q: want status, the failed verify and then the upgrade transaction", stub.calls)
+	}
+	if !windowsBundleHasCode(result.Warnings, "dropped_target_hooks_unproven") || !strings.Contains(fmt.Sprint(result.Warnings), "dcw-std2 (S-1-5-21-1-2-3-1018) kiro") {
+		t.Fatalf("warnings %+v, want dropped_target_hooks_unproven naming the kiro target", result.Warnings)
+	}
+}
+
+// rel-1-0-10 GAP-1646 control: a signed bundle has no transaction after its
+// hot apply, so an undo that cannot prove a dropped target's hook back still
+// fails closed with targets_restore_failed (GAP-0905).
+func TestWindowsEnterpriseHotConfigBundleUndoDroppedHookFailsClosed(t *testing.T) {
+	const previous = "config_version: 9\nguardrail:\n  block_at: MEDIUM\nenterprise:\n  enrollment:\n    include_users:\n      - alice\n      - bob\n"
+	const next = "config_version: 9\nguardrail:\n  block_at: MEDIUM\nenterprise:\n  enrollment:\n    include_users:\n      - alice\n"
+	host, opts := newHotConfigHost(t, previous, next)
+	opts.bundle = host.bundleRun()
+	host.adopted = true
+	host.dropped = []enterprisehooks.ManifestTarget{{User: "bob", SID: "S-1-5-21-1-2-3-1002", Connector: "claudecode"}}
+	host.hookProofErr = errors.New("no verified DefenseClaw hook for bob (S-1-5-21-1-2-3-1002) claudecode")
+	failedVerify := installedStatus("Verify")
+	failedVerify["ok"], failedVerify["gateway_ready"] = false, false
+	stub := &ensureStub{t: t, replies: []map[string]any{failedVerify}}
+	stub.install(t)
+	savedDigest := windowsEnterprisePolicyDigest
+	t.Cleanup(func() { windowsEnterprisePolicyDigest = savedDigest })
+	windowsEnterprisePolicyDigest = host.digest
+	result := newWindowsEnterpriseStandaloneResult("ensure", opts)
+	applied, _ := windowsEnterpriseHotConfigApply(context.Background(), &cobra.Command{}, opts, "installer.ps1",
+		&windowsEnterpriseInstallerReport{OK: true, Installed: true, GatewayReady: true}, result)
+	message := fmt.Sprint(result.Errors)
+	if applied || !opts.hotConfigRestoreFailed || host.stops != 1 || len(host.hookProofs) != 1 ||
+		!windowsBundleHasCode(result.Errors, "targets_restore_failed") || !strings.Contains(message, "bob (S-1-5-21-1-2-3-1002) claudecode") {
+		t.Fatalf("applied=%t restoreFailed=%t stops=%d proofs=%d errors=%s: want targets_restore_failed naming bob",
+			applied, opts.hotConfigRestoreFailed, host.stops, len(host.hookProofs), message)
+	}
+	if windowsBundleHasCode(result.Warnings, "dropped_target_hooks_unproven") {
+		t.Fatalf("warnings %+v: a bundle undo must not hand the dropped hook to a transaction", result.Warnings)
 	}
 }

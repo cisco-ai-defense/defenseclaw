@@ -306,25 +306,31 @@ func TestLogConfigChangeSucceedsOnlyOnceTheRowIsPowerLossDurable(t *testing.T) {
 	}
 }
 
-// The durable connection runs the audit pragmas with only synchronous
-// raised to FULL and fullfsync on (F_FULLFSYNC on macOS): automatic
-// checkpoints stay off, as on every audit connection.
+// A durable batch runs on the writer connection with only synchronous raised
+// to FULL and fullfsync on (F_FULLFSYNC on macOS), and the connection goes
+// back to the store pragmas after it (durableBatchConn).
 func TestAuditDurableConnectionFlushesEveryCommit(t *testing.T) {
 	logger := newTestLogger(t)
-	db, err := logger.store.durableConn()
+	conn, err := logger.store.durableBatchConn(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := map[string]int64{"synchronous": 2, "fullfsync": 1}
-	for _, pragma := range auditMandatoryIntegerPragmas {
-		if _, set := want[pragma.name]; !set {
-			want[pragma.name] = pragma.want
+	for name, value := range map[string]int64{"synchronous": 2, "fullfsync": 1} {
+		var got int64
+		if err := conn.QueryRowContext(t.Context(), "PRAGMA "+name).Scan(&got); err != nil || got != value {
+			t.Fatalf("durable batch PRAGMA %s = %d (%v), want %d", name, got, err, value)
 		}
+	}
+	conn.restore()
+	db := logger.store.db
+	want := map[string]int64{"fullfsync": 0}
+	for _, pragma := range auditMandatoryIntegerPragmas {
+		want[pragma.name] = pragma.want
 	}
 	for name, value := range want {
 		var got int64
 		if err := db.QueryRow("PRAGMA " + name).Scan(&got); err != nil || got != value {
-			t.Fatalf("PRAGMA %s = %d (%v), want %d", name, got, err, value)
+			t.Fatalf("PRAGMA %s = %d (%v) after the durable batch, want %d", name, got, err, value)
 		}
 	}
 	var mode string

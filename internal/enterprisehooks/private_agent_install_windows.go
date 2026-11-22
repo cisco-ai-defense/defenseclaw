@@ -69,7 +69,7 @@ func DiscoverWindowsPrivateAgentInstalls(ctx context.Context, home string, names
 		return nil
 	}
 	home = filepath.Clean(home)
-	scan := newPrivateInstallScan()
+	scan := newPrivateInstallScan(home)
 	if winpath.RejectReparseChain(home) != nil {
 		scan.skipAll(wanted, PrivateInstallSkippedLocation)
 		return scan.result()
@@ -87,9 +87,9 @@ func DiscoverWindowsPrivateAgentInstalls(ctx context.Context, home string, names
 	// The walk never descends through a reparse point: the profile's
 	// compatibility junctions name folders it reads through their own
 	// paths, and LocalSystem must not follow a user's link anywhere else.
-	nested, complete := windowsPrivateHomeWalk(ctx, home)
+	nested, complete, unlisted := windowsPrivateHomeWalk(ctx, home)
 	if !complete {
-		scan.skipAll(wanted, PrivateInstallSkippedHome)
+		scan.skipAllAt(wanted, PrivateInstallSkippedHome, unlisted)
 	}
 	roots = append(roots, nested...)
 	if ctx.Err() != nil {
@@ -180,7 +180,7 @@ func DiscoverWindowsPrivateAgentInstalls(ctx context.Context, home string, names
 
 // windowsPrivateWalkRun is one bounded walk of a home for npm prefixes.
 // Tests replace it.
-var windowsPrivateWalkRun = func(ctx context.Context, home string) ([]string, bool) {
+var windowsPrivateWalkRun = func(ctx context.Context, home string) ([]string, bool, string) {
 	return walkPrivateNPMPrefixes(ctx, home, privateInstallWalk{open: openWindowsPrivateWalkDir, openChild: openWindowsPrivateWalkChild,
 		enter:       enterWindowsPrivateWalkBackup,
 		unreachable: func(_ string, err error) bool { return errors.Is(err, fs.ErrNotExist) }})
@@ -207,6 +207,8 @@ type windowsPrivateWalkRunState struct {
 	done     chan struct{}
 	prefixes []string
 	complete bool
+	// unlisted is the folder an incomplete walk could not list.
+	unlisted string
 	// reported marks a walk a scan stopped waiting for with no fresh
 	// complete walk to use, so that account was reported incomplete.
 	reported bool
@@ -286,9 +288,12 @@ func windowsPrivateWalkWait(ctx context.Context) (context.Context, context.Cance
 	return context.WithDeadline(ctx, deadline.Add(-reserve))
 }
 
-func windowsPrivateHomeWalk(ctx context.Context, home string) ([]string, bool) {
+// windowsPrivateHomeWalk returns the npm prefixes below home, whether the
+// walk was complete, and for an incomplete one the folder it could not
+// list (home for a walk still running at the scan deadline).
+func windowsPrivateHomeWalk(ctx context.Context, home string) ([]string, bool, string) {
 	if ctx.Err() != nil {
-		return nil, false
+		return nil, false, home
 	}
 	key := strings.ToLower(filepath.Clean(home))
 	windowsPrivateWalks.Lock()
@@ -303,10 +308,10 @@ func windowsPrivateHomeWalk(ctx context.Context, home string) ([]string, bool) {
 		state.running = run
 		go func() {
 			walkCtx, cancel := context.WithTimeout(context.Background(), windowsPrivateWalkBackgroundBound)
-			prefixes, complete := windowsPrivateWalkRun(walkCtx, home)
+			prefixes, complete, unlisted := windowsPrivateWalkRun(walkCtx, home)
 			cancel()
 			windowsPrivateWalks.Lock()
-			run.prefixes, run.complete = prefixes, complete
+			run.prefixes, run.complete, run.unlisted = prefixes, complete, unlisted
 			if complete {
 				state.last, state.lastAt = prefixes, windowsPrivateWalkNow()
 			}
@@ -327,18 +332,18 @@ func windowsPrivateHomeWalk(ctx context.Context, home string) ([]string, bool) {
 	defer cancel()
 	select {
 	case <-run.done:
-		return append([]string(nil), run.prefixes...), run.complete
+		return append([]string(nil), run.prefixes...), run.complete, run.unlisted
 	case <-wait.Done():
 	}
 	windowsPrivateWalks.Lock()
 	defer windowsPrivateWalks.Unlock()
 	if age := windowsPrivateWalkNow().Sub(state.lastAt); !state.lastAt.IsZero() && age >= 0 && age <= windowsPrivateWalkReuse {
-		return append([]string(nil), state.last...), true
+		return append([]string(nil), state.last...), true, ""
 	}
 	if state.running == run {
 		run.reported = true
 	}
-	return nil, false
+	return nil, false, home
 }
 
 // errPrivateWalkReparse refuses a directory path that cannot be opened as

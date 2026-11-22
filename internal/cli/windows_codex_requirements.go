@@ -18,6 +18,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
@@ -170,6 +171,20 @@ func writeWindowsCodexRequirementsFailure(
 	return cause
 }
 
+// windowsCodexRequirementsHookImage is the launch image of a bin; a seam for
+// tests.
+var windowsCodexRequirementsHookImage = winpath.EnterpriseHookLaunchPath
+
+// windowsCodexRequirementsBin is the install's bin for a requirements layout:
+// the bin of its hook image (transition or launch image), never the hook's
+// own folder, which is a launch folder once Setup staged one (GAP-0751).
+func windowsCodexRequirementsBin(opts connector.WindowsCodexMachineRequirementsOptions) string {
+	if bin := winpath.EnterpriseHookImageBin(opts.HookBinary); bin != "" {
+		return filepath.Clean(bin)
+	}
+	return filepath.Dir(opts.HookBinary)
+}
+
 func resolveWindowsCodexRequirementsLayout(
 	action string,
 ) (connector.WindowsCodexMachineRequirementsOptions, error) {
@@ -274,20 +289,24 @@ func resolveWindowsCodexRequirementsLayout(
 		return opts, fmt.Errorf("resolve trusted ProgramData: %w", err)
 	}
 	requirementsPath := filepath.Join(programData, "OpenAI", "Codex", "requirements.toml")
+	// The hook Codex runs is the launch image of this install's bin once Setup
+	// staged it (GAP-0751), and windows_managed_dir names its folder, as it
+	// names the folder of the hook everywhere else (ManagedDir is
+	// Dir(HookBinary)). The gateway and the install root still come from the
+	// gateway's own bin.
+	hookBinary := filepath.Clean(windowsCodexRequirementsHookImage(filepath.Join(installRoot, "bin")))
 	opts = connector.WindowsCodexMachineRequirementsOptions{
 		RequirementsPath:                filepath.Clean(requirementsPath),
-		ManagedDir:                      filepath.Join(installRoot, "bin"),
-		HookBinary:                      filepath.Join(installRoot, "bin", "defenseclaw-hook.exe"),
+		ManagedDir:                      filepath.Dir(hookBinary),
+		HookBinary:                      hookBinary,
 		OwnershipPath:                   filepath.Join(stateRoot, "install", "codex-requirements-ownership.json"),
 		ManagedStatePath:                filepath.Join(filepath.Dir(requirementsPath), ".defenseclaw-managed-hooks.state"),
 		GatewayAddr:                     gatewayAddr,
 		GatewayServiceName:              gatewayServiceName,
 		AgentApplicationControlEnforced: applicationControl,
 		ClaudeEffectivePolicyVerified:   claudeEffectivePolicy,
-		HookContractID: connector.WindowsCodexManagedHookContract(
-			filepath.Join(installRoot, "bin", "defenseclaw-hook.exe"),
-		),
-		SecureClient: protectedConfig.SecureClientIntegration(),
+		HookContractID:                  connector.WindowsCodexManagedHookContract(hookBinary),
+		SecureClient:                    protectedConfig.SecureClientIntegration(),
 	}
 	if protectedConfig.StandaloneEnterprise() {
 		// Machine policy follows the administrator's connector configuration,
@@ -360,7 +379,7 @@ func resolveWindowsStagedRetireInstallRoot(executable string) (string, error) {
 	if !exists {
 		return "", errors.New("staged managed-hook retirement requires protected installed deployment metadata")
 	}
-	roots, err := windowsManagedLayout.roots(winpath.EnterpriseProfileStandalone)
+	roots, err := hookcli.WindowsManagedLayout.Roots(winpath.EnterpriseProfileStandalone)
 	if err != nil {
 		return "", err
 	}

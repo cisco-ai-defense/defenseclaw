@@ -40,7 +40,6 @@ jobs:
     runs-on: [self-hosted, Linux, ARM64, e2e]
     timeout-minutes: 30
     env:
-      DEFENSECLAW_GATEWAY_TOKEN: ${{ secrets.OPENCLAW_GATEWAY_TOKEN }}
       OPENCLAW_GATEWAY_TOKEN: ${{ secrets.OPENCLAW_GATEWAY_TOKEN }}
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
@@ -91,6 +90,12 @@ jobs:
             echo "DEFENSECLAW_HOME=${E2E_INSTALL_HOME}/.defenseclaw"
             echo "DEFENSECLAW_CUSTOM_PROVIDERS_PATH=${E2E_INSTALL_HOME}/.defenseclaw/custom-providers.json"
           } >> "$GITHUB_ENV"
+          # The DefenseClaw API token is its own value per run. It is never the
+          # OpenClaw gateway token: since 1.0.10 a DEFENSECLAW_GATEWAY_TOKEN
+          # equal to OPENCLAW_GATEWAY_TOKEN is skipped and the gateway mints one.
+          dc_token="$(openssl rand -hex 32)"
+          echo "::add-mask::${dc_token}"
+          echo "DEFENSECLAW_GATEWAY_TOKEN=${dc_token}" >> "$GITHUB_ENV"
 
       - name: Repair runner workspace ownership
         # This must run before checkout: the repo's own repair helpers live
@@ -722,7 +727,6 @@ jobs:
     runs-on: [self-hosted, Linux, ARM64, e2e]
     timeout-minutes: 45
     env:
-      DEFENSECLAW_GATEWAY_TOKEN: ${{ secrets.OPENCLAW_GATEWAY_TOKEN }}
       OPENCLAW_GATEWAY_TOKEN: ${{ secrets.OPENCLAW_GATEWAY_TOKEN }}
       # ANTHROPIC_API_KEY intentionally NOT plumbed into this job. The full-live
       # guardrail agent now runs on OpenClaw's stock amazon-bedrock provider
@@ -800,6 +804,12 @@ jobs:
             echo "DEFENSECLAW_HOME=${E2E_INSTALL_HOME}/.defenseclaw"
             echo "DEFENSECLAW_CUSTOM_PROVIDERS_PATH=${E2E_INSTALL_HOME}/.defenseclaw/custom-providers.json"
           } >> "$GITHUB_ENV"
+          # The DefenseClaw API token is its own value per run. It is never the
+          # OpenClaw gateway token: since 1.0.10 a DEFENSECLAW_GATEWAY_TOKEN
+          # equal to OPENCLAW_GATEWAY_TOKEN is skipped and the gateway mints one.
+          dc_token="$(openssl rand -hex 32)"
+          echo "::add-mask::${dc_token}"
+          echo "DEFENSECLAW_GATEWAY_TOKEN=${dc_token}" >> "$GITHUB_ENV"
 
       - name: Repair runner workspace ownership
         # This must run before checkout: the repo's own repair helpers live

@@ -14,11 +14,11 @@ This page is the reference for the [OpenClaw connector](/docs/connectors/opencla
 
 | Component | Role |
 | --- | --- |
-| Plugin (`extensions/defenseclaw/`, TypeScript) | Hooks OpenClaw's fetch interceptor and the `before_tool_call` lifecycle. |
+| Plugin (`extensions/defenseclaw/`, TypeScript) | Hooks OpenClaw's fetch interceptor and the `before_tool_call` lifecycle. On OpenClaw 2026.8.35 and later it also uses the native hooks `before_agent_run`, `after_tool_call` and `llm_output` ([Hook modes](/docs/connectors/openclaw#hook-modes)). |
 | `defenseclaw-gateway` (Go) | Receives plugin requests, evaluates policy, returns verdicts and writes the audit row. |
 | `defenseclaw` CLI (Python) | Runs setup and exposes the TUI for audit, alerts, logs and inventory. |
 
-The plugin's two checkpoints, the guardrail proxy and the inspect API, are drawn in the [connector page](/docs/connectors/openclaw#what-the-plugin-does).
+The plugin authenticates with a connector-scoped token that reaches only the routes it calls, not the management API ([Plugin credential](/docs/connectors/openclaw#plugin-credential)). The plugin's two checkpoints, the guardrail proxy and the inspect API, are drawn in the [connector page](/docs/connectors/openclaw#what-the-plugin-does).
 
 ## Protocol compatibility
 
@@ -77,8 +77,9 @@ For a `confirm` verdict in action mode the plugin returns OpenClaw's `requireApp
 
 | What | Path |
 | --- | --- |
-| Allow and load entries | `~/.openclaw/openclaw.json` |
-| Plugin | `~/.openclaw/extensions/defenseclaw/` (`openclaw.plugin.json`, `package.json`, `dist/index.js`) |
+| Allow and load entries | `openclaw.json` in the OpenClaw home (`~/.openclaw/openclaw.json`; `claw.home_dir` and `claw.config_file` move it) |
+| Plugin, managed install | `extensions/defenseclaw/` in the OpenClaw home (`openclaw.plugin.json`, `package.json`, `dist/index.js`) |
+| Plugin, administrator-installed | `connectors.openclaw.plugin_dir`, never written or deleted by DefenseClaw ([Administrator-installed plugin](/docs/connectors/openclaw#administrator-installed-plugin)) |
 | Hook scripts | `~/.defenseclaw/hooks` |
 
 DefenseClaw limits its OpenClaw-tree changes to `extensions/defenseclaw/` and its managed entries in `openclaw.json`. Backups are byte for byte and hash-checked. Teardown restores the file, or removes only DefenseClaw's entries when the file drifted.

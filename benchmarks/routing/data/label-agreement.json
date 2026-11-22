@@ -1,0 +1,9 @@
+{
+ "n": 56,
+ "category_agreement": 1.0,
+ "cohen_kappa": 1.0,
+ "allowed_set_exact": 0.9285714285714286,
+ "expected_alias_agreement": 0.9285714285714286,
+ "disagreements": [],
+ "labeler_vs_generator_intent": 1.0
+}

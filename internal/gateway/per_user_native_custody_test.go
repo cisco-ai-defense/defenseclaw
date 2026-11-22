@@ -14,7 +14,7 @@ import (
 )
 
 func TestPerUserNativeCapableHooksRecordHookOnlyCustody(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	for _, connectorName := range []string{"codex", "claudecode"} {
 		for _, prior := range []audit.ConnectorExportCustody{"", audit.ConnectorCustodyExternal, audit.ConnectorCustodyDefenseClaw} {
 			t.Run(connectorName+"/prior="+string(prior), func(t *testing.T) {
@@ -50,7 +50,7 @@ func TestPerUserNativeCapableHooksRecordHookOnlyCustody(t *testing.T) {
 }
 
 func TestPerUserSandboxNativeCustodyRemainsSeparate(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	server, store := newHookCorrelationServer(t, filepath.Join(t.TempDir(), "audit.db"))
 	defer store.Close() //nolint:errcheck
 	server.scannerCfg = config.DefaultConfig()
@@ -79,7 +79,7 @@ func TestPerUserSandboxNativeCustodyRemainsSeparate(t *testing.T) {
 }
 
 func TestManagedNativeCapableHooksKeepExternalCustodyUntilDelivery(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	for _, managedProfile := range []string{managed.ProfileStandalone, managed.ProfileSecureClient} {
 		t.Run(managedProfile, func(t *testing.T) {
 			server, store := newHookCorrelationServer(t, filepath.Join(t.TempDir(), "audit.db"))

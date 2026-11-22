@@ -15,7 +15,7 @@ import (
 )
 
 func TestReturnedCredentialMaterialLifecycleRequiresExactSuccessfulRebind(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	installDefaultProfileConnector(t, "claudecode")
 	store, logger := testStoreAndV8Logger(t)
 	cfg := &config.Config{}
@@ -76,7 +76,7 @@ func TestReturnedCredentialMaterialLifecycleRequiresExactSuccessfulRebind(t *tes
 }
 
 func TestReturnedCredentialMaterialLifecycleAcceptsOneExactFileRead(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	installDefaultProfileConnector(t, "claudecode")
 	store, logger := testStoreAndV8Logger(t)
 	cfg := &config.Config{}
@@ -103,7 +103,7 @@ func TestReturnedCredentialMaterialLifecycleAcceptsOneExactFileRead(t *testing.T
 }
 
 func TestReturnedCredentialMaterialLifecycleAbstainsWithoutCompleteProof(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	installDefaultProfileConnector(t, "claudecode")
 	store, logger := testStoreAndV8Logger(t)
 	cfg := &config.Config{}
@@ -190,7 +190,7 @@ func TestReturnedCredentialMaterialLifecycleAbstainsWithoutCompleteProof(t *test
 }
 
 func TestReturnedCredentialMaterialLifecycleSupportedConnectorContracts(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	const command = "impacket-GetUserSPNs -request EXAMPLE.TEST/user:secret"
 	credential := returnedTGSFixture()
 	tests := []struct {

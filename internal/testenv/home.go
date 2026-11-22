@@ -18,6 +18,7 @@
 package testenv
 
 import (
+	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -28,6 +29,7 @@ import (
 // directories to home for the lifetime of the test.
 func SetHome(t testing.TB, home string) {
 	t.Helper()
+	keepGoToolchainEnv(t)
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
@@ -44,4 +46,36 @@ func SetHome(t testing.TB, home string) {
 	t.Setenv("HOMEPATH", strings.TrimPrefix(home, volume))
 	t.Setenv("APPDATA", filepath.Join(home, "AppData", "Roaming"))
 	t.Setenv("LOCALAPPDATA", filepath.Join(home, "AppData", "Local"))
+}
+
+// keepGoToolchainEnv pins the go command's module cache, build cache, GOPATH
+// and go env file to where they are before the home moves. Their defaults
+// follow HOME and the user cache and config folders, so a test that builds a
+// helper (go build ./cmd/defenseclaw-hook-post) after SetHome or
+// IsolateAccount downloaded every module into the new home, and t.TempDir
+// could not remove the read-only module files: the test failed in cleanup on
+// a host without GOPATH or GOMODCACHE set (rel-1-0-10:GAP-0167). A value
+// already set is kept.
+func keepGoToolchainEnv(t testing.TB) {
+	t.Helper()
+	if os.Getenv("GOPATH") == "" {
+		if home, err := os.UserHomeDir(); err == nil && home != "" {
+			t.Setenv("GOPATH", filepath.Join(home, "go"))
+		}
+	}
+	if os.Getenv("GOMODCACHE") == "" {
+		if gopath := filepath.SplitList(os.Getenv("GOPATH")); len(gopath) != 0 && gopath[0] != "" {
+			t.Setenv("GOMODCACHE", filepath.Join(gopath[0], "pkg", "mod"))
+		}
+	}
+	if os.Getenv("GOCACHE") == "" {
+		if cache, err := os.UserCacheDir(); err == nil && cache != "" {
+			t.Setenv("GOCACHE", filepath.Join(cache, "go-build"))
+		}
+	}
+	if os.Getenv("GOENV") == "" {
+		if config, err := os.UserConfigDir(); err == nil && config != "" {
+			t.Setenv("GOENV", filepath.Join(config, "go", "env"))
+		}
+	}
 }

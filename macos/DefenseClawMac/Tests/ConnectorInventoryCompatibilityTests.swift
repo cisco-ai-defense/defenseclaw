@@ -104,6 +104,9 @@ struct ConnectorInventoryCompatibilityTests {
                 ],
             "Amp MCP sources match the current runtime contract"
         )
+        expect(MCPScanner.sources(connector: "kiro").map(\.path) == ["\(home)/.kiro/settings/mcp.json"],
+               "Kiro MCP discovery uses its user registration")
+        expect(SkillScanner.skillDirs(connector: "kiro").isEmpty, "Kiro steering documents are not fabricated skills")
         let opencode = MCPScanner.sources(connector: "opencode").map(\.path)
         expect(
             opencode == [

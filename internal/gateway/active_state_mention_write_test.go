@@ -19,7 +19,7 @@ func TestActiveStateMentionAllowedRealWriteBlocked(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX home")
 	}
-	home, cwd := r104ReviewHome(t)
+	home, cwd := r104ReviewHomeNoAlias(t)
 	state := filepath.Join(home, ".defenseclaw")
 	if err := os.MkdirAll(state, 0o700); err != nil {
 		t.Fatal(err)
@@ -60,7 +60,7 @@ func TestActiveStateMentionAllowedRealWriteBlocked(t *testing.T) {
 			findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
 				Input: input, Connector: connectorName, EnforcementCapable: true,
 			})
-			if got := buildVerdict(findings, "tool_call").Action == "block"; got != block {
+			if got := gap0747Blocked(findings, block); got != block {
 				t.Errorf("%s %q: blocked=%v, want %v (%v)",
 					connectorName, command, got, block, FindingStrings(findings))
 			}

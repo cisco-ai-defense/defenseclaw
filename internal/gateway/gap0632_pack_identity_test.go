@@ -201,9 +201,19 @@ func TestGAP0632PinnedPackIdentityKeepsStateProtection(t *testing.T) {
 					findings := dispatchTrustedAction(context.Background(), trustedActionRequest{
 						Input:     actionfacts.Input{Tool: "Bash", Command: command.text, CWD: project, ActiveHome: home, DialectHint: actionfacts.DialectPOSIX},
 						Connector: "codex", EnforcementCapable: true, generation: generation,
+						// The hook's tier decides the severity of a proven state
+						// write: a block in strict, a HIGH alert elsewhere
+						// (GAP-0747 owner tiering 2026-11-15T15:20Z).
+						StrictPolicy: cfg.HookPolicyTierForConnector("codex") == "strict",
 					})
-					if got := singleProfileActionForFindings(cfg, "codex", findings, false, true) == guardrailActionBlock; got != command.block {
-						t.Fatalf("block=%t, want %t; findings=%v", got, command.block, FindingStrings(findings))
+					strict := cfg.HookPolicyTierForConnector("codex") == "strict"
+					if got := singleProfileActionForFindings(cfg, "codex", findings, false, true) == guardrailActionBlock; got != (command.block && strict) {
+						t.Fatalf("tier %q: block=%t, want %t; findings=%v", cfg.HookPolicyTierForConnector("codex"), got, command.block && strict, FindingStrings(findings))
+					}
+					if command.block && !strict {
+						if problem := gap0747DefaultTierCheck(findings, true); problem != "" {
+							t.Fatalf("outside strict: %s; findings=%v", problem, FindingStrings(findings))
+						}
 					}
 				})
 			}

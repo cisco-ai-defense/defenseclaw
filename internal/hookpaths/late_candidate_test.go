@@ -71,9 +71,7 @@ func TestGAP0641LateAssignmentsAndProcessLinks(t *testing.T) {
 	if err := os.WriteFile(protected, []byte("state"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(protected, filepath.Join(cwd, "alias")); err != nil {
-		t.Fatal(err)
-	}
+	testSymlink(t, protected, filepath.Join(cwd, "alias"))
 	if grade := ProtectedReach(filepath.Join(cwd, "alias"), home, NewTargetMemo()); grade != GradeNamed {
 		t.Fatalf("direct protected alias grade=%s, want Named", grade)
 	}

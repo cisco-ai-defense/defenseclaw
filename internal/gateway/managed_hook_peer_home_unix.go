@@ -999,6 +999,19 @@ func verifiedIdentityDirectory(identity string, block bool) (useridentity.Direct
 	return managedHookPeerDirectory(uid, block)
 }
 
+// awaitVerifiedIdentityDirectory waits, at most wait or until ctx ends, for
+// the first directory lookup of a verified uid that has no cached facts yet
+// (identityCache.awaitCold).
+func awaitVerifiedIdentityDirectory(ctx context.Context, identity string, wait time.Duration) {
+	uid, err := strconv.Atoi(identity)
+	if err != nil {
+		return
+	}
+	if cache, key, ok := managedHookPeerHomes.directoryOf(uid); ok {
+		cache.awaitCold(ctx, key, wait)
+	}
+}
+
 // lookup returns the caller's normalized home, or "". A lookup that fails
 // returns the last home the uid resolved to.
 func (c *managedHookPeerHomeCache) lookup(uid int) string {

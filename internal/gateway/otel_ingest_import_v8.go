@@ -143,6 +143,13 @@ func (a *APIServer) importDecodedOTLPRequestV8(
 			if finalizeErr := a.finalizeNativeOTLPCustodyV8(correlated.ctx, correlated); finalizeErr != nil {
 				return addPrimary(leaf, otlpInboundLocalPersistenceFailed)
 			}
+			if p := leafResult.primary; p != nil && !p.invalidMapped && !p.invalidRecord && !p.persistenceFailed {
+				// Agent model calls also feed tokenomics (log.model.usage) when
+				// observability.tokenomics imports this connector. Only after the
+				// native custody of the leaf is final (the replay canary held),
+				// so a retried batch never counts one call twice.
+				a.recordNativeOTLPUsageV8(correlated.ctx, leaf, classification.match, authenticatedSource, receipt)
+			}
 		}
 		for _, derivative := range leafResult.derivatives {
 			switch {
@@ -1428,7 +1435,8 @@ func inboundAliasAnyValue(
 		var value *commonpb.AnyValue
 		var state otlpTypedAttributeState
 		value, state = leaf.attributes().lookup(source)
-		if state == otlpTypedAttributeAbsent {
+		if state == otlpTypedAttributeAbsent ||
+			(state == otlpTypedAttributeUnique && claudeCodeRedactedContentV8(value, alias, authenticatedSource)) {
 			continue
 		}
 		if state != otlpTypedAttributeUnique {
@@ -1451,12 +1459,40 @@ func inboundAliasAnyValue(
 		case "$authenticated_source":
 			return &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: authenticatedSource}}, otlpTypedAttributeUnique
 		case "$scalar_log_body":
+			if authenticatedSource == claudeCodeInboundSource {
+				// Claude Code log bodies are the event name
+				// (claude_code.user_prompt), never content.
+				continue
+			}
 			if text, ok := inboundLogBodyString(leaf.logRecord.GetBody()); ok {
 				return &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: text}}, otlpTypedAttributeUnique
 			}
 		}
 	}
 	return selected, selectedState
+}
+
+const (
+	claudeCodeInboundSource = "claudecode"
+	// claudeCodeRedactedPrompt is what Claude Code sends as the prompt of its
+	// user_prompt event unless OTEL_LOG_USER_PROMPTS is set.
+	claudeCodeRedactedPrompt = "<REDACTED>"
+)
+
+// claudeCodeRedactedContentV8 reports a Claude Code content attribute that
+// carries the redaction marker instead of the text. It is read as absent, so
+// the record says the input was not reported instead of preserving the marker
+// as the prompt.
+func claudeCodeRedactedContentV8(
+	value *commonpb.AnyValue,
+	alias observability.InboundAlias,
+	authenticatedSource string,
+) bool {
+	if authenticatedSource != claudeCodeInboundSource || alias.ValueType() != observability.InboundValueStructured {
+		return false
+	}
+	text, ok := value.GetValue().(*commonpb.AnyValue_StringValue)
+	return ok && text.StringValue == claudeCodeRedactedPrompt
 }
 
 // normalizeInboundAliasValueV8 applies only transformations named by the
@@ -1485,7 +1521,7 @@ func normalizeInboundAliasValueV8(
 		return nil, false
 	}
 	switch alias.ID() {
-	case "input-tokens-v1", "output-tokens-v1", "cached-input-tokens-v1":
+	case "input-tokens-v1", "output-tokens-v1", "cached-input-tokens-v1", "reasoning-tokens-v1":
 	default:
 		return nil, false
 	}

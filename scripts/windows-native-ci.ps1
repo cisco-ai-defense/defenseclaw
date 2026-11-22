@@ -1064,6 +1064,7 @@ function Invoke-WindowsNativeProcess {
         [string]$GoTestFailureSummaryPath = '',
         [string]$WorkingDirectory = '',
         [switch]$GoTestTimingSummary,
+        [switch]$GoTestEventSummary,
         [switch]$SuppressOutput
     )
     if ($GoTestFailureSummaryPath -and $SuppressOutput) {
@@ -1144,6 +1145,18 @@ function Invoke-WindowsNativeProcess {
                     '(?m)^\{"Time":"[^"]*","Action":"(pass|fail|skip)","Package":"([^"]+)","Elapsed":([0-9.]+)')) {
                 [Console]::Out.WriteLine(('[go-package-time] {0} {1} {2}' -f
                     $packageResult.Groups[2].Value, $packageResult.Groups[1].Value, $packageResult.Groups[3].Value))
+            }
+            [Console]::Out.Flush()
+        }
+        if ($GoTestEventSummary -and -not $SuppressOutput) {
+            # Every package event and top-level test event but output, from
+            # the full go test -json stream, for the recorded test times in
+            # scripts/test-timings/go-windows.json. The console copy below
+            # is bounded to its head and tail, and a gateway part's middle
+            # (its slow tests) never reached a refresh (GAP-1295).
+            foreach ($testEvent in [regex]::Matches([string]$rawStdout,
+                    '(?m)^\{"Time":"[^"]*","Action":"(?:start|run|pause|cont|pass|fail|skip)","Package":"[^"]+"(?:,"Test":"[^"/]+"(?=[,}])|(?!,"Test"))[^\r\n]*')) {
+                [Console]::Out.WriteLine('[go-test-event] ' + $testEvent.Value)
             }
             [Console]::Out.Flush()
         }

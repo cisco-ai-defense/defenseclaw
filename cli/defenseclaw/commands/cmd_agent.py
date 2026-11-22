@@ -4191,7 +4191,9 @@ def _resolve_gateway_target(
     1. ``--gateway-token-env`` CLI override → ``os.environ[<that>]``.
     2. Falls through to ``cfg.gateway.resolved_token()`` which itself
        checks ``cfg.gateway.token_env`` → ``DEFENSECLAW_GATEWAY_TOKEN``
-       → ``OPENCLAW_GATEWAY_TOKEN`` → ``cfg.gateway.token`` literal.
+       → ``cfg.gateway.token`` literal. ``OPENCLAW_GATEWAY_TOKEN`` is the
+       OpenClaw credential and never the DefenseClaw token (R-TOK), so an
+       override naming it, or a value equal to it, is not used.
 
     Returns the empty string for the token component when nothing is
     reachable; callers turn that into a friendly ClickException with
@@ -4199,7 +4201,14 @@ def _resolve_gateway_target(
     """
     host = gateway_host or "127.0.0.1"
     port = gateway_port or 18970
-    token = os.environ.get(gateway_token_env or "", "") if gateway_token_env else ""
+    from defenseclaw.config import OPENCLAW_GATEWAY_TOKEN_ENV, is_openclaw_gateway_token_env
+
+    openclaw = os.environ.get(OPENCLAW_GATEWAY_TOKEN_ENV, "").strip()
+    token = ""
+    if gateway_token_env and not is_openclaw_gateway_token_env(gateway_token_env):
+        token = os.environ.get(gateway_token_env, "")
+        if openclaw and token.strip() == openclaw:
+            token = ""
 
     cfg = getattr(app, "cfg", None)
     if cfg is None:
@@ -4226,9 +4235,9 @@ def _resolve_gateway_target(
     # SecretRef text an earlier build saved as a token is never one (#1404).
     from defenseclaw.connector_paths import is_secret_ref_text
 
-    for name in ("DEFENSECLAW_GATEWAY_TOKEN", "OPENCLAW_GATEWAY_TOKEN"):
-        if not token and not is_secret_ref_text(os.environ.get(name, "")):
-            token = os.environ.get(name, "")
+    fallback = os.environ.get("DEFENSECLAW_GATEWAY_TOKEN", "")
+    if not token and not is_secret_ref_text(fallback) and not (openclaw and fallback.strip() == openclaw):
+        token = fallback
 
     # The gateway bearer token authenticates to the *local* sidecar. Only
     # ever attach it to a loopback target: a non-loopback ``gw.host`` (a
