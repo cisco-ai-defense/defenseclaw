@@ -701,7 +701,7 @@ func newSubstrateSecretsCmd() *cobra.Command {
 to requests to the hosts the secret is bound to. These commands list the names you can use,
 store your own, and remove or test them. Values are never shown.`,
 	}
-	parent.AddCommand(newSubstrateSecretsListCmd(), newSubstrateSecretsSetCmd(), newSubstrateSecretsRmCmd(), newSubstrateSecretsTestCmd())
+	parent.AddCommand(newSubstrateSecretsTemplatesCmd(), newSubstrateSecretsAddCmd(), newSubstrateSecretsListCmd(), newSubstrateSecretsSetCmd(), newSubstrateSecretsRmCmd(), newSubstrateSecretsTestCmd())
 	return parent
 }
 

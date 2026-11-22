@@ -381,6 +381,80 @@ func (c *Client) SetSecret(ctx context.Context, name, value string) error {
 	return c.do(ctx, http.MethodPut, "secrets/"+url.PathEscape(name), nil, map[string]string{"value": value}, nil)
 }
 
+// SecretTemplate is one admin-approved way to bind a secret of your own.
+type SecretTemplate struct {
+	Name      string   `json:"name"`
+	Hosts     []string `json:"hosts"`
+	Header    string   `json:"header"`
+	Form      string   `json:"form"`
+	BasicUser string   `json:"basic_user,omitempty"`
+}
+
+func (t SecretTemplate) shown() SecretTemplate {
+	for _, f := range []*string{&t.Name, &t.Header, &t.Form, &t.BasicUser} {
+		*f = safetext.Line(*f)
+	}
+	hosts := make([]string, len(t.Hosts))
+	for i, h := range t.Hosts {
+		hosts[i] = safetext.Line(h)
+	}
+	t.Hosts = hosts
+	return t
+}
+
+// SecretTemplates lists the templates your profile may use and the
+// self-service mode (bindings or values_only).
+func (c *Client) SecretTemplates(ctx context.Context) ([]SecretTemplate, string, error) {
+	var out struct {
+		Templates []SecretTemplate `json:"templates"`
+		Mode      string           `json:"mode"`
+	}
+	if err := c.do(ctx, http.MethodGet, "secret-templates", nil, nil, &out); err != nil {
+		return nil, "", err
+	}
+	for i := range out.Templates {
+		out.Templates[i] = out.Templates[i].shown()
+	}
+	return out.Templates, safetext.Line(out.Mode), nil
+}
+
+// AddSecretRequest creates a binding of your own; Value is the plain
+// token (the gateway forms a basic credential itself).
+type AddSecretRequest struct {
+	Name      string    `json:"name"`
+	Template  string    `json:"template"`
+	Host      string    `json:"host"`
+	Value     string    `json:"value"`
+	Expires   time.Time `json:"expires,omitzero"`
+	AllowEcho bool      `json:"allow_echo,omitempty"`
+	User      string    `json:"user,omitempty"`
+}
+
+// AddSecretResult is the new binding; Reason is set when it waits on an
+// administrator (202).
+type AddSecretResult struct {
+	Name     string    `json:"name"`
+	ID       string    `json:"id"`
+	Template string    `json:"template"`
+	Host     string    `json:"host"`
+	Status   string    `json:"status"`
+	Reason   string    `json:"reason,omitempty"`
+	Expires  time.Time `json:"expires,omitzero"`
+}
+
+// AddSecret stores a new secret of your own for one host; the value
+// travels once, over TLS, and is never echoed.
+func (c *Client) AddSecret(ctx context.Context, req AddSecretRequest) (AddSecretResult, error) {
+	var out AddSecretResult
+	if err := c.do(ctx, http.MethodPost, "secrets", nil, req, &out); err != nil {
+		return AddSecretResult{}, err
+	}
+	for _, f := range []*string{&out.Name, &out.ID, &out.Template, &out.Host, &out.Status, &out.Reason} {
+		*f = safetext.Line(*f)
+	}
+	return out, nil
+}
+
 // RemoveSecret deletes a per-person secret.
 func (c *Client) RemoveSecret(ctx context.Context, name string) error {
 	return c.do(ctx, http.MethodDelete, "secrets/"+url.PathEscape(name), nil, nil, nil)

@@ -1059,6 +1059,96 @@
     "long": "A secret is a key an agent can use without ever seeing it: the cluster adds the real value\nto requests to the hosts the secret is bound to. These commands list the names you can use,\nstore your own, and remove or test them. Values are never shown."
   },
   {
+    "path": "substrate secrets add",
+    "use": "add \u003cname\u003e",
+    "short": "Add a secret of your own for one host, under a template",
+    "long": "Creates your own secret NAME for HOST under TEMPLATE (see secrets templates) and stores its\nvalue. A host the template covers is used from your agents' next request; any other host waits\nuntil an administrator approves it. For a basic template (git hosts, PyPI) give only the token:\nthe cluster adds the user name. generic-basic needs --user.\n\nThe value comes from exactly one source: the terminal without echo (no flag), --from-gh (the\nGitHub CLI's sign-in), --from-keychain SERVICE (macOS keychain), --from-op op://vault/item/field\n(1Password CLI), --from-file PATH, --stdin or --from-env VAR. It is never put on a command line\nand never printed.",
+    "example": "defenseclaw substrate secrets add gl-work --template gitlab --host git.corp.example --from-op op://eng/gitlab/token\ndefenseclaw substrate secrets add nexus --template generic-basic --host nexus.corp.example --user ci-bot --from-file ~/.nexus-token",
+    "args": [
+      {
+        "name": "name",
+        "required": true
+      }
+    ],
+    "flags": [
+      {
+        "name": "account",
+        "type": "string",
+        "usage": "with --from-keychain: the item's account"
+      },
+      {
+        "name": "allow-echo",
+        "type": "bool",
+        "default": "false",
+        "usage": "allow a host that returns the requests it gets (only when your administrator allows it)"
+      },
+      {
+        "name": "context",
+        "type": "string",
+        "usage": "cluster to use (default: the one you signed in to last)",
+        "metavar": "NAME"
+      },
+      {
+        "name": "expires",
+        "type": "string",
+        "usage": "when the secret stops being used: 90d, 12h or a date (2027-01-31); at most 400 days"
+      },
+      {
+        "name": "from-env",
+        "type": "string",
+        "usage": "read the value from this environment variable"
+      },
+      {
+        "name": "from-file",
+        "type": "string",
+        "usage": "read the value from this file"
+      },
+      {
+        "name": "from-gh",
+        "type": "bool",
+        "default": "false",
+        "usage": "read the value from the GitHub CLI's sign-in (gh auth token)"
+      },
+      {
+        "name": "from-keychain",
+        "type": "string",
+        "usage": "read the value from this macOS keychain item (its service name)"
+      },
+      {
+        "name": "from-op",
+        "type": "string",
+        "usage": "read the value from 1Password (op://vault/item/field)"
+      },
+      {
+        "name": "gh-host",
+        "type": "string",
+        "usage": "with --from-gh: the GitHub host to read the sign-in of (default: gh's own)"
+      },
+      {
+        "name": "host",
+        "type": "string",
+        "usage": "the one host the secret is for"
+      },
+      {
+        "name": "stdin",
+        "type": "bool",
+        "default": "false",
+        "usage": "read the value from standard input"
+      },
+      {
+        "name": "template",
+        "type": "string",
+        "usage": "the template to use (see secrets templates)",
+        "metavar": "NAME"
+      },
+      {
+        "name": "user",
+        "type": "string",
+        "usage": "the user name for a basic template (generic-basic needs it)"
+      }
+    ]
+  },
+  {
     "path": "substrate secrets list",
     "use": "list",
     "short": "List secret names you can use",
@@ -1189,6 +1279,34 @@
         "type": "bool",
         "default": "false",
         "usage": "read the value from standard input"
+      }
+    ]
+  },
+  {
+    "path": "substrate secrets templates",
+    "use": "templates",
+    "short": "List the templates you may use to add your own secrets",
+    "long": "Lists the templates your administrator approved for your own secrets: the hosts each one\ncovers without an approval and how the value goes into the request. Use one with secrets add.",
+    "flags": [
+      {
+        "name": "context",
+        "type": "string",
+        "usage": "cluster to use (default: the one you signed in to last)",
+        "metavar": "NAME"
+      },
+      {
+        "name": "json",
+        "type": "bool",
+        "default": "false",
+        "usage": "same as --output json"
+      },
+      {
+        "name": "output",
+        "shorthand": "o",
+        "type": "string",
+        "default": "text",
+        "usage": "output format: text or json",
+        "metavar": "FORMAT"
       }
     ]
   },
