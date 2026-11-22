@@ -83,6 +83,9 @@ func TestSandboxVaultCapturesIntoSealedVaultWithoutKey(t *testing.T) {
 	if bytes.Contains(raw, []byte(key)) || bytes.Contains(raw, []byte("value-other")) || !bytes.Contains(raw, []byte(`"version": 2`)) {
 		t.Fatal("the vault is not sealed after the capture")
 	}
+	if _, err := vault.OpenWith(dir, keys).Confirm("ANTHROPIC_API_KEY"); err != nil {
+		t.Fatal(err)
+	}
 	if _, v, err := vault.OpenWith(dir, keys).Resolve("ANTHROPIC_API_KEY"); err != nil || v != key {
 		t.Fatalf("cli resolve: %v", err)
 	}

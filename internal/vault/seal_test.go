@@ -521,6 +521,13 @@ func TestVaultSealDaemonCapturesWithoutKey(t *testing.T) {
 	if fileVersionOf(t, raw) != sealedVersion {
 		t.Fatal("the daemon unsealed the vault")
 	}
+	// Captured entries need confirming first (metadata only: no key).
+	if _, err := daemon.Confirm("GITHUB_TOKEN"); err != nil {
+		t.Fatalf("the daemon could not confirm: %v", err)
+	}
+	if calls, _ := ks.count(); calls != callsBefore {
+		t.Fatal("confirm called the keystore")
+	}
 	if _, _, err := daemon.Resolve("GITHUB_TOKEN"); !errors.Is(err, ErrKeyUnavailable) {
 		t.Fatalf("the daemon opened a value: %v", err)
 	}
@@ -584,6 +591,9 @@ func TestVaultSealConcurrentWriters(t *testing.T) {
 	for _, e := range list {
 		if e.Source != SourceCaptured {
 			continue
+		}
+		if _, err := OpenWith(cli.Dir(), ks).Confirm(e.Name); err != nil {
+			t.Fatal(err)
 		}
 		_, v, err := OpenWith(cli.Dir(), ks).Resolve(e.Name)
 		if err != nil {
