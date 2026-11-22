@@ -127,7 +127,9 @@ func holdKnownOnNameMaybe(facts []*semanticpb.EffectFact) {
 			fact.GetRoleState() != string(effects.RoleStateKnown) ||
 			fact.GetKind() == string(effects.KindOpaque)
 		for _, match := range target.GetProtected() {
-			if uncertainEffect && match.GetState() == string(gradeKnown) {
+			// An inode match is direct resolver evidence for the physical file;
+			// retain it when command role or placement remains uncertain.
+			if uncertainEffect && match.GetState() == string(gradeKnown) && match.GetReason() != "inode" {
 				match.State = string(gradeUnknown)
 				match.Reason = "call_maybe"
 			}

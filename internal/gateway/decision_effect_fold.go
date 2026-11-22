@@ -54,6 +54,20 @@ func hasEffectFinding(findings []RuleFinding) bool {
 	return false
 }
 
+// withEffectsFoldedIntoCall is the call's findings without the effect
+// findings a 1.0.10 finding of the same call folds (decide.FoldsIntoLegacy).
+// The effect join (joinEffectFindings) runs inside the rule dispatch, before
+// the readings beside it add their 1.0.10 findings (the agent hook config
+// guard's tamper.agent_hook_config_write, a proved state write's
+// tamper.detector_state_write, a twin or a second reading of the call): an
+// effect finding those name stood beside them, added its own rule id and
+// graded the set above the rule naming it (DET111 ruling A;
+// rel-1-0-10:GAP-1243, GAP-1308). The fold runs once more on the final list
+// of the call, so every route keeps the 1.0.10 rule set.
+func withEffectsFoldedIntoCall(findings []RuleFinding) []RuleFinding {
+	return withoutEffectsFoldedInto(findings, findings)
+}
+
 // withoutEffectsFoldedInto is findings without the effect findings a 1.0.10
 // finding of other folds (decide.FoldsIntoLegacy).
 func withoutEffectsFoldedInto(findings, other []RuleFinding) []RuleFinding {
