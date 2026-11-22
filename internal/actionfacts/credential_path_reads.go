@@ -456,6 +456,10 @@ type credentialPathResolver struct {
 	held       map[credentialHeldRead]bool
 	links      []credentialPathLink
 	walkUsed   credentialPathWalkLimits // the walk budget the searches read
+	// walkedBy holds the folders each command already searched, as named
+	// and as resolved: a folder named again by the same command adds
+	// nothing, so grep -r K . . . walks it once (rel-1-0-10:GAP-1668).
+	walkedBy map[credentialWalkKey]bool
 	// rgConfig: the call sets RIPGREP_CONFIG_PATH, so an rg may read
 	// options (--hidden) from a file (substrate-1:GAP-0682).
 	rgConfig bool
@@ -1588,6 +1592,19 @@ func (r *credentialPathResolver) searchFolder(id int64, folder string, filter cr
 		}
 		dir = filepath.Join(r.cwd, dir)
 	}
+	// The folder as rg names its paths: the shell expands ~/.
+	shown := folder
+	if strings.HasPrefix(shown, "~/") && r.home != "" {
+		shown = r.home + shown[1:]
+	}
+	key := credentialWalkKey{id: id, dir: filepath.Clean(dir), shown: shown}
+	if r.walkedBy[key] {
+		return
+	}
+	if r.walkedBy == nil {
+		r.walkedBy = make(map[credentialWalkKey]bool)
+	}
+	r.walkedBy[key] = true
 	if !r.lookups.Take() {
 		return
 	}
@@ -1598,11 +1615,6 @@ func (r *credentialPathResolver) searchFolder(id int64, folder string, filter cr
 	if left.spent() {
 		r.add(id, "", true)
 		return
-	}
-	// The folder as rg names its paths: the shell expands ~/.
-	shown := folder
-	if strings.HasPrefix(shown, "~/") && r.home != "" {
-		shown = r.home + shown[1:]
 	}
 	walk := credentialPathWalk(filepath.Clean(dir), filepath.ToSlash(shown), filter, left)
 	r.walkUsed = r.walkUsed.plus(walk.used)
@@ -1615,6 +1627,13 @@ func (r *credentialPathResolver) searchFolder(id int64, folder string, filter cr
 	if walk.cut {
 		r.add(id, "", true)
 	}
+}
+
+// credentialWalkKey is one folder one command searched: its resolved path
+// and its spelling, which the found files are named under.
+type credentialWalkKey struct {
+	id         int64
+	dir, shown string
 }
 
 // credentialPathWalkLimits is what a walk reads: folders, entries, lookups.
