@@ -156,7 +156,7 @@ func openshellSettingsOf(goos string, cfg *config.Config) openshellSettings {
 	s.Driver = o.SandboxDriver(goos)
 	s.Fallback = o.SandboxDriverFallback(goos, cfg.OpenShell.Admin)
 	s.Version = strings.TrimSpace(o.Version)
-	if v, raised, possible := openshell.ManagedVersionPin(s.Version); raised {
+	if v, raised, possible := openshell.ManagedVersionPin(s.Version, s.Install == config.EnterpriseOpenShellInstallSetup); raised {
 		s.Version, s.RaisedFrom = v, s.Version
 	} else if !possible {
 		s.FloorConflict = true
@@ -823,7 +823,7 @@ func (a *openshellApplied) switchKey() string {
 		// Moving any old requirement across the floor does require a switch;
 		// keep a running legacy sandbox until OpenShell reports it stopped.
 		version = ""
-		if _, raised, possible := openshell.ManagedVersionPin(a.Version); raised || !possible {
+		if _, raised, possible := openshell.ManagedVersionPin(a.Version, false); raised || !possible {
 			version = "below-floor"
 		}
 	}
