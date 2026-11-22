@@ -215,9 +215,14 @@ func (s *passthroughStream) run() {
 		sseCalls = newSSEToolCalls(p.maxBodyValues())
 	}
 	framer := &sseFramer{ndjson: s.ndjson}
-	var bedrockPending []byte // the start of a Bedrock frame whose end has not come
-	var queue [][]byte        // events read and not yet sent
-	var queueAt []time.Time   // when each event of the queue was read
+	// tail is the wire shape of the block tail; sent is what the agent got
+	// of the content blocks, from the marks of the events sent (GAP-1206).
+	tail := streamTailOf(s.path, s.provider, s.ndjson)
+	sent := newStreamSent()
+	var bedrockPending []byte  // the start of a Bedrock frame whose end has not come
+	var queue [][]byte         // events read and not yet sent
+	var queueAt []time.Time    // when each event of the queue was read
+	var queueMark []streamMark // the content blocks each event of the queue opens or closes
 	queueBytes := 0
 	relN := 0      // the first relN events of the queue are not held behind an open tool call
 	heldBytes := 0 // bytes of the events held behind an open tool call
@@ -264,14 +269,15 @@ func (s *passthroughStream) run() {
 		if relN == 0 {
 			return
 		}
-		for _, ev := range queue[:relN] {
+		for i, ev := range queue[:relN] {
 			_, _ = w.Write(ev)
 			queueBytes -= len(ev)
 			released += len(ev)
+			sent.add(queueMark[i])
 		}
-		queue, queueAt = queue[relN:], queueAt[relN:]
+		queue, queueAt, queueMark = queue[relN:], queueAt[relN:], queueMark[relN:]
 		if len(queue) == 0 {
-			queue, queueAt = nil, nil
+			queue, queueAt, queueMark = nil, nil, nil
 		}
 		relN = 0
 		if flusher != nil {
@@ -299,16 +305,17 @@ func (s *passthroughStream) run() {
 	}
 	// endBlock ends a refused stream: the whole block reply when nothing was
 	// sent yet, else the block as the last assistant text of the stream
-	// under way. Held events are dropped.
+	// under way, in its own shape after the last content block the agent
+	// got (GAP-1206). Held events are dropped.
 	endBlock := func() {
 		switch {
 		case released == 0:
 			blockedReply(sseBlockMsg)
 		case sseCalls != nil:
-			sseCalls.writeSSEBlockTail(w, s.model, sseBlockMsg)
+			writeStreamBlockTail(w, tail, sseCalls, sent, s.model, sseBlockMsg)
 		default:
 			hw := &headersSentWriter{ResponseWriter: w}
-			s.bedrock.writeBlockTail(hw, sseBlockMsg)
+			s.bedrock.writeBlockTail(hw, sent.bedrock+1, sseBlockMsg)
 			hw.Flush()
 		}
 	}
@@ -597,6 +604,14 @@ func (s *passthroughStream) run() {
 		}
 		queue = append(queue, ev.Raw)
 		queueAt = append(queueAt, lastRead)
+		mark := noStreamMark
+		switch {
+		case s.bedrock != nil:
+			mark.bedrock = s.bedrock.maxIndex
+		case tail == streamTailAnthropic && ev.HasData:
+			mark = anthropicStreamMark(ev.Data)
+		}
+		queueMark = append(queueMark, mark)
 		queueBytes += len(ev.Raw)
 		if sseCalls != nil && mode == "action" && !holdOff {
 			if sseCalls.Open() {

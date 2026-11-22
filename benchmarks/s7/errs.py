@@ -1,26 +1,52 @@
 #!/usr/bin/env python3
 """FP/FN root-cause clusters for one deterministic run. Prints redacted examples only."""
-import json, sys, re, collections, random
+
+import collections
+import json
+import random
+import re
+import sys
+
 corpus, dec, out = sys.argv[1], sys.argv[2], sys.argv[3]
-RX = [(re.compile(r"\b\d{1,3}(\.\d{1,3}){3}\b"), "<ip>"), (re.compile(r"[\w.+-]+@[\w-]+\.[\w.]+"), "<email>"),
-      (re.compile(r"https?://[^\s'\"/]+"), "https://<host>"), (re.compile(r"\b[A-Fa-f0-9]{24,}\b"), "<hex>"),
-      (re.compile(r"\b[A-Za-z0-9+/_-]{32,}={0,2}"), "<token>"), (re.compile(r"/home/[^/\s]+"), "/home/<user>"),
-      (re.compile(r"(?i)(pass(word)?|pwd|secret|token|key)([=: ]+)\S+"), r"\1\3<redacted>"),
-      (re.compile(r"(?i)\b(corp|ad|dc\d*)\.[\w.-]+\b"), "<domain>"), (re.compile(r"\\\\[^\\\s]+\\"), r"\\\\<host>\\")]
+RX = [
+    (re.compile(r"\b\d{1,3}(\.\d{1,3}){3}\b"), "<ip>"),
+    (re.compile(r"[\w.+-]+@[\w-]+\.[\w.]+"), "<email>"),
+    (re.compile(r"https?://[^\s'\"/]+"), "https://<host>"),
+    (re.compile(r"\b[A-Fa-f0-9]{24,}\b"), "<hex>"),
+    (re.compile(r"\b[A-Za-z0-9+/_-]{32,}={0,2}"), "<token>"),
+    (re.compile(r"/home/[^/\s]+"), "/home/<user>"),
+    (re.compile(r"(?i)(pass(word)?|pwd|secret|token|key)([=: ]+)\S+"), r"\1\3<redacted>"),
+    (re.compile(r"(?i)\b(corp|ad|dc\d*)\.[\w.-]+\b"), "<domain>"),
+    (re.compile(r"\\\\[^\\\s]+\\"), r"\\\\<host>\\"),
+]
+
+
 def red(s, n=140):
     s = (s or "").replace("\n", " ")
-    for rx, rep in RX: s = rx.sub(rep, s)
+    for rx, rep in RX:
+        s = rx.sub(rep, s)
     return s[:n]
+
+
 cases = {}
 for l in open(corpus):
-    r = json.loads(l); t = r["truth"]
+    r = json.loads(l)
+    t = r["truth"]
     evs = r["payload"].get("events") or [r["payload"]]
-    cases[r["id"]] = dict(unsafe=t.get("source_truth") in ("malicious", "sensitive"), disp=t.get("expected_disposition"),
-        dataset=r["source"]["dataset"], cats=t.get("categories") or [], label_source=t.get("label_source"),
-        texts=[(e.get("tool_name"), e.get("command") or json.dumps(e.get("args"))[:400]) for e in evs])
+    cases[r["id"]] = dict(
+        unsafe=t.get("source_truth") in ("malicious", "sensitive"),
+        disp=t.get("expected_disposition"),
+        dataset=r["source"]["dataset"],
+        cats=t.get("categories") or [],
+        label_source=t.get("label_source"),
+        texts=[(e.get("tool_name"), e.get("command") or json.dumps(e.get("args"))[:400]) for e in evs],
+    )
 dec_by = collections.defaultdict(list)
 for l in open(dec):
-    r = json.loads(l); dec_by[r["case"]].append(r)
+    r = json.loads(l)
+    dec_by[r["case"]].append(r)
+
+
 def rules_of(r):
     ids = set()
     for f in r.get("findings") or []:
@@ -28,8 +54,13 @@ def rules_of(r):
     for f in (r.get("det") or {}).get("findings") or []:
         ids.add(f["rule"])
     return ids
-fp = collections.defaultdict(list); fn = collections.defaultdict(list); weak = collections.defaultdict(list)
-fp_rule = collections.Counter(); fp_rule_block = collections.Counter()
+
+
+fp = collections.defaultdict(list)
+fn = collections.defaultdict(list)
+weak = collections.defaultdict(list)
+fp_rule = collections.Counter()
+fp_rule_block = collections.Counter()
 for cid, c in cases.items():
     rs = sorted(dec_by[cid], key=lambda r: r["idx"])
     blocked = any(r["action"] == "block" for r in rs)
@@ -37,10 +68,13 @@ for cid, c in cases.items():
     if not c["unsafe"]:
         if alerted:
             hit = [r for r in rs if r["raw_action"] in ("alert", "block", "confirm") or r["action"] == "block"]
-            rid = sorted(set().union(*[set(f.split(":", 1)[0] for f in (r.get("findings") or [])) for r in hit])) or ["(none)"]
+            rid = sorted(set().union(*[set(f.split(":", 1)[0] for f in (r.get("findings") or [])) for r in hit])) or [
+                "(none)"
+            ]
             for x in rid:
                 fp_rule[x] += 1
-                if blocked: fp_rule_block[x] += 1
+                if blocked:
+                    fp_rule_block[x] += 1
             key = ("block " if blocked else "alert ") + ",".join(rid[:3])
             fp[key].append((cid, red(hit[0].get("reason"), 90), red(c["texts"][hit[0]["idx"]][1])))
         continue
@@ -76,13 +110,23 @@ for cid, c in cases.items():
     ex = next((r for r in rs if r["mapped"] == "shell"), rs[0])
     fn[cause].append((cid, c["dataset"].split("/")[-1] + ":" + ",".join(c["cats"][:2]), red(c["texts"][ex["idx"]][1])))
 rnd = random.Random(7)
-report = {"fp": {k: len(v) for k, v in fp.items()}, "weak": {k: len(v) for k, v in weak.items()}, "fn": {k: len(v) for k, v in fn.items()},
-          "fp_rules_cases": fp_rule.most_common(), "fp_rules_block_cases": fp_rule_block.most_common()}
+report = {
+    "fp": {k: len(v) for k, v in fp.items()},
+    "weak": {k: len(v) for k, v in weak.items()},
+    "fn": {k: len(v) for k, v in fn.items()},
+    "fp_rules_cases": fp_rule.most_common(),
+    "fp_rules_block_cases": fp_rule_block.most_common(),
+}
+
+
 def show(title, d):
     print("##", title, "total", sum(len(v) for v in d.values()))
     for k, v in sorted(d.items(), key=lambda kv: -len(kv[1])):
         print(f"  [{len(v)}] {k}")
-        for e in rnd.sample(v, min(3, len(v))): print("      -", e[1], "|", e[2])
+        for e in rnd.sample(v, min(3, len(v))):
+            print("      -", e[1], "|", e[2])
+
+
 show("FALSE POSITIVES (benign alerted/blocked)", fp)
 show("DETECTED BUT NOT BLOCKED (unsafe, alert only)", weak)
 show("FALSE NEGATIVES (unsafe, nothing)", fn)

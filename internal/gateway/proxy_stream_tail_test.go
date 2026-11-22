@@ -327,10 +327,8 @@ func streamTailReceivedText(f streamTailFormat, out string) string {
 
 // streamTailUpstreamEvents is the Anthropic events of the eventstream frames
 // in out, without the block tail a refused Bedrock stream ends with
-// (bedrockEventStreamText.writeBlockTail): a text block opened after every
-// block of the reply that carries the DefenseClaw block message, then
-// message_delta and message_stop. A trailing
-// partial frame is no event to the client.
+// (bedrockEventStreamText.writeBlockTail, streamTailWithoutBlockTail). A
+// trailing partial frame is no event to the client.
 func streamTailUpstreamEvents(out string) []string {
 	var events []string
 	dec, r := eventstream.NewDecoder(), strings.NewReader(out)
@@ -346,6 +344,27 @@ func streamTailUpstreamEvents(out string) []string {
 			events = append(events, string(chunk.Bytes))
 		}
 	}
+	return streamTailWithoutBlockTail(events)
+}
+
+// streamTailAnthropicSSEEvents is the data of the Anthropic Messages SSE
+// events in out, without the block tail a refused stream ends with
+// (writeAnthropicBlockTail, rel-1-0-10:GAP-1206).
+func streamTailAnthropicSSEEvents(out string) []string {
+	var events []string
+	for _, line := range strings.Split(out, "\n") {
+		if d, ok := strings.CutPrefix(strings.TrimSpace(line), "data: "); ok {
+			events = append(events, d)
+		}
+	}
+	return streamTailWithoutBlockTail(events)
+}
+
+// streamTailWithoutBlockTail is events, Anthropic Messages events, without
+// the block tail the proxy ends a refused stream with: a text block opened
+// after every block of the reply that carries the DefenseClaw block message,
+// then message_delta and message_stop.
+func streamTailWithoutBlockTail(events []string) []string {
 	type ev struct {
 		Type         string `json:"type"`
 		Index        *int   `json:"index"`
@@ -377,13 +396,20 @@ func streamTailUpstreamEvents(out string) []string {
 }
 
 // streamTailSentTerminal reports that the upstream's terminal event reached
-// the client: on an eventstream a message_stop event that is not part of the
-// proxy's block tail.
+// the client: on an eventstream, and in an Anthropic Messages SSE stream, a
+// message_stop event that is not part of the proxy's block tail (GAP-1206:
+// the tail ends the message as the API does).
 func streamTailSentTerminal(f streamTailFormat, out string) bool {
-	if f.ctype != streamTailEventStream {
+	var events []string
+	switch {
+	case f.ctype == streamTailEventStream:
+		events = streamTailUpstreamEvents(out)
+	case f.provider == "anthropic" && f.ctype == streamTailSSE:
+		events = streamTailAnthropicSSEEvents(out)
+	default:
 		return strings.Contains(out, f.terminal)
 	}
-	for _, e := range streamTailUpstreamEvents(out) {
+	for _, e := range events {
 		var ev struct {
 			Type string `json:"type"`
 		}
