@@ -1084,7 +1084,7 @@ configuration. Renaming a remote server alias creates a new component.
 When a local or remote MCP admission scan completes, DefenseClaw preserves the bounded tool
 names returned by its existing `tools/list` request even if the scanner reports
 zero findings. Authenticated agent hooks also record the names of MCP tools
-called at runtime. Managed local and remote inventory emit these as `mcp_tool` components with
+called at runtime. The local and remote MCP inventory emit these as `mcp_tool` components with
 the current parent server component ID, `advertised` or `observed` source, and
 the UTC observation time. It exports names only: tool descriptions, input
 schemas, call arguments, and results are excluded. A completed empty listing
@@ -1115,9 +1115,13 @@ principal catalog. Remote tool lineage follows the alias-based server ID.
 DefenseClaw reuses the scanner's existing remote
 `tools/list` request and does not start an additional endpoint probe. If an
 older scanner omits the tool-list field, the gateway marks the listing unknown
-and keeps the last complete managed snapshot. Only managed enterprise mode
-records this tool inventory; parent identities refresh with inventory
-publication. An observed call alone does not mark a listing complete.
+and keeps the last complete snapshot. The gateway records this tool inventory
+whenever it sends the endpoint inventory: on a Secure Client endpoint, and on
+a per-user or standalone enterprise install with `ai_discovery` on. The
+advertised tools come from the watcher's MCP admission scans, so with
+`gateway.watcher.enabled` off a server lists only the tools of earlier scans.
+Parent identities refresh with inventory publication. An observed call alone
+does not mark a listing complete.
 The `defenseclaw.inventory.mcp_tool_events` counter distinguishes listing,
 authenticated-call observation, and export submission using fixed outcome and
 reason labels. An observation whose verified server parent is unavailable uses

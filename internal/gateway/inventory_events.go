@@ -239,11 +239,10 @@ func emitEndpointInventory(
 	if ctx == nil || emitter == nil {
 		return nil
 	}
-	secureClient := ManagedEnterpriseActive()
-	if !secureClient && (cfg == nil || !cfg.AIDiscovery.Enabled) {
-		// Outside Secure Client the inventory follows ai_discovery.enabled.
+	if !endpointInventoryOn(cfg) {
 		return nil
 	}
+	secureClient := ManagedEnterpriseActive()
 	inventoryAction := func(managedAction observability.ProducerKey) observability.ProducerKey {
 		return endpointInventoryAction(managedAction, secureClient)
 	}
@@ -1423,6 +1422,13 @@ var operatorInventoryActions = map[observability.ProducerKey]observability.Produ
 	config.ObservabilityV8SkillInventoryAction:     config.ObservabilityV8ManagedSkillInventoryAction,
 	config.ObservabilityV8PluginInventoryAction:    config.ObservabilityV8ManagedPluginInventoryAction,
 	config.ObservabilityV8AgentInventoryAction:     config.ObservabilityV8ManagedAgentInventoryAction,
+}
+
+// endpointInventoryOn reports whether the gateway sends the endpoint inventory
+// with cfg: always on a Secure Client endpoint; elsewhere (a per-user or a
+// standalone enterprise install) only with ai_discovery.enabled.
+func endpointInventoryOn(cfg *config.Config) bool {
+	return ManagedEnterpriseActive() || cfg != nil && cfg.AIDiscovery.Enabled
 }
 
 // endpointInventoryAction is the action of a managed inventory collection on

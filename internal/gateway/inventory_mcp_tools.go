@@ -13,6 +13,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 const (
@@ -290,8 +291,10 @@ func (m *mcpToolInventory) recordMetric(ctx context.Context, stage, outcome, rea
 	}
 }
 
-func (a *APIServer) recordObservedMCPToolIfManaged(ctx context.Context, req agentHookRequest) {
-	if !ManagedEnterpriseActive() || req.SuppressCorrelationEmit && !req.CorrelationUnavailable {
+// recordObservedMCPToolIfInventoryOn records an authenticated MCP tool call
+// while the gateway sends the endpoint inventory (endpointInventoryOn).
+func (a *APIServer) recordObservedMCPToolIfInventoryOn(ctx context.Context, req agentHookRequest) {
+	if req.SuppressCorrelationEmit && !req.CorrelationUnavailable || !endpointInventoryOn(a.liveConfig()) {
 		return
 	}
 	a.recordObservedMCPTool(ctx, req, time.Now())
@@ -831,6 +834,25 @@ func (m *mcpToolInventory) restoreToolLocked(key string, tool audit.MCPObservedT
 	if current := m.observed[key][tool.ToolName]; current.IsZero() || restoredAt.After(current) {
 		m.observed[key][tool.ToolName] = restoredAt
 	}
+}
+
+// attachStore makes store the durable state of the tool inventory, in every
+// product. The gateway reads it now when it may send the endpoint inventory
+// (a managed machine, or ai_discovery on); otherwise the first inventory cycle
+// reads it (retryRestoreFromStore), so an install with the inventory off
+// reads nothing.
+func (m *mcpToolInventory) attachStore(ctx context.Context, cfg *config.Config, store mcpObservedToolStore) error {
+	if m == nil || store == nil || cfg == nil {
+		return nil
+	}
+	m.store = store
+	if managed.IsManagedEnterprise(cfg.DeploymentMode) || cfg.AIDiscovery.Enabled {
+		return m.restoreFromStore(ctx)
+	}
+	m.mu.Lock()
+	m.observedRestoreIncomplete, m.advertisedRestoreIncomplete = true, true
+	m.mu.Unlock()
+	return nil
 }
 
 func (m *mcpToolInventory) restoreFromStore(ctx context.Context) error {
