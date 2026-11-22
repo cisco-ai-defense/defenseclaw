@@ -27,8 +27,8 @@ import (
 //	    install. On the owner's DefenseClaw development traces a block in the
 //	    default pack stopped 25 agent sessions that test DefenseClaw. The
 //	    pack data keeps the rule at CRITICAL; the per-user default and
-//	    permissive tiers build the finding alert-only (the same split as an
-//	    MAYBE unresolved authorized-keys link hold).
+//	    permissive tiers build the finding alert-only; this explicit owner
+//	    split is independent of the unresolved authorized-keys MAYBE proof.
 //	tamper.defenseclaw_control_unproven  HIGH: a DefenseClaw command or a
 //	    dynamic target the parse could not resolve. The unknown tier: an
 //	    alert in the default and permissive packs, a block in strict.
