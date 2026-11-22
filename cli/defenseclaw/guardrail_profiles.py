@@ -265,6 +265,9 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             # 1.0.10 (s7/g0210port-r2 on rel da4177e225, rel-1-0-10:GAP-0210, GAP-1267, GAP-1268): SEC-HF-TOKEN and
             # the SEC-PASSWORD-ASSIGN value class (backticks, next line, comma) in secrets.yaml.
             "185cf3ac23ddfdb95542daad3d62f3e165da9d62edfc08802497c722ea367a10",
+            # 1.0.11 (t6/close-auth CLOSE-AUTH stages 2/3, substrate-1 GAP-0727): SEC-AWS-SECRET also matches
+            # the spaced, dashed and quoted key spellings and an access-key id followed by its secret.
+            "8d817b012e5e158bdcf6b95b5789e61f020729f58c673b0fbf4a0cd5c8c20171",
         }
     ),
     "strict": frozenset(
@@ -372,6 +375,9 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             # 1.0.10 (s7/g0210port-r2 on rel da4177e225, rel-1-0-10:GAP-0210, GAP-1267, GAP-1268): SEC-HF-TOKEN and
             # the SEC-PASSWORD-ASSIGN value class (backticks, next line, comma) in secrets.yaml.
             "51cc060958667eaea175b46c6ce542175e0af2667646ffe69b56b9a917218670",
+            # 1.0.11 (t6/close-auth CLOSE-AUTH stages 2/3, substrate-1 GAP-0727): SEC-AWS-SECRET also matches
+            # the spaced, dashed and quoted key spellings and an access-key id followed by its secret.
+            "43d89f5201e1a168203fd8fe26003217684f9d6a81a237b91392c428ab802288",
         }
     ),
 }
