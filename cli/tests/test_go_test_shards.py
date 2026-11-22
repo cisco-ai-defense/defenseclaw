@@ -391,7 +391,9 @@ def test_linux_audit_shard_timeouts_fit_the_job() -> None:
     ]
     workflow = yaml.safe_load((root / ".github/workflows/ci.yml").read_text(encoding="utf-8"))
     job = workflow["jobs"]["go-test-audit"]
-    shards = int(next(step["env"]["GO_TEST_SHARDS"] for step in job["steps"] if "GO_TEST_SHARDS" in step.get("env", {})))
+    shards = int(
+        next(step["env"]["GO_TEST_SHARDS"] for step in job["steps"] if "GO_TEST_SHARDS" in step.get("env", {}))
+    )
     # Every shard index the matrix runs is one the plan has, and back.
     assert job["strategy"]["matrix"]["shard"] == list(range(shards))
     files = discover_test_files(root / "internal/audit")
@@ -687,8 +689,11 @@ def test_windows_gateway_and_connector_shards_fit_the_command_line() -> None:
     workflow = (root / ".github/workflows/windows-native.yml").read_text(encoding="utf-8")
     assert "'--bounded'" in workflow and "$shardPatterns[$patternIndex]" in workflow
     timings = json.loads((root / "scripts/test-timings/go-windows.json").read_text(encoding="utf-8"))["tests"]
-    shard_count = int(re.search(r"\$nativeTestShardCount = (\d+)", workflow).group(1))
-    for package in ("internal/gateway", "internal/gateway/connector"):
+    counts = {
+        "internal/gateway": int(re.search(r"\$nativeTestShardCount = (\d+)", workflow).group(1)),
+        "internal/gateway/connector": int(re.search(r"\$connectorTestShardCount = (\d+)", workflow).group(1)),
+    }
+    for package, shard_count in counts.items():
         shards = partition_test_files(discover_test_files(root / package), shard_count, timings.get(package))
         for names in shards:
             patterns = bounded_regexes(names)
@@ -779,19 +784,44 @@ def test_windows_gateway_jobs_plan_inside_their_job_budget() -> None:
     # job keeps at most 660 s of tests and the jobs average at most 540 s,
     # room for the tests batches add. With the 62 gateway tests no CI run
     # had timed now timed (GAP-1295), 28 jobs averaged 576 s; 32 plan 504 s.
+    # The gateway (gwN) and connector (cnN) parts have their own runners
+    # since one runner running both took 14 to 18 minutes (Windows Native CI
+    # 44948629287): 32 gateway shards plan at most 419 s (its largest test,
+    # the floor) and 16 connector shards at most 375 s.
     import json
 
     root = Path(__file__).resolve().parents[2]
     workflow = (root / ".github/workflows/windows-native.yml").read_text(encoding="utf-8")
-    shard_count = int(re.search(r"\$nativeTestShardCount = (\d+)", workflow).group(1))
-    matrix = re.findall(r"\{ shard: gw(\d+), kind: gateway, index: (\d+) \}", workflow)
-    assert [(int(name), int(index)) for name, index in matrix] == [(index, index) for index in range(shard_count)]
     timings = json.loads((root / "scripts/test-timings/go-windows.json").read_text(encoding="utf-8"))["tests"]
-    jobs = [0.0] * shard_count
-    for package in ("internal/gateway", "internal/gateway/connector"):
+    for package, prefix, kind, variable in (
+        ("internal/gateway", "gw", "gateway", "nativeTestShardCount"),
+        ("internal/gateway/connector", "cn", "connector", "connectorTestShardCount"),
+    ):
+        shard_count = int(re.search(rf"\${variable} = (\d+)", workflow).group(1))
+        matrix = re.findall(rf"\{{ shard: {prefix}(\d+), kind: {kind}, index: (\d+) \}}", workflow)
+        assert [(int(name), int(index)) for name, index in matrix] == [(index, index) for index in range(shard_count)]
         tests = timings[package]
         weigh = weigher_of(tests)
-        for index, names in enumerate(partition_test_files(discover_test_files(root / package), shard_count, tests)):
-            jobs[index] += sum(weigh(name) for name in names)
-    assert max(jobs) <= 660, [round(seconds) for seconds in jobs]
-    assert sum(jobs) / shard_count <= 540, round(sum(jobs) / shard_count)
+        jobs = [
+            sum(weigh(name) for name in names)
+            for names in partition_test_files(discover_test_files(root / package), shard_count, tests)
+        ]
+        assert max(jobs) <= 480, (package, [round(seconds) for seconds in jobs])
+        assert sum(jobs) / shard_count <= 420, (package, round(sum(jobs) / shard_count))
+
+
+def test_test_timing_files_have_no_duplicate_keys() -> None:
+    # json.loads keeps the last of two equal keys, so a duplicate made by a merge
+    # silently replaces a recorded time.
+    root = Path(__file__).resolve().parents[2]
+    files = sorted((root / "scripts/test-timings").glob("*.json"))
+    assert files
+
+    def reject_duplicates(pairs):
+        keys = [key for key, _ in pairs]
+        duplicates = sorted({key for key in keys if keys.count(key) > 1})
+        assert not duplicates, duplicates
+        return dict(pairs)
+
+    for path in files:
+        json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=reject_duplicates)

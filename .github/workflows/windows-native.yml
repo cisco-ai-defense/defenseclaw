@@ -61,8 +61,12 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 20
     # Each part has its own runner: gwN runs shard N of 32 of the gateway
-    # package and shard N of 32 of the connector package, both balanced on
-    # recorded Windows test times (scripts/test-timings/go-windows.json).
+    # package and cnN shard N of 16 of the connector package, both balanced
+    # on recorded Windows test times (scripts/test-timings/go-windows.json).
+    # The two packages ran one after the other on each gw runner (a compile
+    # and up to 7 minutes of gateway tests, then a compile and about 3
+    # minutes of connector tests: 14 to 18 minutes, the pole of Windows
+    # Native CI 44948629287); on their own runners they run side by side.
     # 32, not 20: the two packages carry about 16,100 s of recorded Windows
     # test time (Windows Native CI 44412520021 on PR #1457, 740c0de8fd, plus
     # one native run of the 62 gateway tests no CI run had timed); 20 jobs
@@ -112,6 +116,22 @@ jobs:
           - { shard: gw29, kind: gateway, index: 29 }
           - { shard: gw30, kind: gateway, index: 30 }
           - { shard: gw31, kind: gateway, index: 31 }
+          - { shard: cn0, kind: connector, index: 0 }
+          - { shard: cn1, kind: connector, index: 1 }
+          - { shard: cn2, kind: connector, index: 2 }
+          - { shard: cn3, kind: connector, index: 3 }
+          - { shard: cn4, kind: connector, index: 4 }
+          - { shard: cn5, kind: connector, index: 5 }
+          - { shard: cn6, kind: connector, index: 6 }
+          - { shard: cn7, kind: connector, index: 7 }
+          - { shard: cn8, kind: connector, index: 8 }
+          - { shard: cn9, kind: connector, index: 9 }
+          - { shard: cn10, kind: connector, index: 10 }
+          - { shard: cn11, kind: connector, index: 11 }
+          - { shard: cn12, kind: connector, index: 12 }
+          - { shard: cn13, kind: connector, index: 13 }
+          - { shard: cn14, kind: connector, index: 14 }
+          - { shard: cn15, kind: connector, index: 15 }
           - { shard: pk0, kind: packages, index: 0 }
           - { shard: pk1, kind: packages, index: 1 }
           - { shard: pk2, kind: packages, index: 2 }
@@ -127,6 +147,8 @@ jobs:
           - { shard: pk12, kind: packages, index: 12 }
           - { shard: pk13, kind: packages, index: 13 }
           - { shard: pk14, kind: packages, index: 14 }
+          - { shard: pk15, kind: packages, index: 15 }
+          - { shard: pk16, kind: packages, index: 16 }
           - { shard: hx0, kind: hookexec, index: 0 }
           - { shard: hx1, kind: hookexec, index: 1 }
           - { shard: hx2, kind: hookexec, index: 2 }
@@ -143,17 +165,17 @@ jobs:
         with:
           persist-credentials: false
       - name: Initialize isolated paths
-        # The gateway shards (gateway and connector parts) keep their test
+        # The gateway and connector shards keep their test
         # temp folders on a test volume on the hosted runner work drive (D:),
         # not in the profile on C:, whose slow disk made connector file
         # flushes miss the package timeout (rel-1-0-6:GAP-0443). This changes
         # the hosted runner (it attaches a VHDX as T:); every other shard
         # keeps C:.
-        run: ./scripts/initialize-windows-native-ci-paths.ps1 -Leaf "go-${{ matrix.shard }}" -DiagnosticsLeaf "windows-native-diagnostics-go-${{ matrix.shard }}" ${{ matrix.kind == 'gateway' && '-StateOnRunnerDrive' || '' }}
+        run: ./scripts/initialize-windows-native-ci-paths.ps1 -Leaf "go-${{ matrix.shard }}" -DiagnosticsLeaf "windows-native-diagnostics-go-${{ matrix.shard }}" ${{ (matrix.kind == 'gateway' || matrix.kind == 'connector') && '-StateOnRunnerDrive' || '' }}
       - uses: ./.github/actions/setup-go
         id: go
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
-        if: ${{ matrix.kind == 'packages' || matrix.kind == 'gateway' || matrix.kind == 'hookexec' }}
+        if: ${{ matrix.kind == 'packages' || matrix.kind == 'gateway' || matrix.kind == 'connector' || matrix.kind == 'hookexec' }}
         with:
           enable-cache: true
           # Only main writes the uv cache; other refs restore it.
@@ -346,8 +368,8 @@ jobs:
           # the -run expression while matching parallel tests, so selectors
           # containing hundreds of exact test names can exhaust the hosted
           # runner even after the tests themselves have released resources.
-          # Each runner tests one timing-balanced shard of each package, one
-          # after the other; a shard names about a hundred tests. Several
+          # Each runner tests one timing-balanced shard of one of the two
+          # packages; a shard names about a hundred tests. Several
           # gateway tests deliberately replace process-global capture callbacks;
           # Windows scheduling otherwise lets unrelated tests close or replace
           # that state mid-assertion, so the gateway package remains serialized
@@ -358,11 +380,12 @@ jobs:
           $suiteKind = [string]$env:GO_SUITE_KIND
           $matrixShard = [int]$env:GO_SUITE_INDEX
           $nativeTestShardCount = 32
-          $remainingPackageShardCount = 15
+          $connectorTestShardCount = 16
+          $remainingPackageShardCount = 17
           $hookexecTestShardCount = 6
           $goTestLog = Join-Path $env:DC_STATE_ROOT 'go-test.log'
           $goFailureSummary = Join-Path $env:DC_STATE_ROOT 'go-test-failure-summary.log'
-          if ($suiteKind -notin @('gateway', 'packages', 'hookexec', 'checks')) {
+          if ($suiteKind -notin @('gateway', 'connector', 'packages', 'hookexec', 'checks')) {
             throw "invalid native Windows Go suite kind $suiteKind"
           }
           if ($suiteKind -eq 'hookexec') {
@@ -475,6 +498,9 @@ jobs:
           if ($suiteKind -eq 'gateway' -and ($matrixShard -lt 0 -or $matrixShard -ge $nativeTestShardCount)) {
             throw "invalid native Windows Go matrix shard $matrixShard"
           }
+          if ($suiteKind -eq 'connector' -and ($matrixShard -lt 0 -or $matrixShard -ge $connectorTestShardCount)) {
+            throw "invalid native Windows connector shard $matrixShard"
+          }
           # These regressions spawn another executable and/or replace
           # process-global native-install discovery state. Run each in a fresh
           # process so Windows image/file handles, hook binary overrides, and
@@ -484,16 +510,16 @@ jobs:
             'TestMaintenanceCodexTeardownPreservesDriftWithoutInstalledLayout',
             'TestWindowsDevinDirectBashHookCommandAwaitsGUIHookWithStdio'
           )
-          if ($suiteKind -eq 'gateway') {
+          if ($suiteKind -in @('gateway', 'connector')) {
             # go_test_shards.py reads the test names from the package sources
             # and fails unless every test is in exactly one shard. Names that
             # do not build on Windows (a _linux_test.go file) match nothing.
             $uv = (Get-Command uv.exe -ErrorAction Stop).Source
             $connectorSkip = '^(' + (($windowsInapplicableTests + $connectorIsolatedTests) -join '|') + ')$'
             foreach ($part in @(
-              @{ Dir = 'internal/gateway'; Skip = $windowsInapplicable; Extra = @('-parallel=1') },
-              @{ Dir = 'internal/gateway/connector'; Skip = $connectorSkip; Extra = @() }
-            )) {
+              @{ Kind = 'gateway'; Dir = 'internal/gateway'; Skip = $windowsInapplicable; Extra = @('-parallel=1'); Count = $nativeTestShardCount },
+              @{ Kind = 'connector'; Dir = 'internal/gateway/connector'; Skip = $connectorSkip; Extra = @(); Count = $connectorTestShardCount }
+            ) | Where-Object { $_.Kind -eq $suiteKind }) {
               $leaf = ($part.Dir -replace '^internal/', '') -replace '/', '-'
               # --bounded: the shard comes as -run regexes of at most 16,000
               # characters, one per line (a Windows command line holds 32,767;
@@ -503,7 +529,7 @@ jobs:
                 'run', '--no-project', '--python', '3.12', 'python', 'scripts/go_test_shards.py',
                 '--package-dir', $part.Dir,
                 '--timings', 'scripts/test-timings/go-windows.json',
-                '--shard-count', [string]$nativeTestShardCount,
+                '--shard-count', [string]$part.Count,
                 '--shard-index', [string]$matrixShard,
                 '--bounded'
               ) -TimeoutSeconds 300 -LogPath (Join-Path $env:DC_STATE_ROOT ("go-$leaf-shard-select.log"))
@@ -527,7 +553,7 @@ jobs:
                   -GoTestFailureSummaryPath $goFailureSummary -GoTestEventSummary | Out-Null
               }
             }
-            Write-Host "Native Windows Go matrix shard $matrixShard completed its gateway and connector shards."
+            Write-Host "Native Windows Go $suiteKind shard $matrixShard completed."
             return
           }
           # native-checks: the isolated connector regressions, vet and builds.
@@ -584,9 +610,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Twelve shards balanced on Windows module times
-        # (scripts/test-timings/python-windows.json).
-        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+        # Eighteen shards balanced on Windows module times
+        # (scripts/test-timings/python-windows.json). Twelve ran up to 13.5
+        # minutes of tests (Windows Native CI 44948629287, shard 4), the
+        # pole of the workflow; eighteen bring each to about 9.
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18]
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -618,7 +646,7 @@ jobs:
           Initialize-WindowsNativeTestEnvironment $env:DC_STATE_ROOT | Out-Null
           $uv = (Get-Command uv.exe -ErrorAction Stop).Source
           Invoke-WindowsNativeProcess $uv @('run', '--frozen', 'python', '-m', 'pytest', 'cli/tests/test_local_splunk_controller.py', 'cli/tests/test_local_splunk_transaction.py', 'cli/tests/test_local_splunk_packaging.py', 'cli/tests/test_windows_local_observability_gates.py', '-q') -TimeoutSeconds 900 -LogPath (Join-Path $env:DC_STATE_ROOT 'pytest-local-splunk.log') | Out-Null
-      - name: Run Python test shard ${{ matrix.shard }} of 12
+      - name: Run Python test shard ${{ matrix.shard }} of 18
         run: |
           . ./scripts/windows-native-ci.ps1 -NoRun
           Initialize-WindowsNativeTestEnvironment $env:DC_STATE_ROOT | Out-Null
@@ -641,7 +669,7 @@ jobs:
           }
           # Balance whole test files (the TUI suite included) across the
           # shards by recorded Windows time, as the Linux coverage shards do.
-          $shardSelectionArgs = @('run', '--frozen', 'python', 'scripts/python_test_shards.py', '--shard-count', '12', '--shard-index', [string]$shardIndex, '--timings', 'scripts/test-timings/python-windows.json')
+          $shardSelectionArgs = @('run', '--frozen', 'python', 'scripts/python_test_shards.py', '--shard-count', '18', '--shard-index', [string]$shardIndex, '--timings', 'scripts/test-timings/python-windows.json')
           foreach ($telemetryFile in $exhaustiveTelemetryFiles) {
             $shardSelectionArgs += @('--exclude', $telemetryFile)
           }
