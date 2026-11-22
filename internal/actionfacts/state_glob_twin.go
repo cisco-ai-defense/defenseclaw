@@ -22,7 +22,6 @@ import (
 	"slices"
 	"sort"
 	"strings"
-	"time"
 
 	"mvdan.cc/sh/v3/syntax"
 
@@ -36,9 +35,14 @@ const (
 	maxStateGlobMatches = 64
 	// maxStateGlobDirEntries bounds the names read from one directory.
 	maxStateGlobDirEntries = 4096
-	// stateGlobBudget bounds the directory reads of one command, far below
-	// the hook answer budget (RV-pod2-1).
-	stateGlobBudget = 250 * time.Millisecond
+	// maxStateGlobWork bounds the work of the directory reads of one
+	// command (RV-pod2-1): one unit for each directory listed and each name
+	// examined. It counts work, never time, so the answer does not depend on
+	// the load of the box (rel-1-0-10:GAP-0339). It is what the 250 ms time
+	// bound it replaces read on an idle box: the widest component (64 folders
+	// of 4,000 names, 256,128 units) took 120 ms on the gate box, so about two
+	// such components.
+	maxStateGlobWork = 1 << 19
 )
 
 // StateGlobTwin returns the POSIX reading of command in which every
@@ -50,7 +54,7 @@ const (
 // stays as written, as it does in the shell; a leading wildcard does not
 // match a name that starts with a dot. Only a pattern that can name the
 // active home .defenseclaw tree is expanded, and only that tree is read,
-// within stateGlobBudget: a pattern with wildcards above the home
+// within maxStateGlobWork: a pattern with wildcards above the home
 // (ls /*/*/*/*/*/.defenseclaw/x) walked the whole filesystem past the hook
 // answer budget (RV-pod2-1). ok is false when no pattern matched.
 func StateGlobTwin(command, activeHome string) (twin string, ok bool) {
@@ -87,7 +91,7 @@ func stateGlobTwin(command, activeHome string, stateNames []string) (twin string
 	if !strings.ContainsAny(source, "*?[") || !strings.Contains(source, "/") {
 		return "", false
 	}
-	deadline := time.Now().Add(stateGlobBudget)
+	work := 0
 	return globWordTwin(source, home, func(pattern string) []string {
 		if drive {
 			pattern = stateDrivePattern(pattern)
@@ -95,7 +99,7 @@ func stateGlobTwin(command, activeHome string, stateNames []string) (twin string
 		if !strings.HasPrefix(pattern, "/") && (!drive || !DriveSlashPath(pattern)) {
 			return nil
 		}
-		matches, complete := stateGlobMatches(pattern, home, deadline, stateNames)
+		matches, complete := stateGlobMatches(pattern, home, &work, stateNames)
 		if !complete {
 			return nil
 		}
@@ -393,11 +397,11 @@ func statePatternWord(word *syntax.Word, home string) (string, bool) {
 // the active home .defenseclaw tree: each component up to the home must
 // match the home itself (no directory above it is read), the next one must
 // match .defenseclaw, and only directories of that tree are listed. A
-// longer listing, more matches or the deadline end the expansion
+// longer listing, more matches or more work than maxStateGlobWork end the expansion
 // (complete is false); the reading then adds nothing. With stateNames
 // (StateGlobTwinNamed) nothing is read: the .defenseclaw directory holds
 // exactly those names and a deeper pattern component is kept as written.
-func stateGlobMatches(pattern, home string, deadline time.Time, stateNames []string) (matches []string, complete bool) {
+func stateGlobMatches(pattern, home string, work *int, stateNames []string) (matches []string, complete bool) {
 	// A drive home is on a Windows file system, which opens a name spelled
 	// in any case (~/.DefenseClaw/conf*.yaml lists the state); a wildcard
 	// component is still matched by the shell as written.
@@ -433,7 +437,7 @@ func stateGlobMatches(pattern, home string, deadline time.Time, stateNames []str
 		}
 		var next []string
 		for _, dir := range current {
-			if time.Now().After(deadline) {
+			if *work++; *work > maxStateGlobWork {
 				return nil, false
 			}
 			var names []string
@@ -448,6 +452,9 @@ func stateGlobMatches(pattern, home string, deadline time.Time, stateNames []str
 				continue
 			}
 			if !listed {
+				return nil, false
+			}
+			if *work += len(names); *work > maxStateGlobWork {
 				return nil, false
 			}
 			for _, name := range names {

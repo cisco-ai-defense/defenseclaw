@@ -12,6 +12,7 @@ the identities found in an earlier, unredacted corpus (EC2AMAZ / WIN computer na
 DOMAIN\\user pairs, UPNs), and --person names (the owner's names). build.py (--denylist) redacts these values and the leak scan fails if one survives.
 No real value is written in this file.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -20,7 +21,21 @@ import os
 import re
 import subprocess
 
-GENERIC = {"ubuntu", "localhost", "administrator", "ec2-user", "root", "alice", "public", "user", "users", "admin", "system", "guest", "default"}
+GENERIC = {
+    "ubuntu",
+    "localhost",
+    "administrator",
+    "ec2-user",
+    "root",
+    "alice",
+    "public",
+    "user",
+    "users",
+    "admin",
+    "system",
+    "guest",
+    "default",
+}
 
 
 def main() -> int:
@@ -43,12 +58,20 @@ def main() -> int:
                 p = line.split()
                 if len(p) >= 2 and p[0].lower() in ("host", "hostname", "user"):
                     for t in p[1:]:
-                        if "*" not in t and "." not in t:    # dotted names are public (github.com ...)
+                        if "*" not in t and "." not in t:  # dotted names are public (github.com ...)
                             add({"host": "hostalias", "hostname": "hostalias", "user": "labuser"}[p[0].lower()], t)
     except OSError:
         pass
-    reg = subprocess.run(["bash", "-lc", "source ~/dc-eh/bin/dcenv >/dev/null 2>&1; dc-hosts --json 2>/dev/null || dc-hosts 2>/dev/null"],
-                         capture_output=True, text=True, timeout=120).stdout
+    reg = subprocess.run(
+        [
+            "bash",
+            "-lc",
+            "source ~/dc-eh/bin/dcenv >/dev/null 2>&1; dc-hosts --json 2>/dev/null || dc-hosts 2>/dev/null",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    ).stdout
     for m in re.finditer(r"\b(?:\d{1,3}\.){3}\d{1,3}\b", reg):
         if all(int(x) < 256 for x in m.group(0).split(".")) and not m.group(0).startswith(("0.", "127.", "255.")):
             add("ip", m.group(0), 7)
@@ -56,7 +79,9 @@ def main() -> int:
         add("hostalias", m.group(0))
     for m in re.finditer(r"\bi-[0-9a-f]{17}\b", reg):
         add("instance", m.group(0))
-    acct = subprocess.run(["aws", "sts", "get-caller-identity", "--query", "Account", "--output", "text"], capture_output=True, text=True).stdout.strip()
+    acct = subprocess.run(
+        ["aws", "sts", "get-caller-identity", "--query", "Account", "--output", "text"], capture_output=True, text=True
+    ).stdout.strip()
     if re.fullmatch(r"\d{12}", acct):
         add("account", acct)
     for p in a.person:
@@ -89,7 +114,10 @@ def main() -> int:
     for m in re.finditer(r"\bi-[0-9a-f]{17}\b", text):
         if m.group(0) != "i-0123456789abcdef0":
             add("instance", m.group(0))
-    doms = {m.group(1).lower() for m in re.finditer(r"\b(?:EC2AMAZ|WIN)-[A-Za-z0-9]+\.((?:[a-z0-9-]+\.)+[a-z]{2,})\b", text, re.I)}
+    doms = {
+        m.group(1).lower()
+        for m in re.finditer(r"\b(?:EC2AMAZ|WIN)-[A-Za-z0-9]+\.((?:[a-z0-9-]+\.)+[a-z]{2,})\b", text, re.I)
+    }
     for d in doms:
         add("labdomain", d)
         add("netbios", d.split(".")[0], 3)

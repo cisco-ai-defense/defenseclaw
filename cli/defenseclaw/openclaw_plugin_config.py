@@ -348,6 +348,24 @@ def openclaw_install_policy_wanted(cfg: object) -> bool:
     return tier == "strict"
 
 
+def _first_untraversable_dir(path: str) -> str:
+    # The first folder on the way to ``path`` (from the root down) this
+    # account cannot enter, or "" when every folder is open and the file
+    # itself is what refuses it (rel-1-0-10 GAP-1542).
+    folders = []
+    folder = os.path.dirname(os.path.abspath(path))
+    while True:
+        folders.append(folder)
+        parent = os.path.dirname(folder)
+        if parent == folder:
+            break
+        folder = parent
+    for folder in reversed(folders):
+        if not os.access(folder, os.X_OK):
+            return folder
+    return ""
+
+
 def openclaw_separate_user_notes(cfg: object) -> list[str]:
     # What setup says in the separate-user layout (connectors.openclaw
     # plugin_account) that the gateway cannot say itself: an openclaw.json
@@ -365,8 +383,10 @@ def openclaw_separate_user_notes(cfg: object) -> list[str]:
         with open(config_file, "rb"):
             pass
     except PermissionError:
+        blocked = _first_untraversable_dir(config_file)
+        why = f": it cannot enter {blocked}" if blocked else ""
         notes.append(
-            f"This account cannot read {config_file}, so setup did not check it. When the gateway sets OpenClaw "
+            f"This account cannot read {config_file}{why}, so setup did not check it. When the gateway sets OpenClaw "
             f"up it saves the block to merge in {merge}: merge it and restart the OpenClaw gateway. "
             "defenseclaw status shows the hook mode as unverified until the plugin calls in."
         )
