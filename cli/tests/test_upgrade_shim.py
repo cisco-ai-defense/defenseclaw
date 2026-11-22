@@ -1749,6 +1749,28 @@ def test_downgrade_to_1_0_9_sets_aside_the_1_0_10_keys(
     }
 
 
+@pytest.mark.parametrize("collect", [True, False])
+def test_downgrade_to_1_0_10_sets_aside_only_the_manifest_opt_in(
+    home: Path, execs: list[list[str]], tmp_path: Path, monkeypatch: pytest.MonkeyPatch, collect: bool
+) -> None:
+    import yaml
+
+    monkeypatch.setattr("defenseclaw.__version__", "1.0.11")
+    current = {"config_version": 9, "ai_discovery": {"enabled": True, "mode": "passive", "include_skill_manifests": collect}}
+    (home / "config.yaml").write_text(yaml.safe_dump(current), encoding="utf-8")
+    monkeypatch.setenv(upgrade_shim.LOCAL_DIR_ENV, str(_release_dir(tmp_path, "1.0.10")))
+
+    assert upgrade_shim.run(["upgrade", "--version", "1.0.10", "--yes"]) == 0
+    assert len(execs) == 1
+    downgraded = yaml.safe_load((home / "config.yaml").read_text(encoding="utf-8"))
+    assert downgraded["ai_discovery"] == {"enabled": True, "mode": "passive"}
+    assert json.loads(_set_aside(home).read_text(encoding="utf-8")) == {
+        "version": 1,
+        "for": "1.0.10",
+        "keys": {"ai_discovery.include_skill_manifests": collect},
+    }
+
+
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _CONFIG_KEYS_1_0_9 = Path(__file__).parent / "fixtures" / "config_keys" / "1.0.9.txt"
 

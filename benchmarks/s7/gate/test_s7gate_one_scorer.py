@@ -40,7 +40,7 @@ class AllChecksLabelsFirst(unittest.TestCase):
         out = e.root / "out"
         reg = e.run("register-corpus", e.corpus, "--version", "unit-v1")
         self.assertEqual(reg.returncode, 0, reg.stdout + reg.stderr)
-        r = e.run("all", "--bin", fake, "--policy-dir", pol, "--corpora", e.cfg, "--out", out)
+        r = e.run("all", "--bin", fake, "--policy-dir", pol, "--corpora", e.cfg, "--out", out, "--min-free-gb", "1")
         self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("not found", r.stderr)
         self.assertFalse(started.exists(), "the harness ran although the score was bound to refuse")
