@@ -71,6 +71,9 @@ type Session struct {
 	ActorUID string       `json:"actor_uid"`
 	TokenID  string       `json:"jti,omitempty"`
 	Expires  time.Time    `json:"expires"`
+	// IssuedAt is the token's iat: a person-wide revocation after it ends
+	// the session (B5.1).
+	IssuedAt time.Time `json:"-"`
 	// TaskDigest is the SessionTaskClaim ("" when the token has none).
 	TaskDigest string `json:"task_digest,omitempty"`
 }
@@ -259,6 +262,6 @@ func (s *SessionSigner) Verify(token string) (Session, error) {
 	actor.TaskDigest = c.Task
 	return Session{
 		Person: c.Subject, Actor: actor, ActorRef: c.Actor.Atespace + "/" + c.Actor.Name, ActorUID: c.Actor.UID,
-		TokenID: c.ID, Expires: time.Unix(*c.Expiry, 0), TaskDigest: c.Task,
+		TokenID: c.ID, Expires: time.Unix(*c.Expiry, 0), IssuedAt: time.Unix(*c.IssuedAt, 0), TaskDigest: c.Task,
 	}, nil
 }

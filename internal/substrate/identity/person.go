@@ -18,6 +18,8 @@ package identity
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"regexp"
@@ -49,6 +51,25 @@ type Person struct {
 	Principal string
 	Groups    []string
 	Expires   time.Time
+	// IssuedAt is the token's iat, TokenID its jti ("" when it has none)
+	// and TokenKey the deny-list key of this one token (TokenKey). They
+	// say which sign-in a request came with, for revocation (B5.1); they
+	// are never stored with a registration.
+	IssuedAt time.Time `json:"-"`
+	TokenID  string    `json:"-"`
+	TokenKey string    `json:"-"`
+}
+
+// TokenKey is the revocation key of a person token: a hash of its issuer
+// and jti, or of the whole token when it has no jti. A deny list holds
+// only this, never a token or a raw id.
+func TokenKey(issuer, jti, raw string) string {
+	if jti != "" {
+		s := sha256.Sum256([]byte(issuer + "\x00" + jti))
+		return "jti:" + hex.EncodeToString(s[:16])
+	}
+	s := sha256.Sum256([]byte(raw))
+	return "tok:" + hex.EncodeToString(s[:16])
 }
 
 // ID is the stable owner key of a person: issuer and subject.
@@ -217,6 +238,7 @@ func (v *PersonVerifier) Verify(ctx context.Context, token string) (Person, erro
 		Expiry    *int64   `json:"exp"`
 		NotBefore *int64   `json:"nbf"`
 		IssuedAt  *int64   `json:"iat"`
+		TokenID   string   `json:"jti"`
 		Email     string   `json:"email"`
 		UPN       string   `json:"upn"`
 		Preferred string   `json:"preferred_username"`
@@ -257,7 +279,8 @@ func (v *PersonVerifier) Verify(ctx context.Context, token string) (Person, erro
 	if sub == "" || len(sub) > 255 || strings.HasPrefix(sub, ActorSubjectPrefix) || strings.HasPrefix(sub, WorkerSubjectPrefix) {
 		return Person{}, reasonf(ReasonSubject, "token subject is not a person")
 	}
-	p := Person{Kind: is.Kind, Issuer: c.Issuer, Subject: sub, Expires: time.Unix(*c.Expiry, 0)}
+	p := Person{Kind: is.Kind, Issuer: c.Issuer, Subject: sub, Expires: time.Unix(*c.Expiry, 0),
+		IssuedAt: time.Unix(*c.IssuedAt, 0), TokenID: c.TokenID, TokenKey: TokenKey(c.Issuer, c.TokenID, token)}
 	email := c.Email
 	if emailUnverified(raw["email_verified"]) {
 		// The issuer says it has not checked the address (a local user
