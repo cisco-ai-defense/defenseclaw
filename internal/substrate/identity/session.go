@@ -170,6 +170,19 @@ func (s *SessionSigner) SetClock(now func() time.Time) { s.now = now }
 // Issue signs a token for person to attach to actor for ttl (default
 // DefaultSessionLifetime, at most MaxSessionLifetime).
 func (s *SessionSigner) Issue(person string, actor SessionActor, ttl time.Duration) (string, time.Time, error) {
+	return s.IssueUntil(person, actor, ttl, time.Time{})
+}
+
+// ErrSessionBound refuses a session token whose bound has passed: the
+// caller's own sign-in ends before the token could start (GAP-0588).
+var ErrSessionBound = errors.New("identity: the sign-in ends before a session token could start")
+
+// IssueUntil is Issue for a token that also ends no later than notAfter,
+// the end of the caller's own bearer (Person.SessionBound; zero: no
+// bound). A session token never outlives the sign-in it came from
+// (GAP-0588): the relay ends an attachment at its token's exp, and the
+// launcher reconnects with a fresh sign-in.
+func (s *SessionSigner) IssueUntil(person string, actor SessionActor, ttl time.Duration, notAfter time.Time) (string, time.Time, error) {
 	person = strings.TrimSpace(person)
 	if person == "" || strings.HasPrefix(person, ActorSubjectPrefix) || strings.HasPrefix(person, WorkerSubjectPrefix) {
 		return "", time.Time{}, errors.New("identity: a session token names a person")
@@ -188,6 +201,16 @@ func (s *SessionSigner) Issue(person string, actor SessionActor, ttl time.Durati
 	}
 	now := s.now().Truncate(time.Second)
 	exp := now.Add(ttl)
+	if !notAfter.IsZero() {
+		// exp is a whole second (a NumericDate): the bound rounds down, so
+		// the token ends at or before it.
+		if b := notAfter.Truncate(time.Second); b.Before(exp) {
+			exp = b
+		}
+		if !exp.After(now) {
+			return "", time.Time{}, ErrSessionBound
+		}
+	}
 	jti := make([]byte, 16)
 	if _, err := rand.Read(jti); err != nil {
 		return "", time.Time{}, err

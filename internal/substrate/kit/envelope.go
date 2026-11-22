@@ -76,6 +76,9 @@ type Facts struct {
 	// Skills fingerprints every skill folder after PostToolUse,
 	// SessionStart and Stop (GAP-0039).
 	Skills []SkillFingerprint `json:"skills,omitempty"`
+	// ProjectHooks are the project settings files that declare hooks the
+	// actor's managed settings ignore, reported at SessionStart (GAP-0479).
+	ProjectHooks []ProjectHooks `json:"project_hooks,omitempty"`
 	// Truncated is set when a cap dropped paths or file bytes.
 	Truncated bool `json:"truncated,omitempty"`
 	// readsSkill marks a PreToolUse read of a file in a skill root: the
@@ -131,6 +134,21 @@ type PathFact struct {
 	InsideCWD bool `json:"inside_cwd"`
 	// Error is why the path could not be inspected.
 	Error string `json:"error,omitempty"`
+}
+
+// ProjectHooks is one project settings file that declares hooks (GAP-0479).
+// Only the file's digest and the hook event names travel, never its content:
+// a local settings file can hold environment values.
+type ProjectHooks struct {
+	// Path is the file, absolute.
+	Path string `json:"path"`
+	// SHA256 is the digest of the whole file.
+	SHA256 string `json:"sha256"`
+	// Events are the hook events the file names, sorted (at most
+	// maxProjectHookEvents).
+	Events []string `json:"events"`
+	// Hooks counts the hook commands the file declares.
+	Hooks int `json:"hooks"`
 }
 
 // AttachedFile is a file the kit read for the gateway.

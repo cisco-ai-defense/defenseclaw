@@ -58,8 +58,8 @@ func newSubstrateRunCmd() *cobra.Command {
 		Long: `Starts the coding agent in a sandbox in the cluster, on a copy of the current folder (secret
 files such as .env and keys are held back), and puts the agent on your terminal. The agent is claude,
 codex, copilot, opencode, hermes, kiro, antigravity, cursor-agent, amp or devin. The agents that sign in to a
-vendor account (kiro, antigravity, cursor-agent, amp, devin) run with a warning in open source, because the
-sign-in token stays in the agent and its snapshots; a managed cluster refuses them. A banner shows the guard profile, model, allowed hosts and how to leave. When the
+vendor account (kiro, antigravity, cursor-agent, amp, devin) start in open source only after you say yes to a
+warning (or pass --yes), because the sign-in token stays in the agent and its snapshots; a managed cluster refuses them. A banner shows the guard profile, model, allowed hosts and how to leave. When the
 guard asks before a step, the question appears on the last line: press Ctrl-\ to answer once, always or deny.
 
 Press Ctrl-] to detach; the agent keeps running and suspends when idle. Come back from any machine with
@@ -106,7 +106,7 @@ to the agent.`,
 	fl.StringVar(&f.transport, "transport", "auto", "how to carry the terminal: auto, websocket or longpoll")
 	fl.BoolVar(&f.noAsks, "no-asks", false, "do not show guard questions on this terminal")
 	fl.BoolVar(&f.keep, "keep", false, "keep the agent after a finished --task (default: it stays until you delete it)")
-	fl.BoolVarP(&f.yes, "yes", "y", false, "answer questions with their defaults")
+	fl.BoolVarP(&f.yes, "yes", "y", false, "say yes to the vendor sign-in warning without asking")
 	fl.StringVar(&f.workload, "workload-token-file", "", "CI: file holding the workload identity token")
 	fl.StringVar(&f.remoteDir, "remote-dir", "", "where in the agent to put the copy (default: the image's working folder)")
 	_ = fl.MarkHidden("remote-dir")
@@ -192,7 +192,11 @@ until you choose: --apply writes the changes into the folder, --branch NAME puts
 
 When a change can run code on this machine, --apply asks first (the default answer is no). --yes takes
 that safe answer, so --apply --yes writes nothing and says why; after you reviewed the flagged files,
---allow-flagged writes them too.`,
+--allow-flagged writes them too.
+
+Run it on the computer you started the agent from: it compares the changes with the folder you
+sent, and only that computer keeps a record of it. From another computer, connect to the agent and
+git push its work from inside it.`,
 		Example: "defenseclaw substrate pull fix-tests-7f3a\ndefenseclaw substrate pull fix-tests-7f3a --branch agent/fix-tests",
 		Args:    cobra.ExactArgs(1),
 		RunE:    func(cmd *cobra.Command, args []string) error { return runSubstratePull(cmd, &f, args[0]) },

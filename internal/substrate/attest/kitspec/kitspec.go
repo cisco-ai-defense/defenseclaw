@@ -53,10 +53,12 @@ type Options struct {
 	// config switches) without the agent binary: never an image.
 	MetadataOnly bool
 
-	// Relay session verification (A2/A5): public keys by kid (PEM), the
-	// issuer and audience their tokens carry, or the gateway check URL.
-	// Every kid must be the key's own id (kit.SessionKeyID), the one the
-	// gateway writes in each token; keys need the issuer (GAP-0147).
+	// Relay session verification (A2/A5): the gateway check URL (default
+	// kit.RelayVerifyURL of the gateway URL; every relay has one,
+	// GAP-0435), and optionally public keys by kid (PEM) with the issuer
+	// and audience their tokens carry, checked before the gateway. Every
+	// kid must be the key's own id (kit.SessionKeyID), the one the gateway
+	// writes in each token; keys need the issuer (GAP-0147).
 	SessionKeys   map[string][]byte
 	SessionIssuer string
 	Audience      string
@@ -118,7 +120,10 @@ func Spec(o Options) (attest.KitSpec, attest.TemplateInfo, error) {
 	if o.Audience != "" {
 		cfg.Relay.SessionAudience = o.Audience
 	}
-	cfg.Relay.VerifyURL = o.VerifyURL
+	cfg.Relay.VerifyURL = strings.TrimSpace(o.VerifyURL)
+	if cfg.Relay.VerifyURL == "" {
+		cfg.Relay.VerifyURL = kit.RelayVerifyURL(cfg.GatewayURL)
+	}
 	cfg.Relay.SessionIssuer = strings.TrimSpace(o.SessionIssuer)
 	keyFiles := map[string][]byte{}
 	if len(o.SessionKeys) > 0 {
@@ -136,12 +141,10 @@ func Spec(o Options) (attest.KitSpec, attest.TemplateInfo, error) {
 			keyFiles[p] = pem
 		}
 	}
-	// The rules the hook and the relay apply when they load the file: a
-	// configuration they would refuse is never baked into an image.
+	// The rules the hook and the relay apply when they load the file
+	// (Validate includes the relay's CheckSessions): a configuration they
+	// would refuse is never baked into an image.
 	if err := cfg.Validate(); err != nil {
-		return zero, attest.TemplateInfo{}, fmt.Errorf("kit spec: %w", err)
-	}
-	if err := cfg.Relay.CheckSessions(); err != nil {
 		return zero, attest.TemplateInfo{}, fmt.Errorf("kit spec: %w", err)
 	}
 	// The kit may install a newer agent than the harness pins (GAP-0114).

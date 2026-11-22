@@ -166,7 +166,7 @@ func runSubstrateDoctor(cmd *cobra.Command, out *substrateOutput, com *substrate
 
 	name := ""
 	if openErr != nil {
-		for _, id := range []string{"admin_address", "sign_in", "sign_in_server", "attach"} {
+		for _, id := range []string{"admin_address", "sign_in", "sign_in_server", "attach", "egress_callout"} {
 			d.add(id, doctorSkip, "needs a configured cluster", "")
 		}
 	} else {
@@ -363,6 +363,10 @@ func doctorCluster(ctx context.Context, d *doctorRun, s *substrateSession) {
 	if c, ok := doctorBundles(ctx, s, signedIn); ok {
 		d.checks = append(d.checks, c)
 	}
+
+	// 8. The egress callout: another one in Substrate's slot turns
+	// DefenseClaw's egress checks off (GAP-0497).
+	d.checks = append(d.checks, doctorEgressCallout(ctx, s, adminOK))
 }
 
 const doctorBundleFix = "apply a bundle signed by a key of the bundle-anchors Secret (defenseclaw substrate bundle apply), " +

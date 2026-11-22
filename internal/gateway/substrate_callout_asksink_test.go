@@ -37,9 +37,9 @@ import (
 
 // The callout's AskSink (extproc.AskClient) against the real admin handler
 // (D12, TST-0306): an unattended actor whose profile denies asks is refused
-// at once; with queue the ask waits, the owner sees it as unattended, an
-// approval releases the next request, and the approved host is not asked
-// again. Before this the callout had no AskSink and refused every
+// at once; with queue the ask waits, the owner sees it as unattended, and
+// an approval releases the next request without a second ask (a once
+// approval only that request, GAP-0484). Before this the callout had no AskSink and refused every
 // ask-required host, so queue never reached a person.
 func TestSubstrateCalloutAskSinkThroughTheAdminHandler(t *testing.T) {
 	for _, queue := range []bool{false, true} {

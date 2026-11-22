@@ -62,3 +62,22 @@ func TestSubstrateActorAgentIdentityIsPerPersonAndConnectorGAP0418(t *testing.T)
 		t.Errorf("replicas gave %q and %q for one session", i1, i2)
 	}
 }
+
+// GAP-0514: the agent identity follows the connector the actor is
+// registered with, not the connector a hook request names.
+func TestSubstrateAgentIdentityUsesTheRegisteredConnectorGAP0514(t *testing.T) {
+	eng1 := registry.Person{Kind: identity.PersonHuman, Issuer: "https://idp.example", Subject: "eng1", Principal: "eng1@example.com"}
+	const uid = "7f9c3a1e-8d2b-4c77-9e0a-6b5f1d2c3e4d"
+	key, err := sandboxreg.SubstrateKey("dc-eng", uid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reg := registry.Registration{Key: key, Atespace: "dc-eng", Name: "a9", UID: uid, Connector: "claudecode", Person: eng1}
+	ctx := withSubstrateActor(context.Background(), verifiedSubstrateActor("dc-eng", "a9", uid, "actor/dc-eng/a9", key))
+	ctx = context.WithValue(ctx, substrateRegistrationKey{}, reg)
+	own := resolveHookAgentIdentity(ctx, agentHookRequest{ConnectorName: "claudecode", SessionID: "s-1"})
+	named := resolveHookAgentIdentity(ctx, agentHookRequest{ConnectorName: "codex", SessionID: "s-1"})
+	if own.ID == "" || named.ID != own.ID || named.Connector != "claudecode" {
+		t.Fatalf("a request naming codex for a claudecode actor got %q (%s), want the claudecode identity %q", named.ID, named.Connector, own.ID)
+	}
+}

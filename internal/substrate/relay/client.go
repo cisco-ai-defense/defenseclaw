@@ -77,6 +77,11 @@ type AttachResult struct {
 	Sent  int64
 	// Warning is the relay's hello warning (GAP-0151), "" for none.
 	Warning string
+	// Renew is set when the relay ended the attachment because its session
+	// token expired (SessionExpiredMessage), or the client ended it RenewLead
+	// before the end the gateway gave (SessionSecondsHeader): the launcher
+	// reconnects at once with a fresh token (GAP-0588).
+	Renew bool
 }
 
 // Attach connects in to the agent's terminal and copies in to the agent and
@@ -126,6 +131,11 @@ func pumpInput(in io.Reader, send func([]byte) error) (detached bool) {
 	}
 }
 
+// RenewLead is how long before its session token ends an attachment is
+// renewed (SessionSecondsHeader). A token with less than RenewLead plus a
+// second left is renewed on SessionExpiredMessage.
+const RenewLead = 2 * time.Second
+
 func attachWS(ctx context.Context, in io.Reader, out io.Writer, o AttachOptions) (AttachResult, error) {
 	d := o.Dialer
 	if d == nil {
@@ -144,6 +154,18 @@ func attachWS(ctx context.Context, in io.Reader, out io.Writer, o AttachOptions)
 		return AttachResult{}, err
 	}
 	defer conn.Close()
+	// The gateway says how long the session token lives: end the
+	// attachment cleanly just before, for a planned renew (GAP-0588).
+	var renew <-chan time.Time
+	if resp != nil {
+		if left, err := strconv.Atoi(resp.Header.Get(SessionSecondsHeader)); err == nil && left > 0 && left <= 24*3600 {
+			if d := time.Duration(left)*time.Second - RenewLead; d >= time.Second {
+				t := time.NewTimer(d)
+				defer t.Stop()
+				renew = t.C
+			}
+		}
+	}
 	var wmu sync.Mutex
 	send := func(frame []byte) error {
 		wmu.Lock()
@@ -208,6 +230,8 @@ func attachWS(ctx context.Context, in io.Reader, out io.Writer, o AttachOptions)
 					res.Session, res.Input, res.Warning = c.Session, c.Input, c.Warning
 				case CtlExit:
 					res.ExitCode = c.Code
+				case CtlError:
+					res.Renew = res.Renew || c.Message == SessionExpiredMessage
 				}
 				resMu.Unlock()
 			}
@@ -242,6 +266,15 @@ func attachWS(ctx context.Context, in io.Reader, out io.Writer, o AttachOptions)
 			_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, "detach"), time.Now().Add(time.Second))
 			wmu.Unlock()
 		}
+	case <-renew:
+		// No detach: the agent keeps its terminal, and the launcher
+		// reconnects at once.
+		resMu.Lock()
+		res.Renew = true
+		resMu.Unlock()
+		wmu.Lock()
+		_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, "renew"), time.Now().Add(time.Second))
+		wmu.Unlock()
 	case <-ctx.Done():
 	}
 	// A write still in flight ends now, so settle does not wait on it.
@@ -348,6 +381,8 @@ func attachPoll(ctx context.Context, in io.Reader, out io.Writer, o AttachOption
 						res.Session, res.Input, res.Warning = cc.Session, cc.Input, cc.Warning
 					case CtlExit:
 						res.ExitCode = cc.Code
+					case CtlError:
+						res.Renew = res.Renew || cc.Message == SessionExpiredMessage
 					}
 					resMu.Unlock()
 				}

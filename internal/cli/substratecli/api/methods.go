@@ -128,6 +128,10 @@ type CreateRequest struct {
 	BatchID    string   `json:"batch_id,omitempty"`
 	Unattended bool     `json:"unattended,omitempty"`
 	Secrets    []string `json:"secrets,omitempty"`
+	// AcknowledgeSignin is the person's yes to the cluster's sign-in
+	// warning (GAP-0482). Without it an open-source cluster answers 428
+	// signin_ack_required with the warning and creates nothing.
+	AcknowledgeSignin bool `json:"acknowledge_signin,omitempty"`
 }
 
 // ListOptions filters ListActors.
@@ -294,11 +298,19 @@ func (c *Client) Usage(ctx context.Context, batch string, all bool) (map[string]
 }
 
 // Asks lists the person's pending approvals.
-func (c *Client) Asks(ctx context.Context) ([]Ask, error) {
+func (c *Client) Asks(ctx context.Context) ([]Ask, error) { return c.AsksOf(ctx, false) }
+
+// AsksOf lists the pending approvals of the person, or with all every
+// person's (administrators only; the gateway audits the read, GAP-0466).
+func (c *Client) AsksOf(ctx context.Context, all bool) ([]Ask, error) {
 	var out struct {
 		Asks []Ask `json:"asks"`
 	}
-	if err := c.do(ctx, http.MethodGet, "asks", nil, nil, &out); err != nil {
+	var q url.Values
+	if all {
+		q = url.Values{"all": {"1"}}
+	}
+	if err := c.do(ctx, http.MethodGet, "asks", q, nil, &out); err != nil {
 		return nil, err
 	}
 	for i := range out.Asks {
@@ -307,8 +319,9 @@ func (c *Client) Asks(ctx context.Context) ([]Ask, error) {
 	return out.Asks, nil
 }
 
-// Decide answers one ask: decision is approve or deny; always keeps an
-// approval for later runs.
+// Decide answers one ask: decision is approve or deny. An approval lets
+// one request through; always keeps it for every later request of the
+// agent (GAP-0484).
 func (c *Client) Decide(ctx context.Context, id, decision string, always bool, reason string) error {
 	in := map[string]any{"decision": decision}
 	if always {
@@ -318,6 +331,58 @@ func (c *Client) Decide(ctx context.Context, id, decision string, always bool, r
 		in["reason"] = reason
 	}
 	return c.do(ctx, http.MethodPost, "asks/"+url.PathEscape(id), nil, in, nil)
+}
+
+// StandingApproval is one approval given with approve --always that is
+// still in force (GAP-0492): every later request of the agent to Host (in
+// Scope) goes through without asking.
+type StandingApproval struct {
+	Atespace string `json:"atespace"`
+	Actor    string `json:"actor"`
+	Host     string `json:"host"`
+	// Scope is "host" for the whole host, else the url_rules rule and
+	// methods the approval covers.
+	Scope string `json:"scope,omitempty"`
+	// ApprovedBy is "you", "owner" or "administrator"; empty, like
+	// ApprovedAt, when the cluster no longer has the answer.
+	ApprovedBy string    `json:"approved_by,omitempty"`
+	ApprovedAt time.Time `json:"approved_at,omitzero"`
+	AskID      string    `json:"ask_id,omitempty"`
+	// Owner is the agent's person, in an administrator's all view.
+	Owner string `json:"owner,omitempty"`
+}
+
+func (s StandingApproval) shown() StandingApproval {
+	for _, f := range []*string{&s.Atespace, &s.Actor, &s.Host, &s.Scope, &s.ApprovedBy, &s.AskID, &s.Owner} {
+		*f = safetext.Line(*f)
+	}
+	return s
+}
+
+// StandingApprovals lists the always approvals in force on the person's
+// agents, or with all every person's (administrators only; audited).
+func (c *Client) StandingApprovals(ctx context.Context, all bool) ([]StandingApproval, error) {
+	var out struct {
+		Approvals []StandingApproval `json:"approvals"`
+	}
+	var q url.Values
+	if all {
+		q = url.Values{"all": {"1"}}
+	}
+	if err := c.do(ctx, http.MethodGet, "approvals", q, nil, &out); err != nil {
+		return nil, err
+	}
+	for i := range out.Approvals {
+		out.Approvals[i] = out.Approvals[i].shown()
+	}
+	return out.Approvals, nil
+}
+
+// Revoke takes back the always approvals of host on one agent: the agent's
+// next request to it asks again (GAP-0492).
+func (c *Client) Revoke(ctx context.Context, atespace, name, host string) (map[string]any, error) {
+	var out map[string]any
+	return out, c.do(ctx, http.MethodDelete, "approvals/"+url.PathEscape(atespace)+"/"+url.PathEscape(name)+"/"+url.PathEscape(host), nil, nil, &out)
 }
 
 // Decisions lists recent decisions on the person's actors.
@@ -336,16 +401,6 @@ func (c *Client) Decisions(ctx context.Context, actor string, limit int) ([]map[
 		return nil, err
 	}
 	return out.Decisions, nil
-}
-
-// PolicyExplain returns the effective policy of one actor.
-func (c *Client) PolicyExplain(ctx context.Context, actor string) (map[string]any, error) {
-	q := url.Values{}
-	if actor != "" {
-		q.Set("actor", actor)
-	}
-	var out map[string]any
-	return out, c.do(ctx, http.MethodGet, "policy/explain", q, nil, &out)
 }
 
 // Secret is a secret's name and where it applies (never its value).

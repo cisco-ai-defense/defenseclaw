@@ -283,6 +283,8 @@ func substrateAPIMessage(e *api.Error) string {
 		return "that was too large for the cluster (" + orWord(e.Reason, "too large") + ")"
 	case e.Status == 503 && e.Reason == "no_free_worker":
 		return "the cluster has no free worker for a new agent right now; nothing was started. Your running agents hold workers: see them with defenseclaw substrate list, and free one with defenseclaw substrate delete NAME, or ask your administrator for more workers"
+	case e.Status == 503 && e.Reason == "resume_busy":
+		return "the cluster is busy starting other agents and could not start this one in time; nothing was left behind. Try again, or start fewer agents at once (for a batch, a lower --parallel)"
 	case e.Status == 429:
 		return "the cluster is rate limiting you; wait a moment and try again"
 	case e.Status == 502 || e.Status == 503:
@@ -328,7 +330,7 @@ func init() {
 		newSubstrateRunCmd(), newSubstrateConnectCmd(), newSubstrateListCmd(), newSubstrateStatusCmd(),
 		newSubstrateLogsCmd(), newSubstratePullCmd(), newSubstrateCheckpointCmd(), newSubstrateUndoCmd(),
 		newSubstrateDeleteCmd(), newSubstrateMigrateCmd(),
-		newSubstrateApprovalsCmd(), newSubstrateApproveCmd(), newSubstrateRejectCmd(), newSubstrateUsageCmd(),
+		newSubstrateApprovalsCmd(), newSubstrateApproveCmd(), newSubstrateRejectCmd(), newSubstrateRevokeCmd(), newSubstrateUsageCmd(),
 		newSubstrateSecretsCmd(), newSubstratePolicyCmd(),
 		newSubstrateDoctorCmd(), newSubstrateVerifyCmd(), newSubstrateSetupCmd(), newSubstrateBundleCmd(), newSubstrateTemplateCmd(),
 	)

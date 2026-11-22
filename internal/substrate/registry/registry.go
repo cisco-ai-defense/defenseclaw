@@ -201,6 +201,11 @@ type Lookup struct {
 	UID        string `json:"uid,omitempty"`
 	Profile    string `json:"profile,omitempty"`
 	Unattended bool   `json:"unattended,omitempty"`
+	// Person is the bound person's ID (issuer#subject) and Principal their
+	// principal, for records that name who used the actor (GAP-0513);
+	// empty for an actor with no bound person.
+	Person    string `json:"person,omitempty"`
+	Principal string `json:"principal,omitempty"`
 }
 
 // LookupName finds the newest registration of atespace/name. An actor name
@@ -229,7 +234,11 @@ func LookupName(ctx context.Context, s Store, atespace, name string) (Lookup, er
 	if best == nil {
 		return Lookup{}, nil
 	}
-	return Lookup{Found: true, Deleted: best.Deleted, UID: best.UID, Profile: best.Profile, Unattended: best.Unattended}, nil
+	l := Lookup{Found: true, Deleted: best.Deleted, UID: best.UID, Profile: best.Profile, Unattended: best.Unattended}
+	if !best.Attributed && best.Person.Subject != "" {
+		l.Person, l.Principal = best.Person.ID(), best.Person.Principal
+	}
+	return l, nil
 }
 
 // Current reports whether uid is atespace/name's live incarnation: the

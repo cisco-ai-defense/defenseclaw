@@ -98,6 +98,9 @@ func resolveHookUserIdentity(ctx context.Context, connector string, payload map[
 // address lookup in resolveHookUserIdentity reads a credential file, which is
 // wasted work on a path that has nowhere to put the result.
 func resolveHookUser(ctx context.Context, payload map[string]interface{}) llmEventUser {
+	if user, ok := substrateRequestUser(ctx); ok {
+		return user
+	}
 	if binding, ok := sandboxauth.FromContext(ctx); ok {
 		userID, _, userName := sandboxBindingUser(binding)
 		return newLLMEventUser(userID, userName, userID != "")
@@ -121,7 +124,9 @@ func resolveHookUser(ctx context.Context, payload map[string]interface{}) llmEve
 // with a local credential file to read.
 func resolveHTTPUserIdentity(r *http.Request, rawBody []byte) llmEventUser {
 	var user llmEventUser
-	if binding, ok := sandboxauth.FromContext(r.Context()); ok {
+	if su, ok := substrateRequestUser(r.Context()); ok {
+		user = su
+	} else if binding, ok := sandboxauth.FromContext(r.Context()); ok {
 		userID, _, userName := sandboxBindingUser(binding)
 		user = newLLMEventUser(userID, userName, userID != "")
 	} else if subject, ok := verifiedSubjectFromContext(r.Context()); ok {
@@ -170,6 +175,27 @@ func resolveHTTPUser(r *http.Request, rawBody []byte) llmEventUser {
 		}
 	}
 	return newUntrustedLLMEventUser(userID, userName)
+}
+
+// substrateRequestUser is the user of a verified Agent Substrate actor's
+// request (GAP-0485): the person or CI workload the launcher verified and
+// bound to the actor (attachSubstrateSubject), so the record carries its
+// principal, defenseclaw.user.identity.source (oidc or workload_oidc) and
+// a verified principal assurance. The actor's binding names no host
+// account, and the gateway pod's own account (the fallback of an empty
+// pair) is never the user of an actor's record: an actor with no bound
+// person has no user. ok is false for a request that is not an actor's.
+func substrateRequestUser(ctx context.Context) (llmEventUser, bool) {
+	if _, ok := substrateActorFrom(ctx); !ok {
+		return llmEventUser{}, false
+	}
+	subject, ok := verifiedSubjectFromContext(ctx)
+	if !ok || !isSubstrateSubjectSource(subject.Source) {
+		return llmEventUser{}, true
+	}
+	user := newTrustedLLMEventUser(subject.UserID, subject.UserName)
+	user.IDKind = subject.IDKind
+	return user, true
 }
 
 func newTrustedLLMEventUser(userID, userName string) llmEventUser {

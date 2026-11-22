@@ -65,6 +65,12 @@ type SubstrateCreate struct {
 	// Unattended is a --task or --batch run (fail closed, D8).
 	Unattended bool     `json:"unattended,omitempty"`
 	Secrets    []string `json:"secrets,omitempty"`
+	// AcknowledgeSignin is the person's yes to the open-source sign-in
+	// warning (GAP-0482). A create whose agent signs in to a vendor account
+	// (or keeps the hook in a folder it owns) and does not carry it is
+	// answered 428 signin_ack_required with the warning, before any actor
+	// exists; the acknowledged create is audited.
+	AcknowledgeSignin bool `json:"acknowledge_signin,omitempty"`
 	// Atespace is filled by the gateway from the profile; a request value
 	// is refused unless it is one of the profile's launcher atespaces.
 	Atespace string `json:"atespace,omitempty"`
@@ -152,6 +158,8 @@ func (a *APIServer) newSubstrateAdminHandler(st *substrateState) http.Handler {
 	mux.HandleFunc("GET /api/v1/substrate/doctor", a.substrateDoctor(st))
 	mux.HandleFunc("GET /api/v1/substrate/asks", a.substrateListAsks(st))
 	mux.HandleFunc("POST /api/v1/substrate/asks/{id}", a.substrateDecideAsk(st))
+	mux.HandleFunc("GET /api/v1/substrate/approvals", a.substrateListApprovals(st))
+	mux.HandleFunc("DELETE /api/v1/substrate/approvals/{atespace}/{name}/{host}", a.substrateRevokeApproval(st))
 	mux.HandleFunc("GET /api/v1/substrate/decisions", a.substrateDecisions(st))
 	mux.HandleFunc("GET /api/v1/substrate/policy/explain", a.substratePolicyExplain(st))
 	mux.HandleFunc("GET /api/v1/substrate/secrets", a.substrateListSecrets(st))
@@ -439,8 +447,16 @@ func (a *APIServer) substrateCreateActor(st *substrateState) http.HandlerFunc {
 		// vendor account, before any actor exists. The connector is now the
 		// template's whenever the template has one; it is checked again
 		// below on what the created actor runs.
-		if d := st.cfg.signinDecision(req.Connector, req.Secrets); !d.Allowed {
-			writeSubstrateSigninRefusal(w, d)
+		preDecision := st.cfg.signinDecision(req.Connector, req.Secrets)
+		if !preDecision.Allowed {
+			writeSubstrateSigninRefusal(w, preDecision)
+			return
+		}
+		if preDecision.Warn && !req.AcknowledgeSignin {
+			// GAP-0482: open source asks first. The warning goes back
+			// before anything is created or uploaded; the launcher asks the
+			// person and sends the create again with their yes.
+			writeSubstrateSigninAckRequired(w, preDecision)
 			return
 		}
 		createStart := time.Now()
@@ -467,6 +483,14 @@ func (a *APIServer) substrateCreateActor(st *substrateState) http.HandlerFunc {
 		if !signinDecision.Allowed {
 			_ = st.cfg.Actions.Delete(context.WithoutCancel(r.Context()), created.Atespace, created.Name)
 			writeSubstrateSigninRefusal(w, signinDecision)
+			return
+		}
+		if signinDecision.Warn && !req.AcknowledgeSignin {
+			// The actor runs another connector than the one checked above
+			// (a template with no label): it never ran, so remove it and
+			// ask as above.
+			_ = st.cfg.Actions.Delete(context.WithoutCancel(r.Context()), created.Atespace, created.Name)
+			writeSubstrateSigninAckRequired(w, signinDecision)
 			return
 		}
 		if signinDecision.Warn {
@@ -523,6 +547,11 @@ func (a *APIServer) substrateCreateActor(st *substrateState) http.HandlerFunc {
 				writeSubstrateJSONError(w, http.StatusServiceUnavailable, "no_free_worker")
 				return
 			}
+			if errors.Is(err, ErrSubstrateResumeBusy) {
+				// GAP-0468: busy, not broken; the person can retry.
+				writeSubstrateJSONError(w, http.StatusServiceUnavailable, "resume_busy")
+				return
+			}
 			writeSubstrateJSONError(w, http.StatusBadGateway, "resume_failed")
 			return
 		}
@@ -530,12 +559,16 @@ func (a *APIServer) substrateCreateActor(st *substrateState) http.HandlerFunc {
 		out := st.actorView(reg)
 		if signinDecision.Warn {
 			createWarnings = append(createWarnings, signinDecision.Message)
+			st.auditSigninAcknowledged(r.Context(), c, reg, signinDecision)
 		}
 		if len(createWarnings) > 0 {
 			out["warnings"] = createWarnings
 		}
 		if st.cfg.Sessions != nil && !req.Unattended {
-			tok, exp, err := st.cfg.Sessions.Issue(c.person.ID(), substrateSessionActor(reg), 0)
+			// The token ends with the caller's sign-in, at the latest
+			// (GAP-0588); with no time left the answer carries none and
+			// the launcher attaches through the attach route.
+			tok, exp, err := st.cfg.Sessions.IssueUntil(c.person.ID(), substrateSessionActor(reg), 0, c.person.SessionBound())
 			if err == nil {
 				out["session_token"], out["session_expires"] = tok, exp
 			}
@@ -787,8 +820,13 @@ func (a *APIServer) substrateSessionCert(st *substrateState) http.HandlerFunc {
 			ttl = substrateSessionMaxTTL
 		}
 		// The token names the person as issuer#subject: two issuers may
-		// use the same subject (GAP-0061).
-		tok, exp, err := st.cfg.Sessions.Issue(c.person.ID(), substrateSessionActor(reg), ttl)
+		// use the same subject (GAP-0061). It ends with the caller's
+		// sign-in, at the latest (GAP-0588).
+		tok, exp, err := st.cfg.Sessions.IssueUntil(c.person.ID(), substrateSessionActor(reg), ttl, c.person.SessionBound())
+		if errors.Is(err, identity.ErrSessionBound) {
+			writeSubstrateRefusal(w, http.StatusUnauthorized, string(identity.ReasonExpired))
+			return
+		}
 		if err != nil {
 			writeSubstrateJSONError(w, http.StatusBadRequest, "session_refused")
 			return

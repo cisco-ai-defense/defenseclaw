@@ -76,8 +76,12 @@ type SubstrateFacts struct {
 	Paths []SubstratePathFact     `json:"paths,omitempty"`
 	Files []SubstrateAttachedFile `json:"files,omitempty"`
 	// Skills fingerprints every skill folder (A5's kit, GAP-0039).
-	Skills    []SubstrateSkillFingerprint `json:"skills,omitempty"`
-	Truncated bool                        `json:"truncated,omitempty"`
+	Skills []SubstrateSkillFingerprint `json:"skills,omitempty"`
+	// ProjectHooks are the project settings files that declare hooks the
+	// actor's managed settings ignore (the kit's SessionStart fact,
+	// GAP-0479): recorded, never run.
+	ProjectHooks []kit.ProjectHooks `json:"project_hooks,omitempty"`
+	Truncated    bool               `json:"truncated,omitempty"`
 }
 
 // SubstrateSkillFingerprint is one skill folder's content digest
@@ -197,6 +201,15 @@ func substrateEnvelopeMiddleware(st *substrateState, next http.Handler) http.Han
 				return
 			}
 		}
+		// GAP-0504: an exposed actor_secrets value never reaches the hook
+		// rows (tool results, typed prompts).
+		if reg, ok := substrateRegistrationFrom(r.Context()); ok {
+			if masked, names := substrateMaskExposed(env.Payload, st.exposedValues(reg.Profile)); len(names) > 0 {
+				env.Payload = masked
+				st.logRefusal("hook payload of %s/%s carried the exposed value(s) %s (actor_secrets); replaced before evaluation and audit",
+					reg.Atespace, reg.Name, strings.Join(names, ", "))
+			}
+		}
 		// The facts stay on the envelope (substrateEnvelopeFrom); the skill
 		// scan below reads the attached files from it.
 		ctx := context.WithValue(r.Context(), substrateEnvelopeKey{}, env)
@@ -209,6 +222,7 @@ func substrateEnvelopeMiddleware(st *substrateState, next http.Handler) http.Han
 			r.Header.Set("X-DefenseClaw-Hook-Event", env.Event)
 		}
 		if route.class == sandboxauth.RouteHook {
+			st.substrateRecordProjectHooks(ctx, env)
 			msg := st.substrateMCPRefusal(ctx, env)
 			if msg == "" {
 				msg = st.substrateSkillWriteRefusal(ctx, env)

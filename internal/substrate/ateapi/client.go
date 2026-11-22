@@ -702,6 +702,16 @@ func AllAtespaces(ctx context.Context, c Client, pageSize int32) ([]*Atespace, e
 // worker of the pool has room for the actor.
 func IsResourceExhausted(err error) bool { return status.Code(err) == codes.ResourceExhausted }
 
+// IsBusy reports a call the control plane could not finish now
+// (DEADLINE_EXCEEDED, UNAVAILABLE, ABORTED): busy, not broken (GAP-0468).
+func IsBusy(err error) bool {
+	switch status.Code(err) {
+	case codes.DeadlineExceeded, codes.Unavailable, codes.Aborted:
+		return true
+	}
+	return false
+}
+
 // IsNotFound reports a NOT_FOUND status.
 func IsNotFound(err error) bool { return status.Code(err) == codes.NotFound }
 

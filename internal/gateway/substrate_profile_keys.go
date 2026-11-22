@@ -118,6 +118,40 @@ func SubstrateExposedValues(cfg *config.Config, dir string) func(profile string)
 	}
 }
 
+// exposedValues are a profile's actor_secrets values, from the /llm
+// handler's source (one reader for the model-call refusal and the hook
+// masking, GAP-0504); nil when the gateway has none.
+func (st *substrateState) exposedValues(profile string) map[string]string {
+	if l, ok := st.cfg.LLM.(*substrateLLM); ok && l.cfg.ExposedValues != nil {
+		return l.cfg.ExposedValues(profile)
+	}
+	return nil
+}
+
+// substrateMaskExposed replaces every form of every exposed value in a JSON
+// payload (as is, JSON-escaped, base64, URL-encoded) with the marker
+// [actor_secret:NAME], and returns the names it replaced. The marker is
+// plain ASCII with no quote or backslash, so the payload stays valid JSON.
+func substrateMaskExposed(payload []byte, values map[string]string) ([]byte, []string) {
+	text := string(payload)
+	var names []string
+	for _, name := range slices.Sorted(maps.Keys(values)) {
+		hit := false
+		for _, form := range exactvalue.Forms(values[name]) {
+			if form != "" && strings.Contains(text, form) {
+				text, hit = strings.ReplaceAll(text, form, "[actor_secret:"+name+"]"), true
+			}
+		}
+		if hit {
+			names = append(names, name)
+		}
+	}
+	if len(names) == 0 {
+		return payload, nil
+	}
+	return []byte(text), names
+}
+
 // substrateExposedValueIn returns the name of the first exposed value found
 // in body, in the forms the callout matches too (exactvalue.Forms: as is,
 // JSON-escaped, base64, URL-encoded).

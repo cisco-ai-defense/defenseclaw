@@ -158,6 +158,15 @@ func (s *Remote) GetLatest(ctx context.Context, atespace, uid string) (Registrat
 	return s.Get(ctx, atespace, uid)
 }
 
+// Invalidate forgets the cached registration atespace/uid, so the next Get
+// reads the leader: a revoked approval stops at once on this replica
+// (GAP-0492).
+func (s *Remote) Invalidate(atespace, uid string) {
+	s.mu.Lock()
+	delete(s.cache, atespace+"/"+uid)
+	s.mu.Unlock()
+}
+
 // Put implements Store.
 func (s *Remote) Put(ctx context.Context, r Registration) error {
 	if err := r.Validate(); err != nil {
