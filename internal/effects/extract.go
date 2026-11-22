@@ -2293,6 +2293,7 @@ func (w *walker) classifyOperands(words []Word, p Program, dialect Dialect) ([]o
 	var positionals []Word
 	i := 0
 	unknownFlag := false
+	permissionChange := p.Pos == PosConditionalPerm && hasPermissionMode(words, p.PermissionFlags)
 	inPlace := false
 	inPlaceSuffix := "" // sed -i[SUFFIX] / --in-place=SUFFIX: the backup name
 	del := false
@@ -2541,8 +2542,9 @@ func (w *walker) classifyOperands(words []Word, p Program, dialect Dialect) ([]o
 		unknownFlag, inPlaceSuffix = true, ""
 	}
 	posOps := w.positionalOperands(positionals, p, posCtx{unknownFlag: unknownFlag, inPlace: inPlace, inPlaceSuffix: inPlaceSuffix, del: del, findName: findName, findOpaque: findOpaque, hasExpr: hasExpr, destDir: destDir,
-		appendMode: p.AppendFlag != "" && hasAppendFlag(words, p.AppendFlag, dialect),
-		upload:     p.Pos == PosBits && hasWordFold(words, "/upload"), program: w.curProgram, words: words})
+		appendMode:       p.AppendFlag != "" && hasAppendFlag(words, p.AppendFlag, dialect),
+		permissionChange: permissionChange,
+		upload:           p.Pos == PosBits && hasWordFold(words, "/upload"), program: w.curProgram, words: words})
 	recursive := hasRowFlag(words, p, p.Recursive)
 	dry := hasRowFlag(words, p, p.DryRun)
 	for _, op := range posOps {
@@ -2562,6 +2564,25 @@ func (w *walker) classifyOperands(words []Word, p Program, dialect Dialect) ([]o
 		}
 	}
 	return out, inner, unknownFlag
+}
+
+func hasPermissionMode(words []Word, flags []string) bool {
+	for _, word := range words {
+		if !word.Static {
+			continue
+		}
+		value := strings.ToLower(word.Value)
+		if value == "--" {
+			break
+		}
+		for _, flag := range flags {
+			flag = strings.ToLower(flag)
+			if value == flag || strings.HasPrefix(value, flag+":") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func isInPlaceFlag(p Program, name string) bool {
@@ -2956,16 +2977,17 @@ type posCtx struct {
 	inPlace     bool
 	// inPlaceSuffix is the sed backup suffix: each file is also written at
 	// FILE+suffix (GAP-0216). Empty: no backup.
-	inPlaceSuffix string
-	del           bool
-	findName      string
-	findOpaque    bool
-	hasExpr       bool
-	destDir       string
-	appendMode    bool // tee -a: the file operands are appended to, not rewritten
-	words         []Word
-	upload        bool // bitsadmin /upload: the local file is read and sent
-	program       string
+	inPlaceSuffix    string
+	del              bool
+	findName         string
+	findOpaque       bool
+	hasExpr          bool
+	destDir          string
+	appendMode       bool // tee -a: the file operands are appended to, not rewritten
+	words            []Word
+	upload           bool // bitsadmin /upload: the local file is read and sent
+	program          string
+	permissionChange bool
 }
 
 func (w *walker) positionalOperands(ps []Word, p Program, ctx posCtx) []operand {
@@ -3075,6 +3097,14 @@ func (w *walker) positionalOperands(ps []Word, p Program, ctx posCtx) []operand 
 		role := RoleWrite
 		if ctx.appendMode {
 			role = RoleAppend
+		}
+		for _, wd := range ps {
+			out = append(out, mk(wd, role))
+		}
+	case PosConditionalPerm:
+		role := RoleRead
+		if ctx.permissionChange {
+			role = RolePerm
 		}
 		for _, wd := range ps {
 			out = append(out, mk(wd, role))
@@ -5014,6 +5044,8 @@ func posModeRole(p PosMode) Role {
 		return RoleWrite
 	case PosAllPerm:
 		return RolePerm
+	case PosConditionalPerm:
+		return RoleRead
 	}
 	return RoleNone
 }
