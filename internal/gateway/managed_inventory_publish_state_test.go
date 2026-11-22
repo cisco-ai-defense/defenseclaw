@@ -570,6 +570,31 @@ func TestManagedInventoryPublishStateDegradedCycleDoesNotConsumeBundle(t *testin
 	}
 }
 
+// Outside Secure Client the daily bundle is a refresh of the operator's own
+// destinations: a forced scan cycle stamps it even when a collection was
+// partial, so a collection that stays partial does not make every scan send
+// every collection again.
+func TestOperatorInventoryDailyRefreshIsStampedByADegradedScan(t *testing.T) {
+	state := newManagedInventoryPublishState(&config.Config{DataDir: t.TempDir()})
+	now := time.Now().UTC()
+	cycle := state.beginCycle("scan-1", now, false)
+	if !cycle.forcedBundle() {
+		t.Fatal("fresh state was not forced")
+	}
+	cycle.recordPublished("collection", "digest-a", 1)
+	cycle.markDegraded()
+	cycle.commit()
+	if next := state.beginCycle("scan-2", now.Add(30*time.Minute), true); next.forcedBundle() {
+		t.Fatal("every scan after a degraded one is forced")
+	}
+	// A cycle with no scan (startup, reload) does not stamp it.
+	fresh := newManagedInventoryPublishState(&config.Config{DataDir: t.TempDir()})
+	fresh.beginCycle("", now, true).commit()
+	if !fresh.beginCycle("scan-1", now.Add(time.Minute), true).forcedBundle() {
+		t.Fatal("a cycle without a scan stamped the daily refresh")
+	}
+}
+
 // TestManagedInventoryPublishStateFutureStampIsDue: a clock that jumped forward
 // and was then corrected must not wedge the daily bundle until the skew elapses.
 func TestManagedInventoryPublishStateFutureStampIsDue(t *testing.T) {
@@ -690,7 +715,7 @@ func TestManagedInventoryPublishStateOutsideManagedEnterpriseIsTheSkillState(t *
 			state := newManagedInventoryPublishState(&config.Config{
 				DeploymentMode: mode, DataDir: dataDir,
 			})
-			if state == nil || state.path != filepath.Join(dataDir, skillInventoryPublishStateFile) {
+			if state == nil || state.path != filepath.Join(dataDir, endpointInventoryPublishStateFile) {
 				t.Fatalf("mode %q: publish gate %+v, want the skill inventory state", mode, state)
 			}
 			entries, err := os.ReadDir(dataDir)

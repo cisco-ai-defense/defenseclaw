@@ -28,6 +28,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // skillInventoryActionName is config.ObservabilityV8SkillInventoryAction,
@@ -62,6 +63,9 @@ func skillProductsBodies(t *testing.T, capture *endpointInventoryCapture, want o
 	t.Helper()
 	var bodies []map[string]any
 	for _, record := range capture.snapshot() {
+		if canonicalBody(t, record)[observability.TelemetryAttributeDefenseClawAIDiscoverySource] != endpointSkillInventorySource {
+			continue
+		}
 		if record.Action() != string(want) {
 			t.Fatalf("record %s has action %q, want %q", record.EventName(), record.Action(), want)
 		}
@@ -124,7 +128,7 @@ func TestSkillInventoryIsSentOutsideSecureClient(t *testing.T) {
 			if _, ok := body[observability.TelemetryAttributeDefenseClawInventorySkillManifest]; ok {
 				t.Fatal("SKILL.md text was sent with include_skill_manifests off")
 			}
-			if _, err := os.Stat(filepath.Join(dataDir, "skill_inventory_publish_state.json")); err != nil {
+			if _, err := os.Stat(filepath.Join(dataDir, "endpoint_inventory_publish_state.json")); err != nil {
 				t.Fatalf("the skill state was not kept: %v", err)
 			}
 			if _, err := os.Stat(filepath.Join(dataDir, managedInventoryPublishStateFile)); !os.IsNotExist(err) {
@@ -144,6 +148,67 @@ func TestSkillInventoryIsSentOutsideSecureClient(t *testing.T) {
 			bodies = emit(skillProductsReport("scan-4", skillProductsPDF()))
 			if len(bodies) != 1 || bodies[0][observability.TelemetryAttributeDefenseClawInventorySkillManifest] != string(skillProductsManifest) {
 				t.Fatalf("include_skill_manifests on: %v", bodies)
+			}
+		})
+	}
+}
+
+// Every endpoint collection, not only skills, is sent outside Secure Client
+// under its operator action; none uses a managed action, and an unchanged
+// second scan sends nothing. The actions are spelled out so the fail-before
+// run compiles against the parent.
+func TestEndpointInventoryIsSentOutsideSecureClient(t *testing.T) {
+	want := map[string]observability.ProducerKey{
+		endpointConnectorInventorySource:       "connector_inventory",
+		endpointMCPInventorySource:             "mcp_inventory",
+		"endpoint_discovered_mcp_inventory":    "mcp_inventory",
+		"endpoint_per_connector_mcp_inventory": "mcp_inventory",
+		endpointSkillInventorySource:           skillInventoryActionName,
+		"endpoint_plugin_inventory":            "plugin_inventory",
+	}
+	for _, product := range []struct{ name, mode, profile string }{
+		{name: "oss per-user"},
+		{name: "managed standalone", mode: "managed_enterprise", profile: "standalone"},
+	} {
+		t.Run(product.name, func(t *testing.T) {
+			withManagedEnterprise(t, false)
+			testenv.SetHome(t, t.TempDir())
+			cfg := &config.Config{
+				DataDir: t.TempDir(), DeploymentMode: product.mode,
+				AIDiscovery: config.AIDiscoveryConfig{Enabled: true},
+			}
+			cfg.Enterprise.Profile = product.profile
+			gate := newManagedInventoryPublishState(cfg)
+			emit := func(scanID string) []observability.Record {
+				t.Helper()
+				capture := &endpointInventoryCapture{}
+				err := emitEndpointInventory(t.Context(), cfg, connector.NewDefaultRegistry(), capture, false,
+					skillProductsReport(scanID, skillProductsPDF()), gate)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return capture.snapshot()
+			}
+			seen := map[string]bool{}
+			for _, record := range emit("scan-1") {
+				source, _ := canonicalBody(t, record)[observability.TelemetryAttributeDefenseClawAIDiscoverySource].(string)
+				if strings.HasPrefix(record.Action(), "managed_") {
+					t.Fatalf("%s used the managed action %q", source, record.Action())
+				}
+				if action, ok := want[source]; ok {
+					if record.Action() != string(action) {
+						t.Fatalf("%s action = %q, want %q", source, record.Action(), action)
+					}
+					seen[source] = true
+				}
+			}
+			for source := range want {
+				if !seen[source] {
+					t.Errorf("collection %s was not sent", source)
+				}
+			}
+			if records := emit("scan-2"); len(records) != 0 {
+				t.Fatalf("an unchanged scan sent %d records", len(records))
 			}
 		})
 	}

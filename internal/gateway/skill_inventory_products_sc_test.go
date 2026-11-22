@@ -22,6 +22,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/observability"
 )
 
 // Secure Client keeps its own action and state file; the skill_inventory
@@ -37,17 +38,14 @@ func TestSkillInventoryOnSecureClientKeepsTheManagedAction(t *testing.T) {
 	if gate == nil || filepath.Base(gate.path) != managedInventoryPublishStateFile {
 		t.Fatalf("Secure Client publish state: %+v", gate)
 	}
-	if err := emitSkillInventory(t.Context(), cfg, &endpointInventoryCapture{}, skillProductsReport("scan-1", skillProductsPDF()), gate); err != nil {
-		t.Fatal(err)
-	}
 	capture := &endpointInventoryCapture{}
 	if err := emitEndpointInventory(t.Context(), cfg, connector.NewDefaultRegistry(), capture, false, skillProductsReport("scan-1", skillProductsPDF()), gate); err != nil {
 		t.Fatal(err)
 	}
 	skills := 0
 	for _, record := range capture.snapshot() {
-		if record.Action() == string(config.ObservabilityV8SkillInventoryAction) {
-			t.Fatal("a Secure Client endpoint used the skill_inventory action")
+		if _, operator := operatorInventoryActions[observability.ProducerKey(record.Action())]; operator {
+			t.Fatalf("a Secure Client endpoint used the operator action %q", record.Action())
 		}
 		if record.Action() == string(config.ObservabilityV8ManagedSkillInventoryAction) && record.EventName() == "ai_component.observed" {
 			skills++
@@ -63,7 +61,8 @@ func TestSkillInventoryNeedsAIDiscovery(t *testing.T) {
 	withManagedEnterprise(t, false)
 	cfg := &config.Config{DataDir: t.TempDir()}
 	capture := &endpointInventoryCapture{}
-	if err := emitSkillInventory(t.Context(), cfg, capture, skillProductsReport("scan-1", skillProductsPDF()), newManagedInventoryPublishState(cfg)); err != nil {
+	if err := emitEndpointInventory(t.Context(), cfg, connector.NewDefaultRegistry(), capture, false,
+		skillProductsReport("scan-1", skillProductsPDF()), newManagedInventoryPublishState(cfg)); err != nil {
 		t.Fatal(err)
 	}
 	if n := len(capture.snapshot()); n != 0 {

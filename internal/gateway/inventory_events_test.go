@@ -250,7 +250,9 @@ func TestEmitManagedAgentInventoryUsesCompleteCanonicalSafeSnapshot(t *testing.T
 	}
 }
 
-func TestEmitManagedAgentInventoryOutsideManagedIsNoOp(t *testing.T) {
+// Outside Secure Client the agent inventory goes to the operator's own
+// destinations under agent_inventory.
+func TestEmitAgentInventoryOutsideSecureClientUsesTheOperatorAction(t *testing.T) {
 	withManagedEnterprise(t, false)
 	capture := &endpointInventoryCapture{}
 	api := &APIServer{observabilityV8: capture}
@@ -260,8 +262,14 @@ func TestEmitManagedAgentInventoryOutsideManagedIsNoOp(t *testing.T) {
 	}, 1, false); err != nil {
 		t.Fatal(err)
 	}
-	if records := capture.snapshot(); len(records) != 0 {
-		t.Fatalf("non-managed agent inventory emitted %d records", len(records))
+	records := capture.snapshot()
+	if len(records) == 0 {
+		t.Fatal("no agent inventory outside Secure Client")
+	}
+	for _, record := range records {
+		if record.Action() != "agent_inventory" {
+			t.Fatalf("agent inventory action = %q, want agent_inventory", record.Action())
+		}
 	}
 }
 
@@ -1106,7 +1114,8 @@ func canonicalObjectArray(t *testing.T, value any) []map[string]any {
 	return objects
 }
 
-func TestEmitEndpointInventoryOutsideManagedIsNoOp(t *testing.T) {
+// Outside Secure Client the endpoint inventory follows ai_discovery.enabled.
+func TestEmitEndpointInventoryOutsideSecureClientNeedsAIDiscovery(t *testing.T) {
 	withManagedEnterprise(t, false)
 	capture := &endpointInventoryCapture{}
 	if err := EmitEndpointInventory(t.Context(), &config.Config{}, connector.NewDefaultRegistry(), capture); err != nil {

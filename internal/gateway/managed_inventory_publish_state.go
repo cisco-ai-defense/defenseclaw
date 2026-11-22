@@ -48,9 +48,10 @@ import (
 // guaranteed complete bundle every managedInventoryFullBundleInterval so a cloud
 // that missed the baseline always re-baselines within a day.
 //
-// Outside Secure Client the same gate keeps the skill inventory
-// (emitSkillInventory) in its own file, skillInventoryPublishStateFile, so a
-// machine that later moves to Secure Client re-baselines AI Defense in full.
+// Outside Secure Client the same gate keeps the endpoint inventory sent to
+// the operator's own destinations in its own file,
+// endpointInventoryPublishStateFile, so a machine that later moves to Secure
+// Client re-baselines AI Defense in full.
 // Every method here is nil-receiver safe with "never suppress" semantics.
 const (
 	// managedInventoryFullBundleInterval is release-owned: AI Defense receives
@@ -61,9 +62,9 @@ const (
 	managedInventoryFullBundleInterval = 24 * time.Hour
 
 	managedInventoryPublishStateFile = "managed_inventory_publish_state.json"
-	// skillInventoryPublishStateFile is the skill inventory state of an OSS
+	// endpointInventoryPublishStateFile is the inventory state of an OSS
 	// per-user or managed standalone gateway, in that gateway's data dir.
-	skillInventoryPublishStateFile = "skill_inventory_publish_state.json"
+	endpointInventoryPublishStateFile = "endpoint_inventory_publish_state.json"
 	// Version 2 invalidates v1 publish digests so the first complete scan after
 	// upgrade re-baselines AI Defense with connector-native MCP details. This is
 	// required because v1 could record a successful native publish before the
@@ -116,6 +117,12 @@ type managedInventoryPublishState struct {
 	mu   sync.Mutex
 	path string
 	file managedInventoryPublishFile
+	// aidBundle: the daily bundle is AI Defense's complete copy, so only a
+	// complete, non-degraded cycle stamps it (Secure Client). Elsewhere it is
+	// the daily refresh of the operator's own destinations, stamped by any
+	// forced scan cycle: a collection that stays partial must not make every
+	// scan send every collection again.
+	aidBundle bool
 
 	// Bundle-due decision memoized per discovery scan so the two publishers
 	// reached from one inventory.fanoutReport agree, even though the timestamp
@@ -131,8 +138,8 @@ type managedInventoryPublishState struct {
 }
 
 // newManagedInventoryPublishState returns the publish state of cfg's
-// gateway: the managed inventory state on a Secure Client endpoint, the skill
-// inventory state everywhere else. It returns nil without a data dir.
+// gateway: the managed inventory state on a Secure Client endpoint, the
+// operator inventory state everywhere else. It returns nil without a data dir.
 func newManagedInventoryPublishState(cfg *config.Config) *managedInventoryPublishState {
 	if cfg == nil {
 		return nil
@@ -141,12 +148,14 @@ func newManagedInventoryPublishState(cfg *config.Config) *managedInventoryPublis
 	if dataDir == "" {
 		return nil
 	}
-	name := skillInventoryPublishStateFile
-	if managed.IsManagedEnterprise(cfg.DeploymentMode) && cfg.ManagedAIDOnly() {
+	name := endpointInventoryPublishStateFile
+	aidBundle := managed.IsManagedEnterprise(cfg.DeploymentMode) && cfg.ManagedAIDOnly()
+	if aidBundle {
 		name = managedInventoryPublishStateFile
 	}
 	state := &managedInventoryPublishState{
-		path: filepath.Join(dataDir, name),
+		path:      filepath.Join(dataDir, name),
+		aidBundle: aidBundle,
 	}
 	state.file = loadManagedInventoryPublishFile(state.path)
 	return state
@@ -372,6 +381,9 @@ func (cycle *managedInventoryPublishCycle) commit() {
 	}
 	state := cycle.state
 	stampBundle := cycle.forced && cycle.bundleScope && !cycle.degraded
+	if !state.aidBundle {
+		stampBundle = cycle.forced && cycle.scanID != ""
+	}
 	if len(cycle.published) == 0 && !stampBundle && !cycle.receiptDirty {
 		return
 	}
