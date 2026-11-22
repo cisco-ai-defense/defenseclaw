@@ -3032,7 +3032,11 @@ func (w *walker) positionalOperands(ps []Word, p Program, ctx posCtx) []operand 
 			ps = []Word{{Value: ".", Static: true}}
 		}
 		for _, wd := range ps {
-			out = append(out, mk(wd, role))
+			// A metadata-only program (stat, du, find) names the file but never
+			// reads its content: no read effect; find -delete still deletes below.
+			if !p.MetadataOnly || ctx.inPlace {
+				out = append(out, mk(wd, role))
+			}
 			if ctx.inPlace && ctx.inPlaceSuffix != "" {
 				bk := wd
 				if bk.Static {
@@ -3299,6 +3303,7 @@ func (w *walker) effectForOperand(op operand, p Program, origin Origin, cond, fo
 	e := &Effect{Origin: origin, Cond: cond, RoleState: RoleStateKnown, TargetState: TargetStateKnown,
 		Target: Target{Flavor: w.o.flavor(), Link: LinkNotChecked, CaseFold: w.o.CaseInsensitive}}
 	e.Kind = op.role.kind()
+	e.LinkTarget = op.role == RoleLinkTarget
 	if op.roleUncertain {
 		e.addReason(ReasonUnknownFlag, ScopeRole)
 	}

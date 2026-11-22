@@ -16,9 +16,11 @@ import (
 // TestEffectJoinKeepsShadowOnlyFindingsOut (GAP-1796, GAP-1795): the effect
 // join is the one place the effect lane's findings enter a call, and a
 // finding the tier table records in every cell never enters it: the unknown
-// tier off the target-decided sets, advisory or enforcing, and any Known
-// write to a shell startup file. An unknown-tier write to authorized_keys or
-// the DefenseClaw state and a restricted write to authorized_keys join.
+// tier on every set, advisory or enforcing (DET111 ruling
+// 2026-11-22T17:00Z), any Known write to a shell startup file and a Known
+// link placed at a member other than the DefenseClaw state (the T17 sweep
+// dotfiles shape). A restricted write to authorized_keys or the DefenseClaw
+// state, and a link placed at the state, join.
 func TestEffectJoinKeepsShadowOnlyFindingsOut(t *testing.T) {
 	finding := func(rule string, kind decide.ProofKind, target decide.TargetClass, advise bool) RuleFinding {
 		p := decide.Proof{Kind: kind, Target: target, Certainty: decide.CertKnown, Source: decide.SourceEffects}
@@ -37,8 +39,12 @@ func TestEffectJoinKeepsShadowOnlyFindingsOut(t *testing.T) {
 			{finding(decide.RuleEffectUnknown, decide.KindAppend, decide.TargetAutostart, advise), false},
 			{finding(decide.RuleEffectUnknown, decide.KindWrite, decide.TargetOther, advise), false},
 			{finding(decide.RuleEffectRestricted, decide.KindAppend, decide.TargetAutostart, advise), false},
-			{finding(decide.RuleEffectUnknown, decide.KindWrite, decide.TargetAuthorizedKeys, advise), true},
-			{finding(decide.RuleEffectUnknown, decide.KindAppend, decide.TargetState, advise), true},
+			{finding(decide.RuleEffectUnknown, decide.KindWrite, decide.TargetAuthorizedKeys, advise), false},
+			{finding(decide.RuleEffectUnknown, decide.KindAppend, decide.TargetState, advise), false},
+			{finding(decide.RuleEffectRestricted, decide.KindWrite, decide.TargetState, advise), true},
+			{finding(decide.RuleEffectRestricted, decide.KindLink, decide.TargetAuthorizedKeys, advise), false},
+			{finding(decide.RuleEffectRestricted, decide.KindLink, decide.TargetHookConfig, advise), false},
+			{finding(decide.RuleEffectRestricted, decide.KindLink, decide.TargetState, advise), true},
 			{finding(decide.RuleEffectRestricted, decide.KindAppend, decide.TargetAuthorizedKeys, advise), true},
 		} {
 			got := joinEffectFindings(nil, []RuleFinding{tc.f})

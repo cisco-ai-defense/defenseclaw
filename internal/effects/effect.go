@@ -32,6 +32,11 @@ type Effect struct {
 	// Cond is true when this effect runs only on some execution paths (an
 	// if/case/loop/function body, a || alternative, after an unresolved cd).
 	Cond bool `json:"cond,omitempty"`
+	// LinkTarget marks a KindLink effect that names the path a link points
+	// at (ln -s TARGET LINK, mklink LINK TARGET, New-Item -Target), not the
+	// path the link is placed at: the file itself is not changed, it gets a
+	// new name the call may later write or read through.
+	LinkTarget bool `json:"link_target,omitempty"`
 }
 
 // Target is what an effect acts on.
