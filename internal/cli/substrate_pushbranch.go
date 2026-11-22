@@ -132,20 +132,23 @@ func runSubstratePushBranch(ctx context.Context, cmd *cobra.Command, f *substrat
 }
 
 // substratePushBranchReplaced refuses pull --push-branch, before anything
-// reaches the agent, for a copy this computer sent with credentials
-// replaced by placeholders (S9a, RV6-4): the agent's commits carry the
-// DC_SECRET_<n> placeholders in place of the person's lines, and a push
-// would put them upstream. pull --branch keeps those lines (pull_secrets).
-// workspace.PrepareBranchPush refuses the same commits on a computer with
-// no record. A record that cannot be read refuses nothing here.
+// reaches the agent, for a copy whose tracked files this computer sent with
+// credentials replaced (S9a, RV6-4): the sandbox's HEAD starts at the
+// placeholder commit, so every agent commit carries DC_SECRET_<n> where the
+// person's lines were (osw.CheckPushFromSandbox). A copy whose only replaced
+// files are untracked is not refused: no commit holds them, and a commit the
+// agent makes of one is refused by the placeholder scan in
+// workspace.PrepareBranchPush. A record that cannot be read refuses nothing
+// here; PrepareBranchPush refuses the same commits on any computer.
 func substratePushBranchReplaced(dataDir, copyName, actor, branch string) error {
 	rec, err := osw.LoadCopy(dataDir, copyName)
-	if err != nil || len(rec.SecretLines) == 0 {
+	if err != nil {
 		return nil
 	}
-	return cliusage.WithExitCode(fmt.Errorf("not pushed: the folder you sent to %s had credentials replaced with placeholders (DC_SECRET_<n>), "+
-		"so the agent's work would put them upstream in place of your lines. Bring the work home with: defenseclaw substrate pull %s --branch %s, "+
-		"then push it from this computer", actor, actor, branch), substrateExitRefused)
+	if err := osw.CheckPushFromSandbox(rec); err != nil {
+		return cliusage.WithExitCode(fmt.Errorf("not pushed: %w: defenseclaw substrate pull %s --branch %s", err, actor, branch), substrateExitRefused)
+	}
+	return nil
 }
 
 // substratePushReview prints what the push carries and what is flagged.
