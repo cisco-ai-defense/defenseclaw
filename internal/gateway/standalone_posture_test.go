@@ -75,6 +75,11 @@ func restoreGatewayProcessPosture(t *testing.T) {
 	// Secure Client test read no Secure Client user.
 	facts, attribution := identityFactsEnabled.Load(), secureClientUserAttribution.Load()
 	principal, blocking := userPrincipalCollectionEnabled.Load(), identityLookupBlocking.Load()
+	// A standalone enterprise boot or reload also points identity at the
+	// guardian spool; left set, a later Windows token without groups read as
+	// awaiting the spool (lookup failed) in TestBareUsersEntrySkipsLocalNamesake
+	// (rel-1-0-10:GAP-1305).
+	spool, assignmentGroups := currentIdentitySpoolDir(), profileAssignmentGroups()
 	// A managed boot makes the process ignore the provider overlay path; the
 	// posture must not outlive the test (rel-1-0-10:GAP-1305).
 	providerRegistryMu.Lock()
@@ -88,6 +93,8 @@ func restoreGatewayProcessPosture(t *testing.T) {
 		setSecureClientUserAttribution(attribution)
 		SetUserPrincipalCollectionEnabled(principal)
 		setIdentityLookupBlocking(blocking)
+		setIdentitySpoolDir(spool)
+		setProfileAssignmentGroups(assignmentGroups)
 		gatewaylog.SwapTelemetryHMACKeyForTest(hmacKey)
 		setManagedEnterpriseRedactionPosture(aidOnly)
 		setStandaloneEnterpriseActive(standalone)
