@@ -291,6 +291,13 @@ func attachPoll(ctx context.Context, in io.Reader, out io.Writer, o AttachOption
 	send := func(frame []byte) error {
 		r, err := do(sendCtx, http.MethodPost, path, AppendStream(nil, frame))
 		if err != nil {
+			if sendCtx.Err() != nil && ctx.Err() == nil {
+				// The end of the attachment cut the write off: the relay
+				// may already have handed the keys to the agent (it answers
+				// 204 after that), so they count as sent and the next
+				// hello's Received count tells (rel-1-0-10:GAP-1765).
+				return errWriteCutAtEnd
+			}
 			return err
 		}
 		r.Body.Close()
@@ -401,6 +408,12 @@ type sendCount struct {
 // errAttachEnded refuses a chunk read after the attachment ended.
 var errAttachEnded = errors.New("relay: the attachment ended")
 
+// errWriteCutAtEnd is a long-poll write the end of the attachment cut off
+// before its answer: whether it arrived is unknown, so tracked counts it in
+// Sent and does not report it unsent (the user would type it twice); the
+// relay's Received count on the next hello settles it.
+var errWriteCutAtEnd = errors.New("relay: the attachment ended during the write")
+
 // settle ends the count and returns it.
 func (c *sendCount) settle() int64 {
 	c.mu.Lock()
@@ -409,8 +422,9 @@ func (c *sendCount) settle() int64 {
 	return c.n
 }
 
-// tracked wraps send so a chunk that is written is counted in sent and one
-// that fails, or comes after the attachment ended, is reported (OnUnsent).
+// tracked wraps send so a chunk that is written, or whose long-poll write the
+// end cut off (errWriteCutAtEnd), is counted in sent, and one that fails or
+// comes after the attachment ended is reported (OnUnsent).
 func (o AttachOptions) tracked(sent *sendCount, send func([]byte) error) func([]byte) error {
 	return func(b []byte) error {
 		sent.mu.Lock()
@@ -420,7 +434,7 @@ func (o AttachOptions) tracked(sent *sendCount, send func([]byte) error) func([]
 			err = send(b)
 		}
 		switch {
-		case err == nil:
+		case err == nil, errors.Is(err, errWriteCutAtEnd):
 			sent.n += int64(len(b))
 		case o.OnUnsent != nil && len(b) > 0:
 			o.OnUnsent(len(b))
