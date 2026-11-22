@@ -185,7 +185,9 @@ type substratePullFlags struct {
 	yes    bool
 	// allowFlagged writes flagged files with --apply (GAP-0472).
 	allowFlagged bool
-	timeout      time.Duration
+	// restoreSecrets is --restore-secret-lines (B1 S9a).
+	restoreSecrets bool
+	timeout        time.Duration
 }
 
 func newSubstratePullCmd() *cobra.Command {
@@ -216,6 +218,7 @@ that safe answer, so --apply --yes writes nothing and says why; after you review
 	fl.BoolVarP(&f.yes, "yes", "y", false, "take the safe default at each question")
 	fl.BoolVar(&f.allowFlagged, "allow-flagged", false, "with --apply: also write the files flagged as able to run code (review them first)")
 	fl.DurationVar(&f.timeout, "timeout", 0, "stop reading the agent's work after this long (default 10m)")
+	fl.BoolVar(&f.restoreSecrets, "restore-secret-lines", false, "in files uploaded with credentials replaced, keep the agent's changed lines with the value put back (default: keep your line)")
 	return cmd
 }
 

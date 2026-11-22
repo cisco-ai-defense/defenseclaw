@@ -849,6 +849,12 @@
         "metavar": "FILE"
       },
       {
+        "name": "restore-secret-lines",
+        "type": "bool",
+        "default": "false",
+        "usage": "in files uploaded with credentials replaced, keep the agent's changed lines with the value put back (default: keep your line)"
+      },
+      {
         "name": "timeout",
         "type": "duration",
         "default": "0s",
