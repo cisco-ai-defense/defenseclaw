@@ -201,7 +201,7 @@ def normalize(root: Path, dataset_id: str) -> Path:
     tmp = out.with_suffix(".jsonl.partial")
     argv = [tmp.as_posix() if a == out.as_posix() else a for a in argv]
     print(f"{dataset_id}: normalize {reg['norm'][0]}")
-    subprocess.run(argv, check=True)
+    subprocess.run(argv, check=True, cwd=REPO)  # adapters default to repo-relative schema paths
     os.replace(tmp, out)
     return out
 

@@ -13,6 +13,7 @@ Per dataset id (the id in benchmarks/datasets.lock.json):
   overlay  {prefix, labels, truth, join_digest}: published per-command label files (benchmarks bucket, ~/s7c/hf/bench/data) applied to the
            normalized rows before convert (benchmark_apply_labels.py); ids with no annotation take the truth file, others are dropped
   include / extract   zenodo: files to fetch (default all); zip extracted safely (inert files) before the adapter reads it
+  benign_modulus  keep 1 in N benign rows (sha256 of the row id): a fixed documented cap for very large benign sets
   skip     why the set has no adapter (license, no tool-call content, already covered, unreachable)
 """
 VERSION = "v1"
@@ -40,6 +41,17 @@ REGISTRY = {
               "--split", "development", "--output", "{out}", "--manifest", "{manifest}"]),
     "AnodeAI/Agent-Trace-Cyber-v1": dict(slug="anode-cyber", fetch="hf",
         norm=["benchmark_normalize_anode_cyber.py", "--source", "{src}/agent_trajectories.jsonl", "--revision", "{rev}", "--output", "{out}", "--manifest", "{manifest}"]),
+    # p3: fetch-capped large sets (DET111 DATA-C). The cap is the shard / split named in `include`, fixed here and reported in DATASETS.md.
+    "eval-aware/linuxarena-trajectories": dict(slug="linuxarena", fetch="hf", include=["data/train-00000-of-00001.parquet"],
+        norm=["benchmark_normalize_linuxarena.py", "--source", "{src}/data/train-00000-of-00001.parquet", "--revision", "{rev}", "--output", "{out}", "--manifest", "{manifest}"]),
+    "valiere/ISETrace": dict(slug="isetrace", fetch="hf", include=["LICENSE", "README.md", "trajectories/trajectories-00000.jsonl"],
+        norm=["benchmark_normalize_isetrace.py", "--source-root", "{src}", "--source", "{src}/trajectories/trajectories-00000.jsonl", "--revision", "{rev}", "--output", "{out}", "--manifest", "{manifest}"]),
+    "forgelab/mole": dict(slug="mole", fetch="hf", benign_modulus=20, include=["data/audit/gpt53_multiday/0000.parquet", "data/labels/gpt53_multiday/0000.parquet"],
+        norm=["benchmark_normalize_mole.py", "--input-dir", "{src}", "--source-split", "gpt53_multiday", "--revision", "{rev}", "--split", "validation", "--output", "{out}", "--manifest", "{manifest}"]),
+    "open-swe-traces-v1.2": dict(slug="open-swe", fetch="hf", benign_modulus=2, dir="nvidia/Open-SWE-Traces", include=["data/minisweagent/qwen36_27b/scale-swe/train-00000-of-00017.parquet"],
+        norm=["benchmark_normalize_open_swe_traces.py", "--input", "{src}/data/minisweagent/qwen36_27b/scale-swe/train-00000-of-00017.parquet", "--revision", "{rev}", "--output", "{out}", "--manifest", "{manifest}"]),
+    "microsoft/Orchard": dict(slug="orchard", fetch="hf", benign_modulus=5, include=["swe/train/data-00000-of-00019.parquet"],
+        norm=["benchmark_normalize_orchard_swe.py", "--input", "{src}/swe/train/data-00000-of-00019.parquet", "--revision", "{rev}", "--max-trajectories", "2000", "--output", "{out}", "--manifest", "{manifest}"]),
     "zenodo-cyber-training-shell-v4": dict(slug="zenodo-shell", fetch="zenodo", include=["data.zip"], extract="data.zip",
         overlay=dict(prefix="zenodo-cyber-training-shell-v4/", labels=[f"zenodo-shell-{s}-gpt-oss-120b-labels.jsonl" for s in ("development", "validation", "test")]),
         norm=["benchmark_normalize_cyber_training_shell.py", "--archive", "{archive}", "--input-dir", "{ext}", "--output", "{out}"]),
