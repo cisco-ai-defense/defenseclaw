@@ -619,6 +619,12 @@ func substrateGatewayBuilder(c *config.Config, src *configwatch.Watcher, ready *
 			return out, err
 		}
 		out.RelayTLS = relaytls.Mode(c.Substrate.EffectiveRelayTLS())
+		out.Interactive = func() config.SubstrateInteractiveConfig {
+			if cur := live(); cur != nil {
+				return cur.Substrate.Interactive
+			}
+			return c.Substrate.Interactive
+		}
 		ready.Store(true)
 		return out, nil
 	}

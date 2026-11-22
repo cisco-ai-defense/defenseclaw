@@ -145,6 +145,10 @@ substrate:
   idle_suspend_after: 30m
   relay_tls: required
   unattended: {asks: deny, ask_timeout: 30m, telemetry_sampling: 1.0}
+  interactive:
+    port_forward: {enabled: auto, ports: "3000,8000-8999", max_streams: 32}
+    mcp_bridge: {enabled: off, max_servers: 4, message_max_bytes: 1048576}
+    idle_close: 30m
   rate_limits: {per_actor_rps: 20, per_atespace_rps: 500}
   extproc:
     enabled: true

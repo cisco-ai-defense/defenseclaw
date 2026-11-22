@@ -201,6 +201,9 @@ type SubstrateConfig struct {
 	RelayCA *relaytls.CA
 	// RelayTLS is substrate.relay_tls ("" is auto).
 	RelayTLS relaytls.Mode
+	// Interactive is substrate.interactive in force (B3 port forward and
+	// MCP bridge switches; nil: the defaults).
+	Interactive func() config.SubstrateInteractiveConfig
 	// WorkspaceMaxBytes caps a workspace upload through attach
 	// (substrate.workspace_max_bytes, E23).
 	WorkspaceMaxBytes int64
@@ -262,6 +265,8 @@ type substrateState struct {
 	cfg SubstrateConfig
 	// taskEnds bounds the task-end audit rows per actor.
 	taskEnds substrateTaskEnds
+	// streams counts the open port forwards and MCP bridges per actor.
+	streams substrateStreamCounts
 	// refusals bounds refusal log lines: a flood of bad tokens is still
 	// refused, not logged line by line.
 	refusals *rate.Limiter

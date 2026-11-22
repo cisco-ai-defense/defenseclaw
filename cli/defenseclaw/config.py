@@ -4661,6 +4661,29 @@ class SubstrateUnattendedConfig:
 
 
 @dataclass
+class SubstratePortForwardConfig:
+    # auto (default: on), on or off (the admin switch).
+    enabled: str = ""
+    ports: str = ""  # "1024-65535" (default) or "3000,8000-8999"
+    max_streams: int | None = None  # open forwarded connections per actor; None = 32
+
+
+@dataclass
+class SubstrateMCPBridgeConfig:
+    # auto (default: on in open source, off in managed), on or off.
+    enabled: str = ""
+    max_servers: int | None = None  # bridged servers per actor; None = 4
+    message_max_bytes: int | None = None  # a bigger JSON-RPC message is refused; None = 1 MiB
+
+
+@dataclass
+class SubstrateInteractiveConfig:
+    port_forward: SubstratePortForwardConfig = field(default_factory=SubstratePortForwardConfig)
+    mcp_bridge: SubstrateMCPBridgeConfig = field(default_factory=SubstrateMCPBridgeConfig)
+    idle_close: str = ""  # Go duration, 1m to 24h; "" = 30m
+
+
+@dataclass
 class SubstrateRateLimitsConfig:
     per_actor_rps: float | None = None
     per_atespace_rps: float | None = None
@@ -4834,6 +4857,7 @@ class SubstrateConfig:
     # Workspace upload cap through the admin attach route (E23); None = 1 GiB.
     workspace_max_bytes: int | None = None
     unattended: SubstrateUnattendedConfig = field(default_factory=SubstrateUnattendedConfig)
+    interactive: SubstrateInteractiveConfig = field(default_factory=SubstrateInteractiveConfig)
     rate_limits: SubstrateRateLimitsConfig = field(default_factory=SubstrateRateLimitsConfig)
     extproc: SubstrateExtprocConfig = field(default_factory=SubstrateExtprocConfig)
     llm: SubstrateLLMConfig = field(default_factory=SubstrateLLMConfig)
@@ -8106,6 +8130,9 @@ def _merge_substrate(raw: Any) -> SubstrateConfig:
     oidc = _mapping(ident.get("oidc"))
     services = _mapping(raw.get("services"))
     unattended = _mapping(raw.get("unattended"))
+    interactive = _mapping(raw.get("interactive"))
+    port_forward = _mapping(interactive.get("port_forward"))
+    mcp_bridge = _mapping(interactive.get("mcp_bridge"))
     limits = _mapping(raw.get("rate_limits"))
     extproc = _mapping(raw.get("extproc"))
     llm = _mapping(raw.get("llm"))
@@ -8186,6 +8213,19 @@ def _merge_substrate(raw: Any) -> SubstrateConfig:
             asks=str(unattended.get("asks", "") or ""),
             ask_timeout=_duration_text(unattended.get("ask_timeout")),
             telemetry_sampling=_optional_number(unattended.get("telemetry_sampling"), float),
+        ),
+        interactive=SubstrateInteractiveConfig(
+            port_forward=SubstratePortForwardConfig(
+                enabled=str(port_forward.get("enabled", "") or ""),
+                ports=str(port_forward.get("ports", "") or ""),
+                max_streams=_optional_number(port_forward.get("max_streams"), int),
+            ),
+            mcp_bridge=SubstrateMCPBridgeConfig(
+                enabled=str(mcp_bridge.get("enabled", "") or ""),
+                max_servers=_optional_number(mcp_bridge.get("max_servers"), int),
+                message_max_bytes=_optional_number(mcp_bridge.get("message_max_bytes"), int),
+            ),
+            idle_close=_duration_text(interactive.get("idle_close")),
         ),
         rate_limits=SubstrateRateLimitsConfig(
             per_actor_rps=_optional_number(limits.get("per_actor_rps"), float),

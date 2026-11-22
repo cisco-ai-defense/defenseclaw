@@ -362,8 +362,12 @@ func JoinStreams(s []string) string {
 }
 
 // RelayServesTLS reports whether the actor's signed kit serves TLS.
-func (r Registration) RelayServesTLS() bool {
-	return slices.Contains(strings.Split(r.RelayStreams, ","), "tls")
+func (r Registration) RelayServesTLS() bool { return r.RelayServes("tls") }
+
+// RelayServes reports whether the actor's signed kit names a relay stream
+// (kit.StreamTLS, kit.StreamPort, kit.StreamMCP).
+func (r Registration) RelayServes(stream string) bool {
+	return stream != "" && slices.Contains(strings.Split(r.RelayStreams, ","), stream)
 }
 
 func KitFillable(r Registration) bool {

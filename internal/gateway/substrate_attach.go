@@ -162,8 +162,20 @@ func (a *APIServer) substrateAttach(st *substrateState) http.HandlerFunc {
 			writeSubstrateJSONError(w, status, reason)
 			return
 		}
+		// A port forward or MCP bridge (B3.2, B3.3) gets a token for its
+		// own dc.scope only (substrate_streams.go).
+		stream, sstatus, sreason := a.substrateStreamOpen(st, r, reg, rest)
+		if sstatus != http.StatusOK {
+			writeSubstrateJSONError(w, sstatus, sreason)
+			return
+		}
+		defer stream.close(r.Context())
+		actor := substrateSessionActor(reg)
+		if stream != nil {
+			actor.Scope = stream.scope
+		}
 		c, _ := substrateCallerFrom(r.Context())
-		tok, _, err := st.cfg.Sessions.Issue(c.person.ID(), substrateSessionActor(reg), substrateAttachSessionTTL)
+		tok, _, err := st.cfg.Sessions.Issue(c.person.ID(), actor, substrateAttachSessionTTL)
 		if err != nil {
 			writeSubstrateJSONError(w, http.StatusBadRequest, "session_refused")
 			return
@@ -173,7 +185,7 @@ func (a *APIServer) substrateAttach(st *substrateState) http.HandlerFunc {
 			// A terminal attachment (WebSocket, or a long-poll request
 			// other than its close) is reported while it is open, so a
 			// controller without a CPU feed keeps the actor (GAP-0534).
-			if head == relay.RouteWS || (head == relay.RoutePoll && r.Method != http.MethodDelete) {
+			if head == relay.RouteWS || stream != nil || (head == relay.RoutePoll && r.Method != http.MethodDelete) {
 				defer substrateReportAttach(st.cfg.Activity, reg.Atespace, reg.UID)()
 			}
 		}
@@ -207,8 +219,11 @@ func (a *APIServer) substrateAttach(st *substrateState) http.HandlerFunc {
 				pr.Out.Header.Set("Authorization", "Bearer "+tok)
 			},
 			Transport: &http.Transport{
-				DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) { return dial(ctx) },
-				Proxy:       nil, DisableKeepAlives: true, ResponseHeaderTimeout: 60 * time.Second,
+				DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+					c, err := dial(ctx)
+					return stream.wrap(c), err
+				},
+				Proxy: nil, DisableKeepAlives: true, ResponseHeaderTimeout: 60 * time.Second,
 			},
 			FlushInterval: -1, // stream poll and task answers as they come
 			ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {

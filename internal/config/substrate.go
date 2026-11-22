@@ -79,11 +79,13 @@ type SubstrateConfig struct {
 	// listener's attach route (E23; 0 = DefaultSubstrateWorkspaceMaxBytes).
 	WorkspaceMaxBytes int64                     `mapstructure:"workspace_max_bytes" yaml:"workspace_max_bytes,omitempty"`
 	Unattended        SubstrateUnattendedConfig `mapstructure:"unattended"         yaml:"unattended,omitempty"`
-	RateLimits        SubstrateRateLimitsConfig `mapstructure:"rate_limits"        yaml:"rate_limits,omitempty"`
-	Extproc           SubstrateExtprocConfig    `mapstructure:"extproc"            yaml:"extproc,omitempty"`
-	LLM               SubstrateLLMConfig        `mapstructure:"llm"                yaml:"llm,omitempty"`
-	Egress            SubstrateEgressConfig     `mapstructure:"egress"             yaml:"egress,omitempty"`
-	Secrets           []SubstrateSecret         `mapstructure:"secrets"            yaml:"secrets,omitempty"`
+	// Interactive is the port forward and MCP bridge switches (B3).
+	Interactive SubstrateInteractiveConfig `mapstructure:"interactive" yaml:"interactive,omitempty"`
+	RateLimits  SubstrateRateLimitsConfig  `mapstructure:"rate_limits"        yaml:"rate_limits,omitempty"`
+	Extproc     SubstrateExtprocConfig     `mapstructure:"extproc"            yaml:"extproc,omitempty"`
+	LLM         SubstrateLLMConfig         `mapstructure:"llm"                yaml:"llm,omitempty"`
+	Egress      SubstrateEgressConfig      `mapstructure:"egress"             yaml:"egress,omitempty"`
+	Secrets     []SubstrateSecret          `mapstructure:"secrets"            yaml:"secrets,omitempty"`
 	// AllowPassthroughFor lists hosts forwarded without inspection
 	// (certificate pinning). A secret is never bound to one.
 	AllowPassthroughFor []string `mapstructure:"allow_passthrough_for" yaml:"allow_passthrough_for,omitempty"`
@@ -767,6 +769,7 @@ func (s *SubstrateConfig) Validate() error {
 	if r := s.Unattended.TelemetrySampling; r != nil && (*r < 0 || *r > 1) {
 		bad("unattended.telemetry_sampling", "%v is outside 0-1", *r)
 	}
+	s.Interactive.validate(bad)
 	if s.RateLimits.PerActorRPS < 0 {
 		bad("rate_limits.per_actor_rps", "must not be negative")
 	}

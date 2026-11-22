@@ -303,8 +303,15 @@ func (c Config) Validate() error {
 	return nil
 }
 
-// StreamTLS marks a relay that serves TLS on its listen port.
-const StreamTLS = "tls"
+// Relay streams a kit names (relay.streams). StreamTLS marks a relay that
+// serves TLS on its listen port; StreamPort and StreamMCP mark one that
+// serves port forwards and MCP bridges (B3.2, B3.3), which ride TLS only.
+// A stream name is its relay attach route (relay.RoutePort, RouteMCP).
+const (
+	StreamTLS  = "tls"
+	StreamPort = "port"
+	StreamMCP  = "mcp"
+)
 
 // relayCertPath is the actor-listener route that signs the relay's
 // serving certificate; it sits next to the verify route.
@@ -339,7 +346,13 @@ func (r RelayConfig) CertURL() string {
 // to sign the certificate.
 func (r RelayConfig) checkStreams() error {
 	for _, s := range r.Streams {
-		if s != StreamTLS {
+		switch s {
+		case StreamTLS:
+		case StreamPort, StreamMCP:
+			if !r.ServesTLS() {
+				return fmt.Errorf("relay stream %s needs relay stream tls", s)
+			}
+		default:
 			return fmt.Errorf("relay stream %q is not known", s)
 		}
 	}
