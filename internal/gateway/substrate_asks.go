@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -117,6 +118,14 @@ func (a *APIServer) substrateDecideAsk(st *substrateState) http.HandlerFunc {
 			writeSubstrateJSONError(w, http.StatusBadRequest, "decision_is_approve_or_deny")
 			return
 		}
+		if c.admin && a.substrateBindingAskOrphaned(r.Context(), st, r.PathValue("id")) {
+			// The binding of this ask was removed: the ask is denied, no
+			// approval is recorded (RV4 F4).
+			_, _ = st.cfg.Asks.Resolve(r.Context(), asks.ResolveRequest{ID: r.PathValue("id"), Decision: "deny",
+				Note: "the binding was removed", CallerID: ownerOf(c.person).ID(), Admin: true})
+			writeSubstrateJSONError(w, http.StatusConflict, "ask_binding_gone")
+			return
+		}
 		got, err := st.cfg.Asks.Resolve(r.Context(), asks.ResolveRequest{
 			ID: r.PathValue("id"), Decision: in.Decision, Always: in.Always, Note: in.Reason,
 			CallerID: ownerOf(c.person).ID(), Admin: c.admin,
@@ -133,6 +142,8 @@ func (a *APIServer) substrateDecideAsk(st *substrateState) http.HandlerFunc {
 			switch {
 			case !ok:
 				writeSubstrateJSONError(w, http.StatusConflict, "ask_already_answered")
+			case errors.Is(berr, errSubstrateBindingGone):
+				writeSubstrateJSONError(w, http.StatusConflict, "ask_binding_gone")
 			case berr != nil:
 				fmt.Fprintf(os.Stderr, "[substrate] binding of ask %s not moved: %v\n", again.ID, berr)
 				writeSubstrateJSONError(w, http.StatusBadGateway, "secret_not_stored")
@@ -147,11 +158,17 @@ func (a *APIServer) substrateDecideAsk(st *substrateState) http.HandlerFunc {
 			writeSubstrateJSONError(w, http.StatusServiceUnavailable, "asks_unavailable")
 			return
 		}
+		berr := a.substrateBindingDecided(r.Context(), st, got)
+		if errors.Is(berr, errSubstrateBindingGone) {
+			// Removed between the check above and the answer: no approval record.
+			writeSubstrateJSONError(w, http.StatusConflict, "ask_binding_gone")
+			return
+		}
 		a.emitSubstrateApprovalV8(r.Context(), got, false, audit.SandboxApprovalByOperator)
-		if err := a.substrateBindingDecided(r.Context(), st, got); err != nil {
+		if berr != nil {
 			// The ask is answered but the binding store refused the write:
 			// the binding stays waiting; the administrator is told.
-			fmt.Fprintf(os.Stderr, "[substrate] binding of ask %s not moved: %v\n", got.ID, err)
+			fmt.Fprintf(os.Stderr, "[substrate] binding of ask %s not moved: %v\n", got.ID, berr)
 			writeSubstrateJSONError(w, http.StatusBadGateway, "secret_not_stored")
 			return
 		}

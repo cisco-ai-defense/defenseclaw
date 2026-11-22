@@ -238,6 +238,7 @@ func (a *APIServer) substrateSetSecret(st *substrateState) http.HandlerFunc {
 			writeSubstrateJSONError(w, substrateSecretErrorStatus(err), substrateSecretErrorReason(err, "secret_not_stored"))
 			return
 		}
+		a.substrateRestampBinding(r.Context(), st, c, ns, name, key)
 		a.recordSubstrateSecretChange(r.Context(), st, r.PathValue("name"), audit.SubstrateSecretSet, "", false)
 		writeSubstrateJSON(w, http.StatusOK, map[string]any{"name": r.PathValue("name"), "status": substrateSecretSet})
 	}

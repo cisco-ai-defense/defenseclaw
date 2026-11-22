@@ -87,6 +87,7 @@ var Table = []Reason{
 	{"secret_binding_ask_expired", 0, Render, "Nobody answered the administrator ask for the binding in time, so it is not used.", "Remove it with: defenseclaw substrate secrets rm NAME, then add it again to ask again.", Person},
 	{"secret_binding_not_applied", 0, Render, "An administrator approved the binding, but the binding store was not updated, so it is not used yet.", "Ask your administrator to approve it again with: defenseclaw substrate approve ID", Person},
 	{"secret_binding_not_covered", 0, Render, "The binding's template no longer covers its host, so the cluster does not add it.", "Remove it with: defenseclaw substrate secrets rm NAME, then add it again to ask an administrator.", Person},
+	{"secret_binding_form_changed", 0, Render, "The binding's template changed its form since the value was stored, so the stored value no longer fits the header.", "Store the value again with: defenseclaw substrate secrets set NAME", Person},
 	{"secret_not_set", 0, Render, "No value is stored for the secret yet.", "Store it with: defenseclaw substrate secrets set NAME", Person},
 	{"secret_binding_other_person", 0, Render, "Your own binding goes only to your own agents, and this agent belongs to another person.", "Test it against one of your agents.", Person},
 	{"secret_not_in_policy", 0, Render, "The agent's network policy does not carry the secret: the cluster updates a policy within seconds, or a host rule leaves it out.", "Test again in a few seconds; see the agent's rules with: defenseclaw substrate policy explain AGENT", Person},
@@ -121,6 +122,7 @@ var Statuses = []Status{
 	{"ask expired", "Nobody answered the ask in time; the binding is not used."},
 	{"expired", "The binding passed its expiry and is not used."},
 	{"not covered", "The binding's template no longer covers its host; the binding is not used."},
+	{"template changed", "The binding's template changed its form since the value was stored; store the value again."},
 	{"approved, not applied", "An administrator approved the binding, and the cluster has not applied it yet."},
 	{"locked", "Your administrator allows values only, so your own bindings are not used."},
 }

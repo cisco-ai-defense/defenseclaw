@@ -39,6 +39,7 @@ const (
 	substrateSecretUncovered  = "not covered"
 	substrateSecretNotApplied = "approved, not applied"
 	substrateSecretLocked     = "locked"
+	substrateSecretFormChange = "template changed"
 )
 
 // substrateSecretEntry is one secret as list and test show it to the
@@ -51,6 +52,9 @@ type substrateSecretEntry struct {
 	// uncovered: an unapproved binding whose template is gone or no
 	// longer covers any of its hosts, so it does not render (RV3 P2-2).
 	uncovered bool
+	// formChanged: the template's form (or basic user) is not the one the
+	// stored value was formed with, so the header would be invalid (RV3 P4-3).
+	formChanged bool
 }
 
 // substrateSecretEntries are the secrets the caller may see: the
@@ -73,7 +77,8 @@ func (a *APIServer) substrateSecretEntries(st *substrateState, c substrateCaller
 		t, found := secretbind.Find(catalog, b.Template)
 		sec := secretbind.SecretFor(t, ss.EffectiveProvider(), ss.EffectiveNamespace(), b, ss.AllowEchoBindings)
 		uncovered := !found || (b.AskID == "" && !slices.ContainsFunc(b.Hosts, t.Covers))
-		out = append(out, substrateSecretEntry{sec: sec, binding: &b, profiles: sec.Profiles, uncovered: uncovered})
+		changed := found && b.StoredForm != "" && t.FormStamp(b) != b.StoredForm
+		out = append(out, substrateSecretEntry{sec: sec, binding: &b, profiles: sec.Profiles, uncovered: uncovered, formChanged: changed})
 	}
 	return out
 }
@@ -131,6 +136,8 @@ func (a *APIServer) substrateSecretState(ctx context.Context, st *substrateState
 			return substrateSecretExpired, "secret_expired"
 		case e.uncovered:
 			return substrateSecretUncovered, "secret_binding_not_covered"
+		case e.formChanged:
+			return substrateSecretFormChange, "secret_binding_form_changed"
 		}
 	}
 	ns, name, key, ok := substrateK8sSource(substrateSecretFor(e.sec, subject))
