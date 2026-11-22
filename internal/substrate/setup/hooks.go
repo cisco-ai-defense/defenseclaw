@@ -290,12 +290,15 @@ func PreUpgrade(ctx context.Context, plan ChartPlan, config []byte, validate fun
 
 // PreRollback refuses a rollback to a release that reads an older store
 // schema than the store has, naming the backup (E25), and how to clear the
-// revision helm keeps for the refused rollback (GAP-0448).
+// revision helm keeps for the refused rollback (GAP-0448). helm writes that
+// revision before it runs the hook, so every refusal carries the recovery: a
+// store state that cannot be read or parsed leaves it as much as a schema
+// refusal does (GAP-0666).
 func PreRollback(ctx context.Context, plan ChartPlan, kube KubeAPI) (StepReport, error) {
 	r := StepReport{Step: "pre-rollback"}
 	st, err := storeState(ctx, plan, kube)
 	if err != nil {
-		return r, err
+		return r, fmt.Errorf("%w. %s", err, RefusedRollbackRecovery(plan))
 	}
 	if err := CheckRollback(plan.StoreSchema, st); err != nil {
 		return r, fmt.Errorf("%w. %s", err, RefusedRollbackRecovery(plan))
