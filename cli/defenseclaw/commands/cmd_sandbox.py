@@ -676,9 +676,13 @@ SANDBOX_COMMANDS: tuple[_Cmd, ...] = (
         "Keep your secrets for your sandboxes: list, add, replace, bind and remove",
         long=(
             "The vault keeps your secrets for your sandboxes. Each secret is bound to the one host it may be sent "
-            "to. Start a sandbox with --vault NAME and the agent inside sees only a placeholder in $NAME; OpenShell "
-            "puts the real value in on the way out, to that host only. Secrets with a well-known shape that an agent "
-            "in a sandbox is given in a prompt or a tool call are captured into the vault. Values are never printed."
+            'to. Start a sandbox with "--vault NAME" and the agent inside sees only a placeholder in $NAME; '
+            "OpenShell puts the real value in on the way out, to that host only. DefenseClaw also captures secrets "
+            "for you: when an agent in a sandbox is given a secret with a well-known shape (an Anthropic, OpenAI, "
+            "GitHub, Slack, Stripe or Google API key), in a prompt or a tool call, the secret goes into your vault and "
+            "the call is stopped before the value reaches the model. The vault is a file only your account can read, "
+            "in your DefenseClaw state directory. Values are never printed: list and show give names, hosts and "
+            "status only."
         ),
     ),
     _Cmd(("vault", "list"), "List your secrets (names, hosts and status; never values)", flags=(_OUTPUT, _JSON)),
