@@ -79,7 +79,10 @@ type ConfigMap struct {
 // GrantedUserSecretsAnnotation records, on the credential provider policy
 // ConfigMap, the self-service namespace setup last granted to the launcher
 // atespaces. When self_service_secrets.namespace changes, the recorded one
-// is revoked (RV3 P3-4).
+// is revoked (RV3 P3-4). Setup does not delete the orphan values in the old
+// namespace (that would widen the hook Jobs' access); it prints the kubectl
+// delete command. A namespace renamed in the same upgrade that first writes
+// this annotation is not caught: the first run only records it.
 const GrantedUserSecretsAnnotation = "defenseclaw.cisco.com/granted-user-secrets-namespace"
 
 // KubeAPI is the part of the Kubernetes API the hook steps use. Not-found
