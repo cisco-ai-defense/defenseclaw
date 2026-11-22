@@ -276,7 +276,8 @@ func gap0546Rows() []gap0546Row {
 		{tool: "Bash", input: `bash -c 'cat key-link'`},
 		// GAP-0547: shell writes through a link to DefenseClaw state and
 		// to a hook config.
-		{tool: "Bash", input: "echo x >> dc-link"},
+		// rel 1.0.11 (DET111) alerts tamper.detector_state_write here on the laptop; the actor keeps that verdict.
+		{tool: "Bash", input: "echo x >> dc-link", exact: true},
 		{tool: "Bash", input: "echo x > claude-dir/settings.json", exact: true},
 		{tool: "Bash", input: "cp /tmp/x claude-dir/settings.local.json", exact: true},
 		// GAP-0549 (a): a copy of the user's own key or SSH folder to a

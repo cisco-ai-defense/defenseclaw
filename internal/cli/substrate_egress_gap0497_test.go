@@ -44,10 +44,10 @@ func TestGAP0497DoctorSaysAnotherCalloutIsInPlace(t *testing.T) {
 		{"open", strings.Replace(otherCalloutInfo, `"fail_mode":"closed"`, `"fail_mode":"open"`, 1), 1,
 			[]string{"fail  egress_callout", "keep their egress allow list without these checks", "unattended runs reach only DefenseClaw"}, nil},
 		{"ours", `{"sign_in":"oidc","egress_callout":{"state":"defenseclaw","fail_mode":"closed"}}`, 0,
-			[]string{"ok    egress_callout", "ready for agents"}, []string{"protections are off"}},
+			[]string{"ok    egress_callout", "the cluster components were not checked"}, []string{"protections are off"}},
 		{"unknown", `{"sign_in":"oidc","egress_callout":{"state":"unknown","fail_mode":"closed"}}`, 0,
-			[]string{"warn  egress_callout", "cannot verify the egress callout", "cannot tell which egress callout", "ready for agents"}, nil},
-		{"older gateway", "", 0, []string{"skip  egress_callout", "ready for agents"}, nil},
+			[]string{"warn  egress_callout", "cannot verify the egress callout", "cannot tell which egress callout", "the cluster components were not checked"}, nil},
+		{"older gateway", "", 0, []string{"skip  egress_callout", "the cluster components were not checked"}, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newSubAdminFake(t)
