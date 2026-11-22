@@ -38,9 +38,7 @@ import (
 // elsewhere). A pending row is still held to its lane-off (1.0.10) verdict;
 // one that reaches the unknown tier in every cell fails the test (finish).
 var det111R1VerdictPending = map[string]string{
-	"GAP-0893/var2": "python -c open(...).read() of a key file is not a known read; a known read reaches Decide's read row (S3-R1, S1-MECH)",
-	"GAP-1273/var":  "newgrp's stdin here-document is not lowered as a nested shell body (S3-R1 lowering, S4-R2 newgrp row)",
-	"GAP-1538/var":  "$SHELL stays unknown until the hook account's login shell is supplied (S3-R1, ruling 04:25Z)",
+	"GAP-1538/var": "$SHELL stays unknown until the hook account's login shell is supplied (S3-R1, ruling 04:25Z)",
 	"det111/GAP-1142/linux-rel-dotdot-add-content/var": "the nested PowerShell Add-Content body is a Maybe target (S3-R1)",
 	"det111/GAP-1142/linux-rel-set-content/var":        "the nested PowerShell Set-Content body is a Maybe target (S3-R1)",
 	"det111/GAP-1142/macos-rel-dotdot-add-content/var": "the nested PowerShell Add-Content body is a Maybe target (S3-R1)",
@@ -65,11 +63,6 @@ var det111R1WindowsPending = map[string]string{
 	"GAP-0998/seed":                          "$env:USERPROFILE as one PowerShell bareword stays dynamic (S3-R1)",
 	"GAP-0998/seed2":                         "$env:USERPROFILE as one PowerShell bareword stays dynamic (S3-R1)",
 	"GAP-1550/seed":                          "the automatic PowerShell $HOME stays dynamic (S3-R1)",
-	"GAP-1577/var":                           "*>&1 >> to authorized_keys: the known append does not reach the verdict yet (S3-R1, Decide row)",
-	"GAP-1577/var2":                          "*>> to authorized_keys: the known append does not reach the verdict yet (S3-R1, Decide row)",
-	"GAP-1577/var3":                          "Tee-Object -Append -FilePath has no program row (S4-R2)",
-	"GAP-1577/var4":                          "Start-Process cmd /c >> keys: the known append does not reach the verdict yet (S3-R1, Decide row)",
-	"GAP-1577/var5":                          "PowerShell append redirect to authorized_keys does not reach the verdict yet (S3-R1)",
 	"GAP-0998/var":                           "codex shell on a Windows host: the effects call gets no PowerShell dialect (S3-PRE effectCall); claudecode PowerShell reaches",
 	"GAP-0998/var2":                          "codex shell on a Windows host: no PowerShell dialect for the effects call (S3-PRE effectCall)",
 	"GAP-0998/var3":                          "codex shell on a Windows host: no PowerShell dialect for the effects call (S3-PRE effectCall)",
