@@ -420,7 +420,10 @@ func substrateEndSignin(ctx context.Context, cl substrateSigninEnder, name strin
 	if err == nil {
 		if all {
 			who := orWord(safetext.Line(rev.Principal), safetext.Line(rev.Person))
-			return fmt.Sprintf("Signed out of %s on every device: sign-ins of %s made before %s are refused.",
+			// Like the help: an end covers tokens already issued, not a
+			// refresh token held elsewhere (RV2-02).
+			return fmt.Sprintf("Signed out of %s: every token of %s issued before %s is refused, on every device. "+
+				"A refresh token held elsewhere can still get new tokens: also end your sessions at the sign-in server (ask your administrator).",
 				name, who, rev.NotBefore.UTC().Format("15:04:05 MST")), nil
 		}
 		return fmt.Sprintf("Signed out of %s. This sign-in no longer works on the cluster.", name), nil

@@ -81,14 +81,14 @@ func TestLogoutEndsSigninOnCluster(t *testing.T) {
 	}{
 		{name: "this", code: 200, body: `{"person":"https://idp#alice","scope":"this"}`, want: []string{"Signed out of e1. This sign-in no longer works on the cluster."}, wantScope: "this"},
 		{name: "all", code: 200, all: true, body: `{"person":"https://idp#alice","principal":"alice@example.com","scope":"all","not_before":"2026-11-23T14:02:01Z"}`,
-			want: []string{"Signed out of e1 on every device: sign-ins of alice@example.com made before 14:02:01 UTC are refused."}, wantScope: "all"},
+			want: []string{"Signed out of e1: every token of alice@example.com issued before 14:02:01 UTC is refused, on every device.", "also end your sessions at the sign-in server"}, wantScope: "all"},
 		{name: "old gateway", code: 404, body: `{"reason":"not_found"}`, want: []string{"Signed out of e1.", "can't end sign-ins", "works until 14:17 UTC"}},
 		{name: "old gateway all", code: 404, all: true, body: `{"reason":"not_found"}`, wantErr: "nothing was changed", wantExit: substrateExitRefused},
 		{name: "already ended", code: 401, body: `{"reason":"signin_ended"}`, want: []string{"had already been ended"}},
 		{name: "already ended all", code: 401, all: true, body: `{"reason":"signin_ended"}`, wantErr: "sign in again", wantExit: substrateExitSignedOut},
 		{name: "expired", code: 401, body: `{"reason":"expired"}`, want: []string{"Signed out of e1."}},
 		{name: "stale replica", code: 503, body: `{"reason":"revocation_unavailable"}`, want: []string{"could not end this sign-in", "can't check ended sign-ins", "works until 14:17 UTC"}},
-		{name: "kube token with no iat all", code: 400, all: true, body: `{"reason":"signin_no_issue_time"}`, wantErr: "no issue time"},
+		{name: "kube token with no iat all", code: 400, all: true, body: `{"reason":"signin_no_issue_time"}`, wantErr: "no issue time (a static Kubernetes token or a legacy Secret-based ServiceAccount token)"},
 		{name: "stale replica all", code: 503, all: true, body: `{"reason":"revocation_unavailable"}`, wantErr: "can't check ended sign-ins"},
 	} {
 		gotScope = ""
@@ -144,7 +144,8 @@ func TestAdminRevokeCommand(t *testing.T) {
 	}}
 	useFakeAdmin(t, f)
 	out, _, err := runSubstrate(t, newSubstrateAdminCmd(), "revoke", "--user", "bob@example.com", "--reason", "laptop lost")
-	if err != nil || !strings.Contains(out, "Ended every sign-in of bob@example.com made before 14:05:00 UTC. 2 open terminals were closed.") {
+	if err != nil || !strings.Contains(out, "Ended every token of bob@example.com issued before 14:05:00 UTC, on every device. 2 open terminals were closed.") ||
+		!strings.Contains(out, "also end their sessions at the sign-in server") {
 		t.Fatalf("revoke: %q %v", out, err)
 	}
 	out, _, err = runSubstrate(t, newSubstrateAdminCmd(), "revoke", "--list")
@@ -156,7 +157,7 @@ func TestAdminRevokeCommand(t *testing.T) {
 		t.Fatalf("list json: %q %v", out, err)
 	}
 	out, _, err = runSubstrate(t, newSubstrateAdminCmd(), "revoke", "--lift", "--user", "bob@example.com")
-	if err != nil || !strings.Contains(out, "Lifted the end of the sign-ins of bob@example.com") {
+	if err != nil || !strings.Contains(out, "Lifted the end of the sign-ins of bob@example.com") || !strings.Contains(out, "Tokens ended one at a time stay ended.") {
 		t.Fatalf("lift: %q %v", out, err)
 	}
 	_, _, err = runSubstrate(t, newSubstrateAdminCmd(), "revoke", "--user", "carol@example.com")

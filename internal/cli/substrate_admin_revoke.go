@@ -113,14 +113,15 @@ PERSON removes an end early; it is audited.`,
 				return json.NewEncoder(w).Encode(rev)
 			}
 			if lift {
-				fmt.Fprintf(w, "Lifted the end of the sign-ins of %s: sign-ins made before it work again until they expire.\n", safetext.Line(user))
+				fmt.Fprintf(w, "Lifted the end of the sign-ins of %s: tokens issued before it work again until they expire. Tokens ended one at a time stay ended.\n", safetext.Line(user))
 				return nil
 			}
 			terminals := "open terminals"
 			if rev.Closed == 1 {
 				terminals = "open terminal"
 			}
-			fmt.Fprintf(w, "Ended every sign-in of %s made before %s. %d %s were closed.\n",
+			fmt.Fprintf(w, "Ended every token of %s issued before %s, on every device. %d %s were closed. "+
+				"A refresh token the person holds can still get new tokens: to lock them out, also end their sessions at the sign-in server.\n",
 				safetext.Line(user), rev.NotBefore.UTC().Format("15:04:05 MST"), rev.Closed, terminals)
 			return nil
 		},
