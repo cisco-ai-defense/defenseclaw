@@ -147,6 +147,8 @@ jobs:
           - { shard: pk12, kind: packages, index: 12 }
           - { shard: pk13, kind: packages, index: 13 }
           - { shard: pk14, kind: packages, index: 14 }
+          - { shard: pk15, kind: packages, index: 15 }
+          - { shard: pk16, kind: packages, index: 16 }
           - { shard: hx0, kind: hookexec, index: 0 }
           - { shard: hx1, kind: hookexec, index: 1 }
           - { shard: hx2, kind: hookexec, index: 2 }
@@ -379,7 +381,7 @@ jobs:
           $matrixShard = [int]$env:GO_SUITE_INDEX
           $nativeTestShardCount = 32
           $connectorTestShardCount = 16
-          $remainingPackageShardCount = 15
+          $remainingPackageShardCount = 17
           $hookexecTestShardCount = 6
           $goTestLog = Join-Path $env:DC_STATE_ROOT 'go-test.log'
           $goFailureSummary = Join-Path $env:DC_STATE_ROOT 'go-test-failure-summary.log'
