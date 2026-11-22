@@ -136,6 +136,19 @@ chart's profile is the observability default unless config names one. */ -}}
 {{- $_ := set $obs "defaults" $obsDefaults -}}
 {{- $_ := set $cfg "observability" $obs -}}
 {{- end -}}
+{{- /* Cost for budgets and usage: the gateway prices a call from
+observability.pricing and counts nothing without tokenomics, so the chart turns
+tokenomics on and seeds the reviewed price table unless config sets them. */ -}}
+{{- if .Values.observability.tokenomics.enabled -}}
+{{- $obs := get $cfg "observability" | default dict -}}
+{{- $tok := get $obs "tokenomics" | default dict -}}
+{{- if not (hasKey $tok "enabled") }}{{ $_ := set $tok "enabled" true }}{{ end -}}
+{{- $_ := set $obs "tokenomics" $tok -}}
+{{- if and .Values.observability.tokenomics.defaultPricing (not (hasKey $obs "pricing")) -}}
+{{- $_ := set $obs "pricing" (omit (.Files.Get "files/default-pricing.json" | fromJson) "_comment" "_sources") -}}
+{{- end -}}
+{{- $_ := set $cfg "observability" $obs -}}
+{{- end -}}
 {{- /* The local collector (observability.local.enabled) is the try-out
 target: export to it unless config names a destination chart-collector
 (GAP-0272). Its Service address is private, so the destination allows

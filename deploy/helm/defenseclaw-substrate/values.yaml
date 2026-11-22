@@ -398,6 +398,17 @@ observability:
   # strict remove more, and a custom profile in
   # config.observability.redaction_profiles works too.
   redactionProfile: sensitive
+  # Cost for budgets and `defenseclaw substrate usage`. The gateway prices a
+  # call from observability.pricing in its config and compiles no price in,
+  # so the chart turns tokenomics on and, unless config.observability.pricing
+  # is set, seeds it from files/default-pricing.json (the reviewed table of
+  # bundles/pricing, copied here and checked by a test). enabled: false turns
+  # cost off: no spend, so no budget is counted and usage has no cost column.
+  # defaultPricing: false keeps the chart from seeding the table, for a
+  # cluster that sets its own prices.
+  tokenomics:
+    enabled: true
+    defaultPricing: true
   local:
     enabled: false
     image: otel/opentelemetry-collector-contrib:0.139.0

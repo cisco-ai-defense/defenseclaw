@@ -712,6 +712,18 @@
               "$ref": "#/definitions/resources"
             }
           }
+        },
+        "tokenomics": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "defaultPricing": {
+              "type": "boolean"
+            }
+          }
         }
       }
     },
@@ -733,7 +745,10 @@
     },
     "homeMedium": {
       "type": "string",
-      "enum": ["", "Memory"]
+      "enum": [
+        "",
+        "Memory"
+      ]
     },
     "bundles": {
       "type": "object",
