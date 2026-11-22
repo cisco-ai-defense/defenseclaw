@@ -818,13 +818,9 @@ var (
 	enterpriseHookReconcileInstaller        = enterprisehooks.Install
 	enterpriseHookReconcileSessionAvailable = enterpriseHookTargetSessionAvailable
 	// enterpriseHookReconcileTargetRelease names the other DefenseClaw
-	// release whose hook-contract lock a target still carries, only for a
-	// target this release has not yet protected (the account can write its
-	// lock, GAP-1762) and, on the standalone profile, only when the
-	// administrator-only machine release history proves this computer ran it
-	// (GAP-1537, GAP-0644): enterpriseHookTargetReleaseNotProtectedHere.
-	// Tests replace it.
-	enterpriseHookReconcileTargetRelease = enterpriseHookTargetReleaseNotProtectedHere
+	// release whose hook-contract lock a target still carries. Tests
+	// replace it.
+	enterpriseHookReconcileTargetRelease = enterprisehooks.WindowsProtectedTargetFromOtherRelease
 	// enterpriseHookReconcileTargetRetireRender names this release when a
 	// target's lock is this release's render of a hook-image retire (an
 	// earlier image of this install recorded for it, GAP-1096). Only the
@@ -865,10 +861,6 @@ var (
 	// canonical folder that the account does not own (GAP-0585). Tests
 	// replace it.
 	enterpriseHookForeignDataDirLink = enterpriseHookForeignDataDirLinkPlatform
-	// enterpriseHookPerUserInstallFolder reports an account whose canonical
-	// folder holds a per-user DefenseClaw install (GAP-1733). Tests replace
-	// it.
-	enterpriseHookPerUserInstallFolder = enterpriseHookPerUserInstallFolderPlatform
 )
 
 const enterpriseHookAccountLinkFailure = "enterprise hooks: the account's own DefenseClaw folder link is pending repair"
@@ -881,18 +873,6 @@ const enterpriseHookAccountLinkFailure = "enterprise hooks: the account's own De
 // status, verify and the administrator lifecycle go on for every other
 // account and name this one.
 const enterpriseHookAccountForeignLinkFailure = "enterprise hooks: the account's DefenseClaw folder is a link its account does not own; it was left untouched and the account is not protected until an administrator removes the link"
-
-// enterpriseHookAccountPerUserInstallFailure is the guardian error of an
-// account whose canonical DefenseClaw folder holds a per-user DefenseClaw
-// install and that DefenseClaw never protected (GAP-1733). The guardian's
-// signed-out repair re-stamped that folder
-// with the managed DACL and admitted the account as pending, so its next
-// sign-in enrolled it over the per-user install. The folder is never
-// repaired, adopted or enrolled; like enterpriseHookAccountForeignLinkFailure
-// it fails only that account's rows, and status, verify and the
-// administrator lifecycle name the account as not protected. An account
-// DefenseClaw protects gets enterpriseHookPerUserInstallTamperError instead.
-const enterpriseHookAccountPerUserInstallFailure = "enterprise hooks: the account's DefenseClaw folder holds a per-user DefenseClaw install; it was left untouched and the account is not protected until that install is removed"
 
 // enterpriseHookStandaloneCanonicalDataDir reports, on a standalone
 // deployment only, whether target's effective data directory is the
@@ -923,8 +903,7 @@ func enterpriseHookTargetForeignLink(target enterprisehooks.ManifestTarget, home
 // link another principal owns keeps that one account unprotected.
 func enterpriseHookAccountLinkRow(row enterpriseHookReconcileRow) bool {
 	return cfg != nil && cfg.StandaloneEnterprise() && !cfg.SecureClientIntegration() &&
-		(enterpriseHookAccountLinkRowStandalone(row) || enterpriseHookAccountForeignLinkRow(row) ||
-			enterpriseHookAccountPerUserInstallRow(row))
+		(enterpriseHookAccountLinkRowStandalone(row) || enterpriseHookAccountForeignLinkRow(row))
 }
 
 func enterpriseHookAccountLinkRowStandalone(row enterpriseHookReconcileRow) bool {
@@ -942,141 +921,6 @@ func enterpriseHookAccountForeignLinkRow(row enterpriseHookReconcileRow) bool {
 		row.Error == enterpriseHookAccountForeignLinkFailure &&
 		strings.TrimSpace(row.UserHome) != "" && strings.TrimSpace(row.SID) != "" &&
 		enterpriseHookForeignDataDirLink(row.UserHome, row.SID)
-}
-
-// enterpriseHookAccountPerUserInstallRow is enterpriseHookAccountForeignLinkRow
-// for a folder that holds a per-user DefenseClaw install (GAP-1733). It
-// rechecks the folder now, so the excuse ends once that install is removed.
-func enterpriseHookAccountPerUserInstallRow(row enterpriseHookReconcileRow) bool {
-	return enterpriseHookAccountPerUserInstallRowWith(row, enterpriseHookPerUserInstallFolder)
-}
-
-// enterpriseHookAccountPerUserInstallRowWith is
-// enterpriseHookAccountPerUserInstallRow with the folder check of one pass
-// (enterpriseHookPerUserInstallPass.folder).
-func enterpriseHookAccountPerUserInstallRowWith(row enterpriseHookReconcileRow, folder func(home, sid string) bool) bool {
-	return !row.OK && !row.Pending && row.Result == nil &&
-		row.Error == enterpriseHookAccountPerUserInstallFailure &&
-		strings.TrimSpace(row.UserHome) != "" && strings.TrimSpace(row.SID) != "" &&
-		folder(row.UserHome, row.SID)
-}
-
-// enterpriseHookAccountPerUserInstallTamper starts the guardian and verify
-// error of an enrolled account whose managed DefenseClaw folder holds an
-// entry a per-user DefenseClaw install leaves (GAP-1733 review). The managed
-// folder grants its own account write access, so that account can create
-// such an entry. Were it read as a per-user install, the account would switch
-// off its own protection: its rows would fail before repair and watch, stay
-// enrolled, and be excused by verify. It is tamper instead: the guardian
-// repairs and watches the account as usual, and it keeps its protection. Its
-// rows fail with this error, which no rule excuses.
-const enterpriseHookAccountPerUserInstallTamper = "enterprise hooks: tamper: the managed DefenseClaw folder of this enrolled account holds an entry only a per-user DefenseClaw install leaves"
-
-// enterpriseHookPerUserInstallTamperError is the tamper error for home's
-// folder. A failure of the same pass is kept in the text, not wrapped, so no
-// rule that reads the cause (a signed-out account, a pending session) applies
-// to the row.
-func enterpriseHookPerUserInstallTamperError(home string, cause error) error {
-	message := fmt.Sprintf("%s (%s); DefenseClaw did not write it, keeps repairing and protecting the account, "+
-		"and verify fails until an administrator removes that entry", enterpriseHookAccountPerUserInstallTamper,
-		filepath.Join(filepath.Clean(home), ".defenseclaw"))
-	if cause != nil {
-		message += "; this pass also failed: " + cause.Error()
-	}
-	return errors.New(message)
-}
-
-// enterpriseHookPerUserInstallPass decides, for one guardian or verify pass,
-// what an entry a per-user DefenseClaw install leaves in an account's
-// canonical folder means. On an account DefenseClaw never protected it is a
-// per-user install. That is the first adoption, the same rule as the
-// enumerator's new-row skip: the account is skipped and its folder is left as
-// found. On an account DefenseClaw protects, it is tamper. Each folder is
-// probed once per pass and the protection ledger is read once (GAP-1733
-// review P4).
-type enterpriseHookPerUserInstallPass struct {
-	dataDir  string
-	folders  map[string]bool
-	enrolled func(sid string) bool
-}
-
-func newEnterpriseHookPerUserInstallPass(dataDir string) *enterpriseHookPerUserInstallPass {
-	return &enterpriseHookPerUserInstallPass{dataDir: dataDir, folders: map[string]bool{}}
-}
-
-// folder is enterpriseHookPerUserInstallFolder, once per account and home in
-// the pass.
-func (p *enterpriseHookPerUserInstallPass) folder(home, sid string) bool {
-	key := strings.ToUpper(strings.TrimSpace(sid)) + "\x00" + strings.ToLower(filepath.Clean(strings.TrimSpace(home)))
-	found, known := p.folders[key]
-	if !known {
-		found = enterpriseHookPerUserInstallFolder(home, sid)
-		p.folders[key] = found
-	}
-	return found
-}
-
-// accountProtected reports whether the protection ledger holds a row of sid
-// for any connector, as enterpriseHookEnrolledAccounts decides it, so the
-// folder of an account that may be protected is repaired and reported, never
-// skipped.
-func (p *enterpriseHookPerUserInstallPass) accountProtected(sid string) bool {
-	if p.enrolled == nil {
-		p.enrolled = enterpriseHookEnrolledAccounts(p.dataDir, managed.HookGuardianAuthorizationDir(p.dataDir))
-	}
-	return p.enrolled(sid)
-}
-
-// enterpriseHookEnrolledAccounts reads the guardian's records once, its
-// protection ledger, enrolled-accounts record and activation record in
-// authorizationDir and its state in dataDir, and reports whether an account
-// is enrolled: the enrolled-accounts record names it, or the ledger holds a
-// row of it, for any connector. The guardian reconcile, verify, status and
-// the standalone Windows enumerator all decide "first adoption" with it. It
-// fails closed. A ledger or enrolled-accounts record that cannot be read
-// reports every account as enrolled. So does a missing ledger once the
-// guardian has published on this host: the publish writes the ledger before
-// the state and the activation record, so either of those, present or
-// unreadable, without the ledger means the ledger was removed, not that no
-// account was ever protected. Only a host with none of the three records, the
-// first adoption, reports no account enrolled (rel-1-0-10 GAP-1733 review).
-// The enrolled-accounts record keeps an account whose last ledger row is gone
-// (GAP-1733 review 2, enterprise_hooks_enrolled_accounts.go).
-func enterpriseHookEnrolledAccounts(dataDir, authorizationDir string) func(sid string) bool {
-	if strings.TrimSpace(authorizationDir) == "" {
-		return func(string) bool { return true }
-	}
-	authorization, exists, err := loadEnterpriseHookGuardianAuthorizationFile(
-		filepath.Join(authorizationDir, hookGuardianAuthorizationFile))
-	recorded, _, recordErr := loadEnterpriseHookEnrolledAccounts(authorizationDir)
-	every := err != nil || recordErr != nil
-	if err == nil && !exists {
-		_, activationExists, activationErr := loadEnterpriseHookGuardianActivationFile(
-			filepath.Join(authorizationDir, hookGuardianActivationFile))
-		_, stateExists, stateErr := loadEnterpriseHookGuardianState(dataDir)
-		every = activationExists || activationErr != nil || stateExists || stateErr != nil
-	}
-	protected := recorded
-	for _, row := range authorization.ProtectedTargets {
-		if key := enterpriseHookEnrolledAccountKey(row.SID); key != "" {
-			protected[key] = true
-		}
-	}
-	return func(sid string) bool { return every || protected[enterpriseHookEnrolledAccountKey(sid)] }
-}
-
-// classify reports, for a target whose canonical folder holds a per-user
-// install entry, skip when its account was never protected and tamper when it
-// was. rowProtected is the target's own ledger lookup, which also matches a
-// row recorded before platform identities existed.
-func (p *enterpriseHookPerUserInstallPass) classify(target enterprisehooks.ManifestTarget, home, sid string, rowProtected bool) (skip, tamper bool) {
-	if !enterpriseHookStandaloneCanonicalDataDir(target, home, sid) || !p.folder(home, sid) {
-		return false, false
-	}
-	if rowProtected || p.accountProtected(sid) {
-		return false, true
-	}
-	return true, false
 }
 
 // enterpriseHookAwaitingSignInPrefix starts the guardian error of a target
@@ -1283,20 +1127,14 @@ func enterpriseHookRepairAfterVerifyFailure(
 			if written, other, releaseErr := enterpriseHookReconcileTargetRelease(opts); releaseErr == nil && other {
 				// The earlier release's hooks may still run unchanged: then
 				// the account is guarded, only not fail-closed, until its
-				// next connect (GAP-2463). The account can write its Hermes
-				// config and its lock, so its matrix counts only when the
-				// lock's release, proven by the machine release history and
-				// for a target this release has not protected yet, registered
-				// no fail_closed (GAP-1537, GAP-1762).
-				if connector.HermesReleaseRegisteredWithoutFailClosed(written) {
-					if earlier, matrixErr := enterpriseHookReconcileTargetEarlierMatrix(opts); matrixErr == nil && earlier {
-						return enterprisehooks.InstallResult{}, false, fmt.Errorf(
-							"%w: %s: DefenseClaw %s registered them without fail_closed, and this release's hooks "+
-								"install only in the account's own Windows session; its exact active Windows session is "+
-								"unavailable, so the guardian upgrades them at the account's next connect (verification: %v)",
-							errEnterpriseHookAwaitingSignIn, enterpriseHookAwaitingSignInEarlierMatrix, written, verifyErr,
-						)
-					}
+				// next connect (GAP-2463).
+				if earlier, matrixErr := enterpriseHookReconcileTargetEarlierMatrix(opts); matrixErr == nil && earlier {
+					return enterprisehooks.InstallResult{}, false, fmt.Errorf(
+						"%w: %s: DefenseClaw %s registered them without fail_closed, and this release's hooks "+
+							"install only in the account's own Windows session; its exact active Windows session is "+
+							"unavailable, so the guardian upgrades them at the account's next connect (verification: %v)",
+						errEnterpriseHookAwaitingSignIn, enterpriseHookAwaitingSignInEarlierMatrix, written, verifyErr,
+					)
 				}
 				if enterpriseHookReconcileSecureClient() {
 					return enterprisehooks.InstallResult{}, false, fmt.Errorf(
@@ -1556,13 +1394,6 @@ type enterpriseHookStatusReport struct {
 	Activation                    *enterpriseHookGuardianActivation    `json:"activation,omitempty"`
 	Verification                  []enterpriseHookReconcileRow         `json:"verification,omitempty"`
 	ClaudeEffectivePolicyVerified bool                                 `json:"claude_effective_policy_verified"`
-	// ClaudePolicyShadowedByHKLM says a Windows HKLM Claude Code Settings
-	// policy hides DefenseClaw's file-based managed hooks; the detail names
-	// the fix. ClaudePolicyHKLMManagedSourcesMerge says the HKLM policy merges
-	// managed sources, so both apply (GAP-1731).
-	ClaudePolicyShadowedByHKLM          bool   `json:"claude_policy_shadowed_by_hklm"`
-	ClaudePolicyHKLMManagedSourcesMerge bool   `json:"claude_policy_hklm_managed_sources_merge,omitempty"`
-	ClaudePolicyHKLMDetail              string `json:"claude_policy_hklm_detail,omitempty"`
 	// Enrollment lists, per enrolled account, each connector and its state
 	// in the last guardian reconcile.
 	Enrollment []enterpriseHookEnrollment `json:"enrollment,omitempty"`
@@ -1814,7 +1645,6 @@ func runEnterpriseHooksStatus(cmd *cobra.Command, _ []string) error {
 		report.Verification = append([]enterpriseHookReconcileRow(nil), state.Results...)
 		report.ClaudeEffectivePolicyVerified =
 			enterpriseHooksClaudeEffectivePolicyVerified(state.Results)
-		enterpriseHooksReportClaudeHKLMPolicy(&report, state.Results)
 	}
 	report.OK = len(report.Errors) == 0
 	if enterpriseHookJSON {
@@ -2383,9 +2213,6 @@ func enterpriseHookVerifyExcusedNote(run enterpriseHookVerifyRun, row enterprise
 	if row.Error == enterpriseHookAccountForeignLinkFailure {
 		return " (the account stays unprotected until an administrator removes the link at its DefenseClaw folder)"
 	}
-	if row.Error == enterpriseHookAccountPerUserInstallFailure {
-		return " (the account stays unprotected until the per-user DefenseClaw install in its DefenseClaw folder is removed)"
-	}
 	return enterpriseHookRemovedAccountNote
 }
 
@@ -2594,50 +2421,6 @@ func runEnterpriseHooksVerifyWithScope(cmd *cobra.Command, registrationOnly bool
 		return fmt.Errorf("enterprise hooks verify failed for %d target(s)", failures)
 	}
 	return nil
-}
-
-// enterpriseHookClaudeOSAdminPolicyStatus is the connector's read-only HKLM
-// view; tests replace it.
-var enterpriseHookClaudeOSAdminPolicyStatus = connector.ClaudeCodeOSAdminPolicyStatus
-
-// enterpriseHooksReportClaudeHKLMPolicy reports, on Windows with an enrolled
-// Claude Code target, whether the HKLM Claude Code policy shadows the
-// DefenseClaw drop-in. A shadowing policy is a warning that names the fix:
-// the guardian's own Claude rows carry the failure.
-func enterpriseHooksReportClaudeHKLMPolicy(report *enterpriseHookStatusReport, rows []enterpriseHookReconcileRow) {
-	if runtime.GOOS != "windows" {
-		return
-	}
-	// The oldest enrolled client decides: a merge policy that a newer
-	// Claude Code honours still hides the drop-in from an older one.
-	agentVersion, lowest, enrolled := "", "", false
-	for _, row := range rows {
-		if row.Connector != "claudecode" || row.Removed {
-			continue
-		}
-		enrolled = true
-		if row.Result == nil {
-			continue
-		}
-		raw := strings.TrimSpace(row.Result.AgentVersion)
-		version := connector.NormalizeAgentVersion("claudecode", raw)
-		if version != "" && (lowest == "" || connector.CompareAgentVersions(version, lowest) < 0) {
-			agentVersion, lowest = raw, version
-		}
-	}
-	if !enrolled {
-		return
-	}
-	shadowed, merges, detail := enterpriseHookClaudeOSAdminPolicyStatus(connector.SetupOpts{
-		ManagedEnterprise: true,
-		AgentVersion:      agentVersion,
-	})
-	report.ClaudePolicyShadowedByHKLM = shadowed
-	report.ClaudePolicyHKLMManagedSourcesMerge = merges
-	report.ClaudePolicyHKLMDetail = detail
-	if shadowed {
-		report.Warnings = append(report.Warnings, "claude_policy_shadowed_by_hklm: "+detail)
-	}
 }
 
 // enterpriseHooksClaudeEffectivePolicyVerified deliberately remains false for
@@ -2938,7 +2721,6 @@ func runEnterpriseHookVerifyAttemptRows(ctx context.Context, registrationOnly bo
 	unenrolled := map[string]struct{}{}
 	registry := newEnterpriseHooksConnectorRegistry()
 	claudeMachineContract := enterpriseHookMachinePolicyContract(manifest)
-	perUserInstalls := newEnterpriseHookPerUserInstallPass(cfg.DataDir)
 	for _, target := range manifest.Targets {
 		if !target.IsEnabled() {
 			continue
@@ -2980,14 +2762,6 @@ func runEnterpriseHookVerifyAttemptRows(ctx context.Context, registrationOnly bo
 		}
 		if targetErr == nil && enterpriseHookTargetForeignLink(target, resolved.home, resolved.sid) {
 			targetErr = errors.New(enterpriseHookAccountForeignLinkFailure)
-		}
-		perUserTamper := false
-		if targetErr == nil {
-			var perUserSkip bool
-			perUserSkip, perUserTamper = perUserInstalls.classify(target, resolved.home, resolved.sid, previousProtection.PreviouslyProtected)
-			if perUserSkip {
-				targetErr = errors.New(enterpriseHookAccountPerUserInstallFailure)
-			}
 		}
 		if targetErr == nil && target.IsDeferred() &&
 			!previousProtection.PreviouslyProtected {
@@ -3070,16 +2844,6 @@ func runEnterpriseHookVerifyAttemptRows(ctx context.Context, registrationOnly bo
 				targetErr = fmt.Errorf("protected authorization does not cover target")
 			}
 		}
-		if perUserTamper {
-			// An enrolled account's entry in its own managed folder: the row
-			// fails with the tamper error, before any rule that excuses a
-			// row (GAP-1733 review).
-			row.OK, row.Pending, row.Result = false, false, nil
-			row.Error = enterpriseHookPerUserInstallTamperError(resolved.home, targetErr).Error()
-			run.Failures++
-			run.Rows = append(run.Rows, row)
-			continue
-		}
 		if waiting, ok := enterpriseHookHermesSignedOutRow(target, row, targetErr, recorded); ok {
 			// Unobservable, not failed: reported pending until the
 			// account signs in (Hermes NOT COVERED), never protected,
@@ -3147,9 +2911,6 @@ func runEnterpriseHookVerifyAttemptRows(ctx context.Context, registrationOnly bo
 			} else if excused > 0 && row.Error == enterpriseHookAccountForeignLinkFailure &&
 				enterpriseHookAccountForeignLinkRow(recorded[enterpriseHookProtectedTargetKey(row)]) &&
 				enterpriseHookTargetForeignLink(target, row.UserHome, row.SID) {
-				run.Excused = append(run.Excused, row)
-			} else if excused > 0 && row.Error == enterpriseHookAccountPerUserInstallFailure &&
-				enterpriseHookAccountPerUserInstallRowWith(recorded[enterpriseHookProtectedTargetKey(row)], perUserInstalls.folder) {
 				run.Excused = append(run.Excused, row)
 			} else if excused > 0 && enterpriseHookRemovedAccountRow(row) {
 				run.Excused = append(run.Excused, row)
@@ -3551,7 +3312,6 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 		watchPathOwners = map[string][]string{}
 	}
 	claudeMachineContract := enterpriseHookMachinePolicyContract(manifest)
-	perUserInstalls := newEnterpriseHookPerUserInstallPass(cfg.DataDir)
 	// The targets that verified in a pass a filesystem event armed, checked
 	// again over one shared window after the loop (GAP-1825).
 	recheckWindow := enterpriseHookReconcileRecheckWindow
@@ -3626,21 +3386,6 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 			// rows, by name, so the other accounts keep their protection and
 			// the administrator lifecycle goes on (GAP-0585).
 			err = errors.New(enterpriseHookAccountForeignLinkFailure)
-		}
-		perUserTamper := false
-		if err == nil {
-			// A per-user DefenseClaw install in the folder of an account
-			// DefenseClaw never protected is never repaired, adopted or
-			// enrolled, signed in or not: the signed-out repair took both
-			// such folders over (GAP-1733). Fail only this account's rows, by
-			// name. In the managed folder of an enrolled account the same
-			// entry is tamper: the account is repaired and watched as usual,
-			// and the row fails below with an error nothing excuses.
-			var perUserSkip bool
-			perUserSkip, perUserTamper = perUserInstalls.classify(target, resolved.home, resolved.sid, previousProtection.PreviouslyProtected)
-			if perUserSkip {
-				err = errors.New(enterpriseHookAccountPerUserInstallFailure)
-			}
 		}
 		if err == nil {
 			if linkRow, linked := linkRows[strings.ToLower(strings.TrimSpace(target.Connector))]; linked {
@@ -3788,14 +3533,6 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 			rows = append(rows, row)
 			continue
 		}
-		if perUserTamper {
-			// Repaired and watched above; the account keeps its protection
-			// (below), and status and verify name the tamper (GAP-1733
-			// review).
-			err = enterpriseHookPerUserInstallTamperError(resolved.home, err)
-			row.Result = nil
-			recheck = false
-		}
 		if watchPathErr != nil {
 			err = errors.Join(err, fmt.Errorf("watch target paths: %w", watchPathErr))
 			recheck = false
@@ -3818,14 +3555,6 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 				if ledgerErr != nil {
 					ledgerUnreadable = true
 				}
-			}
-			if perUserTamper {
-				// A tamper row is a protected account's row, also when only
-				// the fail-closed rule of a removed ledger made it one: it is
-				// not unenrolled and never reads as pending, and the
-				// enrolled-accounts record carries its account into the next
-				// pass (GAP-1733 review 2).
-				protected = true
 			}
 			failures++
 			row.OK = false
@@ -4294,7 +4023,7 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 	// has come, for the Setup coverage wait (GAP-0401).
 	enterpriseHookStartup.begin(cmd.ErrOrStderr(), cfg.DataDir)
 	_, startupErr := reconcile("startup")
-	enterpriseHookStartup.end(cmd.ErrOrStderr(), startupErr)
+	enterpriseHookStartup.end(cmd.ErrOrStderr())
 	if startupErr != nil {
 		if !managedMode {
 			return startupErr
@@ -5848,12 +5577,6 @@ func writeEnterpriseHookGuardianState(
 	if err != nil {
 		return err
 	}
-	// The enrolled accounts are recorded first and on every pass, even one
-	// that keeps its generation: the record only grows, so a crash after it
-	// over-protects and never drops an account (GAP-1733 review 2).
-	if err := recordEnterpriseHookEnrolledAccounts(authorizationDir, now, previous.ProtectedTargets, protected, rows); err != nil {
-		return err
-	}
 	// An unchanged outcome keeps its published generation once this process
 	// has published one: the three records stay as they are, so a status
 	// reader never meets a rewrite for a pass that decided nothing new
@@ -5926,12 +5649,6 @@ func writeEnterpriseHookGuardianState(
 		return fmt.Errorf("set hook guardian activation ownership: %w", err)
 	}
 	if err := enterpriseHookAuthorizationFileTrustCheck(activationPath); err != nil {
-		return err
-	}
-	// The targets this release protected bind the other-release sign-in
-	// waits to the target (GAP-1762). A failed write publishes again on the
-	// next pass: the process has not published a complete generation yet.
-	if err := recordEnterpriseHookReleaseProtection(authorizationDir, rows); err != nil {
 		return err
 	}
 	enterpriseHookGuardianPublishedByProcess.Store(true)
@@ -6126,12 +5843,7 @@ func previousEnterpriseHookSuccess(
 }
 
 func loadEnterpriseHookGuardianAuthorization(dataDir string) (enterpriseHookGuardianAuthorization, bool, error) {
-	return loadEnterpriseHookGuardianAuthorizationFile(managed.HookGuardianAuthorizationPath(dataDir))
-}
-
-// loadEnterpriseHookGuardianAuthorizationFile is
-// loadEnterpriseHookGuardianAuthorization for the ledger at path.
-func loadEnterpriseHookGuardianAuthorizationFile(path string) (enterpriseHookGuardianAuthorization, bool, error) {
+	path := managed.HookGuardianAuthorizationPath(dataDir)
 	data, exists, err := readEnterpriseHookPublishedRecord(
 		path,
 		"hook guardian authorization",
@@ -6179,12 +5891,7 @@ func loadEnterpriseHookGuardianAuthorizationFile(path string) (enterpriseHookGua
 }
 
 func loadEnterpriseHookGuardianActivation(dataDir string) (enterpriseHookGuardianActivation, bool, error) {
-	return loadEnterpriseHookGuardianActivationFile(filepath.Join(managed.HookGuardianAuthorizationDir(dataDir), hookGuardianActivationFile))
-}
-
-// loadEnterpriseHookGuardianActivationFile is
-// loadEnterpriseHookGuardianActivation for the record at path.
-func loadEnterpriseHookGuardianActivationFile(path string) (enterpriseHookGuardianActivation, bool, error) {
+	path := filepath.Join(managed.HookGuardianAuthorizationDir(dataDir), hookGuardianActivationFile)
 	data, exists, err := readEnterpriseHookPublishedRecord(
 		path,
 		"hook guardian activation",

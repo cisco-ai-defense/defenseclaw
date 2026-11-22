@@ -1490,91 +1490,47 @@ func startProcessCommandLine(host string, line *psparse.StringLit) (string, bool
 	return commandLineBody(body), true
 }
 
-// commandLineBody is the script of a -Command body of a child command line.
-// A body that starts with a double quote is, as written, a string expression
-// that runs nothing; the child host splits its command line into words with
-// the CommandLineToArgvW rules (commandLineWords) and joins the words after
-// -Command with blanks, so that body is read as the join: -Command "a b" is
-// a b (rel-1-0-10:GAP-1655), and so are -Command "a" "b", "a" ; "b" and
-// "a""b" (a"b), which were read as written (rel-1-0-10:GAP-1660). A body
-// whose first word is not quoted is read as written (rel-1-0-10:GAP-1638),
-// and so is one whose words are all empty.
+// commandLineBody is the script of a -Command body of a child command line:
+// one double-quoted word is read with its quotes taken off
+// (commandLineQuotedWord), any other body as written.
 func commandLineBody(body string) string {
-	if !strings.HasPrefix(body, `"`) {
-		return body
+	if inner, quoted := commandLineQuotedWord(body); quoted && strings.TrimSpace(inner) != "" {
+		return inner
 	}
-	joined := strings.Join(commandLineWords(body), " ")
-	if strings.TrimSpace(joined) == "" {
-		return body
-	}
-	return joined
+	return body
 }
 
-// commandLineWords splits a Windows command line into the words a child
-// process gets, with the CommandLineToArgvW rules: blanks (space, tab) end a
-// word outside quotes; 2n backslashes before a double quote give n and the
-// quote opens or closes a quoted part, 2n+1 give n and a literal quote;
-// backslashes elsewhere are literal; within quotes a run of three quotes
-// gives one literal quote and leaves the quoted part (so "a""b" is a"b); an
-// open quoted part runs to the end of the line.
-func commandLineWords(text string) []string {
-	var words []string
+// commandLineQuotedWord is the word a child process gets for text when text
+// is one double-quoted word of its command line (CommandLineToArgvW): the
+// quotes at both ends are taken off, 2n backslashes before a quote give n,
+// and 2n+1 backslashes before a quote give n and a literal quote. Text with
+// any other quote that is not escaped (two quoted spans, "" inside) is not
+// one word, so it has no such reading.
+func commandLineQuotedWord(text string) (string, bool) {
+	if len(text) < 2 || text[0] != '"' || text[len(text)-1] != '"' {
+		return "", false
+	}
 	var word strings.Builder
-	inWord, quotes, backslashes := false, 0, 0
-	for i := 0; i < len(text); {
-		c := text[i]
-		switch {
-		case (c == ' ' || c == '\t') && quotes == 0:
-			if inWord {
-				words = append(words, word.String())
-				word.Reset()
-				inWord = false
-			}
-			backslashes = 0
-			i++
-		case c == '\\':
-			word.WriteByte(c)
+	backslashes := 0
+	for i := 1; i < len(text); i++ {
+		switch text[i] {
+		case '\\':
 			backslashes++
-			inWord = true
-			i++
-		case c == '"':
-			inWord = true
-			kept := word.String()
-			kept = kept[:len(kept)-backslashes/2]
-			word.Reset()
-			word.WriteString(kept)
-			if backslashes%2 == 1 {
-				// The last backslash escapes the quote.
-				kept = word.String()
-				word.Reset()
-				word.WriteString(kept[:len(kept)-1])
-				word.WriteByte('"')
-			} else {
-				quotes++
+			continue
+		case '"':
+			word.WriteString(strings.Repeat(`\`, backslashes/2))
+			if backslashes%2 == 0 {
+				// The closing quote: it must end the text.
+				return word.String(), i == len(text)-1
 			}
-			backslashes = 0
-			i++
-			for i < len(text) && text[i] == '"' {
-				if quotes++; quotes == 3 {
-					word.WriteByte('"')
-					quotes = 0
-				}
-				i++
-			}
-			if quotes == 2 {
-				quotes = 0
-			}
+			word.WriteByte('"')
 		default:
-			word.WriteByte(c)
-			backslashes = 0
-			inWord = true
-			i++
+			word.WriteString(strings.Repeat(`\`, backslashes))
+			word.WriteByte(text[i])
 		}
+		backslashes = 0
 	}
-	if inWord {
-		words = append(words, word.String())
-	}
-	return words
+	return "", false
 }
 
 type nestedText struct {

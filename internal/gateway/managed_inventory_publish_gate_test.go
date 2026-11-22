@@ -519,6 +519,7 @@ func TestEmitEndpointInventoryGateDoesNotRecordFailedOrDegradedPublishes(t *test
 func TestEmitEndpointInventoryGateEmptyPerConnectorMCPStillPublishes(t *testing.T) {
 	withManagedEnterprise(t, true)
 	gate := managedPublishTestState(t)
+	t.Setenv("HOME", t.TempDir())
 	// An empty registry with no active connectors leaves the per-connector MCP
 	// fanout nothing to enumerate. Asserted rather than assumed so this test
 	// fails loudly if the fixture ever stops being empty.
@@ -667,6 +668,7 @@ func TestEmitEndpointInventoryGatePartialReportCannotStampBundle(t *testing.T) {
 
 func TestEmitEndpointInventoryUnreadableConnectorKeepsManagedDigest(t *testing.T) {
 	withManagedEnterprise(t, true)
+	t.Setenv("HOME", t.TempDir())
 	gate := managedPublishTestState(t)
 	home := t.TempDir()
 	path := filepath.Join(home, ".codex", "config.toml")
