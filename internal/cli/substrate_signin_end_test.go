@@ -84,6 +84,7 @@ func TestLogoutEndsSigninOnCluster(t *testing.T) {
 		{name: "already ended all", code: 401, all: true, body: `{"reason":"signin_ended"}`, wantErr: "sign in again", wantExit: substrateExitSignedOut},
 		{name: "expired", code: 401, body: `{"reason":"expired"}`, want: []string{"Signed out of e1."}},
 		{name: "stale replica", code: 503, body: `{"reason":"revocation_unavailable"}`, want: []string{"could not end this sign-in", "can't check ended sign-ins", "works until 14:17 UTC"}},
+		{name: "kube token with no iat all", code: 400, all: true, body: `{"reason":"signin_no_issue_time"}`, wantErr: "no issue time"},
 		{name: "stale replica all", code: 503, all: true, body: `{"reason":"revocation_unavailable"}`, wantErr: "can't check ended sign-ins"},
 	} {
 		gotScope = ""

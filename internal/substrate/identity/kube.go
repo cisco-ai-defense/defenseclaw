@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -121,8 +122,10 @@ func (k *KubeTokenVerifier) Verify(ctx context.Context, token string) (Person, e
 	if strings.HasPrefix(u.Username, "system:node:") {
 		return Person{}, reasonf(ReasonSubject, "a node token is not a person")
 	}
+	// The token key and issue time let logout, logout --all and admin
+	// revoke end a Kubernetes sign-in like an OIDC one (RV1-01).
 	p := Person{Kind: PersonKube, Issuer: KubeIssuer, Subject: u.Username, Principal: u.Username,
-		Expires: now.Add(kubeReviewTTL)}
+		Expires: now.Add(kubeReviewTTL), IssuedAt: kubeIssuedAt(token, now), TokenKey: TokenKey(KubeIssuer, "", token)}
 	for _, g := range u.Groups {
 		if g = strings.TrimSpace(g); g != "" && len(p.Groups) < 512 {
 			p.Groups = append(p.Groups, g)
@@ -135,6 +138,34 @@ func (k *KubeTokenVerifier) Verify(ctx context.Context, token string) (Person, e
 	k.cache[key] = kubeReview{p: p, at: now}
 	k.mu.Unlock()
 	return p, nil
+}
+
+// kubeIssuedAt is the iat of a Kubernetes token that is a JWT (a bound
+// ServiceAccount token, or an OIDC token the API server accepts). It is
+// read only after the TokenReview authenticated the whole token, so the
+// claims are the issuer's. Zero when the token is opaque (a static or
+// legacy token), has no iat, or names a time more than DefaultSkew ahead:
+// such a sign-in can be ended one token at a time, not by time.
+func kubeIssuedAt(token string, now time.Time) time.Time {
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return time.Time{}
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(strings.TrimRight(parts[1], "="))
+	if err != nil {
+		return time.Time{}
+	}
+	var c struct {
+		IssuedAt *int64 `json:"iat"`
+	}
+	if json.Unmarshal(raw, &c) != nil || c.IssuedAt == nil || *c.IssuedAt <= 0 {
+		return time.Time{}
+	}
+	iat := time.Unix(*c.IssuedAt, 0)
+	if iat.After(now.Add(DefaultSkew)) {
+		return time.Time{}
+	}
+	return iat
 }
 
 // kubeUser is the user of an authenticated TokenReview.

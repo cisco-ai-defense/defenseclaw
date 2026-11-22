@@ -44,6 +44,7 @@ var (
 	substrateReasonSigninEnded   = reasons.Must(revocation.ReasonEnded)
 	substrateReasonRevocationOff = reasons.Must(revocation.ReasonUnavailable)
 	substrateReasonPersonUnknown = reasons.Must("person_unknown")
+	substrateReasonNoIssueTime   = reasons.Must("signin_no_issue_time")
 )
 
 // substrateRevocationRefusal is the answer for a token of person (key, iat)
@@ -140,7 +141,13 @@ func (a *APIServer) substrateSigninRevoke(st *substrateState) http.HandlerFunc {
 			}
 			e.Token = c.person.TokenKey
 		case "all":
-			e.NotBefore = revocation.Watermark(time.Now())
+			if c.person.IssuedAt.IsZero() {
+				// A Kubernetes token with no issue time (RV1-01): an end by
+				// time would also refuse every later sign-in of the person.
+				writeSubstrateJSONError(w, http.StatusBadRequest, substrateReasonNoIssueTime)
+				return
+			}
+			e.NotBefore = substrateCallerWatermark(c.person.IssuedAt, time.Now())
 		default:
 			writeSubstrateJSONError(w, http.StatusBadRequest, "bad_request")
 			return
@@ -159,6 +166,18 @@ func (a *APIServer) substrateSigninRevoke(st *substrateState) http.HandlerFunc {
 		}
 		writeSubstrateJSON(w, http.StatusOK, v)
 	}
+}
+
+// substrateCallerWatermark is the not-before of a person's own logout
+// --all: the next second of this gateway's clock, or later when the
+// caller's own token says its sign-in server's clock is ahead, so the
+// caller's sign-in, and any made before it, is always covered (RV1-06).
+func substrateCallerWatermark(iat, now time.Time) time.Time {
+	nb := revocation.Watermark(now)
+	if own := iat.Truncate(time.Second).Add(time.Second); own.After(nb) {
+		return own
+	}
+	return nb
 }
 
 // substrateResolvePerson turns an admin's user argument into issuer#subject:
