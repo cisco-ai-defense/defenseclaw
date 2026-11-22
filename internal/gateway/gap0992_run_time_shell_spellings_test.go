@@ -19,19 +19,24 @@ package gateway
 import (
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 )
 
 // gap0992Payloads are the TEXT a shell is asked to run: removal of the
-// DefenseClaw state folder and a write to its config. Both block in every
-// tier when the shell is literal.
+// DefenseClaw state folder and a write to its config. Both are proven
+// DefenseClaw state writes when the shell is literal.
 var gap0992Payloads = []struct{ id, text string }{
 	{"state removal", `rm -rf ~/.defenseclaw`},
 	{"config write", `printf x >> ~/.defenseclaw/config.yaml`},
 }
 
-// gap0992Check asserts that a spelling blocks state removal and a config
-// write in every tier, as the literal bash call does
-// (rel-1-0-10:GAP-0992, GAP-0993, GAP-0994).
+// gap0992Check asserts that a spelling reads state removal and a config
+// write as a proven DefenseClaw state write, as the literal bash call does:
+// tamper.detector_state_write in every tier, an alert in the default and
+// permissive tiers and a managed install on the default pack, a block in
+// strict and managed strict (owner GAP-0747 tiering 2026-11-15, see
+// gap0747StateWriteAction) (rel-1-0-10:GAP-0992, GAP-0993, GAP-0994).
 func gap0992Check(t *testing.T, form string) {
 	t.Helper()
 	env := boundedLaneEnv(t)
@@ -44,8 +49,15 @@ func gap0992Check(t *testing.T, form string) {
 				if _, known := gap0980ActionRank[got]; !known {
 					t.Fatalf("%q: action %q is no hook verdict", variant, got)
 				}
-				if got != "block" {
-					t.Errorf("%s: %q = %s (findings %v), want block", tier.name, variant, got, findings)
+				want := "alert"
+				if gap0747StateWriteAction(tier.tier) == bounded.Block {
+					want = "block"
+				}
+				if got != want {
+					t.Errorf("%s: %q = %s (findings %v), want %s", tier.name, variant, got, findings, want)
+				}
+				if !findingStringHasRuleID(findings, "tamper.detector_state_write") {
+					t.Errorf("%s: %q = %s without tamper.detector_state_write (findings %v)", tier.name, variant, got, findings)
 				}
 			})
 		}
@@ -58,7 +70,7 @@ func gap0992Check(t *testing.T, form string) {
 // base name behind a run-time directory, /proc/self/exe, /proc/<pid>/exe,
 // BASH_ARGV0, a lookup with -p, || or a pipe, readlink of SHELL) runs -c
 // TEXT as literal bash does: state removal and a DefenseClaw config write
-// block in all 5 tiers (rel-1-0-10:GAP-0992).
+// are a proven state write in all 5 tiers (rel-1-0-10:GAP-0992).
 func TestGAP0992RunTimeShellSpellingsReadAsTheShellTheyName(t *testing.T) {
 	programs := []struct{ id, word string }{
 		{"errSHELL", `"${SHELL:?}"`}, {"errSHELLm", `"${SHELL:?unset}"`},
@@ -82,7 +94,7 @@ func TestGAP0992RunTimeShellSpellingsReadAsTheShellTheyName(t *testing.T) {
 // TestGAP0993RunTimeShellIsReadWhereTheLiteralShellIsAChildCommand: eval
 // STRING, find -exec, xargs and the $0 of a -c STRING whose name operand is a
 // static shell name read a shell named at run time as the literal shell:
-// block in all 5 tiers (rel-1-0-10:GAP-0993).
+// a proven state write in all 5 tiers (rel-1-0-10:GAP-0993).
 func TestGAP0993RunTimeShellIsReadWhereTheLiteralShellIsAChildCommand(t *testing.T) {
 	forms := map[string]string{
 		"eval-sq":       `eval '"$SHELL" -c "%S"'`,
@@ -104,8 +116,8 @@ func TestGAP0993RunTimeShellIsReadWhereTheLiteralShellIsAChildCommand(t *testing
 // TestGAP0994ShellReadingItsScriptFromStdinJudgesTheScript: a static
 // here-string or piped text given to bash (bash -s, a here-string, a pipe, the
 // same through a nested bash) is read as the nested script, as the heredoc
-// form is: state removal and a DefenseClaw config write block in all 5 tiers
-// (rel-1-0-10:GAP-0994).
+// form is: state removal and a DefenseClaw config write are a proven state
+// write in all 5 tiers (rel-1-0-10:GAP-0994).
 func TestGAP0994ShellReadingItsScriptFromStdinJudgesTheScript(t *testing.T) {
 	forms := map[string]string{
 		"stdin-s":      `echo '%S' | bash -s`,
