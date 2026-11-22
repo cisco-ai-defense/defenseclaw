@@ -16,6 +16,9 @@ type Script struct {
 	// Funcs names the functions the text defines; a later call of one of these
 	// names is shadowed (review R2).
 	Funcs []string
+	// Unread is the text a frontend could not read (from the line of a syntax
+	// error on), with an invalid_syntax unknown; "" when the text was read.
+	Unread string
 }
 
 // Op is the control operator that joins a statement to the next.
@@ -75,6 +78,8 @@ type Cmd struct {
 	// background (`&`) command: both run in a child shell, so a cd/assignment
 	// inside them must not change the parent's cwd/env (review N2).
 	Pipeline bool
+	// PipeLast marks the last stage of a POSIX pipeline (see Pipeline).
+	PipeLast bool
 	Async    bool
 	// ChildList marks a command inside a backgrounded compound or && / || list
 	// (`{ ...; } &`, `a || b &`): bash runs the whole list in a child shell, so
@@ -88,13 +93,25 @@ type Cmd struct {
 	// verdict is opaque and is never unwrapped by the walker's own parsing
 	// (psparse review 9 R9-3, GAP-0193).
 	Host *HostPayload
+	// CmdBody is the verbatim text after the /c or /k switch of a cmd call the
+	// cmd frontend lowered, with cmd's outer quote pair removed: the command
+	// line the child cmd runs (its quotes and operators intact).
+	CmdBody    string
+	CmdBodySet bool
 }
 
 // HostPayload is psparse's reading of one host call's payload.
 type HostPayload struct {
 	Opaque  bool    // not static, or unsafe to trust: no unwrap
 	Text    string  // the payload text when !Opaque
-	Dialect Dialect // the payload's grammar when !Opaque
+	Dialect Dialect // the payload's grammar when !Opaque, or of Maybe
+	// Maybe is one possible reading of an Opaque payload (the verbatim text a
+	// child gets when the parent does not expand it): the walker lowers it as
+	// maybe effects and the call stays opaque (DET111 R1, GAP-1550).
+	Maybe string
+	// MaybeCWD is the folder the Maybe reading runs in (-WorkingDirectory),
+	// placed against the caller's folder; "" keeps the caller's.
+	MaybeCWD string
 }
 
 // WordSeg is one piece of a word: a literal run (Lit) or a simple variable
@@ -110,6 +127,24 @@ type WordSeg struct {
 	// metacharacter (so an escaped `\*` is literal but an unescaped `{a,b}`
 	// alongside it still globs -- review N10).
 	Glob bool
+	// Op is a parameter operator on Var with static operands (${V%pat},
+	// ${V#pat}, ${V/a/b}, ${V:off:len}); the walker applies it to the value.
+	Op *ParamOp
+	// Subst names a command substitution the walker can evaluate itself:
+	// "pwd" for $(pwd), `pwd` and $(pwd -L), the working folder unless pwd is
+	// shadowed (rel-1-0-10:GAP-1043, GAP-1608).
+	Subst string
+}
+
+// ParamOp is one parameter operator with static operands.
+type ParamOp struct {
+	// Kind is "#", "##", "%", "%%" (pattern removal), "/", "//" (replace
+	// first / every literal match), or ":" (substring).
+	Kind     string
+	Pat      string
+	With     string
+	Off, Len int
+	HasLen   bool
 }
 
 // Word is one argv element. The frontend fills Segs for a word built only of
@@ -129,6 +164,14 @@ type Word struct {
 	Reason ReasonCode
 	Segs   []WordSeg
 	Span   [2]int
+	// ProcSub is the body of a word that is one input process substitution
+	// <(...) (it is also in the command's Nested): a consumer that reads the
+	// word as a file (source, a `<` redirect) reads what the body prints.
+	ProcSub *Script
+	// Tail is the literal text after the last dynamic part of a word that is
+	// not static ($(f)/.ssh/id_rsa -> /.ssh/id_rsa): the classifier's reach
+	// rule reads a protected name in it (R-NAME, rel-1-0-10:GAP-1043).
+	Tail string
 }
 
 // Assign is a VAR=value prefix on a command (or an export/declare).

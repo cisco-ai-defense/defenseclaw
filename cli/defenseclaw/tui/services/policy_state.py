@@ -784,7 +784,7 @@ def secret_flow_effective_mode(effects_lane: str, mode: str) -> str:
     """Fold the effects lane (guardrail.cascade.lanes.effects) and the feature
     switch (guardrail.cascade.lanes.secret_flow) into the effective mode,
     mirroring internal/gateway.secretFlowLaneMode."""
-    rollout = (effects_lane or "shadow")
+    rollout = (effects_lane or "on")
     if rollout == "off":
         return "off"
     m = mode or "shadow"
@@ -966,7 +966,7 @@ class PoliciesPanelModel:
             sink = getattr(sf, "sink_action", None)
             mem = getattr(sf, "memory", None)
             lanes = getattr(getattr(guardrail, "cascade", None), "lanes", None)
-            effects_lane = getattr(lanes, "effects", "shadow") or "shadow"
+            effects_lane = getattr(lanes, "effects", "on") or "on"
             flow_lane = getattr(lanes, "secret_flow", "shadow") or "shadow"
             self.secret_flow_cfg = {
                 "mode": flow_lane,

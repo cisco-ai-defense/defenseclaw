@@ -17,12 +17,13 @@ import (
 // the siblings that shared a row with them.
 var restrictedSpecPrograms = map[string][]string{
 	"gnu": {"cp", "install", "mv", "ln", "rm", "unlink", "shred", "tee"},
-	"bsd": {"cp", "install", "mv", "ln", "rm", "unlink", "tee"},
+	"bsd": {"cp", "install", "mv", "ln", "rm", "unlink", "tee", "sed"},
 }
 
 type restrictedSpecFlag struct {
-	arity  int
-	effect string
+	arity    int
+	optional bool // arity "opt" (GAP-0216)
+	effect   string
 }
 
 func loadRestrictedFlagSpec(t *testing.T) map[string]map[string]map[string]restrictedSpecFlag {
@@ -44,7 +45,11 @@ func loadRestrictedFlagSpec(t *testing.T) map[string]map[string]map[string]restr
 			t.Fatalf("line %d: %d columns, want 5", n, len(cols))
 		}
 		prog, plat, flag, eff := cols[0], cols[1], cols[2], cols[4]
+		opt := cols[3] == "opt"
 		ar, err := strconv.Atoi(cols[3])
+		if opt {
+			ar, err = 0, nil
+		}
 		if err != nil || (ar != 0 && ar != 1) {
 			t.Fatalf("line %d: arity %q", n, cols[3])
 		}
@@ -57,7 +62,7 @@ func loadRestrictedFlagSpec(t *testing.T) map[string]map[string]map[string]restr
 		if _, dup := spec[plat][prog][flag]; dup {
 			t.Fatalf("line %d: %s %s %s listed twice", n, plat, prog, flag)
 		}
-		spec[plat][prog][flag] = restrictedSpecFlag{arity: ar, effect: eff}
+		spec[plat][prog][flag] = restrictedSpecFlag{arity: ar, optional: opt, effect: eff}
 	}
 	if err := sc.Err(); err != nil {
 		t.Fatal(err)
@@ -100,8 +105,8 @@ func TestRestrictedFlagSpecMatchesTables(t *testing.T) {
 				if fl.Value {
 					ar = 1
 				}
-				if ar != sf.arity || restrictedFlagEffect(fl) != sf.effect {
-					t.Errorf("%s %s %s: table arity %d effect %s, spec %d %s", plat, prog, name, ar, restrictedFlagEffect(fl), sf.arity, sf.effect)
+				if ar != sf.arity || fl.Optional != sf.optional || restrictedFlagEffect(fl) != sf.effect {
+					t.Errorf("%s %s %s: table arity %d optional=%v effect %s, spec %d optional=%v %s", plat, prog, name, ar, fl.Optional, restrictedFlagEffect(fl), sf.arity, sf.optional, sf.effect)
 				}
 			}
 			for name := range p.Flags {

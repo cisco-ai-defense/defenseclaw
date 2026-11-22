@@ -714,7 +714,7 @@ func (a *APIServer) inspectACPFrameAction(
 	tier := a.boundedTier(ctx, connectorName)
 	var trunc bounded.Truncated
 	trunc.Merge(action.trunc)
-	for _, call := range action.calls {
+	for index, call := range action.calls {
 		var judged *ToolInspectVerdict
 		cwd := acpCallDirectory(req.SessionCWD, call.cwd)
 		if call.unread {
@@ -756,6 +756,9 @@ func (a *APIServer) inspectACPFrameAction(
 			// A script the call runs is read as a hook connector reads it
 			// (rel-1-0-10:GAP-0783).
 			judged = strongerACPVerdict(judged, a.acpArtifactVerdict(callCtx, connectorName, call, cwd, capture, action.enforceable))
+			// The call is a step of its session's tool chains, as a hook
+			// step is (GAP-0305).
+			judged = strongerACPVerdict(judged, a.acpChainStep(callCtx, req, connectorName, profile, index, call, cwd, capture, judged, action.enforceable))
 		}
 		verdict = strongerACPVerdict(verdict, judged)
 	}

@@ -27,12 +27,29 @@ type Call struct {
 
 // Options carries everything that is otherwise OS- or context-dependent, as
 // explicit inputs, so Extract stays pure and testable anywhere.
+// AccountRecord is trusted account data from the hook's counted identity lookup.
+type AccountRecord struct {
+	Home  string
+	Shell string
+}
+
 type Options struct {
 	Flavor Flavor
 	// Dialect forces the shell grammar; DialectNone infers it.
 	Dialect Dialect
 	Home    string
 	CWD     string
+	Account AccountRecord
+	// Login is the active account's login name: ~Login names the account's
+	// home (Home as the call starts, whatever HOME the call later sets), as the
+	// shell's passwd lookup does (rel-1-0-10:GAP-1678). It is matched without
+	// case, as a directory (AD, sssd) login resolves and as the ~<login> twin
+	// of the hook reads it (GAP-2378). Empty: ~name is never the active account.
+	Login string
+	// Accounts maps another account's login name to its home, from a lookup
+	// the caller vouches for (passwd, the managed identity map). A ~name not
+	// here is unknown (rel-1-0-10:GAP-1677, GAP-0898).
+	Accounts map[string]string
 	// Drive is the current Windows drive letter ("C") used to place a Windows
 	// path that names no drive of its own. Ignored for POSIX.
 	Drive string
@@ -62,6 +79,10 @@ type Options struct {
 	// inside a time cap (the live shadow lane) never waits on a long walk. It
 	// is read-only wall-clock input; the zero value means no deadline.
 	Deadline time.Time
+	// loginHome is the passwd home ~Login names: Home as the walk began. The
+	// walker sets it once, so a call that assigns HOME moves ~ and ~/ but not
+	// ~Login (bash reads ~login from the password database, never from HOME).
+	loginHome string
 }
 
 func (o Options) flavor() Flavor {
@@ -80,9 +101,13 @@ func (o Options) maxEffects() int {
 
 const (
 	defaultMaxEffects = 256
-	maxNestedDepth    = 1 // one unwrapped level of nested script text (lead)
-	maxDataText       = 8 << 10
-	maxSpellingBytes  = 4 << 10
-	maxMCPDepth       = 6
-	maxMCPNodes       = 256
+	// maxNestedDepth is how many levels of nested script text are lowered
+	// (sh -c inside eval inside source ...). Each level is counted work under
+	// walkWorkBudget; past it the call has a nesting_limit unknown (DET111 D1:
+	// a nested body is read, not judged as another spelling).
+	maxNestedDepth   = 4
+	maxDataText      = 8 << 10
+	maxSpellingBytes = 4 << 10
+	maxMCPDepth      = 6
+	maxMCPNodes      = 256
 )

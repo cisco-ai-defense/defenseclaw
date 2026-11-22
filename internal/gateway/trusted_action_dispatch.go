@@ -47,6 +47,8 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/tactics"
 	"github.com/defenseclaw/defenseclaw/internal/shellparse"
+	"github.com/defenseclaw/defenseclaw/internal/textlower"
+	"github.com/defenseclaw/defenseclaw/internal/workcount"
 	"mvdan.cc/sh/v3/expand"
 	"mvdan.cc/sh/v3/pattern"
 	"mvdan.cc/sh/v3/syntax"
@@ -285,6 +287,10 @@ type trustedActionRequest struct {
 	// the dispatch takes it once, at the outermost call, and clears it so a
 	// twin or child request never runs the lane again.
 	recordEffectShadow func(EffectShadowResult)
+	// effectLogin is the hook account's login for the effect lane
+	// (effects.Options.Login), set at the outermost dispatch from the trusted
+	// identity (effectActiveLogin).
+	effectLogin string
 	// Prevent recursive standalone evaluation of an already flattened command.
 	simpleCommandPass bool
 	// stateProofOnly limits the judgment to the rule that proves a write to
@@ -489,6 +495,9 @@ func dispatchTrustedActionOnce(
 	request trustedActionRequest,
 ) (findings []RuleFinding) {
 	request = windowsStatementsOnePerLine(request)
+	if request.Input.ActiveShell == "" {
+		request.Input.ActiveShell = trustedActiveShell(parent)
+	}
 	// A call judged as the twin of its data word leaves a detection-only
 	// record of the word (rel-1-0-10:GAP-0382). It is added last, after every
 	// other defer, so a limit finding any of them raises is kept as it is and
@@ -540,16 +549,22 @@ func dispatchTrustedActionOnce(
 	parent, endOpenedPaths := withOpenedPathScope(parent)
 	defer endOpenedPaths()
 	// Effect-model rule lane (S7). Compute once at the outermost dispatch.
-	// In ON the verdict participates; in shadow/off nothing is appended, so
-	// the live answer is unchanged. The benchmark measures shadow through
-	// EvaluateDeterministicAction, not here.
+	// In ON (the default) the verdict joins the findings as a raise only; in
+	// shadow/off nothing is appended, so the live answer is unchanged. The
+	// benchmark measures the lane through EvaluateDeterministicAction, not
+	// here. A managed enterprise gateway runs no local readers (below), so
+	// the lane adds nothing there either: it only raises where they judge.
 	if octx, outermost := markOutermostEffectDispatch(parent); outermost {
 		parent = octx
+		request.effectLogin = effectActiveLogin(parent, request.Input)
 		switch mode := effectsRulesModeFor(); mode {
 		case effectRulesOn:
+			if ManagedEnterpriseActive() && !isSubstrateActorRequest(parent) {
+				break
+			}
 			effectRequest := request
 			defer func() {
-				findings = append(findings, effectShadowFindings(computeEffectShadow(effectRequest, mode, effectsRulesTierFor()), mode)...)
+				findings = append(findings, effectLiveFindings(effectRequest, mode, effectsRulesTierFor())...)
 			}()
 		case effectRulesShadow:
 			// Shadow: compute and record beside today's rules, off the hook's
@@ -597,7 +612,7 @@ func dispatchTrustedActionOnce(
 		}
 	}()
 	if request.targetMemo == nil {
-		request.targetMemo = hookpaths.NewTargetMemo()
+		request.targetMemo = hookpaths.NewTargetMemoIn(callTargetMemo(parent))
 	}
 	if request.ShellStartup != nil {
 		request.targetMemo.WithShellStartup(request.ShellStartup)
@@ -2094,7 +2109,7 @@ func withActiveStateTargetMention(
 				// script, which the PowerShell reading walks (rel-1-0-10:GAP-1134).
 				// A .NET open that may write the state by a mode or path known
 				// only at run time is the unknown tier (rel-1-0-10:GAP-1138).
-				spelled := strings.Contains(strings.ToLower(command), ".defenseclaw")
+				spelled := strings.Contains(textlower.Lower(command), ".defenseclaw")
 				proven, unknown := spelled && provenCMDSlashCStateWrite(request), false
 				if !proven && (spelled || request.ProtectedHomeHook || strings.HasPrefix(request.Input.ActiveHome, "/")) {
 					proven, unknown = provenPowerShellStateWrite(request)
@@ -11373,6 +11388,7 @@ func trustedPowerShellExecutionTool(tool string) bool {
 }
 
 func decodeTrustedTopLevelCommandField(raw json.RawMessage) (string, bool, bool) {
+	workcount.AddLarge(workcount.ArgsDecode, len(raw))
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	opening, err := decoder.Token()
 	if err != nil || opening != json.Delim('{') {

@@ -245,7 +245,7 @@ func secretFlowResultCall(req agentHookRequest, home string) (effects.Call, effe
 	} else {
 		input.DialectHint = secretFlowResultDialect(req.SessionID, req, tool, args)
 	}
-	call, opts, has := effectCall(req.ConnectorName, input)
+	call, opts, has := effectCall(req.ConnectorName, input, false)
 	if !has {
 		return effects.Call{}, effects.Options{}, false
 	}

@@ -70,6 +70,7 @@ func parseCMD(command string, o Options) *Script {
 		if len(c.Words) == 0 && len(c.Redirs) == 0 {
 			continue
 		}
+		c.CmdBody, c.CmdBodySet = cmdSlashCBody(seg, c.Words)
 		s.Stmts = append(s.Stmts, &Stmt{Cmds: []*Cmd{c}, Op: op, Cond: cond, Link: link, Span: c.Span})
 	}
 	return s
@@ -434,4 +435,42 @@ func stripCmdIfCondition(s string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// cmdSlashCBody is the text a `cmd [switches] /c BODY` (or /k) segment hands
+// its child, verbatim: everything after the switch, with the first and the
+// last double quote removed when BODY starts with one (cmd's rule without
+// /s). ok is false when the segment is not such a call.
+func cmdSlashCBody(seg string, words []Word) (string, bool) {
+	if len(words) < 2 || !words[0].Static {
+		return "", false
+	}
+	if p := strings.ToLower(programBasename(words[0].Value, FlavorWindows)); p != "cmd" && p != "cmd.exe" {
+		return "", false
+	}
+	lower := strings.ToLower(seg)
+	idx := -1
+	for i := 0; i+2 <= len(lower); i++ {
+		if lower[i] != '/' || (lower[i+1] != 'c' && lower[i+1] != 'k') {
+			continue
+		}
+		if i > 0 && lower[i-1] != ' ' && lower[i-1] != '\t' {
+			continue
+		}
+		if i+2 < len(lower) && lower[i+2] != ' ' && lower[i+2] != '\t' && lower[i+2] != '"' {
+			continue
+		}
+		idx = i
+		break
+	}
+	if idx < 0 || strings.Count(seg[:idx], `"`)%2 != 0 {
+		return "", false
+	}
+	body := strings.TrimLeft(seg[idx+2:], " \t")
+	if strings.HasPrefix(body, `"`) {
+		if last := strings.LastIndex(body, `"`); last > 0 {
+			body = body[1:last] + body[last+1:]
+		}
+	}
+	return body, true
 }

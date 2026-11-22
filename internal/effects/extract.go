@@ -5,9 +5,11 @@
 package effects
 
 import (
+	"path"
 	"strings"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/awkprog"
 	"github.com/defenseclaw/defenseclaw/internal/psparse"
 )
 
@@ -125,11 +127,11 @@ type walker struct {
 	res        *Result
 	o          Options
 	cmdNo      int
+	wrapOuts   []wrapperOutput // files the current command's wrappers open themselves (time -o, script FILE)
 	funcs      map[string]bool
 	aliases    map[string]string
 	links      map[string]string // link key -> target physical path (review R7)
 	writeByKey map[string]int    // path key -> 1-based effect index that wrote it
-	pathShadow bool
 
 	env      map[string]string
 	curCWD   string
@@ -158,6 +160,13 @@ type walker struct {
 	// cd/pushd is then dynamic, because CDPATH can resolve it elsewhere (review 6
 	// B).
 	cdpathMaybeSet bool
+	// allExportMaybe is sticky once `set -a` / `set -o allexport` (or a dynamic
+	// set argument) is seen: every later plain assignment may be exported, so
+	// it reaches the environment of later programs (GAP-0217).
+	allExportMaybe bool
+	// pathMaybeSet is sticky once PATH is assigned in the shell (bare, export,
+	// declare): a later bare program name may run another binary (GAP-0217).
+	pathMaybeSet bool
 	// cmdHome carries a prefix HOME= assignment to the cd builtin of the current
 	// command (POSIX only); cmdHomeSet is reset per command (review 6 C).
 	cmdHome    string
@@ -190,10 +199,19 @@ type walker struct {
 	aliasAll   bool
 	// varsOwned: env and exported are this scope's own copies (see ownVars).
 	varsOwned bool
+	// remote counts the remote-host bodies being walked (ssh HOST CMD...: the
+	// joined words run in the login shell of another host, GAP-0662 ruling).
+	// Every effect emitted inside one is placed on that host (remoteTarget).
+	remote int
 	// cdUnreliable: the cd builtin was disabled or made to resolve names as
 	// variables (enable -n cd, shopt -s cdable_vars), or cd was aliased: its
 	// target and effect are no longer what the argument says.
 	cdUnreliable bool
+	// lastpipe: shopt -s lastpipe is in effect (see command).
+	lastpipe bool
+	// pwdOwn: the call assigned PWD after its last cd, so $PWD is that value
+	// and not the tracked folder.
+	pwdOwn bool
 	// execState: an unconditional `set -n` (or another unreviewed set option),
 	// `exec CMD`, `exit` or DEBUG/RETURN trap ran in this shell, so whether a
 	// later statement runs is not modeled: every later effect of the shell is
@@ -230,6 +248,19 @@ type walker struct {
 	// spec is the environment change the command being walked applies to the
 	// child process it starts (prefix assignments, env/sudo wrapper options).
 	spec *childSpec
+	// fileText holds the text earlier statements of the call wrote to a file
+	// (a here-document, a static echo), by path key: a later sh FILE, . FILE,
+	// ./FILE or sh < FILE runs that text (DET111 R1, GAP-1502).
+	fileText map[string]fileBody
+	// exactOK / exactText: the command being walked prints exactly exactText
+	// on stdout (exactOutput); literalKind is the data kind of literalOut.
+	exactOK     bool
+	exactText   string
+	literalKind DataKind
+	// positional, when positionalSet, are the $0 $1 ... the next child body
+	// lowered by unwrapCodeScoped binds (sh -c BODY ARG0 ARG1, sh FILE ARG1).
+	positional    []Word
+	positionalSet bool
 }
 
 // cwdState is one cwd certainty value: the primary candidate and the others.
@@ -285,6 +316,9 @@ func newWalker(res *Result, o Options) *walker {
 	}
 	if o.Home != "" {
 		exported["HOME"] = true // the shell's HOME is inherited from the process
+	}
+	if o.loginHome == "" {
+		o.loginHome = o.Home // ~Login stays the passwd home when the call sets HOME
 	}
 	return &walker{res: res, o: o, funcs: map[string]bool{}, aliases: map[string]string{},
 		links: map[string]string{}, writeByKey: map[string]int{},
@@ -716,11 +750,15 @@ func (w *walker) emit(e Effect) int {
 		w.res.addUnknown(ReasonLimit)
 		return 0
 	}
+	if w.remote > 0 {
+		remoteTarget(&e)
+	}
 	if (w.execState || w.debugTrap || w.dead > 0) && mutatesTarget(e.Kind) {
 		// The shell may never run it: not a fully known mutation (GAP-0218). A
 		// read or run that may not happen keeps its reading, as before.
 		e.addReason(ReasonExecutionState, ScopeRole)
 	}
+	w.forgetFileBody(e)
 	w.res.Effects = append(w.res.Effects, e)
 	return len(w.res.Effects)
 }
@@ -744,10 +782,43 @@ func (w *walker) resolveWord(wd Word) Word {
 	glob := false
 	quoted := false
 	for i, s := range wd.Segs {
+		if s.Subst == "pwd" {
+			// $(pwd) prints the working folder unless pwd is a function, an
+			// alias or disabled.
+			v, ok := "", false
+			if w.isBuiltin("pwd", DialectPOSIX) {
+				v, ok = w.cwdWord(i == 0)
+			}
+			if !ok {
+				return Word{Static: false, Reason: ReasonDynamicExpansion, Span: wd.Span, Tail: segTail(wd.Segs[i+1:])}
+			}
+			b.WriteString(v)
+			continue
+		}
 		if s.Var != "" {
 			v, ok := w.env[s.Var]
-			if !ok {
-				return Word{Static: false, Reason: ReasonDynamicExpansion, Span: wd.Span}
+			if s.Var == psHomeVar && !ok {
+				v, ok = w.curHome, w.curHome != "" // PowerShell's automatic $HOME, unless this call assigned it
+			}
+			if s.Var == "SHELL" && !ok && w.o.Account.Shell != "" {
+				v, ok = w.o.Account.Shell, true
+			}
+			if s.Var == "PWD" && !w.pwdOwn && !w.namerefSeen {
+				v, ok = w.cwdWord(i == 0)
+			}
+			if ok && s.Op != nil {
+				if v == "." && s.Var == "PWD" {
+					ok = false
+				} else {
+					v, ok = applyParamOp(v, s.Op)
+				}
+			}
+			if !ok || (s.Var == psHomeVar && v == "") {
+				// The segments stay on the word, so a reader of its literal part
+				// (env NAME=$V: the name) still sees them; the Reason keeps the
+				// word unresolved. Tail is the literal after the dynamic part.
+
+				return Word{Static: false, Reason: ReasonDynamicExpansion, Span: wd.Span, Segs: wd.Segs, Tail: segTail(wd.Segs[i+1:])}
 			}
 			// An unquoted variable undergoes field splitting and globbing: if
 			// its value carries IFS whitespace or a glob metachar we cannot
@@ -766,9 +837,31 @@ func (w *walker) resolveWord(wd Word) Word {
 		lit := s.Lit
 		// A leading ~ (~/ on POSIX, ~\ or ~/ on Windows) expands to the running
 		// home; with no known home it is dynamic (review N6).
+		if i == 0 && s.Quoted && strings.HasPrefix(lit, "~") {
+			// A quoted tilde is a literal folder named ~ (bash expands only an
+			// unquoted tilde prefix): never the home.
+			lit = "./" + lit
+			b.WriteString(lit)
+			quoted = true
+			continue
+		}
+		if i == 0 && !s.Quoted && strings.HasPrefix(lit, "~") && !isTilde(lit, w.o.flavor()) {
+			v, ok := w.tildePrefix(lit)
+			if !ok {
+				// An account the walker cannot place (~x): the home is unknown,
+				// the path below it is not (~x/.aws/credentials keeps its
+				// literal tail for the classifier, rel-1-0-10:GAP-0898).
+				return Word{Static: false, Reason: ReasonDynamicExpansion, Span: wd.Span, Tail: tildeTail(lit, wd.Segs[1:])}
+			}
+			if s.Glob {
+				glob = true
+			}
+			b.WriteString(v)
+			continue
+		}
 		if i == 0 && isTilde(lit, w.o.flavor()) {
 			if w.curHome == "" {
-				return Word{Static: false, Reason: ReasonDynamicExpansion, Span: wd.Span}
+				return Word{Static: false, Reason: ReasonDynamicExpansion, Span: wd.Span, Tail: tildeTail(lit, wd.Segs[1:])}
 			}
 			// a glob/brace after the tilde still globs (review N10 V16).
 			if s.Glob && !s.Quoted {
@@ -797,6 +890,55 @@ func (w *walker) resolveWord(wd Word) Word {
 	return Word{Value: b.String(), Static: true, Quoted: quoted, Glob: glob, Span: wd.Span}
 }
 
+// cwdWord is the value of $PWD or ~+: the working folder when the walk knows
+// it as one folder, else "." when the word starts with it (placed like a
+// relative name under every candidate folder).
+func (w *walker) cwdWord(leading bool) (string, bool) {
+	if cwd, ok := w.knownCWD(); ok {
+		return cwd, true
+	}
+	if leading {
+		return ".", true
+	}
+	return "", false
+}
+
+// knownCWD is the working folder when the walk knows it as one folder.
+func (w *walker) knownCWD() (string, bool) {
+	if w.curCWD == "" || len(w.cwdAlt) > 0 {
+		return "", false
+	}
+	return w.curCWD, true
+}
+
+// tildePrefix expands an unquoted POSIX tilde prefix other than ~ and ~/:
+// ~+ is the working folder and ~- the previous one (unknown here); ~login is
+// that account's home through tildeAccount (the active login, an account the
+// caller vouched for, or the literal folder of a name no login can have).
+func (w *walker) tildePrefix(lit string) (string, bool) {
+	name, rest := lit[1:], ""
+	if i := strings.IndexAny(name, `/`); i >= 0 {
+		name, rest = name[:i], name[i:]
+	}
+	if name == "+" {
+		cwd, ok := w.cwdWord(true)
+		if !ok {
+			return "", false
+		}
+		if w.o.flavor() == FlavorWindows {
+			return strings.TrimRight(cwd, `\`) + rest, true
+		}
+		return strings.TrimRight(cwd, "/") + rest, true
+	}
+	if w.o.flavor() == FlavorWindows {
+		return "", false
+	}
+	o := w.o
+	o.Home = w.curHome
+	h, ok, _ := tildeAccount(lit, o)
+	return h, ok
+}
+
 func (w *walker) resolveWords(in []Word) []Word {
 	out := make([]Word, len(in))
 	for i, wd := range in {
@@ -810,6 +952,10 @@ func (w *walker) resolveWords(in []Word) []Word {
 type stageData struct {
 	reads   []int
 	literal string
+	// exact: the stage printed exactly text (an exact printer, see
+	// exactOutput), so a shell reading the pipe runs that text.
+	exact bool
+	text  string
 }
 
 // maxStageSources bounds the sources one stage carries, so a long pipeline of
@@ -822,14 +968,16 @@ const maxStageSources = 32
 // substitution's reads to the dynamic data the command sends or writes.
 func (w *walker) commandStage(c *Cmd, dialect Dialect, depth int, cond bool) {
 	savedIn, savedLit, savedRedir := w.stageIn, w.literalOut, w.redirOut
+	savedExact, savedText, savedKind := w.exactOK, w.exactText, w.literalKind
 	in := stageData{}
 	if c.PipeIn {
 		in = w.stageOut
 	}
 	w.stageIn, w.literalOut, w.redirOut = in, "", nil
+	w.exactOK, w.exactText, w.literalKind = false, "", ""
 	start, own := len(w.res.Effects), w.cmdNo+1
 	w.command(c, dialect, depth, cond)
-	out := stageData{literal: w.literalOut}
+	out := stageData{literal: w.literalOut, exact: w.exactOK && !stdoutRedirected(c.Redirs), text: w.exactText}
 	if out.literal == "" {
 		out.literal = in.literal
 	}
@@ -850,6 +998,7 @@ func (w *walker) commandStage(c *Cmd, dialect Dialect, depth int, cond bool) {
 	}
 	w.stageOut = out
 	w.stageIn, w.literalOut, w.redirOut = savedIn, savedLit, savedRedir
+	w.exactOK, w.exactText, w.literalKind = savedExact, savedText, savedKind
 }
 
 // linkSubstitutionData records that the data a command sends or writes, when
@@ -973,8 +1122,27 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 	// A pipeline stage or a background command runs in a child shell: its cd and
 	// assignments must not leak into the parent (review N2 V3/V7).
 	if c.Pipeline || c.Async {
-		saved := w.saveScope()
-		defer w.restoreScope(saved)
+		switch {
+		case c.PipeLast && !c.Async && dialect == DialectPOSIX && w.lastpipe:
+			// shopt -s lastpipe: bash runs the last stage in this shell
+			// (non-interactive, so no job control), so its cd and assignments
+			// stay (rel-1-0-10:GAP-1037).
+		case c.PipeLast && !c.Async && dialect == DialectPOSIX:
+			// Without lastpipe bash runs it in a child, but zsh and a lastpipe
+			// set where the walk cannot see it run it here: the folder after it
+			// is either one.
+			saved := w.saveScope()
+			defer func() {
+				after := w.cwdNow()
+				w.restoreScope(saved)
+				if before := w.cwdNow(); !after.equal(before) {
+					w.setCWDState(joinCWD(before, after))
+				}
+			}()
+		default:
+			saved := w.saveScope()
+			defer w.restoreScope(saved)
+		}
 	}
 
 	w.cmdNo++
@@ -1007,6 +1175,11 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 		if a.Name == "CDPATH" {
 			w.cdpathMaybeSet = true
 		}
+		// The shell looks programs up in its own PATH, exported or not: any
+		// assignment can move a later bare program name (GAP-0217).
+		if a.Name == "PATH" && !prefix {
+			w.pathMaybeSet = true
+		}
 		if prefix {
 			// A prefix HOME= applies to the cd builtin of this command (POSIX): a
 			// bare cd then follows it (review 6 C, W5/W6). The assignment is also
@@ -1018,7 +1191,7 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 			w.spec.set(a.Name, rv.Value, rv.Static)
 			continue
 		}
-		if a.Exported {
+		if a.Exported || (w.allExportMaybe && !a.Unexport) {
 			w.ownVars()
 			w.exported[a.Name] = true
 		}
@@ -1032,6 +1205,9 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 		if rv.Static {
 			w.ownVars()
 			w.env[a.Name] = rv.Value
+			if a.Name == "PWD" {
+				w.pwdOwn = true
+			}
 			// A reassigned HOME re-roots `~` and a bare cd under POSIX shell
 			// semantics, on every flavor incl. Git Bash (review 6 C). PowerShell's
 			// `~` is fixed at session start, so $env:USERPROFILE must not rebind it
@@ -1041,7 +1217,11 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 			}
 		} else {
 			w.ownVars()
-			delete(w.env, a.Name)
+			if a.Name == psHomeVar && dialect == DialectPowerShell {
+				w.env[a.Name] = "" // explicitly reassigned to a dynamic value; do not restore the automatic home
+			} else {
+				delete(w.env, a.Name)
+			}
 			if a.Name == "HOME" && dialect == DialectPOSIX {
 				w.curHome = "" // a dynamic home makes ~ dynamic (review N3 E2)
 			}
@@ -1065,8 +1245,26 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 	inner, wrappers, foreign, fromInput, wrapperUA := w.stripWrappers(words)
 	spec := w.spec // the child-process environment this command applies (round 8 E)
 	if len(inner) == 0 {
+		if n := len(wrappers); n > 0 && wrappers[n-1] != "exec" && wrappers[n-1] != "command" && wrappers[n-1] != "builtin" {
+			// a wrapper with no child word (`nohup`, `timeout 5`): nothing we can
+			// read runs, so the call is never clean. A bare exec only applies its
+			// redirections to the shell.
+			e := Effect{Kind: KindExec, Target: Target{Type: TargetProcess, Link: LinkNotChecked}, TargetState: TargetStateKnown, RoleState: RoleStateKnown, Cond: cond,
+				Origin: Origin{Surface: w.res.Surface, Dialect: dialect, Command: cmdNo, Program: wrappers[len(wrappers)-1], Wrappers: wrappers, Depth: depth, Span: c.Span}}
+			e.addReason(ReasonUnmodeledProgram, ScopeRole)
+			w.lastPrim = w.emit(e)
+		}
 		w.handleRedirs(c, dialect, cmdNo, depth, cond, nil)
 		return
+	}
+	// The files a wrapper opens itself are placed in the caller's folder,
+	// before a wrapper's own folder change applies to the child.
+	var wrapEffects []Effect
+	for _, wo := range w.wrapOuts {
+		op := operand{value: wo.word.Value, static: wo.word.Static, quoted: wo.word.Quoted, glob: wo.word.Glob, role: wo.role}
+		if e := w.effectForOperand(op, Program{}, Origin{Surface: w.res.Surface, Dialect: dialect, Command: cmdNo, Program: wrappers[0], Wrappers: wrappers, Depth: depth, Span: c.Span}, cond, false, false, false, dialect, depth); e != nil {
+			wrapEffects = append(wrapEffects, *e)
+		}
 	}
 	prog := inner[0]
 	if !prog.Static {
@@ -1074,12 +1272,32 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 			Origin: Origin{Surface: w.res.Surface, Dialect: dialect, Command: cmdNo, Wrappers: wrappers, Depth: depth, Span: c.Span}}
 		e.addReason(ReasonDynamicExpansion, ScopeTarget)
 		w.lastPrim = w.emit(e)
+		for _, we := range wrapEffects {
+			w.emit(we)
+		}
+		// A program named by a variable ("$SHELL" -c BODY, "$s" <<< BODY) may be
+		// a shell: its body is lowered as a possible one (DET111 R1, GAP-1538,
+		// GAP-1554), and the substitutions in its words still run.
+		w.possibleShell(c, rawWordsFor(inner[:1], c.Words)[0], inner[1:], dialect, depth, e.Origin)
 		w.handleRedirs(c, dialect, cmdNo, depth, cond, nil)
+		for _, sub := range c.Nested {
+			s := w.saveScope()
+			w.walkScript(sub, depth)
+			w.restoreScope(s)
+		}
 		return
 	}
 	program := programBasename(prog.Value, w.o.flavor())
 	origin := Origin{Surface: w.res.Surface, Dialect: dialect, Command: cmdNo, Program: program, Wrappers: wrappers, Depth: depth, Span: c.Span}
 	w.literalOut = literalPrinted(program, inner[1:], dialect)
+	if dialect == DialectPOSIX {
+		if text, ok := exactOutput(program, inner[1:], c.Redirs, w.resolveWord); ok {
+			w.exactOK, w.exactText = true, text
+			if w.literalOut == "" && text != "" {
+				w.literalOut, w.literalKind = cap8k(text), DataHeredoc
+			}
+		}
+	}
 
 	// Calling a user-defined function (including one that shadows cd) may change
 	// the cwd unobservably: mark it dynamic (review R3-6 C06/C07).
@@ -1097,6 +1315,9 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 		return
 	}
 	nameOpaque := w.unbindReader(program, inner)
+	if program == "read" && dialect == DialectPOSIX {
+		w.bindRead(c, inner[1:]) // read NAME <<< WORD binds NAME (GAP-1554)
+	}
 	declUA := false
 	if dialect == DialectPOSIX && isDeclBuiltin(program) && len(inner) > 1 {
 		ok, opq := w.declWords(program, inner[1:])
@@ -1143,9 +1364,6 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 
 	// 4. Shadowing.
 	shadowed := w.funcs[lprog] || w.aliases[program] != ""
-	if w.pathShadow && !strings.Contains(prog.Value, "/") {
-		shadowed = true
-	}
 	if program == "alias" {
 		for _, wd := range inner[1:] {
 			if wd.Static {
@@ -1185,7 +1403,7 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 	if progReason != "" {
 		base.addReason(progReason, ScopeTarget)
 	}
-	if !known {
+	if !known || entry.BuiltinUnknown {
 		base.RoleState = RoleStateUnknown
 		base.addReason(ReasonUnmodeledProgram, ScopeRole)
 	}
@@ -1198,7 +1416,21 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 	}
 	prevPrim := w.lastPrim
 	cmdStart := len(w.res.Effects) // first effect index (0-based) of this command
-	unaccounted := wrapperUA || declUA || bsdReject
+	// 4c. Environment and startup-file inputs (GAP-0217): a name the call puts
+	// in the program's environment that the allow list does not account for,
+	// or a shell that sources startup files. A program's own effects are then
+	// unaccounted; a shell or code runner keeps the effects of the code it
+	// runs and gets one unaccounted exec for the input.
+	envUA, envShell := false, false
+	shellCode := known && entry.ShellCode
+	if dialect == DialectPOSIX && (w.unreviewedEnvInput(program, strings.Contains(prog.Value, "/"), shellCode, spec) != "" || shellStartupFlag(program, inner[1:])) {
+		if shellCode {
+			envShell = true
+		} else {
+			envUA = true
+		}
+	}
+	unaccounted := wrapperUA || declUA || bsdReject || entry.BuiltinUnknown || envUA
 	nestedStart := -1
 	// Single choke point (review N4-1 / R5-1): any step that leaves an argv
 	// token unaccounted (wrapper, launcher, tar, operands) sets unaccounted;
@@ -1218,6 +1450,12 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 	}()
 	baseIdx := w.emit(base)
 	w.lastPrim = baseIdx
+	for _, e := range wrapEffects {
+		w.emit(e)
+	}
+	if envShell {
+		w.envInputEffect(origin, cond)
+	}
 
 	// 6. Interpreter reading piped / heredoc stdin as code (review PX-5).
 	w.interpreterStdin(c, entry, known, inner[1:], dialect, depth, cond, origin, prevPrim)
@@ -1246,6 +1484,12 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 
 	w.noteDriveAlias(program, inner[1:])
 	if !known {
+		// ./FILE of a file the call wrote runs that text (GAP-1502).
+		if dialect == DialectPOSIX && strings.Contains(prog.Value, "/") {
+			if b, ok := w.scriptBody(prog.Value); ok {
+				w.unwrapWithArgs(b.text, DialectPOSIX, depth, cond || b.cond, origin, inner)
+			}
+		}
 		w.handleRedirs(c, dialect, cmdNo, depth, cond, nil)
 		for _, sub := range c.Nested {
 			s := w.saveScope()
@@ -1265,11 +1509,25 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 		w.handleRedirs(c, dialect, cmdNo, depth, cond, nil)
 		return
 	}
+	// The cmd frontend kept the verbatim text after /c: the child cmd runs it
+	// with its quotes and operators, so it is read as a cmd line, not rebuilt
+	// from words whose quotes are gone (DET111 R1).
+	if entry.CmdC && c.CmdBodySet && dialect == DialectCMD && len(inner) == len(words) {
+		if strings.TrimSpace(c.CmdBody) != "" {
+			w.unwrapCode(c.CmdBody, true, DialectCMD, depth, cond, origin)
+		}
+		w.handleRedirs(c, dialect, cmdNo, depth, cond, nil)
+		return
+	}
 	if entry.CmdC {
 		rest := inner[1:]
 		found := false
 		for j, a := range rest {
-			if a.Static && (strings.EqualFold(a.Value, "/c") || strings.EqualFold(a.Value, "/k")) {
+			// Git Bash (MSYS) turns a leading // into /, so cmd //c is cmd's
+			// /c there: the spelling that runs a body from a POSIX shell (DET111
+			// R1, GAP-1667).
+			if a.Static && (strings.EqualFold(a.Value, "/c") || strings.EqualFold(a.Value, "/k") ||
+				dialect == DialectPOSIX && (strings.EqualFold(a.Value, "//c") || strings.EqualFold(a.Value, "//k"))) {
 				found = true
 				parts := make([]string, 0, len(rest)-j-1)
 				allStatic := true
@@ -1407,18 +1665,31 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 	}
 	// unzip extracts unknown files into -d dir or the cwd (review R3-3 Z06).
 	if program == "unzip" {
-		dir := ""
+		dir, dirSet, dirDyn := "", false, false
 		for i, a := range inner[1:] {
-			if a.Static && a.Value == "-d" && i+1 < len(inner[1:]) && inner[1:][i+1].Static {
-				dir = inner[1:][i+1].Value
+			if a.Static && a.Value == "-d" && i+1 < len(inner[1:]) {
+				dirSet = true
+				nx := inner[1:][i+1]
+				dir, dirDyn = nx.Value, !nx.Static
 			}
 		}
 		e := Effect{Kind: KindWrite, Cond: cond, RoleState: RoleStateKnown, TargetState: TargetStateUnknown,
 			Target: Target{Type: TargetPath, Flavor: w.o.flavor(), Link: LinkNotChecked, CaseFold: w.o.CaseInsensitive}, Origin: origin}
-		if dir != "" {
+		if !dirSet {
+			dir = "."
+		}
+		// The -d folder is placed by the one path resolver like every other
+		// target (a ~ in Git Bash is the Windows home: DET111 R1, GAP-1173); a
+		// dynamic -d is an unknown folder, never the cwd.
+		if dirDyn {
+			e.addReason(ReasonDynamicExpansion, ScopeTarget)
+		} else {
 			e.Target.Spelling = cap4k(dir)
-		} else if w.curCWD != "" {
-			e.Target.Spelling = cap4k(w.curCWD)
+			if abs, ok, r := w.placeRel(dir); ok {
+				e.Target.Path = abs
+			} else {
+				e.addReason(r, ScopeTarget)
+			}
 		}
 		e.addReason(ReasonOpaqueArchive, ScopeTarget)
 		w.emit(e)
@@ -1427,6 +1698,24 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 	// 7. Operands.
 	w.curProgram = program
 	operandWords := inner[1:]
+	// xargs appends stdin words after its command. When the preceding stage
+	// printed exactly one literal filename, feed that word through the same
+	// source/destination grammar as ordinary argv; otherwise keep the dynamic
+	// unknown operand path below. This lets cp's table role retain a literal
+	// destination (or -t source) for the protected classifier.
+	allStatic := true
+	for _, word := range operandWords {
+		if !word.Static {
+			allStatic = false
+			break
+		}
+	}
+	if fromInput && entry.Pos == PosSourcesDest && allStatic {
+		piped := strings.TrimSpace(w.stageIn.literal)
+		if piped != "" && !strings.ContainsAny(piped, " \t\r\n\x00") {
+			operandWords = append(append([]Word(nil), operandWords...), Word{Value: piped, Static: true})
+		}
+	}
 	if dialect != DialectPOSIX && (lprog == "new-item" || lprog == "ni") {
 		operandWords = w.joinNewItemName(operandWords)
 	}
@@ -1453,7 +1742,25 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 	readIdx := []int{}
 	readByKeyLocal := map[string]int{} // source path key -> read index, for the copy-label join
 	emittedTargetEffect := false
+	// Inline interpreter code is Data: its path literals and the path arguments
+	// handed to it are opaque path effects, and its positionals are arguments,
+	// not a program to run (GAP-0893, GAP-0662, GAP-1653).
+	inlineCode := dialect == DialectPOSIX && isCodeInterpreter(program) && w.inlineCode(c, inner[1:], origin, cond)
+	shellPOSIX := dialect == DialectPOSIX && isPOSIXShell(program)
+	sc := shellInvocation(inner[1:])
+	codeOps := 0
+	w.nestedBodies(c, program, inner, dialect, depth, cond, origin)
+	emittedKinds := map[Kind]bool{}
 	for _, op := range ops {
+		if inlineCode && op.role == RoleExecProgram {
+			continue
+		}
+		if shellPOSIX && op.role == RoleExecCode {
+			codeOps++
+			if sc.hasC && codeOps > 1 {
+				continue // a word after sh -c CODE is $0, $1 ...: an argument, not code
+			}
+		}
 		e := w.effectForOperand(op, entry, origin, cond, foreign, fromInput, shadowed, dialect, depth)
 		if e == nil {
 			continue
@@ -1467,6 +1774,7 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 		})
 		if e.Target.Type == TargetPath || e.Target.Type == TargetRemote || e.Kind == KindNetworkSend {
 			emittedTargetEffect = true
+			emittedKinds[e.Kind] = true
 		}
 		switch e.Kind {
 		case KindRead:
@@ -1494,8 +1802,21 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 		if op.role == RoleExecCode && op.static && entry.ShellCode {
 			childScope := program != "eval" && program != "source" && program != "."
 			w.spec = spec
-			w.unwrapCodeScoped(op.value, op.static, dialect, depth, cond, origin, childScope)
+			switch {
+			case dialect == DialectPOSIX && program == "eval":
+				// lowered whole by nestedBodies (all arguments joined)
+			case shellPOSIX && sc.hasC:
+				w.unwrapWithArgs(op.value, dialect, depth, cond, origin, sc.rest)
+			case !childScope && isStdinPath(op.value):
+				// source /dev/stdin: the text on stdin (nestedBodies)
+			default:
+				w.unwrapCodeScoped(op.value, op.static, dialect, depth, cond, origin, childScope)
+				w.runWrittenScript(op.value, program, sc, dialect, depth, cond, origin, childScope)
+			}
 		}
+	}
+	if (program == "tee" && dialect == DialectPOSIX) || (program == "tee-object" && dialect == DialectPowerShell) {
+		w.teeData(c, inner[1:], cmdNo, cmdStart, entry.AppendFlag, dialect)
 	}
 	// (see the stage-link cases in secretflow_stage_test.go).
 	// to the pipe (s7-flow).
@@ -1514,8 +1835,14 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 	// A command run by xargs gets its operands from stdin: emit its positional
 	// role with an unknown target so `ls | xargs rm` is a (dynamic) delete
 	// rather than exec-only (review R3-3 / round-3 leftovers).
-	if fromInput && !emittedTargetEffect {
-		if role := posModeRole(entry.Pos); role != RoleNone {
+	// A copier fed by xargs (`xargs cp SRC`) takes its destination from stdin
+	// too: the write is there even when the source was read (GAP-1317).
+	fedRole := posModeRole(entry.Pos)
+	if entry.Pos == PosSourcesDest {
+		fedRole = RoleWrite
+	}
+	if fromInput && !emittedKinds[fedRole.kind()] {
+		if role := fedRole; role != RoleNone {
 			e := Effect{Kind: role.kind(), Cond: cond, RoleState: RoleStateKnown, TargetState: TargetStateUnknown,
 				Target: Target{Type: TargetPath, Flavor: w.o.flavor(), Link: LinkNotChecked, CaseFold: w.o.CaseInsensitive}, Origin: origin}
 			e.addReason(ReasonOperandsFromInput, ScopeTarget)
@@ -1641,6 +1968,7 @@ func (w *walker) applyCWDChange(program string, args []Word, dialect Dialect, co
 	old := w.cwdNow()
 	succ := cwdState{}
 	mayFail := true
+	w.pwdOwn = false // cd sets PWD to the folder it changed to
 	switch {
 	case !found:
 		// bare cd -> the home directory; a prefix HOME= on this command wins (W5/W6).
@@ -1814,15 +2142,10 @@ func (w *walker) interpreterStdin(c *Cmd, entry Program, known bool, args []Word
 	if !interpreter {
 		return
 	}
-	var hdoc string
-	hdocStatic := false
 	hasStdin := c.PipeIn
 	for _, r := range c.Redirs {
 		if r.Op == RedirHeredoc || r.Op == RedirHereString {
 			hasStdin = true
-			if !r.BodyExpands {
-				hdoc, hdocStatic = r.Body, true
-			}
 		}
 		// `sh < file`: with no script or -c operand, the interpreter reads its
 		// code from that file, which we cannot see (round 8 R, GAP-0132).
@@ -1835,11 +2158,14 @@ func (w *walker) interpreterStdin(c *Cmd, entry Program, known bool, args []Word
 	}
 	// A shell given a script or -c operand reads that, not its standard input:
 	// a heredoc / here-string is then data for the script, not code to unwrap.
-	if entry.ShellCode && !c.PipeIn && hasCodeOperand(args, true) {
+	if entry.ShellCode && !entry.StdinCode && !c.PipeIn && hasCodeOperand(args, true) {
 		return
 	}
-	if hdocStatic && entry.ShellCode {
-		w.unwrapCode(hdoc, true, dialect, depth, cond, origin)
+	// The text the call feeds it (here-document, here-string, an exact printer
+	// upstream of the pipe, a printing process substitution, a file the call
+	// wrote) is the script it runs (DET111 R1, GAP-1151, GAP-1593).
+	if text, tcond, ok := w.stdinText(c); ok && entry.ShellCode && (entry.StdinCode || !hasCodeOperand(args, true)) {
+		w.unwrapCode(text, true, dialect, depth, cond || tcond, origin)
 		return
 	}
 	e := Effect{Kind: KindExec, Cond: cond, Target: Target{Type: TargetProcess, Link: LinkNotChecked},
@@ -1921,6 +2247,12 @@ type operand struct {
 	uploadIsFile  bool   // RoleSendData: the body is a file / stdin ("-"), not literal text
 	copyFrom      string // a copy destination write: the source spelling whose read it carries (s7-flow)
 	subtree       bool   // the write covers the whole directory tree below the path (git clone / init)
+	tail          string // Word.Tail of a dynamic operand
+	// findName / findFiltered: a find -delete root deletes only the files its
+	// predicates select: one -name/-iname pattern (findName), or a predicate the
+	// walk does not read as a pattern (findFiltered alone).
+	findName     string
+	findFiltered bool
 }
 
 func hasWordFold(words []Word, v string) bool {
@@ -1934,7 +2266,7 @@ func hasWordFold(words []Word, v string) bool {
 
 // hasAppendFlag reports the append switch among the arguments, alone, as the
 // long form, or inside a cluster of short switches (tee -ai).
-func hasAppendFlag(words []Word, flag string) bool {
+func hasAppendFlag(words []Word, flag string, dialect Dialect) bool {
 	for _, wd := range words {
 		if !wd.Static {
 			continue
@@ -1943,10 +2275,10 @@ func hasAppendFlag(words []Word, flag string) bool {
 		if v == "--" {
 			return false
 		}
-		if v == flag || v == "--append" {
+		if (dialect == DialectPowerShell && (strings.EqualFold(v, flag) || strings.EqualFold(v, "--append"))) || (dialect != DialectPowerShell && (v == flag || v == "--append")) {
 			return true
 		}
-		if len(v) > 2 && v[0] == '-' && v[1] != '-' && strings.ContainsRune(v[1:], rune(flag[1])) {
+		if len(flag) == 2 && len(v) > 2 && v[0] == '-' && v[1] != '-' && strings.ContainsRune(v[1:], rune(flag[1])) {
 			return true
 		}
 	}
@@ -1968,7 +2300,9 @@ func (w *walker) classifyOperands(words []Word, p Program, dialect Dialect) ([]o
 	i := 0
 	unknownFlag := false
 	inPlace := false
+	inPlaceSuffix := "" // sed -i[SUFFIX] / --in-place=SUFFIX: the backup name
 	del := false
+	findName, findOpaque := "", false
 	hasExpr := false
 	destDir := ""
 	var srcFlags []Word
@@ -1978,7 +2312,20 @@ func (w *walker) classifyOperands(words []Word, p Program, dialect Dialect) ([]o
 	for i < len(words) {
 		wd := words[i]
 		name := wd.Value
-		if endOpts || !wd.Static {
+		dynamicInline := false
+		dynamicValue := Word{}
+		if !wd.Static {
+			if flag, value, ok := splitDynamicKeyValueOperand(wd, p, dialect); ok {
+				name, dynamicValue, dynamicInline = flag, value, true
+			} else if flag, value, ok := splitDynamicAttachedFlag(wd, p, dialect); ok {
+				name, dynamicValue, dynamicInline = flag, value, true
+			} else {
+				positionals = append(positionals, wd)
+				i++
+				continue
+			}
+		}
+		if endOpts {
 			positionals = append(positionals, wd)
 			i++
 			continue
@@ -2006,14 +2353,39 @@ func (w *walker) classifyOperands(words []Word, p Program, dialect Dialect) ([]o
 			endOpts = endOpts || p.OptionsFirst
 			continue
 		}
-		// PowerShell / long --flag=value and -Param:Value inline value.
-		fname, inlineVal, hasInline := splitInlineFlagValue(name, dialect)
+		// A native -xVALUE value comes before PowerShell's -Name:Value syntax:
+		// the colon after a drive letter belongs to the attached path.
+		fname, inlineVal, hasInline := name, "", false
+		inlineWord := Word{}
+		if flag, value, attached := splitAttachedNativeValue(name, p, dialect); attached {
+			fname, inlineWord, hasInline = flag, value, true
+			inlineVal = value.Value
+		} else {
+			fname, inlineVal, hasInline = splitInlineFlagValue(name, dialect)
+			inlineWord = Word{Value: inlineVal, Static: true}
+		}
+		if dynamicInline {
+			fname, inlineWord, hasInline = name, dynamicValue, true
+			inlineVal = dynamicValue.Value
+		}
 		fl, ok := flagLookup(p, fname, dialect)
+		if !ok && !dynamicInline && dialect != DialectPOSIX {
+			// A PowerShell or cmd word whose colon is the value's own (7z
+			// -oC:\x: not -Name:value) is a table flag with its value glued on
+			// (DET111 R1, GAP-1663).
+			if flag, value, split := splitDynamicAttachedFlag(wd, p, dialect); split {
+				fname, inlineWord, hasInline, inlineVal = flag, value, true, value.Value
+				fl, ok = flagLookup(p, fname, dialect)
+			}
+		}
+		if ok && dialect == DialectPOSIX {
+			fname, _, _ = flagResolve(p, fname) // an abbreviation reads as its full name (--target= is --target-directory=)
+		}
 		if !ok {
 			// POSIX combined short flags (-xzf, -sSLo): the split marks the
 			// token unaccounted if any component is unlisted.
 			if dialect == DialectPOSIX && len(name) > 2 && name[0] == '-' && name[1] != '-' {
-				_, uf := w.splitShortFlags(name, words, &i, p, &out, &inPlace, &destDir)
+				_, uf := w.splitShortFlags(name, words, &i, p, &out, &inPlace, &inPlaceSuffix, &destDir)
 				if uf {
 					unknownFlag = true
 				}
@@ -2026,16 +2398,17 @@ func (w *walker) classifyOperands(words []Word, p Program, dialect Dialect) ([]o
 			i++
 			continue
 		}
-		if p.InPlace != "" && (fname == p.InPlace || fname == "--in-place" || strings.HasPrefix(fname, "--in-place=")) {
+		if isInPlaceFlag(p, fname) || fname == "--in-place" || strings.HasPrefix(fname, "--in-place=") {
 			inPlace = true
 		}
 		if p.DeleteFlag != "" && fname == p.DeleteFlag {
 			del = true
+		} else if p.DeleteFlag != "" {
+			findName, findOpaque = findPredicate(fname, words, i, findName, findOpaque)
 		}
-		if (p.Pos == PosSourcesDest) && (fname == "-t" || fname == "--target-directory" || strings.HasPrefix(fname, "--target-directory=")) {
-			if v, iv, has := splitInlineFlagValue(name, dialect); has {
-				destDir = iv
-				_ = v
+		if (p.Pos == PosSourcesDest) && (fname == "-t" || fname == "--target-directory") {
+			if hasInline {
+				destDir = inlineVal
 			} else if i+1 < len(words) && words[i+1].Static {
 				destDir = words[i+1].Value
 				i += 2
@@ -2063,25 +2436,63 @@ func (w *walker) classifyOperands(words []Word, p Program, dialect Dialect) ([]o
 			}
 			continue
 		}
-		if hasInline && textBad(fl.Text, Word{Value: inlineVal, Static: true}) {
-			unknownFlag = true // a script / format / config the closed grammar does not accept
+		if hasInline {
+			tops, bad := w.textOperands(fl.Text, inlineWord)
+			out = append(out, tops...)
+			if bad {
+				unknownFlag = true // a script / format / config the closed grammar does not accept
+			}
+		}
+		if hasInline && dialect == DialectPOSIX && !fl.Value {
+			// A switch with a value attached (--in-place=SUFFIX, --color=WHEN):
+			// only an Optional switch takes one. The sed backup suffix is read by
+			// the row; any other non-empty value is not modeled, and a plain
+			// switch given a value makes getopt reject the call (GAP-0216).
+			// A short option has no '=' separator: -i=bak is -i with suffix "=bak".
+			val := inlineVal
+			if !strings.HasPrefix(fname, "--") {
+				val = name[len(fname):]
+			}
+			switch {
+			case fl.Optional && val == "":
+			case fl.Optional && inPlace && p.InPlace != "" && (fname == p.InPlace || fname == "--in-place"):
+				inPlaceSuffix = val
+			case fl.Optional && fl.Role == RoleNone && fl.Text == TextNone && p.InPlace == "":
+				// grep --color=WHEN: the value only selects output colouring
+			default:
+				unknownFlag = true
+			}
+			i++
+			continue
 		}
 		if hasInline {
-			if routeSourcesDestFlag(p, fl, Word{Value: inlineVal, Static: true}, &srcFlags, &destFlag) {
+			if routeSourcesDestFlag(p, fl, inlineWord, &srcFlags, &destFlag) {
 				if fl.Role == RoleWrite {
 					destFlagSet = true
 				}
 				i++
 				continue
 			}
-			out = append(out, operandValue(fl, Word{Value: inlineVal, Static: true}, p))
+			out = append(out, operandValue(fl, inlineWord, p))
 			i++
+			if fl.Extra > 0 {
+				i, unknownFlag = skipExtraValues(words, i, fl.Extra, unknownFlag)
+			}
 			continue
 		}
 		if fl.Value {
 			if i+1 < len(words) {
-				if textBad(fl.Text, words[i+1]) {
+				tops, bad := w.textOperands(fl.Text, words[i+1])
+				out = append(out, tops...)
+				if bad {
 					unknownFlag = true
+				}
+				if fl.Extra > 0 {
+					// find -fprintf FILE FORMAT: the first value has the flag's role,
+					// the next Extra words are inert data (GAP-0216).
+					out = append(out, operandValue(fl, words[i+1], p))
+					i, unknownFlag = skipExtraValues(words, i+2, fl.Extra, unknownFlag)
+					continue
 				}
 				if routeSourcesDestFlag(p, fl, words[i+1], &srcFlags, &destFlag) {
 					if fl.Role == RoleWrite {
@@ -2111,18 +2522,186 @@ func (w *walker) classifyOperands(words []Word, p Program, dialect Dialect) ([]o
 	}
 	// The script / pattern positional a FirstPosIgnore program takes is accounted
 	// only if its closed grammar accepts it (sed script, awk program).
-	if p.FirstPosIgnore && !hasExpr && len(positionals) > 0 && textBad(p.FirstPosText, positionals[0]) {
-		unknownFlag = true
+	if p.FirstPosIgnore && !hasExpr && len(positionals) > 0 {
+		tops, bad := w.textOperands(p.FirstPosText, positionals[0])
+		out = append(out, tops...)
+		if bad {
+			unknownFlag = true
+		}
 	}
 	// A PosNone program with operands it does not model leaves them unaccounted,
 	// unless its entry declares the operands inert data (review R5-2).
 	if p.Pos == PosNone && len(positionals) > 0 && !p.InertOperands {
 		unknownFlag = true
 	}
-	out = append(out, w.positionalOperands(positionals, p, posCtx{unknownFlag: unknownFlag, inPlace: inPlace, del: del, hasExpr: hasExpr, destDir: destDir,
-		appendMode: p.AppendFlag != "" && hasAppendFlag(words, p.AppendFlag),
-		upload:     p.Pos == PosBits && hasWordFold(words, "/upload"), program: w.curProgram, words: words})...)
+	if del {
+		for _, wd := range positionals {
+			if wd.Static && (wd.Value == "!" || wd.Value == "(" || wd.Value == ")" || wd.Value == ",") {
+				findOpaque = true // a negated or grouped expression: not one pattern
+			}
+		}
+	}
+	// A backup suffix with '*' (the file's base name) or '/' (a backup folder)
+	// names the backup by a rule the table does not model (GAP-0216).
+	if inPlace && strings.ContainsAny(inPlaceSuffix, "*/") {
+		unknownFlag, inPlaceSuffix = true, ""
+	}
+	posOps := w.positionalOperands(positionals, p, posCtx{unknownFlag: unknownFlag, inPlace: inPlace, inPlaceSuffix: inPlaceSuffix, del: del, findName: findName, findOpaque: findOpaque, hasExpr: hasExpr, destDir: destDir,
+		appendMode: p.AppendFlag != "" && hasAppendFlag(words, p.AppendFlag, dialect),
+		upload:     p.Pos == PosBits && hasWordFold(words, "/upload"), program: w.curProgram, words: words})
+	recursive := hasRowFlag(words, p, p.Recursive)
+	dry := hasRowFlag(words, p, p.DryRun)
+	for _, op := range posOps {
+		if dry && op.role != RoleRead {
+			continue // a dry run writes, links and deletes none of its operands
+		}
+		if recursive && op.role == RoleWrite && !op.remote {
+			op.subtree = true // a tree copy writes every file below the destination
+		}
+		out = append(out, op)
+	}
+	if p.AppendFlag != "" && hasAppendFlag(words, p.AppendFlag, dialect) {
+		for i := range out {
+			if out[i].role == RoleWrite {
+				out[i].role = RoleAppend
+			}
+		}
+	}
 	return out, inner, unknownFlag
+}
+
+func isInPlaceFlag(p Program, name string) bool {
+	if p.InPlace == name {
+		return true
+	}
+	for _, flag := range p.InPlaceFlags {
+		if flag == name {
+			return true
+		}
+	}
+	return false
+}
+
+// hasRowFlag reports one of the row options names among the words, before
+// "--": the word itself, its --name=value form, its GNU abbreviation, or a
+// letter of a short cluster (up to the first letter that takes a value).
+func hasRowFlag(words []Word, p Program, names []string) bool {
+	if len(names) == 0 {
+		return false
+	}
+	for _, wd := range words {
+		if !wd.Static || len(wd.Value) < 2 || wd.Value[0] != '-' {
+			continue
+		}
+		v := wd.Value
+		if v == "--" {
+			return false
+		}
+		if strings.HasPrefix(v, "--") {
+			if eq := strings.IndexByte(v, '='); eq > 0 {
+				v = v[:eq]
+			}
+			full, _, _ := flagResolve(p, v)
+			if hasName(names, full) {
+				return true
+			}
+			continue
+		}
+		for _, ch := range v[1:] {
+			f := "-" + string(ch)
+			if hasName(names, f) {
+				return true
+			}
+			if fl, ok := p.Flags[f]; ok && fl.Value {
+				break
+			}
+		}
+	}
+	return false
+}
+
+// textOperands reads a script or program value through the closed grammar its
+// row names (DESIGN D2): the files and commands the text names become operands
+// of the call (a sed w file is written, an r file read, an e command run; an
+// awk print redirect writes its file, a gawk /inet file is a connection), and
+// bad reports a value the grammar does not accept, so the call is
+// unaccounted. An awk program with a redirect stays unaccounted (the scan lists
+// only literal targets) but its literal writes are kept.
+func (w *walker) textOperands(kind TextKind, v Word) (ops []operand, bad bool) {
+	switch kind {
+	case TextSed:
+		if !v.Static || len(v.Value) > maxGrammarSource {
+			return nil, true
+		}
+		rd, ok := readSedScript(v.Value)
+		if !ok {
+			return nil, true
+		}
+		for _, f := range rd.writes {
+			if f == "/dev/stdout" || f == "/dev/stderr" {
+				continue // GNU sed writes these streams, not a file
+			}
+			ops = append(ops, operand{value: f, static: true, quoted: true, role: RoleWrite})
+		}
+		for _, f := range rd.reads {
+			ops = append(ops, operand{value: f, static: true, quoted: true, role: RoleRead})
+		}
+		// r / R put the file's bytes in the output, which the call does not
+		// track: the read is kept, the call is not fully known.
+		bad = len(rd.reads) > 0
+		for _, c := range rd.execs {
+			ops = append(ops, operand{value: c, static: true, role: RoleExecCode})
+		}
+		if rd.execDyn {
+			ops = append(ops, operand{role: RoleExecCode})
+		}
+		return ops, bad
+	case TextAwk:
+		if !v.Static || len(v.Value) > maxGrammarSource {
+			return nil, true
+		}
+		if awkProgramOK(v.Value) {
+			return nil, false
+		}
+		for _, o := range awkprog.Parse(v.Value).Outputs {
+			if hostPort, ok := awkInetTarget(o.Target); ok {
+				ops = append(ops, operand{value: hostPort, static: true, role: RoleURLUpload})
+				continue
+			}
+			role := RoleWrite
+			if o.Append {
+				role = RoleAppend
+			}
+			ops = append(ops, operand{value: o.Target, static: true, quoted: true, role: role})
+		}
+		return ops, true
+	}
+	return nil, textBad(kind, v)
+}
+
+// awkInetTarget reads a gawk special file /inet[46]/PROTO/LPORT/HOST/RPORT: a
+// print redirect into it is a network connection to HOST:RPORT, not a file
+// write (rel-1-0-10 GAP-1571). It returns the connection as a URL.
+func awkInetTarget(t string) (string, bool) {
+	parts := strings.Split(t, "/")
+	if len(parts) != 6 || parts[0] != "" || (parts[1] != "inet" && parts[1] != "inet4" && parts[1] != "inet6") {
+		return "", false
+	}
+	proto, host, port := parts[2], parts[4], parts[5]
+	if (proto != "tcp" && proto != "udp") || host == "" {
+		return "", false
+	}
+	return proto + "://" + host + ":" + port, true
+}
+
+// skipExtraValues steps over the n inert extra value words of a multi-value
+// flag starting at words[i]. Fewer than n words left: the program rejects the
+// call, so it is not accounted.
+func skipExtraValues(words []Word, i, n int, unknownFlag bool) (int, bool) {
+	if i+n > len(words) {
+		return len(words), true
+	}
+	return i + n, unknownFlag
 }
 
 // execPlaceholders marks the {} and stdin (-) operands of a find/xargs inner
@@ -2159,6 +2738,96 @@ func isFlagToken(name string, dialect Dialect) bool {
 	return false
 }
 
+// splitDynamicKeyValueOperand applies a table-valued key=value option when the value remains unresolved.
+func splitDynamicKeyValueOperand(wd Word, p Program, dialect Dialect) (string, Word, bool) {
+	name := dynamicLead(wd)
+	eq := strings.IndexByte(name, '=')
+	if eq <= 0 {
+		return "", Word{}, false
+	}
+	flag := name[:eq]
+	fl, ok := flagLookup(p, flag, dialect)
+	if !ok || !fl.Value {
+		return "", Word{}, false
+	}
+	value := attachedValueWord(name[eq+1:], wd)
+	value.Glob = wd.Glob
+	return flag, value, true
+}
+
+func attachedValueWord(value string, source Word) Word {
+	out := Word{Value: value, Static: source.Static, Quoted: source.Quoted}
+	if !source.Static {
+		out.Reason = ReasonDynamicExpansion
+		out.Tail = source.Tail // the literal after the unresolved part names the place
+	}
+	return out
+}
+
+// dynamicLead is the text a word starts with: its value when static, else the
+// literal segments before its first unresolved one (7z -o$env:X\y: "-o"). A
+// resolved word that did not resolve keeps its Segs but no Value (DET111 R1,
+// GAP-1663).
+func dynamicLead(wd Word) string {
+	if wd.Static || wd.Value != "" {
+		return wd.Value
+	}
+	var b strings.Builder
+	for _, s := range wd.Segs {
+		if s.Var != "" || s.Op != nil {
+			break
+		}
+		b.WriteString(s.Lit)
+	}
+	return b.String()
+}
+
+// splitDynamicAttachedFlag lets the table consume an attached option value whose
+// value still contains an unresolved expansion (for example 7z -o$env:USERPROFILE).
+// The frontend owns tokenization; this only separates a known table flag from its value.
+func splitDynamicAttachedFlag(wd Word, p Program, dialect Dialect) (string, Word, bool) {
+	name := dynamicLead(wd)
+	if flag, value, has := splitInlineFlagValue(name, dialect); has {
+		if fl, ok := flagLookup(p, flag, dialect); ok && fl.Value {
+			return flag, attachedValueWord(value, wd), true
+		}
+	}
+	best := ""
+	for flag, fl := range p.Flags {
+		// A word whose whole literal lead is the flag still has a value: the
+		// unresolved part after it (-o$env:X).
+		if !fl.Value || len(flag) < 2 || !strings.HasPrefix(name, flag) || len(name) == len(flag) && wd.Static {
+			continue
+		}
+		if flag[0] != '-' || strings.HasPrefix(flag, "--") || dialect != DialectPOSIX && len(flag) != 2 {
+			continue
+		}
+		if len(flag) > len(best) {
+			best = flag
+		}
+	}
+	if best == "" {
+		return "", Word{}, false
+	}
+	return best, attachedValueWord(name[len(best):], wd), true
+}
+
+// splitAttachedNativeValue consumes -xVALUE for a one-letter table option in
+// CMD/PowerShell native argument grammars. POSIX short clusters stay with
+// splitShortFlags so their left-to-right value and unknown-flag rules apply.
+func splitAttachedNativeValue(name string, p Program, dialect Dialect) (string, Word, bool) {
+	if dialect == DialectPOSIX || (dialect != DialectCMD && dialect != DialectPowerShell) ||
+		len(name) <= 2 || name[0] != '-' || strings.HasPrefix(name, "--") {
+		return "", Word{}, false
+	}
+	for flag, fl := range p.Flags {
+		if len(flag) == 2 && flag[0] == '-' && fl.Value && strings.EqualFold(name[:2], flag) {
+			return flag, Word{Value: name[2:], Static: true}, true
+		}
+	}
+	return "", Word{}, false
+}
+
 // splitInlineFlagValue splits --flag=value and PowerShell -Name:value.
 func splitInlineFlagValue(name string, dialect Dialect) (flag, value string, has bool) {
 	if eq := strings.IndexByte(name, '='); eq >= 0 {
@@ -2175,17 +2844,30 @@ func splitInlineFlagValue(name string, dialect Dialect) (flag, value string, has
 // splitShortFlags expands a combined POSIX short-flag token (-xzf, -sSLo). A
 // known value-taking short flag binds the rest of the token or the next arg;
 // unknown single chars are harmless mode flags (no strict taint).
-func (w *walker) splitShortFlags(name string, words []Word, i *int, p Program, out *[]operand, inPlace *bool, destDir *string) (consumed bool, unknownFlag bool) {
+func (w *walker) splitShortFlags(name string, words []Word, i *int, p Program, out *[]operand, inPlace *bool, inPlaceSuffix *string, destDir *string) (consumed bool, unknownFlag bool) {
 	body := name[1:]
 	for j := 0; j < len(body); j++ {
 		fn := "-" + string(body[j])
-		if fn == p.InPlace {
+		if isInPlaceFlag(p, fn) {
 			*inPlace = true
 		}
 		fl, ok := flagLookup(p, fn, DialectPOSIX)
 		if !ok {
 			unknownFlag = true // an unlisted short flag -> not fully modeled (round 3)
 			continue
+		}
+		if fl.Optional {
+			// -iSUFFIX: the rest of the token is the optional value, never the
+			// next word and never more flags (sed -ie is -i with suffix "e").
+			if rest := body[j+1:]; rest != "" {
+				if fn == p.InPlace {
+					*inPlaceSuffix = rest
+				} else {
+					unknownFlag = true
+				}
+			}
+			*i++
+			return true, unknownFlag
 		}
 		if fl.Role == RoleExecProgram {
 			rest := collectExecArgv(words[*i+1:])
@@ -2215,7 +2897,9 @@ func (w *walker) splitShortFlags(name string, words []Word, i *int, p Program, o
 				return true, true // a dynamic target directory is not accounted
 			}
 			if j+1 < len(body) {
-				if textBad(fl.Text, Word{Value: body[j+1:], Static: true}) {
+				tops, bad := w.textOperands(fl.Text, Word{Value: body[j+1:], Static: true})
+				*out = append(*out, tops...)
+				if bad {
 					unknownFlag = true
 				}
 				*out = append(*out, operandValue(fl, Word{Value: body[j+1:], Static: true}, p))
@@ -2223,7 +2907,9 @@ func (w *walker) splitShortFlags(name string, words []Word, i *int, p Program, o
 				return true, unknownFlag
 			}
 			if *i+1 < len(words) {
-				if textBad(fl.Text, words[*i+1]) {
+				tops, bad := w.textOperands(fl.Text, words[*i+1])
+				*out = append(*out, tops...)
+				if bad {
 					unknownFlag = true
 				}
 				*out = append(*out, operandValue(fl, words[*i+1], p))
@@ -2237,7 +2923,7 @@ func (w *walker) splitShortFlags(name string, words []Word, i *int, p Program, o
 }
 
 func operandValue(fl Flag, v Word, p Program) operand {
-	op := operand{value: v.Value, static: v.Static, quoted: v.Quoted, glob: v.Glob, role: fl.Role}
+	op := operand{value: v.Value, static: v.Static, quoted: v.Quoted, glob: v.Glob, role: fl.Role, subtree: fl.Subtree, tail: v.Tail}
 	if fl.Role == RoleUploadFile {
 		// -T / --upload-file / --post-file / -InFile: the value is always a local
 		// file (or "-" for stdin); it is never inline literal data.
@@ -2274,13 +2960,18 @@ func operandValue(fl Flag, v Word, p Program) operand {
 type posCtx struct {
 	unknownFlag bool
 	inPlace     bool
-	del         bool
-	hasExpr     bool
-	destDir     string
-	appendMode  bool // tee -a: the file operands are appended to, not rewritten
-	words       []Word
-	upload      bool // bitsadmin /upload: the local file is read and sent
-	program     string
+	// inPlaceSuffix is the sed backup suffix: each file is also written at
+	// FILE+suffix (GAP-0216). Empty: no backup.
+	inPlaceSuffix string
+	del           bool
+	findName      string
+	findOpaque    bool
+	hasExpr       bool
+	destDir       string
+	appendMode    bool // tee -a: the file operands are appended to, not rewritten
+	words         []Word
+	upload        bool // bitsadmin /upload: the local file is read and sent
+	program       string
 }
 
 func (w *walker) positionalOperands(ps []Word, p Program, ctx posCtx) []operand {
@@ -2290,7 +2981,7 @@ func (w *walker) positionalOperands(ps []Word, p Program, ctx posCtx) []operand 
 	taint := ctx.unknownFlag
 	mk := func(wd Word, role Role) operand {
 		return operand{value: wd.Value, static: wd.Static, quoted: wd.Quoted,
-			glob: wd.Glob || (p.Pattern && !wd.Quoted), role: role, pattern: p.Pattern}
+			glob: wd.Glob || (p.Pattern && !wd.Quoted), role: role, pattern: p.Pattern, tail: wd.Tail}
 	}
 	if p.FirstPosIgnore && !ctx.hasExpr && len(ps) > 0 {
 		ps = ps[1:] // sed script / grep pattern is not a path (only when no -e/-f gave it)
@@ -2302,10 +2993,28 @@ func (w *walker) positionalOperands(ps []Word, p Program, ctx posCtx) []operand 
 		if ctx.inPlace {
 			role = RoleWrite
 		}
+		// find defaults its search root to the current directory. Preserve that
+		// root for -delete too: a nested shell may cd before running a rootless
+		// find, whose predicate can then delete matching descendants anywhere
+		// under the resulting cwd.
+		if len(ps) == 0 && p.DeleteFlag != "" && ctx.del {
+			ps = []Word{{Value: ".", Static: true}}
+		}
 		for _, wd := range ps {
 			out = append(out, mk(wd, role))
-			if ctx.del { // find -delete: the roots are also deleted
-				out = append(out, mk(wd, RoleDelete))
+			if ctx.inPlace && ctx.inPlaceSuffix != "" {
+				bk := wd
+				if bk.Static {
+					bk.Value += ctx.inPlaceSuffix
+				}
+				out = append(out, mk(bk, RoleWrite)) // the backup copy
+			}
+			if ctx.del { // find -delete: the roots and the files below them are deleted
+				d := mk(wd, RoleDelete)
+				d.subtree = true
+				d.findName = ctx.findName
+				d.findFiltered = ctx.findOpaque || ctx.findName != ""
+				out = append(out, d)
 			}
 		}
 	case PosInOut:
@@ -2415,7 +3124,37 @@ func (w *walker) positionalOperands(ps []Word, p Program, ctx posCtx) []operand 
 		}
 	case PosFirstWrite:
 		if len(ps) > 0 {
-			out = append(out, mk(ps[0], RoleWrite))
+			role := RoleWrite
+			if p.AppendFlag != "" && ctx.appendMode {
+				role = RoleAppend
+			}
+			out = append(out, mk(ps[0], role))
+		}
+	case PosArchive:
+		// 7z command ARCHIVE [MEMBER...]. Extraction/list/test read the archive;
+		// add/update/delete mutate it. Member selectors are not filesystem paths.
+		if len(ps) >= 2 {
+			mode := strings.ToLower(ps[0].Value)
+			out = append(out, mk(ps[0], RoleIgnore))
+			switch mode {
+			case "x", "e", "l", "t", "test":
+				out = append(out, mk(ps[1], RoleRead))
+			case "a", "u":
+				out = append(out, mk(ps[1], RoleWrite))
+				for _, wd := range ps[2:] {
+					out = append(out, mk(wd, RoleRead))
+				}
+			case "d":
+				out = append(out, mk(ps[1], RoleWrite))
+			default:
+				op := mk(ps[1], RoleWrite)
+				op.roleUncertain = true
+				out = append(out, op)
+			}
+		} else if len(ps) == 1 {
+			op := mk(ps[0], RoleWrite)
+			op.roleUncertain = true
+			out = append(out, op)
 		}
 	case PosZip:
 		// zip ARCHIVE FILE...: the first operand is the archive it writes (zip adds
@@ -2588,6 +3327,11 @@ func (w *walker) effectForOperand(op operand, p Program, origin Origin, cond, fo
 	}
 	if !op.static {
 		e.Target.Type = TargetPath
+		e.Target.Subtree = op.subtree
+		e.Target.Spelling = dynamicSpelling(op.tail)
+		if e.Target.Spelling == "" {
+			e.Target.Spelling = cap4k(op.value)
+		}
 		e.addReason(ReasonDynamicExpansion, ScopeTarget)
 		return e
 	}
@@ -2598,6 +3342,7 @@ func (w *walker) effectForOperand(op operand, p Program, origin Origin, cond, fo
 		(dialect == DialectPowerShell && looksGlob(op.value)) {
 		e.Target.Type = TargetPath
 		e.Target.Glob = cap4k(op.value)
+		e.Target.Lexical = cap4k(lexicalCandidate(op.value, w.opts()))
 		e.addReason(ReasonGlob, ScopeTarget)
 		return e
 	}
@@ -2606,13 +3351,31 @@ func (w *walker) effectForOperand(op operand, p Program, origin Origin, cond, fo
 	e.Target.Spelling = cap4k(op.value)
 	if abs, ok, reason := placePath(op.value, w.opts()); ok {
 		e.Target.Path = abs
-		if tgt, ok := w.links[e.Target.Key()]; ok {
-			e.Target.Physical = tgt
+		e.Target.Physical = w.callLinkPhysical(e.Target)
+		if op.findFiltered {
+			// find deletes only the files below the root its predicates select:
+			// the -name pattern at any depth, or any file for a predicate the
+			// walk does not read as a pattern. The classifier intersects it with
+			// the protected sets; the root's own delete stays as before.
+			name := op.findName
+			if name == "" || op.findOpaqueName() {
+				name = "*"
+			}
+			// A root that is a link this call created walks the link's
+			// target (rel-1-0-10:GAP-1573c): join the pattern there.
+			root := abs
+			if e.Target.Physical != "" {
+				root = e.Target.Physical
+			}
+			e.Target.Lexical = cap4k(joinPattern(root, name, w.o.flavor()))
 		}
 		if w.onAliasedDrive(abs) {
 			e.addReason(ReasonNonCanonicalPath, ScopeTarget)
 		}
 	} else {
+		if reason == ReasonNonCanonicalPath {
+			e.Target.Lexical = cap4k(lexicalCandidate(e.Target.Spelling, w.opts()))
+		}
 		e.addReason(reason, ScopeTarget)
 	}
 	// a destination that may be a directory: the real target is dir/basename,
@@ -2796,7 +3559,11 @@ func (w *walker) handleRedirs(c *Cmd, dialect Dialect, cmdNo, depth int, cond bo
 					// echo/printf with static arguments: the write lays down this
 					// literal (s7-flow GAP-0130).
 					if e.Data == nil {
-						e.Data = &Data{Kind: DataLiteral}
+						kind := DataLiteral
+						if w.literalKind != "" {
+							kind = w.literalKind
+						}
+						e.Data = &Data{Kind: kind}
 					}
 					e.Data.Text, e.Data.Bytes = w.literalOut, len(w.literalOut)
 				case c.PipeIn && w.stageIn.literal != "":
@@ -2813,6 +3580,9 @@ func (w *walker) handleRedirs(c *Cmd, dialect Dialect, cmdNo, depth int, cond bo
 				if k := e.Target.Key(); k != "" {
 					w.writeByKey[k] = idx
 				}
+				if stdout && w.exactOK && r.Op != RedirAppend && len(w.exactText) <= maxDataText {
+					w.noteFileBody(e, w.exactText)
+				}
 				if stdout {
 					w.redirOut = append(w.redirOut, idx)
 				}
@@ -2826,6 +3596,9 @@ func (w *walker) handleRedirs(c *Cmd, dialect Dialect, cmdNo, depth int, cond bo
 				})
 			}
 		case RedirRead:
+			if r.Target.ProcSub != nil {
+				continue // `< <(...)`: the pipe of a process substitution, walked as nested
+			}
 			e := Effect{Kind: KindRead, Cond: cond, RoleState: RoleStateKnown, TargetState: TargetStateKnown,
 				Target: Target{Type: TargetPath, Flavor: w.o.flavor(), Link: LinkNotChecked, CaseFold: w.o.CaseInsensitive},
 				Origin: Origin{Surface: w.res.Surface, Dialect: dialect, Command: cmdNo, Depth: depth, Span: c.Span}}
@@ -2848,6 +3621,7 @@ func (w *walker) handleRedirs(c *Cmd, dialect Dialect, cmdNo, depth int, cond bo
 
 func (w *walker) fillRedirTarget(e *Effect, t Word) {
 	if !t.Static {
+		e.Target.Spelling = dynamicSpelling(t.Tail)
 		e.addReason(ReasonDynamicExpansion, ScopeTarget)
 		return
 	}
@@ -2866,19 +3640,21 @@ func (w *walker) fillRedirTarget(e *Effect, t Word) {
 	}
 	if t.Glob {
 		e.Target.Glob = cap4k(t.Value)
+		e.Target.Lexical = cap4k(lexicalCandidate(t.Value, w.opts()))
 		e.addReason(ReasonGlob, ScopeTarget)
 		return
 	}
 	e.Target.Spelling = cap4k(t.Value)
 	if abs, ok, reason := placePath(t.Value, w.opts()); ok {
 		e.Target.Path = abs
-		if tgt, ok := w.links[e.Target.Key()]; ok {
-			e.Target.Physical = tgt
-		}
+		e.Target.Physical = w.callLinkPhysical(e.Target)
 		if w.onAliasedDrive(abs) {
 			e.addReason(ReasonNonCanonicalPath, ScopeTarget)
 		}
 	} else {
+		if reason == ReasonNonCanonicalPath {
+			e.Target.Lexical = cap4k(lexicalCandidate(e.Target.Spelling, w.opts()))
+		}
 		e.addReason(reason, ScopeTarget)
 	}
 }
@@ -2911,9 +3687,11 @@ func (w *walker) unwrapCode(code string, static bool, dialect Dialect, depth int
 // cd/env changes persist (review R3-6 C08).
 func (w *walker) unwrapCodeScoped(code string, static bool, dialect Dialect, depth int, cond bool, origin Origin, childScope bool) {
 	if !static {
+		w.positional, w.positionalSet = nil, false
 		return
 	}
 	if depth+1 > maxNestedDepth {
+		w.positional, w.positionalSet = nil, false
 		w.res.addUnknown(ReasonNestingLimit)
 		return
 	}
@@ -2930,6 +3708,24 @@ func (w *walker) unwrapCodeScoped(code string, static bool, dialect Dialect, dep
 	default:
 		sub = parsePOSIX(code, w.o)
 	}
+	if hasUnknown(sub, ReasonInvalidSyntax) {
+		// A body the shell cannot parse runs nothing from the error on (watch's
+		// joined words, GAP-0662/var6 ruling), but the walk does not know what
+		// the program makes of it: one opaque exec carries the unread text
+		// (R-CODE), never an invented reading. The lines before the error are
+		// lowered as usual (parsePOSIX).
+		unread := code
+		if sub.Unread != "" {
+			unread = sub.Unread
+		}
+		e := Effect{Kind: KindExec, Cond: cond, TargetState: TargetStateUnknown, RoleState: RoleStateUnknown,
+			Target: Target{Type: TargetProcess, Link: LinkNotChecked}, Origin: origin,
+			Data: &Data{Kind: DataCode, Bytes: len(unread), Text: cap8k(unread)}}
+		e.Origin.Depth = depth + 1
+		e.addReason(ReasonInvalidSyntax, ScopeTarget)
+		e.addReason(ReasonOpaqueCode, ScopeTarget)
+		w.emit(e)
+	}
 	// Nested code has a concrete dialect, so place its leading-/ paths by it: a
 	// POSIX body under cmd/PowerShell (bash -c '... /etc/x') is virtual-rooted
 	// (review 6 #1).
@@ -2937,18 +3733,75 @@ func (w *walker) unwrapCodeScoped(code string, static bool, dialect Dialect, dep
 	w.pathDialect = dialect
 	defer func() { w.pathDialect = savedPD }()
 	if !childScope {
+		w.positional, w.positionalSet = nil, false
 		w.walkScript(sub, depth+1)
 		return
 	}
 	s := w.saveScope()
 	env, exp, home := w.childEnvironment(dialect)
+	remote := remoteOrigin(origin)
+	if remote {
+		// ssh HOST CMD...: the login shell of another host runs the body. Its
+		// environment, home and folder are that host's, none of them ours; the
+		// body is still read, and each effect is placed on that host.
+		env, exp, home = map[string]string{}, map[string]bool{}, ""
+		w.setCWDDynamic()
+		w.remote++
+	}
 	w.env, w.exported = env, exp
 	w.varsOwned = true
-	if dialect == DialectPOSIX {
+	w.bindPositional()
+	if dialect == DialectPOSIX || remote {
 		w.curHome = home
 	}
 	w.walkScript(sub, depth+1)
+	if remote {
+		w.remote--
+	}
 	w.restoreScope(s)
+}
+
+// remoteOrigin reports that origin's command was started by a wrapper that
+// runs its joined words as shell text on another host (ssh).
+func remoteOrigin(o Origin) bool {
+	for _, n := range o.Wrappers {
+		if r, ok := wrapperTable[n]; ok && r.kind == wrapForeign && r.joinShell {
+			return true
+		}
+	}
+	return false
+}
+
+// remoteTarget places an effect of a remote-host body on that host (GAP-0662
+// ruling: ssh runs its body on a remote host). The host may be this one (ssh
+// localhost), so the effect is still graded, but nothing of the local file
+// system names it: a placed path keeps only its spelling behind an unknown
+// root ("$?/home/u/.ssh/authorized_keys"), which the protected-set
+// classifier reads by name (Maybe, R-NAME), never as a known local member.
+func remoteTarget(e *Effect) {
+	e.addReason(ReasonForeignContext, ScopeTarget)
+	t := &e.Target
+	if t.Type != TargetPath || t.Path == "" {
+		return
+	}
+	p := t.Path
+	if !strings.HasPrefix(p, "/") && !strings.HasPrefix(p, `\`) {
+		p = "/" + p
+	}
+	t.Spelling = cap4k("$?" + p)
+	t.Path, t.Physical, t.Lexical = "", "", ""
+}
+
+// tildeTail is the Word.Tail of a leading tilde the walker cannot expand (no
+// known home, or another account's): the literal path after the tilde
+// prefix, so the classifier can still read a protected name in it
+// (~/.ssh/authorized_keys under an unknown home).
+func tildeTail(lit string, rest []WordSeg) string {
+	i := strings.IndexAny(lit, `/\`)
+	if i < 0 {
+		return segTail(rest)
+	}
+	return segTail(append([]WordSeg{{Lit: lit[i:]}}, rest...))
 }
 
 // childEnvironment is the environment a child shell starts with: what the
@@ -3005,10 +3858,12 @@ func (w *walker) childEnvironment(childDialect Dialect) (env map[string]string, 
 
 func (w *walker) recordLink(op operand, ops []operand) {
 	var linkPath, targetSpelling string
+	maybeDir := false
 	for _, o2 := range ops {
 		if o2.role == RoleLink && o2.static {
 			if abs, ok, _ := placePath(o2.value, w.opts()); ok {
 				linkPath = abs
+				maybeDir = o2.destMaybeDir
 			}
 		}
 		if o2.role == RoleLinkTarget && o2.static {
@@ -3029,6 +3884,47 @@ func (w *walker) recordLink(op operand, ops []operand) {
 	}
 	t := Target{Path: linkPath, Flavor: w.o.flavor(), CaseFold: w.o.CaseInsensitive}
 	w.links[t.Key()] = targetAbs
+	if maybeDir {
+		// ln -s T d where d is an existing folder puts the link at
+		// d/basename(T); a later d/<name>/... may walk T (GAP-1573c).
+		t.Path = joinDir(linkPath, baseName2(targetSpelling))
+		w.links[t.Key()] = targetAbs
+	}
+}
+
+// callLinkPhysical is where a target lands when it is, or lies below, a link
+// an earlier command of this call created (ln -s T d; ... d/x): the longest
+// recorded link prefix, joined with the rest of the path. Empty when no in-call
+// link covers it. The link does not exist on disk at hook time, so the
+// classifier grades such a target maybe, never known (DET111 F1).
+func (w *walker) callLinkPhysical(t Target) string {
+	if len(w.links) == 0 {
+		return ""
+	}
+	key := t.Key()
+	if tgt, ok := w.links[key]; ok {
+		return tgt
+	}
+	if len(key) != len(t.Path) {
+		return "" // a case fold changed the byte length: no prefix split
+	}
+	sep := "/"
+	if t.Flavor == FlavorWindows {
+		sep = `\`
+	}
+	for i := len(key) - 1; i > 0; i-- {
+		if key[i] != sep[0] {
+			continue
+		}
+		if tgt, ok := w.links[key[:i]]; ok {
+			rest := t.Path[i:]
+			if t.Flavor == FlavorWindows {
+				rest = strings.ReplaceAll(rest, "/", `\`)
+			}
+			return strings.TrimRight(tgt, `/\`) + rest
+		}
+	}
+	return ""
 }
 
 func parentDir(p string, flavor Flavor) string {
@@ -3144,6 +4040,7 @@ type scopeState struct {
 	varsOwned bool
 	execState bool
 	debugTrap bool
+	pwdOwn    bool
 }
 
 // saveScope returns the current state and installs private copies of the
@@ -3152,7 +4049,7 @@ type scopeState struct {
 func (w *walker) saveScope() scopeState {
 	s := scopeState{cwd: w.curCWD, home: w.curHome, alt: w.cwdAlt, stack: w.cwdStack, env: w.env,
 		exported: w.exported, chain: w.cdChain, narrowed: w.narrowed, narrowedOther: w.narrowedOther,
-		execState: w.execState, debugTrap: w.debugTrap}
+		execState: w.execState, debugTrap: w.debugTrap, pwdOwn: w.pwdOwn}
 	w.debugTrap = false // a subshell does not inherit a DEBUG trap
 	// The env and exported maps are shared with the saved state until the child
 	// first writes one (ownVars): most scopes (a command substitution, a pipeline
@@ -3182,6 +4079,7 @@ func (w *walker) restoreScope(s scopeState) {
 	w.varsOwned = s.varsOwned
 	w.execState = s.execState
 	w.debugTrap = s.debugTrap
+	w.pwdOwn = s.pwdOwn
 }
 
 func cloneBools(in map[string]bool) map[string]bool {
@@ -3205,8 +4103,12 @@ func (w *walker) unsetVar(name string) {
 		if w.curDialect == DialectPOSIX {
 			w.curHome = ""
 		}
+	case "PATH":
+		w.pathMaybeSet = true
 	case "CDPATH":
 		w.cdpathMaybeSet = true
+	case "PWD":
+		w.pwdOwn = true // unset or rebound: no longer the tracked folder
 	}
 }
 
@@ -3223,6 +4125,7 @@ func (w *walker) unbindReader(program string, inner []Word) (opaque bool) {
 			opaque = true
 			w.unsetVar("HOME")
 			w.unsetVar("CDPATH")
+			w.unsetVar("PATH") // a computed name may be PATH (GAP-0217)
 			return
 		}
 		w.unsetVar(wd.Value)
@@ -3268,6 +4171,7 @@ func (w *walker) unbindReader(program string, inner []Word) (opaque bool) {
 			} else if !wd.Static {
 				w.unsetVar("HOME")
 				w.unsetVar("CDPATH")
+				w.unsetVar("PATH") // a computed name may be PATH (GAP-0217)
 			}
 		}
 	case "printf":
@@ -3430,26 +4334,67 @@ func (w *walker) opaqueExec(origin Origin, cond bool) {
 func (w *walker) tarEffects(args []Word, origin Origin, cond bool, depth int) {
 	mode := byte(0) // 'c','x','t'
 	archive := ""
-	archivePending := false
 	cdir := ""
 	var files []Word
+	var lists []string // -T / --files-from: the members are named in these files
+	// pending are the value letters of an old-style bundle (`tar xfC a.tar dir`)
+	// still waiting for their word, in order.
+	var pending []byte
+	setValue := func(letter byte, val Word) {
+		v := val.Value
+		switch letter {
+		case 'f':
+			if val.Static {
+				archive = v
+			}
+		case 'C':
+			if val.Static {
+				cdir = v
+			}
+		case 'T':
+			if val.Static {
+				lists = append(lists, v)
+			} else {
+				lists = append(lists, "")
+			}
+		case 'I', 'F':
+			w.opaqueExec(origin, cond) // a compress program or a volume script is run
+		}
+	}
+	tarLongs := posixTable["tar"].Longs
 	for i := 0; i < len(args); i++ {
 		a := args[i]
+		if len(pending) > 0 {
+			setValue(pending[0], a)
+			pending = pending[1:]
+			continue
+		}
 		if !a.Static {
-			if archivePending {
-				archivePending = false
-			} else {
-				files = append(files, a)
-			}
+			files = append(files, a)
 			continue
 		}
 		v := a.Value
-		// Long options may carry their value inline as --name=value (review D A33).
+		// Long options may carry their value inline as --name=value (review D
+		// A33), and GNU tar (argp) takes an unambiguous prefix of any of its long
+		// options (--ext, --dir: rel-1-0-10 GAP-0661).
 		long, inlineVal, hasInline := v, "", false
 		if strings.HasPrefix(v, "--") {
 			if eq := strings.IndexByte(v, '='); eq >= 0 {
 				long, inlineVal, hasInline = v[:eq], v[eq+1:], true
 			}
+			if full, ok := resolveLong(long, tarLongs); ok {
+				long = full
+			}
+		}
+		longValue := func() Word {
+			if hasInline {
+				return Word{Value: inlineVal, Static: true}
+			}
+			if i+1 < len(args) {
+				i++
+				return args[i]
+			}
+			return Word{}
 		}
 		switch {
 		case long == "--extract" || long == "--get":
@@ -3461,32 +4406,27 @@ func (w *walker) tarEffects(args []Word, origin Origin, cond bool, depth int) {
 		case long == "--append" || long == "--update" || long == "--concatenate" || long == "--catenate" || long == "--delete":
 			mode = 'a' // the archive itself is rewritten
 		case v == "-C" || long == "--directory":
-			if hasInline {
-				cdir = inlineVal
-			} else if i+1 < len(args) && args[i+1].Static {
-				cdir = args[i+1].Value
-				i++
-			}
+			setValue('C', longValue())
 		case v == "-f" || long == "--file":
-			if hasInline {
-				archive = inlineVal
-			} else if i+1 < len(args) && args[i+1].Static {
-				archive = args[i+1].Value
-				i++
-			}
-		case v == "--to-command" || v == "--checkpoint-action":
+			setValue('f', longValue())
+		case v == "-T" || long == "--files-from":
+			setValue('T', longValue())
+		case long == "--to-command" || long == "--checkpoint-action" || long == "--use-compress-program" ||
+			long == "--info-script" || long == "--new-volume-script" || long == "--rsh-command" || long == "--rmt-command":
 			w.opaqueExec(origin, cond)
-			if i+1 < len(args) {
-				i++
-			}
+			longValue()
 		case strings.HasPrefix(v, "--"):
-			// unknown long option: ignore
-		case strings.HasPrefix(v, "-") || isTarModeBundle(v):
-			// a flag bundle like -xzf / xzf / czf: read the mode and whether -f
-			// takes the next token as the archive.
+			if tarValuedLongs[long] {
+				longValue() // the option's value is not a member
+			}
+		case strings.HasPrefix(v, "-") || (i == 0 && isTarModeBundle(v)):
+			// a flag bundle like -xzf / xzf / czf: the modes, and the letters that
+			// take a value: with a dash the rest of the word or the next word,
+			// old style (no dash) the next words in order.
+			dash := strings.HasPrefix(v, "-")
 			body := strings.TrimPrefix(v, "-")
 			for k := 0; k < len(body); k++ {
-				switch body[k] {
+				switch c := body[k]; c {
 				case 'c':
 					mode = 'c'
 				case 'x':
@@ -3495,13 +4435,23 @@ func (w *walker) tarEffects(args []Word, origin Origin, cond bool, depth int) {
 					mode = 't'
 				case 'r', 'u', 'A':
 					mode = 'a' // append / update / concatenate: the archive is rewritten
-				case 'f':
-					archivePending = true
+				default:
+					if strings.IndexByte(tarValueLetters, c) < 0 {
+						continue
+					}
+					if !dash {
+						pending = append(pending, c)
+						continue
+					}
+					if k+1 < len(body) {
+						setValue(c, Word{Value: body[k+1:], Static: true})
+					} else if i+1 < len(args) {
+						i++
+						setValue(c, args[i])
+					}
+					k = len(body)
 				}
 			}
-		case archivePending:
-			archive = v
-			archivePending = false
 		default:
 			files = append(files, a)
 		}
@@ -3523,10 +4473,18 @@ func (w *walker) tarEffects(args []Word, origin Origin, cond bool, depth int) {
 		}
 		w.emit(e)
 	}
+	for _, l := range lists {
+		if l != "" && l != "-" {
+			mk(KindRead, l, TargetStateKnown, "")
+		}
+	}
 	switch mode {
 	case 'c':
 		if archive != "" && archive != "-" {
 			mk(KindWrite, archive, TargetStateKnown, "")
+		}
+		if len(lists) > 0 {
+			mk(KindRead, "", TargetStateUnknown, ReasonOperandsFromInput) // the members the list names
 		}
 		for _, f := range files {
 			if f.Static {
@@ -3554,11 +4512,56 @@ func (w *walker) tarEffects(args []Word, origin Origin, cond bool, depth int) {
 			dest = "."
 		}
 		mk(KindWrite, dest, TargetStateUnknown, ReasonOpaqueArchive)
+		// A member the call names lands at dest/member when the archive holds
+		// it (DET111 R1, GAP-1173). tar strips a leading / and refuses .., so
+		// only a plain relative name is joined.
+		memberPathsKnown := true
+		for _, arg := range args {
+			if !arg.Static {
+				continue
+			}
+			name := arg.Value
+			if eq := strings.IndexByte(name, '='); eq >= 0 {
+				name = name[:eq]
+			}
+			if full, ok := resolveLong(name, tarLongs); ok {
+				name = full
+			}
+			if name == "--strip-components" || name == "--transform" || name == "--xform" {
+				memberPathsKnown = false
+			}
+		}
+		for _, f := range files {
+			if f.Static && f.Value != "" && !f.Glob && !looksGlob(f.Value) && !absoluteSpelling(f.Value, w.o.flavor()) &&
+				!strings.Contains("/"+strings.ReplaceAll(f.Value, `\`, "/")+"/", "/../") {
+				state, reason := TargetStateUnknown, ReasonOpaqueArchive
+				if memberPathsKnown {
+					state, reason = TargetStateKnown, ""
+				}
+				mk(KindWrite, joinDir(dest, f.Value), state, reason)
+			}
+		}
 	default: // list or unknown mode
 		if archive != "" && archive != "-" {
 			mk(KindRead, archive, TargetStateKnown, "")
 		}
 	}
+}
+
+// tarValueLetters are the GNU tar short options that take a value.
+const tarValueLetters = "fCTXbFgHIKLNV"
+
+// tarValuedLongs are the GNU tar long options whose value is required, so a
+// separate next word is the value, not a member.
+var tarValuedLongs = map[string]bool{
+	"--exclude": true, "--exclude-from": true, "--transform": true, "--xform": true, "--strip-components": true,
+	"--owner": true, "--group": true, "--mode": true, "--newer": true, "--newer-mtime": true, "--after-date": true,
+	"--label": true, "--suffix": true, "--format": true, "--blocking-factor": true, "--record-size": true,
+	"--tape-length": true, "--index-file": true, "--volno-file": true, "--listed-incremental": true, "--level": true,
+	"--warning": true, "--quoting-style": true, "--owner-map": true, "--group-map": true, "--mtime": true,
+	"--starting-file": true, "--exclude-tag": true, "--exclude-tag-all": true, "--exclude-tag-under": true,
+	"--checkpoint-action": true, "--to-command": true, "--use-compress-program": true, "--info-script": true,
+	"--new-volume-script": true, "--rsh-command": true, "--rmt-command": true,
 }
 
 func isTarModeBundle(v string) bool {
@@ -3570,7 +4573,7 @@ func isTarModeBundle(v string) bool {
 		switch v[i] {
 		case 'c', 'x', 't', 'r', 'u', 'A':
 			has = true
-		case 'f', 'z', 'j', 'v', 'J', 'a', 'p', 'h':
+		case 'f', 'z', 'j', 'v', 'J', 'a', 'p', 'h', 'C', 'T':
 		default:
 			return false
 		}
@@ -4045,6 +5048,9 @@ func tarHasUnknownFlag(args []Word) bool {
 			if eq := strings.IndexByte(v, '='); eq >= 0 {
 				k = v[:eq]
 			}
+			if full, ok := resolveLong(k, posixTable["tar"].Longs); ok {
+				k = full
+			}
 			if !known[k] {
 				return true
 			}
@@ -4362,6 +5368,8 @@ func isCDName(p string) bool {
 // an alias for cd redirects it.
 func (w *walker) noteShellOptions(program string, args []Word) {
 	switch program {
+	case "set":
+		w.allExportMaybe = w.allExportMaybe || setAllExport(args)
 	case "enable":
 		for _, a := range args {
 			if !a.Static || a.Value == "cd" || a.Value == "pushd" || a.Value == "popd" || a.Value == "-n" {
@@ -4392,6 +5400,8 @@ func (w *walker) noteShellOptions(program string, args []Word) {
 				w.execfailMaybe = true
 			case "extdebug":
 				w.extdebugMaybe = true
+			case "lastpipe":
+				w.lastpipe = on
 			}
 			if a.Value == "-s" || a.Value == "-o" {
 				on = true
@@ -4410,6 +5420,38 @@ func (w *walker) noteShellOptions(program string, args []Word) {
 			}
 		}
 	}
+}
+
+// setAllExport reports set arguments that may turn on allexport: -a in an
+// option cluster, -o allexport, or a dynamic word (GAP-0217).
+func setAllExport(args []Word) bool {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if !a.Static {
+			return true
+		}
+		v := a.Value
+		if v == "--" || v == "-" || len(v) < 2 || (v[0] != '-' && v[0] != '+') {
+			return false
+		}
+		if v[0] == '+' {
+			if strings.ContainsRune(v[1:], 'o') {
+				i++ // +o NAME turns NAME off
+			}
+			continue
+		}
+		if strings.ContainsRune(v[1:], 'a') {
+			return true
+		}
+		if strings.ContainsRune(v[1:], 'o') {
+			// -o NAME, also in a cluster (-eo NAME): NAME is the next word.
+			i++
+			if i < len(args) && (!args[i].Static || args[i].Value == "allexport") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // isDeclBuiltin reports a builtin that assigns variables by name when it is
@@ -4461,6 +5503,7 @@ func (w *walker) declWords(program string, args []Word) (ok, opaque bool) {
 			ok = false
 			w.unsetVar("HOME")
 			w.unsetVar("CDPATH")
+			w.unsetVar("PATH") // a computed name may be PATH (GAP-0217)
 			continue
 		}
 		name, val, hasVal := a.Value, "", false
@@ -4472,6 +5515,7 @@ func (w *walker) declWords(program string, args []Word) (ok, opaque bool) {
 			ok, opaque = false, true
 			w.unsetVar("HOME")
 			w.unsetVar("CDPATH")
+			w.unsetVar("PATH") // a computed name may be PATH (GAP-0217)
 			continue
 		}
 		w.ownVars()
@@ -4484,6 +5528,9 @@ func (w *walker) declWords(program string, args []Word) (ok, opaque bool) {
 		if name == "CDPATH" {
 			w.cdpathMaybeSet = true
 		}
+		if name == "PATH" {
+			w.pathMaybeSet = true
+		}
 		if nameref {
 			w.noteNameRef()
 		}
@@ -4492,12 +5539,18 @@ func (w *walker) declWords(program string, args []Word) (ok, opaque bool) {
 		}
 		if attr || nameref || w.namerefSeen {
 			delete(w.env, name) // the stored value is transformed or aliased
+			if name == "PWD" {
+				w.pwdOwn = true
+			}
 			if name == "HOME" && w.curDialect == DialectPOSIX {
 				w.curHome = ""
 			}
 			continue
 		}
 		w.env[name] = val
+		if name == "PWD" {
+			w.pwdOwn = true
+		}
 		if name == "HOME" && w.curDialect == DialectPOSIX {
 			w.curHome = w.placeHomeValue(val)
 		}
@@ -4510,6 +5563,14 @@ func (w *walker) declWords(program string, args []Word) (ok, opaque bool) {
 func (w *walker) hostPayload(c *Cmd, dialect Dialect, depth int, cond bool, origin Origin) {
 	if c.Host.Opaque {
 		w.opaqueExec(origin, cond)
+		if c.Host.Maybe != "" {
+			if c.Host.MaybeCWD != "" {
+				saved := w.cwdNow()
+				w.setCWDState(w.placeCDTarget(c.Host.MaybeCWD, saved))
+				defer w.setCWDState(saved)
+			}
+			w.unwrapUncertain(c.Host.Maybe, c.Host.Dialect, depth, origin, nil, true)
+		}
 		return
 	}
 	w.unwrapCode(c.Host.Text, true, c.Host.Dialect, depth, cond, origin)
@@ -4523,6 +5584,7 @@ func (w *walker) noteNameRef() {
 		w.curHome = ""
 	}
 	w.cdpathMaybeSet = true
+	w.pathMaybeSet = true // a nameref may alias PATH (GAP-0217)
 }
 
 // persistentPrefixBuiltins are the builtins whose prefix assignment is not
@@ -4560,7 +5622,154 @@ func (w *walker) makeUncertain(name string) {
 		if w.curDialect == DialectPOSIX {
 			w.curHome = ""
 		}
+	case "PATH":
+		w.pathMaybeSet = true
 	case "CDPATH":
 		w.cdpathMaybeSet = true
+	case "PWD":
+		w.pwdOwn = true
 	}
+}
+
+// findPredicate reads one find predicate before -delete: -name/-iname with a
+// static pattern is kept as the one name pattern; the predicates that select
+// every file (type, traversal and output options) are ignored; any other
+// predicate, or a second name, makes the selection opaque.
+func findPredicate(fname string, words []Word, i int, name string, opaque bool) (string, bool) {
+	switch fname {
+	case "-type", "-xtype", "-xdev", "-mount", "-depth", "-print", "-print0", "-noleaf",
+		"-ignore_readdir_race", "-noignore_readdir_race", "-warn", "-nowarn", "-follow", "-H", "-L", "-P", "-a", "-and":
+		return name, opaque
+	case "-name", "-iname":
+		if name != "" || i+1 >= len(words) || !words[i+1].Static {
+			return name, true
+		}
+		v := words[i+1].Value
+		if fname == "-iname" {
+			v = strings.ToLower(v)
+		}
+		return v, opaque
+	}
+	return name, true
+}
+
+// findOpaqueName reports a -name pattern that cannot be one path component
+// (a / in it never matches a base name, so the pattern selects nothing; keep
+// it opaque rather than reason about it).
+func (op operand) findOpaqueName() bool {
+	return strings.ContainsAny(op.findName, `/\`)
+}
+
+// joinPattern is root/**/name in the flavor's separator.
+func joinPattern(root, name string, flavor Flavor) string {
+	sep := "/"
+	if flavor == FlavorWindows {
+		sep = `\`
+	}
+	return strings.TrimRight(root, `/\`) + sep + "**" + sep + name
+}
+
+// dynamicSpelling is the Spelling of a target whose word is not static: "$?"
+// and the literal path tail after the last dynamic part, so the classifier can
+// read a protected name in it (R-NAME); empty when the tail is no path step.
+func dynamicSpelling(tail string) string {
+	if !strings.HasPrefix(tail, "/") && !strings.HasPrefix(tail, `\`) || len(tail) < 2 {
+		return ""
+	}
+	return cap4k("$?" + tail)
+}
+
+// applyParamOp applies a parameter operator with static operands to a value.
+// Pattern removal matches the shell way (* and ? match any character, / too);
+// a pattern the matcher cannot read is not applied (ok false).
+func applyParamOp(v string, op *ParamOp) (string, bool) {
+	switch op.Kind {
+	case "#", "##":
+		best := -1
+		for i := 0; i <= len(v); i++ {
+			if m, ok := shellPatternMatch(op.Pat, v[:i]); !ok {
+				return "", false
+			} else if m {
+				best = i
+				if op.Kind == "#" {
+					break
+				}
+			}
+		}
+		if best < 0 {
+			return v, true
+		}
+		return v[best:], true
+	case "%", "%%":
+		best := -1
+		for i := len(v); i >= 0; i-- {
+			if m, ok := shellPatternMatch(op.Pat, v[i:]); !ok {
+				return "", false
+			} else if m {
+				best = i
+				if op.Kind == "%" {
+					break
+				}
+			}
+		}
+		if best < 0 {
+			return v, true
+		}
+		return v[:best], true
+	case "/":
+		return strings.Replace(v, op.Pat, op.With, 1), true
+	case "//":
+		return strings.ReplaceAll(v, op.Pat, op.With), true
+	case ":":
+		if op.Off > len(v) {
+			return "", true
+		}
+		r := v[op.Off:]
+		if op.HasLen && op.Len < len(r) {
+			r = r[:op.Len]
+		}
+		return r, true
+	}
+	return "", false
+}
+
+// shellPatternMatch matches a shell pattern of a parameter operator, where *
+// and ? also match /. Bracket expressions and escapes are not read (ok false).
+func shellPatternMatch(pat, s string) (match, ok bool) {
+	if strings.ContainsAny(pat, `[\`) {
+		return false, false
+	}
+	const sep = "\x00"
+	if strings.Contains(s, sep) {
+		return false, false
+	}
+	m, err := path.Match(strings.ReplaceAll(pat, "/", sep), strings.ReplaceAll(s, "/", sep))
+	if err != nil {
+		return false, false
+	}
+	return m, true
+}
+
+// segTail is the literal text of the segments after a dynamic one, when they
+// are all literals (the Word.Tail of a word the walker could not resolve).
+func segTail(segs []WordSeg) string {
+	var b strings.Builder
+	for _, s := range segs {
+		if s.Var != "" || s.Subst != "" {
+			b.Reset()
+			continue
+		}
+		b.WriteString(s.Lit)
+	}
+	return b.String()
+}
+
+// hasUnknown reports an unknown node of the given reason in a parsed script.
+func hasUnknown(s *Script, r ReasonCode) bool {
+	for _, u := range s.Unknowns {
+		if u.Reason == r {
+			return true
+		}
+	}
+	return false
 }

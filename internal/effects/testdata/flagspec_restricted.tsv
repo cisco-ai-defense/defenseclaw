@@ -15,6 +15,10 @@
 # TestRestrictedFlagSpecMatchesTables reads THIS file: a flag added to a table row
 # without a reviewed line here fails the build, and so does a line with no flag.
 #
+# arity: 0 = switch, 1 = takes a value, opt = a switch with an optional value
+# attached to its own token only (--backup[=CONTROL]). TestFlagSpecRunOracle and
+# TestFlagSpecHelpOracle check the gnu rows against coreutils (GAP-0216).
+#
 # program<TAB>platform<TAB>flag<TAB>arity<TAB>effect   (effect: inert | output | link)
 cp	gnu	-t	1	output
 cp	gnu	--target-directory	1	output
@@ -39,14 +43,14 @@ cp	gnu	-b	0	inert
 cp	gnu	-T	0	inert
 cp	gnu	--recursive	0	inert
 cp	gnu	--force	0	inert
-cp	gnu	--preserve	0	inert
+cp	gnu	--preserve	opt	inert
 cp	gnu	--no-clobber	0	inert
 cp	gnu	--archive	0	inert
 cp	gnu	--parents	0	inert
 cp	gnu	--no-dereference	0	inert
 cp	gnu	--dereference	0	inert
 cp	gnu	--verbose	0	inert
-cp	gnu	--update	0	inert
+cp	gnu	--update	opt	inert
 cp	gnu	--symbolic-link	0	inert
 cp	gnu	--link	0	inert
 cp	gnu	--interactive	0	inert
@@ -61,6 +65,8 @@ install	gnu	-v	0	inert
 install	gnu	-p	0	inert
 install	gnu	-b	0	inert
 install	gnu	-T	0	inert
+install	gnu	-C	0	inert
+install	gnu	--no-target-directory	0	inert
 install	gnu	-D	0	inert
 install	gnu	--verbose	0	inert
 mv	gnu	-t	1	output
@@ -76,8 +82,8 @@ mv	gnu	-T	0	inert
 mv	gnu	--force	0	inert
 mv	gnu	--no-clobber	0	inert
 mv	gnu	--verbose	0	inert
-mv	gnu	--update	0	inert
-mv	gnu	--backup	0	inert
+mv	gnu	--update	opt	inert
+mv	gnu	--backup	opt	inert
 mv	gnu	--interactive	0	inert
 ln	gnu	-t	1	link
 ln	gnu	-S	1	inert
@@ -107,10 +113,10 @@ rm	gnu	-d	0	inert
 rm	gnu	--recursive	0	inert
 rm	gnu	--force	0	inert
 rm	gnu	--verbose	0	inert
-rm	gnu	--preserve-root	0	inert
+rm	gnu	--preserve-root	opt	inert
 rm	gnu	--no-preserve-root	0	inert
 rm	gnu	--one-file-system	0	inert
-rm	gnu	--interactive	0	inert
+rm	gnu	--interactive	opt	inert
 rm	gnu	--dir	0	inert
 shred	gnu	-n	1	inert
 shred	gnu	-s	1	inert
@@ -122,7 +128,7 @@ shred	gnu	-v	0	inert
 shred	gnu	-x	0	inert
 shred	gnu	-z	0	inert
 shred	gnu	--force	0	inert
-shred	gnu	--remove	0	inert
+shred	gnu	--remove	opt	inert
 shred	gnu	--verbose	0	inert
 shred	gnu	--exact	0	inert
 shred	gnu	--zero	0	inert
@@ -188,3 +194,12 @@ install	bsd	-U	0	inert
 install	bsd	-v	0	inert
 tee	bsd	-a	0	inert
 tee	bsd	-i	0	inert
+sed	bsd	-e	1	inert
+sed	bsd	-f	1	role:read
+sed	bsd	-i	1	inert
+sed	bsd	-I	1	inert
+sed	bsd	-l	1	inert
+sed	bsd	-E	0	inert
+sed	bsd	-n	0	inert
+sed	bsd	-u	0	inert
+sed	bsd	-a	0	inert

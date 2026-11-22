@@ -14,8 +14,9 @@ import (
 // cascade block (s7/rules-flow): the effect-model rule lane and Secret flow
 // tracking. They are registered lanes of the cascade (RegisterCascadeLane),
 // so validation, explain, the locks and the profile meet treat them like
-// every other lane. Both ship shadow-only in 1.0.10 (the effect model under
-// them still has P1s open), and both are read at the top level only: the
+// every other lane. The effects lane ships on (DET111, 1.0.11): its verdicts
+// join today's as raises only. Secret flow stays shadow-only (its gaps are
+// open). Both are read at the top level only: the
 // gateway runs them for the whole process, so a connector or profile scope
 // may not set them (Global).
 //
@@ -31,13 +32,14 @@ const (
 )
 
 func init() {
-	const effectGaps = "GAP-0191, GAP-0192, GAP-0193, GAP-0208, GAP-0216, GAP-0217"
+	// The open gaps that keep secret flow shadow-only.
+	const secretFlowGaps = "GAP-0191, GAP-0192, GAP-0193, GAP-0208"
 	RegisterCascadeLane(CascadeLane{
-		Name: CascadeLaneEffects, Default: CascadeLaneShadow, ShadowOnly: effectGaps, Global: true,
-		Description: "effect-model rules: off (today's ActionFacts rules only) or shadow (record effect verdicts beside today's, never change the answer); guardrail.effects_rules_tier picks how far it may block once it ships live",
+		Name: CascadeLaneEffects, Default: CascadeLaneOn, Global: true,
+		Description: "effect-model rules: on (default: effect verdicts join today's as raises only, never lowering one; an unknown effect reaches the unknown tier only with a reach reason), shadow (record them, never change the answer) or off (today's ActionFacts rules only); guardrail.effects_rules_tier picks how far a known effect may block",
 	})
 	RegisterCascadeLane(CascadeLane{
-		Name: CascadeLaneSecretFlow, Default: CascadeLaneShadow, ShadowOnly: effectGaps, Global: true,
+		Name: CascadeLaneSecretFlow, Default: CascadeLaneShadow, ShadowOnly: secretFlowGaps, Global: true,
 		Description: "Secret flow tracking (guardrail.secret_flow holds its settings); runs only while the effects lane is not off",
 	})
 	// The non-shell lane ships live (review rounds 5 to 7, LIVE). It has no

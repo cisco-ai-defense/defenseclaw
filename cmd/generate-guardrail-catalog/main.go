@@ -48,17 +48,33 @@ type rulesFile struct {
 }
 
 type ruleDef struct {
-	ID           string   `yaml:"id"`
-	Enabled      *bool    `yaml:"enabled,omitempty"`
-	Pattern      string   `yaml:"pattern"`
-	Expression   string   `yaml:"expression,omitempty"`
-	ToolCallOnly bool     `yaml:"tool_call_only,omitempty"`
-	Title        string   `yaml:"title"`
-	Severity     string   `yaml:"severity"`
-	Confidence   float64  `yaml:"confidence"`
-	Tags         []string `yaml:"tags"`
+	ID           string    `yaml:"id"`
+	Enabled      *bool     `yaml:"enabled,omitempty"`
+	Pattern      string    `yaml:"pattern"`
+	Expression   string    `yaml:"expression,omitempty"`
+	ToolCallOnly bool      `yaml:"tool_call_only,omitempty"`
+	Title        string    `yaml:"title"`
+	Severity     string    `yaml:"severity"`
+	Confidence   float64   `yaml:"confidence"`
+	Tags         []string  `yaml:"tags"`
+	Keys         *ruleKeys `yaml:"keys,omitempty"`
 
 	expressionSet bool `yaml:"-"`
+}
+
+// ruleKeys is a rule's key vocabulary (guardrail.RuleKeysYAML).
+type ruleKeys struct {
+	Words    []string `yaml:"words,omitempty"`
+	Prefixes []string `yaml:"prefixes,omitempty"`
+	Suffixes []string `yaml:"suffixes,omitempty"`
+}
+
+// keyList is a key word list as Go: nil when absent.
+func keyList(words []string) string {
+	if words == nil {
+		return "nil"
+	}
+	return "[]string{" + quoteStrings(words) + "}"
 }
 
 func main() {
@@ -366,6 +382,11 @@ var defaultRuleCategories = sync.OnceValue(func() []ruleCategory { return []rule
 			}
 			if rule.ToolCallOnly {
 				out.WriteString(", ToolCallOnly: true")
+			}
+			if rule.Keys != nil {
+				// The built-in key vocabulary of the assignment rule (GAP-0433).
+				fmt.Fprintf(&out, ", assignmentKeys: newSecretAssignmentKeys(%s, %s, %s)",
+					keyList(rule.Keys.Words), keyList(rule.Keys.Prefixes), keyList(rule.Keys.Suffixes))
 			}
 			fmt.Fprintf(
 				&out,

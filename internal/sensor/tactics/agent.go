@@ -131,7 +131,11 @@ var mcpInlineCodeFlags = map[string]map[string]bool{
 // looked up without either, or node.exe, python.exe, uvx.exe and npx.cmd
 // would run a server unrecognised.
 func isMCPProcess(cmdline string) bool {
-	fields := commandWords(cmdline)
+	return isMCPArgv(commandWords(cmdline))
+}
+
+// isMCPArgv is isMCPProcess over a command's words.
+func isMCPArgv(fields []string) bool {
 	if len(fields) == 0 {
 		return false
 	}

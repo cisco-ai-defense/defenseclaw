@@ -60,7 +60,7 @@ func TestIntentScopeSessionsResetAndBound(t *testing.T) {
 	table := &intentScopeSessions{}
 	base := time.Now()
 	for i := 0; i < maxToolJudgeContextSessions+5; i++ {
-		table.observe(fmt.Sprintf("s%d", i), "task", "", base.Add(time.Duration(i)*time.Millisecond))
+		table.observe(fmt.Sprintf("s%d", i), "task", "", false, base.Add(time.Duration(i)*time.Millisecond))
 	}
 	if n := len(table.sessions); n != maxToolJudgeContextSessions {
 		t.Fatalf("%d sessions, want the bound %d", n, maxToolJudgeContextSessions)

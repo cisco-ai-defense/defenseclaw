@@ -31,6 +31,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/psparse"
 	"github.com/defenseclaw/defenseclaw/internal/shellparse"
+	"github.com/defenseclaw/defenseclaw/internal/textlower"
 	"mvdan.cc/sh/v3/syntax"
 )
 
@@ -309,14 +310,7 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 					return true
 				}
 			}
-			// On a Windows host a Windows home's paths are spelled with
-			// backslashes (C:\Users\me\.ssh\authorized_keys). The resolver
-			// reads a backslash as a POSIX escape and removes it, so its
-			// reading never names the key that spelling names; the plain
-			// value keeps the spelling, and it still judges the word there,
-			// as on rel/1.0.10 (rel-1-0-10:GAP-1624). The resolver's own
-			// candidates below are judged too.
-			if (!resolverPattern || windowsHost) && known && (!strings.ContainsAny(value, "*?[]") || activeGlob) {
+			if actionPlainValueJudged(resolverPattern, windowsHost, value) && known && (!strings.ContainsAny(value, "*?[]") || activeGlob) {
 				// A parsed value has had its shell tilde expanded already;
 				// a remaining "~/" was quoted, escaped or parameter-derived.
 				if check(value, false, effectiveCWD) {
@@ -2206,7 +2200,7 @@ func actionDotglobSettingIn(folded string) bool {
 // costs a large heredoc body hundreds of milliseconds, and it can match only
 // where a glob character is followed by an opening parenthesis.
 func actionCommandMayDotglob(command string) bool {
-	if actionDotglobSettingIn(strings.ReplaceAll(strings.ToLower(command), "_", "")) {
+	if actionDotglobSettingIn(strings.ReplaceAll(textlower.Lower(command), "_", "")) {
 		return true
 	}
 	if !strings.Contains(command, "*(") && !strings.Contains(command, "?(") && !strings.Contains(command, "](") {
@@ -6019,10 +6013,16 @@ func actionSpelledWindowsTarget(value string, tilde bool, base, home string, sta
 // (GAP-2279 answer budget); a relative value is always read. missing reports
 // an absolute value that Lstat found not to exist.
 func actionStateEntryMayDiffer(value string) (differ, missing bool) {
+	return actionStateEntryMayDifferWith(value, nil)
+}
+
+// actionStateEntryMayDifferWith is actionStateEntryMayDiffer reading the
+// entry through memo's Lstat answers (nil: the file system).
+func actionStateEntryMayDifferWith(value string, memo *TargetMemo) (differ, missing bool) {
 	if !filepath.IsAbs(value) {
 		return true, false
 	}
-	info, err := pathLstat(value)
+	info, err := memo.lstat(value)
 	if err != nil {
 		return !os.IsNotExist(err), os.IsNotExist(err)
 	}
@@ -6352,4 +6352,19 @@ func actionReadOnlyPipelines(file *syntax.File, home string) map[*syntax.Stmt]bo
 		}
 	}
 	return out
+}
+
+// actionPlainValueJudged reports whether the plain value of a word is judged
+// beside its resolver reading in actionPosixTargetMention. A word the
+// resolver reads (resolverPattern) is judged by its escaped pattern, not by
+// the flattened value: 'authorized_key[s]'* names no key. On a Windows host a
+// Windows home's paths are spelled with backslashes
+// (C:\Users\me\.ssh\authorized_keys); the resolver reads a backslash as a
+// POSIX escape and removes it, so its reading never names the key that
+// spelling names. The plain value keeps the spelling and still judges such a
+// word there, as on rel/1.0.10 (rel-1-0-10:GAP-1624), and only such a word:
+// the check ran for every resolver word on a Windows host, so the flattened
+// glob reading of a quoted pattern came back there (rel-1-0-10:GAP-1627).
+func actionPlainValueJudged(resolverPattern, windowsHost bool, value string) bool {
+	return !resolverPattern || windowsHost && strings.Contains(value, `\`)
 }

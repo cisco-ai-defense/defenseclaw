@@ -45,6 +45,13 @@ type Target struct {
 	// Glob holds the unquoted glob pattern when the operand is a pattern; Path
 	// is then empty and a glob reason is present.
 	Glob string `json:"glob,omitempty"`
+	// Lexical is the lexical candidate of a spelling that is not canonical
+	// (a .. after a component that may be a link, an 8.3-looking name, a //):
+	// the absolute path the spelling names before any link or short name is
+	// resolved, with nothing collapsed. The target stays unknown (F1): only the
+	// resolver may turn it into a physical path, and the protected-set
+	// classifier reads it as a pattern otherwise (DET111 D3).
+	Lexical string `json:"lexical,omitempty"`
 	// Network fields.
 	URL    string `json:"url,omitempty"`
 	Scheme string `json:"scheme,omitempty"`
