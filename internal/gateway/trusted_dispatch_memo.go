@@ -152,7 +152,11 @@ func (memo *trustedDispatchMemo) dispatch(ctx context.Context, request trustedAc
 	}
 	bucket := request.Input.Tool + "\x00" + request.Input.Command + "\x00" + request.LegacyText
 	key, refs := trustedDispatchMemoKeyOf(request)
-	before := trustedDispatchStateOf(request)
+	// The goroutine's hook call is found once: the dispatch below runs in it
+	// (or begins and ends its own when none is open), so before and after
+	// read the same call (hookpaths.Call).
+	call := hookpaths.CurrentHookCall()
+	before := trustedDispatchStateOf(call, request)
 	if hit := memo.lookup(ctx, bucket, key, refs, before); hit != nil {
 		if request.budget != nil {
 			request.budget.consumed += hit.cost
@@ -174,7 +178,7 @@ func (memo *trustedDispatchMemo) dispatch(ctx context.Context, request trustedAc
 	findings := dispatchTrustedActionOnce(ctx, run)
 	outs.unprovenSet = outs.unprovenTarget != unprovenWrite{}
 	outs.replay(request)
-	after := trustedDispatchStateOf(request)
+	after := trustedDispatchStateOf(call, request)
 	if ctx.Err() == nil && !before.reached && before.same(after) && after.consumed >= before.consumed {
 		memo.store(bucket, &trustedDispatchMemoEntry{
 			ctx: ctx, key: key, refs: refs, state: before,
@@ -237,8 +241,8 @@ func trustedDispatchMemoKeyOf(request trustedActionRequest) (trustedActionReques
 	return key, refs
 }
 
-func trustedDispatchStateOf(request trustedActionRequest) trustedDispatchState {
-	state := trustedDispatchState{call: hookpaths.HookCallState()}
+func trustedDispatchStateOf(call hookpaths.Call, request trustedActionRequest) trustedDispatchState {
+	state := trustedDispatchState{call: call.State()}
 	if request.sessionID != "" {
 		state.page = pageOrigins.get(pageOriginKey(request.Connector, request.sessionID))
 	}
