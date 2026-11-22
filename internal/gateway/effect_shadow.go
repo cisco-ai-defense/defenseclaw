@@ -250,6 +250,9 @@ func effectActiveLogin(ctx context.Context, in actionfacts.Input) string {
 // maxEffectAccountLookups per call and counted. A name the lookup does not
 // find, or one past the cap, stays unknown (GAP-1677, GAP-0898).
 func effectAccountOptions(call effects.Call, opts effects.Options, login string) effects.Options {
+	if opts.Flavor == effects.FlavorWindows {
+		return effectWindowsHomeOptions(opts)
+	}
 	if opts.Flavor != effects.FlavorPOSIX {
 		return opts
 	}
@@ -276,6 +279,30 @@ func effectAccountOptions(call effects.Call, opts effects.Options, login string)
 			opts.Accounts[name] = home
 		}
 	}
+	return opts
+}
+
+// effectWindowsHomeOptions vouches the hook account's Windows home for the
+// variables that name it at session start: cmd's %USERPROFILE%, PowerShell's
+// $env:USERPROFILE and Git Bash's $HOME place under the home, as the written-
+// out C:\Users\<login> spelling and ~\ do, instead of an unknown target. A
+// value the call itself assigns still wins (the walker's running env). Only a
+// drive-absolute home is vouched.
+func effectWindowsHomeOptions(opts effects.Options) effects.Options {
+	h := opts.Home
+	if len(h) < 3 || h[1] != ':' || (h[2] != '\\' && h[2] != '/') {
+		return opts
+	}
+	env := make(map[string]string, len(opts.Env)+2)
+	for k, v := range opts.Env {
+		env[k] = v
+	}
+	for _, k := range []string{"USERPROFILE", "HOME"} {
+		if _, ok := env[k]; !ok {
+			env[k] = h
+		}
+	}
+	opts.Env = env
 	return opts
 }
 

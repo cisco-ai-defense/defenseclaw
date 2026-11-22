@@ -17,7 +17,8 @@ type Env struct {
 	Home   string
 	Flavor effects.Flavor
 	// Resolve follows a write path through links; nil falls back to
-	// hookpaths.ResolveWriteTarget.
+	// hookpaths.ResolveWriteTarget for the host's own path flavor and to the
+	// placed path for the other flavor (resolverFor).
 	Resolve func(string) (string, bool)
 	// Identity reads a file's device and inode to find a hard link of a
 	// protected member (one stat per resolved target); nil reads the disk
@@ -33,13 +34,13 @@ type Env struct {
 // mutates anything the extractor already decided; only link following and the
 // protected-set grade touch the file system, read-only.
 func Project(res effects.Result, env Env) []*semanticpb.EffectFact {
-	rsv := env.Resolve
-	if rsv == nil {
-		rsv = defaultResolver
-	}
 	flavor := env.Flavor
 	if flavor == "" {
 		flavor = effects.FlavorPOSIX
+	}
+	rsv := env.Resolve
+	if rsv == nil {
+		rsv = resolverFor(flavor)
 	}
 	sets := buildSets(env.Home, flavor)
 	ids := newIdentityCache(env.Identity, sets)
