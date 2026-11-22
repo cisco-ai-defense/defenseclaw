@@ -8111,9 +8111,9 @@
                   },
                   "to": {
                     "type": "string",
-                    "minLength": 9,
+                    "minLength": 10,
                     "maxLength": 256,
-                    "pattern": "^https://[^\\s\"\\\\@/]+(/[^\\s\"\\\\]*)?$"
+                    "pattern": "^https://[^\\s\"\\\\@/]+/([^\\s\"\\\\]*/)?$"
                   }
                 }
               }

@@ -98,14 +98,11 @@ func CheckCloneURL(raw string) error {
 
 // CloneHost is the host git in the actor sends a credential to for raw:
 // the https host, or the host of an ssh address the actor's git turns
-// into https (rules, substrate.git.https_rewrite, nil for the default;
-// and every ssh://git@ address). It is "" for any other address, which
-// never asks for a token.
+// into https (the baked rules plus rules, substrate.git.https_rewrite:
+// config.RewriteGitURL). It is "" for any other address, which never asks
+// for a token.
 func CloneHost(raw string, rules []config.SubstrateGitRewrite) string {
 	raw = strings.TrimSpace(raw)
-	if rules == nil {
-		rules = config.DefaultSubstrateGitHTTPSRewrite()
-	}
 	if v, ok := config.RewriteGitURL(raw, rules); ok {
 		raw = v
 	}

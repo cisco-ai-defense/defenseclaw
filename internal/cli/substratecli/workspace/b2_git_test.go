@@ -14,6 +14,9 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+// The fixtures (hcActor) are unix-only, like the host copy tests.
+//go:build unix
+
 package workspace
 
 import (

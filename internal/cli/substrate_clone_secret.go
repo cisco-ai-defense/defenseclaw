@@ -80,12 +80,21 @@ func substrateCloneOnce(ctx context.Context, cmd *cobra.Command, cl *api.Client,
 // (the repository, an LFS object host, a submodule).
 var substrateCloneURLHostRE = regexp.MustCompile(`https?://(?:[^@/\s'"]+@)?([A-Za-z0-9.-]+)`)
 
+// substrateCloneNetworkErrRE matches the git errors network rules can
+// cause: a refused CONNECT or token (403, 401), a host the agent cannot
+// resolve or connect to.
+var substrateCloneNetworkErrRE = regexp.MustCompile(`(?i)\b40[13]\b|could not resolve|connection refused|failed to connect|\bCONNECT\b`)
+
 // substrateCloneRefused is the first host of a failed clone that the
 // agent's network rules do not allow, or "" (GAP-0720). It asks the
 // gateway's policy explain, which reads the policy in force: the egress
 // guard answers a refused CONNECT with 403, which git reports like a
 // refused token, and the decisions log does not record egress refusals.
+// Each ask is an audit row, so other errors (a missing branch) ask nothing.
 func substrateCloneRefused(ctx context.Context, cl *api.Client, a api.Actor, ce *workspace.CloneError, rules []config.SubstrateGitRewrite) string {
+	if !substrateCloneNetworkErrRE.MatchString(ce.Message) {
+		return ""
+	}
 	var hosts []string
 	if h := workspace.CloneHost(ce.URL, rules); h != "" {
 		hosts = append(hosts, h)

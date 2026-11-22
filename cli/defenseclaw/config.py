@@ -4673,8 +4673,9 @@ class SubstrateFilesConfig:
 @dataclass
 class SubstrateGitConfig:
     # How agents reach private repositories (B2 2.5). https_rewrite is a
-    # list of {"from": ..., "to": ...} pairs (None means the built-in
-    # default of the three SaaS hosts); submodules and lfs: None means on.
+    # list of {"from": ..., "to": ...} pairs added to the rules every actor
+    # image bakes in (None means the built-in default of the three SaaS
+    # hosts); a "to" must end in "/". submodules and lfs: None means on.
     https_rewrite: list[dict[str, str]] | None = None
     submodules: bool | None = None
     lfs: bool | None = None
@@ -8312,7 +8313,10 @@ def _merge_substrate_git(raw: dict[str, Any]) -> SubstrateGitConfig:
         pairs = [
             {"from": r["from"], "to": r["to"]}
             for r in rewrite
-            if isinstance(r, dict) and isinstance(r.get("from"), str) and isinstance(r.get("to"), str)
+            if isinstance(r, dict)
+            and isinstance(r.get("from"), str)
+            and isinstance(r.get("to"), str)
+            and r["to"].endswith("/")
         ]
     return SubstrateGitConfig(
         https_rewrite=pairs,

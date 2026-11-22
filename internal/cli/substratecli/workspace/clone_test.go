@@ -174,7 +174,9 @@ func TestB2CloneHostRewriteMap(t *testing.T) {
 	if got := CloneHost("git@git.corp.example:me/app.git", rules); got != "git.corp.example" {
 		t.Errorf("CloneHost with the map = %q", got)
 	}
-	if got := CloneHost("git@github.com:me/app.git", rules); got != "" {
-		t.Errorf("a map without GitHub = %q, want none", got)
+	// RV-SYNC3 F1 (GAP-0733): the image bakes the SaaS rules, which a map
+	// cannot drop, so git in the agent still asks GitHub for a token.
+	if got := CloneHost("git@github.com:me/app.git", rules); got != "github.com" {
+		t.Errorf("a map without GitHub = %q, want github.com", got)
 	}
 }

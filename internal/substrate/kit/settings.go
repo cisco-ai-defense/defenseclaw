@@ -734,13 +734,18 @@ func codexManagedConfig(data []byte, gw string, o OverlayOptions) ([]byte, error
 func gitConfig() string {
 	var b strings.Builder
 	b.WriteString("# DefenseClaw actor image (root-owned): SSH remotes use HTTPS, credentials are placeholders.\n")
-	b.WriteString("[url \"https://\"]\n\tinsteadOf = ssh://git@\n\tinsteadOf = git+ssh://git@\n")
-	// The default rewrite map (substrate.git.https_rewrite). An admin's own
-	// map is written into the actor user's git config at run (B2 2.5), so
-	// the image needs no rebuild per host; these stay for actors no launcher
-	// started (unattended, batch) and for images made before the map.
-	for _, r := range config.DefaultSubstrateGitHTTPSRewrite() {
-		fmt.Fprintf(&b, "[url \"%s\"]\n\tinsteadOf = %s\n", r.To, r.From)
+	// The baked rules: the generic ssh rules, then the default map
+	// (config.SubstrateGitBakedRewrites, which the launcher reads as the
+	// rules git applies first). An admin's own map is written into the
+	// actor user's git config at run (B2 2.5) and adds to them, so the
+	// image needs no rebuild per host. Rules with one target share a
+	// section.
+	baked := config.SubstrateGitBakedRewrites()
+	for i, r := range baked {
+		if i == 0 || baked[i-1].To != r.To {
+			fmt.Fprintf(&b, "[url \"%s\"]\n", r.To)
+		}
+		fmt.Fprintf(&b, "\tinsteadOf = %s\n", r.From)
 	}
 	fmt.Fprintf(&b, "[credential]\n\thelper = %s\n\tuseHttpPath = false\n", CredHelper)
 	fmt.Fprintf(&b, "[http]\n\tsslCAInfo = %s\n", TrustBundle)

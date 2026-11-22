@@ -651,8 +651,11 @@ type SubstrateGitRewrite struct {
 // only breaks its own git calls.
 type SubstrateGitConfig struct {
 	// HTTPSRewrite turns ssh and scp-form addresses into https ones, which
-	// is the only way out of an agent (egress carries no SSH). Unset means
-	// DefaultSubstrateGitHTTPSRewrite; a list replaces it. At most 64.
+	// is the only way out of an agent (egress carries no SSH). A list adds
+	// to the rules every actor image bakes in (SubstrateGitBakedRewrites:
+	// the three SaaS scp forms and ssh://git@). Git reads those first, so
+	// a list cannot drop one and a baked rule wins a tie; Validate refuses
+	// a from that is baked with another to. Unset adds nothing. At most 64.
 	HTTPSRewrite []SubstrateGitRewrite `mapstructure:"https_rewrite" yaml:"https_rewrite,omitempty"`
 	// Submodules: run --clone also clones the repository's submodules
 	// (true when unset).
@@ -688,6 +691,28 @@ var SubstrateGitGenericRewrites = []SubstrateGitRewrite{
 	{From: "git+ssh://git@", To: "https://"},
 }
 
+// SubstrateGitBakedRewrites are the rules every actor image bakes into
+// /etc/gitconfig (kit gitConfig), in the order git reads them: the generic
+// ssh rules, then the default map.
+func SubstrateGitBakedRewrites() []SubstrateGitRewrite {
+	return append(append([]SubstrateGitRewrite{}, SubstrateGitGenericRewrites...), DefaultSubstrateGitHTTPSRewrite()...)
+}
+
+// SubstrateGitRewriteMap is every rule git in an agent applies, in the
+// order git reads them: the baked rules (the system config), then the
+// pairs of admin (substrate.git.https_rewrite, in the actor user's config,
+// B2 2.5) that WriteGitRewrite writes, which are those CheckSubstrateGitRewrite
+// accepts.
+func SubstrateGitRewriteMap(admin []SubstrateGitRewrite) []SubstrateGitRewrite {
+	out := SubstrateGitBakedRewrites()
+	for _, r := range admin {
+		if CheckSubstrateGitRewrite(r) == nil {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
 // EffectiveHTTPSRewrite is substrate.git.https_rewrite, the default when
 // unset.
 func (g SubstrateGitConfig) EffectiveHTTPSRewrite() []SubstrateGitRewrite {
@@ -712,9 +737,12 @@ func (g SubstrateGitConfig) EffectivePushBranch() string {
 func (g SubstrateGitConfig) LFSOn() bool { return g.LFS == nil || *g.LFS }
 
 // CheckSubstrateGitRewrite refuses a pair git would misread or that is not
-// an https target: from ends in ":" or "/", to is an https address with a
-// host and no user, and neither carries spaces, quotes, backslashes or
-// control characters (the pair is written into the agent's git config).
+// an https target: from ends in ":" or "/" and has no upper case in its
+// scheme or host (git compares the prefix as written, and remotes name
+// hosts in lower case), to is an https address with a host and no user
+// that ends in "/" (git joins the rest of the address to it as is), and
+// neither carries spaces, quotes, backslashes or control characters (the
+// pair is written into the agent's git config).
 func CheckSubstrateGitRewrite(r SubstrateGitRewrite) error {
 	plain := func(v string) bool {
 		return v != "" && len(v) <= 256 && !strings.ContainsAny(v, "\"\\ \t") &&
@@ -725,6 +753,8 @@ func CheckSubstrateGitRewrite(r SubstrateGitRewrite) error {
 		return fmt.Errorf("from %q must be a plain address prefix", r.From)
 	case !strings.HasSuffix(r.From, ":") && !strings.HasSuffix(r.From, "/"):
 		return fmt.Errorf("from %q must end in : or /", r.From)
+	case gitRewriteHostPart(r.From) != strings.ToLower(gitRewriteHostPart(r.From)):
+		return fmt.Errorf("from %q must name its scheme and host in lower case, as remotes do (git compares it as written)", r.From)
 	case !plain(r.To):
 		return fmt.Errorf("to %q must be a plain https address", r.To)
 	}
@@ -732,20 +762,40 @@ func CheckSubstrateGitRewrite(r SubstrateGitRewrite) error {
 	if err != nil || u.Scheme != "https" || !strings.HasPrefix(r.To, "https://") || u.Hostname() == "" || u.User != nil {
 		return fmt.Errorf("to %q must be an https:// address with a host and no user name", r.To)
 	}
+	if !strings.HasSuffix(r.To, "/") {
+		return fmt.Errorf("to %q must end in / (git adds the rest of the address to it as is)", r.To)
+	}
 	return nil
 }
 
-// RewriteGitURL is the address git in an agent uses for raw: git's own
-// rule, the longest insteadOf prefix among rules and the generic ssh://git@
-// rules, wins. ok is false when no rule matches.
-func RewriteGitURL(raw string, rules []SubstrateGitRewrite) (string, bool) {
+// gitRewriteHostPart is the scheme and host of a rewrite from (no user
+// name, port or path): "ssh://" + "ghe.example" for ssh://git@ghe.example/,
+// "ghe.example" for git@ghe.example:.
+func gitRewriteHostPart(from string) string {
+	scheme, rest := "", from
+	if i := strings.Index(from, "://"); i >= 0 {
+		scheme, rest = from[:i+3], from[i+3:]
+	}
+	if j := strings.IndexAny(rest, "/:"); j >= 0 {
+		rest = rest[:j]
+	}
+	if k := strings.LastIndex(rest, "@"); k >= 0 {
+		rest = rest[k+1:]
+	}
+	return scheme + rest
+}
+
+// RewriteGitURL is the address git in an agent uses for raw with admin,
+// substrate.git.https_rewrite, on top of the baked rules
+// (SubstrateGitRewriteMap). It follows git: the longest insteadOf prefix
+// wins and, on a tie, the rule git read first, so a baked rule. ok is
+// false when no rule matches.
+func RewriteGitURL(raw string, admin []SubstrateGitRewrite) (string, bool) {
 	best := -1
 	out := ""
-	for _, set := range [][]SubstrateGitRewrite{rules, SubstrateGitGenericRewrites} {
-		for _, r := range set {
-			if r.From != "" && strings.HasPrefix(raw, r.From) && len(r.From) > best {
-				best, out = len(r.From), r.To+raw[len(r.From):]
-			}
+	for _, r := range SubstrateGitRewriteMap(admin) {
+		if strings.HasPrefix(raw, r.From) && len(r.From) > best {
+			best, out = len(r.From), r.To+raw[len(r.From):]
 		}
 	}
 	return out, best >= 0
@@ -937,11 +987,17 @@ func (s *SubstrateConfig) Validate() error {
 		bad("git.https_rewrite", "has %d entries; at most %d", n, MaxSubstrateGitRewrites)
 	}
 	seenRewrite := map[string]bool{}
+	baked := map[string]string{}
+	for _, r := range SubstrateGitBakedRewrites() {
+		baked[r.From] = r.To
+	}
 	for i, r := range s.Git.HTTPSRewrite {
 		if err := CheckSubstrateGitRewrite(r); err != nil {
 			bad(fmt.Sprintf("git.https_rewrite[%d]", i), "%v", err)
 		} else if seenRewrite[r.From] {
 			bad(fmt.Sprintf("git.https_rewrite[%d]", i), "from %q is listed twice", r.From)
+		} else if to, ok := baked[r.From]; ok && to != r.To {
+			bad(fmt.Sprintf("git.https_rewrite[%d]", i), "from %q is built into every actor image with to %q, which git keeps; use a longer from (for example %sORG/)", r.From, to, r.From)
 		}
 		seenRewrite[r.From] = true
 	}

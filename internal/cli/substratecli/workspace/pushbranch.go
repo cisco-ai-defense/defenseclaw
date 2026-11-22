@@ -301,14 +301,12 @@ func short(c string) string {
 }
 
 // GitRemoteTarget is the https host and repository path (no .git) git
-// pushes to for remote, after the https rewrite rules; "" when remote is
-// not https after them.
+// pushes to for remote, after the baked rules plus rules
+// (config.RewriteGitURL, the map CloneHost uses); "" when remote is not
+// https after them.
 func GitRemoteTarget(remote string, rules []config.SubstrateGitRewrite) (host, repo string) {
 	raw := strings.TrimSpace(remote)
-	if rules == nil {
-		rules = config.DefaultSubstrateGitHTTPSRewrite()
-	}
-	if v, ok := config.RewriteGitURL(raw, append(append([]config.SubstrateGitRewrite{}, rules...), config.SubstrateGitGenericRewrites...)); ok {
+	if v, ok := config.RewriteGitURL(raw, rules); ok {
 		raw = v
 	}
 	u, err := url.Parse(raw)
