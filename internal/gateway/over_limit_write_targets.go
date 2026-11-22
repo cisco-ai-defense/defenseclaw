@@ -286,6 +286,7 @@ func overLimitTwinDialect(request trustedActionRequest, input actionfacts.Input)
 // as withTwinProvenBlocks counts them, and the rules it only records.
 func withOverLimitTwinFindings(findings, twin []RuleFinding) []RuleFinding {
 	findings = withTwinProvenBlocks(findings, twin)
+	_, twin = withEffectsFoldedEitherWay(findings, twin)
 	for _, finding := range twin {
 		if finding.contributesToEnforcement() ||
 			slices.ContainsFunc(findings, func(f RuleFinding) bool { return f.RuleID == finding.RuleID }) {
