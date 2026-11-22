@@ -44,10 +44,12 @@ type Runtime struct {
 	// as not loaded, so a managed deny budget refuses instead of counting 0.
 	feed     bool
 	interval time.Duration
-	epoch    string
-	writer   string      // the last fleet writer id (device), kept while no fleet is set
-	syncW    *syncWorker // the running sync loop (nil: none)
-	kick     chan struct{}
+	// staleAfter is the ledger's trust window of remote spend (0: none).
+	staleAfter time.Duration
+	epoch      string
+	writer     string      // the last fleet writer id (device), kept while no fleet is set
+	syncW      *syncWorker // the running sync loop (nil: none)
+	kick       chan struct{}
 	// budgeted mirrors len(ids) > 0, so For with no routing.admin (the
 	// per-request default) stays lock-free while no budget ever ran.
 	budgeted atomic.Bool
@@ -81,6 +83,19 @@ func (rt *Runtime) SetInterval(d time.Duration) {
 	rt.mu.Lock()
 	rt.interval = d
 	rt.mu.Unlock()
+}
+
+// SetStaleAfter sets how long remote spend is trusted after the last answer
+// of the counter (a cluster replica: 3 x the sync interval; 0: for ever).
+func (rt *Runtime) SetStaleAfter(d time.Duration) {
+	if rt == nil {
+		return
+	}
+	rt.mu.Lock()
+	rt.staleAfter = d
+	ledger := rt.ledger
+	rt.mu.Unlock()
+	ledger.SetStaleAfter(d)
 }
 
 // DefaultSyncInterval is how often the ledger stores this process's spend
@@ -323,6 +338,7 @@ func (rt *Runtime) For(cfg *config.Config) engine.AdminEvaluator {
 	rt.mu.Lock()
 	if len(a.Budgets) > 0 && rt.ledger == nil {
 		rt.ledger = NewLedgerClock(rt.now)
+		rt.ledger.SetStaleAfter(rt.staleAfter)
 	}
 	if rt.feed {
 		ev.ledger = rt.ledger

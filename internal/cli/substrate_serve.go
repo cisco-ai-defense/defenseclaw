@@ -734,6 +734,13 @@ func runSubstrateLeader(parent context.Context, ready *atomic.Bool) error {
 		}).run(ctx)
 	}
 	chains.Register(srv)
+	// Cluster spend and usage of the gateway replicas (T-COST): on the store
+	// volume, only for the gateway peer, off with substrate.usage.enabled.
+	closeSpend, err := serveSpendUsage(srv, cfg, serveFlags.storeDir)
+	if err != nil {
+		return err
+	}
+	defer closeSpend()
 	// A crashed or deleted actor asks nothing any more (E16): its open asks
 	// close when the controller reports the lifecycle event.
 	srv.Handle(chainstate.MethodChainLifecycle, leader.Typed(substrateLifecycleRelays(substrateLifecycleClosesAsks(chains.Lifecycle, askStore), store, relay)))

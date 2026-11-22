@@ -81,6 +81,11 @@ type CallFacts struct {
 	// other reader keep Subject, the verified subject hook events carry.
 	OwnerKey, OwnerKind string
 
+	// Actor, BatchID and Atespace name the Agent Substrate actor of the call
+	// (from its registration, never from headers); empty off a cluster. Only
+	// the cluster usage rows carry them.
+	Actor, BatchID, Atespace string
+
 	// Correlation of a call imported from the OTLP telemetry of the agent
 	// (Engine.RecordNative): the session, turn and agent it joined on the hook
 	// rail, the agent prompt id and the provider request id. Proxied calls

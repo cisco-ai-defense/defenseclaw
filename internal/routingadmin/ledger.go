@@ -40,6 +40,23 @@ type Ledger struct {
 	lastFleet time.Time
 	lastPrune int32
 	now       func() time.Time
+	// staleAfter, when set, is how long the remote spend stays good after the
+	// last answer of its counter: past it the budgets read as not loaded
+	// (spend unknown), never as the last totals forever. A cluster replica
+	// sets it to 3 x the sync interval, so a lost leader is not a free pass
+	// and not a block on a slow answer (D4-2).
+	staleAfter time.Duration
+}
+
+// SetStaleAfter sets how long remote spend is trusted after the last answer
+// (0: for ever, as on a device).
+func (l *Ledger) SetStaleAfter(d time.Duration) {
+	if l == nil {
+		return
+	}
+	l.mu.Lock()
+	l.staleAfter = d
+	l.mu.Unlock()
 }
 
 // NewLedger returns an empty ledger.
@@ -134,10 +151,15 @@ func (l *Ledger) Spend(key, period string, now time.Time) (float64, bool) {
 	today, from := dayNumber(now), windowStart(period, now)
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if !l.seeded[budgetIDOfKey(key)] {
+	if !l.seeded[budgetIDOfKey(key)] || l.staleLocked(now) {
 		return 0, false
 	}
 	return l.windowLocked(key, from, today), true
+}
+
+// staleLocked is true when the remote spend outlived staleAfter.
+func (l *Ledger) staleLocked(now time.Time) bool {
+	return l.staleAfter > 0 && !l.lastSync.IsZero() && now.Sub(l.lastSync) > l.staleAfter
 }
 
 // SpendPrefix sums the spend of every key that starts with prefix
