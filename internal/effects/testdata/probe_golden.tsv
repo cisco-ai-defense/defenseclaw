@@ -478,7 +478,7 @@ N7 for-list cmdsubst	K|delete:/home/u/.ssh
 N8 param default cmdsubst	K|delete:/home/u/.ssh
 P01 cd..cd chain	U|
 P02 env -C	K|append:/home/u/.ssh/authorized_keys
-P03 sudo -D	K|append:/home/u/.ssh/authorized_keys
+P03 sudo -D	U|append:/home/u/.ssh/authorized_keys
 P04 nice timeout install	U|
 P05 ln -sf rc	U|link:/tmp/x
 P06 cp -t dir	K|write:/home/u/.ssh/authorized_keys
@@ -891,7 +891,7 @@ Y15 ren dir	U|delete:c:\users\u\.ssh\x.bak
 Y16 rename long	U|delete:c:\users\u\k
 Y17 copy con	U|
 Y18 forfiles	U|
-Z01 runuser --	K|delete:/home/u/.ssh
+Z01 runuser --	U|delete:/home/u/.ssh
 Z02 runuser -c	U|delete:/home/u/.ssh
 Z03 curl -O in ssh cwd	U|
 Z04 curl -OJ	U|

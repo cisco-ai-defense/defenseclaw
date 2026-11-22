@@ -419,6 +419,10 @@ type Wrapper struct {
 	// (runuser -u runs a program, runuser -c a shell).
 	sub   string
 	needs []string
+	// userOptions and userOperand identify wrappers that run the child under
+	// a different named account; such effects stay in a foreign context.
+	userOptions []string
+	userOperand bool
 
 	posSkip   int  // leading positionals before the child (DURATION, host, dir, mask, priority, lock file)
 	envAssign bool // NAME=val words set the child's environment (env)
@@ -533,16 +537,23 @@ func resolveLong(fn string, all []string) (string, bool) {
 // listed wrapper is transparent only for the options named in its row.
 var wrapperTable = map[string]Wrapper{
 	"sudo": {kind: wrapIdentity, shorts: "AbEeHiKklnPSsVvB",
-		valued: []string{"-u", "-g", "-C", "-h", "-p", "-r", "-t", "-U", "-D", "-T", "--user", "--group", "--chdir", "--close-from", "--host", "--prompt", "--role", "--type", "--other-user", "--command-timeout"},
-		longs:  []string{"--preserve-env", "--login", "--set-home", "--shell", "--background", "--non-interactive", "--reset-timestamp", "--remove-timestamp", "--stdin", "--askpass", "--preserve-groups", "--bell"},
-		stop:   []string{"-e", "--edit", "-l", "--list", "-v", "--validate", "-V", "--version", "-K", "--remove-timestamp"},
-		chdir:  []string{"-D", "--chdir"}, login: []string{"-i", "--login"}, keepEnv: []string{"-E", "--preserve-env"}},
+		valued:      []string{"-u", "-g", "-C", "-h", "-p", "-r", "-t", "-U", "-D", "-T", "--user", "--group", "--chdir", "--close-from", "--host", "--prompt", "--role", "--type", "--other-user", "--command-timeout"},
+		userOptions: []string{"-u", "--user"},
+		longs:       []string{"--preserve-env", "--login", "--set-home", "--shell", "--background", "--non-interactive", "--reset-timestamp", "--remove-timestamp", "--stdin", "--askpass", "--preserve-groups", "--bell"},
+		stop:        []string{"-e", "--edit", "-l", "--list", "-v", "--validate", "-V", "--version", "-K", "--remove-timestamp"},
+		chdir:       []string{"-D", "--chdir"}, login: []string{"-i", "--login"}, keepEnv: []string{"-E", "--preserve-env"}},
 	"doas": {kind: wrapIdentity, shorts: "nsL", valued: []string{"-u", "-C"}, stop: []string{"-C", "-L", "-s"}},
 	// runuser -u USER [--] PROGRAM runs PROGRAM as USER with no shell; the -c
 	// and login forms are the shell row (su, runuser).
 	"runuser": {kind: wrapIdentity, needs: []string{"-u", "--user"}, shorts: "mpf",
-		valued: []string{"-u", "-g", "-G", "-w", "--user", "--group", "--supp-group", "--whitelist-environment"},
-		longs:  []string{"--preserve-environment"}},
+		valued:      []string{"-u", "-g", "-G", "-w", "-c", "--user", "--group", "--supp-group", "--whitelist-environment", "--command"},
+		userOptions: []string{"-u", "--user"}, shellOpt: []string{"-c", "--command"},
+		longs: []string{"--preserve-environment"}},
+	"su": {kind: wrapIdentity, shorts: "lmp",
+		valued: []string{"-c", "-s", "-g", "-G", "--command", "--shell", "--group", "--supp-group"},
+		longs:  []string{"--login", "--preserve-environment"}, login: []string{"-l", "--login"},
+		keepEnv: []string{"-m", "-p", "--preserve-environment"}, shellOpt: []string{"-c", "--command"},
+		userOperand: true},
 	"env": {kind: wrapPlain, shorts: "i0v", envAssign: true,
 		valued: []string{"-u", "-C", "--unset", "--chdir"}, longs: []string{"--ignore-environment", "--null", "--debug"},
 		chdir: []string{"-C", "--chdir"}, clear: []string{"-i", "--ignore-environment"}, unset: []string{"-u", "--unset"}},

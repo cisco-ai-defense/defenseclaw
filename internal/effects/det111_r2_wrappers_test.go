@@ -112,7 +112,7 @@ var r2WrapperCases = []r2case{
 	{"GAP-1493 doas truncate", raLin, `doas truncate -s0 ~/.claude/settings.json`, r2Verdict("K|write:/home/u/.claude/settings.json"), true},
 	{"GAP-1493 setsid -f rm", raLin, `setsid -f rm -f ~/.claude/settings.json`, r2Verdict("K|delete:/home/u/.claude/settings.json"), true},
 	{"GAP-1493 uv run rm", raLin, `uv run rm -f ~/.claude/settings.json`, r2Verdict("K|delete:/home/u/.claude/settings.json"), false},
-	{"GAP-1493 runuser -u rm", raLin, `runuser -u u -- rm -f /home/u/.claude/settings.json`, r2Verdict("K|delete:/home/u/.claude/settings.json"), false},
+	{"GAP-1493 runuser -u rm", raLin, `runuser -u u -- rm -f /home/u/.claude/settings.json`, r2Verdict("U|delete:/home/u/.claude/settings.json"), false},
 	// GAP-1323 / 1326 / 0879: already read through the rows (pins).
 	{"GAP-1323 nohup cat", raLin, `nohup cat ~/.aws/credentials`, r2Has(KindRead, "/home/u/.aws/credentials", true), true},
 	{"GAP-1326 sudo nohup cat", raLin, `sudo nohup cat ~/.aws/credentials`, r2Has(KindRead, "/home/u/.aws/credentials", true), true},
