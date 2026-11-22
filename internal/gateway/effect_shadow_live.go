@@ -154,7 +154,7 @@ func effectShadowRun(request trustedActionRequest, mode effectRulesMode, tiers .
 		c := classifyEffects(result, facts, opts.Flavor, tier, reachEnv)
 		effectReachUnplaced(&c, result, facts, text, request.Input.ActiveHome, opts.Flavor)
 		res := &results[i]
-		res.Sets, res.Program, res.Kind, res.Reach, res.RoleHeld = c.sets, c.program, c.kind, c.reach, c.roleHeld
+		res.Sets, res.Program, res.Kind, res.Reach, res.RoleHeld, res.LinkHeld = c.sets, c.program, c.kind, c.reach, c.roleHeld, c.linkHeld
 		switch {
 		case c.restricted:
 			res.Tier = string(effectTierRestricted)
@@ -191,6 +191,7 @@ func effectReachText(call effects.Call) string {
 var (
 	effectReachCounts   = map[string]*atomic.Int64{}
 	effectReachRoleHeld atomic.Int64
+	effectReachLinkHeld atomic.Int64
 )
 
 func init() {
@@ -210,16 +211,21 @@ func countEffectReach(res EffectShadowResult) {
 	if res.RoleHeld {
 		effectReachRoleHeld.Add(1)
 	}
+	if res.LinkHeld {
+		effectReachLinkHeld.Add(1)
+	}
 }
 
 // EffectReachCounts returns the per-reason counts since the process started,
-// plus "R-ROLE-held".
+// plus "R-ROLE-held" and "LINK-held" (a member reached only through a
+// followed link, counted, not raised).
 func EffectReachCounts() map[string]int64 {
-	out := make(map[string]int64, len(effectReachCounts)+1)
+	out := make(map[string]int64, len(effectReachCounts)+2)
 	for r, n := range effectReachCounts {
 		out[r] = n.Load()
 	}
 	out[effectrules.ReachRole+"-held"] = effectReachRoleHeld.Load()
+	out["LINK-held"] = effectReachLinkHeld.Load()
 	return out
 }
 
@@ -274,6 +280,9 @@ func effectShadowAuditDetails(res EffectShadowResult, dropped int64) string {
 	}
 	if res.RoleHeld {
 		b.WriteString(" role_held=1")
+	}
+	if res.LinkHeld {
+		b.WriteString(" link_held=1")
 	}
 	if len(res.RuleIDs) > 0 {
 		b.WriteString(" rules=" + strings.Join(res.RuleIDs, ","))

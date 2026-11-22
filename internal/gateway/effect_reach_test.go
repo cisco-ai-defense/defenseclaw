@@ -191,7 +191,7 @@ func TestEffectReachCounts(t *testing.T) {
 	countEffectReach(EffectShadowResult{Tier: string(effectTierUnknown), Reach: []string{effectrules.ReachGlob, effectrules.ReachCode}})
 	countEffectReach(EffectShadowResult{Tier: string(effectTierClean), Reach: []string{effectrules.ReachGlob}, RoleHeld: true})
 	after := EffectReachCounts()
-	for r, want := range map[string]int64{effectrules.ReachGlob: 1, effectrules.ReachCode: 1, effectrules.ReachName: 0, effectrules.ReachRole + "-held": 1} {
+	for r, want := range map[string]int64{effectrules.ReachGlob: 1, effectrules.ReachCode: 1, effectrules.ReachName: 0, effectrules.ReachRole + "-held": 1, "LINK-held": 0} {
 		if got := after[r] - before[r]; got != want {
 			t.Errorf("%s counted %d, want %d", r, got, want)
 		}
@@ -312,5 +312,25 @@ func TestEffectPatchKeepsDollarSpelling(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("effects %+v: want an unknown write that keeps the header spelling", res.Effects)
+	}
+}
+
+// A member reached only through a followed link is held (counted, not
+// raised: sed -i and install replace a link, the legacy link reading judges
+// it), and a read of a path whose links could not be read is no credential
+// read (rel-1-0-10 GAP-1243 benign rows, GAP-1286, GAP-1308).
+func TestEffectLinkAndUnresolvedReadAreHeld(t *testing.T) {
+	link := mkFact("write", "known", "known", "sed", "shell", nil, &semanticpb.ProtectedMatch{Set: effectrules.SetAgentHookConfig, State: "known", Reason: "link"})
+	c := classifyEffects(accounted(), []*semanticpb.EffectFact{link}, effects.FlavorPOSIX, tierRestricted, effectReachEnv{Home: "/home/u"})
+	if c.touches || !c.linkHeld {
+		t.Fatalf("link write: touches %v linkHeld %v, want held", c.touches, c.linkHeld)
+	}
+	read := mkFact("read", "known", "known", "cat", "shell", nil, maybeMatch(effectrules.SetCredentials, "unresolved"))
+	if c := classifyEffects(accounted(), []*semanticpb.EffectFact{read}, effects.FlavorPOSIX, tierRestricted, effectReachEnv{Home: "/home/u"}); c.touches {
+		t.Fatalf("unresolved read: touches, want clean")
+	}
+	write := mkFact("write", "known", "known", "cp", "shell", nil, maybeMatch(effectrules.SetCredentials, "unresolved"))
+	if c := classifyEffects(accounted(), []*semanticpb.EffectFact{write}, effects.FlavorPOSIX, tierRestricted, effectReachEnv{Home: "/home/u"}); !c.touches || strings.Join(c.reach, ",") != effectrules.ReachFS {
+		t.Fatalf("unresolved write: touches %v reach %v, want R-FS", c.touches, c.reach)
 	}
 }

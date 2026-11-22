@@ -101,6 +101,9 @@ type EffectShadowResult struct {
 	// 5.3); RoleHeld marks an R-ROLE unknown that was counted, not raised.
 	Reach    []string `json:"reach,omitempty"`
 	RoleHeld bool     `json:"role_held,omitempty"`
+	// LinkHeld marks a member reached only through a followed link: counted,
+	// not raised (effectProtectedSets).
+	LinkHeld bool `json:"link_held,omitempty"`
 	// CostUS is the wall-clock cost of the run in microseconds; Effects is the
 	// number of effects the extractor produced.
 	CostUS  int64 `json:"cost_us,omitempty"`
@@ -243,6 +246,9 @@ type effectClass struct {
 	// roleHeld: an unknown target of a known write or send (R-ROLE) that
 	// does not raise (effectReachRoleRaises is off), counted only.
 	roleHeld bool
+	// linkHeld: a target in a protected set only through a link the
+	// resolver followed, counted, not raised (effectProtectedSets).
+	linkHeld bool
 }
 
 // classifyEffects applies the owner's three answers (2026-11-13): a known
@@ -259,11 +265,14 @@ func classifyEffects(result effects.Result, facts []*semanticpb.EffectFact, flav
 		if t.GetType() != "path" {
 			continue
 		}
-		known, maybe := protectedSetsByState(t)
+		kind := f.GetKind()
+		known, maybe, linkHeld := effectProtectedSets(t, kind)
+		if linkHeld {
+			c.linkHeld = true
+		}
 		if len(known) == 0 && len(maybe) == 0 {
 			continue
 		}
-		kind := f.GetKind()
 		mutating := mutatingEffectKind(kind)
 		unknownEffect := f.GetTargetState() != "known" || f.GetRoleState() != "known" || kind == string(effects.KindOpaque)
 		// Relevance: a mutation touching a protected set; a credential read; or
@@ -317,7 +326,11 @@ func classifyEffects(result effects.Result, facts []*semanticpb.EffectFact, flav
 				continue
 			}
 			c.restricted = true
-			if m.GetSet() == effectrules.SetSSHAuthorizedKeys || m.GetSet() == effectrules.SetSelfProtection {
+			// The authorized-keys ruling blocks in every pack. A state write
+			// keeps the 1.0.10 tier of tamper.detector_state_write (alert in
+			// the default packs, block in strict): the lane raises, it does
+			// not move a class to another tier (that is decide's table).
+			if m.GetSet() == effectrules.SetSSHAuthorizedKeys {
 				c.restrictedRuling = true
 			}
 		}
@@ -343,7 +356,8 @@ func factReach(f *semanticpb.EffectFact, known []string, unknownEffect bool, env
 	}
 	t := f.GetTarget()
 	for _, m := range t.GetProtected() {
-		if m.GetState() != semantic.ProtectedUnknown {
+		if m.GetState() != semantic.ProtectedUnknown || m.GetReason() == "link" ||
+			f.GetKind() == string(effects.KindRead) && m.GetReason() == "unresolved" {
 			continue
 		}
 		switch m.GetReason() {
@@ -455,24 +469,35 @@ func dedupeStrings(in []string) []string {
 	return out
 }
 
-// protectedSetsByState splits a target's protected matches into the sets it is
-// known to be in and the sets it may be in.
-func protectedSetsByState(t *semanticpb.EffectTarget) (known, maybe []string) {
+// effectProtectedSets splits a target's protected matches into the sets it
+// is known to be in and the sets it may be in, leaving out what the lane does
+// not raise on. A member reached only through a link the resolver followed
+// (basis link) is held: whether the program writes through the link or
+// replaces it (sed -i without --follow-symlinks, install, a write after a cd
+// the function body runs behind) is the program table's and the resolver's
+// reading, not yet the effect model's, and the legacy link reading
+// (GAP-1243) judges it. A read of a path whose links could not be read
+// (unresolved, /proc/self/cwd/...) is no credential read: a read reaches a
+// credential by its name only.
+func effectProtectedSets(t *semanticpb.EffectTarget, kind string) (known, maybe []string, linkHeld bool) {
 	for _, m := range t.GetProtected() {
-		switch m.GetState() {
-		case semantic.ProtectedKnown:
+		switch {
+		case m.GetReason() == "link":
+			linkHeld = true
+		case kind == string(effects.KindRead) && m.GetReason() == "unresolved":
+		case m.GetState() == semantic.ProtectedKnown:
 			known = append(known, m.GetSet())
-		case semantic.ProtectedUnknown:
+		case m.GetState() == semantic.ProtectedUnknown:
 			maybe = append(maybe, m.GetSet())
 		}
 	}
-	return known, maybe
+	return known, maybe, linkHeld
 }
 
 // effectAction maps the protected-tier read to the guardrail action. An effect
 // that touches a protected set blocks in the strict packs, and blocks in the
 // default packs (per-user and managed) only when a restricted-tier effect is
-// on a ruling family (authorized-keys / self-protection); otherwise it alerts.
+// on the authorized-keys ruling family; otherwise it alerts.
 // There is no ask yet (S8 owns the confirm path).
 func effectAction(touches, restrictedRuling, strict bool) string {
 	if !touches {
