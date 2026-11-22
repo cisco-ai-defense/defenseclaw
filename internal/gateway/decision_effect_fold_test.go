@@ -44,13 +44,6 @@ type effectFoldRow struct {
 	pending string
 }
 
-// effectFoldAccountSwitch: sudo -iu <other> runs the delete as another
-// account; the 1.0.10 readers name no state set for it (CMD-SUDO only,
-// per-user; tamper.detector_state_write LOW where managed), the effect lane
-// grades it a known delete of the state set. Needs the effects lane to read
-// an account switch (S3/S4), or a DET111 ruling.
-const effectFoldAccountSwitch = "account switch: effects lane grades sudo -iu <other> rm of the state set known (S3/S4 or DET111 ruling)"
-
 func effectFoldRows(home string) []effectFoldRow {
 	dc := home + "/.defenseclaw"
 	return []effectFoldRow{
@@ -60,7 +53,7 @@ func effectFoldRows(home string) []effectFoldRow {
 			dc + "/.codex-lifecycle.lock", dc + "/.hermes-lifecycle.lock", dc + "/aibom_last_digest.json",
 			dc + "/aibom_last_digest.json.lock", dc + "/hooks/.hook-codex.token", dc + "/hooks/.hook-copilot.token",
 			dc + "/hooks/.otlp-codex.token.lock",
-		}, " "), pending: effectFoldAccountSwitch},
+		}, " ")},
 		{name: "state lock plain rm", command: "rm -f " + dc + "/.codex-lifecycle.lock"},
 		{name: "hook token plain rm", command: "rm -f " + dc + "/hooks/.hook-codex.token"},
 		{name: "state config plain write", command: "echo x >> " + dc + "/config.yaml"},
@@ -91,9 +84,6 @@ func effectFoldTraceRows(t *testing.T) []effectFoldRow {
 			t.Fatal(err)
 		}
 		row := effectFoldRow{name: "trace " + r.ID, command: strings.ReplaceAll(r.Command, "/home/alice", os.Getenv("HOME"))}
-		if strings.HasPrefix(r.Command, "sudo -iu ") {
-			row.pending = effectFoldAccountSwitch
-		}
 		rows = append(rows, row)
 	}
 	return rows
