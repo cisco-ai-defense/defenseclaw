@@ -164,18 +164,20 @@ g() { git -c core.quotePath=false -c core.hooksPath=/dev/null "$@"; }
 // gives the commits origin has, and the range is the pushed commit ($3)
 // without those the checkout holds. Names come NUL-ended (-z), so git
 // quotes none of them. Each part goes out as a frame "NAME LENGTH\0" and
-// LENGTH bytes, so no file name can end a part early.
+// LENGTH bytes, so no file name can end a part early. A merge is diffed
+// against its first parent (--diff-merges=first-parent, git 2.31+), so
+// content that only the merge commit adds is listed, flagged and scanned.
 const pushReviewScript = pushScratch + `c=$3
 g ls-remote "$url" > "$s/refs" || exit 11
 { printf '%s\n' "$c"; cut -f1 "$s/refs" | sort -u | g cat-file --batch-check='%(objectname) %(objecttype)' |
   awk '$2 == "commit" || $2 == "tag" { print "^" $1 }'; } > "$s/range" || exit 6
 g rev-list --count --stdin < "$s/range" > "$s/commits" || exit 6
-names() { g log --format= --name-only -z --no-renames "$@" --stdin < "$s/range"; }
+names() { g log --diff-merges=first-parent --format= --name-only -z --no-renames "$@" --stdin < "$s/range"; }
 names > "$s/file" || exit 6
 names -G"$4" > "$s/placeholder" || exit 6
 names -G"$5" > "$s/replaced" || exit 6
 : > "$s/patch"
-[ "$(cat "$s/commits")" = 0 ] || g log -p --no-color --no-ext-diff --no-textconv --no-renames --format= -U0 --stdin < "$s/range" > "$s/patch" || exit 6
+[ "$(cat "$s/commits")" = 0 ] || g log -p --diff-merges=first-parent --no-color --no-ext-diff --no-textconv --no-renames --format= -U0 --stdin < "$s/range" > "$s/patch" || exit 6
 for f in commits file placeholder replaced patch; do
   printf '%s %s\000' "$f" "$(wc -c < "$s/$f" | tr -d ' ')" && cat "$s/$f" || exit 6
 done

@@ -244,3 +244,49 @@ func TestRV4ReplacedCredentialPlaceholdersAreRefused(t *testing.T) {
 		}
 	}
 }
+
+// GAP-0767 (a) / evil merge: a merge commit's own tree can add content
+// that no parent has, and `git log -p/--name-only` prints no diff for a
+// merge. Each merge in the range is diffed against its first parent, so
+// that content reaches the file list, the flags, the placeholder check and
+// the secret scan.
+func TestRV4MergeOnlyContentIsReviewed(t *testing.T) {
+	merge := func(s *rv4, add func()) {
+		gitT(t, s.repo, "checkout", "-q", "-b", "side")
+		s.write("side.txt", "side\n")
+		s.commit("side")
+		gitT(t, s.repo, "checkout", "-q", "-")
+		s.write("main.txt", "main\n")
+		s.commit("main")
+		gitT(t, s.repo, "merge", "-q", "--no-ff", "--no-commit", "side")
+		add()
+		gitT(t, s.repo, "add", "-A")
+		gitT(t, s.repo, "commit", "-qm", "merge side")
+	}
+	s := rv4Setup(t)
+	merge(s, func() {
+		s.write(".github/workflows/evil.yml", "on: push\n")
+		s.write("conf/app.cfg", "token: "+PushPlaceholder+"\n")
+		s.write("conf/aws.ini", "aws_access_key_id = AKIA"+"7Q2M9X4B6C8D3F5H\n")
+	})
+	p := s.prepare()
+	if !slices.Contains(p.Files, ".github/workflows/evil.yml") || !slices.Contains(p.RunsCode, ".github/workflows/evil.yml") ||
+		!slices.Contains(p.Placeholder, "conf/app.cfg") || !p.Flagged() {
+		t.Errorf("merge-only files: files=%q runsCode=%q placeholder=%q", p.Files, p.RunsCode, p.Placeholder)
+	}
+	found := false
+	for _, f := range p.Secrets {
+		found = found || f.Path == "conf/aws.ini"
+	}
+	if !found {
+		t.Errorf("merge-only secret not scanned: %+v", p.Secrets)
+	}
+
+	s = rv4Setup(t)
+	merge(s, func() { s.write("config/app.env", "API_TOKEN=DC_SECRET_1\n") })
+	_, err := PrepareBranchPush(context.Background(), localExec, s.root, "a1", nil)
+	var pe *BranchPushError
+	if !errors.As(err, &pe) || pe.Kind != "replaced_copy" {
+		t.Errorf("merge-only placeholder of a replaced upload: %v", err)
+	}
+}
