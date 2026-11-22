@@ -842,6 +842,9 @@ func (w *walker) resolveWord(wd Word) Word {
 		if i == 0 && !s.Quoted && strings.HasPrefix(lit, "~") && !isTilde(lit, w.o.flavor()) {
 			v, ok := w.tildePrefix(lit)
 			if !ok {
+				// An account the walker cannot place (~x): the home is unknown,
+				// the path below it is not (~x/.aws/credentials keeps its
+				// literal tail for the classifier, rel-1-0-10:GAP-0898).
 				return Word{Static: false, Reason: ReasonDynamicExpansion, Span: wd.Span, Tail: tildeTail(lit, wd.Segs[1:])}
 			}
 			if s.Glob {
