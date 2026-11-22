@@ -193,7 +193,7 @@ func TestCaptureNamesDedupesAndExposes(t *testing.T) {
 	if err != nil || !c.New {
 		t.Fatalf("capture = %+v %v", c, err)
 	}
-	if c.Entry.Name != "GITHUB_TOKEN" || c.Entry.Target() != "api.github.com" || c.Entry.Source != SourceCaptured || c.Entry.Status() != StatusReady {
+	if c.Entry.Name != "GITHUB_TOKEN" || c.Entry.Target() != "api.github.com" || c.Entry.Source != SourceCaptured || c.Entry.Status() != StatusUnconfirmed {
 		t.Fatalf("entry = %+v", c.Entry)
 	}
 	// Same value again, now exposed by a tool call: no new entry, marked exposed.
@@ -209,7 +209,7 @@ func TestCaptureNamesDedupesAndExposes(t *testing.T) {
 	}
 	// A kind with no obvious API is captured unbound.
 	c4, err := s.Capture(CaptureInput{Value: "AIza" + strings.Repeat("Qq1Ww2Ee3", 4)[:35], Kind: "google-api-key"})
-	if err != nil || c4.Entry.Status() != StatusNeedsHost {
+	if err != nil || c4.Entry.Status() != StatusUnconfirmed || c4.Entry.Host != "" {
 		t.Fatalf("google key = %+v %v", c4, err)
 	}
 	if _, err := s.Capture(CaptureInput{Value: "AKIA" + "IOSFODNN7EXAMPLE", Kind: "aws-access-key-id"}); err == nil {
@@ -326,5 +326,40 @@ func TestReplaceWithTheSameExposedValueIsRefused(t *testing.T) {
 	}
 	if e, _ := s.Get("STRIPE_API_KEY"); e.Exposed {
 		t.Fatal("a new value did not lift the exposure")
+	}
+}
+
+
+// A captured entry is unconfirmed: no sandbox gets it until the person
+// confirms it (a sandbox can post a prompt-shaped call of its own) or
+// replaces its value. An exposed entry cannot be confirmed.
+func TestCapturedEntriesNeedConfirmation(t *testing.T) {
+	s := newStore(t)
+	if _, err := s.Capture(CaptureInput{Value: fakeGitHub(), Kind: "github-token", From: "claudecode prompt in sandbox sb"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.Resolve("GITHUB_TOKEN"); !errors.Is(err, ErrUnconfirmed) || !strings.Contains(err.Error(), "vault confirm GITHUB_TOKEN") {
+		t.Fatalf("resolve unconfirmed = %v", err)
+	}
+	if h, err := s.Hint("GITHUB_TOKEN"); err != nil || h != fakeGitHub()[len(fakeGitHub())-4:] {
+		t.Fatalf("hint = %q %v", h, err)
+	}
+	if e, err := s.Confirm("GITHUB_TOKEN"); err != nil || e.Status() != StatusReady {
+		t.Fatalf("confirm = %+v %v", e, err)
+	}
+	if _, v, err := s.Resolve("GITHUB_TOKEN"); err != nil || v != fakeGitHub() {
+		t.Fatalf("resolve confirmed = %v", err)
+	}
+	if _, err := s.Capture(CaptureInput{Value: fakeStripe(), Kind: "stripe-secret-key", Exposed: true}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Confirm("STRIPE_API_KEY"); !errors.Is(err, ErrExposed) {
+		t.Fatalf("confirm exposed = %v", err)
+	}
+	if _, err := s.ReplaceValue("STRIPE_API_KEY", "sk"+"_live_"+strings.Repeat("Rr3Ss4", 5)); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.Resolve("STRIPE_API_KEY"); err != nil {
+		t.Fatalf("replaced entry = %v", err)
 	}
 }

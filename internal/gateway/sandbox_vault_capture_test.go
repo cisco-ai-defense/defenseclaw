@@ -8,6 +8,7 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"path/filepath"
 	"strings"
@@ -54,7 +55,7 @@ func TestSandboxVaultCapturesPromptSecret(t *testing.T) {
 	out, _ := resp["claude_code_output"].(map[string]interface{})
 	reason, _ := resp["reason"].(string)
 	if resp["action"] != "block" || out["decision"] != "block" || !strings.Contains(reason, "ANTHROPIC_API_KEY") ||
-		!strings.Contains(reason, "--vault ANTHROPIC_API_KEY") {
+		!strings.Contains(reason, "--vault ANTHROPIC_API_KEY") || !strings.Contains(reason, "vault confirm ANTHROPIC_API_KEY") {
 		t.Fatalf("answer = %v", resp)
 	}
 	e, err := st.Get("ANTHROPIC_API_KEY")
@@ -63,6 +64,12 @@ func TestSandboxVaultCapturesPromptSecret(t *testing.T) {
 	}
 	if e.Source != vault.SourceCaptured || e.Exposed || e.Target() != "api.anthropic.com" || !strings.Contains(e.CapturedFrom, "dc-claude-app") {
 		t.Fatalf("entry = %+v", e)
+	}
+	if _, _, err := st.Resolve("ANTHROPIC_API_KEY"); !errors.Is(err, vault.ErrUnconfirmed) {
+		t.Fatalf("a captured entry resolved before confirmation: %v", err)
+	}
+	if _, err := st.Confirm("ANTHROPIC_API_KEY"); err != nil {
+		t.Fatal(err)
 	}
 	if _, v, _ := st.Resolve("ANTHROPIC_API_KEY"); v != key {
 		t.Fatal("the vault does not hold the captured value")

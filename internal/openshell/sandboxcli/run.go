@@ -395,7 +395,9 @@ func (a *App) Run(ctx context.Context, o RunOptions) (err error) {
 		}
 		return problem
 	}
-	a.saveRunLaunch(sb, newRunLaunch(sb, spec, o, llm))
+	rec := newRunLaunch(sb, spec, o, llm)
+	rec.VaultVersions = a.vaultVersions(o.Vault)
+	a.saveRunLaunch(sb, rec)
 	if len(o.Vault) > 0 {
 		if err := a.vault().MarkUsed(o.Vault, sb.Name); err != nil {
 			a.note("could not record the vault secrets' use: " + err.Error())

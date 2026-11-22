@@ -68,8 +68,9 @@ usual (`$STRIPE_API_KEY` in a header). It never holds the value.
   body carries a placeholder, so once a placeholder lands in the conversation
   (the agent ran `env`, say) later model calls of that conversation fail. Start
   a new conversation with `defenseclaw sandbox connect NAME`.
-- A sandbox keeps the secrets it was created with. To give a running sandbox a
-  new or replaced secret, stop it and start a new one.
+- A sandbox keeps the secrets it was created with. To give it a new or
+  replaced secret, delete it and start a new one; a stopped sandbox whose
+  secret changed is not started again.
 
 ## Secrets DefenseClaw captures for you
 
@@ -89,10 +90,17 @@ kinds of secret:
 
 A second, different secret of the same kind gets `_2`, `_3` and so on.
 
+Every captured secret starts **unconfirmed**, and no sandbox gets it until you
+run `defenseclaw sandbox vault confirm NAME`. An agent in a sandbox can make a
+call that looks like your prompt, so a captured value may be one it planted.
+`confirm` shows where the secret came from and the last 4 characters of its
+value before it asks.
+
 - **In a prompt.** The prompt is stopped before it reaches the model. Claude
   Code and Codex hooks cannot edit a prompt, only stop it. Claude Code puts the
   prompt back in its input box: delete the value, send the prompt again, and
-  start a sandbox with `--vault NAME` to let the agent use the secret. The
+  confirm the secret and start a sandbox with `--vault NAME` to let the agent
+  use it. The
   agent's session log inside the sandbox still holds the stopped prompt, and
   the agent could read that file, so delete the sandbox when you are done
   (`defenseclaw sandbox delete NAME`).
@@ -141,7 +149,13 @@ sandbox refuses it until you replace the value:
 
 ![defenseclaw sandbox vault list shows STRIPE_API_KEY as exposed: rotate with the replace command, and sandbox run codex --vault STRIPE_API_KEY refuses it until the value is rotated and replaced](/images/sandboxes/screens/vault-exposed-refused.png)
 
-Values are never printed. `show NAME` gives one secret's details, `replace`
+A sandbox keeps the secrets it was created with. If you later replace, rebind
+or remove one of them, or it is marked exposed, that sandbox is not started
+again (`start`, `connect` or a new `run` in its folder): delete it and start
+a new one.
+
+Values are never printed. `show NAME` gives one secret's details, `confirm`
+accepts a captured one, `replace`
 sets a new value, `bind` sets the host, `rename` changes the variable name and
 `remove` deletes it. See [the sandbox CLI reference](/docs/reference/sandbox-cli#sandbox-vault).
 

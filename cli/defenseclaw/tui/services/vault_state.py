@@ -20,7 +20,7 @@ from typing import Any
 
 _NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
 
-STATUS_TEXT = {"ready": "ready", "needs_host": "needs a host", "exposed": "exposed: rotate"}
+STATUS_TEXT = {"ready": "ready", "needs_host": "needs a host", "exposed": "exposed: rotate", "unconfirmed": "unconfirmed"}
 
 # Multi-step prompts of the add flow: name, then host, then the value.
 PROMPT_ADD_NAME = "add-name"
@@ -224,7 +224,7 @@ class VaultPanelModel:
     def keys(self) -> list[tuple[str, str]]:
         keys = [("a", "add"), ("r", "refresh")]
         if self.entries:
-            keys = [("a", "add"), ("v", "replace value"), ("e", "set host"), ("n", "rename"),
+            keys = [("a", "add"), ("c", "confirm"), ("v", "replace value"), ("e", "set host"), ("n", "rename"),
                     ("d", "delete"), ("enter", "details"), ("r", "refresh")]
         return keys
 
@@ -240,8 +240,17 @@ class VaultPanelModel:
             self.pending_name = self.pending_host = ""
             return VaultPanelAction("prompt", prompt=PROMPT_ADD_NAME)
         row = self.selected()
-        if key in ("v", "e", "n", "d", "enter") and row is None:
+        if key in ("c", "v", "e", "n", "d", "enter") and row is None:
             return VaultPanelAction("none", hint="The vault is empty: press a to add a secret.")
+        if key == "c":
+            if row.status != "unconfirmed":
+                return VaultPanelAction("none", hint=f"{row.name} needs no confirmation.")
+            return VaultPanelAction("intent", VaultCommandIntent(
+                f"sandbox vault confirm {row.name}", ("sandbox", "vault", "confirm", "--yes", row.name),
+                hint=f"Confirm {row.name} is your own secret (captured from {row.captured_from or 'a sandbox'}).",
+                consequence=(f"Sandboxes may then use {row.name}. An agent in a sandbox can make a call that looks like "
+                             "your prompt: confirm only a secret you gave it. Check it with: defenseclaw sandbox vault confirm "
+                             f"{row.name} (it shows the last 4 characters).")))
         if key == "v":
             return VaultPanelAction("prompt", prompt=PROMPT_REPLACE)
         if key == "e":

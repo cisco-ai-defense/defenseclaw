@@ -713,6 +713,17 @@ SANDBOX_COMMANDS: tuple[_Cmd, ...] = (
         flags=(_Flag("value-stdin", "bool", "read the value from standard input (one line)"),),
     ),
     _Cmd(
+        ("vault", "confirm"),
+        "Confirm a captured secret is yours, so sandboxes can use it",
+        long=(
+            "A secret DefenseClaw captured from a sandbox is unconfirmed until you confirm it: an agent in a "
+            "sandbox can make a call that looks like your prompt, so a captured value may be one it planted. "
+            "confirm shows where the secret came from and the last 4 characters of its value, then asks."
+        ),
+        args=(_Arg("name"),),
+        flags=(_Flag("yes", "bool", "do not ask", short="y"),),
+    ),
+    _Cmd(
         ("vault", "bind"),
         "Set the one host a secret may be sent to",
         args=(_Arg("name"),),

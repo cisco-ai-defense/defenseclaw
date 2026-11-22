@@ -252,10 +252,11 @@ func (c *sandboxVaultCapture) message() string {
 		}
 		return fmt.Sprintf("DefenseClaw moved the secret in your prompt into your vault as %s and stopped the prompt "+
 			"before it reached the model. Delete the value from your input and send the prompt again without it.%s To let an "+
-			"agent use it, start a sandbox with `defenseclaw sandbox run <harness> %s`: the agent reads $%s, a placeholder "+
+			"agent use it, check it is yours (`defenseclaw sandbox vault confirm %s`), then start a sandbox with "+
+			"`defenseclaw sandbox run <harness> %s`: the agent reads $%s, a placeholder "+
 			"that OpenShell swaps for the value only on the way to its host. The agent's session log in this sandbox still "+
 			"holds the stopped prompt: delete the sandbox when you are done (`defenseclaw sandbox delete %s`).",
-			strings.Join(kept, ", "), bind, strings.Join(flags, " "), first, sandbox)
+			strings.Join(kept, ", "), bind, first, strings.Join(flags, " "), first, sandbox)
 	}
 	var names []string
 	for _, e := range c.Entries {
