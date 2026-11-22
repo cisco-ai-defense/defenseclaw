@@ -337,7 +337,7 @@ type Snapshot struct {
 	// carried are the live entries of an earlier generation of the
 	// leader's list, kept until they lapse (RV1-07), in sequence order.
 	carried   []Entry
-	tokens    map[string]time.Time // key -> until
+	tokens    map[string]time.Time // person NUL key -> until (tokenSlot)
 	notBefore map[string]time.Time // person -> watermark (a lift removes it)
 	overflow  map[string]time.Time // person -> watermark past the token cap (never lifted)
 	onChange  []func()
@@ -448,8 +448,8 @@ func (s *Snapshot) rebuildLocked(now time.Time) {
 		case e.Lift:
 			delete(s.notBefore, e.Person)
 		case e.Token != "":
-			if e.Until.After(s.tokens[e.Token]) {
-				s.tokens[e.Token] = e.Until
+			if slot := tokenSlot(e.Person, e.Token); e.Until.After(s.tokens[slot]) {
+				s.tokens[slot] = e.Until
 			}
 		case e.Overflow:
 			if e.NotBefore.After(s.overflow[e.Person]) {
@@ -468,6 +468,13 @@ func (s *Snapshot) rebuildLocked(now time.Time) {
 	}
 }
 
+// tokenSlot is where an ended token is looked up: the person who ended it
+// and its key. A key is only unique within one person's tokens (a cluster
+// JWT is keyed by its jti, which two issuers the cluster trusts can both
+// use), so one person's end never refuses another person's token
+// (RV3-03, GAP-0790).
+func tokenSlot(person, key string) string { return person + "\x00" + key }
+
 // Check reports whether a token of person, with key and issue time, may be
 // used: nil, ErrEnded or ErrUnavailable (not loaded, or not synced within
 // MaxStale). A nil snapshot accepts every token.
@@ -481,7 +488,7 @@ func (s *Snapshot) Check(person, key string, issuedAt time.Time) error {
 	if !s.loaded || (s.MaxStale > 0 && now.Sub(s.synced) > s.MaxStale) {
 		return ErrUnavailable
 	}
-	if until, ok := s.tokens[key]; ok && key != "" && now.Before(until) {
+	if until, ok := s.tokens[tokenSlot(person, key)]; ok && key != "" && now.Before(until) {
 		return ErrEnded
 	}
 	if nb, ok := s.notBefore[person]; ok && issuedAt.Before(nb) {

@@ -17,6 +17,7 @@
 package identity
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
@@ -78,15 +79,26 @@ type Person struct {
 // no released version wrote a deny list before it.
 func TokenKey(issuer, jti, token string) string {
 	if jti != "" {
-		s := sha256.Sum256([]byte(issuer + "\x00" + jti))
-		return "jti:" + hex.EncodeToString(s[:16])
+		return claimsTokenKey(issuer, jti, nil)
 	}
 	if claims, ok := jwtClaims(token); ok {
-		s := sha256.Sum256([]byte(issuer + "\x00" + string(claims)))
-		return "clm:" + hex.EncodeToString(s[:16])
+		return claimsTokenKey(issuer, "", claims)
 	}
 	s := sha256.Sum256([]byte(token))
 	return "tok:" + hex.EncodeToString(s[:16])
+}
+
+// claimsTokenKey is the key of a JWT: "jti:" when it has a jti, else
+// "clm:" over claims. The OIDC verifier passes the claims bytes it
+// verified, so the key never depends on how the token text is re-read
+// (RV3-02, GAP-0789).
+func claimsTokenKey(issuer, jti string, claims []byte) string {
+	if jti != "" {
+		s := sha256.Sum256([]byte(issuer + "\x00" + jti))
+		return "jti:" + hex.EncodeToString(s[:16])
+	}
+	s := sha256.Sum256([]byte(issuer + "\x00" + string(claims)))
+	return "clm:" + hex.EncodeToString(s[:16])
 }
 
 // jwtClaims is the decoded claims of a token shaped like a compact JWS, ok
@@ -114,7 +126,8 @@ func jwtClaims(token string) ([]byte, bool) {
 		return r
 	}, parts[1])
 	b, err := base64.RawURLEncoding.DecodeString(part)
-	if err != nil || !json.Valid(b) || len(b) == 0 || b[0] != '{' {
+	// JSON white space may come before the object (RV3-02, GAP-0789).
+	if t := bytes.TrimLeft(b, " \t\r\n"); err != nil || len(t) == 0 || t[0] != '{' || !json.Valid(b) {
 		return nil, false
 	}
 	return b, true
@@ -345,7 +358,7 @@ func (v *PersonVerifier) Verify(ctx context.Context, token string) (Person, erro
 		return Person{}, reasonf(ReasonSubject, "token subject is not a person")
 	}
 	p := Person{Kind: is.Kind, Issuer: c.Issuer, Subject: sub, Expires: time.Unix(*c.Expiry, 0),
-		IssuedAt: time.Unix(*c.IssuedAt, 0), TokenID: c.TokenID, TokenKey: TokenKey(c.Issuer, c.TokenID, token)}
+		IssuedAt: time.Unix(*c.IssuedAt, 0), TokenID: c.TokenID, TokenKey: claimsTokenKey(c.Issuer, c.TokenID, t.claims)}
 	email := c.Email
 	if emailUnverified(raw["email_verified"]) {
 		// The issuer says it has not checked the address (a local user
