@@ -47,6 +47,8 @@ type heldResult struct {
 	put map[string]map[int]bool
 	// notes say what happened to each replaced file the agent touched.
 	notes []string
+	// flags are review flags on replaced files (RiskSecretContext).
+	flags []Flag
 }
 
 // dropHeldBack resets every held-back path in result to its baseline
@@ -130,10 +132,12 @@ func translateSecrets(ctx context.Context, base gitCmd, rec *CopyRecord, changes
 			continue
 		}
 		changed[c.Path] = c
-		if c.NewOID != "" && !c.Binary {
+		// Binary ones too: a placeholder in another file must be seen
+		// whatever git calls it (RV5-7).
+		if c.NewOID != "" {
 			oids = append(oids, c.NewOID)
 		}
-		if c.OldOID != "" && !c.Binary {
+		if c.OldOID != "" {
 			oids = append(oids, c.OldOID)
 		}
 	}
@@ -196,6 +200,22 @@ func translateSecrets(ctx context.Context, base gitCmd, rec *CopyRecord, changes
 			}
 		}
 	}
+	// movedTo names, per replaced file, another changed path that now
+	// holds one of its placeholders: the agent moved or copied it there.
+	movedTo := map[string]string{}
+	for p, c := range changed {
+		if _, ok := byFile[p]; ok || c.NewOID == "" {
+			continue
+		}
+		after := blobs[c.NewOID]
+		for _, rel := range files {
+			for _, l := range byFile[rel] {
+				if _, done := movedTo[rel]; !done && len(tokenAt(after, l.Placeholder)) > 0 {
+					movedTo[rel] = p
+				}
+			}
+		}
+	}
 	for _, rel := range files {
 		c, isChanged := changed[rel]
 		if !isChanged {
@@ -210,6 +230,14 @@ func translateSecrets(ctx context.Context, base gitCmd, rec *CopyRecord, changes
 			continue
 		}
 		if c.NewOID == "" || c.Status == "D" {
+			if to, moved := movedTo[rel]; moved {
+				// A move: the new path stays out (it holds placeholders),
+				// so the deletion does too, or the file would be lost
+				// (GAP-0755).
+				keep(rel)
+				note("%s was moved by the agent to %s: neither change is brought back, as the file held replaced credentials", rel, to)
+				continue
+			}
 			if restore {
 				out.restored = append(out.restored, rel)
 				note("%s was deleted by the agent; --restore-secret-lines deletes it here too", rel)
@@ -226,7 +254,7 @@ func translateSecrets(ctx context.Context, base gitCmd, rec *CopyRecord, changes
 			continue
 		}
 		e := uploaded[rel]
-		t, kept, put, why := translateReplaced(blobs[e.oid], agent, byFile[rel], restore)
+		t, kept, put, near, why := translateReplaced(blobs[e.oid], agent, byFile[rel], restore)
 		if why == "" {
 			var ok bool
 			if t, ok = withValues(t, nil, values[rel]); !ok || copyTokens(t, tokens) > copyTokens(local[rel], tokens) {
@@ -246,6 +274,11 @@ func translateSecrets(ctx context.Context, base gitCmd, rec *CopyRecord, changes
 		out.restored = append(out.restored, rel)
 		for _, n := range kept {
 			note("%s: kept your line %d; the agent changed the line that holds a replaced credential (--restore-secret-lines takes the agent's line)", rel, n)
+		}
+		for _, n := range near {
+			note("%s: line %d holds your credential and the agent changed the lines next to it; check that the change does not send or print the value", rel, n)
+			out.flags = append(out.flags, Flag{Path: rel, Label: rel + ":" + strconv.Itoa(n), Kind: RiskSecretContext, Severity: SeverityInfo,
+				Detail: "the agent changed the lines next to a line that holds a replaced credential"})
 		}
 		if len(put) > 0 {
 			if out.put == nil {
@@ -307,6 +340,16 @@ func lsTree(ctx context.Context, g gitCmd, commit string, paths []string) (map[s
 
 // commitWith commits from's tree with entries set, on top of from.
 func commitWith(ctx context.Context, base gitCmd, rec *CopyRecord, from string, entries map[string]idxEntry, msg string) (string, error) {
+	tree, err := treeWith(ctx, base, rec, from, entries)
+	if err != nil {
+		return "", err
+	}
+	return base.line(ctx, "commit-tree", tree, "-p", from, "-m", msg)
+}
+
+// treeWith writes from's tree (a commit or a tree) with entries set, in
+// base (base.git or the project).
+func treeWith(ctx context.Context, base gitCmd, rec *CopyRecord, from string, entries map[string]idxEntry) (string, error) {
 	tmp := filepath.Join(filepath.Dir(rec.BaseGit), "effective-"+randomSuffix()+".index")
 	defer os.Remove(tmp)
 	g := base
@@ -332,11 +375,7 @@ func commitWith(ctx context.Context, base gitCmd, rec *CopyRecord, from string, 
 		return "", err
 	}
 	g.stdin = nil
-	tree, err := g.line(ctx, "write-tree")
-	if err != nil {
-		return "", err
-	}
-	return g.line(ctx, "commit-tree", tree, "-p", from, "-m", msg)
+	return g.line(ctx, "write-tree")
 }
 
 // secretValues reads the values of rel's replaced credentials from the
@@ -458,8 +497,12 @@ func copyTokens(b []byte, tokens map[string]bool) int {
 // each line that holds a placeholder is the uploaded line when the agent
 // left it, or kept so (kept: the local line numbers), or with restore the
 // agent's line (put: its line numbers). why says why the change cannot
-// land: a placeholder is gone (without restore), repeated or moved.
-func translateReplaced(uploaded, agent []byte, lines []SecretLine, restore bool) (out []byte, kept, put []int, why string) {
+// land: a placeholder is gone (without restore), repeated or moved. near
+// are the agent's line numbers of placeholder lines left in place whose
+// neighbour line the agent added, removed or changed: the value lands, and
+// the review names the line (RV6-3: an agent that wraps the line in place,
+// in a string it sends, kept its anchors and landed with no note).
+func translateReplaced(uploaded, agent []byte, lines []SecretLine, restore bool) (out []byte, kept, put, near []int, why string) {
 	ul, al := splitKeep(uploaded), splitKeep(agent)
 	lineOf := func(ls [][]byte, p string) []int {
 		var at []int
@@ -474,19 +517,41 @@ func translateReplaced(uploaded, agent []byte, lines []SecretLine, restore bool)
 		up    int
 		local int
 	}
+	mu := matchLines(ul, al, func(l []byte) string {
+		for _, s := range lines {
+			if len(tokenAt(l, s.Placeholder)) > 0 {
+				// A placeholder line compares by its placeholders.
+				return "\x00" + strings.Join(placeholderRE.FindAllString(string(l), -1), " ")
+			}
+		}
+		return string(trimEOL(l))
+	})
+	am := make([]bool, len(al))
+	for _, a := range mu {
+		if a >= 0 {
+			am[a] = true
+		}
+	}
+	// beside reports a line next to up line u or agent line i that the
+	// agent added, removed or changed; a blank line does not count.
+	text := func(l []byte) bool { return len(bytes.TrimSpace(l)) > 0 }
+	beside := func(u, i int) bool {
+		return (u > 0 && mu[u-1] < 0 && text(ul[u-1])) || (u+1 < len(ul) && mu[u+1] < 0 && text(ul[u+1])) ||
+			(i > 0 && !am[i-1] && text(al[i-1])) || (i+1 < len(al) && !am[i+1] && text(al[i+1]))
+	}
 	onAgent := map[int][]spot{}
 	ofUp := map[int]int{}
 	for _, l := range lines {
 		u := lineOf(ul, l.Placeholder)
 		if len(u) != 1 || len(tokenAt(uploaded, l.Placeholder)) != 1 {
-			return nil, nil, nil, "the uploaded copy does not hold " + l.Placeholder + " once"
+			return nil, nil, nil, nil, "the uploaded copy does not hold " + l.Placeholder + " once"
 		}
 		ofUp[u[0]]++
 		switch a := tokenAt(agent, l.Placeholder); {
 		case len(a) > 1:
-			return nil, nil, nil, "the agent's version holds " + l.Placeholder + " more than once"
+			return nil, nil, nil, nil, "the agent's version holds " + l.Placeholder + " more than once"
 		case len(a) == 0 && !restore:
-			return nil, nil, nil, "the agent removed or rewrote line " + strconv.Itoa(l.Line) + ", which holds a replaced credential (--restore-secret-lines takes the agent's lines as they are)"
+			return nil, nil, nil, nil, "the agent removed or rewrote line " + strconv.Itoa(l.Line) + ", which holds a replaced credential (--restore-secret-lines takes the agent's lines as they are)"
 		case len(a) == 1:
 			i := lineOf(al, l.Placeholder)[0]
 			onAgent[i] = append(onAgent[i], spot{u[0], l.Line})
@@ -498,7 +563,12 @@ func translateReplaced(uploaded, agent []byte, lines []SecretLine, restore bool)
 		for _, s := range spots {
 			same = same && s.up == u
 		}
+		if same && mu[u] == i && beside(u, i) {
+			near = append(near, i+1)
+		}
 		switch {
+		case mu[u] != i:
+			return nil, nil, nil, nil, "the agent moved a replaced credential to another place in the file"
 		case same && len(spots) == ofUp[u] && bytes.Equal(trimEOL(al[i]), trimEOL(ul[u])):
 			// Left as uploaded.
 		case restore:
@@ -507,12 +577,155 @@ func translateReplaced(uploaded, agent []byte, lines []SecretLine, restore bool)
 			al[i] = append(append([]byte(nil), trimEOL(ul[u])...), al[i][len(trimEOL(al[i])):]...)
 			kept = append(kept, spots[0].local)
 		default:
-			return nil, nil, nil, "the agent moved a replaced credential to another line"
+			return nil, nil, nil, nil, "the agent moved a replaced credential to another line"
 		}
 	}
 	sort.Ints(kept)
 	sort.Ints(put)
-	return bytes.Join(al, nil), kept, put, ""
+	sort.Ints(near)
+	return bytes.Join(al, nil), kept, put, near, ""
+}
+
+// maxLCSCells bounds the longest-common-subsequence step of matchLines:
+// a gap between anchors larger than this many line pairs is left unmatched.
+const maxLCSCells = 1 << 16
+
+// matchLines pairs the lines two versions of a file share, as a line diff
+// does (patience diff): the common start and end, then the lines that
+// occur once in each, in an order both keep, as anchors, and the same
+// again between them; a gap with no such line is matched by a longest
+// common subsequence when it is at most maxLCSCells line pairs. Lines
+// compare by key. mu[i] is the agent line that up line i is paired with,
+// or -1 (removed or changed).
+//
+// The lines that hold a placeholder take part, compared by their
+// placeholders, so a blank line or a brace added or removed above a
+// credential line can't pair duplicate lines across it (RV6-2: the earlier
+// anchoring left those lines out, and a blank line added above the line
+// read as a moved credential and dropped the agent's whole change).
+func matchLines(up, agent [][]byte, key func([]byte) string) []int {
+	uk, ak := make([]string, len(up)), make([]string, len(agent))
+	for i, l := range up {
+		uk[i] = key(l)
+	}
+	for i, l := range agent {
+		ak[i] = key(l)
+	}
+	mu := make([]int, len(up))
+	for i := range mu {
+		mu[i] = -1
+	}
+	var lcs func(u0, u1, a0, a1 int)
+	lcs = func(u0, u1, a0, a1 int) {
+		n, m := u1-u0, a1-a0
+		if n*m > maxLCSCells {
+			return
+		}
+		t := make([]int32, (n+1)*(m+1))
+		at := func(i, j int) *int32 { return &t[i*(m+1)+j] }
+		for i := n - 1; i >= 0; i-- {
+			for j := m - 1; j >= 0; j-- {
+				switch {
+				case uk[u0+i] == ak[a0+j]:
+					*at(i, j) = *at(i+1, j+1) + 1
+				case *at(i+1, j) >= *at(i, j+1):
+					*at(i, j) = *at(i+1, j)
+				default:
+					*at(i, j) = *at(i, j+1)
+				}
+			}
+		}
+		for i, j := 0, 0; i < n && j < m; {
+			switch {
+			case uk[u0+i] == ak[a0+j]:
+				mu[u0+i] = a0 + j
+				i, j = i+1, j+1
+			case *at(i+1, j) >= *at(i, j+1):
+				i++
+			default:
+				j++
+			}
+		}
+	}
+	var diff func(u0, u1, a0, a1 int)
+	diff = func(u0, u1, a0, a1 int) {
+		for u0 < u1 && a0 < a1 && uk[u0] == ak[a0] {
+			mu[u0] = a0
+			u0, a0 = u0+1, a0+1
+		}
+		for u1 > u0 && a1 > a0 && uk[u1-1] == ak[a1-1] {
+			u1, a1 = u1-1, a1-1
+			mu[u1] = a1
+		}
+		if u0 == u1 || a0 == a1 {
+			return
+		}
+		type count struct{ u, a, at int }
+		seen := map[string]*count{}
+		for j := u0; j < u1; j++ {
+			c := seen[uk[j]]
+			if c == nil {
+				c = &count{}
+				seen[uk[j]] = c
+			}
+			c.u++
+		}
+		for j := a0; j < a1; j++ {
+			if c := seen[ak[j]]; c != nil {
+				c.a++
+				c.at = j
+			}
+		}
+		var cand [][2]int
+		for j := u0; j < u1; j++ {
+			if c := seen[uk[j]]; c.u == 1 && c.a == 1 {
+				cand = append(cand, [2]int{j, c.at})
+			}
+		}
+		anchors := increasing(cand)
+		if len(anchors) == 0 {
+			lcs(u0, u1, a0, a1)
+			return
+		}
+		pu, pa := u0, a0
+		for _, p := range anchors {
+			diff(pu, p[0], pa, p[1])
+			mu[p[0]] = p[1]
+			pu, pa = p[0]+1, p[1]+1
+		}
+		diff(pu, u1, pa, a1)
+	}
+	diff(0, len(up), 0, len(agent))
+	return mu
+}
+
+// increasing is the longest run of pairs (in order of their first
+// element) whose second elements increase too.
+func increasing(pairs [][2]int) [][2]int {
+	var tops []int
+	prev := make([]int, len(pairs))
+	for i, p := range pairs {
+		j := sort.Search(len(tops), func(k int) bool { return pairs[tops[k]][1] >= p[1] })
+		prev[i] = -1
+		if j > 0 {
+			prev[i] = tops[j-1]
+		}
+		if j == len(tops) {
+			tops = append(tops, i)
+		} else {
+			tops[j] = i
+		}
+	}
+	out := make([][2]int, len(tops))
+	for k, i := len(tops)-1, -1; k >= 0; k-- {
+		if k == len(tops)-1 {
+			i = tops[k]
+		} else {
+			i = prev[i]
+		}
+		out[k] = pairs[i]
+	}
+	return out
 }
 
 // splitKeep splits b into lines, each with its line end.
@@ -554,23 +767,62 @@ func dropPutFindings(found []ScanFinding, put map[string]map[int]bool) []ScanFin
 }
 
 // landing is what a patch or a branch takes of the pull, whose changes
-// start from start: the effective result without the changes to files
-// uploaded with replaced credentials (Restored). Only the 3-way apply
-// brings those into the folder; a patch file or a branch commit would put
-// the value somewhere new.
+// start from start: the effective result with every file uploaded with
+// replaced credentials as start has it. Only the 3-way apply brings the
+// changes to those files (Restored) into the folder; a patch file or a
+// branch commit would put the value somewhere new.
 func (p *PullResult) landing(ctx context.Context, base gitCmd, rec *CopyRecord, start string) (string, error) {
-	if len(p.Restored) == 0 {
+	files := replacedFiles(rec)
+	if len(files) == 0 {
 		return p.Effective, nil
 	}
-	at, err := lsTree(ctx, base, start, p.Restored)
+	at, err := lsTree(ctx, base, start, files)
 	if err != nil {
 		return "", err
 	}
 	entries := map[string]idxEntry{}
-	for _, r := range p.Restored {
+	for _, r := range files {
 		entries[r] = at[r]
 	}
 	return commitWith(ctx, base, rec, p.Effective, entries, "defenseclaw: sandbox result without changes to files with replaced credentials")
+}
+
+// replacedFiles lists, sorted, the files uploaded with replaced
+// credentials.
+func replacedFiles(rec *CopyRecord) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, l := range rec.SecretLines {
+		if !seen[l.Rel] {
+			seen[l.Rel] = true
+			out = append(out, l.Rel)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// secretFreeTree is tree, in g (the project or base.git), with every file
+// uploaded with replaced credentials as the copy's HEAD has it (absent
+// when HEAD has none): a branch commit never holds such a file anew, with
+// its value or a placeholder (GAP-0753).
+func secretFreeTree(ctx context.Context, g gitCmd, rec *CopyRecord, tree string) (string, error) {
+	files := replacedFiles(rec)
+	if len(files) == 0 {
+		return tree, nil
+	}
+	at := map[string]idxEntry{}
+	if rec.Head != "" {
+		var err error
+		if at, err = lsTree(ctx, g, rec.Head, files); err != nil {
+			return "", err
+		}
+	}
+	entries := map[string]idxEntry{}
+	for _, f := range files {
+		entries[f] = at[f]
+	}
+	return treeWith(ctx, g, rec, tree, entries)
 }
 
 // leftOut says what a patch or a branch leaves out (landing).

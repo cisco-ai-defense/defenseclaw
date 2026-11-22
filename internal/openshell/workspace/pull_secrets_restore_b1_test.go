@@ -1,3 +1,5 @@
+//go:build !windows
+
 package workspace
 
 import (
@@ -42,16 +44,15 @@ func s9aRemoved(t *testing.T, restore bool) {
 	{
 		e, fs, key := s9aCopy(t, "s9r2")
 		fs.write(remoteRepo+"/config.py", "import os\nTOKEN = os.environ[\"TOKEN\"]\nprint(TOKEN)\n")
-		var pr *PullResult
 		if restore {
-			pr = pullRestore(t, e, fs, "s9r2")
+			pullRestore(t, e, fs, "s9r2")
 		} else {
-			pr = pull(t, e, fs, "s9r2")
+			pr := pull(t, e, fs, "s9r2")
 			if !hasNote(pr, "removed or rewrote line 2") {
 				t.Fatalf("no note: %q", pr.Review.Warnings)
 			}
 			fs.write(remoteRepo+"/README.md", "agent readme\n")
-			pr = pull(t, e, fs, "s9r2")
+			pull(t, e, fs, "s9r2")
 		}
 		mustApply(t, e, "s9r2")
 		want := "import os\nTOKEN = \"" + key + "\"\nprint(TOKEN)\n"
@@ -78,7 +79,7 @@ func TestB1PlaceholderTokens(t *testing.T) {
 	if _, ok := withValues([]byte("x DC_SECRET_1 DC_SECRET_1"), []SecretLine{{Placeholder: "DC_SECRET_1"}}, nil); ok {
 		t.Fatal("a repeated placeholder passed")
 	}
-	if _, _, _, why := translateReplaced([]byte("k = DC_SECRET_1\n"), []byte("k = DC_SECRET_1\nj = DC_SECRET_1\n"), []SecretLine{{Placeholder: "DC_SECRET_1", Line: 1}}, true); !strings.Contains(why, "more than once") {
+	if _, _, _, _, why := translateReplaced([]byte("k = DC_SECRET_1\n"), []byte("k = DC_SECRET_1\nj = DC_SECRET_1\n"), []SecretLine{{Placeholder: "DC_SECRET_1", Line: 1}}, true); !strings.Contains(why, "more than once") {
 		t.Fatalf("why = %q", why)
 	}
 }
