@@ -87,3 +87,85 @@ func TestB1RV5SandboxGitOnReplacedTrackedFile(t *testing.T) {
 		})
 	}
 }
+
+// branchLeaks fails when anything reachable from branch holds key or a
+// placeholder.
+func branchLeaks(t *testing.T, e *env, branch, key string, absent ...string) {
+	t.Helper()
+	all := e.git(e.project, "log", "-p", "--format=%H %s", branch)
+	if strings.Contains(all, key) && !strings.Contains(e.git(e.project, "log", "-p", "--format=%H %s", "HEAD"), key) {
+		t.Errorf("the value is reachable from branch %s", branch)
+	}
+	if strings.Contains(all, "DC_SECRET_") {
+		t.Errorf("a placeholder is reachable from branch %s", branch)
+	}
+	for _, a := range absent {
+		if strings.Contains(all, a) {
+			t.Errorf("branch %s ancestry holds %q", branch, a)
+		}
+	}
+	if n := strings.TrimSpace(e.git(e.project, "rev-list", "--count", "HEAD.."+branch)); n != "1" {
+		t.Errorf("branch %s is %s commits on HEAD, want 1", branch, n)
+	}
+}
+
+// GAP-0753: the sandbox changed a file the folder had uncommitted edits
+// to, so the branch keeps the whole result: an untracked file uploaded
+// with replaced credentials must not land on it with its value.
+func TestB1RV5BranchKeptEditsLeavesReplacedFileOut(t *testing.T) {
+	e := newEnv(t)
+	e.initRepo()
+	writeFile(t, e.project, "app.py", "a = 1\n")
+	e.git(e.project, "add", "app.py")
+	e.git(e.project, "commit", "-q", "-m", "app")
+	key := b1Key(0)
+	writeFile(t, e.project, "creds.py", "TOKEN = \""+key+"\"\n")
+	writeFile(t, e.project, "app.py", "a = 2\n")
+	_, fs := launchCopy(t, e, "rv52a", func(o *StageOptions) { o.RewriteSecrets = PlaceholderToken })
+	if got := s9aRemote(t, fs, "creds.py"); strings.Contains(got, key) {
+		t.Fatalf("upload holds the key: %q", got)
+	}
+	fs.write(remoteRepo+"/app.py", "a = 3\n")
+	pull(t, e, fs, "rv52a")
+	res, err := apply(e, "rv52a", ApplyBranch, func(o *ApplyOptions) { o.AcceptSensitive, o.Force = true, true })
+	if err != nil {
+		t.Fatalf("branch: %v", err)
+	}
+	if tip := e.git(e.project, "ls-tree", "-r", "--name-only", res.Branch); strings.Contains(tip, "creds.py") || !strings.Contains(tip, "app.py") {
+		t.Errorf("branch tree = %q, want app.py without creds.py", tip)
+	}
+	if got := e.git(e.project, "show", res.Branch+":app.py"); got != "a = 3" {
+		t.Errorf("branch app.py = %q, want the sandbox's", got)
+	}
+	branchLeaks(t, e, res.Branch, key)
+}
+
+// GAP-0753: a clean folder; the agent changed the replaced file and a
+// plain one. The branch is one commit on HEAD with the plain change only:
+// neither the agent's change to the replaced file nor a placeholder is in
+// its ancestry.
+func TestB1RV5BranchOneCommitOnHead(t *testing.T) {
+	e, fs, key := s9aCopy(t, "rv52b")
+	fs.write(remoteRepo+"/config.py", strings.Replace(s9aRemote(t, fs, "config.py"), "import os\n", "import os, AGENTEDIT\n", 1))
+	fs.write(remoteRepo+"/notes.md", "agent notes\n")
+	if out, err := sandboxGit(fs, "commit", "-qam", "agent commit"); err != nil {
+		t.Fatalf("sandbox commit: %v %s", err, out)
+	}
+	pull(t, e, fs, "rv52b")
+	res, err := apply(e, "rv52b", ApplyBranch, func(o *ApplyOptions) { o.AcceptSensitive, o.Force = true, true })
+	if err != nil {
+		t.Fatalf("branch: %v", err)
+	}
+	if got := e.git(e.project, "show", res.Branch+":notes.md"); got != "agent notes" {
+		t.Errorf("branch notes.md = %q", got)
+	}
+	if got := e.git(e.project, "show", res.Branch+":config.py"); got != strings.TrimSpace(e.git(e.project, "show", "HEAD:config.py")) {
+		t.Errorf("branch config.py = %q, want HEAD's", got)
+	}
+	branchLeaks(t, e, res.Branch, key, "AGENTEDIT")
+	// Made again, the branch is recognized as holding the same work.
+	pull(t, e, fs, "rv52b")
+	if _, err := apply(e, "rv52b", ApplyBranch, func(o *ApplyOptions) { o.AcceptSensitive = true }); err != nil {
+		t.Errorf("second branch apply: %v", err)
+	}
+}

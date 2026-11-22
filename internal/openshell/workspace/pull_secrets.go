@@ -307,6 +307,16 @@ func lsTree(ctx context.Context, g gitCmd, commit string, paths []string) (map[s
 
 // commitWith commits from's tree with entries set, on top of from.
 func commitWith(ctx context.Context, base gitCmd, rec *CopyRecord, from string, entries map[string]idxEntry, msg string) (string, error) {
+	tree, err := treeWith(ctx, base, rec, from, entries)
+	if err != nil {
+		return "", err
+	}
+	return base.line(ctx, "commit-tree", tree, "-p", from, "-m", msg)
+}
+
+// treeWith writes from's tree (a commit or a tree) with entries set, in
+// base (base.git or the project).
+func treeWith(ctx context.Context, base gitCmd, rec *CopyRecord, from string, entries map[string]idxEntry) (string, error) {
 	tmp := filepath.Join(filepath.Dir(rec.BaseGit), "effective-"+randomSuffix()+".index")
 	defer os.Remove(tmp)
 	g := base
@@ -332,11 +342,7 @@ func commitWith(ctx context.Context, base gitCmd, rec *CopyRecord, from string, 
 		return "", err
 	}
 	g.stdin = nil
-	tree, err := g.line(ctx, "write-tree")
-	if err != nil {
-		return "", err
-	}
-	return g.line(ctx, "commit-tree", tree, "-p", from, "-m", msg)
+	return g.line(ctx, "write-tree")
 }
 
 // secretValues reads the values of rel's replaced credentials from the
@@ -554,23 +560,62 @@ func dropPutFindings(found []ScanFinding, put map[string]map[int]bool) []ScanFin
 }
 
 // landing is what a patch or a branch takes of the pull, whose changes
-// start from start: the effective result without the changes to files
-// uploaded with replaced credentials (Restored). Only the 3-way apply
-// brings those into the folder; a patch file or a branch commit would put
-// the value somewhere new.
+// start from start: the effective result with every file uploaded with
+// replaced credentials as start has it. Only the 3-way apply brings the
+// changes to those files (Restored) into the folder; a patch file or a
+// branch commit would put the value somewhere new.
 func (p *PullResult) landing(ctx context.Context, base gitCmd, rec *CopyRecord, start string) (string, error) {
-	if len(p.Restored) == 0 {
+	files := replacedFiles(rec)
+	if len(files) == 0 {
 		return p.Effective, nil
 	}
-	at, err := lsTree(ctx, base, start, p.Restored)
+	at, err := lsTree(ctx, base, start, files)
 	if err != nil {
 		return "", err
 	}
 	entries := map[string]idxEntry{}
-	for _, r := range p.Restored {
+	for _, r := range files {
 		entries[r] = at[r]
 	}
 	return commitWith(ctx, base, rec, p.Effective, entries, "defenseclaw: sandbox result without changes to files with replaced credentials")
+}
+
+// replacedFiles lists, sorted, the files uploaded with replaced
+// credentials.
+func replacedFiles(rec *CopyRecord) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, l := range rec.SecretLines {
+		if !seen[l.Rel] {
+			seen[l.Rel] = true
+			out = append(out, l.Rel)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// secretFreeTree is tree, in g (the project or base.git), with every file
+// uploaded with replaced credentials as the copy's HEAD has it (absent
+// when HEAD has none): a branch commit never holds such a file anew, with
+// its value or a placeholder (GAP-0753).
+func secretFreeTree(ctx context.Context, g gitCmd, rec *CopyRecord, tree string) (string, error) {
+	files := replacedFiles(rec)
+	if len(files) == 0 {
+		return tree, nil
+	}
+	at := map[string]idxEntry{}
+	if rec.Head != "" {
+		var err error
+		if at, err = lsTree(ctx, g, rec.Head, files); err != nil {
+			return "", err
+		}
+	}
+	entries := map[string]idxEntry{}
+	for _, f := range files {
+		entries[f] = at[f]
+	}
+	return treeWith(ctx, g, rec, tree, entries)
 }
 
 // leftOut says what a patch or a branch leaves out (landing).
