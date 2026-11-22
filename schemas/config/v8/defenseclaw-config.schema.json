@@ -8049,6 +8049,21 @@
           "minimum": 0,
           "maximum": 68719476736
         },
+        "launcher": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "key_replay": {
+              "type": "string",
+              "enum": [
+                "ask",
+                "on",
+                "off"
+              ],
+              "default": "ask"
+            }
+          }
+        },
         "unattended": {
           "type": "object",
           "additionalProperties": false,

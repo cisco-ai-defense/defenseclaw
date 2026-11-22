@@ -247,6 +247,11 @@
         "metavar": "NAME"
       },
       {
+        "name": "key-replay",
+        "type": "string",
+        "usage": "keys typed while the connection is down: ask (show them, Enter sends), on (send) or off (drop); only tightens the cluster setting"
+      },
+      {
         "name": "no-asks",
         "type": "bool",
         "default": "false",
@@ -946,6 +951,11 @@
         "type": "bool",
         "default": "false",
         "usage": "keep the agent after a finished --task (default: it stays until you delete it)"
+      },
+      {
+        "name": "key-replay",
+        "type": "string",
+        "usage": "keys typed while the connection is down: ask (show them, Enter sends), on (send) or off (drop); only tightens the cluster setting"
       },
       {
         "name": "max-upload-mb",

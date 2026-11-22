@@ -33,6 +33,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/calloutapi"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/chainstate"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/identity"
@@ -153,6 +154,7 @@ func (a *APIServer) newSubstrateAdminHandler(st *substrateState) http.Handler {
 	mux.HandleFunc("GET /api/v1/substrate/launcher", func(w http.ResponseWriter, _ *http.Request) {
 		writeSubstrateJSON(w, http.StatusOK, map[string]any{
 			"workspace_max_bytes": substrateWorkspaceMax(st.cfg.WorkspaceMaxBytes),
+			"key_replay":          substrateKeyReplay(st.cfg.KeyReplay),
 		})
 	})
 	mux.HandleFunc("GET /api/v1/substrate/asks", a.substrateListAsks(st))
@@ -930,4 +932,13 @@ func substrateCalloutAuthorized(st *substrateState, r *http.Request) bool {
 func readAllLimited(r io.Reader, n int64) ([]byte, bool) {
 	b, err := io.ReadAll(io.LimitReader(r, n+1))
 	return b, err == nil && int64(len(b)) <= n
+}
+
+// substrateKeyReplay is substrate.launcher.key_replay for launchers; ask when
+// the listener has no live reader.
+func substrateKeyReplay(read func() string) string {
+	if read == nil {
+		return config.SubstrateKeyReplayAsk
+	}
+	return read()
 }

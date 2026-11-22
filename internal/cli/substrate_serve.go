@@ -551,6 +551,8 @@ func substrateGatewayBuilder(c *config.Config, src *configwatch.Watcher, ready *
 			SignInServer: substrateSignInServer(people),
 			// E23: the workspace cap of an upload through attach.
 			WorkspaceMaxBytes: c.Substrate.EffectiveWorkspaceMaxBytes(),
+			// B3.1: read live, so the admin-off switch applies to the next attach.
+			KeyReplay: func() string { return live().Substrate.Launcher.EffectiveKeyReplay() },
 			Doctor: func(ctx context.Context) []gateway.SubstrateCheck {
 				return []gateway.SubstrateCheck{gateway.SubstrateUpstreamCheck(ctx,
 					gateway.DefaultSubstrateLLMProviders(serveFlags.llmCredDir, serveFlags.bedrockRegion), c.Guardrail.AllowPrivateUpstreams, nil),

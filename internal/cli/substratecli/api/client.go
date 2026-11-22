@@ -303,6 +303,9 @@ func (e *Error) StatusCode() int { return e.Status }
 // LauncherSettings holds the cluster's limits and defaults for the launcher.
 type LauncherSettings struct {
 	WorkspaceMaxBytes int64 `json:"workspace_max_bytes"`
+	// KeyReplay is substrate.launcher.key_replay (ask, on or off); ""
+	// from a gateway that predates it.
+	KeyReplay string `json:"key_replay,omitempty"`
 }
 
 // Launcher reads settings from the signed-in admin listener. A gateway

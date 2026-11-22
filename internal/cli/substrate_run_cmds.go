@@ -42,6 +42,7 @@ type substrateRunFlags struct {
 	maxUploadMB int
 	secrets     []string
 	transport   string
+	keyReplay   string
 	noAsks      bool
 	keep        bool
 	yes         bool
@@ -105,6 +106,7 @@ to the agent.`,
 	fl.StringArrayVar(&f.secrets, "secret", nil, "a secret name the agent may use, as listed by secrets list (repeatable)")
 	fl.StringVar(&f.transport, "transport", "auto", "how to carry the terminal: auto, websocket or longpoll")
 	fl.BoolVar(&f.noAsks, "no-asks", false, "do not show guard questions on this terminal")
+	fl.StringVar(&f.keyReplay, "key-replay", "", keyReplayHelp)
 	fl.BoolVar(&f.keep, "keep", false, "keep the agent after a finished --task (default: it stays until you delete it)")
 	fl.BoolVarP(&f.yes, "yes", "y", false, "answer questions with their defaults")
 	fl.StringVar(&f.workload, "workload-token-file", "", "CI: file holding the workload identity token")
@@ -119,6 +121,7 @@ type substrateAttachFlags struct {
 	com       substrateCommon
 	transport string
 	noAsks    bool
+	keyReplay string
 }
 
 func newSubstrateConnectCmd() *cobra.Command {
@@ -137,6 +140,7 @@ shows, or the --name you gave run when only one agent has it.`,
 	f.com.add(cmd)
 	cmd.Flags().StringVar(&f.transport, "transport", "auto", "how to carry the terminal: auto, websocket or longpoll")
 	cmd.Flags().BoolVar(&f.noAsks, "no-asks", false, "do not show guard questions on this terminal")
+	cmd.Flags().StringVar(&f.keyReplay, "key-replay", "", keyReplayHelp)
 	return cmd
 }
 
@@ -251,3 +255,6 @@ func newSubstrateUndoCmd() *cobra.Command {
 	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "do not ask")
 	return cmd
 }
+
+// keyReplayHelp is the --key-replay help of run and connect (B3.1).
+const keyReplayHelp = "keys typed while the connection is down: ask (show them, Enter sends), on (send) or off (drop); only tightens the cluster setting"

@@ -71,13 +71,16 @@ type SubstrateConfig struct {
 	ChainEgressAction string `mapstructure:"chain_egress_action" yaml:"chain_egress_action,omitempty"`
 	// WorkspaceMaxBytes caps a workspace upload through the admin
 	// listener's attach route (E23; 0 = DefaultSubstrateWorkspaceMaxBytes).
-	WorkspaceMaxBytes int64                     `mapstructure:"workspace_max_bytes" yaml:"workspace_max_bytes,omitempty"`
-	Unattended        SubstrateUnattendedConfig `mapstructure:"unattended"         yaml:"unattended,omitempty"`
-	RateLimits        SubstrateRateLimitsConfig `mapstructure:"rate_limits"        yaml:"rate_limits,omitempty"`
-	Extproc           SubstrateExtprocConfig    `mapstructure:"extproc"            yaml:"extproc,omitempty"`
-	LLM               SubstrateLLMConfig        `mapstructure:"llm"                yaml:"llm,omitempty"`
-	Egress            SubstrateEgressConfig     `mapstructure:"egress"             yaml:"egress,omitempty"`
-	Secrets           []SubstrateSecret         `mapstructure:"secrets"            yaml:"secrets,omitempty"`
+	WorkspaceMaxBytes int64 `mapstructure:"workspace_max_bytes" yaml:"workspace_max_bytes,omitempty"`
+	// Launcher holds what the gateway tells launchers (GET
+	// /api/v1/substrate/launcher), read live.
+	Launcher   SubstrateLauncherConfig   `mapstructure:"launcher" yaml:"launcher,omitempty"`
+	Unattended SubstrateUnattendedConfig `mapstructure:"unattended"         yaml:"unattended,omitempty"`
+	RateLimits SubstrateRateLimitsConfig `mapstructure:"rate_limits"        yaml:"rate_limits,omitempty"`
+	Extproc    SubstrateExtprocConfig    `mapstructure:"extproc"            yaml:"extproc,omitempty"`
+	LLM        SubstrateLLMConfig        `mapstructure:"llm"                yaml:"llm,omitempty"`
+	Egress     SubstrateEgressConfig     `mapstructure:"egress"             yaml:"egress,omitempty"`
+	Secrets    []SubstrateSecret         `mapstructure:"secrets"            yaml:"secrets,omitempty"`
 	// AllowPassthroughFor lists hosts forwarded without inspection
 	// (certificate pinning). A secret is never bound to one.
 	AllowPassthroughFor []string `mapstructure:"allow_passthrough_for" yaml:"allow_passthrough_for,omitempty"`
@@ -474,6 +477,31 @@ func (s SubstrateConfig) EffectiveWorkspaceMaxBytes() int64 {
 	return DefaultSubstrateWorkspaceMaxBytes
 }
 
+// SubstrateLauncherConfig is substrate.launcher: launcher behaviour the
+// cluster admin sets for everyone.
+type SubstrateLauncherConfig struct {
+	// KeyReplay is what a launcher does with keys typed while its terminal
+	// link is down (B3.1): ask (default) shows them after the reconnect and
+	// sends them on Enter, on sends them, off drops them with a count. A
+	// launcher flag can only tighten it; off is the admin-off switch.
+	KeyReplay string `mapstructure:"key_replay" yaml:"key_replay,omitempty"`
+}
+
+// Key replay modes (substrate.launcher.key_replay).
+const (
+	SubstrateKeyReplayAsk = "ask"
+	SubstrateKeyReplayOn  = "on"
+	SubstrateKeyReplayOff = "off"
+)
+
+// EffectiveKeyReplay is substrate.launcher.key_replay, ask when unset.
+func (l SubstrateLauncherConfig) EffectiveKeyReplay() string {
+	if v := strings.ToLower(strings.TrimSpace(l.KeyReplay)); v != "" {
+		return v
+	}
+	return SubstrateKeyReplayAsk
+}
+
 // Chain egress actions (substrate.chain_egress_action).
 const (
 	SubstrateChainEgressBlock = "block"
@@ -620,6 +648,11 @@ func (s *SubstrateConfig) Validate() error {
 	case SubstrateChainEgressBlock, SubstrateChainEgressAlert:
 	default:
 		bad("chain_egress_action", "%q is not block or alert", s.ChainEgressAction)
+	}
+	switch s.Launcher.EffectiveKeyReplay() {
+	case SubstrateKeyReplayAsk, SubstrateKeyReplayOn, SubstrateKeyReplayOff:
+	default:
+		bad("launcher.key_replay", "%q is not ask, on or off", s.Launcher.KeyReplay)
 	}
 	if a := s.API.Address; a != "" {
 		if _, port, err := net.SplitHostPort(a); err != nil || port == "" {

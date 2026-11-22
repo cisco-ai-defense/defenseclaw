@@ -117,15 +117,19 @@ func substrateBanner(ctx context.Context, cl *api.Client, a api.Actor) attach.Ba
 	return b
 }
 
-func substrateAttachOptions(cmd *cobra.Command, s *substrateSession, a api.Actor, transport string, noAsks bool) (attach.Options, error) {
+func substrateAttachOptions(cmd *cobra.Command, s *substrateSession, a api.Actor, transport string, noAsks bool, keyReplay string) (attach.Options, error) {
 	tr, err := substrateTransport(transport)
+	if err != nil {
+		return attach.Options{}, err
+	}
+	replay, err := substrateKeyReplay(cmd, s, keyReplay)
 	if err != nil {
 		return attach.Options{}, err
 	}
 	o := attach.Options{
 		Target:  attach.Target{Atespace: a.Atespace, Name: a.Name},
 		Gateway: attach.Gateway{BaseURL: s.Ctx.AdminURL, CAFile: s.Ctx.AdminCAFile}, Bearer: s.Bearer, In: os.Stdin, Out: cmd.OutOrStdout(), Err: cmd.ErrOrStderr(),
-		Transport: tr, NoAsks: noAsks,
+		Transport: tr, NoAsks: noAsks, KeyReplay: replay,
 	}
 	// The agent starts in the copy of the project, so what it writes where
 	// it starts comes back with pull (GAP-0163). A computer that did not
@@ -179,7 +183,7 @@ func runSubstrateConnect(cmd *cobra.Command, f *substrateAttachFlags, ref string
 	if a.State == substrateStateCrashed {
 		return substrateFail(substrateCrashedErr(a))
 	}
-	o, err := substrateAttachOptions(cmd, s, a, f.transport, f.noAsks)
+	o, err := substrateAttachOptions(cmd, s, a, f.transport, f.noAsks, f.keyReplay)
 	if err != nil {
 		return err
 	}
@@ -577,7 +581,7 @@ func runSubstrateRun(cmd *cobra.Command, f *substrateRunFlags, args []string) er
 	if err != nil {
 		return err
 	}
-	o, err := substrateAttachOptions(cmd, s, a, f.transport, f.noAsks)
+	o, err := substrateAttachOptions(cmd, s, a, f.transport, f.noAsks, f.keyReplay)
 	if err != nil {
 		return err
 	}
@@ -604,7 +608,7 @@ func runSubstrateOneTask(ctx context.Context, cmd *cobra.Command, s *substrateSe
 	if err != nil {
 		return -1, err
 	}
-	o, err := substrateAttachOptions(cmd, s, a, f.transport, true)
+	o, err := substrateAttachOptions(cmd, s, a, f.transport, true, attach.KeyReplayOff)
 	if err != nil {
 		return -1, err
 	}
@@ -843,4 +847,26 @@ func uniqueSubstrateActorName(label, agent string) string {
 		base = strings.Trim(base[:40], "-")
 	}
 	return base + "-" + newSubstrateID(4)
+}
+
+// substrateKeyReplay is what happens to keys typed while the terminal link
+// is down (B3.1): the tighter of the cluster's substrate.launcher.key_replay
+// and the --key-replay flag, which can only tighten it. A gateway that does
+// not report it (older than this launcher) leaves the default, ask.
+func substrateKeyReplay(cmd *cobra.Command, s *substrateSession, flag string) (string, error) {
+	if flag != "" && !attach.ValidKeyReplay(flag) {
+		return "", cliusage.WithExitCode(fmt.Errorf("--key-replay %q: use ask, on or off", flag), 2)
+	}
+	if flag == attach.KeyReplayOff || s == nil || s.Client == nil {
+		return attach.TightestKeyReplay("", flag), nil
+	}
+	ctx := cmd.Context()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	settings, err := s.Client.Launcher(ctx)
+	if err != nil {
+		return attach.TightestKeyReplay("", flag), nil
+	}
+	return attach.TightestKeyReplay(settings.KeyReplay, flag), nil
 }

@@ -266,3 +266,16 @@ The launcher shows the staged size and the largest top-level directories before 
 Use `--exclude 'data/**'` to omit a large directory, or `--clone REPO_URL` to start from Git.
 Administrators set the cap with `substrate.workspace_max_bytes`. A run can lower it with
 `--max-upload-mb`. Rebuild an older actor template to use a cluster limit over 1 GiB.
+
+## Keys typed while disconnected (Preview)
+
+If the connection drops while you type, the launcher keeps those keys in memory and never sends them to a screen you cannot see.
+When it reconnects, the last line shows them, for example `7 keys typed while disconnected: "git sta". Enter sends them, Esc drops them.`
+Control keys show as `^X`. Any other key drops them and goes to the agent.
+
+Nothing is replayed after more than 4 KiB of input, an outage longer than 60 seconds, or `Ctrl-\` (the key that answers a DefenseClaw ask).
+The launcher then says how many characters to type again. Keys sent just before the connection dropped may already have reached the agent,
+so they are never replayed; the launcher says how many to check.
+
+Use `--key-replay on` to send them without asking, or `--key-replay off` to drop them. Administrators set `substrate.launcher.key_replay`;
+the flag can only tighten it.

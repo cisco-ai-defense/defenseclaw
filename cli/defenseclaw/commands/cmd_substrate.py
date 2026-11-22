@@ -241,6 +241,14 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
         args=(_Arg("name"),),
         flags=(
             _Flag("context", "string", "cluster to use (default: the one you signed in to last)", metavar="NAME"),
+            _Flag(
+                "key-replay",
+                "string",
+                (
+                    "keys typed while the connection is down: ask (show them, Enter sends), on (send) or off (drop); "
+                    "only tightens the cluster setting"
+                ),
+            ),
             _Flag("no-asks", "bool", "do not show guard questions on this terminal"),
             _Flag(
                 "transport",
@@ -638,6 +646,14 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             ),
             _Flag("json", "bool", "same as --output json"),
             _Flag("keep", "bool", "keep the agent after a finished --task (default: it stays until you delete it)"),
+            _Flag(
+                "key-replay",
+                "string",
+                (
+                    "keys typed while the connection is down: ask (show them, Enter sends), on (send) or off (drop); "
+                    "only tightens the cluster setting"
+                ),
+            ),
             _Flag("max-upload-mb", "int", "lower the cluster upload limit for this copy, in MiB", default="0"),
             _Flag(
                 "name",

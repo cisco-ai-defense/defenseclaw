@@ -59,7 +59,7 @@ func runSubstrateLogs(cmd *cobra.Command, out *substrateOutput, com *substrateCo
 		// GAP-0420: no wait for an agent that cannot answer.
 		return substrateFail(substrateCrashedErr(a))
 	}
-	o, err := substrateAttachOptions(cmd, s, a, "auto", true)
+	o, err := substrateAttachOptions(cmd, s, a, "auto", true, attach.KeyReplayOff)
 	if err != nil {
 		return err
 	}
