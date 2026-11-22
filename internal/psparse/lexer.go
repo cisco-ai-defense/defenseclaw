@@ -343,10 +343,27 @@ func (l *lexer) lexHereString() {
 	}
 	// Terminator: a line that begins with  "@  (or '@), i.e. the quote then @
 	// at the start of a line.
+	// In an expandable here-string pwsh finds the end of a $( ) by counting
+	// $( and ) as in a "..." string, and a "@ line inside it does not end the
+	// string: @"<nl>$(@"<nl>x<nl>"@)<nl>"@ is one string (GAP-1853). The
+	// nested parse of the $( ) body carries the depth bound (ps_depth_limit).
+	depth := 0
 	for l.i < len(l.runes) {
+		if kind == StrHereDouble {
+			if l.cur() == '$' && l.peek(1) == '(' {
+				depth++
+				l.i += 2
+				continue
+			}
+			if l.cur() == ')' && depth > 0 {
+				depth--
+				l.i++
+				continue
+			}
+		}
 		atLineStart := l.i == 0 || l.runes[l.i-1] == '\n'
 		sameClass := (kind == StrHereSingle && isSingleQuote(l.cur())) || (kind == StrHereDouble && isDoubleQuote(l.cur()))
-		if atLineStart && sameClass && l.peek(1) == '@' {
+		if depth == 0 && atLineStart && sameClass && l.peek(1) == '@' {
 			l.i += 2
 			t := Token{Kind: TokString, Str: kind, Raw: l.slice(a, l.i), Start: l.byteAt(a), End: l.byteAt(l.i)}
 			t.Value = t.Raw

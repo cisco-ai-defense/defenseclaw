@@ -94,7 +94,13 @@ func TestOracleRowsSeeEveryCommand(t *testing.T) {
 	for _, r := range rows {
 		r := r
 		t.Run(r.class+"/"+r.id, func(t *testing.T) {
-			if miss, got := missingCommands(r.src, r.names); len(miss) > 0 {
+			miss, got := missingCommands(r.src, r.names)
+			if r.class == "gap1853" && len(miss) > 0 && len(miss) < len(r.names) && hasDepthLimit(r.src) {
+				// nesting past the parse depth bound: the commands below it may
+				// be unread, but only with a ps_depth_limit diagnostic
+				return
+			}
+			if len(miss) > 0 {
 				t.Errorf("reader misses %q (pwsh reads %q, reader %q)", miss, r.names, got)
 			}
 		})
@@ -211,6 +217,49 @@ func TestGAP1851BracketWordAndOperatorCommandWord(t *testing.T) {
 		}
 		if strings.Join(got, "|") != strings.Join(c.want, "|") {
 			t.Errorf("%q: commands %q, want %q", c.src, got, c.want)
+		}
+	}
+}
+
+func hasDepthLimit(src string) bool {
+	sc, _ := Parse(src, Options{})
+	for _, d := range sc.Diagnostics {
+		if d.Reason == ReasonDepthLimit {
+			return true
+		}
+	}
+	return false
+}
+
+// TestGAP1853NestedHereStringDepth: a "@ line inside a $( ) of an expandable
+// here-string ends the nested here-string, not the outer one (pwsh counts $(
+// and ) as in a "..." string), so every nested command is read; past the parse
+// depth bound the reader emits ps_depth_limit and still reads the commands
+// around the string. Red at the det111/engine-train-2 tip.
+func TestGAP1853NestedHereStringDepth(t *testing.T) {
+	nest := func(n int) string {
+		s := "$(Get-X)"
+		for i := 0; i < n; i++ {
+			s = "$(@\"\n" + s + "\n\"@)"
+		}
+		return "Write-Output @\"\n" + s + "\n\"@; Remove-Item y"
+	}
+	for _, n := range []int{1, 3, 20} {
+		src := nest(n)
+		if miss, got := missingCommands(src, []string{"write-output", "get-x", "remove-item"}); len(miss) > 0 {
+			t.Errorf("depth %d: reader misses %q (reader %q)", n, miss, got)
+		}
+		if hasDepthLimit(src) {
+			t.Errorf("depth %d: unexpected ps_depth_limit", n)
+		}
+	}
+	for _, n := range []int{maxDepth + 10, 999} {
+		src := nest(n)
+		if miss, got := missingCommands(src, []string{"write-output", "remove-item"}); len(miss) > 0 {
+			t.Errorf("depth %d: reader misses %q (reader %d commands)", n, miss, len(got))
+		}
+		if !hasDepthLimit(src) {
+			t.Errorf("depth %d: no ps_depth_limit diagnostic past the bound", n)
 		}
 	}
 }
