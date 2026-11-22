@@ -484,7 +484,7 @@ func (s *Store) ReplaceValue(name, value string) (Entry, error) {
 // last 4 characters of the value, for the person to recognise it.
 func (s *Store) Confirm(name string) (Entry, error) {
 	var out Entry
-	err := s.update(func(f *file) error {
+	err := s.update(needNothing, func(f *file) error {
 		i := f.index(name)
 		if i < 0 {
 			return fmt.Errorf("%w: %s", ErrNotFound, name)
