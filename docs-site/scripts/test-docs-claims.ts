@@ -2002,7 +2002,7 @@ const r105Rows: DocRow[] = [
   // pod docs it3 (2026-10-28)
   { gap: "GAP-2264", page: "hitl.mdx", has: ["Outside Manual mode Claude Code cannot ask, so the call is blocked and its row shows `decision=blocked` in the list and `blocked` on the `Decision` line of `--show`."], lacks: ["Outside Manual mode, the decision is `block`."] },
   { gap: "GAP-2264", page: "stories/hitl-approvals.mdx", has: ["Outside Manual mode Claude Code cannot ask, so the call is blocked and its row shows `decision=blocked` in the list and `blocked` on the `Decision` line of `--show`."], lacks: ["Outside Manual mode, the decision is `block`."] },
-  { gap: "GAP-2260", page: "routing/semantic-routing.mdx", has: ["On native Windows `defenseclaw setup routing --enable` says so and refuses while the classifier is `vllm_sr`, pointing to `defenseclaw routing setup --classifier rules`; `--disable` still turns off a routing block copied from another machine."] },
+  { gap: "GAP-2260", page: "routing/semantic-routing.mdx", has: ["On native Windows `defenseclaw setup routing` says so and refuses `--enable`; `--disable` still turns off a routing block copied from another machine."] },
   { gap: "GAP-2334", page: "enterprise/mdm/linux-config-management.mdx", section: "Check health", has: ["| Kit detection script | `packaging/mdm/linux/detect.sh --require-healthy` (exit `1`, or `unhealthy` with `--format value`, when `verify` reports a problem, `coverage_complete` is `false`, or `security_complete` is `false` for any reason other than `hook_process_fail_open`, `unprivileged_user_namespaces` and `unprivileged_ptrace`; a host with only those warnings passes and gets them on standard error). Add `--require-security-complete` to fail on incomplete security too |"], lacks: ["| Kit detection script | `packaging/mdm/linux/detect.sh --require-healthy` |", "a host whose `verify` passes with incomplete security still fails it", "a host whose `verify` passes with only incomplete security passes"] },
   // pod docs r105 loop i1 (2026-10-28)
   { gap: "GAP-2411", page: "enterprise/troubleshooting.mdx", has: ["On Linux and macOS `status` warns `policy_not_applied` with `policy.applied: false` and `security_complete: false`, and `verify` reports it as an error and exits `1`."], lacks: ["`policy.applied: false` and do not warn"] },
@@ -2501,11 +2501,11 @@ describe('alerts decision label for a hook block matches the HITL pages (GAP-226
   });
 });
 
-// GAP-2260 / GAP-1724 / GAP-1785: setup routing refuses --enable on native Windows only for the vllm_sr classifier; semantic-routing.mdx says so.
+// GAP-2260: setup routing refuses --enable on native Windows; semantic-routing.mdx says so.
 describe('setup routing on native Windows matches semantic-routing.mdx (GAP-2260)', () => {
-  it('refuses --enable for vllm_sr and names the reason on native Windows', () => {
+  it('refuses --enable and names the reason on native Windows', () => {
     const py = source('cli/defenseclaw/commands/cmd_setup.py');
-    assert.ok(py.includes('if enable and _routing_unsupported_on_host(app.cfg.routing):') && py.includes('return _native_windows() and routing_classifier(routing) == DEFAULT_CLASSIFIER') && py.includes('"The vllm_sr classifier is not available on native Windows: it needs Docker or a remote "') && py.includes('"defenseclaw routing setup --classifier rules"'), 'setup routing no longer refuses --enable on native Windows: re-check semantic-routing.mdx Prerequisites');
+    assert.ok(py.includes('if enable and _routing_unsupported_on_host():') && py.includes('"Semantic routing is not supported on native Windows: it routes OpenClaw and "'), 'setup routing no longer refuses --enable on native Windows: re-check semantic-routing.mdx Prerequisites');
   });
 });
 

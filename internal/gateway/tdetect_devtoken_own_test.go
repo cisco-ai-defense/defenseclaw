@@ -23,10 +23,6 @@ func TestOwnDeveloperTokenReadIsJudgedLikeOwnCloudCredentialsFiveTiers(t *testin
 	}
 	const home = "/home/alice"
 	t.Setenv("HOME", home)
-	// The install window reads DEFENSECLAW_HOME, else HOME/.defenseclaw. Keep it in a
-	// private folder: on a host with a real, unreadable /home/alice the lock read
-	// fails, counts as held and the strict tier blocks.
-	t.Setenv("DEFENSECLAW_HOME", t.TempDir())
 	cwd := home + "/proj"
 	files := []struct{ kind, relative string }{
 		{"aws", ".aws/credentials"},

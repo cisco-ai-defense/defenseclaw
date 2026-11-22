@@ -173,8 +173,7 @@ type App struct {
 	DockerEngine func(ctx context.Context) (string, error)
 	// DockerVMLandlock is the Landlock ABI of Docker Desktop's Linux VM
 	// kernel, probed in a local image (openshell.DockerVMLandlockABI), which
-	// decides dockerDesktopRefusal. It is also the doctor's probe
-	// (defaultDoctor): one probe for both (rel-1-0-10:GAP-1746).
+	// decides dockerDesktopRefusal.
 	DockerVMLandlock func(ctx context.Context) (abi int, kernel string, err error)
 	// Sleep waits between polls (tests make it instant).
 	Sleep func(context.Context, time.Duration) error
@@ -368,7 +367,15 @@ func (a *App) defaults() {
 		}
 		if a.DockerVMLandlock == nil {
 			a.DockerVMLandlock = func(ctx context.Context) (int, string, error) {
-				return openshell.DockerVMLandlockABI(ctx, openshell.ExecRunner{}, append([]string{openshell.DefaultBaseImage}, a.harnessImageTags()...))
+				images := []string{openshell.DefaultBaseImage}
+				if a.Images != nil {
+					if recs, err := a.Images.List(); err == nil {
+						for _, r := range recs {
+							images = append(images, r.Tag)
+						}
+					}
+				}
+				return openshell.DockerVMLandlockABI(ctx, openshell.ExecRunner{}, images)
 			}
 		}
 		if a.ConfigPath == "" && a.Cfg != nil {
@@ -832,23 +839,4 @@ func adminNextStep(v *sandboxapi.Violation, why string) string {
 		}
 	}
 	return ""
-}
-
-// harnessImageTags are the harness images DefenseClaw built, all on the
-// OpenShell base image: Docker Desktop's Linux VM is probed for Landlock in
-// the first one on this machine after the base image, by sandbox run and
-// by the doctor alike.
-func (a *App) harnessImageTags() []string {
-	if a.Images == nil {
-		return nil
-	}
-	recs, err := a.Images.List()
-	if err != nil {
-		return nil
-	}
-	tags := make([]string, 0, len(recs))
-	for _, r := range recs {
-		tags = append(tags, r.Tag)
-	}
-	return tags
 }

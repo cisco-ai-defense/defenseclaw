@@ -133,7 +133,6 @@ NEWER_CONFIG_KEYS = (
     ("openshell.admin.unattended_asks", (1, 0, 10)),
     ("openshell.admin.url_rules", (1, 0, 10)),
     ("substrate", (1, 0, 10)),
-    ("enterprise.openshell.allow_downgrade", (1, 0, 11)),
     ("ai_discovery.include_skill_manifests", (1, 0, 11)),
 )
 # More keys added after 1.0.9, in the same path language: a "*" segment is
