@@ -1752,6 +1752,14 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/gateway-test"
+          # The tests find repository files from their own source paths
+          # (runtime.Caller), which the compiler records. Compile from the
+          # path the macOS runner checks out to, so those paths hold there;
+          # each darwin-gateway part checks that it runs from this path.
+          mac_workspace="/Users/runner/work/${GITHUB_REPOSITORY#*/}/${GITHUB_REPOSITORY#*/}"
+          sudo mkdir -p "$mac_workspace"
+          sudo mount --bind "$GITHUB_WORKSPACE" "$mac_workspace"
+          cd "$mac_workspace"
           time go test -c -o "$RUNNER_TEMP/gateway-test/gateway.test" ./internal/gateway
           # upload-artifact drops the executable bit; the tar keeps it.
           tar -C "$RUNNER_TEMP/gateway-test" -cf "$RUNNER_TEMP/darwin-gateway-test.tar" gateway.test
@@ -1813,6 +1821,13 @@ jobs:
           TMPDIR="$(cd "$RUNNER_TEMP/go-tmp" && pwd -P)"
           export TMPDIR
           tar -C "$RUNNER_TEMP" -xf "$RUNNER_TEMP/darwin-gateway-test.tar"
+          # The binary was compiled from this path on Linux (see Darwin
+          # Gateway Test Binary); its tests read repository files there.
+          mac_workspace="/Users/runner/work/${GITHUB_REPOSITORY#*/}/${GITHUB_REPOSITORY#*/}"
+          if [ "$GITHUB_WORKSPACE" != "$mac_workspace" ]; then
+            echo "::error::the darwin gateway test binary was compiled for $mac_workspace, this runner checked out to $GITHUB_WORKSPACE"
+            exit 1
+          fi
           pkg=internal/gateway
           pattern="$(scripts/go-unix-test-pattern.sh "$pkg")"
           echo "$pkg: $(tr '|' '\n' <<<"$pattern" | wc -l | tr -d ' ') unix and darwin tests"
