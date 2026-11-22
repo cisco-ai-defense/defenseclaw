@@ -51,16 +51,16 @@ type r3TierRoute struct {
 // not, is held to at least its lane-off (1.0.10) verdict; a pending row that
 // reaches its target in every cell of a run fails the run (r3Ratchet.finish).
 var r3VerdictPending = map[string]string{
-	"GAP-0898": "peer and mounted-home credential reads need resolver passwd-home facts (S4-R3; read row in Decide, S1-MECH)",
-	"GAP-0899": "mounted-home credential read needs a resolver passwd-home fact (S4-R3; read row in Decide, S1-MECH)",
-	"GAP-1677": "alias/peer tilde targets remain Maybe until every row is resolver-known (S4-R3)",
-	"GAP-0443": "wildcard followed by .. is a file-system answer and stays Maybe (S4-R3)",
-	"GAP-1573": "find below an in-call link stays Maybe until subtree resolution is known (S4-R3)",
-	"GAP-1244": "the PWD pattern replacement form remains Maybe (S4-R3)",
-	"GAP-1678": "cp destination file/directory ambiguity remains Maybe (S4-R3)",
-	"GAP-1156": "cd inside a PowerShell function body is not tracked (S4-R3, S3-R1)",
-	"GAP-1553": "an 8.3 short name stays Maybe until the resolver reads it (S4-R3)",
-	"GAP-1556": "an unknown PowerShell environment folder stays Maybe (S4-R3)",
+	"GAP-0898":  "peer and mounted-home credential reads need resolver passwd-home facts (S4-R3; read row in Decide, S1-MECH)",
+	"GAP-0899":  "mounted-home credential read needs a resolver passwd-home fact (S4-R3; read row in Decide, S1-MECH)",
+	"GAP-1677":  "alias/peer tilde targets remain Maybe until every row is resolver-known (S4-R3)",
+	"GAP-0443":  "wildcard followed by .. is a file-system answer and stays Maybe (S4-R3)",
+	"GAP-1573c": "find below an in-call link stays Maybe until subtree resolution is known (S4-R3)",
+	"GAP-1244":  "the PWD pattern replacement form remains Maybe (S4-R3)",
+	"GAP-1678":  "cp destination file/directory ambiguity remains Maybe (S4-R3)",
+	"GAP-1156":  "cd inside a PowerShell function body is not tracked (S4-R3, S3-R1)",
+	"GAP-1553":  "an 8.3 short name stays Maybe until the resolver reads it (S4-R3)",
+	"GAP-1556":  "an unknown PowerShell environment folder stays Maybe (S4-R3)",
 }
 
 // r3Ratchet judges R3 rows cell by cell: the lane-off floor, the target, and
