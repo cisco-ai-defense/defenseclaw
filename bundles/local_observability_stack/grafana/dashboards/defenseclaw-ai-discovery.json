@@ -334,11 +334,11 @@
           "type": "loki",
           "uid": "defenseclaw-loki"
         },
-        "definition": "label_values({service_name=\"defenseclaw\", host_name=~\"$host\"}, defenseclaw_sandbox_name)",
+        "definition": "label_values({service_name=~\"defenseclaw|defenseclaw-cowork-vm\", host_name=~\"$host\"}, defenseclaw_sandbox_name)",
         "query": {
           "label": "defenseclaw_sandbox_name",
           "refId": "LokiVariableQueryEditor-VariableQuery",
-          "stream": "{service_name=\"defenseclaw\", host_name=~\"$host\"}",
+          "stream": "{service_name=~\"defenseclaw|defenseclaw-cowork-vm\", host_name=~\"$host\"}",
           "type": 1
         },
         "refresh": 2,
@@ -1608,7 +1608,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (host_name, user_id, user_name, ide, plugin, version, enabled, ai, record) (count_over_time({service_name=\"defenseclaw\"} | host_name=~\"$host\" | json | __error__=\"\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"(?i)$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | event_name=~\"ide[.]plugin[.](discovered|changed|removed)\" | label_format user_id=\"{{.body_user_id}}\", user_name=\"{{.body_defenseclaw_user_name}}\", ide=\"{{.body_defenseclaw_ide_product}}\", plugin=\"{{.body_defenseclaw_ide_plugin_id}}\", version=\"{{.body_defenseclaw_ide_plugin_version}}\", enabled=\"{{.body_defenseclaw_ide_plugin_enabled}}\", ai=\"{{.body_defenseclaw_ide_plugin_ai}}\", record=\"{{.event_name}}\" [$__range]))",
+          "expr": "sum by (host_name, user_id, user_name, ide, plugin, version, enabled, ai, record) (count_over_time({service_name=~\"defenseclaw|defenseclaw-cowork-vm\"} | host_name=~\"$host\" | json | __error__=\"\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"(?i)$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | event_name=~\"ide[.]plugin[.](discovered|changed|removed)\" | label_format user_id=\"{{.body_user_id}}\", user_name=\"{{.body_defenseclaw_user_name}}\", ide=\"{{.body_defenseclaw_ide_product}}\", plugin=\"{{.body_defenseclaw_ide_plugin_id}}\", version=\"{{.body_defenseclaw_ide_plugin_version}}\", enabled=\"{{.body_defenseclaw_ide_plugin_enabled}}\", ai=\"{{.body_defenseclaw_ide_plugin_ai}}\", record=\"{{.event_name}}\" [$__range]))",
           "queryType": "instant",
           "datasource": {
             "type": "loki",
@@ -1951,7 +1951,7 @@
       },
       "targets": [
         {
-          "expr": "{service_name=\"defenseclaw\"} | host_name=~\"$host\" | json | __error__=\"\" | event_name=\"ai.discovery.completed\"",
+          "expr": "{service_name=~\"defenseclaw|defenseclaw-cowork-vm\"} | host_name=~\"$host\" | json | __error__=\"\" | event_name=\"ai.discovery.completed\"",
           "refId": "A",
           "datasource": {
             "type": "loki",
@@ -1982,7 +1982,7 @@
       },
       "targets": [
         {
-          "expr": "{service_name=\"defenseclaw\"} | host_name=~\"$host\" | defenseclaw_sandbox_name=~\"$sandbox\" | json | __error__=\"\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"(?i)$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | event_name=~\"ai_component[.](discovered|changed|confidence[.]changed|removed)\"",
+          "expr": "{service_name=~\"defenseclaw|defenseclaw-cowork-vm\"} | host_name=~\"$host\" | defenseclaw_sandbox_name=~\"$sandbox\" | json | __error__=\"\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"(?i)$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | event_name=~\"ai_component[.](discovered|changed|confidence[.]changed|removed)\"",
           "refId": "A",
           "datasource": {
             "type": "loki",
@@ -2013,7 +2013,7 @@
       },
       "targets": [
         {
-          "expr": "{service_name=~\"defenseclaw|defenseclaw-audit\"} | host_name=~\"$host\" | json | __error__=\"\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"(?i)$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | event_name=~\"ai[.]discovery[.]completed|ai_component[.](discovered|changed|confidence[.]changed|removed)\" | line_format \"{{.severity}} | scan={{.body_defenseclaw_ai_discovery_scan_id}} signal={{.body_defenseclaw_ai_discovery_signal_id}} detector={{.body_defenseclaw_ai_discovery_signal}} component={{.body_defenseclaw_ai_component_type}} vendor={{.body_defenseclaw_ai_component_vendor}} product={{.body_defenseclaw_ai_component_product}} user={{.body_defenseclaw_user_name}}\"",
+          "expr": "{service_name=~\"defenseclaw|defenseclaw-audit|defenseclaw-cowork-vm\"} | host_name=~\"$host\" | json | __error__=\"\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"(?i)$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | event_name=~\"ai[.]discovery[.]completed|ai_component[.](discovered|changed|confidence[.]changed|removed)\" | line_format \"{{.severity}} | scan={{.body_defenseclaw_ai_discovery_scan_id}} signal={{.body_defenseclaw_ai_discovery_signal_id}} detector={{.body_defenseclaw_ai_discovery_signal}} component={{.body_defenseclaw_ai_component_type}} vendor={{.body_defenseclaw_ai_component_vendor}} product={{.body_defenseclaw_ai_component_product}} user={{.body_defenseclaw_user_name}}\"",
           "refId": "A"
         }
       ],
@@ -2052,7 +2052,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (sandbox, vendor, product, component, record) (count_over_time({service_name=\"defenseclaw\"} | host_name=~\"$host\" | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_sandbox_name!=\"\" | json | __error__=\"\" | event_name=~\"ai_component[.](discovered|observed|changed|removed)\" | label_format sandbox=\"{{.defenseclaw_sandbox_name}}\", vendor=\"{{.body_defenseclaw_ai_component_vendor}}\", product=\"{{.body_defenseclaw_ai_component_product}}\", component=\"{{.body_defenseclaw_ai_component_type}}\", record=\"{{.event_name}}\" [$__range]))",
+          "expr": "sum by (sandbox, vendor, product, component, record) (count_over_time({service_name=~\"defenseclaw|defenseclaw-cowork-vm\"} | host_name=~\"$host\" | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_sandbox_name!=\"\" | json | __error__=\"\" | event_name=~\"ai_component[.](discovered|observed|changed|removed)\" | label_format sandbox=\"{{.defenseclaw_sandbox_name}}\", vendor=\"{{.body_defenseclaw_ai_component_vendor}}\", product=\"{{.body_defenseclaw_ai_component_product}}\", component=\"{{.body_defenseclaw_ai_component_type}}\", record=\"{{.event_name}}\" [$__range]))",
           "queryType": "instant",
           "datasource": {
             "type": "loki",
