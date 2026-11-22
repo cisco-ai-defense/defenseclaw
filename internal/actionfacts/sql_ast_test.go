@@ -157,3 +157,26 @@ func TestSQLASTDoesNotPromoteStringTokensToMutations(t *testing.T) {
 		t.Fatalf("string token sequence became mutations: %#v", parsed.mutations)
 	}
 }
+
+func TestSQLASTClosesLegacyDestructiveSQLMisses(t *testing.T) {
+	cases := []struct {
+		name, query, command string
+		want                 SQLMutationOperation
+	}{
+		{"quoted DROP", `DROP TABLE "users";`, `psql -d production -c 'DROP TABLE "users";'`, SQLMutationDropTable},
+		{"CTE DELETE", "WITH d AS (DELETE FROM users RETURNING 1) SELECT 1;", `psql -d production -c 'WITH d AS (DELETE FROM users RETURNING 1) SELECT 1;'`, SQLMutationDeleteUnbounded},
+		{"DO EXECUTE DROP", "DO $$BEGIN EXECUTE 'DROP TABLE x'; END$$;", "psql -d production <<'SQL'\nDO $$BEGIN EXECUTE 'DROP TABLE x'; END$$;\nSQL", SQLMutationDropTable},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			if _, _, _, ok := exactSQLMutation("postgresql", test.query); ok {
+				t.Fatalf("legacy SQL classifier unexpectedly covered miss %q", test.query)
+			}
+			facts := Analyze(Input{Tool: "shell", Command: test.command})
+			mutations := ExactSQLMutations(facts)
+			if len(mutations) != 1 || mutations[0].Operation != test.want {
+				t.Fatalf("new SQL AST mutations = %#v", mutations)
+			}
+		})
+	}
+}
