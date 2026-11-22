@@ -1128,7 +1128,7 @@ func selectFiles(root string, candidates []string, scanOpts secretScanOptions, m
 	}
 	held := scan.held
 	rec.SecretLines = scan.lines
-	rec.NotScanned = append(append([]string(nil), scan.tooBig...), scan.late...)
+	rec.NotScanned = scan.notScanned()
 	rec.Warnings = append(rec.Warnings, notScannedWarnings(scan, scanOpts.maxFileBytes, scanOpts.timeBudget)...)
 	// What --unmask shared, and what it named that the copy does not take
 	// (git-ignored files never go): both were silent (GAP-0248).

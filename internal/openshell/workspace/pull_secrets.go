@@ -130,10 +130,12 @@ func translateSecrets(ctx context.Context, base gitCmd, rec *CopyRecord, changes
 			continue
 		}
 		changed[c.Path] = c
-		if c.NewOID != "" && !c.Binary {
+		// Binary ones too: a placeholder in another file must be seen
+		// whatever git calls it (RV5-7).
+		if c.NewOID != "" {
 			oids = append(oids, c.NewOID)
 		}
-		if c.OldOID != "" && !c.Binary {
+		if c.OldOID != "" {
 			oids = append(oids, c.OldOID)
 		}
 	}
@@ -196,6 +198,22 @@ func translateSecrets(ctx context.Context, base gitCmd, rec *CopyRecord, changes
 			}
 		}
 	}
+	// movedTo names, per replaced file, another changed path that now
+	// holds one of its placeholders: the agent moved or copied it there.
+	movedTo := map[string]string{}
+	for p, c := range changed {
+		if _, ok := byFile[p]; ok || c.NewOID == "" {
+			continue
+		}
+		after := blobs[c.NewOID]
+		for _, rel := range files {
+			for _, l := range byFile[rel] {
+				if _, done := movedTo[rel]; !done && len(tokenAt(after, l.Placeholder)) > 0 {
+					movedTo[rel] = p
+				}
+			}
+		}
+	}
 	for _, rel := range files {
 		c, isChanged := changed[rel]
 		if !isChanged {
@@ -210,6 +228,14 @@ func translateSecrets(ctx context.Context, base gitCmd, rec *CopyRecord, changes
 			continue
 		}
 		if c.NewOID == "" || c.Status == "D" {
+			if to, moved := movedTo[rel]; moved {
+				// A move: the new path stays out (it holds placeholders),
+				// so the deletion does too, or the file would be lost
+				// (GAP-0755).
+				keep(rel)
+				note("%s was moved by the agent to %s: neither change is brought back, as the file held replaced credentials", rel, to)
+				continue
+			}
 			if restore {
 				out.restored = append(out.restored, rel)
 				note("%s was deleted by the agent; --restore-secret-lines deletes it here too", rel)
@@ -480,6 +506,14 @@ func translateReplaced(uploaded, agent []byte, lines []SecretLine, restore bool)
 		up    int
 		local int
 	}
+	gu, ga := lineGaps(ul, al, func(l []byte) bool {
+		for _, s := range lines {
+			if len(tokenAt(l, s.Placeholder)) > 0 {
+				return true
+			}
+		}
+		return false
+	})
 	onAgent := map[int][]spot{}
 	ofUp := map[int]int{}
 	for _, l := range lines {
@@ -505,6 +539,8 @@ func translateReplaced(uploaded, agent []byte, lines []SecretLine, restore bool)
 			same = same && s.up == u
 		}
 		switch {
+		case gu[u] != ga[i]:
+			return nil, nil, nil, "the agent moved a replaced credential to another place in the file"
 		case same && len(spots) == ofUp[u] && bytes.Equal(trimEOL(al[i]), trimEOL(ul[u])):
 			// Left as uploaded.
 		case restore:
@@ -519,6 +555,109 @@ func translateReplaced(uploaded, agent []byte, lines []SecretLine, restore bool)
 	sort.Ints(kept)
 	sort.Ints(put)
 	return bytes.Join(al, nil), kept, put, ""
+}
+
+// lineGaps anchors two versions of a file on the lines they share, the
+// lines holding a placeholder (held) left out: the common start and end,
+// and between them the lines that occur once in each, in an order both
+// keep (as patience diff does). gu and ga give each line of up and agent
+// the number of anchors before it: a placeholder line is where it was
+// uploaded only when both numbers agree (GAP-0754).
+func lineGaps(up, agent [][]byte, held func([]byte) bool) (gu, ga []int) {
+	var ui, ai []int
+	for i, l := range up {
+		if !held(l) {
+			ui = append(ui, i)
+		}
+	}
+	for i, l := range agent {
+		if !held(l) {
+			ai = append(ai, i)
+		}
+	}
+	uk := func(j int) string { return string(trimEOL(up[ui[j]])) }
+	ak := func(j int) string { return string(trimEOL(agent[ai[j]])) }
+	var pairs [][2]int
+	lo := 0
+	for lo < len(ui) && lo < len(ai) && uk(lo) == ak(lo) {
+		pairs = append(pairs, [2]int{lo, lo})
+		lo++
+	}
+	hu, ha := len(ui), len(ai)
+	var tail [][2]int
+	for hu > lo && ha > lo && uk(hu-1) == ak(ha-1) {
+		hu, ha = hu-1, ha-1
+		tail = append(tail, [2]int{hu, ha})
+	}
+	type count struct{ u, a, at int }
+	seen := map[string]*count{}
+	for j := lo; j < hu; j++ {
+		c := seen[uk(j)]
+		if c == nil {
+			c = &count{}
+			seen[uk(j)] = c
+		}
+		c.u++
+	}
+	for j := lo; j < ha; j++ {
+		if c := seen[ak(j)]; c != nil {
+			c.a++
+			c.at = j
+		}
+	}
+	var cand [][2]int
+	for j := lo; j < hu; j++ {
+		if c := seen[uk(j)]; c.u == 1 && c.a == 1 {
+			cand = append(cand, [2]int{j, c.at})
+		}
+	}
+	pairs = append(pairs, increasing(cand)...)
+	for k := len(tail) - 1; k >= 0; k-- {
+		pairs = append(pairs, tail[k])
+	}
+	gu, ga = make([]int, len(up)), make([]int, len(agent))
+	for x, k := 0, 0; x < len(up); x++ {
+		for k < len(pairs) && ui[pairs[k][0]] < x {
+			k++
+		}
+		gu[x] = k
+	}
+	for x, k := 0, 0; x < len(agent); x++ {
+		for k < len(pairs) && ai[pairs[k][1]] < x {
+			k++
+		}
+		ga[x] = k
+	}
+	return gu, ga
+}
+
+// increasing is the longest run of pairs (in order of their first
+// element) whose second elements increase too.
+func increasing(pairs [][2]int) [][2]int {
+	var tops []int
+	prev := make([]int, len(pairs))
+	for i, p := range pairs {
+		j := sort.Search(len(tops), func(k int) bool { return pairs[tops[k]][1] >= p[1] })
+		prev[i] = -1
+		if j > 0 {
+			prev[i] = tops[j-1]
+		}
+		if j == len(tops) {
+			tops = append(tops, i)
+		} else {
+			tops[j] = i
+		}
+	}
+	out := make([][2]int, len(tops))
+	for k, i := len(tops)-1, -1; k >= 0; k-- {
+		if k == len(tops)-1 {
+			i = tops[k]
+		} else {
+			i = prev[i]
+		}
+		out[k] = pairs[i]
+	}
+	return out
 }
 
 // splitKeep splits b into lines, each with its line end.

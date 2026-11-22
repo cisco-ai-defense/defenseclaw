@@ -19,12 +19,15 @@ package workspace
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
+	"unicode/utf16"
 
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
@@ -89,9 +92,15 @@ type copyScan struct {
 	// were replaced; lines says where each value was.
 	rewritten map[string][]byte
 	lines     []SecretLine
-	// tooBig and late were not content-scanned: over the per-file limit,
-	// or past the time budget.
-	tooBig, late []string
+	// tooBig, late, binary and unread were not content-scanned: over the
+	// per-file limit, past the time budget, binary (a NUL byte that is not
+	// UTF-16 text) or not readable (GAP-0756).
+	tooBig, late, binary, unread []string
+}
+
+// notScanned lists every file the content scan did not read.
+func (s *copyScan) notScanned() []string {
+	return slices.Concat(s.tooBig, s.late, s.binary, s.unread)
 }
 
 // found reports whether the scan held back or rewrote any file.
@@ -145,13 +154,22 @@ func detectSecretsIn(root string, rels []string, opts secretScanOptions) (*copyS
 			continue
 		}
 		content, err := readSmallRegular(p, maxFile)
-		if err != nil || looksBinary(content) {
+		if err != nil {
+			res.unread = append(res.unread, rel)
 			continue
 		}
-		if _, ok := opts.detector.DetectSecret(rel, content); !ok {
+		// UTF-16 text (a .ps1 or .reg saved by Windows tools) is scanned
+		// as its UTF-8 form and held back when it holds a credential: its
+		// spans are not the file's bytes.
+		text, wide := decodeUTF16(content)
+		if !wide && looksBinary(content) {
+			res.binary = append(res.binary, rel)
 			continue
 		}
-		if opts.rewrite == "" || spanner == nil {
+		if _, ok := opts.detector.DetectSecret(rel, text); !ok {
+			continue
+		}
+		if opts.rewrite == "" || spanner == nil || wide {
 			res.held = append(res.held, rel)
 			continue
 		}
@@ -167,6 +185,27 @@ func detectSecretsIn(root string, rels []string, opts secretScanOptions) (*copyS
 		res.lines = append(res.lines, lines...)
 	}
 	return res, nil
+}
+
+// decodeUTF16 returns b as UTF-8 when it is UTF-16 text with a byte
+// order mark (wide true), else b itself.
+func decodeUTF16(b []byte) ([]byte, bool) {
+	var order binary.ByteOrder
+	switch {
+	case len(b) < 2 || len(b)%2 != 0:
+		return b, false
+	case b[0] == 0xff && b[1] == 0xfe:
+		order = binary.LittleEndian
+	case b[0] == 0xfe && b[1] == 0xff:
+		order = binary.BigEndian
+	default:
+		return b, false
+	}
+	u := make([]uint16, 0, len(b)/2-1)
+	for i := 2; i < len(b); i += 2 {
+		u = append(u, order.Uint16(b[i:]))
+	}
+	return []byte(string(utf16.Decode(u))), true
 }
 
 // replaceSpans writes content with each span replaced by the next
@@ -237,6 +276,12 @@ func notScannedWarnings(s *copyScan, maxFile int64, budget time.Duration) []stri
 	if n := len(s.late); n > 0 {
 		w = append(w, fmt.Sprintf("%d file(s) not scanned for secrets because the scan used its %s (upload_scan.time_budget): %s",
 			n, budget, strings.Join(firstN(s.late, 5), ", ")))
+	}
+	if n := len(s.binary); n > 0 {
+		w = append(w, fmt.Sprintf("%d file(s) not scanned for secrets because they look binary: %s", n, strings.Join(firstN(s.binary, 5), ", ")))
+	}
+	if n := len(s.unread); n > 0 {
+		w = append(w, fmt.Sprintf("%d file(s) not scanned for secrets because they could not be read: %s", n, strings.Join(firstN(s.unread, 5), ", ")))
 	}
 	return w
 }
