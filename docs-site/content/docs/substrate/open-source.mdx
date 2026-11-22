@@ -309,6 +309,8 @@ As in OpenShell copy mode, you see the changed files first, with any file that c
 
 To send your own newer changes to the agent, run `defenseclaw substrate push claude-b66c97d1` in the folder (Preview). It sends what you changed since the last send, with the same rules as the first copy, after a restore point. If the agent changed one of the same files, it sends nothing and lists them; choose `--mine`, `--theirs` or `--patch-out FILE`.
 
+To keep sending while you work, run `defenseclaw substrate sync claude-b66c97d1 --watch` in the folder (Preview). It sends each change a second after you save it, with the same rules, until you press Ctrl-C. A file the agent also changed keeps the agent's version, and sync names it once.
+
 To go back in time, `defenseclaw substrate checkpoint claude-b66c97d1` saves a restore point of the agent's folder, and `defenseclaw substrate undo claude-b66c97d1` returns the folder to the last one and discards what the agent changed since. It asks first.
 
 </Step>

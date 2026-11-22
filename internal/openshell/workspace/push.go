@@ -194,6 +194,10 @@ func PlanPush(ctx context.Context, opts PushPlanOptions) (*PushPlan, error) {
 	return p, nil
 }
 
+// HeavyDirOf is the package-cache folder above rel ("web/node_modules/"),
+// or "": the folders a copy leaves out.
+func HeavyDirOf(rel string) string { return heavyDirOf(rel) }
+
 // stageGitDir is the git directory of a staged copy.
 func stageGitDir(rec *CopyRecord) string {
 	if rec.Kind == CopyPlain {

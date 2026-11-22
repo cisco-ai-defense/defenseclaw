@@ -17,13 +17,16 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/spf13/cobra"
 
+	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/api"
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/auth"
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/workspace"
 	"github.com/defenseclaw/defenseclaw/internal/cliusage"
@@ -223,4 +226,113 @@ func substratePushErr(cmd *cobra.Command, agent string, err error, asJSON bool, 
 		return cliusage.WithExitCode(errors.New(moved.Error()[len("workspace: "):]), substrateExitRefused)
 	}
 	return fmt.Errorf("could not push: %w", err)
+}
+
+// substrateSyncFlags are the flags of sync.
+type substrateSyncFlags struct {
+	com     substrateCommon
+	unmask  []string
+	exclude []string
+	watch   bool
+	dur     time.Duration
+}
+
+func newSubstrateSyncCmd() *cobra.Command {
+	var f substrateSyncFlags
+	cmd := &cobra.Command{
+		Use:   "sync <name> --watch",
+		Short: "Keep sending your changes into a running agent while you work (Preview)",
+		Long: `Watches this folder and sends each change into the agent's copy, one way, until Ctrl-C, --for, or
+the agent is deleted. It sends 1 second after the last change, and at most 5 seconds after the first.
+Each batch follows the rules of push: secret files are held back, ignored files, .git and package
+caches are not sent, and a file the agent also changed keeps the agent's version (it is named once;
+send yours with push NAME --mine FILE). It saves a restore point at the start, then one every
+10 minutes in which something was sent. A suspended agent is not woken: changes wait until it is back.
+Nothing keeps running after it stops. This command is a Preview.`,
+		Example: "defenseclaw substrate sync fix-tests-7f3a --watch\ndefenseclaw substrate sync fix-tests-7f3a --watch --for 2h",
+		Args:    cobra.ExactArgs(1),
+		RunE:    func(cmd *cobra.Command, args []string) error { return runSubstrateSync(cmd, &f, args[0]) },
+	}
+	f.com.add(cmd)
+	fl := cmd.Flags()
+	fl.BoolVar(&f.watch, "watch", false, "watch the folder and send changes as you save (required)")
+	fl.DurationVar(&f.dur, "for", 0, "stop after this long, for example 2h")
+	fl.StringArrayVar(&f.unmask, "unmask", nil, "send a held-back secret file or pattern anyway (repeatable)")
+	fl.StringArrayVar(&f.exclude, "exclude", nil, "hold a path or glob back too (repeatable, for example 'data/**')")
+	return cmd
+}
+
+func runSubstrateSync(cmd *cobra.Command, f *substrateSyncFlags, ref string) error {
+	if !f.watch {
+		return cliusage.WithExitCode(errors.New("sync runs with --watch; to send your changes once, use push"), 2)
+	}
+	if f.dur < 0 {
+		return cliusage.WithExitCode(errors.New("--for must be a positive duration, for example 2h"), 2)
+	}
+	s, err := substrateOpen(cmd, &f.com)
+	if err != nil {
+		return err
+	}
+	ctx, stop := substrateContext(cmd)
+	defer stop()
+	if f.dur > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, f.dur)
+		defer cancel()
+	}
+	a, err := resolveSubstrateActor(ctx, s.Client, ref)
+	if err != nil {
+		return substrateFail(err)
+	}
+	name := substrateCopyName(a)
+	dataDir := auth.StateDir()
+	if !workspace.HasCopy(dataDir, name) {
+		return fmt.Errorf("this computer has no record of the folder you sent to %s/%s. Sync from the computer you ran it on", a.Atespace, a.Name)
+	}
+	limit, settings, err := substrateUploadLimit(ctx, cmd, s)
+	if err != nil {
+		return err
+	}
+	if settings.Files != nil && !settings.Files.Sync {
+		return cliusage.WithExitCode(errors.New("your administrator turned off syncing into a running agent (substrate.files.sync); push still sends changes when allowed"), substrateExitRefused)
+	}
+	rel, err := substrateOpenRelay(ctx, s, a)
+	if err != nil {
+		return err
+	}
+	defer rel.Close()
+	home, _ := os.UserHomeDir()
+	w := cmd.ErrOrStderr()
+	fmt.Fprintf(w, "Syncing this folder into %s/%s. Stop with Ctrl-C.\n", a.Atespace, a.Name)
+	err = workspace.Sync(ctx, workspace.SyncOptions{
+		Push: workspace.PushOptions{
+			Start: workspace.StartOptions{DataDir: dataDir, Home: home, MaxBytes: limit, Masks: f.exclude, Unmask: f.unmask},
+			Name:  name, Transport: rel.Client,
+		},
+		Out: w, Label: a.Name, HourBytes: 4 * limit,
+		State: func(ctx context.Context) (string, error) {
+			actors, err := s.Client.List(ctx, api.ListOptions{})
+			if err != nil {
+				return "", err
+			}
+			for _, cur := range actors {
+				if !cur.Deleted && cur.Atespace == a.Atespace && cur.Name == a.Name {
+					if cur.State == "suspended" {
+						return workspace.SyncActorSuspended, nil
+					}
+					return workspace.SyncActorRunning, nil
+				}
+			}
+			return workspace.SyncActorGone, nil
+		},
+	})
+	if errors.Is(err, workspace.ErrSyncActorGone) {
+		fmt.Fprintln(w, "The agent is gone; sync stopped.")
+		return nil
+	}
+	if err != nil {
+		return substratePushErr(cmd, a.Name, err, false, nil)
+	}
+	fmt.Fprintln(w, "Sync stopped.")
+	return nil
 }

@@ -935,6 +935,40 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
         ),
     ),
     _Cmd(
+        ("sync",),
+        "Keep sending your changes into a running agent while you work (Preview)",
+        long=(
+            "Watches this folder and sends each change into the agent's copy, one way, until Ctrl-C, --for, or\n"
+            "the agent is deleted. It sends 1 second after the last change, and at most 5 seconds after the "
+            "first.\n"
+            "Each batch follows the rules of push: secret files are held back, ignored files, .git and package\n"
+            "caches are not sent, and a file the agent also changed keeps the agent's version (it is named once;\n"
+            "send yours with push NAME --mine FILE). It saves a restore point at the start, then one every\n"
+            "10 minutes in which something was sent. A suspended agent is not woken: changes wait until it is "
+            "back.\n"
+            "Nothing keeps running after it stops. This command is a Preview."
+        ),
+        example=(
+            "defenseclaw substrate sync fix-tests-7f3a --watch\n"
+            "defenseclaw substrate sync fix-tests-7f3a --watch --for 2h"
+        ),
+        args=(_Arg("name"), _Arg("--watch", required=False)),
+        flags=(
+            _Flag("context", "string", "cluster to use (default: the one you signed in to last)", metavar="NAME"),
+            _Flag(
+                "exclude",
+                "stringArray",
+                "hold a path or glob back too (repeatable, for example 'data/**')",
+                metavar="GLOB",
+            ),
+            _Flag("for", "duration", "stop after this long, for example 2h", default="0s"),
+            _Flag(
+                "unmask", "stringArray", "send a held-back secret file or pattern anyway (repeatable)", metavar="GLOB"
+            ),
+            _Flag("watch", "bool", "watch the folder and send changes as you save (required)"),
+        ),
+    ),
+    _Cmd(
         ("template",),
         "Build, check and publish actor images with their attestation (administrators)",
         long=(

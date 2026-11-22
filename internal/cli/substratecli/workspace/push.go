@@ -42,8 +42,12 @@ type PushOptions struct {
 	PatchOut string
 	DryRun   bool
 	// Label names the restore point taken before the push.
-	Label   string
-	Timeout time.Duration
+	Label string
+	// NoCheckpoint skips the restore point (sync takes its own); the push
+	// log then names Checkpoint, the last one taken before it.
+	NoCheckpoint bool
+	Checkpoint   string
+	Timeout      time.Duration
 }
 
 // PushOutcome is what Push found and did.
@@ -54,7 +58,7 @@ type PushOutcome struct {
 }
 
 // ErrPushHostCopy: the Windows host copy has no push yet.
-var ErrPushHostCopy = errors.New("push is not available for a copy started on Windows yet; run the agent again from this folder to send a new copy")
+var ErrPushHostCopy = errors.New("push and sync are not available for a copy started on Windows yet (Preview); run the agent again from this folder to send a new copy")
 
 // Push sends the folder's changes since the last send into the actor: the
 // same staging as run (Preflight: masking, the secret scan, the cluster
@@ -115,25 +119,36 @@ func Push(ctx context.Context, opts PushOptions) (*PushOutcome, error) {
 			return out, &osw.PushConflictError{Paths: conf}
 		}
 	}
-	cp, err := Checkpoint(ctx, CheckpointOptions{Exec: opts.Transport, Dir: rec.RemoteDir, DataDir: dataDir, Name: opts.Name, Label: opts.Label})
-	if err != nil {
-		return out, fmt.Errorf("save a restore point before the push: %w", err)
-	}
-	out.Checkpoint = cp.ID
-	if c, ok := opts.Transport.(*Client); ok {
-		prev := c.Op
-		c.Op = opts.Op
-		if c.Op == "" {
-			c.Op = relay.OpPush
+	cpID := opts.Checkpoint
+	if !opts.NoCheckpoint {
+		cp, err := Checkpoint(ctx, CheckpointOptions{Exec: opts.Transport, Dir: rec.RemoteDir, DataDir: dataDir, Name: opts.Name, Label: opts.Label})
+		if err != nil {
+			return out, fmt.Errorf("save a restore point before the push: %w", err)
 		}
-		defer func() { c.Op = prev }()
+		out.Checkpoint, cpID = cp.ID, cp.ID
 	}
-	res, err := plan.Send(ctx, opts.Transport, mode, cp.ID)
+	if c, ok := opts.Transport.(interface{ SetOp(string) string }); ok {
+		op := opts.Op
+		if op == "" {
+			op = relay.OpPush
+		}
+		prev := c.SetOp(op)
+		defer c.SetOp(prev)
+	}
+	res, err := plan.Send(ctx, opts.Transport, mode, cpID)
 	if err != nil {
 		return out, cleanErr("send the changes", err)
 	}
 	out.Result = res
 	return out, nil
+}
+
+// SetOp names the following uploads (relay.OpPush, relay.OpSync, or ""
+// for a first copy) and returns the previous name.
+func (c *Client) SetOp(op string) string {
+	prev := c.Op
+	c.Op = op
+	return prev
 }
 
 // SendLine is the one-line summary of what a push sends (or would).
@@ -142,7 +157,7 @@ func (o *PushOutcome) SendLine(verb string) string {
 	var n int
 	var size int64
 	for _, c := range o.Plan.Changes {
-		if c.Same {
+		if c.Same || (c.Conflict && o.Result != nil && len(o.Result.Kept) > 0) {
 			continue
 		}
 		n++
