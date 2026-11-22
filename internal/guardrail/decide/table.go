@@ -155,6 +155,17 @@ const (
 	// content (GAP-1795). Target-decided sets (authorized_keys, DefenseClaw
 	// state, hook config, credential files) keep their rows.
 	RowEffectContentDecided = "effect-content-decided"
+	// RowEffectOwnKeyWrite: a Known effects write, append or mode change of
+	// one's own SSH private key file (~/.ssh/id_rsa and its siblings) is a
+	// shadow record. No 1.0.10 rule names that shape (PATH-SSH-KEY grades
+	// reads of the key, persistence.ssh_authorized_keys_command the keys
+	// file), so 1.0.10 allows it; the provisioning step that installs a
+	// deploy key from the environment into ~/.ssh is benign (rel-1-0-10:
+	// GAP-1878, infraset-v1: 9 benign rows raised to alert and strict
+	// block). A read or copy of an existing key keeps its PATH-SSH-KEY row
+	// (the read proof is its own finding), and a write of authorized_keys
+	// keeps its row.
+	RowEffectOwnKeyWrite = "effect-own-key-write"
 	// RowEffectLink: a Known effects link placed at a protected member other
 	// than the DefenseClaw state (ln -s T ~/.ssh/authorized_keys, the
 	// dotfiles shape) is a shadow record. The 1.0.10 reader of the set blocks
@@ -244,6 +255,15 @@ var builtin = Table{Rows: []Row{
 		ID: RowEffectContentDecided, Rules: []string{RuleEffectRestricted, RuleEffectUnknown}, Kinds: mutatingKinds,
 		Targets: []TargetClass{TargetAutostart}, Content: true, SecureClient: true,
 		Source: "rel-1-0-10:persistence.shell_profile_write content-decided (GAP-1795)",
+		Cells: [deploymentCount][tierCount]Cell{
+			uniform(Cell{Levels: true, Ceiling: CeilingRecord}), uniform(Cell{Levels: true, Ceiling: CeilingRecord}),
+		},
+	},
+	{
+		ID: RowEffectOwnKeyWrite, Rules: []string{RuleEffectRestricted, RuleEffectUnknown},
+		Kinds: []ProofKind{KindWrite, KindAppend, KindPerm}, Targets: []TargetClass{TargetCredential},
+		Sets: []string{SetSSHPrivateKey}, Sources: []string{SourceEffects}, Content: true, SecureClient: true,
+		Source: "rel-1-0-10:no rule on an own SSH private key write (GAP-1878)",
 		Cells: [deploymentCount][tierCount]Cell{
 			uniform(Cell{Levels: true, Ceiling: CeilingRecord}), uniform(Cell{Levels: true, Ceiling: CeilingRecord}),
 		},

@@ -293,8 +293,14 @@ loop:
 // frontend cannot follow (opaque code, an unmodeled program or option) may
 // change the entries it is handed. find DIR -exec sh -c 'for f do printf
 // "%s " "$f"; sha256sum "$f"; done' sh {} + only reads them; the same find
-// with : > "$f" writes them (rel-1-0-10:GAP-1327).
+// with : > "$f" writes them (rel-1-0-10:GAP-1327). Only a -c body is read:
+// a shell child with none runs code the call does not show (its standard
+// input, or a handed file as a script), and the frontend's empty reading of
+// that argv is no proof it only reads (rel-1-0-10:GAP-1847).
 func shellBodyOnlyReads(words []string) bool {
+	if _, inline := shellScript(words); !inline {
+		return false
+	}
 	res := effects.Extract(effects.Call{Surface: effects.SurfaceArgv, Tool: "find-exec", Argv: words},
 		effects.Options{Flavor: effects.FlavorPOSIX, Dialect: effects.DialectPOSIX})
 	if len(res.Unknowns) != 0 || len(res.Effects) == 0 {
