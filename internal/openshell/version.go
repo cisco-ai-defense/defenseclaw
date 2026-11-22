@@ -451,6 +451,24 @@ func mustParse(s string) Version {
 	return v
 }
 
+// MicroVMStartsOnMacMin is the first OpenShell release whose MicroVM driver
+// starts sandboxes on a Mac (rel-1-0-10:GAP-1775): 0.1.9 does not give the
+// guest's root folder to the sandbox's account, so the workload check
+// (MicroVMGuestRootLimit) passes. 0.1.6 to 0.1.8 are still refused by it.
+// Remove it, and the text it gates, when SupportedMin reaches it.
+const MicroVMStartsOnMacMin = "0.1.9"
+
+// MicroVMStartsOnMac reports whether the OpenShell release v starts MicroVM
+// sandboxes on a Mac. An empty v is no OpenShell installed yet, which setup
+// installs as InstallerVersion; one that does not parse is not known to.
+func MicroVMStartsOnMac(v string) bool {
+	if strings.TrimSpace(v) == "" {
+		v = InstallerVersion
+	}
+	pv, err := ParseVersion(v)
+	return err == nil && pv.Compare(mustParse(MicroVMStartsOnMacMin)) >= 0
+}
+
 // MicroVMGuestRootLimit is the workload check's refusal of a MicroVM whose
 // root folder OpenShell gave to a non-root account, which OpenShell 0.1.6
 // does for every MicroVM (rel-1-0-6:GAP-0570, rel-1-0-10:GAP-0007): the
