@@ -334,6 +334,7 @@ func commandPathWordsIn(text string, base int, quote byte, depth int, home strin
 			child = builtinChild(values, static, child)
 			follows := commandFollowsOperandLinks(program, node.Args, home)
 			replaced := commandReplacedOperand(program, node.Args, home)
+			written := commandWrittenThroughOperand(program, node.Args, home)
 			if child > 0 && child < len(node.Args) {
 				childProgram := ""
 				if static[child] {
@@ -343,10 +344,14 @@ func commandPathWordsIn(text string, base int, quote byte, depth int, home strin
 				if replaced = commandReplacedOperand(childProgram, node.Args[child:], home); replaced > 0 {
 					replaced += child
 				}
+				if written = commandWrittenThroughOperand(childProgram, node.Args[child:], home); written > 0 {
+					written += child
+				}
 			}
 			change, elsewhere := commandCallPathChange(values, static, run, wrapped, node.Args, home)
 			for index, arg := range node.Args {
-				add(arg, index == 0 || follows && index != replaced, index == 0 || index == child, index >= elsewhere)
+				add(arg, index == 0 || index == written || follows && index != replaced, index == 0 || index == child,
+					index >= elsewhere)
 			}
 			if change.all || len(change.paths) != 0 {
 				change.end = base + int(node.End().Offset())
@@ -567,6 +572,59 @@ func commandFollowsOperandLinks(program string, args []*syntax.Word, home string
 		return commandHasFlag(args, home, 'h', "--dereference")
 	}
 	return true
+}
+
+// commandWrittenThroughOperand is the index in args (args[0] the program) of
+// the operand a program writes through its link in every mode, or -1. cp's
+// -a/-P/-d/-R/-r keep links among the sources, but the destination is opened
+// for writing through an existing link (GNU cp writes the file it reaches),
+// so a destination link to a protected file gets the plain form's verdict
+// (rel-1-0-10:GAP-1287). The destination is the -t/--target-directory value
+// when given, else the last operand. --remove-destination, -s and -l make a
+// new entry in place of the name and leave a link there alone.
+func commandWrittenThroughOperand(program string, args []*syntax.Word, home string) int {
+	switch program {
+	case "cp", "gcp":
+	default:
+		return -1
+	}
+	if commandHasFlag(args, home, 's', "--symbolic-link") || commandHasFlag(args, home, 'l', "--link") ||
+		commandHasFlag(args, home, 0, "--remove-destination") {
+		return -1
+	}
+	last := -1
+	for index := 1; index < len(args); index++ {
+		value, static := StaticWord(args[index], home)
+		switch {
+		case !static:
+			last = -1
+		case value == "--":
+			for index++; index < len(args); index++ {
+				last = index
+			}
+		case value == "-t" || value == "--target-directory":
+			if index+1 < len(args) {
+				return index + 1
+			}
+			return -1
+		case strings.HasPrefix(value, "--target-directory="):
+			return index
+		case len(value) > 1 && value[0] == '-' && value[1] != '-' && strings.IndexByte(value[1:], 't') >= 0:
+			// A bundle ending in t takes the next word (-at DIR); -tDIR
+			// carries it in the word.
+			if value[len(value)-1] == 't' {
+				if index+1 < len(args) {
+					return index + 1
+				}
+				return -1
+			}
+			return index
+		case strings.HasPrefix(value, "-") && value != "-":
+		default:
+			last = index
+		}
+	}
+	return last
 }
 
 // commandReplacedOperand is the index in args (args[0] the program) of the

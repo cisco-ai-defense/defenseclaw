@@ -15,7 +15,12 @@ benign cases) for the named corpora, so the Gemma 4 numbers stay comparable with
 rel-1-0-10:GAP-0120) before stratifying, so the weights follow the corrected labels; score with the same overlay
 (s7gate.py --reviews). Seeded; no corpus text is printed.
 """
-import argparse, collections, json, os, random, sys
+
+import argparse
+import collections
+import json
+import os
+import random
 
 # cases per (corpus, label); None = all of them. Chosen from the judge cost per tool call (about
 # USD 0.27 per 1,000 calls with Gemma 4 31B) so one fresh rules+judge pass stays near USD 10.
@@ -71,8 +76,13 @@ for name, cfg in cfgs.items():
                 picked[cid] = w
         for (lab, ds), v in strata.items():
             sel = [(c, n) for c, n in v if c in picked]
-            plan[f"{name}|{lab}|{ds}"] = {"population": len(v), "sampled": len(sel), "weight": (len(v) / len(sel)) if sel else 0,
-                                           "calls": sum(n for _, n in sel), "source": "cascade sample"}
+            plan[f"{name}|{lab}|{ds}"] = {
+                "population": len(v),
+                "sampled": len(sel),
+                "weight": (len(v) / len(sel)) if sel else 0,
+                "calls": sum(n for _, n in sel),
+                "source": "cascade sample",
+            }
     else:
         tg = TARGETS.get(name, {})
         for lab in ("attack", "benign"):
@@ -93,7 +103,12 @@ for name, cfg in cfgs.items():
                 w = len(v) / n if n else 0
                 for cid, _ in sel:
                     picked[cid] = w
-                plan[f"{name}|{lab}|{k[1]}"] = {"population": len(v), "sampled": n, "weight": w, "calls": sum(c for _, c in sel)}
+                plan[f"{name}|{lab}|{k[1]}"] = {
+                    "population": len(v),
+                    "sampled": n,
+                    "weight": w,
+                    "calls": sum(c for _, c in sel),
+                }
     if not picked:
         continue
     idf = os.path.join(a.out, f"{name}.ids.txt")
@@ -113,4 +128,6 @@ for k, v in plan.items():
     tot[(c, "calls")] += v["calls"]
 for c in out_cfg:
     print(f"{c}: {tot[(c, 'cases')]} cases, {tot[(c, 'calls')]} tool calls")
-print(f"total: {sum(v for (c, k), v in tot.items() if k == 'cases')} cases, {sum(v for (c, k), v in tot.items() if k == 'calls')} tool calls")
+print(
+    f"total: {sum(v for (c, k), v in tot.items() if k == 'cases')} cases, {sum(v for (c, k), v in tot.items() if k == 'calls')} tool calls"
+)
