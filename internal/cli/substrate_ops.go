@@ -171,7 +171,8 @@ func runSubstratePull(cmd *cobra.Command, f *substratePullFlags, ref string) err
 	dataDir := auth.StateDir()
 	if !workspace.HasCopy(dataDir, name) {
 		return fmt.Errorf("this computer has no record of the folder you sent to %s/%s, so it cannot tell what the agent changed. "+
-			"Pull from the computer you ran it on, or push the work to its origin as a branch: defenseclaw substrate pull %s --push-branch NAME", a.Atespace, a.Name, a.Name)
+			"Pull from the computer you ran it on, or, if it was started with run --clone, push the work to its origin as a branch: "+
+			"defenseclaw substrate pull %s --push-branch NAME", a.Atespace, a.Name, a.Name)
 	}
 	rel, err := substrateOpenRelay(ctx, s, a)
 	if err != nil {

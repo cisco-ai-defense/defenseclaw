@@ -20,18 +20,30 @@ package workspace
 // checkout's origin as a new branch, from inside the actor, with the
 // credential the cluster binds to the git host (the image's credential
 // helper answers with a placeholder that egress swaps). It never forces:
-// BR is new on origin, or a branch this actor pushed before (then git
-// refuses anything but a fast-forward).
+// BR is new on origin, or a branch this computer pushed before (then only
+// a fast-forward).
+//
+// The agent can write its checkout's git config and refs, so the review
+// and the push read neither (RV4): they run in a scratch git directory
+// over the checkout's objects, with the image's system config only, and
+// talk to the one https address the review names. What origin lacks comes
+// from that address's ls-remote, and the "pushed before" record is kept on
+// this computer.
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/url"
+	"os"
 	"path"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	osw "github.com/defenseclaw/defenseclaw/internal/openshell/workspace"
@@ -42,6 +54,11 @@ import (
 // pushed change that writes it is flagged: it is no secret, but it means a
 // config file now names a credential the repository should not hold (B1.9).
 const PushPlaceholder = "placeholder-not-a-secret"
+
+// pushReplacedPattern finds the placeholders an upload with replaced
+// credentials (S9a) writes in a file (DC_SECRET_<n>, the pattern pull
+// keeps out). git -G takes it as an extended regular expression.
+const pushReplacedPattern = `DC_SECRET_[0-9][0-9]*`
 
 // BranchExec runs argv in the actor in dir and returns its output and exit
 // code. (*Client).BranchExec is the relay's; tests run a local shell.
@@ -59,8 +76,9 @@ func (c *Client) BranchExec(ctx context.Context, argv []string, dir string, env 
 // BranchPush is what pull --push-branch would push.
 type BranchPush struct {
 	// Dir is the checkout in the actor; URL its origin as git reads it;
-	// Host and Repo the https host and path (team/app) it pushes to.
-	Dir, URL, Host, Repo string
+	// Host and Repo the https host and path (team/app) it pushes to, and
+	// PushURL the exact address the review, the push and its checks use.
+	Dir, URL, Host, Repo, PushURL string
 	// Head is the agent's HEAD; Commit what is pushed: Head, or a commit
 	// of the agent's uncommitted work on Head when Made.
 	Head, Commit string
@@ -75,6 +93,9 @@ type BranchPush struct {
 	Placeholder []string
 	RunsCode    []string
 	Secrets     []osw.ScanFinding
+	// objects is the checkout's object directory, which the scratch git
+	// directory of the push reads.
+	objects string
 }
 
 // Flagged reports whether the push needs a careful look.
@@ -84,14 +105,17 @@ func (p *BranchPush) Flagged() bool {
 
 // BranchPushError is a push refusal in plain words.
 type BranchPushError struct {
-	// Kind is no_checkout, no_origin, no_commit, not_https, exists,
-	// refused, mismatch or failed.
+	// Kind is no_checkout, no_origin, no_commit, not_https, replaced_copy,
+	// exists, refused, mismatch or failed.
 	Kind string
 	Msg  string
 }
 
 func (e *BranchPushError) Error() string { return e.Msg }
 
+// pushPrepareScript finds the checkout and commits the agent's uncommitted
+// work with a private index. It prints NUL-ended key\tvalue records, so a
+// newline in a folder name or in the agent's remote cannot add a key.
 const pushPrepareScript = `set -u
 root=$1 label=$2
 cd "$root" || exit 3
@@ -103,6 +127,7 @@ if [ ! -e .git ]; then
 fi
 url=$(git config --get remote.origin.url) || { echo "no origin remote" >&2; exit 4; }
 head=$(git rev-parse -q --verify HEAD) || { echo "no commit" >&2; exit 5; }
+objs=$(cd "$(git rev-parse --git-path objects)" && pwd -P) || exit 6
 commit=$head made=0
 if [ -n "$(git status --porcelain --untracked-files=normal)" ]; then
   idx=$(mktemp -u) || exit 6
@@ -116,36 +141,65 @@ if [ -n "$(git status --porcelain --untracked-files=normal)" ]; then
   commit=$(git commit-tree "$tree" -p "$head" -m "defenseclaw: work of agent $label") || exit 6
   made=1
 fi
-printf 'dir\t%s\nurl\t%s\nhead\t%s\ncommit\t%s\nmade\t%s\n' "$(pwd)" "$url" "$head" "$commit" "$made"
-printf 'commits\t%s\n' "$(git rev-list --count "$commit" --not --remotes=origin)"
-git log --format= --name-only "$commit" --not --remotes=origin | sort -u | sed 's/^/file\t/'
-git log --format= --name-only -G"$3" "$commit" --not --remotes=origin | sort -u | sed 's/^/placeholder\t/'
+printf 'dir\t%s\000url\t%s\000head\t%s\000commit\t%s\000made\t%s\000objects\t%s\000' "$(pwd)" "$url" "$head" "$commit" "$made" "$objs"
 `
 
-const pushPatchScript = `git log -p --no-color --no-ext-diff --format= -U0 "$1" --not --remotes=origin`
+// pushScratch is the start of the review and push scripts: a scratch git
+// directory over the checkout's objects ($1), with no repository or user
+// config, no templates, no hooks and no replace refs, so nothing the agent
+// set in its checkout changes where the push goes, what it carries, or
+// what the review sees. g runs git there.
+const pushScratch = `set -u
+objs=$1 url=$2
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_CONFIG GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT GIT_NAMESPACE GIT_TEMPLATE_DIR GIT_REPLACE_REF_BASE
+export GIT_CONFIG_GLOBAL=/dev/null GIT_NO_REPLACE_OBJECTS=1
+s=$(mktemp -d) || exit 6
+trap 'rm -rf "$s"' EXIT
+git init -q --bare --template= "$s/g" || exit 6
+export GIT_DIR=$s/g GIT_OBJECT_DIRECTORY=$objs
+g() { git -c core.quotePath=false -c core.hooksPath=/dev/null "$@"; }
+`
 
-const pushScript = `set -u
-c=$1 b=$2
-cur=$(git ls-remote --heads origin "refs/heads/$b") || { echo "ls-remote failed" >&2; exit 6; }
-cur=${cur%%[[:space:]]*}
-prev=$(git config --get "defenseclaw-push.$b.commit" || true)
+// pushReviewScript lists what origin lacks: ls-remote of the push address
+// gives the commits origin has, and the range is the pushed commit ($3)
+// without those the checkout holds. Names come NUL-ended (-z), so git
+// quotes none of them. Each part goes out as a frame "NAME LENGTH\0" and
+// LENGTH bytes, so no file name can end a part early.
+const pushReviewScript = pushScratch + `c=$3
+g ls-remote "$url" > "$s/refs" || exit 11
+{ printf '%s\n' "$c"; cut -f1 "$s/refs" | sort -u | g cat-file --batch-check='%(objectname) %(objecttype)' |
+  awk '$2 == "commit" || $2 == "tag" { print "^" $1 }'; } > "$s/range" || exit 6
+g rev-list --count --stdin < "$s/range" > "$s/commits" || exit 6
+names() { g log --format= --name-only -z --no-renames "$@" --stdin < "$s/range"; }
+names > "$s/file" || exit 6
+names -G"$4" > "$s/placeholder" || exit 6
+names -G"$5" > "$s/replaced" || exit 6
+: > "$s/patch"
+[ "$(cat "$s/commits")" = 0 ] || g log -p --no-color --no-ext-diff --no-textconv --no-renames --format= -U0 --stdin < "$s/range" > "$s/patch" || exit 6
+for f in commits file placeholder replaced patch; do
+  printf '%s %s\000' "$f" "$(wc -c < "$s/$f" | tr -d ' ')" && cat "$s/$f" || exit 6
+done
+`
+
+// pushScript pushes $3 to refs/heads/$4 of the push address. $6 is the
+// commit this computer pushed to that branch before ("" for none): a
+// branch origin has is refused unless it is at that commit.
+const pushScript = pushScratch + `c=$3 b=$4 label=$5 prev=$6
+heads() { g ls-remote --heads "$url" > "$s/heads" && awk -v r="refs/heads/$b" '$2 == r { print $1; exit }' "$s/heads"; }
+cur=$(heads) || { echo "ls-remote failed" >&2; exit 6; }
 if [ -n "$cur" ] && [ "$cur" != "$prev" ]; then echo "exists $cur" >&2; exit 7; fi
-if [ -n "$cur" ] && ! git merge-base --is-ancestor "$cur" "$c" 2>/dev/null; then
-  # The branch holds an earlier commit of the agent's uncommitted work,
-  # which is not in the agent's history: join the two, so the branch
-  # moves forward and nothing on it is lost.
-  git cat-file -e "$cur^{commit}" 2>/dev/null || { echo "exists $cur" >&2; exit 7; }
-  if ! git var GIT_COMMITTER_IDENT >/dev/null 2>&1; then
-    export GIT_AUTHOR_NAME="DefenseClaw agent $3" GIT_AUTHOR_EMAIL=agent@defenseclaw.invalid
-    export GIT_COMMITTER_NAME="$GIT_AUTHOR_NAME" GIT_COMMITTER_EMAIL=$GIT_AUTHOR_EMAIL
-  fi
-  c=$(git commit-tree "$c^{tree}" -p "$cur" -p "$c" -m "defenseclaw: work of agent $3") || exit 8
+if [ -n "$cur" ] && ! g merge-base --is-ancestor "$cur" "$c" 2>/dev/null; then
+  # The branch holds this computer's earlier push of the agent's
+  # uncommitted work, which is not in the agent's history: join the two,
+  # so the branch moves forward and nothing on it is lost.
+  g cat-file -e "$cur^{commit}" 2>/dev/null || { echo "exists $cur" >&2; exit 7; }
+  export GIT_AUTHOR_NAME="DefenseClaw agent $label" GIT_AUTHOR_EMAIL=agent@defenseclaw.invalid
+  export GIT_COMMITTER_NAME="$GIT_AUTHOR_NAME" GIT_COMMITTER_EMAIL=$GIT_AUTHOR_EMAIL
+  c=$(g commit-tree "$c^{tree}" -p "$cur" -p "$c" -m "defenseclaw: work of agent $label") || exit 8
 fi
-git -c core.hooksPath=/dev/null push --no-verify origin "$c:refs/heads/$b" >/dev/null || exit 8
-got=$(git ls-remote --heads origin "refs/heads/$b") || exit 9
-got=${got%%[[:space:]]*}
+g push --no-verify --no-follow-tags --no-recurse-submodules "$url" "$c:refs/heads/$b" >/dev/null || exit 8
+got=$(heads) || exit 9
 [ "$got" = "$c" ] || { echo "mismatch $got" >&2; exit 9; }
-git config "defenseclaw-push.$b.commit" "$c"
 printf 'pushed\t%s\n' "$c"
 `
 
@@ -156,8 +210,10 @@ var pushEnv = map[string]string{"GIT_TERMINAL_PROMPT": "0", "GIT_ASKPASS": "/bin
 // --push-branch pushes: its origin, what origin does not have yet, and the
 // flags of the review. The agent's uncommitted work is committed for the
 // push with a private index, so the agent's HEAD and index do not move.
+// Reading what origin has is a network read (ls-remote); nothing is
+// written anywhere.
 func PrepareBranchPush(ctx context.Context, run BranchExec, root, label string, rules []config.SubstrateGitRewrite) (*BranchPush, error) {
-	out, stderr, code, err := run(ctx, []string{"sh", "-c", pushPrepareScript, "sh", root, label, PushPlaceholder}, root, pushEnv, 2*time.Minute)
+	out, stderr, code, err := run(ctx, []string{"sh", "-c", pushPrepareScript, "sh", root, label}, root, pushEnv, 2*time.Minute)
 	if err != nil {
 		return nil, err
 	}
@@ -172,60 +228,138 @@ func PrepareBranchPush(ctx context.Context, run BranchExec, root, label string, 
 	default:
 		return nil, &BranchPushError{Kind: "failed", Msg: "could not read the agent's checkout: " + lastLine(stderr, out)}
 	}
-	p := &BranchPush{}
-	for _, line := range strings.Split(out, "\n") {
-		k, v, ok := strings.Cut(line, "\t")
-		if !ok {
-			continue
-		}
-		switch k {
-		case "dir":
-			p.Dir = v
-		case "url":
-			p.URL = v
-		case "head":
-			p.Head = v
-		case "commit":
-			p.Commit = v
-		case "made":
-			p.Made = v == "1"
-		case "commits":
-			p.Commits, _ = strconv.Atoi(v)
-		case "file":
-			if v != "" {
-				p.Files = append(p.Files, v)
-				if osw.RunsCode(v) {
-					p.RunsCode = append(p.RunsCode, v)
-				}
-			}
-		case "placeholder":
-			if v != "" {
-				p.Placeholder = append(p.Placeholder, v)
-			}
-		}
+	kv := pushRecords(out)
+	p := &BranchPush{Dir: kv["dir"], URL: kv["url"], Head: kv["head"], Commit: kv["commit"], Made: kv["made"] == "1", objects: kv["objects"]}
+	if p.Commit == "" || p.objects == "" {
+		return nil, &BranchPushError{Kind: "failed", Msg: "could not read the agent's checkout: " + lastLine(stderr, out)}
 	}
-	host, repo := GitRemoteTarget(p.URL, rules)
-	if host == "" || repo == "" {
+	p.Host, p.Repo, p.PushURL = GitRemoteTarget(p.URL, rules)
+	if p.PushURL == "" {
 		return nil, &BranchPushError{Kind: "not_https", Msg: "the agent's origin " + safeRemote(p.URL) +
 			" is not an https address the cluster can add a credential for; ask your administrator to add it to substrate.git.https_rewrite, or bring the work home with --branch NAME"}
 	}
-	p.Host, p.Repo = host, repo
-	if p.Commits > 0 {
-		if patch, _, code, err := run(ctx, []string{"sh", "-c", pushPatchScript, "sh", p.Commit}, p.Dir, pushEnv, 2*time.Minute); err == nil && code == 0 {
-			p.Secrets = scanAddedLines(patch)
+	out, stderr, code, err = run(ctx, []string{"sh", "-c", pushReviewScript, "sh", p.objects, p.PushURL, p.Commit, PushPlaceholder, pushReplacedPattern},
+		p.Dir, pushEnv, 5*time.Minute)
+	if err != nil {
+		return nil, err
+	}
+	switch code {
+	case 0:
+	case 11:
+		return nil, &BranchPushError{Kind: "failed", Msg: "could not read the branches of " + p.PushURL + " from the agent: " + lastLine(stderr, "")}
+	default:
+		return nil, &BranchPushError{Kind: "failed", Msg: "could not read the agent's commits: " + lastLine(stderr, "")}
+	}
+	parts, ok := pushFrames(out)
+	if !ok {
+		return nil, &BranchPushError{Kind: "failed", Msg: "could not read the agent's commits: the answer was cut short"}
+	}
+	p.Commits, _ = strconv.Atoi(strings.TrimSpace(parts["commits"]))
+	p.Files = pushNames(parts["file"])
+	for _, f := range p.Files {
+		if osw.RunsCode(f) {
+			p.RunsCode = append(p.RunsCode, f)
 		}
+	}
+	p.Placeholder = pushNames(parts["placeholder"])
+	if r := pushNames(parts["replaced"]); len(r) > 0 {
+		// The commits write the placeholders an upload with replaced
+		// credentials put in the copy: pushed, they would replace the
+		// person's lines upstream (RV6-4). This holds on any computer,
+		// with or without the copy's record.
+		return nil, &BranchPushError{Kind: "replaced_copy", Msg: "not pushed: the agent's commits put credential placeholders (DC_SECRET_<n>) in " +
+			strings.Join(quoteNames(r, 3), ", ") + " where your credential lines were, so the push would replace them upstream. " +
+			"Bring the work home with pull --branch NAME on the computer you ran the agent from, then push it from there"}
+	}
+	if p.Commits > 0 {
+		p.Secrets = scanAddedLines(parts["patch"])
 	}
 	return p, nil
 }
 
+// pushRecords reads NUL-ended key\tvalue records; the first of a key wins.
+func pushRecords(out string) map[string]string {
+	kv := map[string]string{}
+	for _, tok := range strings.Split(out, "\x00") {
+		if k, v, ok := strings.Cut(tok, "\t"); ok {
+			if _, dup := kv[k]; !dup {
+				kv[k] = v
+			}
+		}
+	}
+	return kv
+}
+
+// pushFrames reads the "NAME LENGTH\0" frames of pushReviewScript; false
+// when the output does not end on a whole frame.
+func pushFrames(out string) (map[string]string, bool) {
+	parts := map[string]string{}
+	for out != "" {
+		hdr, rest, ok := strings.Cut(out, "\x00")
+		name, ln, ok2 := strings.Cut(hdr, " ")
+		n, err := strconv.Atoi(ln)
+		if !ok || !ok2 || err != nil || n < 0 || n > len(rest) {
+			return nil, false
+		}
+		parts[name], out = rest[:n], rest[n:]
+	}
+	return parts, true
+}
+
+// pushNames is the sorted, distinct names of NUL-ended git -z output.
+func pushNames(raw string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, n := range strings.Split(raw, "\x00") {
+		if n != "" && !seen[n] {
+			seen[n] = true
+			out = append(out, n)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// quoteNames is at most n names, Go-quoted when they hold a character a
+// terminal would act on, then "N more".
+func quoteNames(names []string, n int) []string {
+	var out []string
+	for i, name := range names {
+		if i == n {
+			out = append(out, fmt.Sprintf("%d more", len(names)-n))
+			break
+		}
+		out = append(out, DisplayName(name))
+	}
+	return out
+}
+
+// DisplayName is a file name as the review prints it: as it is when every
+// character is printable, else Go-quoted, so a name cannot move the
+// cursor or write terminal controls.
+func DisplayName(name string) string {
+	if !utf8.ValidString(name) || strings.IndexFunc(name, func(r rune) bool { return !unicode.IsPrint(r) }) >= 0 {
+		return strconv.Quote(name)
+	}
+	return name
+}
+
 // scanAddedLines runs the secret rules on the lines each file's patch adds.
+// A header name git quotes (a control character, a quote or a backslash
+// in it) is unquoted, so the rules see the real name.
 func scanAddedLines(patch string) []osw.ScanFinding {
 	added := map[string]*strings.Builder{}
 	var cur string
 	for _, line := range strings.Split(patch, "\n") {
 		switch {
 		case strings.HasPrefix(line, "+++ "):
-			cur = strings.TrimPrefix(strings.TrimPrefix(line, "+++ "), "b/")
+			cur = strings.TrimPrefix(line, "+++ ")
+			if strings.HasPrefix(cur, `"`) {
+				if u, err := strconv.Unquote(cur); err == nil {
+					cur = u
+				}
+			}
+			cur = strings.TrimPrefix(cur, "b/")
 			if cur == "/dev/null" {
 				cur = ""
 			}
@@ -254,12 +388,13 @@ func scanAddedLines(patch string) []osw.ScanFinding {
 	return out
 }
 
-// Push pushes p.Commit to origin's refs/heads/branch from the actor and
-// checks with ls-remote that the branch is there. It never forces; a
-// branch this actor pushed before moves forward only (p.Commit becomes
-// what was pushed).
-func (p *BranchPush) Push(ctx context.Context, run BranchExec, branch, name string) error {
-	out, stderr, code, err := run(ctx, []string{"sh", "-c", pushScript, "sh", p.Commit, branch, name}, p.Dir, pushEnv, 10*time.Minute)
+// Push pushes p.Commit to refs/heads/branch of p.PushURL from the actor and
+// checks with ls-remote that the branch is there. prev is the commit this
+// computer pushed to that branch before (PushedBefore), "" for none. It
+// never forces: a branch origin has moves only when it is at prev, and
+// then forward only (p.Commit becomes what was pushed).
+func (p *BranchPush) Push(ctx context.Context, run BranchExec, branch, name, prev string) error {
+	out, stderr, code, err := run(ctx, []string{"sh", "-c", pushScript, "sh", p.objects, p.PushURL, p.Commit, branch, name, prev}, p.Dir, pushEnv, 10*time.Minute)
 	if err != nil {
 		return err
 	}
@@ -300,24 +435,27 @@ func short(c string) string {
 	return c
 }
 
-// GitRemoteTarget is the https host and repository path (no .git) git
-// pushes to for remote, after the baked rules plus rules
-// (config.RewriteGitURL, the map CloneHost uses); "" when remote is not
-// https after them.
-func GitRemoteTarget(remote string, rules []config.SubstrateGitRewrite) (host, repo string) {
+// GitRemoteTarget is the https host, repository path (no .git) and push
+// address for remote, after the baked rules plus rules
+// (config.RewriteGitURL, the map CloneHost uses); all "" when remote is not
+// https after them. The address is https://HOST/PATH with the path as the
+// remote has it (.git kept), without user, query or fragment.
+func GitRemoteTarget(remote string, rules []config.SubstrateGitRewrite) (host, repo, pushURL string) {
 	raw := strings.TrimSpace(remote)
 	if v, ok := config.RewriteGitURL(raw, rules); ok {
 		raw = v
 	}
 	u, err := url.Parse(raw)
 	if err != nil || u.Scheme != "https" || u.Hostname() == "" {
-		return "", ""
+		return "", "", ""
 	}
-	repo = strings.TrimSuffix(strings.Trim(path.Clean("/"+u.Path), "/"), ".git")
+	p := strings.Trim(path.Clean("/"+u.Path), "/")
+	repo = strings.TrimSuffix(p, ".git")
 	if repo == "" || repo == "." {
-		return "", ""
+		return "", "", ""
 	}
-	return strings.ToLower(u.Host), repo
+	host = strings.ToLower(u.Host)
+	return host, repo, (&url.URL{Scheme: "https", Host: host, Path: "/" + p}).String()
 }
 
 // safeRemote is remote without any user or password.
@@ -342,4 +480,58 @@ func CompareLink(host, repo, branch string) string {
 		return "https://bitbucket.org/" + repo + "/pull-requests/new?source=" + b
 	}
 	return ""
+}
+
+// --- the "pushed before" record, on this computer --------------------------
+
+// pushedPath keeps, per copy name, the commit this computer last pushed
+// to each branch. It lives outside the actor, which can write its own git
+// config and refs (RV4-2).
+func pushedPath(dataDir, name string) string {
+	return filepath.Join(dataDir, "substrate", "pushed", name+".json")
+}
+
+func pushedKey(host, repo, branch string) string { return host + "/" + repo + " refs/heads/" + branch }
+
+func loadPushed(dataDir, name string) map[string]string {
+	m := map[string]string{}
+	if b, err := os.ReadFile(pushedPath(dataDir, name)); err == nil {
+		_ = json.Unmarshal(b, &m)
+	}
+	return m
+}
+
+// PushedBefore is the commit this computer last pushed with pull
+// --push-branch to branch of host/repo for the copy name; "" for none.
+func PushedBefore(dataDir, name, host, repo, branch string) string {
+	return loadPushed(dataDir, name)[pushedKey(host, repo, branch)]
+}
+
+// RecordPushed saves commit as the last push to branch of host/repo.
+func RecordPushed(dataDir, name, host, repo, branch, commit string) error {
+	m := loadPushed(dataDir, name)
+	m[pushedKey(host, repo, branch)] = commit
+	b, err := json.MarshalIndent(m, "", "  ")
+	if err != nil {
+		return err
+	}
+	dst := pushedPath(dataDir, name)
+	if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
+		return err
+	}
+	f, err := os.CreateTemp(filepath.Dir(dst), name+".*.tmp")
+	if err != nil {
+		return err
+	}
+	_, werr := f.Write(append(b, '\n'))
+	if cerr := f.Close(); werr == nil {
+		werr = cerr
+	}
+	if werr == nil {
+		werr = os.Rename(f.Name(), dst)
+	}
+	if werr != nil {
+		_ = os.Remove(f.Name())
+	}
+	return werr
 }

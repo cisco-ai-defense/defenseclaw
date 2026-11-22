@@ -83,6 +83,7 @@ func (a *APIServer) substrateGitPush(st *substrateState) http.HandlerFunc {
 		var in struct {
 			Host    string `json:"host"`
 			Repo    string `json:"repo"`
+			URL     string `json:"url,omitempty"`
 			Branch  string `json:"branch"`
 			Head    string `json:"head"`
 			Commits int    `json:"commits"`
@@ -98,7 +99,8 @@ func (a *APIServer) substrateGitPush(st *substrateState) http.HandlerFunc {
 		in.Host = strings.ToLower(strings.TrimSpace(in.Host))
 		in.Repo = strings.Trim(strings.TrimSpace(in.Repo), "/")
 		if !substrateGitPushHost.MatchString(in.Host) || in.Repo == "" || len(in.Repo) > 512 || strings.ContainsAny(in.Repo, " \t\r\n\"\\") ||
-			!substrateGitPushBranchOK(in.Branch) || !substrateGitPushHead.MatchString(in.Head) || in.Commits < 0 || in.Files < 0 || len(in.AskID) > 64 {
+			!substrateGitPushBranchOK(in.Branch) || !substrateGitPushHead.MatchString(in.Head) || in.Commits < 0 || in.Files < 0 || len(in.AskID) > 64 ||
+			in.URL != "" && in.URL != "https://"+in.Host+"/"+in.Repo && in.URL != "https://"+in.Host+"/"+in.Repo+".git" {
 			writeSubstrateJSONError(w, http.StatusBadRequest, "invalid_request")
 			return
 		}
@@ -107,7 +109,11 @@ func (a *APIServer) substrateGitPush(st *substrateState) http.HandlerFunc {
 			writeSubstrateJSONError(w, status, reason)
 			return
 		}
+		// The ask names the exact address the launcher pushes to.
 		target := in.Host + "/" + in.Repo
+		if in.URL != "" {
+			target = in.URL
+		}
 		answer := func(decision, why string, extra map[string]any) {
 			a.substrateAuditGitPush(r, reg.Atespace+"/"+reg.Name, reg.Person.ID(), target, in.Branch, in.Commits, in.Files, decision, why)
 			out := map[string]any{"decision": decision, "reason": why}

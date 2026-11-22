@@ -70,10 +70,14 @@ func TestB2PushBranchFromTheActor(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not installed")
 	}
-	t.Setenv("GIT_CONFIG_GLOBAL", "/dev/null")
-	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
 	tmp := t.TempDir()
 	origin := filepath.Join(tmp, "origin.git")
+	// The image's system git config (egress here) reads the https origin as
+	// the local bare repository; the push reads no checkout config.
+	sys := filepath.Join(tmp, "gitconfig")
+	os.WriteFile(sys, []byte("[url \"file://"+origin+"\"]\n\tinsteadOf = https://git.example.test/team/app.git\n"), 0o644)
+	t.Setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+	t.Setenv("GIT_CONFIG_SYSTEM", sys)
 	gitT(t, tmp, "init", "-q", "--bare", origin)
 	root := filepath.Join(tmp, "work")
 	gitT(t, tmp, "clone", "-q", origin, root+"/app")
@@ -100,14 +104,14 @@ func TestB2PushBranchFromTheActor(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !p.Made || p.Commits != 1 || len(p.Files) != 2 || p.Host != "git.example.test" || p.Repo != "team/app" ||
+	if !p.Made || p.Commits != 1 || len(p.Files) != 2 || p.Host != "git.example.test" || p.Repo != "team/app" || p.PushURL != "https://git.example.test/team/app.git" ||
 		len(p.Placeholder) != 1 || p.Placeholder[0] != "npmrc" || len(p.RunsCode) != 1 || !p.Flagged() {
 		t.Fatalf("plan: %+v", p)
 	}
 	if gitT(t, repo, "rev-parse", "HEAD") != head || gitT(t, repo, "status", "--porcelain") == "" {
 		t.Fatal("the agent's HEAD or index moved")
 	}
-	if err := p.Push(ctx, localExec, "agent/fix", "a1"); err != nil {
+	if err := p.Push(ctx, localExec, "agent/fix", "a1", ""); err != nil {
 		t.Fatal(err)
 	}
 	if got := gitT(t, tmp, "--git-dir", origin, "rev-parse", "refs/heads/agent/fix"); got != p.Commit {
@@ -121,7 +125,7 @@ func TestB2PushBranchFromTheActor(t *testing.T) {
 	if err != nil || p2.Made {
 		t.Fatalf("committed work: %+v %v", p2, err)
 	}
-	if err := p2.Push(ctx, localExec, "agent/fix", "a1"); err != nil {
+	if err := p2.Push(ctx, localExec, "agent/fix", "a1", p.Commit); err != nil {
 		t.Fatalf("fast-forward of its own branch: %v", err)
 	}
 	if gitT(t, tmp, "--git-dir", origin, "merge-base", "--is-ancestor", p.Commit, p2.Commit) != "" ||
@@ -131,7 +135,7 @@ func TestB2PushBranchFromTheActor(t *testing.T) {
 	// Someone else's branch is never overwritten.
 	gitT(t, tmp, "--git-dir", origin, "update-ref", "refs/heads/theirs", head)
 	var pe *BranchPushError
-	if err := p2.Push(ctx, localExec, "theirs", "a1"); !errors.As(err, &pe) || pe.Kind != "exists" {
+	if err := p2.Push(ctx, localExec, "theirs", "a1", p2.Commit); !errors.As(err, &pe) || pe.Kind != "exists" {
 		t.Fatalf("someone else's branch: %v", err)
 	}
 	if gitT(t, tmp, "--git-dir", origin, "rev-parse", "refs/heads/theirs") != head {
@@ -139,22 +143,22 @@ func TestB2PushBranchFromTheActor(t *testing.T) {
 	}
 	// Its own branch moved on origin by someone else: no force.
 	gitT(t, tmp, "--git-dir", origin, "update-ref", "refs/heads/agent/fix", head)
-	if err := p2.Push(ctx, localExec, "agent/fix", "a1"); !errors.As(err, &pe) || pe.Kind != "exists" {
+	if err := p2.Push(ctx, localExec, "agent/fix", "a1", p2.Commit); !errors.As(err, &pe) || pe.Kind != "exists" {
 		t.Fatalf("moved branch: %v", err)
 	}
 }
 
 func TestB2PushBranchTargetsAndLinks(t *testing.T) {
 	for in, want := range map[string]string{
-		"https://github.com/team/app.git":      "github.com team/app",
-		"git@gitlab.com:group/sub/app.git":     "gitlab.com group/sub/app",
-		"ssh://git@git.corp.example/team/app":  "git.corp.example team/app",
-		"https://x-access-token:p@h.example/r": "h.example r",
-		"/srv/app.git":                         " ",
-		"git@git.corp.example:team/app":        " ",
+		"https://github.com/team/app.git":          "github.com team/app https://github.com/team/app.git",
+		"git@gitlab.com:group/sub/app.git":         "gitlab.com group/sub/app https://gitlab.com/group/sub/app.git",
+		"ssh://git@git.corp.example/team/app":      "git.corp.example team/app https://git.corp.example/team/app",
+		"https://x-access-token:p@h.example/r?x#y": "h.example r https://h.example/r",
+		"/srv/app.git":                  "  ",
+		"git@git.corp.example:team/app": "  ",
 	} {
-		h, r := GitRemoteTarget(in, nil)
-		if h+" "+r != want {
+		h, r, u := GitRemoteTarget(in, nil)
+		if h+" "+r+" "+u != want {
 			t.Errorf("%s: %q %q, want %q", in, h, r, want)
 		}
 	}
