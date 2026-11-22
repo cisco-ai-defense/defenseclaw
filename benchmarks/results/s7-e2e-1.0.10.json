@@ -2,7 +2,7 @@
  "schema": "defenseclaw-s7-e2e-results/1",
  "title": "End-to-end guardrail benchmark, 1.0.10 release candidate",
  "run_date": "2026-11-16",
- "build": "1.0.10 release candidate 4269debe92 plus changes to the test harness only (and a bench-only switch that lets the hook wait 8 seconds for the judge). Not run on the released build.",
+ "build": "1.0.10 release candidate of 2026-11-16 plus changes to the test harness only (and a bench-only switch that lets the hook wait 8 seconds for the judge). Not run on the released build.",
  "label_set": "v3.3 (source labels plus reviewed overlays; overlays in benchmarks/s7/gate/labels)",
  "split": "s7-holdout-v1, holdout side, run once",
  "pooled_over": "13 third-party tool-call sets",

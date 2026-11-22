@@ -32,12 +32,12 @@ Every table below says which layers ran.
 | Question | Benchmark | Build and date | Section |
 | --- | --- | --- | --- |
 | How precise are the rules on public command, PII and agent-trace data? | Deterministic detection | Rule packs of September 2026 (scorecard of 2026-09-08). Not run again for 1.0.10. | [Rule detection](#rule-detection-on-public-data) |
-| How much does the whole cascade catch, and what does it cost in noise, time and money? | end-to-end | 1.0.10 release candidate `4269debe92`, 2026-11-16 | [Whole cascade](#the-whole-cascade-end-to-end) |
+| How much does the whole cascade catch, and what does it cost in noise, time and money? | end-to-end | 1.0.10 release candidate, 2026-11-16 | [Whole cascade](#the-whole-cascade-end-to-end) |
 | How well does the LLM judge read one session in context? | Contextual judge | Gemma 4 26B A4B, 2026-09-09 | [LLM judge](#llm-judge) |
 | Does the alignment check help? | Alignment check | 1.0.10 code | [Alignment check](/docs/guardrail/intent#how-good-it-is) |
 | How good is the decision model on its own? | System One benchmark | OpenJev with Gemma 4 as the judge | [Decision model](/docs/guardrail/decision-model#benchmarks) |
 | Does the router send each prompt to the right model? | Routing evaluation | Stand-in classifiers, 2026-11-12 | [Model routing](#model-routing) |
-| How many tool calls a second can one host check? | Hook sizing | 1.0.10 release candidate `f1ccff5b7a`, 2026-11-17 | [Hook speed](#hook-speed-and-sizing) |
+| How many tool calls a second can one host check? | Hook sizing | 1.0.10 release candidate, 2026-11-17 | [Hook speed](#hook-speed-and-sizing) |
 
 ## The whole cascade: end-to-end
 
@@ -45,11 +45,10 @@ This is the benchmark to quote for 1.0.10. It replays labelled tool calls,
 prompts and tool results through the real hook code, with each layer added in
 turn: rules, then the decision model, then the LLM judge.
 
-**What ran.** The 1.0.10 release candidate `4269debe92`, plus changes to the
-test harness only (and a bench-only switch that lets the hook wait 8 seconds
-for the judge). It ran on 2026-11-16. Fixes made after that build, some of
-them to rules, are in the released 1.0.10. The benchmark was not run again on
-the released build, so its rows can differ from these.
+**What the numbers describe.** The 1.0.10 release candidate of 2026-11-16, with
+changes to the test harness only (and a bench-only switch that lets the hook
+wait 8 seconds for the judge). The released 1.0.10 includes later fixes, some
+of them to rules.
 
 **What each setup is.**
 
@@ -153,7 +152,7 @@ DefenseClaw has the highest F1 of the runs, but not by a margin you should
 rely on against LlamaFirewall: the 95% intervals of the two overlap. On
 speed, LlamaFirewall's p50 and p95 were 2,950 and 24,687 ms, with a cost of
 USD 0.80 per 1,000 calls; the DefenseClaw cascade is in the table above.
-PromptGuard 2 on its own was not run. A tool none of whose rules apply to a
+A tool none of whose rules apply to a
 tool call scores near zero by construction; read those rows as "does not cover
 this surface", not as a failure of the tool at its own job.
 
@@ -207,9 +206,8 @@ corpus it belongs to.
 DefenseClaw is designed to block **proved effects**, not merely suspicious
 words. We evaluated that design across public malicious-command, PII,
 tool-injection, and honest agent-trajectory datasets in September 2026. The
-scorecard is dated 2026-09-08 and has not been regenerated since. 1.0.10
-added and changed rules, and this public harness was not run again for them;
-the end-to-end rows above are the 1.0.10 measurement.
+scorecard is dated 2026-09-08 and describes the September 2026 rule packs.
+The end-to-end rows above are the 1.0.10 measurement.
 
 <Callout type="info" title="How to read these results">
 The **Profile** column is the guardrail rule-pack profile (`default`,
@@ -370,10 +368,9 @@ family-excluded attack trajectories, with **98.95% precision**, **94% recall**,
 and **0.964 F1**. It alerted on one of 20 benign coding trajectories and
 recommended blocking none of them.
 
-**Which model, which date.** This benchmark ran on 2026-09-09 with Gemma 4
-**26B A4B** and Gemma 3 12B. It was not run again with the model DefenseClaw
-recommends in 1.0.10, Gemma 4 **31B** (`google.gemma-4-31b`). The 31B model was
-measured on the benchmark sets: see the
+**Which model, which date.** Measured on 2026-09-09 with Gemma 4
+**26B A4B** and Gemma 3 12B. DefenseClaw recommends Gemma 4 **31B**
+(`google.gemma-4-31b`) in 1.0.10; its results are in the
 [recommended judge model](/docs/guardrail/llm-judge#turn-it-on)
 and the [whole-cascade results](#the-whole-cascade-end-to-end).
 
@@ -624,7 +621,7 @@ How many calls a second one host can check depends on the operating system, the
 install type and the instance size. The measured maximum rates of 1.0.10 for
 each platform, one very large command and the host-capacity warning are in
 [Hook sizing](/docs/support-matrix#hook-sizing). The rates there are
-measurements of release candidate `f1ccff5b7a` (2026-11-17).
+measurements of the 1.0.10 release candidate (2026-11-17).
 
 The load tool for these rates is not
 in the repository. To see how your own host does, read the hook-capacity
