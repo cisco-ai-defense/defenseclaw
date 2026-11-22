@@ -142,11 +142,11 @@ func CollectFacts(connector, event string, payload []byte, attachCap int64) *Fac
 		// A Write or Edit of one of those configs: its next content.
 		budget = attachMCPWrite(f, connector, cwd, input, budget)
 		// A command that may add an MCP server (claude mcp add, codex mcp
-		// add): what the folder offers a registry fetcher (GAP-0573).
-		if in, ok := input.(map[string]any); ok {
-			if c, ok := in["command"].(string); ok && strings.Contains(strings.ToLower(c), "mcp") {
-				budget = attachFetchFacts(f, cwd, budget)
-			}
+		// add), as a string (Bash) or an argv list (the Codex shell tool,
+		// which the gateway reads joined): what the folder offers a
+		// registry fetcher (GAP-0573, GAP-0643).
+		if in, ok := input.(map[string]any); ok && strings.Contains(strings.ToLower(commandText(in["command"])), "mcp") {
+			budget = attachFetchFacts(f, cwd, budget)
 		}
 	}
 	_ = budget
@@ -721,6 +721,14 @@ func attachMCPWrite(f *Facts, connectorName, cwd string, input any, budget int64
 		}
 	}
 	if !match {
+		// A config the connector does not load (sub/.mcp.json): the gateway
+		// reads the servers of a whole write (its content) from the call
+		// itself and decides a fetched one with the folder's facts, so the
+		// kit sends them (GAP-0643). A partial edit gives the gateway no
+		// server; it needs none.
+		if _, whole := in["content"].(string); whole && mcpConfigWriteNames[filepath.Base(target)] {
+			budget = attachFetchFacts(f, cwd, budget)
+		}
 		return budget
 	}
 	content, cut, ok := nextContent(in, target, budget)
@@ -734,6 +742,30 @@ func attachMCPWrite(f *Facts, connectorName, cwd string, input any, budget int64
 	}
 	f.Files = append(f.Files, a)
 	return attachFetchFacts(f, cwd, budget-int64(len(content)))
+}
+
+// mcpConfigWriteNames are the file names whose write the gateway reads for
+// MCP servers wherever they are (attest mcpConfigWrite, the kit's copy of
+// the same rule).
+var mcpConfigWriteNames = map[string]bool{".mcp.json": true, "mcp.json": true, ".claude.json": true,
+	"settings.json": true, "settings.local.json": true, "config.toml": true}
+
+// commandText is a tool call's command as the gateway reads it: the string,
+// or the strings of an argv list joined by spaces.
+func commandText(v any) string {
+	switch c := v.(type) {
+	case string:
+		return c
+	case []any:
+		parts := make([]string, 0, len(c))
+		for _, e := range c {
+			if s, ok := e.(string); ok {
+				parts = append(parts, s)
+			}
+		}
+		return strings.Join(parts, " ")
+	}
+	return ""
 }
 
 func firstString(m map[string]any, keys ...string) string {
