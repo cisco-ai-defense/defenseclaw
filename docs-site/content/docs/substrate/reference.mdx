@@ -133,7 +133,9 @@ The `substrate` section of the DefenseClaw configuration. On a cluster it comes 
 | `substrate.llm.bedrock_models` | `[]` | Bedrock model IDs actors may call. A call that names another model goes to the first entry instead, through the same guardrails. That holds for `/model/<id>` and for the model named in the body of the OpenAI-compatible calls (`/llm/bedrock/openai/v1/responses` and `/chat/completions`). A body that can't be read as a JSON object with a model, or that is compressed or too large, is refused |
 | `substrate.llm.credential.provider_uri` | none | Where the model key comes from (`ate-secret://...`) |
 | `substrate.egress.allow`, `.ecosystem_packs`, `.registries` | `[]`, every pack, `[]` | The base egress every actor gets before its profile tightens it |
+| `substrate.egress.no_swap_hosts` | `[]` | Preview. Hosts that return the requests they get, added to the built-in echo list. No secret is added on them (`secret_echo_host`), for administrator and personal secrets alike |
 | `substrate.secrets` | `[]` | See [Secrets](/docs/substrate/secrets) |
+| `substrate.secrets[].inject.allow_echo` | `false` | Preview. Adds this one secret on an echo host anyway. The gateway warns at start for each such entry |
 | `substrate.allow_passthrough_for` | `[]` | Hosts that are not inspected. Never given a secret |
 | `substrate.admin` | none | The cluster floor, the same keys as `openshell.admin` plus the Substrate keys below. Profiles tighten it |
 

@@ -8334,6 +8334,15 @@
                 "minLength": 1,
                 "maxLength": 253
               }
+            },
+            "no_swap_hosts": {
+              "type": "array",
+              "maxItems": 1024,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 253
+              }
             }
           }
         },
@@ -8390,6 +8399,9 @@
                   "placeholder": {
                     "type": "string",
                     "pattern": "^[A-Z_][A-Z0-9_]*$"
+                  },
+                  "allow_echo": {
+                    "type": "boolean"
                   }
                 }
               },

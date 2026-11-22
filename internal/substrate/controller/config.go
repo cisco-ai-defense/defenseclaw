@@ -58,6 +58,7 @@ func SettingsFromConfig(cfg *config.Config) render.Settings {
 		RegistryHosts:        s.Egress.Registries,
 		PassthroughFor:       s.AllowPassthroughFor,
 		ProviderHosts:        providers,
+		NoSwapHosts:          s.Egress.NoSwapHosts,
 	}
 }
 
@@ -70,7 +71,7 @@ func SecretsFromConfig(cfg *config.Config) []render.Secret {
 			scope = egressspec.ScopeShared
 		}
 		out = append(out, render.Secret{Name: s.Name, Source: s.Source, Hosts: s.Inject.Hosts, Header: s.Inject.Header,
-			Prefix: s.Inject.Prefix, Scope: scope, Profiles: s.Profiles})
+			Prefix: s.Inject.Prefix, Scope: scope, Profiles: s.Profiles, AllowEcho: s.Inject.AllowEcho})
 	}
 	return out
 }

@@ -4743,6 +4743,9 @@ class SubstrateEgressConfig:
     # None = every ecosystem pack (Go nil); [] = none.
     ecosystem_packs: list[str] | None = None
     registries: list[str] = field(default_factory=list)
+    # Hosts added to the built-in echo hosts: no secret is added there
+    # unless the entry sets inject.allow_echo (Go NoSwapHosts).
+    no_swap_hosts: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -4779,6 +4782,8 @@ class SubstrateSecretInject:
     header: str = ""
     prefix: str = ""
     placeholder: str = ""
+    # Lets the secret be added on a host that returns requests (Go AllowEcho).
+    allow_echo: bool = False
 
 
 @dataclass
@@ -8120,6 +8125,7 @@ def _merge_substrate(raw: Any) -> SubstrateConfig:
                     header=str(inject.get("header", "") or ""),
                     prefix=str(inject.get("prefix", "") or ""),
                     placeholder=str(inject.get("placeholder", "") or ""),
+                    allow_echo=bool(inject.get("allow_echo", False)),
                 ),
                 scope=str(item.get("scope", "") or ""),
                 profiles=_string_list(item.get("profiles")),
@@ -8196,6 +8202,7 @@ def _merge_substrate(raw: Any) -> SubstrateConfig:
             allow=_string_list(egress.get("allow")),
             ecosystem_packs=None if packs is None else _string_list(packs),
             registries=_string_list(egress.get("registries")),
+            no_swap_hosts=_string_list(egress.get("no_swap_hosts")),
         ),
         secrets=secrets,
         allow_passthrough_for=_string_list(raw.get("allow_passthrough_for")),
@@ -8315,6 +8322,10 @@ def _serialize_substrate(cfg: Config, d: dict[str, Any]) -> None:
             bundles.pop("enabled")
         if not bundles:
             pruned.pop("bundles")
+    for sec in pruned.get("secrets") or []:
+        inject = sec.get("inject") if isinstance(sec, dict) else None
+        if isinstance(inject, dict) and inject.get("allow_echo") is False:  # Go omitempty
+            inject.pop("allow_echo")
     if packs == []:
         pruned.setdefault("egress", {})["ecosystem_packs"] = []
     d["substrate"] = pruned

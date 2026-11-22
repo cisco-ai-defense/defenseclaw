@@ -225,7 +225,7 @@ func NewEngine(o Options) (*Engine, error) {
 			e.mcpNames[nh] = strings.TrimSpace(name)
 		}
 	}
-	e.bindings = compileBindings(cfg.Secrets)
+	e.bindings = compileBindings(cfg.Secrets, cfg.NoSwapHosts)
 	e.body = newBodyMode(cfg.BodyInspection)
 	e.chain = newChainQueue(o.ChainSink, cfg.Chain.QueueSize)
 	return e, nil

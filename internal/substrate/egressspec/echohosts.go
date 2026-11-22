@@ -16,15 +16,20 @@
 
 package egressspec
 
-import "strings"
+import (
+	"slices"
+	"strings"
+)
 
 // EchoHosts are public services that return or publish the request they
 // were sent, headers included (GAP-0405). A secret injected on a request to
 // one of them comes back to the agent in the response, or is published to
 // whoever reads the capture, so the agent and its model see the real value.
 // The callout cannot tell an echo from a normal answer in headers-only
-// mode, so binding a secret to one of these hosts is warned about at
-// gateway start. The list names the well-known ones; any service can echo.
+// mode, so the controller does not add a secret on these hosts
+// (render.ReasonSecretEchoHost) unless the entry sets inject.allow_echo.
+// The list names the well-known ones; any service can echo, and
+// substrate.egress.no_swap_hosts adds more.
 var EchoHosts = []string{
 	"httpbin.org", "*.httpbin.org", "httpbingo.org", "httpbin.io",
 	"postman-echo.com", "echo.hoppscotch.io",
@@ -33,15 +38,20 @@ var EchoHosts = []string{
 
 // EchoHostsCovered returns the entries of EchoHosts that some host the
 // pattern raw matches is also matched by (an overlap), in list order.
-func EchoHostsCovered(raw string) []string {
+func EchoHostsCovered(raw string) []string { return EchoHostsCoveredWith(raw, nil) }
+
+// EchoHostsCoveredWith is EchoHostsCovered over EchoHosts followed by extra
+// (substrate.egress.no_swap_hosts). An extra entry that is not a valid
+// pattern is skipped (config validation refuses it).
+func EchoHostsCoveredWith(raw string, extra []string) []string {
 	p, ok := ParsePattern(raw)
 	if !ok {
 		return nil
 	}
 	var out []string
-	for _, e := range EchoHosts {
-		ep, _ := ParsePattern(e)
-		if patternsOverlap(p, ep) {
+	for _, e := range append(slices.Clip(EchoHosts), extra...) {
+		ep, ok := ParsePattern(e)
+		if ok && patternsOverlap(p, ep) && !slices.Contains(out, e) {
 			out = append(out, e)
 		}
 	}

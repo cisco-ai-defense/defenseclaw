@@ -217,7 +217,7 @@ The callout's refusal is a JSON body with `error: egress_blocked`, a `message` t
 
 The placeholder was sent to a host the secret isn't bound to, so nothing was swapped. That is working as intended. Bind the secret to the right host, or stop the tool from echoing it.
 
-If a tool's output shows the real value instead, the secret is bound to a host that echoes requests (for example `httpbin.org` or `postman-echo.com`): egress swapped it in and the service sent it back. The callout never reads responses, so it can't mask the value on the way back. Remove that host from the secret's `inject.hosts` ([Bind a secret to hosts](/docs/substrate/secrets#bind-a-secret-to-hosts)) and rotate the value; the gateway's start-up warning names every secret bound to a well-known echo host. See [Hosts that echo tokens](/docs/substrate/secrets#things-to-know).
+If a tool's output shows the real value instead, the secret is bound to a host that echoes requests (for example `httpbin.org` or `postman-echo.com`): egress swapped it in and the service sent it back. The callout never reads responses, so it can't mask the value on the way back. Remove that host from the secret's `inject.hosts` ([Bind a secret to hosts](/docs/substrate/secrets#bind-a-secret-to-hosts)) and rotate the value; on a well-known echo host or one in `substrate.egress.no_swap_hosts` the cluster adds no secret at all unless the entry sets `inject.allow_echo: true`, and `substrate doctor --cluster` names those entries. See [Hosts that echo tokens](/docs/substrate/secrets#things-to-know).
 
 ### Credential injection returns 403 "atespace not permitted"
 

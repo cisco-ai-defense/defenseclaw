@@ -72,6 +72,7 @@ var Table = []Reason{
 	{"secret_not_for_profile", 0, Render, "The agent's profile is not one this secret is for.", "Run the agent with one of the secret's profiles.", Person},
 	{"secret_not_in_allowed_credentials", 0, Render, "The profile limits which secrets its agents may use, and this one is not listed.", "Start the agent with --secret NAME, or ask your administrator to list it.", Person},
 	{"secret_needs_person", 0, Render, "A personal secret needs a signed-in person, and this agent has none.", "Start the agent with defenseclaw substrate run while signed in.", Person},
+	{"secret_echo_host", 0, Render, "The host returns the requests it gets, so the cluster does not add a secret there: the real value would come back to the agent.", "Bind the secret to the API host that needs it. An administrator who wants the echo can set inject.allow_echo: true on the entry.", Person},
 	{"secret_invalid", 0, Render, "The secret's entry is malformed (the detail names the field).", "An administrator can fix the entry in substrate.secrets.", Admin},
 	{"secret_header_conflict", 0, Render, "Another secret already sets that header on that host.", "Remove one of the two bindings.", Admin},
 	{"secret_too_many_headers", 0, Render, "The host already has the most secret headers allowed.", "Remove a binding on that host.", Admin},

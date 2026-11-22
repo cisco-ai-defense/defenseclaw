@@ -29,6 +29,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/egressspec"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/identity"
 )
 
@@ -362,6 +364,54 @@ func SignInServerCheck(d identity.IssuerDiagnosis) SubstrateCheck {
 	case identity.IssuerKeys:
 		c.Detail = "the sign-in server's key set does not load (" + d.Detail + "): no sign-in can be verified"
 		c.Fix = "check the sign-in server's jwks_uri and that the gateway reaches it"
+	}
+	return c
+}
+
+// SubstrateSecretEchoHits are the echo-host entries (egressspec.EchoHosts,
+// then substrate.egress.no_swap_hosts) that a host of sec covers, each once.
+func SubstrateSecretEchoHits(sec config.SubstrateSecret, noSwap []string) []string {
+	var hits []string
+	for _, h := range sec.Inject.Hosts {
+		for _, e := range egressspec.EchoHostsCoveredWith(h, noSwap) {
+			if !slices.Contains(hits, e) {
+				hits = append(hits, e)
+			}
+		}
+	}
+	return hits
+}
+
+// SubstrateSecretEchoHostCheck is the doctor row substrate.secret_echo_host
+// (B1 D1-6): it fails when an admin secret is bound to a host that returns
+// the requests it gets, because the controller drops that binding
+// (secret_echo_host) and the agent no longer gets the secret there. It
+// warns for an entry that keeps the echo with inject.allow_echo.
+func SubstrateSecretEchoHostCheck(secrets []config.SubstrateSecret, noSwap []string) SubstrateCheck {
+	c := SubstrateCheck{ID: "substrate.secret_echo_host", Status: "pass",
+		Detail: "no secret is bound to a host that returns the requests it gets"}
+	var dropped, kept []string
+	for _, sec := range secrets {
+		hits := SubstrateSecretEchoHits(sec, noSwap)
+		if len(hits) == 0 {
+			continue
+		}
+		line := sec.Name + " (" + strings.Join(hits, ", ") + ")"
+		if sec.Inject.AllowEcho {
+			kept = append(kept, line)
+		} else {
+			dropped = append(dropped, line)
+		}
+	}
+	switch {
+	case len(dropped) > 0:
+		c.Status = "fail"
+		c.Detail = "these secrets are not added on hosts that return the requests they get: " + strings.Join(dropped, "; ")
+		c.Fix = "bind each secret to the API host that needs it; to keep the echo on purpose, set inject.allow_echo: true on the entry"
+	case len(kept) > 0:
+		c.Status = "warn"
+		c.Detail = "inject.allow_echo adds these secrets on hosts that return them to the agent: " + strings.Join(kept, "; ")
+		c.Fix = "remove inject.allow_echo unless the echo is intended"
 	}
 	return c
 }

@@ -79,11 +79,11 @@ _FULL = {
     "llm": {"providers": ["anthropic", "bedrock"],
             "credential": {"provider_uri": "ate-secret://k8s.io/default/defenseclaw-system/llm-keys"}},
     "egress": {"allow": ["github.com", "*.githubusercontent.com"], "ecosystem_packs": ["pypi", "npm"],
-               "registries": ["ghcr.io"]},
+               "registries": ["ghcr.io"], "no_swap_hosts": ["echo.corp.example", "*.mirror.example"]},
     "secrets": [
         {"name": "github-push", "source": "ate-secret://k8s.io/default/dc-secrets/github-app/token",
          "inject": {"hosts": ["github.com", "api.github.com"], "header": "Authorization", "prefix": "Bearer ",
-                    "placeholder": "DC_SECRET_GITHUB"},
+                    "placeholder": "DC_SECRET_GITHUB", "allow_echo": True},
          "scope": "shared", "profiles": ["eng-*"]},
         {"name": "npm-mine", "source": "ate-secret://k8s.io/default/dc-people/{person}-npm/token",
          "inject": {"hosts": ["registry.npmjs.org"], "header": "Authorization"},
@@ -163,6 +163,9 @@ class TestSubstrateLoadSave(unittest.TestCase):
             self.assertEqual(sub.secrets[1].scope, "per_person")
             self.assertEqual(sub.egress.ecosystem_packs, ["pypi", "npm"])
             self.assertEqual(sub.admin.egress_block, ["paste.example.com"])
+            self.assertEqual(sub.egress.no_swap_hosts, ["echo.corp.example", "*.mirror.example"])
+            self.assertIs(sub.secrets[0].inject.allow_echo, True)
+            self.assertIs(sub.secrets[1].inject.allow_echo, False)
             cfg.save()  # validates the merged document against the v8 schema
             saved = yaml.safe_load(Path(path).read_text())["substrate"]
             self.assertEqual(saved, _FULL)

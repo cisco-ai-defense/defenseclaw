@@ -374,6 +374,9 @@ type SubstrateEgressConfig struct {
 	// EcosystemPacks (nil = every pack) names package-index packs.
 	EcosystemPacks []string `mapstructure:"ecosystem_packs" yaml:"ecosystem_packs,omitempty"`
 	Registries     []string `mapstructure:"registries"      yaml:"registries,omitempty"`
+	// NoSwapHosts are added to the built-in echo hosts: no secret is added
+	// on a host they cover unless its entry sets inject.allow_echo. Hot.
+	NoSwapHosts []string `mapstructure:"no_swap_hosts" yaml:"no_swap_hosts,omitempty"`
 }
 
 // SubstrateSecret is one entry of substrate.secrets (PLAN §7.2). The value
@@ -396,6 +399,10 @@ type SubstrateSecretInject struct {
 	// Placeholder is the environment variable the actor carries in place
 	// of the value.
 	Placeholder string `mapstructure:"placeholder" yaml:"placeholder,omitempty"`
+	// AllowEcho lets the secret be added on a host that returns the
+	// requests it gets (egressspec.EchoHosts, egress.no_swap_hosts). Off by
+	// default: the real value would come back to the agent.
+	AllowEcho bool `mapstructure:"allow_echo" yaml:"allow_echo,omitempty"`
 }
 
 // Substrate defaults.
@@ -787,6 +794,7 @@ func (s *SubstrateConfig) Validate() error {
 
 	checkPatterns("egress.allow", s.Egress.Allow)
 	checkPatterns("egress.registries", s.Egress.Registries)
+	checkPatterns("egress.no_swap_hosts", s.Egress.NoSwapHosts)
 	checkPatterns("allow_passthrough_for", s.AllowPassthroughFor)
 	known := egressspec.EcosystemPacks()
 	for i, p := range s.Egress.EcosystemPacks {
