@@ -42,8 +42,10 @@ const gap1733PerUserRootSDDL = "D:PAI(A;OICI;FA;;;OW)(A;OICI;FA;;;SY)"
 // was enrolled (dc-win2, TST-11648). Run as an elevated Administrator and as
 // LocalSystem (the test starts itself as LocalSystem), the preflight and the
 // install plan skip both users and name them, a third fresh account is still
-// enrolled, the Upgrade/Repair plan refuses the folders, and no owner, DACL
-// or file changes.
+// enrolled, the Upgrade/Repair plan refuses the folders, the guardian's
+// pending proof for the signed-out accounts refuses them instead of
+// repairing them (as LocalSystem it re-stamped both roots on dc-ent-win,
+// TST-11800), and no owner, DACL or file changes.
 func TestGAP1733PerUserInstallFoldersWithTheirOwnDACLAreSkipped(t *testing.T) {
 	system := windowsTestRunsAsLocalSystem(t)
 	if os.Getenv(gap1733SystemChildEnv) == "1" && !system {
@@ -154,6 +156,20 @@ func runGAP1733PerUserInstallLeg(t *testing.T) {
 		t.Errorf("Upgrade/Repair plan over a per-user install folder = %v, want the refusal naming %s", err, first.data)
 	}
 	unchanged("the Upgrade/Repair plan")
+
+	// The guardian's pass over the signed-out accounts: standalone writes
+	// every discovered row deferred, and the pending proof repaired a
+	// folder whose DACL is not the managed one. It refuses each per-user
+	// install folder, naming it, before any repair.
+	for _, account := range accounts {
+		for _, row := range windowsManagedRuntimeTestManifest(account.home, account.sid).Targets {
+			row.Deferred = true
+			if err := requireWindowsEnterpriseDeferredTargetPendingPlatform(row); err == nil || !named(err.Error(), account) {
+				t.Errorf("guardian pending proof for %s %s = %v, want the refusal naming its per-user install", row.Connector, account.data, err)
+			}
+		}
+	}
+	unchanged("the guardian's signed-out pass")
 }
 
 type gap1733Account struct {
