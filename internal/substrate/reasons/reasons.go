@@ -63,7 +63,7 @@ var Table = []Reason{
 	{"secret_managed_outside_defenseclaw", 409, API, "Its value lives in Vault or a cloud secret store, not in a Kubernetes Secret.", "Change the value in that store.", Person},
 	{"secret_not_found", 404, API, "No secret by that name is yours or bound to your profile.", "See the secrets you can use with: defenseclaw substrate secrets list", Person},
 	{"value_required", 400, API, "The value is empty, over 64 KiB or not UTF-8.", "Give the value again.", Person},
-	{"secret_not_managed_by_defenseclaw", 409, API, "That Kubernetes Secret exists but DefenseClaw did not create it (it has no app.kubernetes.io/managed-by: defenseclaw label), and DefenseClaw changes only Secrets it created.", "Ask your administrator.", Admin},
+	{"secret_not_managed_by_defenseclaw", 409, API, "That Kubernetes Secret exists but DefenseClaw did not create it (it is not labelled as managed by DefenseClaw), and DefenseClaw changes only Secrets it created.", "Ask your administrator.", Admin},
 	{"secret_store_unavailable", 503, API, "The gateway cannot reach the Kubernetes secret store.", "Try again in a minute; an administrator can check it with: defenseclaw-gateway substrate doctor --cluster", Admin},
 	{"secret_not_stored", 502, API, "The secret store refused the write.", "Try again in a minute.", Person},
 	{"secret_not_removed", 502, API, "The secret store refused the removal.", "Try again in a minute.", Person},
