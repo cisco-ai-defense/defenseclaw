@@ -98,6 +98,10 @@ type StageOptions struct {
 	// branch, and the sandbox fetches the rest from the remote
 	// (FetchUpstream). The folder must be the top of a checkout.
 	Upstream bool
+	// UpstreamHTTPS, when set, turns an ssh or scp-form remote into the
+	// https address git in the sandbox clones (substrate.git.https_rewrite
+	// and the image's rules); ok false refuses the remote, as with none.
+	UpstreamHTTPS func(string) (string, bool)
 	// MaxBytes caps the staged copy, history included (500 MiB).
 	MaxBytes int64
 	// Summary optionally collects working-tree sizes after exclusions and masking.
@@ -668,7 +672,7 @@ func stageGit(ctx context.Context, rec *CopyRecord, opts StageOptions, scanOpts 
 	}
 	rec.Head, rec.Branch = head, branch
 	if opts.Upstream {
-		if rec.Upstream, err = resolveUpstream(ctx, proj, head, branch); err != nil {
+		if rec.Upstream, err = resolveUpstream(ctx, proj, head, branch, opts.UpstreamHTTPS); err != nil {
 			return err
 		}
 	}

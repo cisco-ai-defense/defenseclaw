@@ -21,12 +21,15 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+
+	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/api"
 )
 
 // substrateRunFlags are the flags of run.
 type substrateRunFlags struct {
 	out      substrateOutput
 	com      substrateCommon
+	git      *api.LauncherGit // substrate.git, read once (substrateGitSettings)
 	profile  string
 	template string
 	name     string

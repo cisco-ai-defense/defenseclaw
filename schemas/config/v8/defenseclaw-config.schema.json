@@ -8078,6 +8078,46 @@
             }
           }
         },
+        "git": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "https_rewrite": {
+              "type": "array",
+              "maxItems": 64,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "from",
+                  "to"
+                ],
+                "properties": {
+                  "from": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256,
+                    "pattern": "^[^-\\s\"\\\\][^\\s\"\\\\]*[:/]$"
+                  },
+                  "to": {
+                    "type": "string",
+                    "minLength": 9,
+                    "maxLength": 256,
+                    "pattern": "^https://[^\\s\"\\\\@/]+(/[^\\s\"\\\\]*)?$"
+                  }
+                }
+              }
+            },
+            "submodules": {
+              "type": "boolean",
+              "default": true
+            },
+            "lfs": {
+              "type": "boolean",
+              "default": true
+            }
+          }
+        },
         "unattended": {
           "type": "object",
           "additionalProperties": false,

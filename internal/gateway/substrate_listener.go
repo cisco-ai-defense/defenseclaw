@@ -203,6 +203,9 @@ type SubstrateConfig struct {
 	// nil reports on.
 	FilesPush func() bool
 	FilesSync func() bool
+	// Git reads substrate.git live for launchers (B2 2.5: the https
+	// rewrite map, submodules, LFS); nil reports the defaults.
+	Git func() config.SubstrateGitConfig
 	// Doctor runs the gateway-side doctor checks; Info is the
 	// unauthenticated sign-in information (issuer, client_id, sign_in).
 	Doctor func(ctx context.Context) []SubstrateCheck

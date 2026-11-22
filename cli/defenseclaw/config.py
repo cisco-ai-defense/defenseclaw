@@ -4668,6 +4668,16 @@ class SubstrateFilesConfig:
 
 
 @dataclass
+class SubstrateGitConfig:
+    # How agents reach private repositories (B2 2.5). https_rewrite is a
+    # list of {"from": ..., "to": ...} pairs (None means the built-in
+    # default of the three SaaS hosts); submodules and lfs: None means on.
+    https_rewrite: list[dict[str, str]] | None = None
+    submodules: bool | None = None
+    lfs: bool | None = None
+
+
+@dataclass
 class SubstrateUnattendedConfig:
     asks: str = ""
     ask_timeout: str = ""
@@ -4881,6 +4891,7 @@ class SubstrateConfig:
     workspace_max_bytes: int | None = None
     launcher: SubstrateLauncherConfig = field(default_factory=SubstrateLauncherConfig)
     files: SubstrateFilesConfig = field(default_factory=SubstrateFilesConfig)
+    git: SubstrateGitConfig = field(default_factory=SubstrateGitConfig)
     unattended: SubstrateUnattendedConfig = field(default_factory=SubstrateUnattendedConfig)
     rate_limits: SubstrateRateLimitsConfig = field(default_factory=SubstrateRateLimitsConfig)
     extproc: SubstrateExtprocConfig = field(default_factory=SubstrateExtprocConfig)
@@ -8237,6 +8248,7 @@ def _merge_substrate(raw: Any) -> SubstrateConfig:
             push=_optional_bool(_mapping(raw.get("files")).get("push")),
             sync=_optional_bool(_mapping(raw.get("files")).get("sync")),
         ),
+        git=_merge_substrate_git(_mapping(raw.get("git"))),
         unattended=SubstrateUnattendedConfig(
             asks=str(unattended.get("asks", "") or ""),
             ask_timeout=_duration_text(unattended.get("ask_timeout")),
@@ -8285,6 +8297,22 @@ def _merge_substrate(raw: Any) -> SubstrateConfig:
         allow_passthrough_for=_string_list(raw.get("allow_passthrough_for")),
         admin=_merge_openshell_admin(raw.get("admin")),
         bundles=_merge_substrate_bundles(raw.get("bundles")),
+    )
+
+
+def _merge_substrate_git(raw: dict[str, Any]) -> SubstrateGitConfig:
+    rewrite = raw.get("https_rewrite")
+    pairs: list[dict[str, str]] | None = None
+    if isinstance(rewrite, list):
+        pairs = [
+            {"from": r["from"], "to": r["to"]}
+            for r in rewrite
+            if isinstance(r, dict) and isinstance(r.get("from"), str) and isinstance(r.get("to"), str)
+        ]
+    return SubstrateGitConfig(
+        https_rewrite=pairs,
+        submodules=_optional_bool(raw.get("submodules")),
+        lfs=_optional_bool(raw.get("lfs")),
     )
 
 

@@ -20,6 +20,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -28,6 +30,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/api"
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/safetext"
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/workspace"
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/secretbind"
 )
 
@@ -56,23 +59,55 @@ func substrateCloneOnce(ctx context.Context, cmd *cobra.Command, cl *api.Client,
 	clone func() (*workspace.CloneResult, error)) (*workspace.CloneResult, error) {
 	res, err := clone()
 	var ce *workspace.CloneError
-	if !errors.As(err, &ce) || !ce.NeedsCredential() || !substrateCloneNeed(ctx, cmd, cl, a, f, ce) {
+	if !errors.As(err, &ce) {
+		return res, err
+	}
+	if ce.Refused = substrateCloneRefused(ctx, cl, a, ce, substrateGitRules(f)); !ce.NeedsCredential() || !substrateCloneNeed(ctx, cmd, cl, a, f, ce) {
 		return res, err
 	}
 	fmt.Fprintf(cmd.ErrOrStderr(), "Cloning %s in the agent again...\n", safetext.Line(f.clone))
 	hint := ce.Hint
 	res, err = clone()
-	if errors.As(err, &ce) && ce.NeedsCredential() {
-		ce.Hint = hint
+	if errors.As(err, &ce) {
+		if ce.Refused = substrateCloneRefused(ctx, cl, a, ce, substrateGitRules(f)); ce.NeedsCredential() {
+			ce.Hint = hint
+		}
 	}
 	return res, err
+}
+
+// substrateCloneURLHostRE finds the https hosts git names in its error
+// (the repository, an LFS object host, a submodule).
+var substrateCloneURLHostRE = regexp.MustCompile(`https?://(?:[^@/\s'"]+@)?([A-Za-z0-9.-]+)`)
+
+// substrateCloneRefused is the first host of a failed clone that the
+// agent's network rules do not allow, or "" (GAP-0720). It asks the
+// gateway's policy explain, which reads the policy in force: the egress
+// guard answers a refused CONNECT with 403, which git reports like a
+// refused token, and the decisions log does not record egress refusals.
+func substrateCloneRefused(ctx context.Context, cl *api.Client, a api.Actor, ce *workspace.CloneError, rules []config.SubstrateGitRewrite) string {
+	var hosts []string
+	if h := workspace.CloneHost(ce.URL, rules); h != "" {
+		hosts = append(hosts, h)
+	}
+	for _, m := range substrateCloneURLHostRE.FindAllStringSubmatch(ce.Message, 4) {
+		if h := strings.ToLower(strings.TrimSuffix(m[1], ".")); h != "" && !slices.Contains(hosts, h) {
+			hosts = append(hosts, h)
+		}
+	}
+	for _, h := range hosts {
+		if allowed, known := cl.HostAllowed(ctx, a.Atespace+"/"+a.Name, h); known && !allowed {
+			return h
+		}
+	}
+	return ""
 }
 
 // substrateCloneNeed decides what a refused clone offers. retry is true
 // once a new secret of the person's is in the agent's policy (or the wait
 // ran out after it was stored); otherwise ce.Hint says what to do.
 func substrateCloneNeed(ctx context.Context, cmd *cobra.Command, cl *api.Client, a api.Actor, f *substrateRunFlags, ce *workspace.CloneError) (retry bool) {
-	host := workspace.CloneHost(f.clone)
+	host := workspace.CloneHost(f.clone, substrateGitRules(f))
 	if host == "" {
 		return false
 	}

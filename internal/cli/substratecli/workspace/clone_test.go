@@ -16,6 +16,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/config"
 )
 
 // GAP-0175: --clone clones inside the actor through the relay exec, and the
@@ -51,7 +53,7 @@ func TestCloneInTheActor(t *testing.T) {
 
 	workdir, c := hcActor(t)
 	ctx := context.Background()
-	res, err := Clone(ctx, c, o.data, "cl1", srv.URL+"/app.git", "feature")
+	res, err := Clone(ctx, c, o.data, "cl1", srv.URL+"/app.git", "feature", CloneOptions{})
 	if err != nil {
 		t.Fatalf("Clone: %v", err)
 	}
@@ -104,7 +106,7 @@ func TestCloneInTheActor(t *testing.T) {
 	}
 
 	// A repository that is not there: git says why, in plain words.
-	_, err = Clone(ctx, c, o.data, "cl2", srv.URL+"/missing.git", "")
+	_, err = Clone(ctx, c, o.data, "cl2", srv.URL+"/missing.git", "", CloneOptions{})
 	var ce *CloneError
 	if !errors.As(err, &ce) || !strings.Contains(err.Error(), "git could not clone") || ce.Message == "" {
 		t.Fatalf("missing repo: %v", err)
@@ -147,7 +149,7 @@ func TestB1CloneHostAndHint(t *testing.T) {
 		"ssh://deploy@git.corp.example/a.git":        "",
 		"git://git.corp.example/a.git":               "",
 	} {
-		if got := CloneHost(raw); got != want {
+		if got := CloneHost(raw, nil); got != want {
 			t.Errorf("CloneHost(%q) = %q, want %q", raw, got, want)
 		}
 	}
@@ -162,5 +164,17 @@ func TestB1CloneHostAndHint(t *testing.T) {
 	e = &CloneError{URL: "https://git.corp.example/a.git", Message: "fatal: unable to access: Could not resolve host: git.corp.example", Hint: "x"}
 	if e.NeedsCredential() || strings.Contains(e.Error(), ". x") || !strings.Contains(e.Error(), "network rules may not allow") {
 		t.Fatalf("resolve: %q", e.Error())
+	}
+}
+
+// B2 2.5: a cluster rewrite makes an scp-form address on a company host
+// ask for that host's token.
+func TestB2CloneHostRewriteMap(t *testing.T) {
+	rules := []config.SubstrateGitRewrite{{From: "git@git.corp.example:", To: "https://git.corp.example/"}}
+	if got := CloneHost("git@git.corp.example:me/app.git", rules); got != "git.corp.example" {
+		t.Errorf("CloneHost with the map = %q", got)
+	}
+	if got := CloneHost("git@github.com:me/app.git", rules); got != "" {
+		t.Errorf("a map without GitHub = %q, want none", got)
 	}
 }

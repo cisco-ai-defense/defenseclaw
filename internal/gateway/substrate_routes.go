@@ -156,6 +156,7 @@ func (a *APIServer) newSubstrateAdminHandler(st *substrateState) http.Handler {
 			"workspace_max_bytes": substrateWorkspaceMax(st.cfg.WorkspaceMaxBytes),
 			"key_replay":          substrateKeyReplay(st.cfg.KeyReplay),
 			"files":               map[string]bool{"push": substrateSwitch(st.cfg.FilesPush), "sync": substrateSwitch(st.cfg.FilesSync)},
+			"git":                 substrateLauncherGit(st.cfg.Git),
 		})
 	})
 	mux.HandleFunc("GET /api/v1/substrate/asks", a.substrateListAsks(st))
@@ -939,6 +940,16 @@ func readAllLimited(r io.Reader, n int64) ([]byte, bool) {
 
 // substrateSwitch reads a live admin switch; on when not wired.
 func substrateSwitch(read func() bool) bool { return read == nil || read() }
+
+// substrateLauncherGit is substrate.git as launchers use it: the effective
+// rewrite map (the default when unset) and the two switches.
+func substrateLauncherGit(read func() config.SubstrateGitConfig) map[string]any {
+	var g config.SubstrateGitConfig
+	if read != nil {
+		g = read()
+	}
+	return map[string]any{"https_rewrite": g.EffectiveHTTPSRewrite(), "submodules": g.SubmodulesOn(), "lfs": g.LFSOn()}
+}
 
 // substrateKeyReplay is substrate.launcher.key_replay for launchers; ask when
 // the listener has no live reader.

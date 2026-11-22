@@ -65,6 +65,8 @@ _FULL = {
     "chain_egress_action": "alert",
     "launcher": {"key_replay": "off"},
     "files": {"push": False, "sync": True},
+    "git": {"https_rewrite": [{"from": "git@ghe.example.com:", "to": "https://ghe.example.com/"}],
+            "submodules": False, "lfs": True},
     "unattended": {"asks": "deny", "ask_timeout": "30m", "telemetry_sampling": 0.5},
     "rate_limits": {"per_actor_rps": 20, "per_atespace_rps": 500},
     "extproc": {"enabled": True, "failure_mode": "closed", "body_inspection": "on", "body_max_bytes": 1048576,
