@@ -140,7 +140,7 @@ func holdKnownOnNameMaybe(facts []*semanticpb.EffectFact) {
 	for _, fact := range facts {
 		target := fact.GetTarget()
 		for _, match := range target.GetProtected() {
-			if match.GetState() == string(gradeKnown) &&
+			if match.GetState() == string(gradeKnown) && match.GetReason() != "inode" &&
 				maybeNames[target.GetKey()+"\x00"+match.GetSet()] {
 				match.State = string(gradeUnknown)
 				match.Reason = "call_maybe"
