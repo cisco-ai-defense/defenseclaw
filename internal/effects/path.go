@@ -17,6 +17,9 @@ import (
 // path and reports whether it is statically known. It never follows links.
 // ok=false carries the reason the target cannot be placed.
 func placePath(spelling string, o Options) (abs string, ok bool, reason ReasonCode) {
+	if o.flavor() == FlavorWindows {
+		spelling = localWindowsURIPath(spelling)
+	}
 	if spelling == "" {
 		return "", false, ReasonDynamicExpansion
 	}
@@ -271,6 +274,7 @@ func cleanPOSIX(p string) string {
 }
 
 func placeWindows(spelling string, o Options) (string, bool, ReasonCode) {
+	spelling = localWindowsURIPath(spelling)
 	// A leading / on Windows depends on the dialect of the frontend walking the
 	// text (review 6 #1): Git Bash / Cygwin (POSIX) use POSIX-absolute spellings
 	// where only a /<drive>/ MSYS mount and /cygdrive/<drive>/ are known and
@@ -342,6 +346,21 @@ func placeWindows(spelling string, o Options) (string, bool, ReasonCode) {
 // the final element (a Windows filesystem quirk that lets "x.exe ." name
 // "x.exe"), and folds case when CaseInsensitive. A flagged special form must
 // either normalize here or be rejected upstream -- never "known but flagged".
+// localWindowsURIPath recognizes the local file URI spelling emitted by some
+// Windows tools. localhost:///C:/x is a drive path, not a UNC share whose
+// server is "C:".
+func localWindowsURIPath(spelling string) string {
+	const prefix = "localhost:///"
+	if len(spelling) < len(prefix) || !strings.EqualFold(spelling[:len(prefix)], prefix) {
+		return spelling
+	}
+	rest := spelling[len(prefix):]
+	if len(rest) < 3 || !isDriveLetter(rest[0]) || rest[1] != ':' || (rest[2] != '/' && rest[2] != '\\') {
+		return spelling
+	}
+	return rest
+}
+
 func normalizeWindows(p string, o Options) string {
 	prefix := ""
 	body := p

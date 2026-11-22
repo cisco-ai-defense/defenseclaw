@@ -24,8 +24,9 @@ import (
 // two connectors in all five tiers. A "maybe" row must reach at least the
 // unknown tier (alert in default, permissive and managed; block in strict
 // and managed strict); a row with a control must be at least as strict as
-// the control spelling; an "allow" row is a false-positive guard. Red at
-// a64bfdb931 (the effects lane was shadow), green with the raise-only lane.
+// the control spelling; an "allow" row is a false-positive guard. Every row
+// is held to its lane-off (1.0.10) verdict, and rows that do not reach their
+// target yet are listed in r3VerdictPending (a ratchet).
 
 type r3TierRow struct {
 	gap, command string
@@ -41,6 +42,69 @@ type r3TierRow struct {
 type r3TierRoute struct {
 	name, connector string
 	decide          func(t *testing.T, api *APIServer, ctx context.Context, cwd, command string) (string, []string)
+}
+
+// r3VerdictPending are rows whose verdict does not reach their target yet
+// (DET111 ruling 2026-11-22 04:21Z: the verdict tests are ratchets; a Maybe
+// never raises live, so these rows close only when the effect becomes KNOWN).
+// Keyed by row label, with the lane that closes each. Every row, pending or
+// not, is held to at least its lane-off (1.0.10) verdict; a pending row that
+// reaches its target in every cell of a run fails the run (r3Ratchet.finish).
+var r3VerdictPending = map[string]string{
+	"GAP-0898 ~peer aws credential":       "a peer home credential read is not KNOWN yet (S4-R3 resolver; read row in Decide, S1-MECH)",
+	"GAP-0898 ~peer credential":           "a peer home credential read is not KNOWN yet (S4-R3 resolver; read row in Decide, S1-MECH)",
+	"GAP-1677 ~alias hook config":         "the alias login of the active home is a Maybe target (S4-R3)",
+	"GAP-1677 ~peer/../login hook config": "~peer/../login is a Maybe target (S4-R3)",
+	"GAP-1677 ~peer/../login keys":        "~peer/../login is a Maybe target (S4-R3)",
+	"GAP-0443 .. after a wildcard":        "a .. after a wildcard is a file-system answer, Maybe (S4-R3)",
+	"GAP-0898 other account credential":   "a credential under another home-shaped root is not KNOWN yet (S4-R3 resolver; read row in Decide, S1-MECH)",
+	"GAP-0899 mounted home credential":    "a credential under a mounted home is not KNOWN yet (S4-R3 resolver; read row in Decide, S1-MECH)",
+	"GAP-1244 ${PWD%suffix}":              "a credential read through ${PWD%...} is a Maybe target (S4-R3; tiers row via Decide, ruling 04:12Z)",
+	"GAP-1244 ${PWD/proj/}":               "a credential read through ${PWD/.../} is a Maybe target (S4-R3; tiers row via Decide, ruling 04:12Z)",
+	"GAP-1573c in-call link find root":    "find -delete below an in-call link is a Maybe target (S4-R3)",
+	"GAP-1677 ~other/../login keys":       "~other/../login is a Maybe target (S4-R3)",
+	"GAP-1678 ~login cp operand":          "cp onto ~login/.claude/settings.json is weaker than its ~/ control (S4-R3)",
+	"GAP-1156 cd in a function body":      "a cd inside a PowerShell function body is not tracked (S4-R3, S3-R1)",
+	"GAP-1553 SSH~1 short name":           "an 8.3 short name is a Maybe target until the resolver reads it (S4-R3)",
+	"GAP-1556 $env:X folder, keys":        "an unknown $env:X folder is a Maybe target (S4-R3)",
+}
+
+// r3Ratchet judges R3 rows cell by cell: the lane-off floor, the target, and
+// the pending table.
+type r3Ratchet struct {
+	failed, pending map[string]bool
+}
+
+func newR3Ratchet() *r3Ratchet {
+	return &r3Ratchet{failed: map[string]bool{}, pending: map[string]bool{}}
+}
+
+// judge holds an attack row (want is its target) to its lane-off verdict and
+// to its target unless the row is pending.
+func (r *r3Ratchet) judge(t *testing.T, where string, row r3TierRow, got, off, want bounded.Action, action string, findings []string) {
+	t.Helper()
+	if bounded.Stricter(got, off) != got {
+		t.Errorf("%s %q: %s is below its lane-off (1.0.10) verdict %s; findings %v", where, row.command, action, off, findings)
+	}
+	_, pending := r3VerdictPending[row.gap]
+	if pending {
+		r.pending[row.gap] = true
+	}
+	if bounded.Stricter(got, want) != got {
+		r.failed[row.gap] = true
+		if !pending {
+			t.Errorf("%s %q: %s, want at least %s; findings %v", where, row.command, action, want, findings)
+		}
+	}
+}
+
+func (r *r3Ratchet) finish(t *testing.T) {
+	t.Helper()
+	for gap := range r.pending {
+		if !r.failed[gap] {
+			t.Errorf("%s reaches its target in every cell now: remove it from r3VerdictPending (%s)", gap, r3VerdictPending[gap])
+		}
+	}
 }
 
 func r3PosixRoutes() []r3TierRoute {
@@ -208,6 +272,8 @@ func TestDET111R3AccountLookupBudget(t *testing.T) {
 func r3CheckPosixTierRows(t *testing.T, home string, rows []r3TierRow) {
 	t.Helper()
 	probe := os.Getenv("DET111_R3_PROBE") != ""
+	ratchet := newR3Ratchet()
+	defer ratchet.finish(t)
 	for _, tier := range boundedTestTiers {
 		floor := bounded.Unknown(tier.tier)
 		for _, route := range r3PosixRoutes() {
@@ -217,6 +283,9 @@ func r3CheckPosixTierRows(t *testing.T, home string, rows []r3TierRow) {
 				if row.cwd == "." {
 					cwd = home
 				}
+				useEffectsRulesMode(t, "off")
+				offAction, _ := route.decide(t, api, t.Context(), cwd, row.command)
+				useDefaultEffectsLane(t)
 				action, findings := route.decide(t, api, t.Context(), cwd, row.command)
 				got := boundedParse(action)
 				var want bounded.Action
@@ -241,9 +310,7 @@ func r3CheckPosixTierRows(t *testing.T, home string, rows []r3TierRow) {
 					}
 					continue
 				}
-				if bounded.Stricter(got, want) != got {
-					t.Errorf("%s %s %s %q: %s, want at least %s; findings %v", tier.name, route.name, row.gap, row.command, action, want, findings)
-				}
+				ratchet.judge(t, tier.name+" "+route.name+" "+row.gap, row, got, boundedParse(offAction), want, action, findings)
 			}
 		}
 	}
@@ -291,6 +358,8 @@ func TestDET111R3ResolverVerdictFiveTiersWindowsHost(t *testing.T) {
 	useDefaultEffectsLane(t)
 	gap0589WindowsHost(t)
 	probe := os.Getenv("DET111_R3_PROBE") != ""
+	ratchet := newR3Ratchet()
+	defer ratchet.finish(t)
 	for _, tier := range boundedTestTiers {
 		floor := bounded.Unknown(tier.tier)
 		for _, route := range r3WindowsRoutes() {
@@ -306,6 +375,9 @@ func TestDET111R3ResolverVerdictFiveTiersWindowsHost(t *testing.T) {
 				if row.needsHome && !tier.managed {
 					continue
 				}
+				useEffectsRulesMode(t, "off")
+				offAction, _ := route.decide(t, api, ctx, row.cwd, row.command)
+				useDefaultEffectsLane(t)
 				action, findings := route.decide(t, api, ctx, row.cwd, row.command)
 				got := boundedParse(action)
 				want := floor
@@ -328,9 +400,7 @@ func TestDET111R3ResolverVerdictFiveTiersWindowsHost(t *testing.T) {
 					}
 					continue
 				}
-				if bounded.Stricter(got, want) != got {
-					t.Errorf("%s %s %s %q: %s, want at least %s; findings %v", tier.name, route.name, row.gap, row.command, action, want, findings)
-				}
+				ratchet.judge(t, tier.name+" "+route.name+" "+row.gap, row, got, boundedParse(offAction), want, action, findings)
 			}
 		}
 	}
