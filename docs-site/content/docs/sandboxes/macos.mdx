@@ -84,14 +84,14 @@ You can also run setup from the TUI (`defenseclaw tui`, `0`, **Sandboxes (OpenSh
   cwd="~/code/myapp"
   speed={1.6}
   height={620}
-  ariaLabel="Animated terminal replay of defenseclaw sandbox setup on an Apple-silicon Mac whose shared Homebrew belongs to another account: setup stops and names the owner, then a Homebrew of the user's own installs OpenShell 0.1.6, setup switches the gateway to MicroVMs, and the Claude Code image is built."
-  caption="Bonus replay, recorded on DefenseClaw 1.0.4 on a Mac (the OpenShell version in the text is updated to the 1.0.10 pin; Docker Desktop running in the account's session). First run: the shared Homebrew at /opt/homebrew belongs to another account, so setup stops before installing. Second run, after installing Homebrew into `~/homebrew` and putting it first on `PATH`: the install plan, then the gateway changes, the harnesses and the image build (Homebrew output trimmed)."
+  ariaLabel="Animated terminal replay of defenseclaw sandbox setup on an Apple-silicon Mac whose shared Homebrew belongs to another account: setup stops and names the owner, then a Homebrew of the user's own installs OpenShell 0.1.9, setup switches the gateway to MicroVMs, and the Claude Code image is built."
+  caption="Bonus replay, recorded on DefenseClaw 1.0.4 on a Mac (the OpenShell version in the text is updated to the 1.0.11 pin; Docker Desktop running in the account's session). First run: the shared Homebrew at /opt/homebrew belongs to another account, so setup stops before installing. Second run, after installing Homebrew into `~/homebrew` and putting it first on `PATH`: the install plan, then the gateway changes, the harnesses and the image build (Homebrew output trimmed)."
   frames={[
     { type: "cmd", text: "defenseclaw sandbox setup", pauseMs: 700 },
     { type: "out", text: "DefenseClaw sandbox setup" },
     { type: "out", text: "  Checking this machine…  ✓ darwin/arm64  ⚠ Landlock not checked  ✓ Docker 29.8.2  ✗ OpenShell and its MicroVM driver not installed" },
     { type: "prompt", text: "Run sandboxes in OpenShell MicroVMs? macOS needs them: Docker Desktop's Linux kernel has no Landlock. (sets compute_driver = \"vm\" in the gateway's gateway.toml and restarts the gateway; OpenShell calls this driver experimental) [Y/n] ", reply: "", pauseMs: 800 },
-    { type: "prompt", text: "Install OpenShell 0.1.6 with NVIDIA's installer? (Homebrew; sha256 verified) [y/N] ", reply: "y", pauseMs: 800 },
+    { type: "prompt", text: "Install OpenShell 0.1.9 with NVIDIA's installer? (Homebrew; sha256 verified) [y/N] ", reply: "y", pauseMs: 800 },
     { type: "out", text: "✗ install OpenShell: this account cannot write to /opt/homebrew/Library/Taps, which ec2-user owns, so Homebrew at /opt/homebrew cannot install the nvidia/openshell formula as this account" },
     { type: "out", text: "→ Homebrew installs formulas only as the account that owns its prefix (ec2-user): install OpenShell from that account (`defenseclaw sandbox setup --install-openshell` there), or have it give this account the prefix, then run `defenseclaw sandbox setup` here" },
     { type: "spacer", pauseMs: 900 },
@@ -101,10 +101,10 @@ You can also run setup from the TUI (`defenseclaw tui`, `0`, **Sandboxes (OpenSh
     { type: "out", text: "DefenseClaw sandbox setup" },
     { type: "out", text: "  Checking this machine…  ✓ darwin/arm64  ⚠ Landlock not checked  ✓ Docker 29.8.2  ✗ OpenShell and its MicroVM driver not installed" },
     { type: "prompt", text: "Run sandboxes in OpenShell MicroVMs? macOS needs them: Docker Desktop's Linux kernel has no Landlock. (sets compute_driver = \"vm\" in the gateway's gateway.toml and restarts the gateway; OpenShell calls this driver experimental) [Y/n] ", reply: "", pauseMs: 800 },
-    { type: "prompt", text: "Install OpenShell 0.1.6 with NVIDIA's installer? (Homebrew; sha256 verified) [y/N] ", reply: "y", pauseMs: 800 },
+    { type: "prompt", text: "Install OpenShell 0.1.9 with NVIDIA's installer? (Homebrew; sha256 verified) [y/N] ", reply: "y", pauseMs: 800 },
     { type: "out", text: "OpenShell install plan" },
-    { type: "out", text: "  Release     v0.1.6 (NVIDIA OpenShell upstream installer)" },
-    { type: "out", text: "  Script      https://raw.githubusercontent.com/NVIDIA/OpenShell/v0.1.6/install.sh" },
+    { type: "out", text: "  Release     v0.1.9 (NVIDIA OpenShell upstream installer)" },
+    { type: "out", text: "  Script      https://raw.githubusercontent.com/NVIDIA/OpenShell/v0.1.9/install.sh" },
     { type: "out", text: "  SHA-256     7bf6706741b8b59c1b61e0c47030f0a34fefba6cee3c74cd52638cbf7cdc3655 (verified)" },
     { type: "out", text: "  Privileges  none: the script runs Homebrew as you, without sudo" },
     { type: "out", text: "  Changes     Homebrew may update itself and its taps first (its auto-update, when due; HOMEBREW_NO_AUTO_UPDATE=1 skips it)" },
@@ -115,9 +115,9 @@ You can also run setup from the TUI (`defenseclaw tui`, `0`, **Sandboxes (OpenSh
     { type: "warn", text: "! Homebrew has no prebuilt packages for that prefix, so it may build dependencies from source, which can take many minutes (it prints its progress)" },
     { type: "prompt", text: "Run this plan? [y/N] ", reply: "y", pauseMs: 800 },
     { type: "dim", text: "... (Homebrew output trimmed) ..." },
-    { type: "dim", text: "🍺  ~/homebrew/Cellar/openshell/0.1.6: 10 files, 169.9MB, built in 4 seconds" },
+    { type: "dim", text: "🍺  ~/homebrew/Cellar/openshell/0.1.9: 10 files, 169.9MB, built in 4 seconds" },
     { type: "dim", text: "openshell: openshell status reports connected" },
-    { type: "ok", text: "  ✓ OpenShell 0.1.6 installed, gateway running" },
+    { type: "ok", text: "  ✓ OpenShell 0.1.9 installed, gateway running" },
     { type: "prompt", text: "Disable OpenShell's anonymous usage telemetry? (edits ~/.config/openshell/gateway.env, which the Homebrew service reads, and restarts the OpenShell gateway; no sandbox runs on it now) [Y/n] ", reply: "", pauseMs: 800 },
     { type: "out", text: "  OpenShell gateway configuration changes" },
     { type: "out", text: "    edit ~/homebrew/var/openshell/gateway.toml (a timestamped backup is kept)" },
