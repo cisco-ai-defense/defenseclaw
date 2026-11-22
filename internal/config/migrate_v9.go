@@ -3052,9 +3052,10 @@ func (m *v9Migrator) rulePackFor(guardrail *yaml.Node, dir string) (string, []st
 		// package update replaces it, so it is never pinned by digest. The
 		// preset name resolves to it while policy_dir has no such folder
 		// (Config.ResolveRulePackDir).
-		if layout, ok := standaloneUnixLayoutForConfig(m.configPath); ok &&
-			v9SameDir(clean, filepath.Join(layout.VendorPolicyDir, "guardrail", filepath.Base(clean))) {
-			shadow := filepath.Join(m.policyDir(), "guardrail", base)
+		if shadow, ok := m.shippedPackShadow(clean, base); ok {
+			if shadow == "" {
+				return base, nil, nil
+			}
 			if _, err := os.Stat(shadow); errors.Is(err, fs.ErrNotExist) {
 				return base, nil, nil
 			}
@@ -3081,6 +3082,56 @@ func (m *v9Migrator) rulePackFor(guardrail *yaml.Node, dir string) (string, []st
 		}
 	}
 	return m.pinCustomPack(guardrail, base, target, digest), nil, nil
+}
+
+// shippedPackShadow reports whether clean, a folder named base, is the
+// shipped built-in pack of the standalone layout the config is read from,
+// and returns the policy_dir folder that the preset name selects instead
+// when it exists ("" when the preset always resolves to the shipped pack).
+// On the Linux and macOS layout that is <vendor>/guardrail/<name>. On a
+// managed Windows standalone install it is the strict or permissive folder
+// Setup ships in <ProgramData>\Cisco\DefenseClaw-RulePacks\<release>\<name>
+// (#1445), of this release or of an earlier one, whose preset resolves to
+// this release's copy (Config.WindowsShippedRulePackDir); there only an
+// explicit policy_dir is searched first, as at runtime (rel-1-0-10:GAP-1532).
+func (m *v9Migrator) shippedPackShadow(clean, base string) (string, bool) {
+	if layout, ok := standaloneUnixLayoutForConfig(m.configPath); ok {
+		if !v9SameDir(clean, filepath.Join(layout.VendorPolicyDir, "guardrail", filepath.Base(clean))) {
+			return "", false
+		}
+		return filepath.Join(m.policyDir(), "guardrail", base), true
+	}
+	if !policyassets.IsShippedRulePack(base) || !standaloneManagedDocument("windows", m.root) {
+		return "", false
+	}
+	root, err := windowsShippedRulePacksRoot()
+	release := filepath.Dir(clean)
+	if err != nil || strings.TrimSpace(root) == "" || !v9ShippedReleaseFolder(filepath.Base(release)) ||
+		!v9SameDir(filepath.Dir(release), root) {
+		return "", false
+	}
+	policyDir := strings.TrimSpace(m.in.PolicyDir)
+	if policyDir == "" {
+		policyDir = strings.TrimSpace(yamlScalarValue(v8YAMLMapValue(m.root, "policy_dir")))
+	}
+	if policyDir == "" {
+		return "", true
+	}
+	return filepath.Join(policyDir, "guardrail", base), true
+}
+
+// v9ShippedReleaseFolder reports whether name is a release folder of the
+// Windows shipped rule packs: 16 hex digits (policyassets.ShippedRulePackFolderName).
+func v9ShippedReleaseFolder(name string) bool {
+	if len(name) != 16 {
+		return false
+	}
+	for _, r := range strings.ToLower(name) {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // pinCustomPack names the folder target guardrail.custom_packs.<stem of

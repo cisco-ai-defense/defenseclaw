@@ -30,6 +30,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -38,6 +39,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config/internal/cfgtxn"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	policyassets "github.com/defenseclaw/defenseclaw/policies"
 )
 
 func TestMigrateV9NormalizesCursorActionFailMode(t *testing.T) {
@@ -1862,33 +1864,119 @@ func TestMigrateV9RefusesADamagedStoreWithoutAReadableActionsTable(t *testing.T)
 // TestMigrateV9KeepsTheShippedPackAPreset: a v8 rule_pack_dir naming the
 // standalone layout's shipped strict pack, with policy_dir elsewhere, stays
 // the strict preset (which resolves to that pack) instead of a custom pack
-// pinned to files the next package replaces.
+// pinned to files the next package replaces, on the Linux and macOS layout
+// and on a managed Windows standalone install (rel-1-0-10:GAP-1532).
 func TestMigrateV9KeepsTheShippedPackAPreset(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("the shipped-pack preset serves the Linux and macOS standalone layouts; a Linux layout path is not absolute on Windows")
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	t.Setenv("DEFENSECLAW_ENTERPRISE_PROFILE", "")
+	if runtime.GOOS != "windows" {
+		// The Linux layout (the macOS one has the same shape); its paths are
+		// not absolute on Windows.
+		layout, err := managed.StandaloneLayoutFor("linux")
+		if err != nil {
+			t.Fatal(err)
+		}
+		policyDir := t.TempDir()
+		shipped := path.Join(layout.VendorPolicyDir, "guardrail", "strict")
+		source := "config_version: 8\ndeployment_mode: managed_enterprise\nenterprise:\n  profile: standalone\npolicy_dir: " +
+			policyDir + "\nguardrail:\n  rule_pack_dir: " + shipped + "\nobservability: {}\n"
+		result, err := MigrateV9(context.Background(), MigrateV9Input{
+			ConfigPath: layout.ConfigPath, Source: []byte(source), PolicyDir: policyDir, Managed: true, InMemory: true,
+		})
+		if err != nil {
+			t.Fatalf("MigrateV9: %v", err)
+		}
+		if got := string(result.Migrated); !strings.Contains(got, "rule_pack: strict") || strings.Contains(got, "custom_packs") {
+			t.Fatalf("the shipped strict pack did not stay the preset:\n%s", got)
+		}
+		cfg := &Config{PolicyDir: policyDir, ConfigFilePath: layout.ConfigPath, DeploymentMode: "managed_enterprise"}
+		cfg.Enterprise.Profile = "standalone"
+		if got := cfg.ResolveRulePackDir(RulePackRef{Name: "strict"}); got != shipped {
+			t.Fatalf("strict resolves to %q, want the shipped %s while policy_dir has none", got, shipped)
+		}
 	}
-	layout, err := managed.StandaloneLayoutFor("linux")
-	if err != nil {
-		t.Fatal(err)
-	}
-	policyDir := t.TempDir()
-	shipped := path.Join(layout.VendorPolicyDir, "guardrail", "strict")
-	source := "config_version: 8\ndeployment_mode: managed_enterprise\nenterprise:\n  profile: standalone\npolicy_dir: " +
-		policyDir + "\nguardrail:\n  rule_pack_dir: " + shipped + "\nobservability: {}\n"
-	result, err := MigrateV9(context.Background(), MigrateV9Input{
-		ConfigPath: layout.ConfigPath, Source: []byte(source), PolicyDir: policyDir, Managed: true, InMemory: true,
+	// The managed Windows standalone install ships strict and permissive in
+	// <ProgramData>\Cisco\DefenseClaw-RulePacks\<release> (#1445). The same
+	// rule holds there (rel-1-0-10:GAP-1532): the shipped pack of this or an
+	// earlier release stays the preset, which resolves to this release's
+	// copy, and is not migrated as a custom pack that needs a digest. The
+	// root comes from the trusted ProgramData registration; the test seam
+	// stands in for it, so this part also runs off Windows.
+	t.Run("windows shipped packs", func(t *testing.T) {
+		root := t.TempDir()
+		defer SetWindowsShippedRulePacksRootForTest(root)()
+		current, err := policyassets.ShippedRulePackFolderName()
+		if err != nil {
+			t.Fatal(err)
+		}
+		files, err := policyassets.ShippedRulePackFiles()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, release := range []string{current, "0123456789abcdef"} {
+			for _, file := range files {
+				target := filepath.Join(root, release, filepath.FromSlash(file.Path))
+				if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(target, file.Data, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+		configPath := filepath.Join(t.TempDir(), "config.yaml")
+		migrate := func(profile, policyDir, rulePackDir string) (string, error) {
+			source := "config_version: 8\ndeployment_mode: managed_enterprise\nenterprise:\n  profile: " + profile + "\n"
+			if policyDir != "" {
+				source += "policy_dir: " + strconv.Quote(policyDir) + "\n"
+			}
+			source += "guardrail:\n  rule_pack_dir: " + strconv.Quote(rulePackDir) + "\nobservability: {}\n"
+			result, err := MigrateV9(context.Background(), MigrateV9Input{
+				ConfigPath: configPath, Source: []byte(source), PolicyDir: policyDir, Managed: true, InMemory: true,
+			})
+			if err != nil {
+				return "", err
+			}
+			return string(result.Migrated), nil
+		}
+		for _, tc := range []struct{ release, name string }{{current, "strict"}, {current, "permissive"}, {"0123456789abcdef", "strict"}} {
+			shipped := filepath.Join(root, tc.release, tc.name)
+			got, err := migrate("standalone", "", shipped)
+			if err != nil {
+				t.Fatalf("%s: MigrateV9: %v", shipped, err)
+			}
+			if !strings.Contains(got, "rule_pack: "+tc.name) || strings.Contains(got, "custom_packs") {
+				t.Fatalf("the shipped %s pack %s did not stay the preset:\n%s", tc.name, shipped, got)
+			}
+		}
+		win := &Config{ConfigFilePath: `C:\ProgramData\Cisco\DefenseClaw\etc\config.yaml`, DeploymentMode: "managed_enterprise"}
+		win.Enterprise.Profile = "standalone"
+		if got, want := win.ResolveRulePackDir(RulePackRef{Name: "strict"}), filepath.Join(root, current, "strict"); got != want {
+			t.Fatalf("strict resolves to %q, want this release's shipped %s", got, want)
+		}
+
+		// An explicit policy_dir with its own strict folder selects that
+		// folder at runtime, so the shipped pack stays pinned by digest.
+		policyDir := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(policyDir, "guardrail", "strict"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		// Anything else the preset does not resolve to stays a custom pack:
+		// a folder that is not a release folder, the default name (embedded
+		// on Windows, never shipped), and a Secure Client install.
+		for label, refused := range map[string]func() (string, error){
+			"policy_dir shadow": func() (string, error) {
+				return migrate("standalone", policyDir, filepath.Join(root, current, "strict"))
+			},
+			"not a release": func() (string, error) { return migrate("standalone", "", filepath.Join(root, "custom", "strict")) },
+			"default":       func() (string, error) { return migrate("standalone", "", filepath.Join(root, current, "default")) },
+			"secure client": func() (string, error) { return migrate("secure_client", "", filepath.Join(root, current, "strict")) },
+		} {
+			if got, err := refused(); err == nil || !strings.Contains(err.Error(), "needs a digest") {
+				t.Errorf("%s: kept as a preset (err %v):\n%s", label, err, got)
+			}
+		}
 	})
-	if err != nil {
-		t.Fatalf("MigrateV9: %v", err)
-	}
-	if got := string(result.Migrated); !strings.Contains(got, "rule_pack: strict") || strings.Contains(got, "custom_packs") {
-		t.Fatalf("the shipped strict pack did not stay the preset:\n%s", got)
-	}
-	cfg := &Config{PolicyDir: policyDir, ConfigFilePath: layout.ConfigPath, DeploymentMode: "managed_enterprise"}
-	cfg.Enterprise.Profile = "standalone"
-	if got := cfg.ResolveRulePackDir(RulePackRef{Name: "strict"}); got != shipped {
-		t.Fatalf("strict resolves to %q, want the shipped %s while policy_dir has none", got, shipped)
-	}
 }
 
 // TestMigrateV9LeavesTheShippedFirstPartyListUnpinned: the first-party list
