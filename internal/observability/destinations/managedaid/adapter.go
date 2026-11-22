@@ -43,9 +43,11 @@ import (
 const (
 	defaultTimeout        = 10 * time.Second
 	remintMinimumInterval = 30 * time.Second
-	maxResponseBytes      = 64 * 1024
-	jsonEscapeFactor      = 6
-	jsonRequestBaseBytes  = 256 * 1024
+	// AI Defense returns one result per record (about 173 bytes), so a full
+	// 512-record batch is acknowledged with about 89 KB.
+	maxResponseBytes     = 1 << 20
+	jsonEscapeFactor     = 6
+	jsonRequestBaseBytes = 256 * 1024
 )
 
 var payloadPrefix = []byte(`{"payload":`)
