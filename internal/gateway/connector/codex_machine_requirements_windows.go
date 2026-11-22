@@ -949,10 +949,56 @@ func ResolveWindowsCodexManagedRuntimeRegistry(
 	if writerLock {
 		return resolveWindowsCodexManagedRuntimeRegistryStable(writerLockPath, resolve)
 	}
-	if requirementsExists || stateExists {
+	if stateExists {
 		return result, errors.New("the Codex managed artifacts exist without the machine policy lock")
 	}
+	if requirementsExists {
+		// GAP-1832: no writer of any release has run on this host (or the
+		// last one removed its lock on uninstall), so a requirements.toml
+		// here is only DefenseClaw's when it carries DefenseClaw content.
+		// An administrator's file (or the administrator text an uninstall
+		// keeps, GAP-1737) is not a managed artifact: Codex runs no
+		// DefenseClaw hook from it, as the locked read reports such a file
+		// inactive. Anything that may be DefenseClaw's (a managed group of
+		// any release, a command naming the hook image, the managed
+		// directory, or a file that does not parse) still fails closed:
+		// DefenseClaw tables without the lock are a tampered or
+		// half-removed install.
+		owned, err := windowsCodexUnlockedRequirementsMayBeManaged(requirementsPath, hookExecutable)
+		if err != nil {
+			return result, err
+		}
+		// The writer creates its lock before it publishes: a lock that
+		// exists now means the content read above may be a writer's.
+		writerLock, err = windowsCodexMachinePathExists(writerLockPath)
+		if err != nil {
+			return result, err
+		}
+		if writerLock {
+			return resolveWindowsCodexManagedRuntimeRegistryStable(writerLockPath, resolve)
+		}
+		if owned {
+			return result, errors.New("the Codex managed artifacts exist without the machine policy lock")
+		}
+	}
 	return result, nil
+}
+
+// windowsCodexUnlockedRequirementsMayBeManaged reads requirementsPath, found
+// without the machine policy writer lock, through the trusted reader the
+// locked path uses, and reports whether it may hold DefenseClaw content
+// (windowsCodexRequirementsMayHoldDefenseClaw).
+func windowsCodexUnlockedRequirementsMayBeManaged(requirementsPath, hookExecutable string) (bool, error) {
+	requirements, err := readWindowsCodexMachineFile(
+		requirementsPath,
+		windowsCodexMachineRequirementsLimit,
+		false,
+		"Codex machine requirements",
+	)
+	if err != nil {
+		return false, err
+	}
+	return windowsCodexRequirementsMayHoldDefenseClaw(requirements.data, hookExecutable), nil
 }
 
 // windowsCodexTransactionCounterRead reads the writer lock's transaction

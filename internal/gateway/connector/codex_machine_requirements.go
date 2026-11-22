@@ -1012,6 +1012,101 @@ func windowsCodexRequirementsContainExactManagedHook(
 	return false, nil
 }
 
+// windowsCodexRequirementsMayHoldDefenseClaw reports whether a Codex
+// requirements document may hold content a DefenseClaw release wrote, read
+// broadly so that only a plainly administrator-authored file reports false
+// (GAP-1832): a document that does not parse; a hooks.windows_managed_dir or
+// hooks.state key; a managed group of any release for hookBinary
+// (windowsCodexOwnedHookGroup); or any key or string value, or the decoded
+// script of a PowerShell -EncodedCommand in one, that names DefenseClaw or
+// its hook image. Comments and the shared isolation keys
+// (allow_managed_hooks_only, features.hooks) are not DefenseClaw's alone and
+// do not count.
+func windowsCodexRequirementsMayHoldDefenseClaw(raw []byte, hookBinary string) bool {
+	cfg, err := parseWindowsCodexRequirements(raw)
+	if err != nil {
+		return true
+	}
+	if hooks, ok := cfg["hooks"].(map[string]interface{}); ok {
+		if _, ok := hooks["windows_managed_dir"]; ok {
+			return true
+		}
+		if _, ok := hooks["state"]; ok {
+			return true
+		}
+		if strings.TrimSpace(hookBinary) != "" {
+			for event, value := range hooks {
+				groups, _ := value.([]interface{})
+				for _, group := range groups {
+					if windowsCodexOwnedHookGroup(group, event, hookBinary) {
+						return true
+					}
+				}
+			}
+		}
+	}
+	return windowsCodexValueNamesDefenseClaw(cfg)
+}
+
+// windowsCodexValueNamesDefenseClaw walks a parsed TOML value and reports a
+// key or string that names DefenseClaw or its hook image
+// (windowsCodexTextNamesDefenseClaw).
+func windowsCodexValueNamesDefenseClaw(value interface{}) bool {
+	switch typed := value.(type) {
+	case map[string]interface{}:
+		for key, item := range typed {
+			if windowsCodexTextNamesDefenseClaw(key) || windowsCodexValueNamesDefenseClaw(item) {
+				return true
+			}
+		}
+	case []interface{}:
+		for _, item := range typed {
+			if windowsCodexValueNamesDefenseClaw(item) {
+				return true
+			}
+		}
+	case []map[string]interface{}:
+		for _, item := range typed {
+			if windowsCodexValueNamesDefenseClaw(item) {
+				return true
+			}
+		}
+	case string:
+		return windowsCodexTextNamesDefenseClaw(typed)
+	}
+	return false
+}
+
+// windowsCodexTextNamesDefenseClaw reports text that names DefenseClaw or
+// its hook image, case-insensitively, in plain text or in the decoded
+// script of a PowerShell -EncodedCommand it carries.
+func windowsCodexTextNamesDefenseClaw(text string) bool {
+	texts := []string{text}
+	lower := strings.ToLower(text)
+	for offset := 0; ; {
+		index := strings.Index(lower[offset:], "-encodedcommand")
+		if index < 0 {
+			break
+		}
+		offset += index + len("-encodedcommand")
+		fields := strings.Fields(text[offset:])
+		if len(fields) == 0 {
+			break
+		}
+		if script, ok := powershellDecodedCommand(strings.Trim(fields[0], "\"\x27")); ok {
+			texts = append(texts, script)
+		}
+	}
+	for _, candidate := range texts {
+		candidate = strings.ToLower(candidate)
+		if strings.Contains(candidate, "defenseclaw") ||
+			strings.Contains(candidate, strings.ToLower(winpath.EnterpriseHookImageName)) {
+			return true
+		}
+	}
+	return false
+}
+
 func removeWindowsCodexRequirementsOwnedChanges(
 	current []byte,
 	baseline []byte,
