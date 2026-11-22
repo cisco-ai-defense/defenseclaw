@@ -575,6 +575,14 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             _Flag("output", "string", "output format: text or json", short="o", default="text", metavar="FORMAT"),
             _Flag("patch-out", "string", "write the changes as a patch to this file", metavar="FILE"),
             _Flag(
+                "restore-secret-lines",
+                "bool",
+                (
+                    "in files uploaded with credentials replaced, keep the agent's changed lines with the value put back "
+                    "(default: keep your line)"
+                ),
+            ),
+            _Flag(
                 "timeout",
                 "duration",
                 "stop reading the agent's work after this long (default 10m)",
