@@ -369,7 +369,7 @@
         "status": "artifacts",
         "tamperTier": "user",
         "hookConfig": "/sandbox/.config/devin/config.json",
-        "harnessPin": "3000.4.25",
+        "harnessPin": "3000.14.30821",
         "verified": "unverified",
         "unverifiedReason": "The Devin CLI needs a Devin account login (devin auth login, a browser or pasted-token flow) before any agent turn",
         "untestedAuth": [
