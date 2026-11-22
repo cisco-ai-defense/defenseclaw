@@ -221,12 +221,13 @@ func TestEffectFindingProof(t *testing.T) {
 	}
 	// A known effect on a known member by an unlisted command is Known, also
 	// beside a reached effect of the same call, and raises with its reasons
-	// in the tags.
+	// in the tags. Its alert action makes the raise advisory (Proof.Advise,
+	// cb7ccf7296): it alerts and never enforces.
 	knownRes := reachedRes
 	knownRes.Known = true
 	known := effectShadowFindings(knownRes, effectRulesOn)
 	want = decide.Proof{Kind: decide.KindWrite, Target: decide.TargetAutostart, Certainty: decide.CertKnown, Source: "effects"}
-	if len(known) != 1 || known[0].Proof != want {
+	if len(known) != 1 || known[0].Proof != want.Advise() {
 		t.Fatalf("known proof = %+v, want %+v", known, want)
 	}
 	if !slices.Contains(known[0].Tags, "reach:"+effectrules.ReachCode) {
