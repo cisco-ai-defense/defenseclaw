@@ -1815,8 +1815,8 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 			}
 		}
 	}
-	if program == "tee" && dialect == DialectPOSIX {
-		w.teeData(c, inner[1:], cmdNo, cmdStart)
+	if (program == "tee" && dialect == DialectPOSIX) || (program == "tee-object" && dialect == DialectPowerShell) {
+		w.teeData(c, inner[1:], cmdNo, cmdStart, entry.AppendFlag, dialect)
 	}
 	// (see the stage-link cases in secretflow_stage_test.go).
 	// to the pipe (s7-flow).
@@ -2158,13 +2158,13 @@ func (w *walker) interpreterStdin(c *Cmd, entry Program, known bool, args []Word
 	}
 	// A shell given a script or -c operand reads that, not its standard input:
 	// a heredoc / here-string is then data for the script, not code to unwrap.
-	if entry.ShellCode && !c.PipeIn && hasCodeOperand(args, true) {
+	if entry.ShellCode && !entry.StdinCode && !c.PipeIn && hasCodeOperand(args, true) {
 		return
 	}
 	// The text the call feeds it (here-document, here-string, an exact printer
 	// upstream of the pipe, a printing process substitution, a file the call
 	// wrote) is the script it runs (DET111 R1, GAP-1151, GAP-1593).
-	if text, tcond, ok := w.stdinText(c); ok && entry.ShellCode && !hasCodeOperand(args, true) {
+	if text, tcond, ok := w.stdinText(c); ok && entry.ShellCode && (entry.StdinCode || !hasCodeOperand(args, true)) {
 		w.unwrapCode(text, true, dialect, depth, cond || tcond, origin)
 		return
 	}
@@ -2266,7 +2266,7 @@ func hasWordFold(words []Word, v string) bool {
 
 // hasAppendFlag reports the append switch among the arguments, alone, as the
 // long form, or inside a cluster of short switches (tee -ai).
-func hasAppendFlag(words []Word, flag string) bool {
+func hasAppendFlag(words []Word, flag string, dialect Dialect) bool {
 	for _, wd := range words {
 		if !wd.Static {
 			continue
@@ -2275,10 +2275,10 @@ func hasAppendFlag(words []Word, flag string) bool {
 		if v == "--" {
 			return false
 		}
-		if v == flag || v == "--append" {
+		if (dialect == DialectPowerShell && (strings.EqualFold(v, flag) || strings.EqualFold(v, "--append"))) || (dialect != DialectPowerShell && (v == flag || v == "--append")) {
 			return true
 		}
-		if len(v) > 2 && v[0] == '-' && v[1] != '-' && strings.ContainsRune(v[1:], rune(flag[1])) {
+		if len(flag) == 2 && len(v) > 2 && v[0] == '-' && v[1] != '-' && strings.ContainsRune(v[1:], rune(flag[1])) {
 			return true
 		}
 	}
@@ -2547,7 +2547,7 @@ func (w *walker) classifyOperands(words []Word, p Program, dialect Dialect) ([]o
 		unknownFlag, inPlaceSuffix = true, ""
 	}
 	posOps := w.positionalOperands(positionals, p, posCtx{unknownFlag: unknownFlag, inPlace: inPlace, inPlaceSuffix: inPlaceSuffix, del: del, findName: findName, findOpaque: findOpaque, hasExpr: hasExpr, destDir: destDir,
-		appendMode: p.AppendFlag != "" && hasAppendFlag(words, p.AppendFlag),
+		appendMode: p.AppendFlag != "" && hasAppendFlag(words, p.AppendFlag, dialect),
 		upload:     p.Pos == PosBits && hasWordFold(words, "/upload"), program: w.curProgram, words: words})
 	recursive := hasRowFlag(words, p, p.Recursive)
 	dry := hasRowFlag(words, p, p.DryRun)
@@ -2559,6 +2559,13 @@ func (w *walker) classifyOperands(words []Word, p Program, dialect Dialect) ([]o
 			op.subtree = true // a tree copy writes every file below the destination
 		}
 		out = append(out, op)
+	}
+	if p.AppendFlag != "" && hasAppendFlag(words, p.AppendFlag, dialect) {
+		for i := range out {
+			if out[i].role == RoleWrite {
+				out[i].role = RoleAppend
+			}
+		}
 	}
 	return out, inner, unknownFlag
 }
@@ -3117,7 +3124,11 @@ func (w *walker) positionalOperands(ps []Word, p Program, ctx posCtx) []operand 
 		}
 	case PosFirstWrite:
 		if len(ps) > 0 {
-			out = append(out, mk(ps[0], RoleWrite))
+			role := RoleWrite
+			if p.AppendFlag != "" && ctx.appendMode {
+				role = RoleAppend
+			}
+			out = append(out, mk(ps[0], role))
 		}
 	case PosArchive:
 		// 7z command ARCHIVE [MEMBER...]. Extraction/list/test read the archive;
