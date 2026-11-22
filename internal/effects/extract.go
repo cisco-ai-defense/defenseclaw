@@ -2980,6 +2980,13 @@ func (w *walker) positionalOperands(ps []Word, p Program, ctx posCtx) []operand 
 		if ctx.inPlace {
 			role = RoleWrite
 		}
+		// find defaults its search root to the current directory. Preserve that
+		// root for -delete too: a nested shell may cd before running a rootless
+		// find, whose predicate can then delete matching descendants anywhere
+		// under the resulting cwd.
+		if len(ps) == 0 && p.DeleteFlag != "" && ctx.del {
+			ps = []Word{{Value: ".", Static: true}}
+		}
 		for _, wd := range ps {
 			out = append(out, mk(wd, role))
 			if ctx.inPlace && ctx.inPlaceSuffix != "" {
