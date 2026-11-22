@@ -144,7 +144,8 @@ unset _dc_diag_dir _dc_diag_log _dc_diag_size
 // and Cursor shell hooks that are not Secure Client renders: the per-user
 // hooks, where it replaces the boot trap, and the standalone managed hooks:
 // right after DEFENSECLAW_HOME is fixed (GAP-1734), and for Codex from the
-// first line of the hook (GAP-1755). defenseclaw_harden_env
+// first line of the hook (GAP-1755); and of the OpenShell sandbox Codex hook
+// (GAP-1769). defenseclaw_harden_env
 // keeps _dc_hook_on_exit as the EXIT trap, so the guard holds to the end.
 //
 //   - Every deliberate exit goes through the exit function, which marks it.
@@ -154,8 +155,9 @@ unset _dc_diag_dir _dc_diag_log _dc_diag_size
 //   - A deliberate exit 0 or 2 keeps its outcome. Codex reads a non-zero
 //     UserPromptSubmit status as a hook failure and submits the prompt, so
 //     a Codex block (exit 2) is answered as Codex reads one, on stdout with
-//     exit 0 (codex_closed_answer), in the per-user and the standalone
-//     managed hooks alike (GAP-0949, GAP-1755).
+//     exit 0 (codex_closed_answer), in the per-user, the standalone managed
+//     and the OpenShell sandbox Codex hooks alike (GAP-0949, GAP-1755,
+//     GAP-1769). A sandbox hook's guard is closed, as its FAIL_MODE is.
 //   - Any other status, or an unmarked exit, is an unexpected failure: exit
 //     status 1 is a non-blocking error for the agents, so it never decides
 //     the outcome. It writes one hook-failures.jsonl record, as the Secure
@@ -174,7 +176,7 @@ exit() {
   _DC_EXIT_INTENDED=1
   builtin exit "${1:-$_dc_status}"
 }
-{{if .Managed}}_DC_HOOK_FAIL_MODE="{{.FailMode}}"
+{{if .Managed}}_DC_HOOK_FAIL_MODE="{{if .Sandbox}}closed{{else}}{{.FailMode}}{{end}}"
 {{end}}_dc_hook_on_exit() {
   local rc=$? _dc_mode=closed
   set +e

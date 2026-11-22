@@ -57,6 +57,9 @@ for _dc_sandbox_var in $_dc_sandbox_vars; do
     DEFENSECLAW_TRACEPARENT|DEFENSECLAW_TRACESTATE|OTEL_TRACEPARENT|OTEL_TRACESTATE|TRACEPARENT|TRACESTATE) ;;
     HOME|PWD|DEFENSECLAW_HOME|DEFENSECLAW_MANAGED_HOOK) ;;
     HOOK_DIR|DEFENSECLAW_BAKED_HOOK_PATH) export -n "$_dc_sandbox_var" ;;
+    # The Codex hook's exit guard state, assigned above (GAP-1769): unset, it
+    # would end the guard on an unbound variable, exit 1, with no block.
+    _DC_EXIT_INTENDED|_DC_HOOK_FAIL_MODE|_DC_CODEX_EVENT|_DC_CODEX_CONTRACT|_DC_CODEX_BLOCK_REASON) export -n "$_dc_sandbox_var" ;;
     # bash's own variables keep their meaning only while set: unsetting an
     # exported RANDOM made the next $RANDOM fail under set -u and the hook
     # exit 1 (review 2 of sandbox-visibility:GAP-0028).

@@ -53,8 +53,8 @@
     "/usr/local/lib/defenseclaw/hooks/_sandbox.sh": {
       "mode": "-rw-r--r--",
       "owner": "root",
-      "size": 17287,
-      "sha256": "8733be056edc3874a4a63a16773bd5153bace573cc152f4b7b80171d1dce270d"
+      "size": 17570,
+      "sha256": "bfecde35dbc34aa1de2ae6843997c45bc7f340702dd89d32e37136a7df6d0195"
     },
     "/usr/local/lib/defenseclaw/hooks/copilot-hook.sh": {
       "mode": "-rwxr-xr-x",

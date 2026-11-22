@@ -45,6 +45,9 @@ func sandboxNativeBlockText(connector string, run sandboxHookRun) []string {
 		return []string{str("message")}
 	case "antigravity":
 		return []string{str("reason")}
+	case "codex":
+		// Codex shows the reason of its block object, not stderr (GAP-1769).
+		return []string{codexBlockReason(run.stdout)}
 	default:
 		return []string{run.stderr}
 	}
