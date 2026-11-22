@@ -106,3 +106,41 @@ func TestManagedGatewayBlocksARelayedCapture(t *testing.T) {
 		t.Fatalf("answer = %v", resp)
 	}
 }
+
+// A secret used as an object key is captured and redacted too.
+func TestSandboxVaultCapturesASecretInAKey(t *testing.T) {
+	st := vault.Open(filepath.Join(t.TempDir(), "vault"))
+	ctx := sandboxauth.WithRequest(context.Background(), sandboxauth.Binding{SandboxName: "sb", Connector: "claudecode"}, nil)
+	body := []byte(`{"hook_event_name":"PreToolUse","tool_name":"Write","tool_input":{"headers":{"` + vaultTestAnthropicKey() + `":"x"}}}`)
+	out, c := captureSandboxVault(ctx, st, "claudecode", body)
+	if c == nil || len(c.Entries) != 1 || strings.Contains(string(out), vaultTestAnthropicKey()) || !strings.Contains(string(out), "[vault:ANTHROPIC_API_KEY]") {
+		t.Fatalf("capture = %+v body %s", c, out)
+	}
+	// Two keys that redact to one tag: the body is replaced, never a value forwarded.
+	k2 := "sk-" + "ant-api03-" + strings.Repeat("Zy7Xw6", 8)
+	body = []byte(`{"hook_event_name":"PreToolUse","tool_input":{"[vault:ANTHROPIC_API_KEY]":"a","` + k2 + `":"b"}}`)
+	out, c = captureSandboxVault(ctx, vault.Open(filepath.Join(t.TempDir(), "other")), "claudecode", body)
+	if c == nil || string(out) != `{"hook_event_name":"PreToolUse"}` {
+		t.Fatalf("collision capture = %+v body %s", c, out)
+	}
+}
+
+// A prompt whose secret the vault already holds as exposed does not point
+// the person at --vault for it.
+func TestPromptWithAnExposedSecretNamesTheReplace(t *testing.T) {
+	c := &sandboxVaultCapture{Event: vaultCaptureEventPrompt, Entries: []vault.Entry{{Name: "STRIPE_API_KEY", Host: "api.stripe.com", Port: 443, Exposed: true}}}
+	m := c.message()
+	if strings.Contains(m, "--vault") || !strings.Contains(m, "vault replace STRIPE_API_KEY") {
+		t.Fatalf("message = %s", m)
+	}
+}
+
+// A body with a duplicate key is left to the ambiguous-JSON rejection.
+func TestCaptureSkipsAmbiguousJSON(t *testing.T) {
+	st := vault.Open(filepath.Join(t.TempDir(), "vault"))
+	ctx := sandboxauth.WithRequest(context.Background(), sandboxauth.Binding{SandboxName: "sb", Connector: "claudecode"}, nil)
+	body := []byte(`{"hook_event_name":"UserPromptSubmit","prompt":"` + vaultTestAnthropicKey() + `","prompt":"x"}`)
+	if _, c := captureSandboxVault(ctx, st, "claudecode", body); c != nil {
+		t.Fatal("an ambiguous body was captured")
+	}
+}

@@ -98,8 +98,10 @@ A second, different secret of the same kind gets `_2`, `_3` and so on.
   (`defenseclaw sandbox delete NAME`).
 - **In a tool call.** The tool call is stopped. The agent's model wrote the
   value, so it has seen it, and the value may even be the agent's own: the
-  secret is marked **exposed: rotate** and no sandbox gets it until you rotate
-  it with its issuer and run `defenseclaw sandbox vault replace NAME`. Only a
+  secret is marked **exposed: rotate** and no new sandbox gets it until you
+  rotate it with its issuer and run `defenseclaw sandbox vault replace NAME`
+  with the new value (the same value is refused). A sandbox started with it
+  before keeps it until you delete that sandbox. Only a
   value written out in the tool call is seen: a command that makes up a value
   as it runs (from `/dev/urandom`, say) is not.
 
@@ -143,12 +145,15 @@ Values are never printed. `show NAME` gives one secret's details, `replace`
 sets a new value, `bind` sets the host, `rename` changes the variable name and
 `remove` deletes it. See [the sandbox CLI reference](/docs/reference/sandbox-cli#sandbox-vault).
 
-In the TUI, the **Vault** tab (`K`) shows the same list and does the same
+On a per-user install, the TUI's **Vault** tab (`K`) shows the same list and does the same
 changes: `a` add, `v` replace value, `e` set host, `n` rename, `d` delete,
 Enter details. A value is typed in a hidden field and goes to the command on
 standard input.
 
 ![DefenseClaw TUI Vault tab on Linux: 2 secrets for your sandboxes, values never shown; the selected DEMO_API_TOKEN line says it reaches a sandbox as $DEMO_API_TOKEN with --vault, is sent only to host.openshell.internal:28950 and was added by you; the table lists DEMO_API_TOKEN and STRIPE_API_KEY with host, status, source and last use](/images/sandboxes/screens/vault-tui-panel.png)
+
+On a managed computer `defenseclaw tui` is not available; use
+`defenseclaw sandbox vault` there.
 
 Only terminal agents run in a sandbox (Claude Code, Codex, Copilot CLI,
 OpenCode, Kiro, Hermes, Antigravity's `agy`), so only they can use the vault.

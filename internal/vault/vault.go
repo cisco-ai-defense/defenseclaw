@@ -358,6 +358,11 @@ func (s *Store) ReplaceValue(name, value string) (Entry, error) {
 		if j := f.indexValue(value); j >= 0 && j != i {
 			return fmt.Errorf("the vault already holds this value as %s", f.Entries[j].Name)
 		}
+		if f.Entries[i].Exposed && f.indexValue(value) == i {
+			// Only a new value lifts the exposure: the same one may have
+			// been seen by an agent's model.
+			return fmt.Errorf("%w: %s still holds that value; rotate it with its issuer and paste the new one", ErrExposed, name)
+		}
 		f.Entries[i].Value = value
 		f.Entries[i].Exposed = false
 		f.Entries[i].UpdatedAt = s.now().UTC()

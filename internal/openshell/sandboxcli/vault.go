@@ -222,9 +222,11 @@ func (a *App) readVaultValue(prompt string, opts VaultValueOptions) (string, err
 		value = strings.TrimRight(line, "\r\n")
 		// A value is one line: more text after it is a mistake (a pasted
 		// file, two values), never silently dropped.
-		rest, _ := io.ReadAll(io.LimitReader(reader, 1<<16))
-		if strings.TrimSpace(string(rest)) != "" {
-			return "", errors.New("standard input has more than one line; pipe only the value")
+		if !a.IO.InTTY {
+			rest, _ := io.ReadAll(io.LimitReader(reader, 1<<16))
+			if strings.TrimSpace(string(rest)) != "" {
+				return "", errors.New("standard input has more than one line; pipe only the value")
+			}
 		}
 	case a.ReadSecret != nil:
 		v, err := a.ReadSecret(prompt)

@@ -307,3 +307,24 @@ func TestFindCapturableIsNotHiddenByOtherShapes(t *testing.T) {
 		t.Fatalf("found = %+v", found)
 	}
 }
+
+// Replacing an exposed value with the same value does not lift the
+// exposure: only a new value does.
+func TestReplaceWithTheSameExposedValueIsRefused(t *testing.T) {
+	s := newStore(t)
+	if _, err := s.Capture(CaptureInput{Value: fakeStripe(), Kind: "stripe-secret-key", Exposed: true}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ReplaceValue("STRIPE_API_KEY", fakeStripe()); !errors.Is(err, ErrExposed) {
+		t.Fatalf("same-value replace = %v", err)
+	}
+	if e, _ := s.Get("STRIPE_API_KEY"); !e.Exposed {
+		t.Fatal("exposure lifted by a same-value replace")
+	}
+	if _, err := s.ReplaceValue("STRIPE_API_KEY", "sk"+"_live_"+strings.Repeat("Pp8Oo9", 5)); err != nil {
+		t.Fatal(err)
+	}
+	if e, _ := s.Get("STRIPE_API_KEY"); e.Exposed {
+		t.Fatal("a new value did not lift the exposure")
+	}
+}

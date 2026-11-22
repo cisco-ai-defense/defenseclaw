@@ -79,6 +79,11 @@ func captureSandboxVault(ctx context.Context, store *vault.Store, connectorName 
 	if !sandboxVaultCaptureConnectors[name] {
 		return body, nil
 	}
+	if !hookToolCallJSONUnambiguous(name, body) {
+		// Duplicate keys or trailing values: the existing ambiguous-JSON
+		// rejection answers it; capture never picks one reading.
+		return body, nil
+	}
 	dec := json.NewDecoder(bytes.NewReader(body))
 	dec.UseNumber()
 	var doc map[string]interface{}
@@ -92,7 +97,7 @@ func captureSandboxVault(ctx context.Context, store *vault.Store, connectorName 
 	type hit struct{ value, kind string }
 	var hits []hit
 	seen := map[string]bool{}
-	visitStrings(doc, func(s string) string {
+	_, _ = visitStrings(doc, func(s string) string {
 		for _, f := range vault.FindCapturable(s) {
 			if v := s[f.Start:f.End]; !seen[v] {
 				seen[v] = true
@@ -128,7 +133,12 @@ func captureSandboxVault(ctx context.Context, store *vault.Store, connectorName 
 			}
 		}
 	}
-	redacted := visitStrings(doc, func(s string) string { return vault.Redact(s, vault.FindCapturable(s), names) })
+	redacted, collided := visitStrings(doc, func(s string) string { return vault.Redact(s, vault.FindCapturable(s), names) })
+	if collided {
+		// Two keys redacted to the same tag: never forward the value, and
+		// never drop one of them silently. The call is answered block.
+		return []byte(`{"hook_event_name":"` + event + `"}`), out
+	}
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
 	enc.SetEscapeHTML(false)
@@ -143,6 +153,10 @@ func captureSandboxVault(ctx context.Context, store *vault.Store, connectorName 
 // mayHoldCapturable is the cheap first screen: no issuer prefix, nothing
 // to capture.
 func mayHoldCapturable(body []byte) bool {
+	if bytes.Contains(body, []byte(`\u`)) {
+		// A \u escape can spell a prefix; the decoded strings decide.
+		return true
+	}
 	for _, p := range vault.Prefixes {
 		if bytes.Contains(body, []byte(p)) {
 			return true
@@ -151,25 +165,37 @@ func mayHoldCapturable(body []byte) bool {
 	return false
 }
 
-// visitStrings returns v with every string value replaced by f(value).
-func visitStrings(v interface{}, f func(string) string) interface{} {
+// visitStrings returns v with every string, object keys included,
+// replaced by f(value); collided reports two keys of one object that f
+// mapped to the same key.
+func visitStrings(v interface{}, f func(string) string) (interface{}, bool) {
 	switch t := v.(type) {
 	case string:
-		return f(t)
+		return f(t), false
 	case map[string]interface{}:
 		out := make(map[string]interface{}, len(t))
+		collided := false
 		for k, x := range t {
-			out[k] = visitStrings(x, f)
+			nk := f(k)
+			if _, taken := out[nk]; taken {
+				collided = true
+			}
+			nv, c := visitStrings(x, f)
+			out[nk] = nv
+			collided = collided || c
 		}
-		return out
+		return out, collided
 	case []interface{}:
 		out := make([]interface{}, len(t))
+		collided := false
 		for i, x := range t {
-			out[i] = visitStrings(x, f)
+			nv, c := visitStrings(x, f)
+			out[i] = nv
+			collided = collided || c
 		}
-		return out
+		return out, collided
 	}
-	return v
+	return v, false
 }
 
 // errorText says why the vault could not keep a capture, without a path.
@@ -192,8 +218,12 @@ func (c *sandboxVaultCapture) message() string {
 			"). The secret was not sent on. Send it again without the value."
 	}
 	first := c.Entries[0].Name
-	var kept, flags, unbound []string
+	var kept, flags, unbound, exposed []string
 	for _, e := range c.Entries {
+		if e.Exposed && c.Event == vaultCaptureEventPrompt {
+			exposed = append(exposed, e.Name)
+			continue
+		}
 		if t := e.Target(); t != "" {
 			kept = append(kept, e.Name+" (sent only to "+t+")")
 		} else {
@@ -202,11 +232,20 @@ func (c *sandboxVaultCapture) message() string {
 		}
 		flags = append(flags, "--vault "+e.Name)
 	}
+	if c.Event == vaultCaptureEventPrompt && len(flags) == 0 {
+		return fmt.Sprintf("DefenseClaw stopped the prompt before it reached the model: it carried a secret your vault "+
+			"already holds as %s, marked exposed (an agent's model may have seen it). Rotate it with its issuer and run "+
+			"`defenseclaw sandbox vault replace %s` before a sandbox can use it.", strings.Join(exposed, ", "), exposed[0])
+	}
 	if c.Event == vaultCaptureEventPrompt {
 		bind := ""
 		if len(unbound) > 0 {
 			bind = " First give it a host: " + strings.Join(unbound, "; ") + "."
 		}
+		if len(exposed) > 0 {
+			bind += " " + strings.Join(exposed, ", ") + " is marked exposed: rotate and replace it first."
+		}
+		first = strings.TrimPrefix(flags[0], "--vault ")
 		sandbox := c.Sandbox
 		if sandbox == "" {
 			sandbox = "<name>"
@@ -291,7 +330,6 @@ func (a *APIServer) applySandboxVaultCapture(
 	if resp.Severity != "CRITICAL" {
 		resp.Severity = "HIGH"
 	}
-	resp.Findings = nil
 	if req.HookEventName == "" {
 		req.HookEventName = c.Event
 	}
