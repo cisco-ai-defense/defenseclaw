@@ -256,6 +256,8 @@ type Store struct {
 	// secureClientSchema keeps the tables, columns and indexes main creates
 	// (WithSecureClientSchema).
 	secureClientSchema bool
+	// migrationTimeout, when over 0, replaces migrationStatementTimeout.
+	migrationTimeout time.Duration
 	// pageCacheKiB, when over 0, replaces the 20 MB page cache of every
 	// connection, and noReadPool keeps the reads on the writer
 	// (WithSmallFootprint).
@@ -2707,24 +2709,60 @@ func (s *Store) proveDurableWrite(ctx context.Context) error {
 type storeMigrationTx struct {
 	*sql.Tx
 	secureClient bool
+	// ctx bounds every statement of the migration. The statements run in
+	// SQLite C code that database/sql cannot stop, so a cancelled ctx is the
+	// only way to turn a stalled ALTER or schema re-parse into an error
+	// (GAP-0664). A zero value means no bound.
+	ctx context.Context
 }
 
 func (tx storeMigrationTx) secureClientMigration() bool { return tx.secureClient }
+
+func (tx storeMigrationTx) context() context.Context {
+	if tx.ctx == nil {
+		return context.Background()
+	}
+	return tx.ctx
+}
+
+func (tx storeMigrationTx) Exec(query string, args ...any) (sql.Result, error) {
+	return tx.Tx.ExecContext(tx.context(), query, args...)
+}
+
+func (tx storeMigrationTx) Query(query string, args ...any) (*sql.Rows, error) {
+	return tx.Tx.QueryContext(tx.context(), query, args...)
+}
+
+func (tx storeMigrationTx) QueryRow(query string, args ...any) *sql.Row {
+	return tx.Tx.QueryRowContext(tx.context(), query, args...)
+}
+
+// migrationStatementTimeout bounds one schema migration. A migration on a
+// large audit database takes seconds; one that has not finished after this
+// long is stuck inside SQLite, and failing Init beats a gateway or test
+// that never starts (GAP-0664).
+const migrationStatementTimeout = 15 * time.Minute
 
 // applyMigration runs a single migration inside a transaction so that both the
 // DDL and the schema_version bump are atomic. On failure the transaction is
 // rolled back and the version remains unchanged, making retries safe.
 func (s *Store) applyMigration(ver int, m migration) error {
-	tx, err := s.db.Begin()
+	timeout := s.migrationTimeout
+	if timeout <= 0 {
+		timeout = migrationStatementTimeout
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("audit: begin migration %d: %w", ver, err)
 	}
 	defer tx.Rollback() //nolint:errcheck
 
-	if err := m.apply(storeMigrationTx{Tx: tx, secureClient: s.secureClientSchema}); err != nil {
+	if err := m.apply(storeMigrationTx{Tx: tx, secureClient: s.secureClientSchema, ctx: ctx}); err != nil {
 		return fmt.Errorf("audit: migration %d (%s): %w", ver, m.description, err)
 	}
-	if _, err := txExecContextObserved(context.Background(), tx, "migration_version_insert", s.sqliteBusyObservabilityV8(), `INSERT INTO schema_version (version, applied_at) VALUES (?, ?)`,
+	if _, err := txExecContextObserved(ctx, tx, "migration_version_insert", s.sqliteBusyObservabilityV8(), `INSERT INTO schema_version (version, applied_at) VALUES (?, ?)`,
 		ver, time.Now().UTC()); err != nil {
 		return fmt.Errorf("audit: record migration %d: %w", ver, err)
 	}
