@@ -401,7 +401,7 @@ func TestSubstrateActorRateLimit(t *testing.T) {
 
 func TestSubstrateRelayVerify(t *testing.T) {
 	f := newSubstrateFixture(t)
-	tok, _, err := f.sessions.Issue(alice.ID(), identity.SessionActor{Atespace: "eng-web", Name: "alice-1", UID: subUID1}, 0)
+	tok, _, err := f.sessions.Issue(identity.SignInOf(alice), identity.SessionActor{Atespace: "eng-web", Name: "alice-1", UID: subUID1}, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -757,7 +757,7 @@ func TestSubstrateRelayVerifyCarriesTheTaskDigest(t *testing.T) {
 		if name == "alice-1" {
 			owner = alice.ID()
 		}
-		tok, _, err := f.sessions.Issue(owner, identity.SessionActor{Atespace: "eng-web", Name: name, UID: uid}, 0)
+		tok, _, err := f.sessions.Issue(identity.SessionSignIn{Person: owner}, identity.SessionActor{Atespace: "eng-web", Name: name, UID: uid}, 0)
 		if err != nil {
 			t.Fatal(err)
 		}

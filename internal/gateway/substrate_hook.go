@@ -286,6 +286,18 @@ func (a *APIServer) serveSubstrateRelayVerify(st *substrateState, w http.Respons
 		writeSubstrateRefusal(w, status, reason)
 		return
 	}
+	// So is a session of an ended sign-in: a plain logout ends that one
+	// token, and an end by time covers the sign-in's own issue time, so a
+	// session a lagging replica handed out after the end is refused too
+	// (GAP-0744). A session from a build before 1.0.11 names no sign-in;
+	// it expires within MaxSessionLifetime (1 h) of the upgrade.
+	if s.SignInKey != "" {
+		if status, reason := st.substrateRevocationRefusal(s.Person, s.SignInKey, s.SignInIssuedAt); status != 0 {
+			a.substrateAuditRelayDenied(st, r, "MEDIUM", reason, target, s.Person)
+			writeSubstrateRefusal(w, status, reason)
+			return
+		}
+	}
 	// The admin listener issues a session only to the actor's own person,
 	// and the check above holds a token minted any other way to that too.
 	w.Header().Set("Content-Type", "application/json")

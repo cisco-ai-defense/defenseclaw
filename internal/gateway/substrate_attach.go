@@ -164,7 +164,7 @@ func (a *APIServer) substrateAttach(st *substrateState) http.HandlerFunc {
 			return
 		}
 		c, _ := substrateCallerFrom(r.Context())
-		tok, _, err := st.cfg.Sessions.Issue(c.person.ID(), substrateSessionActor(reg), substrateAttachSessionTTL)
+		tok, _, err := st.cfg.Sessions.Issue(identity.SignInOf(c.person), substrateSessionActor(reg), substrateAttachSessionTTL)
 		if err != nil {
 			writeSubstrateJSONError(w, http.StatusBadRequest, "session_refused")
 			return

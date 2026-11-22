@@ -82,7 +82,7 @@ func (f *revFixture) want(t *testing.T, tok string, code int, reason, what strin
 
 func (f *revFixture) relayVerify(t *testing.T) *httptest.ResponseRecorder {
 	t.Helper()
-	tok, _, err := f.sessions.Issue(alice.ID(), identity.SessionActor{Atespace: "eng-web", Name: "alice-1", UID: subUID1}, 0)
+	tok, _, err := f.sessions.Issue(identity.SignInOf(alice), identity.SessionActor{Atespace: "eng-web", Name: "alice-1", UID: subUID1}, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -129,7 +129,7 @@ func TestRelayVerifyRefusesSessionMintedBeforeRevoke(t *testing.T) {
 	if rec := f.relayVerify(t); rec.Code != 200 {
 		t.Fatalf("before: %d %s", rec.Code, rec.Body)
 	}
-	tok, _, _ := f.sessions.Issue(alice.ID(), identity.SessionActor{Atespace: "eng-web", Name: "alice-1", UID: subUID1}, 0)
+	tok, _, _ := f.sessions.Issue(identity.SignInOf(alice), identity.SessionActor{Atespace: "eng-web", Name: "alice-1", UID: subUID1}, 0)
 	rec := f.do(t, f.admin, http.MethodPost, "/api/v1/substrate/admin/revocations", "p-admin", `{"user":"alice@example.com","reason":"laptop lost"}`)
 	if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"person":"https://idp.example#alice"`) {
 		t.Fatalf("admin revoke: %d %s", rec.Code, rec.Body)

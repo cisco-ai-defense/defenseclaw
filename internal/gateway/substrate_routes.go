@@ -544,7 +544,7 @@ func (a *APIServer) substrateCreateActor(st *substrateState) http.HandlerFunc {
 			out["warnings"] = createWarnings
 		}
 		if st.cfg.Sessions != nil && !req.Unattended {
-			tok, exp, err := st.cfg.Sessions.Issue(c.person.ID(), substrateSessionActor(reg), 0)
+			tok, exp, err := st.cfg.Sessions.Issue(identity.SignInOf(c.person), substrateSessionActor(reg), 0)
 			if err == nil {
 				out["session_token"], out["session_expires"] = tok, exp
 			}
@@ -797,7 +797,7 @@ func (a *APIServer) substrateSessionCert(st *substrateState) http.HandlerFunc {
 		}
 		// The token names the person as issuer#subject: two issuers may
 		// use the same subject (GAP-0061).
-		tok, exp, err := st.cfg.Sessions.Issue(c.person.ID(), substrateSessionActor(reg), ttl)
+		tok, exp, err := st.cfg.Sessions.Issue(identity.SignInOf(c.person), substrateSessionActor(reg), ttl)
 		if err != nil {
 			writeSubstrateJSONError(w, http.StatusBadRequest, "session_refused")
 			return

@@ -110,7 +110,7 @@ func TestBuiltRelayAcceptsTheInstallsSessionTokens(t *testing.T) {
 			if !ok || kv == nil {
 				t.Fatalf("verifier %T", v)
 			}
-			tok, _, err := signer.Issue("alice", actor, 5*time.Minute)
+			tok, _, err := signer.Issue(identity.SessionSignIn{Person: "alice"}, actor, 5*time.Minute)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -122,7 +122,7 @@ func TestBuiltRelayAcceptsTheInstallsSessionTokens(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			tok2, _, _ := other.Issue("alice", actor, 5*time.Minute)
+			tok2, _, _ := other.Issue(identity.SessionSignIn{Person: "alice"}, actor, 5*time.Minute)
 			if _, err := kv.VerifyToken(tok2); err == nil {
 				t.Fatal("a token of another issuer and key was accepted")
 			}
