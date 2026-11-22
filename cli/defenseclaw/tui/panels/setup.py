@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import stat
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -5342,6 +5343,26 @@ class SandboxMachineCheck:
     # The release setup installs (the report's ``openshell_install_version``;
     # "" from a doctor that does not say).
     openshell_release: str = ""
+    # On a Mac, setup's MicroVM question defaults to yes: this OpenShell (the
+    # release setup installs when none is) starts MicroVMs, and the gateway
+    # does not already run the docker driver (sandboxcli/setup.go, GAP-1775).
+    microvm_default: bool = False
+
+
+# The first OpenShell release whose MicroVMs start on a Mac
+# (openshell.MicroVMStartsOnMacMin, GAP-1775).
+_MICROVM_STARTS_ON_MAC_MIN = (0, 1, 9)
+
+
+def microvm_starts_on_mac(version: str) -> bool:
+    """Whether OpenShell ``version`` (a prerelease is before its release) starts MicroVMs on a Mac."""
+    match = re.match(r"^v?(\d+)\.(\d+)\.(\d+)(.*)$", version.strip())
+    if not match:
+        return False
+    found = tuple(int(part) for part in match.groups()[:3])
+    if found == _MICROVM_STARTS_ON_MAC_MIN:
+        return not match.group(4).startswith(("-", "~"))
+    return found > _MICROVM_STARTS_ON_MAC_MIN
 
 
 _DOCTOR_GLYPHS = {"pass": "✓", "warn": "⚠", "fail": "✗"}
@@ -5398,15 +5419,21 @@ def sandbox_machine_check(report: Mapping[str, Any] | None, error: str = "") -> 
 
     # The driver the gateway runs, else the one its files configure
     # (DoctorReport.Driver, .ConfiguredDriver; the Go doctor always names
-    # one). On a Mac setup's MicroVM question defaults to no, which
-    # --non-interactive takes: setup runs sandboxes on the docker driver
-    # there and moves a gateway on vm to it (sandboxcli/setup.go,
-    # GAP-1704), so the MicroVM driver's needs never count on a Mac, and
-    # bind mounts do.
+    # one). On a Mac setup's MicroVM question defaults to no before OpenShell
+    # 0.1.9, which --non-interactive takes: setup runs sandboxes on the docker
+    # driver there and moves a gateway on vm to it (sandboxcli/setup.go,
+    # GAP-1704), so the MicroVM driver's needs never count, and bind mounts
+    # do. From 0.1.9 it defaults to yes unless the gateway runs docker
+    # (GAP-1775): then the MicroVM driver's needs count, as on Linux.
     driver = str(report.get("driver") or report.get("configured_driver") or "").strip()
     on_microvm = not compute_driver(driver).host_mounts
     mac = detail("platform").startswith("darwin/")
-    microvm = on_microvm and not mac
+    # The OpenShell that runs (the one setup installs, when none is).
+    starts = microvm_starts_on_mac(
+        str(report.get("cli_version") or report.get("openshell_install_version") or "").strip()
+    )
+    microvm_default = mac and starts and driver != "docker"
+    microvm = on_microvm and (not mac or microvm_default)
     parts: list[str] = []
     docker = status("docker")
     if docker:
@@ -5520,6 +5547,7 @@ def sandbox_machine_check(report: Mapping[str, Any] | None, error: str = "") -> 
         openshell_attention=attention,
         openshell_upgrade=upgrade,
         openshell_release=release,
+        microvm_default=microvm_default,
     )
 
 
@@ -5671,10 +5699,26 @@ def sandbox_wizard_fields(
             visible_when=is_setup,
         ),
     ]
-    if macos:
-        # Setup's MicroVM question defaults to no on a Mac, which
-        # --non-interactive takes: the docker driver, also for a gateway on
-        # vm, which it moves (sandboxcli/setup.go, GAP-1704).
+    mac_microvm = macos and machine is not None and machine.microvm_default
+    if mac_microvm:
+        # OpenShell 0.1.9 starts MicroVMs on a Mac: setup's question defaults
+        # to yes, which --non-interactive takes (sandboxcli/setup.go, GAP-1775).
+        fields.append(
+            WizardFormField(
+                "Compute Driver",
+                "section",
+                value="MicroVMs (the vm driver)",
+                hint='Setup runs sandboxes in OpenShell MicroVMs (compute_driver = "vm"'
+                + driver_restart
+                + "): each sandbox gets its own kernel and disk, works on a copy of the project, and OpenShell calls "
+                "this driver experimental. A gateway that runs the docker driver keeps it.",
+                visible_when=is_setup,
+            )
+        )
+    elif macos:
+        # Setup's MicroVM question defaults to no on a Mac before OpenShell
+        # 0.1.9, which --non-interactive takes: the docker driver, also for a
+        # gateway on vm, which it moves (sandboxcli/setup.go, GAP-1704).
         fields.append(
             WizardFormField(
                 "Compute Driver",

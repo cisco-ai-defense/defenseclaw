@@ -347,3 +347,23 @@ func TestCheckSupportedWindow(t *testing.T) {
 		}
 	}
 }
+
+// TestMicroVMStartsOnMac (GAP-1775): MicroVM sandboxes start on a Mac from
+// OpenShell 0.1.9; 0.1.6 to 0.1.8 and a prerelease of 0.1.9 are still refused
+// by the guest-root check, an empty version is the release setup installs.
+func TestMicroVMStartsOnMac(t *testing.T) {
+	for v, want := range map[string]bool{
+		"":              InstallerVersion == MicroVMStartsOnMacMin || mustParse(InstallerVersion).Compare(mustParse(MicroVMStartsOnMacMin)) > 0,
+		"0.1.6":         false,
+		"0.1.8":         false,
+		"0.1.9-pre.1":   false,
+		"0.1.9":         true,
+		"v0.1.9":        true,
+		"0.1.10":        true,
+		"not-a-version": false,
+	} {
+		if got := MicroVMStartsOnMac(v); got != want {
+			t.Errorf("MicroVMStartsOnMac(%q) = %t, want %t", v, got, want)
+		}
+	}
+}
