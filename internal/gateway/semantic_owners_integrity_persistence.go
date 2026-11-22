@@ -1612,11 +1612,11 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 			}
 			title := named.Title
 			enforcement := enforcingProof
-			// A write the link walk held only because it could not resolve
-			// the target is not a known key write: outside the strict and
-			// managed tiers it warns (rel-1-0-10:GAP-0013, GAP-0004).
+			// An unresolved link hold is only MAYBE: without a positive
+			// resolver fact it is not a known authorized-keys write in any
+			// tier. Resolved symlinks and inode-proven hard links stay enforcing.
 			unprovenOnly := symlinkWrite && unprovenTarget.class != "" && named.ID == rule.ID &&
-				unprovenKeyWriteMayWarn(request, commandText, facts.ActiveHome, unprovenTarget) &&
+				unprovenSSHKeyHoldIsMaybe(facts.ActiveHome, unprovenTarget) &&
 				!trustedAuthorizedKeysSymlinkWrite(input) &&
 				!trustedAuthorizedKeysWriteProofWith(input, facts, false, clientGlobFacts(request), request.targetMemo) &&
 				!trustedSandboxGuestAuthorizedKeysWrite(request)
@@ -1683,62 +1683,18 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 	)
 }
 
-// unprovenKeyWriteMayWarn reports a call whose authorized-keys finding
-// warns, not blocks, when the proof could only hold its write as unknown:
-// a shell command (a native write or patch tool keeps its enforcement) in
-// the default or permissive tier of a per-user install (no managed hook
-// peer) that does not name
-// an authorized-keys file or carry base64 text that could spell one. The
-// strict tier and every managed install keep the block (owner 2026-11-06
-// ruling on rel-1-0-6:GAP-0675; S7 plan: unknown effects never block in
-// default; lead answer 2026-11-12 for rel-1-0-10:GAP-0013). A target the
-// proof found protected blocks in every tier. The confirm ("ask") ceiling
-// for these calls belongs to the hook answer path (S8), so they alert.
-//
-// The call must make no link itself (hookpaths.CommandMayMakeLink): only an
-// operand it cannot resolve, or an archive or copy scope it cannot read,
-// is lowered (the archive-before-write class the owner ruled a balanced
-// warning on rel-1-0-6:GAP-0675). The held write must also be away from
-// every protected file: its operand
-// is outside the active home (where the key files, DefenseClaw state and the
-// agent hook configs live) and outside sshd's ProgramData folder, and the
-// command names no home spelling (~, $HOME, %USERPROFILE%, the home path,
-// OLDPWD). An unreadable link or copy scope inside the home can reach those
-// files, so it keeps the block (owner rule: self-protection blocks whenever
-// an effect can plausibly reach the protected file).
-func unprovenKeyWriteMayWarn(request trustedActionRequest, commandText, home string, held unprovenWrite) bool {
-	if request.tierEnforces(tierGateManaged) || request.ProtectedHomeHook ||
-		!trustedShellCommandInput(request.Input) {
+// unprovenSSHKeyHoldIsMaybe reports whether an unresolved link hold is
+// genuinely unproven as an authorized-keys write. The caller has already
+// excluded every positive resolver proof, including client-resolved targets
+// and inode-proven hard links. An absent or unreadable operand outside the
+// protected home is not a Known write in any policy tier; the held path alone
+// cannot raise the live verdict.
+func unprovenSSHKeyHoldIsMaybe(home string, held unprovenWrite) bool {
+	if held.class != hookpaths.UnprovenLinkUnread || held.operand == "" ||
+		!filepath.IsAbs(held.operand) || home == "" || !filepath.IsAbs(home) {
 		return false
 	}
-	if held.operand == "" || !filepath.IsAbs(held.operand) || home == "" || !filepath.IsAbs(home) ||
-		unprovenOperandNearProtected(held.operand, home) {
-		return false
-	}
-	command, _ := trustedBashCommandInput(request.Input)
-	if command == "" {
-		command = request.Input.Command
-	}
-	if hookpaths.CommandMayMakeLink(command) {
-		// The unknown may be where a link the call makes points, not where
-		// its name sits: a target built at run time reaches the home from
-		// /tmp as easily (review F1: python os.symlink, ln -s "$(cd;pwd)").
-		return false
-	}
-	// Quote and escape characters split a word without changing it
-	// (authorized_''keys), so the spellings are read without them.
-	lower := strings.NewReplacer("'", "", "\"", "", "\\", "", "`", "").Replace(strings.ToLower(commandText))
-	for _, spelling := range []string{
-		"authorized_k", "administrators_authorized", "base64", "~", "$home", "${home", "%userprofile%",
-		"%homepath%", "%homedrive%", "$env:userprofile", "${env:userprofile", "$env:home", "${env:home",
-		"getfolderpath", "oldpwd", "programdata", ".ssh", ".defenseclaw", ".claude", ".codex", ".cursor",
-		strings.ToLower(filepath.ToSlash(home)), strings.ToLower(home),
-	} {
-		if strings.Contains(lower, spelling) {
-			return false
-		}
-	}
-	return true
+	return !unprovenOperandNearProtected(held.operand, home)
 }
 
 // unprovenWrite is what the authorized-keys proof held as unknown: the
