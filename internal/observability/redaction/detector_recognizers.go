@@ -12,7 +12,6 @@ import (
 	"io"
 	"math"
 	"net/netip"
-	"regexp"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -24,20 +23,20 @@ import (
 )
 
 var (
-	providerTokenRE = regexp.MustCompile(`(?:AKIA|ASIA|AROA|AGPA|AIDA|AIPA|ANPA|ANVA)[A-Z0-9]{16}|(?:ghp_|gho_|ghu_|ghs_|ghr_)[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9]{22}_[A-Za-z0-9]{59}|glpat-[A-Za-z0-9_-]{20,255}|xoxb-[0-9]{10,13}-[0-9]{10,13}-[A-Za-z0-9]{24,128}|(?:xoxp-|xoxa-|xoxr-|xoxs-)[A-Za-z0-9-]{24,200}|(?:sk_live_|sk_test_|rk_live_|rk_test_|pk_live_|pk_test_)[A-Za-z0-9]{20,128}|AIza[A-Za-z0-9_-]{35}|sk-proj-[A-Za-z0-9_+=.-]{16,248}|sk-ant-[A-Za-z0-9_+=.-]{17,249}|sk-or-[A-Za-z0-9_+=.-]{18,250}|sk-[A-Za-z0-9_+=.-]{21,253}|eyJ[A-Za-z0-9_-]*={0,2}\.[A-Za-z0-9_-]+={0,2}\.[A-Za-z0-9_-]+={0,2}`)
-	authorizationRE = regexp.MustCompile(`(?i)^(authorization|proxy-authorization)[\t ]*[:=][\t ]*(bearer|basic|digest|token|apikey)[\t ]+([^\r\n]+)$`)
-	assignmentKeyRE = regexp.MustCompile(`(?i)(password|passwd|pwd|secret|client_secret|api_key|apikey|access_token|refresh_token|private_key|signing_key)`)
-	dsnKeyRE        = regexp.MustCompile(`(?i)(password|passwd|pwd|pass|secret|client_secret|api_key|apikey|access_token|refresh_token|token|signature|credential)`)
-	entropyRE       = regexp.MustCompile(`[A-Za-z0-9+/_=-]{20,256}`)
-	uriRE           = regexp.MustCompile(`[A-Za-z][A-Za-z0-9+.-]*://[^\x00-\x20<>"']+`)
-	cloudLabelRE    = regexp.MustCompile(`(?i)(aws_account_id|azure_tenant_id|azure_subscription_id|gcp_project_number|gcp_project_id)[\t ]*[:=][\t ]*([A-Za-z0-9-]+)`)
-	arnRE           = regexp.MustCompile(`arn:[A-Za-z0-9_-]+:[A-Za-z0-9_-]+:[A-Za-z0-9_-]*:([0-9]{12}):[^\x00-\x20:]+`)
-	azurePathRE     = regexp.MustCompile(`(?i)/(subscriptions|tenants)/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:/|$)`)
-	gcpPathRE       = regexp.MustCompile(`(?:^|/)projects/([a-z][a-z0-9-]{4,28}[a-z0-9])(?:/|$)`)
-	gcpServiceRE    = regexp.MustCompile(`[A-Za-z0-9._%+-]+@([a-z][a-z0-9-]{4,28}[a-z0-9])\.iam\.gserviceaccount\.com`)
-	emailRE         = regexp.MustCompile(`[A-Za-z0-9!#$%&'*+/=?^_` + "`" + `{|}~-]+(?:\.[A-Za-z0-9!#$%&'*+/=?^_` + "`" + `{|}~-]+)*@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+`)
-	telephoneRE     = regexp.MustCompile(`(?:\+1[ .-])?(?:\([2-9][0-9]{2}\)|[2-9][0-9]{2})[ .-][2-9][0-9]{2}[ .-][0-9]{4}`)
-	nationalIDRE    = regexp.MustCompile(`[0-9]{3}-[0-9]{2}-[0-9]{4}`)
+	providerTokenRE = lazyregexp.New(`(?:AKIA|ASIA|AROA|AGPA|AIDA|AIPA|ANPA|ANVA)[A-Z0-9]{16}|(?:ghp_|gho_|ghu_|ghs_|ghr_)[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9]{22}_[A-Za-z0-9]{59}|glpat-[A-Za-z0-9_-]{20,255}|xoxb-[0-9]{10,13}-[0-9]{10,13}-[A-Za-z0-9]{24,128}|(?:xoxp-|xoxa-|xoxr-|xoxs-)[A-Za-z0-9-]{24,200}|(?:sk_live_|sk_test_|rk_live_|rk_test_|pk_live_|pk_test_)[A-Za-z0-9]{20,128}|AIza[A-Za-z0-9_-]{35}|sk-proj-[A-Za-z0-9_+=.-]{16,248}|sk-ant-[A-Za-z0-9_+=.-]{17,249}|sk-or-[A-Za-z0-9_+=.-]{18,250}|sk-[A-Za-z0-9_+=.-]{21,253}|eyJ[A-Za-z0-9_-]*={0,2}\.[A-Za-z0-9_-]+={0,2}\.[A-Za-z0-9_-]+={0,2}`)
+	authorizationRE = lazyregexp.New(`(?i)^(authorization|proxy-authorization)[\t ]*[:=][\t ]*(bearer|basic|digest|token|apikey)[\t ]+([^\r\n]+)$`)
+	assignmentKeyRE = lazyregexp.New(`(?i)(password|passwd|pwd|secret|client_secret|api_key|apikey|access_token|refresh_token|private_key|signing_key)`)
+	dsnKeyRE        = lazyregexp.New(`(?i)(password|passwd|pwd|pass|secret|client_secret|api_key|apikey|access_token|refresh_token|token|signature|credential)`)
+	entropyRE       = lazyregexp.New(`[A-Za-z0-9+/_=-]{20,256}`)
+	uriRE           = lazyregexp.New(`[A-Za-z][A-Za-z0-9+.-]*://[^\x00-\x20<>"']+`)
+	cloudLabelRE    = lazyregexp.New(`(?i)(aws_account_id|azure_tenant_id|azure_subscription_id|gcp_project_number|gcp_project_id)[\t ]*[:=][\t ]*([A-Za-z0-9-]+)`)
+	arnRE           = lazyregexp.New(`arn:[A-Za-z0-9_-]+:[A-Za-z0-9_-]+:[A-Za-z0-9_-]*:([0-9]{12}):[^\x00-\x20:]+`)
+	azurePathRE     = lazyregexp.New(`(?i)/(subscriptions|tenants)/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:/|$)`)
+	gcpPathRE       = lazyregexp.New(`(?:^|/)projects/([a-z][a-z0-9-]{4,28}[a-z0-9])(?:/|$)`)
+	gcpServiceRE    = lazyregexp.New(`[A-Za-z0-9._%+-]+@([a-z][a-z0-9-]{4,28}[a-z0-9])\.iam\.gserviceaccount\.com`)
+	emailRE         = lazyregexp.New(`[A-Za-z0-9!#$%&'*+/=?^_` + "`" + `{|}~-]+(?:\.[A-Za-z0-9!#$%&'*+/=?^_` + "`" + `{|}~-]+)*@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+`)
+	telephoneRE     = lazyregexp.New(`(?:\+1[ .-])?(?:\([2-9][0-9]{2}\)|[2-9][0-9]{2})[ .-][2-9][0-9]{2}[ .-][0-9]{4}`)
+	nationalIDRE    = lazyregexp.New(`[0-9]{3}-[0-9]{2}-[0-9]{4}`)
 	uuidRE          = lazyregexp.New(`[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}`)
 )
 
@@ -507,7 +506,7 @@ func recognizeAssignments(input string) []candidate {
 	return scanKeyValues(input, assignmentKeyRE, false)
 }
 
-func scanKeyValues(input string, keyPattern *regexp.Regexp, dsn bool) []candidate {
+func scanKeyValues(input string, keyPattern *lazyregexp.Regexp, dsn bool) []candidate {
 	indices := keyPattern.FindAllStringIndex(input, -1)
 	result := make([]candidate, 0, len(indices))
 	for _, index := range indices {
@@ -896,7 +895,7 @@ func recognizeCloudIdentifiers(input string) []candidate {
 	for _, parts := range azurePathRE.FindAllStringSubmatchIndex(input, -1) {
 		result = append(result, candidate{start: parts[4], end: parts[5], accepted: validUUID(input[parts[4]:parts[5]])})
 	}
-	for _, pattern := range []*regexp.Regexp{gcpPathRE, gcpServiceRE} {
+	for _, pattern := range []*lazyregexp.Regexp{gcpPathRE, gcpServiceRE} {
 		for _, parts := range pattern.FindAllStringSubmatchIndex(input, -1) {
 			result = append(result, candidate{start: parts[2], end: parts[3], accepted: validGCPProjectID(input[parts[2]:parts[3]])})
 		}

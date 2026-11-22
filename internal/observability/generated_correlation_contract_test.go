@@ -79,7 +79,7 @@ func TestGeneratedCorrelationRelationshipRejectsUnknownVocabulary(t *testing.T) 
 }
 
 func TestOccurrenceCorrelationNeverEntersMetricFieldsOrLabels(t *testing.T) {
-	for familyID, contract := range generatedFamilyBaseContracts {
+	for familyID, contract := range generatedFamilyBaseContracts() {
 		if contract.identity.Signal != SignalMetrics {
 			continue
 		}
