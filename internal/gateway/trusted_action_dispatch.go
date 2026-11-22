@@ -49,6 +49,7 @@ import (
 	"mvdan.cc/sh/v3/expand"
 	"mvdan.cc/sh/v3/pattern"
 	"mvdan.cc/sh/v3/syntax"
+	"github.com/defenseclaw/defenseclaw/internal/workcount"
 )
 
 // trustedActionDispatchMaxCost bounds the semantic rules' total CEL cost per
@@ -11371,6 +11372,7 @@ func trustedPowerShellExecutionTool(tool string) bool {
 }
 
 func decodeTrustedTopLevelCommandField(raw json.RawMessage) (string, bool, bool) {
+	workcount.AddLarge(workcount.ArgsDecode, len(raw))
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	opening, err := decoder.Token()
 	if err != nil || opening != json.Delim('{') {
