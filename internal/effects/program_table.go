@@ -832,7 +832,7 @@ func buildPOSIXTable() {
 		Flags: map[string]Flag{"-exec": {Value: true, Role: RoleExecCode}, "-toolexec": {Value: true, Role: RoleExecCode}}})
 	// Inert-operand programs: their positionals are messages, names or option
 	// values, not files they act on (review R5-2 InertOperands).
-	add(Program{Names: []string{"echo", "printf", "true", "false", "pwd", "cd", "pushd", "popd", "export", "set", "unset", "test", "[", "alias", "unalias", "ps", "env", "date", "whoami", "id", "uname", "hostname", "which", "command", "type", "basename", "dirname", "sleep", "kill", "killall", "pkill", "jobs", "wait", "clear", "umask", "ulimit", "hash", "getconf", "tty", "tput", "seq", "yes", "expr", "let", "read", "printenv", "logname", "groups", "nproc", "arch"}, Pos: PosNone, InertOperands: true,
+	add(Program{Names: []string{"echo", "printf", "true", "false", ":", "pwd", "cd", "pushd", "popd", "export", "set", "unset", "test", "[", "alias", "unalias", "ps", "env", "date", "whoami", "id", "uname", "hostname", "which", "command", "type", "basename", "dirname", "sleep", "kill", "killall", "pkill", "jobs", "wait", "clear", "umask", "ulimit", "hash", "getconf", "tty", "tput", "seq", "yes", "expr", "let", "read", "printenv", "logname", "groups", "nproc", "arch"}, Pos: PosNone, InertOperands: true,
 		Flags: fl(nil, "-n", "-e", "-E", "-l", "-a", "-h", "-c", "-v", "-f", "-r", "-s", "-t", "-u", "-p", "-i", "-w", "-x", "-z", "-d", "-k", "-m", "-b", "-o", "-g", "-L", "-P", "-H", "-9", "-1")})
 	// Programs that read their file operands. The valued flags below are inert
 	// data (a count, a delimiter, a field list); none of these programs writes a

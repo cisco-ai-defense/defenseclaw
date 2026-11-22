@@ -474,7 +474,7 @@ N6-a curl -d two urls	U|
 N6-b curl -T two urls	U|
 N6-c curl literal body two urls	U|
 N6-d wget --post-file two urls	U|
-N7 for-list cmdsubst	U|delete:/home/u/.ssh
+N7 for-list cmdsubst	K|delete:/home/u/.ssh
 N8 param default cmdsubst	K|delete:/home/u/.ssh
 P01 cd..cd chain	U|
 P02 env -C	K|append:/home/u/.ssh/authorized_keys
@@ -600,7 +600,7 @@ S15 chdir	U|
 S15 iex (iwr).Content	U|
 S16 Push-Location	U|
 S16 Set-Item env	U|
-S16 Tee-Object	U|
+S16 Tee-Object	K|append:c:\users\u\.ssh\authorized_keys
 S17 & { cd } leaks	K|write:c:\users\u\.ssh\authorized_keys,write:c:\work\authorized_keys
 S17 Rename-Item NewName	U|
 S17 cmd /c from ps	K|delete:c:\windows\x
@@ -626,7 +626,7 @@ S24 -Pa prefix	U|write:c:\users\u\.ssh\authorized_keys
 S24 New-Item -Name	K|write:c:\users\u\.ssh\authorized_keys
 S25 -Value first then positional	K|write:c:\users\u\.ssh\authorized_keys
 S26 Out-File -Append -FilePath	K|write:c:\users\u\.ssh\authorized_keys
-S27 Tee-Object -FilePath	U|
+S27 Tee-Object -FilePath	K|append:c:\users\u\.ssh\authorized_keys
 S28 Start-Process cmd args	U|append:c:\users\u\.ssh\authorized_keys
 S29 iex literal	U|write:c:\users\u\.ssh\authorized_keys
 S3 bash heredoc	K|delete:/home/u/.ssh
@@ -1285,7 +1285,7 @@ rv8-C10 cd || source	U|append:/home/u/.ssh/authorized_keys,append:/home/u/author
 rv8-C11 cmd paren group cd	U|append:c:\users\u\.ssh\authorized_keys,append:c:\users\u\authorized_keys
 rv8-C12 cmd failed cd /d then cd	U|append:c:\t\none\.ssh\authorized_keys,append:c:\t\none\authorized_keys,append:c:\users\u\.ssh\authorized_keys,append:c:\users\u\authorized_keys
 rv8-C13 cmd cd || write	U|append:c:\users\u\.ssh\authorized_keys
-rv8-C14 if cd then	U|append:/home/u/.ssh/authorized_keys,append:/home/u/authorized_keys
+rv8-C14 if cd then	K|append:/home/u/.ssh/authorized_keys,append:/home/u/authorized_keys
 rv8-C15 while cd	U|append:/home/u/.ssh/authorized_keys,append:/home/u/authorized_keys
 rv8-C16 cd || cmdsubst in arg	K|append:/home/u/.ssh/authorized_keys,append:/home/u/authorized_keys
 rv8-C17 cd || heredoc	K|append:/home/u/.ssh/authorized_keys,append:/home/u/authorized_keys
@@ -1294,7 +1294,7 @@ rv8-C19 cd || background	K|append:/home/u/.ssh/authorized_keys,append:/home/u/au
 rv8-C20 cd || pipeline	K|append:/home/u/.ssh/authorized_keys,append:/home/u/authorized_keys
 rv8-C21 ps sl ||	U|write:c:\users\u\.ssh\authorized_keys,write:c:\users\u\authorized_keys
 rv8-C22 ps sl && sub	U|write:c:\users\u\.ssh\authorized_keys,write:c:\users\u\authorized_keys
-rv8-C23 cd && eval	U|append:/home/u/.bashrc,append:/t/none/.bashrc
+rv8-C23 cd && eval	K|append:/home/u/.bashrc,append:/t/none/.bashrc
 rv8-C24 cd || command eval	K|append:/home/u/.ssh/authorized_keys,append:/home/u/authorized_keys
 rv8-C25 cd || builtin eval	K|append:/home/u/.ssh/authorized_keys,append:/home/u/authorized_keys
 rv8-E01 ps env HOME into bash	U|

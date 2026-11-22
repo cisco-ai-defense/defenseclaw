@@ -260,7 +260,7 @@ var refClass = func() map[string]string {
 		"du", "df", "stat", "file", "readlink", "realpath", "diff", "cmp", "look", "shasum", "grep", "egrep", "fgrep", "ag",
 		"ls", "ll", "la", "dir", "vdir", "exa", "eza", "lsd")
 	// operands are messages, names or shell state, not files they act on
-	add("inert", "echo", "printf", "true", "false", "pwd", "cd", "pushd", "popd", "export", "set", "unset", "test", "[", "alias", "unalias",
+	add("inert", "echo", "printf", "true", "false", ":", "pwd", "cd", "pushd", "popd", "export", "set", "unset", "test", "[", "alias", "unalias",
 		"ps", "env", "date", "whoami", "id", "uname", "hostname", "which", "command", "type", "basename", "dirname", "sleep", "kill",
 		"killall", "pkill", "jobs", "wait", "clear", "umask", "ulimit", "hash", "getconf", "tty", "tput", "seq", "yes", "expr", "let",
 		"read", "printenv", "logname", "groups", "nproc", "arch", "tr",
@@ -271,12 +271,12 @@ var refClass = func() map[string]string {
 		"bzcat", "xz", "unxz", "xzcat", "unzip", "tar", "scp", "rsync", "base64", "7z", "7za", "7zr")
 	// carry a script, program, format or config in an operand
 	add("text", "sed", "awk", "gawk", "mawk", "nawk", "curl", "wget", "find", "fd", "rg") // rg --pre runs a preprocessor
-	add("shell", "bash", "sh", "zsh", "dash", "ksh", "eval", "source", ".", "su", "runuser", "python", "python3", "node", "nodejs", "ruby", "perl", "php", "go")
+	add("shell", "bash", "sh", "zsh", "dash", "ksh", "eval", "source", ".", "su", "runuser", "python", "python3", "node", "nodejs", "ruby", "perl", "php", "go", "newgrp")
 	add("special", "git")
 	// Windows table (lower case)
 	add("writes", "copy", "xcopy", "robocopy", "move", "ren", "rename", "del", "erase", "rd", "rmdir", "mklink", "icacls", "cacls", "takeown",
 		"attrib", "certutil", "bitsadmin", "set-content", "add-content", "out-file", "copy-item", "cpi", "move-item", "mi", "remove-item", "ri",
-		"new-item", "ni", "set-acl", "invoke-webrequest", "invoke-restmethod", "iwr", "irm")
+		"new-item", "ni", "set-acl", "invoke-webrequest", "invoke-restmethod", "iwr", "irm", "tee-object")
 	add("reads", "type", "get-content", "gc")
 	add("shell", "cmd", "powershell", "pwsh", "invoke-expression", "iex", "start-process", "saps")
 	return m
