@@ -171,14 +171,25 @@ func parseDecimal(s string) (*big.Int, int, bool) {
 		return nil, 0, false
 	}
 	scale -= exp
+	if v.Sign() == 0 {
+		// zero stays zero whatever the exponent (the scale is clipped to 0..28 like .NET)
+		return v, min(max(scale, 0), 28), true
+	}
 	if scale < 0 {
+		if -scale > 29 {
+			return nil, 0, false // a non-zero value times 10^30 or more overflows decimal
+		}
 		v.Mul(v, new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(-scale)), nil))
 		scale = 0
 	}
 	if scale > 28 {
 		// .NET rounds to 28 places; keep this path simple and exact for common input.
 		d := scale - 28
-		v.Quo(v, new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(d)), nil))
+		if d >= len(s) {
+			v.SetInt64(0) // fewer digits than the dropped places: rounds to zero (and bounds the work)
+		} else {
+			v.Quo(v, new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(d)), nil))
+		}
 		scale = 28
 	}
 	if v.CmpAbs(decimalMax) > 0 {
