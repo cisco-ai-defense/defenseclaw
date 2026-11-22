@@ -191,7 +191,13 @@ func (a *APIServer) substrateSetSecret(st *substrateState) http.HandlerFunc {
 			writeSubstrateJSONError(w, http.StatusBadRequest, "value_required")
 			return
 		}
-		if err := st.cfg.SecretStore.Set(r.Context(), ns, name, key, []byte(in.Value)); err != nil {
+		c, _ := substrateCallerFrom(r.Context())
+		stored, bad := a.substrateStoredValue(st, c, ns, name, key, in.Value)
+		if bad != "" {
+			writeSubstrateJSONError(w, http.StatusBadRequest, bad)
+			return
+		}
+		if err := st.cfg.SecretStore.Set(r.Context(), ns, name, key, []byte(stored)); err != nil {
 			// The error names the Secret, never the value.
 			fmt.Fprintf(os.Stderr, "[substrate] secret %s not stored: %v\n", r.PathValue("name"), err)
 			a.recordSubstrateSecretChange(r.Context(), st, r.PathValue("name"), audit.SubstrateSecretSet, "", true)

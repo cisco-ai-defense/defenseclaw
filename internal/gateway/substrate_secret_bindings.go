@@ -128,6 +128,7 @@ func (a *APIServer) substrateAddSecret(st *substrateState) http.HandlerFunc {
 			Value     string    `json:"value"`
 			Expires   time.Time `json:"expires,omitzero"`
 			AllowEcho bool      `json:"allow_echo,omitempty"`
+			User      string    `json:"user,omitempty"`
 		}
 		dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 2*substrateSecretMaxSize))
 		dec.DisallowUnknownFields()
@@ -142,6 +143,10 @@ func (a *APIServer) substrateAddSecret(st *substrateState) http.HandlerFunc {
 		t, ok := secretbind.Find(secretbind.Catalog(st.cfg.SecretTemplates), in.Template)
 		if !ok || (!c.admin && !t.ForProfile(profile)) {
 			writeSubstrateJSONError(w, http.StatusBadRequest, "secret_template_unknown")
+			return
+		}
+		if in.User != "" && t.Form != secretbind.FormBasic {
+			writeSubstrateJSONError(w, http.StatusBadRequest, "secret_invalid")
 			return
 		}
 		host := strings.ToLower(strings.TrimSpace(in.Host))
@@ -167,24 +172,25 @@ func (a *APIServer) substrateAddSecret(st *substrateState) http.HandlerFunc {
 		owner := render.PersonKey(c.person.Subject)
 		b := secretbind.Binding{ID: secretbind.NewID(), Name: in.Name, Owner: owner, Template: t.Name, Hosts: []string{host},
 			State: secretbind.Active, Expires: in.Expires.UTC(), AllowEcho: in.AllowEcho && st.cfg.SelfService.AllowEchoBindings,
-			Created: now}
+			BasicUser: in.User, Created: now}
 		reason := ""
 		if !t.Covers(host) {
 			b.State, reason = secretbind.Waiting, "secret_binding_outside_templates"
 		}
-		if err := b.Check(); err != nil {
+		stored, err := t.StoredValue(b, in.Value)
+		if err != nil || b.Check() != nil {
 			writeSubstrateJSONError(w, http.StatusBadRequest, "secret_invalid")
 			return
 		}
 		ns, vname := st.cfg.SelfService.EffectiveNamespace(), secretbind.ValueSecretName(owner)
-		if err := st.cfg.SecretStore.Set(r.Context(), ns, vname, b.ID, []byte(in.Value)); err != nil {
+		if err := st.cfg.SecretStore.Set(r.Context(), ns, vname, b.ID, []byte(stored)); err != nil {
 			fmt.Fprintf(os.Stderr, "[substrate] secret %s not stored: %v\n", b.Name, err)
 			a.recordSubstrateSecretChange(r.Context(), st, b.Name, audit.SubstrateSecretBindingAdded, host, true)
 			writeSubstrateJSONError(w, substrateSecretErrorStatus(err), substrateSecretErrorReason(err, "secret_not_stored"))
 			return
 		}
 		limit := st.cfg.SelfService.EffectiveMaxPerPerson()
-		err := st.cfg.Bindings.Update(r.Context(), func(d *secretbind.Doc) error {
+		err = st.cfg.Bindings.Update(r.Context(), func(d *secretbind.Doc) error {
 			n := 0
 			for _, x := range d.Bindings {
 				if x.Owner != owner {
@@ -228,6 +234,36 @@ func (a *APIServer) substrateAddSecret(st *substrateState) http.HandlerFunc {
 		}
 		writeSubstrateJSON(w, code, out)
 	}
+}
+
+// substrateStoredValue is the value set stores at ns/name/key. When that
+// is the caller's own binding it is the template's stored form
+// (base64(user:token) for basic), so a re-set keeps injection working;
+// anything else (an admin per_person secret) is stored as given. reason is
+// set when the binding's template is gone or cannot form the value.
+func (a *APIServer) substrateStoredValue(st *substrateState, c substrateCaller, ns, name, key, value string) (stored, reason string) {
+	if st.cfg.Bindings == nil || c.person.Subject == "" {
+		return value, ""
+	}
+	owner := render.PersonKey(c.person.Subject)
+	if ns != st.cfg.SelfService.EffectiveNamespace() || name != secretbind.ValueSecretName(owner) {
+		return value, ""
+	}
+	for _, b := range st.cfg.Bindings.ForOwner(owner) {
+		if b.ID != key {
+			continue
+		}
+		t, ok := secretbind.Find(secretbind.Catalog(st.cfg.SecretTemplates), b.Template)
+		if !ok {
+			return "", "secret_template_unknown"
+		}
+		v, err := t.StoredValue(b, value)
+		if err != nil {
+			return "", "secret_invalid"
+		}
+		return v, ""
+	}
+	return value, ""
 }
 
 // substrateRemoveBinding drops the caller's binding named name from the

@@ -17,6 +17,8 @@
 package secretbind
 
 import (
+	"encoding/base64"
+	"errors"
 	"path"
 	"strings"
 	"time"
@@ -166,6 +168,25 @@ func (t Template) Prefix() string {
 		return "Basic "
 	}
 	return ""
+}
+
+// StoredValue is what the launcher stores for token under t for binding
+// b. For basic it is base64(user:token), with the user from the binding
+// (generic-basic takes it at add) or else the template; Substrate puts
+// "Basic " before it. Any other form stores the token as given. Add and
+// set both store through it, so a re-set keeps the injected header valid.
+func (t Template) StoredValue(b Binding, token string) (string, error) {
+	if t.Form != FormBasic {
+		return token, nil
+	}
+	user := b.BasicUser
+	if user == "" {
+		user = t.BasicUser
+	}
+	if !basicUserRE.MatchString(user) {
+		return "", errors.New("basic_user")
+	}
+	return base64.StdEncoding.EncodeToString([]byte(user + ":" + token)), nil
 }
 
 // ValueSecretName is the Kubernetes Secret, in the self-service

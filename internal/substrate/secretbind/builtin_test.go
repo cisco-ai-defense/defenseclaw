@@ -17,6 +17,7 @@
 package secretbind
 
 import (
+	"encoding/base64"
 	"strings"
 	"testing"
 	"time"
@@ -135,5 +136,41 @@ func TestB1SecretForEchoNeedsBothSwitches(t *testing.T) {
 	b.AllowEcho = false
 	if SecretFor(tpl, "p", "ns", b, true).Inject.AllowEcho {
 		t.Fatal("allow_echo_bindings alone must not echo")
+	}
+}
+
+func TestB1StoredValueBasicForm(t *testing.T) {
+	cat := Catalog([]config.SubstrateSecretTemplate{{Name: "github"}, {Name: "generic-basic"}, {Name: "npm"}})
+	gh, _ := Find(cat, "github")
+	gb, _ := Find(cat, "generic-basic")
+	npm, _ := Find(cat, "npm")
+	b64 := func(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
+	for _, c := range []struct {
+		name  string
+		t     Template
+		user  string
+		want  string
+		fails bool
+	}{
+		{"template user", gh, "", b64("x-access-token:tok"), false},
+		{"binding user wins", gh, "octo", b64("octo:tok"), false},
+		{"generic-basic needs a user", gb, "", "", true},
+		{"generic-basic with a user", gb, "svc", b64("svc:tok"), false},
+		{"user with a colon", gb, "a:b", "", true},
+		{"bearer stores the token", npm, "", "tok", false},
+	} {
+		got, err := c.t.StoredValue(Binding{BasicUser: c.user}, "tok")
+		if (err != nil) != c.fails || got != c.want {
+			t.Errorf("%s: %q %v", c.name, got, err)
+		}
+	}
+	b := Binding{ID: "b-0123456789", Name: "n", Owner: "owner-key-1", Template: "generic-basic", Hosts: []string{"a.example"},
+		State: Active, Created: time.Now(), BasicUser: "a b"}
+	if b.Check() == nil {
+		t.Fatal("Check accepted a basic_user with a space")
+	}
+	b.BasicUser = "svc-ci@corp"
+	if err := b.Check(); err != nil {
+		t.Fatalf("Check refused %q: %v", b.BasicUser, err)
 	}
 }

@@ -18,6 +18,7 @@ package gateway
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -108,7 +109,7 @@ func TestB1BindingAdd(t *testing.T) {
 		t.Fatalf("add inside template: %d %v", code, out)
 	}
 	id, _ := out["id"].(string)
-	if string(bf.values.m[vname+id]) != "glpat-1" {
+	if string(bf.values.m[vname+id]) != basicForm("oauth2", "glpat-1") {
 		t.Fatalf("value not under %s%s: %v", vname, id, bf.values.m)
 	}
 	if bs := bf.store.ForOwner(alice); len(bs) != 1 || bs[0].State != secretbind.Active {
@@ -141,6 +142,7 @@ func TestB1BindingAdd(t *testing.T) {
 		{"template of another profile", `{"name":"x2","template":"ops-only","host":"ops.example.com","value":"v"}`, 400, "secret_template_unknown"},
 		{"any host", `{"name":"x3","template":"gitlab","host":"*","value":"v"}`, 400, "invalid_pattern"},
 		{"empty value", `{"name":"x4","template":"gitlab","host":"gitlab.com","value":""}`, 400, "value_required"},
+		{"user on a bearer template", `{"name":"x6","template":"generic-bearer","host":"api.example.com","value":"v","user":"me"}`, 400, "secret_invalid"},
 		{"expiry past 400 days", `{"name":"x5","template":"gitlab","host":"gitlab.com","value":"v","expires":"2099-01-01T00:00:00Z"}`, 400, "secret_invalid"},
 	} {
 		if code, out := bf.add(t, "p-alice", c.body); code != c.code || out["reason"] != c.reason {
@@ -263,7 +265,7 @@ func TestB1BindingOwnSetListRemove(t *testing.T) {
 	if got := mine("p-bob"); len(got) != 0 {
 		t.Fatalf("bob sees alice's binding: %v", got)
 	}
-	if rec := bf.do(t, bf.admin, http.MethodPut, "/api/v1/substrate/secrets/gl-work", "p-alice", `{"value":"v2"}`); rec.Code != 200 || string(bf.values.m[key]) != "v2" {
+	if rec := bf.do(t, bf.admin, http.MethodPut, "/api/v1/substrate/secrets/gl-work", "p-alice", `{"value":"v2"}`); rec.Code != 200 || string(bf.values.m[key]) != basicForm("oauth2", "v2") {
 		t.Fatalf("set own binding: %d %s %v", rec.Code, rec.Body, bf.values.m)
 	}
 	if rec := bf.do(t, bf.admin, http.MethodPut, "/api/v1/substrate/secrets/gl-work", "p-bob", `{"value":"x"}`); rec.Code != http.StatusNotFound {
@@ -277,5 +279,82 @@ func TestB1BindingOwnSetListRemove(t *testing.T) {
 	}
 	if _, ok := bf.values.m[key]; ok || len(bf.store.ForOwner(alice)) != 0 {
 		t.Fatalf("rm left value %v or binding %+v", bf.values.m, bf.store.ForOwner(alice))
+	}
+}
+
+func basicForm(user, token string) string {
+	return base64.StdEncoding.EncodeToString([]byte(user + ":" + token))
+}
+
+// TestB1BindingBasicStoredForm: a basic-form binding stores
+// base64(user:token) on add and on every later set, so the header
+// Substrate injects ("Basic " + value) stays valid after a re-set. The CLI
+// sends only the plain token.
+func TestB1BindingBasicStoredForm(t *testing.T) {
+	bf := newBindingFixture(t, func(c *SubstrateConfig) {
+		c.SecretTemplates = append(c.SecretTemplates, config.SubstrateSecretTemplate{Name: "generic-basic"})
+	})
+	alice := render.PersonKey("alice")
+	key := func(id string) string {
+		return "defenseclaw-user-secrets/" + secretbind.ValueSecretName(alice) + "/" + id
+	}
+	set := func(name, value string) {
+		t.Helper()
+		if rec := bf.do(t, bf.admin, http.MethodPut, "/api/v1/substrate/secrets/"+name, "p-alice", `{"value":"`+value+`"}`); rec.Code != http.StatusOK {
+			t.Fatalf("set %s: %d %s", name, rec.Code, rec.Body)
+		}
+	}
+	add := func(body string) string {
+		t.Helper()
+		code, out := bf.add(t, "p-alice", body)
+		if code != http.StatusCreated && code != http.StatusAccepted { // generic-basic has no hosts: waiting
+			t.Fatalf("add %s: %d %v", body, code, out)
+		}
+		id, _ := out["id"].(string)
+		return id
+	}
+
+	// Template user (gitlab: oauth2).
+	gl := add(`{"name":"gl-work","template":"gitlab","host":"gitlab.com","value":"glpat-1"}`)
+	if got := string(bf.values.m[key(gl)]); got != basicForm("oauth2", "glpat-1") {
+		t.Fatalf("gitlab add stored %q", got)
+	}
+	set("gl-work", "glpat-2")
+	if got := string(bf.values.m[key(gl)]); got != basicForm("oauth2", "glpat-2") {
+		t.Fatalf("gitlab re-set stored %q, want base64(oauth2:glpat-2)", got)
+	}
+	tl, _ := secretbind.Find(secretbind.Catalog([]config.SubstrateSecretTemplate{{Name: "gitlab"}}), "gitlab")
+	if p := tl.Prefix(); p != "Basic " {
+		t.Fatalf("gitlab prefix %q", p)
+	}
+
+	// generic-basic takes the user at add and keeps it on the binding.
+	gb := add(`{"name":"nexus","template":"generic-basic","host":"nexus.corp.example","value":"tok-1","user":"svc-ci"}`)
+	set("nexus", "tok-2")
+	if got := string(bf.values.m[key(gb)]); got != basicForm("svc-ci", "tok-2") {
+		t.Fatalf("generic-basic re-set stored %q, want base64(svc-ci:tok-2)", got)
+	}
+	if !strings.Contains(string(bf.cm.raw), `"basic_user":"svc-ci"`) || strings.Contains(string(bf.cm.raw), "tok-") {
+		t.Fatalf("binding ConfigMap: %s", bf.cm.raw)
+	}
+
+	// A bearer binding stores the token as given.
+	br := add(`{"name":"api","template":"generic-bearer","host":"api.corp.example","value":"b-1"}`)
+	set("api", "b-2")
+	if got := string(bf.values.m[key(br)]); got != "b-2" {
+		t.Fatalf("bearer re-set stored %q", got)
+	}
+
+	for _, c := range []struct{ name, body string }{
+		{"generic-basic without a user", `{"name":"g1","template":"generic-basic","host":"a.corp.example","value":"v"}`},
+		{"user with a colon", `{"name":"g2","template":"generic-basic","host":"a.corp.example","value":"v","user":"a:b"}`},
+		{"user with a space", `{"name":"g3","template":"generic-basic","host":"a.corp.example","value":"v","user":"a b"}`},
+	} {
+		if code, out := bf.add(t, "p-alice", c.body); code != http.StatusBadRequest || out["reason"] != "secret_invalid" {
+			t.Errorf("%s: %d %v", c.name, code, out)
+		}
+	}
+	if len(bf.values.m) != 3 {
+		t.Fatalf("a refused add left a value behind: %v", bf.values.m)
 	}
 }

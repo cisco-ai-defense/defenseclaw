@@ -74,6 +74,9 @@ type Binding struct {
 	AskID     string    `json:"ask_id,omitempty"`
 	Expires   time.Time `json:"expires,omitzero"`
 	AllowEcho bool      `json:"allow_echo,omitempty"`
+	// BasicUser is the user of a basic-form binding when its template has
+	// none (generic-basic) or the person names another one.
+	BasicUser string    `json:"basic_user,omitempty"`
 	Created   time.Time `json:"created"`
 }
 
@@ -93,6 +96,9 @@ var (
 	nameRE  = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
 	ownerRE = regexp.MustCompile(`^[A-Za-z0-9_-]{8,128}$`)
 	tmplRE  = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
+	// basicUserRE is a basic-auth user: printable ASCII without space or
+	// ":" (RFC 7617 splits user and password at the first ":").
+	basicUserRE = regexp.MustCompile(`^[!-9;-~]{1,128}$`)
 	// hostRE is the shape only; the controller checks the host against the
 	// template patterns, the echo list and the egress rules when it
 	// renders.
@@ -126,6 +132,8 @@ func (b Binding) Check() error {
 		return errors.New("state")
 	case b.Created.IsZero():
 		return errors.New("created")
+	case b.BasicUser != "" && !basicUserRE.MatchString(b.BasicUser):
+		return errors.New("basic_user")
 	}
 	for _, h := range b.Hosts {
 		if len(h) > 253 || !hostRE.MatchString(h) {
