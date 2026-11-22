@@ -162,7 +162,7 @@ func effectShadowRun(request trustedActionRequest, mode effectRulesMode, tiers .
 		effectReachUnplaced(&c, result, facts, text, request.Input.ActiveHome, opts.Flavor)
 		res := &results[i]
 		res.Sets, res.Program, res.Kind, res.Reach, res.RoleHeld, res.LinkHeld, res.Known = c.sets, c.program, c.kind, c.reach, c.roleHeld, c.linkHeld, c.known
-		res.KnownMutation, res.LinkTo = c.knownMutation, c.linkTo
+		res.KnownMutation, res.LinkTo = c.knownMutation, c.linkTo && !c.linkAt
 		res.ReadProofs = c.readProofs
 		switch {
 		case c.restricted:

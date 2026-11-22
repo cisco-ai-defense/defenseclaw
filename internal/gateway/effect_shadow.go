@@ -113,7 +113,7 @@ type EffectShadowResult struct {
 	// KnownMutation distinguishes known writes from read proofs during handoff.
 	KnownMutation bool `json:"-"`
 	// LinkTo marks a call whose link names a protected member as its target
-	// (decide.Proof.LinkTo).
+	// and puts no link at a member (decide.Proof.LinkTo).
 	LinkTo bool `json:"-"`
 	// ReadProofs are private decision inputs. Do not serialize member paths or
 	// credential classes into the shadow telemetry record.
@@ -390,8 +390,10 @@ type effectClass struct {
 	// resolver followed, counted, not raised (effectProtectedSets).
 	linkHeld bool
 	// linkTo: a touching link effect names a protected member as the link's
-	// target (an alias of the member), not as the place the link is put.
-	linkTo bool
+	// target (an alias of the member); linkAt: one names a member as the
+	// place a link is put. A call that puts a link at a member is judged by
+	// that placement (decide.RowEffectLink), whatever the link points to.
+	linkTo, linkAt bool
 	// known: some protected effect is known (mutation or credential read).
 	known         bool
 	knownMutation bool
@@ -445,8 +447,12 @@ func classifyEffects(result effects.Result, facts []*semanticpb.EffectFact, flav
 			continue
 		}
 		c.touches = true
-		if kind == string(effects.KindLink) && effectFactIsLinkTarget(result, f) {
-			c.linkTo = true
+		if kind == string(effects.KindLink) {
+			if effectFactIsLinkTarget(result, f) {
+				c.linkTo = true
+			} else {
+				c.linkAt = true
+			}
 		}
 		touchSets = append(touchSets, append(append([]string(nil), known...), maybe...)...)
 		if r != "" {
