@@ -172,6 +172,7 @@ func effectCall(connector string, in actionfacts.Input, windowsArg ...bool) (eff
 		}
 	}
 	opts := effects.Options{Flavor: flavor, Dialect: dialect, Home: in.ActiveHome, CWD: in.CWD,
+		Account:     effects.AccountRecord{Home: in.ActiveHome, Shell: in.ActiveShell},
 		BSDUserland: effectBSDUserland(effectHostGOOS, flavor)}
 	if flavor == effects.FlavorWindows && windowsShapedPath(in.ActiveHome) {
 		opts.Env = map[string]string{"USERPROFILE": in.ActiveHome}

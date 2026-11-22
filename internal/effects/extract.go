@@ -797,6 +797,9 @@ func (w *walker) resolveWord(wd Word) Word {
 			if s.Var == psHomeVar && !ok {
 				v, ok = w.curHome, w.curHome != "" // PowerShell's automatic $HOME, unless this call assigned it
 			}
+			if s.Var == "SHELL" && !ok && w.o.Account.Shell != "" {
+				v, ok = w.o.Account.Shell, true
+			}
 			if s.Var == "PWD" && !w.pwdOwn && !w.namerefSeen {
 				v, ok = w.cwdWord(i == 0)
 			}
