@@ -411,8 +411,13 @@ func withSandboxGuestSplitGapEffects(ctx context.Context, request trustedActionR
 	if !slices.ContainsFunc(actionfacts.SimpleCommands(guest, guestFacts), splitGapUnreadPart) {
 		return findings
 	}
+	// The twins are judged in full (dispatchTrustedAction), in a folder of
+	// the guest: no twin reads a host file spelled at a guest path, for any
+	// connector (claudecode and codex already skip it for every sandbox
+	// call).
 	placed := request
 	placed.Input = guest
+	placed.SkipLocalFilesystemResolution = true
 	return withSplitGapEffects(ctx, placed, generation, budget, guestFacts, wholeCommand, findings)
 }
 
