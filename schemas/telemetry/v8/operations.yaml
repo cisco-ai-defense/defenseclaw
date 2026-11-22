@@ -2395,13 +2395,13 @@ attributes:
   examples: [OpenAI]
   stability: stable
   owner: defenseclaw
-  field_class: metadata
+  field_class: content
   sensitivity: internal
   cardinality: bounded
   normalization:
     id: bounded-v1
     overrides: {max_utf8_bytes: 128}
-    notes: The agent vendor for a bundled skill, else the author of the plugin that ships it, else the author its SKILL.md declares; publisher_source says which. Absent when unknown
+    notes: The agent vendor for a bundled skill, else the author of the plugin that ships it, else the author its SKILL.md declares; publisher_source says which. Absent when unknown. Content class because a declared author is free text the skill's author chose, so it is subject to destination redaction like the declared description and version
   introduced_in: telemetry-registry-v3
 - id: defenseclaw.inventory.skill.publisher_source
   type: string
