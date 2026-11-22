@@ -1104,15 +1104,6 @@ func walkWritePath(base, path string, linkDepth int, collect, patchTarget bool) 
 // prefix depends only on that prefix and the file system, so a memo walk
 // answers exactly what a fresh walk answers while the files stay as they are.
 func walkWritePathMemo(base, path string, linkDepth int, collect, patchTarget bool, memo *TargetMemo) (string, []string, int, bool) {
-	return walkWritePathWhy(base, path, linkDepth, collect, patchTarget, memo, nil)
-}
-
-// walkWritePathWhy is walkWritePathMemo that, when unanswered is not nil,
-// sets it when the walk failed on a read of a local path that did not
-// answer (localReadUnanswered): a known folder read past
-// networkShareAnswerWait (stillPlain). The caller can then tell a target it
-// could not read from one that is not there (rel-1-0-10:GAP-1804).
-func walkWritePathWhy(base, path string, linkDepth int, collect, patchTarget bool, memo *TargetMemo, unanswered *bool) (string, []string, int, bool) {
 	if linkDepth > SystemLinkLimit() {
 		return "", nil, linkDepth, false
 	}
@@ -1165,9 +1156,6 @@ func walkWritePathWhy(base, path string, linkDepth int, collect, patchTarget boo
 				break
 			}
 			if state.failed {
-				if unanswered != nil && state.unanswered {
-					*unanswered = true
-				}
 				return "", nil, state.linkDepth, false
 			}
 			key, start = next, i+1
@@ -1177,20 +1165,12 @@ func walkWritePathWhy(base, path string, linkDepth int, collect, patchTarget boo
 	// mark is the call's cut count when the walk began: a state read after
 	// the budget cut a share wait short is not kept (rel-1-0-10:GAP-1606).
 	mark := memo.cutMark()
-	// failAs fails the walk; local tells the caller that a local read did
-	// not answer (unanswered). failRead is failAs for the read of at that
-	// returned err.
-	failAs := func(local bool) (string, []string, int, bool) {
-		if local && unanswered != nil {
-			*unanswered = true
-		}
+	fail := func() (string, []string, int, bool) {
 		if memo != nil {
-			memo.storePrefix(key, walkState{linkDepth: linkDepth, failed: true, unanswered: local}, mark)
+			memo.storePrefix(key, walkState{linkDepth: linkDepth, failed: true}, mark)
 		}
 		return "", nil, linkDepth, false
 	}
-	failRead := func(at string, err error) (string, []string, int, bool) { return failAs(localReadUnanswered(at, err)) }
-	fail := func() (string, []string, int, bool) { return failAs(false) }
 	for _, part := range parts[start:] {
 		if memo != nil {
 			key += "\x00" + part
@@ -1216,7 +1196,7 @@ func walkWritePathWhy(base, path string, linkDepth int, collect, patchTarget boo
 			memo.noteWork()
 			info, err := pathLstat(candidate)
 			if err != nil && !os.IsNotExist(err) {
-				return failRead(candidate, err)
+				return fail()
 			}
 			unknown := os.IsNotExist(err)
 			if err == nil && (info.Mode()&os.ModeSymlink != 0 || windowsMountPointLink(candidate, info)) {
@@ -1227,7 +1207,7 @@ func walkWritePathWhy(base, path string, linkDepth int, collect, patchTarget boo
 				}
 				link, err := pathReadlink(candidate)
 				if err != nil {
-					return failRead(candidate, err)
+					return fail()
 				}
 				// A patch tool may reinterpret a link target with line breaks
 				// as multiple file directives. Ordinary file opens use the
@@ -1238,11 +1218,7 @@ func walkWritePathWhy(base, path string, linkDepth int, collect, patchTarget boo
 				var extra []string
 				var nextDepth int
 				var ok bool
-				var linkUnanswered bool
-				current, extra, nextDepth, ok = walkWritePathWhy(current, link, linkDepth+1, collect, patchTarget, nil, &linkUnanswered)
-				if !ok && linkUnanswered {
-					return failAs(true)
-				}
+				current, extra, nextDepth, ok = walkWritePath(current, link, linkDepth+1, collect, patchTarget)
 				if !ok || collect && len(forms)+len(extra) > maxOpaquePathForms {
 					return fail()
 				}
@@ -1260,7 +1236,7 @@ func walkWritePathWhy(base, path string, linkDepth int, collect, patchTarget boo
 				forms = append(forms, extra...)
 				_, err = pathLstat(current)
 				if err != nil && !os.IsNotExist(err) {
-					return failRead(current, err)
+					return fail()
 				}
 				crossed = append(crossed, os.IsNotExist(err))
 			} else {
@@ -1479,20 +1455,10 @@ func ResolveWriteTarget(path string) (string, bool) {
 	// The reach scans of a shell call ask for every word of it again for each
 	// statement, 446,000 file system reads for 100 PowerShell lines, 27 s on a
 	// Windows host (rel-1-0-10:GAP-0766).
-	resolved, ok, _ := resolveWriteTargetWhy(path)
-	return resolved, ok
-}
-
-// resolveWriteTargetWhy is ResolveWriteTarget that also reports a target
-// whose walk failed on a local read that did not answer (walkWritePathWhy):
-// not proved absent, only unread (rel-1-0-10:GAP-1804).
-func resolveWriteTargetWhy(path string) (resolved string, ok, unanswered bool) {
 	if call := memoHookCall(); call != nil {
-		return call.targets().resolveWriteTargetWhy(path)
+		return call.targets().resolveWriteTarget(path)
 	}
-	writeTargetWalks.Add(1)
-	resolved, _, _, ok = walkWritePathWhy("", path, 0, false, false, nil, &unanswered)
-	return resolved, ok, unanswered
+	return resolveWritePath(path, 0)
 }
 
 // ResolvePatchWriteTarget rejects a link whose target contains a line break:

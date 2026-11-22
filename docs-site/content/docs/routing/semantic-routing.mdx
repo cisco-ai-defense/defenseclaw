@@ -42,7 +42,7 @@ If the classifier is down, times out or names a model that is not configured, ro
 
 - Model backends in `routing.models`. `base_url` is the origin, for example `https://api.openai.com`, without `/v1/chat/completions`.
 - Provider keys are in the environment or `~/.defenseclaw/.env`, never in `config.yaml`.
-- Only for `vllm_sr`: Docker running Linux containers (macOS or Linux), or a remote router. On native Windows `defenseclaw setup routing --enable` says so and refuses while the classifier is `vllm_sr`, pointing to `defenseclaw routing setup --classifier rules`; `--disable` still turns off a routing block copied from another machine.
+- Only for `vllm_sr`: Docker running Linux containers (macOS or Linux), or a remote router. On native Windows `defenseclaw setup routing` says so and refuses `--enable`; `--disable` still turns off a routing block copied from another machine.
 
 ## Built-in rules classifier (1.0.10)
 
