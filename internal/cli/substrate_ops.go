@@ -74,8 +74,12 @@ func runSubstrateLogs(cmd *cobra.Command, out *substrateOutput, com *substrateCo
 			if a.Unattended {
 				// GAP-0420: a headless run whose actor crashed and came back
 				// lost its run and its log with the worker.
+				if _, ok := loadSubstrateTaskRecord(auth.StateDir(), a); ok {
+					return fmt.Errorf("%s/%s has no headless task now: its run and log were lost when it crashed and was brought back to an earlier snapshot. "+
+						"Start the task again from the beginning with: defenseclaw substrate undo %s", a.Atespace, a.Name, a.Name)
+				}
 				return fmt.Errorf("%s/%s has no headless task now: its run and log were lost when it crashed and was brought back to an earlier snapshot. "+
-					"Bring its folder home with: defenseclaw substrate pull %s, or start the task again in a new agent", a.Atespace, a.Name, a.Name)
+					"Start it again with defenseclaw substrate undo %s on the computer that started it, or start the task again in a new agent", a.Atespace, a.Name, a.Name)
 			}
 			return fmt.Errorf("%s/%s has no headless task; start one with: defenseclaw substrate run AGENT --task \"...\"", a.Atespace, a.Name)
 		}
@@ -403,6 +407,20 @@ func runSubstrateUndo(cmd *cobra.Command, com *substrateCommon, ref, to string, 
 			return substrateFail(fmt.Errorf("bringing %s/%s back from its crash: %w", a.Atespace, a.Name, err))
 		}
 		fmt.Fprintf(cmd.ErrOrStderr(), "%s/%s crashed; it is back at its last snapshot and starting.\n", a.Atespace, a.Name)
+	}
+	if a.Unattended && to == "" {
+		// GAP-0420: a --task agent this computer started whose run was lost
+		// (a crash, or an administrator's revert) starts its task again on a
+		// fresh copy of its folder: at least once, never silently dropped.
+		if rec, ok := loadSubstrateTaskRecord(auth.StateDir(), a); ok {
+			lost, err := substrateTaskLost(ctx, cmd, s, a, rec.Transport)
+			if err != nil {
+				return err
+			}
+			if lost {
+				return substrateRerunTask(ctx, cmd, s, a, rec, yes)
+			}
+		}
 	}
 	dir, err := substrateRemoteDir(a)
 	if err != nil {

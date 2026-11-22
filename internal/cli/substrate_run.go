@@ -601,20 +601,22 @@ func runSubstrateOneTask(ctx context.Context, cmd *cobra.Command, s *substrateSe
 		return -1, err
 	}
 	w := cmd.OutOrStdout()
+	// GAP-0420: what undo needs to start the task again after a crash.
+	rec := substrateTaskRecord{Prompt: task, Clone: f.clone, Ref: f.ref, RemoteDir: f.remoteDir, Exclude: f.exclude,
+		Unmask: f.unmask, MaxUploadMB: f.maxUploadMB, Transport: f.transport, Started: time.Now().UTC()}
+	if project != "" {
+		if abs, aerr := filepath.Abs(project); aerr == nil {
+			rec.Project = abs
+		}
+	}
+	if serr := saveSubstrateTaskRecord(auth.StateDir(), a, rec); serr != nil {
+		fmt.Fprintf(cmd.ErrOrStderr(), "Note: could not keep a record of the task on this computer (%v); after a crash it cannot be started again from here.\n", serr)
+	}
 	if f.detach {
 		// The first event is the task's start; once it is seen the task
 		// runs on its own.
-		dctx, cancel := context.WithCancel(ctx)
-		started := false
-		_, rerr := attach.RunTask(dctx, attach.TaskOptions{Options: o, Prompt: task, Args: agentArgs, Emit: func(e relay.TaskEvent) {
-			if e.Type == "start" {
-				started = true
-				cancel()
-			}
-		}})
-		cancel()
-		if !started {
-			return -1, substrateFail(substrateFirstErr(rerr, errors.New("the task did not start")))
+		if serr := substrateStartDetached(ctx, o, task, agentArgs); serr != nil {
+			return -1, substrateFail(serr)
 		}
 		if asJSON {
 			return -1, writeSubstrateJSON(w, map[string]any{"atespace": a.Atespace, "name": a.Name, "batch_id": batchID, "state": "started"})
