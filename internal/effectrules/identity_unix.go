@@ -11,7 +11,10 @@ import (
 	"syscall"
 )
 
-// DiskIdentity reads a regular file's device, inode and link count.
+// DiskIdentity reads a regular file's device, inode and link count. It runs
+// on the resolver's answer, which already followed the links of the path, so
+// os.Stat (not Lstat) is the identity of the file a write through the path
+// changes: a symbolic link to a hard link of a member is that member too.
 func DiskIdentity(path string) (FileID, bool) {
 	info, err := os.Stat(path)
 	if err != nil || !info.Mode().IsRegular() {

@@ -5,10 +5,13 @@
 package effectrules
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 
 	"github.com/defenseclaw/defenseclaw/internal/effects"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/semanticpb"
 )
 
@@ -27,7 +30,11 @@ type FileID struct {
 type IdentityFunc func(path string) (FileID, bool)
 
 // maxIdentityStats bounds the target stats of one Project call: a call with
-// more path targets leaves the rest to the name reading (counted).
+// more path targets leaves the rest to the name reading, counted, and hits
+// bounded.Paths on the call's Truncated (Env.Truncated). S2 cap registry name
+// effectrules.maxIdentityStats (unit bounded.Paths); it is registered where
+// det111/s2-bounds merges (bounded.Register, with effectrules in the
+// registry's reader packages).
 const maxIdentityStats = 64
 
 var identityStats, identityHits, identityOverBudget atomic.Int64
@@ -46,14 +53,15 @@ type identityCache struct {
 	fn      IdentityFunc
 	sets    map[string]protectedSet
 	budget  int
+	trunc   *bounded.Truncated     // the call's; nil: counted only
 	members map[[2]uint64][]string // (dev, ino) -> sets; nil until needed
 }
 
-func newIdentityCache(fn IdentityFunc, sets map[string]protectedSet) *identityCache {
+func newIdentityCache(fn IdentityFunc, sets map[string]protectedSet, trunc *bounded.Truncated) *identityCache {
 	if fn == nil {
 		fn = DiskIdentity
 	}
-	return &identityCache{fn: fn, sets: sets, budget: maxIdentityStats}
+	return &identityCache{fn: fn, sets: sets, budget: maxIdentityStats, trunc: trunc}
 }
 
 func (c *identityCache) memberSets(id FileID) []string {
@@ -106,6 +114,9 @@ func (c *identityCache) hardLinkSets(t effects.Target, rsv resolver) ([]string, 
 	}
 	if c.budget <= 0 {
 		identityOverBudget.Add(1)
+		if c.trunc != nil {
+			c.trunc.Hit(bounded.Paths)
+		}
 		return nil, false
 	}
 	c.budget--
@@ -197,4 +208,31 @@ func (f *HardLinkFixture) Identity(path string) (FileID, bool) {
 	f.Calls++
 	id, ok := f.ids[path]
 	return id, ok
+}
+
+// WriteHardLinkHome lays out a home on disk for identity tests (the disk
+// twin of HardLinkFixture): each member, relative to home, becomes a one-line
+// file, then each link name (relative to home) a hard link of its member.
+// linked is false, with no error, when the file system makes no hard links
+// (the caller skips).
+func WriteHardLinkHome(home string, members []string, links map[string]string) (linked bool, err error) {
+	for _, m := range members {
+		p := filepath.Join(home, filepath.FromSlash(m))
+		if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+			return false, err
+		}
+		if err := os.WriteFile(p, []byte("k\n"), 0o600); err != nil {
+			return false, err
+		}
+	}
+	for name, member := range links {
+		p := filepath.Join(home, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+			return false, err
+		}
+		if os.Link(filepath.Join(home, filepath.FromSlash(member)), p) != nil {
+			return false, nil
+		}
+	}
+	return true, nil
 }
