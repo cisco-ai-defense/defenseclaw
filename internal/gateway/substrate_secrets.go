@@ -25,6 +25,7 @@ import (
 	"net/url"
 	"os"
 	"path"
+	"slices"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -108,7 +109,13 @@ func substrateSecretBound(sec config.SubstrateSecret, profile string, admin bool
 func (a *APIServer) substrateSecretLookup(st *substrateState, r *http.Request) (substrateCaller, string, []config.SubstrateSecret) {
 	c, _ := substrateCallerFrom(r.Context())
 	profile, _, _ := st.cfg.substrateProfiles()(c.person, "", "", false)
-	return c, profile, st.cfg.Secrets
+	own := a.substrateOwnBindings(st, c)
+	if len(own) == 0 {
+		return c, profile, st.cfg.Secrets
+	}
+	// Admin entries come first, so a name an admin uses later always finds
+	// the admin entry; add refuses a name already taken (secret_name_taken).
+	return c, profile, append(slices.Clip(st.cfg.Secrets), own...)
 }
 
 func (a *APIServer) substrateListSecrets(st *substrateState) http.HandlerFunc {
@@ -207,6 +214,13 @@ func (a *APIServer) substrateRemoveSecret(st *substrateState) http.HandlerFunc {
 			fmt.Fprintf(os.Stderr, "[substrate] secret %s not removed: %v\n", r.PathValue("name"), err)
 			a.recordSubstrateSecretChange(r.Context(), st, r.PathValue("name"), audit.SubstrateSecretRemoved, "", true)
 			writeSubstrateJSONError(w, substrateSecretErrorStatus(err), substrateSecretErrorReason(err, "secret_not_removed"))
+			return
+		}
+		c, _ := substrateCallerFrom(r.Context())
+		if err := a.substrateRemoveBinding(r.Context(), st, c, r.PathValue("name")); err != nil {
+			fmt.Fprintf(os.Stderr, "[substrate] binding %s not removed: %v\n", r.PathValue("name"), err)
+			a.recordSubstrateSecretChange(r.Context(), st, r.PathValue("name"), audit.SubstrateSecretRemoved, "", true)
+			writeSubstrateJSONError(w, http.StatusBadGateway, "secret_not_removed")
 			return
 		}
 		a.recordSubstrateSecretChange(r.Context(), st, r.PathValue("name"), audit.SubstrateSecretRemoved, "", false)

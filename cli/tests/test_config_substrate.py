@@ -80,6 +80,14 @@ _FULL = {
             "credential": {"provider_uri": "ate-secret://k8s.io/default/defenseclaw-system/llm-keys"}},
     "egress": {"allow": ["github.com", "*.githubusercontent.com"], "ecosystem_packs": ["pypi", "npm"],
                "registries": ["ghcr.io"], "no_swap_hosts": ["echo.corp.example", "*.mirror.example"]},
+    "self_service_secrets": {"mode": "values_only", "namespace": "eng-secrets", "provider": "k8s-credential-provider",
+                             "max_per_person": 5, "outside_templates": "refuse", "ask_timeout": "24h",
+                             "allow_echo_bindings": True},
+    "secret_templates": [
+        {"name": "gitlab", "hosts": ["git.corp.example", "*.git.corp.example"]},
+        {"name": "artifactory", "hosts": ["npm.corp.example"], "header": "Authorization", "form": "bearer",
+         "profiles": ["eng-*"], "registry": "npm"},
+    ],
     "secrets": [
         {"name": "github-push", "source": "ate-secret://k8s.io/default/dc-secrets/github-app/token",
          "inject": {"hosts": ["github.com", "api.github.com"], "header": "Authorization", "prefix": "Bearer ",
@@ -165,6 +173,11 @@ class TestSubstrateLoadSave(unittest.TestCase):
             self.assertEqual(sub.admin.egress_block, ["paste.example.com"])
             self.assertEqual(sub.egress.no_swap_hosts, ["echo.corp.example", "*.mirror.example"])
             self.assertIs(sub.secrets[0].inject.allow_echo, True)
+            self.assertEqual(sub.self_service_secrets.mode, "values_only")
+            self.assertEqual(sub.self_service_secrets.max_per_person, 5)
+            self.assertIs(sub.self_service_secrets.allow_echo_bindings, True)
+            self.assertEqual(sub.secret_templates[0].hosts, ["git.corp.example", "*.git.corp.example"])
+            self.assertEqual(sub.secret_templates[1].registry, "npm")
             self.assertIs(sub.secrets[1].inject.allow_echo, False)
             cfg.save()  # validates the merged document against the v8 schema
             saved = yaml.safe_load(Path(path).read_text())["substrate"]

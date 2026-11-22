@@ -40,6 +40,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/substrate/identity"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/ratelimit"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/registry"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/secretbind"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/telemetryrelay"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
@@ -208,6 +209,13 @@ type SubstrateConfig struct {
 	// values (nil: list only).
 	Secrets     []config.SubstrateSecret
 	SecretStore SubstrateSecretStore
+	// Bindings is the self-service binding store (nil when
+	// self_service_secrets.mode is off); SelfService and SecretTemplates
+	// are its config, NoSwapHosts substrate.egress.no_swap_hosts.
+	Bindings        *secretbind.Store
+	SelfService     config.SubstrateSelfServiceSecretsConfig
+	SecretTemplates []config.SubstrateSecretTemplate
+	NoSwapHosts     []string
 	// SecretAudit receives each typed secret change record
 	// (log.substrate.secret.changed); nil sends it to the gateway's
 	// sandbox recorder. Tests capture it here.

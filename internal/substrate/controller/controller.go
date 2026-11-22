@@ -29,6 +29,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -1630,7 +1631,11 @@ func (c *Controller) applyOnce(ctx context.Context, a *ateapi.Actor, st *actorSt
 	st.refused, st.refusedMsg = "", ""
 	ref := ateapi.RefOf(a.GetMetadata())
 	lv := c.live()
-	res, err := render.EgressPolicy(render.Input{Settings: lv.Settings, Profile: profile, Person: reg.Person, Approved: reg.Approved, Secrets: lv.Secrets})
+	secrets := lv.Secrets
+	if lv.Bindings != nil && reg.Person != "" {
+		secrets = append(slices.Clip(secrets), lv.Bindings(reg.Person)...)
+	}
+	res, err := render.EgressPolicy(render.Input{Settings: lv.Settings, Profile: profile, Person: reg.Person, Approved: reg.Approved, Secrets: secrets})
 	if err != nil {
 		c.fail(base, "render: "+err.Error())
 		return fmt.Errorf("%s: render: %w", st.key, err)

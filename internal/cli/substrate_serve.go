@@ -32,6 +32,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -54,6 +55,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/substrate/podcert"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/ratelimit"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/registry"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/secretbind"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/telemetryrelay"
 	policyassets "github.com/defenseclaw/defenseclaw/policies"
 )
@@ -534,6 +536,8 @@ func substrateGatewayBuilder(c *config.Config, src *configwatch.Watcher, ready *
 				return gateway.SubstrateUnattendedAskFor(live(), profile)
 			},
 			Secrets: c.Substrate.Secrets, SecretStore: substrateKubeSecrets(),
+			Bindings: substrateBindingStore(c), SelfService: c.Substrate.SelfServiceSecrets,
+			SecretTemplates: c.Substrate.SecretTemplates, NoSwapHosts: c.Substrate.Egress.NoSwapHosts,
 			Relays: relayDialer(router),
 			Skills: runtimeScan,
 			// E20, GAP-0185: the runtime MCP scan of hook events.
@@ -809,6 +813,33 @@ func substrateLeaderPermissions(gateways, callouts, controllers []string) leader
 		chainstate.MethodChainLifecycle, chainstate.MethodChainRunning, leader.MethodActivitySnapshot, telemetryrelay.MethodPostCounts)
 	return p
 }
+
+// substrateBindingsConfigMap is the chart's binding store ConfigMap in the
+// release namespace.
+const substrateBindingsConfigMap = "defenseclaw-secret-bindings"
+
+// substrateBindingStore is the self-service binding store, watched every
+// 2 s. It is nil, and nothing reads the ConfigMap, when
+// self_service_secrets.mode is off or outside a cluster (M-PERF-1).
+func substrateBindingStore(c *config.Config) *secretbind.Store {
+	if c.Substrate.SelfServiceSecrets.EffectiveMode() == config.SelfServiceOff {
+		return nil
+	}
+	return substrateBindingsWatched()
+}
+
+// substrateBindingsWatched is the one store and watcher of this process
+// (gateway or controller).
+var substrateBindingsWatched = sync.OnceValue(func() *secretbind.Store {
+	ns := strings.TrimSpace(os.Getenv("POD_NAMESPACE"))
+	k, ok := substrateKubeSecrets().(*kubeSecrets)
+	if ns == "" || !ok || k == nil {
+		return nil
+	}
+	st := secretbind.New(kubeBindings{k: k, ns: ns, name: substrateBindingsConfigMap})
+	go st.Watch(context.Background(), 2*time.Second)
+	return st
+})
 
 // substrateKubeSecrets is the secrets admin API's writer over the
 // Kubernetes API (nil outside a cluster: the list still answers).

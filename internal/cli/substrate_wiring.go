@@ -89,6 +89,7 @@ func substrateControllerLive(cfg *config.Config, idle bool, resolver controller.
 	}
 	return controller.Live{
 		Settings: controller.SettingsFromConfig(cfg), Secrets: controller.SecretsFromConfig(cfg),
+		Bindings:          controller.BindingsFrom(substrateBindingStore(cfg), cfg, time.Now),
 		LauncherAtespaces: controller.LauncherSet(cfg), RequireAttestation: sub.AttestationRequired(), Templates: sub.Templates,
 		Attestor: attestor, Resolver: resolver, IdleSuspendAfter: after, IdleSuspendWithoutCPU: sub.IdleSuspendWithoutCPU,
 	}

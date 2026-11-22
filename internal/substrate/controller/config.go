@@ -25,10 +25,12 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/egressspec"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/render"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/secretbind"
 )
 
 // SettingsFromConfig builds the render settings from the substrate section.
@@ -64,8 +66,14 @@ func SettingsFromConfig(cfg *config.Config) render.Settings {
 
 // SecretsFromConfig converts substrate.secrets.
 func SecretsFromConfig(cfg *config.Config) []render.Secret {
-	out := make([]render.Secret, 0, len(cfg.Substrate.Secrets))
-	for _, s := range cfg.Substrate.Secrets {
+	return SecretsFrom(cfg.Substrate.Secrets)
+}
+
+// SecretsFrom converts substrate.secrets entries (and self-service
+// bindings in the same form) to render secrets.
+func SecretsFrom(in []config.SubstrateSecret) []render.Secret {
+	out := make([]render.Secret, 0, len(in))
+	for _, s := range in {
 		scope := s.Scope
 		if scope == "" {
 			scope = egressspec.ScopeShared
@@ -74,6 +82,20 @@ func SecretsFromConfig(cfg *config.Config) []render.Secret {
 			Prefix: s.Inject.Prefix, Scope: scope, Profiles: s.Profiles, AllowEcho: s.Inject.AllowEcho})
 	}
 	return out
+}
+
+// BindingsFrom is Live.Bindings over the binding store: the person's
+// active, unexpired bindings under the templates of cfg.
+func BindingsFrom(store *secretbind.Store, cfg *config.Config, now func() time.Time) func(string) []render.Secret {
+	if store == nil || cfg.Substrate.SelfServiceSecrets.EffectiveMode() == config.SelfServiceOff {
+		return nil
+	}
+	catalog := secretbind.Catalog(cfg.Substrate.SecretTemplates)
+	ss := cfg.Substrate.SelfServiceSecrets
+	return func(person string) []render.Secret {
+		return SecretsFrom(secretbind.Secrets(catalog, ss.EffectiveProvider(), ss.EffectiveNamespace(),
+			store.ForOwner(render.PersonKey(person)), ss.AllowEchoBindings, now()))
+	}
 }
 
 // LauncherSet is the set of launcher atespaces.

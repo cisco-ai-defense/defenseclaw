@@ -4811,6 +4811,34 @@ class SubstrateBundlesConfig:
 
 
 @dataclass
+class SubstrateSelfServiceSecretsConfig:
+    """substrate.self_service_secrets (Go SubstrateSelfServiceSecretsConfig)."""
+
+    # bindings (default), values_only or off.
+    mode: str = ""
+    namespace: str = ""
+    provider: str = ""
+    max_per_person: int = 0
+    # ask (default) or refuse, for a host no template covers.
+    outside_templates: str = ""
+    ask_timeout: str = ""
+    allow_echo_bindings: bool = False
+
+
+@dataclass
+class SubstrateSecretTemplate:
+    """One substrate.secret_templates entry (Go SubstrateSecretTemplate)."""
+
+    name: str = ""
+    hosts: list[str] = field(default_factory=list)
+    header: str = ""
+    form: str = ""
+    basic_user: str = ""
+    profiles: list[str] = field(default_factory=list)
+    registry: str = ""
+
+
+@dataclass
 class SubstrateConfig:
     """``substrate:``, DefenseClaw on Agent Substrate (mirrors Go
     ``SubstrateConfig``). Off by default and read only in the cluster; the
@@ -4841,6 +4869,8 @@ class SubstrateConfig:
     llm: SubstrateLLMConfig = field(default_factory=SubstrateLLMConfig)
     egress: SubstrateEgressConfig = field(default_factory=SubstrateEgressConfig)
     secrets: list[SubstrateSecret] = field(default_factory=list)
+    self_service_secrets: SubstrateSelfServiceSecretsConfig = field(default_factory=SubstrateSelfServiceSecretsConfig)
+    secret_templates: list[SubstrateSecretTemplate] = field(default_factory=list)
     allow_passthrough_for: list[str] = field(default_factory=list)
     admin: OpenShellAdminConfig = field(default_factory=OpenShellAdminConfig)
     bundles: SubstrateBundlesConfig = field(default_factory=SubstrateBundlesConfig)
@@ -8132,6 +8162,7 @@ def _merge_substrate(raw: Any) -> SubstrateConfig:
             )
         )
     packs = egress.get("ecosystem_packs")
+    self_service = _mapping(raw.get("self_service_secrets"))
     return SubstrateConfig(
         enabled=raw.get("enabled") is True,
         api=SubstrateAPIConfig(
@@ -8205,6 +8236,27 @@ def _merge_substrate(raw: Any) -> SubstrateConfig:
             no_swap_hosts=_string_list(egress.get("no_swap_hosts")),
         ),
         secrets=secrets,
+        self_service_secrets=SubstrateSelfServiceSecretsConfig(
+            mode=str(self_service.get("mode", "") or ""),
+            namespace=str(self_service.get("namespace", "") or ""),
+            provider=str(self_service.get("provider", "") or ""),
+            max_per_person=_int_or_zero(self_service.get("max_per_person")),
+            outside_templates=str(self_service.get("outside_templates", "") or ""),
+            ask_timeout=str(self_service.get("ask_timeout", "") or ""),
+            allow_echo_bindings=bool(self_service.get("allow_echo_bindings", False)),
+        ),
+        secret_templates=[
+            SubstrateSecretTemplate(
+                name=str(t.get("name", "") or ""),
+                hosts=_string_list(t.get("hosts")),
+                header=str(t.get("header", "") or ""),
+                form=str(t.get("form", "") or ""),
+                basic_user=str(t.get("basic_user", "") or ""),
+                profiles=_string_list(t.get("profiles")),
+                registry=str(t.get("registry", "") or ""),
+            )
+            for t in (_mapping(x) for x in (raw.get("secret_templates") or []))
+        ],
         allow_passthrough_for=_string_list(raw.get("allow_passthrough_for")),
         admin=_merge_openshell_admin(raw.get("admin")),
         bundles=_merge_substrate_bundles(raw.get("bundles")),
@@ -8326,6 +8378,15 @@ def _serialize_substrate(cfg: Config, d: dict[str, Any]) -> None:
         inject = sec.get("inject") if isinstance(sec, dict) else None
         if isinstance(inject, dict) and inject.get("allow_echo") is False:  # Go omitempty
             inject.pop("allow_echo")
+    self_service = pruned.get("self_service_secrets")
+    if isinstance(self_service, dict):
+        # Go omitempty: false and 0 are not written.
+        if self_service.get("allow_echo_bindings") is False:
+            self_service.pop("allow_echo_bindings")
+        if self_service.get("max_per_person") == 0:
+            self_service.pop("max_per_person")
+        if not self_service:
+            pruned.pop("self_service_secrets")
     if packs == []:
         pruned.setdefault("egress", {})["ecosystem_packs"] = []
     d["substrate"] = pruned
