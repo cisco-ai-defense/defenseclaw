@@ -5,6 +5,7 @@
 package gateway
 
 import (
+	"slices"
 	"strings"
 	"testing"
 
@@ -43,6 +44,12 @@ func TestDET111EffectsLaneIsLiveByDefault(t *testing.T) {
 		}
 	}
 	if effect == nil {
+		// DET111 ruling A: the known keys write folds into the 1.0.10 rule
+		// naming the set (decide.FoldsIntoLegacy); TestEffectFindingTakesTheLegacySetTier
+		// holds the fold, TestDET111EffectsLaneRaisesOnly the raise.
+		if slices.Contains(ruleIDsOf(findings), "persistence.ssh_authorized_keys_command") {
+			return
+		}
 		t.Fatalf("default lane: findings %v carry no effect verdict, want effect.protected_target_restricted", ruleIDsOf(findings))
 	}
 	if effect.RuleID != "effect.protected_target_restricted" || effect.disposition != findingDispositionEffectKnown {
