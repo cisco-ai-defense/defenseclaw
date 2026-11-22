@@ -5906,6 +5906,9 @@ func (p *GuardrailProxy) inspectToolCalls(ctx context.Context, toolCallsJSON jso
 		// than the hook projection does (a Windows-spelled home file, a
 		// credential path of another account's home; rel-1-0-10:GAP-0872).
 		findings = mergeBoundedFindings(findings, dispatchTrustedAction(ctx, proxyBareReading(p.connectorName(), toolName, args)))
+		// Each reading merged above joined its own effect findings: one that a
+		// 1.0.10 finding of another reading names folds into it.
+		findings = withEffectsFoldedIntoCall(findings)
 		// CodeGuard reads the file content a write call carries, as on the
 		// hook routes (rel-1-0-10:GAP-0776: the proxy never ran it).
 		findings = append(findings, p.toolCallCodeGuardFindings(ctx, action)...)
