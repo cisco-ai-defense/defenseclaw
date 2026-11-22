@@ -422,6 +422,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST "+Path(RouteExec), s.fileExec)
 	mux.HandleFunc("PUT "+Path(RouteFiles), s.filePut)
 	mux.HandleFunc("GET "+Path(RouteFiles), s.fileGet)
+	mux.HandleFunc("GET "+Path(RoutePort+"/{port}"), s.servePort)
 	return mux
 }
 
