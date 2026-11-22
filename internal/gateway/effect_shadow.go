@@ -107,12 +107,12 @@ type EffectShadowResult struct {
 	// LinkHeld marks a member reached only through a followed link: counted,
 	// not raised (effectProtectedSets).
 	LinkHeld bool `json:"link_held,omitempty"`
-	// Known marks a verdict with a Known protected mutation: a known
-	// mutating effect on a known member, by a listed command (the restricted
-	// tier) or not. Only a Known verdict raises the live answer; a Maybe one
-	// (a reach reason only) and a known read are shadow records
-	// (effectShadowFindings).
+	// Known marks a Known protected effect, including a credential read
+	// routed through its decide credential row.
 	Known bool `json:"known,omitempty"`
+	// ReadProofs are private decision inputs. Do not serialize member paths or
+	// credential classes into the shadow telemetry record.
+	ReadProofs []decide.Proof `json:"-"`
 	// CostUS is the wall-clock cost of the run in microseconds; Effects is the
 	// number of effects the extractor produced.
 	CostUS  int64 `json:"cost_us,omitempty"`
@@ -379,9 +379,9 @@ type effectClass struct {
 	// linkHeld: a target in a protected set only through a link the
 	// resolver followed, counted, not raised (effectProtectedSets).
 	linkHeld bool
-	// known: some effect is a known mutation of a known member (no reach
-	// reason), whatever else the call reached.
-	known bool
+	// known: some protected effect is known (mutation or credential read).
+	known      bool
+	readProofs []decide.Proof
 }
 
 // classifyEffects applies the owner's three answers (2026-11-13): a known
@@ -435,11 +435,10 @@ func classifyEffects(result effects.Result, facts []*semanticpb.EffectFact, flav
 		if r != "" {
 			c.reach = append(c.reach, r)
 		} else if mutating {
-			// A known read of a credential is the credential readers' class
-			// and keeps their 1.0.10 tier (own credentials alert, GAP-0888):
-			// the lane raises a mutation, it does not move a read to
-			// another tier (that is decide's table).
 			c.known = true
+		} else if proof, ok := knownCredentialReadProof(f); ok {
+			c.known = true
+			c.readProofs = appendCredentialReadProof(c.readProofs, proof)
 		}
 		if c.program == "" && c.kind == "" {
 			c.program, c.kind = f.GetOrigin().GetProgram(), kind
@@ -671,27 +670,28 @@ func markOutermostEffectDispatch(ctx context.Context) (context.Context, bool) {
 	return context.WithValue(ctx, effectShadowContextKey{}, struct{}{}), true
 }
 
-// effectShadowFindings turns an effect verdict into rule findings for the ON
-// lane. Clean or allow verdicts carry no finding, and neither does a Maybe
-// verdict: a protected target the lane reached only by a reach reason
-// (R-NAME, R-GLOB, R-CWD, R-CODE, ...) never raises the live answer above the
-// 1.0.10 readers, in any tier (DET111 ruling 2026-11-22, TRAIN T1: every one of
-// its 13,572 new benign blocks was such a verdict), and neither does a known
-// read (Known is a mutation). It stays a shadow record:
-// the reach counters, the harness's EffectShadow stamps and the audit row
-// (effectLiveFindings). A Known verdict (a known effect on a known member)
-// raises: an alert-tier verdict is capped at an alert in every profile; a
-// block-tier verdict contributes to enforcement so the profile threshold maps
-// its severity to the action. The effect disposition lets S8 map the unknown
-// tier to ask later; the effect proof is authoritative only when the lane is
-// ON.
+// effectShadowFindings turns a restricted effect verdict or a Known
+// credential read into findings for the ON lane. Unknown-tier effects,
+// including a call that mixes a Known mutation with a Maybe reach, remain in
+// the shadow record. Credential reads go through Decide with a member-specific
+// proof, so the existing 1.0.10 read row supplies the verdict.
 func effectShadowFindings(res EffectShadowResult, mode effectRulesMode) []RuleFinding {
-	if res.Tier == string(effectTierClean) || res.Action == guardrailActionAllow {
-		return nil
+	var findings []RuleFinding
+	for _, proof := range res.ReadProofs {
+		ruleID := decide.RuleFor(proof)
+		if ruleID == "" {
+			continue
+		}
+		f := RuleFinding{RuleID: ruleID, Title: "Known credential read", Severity: "HIGH", Confidence: 1, Proof: proof}
+		f.proof = newFindingProof(findingProofEffect, ruleID, mode == effectRulesOn)
+		findings = append(findings, f)
+	}
+	if res.Tier != string(effectTierRestricted) || res.Action == guardrailActionAllow {
+		return findings
 	}
 	proof := effectFindingProof(res)
 	if proof.Certainty != decide.CertKnown {
-		return nil
+		return findings
 	}
 	rid := "effect.protected_target_" + res.Tier
 	title := "Effect-model protected-target verdict"
@@ -723,20 +723,74 @@ func effectShadowFindings(res EffectShadowResult, mode effectRulesMode) []RuleFi
 	default:
 		f.Proof = f.Proof.Enforce()
 	}
-	return []RuleFinding{f}
+	return append(findings, f)
+}
+
+// knownCredentialReadProof extracts the one 1.0.10 credential class a Known
+// read names. A Maybe target, unknown role or non-credential file never makes
+// a decision proof.
+func knownCredentialReadProof(f *semanticpb.EffectFact) (decide.Proof, bool) {
+	if f == nil || f.GetKind() != string(effects.KindRead) ||
+		f.GetTargetState() != "known" || f.GetRoleState() != "known" {
+		return decide.Proof{}, false
+	}
+	var target decide.TargetClass
+	knownCredential := false
+	for _, match := range f.GetTarget().GetProtected() {
+		if match.GetSet() != effectrules.SetCredentials || match.GetState() != "known" {
+			continue
+		}
+		switch match.GetReason() {
+		case "exact":
+			target, knownCredential = decide.TargetCredential, true
+		case "other_home":
+			target, knownCredential = decide.TargetOtherHomeCredential, true
+		}
+	}
+	if !knownCredential {
+		return decide.Proof{}, false
+	}
+	tail := effectCredentialMemberTail(f.GetTarget().GetPath())
+	set := decide.CredentialSet(tail)
+	if set == "" {
+		return decide.Proof{}, false
+	}
+	return decide.Proof{Kind: decide.KindRead, Target: target, Certainty: decide.CertKnown,
+		Set: set, Source: effectProofSource}, true
+}
+
+// effectCredentialMemberTail finds the protected member spelling in a path;
+// the classifier has already proved the target Known, so this extracts the
+// member-relative table key without making a second path-resolution decision.
+func effectCredentialMemberTail(path string) string {
+	parts := strings.Split(strings.ReplaceAll(path, "\\", "/"), "/")
+	for i := range parts {
+		tail := strings.Join(parts[i:], "/")
+		if decide.CredentialSet(tail) != "" {
+			return tail
+		}
+	}
+	return ""
+}
+
+func appendCredentialReadProof(proofs []decide.Proof, next decide.Proof) []decide.Proof {
+	for _, proof := range proofs {
+		if proof.Target == next.Target && proof.Set == next.Set {
+			return proofs
+		}
+	}
+	return append(proofs, next)
 }
 
 // effectProofSource is the Proof.Source of every effect-lane finding: the
 // shadow report's key for the effect model beside the legacy readers.
 const effectProofSource = "effects"
 
-// effectFindingProof is the DET111 proof of an effect verdict (internal/
-// guardrail/decide): the deciding effect's kind, the strongest protected
-// class it reached, and how sure the lane is. A restricted-tier verdict, or
-// one with a known mutation of a known member (Known: also by a command the
-// restricted list does not name), is known, even when another effect of the
-// call was only reached; any other is maybe and carries the first reach
-// reason, if any (a known read has none).
+// effectFindingProof is the DET111 proof of a restricted effect verdict
+// (internal/guardrail/decide): the deciding effect's kind, the strongest
+// protected class it reached, and its certainty. Unknown-tier effects are
+// shadow-only; known credential reads carry separate member-specific Decide
+// proofs.
 func effectFindingProof(res EffectShadowResult) decide.Proof {
 	p := decide.Proof{
 		Kind:      effectProofKind(res.Kind),
@@ -744,7 +798,7 @@ func effectFindingProof(res EffectShadowResult) decide.Proof {
 		Certainty: decide.CertKnown,
 		Source:    effectProofSource,
 	}
-	if res.Tier != string(effectTierRestricted) && !res.Known {
+	if res.Tier != string(effectTierRestricted) {
 		p.Certainty = decide.CertMaybe
 		if len(res.Reach) > 0 {
 			p.Reach = res.Reach[0]
