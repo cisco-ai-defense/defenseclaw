@@ -148,6 +148,9 @@ type SubstrateConfig struct {
 	// Profiles picks a create's profile and launcher atespace (nil: every
 	// create is refused).
 	Profiles SubstrateProfileResolver
+	// ProfileWhy says why the caller gets the profile they get (policy
+	// explain with no agent named; nil leaves it out).
+	ProfileWhy SubstrateProfileExplainer
 	// WorkloadEntry names the match.substrate.workloads entry a workload
 	// subject matches and its profile (SubstrateWorkloadEntry over the live
 	// config); nil leaves the workload answer out of the actor list.

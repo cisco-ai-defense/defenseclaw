@@ -1033,11 +1033,19 @@ func newSubstratePolicyExplainCmd() *cobra.Command {
 		com substrateCommon
 	)
 	cmd := &cobra.Command{
-		Use:   "explain <name>",
-		Short: "Explain the rules and recent decisions for one agent",
-		Args:  cobra.ExactArgs(1),
+		Use:   "explain [name]",
+		Short: "Explain the rules and recent decisions for one agent, or the profile you get",
+		Long: `With an agent name, explains the rules and recent decisions for that agent. With no name, explains the profile you get
+for a new agent: the profile and where it came from (the profile assignment that selected you, or default_profile when none
+did), default_profile, and the assignments that were checked first and did not select you (by place and the selector that
+failed, never another person's group or account).`,
+		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return substratePolicyCall(cmd, &out, &com, args[0], nil)
+			ref := ""
+			if len(args) == 1 {
+				ref = args[0]
+			}
+			return substratePolicyCall(cmd, &out, &com, ref, nil)
 		},
 	}
 	out.add(cmd)

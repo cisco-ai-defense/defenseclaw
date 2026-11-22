@@ -478,8 +478,17 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
     ),
     _Cmd(
         ("policy", "explain"),
-        "Explain the rules and recent decisions for one agent",
-        args=(_Arg("name"),),
+        "Explain the rules and recent decisions for one agent, or the profile you get",
+        long=(
+            "With an agent name, explains the rules and recent decisions for that agent. With no name, explains "
+            "the profile you get\n"
+            "for a new agent: the profile and where it came from (the profile assignment that selected you, or "
+            "default_profile when none\n"
+            "did), default_profile, and the assignments that were checked first and did not select you (by place "
+            "and the selector that\n"
+            "failed, never another person's group or account)."
+        ),
+        args=(_Arg("name", required=False),),
         flags=(
             _Flag("context", "string", "cluster to use (default: the one you signed in to last)", metavar="NAME"),
             _Flag("json", "bool", "same as --output json"),
