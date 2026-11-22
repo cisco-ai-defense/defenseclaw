@@ -811,39 +811,6 @@ func runGAP0490OpenLoop(t *testing.T, sandboxes, perSecond int, duration time.Du
 	settleOpenLoop(t, judgeOpenLoop(plan, got, base), probes, ctx.Err())
 }
 
-// openLoopInconclusiveFails says whether an INCONCLUSIVE open-loop run fails.
-// On the dedicated runner of CI (GITHUB_ACTIONS=true) the job runs alone, so an
-// overloaded box or a late launcher is itself a finding and fails, never a pass
-// and never a skip. On a shared build box (GAP-0031: load 30 on dc-build-1) the
-// load is not the gateway's, so the run skips and names the baseline or cadence
-// it could not trust. DC_GAP0490_OPEN_LOOP_STRICT=1 makes any box strict, for a
-// gate that must show the stream was really driven.
-func openLoopInconclusiveFails(getenv func(string) string) bool {
-	return getenv("GITHUB_ACTIONS") == "true" || getenv("DC_GAP0490_OPEN_LOOP_STRICT") == "1"
-}
-
-// GAP-0031: the load-sensitive open-loop test skips when its run is INCONCLUSIVE
-// on a shared box, and keeps failing on the dedicated CI runner.
-func TestGAP0031OpenLoopInconclusiveSkipsOnASharedBox(t *testing.T) {
-	cases := []struct {
-		name string
-		env  map[string]string
-		fail bool
-	}{
-		{"a shared build box skips", map[string]string{}, false},
-		{"a shared box with CI unset and strict off skips", map[string]string{"GITHUB_ACTIONS": "false", "DC_GAP0490_OPEN_LOOP_STRICT": "0"}, false},
-		{"the CI runner fails", map[string]string{"GITHUB_ACTIONS": "true"}, true},
-		{"strict mode fails on any box", map[string]string{"DC_GAP0490_OPEN_LOOP_STRICT": "1"}, true},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := openLoopInconclusiveFails(func(k string) string { return tc.env[k] }); got != tc.fail {
-				t.Fatalf("INCONCLUSIVE fails = %v, want %v", got, tc.fail)
-			}
-		})
-	}
-}
-
 // openLoopProcessCPU is the user and system CPU time this process has used.
 func openLoopProcessCPU(t *testing.T) time.Duration {
 	t.Helper()
