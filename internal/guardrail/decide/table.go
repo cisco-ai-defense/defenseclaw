@@ -132,8 +132,23 @@ func (r *Row) cell(d Deployment, tier func() Tier) Cell {
 
 // Row ids of the built-in table.
 const (
-	RowRecord   = "record"
-	RowAdvisory = "advisory"
+	RowRecord = "record"
+	// RowEffectUnknown: the effect lane's unknown tier is a shadow record and
+	// never moves the live verdict, whatever its Known flag or tier (the
+	// MAYBE rule, DET111 PLAN 5.3; DET111 ruling 2026-11-22T10:36Z,
+	// GAP-1796), except on a target-decided set (DefenseClaw state, hook
+	// config, authorized_keys, credential files), whose 1.0.10 rules judge
+	// the target alone: there a known write by a command off the restricted
+	// list keeps its row (GAP-0662, GAP-1173, GAP-1671).
+	RowEffectUnknown = "effect-unknown"
+	// RowEffectContentDecided: a set whose 1.0.10 rule is decided by the
+	// content written, not by the target (persistence.shell_profile_write on
+	// the shell startup files): the effect lane proves the target only, so
+	// its write there is a shadow record until the effects IR carries the
+	// content (GAP-1795). Target-decided sets (authorized_keys, DefenseClaw
+	// state, hook config, credential files) keep their rows.
+	RowEffectContentDecided = "effect-content-decided"
+	RowAdvisory             = "advisory"
 	// RowAskTicketRequest: a Kerberos ticket request (or credentialed
 	// domain service use) asks for a person's confirmation in the default
 	// tier where the agent can ask, and is an alert where it cannot; never a
@@ -172,6 +187,11 @@ const (
 
 var mutatingKinds = []ProofKind{KindWrite, KindAppend, KindDelete, KindLink, KindPerm}
 
+// notTargetDecided are the target classes no 1.0.10 rule judges by the
+// target alone: a shell startup file (content-decided), a system or project
+// path, another protected path and a call that names none.
+var notTargetDecided = []TargetClass{TargetNone, TargetAutostart, TargetSystem, TargetProject, TargetOther}
+
 // cloudCredentialSets are the credential classes 1.0.10 grades alike in
 // one's own and another account's home: an alert MEDIUM, nothing in
 // permissive (GAP-0888).
@@ -190,6 +210,21 @@ func uniform(c Cell) [tierCount]Cell { return [tierCount]Cell{c, c, c} }
 func Builtin() *Table { return &builtin }
 
 var builtin = Table{Rows: []Row{
+	{
+		ID: RowEffectUnknown, Rules: []string{RuleEffectUnknown}, Targets: notTargetDecided,
+		Content: true, SecureClient: true, Source: "DET111 PLAN 5.3 MAYBE rule (GAP-1796)",
+		Cells: [deploymentCount][tierCount]Cell{
+			uniform(Cell{Levels: true, Ceiling: CeilingRecord}), uniform(Cell{Levels: true, Ceiling: CeilingRecord}),
+		},
+	},
+	{
+		ID: RowEffectContentDecided, Rules: []string{RuleEffectRestricted, RuleEffectUnknown}, Kinds: mutatingKinds,
+		Targets: []TargetClass{TargetAutostart}, Content: true, SecureClient: true,
+		Source: "rel-1-0-10:persistence.shell_profile_write content-decided (GAP-1795)",
+		Cells: [deploymentCount][tierCount]Cell{
+			uniform(Cell{Levels: true, Ceiling: CeilingRecord}), uniform(Cell{Levels: true, Ceiling: CeilingRecord}),
+		},
+	},
 	{
 		// A proof with no reach never moves the verdict (DET111 PLAN 5.3,
 		// the precision rule): the finding is recorded only, on every

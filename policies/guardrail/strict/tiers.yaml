@@ -4,6 +4,22 @@
 version: 1
 tier: strict
 rows:
+  - id: effect-unknown
+    source: DET111 PLAN 5.3 MAYBE rule (GAP-1796)
+    per_user:
+      floor: allow
+      ceiling: record
+    managed:
+      floor: allow
+      ceiling: record
+  - id: effect-content-decided
+    source: rel-1-0-10:persistence.shell_profile_write content-decided (GAP-1795)
+    per_user:
+      floor: allow
+      ceiling: record
+    managed:
+      floor: allow
+      ceiling: record
   - id: record
     source: rel-1-0-10:detection-only
     per_user:

@@ -11,15 +11,18 @@ import "github.com/defenseclaw/defenseclaw/internal/guardrail/decide"
 // the call names is folded into that finding (decide.FoldsIntoLegacy, DET111
 // ruling A): the rule naming the set already grades it with its own 1.0.10
 // cell, so the effect finding adds no action and no verdict severity. Every
-// other effect finding joins and its tier table row decides. The fold reads
-// the same decide findings Decide and the verdict severity read.
+// other effect finding joins and its tier table row decides, except one the
+// table records in every cell (decide.ShadowOnly: the effect unknown tier,
+// a write to a set whose 1.0.10 rule is decided by content), which never
+// enters the call. The fold reads the same decide findings Decide and the
+// verdict severity read.
 func joinEffectFindings(findings, effect []RuleFinding) []RuleFinding {
 	if len(effect) == 0 {
 		return findings
 	}
 	call := decideFindings(findings)
 	for _, f := range effect {
-		if decide.FoldsIntoLegacy(decideFinding(f), call) {
+		if d := decideFinding(f); decide.ShadowOnly(d) || decide.FoldsIntoLegacy(d, call) {
 			continue
 		}
 		findings = append(findings, f)

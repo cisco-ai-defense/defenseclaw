@@ -58,6 +58,39 @@ var legacySetRules = map[string]legacySet{
 	"PATH-KUBE":                      {targets: credentialTargets, set: SetKubeConfig},
 	"PATH-WIN-KUBE-CONFIG":           {targets: credentialTargets, set: SetKubeConfig},
 	"PATH-DOCKER":                    {targets: credentialTargets, set: SetDockerConfig},
+	// The agent instruction file rule (CLAUDE.md), a content rule on a
+	// member of the hook config set: its 1.0.10 cell is what the file is
+	// worth in the call (GAP-1797).
+	"COG-CLAUDE-MD": {targets: []TargetClass{TargetHookConfig}},
+}
+
+// Effect-lane rule ids (the gateway's effect.protected_target_<tier>).
+const (
+	RuleEffectRestricted = "effect.protected_target_restricted"
+	RuleEffectUnknown    = "effect.protected_target_unknown"
+)
+
+// ShadowOnly reports an effects-lane finding the built-in table records in
+// every tier and deployment (RowRecord, RowEffectUnknown,
+// RowEffectContentDecided): it never moves the live verdict, so the effect
+// join keeps it out of the call's findings, the one place the rule holds
+// for every route.
+func ShadowOnly(f Finding) bool {
+	if f.Proof.Source != SourceEffects {
+		return false
+	}
+	row := builtin.match(f, SurfaceTool, false)
+	if row == nil {
+		return false
+	}
+	for _, cells := range row.Cells {
+		for _, c := range cells {
+			if c.Ceiling != CeilingRecord {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // NamesSet reports that ruleID is a 1.0.10 rule naming the protected set of
