@@ -3677,14 +3677,19 @@ func (w *walker) unwrapCodeScoped(code string, static bool, dialect Dialect, dep
 	default:
 		sub = parsePOSIX(code, w.o)
 	}
-	if len(sub.Stmts) == 0 && hasUnknown(sub, ReasonInvalidSyntax) {
-		// A body the shell cannot parse runs nothing (watch's joined words,
-		// GAP-0662/var6 ruling), but the walk does not know what the program
-		// makes of it: one opaque exec carries the text (R-CODE), never an
-		// invented reading.
+	if hasUnknown(sub, ReasonInvalidSyntax) {
+		// A body the shell cannot parse runs nothing from the error on (watch's
+		// joined words, GAP-0662/var6 ruling), but the walk does not know what
+		// the program makes of it: one opaque exec carries the unread text
+		// (R-CODE), never an invented reading. The lines before the error are
+		// lowered as usual (parsePOSIX).
+		unread := code
+		if sub.Unread != "" {
+			unread = sub.Unread
+		}
 		e := Effect{Kind: KindExec, Cond: cond, TargetState: TargetStateUnknown, RoleState: RoleStateUnknown,
 			Target: Target{Type: TargetProcess, Link: LinkNotChecked}, Origin: origin,
-			Data: &Data{Kind: DataCode, Bytes: len(code), Text: cap8k(code)}}
+			Data: &Data{Kind: DataCode, Bytes: len(unread), Text: cap8k(unread)}}
 		e.Origin.Depth = depth + 1
 		e.addReason(ReasonInvalidSyntax, ScopeTarget)
 		e.addReason(ReasonOpaqueCode, ScopeTarget)
