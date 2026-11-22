@@ -9,7 +9,7 @@
 package pwshparse
 
 func (t *tokenizer) scanParameter() *Token {
-	var sb sbuf
+	sb := make(sbuf, 0, 48)
 	scanning := true
 	sawColonAtEnd := false
 	for scanning {
@@ -34,7 +34,7 @@ func (t *tokenizer) scanParameter() *Token {
 		case isSingleQuote(c) || isDoubleQuote(c):
 			if t.inCommandMode() {
 				t.ungetChar()
-				sb = append(sbuf{t.script[t.tokenStart]}, sb...)
+				sb = append(newSbuf(t.script[t.tokenStart]), sb...)
 				return t.scanGenericTokenSB(sb)
 			}
 			t.ungetChar()
@@ -69,17 +69,17 @@ func (t *tokenizer) checkOperatorInCommandMode(c char, kind TokenKind) *Token {
 
 func (t *tokenizer) checkOperatorInCommandMode2(c1, c2 char, kind TokenKind) *Token {
 	if t.inCommandMode() && !forceStartNewToken(t.peekChar()) {
-		return t.scanGenericTokenSB(sbuf{c1, c2})
+		return t.scanGenericTokenSB(newSbuf(c1, c2))
 	}
 	return t.newToken(kind)
 }
 
 func (t *tokenizer) scanGenericToken(first char) *Token {
-	return t.scanGenericTokenSB(sbuf{first})
+	return t.scanGenericTokenSB(newSbuf(first))
 }
 
 func (t *tokenizer) scanGenericTokenSur(first, sur char) *Token {
-	sb := sbuf{first}
+	sb := newSbuf(first)
 	if sur != invalidChar {
 		sb.add(sur)
 	}
@@ -88,7 +88,15 @@ func (t *tokenizer) scanGenericTokenSur(first, sur char) *Token {
 
 func (t *tokenizer) scanGenericTokenSB(sb sbuf) *Token {
 	var nested []*Token
-	formatSb := append(sbuf{}, sb...)
+	// formatSb equals sb until a brace is doubled or an expandable part is read; it is built on first need.
+	var formatSb sbuf
+	same := true
+	diverge := func() {
+		if same {
+			formatSb = append(make(sbuf, 0, len(sb)+16), sb...)
+			same = false
+		}
+	}
 	c := t.getChar()
 	for ; !forceStartNewToken(c); c = t.getChar() {
 		if c == '`' {
@@ -100,30 +108,41 @@ func (t *tokenizer) scanGenericTokenSB(sb sbuf) *Token {
 				if sur != invalidChar {
 					sb.add(c)
 					sb.add(sur)
-					formatSb.add(c)
-					formatSb.add(sur)
+					if !same {
+						formatSb.add(c)
+						formatSb.add(sur)
+					}
 					continue
 				}
 			}
 		} else if isSingleQuote(c) {
 			l := sb.length()
 			t.scanStringLiteralInto(&sb)
-			for i := l; i < sb.length(); i++ {
-				formatSb.add(sb[i])
+			if !same {
+				for i := l; i < sb.length(); i++ {
+					formatSb.add(sb[i])
+				}
 			}
 			continue
 		} else if isDoubleQuote(c) {
+			diverge()
 			t.scanStringExpandableInto(&sb, &formatSb, &nested)
 			continue
 		} else if c == '$' {
+			diverge()
 			if t.scanDollarInStringExpandable(&sb, &formatSb, false, &nested) {
 				continue
 			}
 		}
 		sb.add(c)
-		formatSb.add(c)
 		if c == '{' || c == '}' {
+			diverge()
+		}
+		if !same {
 			formatSb.add(c)
+			if c == '{' || c == '}' {
+				formatSb.add(c)
+			}
 		}
 	}
 	t.ungetChar()

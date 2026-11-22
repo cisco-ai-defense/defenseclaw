@@ -17,14 +17,17 @@ type Node struct {
 	Start int
 	End   int
 	Kids  []*Node
-	Props map[string]string
+	// props holds the scalar properties detection reads, in insertion order: three inline, the rest in moreProps.
+	props     [3]propKV
+	nprops    uint8
+	moreProps []propKV
 	// Str is the Value of a (Expandable)StringConstantExpressionAst; SCT its StringConstantType.
 	Str string
 	SCT string
 	// Num is the value of a ConstantExpressionAst.
 	Num *NumberValue
-	// parent is set by setParents.
-	parent *Node
+	// kidsBuf is the backing store of the first two children (most nodes have at most two).
+	kidsBuf [2]*Node
 }
 
 func (n *Node) ext() extent { return extent{n.Start, n.End} }
@@ -40,6 +43,11 @@ func (n *Node) is(types ...string) bool {
 
 func newNode(typ string, e extent, kids ...*Node) *Node {
 	n := &Node{Type: typ, Start: e.Start, End: e.End}
+	if len(kids) > len(n.kidsBuf) {
+		n.Kids = make([]*Node, 0, len(kids))
+	} else {
+		n.Kids = n.kidsBuf[:0]
+	}
 	for _, k := range kids {
 		if k != nil {
 			n.Kids = append(n.Kids, k)
@@ -48,12 +56,49 @@ func newNode(typ string, e extent, kids ...*Node) *Node {
 	return n
 }
 
+type propKV struct{ k, v string }
+
 func (n *Node) prop(k, v string) *Node {
-	if n.Props == nil {
-		n.Props = map[string]string{}
+	for i := 0; i < int(n.nprops); i++ {
+		if n.props[i].k == k {
+			n.props[i].v = v
+			return n
+		}
 	}
-	n.Props[k] = v
+	for i := range n.moreProps {
+		if n.moreProps[i].k == k {
+			n.moreProps[i].v = v
+			return n
+		}
+	}
+	if int(n.nprops) < len(n.props) {
+		n.props[n.nprops] = propKV{k, v}
+		n.nprops++
+	} else {
+		n.moreProps = append(n.moreProps, propKV{k, v})
+	}
 	return n
+}
+
+// getProp returns the property k and whether it is set.
+func (n *Node) getProp(k string) (string, bool) {
+	for i := 0; i < int(n.nprops); i++ {
+		if n.props[i].k == k {
+			return n.props[i].v, true
+		}
+	}
+	for _, kv := range n.moreProps {
+		if kv.k == k {
+			return kv.v, true
+		}
+	}
+	return "", false
+}
+
+// propv returns the property k, or "" when it is not set.
+func (n *Node) propv(k string) string {
+	v, _ := n.getProp(k)
+	return v
 }
 
 func appendKids(n *Node, kids []*Node) *Node {

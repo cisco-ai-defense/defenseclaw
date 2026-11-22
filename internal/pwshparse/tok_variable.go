@@ -38,7 +38,7 @@ func isASCIIAlnum(c char) bool {
 
 func (t *tokenizer) scanVariable(splatted, inStringExpandable bool) *Token {
 	errorStart := t.curIndex
-	var sb sbuf
+	sb := make(sbuf, 0, 48)
 	c := t.getChar()
 	if c == '{' {
 	braced:

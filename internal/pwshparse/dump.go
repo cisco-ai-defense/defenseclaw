@@ -134,7 +134,7 @@ func (r *Result) Dump(index int) string {
 			pf = false
 		}
 		for _, name := range dumpProps[n.Type] {
-			v, ok := n.Props[name]
+			v, ok := n.getProp(name)
 			if !ok {
 				continue
 			}

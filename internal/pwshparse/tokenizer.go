@@ -103,14 +103,19 @@ type tokenizer struct {
 	// tokenList is nil when the caller does not want the token stream.
 	tokenList  []*Token
 	wantTokens bool
+	// slab hands out Tokens in chunks (one allocation per chunk instead of one per token).
+	slab       []Token
+	slabGrow   uint8
 	firstToken *Token
 	lastToken  *Token
 }
 
-func newTokenizer(p *Parser, src []char, wantTokens bool) *tokenizer {
-	t := &tokenizer{p: p, script: src, wantTokens: wantTokens}
+func initTokenizer(t *tokenizer, p *Parser, src []char, wantTokens bool) {
+	t.p, t.script, t.wantTokens = p, src, wantTokens
+	if wantTokens {
+		t.tokenList = make([]*Token, 0, len(src)/3+4)
+	}
 	t.mode = modeCommand
-	return t
 }
 
 func (t *tokenizer) inCommandMode() bool    { return t.mode == modeCommand }
@@ -366,7 +371,17 @@ func (t *tokenizer) saveToken(tok *Token) *Token {
 
 func (t *tokenizer) mkToken(kind TokenKind, flags TokenFlags) *Token {
 	e := t.currentExtent()
-	return &Token{Kind: kind, Flags: flags | staticTokenFlags[kind], Start: e.Start, End: e.End}
+	if len(t.slab) == 0 {
+		n := 8 << t.slabGrow
+		if t.slabGrow < 4 {
+			t.slabGrow++
+		}
+		t.slab = make([]Token, n)
+	}
+	tok := &t.slab[0]
+	t.slab = t.slab[1:]
+	tok.Kind, tok.Flags, tok.Start, tok.End = kind, flags|staticTokenFlags[kind], e.Start, e.End
+	return tok
 }
 
 func (t *tokenizer) newCommentToken() *Token { return t.saveToken(t.mkToken(TkComment, 0)) }

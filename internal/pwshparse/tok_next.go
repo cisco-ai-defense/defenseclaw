@@ -237,7 +237,7 @@ again:
 		if t.peekChar() == ':' {
 			t.skipChar()
 			if t.inCommandMode() && !t.wantSimpleName && !forceStartNewToken(t.peekChar()) {
-				return t.scanGenericTokenSB(sbuf{':', ':'})
+				return t.scanGenericTokenSB(newSbuf(':', ':'))
 			}
 			return t.newToken(TkColonColon)
 		}

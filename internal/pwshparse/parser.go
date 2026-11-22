@@ -60,11 +60,13 @@ type Parser struct {
 	src             []char
 	ungot           *Token
 	disableComma    bool
-	savingTokens    bool
 	inConfiguration bool
 	errors          []ParseError
 	tokens          []*Token
 	depth           int
+	// asciiSrc is the input text when it is pure ASCII (UTF-16 offsets equal byte offsets): textOf slices it.
+	asciiSrc string
+	ascii    bool
 	// Unsupported is set when the input used a construct the port does not parse (configuration, dynamic keywords) or nested deeper than the budget.
 	Unsupported bool
 }
@@ -90,18 +92,42 @@ type Result struct {
 }
 
 // Parse parses PowerShell source text (the equivalent of Parser.ParseInput).
-func Parse(input string) *Result {
+// parseState holds everything one Parse call allocates up front (one allocation instead of three).
+type parseState struct {
+	p   Parser
+	tz  tokenizer
+	res Result
+}
+
+func Parse(input string) *Result { return parse(input, true) }
+
+// ParseTree parses like Parse but does not keep the token stream (Result.Tokens is nil); the tree and the
+// errors are identical. This is the entry point for readers that only walk the tree.
+func ParseTree(input string) *Result { return parse(input, false) }
+
+func parse(input string, wantTokens bool) *Result {
 	src := toUTF16(input)
-	p := &Parser{src: src}
-	p.tz = newTokenizer(p, src, true)
-	p.savingTokens = true
+	ps := &parseState{}
+	p := &ps.p
+	p.src = src
+	if isASCII(input) {
+		p.ascii, p.asciiSrc = true, input
+	}
+	initTokenizer(&ps.tz, p, src, wantTokens)
+	p.tz = &ps.tz
 	root := p.scriptBlockRule(nil, false, nil)
 	p.tokens = p.tz.tokenList
 	p.semanticChecks(root)
-	return &Result{Root: root, Tokens: p.tokens, Errors: p.errors, Source: src, Unsupported: p.Unsupported}
+	ps.res = Result{Root: root, Tokens: p.tokens, Errors: p.errors, Source: src, Unsupported: p.Unsupported}
+	return &ps.res
 }
 
-func (p *Parser) textOf(e extent) string { return fromUTF16(p.src[e.Start:e.End]) }
+func (p *Parser) textOf(e extent) string {
+	if p.ascii {
+		return p.asciiSrc[e.Start:e.End]
+	}
+	return fromUTF16(p.src[e.Start:e.End])
+}
 
 func (p *Parser) skipNewlines() {
 	if p.ungot == nil || p.ungot.Kind == TkNewLine {
@@ -291,4 +317,13 @@ func (p *Parser) reportIncompleteAt(errPos, detected extent, id string) bool {
 	inc := p.tz.isAtEndOfScript(detected, true)
 	p.saveError(errPos, id, inc)
 	return inc
+}
+
+func isASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] >= 0x80 {
+			return false
+		}
+	}
+	return true
 }

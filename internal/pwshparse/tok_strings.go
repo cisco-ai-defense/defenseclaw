@@ -11,6 +11,9 @@ package pwshparse
 // sbuf is a StringBuilder over UTF-16 code units.
 type sbuf []char
 
+// newSbuf returns a buffer holding cs with room for a typical token.
+func newSbuf(cs ...char) sbuf { return append(make(sbuf, 0, 48), cs...) }
+
 func (s *sbuf) add(c char)      { *s = append(*s, c) }
 func (s *sbuf) addAll(c []char) { *s = append(*s, c...) }
 func (s *sbuf) addStr(x string) { *s = append(*s, toUTF16(x)...) }
@@ -64,14 +67,14 @@ func (t *tokenizer) scanStringLiteralInto(sb *sbuf) TokenFlags {
 }
 
 func (t *tokenizer) scanStringLiteral() *Token {
-	var sb sbuf
+	sb := make(sbuf, 0, 48)
 	flags := t.scanStringLiteralInto(&sb)
 	return t.newStringLiteralToken(sb.String(), TkStringLiteral, flags)
 }
 
 func (t *tokenizer) scanSubExpression(hereString bool) *Token {
 	t.tokenStart = t.curIndex - 2
-	var sb sbuf
+	sb := make(sbuf, 0, 48)
 	sb.addStr("$(")
 	parenCount := 1
 	flags := TokenFlags(0)
@@ -203,7 +206,7 @@ func (t *tokenizer) scanDollarInStringExpandable(sb, formatSb *sbuf, hereString 
 }
 
 func (t *tokenizer) scanStringExpandable() *Token {
-	var sb, fsb sbuf
+	sb, fsb := make(sbuf, 0, 48), make(sbuf, 0, 48)
 	var nested []*Token
 	flags := t.scanStringExpandableInto(&sb, &fsb, &nested)
 	return t.newStringExpandableToken(sb.String(), fsb.String(), TkStringExpandable, nested, flags)
@@ -277,7 +280,7 @@ func (t *tokenizer) scanHereStringLiteral() *Token {
 		return t.newStringLiteralToken("", TkHereStringLiteral, tfTokenInError)
 	}
 	flags := TokenFlags(0)
-	var sb sbuf
+	sb := make(sbuf, 0, 48)
 	appendChar := func(c char) { sb.add(c) }
 	if !t.scanPossibleHereStringFooter(isSingleQuote, appendChar, &falseFooterOffset) {
 		for {
@@ -318,7 +321,7 @@ func (t *tokenizer) scanHereStringExpandable() *Token {
 	flags := TokenFlags(0)
 	var nested []*Token
 	falseFooterOffset := -1
-	var sb, fsb sbuf
+	sb, fsb := make(sbuf, 0, 48), make(sbuf, 0, 48)
 	appendChar := func(c char) { sb.add(c); fsb.add(c) }
 	if !t.scanPossibleHereStringFooter(isDoubleQuote, appendChar, &falseFooterOffset) {
 		for {

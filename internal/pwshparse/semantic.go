@@ -19,39 +19,33 @@ package pwshparse
 // CheckAssignmentTarget).
 
 func (p *Parser) semanticChecks(root *Node) {
-	if root == nil {
-		return
+	if root != nil {
+		p.semanticWalk(root, nil, nil)
 	}
-	var parents []*Node
-	var walk func(n *Node)
-	walk = func(n *Node) {
-		switch n.Type {
-		case "VariableExpressionAst":
-			if n.Props["Splatted"] == "true" && len(parents) > 0 {
-				parent := parents[len(parents)-1]
-				if parent.Type != "CommandAst" && parent.Type != "UsingExpressionAst" {
-					id := "SplattingNotPermitted"
-					if parent.Type == "ArrayLiteralAst" && len(parents) > 1 && parents[len(parents)-2].Type == "CommandAst" {
-						id = "SplattingNotPermittedInArgumentList"
-					}
-					p.reportError(n.ext(), id)
-				}
+}
+
+// semanticWalk visits n; parent and grandparent are its ancestors (nil above the root).
+func (p *Parser) semanticWalk(n, parent, grand *Node) {
+	switch n.Type {
+	case "VariableExpressionAst":
+		if parent != nil && n.propv("Splatted") == "true" && parent.Type != "CommandAst" && parent.Type != "UsingExpressionAst" {
+			id := "SplattingNotPermitted"
+			if parent.Type == "ArrayLiteralAst" && grand != nil && grand.Type == "CommandAst" {
+				id = "SplattingNotPermittedInArgumentList"
 			}
-		case "UnaryExpressionAst":
-			switch n.Props["TokenKind"] {
-			case "PlusPlus", "PostfixPlusPlus", "MinusMinus", "PostfixMinusMinus":
-				if len(n.Kids) > 0 {
-					p.checkIncDecTarget(n.Kids[0])
-				}
+			p.reportError(n.ext(), id)
+		}
+	case "UnaryExpressionAst":
+		switch n.propv("TokenKind") {
+		case "PlusPlus", "PostfixPlusPlus", "MinusMinus", "PostfixMinusMinus":
+			if len(n.Kids) > 0 {
+				p.checkIncDecTarget(n.Kids[0])
 			}
 		}
-		parents = append(parents, n)
-		for _, k := range n.Kids {
-			walk(k)
-		}
-		parents = parents[:len(parents)-1]
 	}
-	walk(root)
+	for _, k := range n.Kids {
+		p.semanticWalk(k, n, parent)
+	}
 }
 
 // checkIncDecTarget is CheckAssignmentTarget(ast, simpleAssignment: false) for the ++/-- operand.
@@ -72,7 +66,7 @@ func (p *Parser) checkIncDecTarget(ast *Node) {
 	case "VariableExpressionAst", "AttributedExpressionAst", "ConvertExpressionAst":
 		// assignable (the attribute chain checks beyond the reference-type rules are not ported)
 	case "MemberExpressionAst", "InvokeMemberExpressionAst", "BaseCtorInvokeMemberExpressionAst", "IndexExpressionAst":
-		if ast.Props["NullConditional"] == "true" {
+		if ast.propv("NullConditional") == "true" {
 			p.reportError(ast.ext(), "OperatorRequiresVariableOrProperty")
 		}
 	default:

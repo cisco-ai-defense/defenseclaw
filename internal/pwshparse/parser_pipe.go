@@ -54,7 +54,7 @@ func (p *Parser) pipelineChainRule() *Node {
 		}
 		// AssignmentStatementAst's constructor unwraps a foreground single-element
 		// pipeline whose element is a CommandExpressionAst (ast.cs 3647).
-		if statement.Type == "PipelineAst" && statement.Props["Background"] != "true" &&
+		if statement.Type == "PipelineAst" && statement.propv("Background") != "true" &&
 			len(statement.Kids) == 1 && statement.Kids[0].Type == "CommandExpressionAst" {
 			statement = statement.Kids[0]
 		}

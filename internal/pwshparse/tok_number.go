@@ -479,7 +479,7 @@ func (t *tokenizer) scanNumberHelper(first char) (string, numberFormat, suffixFl
 	multiplier := int64(1)
 	notNumber := false
 	signIndex := -1
-	var sb sbuf
+	sb := make(sbuf, 0, 48)
 	if isDash(first) || first == '+' {
 		sb.add(first)
 		first = t.getChar()

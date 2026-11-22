@@ -190,6 +190,29 @@ type VariablePath struct {
 
 // u16 helpers: the parser indexes UTF-16 code units.
 
-func toUTF16(s string) []char { return utf16.Encode([]rune(s)) }
+func toUTF16(s string) []char {
+	for i := 0; i < len(s); i++ {
+		if s[i] >= 0x80 {
+			return utf16.Encode([]rune(s))
+		}
+	}
+	out := make([]char, len(s))
+	for i := 0; i < len(s); i++ {
+		out[i] = char(s[i])
+	}
+	return out
+}
 
-func fromUTF16(c []char) string { return string(utf16.Decode(c)) }
+func fromUTF16(c []char) string {
+	for _, x := range c {
+		if x >= 0x80 {
+			return string(utf16.Decode(c))
+		}
+	}
+	var sb strings.Builder
+	sb.Grow(len(c))
+	for _, x := range c {
+		sb.WriteByte(byte(x))
+	}
+	return sb.String()
+}

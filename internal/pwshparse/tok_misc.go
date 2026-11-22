@@ -153,7 +153,7 @@ func (t *tokenizer) scanDot() *Token {
 }
 
 func (t *tokenizer) scanIdentifier(first char) *Token {
-	var sb sbuf
+	sb := make(sbuf, 0, 48)
 	sb.add(first)
 	var c char
 	for {
@@ -218,7 +218,7 @@ func (t *tokenizer) scanAssemblyNameSpecToken(sb *sbuf) {
 }
 
 func (t *tokenizer) getAssemblyNameSpec() string {
-	var sb sbuf
+	sb := make(sbuf, 0, 48)
 	t.scanAssemblyNameSpecToken(&sb)
 	for t.peekChar() == ',' {
 		t.tokenStart = t.curIndex
@@ -238,7 +238,7 @@ func (t *tokenizer) getAssemblyNameSpec() string {
 }
 
 func (t *tokenizer) scanLabel() *Token {
-	var sb sbuf
+	sb := make(sbuf, 0, 48)
 	c := t.getChar()
 	if !isIdentifierStart(c) {
 		sb.add(':')
@@ -254,7 +254,7 @@ func (t *tokenizer) scanLabel() *Token {
 		c = t.getChar()
 	}
 	if t.inCommandMode() && !forceStartNewToken(c) {
-		sb = append(sbuf{':'}, sb...)
+		sb = append(newSbuf(':'), sb...)
 		sb.add(c)
 		return t.scanGenericTokenSB(sb)
 	}

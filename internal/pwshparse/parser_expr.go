@@ -246,7 +246,7 @@ func (p *Parser) unaryExpressionRuleEx(endNumberOnTernaryOpChars bool) *Node {
 				memberAccess = p.nextMemberAccessToken(false)
 			}
 			if memberAccess != nil {
-				expr = p.checkPostPrimaryExpressionOperators(memberAccess, newTypeExpr(lastAttribute.ext(), lastAttribute.Props["TypeName"]))
+				expr = p.checkPostPrimaryExpressionOperators(memberAccess, newTypeExpr(lastAttribute.ext(), lastAttribute.propv("TypeName")))
 			} else {
 				token = p.peekToken()
 				if token.Kind != TkNewLine && token.Kind != TkComma {
@@ -257,7 +257,7 @@ func (p *Parser) unaryExpressionRuleEx(endNumberOnTernaryOpChars bool) *Node {
 				}
 			}
 			if expr == nil {
-				expr = newTypeExpr(lastAttribute.ext(), lastAttribute.Props["TypeName"])
+				expr = newTypeExpr(lastAttribute.ext(), lastAttribute.propv("TypeName"))
 			}
 		}
 		for i := len(attributes) - 2; i >= 0; i-- {

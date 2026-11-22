@@ -79,7 +79,7 @@ func prop(n oNode, k string) string {
 	return fmt.Sprint(v)
 }
 
-var oracleClasses = []string{"cmd", "cmdelem", "param", "strkind", "strval", "scriptblock", "pipeline", "redirection", "ast", "tok", "errid", "errflag"}
+var oracleClasses = []string{"cmd", "cmdelem", "param", "strkind", "strval", "scriptblock", "pipeline", "redirection", "ast", "tok", "errid", "errflag", "tree"}
 
 // classSigs derives, per element class, the ordered signature list of the row.
 func classSigs(r *oRow) map[string][]string {
@@ -127,7 +127,9 @@ func classSigs(r *oRow) map[string][]string {
 	return out
 }
 
-func readGz(t *testing.T, name string) *bufio.Scanner {
+func readGz(t *testing.T, name string) *bufio.Scanner { return readGzB(t, name) }
+
+func readGzB(t testing.TB, name string) *bufio.Scanner {
 	f, err := os.Open(filepath.Join(oracleFixtureDir, name))
 	if err != nil {
 		t.Skipf("fixture missing: %v", err)
@@ -213,9 +215,20 @@ func compareRow(script string, idx int, want *oRow) (res rowRes) {
 	}
 	ws, gs := classSigs(want), classSigs(got)
 	for _, c := range oracleClasses {
+		if c == "tree" {
+			continue
+		}
 		if d := firstDiff(ws[c], gs[c]); d != "" {
 			res.failed[c] = d
 		}
+	}
+	// ParseTree (no token stream) must give the same tree and errors as Parse
+	if tr, err := decodeRow([]byte(ParseTree(script).Dump(idx))); err != nil {
+		res.failed["tree"] = err.Error()
+	} else if d := firstDiff(gs["ast"], classSigs(tr)["ast"]); d != "" {
+		res.failed["tree"] = "ast " + d
+	} else if d := firstDiff(gs["errid"], classSigs(tr)["errid"]); d != "" {
+		res.failed["tree"] = "err " + d
 	}
 	return
 }
@@ -242,6 +255,61 @@ func TestOracleDifferential(t *testing.T) {
 	if len(scripts) != len(wants) {
 		t.Fatalf("rows %d != oracle rows %d", len(scripts), len(wants))
 	}
+	ids := []string{}
+	if f, err := os.Open(filepath.Join(oracleFixtureDir, "pub.ids")); err == nil {
+		sc := bufio.NewScanner(f)
+		for sc.Scan() {
+			ids = append(ids, strings.Fields(sc.Text())[0])
+		}
+		f.Close()
+	}
+	runOracle(t, scripts, wants, ids, false)
+}
+
+// TestOraclePrivate runs the same comparison over the private real-trace rows. The rows never leave
+// the box: PWSHORACLE_PRIV_B64 and PWSHORACLE_PRIV_ORACLE name plain files there, and the report holds
+// counts only (no row ids, no script text).
+func TestOraclePrivate(t *testing.T) {
+	bp, op := os.Getenv("PWSHORACLE_PRIV_B64"), os.Getenv("PWSHORACLE_PRIV_ORACLE")
+	if bp == "" || op == "" {
+		t.Skip("PWSHORACLE_PRIV_B64/PWSHORACLE_PRIV_ORACLE not set")
+	}
+	var scripts []string
+	var wants []*oRow
+	readLines := func(path string, f func(line []byte)) {
+		fh, err := os.Open(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer fh.Close()
+		sc := bufio.NewScanner(fh)
+		sc.Buffer(make([]byte, 1<<20), 1<<28)
+		for sc.Scan() {
+			f(sc.Bytes())
+		}
+	}
+	readLines(bp, func(l []byte) {
+		b, err := base64.StdEncoding.DecodeString(string(l))
+		if err != nil {
+			t.Fatal(err)
+		}
+		scripts = append(scripts, string(b))
+	})
+	readLines(op, func(l []byte) {
+		r, err := decodeRow(append([]byte(nil), l...))
+		if err != nil {
+			t.Fatal(err)
+		}
+		wants = append(wants, r)
+	})
+	if len(scripts) != len(wants) {
+		t.Fatalf("private rows %d != oracle rows %d", len(scripts), len(wants))
+	}
+	runOracle(t, scripts, wants, nil, true)
+}
+
+// runOracle compares every row and reports; private=true suppresses everything that identifies a row.
+func runOracle(t *testing.T, scripts []string, wants []*oRow, ids []string, private bool) {
 	limit := len(scripts)
 	if s := os.Getenv("PWSHORACLE_LIMIT"); s != "" {
 		fmt.Sscan(s, &limit)
@@ -267,14 +335,6 @@ func TestOracleDifferential(t *testing.T) {
 	close(jobs)
 	wg.Wait()
 
-	ids := []string{}
-	if f, err := os.Open(filepath.Join(oracleFixtureDir, "pub.ids")); err == nil {
-		sc := bufio.NewScanner(f)
-		for sc.Scan() {
-			ids = append(ids, strings.Fields(sc.Text())[0])
-		}
-		f.Close()
-	}
 	id := func(i int) string {
 		if i < len(ids) {
 			return ids[i]
@@ -333,6 +393,9 @@ func TestOracleDifferential(t *testing.T) {
 	}
 	// samples: the first 25 differing rows of each class (valid rows first)
 	for _, c := range oracleClasses {
+		if private {
+			break
+		}
 		fmt.Fprintf(&rep, "\n== %s: first differing rows (valid first)\n", c)
 		n := 0
 		for pass := 0; pass < 2 && n < 25; pass++ {
@@ -348,6 +411,9 @@ func TestOracleDifferential(t *testing.T) {
 		}
 	}
 	for i, r := range results {
+		if private {
+			break
+		}
 		if r.panicd != "" {
 			fmt.Fprintf(&rep, "PANIC row %d %s: %s\n", i, id(i), r.panicd)
 		}
@@ -384,8 +450,14 @@ func TestOracleDifferential(t *testing.T) {
 		fmt.Fprintf(&rep, "\n== error ids missing in port: %v\n== error ids extra in port: %v\n", missing, extra)
 	}
 	if dir := os.Getenv("PWSHORACLE_OUT"); dir != "" {
+		name := "report.txt"
+		if private {
+			name = "report-private.txt"
+		}
 		os.MkdirAll(dir, 0o755)
-		os.WriteFile(filepath.Join(dir, "report.txt"), []byte(rep.String()), 0o644)
+		os.WriteFile(filepath.Join(dir, name), []byte(rep.String()), 0o644)
+	}
+	if dir := os.Getenv("PWSHORACLE_OUT"); dir != "" && !private {
 		// differing row index list per class for the fix loop
 		for _, c := range oracleClasses {
 			var sb strings.Builder
