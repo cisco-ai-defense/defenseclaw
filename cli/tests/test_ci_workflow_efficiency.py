@@ -183,7 +183,7 @@ def test_ci_shards_slow_gateway_package_and_combines_go_coverage(tmp_path, capsy
     profiles = sum(
         len(jobs[name]["strategy"]["matrix"]["shard"]) for name in ("go-test-gateway", "go-test-audit", "go-test-other")
     )
-    assert profiles == 161
+    assert profiles == 169
     # The frozen-gateway job adds one more profile (it runs the three tests
     # that no longer run in the shards).
     profiles += 1
