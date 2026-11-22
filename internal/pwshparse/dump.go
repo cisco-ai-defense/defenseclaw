@@ -174,7 +174,11 @@ func (r *Result) Dump(index int) string {
 		case tcVariable:
 			jsonEsc(&sb, t.Path.UserPath)
 		case tcNumber:
-			jsonEsc(&sb, t.Num.Text)
+			if t.Num == nil {
+				sb.WriteString("null")
+			} else {
+				jsonEsc(&sb, t.Num.Text)
+			}
 		default:
 			sb.WriteString("null")
 		}

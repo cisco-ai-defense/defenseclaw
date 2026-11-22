@@ -342,6 +342,11 @@ func stringConstTypeOf(k TokenKind) string {
 
 func newNumberConst(t *Token) *Node {
 	n := newNode("ConstantExpressionAst", tokExt(t))
+	if t.Num == nil {
+		// BadNumericConstant: the reference keeps a null value (static type System.Object).
+		n.prop("StaticType", "System.Object").prop("Value", propNull)
+		return n
+	}
 	n.Num = t.Num
 	ty := t.Num.Type
 	if ty == "BigInteger" {
