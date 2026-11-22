@@ -1942,14 +1942,18 @@ func TestMigrateV9KeepsTheShippedPackAPreset(t *testing.T) {
 			}
 		}
 		configPath := filepath.Join(t.TempDir(), "config.yaml")
+		dataDir := t.TempDir()
 		migrate := func(profile, policyDir, rulePackDir string) (string, error) {
-			source := "config_version: 8\ndeployment_mode: managed_enterprise\nenterprise:\n  profile: " + profile + "\n"
+			source := "config_version: 8\ndata_dir: " + strconv.Quote(dataDir) + "\n"
+			if profile != "" {
+				source += "deployment_mode: managed_enterprise\nenterprise:\n  profile: " + profile + "\n"
+			}
 			if policyDir != "" {
 				source += "policy_dir: " + strconv.Quote(policyDir) + "\n"
 			}
 			source += "guardrail:\n  rule_pack_dir: " + strconv.Quote(rulePackDir) + "\nobservability: {}\n"
 			result, err := MigrateV9(context.Background(), MigrateV9Input{
-				ConfigPath: configPath, Source: []byte(source), PolicyDir: policyDir, Managed: true, InMemory: true,
+				ConfigPath: configPath, Source: []byte(source), PolicyDir: policyDir, Managed: profile != "", InMemory: true,
 			})
 			if err != nil {
 				return "", err
@@ -1966,6 +1970,17 @@ func TestMigrateV9KeepsTheShippedPackAPreset(t *testing.T) {
 				t.Fatalf("the shipped %s pack %s did not stay the preset:\n%s", tc.name, shipped, got)
 			}
 		}
+		// <data_dir>\policies is the default the loader clears (and the
+		// in-memory migration passes): a strict folder there is not what
+		// the preset selects, so the shipped pack stays the preset.
+		defaultPolicies := filepath.Join(dataDir, "policies")
+		if err := os.MkdirAll(filepath.Join(defaultPolicies, "guardrail", "strict"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if got, err := migrate("standalone", defaultPolicies, filepath.Join(root, current, "strict")); err != nil ||
+			!strings.Contains(got, "rule_pack: strict") || strings.Contains(got, "custom_packs") {
+			t.Fatalf("with the default policy_dir the shipped pack did not stay the preset (err %v):\n%s", err, got)
+		}
 		win := &Config{ConfigFilePath: `C:\ProgramData\Cisco\DefenseClaw\etc\config.yaml`, DeploymentMode: "managed_enterprise"}
 		win.Enterprise.Profile = "standalone"
 		if got, want := win.ResolveRulePackDir(RulePackRef{Name: "strict"}), filepath.Join(root, current, "strict"); got != want {
@@ -1979,8 +1994,9 @@ func TestMigrateV9KeepsTheShippedPackAPreset(t *testing.T) {
 			t.Fatal(err)
 		}
 		// Anything else the preset does not resolve to stays a custom pack:
-		// a folder that is not a release folder, the default name (embedded
-		// on Windows, never shipped), and a Secure Client install.
+		// a folder that is not a release folder, a release folder outside the
+		// shipped root, the default name (embedded on Windows, never
+		// shipped), a Secure Client install and a per-user config.
 		for label, refused := range map[string]func() (string, error){
 			"policy_dir shadow": func() (string, error) {
 				return migrate("standalone", policyDir, filepath.Join(root, current, "strict"))
@@ -1988,6 +2004,10 @@ func TestMigrateV9KeepsTheShippedPackAPreset(t *testing.T) {
 			"not a release": func() (string, error) { return migrate("standalone", "", filepath.Join(root, "custom", "strict")) },
 			"default":       func() (string, error) { return migrate("standalone", "", filepath.Join(root, current, "default")) },
 			"secure client": func() (string, error) { return migrate("secure_client", "", filepath.Join(root, current, "strict")) },
+			"per user":      func() (string, error) { return migrate("", "", filepath.Join(root, current, "strict")) },
+			"outside the root": func() (string, error) {
+				return migrate("standalone", "", filepath.Join(t.TempDir(), current, "strict"))
+			},
 		} {
 			if got, err := refused(); err == nil || !strings.Contains(err.Error(), "needs a digest") {
 				t.Errorf("%s: kept as a preset (err %v):\n%s", label, err, got)

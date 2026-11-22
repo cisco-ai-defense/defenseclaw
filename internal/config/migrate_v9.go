@@ -3059,8 +3059,13 @@ func (m *v9Migrator) rulePackFor(guardrail *yaml.Node, dir string) (string, []st
 			if _, err := os.Stat(shadow); errors.Is(err, fs.ErrNotExist) {
 				return base, nil, nil
 			}
-			m.note("%s is the shipped %s pack, but %s exists and the %s name selects it; the shipped pack is pinned as a custom pack, which a package update that changes it refuses until it is pinned again",
-				dir, base, shadow, base)
+			if _, onUnix := standaloneUnixLayoutForConfig(m.configPath); onUnix {
+				m.note("%s is the shipped %s pack, but %s exists and the %s name selects it; the shipped pack is pinned as a custom pack, which a package update that changes it refuses until it is pinned again",
+					dir, base, shadow, base)
+			} else {
+				m.note("%s is a shipped %s pack, but %s exists and the %s name selects it; the shipped pack is pinned as a custom pack, which keeps this release folder's rules after an upgrade",
+					dir, base, shadow, base)
+			}
 		}
 	}
 	// A protected-* folder is a concrete rule pack. Its manifest names the
@@ -3110,14 +3115,18 @@ func (m *v9Migrator) shippedPackShadow(clean, base string) (string, bool) {
 		!v9SameDir(filepath.Dir(release), root) {
 		return "", false
 	}
+	// The loader clears a policy_dir that is <data_dir>\policies on this
+	// install (standalonePolicyDirDefault), and the in-memory migration
+	// passes that folder when the document names none, so only another
+	// policy_dir is searched before the shipped pack.
 	policyDir := strings.TrimSpace(m.in.PolicyDir)
 	if policyDir == "" {
 		policyDir = strings.TrimSpace(yamlScalarValue(v8YAMLMapValue(m.root, "policy_dir")))
 	}
-	if policyDir == "" {
+	if policyDir == "" || v9SameDir(policyDir, filepath.Join(m.dataDir(), "policies")) {
 		return "", true
 	}
-	return filepath.Join(policyDir, "guardrail", base), true
+	return filepath.Join(expandPath(policyDir), "guardrail", base), true
 }
 
 // v9ShippedReleaseFolder reports whether name is a release folder of the
