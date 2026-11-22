@@ -238,13 +238,21 @@ func TestClassifyEffectsKnownBesideReached(t *testing.T) {
 	run := func(command string) EffectShadowResult {
 		return effectShadowRun(shadowLiveRequest(command), effectRulesOn, tierRestricted)[0]
 	}
-	if res := run(`sed -i s/a/b/ /home/u/.bashrc`); res.Tier != string(effectTierUnknown) || !res.Known {
-		t.Fatalf("sed -i on the known rc file: tier %s known %v, want unknown tier and Known", res.Tier, res.Known)
-	} else if f := effectShadowFindings(res, effectRulesOn); len(f) != 0 {
-		t.Fatalf("mixed known and Maybe effects raised an unknown-tier finding: %+v", f)
+	if res := run(`sed -i s/a/b/ /home/u/.bashrc`); res.Tier != string(effectTierUnknown) || !res.Known || !res.KnownMutation {
+		t.Fatalf("sed -i on the known rc file: result %+v, want a known mutation with an unknown reach", res)
+	} else if f := effectShadowFindings(res, effectRulesOn); len(f) != 1 ||
+		f[0].RuleID != "effect.protected_target_unknown" ||
+		f[0].Proof.Certainty != decide.CertMaybe || f[0].Proof.Reach != decide.ReachAdvisory {
+		t.Fatalf("mixed known and Maybe effects must preserve only an advisory proof, got %+v", f)
 	}
-	if res := run(shadowLiveWrite); !res.Known {
-		t.Fatalf("restricted write: known %v, want Known", res.Known)
+	if res := run(shadowLiveWrite); !res.Known || !res.KnownMutation {
+		t.Fatalf("restricted write: result %+v, want a known mutation", res)
+	} else if res.Tier != string(effectTierRestricted) || res.Action != guardrailActionBlock {
+		t.Fatalf("known authorized_keys mutation = tier %s action %s, want restricted block", res.Tier, res.Action)
+	} else if f := effectShadowFindings(res, effectRulesOn); len(f) != 1 ||
+		f[0].RuleID != "effect.protected_target_restricted" ||
+		f[0].Proof.Certainty != decide.CertKnown {
+		t.Fatalf("known mutation did not raise with its tier proof: %+v", f)
 	}
 	// A Known credential read is handed to Decide with its exact member
 	// class. The existing credential table, not the effect tier, decides it.
