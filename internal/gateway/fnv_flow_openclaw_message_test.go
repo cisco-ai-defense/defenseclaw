@@ -142,14 +142,16 @@ func TestFnvOpenClawBenignLargeAttachmentsAndTablesAllow(t *testing.T) {
 }
 
 // GAP-0338: a 4 MB and a 6 MB attachment under the production scan budget are
-// neither a 504 nor a block in the default pack.
+// neither a 504 nor a block in the default pack. A plain build runs the
+// production deadline (inspectScanTimeout); a -race build scales it by
+// raceLargeAttachmentScale so the race leg still runs this path, no skip.
 func TestFnvOpenClawLargeAttachmentStaysInTheScanBudget(t *testing.T) {
 	rng := rand.New(rand.NewSource(5))
 	for _, mb := range []int{4, 6} {
 		bin := make([]byte, mb*1024*1024)
 		rng.Read(bin)
 		api := fnvOCAPI(t, "default")
-		api.inspectToolScanTimeout = 0 // the production budget
+		api.inspectToolScanTimeout = inspectScanTimeout * raceLargeAttachmentScale // production budget; scaled under -race only
 		code, v := fnvOCPost(t, api, map[string]any{"action": "sendAttachment", "to": "+15551230000", "message": "see file", "filename": "a.jpg", "buffer": base64.StdEncoding.EncodeToString(bin)})
 		if code != http.StatusOK || v.Action == "block" {
 			t.Errorf("%d MB attachment: http %d action %q findings %v, want 200 and no block", mb, code, v.Action, v.Findings)
