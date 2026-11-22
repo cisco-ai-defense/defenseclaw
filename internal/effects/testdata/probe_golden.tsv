@@ -527,7 +527,7 @@ P37 xargs -I cp	U|
 P38 find -exec cp	U|
 P39 git -C	U|
 P4 redirect	U|write:c:\users\u\documents\profile.ps1
-P40 tar -C extract	U|
+P40 tar -C extract	U|write:/home/u/.ssh/authorized_keys
 P5 -enc	U|
 P6 param prefix	U|
 P7 env reassigned	K|delete:c:\windows
@@ -932,7 +932,7 @@ Z38 rsync into ~/	U|
 Z39 mv no -T into ~/.ssh/	K|delete:/tmp/x/authorized_keys,write:/home/u/.ssh/authorized_keys
 Z40 cp --target-directory=	K|write:/home/u/.ssh/authorized_keys
 Z41 ln -s . target	K|link:/tmp/k,link:/tmp/k
-Z42 python -c open	U|
+Z42 python -c open	U|append:/home/u/.bashrc
 Z43 node -e	U|
 Z44 crontab	U|
 Z45 ssh-copy-id	U|

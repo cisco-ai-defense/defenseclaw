@@ -4509,10 +4509,30 @@ func (w *walker) tarEffects(args []Word, origin Origin, cond bool, depth int) {
 		// A member the call names lands at dest/member when the archive holds
 		// it (DET111 R1, GAP-1173). tar strips a leading / and refuses .., so
 		// only a plain relative name is joined.
+		memberPathsKnown := true
+		for _, arg := range args {
+			if !arg.Static {
+				continue
+			}
+			name := arg.Value
+			if eq := strings.IndexByte(name, '='); eq >= 0 {
+				name = name[:eq]
+			}
+			if full, ok := resolveLong(name, tarLongs); ok {
+				name = full
+			}
+			if name == "--strip-components" || name == "--transform" || name == "--xform" {
+				memberPathsKnown = false
+			}
+		}
 		for _, f := range files {
 			if f.Static && f.Value != "" && !f.Glob && !looksGlob(f.Value) && !absoluteSpelling(f.Value, w.o.flavor()) &&
 				!strings.Contains("/"+strings.ReplaceAll(f.Value, `\`, "/")+"/", "/../") {
-				mk(KindWrite, joinDir(dest, f.Value), TargetStateUnknown, ReasonOpaqueArchive)
+				state, reason := TargetStateUnknown, ReasonOpaqueArchive
+				if memberPathsKnown {
+					state, reason = TargetStateKnown, ""
+				}
+				mk(KindWrite, joinDir(dest, f.Value), state, reason)
 			}
 		}
 	default: // list or unknown mode
