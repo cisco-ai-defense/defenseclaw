@@ -75,7 +75,7 @@ func recognize(
 	case "credentials.private_key":
 		return recognizePrivateKeys(input), nil
 	case "credentials.authorization":
-		return recognizeAuthorization(input), nil
+		return append(recognizeAuthorization(input), recognizeInlineCredentials(input)...), nil
 	case "credentials.cookie":
 		return recognizeCookies(input), nil
 	case "credentials.connection_string":
@@ -504,7 +504,7 @@ func overlapsAnyRange(start, end int, ranges [][]int) bool {
 }
 
 func recognizeAssignments(input string) []candidate {
-	return scanKeyValues(input, assignmentKeyRE, false)
+	return append(scanKeyValues(input, assignmentKeyRE, false), recognizeCredentialKeys(input)...)
 }
 
 func scanKeyValues(input string, keyPattern *regexp.Regexp, dsn bool) []candidate {
