@@ -149,7 +149,42 @@ const (
 	// (TOOL-PATH-UNVERIFIED: an opened Windows path that could not be
 	// verified).
 	ReachFS = "R-FS"
+	// ReachAdvisory: the reader proved its pattern but nothing that may
+	// enforce (no protected target, no proven effect it can stop): an
+	// advisory finding, an alert at most. It is the 1.0.10 alert-only class.
+	ReachAdvisory = "R-ADVISORY"
 )
+
+// Record is the proof of a finding that proves nothing a verdict may act
+// on: CertMaybe with no reach. By the precision rule (DET111 PLAN 5.3) an
+// unknown without reach never moves the verdict; the finding is recorded
+// (the 1.0.10 detection-only class). Kind and Target, when the reader knows
+// them, stay.
+func (p Proof) Record() Proof {
+	p.Certainty, p.Reach = CertMaybe, ""
+	return p
+}
+
+// Advise is p as an advisory proof (ReachAdvisory).
+func (p Proof) Advise() Proof {
+	p.Certainty, p.Reach = CertMaybe, ReachAdvisory
+	return p
+}
+
+// Enforce is p as a proof that may enforce: the reader's uncertainty
+// marks (Record, Advise) are dropped.
+func (p Proof) Enforce() Proof {
+	if p.Certainty == CertMaybe && (p.Reach == "" || p.Reach == ReachAdvisory) {
+		p.Certainty, p.Reach = CertKnown, ""
+	}
+	return p
+}
+
+// Recorded reports a Record proof.
+func (p Proof) Recorded() bool { return p.Certainty == CertMaybe && p.Reach == "" }
+
+// Advisory reports an Advise proof.
+func (p Proof) Advisory() bool { return p.Certainty == CertMaybe && p.Reach == ReachAdvisory }
 
 // Proof is what a finding proves about the call, value-free: no paths, no
 // argv, no matched text. It never leaves the process (not in the public
@@ -167,8 +202,9 @@ type Proof struct {
 	Source string
 }
 
-// IsZero reports a finding with no proof (KindUnspecified).
-func (p Proof) IsZero() bool { return p.Kind == KindUnspecified }
+// IsZero reports a finding with no proof: no kind and no uncertainty mark
+// (a Record or Advise proof with no kind is not zero: its row decides).
+func (p Proof) IsZero() bool { return p.Kind == KindUnspecified && p.Certainty == CertKnown }
 
 // String is a stable, value-free key of the proof (characterization and
 // shadow-report rows).

@@ -4,6 +4,22 @@
 version: 1
 tier: default
 rows:
+  - id: record
+    source: rel-1-0-10:detection-only
+    per_user:
+      floor: allow
+      ceiling: record
+    managed:
+      floor: allow
+      ceiling: record
+  - id: advisory
+    source: rel-1-0-10:alert-only
+    per_user:
+      floor: allow
+      ceiling: alert
+    managed:
+      floor: allow
+      ceiling: alert
   - id: evaluation-fault
     source: rel-1-0-10:GAP-0486
     per_user:
@@ -17,13 +33,15 @@ rows:
     managed:
       floor: block
   - id: truncated
-    source: rel-1-0-6:GAP-0675
+    source: rel-1-0-6:GAP-0675; rel-1-0-10:GAP-0851
     per_user:
       floor: alert
       levels: false
+      severity: MEDIUM
     managed:
       floor: alert
       levels: false
+      severity: MEDIUM
   - id: state-write
     source: rel-1-0-10:GAP-0747
     per_user:

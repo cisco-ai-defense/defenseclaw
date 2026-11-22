@@ -420,21 +420,40 @@ func strictPackPosture(cfg *config.Config, connector string) bool {
 // cascade unknown tier) and hands decide.Decide the findings with their
 // proofs; the tier table of the pack says what each proof is worth.
 
-// decideFinding is f as decide.Decide reads it. The severity is read as
-// HighestSeverity reads it (exact labels), so a finding the levels never
-// ranked stays unranked.
+// decideFinding is f as decide.Decide reads it. The severity is read with
+// exact labels, so a finding the levels never ranked stays unranked. A
+// reader's uncertainty (Record, Advise) is part of the proof; the tier
+// table says what it is worth, so the same proof always gets the same cell
+// (DET111 R5: before, the reader's alert-only or detection-only mark beside
+// a known keys or state proof made one proof block, alert or allow).
 func decideFinding(f RuleFinding) decide.Finding {
 	out := decide.Finding{RuleID: f.RuleID, Severity: decide.Severity(severityRank[f.Severity]), Proof: f.Proof}
 	switch f.enforcement {
 	case findingEnforcementDetectionOnly:
-		out.Ceiling = decide.CeilingRecord
+		out.Proof = out.Proof.Record()
 	case findingEnforcementAlertOnly:
-		out.Ceiling = decide.CeilingAlert
+		out.Proof = out.Proof.Advise()
 	}
-	if out.Proof.IsZero() {
-		out.Proof = legacyFindingProof(f)
+	if out.Proof.Kind == decide.KindUnspecified {
+		if legacy := legacyFindingProof(f); !legacy.IsZero() {
+			if out.Proof.Certainty == decide.CertMaybe {
+				legacy.Certainty, legacy.Reach = out.Proof.Certainty, out.Proof.Reach
+			}
+			out.Proof = legacy
+		}
 	}
 	return out
+}
+
+// verdictSeverity is the severity a verdict reports for f: the tier
+// table's severity for its proof when the table gives one (a bound alone is
+// MEDIUM, GAP-0851, GAP-0962), else its own. ok is false for a label the
+// levels never rank.
+func verdictSeverity(f RuleFinding) (string, int) {
+	if sev := decide.Builtin().Severity(decideFinding(f).Proof); sev != decide.SevNone {
+		return sev.String(), int(sev)
+	}
+	return f.Severity, severityRank[f.Severity]
 }
 
 func decideFindings(findings []RuleFinding) []decide.Finding {

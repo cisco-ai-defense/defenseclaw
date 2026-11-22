@@ -73,13 +73,25 @@ func legacy1010WithoutLimit(findings []RuleFinding) ([]RuleFinding, bool) {
 	return slices.DeleteFunc(slices.Clone(findings), isLimit), true
 }
 
+// legacy1010HighestSeverity is HighestSeverity at a64bfdb931: each
+// finding's own label.
+func legacy1010HighestSeverity(findings []RuleFinding) string {
+	best, bestRank := "NONE", 0
+	for _, f := range findings {
+		if r := severityRank[f.Severity]; r > bestRank {
+			best, bestRank = f.Severity, r
+		}
+	}
+	return best
+}
+
 func legacy1010ActionForFindings(findings []RuleFinding, actionFor func(severity string) string) string {
 	action := guardrailActionAllow
 	if enforceable := enforceableRuleFindings(findings); len(enforceable) > 0 {
-		action = actionFor(HighestSeverity(enforceable))
+		action = actionFor(legacy1010HighestSeverity(enforceable))
 	}
 	if alerts := alertOnlyRuleFindings(findings); len(alerts) > 0 {
-		candidate := actionFor(HighestSeverity(alerts))
+		candidate := actionFor(legacy1010HighestSeverity(alerts))
 		if candidate == guardrailActionBlock || candidate == guardrailActionConfirm {
 			candidate = guardrailActionAlert
 		}
@@ -120,6 +132,38 @@ func legacy1010ManagedCloses(managed bool, findings []RuleFinding) bool {
 // on both surfaces, in every tier, deployment, Secure Client state and
 // cascade unknown setting, through the frozen 1.0.10 decision and through
 // decide.Decide with decide.Builtin(): 0 differences.
+// ownerTruncatedCell is the owner-ruled cell of a call with an enforcing
+// bound finding (2026-11-21, GAP-0851, GAP-0962): the bound alone is
+// MEDIUM and the truncated row gives the action on every surface (an alert
+// in default and permissive, a block in strict, guardrail.cascade.unknown
+// when set). The 1.0.10 content surface mapped the bound's CRITICAL by the
+// levels (a block in every pack), and strict mapped it by the levels. ok is
+// false for a call the cell does not change (no enforcing bound, the
+// Secure Client integration, the managed unverified-path close).
+func ownerTruncatedCell(findings []RuleFinding, content, secure, packStrict bool, override string, strict func() bool,
+	actionFor func(severity string) string,
+) (string, bool) {
+	if secure {
+		return "", false
+	}
+	rest, limited := legacy1010WithoutLimit(findings)
+	if !limited {
+		return "", false
+	}
+	cell := override
+	if cell == "" {
+		cell = guardrailActionAlert
+		if packStrict {
+			cell = guardrailActionBlock
+		}
+	}
+	base := legacy1010ActionForFindings(rest, actionFor)
+	if !content {
+		base = strongerGuardrailAction(legacy1010ClassFloor(rest, false, strict), base)
+	}
+	return strongerGuardrailAction(cell, base), true
+}
+
 func TestDecideMatchesTheFrozen1010Decision(t *testing.T) {
 	var pool []RuleFinding
 	for _, sev := range []string{"LOW", "MEDIUM", "HIGH", "CRITICAL", "high"} {
@@ -177,9 +221,13 @@ func TestDecideMatchesTheFrozen1010Decision(t *testing.T) {
 							for _, packStrict := range []bool{false, true} {
 								for _, override := range []string{"", "alert", "confirm", "block"} {
 									var want string
+									owner, ownerRuled := ownerTruncatedCell(findings, content, secure, packStrict, override,
+										func() bool { return hookStrict }, actionFor)
 									switch {
 									case legacy1010ManagedCloses(managed, findings):
 										want = guardrailActionBlock
+									case ownerRuled:
+										want = owner
 									case content:
 										want = legacy1010ActionForFindings(findings, actionFor)
 									default:
@@ -326,7 +374,7 @@ func dualRow(route, connector string, in decide.Input, got decide.Output) dualRe
 		}
 	}
 	for _, f := range in.Findings {
-		row.Findings = append(row.Findings, dualFinding{Rule: canonicalTrustedRuleID(f.RuleID), Proof: f.Proof.String(), Sev: f.Severity.String(), Ceiling: uint8(f.Ceiling)})
+		row.Findings = append(row.Findings, dualFinding{Rule: canonicalTrustedRuleID(f.RuleID), Proof: f.Proof.String(), Sev: f.Severity.String()})
 	}
 	sort.Slice(row.Findings, func(i, j int) bool {
 		a, b := row.Findings[i], row.Findings[j]

@@ -1242,10 +1242,10 @@ func HighestSeverity(findings []RuleFinding) string {
 	best := "NONE"
 	bestRank := 0
 	for _, f := range findings {
-		r := severityRank[f.Severity]
+		sev, r := verdictSeverity(f)
 		if r > bestRank {
 			bestRank = r
-			best = f.Severity
+			best = sev
 		}
 	}
 	return best
@@ -1255,7 +1255,7 @@ func HighestSeverity(findings []RuleFinding) string {
 func HighestConfidence(findings []RuleFinding, severity string) float64 {
 	best := 0.0
 	for _, f := range findings {
-		if f.Severity == severity && f.Confidence > best {
+		if sev, _ := verdictSeverity(f); sev == severity && f.Confidence > best {
 			best = f.Confidence
 		}
 	}

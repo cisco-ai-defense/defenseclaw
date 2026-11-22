@@ -33,8 +33,12 @@ type Cell struct {
 	// its floor (the truncated row in the default and permissive tiers).
 	Levels bool
 	// Severity, when set, is the severity the finding maps with instead of
-	// its own (a bound-only finding: GAP-0851, GAP-0962).
+	// its own, and its verdict severity (a bound-only finding is MEDIUM:
+	// GAP-0851, GAP-0962).
 	Severity Severity
+	// Ceiling caps what the finding may do: CeilingAlert is an alert at
+	// most (its floor too), CeilingRecord never moves the verdict.
+	Ceiling Ceiling
 }
 
 // Row is one row of the tier table: the proofs it matches and a cell per
@@ -106,6 +110,8 @@ func (r *Row) cell(d Deployment, tier func() Tier) Cell {
 
 // Row ids of the built-in table.
 const (
+	RowRecord          = "record"
+	RowAdvisory        = "advisory"
 	RowEvaluationFault = "evaluation-fault"
 	RowUnverifiedPath  = "unverified-path"
 	RowTruncated       = "truncated"
@@ -123,6 +129,26 @@ func uniform(c Cell) [tierCount]Cell { return [tierCount]Cell{c, c, c} }
 func Builtin() *Table { return &builtin }
 
 var builtin = Table{Rows: []Row{
+	{
+		// A proof with no reach never moves the verdict (DET111 PLAN 5.3,
+		// the precision rule): the finding is recorded only, on every
+		// surface and in every tier (the 1.0.10 detection-only class).
+		ID: RowRecord, Certainty: []Certainty{CertMaybe}, Reach: []string{""},
+		Content: true, SecureClient: true, Source: "rel-1-0-10:detection-only",
+		Cells: [deploymentCount][tierCount]Cell{
+			uniform(Cell{Levels: true, Ceiling: CeilingRecord}), uniform(Cell{Levels: true, Ceiling: CeilingRecord}),
+		},
+	},
+	{
+		// An advisory proof (ReachAdvisory) maps by its severity and is an
+		// alert at most, on every surface and in every tier (the 1.0.10
+		// alert-only class).
+		ID: RowAdvisory, Certainty: []Certainty{CertMaybe}, Reach: []string{ReachAdvisory},
+		Content: true, SecureClient: true, Source: "rel-1-0-10:alert-only",
+		Cells: [deploymentCount][tierCount]Cell{
+			uniform(Cell{Levels: true, Ceiling: CeilingAlert}), uniform(Cell{Levels: true, Ceiling: CeilingAlert}),
+		},
+	},
 	{
 		// A call the evaluation failed on blocks in every pack
 		// (rel-1-0-10:GAP-0486).
@@ -143,13 +169,18 @@ var builtin = Table{Rows: []Row{
 	},
 	{
 		// A truncated call is the unknown tier: an alert in the default and
-		// permissive packs, by the levels in strict (rel-1-0-6:GAP-0675,
-		// GAP-0313, GAP-0688); guardrail.cascade.unknown replaces it.
+		// permissive packs, a block in strict (rel-1-0-6:GAP-0675, GAP-0313,
+		// GAP-0688); guardrail.cascade.unknown replaces it. A bound alone is
+		// MEDIUM, and the row applies on the content surface too, so every
+		// route gives the same verdict (owner ruling 2026-11-21,
+		// GAP-0851, GAP-0962: in 1.0.10 the bound finding was CRITICAL so
+		// that strict blocked, and the content surface blocked it in
+		// every pack).
 		ID: RowTruncated, Kinds: []ProofKind{KindTruncated}, Unknown: true, PackTier: true,
-		Source: "rel-1-0-6:GAP-0675",
+		Content: true, Source: "rel-1-0-6:GAP-0675; rel-1-0-10:GAP-0851",
 		Cells: [deploymentCount][tierCount]Cell{
-			{TierDefault: {Floor: Alert}, TierPermissive: {Floor: Alert}, TierStrict: {Levels: true}},
-			{TierDefault: {Floor: Alert}, TierPermissive: {Floor: Alert}, TierStrict: {Levels: true}},
+			{TierDefault: {Floor: Alert, Severity: SevMedium}, TierPermissive: {Floor: Alert, Severity: SevMedium}, TierStrict: {Floor: Block, Levels: true, Severity: SevMedium}},
+			{TierDefault: {Floor: Alert, Severity: SevMedium}, TierPermissive: {Floor: Alert, Severity: SevMedium}, TierStrict: {Floor: Block, Levels: true, Severity: SevMedium}},
 		},
 	},
 	{
@@ -193,6 +224,7 @@ type CellYAML struct {
 	Floor    string `yaml:"floor"`
 	Levels   *bool  `yaml:"levels,omitempty"`
 	Severity string `yaml:"severity,omitempty"`
+	Ceiling  string `yaml:"ceiling,omitempty"`
 }
 
 type RowYAML struct {
@@ -271,7 +303,19 @@ func (c CellYAML) cell(row, deployment string) (Cell, error) {
 			return Cell{}, fmt.Errorf("tiers.yaml: row %q %s: severity %q is not LOW, MEDIUM, HIGH or CRITICAL", row, deployment, c.Severity)
 		}
 	}
-	if out.Floor == Allow && !out.Levels {
+	switch strings.ToLower(strings.TrimSpace(c.Ceiling)) {
+	case "", "none":
+	case "alert":
+		out.Ceiling = CeilingAlert
+	case "record":
+		out.Ceiling = CeilingRecord
+	default:
+		return Cell{}, fmt.Errorf("tiers.yaml: row %q %s: ceiling %q is not alert or record", row, deployment, c.Ceiling)
+	}
+	if out.Ceiling == CeilingRecord && out.Floor != Allow {
+		return Cell{}, fmt.Errorf("tiers.yaml: row %q %s: a record ceiling with floor %q", row, deployment, c.Floor)
+	}
+	if out.Floor == Allow && !out.Levels && out.Ceiling != CeilingRecord {
 		return Cell{}, fmt.Errorf("tiers.yaml: row %q %s: floor allow with levels false allows the finding silently", row, deployment)
 	}
 	return out, nil
@@ -347,5 +391,31 @@ func toYAMLCell(c Cell) CellYAML {
 	if c.Severity != SevNone {
 		out.Severity = c.Severity.String()
 	}
+	switch c.Ceiling {
+	case CeilingAlert:
+		out.Ceiling = "alert"
+	case CeilingRecord:
+		out.Ceiling = "record"
+	}
 	return out
+}
+
+// Severity is the severity the table gives a finding with proof p on the
+// tool surface when every cell of its row agrees (the truncated row: a
+// bound alone is MEDIUM), else SevNone: the finding's own severity stands.
+// It is the severity a verdict reports for the finding (HighestSeverity).
+func (t *Table) Severity(p Proof) Severity {
+	row := t.match(p, SurfaceTool, false)
+	if row == nil {
+		return SevNone
+	}
+	sev := row.Cells[PerUser][TierDefault].Severity
+	for d := range row.Cells {
+		for _, c := range row.Cells[d] {
+			if c.Severity != sev {
+				return SevNone
+			}
+		}
+	}
+	return sev
 }
