@@ -24,7 +24,7 @@ import (
 // agent hook_decision derives (the session's root under the actor's agt-),
 // on both replicas.
 func TestSubstrateFreshReplicaHookRowsNameTheAgentGAP0422(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	installDefaultProfileConnector(t, "claudecode")
 	_, chains := newTestChainLeaderService(t)
 	r1 := chartReplica{newSubstrateFixture(t, func(c *SubstrateConfig) { c.Chains = chains })}
