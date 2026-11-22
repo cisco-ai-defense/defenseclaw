@@ -471,6 +471,11 @@ func routeCallerFromContext(ctx context.Context) (engine.Caller, []string) {
 	var caller engine.Caller
 	if s, ok := verifiedSubjectFromContext(ctx); ok {
 		caller = engine.Caller{Verified: true, Key: s.UserID, Source: s.Source}
+		if key, ok := substrateActorPersonKey(ctx); ok {
+			// An actor's calls are charged to its person across issuers
+			// and actors, never to the bare OIDC subject.
+			caller.Key = key
+		}
 		caller.Matches = routingCallerMatcher(ctx)
 		// Name the fact an unconfirmed selector waits on (directory,
 		// groups) in identity_unconfirmed:<fact>, not the bare identity

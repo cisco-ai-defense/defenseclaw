@@ -891,7 +891,7 @@ func (a *APIServer) substrateUsage(st *substrateState) http.HandlerFunc {
 			return
 		}
 		c, _ := substrateCallerFrom(r.Context())
-		owner := ownerOf(c.person).ID()
+		owner := substrateUsageOwner(ownerOf(c.person))
 		if c.admin && r.URL.Query().Get("all") == "1" {
 			owner = ""
 		}
