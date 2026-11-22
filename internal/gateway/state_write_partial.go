@@ -29,7 +29,7 @@ func withPartialStateWriteFloor(request trustedActionRequest, findings []RuleFin
 		if finding.contributesToEnforcement() {
 			return findings // the write is proven: its own verdict decides
 		}
-		if finding.enforcement == findingEnforcementDetectionOnly && finding.partialReading {
+		if finding.Proof.Recorded() && finding.partialReading {
 			partial = true
 		}
 	}

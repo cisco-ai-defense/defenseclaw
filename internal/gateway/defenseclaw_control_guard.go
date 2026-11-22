@@ -75,11 +75,10 @@ func defenseClawControlFindings(ctx context.Context, request trustedActionReques
 		out = append(out, RuleFinding{
 			RuleID: rule.ID, Title: rule.Title + " (" + note + ")", Severity: rule.Severity, Confidence: rule.Confidence,
 			Evidence: "defenseclaw " + note, Tags: append([]string(nil), rule.Tags...), LineNumber: 1,
-			enforcement: findingEnforcementAllowed,
-			proof:       newExactFallbackFindingProof(rule.ID, true, true, true, true),
+			proof: newExactFallbackFindingProof(rule.ID, true, true, true, true),
 		})
 		if alertOnly {
-			out[len(out)-1].enforcement = findingEnforcementAlertOnly
+			out[len(out)-1].Proof = out[len(out)-1].Proof.Advise()
 		}
 	}
 	for _, control := range controls {

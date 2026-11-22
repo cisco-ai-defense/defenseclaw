@@ -489,9 +489,9 @@ func flowShadowFindings(out flow.Result, mode flowLaneMode) []RuleFinding {
 	f.disposition = findingDispositionFlowSecretEgress
 	f.proof = newFindingProof(findingProofFlow, flow.RuleIDEgress, mode == flowLaneOn)
 	if out.Action == flow.ActionAlert {
-		f.enforcement = findingEnforcementAlertOnly
+		f.Proof = f.Proof.Advise()
 	} else {
-		f.enforcement = findingEnforcementInherit
+		f.Proof = f.Proof.Enforce()
 	}
 	return []RuleFinding{f}
 }

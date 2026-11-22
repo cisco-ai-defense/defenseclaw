@@ -322,9 +322,9 @@ func TestSandboxShellCommandScope(t *testing.T) {
 
 func TestMergeSandboxShellCommandVerdict(t *testing.T) {
 	candidate := RuleFinding{RuleID: "E2E-SANDBOX-MARKER", Title: "E2E sandbox marker command", Severity: "CRITICAL",
-		Confidence: 0.99, enforcement: findingEnforcementDetectionOnly}
+		Confidence: 0.99, Proof: recordProof}
 	proven := candidate
-	proven.enforcement = findingEnforcementAllowed
+	proven.Proof = proven.Proof.Enforce()
 	allow := &ToolInspectVerdict{Action: "allow", Severity: "CRITICAL", Reason: "matched: E2E-SANDBOX-MARKER:E2E sandbox marker command",
 		Findings: []string{"E2E-SANDBOX-MARKER:E2E sandbox marker command"}, DetailedFindings: []RuleFinding{candidate}}
 
@@ -576,12 +576,11 @@ func TestAgentHookTrustedActionShellShapes(t *testing.T) {
 // so a conservative finding is never silently dropped (rel-1-0-10:GAP-0833).
 func TestMergeSandboxShellCommandVerdictKeepsBothReadings(t *testing.T) {
 	proven := RuleFinding{RuleID: "CMD-RM-RF", Title: "Recursive force delete from critical root path", Severity: "CRITICAL",
-		Confidence: 1, enforcement: findingEnforcementAllowed}
+		Confidence: 1}
 	block := &ToolInspectVerdict{Action: "block", Severity: "CRITICAL", Reason: "matched: CMD-RM-RF:Recursive force delete from critical root path",
 		Findings: []string{"CMD-RM-RF:Recursive force delete from critical root path"}, DetailedFindings: []RuleFinding{proven}}
 	for _, conservative := range []RuleFinding{unverifiedShellCommandFinding(true), {
 		RuleID: conflictingToolArgumentsRuleID, Title: conflictingToolArgumentsTitle, Severity: "CRITICAL", Confidence: 1,
-		enforcement: findingEnforcementAllowed,
 	}} {
 		got := mergeSandboxShellCommandVerdict(t.Context(), nil, "opencode", block, []RuleFinding{proven, conservative})
 		if got == block || got.Action != "block" || got.Severity != "CRITICAL" || got.Reason != block.Reason {

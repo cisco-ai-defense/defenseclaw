@@ -167,12 +167,12 @@ func ownerTruncatedCell(findings []RuleFinding, content, secure, packStrict bool
 func TestDecideMatchesTheFrozen1010Decision(t *testing.T) {
 	var pool []RuleFinding
 	for _, sev := range []string{"LOW", "MEDIUM", "HIGH", "CRITICAL", "high"} {
-		for _, enf := range []findingEnforcement{findingEnforcementInherit, findingEnforcementAlertOnly, findingEnforcementDetectionOnly} {
+		for _, enf := range []decide.Proof{enforcingProof, advisoryProof, recordProof} {
 			pool = append(pool,
-				RuleFinding{RuleID: "CMD-TEST", Severity: sev, enforcement: enf},
-				RuleFinding{RuleID: evaluationLimitRuleID, Severity: sev, enforcement: enf},
-				RuleFinding{RuleID: "tamper.detector_state_write", Severity: sev, enforcement: enf},
-				RuleFinding{RuleID: windowsPathUnverifiedRuleID, Severity: sev, enforcement: enf},
+				RuleFinding{RuleID: "CMD-TEST", Severity: sev, Proof: enf},
+				RuleFinding{RuleID: evaluationLimitRuleID, Severity: sev, Proof: enf},
+				RuleFinding{RuleID: "tamper.detector_state_write", Severity: sev, Proof: enf},
+				RuleFinding{RuleID: windowsPathUnverifiedRuleID, Severity: sev, Proof: enf},
 			)
 		}
 		pool = append(pool,
@@ -181,7 +181,7 @@ func TestDecideMatchesTheFrozen1010Decision(t *testing.T) {
 			RuleFinding{RuleID: "CMD-TEST", Severity: sev, evaluationFault: true},
 			RuleFinding{RuleID: evaluationLimitRuleID, Severity: sev, evaluationFault: true},
 			RuleFinding{RuleID: "PERSISTENCE.SSH_AUTHORIZED_KEYS_COMMAND", Severity: sev, shellProtectedFile: true},
-			RuleFinding{RuleID: "PATH-SSH-DIR", Severity: sev, shellProtectedFile: true, enforcement: findingEnforcementAlertOnly},
+			RuleFinding{RuleID: "PATH-SSH-DIR", Severity: sev, shellProtectedFile: true, Proof: advisoryProof},
 			RuleFinding{RuleID: "persistence.shell_profile_write", Severity: sev, shellProtectedFile: true},
 		)
 	}
@@ -294,7 +294,7 @@ func TestDecideMatchesTheFrozen1010Decision(t *testing.T) {
 func describeDualFindings(findings []RuleFinding) string {
 	parts := make([]string, len(findings))
 	for i, f := range findings {
-		parts[i] = fmt.Sprintf("{%s %s enf=%d fault=%v omitted=%v spf=%v}", f.RuleID, f.Severity, f.enforcement,
+		parts[i] = fmt.Sprintf("{%s %s proof=%s fault=%v omitted=%v spf=%v}", f.RuleID, f.Severity, f.Proof,
 			f.evaluationFault, f.omittedOperand, f.shellProtectedFile)
 	}
 	return "[" + strings.Join(parts, " ") + "]"

@@ -21,7 +21,7 @@ func TestBlockedSecretReadPredecessorKeepsTheValueLineageStep(t *testing.T) {
 	})
 	read := guardrail.ToolChainProjection{ParseStatus: facts.Parse.Status}
 	projectTrustedActionChainSteps(&read, facts, []RuleFinding{{
-		RuleID: "PATH-ENV-FILE", enforcement: findingEnforcementAllowed,
+		RuleID: "PATH-ENV-FILE",
 	}})
 	valueBit, _ := guardrail.ToolChainStepMask(guardrail.ToolChainSensitiveReadValueExternalTransmit, 1)
 	secretBit, _ := guardrail.ToolChainStepMask(guardrail.ToolChainSecretReadThenEgress, 1)

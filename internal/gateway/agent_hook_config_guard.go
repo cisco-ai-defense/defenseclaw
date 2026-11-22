@@ -1113,8 +1113,7 @@ func agentHookConfigFindingsAs(ctx context.Context, request trustedActionRequest
 		out = append(out, RuleFinding{
 			RuleID: rule.ID, Title: title, Severity: rule.Severity, Confidence: rule.Confidence,
 			Evidence: filepath.Base(target), Tags: append([]string(nil), rule.Tags...), LineNumber: 1,
-			enforcement: findingEnforcementAllowed,
-			proof:       newExactFallbackFindingProof(rule.ID, true, true, true, true),
+			proof: newExactFallbackFindingProof(rule.ID, true, true, true, true),
 		})
 	}
 	if managed {
@@ -1344,9 +1343,9 @@ func sandboxAgentHookConfigFindings(ctx context.Context, request trustedActionRe
 		return findings
 	}
 	title := rule.Title
-	enforcement := findingEnforcementAllowed
+	enforcement := enforcingProof
 	if ruleID == agentHookConfigWriteRuleID && note == "" {
-		enforcement = findingEnforcementAlertOnly
+		enforcement = advisoryProof
 	}
 	if note != "" {
 		title += " (" + note + ")"
@@ -1354,8 +1353,8 @@ func sandboxAgentHookConfigFindings(ctx context.Context, request trustedActionRe
 	return append(append([]RuleFinding(nil), findings...), RuleFinding{
 		RuleID: rule.ID, Title: title, Severity: rule.Severity, Confidence: rule.Confidence,
 		Evidence: path.Base(target), Tags: append([]string(nil), rule.Tags...), LineNumber: 1,
-		enforcement: enforcement,
-		proof:       newExactFallbackFindingProof(rule.ID, true, true, true, true),
+		Proof: enforcement,
+		proof: newExactFallbackFindingProof(rule.ID, true, true, true, true),
 	})
 }
 

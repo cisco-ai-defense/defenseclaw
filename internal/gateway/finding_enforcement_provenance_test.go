@@ -11,24 +11,23 @@ import (
 func TestRuleFindingsToInspectPreservesDetectionOnlyProvenance(t *testing.T) {
 	input := []RuleFinding{
 		{
-			RuleID:      "TRUST-DOCUMENTATION",
-			Tags:        []string{"prompt-injection", "source-code"},
-			enforcement: findingEnforcementDetectionOnly,
+			RuleID: "TRUST-DOCUMENTATION",
+			Tags:   []string{"prompt-injection", "source-code"},
+			Proof:  recordProof,
 		},
 		{
-			RuleID:      "TRUST-OBSERVED-ACTION",
-			Tags:        []string{"prompt-injection"},
-			enforcement: findingEnforcementAllowed,
+			RuleID: "TRUST-OBSERVED-ACTION",
+			Tags:   []string{"prompt-injection"},
 		},
 		{
-			RuleID:      "TRUST-ALREADY-TAGGED",
-			Tags:        []string{"detection-only", "prompt-injection"},
-			enforcement: findingEnforcementDetectionOnly,
+			RuleID: "TRUST-ALREADY-TAGGED",
+			Tags:   []string{"detection-only", "prompt-injection"},
+			Proof:  recordProof,
 		},
 		{
-			RuleID:      "TRUST-NONCANONICAL-TAG",
-			Tags:        []string{"Detection-Only", "prompt-injection"},
-			enforcement: findingEnforcementDetectionOnly,
+			RuleID: "TRUST-NONCANONICAL-TAG",
+			Tags:   []string{"Detection-Only", "prompt-injection"},
+			Proof:  recordProof,
 		},
 	}
 

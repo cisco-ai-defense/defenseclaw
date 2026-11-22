@@ -27,7 +27,7 @@ func appendTrustedPrivateKeyReaderFinding(
 		// included; rel-1-0-10:GAP-0018).
 		for index := range findings {
 			if findings[index].RuleID == "PATH-SSH-KEY" || findings[index].RuleID == "PATH-WIN-SSH-KEY" {
-				findings[index].enforcement = findingEnforcementAlertOnly
+				findings[index].Proof = findings[index].Proof.Advise()
 			}
 		}
 		return appendTrustedPrivateKeyHomeCopyAlert(findings, generation, request)
@@ -100,14 +100,14 @@ func withProvedPrivateKeyRead(
 	if !ok {
 		return findings
 	}
-	enforcement := findingEnforcementDetectionOnly
+	enforcement := recordProof
 	if request.EnforcementCapable {
-		enforcement = findingEnforcementAllowed
+		enforcement = enforcingProof
 	}
 	for index := range findings {
 		if findings[index].RuleID == "PATH-SSH-KEY" ||
 			findings[index].RuleID == "PATH-WIN-SSH-KEY" {
-			findings[index].enforcement = enforcement
+			findings[index].Proof = enforcement
 			findings[index].Severity = rule.Severity
 			return findings
 		}
@@ -116,6 +116,6 @@ func withProvedPrivateKeyRead(
 		RuleID: rule.ID, Title: rule.Title, Severity: rule.Severity,
 		Confidence: rule.Confidence, Evidence: trustedActionInputText(request.Input, ""),
 		Tags: append([]string(nil), rule.Tags...), LineNumber: 1,
-		enforcement: enforcement,
+		Proof: enforcement,
 	}))
 }

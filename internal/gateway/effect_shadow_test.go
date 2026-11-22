@@ -152,7 +152,7 @@ func TestEffectShadowFindingsEnforcement(t *testing.T) {
 	}
 	alert := effectShadowFindings(EffectShadowResult{Tier: string(effectTierUnknown), Action: guardrailActionAlert, Kind: "delete",
 		Sets: []string{effectrules.SetSSHAuthorizedKeys}}, effectRulesOn)
-	if len(alert) != 1 || alert[0].enforcement != findingEnforcementAlertOnly || alert[0].disposition != findingDispositionEffectUnknown {
+	if len(alert) != 1 || !alert[0].Proof.Advisory() || alert[0].disposition != findingDispositionEffectUnknown {
 		t.Fatalf("unknown-tier finding = %+v, want one alert-only effect_unknown finding", alert)
 	}
 	if got := effectShadowFindings(EffectShadowResult{Tier: string(effectTierClean), Action: guardrailActionAllow}, effectRulesOn); got != nil {

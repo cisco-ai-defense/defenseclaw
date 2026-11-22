@@ -182,15 +182,15 @@ func appendTrustedCMDPrivateKeyReadFinding(
 	if !ok {
 		return findings
 	}
-	enforcement := findingEnforcementDetectionOnly
+	enforcement := recordProof
 	if request.EnforcementCapable {
-		enforcement = findingEnforcementAllowed
+		enforcement = enforcingProof
 	}
 	return append(findings, adjustConfidence(input.Tool, RuleFinding{
 		RuleID: rule.ID, Title: rule.Title, Severity: rule.Severity,
 		Confidence: rule.Confidence, Evidence: trustedActionInputText(input, ""),
 		Tags: append([]string(nil), rule.Tags...), LineNumber: 1,
-		enforcement: enforcement,
+		Proof: enforcement,
 	}))
 }
 

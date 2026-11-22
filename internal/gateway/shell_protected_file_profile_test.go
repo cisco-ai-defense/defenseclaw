@@ -237,8 +237,8 @@ func TestGAP0675ShellProtectedFileFloorDecision(t *testing.T) {
 	marked := RuleFinding{RuleID: "persistence.shell_profile_write", Severity: "HIGH", shellProtectedFile: true}
 	native := RuleFinding{RuleID: "persistence.ssh_authorized_keys_command", Severity: "CRITICAL"}
 	state := RuleFinding{RuleID: "tamper.detector_state_write", Severity: "HIGH"}
-	detection := RuleFinding{RuleID: "PATH-SSH-DIR", Severity: "HIGH", shellProtectedFile: true, enforcement: findingEnforcementDetectionOnly}
-	stateDetection := RuleFinding{RuleID: "tamper.detector_state_write", Severity: "HIGH", enforcement: findingEnforcementDetectionOnly}
+	detection := RuleFinding{RuleID: "PATH-SSH-DIR", Severity: "HIGH", shellProtectedFile: true, Proof: recordProof}
+	stateDetection := RuleFinding{RuleID: "tamper.detector_state_write", Severity: "HIGH", Proof: recordProof}
 	for _, tc := range []struct {
 		name         string
 		findings     []RuleFinding

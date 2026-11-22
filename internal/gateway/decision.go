@@ -428,12 +428,6 @@ func strictPackPosture(cfg *config.Config, connector string) bool {
 // a known keys or state proof made one proof block, alert or allow).
 func decideFinding(f RuleFinding) decide.Finding {
 	out := decide.Finding{RuleID: f.RuleID, Severity: decide.Severity(severityRank[f.Severity]), Proof: f.Proof}
-	switch f.enforcement {
-	case findingEnforcementDetectionOnly:
-		out.Proof = out.Proof.Record()
-	case findingEnforcementAlertOnly:
-		out.Proof = out.Proof.Advise()
-	}
 	if out.Proof.Kind == decide.KindUnspecified {
 		if legacy := legacyFindingProof(f); !legacy.IsZero() {
 			if out.Proof.Certainty == decide.CertMaybe {

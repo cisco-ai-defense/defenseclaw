@@ -1369,7 +1369,7 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 		}
 		detectionOnly := len(ruleFindings) > 0 && len(cgFindings) == 0
 		for _, finding := range ruleFindings {
-			if finding.enforcement != findingEnforcementDetectionOnly {
+			if !finding.Proof.Recorded() {
 				detectionOnly = false
 				break
 			}
@@ -2088,7 +2088,7 @@ func clampSourceScopeVerdict(verdict *ToolInspectVerdict) {
 	}
 	for i := range verdict.DetailedFindings {
 		verdict.DetailedFindings[i].Severity = "LOW"
-		verdict.DetailedFindings[i].enforcement = findingEnforcementDetectionOnly
+		verdict.DetailedFindings[i].Proof = verdict.DetailedFindings[i].Proof.Record()
 	}
 }
 

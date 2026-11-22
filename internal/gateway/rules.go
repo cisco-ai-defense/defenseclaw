@@ -78,8 +78,7 @@ type RuleFinding struct {
 	// profile is internal audit provenance for a profile-meet member. It is
 	// deliberately absent from hook and inspect responses, which can be read
 	// by an account whose group membership was not proven.
-	profile     string
-	enforcement findingEnforcement
+	profile string
 	// disposition is a private, value-free presentation class for trusted
 	// action findings. It lets benchmark and audit code distinguish an
 	// explicitly advisory result from audit-only evidence without changing the
@@ -129,8 +128,6 @@ type RuleFinding struct {
 	evaluationFault bool
 }
 
-type findingEnforcement uint8
-
 type findingDisposition uint8
 
 const (
@@ -152,24 +149,29 @@ const (
 	findingDispositionFlowSecretEgress
 )
 
-const (
-	// findingEnforcementInherit preserves the enforcement behavior of every
-	// finding produced before trusted semantic dispatch existed.
-	findingEnforcementInherit findingEnforcement = iota
-	findingEnforcementAllowed
-	findingEnforcementDetectionOnly
-	// findingEnforcementAlertOnly preserves a visible runtime alert while
-	// imposing a hard ceiling below confirm/block in every posture profile.
-	findingEnforcementAlertOnly
+// The proof marks of a reader that proved its pattern but knows no kind or
+// target (legacyFindingProof fills them in decideFinding). A reader never
+// picks an action or a ceiling: it says how sure it is, and the tier table
+// says what that is worth (DET111 R5; the 1.0.10 enforcement field and its
+// allowed, detection-only and alert-only values are gone).
+var (
+	// enforcingProof: the finding may enforce (the zero proof).
+	enforcingProof = decide.Proof{}
+	// recordProof: the finding is recorded and never moves the verdict
+	// (the table's record row).
+	recordProof = decide.Proof{}.Record()
+	// advisoryProof: the finding is an alert at most (the advisory row).
+	advisoryProof = decide.Proof{}.Advise()
 )
 
+// contributesToEnforcement reports a finding whose proof may enforce.
 func (f RuleFinding) contributesToEnforcement() bool {
-	return f.enforcement != findingEnforcementDetectionOnly &&
-		f.enforcement != findingEnforcementAlertOnly
+	return !f.Proof.Recorded() && !f.Proof.Advisory()
 }
 
+// contributesToAlertOnly reports an advisory finding.
 func (f RuleFinding) contributesToAlertOnly() bool {
-	return f.enforcement == findingEnforcementAlertOnly
+	return f.Proof.Advisory()
 }
 
 // ---------------------------------------------------------------------------
@@ -921,7 +923,7 @@ func scanContentRulesWithOptions(
 		// narrow scope and retain their original severity.
 		for i := range findings {
 			findings[i].Severity = "LOW"
-			findings[i].enforcement = findingEnforcementDetectionOnly
+			findings[i].Proof = findings[i].Proof.Record()
 		}
 	}
 	return findings

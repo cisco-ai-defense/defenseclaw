@@ -167,12 +167,11 @@ func containerSocketDispositionFinding(
 		t.Fatalf("rule %q not found", containerSocketDispositionRuleID)
 	}
 	return RuleFinding{
-		RuleID:      rule.ID,
-		Title:       rule.Title,
-		Severity:    rule.Severity,
-		Confidence:  rule.Confidence,
-		Tags:        append([]string(nil), rule.Tags...),
-		enforcement: findingEnforcementAllowed,
+		RuleID:     rule.ID,
+		Title:      rule.Title,
+		Severity:   rule.Severity,
+		Confidence: rule.Confidence,
+		Tags:       append([]string(nil), rule.Tags...),
 	}
 }
 

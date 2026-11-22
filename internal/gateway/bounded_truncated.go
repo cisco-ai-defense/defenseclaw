@@ -97,7 +97,7 @@ func unknownReasonFinding(title, reason string, enforcementCapable bool) RuleFin
 	finding.Title = title + " (" + reason + ")"
 	finding.Evidence = reason
 	if !enforcementCapable {
-		finding.enforcement = findingEnforcementAlertOnly
+		finding.Proof = finding.Proof.Advise()
 	}
 	return finding
 }
@@ -162,7 +162,7 @@ func withUnknownFinding(findings []RuleFinding, bound RuleFinding) []RuleFinding
 	existing.boundedCaps = existing.boundedCaps.Union(bound.boundedCaps)
 	if !existing.contributesToEnforcement() && !existing.contributesToAlertOnly() {
 		// A detection-only limit finding would leave the call allowed.
-		existing.enforcement = bound.enforcement
+		existing.Proof.Certainty, existing.Proof.Reach = bound.Proof.Certainty, bound.Proof.Reach
 		existing.proof = bound.proof
 	}
 	return out
@@ -226,7 +226,7 @@ func (v *ToolInspectVerdict) floorBoundedTruncated(set bounded.CapSet, tier boun
 	bound.Severity = "HIGH"
 	if floor == bounded.Alert {
 		bound.Severity = "MEDIUM"
-		bound.enforcement = findingEnforcementAlertOnly
+		bound.Proof = bound.Proof.Advise()
 	}
 	before, known := bounded.ParseAction(v.Action)
 	after := bounded.Floor(before, set, tier)

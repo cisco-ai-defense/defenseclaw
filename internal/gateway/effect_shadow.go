@@ -355,9 +355,9 @@ func effectShadowFindings(res EffectShadowResult, mode effectRulesMode) []RuleFi
 	f.proof = newFindingProof(findingProofEffect, rid, mode == effectRulesOn)
 	switch res.Action {
 	case guardrailActionAlert:
-		f.enforcement = findingEnforcementAlertOnly
+		f.Proof = f.Proof.Advise()
 	default:
-		f.enforcement = findingEnforcementInherit
+		f.Proof = f.Proof.Enforce()
 	}
 	return []RuleFinding{f}
 }

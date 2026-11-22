@@ -1597,7 +1597,7 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 				}
 			}
 			title := named.Title
-			enforcement := findingEnforcementAllowed
+			enforcement := enforcingProof
 			// A write the link walk held only because it could not resolve
 			// the target is not a known key write: outside the strict and
 			// managed tiers it warns (rel-1-0-10:GAP-0013, GAP-0004).
@@ -1607,7 +1607,7 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 				!trustedAuthorizedKeysWriteProofWith(input, facts, false, clientGlobFacts(request), request.targetMemo) &&
 				!trustedSandboxGuestAuthorizedKeysWrite(request)
 			if unprovenOnly {
-				enforcement = findingEnforcementAlertOnly
+				enforcement = advisoryProof
 			}
 			// A command held as a key write only because words of statements
 			// that read the keys file name it, in a per-user default or
@@ -1619,7 +1619,7 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 			// pack (rel-1-0-10:GAP-0843).
 			readsOnly := (nonWriteMention || unknownMention) && !unprovenOnly && named.ID == rule.ID
 			if readsOnly {
-				enforcement = findingEnforcementAlertOnly
+				enforcement = advisoryProof
 			}
 			// A copy of the user's own SSH folder content to a private place of the
 			// same home, with nothing else written, alerts in every pack: it is
@@ -1627,7 +1627,7 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 			ownFolderCopy := !unprovenOnly && !readsOnly && named.ID == rule.ID &&
 				trustedActionOwnSSHFolderCopy(request, input)
 			if ownFolderCopy {
-				enforcement = findingEnforcementAlertOnly
+				enforcement = advisoryProof
 			}
 			if ownFolderCopy {
 				title = ownSSHFolderCopyTitle
@@ -1649,7 +1649,7 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 				RuleID: named.ID, Title: title, Severity: rule.Severity,
 				Confidence: rule.Confidence, Evidence: trustedActionInputText(input, ""),
 				Tags: append([]string(nil), named.Tags...), LineNumber: 1,
-				enforcement: enforcement,
+				Proof: enforcement,
 			})
 			if named.ID == rule.ID &&
 				(trustedAuthorizedKeysSymlinkWrite(input) || resolvedTarget && !overBudget && !unresolved) {
@@ -2067,19 +2067,19 @@ func appendTrustedSSHPrivateKeyWriteFinding(
 	if !ok {
 		return findings
 	}
-	enforcement := findingEnforcementAlertOnly
+	enforcement := advisoryProof
 	if !request.EnforcementCapable {
-		enforcement = findingEnforcementDetectionOnly
+		enforcement = recordProof
 	}
 	return append(findings, adjustConfidence(input.Tool, RuleFinding{
-		RuleID:      rule.ID,
-		Title:       rule.Title,
-		Severity:    rule.Severity,
-		Confidence:  rule.Confidence,
-		Evidence:    trustedActionInputText(input, ""),
-		Tags:        append([]string(nil), rule.Tags...),
-		LineNumber:  1,
-		enforcement: enforcement,
+		RuleID:     rule.ID,
+		Title:      rule.Title,
+		Severity:   rule.Severity,
+		Confidence: rule.Confidence,
+		Evidence:   trustedActionInputText(input, ""),
+		Tags:       append([]string(nil), rule.Tags...),
+		LineNumber: 1,
+		Proof:      enforcement,
 	}))
 }
 
