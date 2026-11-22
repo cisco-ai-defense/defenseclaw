@@ -56,6 +56,11 @@ type StartOptions struct {
 	StateDir string
 	// GitDepth is the history depth of the copy (200 by default).
 	GitDepth int
+	// Upstream makes a "this checkout" copy (run --clone .): only the
+	// unpushed commits and the working tree go up, and Send has the actor
+	// fetch the rest of the branch's history from its remote. Windows (the
+	// host copy) does not take it; the CLI clones there instead.
+	Upstream bool
 	// MaxBytes caps the copy at the limit reported by the cluster.
 	MaxBytes int64
 	// Masks add secret-file globs to the built-in rules; Unmask shares a
@@ -163,13 +168,16 @@ func Preflight(ctx context.Context, opts StartOptions) (*PreparedUpload, error) 
 	}
 	p := &PreparedUpload{opts: opts}
 	var err error
+	if hostCopy && opts.Upstream {
+		return nil, errors.New("workspace: a this-checkout copy needs the git copy pipeline, which this system does not run")
+	}
 	if hostCopy && (opts.Transport == nil || isRelayClient(opts.Transport)) {
 		p.host, err = prepareHostUpload(ctx, opts, &p.summary)
 		p.bytes = p.summary.Bytes
 	} else {
 		p.copy, err = osw.PrepareCopy(ctx, osw.StageOptions{
 			Project: opts.Project, DataDir: opts.DataDir, Home: opts.Home, Protected: opts.Protected,
-			RemoteRoot: opts.RemoteRoot, GitDepth: opts.GitDepth, MaxBytes: opts.MaxBytes,
+			RemoteRoot: opts.RemoteRoot, GitDepth: opts.GitDepth, MaxBytes: opts.MaxBytes, Upstream: opts.Upstream,
 			FolderName: hostFolderName(opts.Project), Summary: &p.summary,
 			Masks: opts.Masks, Unmask: opts.Unmask, UnmaskAsked: opts.UnmaskAsked,
 			Detector: opts.Detector, DisableContentScan: opts.DisableContentScan,
@@ -191,6 +199,31 @@ func Preflight(ctx context.Context, opts StartOptions) (*PreparedUpload, error) 
 func isRelayClient(t osw.Transport) bool {
 	_, ok := t.(*Client)
 	return ok
+}
+
+// Upstream is the remote side of a this-checkout copy, nil for any other.
+func (p *PreparedUpload) Upstream() *osw.Upstream {
+	if p.copy == nil {
+		return nil
+	}
+	return p.copy.Record().Upstream
+}
+
+// UpstreamLine says what a this-checkout copy sends ("" for any other).
+func (p *PreparedUpload) UpstreamLine() string {
+	up := p.Upstream()
+	if up == nil {
+		return ""
+	}
+	return fmt.Sprintf("Sending %s and %s (%s).", upPlural(up.Commits, "unpushed commit", "unpushed commits"),
+		upPlural(up.Changes, "uncommitted change", "uncommitted changes"), uploadSize(p.bytes))
+}
+
+func upPlural(n int, one, many string) string {
+	if n == 1 {
+		return "1 " + one
+	}
+	return fmt.Sprintf("%d %s", n, many)
 }
 
 // Close discards a local stage that has not been sent.
@@ -267,6 +300,11 @@ func (p *PreparedUpload) Send(ctx context.Context, name string, t osw.Transport)
 		return nil, cleanErr("record the copy's baseline in the actor", err)
 	}
 	removePrevState(ctx, t, prev, rec)
+	if rec.Upstream != nil {
+		if rec, err = osw.FetchUpstream(ctx, opts.DataDir, name, t); err != nil {
+			return nil, cleanErr("fetch the branch history in the actor", err)
+		}
+	}
 	return &StartResult{CopyRecord: rec, KeptBack: rec.HeldBack, Unmasked: rec.Unmasked, Warnings: rec.Warnings}, nil
 }
 

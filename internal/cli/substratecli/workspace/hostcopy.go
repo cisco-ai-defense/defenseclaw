@@ -71,6 +71,10 @@ import (
 // it on any OS.
 var hostCopy = runtime.GOOS == "windows"
 
+// UsesHostCopy reports whether copies on this system are host copies (no
+// git history in the actor).
+func UsesHostCopy() bool { return hostCopy }
+
 const hostRecordVersion = 1
 
 // hostRecord is the launcher's record of one host copy (mode 0600, under

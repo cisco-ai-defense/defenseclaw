@@ -667,20 +667,31 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             'running and follow it with "defenseclaw substrate logs -f NAME".\n'
             "With --batch FILE every task gets its own agent on the same folder; --parallel limits how many run "
             "at once.\n"
-            "With --clone URL the agent starts from a repository instead of a copy of the folder. Arguments "
-            "after -- go\n"
-            "to the agent."
+            "With --clone URL the agent starts from a repository instead of a copy of the folder. With --clone . "
+            "(Preview)\n"
+            "it starts from this checkout: the agent fetches the branch's history from its remote, and only the "
+            "unpushed\n"
+            "commits and uncommitted changes are sent from here. Arguments after -- go to the agent."
         ),
         example=(
             "defenseclaw substrate run claude\n"
             'defenseclaw substrate run codex --task "fix the failing tests" --detach\n'
             "defenseclaw substrate run claude --batch tasks.yaml --parallel 5\n"
-            "defenseclaw substrate run claude --clone https://git.example.test/team/app.git"
+            "defenseclaw substrate run claude --clone https://git.example.test/team/app.git\n"
+            "defenseclaw substrate run claude --clone ."
         ),
         args=(_Arg("agent"), _Arg("agent_args", required=False, many=True)),
         flags=(
             _Flag("batch", "string", "run every task in this YAML file, one agent each", metavar="ID"),
-            _Flag("clone", "string", "start from this repository instead of a copy of the folder", metavar="URL"),
+            _Flag(
+                "clone",
+                "string",
+                (
+                    "start from this repository instead of a copy of the folder; . for this checkout with its history "
+                    "(Preview)"
+                ),
+                metavar="URL",
+            ),
             _Flag("context", "string", "cluster to use (default: the one you signed in to last)", metavar="NAME"),
             _Flag("detach", "bool", "with --task, start it and return; follow it with logs -f", short="d"),
             _Flag(

@@ -25,16 +25,19 @@ import (
 
 // substrateRunFlags are the flags of run.
 type substrateRunFlags struct {
-	out         substrateOutput
-	com         substrateCommon
-	profile     string
-	template    string
-	name        string
-	task        string
-	batch       string
-	parallel    int
-	detach      bool
-	clone       string
+	out      substrateOutput
+	com      substrateCommon
+	profile  string
+	template string
+	name     string
+	task     string
+	batch    string
+	parallel int
+	detach   bool
+	clone    string
+	// cloneHere: --clone named this checkout and the folder copy carries
+	// its upstream (set by substratePrepareCloneHere, not a flag).
+	cloneHere   bool
 	ref         string
 	noUpload    bool
 	unmask      []string
@@ -70,12 +73,14 @@ With --task the agent runs headless without you: asks are denied, or queued for 
 unattended_asks is queue, and the run is checked as strictly as an unattended job. Add --detach to leave it
 running and follow it with "defenseclaw substrate logs -f NAME".
 With --batch FILE every task gets its own agent on the same folder; --parallel limits how many run at once.
-With --clone URL the agent starts from a repository instead of a copy of the folder. Arguments after -- go
-to the agent.`,
+With --clone URL the agent starts from a repository instead of a copy of the folder. With --clone . (Preview)
+it starts from this checkout: the agent fetches the branch's history from its remote, and only the unpushed
+commits and uncommitted changes are sent from here. Arguments after -- go to the agent.`,
 		Example: "defenseclaw substrate run claude\n" +
 			"defenseclaw substrate run codex --task \"fix the failing tests\" --detach\n" +
 			"defenseclaw substrate run claude --batch tasks.yaml --parallel 5\n" +
-			"defenseclaw substrate run claude --clone https://git.example.test/team/app.git",
+			"defenseclaw substrate run claude --clone https://git.example.test/team/app.git\n" +
+			"defenseclaw substrate run claude --clone .",
 		Args: func(cmd *cobra.Command, args []string) error {
 			if len(args) == 0 {
 				return errors.New("name the agent: claude, codex, copilot, opencode, kiro, hermes or antigravity")
@@ -97,7 +102,7 @@ to the agent.`,
 	fl.StringVar(&f.batch, "batch", "", "run every task in this YAML file, one agent each")
 	fl.IntVar(&f.parallel, "parallel", 0, "with --batch, how many agents run at once (default 4)")
 	fl.BoolVarP(&f.detach, "detach", "d", false, "with --task, start it and return; follow it with logs -f")
-	fl.StringVar(&f.clone, "clone", "", "start from this repository instead of a copy of the folder")
+	fl.StringVar(&f.clone, "clone", "", "start from this repository instead of a copy of the folder; . for this checkout with its history (Preview)")
 	fl.StringVar(&f.ref, "ref", "", "with --clone, the branch, tag or commit")
 	fl.BoolVar(&f.noUpload, "no-upload", false, "start with an empty folder; upload nothing")
 	fl.StringArrayVar(&f.unmask, "unmask", nil, "send a held-back secret file or pattern anyway (repeatable)")

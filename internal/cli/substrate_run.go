@@ -529,8 +529,10 @@ func runSubstrateRun(cmd *cobra.Command, f *substrateRunFlags, args []string) er
 		return cliusage.WithExitCode(errors.New("--parallel goes with --batch"), 2)
 	case f.clone != "" && f.noUpload:
 		return cliusage.WithExitCode(errors.New("--clone and --no-upload both say what the agent starts with; use one"), 2)
-	case f.clone != "" && workspace.CheckCloneURL(f.clone) != nil:
+	case f.clone != "" && !substrateCloneHere(f.clone) && workspace.CheckCloneURL(f.clone) != nil:
 		return cliusage.WithExitCode(workspace.CheckCloneURL(f.clone), 2)
+	case f.ref != "" && f.clone != "" && substrateCloneHere(f.clone):
+		return cliusage.WithExitCode(errors.New("--ref goes with --clone URL; --clone . starts at this checkout's HEAD"), 2)
 	case workspace.CheckCloneRef(f.ref) != nil:
 		return cliusage.WithExitCode(workspace.CheckCloneRef(f.ref), 2)
 	case f.ref != "" && f.clone == "":
@@ -552,7 +554,12 @@ func runSubstrateRun(cmd *cobra.Command, f *substrateRunFlags, args []string) er
 		agentArgs = args[dash:]
 	}
 	project := ""
-	if f.clone == "" && !f.noUpload {
+	if f.clone != "" && substrateCloneHere(f.clone) {
+		if project, err = substratePrepareCloneHere(cmd, f); err != nil {
+			return err
+		}
+	}
+	if f.clone == "" && !f.noUpload && project == "" {
 		project, err = os.Getwd()
 		if err != nil {
 			return err

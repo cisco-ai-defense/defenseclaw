@@ -93,6 +93,11 @@ type StageOptions struct {
 	StateDir string
 	// GitDepth is the history depth of the shallow clone (200).
 	GitDepth int
+	// Upstream stages a "this checkout" copy (run --clone .): the history
+	// is only the commits after the merge-base with the remote-tracking
+	// branch, and the sandbox fetches the rest from the remote
+	// (FetchUpstream). The folder must be the top of a checkout.
+	Upstream bool
 	// MaxBytes caps the staged copy, history included (500 MiB).
 	MaxBytes int64
 	// Summary optionally collects working-tree sizes after exclusions and masking.
@@ -161,7 +166,9 @@ type CopyRecord struct {
 	Unmasked []string `json:"unmasked,omitempty"`
 	// Withheld counts the committed blobs left out of the shipped history
 	// (see withholdHistory); the copy is then a partial clone.
-	Withheld   int        `json:"withheld,omitempty"`
+	Withheld int `json:"withheld,omitempty"`
+	// Upstream is set for a "this checkout" copy (StageOptions.Upstream).
+	Upstream   *Upstream  `json:"upstream,omitempty"`
 	Files      int        `json:"files"`
 	Bytes      int64      `json:"bytes"`
 	StagedAt   time.Time  `json:"staged_at"`
@@ -514,7 +521,11 @@ func stageCopy(ctx context.Context, lay layout, opts StageOptions) (*CopyRecord,
 	if scanOpts.detector == nil {
 		scanOpts.detector = DefaultSecretDetector()
 	}
-	if isGitTopLevel(ctx, real) {
+	gitTop := isGitTopLevel(ctx, real)
+	if opts.Upstream && !gitTop {
+		return nil, "", &UpstreamError{Msg: real + " is not the top folder of a git checkout; --clone . needs one (or use run without --clone .)"}
+	}
+	if gitTop {
 		rec.Kind = CopyGit
 		rec.RemoteGitDir = path.Join(rec.RemoteDir, ".git")
 		err = stageGit(ctx, rec, opts, scanOpts, maxBytes)
@@ -651,6 +662,11 @@ func stageGit(ctx context.Context, rec *CopyRecord, opts StageOptions, scanOpts 
 		return err
 	}
 	rec.Head, rec.Branch = head, branch
+	if opts.Upstream {
+		if rec.Upstream, err = resolveUpstream(ctx, proj, head, branch); err != nil {
+			return err
+		}
+	}
 
 	// The working tree to ship: tracked files still present plus untracked
 	// files git does not ignore.
@@ -729,6 +745,12 @@ func stageGit(ctx context.Context, rec *CopyRecord, opts StageOptions, scanOpts 
 	depth := opts.GitDepth
 	if depth <= 0 {
 		depth = DefaultGitDepth
+	}
+	if rec.Upstream != nil {
+		// Every commit of base..HEAD is at most Commits-1 steps from HEAD
+		// and base at most Commits, so this depth ships them and base and
+		// stops there; the sandbox fetches the rest (FetchUpstream).
+		depth = rec.Upstream.Commits + 1
 	}
 	if head != "" {
 		source := "file://" + rec.Project
@@ -838,6 +860,13 @@ func stageGit(ctx context.Context, rec *CopyRecord, opts StageOptions, scanOpts 
 		return err
 	}
 	rec.Baseline = baseline
+	if rec.Upstream != nil {
+		changed, err := sg.output(ctx, "diff-tree", "-r", "-z", "--name-only", "--no-commit-id", head, baseline)
+		if err != nil {
+			return err
+		}
+		rec.Upstream.Changes = len(splitNUL(changed))
+	}
 	if head != "" {
 		// Held-back files stay out of the shipped history as well, and so
 		// does every version of a path the name rules cover.

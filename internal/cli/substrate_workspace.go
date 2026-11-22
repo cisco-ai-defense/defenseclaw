@@ -24,12 +24,15 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/spf13/cobra"
 
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/api"
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/attach"
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/auth"
+	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/safetext"
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/workspace"
 	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	osw "github.com/defenseclaw/defenseclaw/internal/openshell/workspace"
@@ -95,7 +98,7 @@ func substratePreflight(ctx context.Context, cmd *cobra.Command, s *substrateSes
 	home, _ := os.UserHomeDir()
 	prepared, err := workspace.Preflight(ctx, workspace.StartOptions{
 		Project: project, DataDir: auth.StateDir(), Home: home, RemoteRoot: f.remoteDir, MaxBytes: maxBytes,
-		Masks: f.exclude, Unmask: f.unmask, UnmaskAsked: f.unmask, Replace: true,
+		Masks: f.exclude, Unmask: f.unmask, UnmaskAsked: f.unmask, Replace: true, Upstream: f.cloneHere,
 	})
 	if err != nil {
 		var big *workspace.TooLargeError
@@ -105,7 +108,67 @@ func substratePreflight(ctx context.Context, cmd *cobra.Command, s *substrateSes
 		return nil, fmt.Errorf("could not stage the folder: %w", err)
 	}
 	prepared.Preview(w)
+	if line := prepared.UpstreamLine(); line != "" {
+		fmt.Fprintln(w, line)
+	}
 	return prepared, nil
+}
+
+// substrateCloneHere reports whether --clone names this checkout ("." or a
+// folder) rather than a repository address.
+func substrateCloneHere(v string) bool {
+	if v == "." {
+		return true
+	}
+	if strings.Contains(v, "://") {
+		return false
+	}
+	st, err := os.Stat(v)
+	return err == nil && st.IsDir()
+}
+
+// substratePrepareCloneHere turns run --clone . (B2 2.3, Preview) into a
+// copy of the checkout that carries its upstream: only the unpushed commits
+// and the working tree go up and the agent fetches the rest of the history
+// from the remote. It returns the folder to copy. Windows copies have no git
+// history (the host copy), so there the agent clones the remote at the
+// branch instead, which needs the local work pushed: it returns "" and sets
+// --clone to the remote's address.
+func substratePrepareCloneHere(cmd *cobra.Command, f *substrateRunFlags) (string, error) {
+	ctx := cmd.Context()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	dir, err := filepath.Abs(f.clone)
+	if err != nil {
+		return "", err
+	}
+	if err := substrateCheckProject(dir); err != nil {
+		return "", err
+	}
+	up, err := osw.ResolveUpstream(ctx, dir)
+	if err != nil {
+		var refused *osw.UpstreamError
+		if errors.As(err, &refused) {
+			return "", cliusage.WithExitCode(err, 2)
+		}
+		return "", fmt.Errorf("could not read the checkout: %w", err)
+	}
+	if err := workspace.CheckCloneURL(up.URL); err != nil {
+		return "", cliusage.WithExitCode(err, 2)
+	}
+	if !workspace.UsesHostCopy() {
+		f.cloneHere, f.clone = true, ""
+		return dir, nil
+	}
+	if up.Commits > 0 || up.Dirty {
+		return "", cliusage.WithExitCode(errors.New("on Windows, --clone . does not send unpushed commits or uncommitted changes yet; commit and push them first, or use run without --clone ."), 2)
+	}
+	f.clone, f.ref = up.URL, up.Base
+	if up.AtTip && up.Branch != "" && up.Branch != "HEAD" {
+		f.ref = up.Branch
+	}
+	return "", nil
 }
 
 // substrateUploadFolder sends the prepared copy and reports what was kept back.
@@ -116,7 +179,12 @@ func substrateUploadFolder(ctx context.Context, cmd *cobra.Command, s *substrate
 		return err
 	}
 	defer rel.Close()
-	fmt.Fprintln(w, "Copying this folder into the agent...")
+	up := prepared.Upstream()
+	if up != nil {
+		fmt.Fprintf(w, "Cloning %s (branch %s) in the agent...\n", safetext.Line(up.URL), safetext.Line(up.Branch))
+	} else {
+		fmt.Fprintln(w, "Copying this folder into the agent...")
+	}
 	res, err := prepared.Send(ctx, substrateCopyName(a), rel.Client)
 	if err != nil {
 		var refused *workspace.HTTPError
@@ -127,6 +195,9 @@ func substrateUploadFolder(ctx context.Context, cmd *cobra.Command, s *substrate
 	}
 	if prepared.UsesHigherUploadLimit() && !rel.Client.ReportsUploadLimit() {
 		fmt.Fprintln(w, "Note: this agent's image caps uploads at 1 GiB; rebuild the template to use your cluster's limit.")
+	}
+	if up != nil {
+		fmt.Fprintf(w, "The agent has the full history of %s.\n", safetext.Line(up.Branch))
 	}
 	if line := res.KeptBackLine(); line != "" {
 		fmt.Fprintln(w, "Held back from the copy: "+line[len("kept back: "):]+". Share one anyway with --unmask.")
