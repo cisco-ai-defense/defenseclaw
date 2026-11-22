@@ -90,7 +90,9 @@ func gap0747SplitState(findings []RuleFinding) (*RuleFinding, []RuleFinding) {
 	var rest []RuleFinding
 	var state *RuleFinding
 	for i := range findings {
-		if findings[i].RuleID == gap0747StateRule {
+		// A link-held state write (GAP-1568) carries the keys hold's own
+		// verdict, not the state write's tier: it stays with the rest.
+		if findings[i].RuleID == gap0747StateRule && !findings[i].linkHeld {
 			state = &findings[i]
 			continue
 		}
