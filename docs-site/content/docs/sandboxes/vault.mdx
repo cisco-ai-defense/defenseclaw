@@ -201,28 +201,58 @@ The first line of `defenseclaw sandbox vault list` says how the vault is kept
 | `sealed (Secret Service)` | Each value is encrypted. The key is in your Secret Service keyring (GNOME Keyring or KWallet), reached through `secret-tool`. |
 | `file (owner-only, not encrypted)` | No keystore was usable, or `DEFENSECLAW_VAULT_STORE=file` is set. Anything running as your account can read the values, as it can read your shell environment. |
 
-The CLI seals the vault when it changes it and a keystore is usable: a vault
-kept as a plain file is sealed by your next `sandbox vault` change, and the
-command says so. Over SSH, in a service, or on Linux without a desktop keyring
-the keystore is often not usable; the vault then stays a plain file and the
-change says why. Set `DEFENSECLAW_VAULT_STORE=file` to keep it a plain file.
+Sealing starts the first time one of these commands runs with a usable
+keystore: `defenseclaw sandbox setup`, `defenseclaw sandbox run` (before it
+creates or resumes a sandbox), or a change to the vault (`sandbox vault add`,
+`replace`, `bind`, `rename`, `remove`, `confirm`). With no vault yet it makes an
+empty sealed one, so every secret captured after that point is sealed when it
+is written. The command that seals the vault says so. `vault list` and
+`vault show` only read: they never seal.
+
+The gateway and the sandbox daemon never seal a plain-file vault themselves. A
+secret they capture into a vault that is still a plain file (a sandbox that was
+already running when you upgraded, or a run while no keystore was usable) is
+written to that file as before, and is sealed with the rest by the next
+`sandbox run`, `sandbox setup` or vault change that can use the keystore.
+
+Over SSH, in a service, or on Linux without a desktop keyring the keystore is
+often not usable; the vault then stays a plain file and `sandbox setup`, the
+vault change and `vault list` say why. Set `DEFENSECLAW_VAULT_STORE=file` to
+keep it a plain file, or `DEFENSECLAW_VAULT_STORE=keychain` to require sealing:
+a vault change and `sandbox run` then stop with a message when the keystore
+cannot keep the key, instead of writing a plain file.
 
 Names, hosts, status and use times stay readable, so `vault list` and
 `vault show` work without the key. The gateway and the sandbox daemon store a
 captured secret with the vault's public key only: they never read the
 keystore, so capture also works where the keystore cannot be reached, and it
-never asks you anything.
+never asks you anything. `vault confirm` works without the key too; it then
+shows the secret's other details and says its last characters are not
+readable.
 
 A sealed vault is never written back as a plain file. When its key cannot be
 read (keychain locked over SSH, no Secret Service in this session,
-`DEFENSECLAW_VAULT_STORE=file`), listing, showing, removing and capture keep
-working; adding, replacing, binding or renaming a secret and
+`DEFENSECLAW_VAULT_STORE=file`), listing, showing, confirming, removing and
+capture keep working; adding, replacing, binding or renaming a secret and
 `sandbox run --vault` stop with a message that says why. Unlock the keychain
 (`security unlock-keychain` on macOS) or run the command in your desktop
-session. If the key is gone (keychain reset, a vault copied from another
-account or computer) the values cannot be opened: move `vault.json` aside and
-add the secrets again. A vault file that was changed or damaged is refused and
-left as it is.
+session. After an upgrade, the macOS keychain may also refuse the new
+DefenseClaw build over SSH until you allow it once in a desktop session. On
+Linux, `secret-tool` answers the same way for a missing key and for a keyring
+that is locked or whose unlock was dismissed, so DefenseClaw asks you to unlock
+the keyring and never treats the key as gone. Only if you know the key is gone
+(keychain reset, a vault copied from another account or computer) are the
+values lost: move `vault.json` aside and add the secrets again.
+
+Each sealed value is tied to its entry's name, host and port: a value moved to
+another entry or pointed at another host does not open, and a vault that fails
+this check, or whose header is damaged, is refused and left as it is. The other
+fields (confirmed, exposed, where a secret came from, when it was used) are not
+protected: a program that can write the file as your account can change them.
+
+A key made for a change that was then not written stays in the macOS keychain
+as an unused `defenseclaw-vault` item. It opens nothing; you can delete it in
+Keychain Access.
 
 What sealing protects: a copy of the file (a backup, a synced folder, a copied
 home directory, a program that collects files) does not show the values. What

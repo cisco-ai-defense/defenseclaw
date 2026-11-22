@@ -693,6 +693,9 @@ const (
 	needNothing need = iota
 	// needValues: every value open (to compare or to re-seal), so the key.
 	needValues
+	// needSeal: nothing changes; a file vault is written only when this
+	// change seals it (Seal).
+	needSeal
 )
 
 // update reads, changes and writes the vault under the writer lock.
@@ -720,6 +723,12 @@ func (s *Store) updateWait(wait time.Duration, n need, change func(*file) error)
 	f, err := s.read()
 	if err == nil {
 		err = p.apply(f, n)
+	}
+	if err == nil && n == needSeal && !p.fresh {
+		// No key was made, or another process sealed the vault meanwhile:
+		// nothing is written.
+		p.done(f)
+		return nil
 	}
 	if err == nil {
 		err = change(f)

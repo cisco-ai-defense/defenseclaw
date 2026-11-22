@@ -847,6 +847,8 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) (retErr error) {
 		a.note("the first run of each image uses about 12 GiB while preparing its MicroVM disk (about a minute; OpenShell keeps the prepared disk)")
 	}
 	a.importIngressProfile(ctx)
+	// The vault is sealed before a sandbox can capture a secret into it.
+	a.setupSealVault()
 
 	// 8. The daemon picks the change up, the driver included.
 	var driver openshell.ComputeDriver

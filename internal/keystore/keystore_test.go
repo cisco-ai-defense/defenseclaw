@@ -56,7 +56,44 @@ func TestSecretToolLookupStoreClear(t *testing.T) {
 	}
 }
 
+// Listed finds an item, locked or not, without --unlock and without
+// returning anything it printed; nothing listed and a failing helper differ.
+func TestSecretToolListed(t *testing.T) {
+	var out []byte
+	var exit int
+	var stderr string
+	var gotArgs []string
+	st := SecretTool{Bin: "/bin/secret-tool", Run: func(_ context.Context, _ []byte, name string, args ...string) ([]byte, string, int, error) {
+		gotArgs = append([]string{name}, args...)
+		return out, stderr, exit, nil
+	}}
+	out = []byte("[/org/freedesktop/secrets/collection/login/7]\nlabel = x\nattribute.service = s\n")
+	if ok, err := st.Listed(context.Background(), "service", "s", "account", "a"); !ok || err != nil {
+		t.Fatalf("listed = %v %v", ok, err)
+	}
+	if strings.Join(gotArgs, " ") != "/bin/secret-tool search service s account a" {
+		t.Fatalf("argv = %v", gotArgs)
+	}
+	for _, o := range [][]byte{nil, []byte("label = x\n")} {
+		out = o
+		if ok, err := st.Listed(context.Background(), "service", "s"); ok || err != nil {
+			t.Fatalf("not listed = %v %v", ok, err)
+		}
+	}
+	out, exit = nil, 1
+	if ok, err := st.Listed(context.Background(), "service", "s"); ok || err != nil {
+		t.Fatalf("exit 1 = %v %v", ok, err)
+	}
+	stderr = "Cannot autolaunch D-Bus"
+	if _, err := st.Listed(context.Background(), "service", "s"); err == nil || !strings.Contains(err.Error(), "D-Bus") {
+		t.Fatalf("no dbus = %v", err)
+	}
+}
+
 func TestMacStatusReasonAndFirstLine(t *testing.T) {
+	if r := MacStatusReason(StatusInteractionNotAllowed); !strings.Contains(r, "locked") || !strings.Contains(r, "upgrade") {
+		t.Fatalf("interaction not allowed = %q", r)
+	}
 	if !strings.Contains(MacStatusReason(StatusInteractionNotAllowed), "locked") ||
 		!strings.Contains(MacStatusReason(StatusUserCanceled), "declined") ||
 		!strings.Contains(MacStatusReason(-1), "-1") {

@@ -55,7 +55,9 @@ type Keychain interface {
 func MacStatusReason(st int32) string {
 	switch st {
 	case StatusInteractionNotAllowed, StatusAuthFailed:
-		return "the macOS keychain is locked and this session cannot ask you to unlock it (for example over SSH)"
+		return "the macOS keychain is locked, or its DefenseClaw item does not trust this DefenseClaw build yet " +
+			"(as after an upgrade), and this session cannot ask you (for example over SSH); run the command once " +
+			"in a Terminal on the Mac's desktop to unlock the keychain or allow this build"
 	case StatusUserCanceled:
 		return "you declined the macOS keychain request"
 	case StatusNoSuchKeychain, StatusDefaultKeychainMissing:
@@ -71,8 +73,11 @@ type SecretTool struct {
 	Bin string
 }
 
-// Lookup returns the secret stored under attrs; found is false when there
-// is none.
+// Lookup returns the secret stored under attrs; found is false when
+// secret-tool gives none. secret-tool answers the same way (exit 1, nothing
+// on stderr) when the item is missing and when the keyring is locked and its
+// unlock was dismissed or could not be asked for: found false does not prove
+// the item is gone (Listed tells the two apart where it can).
 func (s SecretTool) Lookup(ctx context.Context, attrs ...string) (secret []byte, found bool, err error) {
 	out, stderr, exit, err := s.Run(ctx, nil, s.Bin, append([]string{"lookup"}, attrs...)...)
 	if err != nil {
@@ -89,6 +94,30 @@ func (s SecretTool) Lookup(ctx context.Context, attrs ...string) (secret []byte,
 		return nil, false, nil
 	}
 	return out, true, nil
+}
+
+// Listed says whether the Secret Service lists an item under attrs, locked
+// or not, without unlocking anything (secret-tool search, no --unlock). The
+// listing of an unlocked item carries its secret: only the item lines are
+// looked at, and the output is cleared.
+func (s SecretTool) Listed(ctx context.Context, attrs ...string) (bool, error) {
+	out, stderr, exit, err := s.Run(ctx, nil, s.Bin, append([]string{"search"}, attrs...)...)
+	defer clear(out)
+	if err != nil {
+		return false, err
+	}
+	if exit != 0 {
+		if exit == 1 && strings.TrimSpace(stderr) == "" {
+			return false, nil // nothing listed
+		}
+		return false, toolError("search for", exit, stderr)
+	}
+	for _, l := range bytes.Split(out, []byte("\n")) {
+		if bytes.HasPrefix(bytes.TrimSpace(l), []byte("[/")) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // Store keeps secret under attrs with label.

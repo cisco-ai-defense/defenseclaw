@@ -7396,10 +7396,11 @@
     {
       "name": "DEFENSECLAW_VAULT_STORE",
       "category": "runtime_path",
-      "purpose": "Where the CLI keeps the sandbox credential vault: auto seals it with a key in the operating system keystore (macOS Keychain, Linux Secret Service) when one is usable; file keeps it in a file readable only by you, not encrypted.",
+      "purpose": "Where the CLI keeps the sandbox credential vault: auto seals it with a key in the operating system keystore (macOS Keychain, Linux Secret Service) when one is usable; keychain requires that, and a vault change or sandbox run stops when the keystore cannot keep the key; file keeps it in a file readable only by you, not encrypted.",
       "default": "unset (auto: sealed when a keystore is usable, else the owner-only file)",
       "accepted_values": [
         "auto",
+        "keychain",
         "file",
         "unset"
       ],

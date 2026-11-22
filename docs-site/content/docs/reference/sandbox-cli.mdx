@@ -1993,8 +1993,9 @@ before DefenseClaw captured it.
 
 The first line says how the vault is kept: `sealed (macOS Keychain)`,
 `sealed (Secret Service)` or `file (owner-only, not encrypted)`. `--json`
-carries it as `storage` and `sealed` (and `storage_note` when a plain file is
-not sealed, with the reason). See
+carries it as `storage` and `sealed`, with `storage_note` when a plain file is
+not sealed (the reason) or when this session cannot read a sealed vault's key
+(commands that need its values then fail). See
 [Where the vault lives](/docs/sandboxes/vault#where-the-vault-lives).
 
 ```bash

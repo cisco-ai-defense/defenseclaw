@@ -254,6 +254,10 @@ func (a *App) Run(ctx context.Context, o RunOptions) (err error) {
 	if note := copyPolicyNote(ex, o, drv); note != "" {
 		a.note(note)
 	}
+	// The vault is sealed before a sandbox can capture a secret into it.
+	if err := a.sealVault(); err != nil {
+		return err
+	}
 
 	// Resume this folder's sandbox instead of starting another. The
 	// sandbox keeps the settings it was created with, so flags that only a

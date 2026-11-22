@@ -55,7 +55,18 @@ func (s *Store) Storage() (Storage, error) {
 	}
 	if f.sealer != nil {
 		name := keystoreName(f.sealer.h.Keystore)
-		return Storage{Mode: "sealed", Keystore: name, Label: "sealed (" + name + ")"}, nil
+		st := Storage{Mode: "sealed", Keystore: name, Label: "sealed (" + name + ")"}
+		if s.keys != nil {
+			ks, why, err := s.keys()
+			switch {
+			case err != nil:
+				st.Note = err.Error()
+			case ks == nil:
+				st.Note = "this session does not read the vault key (" + why + "), so commands that need its values " +
+					"(add, replace, bind, rename, run --vault) fail; the vault stays sealed"
+			}
+		}
+		return st, nil
 	}
 	st := Storage{Mode: "file", Label: StorageFileLabel}
 	if s.keys != nil {
@@ -181,23 +192,60 @@ func (s *Store) prepare(n need, change func(*file) error) (*prepared, error) {
 	}
 	sl, raw, err := newSealer(ks.ID())
 	if err != nil {
-		p.why = err.Error()
-		return p, nil
+		return p.fileOnly(ks, err.Error())
 	}
 	defer clear(raw)
 	if err := ks.Save(sl.h.KeyID, raw); err != nil {
-		p.why = fmt.Sprintf("your %s could not keep the vault key: %v", ks.Name(), err)
-		return p, nil
+		return p.fileOnly(ks, fmt.Sprintf("your %s could not keep the vault key: %v", ks.Name(), err))
 	}
 	got, err := ks.Load(sl.h.KeyID)
-	if err != nil || !bytes.Equal(got, raw) {
-		ks.Delete(sl.h.KeyID)
-		p.why = fmt.Sprintf("your %s did not give the vault key back", ks.Name())
-		return p, nil
-	}
+	same := err == nil && bytes.Equal(got, raw)
 	clear(got)
+	if !same {
+		ks.Delete(sl.h.KeyID)
+		why := fmt.Sprintf("your %s did not give the vault key back", ks.Name())
+		if err != nil {
+			why += ": " + err.Error()
+		}
+		return p.fileOnly(ks, why)
+	}
 	p.ks, p.sealer, p.fresh = ks, sl, true
 	return p, nil
+}
+
+// fileOnly keeps a file vault a file for why, or fails the change when
+// EnvStore=keychain asks for a sealed vault.
+func (p *prepared) fileOnly(ks Keystore, why string) (*prepared, error) {
+	if isRequired(ks) {
+		return nil, fmt.Errorf("%w: the vault is not changed: %s=keychain asks for a sealed vault, and %s", ErrStoreSetting, EnvStore, why)
+	}
+	p.why = why
+	return p, nil
+}
+
+// Seal seals a file vault now (an empty one is made when there is none)
+// when this store reads the keystore and the keystore keeps a new key. The
+// gateway and the sandbox daemon never read the keystore and keep a file
+// vault a file, so the CLI seals it before a sandbox can capture into it.
+// It reads no sealed value and no key: a sealed vault is left as it is.
+// Without a usable keystore nothing is written and Notice stays empty; when
+// a keystore fails to keep the key, Notice says why the vault stays a file.
+func (s *Store) Seal() error {
+	if s.keys == nil {
+		return nil
+	}
+	f, err := s.read()
+	if err != nil {
+		return err
+	}
+	if f.sealer != nil {
+		return nil
+	}
+	ks, _, err := s.keys()
+	if err != nil || ks == nil {
+		return err
+	}
+	return s.update(needSeal, func(*file) error { return nil })
 }
 
 // apply fits the prepared key to the vault as read under the lock.

@@ -48,6 +48,43 @@ func (a *App) vaultNotice(st *vault.Store) {
 	}
 }
 
+// sealVault seals the vault before a sandbox can capture into it: the
+// gateway and the sandbox daemon never read the keystore, so they keep a
+// file vault a file. With a keystore that works now the vault is sealed (an
+// empty one is made) and the command says so; without one it stays a file
+// readable only by you, as `vault list` shows. A storage setting that
+// cannot be honoured fails the command; another error is a warning (a
+// sandbox does not need the vault to start).
+func (a *App) sealVault() error {
+	st := a.vault()
+	if err := st.Seal(); err != nil {
+		if errors.Is(err, vault.ErrStoreSetting) {
+			return err
+		}
+		a.warn("the sandbox vault was not sealed: " + err.Error())
+		return nil
+	}
+	a.vaultNotice(st)
+	return nil
+}
+
+// setupSealVault is sealVault for `sandbox setup`, which also says how the
+// vault is kept when it stays a file.
+func (a *App) setupSealVault() {
+	st := a.vault()
+	if err := st.Seal(); err != nil {
+		a.warn("the sandbox vault was not sealed: " + err.Error())
+		return
+	}
+	if n := st.Notice(); n != "" {
+		a.note(n)
+		return
+	}
+	if s, err := st.Storage(); err == nil && s.Mode == "file" && s.Note != "" {
+		a.note("the sandbox vault is a file readable only by you, not encrypted: " + s.Note)
+	}
+}
+
 // vaultStorageLine prints how the vault is kept.
 func (a *App) vaultStorageLine(s vault.Storage) {
 	a.line("Storage: " + s.Label)
@@ -231,15 +268,21 @@ func (a *App) VaultConfirm(name string, yes bool) error {
 		a.note(name + " was added by you; it needs no confirmation")
 		return nil
 	}
+	// The last characters need the vault key; confirming does not, so a
+	// key that cannot be read here only hides them.
 	hint, err := st.Hint(name)
-	if err != nil {
+	unreadable := errors.Is(err, vault.ErrKeyUnavailable)
+	if err != nil && !unreadable {
 		return err
 	}
 	a.printf("%s\n", name)
 	a.line(fmt.Sprintf("%-14s %s", "Kind", firstNonEmpty(e.Kind, "unknown")))
 	a.line(fmt.Sprintf("%-14s %s", "Captured from", firstNonEmpty(e.CapturedFrom, "a sandbox")))
 	a.line(fmt.Sprintf("%-14s %s", "Captured", e.CreatedAt.Local().Format(time.RFC3339)))
-	if hint != "" {
+	switch {
+	case unreadable:
+		a.line(fmt.Sprintf("%-14s %s", "Ends with", "(not readable without the key)"))
+	case hint != "":
 		a.line(fmt.Sprintf("%-14s …%s", "Ends with", hint))
 	}
 	a.line(fmt.Sprintf("%-14s %s", "Host", firstNonEmpty(e.Target(), "none yet")))

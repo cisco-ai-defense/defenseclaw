@@ -17,6 +17,7 @@
 package vault
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"errors"
@@ -29,9 +30,14 @@ import (
 )
 
 // EnvStore selects where the CLI keeps the vault: auto (the default) seals
-// it with a key in the OS keystore when one is usable; file keeps it in a
-// file readable only by you, not encrypted.
+// it with a key in the OS keystore when one is usable; keychain asks for a
+// sealed vault and fails a change that cannot seal; file keeps it in a file
+// readable only by you, not encrypted.
 const EnvStore = "DEFENSECLAW_VAULT_STORE"
+
+// ErrStoreSetting is returned when EnvStore cannot be honoured: a value
+// that is not known, or keychain with no keystore that keeps the key.
+var ErrStoreSetting = errors.New("the vault storage setting cannot be used")
 
 // Keystore keeps a sealed vault's private key.
 type Keystore interface {
@@ -39,8 +45,9 @@ type Keystore interface {
 	Name() string
 	// ID is the keystore as a vault header names it.
 	ID() string
-	// Load returns the key, or nil, nil when the keystore has none. The
-	// caller owns the returned slice and clears it after use.
+	// Load returns the key, or nil, nil only when the keystore positively
+	// has none (a keystore that cannot tell a missing key from a locked
+	// one returns an error). The caller owns the slice and clears it.
 	Load(keyID string) ([]byte, error)
 	// Save keeps a new key.
 	Save(keyID string, key []byte) error
@@ -76,13 +83,39 @@ func keyAccount(keyID string) string { return "vault-" + keyID }
 // vault stays a file; err for a value that is not known.
 func keysFromEnv() (ks Keystore, why string, err error) {
 	switch mode := strings.ToLower(strings.TrimSpace(os.Getenv(EnvStore))); mode {
-	case "", "auto", "keychain":
+	case "", "auto":
 		return osKeystore()
+	case "keychain":
+		ks, why, err := osKeystore()
+		if err != nil {
+			return nil, "", err
+		}
+		if ks == nil {
+			return nil, "", fmt.Errorf("%w: %s=keychain asks for a sealed vault, and %s; unset it to keep the vault in a file readable only by you",
+				ErrStoreSetting, EnvStore, why)
+		}
+		return required{ks}, "", nil
 	case "file":
 		return nil, EnvStore + "=file keeps the vault out of the OS keystore", nil
 	default:
-		return nil, "", fmt.Errorf("%s=%q is not known; use auto (the default) or file", EnvStore, mode)
+		return nil, "", fmt.Errorf("%w: %s=%q is not known; use auto (the default), keychain or file", ErrStoreSetting, EnvStore, mode)
 	}
+}
+
+// required is the keystore EnvStore=keychain asks for: a change that cannot
+// seal the vault with it fails instead of keeping a file.
+type required struct{ Keystore }
+
+func isRequired(ks Keystore) bool {
+	_, ok := ks.(required)
+	return ok
+}
+
+// hexKey is a key as a keystore item holds it; the caller clears it.
+func hexKey(key []byte) []byte {
+	b := make([]byte, hex.EncodedLen(len(key)))
+	hex.Encode(b, key)
+	return b
 }
 
 // macKeychain keeps vault keys as generic passwords of the default macOS
@@ -98,6 +131,7 @@ func (m macKeychain) Load(keyID string) ([]byte, error) {
 	raw, st := m.k.Find(keyService, keyAccount(keyID))
 	switch st {
 	case 0:
+		defer clear(raw)
 		return decodeKey(raw)
 	case keystore.StatusItemNotFound:
 		return nil, nil
@@ -106,7 +140,9 @@ func (m macKeychain) Load(keyID string) ([]byte, error) {
 }
 
 func (m macKeychain) Save(keyID string, key []byte) error {
-	st := m.k.Add(keyService, keyAccount(keyID), []byte(hex.EncodeToString(key)))
+	enc := hexKey(key)
+	defer clear(enc)
+	st := m.k.Add(keyService, keyAccount(keyID), enc)
 	if st == 0 {
 		return nil
 	}
@@ -118,7 +154,10 @@ func (m macKeychain) Save(keyID string, key []byte) error {
 
 // Delete is a no-op on macOS: removing an item needs an item reference the
 // two framework calls do not give, and the security tool would ask the
-// person. An unused key item is harmless.
+// person. A key made for a change that was not written stays in the
+// keychain as an unused item (service defenseclaw-vault, account
+// vault-<key id>): it opens nothing without the vault it was made for, and
+// Keychain Access deletes it.
 func (macKeychain) Delete(string) {}
 
 // secretService keeps vault keys in the Secret Service through secret-tool.
@@ -139,15 +178,26 @@ func (s secretService) Load(keyID string) ([]byte, error) {
 		return nil, ctxError(ctx, err)
 	}
 	if !found {
-		return nil, nil
+		// secret-tool answers a locked keyring whose unlock was dismissed
+		// as it answers a missing item, so the key is never reported gone
+		// from here: a vault whose key is only locked away stays usable.
+		if listed, lerr := s.t.Listed(ctx, s.attrs(keyID)...); lerr == nil && listed {
+			return nil, errors.New("the Secret Service holds the vault key, but the keyring is locked or its unlock was dismissed; " +
+				"unlock it (log in to your desktop session, or unlock the login keyring) and run the command again")
+		}
+		return nil, errors.New("the Secret Service gave no vault key: it is not found, or the keyring is locked or its unlock was dismissed; " +
+			"unlock the keyring (log in to your desktop session) and run the command again")
 	}
+	defer clear(raw)
 	return decodeKey(raw)
 }
 
 func (s secretService) Save(keyID string, key []byte) error {
 	ctx, cancel := context.WithTimeout(context.Background(), keyTimeout)
 	defer cancel()
-	return ctxError(ctx, s.t.Store(ctx, keyLabel, []byte(hex.EncodeToString(key)), s.attrs(keyID)...))
+	enc := hexKey(key)
+	defer clear(enc)
+	return ctxError(ctx, s.t.Store(ctx, keyLabel, enc, s.attrs(keyID)...))
 }
 
 func (s secretService) Delete(keyID string) {
@@ -163,9 +213,14 @@ func ctxError(ctx context.Context, err error) error {
 	return err
 }
 
+// decodeKey decodes a keystore item into a new slice; raw is the caller's
+// to clear.
 func decodeKey(raw []byte) ([]byte, error) {
-	key, err := hex.DecodeString(strings.TrimSpace(string(raw)))
-	if err != nil || len(key) != 32 {
+	raw = bytes.TrimSpace(raw)
+	key := make([]byte, hex.DecodedLen(len(raw)))
+	n, err := hex.Decode(key, raw)
+	if err != nil || n != 32 {
+		clear(key)
 		return nil, errors.New("the keystore item is not a vault key")
 	}
 	return key, nil
