@@ -429,6 +429,14 @@ func (s *Server) Handler() http.Handler {
 // open set the token opens something (an attachment or a task) and may do
 // so once.
 func (s *Server) auth(w http.ResponseWriter, r *http.Request, what string, open bool) (Session, bool) {
+	return s.authScope(w, r, what, open, "")
+}
+
+// authScope is auth for a route that serves one token scope (B3 dc.scope):
+// "" for the terminal, task and file routes, "port:N" or "mcp:NAME" for a
+// stream. A token serves only the routes of its own scope, so a stream token
+// never opens a terminal and a terminal token never opens a stream.
+func (s *Server) authScope(w http.ResponseWriter, r *http.Request, what string, open bool, scope string) (Session, bool) {
 	if s.opts.Verifier == nil {
 		s.log.Warn("relay.refused", "what", what, "reason", "no session verifier configured")
 		http.Error(w, "relay: no session verifier is configured", http.StatusServiceUnavailable)
@@ -438,6 +446,11 @@ func (s *Server) auth(w http.ResponseWriter, r *http.Request, what string, open 
 	if err != nil {
 		s.log.Warn("relay.refused", "what", what, "reason", err.Error())
 		http.Error(w, "relay: "+err.Error(), http.StatusUnauthorized)
+		return Session{}, false
+	}
+	if sess.Scope != scope {
+		s.log.Warn("relay.refused", "what", what, "reason", "token scope", "scope", sess.Scope, "person", sess.Person, "jti", sess.TokenID)
+		http.Error(w, "relay: the session token is not for this route", http.StatusForbidden)
 		return Session{}, false
 	}
 	if open {

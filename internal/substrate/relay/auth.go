@@ -49,6 +49,9 @@ type Session struct {
 	// TaskDigest is the SHA-256 (hex) of the --task text the actor was
 	// registered for; empty for an interactive session (GAP-0071).
 	TaskDigest string `json:"task_digest,omitempty"`
+	// Scope is the token's dc.scope (B3): "port:N" or "mcp:NAME" for a
+	// stream token, "" for a terminal, task or file token.
+	Scope string `json:"scope,omitempty"`
 }
 
 // Verifier checks the credential of an incoming request.
@@ -165,6 +168,8 @@ type Claims struct {
 	} `json:"dc.actor"`
 	// TaskDigest is the registered task's digest (dc.task_sha256).
 	TaskDigest string `json:"dc.task_sha256"`
+	// Scope is the stream scope (dc.scope).
+	Scope string `json:"dc.scope"`
 }
 
 // Verify implements Verifier.
@@ -281,7 +286,7 @@ func (v *KeyVerifier) VerifyToken(tok string) (Session, error) {
 		return Session{}, errors.New("session token is for another actor")
 	}
 	return Session{Person: sub, Actor: c.Actor.Atespace + "/" + c.Actor.Name, ActorUID: c.Actor.UID, TokenID: c.ID, Expires: exp,
-		TaskDigest: c.TaskDigest}, nil
+		TaskDigest: c.TaskDigest, Scope: c.Scope}, nil
 }
 
 // LoadPublicKey reads a PEM public key (PKIX: P-256 ECDSA or Ed25519).
