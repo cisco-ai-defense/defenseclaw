@@ -150,13 +150,19 @@ unset _dc_diag_dir _dc_diag_log _dc_diag_size
 //     Bash 3.2 (macOS /bin/bash) ends a script with status 0 after an unbound
 //     variable or a "." of a missing file, so an unmarked exit is a failure
 //     whatever its status.
-//   - A deliberate exit 0 or 2 keeps its outcome (a per-user Codex block is
-//     answered as Codex reads one, codex_closed_answer). Any other status, or
-//     an unmarked exit, is an unexpected failure: exit status 1 is a
-//     non-blocking error for the agents, so it never decides the outcome. In
-//     fail mode closed (per-user: defenseclaw_boot_fails_closed) the hook
-//     blocks the call; fail mode open keeps the exit status, as the boot trap
-//     did.
+//   - A deliberate exit 0 or 2 keeps its outcome. Codex reads a non-zero
+//     UserPromptSubmit status as a hook failure and submits the prompt, so
+//     a Codex block (exit 2) is answered as Codex reads one, on stdout with
+//     exit 0 (codex_closed_answer), in the per-user and the standalone
+//     managed hooks alike (GAP-0949, GAP-1755).
+//   - Any other status, or an unmarked exit, is an unexpected failure: exit
+//     status 1 is a non-blocking error for the agents, so it never decides
+//     the outcome. It writes one hook-failures.jsonl record, as the Secure
+//     Client macOS prologue does (GAP-1757). In fail mode closed (per-user:
+//     defenseclaw_boot_fails_closed) the hook blocks the call. Fail mode open
+//     keeps the exit status, as the boot trap did, except an unmarked exit
+//     2, which would block: it answers 0, as the Secure Client macOS
+//     prologue does (GAP-1756).
 //
 // The Secure Client renders keep their own bytes: macOS uses the managed
 // prologue above, and the other Secure Client renders are pinned
@@ -169,25 +175,38 @@ exit() {
 }
 {{if .Managed}}_DC_HOOK_FAIL_MODE="{{.FailMode}}"
 {{end}}_dc_hook_on_exit() {
-  local rc=$?
+  local rc=$? _dc_mode=closed
   set +e
   trap - EXIT
-  if declare -F _defenseclaw_hook_cleanup >/dev/null 2>&1; then
-    _defenseclaw_hook_cleanup >/dev/null 2>&1 || true
-  fi
   if [ "$_DC_EXIT_INTENDED" = "1" ]; then
     case "$rc" in
-      0) builtin exit 0 ;;
-      2) {{if and (eq .ConnectorName "codex") (not .Managed)}}codex_closed_answer{{else}}builtin exit 2{{end}} ;;
+      0|2)
+        if declare -F _defenseclaw_hook_cleanup >/dev/null 2>&1; then
+          _defenseclaw_hook_cleanup >/dev/null 2>&1 || true
+        fi
+        [ "$rc" -eq 0 ] && builtin exit 0
+        {{if eq .ConnectorName "codex"}}codex_closed_answer{{else}}builtin exit 2{{end}}
+        ;;
     esac
   elif [ "$rc" -eq 0 ]; then
     rc=1
   fi
-  {{if .Managed}}[ "$_DC_HOOK_FAIL_MODE" = "closed" ]{{else}}defenseclaw_boot_fails_closed{{end}} || builtin exit "$rc"
+  {{if .Managed}}[ "$_DC_HOOK_FAIL_MODE" = "closed" ]{{else}}defenseclaw_boot_fails_closed{{end}} || _dc_mode=open
+  if declare -F defenseclaw_log_hook_failure >/dev/null 2>&1; then
+    defenseclaw_log_hook_failure {{.ConnectorName}} "${DEFENSECLAW_HOOK_NAME:-{{.ConnectorName}}-hook}" \
+      "unexpected hook failure: exit status $rc" internal "$_dc_mode" "fail_$_dc_mode" >/dev/null 2>&1 || true
+  fi
+  if declare -F _defenseclaw_hook_cleanup >/dev/null 2>&1; then
+    _defenseclaw_hook_cleanup >/dev/null 2>&1 || true
+  fi
+  if [ "$_dc_mode" = "open" ]; then
+    [ "$_DC_EXIT_INTENDED" = "1" ] || [ "$rc" -ne 2 ] || rc=0
+    builtin exit "$rc"
+  fi
 {{- if eq .ConnectorName "cursor"}}
   printf '%s\n' '{"continue":false,"permission":"deny","user_message":"DefenseClaw hook failed closed","agent_message":"DefenseClaw hook failed closed"}'
   builtin exit 2
-{{- else if and (eq .ConnectorName "codex") (not .Managed)}}
+{{- else if eq .ConnectorName "codex"}}
   codex_closed_answer
 {{- else}}
   printf '%s (unexpected exit status %s)\n' "` + managedHookBlockSentence + `" "$rc" >&2

@@ -7,6 +7,8 @@
 package connector
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -23,6 +25,7 @@ var shellExitGuardFailures = map[string]string{
 	"unbound variable":  `: "$_DC_TEST_UNSET_AFTER_HARDEN"`,
 	"unmarked exit 0":   "builtin exit 0",
 	"unmarked exit 1":   "builtin exit 1",
+	"unmarked exit 2":   "builtin exit 2",
 	"deliberate exit 3": "exit 3",
 }
 
@@ -89,12 +92,32 @@ func TestShellHookUnexpectedFailureAfterHardeningFollowsFailMode(t *testing.T) {
 						t.Fatalf("the hook ended before hardening (exit %d, stdout %q, stderr %q): the failure was not injected", run.exitCode, run.stdout, run.stderr)
 					}
 					closed := !p.managed || p.failMode == "closed"
+					// GAP-1757: every unexpected failure, open or closed,
+					// leaves one hook-failure record, as the Secure Client
+					// macOS prologue does.
+					outcome := `"outcome":"fail_open"`
+					if closed {
+						outcome = `"outcome":"fail_closed"`
+					}
+					record, _ := os.ReadFile(filepath.Join(dataDir, "logs", "hook-failures.jsonl"))
+					if !strings.Contains(string(record), "unexpected hook failure") || !strings.Contains(string(record), outcome) {
+						t.Errorf("hook-failures.jsonl = %q, want one unexpected-failure record with %s", record, outcome)
+					}
 					if !closed {
 						// Fail mode open keeps the exit status (an unmarked 0
 						// counts as 1): never a block, never an allow by
-						// accident of bash's status.
-						if run.exitCode != 1 && (failureName != "deliberate exit 3" || run.exitCode != 3) {
-							t.Fatalf("open exit = %d, want the failure status (stdout %q, stderr %q)", run.exitCode, run.stdout, run.stderr)
+						// accident of bash's status. An unmarked 2 would be a
+						// block: it answers 0, as the Secure Client macOS
+						// prologue does (GAP-1756).
+						want := 1
+						switch failureName {
+						case "deliberate exit 3":
+							want = 3
+						case "unmarked exit 2":
+							want = 0
+						}
+						if run.exitCode != want {
+							t.Fatalf("open exit = %d, want %d (stdout %q, stderr %q)", run.exitCode, want, run.stdout, run.stderr)
 						}
 						if strings.Contains(run.stdout, `"deny"`) {
 							t.Fatalf("open stdout = %q, want no deny", run.stdout)
@@ -106,11 +129,12 @@ func TestShellHookUnexpectedFailureAfterHardeningFollowsFailMode(t *testing.T) {
 						if run.exitCode != 2 || !strings.Contains(run.stdout, `"permission":"deny"`) {
 							t.Fatalf("closed cursor exit=%d stdout=%q, want 2 and the deny object (stderr %q)", run.exitCode, run.stdout, run.stderr)
 						}
-					case connectorName == "codex" && !p.managed:
+					case connectorName == "codex":
 						// Codex reads a non-zero UserPromptSubmit status as a
-						// hook failure; the block is its deny object (GAP-0949).
-						if run.exitCode != 0 || !strings.Contains(run.stdout, `"permissionDecision":"deny"`) {
-							t.Fatalf("closed per-user codex exit=%d stdout=%q, want 0 and the deny object (stderr %q)", run.exitCode, run.stdout, run.stderr)
+						// hook failure; the block is its deny object, per-user
+						// (GAP-0949) and standalone managed (GAP-1755).
+						if !codexBlockAnswer("PreToolUse", run.exitCode, run.stdout) {
+							t.Fatalf("closed %s codex exit=%d stdout=%q, want 0 and the deny object (stderr %q)", p.name, run.exitCode, run.stdout, run.stderr)
 						}
 					default:
 						if run.exitCode != 2 || !strings.Contains(run.stderr, managedHookBlockSentence) {
@@ -160,5 +184,73 @@ func TestShellExitGuardRenderedOutsideSecureClientOnly(t *testing.T) {
 			}
 		}
 		managedShellGuardGOOS = previous
+	}
+}
+
+// GAP-1755: the standalone managed Codex hook blocked with exit 2 (and
+// stderr), before its helpers loaded and in every failure after, and its
+// oversized-input block printed a block object and exited 2. Codex v0.130+
+// reads a non-zero UserPromptSubmit status as a hook failure and submits the
+// prompt, so a fail-closed managed hook let the prompt through on a gateway
+// outage. codexBlockAnswer is Codex's exit-code contract: only exit 0 with
+// one block object of the registered event is a block. Every block of the
+// standalone managed hook is now that answer, as the per-user hook's is.
+func TestCodexStandaloneManagedHookBlocksEveryEventItCanBlockInCodexsShape(t *testing.T) {
+	failures := []struct {
+		name string
+		// answer is the gateway's answer; nil leaves the port refused.
+		answer func(w http.ResponseWriter)
+		// breaks changes the rendered state before the call.
+		breaks func(t *testing.T, hooks string)
+		// payload replaces the event's input.
+		payload string
+		// args replaces the registered arguments.
+		args []string
+	}{
+		{name: "the hardening helper is missing", breaks: func(t *testing.T, hooks string) {
+			if err := os.Remove(filepath.Join(hooks, "_hardening.sh")); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "the gateway is unreachable"},
+		{name: "the gateway answers HTTP 503", answer: func(w http.ResponseWriter) { w.WriteHeader(http.StatusServiceUnavailable) }},
+		{name: "the gateway answers HTTP 403", answer: func(w http.ResponseWriter) { w.WriteHeader(http.StatusForbidden) }},
+		{name: "the gateway answers no verdict", answer: func(w http.ResponseWriter) { _, _ = w.Write([]byte(`{"action":"maybe"}`)) }},
+		{name: "the gateway blocks without codex_output", answer: func(w http.ResponseWriter) {
+			_, _ = w.Write([]byte(`{"action":"block","reason":"policy says no"}`))
+		}},
+		{name: "the input is too large to inspect", payload: strings.Repeat(" ", 5000) + "{}"},
+		{name: "the payload names another event", payload: codexEventPayload("Notification")},
+	}
+	for _, event := range codexControlledEvents {
+		for _, failure := range failures {
+			t.Run(event+"/"+failure.name, func(t *testing.T) {
+				t.Parallel()
+				addr := refusingAPIAddr(t)
+				if failure.answer != nil {
+					server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { failure.answer(w) }))
+					t.Cleanup(server.Close)
+					addr = strings.TrimPrefix(server.URL, "http://")
+				}
+				hooks := filepath.Join(t.TempDir(), ".defenseclaw", "hooks")
+				if err := writeHookScriptsCommonWithTransport(hooks, addr, managedHookTestToken, "closed", HookFailModeSourceConfig,
+					[]string{"codex-hook.sh"}, true, "codex", true, "", "", false, false); err != nil {
+					t.Fatal(err)
+				}
+				if failure.breaks != nil {
+					failure.breaks(t, hooks)
+				}
+				payload := failure.payload
+				if payload == "" {
+					payload = codexEventPayload(event)
+				}
+				args := codexBoundShellHookArgsForTest(t, "codex-hook.sh", event)[1:]
+				code, stdout, stderr := runShellHookWith(t, filepath.Join(hooks, "codex-hook.sh"), args,
+					[]string{"HOME=" + t.TempDir()}, payload)
+				if !codexBlockAnswer(event, code, stdout) {
+					t.Fatalf("exit %d stdout %q stderr %q, want Codex's own %s block on stdout with exit 0", code, stdout, stderr, event)
+				}
+			})
+		}
 	}
 }
