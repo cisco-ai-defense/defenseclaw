@@ -95,6 +95,8 @@ type StageOptions struct {
 	GitDepth int
 	// MaxBytes caps the staged copy, history included (500 MiB).
 	MaxBytes int64
+	// Summary optionally collects working-tree sizes after exclusions and masking.
+	Summary *CopySummary
 	// MaxWalkEntries caps the files and directories of a non-git folder
 	// (default 250k); a larger folder is refused rather than copied in part.
 	MaxWalkEntries int
@@ -362,6 +364,80 @@ func Stage(ctx context.Context, opts StageOptions) (*CopyRecord, error) {
 	return rec, nil
 }
 
+// PreparedCopy holds a local stage before its actor has been created.
+type PreparedCopy struct {
+	layout layout
+	rec    *CopyRecord
+	dir    string
+	parent string
+}
+
+// PrepareCopy stages the project without installing a copy record.
+func PrepareCopy(ctx context.Context, opts StageOptions) (*PreparedCopy, error) {
+	lay, err := newLayout(opts.DataDir)
+	if err != nil {
+		return nil, err
+	}
+	opts.Name = "preflight-" + randomSuffix()
+	rec, dir, err := stageCopy(ctx, lay, opts)
+	if err != nil {
+		return nil, err
+	}
+	return &PreparedCopy{layout: lay, rec: rec, dir: dir, parent: lay.sandboxDir(opts.Name)}, nil
+}
+
+// Close discards a stage which was not installed.
+func (p *PreparedCopy) Close() {
+	if p.dir != "" {
+		_ = removeTree(p.dir)
+		p.dir = ""
+	}
+	_ = os.Remove(p.parent)
+}
+
+// Record returns the staged copy metadata.
+func (p *PreparedCopy) Record() CopyRecord { return *p.rec }
+
+// Install binds the stage to a newly created actor and installs its local record.
+func (p *PreparedCopy) Install(name, root, stateDir string, replace bool) error {
+	if p.dir == "" {
+		return errors.New("workspace: preflight has already been consumed")
+	}
+	if err := ValidateName(name); err != nil {
+		return err
+	}
+	if !path.IsAbs(root) || path.Clean(root) == "/" {
+		return fmt.Errorf("workspace: remote root %q must be an absolute directory below /", root)
+	}
+	rec := *p.rec
+	rec.Name = name
+	rec.RemoteDir = path.Join(root, rec.RepoName)
+	var err error
+	if rec.StateDir, err = checkStateDir(stateDir, rec.RemoteDir); err != nil {
+		return err
+	}
+	rec.RemoteGitDir = path.Join(rec.RemoteDir, ".git")
+	if rec.Kind == CopyPlain {
+		rec.RemoteGitDir = path.Join(rec.stateDir(), "git")
+	}
+	if pathExists(p.layout.copyRecord(name)) {
+		if !replace {
+			return fmt.Errorf("workspace: copy %s already exists", name)
+		}
+		prev, _ := LoadCopy(p.layout.dataDir, name)
+		rec.replacing(prev)
+	}
+	if err := ensurePrivateDir(p.layout.sandboxDir(name)); err != nil {
+		return err
+	}
+	if err := installCopyDir(p.layout, &rec, p.dir); err != nil {
+		return err
+	}
+	p.dir = ""
+	p.rec = &rec
+	return nil
+}
+
 // stageCopy builds a complete copy directory for opts beside the live one
 // (<copy>.new-<random>) and returns its record, whose paths point into it.
 // Nothing else is touched: the caller installs the directory
@@ -445,7 +521,7 @@ func stageCopy(ctx context.Context, lay layout, opts StageOptions) (*CopyRecord,
 		if parent := enclosingRepo(real); parent != "" {
 			rec.Warnings = append(rec.Warnings, fmt.Sprintf("%s is inside the git repository at %s; it is copied as a plain folder", real, parent))
 		}
-		err = stagePlain(ctx, rec, stageRoot, scanOpts, maxBytes, opts.MaxWalkEntries)
+		err = stagePlain(ctx, rec, stageRoot, scanOpts, maxBytes, opts.MaxWalkEntries, opts.Summary)
 	}
 	if err != nil {
 		return nil, "", err
@@ -621,7 +697,7 @@ func stageGit(ctx context.Context, rec *CopyRecord, opts StageOptions, scanOpts 
 	if w := leftOutWarning(leftOut); w != "" {
 		rec.Warnings = append(rec.Warnings, w)
 	}
-	files, heldBack, err := selectFiles(rec.Project, candidates, scanOpts, maxBytes, rec)
+	files, heldBack, err := selectFiles(rec.Project, candidates, scanOpts, maxBytes, rec, opts.Summary)
 	if err != nil {
 		return err
 	}
@@ -843,7 +919,7 @@ func gitConfigPath(ctx context.Context, g gitCmd) string {
 	return filepath.Join(p, "config")
 }
 
-func stagePlain(ctx context.Context, rec *CopyRecord, stageRoot string, scanOpts secretScanOptions, maxBytes int64, maxEntries int) error {
+func stagePlain(ctx context.Context, rec *CopyRecord, stageRoot string, scanOpts secretScanOptions, maxBytes int64, maxEntries int, summary *CopySummary) error {
 	var candidates []string
 	var opaque []string
 	truncated, err := walkProject(rec.Project, maxEntries, func(rel string, d fs.DirEntry) error {
@@ -866,7 +942,7 @@ func stagePlain(ctx context.Context, rec *CopyRecord, stageRoot string, scanOpts
 		sort.Strings(opaque)
 		rec.Warnings = append(rec.Warnings, "not copied: "+strings.Join(firstN(opaque, 5), ", "))
 	}
-	files, heldBack, err := selectFiles(rec.Project, candidates, scanOpts, maxBytes, rec)
+	files, heldBack, err := selectFiles(rec.Project, candidates, scanOpts, maxBytes, rec, summary)
 	if err != nil {
 		return err
 	}
@@ -917,7 +993,7 @@ func stagePlain(ctx context.Context, rec *CopyRecord, stageRoot string, scanOpts
 // candidate paths. It returns the files to copy and the ones held back,
 // which the record lists once (CopyRecord.HeldBack), not among its
 // warnings.
-func selectFiles(root string, candidates []string, scanOpts secretScanOptions, maxBytes int64, rec *CopyRecord) ([]stagedFile, []string, error) {
+func selectFiles(root string, candidates []string, scanOpts secretScanOptions, maxBytes int64, rec *CopyRecord, summary *CopySummary) ([]stagedFile, []string, error) {
 	sort.Strings(candidates)
 	held, err := detectSecretsIn(root, candidates, scanOpts)
 	if err != nil {
@@ -968,10 +1044,15 @@ func selectFiles(root string, candidates []string, scanOpts secretScanOptions, m
 			continue
 		}
 		total += info.Size()
-		if total > maxBytes {
+		if summary != nil {
+			summary.Add(rel, info.Size())
+		} else if total > maxBytes {
 			return nil, nil, &TooLargeError{What: "the working tree", Size: total, Limit: maxBytes}
 		}
 		files = append(files, stagedFile{rel: rel, info: info})
+	}
+	if total > maxBytes {
+		return nil, nil, &TooLargeError{What: "the working tree", Size: total, Limit: maxBytes}
 	}
 	return files, held, nil
 }

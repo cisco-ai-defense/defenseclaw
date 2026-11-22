@@ -258,3 +258,11 @@ This section is for a coding agent, or an LLM working for one, that hits a Defen
 - **Your terminal is detached.** That is normal. The run continues. Write results to the repository or the task's output, not to your terminal.
 - **You were suspended and resumed.** Your clock may have jumped and your connections may have been reset. Check the time, reopen connections, and don't assume a long-running command is still running.
 - **Never** try to read or change the hook settings, the root-owned managed settings or the kit. They are outside your user, and changes are reported.
+
+
+## Upload exceeds the workspace limit (Preview)
+
+The launcher shows the staged size and the largest top-level directories before it creates an actor.
+Use `--exclude 'data/**'` to omit a large directory, or `--clone REPO_URL` to start from Git.
+Administrators set the cap with `substrate.workspace_max_bytes`. A run can lower it with
+`--max-upload-mb`. Rebuild an older actor template to use a cluster limit over 1 GiB.

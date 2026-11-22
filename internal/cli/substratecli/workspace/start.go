@@ -22,15 +22,15 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"path"
 	"strings"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/safetext"
 	osw "github.com/defenseclaw/defenseclaw/internal/openshell/workspace"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/relay"
 )
-
-// DefaultMaxBytes caps the project copy, git history included.
-const DefaultMaxBytes int64 = osw.DefaultCopyMaxBytes
 
 // StartOptions configures Start.
 type StartOptions struct {
@@ -56,7 +56,7 @@ type StartOptions struct {
 	StateDir string
 	// GitDepth is the history depth of the copy (200 by default).
 	GitDepth int
-	// MaxBytes caps the copy (DefaultMaxBytes, 500 MiB).
+	// MaxBytes caps the copy at the limit reported by the cluster.
 	MaxBytes int64
 	// Masks add secret-file globs to the built-in rules; Unmask shares a
 	// held-back file after all, UnmaskAsked being the person's own
@@ -104,36 +104,121 @@ func (r *StartResult) KeptBackLine() string {
 type TooLargeError struct {
 	Size, Limit int64 // bytes, or entries when Entries is set
 	Entries     bool
+	Biggest     string
 	Err         error
 }
 
 func (e *TooLargeError) Error() string {
-	const clone = "Use --clone REPO_URL to start from a repository instead, or keep the large folders out of the copy by adding them to .gitignore."
+	const clone = "Leave large folders out with --exclude 'data/**', or start from a repository with --clone REPO_URL."
 	if e.Entries {
 		return fmt.Sprintf("This folder has more than %d files and folders, over the limit. %s", e.Limit, clone)
 	}
-	return fmt.Sprintf("This folder is %d MB, over the %d MB limit. %s", mb(e.Size), mb(e.Limit), clone)
+	return fmt.Sprintf("This folder is %s, over the %s upload limit.%s %s", uploadSize(e.Size), uploadSize(e.Limit), e.Biggest, clone)
 }
 
 func (e *TooLargeError) Unwrap() error { return e.Err }
 
-func mb(n int64) int64 { return (n + (1 << 20) - 1) >> 20 }
-
-// Start copies the project into the actor: it stages the folder with the
-// secrets held back, uploads it over the Transport, confirms it arrived and
-// records the baseline Pull measures against. The copy is a normal git
-// repository in the actor when the project is one.
-func Start(ctx context.Context, opts StartOptions) (*StartResult, error) {
-	t := opts.Transport
-	if t == nil {
-		return nil, errors.New("workspace: start needs a transport to the actor")
+func uploadSize(n int64) string {
+	if n < 1<<20 {
+		return fmt.Sprintf("%d bytes", n)
 	}
-	if hostCopy {
-		// GAP-0173: no OpenShell copy pipeline on this OS.
-		if c, ok := t.(*Client); ok {
-			return hostStart(ctx, opts, c)
+	return fmt.Sprintf("%.4g MiB", float64(n)/(1<<20))
+}
+
+// PreparedUpload holds the local copy until an actor is ready for it.
+type PreparedUpload struct {
+	opts    StartOptions
+	copy    *osw.PreparedCopy
+	host    *hostUpload
+	summary osw.CopySummary
+	bytes   int64
+}
+
+func (p *PreparedUpload) biggest() string {
+	var sizes []string
+	for _, d := range p.summary.BiggestDirs(3) {
+		sizes = append(sizes, safetext.Line(d.Path)+"/ "+uploadSize(d.Bytes))
+	}
+	if len(sizes) == 0 {
+		return ""
+	}
+	return " Biggest: " + strings.Join(sizes, ", ") + "."
+}
+
+// UsesHigherUploadLimit reports when an old relay may apply a lower cap.
+func (p *PreparedUpload) UsesHigherUploadLimit() bool {
+	return p.opts.MaxBytes > relay.DefaultFilesMaxBytes
+}
+
+// Preview describes the staged upload, including the effective size limit.
+func (p *PreparedUpload) Preview(w io.Writer) {
+	fmt.Fprintf(w, "Upload: %s in %d files (upload limit %s).%s\n",
+		uploadSize(p.bytes), p.summary.Files, uploadSize(p.opts.MaxBytes), p.biggest())
+}
+
+// Preflight stages the exact copy locally, with the normal masking rules.
+func Preflight(ctx context.Context, opts StartOptions) (*PreparedUpload, error) {
+	if opts.MaxBytes <= 0 {
+		opts.MaxBytes = osw.DefaultCopyMaxBytes
+	}
+	p := &PreparedUpload{opts: opts}
+	var err error
+	if hostCopy && (opts.Transport == nil || isRelayClient(opts.Transport)) {
+		p.host, err = prepareHostUpload(ctx, opts, &p.summary)
+		p.bytes = p.summary.Bytes
+	} else {
+		p.copy, err = osw.PrepareCopy(ctx, osw.StageOptions{
+			Project: opts.Project, DataDir: opts.DataDir, Home: opts.Home, Protected: opts.Protected,
+			RemoteRoot: opts.RemoteRoot, GitDepth: opts.GitDepth, MaxBytes: opts.MaxBytes,
+			FolderName: hostFolderName(opts.Project), Summary: &p.summary,
+			Masks: opts.Masks, Unmask: opts.Unmask, UnmaskAsked: opts.UnmaskAsked,
+			Detector: opts.Detector, DisableContentScan: opts.DisableContentScan,
+		})
+		if err == nil {
+			p.bytes = p.copy.Record().Bytes
 		}
 	}
+	if err != nil {
+		var large *osw.TooLargeError
+		if errors.As(err, &large) {
+			return nil, &TooLargeError{Size: large.Size, Limit: large.Limit, Entries: large.Entries, Biggest: p.biggest(), Err: err}
+		}
+		return nil, cleanErr("copy the project", err)
+	}
+	return p, nil
+}
+
+func isRelayClient(t osw.Transport) bool {
+	_, ok := t.(*Client)
+	return ok
+}
+
+// Close discards a local stage that has not been sent.
+func (p *PreparedUpload) Close() {
+	if p.copy != nil {
+		p.copy.Close()
+	}
+	if p.host != nil {
+		p.host.close()
+	}
+}
+
+// Start stages and sends a copy over an existing actor transport.
+func Start(ctx context.Context, opts StartOptions) (*StartResult, error) {
+	if opts.Transport == nil {
+		return nil, errors.New("workspace: start needs a transport to the actor")
+	}
+	p, err := Preflight(ctx, opts)
+	if err != nil {
+		return nil, err
+	}
+	defer p.Close()
+	return p.Send(ctx, opts.Name, opts.Transport)
+}
+
+// Send uploads the stage and establishes the baseline Pull measures against.
+func (p *PreparedUpload) Send(ctx context.Context, name string, t osw.Transport) (*StartResult, error) {
+	opts := p.opts
 	root := opts.RemoteRoot
 	if root == "" {
 		root = DefaultRemoteRoot
@@ -147,15 +232,8 @@ func Start(ctx context.Context, opts StartOptions) (*StartResult, error) {
 			root = detected
 		}
 	}
-	maxBytes := opts.MaxBytes
-	if maxBytes <= 0 {
-		maxBytes = DefaultMaxBytes
-	}
 	stateDir := opts.StateDir
 	if stateDir == "" {
-		// The relay names a private folder outside the working directory
-		// (GAP-0163); an older relay does not, and the state goes beside
-		// the copy as before.
 		base := root
 		if sr, ok := t.(interface {
 			StateRoot(context.Context) (string, error)
@@ -164,32 +242,27 @@ func Start(ctx context.Context, opts StartOptions) (*StartResult, error) {
 				base = d
 			}
 		}
-		dir, err := NewStateDir(base, opts.Name)
+		dir, err := NewStateDir(base, name)
 		if err != nil {
 			return nil, cleanErr("copy the project", err)
 		}
 		stateDir = dir
 	}
-	// An earlier copy of this name that was uploaded leaves its own state
-	// directory in the actor; it is tidied once this one has arrived.
-	prev, _ := osw.LoadCopy(opts.DataDir, opts.Name)
-	_, err := osw.Stage(ctx, osw.StageOptions{
-		Project: opts.Project, Name: opts.Name, DataDir: opts.DataDir, Home: opts.Home, Protected: opts.Protected,
-		RemoteRoot: root, StateDir: stateDir, GitDepth: opts.GitDepth, MaxBytes: maxBytes, FolderName: hostFolderName(opts.Project),
-		Masks: opts.Masks, Unmask: opts.Unmask, UnmaskAsked: opts.UnmaskAsked,
-		Detector: opts.Detector, DisableContentScan: opts.DisableContentScan, Replace: opts.Replace,
-	})
-	if err != nil {
-		var large *osw.TooLargeError
-		if errors.As(err, &large) {
-			return nil, &TooLargeError{Size: large.Size, Limit: large.Limit, Entries: large.Entries, Err: err}
+	if p.host != nil {
+		c, ok := t.(*Client)
+		if !ok {
+			return nil, errors.New("workspace: the host copy needs the relay client")
 		}
+		return p.host.send(ctx, c, opts.DataDir, name, root, stateDir)
+	}
+	prev, _ := osw.LoadCopy(opts.DataDir, name)
+	if err := p.copy.Install(name, root, stateDir, opts.Replace); err != nil {
 		return nil, cleanErr("copy the project", err)
 	}
-	if _, err = osw.Upload(ctx, opts.DataDir, opts.Name, t, t); err != nil {
+	if _, err := osw.Upload(ctx, opts.DataDir, name, t, t); err != nil {
 		return nil, cleanErr("upload the project to the actor", err)
 	}
-	rec, err := osw.EstablishBaseline(ctx, opts.DataDir, opts.Name, t)
+	rec, err := osw.EstablishBaseline(ctx, opts.DataDir, name, t)
 	if err != nil {
 		return nil, cleanErr("record the copy's baseline in the actor", err)
 	}

@@ -38,6 +38,7 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/safetext"
@@ -85,7 +86,11 @@ type Client struct {
 	// MaxDownloadBytes caps the content Download extracts
 	// (DefaultMaxDownloadBytes when 0).
 	MaxDownloadBytes int64
+	appliedUploadCap atomic.Bool
 }
+
+// ReportsUploadLimit reports whether the last upload used a relay with cap negotiation.
+func (c *Client) ReportsUploadLimit() bool { return c.appliedUploadCap.Load() }
 
 var _ osw.Transport = (*Client)(nil)
 
@@ -165,6 +170,9 @@ func (c *Client) request(ctx context.Context, op, method, route string, q url.Va
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
 		return nil, err
+	}
+	if method == http.MethodPut && route == relay.RouteFiles {
+		c.appliedUploadCap.Store(resp.Header.Get(relay.UploadMaxHeader) != "")
 	}
 	for _, s := range ok {
 		if resp.StatusCode == s {

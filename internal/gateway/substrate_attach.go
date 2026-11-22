@@ -22,9 +22,11 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/identity"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/registry"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/relay"
@@ -66,12 +68,16 @@ const (
 // workspace cap (E23) for a file upload, a frame cap otherwise.
 func substrateAttachBodyCap(r *http.Request, workspaceMax int64) int64 {
 	if r.Method == http.MethodPut && strings.HasSuffix(r.URL.Path, "/attach/files") {
-		if workspaceMax <= 0 {
-			workspaceMax = 1 << 30
-		}
 		return workspaceMax + substrateTarOverhead
 	}
 	return substrateAttachFrameMax
+}
+
+func substrateWorkspaceMax(configured int64) int64 {
+	if configured <= 0 {
+		return config.DefaultSubstrateWorkspaceMaxBytes
+	}
+	return min(configured, relay.MaxFilesBytes)
 }
 
 // substrateAttachCSRF is the browser gate of attach traffic: a request
@@ -186,6 +192,10 @@ func (a *APIServer) substrateAttach(st *substrateState) http.HandlerFunc {
 				pr.Out.Header.Del("Authorization")
 				pr.Out.Header.Del("Cookie")
 				pr.Out.Header.Del("X-Forwarded-For")
+				pr.Out.Header.Del(relay.UploadMaxHeader)
+				if rest == relay.RouteFiles && r.Method == http.MethodPut {
+					pr.Out.Header.Set(relay.UploadMaxHeader, strconv.FormatInt(substrateWorkspaceMax(st.cfg.WorkspaceMaxBytes), 10))
+				}
 				// Only the token the gateway minted reaches the relay.
 				var keep []string
 				for _, v := range pr.In.Header.Values("Sec-WebSocket-Protocol") {

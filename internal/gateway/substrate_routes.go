@@ -150,6 +150,11 @@ func (a *APIServer) newSubstrateAdminHandler(st *substrateState) http.Handler {
 	mux.HandleFunc("GET /api/v1/substrate/batches/{id}", a.substrateGetBatch(st))
 	mux.HandleFunc("GET /api/v1/substrate/usage", a.substrateUsage(st))
 	mux.HandleFunc("GET /api/v1/substrate/doctor", a.substrateDoctor(st))
+	mux.HandleFunc("GET /api/v1/substrate/launcher", func(w http.ResponseWriter, _ *http.Request) {
+		writeSubstrateJSON(w, http.StatusOK, map[string]any{
+			"workspace_max_bytes": substrateWorkspaceMax(st.cfg.WorkspaceMaxBytes),
+		})
+	})
 	mux.HandleFunc("GET /api/v1/substrate/asks", a.substrateListAsks(st))
 	mux.HandleFunc("POST /api/v1/substrate/asks/{id}", a.substrateDecideAsk(st))
 	mux.HandleFunc("GET /api/v1/substrate/decisions", a.substrateDecisions(st))
@@ -182,7 +187,7 @@ func (a *APIServer) newSubstrateAdminHandler(st *substrateState) http.Handler {
 			// long-poll frames and a streaming tar upload. Person sign-in and
 			// ownership are checked as for every admin route; the JSON body
 			// gate and the 1 MiB cap do not fit it, so it has its own.
-			r.Body = http.MaxBytesReader(w, r.Body, substrateAttachBodyCap(r, st.cfg.WorkspaceMaxBytes))
+			r.Body = http.MaxBytesReader(w, r.Body, substrateAttachBodyCap(r, substrateWorkspaceMax(st.cfg.WorkspaceMaxBytes)))
 			attach.ServeHTTP(w, r)
 			return
 		}

@@ -22,7 +22,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"github.com/defenseclaw/defenseclaw/internal/cliusage"
+	"net/http"
 	"os"
 
 	"github.com/spf13/cobra"
@@ -31,6 +31,9 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/attach"
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/auth"
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/workspace"
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
+	osw "github.com/defenseclaw/defenseclaw/internal/openshell/workspace"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/relay"
 )
 
 // substrateCopyName is the name of an agent's local copy record. The cluster
@@ -60,31 +63,60 @@ func substrateOpenRelay(ctx context.Context, s *substrateSession, a api.Actor) (
 	return &substrateRelay{Tunnel: tun, Client: workspace.NewClient(tun.HTTPClient(), tun.BaseURL(), tun.Bearer)}, nil
 }
 
-// substrateUploadFolder copies the project into the agent (secret files held
-// back) and says what was kept back.
-func substrateUploadFolder(ctx context.Context, cmd *cobra.Command, s *substrateSession, a api.Actor, f *substrateRunFlags, project string) error {
+// substratePreflight stages the source before Create can leave actor state.
+func substratePreflight(ctx context.Context, cmd *cobra.Command, s *substrateSession, f *substrateRunFlags, project string) (*workspace.PreparedUpload, error) {
+	w := cmd.ErrOrStderr()
+	settings, err := s.Client.Launcher(ctx)
+	maxBytes := settings.WorkspaceMaxBytes
+	if err != nil {
+		apiErr, ok := api.AsError(err)
+		if !ok || apiErr.Status != http.StatusNotFound {
+			return nil, substrateFail(err)
+		}
+		// Compatibility with clusters predating launcher settings.
+		maxBytes = osw.DefaultCopyMaxBytes
+		fmt.Fprintln(w, "Note: this cluster does not report its upload limit. Using the 500 MiB launcher default.")
+	} else if maxBytes <= 0 || maxBytes > relay.MaxFilesBytes {
+		return nil, errors.New("the cluster reported an invalid workspace upload limit")
+	}
+	if n := int64(f.maxUploadMB); n > 0 && n <= maxBytes>>20 {
+		maxBytes = n << 20
+	}
+	home, _ := os.UserHomeDir()
+	prepared, err := workspace.Preflight(ctx, workspace.StartOptions{
+		Project: project, DataDir: auth.StateDir(), Home: home, RemoteRoot: f.remoteDir, MaxBytes: maxBytes,
+		Masks: f.exclude, Unmask: f.unmask, UnmaskAsked: f.unmask, Replace: true,
+	})
+	if err != nil {
+		var big *workspace.TooLargeError
+		if errors.As(err, &big) {
+			return nil, cliusage.WithExitCode(big, substrateExitRefused)
+		}
+		return nil, fmt.Errorf("could not stage the folder: %w", err)
+	}
+	prepared.Preview(w)
+	return prepared, nil
+}
+
+// substrateUploadFolder sends the prepared copy and reports what was kept back.
+func substrateUploadFolder(ctx context.Context, cmd *cobra.Command, s *substrateSession, a api.Actor, prepared *workspace.PreparedUpload) error {
 	w := cmd.ErrOrStderr()
 	rel, err := substrateOpenRelay(ctx, s, a)
 	if err != nil {
 		return err
 	}
 	defer rel.Close()
-	home, _ := os.UserHomeDir()
-	opts := workspace.StartOptions{
-		Transport: rel.Client, Project: project, Name: substrateCopyName(a), DataDir: auth.StateDir(), Home: home,
-		RemoteRoot: f.remoteDir, Masks: f.exclude, Unmask: f.unmask, UnmaskAsked: f.unmask, Replace: true,
-	}
-	if f.maxUploadMB > 0 {
-		opts.MaxBytes = int64(f.maxUploadMB) << 20
-	}
 	fmt.Fprintln(w, "Copying this folder into the agent...")
-	res, err := workspace.Start(ctx, opts)
+	res, err := prepared.Send(ctx, substrateCopyName(a), rel.Client)
 	if err != nil {
-		var big *workspace.TooLargeError
-		if errors.As(err, &big) {
-			return cliusage.WithExitCode(big, substrateExitRefused)
+		var refused *workspace.HTTPError
+		if prepared.UsesHigherUploadLimit() && errors.As(err, &refused) && refused.Status == http.StatusRequestEntityTooLarge && !rel.Client.ReportsUploadLimit() {
+			return cliusage.WithExitCode(errors.New("this agent's image caps uploads at 1 GiB; rebuild the template to use your cluster's limit"), substrateExitRefused)
 		}
 		return fmt.Errorf("could not copy the folder into the agent: %w", err)
+	}
+	if prepared.UsesHigherUploadLimit() && !rel.Client.ReportsUploadLimit() {
+		fmt.Fprintln(w, "Note: this agent's image caps uploads at 1 GiB; rebuild the template to use your cluster's limit.")
 	}
 	if line := res.KeptBackLine(); line != "" {
 		fmt.Fprintln(w, "Held back from the copy: "+line[len("kept back: "):]+". Share one anyway with --unmask.")

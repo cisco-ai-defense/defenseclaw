@@ -630,10 +630,15 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             _Flag("clone", "string", "start from this repository instead of a copy of the folder", metavar="URL"),
             _Flag("context", "string", "cluster to use (default: the one you signed in to last)", metavar="NAME"),
             _Flag("detach", "bool", "with --task, start it and return; follow it with logs -f", short="d"),
-            _Flag("exclude", "stringArray", "hold a path or pattern back from the copy (repeatable)", metavar="GLOB"),
+            _Flag(
+                "exclude",
+                "stringArray",
+                "exclude a path or glob from the copy (repeatable, for example 'data/**')",
+                metavar="GLOB",
+            ),
             _Flag("json", "bool", "same as --output json"),
             _Flag("keep", "bool", "keep the agent after a finished --task (default: it stays until you delete it)"),
-            _Flag("max-upload-mb", "int", "refuse a copy larger than this many MB (default 500)", default="0"),
+            _Flag("max-upload-mb", "int", "lower the cluster upload limit for this copy, in MiB", default="0"),
             _Flag(
                 "name",
                 "string",

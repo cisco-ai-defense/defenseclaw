@@ -299,3 +299,16 @@ func redactErr(err error, tok string) error {
 
 // StatusCode lets the attach package tell a refusal from a failure.
 func (e *Error) StatusCode() int { return e.Status }
+
+// LauncherSettings holds the cluster's limits and defaults for the launcher.
+type LauncherSettings struct {
+	WorkspaceMaxBytes int64 `json:"workspace_max_bytes"`
+}
+
+// Launcher reads settings from the signed-in admin listener. A gateway
+// predating this route returns 404.
+func (c *Client) Launcher(ctx context.Context) (LauncherSettings, error) {
+	var settings LauncherSettings
+	err := c.do(ctx, http.MethodGet, "launcher", nil, nil, &settings)
+	return settings, err
+}

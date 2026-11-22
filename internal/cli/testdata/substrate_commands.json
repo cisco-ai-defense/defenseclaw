@@ -932,7 +932,7 @@
         "name": "exclude",
         "type": "stringArray",
         "default": "[]",
-        "usage": "hold a path or pattern back from the copy (repeatable)",
+        "usage": "exclude a path or glob from the copy (repeatable, for example 'data/**')",
         "metavar": "GLOB"
       },
       {
@@ -951,7 +951,7 @@
         "name": "max-upload-mb",
         "type": "int",
         "default": "0",
-        "usage": "refuse a copy larger than this many MB (default 500)"
+        "usage": "lower the cluster upload limit for this copy, in MiB"
       },
       {
         "name": "name",

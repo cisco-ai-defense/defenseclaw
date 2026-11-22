@@ -442,6 +442,14 @@ func substrateCreate(ctx context.Context, cmd *cobra.Command, s *substrateSessio
 	// (GAP-0133). Every actor gets a name nobody had before.
 	req.Name = uniqueSubstrateActorName(req.Name, t.spec.Command)
 	req.Secrets = f.secrets
+	var prepared *workspace.PreparedUpload
+	if project != "" {
+		prepared, err = substratePreflight(ctx, cmd, s, f, project)
+		if err != nil {
+			return a, err
+		}
+		defer prepared.Close()
+	}
 	a, err = s.Client.Create(ctx, req)
 	if err != nil {
 		if e, ok := api.AsError(err); ok && e.Status == 503 && e.Reason == "no_free_worker" {
@@ -468,8 +476,8 @@ func substrateCreate(ctx context.Context, cmd *cobra.Command, s *substrateSessio
 			}
 		}
 	}()
-	if project != "" {
-		if err = substrateUploadFolder(ctx, cmd, s, a, f, project); err != nil {
+	if prepared != nil {
+		if err = substrateUploadFolder(ctx, cmd, s, a, prepared); err != nil {
 			return a, err
 		}
 	}
