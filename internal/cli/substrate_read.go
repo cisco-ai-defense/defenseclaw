@@ -754,19 +754,21 @@ func newSubstrateSecretsListCmd() *cobra.Command {
 
 func newSubstrateSecretsSetCmd() *cobra.Command {
 	var (
-		com       substrateCommon
-		fromEnv   string
-		fromStdin bool
+		com substrateCommon
+		src substrateSecretSource
 	)
 	cmd := &cobra.Command{
 		Use:   "set <name>",
 		Short: "Store one of your own secrets",
-		Long: `Stores the value for NAME, bound to the hosts your administrator allowed for it. The value
-is read from the terminal without echo, from standard input with --stdin, or from an environment
-variable with --from-env VAR. It is never put on the command line.`,
+		Long: `Stores the value for NAME, bound to the hosts your administrator allowed for it.
+
+` + substrateSourceHelp,
+		Example: "defenseclaw substrate secrets set GITHUB_TOKEN --from-gh\n" +
+			"defenseclaw substrate secrets set GITLAB_TOKEN --from-op op://eng/gitlab/token\n" +
+			"defenseclaw substrate secrets set NPM_TOKEN --from-keychain npm-publish",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			value, err := readSubstrateSecret(cmd, fromEnv, fromStdin)
+			value, _, err := src.read(cmd)
 			if err != nil {
 				return err
 			}
@@ -784,43 +786,9 @@ variable with --from-env VAR. It is never put on the command line.`,
 		},
 	}
 	com.add(cmd)
-	cmd.Flags().StringVar(&fromEnv, "from-env", "", "read the value from this environment variable")
+	src.add(cmd)
 	cmd.Flags().BoolVar(new(bool), "mine", true, "your own secret (the only kind this command acts on)")
-	cmd.Flags().BoolVar(&fromStdin, "stdin", false, "read the value from standard input")
 	return cmd
-}
-
-func readSubstrateSecret(cmd *cobra.Command, fromEnv string, fromStdin bool) (string, error) {
-	switch {
-	case fromEnv != "":
-		v := os.Getenv(fromEnv)
-		if v == "" {
-			return "", fmt.Errorf("the environment variable %s is empty or not set", fromEnv)
-		}
-		return v, nil
-	case fromStdin:
-		b, err := io.ReadAll(io.LimitReader(cmd.InOrStdin(), 64<<10))
-		if err != nil {
-			return "", err
-		}
-		v := strings.TrimRight(string(b), "\r\n")
-		if v == "" {
-			return "", errors.New("standard input was empty")
-		}
-		return v, nil
-	case term.IsTerminal(int(os.Stdin.Fd())):
-		fmt.Fprint(cmd.ErrOrStderr(), "Secret value (not shown): ")
-		b, err := term.ReadPassword(int(os.Stdin.Fd()))
-		fmt.Fprintln(cmd.ErrOrStderr())
-		if err != nil {
-			return "", err
-		}
-		if len(b) == 0 {
-			return "", errors.New("no value entered")
-		}
-		return string(b), nil
-	}
-	return "", errors.New("give the value with --stdin or --from-env VAR (there is no terminal to ask on)")
 }
 
 func newSubstrateSecretsRmCmd() *cobra.Command {

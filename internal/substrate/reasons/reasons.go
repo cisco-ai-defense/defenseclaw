@@ -80,6 +80,10 @@ var Table = []Reason{
 	{"defenseclaw_internal", 0, Render, "The host is one of DefenseClaw's own services.", "Bind the secret to a different host.", Admin},
 	{"blocked", 0, Render, "The host is blocked for this agent.", "Bind the secret to a different host, or ask your administrator.", Admin},
 	{"not_in_allow_only", 0, Render, "The host is outside the agent's allow list.", "Ask your administrator to allow the host for your profile.", Admin},
+
+	{"secret_source_tool_missing", 0, Launcher, "The tool that source reads from is not installed or not on PATH (the detail names it).", "Install it, or give the value another way: --from-file, --stdin or the prompt.", Person},
+	{"secret_source_unsupported", 0, Launcher, "That source does not exist on this computer (the macOS keychain is only on a Mac).", "Use --from-op, --from-file, --stdin or the prompt.", Person},
+	{"secret_source_failed", 0, Launcher, "The source tool did not give a value (the detail says why).", "Sign in to that tool or fix the reference, then try again; or give the value another way.", Person},
 }
 
 // Status is a secret status the gateway reports (list and test).
