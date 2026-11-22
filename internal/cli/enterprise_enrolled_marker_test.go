@@ -20,6 +20,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 )
 
 // GAP-1026, GAP-1034: the one marker of "the guardian enrolled this connector
@@ -46,7 +48,7 @@ func TestEnterpriseConnectorEnrolledBefore(t *testing.T) {
 			t.Errorf("connector %q: %t, want %t", tc.connector, got, tc.want)
 		}
 	}
-	if enterpriseHomeConnectorEnrolledBefore("", "codex") || enterpriseConnectorEnrolledBefore(" ", "codex") {
+	if enterpriseHomeConnectorEnrolledBefore("", "codex") || hookcli.EnterpriseConnectorEnrolledBefore(" ", "codex") {
 		t.Error("an empty folder is enrolled")
 	}
 }

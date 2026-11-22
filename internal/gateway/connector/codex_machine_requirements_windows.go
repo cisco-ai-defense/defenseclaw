@@ -266,6 +266,9 @@ func ReconcileWindowsCodexMachineRequirements(
 				runtimeStateHealthy = validateWindowsCodexManagedRuntimeStateIdentity(runtimeState, opts) == nil
 			}
 		}
+		// A state an earlier hook image of this install recorded names the
+		// current launch image from now on (GAP-0751).
+		runtimeState.HookExecutable = opts.HookBinary
 		if !runtimeStateHealthy {
 			runtimeState = windowsCodexManagedRuntimeState{
 				SchemaVersion:    windowsCodexMachineRequirementsSchema,
@@ -284,6 +287,10 @@ func ReconcileWindowsCodexMachineRequirements(
 		runtimeChanged := !managedState.existed || !bytes.Equal(managedState.data, runtimeBytes)
 
 		finalState := state
+		// An ownership record of an earlier hook image of this install keeps
+		// its preimage and names the current layout (GAP-0751).
+		finalState.ManagedDir = opts.ManagedDir
+		finalState.HookBinary = opts.HookBinary
 		finalState.PostimageSHA256 = postHash
 		finalState.Pending = false
 		finalOwnership, err := marshalWindowsCodexMachineOwnership(finalState)
@@ -1126,13 +1133,27 @@ func resolveWindowsCodexManagedRuntimeRegistryLocked(
 			}
 		}
 	}
+	// The requirements name the hook image the guardian last published. An
+	// agent session that read its command before an upgrade starts an older
+	// image of the same install bin (or the guardian, before its first
+	// reconcile, resolves the new one while the file still names the old):
+	// the published image is then the identity the requirements are checked
+	// against (GAP-0751).
+	identityHook := hookExecutable
+	if stateExists {
+		if recorded, ok := windowsCodexRecordedRuntimeHook(stateFile); ok &&
+			!sameWindowsCodexMachinePath(recorded, hookExecutable) &&
+			winpath.SameEnterpriseHookImageFamilyExact(recorded, hookExecutable) {
+			identityHook = recorded
+		}
+	}
 	identityOpts := WindowsCodexMachineRequirementsOptions{
 		RequirementsPath:   requirementsPath,
-		ManagedDir:         filepath.Dir(hookExecutable),
-		HookBinary:         hookExecutable,
+		ManagedDir:         filepath.Dir(identityHook),
+		HookBinary:         identityHook,
 		ManagedStatePath:   statePath,
 		CodexTargetEnabled: true,
-		HookContractID:     WindowsCodexManagedHookContract(hookExecutable),
+		HookContractID:     WindowsCodexManagedHookContract(identityHook),
 	}
 	if !stateExists {
 		contains, markerErr := windowsCodexRequirementsContainExactManagedHook(
@@ -1167,7 +1188,7 @@ func resolveWindowsCodexManagedRuntimeRegistryLocked(
 		!sameWindowsCodexMachinePath(state.RequirementsPath, requirementsPath) {
 		return result, errors.New("Codex managed runtime state has an invalid requirements identity")
 	}
-	if !sameWindowsCodexMachinePath(state.HookExecutable, hookExecutable) {
+	if !sameWindowsCodexMachinePath(state.HookExecutable, identityHook) {
 		return result, fmt.Errorf(
 			"invoking hook executable %s does not match protected Codex runtime state %s",
 			hookExecutable,
@@ -1188,6 +1209,27 @@ func resolveWindowsCodexManagedRuntimeRegistryLocked(
 	result.GatewayServiceName = state.GatewayServiceName
 	result.Targets = targets
 	return result, nil
+}
+
+// windowsCodexRecordedRuntimeHook is the hook executable the Codex managed
+// runtime state in stateFile records, or false when it cannot be read. The
+// caller reads and validates the state again before it trusts anything else
+// in it.
+func windowsCodexRecordedRuntimeHook(stateFile string) (string, bool) {
+	stateCopy, err := readWindowsCodexMachineFile(
+		stateFile,
+		windowsCodexManagedStateLimit,
+		false,
+		"Codex managed runtime state",
+	)
+	if err != nil {
+		return "", false
+	}
+	state, err := parseWindowsCodexManagedRuntimeState(stateCopy.data)
+	if err != nil {
+		return "", false
+	}
+	return state.HookExecutable, true
 }
 
 // ReadWindowsCodexManagedRuntimeTargets returns the exact protected target set.
@@ -1330,6 +1372,29 @@ func verifyWindowsCodexMachineRequirementsLocked(
 	return nil
 }
 
+// windowsCodexSameHookImage reports a recorded hook executable that is the
+// current one, or on the standalone profile another hook image of the same
+// install bin, spelled exactly (GAP-0751): an earlier launch folder or the
+// transition image this install named before an upgrade moved the launch
+// image. Secure Client keeps the exact comparison.
+func windowsCodexSameHookImage(recorded, current string, opts WindowsCodexMachineRequirementsOptions) bool {
+	if sameWindowsCodexMachinePath(recorded, current) {
+		return true
+	}
+	return !opts.SecureClient && winpath.SameEnterpriseHookImageFamilyExact(recorded, current)
+}
+
+// windowsCodexSameManagedLayout is windowsCodexSameHookImage for an
+// ownership record's layout: its hook and the folder that holds it.
+func windowsCodexSameManagedLayout(managedDir, hookBinary string, opts WindowsCodexMachineRequirementsOptions) bool {
+	if sameWindowsCodexMachinePath(managedDir, opts.ManagedDir) &&
+		sameWindowsCodexMachinePath(hookBinary, opts.HookBinary) {
+		return true
+	}
+	return windowsCodexSameHookImage(hookBinary, opts.HookBinary, opts) &&
+		sameWindowsCodexMachinePath(managedDir, filepath.Dir(hookBinary))
+}
+
 func validateWindowsCodexMachineOwnership(
 	state windowsCodexMachineOwnership,
 	opts WindowsCodexMachineRequirementsOptions,
@@ -1338,8 +1403,7 @@ func validateWindowsCodexMachineOwnership(
 		return fmt.Errorf("unsupported Codex requirements ownership schema %d", state.SchemaVersion)
 	}
 	if !sameWindowsCodexMachinePath(state.RequirementsPath, opts.RequirementsPath) ||
-		!sameWindowsCodexMachinePath(state.ManagedDir, opts.ManagedDir) ||
-		!sameWindowsCodexMachinePath(state.HookBinary, opts.HookBinary) {
+		!windowsCodexSameManagedLayout(state.ManagedDir, state.HookBinary, opts) {
 		return errors.New("Codex requirements ownership belongs to another protected layout")
 	}
 	if state.PreimageSHA256 != windowsCodexMachineHash(state.Preimage) {
@@ -1376,7 +1440,7 @@ func validateWindowsCodexManagedRuntimeStateIdentity(
 		return fmt.Errorf("unsupported Codex managed runtime state schema %d", state.SchemaVersion)
 	}
 	if !sameWindowsCodexMachinePath(state.RequirementsPath, opts.RequirementsPath) ||
-		!sameWindowsCodexMachinePath(state.HookExecutable, opts.HookBinary) {
+		!windowsCodexSameHookImage(state.HookExecutable, opts.HookBinary, opts) {
 		return errors.New("Codex managed runtime state belongs to another protected layout")
 	}
 	gatewayAddr, err := NormalizeWindowsManagedGatewayAddr(state.GatewayAddr)
@@ -2098,9 +2162,11 @@ func validateWindowsCodexMachineLayout(opts WindowsCodexMachineRequirementsOptio
 	if !sameWindowsCodexMachinePath(opts.ManagedStatePath, expectedState) {
 		return fmt.Errorf("refusing noncanonical Codex managed runtime state path %s", opts.ManagedStatePath)
 	}
-	if !sameWindowsCodexMachinePath(filepath.Dir(opts.HookBinary), opts.ManagedDir) ||
-		!strings.EqualFold(filepath.Base(opts.ManagedDir), "bin") ||
-		!strings.EqualFold(filepath.Base(opts.HookBinary), "defenseclaw-hook.exe") {
+	// The hook is the transition image in bin or a launch image under
+	// bin\hooks\<16 hex> (GAP-0751); the managed directory is its folder.
+	image, imageOK := winpath.ParseEnterpriseHookImagePath(opts.HookBinary)
+	if !imageOK || !strings.EqualFold(image.Name, winpath.EnterpriseHookImageName) ||
+		!sameWindowsCodexMachinePath(filepath.Dir(opts.HookBinary), opts.ManagedDir) {
 		return errors.New("Codex managed hook binary is not the exact DefenseClaw bin sibling")
 	}
 	if !strings.EqualFold(filepath.Base(opts.OwnershipPath), "codex-requirements-ownership.json") ||

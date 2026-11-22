@@ -3,9 +3,12 @@
   "pages": [
     "capability-matrix",
     "compatibility",
+    "aliases",
+    "switching-connectors",
     "---Agents---",
     "claudecode",
     "cowork",
+    "cowork-vm-sensor",
     "codex",
     "openclaw",
     "openclaw-integration",

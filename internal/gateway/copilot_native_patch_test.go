@@ -11,15 +11,16 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/copilotargs"
+	"github.com/defenseclaw/defenseclaw/internal/copilotjoin"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
 
@@ -55,6 +56,9 @@ func TestCopilotNativeBenignCorpus(t *testing.T) {
 					t.Fatal("native creation diff did not project")
 				}
 				return
+			}
+			if item.OS == runtime.GOOS && item.Fixture != "managed-private-home" {
+				item.Input = rehomeRecordedProfile(t, item.Input)
 			}
 			body, err := json.Marshal(item.Input)
 			if err != nil {
@@ -92,6 +96,50 @@ func TestCopilotNativeBenignCorpus(t *testing.T) {
 	if count != 15 {
 		t.Fatalf("native benign corpus has %d cases, want 15", count)
 	}
+}
+
+// recordedProfile is the home of the account a native corpus row was
+// recorded in, read from the start of its cwd.
+var recordedProfile = regexp.MustCompile(`^(?:[A-Za-z]:\\Users\\[^\\]+|/home/[^/]+|/Users/[^/]+)`)
+
+// rehomeRecordedProfile moves a row recorded in the home of its account into
+// the home of the user running the test, so the row means what it recorded:
+// an agent working in a project of its own user. Run as another account, the
+// recorded home is a profile of someone else, which the hook rightly cannot
+// verify (TOOL-PATH-UNVERIFIED: a second standard user on Windows is denied
+// the recorded user's profile, rel-1-0-10:GAP-1152).
+func rehomeRecordedProfile(t *testing.T, input map[string]any) map[string]any {
+	t.Helper()
+	cwd, _ := input["cwd"].(string)
+	recorded := recordedProfile.FindString(cwd)
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recorded == "" || recorded == home {
+		return input
+	}
+	var rehome func(value any) any
+	rehome = func(value any) any {
+		switch typed := value.(type) {
+		case string:
+			return strings.ReplaceAll(typed, recorded, home)
+		case []any:
+			out := make([]any, len(typed))
+			for index, item := range typed {
+				out[index] = rehome(item)
+			}
+			return out
+		case map[string]any:
+			out := make(map[string]any, len(typed))
+			for key, item := range typed {
+				out[key] = rehome(item)
+			}
+			return out
+		}
+		return value
+	}
+	return rehome(input).(map[string]any)
 }
 
 func TestNativeCopilotPatchProjectAndProtectedTargets(t *testing.T) {
@@ -160,12 +208,15 @@ func TestCopilotPermissionJoinCapacityStillInvalidatesPrior(t *testing.T) {
 	if scope == "" {
 		t.Fatal("expected verified per-user scope")
 	}
-	join := copilotPermissionJoin{entries: map[string]copilotPermissionEntry{
-		copilotPermissionToolKey(scope, "apply_patch"): {calls: []copilotargs.NativeCall{{Name: "apply_patch",
-			Args: json.RawMessage(`"*** Begin Patch\n*** Add File: README.md\n+x\n*** End Patch\n"`)}}, uses: 1, at: time.Now()},
-	}}
-	for i := 1; i < copilotPermissionJoinMax; i++ {
-		join.entries["other"+strconv.Itoa(i)] = copilotPermissionEntry{at: time.Now()}
+	var join copilotPermissionJoin
+	allowedPre := pre
+	allowedPre.ToolArgs = json.RawMessage(`"*** Begin Patch\n*** Add File: README.md\n+x\n*** End Patch\n"`)
+	join.record(ctx, allowedPre, true)
+	for i := 1; i < copilotjoin.Max; i++ {
+		if err := join.own.Record(ctx, "other"+strconv.Itoa(i), true, true,
+			[]copilotargs.NativeCall{{Name: "view", Args: json.RawMessage(`{"path":"/tmp/p"}`)}}); err != nil {
+			t.Fatal(err)
+		}
 	}
 	join.record(ctx, pre, false)
 	permission := agentHookRequest{ConnectorName: "copilot", HookEventName: "permissionRequest",

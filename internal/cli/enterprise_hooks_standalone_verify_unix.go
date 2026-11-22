@@ -197,6 +197,27 @@ func runEnterpriseHookVerifyAttemptStandaloneUnix(ctx context.Context, registrat
 				fail(fmt.Errorf("enterprise hooks: %s machine policy is not in place", row.Connector))
 			case exists && !enterpriseHookAuthorizationCovers(authorization, row):
 				fail(errors.New("protected authorization does not cover target"))
+			case enterprisehooks.MachinePolicyRouteOnly(cfg, row.Connector):
+				// The account's own route render is read as the account
+				// (rel-1-0-10 GAP-0568): missing, edited or stale is
+				// route_config_drift, which the guardian repairs.
+				index := len(run.Rows)
+				run.Rows = append(run.Rows, row)
+				dispatched[index] = true
+				job, ok := jobs[account.UID]
+				if !ok {
+					job = &enterpriseHookWorkerJob{Account: account, Request: enterpriseHookWorkerRequest{Operation: enterpriseHookWorkerOpApply, Standalone: true}}
+					jobs[account.UID] = job
+				}
+				job.Request.Targets = append(job.Request.Targets, enterpriseHookWorkerTarget{
+					Index: index,
+					Mode:  enterpriseHookWorkerModeVerifyMachineRoute,
+					Options: enterpriseHookWorkerOptionsFrom(enterprisehooks.InstallOptions{
+						ConnectorName: row.Connector, UserHome: account.Home, OwnerUID: account.UID, OwnerGID: account.GID,
+						DataDir:   strings.TrimSpace(target.DataDir),
+						RouteOnly: enterpriseHookVerifyRouteOnly(row.Connector, account.User, strconv.Itoa(account.UID), apiAddr),
+					}),
+				})
 			default:
 				row.OK = true
 				run.Rows = append(run.Rows, row)
@@ -234,6 +255,7 @@ func runEnterpriseHookVerifyAttemptStandaloneUnix(ctx context.Context, registrat
 			HookCredentialIdentity: identity,
 			ForeignHookGuardBinary: standaloneForeignHookGuardBinary(target.Connector),
 			ManagedHookBinary:      standaloneManagedHookBinary(),
+			RouteOnly:              enterpriseHookVerifyRouteOnly(target.Connector, account.User, identity, apiAddr),
 		}
 		index := len(run.Rows)
 		run.Rows = append(run.Rows, row)

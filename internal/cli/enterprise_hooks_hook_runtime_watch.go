@@ -61,9 +61,9 @@ type windowsHookRuntimeFile struct {
 // a managed hook start: the hook command prepares the managed runtime, which
 // calls the resolver.
 var windowsHookManagedRuntimeHops = []windowsHookReadHop{
-	{"cli/hook.go", "newHookCmd", "prepareEnterpriseManagedHookRuntime"},
-	{"cli/hook_trusted_state_windows.go", "prepareEnterpriseManagedHookRuntime", "enterpriseManagedRuntimeResolver"},
-	{"cli/hook_trusted_state_windows.go", "enterpriseManagedRuntimeResolver", "ResolveWindowsManagedHookRuntime"},
+	{"hookcli/hook.go", "NewHookCmd", "prepareEnterpriseManagedHookRuntime"},
+	{"hookcli/hook_trusted_state_windows.go", "prepareEnterpriseManagedHookRuntime", "enterpriseManagedRuntimeResolver"},
+	{"hookcli/hook_trusted_state_windows.go", "enterpriseManagedRuntimeResolver", "ResolveWindowsManagedHookRuntime"},
 }
 
 // windowsHookRuntimeFiles is the allow-list. The paths are written relative to
@@ -76,9 +76,9 @@ var windowsHookRuntimeFiles = []windowsHookRuntimeFile{
 		NameFile:  "enterprisepolicy/paths.go",
 		NameConst: "PublicPolicyFileName",
 		Path: []windowsHookReadHop{
-			{"cli/hook_foreign_guard_host.go", "applyHostEnterpriseForeignHookGuard", "applyEnterpriseForeignHookGuard"},
-			{"cli/hook_foreign_guard.go", "applyEnterpriseForeignHookGuard", "hookForeignGuardSummaryPath"},
-			{"cli/hook_foreign_guard.go", "hookForeignGuardSummaryPath", "PublicPolicyPathFor"},
+			{"hookcli/hook_foreign_guard_host.go", "applyHostEnterpriseForeignHookGuard", "ApplyEnterpriseForeignHookGuard"},
+			{"hookcli/hook_foreign_guard.go", "ApplyEnterpriseForeignHookGuard", "HookForeignGuardSummaryPath"},
+			{"hookcli/hook_foreign_guard.go", "HookForeignGuardSummaryPath", "PublicPolicyPathFor"},
 			{"enterprisepolicy/standalone.go", "PublicPolicyPathFor", "PublicPolicyFileName"},
 		},
 	},
@@ -89,9 +89,9 @@ var windowsHookRuntimeFiles = []windowsHookRuntimeFile{
 		NameFile:  "enterprisehooks/windows_standalone_hook_closure_windows.go",
 		NameConst: "windowsStandaloneHookClosureFile",
 		Path: []windowsHookReadHop{
-			{"cli/hook.go", "newHookCmd", "prepareEnterpriseManagedHookRuntime"},
-			{"cli/hook_trusted_state_windows.go", "prepareEnterpriseManagedHookRuntime", "windowsStandaloneHooksHeldClosed"},
-			{"cli/hook_trusted_state_windows.go", "windowsStandaloneHooksHeldClosed", "WindowsStandaloneHooksHeldClosed"},
+			{"hookcli/hook.go", "NewHookCmd", "prepareEnterpriseManagedHookRuntime"},
+			{"hookcli/hook_trusted_state_windows.go", "prepareEnterpriseManagedHookRuntime", "windowsStandaloneHooksHeldClosed"},
+			{"hookcli/hook_trusted_state_windows.go", "windowsStandaloneHooksHeldClosed", "WindowsStandaloneHooksHeldClosed"},
 			{"enterprisehooks/windows_standalone_hook_closure_windows.go", "WindowsStandaloneHooksHeldClosed", "windowsStandaloneHookClosureHeldClosed"},
 			{"enterprisehooks/windows_standalone_hook_closure_windows.go", "windowsStandaloneHookClosureHeldClosed", "windowsStandaloneHookClosurePath"},
 			{"enterprisehooks/windows_standalone_hook_closure_windows.go", "windowsStandaloneHookClosurePath", "windowsStandaloneHookClosureFile"},

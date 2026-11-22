@@ -330,3 +330,6 @@ func readRemote(process windows.Handle, address uintptr, into unsafe.Pointer, si
 // OwnerNameOfUID names no account on Windows, whose processes are owned by a
 // SID rather than a uid.
 func OwnerNameOfUID(int) string { return "" }
+
+// CachedOwnerHome names no home on Windows, for the same reason.
+func CachedOwnerHome(int) string { return "" }

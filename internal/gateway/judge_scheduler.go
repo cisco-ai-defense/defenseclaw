@@ -5,6 +5,7 @@ package gateway
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 )
@@ -18,12 +19,26 @@ const (
 	judgeCallTool judgeCallClass = iota
 	// judgeCallContent is prompt, completion and adjudication judging.
 	judgeCallContent
+	// judgeCallAlignment is the alignment check (alignment.go): it never
+	// waits for a slot and gives up the one it holds as soon as another
+	// judge call has to wait (acquireYielding), so it never delays the
+	// tool judge or a content judge (GAP-0679).
+	judgeCallAlignment
 )
+
+// errJudgeSlotBusy: no slot was free for a call that does not wait.
+var errJudgeSlotBusy = errors.New("no free judge slot (guardrail.judge.max_parallel); the alignment check does not wait for one")
+
+// errJudgeSlotPreempted: a yielding call gave its slot to a waiting call.
+var errJudgeSlotPreempted = errors.New("the alignment check gave its judge slot to a waiting judge call")
 
 // judgeCallClassOf is the class of a judge call of the given kind.
 func judgeCallClassOf(kind string) judgeCallClass {
-	if kind == "tool_injection" {
+	switch kind {
+	case "tool_injection":
 		return judgeCallTool
+	case "alignment":
+		return judgeCallAlignment
 	}
 	return judgeCallContent
 }
@@ -40,6 +55,13 @@ type judgeScheduler struct {
 	running        int
 	runningContent int
 	waiting        [2][]*judgeSlotWaiter
+	// yielding are the running alignment calls, cancelled with
+	// errJudgeSlotPreempted when another call has to wait.
+	yielding map[*judgeYieldSlot]struct{}
+}
+
+type judgeYieldSlot struct {
+	cancel context.CancelCauseFunc
 }
 
 type judgeSlotWaiter struct {
@@ -122,6 +144,10 @@ func (s *judgeScheduler) acquire(ctx context.Context, class judgeCallClass) (fun
 	}
 	w := &judgeSlotWaiter{class: class, ready: make(chan struct{})}
 	s.waiting[class] = append(s.waiting[class], w)
+	if s.running >= s.limit {
+		// Every slot is taken: alignment calls give theirs up.
+		s.preemptYieldingLocked()
+	}
 	s.mu.Unlock()
 	select {
 	case <-w.ready:
@@ -145,6 +171,51 @@ func (s *judgeScheduler) acquire(ctx context.Context, class judgeCallClass) (fun
 	}
 	s.mu.Unlock()
 	return nil, ctx.Err()
+}
+
+// acquireYielding takes a slot for an alignment call only when one is free
+// and no other call waits: it never waits (errJudgeSlotBusy). The returned
+// context ends, with cause errJudgeSlotPreempted, when another call has to
+// wait for a slot; the call then ends and its release starts the waiting
+// call. A nil scheduler has no limit.
+func (s *judgeScheduler) acquireYielding(ctx context.Context) (context.Context, func(), error) {
+	if err := ctx.Err(); err != nil {
+		return ctx, nil, err
+	}
+	if s == nil {
+		return ctx, func() {}, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.limit > 0 && (s.running >= s.limit || len(s.waiting[judgeCallTool]) > 0 || len(s.waiting[judgeCallContent]) > 0) {
+		return ctx, nil, errJudgeSlotBusy
+	}
+	yctx, cancel := context.WithCancelCause(ctx)
+	slot := &judgeYieldSlot{cancel: cancel}
+	if s.yielding == nil {
+		s.yielding = make(map[*judgeYieldSlot]struct{})
+	}
+	s.yielding[slot] = struct{}{}
+	s.startLocked(judgeCallAlignment)
+	var once sync.Once
+	release := func() {
+		once.Do(func() {
+			s.mu.Lock()
+			delete(s.yielding, slot)
+			s.releaseLocked(judgeCallAlignment)
+			s.mu.Unlock()
+			cancel(nil)
+		})
+	}
+	return yctx, release, nil
+}
+
+// preemptYieldingLocked cancels every running alignment call.
+func (s *judgeScheduler) preemptYieldingLocked() {
+	for slot := range s.yielding {
+		slot.cancel(errJudgeSlotPreempted)
+		delete(s.yielding, slot)
+	}
 }
 
 func (s *judgeScheduler) releaseFunc(class judgeCallClass) func() {

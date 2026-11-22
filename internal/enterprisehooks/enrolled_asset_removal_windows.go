@@ -26,48 +26,6 @@ func (e *enrolledUserSignedOutError) Is(target error) bool { return target == Er
 
 func (e *enrolledUserSignedOutError) Unwrap() error { return e.s4u }
 
-// SignedOutRemovalReason says why the guardian waits for user to sign in
-// before it removes a quarantined folder: the kind of account and what
-// Windows answered to the S4U logon. Every signed-out user was called a
-// Microsoft Entra ID account, also an on-prem Active Directory one with its
-// domain controller reachable (GAP-0795).
-func SignedOutRemovalReason(sid, user string, err error) string {
-	var signedOut *enrolledUserSignedOutError
-	answer := ""
-	if errors.As(err, &signedOut) && signedOut.s4u != nil {
-		answer = ": " + signedOut.s4u.Error()
-	}
-	const next = "; the guardian removes the folder when that user next signs in"
-	switch kind, domain := windowsAccountKind(sid); kind {
-	case "entra":
-		return "the owner of " + user + " is signed out, and a Microsoft Entra ID account has no S4U logon" + next
-	case "domain":
-		return "the owner of " + user + " is signed out, and Windows refused an S4U logon for this Active Directory account of domain " +
-			domain + " (Kerberos, through a domain controller)" + answer + next
-	default:
-		return "the owner of " + user + " is signed out, and Windows refused an S4U logon for this local account" + answer + next
-	}
-}
-
-// windowsAccountKind is "entra" for a Microsoft Entra ID account (its SID
-// starts S-1-12-1-), "local" for an account of this computer, and "domain"
-// with the domain name for another one.
-func windowsAccountKind(sid string) (string, string) {
-	if strings.HasPrefix(strings.ToUpper(strings.TrimSpace(sid)), "S-1-12-1-") {
-		return "entra", ""
-	}
-	target, err := windows.StringToSid(sid)
-	if err != nil {
-		return "local", ""
-	}
-	_, domain, _, err := target.LookupAccount("")
-	computer, computerErr := windows.ComputerName()
-	if err != nil || computerErr != nil || strings.EqualFold(domain, computer) {
-		return "local", ""
-	}
-	return "domain", domain
-}
-
 // RemoveEnrolledUserAsset deletes a quarantined skill or plugin folder in an
 // enrolled user's profile for the hook guardian (GAP-0202). It runs as that
 // user (the session token, else an S4U logon), only when the user, an
@@ -134,26 +92,6 @@ func GrantGatewayAssetRead(sid, home, path string) error {
 	err = withWindowsEnterpriseSessionImpersonation(target, home, grant)
 	if err != nil && !ran {
 		err = withWindowsEnterpriseS4UTargetImpersonation(target, home, grant)
-	}
-	return err
-}
-
-// RemoveEnrolledUserAssetInSession is RemoveEnrolledUserAsset with the session
-// token only, for a removal deferred until the user signs in: it returns
-// ErrEnrolledUserSignedOut while the user has no session, without an S4U
-// logon attempt on every retry.
-func RemoveEnrolledUserAssetInSession(sid, home, path string) error {
-	target, err := windows.StringToSid(sid)
-	if err != nil {
-		return fmt.Errorf("enterprise hooks: invalid enrolled user SID %q: %w", sid, err)
-	}
-	ran := false
-	err = withWindowsEnterpriseSessionImpersonation(target, home, func() error {
-		ran = true
-		return purgeWindowsEnrolledAsset(path, target)
-	})
-	if err != nil && !ran {
-		return fmt.Errorf("%w (%v)", ErrEnrolledUserSignedOut, err)
 	}
 	return err
 }

@@ -833,24 +833,70 @@ func TestManagedGuardianOpenCodeLateReadWorkerSharesNoFaultState(t *testing.T) {
 }
 
 // A hung account does not stop the next one: carol (healthy) is read and
-// recorded in the same pass; nobody shares a port.
+// recorded in the same pass, while the hung read is still waiting for its
+// deadline; nobody shares a port.
 func TestManagedGuardianOpenCodeHungAccountThenHealthyOne(t *testing.T) {
 	homes, record, setEligible := openCodePortGuardianWith(t, true, 1001)
-	enterpriseHookOpenCodeReadTimeout = 200 * time.Millisecond
+	// Every read gets this deadline, the healthy one too, so it must be long
+	// enough for a slow hosted macOS runner to read a small file (GAP-1605:
+	// 200 ms was not). What the test proves does not rest on it: the hung
+	// read only ends at its deadline, and carol must answer before it.
+	enterpriseHookOpenCodeReadTimeout = 3 * time.Second
 	setOpenCodeReadHang(1001)
 	setEligible(nil, 1001, 1003)
 	writeOpenCodePortFile(t, homes[1003], 25010)
+	inner := enterpriseHookWorkerRunner
+	hungRead := make(chan context.Context, 1)
+	type healthyAnswer struct {
+		hungStillWaiting bool
+		after            time.Duration
+	}
+	healthyRead := make(chan healthyAnswer, 1)
+	start := time.Now()
+	enterpriseHookWorkerRunner = func(ctx context.Context, account enterpriseHookWorkerAccount, request enterpriseHookWorkerRequest) (enterpriseHookWorkerResponse, error) {
+		if request.Operation != enterpriseHookWorkerOpOpenCodePortRead {
+			return inner(ctx, account, request)
+		}
+		switch account.UID {
+		case 1001:
+			select {
+			case hungRead <- ctx:
+			default:
+			}
+		case 1003:
+			response, err := inner(ctx, account, request)
+			answer := healthyAnswer{hungStillWaiting: true, after: time.Since(start)}
+			select {
+			case hung := <-hungRead:
+				// The hung read's context ends only at its deadline.
+				answer.hungStillWaiting = hung.Err() == nil
+			default: // the hung read has not even started: it blocks nothing
+			}
+			healthyRead <- answer
+			return response, err
+		}
+		return inner(ctx, account, request)
+	}
 	done := make(chan string, 1)
 	go func() { done <- runOpenCodePortPass(t) }()
 	var log string
 	select {
 	case log = <-done:
-	case <-time.After(10 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("a hung account blocked the pass")
 	}
 	assertNoSharedOpenCodePort(t, homes, []int{1001, 1003}, log)
 	if (*record)[1003] != 25010 {
 		t.Fatalf("the healthy account was not processed: record %v\n%s", *record, log)
+	}
+	select {
+	case answer := <-healthyRead:
+		if !answer.hungStillWaiting {
+			t.Fatalf("the healthy account was read only after the hung read reached its %s deadline (answered after %s): the hung account held it up\n%s",
+				enterpriseHookOpenCodeReadTimeout, answer.after, log)
+		}
+	default:
+		t.Fatalf("the healthy account was never read\n%s", log)
 	}
 }
 

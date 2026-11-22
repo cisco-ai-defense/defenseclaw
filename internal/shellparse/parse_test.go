@@ -41,12 +41,13 @@ func TestParseRefusesDeepNestingWithoutRecursing(t *testing.T) {
 	defer debug.SetMaxStack(debug.SetMaxStack(64 << 20))
 	for _, unit := range []string{"(", "$(", "$((", "{ ", "[", "\"$("} {
 		command := strings.Repeat(unit, (180<<10)/len(unit)) + "\necho done"
+		bound := timeBound(len(command), readAll)
 		start := time.Now()
 		if _, ok := Parse(command); ok {
 			t.Errorf("unit %q: deep command parsed", unit)
 		}
-		if took := time.Since(start); took > time.Second {
-			t.Errorf("unit %q: refused in %s", unit, took)
+		if took := time.Since(start); took > bound {
+			t.Errorf("unit %q: refused in %s (bound %s)", unit, took, bound)
 		}
 	}
 	nested := strings.Repeat("$(echo ", 64) + "x" + strings.Repeat(")", 64)

@@ -26,9 +26,7 @@ func TestActionLinkedHomeProtectsAKeyFileBeforeItExists(t *testing.T) {
 		t.Fatal(err)
 	}
 	link := filepath.Join(root, "link")
-	if err := os.Symlink(real, link); err != nil {
-		t.Fatal(err)
-	}
+	testSymlink(t, real, link)
 	home := filepath.Join(link, "h")
 	cwd := filepath.Join(home, "project")
 	for _, command := range []string{

@@ -5,6 +5,7 @@ package gateway
 
 import (
 	"context"
+	"database/sql"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -168,8 +169,8 @@ func TestScriptHookCallAnsweredToItsClientStaysAllowed(t *testing.T) {
 
 // The extended write window of an answered call applies to the per-user
 // install a validated config describes (it compared a deployment mode no
-// config can hold), and never to a managed one.
-func TestPerUserInstallKeepsTheLongRecordWindowOfAnAnsweredCall(t *testing.T) {
+// config can hold) and to a managed one (rel-1-0-10 GAP-0277).
+func TestAnsweredCallKeepsTheLongRecordWindowPerUserAndManaged(t *testing.T) {
 	f := perUserHookFixture(t)
 	ctx, cancel := f.api.hookDeliveredPersistenceContext(t.Context(), true)
 	if cancel == nil {
@@ -183,8 +184,18 @@ func TestPerUserInstallKeepsTheLongRecordWindowOfAnAnsweredCall(t *testing.T) {
 		t.Fatal("a call without a receipt got the answered-call window")
 	}
 	f.api.scannerCfg.DeploymentMode = "managed_enterprise"
+	f.api.scannerCfg.Enterprise = config.EnterpriseConfig{Profile: "standalone"}
+	managedCtx, managedCancel := f.api.hookDeliveredPersistenceContext(t.Context(), true)
+	if managedCancel == nil {
+		t.Fatal("a managed answered call got the ordinary window")
+	}
+	defer managedCancel()
+	if deadline, ok := managedCtx.Deadline(); !ok || time.Until(deadline) < 20*time.Second {
+		t.Fatalf("managed window deadline = %v, want about 30 s", deadline)
+	}
+	f.api.scannerCfg.Enterprise = config.EnterpriseConfig{Profile: "secure_client"}
 	if _, none := f.api.hookDeliveredPersistenceContext(t.Context(), true); none != nil {
-		t.Fatal("a managed call got the per-user window")
+		t.Fatal("a Secure Client call got the answered-call window; it keeps its own grace")
 	}
 }
 
@@ -257,28 +268,60 @@ func TestReportedFailOpenToolCallNamesItsToolID(t *testing.T) {
 // unconfirmed.
 func joinByToolID(t *testing.T, store *audit.Store) map[string][]string {
 	t.Helper()
-	rows, err := store.ListEvents(1000)
+	db, err := sql.Open("sqlite", "file:"+store.DatabasePath()+"?mode=ro")
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer db.Close()
+	// A benign per-user allow keeps only its hook_decision row (#1384), and a
+	// call whose audit write failed has its fail-mode hook_decision row: that
+	// row is the call's record unless a connector-hook or report row names
+	// the same correlation event.
+	rows, err := db.Query(`SELECT COALESCE(NULLIF(event.tool_id,''),
+			json_extract(event.projected_record_json,'$.correlation.tool_invocation_id'),''),
+		event.action, COALESCE(event.details,''),
+		COALESCE(json_extract(event.projected_record_json,'$.body."defenseclaw.guardrail.effective_action"'),'')
+		FROM audit_events AS event
+		WHERE event.action IN ('connector-hook','guardrail-block')
+		   OR (event.action = 'hook_decision'
+		       AND json_extract(event.projected_record_json,'$.correlation.semantic_event_id') IS NOT NULL
+		       AND NOT EXISTS (SELECT 1 FROM audit_events AS other
+		           WHERE other.action IN ('connector-hook','connector-hook-synthetic','guardrail-block')
+		             AND json_extract(other.projected_record_json,'$.correlation.semantic_event_id') =
+		                 json_extract(event.projected_record_json,'$.correlation.semantic_event_id')))
+		ORDER BY event.rowid DESC`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
 	outcomes := map[string][]string{}
-	for _, row := range rows {
-		if row.ToolID == "" || (row.Action != string(audit.ActionConnectorHook) && row.Action != string(audit.ActionGuardrailBlock)) {
+	for rows.Next() {
+		var toolID, action, details, effective string
+		if err := rows.Scan(&toolID, &action, &details, &effective); err != nil {
+			t.Fatal(err)
+		}
+		if toolID == "" {
 			continue
 		}
-		outcome := ""
-		for _, field := range strings.Fields(row.Details) {
-			if value, ok := strings.CutPrefix(field, "action="); ok {
-				outcome = value
+		outcome := effective
+		if action != "hook_decision" {
+			outcome = ""
+			for _, field := range strings.Fields(details) {
+				if value, ok := strings.CutPrefix(field, "action="); ok {
+					outcome = value
+				}
 			}
 		}
-		if row.Action == string(audit.ActionGuardrailBlock) {
+		if action == string(audit.ActionGuardrailBlock) {
 			outcome = "block"
 		}
-		if strings.Contains(strings.ToLower(row.Details), "unconfirmed") {
+		if strings.Contains(strings.ToLower(details), "unconfirmed") {
 			outcome = "unconfirmed"
 		}
-		outcomes[row.ToolID] = append(outcomes[row.ToolID], outcome)
+		outcomes[toolID] = append(outcomes[toolID], outcome)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
 	}
 	return outcomes
 }

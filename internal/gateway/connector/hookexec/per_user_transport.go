@@ -187,7 +187,7 @@ const PerUserPostRestartOutageExit = 11
 // PerUserPostLateOrdinaryExit is the exit status of `hook-post` for a call
 // that got no answer from its verified gateway before the deadline (like
 // PerUserPostNoAnswerExit) and that plainly names nothing a protected file
-// could be reached through (hookpaths.LateOrdinaryCall): a gateway that is up
+// could be reached through (LateOrdinaryBothScans): a gateway that is up
 // but slow under a burst or a long operand list (GAP-0518). The shell hooks
 // read it as the outage status 7, so the account's outage mode decides: open
 // with the visible warning in the default and permissive tiers, closed in
@@ -241,7 +241,38 @@ func PostPerUserHook(ctx context.Context, apiAddr, path string, headers map[stri
 	if err != nil {
 		return PerUserHookReply{}, err
 	}
-	return postPluginHook(ctx, client, apiAddr, path, headers, body)
+	return postPluginHook(withPostOwnerDecision(ctx), client, apiAddr, path, headers, body)
+}
+
+// perUserPostOwnerScanReserve is the part of a plugin or shell post's
+// deadline kept for the owner scan of a connection its listener never
+// accepted (verifyConnected decides it unansweredMargin earlier still).
+// The scan reads every process of the account: on macOS one libproc read of
+// each, several times over, and on a loaded Linux host hundreds of
+// milliseconds (ownerScanGrace).
+const perUserPostOwnerScanReserve = 750 * time.Millisecond
+
+// withPostOwnerDecision gives a post whose request has a deadline, and no
+// connect deadline of its own (connectBy, the native hook), the decision on
+// a connection that sits unaccepted in the queue of this account's frozen
+// gateway before that deadline. Without it the post waited the whole
+// perUserConnectedWait (3 s) for an accept: a Codex shell hook gives its
+// helper about 3.2 s, so on macOS the request ended first and the helper
+// exited 1, a closed refusal for an ordinary ls, instead of the unanswered
+// listener the outage mode decides (rel-1-0-10 GAP-1162). The classification
+// only names the outage: a call that may reach a protected file still exits
+// PerUserPostNoAnswerExit, closed in every mode (cmd/defenseclaw-hook-post).
+func withPostOwnerDecision(ctx context.Context) context.Context {
+	if check, _ := ctx.Value(perUserPeerCheckKey{}).(*perUserPeerCheck); check != nil {
+		return ctx
+	}
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return ctx
+	}
+	ctx, check := withPerUserPeerCheck(ctx)
+	check.by = deadline.Add(-perUserPostOwnerScanReserve)
+	return ctx
 }
 
 // PostManagedEnterprisePluginHook sends one plugin event through the service
@@ -342,7 +373,7 @@ func verifiedPerUserHTTPClient(
 				// hook-post reads the process behind the proven socket, for
 				// a no-answer during a restart (PerUserGatewayRestartProven).
 				if record, _ := ctx.Value(perUserPeerRecordKey{}).(*PerUserPeerRecord); record != nil {
-					record.capture(conn.LocalAddr(), conn.RemoteAddr())
+					record.capture(perUserCallHomes(ctx), conn.LocalAddr(), conn.RemoteAddr())
 				}
 				return conn, nil
 			},

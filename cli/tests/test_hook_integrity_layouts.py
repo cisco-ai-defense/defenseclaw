@@ -545,3 +545,58 @@ def test_an_unpadded_edited_hermes_script_is_still_reported(tmp_path, monkeypatc
     document["hooks"]["pre_tool_call"].insert(0, {"command": edited, "timeout": 30})
     config.write_text(yaml.safe_dump(document), encoding="utf-8")
     assert any("hook command edited" in problem for problem in hook_command_problems(cfg, "hermes"))
+
+
+def _managed_echoes(words: list[str]) -> list[str]:
+    texts, i = [], 0
+    while i < len(words):
+        if words[i] == "echo":
+            end = words.index("1>&2", i)
+            texts.append(" ".join(words[i + 1:end]))
+            i = end
+        i += 1
+    return texts
+
+
+def test_managed_claude_guard_texts_name_their_own_condition_gap0119(monkeypatch):
+    """Claude Code shows the whole registered command beside the hook's answer,
+    so each unavailable text names its own condition (rel-1-0-10 GAP-0119); the
+    1.0.9 form still reads as DefenseClaw's managed guard."""
+    monkeypatch.setenv("SystemRoot", "C:\\Windows")
+    launcher = "C:\\Program Files\\Cisco\\DefenseClaw\\bin\\defenseclaw-hook.exe"
+    guard = "C:\\Program Files\\Cisco\\DefenseClaw\\bin\\defenseclaw-hook-guard.exe"
+    want_missing = (
+        "If defenseclaw-hook-guard.exe is missing from the install folder: "
+        "DefenseClaw cannot check Claude Code until an administrator runs "
+        "DefenseClawSetup-Enterprise-Standalone-x64.exe /repair to restore it. "
+        "Setup is not installed on this computer: use the copy in your MDM package or the release download."
+    )
+    want_start = (
+        "If defenseclaw-hook-guard.exe is in the install folder but does not run: "
+        "DefenseClaw cannot check Claude Code until an administrator runs "
+        "DefenseClawSetup-Enterprise-Standalone-x64.exe /repair."
+    )
+    old = [
+        "DefenseClaw could not start its Claude Code hook guard defenseclaw-hook-guard.exe "
+        "because it is missing from the install folder. Run DefenseClawSetup-Enterprise-Standalone-x64.exe /repair "
+        "as an administrator to restore it. Setup is not installed on this computer: use the copy in your MDM package "
+        "or the release download.",
+        "DefenseClaw could not start its Claude Code hook guard. Run the DefenseClaw installer again to repair it.",
+    ]
+    exec_view = ["hook", "--connector", "claudecode", "--enterprise-managed"]
+    for event in ("UserPromptSubmit", "SessionStart", "Stop"):
+        words = hook_integrity._claude_managed_wrapper_words(guard, launcher, event)
+        assert _managed_echoes(words) == [want_missing, want_start]
+        joined = " ".join(words)
+        assert joined.count("missing from the install folder") == 1
+        assert joined.count("to restore it") == 1
+        assert "could not start its Claude Code hook guard" not in joined
+        first = words.index("echo") + 1
+        second = words.index("echo", first) + 1
+        legacy = (words[:first] + old[0].split() + words[first + len(want_missing.split()):second]
+                  + old[1].split() + words[second + len(want_start.split()):])
+        assert _managed_echoes(legacy) == old
+        handler = {"command": "C:\\Windows\\System32\\cmd.exe", "args": legacy}
+        assert hook_integrity.claude_launcher_guard_view(handler) == {**handler, "command": launcher, "args": exec_view}
+        edited = {**handler, "args": [("admin" if w == "administrator" else w) for w in legacy]}
+        assert hook_integrity.claude_launcher_guard_view(edited) is edited

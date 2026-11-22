@@ -28,10 +28,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"github.com/spf13/cobra"
@@ -52,7 +54,7 @@ var (
 	bundleManagedDevice  = managed.IsStandaloneManagedHost
 	bundlePrivilege      = func() error { return nil }
 	bundleSecretValue    = managedBundleSecretValue
-	bundleSecureClient   = func() bool { return secureClientHost() }
+	bundleSecureClient   = func() bool { return hookcli.SecureClientHost() }
 	bundleDefaultAnchors = func() (string, error) { return enterprisebundle.AnchorsPath(runtime.GOOS) }
 	// bundleAnchorTrust is the anchor file trust check on a device.
 	bundleAnchorTrust = enterprisebundle.TrustCheck(enterprisebundle.TrustAnchorFile)
@@ -88,7 +90,7 @@ func newEnterpriseBundleCommand() *cobra.Command {
 		Use:          "bundle",
 		Short:        "Sign, verify and report signed policy bundles (standalone enterprise)",
 		Long:         enterpriseBundleLong,
-		Annotations:  map[string]string{secureClientAbsentAnnotation: "true"},
+		Annotations:  map[string]string{hookcli.SecureClientAbsentAnnotation: "true"},
 		SilenceUsage: true,
 		// The verbs need no config, audit store or PID registration.
 		PersistentPreRunE: func(*cobra.Command, []string) error { return nil },
@@ -317,7 +319,7 @@ func bundleRefusal(err error) ([]bundleError, error) {
 	if errors.As(err, &be) {
 		entry = bundleError{Code: string(be.Code), Path: be.Path, Message: be.Error()}
 	}
-	return []bundleError{entry}, withExitCode(err, bundleFailureExitCode())
+	return []bundleError{entry}, cliusage.WithExitCode(err, bundleFailureExitCode())
 }
 
 func bundleFailureExitCode() int {
@@ -350,7 +352,7 @@ func runEnterpriseBundleSign(cmd *cobra.Command, opts *bundleSignOptions) error 
 		SecretRefs: []enterprisebundle.SecretRef{}, Warnings: []enterprisebundle.Warning{}, Errors: []bundleError{}}
 	err := bundleSign(bundleContext(cmd), cmd, opts, res)
 	if err != nil {
-		var usage *exitCodeError
+		var usage *cliusage.ExitCodeError
 		if errors.As(err, &usage) && usage.ExitCode() == enterprisestatus.InvalidArgsExitCode(runtime.GOOS) {
 			res.Errors = []bundleError{{Code: "invalid_arguments", Message: err.Error()}}
 		} else {
@@ -534,7 +536,7 @@ func runEnterpriseBundleVerify(cmd *cobra.Command, opts *bundleVerifyOptions) er
 		Platform: opts.platform, Warnings: []enterprisebundle.Warning{}, Errors: []bundleError{}}
 	err := bundleVerify(bundleContext(cmd), opts, res)
 	if err != nil {
-		var usage *exitCodeError
+		var usage *cliusage.ExitCodeError
 		if errors.As(err, &usage) && usage.ExitCode() == enterprisestatus.InvalidArgsExitCode(runtime.GOOS) {
 			res.Errors = []bundleError{{Code: "invalid_arguments", Message: err.Error()}}
 		} else {

@@ -19,8 +19,10 @@ package connector
 import (
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 // managedEnterpriseWindowsHookBinary returns the hook launcher installed beside
@@ -39,7 +41,12 @@ func managedEnterpriseWindowsHookBinary(executable string) string {
 	if err != nil {
 		return ""
 	}
+	// The launch image of the gateway's bin once Setup staged it (GAP-0751);
+	// a hook process asking about itself keeps its own image path.
 	hook := filepath.Clean(filepath.Join(filepath.Dir(executable), windowsHookBinaryName))
+	if !strings.EqualFold(filepath.Base(executable), windowsHookBinaryName) {
+		hook = filepath.Clean(winpath.EnterpriseHookLaunchPath(filepath.Dir(executable)))
+	}
 	if !stableNativeWindowsPE(hook) {
 		return ""
 	}

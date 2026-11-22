@@ -15,6 +15,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -24,14 +25,14 @@ import (
 // deployment_mode managed_enterprise. An elevated administrator keeps the
 // managed answer.
 func TestManagedWindowsStatusShowsOwnState(t *testing.T) {
-	previousStandalone, previousElevated, previousFetch := managedHostWindowsStandalone, windowsEnterpriseIsElevated, ownStatusPipeFetch
+	previousStandalone, previousElevated, previousFetch := hookcli.ManagedHostWindowsStandalone, windowsEnterpriseIsElevated, ownStatusPipeFetch
 	t.Cleanup(func() {
-		managedHostWindowsStandalone, windowsEnterpriseIsElevated, ownStatusPipeFetch = previousStandalone, previousElevated, previousFetch
+		hookcli.ManagedHostWindowsStandalone, windowsEnterpriseIsElevated, ownStatusPipeFetch = previousStandalone, previousElevated, previousFetch
 		gatewayStatusJSON, gatewayStatusOwnState = false, false
 	})
 	t.Setenv(managed.DeploymentModeEnv, "")
 	t.Setenv(managed.ConfigPathEnv, "")
-	managedHostWindowsStandalone = func() (string, bool) { return `HKLM\SOFTWARE\Cisco\DefenseClaw\Enterprise`, true }
+	hookcli.ManagedHostWindowsStandalone = func() (string, bool) { return `HKLM\SOFTWARE\Cisco\DefenseClaw\Enterprise`, true }
 	elevated := false
 	windowsEnterpriseIsElevated = func() bool { return elevated }
 	answer := `{"own":true,"managed":true,"managed_by":"your organization","account":{"sid":"S-1-5-21-1-2-3-1001","name":"WIN11\\dcadmin"},` +
@@ -88,7 +89,7 @@ func TestManagedWindowsStatusShowsOwnState(t *testing.T) {
 		t.Fatal("status with DEFENSECLAW_CONFIG shows the own view")
 	}
 	t.Setenv(managed.ConfigPathEnv, "")
-	managedHostWindowsStandalone = func() (string, bool) { return "", false }
+	hookcli.ManagedHostWindowsStandalone = func() (string, bool) { return "", false }
 	if statusShowsOwnState() {
 		t.Fatal("status on an unmanaged computer shows the own view")
 	}

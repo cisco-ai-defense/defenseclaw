@@ -7255,6 +7255,9 @@ _RESTAMP_VARIABLES = {
     "$codexStateCopy": {"CodexManagedHooksStatePath"},
     # The lazily created lock files (GAP-0766): named out of class, they hold no bytes DefenseClaw reads.
     "$lockFile.Path": {"LazyLockFiles"},
+    # GAP-0751: the hooks folder and its launch folders (gated) and the launch
+    # images (installed binaries, named out of class).
+    "$hookImageItem.Path": {"HookImageFolders", "HookImageFiles"},
 }
 
 
@@ -7293,6 +7296,8 @@ def _gated_managed_paths(gate: str) -> set[str]:
         names.add("BundleTree")
     if "Get-DefenseClawApprovedPolicyPath -Layout $Layout -Name $copy[0]" in gate:
         names.add("ApprovedPolicyFiles")
+    if "Get-DefenseClawHookImageAclItems -Layout $Layout -FoldersOnly" in gate:
+        names.add("HookImageFolders")
     walk = re.search(r"\$walkRoot = if \(\$Scope -ceq 'Retain'\) \{ '(\w+)' \} else \{ '(\w+)' \}", gate)
     if walk and "Get-DefenseClawContentGateWalk -Root" in gate:
         names |= {f"walk:{walk.group(1)}", f"walk:{walk.group(2)}"}

@@ -169,7 +169,7 @@ func TestWindowsCodexFailModePolicyRefreshIsNotTampering(t *testing.T) {
 	cfg.Guardrail.Mode = "observe"
 	cfg.Guardrail.HookFailMode = "open"
 	setupSidecar := &Sidecar{cfg: cfg, health: NewSidecarHealth()}
-	if err := setupSidecar.setupOneConnector(t.Context(), conn, opts, cfg.Gateway.Token, guardrail.NewRulePackCache()); err != nil {
+	if err := setupSidecar.setupOneConnector(t.Context(), conn, opts, guardrail.NewRulePackCache()); err != nil {
 		t.Fatalf("initial Codex setup: %v", err)
 	}
 	if current, err := connector.HookRuntimeRegistrationCurrent(opts, conn, version.Current().BinaryVersion); err != nil || !current {
@@ -300,7 +300,7 @@ func TestCodexRegistrationRecoversOnAuthenticatedSessionStartAfterReadditionAndR
 	}
 	setupSidecar := &Sidecar{cfg: cfg, health: NewSidecarHealth()}
 	if err := setupSidecar.setupOneConnector(
-		context.Background(), conn, opts, gatewayToken, guardrail.NewRulePackCache(),
+		context.Background(), conn, opts, guardrail.NewRulePackCache(),
 	); err != nil {
 		t.Fatalf("initial Codex setup: %v", err)
 	}
@@ -326,7 +326,7 @@ func TestCodexRegistrationRecoversOnAuthenticatedSessionStartAfterReadditionAndR
 	opts.APIToken, opts.HookAPIToken = hookToken, hookToken
 	publishCodexSetupSelectionFixture(t, dataDir, opts)
 	if err := setupSidecar.setupOneConnector(
-		context.Background(), conn, opts, gatewayToken, guardrail.NewRulePackCache(),
+		context.Background(), conn, opts, guardrail.NewRulePackCache(),
 	); err != nil {
 		t.Fatalf("Codex re-addition: %v", err)
 	}
@@ -1271,7 +1271,7 @@ func TestSetupOneConnectorRefusesMissingEffectiveRegistration(t *testing.T) {
 	conn.skipWrite.Store(true)
 	sidecar := &Sidecar{cfg: &config.Config{DataDir: filepath.Join(root, "data")}}
 	opts := connector.SetupOpts{DataDir: sidecar.cfg.DataDir}
-	err := sidecar.setupOneConnector(context.Background(), conn, opts, "non-secret-master-fixture", guardrail.NewRulePackCache())
+	err := sidecar.setupOneConnector(context.Background(), conn, opts, guardrail.NewRulePackCache())
 	if err == nil || !strings.Contains(err.Error(), "registration verification failed") {
 		t.Fatalf("setupOneConnector error=%v, want effective-registration refusal", err)
 	}

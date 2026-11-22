@@ -319,6 +319,72 @@ def test_windows_durable_replace_supports_path_beyond_max_path(tmp_path):
             shutil.rmtree(extended_root)
 
 
+def _windows_open_sharing_everything(path):
+    """Open *path* for reading as the gateway reads a state file: sharing
+    read, write and delete. Returns (kernel32, handle)."""
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateFileW.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    ]
+    kernel32.CreateFileW.restype = wintypes.HANDLE
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    handle = kernel32.CreateFileW(os.fspath(path), 0x80000000, 0x7, None, 3, 0x80, None)
+    assert handle not in (None, wintypes.HANDLE(-1).value), ctypes.get_last_error()
+    return kernel32, handle
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows rename semantics")
+def test_windows_durable_replace_succeeds_while_a_reader_shares_delete(tmp_path):
+    # GAP-1242: the gateway reads agent_discovery.json sharing read, write and
+    # delete. MoveFileExW is refused while any handle has the target open, so
+    # discovery's replace failed and dropped the scan while the gateway read
+    # the cache; the POSIX-semantics rename is not refused.
+    target = tmp_path / "agent_discovery.json"
+    staging = tmp_path / ".agent_discovery.json.new"
+    target.write_bytes(b"old")
+    staging.write_bytes(b"new")
+    kernel32, handle = _windows_open_sharing_everything(target)
+    try:
+        file_permissions.replace_file_durable(staging, target)
+    finally:
+        kernel32.CloseHandle(handle)
+
+    assert target.read_bytes() == b"new"
+    assert not staging.exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows rename semantics")
+def test_windows_durable_replace_uses_movefileex_where_posix_rename_is_refused(monkeypatch, tmp_path):
+    # A volume or filter driver that refuses FileRenameInfoEx still gets the
+    # replacement, through MoveFileExW as before.
+    calls: list[str] = []
+
+    def refused(_kernel32, source, _target):
+        calls.append(source)
+        return 50  # ERROR_NOT_SUPPORTED
+
+    monkeypatch.setattr(file_permissions, "_windows_posix_rename_replace", refused)
+    target = tmp_path / "state.json"
+    staging = tmp_path / ".state.json.new"
+    target.write_bytes(b"old")
+    staging.write_bytes(b"new")
+
+    file_permissions.replace_file_durable(staging, target)
+
+    assert target.read_bytes() == b"new"
+    assert not staging.exists()
+    assert len(calls) == 1
+
+
 def test_durable_replace_failure_names_the_target_file(tmp_path):
     # A target that is a folder cannot be replaced. The error names the file on
     # every OS (os.replace sets filename2; MoveFileExW through ctypes did not),

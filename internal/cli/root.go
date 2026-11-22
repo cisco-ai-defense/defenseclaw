@@ -29,6 +29,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/daemon"
 	"github.com/defenseclaw/defenseclaw/internal/envvars"
@@ -598,7 +599,7 @@ func Execute() int {
 //     specific rc for the withExitCode helper the Windows enterprise
 //     lifecycle command uses (rc 1603 on preflight failures).
 //
-// exitCodeFor handles the scrub carrier; commandExitCode handles the
+// exitCodeFor handles the scrub carrier; cliusage.ExitCode handles the
 // integration carrier. Layered so exitCodeFor wins on ambiguity —
 // scrub is the more specific subcommand.
 func ExecuteContext(ctx context.Context) int {
@@ -643,7 +644,7 @@ func executeResult(root *cobra.Command, err error) int {
 		return rc
 	}
 	// integration-branch withExitCode helper.
-	if rc := commandExitCode(err); rc != 1 {
+	if rc := cliusage.ExitCode(err); rc != 1 {
 		return rc
 	}
 	// An unknown top-level command is a usage error, as in the Python CLI
@@ -706,8 +707,6 @@ func loadDotEnvIntoOS(path string) {
 		return
 	}
 	managedHost := envvars.ManagedStandalone() || dotEnvManagedSource()
-	// An adopted gateway token copy never shadows the one the operator saved.
-	shadowed := envvars.ShadowedAdoptedGatewayTokens(data)
 	for _, line := range strings.Split(string(data), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || line[0] == '#' {
@@ -719,7 +718,7 @@ func loadDotEnvIntoOS(path string) {
 		}
 		k = strings.TrimSpace(k)
 		v = strings.TrimSpace(v)
-		if !dotEnvKeyIsValid(k) || strings.IndexByte(v, 0) >= 0 || dotEnvKeyIsProcessControl(k) || shadowed.Has(k) {
+		if !dotEnvKeyIsValid(k) || strings.IndexByte(v, 0) >= 0 || dotEnvKeyIsProcessControl(k) {
 			continue
 		}
 		// A managed standalone host skips what the registry ignores there.

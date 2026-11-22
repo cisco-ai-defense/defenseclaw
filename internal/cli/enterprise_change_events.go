@@ -26,6 +26,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
@@ -92,7 +93,7 @@ func secretFailureCode(err error, invalidExit int) string {
 		return refusal.code
 	case errors.As(err, &view):
 		return view.code
-	case commandExitCode(err) == invalidExit:
+	case cliusage.ExitCode(err) == invalidExit:
 		return "invalid_arguments"
 	default:
 		return string(enterprisebundle.CodeStateInvalid)

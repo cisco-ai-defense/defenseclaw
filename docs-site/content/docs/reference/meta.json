@@ -3,6 +3,7 @@
   "pages": [
     "cli",
     "setup-commands",
+    "setup-guardrail",
     "sandbox-cli",
     "source-of-truth",
     "configuration",

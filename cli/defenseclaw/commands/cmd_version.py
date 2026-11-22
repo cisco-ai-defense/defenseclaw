@@ -243,10 +243,11 @@ def _openclaw_active_in(cfg) -> bool:
 
 def _plugin_component() -> Component:
     """Read the OpenClaw plugin's ``package.json`` if it's installed."""
-    candidates: list[Path] = []
-    # Installed location (what DefenseClaw ships to OpenClaw)
-    openclaw_ext = Path.home() / ".openclaw" / "extensions" / "defenseclaw" / "package.json"
-    candidates.append(openclaw_ext)
+    from defenseclaw.openclaw_plugin_config import openclaw_plugin_package_candidates
+
+    # The administrator-installed plugin_dir, then the managed copy under
+    # claw.home_dir (rel-1-0-10 GAP-0140).
+    candidates: list[Path] = [Path(p) for p in openclaw_plugin_package_candidates()]
 
     # Dev-tree / source location (for operators running out of the repo)
     try:
@@ -258,7 +259,11 @@ def _plugin_component() -> Component:
         pass
 
     for path in candidates:
-        if not path.is_file():
+        try:
+            if not path.is_file():
+                continue
+        except OSError:
+            # A folder of another account (separate-user layout).
             continue
         try:
             with path.open(encoding="utf-8") as fh:
@@ -282,7 +287,7 @@ def _plugin_component() -> Component:
     return Component(
         name="plugin",
         version="(not installed)",
-        origin="~/.openclaw/extensions/defenseclaw",
+        origin=str(candidates[0].parent) if candidates else "~/.openclaw/extensions/defenseclaw",
         status="missing",
     )
 

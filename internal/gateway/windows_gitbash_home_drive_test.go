@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -194,7 +195,9 @@ func TestR105GAP2304WindowsGitBashHomeDrivePaths(t *testing.T) {
 				})
 				action, findings = resp.Action, resp.Findings
 			}
-			blocked := action == guardrailActionBlock
+			// A proven state write alone is the HIGH alert of the default
+			// pack (GAP-0747 owner tiering 2026-11-15T15:20Z).
+			blocked := gap0747ActionBlocked(action, strings.Join(findings, " "), row.block, false)
 			if blocked != row.block {
 				t.Errorf("%s %s %q: blocked=%v, want %v (findings %v)", agent, row.id, row.command, blocked, row.block, findings)
 			}

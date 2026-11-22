@@ -79,7 +79,7 @@ func TestR106ManagedMoveOntoLinkWithCdRelativeDestinationReplacesTheLink(t *test
 				input := actionfacts.Input{Tool: "Bash", Command: command, CWD: cwd, ActiveHome: home, DialectHint: actionfacts.DialectPOSIX}
 				findings := dispatchTrustedAction(t.Context(), trustedActionRequest{Input: input, Connector: connector,
 					EnforcementCapable: true, ProtectedHomeHook: true, ResolvedWriteTargets: targets})
-				if blocked := buildVerdict(findings, "tool_call").Action == "block"; blocked != row.block {
+				if blocked := gap0747Blocked(findings, row.block); blocked != row.block {
 					t.Errorf("%s hidden=%v %q: block=%v, want %v (%s)", connector, hidden, row.command, blocked, row.block, strings.Join(FindingStrings(findings), ","))
 				}
 				_ = os.Chmod(ext, 0o700)

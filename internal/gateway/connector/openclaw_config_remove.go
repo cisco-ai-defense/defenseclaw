@@ -22,6 +22,10 @@ type openClawRemoval struct {
 	// because the operator had one before setup.
 	conversationGrant bool
 	keepEmptyHooks    bool
+	// loneGrant drops a defenseclaw entry that is left with nothing but that
+	// grant, when no copy of the file from before setup says the operator
+	// wrote it (GAP-0267).
+	loneGrant bool
 }
 
 // removeDefenseClawFromConfig takes the settings in scope out of a parsed
@@ -122,9 +126,18 @@ func nextDefenseClawRemoval(doc *jsonc.Value, data []byte, scope openClawRemoval
 						if j, ok := entry.Lookup("enabled"); ok {
 							return entry.RemoveChild(data, j)
 						}
+						if spans := removeHookModeSpans(entry, data); spans != nil {
+							return spans
+						}
 						if scope.conversationGrant {
 							if spans := removeConversationGrantSpans(entry, data, scope.keepEmptyHooks); spans != nil {
 								return spans
+							}
+						}
+						if scope.loneGrant {
+							var left map[string]interface{}
+							if jsonc.UnmarshalJSON5(data[entry.Start:entry.End], &left) == nil && isLoneConversationGrant(left) {
+								return entries.RemoveChild(data, i)
 							}
 						}
 					}
@@ -191,4 +204,28 @@ func childValue(obj *jsonc.Value, key string) *jsonc.Value {
 		return obj.Children[i].Value
 	}
 	return nil
+}
+
+// removeHookModeSpans returns the text ranges that drop config.hookMode or config.promptGate
+// (setup writes it) from a defenseclaw entry, and the config object with it
+// when nothing else is in it. It mirrors removeDefenseClawPluginKeys.
+func removeHookModeSpans(entry *jsonc.Value, data []byte) []jsonc.Span {
+	cfg := childValue(entry, "config")
+	if cfg == nil || !cfg.Object {
+		return nil
+	}
+	i, ok := -1, false
+	for _, key := range openClawSetupConfigKeys {
+		if i, ok = cfg.Lookup(key); ok {
+			break
+		}
+	}
+	if !ok {
+		return nil
+	}
+	if len(cfg.Children) == 1 {
+		k, _ := entry.Lookup("config")
+		return entry.RemoveChild(data, k)
+	}
+	return cfg.RemoveChild(data, i)
 }

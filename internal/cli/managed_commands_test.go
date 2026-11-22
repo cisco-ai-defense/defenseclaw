@@ -15,7 +15,9 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -110,11 +112,11 @@ func TestManagedCommandCellsAgreeWithTheLauncher(t *testing.T) {
 // Refused, and every other value matches what the command tree and the
 // elevation check do.
 func TestManagedCommandsMatchTheWindowsBinary(t *testing.T) {
-	restoreHost, restoreAdmin, restoreCaller := managedHostWindowsStandalone, auditExportManagedHost, auditExportCallerIsAdministrator
+	restoreHost, restoreAdmin, restoreCaller := hookcli.ManagedHostWindowsStandalone, auditExportManagedHost, auditExportCallerIsAdministrator
 	t.Cleanup(func() {
-		managedHostWindowsStandalone, auditExportManagedHost, auditExportCallerIsAdministrator = restoreHost, restoreAdmin, restoreCaller
+		hookcli.ManagedHostWindowsStandalone, auditExportManagedHost, auditExportCallerIsAdministrator = restoreHost, restoreAdmin, restoreCaller
 	})
-	managedHostWindowsStandalone = func() (string, bool) { return `HKLM\SOFTWARE\Cisco\DefenseClaw\Enterprise`, true }
+	hookcli.ManagedHostWindowsStandalone = func() (string, bool) { return `HKLM\SOFTWARE\Cisco\DefenseClaw\Enterprise`, true }
 	auditExportManagedHost = func() bool { return true }
 	auditExportCallerIsAdministrator = func() bool { return false }
 	t.Setenv(managed.ConfigPathEnv, "")
@@ -168,10 +170,14 @@ func TestManagedCommandsMatchTheWindowsBinary(t *testing.T) {
 				var err error
 				if probe[0] == "policy" {
 					err = policyConfigOnlyPreRunE(cmd, nil)
+				} else if slices.Equal(probe, []string{"audit", "compact"}) {
+					err = prepareManagedAuditCompactEnvironment()
+				} else if slices.Equal(probe, []string{"audit", "rejected"}) {
+					err = auditRejectedPersistentPreRunE(cmd, nil)
 				} else {
 					err = prepareManagedAuditExportEnvironment()
 				}
-				if !installed || err == nil || commandExitCode(err) != enterprisestatus.WindowsExitAccessDenied {
+				if !installed || err == nil || cliusage.ExitCode(err) != enterprisestatus.WindowsExitAccessDenied {
 					t.Errorf("%s: marked Administrators only but a standard account gets %v", command.Command, err)
 				}
 			default:

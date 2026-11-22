@@ -19,7 +19,17 @@ func verifyPerUserConnectedTuple(client, server *net.TCPAddr) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), perUserConnectedWait)
 	defer cancel()
+	started := time.Now()
 	err := awaitPerUserDarwinSocket(ctx, func(ctx context.Context) (bool, error) {
+		if darwinRecordedGatewayHoldsSocket(ctx, server, client, darwinTCPEstablished) {
+			return true, nil
+		}
+		// The scan of every process of the account is the proof for a
+		// gateway with no valid record, and the fallback once the recorded
+		// gateway has not shown the socket for darwinRecordedGatewayGrace.
+		if recordedGatewayValid(ctx) && time.Since(started) < darwinRecordedGatewayGrace {
+			return false, nil
+		}
 		owners, err := darwinSocketOwnerPIDs(ctx, server, client, darwinTCPEstablished)
 		return len(owners) != 0, err
 	})
@@ -27,6 +37,22 @@ func verifyPerUserConnectedTuple(client, server *net.TCPAddr) error {
 		return fmt.Errorf("%w: %w", errPerUserNotAccepted, err)
 	}
 	return err
+}
+
+// darwinRecordedGatewayGrace is how long a call waits for the recorded
+// gateway to show the accepted socket before it scans every process of the
+// account as well.
+const darwinRecordedGatewayGrace = 100 * time.Millisecond
+
+// recordedGatewayValid reports whether a gateway record of the call names a
+// live process of the same start.
+func recordedGatewayValid(ctx context.Context) bool {
+	for _, home := range perUserGatewayHomes(ctx) {
+		if _, ok := recordedGatewayPID(home); ok {
+			return true
+		}
+	}
+	return false
 }
 
 // tupleStillQueued reports whether no process of this account holds the
@@ -73,6 +99,7 @@ var errDarwinSocketNotProven = errors.New("connected gateway server socket was n
 // connect can finish before accept gives the gateway its server-side FD.
 // The request waits for the held connection exact reverse tuple.
 func awaitPerUserDarwinSocket(ctx context.Context, inspect func(context.Context) (bool, error)) error {
+	attempt := 0
 	for {
 		if ctx.Err() != nil {
 			return errDarwinSocketNotProven
@@ -87,7 +114,7 @@ func awaitPerUserDarwinSocket(ctx context.Context, inspect func(context.Context)
 		select {
 		case <-ctx.Done():
 			return errDarwinSocketNotProven
-		case <-time.After(20 * time.Millisecond):
+		case <-time.After(nextConnectedPollPause(&attempt)):
 		}
 	}
 }

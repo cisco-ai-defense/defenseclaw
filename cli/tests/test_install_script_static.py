@@ -288,8 +288,11 @@ def test_windows_upgrade_says_it_is_cleaning_up_before_the_long_deletes() -> Non
 def test_installer_never_uses_retired_asset_names() -> None:
     text = INSTALL_SH.read_text(encoding="utf-8")
 
-    for retired in (".dcwheel", ".dcgateway", "upgrade-manifest.json", "release-provenance.json", "defenseclaw_"):
+    for retired in (".dcwheel", ".dcgateway", "upgrade-manifest.json", "release-provenance.json"):
         assert retired not in text
+    # The retired wheel names began with defenseclaw_; the Codex route-only provider table
+    # defenseclaw_route (route_only_left, GAP-0602) is a config key, not an asset name.
+    assert re.search(r"defenseclaw_(?!route\b)", text) is None
 
 
 def test_intel_macos_is_refused_before_changes() -> None:
@@ -615,7 +618,9 @@ def test_quickstart_failure_without_hermes_says_how_to_install_it() -> None:
     assert "Install Hermes (https://github.com/NousResearch/hermes-agent), then run:" in branch
 
 
-def _openclaw_install_run(tmp_path: Path, npm_rc: int, answer: int = 0) -> subprocess.CompletedProcess[str]:
+def _openclaw_install_run(
+    tmp_path: Path, npm_rc: int, answer: int = 0, node_version: str = "v24.16.0"
+) -> subprocess.CompletedProcess[str]:
     text = INSTALL_SH.read_text(encoding="utf-8")
     start = text.index("ensure_openclaw() {")
     funcs = text[start : text.index("\n}\n", text.index("npm_global_prefix_writable() {")) + 3]
@@ -631,6 +636,8 @@ def _openclaw_install_run(tmp_path: Path, npm_rc: int, answer: int = 0) -> subpr
         encoding="utf-8",
     )
     (fake / "npm").chmod(0o755)
+    (fake / "node").write_text(f"#!/bin/sh\necho {node_version}\n", encoding="utf-8")
+    (fake / "node").chmod(0o755)
     (prefix / "lib" / "node_modules").chmod(0o555)
     (prefix / "bin").chmod(0o555)
     script = tmp_path / "oc.sh"
@@ -638,7 +645,7 @@ def _openclaw_install_run(tmp_path: Path, npm_rc: int, answer: int = 0) -> subpr
         "set -euo pipefail\n"
         f'has() {{ command -v "$1" >/dev/null 2>&1; }}\nask_yes_no() {{ return {answer}; }}\n'
         'warn() { echo "WARN $*"; }\ninfo() { echo "INFO $*"; }\nok() { :; }\nversion_lt() { return 1; }\n'
-        f'OPENCLAW_VERSION=2026.3.24 OPENCLAW_MISSING=false OPENCLAW_INSTALLED=false BIN_DIR="{tmp_path / "home" / ".local" / "bin"}"\n'
+        f'OPENCLAW_VERSION=2026.11.3 OPENCLAW_NODE22_VERSION=2026.8.35 OPENCLAW_MISSING=false OPENCLAW_INSTALLED=false BIN_DIR="{tmp_path / "home" / ".local" / "bin"}"\n'
         + funcs
         + 'ensure_openclaw\necho "missing=${OPENCLAW_MISSING} installed=${OPENCLAW_INSTALLED}"\n',
         encoding="utf-8",
@@ -658,16 +665,16 @@ def test_openclaw_installs_into_the_user_prefix_when_the_node_prefix_is_read_onl
     assert done.returncode == 0, done.stdout + done.stderr
     home = tmp_path / "home"
     assert (tmp_path / "npm.log").read_text().split() == [
-        "install", "-g", "--prefix", f"{home}/.local", "openclaw@2026.3.24",
+        "install", "-g", "--prefix", f"{home}/.local", "openclaw@2026.11.3",
         "--no-fund", "--no-audit", "--no-update-notifier", "--loglevel=error",
     ]
-    assert "INFO Installing OpenClaw 2026.3.24 with npm" in done.stdout
+    assert "INFO Installing OpenClaw 2026.11.3 with npm" in done.stdout
     assert "missing=false installed=true" in done.stdout
 
     failed_dir = tmp_path / "f"
     failed_dir.mkdir()
     failed = _openclaw_install_run(failed_dir, 1)
-    assert f"run: npm install -g --prefix {failed_dir / 'home'}/.local openclaw@2026.3.24" in failed.stdout
+    assert f"run: npm install -g --prefix {failed_dir / 'home'}/.local openclaw@2026.11.3" in failed.stdout
     assert "missing=true installed=false" in failed.stdout
     summary = INSTALL_SH.read_text(encoding="utf-8")
     tail = summary[summary.index('if [[ "${OPENCLAW_MISSING}" == true ]]; then') :]
@@ -2100,18 +2107,17 @@ def test_a_process_gone_since_ps_listed_it_is_skipped_without_lsof(tmp_path: Pat
     result = _agent_scan(home, [stubs])
     assert result.returncode == 0, (result.stdout, result.stderr)
     assert "scan-passed" in result.stdout
-    if installed:
-        assert f"audit: live-agent identity unproven for PID {gone.pid}: process vanished during lookup" in result.stderr
-    else:
-        assert "audit:" not in result.stderr
+    # GAP-0916: a process that exited after the listing is not an unproven identity.
+    assert "audit:" not in result.stderr and "vanished" not in result.stderr
     assert not marker.exists()
     assert time.monotonic() - started < 10
 
 
 @pytest.mark.skipif(not Path("/proc/self/exe").exists(), reason="Linux /proc")
-def test_the_audit_line_goes_to_the_install_log_not_the_console(tmp_path: Path) -> None:
-    # GAP-0103: install.sh printed "audit: live-agent identity unproven ... process vanished during
-    # lookup" in the console. With the install log open (LOG) the line is written there only.
+def test_a_vanished_process_leaves_no_audit_line_and_an_unproven_one_goes_to_the_log(tmp_path: Path) -> None:
+    # GAP-0103 moved the line from the console to the install log; GAP-0916: a
+    # process that is gone is not audited at all. A real unproven identity (a
+    # process list that cannot be read) still goes to the log, not the console.
     gone = subprocess.Popen(["true"])
     gone.wait()
     stubs, log = tmp_path / "stubs", tmp_path / "install.log"
@@ -2125,7 +2131,13 @@ def test_the_audit_line_goes_to_the_install_log_not_the_console(tmp_path: Path) 
     result = _agent_scan(home, [stubs], LOG=str(log))
     assert result.returncode == 0 and "scan-passed" in result.stdout, (result.stdout, result.stderr)
     assert "audit:" not in result.stderr and "audit:" not in result.stdout
-    assert f"audit: live-agent identity unproven for PID {gone.pid}: process vanished during lookup" in log.read_text()
+    assert not log.exists() or "vanished" not in log.read_text()
+
+    (stubs / "ps").write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    result = _agent_scan(home, [stubs], LOG=str(log))
+    assert result.returncode == 0 and "scan-passed" in result.stdout, (result.stdout, result.stderr)
+    assert "audit:" not in result.stderr and "audit:" not in result.stdout
+    assert "audit: live-agent identity unproven for PID 0: process list unreadable" in log.read_text()
 
 
 @pytest.mark.parametrize("installed", [False, True])
@@ -2515,7 +2527,7 @@ def test_declining_openclaw_names_the_working_command_and_skips_quickstart(tmp_p
     # root-owned Node), then quickstart failed on the missing agent (exit 4).
     declined = _openclaw_install_run(tmp_path, 0, answer=1)
     assert declined.returncode == 0, declined.stdout + declined.stderr
-    hint = f"install it later with: npm install -g --prefix {tmp_path / 'home'}/.local openclaw@2026.3.24"
+    hint = f"install it later with: npm install -g --prefix {tmp_path / 'home'}/.local openclaw@2026.11.3"
     assert hint in declined.stdout
     assert "missing=true installed=false" in declined.stdout
     assert not (tmp_path / "npm.log").exists()
@@ -4071,3 +4083,24 @@ def test_the_new_entry_runs_under_sh_before_any_link_names_it() -> None:
     restore = script[script.index("restore_links() {"):]
     restore = restore[: restore.index("\n}\n")]
     assert restore.index("shell_runnable_entry") < restore.index('mv -f "${new}" "${BIN_DIR}/${link}"')
+
+
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root can write any prefix")
+@pytest.mark.parametrize(
+    ("node_version", "openclaw"),
+    [("v24.16.0", "2026.11.3"), ("v26.1.0", "2026.11.3"), ("v22.23.3", "2026.8.35"), ("v24.15.0", "2026.8.35")],
+)
+def test_openclaw_release_follows_the_node_version(tmp_path: Path, node_version: str, openclaw: str) -> None:
+    # OpenClaw 2026.9 and later need Node 24.16; Node 22 hosts get 2026.8.35,
+    # the first release with the native plugin hooks.
+    done = _openclaw_install_run(tmp_path, 0, node_version=node_version)
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert f"openclaw@{openclaw}" in (tmp_path / "npm.log").read_text()
+
+
+def test_openclaw_is_not_installed_on_a_node_it_cannot_run_on(tmp_path: Path) -> None:
+    done = _openclaw_install_run(tmp_path, 0, node_version="v20.11.0")
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert not (tmp_path / "npm.log").exists()
+    assert "OpenClaw needs Node.js 22.22.3 or later" in done.stdout
+    assert "missing=true installed=false" in done.stdout

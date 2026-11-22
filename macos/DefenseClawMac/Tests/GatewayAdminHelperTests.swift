@@ -21,6 +21,18 @@ import Darwin
 import Foundation
 import Security
 
+extension GatewayAdminAgentConfigRepair {
+    /// Runs after a listed file passed its checks, before it is opened
+    /// (main.swift calls it in GATEWAY_ADMIN_HELPER_TESTING builds only).
+    static var fileCheckedForTesting: ((String) -> Void)?
+}
+
+extension GatewayAdminOwnershipRepair {
+    /// Runs after a walked file passed its checks, before it is opened
+    /// (main.swift calls it in GATEWAY_ADMIN_HELPER_TESTING builds only).
+    static var walkFileCheckedForTesting: ((String) -> Void)?
+}
+
 @main
 private enum GatewayAdminHelperTests {
     private static var checks = 0
@@ -35,6 +47,11 @@ private enum GatewayAdminHelperTests {
     }
 
     static func main() throws {
+        if CommandLine.arguments.count == 3, CommandLine.arguments[2] == "--real-root" {
+            try testRealRootAgentConfigRepair(root: URL(fileURLWithPath: CommandLine.arguments[1], isDirectory: true))
+            print("Gateway administrator helper: \(checks) real-root checks passed")
+            return
+        }
         guard CommandLine.arguments.count == 2, getuid() != 0 else {
             fatalError("Run these tests as a normal user with a private fixture directory.")
         }
@@ -172,6 +189,10 @@ private enum GatewayAdminHelperTests {
         }
         testStagedExecutables()
         try testOwnershipRepair(root: root, account: account)
+        try testAgentConfigRepair(root: root, account: account)
+        try testAgentConfigFolderRules(root: root)
+        try testAgentConfigFileEdgeCases(root: root)
+        try testAgentConfigFolderWalkSwap(root: root)
         try testRepairOrder()
         try testRootProcessRecord(root: root)
         try testStop()
@@ -318,6 +339,409 @@ private enum GatewayAdminHelperTests {
             home: installation.descriptor, from: getuid() &+ 1, to: (getuid(), getgid()),
             change: { _, relative in fatalError("A file of another owner was changed: \(relative)") })
         check(untouched.restored.isEmpty && untouched.summary.contains("No root-owned"), "Nothing else is changed")
+    }
+
+    /// v1.1.36 port: agent config files outside the DefenseClaw home. With the
+    /// account as the "root" owner every folder is entered, so only the file
+    /// rules decide; with another account uid, an owned folder on the way is a
+    /// "root-owned" folder and is returned whole, once.
+    private static func testAgentConfigRepair(root: URL, account: InvokingAccount) throws {
+        let fm = FileManager.default
+        let home = root.appendingPathComponent("agent-home", isDirectory: true)
+        let outside = root.appendingPathComponent("agent-outside", isDirectory: true)
+        for directory in ["", ".claude", ".codex", ".copilot", ".copilot/hooks", ".hermes", ".kiro", ".kiro/agents", ".kiro/hooks"] {
+            try fm.createDirectory(at: home.appendingPathComponent(directory, isDirectory: true),
+                                   withIntermediateDirectories: false,
+                                   attributes: [.posixPermissions: NSNumber(value: 0o700)])
+        }
+        try fm.createDirectory(at: outside, withIntermediateDirectories: false,
+                               attributes: [.posixPermissions: NSNumber(value: 0o700)])
+        _ = chmod(home.appendingPathComponent(".hermes").path, 0o770)
+        let secret = outside.appendingPathComponent("system-file")
+        try Data("not the account's".utf8).write(to: secret)
+        for name in [".claude/settings.json", ".copilot/hooks/defenseclaw.json", ".hermes/config.yaml",
+                     ".kiro/agents/defenseclaw.json", ".kiro/hooks/defenseclaw.json"] {
+            try Data("{}".utf8).write(to: home.appendingPathComponent(name))
+            _ = chmod(home.appendingPathComponent(name).path, 0o600)
+        }
+        _ = chmod(home.appendingPathComponent(".copilot/hooks/defenseclaw.json").path, 0o620)
+        check(link(secret.path, home.appendingPathComponent(".codex/config.toml").path) == 0, "Could not prepare the hard-link fixture")
+        try fm.createSymbolicLink(at: home.appendingPathComponent(".cursor"), withDestinationURL: outside)
+        try Data("{}".utf8).write(to: outside.appendingPathComponent("hooks.json"))
+
+        let descriptor = try GatewayAdminAgentConfigRepair.openAccountHome(home.path, uid: getuid())
+        defer { close(descriptor) }
+        var changed: [String] = []
+        var descriptorsWereOpen = true
+        let files = GatewayAdminAgentConfigRepair.restore(
+            home: descriptor, from: getuid(), to: (getuid(), getgid()),
+            change: { opened, relative in
+                var metadata = stat()
+                descriptorsWereOpen = descriptorsWereOpen && fstat(opened, &metadata) == 0
+                changed.append(relative)
+                return 0
+            })
+        check(descriptorsWereOpen, "Every agent config change must go through an open descriptor")
+        check(Set(changed) == ["~/.claude/settings.json", "~/.kiro/agents/defenseclaw.json", "~/.kiro/hooks/defenseclaw.json"],
+              "Only listed single-link regular files under private folders are returned: \(changed)")
+        check(files.skipped == ["~/.codex/config.toml", "~/.copilot/hooks/defenseclaw.json"],
+              "Hard-linked and group-writable files are reported, not changed: \(files.skipped)")
+        check(!changed.contains(where: { $0.hasPrefix("~/.cursor") || $0.hasPrefix("~/.hermes") }),
+              "A linked folder is never followed and a shared-writable folder is never entered")
+        check(!files.incomplete, "Missing agent configs are not an incomplete repair")
+
+        changed = []
+        let folders = GatewayAdminAgentConfigRepair.restore(
+            home: descriptor, from: getuid(), to: (getuid() &+ 1, getgid()),
+            change: { _, relative in changed.append(relative); return 0 })
+        check(changed.filter { $0 == "~/.kiro" }.count == 1 && changed.contains("~/.kiro/agents/defenseclaw.json")
+              && changed.contains("~/.kiro/hooks/defenseclaw.json"),
+              "A root-owned folder on the way is returned whole, once: \(changed)")
+        check(changed.contains("~/.claude") && !changed.contains(where: { $0.hasPrefix("~/.cursor") }),
+              "Folder returns stay inside the account home: \(changed)")
+        check(folders.skipped.contains("~/.codex/config.toml"), "A hard link inside a returned folder stays unchanged")
+
+        let unlisted = GatewayAdminAgentConfigRepair.restore(
+            home: descriptor, from: getuid() &+ 1, to: (getuid(), getgid()),
+            change: { _, relative in fatalError("A file of another owner was changed: \(relative)") })
+        check(unlisted.restored.isEmpty, "Files of other owners are never changed")
+
+        rejects("A shared-writable account home is refused") {
+            _ = chmod(home.path, 0o770)
+            defer { _ = chmod(home.path, 0o700) }
+            close(try GatewayAdminAgentConfigRepair.openAccountHome(home.path, uid: getuid()))
+        }
+        rejects("An account home reached through a link is refused") {
+            let alias = root.appendingPathComponent("agent-home-link")
+            try? fm.createSymbolicLink(at: alias, withDestinationURL: home)
+            close(try GatewayAdminAgentConfigRepair.openAccountHome(alias.path, uid: getuid()))
+        }
+        rejects("Another account's home is refused") {
+            close(try GatewayAdminAgentConfigRepair.openAccountHome(home.path, uid: getuid() &+ 1))
+        }
+        check(GatewayAdminAgentConfigRepair.relativePaths.allSatisfy { !$0.hasPrefix("/") && !$0.contains("..") },
+              "The fixed agent config list stays relative to the account home")
+    }
+
+    private static func makeFolders(_ base: URL, _ names: [String], mode: mode_t = 0o700) throws {
+        for name in names {
+            let url = name.isEmpty ? base : base.appendingPathComponent(name, isDirectory: true)
+            try FileManager.default.createDirectory(at: url, withIntermediateDirectories: false,
+                                                    attributes: [.posixPermissions: NSNumber(value: mode)])
+        }
+    }
+
+    private static func makeFile(_ url: URL, mode: mode_t = 0o600) throws {
+        try Data("{}".utf8).write(to: url)
+        check(chmod(url.path, mode) == 0, "Could not set the mode of \(url.lastPathComponent)")
+    }
+
+    /// GAP-0141: a root-owned agent config folder returned whole follows the
+    /// per-file rules (no setuid, setgid, group or other write; no folder
+    /// others can write), never follows a link or opens a named pipe for
+    /// reading, and is returned only after everything in it was inspected,
+    /// so a walk cut short leaves it root-owned (listed by Go) instead of
+    /// returning it with unlisted root-owned children. This account stands in
+    /// for root; the repaired account is another uid, so its folders count as
+    /// root-owned.
+    private static func testAgentConfigFolderRules(root: URL) throws {
+        let home = root.appendingPathComponent("agent-folder-home", isDirectory: true)
+        let outside = root.appendingPathComponent("agent-folder-outside", isDirectory: true)
+        try makeFolders(home, ["", ".kiro", ".kiro/agents", ".kiro/settings", ".codex", ".copilot"])
+        try makeFolders(home, [".copilot/hooks"], mode: 0o770)
+        try makeFolders(outside, [""])
+        _ = chmod(home.appendingPathComponent(".copilot/hooks").path, 0o770)
+        try makeFile(home.appendingPathComponent(".kiro/agents/defenseclaw.json"))
+        try makeFile(home.appendingPathComponent(".copilot/hooks/defenseclaw.json"))
+        try makeFile(home.appendingPathComponent(".kiro/settings/cli.json"), mode: 0o620)
+        try makeFile(home.appendingPathComponent(".kiro/other-write.json"), mode: 0o602)
+        try makeFile(home.appendingPathComponent(".kiro/setuid-tool"), mode: 0o4700)
+        check(mkfifo(home.appendingPathComponent(".kiro/pipe").path, 0o600) == 0, "Could not prepare the named-pipe fixture")
+        try makeFile(outside.appendingPathComponent("target.json"))
+        try FileManager.default.createSymbolicLink(at: home.appendingPathComponent(".kiro/linked.json"),
+                                                   withDestinationURL: outside.appendingPathComponent("target.json"))
+        try FileManager.default.createSymbolicLink(at: home.appendingPathComponent(".kiro/linked-folder"),
+                                                   withDestinationURL: outside)
+
+        let descriptor = try GatewayAdminAgentConfigRepair.openAccountHome(home.path, uid: getuid())
+        defer { close(descriptor) }
+        var changed: [String] = []
+        let rules = GatewayAdminAgentConfigRepair.restore(
+            home: descriptor, from: getuid(), to: (getuid() &+ 1, getgid()),
+            paths: [".kiro/agents/defenseclaw.json", ".kiro/hooks/defenseclaw.json", ".kiro/settings/cli.json"],
+            change: { _, relative in changed.append(relative); return 0 })
+        check(Set(changed) == ["~/.kiro", "~/.kiro/agents", "~/.kiro/agents/defenseclaw.json", "~/.kiro/settings"],
+              "Only private folders and single-link files without special bits are returned: \(changed)")
+        check(Set(rules.skipped) == ["~/.kiro/settings/cli.json", "~/.kiro/other-write.json",
+                                     "~/.kiro/setuid-tool", "~/.kiro/pipe"],
+              "Shared-writable, setuid and special files are reported, not changed: \(rules.skipped)")
+        check(!changed.contains(where: { $0.hasPrefix("~/.kiro/linked") }), "A link is never followed")
+        check(changed.last == "~/.kiro" && !rules.incomplete,
+              "A whole folder is returned after its contents: \(changed)")
+        check(rules.summary.contains("items other accounts can write") && rules.summary.contains("setuid"),
+              "The summary names every reason an item was left: \(rules.summary)")
+
+        // A root-owned folder others can write is not entered, and the
+        // folder holding it stays root-owned.
+        changed = []
+        let shared = GatewayAdminAgentConfigRepair.restore(
+            home: descriptor, from: getuid(), to: (getuid() &+ 1, getgid()), paths: [".copilot/hooks/defenseclaw.json"],
+            change: { _, relative in changed.append(relative); return 0 })
+        check(changed.isEmpty, "Nothing under or above a shared-writable folder is returned: \(changed)")
+        check(shared.skipped == ["~/.copilot/hooks"] && shared.incomplete,
+              "A shared-writable folder is reported and the walk is incomplete: \(shared)")
+
+        // Deeper than the walk goes: the folder must stay root-owned.
+        var deep = home.appendingPathComponent(".codex", isDirectory: true)
+        for _ in 0...(GatewayAdminOwnershipRepair.maximumDepth + 1) {
+            deep = deep.appendingPathComponent("d", isDirectory: true)
+            try makeFolders(deep, [""])
+        }
+        try makeFile(home.appendingPathComponent(".codex/config.toml"))
+        changed = []
+        let cut = GatewayAdminAgentConfigRepair.restore(
+            home: descriptor, from: getuid(), to: (getuid() &+ 1, getgid()), paths: [".codex/config.toml"],
+            change: { _, relative in changed.append(relative); return 0 })
+        check(cut.incomplete, "A folder walk cut short must report itself incomplete")
+        check(!changed.contains("~/.codex") && !changed.contains("~/.codex/d"),
+              "A folder whose walk was cut short must stay root-owned: \(changed)")
+
+        // A failed change of a child keeps the folder root-owned.
+        try makeFolders(home, [".claude", ".claude/projects"])
+        try makeFile(home.appendingPathComponent(".claude/settings.json"))
+        changed = []
+        let failed = GatewayAdminAgentConfigRepair.restore(
+            home: descriptor, from: getuid(), to: (getuid() &+ 1, getgid()), paths: [".claude/settings.json"],
+            change: { _, relative in
+                changed.append(relative)
+                return relative == "~/.claude/settings.json" ? -1 : 0
+            })
+        check(failed.incomplete && !changed.contains("~/.claude"),
+              "A folder with a child that could not be returned stays root-owned: \(changed)")
+    }
+
+    /// GAP-0141: the listed file itself: a symlink, a named pipe and a
+    /// setuid file are never changed, and a file swapped between its checks
+    /// and its open (another inode, or a symlink) is never changed.
+    private static func testAgentConfigFileEdgeCases(root: URL) throws {
+        let fm = FileManager.default
+        let home = root.appendingPathComponent("agent-file-home", isDirectory: true)
+        let outside = root.appendingPathComponent("agent-file-outside", isDirectory: true)
+        try makeFolders(home, ["", ".claude", ".cursor", ".gemini", ".gemini/config", ".hermes"])
+        try makeFolders(outside, [""])
+        try makeFile(outside.appendingPathComponent("target.json"))
+        try fm.createSymbolicLink(at: home.appendingPathComponent(".cursor/hooks.json"),
+                                  withDestinationURL: outside.appendingPathComponent("target.json"))
+        check(mkfifo(home.appendingPathComponent(".gemini/config/hooks.json").path, 0o600) == 0,
+              "Could not prepare the named-pipe fixture")
+        try makeFile(home.appendingPathComponent(".hermes/config.yaml"), mode: 0o4600)
+        try makeFile(home.appendingPathComponent(".claude/settings.json"))
+
+        let descriptor = try GatewayAdminAgentConfigRepair.openAccountHome(home.path, uid: getuid())
+        defer { close(descriptor) }
+        var changed: [String] = []
+        let edges = GatewayAdminAgentConfigRepair.restore(
+            home: descriptor, from: getuid(), to: (getuid(), getgid()),
+            paths: [".cursor/hooks.json", ".gemini/config/hooks.json", ".hermes/config.yaml"],
+            change: { _, relative in changed.append(relative); return 0 })
+        check(changed.isEmpty, "A symlinked, named-pipe or setuid agent config is never changed: \(changed)")
+        check(edges.skipped == ["~/.hermes/config.yaml"] && !edges.incomplete,
+              "A setuid file is reported; links and pipes are left: \(edges.skipped)")
+
+        let settings = home.appendingPathComponent(".claude/settings.json")
+        let moved = home.appendingPathComponent(".claude/settings.moved")
+        for swapIn in ["file", "symlink"] {
+            var swappedAtCheck = false
+            GatewayAdminAgentConfigRepair.fileCheckedForTesting = { shown in
+                guard shown == "~/.claude/settings.json" else { return }
+                swappedAtCheck = true
+                guard rename(settings.path, moved.path) == 0 else { fatalError("Could not move the swap fixture") }
+                if swapIn == "file" {
+                    try? Data("{}".utf8).write(to: settings)
+                    _ = chmod(settings.path, 0o600)
+                } else {
+                    try? fm.createSymbolicLink(at: settings, withDestinationURL: outside.appendingPathComponent("target.json"))
+                }
+            }
+            changed = []
+            let swapped = GatewayAdminAgentConfigRepair.restore(
+                home: descriptor, from: getuid(), to: (getuid(), getgid()), paths: [".claude/settings.json"],
+                change: { _, relative in changed.append(relative); return 0 })
+            GatewayAdminAgentConfigRepair.fileCheckedForTesting = nil
+            check(swappedAtCheck, "The repair must reach the swap point between a file's checks and its open")
+            check(changed.isEmpty, "A file swapped (\(swapIn)) after its checks must not be changed: \(changed)")
+            check(swapIn == "file" ? swapped.skipped == ["~/.claude/settings.json"] : swapped.incomplete,
+                  "A swap (\(swapIn)) is reported: \(swapped)")
+            _ = unlink(settings.path)
+            check(rename(moved.path, settings.path) == 0, "Could not restore the swap fixture")
+        }
+    }
+
+    /// GAP-0141 review: a file inside a root-owned agent config folder that
+    /// the walk returns is changed only when it had one link when inspected
+    /// and the opened file is that inode. Before, the walk checked the link
+    /// count only through the opened descriptor: the account could hard-link
+    /// a root file (a LaunchDaemon plist) into the folder and unlink the link
+    /// between the open and the fstat, so the count read 1 and the root file
+    /// was handed over. This account stands in for root; the repaired account
+    /// is another uid, so the folder counts as root-owned and is walked.
+    private static func testAgentConfigFolderWalkSwap(root: URL) throws {
+        let home = root.appendingPathComponent("agent-walk-home", isDirectory: true)
+        let outside = root.appendingPathComponent("agent-walk-outside", isDirectory: true)
+        try makeFolders(home, ["", ".kiro", ".kiro/agents"])
+        try makeFolders(outside, [""])
+        let listed = home.appendingPathComponent(".kiro/agents/defenseclaw.json")
+        let moved = home.appendingPathComponent(".kiro/agents/defenseclaw.moved")
+        let secret = outside.appendingPathComponent("system-file")
+        let linked = home.appendingPathComponent(".kiro/linked.json")
+        try makeFile(listed)
+        try makeFile(secret)
+        var secretStatus = stat()
+        check(lstat(secret.path, &secretStatus) == 0, "Could not inspect the hard-link fixture")
+        let secretInode = secretStatus.st_ino
+        let secretDevice = secretStatus.st_dev
+        func handsOverSecret(_ opened: Int32) -> Bool {
+            var status = stat()
+            return fstat(opened, &status) == 0 && status.st_ino == secretInode && status.st_dev == secretDevice
+        }
+        let descriptor = try GatewayAdminAgentConfigRepair.openAccountHome(home.path, uid: getuid())
+        defer { close(descriptor) }
+
+        // A hard link (two links when inspected) is reported and never opened.
+        check(link(secret.path, linked.path) == 0, "Could not prepare the hard-link fixture")
+        var opened: [String] = []
+        GatewayAdminOwnershipRepair.walkFileCheckedForTesting = { relative in opened.append(relative) }
+        var changed: [String] = []
+        var handedLinked = false
+        let hardLinked = GatewayAdminAgentConfigRepair.restore(
+            home: descriptor, from: getuid(), to: (getuid() &+ 1, getgid()), paths: [".kiro/agents/defenseclaw.json"],
+            change: { file, relative in
+                if handsOverSecret(file) { handedLinked = true }
+                changed.append(relative)
+                return 0
+            })
+        GatewayAdminOwnershipRepair.walkFileCheckedForTesting = nil
+        check(!handedLinked && !opened.contains("linked.json"),
+              "A file with two links when inspected must be neither opened nor handed over: \(opened)")
+        check(hardLinked.skipped == ["~/.kiro/linked.json"] && changed.contains("~/.kiro/agents/defenseclaw.json"),
+              "The hard link is reported and the rest of the folder is returned: \(hardLinked) \(changed)")
+        check(unlink(linked.path) == 0, "Could not remove the hard-link fixture")
+
+        // The attack itself, with no test hook (run first, so it decides a
+        // run of the helper before this fix): another thread hard-links the
+        // file outside the folder into it and unlinks the link again while the
+        // walk runs. Before the fix the walk opened the link and, when the
+        // unlink landed before its fstat, read one link and handed the file
+        // over; now the inspected entry has two links and is never opened.
+        let race = home.appendingPathComponent(".kiro/race.json").path
+        let secretPath = secret.path
+        let finished = DispatchSemaphore(value: 0)
+        let toggler = Thread {
+            while !Thread.current.isCancelled {
+                _ = link(secretPath, race)
+                _ = unlink(race)
+            }
+            finished.signal()
+        }
+        toggler.start()
+        var handedOver = 0
+        var walks = 0
+        while walks < 20_000 && handedOver == 0 {
+            walks += 1
+            _ = GatewayAdminAgentConfigRepair.restore(
+                home: descriptor, from: getuid(), to: (getuid() &+ 1, getgid()), paths: [".kiro/agents/defenseclaw.json"],
+                change: { file, _ in
+                    if handsOverSecret(file) { handedOver += 1 }
+                    return 0
+                })
+        }
+        toggler.cancel()
+        finished.wait()
+        _ = unlink(race)
+        check(handedOver == 0, "A hard link unlinked between the open and the fstat handed a file outside the folder over "
+            + "(walk \(walks))")
+
+        // A file swapped in between the checks and the open (another inode,
+        // one link) is never changed.
+        var swappedAtCheck = false
+        GatewayAdminOwnershipRepair.walkFileCheckedForTesting = { relative in
+            guard relative == "agents/defenseclaw.json" else { return }
+            swappedAtCheck = true
+            guard rename(listed.path, moved.path) == 0 else { fatalError("Could not move the swap fixture") }
+            try? Data("{}".utf8).write(to: listed)
+            _ = chmod(listed.path, 0o600)
+        }
+        changed = []
+        let swapped = GatewayAdminAgentConfigRepair.restore(
+            home: descriptor, from: getuid(), to: (getuid() &+ 1, getgid()), paths: [".kiro/agents/defenseclaw.json"],
+            change: { _, relative in changed.append(relative); return 0 })
+        GatewayAdminOwnershipRepair.walkFileCheckedForTesting = nil
+        check(swappedAtCheck, "The folder walk must reach the swap point between a file's checks and its open")
+        check(!changed.contains("~/.kiro/agents/defenseclaw.json") && swapped.skipped == ["~/.kiro/agents/defenseclaw.json"],
+              "A file swapped after its checks must be reported, not changed: \(swapped) \(changed)")
+        _ = unlink(listed.path)
+        check(rename(moved.path, listed.path) == 0, "Could not restore the swap fixture")
+    }
+
+    /// GAP-0141 real-root cases: run as root by sudo (the runner script does
+    /// it only in CI with passwordless sudo). Root creates the leftovers and
+    /// the helper's real fchown returns them to the sudo account.
+    private static func testRealRootAgentConfigRepair(root: URL) throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard getuid() == 0, let uid = environment["SUDO_UID"].flatMap({ uid_t($0) }), uid != 0,
+              let gid = environment["SUDO_GID"].flatMap({ gid_t($0) }) else {
+            fatalError("The real-root cases run as root under sudo, with SUDO_UID and SUDO_GID set.")
+        }
+        let base = root.appendingPathComponent("real-root", isDirectory: true)
+        let home = base.appendingPathComponent("home", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: base) }
+        try makeFolders(base, ["", "home"])
+        check(chown(home.path, uid, gid) == 0, "Could not give the fixture home to the sudo account")
+        try makeFolders(home, [".claude", ".claude/projects"])
+        try makeFolders(home, [".codex"])
+        check(chown(home.appendingPathComponent(".codex").path, uid, gid) == 0, "Could not prepare the account folder")
+        try makeFile(home.appendingPathComponent(".claude/settings.json"))
+        try makeFile(home.appendingPathComponent(".claude/projects/state.json"))
+        try makeFile(home.appendingPathComponent(".claude/setuid-tool"), mode: 0o4755)
+        try makeFile(home.appendingPathComponent(".claude/world.json"), mode: 0o666)
+        try makeFile(home.appendingPathComponent(".codex/config.toml"))
+        try makeFile(base.appendingPathComponent("system-file"))
+        check(link(base.appendingPathComponent("system-file").path, home.appendingPathComponent(".claude/linked").path) == 0,
+              "Could not prepare the hard-link fixture")
+
+        let descriptor = open(home.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        check(descriptor >= 0, "Could not open the fixture home")
+        defer { close(descriptor) }
+        let outcome = GatewayAdminAgentConfigRepair.restore(home: descriptor, to: (uid, gid),
+                                                            paths: [".claude/settings.json", ".codex/config.toml"])
+        func owner(_ relative: String, in folder: URL? = nil) -> uid_t {
+            var status = stat()
+            guard lstat((folder ?? home).appendingPathComponent(relative).path, &status) == 0 else {
+                fatalError("lstat \(relative)")
+            }
+            return status.st_uid
+        }
+        for relative in [".claude", ".claude/settings.json", ".claude/projects", ".claude/projects/state.json",
+                         ".codex/config.toml"] {
+            check(owner(relative) == uid, "\(relative) must be returned to the account")
+        }
+        for relative in [".claude/setuid-tool", ".claude/world.json", ".claude/linked"] {
+            check(owner(relative) == 0, "\(relative) must stay root-owned")
+        }
+        check(owner("system-file", in: base) == 0, "A hard-linked file outside the home must stay root-owned")
+        check(!outcome.incomplete && outcome.skipped.count == 3, "The outcome must report the left items: \(outcome)")
+
+        // A root-owned folder others can write keeps the folder holding it
+        // root-owned (root's real fchown).
+        try makeFolders(home, [".cursor", ".cursor/shared"])
+        _ = chmod(home.appendingPathComponent(".cursor/shared").path, 0o777)
+        try makeFile(home.appendingPathComponent(".cursor/hooks.json"))
+        try makeFile(home.appendingPathComponent(".cursor/shared/state.json"))
+        let shared = GatewayAdminAgentConfigRepair.restore(home: descriptor, to: (uid, gid), paths: [".cursor/hooks.json"])
+        check(owner(".cursor") == 0 && owner(".cursor/shared") == 0 && owner(".cursor/shared/state.json") == 0,
+              "A shared-writable root folder and the folder holding it must stay root-owned")
+        check(shared.incomplete && shared.skipped == ["~/.cursor/shared"], "The held-back folder is reported: \(shared)")
+        check(shared.summary.contains("other accounts can write it"), "The summary says why: \(shared.summary)")
     }
 
     /// Nothing changes while a root gateway the helper did not start runs;

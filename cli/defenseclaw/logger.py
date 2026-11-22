@@ -154,20 +154,19 @@ def _refreshed_gateway_token(cfg: Any, gateway: Any, rejected_token: str) -> str
 
     Custom ``gateway.token_env`` values remain authoritative: silently
     switching those to the default dotenv key would violate explicit operator
-    intent. The built-in canonical and legacy names may legitimately become
-    stale during first boot or an upgrade handoff, so those can recover from
-    the current installation's private dotenv.
+    intent. The canonical name may legitimately become stale during first
+    boot or an upgrade handoff, so it can recover from the current
+    installation's private dotenv. A token_env naming OPENCLAW_GATEWAY_TOKEN
+    is ignored like everywhere else (R-TOK).
     """
 
+    from defenseclaw.config import is_openclaw_gateway_token_env
+
     token_env = str(getattr(gateway, "token_env", "") or "").strip()
-    if token_env not in {
-        "",
-        "DEFENSECLAW_GATEWAY_TOKEN",
-        "OPENCLAW_GATEWAY_TOKEN",
-    }:
+    if token_env not in {"", "DEFENSECLAW_GATEWAY_TOKEN"} and not is_openclaw_gateway_token_env(token_env):
         return ""
     data_dir = str(getattr(cfg, "data_dir", "") or "")
-    refreshed = _gateway_token_from_dotenv(data_dir, token_env=token_env)
+    refreshed = _gateway_token_from_dotenv(data_dir)
     if not refreshed or secrets.compare_digest(
         refreshed.encode("utf-8"),
         rejected_token.encode("utf-8"),
@@ -176,17 +175,16 @@ def _refreshed_gateway_token(cfg: Any, gateway: Any, rejected_token: str) -> str
     return refreshed
 
 
-def _gateway_token_from_dotenv(data_dir: str, *, token_env: str) -> str:
-    """Read the selected built-in gateway token from one installation.
+def _gateway_token_from_dotenv(data_dir: str) -> str:
+    """Read DEFENSECLAW_GATEWAY_TOKEN from one installation's ``.env``.
 
-    An empty selector follows :meth:`GatewayConfig.resolved_token` precedence:
-    canonical DefenseClaw first, then the legacy OpenClaw name. An explicit
-    built-in selector reads only that key.
+    A value equal to OPENCLAW_GATEWAY_TOKEN in the same file is not the master
+    (R-TOK, :meth:`GatewayConfig.resolved_token`).
     """
 
     if not data_dir:
         return ""
-    candidates = (token_env,) if token_env else ("DEFENSECLAW_GATEWAY_TOKEN", "OPENCLAW_GATEWAY_TOKEN")
+    candidates = ("DEFENSECLAW_GATEWAY_TOKEN", "OPENCLAW_GATEWAY_TOKEN")
     values: dict[str, str] = {}
     path = os.path.join(data_dir, ".env")
     try:
@@ -205,7 +203,8 @@ def _gateway_token_from_dotenv(data_dir: str, *, token_env: str) -> str:
                 values[key] = value
     except (OSError, UnicodeError):
         return ""
-    return next((values.get(name, "") for name in candidates if values.get(name)), "")
+    master = values.get("DEFENSECLAW_GATEWAY_TOKEN", "")
+    return "" if master and master == values.get("OPENCLAW_GATEWAY_TOKEN") else master
 
 
 def keep_running_gateway_token(logger: Any, data_dir: str, running: str, saved: str) -> None:

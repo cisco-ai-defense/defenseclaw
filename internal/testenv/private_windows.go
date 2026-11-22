@@ -141,3 +141,11 @@ func assertPrivateDACL(t testing.TB, path string) {
 		}
 	}
 }
+
+// TraversableTempDir is a fresh test directory. Windows has no POSIX
+// search bit on the folders above it, so the temporary folder qualifies as
+// it is (see the non-Windows TraversableTempDir).
+func TraversableTempDir(t *testing.T) string {
+	t.Helper()
+	return t.TempDir()
+}

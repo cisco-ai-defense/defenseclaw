@@ -64,6 +64,15 @@ const (
 	// The maximum matches audit.RetentionMaxStoreMB.
 	ObservabilityV8MinStoreMB = 64
 	ObservabilityV8MaxStoreMB = 1 << 20
+
+	// ObservabilityV8DefaultRejectedRecordsRows, ...Min... and ...Max... bound
+	// observability.local.rejected_records_max_rows, the row cap of the
+	// opt-in rejected-record store (#1442). They match
+	// audit.RejectedRecordsDefaultRows, RejectedRecordsMinRows and
+	// RejectedRecordsMaxRows.
+	ObservabilityV8DefaultRejectedRecordsRows = 10_000
+	ObservabilityV8MinRejectedRecordsRows     = 100
+	ObservabilityV8MaxRejectedRecordsRows     = 1_000_000
 )
 
 const (
@@ -97,8 +106,12 @@ type ObservabilityV8Source struct {
 	Connectors           map[string]ObservabilityV8ConnectorSource                  `json:"connectors,omitempty" mapstructure:"connectors" yaml:"connectors,omitempty"`
 	Local                ObservabilityV8LocalSource                                 `json:"local,omitempty" mapstructure:"local" yaml:"local,omitempty"`
 	Destinations         []ObservabilityV8DestinationSource                         `json:"destinations,omitempty" mapstructure:"destinations" yaml:"destinations,omitempty"`
-	localPathDefaulted   bool
-	judgePathDefaulted   bool
+	// Tokenomics and Pricing (tokenomics.go) are read by the model-usage engine
+	// only; the exporter compile ignores them, so the plan digest is unchanged.
+	Tokenomics         TokenomicsConfig `json:"tokenomics,omitempty" mapstructure:"tokenomics" yaml:"tokenomics,omitempty"`
+	Pricing            PricingConfig    `json:"pricing,omitempty" mapstructure:"pricing" yaml:"pricing,omitempty"`
+	localPathDefaulted bool
+	judgePathDefaulted bool
 }
 
 type ObservabilityV8ResourceSource struct {
@@ -188,6 +201,11 @@ type ObservabilityV8LocalSource struct {
 	// MaxStoreMB is the opt-in audit.db size cap in MiB (#1384); unset or
 	// 0 keeps retention by days only.
 	MaxStoreMB *int `json:"max_store_mb,omitempty" mapstructure:"max_store_mb" yaml:"max_store_mb,omitempty"`
+	// KeepRejectedRecords keeps a redacted copy of each record the v8 schema
+	// gate refuses in audit.db (#1442); unset or false keeps none.
+	KeepRejectedRecords *bool `json:"keep_rejected_records,omitempty" mapstructure:"keep_rejected_records" yaml:"keep_rejected_records,omitempty"`
+	// RejectedRecordsMaxRows caps that store; unset is 10000.
+	RejectedRecordsMaxRows *int `json:"rejected_records_max_rows,omitempty" mapstructure:"rejected_records_max_rows" yaml:"rejected_records_max_rows,omitempty"`
 }
 
 // ObservabilityV8ConnectorSource preserves the v7 notification-only webhook

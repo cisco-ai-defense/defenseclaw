@@ -52,9 +52,12 @@ func windowsClaudeManagedHooksOnlyEnforced() bool {
 // withWindowsClaudeManagedHooksOnly returns setup with the lock this process
 // renders and verifies in the machine-wide Claude policy: on in a standalone
 // process whose policy enforces it, off otherwise (always off for Secure
-// Client).
+// Client). It also sets the guard wrapper texts of the form this process
+// writes: the 1.0.9 texts while the launch folders are retired
+// (windowsClaudeWrittenForm, rel-1-0-10 GAP-1540).
 func withWindowsClaudeManagedHooksOnly(setup connector.SetupOpts) connector.SetupOpts {
 	setup.ClaudeAllowManagedHooksOnly = windowsEnterpriseStandaloneProcess() && windowsClaudeManagedHooksOnlyEnforced()
+	setup.ClaudeManagedGuardTexts109 = windowsClaudeWrittenForm(setup.HookExecutable) == windowsClaudeFormGuard109
 	return setup
 }
 

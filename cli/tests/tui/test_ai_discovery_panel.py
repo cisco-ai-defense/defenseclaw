@@ -1009,3 +1009,21 @@ def test_format_confidence_state_weight_and_humanize_age() -> None:
     assert humanize_age(timedelta(milliseconds=500)) == "0s"
     assert humanize_age(timedelta(hours=3, minutes=12)) == "3h12m"
     assert humanize_age(timedelta(hours=36)) == "1d12h"
+
+
+def test_ai_discovery_compact_rows_keep_the_confidence_whole_at_80_columns() -> None:
+    """GAP-0908: the fitter cut "medium (78%)" to "medium (…"; under 100 columns the cell is the percentage."""
+    from defenseclaw.tui.services.table_fit import fit_table
+
+    panel = AIDiscoveryPanelModel()
+    panel.set_snapshot(_snapshot_with_component(3))
+    columns = panel.data_table_columns()
+    wide = panel.data_table_rows()[0]
+    compact = panel.data_table_rows(compact=True)[0]
+    assert wide[-1] == "medium (78%)" and wide[-2] == "high (91%)"
+    assert compact[-1] == "78%" and compact[-2] == "91%"
+    assert compact[:-2] == wide[:-2]
+    fitted_columns, fitted_rows = fit_table(
+        columns, (compact,), 80 - 9, drop=("Detectors", "Vendor", "Identity", "Version", "Categories")
+    )
+    assert fitted_columns[-1] == "Presence" and fitted_rows[0][-1] == "78%"

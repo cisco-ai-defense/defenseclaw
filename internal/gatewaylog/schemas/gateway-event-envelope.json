@@ -26,7 +26,7 @@
 
     "provider":  { "type": ["string", "null"] },
     "model":     { "type": ["string", "null"] },
-    "direction": { "type": ["string", "null"], "enum": ["prompt", "completion", "tool_call", null] },
+    "direction": { "type": ["string", "null"], "enum": ["prompt", "completion", "tool_call", "tool_result", null] },
 
     "agent_id":            { "type": ["string", "null"] },
     "agent_name":          { "type": ["string", "null"] },
@@ -142,7 +142,8 @@
         "latency_ms": { "type": ["integer", "null"], "minimum": 0 },
         "reason": { "type": ["string", "null"], "maxLength": 4096 },
         "evaluation_id": { "type": ["string", "null"], "maxLength": 256 },
-        "rule_ids": { "type": ["array", "null"], "items": { "type": "string", "maxLength": 256 }, "maxItems": 8 }
+        "rule_ids": { "type": ["array", "null"], "items": { "type": "string", "maxLength": 256 }, "maxItems": 8 },
+        "rule_names": { "type": ["array", "null"], "items": { "type": "string", "maxLength": 256 }, "maxItems": 8, "description": "Display names index-aligned with rule_ids." }
       }
     },
     "JudgePayload": {

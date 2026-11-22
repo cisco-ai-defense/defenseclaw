@@ -326,9 +326,7 @@ func TestGAP0295FreshGatewayHoldsCallProof(t *testing.T) {
 // is not done by the deadline the call keeps the closed no-answer answer:
 // never an allow without the account's mode.
 func TestGAP0295FirstTryOutageModeNotReadyStaysClosed(t *testing.T) {
-	previousLogWait := answerWatchdogLogWait
-	answerWatchdogLogWait = time.Minute
-	t.Cleanup(func() { answerWatchdogLogWait = previousLogWait })
+	setAnswerWatchdogLogWait(t, time.Minute)
 	stubRestartWindowProof(t, true)
 	sp, _ := specFor("claudecode")
 	home := t.TempDir()

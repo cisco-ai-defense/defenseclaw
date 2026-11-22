@@ -59,7 +59,7 @@ func TestHookBurstProbe(t *testing.T) {
 	}
 	warm, calls, workers := setting("DEFENSECLAW_HOOK_BURST_WARM", 0), setting("DEFENSECLAW_HOOK_BURST_CALLS", 200), setting("DEFENSECLAW_HOOK_BURST_WORKERS", 32)
 	out := os.Getenv("DEFENSECLAW_HOOK_BURST_OUT")
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	installDefaultProfileConnector(t, "claudecode")
 	fixture := newSidecarRuntimeFixture(t, true)
 	fingerprints, err := observabilityredaction.NewEngine(bytes.Repeat([]byte{0x42}, 32))

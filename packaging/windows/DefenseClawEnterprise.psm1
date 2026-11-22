@@ -348,6 +348,13 @@ $script:DefenseClawRuntimeGenerationCollectError = ''
 # and whether this run did. Set per recovery; reset per lifecycle run.
 $script:DefenseClawRecoveryActivationDeferrable = $false
 $script:DefenseClawRecoveryActivationDeferred = $false
+# GAP-0601: set when the hook rollback copy of this run is this Setup's own
+# hook because the installed one did not have the recorded digest; the
+# result reports it as hook_rollback_copy_rederived.
+$script:DefenseClawHookRollbackCopyRederived = ''
+# GAP-0601: the services the restored release ran before a deferred
+# recovery (Complete-DefenseClawDeferredRecoveryActivation).
+$script:DefenseClawDeferredRecoveryServices = $null
 # A standalone uninstall with purge also removes each enrolled account's
 # per-user DefenseClaw folder when the managed-hook teardown finalizes
 # (Invoke-DefenseClawGatewayCommand tells the helper). Set per lifecycle run.
@@ -9020,6 +9027,7 @@ function Enter-DefenseClawLifecycleLock {
             -RequiredBase $script:ProgramData
     }
     if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $path)) {
+        $createdHere = $false
         try {
             $created = [IO.File]::Open(
                 $path,
@@ -9028,20 +9036,37 @@ function Enter-DefenseClawLifecycleLock {
                 [IO.FileShare]::None
             )
             $created.Dispose()
+            $createdHere = $true
+        }
+        catch [IO.IOException] {
+            # Another run created it first; it is checked below.
+            if (-not (Microsoft.PowerShell.Management\Test-Path `
+                -LiteralPath $path `
+                -PathType Leaf)) {
+                throw
+            }
+        }
+        if ($createdHere) {
+            # Outside the catch above: a failed stamp of the lock this run
+            # created is reported, never mistaken for a lock another run
+            # created (a lock left between creation and this stamp inherits
+            # its folder, rel-1-0-10:GAP-0028).
             $security = [Security.AccessControl.FileSecurity]::new()
             $security.SetSecurityDescriptorSddlForm(
                 'O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)',
                 [Security.AccessControl.AccessControlSections]::All
             )
-            Microsoft.PowerShell.Security\Set-Acl `
-                -LiteralPath $path `
-                -AclObject $security
-        }
-        catch [IO.IOException] {
-            if (-not (Microsoft.PowerShell.Management\Test-Path `
-                -LiteralPath $path `
-                -PathType Leaf)) {
-                throw
+            try {
+                Microsoft.PowerShell.Security\Set-Acl `
+                    -LiteralPath $path `
+                    -AclObject $security
+            }
+            catch [IO.IOException] {
+                # Secure Client repairs the lock in its verdict below, as it
+                # did when this stamp sat inside the catch above.
+                if (Test-DefenseClawStandaloneProfile) {
+                    throw
+                }
             }
         }
     }
@@ -9057,24 +9082,66 @@ function Enter-DefenseClawLifecycleLock {
     # ReadOnly, Hidden or System; the ReadWrite open below would then fail with
     # access denied that no retry can fix. Clear them on the exact leaf.
     [void](Clear-DefenseClawRestrictiveFileAttributes -Path $path)
-    # The lock holds no data, so repair runs before the verdict: an inherited,
-    # re-owned or extra-entry descriptor (a crash between creation and the
-    # first stamp, an icacls reset, a takeown) is re-stamped to the canonical
-    # protected admin-file descriptor in place. The identity persists, which
-    # keeps cross-run serialization intact.
+    $lockWriters = @($script:SystemSID, $script:AdministratorsSID, $script:TrustedInstallerSID)
     $adminRights = New-DefenseClawRequiredRights -Kind Admin
+    # A lock left between its creation and its stamp, a Programs and Features
+    # uninstall, a restored folder access list or an icacls /reset leaves the
+    # lock inheriting from its folder. The standalone verdict below never
+    # re-stamps a lost protected flag, so every later Setup /ensure ended 1603
+    # until an administrator fixed the lock by hand (rel-1-0-10:GAP-0028).
+    # The lock holds no data (its length is 0, checked above), so when the
+    # inheritance is its only fault (SYSTEM, Administrators or TrustedInstaller
+    # own it, and every entry it carries is one the verdict accepts), the
+    # canonical protected descriptor is written back here. Any other fault (a
+    # foreign owner, a foreign writer, a deny entry) stays refused below, as
+    # the standalone contract wants (GAP-0603 review M1). Secure Client keeps
+    # its re-stamp in the verdict.
+    if (Test-DefenseClawStandaloneProfile) {
+        $lockVerdicts = @(Get-DefenseClawPathAclVerdicts `
+            -Path $path `
+            -AllowedWriterSIDs $lockWriters `
+            -AllowedReaderSIDs $lockWriters `
+            -RequiredRights $adminRights `
+            -AllowedOwnerSIDs $lockWriters `
+            -RejectUntrustedRead)
+        $onlyInheritance = $lockVerdicts.Count -gt 0 -and @(
+            $lockVerdicts | Microsoft.PowerShell.Core\Where-Object {
+                -not ($_.Kind -eq 'Access' -and $_.Severity -eq 'Inheritance')
+            }).Count -eq 0
+        if ($onlyInheritance) {
+            Write-DefenseClawAclSelfHealAdvisory `
+                -Path $path `
+                -Reason 're-stamping the canonical AdminFile ACL of the lifecycle lock after: managed DACL inherits from an ancestor'
+            Write-DefenseClawResilienceEvent -Marker defenseclaw_repair -Fields @{
+                path   = $path
+                kind   = 'AdminFile'
+                reason = 'managed DACL inherits from an ancestor'
+            }
+            try {
+                Set-DefenseClawPathAcl `
+                    -Path $path `
+                    -Kind AdminFile `
+                    -GatewayServiceSID $script:AdministratorsSID
+            }
+            catch {
+                # A lock another program holds open is refused by name, as
+                # every in-place re-stamp is (GAP-0763).
+                $held = Get-DefenseClawHeldFileRefusal -ErrorRecord $_
+                if ($null -ne $held) {
+                    throw $held
+                }
+                throw
+            }
+        }
+    }
+    # The verdict repairs in place what the profile allows: on Secure Client
+    # an inherited, re-owned or extra-entry descriptor; on standalone only
+    # Contract and Rights faults (an inheriting lock is repaired above). The
+    # identity persists, which keeps cross-run serialization intact.
     Assert-DefenseClawPathAcl `
         -Path $path `
-        -AllowedWriterSIDs @(
-            $script:SystemSID,
-            $script:AdministratorsSID,
-            $script:TrustedInstallerSID
-        ) `
-        -AllowedReaderSIDs @(
-            $script:SystemSID,
-            $script:AdministratorsSID,
-            $script:TrustedInstallerSID
-        ) `
+        -AllowedWriterSIDs $lockWriters `
+        -AllowedReaderSIDs $lockWriters `
         -RequiredRights $adminRights `
         -RejectUntrustedRead `
         -SelfHealKind AdminFile `
@@ -10412,6 +10479,12 @@ function Remove-DefenseClawStandaloneInstallTreeReplacementBackups {
     if ($null -ne $openCodePlugin) {
         $files += [string]$openCodePlugin.PluginPath
         $files += [string]$openCodePlugin.LegacyPluginPath
+    }
+    # GAP-0751: the guardian keeps its swap backups beside a launch image too.
+    foreach ($hookImageItem in @(if ([string](Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name HookImagesDirectory)) { Get-DefenseClawHookImageAclItems -Layout $Layout })) {
+        if ([string]$hookImageItem.Kind -ceq 'InstallFile') {
+            $files += [string]$hookImageItem.Path
+        }
     }
     foreach ($path in $files) {
         if ([string]::IsNullOrWhiteSpace([string]$path)) {
@@ -14342,6 +14415,11 @@ function Set-DefenseClawManagedAcls {
     if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.CLIPath -PathType Leaf) {
         Set-DefenseClawPathAcl -Path $Layout.CLIPath -Kind InstallFile -GatewayServiceSID $gatewaySID
     }
+    # GAP-0751: the hooks folder and its launch folders like bin, their images
+    # like the hook (standalone; nothing on a layout without bin\hooks).
+    foreach ($hookImageItem in @(if ([string](Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name HookImagesDirectory)) { Get-DefenseClawHookImageAclItems -Layout $Layout })) {
+        Set-DefenseClawPathAcl -Path $hookImageItem.Path -Kind ([string]$hookImageItem.Kind) -GatewayServiceSID $gatewaySID
+    }
     foreach ($ancestor in @($Layout.StateRootAncestors)) {
         Grant-DefenseClawStateAncestorTraverse -Path $ancestor -GatewayServiceSID $gatewaySID -Scope ([string]$Layout.StateRoot)
     }
@@ -15583,6 +15661,12 @@ function Get-DefenseClawLayout {
     if (-not $brokerEnabled) {
         $hookGuardPath = (Microsoft.PowerShell.Management\Join-Path $bin 'defenseclaw-hook-guard.exe')
     }
+    # GAP-0751: the standalone launch images, bin\hooks\<d16>\ (the hook and
+    # its guard). Secure Client has none.
+    $hookImagesDirectory = ''
+    if (-not $brokerEnabled) {
+        $hookImagesDirectory = (Microsoft.PowerShell.Management\Join-Path $bin 'hooks')
+    }
     $layout = @{
         InstallRoot = $InstallRoot
         StateRoot = $StateRoot
@@ -15627,6 +15711,7 @@ function Get-DefenseClawLayout {
         ProviderLibraryPath = ''
         HookPath = (Microsoft.PowerShell.Management\Join-Path $bin 'defenseclaw-hook.exe')
         HookGuardPath = $hookGuardPath
+        HookImagesDirectory = $hookImagesDirectory
         CLIPath = (Microsoft.PowerShell.Management\Join-Path $bin 'defenseclaw.exe')
         ConfigPath = (Microsoft.PowerShell.Management\Join-Path $configDirectory 'config.yaml')
         ManifestPath = (Microsoft.PowerShell.Management\Join-Path $guardianDirectory 'targets.yaml')
@@ -18074,7 +18159,7 @@ function Assert-DefenseClawRepairableConfigAcl {
 $script:StandaloneContentGateOutOfClass = @(
     [pscustomobject]@{
         Reason = 'an installed binary: verify and the lifecycle actions check its bytes against the digest recorded from the signed payload'
-        Paths  = @('GatewayPath', 'ACPPath', 'HookPath', 'HookGuardPath', 'SensorHelperPath', 'InstallerPath', 'ModulePath', 'BrokerPath', 'CLIPath', 'CompilerPath')
+        Paths  = @('GatewayPath', 'ACPPath', 'HookPath', 'HookGuardPath', 'SensorHelperPath', 'InstallerPath', 'ModulePath', 'BrokerPath', 'CLIPath', 'CompilerPath', 'HookImageFiles')
     },
     [pscustomobject]@{
         Reason = 'a log: DefenseClaw appends to it and never reads it as policy or as a record'
@@ -18250,6 +18335,17 @@ function Assert-DefenseClawStandaloneContentTrusted {
                 Path     = $entryPath
                 Writer   = 'Admin'
                 Recovery = [string]$row[1]
+            })
+        }
+    }
+    if ($Scope -ceq 'Lifecycle') {
+        # GAP-0751: the hooks folder and its launch folders, judged like bin;
+        # their images are installed binaries (out of class, as HookPath).
+        foreach ($hookImageFolder in @(if ([string](Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name HookImagesDirectory)) { Get-DefenseClawHookImageAclItems -Layout $Layout -FoldersOnly })) {
+            $entries.Add([pscustomobject]@{
+                Path     = [string]$hookImageFolder.Path
+                Writer   = 'Admin'
+                Recovery = $folder
             })
         }
     }
@@ -19510,6 +19606,14 @@ function New-DefenseClawTransaction {
         $snapshot['cowork_created_directories'] = @()
         $snapshot['cowork_cache_created'] = $false
         $snapshot['cowork_cache_existed'] = [IO.Directory]::Exists($coworkPaths.Cache)
+    }
+    if (Test-DefenseClawStandaloneProfile) {
+        # GAP-0751: a rollback removes the hooks folder only when this
+        # transaction created it (Remove-DefenseClawTransactionCreatedHookImages).
+        $hookImagesDirectory = [string](Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name HookImagesDirectory)
+        $snapshot['hook_images_root_existed'] = [bool](
+            [string]::IsNullOrWhiteSpace($hookImagesDirectory) -or
+            [IO.Directory]::Exists($hookImagesDirectory))
     }
     if ($RecoverLegacyManagedHooksLifecycleJournal -and
         $null -eq $legacyManagedHooksLifecyclePreimage) {
@@ -21151,17 +21255,21 @@ function Get-DefenseClawClaudeEffectivePolicyBinding {
         throw 'DefenseClaw Claude managed policy does not match its ownership record'
     }
     $recordedHook = [string]$state.hook_executable
+    # GAP-0751: standalone policy launches a launch image of this layout, or,
+    # written before its first 1.0.10 upgrade, the transition image; the
+    # evidence binds the bytes of the image it launches.
     if ([string]::IsNullOrWhiteSpace($recordedHook) -or
-        -not [string]::Equals(
-            [IO.Path]::GetFullPath($recordedHook).TrimEnd('\'),
-            [IO.Path]::GetFullPath([string]$Layout.HookPath).TrimEnd('\'),
-            [StringComparison]::OrdinalIgnoreCase
-        )) {
+        -not (Test-DefenseClawManagedHookImagePath -Layout $Layout -Path $recordedHook)) {
         throw 'DefenseClaw Claude managed policy launches a hook outside the installed layout'
     }
+    $launchedHook = [IO.Path]::GetFullPath($recordedHook)
+    if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $launchedHook -PathType Leaf)) {
+        throw "DefenseClaw hook binary is missing: $launchedHook"
+    }
+    Assert-DefenseClawNoReparsePath -Path $launchedHook
     $hookSha256 = (
         Microsoft.PowerShell.Utility\Get-FileHash `
-            -LiteralPath $Layout.HookPath `
+            -LiteralPath $launchedHook `
             -Algorithm SHA256
     ).Hash.ToLowerInvariant()
     return [ordered]@{
@@ -21467,6 +21575,12 @@ function Get-DefenseClawCommittedUninstallHeldTargets {
     $hook = [string](Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name HookPath)
     if (-not [string]::IsNullOrWhiteSpace($hook)) {
         $targets.Add([pscustomobject]@{ Path = $hook; Code = 'hook_in_use'; What = 'the installed hook' })
+    }
+    # GAP-0751: the launch images agents start (standalone).
+    foreach ($hookImageItem in @(if ([string](Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name HookImagesDirectory)) { Get-DefenseClawHookImageAclItems -Layout $Layout })) {
+        if ([string]$hookImageItem.Kind -ceq 'InstallFile') {
+            $targets.Add([pscustomobject]@{ Path = [string]$hookImageItem.Path; Code = 'hook_in_use'; What = 'an installed hook launch image' })
+        }
     }
     foreach ($guardianFile in @(Get-DefenseClawGuardianStateFiles -Layout $Layout)) {
         $targets.Add([pscustomobject]@{ Path = [string]$guardianFile; Code = 'guardian_state_held'; What = 'the hook guardian state file' })
@@ -21856,7 +21970,11 @@ function Get-DefenseClawRuntimeSelectorOtherHooks {
             continue
         }
         $full = try { [IO.Path]::GetFullPath([string]$hook.Value) } catch { [string]$hook.Value }
-        if (-not [string]::Equals($full, $OwnHook, [StringComparison]::OrdinalIgnoreCase)) {
+        # GAP-0751: a selection a hook of this deployment made from another of
+        # its images (an earlier launch image, the transition image) is its own.
+        if (-not [string]::Equals($full, $OwnHook, [StringComparison]::OrdinalIgnoreCase) -and
+            -not ((Test-DefenseClawStandaloneProfile) -and
+                (Test-DefenseClawSameHookImageFamily -Path $full -Other $OwnHook))) {
             $full
         }
     }
@@ -21899,6 +22017,14 @@ function Remove-DefenseClawStandaloneOrphanedHookMachineState {
         return
     }
     $escapedHook = [IO.Path]::GetFullPath([string]$Layout.HookPath).Replace('\', '\\')
+    # GAP-0751: a file that names one of this layout's launch images
+    # (bin\hooks\<16 hex>\defenseclaw-hook.exe, JSON-escaped) names this hook.
+    $hookImagesDirectory = [string](Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name HookImagesDirectory)
+    $launchHookPattern = '(?!)'
+    if (-not [string]::IsNullOrWhiteSpace($hookImagesDirectory)) {
+        $escapedHooks = [IO.Path]::GetFullPath($hookImagesDirectory).TrimEnd('\').Replace('\', '\\')
+        $launchHookPattern = [regex]::Escape($escapedHooks) + '\\\\[0-9A-Fa-f]{16}\\\\defenseclaw-hook\.exe'
+    }
     $namesThisHook = {
         param([string]$Path)
         # A file behind a link at its folder is not read (GAP-0758).
@@ -21910,7 +22036,9 @@ function Remove-DefenseClawStandaloneOrphanedHookMachineState {
         if ($info.Length -gt 4MB -or ($info.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
             return $false
         }
-        return ([IO.File]::ReadAllText($Path).IndexOf($escapedHook, [StringComparison]::OrdinalIgnoreCase) -ge 0)
+        $text = [IO.File]::ReadAllText($Path)
+        return ($text.IndexOf($escapedHook, [StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+            $text -match $launchHookPattern)
     }
     $claude = [IO.Path]::Combine($ProgramFiles, 'ClaudeCode', 'managed-settings.d')
     $removals = [Collections.Generic.List[string]]::new()
@@ -22665,6 +22793,40 @@ function Remove-DefenseClawStandaloneScannerRuntimeLeftover {
     }
 }
 
+# The shipped rule pack root (ProgramData\Cisco\DefenseClaw-RulePacks, beside
+# the lifecycle folder, #1445) is DefenseClaw's own and holds no record; the Go
+# step removes it after an uninstall that left no deployment, after this
+# script returned. A purge removes it here first, as it does the scanner
+# runtime, so the Cisco folder and its record go in the same run. Only a real
+# folder whose writers are SYSTEM, Administrators or TrustedInstaller is
+# removed, never through a link; anything else stays for the Go step.
+function Remove-DefenseClawStandaloneShippedRulePacksLeftover {
+    param([Parameter(Mandatory)][string]$LifecycleFolder)
+    try {
+        $root = [IO.Path]::Combine([IO.Path]::GetDirectoryName($LifecycleFolder), 'DefenseClaw-RulePacks')
+        if (-not (Test-DefenseClawPathPresentNoFollow -Path $root)) {
+            return
+        }
+        $null = Assert-DefenseClawNoReparsePath -Path $root
+        Assert-DefenseClawPathAcl `
+            -Path $root `
+            -AllowedWriterSIDs @($script:SystemSID, $script:AdministratorsSID, $script:TrustedInstallerSID)
+        $remaining = [Collections.Generic.List[string]]::new()
+        foreach ($child in @([IO.Directory]::GetFileSystemEntries($root))) {
+            $null = Remove-DefenseClawNoFollowTree -Path ([string]$child) -Remaining $remaining
+        }
+        if ($remaining.Count -eq 0) {
+            [IO.Directory]::Delete($root, $false)
+        }
+        else {
+            Microsoft.PowerShell.Utility\Write-Verbose "shipped rule packs stay: $($remaining[0])"
+        }
+    }
+    catch {
+        Microsoft.PowerShell.Utility\Write-Verbose "shipped rule packs stay: $($_.Exception.Message)"
+    }
+}
+
 # Runs under the lifecycle lock (Remove-DefenseClawStandaloneLifecycleLockLeftover
 # holds it exclusively), once no deployment of any scope is left, no
 # self-uninstall finalizer is pending and the lifecycle folder holds nothing
@@ -22714,6 +22876,7 @@ function Invoke-DefenseClawStandaloneCreatedFolderRemoval {
     # folder the Cisco folder can still hold: it goes first, so the Cisco
     # folder and its record go with it in this run.
     Remove-DefenseClawStandaloneScannerRuntimeLeftover -LifecycleFolder $lifecycle
+    Remove-DefenseClawStandaloneShippedRulePacksLeftover -LifecycleFolder $lifecycle
     $records = @(Get-DefenseClawStandaloneCreatedFolderRecords -RecordDirectory $RecordDirectory)
     $lifecycleFull = [IO.Path]::GetFullPath($lifecycle).TrimEnd('\')
     $deferred = [Collections.Generic.List[object]]::new()
@@ -24997,6 +25160,9 @@ function Restore-DefenseClawTransaction {
         }
     }
     Remove-DefenseClawTransactionCreatedSharedDirectories `
+        -Snapshot $snapshot `
+        -Layout $Layout
+    Remove-DefenseClawTransactionCreatedHookImages `
         -Snapshot $snapshot `
         -Layout $Layout
     # Fresh Install over a retained non-purge StateRoot temporarily grants the
@@ -27721,11 +27887,15 @@ function Assert-DefenseClawManagedHooksTeardownSchema6Journal {
         catch {
             throw "schema-6 managed-hook teardown journal has an invalid $($pair[0])"
         }
-        if (-not [string]::Equals(
-            $recorded,
-            $expected,
-            [StringComparison]::OrdinalIgnoreCase
-        )) {
+        # GAP-0751: the journal names the hook image the teardown found in the
+        # hook configs: the transition image or a launch image of this layout.
+        $sameScope = if ([string]$pair[0] -ceq 'hook_binary') {
+            Test-DefenseClawManagedHookImagePath -Layout $Layout -Path $recorded
+        }
+        else {
+            [string]::Equals($recorded, $expected, [StringComparison]::OrdinalIgnoreCase)
+        }
+        if (-not $sameScope) {
             throw "schema-6 managed-hook teardown journal $($pair[0]) does not match this scope"
         }
     }
@@ -28129,11 +28299,15 @@ function Get-DefenseClawManagedHooksTeardownJournalPhase {
         catch {
             throw "legacy managed-hook teardown journal has an invalid $($pair[0])"
         }
-        if (-not [string]::Equals(
-            $recorded,
-            $expected,
-            [StringComparison]::OrdinalIgnoreCase
-        )) {
+        # GAP-0751: the journal names the hook image the teardown found in the
+        # hook configs: the transition image or a launch image of this layout.
+        $sameScope = if ([string]$pair[0] -ceq 'hook_binary') {
+            Test-DefenseClawManagedHookImagePath -Layout $Layout -Path $recorded
+        }
+        else {
+            [string]::Equals($recorded, $expected, [StringComparison]::OrdinalIgnoreCase)
+        }
+        if (-not $sameScope) {
             throw "legacy managed-hook teardown journal $($pair[0]) does not match this scope"
         }
     }
@@ -28224,6 +28398,12 @@ function Remove-DefenseClawCommittedManagedHooksTeardownJournal {
         -LiteralPath $Layout.HookPath) {
         throw 'refusing to retire the managed-hook teardown journal while the owned hook binary still exists'
     }
+    $hookImagesDirectory = [string](Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name HookImagesDirectory)
+    if (-not [string]::IsNullOrWhiteSpace($hookImagesDirectory) -and
+        (Microsoft.PowerShell.Management\Test-Path -LiteralPath $hookImagesDirectory)) {
+        # GAP-0751: the launch images agents start are owned hook binaries too.
+        throw 'refusing to retire the managed-hook teardown journal while the owned hook launch images still exist'
+    }
     if (-not (Microsoft.PowerShell.Management\Test-Path `
             -LiteralPath $Layout.ManagedHooksTeardownJournalPath)) {
         return $false
@@ -28243,6 +28423,541 @@ function Remove-DefenseClawCommittedManagedHooksTeardownJournal {
         throw 'managed-hook teardown journal survived committed retirement'
     }
     return $true
+}
+
+# GAP-0751: versioned managed hook images. A standalone agent hook config names
+# <bin>\hooks\<d16>\defenseclaw-hook.exe (the launch image; the hook guard is
+# beside it), d16 the first 16 hex digits of the hook image's SHA-256. Setup
+# stages a new folder for a new release with the gateway's hidden
+# `enterprise windows hook-image stage`, which also starts the new images once,
+# and the guardian's first reconcile after the services start switches every
+# hook config to it. Nothing replaces the image an agent session started: the
+# folder of the replaced release stays until the next upgrade. $Layout.HookPath
+# stays the transition image the early-hook protocol (GAP-0993) replaces in
+# place: hook configs of 1.0.9 and earlier name it, and the documented rollback
+# to such a release runs it again, so it and its protocol stay until no
+# supported upgrade source or rollback target is older than 1.0.10.
+function Get-DefenseClawManagedHookImageLocation {
+    <#
+        GAP-0751: parses an absolute drive path of the form <bin>\<name> (the
+        transition image) or <bin>\hooks\<16 hex>\<name> (a launch image), name
+        being defenseclaw-hook.exe or defenseclaw-hook-guard.exe, the way
+        winpath.ParseEnterpriseHookImagePath does. String-only, so it means
+        the same on every platform; $null for any other path, a relative path,
+        a UNC path or a path with a . or .. segment. Names are compared without
+        case, as Windows does.
+    #>
+    param([AllowEmptyString()][string]$Path)
+    $value = ([string]$Path).Trim().Replace('/', '\')
+    while ($value.Contains('\\')) {
+        $value = $value.Replace('\\', '\')
+    }
+    if ($value.Length -gt 3) {
+        $value = $value.TrimEnd('\')
+    }
+    if ($value -cnotmatch '^[A-Za-z]:\\[^\\]') {
+        return $null
+    }
+    $parts = @($value.Split('\'))
+    foreach ($part in $parts) {
+        if ($part -in @('', '.', '..')) {
+            return $null
+        }
+    }
+    $name = $null
+    foreach ($candidate in @('defenseclaw-hook.exe', 'defenseclaw-hook-guard.exe')) {
+        if ([string]::Equals([string]$parts[-1], $candidate, [StringComparison]::OrdinalIgnoreCase)) {
+            $name = $candidate
+        }
+    }
+    if ($null -eq $name) {
+        return $null
+    }
+    if ($parts.Count -ge 3 -and
+        [string]::Equals([string]$parts[-2], 'bin', [StringComparison]::OrdinalIgnoreCase)) {
+        return [pscustomobject]@{
+            Bin    = ($parts[0..($parts.Count - 2)] -join '\')
+            Name   = $name
+            Digest = ''
+        }
+    }
+    if ($parts.Count -ge 5 -and
+        [string]$parts[-2] -cmatch '^[0-9a-f]{16}$' -and
+        [string]::Equals([string]$parts[-3], 'hooks', [StringComparison]::OrdinalIgnoreCase) -and
+        [string]::Equals([string]$parts[-4], 'bin', [StringComparison]::OrdinalIgnoreCase)) {
+        return [pscustomobject]@{
+            Bin    = ($parts[0..($parts.Count - 4)] -join '\')
+            Name   = $name
+            Digest = ([string]$parts[-2]).ToLowerInvariant()
+        }
+    }
+    return $null
+}
+
+function Test-DefenseClawSameHookImageFamily {
+    <#
+        GAP-0751: true when Path and Other are the same image (the hook or the
+        hook guard) of the same bin folder, the transition image or any launch
+        image in either order (winpath.SameEnterpriseHookImageFamily). A hook
+        config written before an upgrade names the image of the release it was
+        written by; it is still this deployment's own.
+    #>
+    param(
+        [AllowEmptyString()][string]$Path,
+        [AllowEmptyString()][string]$Other
+    )
+    $left = Get-DefenseClawManagedHookImageLocation -Path $Path
+    $right = Get-DefenseClawManagedHookImageLocation -Path $Other
+    if ($null -eq $left -or $null -eq $right) {
+        return $false
+    }
+    return ([string]::Equals([string]$left.Name, [string]$right.Name, [StringComparison]::OrdinalIgnoreCase) -and
+        [string]::Equals([string]$left.Bin, [string]$right.Bin, [StringComparison]::OrdinalIgnoreCase))
+}
+
+function Test-DefenseClawManagedHookImagePath {
+    <#
+        GAP-0751: true when Path is this layout's hook (or, with -Guard, its
+        hook guard): standalone accepts the transition image and every launch
+        image of its own bin folder; Secure Client, which has no launch images,
+        keeps the exact path.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [AllowEmptyString()][string]$Path,
+        [switch]$Guard
+    )
+    $own = if ($Guard) {
+        [string](Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name HookGuardPath)
+    }
+    else {
+        [string]$Layout.HookPath
+    }
+    if ([string]::IsNullOrWhiteSpace($own) -or [string]::IsNullOrWhiteSpace($Path)) {
+        return $false
+    }
+    # The layout's own path is always this hook, whatever its name.
+    try {
+        if ([string]::Equals(
+                [IO.Path]::GetFullPath($Path).TrimEnd('\'),
+                [IO.Path]::GetFullPath($own).TrimEnd('\'),
+                [StringComparison]::OrdinalIgnoreCase)) {
+            return $true
+        }
+    }
+    catch {
+        return $false
+    }
+    if (-not (Test-DefenseClawStandaloneProfile)) {
+        return $false
+    }
+    return (Test-DefenseClawSameHookImageFamily -Path $Path -Other $own)
+}
+
+function Get-DefenseClawHookImageDigest {
+    # GAP-0751: the launch folder name of an image SHA-256: its first 16
+    # lowercase hex digits.
+    param([AllowEmptyString()][string]$SHA256)
+    $value = ([string]$SHA256).Trim().ToLowerInvariant()
+    if ($value -cnotmatch '^[0-9a-f]{64}$') {
+        throw "hook image digest is not a SHA-256: $(ConvertTo-DefenseClawBoundedDiagnostic -Value $value)"
+    }
+    return $value.Substring(0, 16)
+}
+
+function Test-DefenseClawHookImageFileName {
+    <#
+        GAP-0751: a file DefenseClaw puts in a launch or staging folder: one of
+        the two images, the swap backup the guardian keeps beside an image it
+        replaced while it ran (<image>.backup.<32 hex>) and the guardian's
+        restore temporary (<image>.restore-<16 hex>).
+    #>
+    param([Parameter(Mandatory)][string]$Name)
+    return ($Name -match '^defenseclaw-hook(?:-guard)?\.exe(?:\.backup\.[0-9a-f]{32}|\.restore-[0-9a-f]{16})?$')
+}
+
+function Get-DefenseClawHookImageTreeItems {
+    <#
+        GAP-0751: the folders and files under <BinDirectory>\hooks that
+        DefenseClaw puts there, as full paths: the hooks folder, each launch
+        folder (16 hex digits), each staging folder a stopped stage left
+        (.staging-<32 hex>) and the files Test-DefenseClawHookImageFileName
+        names inside them. Anything else is left out, so the install-tree and
+        retired-tree checks refuse it as before. Read only.
+    #>
+    param([Parameter(Mandatory)][string]$BinDirectory)
+    $directories = [Collections.Generic.List[string]]::new()
+    $files = [Collections.Generic.List[string]]::new()
+    $root = [IO.Path]::Combine($BinDirectory, 'hooks')
+    if ([IO.Directory]::Exists($root)) {
+        $directories.Add([IO.Path]::GetFullPath($root).TrimEnd('\'))
+        # The marker `hook-image retire` writes before a rollback to 1.0.9.
+        $retired = [IO.Path]::Combine($root, '.retired')
+        if ([IO.File]::Exists($retired)) {
+            $files.Add([IO.Path]::GetFullPath($retired))
+        }
+        foreach ($folder in @(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $root -Force -Directory)) {
+            if ([string]$folder.Name -cnotmatch '^(?:[0-9a-f]{16}|\.staging-[0-9a-f]{32})$') {
+                continue
+            }
+            $directories.Add([IO.Path]::GetFullPath([string]$folder.FullName).TrimEnd('\'))
+            foreach ($file in @(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $folder.FullName -Force -File)) {
+                if (Test-DefenseClawHookImageFileName -Name ([string]$file.Name)) {
+                    $files.Add([IO.Path]::GetFullPath([string]$file.FullName))
+                }
+            }
+        }
+    }
+    return @{
+        directories = @($directories)
+        files = @($files)
+    }
+}
+
+function Get-DefenseClawHookImageAclItems {
+    <#
+        GAP-0751, standalone only: the hooks folder and each launch folder,
+        with the access list of bin (ServiceInstallDirectory), and the two
+        images in each launch folder with the hook's (InstallFile): what
+        Set-DefenseClawManagedAcls stamps, verify checks and the content gate
+        judges first (-FoldersOnly: the images are installed binaries, whose
+        bytes the stage checks against the payload digest). A staging folder
+        is a leftover the next prune removes, so it is not listed. A reparse
+        point under the hooks folder throws. Empty when there is no hooks
+        folder (a layout before its first 1.0.10 upgrade).
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [switch]$FoldersOnly
+    )
+    $items = [Collections.Generic.List[object]]::new()
+    if (-not (Test-DefenseClawStandaloneProfile)) {
+        return @($items)
+    }
+    $root = [string](Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name HookImagesDirectory)
+    if ([string]::IsNullOrWhiteSpace($root) -or
+        -not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $root)) {
+        return @($items)
+    }
+    Assert-DefenseClawNoReparsePath -Path $root
+    if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $root -PathType Container)) {
+        throw "the hook images folder is not a folder: $root"
+    }
+    $items.Add([pscustomobject]@{ Path = [IO.Path]::GetFullPath($root).TrimEnd('\'); Kind = 'ServiceInstallDirectory' })
+    foreach ($folder in @(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $root -Force)) {
+        if (($folder.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "the hook images folder contains a reparse point: $($folder.FullName)"
+        }
+        if (-not $folder.PSIsContainer -or [string]$folder.Name -cnotmatch '^[0-9a-f]{16}$') {
+            continue
+        }
+        $items.Add([pscustomobject]@{ Path = [string]$folder.FullName; Kind = 'ServiceInstallDirectory' })
+        if ($FoldersOnly) {
+            continue
+        }
+        foreach ($name in @('defenseclaw-hook.exe', 'defenseclaw-hook-guard.exe')) {
+            $image = [IO.Path]::Combine([string]$folder.FullName, $name)
+            $info = [IO.FileInfo]::new($image)
+            if (-not $info.Exists) {
+                continue
+            }
+            if (($info.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw "the hook images folder contains a reparse point: $image"
+            }
+            $items.Add([pscustomobject]@{ Path = $image; Kind = 'InstallFile' })
+        }
+    }
+    return @($items)
+}
+
+function Get-DefenseClawHookImageGatewayReport {
+    <#
+        GAP-0751: runs the installed gateway's hidden
+        `enterprise windows hook-image <stage|prune> ... --json` and returns
+        its exit code and its one JSON report (schema 1). Malformed output,
+        no report or more than one throws.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$GatewayServiceName,
+        [Parameter(Mandatory)][string[]]$Arguments,
+        [Parameter(Mandatory)][string]$What
+    )
+    $probe = Invoke-DefenseClawGatewayCommand `
+        -Layout $Layout `
+        -GatewayServiceName $GatewayServiceName `
+        -Arguments (@('enterprise', 'windows', 'hook-image') + $Arguments + @('--json')) `
+        -Capture `
+        -AllowFailure
+    $reports = [Collections.Generic.List[object]]::new()
+    foreach ($line in @($probe.output)) {
+        $text = ([string]$line).Trim()
+        if (-not $text.StartsWith('{', [StringComparison]::Ordinal)) {
+            continue
+        }
+        try {
+            $reports.Add(($text | Microsoft.PowerShell.Utility\ConvertFrom-Json))
+        }
+        catch {
+            throw "${What}: the gateway emitted malformed JSON: $(ConvertTo-DefenseClawBoundedDiagnostic -Value $text)"
+        }
+    }
+    if ($reports.Count -ne 1) {
+        throw "${What}: the gateway emitted $($reports.Count) JSON reports; expected exactly one: $(ConvertTo-DefenseClawBoundedDiagnostic -Value (($probe.output | Microsoft.PowerShell.Utility\Out-String).Trim()))"
+    }
+    $report = $reports[0]
+    $schema = $report.PSObject.Properties['schema_version']
+    if ($null -eq $schema -or [string]$schema.Value -cne '1') {
+        throw "${What}: unsupported report schema: $(if ($null -eq $schema) { 'none' } else { [string]$schema.Value })"
+    }
+    return [pscustomobject]@{
+        ExitCode = [int]$probe.exit_code
+        Report   = $report
+    }
+}
+
+function Install-DefenseClawStandaloneHookImage {
+    <#
+        GAP-0751, standalone only. After the payload loop has put this
+        release's hook (and hook guard) at the transition path and before any
+        step writes a hook config, the installed gateway's hidden
+        `enterprise windows hook-image stage` copies them into
+        <bin>\hooks\<d16> (a new folder for a new release; a folder that
+        already holds exactly these images is kept, so a repeated ensure
+        changes nothing), and starts each copy once (--version-json,
+        --version). The Codex requirements step and the guardian's first
+        reconcile then name it in every hook config. When the stage fails the
+        run throws with the stage's reason, the transaction rolls back and
+        every hook config keeps the image it names, which is still there:
+        managed mode never switches to an image that does not start.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$GatewayServiceName,
+        [Parameter(Mandatory)][hashtable]$Sources
+    )
+    if (-not (Test-DefenseClawStandaloneProfile) -or -not $Sources.ContainsKey('hook') -or $null -eq $Sources['hook']) {
+        return
+    }
+    $root = [string](Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name HookImagesDirectory)
+    if ([string]::IsNullOrWhiteSpace($root)) {
+        throw 'the standalone layout has no hook images folder'
+    }
+    $hookSHA256 = ([string]$Sources['hook'].sha256).ToLowerInvariant()
+    $digest = Get-DefenseClawHookImageDigest -SHA256 $hookSHA256
+    $arguments = @('stage', '--sha256', $hookSHA256)
+    # The launch set holds the guard whenever the transition guard exists
+    # (the resolver requires it): this run's guard source, or the installed
+    # guard a run without one keeps.
+    $guardSHA256 = ''
+    if ($Sources.ContainsKey('hook_guard') -and $null -ne $Sources['hook_guard']) {
+        $guardSHA256 = ([string]$Sources['hook_guard'].sha256).ToLowerInvariant()
+    }
+    else {
+        $installedGuard = [string](Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name HookGuardPath)
+        if (-not [string]::IsNullOrWhiteSpace($installedGuard) -and
+            (Microsoft.PowerShell.Management\Test-Path -LiteralPath $installedGuard -PathType Leaf)) {
+            $guardSHA256 = (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $installedGuard -Algorithm SHA256).Hash.ToLowerInvariant()
+        }
+    }
+    $guardStaged = $guardSHA256 -ne ''
+    if ($guardStaged) {
+        [void](Get-DefenseClawHookImageDigest -SHA256 $guardSHA256)
+        $arguments += @('--guard-sha256', $guardSHA256)
+    }
+    $result = Get-DefenseClawHookImageGatewayReport `
+        -Layout $Layout `
+        -GatewayServiceName $GatewayServiceName `
+        -Arguments $arguments `
+        -What 'hook image stage'
+    $report = $result.Report
+    $ok = $report.PSObject.Properties['ok']
+    if ($result.ExitCode -ne 0 -or $null -eq $ok -or $ok.Value -isnot [bool] -or -not [bool]$ok.Value) {
+        $reasonProperty = $report.PSObject.Properties['reason']
+        $reason = if ($null -eq $reasonProperty) { '' } else { [string]$reasonProperty.Value }
+        if ($reason -cnotin @('hook_image_start_failed', 'hook_image_digest_mismatch', 'hook_image_stage_failed', 'hook_image_publish_busy')) {
+            $reason = 'hook_image_stage_failed'
+        }
+        $errorProperty = $report.PSObject.Properties['error']
+        $detail = ConvertTo-DefenseClawBoundedDiagnostic -Value $(if ($null -eq $errorProperty) { '' } else { [string]$errorProperty.Value })
+        $next = switch ($reason) {
+            'hook_image_start_failed' {
+                'Next step: make sure application control (WDAC or AppLocker) and the antivirus let ' +
+                $root.TrimEnd('\') + '\*\defenseclaw-hook.exe and defenseclaw-hook-guard.exe beside it start ' +
+                '(allow the DefenseClaw signer rather than a folder), then ' + (Format-DefenseClawRerunStep -SameSetupCommand)
+            }
+            'hook_image_publish_busy' {
+                'Next step: an antivirus or EDR scan kept the new folder busy; ' +
+                (Format-DefenseClawRerunStep -SameSetupCommand) + ' (an MDM retries exit 1618 on its own)'
+            }
+            'hook_image_digest_mismatch' {
+                'Next step: ' + (Format-DefenseClawRerunStep -SameSetupCommand) + '; if it fails the same way, the hook in ' +
+                [string]$Layout.BinDirectory + ' keeps changing: find the program that writes it'
+            }
+            default {
+                'Next step: ' + (Format-DefenseClawRerunStep -SameSetupCommand)
+            }
+        }
+        throw ("${reason}: the hook image of this release could not be staged in ${root}: $detail. " +
+            "Nothing switched: every agent hook still runs the installed image. $next")
+    }
+    $folder = [IO.Path]::GetFullPath([string]$report.folder).TrimEnd('\')
+    $expectedFolder = [IO.Path]::GetFullPath([IO.Path]::Combine($root, $digest)).TrimEnd('\')
+    if (-not [string]::Equals($folder, $expectedFolder, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "hook_image_stage_failed: the hook image was staged in $folder, not in $expectedFolder"
+    }
+    foreach ($pair in @(
+        @('hook', 'defenseclaw-hook.exe', $true),
+        @('guard', 'defenseclaw-hook-guard.exe', $guardStaged)
+    )) {
+        if (-not [bool]$pair[2]) {
+            continue
+        }
+        $property = $report.PSObject.Properties[[string]$pair[0]]
+        $want = [IO.Path]::Combine($folder, [string]$pair[1])
+        if ($null -eq $property -or [string]::IsNullOrWhiteSpace([string]$property.Value) -or
+            -not [string]::Equals([IO.Path]::GetFullPath([string]$property.Value), $want, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "hook_image_stage_failed: the stage did not report the $($pair[0]) image at $want"
+        }
+    }
+    Write-DefenseClawLifecyclePhase -Stage (
+        'hook image staged: {0} (folder created {1}, changed {2})' -f $folder, [bool]$report.created_folder, [bool]$report.changed
+    )
+}
+
+function Remove-DefenseClawTransactionCreatedHookImages {
+    <#
+        GAP-0751, standalone rollback and crash recovery: when the hooks
+        folder did not exist before the transaction (hook_images_root_existed
+        is false: a first install, or the first upgrade from 1.0.9 or earlier),
+        the release the rollback restores does not know it, and the
+        uninstall of that release refuses an item it did not install, so the
+        rollback removes it. Only DefenseClaw's shapes are removed and never
+        through a reparse point. A folder that cannot be removed (an image
+        still running) is left, logged and reported as a rollback leftover:
+        the rollback never fails over it. When the folder existed before, the
+        restored release knows it, the staged folder stays for any session
+        that read a switched hook config, and its next upgrade prunes it. A
+        snapshot without the property (an earlier release's) changes nothing.
+    #>
+    param(
+        [Parameter(Mandatory)]$Snapshot,
+        [Parameter(Mandatory)][hashtable]$Layout
+    )
+    if (-not (Test-DefenseClawStandaloneProfile)) {
+        return
+    }
+    $property = $Snapshot.PSObject.Properties['hook_images_root_existed']
+    if ($null -eq $property -or $property.Value -isnot [bool] -or [bool]$property.Value) {
+        return
+    }
+    $root = [string](Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name HookImagesDirectory)
+    if ([string]::IsNullOrWhiteSpace($root) -or
+        -not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $root)) {
+        return
+    }
+    try {
+        Assert-DefenseClawNoReparsePath -Path $root
+        $allowed = Get-DefenseClawHookImageTreeItems -BinDirectory ([string]$Layout.BinDirectory)
+        foreach ($item in @(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $root -Recurse -Force)) {
+            $full = [IO.Path]::GetFullPath([string]$item.FullName).TrimEnd('\')
+            if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw "it contains a reparse point: $full"
+            }
+            if (($item.PSIsContainer -and $full -notin $allowed.directories) -or
+                (-not $item.PSIsContainer -and $full -notin $allowed.files)) {
+                throw "it contains an item DefenseClaw did not put there: $full"
+            }
+        }
+        # Each launch folder is renamed to a staging name first, as the
+        # prune does: Windows refuses the rename while an image inside runs,
+        # so a folder is removed whole or kept whole, never half a launch set.
+        $kept = [Collections.Generic.List[string]]::new()
+        foreach ($folder in @(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $root -Force -Directory)) {
+            $target = [string]$folder.FullName
+            if ([string]$folder.Name -cnotmatch '^\.staging-[0-9a-f]{32}$') {
+                $target = [IO.Path]::Combine($root, '.staging-' + [guid]::NewGuid().ToString('N'))
+                try {
+                    [IO.Directory]::Move([string]$folder.FullName, $target)
+                }
+                catch {
+                    $kept.Add(([string]$folder.FullName + ': ' + (ConvertTo-DefenseClawBoundedDiagnostic -Value $_.Exception.Message)))
+                    continue
+                }
+            }
+            Microsoft.PowerShell.Management\Remove-Item -LiteralPath $target -Recurse -Force -ErrorAction Stop
+        }
+        if ($kept.Count -gt 0) {
+            throw ("a launch folder whose image still runs was kept whole: " + ($kept -join '; '))
+        }
+        Microsoft.PowerShell.Management\Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction Stop
+    }
+    catch {
+        $reason = "transaction-created hook images folder left in place: $(ConvertTo-DefenseClawBoundedDiagnostic -Value $_.Exception.Message)"
+        Write-DefenseClawResilienceEvent -Marker defenseclaw_accept -Fields @{
+            path   = $root
+            reason = $reason
+        }
+        Add-DefenseClawRollbackLeftovers -Report ([pscustomobject]@{ leftovers = @("${root}: $reason") })
+    }
+}
+
+function Invoke-DefenseClawStandaloneHookImagePrune {
+    <#
+        GAP-0751, standalone, after a committed upgrade that switched the hook
+        image: removes every launch folder except this release's and the
+        replaced release's (the image sessions started before this upgrade
+        still run), and staging folders a stopped stage left. A folder still in
+        use is kept and named. It never fails the run: the transaction is
+        committed and the services run.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$GatewayServiceName,
+        [Parameter(Mandatory)][string[]]$Keep
+    )
+    if (-not (Test-DefenseClawStandaloneProfile)) {
+        return
+    }
+    $arguments = @('prune')
+    foreach ($digest in @($Keep | Microsoft.PowerShell.Utility\Select-Object -Unique)) {
+        $arguments += @('--keep', [string]$digest)
+    }
+    try {
+        $result = Get-DefenseClawHookImageGatewayReport `
+            -Layout $Layout `
+            -GatewayServiceName $GatewayServiceName `
+            -Arguments $arguments `
+            -What 'hook image prune'
+    }
+    catch {
+        Microsoft.PowerShell.Utility\Write-Warning -Message (
+            'hook image prune: the earlier hook images were kept: {0}' -f (ConvertTo-DefenseClawBoundedDiagnostic -Value $_.Exception.Message)
+        )
+        return
+    }
+    $report = $result.Report
+    $ok = $report.PSObject.Properties['ok']
+    if ($result.ExitCode -ne 0 -or $null -eq $ok -or $ok.Value -isnot [bool] -or -not [bool]$ok.Value) {
+        $errorProperty = $report.PSObject.Properties['error']
+        Microsoft.PowerShell.Utility\Write-Warning -Message (
+            'hook image prune: the earlier hook images were kept: {0}' -f (ConvertTo-DefenseClawBoundedDiagnostic -Value $(if ($null -eq $errorProperty) { '' } else { [string]$errorProperty.Value }))
+        )
+        return
+    }
+    $inUse = $report.PSObject.Properties['in_use']
+    if ($null -ne $inUse -and $null -ne $inUse.Value) {
+        foreach ($entry in @($inUse.Value)) {
+            Microsoft.PowerShell.Utility\Write-Warning -Message (
+                'hook image prune: {0} is still in use and stays until the next upgrade: {1}' -f
+                (ConvertTo-DefenseClawBoundedDiagnostic -Value ([string]$entry.folder)),
+                (ConvertTo-DefenseClawBoundedDiagnostic -Value ([string]$entry.error))
+            )
+        }
+    }
+    $removed = $report.PSObject.Properties['removed']
+    $removedCount = if ($null -eq $removed -or $null -eq $removed.Value) { 0 } else { @($removed.Value).Count }
+    Write-DefenseClawLifecyclePhase -Stage ('hook image prune: {0} earlier hook image folder(s) removed' -f $removedCount)
 }
 
 function Copy-DefenseClawHookPreimage {
@@ -28332,13 +29047,21 @@ function Copy-DefenseClawRecordedHookPreimage {
         a rollback or a recovery puts back as a fresh, trusted object. When
         the installed hook does not have the recorded digest (or cannot be
         read), the copy is the guardian's protected copy, taken only when it
-        has that digest. When neither does, this throws, so the run stops
-        with the prior release intact. Nothing is written when Destination
-        is empty (a check before anything is stopped).
+        has that digest. When neither does, the rollback copy is this
+        Setup's own verified hook (ReplacementSource, when it carries its
+        digest), and the notice says so: the bytes that could not be checked are never kept, and the hook
+        a rollback puts back is the replacement the early-hook protocol
+        publishes anyway (GAP-0993). Before, this case threw on every Setup
+        run: a recovery that left the replacement hook in place over the
+        restored release's record then refused every /ensure, /repair,
+        /upgrade and /uninstall, with every service stopped (GAP-0601).
+        With no ReplacementSource, or one without a digest, it still throws. Nothing is written when
+        Destination is empty (a check before anything is stopped).
     #>
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
-        [AllowEmptyString()][string]$Destination = ''
+        [AllowEmptyString()][string]$Destination = '',
+        [AllowNull()][hashtable]$ReplacementSource
     )
     $expected = Get-DefenseClawRecordedHookSHA256 -Layout $Layout
     if ([string]::IsNullOrEmpty($expected)) {
@@ -28396,6 +29119,43 @@ function Copy-DefenseClawRecordedHookPreimage {
     }
     $installed = if ($liveProblem) { "cannot be read ($liveProblem)" } else { "has sha256 $live" }
     $protected = if ([string]::IsNullOrEmpty($guardianDigest)) { 'is missing or unreadable' } else { "has sha256 $guardianDigest" }
+    # A replacement with no digest (a partial descriptor) cannot be the
+    # rollback copy: it gets the refusal below, not a strict-mode property
+    # error that names no next step.
+    $replacementDigest = ''
+    if ($null -ne $ReplacementSource -and $ReplacementSource.ContainsKey('sha256')) {
+        $replacementDigest = ([string]$ReplacementSource['sha256']).ToLowerInvariant()
+    }
+    if ($replacementDigest -cmatch '^[0-9a-f]{64}$') {
+        if ($write) {
+            Install-DefenseClawSourceDescriptor -Source $ReplacementSource -Destination $Destination
+            Assert-DefenseClawNoReparsePath -Path $Destination
+            $copied = (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $Destination -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($copied -cne $replacementDigest) {
+                throw 'the replacement hook changed while its rollback copy was taken'
+            }
+            $notice = (
+                "the installed hook $installed and the guardian's protected copy $protected, " +
+                "not the $expected the deployment records; the rollback copy is this Setup's " +
+                "verified hook (sha256 $replacementDigest), and the hook record is written again " +
+                "when this run commits (GAP-0601)")
+            Write-DefenseClawLifecyclePhase -Stage "notice: $notice"
+            Write-DefenseClawResilienceEvent -Marker defenseclaw_boundary -Fields @{
+                path     = [string]$Layout.HookPath
+                artifact = 'hook'
+                reason   = 'the installed hook is not the recorded one and no protected copy is; this run replaces it'
+                pinned   = $expected
+                live     = $(if ($liveProblem) { 'unreadable' } else { $live })
+            }
+            Write-DefenseClawResilienceEvent -Marker defenseclaw_repair -Fields @{
+                subsystem = 'hook'
+                path      = [string]$Layout.HookPath
+                reason    = $notice
+            }
+            $script:DefenseClawHookRollbackCopyRederived = $notice
+        }
+        return $replacementDigest
+    }
     throw ("refusing to replace the installed hook: it $installed and the guardian's protected copy $protected, but the deployment records $expected, so no rollback copy can be checked. Nothing was stopped or changed. Next step: let the installed release's guardian restore its hook (about 5 seconds), or, for the installed release, run " + (Format-DefenseClawSetupAction -Action '/repair') + ", then " + (Format-DefenseClawRerunStep -SameSetupCommand))
 }
 
@@ -28416,7 +29176,7 @@ function Assert-DefenseClawHookPreimageAvailable {
         return
     }
     Assert-DefenseClawNoReparsePath -Path $Layout.HookPath
-    [void](Copy-DefenseClawRecordedHookPreimage -Layout $Layout)
+    [void](Copy-DefenseClawRecordedHookPreimage -Layout $Layout -ReplacementSource $Source)
 }
 
 function Publish-DefenseClawEarlyHook {
@@ -28452,7 +29212,10 @@ function Publish-DefenseClawEarlyHook {
         # records for the hook, not against itself, and a hook that does not
         # match is not the rollback copy: the guardian's protected copy is,
         # or the run throws before anything is stopped.
-        $preimageSHA256 = Copy-DefenseClawRecordedHookPreimage -Layout $Layout -Destination $preimage
+        $preimageSHA256 = Copy-DefenseClawRecordedHookPreimage `
+            -Layout $Layout `
+            -Destination $preimage `
+            -ReplacementSource $Source
         Assert-DefenseClawNoReparsePath -Path $preimage
     }
     else {
@@ -29930,7 +30693,12 @@ function Invoke-DefenseClawEnumeratorRefresh {
             -Arguments @(
                 'enterprise', 'windows', 'enumerate',
                 '--manifest', [string]$Layout.ManifestPath,
-                '--once'
+                '--once',
+                # The enumerator service's first cycle after activation takes
+                # the gateway's read access off excluded profiles; here the
+                # revoke of many orphan profiles outlasted the timeout
+                # (GAP-1109).
+                '--defer-excluded-revoke'
             ) `
             -Capture `
             -AllowFailure `
@@ -31793,12 +32561,38 @@ function Invoke-DefenseClawCodexRequirementsCommand {
         }
         $actual = [IO.Path]::GetFullPath([string]$property.Value).TrimEnd('\')
         $expected = [IO.Path]::GetFullPath([string]$pair[1]).TrimEnd('\')
-        if (-not [string]::Equals(
-            $actual,
-            $expected,
-            [StringComparison]::OrdinalIgnoreCase
-        )) {
+        # GAP-0751: the requirements launch a launch image of this layout
+        # (standalone) or the transition image, and the Codex managed folder
+        # is the folder of that image (checked below).
+        $inLayout = switch ([string]$pair[0]) {
+            'hook_binary' {
+                Test-DefenseClawManagedHookImagePath -Layout $Layout -Path $actual
+            }
+            'managed_dir' {
+                [string]::Equals($actual, $expected, [StringComparison]::OrdinalIgnoreCase) -or
+                    ((Test-DefenseClawStandaloneProfile) -and
+                        (Test-DefenseClawManagedHookImagePath -Layout $Layout -Path ([IO.Path]::Combine($actual, 'defenseclaw-hook.exe'))))
+            }
+            default {
+                [string]::Equals($actual, $expected, [StringComparison]::OrdinalIgnoreCase)
+            }
+        }
+        if (-not $inLayout) {
             throw "Codex requirements report $($pair[0]) is outside the exact installed layout: $actual"
+        }
+    }
+    # A report that names a launch image (not the layout hook itself) must
+    # name that image folder as the Codex managed folder; a report for the
+    # layout hook keeps the exact managed_dir check above.
+    $reportNamesLaunchImage = -not [string]::Equals(
+        [IO.Path]::GetFullPath([string]$report.hook_binary).TrimEnd('\'),
+        [IO.Path]::GetFullPath([string]$Layout.HookPath).TrimEnd('\'),
+        [StringComparison]::OrdinalIgnoreCase)
+    if ((Test-DefenseClawStandaloneProfile) -and $reportNamesLaunchImage) {
+        $reportHookFolder = [IO.Path]::GetDirectoryName([IO.Path]::GetFullPath([string]$report.hook_binary)).TrimEnd('\')
+        $reportManagedDir = [IO.Path]::GetFullPath([string]$report.managed_dir).TrimEnd('\')
+        if (-not [string]::Equals($reportHookFolder, $reportManagedDir, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "Codex requirements report managed_dir is not the folder of its hook_binary: $reportManagedDir"
         }
     }
     foreach ($hashName in @('preimage_sha256', 'postimage_sha256')) {
@@ -33331,6 +34125,8 @@ function Set-DefenseClawRecoveryGatewayCandidate {
     $script:DefenseClawRecoveryGatewayCandidate = $null
     $script:DefenseClawRecoveryGatewayRuns = @()
     $script:DefenseClawRecoveryGatewayRefusal = $null
+    $script:DefenseClawHookRollbackCopyRederived = ''
+    $script:DefenseClawDeferredRecoveryServices = $null
     $script:DefenseClawStaleLifecycleJournalRemoved = ''
     $script:DefenseClawStaleTeardownJournalRemoved = ''
     $script:DefenseClawCursorAdapterRestored = $false
@@ -33582,6 +34378,22 @@ function Complete-DefenseClawDeferredRecoveryActivation {
         [Parameter(Mandatory)][string]$SnapshotPath,
         [string]$SensorHelper
     )
+    # GAP-0601: what the restored release ran before the transaction, so a
+    # requested lifecycle that then fails can start it again
+    # (Restart-DefenseClawDeferredRecoveryRelease).
+    $restoredVersion = ''
+    foreach ($run in @($script:DefenseClawRecoveryGatewayRuns)) {
+        if ($null -ne $run -and [string]$run['action'] -ceq 'service-reactivation') {
+            $restoredVersion = [string]$run['staged_version']
+        }
+    }
+    $script:DefenseClawDeferredRecoveryServices = [pscustomobject]@{
+        services = @($Snapshot.services)
+        gateway_service = [string]$Snapshot.gateway_service
+        guardian_service = [string]$Snapshot.guardian_service
+        sensor_helper = [string]$SensorHelper
+        restored_version = $restoredVersion
+    }
     if (-not [string]::IsNullOrEmpty($SensorHelper)) {
         Stop-DefenseClawService -Name $SensorHelper
         Set-DefenseClawServiceStartMode -Name $SensorHelper -StartMode 4
@@ -33591,6 +34403,116 @@ function Complete-DefenseClawDeferredRecoveryActivation {
         -Path $SnapshotPath `
         -Phase quiesced `
         -ServicesQuiescedAt ([DateTime]::UtcNow.ToString('o'))
+}
+
+function Restart-DefenseClawDeferredRecoveryRelease {
+    <#
+        GAP-0601: a recovery that left the restored release stopped and
+        disabled (Test-DefenseClawRecoveryActivationDeferral) counts on this
+        Setup's own release to replace it. When the requested lifecycle then
+        fails with no transaction of its own left pending, the endpoint had
+        no DefenseClaw service at all, and every later Setup run refused.
+        This starts the restored release again with the service set and
+        boot policy it had before the transaction, and waits for readiness
+        accepting failed user targets, as a rollback does. A readiness that
+        does not come is reported, not a reason to stop the services again:
+        a running gateway and guardian enforce the installed policy, and the
+        guardian repairs what it can. Returns the note for the result, or ''
+        when this run deferred nothing, or when the deployment in place is no
+        longer the restored release (the requested lifecycle committed: an
+        upgrade recorded its own release, an uninstall removed the record).
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout
+    )
+    $deferred = $script:DefenseClawDeferredRecoveryServices
+    if (-not [bool]$script:DefenseClawRecoveryActivationDeferred -or
+        $null -eq $deferred -or
+        -not (Test-DefenseClawStandaloneProfile) -or
+        (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.PendingPath)) {
+        return ''
+    }
+    # A committed uninstall leaves a tombstone that keeps the removed
+    # release's product_version (GAP-1074); it is not installed.
+    $installedVersion = ''
+    try {
+        $metadata = Get-DefenseClawDeploymentMetadata -Layout $Layout
+        if ($null -ne $metadata -and
+            (Test-DefenseClawMetadataInstalled -Metadata $metadata) -and
+            $null -ne $metadata.PSObject.Properties['product_version']) {
+            $installedVersion = [string]$metadata.product_version
+        }
+    }
+    catch {
+        $installedVersion = ''
+    }
+    if ([string]::IsNullOrEmpty([string]$deferred.restored_version) -or
+        $installedVersion -cne [string]$deferred.restored_version) {
+        return ''
+    }
+    $script:DefenseClawDeferredRecoveryServices = $null
+    $gatewayServiceName = [string]$deferred.gateway_service
+    $guardianServiceName = [string]$deferred.guardian_service
+    try {
+        $states = Get-DefenseClawTransactionServiceStates `
+            -Services $deferred.services `
+            -GatewayServiceName $gatewayServiceName `
+            -GuardianServiceName $guardianServiceName
+        $enumeratorServiceName = Get-DefenseClawEnumeratorServiceName -GuardianServiceName $guardianServiceName
+        $brokerServiceName = Get-DefenseClawCMIDBrokerServiceName -GatewayServiceName $gatewayServiceName
+        $sensorHelper = [string]$deferred.sensor_helper
+        if (-not [string]::IsNullOrEmpty($sensorHelper) -and
+            (Test-DefenseClawServiceExists -Name $sensorHelper)) {
+            Set-DefenseClawServiceStartMode -Name $sensorHelper -StartMode 3
+            Start-DefenseClawService -Name $sensorHelper
+        }
+        # The order of a rollback's restart: broker, guardian, gateway,
+        # enumerator; each demand-start first, boot policy after.
+        foreach ($name in @($brokerServiceName, $guardianServiceName, $gatewayServiceName, $enumeratorServiceName)) {
+            $state = $states[$name]
+            if ($null -ne $state -and [bool]$state.existed -and [bool]$state.running) {
+                Set-DefenseClawServiceStartMode -Name $name -StartMode 3
+                Start-DefenseClawService -Name $name
+            }
+        }
+        Restore-DefenseClawTransactionServiceStartModes `
+            -Services $deferred.services `
+            -GatewayServiceName $gatewayServiceName `
+            -GuardianServiceName $guardianServiceName
+        if (-not [string]::IsNullOrEmpty($sensorHelper) -and
+            (Test-DefenseClawServiceExists -Name $sensorHelper)) {
+            Set-DefenseClawServiceStartMode `
+                -Name $sensorHelper `
+                -StartMode ([int]$states[$gatewayServiceName].start_mode)
+        }
+        $note = 'Setup started the restored release again with the service set it had before the transaction'
+        try {
+            Wait-DefenseClawEnterpriseReadiness `
+                -Layout $Layout `
+                -GatewayServiceName $gatewayServiceName `
+                -GuardianServiceName $guardianServiceName `
+                -RequireBroker:([bool]$states[$brokerServiceName].existed) `
+                -RequireEnumerator:([bool]$states[$enumeratorServiceName].running) `
+                -AllowFailedTargets
+            $note += ', and it is ready'
+        }
+        catch {
+            $note += "; it is running, but its readiness was not proven: $(ConvertTo-DefenseClawBoundedDiagnostic -Value $_.Exception.Message)"
+        }
+        Write-DefenseClawResilienceEvent -Marker defenseclaw_recover -Fields @{
+            subsystem = 'lifecycle'
+            reason    = $note
+        }
+        return $note
+    }
+    catch {
+        $note = "Setup could not start the restored release again: $(ConvertTo-DefenseClawBoundedDiagnostic -Value $_.Exception.Message)"
+        Write-DefenseClawResilienceEvent -Marker defenseclaw_degraded -Fields @{
+            subsystem = 'lifecycle'
+            reason    = $note
+        }
+        return $note
+    }
 }
 
 function Get-DefenseClawRecoveryGatewayAdmission {
@@ -34871,6 +35793,89 @@ function Register-DefenseClawRestoredConfigGeneration {
         -AllowFailure)
 }
 
+function Install-DefenseClawStandaloneShippedRulePacks {
+    <#
+        Standalone only (#1445). Runs the installed gateway's hidden
+        `enterprise windows shipped-rule-packs`, which writes the strict and
+        permissive rule packs the binary embeds to
+        <ProgramData>\Cisco\DefenseClaw-RulePacks\<digest16> (Administrators
+        and LocalSystem write it, services read it) and checks every file. A
+        folder that already holds exactly those files is left as it is, so a
+        repeated ensure changes nothing. The root sits beside the state root,
+        like the scanner runtime, so the install-tree and state-root checks
+        never walk it. A failed write stops the run only when the config it
+        applies selects strict or permissive (the helper's required flag);
+        a deployment on the default pack goes on with a warning, and the
+        next run that selects one writes them. Secure Client never calls it.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$GatewayServiceName
+    )
+    $probe = Invoke-DefenseClawGatewayCommand `
+        -Layout $Layout `
+        -GatewayServiceName $GatewayServiceName `
+        -Arguments @('enterprise', 'windows', 'shipped-rule-packs', '--json') `
+        -Capture `
+        -AllowFailure
+    $reports = [Collections.Generic.List[object]]::new()
+    foreach ($line in @($probe.output)) {
+        $text = ([string]$line).Trim()
+        if (-not $text.StartsWith('{', [StringComparison]::Ordinal)) {
+            continue
+        }
+        try {
+            $reports.Add(($text | Microsoft.PowerShell.Utility\ConvertFrom-Json))
+        }
+        catch {
+            throw "shipped rule packs: the gateway emitted malformed JSON: $(ConvertTo-DefenseClawBoundedDiagnostic -Value $text)"
+        }
+    }
+    if ($reports.Count -ne 1) {
+        throw "shipped rule packs: the gateway emitted $($reports.Count) JSON reports; expected exactly one: $(ConvertTo-DefenseClawBoundedDiagnostic -Value (($probe.output | Microsoft.PowerShell.Utility\Out-String).Trim()))"
+    }
+    $report = $reports[0]
+    if ([int]$report.schema_version -ne 1) {
+        throw "unsupported shipped rule packs report schema: $($report.schema_version)"
+    }
+    $ok = $report.PSObject.Properties['ok']
+    if ($null -eq $ok -or $ok.Value -isnot [bool]) {
+        throw 'shipped rule packs report is missing boolean ok'
+    }
+    if ([int]$probe.exit_code -ne 0 -or -not [bool]$ok.Value) {
+        $detail = ConvertTo-DefenseClawBoundedDiagnostic -Value ([string]$report.error)
+        $required = $report.PSObject.Properties['required']
+        if ([bool]$ok.Value -or $null -eq $required -or $required.Value -isnot [bool] -or [bool]$required.Value) {
+            throw "the rule packs this release ships could not be written, and the config selects one of them: $detail"
+        }
+        Write-DefenseClawResilienceEvent -Marker defenseclaw_degraded -Fields @{
+            subsystem = 'shipped-rule-packs'
+            reason    = "the strict and permissive rule packs this release ships could not be written; the config selects neither, so the run goes on, and the next run whose config selects one writes them: $detail"
+        }
+        Microsoft.PowerShell.Utility\Write-Warning -Message ('shipped rule packs were not written: {0}' -f $detail)
+        return
+    }
+    $folder = [IO.Path]::GetFullPath([string]$report.folder).TrimEnd('\')
+    $expectedRoot = [IO.Path]::Combine($script:ProgramData, 'Cisco', 'DefenseClaw-RulePacks')
+    if (-not [string]::Equals(
+            [IO.Path]::GetDirectoryName($folder),
+            [IO.Path]::GetFullPath($expectedRoot).TrimEnd('\'),
+            [StringComparison]::OrdinalIgnoreCase)) {
+        throw "the shipped rule packs were written outside $expectedRoot`: $folder"
+    }
+    $notes = $report.PSObject.Properties['notes']
+    if ($null -ne $notes -and $null -ne $notes.Value) {
+        foreach ($note in @($notes.Value)) {
+            Microsoft.PowerShell.Utility\Write-Warning -Message (
+                'shipped rule packs: {0}' -f (ConvertTo-DefenseClawBoundedDiagnostic -Value ([string]$note))
+            )
+        }
+    }
+    Microsoft.PowerShell.Utility\Write-Verbose (
+        'stage=shipped-rule-packs folder={0} changed={1}' -f $folder, [bool]$report.changed
+    )
+}
+
 # A fresh Install on a host where an earlier purge or an interrupted uninstall
 # left a hooks runtime selector behind, with no Guardian activation,
 # authorization or state and no machine-policy enrollment, would otherwise
@@ -35998,8 +37003,7 @@ function Get-DefenseClawGuardianReadinessProbe {
         # As in Wait-DefenseClawFreshGuardianReconcile: a complete reconcile
         # whose only problem is failed targets is accepted (rollback restores it;
         # activation runs degraded). With -LiveVerify, only Guardian-failed targets.
-        [switch]$AllowFailedTargets,
-        [string[]]$AllowedFailedTargetSIDs
+        [switch]$AllowFailedTargets
     )
     $service = Microsoft.PowerShell.Management\Get-Service -Name $GuardianServiceName -ErrorAction SilentlyContinue
     if ($null -eq $service -or
@@ -36022,9 +37026,7 @@ function Get-DefenseClawGuardianReadinessProbe {
         $report = Get-DefenseClawGuardianStatusReport `
             -Layout $Layout `
             -GatewayServiceName $GatewayServiceName
-        if ((Test-DefenseClawGuardianReportCompletedWithFailedTargets -Report $report) -and
-            (Test-DefenseClawGuardianFailedTargetsWithinSIDs `
-                -Report $report -AllowedSIDs $AllowedFailedTargetSIDs)) {
+        if (Test-DefenseClawGuardianReportCompletedWithFailedTargets -Report $report) {
             $accepted = -not $LiveVerify
             if ($LiveVerify) {
                 # A live verify may fail only on the targets the Guardian
@@ -36084,16 +37086,14 @@ function Test-DefenseClawGuardianReady {
         [Parameter(Mandatory)][string]$GatewayServiceName,
         [Parameter(Mandatory)][string]$GuardianServiceName,
         [switch]$LiveVerify,
-        [switch]$AllowFailedTargets,
-        [string[]]$AllowedFailedTargetSIDs
+        [switch]$AllowFailedTargets
     )
     $readiness = Get-DefenseClawGuardianReadinessProbe `
         -Layout $Layout `
         -GatewayServiceName $GatewayServiceName `
         -GuardianServiceName $GuardianServiceName `
         -LiveVerify:$LiveVerify `
-        -AllowFailedTargets:$AllowFailedTargets `
-        -AllowedFailedTargetSIDs $AllowedFailedTargetSIDs
+        -AllowFailedTargets:$AllowFailedTargets
     return [bool]$readiness.ready
 }
 
@@ -36107,7 +37107,6 @@ function Wait-DefenseClawEnterpriseReadiness {
         [int]$TimeoutSeconds = 90,
         # Rollback, recovery and activation; see Get-DefenseClawGuardianReadinessProbe.
         [switch]$AllowFailedTargets,
-        [string[]]$AllowedFailedTargetSIDs,
         # GAP-0947: the guardian can neither prove coverage nor stay up until
         # a program lets go of the Codex requirements (rollback only).
         [switch]$GuardianCoverageDeferred
@@ -36149,8 +37148,7 @@ function Wait-DefenseClawEnterpriseReadiness {
                 -Layout $Layout `
                 -GatewayServiceName $GatewayServiceName `
                 -GuardianServiceName $GuardianServiceName `
-                -AllowFailedTargets:$AllowFailedTargets `
-                -AllowedFailedTargetSIDs $AllowedFailedTargetSIDs
+                -AllowFailedTargets:$AllowFailedTargets
         }
         $enumerator = Microsoft.PowerShell.Management\Get-Service `
             -Name $enumeratorServiceName `
@@ -37599,6 +38597,38 @@ function Assert-DefenseClawInstalledArtifacts {
             }
         }
     }
+    # GAP-0751: the launch folder of the recorded hook, when it exists, holds
+    # the recorded hook and guard: they are what agent hook configs start. A
+    # missing folder is not an artifact failure here (the hooks then name the
+    # transition image, and the gateway's verify reports hook_image_not_staged):
+    # a rollback to a release before 1.0.10 can leave a folder of the release
+    # it replaced, which names another digest. Not checked while a servicing
+    # transition runs.
+    $hookImagesDirectory = [string](Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name HookImagesDirectory)
+    $recorded = $Metadata.hashes.PSObject.Properties['hook']
+    $launchFolder = ''
+    if ((Test-DefenseClawStandaloneProfile) -and $TransitionHookSHA256 -eq '' -and
+        -not [string]::IsNullOrWhiteSpace($hookImagesDirectory) -and
+        $null -ne $recorded -and ([string]$recorded.Value).ToLowerInvariant() -cmatch '^[0-9a-f]{64}$') {
+        $launchFolder = [IO.Path]::Combine($hookImagesDirectory, (Get-DefenseClawHookImageDigest -SHA256 ([string]$recorded.Value)))
+    }
+    if ($launchFolder -ne '' -and [IO.Directory]::Exists($launchFolder)) {
+        foreach ($pair in @(@('hook', 'defenseclaw-hook.exe'), @('hook_guard', 'defenseclaw-hook-guard.exe'))) {
+            $hash = $Metadata.hashes.PSObject.Properties[[string]$pair[0]]
+            if ($null -eq $hash) {
+                continue
+            }
+            $launchImage = [IO.Path]::Combine($launchFolder, [string]$pair[1])
+            if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $launchImage -PathType Leaf)) {
+                throw "installed launch image is missing: $($pair[0]) ($launchImage)"
+            }
+            Assert-DefenseClawNoReparsePath -Path $launchImage
+            $actualHash = (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $launchImage -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($actualHash -cne ([string]$hash.Value).ToLowerInvariant()) {
+                throw "installed launch image hash drift: $($pair[0]) ($launchImage)"
+            }
+        }
+    }
 }
 
 function New-DefenseClawRollbackHeldMessage {
@@ -38753,8 +39783,7 @@ function Assert-DefenseClawEnterpriseDeployment {
         # Install/Upgrade activation: live readiness accepts a completed
         # reconcile whose only failures are user targets the Guardian itself
         # reported failed (see Get-DefenseClawGuardianReadinessProbe).
-        [switch]$AcceptDegradedTargets,
-        [string[]]$AllowedFailedTargetSIDs
+        [switch]$AcceptDegradedTargets
     )
     if ($null -eq $ExpectedGatewayAccount -or $ExpectedGatewayAccount.Count -eq 0) {
         $ExpectedGatewayAccount = Get-DefenseClawAcceptedGatewayServiceAccounts `
@@ -39172,6 +40201,28 @@ function Assert-DefenseClawEnterpriseDeployment {
             -AllowUsersRead `
             -SelfHealKind InstallDirectory `
             -SelfHealGatewayServiceSID $gatewaySID
+    }
+    # GAP-0751: the hooks folder and its launch folders like bin, the images
+    # agents start like the hook (standalone; nothing before bin\hooks exists).
+    foreach ($hookImageItem in @(if ([string](Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name HookImagesDirectory)) { Get-DefenseClawHookImageAclItems -Layout $Layout })) {
+        if ([string]$hookImageItem.Kind -ceq 'ServiceInstallDirectory') {
+            Assert-DefenseClawPathAcl `
+                -Path ([string]$hookImageItem.Path) `
+                -AllowedWriterSIDs $adminWriters `
+                -RequiredRights $serviceInstallRights `
+                -AllowUsersRead `
+                -SelfHealKind InstallDirectory `
+                -SelfHealGatewayServiceSID $gatewaySID
+        }
+        else {
+            Assert-DefenseClawPathAcl `
+                -Path ([string]$hookImageItem.Path) `
+                -AllowedWriterSIDs $adminWriters `
+                -RequiredRights $installRights `
+                -AllowUsersRead `
+                -SelfHealKind InstallFile `
+                -SelfHealGatewayServiceSID $gatewaySID
+        }
     }
     Assert-DefenseClawPathAcl `
         -Path $Layout.LibexecDirectory `
@@ -39819,8 +40870,7 @@ function Assert-DefenseClawEnterpriseDeployment {
             -GatewayServiceName $GatewayServiceName `
             -GuardianServiceName $GuardianServiceName `
             -LiveVerify `
-            -AllowFailedTargets:$AcceptDegradedTargets `
-            -AllowedFailedTargetSIDs $AllowedFailedTargetSIDs
+            -AllowFailedTargets:$AcceptDegradedTargets
         if (-not [bool]$guardianReadiness.ready) {
             throw (
                 'guardian SCM process is running but protected target ' +
@@ -40822,8 +41872,7 @@ function Get-DefenseClawLifecycleStatus {
         # The result of an activation that accepted a completed reconcile
         # with failed user targets: those targets are logged as
         # defenseclaw_degraded instead of failing the result.
-        [switch]$AcceptDegradedTargets,
-        [string[]]$AllowedFailedTargetSIDs
+        [switch]$AcceptDegradedTargets
     )
     $errors = [Collections.Generic.List[string]]::new()
     $metadata = $null
@@ -40897,17 +41946,14 @@ function Get-DefenseClawLifecycleStatus {
                 -Layout $Layout `
                 -GatewayServiceName $GatewayServiceName `
                 -GuardianServiceName $GuardianServiceName `
-                -AllowFailedTargets:$AcceptDegradedTargets `
-                -AllowedFailedTargetSIDs $AllowedFailedTargetSIDs
+                -AllowFailedTargets:$AcceptDegradedTargets
             $guardianReport = Get-DefenseClawGuardianStatusReport `
                 -Layout $Layout `
                 -GatewayServiceName $GatewayServiceName
             $generation = Get-DefenseClawGuardianGeneration -Report $guardianReport
             $guardianDegraded = [bool](
                 $AcceptDegradedTargets -and
-                (Test-DefenseClawGuardianReportCompletedWithFailedTargets -Report $guardianReport) -and
-                (Test-DefenseClawGuardianFailedTargetsWithinSIDs `
-                    -Report $guardianReport -AllowedSIDs $AllowedFailedTargetSIDs)
+                (Test-DefenseClawGuardianReportCompletedWithFailedTargets -Report $guardianReport)
             )
             if ($guardianDegraded) {
                 Write-DefenseClawGuardianDegradedTargets -Report $guardianReport
@@ -41128,6 +42174,9 @@ function Get-DefenseClawLifecycleStatus {
         if ($recoveryRuns.Count -gt 0) {
             $status['recovery_gateway_runs'] = $recoveryRuns
         }
+        if (-not [string]::IsNullOrEmpty($script:DefenseClawHookRollbackCopyRederived)) {
+            $status['hook_rollback_copy_rederived'] = $script:DefenseClawHookRollbackCopyRederived
+        }
         if ($null -ne $script:DefenseClawRecoveryGatewayRefusal) {
             $status['recovery_gateway_refusal'] = [pscustomobject](
                 $script:DefenseClawRecoveryGatewayRefusal
@@ -41197,8 +42246,7 @@ function Test-DefenseClawGuardianCoverageReport {
         [AllowEmptyString()][string]$CurrentStateIdentity,
         [AllowEmptyString()][string]$ExpectedManifestSHA256,
         [Parameter(Mandatory)][DateTime]$StartedAfter,
-        [switch]$AllowFailedTargets,
-        [string[]]$AllowedFailedTargetSIDs
+        [switch]$AllowFailedTargets
     )
     $reject = {
         param([string]$Reason)
@@ -41212,9 +42260,7 @@ function Test-DefenseClawGuardianCoverageReport {
     # A digest-bound activation still has to prove its exact activation
     # identity below; only the report's ok=false is excused.
     $degradedAccepted = $AllowFailedTargets -and
-        (Test-DefenseClawGuardianReportCompletedWithFailedTargets -Report $Report) -and
-        (Test-DefenseClawGuardianFailedTargetsWithinSIDs `
-            -Report $Report -AllowedSIDs $AllowedFailedTargetSIDs)
+        (Test-DefenseClawGuardianReportCompletedWithFailedTargets -Report $Report)
     if (-not $degradedAccepted -and
         ($null -eq $Report -or
         $null -eq $Report.PSObject.Properties['ok'] -or
@@ -41463,12 +42509,24 @@ function Test-DefenseClawGuardianReportCompletedWithFailedTargets {
 }
 
 # Degraded coverage is accepted only when every status error comes from the
-# failed targets themselves: one "last guardian reconcile failed for
-# <connector>@<sid>" line per failed row (the Windows Guardian names the
-# account "<connector>@<user> (<sid>)"), and the reconcile, authorization and
-# activation "is incomplete" lines carrying exactly the state's counts. Any
-# other error (a missing or unreadable authorization or activation, an
-# untrusted manifest, an unreadable state) rejects the report.
+# failed targets themselves: one line per failed row, and the reconcile,
+# authorization and activation "is incomplete" lines carrying exactly the
+# state's counts. A failed row is "last guardian reconcile failed for
+# <connector>@<sid>" (the Windows Guardian names the account
+# "<connector>@<user> (<sid>)"), or, for a signed-out account, one of the
+# three lines the gateway words it with (enterpriseHookGuardianFailureIssue):
+# "<connector> for <account> is pending until that account signs in: ...",
+# "<connector> for <account> is enrolled with the hook matrix of an earlier
+# DefenseClaw release ..." and "the guardian cannot repair <connector> for
+# <account> while that account is signed out: ...", the account "user (SID)"
+# or the SID alone. Without those three, no rollback or recovery accepted the
+# restored release's degraded reconcile while an account was signed out, and
+# every DefenseClaw service stayed stopped (GAP-0601). The status of 1.0.10
+# and later starts each of those lines with "last guardian reconcile failed
+# for <connector>@<account>: ", which a Setup before 1.0.10 accepts too
+# (GAP-0794); the three bare forms are what a restored 1.0.9 status writes. Any other error (a
+# missing or unreadable authorization or activation, an untrusted manifest,
+# an unreadable state) rejects the report.
 function Test-DefenseClawGuardianReportErrorsAttributable {
     param(
         [Parameter(Mandatory)]$Report,
@@ -41502,6 +42560,12 @@ function Test-DefenseClawGuardianReportErrorsAttributable {
         return $true
     }
     $countsPattern = '^(?:last guardian reconcile|protected guardian authorization|protected guardian activation) is incomplete \((\d+) succeeded, (\d+) pending, (\d+) total\)$'
+    $account = '(?:.+? \((?<sid>S-1-[0-9-]+)\)|(?<sid>S-1-[0-9-]+))'
+    $signedOutPattern = (
+        '^(?:the guardian cannot repair (?<connector>[^\s@]+) for ' + $account +
+        ' while that account is signed out: |(?<connector>[^\s@]+) for ' + $account +
+        ' is (?:pending until that account signs in: |enrolled with the hook matrix of an earlier DefenseClaw release ))'
+    )
     foreach ($entry in @($errorsProperty.Value)) {
         $text = ([string]$entry).Trim()
         # Windows names the account of a row as "user (SID)" on every profile
@@ -41514,6 +42578,14 @@ function Test-DefenseClawGuardianReportErrorsAttributable {
             if ($failed.Groups[2].Success) {
                 $label = $label.Split('@')[0] + '@' + $failed.Groups[2].Value
             }
+            if (-not $failedLabels.ContainsKey($label)) {
+                return $false
+            }
+            continue
+        }
+        $signedOut = [regex]::Match($text, $signedOutPattern)
+        if ($signedOut.Success) {
+            $label = $signedOut.Groups['connector'].Value + '@' + $signedOut.Groups['sid'].Value
             if (-not $failedLabels.ContainsKey($label)) {
                 return $false
             }
@@ -41599,46 +42671,6 @@ function Get-DefenseClawGuardianFailedTargets {
         $failed.Add([pscustomobject]$values)
     }
     return @($failed.ToArray())
-}
-
-# An activation that skipped account roots may accept Guardian failures only
-# for those accounts. An empty list preserves the existing Secure Client and
-# rollback behavior, where any completed per-target failure is reported as
-# degraded. The caller must first validate the report as complete.
-function Test-DefenseClawGuardianFailedTargetsWithinSIDs {
-    param(
-        [Parameter(Mandatory)]$Report,
-        [string[]]$AllowedSIDs
-    )
-    if ($null -eq $AllowedSIDs -or $AllowedSIDs.Count -eq 0) {
-        return $true
-    }
-    $allowed = [Collections.Generic.HashSet[string]]::new(
-        [StringComparer]::OrdinalIgnoreCase
-    )
-    foreach ($sid in $AllowedSIDs) {
-        if ([string]::IsNullOrWhiteSpace($sid)) {
-            return $false
-        }
-        [void]$allowed.Add($sid)
-    }
-    foreach ($target in @(Get-DefenseClawGuardianFailedTargets -Report $Report)) {
-        if (-not $allowed.Contains([string]$target.sid)) {
-            return $false
-        }
-    }
-    return $true
-}
-
-function Get-DefenseClawAllowedFailedTargetSIDs {
-    param([Parameter(Mandatory)]$Plan)
-    if (-not (Test-DefenseClawStandaloneProfile)) {
-        return , [string[]]@()
-    }
-    return , [string[]]@(
-        Get-DefenseClawTargetRuntimeSkippedProfiles -Plan $Plan |
-            Microsoft.PowerShell.Core\ForEach-Object { [string]$_.sid }
-    )
 }
 
 # Install and Upgrade succeed when the Guardian completed a fresh reconcile in
@@ -41745,6 +42777,88 @@ function Get-DefenseClawVerifyFailedTargetKeys {
     return , $keys.ToArray()
 }
 
+function Get-DefenseClawRouteEpochIdentity {
+    <#
+        The SHA-256 of the route epoch a standalone Windows gateway publishes
+        each time it owns its API port (<runtime>\hooks\route-epoch.json), or
+        '' when none is published, it cannot be read, or the profile is not
+        standalone (only the standalone gateway publishes one). Compared
+        before and after Setup starts the gateway
+        (Sync-DefenseClawGuardianRouteEpochRender).
+    #>
+    param([Parameter(Mandatory)][hashtable]$Layout)
+    $runtime = [string]$Layout['RuntimeDirectory']
+    if (-not (Test-DefenseClawStandaloneProfile) -or
+        [string]::IsNullOrWhiteSpace($runtime)) {
+        return ''
+    }
+    $path = [IO.Path]::Combine($runtime, 'hooks', 'route-epoch.json')
+    try {
+        if (-not [IO.File]::Exists($path)) {
+            return ''
+        }
+        $bytes = [IO.File]::ReadAllBytes($path)
+        $sha = [Security.Cryptography.SHA256]::Create()
+        try {
+            return [BitConverter]::ToString($sha.ComputeHash($bytes)).Replace('-', '').ToLowerInvariant()
+        }
+        finally {
+            $sha.Dispose()
+        }
+    }
+    catch {
+        return ''
+    }
+}
+
+function Sync-DefenseClawGuardianRouteEpochRender {
+    <#
+        rel-1-0-10:GAP-0937. The guardian publishes the activation reconcile
+        while the gateway is still disabled, so it renders the route-only
+        targets (claudecode, codex) from the route epoch published before.
+        When the gateway Setup then starts publishes a new one (the first
+        epoch of the host, or a rotation after its API port was held), every
+        route-only target was rendered without it, and the live verify of the
+        readiness gate ended the run 1603 with route_config_drift although
+        the guardian re-rendered at its next reconcile. This waits, bounded,
+        for the positive signal (a published epoch); when it differs from the
+        one the guardian rendered from, it has the guardian publish one fresh
+        reconcile from it. An epoch that never appears, or a render that still
+        does not match it, is left to the live verify, which fails as before.
+        Standalone only: Secure Client renders no route-only target.
+        Returns whether a fresh reconcile ran.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$GatewayServiceName,
+        [Parameter(Mandatory)][string]$GuardianServiceName,
+        [Parameter(Mandatory)][AllowEmptyString()][string]$PriorEpochIdentity,
+        [string]$ExpectedManifestSHA256,
+        [int]$TimeoutSeconds = 30,
+        [switch]$AllowFailedTargets
+    )
+    if (-not (Test-DefenseClawStandaloneProfile)) {
+        return $false
+    }
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    $current = Get-DefenseClawRouteEpochIdentity -Layout $Layout
+    while ([string]::IsNullOrEmpty($current) -and [DateTime]::UtcNow -lt $deadline) {
+        Microsoft.PowerShell.Utility\Start-Sleep -Milliseconds 250
+        $current = Get-DefenseClawRouteEpochIdentity -Layout $Layout
+    }
+    if ([string]::IsNullOrEmpty($current) -or $current -ceq $PriorEpochIdentity) {
+        return $false
+    }
+    Write-DefenseClawLifecyclePhase -Stage 'guardian reconcile with the published route epoch'
+    [void](Wait-DefenseClawFreshGuardianReconcile `
+        -Layout $Layout `
+        -GatewayServiceName $GatewayServiceName `
+        -GuardianServiceName $GuardianServiceName `
+        -ExpectedManifestSHA256 $ExpectedManifestSHA256 `
+        -AllowFailedTargets:$AllowFailedTargets)
+    return $true
+}
+
 function Wait-DefenseClawFreshGuardianReconcile {
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
@@ -41757,8 +42871,7 @@ function Wait-DefenseClawFreshGuardianReconcile {
         # Upgrade activation the deployment is live and degraded (each
         # failed target is logged). A reconcile that never completes, or a
         # status that is not fresh, still fails.
-        [switch]$AllowFailedTargets,
-        [string[]]$AllowedFailedTargetSIDs
+        [switch]$AllowFailedTargets
     )
     if (-not [string]::IsNullOrWhiteSpace($ExpectedManifestSHA256) -and
         $ExpectedManifestSHA256 -cnotmatch '^[0-9a-f]{64}$') {
@@ -41850,8 +42963,7 @@ function Wait-DefenseClawFreshGuardianReconcile {
             -CurrentStateIdentity $currentStateIdentity `
             -ExpectedManifestSHA256 $ExpectedManifestSHA256 `
             -StartedAfter $startedAfter `
-            -AllowFailedTargets:$AllowFailedTargets `
-            -AllowedFailedTargetSIDs $AllowedFailedTargetSIDs
+            -AllowFailedTargets:$AllowFailedTargets
         if ([bool]$coverage.ok) {
             if ($AllowFailedTargets) {
                 Write-DefenseClawGuardianDegradedTargets -Report $report
@@ -41933,6 +43045,11 @@ function Wait-DefenseClawFreshGuardianReconcile {
     if ($null -ne $progress -and $progress.state -ceq 'reconciling') {
         $quiet = [int][Math]::Round(([DateTime]::UtcNow - $progress.updated_at).TotalSeconds)
         throw "LocalSystem guardian did not publish fresh required coverage: the hook guardian's first reconcile is still running after $waited s ($($progress.targets_done) of $($progress.targets_total) targets done, last progress $quiet s ago); $guardianLog; last_status=$lastStatus"
+    }
+    if ($finishedRead) {
+        # GAP-0601: the first reconcile finished and published, so this is
+        # not a wait that ran out: its coverage is what was refused.
+        throw "LocalSystem guardian finished its first reconcile ($waited s after Setup started it), but its coverage was not accepted; $guardianLog; last_status=$lastStatus"
     }
     if ($extended -or $guardianProcessId -ne 0) {
         throw "LocalSystem guardian restarted but did not publish fresh required coverage within $([Math]::Max($TimeoutSeconds, $waited)) seconds; $guardianLog; last_status=$lastStatus"
@@ -42328,6 +43445,13 @@ function Assert-DefenseClawManagedInstallTree {
         $allowedDirectories += [string]$openCodePlugin.PluginDirectory
         $allowedFiles += [string]$openCodePlugin.PluginPath
         $allowedFiles += [string]$openCodePlugin.LegacyPluginPath
+    }
+    # GAP-0751: the launch folders under bin\hooks and the files DefenseClaw
+    # puts in them (standalone). Anything else there is still refused.
+    if (Test-DefenseClawStandaloneProfile) {
+        $hookImages = Get-DefenseClawHookImageTreeItems -BinDirectory ([string]$Layout.BinDirectory)
+        $allowedDirectories += @($hookImages.directories)
+        $allowedFiles += @($hookImages.files)
     }
     # A Fleet-enabled 1.0.2 host keeps its compiler (GAP-0274). Only the
     # recorded, unchanged compiler and its two directories are accepted; an
@@ -43351,6 +44475,10 @@ function Get-DefenseClawRetiredInstallTreeAllowlist {
         # Only the standalone payload carries the Claude Code hook guard;
         # Secure Client's retired-tree verdict on that name is unchanged.
         $files += (Microsoft.PowerShell.Management\Join-Path $RetiredRoot 'bin\defenseclaw-hook-guard.exe')
+        # GAP-0751: the launch folders under bin\hooks and their images.
+        $hookImages = Get-DefenseClawHookImageTreeItems -BinDirectory (Microsoft.PowerShell.Management\Join-Path $RetiredRoot 'bin')
+        $directories += @($hookImages.directories)
+        $files += @($hookImages.files)
     }
     return @{
         directories = @(
@@ -49802,9 +50930,14 @@ function Invoke-DefenseClawInstallLikeLifecycle {
         [switch]$DeferredConfig,
         [switch]$NoStart
     )
-    # Secure Client activates degraded when the Guardian's fresh reconcile
-    # completed with failed user targets; standalone requires all of them.
-    $acceptDegradedTargets = -not (Test-DefenseClawStandaloneProfile)
+    # Both profiles activate degraded (-AllowFailedTargets and
+    # -AcceptDegradedTargets below) when the Guardian's fresh, digest-bound
+    # reconcile completed with failed user targets: one account's foreign hook
+    # file or signed-out profile is that account's failure, named in the
+    # result and logged as defenseclaw_degraded, never the machine's.
+    # Standalone used to require every target, so one such account failed
+    # the upgrade with 1603, and the rollback over the same account left every
+    # service stopped and disabled (GAP-0601).
     $metadata = Get-DefenseClawDeploymentMetadata -Layout $Layout
     $priorDeferredConfigPending = [bool](
         $null -ne $metadata -and
@@ -50112,6 +51245,18 @@ function Invoke-DefenseClawInstallLikeLifecycle {
     if ($Sources.ContainsKey('hook')) {
         $earlyHookSource = $Sources['hook']
     }
+    # GAP-0751: the hook digest the deployment records before this run, read
+    # before the transaction writes the new record: the launch folder the
+    # prune after the commit keeps for sessions started before this upgrade.
+    $replacedHookImageSHA256 = ''
+    if (Test-DefenseClawStandaloneProfile) {
+        try {
+            $replacedHookImageSHA256 = [string](Get-DefenseClawRecordedHookSHA256 -Layout $Layout)
+        }
+        catch {
+            $replacedHookImageSHA256 = ''
+        }
+    }
     $coworkSourcePlan = $null
     if (Test-DefenseClawStandaloneProfile) {
         $coworkConfigSource = if ($Sources.ContainsKey('config')) {
@@ -50264,6 +51409,16 @@ function Invoke-DefenseClawInstallLikeLifecycle {
         if ($StandaloneFleetStateKnown -and -not $StandaloneFleetEnabled) {
             Remove-DefenseClawRetiredStandaloneCompiler -Layout $Layout
         }
+        if (Test-DefenseClawStandaloneProfile) {
+            # GAP-0751: the launch images of this release, staged and started
+            # once before any step below writes a hook config (the Codex
+            # requirements, the guardian's reconcile). A stage that fails
+            # throws, and the rollback keeps every config on its image.
+            Install-DefenseClawStandaloneHookImage `
+                -Layout $Layout `
+                -GatewayServiceName $GatewayServiceName `
+                -Sources $Sources
+        }
         foreach ($requiredPath in @(
             $Layout.GatewayPath,
             $Layout.BrokerPath,
@@ -50368,6 +51523,17 @@ function Invoke-DefenseClawInstallLikeLifecycle {
                 throw "required managed artifact is missing after $Action policy staging: $requiredPath"
             }
         }
+        if (Test-DefenseClawStandaloneProfile) {
+            # The strict and permissive rule packs this release ships
+            # (#1445), written by the gateway just installed once the config
+            # this run applies is in place, and before the target runtimes,
+            # the config check and the first start read them. A rollback
+            # needs nothing restored: each folder is named by its packs'
+            # digest and a release reads only its own.
+            Install-DefenseClawStandaloneShippedRulePacks `
+                -Layout $Layout `
+                -GatewayServiceName $GatewayServiceName
+        }
         if ($Action -eq 'Install' -and -not $priorDeploymentActive) {
             # Before any target runtime is prepared or the Guardian can
             # start, clear runtime selectors an earlier purge or interrupted
@@ -50432,13 +51598,6 @@ function Invoke-DefenseClawInstallLikeLifecycle {
                 $Action -eq 'Install' -and -not $reconcileInstall -and
                 $targetRuntimePreparationMode -ceq 'prepare'
             )
-        $allowedFailedTargetSIDs = [string[]](
-            Get-DefenseClawAllowedFailedTargetSIDs -Plan $targetRuntimePlan
-        )
-        if ((Test-DefenseClawStandaloneProfile) -and
-            $allowedFailedTargetSIDs.Count -gt 0) {
-            $acceptDegradedTargets = $true
-        }
         $expectedGuardianManifestSHA256 = [string]$targetRuntimePlan.manifest_sha256
         if ($expectedGuardianManifestSHA256 -cnotmatch '^[0-9a-f]{64}$') {
             throw 'target runtime plan did not bind an exact manifest SHA-256'
@@ -50762,16 +51921,14 @@ function Invoke-DefenseClawInstallLikeLifecycle {
                 -Name $GuardianServiceName `
                 -StartMode 3
             # A completed, fresh, digest-bound reconcile with failed targets
-            # activates degraded only for Secure Client or for accounts the
-            # standalone target runtime plan explicitly skipped.
+            # activates degraded on both profiles (GAP-0601).
             try {
                 [void](Wait-DefenseClawFreshGuardianReconcile `
                     -Layout $Layout `
                     -GatewayServiceName $GatewayServiceName `
                     -GuardianServiceName $GuardianServiceName `
                     -ExpectedManifestSHA256 $expectedGuardianManifestSHA256 `
-                    -AllowFailedTargets:$acceptDegradedTargets `
-                    -AllowedFailedTargetSIDs $allowedFailedTargetSIDs)
+                    -AllowFailedTargets)
             }
             finally {
                 if (Test-DefenseClawStandaloneProfile) {
@@ -50801,6 +51958,8 @@ function Invoke-DefenseClawInstallLikeLifecycle {
             Set-DefenseClawServiceStartMode `
                 -Name $GatewayServiceName `
                 -StartMode 3
+            # The route epoch the guardian rendered from (GAP-0937).
+            $routeEpochBeforeGateway = Get-DefenseClawRouteEpochIdentity -Layout $Layout
             Start-DefenseClawService -Name $GatewayServiceName -FailureLogPath $Layout.GatewayLogPath
             # The enumerator
             # must be demand-started + RUNNING before the pending-state
@@ -50823,8 +51982,17 @@ function Invoke-DefenseClawInstallLikeLifecycle {
                 -Layout $Layout `
                 -GatewayServiceName $GatewayServiceName `
                 -GuardianServiceName $GuardianServiceName `
-                -AllowFailedTargets:$acceptDegradedTargets `
-                -AllowedFailedTargetSIDs $allowedFailedTargetSIDs
+                -AllowFailedTargets
+            # A route epoch the gateway published at this start was not in
+            # the activation reconcile: re-render from it before the live
+            # verify below (GAP-0937).
+            [void](Sync-DefenseClawGuardianRouteEpochRender `
+                -Layout $Layout `
+                -GatewayServiceName $GatewayServiceName `
+                -GuardianServiceName $GuardianServiceName `
+                -PriorEpochIdentity $routeEpochBeforeGateway `
+                -ExpectedManifestSHA256 $expectedGuardianManifestSHA256 `
+                -AllowFailedTargets)
             # Canonicalize dynamic logs/authorization after the service-created
             # files exist, then verify exact effective rights.
             Set-DefenseClawManagedAcls -Layout $Layout -GatewayServiceName $GatewayServiceName
@@ -50834,8 +52002,7 @@ function Invoke-DefenseClawInstallLikeLifecycle {
                 -GuardianServiceName $GuardianServiceName `
                 -RequireReadiness `
                 -PendingTransaction `
-                -AcceptDegradedTargets:$acceptDegradedTargets `
-                -AllowedFailedTargetSIDs $allowedFailedTargetSIDs
+                -AcceptDegradedTargets
             # Only fully verified live state may become boot-active. A crash
             # before pending cleanup can start only validated services.
             Set-DefenseClawVerifiedServiceBootPolicy `
@@ -50848,8 +52015,7 @@ function Invoke-DefenseClawInstallLikeLifecycle {
                 -GatewayServiceName $GatewayServiceName `
                 -GuardianServiceName $GuardianServiceName `
                 -RequireReadiness `
-                -AcceptDegradedTargets:$acceptDegradedTargets `
-                -AllowedFailedTargetSIDs $allowedFailedTargetSIDs
+                -AcceptDegradedTargets
             if ($priorDeferredConfigPending) {
                 # Keep the authenticated activation marker set through every
                 # mutable policy/runtime step and the complete live readiness
@@ -50976,13 +52142,27 @@ function Invoke-DefenseClawInstallLikeLifecycle {
             reason    = "$Action committed; the completed lifecycle journal could not be retired and is kept for the next action: $($_.Exception.Message)"
         }
     }
+    if ((Test-DefenseClawStandaloneProfile) -and $Sources.ContainsKey('hook') -and $null -ne $Sources['hook'] -and
+        $replacedHookImageSHA256 -cmatch '^[0-9a-f]{64}$') {
+        # GAP-0751: an upgrade that switched the hook image keeps this
+        # release's launch folder and the replaced release's (the image agent
+        # sessions started before this upgrade still run) and removes older
+        # ones. A repair or an ensure of the same release keeps them all.
+        $currentHookImage = Get-DefenseClawHookImageDigest -SHA256 ([string]$Sources['hook'].sha256)
+        $replacedHookImage = Get-DefenseClawHookImageDigest -SHA256 $replacedHookImageSHA256
+        if ($replacedHookImage -cne $currentHookImage) {
+            Invoke-DefenseClawStandaloneHookImagePrune `
+                -Layout $Layout `
+                -GatewayServiceName $GatewayServiceName `
+                -Keep @($currentHookImage, $replacedHookImage)
+        }
+    }
     $result = Get-DefenseClawLifecycleStatus `
         -Action $Action `
         -Layout $Layout `
         -GatewayServiceName $GatewayServiceName `
         -GuardianServiceName $GuardianServiceName `
-        -AcceptDegradedTargets:$acceptDegradedTargets `
-        -AllowedFailedTargetSIDs $allowedFailedTargetSIDs
+        -AcceptDegradedTargets
     if ($NoStart) {
         $result.ok = $true
     }
@@ -55577,7 +56757,14 @@ function Invoke-DefenseClawEnterpriseLifecycle {
         # Standalone Verify only: the Verify of an ensure that found the
         # deployment compliant also collects old managed runtime generations
         # (Invoke-DefenseClawStandaloneRuntimeGenerationCollect, GAP-0211).
-        [switch]$CollectRuntimeGenerations
+        [switch]$CollectRuntimeGenerations,
+        # Standalone Verify only: the Verify an ensure runs to decide whether
+        # to repair accepts a fresh, complete reconcile whose only failures
+        # are user targets the guardian itself reported failed or pending. A
+        # repair re-runs that same guardian and cannot fix them, so every
+        # rerun of ensure repaired, stopping the services for minutes
+        # (GAP-0601). The administrator's verify stays strict.
+        [switch]$AcceptDegradedTargets
     )
     $script:ResilienceEvents.Clear()
     $script:FilePrivilegePrerequisitesReported = $false
@@ -55755,6 +56942,9 @@ function Invoke-DefenseClawEnterpriseLifecycle {
     }
     if ($CollectRuntimeGenerations -and ($Action -ne 'Verify' -or -not (Test-DefenseClawStandaloneProfile))) {
         throw '-CollectRuntimeGenerations is valid only with a standalone Verify'
+    }
+    if ($AcceptDegradedTargets -and ($Action -ne 'Verify' -or -not (Test-DefenseClawStandaloneProfile))) {
+        throw '-AcceptDegradedTargets is valid only with a standalone Verify'
     }
     if ($SelfUninstallCallerPID -lt 0 -or
         ($SelfUninstallCallerPID -gt 0 -and $Action -ne 'Uninstall')) {
@@ -56033,7 +57223,8 @@ function Invoke-DefenseClawEnterpriseLifecycle {
             -Layout $layout `
             -GatewayServiceName $GatewayServiceName `
             -GuardianServiceName $GuardianServiceName `
-            -RequireReadiness
+            -RequireReadiness `
+            -AcceptDegradedTargets:$AcceptDegradedTargets
         if ($CollectRuntimeGenerations) {
             Invoke-DefenseClawStandaloneRuntimeGenerationCollect `
                 -Layout $layout `
@@ -56043,7 +57234,8 @@ function Invoke-DefenseClawEnterpriseLifecycle {
             -Action $Action `
             -Layout $layout `
             -GatewayServiceName $GatewayServiceName `
-            -GuardianServiceName $GuardianServiceName
+            -GuardianServiceName $GuardianServiceName `
+            -AcceptDegradedTargets:$AcceptDegradedTargets
     }
 
     Assert-DefenseClawAdministrator
@@ -56729,6 +57921,19 @@ function Invoke-DefenseClawEnterpriseLifecycle {
             if ($null -ne $committedJournal) {
                 throw $committedJournal
             }
+        }
+        # GAP-0601: never end with the restored release stopped and disabled.
+        # The failure keeps its message start and its recovery evidence
+        # (Exception.Data); the note follows the message.
+        $restarted = Restart-DefenseClawDeferredRecoveryRelease -Layout $layout
+        if (-not [string]::IsNullOrEmpty($restarted)) {
+            $original = $_.Exception
+            $combined = [InvalidOperationException]::new(
+                ('{0}; {1}' -f [string]$original.Message, $restarted), $original)
+            foreach ($key in @($original.Data.Keys)) {
+                $combined.Data[$key] = $original.Data[$key]
+            }
+            throw $combined
         }
         throw
     }

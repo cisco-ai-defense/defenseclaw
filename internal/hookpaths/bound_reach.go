@@ -75,12 +75,12 @@ func boundTextNamesProtected(text, cwd string) bool {
 		strings.NewReplacer("\\", "").Replace(text),
 		strings.NewReplacer("\\", "/").Replace(text),
 	} {
-		for _, word := range strings.FieldsFunc(variant, boundWordSeparator) {
+		for word := range strings.FieldsFuncSeq(variant, boundWordSeparator) {
 			// The folder the word gives so far: whether it has an agent
 			// folder, and whether it is built at run time.
 			agentFolder, unknownFolder := false, false
 			for _, segment := range strings.Split(word, "/") {
-				for _, component := range strings.FieldsFunc(segment, boundNameSeparator) {
+				for component := range strings.FieldsFuncSeq(segment, boundNameSeparator) {
 					if boundNameMayBeProtected(component) {
 						return true
 					}
@@ -151,7 +151,7 @@ func BoundCallMayNameProtected(command, cwd, home string) bool {
 	homeText := strings.TrimRight(strings.ToLower(unquote.Replace(home)), "/")
 	cwdText := strings.TrimRight(strings.ToLower(unquote.Replace(cwd)), "/")
 	atHome := homeText != "" && cwdText == homeText
-	for _, word := range strings.FieldsFunc(text, boundWordSeparator) {
+	for word := range strings.FieldsFuncSeq(text, boundWordSeparator) {
 		if boundWordMayReachHome(word, homeText, atHome) {
 			return true
 		}

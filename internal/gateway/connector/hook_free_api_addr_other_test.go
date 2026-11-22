@@ -19,5 +19,3 @@ func reservedLoopbackSocket() (int, error) {
 }
 
 func closeReservedSocket(socket int) error { return syscall.Close(socket) }
-
-func isWindowsConnectionRefused(error) bool { return false }

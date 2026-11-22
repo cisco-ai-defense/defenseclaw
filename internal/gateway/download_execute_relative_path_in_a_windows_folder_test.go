@@ -131,7 +131,7 @@ func offWindowsRows(t *testing.T, cwd, url string) {
 // with the drive mount joins too, and another file and an asked flow stay
 // quiet (rel-1-0-6:GAP-0212).
 func TestDownloadThenExecuteAlertsForARelativeDownloadThroughTheHook(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	base := t.TempDir()
 	home := filepath.Join(base, "Users", "dcw-fxw2")
 	project := filepath.Join(home, "proj")

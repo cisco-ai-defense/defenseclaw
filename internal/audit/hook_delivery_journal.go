@@ -168,27 +168,50 @@ func (s *Store) execHookDeliveryJournal(ctx context.Context, insert bool, query 
 	if err != nil {
 		return nil, err
 	}
-	defer release()
+	held := true
+	defer func() {
+		if held {
+			release()
+		}
+	}()
 	db, durable := s.db, s.dbPathGuard != nil && !s.dbPathGuard.inMemory
 	if durable {
+		if !s.secureClientSchema {
+			// The hook-call write group takes the store lifecycle lock in its
+			// own batch runner (runCallGroupBatch); holding it here too would
+			// nest the read lock under a waiting Close.
+			release()
+			held = false
+		}
 		// Concurrent journal writes share one commit and one flush
 		// (durableGrouped). An insert flushes the database folder too: the WAL
 		// file can be newer than the folder entry the store opened.
-		var result sql.Result
-		err := s.durableGrouped(ctx, insert, func(ctx context.Context, tx *sql.Tx) error {
-			if insert {
-				if _, err := tx.ExecContext(ctx, hookDeliveryJournalSchema); err != nil {
-					return fmt.Errorf("create the hook delivery journal: %w", err)
+		for attempt := 0; ; attempt++ {
+			var result sql.Result
+			create := insert && (s.secureClientSchema || !s.hookJournalReady.Load())
+			err := s.durableGrouped(ctx, insert, func(ctx context.Context, tx *sql.Tx) error {
+				if create {
+					if _, err := tx.ExecContext(ctx, hookDeliveryJournalSchema); err != nil {
+						return fmt.Errorf("create the hook delivery journal: %w", err)
+					}
 				}
+				var err error
+				result, err = tx.ExecContext(ctx, query, args...)
+				return err
+			})
+			if err != nil {
+				if attempt == 0 && insert && !create && strings.Contains(err.Error(), "no such table") {
+					// The table went away under this store: create it again.
+					s.hookJournalReady.Store(false)
+					continue
+				}
+				return nil, err
 			}
-			var err error
-			result, err = tx.ExecContext(ctx, query, args...)
-			return err
-		})
-		if err != nil {
-			return nil, err
+			if create {
+				s.hookJournalReady.Store(true)
+			}
+			return result, nil
 		}
-		return result, nil
 	}
 	if insert {
 		if _, err := execHookDeliveryJournalRetryingBusy(ctx, db, hookDeliveryJournalSchema); err != nil {
@@ -270,8 +293,22 @@ func (s *Store) ForgetHookDelivery(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
-	defer release()
-	_, err = s.execDB(ctx, "hook_delivery_journal", `DELETE FROM hook_delivery_journal WHERE id = ?`, id)
+	const forget = `DELETE FROM hook_delivery_journal WHERE id = ?`
+	if s.secureClientSchema || s.dbPathGuard == nil || s.dbPathGuard.inMemory {
+		defer release()
+		_, err = s.execDB(ctx, "hook_delivery_journal", forget, id)
+	} else {
+		// The hook-call write group: the deletion shares the commit of the
+		// call audit rows queued beside it instead of an autocommit of its
+		// own on the writer connection (#1384). The group batch runner takes
+		// the lifecycle lock itself (runCallGroupBatch); holding it here too
+		// would nest the read lock under a waiting Close.
+		release()
+		err = s.callGroupWrite(ctx, func(ctx context.Context, tx *sql.Tx) error {
+			_, err := tx.ExecContext(ctx, forget, id)
+			return err
+		})
+	}
 	if err != nil && strings.Contains(err.Error(), "no such table") {
 		return nil
 	}

@@ -5,10 +5,11 @@ package gateway
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -17,7 +18,12 @@ import (
 
 func TestCodeGuardPostLogVerdictUsesCanonicalRuleID(t *testing.T) {
 	target := filepath.Join(t.TempDir(), "finding.py")
-	privateValue := strings.Join([]string{"private", strings.Repeat("v", 32)}, "-")
+	// A fixed, fake, random-looking key built at runtime from a seed: "private-"
+	// beside a run of one repeated letter is a placeholder shape under the
+	// CodeGuard shape rule and yields no finding (rel-1-0-10:GAP-0942/0957, the
+	// GAP-0935 class), so it cannot prove the post-log rule identity.
+	seed := sha256.Sum256([]byte("codeguard-post-log-canonical-rule-id"))
+	privateValue := "private-" + hex.EncodeToString(seed[:16])
 	if err := os.WriteFile(target, []byte(`api_key = "`+privateValue+`"`), 0o600); err != nil {
 		t.Fatal(err)
 	}

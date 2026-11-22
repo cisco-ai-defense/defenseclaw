@@ -307,13 +307,6 @@ type familyDescriptor interface {
 	familyDescriptorContract() familyDescriptorContract
 }
 
-// generatedLogFamilyContract is implemented only by future generated values in
-// this package. It also satisfies Record's private mandatory/identity capability.
-type generatedLogFamilyContract interface {
-	familyDescriptor
-	schemaDerivedLogFamilyContract
-}
-
 type spanNamePart struct {
 	literal string
 	field   string

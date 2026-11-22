@@ -19,7 +19,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
-	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
+	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 	"mvdan.cc/sh/v3/syntax"
 )
@@ -67,9 +67,7 @@ func (a *APIServer) safeApplyExperimentalArtifactPromotion(
 		original.Action == guardrailActionBlock ||
 		original.RawAction == guardrailActionBlock ||
 		!req.toolChain.recorded ||
-		!profile.ExperimentalToolLifecycleEligible() ||
-		profile.ToolCallLifecycle.RouteForEvent(req.HookEventName) !=
-			connector.ToolEventRouteStructuredAction {
+		!artifactPromotionEvent(profile, req) {
 		return resp
 	}
 	caps := profile.Capabilities
@@ -117,6 +115,31 @@ func (a *APIServer) safeApplyExperimentalArtifactPromotion(
 		resp.RuleIDs = mergeBoundedRuleIDs(8, eval.RuleIDs, resp.RuleIDs)
 	}
 	return resp
+}
+
+// artifactPromotionEvent reports whether a hook event is a tool proposal
+// whose script operands the artifact gate reads: the structured action event
+// of the connector tool lifecycle contract, or, for a connector that has no
+// lifecycle contract and no version gate (Kiro: not-gated), an event that
+// carries a tool call and that the connector can block on. Gated on the contract alone, a script named on a
+// Kiro command line was never read, so a script that Claude Code and every
+// other hook connector blocks ran unblocked under Kiro (rel-1-0-10:GAP-0777).
+// The gate is a same-request decision; it needs no invocation join.
+func artifactPromotionEvent(profile connector.HookProfile, req agentHookRequest) bool {
+	if profile.ExperimentalToolLifecycleEligible() {
+		return profile.ToolCallLifecycle.RouteForEvent(req.HookEventName) ==
+			connector.ToolEventRouteStructuredAction
+	}
+	if profile.ToolCallLifecycle.Version != 0 {
+		return false
+	}
+	switch profile.CompatibilityStatus {
+	case connector.HookCompatibilityKnown, connector.HookCompatibilityUnversioned, connector.HookCompatibilityNotGated:
+	default:
+		return false
+	}
+	caps := profile.Capabilities
+	return strings.TrimSpace(req.ToolName) != "" && caps.CanBlock && eventIn(req.HookEventName, caps.BlockEvents)
 }
 
 func promotedArtifactFindings(
@@ -563,10 +586,10 @@ func promotedArtifactOpenedPath(value, cwd, home string, moved bool) (opened str
 	// The system answers first: a pathname it refuses (more links than it
 	// follows in one name, a folder it cannot search) opens no script,
 	// while EvalSymlinks follows many more links than the system does.
-	if _, err := os.Stat(value); err != nil {
+	if _, err := hookpaths.Stat(value); err != nil {
 		return "", true
 	}
-	physical, err := filepath.EvalSymlinks(value)
+	physical, err := hookpaths.EvalSymlinks(value)
 	if err != nil {
 		return "", true
 	}
@@ -698,7 +721,7 @@ func readPromotedArtifact(
 	path string,
 	dialectHint actionfacts.Dialect,
 ) ([]byte, actionfacts.Dialect, bool) {
-	before, err := pathidentity.LstatPinned(path)
+	before, err := hookpaths.LstatPinned(path)
 	if err != nil || !before.Mode().IsRegular() || before.Mode()&os.ModeSymlink != 0 ||
 		before.Size() <= 0 || before.Size() > promotedArtifactMaxBytes {
 		return nil, actionfacts.DialectNone, false
@@ -710,11 +733,11 @@ func readPromotedArtifact(
 		// readable even when the script itself is not executable.
 		return nil, actionfacts.DialectNone, false
 	}
-	resolved, err := filepath.EvalSymlinks(path)
+	resolved, err := hookpaths.EvalSymlinks(path)
 	if err != nil {
 		return nil, actionfacts.DialectNone, false
 	}
-	resolvedInfo, err := os.Stat(resolved)
+	resolvedInfo, err := hookpaths.Stat(resolved)
 	if err != nil || !os.SameFile(before, resolvedInfo) {
 		return nil, actionfacts.DialectNone, false
 	}

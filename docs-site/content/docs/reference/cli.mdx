@@ -50,7 +50,9 @@ DefenseClaw ships three binaries. Each row below is on the Python CLI unless it 
 | Gateway daemon | `defenseclaw-gateway start|stop|restart` | [Gateway daemon](#gateway-daemon) |
 | Configuration | `config get|set|unset` | [Configuration](#configuration) |
 | Upgrade and uninstall | `upgrade`, `uninstall` | [Upgrade](#upgrade), [Uninstall](#uninstall--disable) |
+| Model routing, budgets and cost | `routing ...`, `defenseclaw-gateway budget-store ...` | [Routing](#routing) |
 | Sandboxes | `sandbox ...` | [Sandbox](#sandbox) |
+| Agents in an Agent Substrate cluster | `substrate ...` | [Agent Substrate](#agent-substrate) |
 | Enterprise lifecycle | `enterprise ...`, run by the gateway's full path | [Enterprise](#enterprise) |
 
 `config.yaml` holds every setting you choose. Every command that changes one (`config set`, `guardrail ...`, `skill|mcp|plugin|tool block|allow`, `policy activate`, the `setup` commands, the TUI) goes through the same config writer, which checks the change before it writes. A running gateway applies a valid change itself and shows a new policy generation in `defenseclaw status`; only the [restart-required keys](#restart-required-keys) need `defenseclaw-gateway restart`. Files derived from `config.yaml`, such as `custom-providers.json` and the generated hook scripts, are rewritten for you. See [Source of truth](/docs/reference/source-of-truth).
@@ -300,15 +302,16 @@ Hook setup aliases (`setup codex`, `setup claude-code` and the rest) add or reco
 
 | Command | Use it for |
 | --- | --- |
-| `defenseclaw setup guardrail` | The central setup command. See [setup guardrail](/docs/guardrail/aliases). |
+| `defenseclaw setup guardrail` | The central setup command. See [setup guardrail](/docs/connectors/aliases). |
 | `defenseclaw setup remove CONNECTOR [--force] [--yes]` | Remove one connector from the active roster; the gateway restart tears down its hooks. If the connector is already absent, the command removes DefenseClaw hook entries it left in the agent settings. Removing the last configured connector needs `--force`. To take DefenseClaw off the machine, use `defenseclaw uninstall`. `setup remove claudecode` does not remove the Cowork plugin from your Claude account; see [Remove the Cowork plugin](/docs/connectors/cowork#remove). With `--no-restart`, a running gateway removes the connector's hooks when it reloads the config (within seconds) and a stopped one removes them when it next starts; if the removed connector was the primary one, its hooks stay until the gateway restarts. |
 | `defenseclaw setup gateway [--api-port N] [--host H] [--port N] [--remote] [--non-interactive]` | Set the sidecar REST API port (`--api-port`) and the upstream agent gateway connection: host, WebSocket port, and auth token (`--remote`; the token can come from AWS SSM Parameter Store). Runs connectivity checks afterward unless `--no-verify`. Port values take 1-65535; anything else is refused when the command parses. |
 | `defenseclaw setup rotate-token [--yes]` | Rotate the gateway token and every connector-scoped hook credential in one transaction, then refresh the hooks and verify the restarted gateway. A failure after the gateway stops restores the previous credentials. Rotation is always global; `--connector` does not narrow it. |
 | `defenseclaw setup skill-scanner` / `setup mcp-scanner` | Configure the skill and MCP scanners: analyzers, the LLM judge, optional VirusTotal, AI Defense and OSV lookups, and the scan policy. They write `scanners.skill_scanner.*` or `scanners.mcp_scanner.*` (and the shared `llm:` block) in `config.yaml`, then restart a running gateway, as most `setup` subcommands do. `--non-interactive` takes every choice from flags; the [flags are below](#setup-skill-scanner-and-setup-mcp-scanner-flags). See [Scanners](/docs/scanning). |
 | `defenseclaw setup registry` | Interactive wizard that registers a skill or MCP catalog; the same as `defenseclaw registry wizard`. See [Registries](#registries). |
 | `defenseclaw setup migrate-llm [--dry-run] [--no-backup]` | Rewrite a `config.yaml` that still carries pre-v5 `inspect_llm`, `default_llm_*` or guardrail LLM fields into the unified `llm:` block, writing `config.yaml.bak` first unless `--no-backup`. On a current config it prints `Config already in v5 shape — nothing to migrate.` |
-| `defenseclaw setup routing --enable\|--disable\|--status` | Configure or inspect semantic model routing for proxy-mode OpenAI Chat Completions traffic. Managed mode requires Docker; all config changes activate on gateway restart. See [Semantic routing](/docs/guardrail/semantic-routing). |
-| `defenseclaw setup llm [--show] [--non-interactive] [--provider P] [--model M] [--api-key-env NAME]` | Write the unified or role-scoped LLM block (`--role unified\|agent\|judge`) in `config.yaml`; the key itself goes to `~/.defenseclaw/.env`. `--show` prints the resolved values and changes nothing. Supports SaaS providers and regional Bedrock / Vertex AI / Azure OpenAI via dedicated `--bedrock-*`, `--vertex-*`, `--azure-*` flags, plus `--instance-name` to bind a custom provider from `llm_providers` (use `--provider custom`) and `--inherit-from` to seed from a sibling component. `--ping` / `--no-ping` sends (or skips) a one-shot reachability probe after saving. See [LLM providers](/docs/guardrail/unified-llm-key). |
+| `defenseclaw setup routing --enable\|--disable\|--status` | Configure or inspect semantic model routing with the vLLM Semantic Router container (classifier `vllm_sr`, which needs Docker and a gateway restart). For the in-process `rules` classifier, models, rules and budgets use [`defenseclaw routing`](#routing). See [Semantic routing](/docs/routing/semantic-routing). |
+| `defenseclaw setup tokenomics [--enable\|--disable\|--status\|--seed-pricing] [--json]` | Turn per-call model usage and cost on or off and seed the reviewed default price table when `config.yaml` has none. Off by default. See [Tokenomics](/docs/observability/tokenomics). |
+| `defenseclaw setup llm [--show] [--non-interactive] [--provider P] [--model M] [--api-key-env NAME]` | Write the unified or role-scoped LLM block (`--role unified\|agent\|judge`) in `config.yaml`; the key itself goes to `~/.defenseclaw/.env`. `--show` prints the resolved values and changes nothing. Supports SaaS providers and regional Bedrock / Vertex AI / Azure OpenAI via dedicated `--bedrock-*`, `--vertex-*`, `--azure-*` flags, plus `--instance-name` to bind a custom provider from `llm_providers` (use `--provider custom`) and `--inherit-from` to seed from a sibling component. `--ping` / `--no-ping` sends (or skips) a one-shot reachability probe after saving. See [LLM providers](/docs/get-started/unified-llm-key). |
 | `defenseclaw setup provider add\|list\|show\|remove` | Manage `llm_providers.custom` entries that route LLM traffic through internal or self-hosted endpoints. `custom-providers.json` is derived from them; never edit it. `add` writes the entry and asks a running gateway to reload its provider registry (`--no-reload` skips); omit `--name` for the wizard. `list` prints the live registry. [`add` flags](#setup-provider-add-flags) are below. |
 | `defenseclaw setup claude-code` | Hook setup alias for Claude Code. Defaults to observe on first setup; a re-run without `--mode` keeps the current mode (on a terminal it asks first; `--yes` skips the questions). Pass `--mode action` to block hook-side. |
 | `defenseclaw setup codex` | Hook setup alias for Codex. Defaults to observe on first setup; a re-run without `--mode` keeps the current mode (on a terminal it asks first; `--yes` skips the questions). Pass `--mode action` to block hook-side. |
@@ -459,9 +462,10 @@ On a managed standalone device these are refused with exit `3`; see [Managed dev
 | --- | --- | --- | --- |
 | [`init`](/docs/get-started/first-run) | On a TTY | `--non-interactive --yes` plus option flags | `--fail-mode`, `--observe-all` and `--action-connectors` cover what it asks. |
 | [`quickstart`](/docs/get-started/first-run) | No | Always | Zero-prompt by design; use `init` for the wizard. |
-| [`setup guardrail`](/docs/guardrail/aliases) | Default | `--non-interactive` plus flags | Missing flags fall back to wizard defaults. Hook fail mode and judge fallback models have no flag here. |
-| [`setup <connector>`](/docs/guardrail/aliases) | Yes | Flags plus `--yes` | With other connectors configured the default, also under `--yes`, is to add; `--replace` switches. With `--mode`, a TTY run does not ask for the mode again. |
-| `setup routing` | No | `--enable`, `--disable`, `--status` | Needs Docker. Proxy-mode OpenAI Chat Completions traffic only. |
+| [`setup guardrail`](/docs/connectors/aliases) | Default | `--non-interactive` plus flags | Missing flags fall back to wizard defaults. Hook fail mode and judge fallback models have no flag here. |
+| [`setup <connector>`](/docs/connectors/aliases) | Yes | Flags plus `--yes` | With other connectors configured the default, also under `--yes`, is to add; `--replace` switches. With `--mode`, a TTY run does not ask for the mode again. |
+| `setup routing` | No | `--enable`, `--disable`, `--status` | The vLLM Semantic Router container: needs Docker. For the `rules` classifier use `defenseclaw routing setup`. |
+| `setup tokenomics` | No | `--enable`, `--disable`, `--status`, `--seed-pricing`, `--json` | Writes `observability.tokenomics` and, when absent, `observability.pricing`. Exit 3 on a managed host. |
 | `keys set` | Hidden prompt without a value | `--value-stdin` (or `--value`, visible in `ps`) | See [Keys](/docs/reference/keys). |
 | `keys fill-missing` | Yes | `--yes` skips the opening confirmation | Prompts for every required key that is unset. |
 | `keys list`, `keys check` | No | Always | `keys check` exits non-zero when a required key is missing. |
@@ -498,7 +502,7 @@ Editor agents that speak the Agent Client Protocol (Zed, JetBrains) are guarded 
 | `defenseclaw acp status` | Show the ACP posture and configured bindings (`--json` for the machine-readable document). |
 | `defenseclaw acp remove --client <client> --agent <agent>` | Remove only the DefenseClaw-owned entry. |
 | `defenseclaw acp verify [--client X] [--agent Y]` | Fail when a managed editor entry or the guarded executable's digest has drifted. With no `--client`/`--agent`, every configured binding is checked. |
-| `defenseclaw acp refresh [--from-sha256 <digest>]` | Re-pin the upgraded `defenseclaw-acp` guard in configured editor entries (the installer runs it after an upgrade). A changed agent binary or editor entry still needs `acp setup`. |
+| `defenseclaw acp refresh [--from-sha256 <digest>] [--agent <agent>]` | Re-pin the upgraded `defenseclaw-acp` guard in configured editor entries (the installer runs it after an upgrade). With `--agent`, re-pin that agent after you updated it in place, at the path setup pinned, once only your account, root or (Windows) SYSTEM, Administrators and TrustedInstaller can change the file and its folder; it records an `acp-agent-repin` audit event. A changed editor entry, a managed enrollment or an agent that fails that check still needs `acp setup`. |
 
 ## Guardrail
 
@@ -518,7 +522,7 @@ Per-connector guardrail controls. `--connector X` is the explicit scope selector
 | `defenseclaw guardrail list-packs [--json]` | Read-only. Lists the built-in rule-pack presets, custom packs found under `~/.defenseclaw/policies/guardrail/` or configured anywhere, and the pack each active connector enforces (per-connector override > global pack > built-in default). `--json` prints `{"version": 1, "global": {...}, "connectors": [...], "packs": [...]}`. |
 | `defenseclaw guardrail use-pack PACK [--connector X] [--no-validate] [--repin [--yes]] [--json]` | Switch rule packs. `PACK` is a preset (`default`, `strict`, `permissive`), a `guardrail.custom_packs` key, a pack name under `~/.defenseclaw/policies/guardrail/`, or a directory. It is written as `guardrail.rule_pack`; a custom directory is also pinned as `guardrail.custom_packs.NAME` with its validated digest, so an edited pack is refused until `--repin` pins it again (it shows the pinned and the new digest, names the other scopes that share the pin, lists every `config.yaml` edit, and asks; if `config.yaml` changed meanwhile it saves nothing and says to run it again; `--yes` for scripts, which `--json` needs). An invalid pack changes nothing; `--no-validate` skips validating a built-in pack. Without `--connector`, every connector uses `PACK` and per-connector packs are removed. `--json` prints `{"version": 1, "ok", "scope", "connector", "pack", "path", "cleared_overrides", "validation", "gateway", "message"}`. |
 | `defenseclaw guardrail use-pack --clear --connector X` | Remove X's rule-pack override so it uses the global pack again. |
-| `defenseclaw guardrail protection list [--json]` | Read-only. Lists the opt-in protection packs (five selectable, one staged) and which scope (the global pack or an active connector) has which on. See [Opt-in protection packs](#opt-in-protection-packs). |
+| `defenseclaw guardrail protection list [--json]` | Read-only. Lists the opt-in protection packs (six selectable, one staged) and which scope (the global pack or an active connector) has which on. See [Opt-in protection packs](#opt-in-protection-packs). |
 | `defenseclaw guardrail protection enable NAME [--connector X] [--profile P] [--json]` | Turn an opt-in protection pack on for a scope: adds `NAME` to `guardrail[.profiles.P][.connectors.C].rules.protections`, which the gateway layers onto the scope's rule pack on its next reload. Staged and unknown packs are refused (exit `1`). The gateway composes the pack in memory on its next reload; nothing is restarted. |
 | `defenseclaw guardrail protection disable NAME [--connector X] [--profile P] [--json]` | Remove `NAME` from that scope's `rules.protections`. If a wider scope enables it, the command refuses with exit `1`; disable it at that wider scope. |
 | `defenseclaw guardrail rule enable\|disable RULE_ID [--connector X] [--profile P] [--json]` | Turn one rule on or off for a scope (`guardrail.rules.enable` / `disable`). An ID the scope's rule pack does not have is refused by the gateway when it reloads, and the previous configuration keeps running. |
@@ -758,6 +762,8 @@ These list/inventory verbs read across the full active roster:
 | `defenseclaw-gateway audit export` (or `defenseclaw audit export`, same options) | JSONL export of `audit_events`, oldest first, with `structured` when present. `--limit N` returns the earliest N matches, or with `--newest` the most recent N. `--since` (inclusive) and `--until` (exclusive) take RFC3339 or a duration ago (`30m`, `2h`). `--connector` keeps one connector's rows. `--db PATH` reads another audit database, for example `~/.defenseclaw/previous/data/audit.db` after a rollback. Configuration changes are audit rows with action `config.change.applied`; `structured` names the operation (`defenseclaw.admin.operation`, for example `config-update`) and what changed (`defenseclaw.admin.target_ref`). `--include-activity` also appends rows of the `activity_events` table, which holds only pre-1.0 history. |
 | `defenseclaw audit logs [--source gateway\|watchdog] [-n N] [--grep TEXT]` | Print the newest lines of `~/.defenseclaw/gateway.log` (or `watchdog.log`), the same log the TUI Logs panel shows. `-n` defaults to 50; `--grep` keeps lines that contain the text (case-insensitive). For config changes and operator actions use `defenseclaw audit export --since 1h`: they are audit rows with action `config.change.applied` and others. |
 | `defenseclaw-gateway audit findings [--since RFC3339] [--new-only] [--include-resolved] [--scanner NAME] [--target PATH] [--limit N]` (or `defenseclaw audit findings`, which runs it with the same options) | Report the deduplicated finding lifecycle. Active current findings are the default; `--include-resolved` adds resolved state, while `--since` selects lifecycle changes and `--new-only` narrows that window to fingerprints first observed since the timestamp. JSON reports both the total distinct count and the returned page. |
+| `defenseclaw-gateway audit compact [--dry-run] [--json]` (or `defenseclaw audit compact`) | Give the disk space of deleted audit history back. SQLite keeps `audit.db` at its largest size after retention deletes rows; `compact` rewrites it with the rows that are left, switches it to incremental `auto_vacuum` so later retention passes give their space back on their own, and empties the WAL. Stop the gateway first: it refuses while the gateway or any other program has the database open and names the stop and start commands. It needs free disk space next to `audit.db` of about twice the live data and refuses with the numbers when the disk is short. `--dry-run` shows what it would reclaim and works while the gateway runs. Running it again is safe. On a managed computer an administrator runs it after stopping the gateway service. |
+| `defenseclaw-gateway audit rejected [--since RFC3339\|DURATION] [--limit N]` (or `defenseclaw audit rejected`, which runs it with the same options) | List the records the v8 schema gate refused, newest first, one JSON object per line (reason code, failing field, error and a redacted copy of the fields). Records are kept only while `observability.local.keep_rejected_records` is `true`; otherwise a note on stderr says so. The audit database is opened read-only. On a managed computer run it as root or the service account (Linux, macOS) or from an elevated Administrator prompt (Windows). |
 | `tail -f ~/.defenseclaw/gateway.jsonl \| jq` | Tail an optional, explicitly configured `kind: jsonl` destination at that path. It holds only the records routed to that destination; complete local history stays in SQLite, and JSONL is not an implicit mirror. |
 
 ## AI discovery
@@ -1285,6 +1291,33 @@ teardown stop and delete any that still run. To leave sandboxes in place during 
 `deleting` phases count as running. Only `stopped`, `completed`, `deleted`
 and `missing` do not.
 
+## Routing
+
+`defenseclaw routing` sets up and reads semantic model routing, rules, budgets, prices and usage. The concepts, the rule and budget keys and a worked setup are on [Semantic routing](/docs/routing/semantic-routing), [Routing rules and budgets](/docs/routing/routing-budgets) and [Tokenomics](/docs/observability/tokenomics). Every command that changes `config.yaml` goes through the same config writer as `config set`. On a managed standalone device the administrator config in the signed bundle owns these keys: the commands that change them are refused with exit `3` and name the key ([Managed command availability](/docs/enterprise/managed-commands)).
+
+| Command | Use it for |
+| --- | --- |
+| `defenseclaw routing setup [--classifier C] [--model M] [--route R] [--yes]` | Guided setup: model aliases, classifier, default model and route rules, then a test. `--classifier rules` needs no Docker. |
+| `defenseclaw routing status [--json]` | Whether routing is on, its models, rules, health and your last decisions. |
+| `defenseclaw routing enable\|disable [--connector claudecode\|codex]` | Turn routing on or off, or route (or stop routing) one hook connector's model calls through the gateway (route-only). `disable --connector` works with the gateway stopped. |
+| `defenseclaw routing models list\|add\|remove\|set-default` | Manage the model aliases (`add NAME`). `add` takes `--provider`, `--model`, `--base-url`, `--api-key-env`, `--api` and `--capability`. `remove` is refused while a rule, budget or default uses the alias. |
+| `defenseclaw routing rules list\|add\|remove\|move` | Manage `routing.admin` rules, or a profile's routing overlay with `--profile`. `add` takes the match flags (`--groups`, `--users`, `--connectors`, `--agents`, `--categories`, `--severity-at-least`) and `--allow`, `--default`, `--deny` with `--message`, and `--at` for the position. |
+| `defenseclaw routing budgets list\|add\|remove` | Manage budgets (`--scope`, `--subject`, `--period`, `--limit-usd`, `--on-exceed`) and list them with the spend so far in the period. |
+| `defenseclaw routing pricing show\|set\|import` | Show the price table, change one model's prices (`--input`, `--output`, `--cache-read`, `--cache-write`, `--reasoning`; bumps the table version) or replace the table from a YAML or JSON file shaped like `observability.pricing`. |
+| `defenseclaw routing test PROMPT [--connector C] [--as-profile P] [--as-user U] [--json]` | Dry run: which model the prompt would go to, and why. No model is called. |
+| `defenseclaw routing explain REQUEST_ID [--json]` | Why a recent call went where it went. The gateway keeps the last 256 decisions. |
+| `defenseclaw routing usage [--by BY] [--since 24h\|7d\|30d] [--json]` | Tokens, calls and cost, yours or, for an administrator, everyone's. |
+
+`defenseclaw setup routing --enable\|--disable\|--status` is the older switch for the vLLM Semantic Router container, which only the `vllm_sr` classifier uses.
+
+The opt-in fleet budget store runs from the gateway binary, on a server of your choice (see [Routing rules and budgets](/docs/routing/routing-budgets)):
+
+| Command | Use it for |
+| --- | --- |
+| `defenseclaw-gateway budget-store serve` | Serve the store over HTTPS until stopped. It reads `routing.admin.budget_store.server`. |
+| `defenseclaw-gateway budget-store device issue\|add\|revoke\|list` | Issue one device credential on an administrator workstation, register it on the store host, refuse a device from now on, or list the devices. |
+| `defenseclaw-gateway budget-store report` | Fleet totals per charge key. Store host only. |
+
 ## Sandbox
 
 Linux, and Apple-silicon Macs, where sandboxes are OpenShell MicroVMs that
@@ -1310,6 +1343,10 @@ see also [Sandbox](/docs/sandboxes/first-session).
 | `defenseclaw sandbox enable\|disable <harness>` | Add or remove the shell wrapper that makes a harness command run sandboxed. |
 | `defenseclaw sandbox teardown [--dry-run]` | Remove DefenseClaw's sandboxes, providers, images, gateway change, and wrappers. `defenseclaw uninstall` runs it. |
 | `defenseclaw sandbox kernel-feed install\|status\|uninstall` | Linux: install (as root), check or remove the opt-in sandbox kernel feed, a root service that adds Tetragon's exec and exit records to your docker sandboxes' process trees. Run as yourself, `install` prints the `sudo` command. See [sandbox kernel-feed](/docs/reference/sandbox-cli#sandbox-kernel-feed). |
+
+## Agent Substrate
+
+`defenseclaw substrate ...` runs your coding agents as actors in your organization's [Agent Substrate](/docs/substrate) cluster. It talks to that cluster and needs no local DefenseClaw install, daemon or sandbox. The commands are `login`, `logout`, `whoami`, `run`, `connect`, `list`, `status`, `logs`, `pull`, `checkpoint`, `undo`, `delete`, `migrate`, `approvals`, `approve`, `reject`, `usage`, `secrets`, `policy`, `bundle`, `doctor`, `verify`, `setup` and `template`. Every command and flag is on [Substrate reference](/docs/substrate/reference).
 
 ## Enterprise
 
@@ -1445,6 +1482,33 @@ The standalone profile runs its transaction on PowerShell 7, which must be insta
 | `--purge` | Uninstall: also remove managed state (Secure Client; standalone removes it without `--purge`) and (standalone) each enrolled account's `%USERPROFILE%\.defenseclaw` and DefenseClaw files in `%USERPROFILE%\.local\bin`, with that folder's user `Path` entry once it is empty. The result names each account. A signed-out account keeps its `Path` entry, and the result says so |
 | `--attest-claude-effective-policy` | Install, upgrade, repair: record that an administrator confirmed that Claude Code runs DefenseClaw's managed hooks |
 | `--json` | Print the result as JSON |
+
+Before an older release's Setup, the gateway runs one more step from an elevated prompt:
+`& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-gateway.exe' enterprise windows hook-image retire [--skip-profile <SID>]... [--json]`.
+It points every agent hook back at `bin\defenseclaw-hook.exe` and ends `ok` only when no machine file and no
+enrolled account's agent config names a launch folder; otherwise `hook_image_retire_pending` lists each file in
+`still_named`, each machine file with the `cause` that kept it from being rewritten; do not run the older Setup then
+([Roll back](/docs/enterprise/lifecycle#roll-back)). The account files are every connector's hook configs and the
+files its [managed install](/docs/enterprise/managed-commands) writes beside them (the Copilot VS Code Local hook file and plugin hooks, the Hermes
+allowlist, the Kiro `defenseclaw` agent). An account file `retire` could not read or verify (a link on its path below
+the account home, access denied, too large, no answer within 5 seconds, an agent home moved out of the profile, or the
+Hermes home of a signed-out account, whose `HERMES_HOME` cannot be read while it is signed out) also holds it back: it
+is listed with `account: true`, `unreadable: true` and the `cause`. Each account's files are found as the guardian
+finds them; the agent homes the administrator's shell sets (`CODEX_HOME` and the like) are ignored. An elevated administrator is denied some account folders, so run `retire` as
+LocalSystem. An enrolled account that is signed out does not hold back the machine
+files: `retire` drops its launch-folder runtime selections and lists it in `signed_out_profiles`; its own files still
+need its sign-in (the guardian rewrites them) or `--skip-profile`. `--skip-profile <SID>` (repeatable, no blanket
+form) leaves one enrolled profile's own configs unconverted: the SID must be an enrolled profile that still holds
+`retire` back, or `retire` refuses with nothing changed. Each skip writes a HIGH `config-update` audit row
+(target `hook-image-retire-skip`: who, when, the SID and its files), is listed in `skipped_profiles`, and
+`enterprise windows status` and `verify` report it as `hook_image_profile_not_retired` until none of its files
+names a launch folder.
+`--skip-profile` is refused when `retire` does not run as LocalSystem and every file that holds that profile back is
+one it was denied (access denied): run `retire` as LocalSystem, which reads it. A `status` that is denied a skipped
+profile's files reports `hook_image_profile_unverified` for it instead (run it as LocalSystem to check). `retire` writes
+`bin\hooks\.retired` when it starts, since that marker is what makes every writer name `bin\defenseclaw-hook.exe`,
+and it stays while `retire` is pending; it records how the last `retire` ended, and `status` and `verify` warn
+`hook_image_retire_pending` instead of `hook_image_retired` until a `retire` ends `ok`.
 
 Exit codes: standalone `0`, `1603` failure, `1618` busy, `1639` invalid
 arguments, `5` when run from a standard account (`status` and `verify` need an elevated prompt; the JSON error code is `elevation_required`), and `3010` (reserved). Secure Client: `0` and `1603`.
@@ -1587,7 +1651,7 @@ mutations run only in the LocalSystem guardian.
 
 ### ACP
 
-In enterprise managed mode an administrator enrolls ACP (Agent Client Protocol) editors with `/opt/defenseclaw/bin/defenseclaw-gateway enterprise acp enroll` (`/opt/cisco/defenseclaw/bin/defenseclaw-gateway` on macOS; preview, not yet verified live).
+In enterprise managed mode an administrator enrolls ACP (Agent Client Protocol) editors with `/opt/defenseclaw/bin/defenseclaw-gateway enterprise acp enroll` (`/opt/cisco/defenseclaw/bin/defenseclaw-gateway` on macOS; Preview).
 
 ## Discoverability
 

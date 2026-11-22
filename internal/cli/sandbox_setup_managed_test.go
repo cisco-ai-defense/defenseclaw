@@ -24,6 +24,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxcli"
 )
 
@@ -45,7 +46,7 @@ func TestSandboxSetupAnswersOnAManagedComputer(t *testing.T) {
 	// command line (GAP-0079).
 	command.SetArgs([]string{})
 	err := command.Execute()
-	var coded *exitCodeError
+	var coded *cliusage.ExitCodeError
 	if !errors.As(err, &coded) || coded.ExitCode() != 3 {
 		t.Fatalf("setup = %v, want exit 3", err)
 	}

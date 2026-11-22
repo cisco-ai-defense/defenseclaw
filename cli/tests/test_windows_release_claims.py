@@ -28,7 +28,7 @@ RETIRED_CONNECTORS = {"openhands", "omnigent"}
 
 # The 1.0.3 docs layout (back since 2026-10-26, owner) keeps these reference pages in the
 # Connectors section next to the connector pages.
-_CONNECTOR_SECTION_REFERENCE_PAGES = {"capability-matrix", "compatibility", "openclaw-integration"}
+_CONNECTOR_SECTION_REFERENCE_PAGES = {"capability-matrix", "compatibility", "openclaw-integration", "aliases", "switching-connectors", "cowork-vm-sensor"}
 
 # Hook routes a gateway calls (1.0.6 agent-gateway, #1394). They sit with the
 # connector pages but install nothing and have no setup connector, so they
@@ -41,6 +41,12 @@ _CONNECTOR_SECTION_ROUTE_PAGES = {"agent-gateway"}
 # it has no setup connector and no platform status of its own, so its page
 # points at its connector's page, which holds the status rows.
 _CONNECTOR_SECTION_SURFACE_PAGES = {"cowork": "claudecode"}
+
+# A companion page documents a feature that ships beside a connector but is not
+# a connector: the Cowork VM sensor (a detection-only package Claude Desktop
+# installs in the Cowork VM). It has no setup connector and no platform status
+# row; its own page says where it works.
+_CONNECTOR_SECTION_COMPANION_PAGES = {"cowork-vm-sensor"}
 
 
 def _active_connector_docs() -> dict[str, Path]:
@@ -60,6 +66,7 @@ def _active_connector_docs() -> dict[str, Path]:
             and item not in _CONNECTOR_SECTION_REFERENCE_PAGES
             and item not in _CONNECTOR_SECTION_ROUTE_PAGES
             and item not in _CONNECTOR_SECTION_SURFACE_PAGES
+            and item not in _CONNECTOR_SECTION_COMPANION_PAGES
         ):
             connector_ids.append(item)
     return {connector_id: reference_dir / f"{connector_id}.mdx" for connector_id in connector_ids}
@@ -121,6 +128,16 @@ def test_connector_surface_pages_point_at_their_connector() -> None:
         assert "## Platform support" not in text, surface
         assert f"](/docs/connectors/{connector})" in text, surface
         assert "is a surface of that connector, not a connector of its own" in text, surface
+
+
+def test_connector_companion_pages_are_listed_and_are_not_connectors() -> None:
+    connectors_dir = ROOT / "docs-site/content/docs/connectors"
+    navigation = json.loads((connectors_dir / "meta.json").read_text(encoding="utf-8"))["pages"]
+    for page in sorted(_CONNECTOR_SECTION_COMPANION_PAGES):
+        assert page in navigation, page
+        assert page not in WINDOWS_CONNECTOR_SUPPORT, page
+        text = (connectors_dir / f"{page}.mdx").read_text(encoding="utf-8")
+        assert "## Platform support" not in text, page
 
 
 def test_connector_route_pages_are_listed_and_state_their_windows_limit() -> None:

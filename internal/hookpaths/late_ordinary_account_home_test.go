@@ -60,9 +60,7 @@ func TestLateOrdinaryCallAtWithAHomeThatIsNoFolder(t *testing.T) {
 	if err := os.Link(filepath.Join(f.project, "plain.txt"), filepath.Join(f.project, "hl-plain")); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(filepath.Join(f.project, "hardlink"), filepath.Join(f.project, "l-hard")); err != nil {
-		t.Fatal(err)
-	}
+	testSymlink(t, filepath.Join(f.project, "hardlink"), filepath.Join(f.project, "l-hard"))
 	for _, home := range []string{"relative/home", filepath.Join(f.home, "missing"), filepath.Join(f.project, "plain.txt")} {
 		for _, tc := range []struct {
 			name, command string
@@ -127,18 +125,14 @@ func TestLateOrdinaryCallAtReadsARelativeHomeAgainstTheCallFolder(t *testing.T) 
 // closed and a hard link to an ordinary file stays ordinary.
 func TestLateOrdinaryCallAtReadsARelativeHomeWithALinkBeforeAParentStep(t *testing.T) {
 	f := newLateFixture(t)
-	if err := os.Symlink(f.project, filepath.Join(f.project, "fold")); err != nil {
-		t.Fatal(err)
-	}
+	testSymlink(t, f.project, filepath.Join(f.project, "fold"))
 	for _, link := range [][2]string{{"plain.txt", "hl-plain"}, {"hardlink", "hl-keys-2"}} {
 		if err := os.Link(filepath.Join(f.project, link[0]), filepath.Join(f.project, link[1])); err != nil {
 			t.Fatal(err)
 		}
 	}
 	for _, link := range [][2]string{{"hl-plain", "l-plain"}, {"hl-keys-2", "l-keys"}} {
-		if err := os.Symlink(filepath.Join(f.project, link[0]), filepath.Join(f.project, link[1])); err != nil {
-			t.Fatal(err)
-		}
+		testSymlink(t, filepath.Join(f.project, link[0]), filepath.Join(f.project, link[1]))
 	}
 	scratch, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
@@ -182,9 +176,7 @@ func TestLateOrdinaryCallAtReadsARelativeHomeWithALinkBeforeAParentStep(t *testi
 // relative saved home.
 func TestLateOrdinaryCallAtReadsARelativeWorkdirWithALinkBeforeAParentStep(t *testing.T) {
 	f := newLateFixture(t)
-	if err := os.Symlink(f.project, filepath.Join(f.project, "fold")); err != nil {
-		t.Fatal(err)
-	}
+	testSymlink(t, f.project, filepath.Join(f.project, "fold"))
 	// "alias" is a hard link to the keys in the folder the workdir reaches
 	// and an ordinary file in the project a text clean-up would name.
 	if err := os.Link(filepath.Join(f.home, ".ssh", "authorized_keys"), filepath.Join(f.home, "alias")); err != nil {

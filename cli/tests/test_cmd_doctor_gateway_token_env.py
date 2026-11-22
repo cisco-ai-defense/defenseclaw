@@ -1,17 +1,13 @@
-"""Phase 6 of the gateway-token rebranding fix — doctor coverage.
+"""Doctor coverage for ``gateway.token_env``.
 
-The Phase 1+2 auto-detect ladder makes ``agent usage`` work even
-when ``cfg.gateway.token_env`` points at a stale ``OPENCLAW_GATEWAY_TOKEN``
-default. That's a safety net, not the design — doctor should still
-flag the drift and offer to repoint via ``--fix``.
+``OPENCLAW_GATEWAY_TOKEN`` is the OpenClaw credential and never the
+DefenseClaw master (R-TOK); DefenseClaw 1.0.9 and earlier saved
+``token_env: OPENCLAW_GATEWAY_TOKEN``. This file covers:
 
-This file covers:
-
-* ``_check_gateway_token_env_alignment`` — emits ``pass`` when the
-  configured var is populated, ``fail`` when it's empty AND the
-  canonical DEFENSECLAW_ var is set (the drift case), ``warn`` for
-  the rarer "all vars empty" or "custom env empty + legacy populated"
-  cases.
+* ``_check_gateway_token_env_alignment`` — warns, with the
+  ``doctor --fix`` remedy, whenever token_env names the OpenClaw
+  credential; ``pass`` when a custom configured var is populated;
+  ``warn`` when a custom or canonical var is empty.
 * ``_fix_gateway_token_env`` — repoints stale ``OPENCLAW_GATEWAY_TOKEN``
   to ``DEFENSECLAW_GATEWAY_TOKEN`` only when the latter is populated;
   skips silently otherwise; refuses to stomp custom operator overrides.
@@ -68,54 +64,40 @@ def _make_cfg(*, token_env: str = "", active=None) -> SimpleNamespace:
 
 
 class CheckTests(unittest.TestCase):
+    def _run(self, cfg, **env):
+        r = _DoctorResult()
+        with patch.dict(os.environ, _clean_env(**env), clear=True):
+            _check_gateway_token_env_alignment(cfg, r)
+        return r
+
     def test_pass_when_configured_var_is_populated(self):
-        cfg = _make_cfg(token_env="OPENCLAW_GATEWAY_TOKEN")
-        env = _clean_env(OPENCLAW_GATEWAY_TOKEN="abc123")
-        r = _DoctorResult()
-        with patch.dict(os.environ, env, clear=True):
-            _check_gateway_token_env_alignment(cfg, r)
-        self.assertEqual(r.passed, 1)
-        self.assertEqual(r.failed, 0)
-        self.assertEqual(r.warned, 0)
+        r = self._run(_make_cfg(token_env="MY_CUSTOM_TOKEN"), MY_CUSTOM_TOKEN="abc123")
+        self.assertEqual((r.passed, r.failed, r.warned), (1, 0, 0))
 
-    def test_fail_when_legacy_token_env_is_empty_but_defenseclaw_is_set(self):
-        """The exact bug repro: token_env points at OPENCLAW_, real
-        token is in DEFENSECLAW_, doctor flags it as a failure so
-        --fix has something to repair.
-        """
-        cfg = _make_cfg(token_env="OPENCLAW_GATEWAY_TOKEN")
-        env = _clean_env(DEFENSECLAW_GATEWAY_TOKEN="abc123")
-        r = _DoctorResult()
-        with patch.dict(os.environ, env, clear=True):
-            _check_gateway_token_env_alignment(cfg, r)
-        self.assertEqual(r.failed, 1)
-        # Detail should mention the actionable remediation.
-        fail_msg = next(c for c in r.checks if c["status"] == "fail")["detail"]
-        self.assertIn("DEFENSECLAW_GATEWAY_TOKEN", fail_msg)
-        self.assertIn("doctor --fix", fail_msg)
+    def test_openclaw_token_env_warns_and_names_the_fix_even_when_populated(self):
+        """R-TOK: OPENCLAW_GATEWAY_TOKEN is the OpenClaw credential, never the
+        DefenseClaw token, so a token_env naming it is reported whatever it holds."""
+        for env in ({}, {"OPENCLAW_GATEWAY_TOKEN": "oc"}, {"DEFENSECLAW_GATEWAY_TOKEN": "abc123"}):
+            for active in (None, [], ["openclaw"], ["hermes"]):
+                with self.subTest(env=sorted(env), active=active):
+                    r = self._run(_make_cfg(token_env="OPENCLAW_GATEWAY_TOKEN", active=active), **env)
+                    self.assertEqual((r.passed, r.failed, r.warned), (0, 0, 1))
+                    msg = next(c for c in r.checks if c["status"] == "warn")["detail"]
+                    self.assertIn("names the OpenClaw credential", msg)
+                    self.assertIn("doctor --fix", msg)
+                    self.assertIn("DEFENSECLAW_GATEWAY_TOKEN", msg)
+                    self.assertNotIn("keys set", msg)
 
-    def test_warn_when_custom_token_env_is_empty_and_legacy_present(self):
-        """Operator pinned a custom var, that var is empty, but a
-        legacy OPENCLAW_ value exists somewhere — flag for review
-        without auto-mutating their custom config.
-        """
-        cfg = _make_cfg(token_env="MY_CUSTOM_TOKEN")
-        env = _clean_env(OPENCLAW_GATEWAY_TOKEN="legacy")
-        r = _DoctorResult()
-        with patch.dict(os.environ, env, clear=True):
-            _check_gateway_token_env_alignment(cfg, r)
+    def test_custom_token_env_empty_with_only_the_openclaw_token_is_not_told_to_copy_it(self):
+        r = self._run(_make_cfg(token_env="MY_CUSTOM_TOKEN"), OPENCLAW_GATEWAY_TOKEN="oc")
         self.assertEqual(r.warned, 1)
-        warn_msg = next(c for c in r.checks if c["status"] == "warn")["detail"]
-        self.assertIn("MY_CUSTOM_TOKEN", warn_msg)
-        self.assertIn("OPENCLAW_GATEWAY_TOKEN", warn_msg)
+        msg = next(c for c in r.checks if c["status"] == "warn")["detail"]
+        self.assertIn("MY_CUSTOM_TOKEN", msg)
+        self.assertNotIn("OPENCLAW_GATEWAY_TOKEN", msg)
+        self.assertNotIn("doctor --fix", msg)
 
     def test_warns_without_false_fix_hint_for_custom_env_with_canonical_fallback(self):
-        cfg = _make_cfg(token_env="MY_CUSTOM_TOKEN")
-        env = _clean_env(DEFENSECLAW_GATEWAY_TOKEN="canonical-fallback")
-        r = _DoctorResult()
-        with patch.dict(os.environ, env, clear=True):
-            _check_gateway_token_env_alignment(cfg, r)
-
+        r = self._run(_make_cfg(token_env="MY_CUSTOM_TOKEN"), DEFENSECLAW_GATEWAY_TOKEN="canonical-fallback")
         self.assertEqual(r.warned, 1)
         msg = next(c for c in r.checks if c["status"] == "warn")["detail"]
         self.assertIn("MY_CUSTOM_TOKEN", msg)
@@ -123,91 +105,31 @@ class CheckTests(unittest.TestCase):
         self.assertIn("preserves custom providers", msg)
         self.assertNotIn("doctor --fix", msg)
 
-    def test_warn_when_no_token_is_reachable_anywhere(self):
-        """All env vars empty — surface the local config state so
-        the operator can correlate with sidecar /health failure.
-        """
-        cfg = _make_cfg(token_env="OPENCLAW_GATEWAY_TOKEN", active=["openclaw"])
-        env = _clean_env()
-        r = _DoctorResult()
-        with patch.dict(os.environ, env, clear=True):
-            _check_gateway_token_env_alignment(cfg, r)
-        self.assertEqual(r.warned, 1)
-        warn_msg = next(c for c in r.checks if c["status"] == "warn")["detail"]
-        self.assertIn("defenseclaw keys set", warn_msg)
-
-    def test_no_agent_does_not_suggest_setting_openclaw_token(self):
-        cfg = _make_cfg(token_env="OPENCLAW_GATEWAY_TOKEN", active=[])
-        r = _DoctorResult()
-        with patch.dict(os.environ, _clean_env(), clear=True):
-            _check_gateway_token_env_alignment(cfg, r)
-
-        warn_msg = next(c for c in r.checks if c["status"] == "warn")["detail"]
-        self.assertIn("doctor --fix", warn_msg)
-        self.assertNotIn("defenseclaw keys set", warn_msg)
-
-    def test_skips_when_token_env_unset(self):
-        """No token_env configured at all — other checks (sidecar
-        auth probe) cover this case; nothing for us to flag.
-        """
-        cfg = _make_cfg(token_env="")
-        env = _clean_env()
-        r = _DoctorResult()
-        with patch.dict(os.environ, env, clear=True):
-            _check_gateway_token_env_alignment(cfg, r)
-        # No record at all — silent skip.
-        self.assertEqual(r.passed, 0)
-        self.assertEqual(r.failed, 0)
-        self.assertEqual(r.warned, 0)
-
-    def test_skips_when_no_gateway_config(self):
-        """Defensive: cfg.gateway is None → no crash, no record."""
-        cfg = SimpleNamespace(gateway=None)
-        r = _DoctorResult()
-        with patch.dict(os.environ, _clean_env(), clear=True):
-            _check_gateway_token_env_alignment(cfg, r)
-        self.assertEqual(r.passed, 0)
-        self.assertEqual(r.failed, 0)
-
-
-class ConnectorAwareCheckTests(unittest.TestCase):
-    """D1: on a non-OpenClaw install, a stale legacy ``OPENCLAW_GATEWAY_TOKEN``
-    sitting in ``token_env`` (both vars empty) must NOT be presented as the var
-    the operator has to set — it's drift to repoint, not a required OpenClaw
-    token. Only when OpenClaw is genuinely active is that var legitimate.
-    """
-
-    def test_reworded_both_empty_on_hook_install(self):
-        cfg = _make_cfg(token_env="OPENCLAW_GATEWAY_TOKEN", active=["hermes"])
-        r = _DoctorResult()
-        with patch.dict(os.environ, _clean_env(), clear=True):
-            _check_gateway_token_env_alignment(cfg, r)
-        self.assertEqual(r.warned, 1)
-        msg = next(c for c in r.checks if c["status"] == "warn")["detail"]
-        self.assertIn("doctor --fix", msg)
-        self.assertIn("DEFENSECLAW_GATEWAY_TOKEN", msg)
-        # The non-OpenClaw operator is NOT told to set OPENCLAW via keys set.
-        self.assertNotIn("keys set", msg)
-
-    def test_openclaw_active_keeps_generic_message(self):
-        cfg = _make_cfg(token_env="OPENCLAW_GATEWAY_TOKEN", active=["openclaw"])
-        r = _DoctorResult()
-        with patch.dict(os.environ, _clean_env(), clear=True):
-            _check_gateway_token_env_alignment(cfg, r)
-        self.assertEqual(r.warned, 1)
-        msg = next(c for c in r.checks if c["status"] == "warn")["detail"]
-        self.assertIn("defenseclaw keys set", msg)
-
     def test_custom_token_env_both_empty_keeps_generic_message(self):
-        cfg = _make_cfg(token_env="MY_CUSTOM_TOKEN", active=["hermes"])
-        r = _DoctorResult()
-        with patch.dict(os.environ, _clean_env(), clear=True):
-            _check_gateway_token_env_alignment(cfg, r)
+        r = self._run(_make_cfg(token_env="MY_CUSTOM_TOKEN", active=["hermes"]))
         self.assertEqual(r.warned, 1)
         msg = next(c for c in r.checks if c["status"] == "warn")["detail"]
         self.assertIn("MY_CUSTOM_TOKEN", msg)
         self.assertIn("preserves custom providers", msg)
         self.assertNotIn("doctor --fix", msg)
+
+    def test_canonical_token_env_empty_points_at_the_gateway_start(self):
+        r = self._run(_make_cfg(token_env="DEFENSECLAW_GATEWAY_TOKEN"), OPENCLAW_GATEWAY_TOKEN="oc")
+        self.assertEqual(r.warned, 1)
+        msg = next(c for c in r.checks if c["status"] == "warn")["detail"]
+        self.assertIn("doctor --fix", msg)
+
+    def test_skips_when_token_env_unset(self):
+        """No token_env configured at all — other checks (sidecar
+        auth probe) cover this case; nothing for us to flag.
+        """
+        r = self._run(_make_cfg(token_env=""))
+        self.assertEqual((r.passed, r.failed, r.warned), (0, 0, 0))
+
+    def test_skips_when_no_gateway_config(self):
+        """Defensive: cfg.gateway is None → no crash, no record."""
+        r = self._run(SimpleNamespace(gateway=None))
+        self.assertEqual((r.passed, r.failed), (0, 0))
 
 
 class FixerTests(unittest.TestCase):
@@ -223,6 +145,16 @@ class FixerTests(unittest.TestCase):
         self.assertIn("DEFENSECLAW_GATEWAY_TOKEN", detail)
         self.assertEqual(cfg.gateway.token_env, "DEFENSECLAW_GATEWAY_TOKEN")
         cfg.save.assert_called_once()
+
+    def test_repoints_a_populated_openclaw_token_env(self):
+        """R-TOK: a populated OPENCLAW_GATEWAY_TOKEN is the OpenClaw credential,
+        not a working DefenseClaw provider, so it is repointed too."""
+        cfg = _make_cfg(token_env="OPENCLAW_GATEWAY_TOKEN")
+        env = _clean_env(OPENCLAW_GATEWAY_TOKEN="oc", DEFENSECLAW_GATEWAY_TOKEN="abc123")
+        with patch.dict(os.environ, env, clear=True):
+            tag, _detail = _fix_gateway_token_env(cfg, assume_yes=True)
+        self.assertEqual(tag, "pass")
+        self.assertEqual(cfg.gateway.token_env, "DEFENSECLAW_GATEWAY_TOKEN")
 
     def test_skips_when_already_on_canonical_name(self):
         """Idempotent: already at DEFENSECLAW_GATEWAY_TOKEN → no-op."""

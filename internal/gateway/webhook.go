@@ -391,9 +391,14 @@ func (d *WebhookDispatcher) Dispatch(event audit.Event) {
 	// suppress); every other event inherits the global endpoints. Keys off
 	// event.Connector, stamped by the proxy guardrail path / connector glue.
 	endpoints := d.endpointsForConnector(event.Connector)
+	// An approval request asks a person to act (an unattended run's queued
+	// ask waits for them, D12): it is not a finding with a severity, so
+	// min_severity does not drop it; an endpoint's events list still can
+	// (GAP-0557: a HIGH endpoint never heard of a queued ask).
+	actionItem := eventCategory == string(audit.ActionApprovalRequest)
 	for i := range endpoints {
 		ep := &endpoints[i]
-		if rank < ep.minSeverity {
+		if rank < ep.minSeverity && !actionItem {
 			continue
 		}
 		if len(ep.events) > 0 && !ep.events[eventCategory] {
@@ -942,6 +947,17 @@ type webhookAttribution struct {
 	AgentIdentityID string
 	Profile         string
 	Host            string
+	// Substrate names the Agent Substrate actor of the request, its
+	// person and profile, as the actor's audit row does (GAP-0563): in a
+	// cluster, Host is the gateway pod and says nothing about whose run it is.
+	Substrate webhookSubstrateActor
+}
+
+// webhookSubstrateActor is the verified actor of a request on an Agent
+// Substrate gateway. Person is the sanitized subject the audit row records.
+type webhookSubstrateActor struct {
+	Actor, Atespace, Person, Profile string
+	Unattended                       bool
 }
 
 // webhookAttributionFor is the attribution of the request on ctx. The hook
@@ -950,7 +966,13 @@ func webhookAttributionFor(ctx context.Context) webhookAttribution {
 	user := resolveHookUser(ctx, nil)
 	agent, _ := agentIdentityFromContext(ctx)
 	profile, _ := guardrailProfileTelemetryFor(ctx).Name.Get()
-	return webhookAttribution{UserID: user.ID, UserName: user.Name, AgentIdentityID: agent, Profile: profile}
+	out := webhookAttribution{UserID: user.ID, UserName: user.Name, AgentIdentityID: agent, Profile: profile}
+	if actor, ok := substrateActorFrom(ctx); ok {
+		reg, _ := substrateRegistrationFrom(ctx)
+		out.Substrate = webhookSubstrateActor{Actor: actor.Name, Atespace: actor.Atespace,
+			Person: sanitizeLLMEventUser(reg.Person.Subject), Profile: reg.Profile, Unattended: reg.Unattended}
+	}
+	return out
 }
 
 var webhookHostname = sync.OnceValue(func() string {
@@ -978,6 +1000,8 @@ func (a webhookAttribution) pairs() [][2]string {
 	for _, field := range [][2]string{
 		{"user_id", a.UserID}, {"user_name", a.UserName}, {"agent_identity_id", a.AgentIdentityID},
 		{"guardrail_profile", a.Profile}, {"host", a.Host},
+		{"substrate_actor", a.Substrate.Actor}, {"substrate_atespace", a.Substrate.Atespace},
+		{"substrate_person", a.Substrate.Person}, {"substrate_profile", a.Substrate.Profile},
 	} {
 		if field[1] != "" {
 			out = append(out, field)
@@ -1004,8 +1028,12 @@ func formatGenericPayload(event audit.Event) ([]byte, error) {
 	if event.Connector != "" {
 		eventData["connector"] = event.Connector
 	}
-	for _, field := range webhookAttributionOf(event).pairs() {
+	attribution := webhookAttributionOf(event)
+	for _, field := range attribution.pairs() {
 		eventData[field[0]] = field[1]
+	}
+	if attribution.Substrate.Actor != "" {
+		eventData["substrate_unattended"] = attribution.Substrate.Unattended
 	}
 	if strings.Contains(strings.ToLower(event.Action), "block") {
 		eventData["defenseclaw_blocked"] = true

@@ -1,0 +1,53 @@
+{{- /*
+The launcher endpoint record (GAP-0130): `defenseclaw substrate login --kube`
+sends the kubeconfig user's credential only to the admin URL this cluster
+publishes here, so a kube bearer never goes to an arbitrary URL. Every
+authenticated user may read this one ConfigMap and nothing else.
+*/ -}}
+{{- $x := .Values.admin.expose -}}
+{{- $url := .Values.admin.url -}}
+{{- if not $url -}}
+{{- if eq $x.type "Ingress" -}}
+{{- $url = printf "https://%s" $x.ingress.host -}}
+{{- else if eq $x.type "LoadBalancer" -}}
+{{- fail "admin.url is required with admin.expose.type LoadBalancer: the https URL laptops use (the load balancer's DNS name, matching admin.tlsSecretName)" -}}
+{{- else -}}
+{{- $url = printf "https://%s" (include "dc.adminTLSHost" .) -}}
+{{- end -}}
+{{- end -}}
+{{- if not (hasPrefix "https://" $url) }}{{ fail "admin.url must be an https URL" }}{{ end -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: defenseclaw-launcher-endpoint
+  labels:
+    {{- include "dc.componentLabels" (dict "ctx" . "component" "gateway") | nindent 4 }}
+data:
+  admin_url: {{ $url | quote }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: defenseclaw-launcher-endpoint-read
+  labels:
+    {{- include "dc.componentLabels" (dict "ctx" . "component" "gateway") | nindent 4 }}
+rules:
+- apiGroups: [""]
+  resources: [configmaps]
+  resourceNames: [defenseclaw-launcher-endpoint]
+  verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: defenseclaw-launcher-endpoint-read
+  labels:
+    {{- include "dc.componentLabels" (dict "ctx" . "component" "gateway") | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: defenseclaw-launcher-endpoint-read
+subjects:
+- apiGroup: rbac.authorization.k8s.io
+  kind: Group
+  name: system:authenticated

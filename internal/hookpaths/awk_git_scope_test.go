@@ -90,9 +90,7 @@ func TestR104Refix4GitWorktreeMarker(t *testing.T) {
 		t.Fatalf("worktree-file scope = %q, materializes = %v, want %q", scope, materializes, root)
 	}
 	alias := filepath.Join(t.TempDir(), "repo")
-	if err := os.Symlink(root, alias); err != nil {
-		t.Fatal(err)
-	}
+	testSymlink(t, root, alias)
 	if scope, materializes := gitMaterializationScope(
 		[]string{"-C", "repo/sub", "pull"}, []bool{true, true, true}, filepath.Dir(alias),
 	); !materializes || scope != root {

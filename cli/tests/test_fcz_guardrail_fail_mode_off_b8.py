@@ -11,6 +11,8 @@ from defenseclaw.commands import cmd_guardrail
 from tests.test_fail_mode_runtime import _runtime_cfg
 from tests.test_fcux_cli_messages_b11 import _app, _fail_mode, _roster
 
+pytestmark = pytest.mark.usefixtures("openclaw_proxy_topology")
+
 
 def test_fail_mode_while_off_counts_every_saved_connector(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     # GAP-2178: the summary said "2 active connector overrides ... Codex is disabled (no hooks)"

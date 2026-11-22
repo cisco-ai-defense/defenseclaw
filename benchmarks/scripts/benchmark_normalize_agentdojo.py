@@ -11,7 +11,8 @@ structured arguments are retained. Bounded result/error records are attached
 only as non-runtime stateful evidence, so observations cannot be mistaken for
 tool-call arguments by the benchmark harness.
 
-AgentDojo's security score is trajectory-level truth. A violated run is a
+AgentDojo's security score is trajectory-level truth; `security` is True when
+the injection succeeded (rel-1-0-10:GAP-0120). A violated run is a
 contextual positive only when its complete executed trajectory fits in one
 bounded window; individual calls and partial windows remain out of scope.
 Security-preserving attacked runs are useful hard negatives.
@@ -276,9 +277,13 @@ def run_class(record: Mapping[str, Any]) -> tuple[str, bool, str]:
         if security:
             return "benign", False, "no_injection"
         return "unknown", False, "invalid_no_injection_security"
+    # AgentDojo records the injection task's security() check, which returns
+    # True when the attacker's goal WAS achieved (its targeted attack success
+    # rate is the mean of this flag). True on an attacked run is therefore a
+    # successful injection and False is a resisted one (rel-1-0-10:GAP-0120).
     if security:
-        return "benign", True, "security_preserved"
-    return "malicious", False, "security_violated"
+        return "malicious", False, "security_violated"
+    return "benign", True, "security_preserved"
 
 
 def source(revision: str, original_id: str) -> dict[str, str]:

@@ -59,8 +59,12 @@ const (
 	// (managedEnterpriseScanInterval, the generated managed destination).
 	managedInventoryFullBundleInterval = 24 * time.Hour
 
-	managedInventoryPublishStateFile    = "managed_inventory_publish_state.json"
-	managedInventoryPublishStateVersion = 1
+	managedInventoryPublishStateFile = "managed_inventory_publish_state.json"
+	// Version 2 invalidates v1 publish digests so the first complete scan after
+	// upgrade re-baselines AI Defense with connector-native MCP details. This is
+	// required because v1 could record a successful native publish before the
+	// backend consumer was enabled, suppressing an unchanged retry for 24 hours.
+	managedInventoryPublishStateVersion = 2
 
 	// managedInventorySignalsKey is the state key for the per-signal lifecycle
 	// snapshot. The six endpoint collections key on their own `source` strings.
@@ -271,6 +275,25 @@ func (cycle *managedInventoryPublishCycle) recordPublished(key, digest string, r
 	}
 }
 
+// covers reports whether AI Defense has accepted this exact collection, either
+// during the current cycle or in a previous successful cycle. It is used to
+// keep child inventory from referencing a parent whose managed publish failed.
+func (cycle *managedInventoryPublishCycle) covers(key, digest string) bool {
+	if cycle == nil || digest == "" {
+		return false
+	}
+	if current, ok := cycle.published[key]; ok && current.Digest == digest {
+		return true
+	}
+	if cycle.state == nil {
+		return false
+	}
+	cycle.state.mu.Lock()
+	defer cycle.state.mu.Unlock()
+	stored, ok := cycle.state.file.Collections[key]
+	return ok && stored.Digest == digest
+}
+
 // managedInventoryPublishRejected reports whether an emit that returned no error
 // nevertheless failed to hand its record to the managed AI Defense destination.
 //
@@ -433,9 +456,16 @@ func managedInventoryComponentsDigest(key string, components []endpointInventory
 			component.connectorSubprocessPolicy,
 			component.mcpTransport,
 			component.mcpCommandBasename,
+			component.mcpCommandFingerprint,
+			component.mcpArgumentsFingerprint,
+			component.mcpSourceScope,
+			component.mcpServerURL,
 			component.mcpURLHost,
 			component.mcpAuthProviderType,
 			managedInventoryOptionalBool(component.mcpDisabled),
+			component.mcpToolSource,
+			component.mcpToolParentID,
+			component.mcpToolObservedAt,
 			component.agentConnector,
 			managedInventoryOptionalBool(component.agentInstalled),
 			managedInventoryOptionalBool(component.agentHasConfig),

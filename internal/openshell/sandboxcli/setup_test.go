@@ -1314,8 +1314,8 @@ func TestSetupOnMacOSPlansMicroVMsNotBindMounts(t *testing.T) {
 			p[0].VMResources == nil || *p[0].VMResources != (openshell.VMResources{VCPUs: 4, OverlayDiskMiB: 16384}) || ta.gateway.applied != 1 {
 			t.Fatalf("upstream %t: gateway plans = %+v, applied %d", upstream, p, ta.gateway.applied)
 		}
-		has(t, ta.output(), `Run sandboxes in OpenShell MicroVMs? macOS needs them: Docker Desktop's Linux kernel has no Landlock. `+
-			`(sets compute_driver = "vm" in ~/.config/openshell/gateway.toml and restarts the gateway; OpenShell calls this driver experimental) [Y/n]`,
+		has(t, ta.output(), `Run sandboxes in OpenShell MicroVMs? On a Mac, MicroVMs do not start until OpenShell fixes its MicroVM driver; Docker Desktop 29.8 or newer runs sandboxes on the docker driver (the run-time Landlock check decides). `+
+			`(sets compute_driver = "vm" in ~/.config/openshell/gateway.toml and restarts the gateway; OpenShell calls this driver experimental) [y/N]`,
 			"sandbox_uid and sandbox_gid are gateway-wide: every MicroVM sandbox on this gateway, including ones made outside DefenseClaw "+
 				"with `openshell sandbox create`, then runs as 501:20",
 			"✓ gateway configured and restarted: it runs sandboxes in OpenShell MicroVMs",
@@ -1351,12 +1351,11 @@ func TestSetupNamesTheGatewayTOMLOnceKnown(t *testing.T) {
 
 // TestSetupSwitchesADockerDesktopMacToMicroVMs: a fresh Mac on Docker
 // Desktop, whose Linux VM has no Landlock, still reaches the MicroVM
-// question instead of stopping at the machine check; --yes and
-// --non-interactive take its default, yes.
+// question instead of stopping at the machine check; the question's
+// default is no (Docker), so only a yes switches.
 func TestSetupSwitchesADockerDesktopMacToMicroVMs(t *testing.T) {
-	for _, o := range []SetupOptions{{NonInteractive: true}, {Yes: true}} {
-		ta := setupApp(t, "", "", false)
-		ta.IO.TTY = false
+	for _, o := range []SetupOptions{{}} {
+		ta := setupApp(t, "y\n\n", "", false)
 		ta.GOOS = "darwin"
 		ta.HostDoctor = macReport(openshell.DriverDocker, func(r *openshell.DoctorReport) { *r.Get(openshell.CheckIDLandlock) = noLandlockInTheVM })
 		ta.gateway.applyRes = &openshell.GatewayApplyResult{}
@@ -1378,8 +1377,7 @@ func TestSetupSwitchesADockerDesktopMacToMicroVMs(t *testing.T) {
 // does.
 func TestSetupWaitsForTheDaemonToDriveMicroVMs(t *testing.T) {
 	for _, notices := range []bool{true, false} {
-		ta := setupApp(t, "", "", false)
-		ta.IO.TTY = false
+		ta := setupApp(t, "y\n\n", "", false)
 		ta.GOOS = "darwin"
 		ta.HostDoctor = macReport(openshell.DriverDocker, func(r *openshell.DoctorReport) { *r.Get(openshell.CheckIDLandlock) = noLandlockInTheVM })
 		ta.gateway.applyRes = &openshell.GatewayApplyResult{}
@@ -1391,7 +1389,7 @@ func TestSetupWaitsForTheDaemonToDriveMicroVMs(t *testing.T) {
 				st.Gateway.Driver = "vm"
 			}
 		}
-		ta.ok(t, ta.Setup(bg, SetupOptions{Yes: true, SkipImages: true, NoWrappers: true}))
+		ta.ok(t, ta.Setup(bg, SetupOptions{SkipImages: true, NoWrappers: true}))
 		const stale = "the daemon still drives the OpenShell gateway as the docker driver, not vm"
 		if notices {
 			has(t, ta.output(), "the daemon runs the sandbox subsystem")
@@ -1409,13 +1407,12 @@ func TestSetupWaitsForTheDaemonToDriveMicroVMs(t *testing.T) {
 // MicroVM, or that it is done: on Docker Desktop no sandbox can start
 // until the gateway runs MicroVMs.
 func TestSetupSaysASwitchNotAppliedLeavesDocker(t *testing.T) {
-	ta := setupApp(t, "", "", false)
-	ta.IO.TTY = false
+	ta := setupApp(t, "y\n\n\n", "", false)
 	ta.GOOS = "darwin"
 	ta.HostDoctor = macReport(openshell.DriverDocker, func(r *openshell.DoctorReport) { *r.Get(openshell.CheckIDLandlock) = noLandlockInTheVM })
 	ta.gateway.applyRes = &openshell.GatewayApplyResult{}
 	runningOn(t, ta, 1)
-	wantExit(t, ta.Setup(bg, SetupOptions{Yes: true, SkipImages: true, NoWrappers: true}), 1)
+	wantExit(t, ta.Setup(bg, SetupOptions{SkipImages: true, NoWrappers: true}), 1)
 	if ta.gateway.applied != 0 || ta.gateway.restarts != 0 {
 		t.Fatalf("applied %d, restarts %d", ta.gateway.applied, ta.gateway.restarts)
 	}
@@ -1426,13 +1423,12 @@ func TestSetupSaysASwitchNotAppliedLeavesDocker(t *testing.T) {
 	lacks(t, ta.output(), "every run works on a copy (the MicroVM driver", "prepares its MicroVM disk", "Done →")
 
 	// With --restart-gateway the switch is applied.
-	ta = setupApp(t, "", "", false)
-	ta.IO.TTY = false
+	ta = setupApp(t, "y\n\n", "", false)
 	ta.GOOS = "darwin"
 	ta.HostDoctor = macReport(openshell.DriverDocker, func(r *openshell.DoctorReport) { *r.Get(openshell.CheckIDLandlock) = noLandlockInTheVM })
 	ta.gateway.applyRes = &openshell.GatewayApplyResult{}
 	runningOn(t, ta, 1)
-	ta.ok(t, ta.Setup(bg, SetupOptions{Yes: true, RestartGateway: true, NoWrappers: true, SkipImages: true}))
+	ta.ok(t, ta.Setup(bg, SetupOptions{RestartGateway: true, NoWrappers: true, SkipImages: true}))
 	has(t, ta.output(), "every run works on a copy (the MicroVM driver", "Done →")
 	lacks(t, ta.output(), "still runs the docker driver", "not ready for sandboxes yet")
 }
@@ -1458,7 +1454,7 @@ func TestSetupOnAMacAlreadyOnMicroVMs(t *testing.T) {
 
 	// Configured, not running yet: one restart, asked about when a
 	// sandbox runs on the gateway.
-	ta = setupApp(t, "\ny\n", "", false)
+	ta = setupApp(t, "y\ny\n", "", false)
 	ta.GOOS = "darwin"
 	ta.gateway.state.Env = map[string]string{openshell.EnvTelemetryEnabled: "false"}
 	ta.Gateway = emptyPlans{ta.gateway}
@@ -1489,7 +1485,14 @@ func TestSetupBuildsTheImagesForItsDriver(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ta := setupApp(t, "", "", false)
-			ta.IO.TTY = false
+			opts := SetupOptions{Yes: true, NoWrappers: true, Harnesses: []string{"claude"}}
+			if tc.mac && tc.driver == openshell.DriverDocker {
+				// --yes takes the Docker default on a Mac: the switch is a yes.
+				ta = setupApp(t, "y\n\n\n\n\n", "", false)
+				opts.Yes = false
+			} else {
+				ta.IO.TTY = false
+			}
 			if tc.mac {
 				ta.GOOS = "darwin"
 				ta.Gateway = emptyPlans{ta.gateway}
@@ -1497,7 +1500,7 @@ func TestSetupBuildsTheImagesForItsDriver(t *testing.T) {
 			}
 			ta.gateway.applyRes = &openshell.GatewayApplyResult{}
 			_, _ = useGateway(ta)
-			ta.ok(t, ta.Setup(bg, SetupOptions{Yes: true, NoWrappers: true, Harnesses: []string{"claude"}}))
+			ta.ok(t, ta.Setup(bg, opts))
 			if len(ta.images.recs) != 1 || ta.images.recs[0].MicroVM != tc.microVM {
 				t.Fatalf("built %+v, want MicroVM=%t:\n%s", ta.images.recs, tc.microVM, ta.output())
 			}
@@ -1545,20 +1548,22 @@ func TestSetupInstallsWhatTheMicroVMDriverNeeds(t *testing.T) {
 		t.Fatalf("e2fsprogs %d, resigned %d, plans %+v", inst.e2fsprogs, inst.resigned, ta.gateway.planned)
 	}
 
+	// --yes and --install-openshell take the Docker default on a Mac, so
+	// the MicroVM driver's prerequisites are not installed behind a no.
 	for _, o := range []SetupOptions{{Yes: true}, {InstallOpenShell: true, NonInteractive: true}} {
 		ta, inst = setup(t, "")
 		o.SkipImages, o.NoWrappers = true, true
 		ta.ok(t, ta.Setup(bg, o))
 		lacks(t, ta.output(), e2fsprogs, resign)
-		if inst.e2fsprogs != 1 || inst.resigned != 1 {
+		if inst.e2fsprogs != 0 || inst.resigned != 0 {
 			t.Fatalf("%+v: e2fsprogs %d, resigned %d", o, inst.e2fsprogs, inst.resigned)
 		}
 	}
 
 	// --non-interactive alone installs no software.
-	ta, inst = setup(t, "")
-	ta.IO.TTY = false
-	wantErr(t, ta.Setup(bg, SetupOptions{NonInteractive: true, SkipImages: true}), "the OpenShell MicroVM driver needs e2fsprogs")
+	// (Answered by hand: a yes to MicroVMs, a no to the install.)
+	ta, inst = setup(t, "y\nn\n")
+	wantErr(t, ta.Setup(bg, SetupOptions{SkipImages: true}), "the OpenShell MicroVM driver needs e2fsprogs")
 	has(t, ta.output(), "✗ MicroVM driver: e2fsprogs, which it formats its disks with", "→ run `brew install e2fsprogs`, then `defenseclaw sandbox setup` again")
 	if inst.e2fsprogs != 0 || len(ta.gateway.planned) != 0 {
 		t.Fatalf("installed %d, plans %+v", inst.e2fsprogs, ta.gateway.planned)
@@ -1574,11 +1579,11 @@ func TestSetupInstallsWhatTheMicroVMDriverNeeds(t *testing.T) {
 
 	// The formula's post-install step signs only its own driver: for one
 	// elsewhere setup neither asks nor runs it, and names that binary.
-	ta, inst = setup(t, "")
+	ta, inst = setup(t, "y\n")
 	ta.HostDoctor = macReport(openshell.DriverDocker, func(r *openshell.DoctorReport) {
 		r.MicroVM.DriverBinary, r.MicroVM.DriverFromFormula, r.MicroVM.HypervisorSigned = "/opt/openshell/libexec/openshell-driver-vm", false, false
 	})
-	wantErr(t, ta.Setup(bg, SetupOptions{Yes: true, SkipImages: true}), "the OpenShell MicroVM driver needs /opt/openshell/libexec/openshell-driver-vm signed")
+	wantErr(t, ta.Setup(bg, SetupOptions{SkipImages: true}), "the OpenShell MicroVM driver needs /opt/openshell/libexec/openshell-driver-vm signed")
 	has(t, ta.output(), "✗ MicroVM driver: /opt/openshell/libexec/openshell-driver-vm is not signed for Apple's Hypervisor",
 		"→ sign /opt/openshell/libexec/openshell-driver-vm with the com.apple.security.hypervisor entitlement")
 	lacks(t, ta.output(), resign)
@@ -1589,11 +1594,11 @@ func TestSetupInstallsWhatTheMicroVMDriverNeeds(t *testing.T) {
 	// The driver searches only the kegs under /opt/homebrew and /usr/local
 	// (GAP-0112): an e2fsprogs built in a Homebrew of your own is never
 	// found, so setup builds nothing there, and says where it goes.
-	ta, inst = setup(t, "")
+	ta, inst = setup(t, "y\n")
 	ta.HostDoctor = macReport(openshell.DriverDocker, func(r *openshell.DoctorReport) {
 		r.MicroVM.E2fsprogs, r.MicroVM.OwnBrewPrefix = "", "/Users/a/homebrew"
 	})
-	wantErr(t, ta.Setup(bg, SetupOptions{Yes: true, SkipImages: true}), "the OpenShell MicroVM driver needs e2fsprogs where it looks for it")
+	wantErr(t, ta.Setup(bg, SetupOptions{SkipImages: true}), "the OpenShell MicroVM driver needs e2fsprogs where it looks for it")
 	has(t, ta.output(), "✗ MicroVM driver: the MicroVM driver looks for e2fsprogs only in the Homebrew kegs under /opt/homebrew and /usr/local, "+
 		"not in your Homebrew at /Users/a/homebrew: have an administrator install it with a Homebrew there (brew install e2fsprogs)")
 	if inst.e2fsprogs != 0 || len(ta.gateway.planned) != 0 {
@@ -1648,9 +1653,9 @@ func TestSetupListsTheSandboxesASwitchStrands(t *testing.T) {
 		{openshell.Check{ID: openshell.CheckIDLandlock, Title: "Landlock", Status: openshell.StatusPass, Detail: "ABI 6 in the Linux VM Docker runs in"},
 			"2 sandboxes run on the docker driver (dc-a, dc-b): bring back any copy-mode work now (`defenseclaw sandbox pull NAME --apply`, or --branch or --patch-out FILE), then confirm the project, branch or patch file contains the work before switching; afterward it is reachable only by switching back"},
 	} {
-		// The MicroVM and telemetry questions take their default (yes), the
-		// restart its default (no).
-		ta := newTestApp(t, "\n\n\n", sandboxapi.Sandbox{Name: "dc-b"}, sandboxapi.Sandbox{Name: "dc-a"})
+		// The MicroVM question is answered yes, the telemetry question takes its
+		// default (yes), the restart its default (no).
+		ta := newTestApp(t, "y\n\n\n", sandboxapi.Sandbox{Name: "dc-b"}, sandboxapi.Sandbox{Name: "dc-a"})
 		writeConfig(t, ta, "")
 		ta.GOOS = "darwin"
 		ta.HostDoctor = macReport(openshell.DriverDocker, func(r *openshell.DoctorReport) { *r.Get(openshell.CheckIDLandlock) = tc.landlock })
@@ -2410,6 +2415,84 @@ func TestTeardownDryRunSaysWhatItKnowsOfTheSandboxes(t *testing.T) {
 	}
 	ta.ok(t, ta.Teardown(bg, TeardownOptions{DryRun: true}))
 	has(t, ta.output(), "  sandboxes         dc-claude-kept (stopped), dc-claude-live\n")
+}
+
+// GAP-0917: with sandboxes off because another account runs the machine's
+// OpenShell gateway, an account that kept no sandbox record has no sandbox of
+// its own to lose, so the dry run says "none" (the uninstall then proceeds).
+// One that does keep a record stays unknown: it may have work to lose.
+func TestTeardownDryRunWithAnotherAccountsGatewayAndNoSandboxRecord(t *testing.T) {
+	setup := func(t *testing.T) *testApp {
+		ta := newTestApp(t, "")
+		writeConfig(t, ta, "")
+		if _, err := image.NewStore(ta.Cfg.DataDir).Owner(); err != nil {
+			t.Fatal(err)
+		}
+		ta.daemon.status = sandboxapi.Status{Enabled: false, GatewayElsewhere: "uid 1001"}
+		ta.daemon.errors["GET "+sandboxapi.PathSandboxes] = &sandboxapi.Error{Code: sandboxapi.CodeDisabled, Message: "sandboxes are off"}
+		ta.API = ta.daemon.client()
+		ta.OpenShell = func(context.Context) (openshell.Client, *openshell.Registration, error) {
+			return nil, nil, errors.New("permission denied: the gateway belongs to another account")
+		}
+		return ta
+	}
+	t.Run("no record", func(t *testing.T) {
+		ta := setup(t)
+		ta.ok(t, ta.Teardown(bg, TeardownOptions{DryRun: true}))
+		has(t, ta.output(), "  sandboxes         none\n")
+		lacks(t, ta.output(), "unknown (neither")
+	})
+	t.Run("a record is kept", func(t *testing.T) {
+		ta := setup(t)
+		writeFile(t, filepath.Join(ta.Cfg.DataDir, "sandboxes", "manager", "dc-claude-mine.json"),
+			`{"version":1,"name":"dc-claude-mine","harness":"claudecode"}`)
+		ta.ok(t, ta.Teardown(bg, TeardownOptions{DryRun: true}))
+		has(t, ta.output(), "  sandboxes         unknown (neither the sandbox daemon nor the OpenShell gateway listed them)\n")
+	})
+	// Anything short of "no sandbox state at all" stays unknown (clirev P3).
+	unknown := "  sandboxes         unknown (neither the sandbox daemon nor the OpenShell gateway listed them)\n"
+	t.Run("a malformed record", func(t *testing.T) {
+		ta := setup(t)
+		writeFile(t, filepath.Join(ta.Cfg.DataDir, "sandboxes", "manager", "dc-claude-mine.json"), "{not json")
+		ta.ok(t, ta.Teardown(bg, TeardownOptions{DryRun: true}))
+		has(t, ta.output(), unknown)
+	})
+	t.Run("a record that is not a plain file", func(t *testing.T) {
+		ta := setup(t)
+		if err := os.MkdirAll(filepath.Join(ta.Cfg.DataDir, "sandboxes", "manager", "dc-claude-mine.json"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		ta.ok(t, ta.Teardown(bg, TeardownOptions{DryRun: true}))
+		has(t, ta.output(), unknown)
+	})
+	t.Run("an orphaned sandbox folder", func(t *testing.T) {
+		ta := setup(t)
+		writeFile(t, filepath.Join(ta.Cfg.DataDir, "sandboxes", "dc-claude-left", "run-config", "settings.json"), "{}")
+		ta.ok(t, ta.Teardown(bg, TeardownOptions{DryRun: true}))
+		has(t, ta.output(), unknown)
+	})
+	t.Run("an unreadable records folder", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("a folder cannot be made unreadable here")
+		}
+		ta := setup(t)
+		records := filepath.Join(ta.Cfg.DataDir, "sandboxes", "manager")
+		if err := os.MkdirAll(records, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(records, 0); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(records, 0o755) })
+		ta.ok(t, ta.Teardown(bg, TeardownOptions{DryRun: true}))
+		has(t, ta.output(), unknown)
+	})
+	t.Run("sandboxes off without another account's gateway", func(t *testing.T) {
+		ta := setup(t)
+		ta.daemon.status = sandboxapi.Status{Enabled: false}
+		ta.ok(t, ta.Teardown(bg, TeardownOptions{DryRun: true}))
+		has(t, ta.output(), "unknown (neither the sandbox daemon nor the OpenShell gateway listed them)")
+	})
 }
 
 // A teardown without the daemon also removes what the daemon's delete would

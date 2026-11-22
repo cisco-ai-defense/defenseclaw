@@ -1017,6 +1017,9 @@ def openclaw_needs_interception_advisory(raw_version: str | None) -> bool:
 # before_tool_call and the approvals.plugin config block). Older releases
 # reject approvals.plugin, so their gateway no longer starts (GAP-1956).
 OPENCLAW_PLUGIN_APPROVALS_SINCE = "2026.3.28"
+# First OpenClaw with the native plugin hooks; native Windows needs it
+# (Go connector.OpenClawNativeHooksSince).
+OPENCLAW_NATIVE_HOOKS_SINCE = "2026.8.35"
 
 
 # Where OpenClaw shows a plugin approval request: the Control UI, chat
@@ -1083,6 +1086,15 @@ def openclaw_bedrock_plugin_missing(raw_version: str | None, openclaw_config: An
         return True
     deny = plugins.get("deny")
     return isinstance(deny, list) and OPENCLAW_BEDROCK_PLUGIN_ID in deny
+
+
+def openclaw_lacks_native_hooks(raw_version: str | None) -> bool:
+    """Return True for a known OpenClaw version older than the native plugin hooks."""
+
+    normalized = normalize_agent_version(raw_version or "")
+    if not normalized:
+        return False
+    return compare_agent_versions(normalized, OPENCLAW_NATIVE_HOOKS_SINCE) < 0
 
 
 def openclaw_lacks_plugin_approvals(raw_version: str | None) -> bool:

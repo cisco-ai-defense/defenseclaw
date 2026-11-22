@@ -1555,6 +1555,7 @@ def _apply_per_connector_asset_policy_field(cfg: object | dict[str, Any], key: s
 
 _BOOL_FIELD_KEYS = frozenset(
     {
+        "routing.allow_user_override",
         "admission.defaults.allow_list_bypass_scan",
         "notifications.enabled",
         "notifications.block_enforced",
@@ -1626,9 +1627,11 @@ _BOOL_FIELD_KEYS = frozenset(
 # Decision model numbers are fractions (thresholds) or fractional seconds.
 _FLOAT_FIELD_KEYS = frozenset(
     {
+        "routing.min_confidence",
         "decision_model.timeout",
         "decision_model.allow_threshold",
         "decision_model.block_threshold",
+        "decision_model.block_risk_score",
     }
 )
 

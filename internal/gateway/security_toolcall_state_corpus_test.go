@@ -88,7 +88,7 @@ func (matrix toolCallStateConfusionMatrix) metrics() (precision, recall, f1 floa
 // checked-in corpus, not production prevalence or generalization.
 func TestSecuritySuiteToolCallState(t *testing.T) {
 	const connectorName = "claudecode"
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	cases := readJSONL[toolCallStateCorpusCase](t, "toolcall", "stateful.jsonl")
 	if len(cases) == 0 || len(cases) > 16 {
 		t.Fatalf("stateful corpus size=%d, want 1..16", len(cases))

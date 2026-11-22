@@ -7,7 +7,6 @@ package gateway
 
 import (
 	"encoding/json"
-	"strings"
 	"testing"
 )
 
@@ -29,7 +28,7 @@ func nativeWriteBlockedOverBound(t *testing.T, got string, overBound bool) bool 
 	if overBound && resp.Action == "alert" && len(resp.Findings) > 0 {
 		onlyBound := true
 		for _, finding := range resp.Findings {
-			onlyBound = onlyBound && strings.HasPrefix(finding, operandBoundRuleID+":")
+			onlyBound = onlyBound && operandBoundTruncatedString(finding)
 		}
 		if onlyBound {
 			return false

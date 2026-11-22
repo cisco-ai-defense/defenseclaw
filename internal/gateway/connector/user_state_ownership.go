@@ -70,7 +70,8 @@ func ManagedUserStateFile(rel string) bool {
 	name := parts[1]
 	switch parts[0] {
 	case "hooks":
-		if slices.Contains([]string{".hookcfg", ".hookcfg.lock", ".hookcfg.legacy", ".token", ".hook-api-token-publish.lock", ".gateway-helper", ".config-record", "hermes-direct-native-state.json"}, name) {
+		if slices.Contains([]string{".hookcfg", ".hookcfg.lock", ".hookcfg.legacy", ".token", ".hook-api-token-publish.lock", ".gateway-helper", ".config-record", "hermes-direct-native-state.json"}, name) ||
+			slices.Contains(outageModeLookFiles, name) {
 			return true
 		}
 		for _, scope := range OTLPPathTokenScopes() {

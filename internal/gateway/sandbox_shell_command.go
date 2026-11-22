@@ -52,9 +52,28 @@ func sandboxShellCommand(ctx context.Context, connectorName, event, toolName, ac
 		}
 	}
 	if command, ok := connector.ShellCommandArgs(connectorName, toolName, args); ok {
-		return command, actionTool
+		return command, shellCommandJudgeTool(connectorName, toolName, actionTool)
 	}
 	return nil, ""
+}
+
+// shellCommandJudgeTool is the tool a shell call's command alone is judged
+// as: the PowerShell tool for Copilot's powershell tool, whose commands
+// Copilot runs in PowerShell, else actionTool. On Windows the call itself is
+// judged as shell (agentHookTrustedActionTool), in the dialect its text
+// infers, and a launcher line inferred as POSIX loses the backslashes of an
+// unquoted Windows path: pwsh -wd C:\Users\a\.defenseclaw -Command
+// "Set-Content config.yaml ..." moved to a folder that does not exist, so the
+// write was allowed while the same move spelled Set-Location blocked
+// (rel-1-0-10:GAP-0198). As for Codex (codexPowerShellCommand), the command
+// alone is also judged as PowerShell, the launcher reading of the PowerShell
+// tool; that reading only adds to the call's verdict.
+func shellCommandJudgeTool(connectorName, toolName, actionTool string) string {
+	if strings.EqualFold(strings.TrimSpace(connectorName), "copilot") &&
+		strings.EqualFold(strings.TrimSpace(toolName), "powershell") {
+		return "powershell"
+	}
+	return actionTool
 }
 
 // inspectSandboxShellToolPolicyCtx is inspectTrustedToolPolicyCtx for a
@@ -92,7 +111,8 @@ func (a *APIServer) inspectSandboxShellToolPolicyCtx(
 	if req != nil {
 		connectorName = firstNonEmpty(req.Connector, action.Connector)
 	}
-	unverified := len(command) == 0 && req != nil && connector.IsShellTool(connectorName, req.Tool)
+	unverified := len(command) == 0 && req != nil && connector.IsShellTool(connectorName, req.Tool) &&
+		!connector.BlankShellCommand(connectorName, req.Tool, req.Args)
 	if len(command) == 0 && !unverified {
 		return a.inspectTrustedToolPolicyCtx(ctx, req, action)
 	}
@@ -145,7 +165,9 @@ func (a *APIServer) inspectSandboxShellToolPolicyCtx(
 		DowngradeReadOnlyDataArgs:     action.DowngradeReadOnlyDataArgs,
 		SkipLocalFilesystemResolution: action.SkipLocalFilesystemResolution,
 		ResolvedWriteTargets:          action.ResolvedWriteTargets,
+		ShellStartup:                  action.ShellStartup,
 		SandboxGuestCWD:               action.SandboxGuestCWD,
+		windowsDialectReadings:        action.windowsDialectReadings,
 	})
 	if plain, ok := codexPlainShellCommand(a.decisionConfig(ctx), connectorName, req, action, commandTool); ok {
 		// Codex runs the command in PowerShell here, but the text may be
@@ -177,10 +199,50 @@ func (a *APIServer) inspectSandboxShellToolPolicyCtx(
 				SkipLocalFilesystemResolution: action.SkipLocalFilesystemResolution,
 				ResolvedWriteTargets:          action.ResolvedWriteTargets,
 				SandboxGuestCWD:               action.SandboxGuestCWD,
+				windowsDialectReadings:        action.windowsDialectReadings,
 			}))
 		}
 	}
-	return mergeSandboxShellCommandVerdict(ctx, a.decisionConfig(ctx), connectorName, verdict, findings)
+	return withSecondReadingDetections(
+		mergeSandboxShellCommandVerdict(ctx, a.decisionConfig(ctx), connectorName, verdict, findings),
+		findings,
+	)
+}
+
+// withSecondReadingDetections records on verdict the detection-only findings
+// of loaded rule-pack rules that the second reading proved, as the first
+// reading records its own: listed with their severity, the action unchanged.
+// On a Windows host Codex runs its Bash tool in PowerShell, and the call's own
+// reading of PowerShell text it infers as POSIX can fail, so the PowerShell
+// reading here is the only one that reads the call. The merge keeps only the
+// findings that decide, so a detection-only rule proved by that reading (the
+// PowerShell TCP command loop) never reached the verdict or the audit, while
+// the same text on a PowerShell tool reported it (rel-1-0-10:GAP-0161).
+// Findings of no rule-pack rule (parse and limit records of the second
+// reading) are not added: the call's own reading reports its own.
+func withSecondReadingDetections(verdict *ToolInspectVerdict, findings []RuleFinding) *ToolInspectVerdict {
+	if verdict == nil {
+		return nil
+	}
+	var detections []RuleFinding
+	for _, finding := range findings {
+		if finding.contributesToEnforcement() || finding.contributesToAlertOnly() ||
+			!activeRulePackRuleID(finding.RuleID) {
+			continue
+		}
+		detections = append(detections, finding)
+	}
+	if len(detections) == 0 {
+		return verdict
+	}
+	out := withSandboxShellCommandFindings(verdict, detections)
+	if severity := HighestSeverity(detections); severityRank[severity] > severityRank[strings.ToUpper(strings.TrimSpace(out.Severity))] {
+		raised := *out
+		raised.Severity = severity
+		raised.Confidence = HighestConfidence(detections, severity)
+		out = &raised
+	}
+	return out
 }
 
 // codexPlainShellCommand is the command of a Codex shell call in the plain
@@ -226,26 +288,36 @@ func unverifiedShellCommandFinding(enforcementCapable bool) RuleFinding {
 // mergeSandboxShellCommandVerdict raises verdict to the action findings, the
 // command judged on its own, decide at the connector's thresholds, when that
 // is stronger. The deciding findings replace the call's findings of the same
-// rules (there only candidates) and name the reason. A verdict at least as
-// strong is returned unchanged.
+// rules (there only candidates) and name the reason.
+//
+// A verdict at least as strong keeps its action, severity and reason, but
+// still records the deciding findings it does not name yet: both readings of
+// the call are judged, the verdict is the stricter one, and neither is
+// silently dropped. A rule the full call proves from a partial parse
+// (withProvenScopeFindings) already blocks it, and the conservative finding
+// of the second reading (TOOL-ARGS-CONFLICT for two spellings of the command
+// key, TOOL-ARGS-UNVERIFIED for no single command) was lost from the verdict
+// and its audit (rel-1-0-10:GAP-0833). A verdict that gains nothing is
+// returned unchanged.
 func mergeSandboxShellCommandVerdict(ctx context.Context, cfg *config.Config, connectorName string, verdict *ToolInspectVerdict, findings []RuleFinding) *ToolInspectVerdict {
 	action := profileMeetActionForFindings(ctx, cfg, connectorName, findings, true, false)
-	if strongerGuardrailAction(verdict.Action, action) == verdict.Action {
-		if verdict.decisionConfirm && action == guardrailActionConfirm {
-			// A rule confirms the call too: the confirm is no longer the
-			// decision model's alone, so it keeps the rule mapping (a block
-			// where the agent cannot ask).
-			out := *verdict
-			out.decisionConfirm = false
-			return &out
-		}
-		return verdict
-	}
 	deciding := make([]RuleFinding, 0, len(findings))
 	for _, finding := range findings {
 		if finding.contributesToEnforcement() || finding.contributesToAlertOnly() {
 			deciding = append(deciding, finding)
 		}
+	}
+	if strongerGuardrailAction(verdict.Action, action) == verdict.Action {
+		out := verdict
+		if verdict.decisionConfirm && action == guardrailActionConfirm {
+			// A rule confirms the call too: the confirm is no longer the
+			// decision model's alone, so it keeps the rule mapping (a block
+			// where the agent cannot ask).
+			copied := *verdict
+			copied.decisionConfirm = false
+			out = &copied
+		}
+		return withSandboxShellCommandFindings(out, deciding)
 	}
 	merged := *verdict
 	merged.Action = action
@@ -278,4 +350,33 @@ func mergeSandboxShellCommandVerdict(ctx context.Context, cfg *config.Config, co
 	}
 	merged.Reason = "matched: " + strings.Join(reasons, ", ")
 	return &merged
+}
+
+// withSandboxShellCommandFindings records on verdict the deciding findings of
+// a second reading whose action is not stronger: each rule verdict does not
+// name yet is added to its findings, and its action, severity and reason are
+// kept. With nothing to add, verdict itself is returned.
+func withSandboxShellCommandFindings(verdict *ToolInspectVerdict, deciding []RuleFinding) *ToolInspectVerdict {
+	var added []RuleFinding
+	for _, finding := range deciding {
+		label := finding.RuleID + ":" + finding.Title
+		if slices.Contains(verdict.Findings, label) ||
+			slices.ContainsFunc(added, func(f RuleFinding) bool { return f.RuleID == finding.RuleID }) {
+			continue
+		}
+		added = append(added, finding)
+	}
+	if len(added) == 0 {
+		return verdict
+	}
+	out := *verdict
+	out.Findings = append([]string(nil), verdict.Findings...)
+	out.DetailedFindings = append([]RuleFinding(nil), verdict.DetailedFindings...)
+	for _, finding := range added {
+		out.Findings = append(out.Findings, finding.RuleID+":"+finding.Title)
+		if !slices.ContainsFunc(out.DetailedFindings, func(f RuleFinding) bool { return f.RuleID == finding.RuleID }) {
+			out.DetailedFindings = append(out.DetailedFindings, finding)
+		}
+	}
+	return &out
 }

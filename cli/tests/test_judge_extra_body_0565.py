@@ -3,12 +3,12 @@
 import json
 from types import SimpleNamespace
 
-from click.testing import CliRunner
 import yaml
-
+from click.testing import CliRunner
 from defenseclaw import config as config_module
 from defenseclaw.commands import cmd_config
 from defenseclaw.context import AppContext
+
 from tests.environment import isolated_home_env
 
 

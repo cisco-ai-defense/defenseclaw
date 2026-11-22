@@ -219,9 +219,18 @@ func (d *Daemon) IsRunning() (bool, int) {
 			// A live process this account may not signal is another
 			// account's. Its record (start identity and this data
 			// directory, checked above) may name the gateway an
-			// administrator started for this home whose identity this
+			// administrator started for this home whose executable this
 			// account could not read; that is not stale evidence this
-			// account may discard.
+			// account may discard. A live start identity that this
+			// account can read and that differs from the record is: the
+			// PID was reused by another account's program, and the record
+			// kept status and stop pinned to it (CodeRabbit on #1427).
+			// An identity that cannot be read keeps the record, and so does an older
+			// Darwin record within the five-second window of its launch time (its
+			// ps lstart token depends on locale and timezone). On Windows
+			// access denied alone never removes the record
+			// (rel-1-0-10:GAP-1314, GAP-1473): settleUnsignalableRecord.
+			d.settleUnsignalableRecord(info)
 			return false, 0
 		}
 		// Closes (chain ): a stale gateway.pid
@@ -241,6 +250,55 @@ func (d *Daemon) IsRunning() (bool, int) {
 		return false, 0
 	}
 	return true, info.PID
+}
+
+// unsignalableIdentity is what the live start identity of a process this
+// account may not signal says about the record IsRunning found for it (a
+// record that binds this home and carries a start identity).
+type unsignalableIdentity int
+
+const (
+	// unsignalableIdentitySame: the live start identity is the recorded one,
+	// or an older Darwin record within its launch window. The record names
+	// this process: it is kept.
+	unsignalableIdentitySame unsignalableIdentity = iota
+	// unsignalableIdentityUnknown: no live start identity could be read.
+	// That proves nothing about the record: it is kept.
+	unsignalableIdentityUnknown
+	// unsignalableIdentityReused: a live start identity that was read
+	// contradicts the record, positive proof the PID was reused by another
+	// program: the record is removed.
+	unsignalableIdentityReused
+)
+
+// unsignalableStartIdentity is holderStartIdentity; tests replace it with a
+// fake process table.
+var unsignalableStartIdentity = holderStartIdentity
+
+// settleUnsignalableRecord compares the live start identity of a process
+// this account may not signal with the one its record carries, removes the
+// record only when they contradict, and reports which it was.
+//
+// The live identity is holderStartIdentity: on Windows the creation time
+// through a PROCESS_QUERY_LIMITED_INFORMATION handle or, when even that open
+// is denied (this account's gateway started elevated in another logon
+// session), the creation time the kernel's process list gives without a
+// handle, in the same text; elsewhere it is processStartIdentity. It is
+// compared with the record here. verifyStartIdentity re-reads the identity
+// through a process handle, which on Windows is the open that was just
+// denied, so its false alone is no proof (rel-1-0-10:GAP-1473: every
+// record of an unopenable gateway was removed). It is consulted only after
+// a direct mismatch, for the Darwin launch-window migration.
+func (d *Daemon) settleUnsignalableRecord(info pidInfo) unsignalableIdentity {
+	live, err := unsignalableStartIdentity(info.PID)
+	if err != nil || live == "" {
+		return unsignalableIdentityUnknown
+	}
+	if live == info.StartIdentity || d.verifyStartIdentityForAuthenticatedMigration(info) {
+		return unsignalableIdentitySame
+	}
+	d.removePIDFileIfStarted(info)
+	return unsignalableIdentityReused
 }
 
 // legacyRecordNamesGateway reports whether pid runs a gateway binary: one
@@ -922,8 +980,6 @@ func readGatewayTokenDotenv(path string) map[string]string {
 	if err != nil {
 		return values
 	}
-	// An adopted gateway token copy never shadows the one the operator saved.
-	shadowed := envvars.ShadowedAdoptedGatewayTokens(data)
 	for _, line := range strings.Split(string(data), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
@@ -935,7 +991,7 @@ func readGatewayTokenDotenv(path string) map[string]string {
 		}
 		key = strings.TrimSpace(key)
 		canonicalKey, ok := canonicalGatewayTokenEnvironmentKey(key)
-		if !ok || shadowed.Has(canonicalKey) {
+		if !ok {
 			continue
 		}
 		value = strings.TrimSpace(value)

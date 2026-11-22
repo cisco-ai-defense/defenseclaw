@@ -61,9 +61,9 @@ enum EntityState: String {
         switch raw.lowercased() {
         case "active", "running", "enabled", "clean", "pass", "ok", "healthy", "allow", "allowed", "connected":
             return .active
-        case "blocked", "error", "rejected", "stopped", "fail", "failed", "block", "offline":
+        case "blocked", "error", "rejected", "stopped", "fail", "failed", "failing", "block", "offline":
             return .blocked
-        case "warn", "warning", "reconnecting", "starting", "stale", "degraded", "observe", "not configured", "unconfigured":
+        case "warn", "warning", "reconnecting", "starting", "stale", "degraded", "observe", "not configured", "unconfigured", "unavailable":
             return .warn
         case "quarantined":
             return .quarantined
@@ -89,6 +89,12 @@ struct HealthSnapshot: Sendable {
     /// The SERVICES Telemetry row detail (TUI telemetry_detail()), e.g.
     /// "1 destination: splunk-o11y (99.9% delivered)".
     var telemetryDetail: String = ""
+    /// telemetry.details.retention_state / retention_failure — the bounded
+    /// audit-store retention controller state the Overview storage line shows
+    /// as "controller=…" (v8_status.retention_health_from_gateway). Empty when
+    /// the gateway publishes no known state.
+    var retentionState: String = ""
+    var retentionFailure: String = ""
     /// The singular primary "connector" object from /health — drives the
     /// connector-drift and zero-requests notices (distinct from connectors[]).
     var primaryConnector: PrimaryConnectorHealth?
@@ -142,7 +148,18 @@ struct ObservabilityDestinationRow: Identifiable, Sendable {
     var signals: String
     var routing: String     // "" renders as "—"
     var endpoint: String    // pre-redacted for display
+    var policyState: String = ""
+    var queue: String = ""
+    var healthReason: String = ""
+    var circuit: String = ""
     var id: String { "\(target)/\(name)" }
+
+    var detail: String {
+        ["Policy: \(policyState)", "Health: \(state)", healthReason,
+         "Signals: \(signals)", routing, queue.isEmpty ? "" : "Queue: \(queue)",
+         circuit.isEmpty ? "" : "Circuit: \(circuit)", "Endpoint: \(endpoint)"]
+            .filter { !$0.isEmpty }.joined(separator: "\n")
+    }
 }
 
 struct ConnectorHealth: Identifiable, Sendable {

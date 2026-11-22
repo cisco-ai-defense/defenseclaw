@@ -741,9 +741,14 @@ func hermesToolCallLifecycle() ToolCallLifecycleContract {
 			StructuredActionEvents: []string{"pre_tool_call"},
 			ResultContentEvents:    []string{"post_tool_call"},
 			StateTransitionEvents:  []string{},
+			// The result transforms and the approval round trip carry a
+			// tool name but are not a tool call of their own: audit only, or
+			// every call would be reported unrecorded (GAP-0339 review F5).
 			AuditOnlyEvents: []string{
 				"on_session_start", "on_session_end", "on_session_finalize",
 				"on_session_reset", "subagent_start", "subagent_stop",
+				"transform_tool_result", "transform_terminal_output",
+				"pre_approval_request", "post_approval_response",
 			},
 		},
 		CoveredToolSurfaces: []ToolSurface{
@@ -764,6 +769,9 @@ func hermesToolCallLifecycle() ToolCallLifecycleContract {
 
 func hermesToolCallLifecycleV2() ToolCallLifecycleContract {
 	contract := hermesToolCallLifecycle()
+	// post_llm_call (v2 only) is the model's reply, an AID tool-result
+	// surface but no tool call: audit only.
+	contract.Routing.AuditOnlyEvents = append(append([]string(nil), contract.Routing.AuditOnlyEvents...), "post_llm_call")
 	contract.OfficialSourceURLs = []string{
 		"https://github.com/NousResearch/hermes-agent/blob/345cd2b057a452236de401d3534b8502a7465e8d/agent/shell_hooks.py",
 		"https://github.com/NousResearch/hermes-agent/blob/345cd2b057a452236de401d3534b8502a7465e8d/hermes_cli/plugins.py",
@@ -797,9 +805,11 @@ func cursorToolCallLifecycle() ToolCallLifecycleContract {
 				"afterMCPExecution", "afterFileEdit", "afterTabFileEdit",
 			},
 			StateTransitionEvents: []string{},
+			// The agent's reply and thought are AID tool-result surfaces
+			// (they may hold tool output) but no tool call: audit only.
 			AuditOnlyEvents: []string{
 				"sessionStart", "sessionEnd", "subagentStart", "subagentStop",
-				"stop", "workspaceOpen",
+				"stop", "workspaceOpen", "afterAgentResponse", "afterAgentThought",
 			},
 		},
 		CoveredToolSurfaces: []ToolSurface{
@@ -848,6 +858,44 @@ func devinToolCallLifecycle() ToolCallLifecycleContract {
 		Limitations: []string{
 			"Devin publishes session_id and per-turn prompt_id but no stable per-tool invocation identifier, so PreToolUse/PostToolUse state remains detection-only.",
 			"PostToolUse success/failure is authoritative only through tool_response.success; hook errors other than exit code 2 fail open upstream.",
+		},
+	}
+}
+
+// kiroSandboxToolCallLifecycle is the tool-call lifecycle of the pinned Kiro
+// CLI 2.x sandbox build (kiro-cli-hooks-v1). Without one no Kiro tool call
+// reached a tool chain on a Substrate actor or in an OpenShell image: the
+// zero lifecycle routes no event (substrate-1 GAP-0338). Kiro names no tool
+// invocation in its hooks, so, as for Devin, a call's result is never tied
+// to it and the secret-read chain starts at the proposal.
+func kiroSandboxToolCallLifecycle() ToolCallLifecycleContract {
+	return ToolCallLifecycleContract{
+		Version:                           ToolCallLifecycleContractVersion,
+		PreProposalEvents:                 []string{"preToolUse"},
+		AuthoritativeSuccessEvents:        []string{"postToolUse"},
+		AuthoritativeFailureEvents:        []string{"postToolUse"},
+		AuthoritativeDenialEvents:         []string{},
+		AuthoritativePendingDiscardEvents: []string{"stop"},
+		AuthoritativeTerminalEvents:       []string{},
+		InvocationIDAuthority:             ToolInvocationIDNone,
+		OutcomeAuthority:                  ToolOutcomeResultPayload,
+		StatefulEnforcementLevel:          StatefulToolDetectionOnly,
+		Routing: ToolEventRouting{
+			StructuredActionEvents: []string{"preToolUse"},
+			ResultContentEvents:    []string{"postToolUse"},
+			StateTransitionEvents:  []string{},
+			AuditOnlyEvents:        []string{"userPromptSubmit", "stop"},
+		},
+		CoveredToolSurfaces: []ToolSurface{
+			ToolSurfaceGeneric, ToolSurfaceShell, ToolSurfaceFileRead,
+			ToolSurfaceFileWrite, ToolSurfaceFileEdit, ToolSurfaceMCP,
+		},
+		OfficialSourceURLs: []string{
+			"https://kiro.dev/docs/cli/hooks/",
+		},
+		Limitations: []string{
+			"Kiro CLI 2.x hooks name no tool invocation, so preToolUse and postToolUse are not paired: chain state is detection-only and a credentials read starts the secret-read chain at preToolUse.",
+			"Only exit 2 from preToolUse vetoes a call; other exit codes are warnings and the tool runs.",
 		},
 	}
 }

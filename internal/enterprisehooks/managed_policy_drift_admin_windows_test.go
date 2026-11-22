@@ -59,6 +59,7 @@ func TestWindowsClaudeManagedPolicyDriftIsPutBackByAnElevatedAdministrator(t *te
 
 // GAP-2336: status and verify name a changed or removed drop-in (read only).
 func TestWindowsClaudeManagedPolicyDriftNamesAChangedOrRemovedDropIn(t *testing.T) {
+	requireGAP633Elevated(t) // a standard user is refused the managed policy folder (rel-1-0-10 GAP-1519)
 	fixture := newWindowsManagedInstallFixture(t, map[string]interface{}{"allowManagedHooksOnly": true})
 	if _, err := Install(context.Background(), windowsManagedInstallOptions(fixture)); err != nil {
 		t.Fatal(err)

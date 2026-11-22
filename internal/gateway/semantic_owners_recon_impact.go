@@ -68,8 +68,11 @@ var semanticReconImpactOwners = map[string]semanticOwner{
 		prerequisite:     actionfacts.ExactDirectoryCredentialCompromise,
 		suppressFallback: actionfacts.DirectoryCredentialAcquisitionSafeNegative,
 	},
+	// The non-dump half also owns credentialed NetExec / CrackMapExec domain
+	// service use at the same HIGH (rel-1-0-10:GAP-0014, folded here to keep the
+	// default catalog's semantic headroom; see directoryTicketRequestOrServiceUse).
 	"credential.directory_ticket_request": {
-		prerequisite:     actionfacts.ExactDirectoryCredentialTicketRequest,
+		prerequisite:     directoryTicketRequestOrServiceUse,
 		suppressFallback: actionfacts.DirectoryCredentialAcquisitionSafeNegative,
 	},
 	"credential.pkcs12_private_key_extract": {
@@ -255,7 +258,7 @@ var semanticReconImpactOwners = map[string]semanticOwner{
 	},
 	"CMD-CHMOD-WORLD": alertOnlyReconImpactOwnerWithAliases(
 		actionfacts.OperationPermissionChange,
-		accessControlMutationDisposition,
+		worldAccessControlDisposition,
 		"CMD-CHOWN-ROOT",
 	),
 	"CMD-DD-IF": {
@@ -447,7 +450,7 @@ func recursiveDeletePrerequisite(facts actionfacts.Facts) bool {
 	for _, command := range facts.Commands {
 		if !reconImpactExecutingOwned(command) ||
 			!hasOperation(command, actionfacts.OperationDelete) ||
-			!recursiveForceDeleteFlags(command) {
+			!recursiveForceDeleteFlags(command) && !unrestrictedFindDelete(command) {
 			continue
 		}
 		if commandOwnsPath(
@@ -570,25 +573,17 @@ func cmdRecursiveQuietFlags(argv []string) bool {
 	return recursive && quiet
 }
 
+// deleteTargetIsCriticalScope reports a delete target that is critical scope
+// (criticalDeleteScope): the roots, the system folders, the active home and
+// the children of the system payload folders.
 func deleteTargetIsCriticalScope(
 	facts actionfacts.Facts,
 	candidate actionfacts.PathFact,
 ) bool {
-	value := canonicalSemanticPath(semanticPathValue(candidate))
-	if value == "/" || windowsDriveRoot(value) {
-		return true
-	}
-	switch strings.TrimRight(value, "/") {
-	case "/bin", "/boot", "/dev", "/etc", "/home", "/lib", "/lib64",
-		"/mnt", "/opt", "/proc", "/root", "/sbin", "/srv", "/sys", "/usr", "/var",
-		"/applications", "/library", "/system", "/users",
-		"c:/program files", "c:/program files (x86)", "c:/programdata",
-		"c:/users", "c:/windows":
-		return true
-	}
-	home := strings.TrimRight(canonicalSemanticPath(facts.ActiveHome), "/")
-	return home != "" &&
-		strings.TrimRight(value, "/") == home
+	return criticalDeleteScope(
+		canonicalSemanticPath(semanticPathValue(candidate)),
+		criticalScopeHome(facts),
+	)
 }
 
 func windowsDriveRoot(value string) bool {
@@ -851,6 +846,70 @@ func shellProgram(value string) bool {
 	default:
 		return false
 	}
+}
+
+// worldAccessControlDisposition is accessControlMutationDisposition for the
+// alert-only CMD-CHMOD-WORLD rule, which also alerts when the command makes
+// a copy of a credentials file group or world readable: a numeric chmod of
+// the destination a copy of the same call wrote, or install -m of the file
+// (rel-1-0-10:GAP-0950). The copy is a credential of its own; the mode
+// widens who reads it as go+r on it does.
+func worldAccessControlDisposition(
+	facts actionfacts.Facts,
+	command actionfacts.CommandFact,
+) (bool, bool) {
+	if credentialCopyMadeReadable(facts, command) {
+		return true, true
+	}
+	return accessControlMutationDisposition(facts, command)
+}
+
+func credentialCopyMadeReadable(facts actionfacts.Facts, command actionfacts.CommandFact) bool {
+	switch strings.ToLower(command.Program) {
+	case "chmod":
+		mode, ok := firstPOSIXPermissionOperand(command.Argv)
+		return ok && actionfacts.ModeOpensRead(mode) &&
+			commandOwnsPath(facts, command.ID, actionfacts.PathAccessMetadata, func(target actionfacts.PathFact) bool {
+				return credentialCopyDestination(facts, command.ID, target)
+			})
+	case "install":
+		mode, ok := posixOptionValue(command.Argv, "-m", "--mode")
+		return ok && actionfacts.ModeOpensRead(mode) &&
+			commandOwnsPath(facts, command.ID, actionfacts.PathAccessRead, func(source actionfacts.PathFact) bool {
+				return credentialSourcePath(facts, source)
+			})
+	}
+	return false
+}
+
+// credentialCopyDestination reports a target that an earlier copy of the
+// same call wrote from a credentials file.
+func credentialCopyDestination(facts actionfacts.Facts, before int64, target actionfacts.PathFact) bool {
+	want := canonicalSemanticPath(semanticPathValue(target))
+	if want == "" {
+		return false
+	}
+	for _, copied := range facts.Commands {
+		if copied.ID >= before || !hasOperation(copied, actionfacts.OperationCopy) {
+			continue
+		}
+		if commandOwnsPath(facts, copied.ID, actionfacts.PathAccessRead, func(source actionfacts.PathFact) bool {
+			return credentialSourcePath(facts, source)
+		}) && commandOwnsPath(facts, copied.ID, actionfacts.PathAccessWrite, func(written actionfacts.PathFact) bool {
+			return canonicalSemanticPath(semanticPathValue(written)) == want
+		}) {
+			return true
+		}
+	}
+	return false
+}
+
+func credentialSourcePath(facts actionfacts.Facts, source actionfacts.PathFact) bool {
+	if privateSecurityMaterial(facts, source) {
+		return true
+	}
+	_, ok := actionfacts.MatchCredentialFileShape(canonicalSemanticPath(semanticPathValue(source)))
+	return ok
 }
 
 func accessControlMutationDisposition(
@@ -1234,10 +1293,10 @@ func privateSecurityMaterial(
 	}
 	return matchesAuthorizedKeys(facts, candidate) ||
 		matchesActiveSSHPrivateKey(facts, candidate) ||
-		matchesActiveAWSCredentials(facts, candidate) ||
-		matchesActiveKubeConfig(facts, candidate) ||
-		matchesActivePackageCredentialFile(facts, candidate) ||
-		matchesActiveGitCredentialFile(facts, candidate) ||
+		matchesAnyHomeAWSCredentials(facts, candidate) ||
+		matchesAnyHomeKubeConfig(facts, candidate) ||
+		matchesAnyHomePackageCredentialFile(facts, candidate) ||
+		matchesAnyHomeGitCredentialFile(facts, candidate) ||
 		matchesActiveCloudCredentialFile(facts, candidate) ||
 		matchesActiveBrowserSessionStore(facts, candidate)
 }
@@ -2328,18 +2387,7 @@ func forkBombFallbackProof(
 	return false
 }
 
-func canonicalShellForkBomb(value string) bool {
-	var compact strings.Builder
-	for _, character := range strings.TrimSpace(value) {
-		switch character {
-		case ' ', '\t', '\r', '\n':
-			continue
-		default:
-			compact.WriteRune(character)
-		}
-	}
-	return compact.String() == ":(){:|:&};:"
-}
+func canonicalShellForkBomb(value string) bool { return matchesForkBomb(value) }
 
 func exactInterpreterProgram(argv []string, expected string) bool {
 	if len(argv) != 3 || argv[1] != "-e" {
@@ -2385,4 +2433,15 @@ func hasArgumentFold(argv []string, expected string) bool {
 		}
 	}
 	return false
+}
+
+// directoryTicketRequestOrServiceUse is the prerequisite of the built-in HIGH
+// credential.directory_ticket_request rule: a bare Kerberos ticket request, or a
+// complete credentialed NetExec / CrackMapExec domain-service call that is not
+// an NTDS dump (directoryServiceCredentialUsePrerequisite). Both are directory
+// credential use short of a dump or crack, so default alerts and strict blocks.
+// The rule's CEL program list keeps each half on its own programs.
+func directoryTicketRequestOrServiceUse(facts actionfacts.Facts) bool {
+	return actionfacts.ExactDirectoryCredentialTicketRequest(facts) ||
+		directoryServiceCredentialUsePrerequisite(facts)
 }

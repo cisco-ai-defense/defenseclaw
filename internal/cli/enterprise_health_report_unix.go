@@ -18,6 +18,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/enterpriseunix"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 )
 
 // macOSSecureClientDataDir is the Secure Client gateway's data_dir on macOS,
@@ -36,7 +37,7 @@ var (
 // changes ok or the exit code. Other hosts and actions are left as they are.
 func attachSecureClientHealthReport(result *enterprisestatus.Result, goos string, now time.Time) {
 	if result == nil || goos != "darwin" || result.Action != enterpriseunix.ActionStatus || result.PendingApply ||
-		lifecycleResultHasError(result, "not_root") || !healthReportReaderIsRoot() || !secureClientHost() {
+		lifecycleResultHasError(result, "not_root") || !healthReportReaderIsRoot() || !hookcli.SecureClientHost() {
 		return
 	}
 	result.SetHealthReport(enterprisestatus.ReadHealthReport(secureClientHealthReportDataDir(), now))
