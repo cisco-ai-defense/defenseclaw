@@ -19,6 +19,8 @@ package workspace
 import (
 	"context"
 	"fmt"
+	"net"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -78,6 +80,20 @@ func ResolveUpstream(ctx context.Context, project string) (*Upstream, error) {
 	return up, nil
 }
 
+// loopbackURL: the URL's host is localhost or a loopback address.
+func loopbackURL(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	h := u.Hostname()
+	if strings.EqualFold(h, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(h)
+	return ip != nil && ip.IsLoopback()
+}
+
 func resolveUpstream(ctx context.Context, proj gitCmd, head, branch string) (*Upstream, error) {
 	if head == "" {
 		return nil, &UpstreamError{Msg: "this branch has no commit yet; use run without --clone ."}
@@ -101,7 +117,16 @@ func resolveUpstream(ctx context.Context, proj gitCmd, head, branch string) (*Up
 	if !ok {
 		return nil, &UpstreamError{Msg: "remote " + remote + " is a local path; use run without --clone ."}
 	}
-	if l := strings.ToLower(clean); !strings.HasPrefix(l, "https://") && !strings.HasPrefix(l, "http://") {
+	switch l := strings.ToLower(clean); {
+	case strings.HasPrefix(l, "https://"):
+	case strings.HasPrefix(l, "http://"):
+		// The agent's credential helper would send the git token in clear
+		// over the agent's egress (RV2 N7). A loopback address never
+		// leaves the agent.
+		if !loopbackURL(clean) {
+			return nil, &UpstreamError{Msg: "remote " + remote + " uses http://, which sends your git credentials unencrypted; --clone . needs an https remote (use run without --clone .)"}
+		}
+	default:
 		// ssh and scp-form addresses need the https rewrite map (B2 2.5).
 		return nil, &UpstreamError{Msg: "remote " + remote + " is an ssh address; --clone . needs an https remote for now (use run without --clone .)"}
 	}

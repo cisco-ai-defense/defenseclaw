@@ -149,6 +149,7 @@ func TestCloneHereRemoteRefused(t *testing.T) {
 		{"local path", "/srv/git/app.git", "", "remote origin is a local path; use run without --clone ."},
 		{"file url", "file:///srv/git/app.git", "", "remote origin is a local path; use run without --clone ."},
 		{"scp form", "git@git.example.test:team/app.git", "", "remote origin is an ssh address; --clone . needs an https remote for now (use run without --clone .)"},
+		{"http url", "http://git.example.test/team/app.git", "", "remote origin uses http://, which sends your git credentials unencrypted"},
 		{"no remote", "", "", "this checkout has no remote origin; use run without --clone ."},
 		{"subfolder", "https://git.example.test/team/app.git", "src", "not the top folder of a git checkout"},
 	} {

@@ -234,7 +234,7 @@ Claude Code starts below the banner, in `/work/myapp`. The first start takes abo
 
 Prefer git to an upload? `defenseclaw substrate run claude --clone https://git.example.test/me/myapp.git --ref agent/fix-tests` clones inside the agent. The clone goes through the cluster's network rules, so the git host must be one your profile allows. The credential is added by the cluster's egress gateway on that host only, so the agent never holds it. Put no user name or token in the address. See [Secrets](/docs/substrate/secrets).
 
-In a checkout of your own, `defenseclaw substrate run claude --clone .` gives the agent the full history of your branch (Preview). The agent fetches the branch from its https remote, and only your unpushed commits and uncommitted changes are sent from your computer, with the same rules as a copy: secret files, and their committed versions, stay behind. `pull` works as for a copy. A remote that is a local path or an ssh address, or a branch that shares no commit with its remote, is refused; use `run` without `--clone .`. On Windows, push and commit your work first.
+In a checkout of your own, `defenseclaw substrate run claude --clone .` gives the agent the full history of your branch (Preview). The agent fetches the branch from its https remote, and only your unpushed commits and uncommitted changes are sent from your computer, with the same rules as a copy: secret files, and their committed versions, stay behind. `pull` works as for a copy. A remote that is a local path, an ssh address or a plain http:// address, or a branch that shares no commit with its remote, is refused; use `run` without `--clone .`. On Windows, push and commit your work first.
 
 </Step>
 
