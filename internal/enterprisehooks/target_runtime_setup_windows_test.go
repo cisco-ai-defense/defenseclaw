@@ -528,8 +528,13 @@ func TestWindowsManagedRuntimePreflightRefusesAPerUserInstallFolder(t *testing.T
 		!strings.Contains(err.Error(), dataDir+" holds config.yaml") {
 		t.Fatalf("preflight = %v, want the per-user install folder refused", err)
 	}
-	if _, planErr := PlanWindowsManagedRuntimeRoots(manifest, manifestPath, digest); planErr == nil || planErr.Error() != err.Error() {
-		t.Fatalf("install plan = %v, want the preflight refusal %v", planErr, err)
+	// The install plan skips that one user instead of failing every user
+	// (GAP-1733); the preflight above keeps the early refusal because it
+	// would enrol nobody.
+	plan, planErr := PlanWindowsManagedRuntimeRoots(manifest, manifestPath, digest)
+	if planErr != nil || len(plan.Roots) != 0 || len(plan.SkippedProfiles) != 1 ||
+		!strings.Contains(plan.SkippedProfiles[0].Reason, dataDir+" holds config.yaml") {
+		t.Fatalf("install plan = %+v, %v; want the per-user install user skipped and named", plan, planErr)
 	}
 }
 
