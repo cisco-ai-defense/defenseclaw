@@ -3032,7 +3032,11 @@ func (w *walker) positionalOperands(ps []Word, p Program, ctx posCtx) []operand 
 			ps = []Word{{Value: ".", Static: true}}
 		}
 		for _, wd := range ps {
-			out = append(out, mk(wd, role))
+			// A metadata-only program (stat, du, find) names the file but never
+			// reads its content: no read effect; find -delete still deletes below.
+			if !p.MetadataOnly || ctx.inPlace {
+				out = append(out, mk(wd, role))
+			}
 			if ctx.inPlace && ctx.inPlaceSuffix != "" {
 				bk := wd
 				if bk.Static {

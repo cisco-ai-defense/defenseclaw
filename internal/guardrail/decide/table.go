@@ -56,6 +56,10 @@ type Row struct {
 	// Sets: the row matches only a proof naming one of these file classes
 	// (Proof.Set); empty matches any proof, with or without a set.
 	Sets []string
+	// Sources: the row matches only a proof from one of these readers
+	// (Proof.Source, e.g. SourceEffects); empty matches any reader. It keeps
+	// an effects-lane row off the 1.0.10 reader's finding of the same rule.
+	Sources []string
 	// Content: the row applies on the content surface too.
 	Content bool
 	// SecureClient: the row applies under the Secure Client integration.
@@ -110,7 +114,8 @@ func (r *Row) matches(p Proof) bool {
 		(len(r.Targets) == 0 || slices.Contains(r.Targets, p.Target)) &&
 		(len(r.Certainty) == 0 || slices.Contains(r.Certainty, p.Certainty)) &&
 		(len(r.Reach) == 0 || slices.Contains(r.Reach, p.Reach)) &&
-		(len(r.Sets) == 0 || slices.Contains(r.Sets, p.Set))
+		(len(r.Sets) == 0 || slices.Contains(r.Sets, p.Set)) &&
+		(len(r.Sources) == 0 || slices.Contains(r.Sources, p.Source))
 }
 
 // cell is the row's cell for d, reading the tier only when the row's cells
@@ -133,13 +138,11 @@ func (r *Row) cell(d Deployment, tier func() Tier) Cell {
 // Row ids of the built-in table.
 const (
 	RowRecord = "record"
-	// RowEffectUnknown: the effect lane's unknown tier is a shadow record and
-	// never moves the live verdict, whatever its Known flag or tier (the
-	// MAYBE rule, DET111 PLAN 5.3; DET111 ruling 2026-11-22T10:36Z,
-	// GAP-1796), except on a target-decided set (DefenseClaw state, hook
-	// config, authorized_keys, credential files), whose 1.0.10 rules judge
-	// the target alone: there a known write by a command off the restricted
-	// list keeps its row (GAP-0662, GAP-1173, GAP-1671).
+	// RowEffectUnknown: the effect lane's unknown tier is a shadow record on
+	// every set and never moves the live verdict, whatever its Known flag,
+	// target or tier (the MAYBE rule, DET111 PLAN 5.3, GAP-1796; DET111
+	// ruling 2026-11-22T17:00Z: the target-decided exception raised 70
+	// benign cells of the T17 large-trace sweep, 26 of them new blocks).
 	RowEffectUnknown = "effect-unknown"
 	// RowEffectContentDecided: a set whose 1.0.10 rule is decided by the
 	// content written, not by the target (persistence.shell_profile_write on
@@ -148,7 +151,26 @@ const (
 	// content (GAP-1795). Target-decided sets (authorized_keys, DefenseClaw
 	// state, hook config, credential files) keep their rows.
 	RowEffectContentDecided = "effect-content-decided"
-	RowAdvisory             = "advisory"
+	// RowEffectLink: a Known effects link placed at a protected member other
+	// than the DefenseClaw state (ln -s T ~/.ssh/authorized_keys, the
+	// dotfiles shape) is a shadow record. The 1.0.10 reader of the set blocks
+	// every plain spelling of it on its own (persistence.ssh_authorized_keys_command),
+	// and the effect finding folds there; the effects reading of a script
+	// spelling that reader does not name raised 6 benign owner cells of the
+	// T17 sweep, all new blocks, and no attack cell. A link at the state
+	// keeps its row (self-protection).
+	RowEffectLink = "effect-link"
+	// RowEffectRead: a Known read of one's own credential file the effects
+	// lane proves is a shadow record. The 1.0.10 credential rules
+	// (PATH-SSH-KEY, PATH-AWS-*, PATH-DOCKER, ...) judge their own
+	// spellings; the effects reading of a spelling they do not name (grep
+	// after a cd, install of a key, stat) raised 12 benign owner cells
+	// (6 new blocks) and no attack cell of the T17 sweep (GAP-1825,
+	// GAP-1826). A read of another account's credential file keeps its row
+	// (GAP-0888, GAP-0898). The own-home read rows below still grade a
+	// read proof from any other reader.
+	RowEffectRead = "effect-read"
+	RowAdvisory   = "advisory"
 	// RowAskTicketRequest: a Kerberos ticket request (or credentialed
 	// domain service use) asks for a person's confirmation in the default
 	// tier where the agent can ask, and is an alert where it cannot; never a
@@ -187,11 +209,6 @@ const (
 
 var mutatingKinds = []ProofKind{KindWrite, KindAppend, KindDelete, KindLink, KindPerm}
 
-// notTargetDecided are the target classes no 1.0.10 rule judges by the
-// target alone: a shell startup file (content-decided), a system or project
-// path, another protected path and a call that names none.
-var notTargetDecided = []TargetClass{TargetNone, TargetAutostart, TargetSystem, TargetProject, TargetOther}
-
 // cloudCredentialSets are the credential classes 1.0.10 grades alike in
 // one's own and another account's home: an alert MEDIUM, nothing in
 // permissive (GAP-0888).
@@ -211,7 +228,7 @@ func Builtin() *Table { return &builtin }
 
 var builtin = Table{Rows: []Row{
 	{
-		ID: RowEffectUnknown, Rules: []string{RuleEffectUnknown}, Targets: notTargetDecided,
+		ID: RowEffectUnknown, Rules: []string{RuleEffectUnknown},
 		Content: true, SecureClient: true, Source: "DET111 PLAN 5.3 MAYBE rule (GAP-1796)",
 		Cells: [deploymentCount][tierCount]Cell{
 			uniform(Cell{Levels: true, Ceiling: CeilingRecord}), uniform(Cell{Levels: true, Ceiling: CeilingRecord}),
@@ -221,6 +238,21 @@ var builtin = Table{Rows: []Row{
 		ID: RowEffectContentDecided, Rules: []string{RuleEffectRestricted, RuleEffectUnknown}, Kinds: mutatingKinds,
 		Targets: []TargetClass{TargetAutostart}, Content: true, SecureClient: true,
 		Source: "rel-1-0-10:persistence.shell_profile_write content-decided (GAP-1795)",
+		Cells: [deploymentCount][tierCount]Cell{
+			uniform(Cell{Levels: true, Ceiling: CeilingRecord}), uniform(Cell{Levels: true, Ceiling: CeilingRecord}),
+		},
+	},
+	{
+		ID: RowEffectLink, Rules: []string{RuleEffectRestricted, RuleEffectUnknown}, Kinds: []ProofKind{KindLink},
+		Targets: []TargetClass{TargetHookConfig, TargetAuthorizedKeys, TargetCredential, TargetOtherHomeCredential, TargetAutostart, TargetSystem, TargetProject, TargetOther, TargetNone},
+		Content: true, SecureClient: true, Source: "DET111 effects link at a member (sweep T17)",
+		Cells: [deploymentCount][tierCount]Cell{
+			uniform(Cell{Levels: true, Ceiling: CeilingRecord}), uniform(Cell{Levels: true, Ceiling: CeilingRecord}),
+		},
+	},
+	{
+		ID: RowEffectRead, Kinds: []ProofKind{KindRead}, Targets: []TargetClass{TargetCredential}, Sources: []string{SourceEffects},
+		Content: true, SecureClient: true, Source: "DET111 effects credential read (GAP-1825, GAP-1826)",
 		Cells: [deploymentCount][tierCount]Cell{
 			uniform(Cell{Levels: true, Ceiling: CeilingRecord}), uniform(Cell{Levels: true, Ceiling: CeilingRecord}),
 		},

@@ -7,8 +7,8 @@ package decide
 import "testing"
 
 // TestEffectShadowOnlyRows (GAP-1796, GAP-1795, GAP-1797): the effect lane's
-// unknown tier is recorded only, whatever its Known flag, except on a
-// target-decided set (GAP-0662, GAP-1173, GAP-1671); a Known effect
+// unknown tier is recorded only, whatever its Known flag or target (DET111
+// ruling 2026-11-22T17:00Z, the target-decided exception is gone); a Known effect
 // write to a shell startup file (a set whose 1.0.10 rule is decided by the
 // content written) is recorded only; a Known effect write to a
 // target-decided set keeps its row and raises. The CLAUDE.md content rule
@@ -34,15 +34,23 @@ func TestEffectShadowOnlyRows(t *testing.T) {
 		{"unknown known write other", effect(RuleEffectUnknown, KindWrite, TargetOther, CertKnown), true},
 		{"unknown maybe reach system", effect(RuleEffectUnknown, KindWrite, TargetSystem, CertMaybe), true},
 		{"unknown known write no target", effect(RuleEffectUnknown, KindExec, TargetNone, CertKnown), true},
-		{"unknown known write keys (GAP-1671)", effect(RuleEffectUnknown, KindWrite, TargetAuthorizedKeys, CertKnown), false},
-		{"unknown advisory write state (GAP-0662)", effect(RuleEffectUnknown, KindAppend, TargetState, CertMaybe), false},
-		{"unknown known write hook config", effect(RuleEffectUnknown, KindWrite, TargetHookConfig, CertKnown), false},
+		{"unknown known write keys", effect(RuleEffectUnknown, KindWrite, TargetAuthorizedKeys, CertKnown), true},
+		{"unknown advisory write state", effect(RuleEffectUnknown, KindAppend, TargetState, CertMaybe), true},
+		{"unknown known write hook config", effect(RuleEffectUnknown, KindWrite, TargetHookConfig, CertKnown), true},
+		{"unknown known write credential", effect(RuleEffectUnknown, KindWrite, TargetCredential, CertKnown), true},
 		{"restricted append shell rc", effect(RuleEffectRestricted, KindAppend, TargetAutostart, CertKnown), true},
 		{"restricted write shell rc", effect(RuleEffectRestricted, KindWrite, TargetAutostart, CertKnown), true},
 		{"restricted append authorized_keys", effect(RuleEffectRestricted, KindAppend, TargetAuthorizedKeys, CertKnown), false},
 		{"restricted write state", effect(RuleEffectRestricted, KindWrite, TargetState, CertKnown), false},
 		{"restricted write hook config", effect(RuleEffectRestricted, KindWrite, TargetHookConfig, CertKnown), false},
 		{"restricted delete credential", effect(RuleEffectRestricted, KindDelete, TargetCredential, CertKnown), false},
+		{"restricted link authorized_keys", effect(RuleEffectRestricted, KindLink, TargetAuthorizedKeys, CertKnown), true},
+		{"restricted link hook config", effect(RuleEffectRestricted, KindLink, TargetHookConfig, CertKnown), true},
+		{"restricted link state", effect(RuleEffectRestricted, KindLink, TargetState, CertKnown), false},
+		{"effects read ssh key", Finding{RuleID: "PATH-SSH-KEY", Severity: SevCritical, Proof: Proof{Kind: KindRead, Target: TargetCredential, Certainty: CertKnown, Set: SetSSHPrivateKey, Source: SourceEffects}}, true},
+		{"effects read aws", Finding{RuleID: "PATH-AWS-CREDS", Severity: SevCritical, Proof: Proof{Kind: KindRead, Target: TargetCredential, Certainty: CertKnown, Set: SetAWSCredentials, Source: SourceEffects}}, true},
+		{"effects read other home ssh key", Finding{RuleID: "PATH-SSH-KEY", Severity: SevCritical, Proof: Proof{Kind: KindRead, Target: TargetOtherHomeCredential, Certainty: CertKnown, Set: SetSSHPrivateKey, Source: SourceEffects}}, false},
+		{"legacy read ssh key", Finding{RuleID: "PATH-SSH-KEY", Severity: SevCritical, Proof: Proof{Kind: KindRead, Target: TargetCredential, Certainty: CertKnown, Set: SetSSHPrivateKey, Source: "PATH-SSH-KEY"}}, false},
 		{"legacy unknown-named rule", Finding{RuleID: RuleEffectUnknown, Severity: SevHigh, Proof: Proof{Kind: KindWrite, Target: TargetAutostart}}, false},
 	} {
 		if got := ShadowOnly(tc.f); got != tc.shadow {

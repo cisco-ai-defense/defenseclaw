@@ -63,7 +63,14 @@ func TestKnownCredentialReadRows(t *testing.T) {
 		{"other kube", TargetOtherHomeCredential, SetKubeConfig, "PATH-KUBE", own},
 		{"other docker", TargetOtherHomeCredential, SetDockerConfig, "PATH-DOCKER", own},
 	} {
-		p := Proof{Kind: KindRead, Target: tc.target, Certainty: CertKnown, Set: tc.set, Source: "effects"}
+		// An effects read of one's own file is a shadow record
+		// (RowEffectRead, TestEffectShadowOnlyRows); the own-home rows grade
+		// a read proof from any other reader.
+		src := SourceEffects
+		if tc.target == TargetCredential {
+			src = "reader"
+		}
+		p := Proof{Kind: KindRead, Target: tc.target, Certainty: CertKnown, Set: tc.set, Source: src}
 		if got := RuleFor(p); got != tc.rule {
 			t.Errorf("%s: RuleFor %q, want %q", tc.name, got, tc.rule)
 		}

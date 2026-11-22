@@ -103,11 +103,21 @@ func TestKnownCredentialReadTakesThePlainSpellingCellFiveTiers(t *testing.T) {
 				if last != nil {
 					in = *last
 				}
+				variantAction := decideAction(decide.Decide(in).Action)
 				proof := decide.Proof{Kind: decide.KindRead, Target: row.target, Certainty: decide.CertKnown, Set: set, Source: "effects"}
 				in.Findings = append(append([]decide.Finding(nil), in.Findings...), decideFinding(RuleFinding{
 					RuleID: decide.RuleFor(proof), Severity: "HIGH", Proof: proof,
 				}))
 				out := decide.Decide(in)
+				if row.target == decide.TargetCredential {
+					// One's own file: the effects read is a shadow record
+					// (decide.RowEffectRead, GAP-1825/1826): it does not move
+					// the variant's verdict.
+					if got := decideAction(out.Action); got != variantAction {
+						t.Errorf("%s %s %s: an effects read of %q moves the verdict %s -> %s", tier.name, route.connector, row.name, row.variant, variantAction, got)
+					}
+					continue
+				}
 				if got := decideAction(out.Action); got != plainAction || out.Severity.String() != plainSeverity {
 					t.Errorf("%s %s %s: known read of %q is %s/%s, want the plain spelling %q verdict %s/%s",
 						tier.name, route.connector, row.name, row.variant, got, out.Severity, row.plain, plainAction, plainSeverity)
