@@ -4,6 +4,7 @@
 package gateway
 
 import (
+	"context"
 	"path"
 	"slices"
 	"strings"
@@ -383,6 +384,36 @@ func withSandboxGuestFolderTier(findings []RuleFinding, request trustedActionReq
 	placed := request
 	placed.Input, placed.SandboxGuestCWD = guest, ""
 	return withSimpleCommandFindings(findings, withUnresolvedFolderTier(nil, placed, guestFacts, false))
+}
+
+// withSandboxGuestSplitGapEffects judges the files a sandbox call with a
+// parse gap touches as the laptop judges the same call in its own folder
+// (withSplitGapEffects): on the call placed in the guest's working directory
+// (sandboxGuestPlacedInput). The effect twins name each file in its resolved
+// spelling, and a copy-mode call names no folder, so a relative operand
+// resolved nowhere and no twin was judged: cd .cache; cd -; $CMD; rm
+// ../.bash_history was an allow where the laptop alerts with
+// ACTION-COMPOUND-LIMIT (cd -, cd "$D", a function that cds), and $CMD; rm
+// .bash_history named PATH-HISTORY without the laptop's limit (substrate-1
+// GAP-0363, GAP-0377). The same at rel 5597ca2b83, before the guest
+// placement. It is read only when the split of the call placed there has a
+// parse gap, as the laptop's is: a copy-mode split with no folder may have
+// one where the laptop's has none (cd .cache; rm ../.bash_history), and the
+// laptop judges that call by its split alone. The reading is lexical and
+// only adds findings.
+func withSandboxGuestSplitGapEffects(ctx context.Context, request trustedActionRequest, generation *compiledRulePackCategories,
+	budget *trustedActionBudget, facts actionfacts.Facts, wholeCommand string, findings []RuleFinding) []RuleFinding {
+	guest, ok := sandboxGuestPlacedInput(request, facts)
+	if !ok {
+		return findings
+	}
+	guestFacts := actionfacts.Analyze(guest)
+	if !slices.ContainsFunc(actionfacts.SimpleCommands(guest, guestFacts), splitGapUnreadPart) {
+		return findings
+	}
+	placed := request
+	placed.Input = guest
+	return withSplitGapEffects(ctx, placed, generation, budget, guestFacts, wholeCommand, findings)
 }
 
 // guestPlacementSkips reports a simple command the guest placement does not

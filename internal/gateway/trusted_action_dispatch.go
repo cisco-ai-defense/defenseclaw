@@ -1409,6 +1409,7 @@ func dispatchTrustedActionWith(
 						if splitGapUnreadPart(simple) && wholeCommandKnown && !checkedSplitGapEffects {
 							checkedSplitGapEffects = true
 							findings = withSplitGapEffects(ctx, request, generation, budget, facts, wholeCommand, findings)
+							findings = withSandboxGuestSplitGapEffects(ctx, request, generation, budget, facts, wholeCommand, findings)
 						}
 						continue
 					}
