@@ -23,7 +23,7 @@ func TestTrustedDispatchMemoKeyCoversEveryField(t *testing.T) {
 		"conflictSource": "value", "parentPatch": "value",
 		"ResolvedWriteTargets": "value", "ActiveAgentFileIdentities": "value", "ShellStartup": "value",
 		"budget": "identity", "capFloor": "identity", "generation": "identity", "targetMemo": "identity",
-		"windowsTwinHosts": "identity", "windowsPowerShellReading": "identity",
+		"windowsTwinHosts": "identity", "windowsPowerShellReading": "identity", "Tiers": "identity",
 		"simpleMemo":         "cache",
 		"overBudgetOmission": "out", "unresolvedTarget": "out", "resolvedTarget": "out",
 		"nonWriteMention": "out", "unprovenTarget": "out", "unknownMention": "out",

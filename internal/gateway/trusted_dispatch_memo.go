@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/decide"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
 
@@ -58,6 +59,9 @@ type trustedDispatchMemoRefs struct {
 	targetMemo        *hookpaths.TargetMemo
 	windowsTwinHosts  *windowsTwinHostReadings
 	windowsPowerShell *windowsHintedReading
+	// tiers is the pack tier table the tier gates read (one table per pack
+	// directory, packTable), compared by identity.
+	tiers *decide.Table
 	// outs records which out-parameters are asked for (non-nil): a nil one
 	// may change what the readers do.
 	outs [6]bool
@@ -219,7 +223,7 @@ func trustedDispatchMemoKeyOf(request trustedActionRequest) (trustedActionReques
 	refs := trustedDispatchMemoRefs{
 		budget: request.budget, capFloor: request.capFloor, generation: request.generation,
 		targetMemo: request.targetMemo, windowsTwinHosts: request.windowsTwinHosts,
-		windowsPowerShell: request.windowsPowerShellReading,
+		windowsPowerShell: request.windowsPowerShellReading, tiers: request.Tiers,
 		outs: [6]bool{
 			request.overBudgetOmission != nil, request.unresolvedTarget != nil, request.resolvedTarget != nil,
 			request.nonWriteMention != nil, request.unprovenTarget != nil, request.unknownMention != nil,
@@ -227,7 +231,7 @@ func trustedDispatchMemoKeyOf(request trustedActionRequest) (trustedActionReques
 	}
 	key := request
 	key.budget, key.capFloor, key.generation, key.targetMemo = nil, nil, nil, nil
-	key.windowsTwinHosts, key.windowsPowerShellReading, key.simpleMemo = nil, nil, nil
+	key.windowsTwinHosts, key.windowsPowerShellReading, key.simpleMemo, key.Tiers = nil, nil, nil, nil
 	key.overBudgetOmission, key.unresolvedTarget, key.resolvedTarget, key.nonWriteMention = nil, nil, nil, nil
 	key.unprovenTarget, key.unknownMention = nil, nil
 	return key, refs

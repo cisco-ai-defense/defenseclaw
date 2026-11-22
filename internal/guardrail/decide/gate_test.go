@@ -44,7 +44,7 @@ func TestGateRowsHoldThe1010Tiers(t *testing.T) {
 		t.Errorf("unknown gate row: ceiling %d, want none (fail closed)", got)
 	}
 	for _, p := range []Proof{{}, {Certainty: CertMaybe}, {Certainty: CertMaybe, Reach: ReachAdvisory}, {Kind: KindWrite, Target: TargetState}} {
-		if row := Builtin().match(p, SurfaceTool, false); row != nil && row.Gate {
+		if row := Builtin().match(Finding{RuleID: "credential.directory_ticket_request", Proof: p}, SurfaceTool, false); row != nil && row.Gate {
 			t.Errorf("proof %v matched gate row %s", p, row.ID)
 		}
 	}

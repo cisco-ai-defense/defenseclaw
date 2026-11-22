@@ -40,6 +40,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/decide"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/semantic"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/semanticpb"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
@@ -164,6 +165,11 @@ type trustedActionRequest struct {
 	EnforcementCapable bool
 	// StrictPolicy grades an unverifiable extra argument as a block.
 	StrictPolicy bool
+	// PolicyTier and Tiers are the hook or proxy tier of the call and its
+	// pack's tier table: the cell a tier gate reads (gateCeiling). Zero is
+	// the default tier of decide.Builtin(); StrictPolicy reads strict.
+	PolicyTier decide.Tier
+	Tiers      *decide.Table
 	// sessionID is the connector's session of the call, for the checks that
 	// follow a session across calls (the page a browser tool has open).
 	sessionID string

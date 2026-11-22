@@ -20,6 +20,12 @@ rows:
     managed:
       floor: allow
       ceiling: alert
+  - id: ask-ticket-request
+    source: rel-1-0-10:GAP-0017/GAP-0067
+    per_user:
+      floor: confirm
+    managed:
+      floor: confirm
   - id: evaluation-fault
     source: rel-1-0-10:GAP-0486
     per_user:

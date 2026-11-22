@@ -5700,6 +5700,7 @@ func (p *GuardrailProxy) toolCallAction(ctx context.Context, toolName, args stri
 	trusted, toolCWD := agentHookTrustedActionArgs(connectorName, toolName, json.RawMessage(args))
 	actionTool, trusted := agentHookNativeFileView(agentHookTrustedActionTool(connectorName, toolName, runtime.GOOS), trusted)
 	cfg := proxyDecisionConfig(ctx)
+	proxyTier, proxyTiers := p.toolCallTierTable(ctx, cfg)
 	action := trustedActionRequest{
 		Input: actionfacts.Input{
 			Tool:            actionTool,
@@ -5712,6 +5713,8 @@ func (p *GuardrailProxy) toolCallAction(ctx context.Context, toolName, args stri
 		Connector:          connectorName,
 		EnforcementCapable: true,
 		StrictPolicy:       p.toolCallStrictTier(ctx, cfg),
+		PolicyTier:         proxyTier,
+		Tiers:              proxyTiers,
 		ManagedInstall:     cfg != nil && managed.IsManagedEnterprise(cfg.DeploymentMode),
 		recordTelemetry: func(observation trustedActionTelemetry) {
 			p.recordParserUncertaintyMetricV8(

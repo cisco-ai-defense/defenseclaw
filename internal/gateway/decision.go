@@ -133,15 +133,28 @@ func profileMeetActionForFindings(
 	ctx context.Context, cfg *config.Config, connector string, findings []RuleFinding,
 	confirmable, content bool,
 ) string {
+	action, _ := profileMeetDecisionForFindings(ctx, cfg, connector, findings, confirmable, content)
+	return action
+}
+
+// profileMeetDecisionForFindings is profileMeetActionForFindings with
+// floorConfirm: the confirm came only from a tier-table confirm floor
+// (decide.Output.FloorConfirm) of the member that set it, and no member
+// confirms by its levels. Where the agent cannot ask, such a confirm is an
+// alert, never the hook's block fallback (rel-1-0-10:GAP-0067, GAP-0371).
+func profileMeetDecisionForFindings(
+	ctx context.Context, cfg *config.Config, connector string, findings []RuleFinding,
+	confirmable, content bool,
+) (action string, floorConfirm bool) {
 	resolved := resolvedGuardrailProfileFrom(ctx)
 	if resolved == nil || resolved.set == nil {
-		return singleProfileActionForFindings(cfg, connector, findings, confirmable, content)
+		return singleProfileDecisionForFindings(cfg, connector, findings, confirmable, content)
 	}
 	meet := resolved.evaluationMeet()
 	if meet == nil {
-		return singleProfileActionForFindings(cfg, connector, findings, confirmable, content)
+		return singleProfileDecisionForFindings(cfg, connector, findings, confirmable, content)
 	}
-	action := guardrailActionAllow
+	action = guardrailActionAllow
 	for _, member := range meet.members {
 		memberCfg := resolved.set.profileConfig(member)
 		var own []RuleFinding
@@ -150,20 +163,32 @@ func profileMeetActionForFindings(
 				own = append(own, finding)
 			}
 		}
-		candidate := singleProfileActionForFindings(memberCfg, connector, own, confirmable, content)
+		candidate, memberFloor := singleProfileDecisionForFindings(memberCfg, connector, own, confirmable, content)
 		if !configBlocksOn(memberCfg, connector, requestProfilePath(ctx)) &&
 			(candidate == guardrailActionBlock || candidate == guardrailActionConfirm) {
-			candidate = guardrailActionAlert
+			candidate, memberFloor = guardrailActionAlert, false
+		}
+		switch {
+		case strongerGuardrailAction(action, candidate) != action:
+			floorConfirm = memberFloor
+		case candidate == action && !memberFloor:
+			floorConfirm = false
 		}
 		action = strongerGuardrailAction(action, candidate)
 	}
-	return action
+	return action, floorConfirm && action == guardrailActionConfirm
 }
 
 // singleProfileActionForFindings is the verdict of one profile's findings:
 // decide.Decide with the profile's levels, tier and deployment.
 func singleProfileActionForFindings(cfg *config.Config, connector string, findings []RuleFinding, confirmable, content bool) string {
-	return decideRoute("single", connector, decideInputForConfig(cfg, connector, findings, confirmable, content, true))
+	action, _ := singleProfileDecisionForFindings(cfg, connector, findings, confirmable, content)
+	return action
+}
+
+func singleProfileDecisionForFindings(cfg *config.Config, connector string, findings []RuleFinding, confirmable, content bool) (string, bool) {
+	out := decideRouteOutput("single", connector, decideInputForConfig(cfg, connector, findings, confirmable, content, true))
+	return decideAction(out.Action), out.FloorConfirm
 }
 
 func profileMeetActionForSeverity(ctx context.Context, cfg *config.Config, connector, severity string, confirmable, content bool) string {
@@ -440,7 +465,7 @@ func decideFinding(f RuleFinding) decide.Finding {
 // MEDIUM, GAP-0851, GAP-0962), else its own. ok is false for a label the
 // levels never rank.
 func verdictSeverity(f RuleFinding) (string, int) {
-	if sev := decide.Builtin().Severity(decideFinding(f).Proof); sev != decide.SevNone {
+	if sev := decide.Builtin().Severity(decideFinding(f)); sev != decide.SevNone {
 		return sev.String(), int(sev)
 	}
 	return f.Severity, severityRank[f.Severity]
@@ -549,6 +574,8 @@ func decideInputForConfig(cfg *config.Config, connector string, findings []RuleF
 	in := decide.Input{
 		Findings:     decideFindings(findings),
 		SecureClient: secureClient,
+		Confirmable:  confirmable,
+		Table:        configPackTable(cfg, connector),
 		Tier:         func() decide.Tier { return decideTierOf(cfg.HookPolicyTierForConnector(connector)) },
 		PackTier: func() decide.Tier {
 			if cfg == nil {
@@ -593,6 +620,8 @@ func decideInputForGuardrail(gc *config.GuardrailConfig, connector string, findi
 	return decide.Input{
 		Findings:     decideFindings(findings),
 		SecureClient: ManagedEnterpriseActive(),
+		Confirmable:  confirmable,
+		Table:        guardrailPackTable(gc, gcPackRef(gc, connector)),
 		Levels:       guardrailConnectorLevels(gc, connector, confirmable),
 		Tier:         tier,
 		Unknown: func() (decide.Action, bool) {
@@ -604,16 +633,27 @@ func decideInputForGuardrail(gc *config.GuardrailConfig, connector string, findi
 	}
 }
 
+func gcPackRef(gc *config.GuardrailConfig, connector string) config.RulePackRef {
+	if gc == nil {
+		return config.RulePackRef{}
+	}
+	return gc.EffectiveRulePackRef(connector)
+}
+
 // decideRecordHook, set only by tests (DET111_S1_REC: the characterization
 // recorder), sees every decision with its input.
 var decideRecordHook func(route, connector string, in decide.Input, out decide.Output)
 
 func decideRoute(route, connector string, in decide.Input) string {
+	return decideAction(decideRouteOutput(route, connector, in).Action)
+}
+
+func decideRouteOutput(route, connector string, in decide.Input) decide.Output {
 	out := decide.Decide(in)
 	if decideRecordHook != nil {
 		decideRecordHook(route, connector, in, out)
 	}
-	return decideAction(out.Action)
+	return out
 }
 
 // The tier gates (DET111 step 1, R5 item 1): a reader whose 1.0.10
@@ -626,17 +666,19 @@ const (
 	tierGateManaged = decide.RowTieredManaged
 )
 
-// gateCeiling is gate row's cell for the request: its hook or proxy tier
-// (StrictPolicy) and its deployment (ManagedInstall).
+// gateCeiling is gate row's cell for the request in its pack's tier table
+// (Tiers; nil is decide.Builtin()): the column of its hook or proxy tier
+// (PolicyTier, strict when StrictPolicy) and its deployment
+// (ManagedInstall).
 func (request trustedActionRequest) gateCeiling(row string) decide.Ceiling {
-	tier, deployment := decide.TierDefault, decide.PerUser
+	tier, deployment := request.PolicyTier, decide.PerUser
 	if request.StrictPolicy {
 		tier = decide.TierStrict
 	}
 	if request.ManagedInstall {
 		deployment = decide.Managed
 	}
-	return decide.Builtin().GateCeiling(row, deployment, tier)
+	return request.Tiers.GateCeiling(row, deployment, tier)
 }
 
 // tieredProof is p graded by gate row for the request: enforcing where the

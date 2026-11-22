@@ -4260,6 +4260,7 @@ func (a *APIServer) inspectAgentHookToolCall(
 		CredentialLineageHMACKey: activeToolValueLineageProcessKey.material,
 	}
 	dialectHint := a.agentHookWindowsDialectHint(ctx)
+	hookTier, hookTiers := configTierTable(a.decisionConfig(ctx), req.ConnectorName)
 	var conflictSource *conflictingToolArgumentSource
 	if bytes.Equal(trustedArgs, shellProjectedArgs) {
 		// The conflicting-keys check reads the arguments as the call
@@ -4274,6 +4275,8 @@ func (a *APIServer) inspectAgentHookToolCall(
 		CopilotSharedLocalFile:  copilotSharedLocalFileCall(ctx, req),
 		EnforcementCapable:      enforcementCapable,
 		StrictPolicy:            a.strictPolicyTierForHook(ctx, req.ConnectorName),
+		PolicyTier:              hookTier,
+		Tiers:                   hookTiers,
 		ManagedInstall:          a.managedInstallForHook(ctx),
 		ManagedHookOverflowHold: managedWindowsHookOverflowHold(ctx, a.scannerCfg, req.ConnectorName, runtime.GOOS),
 		ResolvedWriteTargets:    resolvedWritesFromContext(ctx),
