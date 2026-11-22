@@ -100,6 +100,9 @@ func (n *Node) propv(k string) string {
 	return v
 }
 
+// Prop returns the scalar property k (see the dump property table), or "" when it is not set.
+func (n *Node) Prop(k string) string { return n.propv(k) }
+
 func appendKids(n *Node, kids []*Node) *Node {
 	for _, k := range kids {
 		if k != nil {
