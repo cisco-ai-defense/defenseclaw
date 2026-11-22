@@ -140,7 +140,6 @@ func TestVaultAddRefusesAMultiLineStdin(t *testing.T) {
 	ta.ok(t, ta.VaultAdd("PAY_KEY", "api.example.com", VaultValueOptions{Stdin: true}))
 }
 
-
 // A stopped sandbox created with a vault secret is not started again once
 // that secret was removed or changed: it would keep the old value.
 func TestStartRefusesAChangedVaultGrant(t *testing.T) {
@@ -170,7 +169,7 @@ func TestStartRefusesAChangedVaultGrant(t *testing.T) {
 	if err := st.Remove("PAY_KEY"); err != nil {
 		t.Fatal(err)
 	}
-	if err := ta.vaultGrantsCurrent(sb); err == nil || !strings.Contains(err.Error(), "no such secret") {
+	if err := ta.vaultGrantsCurrent(sb); err == nil || !strings.Contains(err.Error(), "no longer in your vault") {
 		t.Fatalf("removed grant = %v", err)
 	}
 }

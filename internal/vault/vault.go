@@ -43,8 +43,6 @@ import (
 const (
 	// FileName is the vault file inside the vault directory.
 	FileName = "vault.json"
-	// lockName serializes writers (the CLI and the gateway or daemon).
-	lockName = "vault.lock"
 	// DirName is the vault directory inside a DefenseClaw state directory.
 	DirName = "vault"
 
