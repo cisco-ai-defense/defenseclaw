@@ -690,18 +690,20 @@ func (u SubstrateUploadScanConfig) EffectiveTimeBudget() time.Duration {
 }
 
 // EffectiveSecretAction is upload_scan.secret_action, replace when unset.
+// It is matched exactly, as the config schemas do: Replace or a padded
+// value is refused by Validate, not read as replace (RV5-8).
 func (u SubstrateUploadScanConfig) EffectiveSecretAction() string {
-	if v := strings.ToLower(strings.TrimSpace(u.SecretAction)); v != "" {
-		return v
+	if u.SecretAction != "" {
+		return u.SecretAction
 	}
 	return SubstrateUploadReplace
 }
 
 // EffectivePlaceholderForm is upload_scan.placeholder_form, token when
-// unset.
+// unset, matched exactly like EffectiveSecretAction.
 func (u SubstrateUploadScanConfig) EffectivePlaceholderForm() string {
-	if v := strings.ToLower(strings.TrimSpace(u.PlaceholderForm)); v != "" {
-		return v
+	if u.PlaceholderForm != "" {
+		return u.PlaceholderForm
 	}
 	return SubstratePlaceholderTok
 }
@@ -1081,6 +1083,8 @@ func (s *SubstrateConfig) Validate() error {
 		bad("self_service_secrets.namespace", "%q is not a Kubernetes namespace name", ss.Namespace)
 	} else if slices.Contains(substrateReservedNamespaces, ss.Namespace) {
 		bad("self_service_secrets.namespace", "%q is a Kubernetes system namespace; use a namespace of its own", ss.Namespace)
+	} else if _, ok := s.LauncherAtespace(ss.Namespace); ok && ss.Namespace != "" {
+		bad("self_service_secrets.namespace", "%q is a launcher atespace, where actors run; use a namespace of its own", ss.Namespace)
 	}
 	if ss.Provider != "" && !egressspec.IsDNS1123Subdomain(ss.Provider) {
 		bad("self_service_secrets.provider", "%q is not a provider name", ss.Provider)
