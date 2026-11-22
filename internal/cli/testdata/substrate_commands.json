@@ -1127,7 +1127,8 @@
     "path": "substrate secrets set",
     "use": "set \u003cname\u003e",
     "short": "Store one of your own secrets",
-    "long": "Stores the value for NAME, bound to the hosts your administrator allowed for it. The value\nis read from the terminal without echo, from standard input with --stdin, or from an environment\nvariable with --from-env VAR. It is never put on the command line.",
+    "long": "Stores the value for NAME, bound to the hosts your administrator allowed for it.\n\nThe value comes from exactly one source: the terminal without echo (no flag), --from-gh (the\nGitHub CLI's sign-in), --from-keychain SERVICE (macOS keychain), --from-op op://vault/item/field\n(1Password CLI), --from-file PATH, --stdin or --from-env VAR. It is never put on a command line\nand never printed.",
+    "example": "defenseclaw substrate secrets set GITHUB_TOKEN --from-gh\ndefenseclaw substrate secrets set GITLAB_TOKEN --from-op op://eng/gitlab/token\ndefenseclaw substrate secrets set NPM_TOKEN --from-keychain npm-publish",
     "args": [
       {
         "name": "name",
@@ -1135,6 +1136,11 @@
       }
     ],
     "flags": [
+      {
+        "name": "account",
+        "type": "string",
+        "usage": "with --from-keychain: the item's account"
+      },
       {
         "name": "context",
         "type": "string",
@@ -1145,6 +1151,32 @@
         "name": "from-env",
         "type": "string",
         "usage": "read the value from this environment variable"
+      },
+      {
+        "name": "from-file",
+        "type": "string",
+        "usage": "read the value from this file"
+      },
+      {
+        "name": "from-gh",
+        "type": "bool",
+        "default": "false",
+        "usage": "read the value from the GitHub CLI's sign-in (gh auth token)"
+      },
+      {
+        "name": "from-keychain",
+        "type": "string",
+        "usage": "read the value from this macOS keychain item (its service name)"
+      },
+      {
+        "name": "from-op",
+        "type": "string",
+        "usage": "read the value from 1Password (op://vault/item/field)"
+      },
+      {
+        "name": "gh-host",
+        "type": "string",
+        "usage": "with --from-gh: the GitHub host to read the sign-in of (default: gh's own)"
       },
       {
         "name": "mine",

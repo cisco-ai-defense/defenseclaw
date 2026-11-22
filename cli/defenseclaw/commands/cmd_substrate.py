@@ -721,14 +721,28 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
         ("secrets", "set"),
         "Store one of your own secrets",
         long=(
-            "Stores the value for NAME, bound to the hosts your administrator allowed for it. The value\n"
-            "is read from the terminal without echo, from standard input with --stdin, or from an environment\n"
-            "variable with --from-env VAR. It is never put on the command line."
+            "Stores the value for NAME, bound to the hosts your administrator allowed for it.\n"
+            "\n"
+            "The value comes from exactly one source: the terminal without echo (no flag), --from-gh (the\n"
+            "GitHub CLI's sign-in), --from-keychain SERVICE (macOS keychain), --from-op op://vault/item/field\n"
+            "(1Password CLI), --from-file PATH, --stdin or --from-env VAR. It is never put on a command line\n"
+            "and never printed."
+        ),
+        example=(
+            "defenseclaw substrate secrets set GITHUB_TOKEN --from-gh\n"
+            "defenseclaw substrate secrets set GITLAB_TOKEN --from-op op://eng/gitlab/token\n"
+            "defenseclaw substrate secrets set NPM_TOKEN --from-keychain npm-publish"
         ),
         args=(_Arg("name"),),
         flags=(
+            _Flag("account", "string", "with --from-keychain: the item's account"),
             _Flag("context", "string", "cluster to use (default: the one you signed in to last)", metavar="NAME"),
             _Flag("from-env", "string", "read the value from this environment variable"),
+            _Flag("from-file", "string", "read the value from this file"),
+            _Flag("from-gh", "bool", "read the value from the GitHub CLI's sign-in (gh auth token)"),
+            _Flag("from-keychain", "string", "read the value from this macOS keychain item (its service name)"),
+            _Flag("from-op", "string", "read the value from 1Password (op://vault/item/field)"),
+            _Flag("gh-host", "string", "with --from-gh: the GitHub host to read the sign-in of (default: gh's own)"),
             _Flag("mine", "bool", "your own secret (the only kind this command acts on)", default="true"),
             _Flag("stdin", "bool", "read the value from standard input"),
         ),
