@@ -69,7 +69,7 @@ func TestGAP1655StartProcessQuotedCommandBodyIsRead(t *testing.T) {
 // TestGAP1655StartProcessQuotedBodyReading: the child script of a
 // Start-Process -ArgumentList command line whose body is one double-quoted
 // word is the word with its quotes taken off by the CommandLineToArgvW rules;
-// a body that is not one quoted word is read as written.
+// a body of several words is their join with blanks (rel-1-0-10:GAP-1660).
 func TestGAP1655StartProcessQuotedBodyReading(t *testing.T) {
 	body := `New-Item "HKCU:\x" -Force; Start-Process notepad.exe`
 	for _, c := range []struct{ command, want string }{
@@ -77,7 +77,7 @@ func TestGAP1655StartProcessQuotedBodyReading(t *testing.T) {
 		{`Start-Process powershell -ArgumentList '-NoProfile "New-Item ''HKCU:\x'' -Force; Start-Process notepad.exe"'`, `New-Item 'HKCU:\x' -Force; Start-Process notepad.exe`},
 		{`Start-Process powershell -ArgumentList '-c','"New-Item \"HKCU:\x\" -Force; Start-Process notepad.exe"'`, body},
 		{`Start-Process powershell -ArgumentList '-c "Set-Location C:\work\; Start-Process notepad.exe"'`, `Set-Location C:\work\; Start-Process notepad.exe`},
-		{`Start-Process powershell -ArgumentList '-c "Start-Process notepad.exe" "x"'`, `"Start-Process notepad.exe" "x"`},
+		{`Start-Process powershell -ArgumentList '-c "Start-Process notepad.exe" "x"'`, `Start-Process notepad.exe x`},
 		{`Start-Process powershell -ArgumentList '-c ` + body + `'`, body},
 	} {
 		input := windowsHookShellCall(c.command, `C:\repo`)
