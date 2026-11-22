@@ -44,7 +44,7 @@ var dumpProps = map[string][]string{
 	"FunctionDefinitionAst":             {"Name", "IsFilter", "IsWorkflow"},
 	"NamedAttributeArgumentAst":         {"ArgumentName", "ExpressionOmitted"},
 	"PipelineAst":                       {"Background"},
-	"PipelineChainAst":                  {"Operator", "IsBackground"},
+	"PipelineChainAst":                  {"Operator"},
 	"UsingStatementAst":                 {"UsingStatementKind"},
 	"DataStatementAst":                  {"Variable"},
 	"CatchClauseAst":                    {"IsCatchAll"},

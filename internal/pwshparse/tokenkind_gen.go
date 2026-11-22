@@ -6,300 +6,300 @@ package pwshparse
 type TokenKind uint8
 
 const (
-	TkUnknown TokenKind = 0
-	TkVariable TokenKind = 1
-	TkSplattedVariable TokenKind = 2
-	TkParameter TokenKind = 3
-	TkNumber TokenKind = 4
-	TkLabel TokenKind = 5
-	TkIdentifier TokenKind = 6
-	TkGeneric TokenKind = 7
-	TkNewLine TokenKind = 8
-	TkLineContinuation TokenKind = 9
-	TkComment TokenKind = 10
-	TkEndOfInput TokenKind = 11
-	TkStringLiteral TokenKind = 12
-	TkStringExpandable TokenKind = 13
-	TkHereStringLiteral TokenKind = 14
-	TkHereStringExpandable TokenKind = 15
-	TkLParen TokenKind = 16
-	TkRParen TokenKind = 17
-	TkLCurly TokenKind = 18
-	TkRCurly TokenKind = 19
-	TkLBracket TokenKind = 20
-	TkRBracket TokenKind = 21
-	TkAtParen TokenKind = 22
-	TkAtCurly TokenKind = 23
-	TkDollarParen TokenKind = 24
-	TkSemi TokenKind = 25
-	TkAndAnd TokenKind = 26
-	TkOrOr TokenKind = 27
-	TkAmpersand TokenKind = 28
-	TkPipe TokenKind = 29
-	TkComma TokenKind = 30
-	TkMinusMinus TokenKind = 31
-	TkPlusPlus TokenKind = 32
-	TkDotDot TokenKind = 33
-	TkColonColon TokenKind = 34
-	TkDot TokenKind = 35
-	TkExclaim TokenKind = 36
-	TkMultiply TokenKind = 37
-	TkDivide TokenKind = 38
-	TkRem TokenKind = 39
-	TkPlus TokenKind = 40
-	TkMinus TokenKind = 41
-	TkEquals TokenKind = 42
-	TkPlusEquals TokenKind = 43
-	TkMinusEquals TokenKind = 44
-	TkMultiplyEquals TokenKind = 45
-	TkDivideEquals TokenKind = 46
-	TkRemainderEquals TokenKind = 47
-	TkRedirection TokenKind = 48
-	TkRedirectInStd TokenKind = 49
-	TkFormat TokenKind = 50
-	TkNot TokenKind = 51
-	TkBnot TokenKind = 52
-	TkAnd TokenKind = 53
-	TkOr TokenKind = 54
-	TkXor TokenKind = 55
-	TkBand TokenKind = 56
-	TkBor TokenKind = 57
-	TkBxor TokenKind = 58
-	TkJoin TokenKind = 59
-	TkIeq TokenKind = 60
-	TkIne TokenKind = 61
-	TkIge TokenKind = 62
-	TkIgt TokenKind = 63
-	TkIlt TokenKind = 64
-	TkIle TokenKind = 65
-	TkIlike TokenKind = 66
-	TkInotlike TokenKind = 67
-	TkImatch TokenKind = 68
-	TkInotmatch TokenKind = 69
-	TkIreplace TokenKind = 70
-	TkIcontains TokenKind = 71
-	TkInotcontains TokenKind = 72
-	TkIin TokenKind = 73
-	TkInotin TokenKind = 74
-	TkIsplit TokenKind = 75
-	TkCeq TokenKind = 76
-	TkCne TokenKind = 77
-	TkCge TokenKind = 78
-	TkCgt TokenKind = 79
-	TkClt TokenKind = 80
-	TkCle TokenKind = 81
-	TkClike TokenKind = 82
-	TkCnotlike TokenKind = 83
-	TkCmatch TokenKind = 84
-	TkCnotmatch TokenKind = 85
-	TkCreplace TokenKind = 86
-	TkCcontains TokenKind = 87
-	TkCnotcontains TokenKind = 88
-	TkCin TokenKind = 89
-	TkCnotin TokenKind = 90
-	TkCsplit TokenKind = 91
-	TkIs TokenKind = 92
-	TkIsNot TokenKind = 93
-	TkAs TokenKind = 94
-	TkPostfixPlusPlus TokenKind = 95
-	TkPostfixMinusMinus TokenKind = 96
-	TkShl TokenKind = 97
-	TkShr TokenKind = 98
-	TkColon TokenKind = 99
-	TkQuestionMark TokenKind = 100
+	TkUnknown                TokenKind = 0
+	TkVariable               TokenKind = 1
+	TkSplattedVariable       TokenKind = 2
+	TkParameter              TokenKind = 3
+	TkNumber                 TokenKind = 4
+	TkLabel                  TokenKind = 5
+	TkIdentifier             TokenKind = 6
+	TkGeneric                TokenKind = 7
+	TkNewLine                TokenKind = 8
+	TkLineContinuation       TokenKind = 9
+	TkComment                TokenKind = 10
+	TkEndOfInput             TokenKind = 11
+	TkStringLiteral          TokenKind = 12
+	TkStringExpandable       TokenKind = 13
+	TkHereStringLiteral      TokenKind = 14
+	TkHereStringExpandable   TokenKind = 15
+	TkLParen                 TokenKind = 16
+	TkRParen                 TokenKind = 17
+	TkLCurly                 TokenKind = 18
+	TkRCurly                 TokenKind = 19
+	TkLBracket               TokenKind = 20
+	TkRBracket               TokenKind = 21
+	TkAtParen                TokenKind = 22
+	TkAtCurly                TokenKind = 23
+	TkDollarParen            TokenKind = 24
+	TkSemi                   TokenKind = 25
+	TkAndAnd                 TokenKind = 26
+	TkOrOr                   TokenKind = 27
+	TkAmpersand              TokenKind = 28
+	TkPipe                   TokenKind = 29
+	TkComma                  TokenKind = 30
+	TkMinusMinus             TokenKind = 31
+	TkPlusPlus               TokenKind = 32
+	TkDotDot                 TokenKind = 33
+	TkColonColon             TokenKind = 34
+	TkDot                    TokenKind = 35
+	TkExclaim                TokenKind = 36
+	TkMultiply               TokenKind = 37
+	TkDivide                 TokenKind = 38
+	TkRem                    TokenKind = 39
+	TkPlus                   TokenKind = 40
+	TkMinus                  TokenKind = 41
+	TkEquals                 TokenKind = 42
+	TkPlusEquals             TokenKind = 43
+	TkMinusEquals            TokenKind = 44
+	TkMultiplyEquals         TokenKind = 45
+	TkDivideEquals           TokenKind = 46
+	TkRemainderEquals        TokenKind = 47
+	TkRedirection            TokenKind = 48
+	TkRedirectInStd          TokenKind = 49
+	TkFormat                 TokenKind = 50
+	TkNot                    TokenKind = 51
+	TkBnot                   TokenKind = 52
+	TkAnd                    TokenKind = 53
+	TkOr                     TokenKind = 54
+	TkXor                    TokenKind = 55
+	TkBand                   TokenKind = 56
+	TkBor                    TokenKind = 57
+	TkBxor                   TokenKind = 58
+	TkJoin                   TokenKind = 59
+	TkIeq                    TokenKind = 60
+	TkIne                    TokenKind = 61
+	TkIge                    TokenKind = 62
+	TkIgt                    TokenKind = 63
+	TkIlt                    TokenKind = 64
+	TkIle                    TokenKind = 65
+	TkIlike                  TokenKind = 66
+	TkInotlike               TokenKind = 67
+	TkImatch                 TokenKind = 68
+	TkInotmatch              TokenKind = 69
+	TkIreplace               TokenKind = 70
+	TkIcontains              TokenKind = 71
+	TkInotcontains           TokenKind = 72
+	TkIin                    TokenKind = 73
+	TkInotin                 TokenKind = 74
+	TkIsplit                 TokenKind = 75
+	TkCeq                    TokenKind = 76
+	TkCne                    TokenKind = 77
+	TkCge                    TokenKind = 78
+	TkCgt                    TokenKind = 79
+	TkClt                    TokenKind = 80
+	TkCle                    TokenKind = 81
+	TkClike                  TokenKind = 82
+	TkCnotlike               TokenKind = 83
+	TkCmatch                 TokenKind = 84
+	TkCnotmatch              TokenKind = 85
+	TkCreplace               TokenKind = 86
+	TkCcontains              TokenKind = 87
+	TkCnotcontains           TokenKind = 88
+	TkCin                    TokenKind = 89
+	TkCnotin                 TokenKind = 90
+	TkCsplit                 TokenKind = 91
+	TkIs                     TokenKind = 92
+	TkIsNot                  TokenKind = 93
+	TkAs                     TokenKind = 94
+	TkPostfixPlusPlus        TokenKind = 95
+	TkPostfixMinusMinus      TokenKind = 96
+	TkShl                    TokenKind = 97
+	TkShr                    TokenKind = 98
+	TkColon                  TokenKind = 99
+	TkQuestionMark           TokenKind = 100
 	TkQuestionQuestionEquals TokenKind = 101
-	TkQuestionQuestion TokenKind = 102
-	TkQuestionDot TokenKind = 103
-	TkQuestionLBracket TokenKind = 104
-	TkBegin TokenKind = 119
-	TkBreak TokenKind = 120
-	TkCatch TokenKind = 121
-	TkClass TokenKind = 122
-	TkContinue TokenKind = 123
-	TkData TokenKind = 124
-	TkDefine TokenKind = 125
-	TkDo TokenKind = 126
-	TkDynamicparam TokenKind = 127
-	TkElse TokenKind = 128
-	TkElseIf TokenKind = 129
-	TkEnd TokenKind = 130
-	TkExit TokenKind = 131
-	TkFilter TokenKind = 132
-	TkFinally TokenKind = 133
-	TkFor TokenKind = 134
-	TkForeach TokenKind = 135
-	TkFrom TokenKind = 136
-	TkFunction TokenKind = 137
-	TkIf TokenKind = 138
-	TkIn TokenKind = 139
-	TkParam TokenKind = 140
-	TkProcess TokenKind = 141
-	TkReturn TokenKind = 142
-	TkSwitch TokenKind = 143
-	TkThrow TokenKind = 144
-	TkTrap TokenKind = 145
-	TkTry TokenKind = 146
-	TkUntil TokenKind = 147
-	TkUsing TokenKind = 148
-	TkVar TokenKind = 149
-	TkWhile TokenKind = 150
-	TkWorkflow TokenKind = 151
-	TkParallel TokenKind = 152
-	TkSequence TokenKind = 153
-	TkInlineScript TokenKind = 154
-	TkConfiguration TokenKind = 155
-	TkDynamicKeyword TokenKind = 156
-	TkPublic TokenKind = 157
-	TkPrivate TokenKind = 158
-	TkStatic TokenKind = 159
-	TkInterface TokenKind = 160
-	TkEnum TokenKind = 161
-	TkNamespace TokenKind = 162
-	TkModule TokenKind = 163
-	TkType TokenKind = 164
-	TkAssembly TokenKind = 165
-	TkCommand TokenKind = 166
-	TkHidden TokenKind = 167
-	TkBase TokenKind = 168
-	TkDefault TokenKind = 169
-	TkClean TokenKind = 170
+	TkQuestionQuestion       TokenKind = 102
+	TkQuestionDot            TokenKind = 103
+	TkQuestionLBracket       TokenKind = 104
+	TkBegin                  TokenKind = 119
+	TkBreak                  TokenKind = 120
+	TkCatch                  TokenKind = 121
+	TkClass                  TokenKind = 122
+	TkContinue               TokenKind = 123
+	TkData                   TokenKind = 124
+	TkDefine                 TokenKind = 125
+	TkDo                     TokenKind = 126
+	TkDynamicparam           TokenKind = 127
+	TkElse                   TokenKind = 128
+	TkElseIf                 TokenKind = 129
+	TkEnd                    TokenKind = 130
+	TkExit                   TokenKind = 131
+	TkFilter                 TokenKind = 132
+	TkFinally                TokenKind = 133
+	TkFor                    TokenKind = 134
+	TkForeach                TokenKind = 135
+	TkFrom                   TokenKind = 136
+	TkFunction               TokenKind = 137
+	TkIf                     TokenKind = 138
+	TkIn                     TokenKind = 139
+	TkParam                  TokenKind = 140
+	TkProcess                TokenKind = 141
+	TkReturn                 TokenKind = 142
+	TkSwitch                 TokenKind = 143
+	TkThrow                  TokenKind = 144
+	TkTrap                   TokenKind = 145
+	TkTry                    TokenKind = 146
+	TkUntil                  TokenKind = 147
+	TkUsing                  TokenKind = 148
+	TkVar                    TokenKind = 149
+	TkWhile                  TokenKind = 150
+	TkWorkflow               TokenKind = 151
+	TkParallel               TokenKind = 152
+	TkSequence               TokenKind = 153
+	TkInlineScript           TokenKind = 154
+	TkConfiguration          TokenKind = 155
+	TkDynamicKeyword         TokenKind = 156
+	TkPublic                 TokenKind = 157
+	TkPrivate                TokenKind = 158
+	TkStatic                 TokenKind = 159
+	TkInterface              TokenKind = 160
+	TkEnum                   TokenKind = 161
+	TkNamespace              TokenKind = 162
+	TkModule                 TokenKind = 163
+	TkType                   TokenKind = 164
+	TkAssembly               TokenKind = 165
+	TkCommand                TokenKind = 166
+	TkHidden                 TokenKind = 167
+	TkBase                   TokenKind = 168
+	TkDefault                TokenKind = 169
+	TkClean                  TokenKind = 170
 )
 
 // TokenFlags mirrors System.Management.Automation.Language.TokenFlags.
 type TokenFlags uint32
 
 const (
-	tfNone TokenFlags = 0x00000000
-	tfBinaryPrecedenceLogical TokenFlags = 0x1
-	tfBinaryPrecedenceBitwise TokenFlags = 0x2
-	tfBinaryPrecedenceComparison TokenFlags = 0x5
-	tfBinaryPrecedenceCoalesce TokenFlags = 0x7
-	tfBinaryPrecedenceAdd TokenFlags = 0x9
-	tfBinaryPrecedenceMultiply TokenFlags = 0xa
-	tfBinaryPrecedenceFormat TokenFlags = 0xc
-	tfBinaryPrecedenceRange TokenFlags = 0xd
-	tfBinaryPrecedenceMask TokenFlags = 0x0000000f
-	tfKeyword TokenFlags = 0x00000010
-	tfScriptBlockBlockName TokenFlags = 0x00000020
-	tfBinaryOperator TokenFlags = 0x00000100
-	tfUnaryOperator TokenFlags = 0x00000200
-	tfCaseSensitiveOperator TokenFlags = 0x00000400
-	tfTernaryOperator TokenFlags = 0x00000800
-	tfSpecialOperator TokenFlags = 0x00001000
-	tfAssignmentOperator TokenFlags = 0x00002000
-	tfParseModeInvariant TokenFlags = 0x00008000
-	tfTokenInError TokenFlags = 0x00010000
-	tfDisallowedInRestrictedMode TokenFlags = 0x00020000
-	tfPrefixOrPostfixOperator TokenFlags = 0x00040000
-	tfCommandName TokenFlags = 0x00080000
-	tfMemberName TokenFlags = 0x00100000
-	tfTypeName TokenFlags = 0x00200000
-	tfAttributeName TokenFlags = 0x00400000
-	tfCanConstantFold TokenFlags = 0x00800000
+	tfNone                             TokenFlags = 0x00000000
+	tfBinaryPrecedenceLogical          TokenFlags = 0x1
+	tfBinaryPrecedenceBitwise          TokenFlags = 0x2
+	tfBinaryPrecedenceComparison       TokenFlags = 0x5
+	tfBinaryPrecedenceCoalesce         TokenFlags = 0x7
+	tfBinaryPrecedenceAdd              TokenFlags = 0x9
+	tfBinaryPrecedenceMultiply         TokenFlags = 0xa
+	tfBinaryPrecedenceFormat           TokenFlags = 0xc
+	tfBinaryPrecedenceRange            TokenFlags = 0xd
+	tfBinaryPrecedenceMask             TokenFlags = 0x0000000f
+	tfKeyword                          TokenFlags = 0x00000010
+	tfScriptBlockBlockName             TokenFlags = 0x00000020
+	tfBinaryOperator                   TokenFlags = 0x00000100
+	tfUnaryOperator                    TokenFlags = 0x00000200
+	tfCaseSensitiveOperator            TokenFlags = 0x00000400
+	tfTernaryOperator                  TokenFlags = 0x00000800
+	tfSpecialOperator                  TokenFlags = 0x00001000
+	tfAssignmentOperator               TokenFlags = 0x00002000
+	tfParseModeInvariant               TokenFlags = 0x00008000
+	tfTokenInError                     TokenFlags = 0x00010000
+	tfDisallowedInRestrictedMode       TokenFlags = 0x00020000
+	tfPrefixOrPostfixOperator          TokenFlags = 0x00040000
+	tfCommandName                      TokenFlags = 0x00080000
+	tfMemberName                       TokenFlags = 0x00100000
+	tfTypeName                         TokenFlags = 0x00200000
+	tfAttributeName                    TokenFlags = 0x00400000
+	tfCanConstantFold                  TokenFlags = 0x00800000
 	tfStatementDoesntSupportAttributes TokenFlags = 0x01000000
 )
 
 var tokenKindNames = [171]string{
-	0: "Unknown",
-	1: "Variable",
-	2: "SplattedVariable",
-	3: "Parameter",
-	4: "Number",
-	5: "Label",
-	6: "Identifier",
-	7: "Generic",
-	8: "NewLine",
-	9: "LineContinuation",
-	10: "Comment",
-	11: "EndOfInput",
-	12: "StringLiteral",
-	13: "StringExpandable",
-	14: "HereStringLiteral",
-	15: "HereStringExpandable",
-	16: "LParen",
-	17: "RParen",
-	18: "LCurly",
-	19: "RCurly",
-	20: "LBracket",
-	21: "RBracket",
-	22: "AtParen",
-	23: "AtCurly",
-	24: "DollarParen",
-	25: "Semi",
-	26: "AndAnd",
-	27: "OrOr",
-	28: "Ampersand",
-	29: "Pipe",
-	30: "Comma",
-	31: "MinusMinus",
-	32: "PlusPlus",
-	33: "DotDot",
-	34: "ColonColon",
-	35: "Dot",
-	36: "Exclaim",
-	37: "Multiply",
-	38: "Divide",
-	39: "Rem",
-	40: "Plus",
-	41: "Minus",
-	42: "Equals",
-	43: "PlusEquals",
-	44: "MinusEquals",
-	45: "MultiplyEquals",
-	46: "DivideEquals",
-	47: "RemainderEquals",
-	48: "Redirection",
-	49: "RedirectInStd",
-	50: "Format",
-	51: "Not",
-	52: "Bnot",
-	53: "And",
-	54: "Or",
-	55: "Xor",
-	56: "Band",
-	57: "Bor",
-	58: "Bxor",
-	59: "Join",
-	60: "Ieq",
-	61: "Ine",
-	62: "Ige",
-	63: "Igt",
-	64: "Ilt",
-	65: "Ile",
-	66: "Ilike",
-	67: "Inotlike",
-	68: "Imatch",
-	69: "Inotmatch",
-	70: "Ireplace",
-	71: "Icontains",
-	72: "Inotcontains",
-	73: "Iin",
-	74: "Inotin",
-	75: "Isplit",
-	76: "Ceq",
-	77: "Cne",
-	78: "Cge",
-	79: "Cgt",
-	80: "Clt",
-	81: "Cle",
-	82: "Clike",
-	83: "Cnotlike",
-	84: "Cmatch",
-	85: "Cnotmatch",
-	86: "Creplace",
-	87: "Ccontains",
-	88: "Cnotcontains",
-	89: "Cin",
-	90: "Cnotin",
-	91: "Csplit",
-	92: "Is",
-	93: "IsNot",
-	94: "As",
-	95: "PostfixPlusPlus",
-	96: "PostfixMinusMinus",
-	97: "Shl",
-	98: "Shr",
-	99: "Colon",
+	0:   "Unknown",
+	1:   "Variable",
+	2:   "SplattedVariable",
+	3:   "Parameter",
+	4:   "Number",
+	5:   "Label",
+	6:   "Identifier",
+	7:   "Generic",
+	8:   "NewLine",
+	9:   "LineContinuation",
+	10:  "Comment",
+	11:  "EndOfInput",
+	12:  "StringLiteral",
+	13:  "StringExpandable",
+	14:  "HereStringLiteral",
+	15:  "HereStringExpandable",
+	16:  "LParen",
+	17:  "RParen",
+	18:  "LCurly",
+	19:  "RCurly",
+	20:  "LBracket",
+	21:  "RBracket",
+	22:  "AtParen",
+	23:  "AtCurly",
+	24:  "DollarParen",
+	25:  "Semi",
+	26:  "AndAnd",
+	27:  "OrOr",
+	28:  "Ampersand",
+	29:  "Pipe",
+	30:  "Comma",
+	31:  "MinusMinus",
+	32:  "PlusPlus",
+	33:  "DotDot",
+	34:  "ColonColon",
+	35:  "Dot",
+	36:  "Exclaim",
+	37:  "Multiply",
+	38:  "Divide",
+	39:  "Rem",
+	40:  "Plus",
+	41:  "Minus",
+	42:  "Equals",
+	43:  "PlusEquals",
+	44:  "MinusEquals",
+	45:  "MultiplyEquals",
+	46:  "DivideEquals",
+	47:  "RemainderEquals",
+	48:  "Redirection",
+	49:  "RedirectInStd",
+	50:  "Format",
+	51:  "Not",
+	52:  "Bnot",
+	53:  "And",
+	54:  "Or",
+	55:  "Xor",
+	56:  "Band",
+	57:  "Bor",
+	58:  "Bxor",
+	59:  "Join",
+	60:  "Ieq",
+	61:  "Ine",
+	62:  "Ige",
+	63:  "Igt",
+	64:  "Ilt",
+	65:  "Ile",
+	66:  "Ilike",
+	67:  "Inotlike",
+	68:  "Imatch",
+	69:  "Inotmatch",
+	70:  "Ireplace",
+	71:  "Icontains",
+	72:  "Inotcontains",
+	73:  "Iin",
+	74:  "Inotin",
+	75:  "Isplit",
+	76:  "Ceq",
+	77:  "Cne",
+	78:  "Cge",
+	79:  "Cgt",
+	80:  "Clt",
+	81:  "Cle",
+	82:  "Clike",
+	83:  "Cnotlike",
+	84:  "Cmatch",
+	85:  "Cnotmatch",
+	86:  "Creplace",
+	87:  "Ccontains",
+	88:  "Cnotcontains",
+	89:  "Cin",
+	90:  "Cnotin",
+	91:  "Csplit",
+	92:  "Is",
+	93:  "IsNot",
+	94:  "As",
+	95:  "PostfixPlusPlus",
+	96:  "PostfixMinusMinus",
+	97:  "Shl",
+	98:  "Shr",
+	99:  "Colon",
 	100: "QuestionMark",
 	101: "QuestionQuestionEquals",
 	102: "QuestionQuestion",
@@ -360,106 +360,106 @@ var tokenKindNames = [171]string{
 }
 
 var staticTokenFlags = [171]TokenFlags{
-	0: tfNone,
-	1: tfNone,
-	2: tfNone,
-	3: tfNone,
-	4: tfNone,
-	5: tfNone,
-	6: tfNone,
-	7: tfNone,
-	8: tfParseModeInvariant,
-	9: tfParseModeInvariant,
-	10: tfParseModeInvariant,
-	11: tfParseModeInvariant,
-	12: tfParseModeInvariant,
-	13: tfParseModeInvariant,
-	14: tfParseModeInvariant,
-	15: tfParseModeInvariant,
-	16: tfParseModeInvariant,
-	17: tfParseModeInvariant,
-	18: tfParseModeInvariant,
-	19: tfParseModeInvariant,
-	20: tfNone,
-	21: tfParseModeInvariant,
-	22: tfParseModeInvariant,
-	23: tfParseModeInvariant,
-	24: tfParseModeInvariant,
-	25: tfParseModeInvariant,
-	26: tfParseModeInvariant,
-	27: tfParseModeInvariant,
-	28: tfSpecialOperator | tfParseModeInvariant,
-	29: tfSpecialOperator | tfParseModeInvariant,
-	30: tfUnaryOperator | tfParseModeInvariant,
-	31: tfUnaryOperator | tfPrefixOrPostfixOperator | tfDisallowedInRestrictedMode,
-	32: tfUnaryOperator | tfPrefixOrPostfixOperator | tfDisallowedInRestrictedMode,
-	33: tfBinaryOperator | tfBinaryPrecedenceRange | tfDisallowedInRestrictedMode,
-	34: tfSpecialOperator | tfDisallowedInRestrictedMode,
-	35: tfSpecialOperator | tfDisallowedInRestrictedMode,
-	36: tfUnaryOperator | tfCanConstantFold,
-	37: tfBinaryOperator | tfBinaryPrecedenceMultiply | tfCanConstantFold,
-	38: tfBinaryOperator | tfBinaryPrecedenceMultiply | tfCanConstantFold,
-	39: tfBinaryOperator | tfBinaryPrecedenceMultiply | tfCanConstantFold,
-	40: tfBinaryOperator | tfBinaryPrecedenceAdd | tfUnaryOperator | tfCanConstantFold,
-	41: tfBinaryOperator | tfBinaryPrecedenceAdd | tfUnaryOperator | tfCanConstantFold,
-	42: tfAssignmentOperator,
-	43: tfAssignmentOperator,
-	44: tfAssignmentOperator,
-	45: tfAssignmentOperator,
-	46: tfAssignmentOperator,
-	47: tfAssignmentOperator,
-	48: tfDisallowedInRestrictedMode,
-	49: tfParseModeInvariant | tfDisallowedInRestrictedMode,
-	50: tfBinaryOperator | tfBinaryPrecedenceFormat | tfDisallowedInRestrictedMode,
-	51: tfUnaryOperator | tfCanConstantFold,
-	52: tfUnaryOperator | tfCanConstantFold,
-	53: tfBinaryOperator | tfBinaryPrecedenceLogical | tfCanConstantFold,
-	54: tfBinaryOperator | tfBinaryPrecedenceLogical | tfCanConstantFold,
-	55: tfBinaryOperator | tfBinaryPrecedenceLogical | tfCanConstantFold,
-	56: tfBinaryOperator | tfBinaryPrecedenceBitwise | tfCanConstantFold,
-	57: tfBinaryOperator | tfBinaryPrecedenceBitwise | tfCanConstantFold,
-	58: tfBinaryOperator | tfBinaryPrecedenceBitwise | tfCanConstantFold,
-	59: tfBinaryOperator | tfUnaryOperator | tfBinaryPrecedenceComparison | tfDisallowedInRestrictedMode,
-	60: tfBinaryOperator | tfBinaryPrecedenceComparison,
-	61: tfBinaryOperator | tfBinaryPrecedenceComparison,
-	62: tfBinaryOperator | tfBinaryPrecedenceComparison,
-	63: tfBinaryOperator | tfBinaryPrecedenceComparison,
-	64: tfBinaryOperator | tfBinaryPrecedenceComparison,
-	65: tfBinaryOperator | tfBinaryPrecedenceComparison,
-	66: tfBinaryOperator | tfBinaryPrecedenceComparison,
-	67: tfBinaryOperator | tfBinaryPrecedenceComparison,
-	68: tfBinaryOperator | tfBinaryPrecedenceComparison | tfDisallowedInRestrictedMode,
-	69: tfBinaryOperator | tfBinaryPrecedenceComparison | tfDisallowedInRestrictedMode,
-	70: tfBinaryOperator | tfBinaryPrecedenceComparison | tfDisallowedInRestrictedMode,
-	71: tfBinaryOperator | tfBinaryPrecedenceComparison,
-	72: tfBinaryOperator | tfBinaryPrecedenceComparison,
-	73: tfBinaryOperator | tfBinaryPrecedenceComparison,
-	74: tfBinaryOperator | tfBinaryPrecedenceComparison,
-	75: tfBinaryOperator | tfUnaryOperator | tfBinaryPrecedenceComparison | tfDisallowedInRestrictedMode,
-	76: tfBinaryOperator | tfBinaryPrecedenceComparison | tfCaseSensitiveOperator,
-	77: tfBinaryOperator | tfBinaryPrecedenceComparison | tfCaseSensitiveOperator,
-	78: tfBinaryOperator | tfBinaryPrecedenceComparison | tfCaseSensitiveOperator,
-	79: tfBinaryOperator | tfBinaryPrecedenceComparison | tfCaseSensitiveOperator,
-	80: tfBinaryOperator | tfBinaryPrecedenceComparison | tfCaseSensitiveOperator,
-	81: tfBinaryOperator | tfBinaryPrecedenceComparison | tfCaseSensitiveOperator,
-	82: tfBinaryOperator | tfBinaryPrecedenceComparison | tfCaseSensitiveOperator,
-	83: tfBinaryOperator | tfBinaryPrecedenceComparison | tfCaseSensitiveOperator,
-	84: tfBinaryOperator | tfBinaryPrecedenceComparison | tfCaseSensitiveOperator | tfDisallowedInRestrictedMode,
-	85: tfBinaryOperator | tfBinaryPrecedenceComparison | tfCaseSensitiveOperator | tfDisallowedInRestrictedMode,
-	86: tfBinaryOperator | tfBinaryPrecedenceComparison | tfCaseSensitiveOperator | tfDisallowedInRestrictedMode,
-	87: tfBinaryOperator | tfBinaryPrecedenceComparison | tfCaseSensitiveOperator,
-	88: tfBinaryOperator | tfBinaryPrecedenceComparison | tfCaseSensitiveOperator,
-	89: tfBinaryOperator | tfBinaryPrecedenceComparison | tfCaseSensitiveOperator,
-	90: tfBinaryOperator | tfBinaryPrecedenceComparison | tfCaseSensitiveOperator,
-	91: tfBinaryOperator | tfUnaryOperator | tfBinaryPrecedenceComparison | tfCaseSensitiveOperator | tfDisallowedInRestrictedMode,
-	92: tfBinaryOperator | tfBinaryPrecedenceComparison,
-	93: tfBinaryOperator | tfBinaryPrecedenceComparison,
-	94: tfBinaryOperator | tfBinaryPrecedenceComparison | tfDisallowedInRestrictedMode,
-	95: tfUnaryOperator | tfPrefixOrPostfixOperator | tfDisallowedInRestrictedMode,
-	96: tfUnaryOperator | tfPrefixOrPostfixOperator | tfDisallowedInRestrictedMode,
-	97: tfBinaryOperator | tfBinaryPrecedenceComparison | tfCanConstantFold,
-	98: tfBinaryOperator | tfBinaryPrecedenceComparison | tfCanConstantFold,
-	99: tfSpecialOperator | tfDisallowedInRestrictedMode,
+	0:   tfNone,
+	1:   tfNone,
+	2:   tfNone,
+	3:   tfNone,
+	4:   tfNone,
+	5:   tfNone,
+	6:   tfNone,
+	7:   tfNone,
+	8:   tfParseModeInvariant,
+	9:   tfParseModeInvariant,
+	10:  tfParseModeInvariant,
+	11:  tfParseModeInvariant,
+	12:  tfParseModeInvariant,
+	13:  tfParseModeInvariant,
+	14:  tfParseModeInvariant,
+	15:  tfParseModeInvariant,
+	16:  tfParseModeInvariant,
+	17:  tfParseModeInvariant,
+	18:  tfParseModeInvariant,
+	19:  tfParseModeInvariant,
+	20:  tfNone,
+	21:  tfParseModeInvariant,
+	22:  tfParseModeInvariant,
+	23:  tfParseModeInvariant,
+	24:  tfParseModeInvariant,
+	25:  tfParseModeInvariant,
+	26:  tfParseModeInvariant,
+	27:  tfParseModeInvariant,
+	28:  tfSpecialOperator | tfParseModeInvariant,
+	29:  tfSpecialOperator | tfParseModeInvariant,
+	30:  tfUnaryOperator | tfParseModeInvariant,
+	31:  tfUnaryOperator | tfPrefixOrPostfixOperator | tfDisallowedInRestrictedMode,
+	32:  tfUnaryOperator | tfPrefixOrPostfixOperator | tfDisallowedInRestrictedMode,
+	33:  tfBinaryOperator | tfBinaryPrecedenceRange | tfDisallowedInRestrictedMode,
+	34:  tfSpecialOperator | tfDisallowedInRestrictedMode,
+	35:  tfSpecialOperator | tfDisallowedInRestrictedMode,
+	36:  tfUnaryOperator | tfCanConstantFold,
+	37:  tfBinaryOperator | tfBinaryPrecedenceMultiply | tfCanConstantFold,
+	38:  tfBinaryOperator | tfBinaryPrecedenceMultiply | tfCanConstantFold,
+	39:  tfBinaryOperator | tfBinaryPrecedenceMultiply | tfCanConstantFold,
+	40:  tfBinaryOperator | tfBinaryPrecedenceAdd | tfUnaryOperator | tfCanConstantFold,
+	41:  tfBinaryOperator | tfBinaryPrecedenceAdd | tfUnaryOperator | tfCanConstantFold,
+	42:  tfAssignmentOperator,
+	43:  tfAssignmentOperator,
+	44:  tfAssignmentOperator,
+	45:  tfAssignmentOperator,
+	46:  tfAssignmentOperator,
+	47:  tfAssignmentOperator,
+	48:  tfDisallowedInRestrictedMode,
+	49:  tfParseModeInvariant | tfDisallowedInRestrictedMode,
+	50:  tfBinaryOperator | tfBinaryPrecedenceFormat | tfDisallowedInRestrictedMode,
+	51:  tfUnaryOperator | tfCanConstantFold,
+	52:  tfUnaryOperator | tfCanConstantFold,
+	53:  tfBinaryOperator | tfBinaryPrecedenceLogical | tfCanConstantFold,
+	54:  tfBinaryOperator | tfBinaryPrecedenceLogical | tfCanConstantFold,
+	55:  tfBinaryOperator | tfBinaryPrecedenceLogical | tfCanConstantFold,
+	56:  tfBinaryOperator | tfBinaryPrecedenceBitwise | tfCanConstantFold,
+	57:  tfBinaryOperator | tfBinaryPrecedenceBitwise | tfCanConstantFold,
+	58:  tfBinaryOperator | tfBinaryPrecedenceBitwise | tfCanConstantFold,
+	59:  tfBinaryOperator | tfUnaryOperator | tfBinaryPrecedenceComparison | tfDisallowedInRestrictedMode,
+	60:  tfBinaryOperator | tfBinaryPrecedenceComparison,
+	61:  tfBinaryOperator | tfBinaryPrecedenceComparison,
+	62:  tfBinaryOperator | tfBinaryPrecedenceComparison,
+	63:  tfBinaryOperator | tfBinaryPrecedenceComparison,
+	64:  tfBinaryOperator | tfBinaryPrecedenceComparison,
+	65:  tfBinaryOperator | tfBinaryPrecedenceComparison,
+	66:  tfBinaryOperator | tfBinaryPrecedenceComparison,
+	67:  tfBinaryOperator | tfBinaryPrecedenceComparison,
+	68:  tfBinaryOperator | tfBinaryPrecedenceComparison | tfDisallowedInRestrictedMode,
+	69:  tfBinaryOperator | tfBinaryPrecedenceComparison | tfDisallowedInRestrictedMode,
+	70:  tfBinaryOperator | tfBinaryPrecedenceComparison | tfDisallowedInRestrictedMode,
+	71:  tfBinaryOperator | tfBinaryPrecedenceComparison,
+	72:  tfBinaryOperator | tfBinaryPrecedenceComparison,
+	73:  tfBinaryOperator | tfBinaryPrecedenceComparison,
+	74:  tfBinaryOperator | tfBinaryPrecedenceComparison,
+	75:  tfBinaryOperator | tfUnaryOperator | tfBinaryPrecedenceComparison | tfDisallowedInRestrictedMode,
+	76:  tfBinaryOperator | tfBinaryPrecedenceComparison | tfCaseSensitiveOperator,
+	77:  tfBinaryOperator | tfBinaryPrecedenceComparison | tfCaseSensitiveOperator,
+	78:  tfBinaryOperator | tfBinaryPrecedenceComparison | tfCaseSensitiveOperator,
+	79:  tfBinaryOperator | tfBinaryPrecedenceComparison | tfCaseSensitiveOperator,
+	80:  tfBinaryOperator | tfBinaryPrecedenceComparison | tfCaseSensitiveOperator,
+	81:  tfBinaryOperator | tfBinaryPrecedenceComparison | tfCaseSensitiveOperator,
+	82:  tfBinaryOperator | tfBinaryPrecedenceComparison | tfCaseSensitiveOperator,
+	83:  tfBinaryOperator | tfBinaryPrecedenceComparison | tfCaseSensitiveOperator,
+	84:  tfBinaryOperator | tfBinaryPrecedenceComparison | tfCaseSensitiveOperator | tfDisallowedInRestrictedMode,
+	85:  tfBinaryOperator | tfBinaryPrecedenceComparison | tfCaseSensitiveOperator | tfDisallowedInRestrictedMode,
+	86:  tfBinaryOperator | tfBinaryPrecedenceComparison | tfCaseSensitiveOperator | tfDisallowedInRestrictedMode,
+	87:  tfBinaryOperator | tfBinaryPrecedenceComparison | tfCaseSensitiveOperator,
+	88:  tfBinaryOperator | tfBinaryPrecedenceComparison | tfCaseSensitiveOperator,
+	89:  tfBinaryOperator | tfBinaryPrecedenceComparison | tfCaseSensitiveOperator,
+	90:  tfBinaryOperator | tfBinaryPrecedenceComparison | tfCaseSensitiveOperator,
+	91:  tfBinaryOperator | tfUnaryOperator | tfBinaryPrecedenceComparison | tfCaseSensitiveOperator | tfDisallowedInRestrictedMode,
+	92:  tfBinaryOperator | tfBinaryPrecedenceComparison,
+	93:  tfBinaryOperator | tfBinaryPrecedenceComparison,
+	94:  tfBinaryOperator | tfBinaryPrecedenceComparison | tfDisallowedInRestrictedMode,
+	95:  tfUnaryOperator | tfPrefixOrPostfixOperator | tfDisallowedInRestrictedMode,
+	96:  tfUnaryOperator | tfPrefixOrPostfixOperator | tfDisallowedInRestrictedMode,
+	97:  tfBinaryOperator | tfBinaryPrecedenceComparison | tfCanConstantFold,
+	98:  tfBinaryOperator | tfBinaryPrecedenceComparison | tfCanConstantFold,
+	99:  tfSpecialOperator | tfDisallowedInRestrictedMode,
 	100: tfTernaryOperator | tfDisallowedInRestrictedMode,
 	101: tfAssignmentOperator,
 	102: tfBinaryOperator | tfBinaryPrecedenceCoalesce,
@@ -534,106 +534,106 @@ var staticTokenFlags = [171]TokenFlags{
 }
 
 var tokenText = [171]string{
-	0: "unknown",
-	1: "var",
-	2: "@var",
-	3: "param",
-	4: "number",
-	5: "label",
-	6: "ident",
-	7: "generic",
-	8: "newline",
-	9: "line continuation",
-	10: "comment",
-	11: "eof",
-	12: "sqstr",
-	13: "dqstr",
-	14: "sq here string",
-	15: "dq here string",
-	16: "(",
-	17: ")",
-	18: "{",
-	19: "}",
-	20: "[",
-	21: "]",
-	22: "@(",
-	23: "@{",
-	24: "$(",
-	25: ";",
-	26: "&&",
-	27: "||",
-	28: "&",
-	29: "|",
-	30: ",",
-	31: "--",
-	32: "++",
-	33: "..",
-	34: "::",
-	35: ".",
-	36: "!",
-	37: "*",
-	38: "/",
-	39: "%",
-	40: "+",
-	41: "-",
-	42: "=",
-	43: "+=",
-	44: "-=",
-	45: "*=",
-	46: "/=",
-	47: "%=",
-	48: "redirection",
-	49: "<",
-	50: "-f",
-	51: "-not",
-	52: "-bnot",
-	53: "-and",
-	54: "-or",
-	55: "-xor",
-	56: "-band",
-	57: "-bor",
-	58: "-bxor",
-	59: "-join",
-	60: "-eq",
-	61: "-ne",
-	62: "-ge",
-	63: "-gt",
-	64: "-lt",
-	65: "-le",
-	66: "-ilike",
-	67: "-inotlike",
-	68: "-imatch",
-	69: "-inotmatch",
-	70: "-ireplace",
-	71: "-icontains",
-	72: "-inotcontains",
-	73: "-iin",
-	74: "-inotin",
-	75: "-isplit",
-	76: "-ceq",
-	77: "-cne",
-	78: "-cge",
-	79: "-cgt",
-	80: "-clt",
-	81: "-cle",
-	82: "-clike",
-	83: "-cnotlike",
-	84: "-cmatch",
-	85: "-cnotmatch",
-	86: "-creplace",
-	87: "-ccontains",
-	88: "-cnotcontains",
-	89: "-cin",
-	90: "-cnotin",
-	91: "-csplit",
-	92: "-is",
-	93: "-isnot",
-	94: "-as",
-	95: "++",
-	96: "--",
-	97: "-shl",
-	98: "-shr",
-	99: ":",
+	0:   "unknown",
+	1:   "var",
+	2:   "@var",
+	3:   "param",
+	4:   "number",
+	5:   "label",
+	6:   "ident",
+	7:   "generic",
+	8:   "newline",
+	9:   "line continuation",
+	10:  "comment",
+	11:  "eof",
+	12:  "sqstr",
+	13:  "dqstr",
+	14:  "sq here string",
+	15:  "dq here string",
+	16:  "(",
+	17:  ")",
+	18:  "{",
+	19:  "}",
+	20:  "[",
+	21:  "]",
+	22:  "@(",
+	23:  "@{",
+	24:  "$(",
+	25:  ";",
+	26:  "&&",
+	27:  "||",
+	28:  "&",
+	29:  "|",
+	30:  ",",
+	31:  "--",
+	32:  "++",
+	33:  "..",
+	34:  "::",
+	35:  ".",
+	36:  "!",
+	37:  "*",
+	38:  "/",
+	39:  "%",
+	40:  "+",
+	41:  "-",
+	42:  "=",
+	43:  "+=",
+	44:  "-=",
+	45:  "*=",
+	46:  "/=",
+	47:  "%=",
+	48:  "redirection",
+	49:  "<",
+	50:  "-f",
+	51:  "-not",
+	52:  "-bnot",
+	53:  "-and",
+	54:  "-or",
+	55:  "-xor",
+	56:  "-band",
+	57:  "-bor",
+	58:  "-bxor",
+	59:  "-join",
+	60:  "-eq",
+	61:  "-ne",
+	62:  "-ge",
+	63:  "-gt",
+	64:  "-lt",
+	65:  "-le",
+	66:  "-ilike",
+	67:  "-inotlike",
+	68:  "-imatch",
+	69:  "-inotmatch",
+	70:  "-ireplace",
+	71:  "-icontains",
+	72:  "-inotcontains",
+	73:  "-iin",
+	74:  "-inotin",
+	75:  "-isplit",
+	76:  "-ceq",
+	77:  "-cne",
+	78:  "-cge",
+	79:  "-cgt",
+	80:  "-clt",
+	81:  "-cle",
+	82:  "-clike",
+	83:  "-cnotlike",
+	84:  "-cmatch",
+	85:  "-cnotmatch",
+	86:  "-creplace",
+	87:  "-ccontains",
+	88:  "-cnotcontains",
+	89:  "-cin",
+	90:  "-cnotin",
+	91:  "-csplit",
+	92:  "-is",
+	93:  "-isnot",
+	94:  "-as",
+	95:  "++",
+	96:  "--",
+	97:  "-shl",
+	98:  "-shr",
+	99:  ":",
 	100: "?",
 	101: "??=",
 	102: "??",

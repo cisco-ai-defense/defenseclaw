@@ -214,7 +214,7 @@ func formatDouble(f float64) string {
 	mant = strings.TrimPrefix(mant, "-")
 	digits := strings.Replace(mant, ".", "", 1)
 	var out string
-	if exp >= 15 || exp < -5 {
+	if exp >= 17 || exp <= -5 {
 		out = digits[:1]
 		if len(digits) > 1 {
 			out += "." + digits[1:]

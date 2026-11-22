@@ -28,9 +28,11 @@ const (
 	quoteLowDoubleLft char = 0x201e
 )
 
-func isLetter(c char) bool        { return unicode.IsLetter(rune(c)) }
-func isLetterOrDigit(c char) bool { return unicode.IsLetter(rune(c)) || unicode.Is(unicode.Nd, rune(c)) }
-func isDigitUnicode(c char) bool  { return unicode.Is(unicode.Nd, rune(c)) }
+func isLetter(c char) bool { return unicode.IsLetter(rune(c)) }
+func isLetterOrDigit(c char) bool {
+	return unicode.IsLetter(rune(c)) || unicode.Is(unicode.Nd, rune(c))
+}
+func isDigitUnicode(c char) bool { return unicode.Is(unicode.Nd, rune(c)) }
 
 func isCurlyBracket(c char) bool { return c == '{' || c == '}' }
 

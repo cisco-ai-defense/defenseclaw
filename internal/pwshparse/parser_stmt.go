@@ -111,7 +111,11 @@ func (p *Parser) statementRule() *Node {
 			return p.statementRule()
 		}
 		statement = p.statementDefault(token, attributes, restorePoint)
-	case TkDynamicKeyword, TkClass, TkEnum:
+	case TkClass:
+		statement = p.classDefinitionRule(attributes, token)
+	case TkEnum:
+		statement = p.enumDefinitionRule(attributes, token)
+	case TkDynamicKeyword:
 		statement = p.unsupportedStatement(token)
 	case TkUsing:
 		statement = p.usingStatementRule(token)
@@ -131,7 +135,7 @@ func (p *Parser) statementDefault(token *Token, attributes []*Node, restorePoint
 	return p.pipelineChainRule()
 }
 
-// unsupportedStatement is used for the tier-2 constructs (class, enum, configuration, dynamic keywords):
+// unsupportedStatement is used for the tier-2 constructs that are not ported (configuration, dynamic keywords):
 // the port does not parse them, flags the result and recovers as the reference does on a bad statement.
 func (p *Parser) unsupportedStatement(token *Token) *Node {
 	p.Unsupported = true

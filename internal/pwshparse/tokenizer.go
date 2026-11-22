@@ -101,10 +101,10 @@ type tokenizer struct {
 	curIndex   int
 
 	// tokenList is nil when the caller does not want the token stream.
-	tokenList    []*Token
-	wantTokens   bool
-	firstToken   *Token
-	lastToken    *Token
+	tokenList  []*Token
+	wantTokens bool
+	firstToken *Token
+	lastToken  *Token
 }
 
 func newTokenizer(p *Parser, src []char, wantTokens bool) *tokenizer {

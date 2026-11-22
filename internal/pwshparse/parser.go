@@ -65,11 +65,11 @@ type Parser struct {
 	errors          []ParseError
 	tokens          []*Token
 	depth           int
-	// Unsupported is set when the input used a construct the port does not parse (class, enum, configuration, dynamic keywords) or nested deeper than the budget.
+	// Unsupported is set when the input used a construct the port does not parse (configuration, dynamic keywords) or nested deeper than the budget.
 	Unsupported bool
 }
 
-const maxParseDepth = 4000
+const maxParseDepth = 16000
 
 func (p *Parser) tooDeep() {
 	p.Unsupported = true
@@ -97,6 +97,7 @@ func Parse(input string) *Result {
 	p.savingTokens = true
 	root := p.scriptBlockRule(nil, false, nil)
 	p.tokens = p.tz.tokenList
+	p.semanticChecks(root)
 	return &Result{Root: root, Tokens: p.tokens, Errors: p.errors, Source: src, Unsupported: p.Unsupported}
 }
 

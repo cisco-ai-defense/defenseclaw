@@ -52,6 +52,12 @@ func (p *Parser) pipelineChainRule() *Node {
 			p.reportIncomplete(errorExtent, "ExpectedValueExpression")
 			statement = newErrorStmt(errorExtent)
 		}
+		// AssignmentStatementAst's constructor unwraps a foreground single-element
+		// pipeline whose element is a CommandExpressionAst (ast.cs 3647).
+		if statement.Type == "PipelineAst" && statement.Props["Background"] != "true" &&
+			len(statement.Kids) == 1 && statement.Kids[0].Type == "CommandExpressionAst" {
+			statement = statement.Kids[0]
+		}
 		n := newNode("AssignmentStatementAst", extentOf(expr.ext(), statement.ext()), expr, statement)
 		n.prop("Operator", assignToken.Kind.String())
 		return n

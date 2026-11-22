@@ -11,12 +11,12 @@ package pwshparse
 // sbuf is a StringBuilder over UTF-16 code units.
 type sbuf []char
 
-func (s *sbuf) add(c char)          { *s = append(*s, c) }
-func (s *sbuf) addAll(c []char)     { *s = append(*s, c...) }
-func (s *sbuf) addStr(x string)     { *s = append(*s, toUTF16(x)...) }
-func (s sbuf) String() string       { return fromUTF16(s) }
-func (s sbuf) length() int          { return len(s) }
-func (s *sbuf) truncate(n int)      { *s = (*s)[:n] }
+func (s *sbuf) add(c char)      { *s = append(*s, c) }
+func (s *sbuf) addAll(c []char) { *s = append(*s, c...) }
+func (s *sbuf) addStr(x string) { *s = append(*s, toUTF16(x)...) }
+func (s sbuf) String() string   { return fromUTF16(s) }
+func (s sbuf) length() int      { return len(s) }
+func (s *sbuf) truncate(n int)  { *s = (*s)[:n] }
 
 func (t *tokenizer) getVerbatimCommandArgument() *Token {
 	t.skipWhiteSpace()
