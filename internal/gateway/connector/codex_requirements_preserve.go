@@ -269,7 +269,7 @@ func editCodexRequirementsInPlace(raw []byte, cfg map[string]interface{}) ([]byt
 	lastDropped := false
 	rootSlotPlaced := false
 	flush := func(nextDropped bool) {
-		if !(pendingDropped && nextDropped) {
+		if !pendingDropped || !nextDropped {
 			for _, line := range pending {
 				pieces = append(pieces, piece{text: line.text})
 			}
