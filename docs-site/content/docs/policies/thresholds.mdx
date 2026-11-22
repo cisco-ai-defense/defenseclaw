@@ -12,13 +12,12 @@ keywords:
   - guardrail profiles
 ---
 
-Two settings decide how severe a finding must be before the guardrail acts. To change them, see [change block and alert levels](/docs/policies/thresholds).
-
+Two settings decide how severe a finding must be before the guardrail acts. To change them, see [Set the levels](#set-the-levels).
 
 - `block_at` is the lowest severity that is **blocked**.
 - `alert_at` is the lowest severity that raises an **alert**.
 
-Both take `CRITICAL`, `HIGH`, `MEDIUM` or `LOW`. They are the only threshold source: one pair of settings, resolved the same way on every guardrail surface. There is no separate tool-call level, no per-direction level and no threshold hidden in a policy file. `config.yaml` holds the values, and the rule pack supplies a default for anything you leave unset.
+Both take `CRITICAL`, `HIGH`, `MEDIUM` or `LOW`. They are the only severity levels for rule and judge findings: one pair of settings, resolved the same way on every guardrail surface. There is no separate tool-call level and no per-direction level. `config.yaml` holds the values, and the rule pack supplies a default for anything you leave unset. Other layers can change the final action after the levels have been applied (for example the unknown tier, System One, the judge limits, an optional Rego policy and the CRITICAL floor); [Configure the cascade](/docs/guardrail/configure-cascade) lists them.
 
 ## What the two levels do
 
@@ -31,8 +30,8 @@ With `block_at: HIGH` and `alert_at: MEDIUM`:
 | `LOW` | Allowed | Allowed |
 
 - **Anything that blocks also alerts.** An `alert_at` that sits above `block_at` on the severity scale (for example `block_at: LOW` with `alert_at: MEDIUM`) alerts from the block level instead. `defenseclaw config get guardrail.alert_at --effective` labels that case `(clamped to block_at)`.
-- **Observe mode does not enforce policy findings.** Findings at or above the alert level are logged as alerts; fail mode and proxy availability can still stop a call. The levels take effect when the connector runs in action mode.
-- **Human approval sits below the block level.** When [HITL](/docs/guardrail) is on, a finding at or above `guardrail.hilt.min_severity` but below `block_at` becomes a `confirm` on a connector event that can ask. Findings at or above `block_at` block without asking.
+- **Observe mode does not enforce policy findings.** Findings at or above the alert level are logged as alerts; fail mode and proxy availability can still stop a call. The levels take effect when the connector runs in action mode. One rule is the exception; see [Modes](/docs/guardrail/packs-and-modes#modes).
+- **Human approval sits below the block level.** When [human approval](/docs/guardrail/human-approval) is on, a finding at or above `guardrail.hilt.min_severity` but below `block_at` becomes a `confirm` on a connector event that can ask. Findings at or above `block_at` block without asking.
 
 ## Where the levels apply
 
@@ -112,11 +111,13 @@ guardrail:
 
 A scope with no level of its own takes the default of the rule pack it enforces. The default comes from the pack's **posture**:
 
-| Posture | `block_at` | `alert_at` |
-| --- | --- | --- |
-| `default` | `CRITICAL` | `MEDIUM` |
-| `strict` | `MEDIUM` | `LOW` |
-| `permissive` | `CRITICAL` | `HIGH` |
+| Posture | `block_at` | `alert_at` | Pick it when |
+| --- | --- | --- | --- |
+| `default` | `CRITICAL` | `MEDIUM` | You want to stop obvious harm. With human approval on, eligible HIGH findings ask first. |
+| `strict` | `MEDIUM` | `LOW` | A missed attack costs more than an interruption, as in regulated work. Turn the LLM judge on too. |
+| `permissive` | `CRITICAL` | `HIGH` | You are piloting, or agents must stay available. Pair it with observe mode and review what would have happened. |
+
+This is the one place the three levels are listed; the other pages link here.
 
 The posture of a pack is, in order:
 
@@ -288,7 +289,7 @@ A change to a threshold, a rule pack, `guardrail.rules`, a profile, the mode, HI
 
 If a change is invalid, the previous generation keeps running. The rejected change shows up as `policy.last_reload_error` in the gateway `/health` output and as a failing **Policy** row in `defenseclaw doctor`, which also lists the generation and the digest still being enforced. The `guardrail` commands wait up to 10 seconds for the running gateway to report the new config generation; when it does not (it rejected the change, or it never reloaded it), they end with `The running gateway did not apply it and still enforces the previous setting (defenseclaw-gateway status says why); restart it to apply this: defenseclaw-gateway restart.` (`mode`, `block-at` and `alert-at` then exit 1; `use-pack`, `protection`, `rule` and `suppress` print the same line after `Saved (config generation N).`).
 
-A restart is still needed for the process-level guardrail keys: `guardrail.host`, `guardrail.port`, `guardrail.enabled`, `guardrail.connector`, `guardrail.scanner_mode`, `guardrail.retain_judge_bodies` and the hook self-heal settings. A connector's own `enabled` applies in place: the gateway sets up or removes its hooks. `guardrail.hook_fail_mode` reloads hot: the gateway rewrites the installed hook scripts (with hook self-heal off it runs the connector setup again), and `defenseclaw guardrail fail-mode` rewrites them itself. The writer prints `Restart the gateway to apply <key>: defenseclaw-gateway restart` when you change one. The rest of such a change still applies at once; the gateway logs which keys wait for the restart. With `gateway.config_reload.mode: restart` the gateway restarts itself when a change needs it, instead of waiting for you.
+A restart is still needed for the process-level guardrail keys: `guardrail.host`, `guardrail.port`, `guardrail.enabled`, `guardrail.connector`, `guardrail.scanner_mode`, `guardrail.retain_judge_bodies`, `guardrail.protected_files` and the hook self-heal settings. A connector's own `enabled` applies in place: the gateway sets up or removes its hooks. `guardrail.hook_fail_mode` reloads hot: the gateway rewrites the installed hook scripts (with hook self-heal off it runs the connector setup again), and `defenseclaw guardrail fail-mode` rewrites them itself. The writer prints `Restart the gateway to apply <key>: defenseclaw-gateway restart` when you change one. The rest of such a change still applies at once; the gateway logs which keys wait for the restart. With `gateway.config_reload.mode: restart` the gateway restarts itself when a change needs it, instead of waiting for you.
 
 <Callout type="info" title="Secure Client">
 When Cisco Secure Client integration is active, the gateway keeps the rule pack's posture levels for content decisions. `guardrail.block_at` and `alert_at` do not change them.
@@ -298,6 +299,7 @@ When Cisco Secure Client integration is active, the gateway keeps the rule pack'
 
 - [Rules and custom packs](/docs/policies/rules): `guardrail.rule_pack`, `custom_packs` and `guardrail.rules`
 - [Defaults](/docs/policies/defaults): what each shipped preset and pack sets
-- [HITL](/docs/guardrail): the confirm band below the block level
+- [Human approval](/docs/guardrail/human-approval): the confirm band below the block level
+- [Configure the cascade](/docs/guardrail/configure-cascade): System One, the judge limits, the optional Rego policy and the CRITICAL floor, which can change the final action
 - [User- and group-based policies](/docs/guardrail/user-and-group-policies): assign profiles by user, group, connector or agent
 - [Reference: Configuration](/docs/reference/configuration): every key
