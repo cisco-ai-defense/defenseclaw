@@ -631,6 +631,9 @@ type ContinuousDiscoveryService struct {
 	skillFactsSeen map[string]AISkillFacts
 	skillBytesRead int64
 	skillManifests map[string]string // SKILL.md hash -> skill folder
+	// skillHashCache keeps each skill folder's hash across scans while the
+	// folder is unchanged (GAP-1816).
+	skillHashCache map[string]skillHashCacheEntry
 	// modelAPIProbeCursor rotates origins and catalogs across bounded passes so
 	// a stalled or over-cap loopback provider cannot starve later providers.
 	modelAPIProbeCursor  atomic.Uint64

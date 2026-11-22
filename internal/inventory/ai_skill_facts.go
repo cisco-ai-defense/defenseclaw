@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
@@ -97,20 +98,35 @@ func (s *ContinuousDiscoveryService) skillFacts(path string, bundled bool) *AISk
 	s.skillFactsMu.Lock()
 	facts, seen := s.skillFactsSeen[path]
 	limit := min64(maxSkillBytes, maxSkillScanBytes-s.skillBytesRead)
+	cached, inCache := s.skillHashCache[path]
 	s.skillFactsMu.Unlock()
 	if seen {
 		return &facts
 	}
-	hash, status, manifest, read := hashSkillFolder(path, limit)
-	location, inHome := s.skillLocation(path)
-	front := parseSkillFrontMatter(manifest)
-	facts = AISkillFacts{
-		ContentHash: hash, ContentStatus: status, Scope: SkillScopeUser, Location: location,
-		Author: front.author, Description: front.description, Version: front.version,
+	// An unchanged folder keeps its last hash without being read again
+	// (ai_skill_hash_cache.go), and costs nothing from the scan budget.
+	now := time.Now()
+	signature, signed := skillFolderSignature(path)
+	hashed, read, keep := cached, int64(0), false
+	if !inCache || !signed || !cached.fresh(signature, now) {
+		var manifest []byte
+		hashed = skillHashCacheEntry{signature: signature, hashedAt: now}
+		hashed.hash, hashed.status, manifest, read = hashSkillFolder(path, limit)
+		hashed.front = parseSkillFrontMatter(manifest)
+		if hashed.status == SkillContentOK && manifest != nil {
+			hashed.manifestHash = skillManifestHash(manifest)
+			hashed.manifestSize = int64(len(manifest))
+		}
+		// A folder cut short by the scan budget, not by its own size, is
+		// read again next scan.
+		keep = signed && (hashed.status == SkillContentOK ||
+			hashed.status == SkillContentTooLarge && limit >= maxSkillBytes)
 	}
-	if status == SkillContentOK && manifest != nil {
-		facts.ManifestHash = skillManifestHash(manifest)
-		facts.ManifestSize = int64(len(manifest))
+	location, inHome := s.skillLocation(path)
+	facts = AISkillFacts{
+		ContentHash: hashed.hash, ContentStatus: hashed.status, Scope: SkillScopeUser, Location: location,
+		Author: hashed.front.author, Description: hashed.front.description, Version: hashed.front.version,
+		ManifestHash: hashed.manifestHash, ManifestSize: hashed.manifestSize,
 	}
 	switch {
 	case bundled:
@@ -124,6 +140,12 @@ func (s *ContinuousDiscoveryService) skillFacts(path string, bundled bool) *AISk
 		s.skillFactsSeen = map[string]AISkillFacts{}
 	}
 	s.skillFactsSeen[path] = facts
+	if keep {
+		if s.skillHashCache == nil || len(s.skillHashCache) >= maxSkillHashCacheFolders {
+			s.skillHashCache = map[string]skillHashCacheEntry{}
+		}
+		s.skillHashCache[path] = hashed
+	}
 	if facts.ManifestHash != "" {
 		if s.skillManifests == nil || len(s.skillManifests) >= maxSkillManifestFolders {
 			s.skillManifests = map[string]string{}

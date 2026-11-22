@@ -294,6 +294,8 @@ func TestDetectSkillsAttachesFactsOncePerFolder(t *testing.T) {
 	}
 
 	// A spent scan budget stops reading instead of hashing more user files.
+	// The folder is new to this scan, so it is not in the hash cache.
+	svc.skillHashCache = nil
 	svc.skillBytesRead = maxSkillScanBytes
 	if got := svc.skillFacts(filepath.Join(home, ".agents", "skills", "pdf"), false); got.ContentStatus != SkillContentTooLarge {
 		t.Fatalf("over the scan budget: %+v", got)
