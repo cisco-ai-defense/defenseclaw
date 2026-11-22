@@ -727,7 +727,7 @@ func attachMCPWrite(f *Facts, connectorName, cwd string, input any, budget int64
 		// kit sends them (GAP-0643). A partial edit gives the gateway no
 		// server; it needs none.
 		if _, whole := in["content"].(string); whole && mcpConfigWriteNames[filepath.Base(target)] {
-			budget = attachFetchFacts(f, cwd, budget)
+			budget = attachFetchFacts(f, MCPConfigProject(target, cwd), budget)
 		}
 		return budget
 	}
@@ -741,7 +741,30 @@ func attachMCPWrite(f *Facts, connectorName, cwd string, input any, budget int64
 		f.Truncated = true
 	}
 	f.Files = append(f.Files, a)
-	return attachFetchFacts(f, cwd, budget-int64(len(content)))
+	return attachFetchFacts(f, MCPConfigProject(target, cwd), budget-int64(len(content)))
+}
+
+// MCPConfigProject is the folder the servers of an MCP config written at
+// target run in, as the gateway judges them: the config's folder (the folder
+// above a config folder such as .cursor or .claude) when it lies below cwd,
+// else cwd. A whole write of sub/.mcp.json from /work is checked for what a
+// fetcher resolves in /work/sub, where the agent loads it (substrate-1
+// GAP-0646); a home config stays in cwd. Both paths are absolute or the
+// result is cwd.
+func MCPConfigProject(target, cwd string) string {
+	if !filepath.IsAbs(target) || !filepath.IsAbs(cwd) {
+		return cwd
+	}
+	cwd = filepath.Clean(cwd)
+	folder := filepath.Dir(filepath.Clean(target))
+	if strings.HasPrefix(filepath.Base(folder), ".") && folder != cwd {
+		folder = filepath.Dir(folder)
+	}
+	if rel, err := filepath.Rel(cwd, folder); err == nil && rel != "." && rel != ".." &&
+		!strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return folder
+	}
+	return cwd
 }
 
 // mcpConfigWriteNames are the file names whose write the gateway reads for

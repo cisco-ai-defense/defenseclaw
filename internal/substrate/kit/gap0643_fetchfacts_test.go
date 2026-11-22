@@ -55,8 +55,13 @@ func TestGAP0643KitSendsFetchFactsForArgvMCPAddAndUnloadedConfigWrite(t *testing
 	for _, c := range adds {
 		if got := collect(c.connector, c.tool, c.input); len(got) == 0 {
 			t.Errorf("%s: no files, want the folder record", c.name)
-		} else if _, ok := got[roleFetchChecked+" "+repo]; !ok {
-			t.Errorf("%s: files %v, want %s %s", c.name, keys(got), roleFetchChecked, repo)
+		} else if folder := map[string]string{"Write": filepath.Join(repo, "sub")}[c.tool]; folder == "" {
+			if _, ok := got[roleFetchChecked+" "+repo]; !ok {
+				t.Errorf("%s: files %v, want %s %s", c.name, keys(got), roleFetchChecked, repo)
+			}
+		} else if _, ok := got[roleFetchChecked+" "+folder]; !ok {
+			// The config's folder, where the agent loads it (GAP-0646).
+			t.Errorf("%s: files %v, want %s %s", c.name, keys(got), roleFetchChecked, folder)
 		}
 	}
 
