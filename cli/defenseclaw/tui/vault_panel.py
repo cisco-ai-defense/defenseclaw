@@ -83,6 +83,7 @@ class VaultPanelMixin:
             return False
         if kind == "move":
             self._update_body_only()  # type: ignore[attr-defined]
+            self._vault_sync_table_cursor()
             return True
         if kind == "refresh":
             self._schedule_vault_load()
@@ -105,6 +106,18 @@ class VaultPanelMixin:
             self._open_vault_prompt(action.prompt)
             return True
         return False
+
+    def _vault_sync_table_cursor(self) -> None:
+        """Move the table highlight to the model's row (j/k move the model; the
+        detail line and the highlight must name the same secret)."""
+        from textual.widgets import DataTable
+
+        try:
+            table = self.query_one("#panel-table", DataTable)  # type: ignore[attr-defined]
+        except Exception:  # noqa: BLE001 - no table yet (tests, early start)
+            return
+        with self._programmatic_table_update():  # type: ignore[attr-defined]
+            self._position_panel_table_cursor(table, self.vault_model.cursor)  # type: ignore[attr-defined]
 
     def _open_vault_prompt(self, prompt: str) -> None:
         title, hint, password = self.vault_model.prompt_spec(prompt)

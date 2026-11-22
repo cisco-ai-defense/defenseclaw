@@ -172,3 +172,22 @@ async def test_capital_k_opens_the_vault_tab(tmp_path, sandboxes_supported) -> N
             await pilot.press("K")
             await pilot.pause()
             assert app.active_panel == "vault", start
+
+
+async def test_j_moves_the_highlight_with_the_detail_line(tmp_path, sandboxes_supported) -> None:
+    """The detail line and the table highlight name the same secret after j/k."""
+    from textual.widgets import DataTable
+
+    app = snapshot_app(tmp_path)
+    app.vault_model, app._vault_model_injected = loaded(), True
+    async with app.run_test(size=(80, 24)) as pilot:
+        app.action_switch_panel("vault")
+        await pilot.pause()
+        await pilot.press("j")
+        await pilot.pause()
+        table = app.query_one("#panel-table", DataTable)
+        assert app.vault_model.cursor == 1 and table.cursor_row == 1
+        assert "GOOGLE_API_KEY" in screen_text(app)
+        await pilot.press("k")
+        await pilot.pause()
+        assert app.vault_model.cursor == 0 and table.cursor_row == 0

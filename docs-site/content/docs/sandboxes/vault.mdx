@@ -28,6 +28,12 @@ way out, to that host only.
                                        $STRIPE_API_KEY" api.stripe.com      value, for api.stripe.com only
 ```
 
+<Video
+  src="sandbox-vault"
+  aspect="16/10"
+  caption="Claude Code in an OpenShell sandbox on Linux: a secret added to the vault with its value typed hidden, the agent calling a demo API with $DEMO_API_TOKEN (the API gets the real token, the agent only a placeholder), a Stripe-shaped key pasted into a prompt moved into the vault and the prompt stopped, and the Vault tab in the TUI. The keys shown are made up for the recording."
+/>
+
 ## Add a secret
 
 ```bash
@@ -49,6 +55,8 @@ paths and wildcards are refused.
 ```bash
 defenseclaw sandbox run claude --vault STRIPE_API_KEY
 ```
+
+![Claude Code in a sandbox runs curl with "Authorization: Bearer $DEMO_API_TOKEN" against host.openshell.internal:28950 and reports that the API answered accepted: the real token arrived, while the agent held only a placeholder](/images/sandboxes/screens/vault-placeholder-call.png)
 
 `--vault` takes one name and repeats. The run's banner lists each secret and
 its host on the `Secret` line. Inside the sandbox the agent uses the variable as
@@ -91,7 +99,22 @@ A second, different secret of the same kind gets `_2`, `_3` and so on.
 - **In a tool call.** The tool call is stopped. The agent's model wrote the
   value, so it has seen it, and the value may even be the agent's own: the
   secret is marked **exposed: rotate** and no sandbox gets it until you rotate
-  it with its issuer and run `defenseclaw sandbox vault replace NAME`.
+  it with its issuer and run `defenseclaw sandbox vault replace NAME`. Only a
+  value written out in the tool call is seen: a command that makes up a value
+  as it runs (from `/dev/urandom`, say) is not.
+
+![Claude Code in a sandbox: a prompt with a Stripe-shaped key is stopped by the UserPromptSubmit hook, and DefenseClaw says it moved the secret into the vault as STRIPE_API_KEY, sent only to api.stripe.com](/images/sandboxes/screens/vault-capture-claude.png)
+
+The same in Codex, where a GitHub token in a prompt is moved into the vault and
+a key the model typed into a `printf` command is stopped and marked exposed:
+
+![Codex in a sandbox: a GitHub token in a prompt is moved into the vault as GITHUB_TOKEN, and a printf that writes a Stripe-shaped key the model made up is stopped by the PreToolUse hook and marked exposed](/images/sandboxes/screens/vault-capture-codex.png)
+
+<Video
+  src="sandbox-vault-codex"
+  aspect="16/10"
+  caption="Codex in an OpenShell sandbox on Linux: the demo API call with a vault placeholder, a GitHub token in a prompt moved into the vault, a key the model typed into a tool call stopped and marked exposed, and a sandbox refused that exposed secret until it is rotated and replaced. The keys shown are made up for the recording."
+/>
 
 Capture keeps at most 16 captured secrets; past that a call is still stopped
 and the value still removed, but nothing more is stored until you remove some.
@@ -109,12 +132,12 @@ your administrator's setting applies.
 defenseclaw sandbox vault list
 ```
 
-```text
-NAME            HOST             STATUS           SOURCE    LAST USED
-GITHUB_TOKEN    api.github.com   exposed: rotate  captured  never
-GOOGLE_API_KEY  —                needs a host     captured  never
-STRIPE_API_KEY  api.stripe.com   ready            manual    3m ago (demo)
-```
+![defenseclaw sandbox vault list: DEMO_API_TOKEN added by hand and bound to host.openshell.internal:28950, last used by the vault-demo sandbox, and STRIPE_API_KEY captured from a prompt and bound to api.stripe.com](/images/sandboxes/screens/vault-cli-list.png)
+
+A secret an agent wrote into a tool call is listed as **exposed: rotate**, and a
+sandbox refuses it until you replace the value:
+
+![defenseclaw sandbox vault list shows STRIPE_API_KEY as exposed: rotate with the replace command, and sandbox run codex --vault STRIPE_API_KEY refuses it until the value is rotated and replaced](/images/sandboxes/screens/vault-exposed-refused.png)
 
 Values are never printed. `show NAME` gives one secret's details, `replace`
 sets a new value, `bind` sets the host, `rename` changes the variable name and
@@ -124,6 +147,12 @@ In the TUI, the **Vault** tab (`K`) shows the same list and does the same
 changes: `a` add, `v` replace value, `e` set host, `n` rename, `d` delete,
 Enter details. A value is typed in a hidden field and goes to the command on
 standard input.
+
+![DefenseClaw TUI Vault tab on Linux: 2 secrets for your sandboxes, values never shown; the selected DEMO_API_TOKEN line says it reaches a sandbox as $DEMO_API_TOKEN with --vault, is sent only to host.openshell.internal:28950 and was added by you; the table lists DEMO_API_TOKEN and STRIPE_API_KEY with host, status, source and last use](/images/sandboxes/screens/vault-tui-panel.png)
+
+Only terminal agents run in a sandbox (Claude Code, Codex, Copilot CLI,
+OpenCode, Kiro, Hermes, Antigravity's `agy`), so only they can use the vault.
+Desktop apps and IDE agents do not run in an OpenShell sandbox.
 
 ## Where the vault lives
 
