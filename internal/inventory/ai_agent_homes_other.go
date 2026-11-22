@@ -12,6 +12,6 @@
 
 package inventory
 
-func platformSavedVariable(home, _, name string) string {
-	return shellSavedVariable(home, name)
+func platformSavedVariable(home, _, name string) (string, bool) {
+	return shellSavedVariable(home, name), true
 }

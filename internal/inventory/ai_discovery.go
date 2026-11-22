@@ -589,6 +589,10 @@ const (
 // sidecar-scoped so CLI/TUI/API callers all see the same state and OTel fanout.
 type ContinuousDiscoveryService struct {
 	opts AIDiscoveryOptions
+	// agentHomes is the last agent folder variables each user was seen to
+	// save (ai_agent_homes_state.go).
+	agentHomesMu sync.Mutex
+	agentHomes   map[string]map[string]string
 	// homeOwnersMu guards opts.homeOwners against EnrolledAccounts, which
 	// the runtime planes call from their own goroutine while a scan renames
 	// the owners (refreshHomeOwnerNames).

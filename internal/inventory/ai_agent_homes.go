@@ -35,7 +35,8 @@ var agentHomeShellFiles = []string{".zshenv", ".zprofile", ".zshrc", ".bash_prof
 const maxShellFileBytes = 256 << 10
 
 // savedUserVariable returns the value the user of home (sid on Windows)
-// saved for name (replaceable in tests).
+// saved for name, and false when it cannot be known now (a signed-out
+// Windows user); replaceable in tests.
 var savedUserVariable = platformSavedVariable
 
 // agentHome is the agent folder of home for variable name: the one the user
@@ -55,7 +56,8 @@ func (s *ContinuousDiscoveryService) savedAgentHome(home, name string) string {
 		return ""
 	}
 	owner, _ := s.homeOwnerForPath(home)
-	value := strings.TrimSpace(savedUserVariable(home, owner.UserID, name))
+	value, known := savedUserVariable(home, owner.UserID, name)
+	value = s.rememberedAgentHome(home, owner.UserID, name, strings.TrimSpace(value), known)
 	for _, prefix := range []string{"~/", "$HOME/", "${HOME}/", `%USERPROFILE%\`} {
 		if len(value) > len(prefix) && strings.EqualFold(value[:len(prefix)], prefix) {
 			value = filepath.Join(home, value[len(prefix):])
