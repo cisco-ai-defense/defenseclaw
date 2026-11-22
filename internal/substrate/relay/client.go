@@ -15,7 +15,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -164,7 +163,7 @@ func attachWS(ctx context.Context, in io.Reader, out io.Writer, o AttachOptions)
 	conn.SetPongHandler(func(string) error { return conn.SetReadDeadline(time.Now().Add(dead)) })
 	var res AttachResult
 	var resMu sync.Mutex // the reader goroutine writes res while the paths below read it
-	var sent atomic.Int64
+	var sent sendCount
 	done := make(chan struct{})
 	go func() {
 		t := time.NewTicker(every)
@@ -245,9 +244,12 @@ func attachWS(ctx context.Context, in io.Reader, out io.Writer, o AttachOptions)
 		}
 	case <-ctx.Done():
 	}
+	// A write still in flight ends now, so settle does not wait on it.
+	_ = conn.Close()
+	n := sent.settle()
 	resMu.Lock()
 	defer resMu.Unlock()
-	res.Sent = sent.Load()
+	res.Sent = n
 	return res, nil
 }
 
@@ -280,10 +282,14 @@ func attachPoll(ctx context.Context, in io.Reader, out io.Writer, o AttachOption
 	path := RoutePoll + "/" + open.ID
 	var res AttachResult
 	var resMu sync.Mutex // the follower goroutine writes res while the paths below read it
-	var sent atomic.Int64
+	var sent sendCount
 	var outMu sync.Mutex
+	// sendCtx ends a write still in flight when the attachment ends, so
+	// settle does not wait on it.
+	sendCtx, stopSends := context.WithCancel(ctx)
+	defer stopSends()
 	send := func(frame []byte) error {
-		r, err := do(ctx, http.MethodPost, path, AppendStream(nil, frame))
+		r, err := do(sendCtx, http.MethodPost, path, AppendStream(nil, frame))
 		if err != nil {
 			return err
 		}
@@ -371,20 +377,51 @@ func attachPoll(ctx context.Context, in io.Reader, out io.Writer, o AttachOption
 		}
 	case <-ctx.Done():
 	}
+	stopSends()
+	n := sent.settle()
 	resMu.Lock()
 	defer resMu.Unlock()
-	res.Sent = sent.Load()
+	res.Sent = n
 	return res, nil
 }
 
-// tracked wraps send so a chunk that fails is reported (OnUnsent) and one
-// that is written is counted in sent.
-func (o AttachOptions) tracked(sent *atomic.Int64, send func([]byte) error) func([]byte) error {
+// sendCount is the DATA bytes an attachment wrote (AttachResult.Sent). A
+// chunk is written and counted under mu, and settle ends the count once no
+// chunk is in flight: a chunk the input pump reads after that is not written
+// but reported (OnUnsent). So every chunk is either in Sent or reported,
+// never neither (GAP-1765: the relay can drop the connection on a chunk it
+// got before the write returned, and Sent was read before that chunk was
+// counted, so the keys lost with it were never reported).
+type sendCount struct {
+	mu    sync.Mutex
+	n     int64
+	ended bool
+}
+
+// errAttachEnded refuses a chunk read after the attachment ended.
+var errAttachEnded = errors.New("relay: the attachment ended")
+
+// settle ends the count and returns it.
+func (c *sendCount) settle() int64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.ended = true
+	return c.n
+}
+
+// tracked wraps send so a chunk that is written is counted in sent and one
+// that fails, or comes after the attachment ended, is reported (OnUnsent).
+func (o AttachOptions) tracked(sent *sendCount, send func([]byte) error) func([]byte) error {
 	return func(b []byte) error {
-		err := send(b)
+		sent.mu.Lock()
+		defer sent.mu.Unlock()
+		err := errAttachEnded
+		if !sent.ended {
+			err = send(b)
+		}
 		switch {
 		case err == nil:
-			sent.Add(int64(len(b)))
+			sent.n += int64(len(b))
 		case o.OnUnsent != nil && len(b) > 0:
 			o.OnUnsent(len(b))
 		}
