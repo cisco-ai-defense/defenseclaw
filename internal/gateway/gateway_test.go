@@ -6649,7 +6649,7 @@ func TestHandleToolCallRecordsJudgeContextBeforeAsyncDispatch(t *testing.T) {
 		router.handleToolCall(EventFrame{Type: "tool_call", Payload: payload})
 	}
 
-	snapshot, _ := judge.intentStore().(*intentstore.Process).Peek("ordered-session")
+	snapshot, _ := judge.intentStore().(*intentstore.Process).Peek(judgeSessionKey(openClawJudgeContext("ordered-session")))
 	events := snapshot.Prior
 	if len(events) != 2 || !strings.Contains(events[0].Args, "first prerequisite") ||
 		!strings.Contains(events[1].Args, "second dependent") {

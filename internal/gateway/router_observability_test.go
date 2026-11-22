@@ -177,8 +177,10 @@ func TestScanInboundPromptSeedsBoundedJudgeSessionIntent(t *testing.T) {
 	r.scanInboundPrompt(sessionID, "msg-context-1", "gpt-5.5",
 		"inspect the password fixture in this workspace")
 
+	// The router's own tool calls read it: the OpenClaw session's key
+	// (openClawJudgeContext, GAP-0152).
 	sample := judge.toolJudgeContextSample(
-		ContextWithSessionID(t.Context(), sessionID),
+		openClawJudgeContext(sessionID),
 		"shell",
 		`{"command":"grep password fixture.bin"}`,
 	)
