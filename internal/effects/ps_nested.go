@@ -425,6 +425,52 @@ var envItemCmdlets = set("set-item", "si", "new-item", "ni", "remove-item", "ri"
 	"clear-item", "cli", "set-content", "sc", "add-content", "ac", "clear-content", "clc", "rename-item", "rni", "ren",
 	"copy-item", "cp", "copy", "cpi", "move-item", "mv", "move", "mi", "new-itemproperty", "set-itemproperty", "sp")
 
+// noteSessionHome records a Set-Variable HOME update after its command runs.
+// A literal value replaces the automatic home; an unresolved value disables
+// the hook-home fallback for the rest of the current script.
+func (lw *psLower) noteSessionHome(c *Cmd, cond bool) {
+	if len(c.Words) < 2 || !c.Words[0].Static {
+		return
+	}
+	name := psLeaf(c.Words[0].Value)
+	if name != "set-variable" && name != "sv" {
+		return
+	}
+	var variable string
+	var value Word
+	valueKnown := false
+	for i := 1; i < len(c.Words); i++ {
+		w := c.Words[i]
+		if !w.Static {
+			continue
+		}
+		switch strings.ToLower(w.Value) {
+		case "-name":
+			if i+1 < len(c.Words) && c.Words[i+1].Static {
+				variable = c.Words[i+1].Value
+				i++
+			}
+		case "-value":
+			if i+1 < len(c.Words) {
+				value, valueKnown = c.Words[i+1], true
+				i++
+			}
+		default:
+			if variable == "" && !strings.HasPrefix(w.Value, "-") {
+				variable = w.Value
+			}
+		}
+	}
+	if !strings.EqualFold(variable, "HOME") {
+		return
+	}
+	if !valueKnown || !value.Static {
+		value = Word{Reason: ReasonDynamicExpansion}
+	}
+	assign := &Cmd{Cond: cond, Assigns: []Assign{{Name: psHomeVar, ValueWord: value}}}
+	lw.out.Stmts = append(lw.out.Stmts, &Stmt{Cmds: []*Cmd{assign}, Cond: cond})
+}
+
 // noteEnvDrive records the variables a command changes through the Env: drive
 // (Set-Item Env:USERPROFILE C:\x): the walker must not keep their old value.
 func (lw *psLower) noteEnvDrive(c *Cmd) {
@@ -571,10 +617,14 @@ func psExpandSegs(segs []WordSeg, o Options) (string, bool) {
 		case seg.Var == "":
 			b.WriteString(seg.Lit)
 		case seg.Var == psHomeVar:
-			if o.Home == "" {
+			v, ok := o.Env[psHomeVar]
+			if !ok {
+				v = o.Home
+			}
+			if v == "" {
 				return "", false
 			}
-			b.WriteString(o.Home)
+			b.WriteString(v)
 		default:
 			v, ok := psEnvValue(o.Env, seg.Var)
 			if !ok {
