@@ -68,7 +68,7 @@ def tree_digest(base: Path) -> tuple[str, int, int]:
     n = size = 0
     for p in sorted(x for x in base.rglob("*") if x.is_file()):
         rel = p.relative_to(base).as_posix()
-        if rel.startswith(".cache/") or rel == ".defenseclaw-source.json":
+        if rel.startswith((".cache/", ".git/")) or rel == ".defenseclaw-source.json":
             continue
         h.update(rel.encode() + b"\0" + sha256_file(p).encode() + b"\n")
         n += 1
@@ -91,16 +91,19 @@ def fetch(root: Path, dataset_id: str, max_bytes: int, token_file: str | None) -
     inc = reg.get("include") or ent.get("include_paths") or []
     if kind == "prepare":
         lock = LOCK
-        if reg.get("include_from"):
+        if reg.get("include_from") or reg.get("force_git"):
             # the adapter audits an exact file list: fetch only those paths (never a whole repository)
             import re  # noqa: PLC0415
 
-            text = (SCRIPTS / reg["include_from"]).read_text(encoding="utf-8")
-            paths = sorted(set(re.findall(r'"(datasets/[A-Za-z0-9_./-]+\.(?:log|json|yml|zip))"', text)))
+            paths = None
+            if reg.get("include_from"):
+                text = (SCRIPTS / reg["include_from"]).read_text(encoding="utf-8")
+                paths = sorted(set(re.findall(r'"(datasets/[A-Za-z0-9_./-]+\.(?:log|json|yml|zip))"', text)))
             doc = json.loads(LOCK.read_text(encoding="utf-8"))
             for item in doc["datasets"]:
                 if item["id"] == dataset_id:
-                    item["include_paths"] = paths
+                    if paths is not None:
+                        item["include_paths"] = paths
                     item["fetch"] = "git"  # the lock says manual (no include list); the pinned git blobs are what we need
             lock = root / "data" / f"lock-{reg['slug']}.json"
             lock.parent.mkdir(parents=True, exist_ok=True)
@@ -110,7 +113,18 @@ def fetch(root: Path, dataset_id: str, max_bytes: int, token_file: str | None) -
         subprocess.run(cmd, check=True)
         return
     dest.mkdir(parents=True, exist_ok=True)
-    if kind == "hf":
+    if kind == "gitpin":
+        # an adapter that verifies the pinned commit with git needs a real checkout: fetch exactly the locked commit
+        def _g(*a: str) -> None:
+            subprocess.run(["git", "-C", str(dest), *a], check=True)
+
+        _g("init", "-q")
+        _g("remote", "add", "origin", url)
+        _g("fetch", "-q", "--depth", "1", "origin", rev)
+        _g("-c", "advice.detachedHead=false", "checkout", "-q", "--detach", "FETCH_HEAD")
+        if subprocess.run(["git", "-C", str(dest), "rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip() != rev:
+            raise SystemExit(f"{dataset_id}: checked out a commit other than the lock")
+    elif kind == "hf":
         from huggingface_hub import HfApi, snapshot_download  # noqa: PLC0415
 
         token = Path(token_file).read_text().strip() if token_file else None
@@ -194,15 +208,67 @@ def normalize(root: Path, dataset_id: str) -> Path:
     ext = root / "data/extracted" / reg.get("dir", dataset_id)
     if reg.get("extract") and not ext.exists():
         safe_extract_zip(src_dir(root, dataset_id) / reg["extract"], ext)
+    if reg.get("stage") and not ext.exists():
+        # the adapter reads fixed file names: stage regular-file copies (never links) of the pinned paths under those names
+        import shutil  # noqa: PLC0415
+
+        ext.mkdir(parents=True)
+        for name, rel in sorted(reg["stage"].items()):
+            shutil.copyfile(src_dir(root, dataset_id) / rel, ext / name)
     sub = {"archive": str(src_dir(root, dataset_id) / reg.get("extract", "-")), "ext": str(ext),
            "src": str(src_dir(root, dataset_id)), "srcroot": str(root / "data/sources"), "rev": ent["revision"], "out": str(out), "manifest": str(man),
            "lock": str(LOCK), "id": dataset_id, "data": str(root / "data")}
-    argv = [sys.executable, "-s", str(SCRIPTS / reg["norm"][0])] + [a.format(**sub) for a in reg["norm"][1:]]
+    if reg.get("meta") == "hf-lfs":
+        sub["meta"] = str(write_hf_meta(root, dataset_id, ent, reg))
+    else:
+        sub["meta"] = "-"
+    argv = [sys.executable, "-s", str(SCRIPTS / reg["norm"][0])] + expand_args([a.format(**sub) for a in reg["norm"][1:]])
     tmp = out.with_suffix(".jsonl.partial")
     argv = [tmp.as_posix() if a == out.as_posix() else a for a in argv]
     print(f"{dataset_id}: normalize {reg['norm'][0]}")
     subprocess.run(argv, check=True, cwd=REPO)  # adapters default to repo-relative schema paths
     os.replace(tmp, out)
+    return out
+
+
+def expand_args(args: list[str]) -> list[str]:
+    """A `*` in an argument expands to the sorted matching files; after a flag it repeats the flag for each file (action=append adapters)."""
+    import glob  # noqa: PLC0415
+
+    out: list[str] = []
+    for a in args:
+        if "*" not in a:
+            out.append(a)
+            continue
+        files = sorted(glob.glob(a))
+        if not files:
+            raise SystemExit(f"no file matches {a}")
+        if out and out[-1].startswith("--"):
+            flag = out.pop()
+            for f in files:
+                out += [flag, f]
+        else:
+            out += files
+    return out
+
+
+def write_hf_meta(root: Path, dataset_id: str, ent: dict, reg: dict) -> Path:
+    """Source identity file for adapters that pin each shard by bytes and sha256 (Toucan): the identities come from the Hub's
+    LFS metadata at the locked revision, never from the downloaded bytes, so the adapter's check compares the download to the Hub."""
+    from huggingface_hub import HfApi  # noqa: PLC0415
+
+    repo = ent["source_url"].split("huggingface.co/datasets/")[1].strip("/")
+    info = HfApi().dataset_info(repo, revision=ent["revision"], files_metadata=True)
+    if info.sha != ent["revision"]:
+        raise SystemExit(f"{dataset_id}: resolved {info.sha}, lock says {ent['revision']}")
+    files = {}
+    for s in info.siblings:
+        if s.rfilename in reg["meta_files"]:
+            files[s.rfilename] = {"bytes": s.lfs.size, "sha256": s.lfs.sha256}
+    if set(files) != set(reg["meta_files"]):
+        raise SystemExit(f"{dataset_id}: Hub metadata lacks some pinned shards")
+    out = root / "data" / f"meta-{reg['slug']}.json"
+    out.write_text(json.dumps({"config": reg["meta_config"], "files": files, "revision": ent["revision"]}, sort_keys=True) + "\n", encoding="utf-8")
     return out
 
 

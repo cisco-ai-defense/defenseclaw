@@ -128,5 +128,28 @@ class OverlayAndExtract(unittest.TestCase):
             self.assertFalse((td / "evil.txt").exists())
 
 
+class ExpandArgsAndRegistry(unittest.TestCase):
+    def test_glob_after_a_flag_repeats_the_flag_in_sorted_order(self):
+        with tempfile.TemporaryDirectory() as td:
+            for n in ("b.parquet", "a.parquet", "c.txt"):
+                (Path(td) / n).write_text("x")
+            got = s7_datasets.expand_args(["--input", f"{td}/*.parquet", "--revision", "r"])
+            self.assertEqual(got, ["--input", f"{td}/a.parquet", "--input", f"{td}/b.parquet", "--revision", "r"])
+
+    def test_glob_without_a_match_is_refused(self):
+        with tempfile.TemporaryDirectory() as td:
+            with self.assertRaises(SystemExit):
+                s7_datasets.expand_args(["--input", f"{td}/*.parquet"])
+
+    def test_every_registered_set_is_in_the_lock_and_names_an_adapter(self):
+        ids = {d["id"] for d in json.loads(s7_datasets.LOCK.read_text())["datasets"]}
+        for k, v in REGISTRY.items():
+            if k == SET:
+                continue
+            self.assertIn(k, ids)
+            if not v.get("skip"):
+                self.assertTrue((s7_datasets.SCRIPTS / v["norm"][0]).is_file(), k)
+
+
 if __name__ == "__main__":
     unittest.main()
