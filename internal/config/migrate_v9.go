@@ -76,10 +76,6 @@ const (
 // MigrationRecordSchemaVersion versions the migration-v9.json shape.
 const MigrationRecordSchemaVersion = 1
 
-// ErrMigrateV9NotImplemented was returned by the frozen stub. Nothing returns
-// it now; it stays for callers compiled against the stub contract.
-var ErrMigrateV9NotImplemented = errors.New("config: the config_version 9 migration is not implemented yet")
-
 // MigrateV9Input names the migration inputs.
 type MigrateV9Input struct {
 	// ConfigPath is the v8 config.yaml.

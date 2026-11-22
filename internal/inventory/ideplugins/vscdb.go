@@ -15,14 +15,6 @@ import (
 	"time"
 )
 
-// readStateDBValue opens state.vscdb with the "sqlite" database/sql driver,
-// which this package does not import: the hook links the package for its
-// Windows grants and never scans, and the SQLite driver is the largest
-// library it would carry. Every other program that links this package links
-// the driver (internal/config/fullconfig);
-// TestEveryIDEInventoryProgramLinksTheSQLiteDriver in cmd/defenseclaw-hook
-// pins that.
-
 // stateDBMaxBytes bounds a state database and its WAL file.
 const stateDBMaxBytes = 64 << 20
 
@@ -30,6 +22,14 @@ const stateDBMaxBytes = 64 << 20
 // The database is opened read-only so SQLite sees uncheckpointed WAL changes
 // from a running editor without writing to its database. The read is
 // bounded by timeout.
+//
+// It opens state.vscdb with the "sqlite" database/sql driver, which this
+// package does not import: the hook links the package for its
+// Windows grants and never scans, and the SQLite driver is the largest
+// library it would carry. Every other program that links this package links
+// the driver (internal/config/fullconfig);
+// TestEveryIDEInventoryProgramLinksTheSQLiteDriver in cmd/defenseclaw-hook
+// pins that.
 func readStateDBValue(path, key string, timeout time.Duration) ([]byte, bool) {
 	const maxValueBytes = 4 << 20
 	info, err := os.Stat(path)

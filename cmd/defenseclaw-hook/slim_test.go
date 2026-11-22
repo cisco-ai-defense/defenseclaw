@@ -293,8 +293,9 @@ func TestEveryIDEInventoryProgramLinksTheSQLiteDriver(t *testing.T) {
 // windows/amd64; W1 measured 47.7 MiB on Windows and the budget was 50 MiB
 // through 1.0.11, when the hook stopped linking the JSON Schema library, the
 // config migration's SQLite driver and Rego parser (internal/config/fullconfig):
-// 40.8 MiB (42,753,024 bytes) on Windows and 36.7 MiB on Linux, against
-// 144-151 MB for the full-CLI main. The CEL compiler of the rule loader stays:
+// 40.8 MiB (42,789,888 bytes) on Windows and 36.7 MiB on Linux with the
+// OpenShell SDK at github.com/ai-openshell/sdk-go v0.1.9 (rel-1-0-10:GAP-1773),
+// against 144-151 MB for the full-CLI main. The CEL compiler of the rule loader stays:
 // the hook links it so that a pinned custom pack sets the outage mode exactly
 // as the gateway reads it (rel-1-0-10:GAP-0603). A change that needs more
 // than the room left here adds a heavy library to every agent tool call.
