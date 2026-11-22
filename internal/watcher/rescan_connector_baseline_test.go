@@ -899,8 +899,18 @@ func TestSkippedTreeHashBounds(t *testing.T) {
 	limit := hermesSkippedTreeMaxBytes
 	hermesSkippedTreeMaxBytes = 4
 	t.Cleanup(func() { hermesSkippedTreeMaxBytes = limit })
-	if first, second := skippedTreeHash(dir, hermesScannerLoader(t)), skippedTreeHash(dir, hermesScannerLoader(t)); first == second {
-		t.Fatal("a tree past the read bound has a stable hash")
+	// A tree past the bound hashes the clock (unbounded:<UnixNano>). Windows
+	// reads that clock in ticks of up to about 16 ms, so two reads in a row can
+	// return the same value and the same hash (GAP-1791). Read again, a tick
+	// apart, until the hash differs: a stable hash never differs, so it still
+	// fails once the deadline passes.
+	first := skippedTreeHash(dir, hermesScannerLoader(t))
+	deadline := time.Now().Add(2 * time.Second)
+	for skippedTreeHash(dir, hermesScannerLoader(t)) == first {
+		if time.Now().After(deadline) {
+			t.Fatal("a tree past the read bound has a stable hash")
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }
 
