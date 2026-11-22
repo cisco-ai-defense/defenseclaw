@@ -35,6 +35,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -82,6 +83,10 @@ type Registration struct {
 	Template       string `json:"template,omitempty"`
 	TemplateDigest string `json:"template_digest,omitempty"`
 	KitVersion     string `json:"kit_version,omitempty"`
+	// RelayStreams are the relay features the template's signed kit names,
+	// comma-joined ("tls": dial the relay with TLS, B3.5). Empty for kits
+	// built before 1.0.11.
+	RelayStreams   string `json:"relay_streams,omitempty"`
 	Connector      string `json:"connector"`
 	HarnessVersion string `json:"harness_version,omitempty"`
 	HookContract   string `json:"hook_contract,omitempty"`
@@ -348,6 +353,19 @@ func (s *FileStore) Get(_ context.Context, atespace, uid string) (Registration, 
 // controller could not attest its template when it first attributed it.
 // Such a record may take its attested kit (connector, harness version, hook
 // contract, kit version, template digest) once (GAP-0351).
+// JoinStreams is the registry form of a kit's relay streams: sorted,
+// deduplicated and comma-joined, so records compare as strings.
+func JoinStreams(s []string) string {
+	out := slices.Clone(s)
+	slices.Sort(out)
+	return strings.Join(slices.Compact(out), ",")
+}
+
+// RelayServesTLS reports whether the actor's signed kit serves TLS.
+func (r Registration) RelayServesTLS() bool {
+	return slices.Contains(strings.Split(r.RelayStreams, ","), "tls")
+}
+
 func KitFillable(r Registration) bool {
 	return r.Attributed && !r.Deleted && r.ParentUID == "" && r.Connector == "" && r.HarnessVersion == "" &&
 		r.HookContract == "" && r.KitVersion == "" && r.TemplateDigest == ""

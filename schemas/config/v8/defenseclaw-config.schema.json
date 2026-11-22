@@ -8044,6 +8044,16 @@
           ],
           "default": "block"
         },
+        "relay_tls": {
+          "description": "How the gateway reaches an actor's relay: auto (default) uses TLS when the template's signed kit serves it and plain HTTP with an audit row for older templates; required refuses those; off drops the row and the doctor warning.",
+          "type": "string",
+          "enum": [
+            "auto",
+            "required",
+            "off"
+          ],
+          "default": "auto"
+        },
         "workspace_max_bytes": {
           "type": "integer",
           "minimum": 0,

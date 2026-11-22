@@ -118,7 +118,7 @@ func substrateTemplateKit(a controller.Attestor) func(context.Context, *ateapi.A
 			return gateway.SubstrateTemplateKit{}, &gateway.SubstrateTemplateAttestation{Reason: "the attestation carries no connector label", Unlabeled: true}
 		}
 		return gateway.SubstrateTemplateKit{Connector: att.Connector, AgentVersion: att.AgentVersion,
-			HookContract: att.HookContract, KitVersion: att.KitVersion, Digest: att.Digest}, nil
+			HookContract: att.HookContract, KitVersion: att.KitVersion, Digest: att.Digest, RelayStreams: att.RelayStreams}, nil
 	}
 }
 

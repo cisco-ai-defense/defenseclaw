@@ -45,7 +45,9 @@ const (
 	ModeAuto Mode = "auto"
 	// ModeRequired refuses an actor whose kit does not serve TLS.
 	ModeRequired Mode = "required"
-	// ModeOff dials plain HTTP. It is the escape hatch until 1.0.13.
+	// ModeOff dials templates built before relay TLS in plain HTTP with no
+	// audit row or doctor warning. A TLS kit's relay serves attachments
+	// over TLS only, so a TLS kit is still dialed with TLS.
 	ModeOff Mode = "off"
 )
 
@@ -76,11 +78,10 @@ const (
 // Decide picks the dial for an actor. kitServesTLS comes from the
 // template's signed attestation, never from the relay, so an attacker on
 // the cluster network cannot downgrade a TLS kit to plain in auto mode.
-// A TLS kit is dialed with TLS in every mode but off.
+// A TLS kit is dialed with TLS in every mode: its relay refuses plain
+// attachments.
 func Decide(m Mode, kitServesTLS bool) Decision {
 	switch {
-	case m == ModeOff:
-		return DialPlain
 	case kitServesTLS:
 		return DialTLS
 	case m == ModeRequired:
@@ -240,40 +241,24 @@ func NewKeyAndCSR() (*ecdsa.PrivateKey, []byte, error) {
 	return key, der, err
 }
 
-// Holder keeps the relay's current certificate; renewals swap it in place
-// so open connections keep theirs.
-type Holder struct {
-	mu   sync.RWMutex
-	cert *tls.Certificate
-}
-
-// Set installs a certificate for key.
-func (h *Holder) Set(certPEM []byte, key *ecdsa.PrivateKey) error {
+// KeyPair is the serving certificate for key and the PEM chain the
+// gateway signed (Sign). Leaf is set, so the caller can read its names and
+// lifetime.
+func KeyPair(certPEM []byte, key *ecdsa.PrivateKey) (*tls.Certificate, error) {
 	kder, err := x509.MarshalECPrivateKey(key)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	c, err := tls.X509KeyPair(certPEM, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: kder}))
 	if err != nil {
-		return err
+		return nil, err
 	}
-	h.mu.Lock()
-	h.cert = &c
-	h.mu.Unlock()
-	return nil
-}
-
-// ServerConfig serves the held certificate; a relay with none yet fails
-// the handshake rather than serving anything else.
-func (h *Holder) ServerConfig() *tls.Config {
-	return &tls.Config{MinVersion: tls.VersionTLS13, GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
-		h.mu.RLock()
-		defer h.mu.RUnlock()
-		if h.cert == nil {
-			return nil, errors.New("relay certificate not issued yet")
+	if c.Leaf == nil {
+		if c.Leaf, err = x509.ParseCertificate(c.Certificate[0]); err != nil {
+			return nil, err
 		}
-		return h.cert, nil
-	}}
+	}
+	return &c, nil
 }
 
 // Split serves TLS and plain HTTP on one port: a connection whose first

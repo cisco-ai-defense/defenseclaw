@@ -23,6 +23,7 @@
   "delete_owner_token" .Values.bootstrap.deleteTokenAfterUse
   "auth_delegator_binding" (ternary (include "dc.authDelegatorBinding" .) "" (eq (include "dc.kubeSignIn" .) "true"))
   "relay_session_secret" .Values.gateway.relaySessionSecret
+  "relay_ca_secret" .Values.gateway.relayCASecret
 -}}
 {{- toPrettyJson $p -}}
 {{- end -}}

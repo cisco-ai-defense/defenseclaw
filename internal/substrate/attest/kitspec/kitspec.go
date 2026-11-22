@@ -119,6 +119,13 @@ func Spec(o Options) (attest.KitSpec, attest.TemplateInfo, error) {
 		cfg.Relay.SessionAudience = o.Audience
 	}
 	cfg.Relay.VerifyURL = o.VerifyURL
+	// A relay that verifies through the gateway also serves TLS with a
+	// certificate that gateway signs (B3.5); session-key kits have no
+	// gateway route to ask and stay plain.
+	cfg.Relay.Streams = nil
+	if o.VerifyURL != "" {
+		cfg.Relay.Streams = []string{kit.StreamTLS}
+	}
 	cfg.Relay.SessionIssuer = strings.TrimSpace(o.SessionIssuer)
 	keyFiles := map[string][]byte{}
 	if len(o.SessionKeys) > 0 {
@@ -169,7 +176,7 @@ func Spec(o Options) (attest.KitSpec, attest.TemplateInfo, error) {
 	}
 
 	spec := attest.KitSpec{
-		Version: o.KitVersion, HookContract: ov.HookContract, Remove: ov.Remove, Env: ov.Env,
+		Version: o.KitVersion, HookContract: ov.HookContract, RelayStreams: cfg.Relay.Streams, Remove: ov.Remove, Env: ov.Env,
 		User: "0:0", AgentUser: cfg.Relay.AgentUser, Workdir: Workdir,
 		Entrypoint: []string{kit.RelayBinary, "serve"},
 		HomeOwners: map[string][2]int{Home: {o.UID, o.GID}},

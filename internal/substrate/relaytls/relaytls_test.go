@@ -46,8 +46,8 @@ func serve(t *testing.T, ca *CA, uid string) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var h Holder
-	if err := h.Set(certPEM, key); err != nil {
+	kp, err := KeyPair(certPEM, key)
+	if err != nil {
 		t.Fatal(err)
 	}
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -55,7 +55,7 @@ func serve(t *testing.T, ca *CA, uid string) string {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = ln.Close() })
-	tl, pl := Split(ln, h.ServerConfig())
+	tl, pl := Split(ln, &tls.Config{MinVersion: tls.VersionTLS13, Certificates: []tls.Certificate{*kp}})
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.TLS != nil {
@@ -129,11 +129,11 @@ func TestRelayCertSignIgnoresCSRNames(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var h Holder
-	if err := h.Set(p, key); err != nil {
+	kp, err := KeyPair(p, key)
+	if err != nil {
 		t.Fatal(err)
 	}
-	leaf, _ := x509.ParseCertificate(h.cert.Certificate[0])
+	leaf := kp.Leaf
 	if len(leaf.DNSNames) != 1 || leaf.DNSNames[0] != "uid."+uidA+SANSuffix {
 		t.Fatalf("names %v", leaf.DNSNames)
 	}
@@ -174,7 +174,8 @@ func TestRelayCANameConstraint(t *testing.T) {
 }
 
 // TestRelayTLSDecide is the mode table: a TLS kit is never dialed plain
-// unless the admin set off; required refuses an old kit; auto falls back.
+// in any mode (its relay refuses plain); required refuses an old kit; auto
+// and off fall back.
 func TestRelayTLSDecide(t *testing.T) {
 	for _, c := range []struct {
 		m    Mode
@@ -183,7 +184,7 @@ func TestRelayTLSDecide(t *testing.T) {
 	}{
 		{ModeAuto, true, DialTLS}, {ModeAuto, false, DialPlain},
 		{ModeRequired, true, DialTLS}, {ModeRequired, false, Refuse},
-		{ModeOff, true, DialPlain}, {ModeOff, false, DialPlain},
+		{ModeOff, true, DialTLS}, {ModeOff, false, DialPlain},
 	} {
 		if got := Decide(c.m, c.tls); got != c.want {
 			t.Errorf("Decide(%s,%v)=%v want %v", c.m, c.tls, got, c.want)

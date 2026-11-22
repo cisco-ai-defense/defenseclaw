@@ -69,6 +69,12 @@ type SubstrateConfig struct {
 	// check with it; the gateway and the leader read it from the same
 	// config (GAP-0250).
 	ChainEgressAction string `mapstructure:"chain_egress_action" yaml:"chain_egress_action,omitempty"`
+	// RelayTLS is how the gateway reaches an actor's relay (B3.5): auto
+	// (default) uses TLS when the template's signed kit serves it and plain
+	// HTTP with an audit row and a doctor warning for older templates;
+	// required refuses those; off drops the row and the warning. A kit that
+	// serves TLS is dialed with TLS in every mode.
+	RelayTLS string `mapstructure:"relay_tls" yaml:"relay_tls,omitempty"`
 	// WorkspaceMaxBytes caps a workspace upload through the admin
 	// listener's attach route (E23; 0 = DefaultSubstrateWorkspaceMaxBytes).
 	WorkspaceMaxBytes int64                     `mapstructure:"workspace_max_bytes" yaml:"workspace_max_bytes,omitempty"`
@@ -480,6 +486,21 @@ const (
 	SubstrateChainEgressAlert = "alert"
 )
 
+// Values of substrate.relay_tls.
+const (
+	SubstrateRelayTLSAuto     = "auto"
+	SubstrateRelayTLSRequired = "required"
+	SubstrateRelayTLSOff      = "off"
+)
+
+// EffectiveRelayTLS is substrate.relay_tls, auto when unset.
+func (s SubstrateConfig) EffectiveRelayTLS() string {
+	if v := strings.ToLower(strings.TrimSpace(s.RelayTLS)); v != "" {
+		return v
+	}
+	return SubstrateRelayTLSAuto
+}
+
 // EffectiveChainEgressAction is substrate.chain_egress_action, block when
 // unset.
 func (s SubstrateConfig) EffectiveChainEgressAction() string {
@@ -620,6 +641,11 @@ func (s *SubstrateConfig) Validate() error {
 	case SubstrateChainEgressBlock, SubstrateChainEgressAlert:
 	default:
 		bad("chain_egress_action", "%q is not block or alert", s.ChainEgressAction)
+	}
+	switch s.EffectiveRelayTLS() {
+	case SubstrateRelayTLSAuto, SubstrateRelayTLSRequired, SubstrateRelayTLSOff:
+	default:
+		bad("relay_tls", "%q is not auto, required or off", s.RelayTLS)
 	}
 	if a := s.API.Address; a != "" {
 		if _, port, err := net.SplitHostPort(a); err != nil || port == "" {

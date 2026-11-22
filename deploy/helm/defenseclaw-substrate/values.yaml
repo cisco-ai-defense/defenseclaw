@@ -151,6 +151,11 @@ gateway:
   # are built with public.pem): the relay-session hook creates it when
   # absent and never replaces it; uninstall keeps it.
   relaySessionSecret: defenseclaw-relay-session
+  # The relay CA Secret (ca.pem, ca-key.pem): the gateway signs each
+  # relay's TLS serving certificate with it and verifies the relay on
+  # attach. The relay-session hook creates it when absent and never
+  # replaces it; uninstall keeps it.
+  relayCASecret: defenseclaw-relay-ca
   llmCredentialsSecret: defenseclaw-llm
   # The chart's one cluster-wide grant: with no OIDC issuer (people sign in
   # with Kubernetes credentials, not on a managed install), a
