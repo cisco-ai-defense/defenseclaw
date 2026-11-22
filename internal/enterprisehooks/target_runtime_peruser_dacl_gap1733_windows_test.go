@@ -160,7 +160,8 @@ func runGAP1733PerUserInstallLeg(t *testing.T) {
 	// The guardian's pass over the signed-out accounts: standalone writes
 	// every discovered row deferred, and the pending proof repaired a
 	// folder whose DACL is not the managed one. It refuses each per-user
-	// install folder, naming it, before any repair.
+	// install folder, naming it, before any repair; the status probe names
+	// the same entry, and a fresh account is not named.
 	for _, account := range accounts {
 		for _, row := range windowsManagedRuntimeTestManifest(account.home, account.sid).Targets {
 			row.Deferred = true
@@ -168,8 +169,14 @@ func runGAP1733PerUserInstallLeg(t *testing.T) {
 				t.Errorf("guardian pending proof for %s %s = %v, want the refusal naming its per-user install", row.Connector, account.data, err)
 			}
 		}
+		if finding := WindowsPerUserInstallDataDir(account.home, account.sid.String()); !strings.HasPrefix(finding, "config.yaml") {
+			t.Errorf("WindowsPerUserInstallDataDir(%s) = %q, want config.yaml", account.home, finding)
+		}
 	}
 	unchanged("the guardian's signed-out pass")
+	if finding := WindowsPerUserInstallDataDir(freshHome, fresh.String()); finding != "" {
+		t.Errorf("WindowsPerUserInstallDataDir(fresh account) = %q, want none", finding)
+	}
 }
 
 type gap1733Account struct {

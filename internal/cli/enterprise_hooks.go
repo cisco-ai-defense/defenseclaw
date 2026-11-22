@@ -861,6 +861,10 @@ var (
 	// canonical folder that the account does not own (GAP-0585). Tests
 	// replace it.
 	enterpriseHookForeignDataDirLink = enterpriseHookForeignDataDirLinkPlatform
+	// enterpriseHookPerUserInstallFolder reports an account whose canonical
+	// folder holds a per-user DefenseClaw install (GAP-1733). Tests replace
+	// it.
+	enterpriseHookPerUserInstallFolder = enterpriseHookPerUserInstallFolderPlatform
 )
 
 const enterpriseHookAccountLinkFailure = "enterprise hooks: the account's own DefenseClaw folder link is pending repair"
@@ -873,6 +877,16 @@ const enterpriseHookAccountLinkFailure = "enterprise hooks: the account's own De
 // status, verify and the administrator lifecycle go on for every other
 // account and name this one.
 const enterpriseHookAccountForeignLinkFailure = "enterprise hooks: the account's DefenseClaw folder is a link its account does not own; it was left untouched and the account is not protected until an administrator removes the link"
+
+// enterpriseHookAccountPerUserInstallFailure is the guardian error of an
+// account whose canonical DefenseClaw folder holds a per-user DefenseClaw
+// install (GAP-1733). The guardian's signed-out repair re-stamped that folder
+// with the managed DACL and admitted the account as pending, so its next
+// sign-in enrolled it over the per-user install. The folder is never
+// repaired, adopted or enrolled; like enterpriseHookAccountForeignLinkFailure
+// it fails only that account's rows, and status, verify and the
+// administrator lifecycle name the account as not protected.
+const enterpriseHookAccountPerUserInstallFailure = "enterprise hooks: the account's DefenseClaw folder holds a per-user DefenseClaw install; it was left untouched and the account is not protected until that install is removed"
 
 // enterpriseHookStandaloneCanonicalDataDir reports, on a standalone
 // deployment only, whether target's effective data directory is the
@@ -898,12 +912,18 @@ func enterpriseHookTargetForeignLink(target enterprisehooks.ManifestTarget, home
 		enterpriseHookForeignDataDirLink(home, sid)
 }
 
+func enterpriseHookTargetPerUserInstall(target enterprisehooks.ManifestTarget, home, sid string) bool {
+	return enterpriseHookStandaloneCanonicalDataDir(target, home, sid) &&
+		enterpriseHookPerUserInstallFolder(home, sid)
+}
+
 // enterpriseHookAccountLinkRow reports a failed standalone row that status,
 // verify and the lifecycle excuse because the account's own folder link or a
 // link another principal owns keeps that one account unprotected.
 func enterpriseHookAccountLinkRow(row enterpriseHookReconcileRow) bool {
 	return cfg != nil && cfg.StandaloneEnterprise() && !cfg.SecureClientIntegration() &&
-		(enterpriseHookAccountLinkRowStandalone(row) || enterpriseHookAccountForeignLinkRow(row))
+		(enterpriseHookAccountLinkRowStandalone(row) || enterpriseHookAccountForeignLinkRow(row) ||
+			enterpriseHookAccountPerUserInstallRow(row))
 }
 
 func enterpriseHookAccountLinkRowStandalone(row enterpriseHookReconcileRow) bool {
@@ -921,6 +941,16 @@ func enterpriseHookAccountForeignLinkRow(row enterpriseHookReconcileRow) bool {
 		row.Error == enterpriseHookAccountForeignLinkFailure &&
 		strings.TrimSpace(row.UserHome) != "" && strings.TrimSpace(row.SID) != "" &&
 		enterpriseHookForeignDataDirLink(row.UserHome, row.SID)
+}
+
+// enterpriseHookAccountPerUserInstallRow is enterpriseHookAccountForeignLinkRow
+// for a folder that holds a per-user DefenseClaw install (GAP-1733). It
+// rechecks the folder now, so the excuse ends once that install is removed.
+func enterpriseHookAccountPerUserInstallRow(row enterpriseHookReconcileRow) bool {
+	return !row.OK && !row.Pending && row.Result == nil &&
+		row.Error == enterpriseHookAccountPerUserInstallFailure &&
+		strings.TrimSpace(row.UserHome) != "" && strings.TrimSpace(row.SID) != "" &&
+		enterpriseHookPerUserInstallFolder(row.UserHome, row.SID)
 }
 
 // enterpriseHookAwaitingSignInPrefix starts the guardian error of a target
@@ -2221,6 +2251,9 @@ func enterpriseHookVerifyExcusedNote(run enterpriseHookVerifyRun, row enterprise
 	if row.Error == enterpriseHookAccountForeignLinkFailure {
 		return " (the account stays unprotected until an administrator removes the link at its DefenseClaw folder)"
 	}
+	if row.Error == enterpriseHookAccountPerUserInstallFailure {
+		return " (the account stays unprotected until the per-user DefenseClaw install in its DefenseClaw folder is removed)"
+	}
 	return enterpriseHookRemovedAccountNote
 }
 
@@ -2815,6 +2848,9 @@ func runEnterpriseHookVerifyAttemptRows(ctx context.Context, registrationOnly bo
 		if targetErr == nil && enterpriseHookTargetForeignLink(target, resolved.home, resolved.sid) {
 			targetErr = errors.New(enterpriseHookAccountForeignLinkFailure)
 		}
+		if targetErr == nil && enterpriseHookTargetPerUserInstall(target, resolved.home, resolved.sid) {
+			targetErr = errors.New(enterpriseHookAccountPerUserInstallFailure)
+		}
 		if targetErr == nil && target.IsDeferred() &&
 			!previousProtection.PreviouslyProtected {
 			var pending bool
@@ -2963,6 +2999,10 @@ func runEnterpriseHookVerifyAttemptRows(ctx context.Context, registrationOnly bo
 			} else if excused > 0 && row.Error == enterpriseHookAccountForeignLinkFailure &&
 				enterpriseHookAccountForeignLinkRow(recorded[enterpriseHookProtectedTargetKey(row)]) &&
 				enterpriseHookTargetForeignLink(target, row.UserHome, row.SID) {
+				run.Excused = append(run.Excused, row)
+			} else if excused > 0 && row.Error == enterpriseHookAccountPerUserInstallFailure &&
+				enterpriseHookAccountPerUserInstallRow(recorded[enterpriseHookProtectedTargetKey(row)]) &&
+				enterpriseHookTargetPerUserInstall(target, row.UserHome, row.SID) {
 				run.Excused = append(run.Excused, row)
 			} else if excused > 0 && enterpriseHookRemovedAccountRow(row) {
 				run.Excused = append(run.Excused, row)
@@ -3438,6 +3478,13 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 			// rows, by name, so the other accounts keep their protection and
 			// the administrator lifecycle goes on (GAP-0585).
 			err = errors.New(enterpriseHookAccountForeignLinkFailure)
+		}
+		if err == nil && enterpriseHookTargetPerUserInstall(target, resolved.home, resolved.sid) {
+			// A per-user DefenseClaw install in the account's folder is never
+			// repaired, adopted or enrolled, signed in or not: the signed-out
+			// repair took both such folders over (GAP-1733). Fail only this
+			// account's rows, by name.
+			err = errors.New(enterpriseHookAccountPerUserInstallFailure)
 		}
 		if err == nil {
 			if linkRow, linked := linkRows[strings.ToLower(strings.TrimSpace(target.Connector))]; linked {

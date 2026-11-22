@@ -3204,6 +3204,7 @@ var (
 	windowsEnterpriseAccountCreatedDataDir     = enterprisehooks.WindowsAccountCreatedDataDir
 	windowsEnterpriseAccountOwnedDataDirLink   = enterprisehooks.WindowsAccountOwnedDataDirLink
 	windowsEnterpriseAccountForeignDataDirLink = enterprisehooks.WindowsForeignOwnedDataDirLink
+	windowsEnterpriseAccountPerUserInstall     = enterprisehooks.WindowsPerUserInstallDataDir
 	windowsEnterpriseAccountDeleted            = func(sid string) bool {
 		// A domain or Entra account's lookup also fails while its directory
 		// is unreachable; never tell the administrator to remove that
@@ -3301,6 +3302,13 @@ func applyWindowsEnterpriseAccountFolders(result *enterprisestatus.Result) {
 					"administrator made, so it is not protected; DefenseClaw never follows that link and leaves this account out so "+
 					"Setup, Upgrade and Repair finish for the other accounts. Remove the link (rmdir on a junction removes only the "+
 					"link), then run `%s` from an elevated PowerShell prompt",
+				label, filepath.Join(account.Home, ".defenseclaw"),
+				managed.WindowsAdminCommand("enterprise", "windows", "repair", "--profile", managed.ProfileStandalone)))
+		case windowsEnterpriseAccountPerUserInstall(account.Home, account.SID) != "":
+			result.AddWarning("enrollment_skipped_per_user_install", fmt.Sprintf(
+				"the account %s has a per-user DefenseClaw install in %s, so it is not protected; DefenseClaw leaves that folder "+
+					"untouched and this account out so Setup, Upgrade and Repair finish for the other accounts. Remove the per-user "+
+					"install as that account (`defenseclaw uninstall --all`), then run `%s` from an elevated PowerShell prompt",
 				label, filepath.Join(account.Home, ".defenseclaw"),
 				managed.WindowsAdminCommand("enterprise", "windows", "repair", "--profile", managed.ProfileStandalone)))
 		case windowsEnterpriseAccountCreatedDataDir(account.Home, account.SID):
@@ -4417,7 +4425,8 @@ func readWindowsEnterpriseStandaloneEnrollment() (enterprisestatus.Enrollment, e
 // windowsEnterpriseEnrollmentRowFailed reports a guardian row that leaves its
 // target unprotected for a reason no sign-in or account clean-up resolves:
 // not ok, not pending, not waiting for the account's sign-in, and not a row
-// of a removed account or an account folder link (the rows status excuses).
+// of a removed account, an account folder link or a per-user install folder
+// (the rows status excuses).
 // Since a standalone install or upgrade activates on a complete reconcile
 // with such rows (GAP-0601), they are counted, so coverage_complete is not
 // true while one of them stands.
@@ -4426,7 +4435,8 @@ func windowsEnterpriseEnrollmentRowFailed(row enterpriseHookReconcileRow) bool {
 		!enterpriseHookAwaitingSignInError(row) &&
 		!enterpriseHookRemovedAccountRow(row) &&
 		!enterpriseHookAccountLinkRowStandalone(row) &&
-		!enterpriseHookAccountForeignLinkRow(row)
+		!enterpriseHookAccountForeignLinkRow(row) &&
+		!enterpriseHookAccountPerUserInstallRow(row)
 }
 
 // windowsEnterpriseHookRollbackCopyRederived is the warning code of a run

@@ -337,6 +337,21 @@ func applyStandaloneRowStateFor(row *ManifestTarget, previous map[string]Manifes
 		rowContext.unprotected(row, version, reason)
 		return false
 	}
+	// The install plan skips an account whose folder holds a per-user
+	// DefenseClaw install and publishes the manifest without it; writing its
+	// row again republished targets.yaml after every Setup and failed the
+	// first /ensure on the guardian's activation evidence (GAP-1733). The
+	// account gets no row, is reported as not protected, and its folder is
+	// left as found.
+	if finding := windowsStandaloneNewRowPerUserInstall(row); finding != "" {
+		reason := fmt.Sprintf(
+			"%s holds %s, which a per-user DefenseClaw install leaves; DefenseClaw leaves that folder untouched and this account out until that install is removed",
+			filepath.Join(filepath.Clean(row.UserHome), ".defenseclaw"), finding,
+		)
+		logfSafely(logf, row.SID, fmt.Sprintf("newly-discovered (SID, %s) row skipped: %s", row.Connector, reason))
+		rowContext.unprotected(row, version, reason)
+		return false
+	}
 	enabled := true
 	row.AgentVersion = version
 	row.Enabled = &enabled
@@ -351,6 +366,18 @@ func applyStandaloneRowStateFor(row *ManifestTarget, previous map[string]Manifes
 		),
 	)
 	return true
+}
+
+// windowsStandaloneNewRowPerUserInstall names the per-user install entry in
+// the canonical data folder of a newly discovered row
+// (WindowsPerUserInstallDataDir), or "". A row with another data_dir is not
+// checked here; the plan refuses it. Tests replace it.
+var windowsStandaloneNewRowPerUserInstall = func(row *ManifestTarget) string {
+	home := filepath.Clean(strings.TrimSpace(row.UserHome))
+	if dataDir := strings.TrimSpace(row.DataDir); dataDir != "" && !sameWindowsEnterprisePath(dataDir, filepath.Join(home, ".defenseclaw")) {
+		return ""
+	}
+	return WindowsPerUserInstallDataDir(home, row.SID)
 }
 
 // standaloneWindowsAgentVersionExplain is the standalone profile's single

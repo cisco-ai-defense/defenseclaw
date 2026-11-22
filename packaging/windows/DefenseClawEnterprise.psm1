@@ -37828,7 +37828,8 @@ function Get-DefenseClawSignedOutUntrustedFolder {
 # (enterpriseHookAccountLinkFailure, enterpriseHookAccountForeignLinkFailure).
 $script:AccountLinkGuardianErrors = @(
     'enterprise hooks: the account''s own DefenseClaw folder link is pending repair',
-    'enterprise hooks: the account''s DefenseClaw folder is a link its account does not own; it was left untouched and the account is not protected until an administrator removes the link'
+    'enterprise hooks: the account''s DefenseClaw folder is a link its account does not own; it was left untouched and the account is not protected until an administrator removes the link',
+    'enterprise hooks: the account''s DefenseClaw folder holds a per-user DefenseClaw install; it was left untouched and the account is not protected until that install is removed'
 )
 
 # The guardian never writes through a link, so a row whose machine vendor folder
@@ -38117,9 +38118,10 @@ function Get-DefenseClawStandaloneManifestAdoption {
             $removedRows++
             continue
         }
-        # The account's own folder link (GAP-0193) and a link another principal
-        # owns (GAP-0585) leave only that account unprotected; the guardian
-        # counts both in account_link_failures.
+        # The account's own folder link (GAP-0193), a link another principal
+        # owns (GAP-0585) and a folder that holds a per-user DefenseClaw
+        # install (GAP-1733) leave only that account unprotected; the guardian
+        # counts them in account_link_failures.
         if ($script:AccountLinkGuardianErrors -ccontains [string](& $field $row 'error') -and
             $accountLinks -gt 0) {
             $accountLinkRows++

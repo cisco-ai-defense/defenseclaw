@@ -126,3 +126,51 @@ func TestStandaloneRowAdmissionAppliesTheWindowsPlatformMinimum(t *testing.T) {
 		t.Fatalf("the dropped row must be logged with its reason; log:\n%s", strings.Join(logged, "\n"))
 	}
 }
+
+// GAP-1733: a newly discovered account whose folder holds a per-user
+// DefenseClaw install gets no row (the plan skips it, and a row written
+// again republished targets.yaml after the install), is logged with the
+// folder and the entry, and is reported as not protected; the other
+// account is enrolled.
+func TestEnumerateWindowsStandaloneSkipsANewRowWithAPerUserInstall(t *testing.T) {
+	stubMachineWinGet(t, nil)
+	const perUserSID = "S-1-5-21-1004336348-1177238915-682003330-1733"
+	perUserHome := cursorProfile(t, "2.5.0")
+	injectWindowsProfileList(t, map[string]string{
+		testLocalUserSID: cursorProfile(t, "2.5.0"),
+		perUserSID:       perUserHome,
+	})
+	previous := windowsStandaloneNewRowPerUserInstall
+	t.Cleanup(func() { windowsStandaloneNewRowPerUserInstall = previous })
+	windowsStandaloneNewRowPerUserInstall = func(row *ManifestTarget) string {
+		if row.SID == perUserSID && row.UserHome == perUserHome {
+			return "config.yaml"
+		}
+		return ""
+	}
+	var logged []string
+	var reported []UnprotectedAgent
+	manifest, err := EnumerateWindows(context.Background(), standaloneEnumeratorConfig("cursor"), EnumerateOptions{
+		Logger:            func(subject, reason string) { logged = append(logged, subject+": "+reason) },
+		ReportUnprotected: func(agent UnprotectedAgent) { reported = append(reported, agent) },
+	})
+	if err != nil {
+		t.Fatalf("EnumerateWindows: %v", err)
+	}
+	if len(manifest.Targets) != 1 || manifest.Targets[0].SID != testLocalUserSID {
+		t.Fatalf("targets = %+v, want only the account without a per-user install", manifest.Targets)
+	}
+	want := perUserSID + ": newly-discovered (SID, cursor) row skipped: " + filepath.Join(perUserHome, ".defenseclaw") +
+		" holds config.yaml, which a per-user DefenseClaw install leaves"
+	if !strings.Contains(strings.Join(logged, "\n"), want) {
+		t.Fatalf("the skipped row must be logged with its folder; log:\n%s", strings.Join(logged, "\n"))
+	}
+	found := false
+	for _, agent := range reported {
+		found = found || (agent.SID == perUserSID && strings.Contains(agent.Message(), "is not protected") &&
+			strings.Contains(agent.Reason, "per-user DefenseClaw install"))
+	}
+	if !found {
+		t.Fatalf("the account was not reported as not protected: %+v", reported)
+	}
+}
