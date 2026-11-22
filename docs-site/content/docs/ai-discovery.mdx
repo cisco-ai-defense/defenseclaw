@@ -1132,6 +1132,23 @@ actions. That exclusivity applies to the release-owned managed inventory
 actions; `ai_discovery` records continue to follow the
 destination policy and also reach the generated destination in managed mode.
 
+### Endpoint inventory
+
+With `ai_discovery` on, the gateway sends an inventory of the endpoint after each full scan: the connectors it supports, the MCP servers the agents are configured with and the tools they list, the skills and the plugins. A request to discover coding agents also sends the agent inventory. Each collection has its own action, which depends on the product:
+
+| Collection | Per-user install (Preview) | Standalone enterprise (Preview) | Secure Client endpoint |
+| --- | --- | --- | --- |
+| Connectors | `connector_inventory` | `connector_inventory` | `managed_connector_inventory` |
+| MCP servers and their tools | `mcp_inventory` | `mcp_inventory` | `managed_mcp_inventory` |
+| Skills | `skill_inventory` | `skill_inventory` | `managed_skill_inventory` |
+| Plugins | `plugin_inventory` | `plugin_inventory` | `managed_plugin_inventory` |
+| Coding agents | `agent_inventory` | `agent_inventory` | `managed_agent_inventory` |
+| Where the records go | The local audit log and your own observability destinations | The local audit log and the destinations the administrator configured | The local audit log and the managed Cisco AI Defense destination only |
+
+The records are metadata. An MCP server's command and arguments are sent as keyed fingerprints with the command's file name, and a server URL as its scheme and host only. On a managed machine only the machine configuration decides what is sent; a user cannot change it. An unchanged collection is sent again once a day. A scan that could not read a collection in full (a partial or over-limit collection) is kept in the local audit log and is not sent to any other destination.
+
+On a per-user install and a standalone enterprise machine the gateway keeps what it sent in `endpoint_inventory_publish_state.json` in its data folder.
+
 ### Skill inventory
 
 With `ai_discovery` on, the gateway sends every skill the agents load in the `endpoint_skill_inventory` collection after each full scan: one `ai_component.observed` record per skill and agent. Where the records go depends on the product:
@@ -1149,7 +1166,7 @@ Each destination applies its own redaction profile to the record. On a managed m
 | `content_hash` | SHA-256 over every file of the skill folder, scripts and binaries included. The same skill has the same hash on every endpoint |
 | `content_status` | `ok`, or why the record has no hash: `symlink` (links are recorded by target and never followed), `too_large` or `unreadable` |
 | `state`, `first_seen`, `last_seen` | `new`, `changed`, `unchanged` or `removed` since the last publish, from state the endpoint keeps, and when the skill was first and last seen |
-| `scope` | `user`, `project`, `bundled` (shipped by the agent vendor), `managed` (a folder outside every user home, such as `/etc/codex/skills`; the scope comes from the location, not from who created the folder) or `plugin` |
+| `scope` | `user`, `project`, `bundled` (shipped by the agent vendor), `managed` (a folder outside every user home that an administrator owns, such as `/etc/codex/skills`: on Windows owned by SYSTEM, Administrators or TrustedInstaller, elsewhere owned by root and not writable by others) or `plugin`. A folder outside the homes that a user created is reported as `user`, with no location |
 | `location` | The skill folder below the user's home, as `~/.claude/skills/pdf`. The account name and the absolute path stay on the endpoint; a project or managed skill sends none |
 | `agents` | Every agent that reads the folder. Each agent still gets its own record and component id, with the same hash. The record's `defenseclaw.ai.component.vendor` is that agent's vendor from the discovery catalog (Anthropic, OpenAI, Anysphere, GitHub, …) |
 | `publisher`, `publisher_source` | Who published the skill and how that is known: `declared` (the SKILL.md author), `plugin_manifest`, `vendor_bundled` or `unknown`. The publisher is a content field, so the destination's redaction profile masks a secret in it |
@@ -1162,7 +1179,7 @@ A scan reads at most 32 MiB and 1,000 files and folders per skill, and 256 MiB i
 
 The gateway keeps the state in its data folder and saves it only after the collection was published, so a change that was not sent goes out again on the next scan. A skill is sent as removed once a complete scan no longer finds it. An unchanged collection is sent again once a day. A skill folder that has not changed since the last scan is not read again, and every folder is read in full at least once a day. On a managed Windows machine every scan reads every folder.
 
-The default redaction profile of your own destinations is `none`. To mask secrets in the declared description, version and publisher, and in SKILL.md text, set `observability.buckets.ai.discovery.redaction_profile` (or the destination's route) to `sensitive` or stricter; see [Redaction](/docs/observability/redaction#resolution-order).
+The default redaction profile of your own destinations is `none`: the records are sent as they are, so a secret written into a declared description, version or publisher, or into SKILL.md text, reaches those destinations unmasked. To mask secrets in the declared description, version and publisher, and in SKILL.md text, set `observability.buckets.ai.discovery.redaction_profile` (or the destination's route) to `sensitive` or stricter; see [Redaction](/docs/observability/redaction#resolution-order).
 
 With `ai_discovery.include_skill_manifests: true` (off by default, in every product), the record of a new or changed skill also carries its SKILL.md text, once per file version: one record carries the text, and every record of that file carries `manifest_hash`. The text is a content field, so the destination's redaction profile masks secrets before upload. A file over 256 KiB, the most the redaction detectors scan in one field, goes in ordered parts that end at a line and keep a PEM block whole, one part a scan, and at most 2 MiB of text goes out in one scan; a file that cannot be split that way, or needs more than 128 parts, sends only its hash. Local submission progress is saved after publication, separately from durable delivery confirmation.
 
@@ -1172,7 +1189,9 @@ A part is acknowledged only when durable storage reports its exact **post-redact
 
 Valid version 2 publish state keeps completed, unchanged documents quiet across daily bundles and routine restarts. A fresh scoped receipt explicitly showing storage loss can reopen only the missing parts after grace. A stored digest that differs from the current projection is a representation conflict; the endpoint preserves the stored part. When version 2 state has submission progress only, the endpoint uses one ownership-checked, bounded local preview through the same redaction policy to learn expected digests. The preview holds document bodies in memory. The existing transition from version 1 to version 2 re-baselines Inventory on the next complete scan. Recovery metadata stays in version 2 and tracks digests, timestamps and part indexes for up to 512 active manifests of up to 128 parts each.
 
-A managed scan also follows an agent folder a user moved with `CODEX_HOME`, `CLAUDE_CONFIG_DIR` or `COPILOT_HOME`. It reads the last literal assignment in `~/.zshenv`, `~/.zprofile`, `~/.zshrc`, `~/.bash_profile`, `~/.bashrc` or `~/.profile`, or on Windows the user's persistent environment (`HKU\<SID>\Environment`, read while the user is signed in), and uses the folder only when it is a real folder inside that user's home. A variable set in one terminal session only is not seen.
+A managed scan also follows an agent folder a user moved with `CODEX_HOME`, `CLAUDE_CONFIG_DIR` or `COPILOT_HOME`. It reads the last literal assignment in `~/.zshenv`, `~/.zprofile`, `~/.zshrc`, `~/.bash_profile`, `~/.bashrc` or `~/.profile`, or on Windows the user's persistent environment (`HKU\<SID>\Environment`, which can be read only while the user is signed in), and uses the folder only when it is a real folder inside that user's home. After a Windows user signs out, the scan keeps using the last folder it read for that user, so their skills are not reported removed; it keeps that folder in `ai_agent_homes_state.json` in its data folder. A variable set in one terminal session only is not seen.
+
+A managed scan reads a plugin's skills only when every folder from the user's home down to the plugin is a real folder. A plugin folder reached through a link or junction is left out, so a link cannot make another folder's skills read as that user's.
 
 ### Splunk: AI Discovery Inventory
 
