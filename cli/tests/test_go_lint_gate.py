@@ -80,9 +80,14 @@ def test_ci_go_lint_has_the_history_for_changed_lines() -> None:
     checkout = next(step for step in steps if str(step.get("uses", "")).startswith("actions/checkout@"))
     assert checkout["with"]["fetch-depth"] == "${{ github.event_name == 'pull_request' && 2 || 0 }}"
     assert checkout["with"]["persist-credentials"] is False
-    lint = next(step for step in steps if step.get("run") == "make go-lint")
+    lint = next(step for step in steps if step.get("name") == "Go lint (gofmt, go vet, golangci-lint on changed lines)")
+    # The whole gate is still make go-lint, with the Makefile's pinned
+    # golangci-lint (installed into the restored cache directory).
+    assert 'make go-lint GOLANGCI_LINT="$bin"' in lint["run"]
     assert lint["env"] == {
-        "GOLANGCI_LINT_BASE": "${{ github.event_name == 'pull_request' && 'HEAD^1' || 'origin/main' }}"
+        "GOLANGCI_LINT_BASE": "${{ github.event_name == 'pull_request' && 'HEAD^1' || 'origin/main' }}",
+        "GOLANGCI_DIR": "${{ steps.golangci.outputs.dir }}",
+        "GOLANGCI_VERSION": "${{ steps.golangci.outputs.version }}",
     }
 
 
