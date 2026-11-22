@@ -1776,14 +1776,15 @@ func emitEndpointInventoryComponent(
 // by the managed plan: SQLite remains authoritative locally and only the
 // CMID-authenticated AI Defense destination receives optional export work.
 // Outside Secure Client the snapshot carries the operator agent_inventory
-// action to local audit and the operator's own destinations.
+// action to local audit and the operator's own destinations, and only with
+// ai_discovery on, as the other collections (endpointInventoryOn).
 func (a *APIServer) emitManagedAgentInventory(
 	ctx context.Context,
 	report *agentDiscoveryReport,
 	installed int,
 	partial bool,
 ) error {
-	if a == nil || report == nil || ctx == nil {
+	if a == nil || report == nil || ctx == nil || !endpointInventoryOn(a.liveConfig()) {
 		return nil
 	}
 	emitter := a.observabilityV8RuntimeEmitter()

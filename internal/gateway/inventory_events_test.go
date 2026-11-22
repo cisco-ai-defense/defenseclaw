@@ -255,7 +255,9 @@ func TestEmitManagedAgentInventoryUsesCompleteCanonicalSafeSnapshot(t *testing.T
 func TestEmitAgentInventoryOutsideSecureClientUsesTheOperatorAction(t *testing.T) {
 	withManagedEnterprise(t, false)
 	capture := &endpointInventoryCapture{}
-	api := &APIServer{observabilityV8: capture}
+	cfg := &config.Config{}
+	cfg.AIDiscovery.Enabled = true
+	api := &APIServer{observabilityV8: capture, scannerCfg: cfg}
 	if err := api.emitManagedAgentInventory(t.Context(), &agentDiscoveryReport{
 		Source: "cli", ScannedAt: "2026-07-11T00:00:00Z",
 		Agents: map[string]agentDiscoverySignal{"codex": {Installed: true}},
