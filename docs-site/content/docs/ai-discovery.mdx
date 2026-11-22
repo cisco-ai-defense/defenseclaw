@@ -1134,7 +1134,7 @@ destination policy and also reach the generated destination in managed mode.
 
 ### Managed skill inventory
 
-In `managed_enterprise`, the managed inventory carries every skill the agents load in the `endpoint_skill_inventory` collection (action `managed_skill_inventory`): one `ai_component.observed` record per skill and agent, with these fields under `defenseclaw.inventory.skill`:
+On a Secure Client endpoint, the managed inventory carries every skill the agents load in the `endpoint_skill_inventory` collection (action `managed_skill_inventory`): one `ai_component.observed` record per skill and agent, sent only to the managed Cisco AI Defense destination (a standalone enterprise or per-user install sends none), with these fields under `defenseclaw.inventory.skill`:
 
 | Field | Meaning |
 | --- | --- |
