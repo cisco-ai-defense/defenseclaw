@@ -6,6 +6,8 @@ package gateway
 import (
 	"regexp"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 )
 
 // The open-secret hold of a streamed reply (rel-1-0-10:GAP-0429).
@@ -54,8 +56,14 @@ import (
 // quiet it stays held, and the next text or the end decides it, so a card
 // number or a token the upstream pauses inside never goes out in part. Past
 // streamSecretMaxHeld bytes held behind open runs (a long numeric table keeps
-// one open at almost every piece end) the held bytes go out once the check
-// has read them, with no verdict, and what follows is held again. While
+// one open at almost every piece end) the held pieces before the one that
+// holds the first byte of the oldest open run go out once the check has read
+// them, with no verdict, and the rest stays held (rel-1-0-10:GAP-1306: the
+// whole queue went out, and with it the first bytes of a card number or a
+// token cut at that moment). The run is at most streamSecretMaxToken bytes,
+// so what stays is the pieces from its start. Only when those are over the
+// bound themselves (the run's lane gets no text while other lanes stream, or
+// one piece is that large) they all go out as before, with no verdict. While
 // the upstream is quiet behind an open run the client gets a keep-alive, or
 // the held bytes with the run masked, every streamKeepAliveAfter
 // (rel-1-0-10:GAP-1307, stream_keepalive.go).
@@ -74,6 +82,9 @@ const (
 	// longer than 80 bytes; metadata lines are up to 32+1+256.
 	streamPEMLineMax = 290
 )
+
+// The held bound is in the cap registry (DET111 step 2, one bound model).
+var _ = bounded.Register("gateway.streamSecretMaxHeld", bounded.Bytes, streamSecretMaxHeld)
 
 const pemBeginMark = "-----BEGIN "
 
@@ -158,6 +169,39 @@ type secretLane struct {
 	pemLine  int  // start of the first line of the open block not yet read
 	// tokenFrom: a token run that starts before it was given up at a bound.
 	tokenFrom int
+	// segs places the end of the lane in the reply text (GAP-1306): from
+	// lane byte at, the bytes were added when the reply had n bytes of text.
+	// Only the segments that reach the last streamSecretTail bytes are kept,
+	// where an open run starts (tokenStart).
+	segs []laneSeg
+}
+
+// laneSeg is one piece of a lane: it starts at lane byte at and reply text
+// byte n.
+type laneSeg struct{ at, n int }
+
+// mark records a piece of the lane that starts at lane byte at and reply
+// text byte n, and drops the segments that end before the tail a run can
+// start in.
+func (s *secretLane) mark(at, n int) {
+	drop := 0
+	for drop+1 < len(s.segs) && s.segs[drop+1].at <= at-streamSecretTail {
+		drop++
+	}
+	s.segs = append(s.segs[drop:], laneSeg{at: at, n: n})
+}
+
+// textAt is the reply text offset of lane byte off, which is in the kept
+// tail (mark keeps every segment from len-streamSecretTail on).
+func (s *secretLane) textAt(off int) int {
+	if len(s.segs) == 0 {
+		return off
+	}
+	i := len(s.segs) - 1
+	for i > 0 && s.segs[i].at > off {
+		i--
+	}
+	return max(s.segs[i].n+off-s.segs[i].at, 0)
 }
 
 // pem advances the private-key state over t and reports an open BEGIN line
@@ -374,6 +418,31 @@ func (r *responseText) OpenSecret() openSecret {
 		o.open = o.open || pemOpen || r.secret[i].token(t)
 	}
 	return o
+}
+
+// OpenRunFrom is the reply text offset (Len) of the first byte of the oldest
+// open token or digit run, -1 for none (GAP-1306).
+func (r *responseText) OpenRunFrom() int {
+	from := -1
+	for i, l := range r.lanes {
+		if st := r.secret[i].tokenStart(l.String()); st >= 0 {
+			if at := r.secret[i].textAt(st); from < 0 || at < from {
+				from = at
+			}
+		}
+	}
+	return from
+}
+
+// heldBeforeRun is how many of the held pieces end before the reply text
+// offset from: marks[i] is the text length once piece i was read, in stream
+// order (GAP-1306). Those pieces hold no byte of the open run.
+func heldBeforeRun(marks []int, from int) int {
+	k := 0
+	for k < len(marks) && marks[k] <= from {
+		k++
+	}
+	return k
 }
 
 // ReleaseOpenSecret stops holding what is open now, after a bound decided it.

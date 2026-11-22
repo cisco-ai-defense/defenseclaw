@@ -97,6 +97,7 @@ func (r *responseText) Add(p responsePiece) {
 		r.lanes = append(r.lanes, &strings.Builder{})
 		r.secret = append(r.secret, secretLane{})
 	}
+	r.secret[i].mark(r.lanes[i].Len(), r.n)
 	r.lanes[i].WriteString(p.text)
 	r.n += len(p.text)
 	r.fresh = false
