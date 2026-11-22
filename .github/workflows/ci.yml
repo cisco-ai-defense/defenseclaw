@@ -131,10 +131,53 @@ jobs:
       - run: make plugin
       - name: Type-check Amp policy plugin against official API
         run: make amp-plugin-typecheck
+      # golangci-lint itself and its analysis cache: on a 4 vCPU runner the
+      # pinned golangci-lint took 409 s cold (go run built it, then analysed
+      # every package) and 8 s with the analysis cache warm (dc-build-1, 4
+      # CPUs, 7cdbc8f4da); the cache is about 56 MB. The cache is content
+      # addressed (a changed package is analysed again), so a pull request
+      # restores the latest entry main saved. Only main saves, one entry per
+      # commit; nothing here changes what golangci-lint checks.
+      - name: Name the golangci-lint cache
+        id: golangci
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/^GOLANGCI_LINT_VERSION := //p' Makefile)"
+          test -n "$version"
+          prefix="golangci-lint-$RUNNER_OS-$RUNNER_ARCH-$(go env GOVERSION)-$version-"
+          {
+            echo "version=$version"
+            echo "prefix=$prefix"
+            echo "key=$prefix$GITHUB_SHA"
+            echo "dir=$HOME/.cache/dc-golangci-lint"
+          } >> "$GITHUB_OUTPUT"
+      - id: golangci-cache
+        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: ${{ steps.golangci.outputs.dir }}
+          key: ${{ steps.golangci.outputs.key }}
+          restore-keys: |
+            ${{ steps.golangci.outputs.prefix }}
       - name: Go lint (gofmt, go vet, golangci-lint on changed lines)
         env:
           GOLANGCI_LINT_BASE: ${{ github.event_name == 'pull_request' && 'HEAD^1' || 'origin/main' }}
-        run: make go-lint
+          GOLANGCI_DIR: ${{ steps.golangci.outputs.dir }}
+          GOLANGCI_VERSION: ${{ steps.golangci.outputs.version }}
+        run: |
+          set -euo pipefail
+          bin="$GOLANGCI_DIR/bin/golangci-lint"
+          if ! "$bin" version 2>/dev/null | grep -qF " ${GOLANGCI_VERSION#v} "; then
+            rm -rf "$GOLANGCI_DIR/bin"
+            GOBIN="$GOLANGCI_DIR/bin" go install "github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$GOLANGCI_VERSION"
+          fi
+          "$bin" version
+          GOLANGCI_LINT_CACHE="$GOLANGCI_DIR/cache" make go-lint GOLANGCI_LINT="$bin"
+      - if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.golangci-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: ${{ steps.golangci.outputs.dir }}
+          key: ${{ steps.golangci.outputs.key }}
 
   # The defenseclaw-substrate Helm chart: lint, goldens and render
   # invariants with a pinned helm (the general Go shards have no helm and
@@ -392,7 +435,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18]
+        # 19 shards planned up to 543 s of recorded package time each (shard 3
+        # of #1490 on 447e0e8b09: 11.9 min in the test step); 32 plan at most
+        # 329 s.
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -412,7 +458,7 @@ jobs:
         timeout-minutes: 18
         env:
           GO_PACKAGE_SHARD: ${{ matrix.shard }}
-          GO_PACKAGE_SHARDS: 19
+          GO_PACKAGE_SHARDS: 32
         run: |
           set -euo pipefail
           go list ./... > "$RUNNER_TEMP/go-packages.txt"
@@ -762,7 +808,7 @@ jobs:
           )
           # 124 gateway + 5 audit + 19 remaining-package shards, plus the
           # frozen-gateway job.
-          test "${#coverage_parts[@]}" -eq 149
+          test "${#coverage_parts[@]}" -eq 162
           python3 scripts/merge_go_coverage.py \
             --output coverage.out \
             "${coverage_parts[@]}"
