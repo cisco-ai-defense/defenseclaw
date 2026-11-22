@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -291,10 +292,21 @@ func translateSecrets(ctx context.Context, base gitCmd, rec *CopyRecord, changes
 			continue
 		}
 		after, ok := blobs[c.NewOID]
-		if !ok || copyTokens(after, tokens) == 0 {
+		if !ok {
+			// Over the scan cap, so not read into memory: look for a
+			// placeholder by streaming it (RV5-7). One in it, old or new,
+			// keeps the change out: the old one cannot be compared.
+			found, err := streamHasPlaceholder(ctx, base, c.NewOID)
+			if err != nil {
+				return err
+			}
+			if !found {
+				continue
+			}
+		} else if copyTokens(after, tokens) == 0 {
 			continue
 		}
-		if copyTokens(after, tokens) > copyTokens(blobs[c.OldOID], tokens) {
+		if !ok || copyTokens(after, tokens) > copyTokens(blobs[c.OldOID], tokens) {
 			others = append(others, p)
 			if applied != "" {
 				entries[p] = since[p]
@@ -312,6 +324,51 @@ func translateSecrets(ctx context.Context, base gitCmd, rec *CopyRecord, changes
 }
 
 // lsTree lists the entries of paths in commit.
+// streamHasPlaceholder reports whether the blob holds DC_SECRET_, read in
+// pieces so a file over the scan cap is not held in memory.
+func streamHasPlaceholder(ctx context.Context, g gitCmd, oid string) (bool, error) {
+	cmd, cleanup, err := g.command(ctx, []string{"cat-file", "blob", oid})
+	if err != nil {
+		return false, err
+	}
+	defer cleanup()
+	out, err := cmd.StdoutPipe()
+	if err != nil {
+		return false, err
+	}
+	if err := cmd.Start(); err != nil {
+		return false, err
+	}
+	const prefix = "DC_SECRET_"
+	buf := make([]byte, 1<<20)
+	tail := []byte{}
+	found := false
+	for !found {
+		n, rerr := out.Read(buf)
+		if n > 0 {
+			win := append(tail, buf[:n]...)
+			found = bytes.Contains(win, []byte(prefix))
+			if k := len(prefix) - 1; len(win) > k {
+				tail = append([]byte{}, win[len(win)-k:]...)
+			} else {
+				tail = win
+			}
+		}
+		if rerr != nil {
+			break
+		}
+	}
+	if found {
+		_ = cmd.Process.Kill()
+	}
+	_, _ = io.Copy(io.Discard, out)
+	werr := cmd.Wait()
+	if found {
+		return true, nil
+	}
+	return false, werr
+}
+
 func lsTree(ctx context.Context, g gitCmd, commit string, paths []string) (map[string]idxEntry, error) {
 	out := map[string]idxEntry{}
 	if len(paths) == 0 {
