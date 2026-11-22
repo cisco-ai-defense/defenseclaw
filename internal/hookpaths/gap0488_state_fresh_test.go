@@ -41,7 +41,7 @@ func TestG622b8StateAddedInsideIndexTTLIsStillProtected(t *testing.T) {
 				t.Fatal(err)
 			}
 			// This ordinary hard link creates a cached view of the state tree.
-			if _, same := ResolveActiveStateHardlinkTarget(two, home); same {
+			if _, same, _ := ResolveActiveStateHardlinkTarget(two, home); same {
 				t.Fatal("ordinary link was state")
 			}
 			target := filepath.Join(project, "target.txt")

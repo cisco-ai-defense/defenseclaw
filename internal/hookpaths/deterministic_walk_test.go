@@ -87,7 +87,7 @@ func TestStateWalksCountEntriesNotTime(t *testing.T) {
 	if err := os.Link(late, alias); err != nil {
 		t.Fatal(err)
 	}
-	if _, same := ResolveActiveStateHardlinkTarget(alias, home); !same {
+	if _, same, _ := ResolveActiveStateHardlinkTarget(alias, home); !same {
 		t.Fatal("the hard link to the last cache entry was not found on an idle box")
 	}
 	idle := builtActiveStateIndex(t)
@@ -98,7 +98,7 @@ func TestStateWalksCountEntriesNotTime(t *testing.T) {
 	for run := range 3 {
 		resetActiveStateIndex(t)
 		var same bool
-		took := starved(64, func() { _, same = ResolveActiveStateHardlinkTarget(alias, home) })
+		took := starved(64, func() { _, same, _ = ResolveActiveStateHardlinkTarget(alias, home) })
 		if !same {
 			t.Fatalf("run %d: the hard link to a state file inside the entry bound was not found on a loaded box (walk took %s)", run, took)
 		}

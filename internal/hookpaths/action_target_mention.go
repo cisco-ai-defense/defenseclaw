@@ -2749,28 +2749,43 @@ func actionProtectedStatePath(value string, home *actionStateHome) bool {
 	if err != nil || !info.Mode().IsRegular() || linkCount(resolved, info) < 2 {
 		return false
 	}
-	_, same := ResolveActiveStateHardlinkTarget(resolved, home.home)
-	return same
+	// A target the index could not rule out (a read of the state did not
+	// answer) is not proved free of the state, as for a patch target
+	// (rel-1-0-10:GAP-1789).
+	_, same, complete := ResolveActiveStateHardlinkTarget(resolved, home.home)
+	return same || !complete
 }
 
 // ResolveActiveStateHardlinkTarget maps an existing write target back to an
 // active DefenseClaw state file with the same file identity. Ordinary aliases
 // have one link and avoid the index; a multiply linked target is compared
 // with the bounded, shared index of the active state files.
-func ResolveActiveStateHardlinkTarget(value, home string) (string, bool) {
+//
+// complete is false only for a multiply linked target the index does not
+// hold while a read of its walk did not answer (a network share, or on
+// Windows a local folder read that the share-link walk waited for past
+// networkShareAnswerWait): the part of the state the walk could not read may
+// hold the file, so the target is not proved free of the state and the
+// caller refuses it, as an unfinished walk refuses a patch target
+// (ResolveActiveStateIdentity). Before, that miss read as no state file, an
+// allow (rel-1-0-10:GAP-1789). A target outside the entry bound is not
+// mapped and complete stays true: the bound never refuses ordinary shell
+// work.
+func ResolveActiveStateHardlinkTarget(value, home string) (state string, same, complete bool) {
 	resolved, ok := ResolveWriteTarget(value)
 	if !ok {
-		return "", false
+		return "", false, true
 	}
 	info, err := pathStat(resolved)
 	if err != nil || !info.Mode().IsRegular() || linkCount(resolved, info) < 2 {
-		return "", false
+		return "", false, true
 	}
 	activeRoot, ok := ResolveWriteTarget(filepath.Join(home, ".defenseclaw"))
 	if !ok {
-		return "", false
+		return "", false, true
 	}
-	for _, file := range activeStateIdentities(activeRoot) {
+	files, unanswered := activeStateIdentities(activeRoot)
+	for _, file := range files {
 		if !os.SameFile(info, file.info) {
 			continue
 		}
@@ -2778,10 +2793,10 @@ func ResolveActiveStateHardlinkTarget(value, home string) (string, bool) {
 		// still holds this file before mapping the alias to it.
 		path := filepath.Join(activeRoot, filepath.FromSlash(file.relative))
 		if current, err := pathStat(path); err == nil && os.SameFile(info, current) {
-			return filepath.Join(home, ".defenseclaw", filepath.FromSlash(file.relative)), true
+			return filepath.Join(home, ".defenseclaw", filepath.FromSlash(file.relative)), true, true
 		}
 	}
-	return "", false
+	return "", false, !unanswered
 }
 
 // The identity index of one active state tree is built at most once per
@@ -2818,12 +2833,16 @@ type activeStateIdentityIndex struct {
 	files []activeStateIdentity
 }
 
-func activeStateIdentities(activeRoot string) []activeStateIdentity {
+// activeStateIdentities is the identity index of the active state at
+// activeRoot. unanswered reports that a read of its walk did not answer
+// (activeStateWalk.unanswered): such an index is not kept, so the next call
+// reads the state again.
+func activeStateIdentities(activeRoot string) (files []activeStateIdentity, unanswered bool) {
 	activeStateIndex.Lock()
 	defer activeStateIndex.Unlock()
 	now := time.Now()
 	if index, ok := activeStateIndex.byRoot[activeRoot]; ok && now.Sub(index.built) < activeStateIndexTTL {
-		return index.files
+		return index.files, false
 	}
 	for root, index := range activeStateIndex.byRoot {
 		if now.Sub(index.built) >= activeStateIndexTTL {
@@ -2834,13 +2853,16 @@ func activeStateIdentities(activeRoot string) []activeStateIdentity {
 		activeStateIndex.byRoot = make(map[string]activeStateIdentityIndex)
 	}
 	activeStateIndexWalks.Add(1)
-	var files []activeStateIdentity
-	walkActiveStateFiles(activeRoot, activeStateIndexEntries, func(relative string, info os.FileInfo) bool {
+	walk := &activeStateWalk{limit: activeStateIndexEntries, visit: func(relative string, info os.FileInfo) bool {
 		files = append(files, activeStateIdentity{relative: relative, info: info})
 		return false
-	})
+	}}
+	walk.run(activeRoot)
+	if walk.unanswered {
+		return files, true
+	}
 	activeStateIndex.byRoot[activeRoot] = activeStateIdentityIndex{built: now, files: files}
-	return files
+	return files, false
 }
 
 // ResolveActiveStateIdentity reports whether resolved, an existing write
@@ -2982,21 +3004,20 @@ type activeStateWalk struct {
 	record  bool // keep the fingerprint of every directory and link read
 	watches []activeStateWatch
 	visited int
-	stopped bool          // visit accepted a file
-	over    bool          // the entry bound was reached
-	partial bool          // some of the state could not be seen
-	linked  []os.FileInfo // directories reached through a link, walked once
+	stopped bool // visit accepted a file
+	over    bool // the entry bound was reached
+	partial bool // some of the state could not be seen
+	// unanswered: a read of the state did not answer (errNetworkShareUnanswered),
+	// so what it would have shown is unknown, not absent (GAP-1789).
+	unanswered bool
+	linked     []os.FileInfo // directories reached through a link, walked once
 }
 
-// walkActiveStateFiles visits the regular files of the active state in the
-// order of activeStateFiles and activeStateTrees until visit returns true. A
-// link to a directory is followed. It reports whether the view was complete:
-// false when it stopped at the entry bound, or could not list a
-// directory or stat a name, so what it did not see is unknown.
-func walkActiveStateFiles(activeRoot string, limit int, visit func(relative string, info os.FileInfo) bool) (complete bool) {
-	return (&activeStateWalk{limit: limit, visit: visit}).run(activeRoot)
-}
-
+// run visits the regular files of the active state in the order of
+// activeStateFiles and activeStateTrees until visit returns true. A link to a
+// directory is followed. It reports whether the view was complete: false
+// when it stopped at the entry bound, or could not list a directory or stat
+// a name, so what it did not see is unknown.
 func (w *activeStateWalk) run(activeRoot string) (complete bool) {
 	w.watch(activeRoot)
 	for _, name := range activeStateFiles {
@@ -3033,7 +3054,16 @@ func (w *activeStateWalk) keep(path string, info os.FileInfo, err error) {
 	case activeStateNameAbsent(err):
 		w.watches = append(w.watches, activeStateWatch{path: path})
 	default:
-		w.partial = true
+		w.unseen(err)
+	}
+}
+
+// unseen marks the walk partial for a read that failed with err, and
+// unanswered when the read did not answer.
+func (w *activeStateWalk) unseen(err error) {
+	w.partial = true
+	if errors.Is(err, errNetworkShareUnanswered) {
+		w.unanswered = true
 	}
 }
 
@@ -3078,7 +3108,7 @@ func (w *activeStateWalk) file(path, relative string, depth int) {
 	switch {
 	case err != nil:
 		if !activeStateNameAbsent(err) {
-			w.partial = true
+			w.unseen(err)
 		}
 	case info.IsDir():
 		for _, seen := range w.linked {
@@ -3106,7 +3136,7 @@ func (w *activeStateWalk) directory(path, relative string, depth int) {
 	// is a positive answer, and the failure makes the rest unknown.
 	entries, err := pathReadDir(path)
 	if err != nil && !activeStateNameAbsent(err) {
-		w.partial = true
+		w.unseen(err)
 	}
 	for _, entry := range entries {
 		// path is clean and a listed name holds no separator, so joining by
