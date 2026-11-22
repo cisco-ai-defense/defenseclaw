@@ -5,6 +5,7 @@
 package psparse
 
 import (
+	"os"
 	"strings"
 	"unicode/utf8"
 
@@ -44,6 +45,27 @@ func FromPwshparse(src string, opts Options) (*Script, bool) {
 	}
 	sc.Diagnostics = a.p.diags
 	return sc, true
+}
+
+// frontendPwshparse selects the reader of ParseEffects: true (the default)
+// is FromPwshparse; DEFENSECLAW_PS_FRONTEND=psparse keeps Parse. It is read
+// once here because the effects package must not import os (pure parse step).
+var frontendPwshparse = os.Getenv("DEFENSECLAW_PS_FRONTEND") != "psparse"
+
+// ParseEffects is the PowerShell reader of the effects frontend. It parses
+// with FromPwshparse and falls back to Parse when the port declines the input
+// (a construct it does not parse, or nesting past its depth budget), so every
+// input still gets a Script. With DEFENSECLAW_PS_FRONTEND=psparse it is Parse.
+// port reports that FromPwshparse built the Script (its elements are the
+// PowerShell parser's own: a native program's argv follows them exactly).
+func ParseEffects(src string, opts Options) (sc *Script, port bool, err error) {
+	if frontendPwshparse {
+		if sc, ok := FromPwshparse(src, opts); ok {
+			return sc, true, nil
+		}
+	}
+	sc, err = Parse(src, opts)
+	return sc, false, err
 }
 
 // pwErrorReason maps a pwshparse error id to the Reason code Parse uses.
