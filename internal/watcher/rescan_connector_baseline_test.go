@@ -478,11 +478,12 @@ func TestSkippedTreeHashCoversALink(t *testing.T) {
 	dir := t.TempDir()
 	writePluginFile(t, filepath.Join(dir, "plugin.yaml"), "name: a\n")
 	writePluginFile(t, filepath.Join(dir, "other.yaml"), "name: b\n")
+	none := skippedTreeHash(dir, hermesScannerLoader(t))
 	link := filepath.Join(dir, "link.yaml")
 	testenv.Symlink(t, filepath.Join(dir, "plugin.yaml"), link)
 	first := skippedTreeHash(dir, hermesScannerLoader(t))
-	if first == "" {
-		t.Fatal("a link left the skipped-tree hash empty")
+	if first == "" || first == none {
+		t.Fatalf("added link: skipped-tree hash %q, want a new value (was %q)", first, none)
 	}
 	if err := os.Remove(link); err != nil {
 		t.Fatal(err)
