@@ -32,9 +32,10 @@ import (
 // without its files being read again (GAP-1816). "Not changed" is the
 // metadata of every entry the hash covers: name, type, size, modification
 // time and, outside Windows, the inode change time, inode, link count and
-// owner, none of which a user can set back after a write. Every folder is
-// read again at least once per skillHashCacheMaxAge, so a Windows file whose
-// write time was restored by hand is caught within a day.
+// owner, none of which a user can set back after a write. Windows keeps no
+// such time a user cannot set, so a managed Windows scan does not use the
+// cache (skillChangeStampTamperEvident); an OSS Windows install does, and
+// reads every folder again at least once per skillHashCacheMaxAge.
 const (
 	skillHashCacheMaxAge = 24 * time.Hour
 	// maxSkillHashCacheFolders bounds the memory of the cache; a scan that

@@ -107,6 +107,9 @@ func (s *ContinuousDiscoveryService) skillFacts(path string, bundled bool) *AISk
 	// (ai_skill_hash_cache.go), and costs nothing from the scan budget.
 	now := time.Now()
 	signature, signed := skillFolderSignature(path)
+	// A managed Windows scan reads every folder each time: the metadata a
+	// user can write back by hand there is all the cache could check.
+	signed = signed && (skillChangeStampTamperEvident || !s.opts.ManagedEnterprise)
 	hashed, read, keep := cached, int64(0), false
 	if !inCache || !signed || !cached.fresh(signature, now) {
 		var manifest []byte

@@ -55,3 +55,22 @@ func TestSkillHashCacheAgesOut(t *testing.T) {
 		t.Fatal("a folder cut short by the scan budget was kept in the cache")
 	}
 }
+
+// A managed scan on Windows, where a user can write every file time back,
+// reads every folder each time; elsewhere it uses the cache.
+func TestSkillHashCacheManagedWindowsReadsEveryScan(t *testing.T) {
+	home := t.TempDir()
+	dir := filepath.Join(home, ".agents", "skills", "pdf")
+	writeSkillFiles(t, dir, map[string]string{"SKILL.md": "---\nname: pdf\n---\n"})
+	svc := NewContinuousDiscoveryServiceWithOptions(AIDiscoveryOptions{
+		Enabled: true, Mode: "enhanced", DataDir: filepath.Join(home, "data"), HomeDir: home,
+	}, nil)
+	cleanupPreparedDiscoveryService(t, svc)
+	svc.opts.ManagedEnterprise = true
+	svc.skillFacts(dir, false)
+	svc.resetSkillFacts()
+	svc.skillFacts(dir, false)
+	if read := svc.skillBytesRead != 0; read == skillChangeStampTamperEvident {
+		t.Fatalf("managed scan read again = %v, want %v", read, !skillChangeStampTamperEvident)
+	}
+}

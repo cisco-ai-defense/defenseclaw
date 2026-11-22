@@ -25,6 +25,10 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// skillChangeStampTamperEvident: an unprivileged user cannot set the inode
+// change time back.
+const skillChangeStampTamperEvident = true
+
 // skillEntryChangeStamp is the inode change time, inode, link count and
 // owner of path. Any write or chmod, and any link or owner change that would
 // change whether a SKILL.md is kept as the manifest, moves one of them.

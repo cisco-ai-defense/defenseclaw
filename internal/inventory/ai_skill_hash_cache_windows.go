@@ -24,6 +24,10 @@ import (
 	"syscall"
 )
 
+// skillChangeStampTamperEvident: a user can set every time Windows keeps on
+// a file, so a managed scan does not trust the cache.
+const skillChangeStampTamperEvident = false
+
 // skillEntryChangeStamp is the creation time of path. Windows has no change
 // time in the file metadata Go reads, so the cache age bound catches a write
 // time restored by hand.
