@@ -6368,13 +6368,12 @@ def _serialize_v9_scanner_keys(scanners: Any) -> None:
 
 
 def _strip_ai_discovery_omitempty(ai_discovery: Any) -> None:
-    """Mirror Go's ``omitempty`` on ``ai_discovery.include_user_principal``,
-    ``trusted_ad_child_domains`` and ``ide_inventory`` so configs that never
-    set them stay byte-identical."""
+    """Mirror Go's omission of default-valued optional discovery settings."""
     if not isinstance(ai_discovery, dict):
         return
-    if not ai_discovery.get("include_user_principal"):
-        ai_discovery.pop("include_user_principal", None)
+    for key in ("include_user_principal", "include_skill_manifests"):
+        if not ai_discovery.get(key):
+            ai_discovery.pop(key, None)
     if not ai_discovery.get("trusted_ad_child_domains"):
         ai_discovery.pop("trusted_ad_child_domains", None)
     if ai_discovery.get("ide_inventory") in (None, "", "all"):
@@ -6678,6 +6677,7 @@ _OWNED_NESTED_KEYS: frozenset[str] = frozenset(
         "guardrail.default_profile",
         # AI discovery identity/IDE opt-ins: stripped at their defaults.
         "ai_discovery.include_user_principal",
+        "ai_discovery.include_skill_manifests",
         "ai_discovery.trusted_ad_child_domains",
         "ai_discovery.ide_inventory",
     }

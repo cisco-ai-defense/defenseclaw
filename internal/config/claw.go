@@ -340,7 +340,7 @@ func (c *Config) LookupMCPServerForConnector(connector, workspaceDir, name strin
 	if workspaceDir == "" && c != nil {
 		workspaceDir = c.ConnectorWorkspaceDir()
 	}
-	entries := c.readMCPServersForLookup(connector, workspaceDir)
+	entries, _ := c.readMCPServersForConnectorIn(connector, workspaceDir)
 	for _, e := range entries {
 		if e.Name == name {
 			return e, true
@@ -389,7 +389,7 @@ func (c *Config) LookupMCPToolServerForConnector(connector, workspaceDir, name s
 	if workspaceDir == "" && c != nil {
 		workspaceDir = c.ConnectorWorkspaceDir()
 	}
-	entries := c.readMCPServersForLookup(connector, workspaceDir)
+	entries, _ := c.readMCPServersForConnectorIn(connector, workspaceDir)
 	if entry, ok := lookupMCPToolServer(connector, entries, name); ok {
 		return entry, true
 	}
@@ -408,7 +408,8 @@ func (c *Config) CodexMCPToolServerAmbiguous(workspaceDir, toolServer string) bo
 	if workspaceDir == "" && c != nil {
 		workspaceDir = c.ConnectorWorkspaceDir()
 	}
-	return codexMCPToolServerAmbiguous(c.readMCPServersForLookup("codex", workspaceDir), toolServer)
+	entries, _ := c.readMCPServersForConnectorIn("codex", workspaceDir)
+	return codexMCPToolServerAmbiguous(entries, toolServer)
 }
 
 // CodexMCPToolServerAmbiguousUnderHome uses the managed caller's Codex
@@ -495,23 +496,6 @@ func lookupMCPToolServer(connector string, entries []MCPServerEntry, name string
 		}
 	}
 	return found, found.Name != ""
-}
-
-// readMCPServersForLookup is the server list a per-call lookup reads. Codex
-// is read as a session runs it (readMCPServersCodexLayers effectiveOnly): a
-// project layer the user config does not trust is left out, so a planted
-// .codex/config.toml cannot shadow the user's server of that name, and a
-// trusted layer DefenseClaw cannot read (a symlink, too large, unstable)
-// ends the list, so a name it may define is unproven rather than resolved to
-// the user layer's server of that name (rel-1-0-10:GAP-1693). The reader's
-// error is dropped (GAP-1692). Secure Client keeps main (issue #1092).
-func (c *Config) readMCPServersForLookup(connector, workspaceDir string) []MCPServerEntry {
-	if normalizeConnectorKey(connector) == "codex" && (c == nil || !c.SecureClientIntegration()) {
-		entries, _ := readMCPServersCodexLayers(codexUserConfigPath(), workspaceDir, true)
-		return entries
-	}
-	entries, _ := c.readMCPServersForConnectorIn(connector, workspaceDir)
-	return entries
 }
 
 func (c *Config) readMCPServersForConnectorIn(connector, workspaceDir string) ([]MCPServerEntry, error) {
@@ -1692,12 +1676,7 @@ func ReadMCPFromClaudeJSONBothScopes(path string) ([]MCPServerEntry, error) {
 }
 
 func readMCPServersCodex(workspaceDir string) ([]MCPServerEntry, error) {
-	return readMCPServersCodexAt(codexUserConfigPath(), workspaceDir)
-}
-
-// codexUserConfigPath is the user config.toml of this process's Codex.
-func codexUserConfigPath() string {
-	return filepath.Join(connectorEnvHome("CODEX_HOME", ".codex"), "config.toml")
+	return readMCPServersCodexAt(filepath.Join(connectorEnvHome("CODEX_HOME", ".codex"), "config.toml"), workspaceDir)
 }
 
 // readMCPServersCodexAt reads the Codex servers from the user config.toml at
@@ -1707,13 +1686,9 @@ func readMCPServersCodexAt(userPath, workspaceDir string) ([]MCPServerEntry, err
 }
 
 // readMCPServersCodexLayers reads the layers readMCPServersCodexAt lists.
-// With effectiveOnly the entries are the servers a session runs rather than
-// the ones discovery should scan: a project layer Codex does not activate
-// (one the user config does not trust) is left out, and a trusted layer that
-// exists but cannot be read ends the list there, since the servers it
-// defines take precedence over every layer after it, the user layer
-// included (rel-1-0-10:GAP-1693). The user config is read once, for its
-// servers and the trust of the projects.
+// With effectiveOnly, a project layer Codex does not activate (one the user
+// config does not trust) is left out, so the entries are the servers a
+// session runs rather than the ones discovery should scan.
 func readMCPServersCodexLayers(userPath, workspaceDir string, effectiveOnly bool) ([]MCPServerEntry, error) {
 	// Codex stores user and project MCP registries in config.toml
 	// [mcp_servers] tables. Candidate project layers are read closest-first so
@@ -1721,71 +1696,41 @@ func readMCPServersCodexLayers(userPath, workspaceDir string, effectiveOnly bool
 	// Filesystem presence is discovery only: project entries carry
 	// TrustRequired because Codex activates them only for trusted projects.
 	cwd := strings.TrimSpace(workspaceDir)
+	var trusted codexProjectTrust
+	if effectiveOnly {
+		trusted = readCodexProjectTrust(userPath)
+	}
 
 	var entries []MCPServerEntry
 	var firstErr error
-	fail := func(err error) {
-		if firstErr == nil {
-			firstErr = err
-		}
-	}
-	// exists reports a layer file to read; a refused or unreadable entry is
-	// recorded and reported as present.
-	exists := func(path string) (bool, bool) {
+	read := func(path string, reader func(string) ([]MCPServerEntry, error)) []MCPServerEntry {
 		if err := managed.RequireWindowsGatewayPathOutsideUserProfiles(path); err != nil {
-			fail(err)
-			return true, false
+			if firstErr == nil {
+				firstErr = err
+			}
+			return nil
 		}
 		if _, err := os.Lstat(path); err != nil {
-			if !errors.Is(err, fs.ErrNotExist) {
-				fail(err)
-				return true, false
+			if !errors.Is(err, fs.ErrNotExist) && firstErr == nil {
+				firstErr = err
 			}
-			return false, false
+			return nil
 		}
-		return true, true
-	}
-	var userEntries []MCPServerEntry
-	var trusted codexProjectTrust
-	if present, readable := exists(userPath); readable {
-		data, ok := gatewayconnector.ReadStableInventoryFile(userPath, maxCodexInventoryConfigBytes)
-		if !ok {
-			fail(fmt.Errorf("Codex MCP config is unavailable, unstable, unsafe, or exceeds %d bytes: %s", maxCodexInventoryConfigBytes, userPath)) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
-			trusted.unknown = true
-		} else {
-			found, err := ParseCodexUserMCPServers(data, userPath)
-			if err != nil {
-				fail(err)
-			}
-			userEntries = found
-			trusted = parseCodexProjectTrust(data)
+		found, err := reader(path)
+		if err != nil && firstErr == nil {
+			firstErr = err
 		}
-	} else if present {
-		trusted.unknown = true
+		return found
 	}
 	for _, layer := range gatewayconnector.CodexProjectLayerDirs(cwd) {
 		if effectiveOnly && !trusted.covers(layer, cwd) {
 			continue
 		}
 		projectPath := filepath.Join(layer, ".codex", "config.toml")
-		present, readable := exists(projectPath)
-		if !present {
-			continue
-		}
-		failed := !readable
-		if readable {
-			found, err := readMCPFromCodexConfigTOML(projectPath)
-			if err != nil {
-				fail(err)
-				failed = true
-			}
-			entries = append(entries, annotateCodexMCPEntries(found, projectPath, "project", true)...)
-		}
-		if effectiveOnly && failed {
-			return dedupMCPEntries(entries), firstErr
-		}
+		e := read(projectPath, readMCPFromCodexConfigTOML)
+		entries = append(entries, annotateCodexMCPEntries(e, projectPath, "project", true)...)
 	}
-	entries = append(entries, userEntries...)
+	entries = append(entries, read(userPath, ReadMCPFromCodexUserConfigTOML)...)
 	return dedupMCPEntries(entries), firstErr
 }
 
@@ -1799,7 +1744,8 @@ func LookupEffectiveCodexMCPToolServer(workspaceDir, name string) (MCPServerEntr
 	if name == "" {
 		return MCPServerEntry{}, false
 	}
-	entries, _ := readMCPServersCodexLayers(codexUserConfigPath(), workspaceDir, true)
+	userPath := filepath.Join(connectorEnvHome("CODEX_HOME", ".codex"), "config.toml")
+	entries, _ := readMCPServersCodexLayers(userPath, workspaceDir, true)
 	return lookupMCPToolServer("codex", entries, name)
 }
 
