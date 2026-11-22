@@ -118,6 +118,10 @@ struct SandboxVaultTests {
                == ["sandbox", "vault", "bind", "--host", "api.example.com:8443", "API_KEY"], "bind argv")
         expect(SandboxVaultChange.rename(name: "API_KEY", newName: "NEW_KEY").arguments
                == ["sandbox", "vault", "rename", "API_KEY", "NEW_KEY"], "rename argv")
+        expect(SandboxVaultChange.confirm(name: "API_KEY").arguments == ["sandbox", "vault", "confirm", "--yes", "API_KEY"],
+               "confirm argv (the TUI's c)")
+        expect(!SandboxVaultChange.confirm(name: "API_KEY").needsValue, "confirm takes no value")
+        expect(SandboxVaultChange.confirm(name: "--yes").problem != nil, "confirm of a flag-shaped name refused")
         expect(SandboxVaultChange.remove(name: "API_KEY").arguments
                == ["sandbox", "vault", "remove", "--yes", "API_KEY"], "remove argv")
         expect(SandboxVaultChange.add(name: "A", host: "x").needsValue && SandboxVaultChange.replace(name: "A").needsValue
@@ -177,6 +181,24 @@ struct SandboxVaultTests {
 
         let empty = try SandboxVault.decodeList("{\"path\":\"\",\"entries\":[]}")
         expect(empty.entries.isEmpty && empty.summary.hasPrefix("0 secrets"), "empty vault")
+
+        // A captured entry waits for the person's confirmation.
+        let pending = try SandboxVault.decodeList(json(["path": "/fixture/vault.json", "entries": [
+            ["name": "AWS_KEY", "target": "api.example.com:443", "status": "unconfirmed", "source": "captured",
+             "captured_from": "demo (claude prompt)"],
+            ["name": "OK_KEY", "target": "api.example.com:443", "status": "ready", "source": "manual"],
+        ]]))
+        let unconfirmed = pending.entries[0]
+        expect(unconfirmed.unconfirmed && !unconfirmed.ready && unconfirmed.statusText == "unconfirmed", "unconfirmed status")
+        expect(!pending.entries[1].unconfirmed, "a manual entry needs no confirmation")
+        expect(pending.summary == "2 secrets for your sandboxes · 1 unconfirmed · values are never shown", "summary counts unconfirmed")
+        expect(unconfirmed.attention.contains("captured from demo (claude prompt)") && unconfirmed.attention.contains("confirm"),
+               "unconfirmed explains")
+        let dialog = SandboxVault.confirmText(unconfirmed)
+        expect(dialog.contains(SandboxVault.confirmCaution), "the dialog carries the caution")
+        expect(SandboxVault.confirmCaution.contains("looks like your prompt") && SandboxVault.confirmCaution.contains("you gave it"),
+               "the caution says why")
+        expect(dialog.hasSuffix("Runs: defenseclaw sandbox vault confirm --yes AWS_KEY"), "the dialog shows the command")
         for bad in ["", "not json", "[]", "{\"entries\":{}}", "{\"path\":\"x\"}"] {
             expect((try? SandboxVault.decodeList(bad)) == nil, "refuse malformed list: \(bad)")
         }
@@ -220,6 +242,12 @@ struct SandboxVaultTests {
         expect(ok && cli.runs.last?.standardInput == nil, "bind sends no stdin")
         ok = await store.perform(.remove(name: "API_KEY"), value: value, run: cli.runner(), read: cli.reader(), managed: false)
         expect(ok && cli.runs.last?.standardInput == nil, "remove ignores a stray value")
+        let reads = cli.reads.count
+        ok = await store.perform(.confirm(name: "API_KEY"), value: value, run: cli.runner(), read: cli.reader(), managed: false)
+        expect(ok && cli.runs.last?.arguments == ["sandbox", "vault", "confirm", "--yes", "API_KEY"]
+               && cli.runs.last?.standardInput == nil, "confirm runs the CLI's confirm with --yes and no stdin")
+        expect(cli.runs.last?.title == "Vault: confirm API_KEY is your own secret", "confirm Activity title")
+        expect(cli.reads.count == reads + 1, "confirm re-reads the list")
 
         // Refused before any command runs.
         let before = cli.runs.count

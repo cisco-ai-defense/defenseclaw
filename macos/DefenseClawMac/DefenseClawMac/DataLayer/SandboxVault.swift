@@ -29,7 +29,7 @@ import Observation
 struct SandboxVaultEntry: Identifiable, Hashable, Sendable {
     var name: String
     var target = ""
-    /// ready | needs_host | exposed
+    /// ready | needs_host | exposed | unconfirmed
     var status = ""
     /// manual | captured
     var source = ""
@@ -43,6 +43,8 @@ struct SandboxVaultEntry: Identifiable, Hashable, Sendable {
     var statusText: String { SandboxVault.statusText(status) }
     var hostText: String { target.isEmpty ? "—" : target }
     var ready: Bool { status == "ready" }
+    /// Captured from a sandbox and not yet confirmed as the person's own.
+    var unconfirmed: Bool { status == "unconfirmed" }
 
     var sourceText: String {
         source == "captured" ? "captured from \(capturedFrom.isEmpty ? "a sandbox" : capturedFrom)" : "added by you"
@@ -70,6 +72,7 @@ struct SandboxVaultEntry: Identifiable, Hashable, Sendable {
         switch status {
         case "needs_host": return "\(name) has no host yet: set the one host it may be sent to."
         case "exposed": return "\(name) may have been seen by an agent's model: rotate it with its issuer, then replace the value."
+        case "unconfirmed": return "\(name) was \(sourceText): confirm it only if it is a secret you gave the agent."
         default: return ""
         }
     }
@@ -79,10 +82,11 @@ struct SandboxVaultList: Sendable, Equatable {
     var path = ""
     var entries: [SandboxVaultEntry] = []
 
-    var counts: (ready: Int, needsHost: Int, exposed: Int) {
+    var counts: (ready: Int, needsHost: Int, exposed: Int, unconfirmed: Int) {
         (entries.filter { $0.status == "ready" }.count,
          entries.filter { $0.status == "needs_host" }.count,
-         entries.filter { $0.status == "exposed" }.count)
+         entries.filter { $0.status == "exposed" }.count,
+         entries.filter { $0.status == "unconfirmed" }.count)
     }
 
     /// The TUI's summary line.
@@ -92,6 +96,7 @@ struct SandboxVaultList: Sendable, Equatable {
         let c = counts
         if c.needsHost > 0 { parts.append("\(c.needsHost) need\(c.needsHost == 1 ? "s" : "") a host") }
         if c.exposed > 0 { parts.append("\(c.exposed) exposed: rotate") }
+        if c.unconfirmed > 0 { parts.append("\(c.unconfirmed) unconfirmed") }
         return parts.joined(separator: " · ") + " · values are never shown"
     }
 }
@@ -111,6 +116,7 @@ enum SandboxVaultChange: Equatable, Sendable {
     case bind(name: String, host: String)
     case rename(name: String, newName: String)
     case remove(name: String)
+    case confirm(name: String)
 
     var needsValue: Bool {
         switch self {
@@ -121,7 +127,7 @@ enum SandboxVaultChange: Equatable, Sendable {
 
     var name: String {
         switch self {
-        case .add(let name, _), .replace(let name), .bind(let name, _), .rename(let name, _), .remove(let name): return name
+        case .add(let name, _), .replace(let name), .bind(let name, _), .rename(let name, _), .remove(let name), .confirm(let name): return name
         }
     }
 
@@ -134,6 +140,7 @@ enum SandboxVaultChange: Equatable, Sendable {
         case .bind(let name, let host): return ["sandbox", "vault", "bind", "--host", Self.trim(host), name]
         case .rename(let name, let newName): return ["sandbox", "vault", "rename", name, Self.trim(newName)]
         case .remove(let name): return ["sandbox", "vault", "remove", "--yes", name]
+        case .confirm(let name): return ["sandbox", "vault", "confirm", "--yes", name]
         }
     }
 
@@ -144,6 +151,7 @@ enum SandboxVaultChange: Equatable, Sendable {
         case .bind(let name, let host): return "Vault: send \(name) only to \(Self.trim(host))"
         case .rename(let name, let newName): return "Vault: rename \(name) to \(Self.trim(newName))"
         case .remove(let name): return "Vault: remove \(name)"
+        case .confirm(let name): return "Vault: confirm \(name) is your own secret"
         }
     }
 
@@ -151,7 +159,7 @@ enum SandboxVaultChange: Equatable, Sendable {
     var problem: String? {
         switch self {
         case .add(let name, let host): return SandboxVault.nameProblem(name) ?? SandboxVault.hostProblem(host)
-        case .replace(let name), .remove(let name): return SandboxVault.nameProblem(name)
+        case .replace(let name), .remove(let name), .confirm(let name): return SandboxVault.nameProblem(name)
         case .bind(let name, let host): return SandboxVault.nameProblem(name) ?? SandboxVault.hostProblem(host)
         case .rename(let name, let newName):
             if let problem = SandboxVault.nameProblem(name) ?? SandboxVault.nameProblem(Self.trim(newName)) { return problem }
@@ -229,12 +237,23 @@ enum SandboxVault {
         + "Start a sandbox with --vault NAME to use one."
     static let aboutText = "Each secret is bound to the one host it may be sent to. A sandbox started with --vault NAME "
         + "sees only a placeholder in $NAME; OpenShell puts the real value on requests to that host. Values are never shown."
+    /// Why a captured secret needs the person's confirmation (the TUI's c).
+    static let confirmCaution = "An agent in a sandbox can make a call that looks like your prompt: confirm only a secret you gave it."
+
+    /// The Confirm dialog's text: where the secret came from, the caution,
+    /// how to see its last 4 characters first, and the command that runs.
+    static func confirmText(_ entry: SandboxVaultEntry) -> String {
+        "\(entry.name) was \(entry.sourceText). Sandboxes may then use it. \(confirmCaution) "
+            + "To check its last 4 characters first, run in Terminal: defenseclaw sandbox vault confirm \(entry.name). "
+            + "Runs: defenseclaw " + SandboxVaultChange.confirm(name: entry.name).arguments.joined(separator: " ")
+    }
 
     static func statusText(_ status: String) -> String {
         switch status {
         case "ready": return "ready"
         case "needs_host": return "needs a host"
         case "exposed": return "exposed: rotate"
+        case "unconfirmed": return "unconfirmed"
         case "": return "unknown"
         default: return status
         }

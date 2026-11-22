@@ -28,6 +28,7 @@ struct SandboxVaultCard: View {
     @State private var selection: SandboxVaultEntry.ID?
     @State private var editor: SandboxVaultEditor?
     @State private var confirmRemove: SandboxVaultEntry?
+    @State private var confirmCaptured: SandboxVaultEntry?
 
     private var managed: Bool { appState.sandbox.status.adminConfigured }
     private var changesAllowed: Bool { appState.installationMutationsAllowed && !store.busy }
@@ -77,6 +78,17 @@ struct SandboxVaultCard: View {
         } message: { entry in
             Text("Sandboxes started from now on cannot use \(entry.name); running ones keep it until they stop. "
                 + "Revoke it with its issuer if it may have leaked.")
+        }
+        .confirmationDialog(
+            "Is \(confirmCaptured?.name ?? "") your own secret?",
+            isPresented: Binding(get: { confirmCaptured != nil }, set: { if !$0 { confirmCaptured = nil } }),
+            presenting: confirmCaptured
+        ) { entry in
+            Button("Confirm") {
+                Task { await store.perform(.confirm(name: entry.name), run: runner, read: reader, managed: managed) }
+            }
+        } message: { entry in
+            Text(SandboxVault.confirmText(entry))
         }
     }
 
@@ -132,6 +144,9 @@ struct SandboxVaultCard: View {
 
     private var actions: some View {
         HStack(spacing: 8) {
+            Button("Confirm…") { if let selected, selected.unconfirmed { confirmCaptured = selected } }
+                .disabled(!(selected?.unconfirmed ?? false) || !changesAllowed)
+                .help("Confirm a secret captured from a sandbox is one you gave the agent. \(SandboxVault.confirmCaution)")
             Button {
                 editor = .add
             } label: {
