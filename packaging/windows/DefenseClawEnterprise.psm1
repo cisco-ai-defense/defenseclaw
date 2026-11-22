@@ -31831,13 +31831,13 @@ function Get-DefenseClawSharedManagedHookOwners {
         if ([string]::IsNullOrWhiteSpace($owner)) {
             throw "$($specification.name) managed-hook ownership has no gateway service"
         }
-        # Secure Client counts the owner even when the bound policy file was
-        # removed or changed after DefenseClaw wrote it (an MDM or an
-        # administrator edit): the writer re-merges and re-authenticates the
-        # file later in this transaction, so a reinstall no longer fails on
-        # it. Standalone and strict keep refusing.
-        $lenientBinding = -not (Test-DefenseClawStandaloneProfile) -and
-            -not (Test-DefenseClawTrustStrictAncestors)
+        # Outside strict mode the owner counts even when the bound policy
+        # file was removed or changed after DefenseClaw wrote it (Intune, an
+        # MDM or an administrator edit): this probe only decides ownership,
+        # and the writer re-merges and re-authenticates the file later in
+        # this transaction, so a reinstall no longer fails 1603 on it. Both
+        # profiles (GAP-1732: standalone refused too); strict keeps refusing.
+        $lenientBinding = -not (Test-DefenseClawTrustStrictAncestors)
         foreach ($binding in @($specification.bindings)) {
             $boundPath = [string]$binding.path
             $expectedHash = [string]$state.([string]$binding.field)
@@ -37932,7 +37932,8 @@ function Get-DefenseClawSignedOutUntrustedFolder {
 # (enterpriseHookAccountLinkFailure, enterpriseHookAccountForeignLinkFailure).
 $script:AccountLinkGuardianErrors = @(
     'enterprise hooks: the account''s own DefenseClaw folder link is pending repair',
-    'enterprise hooks: the account''s DefenseClaw folder is a link its account does not own; it was left untouched and the account is not protected until an administrator removes the link'
+    'enterprise hooks: the account''s DefenseClaw folder is a link its account does not own; it was left untouched and the account is not protected until an administrator removes the link',
+    'enterprise hooks: the account''s DefenseClaw folder holds a per-user DefenseClaw install; it was left untouched and the account is not protected until that install is removed'
 )
 
 # The guardian never writes through a link, so a row whose machine vendor folder
@@ -38221,9 +38222,10 @@ function Get-DefenseClawStandaloneManifestAdoption {
             $removedRows++
             continue
         }
-        # The account's own folder link (GAP-0193) and a link another principal
-        # owns (GAP-0585) leave only that account unprotected; the guardian
-        # counts both in account_link_failures.
+        # The account's own folder link (GAP-0193), a link another principal
+        # owns (GAP-0585) and a folder that holds a per-user DefenseClaw
+        # install (GAP-1733) leave only that account unprotected; the guardian
+        # counts them in account_link_failures.
         if ($script:AccountLinkGuardianErrors -ccontains [string](& $field $row 'error') -and
             $accountLinks -gt 0) {
             $accountLinkRows++

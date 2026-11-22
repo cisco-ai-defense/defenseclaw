@@ -27,6 +27,11 @@ const (
 	// the DefenseClaw per-user registrations the hook guardian still has to
 	// remove from the homes of users it no longer enrolls.
 	HookGuardianUserCleanupFile = "user-cleanup.json"
+	// HookGuardianEnrolledAccountsFile, next to the authorization ledger,
+	// lists every account the hook guardian has protected. An account stays
+	// in it after its last ledger row is gone, until its account or profile
+	// is removed, so it is never again a first adoption (GAP-1733 review 2).
+	HookGuardianEnrolledAccountsFile = "enrolled-accounts.json"
 	// HookGuardianCredentialAttestationFile, next to the ledger, is the
 	// standalone Unix guardian's root-only record of what its last reconcile
 	// did to each target and which per-user credential key it rendered from
@@ -75,6 +80,15 @@ func IsManagedEnterprise(mode string) bool {
 	return strings.EqualFold(strings.TrimSpace(mode), DeploymentModeManagedEnterprise)
 }
 
+// HookGuardianAuthorizationDir is the hook guardian's authorization folder,
+// which holds its protection ledger, for dataDir: the
+// DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR override; else, when dataDir is this
+// platform's standalone layout data folder, that layout's GuardianAuthDir;
+// else <dataDir>-hook-guardian. A process started without the service pins
+// (status as an administrator, a manual reconcile or verify) therefore reads
+// the ledger the guardian writes. On Windows and macOS the layout folder is
+// not <dataDir>-hook-guardian, and such a reader found no ledger, so it
+// counted no account as enrolled (rel-1-0-10 GAP-1733 review).
 func HookGuardianAuthorizationDir(dataDir string) string {
 	if configured := strings.TrimSpace(os.Getenv(HookGuardianAuthorizationDirEnv)); configured != "" {
 		return filepath.Clean(configured)
@@ -128,6 +142,19 @@ var standaloneWindowsAuthLayout = func() (StandaloneLayout, error) {
 		return StandaloneLayout{}, err
 	}
 	return StandaloneWindowsLayoutForRoots(programFiles, programData)
+}
+
+// HookGuardianAuthorizationDirForLayout is that folder for a standalone
+// layout: the DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR override, else
+// layout.GuardianAuthDir, or "" when neither is set.
+func HookGuardianAuthorizationDirForLayout(layout StandaloneLayout) string {
+	if configured := strings.TrimSpace(os.Getenv(HookGuardianAuthorizationDirEnv)); configured != "" {
+		return filepath.Clean(configured)
+	}
+	if dir := strings.TrimSpace(layout.GuardianAuthDir); dir != "" {
+		return filepath.Clean(dir)
+	}
+	return ""
 }
 
 // ForeignHookCleanDirSuffix names the folder next to the data directory in

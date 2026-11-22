@@ -2044,6 +2044,12 @@ func recoverStaleWindowsSetupRelaxedDataDir(dataDir string, target *windows.SID)
 	if !windowsManagedRuntimeDirSetupRelaxed(dataDir, target) {
 		return false
 	}
+	// The setup shape is also the DACL a per-user install puts on its
+	// folder: that folder is never re-stamped, here or by the generation GC
+	// (GAP-1733).
+	if windowsPerUserInstallLeftover(dataDir) != "" {
+		return false
+	}
 	deadline := time.Now().Add(windowsManagedRuntimeSetupRelaxWait)
 	for windowsManagedRuntimeDirSetupRelaxed(dataDir, target) && time.Now().Before(deadline) {
 		time.Sleep(windowsManagedRuntimeSetupRelaxPoll)

@@ -30,7 +30,14 @@ func TestWindowsEnterpriseStandaloneClaudeRegistryPolicyPreflight(t *testing.T) 
 		refused    bool
 	}{
 		{name: "claude enrolled, value set", connectors: []string{"codex", "claudecode"}, value: `{"env":{"X":"1"}}`, refused: true},
-		{name: "claude enrolled, mixed case", connectors: []string{"ClaudeCode"}, value: "{}", refused: true},
+		{name: "claude enrolled, mixed case", connectors: []string{"ClaudeCode"}, value: `{"model":"x"}`, refused: true},
+		// GAP-1731: Claude Code skips an empty or control-only value, and a
+		// merge value composes with the drop-in; neither is refused.
+		{name: "claude enrolled, empty object", connectors: []string{"claudecode"}, value: "{}"},
+		{name: "claude enrolled, control keys only", connectors: []string{"claudecode"}, value: `{"managedSourcesBehavior":"merge"}`},
+		{name: "claude enrolled, merge with policy", connectors: []string{"claudecode"}, value: `{"managedSourcesBehavior":"merge","permissions":{"deny":["Bash(curl:*)"]}}`},
+		{name: "claude enrolled, merge disables hooks", connectors: []string{"claudecode"}, value: `{"managedSourcesBehavior":"merge","disableAllHooks":true}`, refused: true},
+		{name: "claude enrolled, own hooks table", connectors: []string{"claudecode"}, value: `{"hooks":{"PreToolUse":[]}}`},
 		{name: "claude enrolled, no value", connectors: []string{"claudecode"}, value: ""},
 		{name: "claude not enrolled, value set", connectors: []string{"codex", "copilot"}, value: `{"env":{}}`},
 		{name: "config not loadable", loadErr: errors.New("bad config"), value: "{}"},
@@ -56,6 +63,7 @@ func TestWindowsEnterpriseStandaloneClaudeRegistryPolicyPreflight(t *testing.T) 
 					`HKLM\SOFTWARE\Policies\ClaudeCode\Settings`,
 					"nothing was changed",
 					"Delete that registry value",
+					`"managedSourcesBehavior": "merge"`,
 					"guardrail.connectors.claudecode.enabled: false",
 					"run the same command again",
 				} {

@@ -1029,6 +1029,23 @@ func enterpriseHookStandalonePlatformFinish(ctx context.Context, stderr io.Write
 	}
 	users := map[string]*user{}
 	order := []string{}
+	// An account left out for a per-user DefenseClaw install in its folder
+	// is left as found, the vendor hook configs of that install included:
+	// one whose rows carry that failure, and one without rows that the
+	// enumerator skipped (GAP-1733 review).
+	rowAccounts, perUserSkipped := map[string]bool{}, map[string]bool{}
+	for _, row := range rows {
+		key := strings.ToUpper(strings.TrimSpace(row.SID))
+		rowAccounts[key] = true
+		if row.Error == enterpriseHookAccountPerUserInstallFailure {
+			perUserSkipped[key] = true
+		}
+	}
+	dataDir := ""
+	if cfg != nil {
+		dataDir = cfg.DataDir
+	}
+	perUserInstalls := newEnterpriseHookPerUserInstallPass(dataDir)
 	for _, row := range rows {
 		if !row.OK || strings.TrimSpace(row.SID) == "" || strings.TrimSpace(row.UserHome) == "" {
 			continue
@@ -1061,6 +1078,14 @@ func enterpriseHookStandalonePlatformFinish(ctx context.Context, stderr io.Write
 		}
 		if _, ok := users[key]; ok {
 			continue
+		}
+		if perUserSkipped[key] {
+			continue
+		}
+		if !rowAccounts[key] {
+			if skip, _ := perUserInstalls.classify(enterprisehooks.ManifestTarget{}, profile.UserHome, profile.SID, false); skip {
+				continue
+			}
 		}
 		users[key] = &user{
 			creds:   enterprisehooks.TargetCredentials{UserHome: profile.UserHome, UID: -1, GID: -1, SID: profile.SID},
