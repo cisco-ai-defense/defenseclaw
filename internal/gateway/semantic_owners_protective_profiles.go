@@ -221,7 +221,8 @@ func hasArgPrefixFold(argv []string, prefix string) bool {
 
 func sqlUnboundedDeletePrerequisite(facts actionfacts.Facts) bool {
 	for _, mutation := range actionfacts.ExactSQLMutations(facts) {
-		if mutation.Operation == actionfacts.SQLMutationDeleteUnbounded {
+		if mutation.Operation == actionfacts.SQLMutationDeleteUnbounded ||
+			mutation.Operation == actionfacts.SQLMutationUpdateUnbounded {
 			return true
 		}
 	}

@@ -194,3 +194,14 @@ func TestPostgreSQLCopyProgramIdentityDigestIsExact(t *testing.T) {
 		t.Fatalf("digest exactness equality=%t mismatch=%t", first == same, first != different)
 	}
 }
+
+
+func TestPostgreSQLCopyProgramsPSQLCLI(t *testing.T) {
+	facts := Analyze(Input{
+		Tool: "shell",
+		Command: `psql -d production -c "COPY audit.events FROM PROGRAM 'printf data';"`,
+	})
+	if _, ok := ExactPostgreSQLCopyProgram(facts); !ok {
+		t.Fatalf("expected psql CLI COPY PROGRAM fact, got %#v", facts.PostgreSQLCopyPrograms)
+	}
+}

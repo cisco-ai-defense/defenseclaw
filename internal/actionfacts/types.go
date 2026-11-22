@@ -240,6 +240,9 @@ type Facts struct {
 	// boundary. The projection exists only to support a bounded same-function,
 	// same-connection chain after a successful create result.
 	SQLCommandUDFOperations []SQLCommandUDFOperationFact `json:"-"`
+	// SQLFacts contains bounded syntactic facts from one authenticated SQL source.
+	// It never stores SQL literals or connection credentials.
+	SQLFacts []SQLFact `json:"-"`
 	// SQLMutations contains only exact destructive mutation classes and
 	// domain-separated SHA-256 identity digests. SQL text, connection strings,
 	// usernames, passwords, and raw database/object names are discarded before
@@ -879,11 +882,21 @@ type DirectoryCredentialAcquisitionFact struct {
 	Operation DirectoryCredentialAcquisition
 }
 
+// SQLFact contains the bounded, value-free syntactic facts of one SQL input.
+type SQLFact struct {
+	Verbs []string
+	Tables []string
+	Functions []string
+	Database string
+	StatementCount int
+}
+
 // SQLMutationOperation is the closed destructive SQL operation vocabulary.
 type SQLMutationOperation string
 
 const (
 	SQLMutationDeleteUnbounded SQLMutationOperation = "delete_unbounded"
+	SQLMutationUpdateUnbounded SQLMutationOperation = "update_unbounded"
 	SQLMutationTruncate        SQLMutationOperation = "truncate"
 	SQLMutationDropTable       SQLMutationOperation = "drop_table"
 	SQLMutationDropSchema      SQLMutationOperation = "drop_schema"

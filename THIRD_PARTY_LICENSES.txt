@@ -16,7 +16,9 @@ API definitions vendored for the Linux sensor helper:
     from them; not a go.mod dependency)
   - github.com/denoland/clawpatrol at commit 0e6674c (MIT): the Kubernetes
     API path and HTTP verb decomposition adapted in
-    internal/actionfacts/kube_request.go; no code is imported or vendored
+    internal/actionfacts/kube_request.go, and the design reference (read
+    only) for the bounded SQL scanner in internal/actionfacts/sql_ast.go; no
+    code is imported or vendored
 
 It is a scoped attribution artifact for those dependency additions, not an
 exhaustive inventory of every dependency in every DefenseClaw artifact.
@@ -868,6 +870,8 @@ github.com/denoland/clawpatrol 0e6674c (MIT)
 
 Adapted (not imported) in internal/actionfacts/kube_request.go from
 internal/config/plugins/facets/k8s/k8s.go (parsePath, verbFromMethod).
+Reviewed only, as the SQL parser design reference for
+internal/actionfacts/sql_ast.go (no source code copied or imported).
 Upstream file: https://github.com/denoland/clawpatrol/blob/0e6674c/LICENSE.md
 Upstream LICENSE.md SHA-256:
   3dd2616f96c71e3b5aafecbce0b3210e37327079a32a3a62f63f7b4a36433d8d

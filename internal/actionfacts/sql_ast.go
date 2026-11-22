@@ -1,0 +1,489 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+// SPDX-License-Identifier: Apache-2.0
+
+package actionfacts
+
+import (
+	"strings"
+	"unicode"
+)
+
+const (
+	maxSQLASTBytes      = 64 << 10
+	maxSQLASTTokens     = 16384
+	maxSQLASTStatements = 256
+	maxSQLASTDepth      = 4
+)
+
+type sqlASTTokenKind uint8
+
+const (
+	sqlASTWord sqlASTTokenKind = iota
+	sqlASTIdentifier
+	sqlASTString
+	sqlASTPunctuation
+)
+
+type sqlASTToken struct {
+	text string
+	kind sqlASTTokenKind
+}
+
+type sqlASTMutation struct {
+	operation SQLMutationOperation
+	scope     SQLMutationScope
+	object    string
+}
+
+type sqlASTResult struct {
+	tokens         []sqlASTToken
+	mutations      []sqlASTMutation
+	verbs          []string
+	tables         []string
+	functions      []string
+	statementCount int
+	unknown        bool
+}
+
+// parseSQLAST extracts bounded, value-free SQL facts. It recognizes lexical
+// structure rather than validating a dialect grammar; unknown syntax is kept
+// unknown so callers can retain the existing verdict.
+func parseSQLAST(query string) sqlASTResult {
+	result := sqlASTResult{}
+	parseSQLASTInto(query, 0, &result)
+	return result
+}
+
+func parseSQLASTInto(query string, depth int, result *sqlASTResult) {
+	if depth > maxSQLASTDepth || len(query) > maxSQLASTBytes {
+		result.unknown = true
+		return
+	}
+	tokens, statements, ok := lexSQLAST(query)
+	if !ok {
+		result.unknown = true
+		return
+	}
+	if depth == 0 {
+		result.statementCount += statements
+	}
+	if result.statementCount > maxSQLASTStatements {
+		result.unknown = true
+		return
+	}
+	result.tokens = append(result.tokens, tokens...)
+	result.mutations = append(result.mutations, extractSQLASTMutations(tokens)...)
+	if len(result.tokens) > maxSQLASTTokens {
+		result.unknown = true
+		return
+	}
+	for _, token := range tokens {
+		if token.kind == sqlASTString {
+			continue
+		}
+		if token.kind == sqlASTWord || token.kind == sqlASTIdentifier {
+			word := strings.ToUpper(token.text)
+			if isSQLASTVerb(word) {
+				result.verbs = appendUniqueSQL(result.verbs, strings.ToLower(word))
+			}
+		}
+	}
+	for i, token := range tokens {
+		if token.kind == sqlASTWord || token.kind == sqlASTIdentifier {
+			word := strings.ToUpper(token.text)
+			if isSQLASTTableIntroducer(word) && i+1 < len(tokens) {
+				next := tokens[i+1]
+				if next.kind == sqlASTWord || next.kind == sqlASTIdentifier {
+					if !isSQLASTControlWord(strings.ToUpper(next.text)) {
+						result.tables = appendUniqueSQL(result.tables, strings.ToLower(next.text))
+					}
+				}
+			}
+			if i+1 < len(tokens) && tokens[i+1].text == "(" &&
+				isSQLASTIdentifierStart(token.text) && !isSQLASTControlWord(word) {
+				result.functions = appendUniqueSQL(result.functions, strings.ToLower(token.text))
+			}
+			// Recurse only through a literal directly following DO or EXECUTE.
+			if (word == "DO" || word == "EXECUTE") && i+1 < len(tokens) &&
+				tokens[i+1].kind == sqlASTString {
+				parseSQLASTInto(tokens[i+1].text, depth+1, result)
+			}
+		}
+	}
+	if len(result.verbs) > maxSQLASTTokens || len(result.tables) > maxSQLASTTokens ||
+		len(result.functions) > maxSQLASTTokens {
+		result.unknown = true
+	}
+}
+
+func lexSQLAST(source string) ([]sqlASTToken, int, bool) {
+	tokens := make([]sqlASTToken, 0, min(len(source)/4, 256))
+	statements := 0
+	parenDepth := 0
+	statementTokenStart := 0
+	for i := 0; i < len(source); {
+		c := source[i]
+		if c == ' ' || c == '\t' || c == '\r' || c == '\n' {
+			i++
+			continue
+		}
+		if c == '-' && i+1 < len(source) && source[i+1] == '-' {
+			i += 2
+			for i < len(source) && source[i] != '\n' && source[i] != '\r' {
+				i++
+			}
+			continue
+		}
+		if c == '/' && i+1 < len(source) && source[i+1] == '*' {
+			i += 2
+			depth := 1
+			for i < len(source) && depth > 0 {
+				if i+1 < len(source) && source[i] == '/' && source[i+1] == '*' {
+					depth++
+					i += 2
+				} else if i+1 < len(source) && source[i] == '*' && source[i+1] == '/' {
+					depth--
+					i += 2
+				} else {
+					i++
+				}
+			}
+			if depth != 0 {
+				return nil, 0, false
+			}
+			continue
+		}
+		if c == '$' {
+			endTag := i + 1
+			for endTag < len(source) && (source[endTag] == '_' ||
+				source[endTag] >= 'a' && source[endTag] <= 'z' ||
+				source[endTag] >= 'A' && source[endTag] <= 'Z' ||
+				source[endTag] >= '0' && source[endTag] <= '9') {
+				endTag++
+			}
+			if endTag < len(source) && source[endTag] == '$' {
+				tag := source[i : endTag+1]
+				end := strings.Index(source[endTag+1:], tag)
+				if end < 0 {
+					return nil, 0, false
+				}
+				body := source[endTag+1 : endTag+1+end]
+				tokens = append(tokens, sqlASTToken{text: body, kind: sqlASTString})
+				i = endTag + 1 + end + len(tag)
+				continue
+			}
+		}
+		if c == '\'' {
+			var value strings.Builder
+			i++
+			closed := false
+			for i < len(source) {
+				if source[i] == '\'' {
+					if i+1 < len(source) && source[i+1] == '\'' {
+						value.WriteByte('\'')
+						i += 2
+						continue
+					}
+					i++
+					closed = true
+					break
+				}
+				if source[i] == '\\' && i+1 < len(source) {
+					i++
+				}
+				value.WriteByte(source[i])
+				i++
+			}
+			if !closed {
+				return nil, 0, false
+			}
+			tokens = append(tokens, sqlASTToken{text: value.String(), kind: sqlASTString})
+			continue
+		}
+		if c == '"' || c == '`' || c == '[' {
+			close := c
+			if c == '[' {
+				close = ']'
+			}
+			var value strings.Builder
+			i++
+			closed := false
+			for i < len(source) {
+				if source[i] == close {
+					if i+1 < len(source) && source[i+1] == close && close != ']' {
+						value.WriteByte(close)
+						i += 2
+						continue
+					}
+					i++
+					closed = true
+					break
+				}
+				value.WriteByte(source[i])
+				i++
+			}
+			if !closed {
+				return nil, 0, false
+			}
+			tokens = append(tokens, sqlASTToken{text: value.String(), kind: sqlASTIdentifier})
+			continue
+		}
+		if c == ';' {
+			if parenDepth == 0 {
+				if len(tokens) > statementTokenStart {
+					statements++
+				}
+				tokens = append(tokens, sqlASTToken{text: ";", kind: sqlASTPunctuation})
+				statementTokenStart = len(tokens)
+			}
+			i++
+			continue
+		}
+		if c == '(' {
+			parenDepth++
+		}
+		if c == ')' {
+			parenDepth--
+			if parenDepth < 0 {
+				return nil, 0, false
+			}
+		}
+		if isSQLASTWordByte(c) {
+			start := i
+			i++
+			for i < len(source) && isSQLASTWordByte(source[i]) {
+				i++
+			}
+			tokens = append(tokens, sqlASTToken{text: source[start:i], kind: sqlASTWord})
+		} else {
+			tokens = append(tokens, sqlASTToken{text: string(c), kind: sqlASTPunctuation})
+			i++
+		}
+		if len(tokens) > maxSQLASTTokens {
+			return nil, 0, false
+		}
+	}
+	if parenDepth != 0 {
+		return nil, 0, false
+	}
+	if len(tokens) > statementTokenStart {
+		statements++
+	}
+	return tokens, statements, true
+}
+
+func isSQLASTWordByte(c byte) bool {
+	return c == '_' || c == '$' || c >= '0' && c <= '9' ||
+		c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= 0x80
+}
+func isSQLASTIdentifierStart(s string) bool {
+	if s == "" {
+		return false
+	}
+	r := []rune(s)[0]
+	return r == '_' || unicode.IsLetter(r)
+}
+func isSQLASTVerb(s string) bool {
+	switch s {
+	case "SELECT", "INSERT", "UPDATE", "DELETE", "MERGE", "TRUNCATE", "DROP",
+		"ALTER", "GRANT", "REVOKE", "CREATE", "COPY", "CALL", "DO", "EXECUTE",
+		"BEGIN", "COMMIT", "ROLLBACK":
+		return true
+	default:
+		return false
+	}
+}
+func isSQLASTTableIntroducer(s string) bool {
+	switch s {
+	case "FROM", "JOIN", "INTO", "UPDATE", "TABLE", "SCHEMA", "DATABASE", "REFERENCES", "ON":
+		return true
+	default:
+		return false
+	}
+}
+func isSQLASTControlWord(s string) bool {
+	switch s {
+	case "SELECT", "ONLY", "IF", "NOT", "EXISTS", "LATERAL", "UNNEST", "VALUES",
+		"SET", "ROLE", "USER", "DATABASE", "SCHEMA", "TABLE", "INDEX", "VIEW",
+		"TO", "FROM", "WITH", "AS", "PROGRAM":
+		return true
+	default:
+		return false
+	}
+}
+func appendUniqueSQL(values []string, value string) []string {
+	for _, existing := range values {
+		if existing == value {
+			return values
+		}
+	}
+	return append(values, value)
+}
+
+func projectSQLAnalysis(input Input, facts Facts) ([]SQLMutationFact, []SQLFact) {
+	inputs := exactSQLMutationInputs(input, facts)
+	mutations := make([]SQLMutationFact, 0, len(inputs))
+	sqlFacts := make([]SQLFact, 0, len(inputs))
+	for _, candidate := range inputs {
+		parsed := parseSQLAST(candidate.query)
+		if !parsed.unknown {
+			database := candidate.databaseIdentity
+			if !exactSQLIdentity(database) || unresolvedSQLMutationValue(database) {
+				database = ""
+			}
+			sqlFacts = append(sqlFacts, SQLFact{
+				Verbs:          append([]string(nil), parsed.verbs...),
+				Tables:         append([]string(nil), parsed.tables...),
+				Functions:      append([]string(nil), parsed.functions...),
+				Database:       database,
+				StatementCount: parsed.statementCount,
+			})
+		}
+
+		operation, scope, object, ok := exactSQLMutation(candidate.engine, candidate.query)
+		if candidate.engine == "sqlite" {
+			object, ok = exactSQLiteUnboundedDelete(candidate.query)
+			operation = SQLMutationDeleteUnbounded
+			scope = SQLMutationScopeTable
+		} else if !ok && !parsed.unknown {
+			operation, scope, object, ok = exactSQLASTMutationParsed(candidate.engine, candidate.query, parsed)
+		}
+		if !ok {
+			continue
+		}
+		if fact, valid := projectSQLMutationFact(candidate, operation, scope, object); valid {
+			mutations = append(mutations, fact)
+		}
+	}
+	return mutations, sqlFacts
+}
+
+func exactSQLASTMutationParsed(engine, query string, parsed sqlASTResult) (SQLMutationOperation, SQLMutationScope, string, bool) {
+	if engine == "sqlite" || len(query) == 0 || len(query) > maxSQLASTBytes ||
+		strings.Contains(query, "--") || strings.Contains(query, "/*") ||
+		strings.Contains(query, "*/") || strings.Contains(query, "#") ||
+		parsed.unknown || parsed.statementCount != 1 || len(parsed.mutations) == 0 {
+		return "", "", "", false
+	}
+	upper := strings.ToUpper(strings.TrimSpace(query))
+	if strings.HasPrefix(upper, "BEGIN") || strings.HasPrefix(upper, "START TRANSACTION") {
+		return "", "", "", false
+	}
+	if strings.HasPrefix(upper, "EXPLAIN ") {
+		if engine != "postgresql" || !strings.HasPrefix(upper, "EXPLAIN ANALYZE ") ||
+			parsed.mutations[0].operation != SQLMutationDeleteUnbounded {
+			return "", "", "", false
+		}
+	}
+	mutation := parsed.mutations[0]
+	object := strings.ToLower(mutation.object)
+	if !exactSQLQualifiedIdentity(object) {
+		return "", "", "", false
+	}
+	return mutation.operation, mutation.scope, object, true
+}
+
+func extractSQLASTMutations(tokens []sqlASTToken) []sqlASTMutation {
+	var result []sqlASTMutation
+	for start := 0; start < len(tokens); {
+		end := start
+		for end < len(tokens) && tokens[end].text != ";" {
+			end++
+		}
+		statement := tokens[start:end]
+		start = end + 1
+		if len(statement) == 0 {
+			continue
+		}
+		if strings.EqualFold(statement[0].text, "EXPLAIN") &&
+			(len(statement) < 2 || !strings.EqualFold(statement[1].text, "ANALYZE")) {
+			continue
+		}
+		for i := 0; i < len(statement); i++ {
+			if statement[i].kind == sqlASTString {
+				continue
+			}
+			word := strings.ToUpper(statement[i].text)
+			switch word {
+			case "DROP":
+				if i+2 >= len(statement) {
+					continue
+				}
+				kind := strings.ToUpper(statement[i+1].text)
+				var scope SQLMutationScope
+				var op SQLMutationOperation
+				switch kind {
+				case "TABLE":
+					scope, op = SQLMutationScopeTable, SQLMutationDropTable
+				case "SCHEMA":
+					scope, op = SQLMutationScopeSchema, SQLMutationDropSchema
+				case "DATABASE":
+					scope, op = SQLMutationScopeDatabase, SQLMutationDropDatabase
+				default:
+					continue
+				}
+				objectIndex := i + 2
+				if objectIndex+1 < len(statement) && strings.EqualFold(statement[objectIndex].text, "IF") &&
+					strings.EqualFold(statement[objectIndex+1].text, "EXISTS") {
+					objectIndex += 2
+				}
+				if object, ok := sqlASTQualifiedObject(statement, objectIndex); ok {
+					result = append(result, sqlASTMutation{operation: op, scope: scope, object: object})
+				}
+			case "TRUNCATE":
+				objectIndex := i + 1
+				if objectIndex < len(statement) && strings.EqualFold(statement[objectIndex].text, "TABLE") {
+					objectIndex++
+				}
+				if object, ok := sqlASTQualifiedObject(statement, objectIndex); ok {
+					result = append(result, sqlASTMutation{operation: SQLMutationTruncate, scope: SQLMutationScopeTable, object: object})
+				}
+			case "DELETE":
+				if i+2 >= len(statement) || !strings.EqualFold(statement[i+1].text, "FROM") ||
+					sqlASTHasWord(statement[i+2:], "WHERE") {
+					continue
+				}
+				if object, ok := sqlASTQualifiedObject(statement, i+2); ok {
+					result = append(result, sqlASTMutation{operation: SQLMutationDeleteUnbounded, scope: SQLMutationScopeTable, object: object})
+				}
+			case "UPDATE":
+				if i+1 >= len(statement) || sqlASTHasWord(statement[i+1:], "WHERE") {
+					continue
+				}
+				if object, ok := sqlASTQualifiedObject(statement, i+1); ok &&
+					sqlASTHasWord(statement[i+1:], "SET") {
+					result = append(result, sqlASTMutation{operation: SQLMutationUpdateUnbounded, scope: SQLMutationScopeTable, object: object})
+				}
+			}
+		}
+	}
+	return result
+}
+
+func sqlASTHasWord(tokens []sqlASTToken, word string) bool {
+	for _, token := range tokens {
+		if token.kind != sqlASTString && strings.EqualFold(token.text, word) {
+			return true
+		}
+	}
+	return false
+}
+
+func sqlASTQualifiedObject(tokens []sqlASTToken, start int) (string, bool) {
+	if start >= len(tokens) {
+		return "", false
+	}
+	if tokens[start].kind != sqlASTWord && tokens[start].kind != sqlASTIdentifier {
+		return "", false
+	}
+	var object strings.Builder
+	object.WriteString(tokens[start].text)
+	for i := start + 1; i+1 < len(tokens) && tokens[i].text == "."; i += 2 {
+		if tokens[i+1].kind != sqlASTWord && tokens[i+1].kind != sqlASTIdentifier {
+			return "", false
+		}
+		object.WriteByte('.')
+		object.WriteString(tokens[i+1].text)
+	}
+	return object.String(), true
+}

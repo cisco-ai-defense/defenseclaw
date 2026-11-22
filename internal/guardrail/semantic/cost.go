@@ -22,6 +22,11 @@ import (
 	"github.com/google/cel-go/checker"
 )
 
+const (
+	maxSQLFacts      = 16
+	maxSQLFactValues = 4096
+)
+
 type sizeBound struct {
 	path string
 	max  uint64
@@ -33,6 +38,14 @@ var semanticSizeBounds = [...]sizeBound{
 	{"f.active_home", maxScalarBytes},
 	{"f.parse.issues", maxIssues},
 	{"f.commands", maxCommands},
+	{"f.sql_facts", maxSQLFacts},
+	{"f.sql_facts.@items.verbs", maxSQLFactValues},
+	{"f.sql_facts.@items.verbs.@items", maxScalarBytes},
+	{"f.sql_facts.@items.tables", maxSQLFactValues},
+	{"f.sql_facts.@items.tables.@items", maxScalarBytes},
+	{"f.sql_facts.@items.functions", maxSQLFactValues},
+	{"f.sql_facts.@items.functions.@items", maxScalarBytes},
+	{"f.sql_facts.@items.database", maxScalarBytes},
 	{"f.commands.@items.executable", maxScalarBytes},
 	{"f.commands.@items.program", maxScalarBytes},
 	{"f.commands.@items.argv", maxArgvItems},

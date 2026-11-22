@@ -36,6 +36,17 @@ message Facts {
   // kube is every Kubernetes API request of the call, from kubectl argv and
   // from curl or wget URLs addressed to an apiserver (GAP-1824).
   repeated KubeFact kube = 12;
+  // sql_facts is a bounded syntax summary of each SQL text of the call (GAP-1823).
+  repeated SQLFact sql_facts = 13;
+}
+
+// SQLFact is a bounded syntax summary. Literal values and credentials are omitted.
+message SQLFact {
+  repeated string verbs = 1;
+  repeated string tables = 2;
+  repeated string functions = 3;
+  string database = 4;
+  int64 statement_count = 5;
 }
 
 // EffectFact is one effect of the call: what it reads, writes, deletes,
