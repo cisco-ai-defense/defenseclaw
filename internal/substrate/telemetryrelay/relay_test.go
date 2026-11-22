@@ -47,7 +47,7 @@ func TestPosterKeepsOnlyTheNewestGaugeValue(t *testing.T) {
 func TestEachPosterMethodTakesOnlyItsKinds(t *testing.T) {
 	s := &Store{}
 	all := PostRequest{Records: []Record{
-		{Kind: KindEgress, Host: "h"}, {Kind: KindCount, Metric: MetricIdleSuspends, Value: 1},
+		{Kind: KindEgress, Host: "h", Decision: "allow"}, {Kind: KindCount, Metric: MetricIdleSuspends, Value: 1},
 		{Kind: KindLifecycle, Actor: "forged"}, {Kind: KindGauge, Metric: MetricUnattestedTemplates, Value: 2},
 	}}
 	_, _ = s.PostEgress(context.Background(), all)
