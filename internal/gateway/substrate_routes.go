@@ -132,7 +132,7 @@ func substrateCallerFrom(ctx context.Context) (substrateCaller, bool) {
 
 // ownerOf is the registry owner key of a person.
 func ownerOf(p identity.Person) registry.Person {
-	return registry.Person{Kind: p.Kind, Issuer: p.Issuer, Subject: p.Subject, Principal: p.Principal, Groups: p.Groups}
+	return registry.Person{Kind: p.Kind, Issuer: p.Issuer, Subject: p.Subject, Principal: p.Principal, EmailUnverified: p.EmailUnverified, Groups: p.Groups}
 }
 
 func (a *APIServer) newSubstrateAdminHandler(st *substrateState) http.Handler {

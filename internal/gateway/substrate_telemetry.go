@@ -98,6 +98,9 @@ func substrateHookAuditExtra(ctx context.Context) map[string]string {
 			extra[k] = v
 		}
 	}
+	if a := reg.Person.Assurance(); a != "" {
+		extra["substrate_person_assurance"] = a
+	}
 	if reg.Attributed {
 		extra["substrate_person"], extra["substrate_person_kind"] = "", "atespace"
 	}

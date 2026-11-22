@@ -47,8 +47,12 @@ type Person struct {
 	// username), "" when the token carries none. An email the issuer marks
 	// unverified (email_verified false) is never the principal.
 	Principal string
-	Groups    []string
-	Expires   time.Time
+	// EmailUnverified is set when the token carried an email the issuer
+	// marked unverified (email_verified false): the sign-in is lower
+	// assurance, and policy explain and the audit rows say so (GAP-0640).
+	EmailUnverified bool
+	Groups          []string
+	Expires         time.Time
 }
 
 // ID is the stable owner key of a person: issuer and subject.
@@ -263,6 +267,7 @@ func (v *PersonVerifier) Verify(ctx context.Context, token string) (Person, erro
 		// The issuer says it has not checked the address (a local user
 		// typed it in): it is not a join key a profile or an audit row may
 		// trust, so the UPN or user name stands in (GAP-0390).
+		p.EmailUnverified = strings.TrimSpace(email) != ""
 		email = ""
 	}
 	for _, cand := range []string{email, c.UPN, c.Preferred} {

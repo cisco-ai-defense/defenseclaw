@@ -48,12 +48,29 @@ import (
 // workload. Attributed registrations (actors DefenseClaw did not create)
 // have none and name their atespace instead.
 type Person struct {
-	Kind      string   `json:"kind"`
-	Issuer    string   `json:"issuer"`
-	Subject   string   `json:"subject"`
-	Principal string   `json:"principal,omitempty"`
-	Groups    []string `json:"groups,omitempty"`
+	Kind      string `json:"kind"`
+	Issuer    string `json:"issuer"`
+	Subject   string `json:"subject"`
+	Principal string `json:"principal,omitempty"`
+	// EmailUnverified: the sign-in carried an email its issuer marked
+	// unverified, so it was not used as the principal (GAP-0640). Shown as
+	// lower assurance.
+	EmailUnverified bool     `json:"email_unverified,omitempty"`
+	Groups          []string `json:"groups,omitempty"`
 }
+
+// Assurance names the person's sign-in assurance when it is lower than a
+// verified one ("email_unverified"), "" otherwise.
+func (p Person) Assurance() string {
+	if p.EmailUnverified {
+		return AssuranceEmailUnverified
+	}
+	return ""
+}
+
+// AssuranceEmailUnverified is the assurance mark of a sign-in whose email
+// the issuer did not verify.
+const AssuranceEmailUnverified = "email_unverified"
 
 // ID is the owner key (issuer#subject), "" for no person.
 func (p Person) ID() string {
