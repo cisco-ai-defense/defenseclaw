@@ -49,8 +49,11 @@ const (
 	maxSkillScanBytes   = 256 << 20
 	maxSkillDepth       = 12
 	maxSkillLocation    = 512
-	maxSkillManifest    = 64 << 10 // the part skillAuthor reads
+	maxSkillManifest    = 64 << 10 // the part parseSkillFrontMatter reads
 	maxSkillAuthorBytes = 128
+	// maxSkillDescriptionBytes matches defenseclaw.inventory.item.description.
+	maxSkillDescriptionBytes = 512
+	maxSkillVersionBytes     = 64
 )
 
 // maxSkillManifestFolders bounds the hash-to-folder index SkillManifest
@@ -68,13 +71,18 @@ type AISkillFacts struct {
 	// Location is the folder below the user's home ("~/..."); the absolute
 	// path never leaves the endpoint.
 	Location string `json:"location,omitempty"`
-	// Author is the skill's own unverified SKILL.md claim.
-	Author string         `json:"author,omitempty"`
-	Plugin *AISkillPlugin `json:"plugin,omitempty"`
+	// Author, Description and Version are the skill's own unverified
+	// SKILL.md claims, one bounded line each.
+	Author      string         `json:"author,omitempty"`
+	Description string         `json:"description,omitempty"`
+	Version     string         `json:"version,omitempty"`
+	Plugin      *AISkillPlugin `json:"plugin,omitempty"`
 
 	// ManifestHash is the SHA-256 of the folder's SKILL.md; SkillManifest
-	// reads that file again for a managed publish.
+	// reads that file again for a managed publish. ManifestSize is its size
+	// in bytes.
 	ManifestHash string `json:"manifest_hash,omitempty"`
+	ManifestSize int64  `json:"manifest_size,omitempty"`
 }
 
 func (s *ContinuousDiscoveryService) resetSkillFacts() {
@@ -95,12 +103,14 @@ func (s *ContinuousDiscoveryService) skillFacts(path string, bundled bool) *AISk
 	}
 	hash, status, manifest, read := hashSkillFolder(path, limit)
 	location, inHome := s.skillLocation(path)
+	front := parseSkillFrontMatter(manifest)
 	facts = AISkillFacts{
-		ContentHash: hash, ContentStatus: status, Scope: SkillScopeUser,
-		Location: location, Author: skillAuthor(manifest),
+		ContentHash: hash, ContentStatus: status, Scope: SkillScopeUser, Location: location,
+		Author: front.author, Description: front.description, Version: front.version,
 	}
 	if status == SkillContentOK && manifest != nil {
 		facts.ManifestHash = skillManifestHash(manifest)
+		facts.ManifestSize = int64(len(manifest))
 	}
 	switch {
 	case bundled:
@@ -262,17 +272,25 @@ func hashSkillFolder(root string, limit int64) (hash, status string, manifest []
 	return "sha256:" + hex.EncodeToString(digest.Sum(nil)), SkillContentOK, manifest, total
 }
 
-// skillAuthor returns the author a SKILL.md frontmatter declares at the top
-// level or under metadata.
-func skillAuthor(manifest []byte) string {
+// skillFrontMatter is what a SKILL.md frontmatter declares about its skill.
+type skillFrontMatter struct{ author, description, version string }
+
+// parseSkillFrontMatter reads the author and version a SKILL.md frontmatter
+// declares at the top level or under metadata, and its top-level
+// description. A block (| or >) or wrapped value is folded into one line;
+// the first declaration of a key wins, and a value that is not printable
+// text is left out.
+func parseSkillFrontMatter(manifest []byte) skillFrontMatter {
+	var out skillFrontMatter
 	manifest = manifest[:min(len(manifest), maxSkillManifest)]
 	lines := strings.Split(strings.TrimPrefix(string(manifest), "\ufeff"), "\n")
 	if len(lines) == 0 || strings.TrimSpace(lines[0]) != "---" {
-		return ""
+		return out
 	}
+	seen := map[string]bool{}
 	inMetadata := false
-	for _, line := range lines[1:] {
-		line = strings.TrimRight(line, "\r")
+	for i := 1; i < len(lines); i++ {
+		line := strings.TrimRight(lines[i], "\r")
 		trimmed := strings.TrimSpace(line)
 		if trimmed == "---" || trimmed == "..." {
 			break
@@ -282,28 +300,123 @@ func skillAuthor(manifest []byte) string {
 			continue
 		}
 		value = strings.TrimSpace(value)
-		indented := line[0] == ' ' || line[0] == '\t'
-		if !indented {
+		indent := len(line) - len(strings.TrimLeft(line, " \t"))
+		if indent == 0 {
 			inMetadata = key == "metadata" && value == ""
 		}
-		if key != "author" || (indented && !inMetadata) {
+		var field *string
+		limit := 0
+		switch {
+		case key == "author" && (indent == 0 || inMetadata):
+			field, limit = &out.author, maxSkillAuthorBytes
+		case key == "version" && (indent == 0 || inMetadata):
+			field, limit = &out.version, maxSkillVersionBytes
+		case key == "description" && indent == 0:
+			field, limit = &out.description, maxSkillDescriptionBytes
+		default:
 			continue
 		}
-		if len(value) >= 2 && (value[0] == '"' || value[0] == '\'') && value[len(value)-1] == value[0] {
-			value = value[1 : len(value)-1]
-		} else if comment := strings.Index(value, " #"); comment >= 0 {
-			value = strings.TrimSpace(value[:comment])
+		block := isYAMLBlockIndicator(value)
+		inner, quoted := closedQuotedValue(value)
+		switch {
+		case quoted:
+			value = inner
+		case block:
+			value = ""
+		case value == "" || (value[0] != '"' && value[0] != '\''):
+			if comment := strings.Index(value, " #"); comment >= 0 {
+				value = strings.TrimSpace(value[:comment])
+			}
 		}
-		if !utf8.ValidString(value) || containsUnicodeControl(value) {
-			return ""
+		// A block scalar, or a plain one wrapped onto more-indented lines,
+		// continues until a line indented no deeper than its key.
+		if block || (!quoted && value != "") {
+			var folded strings.Builder
+			for i+1 < len(lines) {
+				next := strings.TrimRight(lines[i+1], "\r")
+				nextTrimmed := strings.TrimSpace(next)
+				if nextTrimmed == "" {
+					if !block {
+						break
+					}
+					i++
+					continue
+				}
+				if len(next)-len(strings.TrimLeft(next, " \t")) <= indent || nextTrimmed == "---" || nextTrimmed == "..." {
+					break
+				}
+				if folded.Len() == 0 {
+					folded.WriteString(value)
+				}
+				folded.WriteByte(' ')
+				folded.WriteString(nextTrimmed)
+				i++
+			}
+			if folded.Len() > 0 {
+				value = folded.String()
+			}
+			// A quoted value may wrap too.
+			if !block && len(value) >= 2 && (value[0] == '"' || value[0] == '\'') && value[len(value)-1] == value[0] {
+				value = value[1 : len(value)-1]
+			}
 		}
-		for len(value) > maxSkillAuthorBytes {
-			_, size := utf8.DecodeLastRuneInString(value)
-			value = value[:len(value)-size]
+		if seen[key] {
+			continue
 		}
-		return value
+		seen[key] = true
+		*field = skillFrontMatterText(value, limit)
 	}
-	return ""
+	return out
+}
+
+// closedQuotedValue is the text of a value quoted and closed on its own line,
+// before any trailing comment.
+func closedQuotedValue(value string) (string, bool) {
+	if len(value) < 2 || (value[0] != '"' && value[0] != '\'') {
+		return "", false
+	}
+	end := strings.IndexByte(value[1:], value[0])
+	if end < 0 {
+		return "", false
+	}
+	if rest := strings.TrimSpace(value[end+2:]); rest != "" && !strings.HasPrefix(rest, "#") {
+		return "", false
+	}
+	return value[1 : end+1], true
+}
+
+// isYAMLBlockIndicator reports a literal or folded block scalar header such
+// as |, >-, |+ or >2.
+func isYAMLBlockIndicator(value string) bool {
+	if comment := strings.Index(value, " #"); comment >= 0 {
+		value = strings.TrimSpace(value[:comment])
+	}
+	if value == "" || (value[0] != '|' && value[0] != '>') || len(value) > 3 {
+		return false
+	}
+	for _, r := range value[1:] {
+		if r != '-' && r != '+' && (r < '1' || r > '9') {
+			return false
+		}
+	}
+	return true
+}
+
+// skillFrontMatterText is value as one line of at most limit bytes, or ""
+// when it holds anything but printable text.
+func skillFrontMatterText(value string, limit int) string {
+	if !utf8.ValidString(value) {
+		return ""
+	}
+	value = strings.Join(strings.Fields(value), " ")
+	if containsUnicodeControl(value) {
+		return ""
+	}
+	for len(value) > limit {
+		_, size := utf8.DecodeLastRuneInString(value)
+		value = value[:len(value)-size]
+	}
+	return strings.TrimSpace(value)
 }
 
 // skillLocation is path below the scanned home that holds it, as "~/rel"
@@ -346,8 +459,12 @@ func validateSkillFacts(facts AISkillFacts) error {
 	if facts.Location != "" && (!strings.HasPrefix(facts.Location, "~/") || !userScanText(facts.Location, maxSkillLocation)) {
 		return errors.New("skill location must be a printable home-relative path")
 	}
-	if !userScanText(facts.Author, maxSkillAuthorBytes) {
-		return errors.New("skill author must be short printable text")
+	if !userScanText(facts.Author, maxSkillAuthorBytes) || !userScanText(facts.Description, maxSkillDescriptionBytes) ||
+		!userScanText(facts.Version, maxSkillVersionBytes) {
+		return errors.New("skill author, description and version must be short printable text")
+	}
+	if facts.ManifestSize < 0 || facts.ManifestSize > maxSkillBytes || (facts.ManifestSize > 0 && facts.ManifestHash == "") {
+		return errors.New("skill manifest size must come with its manifest hash")
 	}
 	if facts.ManifestHash != "" && (facts.ContentStatus != SkillContentOK || !strings.HasPrefix(facts.ManifestHash, "sha256:") || !isSHA256Hash(facts.ManifestHash)) {
 		return errors.New("skill manifest hash must be a sha256 digest of an ok folder")
