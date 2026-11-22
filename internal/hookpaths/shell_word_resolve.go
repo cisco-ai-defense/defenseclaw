@@ -191,10 +191,18 @@ func resolveShellWord(word *syntax.Word, values actionValues, cwd string, opts s
 	hidden := actionGlobViewHidden(cwd, home)
 	userView := !hidden && actionProcessOwnsHome(home)
 	dots := func() bool { return opts.dotGlob || actionShellProfileMayDotglob(home) }
-	matches, complete, unseen := actionExpandGlobStar(OperandPath(pattern, cwd), base, hidden, userView, dots, opts.noCaseGlob, opts.globStar)
+	matches, complete, unseen, capped := actionExpandGlobWalk(OperandPath(pattern, cwd), base, hidden, userView, dots, opts.noCaseGlob, opts.globStar)
 	var truncated bounded.Truncated
 	candidates := bounded.NewCounter(&truncated, bounded.Paths, MaxResolvedCandidates)
 	switch {
+	case capped:
+		// A walk that read every folder it reached and stopped only at a
+		// counted bound is TRUNCATED, as a result past MaxResolvedCandidates
+		// is: the bound rule judges it, on the hook call
+		// (rel-1-0-10:GAP-1324).
+		cut := bounded.Of(bounded.Paths)
+		noteGlobCut(cut)
+		return resolvedWord{uncertain: wordUncertainTruncated, caps: cut}
 	case unseen || !complete:
 		return resolvedWord{uncertain: wordUncertainUnread}
 	case !candidates.TakeN(len(matches)):

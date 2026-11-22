@@ -1,0 +1,4 @@
+{"id":"GAP-1288","command":"sed -i -e 'w key[9]' ordinary/x","alias":"key[9]","member":"/home/alice/.ssh/authorized_keys","certainty":"maybe","reach":"R-NAME","basis":"inode_glob"}
+{"id":"GAP-1289","command":"dd of=./key[9]","alias":"key[9]","member":"/home/alice/.ssh/authorized_keys","certainty":"maybe","reach":"R-NAME","basis":"inode_glob"}
+{"id":"GAP-1317","command":"echo keya | xargs cp ordinary/x","alias":"keya","member":"/home/alice/.ssh/authorized_keys","certainty":"known","reach":"","basis":"inode"}
+{"id":"GAP-1318","command":"sed 's/a/b/w keya' ordinary/x","alias":"keya","member":"/home/alice/.ssh/authorized_keys","certainty":"known","reach":"","basis":"inode"}

@@ -308,7 +308,6 @@ func addSecretFlowResultValues(ctx context.Context, req agentHookRequest) {
 	if !bound.admit(call.Command) {
 		return
 	}
-	opts.Deadline = bound.deadline
 	res := effects.Extract(call, opts)
 	if !bound.alive() {
 		return

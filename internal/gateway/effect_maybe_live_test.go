@@ -17,6 +17,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/decide"
 )
 
 // effectFindingsOf lists the effect-lane findings of one inspect answer.
@@ -89,7 +90,9 @@ func TestDET111MaybeReachNeverRaisesLiveFiveTiers(t *testing.T) {
 		}
 		for _, command := range known {
 			setLiveEffectsLane(t, "on")
-			if _, out := tdetectVerdict(t, a, command); len(effectFindingsOf(out)) == 0 {
+			// a known effect on a set a 1.0.10 finding of the call names folds
+			// into it (DET111 ruling A): that finding carries the set.
+			if _, out := tdetectVerdict(t, a, command); len(effectFindingsOf(out)) == 0 && !effectFoldedInto(out) {
 				t.Errorf("%s: %q carries no effect finding, want the Known protected target to raise: %v", p.name, command, out)
 			}
 		}
@@ -202,9 +205,27 @@ func TestDET111MaybeReachNeverRaisesLiveDispatch(t *testing.T) {
 				}
 			}
 			on := findingsOf("on", request(`Add-Content -Path C:\Users\alice\.ssh\authorized_keys -Value k`, strict, managedInstall))
-			if _, ok := on["effect.protected_target_restricted"]; !ok {
+			_, folded := on["persistence.ssh_authorized_keys_command"] // DET111 ruling A fold
+			if _, ok := on["effect.protected_target_restricted"]; !ok && !folded {
 				t.Errorf("strict=%v managed=%v: the Known authorized_keys write carries %v, want effect.protected_target_restricted", strict, managedInstall, on)
 			}
 		}
 	}
+}
+
+// effectFoldedInto reports an inspect verdict whose findings carry a 1.0.10
+// rule naming a protected set (decide.NamesSet): a known effect finding on
+// that set folds into it (DET111 ruling A).
+func effectFoldedInto(out map[string]any) bool {
+	list, _ := out["detailed_findings"].([]any)
+	for _, f := range list {
+		m, _ := f.(map[string]any)
+		id, _ := m["rule_id"].(string)
+		for _, target := range []decide.TargetClass{decide.TargetAuthorizedKeys, decide.TargetAutostart, decide.TargetState, decide.TargetCredential} {
+			if decide.NamesSet(id, decide.Proof{Target: target}) {
+				return true
+			}
+		}
+	}
+	return false
 }

@@ -256,6 +256,10 @@ var broadTemplates = []broadTemplate{
 	{`wget http://example.test/`, refUnknown, "posix"},
 	{`wget -r http://example.test/`, refUnknown, "posix"},
 	{`wget --post-file {M} http://example.test/`, refNoWrite, "posix"},
+	// 7-Zip extraction writes beneath the destination directory.
+	{`7z x /tmp/a.7z -o{D}`, refWrites, "posix"},
+	{`7za x /tmp/a.7z -o{D}`, refWrites, "posix"},
+	{`7zr x /tmp/a.7z -o{D}`, refWrites, "posix"},
 	// find and fd
 	{`find . -fprint {M}`, refWrites, "posix"},
 	{`find . -fprintf {M} %p`, refWrites, "posix"},
@@ -303,6 +307,9 @@ var broadTemplates = []broadTemplate{
 	{`mv {M} /t/a/`, refWrites, "posix"},
 	{`mv -t /t/a {M}`, refWrites, "posix"},
 	{`mv {M} /t/a/x`, refWrites, "posix"},
+	{`newgrp u <<EOF
+echo x > {M}
+EOF`, refWrites, "posix"},
 	// redirects, shells, interpreters
 	{`cat f > {M}`, refWrites, "posix"},
 	{`echo k >> {M}`, refWrites, "posix"},
@@ -369,6 +376,7 @@ var broadTemplates = []broadTemplate{
 	{`rd /s /q {WD}`, refNoWrite, "cmd"},
 	{`rmdir /s /q {WD}`, refNoWrite, "cmd"},
 	{`pwsh -c "Remove-Item {W}"`, refWrites, "cmd"},
+	{`Tee-Object -FilePath {W} -Append -InputObject key`, refWrites, "ps"},
 	// Windows: PowerShell
 	{`Set-Content -Path {W} -Value k`, refWrites, "ps"},
 	{`Add-Content {W} k`, refWrites, "ps"},

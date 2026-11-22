@@ -85,7 +85,7 @@ func TestTicketRequestAsksInDefaultPerConnector(t *testing.T) {
 					"tool_input": map[string]any{"command": command},
 				})
 				key := "claudecode/" + mode
-				got[key], _, rules[key] = g0432Verdict(out)
+				got[key], _, rules[key] = gap0067Verdict(out)
 			}
 			body, _ := json.Marshal(map[string]any{
 				"hook_event_name": "PreToolUse", "session_id": fmt.Sprintf("g0067-codex-%s-%d", p.name, ci), "cwd": project,
@@ -104,7 +104,7 @@ func TestTicketRequestAsksInDefaultPerConnector(t *testing.T) {
 			if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
 				t.Fatal(err)
 			}
-			got["codex"], _, rules["codex"] = g0432Verdict(out)
+			got["codex"], _, rules["codex"] = gap0067Verdict(out)
 			got["inspect"], _ = gap0437Inspect(t, inspect, project, command)["action"].(string)
 			for key, action := range got {
 				t.Logf("ROW %s %d %s %s %v", p.name, ci, key, action, rules[key])
@@ -117,4 +117,19 @@ func TestTicketRequestAsksInDefaultPerConnector(t *testing.T) {
 			}
 		}
 	}
+}
+
+// gap0067Verdict is the action and rule ids of a hook answer.
+func gap0067Verdict(out map[string]any) (action, severity string, rules []string) {
+	action, _ = out["action"].(string)
+	if action == "" {
+		action = "allow"
+	}
+	severity, _ = out["severity"].(string)
+	if raw, ok := out["rule_ids"].([]any); ok {
+		for _, rule := range raw {
+			rules = append(rules, fmt.Sprint(rule))
+		}
+	}
+	return action, severity, rules
 }

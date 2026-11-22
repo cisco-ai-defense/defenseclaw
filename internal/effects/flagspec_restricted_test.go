@@ -17,7 +17,7 @@ import (
 // the siblings that shared a row with them.
 var restrictedSpecPrograms = map[string][]string{
 	"gnu": {"cp", "install", "mv", "ln", "rm", "unlink", "shred", "tee"},
-	"bsd": {"cp", "install", "mv", "ln", "rm", "unlink", "tee"},
+	"bsd": {"cp", "install", "mv", "ln", "rm", "unlink", "tee", "sed"},
 }
 
 type restrictedSpecFlag struct {

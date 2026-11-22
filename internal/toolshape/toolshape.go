@@ -110,6 +110,10 @@ type Effect struct {
 	Setting string     // setting: what the change does
 	Code    string     // exec: the code text (bounded)
 	Reason  string
+	// Whole marks the value of a path list read whole (pathList): another
+	// reading of the paths it joins, not one more path of the call, so a
+	// caller's path cap does not count it (rel-1-0-10:GAP-0646).
+	Whole bool
 }
 
 // Mapping is the reading of one call.
@@ -806,7 +810,7 @@ func (w *walker) str(key, val string) {
 			// Which reading the server applies is not known: a path whose name
 			// holds the separator is still judged whole.
 			if looksPath(val) {
-				w.path(kind, key, val)
+				w.wholePath(kind, key, val)
 			}
 			return
 		}
@@ -943,6 +947,14 @@ func (w *walker) path(kind Kind, key, val string) {
 		w.trunc.Hit(bounded.Bytes)
 	}
 	w.add(Effect{Kind: kind, Arg: key, Path: cleanPath(val)})
+}
+
+// wholePath is path for the value of a path list read whole (Effect.Whole).
+func (w *walker) wholePath(kind Kind, key, val string) {
+	if len(val) > maxPath {
+		w.trunc.Hit(bounded.Bytes)
+	}
+	w.add(Effect{Kind: kind, Arg: key, Path: cleanPath(val), Whole: true})
 }
 
 // genericSQL reports that a value under a generic key (query, q, command) is

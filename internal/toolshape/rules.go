@@ -8,6 +8,8 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/textlower"
 )
 
 // PathRule is a rule on a file the call reads or changes. The id names a rule
@@ -210,7 +212,7 @@ func ShellCandidate(text string) bool {
 	if err != nil {
 		return false
 	}
-	lower := strings.ReplaceAll(strings.ToLower(text), `\`, "/")
+	lower := strings.ReplaceAll(textlower.Lower(text), `\`, "/")
 	for _, w := range t.ShellTriggers {
 		if strings.Contains(lower, w) {
 			return true

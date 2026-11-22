@@ -65,6 +65,8 @@ install	gnu	-v	0	inert
 install	gnu	-p	0	inert
 install	gnu	-b	0	inert
 install	gnu	-T	0	inert
+install	gnu	-C	0	inert
+install	gnu	--no-target-directory	0	inert
 install	gnu	-D	0	inert
 install	gnu	--verbose	0	inert
 mv	gnu	-t	1	output
@@ -192,3 +194,12 @@ install	bsd	-U	0	inert
 install	bsd	-v	0	inert
 tee	bsd	-a	0	inert
 tee	bsd	-i	0	inert
+sed	bsd	-e	1	inert
+sed	bsd	-f	1	role:read
+sed	bsd	-i	1	inert
+sed	bsd	-I	1	inert
+sed	bsd	-l	1	inert
+sed	bsd	-E	0	inert
+sed	bsd	-n	0	inert
+sed	bsd	-u	0	inert
+sed	bsd	-a	0	inert

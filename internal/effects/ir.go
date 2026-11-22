@@ -16,6 +16,9 @@ type Script struct {
 	// Funcs names the functions the text defines; a later call of one of these
 	// names is shadowed (review R2).
 	Funcs []string
+	// Unread is the text a frontend could not read (from the line of a syntax
+	// error on), with an invalid_syntax unknown; "" when the text was read.
+	Unread string
 }
 
 // Op is the control operator that joins a statement to the next.
@@ -90,13 +93,25 @@ type Cmd struct {
 	// verdict is opaque and is never unwrapped by the walker's own parsing
 	// (psparse review 9 R9-3, GAP-0193).
 	Host *HostPayload
+	// CmdBody is the verbatim text after the /c or /k switch of a cmd call the
+	// cmd frontend lowered, with cmd's outer quote pair removed: the command
+	// line the child cmd runs (its quotes and operators intact).
+	CmdBody    string
+	CmdBodySet bool
 }
 
 // HostPayload is psparse's reading of one host call's payload.
 type HostPayload struct {
 	Opaque  bool    // not static, or unsafe to trust: no unwrap
 	Text    string  // the payload text when !Opaque
-	Dialect Dialect // the payload's grammar when !Opaque
+	Dialect Dialect // the payload's grammar when !Opaque, or of Maybe
+	// Maybe is one possible reading of an Opaque payload (the verbatim text a
+	// child gets when the parent does not expand it): the walker lowers it as
+	// maybe effects and the call stays opaque (DET111 R1, GAP-1550).
+	Maybe string
+	// MaybeCWD is the folder the Maybe reading runs in (-WorkingDirectory),
+	// placed against the caller's folder; "" keeps the caller's.
+	MaybeCWD string
 }
 
 // WordSeg is one piece of a word: a literal run (Lit) or a simple variable
@@ -149,6 +164,10 @@ type Word struct {
 	Reason ReasonCode
 	Segs   []WordSeg
 	Span   [2]int
+	// ProcSub is the body of a word that is one input process substitution
+	// <(...) (it is also in the command's Nested): a consumer that reads the
+	// word as a file (source, a `<` redirect) reads what the body prints.
+	ProcSub *Script
 	// Tail is the literal text after the last dynamic part of a word that is
 	// not static ($(f)/.ssh/id_rsa -> /.ssh/id_rsa): the classifier's reach
 	// rule reads a protected name in it (R-NAME, rel-1-0-10:GAP-1043).

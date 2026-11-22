@@ -125,8 +125,10 @@ var credentialReader = lazyregexp.New(
 	`(?i)\b(cat|head|tail|less|more|strings|xxd|od|base64|cp|scp|rsync|dd|` +
 		`type|Get-Content|gc|Copy-Item|awk|sed|python3?|node|jq)\b`)
 
-// localMCPCommand recognises an agent starting a local MCP tool server, which
-// is how it reaches the filesystem, a database, or a cloud API.
+// localMCPCommand is the MCP server name an agent's local tool server carries
+// (how it reaches the filesystem, a database, or a cloud API). A command line
+// that holds it only names a server; startsLocalMCPServer decides whether the
+// command runs one.
 var localMCPCommand = lazyregexp.New(`(?i)(mcp[-_]server|server[-_]mcp|@modelcontextprotocol/)`)
 
 // Classify turns one observation into a tactic match, or reports false when
@@ -304,7 +306,7 @@ func classifyExec(observation Observation, indicators IndicatorSet) (Match, bool
 			}, true
 		}
 	}
-	if localMCPCommand.MatchString(cmdline) &&
+	if startsLocalMCPServer(cmdline) &&
 		(indicators.KeepClientMCP || !observation.ClaudeClient || !claudeClientOnlyMCPReference(cmdline)) {
 		return Match{
 			Tactic: LocalInference, SignalID: "agent_local_mcp_server",

@@ -22,6 +22,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -338,6 +339,14 @@ func cloneRulePackForCompose(base *RulePack) *RulePack {
 				rule.Enabled = &enabled
 			}
 			rule.Tags = append([]string(nil), rule.Tags...)
+			if rule.Keys != nil {
+				keys := RuleKeysYAML{
+					Words:    slices.Clone(rule.Keys.Words),
+					Prefixes: slices.Clone(rule.Keys.Prefixes),
+					Suffixes: slices.Clone(rule.Keys.Suffixes),
+				}
+				rule.Keys = &keys
+			}
 			cloned.Rules[index] = rule
 		}
 		out.RuleFiles = append(out.RuleFiles, &cloned)

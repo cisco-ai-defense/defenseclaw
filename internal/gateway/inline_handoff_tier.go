@@ -11,6 +11,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
+	"github.com/defenseclaw/defenseclaw/internal/textlower"
 )
 
 // inlineStateReading is what a shell call hands to inline-code interpreter
@@ -160,7 +161,7 @@ func containsInlineInterpreterName(command string) bool {
 // shell reads a program word, without quotes and backslashes and in any
 // case, so 'un'zip, t\ar and TAR pass it (rel-1-0-10:GAP-1223).
 func mentionsArchiveExtractor(command string) bool {
-	text := strings.ToLower(archiveGateText.Replace(command))
+	text := textlower.Lower(archiveGateText.Replace(command))
 	for _, name := range []string{"tar", "unzip", "7z", "cpio", "ditto", "zipfile", "unpack_archive", "expand-archive", "extracttodirectory"} {
 		if strings.Contains(text, name) {
 			return true

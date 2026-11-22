@@ -575,6 +575,7 @@ func decideInputForConfig(cfg *config.Config, connector string, findings []RuleF
 		Findings:     decideFindings(findings),
 		SecureClient: secureClient,
 		Confirmable:  confirmable,
+		Table:        configPackTable(cfg, connector),
 		Tier:         func() decide.Tier { return decideTierOf(cfg.HookPolicyTierForConnector(connector)) },
 		PackTier: func() decide.Tier {
 			if cfg == nil {
@@ -620,6 +621,7 @@ func decideInputForGuardrail(gc *config.GuardrailConfig, connector string, findi
 		Findings:     decideFindings(findings),
 		SecureClient: ManagedEnterpriseActive(),
 		Confirmable:  confirmable,
+		Table:        guardrailPackTable(gc, gcPackRef(gc, connector)),
 		Levels:       guardrailConnectorLevels(gc, connector, confirmable),
 		Tier:         tier,
 		Unknown: func() (decide.Action, bool) {
@@ -629,6 +631,13 @@ func decideInputForGuardrail(gc *config.GuardrailConfig, connector string, findi
 			return decide.Allow, false
 		},
 	}
+}
+
+func gcPackRef(gc *config.GuardrailConfig, connector string) config.RulePackRef {
+	if gc == nil {
+		return config.RulePackRef{}
+	}
+	return gc.EffectiveRulePackRef(connector)
 }
 
 // decideRecordHook, set only by tests (DET111_S1_REC: the characterization
@@ -657,17 +666,19 @@ const (
 	tierGateManaged = decide.RowTieredManaged
 )
 
-// gateCeiling is gate row's cell for the request: its hook or proxy tier
-// (StrictPolicy) and its deployment (ManagedInstall).
+// gateCeiling is gate row's cell for the request in its pack's tier table
+// (Tiers; nil is decide.Builtin()): the column of its hook or proxy tier
+// (PolicyTier, strict when StrictPolicy) and its deployment
+// (ManagedInstall).
 func (request trustedActionRequest) gateCeiling(row string) decide.Ceiling {
-	tier, deployment := decide.TierDefault, decide.PerUser
+	tier, deployment := request.PolicyTier, decide.PerUser
 	if request.StrictPolicy {
 		tier = decide.TierStrict
 	}
 	if request.ManagedInstall {
 		deployment = decide.Managed
 	}
-	return decide.Builtin().GateCeiling(row, deployment, tier)
+	return request.Tiers.GateCeiling(row, deployment, tier)
 }
 
 // tieredProof is p graded by gate row for the request: enforcing where the

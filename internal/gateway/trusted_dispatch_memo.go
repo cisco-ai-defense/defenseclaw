@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/decide"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
 
@@ -58,6 +59,9 @@ type trustedDispatchMemoRefs struct {
 	targetMemo        *hookpaths.TargetMemo
 	windowsTwinHosts  *windowsTwinHostReadings
 	windowsPowerShell *windowsHintedReading
+	// tiers is the pack tier table the tier gates read (one table per pack
+	// directory, packTable), compared by identity.
+	tiers *decide.Table
 	// outs records which out-parameters are asked for (non-nil): a nil one
 	// may change what the readers do.
 	outs [6]bool
@@ -121,14 +125,29 @@ func dispatchTrustedAction(parent context.Context, request trustedActionRequest)
 			parent = context.Background()
 		}
 		memo = &trustedDispatchMemo{}
+		trustedDispatchRun(request)
 		return dispatchTrustedActionOnce(context.WithValue(parent, trustedDispatchMemoKey{}, memo), request)
 	}
 	return memo.dispatch(parent, request)
 }
 
+// trustedDispatchRunHook is a test-only seam: when non-nil it is told each
+// request the dispatch judges with the memo on (a repeat the memo answers is
+// not judged), so a test can count the dispatches one hook call costs
+// (rel-1-0-10:GAP-1593). Unlike trustedActionFaultHook it leaves the memo on.
+// Production never sets it.
+var trustedDispatchRunHook func(trustedActionRequest)
+
+func trustedDispatchRun(request trustedActionRequest) {
+	if trustedDispatchRunHook != nil {
+		trustedDispatchRunHook(request)
+	}
+}
+
 func (memo *trustedDispatchMemo) dispatch(ctx context.Context, request trustedActionRequest) []RuleFinding {
 	if request.record != nil || request.recordTelemetry != nil || request.recordEffectShadow != nil ||
 		trustedActionFaultHook != nil || trustedSimpleCommandsFaultHook != nil {
+		trustedDispatchRun(request)
 		return dispatchTrustedActionOnce(ctx, request)
 	}
 	bucket := request.Input.Tool + "\x00" + request.Input.Command + "\x00" + request.LegacyText
@@ -151,6 +170,7 @@ func (memo *trustedDispatchMemo) dispatch(ctx context.Context, request trustedAc
 	if request.unprovenTarget != nil {
 		run.unprovenTarget = &outs.unprovenTarget
 	}
+	trustedDispatchRun(request)
 	findings := dispatchTrustedActionOnce(ctx, run)
 	outs.unprovenSet = outs.unprovenTarget != unprovenWrite{}
 	outs.replay(request)
@@ -203,7 +223,7 @@ func trustedDispatchMemoKeyOf(request trustedActionRequest) (trustedActionReques
 	refs := trustedDispatchMemoRefs{
 		budget: request.budget, capFloor: request.capFloor, generation: request.generation,
 		targetMemo: request.targetMemo, windowsTwinHosts: request.windowsTwinHosts,
-		windowsPowerShell: request.windowsPowerShellReading,
+		windowsPowerShell: request.windowsPowerShellReading, tiers: request.Tiers,
 		outs: [6]bool{
 			request.overBudgetOmission != nil, request.unresolvedTarget != nil, request.resolvedTarget != nil,
 			request.nonWriteMention != nil, request.unprovenTarget != nil, request.unknownMention != nil,
@@ -211,7 +231,7 @@ func trustedDispatchMemoKeyOf(request trustedActionRequest) (trustedActionReques
 	}
 	key := request
 	key.budget, key.capFloor, key.generation, key.targetMemo = nil, nil, nil, nil
-	key.windowsTwinHosts, key.windowsPowerShellReading, key.simpleMemo = nil, nil, nil
+	key.windowsTwinHosts, key.windowsPowerShellReading, key.simpleMemo, key.Tiers = nil, nil, nil, nil
 	key.overBudgetOmission, key.unresolvedTarget, key.resolvedTarget, key.nonWriteMention = nil, nil, nil, nil
 	key.unprovenTarget, key.unknownMention = nil, nil
 	return key, refs
