@@ -41,7 +41,7 @@ const (
 
 // CheckIDs lists every check in the order doctor prints them.
 var CheckIDs = []string{CheckSubstrateVersion, CheckIssuer, CheckActorKeys, CheckSignInServer, CheckBucket, CheckGrants, CheckCallout,
-	CheckIngressClients, CheckActorRoutes, CheckAPIAccess, CheckPolicyConflicts, CheckWorkerDrain}
+	CheckIngressClients, CheckActorRoutes, CheckAPIAccess, CheckPolicyConflicts, CheckWorkerDrain, CheckRelayTLS}
 
 // Check is one result. Message is for the admin (kept on the cluster);
 // EdgeCase names the plan edge case it guards, when there is one.
@@ -174,6 +174,11 @@ type Observed struct {
 	// administrator's DefenseClaw sign-in (GAP-0398); nil or a Reason when
 	// they were not counted.
 	Conflicts *Conflicts
+
+	// RelayTLS is the effective substrate.relay_tls ("" reads as auto);
+	// RelayCA is the relay CA Secret, nil when it was not read (B3.5).
+	RelayTLS string
+	RelayCA  *RelayCA
 }
 
 // DefaultIssuer is Substrate's actor JWT issuer when actorJWT.issuer is unset.
@@ -205,6 +210,7 @@ func RunChecks(o Observed) []Check {
 		CheckCalloutRegistered(o), CheckRouterClients(o), CheckActorListenerRoutes(o), CheckAPIAccessLabel(o),
 		CheckPolicyConflict(o),
 		CheckWorkerDrainRunning(o),
+		CheckRelayTLSReady(o),
 	}
 }
 

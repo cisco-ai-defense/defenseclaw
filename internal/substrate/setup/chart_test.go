@@ -504,10 +504,17 @@ func checkChartInvariants(t *testing.T, name string, out []byte) {
 	}
 	// F4 follow-up: the relay session key is created by its own hook (never
 	// rendered), with its own ServiceAccount that may read only that
-	// Secret, and the gateway mounts it.
+	// Secret and (B3.5) the relay CA Secret the same step creates, and the
+	// gateway mounts both, the relay CA as optional (a gateway upgraded
+	// before setup ran again starts without it).
 	if !strings.Contains(string(out), "- relay-session\n") || !strings.Contains(string(out), "serviceAccountName: defenseclaw-relay-key") ||
-		!strings.Contains(string(out), "resourceNames: [\"defenseclaw-relay-session\"]") {
+		!strings.Contains(string(out), "resourceNames: [\"defenseclaw-relay-session\", \"defenseclaw-relay-ca\"]") {
 		t.Errorf("%s: no relay-session hook with its own ServiceAccount", name)
+	}
+	if !strings.Contains(string(out), "mountPath: /var/run/secrets/defenseclaw-relay-ca") ||
+		!strings.Contains(string(out), "secretName: defenseclaw-relay-ca\n    optional: true") &&
+			!strings.Contains(string(out), "secretName: defenseclaw-relay-ca\n          optional: true") {
+		t.Errorf("%s: the gateway does not mount the relay CA Secret, or not as optional", name)
 	}
 	if c, ok := byName["Deployment/defenseclaw-callout"]; ok {
 		raw, _ := yaml.Marshal(c.Spec)

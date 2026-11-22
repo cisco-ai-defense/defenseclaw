@@ -222,13 +222,14 @@ func (unauthenticatedReader) GetAccessPolicy(context.Context, string) (*setup.Ac
 func TestVerifyProbesTheActorListener(t *testing.T) {
 	t.Run("only actor routes", func(t *testing.T) {
 		fakeKubectl(t, nil)
-		// The 9 actor routes of fleet.ActorListenerProbes answer 401 without a token:
+		// The 10 actor routes of fleet.ActorListenerProbes answer 401 without a token:
 		// hook, notify, inspect, /llm/, the three OTLP paths, the relay's session
-		// check and (F18) the relay's task-end report /api/v1/substrate/relay/task.
+		// check, (F18) the relay's task-end report /api/v1/substrate/relay/task and
+		// (B3.5) the relay's serving certificate /api/v1/substrate/relay/cert.
 		if !fleet.ActorRouteAllowed("/api/v1/substrate/relay/task") {
 			t.Fatal("the relay task-end route is not an actor route")
 		}
-		wantCheck(t, verifyChecks(t, fleetInstallOK)[fleet.CheckActorRoutes], fleet.Pass, "only actor routes (9 of")
+		wantCheck(t, verifyChecks(t, fleetInstallOK)[fleet.CheckActorRoutes], fleet.Pass, "only actor routes (10 of")
 	})
 	t.Run("an admin route on the actor listener fails", func(t *testing.T) {
 		fakeKubectl(t, nil)
@@ -273,4 +274,25 @@ func TestCloudErrWordsNamesNoIdentity(t *testing.T) {
 	if strings.Contains(got, "@") || !strings.Contains(got, "[identity]") || !strings.Contains(got, "HTTPError 403") {
 		t.Errorf("gcloud words = %q", got)
 	}
+}
+
+// B3.5: verify reads the relay CA Secret the gateway mounts (Helm
+// gateway.relayCASecret) and warns when it is missing in auto.
+func TestVerifyReadsTheRelayCA(t *testing.T) {
+	t.Run("present", func(t *testing.T) {
+		fakeKubectl(t, nil)
+		wantCheck(t, verifyChecks(t, fleetInstallOK)[fleet.CheckRelayTLS], fleet.Pass, "relay_tls is auto")
+	})
+	t.Run("missing", func(t *testing.T) {
+		fakeKubectl(t, nil)
+		inner := substrateKubectl
+		substrateKubectl = func(ctx context.Context, f *substrateClusterFlags, args ...string) ([]byte, error) {
+			if len(args) > 1 && args[0] == "get" && args[1] == "secret" {
+				return nil, nil
+			}
+			return inner(ctx, f, args...)
+		}
+		t.Cleanup(func() { substrateKubectl = inner })
+		wantCheck(t, verifyChecks(t, fleetInstallOK)[fleet.CheckRelayTLS], fleet.Warn, "e1-relay-ca is missing")
+	})
 }

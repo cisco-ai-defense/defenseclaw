@@ -183,6 +183,10 @@ The cluster gateway did not answer some hook calls of a `--task` run, so those c
 
 A worker pool roll is in progress: some workers are draining and actors still run on them. The controller suspends the actors DefenseClaw manages and resumes them on another worker (the controller log has `sandbox.worker_drain.suspend` and `sandbox.worker_drain.resume`); if no worker has room yet it says so and tries again on each pass, and `connect` also resumes the actor. Suspend other actors yourself before the old workers stop. An actor that crashed anyway needs `kubectl ate revert actor NAME -a ATESPACE` (an administrator), then `connect`. If the controller says it cannot list Substrate workers, it needs the global viewer grant that the chart bootstrap gives it.
 
+### `verify` reports `relay_tls` (Preview)
+
+The check reads `substrate.relay_tls` and whether the relay CA Secret exists (the name the gateway mounts, `defenseclaw-relay-ca` unless `gateway.relayCASecret` sets another). It warns when the Secret is missing: relays on templates built with DefenseClaw 1.0.11 or later then get no serving certificate, and attaching to them fails with `relay_ca_missing`. With `relay_tls: required` the same state fails, because nothing can be attached. Run `setup` again (its relay-session step creates the Secret), then restart the gateway. With `relay_tls: off` the check passes without reading the Secret.
+
 ### Hooks fail with "gateway unreachable"
 
 The hook retries once, then follows the fail mode. Check that the `defenseclaw-actor` Service has ready endpoints, that the NetworkPolicy admits Substrate's egress gateway, and that the agent's settings use the full Service name (`defenseclaw-actor.defenseclaw-system.svc.cluster.local`): an actor resolves only the names in its allow list. Some CNIs apply a NetworkPolicy a moment after a pod starts.

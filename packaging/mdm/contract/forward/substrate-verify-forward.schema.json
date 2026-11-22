@@ -41,7 +41,7 @@
         "$ref": "#/$defs/check"
       },
       "minItems": 12,
-      "maxItems": 12
+      "maxItems": 13
     }
   },
   "$defs": {
@@ -102,7 +102,8 @@
             "actor_service_routes",
             "api_access_label",
             "policy_conflict",
-            "worker_drain"
+            "worker_drain",
+            "relay_tls"
           ]
         },
         "status": {

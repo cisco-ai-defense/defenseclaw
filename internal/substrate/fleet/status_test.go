@@ -58,6 +58,7 @@ func healthyCluster() Observed {
 		NamespaceLabels: map[string]string{APIAccessLabel: "true"},
 		SignInIssuer:    "https://kc.cluster-a.example/realms/dc", SignInRead: true,
 		Conflicts: &Conflicts{Agents: []ConflictAgent{}},
+		RelayCA:   &RelayCA{Secret: "defenseclaw-relay-ca", Present: true},
 	}
 }
 
