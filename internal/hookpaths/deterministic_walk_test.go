@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -52,8 +53,23 @@ func starved(spinners int, fn func()) time.Duration {
 // folders up to just inside the entry bound (each one a directory read, so
 // the walk runs past one scheduler slice and is preempted), then the file
 // the alias names, and the index is built with the processor starved.
+//
+// Each starved index must also be the idle-box index, entry for entry: the
+// same files, the late one last. A walk cut short by a clock holds fewer.
+//
+// On Windows every read of the walk first asks whether a link on its way
+// leads to a network share (networkShareLinkWalk), and that ask has a
+// wall-clock wait of its own, networkShareAnswerWait, for a share that does
+// not answer: a bound on a share, not on the walk, which a hung SMB read
+// needs and GAP-0339 leaves as it is. Under the starvation here one local
+// read waits on the scheduler past it, so the walk saw an unanswered share
+// (no file, no link found) instead of its entry bound (rel-1-0-10:GAP-1787).
+// The starved runs give that wait a minute, so they measure the walk alone;
+// off Windows the share walk is off and the wait is never read.
 func TestStateWalksCountEntriesNotTime(t *testing.T) {
 	resetActiveStateIndex(t)
+	shareWait := networkShareAnswerWait
+	t.Cleanup(func() { networkShareAnswerWait = shareWait })
 	home, cwd := activeStateIndexFixture(t, 0)
 	cache := filepath.Join(home, ".defenseclaw", "cache")
 	folders := activeStateIndexEntries - len(activeStateFiles) - 64
@@ -74,6 +90,11 @@ func TestStateWalksCountEntriesNotTime(t *testing.T) {
 	if _, same := ResolveActiveStateHardlinkTarget(alias, home); !same {
 		t.Fatal("the hard link to the last cache entry was not found on an idle box")
 	}
+	idle := builtActiveStateIndex(t)
+	if n := len(idle); n == 0 || idle[n-1] != "cache/entry-late" {
+		t.Fatalf("the idle index does not end at the late entry: %d files", n)
+	}
+	networkShareAnswerWait = time.Minute
 	for run := range 3 {
 		resetActiveStateIndex(t)
 		var same bool
@@ -81,6 +102,27 @@ func TestStateWalksCountEntriesNotTime(t *testing.T) {
 		if !same {
 			t.Fatalf("run %d: the hard link to a state file inside the entry bound was not found on a loaded box (walk took %s)", run, took)
 		}
+		if files := builtActiveStateIndex(t); !slices.Equal(files, idle) {
+			t.Fatalf("run %d: the index built on a loaded box holds %d files, the idle-box index %d (walk took %s)", run, len(files), len(idle), took)
+		}
 		t.Logf("run %d: starved walk took %s", run, took)
 	}
+}
+
+// builtActiveStateIndex is the relative names of the one active state index
+// the last walk built, in walk order.
+func builtActiveStateIndex(t *testing.T) []string {
+	t.Helper()
+	activeStateIndex.Lock()
+	defer activeStateIndex.Unlock()
+	if len(activeStateIndex.byRoot) != 1 {
+		t.Fatalf("%d active state indexes built, want 1", len(activeStateIndex.byRoot))
+	}
+	var names []string
+	for _, index := range activeStateIndex.byRoot {
+		for _, file := range index.files {
+			names = append(names, file.relative)
+		}
+	}
+	return names
 }
