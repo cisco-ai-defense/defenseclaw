@@ -124,7 +124,7 @@ func effectShadowRun(request trustedActionRequest, mode effectRulesMode, tiers .
 			results = finish(effectShadowReasonPanic, 0)
 		}
 	}()
-	call, opts, ok := effectCall(request.Connector, request.Input)
+	call, opts, ok := effectCall(request.Connector, request.Input, effectWindowsCall(request))
 	if !ok {
 		return results
 	}

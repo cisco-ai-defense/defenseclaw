@@ -281,12 +281,12 @@ func TestEffectCallReadsPatchTools(t *testing.T) {
 		"codex apply_patch": {Tool: "apply_patch", Command: env, ActiveHome: "/home/u", CWD: "/home/u"},
 		"opencode patch":    {Tool: "patch", Args: json.RawMessage(`{"patchText":` + strconv.Quote(env) + `}`), ActiveHome: "/home/u", CWD: "/home/u"},
 	} {
-		call, _, ok := effectCall("x", in)
+		call, _, ok := effectCall("x", in, false)
 		if !ok || call.Surface != effects.SurfacePatch || call.Command != env {
 			t.Fatalf("%s: call %+v ok %v, want the patch surface with the envelope", name, call, ok)
 		}
 	}
-	if call, _, _ := effectCall("hermes", actionfacts.Input{Tool: "patch", Args: json.RawMessage(`{"mode":"replace","path":"a"}`)}); call.Surface == effects.SurfacePatch {
+	if call, _, _ := effectCall("hermes", actionfacts.Input{Tool: "patch", Args: json.RawMessage(`{"mode":"replace","path":"a"}`)}, false); call.Surface == effects.SurfacePatch {
 		t.Fatalf("a patch call with no envelope read as a patch: %+v", call)
 	}
 }
@@ -338,7 +338,7 @@ func TestEffectPatchKeepsDollarSpelling(t *testing.T) {
 	const p = `\\localhost\c$\Users\testuser\.git-credentials`
 	env := "*** Begin Patch\n*** Add File: " + p + "\n+x\n*** End Patch"
 	call, opts, ok := effectCall("codex", actionfacts.Input{Tool: "apply_patch", Command: env, CWD: `C:\Users\alice`,
-		ActiveHome: `C:\Users\alice`, DialectHint: actionfacts.DialectPowerShell})
+		ActiveHome: `C:\Users\alice`, DialectHint: actionfacts.DialectPowerShell}, true)
 	if !ok {
 		t.Fatal("no call")
 	}
