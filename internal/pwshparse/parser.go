@@ -64,6 +64,16 @@ type Parser struct {
 	inConfiguration bool
 	errors          []ParseError
 	tokens          []*Token
+	depth           int
+	// Unsupported is set when the input used a construct the port does not parse (class, enum, configuration, dynamic keywords) or nested deeper than the budget.
+	Unsupported bool
+}
+
+const maxParseDepth = 4000
+
+func (p *Parser) tooDeep() {
+	p.Unsupported = true
+	p.reportError(extent{p.tz.curIndex, p.tz.curIndex}, "ParseTooDeep")
 }
 
 const verbatimArgument = "--%"
@@ -75,6 +85,8 @@ type Result struct {
 	Tokens []*Token
 	Errors []ParseError
 	Source []char
+	// Unsupported: see Parser.Unsupported.
+	Unsupported bool
 }
 
 // Parse parses PowerShell source text (the equivalent of Parser.ParseInput).
@@ -85,7 +97,7 @@ func Parse(input string) *Result {
 	p.savingTokens = true
 	root := p.scriptBlockRule(nil, false, nil)
 	p.tokens = p.tz.tokenList
-	return &Result{Root: root, Tokens: p.tokens, Errors: p.errors, Source: src}
+	return &Result{Root: root, Tokens: p.tokens, Errors: p.errors, Source: src, Unsupported: p.Unsupported}
 }
 
 func (p *Parser) textOf(e extent) string { return fromUTF16(p.src[e.Start:e.End]) }

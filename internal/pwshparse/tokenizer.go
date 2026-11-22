@@ -92,6 +92,7 @@ type tokenizer struct {
 	allowSignedNumbers     bool
 	forceEndNumberOnTernOp bool
 	wantSimpleName         bool
+	inWorkflowContext      bool
 
 	script     []char
 	nestedAdj  int
