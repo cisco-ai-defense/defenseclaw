@@ -185,3 +185,23 @@ func TestHealthState(t *testing.T) {
 		t.Error("callout down")
 	}
 }
+
+// GAP-0429: a stage whose bundle no longer verifies fails, with the stage,
+// the code and the fix; one that could not be checked from here warns.
+func TestCheckBundleState(t *testing.T) {
+	o := healthyCluster()
+	expect(t, CheckBundleState(o), Pass, "1 stage(s) enforce bundles that verify")
+	o.Bundles.Stages[0].State, o.Bundles.Stages[0].Problem = BundleUnverified, "signature_invalid"
+	expect(t, CheckBundleState(o), Fail, "stage s-eng (b-01AAAAAAAAAAAAAAAAAAAAAAAA version 3, key acme-2026a): signature_invalid")
+	expect(t, CheckBundleState(o), Fail, "fall back to config.yaml")
+	o.Bundles.Managed = true
+	expect(t, CheckBundleState(o), Fail, "deny-only")
+	o.Bundles.Stages[0].State, o.Bundles.Note = BundleUnchecked, "the trust anchors Secret could not be read"
+	expect(t, CheckBundleState(o), Warn, "could not be verified from here (the trust anchors Secret could not be read)")
+	o.Bundles.Stages, o.Bundles.Note = nil, ""
+	expect(t, CheckBundleState(o), Pass, "no bundle is applied")
+	o.Bundles.Note = "the defenseclaw-bundles ConfigMap could not be read: forbidden"
+	expect(t, CheckBundleState(o), Warn, "could not be read: forbidden")
+	o.Bundles = nil
+	expect(t, CheckBundleState(o), Skip, "bundles are off")
+}

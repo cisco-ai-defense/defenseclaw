@@ -598,6 +598,13 @@ func substrateGatewayBuilder(c *config.Config, src *configwatch.Watcher, ready *
 			if out.Bundles, err = substrateBundleStore(c, live); err != nil {
 				return out, err
 			}
+			// GAP-0429: doctor says when a stage's bundle no longer verifies.
+			if ba, ok := out.Bundles.(substrateBundleAdapter); ok && out.Doctor != nil {
+				doctor, managedMode := out.Doctor, managed.IsManagedEnterprise(c.DeploymentMode)
+				out.Doctor = func(ctx context.Context) []gateway.SubstrateCheck {
+					return append(doctor(ctx), substrateBundleCheck(ctx, ba.s, managedMode))
+				}
+			}
 			if _, err := os.Stat(serveFlags.calloutTokenFile); err == nil {
 				out.CalloutToken = readSecretFile(serveFlags.calloutTokenFile)
 			}
