@@ -40,6 +40,11 @@ const (
 	// RoutingBudgetScopeActor is one limit per Agent Substrate actor
 	// (subject *); it counts actor calls only.
 	RoutingBudgetScopeActor = "actor"
+
+	// RoutingBudgetScopeBatch is one limit per Agent Substrate batch (the
+	// registration batch id) of one person in one atespace. Cluster-only like
+	// actor.
+	RoutingBudgetScopeBatch = "batch"
 )
 
 // Values of routing.admin.budgets[].period. Windows are UTC calendar
@@ -154,7 +159,8 @@ func (r RoutingAdminRule) IsDeny() bool {
 // routing.admin.budget_store adds up every device's spend.
 type RoutingBudget struct {
 	ID string `mapstructure:"id" yaml:"id"`
-	// Scope is user, group, connector or actor (Agent Substrate clusters).
+	// Scope is user, group, connector, actor or batch (actor and batch need an
+	// Agent Substrate cluster).
 	Scope string `mapstructure:"scope" yaml:"scope"`
 	// Subject is, for user, a users entry or * (each user its own limit);
 	// for group, a groups entry (one pooled limit); for connector, a
@@ -373,8 +379,12 @@ func validateRoutingBudget(at string, b RoutingBudget, aliases map[string]struct
 		if subject != RoutingBudgetSubjectAll {
 			return settingErrorAt(at+".subject", fmt.Errorf("%s.subject: an actor budget is one limit per actor; set subject *", at))
 		}
+	case RoutingBudgetScopeBatch:
+		if subject != RoutingBudgetSubjectAll {
+			return settingErrorAt(at+".subject", fmt.Errorf("%s.subject: a batch budget is one limit per batch; set subject *", at))
+		}
 	default:
-		return settingErrorAt(at+".scope", fmt.Errorf("%s.scope %q must be user, group, connector or actor", at, b.Scope))
+		return settingErrorAt(at+".scope", fmt.Errorf("%s.scope %q must be user, group, connector, actor or batch", at, b.Scope))
 	}
 	if w := b.WarnAtPercent; w != nil && (*w < 0 || *w > 99) {
 		return settingErrorAt(at+".warn_at_percent", fmt.Errorf("%s.warn_at_percent must be 0 (off) to 99", at))
@@ -474,9 +484,9 @@ func (c *Config) validateRoutingAdminSubstrate() error {
 		}
 	}
 	for i, budget := range a.Budgets {
-		if budget.Scope == RoutingBudgetScopeActor {
+		if budget.Scope == RoutingBudgetScopeActor || budget.Scope == RoutingBudgetScopeBatch {
 			at := fmt.Sprintf("routing.admin.budgets[%d].scope", i)
-			return settingErrorAt(at, fmt.Errorf("%s actor counts Agent Substrate actor calls; it needs substrate.enabled", at))
+			return settingErrorAt(at, fmt.Errorf("%s %s counts Agent Substrate actor calls; it needs substrate.enabled", at, budget.Scope))
 		}
 	}
 	return nil

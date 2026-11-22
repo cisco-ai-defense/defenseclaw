@@ -138,3 +138,29 @@ func TestRoutingBudgetStoreRefusedOnCluster(t *testing.T) {
 		t.Fatalf("budget_store on a cluster: err %v", err)
 	}
 }
+
+// TestBudgetScopeBatchConfig: scope batch is one limit per batch (subject
+// *), cluster only like actor, and the schema agrees.
+func TestBudgetScopeBatchConfig(t *testing.T) {
+	b := RoutingBudget{ID: "nightly", Scope: "batch", Subject: "*", Period: "day", LimitUSD: 20, OnExceed: "deny"}
+	admin := &RoutingAdminConfig{Budgets: []RoutingBudget{b}}
+	if err := ValidateRoutingAdminRules(nil, admin.Budgets, nil, nil); err != nil {
+		t.Fatalf("batch budget refused: %v", err)
+	}
+	if err := clusterRoutingConfig(false, admin).validateRoutingAdminSubstrate(); err == nil || !strings.Contains(err.Error(), "batch counts Agent Substrate") {
+		t.Fatalf("laptop batch budget: err %v", err)
+	}
+	if err := clusterRoutingConfig(true, admin).validateRoutingAdminSubstrate(); err != nil {
+		t.Fatalf("cluster batch budget: %v", err)
+	}
+	b.Subject = "run-7"
+	if err := ValidateRoutingAdminRules(nil, []RoutingBudget{b}, nil, nil); err == nil || !strings.Contains(err.Error(), "set subject *") {
+		t.Fatalf("batch budget with a subject: err %v", err)
+	}
+	if err := ValidateV8SchemaBytes("ok.yaml", []byte("config_version: 9\nrouting: {admin: {budgets: [{id: a, scope: batch, subject: \"*\", period: day, limit_usd: 1, on_exceed: deny}]}}\n")); err != nil {
+		t.Fatalf("schema refused scope batch: %v", err)
+	}
+	if err := ValidateV8SchemaBytes("bad.yaml", []byte("config_version: 9\nrouting: {admin: {budgets: [{id: a, scope: batch, subject: bob, period: day, limit_usd: 1, on_exceed: deny}]}}\n")); err == nil {
+		t.Fatal("schema accepted a batch budget with a named subject")
+	}
+}

@@ -61,7 +61,7 @@ func substrateRouteActor(ctx context.Context) *engine.Actor {
 	if !ok || reg.Key == "" {
 		return nil
 	}
-	a := &engine.Actor{Key: reg.Key, Atespace: reg.Atespace, Template: reg.Template}
+	a := &engine.Actor{Key: reg.Key, Atespace: reg.Atespace, Template: reg.Template, BatchID: reg.BatchID}
 	if !reg.Attributed && reg.Person.Key() != "" {
 		a.Person = true
 		if reg.Person.Kind == identity.PersonWorkload {

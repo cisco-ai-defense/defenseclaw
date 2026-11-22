@@ -499,6 +499,17 @@ func chargeKey(b *compiledBudget, req Request) (string, MatchState, string) {
 			return "", No, ""
 		}
 		return "actor:" + b.ID + ":" + shortHash(req.Actor.Key), Yes, ""
+	case config.RoutingBudgetScopeBatch:
+		// One limit per batch of one person in one atespace, so two people
+		// who pick the same batch id never share a counter.
+		if req.Actor == nil || req.Actor.BatchID == "" {
+			return "", No, ""
+		}
+		who := "-"
+		if req.Actor.Person && req.Caller.Key != "" {
+			who = req.Caller.Key
+		}
+		return "batch:" + b.ID + ":" + shortHash(req.Actor.Atespace+"/"+who) + ":" + shortHash(req.Actor.BatchID), Yes, ""
 	case config.RoutingBudgetScopeUser:
 		if req.Actor != nil && !req.Actor.Person {
 			return "", No, ""

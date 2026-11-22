@@ -5759,7 +5759,8 @@
             "user",
             "group",
             "connector",
-            "actor"
+            "actor",
+            "batch"
           ]
         },
         "subject": {
@@ -5832,7 +5833,7 @@
           }
         },
         {
-          "if": { "properties": { "scope": { "const": "actor" } } },
+          "if": { "properties": { "scope": { "enum": ["actor", "batch"] } } },
           "then": { "properties": { "subject": { "const": "*" } } }
         }
       ]

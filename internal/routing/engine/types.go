@@ -49,6 +49,9 @@ type Actor struct {
 	// actor and connector budgets.
 	Person                       bool
 	Atespace, Template, Workload string
+	// BatchID is the registration batch id (from the launcher, never a
+	// header); scope batch budgets read it. Empty: not a batch call.
+	BatchID string
 }
 
 // Listener names where a request arrived.
