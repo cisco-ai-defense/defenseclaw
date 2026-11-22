@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+
 	"github.com/defenseclaw/defenseclaw/internal/textlower"
 )
 

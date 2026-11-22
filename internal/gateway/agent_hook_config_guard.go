@@ -31,8 +31,8 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 	"github.com/defenseclaw/defenseclaw/internal/shellparse"
-	"gopkg.in/yaml.v3"
 	"github.com/defenseclaw/defenseclaw/internal/workcount"
+	"gopkg.in/yaml.v3"
 )
 
 // An agent's own hook config (GAP-0048). On a per-user install the files

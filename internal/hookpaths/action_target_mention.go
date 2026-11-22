@@ -31,8 +31,8 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/psparse"
 	"github.com/defenseclaw/defenseclaw/internal/shellparse"
-	"mvdan.cc/sh/v3/syntax"
 	"github.com/defenseclaw/defenseclaw/internal/textlower"
+	"mvdan.cc/sh/v3/syntax"
 )
 
 // ActionStateTargetMention applies the same independent target scan to the

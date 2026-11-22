@@ -29,11 +29,10 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/rxprefilter"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/tactics"
 	"github.com/defenseclaw/defenseclaw/internal/shellparse"
+	"github.com/defenseclaw/defenseclaw/internal/textlower"
+	"github.com/defenseclaw/defenseclaw/internal/workcount"
 	"mvdan.cc/sh/v3/expand"
 	"mvdan.cc/sh/v3/syntax"
-
-	"github.com/defenseclaw/defenseclaw/internal/workcount"
-	"github.com/defenseclaw/defenseclaw/internal/textlower"
 )
 
 const Header = "X-DefenseClaw-Resolved-Writes"

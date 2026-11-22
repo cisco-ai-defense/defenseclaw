@@ -15,8 +15,8 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
-	"mvdan.cc/sh/v3/syntax"
 	"github.com/defenseclaw/defenseclaw/internal/textlower"
+	"mvdan.cc/sh/v3/syntax"
 )
 
 // ActionCommandDecision returns an enforcement reason only when the command
