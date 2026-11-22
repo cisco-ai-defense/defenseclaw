@@ -416,6 +416,7 @@
    "TestGAP1138PowerShellWriteSpellings": 59.9,
    "TestGAP1150FailedLocationChangeThenRelativeStateWriteFiveTiers": 190.0,
    "TestGAP1228PaddedWindowsCallAfterMovesThatMayFailKeepsItsReadingsFiveTiers": 300.0,
+   "TestGAP1307QuietOpenRunReachesClient": 330.0,
    "TestGAP1230UnplacedDotNetOpens": 39.4,
    "TestGAP1265NumericTableIsNotCutAtHeldBound": 31.1,
    "TestGAP1265OpenRunIdleIsNotTruncated": 19.6,
