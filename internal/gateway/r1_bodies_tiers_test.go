@@ -54,15 +54,17 @@ var det111R1VerdictPending = map[string]string{
 // det111R1WindowsPending are the Windows host rows (managed cells) whose
 // verdict does not reach the unknown tier yet, with the lane that closes each.
 var det111R1WindowsPending = map[string]string{
-	"GAP-0998/var":   "codex shell on a Windows host: the effects call gets no PowerShell dialect (S3-PRE effectCall); claudecode PowerShell reaches",
-	"GAP-0998/var2":  "codex shell on a Windows host: no PowerShell dialect for the effects call (S3-PRE effectCall)",
-	"GAP-0998/var3":  "codex shell on a Windows host: no PowerShell dialect for the effects call (S3-PRE effectCall)",
-	"GAP-1199/var":   "codex shell on a Windows host: no PowerShell dialect for the effects call (S3-PRE effectCall)",
-	"GAP-1199/var2":  "codex shell on a Windows host: no PowerShell dialect for the effects call (S3-PRE effectCall)",
-	"GAP-1199/var3":  "codex shell on a Windows host: no PowerShell dialect for the effects call (S3-PRE effectCall)",
-	"GAP-1199/var4":  "codex shell on a Windows host: no PowerShell dialect for the effects call (S3-PRE effectCall)",
-	"GAP-1550/seed2": "codex shell on a Windows host: no PowerShell dialect for the effects call (S3-PRE effectCall)",
-	"GAP-1550/var":   "codex shell on a Windows host: no PowerShell dialect for the effects call (S3-PRE effectCall)",
+	"GAP-0998/var":                           "codex shell on a Windows host: the effects call gets no PowerShell dialect (S3-PRE effectCall); claudecode PowerShell reaches",
+	"GAP-0998/var2":                          "codex shell on a Windows host: no PowerShell dialect for the effects call (S3-PRE effectCall)",
+	"GAP-0998/var3":                          "codex shell on a Windows host: no PowerShell dialect for the effects call (S3-PRE effectCall)",
+	"GAP-1199/var":                           "codex shell on a Windows host: no PowerShell dialect for the effects call (S3-PRE effectCall)",
+	"GAP-1199/var2":                          "codex shell on a Windows host: no PowerShell dialect for the effects call (S3-PRE effectCall)",
+	"GAP-1199/var3":                          "codex shell on a Windows host: no PowerShell dialect for the effects call (S3-PRE effectCall)",
+	"GAP-1199/var4":                          "codex shell on a Windows host: no PowerShell dialect for the effects call (S3-PRE effectCall)",
+	"GAP-1550/seed2":                         "codex shell on a Windows host: no PowerShell dialect for the effects call (S3-PRE effectCall)",
+	"GAP-1550/var":                           "codex shell on a Windows host: no PowerShell dialect for the effects call (S3-PRE effectCall)",
+	"det111/GAP-1557/argv-wd-positional/var": "codex shell on a Windows host: the effects call has POSIX flavor, so C:\\Users\\... loses its backslashes (S3-PRE effectCall)",
+	"det111/GAP-1557/pwsh-argv-wd-positional/var": "codex shell on a Windows host: the effects call has POSIX flavor, so C:\\Users\\... loses its backslashes (S3-PRE effectCall)",
 	"GAP-1173/var":   "Git Bash on a Windows host: the effects call reads POSIX flavor (S3-PRE effectCall); tar on Windows has no row (S4-R2)",
 	"GAP-1173/var3":  "Git Bash on a Windows host: the effects call reads POSIX flavor (S3-PRE effectCall)",
 	"GAP-1173/var6":  "inline-code folder literal: the classifier grades a folder only for mutations (S4-R3)",
@@ -84,9 +86,18 @@ var det111R1WindowsPending = map[string]string{
 	"GAP-1588/var5":  "icacls on the system root (decision side)",
 }
 
+// det111R1RuledInert are corpus attack rows DET111 ruled are not attacks
+// (the IR table's det111RuledInert): judged as benign rows.
+var det111R1RuledInert = map[string]string{
+	"GAP-0662/var6": "RULING 2026-11-22T01:47Z: watch's joined body is a shell syntax error, nothing runs",
+}
+
 type det111R1Row struct {
 	id, gap, role, platform, dialect, tool, command string
 	attack, benign                                  bool
+	// expect is the corpus action per tier (tier:<tier>=<action>), the
+	// gap's own bar; the test asserts the unknown tier and reports this.
+	expect map[string]string
 }
 
 func loadDET111R1Rows(t *testing.T, keep func(platform, dialect string) bool) []det111R1Row {
@@ -118,23 +129,32 @@ func loadDET111R1Rows(t *testing.T, keep func(platform, dialect string) bool) []
 			if err := json.Unmarshal(sc.Bytes(), &c); err != nil {
 				t.Fatal(err)
 			}
-			r := det111R1Row{id: strings.TrimPrefix(c.ID, "gap/det111-b_"), platform: c.Strata.Platform, tool: c.Payload.ToolName}
+			r := det111R1Row{expect: map[string]string{}, id: strings.TrimPrefix(c.ID, "gap/det111-b_"), platform: c.Strata.Platform, tool: c.Payload.ToolName}
 			r.command, _ = c.Payload.Args["command"].(string)
-			attackMiss, cost := false, false
+			cost := false
 			for _, k := range c.Truth.Categories {
 				switch {
 				case strings.HasPrefix(k, "gap:"):
 					r.gap = strings.TrimPrefix(k, "gap:")
 				case strings.HasPrefix(k, "role:"):
 					r.role = strings.TrimPrefix(k, "role:")
-				case k == "kind:attack-miss":
-					attackMiss = true
+				case strings.HasPrefix(k, "tier:") && strings.Contains(k, "="):
+					kv := strings.SplitN(strings.TrimPrefix(k, "tier:"), "=", 2)
+					r.expect[kv[0]] = kv[1]
+				case k == "kind:parity":
+					cost = true // judged by its own parity test
 				case k == "kind:cost":
 					cost = true // a raise the corpus expects on a benign row: judged by its own tier test
 				}
 			}
-			r.attack = attackMiss && c.Truth.Truth == "deterministic_malicious"
+			// every malicious row is an attack row: the gap corpus marks them
+			// kind:attack-miss, the launcher copies carry no kind.
+			r.attack = c.Truth.Truth == "deterministic_malicious"
 			r.benign = c.Truth.Truth == "benign" && !cost
+			if _, inert := det111R1RuledInert[r.id]; inert {
+				// ruled not an attack: it may not raise more than 1.0.10 does
+				r.attack, r.benign = false, true
+			}
 			r.dialect = c.Payload.Dialect
 			if r.command == "" || !keep(r.platform, r.dialect) {
 				continue
@@ -237,7 +257,7 @@ func (j *det111R1Judge) judge(t *testing.T, api *APIServer, ctx context.Context,
 		on = boundedParse(route.decide(t, api, ctx, cwd, command))
 	}
 	if probe {
-		t.Logf("ROW\t%s\t%s\t%s\t%s\toff=%s\ton=%s", tierName, route.name, row.id, row.role, off, on)
+		t.Logf("ROW\t%s\t%s\t%s\t%s\toff=%s\ton=%s\texpect=%s", tierName, route.name, row.id, row.role, off, on, row.expect[strings.ReplaceAll(tierName, " ", "-")])
 	}
 	where := tierName + " " + route.name + " " + row.id
 	switch {
