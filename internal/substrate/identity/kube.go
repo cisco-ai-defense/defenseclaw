@@ -20,7 +20,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -123,9 +122,12 @@ func (k *KubeTokenVerifier) Verify(ctx context.Context, token string) (Person, e
 		return Person{}, reasonf(ReasonSubject, "a node token is not a person")
 	}
 	// The token key and issue time let logout, logout --all and admin
-	// revoke end a Kubernetes sign-in like an OIDC one (RV1-01).
+	// revoke end a Kubernetes sign-in like an OIDC one (RV1-01). A JWT is
+	// keyed by its jti, else by its claims, never by its text: the API
+	// server accepts other encodings of the same token (RV2-01).
+	iat, jti := kubeClaims(token, now)
 	p := Person{Kind: PersonKube, Issuer: KubeIssuer, Subject: u.Username, Principal: u.Username,
-		Expires: now.Add(kubeReviewTTL), IssuedAt: kubeIssuedAt(token, now), TokenKey: TokenKey(KubeIssuer, "", token)}
+		Expires: now.Add(kubeReviewTTL), IssuedAt: iat, TokenID: jti, TokenKey: TokenKey(KubeIssuer, jti, token)}
 	for _, g := range u.Groups {
 		if g = strings.TrimSpace(g); g != "" && len(p.Groups) < 512 {
 			p.Groups = append(p.Groups, g)
@@ -140,32 +142,34 @@ func (k *KubeTokenVerifier) Verify(ctx context.Context, token string) (Person, e
 	return p, nil
 }
 
-// kubeIssuedAt is the iat of a Kubernetes token that is a JWT (a bound
-// ServiceAccount token, or an OIDC token the API server accepts). It is
-// read only after the TokenReview authenticated the whole token, so the
-// claims are the issuer's. Zero when the token is opaque (a static or
-// legacy token), has no iat, or names a time more than DefaultSkew ahead:
-// such a sign-in can be ended one token at a time, not by time.
-func kubeIssuedAt(token string, now time.Time) time.Time {
-	parts := strings.Split(token, ".")
-	if len(parts) != 3 {
-		return time.Time{}
-	}
-	raw, err := base64.RawURLEncoding.DecodeString(strings.TrimRight(parts[1], "="))
-	if err != nil {
-		return time.Time{}
+// kubeClaims reads the iat and jti of a Kubernetes token that is a JWT (a
+// bound ServiceAccount token, or an OIDC token the API server accepts). It
+// is called only after the TokenReview authenticated the whole token, so
+// the claims are the issuer's. iat is zero when the token is opaque (a
+// static token), has no iat (a legacy Secret-based ServiceAccount token),
+// or names a time more than DefaultSkew ahead: such a sign-in can be ended
+// one token at a time, not by time. jti is "" when the token has none.
+func kubeClaims(token string, now time.Time) (time.Time, string) {
+	raw, ok := jwtClaims(token)
+	if !ok {
+		return time.Time{}, ""
 	}
 	var c struct {
 		IssuedAt *int64 `json:"iat"`
+		TokenID  any    `json:"jti"`
 	}
-	if json.Unmarshal(raw, &c) != nil || c.IssuedAt == nil || *c.IssuedAt <= 0 {
-		return time.Time{}
+	if json.Unmarshal(raw, &c) != nil {
+		return time.Time{}, ""
+	}
+	jti, _ := c.TokenID.(string)
+	if c.IssuedAt == nil || *c.IssuedAt <= 0 {
+		return time.Time{}, jti
 	}
 	iat := time.Unix(*c.IssuedAt, 0)
 	if iat.After(now.Add(DefaultSkew)) {
-		return time.Time{}
+		return time.Time{}, jti
 	}
-	return iat
+	return iat, jti
 }
 
 // kubeUser is the user of an authenticated TokenReview.

@@ -55,8 +55,8 @@ func TestB51PersonCarriesTheSignIn(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got2.TokenKey != TokenKey(p.srv.URL, "", tok2) || !strings.HasPrefix(got2.TokenKey, "tok:") || strings.Contains(got2.TokenKey, tok2) {
-		t.Fatalf("a token without jti is keyed by its hash: %q", got2.TokenKey)
+	if got2.TokenKey != TokenKey(p.srv.URL, "", tok2) || !strings.HasPrefix(got2.TokenKey, "clm:") || strings.Contains(got2.TokenKey, tok2) {
+		t.Fatalf("a JWT without jti is keyed by a hash of its claims: %q", got2.TokenKey)
 	}
 	// The sign-in fields never travel with a stored person.
 	b, _ := json.Marshal(got)

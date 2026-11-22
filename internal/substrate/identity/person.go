@@ -19,6 +19,7 @@ package identity
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -60,16 +61,50 @@ type Person struct {
 	TokenKey string    `json:"-"`
 }
 
-// TokenKey is the revocation key of a person token: a hash of its issuer
-// and jti, or of the whole token when it has no jti. A deny list holds
-// only this, never a token or a raw id.
-func TokenKey(issuer, jti, raw string) string {
+// TokenKey is the revocation key of one person token, token as it was
+// presented. A deny list holds only this, never a token or a raw id:
+//   - "jti:" a hash of the issuer and the token's jti;
+//   - "clm:" a token with no jti that is a JWT: a hash of the issuer and
+//     its decoded claims. These are the signed bytes, the same for every
+//     encoding of one signed token a verifier accepts (spare base64 bits,
+//     '=' padding, line breaks, an ES256 (r, n-s) signature), so a copy
+//     that is re-encoded is still the token that was ended (RV2-01,
+//     GAP-0759);
+//   - "tok:" a hash of the whole token, only for an opaque token (a static
+//     Kubernetes token), which its server compares as it is.
+//
+// The "clm:" prefix is new in the build that keys by claims, so a raw-text
+// key an earlier build of the same release wrote can never be read as one;
+// no released version wrote a deny list before it.
+func TokenKey(issuer, jti, token string) string {
 	if jti != "" {
 		s := sha256.Sum256([]byte(issuer + "\x00" + jti))
 		return "jti:" + hex.EncodeToString(s[:16])
 	}
-	s := sha256.Sum256([]byte(raw))
+	if claims, ok := jwtClaims(token); ok {
+		s := sha256.Sum256([]byte(issuer + "\x00" + string(claims)))
+		return "clm:" + hex.EncodeToString(s[:16])
+	}
+	s := sha256.Sum256([]byte(token))
 	return "tok:" + hex.EncodeToString(s[:16])
+}
+
+// jwtClaims is the decoded claims of a token shaped like a compact JWS, ok
+// false when it is not one. It decodes the way the most lenient verifier
+// in front of DefenseClaw does (the kube-apiserver's go-jose: '=' trimmed,
+// spare bits and line breaks ignored), so every encoding that verifier
+// accepts gives the same bytes. It checks no signature: callers key only a
+// token a verifier or a TokenReview has already accepted.
+func jwtClaims(token string) ([]byte, bool) {
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return nil, false
+	}
+	b, err := base64.RawURLEncoding.DecodeString(strings.TrimRight(parts[1], "="))
+	if err != nil || !json.Valid(b) || len(b) == 0 || b[0] != '{' {
+		return nil, false
+	}
+	return b, true
 }
 
 // ID is the stable owner key of a person: issuer and subject.
