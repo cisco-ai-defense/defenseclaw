@@ -80,6 +80,11 @@ const (
 	// StatusExposed: an agent's model may have seen the value before it
 	// was captured; rotate it with the issuer and replace the value.
 	StatusExposed Status = "exposed"
+	// StatusUnconfirmed: captured from a sandbox and not yet confirmed by
+	// the person. A sandbox can post its own prompt-shaped hook call, so a
+	// captured value may be one the agent planted; no sandbox gets it until
+	// the person confirms it (or replaces the value).
+	StatusUnconfirmed Status = "unconfirmed"
 )
 
 var (
@@ -94,6 +99,9 @@ var (
 	// ErrExposed is returned when resolving an entry an agent's model may
 	// have seen: it must be rotated and replaced before a sandbox uses it.
 	ErrExposed = errors.New("an agent's model may have seen this secret's value")
+	// ErrUnconfirmed is returned when resolving a captured entry the person
+	// has not confirmed.
+	ErrUnconfirmed = errors.New("this secret was captured from a sandbox and is not confirmed yet")
 	// ErrBusy is returned when another process holds the vault lock.
 	ErrBusy = errors.New("another DefenseClaw process is writing the vault")
 )
@@ -112,6 +120,9 @@ type Entry struct {
 	LastUsedAt   *time.Time `json:"last_used_at,omitempty"`
 	LastUsedBy   string     `json:"last_used_by,omitempty"`
 	UseCount     int        `json:"use_count,omitempty"`
+	// Confirmed: the person confirmed a captured entry is theirs (vault
+	// confirm) or replaced its value. Manual entries need no confirmation.
+	Confirmed bool `json:"confirmed,omitempty"`
 }
 
 // Status is the entry's state as people see it.
@@ -119,6 +130,8 @@ func (e Entry) Status() Status {
 	switch {
 	case e.Exposed:
 		return StatusExposed
+	case e.Source == SourceCaptured && !e.Confirmed:
+		return StatusUnconfirmed
 	case e.Host == "":
 		return StatusNeedsHost
 	default:
@@ -272,6 +285,9 @@ func (s *Store) Resolve(name string) (Entry, string, error) {
 		// name) or a leaked one. The person rotates it and replaces it.
 		return r.Entry, "", fmt.Errorf("%w: %s; rotate it with its issuer, then: defenseclaw sandbox vault replace %s", ErrExposed, name, name)
 	}
+	if r.Source == SourceCaptured && !r.Confirmed {
+		return r.Entry, "", fmt.Errorf("%w: %s; check it is yours, then: defenseclaw sandbox vault confirm %s", ErrUnconfirmed, name, name)
+	}
 	if r.Host == "" {
 		return r.Entry, "", fmt.Errorf("%w: %s (bind one with: defenseclaw sandbox vault bind %s --host HOST)", ErrNoHost, name, name)
 	}
@@ -365,11 +381,52 @@ func (s *Store) ReplaceValue(name, value string) (Entry, error) {
 		}
 		f.Entries[i].Value = value
 		f.Entries[i].Exposed = false
+		// The person typed this value: it is theirs.
+		f.Entries[i].Confirmed = true
 		f.Entries[i].UpdatedAt = s.now().UTC()
 		out = f.Entries[i].Entry
 		return nil
 	})
 	return out, err
+}
+
+// Confirm marks a captured entry as the person's own. An exposed entry
+// cannot be confirmed: its value must be rotated and replaced. Hint is the
+// last 4 characters of the value, for the person to recognise it.
+func (s *Store) Confirm(name string) (Entry, error) {
+	var out Entry
+	err := s.update(func(f *file) error {
+		i := f.index(name)
+		if i < 0 {
+			return fmt.Errorf("%w: %s", ErrNotFound, name)
+		}
+		if f.Entries[i].Exposed {
+			return fmt.Errorf("%w: %s; rotate it with its issuer and replace it (defenseclaw sandbox vault replace %s)", ErrExposed, name, name)
+		}
+		f.Entries[i].Confirmed = true
+		f.Entries[i].UpdatedAt = s.now().UTC()
+		out = f.Entries[i].Entry
+		return nil
+	})
+	return out, err
+}
+
+// Hint returns the last 4 characters of an entry's value (for a person to
+// recognise a captured secret before confirming it), or "" for a short one.
+func (s *Store) Hint(name string) (string, error) {
+	f, err := s.read()
+	if err != nil {
+		return "", err
+	}
+	i := f.index(name)
+	if i < 0 {
+		return "", fmt.Errorf("%w: %s", ErrNotFound, name)
+	}
+	v := f.Entries[i].Value
+	if len(v) < 16 {
+		return "", nil
+	}
+	return v[len(v)-4:], nil
 }
 
 // Bind sets the host an entry may be sent to.

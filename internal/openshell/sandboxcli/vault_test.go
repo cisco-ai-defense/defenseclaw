@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/vault"
 )
 
@@ -137,4 +138,53 @@ func TestVaultAddRefusesAMultiLineStdin(t *testing.T) {
 	}
 	ta = newTestApp(t, fakeVaultValue()+"\n\n")
 	ta.ok(t, ta.VaultAdd("PAY_KEY", "api.example.com", VaultValueOptions{Stdin: true}))
+}
+
+
+// A stopped sandbox created with a vault secret is not started again once
+// that secret was removed or changed: it would keep the old value.
+func TestStartRefusesAChangedVaultGrant(t *testing.T) {
+	ta := newTestApp(t, "")
+	st := vault.Open(ta.VaultDir())
+	if _, err := st.Add(vault.AddInput{Name: "PAY_KEY", Value: "value-p1", Host: "api.example.com"}); err != nil {
+		t.Fatal(err)
+	}
+	noChanges(ta)
+	ta.ok(t, ta.Run(bg, RunOptions{Harness: "claude", Vault: []string{"PAY_KEY"}}))
+	var sb *sandboxapi.Sandbox
+	for _, v := range ta.daemon.sandboxes {
+		sb = v
+	}
+	if sb == nil {
+		t.Fatal("no sandbox created")
+	}
+	if err := ta.vaultGrantsCurrent(sb); err != nil {
+		t.Fatalf("unchanged grant refused: %v", err)
+	}
+	if _, err := st.ReplaceValue("PAY_KEY", "value-p2"); err != nil {
+		t.Fatal(err)
+	}
+	if err := ta.vaultGrantsCurrent(sb); err == nil || !strings.Contains(err.Error(), "delete it") {
+		t.Fatalf("replaced grant = %v", err)
+	}
+	if err := st.Remove("PAY_KEY"); err != nil {
+		t.Fatal(err)
+	}
+	if err := ta.vaultGrantsCurrent(sb); err == nil || !strings.Contains(err.Error(), "no such secret") {
+		t.Fatalf("removed grant = %v", err)
+	}
+}
+
+func TestVaultConfirm(t *testing.T) {
+	ta := newTestApp(t, "")
+	st := vault.Open(ta.VaultDir())
+	if _, err := st.Capture(vault.CaptureInput{Value: fakeVaultValue(), Kind: "stripe-secret-key", From: "claudecode prompt in sandbox sb"}); err != nil {
+		t.Fatal(err)
+	}
+	ta.ok(t, ta.VaultConfirm("STRIPE_API_KEY", true))
+	has(t, ta.output(), "Captured from", "claudecode prompt in sandbox sb", "Ends with", fakeVaultValue()[len(fakeVaultValue())-4:], "confirmed STRIPE_API_KEY")
+	lacks(t, ta.output(), fakeVaultValue())
+	if _, _, err := st.Resolve("STRIPE_API_KEY"); err != nil {
+		t.Fatalf("confirmed entry = %v", err)
+	}
 }

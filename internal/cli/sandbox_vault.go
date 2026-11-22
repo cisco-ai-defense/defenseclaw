@@ -115,6 +115,22 @@ on the command line.`,
 		}),
 	}
 
+	var confirmYes bool
+	confirm := &cobra.Command{
+		Use:   "confirm <name>",
+		Short: "Confirm a captured secret is yours, so sandboxes can use it",
+		Long: `A secret DefenseClaw captured from a sandbox is unconfirmed until you confirm it:
+an agent in a sandbox can make a call that looks like your prompt, so a captured value
+may be one it planted. confirm shows where the secret came from and the last 4
+characters of its value, then asks.`,
+		Args:        nameArg("secret"),
+		Annotations: defaults,
+		RunE: sandboxRunE(func(_ context.Context, app *sandboxcli.App, _ *cobra.Command, args []string) error {
+			return app.VaultConfirm(args[0], confirmYes)
+		}),
+	}
+	confirm.Flags().BoolVarP(&confirmYes, "yes", "y", false, "do not ask")
+
 	var removeYes bool
 	remove := &cobra.Command{
 		Use:         "remove <name>",
@@ -127,6 +143,6 @@ on the command line.`,
 	}
 	remove.Flags().BoolVarP(&removeYes, "yes", "y", false, "do not ask")
 
-	cmd.AddCommand(list, show, add, replace, bind, rename, remove)
+	cmd.AddCommand(list, show, add, replace, confirm, bind, rename, remove)
 	return cmd
 }

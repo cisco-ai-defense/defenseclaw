@@ -1976,6 +1976,7 @@ defenseclaw sandbox vault list
 | --- | --- |
 | [`sandbox vault add`](#sandbox-vault-add) | Add a secret bound to one host (asks for the value with echo off). |
 | [`sandbox vault bind`](#sandbox-vault-bind) | Set the one host a secret may be sent to. |
+| [`sandbox vault confirm`](#sandbox-vault-confirm) | Confirm a captured secret is yours, so sandboxes can use it. |
 | [`sandbox vault list`](#sandbox-vault-list) | List your secrets (names, hosts and status; never values). |
 | [`sandbox vault remove`](#sandbox-vault-remove) | Remove a secret from the vault. |
 | [`sandbox vault rename`](#sandbox-vault-rename) | Rename a secret (the variable the sandbox sees). |
@@ -2050,6 +2051,25 @@ defenseclaw sandbox vault replace GITHUB_TOKEN
 | Flag | Takes | Default | Description |
 | --- | --- | --- | --- |
 | `--value-stdin` | switch |  | Read the value from standard input (one line). |
+{/* AUTOGEN-END: sandbox-flags */}
+
+### `sandbox vault confirm`
+
+Confirms that a secret DefenseClaw captured from a sandbox is yours. A captured
+secret is **unconfirmed** and no sandbox gets it until you confirm it: an agent
+in a sandbox can make a call that looks like your prompt, so a captured value
+may be one it planted. `confirm` shows where the secret came from, when, and
+the last 4 characters of its value, then asks. An exposed secret cannot be
+confirmed; replace it with a new value instead.
+
+```bash
+defenseclaw sandbox vault confirm GITHUB_TOKEN
+```
+
+{/* AUTOGEN-BEGIN: sandbox-flags vault confirm */}
+| Flag | Takes | Default | Description |
+| --- | --- | --- | --- |
+| `-y`, `--yes` | switch |  | Do not ask. |
 {/* AUTOGEN-END: sandbox-flags */}
 
 ### `sandbox vault bind`

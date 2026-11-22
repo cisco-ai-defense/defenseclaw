@@ -608,6 +608,9 @@ func (a *APIServer) newSandboxIngressHandler(st *sandboxIngressState) http.Handl
 		// Forwarding mode: nothing is evaluated on a managed host's daemon.
 		h = a.sandboxRelayForwarder(st)
 	}
+	// A harness's telemetry and notify bodies can carry the prompt: mask
+	// capturable credentials before anything relays or stores them.
+	h = a.sandboxVaultMaskMiddleware(st, h)
 	h = st.idem.middleware(h)
 	h = apiBodyLimitMiddleware(h, apiRequestBodyMaxBytes, st.otlpMaxBytes)
 	h = a.apiCSRFProtect(h)
