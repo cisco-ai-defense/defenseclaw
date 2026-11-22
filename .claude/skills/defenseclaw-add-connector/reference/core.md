@@ -9,7 +9,7 @@ Paths are repo-relative. Unless noted, Go files are under `internal/gateway/conn
 - `validNativeHookConnector` (`helpers.go`) accepts `[a-z0-9-]`.
 - `hookAPITokenScopeRE` (`hook_api_token.go`) is `^[a-z0-9][a-z0-9_-]*$`.
 - The shell helper `defenseclaw_shared_runtime_connector` (`hooks/_hardening.sh`) accepts `[a-z0-9_-]`.
-- `hookSidecarFailModeKey` (`internal/cli/hook.go`) upper-cases the ID and **strips** `-` and `_` to build `DEFENSECLAW_FAIL_MODE_<ID>`.
+- `hookSidecarFailModeKey` (`internal/hookcli/hook.go`) upper-cases the ID and **strips** `-` and `_` to build `DEFENSECLAW_FAIL_MODE_<ID>`.
 - The enterprise config key must match `^[a-z][a-z0-9_-]{0,63}$`.
 - Metric labels must pass `observability.IsStableToken`; anything else becomes `unknown`.
 
@@ -213,7 +213,7 @@ This is the Windows path, the enterprise-managed path, and the standalone Unix p
 
 **Entry.**
 - `cmd/defenseclaw-hook/main.go` accepts only `hook` and `notify` (anything else exits 2), plus `--version-json`. It passes through the Windows tombstone checks (`NativeHookRuntimeNoop`, `NativeConnectorHookNoop`) and then `cli.Execute`.
-- The hidden `hook` command (`internal/cli/hook.go`) has these flags:
+- The hidden `hook` command (`internal/hookcli/hook.go`) has these flags:
   - `--connector` (required), `--event`, `--api-addr`, `--fail-mode`;
   - hidden: `--hook-contract`, `--hook-surface`, `--input-file` (Cursor on Windows only), `--enterprise-managed`, `--foreign-hook-check`.
 - `buildHookOptionsForRuntime` then calls `hookexec.Run`.
@@ -255,7 +255,7 @@ This is the Windows path, the enterprise-managed path, and the standalone Unix p
 | `styleCodex` | block only on control events of the bound contract (`emitCodexBlock`) |
 | `styleHookEcho` | print `hook_output` and exit 0 (Cursor synthesizes event-native JSON) |
 | `styleHookEchoDecision` | print, then exit 2 if the decision is deny or block |
-| `styleHookDecisionStderr` | Kiro: no stdout; a deny prints the reason on stderr and exits 2 |
+| `styleHookDecisionStderr` | Kiro: no stdout except the v3 prompt note (`KiroV3PromptCheckedNote`); a deny prints the reason on stderr and exits 2 |
 | `styleActionStderr` | Amp: a block prints the reason on stderr and exits 2 |
 | `stylePluginBridge` | print the whole compacted response as one JSON line |
 
@@ -335,7 +335,7 @@ A new `SetupOpts` field must also be carried through the Unix worker protocol (e
 - Enterprise-managed hooks always fail closed. Their lock and status must say so (Devin, `b4aaedb3`).
 
 **Exit codes.**
-- The `hook` command's pre-run failures (cobra usage errors) exit 1. `hookFailureExitCode` (`internal/cli/hook.go`) makes Kiro exit 2 when fail-closed, because Kiro ignores status 1. Add your connector there if its vendor also ignores status 1.
+- The `hook` command's pre-run failures (cobra usage errors) exit 1. `hookFailureExitCode` (`internal/hookcli/hook.go`) makes Kiro exit 2 when fail-closed, because Kiro ignores status 1. Add your connector there if its vendor also ignores status 1.
 - `connector verify` exits 0 when clean, 1 on residue, 2 for an unknown connector.
 - Vendors differ on what blocks: exit 2 blocks for Claude, Devin, Kiro and Amp; JSON decides for Codex, Cursor, Copilot and Antigravity.
 

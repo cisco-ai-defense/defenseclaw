@@ -37,7 +37,7 @@ func TestManagedProtectHomeDownloadThenExecuteJoinsRelativePathsInTheHome(t *tes
 	if runtime.GOOS == "windows" {
 		t.Skip("a managed POSIX gateway; relative joins are POSIX only (#1390)")
 	}
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	base := t.TempDir()
 	home := filepath.Join(base, "Users", "r106u")
 	projectA := filepath.Join(home, "project")

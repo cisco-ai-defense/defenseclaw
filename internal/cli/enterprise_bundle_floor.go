@@ -14,6 +14,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 )
 
@@ -49,7 +50,7 @@ func newEnterpriseBundleFloorCheckCommand() *cobra.Command {
 		Args:         cobra.NoArgs,
 		SilenceUsage: true,
 		Annotations:  map[string]string{"defenseclaw.skip-daemon-bootstrap": "true", floorCheckMarkerAnnotation: floorCheckMarker},
-		RunE: func(_ *cobra.Command, _ []string) error {
+		RunE: func(cmd *cobra.Command, _ []string) error {
 			if strings.TrimSpace(version) == "" {
 				return bundleUsage("--product-version is required")
 			}
@@ -61,9 +62,15 @@ func newEnterpriseBundleFloorCheckCommand() *cobra.Command {
 			}
 			env, err := newUnixLifecycleEnv(runtime.GOOS)
 			if err != nil {
-				return withExitCode(&enterprisebundle.Error{Code: enterprisebundle.CodeStateInvalid, Detail: err.Error()}, bundleFloorRefusedExit)
+				return cliusage.WithExitCode(&enterprisebundle.Error{Code: enterprisebundle.CodeStateInvalid, Detail: err.Error()}, bundleFloorRefusedExit)
 			}
-			return withExitCode(env.BundleProductFloorRefusal(strings.TrimSpace(version)), bundleFloorRefusedExit)
+			if err := env.BundleProductFloorRefusal(strings.TrimSpace(version)); err != nil {
+				return cliusage.WithExitCode(err, bundleFloorRefusedExit)
+			}
+			// A release before route-only would leave every routed
+			// account pointing at a listener it does not have
+			// (rel-1-0-10 GAP-0647).
+			return cliusage.WithExitCode(routeOnlyDowngradeRefusal(cmd.Context(), env, strings.TrimSpace(version)), bundleFloorRefusedExit)
 		},
 	}
 	cmd.Flags().StringVar(&version, "product-version", "", "the DefenseClaw version about to be installed")

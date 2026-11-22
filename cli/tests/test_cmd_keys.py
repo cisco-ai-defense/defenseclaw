@@ -24,6 +24,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+import pytest
 from click.testing import CliRunner
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -377,22 +378,21 @@ def _dotenv_lines(tmp_path) -> dict[str, str]:
     return dict(line.split("=", 1) for line in body.splitlines() if "=" in line and not line.startswith("#"))
 
 
-def test_keys_set_gateway_token_replaces_an_adopted_copy_under_the_other_name(tmp_path) -> None:
-    # GAP-0847: the gateway writes an adopted OpenClaw token under both names.
-    # A token the operator saves under one name must not lose to the older copy
-    # under the other, which the gateway reads first at its next start.
+@pytest.mark.parametrize(
+    ("name", "other"),
+    [("OPENCLAW_GATEWAY_TOKEN", "DEFENSECLAW_GATEWAY_TOKEN"), ("DEFENSECLAW_GATEWAY_TOKEN", "OPENCLAW_GATEWAY_TOKEN")],
+)
+def test_keys_set_one_gateway_token_never_changes_the_other(tmp_path, name, other) -> None:
+    # R-TOK: the DefenseClaw master and the OpenClaw credential are separate
+    # values, so saving one leaves the other as it is.
     (tmp_path / ".env").write_text(
         "DEFENSECLAW_GATEWAY_TOKEN=stale-adopted\nOPENCLAW_GATEWAY_TOKEN=stale-adopted\nOTHER=keep\n",
         encoding="utf-8",
     )
     app = _make_app_context(str(tmp_path))
-    result = CliRunner().invoke(keys_cmd, ["set", "OPENCLAW_GATEWAY_TOKEN", "--value", "fresh-saved"], obj=app)
+    result = CliRunner().invoke(keys_cmd, ["set", name, "--value", "fresh-saved"], obj=app)
     assert result.exit_code == 0, result.output
-    assert _dotenv_lines(tmp_path) == {
-        "DEFENSECLAW_GATEWAY_TOKEN": "fresh-saved",
-        "OPENCLAW_GATEWAY_TOKEN": "fresh-saved",
-        "OTHER": "keep",
-    }
+    assert _dotenv_lines(tmp_path) == {name: "fresh-saved", other: "stale-adopted", "OTHER": "keep"}
     assert "fresh-saved" not in result.output
 
 

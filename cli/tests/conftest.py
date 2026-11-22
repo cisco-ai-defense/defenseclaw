@@ -65,6 +65,27 @@ def own_pids_outside_fake_listings(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(os, "getppid", lambda: 900002)
 
 
+@pytest.fixture
+def openclaw_proxy_topology(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Resolve OpenClaw's topology as on Linux and macOS: model traffic through the guardrail proxy.
+
+    On native Windows OpenClaw runs in native plugin hook mode with no
+    guardrail proxy (``platform_support.uses_guardrail_proxy``), so the
+    fail-mode provenance, the setup version gate and the doctor's guardrail
+    rows differ there. Tests of the proxy topology use this fixture so they
+    assert the same thing on every runner; every caller imports
+    ``uses_guardrail_proxy`` at call time. An explicit ``os_name`` still wins.
+    """
+    from defenseclaw import platform_support
+
+    resolve = platform_support.uses_guardrail_proxy
+    monkeypatch.setattr(
+        platform_support,
+        "uses_guardrail_proxy",
+        lambda name, os_name=None: resolve(name, "linux" if os_name is None else os_name),
+    )
+
+
 @pytest.fixture(autouse=True)
 def _isolated_windows_identity(tmp_path_factory, monkeypatch: pytest.MonkeyPatch):
     """Keep tests away from the developer's real Windows profile.
@@ -93,6 +114,31 @@ def _isolated_windows_identity(tmp_path_factory, monkeypatch: pytest.MonkeyPatch
     original_setenv = pytest.MonkeyPatch.setenv
     monkeypatch.setattr(pytest.MonkeyPatch, "setenv", setenv)
     yield
+
+
+@pytest.fixture(autouse=True)
+def _no_ambient_user_home(tmp_path_factory, monkeypatch: pytest.MonkeyPatch):
+    """Start every test in an empty user home (GAP-0457).
+
+    Setup and uninstall commands read the connector roster from the account's
+    config.yaml and connector folders. A shared build box (or a developer
+    machine) has a real ~/.defenseclaw with another connector set up, so the
+    setup-guardrail and uninstall tests refused with "Claude Code is not set
+    up here (set up: openclaw)", while CI, whose home is empty, passed.
+    Tests that need a home (or a DefenseClaw/connector home) still set it
+    after this fixture runs, and win.
+    """
+    if os.name == "nt":
+        return  # _isolated_windows_identity covers the Windows profile variables
+    monkeypatch.setenv("HOME", str(tmp_path_factory.mktemp("empty-home")))
+    for name in (
+        "DEFENSECLAW_HOME",
+        "DEFENSECLAW_CONFIG",
+        "CODEX_HOME",
+        "CLAUDE_CONFIG_DIR",
+        "HERMES_HOME",
+    ):
+        monkeypatch.delenv(name, raising=False)
 
 
 # The modules that test the Windows launcher preflight, or fake the launcher it probes.

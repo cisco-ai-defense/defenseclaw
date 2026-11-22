@@ -374,8 +374,14 @@ func TestBusyGatewayNeverDeniesBeforeTheAnswerBudget(t *testing.T) {
 				busy(w, reason)
 			})
 			result, elapsed := runAgainstGateway(t, "claudecode", addr, managedCodex)
-			if !blocked(result) || !strings.Contains(result.stdout+result.stderr, managedGatewayNoAnswerReason) {
-				t.Fatalf("code=%d stdout=%q stderr=%q, want a block naming the slow gateway", result.code, result.stdout, result.stderr)
+			// A full gateway gave no answer; an account over its own budget
+			// is named by its documented code (S8 review P3-8).
+			wantCode := managedGatewayNoAnswerReason
+			if reason == callerBusyReason {
+				wantCode = callerBusyReason
+			}
+			if !blocked(result) || !strings.Contains(result.stdout+result.stderr, wantCode) {
+				t.Fatalf("code=%d stdout=%q stderr=%q, want a block naming %s", result.code, result.stdout, result.stderr, wantCode)
 			}
 			if elapsed < budget-50*time.Millisecond || elapsed > budget+500*time.Millisecond {
 				t.Fatalf("the busy call was denied after %s, want at the end of the %s budget", elapsed, budget)

@@ -856,6 +856,7 @@
               "UserPromptExpansion",
               "PreToolUse",
               "PermissionRequest",
+              "PostToolUse",
               "TaskCreated",
               "TaskCompleted",
               "TeammateIdle",
@@ -872,7 +873,7 @@
           "notes": [
             "Pinned to Claude Code >=2.1.154,<2.1.219: 2.1.152 introduced MessageDisplay and 2.1.154 added the plugin defaultEnabled semantics required by inventory.",
             "Claude Code PreToolUse supports native HITL via permissionDecision=ask.",
-            "PostToolUse findings are advisory because the inspected tool side effects have already occurred.",
+            "PostToolUse blocks render decision=block with a reason the model reads and a systemMessage the user sees; the tool side effects have already occurred, so the block cannot withhold the result (GAP-0605).",
             "PostToolBatch can block continuation before the next model call, but cannot undo completed batch side effects.",
             "ConfigChange is blockable except when source=policy_settings, where Claude Code ignores blocking decisions."
           ]
@@ -1027,6 +1028,7 @@
               "UserPromptExpansion",
               "PreToolUse",
               "PermissionRequest",
+              "PostToolUse",
               "PostToolBatch",
               "TaskCreated",
               "TaskCompleted",
@@ -1045,7 +1047,7 @@
             "Pinned to Claude Code >=2.1.219: 2.1.219 added DirectoryAdded after a working directory is registered mid-session.",
             "DirectoryAdded is a synchronous 30-second observation with no matcher and no block, ask, or decision authority; the directory has already been added when the hook runs.",
             "Claude Code PreToolUse supports native HITL via permissionDecision=ask.",
-            "PostToolUse and PostToolBatch findings are advisory because their payloads are returned bytes, not typed action requests; command/path enforcement stays on PreToolUse.",
+            "PostToolUse blocks render decision=block with a reason the model reads and a systemMessage the user sees; the result was already read, so the block cannot withhold it (GAP-0605). PostToolBatch findings are advisory. Command/path enforcement stays on PreToolUse.",
             "ConfigChange is blockable except when source=policy_settings, where Claude Code ignores blocking decisions.",
             "Claude Desktop's bundled Claude Code engine is a hook host too: Claude Cowork runs the Claude Code hooks of managed settings and of account plugins as children of that engine. The DefenseClaw Cowork plugin registers ten of this contract's events (CoworkPluginHookEvents: SessionStart, UserPromptSubmit, PreToolUse, PermissionRequest, PostToolUse, PostToolUseFailure, SubagentStart, SubagentStop, Stop, SessionEnd), measured on Claude Desktop 4.4212.0 (engine 2.1.309) and 4.16336.0 (engine 2.1.317)."
           ]
@@ -1193,7 +1195,11 @@
                 "on_session_finalize",
                 "on_session_reset",
                 "subagent_start",
-                "subagent_stop"
+                "subagent_stop",
+                "transform_tool_result",
+                "transform_terminal_output",
+                "pre_approval_request",
+                "post_approval_response"
               ]
             },
             "covered_tool_surfaces": [
@@ -1355,7 +1361,12 @@
                 "on_session_finalize",
                 "on_session_reset",
                 "subagent_start",
-                "subagent_stop"
+                "subagent_stop",
+                "transform_tool_result",
+                "transform_terminal_output",
+                "pre_approval_request",
+                "post_approval_response",
+                "post_llm_call"
               ]
             },
             "covered_tool_surfaces": [
@@ -1544,7 +1555,9 @@
                 "subagentStart",
                 "subagentStop",
                 "stop",
-                "workspaceOpen"
+                "workspaceOpen",
+                "afterAgentResponse",
+                "afterAgentThought"
               ]
             },
             "covered_tool_surfaces": [

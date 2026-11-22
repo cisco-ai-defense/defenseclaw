@@ -71,10 +71,17 @@ const (
 	ErrorUnsupportedPolicy   ErrorCode = "unsupported_policy"
 )
 
-// Error is safe for mandatory health reporting. It never includes a
-// destination name, path, endpoint, secret reference, secret value, or wrapped
-// dependency error.
-type Error struct{ code ErrorCode }
+// Error is safe for mandatory health reporting. Its Error text never includes
+// a destination name, path, endpoint, secret reference, secret value, or
+// wrapped dependency error. problem is the operator line the factory writes
+// to stderr (it may name the administrator's own path); summary is the same
+// cause without a path or endpoint, for the gateway's bootstrap error
+// (GAP-0272).
+type Error struct {
+	code    ErrorCode
+	problem string
+	summary string
+}
 
 func (err *Error) Error() string {
 	if err == nil {
@@ -168,6 +175,11 @@ type Factory struct {
 	managedProvider  managedaid.ProviderResolver
 	canaryMu         sync.RWMutex
 	canary           map[uint64]*otlpGenerationCanaryRegistry
+	// noteMu guards the operator lines already written and the last
+	// preparation failure (destination_notes.go).
+	noteMu      sync.Mutex
+	noted       map[string]struct{}
+	lastFailure string
 }
 
 var _ observabilityruntime.DestinationAdapterFactory = (*Factory)(nil)
@@ -196,7 +208,23 @@ func NewFactory(options Options) (*Factory, error) {
 	}, nil
 }
 
+// PrepareDestination prepares one log adapter. A failure also writes one
+// line that names the destination, the cause and the fix, and is kept for
+// LastPreparationFailure: the runtime reduces it to a content-free code, and
+// the gateway stopped with only runtime_unavailable (GAP-0890, GAP-0272).
 func (factory *Factory) PrepareDestination(
+	ctx context.Context,
+	destination config.ObservabilityV8EffectiveDestination,
+	resourceContext telemetry.V8ResourceContext,
+) (delivery.Adapter, observabilityruntime.DestinationAdapterCleanup, error) {
+	adapter, cleanup, err := factory.prepareDestination(ctx, destination, resourceContext)
+	if err != nil {
+		factory.noteFailure(ctx, destination, err)
+	}
+	return adapter, cleanup, err
+}
+
+func (factory *Factory) prepareDestination(
 	ctx context.Context,
 	destination config.ObservabilityV8EffectiveDestination,
 	resourceContext telemetry.V8ResourceContext,
@@ -233,20 +261,18 @@ func (factory *Factory) PrepareDestination(
 			Compress: rotation.Compress, FailOnOpenError: factory.secureClient,
 		})
 		if err != nil {
-			// Secure Client keeps the origin/main startup refusal without
-			// this line (GAP-1018).
-			if !nilInterface(factory.stderr) && !factory.secureClient {
-				// The destination, the path and the rule: start failed with
-				// only runtime_unavailable (GAP-0890).
-				reason := local.JSONLPathProblem(destination.Transport.Path)
-				if reason == "" {
-					reason = "cannot be opened safely: the file or its folder belongs to an account the gateway does not trust, or the folder cannot be created"
-				}
-				_, _ = fmt.Fprintf(factory.stderr,
-					"defenseclaw: observability destination %q: %s %s; fix the path or remove the destination\n",
-					destination.Name, destination.Transport.Path, reason)
+			// The destination, the path and the rule: start failed with only
+			// runtime_unavailable (GAP-0890). PrepareDestination writes it.
+			reason := local.JSONLPathProblem(destination.Transport.Path)
+			if reason == "" {
+				reason = "cannot be opened safely: the file or its folder belongs to an account the gateway does not trust, or the folder cannot be created"
 			}
-			return nil, cleanup, newError(ErrorAdapterPrepare)
+			return nil, cleanup, &Error{
+				code:    ErrorAdapterPrepare,
+				problem: destination.Transport.Path + " " + reason + "; fix the path",
+				// The reason may name folders; the summary names none.
+				summary: "its jsonl path cannot be opened safely; fix the path",
+			}
 		}
 		if adapter.OpenDeferred() && !nilInterface(factory.stderr) {
 			// The administrator's own destination name and file path: the one
@@ -361,10 +387,14 @@ func (factory *Factory) prepareOTLPLogs(
 			ScheduledDelay:      time.Duration(batch.ScheduledDelayMS) * time.Millisecond,
 		},
 		ManagedService: factory.managedService,
+		// Secure Client keeps the start refusal (GAP-1018); elsewhere a
+		// refused DNS answer starts the destination deferred (GAP-0272).
+		DeferProhibitedAnswer: !factory.secureClient,
 	}, otlp.Dependencies{Resolver: factory.resolver, Dialer: factory.dialer})
 	if prepareErr != nil {
-		return nil, noResource, newError(ErrorAdapterPrepare)
+		return nil, noResource, adapterPrepareError(prepareErr)
 	}
+	factory.noteOTLPDeferrals(destination, prepared)
 	adapter, adapterErr := newOTLPLogAdapterSafely(ctx, prepared, otlp.LogResourceSnapshot{
 		SchemaURL: resourceContext.SchemaURL(), Values: resourceContext.Values(),
 		DroppedAttributesCount: resourceContext.ResourceDroppedAttributesCount(),
@@ -432,11 +462,12 @@ func (factory *Factory) prepareSplunk(
 			AllowPrivateNetworks: network.AllowPrivateNetworks,
 			AllowCGNAT:           network.AllowCGNAT,
 			Resolver:             factory.resolver, Dialer: factory.dialer,
+			DeferProhibitedAnswer: !factory.secureClient,
 		},
-		Observer: factory.warnings,
+		Observer: factory.destinationWarnings(destination),
 	})
 	if prepareErr != nil {
-		return nil, noResource, newError(ErrorAdapterPrepare)
+		return nil, noResource, adapterPrepareError(prepareErr)
 	}
 	cleanup := retryableCleanup(func(context.Context) error {
 		adapter.CloseIdleConnections()
@@ -479,11 +510,12 @@ func (factory *Factory) prepareHTTPJSONL(
 			AllowPrivateNetworks: network.AllowPrivateNetworks,
 			AllowCGNAT:           network.AllowCGNAT,
 			Resolver:             factory.resolver, Dialer: factory.dialer,
+			DeferProhibitedAnswer: !factory.secureClient,
 		},
-		Observer: factory.warnings,
+		Observer: factory.destinationWarnings(destination),
 	})
 	if prepareErr != nil {
-		return nil, noResource, newError(ErrorAdapterPrepare)
+		return nil, noResource, adapterPrepareError(prepareErr)
 	}
 	cleanup := retryableCleanup(func(context.Context) error {
 		adapter.CloseIdleConnections()

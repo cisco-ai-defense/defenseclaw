@@ -6,6 +6,7 @@
 package gateway
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strconv"
@@ -96,6 +97,16 @@ func resolveWindowsDirectoryFacts(sid string, upnWait time.Duration) (useridenti
 // verifiedIdentityDirectory returns the directory facts of a verified SID.
 func verifiedIdentityDirectory(identity string, block bool) (useridentity.DirectoryFacts, bool) {
 	return windowsDirectoryFacts(identity, block)
+}
+
+// awaitVerifiedIdentityDirectory waits, at most wait or until ctx ends, for
+// the first directory lookup of a verified SID that has no cached facts yet
+// (identityCache.awaitCold).
+func awaitVerifiedIdentityDirectory(ctx context.Context, identity string, wait time.Duration) {
+	sid := strings.ToUpper(strings.TrimSpace(identity))
+	if strings.HasPrefix(sid, "S-1-") {
+		peerDirectoryCache().awaitCold(ctx, sid, wait)
+	}
 }
 
 // exemptIdentityDirectory returns the directory facts exempt matches a hook

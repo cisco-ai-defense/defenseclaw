@@ -1041,7 +1041,7 @@ func (o EnterpriseOpenShellConfig) SandboxDriver(goos string) string {
 // (default docker) and F's driver_fallback (a profile may only tighten it to
 // none). It is "" where no fallback applies: macOS and the
 // docker driver.
-func (o EnterpriseOpenShellConfig) SandboxDriverFallback(goos string, floor OpenShellAdminConfig) string {
+func (o EnterpriseOpenShellConfig) SandboxDriverFallback(goos string, floor SandboxAdminConfig) string {
 	if goos == "darwin" || o.SandboxDriver(goos) == EnterpriseOpenShellDriverDocker {
 		return ""
 	}

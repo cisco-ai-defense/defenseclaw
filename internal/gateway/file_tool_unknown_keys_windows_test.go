@@ -89,6 +89,9 @@ func TestWindowsFileToolExtraKeyStateWriteIsBlocked(t *testing.T) {
 					args[k] = v
 				}
 				got, out := postWindowsFileTool(t, f, call.connector, call.tool, args)
+				// A proven state write is the HIGH alert of the default pack
+				// that names the state rule (GAP-0747 owner tiering 2026-11-15T15:20Z).
+				got = gap0747StateVerdict(got, out, false)
 				if got != row.want {
 					t.Errorf("%s: %s of %s is %q, want %q: %.500s", name, call.tool, row.path, got, row.want, out)
 				}

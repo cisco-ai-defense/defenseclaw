@@ -19,7 +19,7 @@ func actionClientProvedSafeVariableTargets(command, cwd, home string) bool {
 }
 
 func actionClientProvedSafeVariableTargetsWithBindings(command, cwd, home string, trackBindings bool) bool {
-	if actionClientLoopCopySourceStartupUnknown() {
+	if shellStartupUnknownForCommand(command) {
 		return false
 	}
 	file, ok := parseShell(command)
@@ -408,7 +408,7 @@ func actionClientQuotedVariableTarget(word *syntax.Word) bool {
 // ordinary on its own.
 func actionStartupConditionalAliasRedirect(command string) bool {
 	if !strings.Contains(command, "if ") || !strings.Contains(command, ">") ||
-		!strings.Contains(command, "$") || !actionClientLoopCopySourceStartupUnknown() {
+		!strings.Contains(command, "$") || !shellStartupUnknownForCommand(command) {
 		return false
 	}
 	file, ok := parseShell(command)
@@ -448,7 +448,7 @@ func actionStartupConditionalAliasRedirect(command string) bool {
 // that narrow proof out of the client's positive-only decision; the managed
 // gateway cannot otherwise distinguish the transient value from a write.
 func actionClientProvedOverwrittenRedirect(command, cwd, home string) bool {
-	if actionClientLoopCopySourceStartupUnknown() {
+	if shellStartupUnknownForCommand(command) {
 		return false
 	}
 	file, ok := parseShell(command)

@@ -985,8 +985,10 @@ public static class DcsfRemove {
             # After the services stopped: the deletion of StateRoot. The
             # tree removal is replaced by the plain recursive delete it ends
             # with, because its trusted-root checks refuse a scratch tree.
+            $script:dcsfTreeRemovals = 0
             function script:Remove-DefenseClawManagedTree {
                 param([string]$Path, [string]$RequiredBase, [string]$Label, [string]$AllowAFUnixSocketAt)
+                $script:dcsfTreeRemovals++
                 if ([IO.File]::Exists([IO.Path]::Combine($Path, 'refuse'))) {
                     throw "refusing $Label reparse point: $Path"
                 }
@@ -1048,24 +1050,33 @@ public static class DcsfRemove {
             # Any other deletion failure is not retried and keeps its message.
             $layout = New-TestState 'other'
             [IO.File]::WriteAllText([IO.Path]::Combine($layout.StateRoot, 'refuse'), 'x')
-            $clock = [Diagnostics.Stopwatch]::StartNew()
+            $script:dcsfTreeRemovals = 0
             Test-Refused 'deletion that fails for another reason' { Remove-DefenseClawPurgedStateRoot -Layout $layout } '^refusing StateRoot reparse point: '
-            if ($clock.ElapsedMilliseconds -ge 1500) {
-                $failures.Add("a failure that is not a file in use was retried ($($clock.ElapsedMilliseconds) ms)")
+            if ($script:dcsfTreeRemovals -ne 1) {
+                $failures.Add("a failure that is not a file in use was retried ($($script:dcsfTreeRemovals) tree removals)")
             }
 
-            # The Secure Client profile keeps the single deletion.
+            # The Secure Client profile keeps the single deletion. A retry is
+            # counted, not timed: the tree removal above counts its calls, and
+            # Secure Client must make exactly one, keeping the original
+            # file-in-use error. The former check read "ended within 1.5 s" as
+            # "not retried": one recursive delete of the held tree took 6-7 ms
+            # on dc-s7-win, and a deletion that ran once (its message was the
+            # original in-use error) still failed that bound on a hosted
+            # Windows PowerShell 5.1 runner (rel-1-0-10:GAP-1233, #1457 job
+            # 134343225809).
             $layout = New-TestState 'secure-client'
             $reader = Start-TestReader ([IO.Path]::Combine($layout.RuntimeDirectory, 'audit.db')) 120000
             Set-DefenseClawEnterpriseProfile -EnterpriseProfile SecureClient
-            $clock = [Diagnostics.Stopwatch]::StartNew()
+            $script:dcsfTreeRemovals = 0
             try {
                 Remove-DefenseClawPurgedStateRoot -Layout $layout
                 $failures.Add('Secure Client deletion of a held audit.db succeeded')
             }
             catch {
-                if ($_.Exception.Message -match '^uninstall_in_use' -or $clock.ElapsedMilliseconds -ge 1500) {
-                    $failures.Add("Secure Client deletion was retried or reworded: $($_.Exception.Message)")
+                if ($script:dcsfTreeRemovals -ne 1 -or $_.Exception.Message -match '^uninstall_in_use' -or
+                    -not (Test-DefenseClawFileInUseError -ErrorRecord $_)) {
+                    $failures.Add("Secure Client deletion was retried or reworded ($($script:dcsfTreeRemovals) tree removals): $($_.Exception.Message)")
                 }
             }
             Set-DefenseClawEnterpriseProfile -EnterpriseProfile Standalone

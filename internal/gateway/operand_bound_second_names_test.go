@@ -20,7 +20,7 @@ import (
 // in every tier, below the bound and above it (GAP-0943). An ordinary name in
 // an ordinary folder stays the unresolved remainder that the tier decides.
 func TestSecondNameOfAProtectedFilePastTheOperandBoundBlocks(t *testing.T) {
-	home, cwd := r104ReviewHome(t)
+	home, cwd := r104ReviewHomeNoAlias(t)
 	if err := os.Link(filepath.Join(home, ".ssh", "authorized_keys"), filepath.Join(cwd, "hl")); err != nil {
 		t.Skipf("no hard links here: %v", err)
 	}
@@ -48,10 +48,10 @@ func TestSecondNameOfAProtectedFilePastTheOperandBoundBlocks(t *testing.T) {
 				Connector: "claudecode", EnforcementCapable: true,
 			}
 			findings := dispatchTrustedAction(withShareBodyStrict(t.Context(), func() bool { return false }), request)
-			if got := buildVerdict(findings, "tool_call").Action; got != row.want {
+			if got := operandBoundTierAction(findings, false); got != row.want {
 				t.Errorf("%s, want %s; findings %v", got, row.want, findings)
 			}
-			alert := slices.ContainsFunc(findings, func(f RuleFinding) bool { return f.RuleID == operandBoundRuleID })
+			alert := slices.ContainsFunc(findings, operandBoundTruncated)
 			if alert != row.bound {
 				t.Errorf("bound alert %v, want %v", alert, row.bound)
 			}

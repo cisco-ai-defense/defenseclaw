@@ -17,7 +17,7 @@ import (
 // observe. Its digest record is receipts/installer.sha256. Reads, running the
 // saved installer, the DefenseClaw CLI and a project look-alike stay allowed.
 func TestR105GAP1099SavedInstallerIsActiveState(t *testing.T) {
-	home, cwd := r104ReviewHome(t)
+	home, cwd := r104ReviewHomeNoAlias(t)
 	// The active home is os.UserHomeDir, which reads USERPROFILE (not HOME)
 	// on Windows; without it the fixture state is outside the active home
 	// there and every write row is an ordinary file write.

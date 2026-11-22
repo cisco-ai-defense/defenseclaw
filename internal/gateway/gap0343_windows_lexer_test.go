@@ -53,8 +53,10 @@ func TestGAP0343PowerShellTailAfterBalancedValue(t *testing.T) {
 						{`Clear-Content $HOME\.defenseclaw\config.yaml`, "tamper.detector_state_write"},
 					} {
 						findings := judge(tc.prefix + tail.command)
+						// A proven state write alerts (HIGH) outside strict.
 						if findingWithID(findings, tail.finding) == nil ||
-							buildVerdict(findings, "tool_call").Action != guardrailActionBlock {
+							(tail.finding == gap0747StateRule && gap0747DefaultTierCheck(findings, true) != "") ||
+							(tail.finding != gap0747StateRule && buildVerdict(findings, "tool_call").Action != guardrailActionBlock) {
 							t.Fatalf("tail %q: findings %v, want blocking %s", tail.command, findingIDs(findings), tail.finding)
 						}
 					}

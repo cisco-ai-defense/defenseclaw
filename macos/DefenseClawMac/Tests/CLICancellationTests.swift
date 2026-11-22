@@ -30,6 +30,7 @@ struct DoctorCheck {
 struct CLICancellationTests {
     static func main() async {
         CLIProcessGroupLauncher.execIfRequested()
+        await readOnlyCommandsDoNotClaimConfigurationChanges()
         await exclusiveUpgradeOperationBlocksOtherCommands()
         await launcherRejectsExternalInvocation()
         await launcherPreservesArgumentsAndStandardInput()
@@ -43,6 +44,22 @@ struct CLICancellationTests {
         await standardInputIsWrittenAndClosed()
         cancelledResultIsNotSuccessful()
         print("CLICancellationTests passed")
+    }
+
+    @MainActor
+    private static func readOnlyCommandsDoNotClaimConfigurationChanges() async {
+        let store = CommandActivityStore(runner: CLIRunner())
+        let read = await store.run(title: "Read status", binary: "/usr/bin/true",
+                                   arguments: ["setup", "redaction", "status"], mutation: false,
+                                   category: "setup", origin: "Test")
+        expect(read.succeeded && store.entries.first?.sideEffects.isEmpty == true,
+               "a read-only setup command must not claim configuration changes")
+        _ = await store.run(title: "Explicit read effect", binary: "/usr/bin/true", arguments: [], mutation: false,
+                            category: "info", origin: "Test", successEffects: ["Snapshot refreshed"])
+        expect(store.entries.first?.sideEffects == ["Snapshot refreshed"], "explicit read effects remain available")
+        _ = await store.run(title: "Mock mutation", binary: "/usr/bin/true", arguments: ["setup"], mutation: true,
+                            category: "setup", origin: "Test")
+        expect(store.entries.first?.sideEffects == ["Configuration updated"], "successful mutations retain their state-change effect")
     }
 
     private static func exclusiveUpgradeOperationBlocksOtherCommands() async {

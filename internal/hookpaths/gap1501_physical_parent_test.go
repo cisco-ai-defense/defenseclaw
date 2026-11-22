@@ -32,9 +32,7 @@ func TestResolveListsThePhysicalParentOfALinkedCWD(t *testing.T) {
 		t.Fatal(err)
 	}
 	linked := filepath.Join(home, "linked-inner")
-	if err := os.Symlink(inner, linked); err != nil {
-		t.Fatal(err)
-	}
+	testSymlink(t, inner, linked)
 	t.Setenv("HOME", home)
 	payload, err := json.Marshal(map[string]any{"tool_name": "exec_command", "cwd": linked,
 		"tool_input": map[string]any{"cmd": "printf x >> ../AGENTS.md"}})

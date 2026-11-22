@@ -103,16 +103,30 @@ func (cycle *managedInventoryPublishCycle) trackSkills(
 
 // skillScanComplete reports whether a skill missing from report can be
 // trusted as removed: the skill detector and every per-user scan finished and
-// no skill folder was cut short. Errors elsewhere in the scan (a protected
-// folder another detector could not read) do not hold removals back.
+// no skill folder was cut short. Explicit model-file errors do not hold skill
+// removals back; global, aggregate and unclassified errors remain incomplete.
 func skillScanComplete(report *inventory.AIDiscoveryReport) bool {
-	if report == nil || strings.TrimSpace(report.Summary.ScanID) == "" {
+	if report == nil || strings.TrimSpace(report.Summary.ScanID) == "" ||
+		strings.TrimSpace(report.Summary.Result) == "" {
+		return false
+	}
+	// A partial result without a detector-specific cause does not establish
+	// that skills were fully enumerated. Explicit errors in unrelated detectors
+	// may still leave this collection complete, unlike the whole daily bundle.
+	if !aiDiscoveryReportComplete(report) && len(report.Summary.DetectorErrors) == 0 {
 		return false
 	}
 	for name := range report.Summary.DetectorErrors {
-		if strings.HasPrefix(name, "skill") || strings.HasPrefix(name, "user_scan") {
-			return false
+		// runScan measures model_file separately after the skill detectors and
+		// may also report an error scoped to one model root. Other keys may
+		// describe missing homes/sandboxes or a global scan/state failure.
+		if name == "model_file" {
+			continue
 		}
+		if root, ok := strings.CutPrefix(name, "model_file:"); ok && strings.TrimSpace(root) != "" {
+			continue
+		}
+		return false
 	}
 	for _, signal := range report.Signals {
 		if signal.Category == inventory.SignalSkill && signal.Partial {

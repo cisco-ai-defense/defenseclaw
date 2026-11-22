@@ -57,7 +57,7 @@ func TestManagedAgentSettingsThroughProjectLinkAreSelfProtection(t *testing.T) {
 			for _, managed := range []bool{false, true} {
 				for _, command := range protected {
 					got := postManagedSettingsShellCell(t, home, project, connector, pack, managed, command)
-					if !strings.HasPrefix(got, `{"action":"block"`) || !strings.Contains(got, "tamper.detector_state_write") {
+					if !gap0747HookBlocked(got, pack) || !strings.Contains(got, "tamper.detector_state_write") {
 						t.Errorf("%s managed=%t pack=%q: %s = %.160s, want protected block", connector, managed, pack, command, got)
 					}
 				}

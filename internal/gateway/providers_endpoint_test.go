@@ -354,6 +354,7 @@ func TestHandleReloadProviders_MergesNewOverlay(t *testing.T) {
 }
 
 func TestProviderResponsesReportMalformedOverlayNotApplied(t *testing.T) {
+	unmanagedProviderRegistry(t)
 	path := filepath.Join(t.TempDir(), "custom-providers.json")
 	t.Setenv("DEFENSECLAW_CUSTOM_PROVIDERS_PATH", path)
 	t.Cleanup(func() {
@@ -423,6 +424,7 @@ func TestProviderResponsesReportMalformedOverlayNotApplied(t *testing.T) {
 // over ~/.defenseclaw so tests and container installs can both
 // relocate the overlay without patching code.
 func TestCustomProvidersPath_EnvOverride(t *testing.T) {
+	unmanagedProviderRegistry(t)
 	// An absolute path for this OS: the override refuses relative paths, and
 	// "/tmp/..." is not absolute on Windows.
 	want := filepath.Join(t.TempDir(), "my-overlay.json")

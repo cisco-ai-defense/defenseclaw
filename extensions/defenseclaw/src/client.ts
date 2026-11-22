@@ -29,8 +29,6 @@ import type {
   ScanResult,
   BlockEntry,
   AllowEntry,
-  DaemonStatus,
-  AdmissionResult,
   CorrelationContext,
   OutboundSidecarRequestLog,
 } from "./types.js";
@@ -159,6 +157,9 @@ export class DaemonClient {
       outboundAgentInstanceId: outboundInstance,
     });
     h[HEADER_DEFENSECLAW_CLIENT] = "openclaw-plugin";
+    // The plugin credential is the openclaw connector-scoped token; the
+    // gateway accepts it on /api/v1/inspect/* only with this header.
+    h["X-DefenseClaw-Connector"] = "openclaw";
     const token = this.token;
     if (token) {
       // The listener proves it is this account's gateway before a caller
@@ -180,50 +181,15 @@ export class DaemonClient {
     };
   }
 
-  async status(): Promise<ApiResponse<DaemonStatus>> {
-    return this.get<DaemonStatus>("/status");
-  }
-
   async submitScanResult(result: ScanResult): Promise<ApiResponse<void>> {
     return this.post<void>("/scan/result", result);
   }
 
-  async block(
-    targetType: string,
-    targetName: string,
-    reason: string,
-  ): Promise<ApiResponse<void>> {
-    return this.post<void>("/enforce/block", {
-      target_type: targetType,
-      target_name: targetName,
-      reason,
-    });
-  }
-
-  async allow(
-    targetType: string,
-    targetName: string,
-    reason: string,
-  ): Promise<ApiResponse<void>> {
-    return this.post<void>("/enforce/allow", {
-      target_type: targetType,
-      target_name: targetName,
-      reason,
-    });
-  }
-
-  async unblock(
-    targetType: string,
-    targetName: string,
-  ): Promise<ApiResponse<void>> {
-    return this.delete<void>("/enforce/block", {
-      target_type: targetType,
-      target_name: targetName,
-    });
-  }
-
-  async listAlerts(limit = 50): Promise<ApiResponse<AdmissionResult[]>> {
-    return this.get<AdmissionResult[]>(`/alerts?limit=${limit}`);
+  /** Guardrail settings for the separate-user layout (GET /api/v1/openclaw/runtime). */
+  async runtime(hookMode?: string, timeoutMs?: number): Promise<ApiResponse<Record<string, unknown>>> {
+    // hook_mode tells the gateway which mode this plugin runs (status shows it).
+    const query = hookMode ? `?hook_mode=${encodeURIComponent(hookMode)}` : "";
+    return this.doRequest<Record<string, unknown>>("GET", `/api/v1/openclaw/runtime${query}`, undefined, undefined, timeoutMs);
   }
 
   async listBlocked(): Promise<ApiResponse<BlockEntry[]>> {
@@ -256,10 +222,6 @@ export class DaemonClient {
     return this.doRequest<T>("POST", path, body);
   }
 
-  private delete<T>(path: string, body: unknown): Promise<ApiResponse<T>> {
-    return this.doRequest<T>("DELETE", path, body);
-  }
-
   /**
    * POST body to path and return the raw answer, over a connection that
    * proved it is this account's gateway. The tool check uses it: its verdict
@@ -281,8 +243,9 @@ export class DaemonClient {
     path: string,
     body?: unknown,
     correlationPartial?: Partial<CorrelationContext>,
+    timeoutMs?: number,
   ): Promise<ApiResponse<T>> {
-    const res = await this.sendRaw(method, path, body, correlationPartial, this.timeoutMs);
+    const res = await this.sendRaw(method, path, body, correlationPartial, timeoutMs ?? this.timeoutMs);
     if (res.status === 0) {
       return { ok: false, error: res.error ?? "request failed", status: 0 };
     }
@@ -322,6 +285,7 @@ export class DaemonClient {
         "Content-Type": "application/json",
         Accept: "application/json",
         [HEADER_DEFENSECLAW_CLIENT]: "openclaw-plugin",
+        "X-DefenseClaw-Connector": "openclaw",
         ...correlationHeaders,
       };
       if (token) {

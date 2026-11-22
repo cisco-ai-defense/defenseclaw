@@ -542,6 +542,14 @@ class AIDiscoveryRow:
         return format_confidence(self.presence_score, self.presence_band)
 
     @property
+    def identity_compact_label(self) -> str:
+        return format_confidence(self.identity_score, "")
+
+    @property
+    def presence_compact_label(self) -> str:
+        return format_confidence(self.presence_score, "")
+
+    @property
     def model_country_label(self) -> str:
         if self.model_provenance is None:
             return ""
@@ -1173,7 +1181,9 @@ class AIDiscoveryPanelModel:
             "Presence",
         )
 
-    def data_table_rows(self) -> tuple[tuple[str, ...], ...]:
+    def data_table_rows(self, compact: bool = False) -> tuple[tuple[str, ...], ...]:
+        """Table rows. ``compact`` (under 100 columns) shows a confidence as its percentage: the band
+        ("very_high (97%)") is what the fitter cut to "very_hig…", and Enter's detail still names it (GAP-0908)."""
         rendered: list[tuple[str, ...]] = []
         for row in self.filtered:
             cells = [
@@ -1188,6 +1198,9 @@ class AIDiscoveryPanelModel:
                 row.identity_label,
                 row.presence_label,
             ]
+            if compact:
+                cells[-2] = row.identity_compact_label
+                cells[-1] = row.presence_compact_label
             rendered.append(tuple(cells))
         return tuple(rendered)
 

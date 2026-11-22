@@ -105,6 +105,27 @@ def test_empty_query_with_no_mru_uses_preferred_set() -> None:
     assert len(names) <= 12
 
 
+@pytest.mark.parametrize("os_name", ["darwin", "linux", "windows"])
+def test_palette_command_rows_are_unique(os_name: str) -> None:
+    """GAP-0728: a tester read "routing usage" and "routing enable" twice in
+    the palette on macOS. Each command name is one registry row on every OS,
+    and a filter or an MRU that repeats a name still lists it once."""
+
+    from collections import Counter
+
+    from defenseclaw.tui.registry import build_registry
+
+    registry = build_registry(os_name)
+    assert [name for name, n in Counter(e.tui_name for e in registry).items() if n > 1] == []
+    app = _make_app(mru=("routing usage", "routing usage", "routing enable", "routing enable"))
+    app._command_registry = registry
+    for query in ("routing", "routing usage", "routing enable", ""):
+        rows = [_palette_row_for_entry(entry) for entry in app._palette_matches(query, limit=60)]
+        assert len(rows) == len(set(rows)), f"duplicate palette rows for {query!r}: {rows}"
+    names = [entry.tui_name for entry in app._palette_matches("routing", limit=60)]
+    assert names.count("routing usage") == 1 and names.count("routing enable") == 1
+
+
 def test_typed_query_ignores_mru_priority() -> None:
     """Active typing overrides MRU sort so the operator's typed
     fragment always controls ranking — MRU only kicks in for the

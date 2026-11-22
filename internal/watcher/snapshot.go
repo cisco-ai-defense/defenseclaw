@@ -40,6 +40,11 @@ type TargetSnapshot struct {
 	ConfigHashes     map[string]string `json:"config_hashes"`
 	NetworkEndpoints []string          `json:"network_endpoints"`
 	Timestamp        time.Time         `json:"timestamp"`
+
+	// hermesCachedVendor is, for a Hermes shipped plugin with vendor source
+	// and bytecode, the digest of those bytes read with the snapshot
+	// (hermesCachedVendorDigest), and "" otherwise.
+	hermesCachedVendor string
 }
 
 var dependencyFiles = map[string]bool{

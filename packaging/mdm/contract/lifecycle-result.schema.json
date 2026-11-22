@@ -141,6 +141,7 @@
     "identity": { "$ref": "#/$defs/identityHealth", "description": "status and verify, standalone profile, from 1.0.3: the gateway's directory lookups, from its /health. Source tokens, counts and ages only. Optional." },
     "account_join": { "$ref": "#/$defs/accountJoin", "description": "status and verify run as root or an administrator, standalone profile, from 1.0.7, only while enterprise.account_join is on: how many account join keys each generation has for the enrolled accounts the guardian saw in the last 30 days (at most 64), and reason codes. Never a key, an account name, an identifier or a secret: the keys are only in the output of enterprise account-keys. Optional." },
     "cowork": { "$ref": "#/$defs/coworkState", "description": "status and verify run as root or an administrator, standalone profile, from 1.0.8: Claude Cowork runs the Claude Code engine Claude Desktop bundles, which loads the Claude Code machine policy. Whether DefenseClaw's Claude Code machine policy hooks are in place for it, the managed_hooks_only lock, the gateway's Cowork events since it started, and each enrolled account's last Cowork event (account names: administrator views only). Optional." },
+    "routing": { "$ref": "#/$defs/routingState", "description": "status and verify, standalone profile, from 1.0.10 (absent before; a consumer ignores an unknown member): whether model routing is on, its classifier, the counts of routing.models, routing.admin.rules and routing.admin.budgets, and each routing.route_only connector with the readiness check the gateway runs on its route. Counts, connector ids and closed codes only. Not forwarded off the device. Optional." },
     "cowork_vm_sensor": { "$ref": "#/$defs/coworkVMSensor", "description": "Optional standalone host-delivery observation. host_ready checks the architecture package, detached signature, install arguments and their trust; settings_ready checks the two managed Claude Desktop settings. Neither field proves Claude accepted or ran the package inside its VM. Absent under Secure Client." },
     "health_report": { "$ref": "#/$defs/healthReport", "description": "status on a Secure Client host: the managed gateway's last endpoint health report (<data_dir>/diagnostics/health_report_last.json). Codes, enums, counts and times only. Absent when there is no report. Never an error or a warning: ok, warnings and the exit code are those of the result without it." },
     "log_path": { "type": "string" },
@@ -510,6 +511,31 @@
           "else": { "required": ["failing_accounts", "stale_accounts", "serving_offline_cache"], "properties": { "reason_code": false } }
         }
       ]
+    },
+    "routingState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "classifier", "models", "rules", "budgets"],
+      "properties": {
+        "enabled": { "type": "boolean", "description": "routing.enabled of the installed config." },
+        "classifier": { "enum": ["rules", "systemone", "vllm_sr"], "description": "The effective routing.classifier." },
+        "models": { "type": "integer", "minimum": 0, "description": "Entries of routing.models." },
+        "rules": { "type": "integer", "minimum": 0, "description": "Entries of routing.admin.rules." },
+        "budgets": { "type": "integer", "minimum": 0, "description": "Entries of routing.admin.budgets." },
+        "route_only": { "type": "array", "maxItems": 16, "items": { "$ref": "#/$defs/routingRouteOnly" }, "description": "routing.route_only.connectors, sorted by connector." }
+      }
+    },
+    "routingRouteOnly": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["connector"],
+      "properties": {
+        "connector": { "type": "string", "pattern": "^[a-z][a-z0-9_-]*$" },
+        "managed_hook": { "type": "boolean", "description": "The connector runs from administrator machine policy. Absent when the connectors block does not say." },
+        "ready": { "type": "boolean", "description": "The readiness check the gateway runs on the connector route (credential, upstream, signing). Absent when the gateway did not report it." },
+        "reason_code": { "enum": ["gateway_did_not_report", "no_readiness_row", "not_ready"], "description": "Why ready is absent or false." },
+        "cause": { "enum": ["route_epoch", "allowed_alias_no_credential", "upstream_not_set", "signing_not_ready", "credential_not_stored", "credential_not_configured", "no_enrolled_account"], "description": "With reason_code not_ready: the closed cause the gateway names for it (route_epoch: the route epoch is not published; credential_not_stored: a credential the policy names is not stored on this host; credential_not_configured: no gateway credential covers the upstream; signing_not_ready: gateway Bedrock signing; upstream_not_set; allowed_alias_no_credential: a rule for every caller allows only models without a gateway credential; no_enrolled_account). Absent for any other problem. Optional, from 1.0.10." }
+      }
     },
     "coworkState": {
       "type": "object",

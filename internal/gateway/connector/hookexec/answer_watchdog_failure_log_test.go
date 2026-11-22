@@ -68,7 +68,7 @@ func TestWatchdogDenyLeavesItsLineWhenTheLogOpensSlowlyAfterTheDeadline(t *testi
 	const budget = 600 * time.Millisecond
 	shortAnswerBudget(t, budget)
 	shortAnswerFloor(t)
-	stall := 4 * answerWatchdogLogWait
+	stall := 4 * answerWatchdogLogWait.Load()
 	start := time.Now()
 	previousOpen := openHookFailureLog
 	openHookFailureLog = func(name string, flag int, perm os.FileMode) (*os.File, error) {

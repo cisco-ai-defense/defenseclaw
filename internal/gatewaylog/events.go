@@ -177,6 +177,15 @@ const (
 	// was retired, so the schema's event_type enum deliberately omits it.
 	EventAIDiscovery EventType = "ai_discovery"
 
+	// EventModelUsage is the classification key the canonical v8 model usage
+	// records (log.model.usage, observability.tokenomics) are routed under --
+	// observability.ProducerGatewayEvent with ProducerKey("model_usage"). Like
+	// EventAIDiscovery it has no envelope payload and no envelope row: it is not
+	// a v7 gateway event, so it stays out of the v7 audit-sink derivation
+	// (scripts/generate_telemetry_registry.py expected_audit_gateway_keys) and a
+	// migrated v7 audit sink never receives a usage record.
+	EventModelUsage EventType = "model_usage"
+
 	// EventEndpointHealth is the classification key of the periodic managed
 	// endpoint health report (observability.ProducerGatewayEvent with
 	// ProducerKey("endpoint_health")). Like EventAIDiscovery it exists only as a
@@ -269,6 +278,9 @@ const (
 	// completion so dashboards can split out MCP-tool risk from
 	// user-facing chat risk.
 	DirectionToolCall Direction = "tool_call"
+	// DirectionToolResult marks inspections of a tool's output on its way
+	// to the model (hook PostToolUse results, proxy tool-role messages).
+	DirectionToolResult Direction = "tool_result"
 )
 
 // Event is the single envelope type every gateway observability
@@ -591,6 +603,7 @@ type HookDecisionPayload struct {
 	Reason       string   `json:"reason,omitempty"`
 	EvaluationID string   `json:"evaluation_id,omitempty"`
 	RuleIDs      []string `json:"rule_ids,omitempty"`
+	RuleNames    []string `json:"rule_names,omitempty"`
 }
 
 // Finding matches the shape guardrail scanners emit. Keep the field

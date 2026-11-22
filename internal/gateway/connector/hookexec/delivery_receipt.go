@@ -328,7 +328,7 @@ func (d *hookDeliveryRequest) deadline(blocked bool) bool {
 		return false
 	}
 	d.mu.Unlock()
-	readyWait := time.NewTimer(answerWatchdogLogWait)
+	readyWait := time.NewTimer(answerWatchdogLogWait.Load())
 	defer readyWait.Stop()
 	select {
 	case <-d.payloadDone:

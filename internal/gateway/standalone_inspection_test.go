@@ -73,7 +73,7 @@ func waitForGuardrailDetail(t *testing.T, s *Sidecar) (map[string]interface{}, *
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		done <- s.runManagedEnterpriseMultiHookGuardrail(ctx, reg, []connector.Connector{conn}, "gateway-token", "127.0.0.1:0", "127.0.0.1:0", "master")
+		done <- s.runManagedEnterpriseMultiHookGuardrail(ctx, reg, []connector.Connector{conn}, "gateway-token", "127.0.0.1:0", "127.0.0.1:0")
 	}()
 	defer func() {
 		cancel()

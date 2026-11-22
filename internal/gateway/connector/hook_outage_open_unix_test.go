@@ -23,6 +23,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // oss-outage-open (owner decision 2026-10-23): a per-user shell hook in the
@@ -34,6 +36,11 @@ import (
 // install window block. The real native helper (hook-post) carries every
 // call, as on an installed host.
 func TestPerUserShellHookOutageOpenOnlyForAnOutage(t *testing.T) {
+	// The render writes the config record of the account that runs the test
+	// (writePerUserConfigRecord); a box account with its own
+	// ~/.defenseclaw/config.yaml reopened the no-config outage
+	// (rel-1-0-10:GAP-0167).
+	testenv.IsolateAccount(t)
 	type scenario struct {
 		name    string
 		handler http.HandlerFunc // nil: no gateway listens
@@ -157,6 +164,11 @@ func TestPerUserShellHookOutageOpenOnlyForAnOutage(t *testing.T) {
 // A setup-time record cannot override the current policy tier, including a
 // record left by an earlier strict render or a missing legacy record.
 func TestPerUserShellHookOutageIgnoresStaleRecord(t *testing.T) {
+	// The render writes the config record of the account that runs the test
+	// (writePerUserConfigRecord); a box account with its own
+	// ~/.defenseclaw/config.yaml reopened the no-config outage
+	// (rel-1-0-10:GAP-0167).
+	testenv.IsolateAccount(t)
 	for _, tc := range []struct {
 		name   string
 		record string // "" removes the record
@@ -205,6 +217,11 @@ func TestPerUserShellHookOutageIgnoresStaleRecord(t *testing.T) {
 // close the outage, whatever the record says; the default and permissive
 // packs and another connector's strict pack leave it open.
 func TestPerUserShellHookOutageFollowsTheConfigNow(t *testing.T) {
+	// The render writes the config record of the account that runs the test
+	// (writePerUserConfigRecord); a box account with its own
+	// ~/.defenseclaw/config.yaml reopened the no-config outage
+	// (rel-1-0-10:GAP-0167).
+	testenv.IsolateAccount(t)
 	for _, conn := range []Connector{NewClaudeCodeConnector(), NewCodexConnector(), NewCopilotConnector(), NewCursorConnector(),
 		NewDevinConnector(), NewKiroConnector(), NewAntigravityConnector(), NewHermesConnector()} {
 		other := "claudecode"
@@ -231,10 +248,19 @@ func TestPerUserShellHookOutageFollowsTheConfigNow(t *testing.T) {
 				hookDir := filepath.Join(home, "hooks")
 				// A strict render can remain installed when the gateway is stopped.
 				opts := SetupOpts{DataDir: home, APIAddr: freeLoopbackAddrForOutageTest(t), APIToken: "scoped-test-token", HookFailMode: "closed"}
-				if err := WriteHookScriptsForConnectorObjectWithOpts(hookDir, opts, conn); err != nil {
+				// Render as the account of this case's home, never as the
+				// account running the tests: the render records the config
+				// that account runs under (.config-record), and the no_config
+				// case falls back to it. A real ~/.defenseclaw/config.yaml of
+				// the build account (default tier) then opened that case
+				// (rel-1-0-10:GAP-1176).
+				if err := WithUserHomeDir(home, func() error {
+					return WriteHookScriptsForConnectorObjectWithOpts(hookDir, opts, conn)
+				}); err != nil {
 					t.Fatal(err)
 				}
 				writeOutageTierConfig(t, home, tc.config)
+				assertNoForeignConfigRecord(t, hookDir, home)
 				cmd := exec.Command("bash", append([]string{filepath.Join(hookDir, invoke.script)}, invoke.args...)...)
 				cmd.Stdin = strings.NewReader(invoke.stdin)
 				cmd.Env = append(sanitizedTestEnv(), "HOME="+home, "DEFENSECLAW_HOME="+home, "DEFENSECLAW_GATEWAY_AUTOSTART=0")
@@ -365,3 +391,22 @@ var (
 	outagePortsMu   sync.Mutex
 	outagePortsUsed = map[int]bool{}
 )
+
+// assertNoForeignConfigRecord fails when the hooks rendered into hookDir
+// record a config file outside home (.config-record): the outage mode of a
+// case would then follow a config the test did not write, such as the build
+// account's own (rel-1-0-10:GAP-1176).
+func assertNoForeignConfigRecord(t *testing.T, hookDir, home string) {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(hookDir, perUserConfigRecordName))
+	if errors.Is(err, os.ErrNotExist) {
+		return
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorded := filepath.Clean(strings.TrimSpace(string(raw)))
+	if rel, relErr := filepath.Rel(home, recorded); relErr != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		t.Fatalf("hooks record config %s outside the case home %s", recorded, home)
+	}
+}

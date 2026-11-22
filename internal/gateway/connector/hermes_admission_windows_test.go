@@ -185,7 +185,7 @@ func TestHermesSetupAdmissionRejectsChangedPathBytesVersionAndCustodyBeforeMutat
 			if err := os.WriteFile(configPath, []byte("operator_literal: KEEP-CONFIG-BYTES\n"), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			allowlistPath := filepath.Join(filepath.Dir(configPath), hermesAllowlistFileName)
+			allowlistPath := filepath.Join(filepath.Dir(configPath), HermesAllowlistFileName)
 			if err := os.WriteFile(allowlistPath, []byte("{\"approvals\":[],\"operator\":\"KEEP-ALLOWLIST-BYTES\"}\n"), 0o600); err != nil {
 				t.Fatal(err)
 			}
@@ -212,6 +212,10 @@ func TestHermesSetupAdmissionRejectsChangedPathBytesVersionAndCustodyBeforeMutat
 			// GAP-1856: the gateway skips only this connector on this error.
 			if !errors.Is(err, ErrExecutableAdmission) {
 				t.Fatalf("Setup error = %v, want ErrExecutableAdmission", err)
+			}
+			// GAP-0249: changed bytes are a Hermes update and name the step.
+			if changedBytes := test.name == "replaced executable bytes"; changedBytes != strings.Contains(err.Error(), "run: defenseclaw setup hermes --yes") {
+				t.Fatalf("Setup error = %v, want the setup step only for changed bytes", err)
 			}
 			assertHermesAdmissionTargetsUnchanged(t, before)
 		})
@@ -272,7 +276,7 @@ func loadHermesReceiptDigestForTest(t *testing.T, dataDir string) string {
 func hermesAdmissionMutationTargets(opts SetupOpts, configPath string) []string {
 	return []string{
 		configPath,
-		filepath.Join(filepath.Dir(configPath), hermesAllowlistFileName),
+		filepath.Join(filepath.Dir(configPath), HermesAllowlistFileName),
 		filepath.Join(opts.DataDir, activeConnectorFile),
 		filepath.Join(opts.DataDir, hookContractLockFile),
 		filepath.Join(opts.DataDir, ".hermes-lifecycle.lock"),

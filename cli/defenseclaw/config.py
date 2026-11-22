@@ -50,7 +50,6 @@ from defenseclaw import (
     connector_paths,
     credential_provenance,
     envvars,
-    gateway_token_adoption,
     legacy_connector,
 )
 from defenseclaw.config_writer import ManagedConfigWriteError
@@ -1147,6 +1146,32 @@ def _warn_untrusted_managed_config(path: str, data: dict[str, Any]) -> None:
 _openclaw_bin_cache: str | None = None
 
 
+OPENCLAW_CONFIG_REPAIR_HINT = (
+    "OpenClaw rejected a setting in its openclaw.json; if you did not write that setting "
+    "after upgrading OpenClaw, run `openclaw doctor --fix` to repair it "
+    "(DefenseClaw does not rewrite OpenClaw's own settings)"
+)
+
+
+def openclaw_config_repair_hint(*outputs: str | None) -> str:
+    """The repair to name when an openclaw command refused its own config.
+
+    OpenClaw 2026.11 rejects an openclaw.json written by an older release
+    ("Unrecognized key") and says to run ``openclaw doctor --fix``. DefenseClaw
+    repeats that repair where it shows such an error, and never edits the file.
+    Empty when the output is not that refusal, or when the refused key is one
+    DefenseClaw writes itself (the plugin entry, ``approvals.plugin``): an older
+    OpenClaw rejects those, and ``doctor --fix`` would strip DefenseClaw's own
+    wiring (GAP-0110).
+    """
+    text = " ".join(o or "" for o in outputs).lower()
+    if "unrecognized key" not in text:
+        return ""
+    if "plugins.entries" in text or "approvals" in text or "defenseclaw" in text:
+        return ""
+    return OPENCLAW_CONFIG_REPAIR_HINT
+
+
 def openclaw_bin() -> str:
     """Return the absolute path to the ``openclaw`` binary.
 
@@ -1766,7 +1791,14 @@ DECISION_MODEL_KEY_ENV = "DEFENSECLAW_DECISION_MODEL_KEY"
 DECISION_MODEL_DEFAULT_ALLOW_THRESHOLD = 0.30
 DECISION_MODEL_DEFAULT_BLOCK_THRESHOLD = 0.75
 DECISION_MODEL_DEFAULT_TIMEOUT = 1.0
+# "decide" is retired (owner 2026-11-13: a decision-model block is never final); it still loads and acts as escalate.
 DECISION_MODEL_ON_CONFIDENT_BLOCK = ("escalate", "decide")
+DECISION_MODEL_DEFAULT_BLOCK_RISK_SCORE = 1.5
+# Wire protocols: System One ({model, state, questions}, Bearer token) and
+# Google's Decisions API ({model, input, questions}, x-goog-api-key).
+DECISION_MODEL_PROTOCOL_SYSTEM_ONE = "system-one"
+DECISION_MODEL_PROTOCOL_GEMINI = "gemini-decisions"
+DECISION_MODEL_PROTOCOLS = (DECISION_MODEL_PROTOCOL_SYSTEM_ONE, DECISION_MODEL_PROTOCOL_GEMINI)
 
 
 @dataclass
@@ -1789,12 +1821,24 @@ class DecisionModelConfig:
     enabled: bool = False
     model: str = ""
     base_url: str = ""
+    # system-one (default) or gemini-decisions (Gemini Decision 1).
+    protocol: str = ""
     api_key_env: str = ""
     credential: str = ""
     timeout: float = 0.0
     allow_threshold: float = 0.0
     block_threshold: float = 0.0
     on_confident_block: str = ""
+    # A confident block also needs the risk score answer (0..2) at or above this; 0 = 1.5.
+    block_risk_score: float = 0.0
+    # A call the rules flagged never gets a confident block (it escalates); None = true.
+    escalate_rule_flagged: bool | None = None
+    # Session history the model sees: last N turns, calls only (None = 25, 0 = none, at most 100).
+    history_turns: int | None = None
+    # Add each tool's result (cut to 1 KB) to that history. Off by default.
+    history_tool_results: bool = False
+    # Flow questions that turn an unauthorized or off-task confident allow into an escalation; None = true.
+    flow_guard: bool | None = None
     # Connectors whose hook-lane tool calls the model answers on its own
     # where the LLM judge does not run ("*" = all). Empty = only in front
     # of the judge. Omitted from YAML when empty.
@@ -1806,6 +1850,10 @@ class DecisionModelConfig:
     def effective_api_key_env(self) -> str:
         return self.api_key_env.strip() or DECISION_MODEL_KEY_ENV
 
+    def effective_protocol(self) -> str:
+        # Exact values only (validation_error refuses anything else), as in Go and the schema.
+        return self.protocol or DECISION_MODEL_PROTOCOL_SYSTEM_ONE
+
     def effective_timeout(self) -> float:
         return self.timeout if self.timeout > 0 else DECISION_MODEL_DEFAULT_TIMEOUT
 
@@ -1814,6 +1862,18 @@ class DecisionModelConfig:
 
     def effective_block_threshold(self) -> float:
         return self.block_threshold if self.block_threshold > 0 else DECISION_MODEL_DEFAULT_BLOCK_THRESHOLD
+
+    def effective_block_risk_score(self) -> float:
+        return self.block_risk_score if self.block_risk_score > 0 else DECISION_MODEL_DEFAULT_BLOCK_RISK_SCORE
+
+    def effective_escalate_rule_flagged(self) -> bool:
+        return self.escalate_rule_flagged is not False
+
+    def effective_history_turns(self) -> int:
+        return 25 if self.history_turns is None else self.history_turns
+
+    def effective_flow_guard(self) -> bool:
+        return self.flow_guard is not False
 
     def effective_on_confident_block(self) -> str:
         return (self.on_confident_block or "").strip().lower() or "escalate"
@@ -1836,10 +1896,24 @@ class DecisionModelConfig:
                 f"allow_threshold ({self.effective_allow_threshold()}) must be lower than "
                 f"block_threshold ({self.effective_block_threshold()})"
             )
+        if self.escalate_rule_flagged is not None and not isinstance(self.escalate_rule_flagged, bool):
+            return f"escalate_rule_flagged must be true or false, got {self.escalate_rule_flagged!r}"
+        if self.flow_guard is not None and not isinstance(self.flow_guard, bool):
+            return f"flow_guard must be true or false, got {self.flow_guard!r}"
+        if self.history_turns is not None and (
+            isinstance(self.history_turns, bool)
+            or not isinstance(self.history_turns, int)
+            or not 0 <= self.history_turns <= 100
+        ):
+            return f"history_turns must be between 0 and 100, got {self.history_turns!r}"
+        if not 0 <= self.block_risk_score <= 2:
+            return f"block_risk_score must be between 0 and 2, got {self.block_risk_score}"
         if not 0 <= self.timeout <= 30:
             return f"timeout must be between 0 and 30 seconds, got {self.timeout}"
         if self.effective_on_confident_block() not in DECISION_MODEL_ON_CONFIDENT_BLOCK:
             return f"on_confident_block must be escalate or decide, got {self.on_confident_block!r}"
+        if self.protocol not in ("", *DECISION_MODEL_PROTOCOLS):
+            return f"protocol must be system-one or gemini-decisions, got {self.protocol!r}"
         if self.base_url.strip():
             err = decision_model_url_error(self.base_url)
             if err:
@@ -1850,6 +1924,13 @@ class DecisionModelConfig:
             if not self.model.strip():
                 return "enabled needs model (the model name the endpoint serves)"
         return ""
+
+
+# Query parameters that carry a key or token. Mirrors decisionModelKeyQueryParams in Go.
+_DECISION_MODEL_KEY_QUERY_PARAMS = frozenset({
+    "key", "api_key", "apikey", "api-key", "x-goog-api-key", "access_token", "token",
+    "auth_token", "auth", "secret", "client_secret", "password",
+})
 
 
 def decision_model_url_error(raw: str) -> str:
@@ -1866,6 +1947,14 @@ def decision_model_url_error(raw: str) -> str:
         return "base_url must be an absolute http(s) URL"
     if parsed.username or parsed.password:
         return f"base_url must not carry credentials; put the token in {DECISION_MODEL_KEY_ENV}"
+    from urllib.parse import parse_qsl
+
+    for name, _value in parse_qsl(parsed.query, keep_blank_values=True):
+        if name.lower() in _DECISION_MODEL_KEY_QUERY_PARAMS:
+            return (
+                f"base_url must not carry a key in its query string ({name}=); put the key in "
+                f"{DECISION_MODEL_KEY_ENV} (decision_model.api_key_env)"
+            )
     scheme = parsed.scheme.lower()
     if scheme == "https":
         return ""
@@ -1895,12 +1984,20 @@ def _merge_decision_model(raw: Any) -> DecisionModelConfig:
         enabled=raw.get("enabled") is True or str(raw.get("enabled", "")).strip().lower() == "true",
         model=str(raw.get("model", "") or ""),
         base_url=str(raw.get("base_url", "") or ""),
+        protocol=str(raw.get("protocol", "") or ""),
         api_key_env=str(raw.get("api_key_env", "") or ""),
         credential=str(raw.get("credential", "") or ""),
         timeout=_num("timeout"),
         allow_threshold=_num("allow_threshold"),
         block_threshold=_num("block_threshold"),
         on_confident_block=str(raw.get("on_confident_block", "") or ""),
+        block_risk_score=_num("block_risk_score"),
+        # Strict: a YAML bool or nothing; anything else is kept as given so
+        # validation_error reports it (Go refuses it at load too).
+        escalate_rule_flagged=raw.get("escalate_rule_flagged"),
+        history_turns=raw.get("history_turns"),
+        history_tool_results=raw.get("history_tool_results") is True,
+        flow_guard=raw.get("flow_guard"),
         hook_connectors=_decision_model_connector_list(raw.get("hook_connectors")),
     )
 
@@ -2113,8 +2210,12 @@ class OpenShellMCPConfig:
 
 
 @dataclass
-class OpenShellAdminConfig:
+class SandboxAdminConfig:
     """Administrator sandbox constraints (``openshell.admin``).
+
+    Runtime-neutral (Go ``config.SandboxAdminConfig``): OpenShell sandboxes
+    read it from ``openshell.admin`` and ``guardrail.profiles.<p>.sandbox``,
+    and Agent Substrate actors take the same floor.
 
     Every field is optional; ``None`` / empty imposes no constraint. The Go
     resolver (internal/openshell/packs) enforces them at every decision point;
@@ -2158,9 +2259,28 @@ class OpenShellAdminConfig:
     # none refuses a Linux sandbox that wants the MicroVM driver where KVM
     # is not available (no docker fallback); none wins, docker never loosens.
     driver_fallback: str = ""  # docker | none ("" = unset)
+    # The runtime keys (Go sandbox_runtime_keys.go, PLAN 7.3). ``runtimes``
+    # applies on computers and in clusters; the others are Agent Substrate
+    # keys that ``openshell.admin`` refuses. None / "" is unset.
+    runtimes: list[str] | None = None  # openshell | substrate (unset = both)
+    sandbox_class: str = ""  # gvisor | microvm (microvm wins)
+    idle_suspend_after: str = ""  # Go duration, >= 1m (the shortest wins)
+    idle_suspend_tasks: bool | None = None  # true opts --task runs into idle suspend (true wins)
+    unattended_asks: str = ""  # deny | queue (deny wins)
+    ask_timeout: str = ""  # Go duration, 1m to 24h (the shortest wins)
+    actor_secrets: list[str] | None = None  # exposed values (unset = none)
+    # The egress ask keys (Go sandbox_ask_keys.go, GAP-0171): allowed hosts
+    # that need an approval, and url rules (deny | ask) the egress callout
+    # applies. Agent Substrate only; profiles add to substrate.admin's.
+    ask_hosts: list[str] | None = None  # host or "*.<host>" (unset = none)
+    url_rules: list[dict[str, Any]] | None = None  # {name, hosts, methods, path_prefix, action}
 
 
-# The managed sandbox floor keys of OpenShellAdminConfig, unset when None or
+# OpenShellAdminConfig is the name SandboxAdminConfig had through 1.0.9.
+OpenShellAdminConfig = SandboxAdminConfig
+
+
+# The managed sandbox floor keys of SandboxAdminConfig, unset when None or
 # "" (Go omitempty): a save never writes them unset.
 _OPENSHELL_ADMIN_FLOOR_KEYS = (
     "allowed",
@@ -2176,6 +2296,28 @@ _OPENSHELL_ADMIN_FLOOR_KEYS = (
     "delete_stopped_after",
     "request_access",
     "driver_fallback",
+    "runtimes",
+    "sandbox_class",
+    "idle_suspend_after",
+    "idle_suspend_tasks",
+    "unattended_asks",
+    "ask_timeout",
+    "actor_secrets",
+    "ask_hosts",
+    "url_rules",
+)
+
+# The Agent Substrate floor keys, refused in openshell.admin (Go
+# SandboxSubstrateOnlyKeys).
+_SANDBOX_SUBSTRATE_ONLY_KEYS = (
+    "sandbox_class",
+    "idle_suspend_after",
+    "idle_suspend_tasks",
+    "unattended_asks",
+    "ask_timeout",
+    "actor_secrets",
+    "ask_hosts",
+    "url_rules",
 )
 
 
@@ -2251,7 +2393,7 @@ class OpenShellConfig:
     # roots (a TLS-inspecting proxy's root): absolute or "~/...". Sandbox images
     # built while it is set carry them; nothing comes from the host's store.
     trusted_ca_bundle: str = ""
-    admin: OpenShellAdminConfig = field(default_factory=OpenShellAdminConfig)
+    admin: SandboxAdminConfig = field(default_factory=SandboxAdminConfig)
 
     def effective_ingress_port(self, api_port: int) -> int:
         """Sandbox hook ingress port; 0 means ``api_port + 1``."""
@@ -2349,43 +2491,57 @@ class GatewayConfig:
     watchdog: GatewayWatchdogConfig = field(default_factory=GatewayWatchdogConfig)
 
     def resolved_token(self) -> str:
-        """Return the gateway auth token, walking the precedence ladder.
+        """Return the DefenseClaw master gateway token.
 
-        Resolution order:
+        Mirror of ``GatewayConfig.ResolvedToken`` in internal/config/config.go;
+        the two must agree. Resolution order:
 
-        1. ``self.token_env`` — operator-supplied override, ALWAYS wins.
-           This lets ``defenseclaw setup`` / ops tooling pin the var
-           name explicitly without us guessing.
-        2. ``DEFENSECLAW_GATEWAY_TOKEN`` — the canonical name the Go
-           gateway (`internal/gateway/firstboot.go::EnsureGatewayToken`)
-           writes to ``~/.defenseclaw/.env`` on first boot.
-        3. ``OPENCLAW_GATEWAY_TOKEN`` — back-compat shim for installs
-           that bootstrapped before the defenseclaw rename. The Go
-           gateway also reads this for the same reason; honouring it
-           here keeps the two sides symmetric.
-        4. ``self.token`` — literal value from ``config.yaml``. Last
-           resort because plaintext secrets in YAML are discouraged
-           (and ``_warn_plaintext_secrets`` already nags about it).
+        1. ``self.token_env`` - an operator-chosen variable name, unless it
+           names ``OPENCLAW_GATEWAY_TOKEN``.
+        2. ``DEFENSECLAW_GATEWAY_TOKEN`` - the name the gateway mints into
+           ``~/.defenseclaw/.env`` (EnsureGatewayToken).
+        3. ``self.token`` - the literal from ``config.yaml``.
 
-        When ``.env`` holds both gateway-token spellings with different
-        values, the earlier name in this order wins, except that a copy the
-        gateway adopted from ``openclaw.json`` (recorded by the marker comment
-        in ``.env``, see ``defenseclaw.gateway_token_adoption``) never shadows a
-        value the operator saved under the other spelling: the load leaves the
-        adopted copy out. ``defenseclaw keys set`` on either name replaces every
-        spelling already saved.
+        ``OPENCLAW_GATEWAY_TOKEN`` is never the master (R-TOK): it is only the
+        credential the gateway presents to the OpenClaw WebSocket, and the
+        OpenClaw account, its plugins and any tool that reads openclaw.json
+        hold it. A candidate whose value equals it is skipped too, because a
+        1.0.9 adoption wrote the OpenClaw token under both names; the gateway
+        and ``defenseclaw migrate`` mint a separate master then. SecretRef text
+        an earlier build saved as a token is never one (#1404).
 
-        Returns the empty string when no token is reachable; callers
-        gate on the truthiness, so empty == "unauthenticated".
+        Returns the empty string when no token is reachable; callers gate on
+        the truthiness, so empty == "unauthenticated".
         """
-        # SecretRef text an earlier build saved as a token is never one (#1404).
         from defenseclaw.connector_paths import is_secret_ref_text
 
-        for name in (self.token_env, "DEFENSECLAW_GATEWAY_TOKEN", "OPENCLAW_GATEWAY_TOKEN"):
-            val = os.environ.get(name, "") if name else ""
-            if val and not is_secret_ref_text(val):
+        openclaw = os.environ.get(OPENCLAW_GATEWAY_TOKEN_ENV, "").strip()
+
+        def usable(value: str) -> bool:
+            return bool(value) and not is_secret_ref_text(value) and value.strip() != openclaw
+
+        token_env = (self.token_env or "").strip()
+        for name in (token_env, _GATEWAY_TOKEN_ENV_NAME):
+            if not name or is_openclaw_gateway_token_env(name):
+                continue
+            val = os.environ.get(name, "")
+            if usable(val):
                 return val
-        return "" if is_secret_ref_text(self.token) else self.token
+        return self.token if usable(self.token) else ""
+
+
+# The DefenseClaw master gateway token and the OpenClaw WebSocket credential
+# (R-TOK). They are separate values; see GatewayConfig.resolved_token.
+_GATEWAY_TOKEN_ENV_NAME = "DEFENSECLAW_GATEWAY_TOKEN"
+OPENCLAW_GATEWAY_TOKEN_ENV = "OPENCLAW_GATEWAY_TOKEN"
+
+
+def is_openclaw_gateway_token_env(name: str) -> bool:
+    """True when *name* is ``OPENCLAW_GATEWAY_TOKEN`` (any case on Windows)."""
+    name = (name or "").strip()
+    if os.name == "nt":
+        return name.upper() == OPENCLAW_GATEWAY_TOKEN_ENV
+    return name == OPENCLAW_GATEWAY_TOKEN_ENV
 
 
 @dataclass
@@ -2732,6 +2888,10 @@ class JudgeConfig:
     # ``curl --max-time 10`` budget — the proxy lane's 30s would let the
     # client hang up before a verdict lands).
     hook_timeout: float = 0.0
+    # What the tool judge does with a call that sends data to a destination the
+    # user's task does not name (Go ``JudgeConfig.IntentScope``): ``"shadow"``
+    # (record only, the built-in default) or ``"off"``.
+    intent_scope: str = ""
     # Most judge calls sent to the judge model at once (Go
     # ``JudgeConfig.MaxParallel``); 0 = no limit. With a limit, tool-call
     # judging goes ahead of prompt judging (#1395).
@@ -2815,6 +2975,55 @@ class PerConnectorObservability:
     webhooks: list[WebhookConfig] | None = None
 
 
+TOKENOMICS_ROLES = ("agent", "judge", "decision_model", "ai_defense", "router_classifier")
+TOKENOMICS_METRIC_LABELS = ("connector", "provider", "model", "route_decision", "call_role", "profile")
+
+
+@dataclass
+class PriceRates:
+    """Per-million-token USD rates. ``None`` is absent (never 0)."""
+
+    input_per_mtok: float | None = None
+    output_per_mtok: float | None = None
+    cache_read_per_mtok: float | None = None
+    cache_write_per_mtok: float | None = None
+    reasoning_per_mtok: float | None = None
+
+
+@dataclass
+class PriceEntry(PriceRates):
+    provider: str = ""
+    model: str = ""
+
+
+@dataclass
+class PricingConfig:
+    """``observability.pricing`` (mirrors ``config.PricingConfig``)."""
+
+    version: str = ""
+    models: list[PriceEntry] = field(default_factory=list)
+    ai_defense_per_call_usd: float | None = None
+    unknown_model: str = "omit"
+    fallback: PriceRates = field(default_factory=PriceRates)
+
+
+@dataclass
+class TokenomicsConfig:
+    """``observability.tokenomics`` (mirrors ``config.TokenomicsConfig``). Off by default."""
+
+    enabled: bool = False
+    record_routing_provenance: bool = True
+    roles: list[str] = field(default_factory=list)
+    native_claudecode: bool = True
+    native_codex: bool = True
+    cost_compute: bool = True
+    cost_currency: str = "USD"
+    cost_keep_reported: bool = True
+    local_store_enabled: bool = False
+    local_store_retention_days: int = 30
+    metric_labels: list[str] = field(default_factory=lambda: list(TOKENOMICS_METRIC_LABELS))
+
+
 @dataclass
 class ObservabilityConfig:
     """Notification-only connector compatibility inside ``observability``.
@@ -2826,6 +3035,8 @@ class ObservabilityConfig:
     """
 
     connectors: dict[str, PerConnectorObservability] = field(default_factory=dict)
+    tokenomics: TokenomicsConfig = field(default_factory=TokenomicsConfig)
+    pricing: PricingConfig = field(default_factory=PricingConfig)
 
     def _connector_override(self, connector: str) -> PerConnectorObservability | None:
         """Return the override block for ``connector`` if configured.
@@ -2921,6 +3132,19 @@ class PerConnectorGuardrailConfig:
     # :meth:`GuardrailConfig.effective_alert_at`.
     block_at: str = ""
     alert_at: str = ""
+    # guardrail.connectors.<c>.cascade (and profiles' connectors): this scope's
+    # guardrail.cascade settings, kept as written; the gateway validates and
+    # resolves them (internal/config/cascade.go).
+    cascade: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class GuardrailProfileMatchSubstrate:
+    """``match.substrate``: Substrate actors by atespace, template or workload."""
+
+    atespaces: list[str] = field(default_factory=list)
+    templates: list[str] = field(default_factory=list)
+    workloads: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -2935,6 +3159,8 @@ class GuardrailProfileMatch:
     users: list[str] = field(default_factory=list)
     connectors: list[str] = field(default_factory=list)
     agents: list[str] = field(default_factory=list)
+    # Agent Substrate actors (``config.ProfileMatchSubstrate``); None = unset.
+    substrate: GuardrailProfileMatchSubstrate | None = None
 
 
 @dataclass
@@ -2969,9 +3195,46 @@ class GuardrailProfile:
     block_message: str = ""
     connectors: dict[str, PerConnectorGuardrailConfig] = field(default_factory=dict)
     # Tightens openshell.admin for subjects of this profile; None adds nothing.
-    sandbox: OpenShellAdminConfig | None = None
+    sandbox: SandboxAdminConfig | None = None
+    # Tightens routing.admin for subjects of this profile (Go
+    # RoutingPolicyConfig); kept as a mapping, None adds nothing.
+    routing: dict[str, Any] | None = None
     enabled: bool | None = None
     hook_fail_mode: str = ""
+    # guardrail.profiles.<p>.cascade, kept as written (the gateway validates).
+    cascade: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class SecretFlowLabelSets:
+    credentials: bool = True
+    extra_path_globs: list[str] = field(default_factory=list)
+    extra_secret_patterns: list[str] = field(default_factory=list)
+
+
+@dataclass
+class SecretFlowSinkAction:
+    default: str = "alert"  # the default pack never blocks
+    strict: str = "block"  # a managed install follows its pack
+
+
+@dataclass
+class SecretFlowMemory:
+    max_labeled_paths: int = 512
+    max_value_digests: int = 256
+
+
+@dataclass
+class SecretFlowConfig:
+    """guardrail.secret_flow: Secret flow tracking settings. The live/shadow
+    switch is guardrail.cascade.lanes.secret_flow; these are the feature's own
+    settings. Mirrors internal/config.SecretFlowConfig."""
+
+    label_sets: SecretFlowLabelSets = field(default_factory=SecretFlowLabelSets)
+    sink_action: SecretFlowSinkAction = field(default_factory=SecretFlowSinkAction)
+    reencodings: bool = True
+    memory: SecretFlowMemory = field(default_factory=SecretFlowMemory)
+    destination_allowlist: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -3002,6 +3265,8 @@ class GuardrailConfig:
     detection_strategy_prompt: str = ""  # per-direction override
     detection_strategy_completion: str = ""  # per-direction override
     detection_strategy_tool_call: str = ""  # per-direction override
+    effects_rules_tier: str = "restricted"  # restricted | full (effect block scope)
+    secret_flow: SecretFlowConfig = field(default_factory=SecretFlowConfig)  # Secret flow tracking
     # Run full judge classification on content with no regex signal
     # (regex_judge mode). Flipped from False to True in the
     # multi-provider-adapters PR: pure-regex triage misses enough
@@ -3023,6 +3288,11 @@ class GuardrailConfig:
     # under one does not start the download-then-execute alert (#1390).
     # Mirrors ``GuardrailConfig.InternalDomains`` in internal/config/config.go.
     internal_domains: list[str] = field(default_factory=list)
+    # guardrail.cascade: what each layer of the cascade does with its outcome,
+    # the unknown tier, lane switches, the Rego policy and admin locks. Kept as
+    # written; the gateway validates and resolves it (internal/config/cascade.go,
+    # `defenseclaw guardrail cascade explain`).
+    cascade: dict[str, Any] = field(default_factory=dict)
     # Lowest severity a tool call is blocked / alerted at (``CRITICAL``
     # | ``HIGH`` | ``MEDIUM`` | ``LOW``). Empty keeps the rule pack's
     # profile levels (strict: MEDIUM / LOW, permissive: CRITICAL / HIGH,
@@ -3400,6 +3670,16 @@ class GuardrailConfig:
         from defenseclaw.observability.v8_config import validate_judge_extra_body
 
         validate_judge_extra_body(self.judge.extra_body, "config.yaml")
+        scope = (self.judge.intent_scope or "").strip().lower()
+        if scope not in ("", "shadow", "off"):
+            # Same refusal as the gateway loader (JudgeConfig.ValidateIntentScope):
+            # the task-scope lane is shadow-only in 1.0.10.
+            if scope == "alert":
+                raise ValueError(
+                    "guardrail.judge.intent_scope: 'alert' is not available in 1.0.10: the task-scope lane "
+                    "is shadow-only (rel-1-0-10:GAP-0341, GAP-0372, GAP-0363); use shadow or off"
+                )
+            raise ValueError(f"guardrail.judge.intent_scope: unknown value {self.judge.intent_scope!r} (shadow or off)")
         _validate_guardrail_level("guardrail.block_at", self.block_at)
         _validate_guardrail_level("guardrail.alert_at", self.alert_at)
         seen: dict[str, str] = {}
@@ -3463,10 +3743,14 @@ def validate_guardrail_profiles(gc: GuardrailConfig) -> None:
         if assignment.profile not in gc.profiles:
             raise ValueError(f"guardrail.profile_assignments[{i}]: unknown profile {assignment.profile!r}")
         match = assignment.match
-        if not (match.groups or match.users or match.connectors or match.agents):
+        substrate = match.substrate
+        has_substrate = substrate is not None and bool(
+            substrate.atespaces or substrate.templates or substrate.workloads
+        )
+        if not (match.groups or match.users or match.connectors or match.agents or has_substrate):
             raise ValueError(
                 f"guardrail.profile_assignments[{i}]: match needs at least one of groups, users, "
-                "connectors or agents; use guardrail.default_profile for everyone else"
+                "connectors, agents or substrate; use guardrail.default_profile for everyone else"
             )
         for agent in match.agents:
             if not _AGENT_IDENTITY_RE.match(agent):
@@ -3482,7 +3766,7 @@ def validate_guardrail_profiles(gc: GuardrailConfig) -> None:
 # --- Sandbox floors ---------------------------------------------------------
 #
 # openshell.admin is the organization floor and guardrail.profiles.<p>.sandbox
-# tightens it (Go TightenOpenShellAdmin). validate_sandbox_floors mirrors the Go
+# tightens it (Go TightenSandboxAdmin). validate_sandbox_floors mirrors the Go
 # loader's refusals of the managed floor keys message for message (the shared
 # corpus internal/config/testdata/sandbox_floor_cases.yaml pins both). It reads
 # the raw document so an explicit empty list stays apart from an unset key.
@@ -3690,6 +3974,153 @@ def _sandbox_section_error(section: Mapping[str, Any], prefix: str) -> str | Non
                 f"{prefix}: required_for [{', '.join(outside)}] is outside allowed_harnesses "
                 f"[{', '.join(str(n) for n in harnesses)}]: a required agent could not run anywhere"
             )
+    return _sandbox_runtime_keys_error(section, prefix)
+
+
+_SANDBOX_ACTOR_SECRET_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,252}$")
+# The egress ask keys (Go sandbox_ask_keys.go).
+_SANDBOX_HOST_PATTERN_RE = re.compile(
+    r"^(\*\.)?[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$"
+)
+_SANDBOX_HTTP_METHOD_RE = re.compile(r"^[A-Z]{3,10}$")
+_SANDBOX_URL_RULE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+
+
+def _go_duration_ns(value: str) -> int | None:
+    """Nanoseconds of a Go duration (time.ParseDuration without a sign), or None."""
+    from fractions import Fraction
+
+    v = value.strip()
+    if v == "0":
+        return 0
+    if not _GO_DURATION_RE.match(v):
+        return None
+    total = Fraction(0)
+    for number, unit in _GO_DURATION_PART_RE.findall(v):
+        total += Fraction(number) * _GO_DURATION_UNIT_NS[unit]
+    return int(total)
+
+
+def _sandbox_go_duration_error(
+    field_name: str, value: Any, minimum_ns: int, maximum_ns: int, minimum: str, maximum: str, example: str
+) -> str | None:
+    if value in (None, ""):
+        return None
+    ns = _go_duration_ns(str(value))
+    if ns is None:
+        return f"{field_name} {_go_quote(value)} must be a Go duration such as {example}"
+    if ns < minimum_ns:
+        return f"{field_name} {_go_quote(value)} must be at least {minimum}"
+    if maximum_ns and ns > maximum_ns:
+        return f"{field_name} {_go_quote(value)} must be at most {maximum}"
+    return None
+
+
+def _sandbox_runtime_keys_error(section: Mapping[str, Any], prefix: str) -> str | None:
+    """The first refusal of a section's runtime keys (Go validateRuntimeKeys)."""
+    runtimes = section.get("runtimes")
+    if isinstance(runtimes, list) and not runtimes:
+        return f"{prefix}.runtimes: an empty list is refused; leave the key out for no constraint"
+    for index, name in enumerate(runtimes if isinstance(runtimes, list) else []):
+        if name not in ("openshell", "substrate"):
+            return f"{prefix}.runtimes[{index}]: {_go_quote(name)} must be openshell or substrate"
+    for key, allowed in (("sandbox_class", ("gvisor", "microvm")), ("unattended_asks", ("deny", "queue"))):
+        error = _sandbox_enum_error(f"{prefix}.{key}", section.get(key), *allowed)
+        if error:
+            return error
+    minute, day = 60 * 10**9, 24 * 3600 * 10**9
+    for error in (
+        _sandbox_go_duration_error(
+            f"{prefix}.idle_suspend_after", section.get("idle_suspend_after"), minute, 0, "1m", "", "30m"
+        ),
+        _sandbox_go_duration_error(
+            f"{prefix}.ask_timeout", section.get("ask_timeout"), minute, day, "1m", "24h0m0s", "30m"
+        ),
+    ):
+        if error:
+            return error
+    secrets = section.get("actor_secrets")
+    if isinstance(secrets, list) and not secrets:
+        return f"{prefix}.actor_secrets: an empty list is refused; leave the key out to expose no value"
+    secrets = secrets if isinstance(secrets, list) else []
+    if len(secrets) > 64:
+        return f"{prefix}.actor_secrets: at most 64 entries"
+    for index, name in enumerate(secrets):
+        if not isinstance(name, str) or not _SANDBOX_ACTOR_SECRET_RE.match(name):
+            return (
+                f"{prefix}.actor_secrets[{index}]: {_go_quote(name)} "
+                'must be a secret key (letters, digits, ".", "_" and "-")'
+            )
+    return _sandbox_ask_keys_error(section, prefix)
+
+
+def _sandbox_host_pattern_ok(host: Any) -> bool:
+    return isinstance(host, str) and len(host) <= 253 and _SANDBOX_HOST_PATTERN_RE.fullmatch(host) is not None
+
+
+def _sandbox_path_prefix_ok(path: Any) -> bool:
+    """Go sandboxPathPrefixOK: "/"-rooted printable ASCII, no %, ;, \\ or dot segment."""
+    if path in (None, ""):
+        return True
+    if not isinstance(path, str) or not path.startswith("/") or len(path) > 512 or any(c in path for c in "%;\\"):
+        return False
+    if any(ord(c) < 0x21 or ord(c) > 0x7E for c in path):
+        return False
+    return not any(seg in (".", "..") for seg in path.split("/"))
+
+
+def _sandbox_ask_keys_error(section: Mapping[str, Any], prefix: str) -> str | None:
+    """The first refusal of a section's ask_hosts and url_rules (Go validateAskKeys)."""
+    hosts = section.get("ask_hosts")
+    if isinstance(hosts, list) and not hosts:
+        return f"{prefix}.ask_hosts: an empty list is refused; leave the key out for no ask"
+    hosts = hosts if isinstance(hosts, list) else []
+    if len(hosts) > 256:
+        return f"{prefix}.ask_hosts: at most 256 entries"
+    for index, host in enumerate(hosts):
+        if not _sandbox_host_pattern_ok(host):
+            return f'{prefix}.ask_hosts[{index}]: {_go_quote(host)} must be a lower-case host name or "*.<host>"'
+    rules = section.get("url_rules")
+    if isinstance(rules, list) and not rules:
+        return f"{prefix}.url_rules: an empty list is refused; leave the key out for no rule"
+    rules = rules if isinstance(rules, list) else []
+    if len(rules) > 64:
+        return f"{prefix}.url_rules: at most 64 entries"
+    for index, rule in enumerate(rules):
+        p = f"{prefix}.url_rules[{index}]"
+        rule = rule if isinstance(rule, Mapping) else {}
+        name = rule.get("name") or ""
+        if name and (not isinstance(name, str) or not _SANDBOX_URL_RULE_NAME_RE.fullmatch(name)):
+            return f'{p}.name {_go_quote(name)} must be letters, digits, ".", "_" and "-" (at most 64)'
+        action = rule.get("action") or ""
+        if not isinstance(action, str) or action.lower() not in ("deny", "ask"):
+            return f"{p}.action {_go_quote(action)} must be one of deny, ask"
+        rule_hosts = rule.get("hosts") if isinstance(rule.get("hosts"), list) else []
+        if not rule_hosts or len(rule_hosts) > 64:
+            return f"{p}.hosts: name one to 64 hosts"
+        for j, host in enumerate(rule_hosts):
+            if not _sandbox_host_pattern_ok(host):
+                return f'{p}.hosts[{j}]: {_go_quote(host)} must be a lower-case host name or "*.<host>"'
+        methods = rule.get("methods") if isinstance(rule.get("methods"), list) else []
+        for j, method in enumerate(methods):
+            if not isinstance(method, str) or not _SANDBOX_HTTP_METHOD_RE.fullmatch(method):
+                return f"{p}.methods[{j}]: {_go_quote(method)} must be an HTTP method in capitals such as POST"
+        if not _sandbox_path_prefix_ok(rule.get("path_prefix")):
+            return (
+                f"{p}.path_prefix {_go_quote(rule.get('path_prefix'))} must start with \"/\" "
+                "and have no percent sign, semicolon, backslash or dot segment"
+            )
+    return None
+
+
+def _sandbox_host_scope_error(admin: Mapping[str, Any]) -> str | None:
+    """openshell.admin refuses the Agent Substrate keys (Go hostScopeError)."""
+    for key in _SANDBOX_SUBSTRATE_ONLY_KEYS:
+        if admin.get(key) not in (None, ""):
+            return (
+                f"admin.{key} is an Agent Substrate key; "
+                "set it in substrate.admin or a guardrail profile's sandbox section"
+            )
     return None
 
 
@@ -3867,7 +4298,7 @@ def _sandbox_union(base: list[Any], overlay: list[Any]) -> list[str]:
 
 
 def _sandbox_tighten_error(base: Mapping[str, Any], overlay: Mapping[str, Any]) -> str | None:
-    """The contradiction Go TightenOpenShellAdmin reports for base tightened
+    """The contradiction Go TightenSandboxAdmin reports for base tightened
     by overlay, or None."""
 
     def intersection_error(key: str, noun: str, left: list[Any], right: list[Any]) -> str:
@@ -3899,6 +4330,10 @@ def _sandbox_tighten_error(base: Mapping[str, Any], overlay: Mapping[str, Any]) 
         right = [p for p in (_sandbox_egress_pattern(v) for v in egress) if p]
         if not any(_sandbox_egress_covers(b, o) or _sandbox_egress_covers(o, b) for b in left for o in right):
             return intersection_error("egress_allow_only", "destination", egress_base, egress)
+    runtimes_base, runtimes = base.get("runtimes"), overlay.get("runtimes")
+    if isinstance(runtimes_base, list) and isinstance(runtimes, list):
+        if not any(str(v).strip().lower() == str(o).strip().lower() for v in runtimes_base for o in runtimes):
+            return intersection_error("runtimes", "runtime", runtimes_base, runtimes)
     required = _sandbox_union(base.get("required_for") or [], overlay.get("required_for") or [])
     if (base.get("allowed") is False or overlay.get("allowed") is False) and required:
         return (
@@ -3954,7 +4389,7 @@ def validate_sandbox_floors(raw: Mapping[str, Any] | None) -> None:
         error = _sandbox_section_error(sections[name], "sandbox") or _sandbox_tighten_error(admin, sections[name])
         if error:
             raise ValueError(where + error)
-    error = _sandbox_section_error(admin, "admin")
+    error = _sandbox_section_error(admin, "admin") or _sandbox_host_scope_error(admin)
     if error:
         raise ValueError("openshell: " + error)
 
@@ -4113,6 +4548,23 @@ class RoutingConfig:
     models: list[dict[str, Any]] = field(default_factory=list)
     signals: dict[str, Any] = field(default_factory=dict)
     decisions: list[dict[str, Any]] = field(default_factory=list)
+    # 1.0.10 keys (Go internal/config/routing_policy.go). Absent keeps the
+    # 1.0.9 meaning; validation is the v8 schema plus the Go gateway.
+    classifier: str = ""
+    min_confidence: float = 0.0
+    on_classifier_error: str = ""
+    default_alias: str = ""
+    categories: dict[str, Any] = field(default_factory=dict)
+    allow_user_override: bool = False
+    sensitive: dict[str, Any] = field(default_factory=dict)
+    systemone: dict[str, Any] = field(default_factory=dict)
+    route_only: dict[str, Any] = field(default_factory=dict)
+    # routing.context: bounded recent context for the router (recent_user_turns,
+    # include_first_user_turn, max_bytes, per_turn_bytes, include_tool_names).
+    context: dict[str, Any] = field(default_factory=dict)
+    # routing.admin: the floor keys (S1) plus rules / budgets / visibility
+    # (S11), kept as a mapping so every key round-trips.
+    admin: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {"enabled": self.enabled}
@@ -4130,7 +4582,262 @@ class RoutingConfig:
             d["signals"] = copy.deepcopy(self.signals)
         if self.decisions:
             d["decisions"] = copy.deepcopy(self.decisions)
+        for name in ("classifier", "on_classifier_error", "default_alias"):
+            if getattr(self, name):
+                d[name] = getattr(self, name)
+        if self.min_confidence:
+            d["min_confidence"] = self.min_confidence
+        if self.allow_user_override:
+            d["allow_user_override"] = True
+        for name in ROUTING_NESTED_1010_KEYS:
+            if getattr(self, name):
+                d[name] = copy.deepcopy(getattr(self, name))
         return d
+
+
+# Nested routing keys added in 1.0.10, kept as raw mappings.
+ROUTING_NESTED_1010_KEYS = ("categories", "sensitive", "systemone", "route_only", "admin", "context")
+
+
+@dataclass
+class SubstrateAPIConfig:
+    """``substrate.api``: how the cluster components reach ate-api-server."""
+
+    address: str = ""
+    server_name: str = ""
+    ca_file: str = ""
+    auth: str = ""
+    token_file: str = ""
+    credential_bundle: str = ""
+
+
+@dataclass
+class SubstrateOIDCConfig:
+    issuer: str = ""
+    client_id: str = ""
+    groups_claim: str = ""
+
+
+@dataclass
+class SubstrateWorkloadOIDCConfig:
+    issuer: str = ""
+    audience: str = ""
+    # Bind the entry to the workloads it trusts (GAP-0043): subject exact or
+    # a prefix ending in ":*" or "/*" (whole segments only; a raw prefix or a
+    # bare "*" is refused), claims compared exactly.
+    subject: str = ""
+    claims: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
+class SubstrateIdentityConfig:
+    issuer: str = ""
+    audience: str = ""
+    token_lifetime_seconds: int | None = None
+    actor_cert_oid: str = ""
+    # The actor token key set (GAP-0194): empty is the idp Service,
+    # https://idp.<substrate namespace>.svc/openid/v1/jwks, whatever the
+    # issuer is; keys_ca_file empty is the servicedns trust bundle.
+    keys_url: str = ""
+    keys_ca_file: str = ""
+    oidc: SubstrateOIDCConfig = field(default_factory=SubstrateOIDCConfig)
+    workload_oidc: list[SubstrateWorkloadOIDCConfig] = field(default_factory=list)
+    # Groups whose members are Substrate administrators (GAP-0191).
+    admin_groups: list[str] = field(default_factory=list)
+
+
+@dataclass
+class SubstrateServicesConfig:
+    actor: str = ""
+    admin: str = ""
+
+
+@dataclass
+class SubstrateUnattendedConfig:
+    asks: str = ""
+    ask_timeout: str = ""
+    telemetry_sampling: float | None = None
+
+
+@dataclass
+class SubstrateRateLimitsConfig:
+    per_actor_rps: float | None = None
+    per_atespace_rps: float | None = None
+
+
+@dataclass
+class SubstrateExtprocUIDConfig:
+    cache_ttl: str = ""
+    stale_max: str = ""
+
+
+@dataclass
+class SubstrateExtprocChainConfig:
+    check_budget: str = ""
+    send_budget: str = ""
+    queue_size: int | None = None
+    failure_mode: str = ""
+
+
+@dataclass
+class SubstrateExtprocAskConfig:
+    hold: str = ""
+
+
+@dataclass
+class SubstrateExtprocJudgeConfig:
+    url: str = ""
+    token_file: str = ""
+    ca_file: str = ""
+    timeout: str = ""
+
+
+@dataclass
+class SubstrateExtprocDLPConfig:
+    credential_headers: str = ""
+
+
+@dataclass
+class SubstrateExtprocConfig:
+    """``substrate.extproc``: the egress callout (mirrors Go
+    ``SubstrateExtprocConfig``; the callout validates the same bounds)."""
+
+    enabled: bool | None = None
+    failure_mode: str = ""
+    body_inspection: str = ""
+    body_max_bytes: int | None = None
+    mcp_hosts: list[str] = field(default_factory=list)
+    body_hosts: list[str] = field(default_factory=list)
+    cluster_domains: list[str] = field(default_factory=list)
+    actor_trust_domain: str = ""
+    egress_peers: list[str] = field(default_factory=list)
+    request_access: str = ""
+    log_headers: bool = False
+    redact_headers: list[str] = field(default_factory=list)
+    blocklist_files: list[str] = field(default_factory=list)
+    actor_secrets_dir: str = ""
+    uid: SubstrateExtprocUIDConfig = field(default_factory=SubstrateExtprocUIDConfig)
+    chain: SubstrateExtprocChainConfig = field(default_factory=SubstrateExtprocChainConfig)
+    ask: SubstrateExtprocAskConfig = field(default_factory=SubstrateExtprocAskConfig)
+    judge: SubstrateExtprocJudgeConfig = field(default_factory=SubstrateExtprocJudgeConfig)
+    dlp: SubstrateExtprocDLPConfig = field(default_factory=SubstrateExtprocDLPConfig)
+
+
+@dataclass
+class SubstrateLLMCredentialConfig:
+    provider_uri: str = ""
+
+
+@dataclass
+class SubstrateLLMConfig:
+    providers: list[str] = field(default_factory=list)
+    credential: SubstrateLLMCredentialConfig = field(default_factory=SubstrateLLMCredentialConfig)
+    # Bedrock model IDs actors may call; another model goes to the first (GAP-0008).
+    bedrock_models: list[str] = field(default_factory=list)
+
+
+@dataclass
+class SubstrateEgressConfig:
+    allow: list[str] = field(default_factory=list)
+    # None = every ecosystem pack (Go nil); [] = none.
+    ecosystem_packs: list[str] | None = None
+    registries: list[str] = field(default_factory=list)
+
+
+@dataclass
+class SubstrateRegistryAuthConfig:
+    """``substrate.templates.registry_auth`` (mirrors Go
+    ``SubstrateRegistryAuthConfig``, GAP-0190): template registry logins,
+    each for exactly one host; unset is anonymous."""
+
+    docker_config: str = ""
+    ecr_hosts: list[str] = field(default_factory=list)
+
+
+@dataclass
+class SubstrateTemplatesConfig:
+    """``substrate.templates`` (mirrors Go ``SubstrateTemplatesConfig``):
+    how the controller admits template images (trust anchors from an
+    admin-only Secret, image allow lists, revoked digests)."""
+
+    trust_anchors: str = ""
+    min_policy_generation: int = 0
+    max_age: str = ""
+    allow_unverified_base: bool = False
+    allowed_images: list[str] = field(default_factory=list)
+    profile_images: dict[str, list[str]] = field(default_factory=dict)
+    volume_images: list[str] = field(default_factory=list)
+    plain_http_registries: list[str] = field(default_factory=list)
+    revoked_digests: list[str] = field(default_factory=list)
+    registry_auth: SubstrateRegistryAuthConfig = field(default_factory=SubstrateRegistryAuthConfig)
+
+
+@dataclass
+class SubstrateSecretInject:
+    hosts: list[str] = field(default_factory=list)
+    header: str = ""
+    prefix: str = ""
+    placeholder: str = ""
+
+
+@dataclass
+class SubstrateSecret:
+    """One ``substrate.secrets`` entry: a reference, never a value."""
+
+    name: str = ""
+    source: str = ""
+    inject: SubstrateSecretInject = field(default_factory=SubstrateSecretInject)
+    scope: str = ""
+    profiles: list[str] = field(default_factory=list)
+
+
+@dataclass
+class SubstrateBundlesConfig:
+    """``substrate.bundles``: signed policy bundles for the cluster (mirrors
+    Go ``SubstrateBundlesConfig``). Empty strings take the defaults: the
+    chart's anchors mount, the ``defenseclaw-bundle-inbox`` ConfigMap and a
+    10 s refresh."""
+
+    enabled: bool = False
+    anchors_file: str = ""
+    inbox: str = ""
+    refresh_interval: str = ""
+
+
+@dataclass
+class SubstrateConfig:
+    """``substrate:``, DefenseClaw on Agent Substrate (mirrors Go
+    ``SubstrateConfig``). Off by default and read only in the cluster; the
+    gateway validates it (``config.SubstrateConfig.Validate``). An untouched
+    block is not written, as Go's ``omitempty``."""
+
+    enabled: bool = False
+    api: SubstrateAPIConfig = field(default_factory=SubstrateAPIConfig)
+    supported_versions: str = ""
+    identity: SubstrateIdentityConfig = field(default_factory=SubstrateIdentityConfig)
+    services: SubstrateServicesConfig = field(default_factory=SubstrateServicesConfig)
+    launcher_atespaces: dict[str, list[str]] = field(default_factory=dict)
+    require_attested_templates: bool | None = None
+    templates: SubstrateTemplatesConfig = field(default_factory=SubstrateTemplatesConfig)
+    default_sandbox_class: str = ""
+    idle_suspend_after: str = ""
+    # Opt-in: without a CPU feed, silence alone is idle, an attached
+    # actor's too (GAP-0534).
+    idle_suspend_without_cpu: bool | None = None
+    # block (default) or alert: a request after a secret read at the egress
+    # callout; the leader reads it (GAP-0250).
+    chain_egress_action: str = ""
+    # Workspace upload cap through the admin attach route (E23); None = 1 GiB.
+    workspace_max_bytes: int | None = None
+    unattended: SubstrateUnattendedConfig = field(default_factory=SubstrateUnattendedConfig)
+    rate_limits: SubstrateRateLimitsConfig = field(default_factory=SubstrateRateLimitsConfig)
+    extproc: SubstrateExtprocConfig = field(default_factory=SubstrateExtprocConfig)
+    llm: SubstrateLLMConfig = field(default_factory=SubstrateLLMConfig)
+    egress: SubstrateEgressConfig = field(default_factory=SubstrateEgressConfig)
+    secrets: list[SubstrateSecret] = field(default_factory=list)
+    allow_passthrough_for: list[str] = field(default_factory=list)
+    admin: OpenShellAdminConfig = field(default_factory=OpenShellAdminConfig)
+    bundles: SubstrateBundlesConfig = field(default_factory=SubstrateBundlesConfig)
 
 
 @dataclass
@@ -4647,6 +5354,8 @@ class Config:
     notifications: NotificationsConfig = field(default_factory=lambda: NotificationsConfig())
     routing: RoutingConfig = field(default_factory=RoutingConfig)
     fleet: FleetConfig = field(default_factory=FleetConfig)
+    # substrate: (DefenseClaw on Agent Substrate); off by default.
+    substrate: SubstrateConfig = field(default_factory=SubstrateConfig)
     llm_providers: LLMProvidersConfig = field(default_factory=LLMProvidersConfig)
     update: UpdateConfig = field(default_factory=UpdateConfig)
     # The unified decision model (decision_model:); off by default.
@@ -5481,6 +6190,8 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
             judge.pop("hook_connectors", None)
         if not judge.get("hook_timeout"):
             judge.pop("hook_timeout", None)
+        if not judge.get("intent_scope"):
+            judge.pop("intent_scope", None)
         judge.pop("_max_parallel_explicit_zero", None)
         if not judge.get("max_parallel") and not cfg.guardrail.judge._max_parallel_explicit_zero:
             judge.pop("max_parallel", None)
@@ -5570,6 +6281,7 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
         if not sources:
             d.pop("registries", None)
     _serialize_openshell(d)
+    _serialize_substrate(cfg, d)
     _serialize_routing(d)
     return d
 
@@ -5612,12 +6324,13 @@ def _prune_v9_block(parent: Any, key: str, *, drop_false: bool = False) -> None:
 
 
 def _serialize_v9_rules_scope(block: Any) -> None:
-    """Drop an unset ``rule_pack`` / ``rules`` on a guardrail scope."""
+    """Drop an unset ``rule_pack`` / ``rules`` / ``cascade`` on a guardrail scope."""
     if not isinstance(block, dict):
         return
     if not block.get("rule_pack"):
         block.pop("rule_pack", None)
     _prune_v9_block(block, "rules")
+    _prune_v9_block(block, "cascade")
 
 
 def _serialize_v9_guardrail_keys(guardrail: Any) -> None:
@@ -5654,13 +6367,12 @@ def _serialize_v9_scanner_keys(scanners: Any) -> None:
 
 
 def _strip_ai_discovery_omitempty(ai_discovery: Any) -> None:
-    """Mirror Go's ``omitempty`` on ``ai_discovery.include_user_principal``,
-    ``trusted_ad_child_domains`` and ``ide_inventory`` so configs that never
-    set them stay byte-identical."""
+    """Mirror Go's omission of default-valued optional discovery settings."""
     if not isinstance(ai_discovery, dict):
         return
-    if not ai_discovery.get("include_user_principal"):
-        ai_discovery.pop("include_user_principal", None)
+    for key in ("include_user_principal", "include_skill_manifests"):
+        if not ai_discovery.get(key):
+            ai_discovery.pop(key, None)
     if not ai_discovery.get("trusted_ad_child_domains"):
         ai_discovery.pop("trusted_ad_child_domains", None)
     if ai_discovery.get("ide_inventory") in (None, "", "all"):
@@ -5713,7 +6425,7 @@ def _serialize_guardrail_profiles(cfg: Config, guardrail: Any) -> None:
                 continue
             _strip_empty_keys(
                 profile,
-                ("description", "mode", "block_message", "hilt", "enabled", "hook_fail_mode", "sandbox"),
+                ("description", "mode", "block_message", "hilt", "enabled", "hook_fail_mode", "sandbox", "routing"),
             )
             if isinstance(profile.get("sandbox"), dict):
                 _strip_unset_sandbox_keys(profile["sandbox"])
@@ -5740,6 +6452,13 @@ def _serialize_guardrail_profiles(cfg: Config, guardrail: Any) -> None:
                 for key in ("groups", "users", "connectors", "agents"):
                     if not match.get(key):
                         match.pop(key, None)
+                sub = match.get("substrate")
+                if isinstance(sub, dict):
+                    for key in ("atespaces", "templates", "workloads"):
+                        if not sub.get(key):
+                            sub.pop(key, None)
+                if not match.get("substrate"):
+                    match.pop("substrate", None)
     if not guardrail.get("default_profile"):
         guardrail.pop("default_profile", None)
 
@@ -5772,6 +6491,7 @@ def _serialize_routing(d: dict[str, Any]) -> None:
         "models",
         "signals",
         "decisions",
+        *ROUTING_NESTED_1010_KEYS,
     )
     has_value = any(
         (
@@ -5779,6 +6499,11 @@ def _serialize_routing(d: dict[str, Any]) -> None:
             routing.get("version"),
             routing.get("port"),
             routing.get("algorithm"),
+            routing.get("classifier"),
+            routing.get("min_confidence"),
+            routing.get("on_classifier_error"),
+            routing.get("default_alias"),
+            routing.get("allow_user_override"),
             *(routing.get(name) for name in nested_fields),
         )
     )
@@ -5791,6 +6516,9 @@ def _serialize_routing(d: dict[str, Any]) -> None:
         routing.pop("port", None)
     if not routing.get("algorithm"):
         routing.pop("algorithm", None)
+    for name in ("classifier", "min_confidence", "on_classifier_error", "default_alias", "allow_user_override"):
+        if not routing.get(name):
+            routing.pop(name, None)
     for name in nested_fields:
         if not routing.get(name):
             routing.pop(name, None)
@@ -5939,6 +6667,8 @@ _OWNED_NESTED_KEYS: frozenset[str] = frozenset(
         "decision_model.hook_connectors",
         # Hook-lane judge timeout: 0 = gateway default, stripped on save.
         "guardrail.judge.hook_timeout",
+        # Task-scope check of the tool judge: empty = built-in default, stripped on save.
+        "guardrail.judge.intent_scope",
         # Judge call bound: 0 = no limit, stripped on save.
         "guardrail.judge.max_parallel",
         # Identity-based guardrail profile selection: empty = no profiles.
@@ -5946,6 +6676,7 @@ _OWNED_NESTED_KEYS: frozenset[str] = frozenset(
         "guardrail.default_profile",
         # AI discovery identity/IDE opt-ins: stripped at their defaults.
         "ai_discovery.include_user_principal",
+        "ai_discovery.include_skill_manifests",
         "ai_discovery.trusted_ad_child_domains",
         "ai_discovery.ide_inventory",
     }
@@ -6862,6 +7593,7 @@ def _merge_judge(raw: dict[str, Any] | None) -> JudgeConfig:
         timeout=raw.get("timeout", 30.0),
         hook_connectors=raw.get("hook_connectors", []),
         hook_timeout=raw.get("hook_timeout", 0.0),
+        intent_scope=raw.get("intent_scope", "") or "",
         max_parallel=_judge_max_parallel(raw.get("max_parallel", 0)),
         extra_body=raw.get("extra_body", {}),
         _max_parallel_explicit_zero=type(raw.get("max_parallel")) is int and raw["max_parallel"] == 0,
@@ -6904,12 +7636,15 @@ def _merge_guardrail(raw: dict[str, Any] | None, data_dir: str) -> GuardrailConf
         detection_strategy_prompt=raw.get("detection_strategy_prompt", ""),
         detection_strategy_completion=raw.get("detection_strategy_completion", ""),
         detection_strategy_tool_call=raw.get("detection_strategy_tool_call", ""),
+        effects_rules_tier=raw.get("effects_rules_tier", "restricted"),
+        secret_flow=_merge_secret_flow(raw.get("secret_flow")),
         judge_sweep=raw.get("judge_sweep", True),
         rule_pack=str(raw.get("rule_pack", "") or ""),
         custom_packs=_merge_custom_rule_packs(raw.get("custom_packs")),
         rules=_merge_guardrail_rules(raw.get("rules")) or GuardrailRulesConfig(),
         cisco_trust_level=str(raw.get("cisco_trust_level", "") or ""),
         internal_domains=_string_list(raw.get("internal_domains")),
+        cascade=_merge_cascade(raw.get("cascade")),
         block_at=normalize_guardrail_level(raw.get("block_at")),
         alert_at=normalize_guardrail_level(raw.get("alert_at")),
         connector=raw.get("connector", ""),
@@ -6960,8 +7695,14 @@ def _merge_guardrail_connectors(
             enabled=enabled,
             block_at=normalize_guardrail_level(entry.get("block_at")),
             alert_at=normalize_guardrail_level(entry.get("alert_at")),
+            cascade=_merge_cascade(entry.get("cascade")),
         )
     return out
+
+
+def _merge_cascade(raw: Any) -> dict[str, Any]:
+    """A ``guardrail.cascade`` block as written (a copy); not a mapping is unset."""
+    return copy.deepcopy(raw) if isinstance(raw, dict) else {}
 
 
 def _string_list(raw: Any) -> list[str]:
@@ -6991,8 +7732,10 @@ def _merge_guardrail_profiles(raw: Any) -> dict[str, GuardrailProfile]:
             block_message=str(entry.get("block_message", "") or ""),
             connectors=_merge_guardrail_connectors(entry.get("connectors"), profile=True),
             sandbox=_merge_openshell_admin(entry["sandbox"]) if isinstance(entry.get("sandbox"), dict) else None,
+            routing=copy.deepcopy(entry["routing"]) if isinstance(entry.get("routing"), dict) else None,
             enabled=enabled_raw if isinstance(enabled_raw, bool) else None,
             hook_fail_mode=str(entry.get("hook_fail_mode", "") or ""),
+            cascade=_merge_cascade(entry.get("cascade")),
         )
     return out
 
@@ -7014,10 +7757,21 @@ def _merge_guardrail_profile_assignments(raw: Any) -> list[GuardrailProfileAssig
                     users=_string_list(match.get("users")),
                     connectors=_string_list(match.get("connectors")),
                     agents=_string_list(match.get("agents")),
+                    substrate=_merge_profile_match_substrate(match.get("substrate")),
                 ),
             )
         )
     return out
+
+
+def _merge_profile_match_substrate(raw: Any) -> GuardrailProfileMatchSubstrate | None:
+    if not isinstance(raw, dict):
+        return None
+    return GuardrailProfileMatchSubstrate(
+        atespaces=_string_list(raw.get("atespaces")),
+        templates=_string_list(raw.get("templates")),
+        workloads=_string_list(raw.get("workloads")),
+    )
 
 
 def _normalize_llm_role(value: Any) -> str:
@@ -7105,6 +7859,37 @@ def _merge_hilt(raw: dict[str, Any] | None) -> HILTConfig:
     return HILTConfig(
         enabled=bool(raw.get("enabled", False)),
         min_severity=str(raw.get("min_severity", "HIGH") or "HIGH").upper(),
+    )
+
+
+def _merge_secret_flow(raw: dict[str, Any] | None) -> SecretFlowConfig:
+    if not isinstance(raw, dict):
+        return SecretFlowConfig()
+    label_raw = raw.get("label_sets") or {}
+    sink_raw = raw.get("sink_action") or {}
+    mem_raw = raw.get("memory") or {}
+    allow_raw = raw.get("destination_allowlist", [])
+    allow = (
+        [str(v).strip() for v in allow_raw if str(v).strip()]
+        if isinstance(allow_raw, list | tuple)
+        else []
+    )
+    return SecretFlowConfig(
+        label_sets=SecretFlowLabelSets(
+            credentials=bool(label_raw.get("credentials", True)),
+            extra_path_globs=_string_list(label_raw.get("extra_path_globs")),
+            extra_secret_patterns=_string_list(label_raw.get("extra_secret_patterns")),
+        ),
+        sink_action=SecretFlowSinkAction(
+            default=str(sink_raw.get("default", "alert") or "alert"),
+            strict=str(sink_raw.get("strict", "block") or "block"),
+        ),
+        reencodings=bool(raw.get("reencodings", True)),
+        memory=SecretFlowMemory(
+            max_labeled_paths=int(mem_raw.get("max_labeled_paths", 512) or 512),
+            max_value_digests=int(mem_raw.get("max_value_digests", 256) or 256),
+        ),
+        destination_allowlist=allow,
     )
 
 
@@ -7291,6 +8076,252 @@ def _merge_llm_providers(raw: Any) -> LLMProvidersConfig:
     return LLMProvidersConfig(custom=custom, ollama_ports=ports)
 
 
+def _optional_number(raw: Any, kind: type) -> Any:
+    if raw is None or isinstance(raw, bool):
+        return None
+    try:
+        return kind(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _duration_text(raw: Any) -> str:
+    """A ``duration`` value as written: a Go duration string, or integer
+    seconds kept as their text."""
+    if raw is None or isinstance(raw, bool):
+        return ""
+    return str(raw).strip()
+
+
+def _merge_substrate(raw: Any) -> SubstrateConfig:
+    """Build :class:`SubstrateConfig` from the YAML ``substrate:`` block.
+    Load only: validation is the gateway's."""
+    raw = _mapping(raw)
+    api = _mapping(raw.get("api"))
+    ident = _mapping(raw.get("identity"))
+    oidc = _mapping(ident.get("oidc"))
+    services = _mapping(raw.get("services"))
+    unattended = _mapping(raw.get("unattended"))
+    limits = _mapping(raw.get("rate_limits"))
+    extproc = _mapping(raw.get("extproc"))
+    llm = _mapping(raw.get("llm"))
+    egress = _mapping(raw.get("egress"))
+    launchers: dict[str, list[str]] = {}
+    for profile, spaces in _mapping(raw.get("launcher_atespaces")).items():
+        launchers[str(profile)] = _string_list(spaces)
+    secrets = []
+    for item in raw.get("secrets") or []:
+        item = _mapping(item)
+        inject = _mapping(item.get("inject"))
+        secrets.append(
+            SubstrateSecret(
+                name=str(item.get("name", "") or ""),
+                source=str(item.get("source", "") or ""),
+                inject=SubstrateSecretInject(
+                    hosts=_string_list(inject.get("hosts")),
+                    header=str(inject.get("header", "") or ""),
+                    prefix=str(inject.get("prefix", "") or ""),
+                    placeholder=str(inject.get("placeholder", "") or ""),
+                ),
+                scope=str(item.get("scope", "") or ""),
+                profiles=_string_list(item.get("profiles")),
+            )
+        )
+    packs = egress.get("ecosystem_packs")
+    return SubstrateConfig(
+        enabled=raw.get("enabled") is True,
+        api=SubstrateAPIConfig(
+            address=str(api.get("address", "") or ""),
+            server_name=str(api.get("server_name", "") or ""),
+            ca_file=str(api.get("ca_file", "") or ""),
+            auth=str(api.get("auth", "") or ""),
+            token_file=str(api.get("token_file", "") or ""),
+            credential_bundle=str(api.get("credential_bundle", "") or ""),
+        ),
+        supported_versions=str(raw.get("supported_versions", "") or ""),
+        identity=SubstrateIdentityConfig(
+            issuer=str(ident.get("issuer", "") or ""),
+            audience=str(ident.get("audience", "") or ""),
+            token_lifetime_seconds=_optional_number(ident.get("token_lifetime_seconds"), int),
+            actor_cert_oid=str(ident.get("actor_cert_oid", "") or ""),
+            keys_url=str(ident.get("keys_url", "") or ""),
+            keys_ca_file=str(ident.get("keys_ca_file", "") or ""),
+            oidc=SubstrateOIDCConfig(
+                issuer=str(oidc.get("issuer", "") or ""),
+                client_id=str(oidc.get("client_id", "") or ""),
+                groups_claim=str(oidc.get("groups_claim", "") or ""),
+            ),
+            workload_oidc=[
+                SubstrateWorkloadOIDCConfig(
+                    issuer=str(_mapping(w).get("issuer", "") or ""),
+                    audience=str(_mapping(w).get("audience", "") or ""),
+                    subject=str(_mapping(w).get("subject", "") or ""),
+                    claims={
+                        str(k): str(v)
+                        for k, v in (_mapping(_mapping(w).get("claims")) or {}).items()
+                    },
+                )
+                for w in ident.get("workload_oidc") or []
+            ],
+            admin_groups=_string_list(ident.get("admin_groups")),
+        ),
+        services=SubstrateServicesConfig(
+            actor=str(services.get("actor", "") or ""),
+            admin=str(services.get("admin", "") or ""),
+        ),
+        launcher_atespaces=launchers,
+        require_attested_templates=_optional_bool(raw.get("require_attested_templates")),
+        templates=_merge_substrate_templates(raw.get("templates")),
+        default_sandbox_class=str(raw.get("default_sandbox_class", "") or ""),
+        idle_suspend_after=_duration_text(raw.get("idle_suspend_after")),
+        idle_suspend_without_cpu=_optional_bool(raw.get("idle_suspend_without_cpu")),
+        chain_egress_action=str(raw.get("chain_egress_action", "") or ""),
+        workspace_max_bytes=_optional_number(raw.get("workspace_max_bytes"), int),
+        unattended=SubstrateUnattendedConfig(
+            asks=str(unattended.get("asks", "") or ""),
+            ask_timeout=_duration_text(unattended.get("ask_timeout")),
+            telemetry_sampling=_optional_number(unattended.get("telemetry_sampling"), float),
+        ),
+        rate_limits=SubstrateRateLimitsConfig(
+            per_actor_rps=_optional_number(limits.get("per_actor_rps"), float),
+            per_atespace_rps=_optional_number(limits.get("per_atespace_rps"), float),
+        ),
+        extproc=_merge_substrate_extproc(extproc),
+        llm=SubstrateLLMConfig(
+            providers=_string_list(llm.get("providers")),
+            credential=SubstrateLLMCredentialConfig(
+                provider_uri=str(_mapping(llm.get("credential")).get("provider_uri", "") or ""),
+            ),
+            bedrock_models=_string_list(llm.get("bedrock_models")),
+        ),
+        egress=SubstrateEgressConfig(
+            allow=_string_list(egress.get("allow")),
+            ecosystem_packs=None if packs is None else _string_list(packs),
+            registries=_string_list(egress.get("registries")),
+        ),
+        secrets=secrets,
+        allow_passthrough_for=_string_list(raw.get("allow_passthrough_for")),
+        admin=_merge_openshell_admin(raw.get("admin")),
+        bundles=_merge_substrate_bundles(raw.get("bundles")),
+    )
+
+
+def _merge_substrate_bundles(raw: Any) -> SubstrateBundlesConfig:
+    raw = _mapping(raw)
+    return SubstrateBundlesConfig(
+        enabled=raw.get("enabled") is True,
+        anchors_file=str(raw.get("anchors_file", "") or ""),
+        inbox=str(raw.get("inbox", "") or ""),
+        refresh_interval=_duration_text(raw.get("refresh_interval")),
+    )
+
+
+def _merge_substrate_templates(raw: Any) -> SubstrateTemplatesConfig:
+    t = _mapping(raw)
+    generation = _optional_number(t.get("min_policy_generation"), int)
+    return SubstrateTemplatesConfig(
+        trust_anchors=str(t.get("trust_anchors", "") or ""),
+        min_policy_generation=int(generation or 0),
+        max_age=_duration_text(t.get("max_age")),
+        allow_unverified_base=t.get("allow_unverified_base") is True,
+        allowed_images=_string_list(t.get("allowed_images")),
+        profile_images={str(k): _string_list(v) for k, v in _mapping(t.get("profile_images")).items()},
+        volume_images=_string_list(t.get("volume_images")),
+        plain_http_registries=_string_list(t.get("plain_http_registries")),
+        revoked_digests=_string_list(t.get("revoked_digests")),
+        registry_auth=SubstrateRegistryAuthConfig(
+            docker_config=str(_mapping(t.get("registry_auth")).get("docker_config", "") or ""),
+            ecr_hosts=_string_list(_mapping(t.get("registry_auth")).get("ecr_hosts")),
+        ),
+    )
+
+
+def _merge_substrate_extproc(extproc: dict[str, Any]) -> SubstrateExtprocConfig:
+    uid = _mapping(extproc.get("uid"))
+    chain = _mapping(extproc.get("chain"))
+    judge = _mapping(extproc.get("judge"))
+    return SubstrateExtprocConfig(
+        enabled=_optional_bool(extproc.get("enabled")),
+        failure_mode=str(extproc.get("failure_mode", "") or ""),
+        body_inspection=str(extproc.get("body_inspection", "") or ""),
+        body_max_bytes=_optional_number(extproc.get("body_max_bytes"), int),
+        mcp_hosts=_string_list(extproc.get("mcp_hosts")),
+        body_hosts=_string_list(extproc.get("body_hosts")),
+        cluster_domains=_string_list(extproc.get("cluster_domains")),
+        actor_trust_domain=str(extproc.get("actor_trust_domain", "") or ""),
+        egress_peers=_string_list(extproc.get("egress_peers")),
+        request_access=str(extproc.get("request_access", "") or ""),
+        log_headers=extproc.get("log_headers") is True,
+        redact_headers=_string_list(extproc.get("redact_headers")),
+        blocklist_files=_string_list(extproc.get("blocklist_files")),
+        actor_secrets_dir=str(extproc.get("actor_secrets_dir", "") or ""),
+        uid=SubstrateExtprocUIDConfig(
+            cache_ttl=_duration_text(uid.get("cache_ttl")), stale_max=_duration_text(uid.get("stale_max"))
+        ),
+        chain=SubstrateExtprocChainConfig(
+            check_budget=_duration_text(chain.get("check_budget")),
+            send_budget=_duration_text(chain.get("send_budget")),
+            queue_size=_optional_number(chain.get("queue_size"), int),
+            failure_mode=str(chain.get("failure_mode", "") or ""),
+        ),
+        ask=SubstrateExtprocAskConfig(hold=_duration_text(_mapping(extproc.get("ask")).get("hold"))),
+        judge=SubstrateExtprocJudgeConfig(
+            url=str(judge.get("url", "") or ""),
+            token_file=str(judge.get("token_file", "") or ""),
+            ca_file=str(judge.get("ca_file", "") or ""),
+            timeout=_duration_text(judge.get("timeout")),
+        ),
+        dlp=SubstrateExtprocDLPConfig(
+            credential_headers=str(_mapping(extproc.get("dlp")).get("credential_headers", "") or "")
+        ),
+    )
+
+
+def _serialize_substrate(cfg: Config, d: dict[str, Any]) -> None:
+    """Mirror Go's ``yaml:"substrate,omitempty"``: an untouched block is not
+    written. Otherwise unset keys are dropped (``enabled`` stays, as Go
+    writes it), an explicit empty ``egress.ecosystem_packs`` (no packs)
+    stays, and ``admin`` keeps only the keys that are set."""
+    if cfg.substrate == SubstrateConfig():
+        d.pop("substrate", None)
+        return
+    block = d.get("substrate")
+    if not isinstance(block, dict):
+        return
+    admin = block.get("admin")
+    if isinstance(admin, dict):
+        _strip_unset_sandbox_keys(admin)
+    packs = (block.get("egress") or {}).get("ecosystem_packs")
+    pruned = _prune_unset(block)
+    if pruned is _V8_MISSING:
+        pruned = {}
+    pruned["enabled"] = cfg.substrate.enabled
+    extproc = pruned.get("extproc")
+    if isinstance(extproc, dict):
+        if extproc.get("log_headers") is False:  # Go omitempty
+            extproc.pop("log_headers")
+        if not extproc:
+            pruned.pop("extproc")
+    templates = pruned.get("templates")
+    if isinstance(templates, dict):
+        # Go omitempty: false and 0 are not written.
+        if templates.get("allow_unverified_base") is False:
+            templates.pop("allow_unverified_base")
+        if templates.get("min_policy_generation") == 0:
+            templates.pop("min_policy_generation")
+        if not templates:
+            pruned.pop("templates")
+    bundles = pruned.get("bundles")
+    if isinstance(bundles, dict):
+        if bundles.get("enabled") is False:  # Go omitempty
+            bundles.pop("enabled")
+        if not bundles:
+            pruned.pop("bundles")
+    if packs == []:
+        pruned.setdefault("egress", {})["ecosystem_packs"] = []
+    d["substrate"] = pruned
+
+
 def _merge_update(raw: Any) -> UpdateConfig:
     raw = _mapping(raw)
     return UpdateConfig(
@@ -7424,6 +8455,72 @@ def _merge_observability(raw: Any) -> ObservabilityConfig:
         return ObservabilityConfig()
     return ObservabilityConfig(
         connectors=_merge_observability_connectors(raw.get("connectors")),
+        tokenomics=_merge_tokenomics(raw.get("tokenomics")),
+        pricing=_merge_pricing(raw.get("pricing")),
+    )
+
+def _opt_float(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
+
+
+def _merge_rates(raw: Any, rates: type[PriceRates] = PriceRates, **extra: Any) -> Any:
+    raw = raw if isinstance(raw, dict) else {}
+    return rates(
+        input_per_mtok=_opt_float(raw.get("input_per_mtok")),
+        output_per_mtok=_opt_float(raw.get("output_per_mtok")),
+        cache_read_per_mtok=_opt_float(raw.get("cache_read_per_mtok")),
+        cache_write_per_mtok=_opt_float(raw.get("cache_write_per_mtok")),
+        reasoning_per_mtok=_opt_float(raw.get("reasoning_per_mtok")),
+        **extra,
+    )
+
+
+def _merge_pricing(raw: Any) -> PricingConfig:
+    """Parse ``observability.pricing``. Absent keys stay absent; no price is invented."""
+    if not isinstance(raw, dict):
+        return PricingConfig()
+    models = [
+        _merge_rates(entry, PriceEntry, provider=str(entry.get("provider", "")), model=str(entry.get("model", "")))
+        for entry in (raw.get("models") or [])
+        if isinstance(entry, dict)
+    ]
+    ai_defense = raw.get("ai_defense")
+    return PricingConfig(
+        version=str(raw.get("version", "") or ""),
+        models=models,
+        ai_defense_per_call_usd=_opt_float(ai_defense.get("per_call_usd")) if isinstance(ai_defense, dict) else None,
+        unknown_model=str(raw.get("unknown_model", "") or "omit"),
+        fallback=_merge_rates(raw.get("fallback")),
+    )
+
+
+def _merge_tokenomics(raw: Any) -> TokenomicsConfig:
+    """Parse ``observability.tokenomics``. Off unless ``enabled: true``."""
+    if not isinstance(raw, dict):
+        return TokenomicsConfig()
+
+    def child(key: str) -> dict[str, Any]:
+        value = raw.get(key)
+        return value if isinstance(value, dict) else {}
+
+    native, cost, store, metrics = child("native_otel_import"), child("cost"), child("local_store"), child("metrics")
+    labels = metrics.get("labels")
+    return TokenomicsConfig(
+        enabled=_coerce_bool(raw.get("enabled", False)),
+        record_routing_provenance=_coerce_bool(raw.get("record_routing_provenance", True), default=True),
+        roles=[str(r) for r in (raw.get("roles") or [])],
+        native_claudecode=_coerce_bool(native.get("claudecode", True), default=True),
+        native_codex=_coerce_bool(native.get("codex", True), default=True),
+        cost_compute=_coerce_bool(cost.get("compute", True), default=True),
+        cost_currency=str(cost.get("currency", "USD") or "USD"),
+        cost_keep_reported=_coerce_bool(cost.get("keep_reported", True), default=True),
+        local_store_enabled=_coerce_bool(store.get("enabled", False)),
+        local_store_retention_days=int(store.get("retention_days", 30) or 30),
+        metric_labels=(
+            [str(x) for x in labels] if isinstance(labels, list) and labels else list(TOKENOMICS_METRIC_LABELS)
+        ),
     )
 
 
@@ -7640,11 +8737,11 @@ def _openshell_optional_str_list(value: Any) -> list[str] | None:
     return _openshell_str_list(value)
 
 
-def _merge_openshell_admin(raw: Any) -> OpenShellAdminConfig:
+def _merge_openshell_admin(raw: Any) -> SandboxAdminConfig:
     """Parse ``openshell.admin`` or a profile's ``sandbox`` section (one type,
-    as Go ``OpenShellAdminConfig``)."""
+    as Go ``SandboxAdminConfig``)."""
     admin = _openshell_mapping(raw)
-    return OpenShellAdminConfig(
+    return SandboxAdminConfig(
         required_pack=_openshell_str(admin.get("required_pack")),
         required_pack_digest=_openshell_str(admin.get("required_pack_digest")),
         min_profile=_openshell_str(admin.get("min_profile")),
@@ -7673,7 +8770,37 @@ def _merge_openshell_admin(raw: Any) -> OpenShellAdminConfig:
         delete_stopped_after=_openshell_str(admin.get("delete_stopped_after")),
         request_access=str(admin.get("request_access") or ""),
         driver_fallback=_openshell_str(admin.get("driver_fallback")),
+        runtimes=_openshell_optional_str_list(admin.get("runtimes")),
+        sandbox_class=_openshell_str(admin.get("sandbox_class")),
+        idle_suspend_after=_openshell_str(admin.get("idle_suspend_after")),
+        idle_suspend_tasks=_openshell_optional_bool(admin.get("idle_suspend_tasks")),
+        unattended_asks=_openshell_str(admin.get("unattended_asks")),
+        ask_timeout=_openshell_str(admin.get("ask_timeout")),
+        actor_secrets=_openshell_optional_str_list(admin.get("actor_secrets")),
+        ask_hosts=_openshell_optional_str_list(admin.get("ask_hosts")),
+        url_rules=_sandbox_url_rules(admin.get("url_rules")),
     )
+
+
+def _sandbox_url_rules(value: Any) -> list[dict[str, Any]] | None:
+    """url_rules as written (None when unset), each entry with its known keys
+    only, in Go's field order (SandboxURLRule)."""
+    if value is None:
+        return None
+    out: list[dict[str, Any]] = []
+    for rule in value if isinstance(value, list) else []:
+        rule = rule if isinstance(rule, Mapping) else {}
+        entry: dict[str, Any] = {}
+        if rule.get("name"):
+            entry["name"] = str(rule["name"])
+        entry["hosts"] = _openshell_str_list(rule.get("hosts") or [])
+        if rule.get("methods"):
+            entry["methods"] = _openshell_str_list(rule["methods"])
+        if rule.get("path_prefix"):
+            entry["path_prefix"] = str(rule["path_prefix"])
+        entry["action"] = str(rule.get("action") or "")
+        out.append(entry)
+    return out
 
 
 def _merge_enterprise_openshell(raw: Any) -> EnterpriseOpenShellConfig:
@@ -7915,8 +9042,6 @@ def _load_dotenv_into_os(data_dir: str) -> None:
     managed_host: bool | None = None
     try:
         body = read_regular_file_no_follow(env_path, max_bytes=MAX_DOTENV_BYTES)
-        # An adopted gateway token copy never shadows the one the operator saved.
-        shadowed = gateway_token_adoption.shadowed_names(body)
         for raw_line in body.splitlines():
             line = raw_line.strip()
             if not line or line.startswith(b"#"):
@@ -7951,12 +9076,6 @@ def _load_dotenv_into_os(data_dir: str) -> None:
                 seen_keys.add(key)
                 current = os.environ.get(key)
                 injected = current is None or credential_provenance.holds_injected_value(data_dir, key, current)
-                if gateway_token_adoption.is_shadowed(shadowed, key):
-                    # A long-lived process (the TUI) may hold the adopted copy an
-                    # earlier load injected.
-                    if current is not None and injected:
-                        del os.environ[key]
-                    continue
                 if injected:
                     os.environ[key] = value
                 credential_provenance.note_dotenv_candidate(
@@ -8342,6 +9461,7 @@ def load(
         application_protection=_merge_application_protection(raw.get("application_protection")),
         notifications=_merge_notifications(raw.get("notifications")),
         routing=_merge_routing(raw.get("routing")),
+        substrate=_merge_substrate(raw.get("substrate")),
         fleet=_merge_fleet(raw.get("fleet")),
         admission=_merge_admission(raw.get("admission")),
         llm_providers=_merge_llm_providers(raw.get("llm_providers")),
@@ -8686,6 +9806,17 @@ def _merge_routing(raw: dict[str, Any] | None) -> RoutingConfig:
         models=mapping_list("models"),
         signals=mapping("signals"),
         decisions=mapping_list("decisions"),
+        classifier=str(raw.get("classifier", "") or ""),
+        min_confidence=_optional_float(raw.get("min_confidence")) or 0.0,
+        on_classifier_error=str(raw.get("on_classifier_error", "") or ""),
+        default_alias=str(raw.get("default_alias", "") or ""),
+        categories=mapping("categories"),
+        allow_user_override=_coerce_bool(raw.get("allow_user_override", False)),
+        sensitive=mapping("sensitive"),
+        systemone=mapping("systemone"),
+        route_only=mapping("route_only"),
+        admin=mapping("admin"),
+        context=mapping("context"),
     )
 
 

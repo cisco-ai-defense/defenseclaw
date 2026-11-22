@@ -138,7 +138,9 @@ func TestConcurrentHookCallsEachHaveTheirOwnShareWait(t *testing.T) {
 func TestHookCallInsideAHookCallSharesItsWait(t *testing.T) {
 	const shares, spent = 10, 6
 	release := make(chan struct{})
-	defer close(release)
+	var once sync.Once
+	answer := func() { once.Do(func() { close(release) }) }
+	defer answer()
 	fakeNetworkShare(t, "/dead0.example/share", 750*time.Millisecond, 5*time.Second, func(string) { <-release })
 	networkShareRootOf = func(path string) string {
 		for i := range shares {
@@ -169,12 +171,18 @@ func TestHookCallInsideAHookCallSharesItsWait(t *testing.T) {
 			t.Fatal("the share that does not answer answered")
 		}
 	}
-	start := time.Now()
-	if _, ok := Decode(Resolve(payload)); !ok {
-		t.Fatal("Resolve gave no target map")
+	// The waits above spent this call's. From here a share asked afresh waits
+	// an hour for its answer, which never comes until the read is done: a
+	// resolution that began a wait of its own, or waited outside this call,
+	// cannot come back while the shares are silent; one that shares the
+	// spent wait comes back after what is left of it (milliseconds).
+	networkShareAnswerWait = time.Hour
+	var ok bool
+	if !returnsWhileSharesAreSilent(t, answer, func() { _, ok = Decode(Resolve(payload)) }) {
+		t.Fatal("the target resolution inside a hook call that spent its wait waited for the shares to answer")
 	}
-	if took := time.Since(start); took > 400*time.Millisecond {
-		t.Fatalf("the target resolution inside a hook call that spent its wait waited %v more", took)
+	if !ok {
+		t.Fatal("Resolve gave no target map")
 	}
 }
 

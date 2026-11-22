@@ -16,6 +16,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // hookPathRawReads are the file system reads that wait for a network share
@@ -32,7 +34,8 @@ var hookPathRawReads = map[string][]string{
 
 // hookPathRawHandles open a path through the Windows API. A function may
 // call one only after it read the same path through the bounded readers or
-// asked networkPathUnanswered.
+// took it from gatedPath (or asked networkPathUnanswered, for a call that
+// opens no last link).
 var hookPathRawHandles = map[string][]string{
 	"windows": {"CreateFile", "GetLongPathName", "GetNamedSecurityInfo"},
 	"syscall": {"CreateFile"},
@@ -76,6 +79,109 @@ func TestHookPathReadsAreShareBounded(t *testing.T) {
 	if len(found) != 0 {
 		t.Fatalf("hook path reads that bypass the network share bound (use pathStat, pathLstat, pathWalkDir, ... here, hookpaths.Stat or hookpaths.Lstat in the gateway):\n%s", strings.Join(found, "\n"))
 	}
+}
+
+// rel-1-0-10:GAP-1074: the agent hook config guard, the promoted-artifact
+// reader and the codex trusted-source proofs read a path a hook call names
+// (a Write or Edit target, a cp destination, a git pathspec or -C folder, a
+// script the command runs). Each read goes through the share-gated readers
+// (the guard through its seam, which must call them), so a share on another
+// machine is never contacted; a bounded regular-file read goes through
+// hookpaths.ReadRegularFileBounded. On native Windows
+// the guard's direct os.Lstat and filepath.EvalSymlinks of a Write target on
+// \\server\share opened an SMB session (210 DNS names in the native run).
+func TestGatewayHookPathOperandReadsAreShareBounded(t *testing.T) {
+	files := []string{
+		"../gateway/agent_hook_config_guard.go", "../gateway/agent_hook_artifact.go",
+		"../gateway/fixturefs_seam.go", "../gateway/codex_hook.go",
+	}
+	// The codex hook also reads its cwd, config and component trees (the
+	// agent's own working tree, not operand text); only its proofs of a
+	// named operand are held here.
+	codexProofs := map[string]bool{
+		"trustedFixtureOrGuardrailSourceTarget": true, "trustedObserveWorkspaceSourceTarget": true,
+		"codexObserveGitDiffPathspecs": true, "trustedPhysicalWorkspaceRelativePath": true,
+	}
+	fset := token.NewFileSet()
+	var found []string
+	seamReaders := 0
+	seenProof := map[string]bool{}
+	for _, name := range files {
+		file, err := parser.ParseFile(fset, name, nil, parser.SkipObjectResolution)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, decl := range file.Decls {
+			fn, isFunc := decl.(*ast.FuncDecl)
+			if strings.HasSuffix(name, "codex_hook.go") {
+				if !isFunc || !codexProofs[fn.Name.Name] {
+					continue
+				}
+				seenProof[fn.Name.Name] = true
+			}
+			found = append(found, hookPathUnboundedReads(fset, decl)...)
+			found = append(found, gatewayUngatedOperandReads(fset, decl)...)
+			if isFunc && strings.HasSuffix(name, "fixturefs_seam.go") && strings.HasPrefix(fn.Name.Name, "seam") {
+				seamReaders++
+				if !callsPackage(fn, "hookpaths") {
+					found = append(found, fset.Position(fn.Pos()).String()+": "+fn.Name.Name+" does not read through a hookpaths reader")
+				}
+			}
+		}
+	}
+	for name := range codexProofs {
+		if !seenProof[name] {
+			t.Errorf("codex proof %s is gone; update the scan", name)
+		}
+	}
+	if seamReaders < 6 {
+		t.Fatalf("found %d seam readers; the scan no longer finds the guard seam", seamReaders)
+	}
+	sort.Strings(found)
+	if len(found) != 0 {
+		t.Fatalf("gateway reads of a path a hook call names that bypass the share gate (use the seam or hookpaths.Stat, Lstat, LstatPinned, EvalSymlinks, Readlink, Open, ReadFile, ReadRegularFileBounded):\n%s", strings.Join(found, "\n"))
+	}
+}
+
+// gatewayUngatedOperandReads finds the readers hookPathRawReads does not
+// name that the gateway uses on an operand: a pinned lstat and a bounded
+// safefile read (hookpaths.LstatPinned and ReadRegularFileBounded read them
+// through the share gate). A check before a safefile read is no gate: the
+// read would open the name again after it (rel-1-0-10:GAP-1074 review 1).
+func gatewayUngatedOperandReads(fset *token.FileSet, decl ast.Decl) []string {
+	var found []string
+	ast.Inspect(decl, func(node ast.Node) bool {
+		selector, ok := node.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		pkg, ok := selector.X.(*ast.Ident)
+		if !ok {
+			return true
+		}
+		where := fset.Position(selector.Pos()).String() + ": " + pkg.Name + "." + selector.Sel.Name
+		switch {
+		case pkg.Name == "pathidentity" && selector.Sel.Name == "LstatPinned":
+			found = append(found, where)
+		case pkg.Name == "safefile" && strings.HasPrefix(selector.Sel.Name, "Read"):
+			found = append(found, where)
+		}
+		return true
+	})
+	return found
+}
+
+func callsPackage(fn *ast.FuncDecl, pkg string) bool {
+	calls := false
+	ast.Inspect(fn, func(node ast.Node) bool {
+		if selector, ok := node.(*ast.SelectorExpr); ok {
+			if ident, ok := selector.X.(*ast.Ident); ok && ident.Name == pkg {
+				calls = true
+			}
+		}
+		return true
+	})
+	return calls
 }
 
 func fixedLocalPath(value string) bool {
@@ -180,8 +286,14 @@ func TestOneHookCallWaitsForItsSharesOneAnswerWaitInAll(t *testing.T) {
 	}
 	start := time.Now()
 	got := Resolve(payload)
-	if took := time.Since(start); took > 2*time.Second {
-		t.Fatalf("one hook call spent %v on %d shares that do not answer (%d probes); want one 750ms answer wait in all", took, shares, probes.Load())
+	// One wait in all takes 2.0 s here under -race on an idle host; a wait
+	// for each share takes shares x 750 ms = 6 s at least. A window of 2 s sat on
+	// the idle time itself and failed at 2.03 s (GAP-0538). The window is
+	// 4 s, stretched with the host's slowdown, and kept under the 6 s that
+	// waiting for each share takes, so it still tells the two apart.
+	limit := min(max(4*time.Second, testenv.Scale(2*time.Second, testenv.HostSlowdown())), (shares-1)*750*time.Millisecond)
+	if took := time.Since(start); took > limit {
+		t.Fatalf("one hook call spent %v on %d shares that do not answer (%d probes); want one 750ms answer wait in all (window %v)", took, shares, probes.Load(), limit)
 	}
 	targets, ok := Decode(got)
 	if !ok {
@@ -258,7 +370,7 @@ func hookPathUnboundedReads(fset *token.FileSet, decl ast.Decl) []string {
 			}
 		case *ast.Ident:
 			switch node.Name {
-			case "networkPathUnanswered", "pathStat", "pathLstat":
+			case "networkPathUnanswered", "gatedPath", "pathStat", "pathLstat":
 				gated = true
 			}
 		}

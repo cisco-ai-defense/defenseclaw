@@ -7,3 +7,13 @@
 package gateway
 
 const hookAnswerRaceBuild = false
+
+// raceScanBudgetScale multiplies the 200 ms inspect scan deadline
+// (inspectScanTimeout) of the gap0437Server tests (rel-1-0-10:GAP-1472). The
+// race detector makes the scan worker about 5.6x slower (all FiveTiers rows x
+// 5 packs on dc-build-2: plain p99 26 ms, max 55 ms; race p99 116-137 ms, the
+// slowest row 235-282 ms per call), so the -race FiveTiers run missed the
+// deadline on rows the product answers well inside it. A plain build keeps
+// the production deadline (scale 1) on every row, so a slower product still
+// fails there; no row is skipped under either build.
+const raceScanBudgetScale = 1

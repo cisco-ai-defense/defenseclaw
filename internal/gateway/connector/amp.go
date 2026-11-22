@@ -80,16 +80,13 @@ func (c *AMPConnector) HookRuntimeArtifacts(opts SetupOpts) []string {
 // Authenticate requires an explicit bearer even on loopback. Amp's managed
 // plugin always has a header-injection seam and setup requires a
 // connector-scoped token, so the legacy unauthenticated-loopback carve-out
-// used by shell-hook connectors is neither necessary nor safe here. The
-// gateway master remains valid as an intentionally more-privileged
-// administrative credential, matching the API middleware's auth contract.
+// used by shell-hook connectors is neither necessary nor safe here.
 func (c *AMPConnector) Authenticate(r *http.Request) bool {
 	if c == nil || c.hookOnlyConnector == nil || r == nil {
 		return false
 	}
 	provided := ExtractBearerKey(r.Header.Get("Authorization"))
-	return (c.gatewayToken != "" && SecureTokenMatch(provided, c.gatewayToken)) ||
-		(c.masterKey != "" && SecureTokenMatch(provided, c.masterKey))
+	return c.gatewayToken != "" && SecureTokenMatch(provided, c.gatewayToken)
 }
 
 // ownedHookContractPresent verifies Amp's actual agent-visible policy

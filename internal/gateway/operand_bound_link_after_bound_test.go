@@ -39,7 +39,7 @@ func TestNamedProtectedLinkPastTheOperandBoundBlocks(t *testing.T) {
 }
 
 func TestShellEscapedProtectedNamePastTheOperandBoundBlocks(t *testing.T) {
-	home, cwd := r104ReviewHome(t)
+	home, cwd := r104ReviewHomeNoAlias(t)
 	// Bash removes each backslash, so this is ../.ssh/authorized_keys.
 	escaped := `\.\./.\s\s\h/\a\u\t\h\o\r\i\z\e\d_\k\e\y\s`
 	for _, row := range []struct{ name, command string }{

@@ -53,7 +53,9 @@ func TestMSYSDriveSpellingOfActiveStateIsTheDrivePath(t *testing.T) {
 						findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
 							Input: input, Connector: connectorName, EnforcementCapable: true,
 						})
-						if blocked := buildVerdict(findings, "tool_call").Action == "block"; blocked != rows.want {
+						// A proven state write alone is the HIGH alert of the default
+						// pack (gap0747Blocked, GAP-0747 owner tiering 2026-11-15T15:20Z).
+						if blocked := gap0747Blocked(findings, rows.want); blocked != rows.want {
 							t.Errorf("%s hint=%q %q: blocked=%v, want %v (%v)",
 								connectorName, hint, command, blocked, rows.want, FindingStrings(findings))
 						}

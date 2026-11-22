@@ -976,3 +976,42 @@ func TestOwnHostNameIsTheRecordedOne(t *testing.T) {
 		t.Fatal("ownHostName")
 	}
 }
+
+// rel-1-0-10:GAP-0007 (and rel-1-0-6:GAP-0570): OpenShell 0.1.6 gives the
+// MicroVM's root folder to the sandbox's account on Linux and macOS, so the
+// resolver is never trusted and every MicroVM is deleted. The refusal
+// stays; it now names the known limit instead of "could not resolve
+// localhost", which sent people to retry. A root-owned guest, and a guest
+// whose resolver failed for another reason, keep the old words.
+func TestGAP0007MicroVMGuestRootOwnerNamesTheKnownLimit(t *testing.T) {
+	vm, _ := openshell.LookupDriver("vm")
+	for _, tc := range []struct {
+		name, owner string
+		failed      bool
+		want, not   string
+	}{
+		{"guest root owned by the sandbox account", "rootowner 1000\n", true, openshell.MicroVMGuestRootLimit + " (uid 1000 owns it)", "could not resolve localhost"},
+		{"guest root owned by root, resolver failed", "rootowner 0\n", true, "could not resolve localhost to its loopback ingress", "known limit"},
+		{"no owner line, resolver failed", "", true, "could not resolve localhost to its loopback ingress", "known limit"},
+		{"guest root owned by another account, resolver passed", "rootowner 1000\n", false, "", "known limit"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := answerFor(testVerify(), "vmbox")
+			if tc.failed {
+				a.localhost, a.localhostFailed = nil, true
+			}
+			facts, err := parseWorkloadFacts(append([]byte(tc.owner), a.stdout()...))
+			must(t, err)
+			facts.DirectResolverOK = true
+			problems := strings.Join(workloadProblems(testVerify(), facts, vm, workloadLimits{}), "; ")
+			if (tc.want == "" && problems != "") || !strings.Contains(problems, tc.want) || strings.Contains(problems, tc.not) {
+				t.Fatalf("VM problems = %q, want %q and not %q", problems, tc.want, tc.not)
+			}
+		})
+	}
+	for _, answer := range []string{"rootowner 1000\nrootowner 0\nend\n", "rootowner x\nend\n", "rootowner\nend\n"} {
+		if _, err := parseWorkloadFacts([]byte(answer)); err == nil {
+			t.Fatalf("accepted malformed root owner %q", answer)
+		}
+	}
+}

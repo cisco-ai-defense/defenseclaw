@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 )
 
@@ -58,7 +59,7 @@ func TestBundleFloorCheckRefusesOnlyBelowTheFloorWithItsOwnExitCode(t *testing.T
 		t.Fatal(err)
 	}
 	err := run("--product-version", "0.0.1")
-	var coded *exitCodeError
+	var coded *cliusage.ExitCodeError
 	if !errors.As(err, &coded) || coded.ExitCode() != bundleFloorRefusedExit {
 		t.Fatalf("unreadable floor = %v; want exit %d", err, bundleFloorRefusedExit)
 	}

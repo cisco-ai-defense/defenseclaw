@@ -29,7 +29,13 @@ func writeOutageTierConfig(t *testing.T, dir, body string) {
 	if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := writePerUserGatewayHelperRecord(filepath.Join(dir, "hooks")); err != nil {
+	// As the account of dir, never the account running the tests: the
+	// record write also records the config that account runs under
+	// (.config-record), and a real ~/.defenseclaw of the build account
+	// must not decide a case (rel-1-0-10:GAP-1176).
+	if err := WithUserHomeDir(dir, func() error {
+		return writePerUserGatewayHelperRecord(filepath.Join(dir, "hooks"))
+	}); err != nil {
 		t.Fatal(err)
 	}
 }

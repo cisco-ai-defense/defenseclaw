@@ -14,6 +14,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -88,9 +89,9 @@ func TestWindowsEnterpriseEnrollmentHidesAnEntryBackOnTheRoster(t *testing.T) {
 // account of a standalone managed computer: not on Secure Client or an
 // unmanaged host, not from an elevated prompt.
 func TestOwnRemovedConnectorLinesCallsThePipeOnlyOnStandalone(t *testing.T) {
-	restoreStandalone, restoreFetch, restoreElevated := managedHostWindowsStandalone, ownStatusPipeFetch, windowsEnterpriseIsElevated
+	restoreStandalone, restoreFetch, restoreElevated := hookcli.ManagedHostWindowsStandalone, ownStatusPipeFetch, windowsEnterpriseIsElevated
 	t.Cleanup(func() {
-		managedHostWindowsStandalone, ownStatusPipeFetch, windowsEnterpriseIsElevated = restoreStandalone, restoreFetch, restoreElevated
+		hookcli.ManagedHostWindowsStandalone, ownStatusPipeFetch, windowsEnterpriseIsElevated = restoreStandalone, restoreFetch, restoreElevated
 	})
 	t.Setenv(managed.DeploymentModeEnv, "")
 	t.Setenv(managed.ConfigPathEnv, "")
@@ -100,11 +101,11 @@ func TestOwnRemovedConnectorLinesCallsThePipeOnlyOnStandalone(t *testing.T) {
 		return []byte(`{"connectors":{"cursor":{"state":"not managed (removed from roster)"}}}`), nil
 	}
 	windowsEnterpriseIsElevated = func() bool { return false }
-	managedHostWindowsStandalone = func() (string, bool) { return "", false }
+	hookcli.ManagedHostWindowsStandalone = func() (string, bool) { return "", false }
 	if lines := ownRemovedConnectorLines(); lines != nil || calls != 0 {
 		t.Fatalf("a computer that is not a standalone managed one read the pipe: %v %d", lines, calls)
 	}
-	managedHostWindowsStandalone = func() (string, bool) { return `HKLM\SOFTWARE\Cisco\DefenseClaw\Enterprise`, true }
+	hookcli.ManagedHostWindowsStandalone = func() (string, bool) { return `HKLM\SOFTWARE\Cisco\DefenseClaw\Enterprise`, true }
 	windowsEnterpriseIsElevated = func() bool { return true }
 	if lines := ownRemovedConnectorLines(); lines != nil || calls != 0 {
 		t.Fatalf("an elevated prompt read the pipe: %v %d", lines, calls)

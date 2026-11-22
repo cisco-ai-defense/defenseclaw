@@ -175,16 +175,24 @@ func executeEnterpriseSetup(
 		return 0, err
 	}
 	standalone := payload.Standalone()
+	// ensureMutexHeld proves that no other ensure runs (the ensure stage
+	// sweep needs that proof).
+	ensureMutexHeld := false
 	if standalone && opts.Action == "ensure" {
 		// Status and Verify can report a no-op before another Setup's
 		// lifecycle commits. Hold one host-wide intent from before staging
 		// through the final result (GAP-1027). The child still takes its
 		// ordinary journaled lifecycle lock for every change.
-		release, err := acquireStandaloneSetupEnsure()
+		notice := stdout
+		if opts.JSON {
+			notice = io.Discard
+		}
+		release, held, err := acquireStandaloneSetupEnsure(notice)
 		if err != nil {
 			return 0, err
 		}
 		defer release()
+		ensureMutexHeld = held
 	}
 	if payload.Manifest.Unsigned && !opts.AllowUnsigned && !standalone {
 		return 0, errors.New("this enterprise Setup is unsigned and can run only with --allow-unsigned in exact disposable certification scope")
@@ -202,6 +210,14 @@ func executeEnterpriseSetup(
 	opts.Standalone = standalone
 	opts.StandaloneUnsigned = standalone && payload.Manifest.Unsigned
 	opts.ProductVersion = payload.Manifest.Version
+	if standaloneSetupWaitsForRecovery(opts) {
+		// Before anything is read or staged: the recovery an earlier
+		// /uninstall armed may still be finishing its clean-up
+		// (rel-1-0-6:GAP-1080).
+		if err := waitForStandaloneUninstallRecovery(opts, stdout); err != nil {
+			return 0, err
+		}
+	}
 	// A policy-less /install is only the first half of a fresh deployment.
 	// Refuse an existing or unproven deployment before staging a child: the
 	// lifecycle used to publish a fresh-install rollback receipt first, then
@@ -260,12 +276,18 @@ func executeEnterpriseSetup(
 			// every ensure holds the host-wide ensure mutex from before
 			// staging to its result: holding that mutex proves no ensure
 			// runs, so any such folder is stale whatever its age.
+			// A run that goes on without the mutex (a squatted name) has
+			// no such proof and leaves the folders alone.
 			switch opts.Action {
 			case "ensure":
-				removeStaleEnterpriseEnsureStages(programData, progress, stderr)
-			case "uninstall":
-				if release, err := acquireStandaloneSetupEnsure(); err == nil {
+				if ensureMutexHeld {
 					removeStaleEnterpriseEnsureStages(programData, progress, stderr)
+				}
+			case "uninstall":
+				if release, held, err := acquireStandaloneSetupEnsure(progress); err == nil {
+					if held {
+						removeStaleEnterpriseEnsureStages(programData, progress, stderr)
+					}
 					release()
 				}
 			}
@@ -439,11 +461,89 @@ func executeEnterpriseSetup(
 	return enterpriseFailureExitCode, nil
 }
 
+// standaloneSetupEnsureMutex is the host-wide ensure mutex. Replaceable in
+// tests.
+var standaloneSetupEnsureMutex = `Global\Cisco-DefenseClaw-Standalone-Setup-Ensure`
+
 // acquireStandaloneSetupEnsure admits one standalone Setup /ensure at a
 // time, including the read-only no-op path. A named kernel mutex has no
 // stale file after a killed Setup. The owning thread stays fixed until the
 // returned release runs; another active Setup gets MSI's retryable 1618.
-func acquireStandaloneSetupEnsure() (release func(), err error) {
+// held is false when the run goes on without the mutex because another
+// account squats its name (holdStandaloneSetupMutex): the run says so on
+// notice, and nothing that needs the proof that no ensure runs (the ensure
+// stage sweep) may run then.
+func acquireStandaloneSetupEnsure(notice io.Writer) (release func(), held bool, err error) {
+	release, err = holdStandaloneSetupMutex(standaloneSetupEnsureMutex, "standalone ensure", 0)
+	switch {
+	case errors.Is(err, errStandaloneSetupMutexHeld):
+		return nil, false, errEnterpriseSetupEnsureBusy
+	case errors.Is(err, errStandaloneSetupMutexIgnored):
+		fmt.Fprintf(notice, "warning: %v\n", err)
+		return release, false, nil
+	case err != nil:
+		return nil, false, err
+	}
+	return release, true, nil
+}
+
+// standaloneSetupMutexTrusted reports a Setup mutex that SYSTEM or the
+// Administrators group owns: one Setup or its recovery created. An owner that
+// cannot be read is not trusted.
+func standaloneSetupMutexTrusted(handle windows.Handle) bool {
+	descriptor, err := windows.GetSecurityInfo(handle, windows.SE_KERNEL_OBJECT, windows.OWNER_SECURITY_INFORMATION)
+	if err != nil || descriptor == nil {
+		return false
+	}
+	owner, _, err := descriptor.Owner()
+	if err != nil || owner == nil {
+		return false
+	}
+	return owner.IsWellKnown(windows.WinLocalSystemSid) || owner.IsWellKnown(windows.WinBuiltinAdministratorsSid)
+}
+
+// errStandaloneSetupMutexIgnored is a host-wide Setup mutex the run goes on
+// without (holdStandaloneSetupMutex). Callers name it on stdout, never on
+// stderr: an MDM reads any stderr output as a failed script (GAP-1353,
+// GAP-1069), and a squatter could make every run look failed.
+var errStandaloneSetupMutexIgnored = errors.New("standalone Setup mutex ignored")
+
+type standaloneSetupMutexIgnored struct{ label, why string }
+
+func (e standaloneSetupMutexIgnored) Error() string {
+	return fmt.Sprintf("Setup ignores the host-wide %s mutex because %s; the lifecycle lock orders this run", e.label, e.why)
+}
+
+func (standaloneSetupMutexIgnored) Is(target error) bool {
+	return target == errStandaloneSetupMutexIgnored
+}
+
+// untrustedStandaloneSetupMutex is the result of a Setup mutex the run goes
+// on without: a release that holds nothing, and errStandaloneSetupMutexIgnored.
+func untrustedStandaloneSetupMutex(label, why string) (release func(), err error) {
+	runtime.UnlockOSThread()
+	return func() {}, standaloneSetupMutexIgnored{label: label, why: why}
+}
+
+// errStandaloneSetupMutexHeld is a host-wide Setup mutex another process
+// still held when the wait for it ended.
+var errStandaloneSetupMutexHeld = errors.New("standalone Setup mutex is held")
+
+// holdStandaloneSetupMutex takes the host-wide named mutex name, waiting up
+// to wait for another holder to let go (errStandaloneSetupMutexHeld past it).
+// Setup creates it owned by Administrators with access for SYSTEM and
+// Administrators only. Any signed-in account can create a Global\ mutex of
+// the same name first, though, or an event or another object of that name,
+// and hold it to stall or fail every Setup (the 1.0.10 T1 reviews). A mutex
+// that exists already is used only when SYSTEM or Administrators own it; one
+// another account owns, or a name Setup cannot open as its mutex, is ignored
+// (errStandaloneSetupMutexIgnored, with a no-op release), and the run goes
+// on without it: the
+// lifecycle lock still orders the runs that change the deployment, so
+// nothing runs next to another and nothing fails open. An abandoned mutex (a
+// killed holder) is taken. The owning thread stays fixed until the returned
+// release runs.
+func holdStandaloneSetupMutex(name, label string, wait time.Duration) (release func(), err error) {
 	runtime.LockOSThread()
 	defer func() {
 		if release == nil {
@@ -452,39 +552,48 @@ func acquireStandaloneSetupEnsure() (release func(), err error) {
 	}()
 	descriptor, err := windows.SecurityDescriptorFromString("O:BAG:BAD:P(A;;GA;;;SY)(A;;GA;;;BA)")
 	if err != nil {
-		return nil, fmt.Errorf("build standalone ensure mutex ACL: %w", err)
+		return nil, fmt.Errorf("build %s mutex ACL: %w", label, err)
 	}
 	attrs := &windows.SecurityAttributes{
 		Length:             uint32(unsafe.Sizeof(windows.SecurityAttributes{})),
 		SecurityDescriptor: descriptor,
 	}
-	name, err := windows.UTF16PtrFromString(`Global\Cisco-DefenseClaw-Standalone-Setup-Ensure`)
+	namePointer, err := windows.UTF16PtrFromString(name)
 	if err != nil {
 		return nil, err
 	}
-	handle, createErr := windows.CreateMutex(attrs, true, name)
+	handle, createErr := windows.CreateMutex(attrs, false, namePointer)
 	if handle == 0 {
-		return nil, fmt.Errorf("create standalone ensure mutex: %w", createErr)
+		// Access denied, or another object type holds the name
+		// (ERROR_INVALID_HANDLE): the mutex only orders runs, so none fails
+		// for it.
+		return untrustedStandaloneSetupMutex(label, fmt.Sprintf("Setup cannot open it (%v)", createErr))
 	}
-	closeWith := func(err error) (func(), error) {
+	if createErr != nil && !errors.Is(createErr, windows.ERROR_ALREADY_EXISTS) {
 		_ = windows.CloseHandle(handle)
-		return nil, err
+		return nil, fmt.Errorf("open %s mutex: %w", label, createErr)
 	}
-	if createErr != nil {
-		if !errors.Is(createErr, windows.ERROR_ALREADY_EXISTS) {
-			return closeWith(fmt.Errorf("open standalone ensure mutex: %w", createErr))
-		}
-		state, waitErr := windows.WaitForSingleObject(handle, 0)
-		if waitErr != nil {
-			return closeWith(fmt.Errorf("wait for standalone ensure mutex: %w", waitErr))
-		}
-		switch state {
-		case uint32(windows.WAIT_OBJECT_0), uint32(windows.WAIT_ABANDONED):
-		case uint32(windows.WAIT_TIMEOUT):
-			return closeWith(errEnterpriseSetupEnsureBusy)
-		default:
-			return closeWith(fmt.Errorf("standalone ensure mutex returned unexpected wait state %d", state))
-		}
+	if createErr != nil && !standaloneSetupMutexTrusted(handle) {
+		_ = windows.CloseHandle(handle)
+		return untrustedStandaloneSetupMutex(label, "an account other than SYSTEM or Administrators owns it")
+	}
+	milliseconds := uint32(0)
+	if wait > 0 {
+		milliseconds = uint32(min(wait.Milliseconds(), int64(windows.INFINITE-1)))
+	}
+	state, waitErr := windows.WaitForSingleObject(handle, milliseconds)
+	if waitErr != nil {
+		_ = windows.CloseHandle(handle)
+		return nil, fmt.Errorf("wait for %s mutex: %w", label, waitErr)
+	}
+	switch state {
+	case uint32(windows.WAIT_OBJECT_0), uint32(windows.WAIT_ABANDONED):
+	case uint32(windows.WAIT_TIMEOUT):
+		_ = windows.CloseHandle(handle)
+		return nil, errStandaloneSetupMutexHeld
+	default:
+		_ = windows.CloseHandle(handle)
+		return nil, fmt.Errorf("%s mutex returned unexpected wait state %d", label, state)
 	}
 	return func() {
 		_ = windows.ReleaseMutex(handle)

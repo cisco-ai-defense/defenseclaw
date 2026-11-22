@@ -1338,6 +1338,7 @@ func seedRetentionHistory(
 	for _, table := range []string{"activity_events", "network_egress_events", "sink_health"} {
 		seedSimpleRetentionBoundary(t, store, table, before, equal, after)
 	}
+	seedRejectedRecordRetentionBoundary(t, store, before, equal, after)
 	for _, fixture := range []struct {
 		id string
 		ts time.Time
@@ -1526,7 +1527,7 @@ func TestCorrelationRetentionRotatesFirstStageAcrossBudgetedRuns(t *testing.T) {
 	for range 7 {
 		budgetExpired = false
 		result := RetentionRunResult{RowsDeleted: newRetentionCounts()}
-		if err := reaper.drainCorrelationState(t.Context(), old.Add(24*time.Hour), now, &result); err != nil {
+		if err := reaper.drainCorrelationState(t.Context(), old.Add(24*time.Hour), time.Unix(0, 0).UTC(), now, &result); err != nil {
 			t.Fatal(err)
 		}
 		if !result.Backlog {
@@ -1631,6 +1632,7 @@ func assertRetentionBoundaryRows(t *testing.T, store *Store, judge *JudgeBodySto
 	} {
 		assertRetentionSuffixes(t, store.db, table)
 	}
+	assertRejectedRecordRetentionBoundary(t, store)
 	assertRetentionSuffixes(t, judge.db, "judge_responses")
 	var baseline, projection int
 	if err := store.db.QueryRow(`SELECT COUNT(*) FROM alert_acknowledgement_baselines
@@ -1893,7 +1895,7 @@ func TestCorrelationRetentionBatchYieldsToAWaitingHookWrite(t *testing.T) {
 	}
 
 	result := RetentionRunResult{RowsDeleted: newRetentionCounts()}
-	if err := reaper.drainCorrelationState(t.Context(), old.Add(24*time.Hour), now, &result); err != nil {
+	if err := reaper.drainCorrelationState(t.Context(), old.Add(24*time.Hour), time.Unix(0, 0).UTC(), now, &result); err != nil {
 		t.Fatal(err)
 	}
 	if result.Backlog {

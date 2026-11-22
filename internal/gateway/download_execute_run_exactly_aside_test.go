@@ -54,7 +54,7 @@ func upperDrive(path string) string {
 // (serviceAccountCallerCWD) or none outside the caller's home, and a
 // download the user asked to run stays quiet.
 func TestDownloadThenExecuteAlertsAfterARunExactlyPromptWithAnAside(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	base := t.TempDir()
 	home := filepath.Join(base, "Users", "dcw-fxc1")
 	project := filepath.Join(home, "proj")

@@ -83,6 +83,9 @@ class ScanResult:
     notes: list[str] = field(default_factory=list)
     # What the scan ran with, for output ("policy": "quiet", "judge": a model or "off").
     settings: dict[str, str] = field(default_factory=dict)
+    # MCP only: names returned by tools/list, independent of analyzer findings.
+    advertised_tools: list[str] = field(default_factory=list)
+    advertised_tools_partial: bool = False
 
     def has_severity(self, severity: str) -> bool:
         return any(f.severity == severity for f in self.findings)
@@ -108,6 +111,9 @@ class ScanResult:
         }
         if self.settings:
             payload["settings"] = dict(self.settings)
+        if self.scanner == "mcp-scanner":
+            payload["advertised_tools"] = list(self.advertised_tools)
+            payload["advertised_tools_partial"] = self.advertised_tools_partial
         return json.dumps(payload, indent=2)
 
 
@@ -213,6 +219,10 @@ class Event:
     # audit_events.enforced: True when the gateway really blocked the call
     # (None on rows that predate the column).
     enforced: bool | None = None
+    # The semantic event id of a hook row (connector-hook or hook_decision):
+    # it pairs the two rows of one hook decision (S8 R4, #1384). Empty on
+    # other rows and when a query does not read it.
+    semantic_event_id: str = ""
 
 
 @dataclass
@@ -238,3 +248,7 @@ class Counts:
     alerts: int | None = 0
     total_scans: int = 0
     blocked_egress_calls: int = 0
+    # Tool calls the gateway could read only in part (ACTION-PARSE-FAILURE
+    # records: a shell syntax error, a shell body it could not resolve).
+    # None: not counted in time (see Store.get_counts).
+    unread_calls: int | None = 0

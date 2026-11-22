@@ -487,10 +487,10 @@ func (repo *CorrelationRepository) matchIdentifiers(ctx context.Context, connect
 		return nil, nil
 	}
 	from, args := correlationIdentifierMatchFrom(connector, identifiers, mirror)
-	// A session or agent identifier matches every earlier event of that
-	// session. classifyCorrelationMatches needs only whether the matches span
-	// more than one logical group (then the result is ambiguous and uses no
-	// row) and, when they do not, the earliest match. So read any one match,
+	// A session identifier matches every earlier event of that session.
+	// classifyCorrelationMatches needs only whether the matches span more
+	// than one logical group (then the result is ambiguous and uses no row)
+	// and, when they do not, the earliest match. So read any one match,
 	// then any match in another group; both reads stop at their first row.
 	// Only matches that all share one group are sorted for the earliest one.
 	// Sorting every match first made each hook of a long session read and sort

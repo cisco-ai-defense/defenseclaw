@@ -29,6 +29,14 @@ type hookCall struct {
 	managed   bool
 	verdict   string
 	body      string
+	// benignPerUserBlock marks a benign call whose fixture states that the
+	// per-user reading over-blocks it while the managed client proof
+	// allows it (an overwritten ordinary destination). A false block is
+	// not a protection the managed gateway lacks.
+	benignPerUserBlock bool
+	// startup, when set, is the X-DefenseClaw-Shell-Startup header value the
+	// hook client sends with the call.
+	startup string
 }
 
 // eachConcurrently runs work for every index on all processors.
@@ -63,6 +71,14 @@ func (f b36ManagedHookFixture) clientHeaders(t *testing.T, payloads [][]byte) []
 // a large table costs about its rows divided by the processors.
 func (f b36ManagedHookFixture) answerAll(t *testing.T, calls []*hookCall) {
 	t.Helper()
+	f.answerCells(t, calls)
+	managedAtLeastPerUser(t, calls)
+}
+
+// answerCells answers every call in its cell without judging the managed
+// answers against the per-user ones.
+func (f b36ManagedHookFixture) answerCells(t *testing.T, calls []*hookCall) {
+	t.Helper()
 	defer os.Chmod(f.homes, 0o700)
 	for _, managed := range []bool{false, true} {
 		mode := os.FileMode(0o700)
@@ -82,6 +98,27 @@ func (f b36ManagedHookFixture) answerAll(t *testing.T, calls []*hookCall) {
 	}
 }
 
+// managedAtLeastPerUser holds every managed call to at least the verdict
+// of its per-user twin (same connector and payload). A managed gateway
+// cannot read the home and judges from the client's facts; a fact the
+// client did not send may cost it an allow, never a block (GAP-0298).
+func managedAtLeastPerUser(t *testing.T, calls []*hookCall) {
+	t.Helper()
+	perUser := map[string]*hookCall{}
+	key := func(call *hookCall) string { return call.connector + "\x00" + string(call.payload) }
+	for _, call := range calls {
+		if !call.managed {
+			perUser[key(call)] = call
+		}
+	}
+	for _, call := range calls {
+		if twin := perUser[key(call)]; call.managed && !call.benignPerUserBlock && twin != nil &&
+			twin.verdict == "block" && call.verdict != "block" {
+			t.Errorf("%s: managed %s is weaker than per-user block (%s)", call.name, call.verdict, twin.name)
+		}
+	}
+}
+
 // serve answers one call; the caller sets the home mode for its group.
 func (f b36ManagedHookFixture) serve(call *hookCall) (string, string) {
 	cfg := &config.Config{}
@@ -92,6 +129,9 @@ func (f b36ManagedHookFixture) serve(call *hookCall) (string, string) {
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/hook", strings.NewReader(string(call.payload)))
 	if call.managed && call.header != "" {
 		req.Header.Set(hookpaths.Header, call.header)
+	}
+	if call.startup != "" {
+		req.Header.Set(hookpaths.ShellStartupHeader, call.startup)
 	}
 	if call.connector == "codex" {
 		setTestCodexHookBinding(req, "PreToolUse", defaultTestCodexHookContract)
@@ -206,8 +246,8 @@ func TestGAP0151LongOperandListKeepsProtectedTarget(t *testing.T) {
 			// Past the operand bound the ordinary twin is unresolved: the
 			// default tier allows it with the alert that names the bound
 			// (GAP-0943).
-			if !strings.HasPrefix(call.body, `{"action":"alert"`) || !strings.Contains(call.body, operandBoundRuleID) {
-				t.Errorf("%s: want an allowing alert %s; verdict %s", call.name, operandBoundRuleID, call.verdict)
+			if !strings.HasPrefix(call.body, `{"action":"alert"`) || !strings.Contains(call.body, operandBoundReason) {
+				t.Errorf("%s: want an allowing alert %s; verdict %s", call.name, operandBoundReason, call.verdict)
 			}
 			continue
 		}

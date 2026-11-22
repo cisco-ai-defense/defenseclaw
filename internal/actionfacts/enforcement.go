@@ -78,6 +78,7 @@ func (f Facts) EnforcementProjection() Facts {
 			Status:  f.Parse.Status,
 			Dialect: f.Parse.Dialect,
 			Issues:  cloneSlice(f.Parse.Issues),
+			Unread:  f.Parse.Unread,
 		},
 	}
 	for _, mutation := range f.CloudResourceMutations {
@@ -246,6 +247,7 @@ func mergeProjectionParseResult(
 		}
 		target.Issues = append(target.Issues, issue)
 	}
+	target.Unread = target.Unread || source.Unread
 }
 
 func appendProjectionPaths(projected *Facts, facts []PathFact) {

@@ -39,12 +39,14 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/daemon"
 	"github.com/defenseclaw/defenseclaw/internal/envvars"
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
@@ -219,8 +221,8 @@ func init() {
 	stopCmd.Flags().Bool(rotationCleanupFlag, false, "allow authenticated rollback cleanup before readiness")
 	_ = startCmd.Flags().MarkHidden(rotationTransactionFlag)
 	_ = startCmd.Flags().MarkHidden(rotationConnectorStateFlag)
-	startCmd.Flags().Bool(hookColdStartFlag, false, "start requested by a connector hook after a refused connection")
-	_ = startCmd.Flags().MarkHidden(hookColdStartFlag)
+	startCmd.Flags().Bool(hookcli.HookColdStartFlag, false, "start requested by a connector hook after a refused connection")
+	_ = startCmd.Flags().MarkHidden(hookcli.HookColdStartFlag)
 	startCmd.Flags().Bool(requireEveryConnectorFlag, false, "exit 3 unless every configured connector is guarded")
 	_ = startCmd.Flags().MarkHidden(requireEveryConnectorFlag)
 	_ = stopCmd.Flags().MarkHidden(rotationTransactionFlag)
@@ -353,9 +355,64 @@ func runStartLocked(cmd *cobra.Command, _ []string, coldStart bool) error {
 		return fmt.Errorf("gateway start listener: %w", err)
 	}
 
+	if !rotationTransaction {
+		if heldPID, ok := gatewayOutOfReach(cfg); ok {
+			// GAP-1212: this account's gateway runs where this shell cannot
+			// open it (elevated in another logon session). It is running:
+			// say so and change nothing, as for any running gateway.
+			if !coldStart {
+				// An explicit start of a running gateway still ends a stop.
+				clearGatewayColdStartState(config.DefaultDataPath())
+			}
+			Warn(fmt.Sprintf("Gateway sidecar is already running (PID %d), elevated or in another Windows logon session", heldPID))
+			fmt.Println(gatewayOutOfReachFix("status") + " to check its health")
+			if requireEveryConnectorRequested(cmd) {
+				return cliusage.WithExitCode(errors.New("the gateway runs elevated or in another logon session, so no connector is proven guarded from this shell"),
+					gatewayStartAdmissionRefusedExitCode)
+			}
+			return nil
+		}
+	}
+
+	if !rotationTransaction {
+		// No gateway of this account runs: park the route a crash, a forced
+		// stop or a logoff left in place before anything else, so a start
+		// refused because another process holds the port leaves the agents
+		// sending nothing (GAP-1133). The gateway parks again before it
+		// binds and renders the real route once it holds the port.
+		if running, _ := d.IsRunning(); !running {
+			// A failed park is not a start failure: the gateway parks
+			// again before it binds.
+			if err := parkRouteOnlyWithoutGateway(cfg, false); err != nil {
+				Warn(err.Error())
+			}
+		}
+	}
 	alreadyRunning, pid, err := inspectConfiguredListener(d, cfg, client)
 	if err != nil {
 		return err
+	}
+	// GAP-0205: the start of the unit this data directory's gateway is bound
+	// to takes over the gateway a restart from a shell left running outside
+	// the unit, so the unit runs it. Any other unit's start, a transient
+	// `systemd-run` one included, finds that gateway already running.
+	tookOver, takeOverTime := false, time.Duration(0)
+	if alreadyRunning && !coldStart && !rotationTransaction {
+		if unitCgroup, bound := boundSystemdUnitCgroup(config.DefaultDataPath()); bound && processOutsideCgroup(pid, unitCgroup) {
+			// As restart does, refuse what would fail the start before
+			// stopping anything: every Restart=on-failure retry of a refused
+			// unit start then leaves that gateway running.
+			if err := gatewayStartRefusal(cfg, false); err != nil {
+				return fmt.Errorf("systemd unit %q: nothing was stopped, the gateway (PID %d) outside the unit keeps running: %w",
+					systemdUnitName(unitCgroup), pid, err)
+			}
+			began := time.Now()
+			if err := takeOverGatewayOutsideUnit(d, cfg, client, pid, unitCgroup); err != nil {
+				return err
+			}
+			tookOver, takeOverTime = true, time.Since(began)
+			alreadyRunning = false
+		}
 	}
 	if alreadyRunning {
 		if rotationTransaction {
@@ -377,7 +434,7 @@ func runStartLocked(cmd *cobra.Command, _ []string, coldStart bool) error {
 			// GAP-1342: a hung gateway; status and start pointed at each other.
 			fmt.Println("It does not answer /health. If it stays that way, restart it with: defenseclaw-gateway restart")
 			if requireEveryConnectorRequested(cmd) {
-				return withExitCode(errors.New("gateway does not answer /health, so no connector is proven guarded"),
+				return cliusage.WithExitCode(errors.New("gateway does not answer /health, so no connector is proven guarded"),
 					gatewayStartAdmissionRefusedExitCode)
 			}
 			return nil
@@ -389,15 +446,13 @@ func runStartLocked(cmd *cobra.Command, _ []string, coldStart bool) error {
 		}
 		return nil
 	}
-	if err := gatewayDiskFullError("start", config.DefaultDataPath()); err != nil {
-		return err
-	}
-	if !rotationTransaction {
-		if problem := foreignGatewayListener(cfg); problem != "" {
-			return fmt.Errorf("cannot start the gateway: %s. %s", problemClause(problem), foreignGatewayListenerFix(cfg))
+	if tookOver {
+		// The other refusals ran before the takeover; only now is the port
+		// free of the gateway it stopped.
+		if err := foreignGatewayListenerRefusal(cfg); err != nil {
+			return err
 		}
-	}
-	if err := rootOwnedRuntimeLeftoversRefusal(cfg, "start"); err != nil {
+	} else if err := gatewayStartRefusal(cfg, !rotationTransaction); err != nil {
 		return err
 	}
 	if !coldStart {
@@ -416,6 +471,8 @@ func runStartLocked(cmd *cobra.Command, _ []string, coldStart bool) error {
 		progress = newStartProgressPrinter()
 		d.SetStartProgress(progress.report)
 	}
+	// GAP-0205: a unit's ExecStart binds the gateway it launches to the unit.
+	recordGatewayLaunchUnit(config.DefaultDataPath())
 	startAttemptedAt := time.Now()
 	logOffset := gatewayLogSize(d.LogFile())
 	pid, err = d.Start(args)
@@ -465,6 +522,11 @@ func runStartLocked(cmd *cobra.Command, _ []string, coldStart bool) error {
 		requirements.reportProgress = progress.report
 		requirements.keepSlowStart = true
 	}
+	if tookOver {
+		// The takeover's stop and port wait count against the unit's
+		// TimeoutStartSec as well.
+		readinessTimeout = max(readinessTimeout-takeOverTime, readinessTimeout/2)
+	}
 	snap, _, err := waitForStartedDaemon(
 		d,
 		pid,
@@ -475,7 +537,7 @@ func runStartLocked(cmd *cobra.Command, _ []string, coldStart bool) error {
 		requirements,
 	)
 	if errors.Is(err, errGatewayStillStarting) {
-		return reportGatewayStillStarting(err, pid, d.LogFile(), cfg, cfgErr)
+		return reportGatewayStillStarting(pid, d.LogFile(), cfg, cfgErr, startedAsUnitExecStart())
 	}
 	if err != nil {
 		fmt.Println(Style("FAILED", "fg=red", "bold"))
@@ -536,7 +598,7 @@ func hookContractAdmissionStartError(connectors []string, detail string) error {
 	for _, name := range connectors {
 		commands = append(commands, "defenseclaw setup guardrail --connector "+name)
 	}
-	return withExitCode(fmt.Errorf(
+	return cliusage.WithExitCode(fmt.Errorf(
 		"gateway is running, but hook-contract admission refused %s: %s; "+
 			"verify the updated agent, then re-run `%s` to refresh the hook contract",
 		strings.Join(connectors, ", "), strings.TrimSpace(detail), strings.Join(commands, "` and `"),
@@ -626,6 +688,16 @@ func runStop(cmd *cobra.Command, _ []string) error {
 		}
 	} else {
 		running, pid = d.IsRunning()
+		if !running {
+			if heldPID, ok := gatewayOutOfReach(cfg); ok {
+				// GAP-1212: this shell cannot open, so cannot stop, this
+				// account's gateway that runs elevated in another logon
+				// session. Refuse with nothing changed (the watchdog, the
+				// stop marker, the token and the agents' routes stay), never
+				// "not running" with exit 0.
+				return gatewayOutOfReachLifecycleError("stop", heldPID)
+			}
+		}
 	}
 
 	watchdogWasRunning := false
@@ -649,10 +721,25 @@ func runStop(cmd *cobra.Command, _ []string) error {
 			return fmt.Errorf("rotation stop watchdog ownership: %w", err)
 		}
 	} else {
+		// GAP-0205: as the ExecStop of the systemd unit this data directory's
+		// gateway is bound to, a gateway that runs outside the unit's cgroup
+		// is not the unit's to stop. A restart from a shell (`defenseclaw
+		// setup remove`) replaced the unit's gateway with one outside the
+		// unit; with the unit's processes gone systemd ran this stop, which
+		// stopped the replacement too. Any other unit's stop, a transient
+		// `systemd-run` one included, and an unreadable cgroup stop the
+		// gateway as a shell's stop does.
+		unitCgroup, bound := boundSystemdUnitCgroup(config.DefaultDataPath())
+		outsideUnit := func() bool { return bound && running && processOutsideCgroup(pid, unitCgroup) }
+		if running && !outsideUnit() {
+			adoptGatewayUnitOf(config.DefaultDataPath(), pid)
+		}
 		// Stop watchdog first since it monitors the gateway. Ordinary operator
 		// stop keeps the historical best-effort behavior after identity preflight.
-		_ = stopWatchdogForGateway()
-		if hookColdStartSupported() && !secureClientHost() {
+		if !outsideUnit() {
+			_ = stopWatchdogForGateway()
+		}
+		if hookColdStartSupported() && !hookcli.SecureClientHost() {
 			// The watchdog can be waiting for an independent cold-start child
 			// when it exits. Wait for that child's start lock before taking the
 			// final running snapshot and publishing the stop marker. A start
@@ -663,11 +750,23 @@ func runStop(cmd *cobra.Command, _ []string) error {
 				return fmt.Errorf("wait for gateway start before stop: %w", lockErr)
 			}
 			defer release()
+			if bound {
+				// The gateway a restart started while this stop waited.
+				running, pid = d.IsRunning()
+			}
 			// The child may have started a fresh watchdog while finishing.
 			// With its start lock held, stop that instance before checking
 			// the gateway and writing the final marker.
-			_ = stopWatchdogForGateway()
-			running, pid = d.IsRunning()
+			if !outsideUnit() {
+				_ = stopWatchdogForGateway()
+				running, pid = d.IsRunning()
+			}
+		}
+		if outsideUnit() {
+			// No stop marker: the gateway and its watchdog keep running.
+			fmt.Fprintf(os.Stderr, "Gateway sidecar (PID %d) runs outside the systemd unit %q and was left running; run it under the unit with: %s start %q\n",
+				pid, systemdUnitName(unitCgroup), systemctlFor(unitCgroup), systemdUnitName(unitCgroup))
+			return nil
 		}
 	}
 
@@ -678,7 +777,8 @@ func runStop(cmd *cobra.Command, _ []string) error {
 	if !running {
 		removeRunningGatewayToken(config.DefaultDataPath())
 		fmt.Println(Dim("Gateway sidecar is not running"))
-		return nil
+		// A crash or a forced stop left the route in place (GAP-1133).
+		return parkRouteOnlyWithoutGateway(cfg, true)
 	}
 
 	fmt.Printf("Stopping gateway sidecar (PID %d)... ", pid)
@@ -713,6 +813,11 @@ func runStop(cmd *cobra.Command, _ []string) error {
 
 	fmt.Println(Style("OK", "fg=green", "bold"))
 	removeRunningGatewayToken(config.DefaultDataPath())
+	// A graceful stop parked the routes itself; a stop that had to kill the
+	// process (Windows TerminateProcess) did not (GAP-1133).
+	if err := parkRouteOnlyWithoutGateway(cfg, false); err != nil {
+		return fmt.Errorf("the gateway stopped, but %w", err)
+	}
 	printHint("Start again:  defenseclaw-gateway start")
 	return nil
 }
@@ -843,12 +948,23 @@ func runRestart(cmd *cobra.Command, _ []string) error {
 	if err := rootOwnedRuntimeLeftoversRefusal(cfg, "restart"); err != nil {
 		return err
 	}
+	if running, _ := d.IsRunning(); !running {
+		if heldPID, ok := gatewayOutOfReach(cfg); ok {
+			// GAP-1212: as stop, before anything is stopped.
+			return gatewayOutOfReachLifecycleError("restart", heldPID)
+		}
+	}
 	var cfgErr error
 	client, err := gatewayPeerClientForURL(cfg, sidecarStatusURL(cfg), defaultReadinessHTTPTimeout)
 	if err != nil {
 		return fmt.Errorf("gateway restart listener: %w", err)
 	}
 
+	if running, pid := d.IsRunning(); running {
+		// GAP-0205: a gateway an older release launched from its unit binds
+		// that unit, whose ExecStop then leaves the gateway this restart starts.
+		adoptGatewayUnitOf(config.DefaultDataPath(), pid)
+	}
 	running, pid, err := stopRestartTarget(d, cfg, client, defaultStopTimeout, func(pid int) {
 		// Stop the watchdog only after proving the configured listener belongs to
 		// this managed instance; a foreign collision must have no side effects.
@@ -899,7 +1015,7 @@ func runRestart(cmd *cobra.Command, _ []string) error {
 		requirements,
 	)
 	if errors.Is(err, errGatewayStillStarting) {
-		return reportGatewayStillStarting(err, pid, d.LogFile(), cfg, cfgErr)
+		return reportGatewayStillStarting(pid, d.LogFile(), cfg, cfgErr, false)
 	}
 	if err != nil {
 		fmt.Println(Style("FAILED", "fg=red", "bold"))
@@ -924,6 +1040,61 @@ func runRestart(cmd *cobra.Command, _ []string) error {
 	}
 
 	return nil
+}
+
+// takeOverGatewayOutsideUnit stops, with restart's stop half (this start
+// holds the start lock), a gateway that runs outside the systemd unit this
+// start runs for, so the start goes on and runs the gateway under the unit
+// (GAP-0205).
+func takeOverGatewayOutsideUnit(d restartTargetDaemon, cfg *config.Config, client *http.Client, pid int, unitCgroup string) error {
+	fmt.Printf("Gateway sidecar (PID %d) runs outside the systemd unit %q; starting it under the unit\n", pid, systemdUnitName(unitCgroup))
+	running, stoppedPID, err := stopRestartTarget(d, cfg, client, defaultStopTimeout, func(pid int) {
+		_ = stopWatchdogForGateway()
+		fmt.Printf("Stopping gateway sidecar (PID %d)... ", pid)
+	})
+	if err != nil {
+		return err
+	}
+	if running {
+		fmt.Println(Style("OK", "fg=green", "bold"))
+	}
+	if err := waitForConfiguredPortFree(cfg, stoppedPID, restartPortReleaseTimeout, restartPortReleaseInterval); err != nil {
+		return fmt.Errorf("start under the systemd unit: %w", err)
+	}
+	return nil
+}
+
+// gatewayStartRefusal refuses a start that would fail once launched: a full
+// data disk, a listener on the gateway port that is not this install's
+// gateway (when checkListener), root-owned runtime leftovers.
+func gatewayStartRefusal(cfg *config.Config, checkListener bool) error {
+	if err := gatewayDiskFullError("start", config.DefaultDataPath()); err != nil {
+		return err
+	}
+	if checkListener {
+		if err := foreignGatewayListenerRefusal(cfg); err != nil {
+			return err
+		}
+	}
+	return rootOwnedRuntimeLeftoversRefusal(cfg, "start")
+}
+
+func foreignGatewayListenerRefusal(cfg *config.Config) error {
+	if problem := foreignGatewayListener(cfg); problem != "" {
+		return fmt.Errorf("cannot start the gateway: %s. %s", problemClause(problem), foreignGatewayListenerFix(cfg))
+	}
+	return nil
+}
+
+// systemdUnitName is the unit a systemd service cgroup path names (its leaf).
+func systemdUnitName(cgroup string) string { return cgroup[strings.LastIndex(cgroup, "/")+1:] }
+
+// systemctlFor is the systemctl command that manages the unit of cgroup.
+func systemctlFor(cgroup string) string {
+	if strings.Contains(cgroup, "/user@") {
+		return "systemctl --user"
+	}
+	return "sudo systemctl"
 }
 
 type gracefulGatewayStopper interface {
@@ -975,14 +1146,6 @@ func stopGatewayGracefullyOnDataDir(d gracefulGatewayStopper, cfg *config.Config
 	return d.StopGracefully(timeout, func(pid int) error {
 		return requestGatewayShutdownOnDataDir(client, cfg, daemonGatewayToken(cfg), pid, dataDir)
 	})
-}
-
-func requestGatewayShutdown(client *http.Client, cfg *config.Config, token string, pid int) error {
-	dataDir := ""
-	if cfg != nil {
-		dataDir = cfg.DataDir
-	}
-	return requestGatewayShutdownOnDataDir(client, cfg, token, pid, dataDir)
 }
 
 func requestGatewayShutdownOnDataDir(client *http.Client, cfg *config.Config, token string, pid int, dataDir string) error {
@@ -1125,9 +1288,9 @@ type daemonReadinessRequirements struct {
 	// step extend the readiness timeout up to startReadinessProgressCap.
 	reportProgress func(elapsed time.Duration, step string)
 
-	// keepSlowStart leaves the launched gateway running when an interactive
-	// start or restart reaches the readiness deadline while that process is
-	// still alive (GAP-2022). Stopping it left no gateway and no watchdog on
+	// keepSlowStart leaves the launched gateway running when a start or
+	// restart reaches the readiness deadline while that process is still
+	// alive (GAP-2022). Stopping it left no gateway and no watchdog on
 	// a loaded host where it would have answered moments later.
 	keepSlowStart bool
 }
@@ -1214,7 +1377,7 @@ func daemonConfigLoadError(verb string, err error) error {
 	if err == nil {
 		return nil
 	}
-	if !secureClientHost() {
+	if !hookcli.SecureClientHost() {
 		if _, statErr := os.Stat(config.ConfigPath()); errors.Is(statErr, os.ErrNotExist) {
 			return fmt.Errorf("cannot %s the gateway: no config.yaml exists yet; run defenseclaw init first", verb)
 		}
@@ -1446,8 +1609,6 @@ func readDotEnv(path string) map[string]string {
 		return nil
 	}
 	env := make(map[string]string)
-	// An adopted gateway token copy never shadows the one the operator saved.
-	shadowed := envvars.ShadowedAdoptedGatewayTokens(data)
 	for _, line := range strings.Split(string(data), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || line[0] == '#' {
@@ -1458,9 +1619,6 @@ func readDotEnv(path string) map[string]string {
 			continue
 		}
 		key, value = strings.TrimSpace(key), strings.TrimSpace(value)
-		if shadowed.Has(key) {
-			continue
-		}
 		if len(value) >= 2 && ((value[0] == '"' && value[len(value)-1] == '"') || (value[0] == '\'' && value[len(value)-1] == '\'')) {
 			value = value[1 : len(value)-1]
 		}
@@ -1470,24 +1628,30 @@ func readDotEnv(path string) map[string]string {
 }
 
 func daemonGatewayToken(cfg *config.Config) string {
-	const (
-		canonicalTokenEnv = "DEFENSECLAW_GATEWAY_TOKEN"
-		legacyTokenEnv    = "OPENCLAW_GATEWAY_TOKEN"
-	)
+	const canonicalTokenEnv = "DEFENSECLAW_GATEWAY_TOKEN"
 
 	// Daemon.childEnv preserves a genuinely custom token environment
-	// override, but replaces the canonical/legacy process variables with the
-	// data directory's dotenv values when those exist. Resolve the parent's
-	// readiness credential in that same order so it always authenticates with
-	// the token the child actually received.
-	tokenEnv := ""
+	// override, but replaces the canonical process variable with the data
+	// directory's dotenv value when it exists. Resolve the parent's readiness
+	// credential in that same order so it always authenticates with the token
+	// the child actually received. OPENCLAW_GATEWAY_TOKEN is the OpenClaw
+	// WebSocket credential and never the gateway token (R-TOK); a gateway
+	// token equal to it is not one either (the child mints a new one, which
+	// runningGatewayToken then reports).
+	openClaw := ""
 	if cfg != nil {
-		tokenEnv = strings.TrimSpace(cfg.Gateway.TokenEnv)
+		openClaw = strings.TrimSpace(cfg.Gateway.OpenClawToken)
+	}
+	usable := func(token, dotenvOpenClaw string) bool {
+		return token != "" && !envvars.IsSecretRefText(token) && token != openClaw && token != dotenvOpenClaw
+	}
+	if cfg != nil {
+		tokenEnv := strings.TrimSpace(cfg.Gateway.TokenEnv)
 		if running := runningGatewayToken(cfg.DataDir); running != "" {
 			return running
 		}
-		if tokenEnv != "" && !daemonEnvironmentKeyEqual(tokenEnv, canonicalTokenEnv) && !daemonEnvironmentKeyEqual(tokenEnv, legacyTokenEnv) {
-			if token := strings.TrimSpace(os.Getenv(tokenEnv)); token != "" && !envvars.IsSecretRefText(token) {
+		if tokenEnv != "" && !daemonEnvironmentKeyEqual(tokenEnv, canonicalTokenEnv) && !config.IsOpenClawGatewayTokenEnv(tokenEnv) {
+			if token := strings.TrimSpace(os.Getenv(tokenEnv)); usable(token, "") {
 				return token
 			}
 		}
@@ -1497,16 +1661,11 @@ func daemonGatewayToken(cfg *config.Config) string {
 	if cfg != nil && cfg.DataDir != "" {
 		paths = append(paths, filepath.Join(cfg.DataDir, ".env"))
 	}
-	tokenKeys := []string{canonicalTokenEnv, legacyTokenEnv}
-	if daemonEnvironmentKeyEqual(tokenEnv, legacyTokenEnv) {
-		tokenKeys = []string{legacyTokenEnv, canonicalTokenEnv}
-	}
 	for _, path := range paths {
 		env := readDotEnv(path)
-		for _, key := range tokenKeys {
-			if token := strings.TrimSpace(daemonDotenvValue(env, key)); token != "" && !envvars.IsSecretRefText(token) {
-				return token
-			}
+		dotenvOpenClaw := strings.TrimSpace(daemonDotenvValue(env, config.OpenClawGatewayTokenEnv))
+		if token := strings.TrimSpace(daemonDotenvValue(env, canonicalTokenEnv)); usable(token, dotenvOpenClaw) {
+			return token
 		}
 	}
 	if cfg != nil {

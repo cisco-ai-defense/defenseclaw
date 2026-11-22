@@ -83,7 +83,7 @@ func TestWriteThroughCommandLinkToActiveStateBlocks(t *testing.T) {
 			for _, row := range rows {
 				input := actionfacts.Input{Tool: "Bash", Command: row.command, CWD: cwd, ActiveHome: home, DialectHint: hint}
 				findings := dispatchTrustedAction(t.Context(), trustedActionRequest{Input: input, Connector: connector, EnforcementCapable: true})
-				if blocked := buildVerdict(findings, "tool_call").Action == "block"; blocked != row.block {
+				if blocked := gap0747Blocked(findings, row.block); blocked != row.block {
 					ids := ""
 					for _, finding := range findings {
 						ids += finding.RuleID + " "
@@ -169,7 +169,7 @@ func TestSedFollowSymlinksToActiveStateBlocks(t *testing.T) {
 			for _, row := range rows {
 				input := actionfacts.Input{Tool: "Bash", Command: row.command, CWD: cwd, ActiveHome: home, DialectHint: hint}
 				findings := dispatchTrustedAction(t.Context(), trustedActionRequest{Input: input, Connector: connector, EnforcementCapable: true})
-				if blocked := buildVerdict(findings, "tool_call").Action == "block"; blocked != row.block {
+				if blocked := gap0747Blocked(findings, row.block); blocked != row.block {
 					ids := ""
 					for _, finding := range findings {
 						ids += finding.RuleID + " "

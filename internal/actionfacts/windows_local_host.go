@@ -23,8 +23,8 @@ import (
 
 // WindowsLocalHost reports a server name of a Windows share that is this
 // machine: localhost, a loopback address, or the machine name that hostname
-// returns. The typed patch reader and the path rules share it, so both read
-// the same spellings as a local file.
+// returns. The path rules read the admin share of such a name as the drive
+// path it opens (windowsOpenedPath).
 func WindowsLocalHost(host string, hostname func() (string, error)) bool {
 	if strings.EqualFold(host, "localhost") || strings.HasSuffix(strings.ToLower(host), ".localhost") {
 		return true

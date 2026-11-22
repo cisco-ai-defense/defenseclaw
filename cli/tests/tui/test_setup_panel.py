@@ -112,6 +112,8 @@ def test_setup_config_sections_match_go_catalog_order() -> None:
         "Gateway Watcher",
         "Gateway Watchdog",
         "Observability",
+        "Routing",
+        "Tokenomics",
         "Webhooks",
         "Admission Defaults",
         "Skill Admission",
@@ -643,20 +645,20 @@ def _wizard_options(fields: Sequence, label: str) -> tuple[str, ...]:
 
 
 def test_connector_choices_are_os_filtered_for_windows() -> None:
-    # B6: Windows is hook-only, so the proxy connectors (openclaw/zeptoclaw)
-    # must not be offered in the connector wizard and the seeded default must
-    # not be one of them.
+    # B6: Windows has no guardrail proxy, so ZeptoClaw must not be offered in
+    # the connector wizard and the seeded default must not be it. OpenClaw
+    # runs native plugin hooks there (1.0.10) and is offered.
     win_fields = connector_setup_wizard_fields({}, os_name="windows")
     win_options = _wizard_options(win_fields, "Connector")
-    assert "openclaw" not in win_options
+    assert "openclaw" in win_options
     assert "zeptoclaw" not in win_options
     assert "codex" in win_options and "claudecode" in win_options
     assert "amp" in win_options
-    assert wizard_field_value(win_fields, "Connector") not in {"openclaw", "zeptoclaw"}
+    assert wizard_field_value(win_fields, "Connector") != "zeptoclaw"
 
     # A stored proxy ``claw.mode`` (e.g. a config copied from macOS) leaves
     # the choice empty so no unsupported agent is selected automatically.
-    proxy_cfg = {"claw": {"mode": "openclaw"}}
+    proxy_cfg = {"claw": {"mode": "zeptoclaw"}}
     seeded = wizard_field_value(connector_setup_wizard_fields(proxy_cfg, os_name="windows"), "Connector")
     assert seeded == ""
 
@@ -666,7 +668,7 @@ def test_connector_choices_are_os_filtered_for_windows() -> None:
 
     # The config-editor "Mode" choice is filtered the same way.
     win_mode = _field_by_key(build_setup_sections({}, os_name="windows"), "claw.mode")
-    assert "openclaw" not in win_mode.options and "zeptoclaw" not in win_mode.options
+    assert "openclaw" in win_mode.options and "zeptoclaw" not in win_mode.options
     assert "codex" in win_mode.options
     linux_mode = _field_by_key(build_setup_sections({}, os_name="linux"), "claw.mode")
     assert set(linux_mode.options) == set(CONNECTORS)
@@ -765,6 +767,34 @@ def test_guardrail_wizard_prefills_single_connector_and_passes_explicit_scope() 
     argv = build_wizard_args(SetupWizard.GUARDRAIL, fields)
     assert "--connector" in argv
     assert argv[argv.index("--connector") + 1] == "codex"
+
+
+def test_guardrail_wizard_global_scope_judge_covers_every_connector_on_a_single_connector_install() -> None:
+    # Global scope means every active connector, including ones added later. The wizard
+    # names the one connector on a single-connector install, and `--connector X` alone
+    # would narrow judge.hook_connectors to [X].
+    cfg = {"claw": {"mode": "codex"}}
+    fields = _guardrail_wizard_fields_for({"--detection-strategy": "judge_first"}, cfg)
+    argv = build_wizard_args(SetupWizard.GUARDRAIL, fields, cfg)
+    assert argv[argv.index("--connector") + 1] == "codex"
+    assert argv[argv.index("--judge-hook-connectors") + 1] == "all"
+
+    # A gate that lists connectors is left alone (see
+    # test_guardrail_wizard_omits_judge_hook_connectors_without_openclaw_default).
+    listed = _guardrail_wizard_fields_for(
+        {"--detection-strategy": "judge_first"}, {**cfg, "guardrail": {"judge": {"hook_connectors": ["codex"]}}}
+    )
+    assert "--judge-hook-connectors" not in build_wizard_args(
+        SetupWizard.GUARDRAIL, listed, {**cfg, "guardrail": {"judge": {"hook_connectors": ["codex"]}}}
+    )
+
+    # No judge change, no gate flag: the existing gate is left alone.
+    plain = build_wizard_args(SetupWizard.GUARDRAIL, _guardrail_wizard_fields_for({}, cfg), cfg)
+    assert "--judge-hook-connectors" not in plain
+
+    # Connector scope keeps the connector-only gate.
+    scoped = _guardrail_wizard_fields_for({"@Scope": "selected-connector", "--detection-strategy": "judge_first"}, cfg)
+    assert "--judge-hook-connectors" not in build_wizard_args(SetupWizard.GUARDRAIL, scoped, cfg)
 
 
 def test_trusted_paths_wizard_builds_real_setup_commands() -> None:
@@ -982,7 +1012,7 @@ def test_guardrail_wizard_omits_judge_hook_connectors_without_openclaw_default()
         },
     }
     fields = _guardrail_wizard_fields_for({"--detection-strategy": "regex_judge"}, cfg)
-    argv = build_wizard_args(SetupWizard.GUARDRAIL, fields)
+    argv = build_wizard_args(SetupWizard.GUARDRAIL, fields, cfg)
     assert wizard_field_value(fields, "Hook Connectors") == ""
     assert "--judge-hook-connectors" not in argv
 

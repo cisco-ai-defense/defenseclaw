@@ -21,6 +21,13 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
+// runHermesExecutionProbe is runHermesExecutionProbeResult without the error:
+// only these tests ask for the verdict alone.
+func runHermesExecutionProbe(target string, args []string) bool {
+	ok, _ := runHermesExecutionProbeResult(target, args)
+	return ok
+}
+
 func TestHermesRegistrationRequiresExecutableProbe(t *testing.T) {
 	root := testenv.PrivateTempDir(t)
 	configPath := filepath.Join(root, "hermes", "config.yaml")
@@ -39,7 +46,7 @@ func TestHermesRegistrationRequiresExecutableProbe(t *testing.T) {
 	if err := patchHermesHooks(configPath, script, ""); err != nil {
 		t.Fatal(err)
 	}
-	if err := patchHermesAllowlist(filepath.Join(filepath.Dir(configPath), hermesAllowlistFileName),
+	if err := patchHermesAllowlist(filepath.Join(filepath.Dir(configPath), HermesAllowlistFileName),
 		hermesConfiguredHookCommand(script, ""), script); err != nil {
 		t.Fatal(err)
 	}

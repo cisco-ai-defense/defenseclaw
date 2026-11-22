@@ -19,7 +19,7 @@ const fileToolBlockPrefix = `{"action":"block"`
 // postFileToolCell posts one PreToolUse call of a native file tool to the
 // Claude Code hook, as the per-user hook or as a managed hook peer of home,
 // under the rule pack, and reports whether the verdict blocks with the
-// state-write finding and the response.
+// state-write finding (alert outside strict) and the response.
 func postFileToolCell(t *testing.T, home, cwd, tool string, input map[string]any, managed bool, pack string) (blocked bool, response string) {
 	t.Helper()
 	cfg := &config.Config{}
@@ -37,5 +37,11 @@ func postFileToolCell(t *testing.T, home, cwd, tool string, input map[string]any
 	rec := httptest.NewRecorder()
 	api.handleAgentHook("claudecode").ServeHTTP(rec, req)
 	got := rec.Body.String()
-	return strings.HasPrefix(got, `{"action":"block"`) && strings.Contains(got, "tamper.detector_state_write"), got
+	// GAP-0747 owner tiering 2026-11-15T15:20Z: the state write is a block in
+	// strict and a HIGH alert in the default and permissive packs.
+	want := `{"action":"alert"`
+	if pack == "strict" {
+		want = `{"action":"block"`
+	}
+	return strings.HasPrefix(got, want) && strings.Contains(got, "tamper.detector_state_write"), got
 }

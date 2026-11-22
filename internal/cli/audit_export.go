@@ -23,7 +23,9 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/version"
@@ -161,7 +163,7 @@ func auditExportPersistentPreRunE(cmd *cobra.Command, _ []string) error {
 		// managed decommission without touching the active deployment.
 		if auditExportManagedHost() {
 			if !auditExportCallerIsAdministrator() {
-				return withExitCode(&managedViewRefusal{
+				return cliusage.WithExitCode(&managedViewRefusal{
 					code:    "elevation_required",
 					message: windowsManagedStandardUserViewAnswer("the audit log", "audit", "export", "-o", "<file>"),
 				}, enterprisestatus.WindowsExitAccessDenied)
@@ -213,7 +215,7 @@ func init() {
 	auditExportCmd.Flags().BoolVar(&auditExportForce, "force", false, "Overwrite the --output file if it already exists")
 	auditExportCmd.Flags().StringVar(&auditExportConnector, "connector", "", "Only export rows attributed to this connector (matches the authoritative connector column, then structured.connector, then the details connector= field). Activity rows are omitted when set.")
 	auditExportCmd.Flags().StringVar(&auditExportDB, "db", "", "Read this audit database instead of the configured one, for example the install a rollback left in ~/.defenseclaw/previous/data/audit.db")
-	_ = auditExportCmd.Flags().SetAnnotation("db", secureClientAbsentAnnotation, []string{"true"})
+	_ = auditExportCmd.Flags().SetAnnotation("db", hookcli.SecureClientAbsentAnnotation, []string{"true"})
 
 	auditCmd.AddCommand(auditExportCmd)
 	rootCmd.AddCommand(auditCmd)
@@ -362,10 +364,19 @@ func runAuditExport(cmd *cobra.Command, _ []string) (err error) {
 	// (GAP-0614).
 	hasPayloadJSON, _ := columnExists(db, "audit_events", "payload_json")
 	structuredCol := audit.StructuredJSONReadSQL("", hasPayloadJSON, eventNameCol != "NULL")
+	// A benign per-user allow keeps only its hook_decision row (#1384): the
+	// export adds the v7 connector-hook line of that decision, so it still
+	// has one connector-hook line per hook decision.
+	loneHookBodyCol := "NULL"
+	if hasProjected, _ := columnExists(db, "audit_events", "projected_record_json"); hasProjected && hasPayloadJSON &&
+		eventNameCol != "NULL" {
+		tracked, _ := audit.HookRowsTracked(db)
+		loneHookBodyCol = loneHookDecisionBodySQL(tracked)
+	}
 	q := `SELECT id, timestamp, action, target, actor, details, ` + structuredCol + `, severity, run_id,
 session_id, trace_id, agent_id, agent_name, agent_instance_id, sidecar_instance_id,
 schema_version, content_hash, generation, binary_version,
-destination_app, tool_name, tool_id, policy_id, connector, ` + eventNameCol + `
+destination_app, tool_name, tool_id, policy_id, connector, ` + eventNameCol + `, ` + loneHookBodyCol + `
 FROM audit_events` + where + ` ORDER BY ` + window.orderBy(hasExactTime)
 	// When a connector or time filter is active the cap must apply to
 	// *matching* rows, so we filter in Go and bound the count there.
@@ -403,14 +414,14 @@ FROM audit_events` + where + ` ORDER BY ` + window.orderBy(hasExactTime)
 			contentHash, binVer                             sql.NullString
 			gen                                             sql.NullInt64
 			destApp, toolName, toolID, policyID             sql.NullString
-			connectorCol, eventName                         sql.NullString
+			connectorCol, eventName, loneHookBody           sql.NullString
 		)
 		if err := rows.Scan(
 			&id, &ts, &action, &target, &actor, &details, &structuredRaw, &severity, &runID,
 			&sessionID, &traceID,
 			&agentID, &agentName, &agentInst, &sidecarInst,
 			&schemaVer, &contentHash, &gen, &binVer,
-			&destApp, &toolName, &toolID, &policyID, &connectorCol, &eventName,
+			&destApp, &toolName, &toolID, &policyID, &connectorCol, &eventName, &loneHookBody,
 		); err != nil {
 			return fmt.Errorf("audit export: scan: %w", err)
 		}
@@ -449,6 +460,28 @@ FROM audit_events` + where + ` ORDER BY ` + window.orderBy(hasExactTime)
 		}
 		if !more {
 			break
+		}
+		if hookTarget, hookDetails, hookStructured, ok := hookDecisionConnectorHook(connector, ns(loneHookBody)); ok {
+			line, err = buildAuditEventLine(id+hookDecisionConnectorHookIDSuffix, ts, string(audit.ActionConnectorHook),
+				hookTarget, hookDetails, "INFO", ns(runID),
+				hookStructured,
+				ns(sessionID), ns(traceID),
+				actor,
+				ns(agentID), ns(agentName), ns(agentInst), ns(sidecarInst),
+				schemaVer, ns(contentHash), gen, ns(binVer),
+				ns(destApp), ns(toolName), ns(toolID), ns(policyID),
+				connector, "",
+				prov,
+			)
+			if err != nil {
+				return err
+			}
+			if more, err = sink.add(line, ts); err != nil {
+				return err
+			}
+			if !more {
+				break
+			}
 		}
 	}
 	if err := rows.Err(); err != nil {
@@ -526,9 +559,9 @@ type auditExportWindow struct {
 // status 2, like unknown flags and unparsable numbers (GAP-2110).
 func auditUsageError(cmd *cobra.Command, err error) error {
 	if cmd == nil {
-		return withExitCode(err, 2)
+		return cliusage.WithExitCode(err, 2)
 	}
-	return usageError(cmd, err)
+	return cliusage.UsageError(cmd, err)
 }
 
 // parseAuditExportWindow reads --since, --until, --limit and --newest.

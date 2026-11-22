@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 )
 
@@ -94,7 +95,7 @@ func TestHookDataDirNowLocksEveryDataDirAHookCanOpenIn(t *testing.T) {
 				t.Setenv("DEFENSECLAW_HOME", env.dcHome)
 				t.Setenv("HOME", env.home)
 				t.Setenv("USERPROFILE", env.home)
-				if hookOutageFailModeNow("opencode", hooks) != "open" {
+				if hookcli.HookOutageFailModeNow("opencode", hooks) != "open" {
 					t.Logf("%s: the runtime does not take this spelling as %s config; no outage opens there", env.label, data)
 					continue
 				}
@@ -106,7 +107,7 @@ func TestHookDataDirNowLocksEveryDataDirAHookCanOpenIn(t *testing.T) {
 				if err := os.MkdirAll(lock, 0o700); err != nil {
 					t.Fatal(err)
 				}
-				if mode := hookOutageFailModeNow("opencode", hooks); mode != "closed" {
+				if mode := hookcli.HookOutageFailModeNow("opencode", hooks); mode != "closed" {
 					t.Fatalf("%s: hook-outage-mode with the lock install.sh holds = %q, want closed", env.label, mode)
 				}
 				if err := os.Remove(lock); err != nil {
@@ -218,7 +219,7 @@ func TestHookDataDirNowResolvesRelativeOverrides(t *testing.T) {
 				t.Setenv("DEFENSECLAW_HOME", env.dcHome)
 				t.Setenv("HOME", env.home)
 				t.Setenv("USERPROFILE", env.home)
-				if hookOutageFailModeNow("opencode", hooks) != "open" {
+				if hookcli.HookOutageFailModeNow("opencode", hooks) != "open" {
 					continue
 				}
 				locked := false
@@ -234,7 +235,7 @@ func TestHookDataDirNowResolvesRelativeOverrides(t *testing.T) {
 				if err := os.MkdirAll(lock, 0o700); err != nil {
 					t.Fatal(err)
 				}
-				if mode := hookOutageFailModeNow("opencode", hooks); mode != "closed" {
+				if mode := hookcli.HookOutageFailModeNow("opencode", hooks); mode != "closed" {
 					t.Fatalf("%s: hook-outage-mode with the lock install.sh holds = %q, want closed", env.label, mode)
 				}
 				if err := os.Remove(lock); err != nil {

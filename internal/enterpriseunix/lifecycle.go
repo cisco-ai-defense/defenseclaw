@@ -2110,6 +2110,13 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 		}
 		if committedConfig != nil && (code == codeConfig || code == codeMachinePolicy) {
 			l.revertRejectedConfig(record, committedConfig, nil, err.Error())
+		} else if committedConfig == nil && (code == codeConfig || code == codeMachinePolicy) && l.opts.ConfigFile != "" &&
+			trustedInputFile(l.opts.ConfigFile, "--config") == nil {
+			// A refused --config changed nothing, and the deployment keeps
+			// the config it ran: reported as on Windows (GAP-1027).
+			if raw, readErr := readBounded(l.opts.ConfigFile, maxInputBytes); readErr == nil {
+				l.keepRejectedConfigFile(record, raw, err.Error())
+			}
 		}
 		if record != nil {
 			// Refused before any change: the running deployment is untouched,
@@ -2295,6 +2302,11 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 			}
 		}
 		restored, err := l.rollback(ctx, snap, pending, false, keepNewerConfig, restoreLiveBeforeStart)
+		if restored && committedConfig == nil {
+			// Before a config.yaml pushed during the run goes back: that
+			// newer file supersedes the kept rejection (GAP-1027).
+			l.keepRejectedConfigFile(record, p.config.Raw, cause.Error())
+		}
 		if newerConfig != nil {
 			l.restoreNewerConfig(record.ServiceGID, newerConfig)
 		}

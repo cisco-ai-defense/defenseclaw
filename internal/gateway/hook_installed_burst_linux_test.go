@@ -35,7 +35,7 @@ func TestInstalledClaudeBurstAnswersAndRecovers(t *testing.T) {
 	if runtime.GOMAXPROCS(0) != 2 {
 		t.Skip("run with GOMAXPROCS=2")
 	}
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	installDefaultProfileConnector(t, "claudecode")
 	fixture := newSidecarRuntimeFixture(t, true)
 	logger := audit.NewLogger(fixture.store)

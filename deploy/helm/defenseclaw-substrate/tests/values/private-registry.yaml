@@ -1,0 +1,23 @@
+# Private template registries (GAP-0190): an ECR registry with an IRSA role
+# on the gateway and controller only, a docker config Secret for another
+# registry; and (GAP-0191) a private OIDC issuer CA from a Secret and
+# administrator groups as a config key.
+controller:
+  templateRegistrySecret: dc-template-registry
+serviceAccounts:
+  componentAnnotations:
+    gateway: {eks.amazonaws.com/role-arn: "arn:aws:iam::123456789012:role/dc-ecr-read"}
+    controller: {eks.amazonaws.com/role-arn: "arn:aws:iam::123456789012:role/dc-ecr-read"}
+gateway:
+  oidcCA:
+    secret: dc-oidc-ca
+config:
+  substrate:
+    identity:
+      issuer: https://idp.cluster-a.example
+      oidc: {issuer: "https://sso.example.com/realms/dc", client_id: defenseclaw-launcher, groups_claim: groups}
+      admin_groups: [dc-admins]
+    templates:
+      allowed_images: ["123456789012.dkr.ecr.us-east-1.amazonaws.com/dc/*", "registry.example.com/dc/*"]
+      registry_auth:
+        ecr_hosts: [123456789012.dkr.ecr.us-east-1.amazonaws.com]

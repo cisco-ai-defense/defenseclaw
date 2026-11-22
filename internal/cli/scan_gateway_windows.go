@@ -19,6 +19,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -39,7 +40,7 @@ const managedScanAdministratorOnly = "on this managed computer a scan runs throu
 // managed gateway: its configured API port and the gateway token in its data
 // directory, which only an administrator can read.
 func managedScanGatewayEndpoint() (string, string, bool, error) {
-	if _, present := managedHostWindowsStandalone(); !present {
+	if _, present := hookcli.ManagedHostWindowsStandalone(); !present {
 		return "", "", false, nil
 	}
 	layout, err := managedScanWindowsLayout()

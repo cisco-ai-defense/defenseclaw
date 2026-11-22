@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 )
 
@@ -76,7 +77,7 @@ func TestHookDataDirsNowLocksEveryFolderWhoseConfigIsTheConfiguredFile(t *testin
 			t.Setenv("DEFENSECLAW_HOME", "")
 			t.Setenv("HOME", filepath.Join(base, "agent-home"))
 			t.Setenv("USERPROFILE", filepath.Join(base, "agent-home"))
-			if mode := hookOutageFailModeNow("opencode", hooks); mode != "open" {
+			if mode := hookcli.HookOutageFailModeNow("opencode", hooks); mode != "open" {
 				t.Fatalf("precondition: the hook in %s does not open an outage (%q)", folder, mode)
 			}
 			held := false
@@ -91,7 +92,7 @@ func TestHookDataDirsNowLocksEveryFolderWhoseConfigIsTheConfiguredFile(t *testin
 			if err := os.MkdirAll(filepath.Join(folder, ".install.lock"), 0o700); err != nil {
 				t.Fatal(err)
 			}
-			if mode := hookOutageFailModeNow("opencode", hooks); mode != "closed" {
+			if mode := hookcli.HookOutageFailModeNow("opencode", hooks); mode != "closed" {
 				t.Fatalf("hook-outage-mode with the lock install.sh holds = %q, want closed", mode)
 			}
 		})
@@ -164,13 +165,13 @@ func TestHookDataDirsNowLocksEveryAliasOfTheConfiguredFile(t *testing.T) {
 			t.Fatalf("hook-data-dir names %q, not the account's own %s", dirs, accountData)
 		}
 		hooks := filepath.Join(other, "hooks")
-		if mode := hookOutageFailModeNow("opencode", hooks); mode != "open" {
+		if mode := hookcli.HookOutageFailModeNow("opencode", hooks); mode != "open" {
 			t.Fatalf("precondition: the hook in %s does not open an outage (%q)", other, mode)
 		}
 		if err := os.MkdirAll(filepath.Join(accountData, ".install.lock"), 0o700); err != nil {
 			t.Fatal(err)
 		}
-		if mode := hookOutageFailModeNow("opencode", hooks); mode != "closed" {
+		if mode := hookcli.HookOutageFailModeNow("opencode", hooks); mode != "closed" {
 			t.Fatalf("hook-outage-mode while install.sh holds %s = %q, want closed", accountData, mode)
 		}
 	})

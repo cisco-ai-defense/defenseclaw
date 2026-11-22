@@ -29,6 +29,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/netguard"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/observability/delivery"
 	"github.com/defenseclaw/defenseclaw/internal/observability/destinations"
@@ -78,9 +79,14 @@ const (
 // sidecarObservabilityV8BootstrapError is content-free. Config validation
 // remains the operator-facing source-location boundary; runtime assembly must
 // not return database paths, endpoints, secret references, or driver errors.
+// destination is the one exception: the administrator's destination name and
+// a fixed cause (destinations.Factory.LastPreparationFailure), without a path
+// or endpoint. Without it the gateway stopped with only runtime_unavailable
+// (GAP-0272).
 type sidecarObservabilityV8BootstrapError struct {
-	code  sidecarObservabilityV8BootstrapErrorCode
-	cause error
+	code        sidecarObservabilityV8BootstrapErrorCode
+	cause       error
+	destination string
 }
 
 func (err *sidecarObservabilityV8BootstrapError) Error() string {
@@ -94,6 +100,9 @@ func (err *sidecarObservabilityV8BootstrapError) Error() string {
 	var keyErr *redaction.KeyStoreError
 	if err.code == sidecarObservabilityV8BootstrapRedaction && errors.As(err.cause, &keyErr) {
 		message += ":" + string(keyErr.Code)
+	}
+	if err.destination != "" {
+		message += ": " + err.destination
 	}
 	return message
 }
@@ -340,7 +349,7 @@ func (s *Sidecar) prepareObservabilityV8Runtime(
 		// Exporters check each destination, then connect through the
 		// standalone enterprise.network proxy when one is set, otherwise
 		// through HTTPS_PROXY (NO_PROXY and loopback connect directly).
-		Resolver: net.DefaultResolver, Dialer: telemetryEgressDialer{direct: &net.Dialer{}},
+		Resolver: s.observabilityV8ResolverOrDefault(), Dialer: telemetryEgressDialer{direct: &net.Dialer{}},
 		Warnings: push.WarningObserverFunc(func(warning push.Warning) {
 			s.observeObservabilityV8Warning(warning)
 		}),
@@ -366,6 +375,7 @@ func (s *Sidecar) prepareObservabilityV8Runtime(
 		DefenseClawInstanceID: gatewaylog.SidecarInstanceID(),
 		TenantID:              cfg.TenantID, WorkspaceID: cfg.WorkspaceID,
 		DeploymentMode: cfg.DeploymentMode, ConnectorMode: observabilityClawMode(cfg),
+		K8sClusterName: observabilitySubstrateK8s(cfg, substrateClusterNameEnv), K8sNamespaceName: observabilitySubstrateK8s(cfg, "POD_NAMESPACE"),
 		DiscoverySource: cfg.DiscoverySource, DeviceKeyFile: cfg.Gateway.DeviceKeyFile,
 		GenerationPipelines: destinationFactory.GenerationPipelineFactory(prometheus.Options{}),
 	})
@@ -388,12 +398,26 @@ func (s *Sidecar) prepareObservabilityV8Runtime(
 		},
 	)
 	if err != nil {
-		return nil, newSidecarObservabilityV8BootstrapError(sidecarObservabilityV8BootstrapRuntime, err)
+		failure := newSidecarObservabilityV8BootstrapError(sidecarObservabilityV8BootstrapRuntime, err)
+		var bootstrapErr *sidecarObservabilityV8BootstrapError
+		if errors.As(failure, &bootstrapErr) {
+			bootstrapErr.destination = destinationFactory.LastPreparationFailure()
+		}
+		return nil, failure
 	}
 	return &sidecarOwnedObservabilityV8Runtime{
 		runtime: runtime, redactionEngine: engine, dataDir: filepath.Clean(compiled.DataDir),
 		retainJudgeBodies: retainJudgeBodies, destinationFactory: destinationFactory,
 	}, nil
+}
+
+// observabilityV8ResolverOrDefault is the resolver destination exporters
+// check their endpoints with: the system resolver, or a test's.
+func (s *Sidecar) observabilityV8ResolverOrDefault() netguard.V8Resolver {
+	if s.observabilityV8Resolver != nil {
+		return s.observabilityV8Resolver
+	}
+	return net.DefaultResolver
 }
 
 // newObservabilityV8RedactionEngine builds the projection engine every
@@ -522,6 +546,17 @@ func (owner *sidecarOwnedObservabilityV8Runtime) LatestLifecycleProjection(
 		return audit.LifecycleProjection{}, false, newSidecarObservabilityV8BootstrapError(sidecarObservabilityV8BootstrapClose, nil)
 	}
 	return owner.runtime.LatestLifecycleProjection(ctx, query)
+}
+
+// LogsCollected reports whether the active plan collects the logs of
+// bucket (hookDecisionRecordsKept).
+func (owner *sidecarOwnedObservabilityV8Runtime) LogsCollected(bucket observability.Bucket) bool {
+	if owner == nil || owner.runtime == nil {
+		return false
+	}
+	owner.lifecycleMu.RLock()
+	defer owner.lifecycleMu.RUnlock()
+	return !owner.closed && owner.runtime.LogsCollected(bucket)
 }
 
 func (owner *sidecarOwnedObservabilityV8Runtime) EmitLocalOnly(
@@ -1299,8 +1334,24 @@ var (
 // agent's traffic as another's; each record already names its own agent, so
 // the attribute is left out then.
 func observabilityClawMode(cfg *config.Config) string {
-	if cfg == nil || len(cfg.ActiveConnectors()) > 1 {
+	// A gateway on Agent Substrate serves every actor's connector, so the
+	// configured claw mode (openclaw by default) named none of them
+	// (GAP-0454).
+	if cfg == nil || len(cfg.ActiveConnectors()) > 1 || cfg.Substrate.Enabled {
 		return ""
 	}
 	return string(cfg.Claw.Mode)
+}
+
+// substrateClusterNameEnv is the variable the Substrate chart sets from its
+// clusterName value (Kubernetes has no API that names the cluster).
+const substrateClusterNameEnv = "DEFENSECLAW_K8S_CLUSTER_NAME"
+
+// observabilitySubstrateK8s is a k8s.* resource attribute of a gateway pod
+// on Agent Substrate, from the pod's environment; "" elsewhere (GAP-0454).
+func observabilitySubstrateK8s(cfg *config.Config, env string) string {
+	if cfg == nil || !cfg.Substrate.Enabled {
+		return ""
+	}
+	return strings.TrimSpace(os.Getenv(env))
 }

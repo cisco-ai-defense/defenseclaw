@@ -190,7 +190,7 @@ func TestHermesHookActionModeVerdicts(t *testing.T) {
 }
 
 func TestGAP0870HermesSudoListWithCWDIsAllowed(t *testing.T) {
-	home, cwd := r104ReviewHome(t)
+	home, cwd := r104ReviewHomeNoAlias(t)
 	store, logger := testStoreAndLogger(t)
 	cfg := &config.Config{}
 	cfg.Guardrail.Mode = "action"

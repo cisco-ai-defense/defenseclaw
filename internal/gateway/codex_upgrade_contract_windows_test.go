@@ -96,7 +96,7 @@ func testCodexUpgradePredecessorLock(t *testing.T, predecessor, priorMode, tier 
 	cfg.Guardrail.Connector = "codex"
 	cfg.Guardrail.Mode = "observe"
 	s := &Sidecar{cfg: cfg, health: NewSidecarHealth()}
-	if err := s.setupOneConnector(context.Background(), conn, opts, cfg.Gateway.Token, guardrail.NewRulePackCache()); err != nil {
+	if err := s.setupOneConnector(context.Background(), conn, opts, guardrail.NewRulePackCache()); err != nil {
 		t.Fatalf("upgrade from %s: %v", predecessor, err)
 	}
 	got := connector.LoadHookContractLockEntry(dataDir, "codex")

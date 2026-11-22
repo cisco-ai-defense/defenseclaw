@@ -18,6 +18,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -74,7 +75,7 @@ Exit codes: 0 success, 1 failure, 2 invalid arguments.`,
 		Args:              cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) > 0 {
-				return lifecycleFlagError(cmd, fmt.Errorf("unknown action %q for %q%s", args[0], cmd.CommandPath(), didYouMean(cmd, args[0])))
+				return lifecycleFlagError(cmd, fmt.Errorf("unknown action %q for %q%s", args[0], cmd.CommandPath(), cliusage.DidYouMean(cmd, args[0])))
 			}
 			return cmd.Help()
 		},
@@ -138,7 +139,7 @@ func (v *readyForValue) String() string {
 	return *v.mode
 }
 
-func (v *readyForValue) flagTakes() string { return "consume, observe or enforce" }
+func (v *readyForValue) FlagTakes() string { return "consume, observe or enforce" }
 
 // pauseDurationValue is --for: a Go duration, or whole days such as 2d.
 type pauseDurationValue struct{ d *time.Duration }
@@ -171,4 +172,4 @@ func (v *pauseDurationValue) String() string {
 	return v.d.String()
 }
 
-func (v *pauseDurationValue) flagTakes() string { return "a duration up to 7d, such as 30m, 8h or 2d" }
+func (v *pauseDurationValue) FlagTakes() string { return "a duration up to 7d, such as 30m, 8h or 2d" }

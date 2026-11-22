@@ -318,10 +318,26 @@ func installWindowsClaudeManagedResultSecure(ctx context.Context, opts InstallOp
 		if scriptProvider, ok := conn.(connector.HookScriptProvider); ok {
 			hookScripts = scriptProvider.HookScripts(setup)
 		}
+		// Route-only last, in the target own settings.json (S1 DESIGN 21);
+		// nil removes an earlier render. A failure discards the prepared
+		// generation and rolls the runtime back.
+		if err := connector.WithUserHomeDir(home, func() error {
+			return applyWindowsRouteOnly(conn, setup.DataDir, opts.RouteOnly)
+		}); err != nil {
+			return fail(errors.Join(err, discardWindowsManagedRuntimeGeneration(generation)))
+		}
 		return nil
 	})
 	if err != nil {
 		return InstallResult{}, err
+	}
+	// A later failure takes the render back: the target is not protected,
+	// so its route credential would only be refused.
+	routeRollback := func() error {
+		if opts.RouteOnly == nil {
+			return nil
+		}
+		return restoreWindowsRouteOnlyAsTarget(conn, targetSID, home, setup.DataDir)
 	}
 
 	generationCommit, err := windowsManagedRuntimeGenerationCommit(generation)
@@ -332,6 +348,7 @@ func installWindowsClaudeManagedResultSecure(ctx context.Context, opts InstallOp
 			fmt.Errorf("enterprise hooks: select immutable Claude Code runtime generation: %w", err),
 			generationErr,
 			restoreErr,
+			routeRollback(),
 		)
 	}
 
@@ -341,6 +358,7 @@ func installWindowsClaudeManagedResultSecure(ctx context.Context, opts InstallOp
 			err,
 			rollbackWindowsManagedRuntimeGeneration(generationCommit, generation),
 			restoreWindowsClaudeUserRuntimeAsTarget(targetSID, home, transaction),
+			routeRollback(),
 		)
 	}
 	rollbackAll := func(cause error) error {
@@ -357,6 +375,9 @@ func installWindowsClaudeManagedResultSecure(ctx context.Context, opts InstallOp
 		}
 		if restoreErr := restoreWindowsClaudeUserRuntimeAsTarget(targetSID, home, transaction); restoreErr != nil {
 			cause = fmt.Errorf("%v (per-user runtime rollback failed: %v)", cause, restoreErr)
+		}
+		if routeErr := routeRollback(); routeErr != nil {
+			cause = fmt.Errorf("%v (route-only rollback failed: %v)", cause, routeErr)
 		}
 		return cause
 	}

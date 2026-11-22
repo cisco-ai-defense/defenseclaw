@@ -1,0 +1,18 @@
+{
+  "title": "Agent Substrate",
+  "pages": [
+    "index",
+    "open-source",
+    "enterprise",
+    "unattended",
+    "agents",
+    "features",
+    "secrets",
+    "delivery",
+    "how-it-works",
+    "reference",
+    "troubleshooting",
+    "eks",
+    "threat-model"
+  ]
+}

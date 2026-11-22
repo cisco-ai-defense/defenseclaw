@@ -1,6 +1,6 @@
 ---
 title: Tetragon on a Linux fleet
-description: Roll DefenseClaw out to Linux computers that already run Tetragon - harden Tetragon, turn on Plane C, see your own policies' events from AI agents, observe, approve and enforce ring by ring, check the fleet, and troubleshoot - with tested Ansible and shell examples.
+description: Roll DefenseClaw out to Linux computers that already run Tetragon - harden Tetragon, turn on Plane C, see your own policies' events from AI agents, observe, approve and enforce ring by ring, check the fleet, and troubleshoot - with Ansible and shell examples.
 keywords:
   - DefenseClaw Tetragon
   - Tetragon fleet
@@ -60,7 +60,7 @@ How this fits with hooks, sandboxes and the egress proxy is on [Agent segmentati
 | Need | Detail |
 | --- | --- |
 | DefenseClaw | The standalone enterprise package installed with the [Linux configuration management recipes](/docs/enterprise/mdm/linux-config-management), or the lifecycle in [Linux](/docs/enterprise/linux). Users and agents enrolled. The config reads `config_version: 9` and `enterprise.tetragon`. |
-| Tetragon | 1.7.x on RHEL 9 x86_64 supports `consume`, `observe` and `enforce`. 1.6.x supports `consume` only. Ubuntu 22.04 and 24.04 and arm64: `consume` only, expected to work and not verified. RHEL 8 (kernel 4.18) is not supported. Other versions fall back to `cn_proc` and `fanotify` and report `tetragon_unsupported_version`. |
+| Tetragon | 1.7.x on RHEL 9 x86_64 supports `consume`, `observe` and `enforce`. 1.6.x supports `consume` only. Ubuntu 22.04 and 24.04 and arm64: `consume` only (Preview). RHEL 8 (kernel 4.18) is not supported. Other versions fall back to `cn_proc` and `fanotify` and report `tetragon_unsupported_version`. |
 | Kernel | `consume` works wherever Tetragon runs. `enforce` needs BPF LSM: `bpf` in the kernel's `lsm=` list |
 
 Run this read-only check on one computer first, as root:
@@ -264,7 +264,7 @@ Each line is a pass (`✓`), a warning (`!`), a failure (`✗`) or information (
   speed={1.5}
   height={440}
   ariaLabel="Animated terminal replay of tetragon verify --ready-for consume followed by tetragon status on a computer that runs consume: every check passes, and status lists the four Tetragon policies of the administrator with their event counts and the next step."
-  caption="Recorded on DefenseClaw 1.0.4 on a RHEL 9.8 lab computer in `consume` with Tetragon 1.7.1 and four policies of the administrator loaded. The event counts keep growing as the administrator's policies fire. Run `verify` a minute after `ensure`: right after the sensor helper restarts, the Plane C line can warn that the gateway's state is not known yet, and it turns into a pass."
+  caption="Example on RHEL 9.8 in `consume` with Tetragon 1.7.1 and four policies of the administrator loaded. The event counts keep growing as the administrator's policies fire. Run `verify` a minute after `ensure`: right after the sensor helper restarts, the Plane C line can warn that the gateway's state is not known yet, and it turns into a pass."
   frames={[
     { type: "cmd", text: "sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux tetragon verify --ready-for consume", pauseMs: 700 },
     { type: "out", text: "Tetragon readiness for consume" },
@@ -477,7 +477,7 @@ enterprise:
 
 #### Puppet, Chef and Salt
 
-<Callout title="Template">These snippets are templates, validated by reading the command lines. They have not been run in a live tenant.</Callout>
+<Callout title="Template">These snippets are Preview templates. Check the command lines before you use them.</Callout>
 
 They run the same three commands: `ensure`, `verify` and `tetragon verify`. Stage the config file the way the [recipes](/docs/enterprise/mdm/linux-config-management) do, and run the commands only when it changes. The readiness check retries for up to two minutes, as the play's gate does.
 
@@ -623,7 +623,7 @@ Approval is once per build (the digest covers only the controls in the binary), 
 
 What changes for developers: nothing for the normal shell, IDE terminals, other users and `tmux`. Below an enrolled user's command-line agent, an open of an SSH private key or an in-place write of a shell profile or user autostart entry returns `Operation not permitted`; see [When a control blocks something](#when-a-control-blocks-something).
 
-Once a ring enforces, `status` shows each user's state: enforcing, in monitor mode because another user's native agent holds the one deny anchor, or no agent installed. A lab ring with `burn_in: 0` warns `kernel_burn_in_skipped`; a real ring keeps a measured burn-in.
+Once a ring enforces, `status` shows each user's state: enforcing, in monitor mode because another user's native agent holds the one deny anchor, or no agent installed. A ring with `burn_in: 0` warns `kernel_burn_in_skipped`; a production ring keeps a burn-in.
 
 ![tetragon verify --ready-for enforce on the computer that enforces: every check passes, the burn-in table for burn_in 0 with the hits of two users, and the closing line that one of three users is enforced, two stay in monitor without a deny anchor, alice (uid 1001) holds the deny anchor as the lowest uid with a native agent install, and enrollment.exclude_users moves it](/images/tetragon/terminal-tetragon-verify-enforce-holder.png)
 
@@ -632,7 +632,7 @@ Once a ring enforces, `status` shows each user's state: enforcing, in monitor mo
   speed={1.5}
   height={560}
   ariaLabel="Animated terminal replay of tetragon verify --ready-for enforce on a computer that runs observe: the checks, the burn-in table where two users were reset by a hit and one has not run an agent, and the block to approve."
-  caption="Recorded on DefenseClaw 1.0.4 on a RHEL 9.8 lab computer in `observe` after a working session; account names are shortened to alice, bob and carol and the lab's other enrolled accounts (each at 0.0h, measuring) are left out of the table (the real run lists all 13). `alice` and `bob` each opened the SSH key decoy and wrote `~/.bashrc` where a control would have denied it, so their windows restarted; `carol` has not run an agent. Nothing is ready yet; the output still prints the block to approve for when a user finishes. The approval value is the same as in 1.0.3."
+  caption="Example on RHEL 9.8 in `observe` after a working session; account names are shortened to alice, bob and carol and the other enrolled accounts (each at 0.0h, measuring) are left out of the table. `alice` and `bob` each opened the SSH key decoy and wrote `~/.bashrc` where a control would have denied it, so their windows restarted; `carol` has not run an agent. Nothing is ready yet; the output still prints the block to approve for when a user finishes. The approval value is the same as in 1.0.3."
   frames={[
     { type: "cmd", text: "sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux tetragon verify --ready-for enforce", pauseMs: 700 },
     { type: "out", text: "Tetragon readiness for enforce (this host runs observe)" },
@@ -953,7 +953,7 @@ Stopping Tetragon is not a kill switch: with `keep-sensors-on-exit` on, its prog
   speed={1.5}
   height={300}
   ariaLabel="Animated terminal replay of tetragon pause and tetragon resume: each prints one line that says what changed and the command that checks the computer."
-  caption="Recorded on DefenseClaw 1.0.4 on the lab computer with `--for 1h`. Each command prints only its own change; the sensor helper moves the controls to monitor mode within seconds, and applies the configured intent on its next pass after `resume`. The output is the same as in 1.0.3."
+  caption="Example with `--for 1h`. Each command prints only its own change; the sensor helper moves the controls to monitor mode within seconds, and applies the configured intent on its next pass after `resume`. The output is the same as in 1.0.3."
   frames={[
     { type: "cmd", text: "sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux tetragon pause --for 1h --reason TICKET-R3", pauseMs: 700 },
     { type: "ok", text: "✓ paused kernel enforcement for every user on this host until 2026-10-26T15:45:29Z; the sensor helper moves enforcing controls to monitor mode within seconds and keeps them visible" },
@@ -1361,33 +1361,29 @@ output carries the same section.
 
 The `observe`, `controls` and `controls-burnin` policies hook `file_open`, so
 every open on the computer, by any process, runs their path filters in the
-kernel. Measured in two live rounds on a t3.xlarge (RHEL 9.8, Tetragon 1.7.1,
-four customer policies loaded in every run), with `enforce` and all four
-DefenseClaw policies loaded against mode `off` (the `off` column is from the
-first round; the `enforce` column spans both):
+kernel. On a t3.xlarge (RHEL 9.8, Tetragon 1.7.1, four customer policies loaded), with `enforce` and all four
+DefenseClaw policies loaded against mode `off`:
 
 | Workload | Mode `off` | `enforce`, four policies | Difference |
 | --- | --- | --- | --- |
 | `open` and `close` of one file, 300,000 times | 6.2 to 6.3 µs per open | 14.4 to 16.9 µs per open | about +8 to +11 µs per open (2.3 to 2.7 times) |
 | Reading 60,000 files under `/usr` with `cat` | 0.81 to 0.85 s | 1.23 to 1.27 s | about +45 to 55 percent wall time |
 
-In a separate monitor-only probe on the same host and Tetragon version, a
-controls copy scoped to one probe uid and its own processes produced these
-results. Each cost range is three runs of 300,000 opens and closes of one
-file. "No copy" kept the host's existing policies loaded.
+With a controls copy scoped to one probe uid and its own processes (monitor-only), each cost range below is three runs of 300,000 opens and closes of one
+file. "No copy" keeps the host's existing policies loaded.
 
 | Live roots in the controls copy | `file_open` hooks | µs per open |
 | --- | ---: | ---: |
 | No copy | 0 extra | 5.63 to 5.78 |
 | 4 (current limit) | 2 | 9.06 to 9.43 |
-| 5 | 2 | Not measured |
+| 5 | 2 | n/a |
 | 8 | 2 | 11.17 to 11.35 |
 | 12 | 3 | 14.03 to 14.47 |
 | 16 | 3 | 16.12 to 16.27 |
-| 32 | 6 | Not measured |
+| 32 | 6 | n/a |
 | 64 | 12 | 48.81 to 50.79 |
 
-All tested copies loaded enabled. The rows above four roots were measured with an
+All copies load enabled. The rows above four roots are from an
 earlier renderer that had no cap. They show what more roots would cost; the
 shipped limit is four roots per policy, so the largest render is the four-root
 row. Every extra `file_open` hook

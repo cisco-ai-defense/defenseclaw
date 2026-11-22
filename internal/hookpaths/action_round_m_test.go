@@ -122,9 +122,7 @@ func TestR104GlobAliasBehindHiddenHome(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(ssh, "authorized_keys"), []byte("marker\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(ssh, filepath.Join(cwd, "keydir")); err != nil {
-		t.Fatal(err)
-	}
+	testSymlink(t, ssh, filepath.Join(cwd, "keydir"))
 	blocked := []string{
 		`cp payload keyd*/authorized_keys`,
 		`cat payload >> keyd*/authorized_keys`,
