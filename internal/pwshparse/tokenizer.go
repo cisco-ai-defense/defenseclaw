@@ -61,6 +61,33 @@ func lookupKeyword(s string) (TokenKind, bool) {
 	return k, ok
 }
 
+// lookupKeywordChars is lookupKeyword over UTF-16 text; ASCII text of keyword length is looked up without allocating.
+func lookupKeywordChars(cs []char) (TokenKind, bool) {
+	const maxKeywordLen = 13 // "configuration"
+	if len(cs) == 0 || len(cs) > maxKeywordLen {
+		if len(cs) > maxKeywordLen {
+			for _, c := range cs {
+				if c >= 0x80 {
+					return lookupKeyword(fromUTF16(cs))
+				}
+			}
+		}
+		return 0, false
+	}
+	var buf [maxKeywordLen]byte
+	for i, c := range cs {
+		if c >= 0x80 {
+			return lookupKeyword(fromUTF16(cs))
+		}
+		if c >= 'A' && c <= 'Z' {
+			c += 'a' - 'A'
+		}
+		buf[i] = byte(c)
+	}
+	k, ok := keywordTable[string(buf[:len(cs)])]
+	return k, ok
+}
+
 func lookupOperator(s string) (TokenKind, bool) {
 	k, ok := operatorTable[strings.ToLower(s)]
 	return k, ok

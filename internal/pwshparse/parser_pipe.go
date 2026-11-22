@@ -366,7 +366,7 @@ func (p *Parser) commandRule() *Node {
 	hasRedirs := false
 	sawDashDash := false
 	foundVerbatim := false
-	var elements []*Node
+	elements := make([]*Node, 0, 4)
 	var firstToken *Token
 	var endExtent extent
 	dotSource, ampersand := false, false

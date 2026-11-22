@@ -153,14 +153,10 @@ func (t *tokenizer) scanDot() *Token {
 }
 
 func (t *tokenizer) scanIdentifier(first char) *Token {
-	sb := make(sbuf, 0, 48)
-	sb.add(first)
 	var c char
 	for {
 		c = t.getChar()
-		if isIdentifierFollow(c) {
-			sb.add(c)
-		} else {
+		if !isIdentifierFollow(c) {
 			t.ungetChar()
 			break
 		}
@@ -169,11 +165,13 @@ func (t *tokenizer) scanIdentifier(first char) *Token {
 		return t.scanTypeName()
 	}
 	if !t.wantSimpleName && t.inCommandMode() && !forceStartNewToken(c) {
+		// a generic token that starts like an identifier: the identifier text so far is the buffer
+		sb := make(sbuf, 0, 48)
+		sb.addAll(t.script[t.tokenStart:t.curIndex])
 		return t.scanGenericTokenSB(sb)
 	}
 	if !t.wantSimpleName && (t.inCommandMode() || t.inSignatureMode()) {
-		ident := sb.String()
-		if k, ok := lookupKeyword(ident); ok {
+		if k, ok := lookupKeywordChars(t.script[t.tokenStart:t.curIndex]); ok {
 			if k != TkInlineScript {
 				return t.newToken(k)
 			}
