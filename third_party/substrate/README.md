@@ -29,7 +29,7 @@ extend google.protobuf.MessageOptions { ResourceAnnotation resource = 50000; }
 extend google.protobuf.MethodOptions  { MethodAnnotation method = 50000; }
 ```
 
-The OpenShell SDK (`github.com/NVIDIA/OpenShell/sdk/go/proto/optionsv1`), which
+The OpenShell SDK (`github.com/ai-openshell/sdk-go/proto/optionsv1`), which
 the gateway already links, registers extension 50000 on the same descriptor
 messages. Go's protobuf registry refuses the second registration at init, so a
 binary linking both panics before `main`. `strip-options.awk` writes a copy

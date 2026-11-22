@@ -26,8 +26,8 @@ import (
 	"time"
 	"unicode"
 
-	v1 "github.com/NVIDIA/OpenShell/sdk/go/openshell/v1"
-	"github.com/NVIDIA/OpenShell/sdk/go/openshell/v1/types"
+	v1 "github.com/ai-openshell/sdk-go/openshell/v1"
+	"github.com/ai-openshell/sdk-go/openshell/v1/types"
 
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
@@ -391,11 +391,11 @@ func (c *client) CreateSandbox(ctx context.Context, name string, spec *SandboxSp
 	}
 	ctx, cancel := c.rpc(ctx)
 	defer cancel()
-	var create []v1.CreateOptions
+	create := []v1.CreateOption{v1.WithLabels(opts.Labels)}
 	if len(opts.Annotations) > 0 {
-		create = append(create, v1.CreateOptions{Annotations: opts.Annotations})
+		create = append(create, v1.WithAnnotations(opts.Annotations))
 	}
-	sb, err := c.sdk.Sandboxes().Create(ctx, c.opts.Workspace, name, spec, opts.Labels, create...)
+	sb, err := c.sdk.Sandboxes().Create(ctx, c.opts.Workspace, name, spec, create...)
 	return sb, wrap(fmt.Sprintf("create sandbox %q", name), err)
 }
 
