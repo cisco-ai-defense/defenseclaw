@@ -125,3 +125,5 @@ architecture details, design/history, test fixtures, and package-local context.
 It should link to the canonical site page instead of repeating user-facing
 instructions. When product behavior changes, update the relevant MDX in the
 same change.
+
+<!-- CI timing probe for PR 1488 (docs-only path); not for merge. -->
