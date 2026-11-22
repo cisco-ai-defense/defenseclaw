@@ -344,8 +344,10 @@ func newSubstrateLogoutCmd() *cobra.Command {
 		Use:   "logout",
 		Short: "Sign out of a cluster: end the sign-in there and forget it",
 		Long: `Ends your sign-in on the cluster, so a copy of its token stops working there, then ends it at the sign-in server
-where that server supports it, and removes the stored sign-in. --all ends every sign-in you made before now, on every
-device, and closes their open terminals. Your agents keep running; sign in again to reach them.`,
+where that server supports it, and removes the stored sign-in. --all ends every token of yours issued before now, on
+every device, and closes their open terminals. An end covers tokens already issued: a refresh token held on another
+device or in a copied store can still get new ones, so also end your sessions at the sign-in server (ask your
+administrator). Your agents keep running; sign in again to reach them.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			name, c, err := auth.ResolveContext(com.context)
@@ -381,7 +383,7 @@ device, and closes their open terminals. Your agents keep running; sign in again
 		},
 	}
 	com.add(cmd)
-	cmd.Flags().BoolVar(&all, "all", false, "end every sign-in of yours made before now, on every device")
+	cmd.Flags().BoolVar(&all, "all", false, "end every token of yours issued before now, on every device")
 	return cmd
 }
 

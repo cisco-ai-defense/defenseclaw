@@ -114,13 +114,15 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
         ("admin", "revoke"),
         "End every sign-in of a person, list the ended ones, or lift an end",
         long=(
-            "--user PERSON ends every sign-in of that person made before now, on every device, and closes their "
+            "--user PERSON ends every token of that person issued before now, on every device, and closes their "
             "open\n"
             "terminals (PERSON is a principal such as bob@example.com, or issuer#subject to end the sign-ins of "
             "a person who\n"
-            "has not signed in yet). --list shows the people whose sign-ins are ended. --lift --user PERSON "
-            "removes an end\n"
-            "early; it is audited."
+            "has not signed in yet). A refresh token the person holds can still get new tokens from the sign-in "
+            "server: to\n"
+            "lock someone out, also end their sessions there. --list shows the people whose sign-ins are ended. "
+            "--lift --user\n"
+            "PERSON removes an end early; it is audited."
         ),
         flags=(
             _Flag("context", "string", "cluster to use (default: the one you signed in to last)", metavar="NAME"),
@@ -462,12 +464,16 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
         long=(
             "Ends your sign-in on the cluster, so a copy of its token stops working there, then ends it at the "
             "sign-in server\n"
-            "where that server supports it, and removes the stored sign-in. --all ends every sign-in you made "
-            "before now, on every\n"
-            "device, and closes their open terminals. Your agents keep running; sign in again to reach them."
+            "where that server supports it, and removes the stored sign-in. --all ends every token of yours "
+            "issued before now, on\n"
+            "every device, and closes their open terminals. An end covers tokens already issued: a refresh token "
+            "held on another\n"
+            "device or in a copied store can still get new ones, so also end your sessions at the sign-in server "
+            "(ask your\n"
+            "administrator). Your agents keep running; sign in again to reach them."
         ),
         flags=(
-            _Flag("all", "bool", "end every sign-in of yours made before now, on every device"),
+            _Flag("all", "bool", "end every token of yours issued before now, on every device"),
             _Flag("context", "string", "cluster to use (default: the one you signed in to last)", metavar="NAME"),
         ),
     ),
