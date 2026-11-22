@@ -1208,7 +1208,7 @@ func walkWritePathMemo(base, path string, linkDepth int, collect, patchTarget bo
 				return fail()
 			}
 			memo.noteWork()
-			info, err := pathLstat(candidate)
+			info, err := memo.lstat(candidate)
 			if err != nil && !os.IsNotExist(err) {
 				return fail()
 			}

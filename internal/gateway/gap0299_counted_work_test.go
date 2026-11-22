@@ -74,6 +74,12 @@ func TestGAP0299CountedWorkPerCall(t *testing.T) {
 	if got["lowers"] > gap0299MaxTextLowers {
 		t.Errorf("lower-cased copies of the 1 MiB text in one call = %d, bound %d", got["lowers"], gap0299MaxTextLowers)
 	}
+	if got["walks"] > gap0299MaxMemoWalks {
+		t.Errorf("write-target walks in one call = %d, bound %d (one per distinct word)", got["walks"], gap0299MaxMemoWalks)
+	}
+	if got["lookups"] > gap0299MaxWordLookups {
+		t.Errorf("file lookups of resolved words in one call = %d, bound %d (one per distinct word)", got["lookups"], gap0299MaxWordLookups)
+	}
 	if got["walks"] > 0 && got["keys"] > 2*got["walks"] {
 		t.Errorf("memo key builds = %d for %d memo walks, bound 2 per walk", got["keys"], got["walks"])
 	}
@@ -85,4 +91,9 @@ const (
 	gap0299MaxLargeParses = 2 // 7 at a64bfdb931
 	gap0299MaxArgsDecodes = 7 // 11 at a64bfdb931
 	gap0299MaxTextLowers  = 2 // 24 at a64bfdb931
+	// The here-document has 24,099 distinct words; each is walked and read
+	// once per call (two evaluations walked each, the state scan read each
+	// again).
+	gap0299MaxMemoWalks   = 25000 // 48,238 at a64bfdb931
+	gap0299MaxWordLookups = 25000
 )

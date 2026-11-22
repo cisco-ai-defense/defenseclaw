@@ -588,7 +588,7 @@ func dispatchTrustedActionOnce(
 		}
 	}()
 	if request.targetMemo == nil {
-		request.targetMemo = hookpaths.NewTargetMemo()
+		request.targetMemo = hookpaths.NewTargetMemoIn(callTargetMemo(parent))
 	}
 	if request.ShellStartup != nil {
 		request.targetMemo.WithShellStartup(request.ShellStartup)

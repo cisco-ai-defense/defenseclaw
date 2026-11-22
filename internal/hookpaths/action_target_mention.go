@@ -6013,10 +6013,16 @@ func actionSpelledWindowsTarget(value string, tilde bool, base, home string, sta
 // (GAP-2279 answer budget); a relative value is always read. missing reports
 // an absolute value that Lstat found not to exist.
 func actionStateEntryMayDiffer(value string) (differ, missing bool) {
+	return actionStateEntryMayDifferWith(value, nil)
+}
+
+// actionStateEntryMayDifferWith is actionStateEntryMayDiffer reading the
+// entry through memo's Lstat answers (nil: the file system).
+func actionStateEntryMayDifferWith(value string, memo *TargetMemo) (differ, missing bool) {
 	if !filepath.IsAbs(value) {
 		return true, false
 	}
-	info, err := pathLstat(value)
+	info, err := memo.lstat(value)
 	if err != nil {
 		return !os.IsNotExist(err), os.IsNotExist(err)
 	}
