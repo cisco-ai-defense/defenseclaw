@@ -13,7 +13,7 @@ DefenseClaw scans Codex at three points: `UserPromptSubmit` for prompts, `PreToo
 ## Before you start
 
 - Codex is installed ([supported versions](/docs/connectors/codex)).
-- Optional: an LLM key for the judge ([Set up an LLM key](/docs/guardrail/unified-llm-key)).
+- Optional: an LLM key for the judge ([Set up an LLM key](/docs/get-started/unified-llm-key)).
 
 ## Try it
 
@@ -103,7 +103,7 @@ defenseclaw-gateway audit export --connector codex --since 30m \
 ## Prompt alerts versus tool-call enforcement
 
 - Prompt findings follow the configured block threshold in action mode. HIGH prompt findings can block when `block_at` is HIGH. A finding below the threshold alerts; CRITICAL findings block. See [Thresholds](/docs/policies/thresholds).
-- Codex cannot ask, so a confirm verdict becomes an alert ([which agents can ask](/docs/guardrail#which-agents-can-ask)).
+- Codex cannot ask, so a confirm verdict becomes an alert ([which agents can ask](/docs/guardrail/human-approval#which-agents-can-ask)).
 
 ## Variations
 

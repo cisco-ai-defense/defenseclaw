@@ -80,6 +80,35 @@ func classifyChanges(changes []TreeChange, content contentFunc, sensitive []stri
 			} else {
 				add(Flag{Path: rel, Label: rel, Kind: RiskSymlink, Severity: SeverityInfo, Detail: "symbolic link to " + t})
 			}
+			// The link's own path counts as the file it makes appear,
+			// wherever inside the project it points (GAP-0523): a run-code
+			// name or folder, a secret file name, a sensitive pattern (a
+			// directory link when a pattern reaches below it).
+			if r, ok := classifyLinkName(rel); ok {
+				add(Flag{Path: rel, Label: rel, Kind: r.kind, Severity: r.severity, Detail: r.detail + " (a symbolic link to " + t + ")"})
+			} else if tgt := linkTarget(rel, t); tgt != "" {
+				// The resolved target inside the project: a link to a
+				// run-code file or folder (notes -> .claude) lets a later
+				// write through the link land there.
+				if r, ok := classifyLinkName(tgt); ok {
+					add(Flag{Path: rel, Label: rel, Kind: r.kind, Severity: r.severity, Detail: r.detail + " (a symbolic link to " + t + ", which is " + tgt + ")"})
+				} else if underHeavyDir(tgt + "/x") {
+					// A link into a dependency or cache folder (node_modules)
+					// that git ignores: its content is never in the diff, so an
+					// agent config there would surface through the link with
+					// no review (GAP-0556).
+					add(Flag{Path: rel, Label: rel, Kind: RiskAutoExec, Severity: SeverityHigh,
+						Detail: "a symbolic link to " + t + ", a dependency or cache folder the review does not read: agent settings or scripts there appear at " + rel})
+				}
+			}
+			if _, ok := isSecretName(rel); ok {
+				add(Flag{Path: rel, Label: rel, Kind: RiskSecretFile, Severity: SeverityMedium, Detail: "a secret-like name, as a symbolic link to " + t})
+			}
+			if p, ok := matchAny(sensitive, rel); ok {
+				add(Flag{Path: rel, Label: rel, Kind: RiskPolicy, Severity: SeverityHigh, Detail: "matches the sensitive-change pattern " + p + " (a symbolic link to " + t + ")"})
+			} else if globsReachBelow(sensitive, rel) {
+				add(Flag{Path: rel, Label: rel, Kind: RiskPolicy, Severity: SeverityHigh, Detail: "a symbolic link to " + t + " where a sensitive-change pattern reaches below it"})
+			}
 			continue
 		}
 		switch base {
@@ -110,6 +139,19 @@ func classifyChanges(changes []TreeChange, content contentFunc, sensitive []stri
 		}
 	}
 	return sortFlags(flags)
+}
+
+// linkTarget is the project path a relative link at rel resolves to, ""
+// when it is absolute or leaves the project.
+func linkTarget(rel, target string) string {
+	if target == "" || path.IsAbs(target) {
+		return ""
+	}
+	p := path.Clean(path.Join(path.Dir(rel), target))
+	if p == "." || p == ".." || strings.HasPrefix(p, "../") {
+		return ""
+	}
+	return p
 }
 
 func sortFlags(flags []Flag) []Flag {

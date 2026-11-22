@@ -13,6 +13,8 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"slices"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -63,20 +65,32 @@ func postToolRequest(connectorName, event string) (agentHookRequest, []byte, map
 	}, []byte(body), payload
 }
 
-// contextField finds the harness field the notice was rendered into.
-func contextField(value interface{}, needle string) string {
-	switch v := value.(type) {
-	case map[string]interface{}:
-		for key, child := range v {
+// noticeFields lists, sorted, the dotted paths of every harness field the
+// notice was rendered into. It visits every key, so the answer does not
+// depend on map iteration order: a notice in two fields (Claude Code's and
+// Codex's model context and user line, GAP-0605) is reported as both.
+func noticeFields(value interface{}, needle string) []string {
+	var paths []string
+	var walk func(prefix string, v interface{})
+	walk = func(prefix string, v interface{}) {
+		m, ok := v.(map[string]interface{})
+		if !ok {
+			return
+		}
+		for key, child := range m {
+			path := key
+			if prefix != "" {
+				path = prefix + "." + key
+			}
 			if text, ok := child.(string); ok && strings.Contains(text, needle) {
-				return key
+				paths = append(paths, path)
 			}
-			if found := contextField(child, needle); found != "" {
-				return found
-			}
+			walk(path, child)
 		}
 	}
-	return ""
+	walk("", value)
+	sort.Strings(paths)
+	return paths
 }
 
 func withHomes(t *testing.T) {
@@ -86,8 +100,21 @@ func withHomes(t *testing.T) {
 	t.Cleanup(func() { kernelUserHome = saved })
 }
 
+// kernelNoticeFields is where each harness's post-tool answer carries the
+// notice. The model reads the context field; Claude Code and Codex show the
+// user only systemMessage, and every tool-result notice on them reaches the
+// user there too (rel-1-0-10 GAP-0605).
+var kernelNoticeFields = map[string][]string{
+	"claudecode": {"hookSpecificOutput.additionalContext", "systemMessage"},
+	"codex":      {"hookSpecificOutput.additionalContext", "systemMessage"},
+	"copilot":    {"additionalContext"},
+	"cursor":     {"additional_context"},
+	"devin":      {"hookSpecificOutput.additionalContext"},
+}
+
 // TestKernelBlockNoticePerConnector: each harness whose post-tool hook has a
-// context field the model reads gets the notice there, once.
+// context field the model reads gets the notice there, once, and on Claude
+// Code and Codex the user sees the same text in systemMessage.
 func TestKernelBlockNoticePerConnector(t *testing.T) {
 	withHomes(t)
 	api := &APIServer{}
@@ -105,8 +132,14 @@ func TestKernelBlockNoticePerConnector(t *testing.T) {
 			if resp.AdditionalContext != want {
 				t.Fatalf("%s %s: context %q", connectorName, hookEvent, resp.AdditionalContext)
 			}
-			if field := contextField(resp.HookOutput, "PATH-SSH-KEY"); field != "additionalContext" && field != "additional_context" {
-				t.Fatalf("%s %s: rendered into %q: %v", connectorName, hookEvent, field, resp.HookOutput)
+			wantFields := kernelNoticeFields[connectorName]
+			if fields := noticeFields(resp.HookOutput, "PATH-SSH-KEY"); !slices.Equal(fields, wantFields) {
+				t.Fatalf("%s %s: rendered into %q, want %q: %v", connectorName, hookEvent, fields, wantFields, resp.HookOutput)
+			}
+			if slices.Contains(wantFields, "systemMessage") {
+				if resp.HookOutput["systemMessage"] != want {
+					t.Fatalf("%s %s: user line %v", connectorName, hookEvent, resp.HookOutput["systemMessage"])
+				}
 			}
 			if len(resp.KernelBlocksTold) != 1 || resp.KernelBlocksTold[0] != "kblock-1" {
 				t.Fatalf("%s: told %v", connectorName, resp.KernelBlocksTold)

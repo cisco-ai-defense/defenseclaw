@@ -706,6 +706,8 @@ func (a *APIServer) sandboxIngressAuthenticate(st *sandboxIngressState, next htt
 			return
 		}
 		view := sandboxauth.NewFSView(binding, st.fs)
+		// Keep the confined view on the hook request: guards can read an
+		// available before-document here even when a sender predates kit facts.
 		ctx := sandboxauth.WithRequest(r.Context(), binding, view)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})

@@ -313,9 +313,9 @@ func TestV8SchemaNamesMissingKeysAndLimits(t *testing.T) {
 	base := "config_version: 9\nguardrail:\n  profiles:\n    engineering: {}\n"
 	for _, tc := range []struct{ name, doc, keyword, expected string }{
 		{"no match", base + "  profile_assignments:\n    - profile: engineering\n", "required",
-			"the required key match: a mapping that sets at least one of agents, connectors, groups, users"},
+			"the required key match: a mapping that sets at least one of agents, connectors, groups, substrate, users"},
 		{"empty match", base + "  profile_assignments:\n    - profile: engineering\n      match: {}\n", "minProperties",
-			"a mapping that sets at least one of agents, connectors, groups, users"},
+			"a mapping that sets at least one of agents, connectors, groups, substrate, users"},
 		{"empty groups", base + "  profile_assignments:\n    - profile: engineering\n      match: {groups: []}\n", "minItems", "a nonempty list"},
 		{"long request_access", base + "    contractors:\n      sandbox:\n        request_access: " + strings.Repeat("x", 600) + "\n",
 			"maxLength", "a string of at most 512 characters (it has 600)"},

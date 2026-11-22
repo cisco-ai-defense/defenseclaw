@@ -7,7 +7,6 @@ package cli
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -26,10 +25,6 @@ import (
 // enterpriseHookQuarantinePoll is how often the guardian looks for requests.
 const enterpriseHookQuarantinePoll = time.Second
 
-// enterpriseHookQuarantineDeferredPoll is how often the guardian retries the
-// removals deferred until a signed-out user signs in again.
-const enterpriseHookQuarantineDeferredPoll = 5 * time.Second
-
 // startEnterpriseHookQuarantineRemovals answers the gateway's requests to
 // remove a quarantined skill or plugin from an enrolled user's folder, which
 // the gateway service may read but not delete in (GAP-0202). Standalone only:
@@ -43,7 +38,6 @@ func startEnterpriseHookQuarantineRemovals(ctx context.Context, errOut io.Writer
 	channel := enforce.QuarantineRemovalChannelFor(current.DataDir, guardianDir)
 	go func() {
 		prepared := false
-		var lastDeferred time.Time
 		ticker := time.NewTicker(enterpriseHookQuarantinePoll)
 		defer ticker.Stop()
 		for {
@@ -84,43 +78,14 @@ func startEnterpriseHookQuarantineRemovals(ctx context.Context, errOut io.Writer
 				if request.Kind == enforce.QuarantineRequestRemoveLink {
 					outcome = "removed the link; the folder it pointed to was not changed"
 				}
-				switch {
-				case errors.Is(err, enforce.ErrQuarantineRemovalDeferred):
-					outcome = "deferred: " + err.Error()
-				case err != nil:
+				if err != nil {
 					outcome = "refused: " + err.Error()
 				}
 				fmt.Fprintf(errOut, "[hook-guardian] quarantine %s %s: %s\n", request.TargetType, request.SourcePath, outcome)
 				return err
 			})
-			if time.Since(lastDeferred) >= enterpriseHookQuarantineDeferredPoll {
-				lastDeferred = time.Now()
-				channel.ServeDeferred(func(request enforce.QuarantineRemovalRequest) error {
-					err := retryEnterpriseHookQuarantineRemoval(current, request, func(latest *config.Config, request enforce.QuarantineRemovalRequest) error {
-						return removeEnrolledRequestedAsset(latest, request, enterprisehooks.RemoveEnrolledUserAssetInSession)
-					})
-					switch {
-					case err == nil:
-						fmt.Fprintf(errOut, "[hook-guardian] quarantine %s %s: removed now that the user is signed in\n", request.TargetType, request.SourcePath)
-					case !errors.Is(err, enforce.ErrQuarantineRemovalDeferred):
-						fmt.Fprintf(errOut, "[hook-guardian] quarantine %s %s: deferred removal retry pending: %v\n", request.TargetType, request.SourcePath, err)
-					}
-					return err
-				})
-			}
 		}
 	}()
-}
-
-// retryEnterpriseHookQuarantineRemoval rechecks a deferred request against
-// the current protected roots; a hot ensure may have moved quarantine_dir
-// since the request was first deferred.
-func retryEnterpriseHookQuarantineRemoval(startup *config.Config, request enforce.QuarantineRemovalRequest, remove func(*config.Config, enforce.QuarantineRemovalRequest) error) error {
-	latest, err := enterpriseHookQuarantineCurrentConfig(startup)
-	if err != nil {
-		return err
-	}
-	return remove(latest, request)
 }
 
 // enterpriseHookQuarantineCurrentConfig loads the protected config for each
@@ -142,8 +107,7 @@ func enterpriseHookQuarantineCurrentConfig(startup *config.Config) (*config.Conf
 // watched folders, and for a quarantined source against the quarantine
 // store, then removes the source, or the link a link removal names (never
 // what it points to, GAP-1188), as the user who owns that watched folder,
-// with remove. A signed-out user Windows gives no S4U logon for defers the
-// removal to the next sign-in.
+// with remove.
 func removeEnrolledRequestedAsset(current *config.Config, request enforce.QuarantineRemovalRequest, remove func(sid, home, path string) error) error {
 	roots := guardianAssetRoots(current, request.SourcePath)
 	dirs := make([]string, 0, len(roots))
@@ -162,12 +126,11 @@ func removeEnrolledRequestedAsset(current *config.Config, request enforce.Quaran
 	}
 	for _, root := range roots {
 		if strings.EqualFold(filepath.Clean(root.Dir), filepath.Clean(rootDir)) {
-			err := remove(root.SID, root.Home, source)
-			if errors.Is(err, enterprisehooks.ErrEnrolledUserSignedOut) {
-				return fmt.Errorf("%w: %s", enforce.ErrQuarantineRemovalDeferred,
-					enterprisehooks.SignedOutRemovalReason(root.SID, filepath.Base(root.Home), err))
-			}
-			return err
+			// A user who is signed out with no S4U logon keeps the folder:
+			// the gateway keeps the asset blocked and retries the
+			// quarantine, and the retry after the user signs in removes it
+			// with the session token.
+			return remove(root.SID, root.Home, source)
 		}
 	}
 	return fmt.Errorf("no enrolled user owns %s", rootDir)

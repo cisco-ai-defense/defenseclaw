@@ -42,8 +42,10 @@ func Prepare(dbPath string) error {
 	return Secure(dbPath)
 }
 
-// Secure applies owner-only permissions to all existing SQLite files. Call it
-// again after schema setup to cover journal files SQLite created on first use.
+// Secure applies owner-only permissions to all existing SQLite files, or, in
+// the managed Windows gateway service, checks them against the managed
+// runtime trust rule (parent_windows.go). Call it again after schema setup to
+// cover journal files SQLite created on first use.
 func Secure(dbPath string) error {
 	for _, suffix := range []string{"", "-wal", "-shm"} {
 		path := dbPath + suffix

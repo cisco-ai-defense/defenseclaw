@@ -928,6 +928,146 @@ def test_set_aside_keys_keep_a_value_set_again_and_a_later_release_key(data_dir:
     assert json.loads(record.read_text(encoding="utf-8"))["keys"] == {"openshell.future_key": True}
 
 
+_NESTED_SET_ASIDE = {
+    "version": 1,
+    "for": "1.0.9",
+    "keys": {
+        "routing.models[1].bedrock": {"region": "us-east-1"},
+        "routing.models[1].apis": ["converse"],
+        "guardrail.profiles.dev.routing": {"allowed_aliases": ["fast"]},
+    },
+    "items": {"routing.models[1]": "deep"},
+}
+_NESTED_AFTER_DOWNGRADE = """config_version: 9
+routing:
+  models:
+    - name: fast
+      provider: openai
+      model: gpt-5-mini
+    - name: deep
+      provider: bedrock
+      model: anthropic.claude-sonnet-5
+guardrail:
+  profiles:
+    dev:
+      mode: observe
+"""
+
+
+def test_set_aside_keys_inside_a_model_and_a_profile_are_put_back(data_dir: Path) -> None:
+    """rel-1-0-10:GAP-0644: keys inside a list item or a map value go back onto the same item."""
+    import yaml
+
+    config = _write_config(data_dir, _NESTED_AFTER_DOWNGRADE)
+    record = data_dir / "config-set-aside.json"
+    record.write_text(json.dumps(_NESTED_SET_ASIDE), encoding="utf-8")
+
+    migrations._restore_set_aside_keys(str(data_dir), str(config))
+
+    restored = yaml.safe_load(config.read_text(encoding="utf-8"))
+    deep = restored["routing"]["models"][1]
+    assert deep["name"] == "deep" and deep["bedrock"] == {"region": "us-east-1"} and deep["apis"] == ["converse"]
+    assert "bedrock" not in restored["routing"]["models"][0]
+    assert restored["guardrail"]["profiles"]["dev"]["routing"] == {"allowed_aliases": ["fast"]}
+    assert not record.exists()
+
+
+def test_set_aside_model_keys_never_go_onto_another_model(data_dir: Path, capsys: pytest.CaptureFixture) -> None:
+    """The models were reordered and the profile removed on the older release: nothing is put on the wrong item."""
+    import yaml
+
+    reordered = _NESTED_AFTER_DOWNGRADE.replace(
+        "    - name: fast\n      provider: openai\n      model: gpt-5-mini\n    - name: deep\n      provider: bedrock\n      model: anthropic.claude-sonnet-5\n",
+        "    - name: deep\n      provider: bedrock\n      model: anthropic.claude-sonnet-5\n    - name: fast\n      provider: openai\n      model: gpt-5-mini\n",
+    ).replace("    dev:\n      mode: observe\n", "    ops:\n      mode: action\n")
+    config = _write_config(data_dir, reordered)
+    (data_dir / "config-set-aside.json").write_text(json.dumps(_NESTED_SET_ASIDE), encoding="utf-8")
+
+    migrations._restore_set_aside_keys(str(data_dir), str(config))
+
+    restored = yaml.safe_load(config.read_text(encoding="utf-8"))
+    assert all("bedrock" not in model and "apis" not in model for model in restored["routing"]["models"])
+    assert restored["guardrail"]["profiles"] == {"ops": {"mode": "action"}}
+    captured = capsys.readouterr()
+    assert "bedrock of the routing model named deep" in captured.out + captured.err
+    # Nothing is lost: what could not go back stays in the record, with the model it belongs to.
+    kept = json.loads((data_dir / "config-set-aside.json").read_text(encoding="utf-8"))
+    assert kept["keys"] == {key: value for key, value in _NESTED_SET_ASIDE["keys"].items()}
+    assert kept["items"] == {"routing.models[1]": "deep"}
+
+
+def test_set_aside_decision_and_switched_routing_are_put_back(data_dir: Path) -> None:
+    """rel-1-0-10:GAP-0767/0769: the decision goes back to its place, routing back on with its classifier."""
+    import yaml
+
+    config = _write_config(
+        data_dir,
+        "config_version: 9\nrouting:\n  enabled: false\n  models:\n    - name: fast\n      provider: openai\n"
+        "      model: gpt-5-mini\n  signals:\n    keywords:\n      - name: quick\n        keywords: [quick question]\n"
+        "  decisions:\n    - name: quick\n      conditions: [{type: keyword, name: quick}]\n      model_refs: [fast]\n"
+        "    - name: last\n      conditions: [{type: keyword, name: quick}]\n      model_refs: [fast]\n",
+    )
+    record = data_dir / "config-set-aside.json"
+    held = {"name": "codex-fast", "conditions": [{"type": "connector", "name": "codex"}], "model_refs": ["fast"]}
+    record.write_text(
+        json.dumps({"version": 1, "for": "1.0.9", "keys": {"routing.classifier": "rules"},
+                    "decisions": [{"index": 1, "value": held}], "switched": {"routing.enabled": True}}),
+        encoding="utf-8",
+    )
+
+    migrations._restore_set_aside_keys(str(data_dir), str(config))
+
+    routing = yaml.safe_load(config.read_text(encoding="utf-8"))["routing"]
+    assert [d["name"] for d in routing["decisions"]] == ["quick", "codex-fast", "last"]
+    assert routing["decisions"][1] == held
+    assert routing["classifier"] == "rules" and routing["enabled"] is True
+    assert not record.exists()
+
+
+def test_a_decision_that_no_longer_fits_is_kept_and_the_rest_goes_back(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Delta check D-1/D-2: a decision the validated writer refuses (its model is gone on the gateway
+    check), or whose name was reused, is kept in the record with its value; the classifier and
+    routing still go back."""
+    import yaml
+    from defenseclaw import config_writer
+
+    real_apply = config_writer.apply
+
+    def refusing_decisions(changes, *args, **kwargs):
+        if any(c.path == "routing.decisions" for c in changes):
+            raise ValueError("routing.decisions[1].model_refs: unknown model alias deep")
+        return real_apply(changes, *args, **kwargs)
+
+    monkeypatch.setattr(config_writer, "apply", refusing_decisions)
+    config = _write_config(
+        data_dir,
+        "config_version: 9\nrouting:\n  enabled: false\n  models:\n    - name: fast\n      provider: openai\n"
+        "      model: gpt-5-mini\n  signals:\n    keywords:\n      - name: quick\n        keywords: [quick question]\n"
+        "  decisions:\n    - name: quick\n      conditions: [{type: keyword, name: quick}]\n      model_refs: [fast]\n",
+    )
+    record = data_dir / "config-set-aside.json"
+    gone = {"name": "deep-codex", "conditions": [{"type": "connector", "name": "codex"}], "model_refs": ["deep"]}
+    reused = {"name": "quick", "conditions": [{"type": "connector", "name": "codex"}], "model_refs": ["fast"]}
+    record.write_text(
+        json.dumps({"version": 1, "for": "1.0.9", "keys": {"routing.classifier": "rules"},
+                    "decisions": [{"index": 0, "value": reused}, {"index": 1, "value": gone}],
+                    "switched": {"routing.enabled": True}}),
+        encoding="utf-8",
+    )
+
+    migrations._restore_set_aside_keys(str(data_dir), str(config))
+
+    routing = yaml.safe_load(config.read_text(encoding="utf-8"))["routing"]
+    assert routing["classifier"] == "rules" and routing["enabled"] is True
+    assert [d["name"] for d in routing["decisions"]] == ["quick"]
+    assert routing["decisions"][0]["conditions"] == [{"type": "keyword", "name": "quick"}]
+    kept = json.loads(record.read_text(encoding="utf-8"))
+    assert kept["keys"] == {}
+    assert sorted(d["value"]["name"] for d in kept["decisions"]) == ["deep-codex", "quick"]
+
+
 def test_set_aside_key_that_cannot_be_put_back_is_named_with_its_command(
     data_dir: Path, capsys: pytest.CaptureFixture
 ) -> None:
@@ -940,6 +1080,38 @@ def test_set_aside_key_that_cannot_be_put_back_is_named_with_its_command(
     assert record.exists()
     captured = capsys.readouterr()
     assert "defenseclaw config set openshell.trusted_ca_bundle relative.pem" in captured.out + captured.err
+
+
+def test_one_refused_set_aside_key_does_not_hold_back_the_valid_ones(
+    data_dir: Path, capsys: pytest.CaptureFixture
+) -> None:
+    """rel-1-0-10:GAP-1145: one refused key left effects_rules_tier and the other valid keys
+    unapplied. Each key goes back alone (routing.* together); the refused key is named with its
+    command, kept in the record, and the rest is applied."""
+    import yaml
+
+    config = _write_config(data_dir, "config_version: 9\n")
+    record = _set_aside_record(
+        data_dir,
+        {
+            "guardrail.effects_rules_tier": "restricted",
+            "openshell.trusted_ca_bundle": "relative.pem",
+            "routing.min_confidence": 0.6,
+        },
+    )
+
+    migrations._restore_set_aside_keys(str(data_dir), str(config))
+
+    got = yaml.safe_load(config.read_text(encoding="utf-8"))
+    assert got["guardrail"]["effects_rules_tier"] == "restricted"
+    assert got["routing"]["min_confidence"] == 0.6
+    assert "openshell" not in got
+    assert list(json.loads(record.read_text(encoding="utf-8"))["keys"]) == ["openshell.trusted_ca_bundle"]
+    shown = " ".join((lambda c: c.out + c.err)(capsys.readouterr()).split())
+    assert "Could not put back openshell.trusted_ca_bundle (" in shown
+    assert "defenseclaw config set openshell.trusted_ca_bundle relative.pem" in shown
+    assert "Could not put back guardrail.effects_rules_tier" not in shown
+    assert "Put back guardrail.effects_rules_tier" in shown and "Put back routing.min_confidence" in shown
 
 
 def _sealed_codex_lock(data_dir: Path, exe: Path, digest: str) -> None:
@@ -1089,3 +1261,30 @@ def test_the_rollback_selects_updated_agents_through_the_cli_entry() -> None:
     body = body[: body.index("\n}\n")]
     assert '@("migrate", "--reselect-updated-agents", "--data-dir", $Data)' in body
     assert '"-c"' not in body
+
+
+def test_set_aside_scoped_cascades_are_put_back(data_dir: Path) -> None:
+    """GAP-0583: a downgrade to 1.0.9 set the connector and profile cascades aside by
+    their dotted keys; migrating to a release that has them puts each one back."""
+    import yaml
+
+    config = _write_config(
+        data_dir,
+        "config_version: 9\nguardrail:\n  connectors:\n    codex:\n      block_at: HIGH\n"
+        "  profiles:\n    contractors:\n      block_at: MEDIUM\n",
+    )
+    record = _set_aside_record(
+        data_dir,
+        {
+            "guardrail.connectors.codex.cascade": {"unknown": "block"},
+            "guardrail.profiles.contractors.cascade": {"judge": {"max_action": "alert"}},
+            "guardrail.profiles.contractors.future_key": True,
+        },
+    )
+
+    migrations._restore_set_aside_keys(str(data_dir), str(config))
+
+    guardrail = yaml.safe_load(config.read_text(encoding="utf-8"))["guardrail"]
+    assert guardrail["connectors"]["codex"] == {"block_at": "HIGH", "cascade": {"unknown": "block"}}
+    assert guardrail["profiles"]["contractors"]["cascade"] == {"judge": {"max_action": "alert"}}
+    assert json.loads(record.read_text(encoding="utf-8"))["keys"] == {"guardrail.profiles.contractors.future_key": True}

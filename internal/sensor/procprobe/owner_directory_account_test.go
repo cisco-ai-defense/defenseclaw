@@ -71,6 +71,14 @@ func TestProcessOwnerOfADirectoryAccountIsNamedThroughNSS(t *testing.T) {
 	if got := ownerName(12345678, now); got != "" {
 		t.Fatalf("owner of a uid no account holds = %q, want none", got)
 	}
+	// GAP-1592: the same lookup gives the home the account database
+	// records, which the sensor compares a provider config read with.
+	if got := CachedOwnerHome(adUID); got != "/home/eng1@corp.example" {
+		t.Fatalf("home of AD uid %d = %q, want the home NSS gives", adUID, got)
+	}
+	if got := CachedOwnerHome(12345678); got != "" {
+		t.Fatalf("home of a uid no account holds = %q, want none", got)
+	}
 }
 
 // A directory that does not answer names no owner now and is asked again

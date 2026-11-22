@@ -386,6 +386,12 @@ func TestOTLPInboundConnectorLogMatrix(t *testing.T) {
 		}
 		leaf.logRecord.TimeUnixNano = uint64(now.Add(time.Duration(index) * time.Nanosecond).UnixNano())
 		leaf.logRecord.Body = &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: test.content}}
+		if source == "claudecode" {
+			// Claude Code puts the event name in the body and the prompt
+			// in the prompt attribute (GAP-0039).
+			leaf.logRecord.Body = &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "claude_code.user_prompt"}}
+			leaf.logRecord.Attributes = append(leaf.logRecord.Attributes, otlpClassifierStringAttribute("prompt", test.content))
+		}
 		leaf.logRecord.Attributes = append(leaf.logRecord.Attributes,
 			otlpClassifierStringAttribute(test.sessionKey, "session-1"),
 			otlpClassifierStringAttribute(test.turnKey, "turn-1"),

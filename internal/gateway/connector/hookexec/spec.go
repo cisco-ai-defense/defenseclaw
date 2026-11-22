@@ -188,7 +188,7 @@ var specs = map[string]spec{
 	// attaches a prompt hook's result and calls the model); any other non-zero
 	// status is a failed hook Kiro proceeds past, so every closed failure
 	// here exits 2. Kiro appends hook stdout to the agent's context, so the
-	// hook never prints one.
+	// hook prints none, except the v3 prompt note (KiroV3PromptCheckedNote).
 	"kiro": {
 		connector: "kiro", hookName: "kiro-hook", errLabel: "kiro",
 		subject: "kiro hook", endpoint: "/api/v1/kiro/hook",

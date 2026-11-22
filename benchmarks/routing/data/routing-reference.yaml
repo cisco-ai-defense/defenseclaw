@@ -1,0 +1,43 @@
+# Reference routing block for the S12 router eval (DefenseClaw 1.0.10).
+# Shape: the 1.0.9 config.yaml `routing:` block (keyword signals + decisions),
+# so the same file drives the in-process keyword classifier and the pinned
+# vLLM SR container (through internal/routing.Translate). Decision names are
+# the eval categories; model_refs are the category default aliases.
+routing:
+  enabled: true
+  version: "0.3.0"
+  port: 18480
+  algorithm: static
+  models:
+    - {name: local,  provider: ollama,    model: llama3.1:8b,      base_url: "http://127.0.0.1:11434"}
+    - {name: fast,   provider: anthropic, model: fast-tier,        base_url: "https://fast.invalid"}
+    - {name: mid,    provider: anthropic, model: mid-tier,         base_url: "https://mid.invalid"}
+    - {name: strong, provider: anthropic, model: strong-tier,      base_url: "https://strong.invalid"}
+  signals:
+    keywords:
+      - name: sensitive-kw
+        operator: OR
+        keywords: ["ssn", "social security", "password", "passwd", "api key", "api_key", "secret key", "private key", "BEGIN RSA", "BEGIN OPENSSH", "credit card", "card number", "cvv", "patient", "diagnosis", "medical record", "date of birth", "dob", "salary", "payroll", "home address", "phone number", "passport", "driver license", "bank account", "routing number", "iban", "confidential", "hipaa", "pii", "token=", "sk-"]
+      - name: tool-kw
+        operator: OR
+        keywords: ["run the tests", "run tests", "across the repo", "in the repo", "every file", "all files", "open the", "grep", "search the codebase", "find all", "find every", "then run", "and push", "create a pr", "open a pr", "ci job", "pipeline logs", "tool_call", "tool call", "function call", "browse", "fetch the", "kubectl", "deploy", "step by step and execute", "iterate until"]
+      - name: code-kw
+        operator: OR
+        keywords: ["debug", "implement", "refactor", "function", "code", "bug", "compile", "error", "traceback", "stack trace", "regex", "sql", "query", "python", "golang", "javascript", "typescript", "rust", "bash", "script", "class", "method", "unit test", "api", "json", "yaml", "dockerfile", "terraform", "diff"]
+      - name: reasoning-kw
+        operator: OR
+        keywords: ["prove", "proof", "theorem", "puzzle", "probability", "derive", "complexity", "big-o", "optimal", "trade-off", "tradeoff", "step by step", "reason", "why does", "estimate", "how many", "design a system", "constraints", "riddle", "logic"]
+      - name: summarize-kw
+        operator: OR
+        keywords: ["summarize", "summarise", "summary", "tl;dr", "tldr", "key points", "condense", "recap", "outline", "bullet points", "shorten", "main takeaways", "extract the"]
+      - name: cheap-kw
+        operator: OR
+        keywords: ["convert", "spell", "synonym", "translate", "what time", "what is the capital", "how do you say", "define", "meaning of", "thanks", "thank you", "hello", "hi", "what does", "stand for", "format this date"]
+  decisions:
+    - {name: sensitive,  priority: 100, conditions: [{type: keyword, name: sensitive-kw}], model_refs: [local]}
+    - {name: tool_heavy, priority: 90,  conditions: [{type: keyword, name: tool-kw}],      model_refs: [mid]}
+    - {name: coding,     priority: 80,  conditions: [{type: keyword, name: code-kw}],      model_refs: [mid]}
+    - {name: reasoning,  priority: 70,  conditions: [{type: keyword, name: reasoning-kw}], model_refs: [strong]}
+    - {name: summarize,  priority: 60,  conditions: [{type: keyword, name: summarize-kw}], model_refs: [fast]}
+    - {name: cheap_fast, priority: 50,  conditions: [{type: keyword, name: cheap-kw}],     model_refs: [fast]}
+    - {name: chat,       priority: 1,   model_refs: [fast]}

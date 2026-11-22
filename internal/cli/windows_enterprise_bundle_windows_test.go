@@ -28,6 +28,7 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/sys/windows"
 
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
@@ -1042,17 +1043,17 @@ func TestWindowsEnsureBundleConfirmsThenRequiresBundles(t *testing.T) {
 	both := &windowsEnterpriseLifecycleOptions{bundlePath: signed, configPath: filepath.Join(e.dir, "config.yaml"),
 		profile: managed.ProfileStandalone, jsonOutput: true, installedBeforeRun: true}
 	done, err := prepareWindowsEnterpriseBundle(ctx, cmd, "ensure", both)
-	if !done || commandExitCode(err) != enterprisestatus.WindowsExitInvalidArgs || !strings.Contains(out.String(), "invalid_arguments") {
-		t.Fatalf("BUNDLE= with CONFIG=: done=%v exit=%d\n%s", done, commandExitCode(err), out.String())
+	if !done || cliusage.ExitCode(err) != enterprisestatus.WindowsExitInvalidArgs || !strings.Contains(out.String(), "invalid_arguments") {
+		t.Fatalf("BUNDLE= with CONFIG=: done=%v exit=%d\n%s", done, cliusage.ExitCode(err), out.String())
 	}
 	cmd, out = windowsBundleCommand()
 	anchored := &windowsEnterpriseLifecycleOptions{trustAnchors: e.anchors, configPath: filepath.Join(e.dir, "config.yaml"),
 		profile: managed.ProfileStandalone, jsonOutput: true, installedBeforeRun: true}
 	done, err = prepareWindowsEnterpriseBundle(ctx, cmd, "ensure", anchored)
 	// #1288: the code is bundle_required (not invalid_arguments), the exit 1639.
-	if !done || commandExitCode(err) != enterprisestatus.WindowsExitInvalidArgs || !strings.Contains(out.String(), string(enterprisebundle.CodeBundleRequired)) ||
+	if !done || cliusage.ExitCode(err) != enterprisestatus.WindowsExitInvalidArgs || !strings.Contains(out.String(), string(enterprisebundle.CodeBundleRequired)) ||
 		strings.Contains(out.String(), "invalid_arguments") {
-		t.Fatalf("TRUSTANCHORS= with CONFIG=: done=%v exit=%d\n%s", done, commandExitCode(err), out.String())
+		t.Fatalf("TRUSTANCHORS= with CONFIG=: done=%v exit=%d\n%s", done, cliusage.ExitCode(err), out.String())
 	}
 	if _, err := os.Stat(filepath.Join(layout.ConfigDir, "trust", enterprisebundle.AnchorsName)); err == nil {
 		t.Fatal("TRUSTANCHORS= with CONFIG= installed the anchors")
@@ -1327,9 +1328,9 @@ func TestWindowsCommittedBundleGatewayOutageReportsPendingReceipt(t *testing.T) 
 		result.Bundle == nil || result.Bundle.State != enterprisebundle.StateApplied ||
 		!windowsBundleHasCode(result.Errors, string(enterprisebundle.CodeNotConfirmed)) ||
 		!windowsBundleHasCode(result.Warnings, enterprisebundle.WarnBundlePending) ||
-		commandExitCode(finishErr) != enterprisestatus.WindowsExitBusy {
+		cliusage.ExitCode(finishErr) != enterprisestatus.WindowsExitBusy {
 		t.Fatalf("gateway outage: receipt=%+v bundle=%+v errors=%+v warnings=%+v exit=%d",
-			rc, result.Bundle, result.Errors, result.Warnings, commandExitCode(finishErr))
+			rc, result.Bundle, result.Errors, result.Warnings, cliusage.ExitCode(finishErr))
 	}
 	if _, err := os.Stat(run.driver.Store.PublicReceiptPath()); !os.IsNotExist(err) {
 		t.Fatalf("pending receipt published as terminal: %v", err)
@@ -1940,7 +1941,7 @@ func TestWindowsEnsureRefusesCrossHostDigestMismatch(t *testing.T) {
 			if decodeErr := json.Unmarshal(out.Bytes(), &refusal); decodeErr != nil {
 				t.Fatalf("decode refusal: %v: %s", decodeErr, out.String())
 			}
-			if !done || commandExitCode(err) != enterprisestatus.WindowsExitFailure || refusal.ExitCode != enterprisestatus.WindowsExitFailure ||
+			if !done || cliusage.ExitCode(err) != enterprisestatus.WindowsExitFailure || refusal.ExitCode != enterprisestatus.WindowsExitFailure ||
 				refusal.LastRefusal.ErrorCode != string(enterprisebundle.CodeDigestMismatch) ||
 				!strings.Contains(out.String(), "the signer computed the digest on linux") {
 				t.Fatalf("disproved cross-host digest: done=%v err=%v output=%s", done, err, out.String())
@@ -2020,7 +2021,7 @@ func TestWindowsBundleRefusalsReleaseLock(t *testing.T) {
 				if decodeErr := json.Unmarshal(out.Bytes(), &refusal); decodeErr != nil {
 					t.Fatalf("decode version floor refusal: %v: %s", decodeErr, out.String())
 				}
-				if !done || commandExitCode(err) != enterprisestatus.WindowsExitFailure ||
+				if !done || cliusage.ExitCode(err) != enterprisestatus.WindowsExitFailure ||
 					refusal.ExitCode != enterprisestatus.WindowsExitFailure || refusal.LastRefusal.ErrorCode != kind ||
 					refusal.FloorSource != "trust_anchor_min_version" ||
 					!strings.Contains(out.String(), "set by trust anchor min_version") {

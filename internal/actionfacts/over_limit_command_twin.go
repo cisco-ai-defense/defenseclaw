@@ -49,11 +49,18 @@ func OverLimitCommandBoundedTwin(input Input, facts Facts) (Input, bool) {
 		if len(input.Args) > maxOverLimitWriteArgsBytes || !utf8.Valid(input.Args) {
 			return Input{}, false
 		}
-		reduction, ok := runOverLimitReducer(input.Args, &overLimitArgsReducer{commandTwin: true})
+		// A dry pass finds whether a text has a bounded form, and only then
+		// are the arguments copied: the copy of a 1 MiB command that has
+		// none was made on every reading of the call (rel-1-0-10:GAP-0299).
+		probe, ok := runOverLimitReducer(input.Args, &overLimitArgsReducer{commandTwin: true, dry: true})
 		if !ok {
 			return Input{}, false
 		}
-		if reduction.boundedCommand {
+		if probe.boundedCommand {
+			reduction, ok := runOverLimitReducer(input.Args, &overLimitArgsReducer{commandTwin: true})
+			if !ok {
+				return Input{}, false
+			}
 			twin.Args, changed = reduction.args, true
 		}
 	}
@@ -103,7 +110,15 @@ func boundedCommandText(text string) (string, bool) {
 	if stripped, ok := stripShellComments(text); ok {
 		source = stripped
 	}
+	// Every byte that is not white space stays in the form, so a text with
+	// more of them than the bound has none. It is not copied to find that
+	// out: the copy of a 1 MiB here-document of text was made on every
+	// reading of the call (rel-1-0-10:GAP-0299).
+	if shellContentBytes(source) > maxCommandBytes {
+		return "", false
+	}
 	var out strings.Builder
+	out.Grow(maxCommandBytes)
 	content := false
 	for index := 0; index < len(source); {
 		if !isShellWhiteSpace(source[index]) {
@@ -121,6 +136,17 @@ func boundedCommandText(text string) (string, bool) {
 	}
 	bounded := out.String()
 	return bounded, content && len(bounded) <= maxCommandBytes && len(bounded) < len(text)
+}
+
+// shellContentBytes counts the bytes of text that are not shell white space.
+func shellContentBytes(text string) int {
+	content := 0
+	for index := 0; index < len(text); index++ {
+		if !isShellWhiteSpace(text[index]) {
+			content++
+		}
+	}
+	return content
 }
 
 // boundedShellWhiteSpace is one run of shell white space with each line of

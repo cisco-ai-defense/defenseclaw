@@ -161,11 +161,24 @@ func newestHookDecision(t *testing.T, store *audit.Store, session string) audit.
 	if err != nil {
 		t.Fatal(err)
 	}
-	var rows []audit.Event
+	var rows, decisions []audit.Event
 	for _, event := range events {
 		if event.Action == string(audit.ActionConnectorHook) {
 			rows = append(rows, event)
 		}
+		if event.Action == "hook_decision" {
+			decisions = append(decisions, event)
+		}
+	}
+	if len(rows) == 0 && len(decisions) > 0 && decisions[0].SessionID == session {
+		// A benign per-user allow keeps only its hook_decision row (#1384):
+		// that row is the decision, read under the hook envelope names.
+		decision := decisions[0]
+		decision.Structured = map[string]any{
+			"action": decision.Structured["defenseclaw.guardrail.effective_action"],
+			"result": decision.Structured["defenseclaw.hook.result"],
+		}
+		return decision
 	}
 	if len(rows) == 0 || rows[0].SessionID != session || (len(rows) > 1 && rows[1].SessionID == session) {
 		t.Fatalf("newest hook decision rows=%+v, want one row of session %s", rows, session)

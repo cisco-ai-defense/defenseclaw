@@ -92,6 +92,7 @@ defenseclaw keys check
 - `keys set` and `keys remove` record a configuration-change audit event (`audit export` action `config.change.applied`, `structured` `defenseclaw.admin.operation=config-update` and `defenseclaw.admin.target_ref=config:dotenv:<ENV>`) with only the before and after presence; the value is never logged. With the gateway stopped, the change is saved and the command warns that the audit event was not recorded.
 - `keys remove` works for any name in `.env`, including names outside the registry, and leaves a value exported in your shell alone.
 - `keys set DEFENSECLAW_GATEWAY_TOKEN` reports that it manages gateway authentication (the name is case-insensitive on Windows). The running gateway keeps the token it loaded at start. CLI audit events still use that token, but other CLI calls to the gateway send the saved one and get HTTP 401 until the gateway restarts. Until then `defenseclaw doctor` reports `[FAIL] Gateway authentication  —  local token rejected (HTTP 401) — run 'defenseclaw doctor --fix' to reconcile the running gateway`. To clear the 401, run `defenseclaw-gateway restart`, or run `defenseclaw doctor --fix`, which asks before it restarts the gateway (`--yes` skips the prompt). For a coordinated gateway and connector rotation use `defenseclaw setup rotate-token --yes`.
+- `keys set OPENCLAW_GATEWAY_TOKEN` saves only the OpenClaw gateway credential, the token the gateway uses to connect to OpenClaw. It does not change the DefenseClaw API token. Restart the gateway with `defenseclaw-gateway restart` so it connects with the new value.
 
 ## Requirement classification
 
@@ -112,7 +113,7 @@ A disabled feature gives `NOT_USED`, never `OPTIONAL`.
 | Env name and feature | Required when… | Notes |
 | --- | --- | --- |
 | `DEFENSECLAW_LLM_KEY`<br/>`llm.default` | An LLM-using component (guardrail upstream, judge, skill or MCP scanner) is enabled and falls back to the default key. Shown as optional while the guardrail is on and nothing uses it. | The single canonical key. Provider-specific keys (`OPENAI_API_KEY` and others) are derived from it and the model prefix at routing time. |
-| `OPENCLAW_GATEWAY_TOKEN`<br/>`gateway` | OpenClaw is the active connector, including a legacy config whose `claw.mode` default resolves to an installed OpenClaw. Not required when OpenClaw is absent ([OpenClaw fleet link](/docs/reference/configuration#openclaw-fleet-link)). | Upstream OpenClaw gateway token, auto-detected from `~/.openclaw/openclaw.json` when available. |
+| `OPENCLAW_GATEWAY_TOKEN`<br/>`gateway` | OpenClaw is the active connector, including a legacy config whose `claw.mode` default resolves to an installed OpenClaw. Not required when OpenClaw is absent ([OpenClaw fleet link](/docs/reference/configuration#openclaw-fleet-link)). | Upstream OpenClaw gateway token, auto-detected from `~/.openclaw/openclaw.json` when available. The gateway uses it only to connect to OpenClaw; it is not the DefenseClaw API token. |
 | `JUDGE_API_KEY`<br/>`guardrail.judge` | The judge is enabled, uses a hosted provider, and `guardrail.judge.llm.api_key_env` names a key other than `DEFENSECLAW_LLM_KEY`. | Without that override the row folds into `DEFENSECLAW_LLM_KEY`. |
 | `CISCO_AI_DEFENSE_API_KEY`<br/>`guardrail.remote` | `guardrail.scanner_mode` is `remote` or `both`. | API key for the [Cisco AI Defense](https://www.cisco.com/site/us/en/products/security/ai-defense/index.html) remote scanner. |
 | `VIRUSTOTAL_API_KEY`<br/>`skill-scanner.virustotal` | `scanners.skill_scanner.analyzers.virustotal.enabled` is `true`. | Used when the skill scanner asks VirusTotal. The variable name is `analyzers.virustotal.api_key_env`; the key itself belongs in `.env`, never in `config.yaml`. The [v9 migration](/docs/reference/migrate-v9#scanner-keys) moves an inline v8 `virustotal_api_key` there. |
@@ -123,18 +124,18 @@ A disabled feature gives `NOT_USED`, never `OPTIONAL`.
 
 `keys list` shows effective names: with `guardrail.judge.llm.api_key_env: MY_JUDGE_KEY` it shows `MY_JUDGE_KEY` rather than `JUDGE_API_KEY`. A default install shows six rows; the judge and skill-scanner keys appear only when overridden.
 
-For routed traffic the classifier chooses only a configured alias; the gateway resolves that alias's credential and sends it only to the configured provider. The semantic-router container does not read `.env` ([Semantic routing](/docs/guardrail/semantic-routing)).
+For routed traffic the classifier chooses only a configured alias; the gateway resolves that alias's credential and sends it only to the configured provider. The semantic-router container does not read `.env` ([Semantic routing](/docs/routing/semantic-routing)).
 
 ## Provider-specific SaaS variables are not baseline entries
 
-The Go gateway (Bifrost) and the Python scanners (LiteLLM) derive the provider key from `DEFENSECLAW_LLM_KEY` and the model prefix (`openai/`, `anthropic/`, `bedrock/`, `vertex/`, `azure/`, `ollama/`, and so on). Do not set `OPENAI_API_KEY` separately. The mapping is in `cli/defenseclaw/scanner/_llm_env.py` ([LLM providers](/docs/guardrail/unified-llm-key)).
+The Go gateway (Bifrost) and the Python scanners (LiteLLM) derive the provider key from `DEFENSECLAW_LLM_KEY` and the model prefix (`openai/`, `anthropic/`, `bedrock/`, `vertex/`, `azure/`, `ollama/`, and so on). Do not set `OPENAI_API_KEY` separately. The mapping is in `cli/defenseclaw/scanner/_llm_env.py` ([LLM providers](/docs/get-started/unified-llm-key)).
 
 ## Gateway and connector-scoped tokens
 
 | Token | What it is |
 | --- | --- |
 | `DEFENSECLAW_GATEWAY_TOKEN` | Authenticates the sidecar management API. With no token from the environment or `.env`, the sidecar generates a 32-byte random token at first boot and stores its hex value in `~/.defenseclaw/.env` with private permissions. Rotate with `defenseclaw setup rotate-token --yes` so the gateway and active connectors change together. |
-| `OPENCLAW_GATEWAY_TOKEN` | The upstream OpenClaw gateway credential, also kept as a legacy fallback by the sidecar token resolver. Not interchangeable with the sidecar token when an OpenClaw deployment uses different credentials. |
+| `OPENCLAW_GATEWAY_TOKEN` | The upstream OpenClaw gateway credential. The gateway uses it only on its OpenClaw WebSocket connection. It is never the DefenseClaw API token: the API refuses it with 401, and a `gateway.token_env` that names it is skipped. `setup rotate-token` does not change it. Upgrades from 1.0.9 or earlier create a separate `DEFENSECLAW_GATEWAY_TOKEN` ([OpenClaw gateway token](/docs/connectors/openclaw#openclaw-gateway-token)). |
 | `~/.defenseclaw/hooks/.hook-<connector>.token` | Least-privilege connector hook token. A managed runtime file, not a `keys set` input; accepted only on its hook or inspection scope. |
 | `~/.defenseclaw/hooks/.otlp-<source>.token` | Scoped OTLP token. Managed runtime file; accepted only on its OTLP scope. |
 
@@ -162,7 +163,7 @@ destination and `DEFENSECLAW_LLM_KEY` stored in `.env`:
 enabled. The last line names the [gateway token](#gateway-and-connector-scoped-tokens)
 that the sidecar generated in `.env`. `keys check` on the same install prints `1/1 required credentials set.` and `OK all required credentials present`, and exits `0`.
 
-See also [LLM providers](/docs/guardrail/unified-llm-key) and [Environment variables](/docs/reference/env-vars).
+See also [LLM providers](/docs/get-started/unified-llm-key) and [Environment variables](/docs/reference/env-vars).
 
 ## Troubleshooting
 
@@ -222,7 +223,7 @@ Fixes for the gateway, the keys it needs and the destinations it exports to.
 
 **Cause.** No LLM key is configured. The local rules work without one.
 
-**Fix.** To add the judge: `defenseclaw setup llm`, or follow [Set up an LLM key](/docs/guardrail/unified-llm-key). Check what is set with `defenseclaw keys list`.
+**Fix.** To add the judge: `defenseclaw setup llm`, or follow [Set up an LLM key](/docs/get-started/unified-llm-key). Check what is set with `defenseclaw keys list`.
 
 **Check.** `defenseclaw doctor` shows `LLM API key` and `LLM reachable` as `[PASS]`.
 

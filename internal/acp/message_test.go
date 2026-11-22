@@ -26,6 +26,16 @@ func TestParseMessageRejectsBatchAndMalformedEnvelopes(t *testing.T) {
 		{"request with result", `{"jsonrpc":"2.0","method":"initialize","id":1,"result":{}}`, ErrInvalidMessage},
 		{"duplicate method", `{"jsonrpc":"2.0","method":"safe","method":"unsafe"}`, ErrInvalidMessage},
 		{"nested duplicate", `{"jsonrpc":"2.0","method":"x","params":{"path":"a","path":"b"}}`, ErrInvalidMessage},
+		// rel-1-0-10:GAP-0295: keys that differ only in letter case are the
+		// same key to encoding/json (the last wins) and different keys to an
+		// exact-match reader, so the guard and the peer would read two frames.
+		{"method twin in another case", `{"jsonrpc":"2.0","id":1,"method":"a","Method":"b","params":{}}`, ErrInvalidMessage},
+		{"params twin in another case", `{"jsonrpc":"2.0","id":1,"method":"a","params":{"x":1},"Params":{"x":2}}`, ErrInvalidMessage},
+		{"nested twin in another case", `{"jsonrpc":"2.0","id":1,"method":"a","params":{"command":"a","Command":"b"}}`, ErrInvalidMessage},
+		{"twin under the Kelvin sign", `{"jsonrpc":"2.0","id":1,"method":"a","params":{"k":"a","\u212a":"b"}}`, ErrInvalidMessage},
+		{"twin beside rawOutput", `{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":{"toolCallId":"t","kind":"read","Kind":"edit","rawOutput":{}}}}`, ErrInvalidMessage},
+		{"exact duplicate inside rawOutput", `{"jsonrpc":"2.0","method":"a","params":{"rawOutput":{"x":1,"x":2}}}`, ErrInvalidMessage},
+		{"twin inside an array element", `{"jsonrpc":"2.0","id":1,"method":"a","params":{"env":[{"name":"a","Name":"b"}]}}`, ErrInvalidMessage},
 		{"trailing value", `{"jsonrpc":"2.0","method":"x"} {}`, ErrInvalidMessage},
 		{"boolean id", `{"jsonrpc":"2.0","method":"x","id":true}`, ErrInvalidMessage},
 		{"scalar params", `{"jsonrpc":"2.0","method":"x","params":"bad"}`, ErrInvalidMessage},
@@ -36,6 +46,20 @@ func TestParseMessageRejectsBatchAndMalformedEnvelopes(t *testing.T) {
 				t.Fatalf("ParseMessage() error = %v, want %v", err, test.want)
 			}
 		})
+	}
+}
+
+func TestParseMessageAllowsKeysThatDifferByMoreThanCase(t *testing.T) {
+	for _, body := range []string{
+		// Free-form data: headers and rows an agent reports are not keys the guard reads.
+		`{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"tool_call_update","toolCallId":"t","rawOutput":{"headers":{"ETag":"a","etag":"b"},"rows":[{"ID":1,"id":2}]}}}}`,
+		`{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","_meta":{"Trace":"a","trace":"b"},"update":{}}}`,
+		`{"jsonrpc":"2.0","id":1,"method":"a","params":{"path":"a","paths":"b","_path":"c"}}`,
+		`{"jsonrpc":"2.0","id":1,"method":"a","params":{"a":{"Command":"x"},"b":{"command":"y"}}}`,
+	} {
+		if _, err := ParseMessage([]byte(body)); err != nil {
+			t.Errorf("%s: %v", body, err)
+		}
 	}
 }
 

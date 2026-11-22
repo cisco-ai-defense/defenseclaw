@@ -157,10 +157,12 @@ func sssdADNamesakes(records []enterprisehooks.IdentitySpoolRecord, entry string
 // human-approval warnings of the config itself, which config validate and
 // profile-explain already gave (id.GAP-1264).
 func standaloneProfileWarnings(set *guardrailProfileSet, cfg *config.Config) []string {
+	// An exclude_users entry that matches no account is listed too
+	// (GAP-1111).
 	if set != nil {
-		return set.healthProfileWarnings()
+		return append(set.healthProfileWarnings(), enrollmentExcludeWarnings(cfg)...)
 	}
-	return ConfigHILTWarnings(cfg)
+	return append(ConfigHILTWarnings(cfg), enrollmentExcludeWarnings(cfg)...)
 }
 
 // inertHILTWarning uses the same resolved threshold as enforcement. Keep
@@ -486,8 +488,8 @@ func (set *guardrailProfileSet) unknownGroupWarnings(wait time.Duration) []strin
 	if set != nil && runtime.GOOS == "windows" && set.base != nil && !set.base.StandaloneEnterprise() {
 		return perUserWindowsGroupWarnings(set.assignments)
 	}
-	return set.unknownGroupWarningsWith(profileGroupExists, profileGroupQualifiedName, bareGroupsDirectorySilent, profileUserEntryUnmatched(),
-		directoryCacheHealth, wait)
+	exists, qualify := matcherFoldedGroupChecks(currentIdentitySpoolDir())
+	return set.unknownGroupWarningsWith(exists, qualify, bareGroupsDirectorySilent, profileUserEntryUnmatched(), directoryCacheHealth, wait)
 }
 
 // Per-user Windows has no trusted group facts; these assignments cannot match.
@@ -595,8 +597,8 @@ func (set *guardrailProfileSet) logProfileWarnings() {
 	for _, warning := range set.unknownConnectorWarnings() {
 		fmt.Fprintf(os.Stderr, "[guardrail] %s\n", warning)
 	}
-	exists, qualify, silent, unmatchedUser, health := profileGroupExists, profileGroupQualifiedName, bareGroupsDirectorySilent,
-		profileUserEntryUnmatched(), directoryCacheHealth
+	exists, qualify := matcherFoldedGroupChecks(currentIdentitySpoolDir())
+	silent, unmatchedUser, health := bareGroupsDirectorySilent, profileUserEntryUnmatched(), directoryCacheHealth
 	go func() {
 		if runtime.GOOS == "windows" && set.base != nil && !set.base.StandaloneEnterprise() {
 			for _, warning := range perUserWindowsGroupWarnings(set.assignments) {
@@ -707,6 +709,10 @@ func unknownAssignmentGroupsForOS(ctx context.Context, assignments []config.Prof
 			if dead {
 				unknown = append(unknown, unknownGroup{assignment: i + 1, group: group, domain: domain})
 			} else if listed := respelled[key]; listed != "" {
+				// CORP\name answered as name@corp.example.com of the same
+				// verified domain is the same group: the matcher folds the
+				// two, and foldedGroupQualify leaves no respelling then
+				// (rel-1-0-10:GAP-1124, GAP-1136).
 				hint := ""
 				if _, listedDomain := useridentity.SplitQualifiedName(listed); listedDomain == "" {
 					hint = " (SSSD use_fully_qualified_names = False)"

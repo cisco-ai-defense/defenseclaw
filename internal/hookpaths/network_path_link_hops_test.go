@@ -21,7 +21,9 @@ import (
 // and returns the number of probes of each root.
 func fakeNetworkShares(t *testing.T, roots []string, wait time.Duration, ask func(root string)) func(root string) int {
 	t.Helper()
-	oldRoot, oldProbe, oldWalk := networkShareRootOf, probeNetworkShare, networkShareLinkWalk
+	oldRoot, oldProbe, oldWalk, oldLocal := networkShareRootOf, probeNetworkShare, networkShareLinkWalk, networkShareOfThisMachine
+	// The fake shares are this machine's: the gate asks only those (GAP-1074).
+	networkShareOfThisMachine = func(string) bool { return true }
 	oldWait := networkShareAnswerWait
 	networkShares.mu.Lock()
 	oldProbes := networkShares.probes
@@ -49,7 +51,7 @@ func fakeNetworkShares(t *testing.T, roots []string, wait time.Duration, ask fun
 	networkShareLinkWalk = true
 	networkShareAnswerWait = wait
 	t.Cleanup(func() {
-		networkShareRootOf, probeNetworkShare, networkShareLinkWalk = oldRoot, oldProbe, oldWalk
+		networkShareRootOf, probeNetworkShare, networkShareLinkWalk, networkShareOfThisMachine = oldRoot, oldProbe, oldWalk, oldLocal
 		networkShareAnswerWait = oldWait
 		networkShares.mu.Lock()
 		networkShares.probes = oldProbes

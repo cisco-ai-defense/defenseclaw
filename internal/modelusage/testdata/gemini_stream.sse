@@ -1,0 +1,4 @@
+data: {"candidates":[{"content":{"role":"model","parts":[{"text":"H"}]}}],"usageMetadata":{"promptTokenCount":10,"totalTokenCount":10},"modelVersion":"gemini-2.5-flash"}
+
+data: {"candidates":[{"content":{"role":"model","parts":[{"text":"i"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":3,"thoughtsTokenCount":2,"totalTokenCount":15},"modelVersion":"gemini-2.5-flash"}
+

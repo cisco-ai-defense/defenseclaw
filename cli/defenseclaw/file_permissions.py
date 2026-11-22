@@ -878,9 +878,16 @@ def replace_file_durable(source: str | os.PathLike[str], target: str | os.PathLi
 
     ``os.replace`` provides name atomicity but does not request write-through
     on Windows. Installer migrations use the resulting file as a recovery
-    boundary, so native Windows uses ``MoveFileExW`` with both
-    ``MOVEFILE_REPLACE_EXISTING`` and ``MOVEFILE_WRITE_THROUGH``. POSIX uses a
-    sibling rename followed by an fsync of the containing directory.
+    boundary, so native Windows renames through a write-through handle. POSIX
+    uses a sibling rename followed by an fsync of the containing directory.
+
+    On Windows the rename uses POSIX semantics (``FileRenameInfoEx``), as the
+    Go writer does (``safefile.ReplaceFileAtomically``): ``MoveFileExW`` is
+    refused while any handle has *target* open, whatever that handle shares,
+    so a gateway read of ``agent_discovery.json`` made discovery's replace
+    fail and drop the scan (GAP-1242). The POSIX-semantics rename succeeds
+    while readers share delete; one that does not is waited for briefly. A
+    volume or filter driver that refuses it gets ``MoveFileExW`` as before.
     """
 
     source_path = os.path.abspath(os.fspath(source))
@@ -901,16 +908,23 @@ def replace_file_durable(source: str | os.PathLike[str], target: str | os.PathLi
     move_file_ex = kernel32.MoveFileExW
     move_file_ex.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.DWORD]
     move_file_ex.restype = wintypes.BOOL
-    code = _move_retrying_sharing_errors(
-        lambda: bool(
-            move_file_ex(
-                windows_extended_path(source_path),
-                windows_extended_path(target_path),
-                movefile_replace_existing | movefile_write_through,
-            )
-        ),
-        ctypes.get_last_error,
-    )
+    source_name = windows_extended_path(source_path)
+    target_name = windows_extended_path(target_path)
+    state = {"posix": True, "code": 0}
+
+    def move() -> bool:
+        if state["posix"]:
+            code = _windows_posix_rename_replace(kernel32, source_name, target_name)
+            if code not in _POSIX_RENAME_REFUSED:
+                state["code"] = code
+                return code == 0
+            state["posix"] = False
+        if move_file_ex(source_name, target_name, movefile_replace_existing | movefile_write_through):
+            return True
+        state["code"] = ctypes.get_last_error()
+        return False
+
+    code = _move_retrying_sharing_errors(move, lambda: state["code"])
     if code:
         # ctypes.WinError carries no file name; callers name the file they
         # could not save from filename2, as os.replace sets it on POSIX.
@@ -918,9 +932,85 @@ def replace_file_durable(source: str | os.PathLike[str], target: str | os.PathLi
         raise OSError(error.errno, error.strerror, source_path, error.winerror, target_path)
 
 
+# ERROR_NOT_SUPPORTED and ERROR_INVALID_PARAMETER: the volume (FAT, some
+# network shares) or a filter driver refuses the POSIX-semantics rename.
+_POSIX_RENAME_REFUSED = frozenset({50, 87})
+
+
+def _windows_posix_rename_replace(kernel32, source: str, target: str) -> int:
+    """Rename *source* over *target* with POSIX semantics; 0 or the Win32 error.
+
+    The source is opened write-through, as MOVEFILE_WRITE_THROUGH does, and
+    without following a link at that name (the Go writer opens it the same
+    way). The handle is closed before this returns.
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    delete, synchronize = 0x00010000, 0x00100000
+    share_all = 0x00000001 | 0x00000002 | 0x00000004
+    open_existing = 3
+    write_through, backup_semantics, open_reparse_point = 0x80000000, 0x02000000, 0x00200000
+    file_rename_info_ex = 22  # FILE_INFO_BY_HANDLE_CLASS.FileRenameInfoEx
+    replace_if_exists, posix_semantics = 0x00000001, 0x00000002
+
+    create_file = kernel32.CreateFileW
+    create_file.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    ]
+    create_file.restype = wintypes.HANDLE
+    set_information = kernel32.SetFileInformationByHandle
+    set_information.argtypes = [wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD]
+    set_information.restype = wintypes.BOOL
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = [wintypes.HANDLE]
+    close_handle.restype = wintypes.BOOL
+
+    class _FileRenameInfo(ctypes.Structure):
+        _fields_ = [
+            ("Flags", wintypes.DWORD),
+            ("RootDirectory", wintypes.HANDLE),
+            ("FileNameLength", wintypes.DWORD),
+            ("FileName", wintypes.WCHAR * 1),
+        ]
+
+    handle = create_file(
+        source,
+        delete | synchronize,
+        share_all,
+        None,
+        open_existing,
+        write_through | backup_semantics | open_reparse_point,
+        None,
+    )
+    if handle is None or handle == wintypes.HANDLE(-1).value:
+        return ctypes.get_last_error()
+    try:
+        name = target.encode("utf-16-le")
+        offset = _FileRenameInfo.FileName.offset
+        size = offset + len(name) + 2  # the name and its terminator
+        buffer = (ctypes.c_ulonglong * ((size + 7) // 8))()  # 8-byte aligned, zeroed
+        info = _FileRenameInfo.from_buffer(buffer)
+        info.Flags = replace_if_exists | posix_semantics
+        info.RootDirectory = None
+        info.FileNameLength = len(name)
+        ctypes.memmove(ctypes.addressof(buffer) + offset, name, len(name))
+        if set_information(handle, file_rename_info_ex, buffer, size):
+            return 0
+        return ctypes.get_last_error()
+    finally:
+        close_handle(handle)
+
+
 # ERROR_ACCESS_DENIED and ERROR_SHARING_VIOLATION: a reader that opened the
 # target without FILE_SHARE_DELETE (another DefenseClaw process, an indexer,
-# antivirus) makes MoveFileExW fail for a moment.
+# antivirus) makes the rename fail for a moment.
 _TRANSIENT_MOVE_ERRORS = frozenset({5, 32})
 
 

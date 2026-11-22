@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 )
@@ -39,16 +40,16 @@ func TestBadFlagValueNamesWhatTheFlagTakes(t *testing.T) {
 			t.Fatalf("%s parsed", arg)
 		}
 		got := usageFlagError(status, parseErr)
-		if commandExitCode(got) != 2 || !errors.Is(got, parseErr) {
-			t.Fatalf("%s: exit = %d, err = %v", arg, commandExitCode(got), got)
+		if cliusage.ExitCode(got) != 2 || !errors.Is(got, parseErr) {
+			t.Fatalf("%s: exit = %d, err = %v", arg, cliusage.ExitCode(got), got)
 		}
 		if !strings.HasPrefix(got.Error(), want+"\nUsage: ") || strings.Contains(got.Error(), "strconv") {
 			t.Errorf("%s: error %q, want it to start with %q", arg, got.Error(), want)
 		}
 		parseErr = enterpriseStatus.ParseFlags([]string{arg})
 		got = usageFlagError(enterpriseStatus, parseErr)
-		if got.Error() != want || commandExitCode(got) != 1 || !errors.Is(got, parseErr) {
-			t.Errorf("%s in an exempt tree: %q (exit %d), want %q with its own exit status", arg, got, commandExitCode(got), want)
+		if got.Error() != want || cliusage.ExitCode(got) != 1 || !errors.Is(got, parseErr) {
+			t.Errorf("%s in an exempt tree: %q (exit %d), want %q with its own exit status", arg, got, cliusage.ExitCode(got), want)
 		}
 	}
 }
@@ -56,13 +57,13 @@ func TestBadFlagValueNamesWhatTheFlagTakes(t *testing.T) {
 // GAP-2189: run by its absolute path (the enterprise rpm puts nothing on
 // PATH), a usage error names that path, so the hint runs as typed.
 func TestUsageMessageNamesTheInvokedPath(t *testing.T) {
-	previous := invokedGatewayPath
-	t.Cleanup(func() { invokedGatewayPath = previous })
-	invokedGatewayPath = func(string) string { return "/opt/defenseclaw/bin/defenseclaw-gateway" }
+	previous := cliusage.InvokedGatewayPath
+	t.Cleanup(func() { cliusage.InvokedGatewayPath = previous })
+	cliusage.InvokedGatewayPath = func(string) string { return "/opt/defenseclaw/bin/defenseclaw-gateway" }
 	root := &cobra.Command{Use: "defenseclaw-gateway"}
 	set := &cobra.Command{Use: "set", RunE: func(*cobra.Command, []string) error { return nil }}
 	root.AddCommand(set)
-	got := usageMessage(set, errors.New("bad flag"))
+	got := cliusage.UsageMessage(set, errors.New("bad flag"))
 	want := "bad flag\nUsage: /opt/defenseclaw/bin/defenseclaw-gateway set\n" +
 		"Try '/opt/defenseclaw/bin/defenseclaw-gateway set --help' for help."
 	if got != want {
@@ -79,8 +80,8 @@ func TestUsageMessageNamesTheInvokedPath(t *testing.T) {
 			t.Errorf("enterprise %s frobnicate: %v, want %q", group, got, want)
 		}
 	}
-	t.Setenv(delegatedFromEnv, "defenseclaw")
-	if got := usageMessage(set, errors.New("bad flag")); !strings.Contains(got, "Try 'defenseclaw set --help'") {
+	t.Setenv(cliusage.DelegatedFromEnv, "defenseclaw")
+	if got := cliusage.UsageMessage(set, errors.New("bad flag")); !strings.Contains(got, "Try 'defenseclaw set --help'") {
 		t.Errorf("delegated usage message = %q, want the defenseclaw command", got)
 	}
 }
@@ -107,7 +108,7 @@ func TestInvokedGatewayPathResolvesARelativeInvocation(t *testing.T) {
 	}
 	for arg0, expect := range cases {
 		os.Args = []string{arg0}
-		if got := invokedGatewayPath("defenseclaw-gateway"); got != expect {
+		if got := cliusage.InvokedGatewayPath("defenseclaw-gateway"); got != expect {
 			t.Errorf("os.Args[0] = %q: invoked path %q, want %q", arg0, got, expect)
 		}
 	}

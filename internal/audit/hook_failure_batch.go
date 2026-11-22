@@ -23,6 +23,21 @@ type HookFailureAuditRow struct {
 	Severity string
 }
 
+// hookFailureRowsWithKnownEvents keeps the correlation event of a report row
+// only while the ledger still holds it: the row's observation refers to the
+// event, so a row written after retention pruned it would fail and hold the
+// report back. The call's hook_decision row is pruned with it.
+func (l *Logger) hookFailureRowsWithKnownEvents(ctx context.Context, rows []HookFailureAuditRow) []HookFailureAuditRow {
+	checked := make([]HookFailureAuditRow, len(rows))
+	for index, row := range rows {
+		if row.Envelope.SemanticEventID != "" && (l == nil || !l.store.correlationEventExists(ctx, row.Envelope.SemanticEventID)) {
+			row.Envelope.SemanticEventID, row.Envelope.LogicalEventID, row.Envelope.ConnectorInstanceID = "", "", ""
+		}
+		checked[index] = row
+	}
+	return checked
+}
+
 // LogHookFailureRowsAtomic returns the number of rows whose local outcome is
 // settled. A failed local transaction settles none, so its source window can
 // be replayed without duplicate rows.
@@ -30,6 +45,7 @@ func (l *Logger) LogHookFailureRowsAtomic(ctx context.Context, rows []HookFailur
 	if ctx == nil || len(rows) == 0 || len(rows) > 32 {
 		return 0, fmt.Errorf("audit: invalid hook failure batch")
 	}
+	rows = l.hookFailureRowsWithKnownEvents(ctx, rows)
 	binding := l.runtimeV8BindingSnapshot()
 	atomicEmitter, ok := binding.emitter.(RuntimeV8AtomicLogBatchEmitter)
 	if !ok {
@@ -62,6 +78,9 @@ func (l *Logger) LogHookFailureRowsAtomic(ctx context.Context, rows []HookFailur
 			SidecarInstanceID: ProcessAgentInstanceID(),
 		}
 		applyEnvelope(&event, row.Envelope)
+		event.SemanticEventID = row.Envelope.SemanticEventID
+		event.LogicalEventID = row.Envelope.LogicalEventID
+		event.ConnectorInstanceID = row.Envelope.ConnectorInstanceID
 		stampAuditEventEnvelope(&event)
 		classification := observability.ClassificationContext{RawSeverity: event.Severity}
 		registered, found := observability.AuditActionClassification(observability.ProducerKey(event.Action))

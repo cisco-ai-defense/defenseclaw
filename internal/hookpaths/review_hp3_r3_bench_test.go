@@ -52,9 +52,7 @@ func hp3r3Home(tb testing.TB) (home, project string) {
 	if err := os.WriteFile(keys, []byte("# decoy\n"), 0o600); err != nil {
 		tb.Fatal(err)
 	}
-	if err := os.Symlink("../.ssh/authorized_keys", filepath.Join(project, "keylink")); err != nil {
-		tb.Fatal(err)
-	}
+	testSymlink(tb, "../.ssh/authorized_keys", filepath.Join(project, "keylink"))
 	return home, project
 }
 

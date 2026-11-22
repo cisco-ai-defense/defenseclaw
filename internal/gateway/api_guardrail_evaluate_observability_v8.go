@@ -343,7 +343,7 @@ func (facts apiGuardrailEvaluateV8Facts) emitLog(
 			ConditionSecuritySeverityAvailable:  true,
 		}
 		caller := auditCallerIdentity(ctx)
-		if !ManagedEnterpriseActive() {
+		if v8RecordNamesCaller(ctx, caller.ID) {
 			input.UserID = hookV8OptionalIdentifier(caller.ID)
 			input.DefenseClawUserIDKind = v8UserIDKind(caller.IDKind)
 			input.DefenseClawUserName = v8UserName(caller.Name, hookV8OptionalIdentifier)
@@ -481,7 +481,7 @@ func (facts apiGuardrailEvaluateV8Facts) traceInput(
 		ConditionOperationTerminal:          true,
 	}
 	caller := auditCallerIdentity(ctx)
-	if !ManagedEnterpriseActive() {
+	if v8RecordNamesCaller(ctx, caller.ID) {
 		input.UserID = hookV8OptionalIdentifier(caller.ID)
 		input.DefenseClawUserIDKind = v8UserIDKind(caller.IDKind)
 		input.DefenseClawUserName = v8UserName(caller.Name, hookV8OptionalIdentifier)

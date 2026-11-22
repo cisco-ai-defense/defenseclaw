@@ -24,12 +24,13 @@ import yaml from "js-yaml";
 
 const DEFAULT_HOST = "127.0.0.1";
 const DEFAULT_API_PORT = 18970;
-// DEFENSECLAW_GATEWAY_TOKEN is the canonical env-var name written by
-// the Go sidecar's first-boot bootstrap path. OPENCLAW_GATEWAY_TOKEN
-// is preserved as a legacy fallback for installs that pre-date the
-// rename. Lookup order is consistent across process.env AND ~/.defenseclaw/.env.
-const DEFAULT_TOKEN_ENV = "DEFENSECLAW_GATEWAY_TOKEN";
-const LEGACY_TOKEN_ENV = "OPENCLAW_GATEWAY_TOKEN";
+// The plugin credential: the connector-scoped hook token setup mints for
+// openclaw. It authenticates only the routes the plugin calls
+// (internal/gateway/openclaw_plugin_scope.go), never the management API.
+// Before 1.0.10 the plugin read the master gateway token from config.yaml,
+// .env or OPENCLAW_GATEWAY_TOKEN; it reads none of them now.
+const PLUGIN_TOKEN_FILE = join("hooks", ".hook-openclaw.token");
+const PLUGIN_TOKEN_RE = /^[0-9a-f]{64}$/;
 
 interface SidecarConfig {
   host: string;
@@ -39,20 +40,6 @@ interface SidecarConfig {
   guardrailPort: number;
   approvalTimeoutS: number;
   hiltEnabled: boolean;
-  /**
-   * Mirror of guardrail.mode from ~/.defenseclaw/config.yaml. Values
-   * recognised by the host enforcement code are:
-   *   - "observe" (default): inspection failures fall open (legacy
-   *     behaviour, used in development).
-   *   - "action" / "enforce": inspection failures fail CLOSED. The
-   *     extension MUST NOT silently allow tool calls when the sidecar
-   *     is unreachable, returns 401/403/413, times out, or returns
-   *     malformed JSON (finding "Tool inspection fails open
-   *     on sidecar errors").
-   * Anything else is treated as observe to preserve the existing
-   * conservative default for unknown values.
-   */
-  enforcementMode: "observe" | "action";
 }
 
 let cached: SidecarConfig | undefined;
@@ -71,16 +58,114 @@ function resolveDefenseClawHome(): string {
 }
 
 /**
- * Read gateway.host, gateway.api_port, and gateway token from
- * ~/.defenseclaw/config.yaml. Token resolution mirrors the Go sidecar:
- * env var (gateway.token_env, default OPENCLAW_GATEWAY_TOKEN) wins over
- * the direct gateway.token value. Falls back to defaults if the file is
- * missing or malformed. The result is cached until config.yaml or .env
- * changes: `defenseclaw setup openclaw` rewrites the token in .env while
- * OpenClaw keeps running, and a stale token fails every sidecar call with
- * an api-auth-failure security event (GAP-2286).
+ * Read gateway.host and gateway.api_port from ~/.defenseclaw/config.yaml
+ * and the plugin credential from hooks/.hook-openclaw.token. Falls back to
+ * defaults if config.yaml is missing or malformed. The result is cached
+ * until config.yaml or the credential file changes: setup and token
+ * rotation rewrite the credential while OpenClaw keeps running, and a
+ * stale one fails every sidecar call (GAP-2286).
  */
+/**
+ * The separate-user layout: the OpenClaw account cannot read the DefenseClaw
+ * data folder, so plugins.entries.defenseclaw.config names the gateway
+ * address and the published credential (tokenFile), and the guardrail
+ * settings come from GET /api/v1/openclaw/runtime (setRuntimeSettings).
+ */
+interface SidecarConnection {
+  tokenFile: string;
+  host: string;
+  apiPort: number;
+  guardrailPort: number;
+}
+
+let connection: SidecarConnection | undefined;
+interface RuntimeSettings {
+  hiltEnabled: boolean;
+  approvalTimeoutS: number;
+  /** How long to wait for a verdict, from the gateway; 0 until it answers. */
+  inspectTimeoutMs: number;
+  /** connectors.openclaw.hooks.prompt_gate. */
+  promptGate: boolean;
+}
+
+let runtimeSettings: RuntimeSettings = { hiltEnabled: false, approvalTimeoutS: 30, inspectTimeoutMs: 0, promptGate: false };
+
+/** The last answer of GET /api/v1/openclaw/runtime. */
+export function getRuntimeSettings(): RuntimeSettings {
+  return runtimeSettings;
+}
+
+/** Configure the separate-user layout from api.pluginConfig (no tokenFile: off). */
+export function configureSidecarConnection(pluginConfig: unknown): void {
+  const pc = (pluginConfig ?? {}) as Record<string, unknown>;
+  const tokenFile = typeof pc["tokenFile"] === "string" ? pc["tokenFile"] : "";
+  if (!tokenFile || !isAbsolute(tokenFile)) {
+    connection = undefined;
+  } else {
+    const num = (v: unknown, d: number) => (typeof v === "number" && v > 0 ? v : d);
+    connection = {
+      tokenFile: normalize(tokenFile),
+      host: typeof pc["sidecarHost"] === "string" && pc["sidecarHost"] ? pc["sidecarHost"] : DEFAULT_HOST,
+      apiPort: num(pc["sidecarPort"], DEFAULT_API_PORT),
+      guardrailPort: num(pc["guardrailPort"], 4000),
+    };
+  }
+  _resetSidecarConfigCache();
+}
+
+/** Whether the plugin runs in the separate-user layout. */
+export function separateUserLayout(): boolean {
+  return connection !== undefined;
+}
+
+/** Apply the answer of GET /api/v1/openclaw/runtime. */
+export function setRuntimeSettings(answer: unknown): void {
+  const a = (answer ?? {}) as Record<string, unknown>;
+  const positive = (v: unknown) => typeof v === "number" && Number.isFinite(v) && v > 0;
+  runtimeSettings = {
+    hiltEnabled: a["hilt_enabled"] === true,
+    approvalTimeoutS: positive(a["approval_timeout_s"]) ? (a["approval_timeout_s"] as number) : 30,
+    inspectTimeoutMs: positive(a["inspect_timeout_ms"]) ? (a["inspect_timeout_ms"] as number) : 0,
+    promptGate: a["prompt_gate"] === true,
+  };
+  _resetSidecarConfigCache();
+}
+
+function readTokenFile(path: string): string {
+  try {
+    const value = readFileSync(path, "utf8").trim();
+    return PLUGIN_TOKEN_RE.test(value) ? value : "";
+  } catch {
+    return "";
+  }
+}
+
+function tokenFileKey(path: string): string {
+  try {
+    const st = statSync(path);
+    return `${path}:${st.mtimeMs}:${st.size}`;
+  } catch {
+    return `${path}:missing`;
+  }
+}
+
 export function loadSidecarConfig(): SidecarConfig {
+  if (connection) {
+    const key = `separate|${tokenFileKey(connection.tokenFile)}|${runtimeSettings.hiltEnabled}|${runtimeSettings.approvalTimeoutS}`;
+    if (cached && key === cachedKey) return cached;
+    const host = connection.host.trim().toLowerCase() === "localhost" ? DEFAULT_HOST : connection.host;
+    cached = {
+      host,
+      apiPort: connection.apiPort,
+      baseUrl: `http://${host}:${connection.apiPort}`,
+      token: readTokenFile(connection.tokenFile),
+      guardrailPort: connection.guardrailPort,
+      approvalTimeoutS: runtimeSettings.approvalTimeoutS,
+      hiltEnabled: runtimeSettings.hiltEnabled,
+    };
+    cachedKey = key;
+    return cached;
+  }
   // Resolve outside the permissive config-file fallback below. An invalid
   // explicit data-root override must fail closed instead of silently reading
   // an unrelated account-level installation.
@@ -94,9 +179,6 @@ export function loadSidecarConfig(): SidecarConfig {
   let approvalTimeoutS = 30;
   let hiltEnabled = false;
   let token = "";
-  // Default to observe to keep current dev behaviour. Production
-  // installs flip this via `guardrail.mode = action` (or `enforce`).
-  let enforcementMode: "observe" | "action" = "observe";
 
   try {
     const cfgPath = join(defenseClawHome, "config.yaml");
@@ -109,29 +191,10 @@ export function loadSidecarConfig(): SidecarConfig {
         if (typeof gw["approval_timeout_s"] === "number" && gw["approval_timeout_s"] > 0) {
           approvalTimeoutS = gw["approval_timeout_s"];
         }
-        if (typeof gw["token"] === "string" && gw["token"]) token = gw["token"];
-        const tokenEnv =
-          typeof gw["token_env"] === "string" && gw["token_env"]
-            ? gw["token_env"]
-            : DEFAULT_TOKEN_ENV;
-        // Mirror the Go resolver: try process.env first, then the
-        // sidecar-managed ~/.defenseclaw/.env. The .env path is the
-        // common case in production because the Go bootstrap writes
-        // DEFENSECLAW_GATEWAY_TOKEN there but does not export it
-        // into the Node process that loads this extension.
-        const envVal = process.env[tokenEnv] || readDotEnvToken(defenseClawHome, tokenEnv);
-        if (envVal) token = envVal;
       }
       const gr = raw["guardrail"] as Record<string, unknown> | undefined;
       if (gr && typeof gr === "object") {
         if (typeof gr["port"] === "number") guardrailPort = gr["port"];
-        if (typeof gr["mode"] === "string") {
-          const m = gr["mode"].toLowerCase();
-          // "action" and "enforce" are accepted aliases for the
-          // fail-closed behaviour. Anything else (including the legacy
-          // empty string) stays in observe.
-          enforcementMode = m === "action" || m === "enforce" ? "action" : "observe";
-        }
         const hilt =
           (gr["hilt"] as Record<string, unknown> | undefined) ??
           (gr["hitl"] as Record<string, unknown> | undefined);
@@ -144,24 +207,7 @@ export function loadSidecarConfig(): SidecarConfig {
     // Config missing or unreadable — use defaults
   }
 
-  // Last-resort fallbacks: try the canonical name, then the legacy
-  // OPENCLAW_GATEWAY_TOKEN. Both process.env and ~/.defenseclaw/.env
-  // are consulted for each name so the resolver works regardless of
-  // whether the operator exported the value into the shell or kept
-  // it solely in the sidecar-managed dotenv.
-  for (const name of [DEFAULT_TOKEN_ENV, LEGACY_TOKEN_ENV]) {
-    if (token) break;
-    const envVal = process.env[name];
-    if (envVal) {
-      token = envVal;
-      break;
-    }
-    const dotenvVal = readDotEnvToken(defenseClawHome, name);
-    if (dotenvVal) {
-      token = dotenvVal;
-      break;
-    }
-  }
+  token = readPluginToken(defenseClawHome);
 
   // The plugin keys its listener proof by host and connects to it: name the
   // address the gateway binds instead of a name that may resolve to ::1.
@@ -175,15 +221,14 @@ export function loadSidecarConfig(): SidecarConfig {
     guardrailPort,
     approvalTimeoutS,
     hiltEnabled,
-    enforcementMode,
   };
   cachedKey = key;
   return cached;
 }
 
-/** Path, mtime and size of config.yaml and .env, to notice when either changes. */
+/** Path, mtime and size of config.yaml and the credential file, to notice when either changes. */
 function configFilesKey(defenseClawHome: string): string {
-  return ["config.yaml", ".env"]
+  return ["config.yaml", PLUGIN_TOKEN_FILE]
     .map((name) => {
       const path = join(defenseClawHome, name);
       try {
@@ -197,27 +242,11 @@ function configFilesKey(defenseClawHome: string): string {
 }
 
 /**
- * Read a KEY=VALUE token from ~/.defenseclaw/.env.
- * The Go sidecar loads this file into its own process env, but the
- * OpenClaw Node.js process is separate and won't have it.
+ * The plugin credential at <DEFENSECLAW_HOME>/hooks/.hook-openclaw.token, or
+ * "" when it is missing or not a 64-character hex token.
  */
-function readDotEnvToken(defenseClawHome: string, key: string): string {
-  try {
-    const envPath = join(defenseClawHome, ".env");
-    const content = readFileSync(envPath, "utf8");
-    for (const line of content.split("\n")) {
-      const trimmed = line.trim();
-      if (trimmed.startsWith("#") || !trimmed.includes("=")) continue;
-      const eqIdx = trimmed.indexOf("=");
-      const k = trimmed.slice(0, eqIdx).trim();
-      if (k === key) {
-        return trimmed.slice(eqIdx + 1).trim();
-      }
-    }
-  } catch {
-    // .env missing or unreadable
-  }
-  return "";
+function readPluginToken(defenseClawHome: string): string {
+  return readTokenFile(join(defenseClawHome, PLUGIN_TOKEN_FILE));
 }
 
 /** Clear cached config (for testing). */

@@ -67,32 +67,8 @@ func (contract resolvedSchemaDerivedLogFamilyContract) schemaDerivedLogMandatory
 	return contract.mandatory
 }
 
-func (builder *FamilyBuilder) buildGeneratedLog(
-	descriptor generatedLogFamilyContract,
-	input familyLogBuildInput,
-) (Record, error) {
-	if !builder.ready() || nilInterface(descriptor) {
-		return Record{}, familyBuildFailure(FamilyBuildInvalidDependency)
-	}
-	contract := cloneFamilyDescriptorContract(descriptor.familyDescriptorContract())
-	if err := validateFamilyDescriptor(contract, familySignalLog); err != nil {
-		return Record{}, err
-	}
-	resolvedIdentity := descriptor.schemaDerivedLogIdentity()
-	if resolvedIdentity != contract.identity || resolvedIdentity.Signal != SignalLogs {
-		return Record{}, familyBuildFailure(FamilyBuildInvalidDescriptor)
-	}
-	return builder.buildResolvedGeneratedLog(
-		contract,
-		resolveGeneratedLogMandatory(descriptor.schemaDerivedLogMandatory()),
-		input,
-	)
-}
-
 // buildGeneratedResolvedLog is the private entry point used by generated
 // wrappers whose mandatory value is computed from compiler-owned typed facts.
-// The legacy generatedLogFamilyContract adapter above remains until generated
-// descriptors replace the handwritten compatibility witnesses.
 func (builder *FamilyBuilder) buildGeneratedResolvedLog(
 	descriptor familyDescriptor,
 	resolved resolvedGeneratedLogContract,
@@ -108,7 +84,23 @@ func (builder *FamilyBuilder) buildGeneratedResolvedLog(
 	)
 }
 
+// buildResolvedGeneratedLog is the v8 schema gate of every generated log. A
+// record the gate refuses is offered to the opt-in rejected-record store
+// (#1442) before the error goes back to the producer; the offer is one atomic
+// load when the store is off and never runs on an accepted record.
 func (builder *FamilyBuilder) buildResolvedGeneratedLog(
+	contract familyDescriptorContract,
+	resolved resolvedGeneratedLogContract,
+	input familyLogBuildInput,
+) (Record, error) {
+	record, err := builder.buildCheckedGeneratedLog(contract, resolved, input)
+	if err != nil {
+		offerRejectedFamilyRecord(contract, SignalLogs, input.envelope, input.values, err)
+	}
+	return record, err
+}
+
+func (builder *FamilyBuilder) buildCheckedGeneratedLog(
 	contract familyDescriptorContract,
 	resolved resolvedGeneratedLogContract,
 	input familyLogBuildInput,
@@ -165,7 +157,20 @@ func (builder *FamilyBuilder) buildResolvedGeneratedLog(
 	return checked.withOccurrence(recordInput.Timestamp, recordInput.RecordID), nil
 }
 
+// buildGeneratedTrace is the v8 schema gate of every generated span; see
+// buildResolvedGeneratedLog for the rejected-record offer.
 func (builder *FamilyBuilder) buildGeneratedTrace(
+	descriptor generatedTraceFamilyContract,
+	input familyTraceBuildInput,
+) (Record, error) {
+	record, err := builder.buildCheckedGeneratedTrace(descriptor, input)
+	if err != nil && RejectedRecordSinkInstalled() && !nilInterface(descriptor) {
+		offerRejectedFamilyRecord(descriptor.familyDescriptorContract(), SignalTraces, input.envelope, input.values, err)
+	}
+	return record, err
+}
+
+func (builder *FamilyBuilder) buildCheckedGeneratedTrace(
 	descriptor generatedTraceFamilyContract,
 	input familyTraceBuildInput,
 ) (Record, error) {
@@ -408,7 +413,20 @@ func mergeFamilyConditionFacts(
 	return merged, nil
 }
 
+// buildGeneratedMetric is the v8 schema gate of every generated metric point;
+// see buildResolvedGeneratedLog for the rejected-record offer.
 func (builder *FamilyBuilder) buildGeneratedMetric(
+	descriptor generatedMetricFamilyContract,
+	input familyMetricBuildInput,
+) (Record, error) {
+	record, err := builder.buildCheckedGeneratedMetric(descriptor, input)
+	if err != nil && RejectedRecordSinkInstalled() && !nilInterface(descriptor) {
+		offerRejectedFamilyRecord(descriptor.familyDescriptorContract(), SignalMetrics, input.envelope, input.labels, err)
+	}
+	return record, err
+}
+
+func (builder *FamilyBuilder) buildCheckedGeneratedMetric(
 	descriptor generatedMetricFamilyContract,
 	input familyMetricBuildInput,
 ) (Record, error) {

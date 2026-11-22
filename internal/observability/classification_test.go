@@ -28,8 +28,8 @@ import (
 func TestGatewayEventClassificationsMatchSourceConstants(t *testing.T) {
 	want := typedStringConstants(t, "internal/gatewaylog/events.go", "EventType")
 	got := producerKeysAsStrings(observability.ClassificationKeys(observability.ProducerGatewayEvent))
-	if len(want) != 17 {
-		t.Fatalf("gateway EventType source constants = %d, want 17", len(want))
+	if len(want) != 18 {
+		t.Fatalf("gateway EventType source constants = %d, want 18", len(want))
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("gateway classifications = %v, source constants = %v", got, want)
@@ -44,8 +44,8 @@ func TestAuditActionClassificationsMatchSourceConstantsAndRegistry(t *testing.T)
 	}
 	sort.Strings(registry)
 	got := producerKeysAsStrings(observability.ClassificationKeys(observability.ProducerAuditAction))
-	if len(sourceConstants) != 240 {
-		t.Fatalf("audit Action source constants = %d, want 240", len(sourceConstants))
+	if len(sourceConstants) != 247 {
+		t.Fatalf("audit Action source constants = %d, want 247", len(sourceConstants))
 	}
 	if !reflect.DeepEqual(registry, sourceConstants) {
 		t.Fatalf("audit.AllActions registry differs from typed source constants\nregistry: %v\nsource: %v", registry, sourceConstants)
@@ -450,4 +450,32 @@ func typedStringConstants(t *testing.T, relativePath, typeName string) []string 
 	})
 	sort.Strings(result)
 	return result
+}
+
+// model.usage has its own gateway_event producer. It is not an identity of the
+// v7 gateway events that the v7 audit-sink selector derives its event names
+// from (verdict, llm_prompt, llm_response, tool_invocation), so a migrated v7
+// audit sink never receives a usage record (GAP-0220).
+func TestModelUsageHasItsOwnProducerAndIsNotAV7AuditIdentity(t *testing.T) {
+	usage := observability.ClassificationContext{Bucket: observability.BucketModelIO, EventName: observability.EventName("model.usage"), RawSeverity: "INFO"}
+	own, found := observability.GatewayEventClassification(observability.ProducerKey("model_usage"))
+	if !found {
+		t.Fatal("no model_usage gateway_event classification")
+	}
+	resolved, err := own.Resolve(usage)
+	if err != nil {
+		t.Fatalf("model_usage cannot resolve model.usage: %v", err)
+	}
+	if resolved.Identity.Name != observability.EventName("model.usage") || resolved.Identity.Bucket != observability.BucketModelIO {
+		t.Fatalf("model_usage resolved to %+v", resolved.Identity)
+	}
+	for _, key := range []string{"verdict", "llm_prompt", "llm_response", "tool_invocation"} {
+		classification, found := observability.GatewayEventClassification(observability.ProducerKey(key))
+		if !found {
+			t.Fatalf("no %s gateway_event classification", key)
+		}
+		if _, err := classification.Resolve(usage); err == nil {
+			t.Errorf("%s accepts model.usage as a context identity: a v7 audit sink would receive usage records", key)
+		}
+	}
 }

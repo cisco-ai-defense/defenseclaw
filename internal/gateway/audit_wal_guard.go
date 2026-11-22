@@ -48,8 +48,9 @@ const (
 	// and auditWALGuardRetryInterval after a pass that needed the writer and
 	// did not get it to the end of the log. At 100 hook calls/s the log grew
 	// by about 55 MiB/s, so a 2 s tick could find it past the trigger, whose
-	// catch-up holds the writer without settling the backlog first, and its
-	// file past the 256 MiB bound (r108 SWEEP-100). Passing sooner keeps it
+	// catch-up takes the writer after only a short settle (audit
+	// walBoundedSettleRounds), and its file past the 256 MiB bound (r108
+	// SWEEP-100). Passing sooner keeps it
 	// in the settled catch-up and its short hold (audit walSettledHoldCap).
 	auditWALGuardBusyInterval  = time.Second
 	auditWALGuardRetryInterval = 250 * time.Millisecond
@@ -132,17 +133,47 @@ func auditWALGuardPass(ctx context.Context, store auditWALCheckpointer, alarm *a
 		fmt.Fprintf(log, "[sidecar] audit WAL checkpoint held the audit writer for %s (budget %s)\n",
 			pass.WriterHeld.Round(time.Millisecond), auditWALWriterBudget)
 	}
+	if line := alarm.observeBackoff(pass); line != "" {
+		fmt.Fprintln(log, line)
+	}
 	if line := alarm.observe(now, pass.FileBytes); line != "" {
 		fmt.Fprintln(log, line)
 	}
 	return pass
 }
 
+// observeBackoff says once when the guard starts leaving the writer to the
+// hooks because its holds kept reaching their cap without restarting the log
+// (audit.WALCheckpoint.HoldBackoff), and once when that ends: the store no
+// longer has the log over its limit (a restart, or a log back under it). The
+// passes in between, the rests and the probe holds between them, are
+// otherwise silent (rel-1-0-10:GAP-1153 review). A pass that found another
+// checkpoint busy or failed keeps the store's previous record, so it ends
+// nothing.
+func (a *auditWALAlarm) observeBackoff(pass audit.WALCheckpoint) string {
+	switch {
+	case pass.HoldBackoff && !a.backingOff:
+		a.backingOff = true
+		return fmt.Sprintf("[sidecar] audit WAL over its %d MiB limit (%d MiB): writer holds did not restart the log; "+
+			"leaving the audit writer to the hooks while the disk catches up",
+			int64(auditWALLimitBytes)>>20, pass.LogBytes>>20)
+	case a.backingOff && !pass.OverLimit:
+		a.backingOff = false
+		return fmt.Sprintf("[sidecar] audit WAL back under its %d MiB limit (restarted %t): writer hold backoff ended",
+			int64(auditWALLimitBytes)>>20, pass.Restarted)
+	}
+	return ""
+}
+
 // auditWALAlarm says when the audit WAL file passes auditWALAlarmBytes, again
-// every auditWALAlarmRepeat while it stays there, and once when it is back.
+// every auditWALAlarmRepeat while it stays there, and once when it is back,
+// and when the guard's hold backoff starts and when it ends.
 type auditWALAlarm struct {
 	raised   bool
 	reported time.Time
+	// backingOff is whether the last pass left the writer alone
+	// (observeBackoff).
+	backingOff bool
 }
 
 func (a *auditWALAlarm) observe(now time.Time, walBytes int64) string {

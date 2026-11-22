@@ -37,15 +37,9 @@ func TestGAP0641AliasThroughLinkStaysUnprovedWithoutDotDot(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(hookCWD, "status"), []byte("ordinary"), 0600); err != nil {
 				t.Fatal(err)
 			}
-			if err := os.Symlink(protected, filepath.Join(agentCWD, "status")); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.Symlink(alias, filepath.Join(project, "jump")); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.Symlink("jump", filepath.Join(project, "chain")); err != nil {
-				t.Fatal(err)
-			}
+			testSymlink(t, protected, filepath.Join(agentCWD, "status"))
+			testSymlink(t, alias, filepath.Join(project, "jump"))
+			testSymlink(t, "jump", filepath.Join(project, "chain"))
 			t.Chdir(hookCWD)
 			for _, target := range []string{
 				filepath.Join(project, "jump", "status"),

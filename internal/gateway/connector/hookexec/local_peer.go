@@ -4,6 +4,7 @@
 package hookexec
 
 import (
+	"errors"
 	"fmt"
 	"net"
 )
@@ -35,3 +36,8 @@ func VerifyLocalPeer(conn net.Conn) error {
 	}
 	return verifyLocalPeerTuple(local, remote)
 }
+
+// ErrPeerAccountUnverifiable: this OS cannot name the owner of a socket of
+// another account without privileges (macOS reads owners from the processes
+// of this account only); VerifyLocalPeerOwnedBy returns it there.
+var ErrPeerAccountUnverifiable = errors.New("the owner of another account socket cannot be read on this OS")

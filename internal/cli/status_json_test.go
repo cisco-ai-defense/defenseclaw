@@ -15,6 +15,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 )
 
@@ -73,7 +74,7 @@ func TestGatewayStatusConfigLoadErrorNamesKeysSet(t *testing.T) {
 func TestUsageErrorShowsSubcommandFormOfRunnableGroup(t *testing.T) {
 	group := &cobra.Command{Use: "watchdog", RunE: func(*cobra.Command, []string) error { return nil }}
 	group.AddCommand(&cobra.Command{Use: "status", RunE: func(*cobra.Command, []string) error { return nil }})
-	err := unexpectedArgs(group, []string{"bogus"})
+	err := cliusage.UnexpectedArgs(group, []string{"bogus"})
 	if err == nil || !strings.Contains(err.Error(), "watchdog [command]") || !strings.Contains(err.Error(), "unknown command") {
 		t.Fatalf("usage error = %v", err)
 	}

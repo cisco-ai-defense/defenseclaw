@@ -69,7 +69,7 @@ func Compose(ctx context.Context, in ComposeInput) (*Manifest, []byte, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	if err := CheckKeyProductFloor(cfg, in.MinProductVersion); err != nil {
+	if err := CheckKeyProductFloor(cfg, b.Files[ConfigName], in.MinProductVersion); err != nil {
 		return nil, nil, err
 	}
 	if join := cfg.Enterprise.AccountJoin; join.On() && join.NextGeneration != 0 {
@@ -142,7 +142,7 @@ func Compose(ctx context.Context, in ComposeInput) (*Manifest, []byte, error) {
 		Files:             FileEntries(b),
 		SecretRefs:        refs,
 		EffectivePolicy:   EffectivePolicy{ProductVersion: in.ProductVersion, ComputedOn: in.HostPlatform, Digests: digests, Components: components},
-		Warnings:          limitBundleWarnings(append(append(ruleWarnings, Reachability(cfg, platforms)...), sectionWarnings...)),
+		Warnings:          limitBundleWarnings(append(append(append(ruleWarnings, Reachability(cfg, platforms)...), sectionWarnings...), RoutingAliasCredentialWarnings(cfg)...)),
 	}
 	raw, err := m.Marshal()
 	if err != nil {

@@ -24,6 +24,8 @@ import (
 	"io/fs"
 	"os"
 	"os/user"
+	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"syscall"
@@ -57,8 +59,75 @@ var sandboxGroupName = func(gid int) string {
 // member of its group, else the other bits. For /dev/kvm, a named user ACL
 // takes precedence over group and other bits. A path or ACL that cannot be
 // examined grants nothing.
+//
+// On macOS the docker socket is Docker Desktop's link into the home of the
+// account that started it last; the gateway's service account cannot look
+// behind it, so the link itself decides (sandboxDockerDesktopAccess).
 func sandboxPathAccess(path string, uid int) sandboxDeviceAccess {
+	if path == sandboxDockerSocketPath && runtime.GOOS == "darwin" {
+		return sandboxDockerDesktopAccess(path, uid, sandboxAccountHome)
+	}
 	return sandboxDevicePathAccess(path, uid, path == sandboxKVMDevicePath)
+}
+
+// sandboxAccountHome is uid's home folder from the account database;
+// tests replace it.
+var sandboxAccountHome = func(uid int) (string, error) {
+	account, err := unixidentity.Default(context.Background()).LookupUID(uid)
+	if err != nil {
+		return "", err
+	}
+	return account.Home, nil
+}
+
+// sandboxDockerLinkTrusted reports a docker socket link only root can have
+// made (Docker Desktop's privileged helper writes it in /var/run); tests
+// replace it.
+var sandboxDockerLinkTrusted = func(info fs.FileInfo) bool {
+	st, ok := info.Sys().(*syscall.Stat_t)
+	return ok && st.Uid == 0
+}
+
+// sandboxDockerDesktopAccess judges the macOS docker socket path for uid.
+// Docker Desktop points it, as a root-owned link, at
+// <home>/.docker/run/docker.sock of the account whose Docker Desktop
+// started last, behind that account's 0700 ~/.docker. The managed gateway
+// runs as a service account, so a stat through the link fails for it even
+// when the link leads to the caller's own Docker Desktop, and every
+// managed Mac account was told the socket isn't read-write for it
+// (GAP-0007). A trusted link into the caller's own home is the caller's
+// own Docker Desktop: usable, and the account's sandbox daemon checks that
+// Docker answers when the sandbox starts. Anything else is judged through
+// the link as before: another account's Docker Desktop stays denied.
+func sandboxDockerDesktopAccess(path string, uid int, home func(int) (string, error)) sandboxDeviceAccess {
+	access := sandboxDevicePathAccess(path, uid, false)
+	if access.State != sandboxDeviceDenied {
+		return access
+	}
+	info, err := os.Lstat(path)
+	if err != nil || info.Mode()&fs.ModeSymlink == 0 || !sandboxDockerLinkTrusted(info) {
+		return access
+	}
+	target, err := os.Readlink(path)
+	if err != nil {
+		return access
+	}
+	if !filepath.IsAbs(target) {
+		target = filepath.Join(filepath.Dir(path), target)
+	}
+	dir, err := home(uid)
+	if err != nil {
+		// The answer depends on an account record that could not be
+		// looked up: provisional, as for groups (GAP-0507).
+		return sandboxDeviceAccess{State: sandboxDeviceGroupsUnknown}
+	}
+	if dir = filepath.Clean(dir); dir == "/" || !filepath.IsAbs(dir) {
+		return access
+	}
+	if filepath.Clean(target) == filepath.Join(dir, ".docker", "run", "docker.sock") {
+		return sandboxDeviceAccess{State: sandboxDeviceUsable}
+	}
+	return access
 }
 
 func sandboxDevicePathAccess(path string, uid int, checkACL bool) sandboxDeviceAccess {

@@ -47,7 +47,7 @@ func newMovedStoreFixture(t *testing.T) movedStoreFixture {
 		t.Fatal(err)
 	}
 	t.Setenv("HOME", root)
-	return movedStoreFixture{root: root, home: home, allowlist: filepath.Join(root, ".hermes", hermesAllowlistFileName)}
+	return movedStoreFixture{root: root, home: home, allowlist: filepath.Join(root, ".hermes", HermesAllowlistFileName)}
 }
 
 // writeEarlierDataDirList writes the list config set data_dir keeps in the
@@ -320,7 +320,7 @@ func TestSetupAfterEachDataDirMoveRewritesItsOwnApprovals(t *testing.T) {
 	previousOverride := HermesConfigPathOverride
 	HermesConfigPathOverride = ""
 	t.Cleanup(func() { HermesConfigPathOverride = previousOverride })
-	allowlist := filepath.Join(hermesHome, hermesAllowlistFileName)
+	allowlist := filepath.Join(hermesHome, HermesAllowlistFileName)
 
 	conn := NewHermesConnector()
 	var opts SetupOpts

@@ -4,6 +4,7 @@
 package pathidentity
 
 import (
+	"errors"
 	"os"
 	"sync/atomic"
 )
@@ -57,4 +58,27 @@ func runPinnedStatHook(path string) {
 func SetPinnedStatHookForTest(fn func(path string)) (restore func()) {
 	pinnedStatHook.Store(&fn)
 	return func() { pinnedStatHook.Store(nil) }
+}
+
+// ErrLinked is the error of HoldUnlinked for a path whose last component is
+// a link (a symbolic link, a junction or another name surrogate).
+var ErrLinked = errors.New("pathidentity: the last component of the path is a link")
+
+// HoldUnlinked holds the last component of path, which a check has read as
+// no link, for a read of the path that follows it: a component that is a
+// link now is refused (ErrLinked) before anything opens it, so a read never
+// follows a link the check did not see. still, called once after the read,
+// releases the hold and reports whether the component stayed no link for
+// the whole read; a read for which it reports false is to be discarded.
+//
+// On Windows the component is opened without following it and without
+// delete sharing: while it is held no one can rename or delete it, so no
+// link can take its place. If another handle already has delete access the
+// component is held with it shared and looked at again in still. On other
+// platforms it is read with lstat before and after the read.
+//
+// A component that does not exist is that error; one that cannot be opened
+// at all is left to the read and looked at again in still.
+func HoldUnlinked(path string) (still func() bool, err error) {
+	return holdUnlinked(path)
 }

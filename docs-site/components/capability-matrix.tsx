@@ -156,16 +156,16 @@ export function SandboxHarnessTable() {
               <Td className="max-w-[240px] break-all font-mono text-[11px] text-fd-muted-foreground">{c.sandbox.hookConfig}</Td>
               <Td className="max-w-[320px] text-xs leading-relaxed">
                 {c.sandbox.verified === 'verified' ? (
-                  <span className="font-medium text-emerald-700 dark:text-emerald-400">Verified end to end</span>
+                  <span className="font-medium text-emerald-700 dark:text-emerald-400">Supported</span>
                 ) : (
                   <>
-                    <span className="font-medium text-[var(--brand-cisco-strong)]">Unverified: cannot run yet.</span>{' '}
+                    <span className="font-medium text-[var(--brand-cisco-strong)]">Not available yet: cannot run yet.</span>{' '}
                     <span className="text-fd-muted-foreground">{c.sandbox.unverifiedReason}.</span>
                   </>
                 )}
                 {c.sandbox.untestedAuth && c.sandbox.untestedAuth.length > 0 && (
                   <div className="mt-1 text-fd-muted-foreground">
-                    Not tested live:{' '}
+                    Preview:{' '}
                     {c.sandbox.untestedAuth.map((entry, j) => (
                       <span key={entry}>
                         {j > 0 && ', '}

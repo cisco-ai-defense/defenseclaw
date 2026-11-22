@@ -32,6 +32,8 @@ import (
 	"time"
 
 	"golang.org/x/sys/unix"
+
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // The golden creates thousands of short-lived hook installations. Each one
@@ -950,23 +952,35 @@ func runHookGoldenCase(base string, i int, c hookGoldenCase) (hookGoldenObservat
 	env, review2Delay := review2Env(env, base)
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, script, c.hook.args(c.event)...)
-	if sh := os.Getenv("DC_REVIEW2_BASH"); sh != "" {
-		cmd = exec.CommandContext(ctx, sh, append([]string{script}, c.hook.args(c.event)...)...)
-	}
-	cmd.Dir = work
-	cmd.Env = env
+	var delayedStdin io.Reader
 	if review2Delay > 0 {
 		pr, pw := io.Pipe()
 		go func() { time.Sleep(review2Delay); _, _ = pw.Write(stdin); _ = pw.Close() }()
-		cmd.Stdin = pr
-	} else {
-		cmd.Stdin = bytes.NewReader(stdin)
+		delayedStdin = pr
 	}
 	var stdout, stderr bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	hookStart := time.Now()
-	runErr := cmd.Run()
+	// The 16 workers write each case's hook files while others fork, so an
+	// exec of a just-written hook can meet ETXTBSY (rel-1-0-10:GAP-1208).
+	cmd, runErr := testenv.StartWritten(func() *exec.Cmd {
+		cmd := exec.CommandContext(ctx, script, c.hook.args(c.event)...)
+		if sh := os.Getenv("DC_REVIEW2_BASH"); sh != "" {
+			cmd = exec.CommandContext(ctx, sh, append([]string{script}, c.hook.args(c.event)...)...)
+		}
+		cmd.Dir = work
+		cmd.Env = env
+		cmd.Stdin = delayedStdin
+		if cmd.Stdin == nil {
+			cmd.Stdin = bytes.NewReader(stdin)
+		}
+		stdout.Reset()
+		stderr.Reset()
+		cmd.Stdout, cmd.Stderr = &stdout, &stderr
+		return cmd
+	})
+	if runErr == nil {
+		runErr = cmd.Wait()
+	}
 	obs.raw.HookMs = time.Since(hookStart).Milliseconds()
 	obs.raw.LoadAfter = hookGoldenLoad()
 	obs.raw.Stdout, obs.raw.Stderr, obs.raw.Root, obs.raw.Addr = stdout.String(), stderr.String(), root, addr

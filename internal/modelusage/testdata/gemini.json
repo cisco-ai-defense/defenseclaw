@@ -1,0 +1,1 @@
+{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":400,"cachedContentTokenCount":100,"candidatesTokenCount":60,"thoughtsTokenCount":25,"totalTokenCount":485},"modelVersion":"gemini-2.5-pro"}

@@ -13,6 +13,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -23,16 +24,16 @@ import (
 // connector verify`). Every answer names managed status and verify.
 func TestManagedUnixConfigLoadErrorNamesOnlyAWorkingAdminCommand(t *testing.T) {
 	descriptor := filepath.Join(t.TempDir(), "managed-runtime.json")
-	restore, restoreWindows, restoreTrust := managedHostDescriptorPath, managedHostWindowsStandalone, managedHostRecordTrusted
+	restore, restoreWindows, restoreTrust := hookcli.ManagedHostDescriptorPath, hookcli.ManagedHostWindowsStandalone, hookcli.ManagedHostRecordTrusted
 	restoreDeployment, restoreUID := managedStandaloneAdminDeployment, managedHostCallerUID
-	managedHostDescriptorPath = func() string { return descriptor }
-	managedHostWindowsStandalone = func() (string, bool) { return "", false }
-	managedHostRecordTrusted = func(string) error { return nil }
+	hookcli.ManagedHostDescriptorPath = func() string { return descriptor }
+	hookcli.ManagedHostWindowsStandalone = func() (string, bool) { return "", false }
+	hookcli.ManagedHostRecordTrusted = func(string) error { return nil }
 	managedStandaloneAdminDeployment = func() (managed.StandaloneLayout, *managed.RuntimeDescriptor, error) {
 		return managed.StandaloneLayout{}, &managed.RuntimeDescriptor{ServiceUID: 990}, nil
 	}
 	defer func() {
-		managedHostDescriptorPath, managedHostWindowsStandalone, managedHostRecordTrusted = restore, restoreWindows, restoreTrust
+		hookcli.ManagedHostDescriptorPath, hookcli.ManagedHostWindowsStandalone, hookcli.ManagedHostRecordTrusted = restore, restoreWindows, restoreTrust
 		managedStandaloneAdminDeployment, managedHostCallerUID = restoreDeployment, restoreUID
 	}()
 	t.Setenv(managed.DeploymentModeEnv, "")

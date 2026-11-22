@@ -18,15 +18,36 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
-// HookBinaryPath is the administrator-owned hook executable every machine
-// policy entry invokes (defenseclaw-hook, .exe on Windows).
+// windowsHookLaunchPath resolves the launch image of a Windows bin
+// (GAP-0751); a seam so renderer tests stay pure.
+var windowsHookLaunchPath = winpath.EnterpriseHookLaunchPath
+
+// HookBinaryPath is the administrator-owned hook executable at its fixed
+// path in bin (defenseclaw-hook, .exe on Windows). On Windows that is the
+// transition image, which machine policy written by 1.0.9 names; it is
+// pure, so the read-only and ownership checks (also those a hook process
+// makes) never read an image. A policy written now names
+// HookLaunchBinaryPath.
 func HookBinaryPath(layout managed.StandaloneLayout) string {
 	if layout.GOOS == "windows" {
 		return strings.TrimRight(layout.BinDir, `\`) + `\defenseclaw-hook.exe`
 	}
 	return path.Join(layout.BinDir, "defenseclaw-hook")
+}
+
+// HookLaunchBinaryPath is the hook executable a machine policy entry
+// written now invokes. On Windows it is the launch image
+// <bin>\hooks\<d16>\defenseclaw-hook.exe once Setup staged it, so an upgrade
+// never replaces the image an agent starts (GAP-0751), else the transition
+// image. Linux and macOS: HookBinaryPath.
+func HookLaunchBinaryPath(layout managed.StandaloneLayout) string {
+	if layout.GOOS == "windows" {
+		return windowsHookLaunchPath(strings.TrimRight(layout.BinDir, `\`))
+	}
+	return HookBinaryPath(layout)
 }
 
 // LayoutOptions derives the machine policy paths of a standalone layout
@@ -66,6 +87,9 @@ func StandaloneOptions(layout managed.StandaloneLayout, programFiles, programDat
 		return Options{}, errors.New("enterprise machine policy requires the standalone managed_enterprise profile")
 	}
 	opts := LayoutOptions(layout, programFiles, programData)
+	// The lifecycle, the guardian and `enterprise policy` render machine
+	// policy from these options: they name the launch image (GAP-0751).
+	opts.HookBinary = HookLaunchBinaryPath(layout)
 	opts.Policies = map[string]config.ResolvedConnectorPolicy{}
 	for _, name := range withCompanions(StandaloneConnectors(cfg)) {
 		opts.Policies[name] = cfg.Enterprise.MachinePolicy.PolicyFor(name)

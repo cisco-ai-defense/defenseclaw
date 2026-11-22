@@ -143,9 +143,7 @@ func claimedStopRows(t *testing.T, home string) []claimedStopRow {
 // hand from inside the row write; nothing sleeps.
 func TestManagedStopProvenLateNamesNotRunningInAnswerAndRow(t *testing.T) {
 	stubManagedLifecycle(t, func() bool { return false })
-	previousLogWait := answerWatchdogLogWait
-	answerWatchdogLogWait = time.Minute // a bound only: the row is released below
-	t.Cleanup(func() { answerWatchdogLogWait = previousLogWait })
+	setAnswerWatchdogLogWait(t, time.Minute) // a bound only: the row is released below
 
 	for _, form := range managedStoppedForms {
 		t.Run(form.name, func(t *testing.T) {

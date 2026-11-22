@@ -41,6 +41,21 @@ var openCodePin = npmPin{
 	},
 }
 
+// openCodePinSubstrate is the OpenCode V2 release of the Agent Substrate actor
+// kit (lane K1): the cert hosts' release, 2.2.7 (hook contract opencode-hooks-v2,
+// 2.0.0 to below 2.3.0).
+var openCodePinSubstrate = npmPin{
+	Package:   "@opencode/cli",
+	Version:   "2.2.7",
+	Integrity: "sha512-qsSExDfpUCqhGXBqZ8xhjg2OG9DxnsnfWl1/7vGINRWw7sxZvK9cXeW6MI8j9e+GItaYtg94zH3Eo2ng86VLCg==",
+	Native: map[string]npmNative{
+		"aarch64": {Path: "lib/node_modules/@opencode/cli/node_modules/@opencode/cli-linux-arm64/bin/opencode", SHA256: "c577783eacf7d1e66661fc7fd904b7646761497b687ff8f8f82ebe4f2f3ea425"},
+		"x86_64":  {Path: "lib/node_modules/@opencode/cli/node_modules/@opencode/cli-linux-x64-baseline/bin/opencode", SHA256: "589253d36810f21217edd51545cd435b328cdc3cf4f451fbe0cce6f88afcf5e1"},
+	},
+}
+
+var openCodePins = npmPins{openCodePin, openCodePinSubstrate}
+
 // openCodeMantleConfig is the OPENCODE_CONFIG_CONTENT of the Bedrock Mantle
 // profile: a custom provider on OpenCode's bundled Anthropic SDK, keyed from
 // the placeholder in BEDROCK_MANTLE_API_KEY ({env:...} is resolved per
@@ -78,7 +93,7 @@ var OpenCode = register(&Spec{
 	},
 	install: func(version string) ([]InstallStep, error) {
 		root := InstallRootBase + "/opencode"
-		run, err := openCodePin.installRun(root, version, "opencode", "opencode-ai")
+		run, err := openCodePins.installRun(root, version, "opencode", "opencode-ai")
 		if err != nil {
 			return nil, err
 		}

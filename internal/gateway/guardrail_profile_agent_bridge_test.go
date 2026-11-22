@@ -79,6 +79,10 @@ func TestSoleLegacyRowCannotGrantItsRecordedNamesakePolicy(t *testing.T) {
 }
 
 func TestLegacyOwnerRefusalNamesAnExplainCommandForTheCurrentAgent(t *testing.T) {
+	// NewAPIServer below publishes its profile set (default profile in
+	// action mode) for the whole process: the next tests get it back.
+	previousProfiles := liveGuardrailProfiles.Load()
+	t.Cleanup(func() { liveGuardrailProfiles.Store(previousProfiles) })
 	legacy := agentidentity.LegacyAgentID(legacyBridgeInputs("alice@corp.example"))
 	current := agentidentity.AgentID(legacyBridgeInputs("alice@corp.example"))
 	records := []inventory.AgentIdentityRecord{legacyBridgeRecord(legacy, "alice@corp.example")}

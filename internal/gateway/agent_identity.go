@@ -127,6 +127,10 @@ func resolveHookAgentIdentity(ctx context.Context, req agentHookRequest) agentId
 		return agentIdentityFacts{}
 	}
 	connectorName := strings.ToLower(strings.TrimSpace(req.ConnectorName))
+	if actor, ok := substrateActorFrom(ctx); ok && connectorName != "" {
+		reg, _ := substrateRegistrationFrom(ctx)
+		return substrateAgentIdentityFacts(actor, reg, connectorName)
+	}
 	user := hookAgentIdentityUser(ctx)
 	if connectorName == "" || user.ID == "" {
 		return agentIdentityFacts{}

@@ -48,7 +48,7 @@
     "agent": {
       "type": "object", "additionalProperties": false,
       "required": ["id", "name", "command", "args", "support", "connector_id"],
-      "properties": {"id": {"$ref": "#/$defs/id"}, "name": {"type": "string"}, "command": {"type": "string", "minLength": 1}, "args": {"type": "array", "items": {"type": "string"}}, "support": {"$ref": "#/$defs/support"}, "connector_id": {"$ref": "#/$defs/id"}, "kind": {"enum": ["native", "bridge"]}, "registry_id": {"$ref": "#/$defs/id"}, "source_url": {"type": "string", "format": "uri", "pattern": "^https://"}}
+      "properties": {"id": {"$ref": "#/$defs/id"}, "name": {"type": "string"}, "command": {"type": "string", "minLength": 1}, "args": {"type": "array", "items": {"type": "string"}}, "support": {"$ref": "#/$defs/support"}, "connector_id": {"$ref": "#/$defs/id"}, "kind": {"enum": ["native", "bridge"]}, "runs_own_tools": {"type": "boolean"}, "registry_id": {"$ref": "#/$defs/id"}, "source_url": {"type": "string", "format": "uri", "pattern": "^https://"}}
     },
     "coverage": {
       "type": "object", "additionalProperties": false,

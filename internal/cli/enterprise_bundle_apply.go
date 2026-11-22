@@ -16,6 +16,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 )
 
@@ -84,7 +85,7 @@ Exit codes: 0, 1 (errors[].code names the refusal), 75 busy, 2 usage. With
 			out := &countingWriter{w: cmd.OutOrStdout()}
 			cmd.SetOut(out)
 			err := runEnterpriseBundleApply(cmd, opts)
-			if out.n == 0 && err != nil && commandExitCode(err) == enterprisestatus.InvalidArgsExitCode(runtime.GOOS) {
+			if out.n == 0 && err != nil && cliusage.ExitCode(err) == enterprisestatus.InvalidArgsExitCode(runtime.GOOS) {
 				return bundleApplyArgumentError(cmd, opts, err)
 			}
 			return err
@@ -124,9 +125,9 @@ func bundleApplyArgumentError(cmd *cobra.Command, opts *bundleApplyOptions, err 
 		return err
 	}
 	message := err.Error()
-	var usage *delegatedUsageError
-	if errors.As(err, &usage) && usage.err != nil {
-		message = usage.err.Error()
+	var usage *cliusage.DelegatedUsageError
+	if errors.As(err, &usage) && usage.Err != nil {
+		message = usage.Err.Error()
 	}
 	res := &bundleApplyResult{SchemaVersion: bundleOutputSchemaVersion, Command: "apply",
 		Errors: []bundleError{{Code: "invalid_arguments", Message: message}}}

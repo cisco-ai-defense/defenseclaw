@@ -347,7 +347,38 @@ func projectManagedVerdict(
 		projection.attributes = append(projection.attributes,
 			managedStringAttribute("defenseclaw.verdict.rule_ids", strings.Join(ruleIDs, ",")))
 	}
+	projectManagedVerdictUser(event, body, projection)
 	return true
+}
+
+// managedVerdictUserFields are the end-user fields of a verdict record that
+// AI Defense attributes the inspection with, and their length limits. Each
+// is copied only when the record carries a valid value; a missing or
+// invalid one is skipped and never rejects the record.
+var managedVerdictUserFields = []struct {
+	key string
+	max int
+}{
+	{"user.id", 256},
+	{"defenseclaw.user.id_kind", 64},
+	{"defenseclaw.user.name", 256},
+	{"defenseclaw.user.principal", 512},
+	{"defenseclaw.user.principal.assurance", 64},
+	{"defenseclaw.user.email", 254},
+}
+
+// projectManagedVerdictUser carries the verdict record's end user onto the
+// legacy event (user_id, user_name) and onto the log record's attributes.
+// The rewrite dropped them before, so AI Defense could not tell whose
+// inspection a verdict was.
+func projectManagedVerdictUser(event *gatewaylog.Event, body map[string]any, projection *managedCompatibilityProjection) {
+	event.UserID = managedString(body, "user.id", 256)
+	event.UserName = managedString(body, "defenseclaw.user.name", 256)
+	for _, field := range managedVerdictUserFields {
+		if value := managedString(body, field.key, field.max); value != "" {
+			projection.attributes = append(projection.attributes, managedStringAttribute(field.key, value))
+		}
+	}
 }
 
 func applyManagedCompatibility(record *logspb.LogRecord, projection managedCompatibilityProjection) bool {

@@ -25,6 +25,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -164,6 +165,12 @@ func commandNames(connectors []string) []string {
 		}
 	}
 	return out
+}
+
+// substrateOnlyRuntimes reports a floor's runtimes that leave Agent
+// Substrate only (config.SandboxAdminConfig.SubstrateOnly).
+func substrateOnlyRuntimes(runtimes []string) bool {
+	return len(runtimes) > 0 && !slices.Contains(runtimes, "openshell") && slices.Contains(runtimes, "substrate")
 }
 
 // andList joins words as "a", "a and b", "a, b and c".
@@ -332,6 +339,12 @@ func managedExplainRowsFor(m *sandboxapi.ManagedExplain, ex *sandboxapi.Explain,
 		add("Required", "your account is exempt from enrollment (enterprise.enrollment.exempt_users), so required_for doesn't apply to you: "+
 			andList(commandNames(m.RequiredFor))+" may also run on this computer outside a sandbox, where their calls are still inspected and logged",
 			"required_for")
+	case len(m.RequiredFor) > 0 && substrateOnlyRuntimes(m.Runtimes):
+		// runtimes: [substrate] (E26): the required agents run on Agent
+		// Substrate through the launcher, never on this computer.
+		names := commandNames(m.RequiredFor)
+		add("Required", andList(names)+" run only on Agent Substrate, not on this computer: start one with "+
+			"defenseclaw substrate run "+names[0], "required_for", "runtimes")
 	case len(m.RequiredFor) > 0:
 		text := andList(commandNames(m.RequiredFor)) + " run only in a sandbox on this computer"
 		keys := []string{"required_for"}

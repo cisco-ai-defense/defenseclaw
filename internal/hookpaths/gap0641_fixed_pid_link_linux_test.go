@@ -29,16 +29,10 @@ func TestGAP0641FixedPIDProcCWDOrdinary(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "runner", "status"), []byte("ordinary"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(protected, filepath.Join(project, "status")); err != nil {
-		t.Fatal(err)
-	}
+	testSymlink(t, protected, filepath.Join(project, "status"))
 	pidPath := fmt.Sprintf("/proc/%d/cwd", os.Getpid())
-	if err := os.Symlink(pidPath, filepath.Join(project, "jump")); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink("jump", filepath.Join(project, "chain")); err != nil {
-		t.Fatal(err)
-	}
+	testSymlink(t, pidPath, filepath.Join(project, "jump"))
+	testSymlink(t, "jump", filepath.Join(project, "chain"))
 	t.Chdir(runner)
 	for _, path := range []string{
 		pidPath + "/../status",
@@ -84,21 +78,15 @@ func TestGAP0641FixedPIDProcFDOrdinary(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(ordinaryDir, "status"), []byte("ordinary"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(protected, filepath.Join(project, "status")); err != nil {
-		t.Fatal(err)
-	}
+	testSymlink(t, protected, filepath.Join(project, "status"))
 	dir, err := os.Open(ordinaryDir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer dir.Close()
 	fdPath := fmt.Sprintf("/proc/%d/fd/%d", os.Getpid(), dir.Fd())
-	if err := os.Symlink(fdPath, filepath.Join(project, "jump")); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink("jump", filepath.Join(project, "chain")); err != nil {
-		t.Fatal(err)
-	}
+	testSymlink(t, fdPath, filepath.Join(project, "jump"))
+	testSymlink(t, "jump", filepath.Join(project, "chain"))
 	for _, path := range []string{
 		fdPath + "/status",
 		fdPath + "/../status",
@@ -122,9 +110,7 @@ func TestGAP0641FixedPIDProcFDOrdinary(t *testing.T) {
 	if err := os.Remove(filepath.Join(root, "ordinary", "status")); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(protected, filepath.Join(root, "ordinary", "status")); err != nil {
-		t.Fatal(err)
-	}
+	testSymlink(t, protected, filepath.Join(root, "ordinary", "status"))
 	protectedViaFD := fdPath + "/../status"
 	if data, err := exec.Command("cat", protectedViaFD).Output(); err != nil || string(data) != "protected" {
 		t.Fatalf("child protected read %q = %q, %v", protectedViaFD, data, err)

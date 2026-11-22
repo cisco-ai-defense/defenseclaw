@@ -39,7 +39,7 @@ func TestWindowsTypeNulRedirectToActiveStateBlocks(t *testing.T) {
 		input := actionfacts.Input{Tool: "Bash", Command: row.command, CWD: cwd, ActiveHome: home, DialectHint: row.dialect}
 		findings := dispatchTrustedAction(t.Context(), trustedActionRequest{Input: input, Connector: connectorName, EnforcementCapable: true})
 		verdict := buildVerdict(findings, "tool_call")
-		if got := verdict.Action == "block"; got != row.block {
+		if got := gap0747Blocked(findings, row.block); got != row.block {
 			t.Errorf("%s %q: action=%q want block=%v", row.dialect, row.command, verdict.Action, row.block)
 		}
 	}

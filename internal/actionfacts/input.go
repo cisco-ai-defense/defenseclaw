@@ -29,7 +29,12 @@ import (
 )
 
 type extractedInput struct {
-	command      string
+	command string
+	// unreadCommands are the command values a conflict left out of the
+	// projection; the sender reader reads them (GAP-0597).
+	unreadCommands []string
+	// unreadArgvs are the argv values a conflict left out.
+	unreadArgvs  [][]string
 	argv         []string
 	cwd          string
 	paths        []extractedScalar
@@ -928,6 +933,7 @@ func extractJSONObject(
 				}
 				if out.command != "" && out.command != value {
 					out.mergeProblem(StatusAmbiguous, IssueConflictingSources)
+					out.unreadCommands = append(out.unreadCommands, value)
 					continue
 				}
 				out.command = value
@@ -1157,6 +1163,7 @@ func mergeNestedExtractedValue(
 func mergeExtractedArgv(out *extractedInput, argv []string) {
 	if len(out.argv) > 0 && !equalStrings(out.argv, argv) {
 		out.mergeProblem(StatusAmbiguous, IssueConflictingSources)
+		out.unreadArgvs = append(out.unreadArgvs, cloneSlice(argv))
 		return
 	}
 	out.argv = cloneSlice(argv)
@@ -1325,6 +1332,25 @@ func consumeJSONValue(
 	return ""
 }
 
+// argvScalarText is the argv word of one JSON array element: a string, or
+// the JSON text of a number or a boolean (an agent writes "-n", 5 for
+// "-n", "5", and the tool runs it so). A null, an object or an array is no
+// word (GAP-0598).
+func argvScalarText(value any) (string, bool) {
+	switch value := value.(type) {
+	case string:
+		return value, true
+	case json.Number:
+		return value.String(), true
+	case bool:
+		if value {
+			return "true", true
+		}
+		return "false", true
+	}
+	return "", false
+}
+
 func stringArray(values []any) ([]string, IssueCode) {
 	if len(values) == 0 || len(values) > maxArgvItems {
 		if len(values) > maxArgvItems {
@@ -1335,7 +1361,7 @@ func stringArray(values []any) ([]string, IssueCode) {
 	argv := make([]string, len(values))
 	total := 0
 	for i, value := range values {
-		text, ok := value.(string)
+		text, ok := argvScalarText(value)
 		if !ok {
 			return nil, IssueInvalidJSON
 		}
@@ -1368,9 +1394,12 @@ func (out *extractedInput) mergeProblem(status ParseStatus, issue IssueCode) {
 }
 
 func (out *extractedInput) merge(other extractedInput) {
+	out.unreadCommands = append(out.unreadCommands, other.unreadCommands...)
+	out.unreadArgvs = append(out.unreadArgvs, other.unreadArgvs...)
 	if other.command != "" {
 		if out.command != "" && out.command != other.command {
 			out.mergeProblem(StatusAmbiguous, IssueConflictingSources)
+			out.unreadCommands = append(out.unreadCommands, other.command)
 		} else {
 			out.command = other.command
 		}
@@ -1378,6 +1407,7 @@ func (out *extractedInput) merge(other extractedInput) {
 	if len(other.argv) > 0 {
 		if len(out.argv) > 0 && !equalStrings(out.argv, other.argv) {
 			out.mergeProblem(StatusAmbiguous, IssueConflictingSources)
+			out.unreadArgvs = append(out.unreadArgvs, cloneSlice(other.argv))
 		} else {
 			out.argv = cloneSlice(other.argv)
 		}

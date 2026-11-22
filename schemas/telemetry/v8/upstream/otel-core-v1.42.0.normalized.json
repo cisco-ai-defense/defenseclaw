@@ -12,7 +12,7 @@
   "full_normalized_inventory_sha256": "183e280c15e0d55155cb6997a33c0b0097b2112315ecfb6c1a59f61aa75cfae6",
   "selection": {
     "policy": "authored-extension-closure-v1",
-    "attribute_ids_sha256": "72b8565ff37173abf3c212a19c33c3ff427bab600d97a4b409a89974cab9cfc9"
+    "attribute_ids_sha256": "ab1f7f102c41d85d39b70a5ecad94828086b313d38b4a27c095ef14deed8b292"
   },
   "source_files": [
     {
@@ -42,6 +42,10 @@
     {
       "path": "model/http/registry.yaml",
       "sha256": "8d44e243c6f18bb21dea653fdbf2e34b40750cafc0604d894e914c637c0a8c5d"
+    },
+    {
+      "path": "model/k8s/registry.yaml",
+      "sha256": "192e2133f4b62eb1375de8d6b968e38c24cdef2cb59d66cffbfd43014752396a"
     },
     {
       "path": "model/network/registry.yaml",
@@ -250,6 +254,30 @@
       "stability": "stable",
       "stability_source": "upstream",
       "source_pointer": "model/http/registry.yaml#/groups/0/attributes/10",
+      "enum": [],
+      "deprecated": false
+    },
+    {
+      "id": "k8s.cluster.name",
+      "allowed_types": [
+        "string"
+      ],
+      "shape": "attribute",
+      "stability": "stable",
+      "stability_source": "upstream",
+      "source_pointer": "model/k8s/registry.yaml#/groups/0/attributes/0",
+      "enum": [],
+      "deprecated": false
+    },
+    {
+      "id": "k8s.namespace.name",
+      "allowed_types": [
+        "string"
+      ],
+      "shape": "attribute",
+      "stability": "stable",
+      "stability_source": "upstream",
+      "source_pointer": "model/k8s/registry.yaml#/groups/0/attributes/7",
       "enum": [],
       "deprecated": false
     },
