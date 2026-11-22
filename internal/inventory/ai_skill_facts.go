@@ -134,7 +134,7 @@ func (s *ContinuousDiscoveryService) skillFacts(path string, bundled bool) *AISk
 	switch {
 	case bundled:
 		facts.Scope = SkillScopeBundled
-	case !inHome:
+	case !inHome && skillFolderManaged(path):
 		facts.Scope = SkillScopeManaged // an admin folder such as /etc/codex/skills
 	}
 	s.skillFactsMu.Lock()

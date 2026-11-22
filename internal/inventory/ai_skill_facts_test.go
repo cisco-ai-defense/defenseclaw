@@ -304,6 +304,10 @@ func TestDetectSkillsAttachesFactsOncePerFolder(t *testing.T) {
 
 func TestDetectSkillsSyncedAndManagedFolders(t *testing.T) {
 	home, managed := t.TempDir(), t.TempDir()
+	// The test folder stands for one an administrator owns.
+	adminOwned := skillFolderManaged
+	skillFolderManaged = func(path string) bool { return pathBelow(managed, path) || adminOwned(path) }
+	t.Cleanup(func() { skillFolderManaged = adminOwned })
 	skills := filepath.Join(home, ".claude", "skills")
 	writeSkillFiles(t, skills, map[string]string{
 		"pdf/SKILL.md":                     "---\nname: pdf\n---\n",
