@@ -35,6 +35,7 @@ type parser struct {
 	topParams []*Variable
 	exprMode  bool   // true inside (), $(), @{} values, [], method args
 	forHeader int    // >0 while inside a for/foreach header, so 'in' is a keyword
+	inIndex   int    // >0 while inside an index $a[...]: a "]" there closes the index, not a command word
 	budget    *int   // shared remaining work budget for nested string re-parses (F12)
 	src       string // source text, for slicing greedy command-name spans
 }
@@ -157,6 +158,12 @@ func (p *parser) atStop(s stopSet) bool {
 // parseStatementList parses statements until the stop token or EOF.
 func (p *parser) parseStatementList(s stopSet) []Statement {
 	var out []Statement
+	// a statement list inside an index ($a[$(cmd ])]) has its own command words
+	if p.inIndex > 0 {
+		saved := p.inIndex
+		p.inIndex = 0
+		defer func() { p.inIndex = saved }()
+	}
 	for {
 		p.skipSeparators()
 		if p.atStop(s) {

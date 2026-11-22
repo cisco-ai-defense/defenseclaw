@@ -28,16 +28,29 @@ type lexer struct {
 	// used to decide whether '-' / '.' / '@' start an operator or a word, and
 	// whether we are at a command-start position.
 	prevSignificant TokenKind
-	prevWasValue    bool   // last token could end a value (for dash disambiguation)
-	atStart         bool   // at a token boundary (for '#' comment vs bareword)
-	braceStack      []byte // 'h' for an open @{ hashtable, 'b' for a { scriptblock
+	prevWasValue    bool // last token could end a value (for dash disambiguation)
+	atStart         bool // at a token boundary (for '#' comment vs bareword)
+	// wordOpen: the last token is a piece of an unquoted word that pwsh still
+	// scans as one generic token (a bareword, variable, number or parameter,
+	// or a quoted piece glued to one). A quote, '#' or '<#' glued to an open
+	// word continues that word; it does not start a token (GAP-1850).
+	wordOpen bool
+	// stmtLead is the kind of the first significant token of the current
+	// statement (TokEOF until one is seen). An assignment operator in a
+	// statement led by a variable is an expression operator, so the next rune
+	// starts a fresh token, where '#' and '<#' begin comments.
+	stmtLead TokenKind
+	// leadStack saves stmtLead across ( ), $( ), @( ), { } and @{ } so the
+	// statement that encloses a group keeps its lead after the group closes.
+	leadStack  []TokenKind
+	braceStack []byte // 'h' for an open @{ hashtable, 'b' for a { scriptblock
 }
 
 func newLexer(src string) *lexer {
 	if len(src) > maxInput {
 		src = src[:maxInput]
 	}
-	l := &lexer{src: src, atStart: true}
+	l := &lexer{src: src, atStart: true, stmtLead: TokEOF}
 	l.runes = make([]rune, 0, len(src))
 	l.pos = make([]int, 0, len(src)+1)
 	for off := 0; off < len(src); {
@@ -75,23 +88,80 @@ func (l *lexer) cur() rune { return l.peek(0) }
 func (l *lexer) emit(k TokenKind, a, b int) {
 	t := Token{Kind: k, Raw: l.slice(a, b), Start: l.byteAt(a), End: l.byteAt(b)}
 	t.Value = t.Raw
+	l.push(t)
+}
+
+func (l *lexer) push(t Token) {
+	glued := false
+	if n := len(l.toks); n > 0 {
+		glued = l.wordOpen && l.toks[n-1].End == t.Start
+	}
 	l.toks = append(l.toks, t)
+	k := t.Kind
 	if k != TokNewline && k != TokComment {
 		l.prevSignificant = k
 		l.prevWasValue = k == TokVariable || k == TokNumber || k == TokString ||
 			k == TokGeneric || k == TokRParen || k == TokRBracket || k == TokRBrace
 	}
 	l.setAtStart(k)
+	switch k {
+	case TokGeneric, TokVariable, TokNumber, TokParameter:
+		l.wordOpen = true
+	case TokString:
+		// A quoted piece glued to an open word is part of that word, so the
+		// next rune is not at a token boundary: a"b"#x is one word in pwsh.
+		// A string that starts a token ends it: "b"#x is "b" then a comment.
+		l.wordOpen = glued && (t.Str == StrSingle || t.Str == StrDouble)
+		if l.wordOpen {
+			l.atStart = false
+		}
+	case TokLBracket, TokRBracket:
+		// In command arguments pwsh scans [int], a[# and .\a[1] as one generic
+		// word, so a '#' glued after a bracket is word text, not a comment.
+		l.wordOpen = l.stmtLead == TokGeneric
+		if l.wordOpen {
+			l.atStart = false
+		}
+	default:
+		l.wordOpen = false
+	}
+	switch k {
+	case TokLParen, TokLBrace, TokDollarParen, TokAtParen, TokAtBrace:
+		l.leadStack = append(l.leadStack, l.stmtLead)
+		l.stmtLead = TokEOF
+	case TokRParen, TokRBrace:
+		if n := len(l.leadStack); n > 0 {
+			l.stmtLead = l.leadStack[n-1]
+			l.leadStack = l.leadStack[:n-1]
+		}
+	case TokNewline, TokSemi, TokPipe, TokPipePipe, TokAmpAmp:
+		l.stmtLead = TokEOF
+	case TokComment:
+	case TokOperator:
+		if l.stmtLead == TokVariable && isAssignOp(t.Value) {
+			// $x = ...: the right side is a new pipeline that starts at a
+			// token boundary ($x =# c and $x =<# c #> are comments in pwsh).
+			l.atStart = true
+			l.stmtLead = TokEOF
+			break
+		}
+		if l.stmtLead == TokEOF {
+			l.stmtLead = k
+		}
+	default:
+		if l.stmtLead == TokEOF {
+			l.stmtLead = k
+		}
+	}
 }
 
-func (l *lexer) push(t Token) {
-	l.toks = append(l.toks, t)
-	if t.Kind != TokNewline && t.Kind != TokComment {
-		l.prevSignificant = t.Kind
-		l.prevWasValue = t.Kind == TokVariable || t.Kind == TokNumber || t.Kind == TokString ||
-			t.Kind == TokGeneric || t.Kind == TokRParen || t.Kind == TokRBracket || t.Kind == TokRBrace
+// isAssignOp reports whether an operator token value is an assignment.
+func isAssignOp(v string) bool {
+	switch v {
+	case "=", "+=", "-=", "*=", "/=", "%=", "??=":
+		return true
 	}
-	l.setAtStart(t.Kind)
+	return false
 }
 
 // setAtStart records whether the next token begins at a token boundary (after a
@@ -116,6 +186,7 @@ func (l *lexer) lex() []Token {
 		case r == ' ' || r == '\t' || r == '\r' || r == '\f' || r == 0xA0:
 			l.i++
 			l.atStart = true
+			l.wordOpen = false
 		case r == '`' && (l.peek(1) == '\n' || l.peek(1) == '\r' || l.peek(1) == -1):
 			// line continuation: swallow backtick + newline
 			l.i++
@@ -126,6 +197,7 @@ func (l *lexer) lex() []Token {
 				l.i++
 			}
 			l.atStart = true
+			l.wordOpen = false
 		case r == '\n':
 			a := l.i
 			l.i++
@@ -271,10 +343,27 @@ func (l *lexer) lexHereString() {
 	}
 	// Terminator: a line that begins with  "@  (or '@), i.e. the quote then @
 	// at the start of a line.
+	// In an expandable here-string pwsh finds the end of a $( ) by counting
+	// $( and ) as in a "..." string, and a "@ line inside it does not end the
+	// string: @"<nl>$(@"<nl>x<nl>"@)<nl>"@ is one string (GAP-1853). The
+	// nested parse of the $( ) body carries the depth bound (ps_depth_limit).
+	depth := 0
 	for l.i < len(l.runes) {
+		if kind == StrHereDouble {
+			if l.cur() == '$' && l.peek(1) == '(' {
+				depth++
+				l.i += 2
+				continue
+			}
+			if l.cur() == ')' && depth > 0 {
+				depth--
+				l.i++
+				continue
+			}
+		}
 		atLineStart := l.i == 0 || l.runes[l.i-1] == '\n'
 		sameClass := (kind == StrHereSingle && isSingleQuote(l.cur())) || (kind == StrHereDouble && isDoubleQuote(l.cur()))
-		if atLineStart && sameClass && l.peek(1) == '@' {
+		if depth == 0 && atLineStart && sameClass && l.peek(1) == '@' {
 			l.i += 2
 			t := Token{Kind: TokString, Str: kind, Raw: l.slice(a, l.i), Start: l.byteAt(a), End: l.byteAt(l.i)}
 			t.Value = t.Raw
