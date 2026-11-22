@@ -4,6 +4,7 @@
 package routingadmin
 
 import (
+	"container/list"
 	"math"
 	"sort"
 	"strings"
@@ -31,7 +32,14 @@ type Ledger struct {
 	// price covers (UnknownTTL).
 	unknown map[string]time.Time
 	// seeded holds the budget ids whose remote spend has been read once.
-	seeded   map[string]bool
+	seeded map[string]bool
+	// lru orders the local keys of each launcher-keyed budget (scope actor and
+	// batch), per budget id, so one budget holds at most KeyCap keys in
+	// memory; evicted holds the budget ids that lost keys since the verdict
+	// last reported it.
+	lru     map[string]*keyLRU
+	evicted map[string]int
+	keyCap  int
 	syncErr  string
 	pushErr  string
 	lastSync time.Time
@@ -62,7 +70,8 @@ func (l *Ledger) SetStaleAfter(d time.Duration) {
 // NewLedger returns an empty ledger.
 func NewLedger() *Ledger {
 	return &Ledger{local: map[string]map[int32]float64{}, remote: map[string]map[int32]float64{},
-		unknown: map[string]time.Time{}, seeded: map[string]bool{}, now: time.Now}
+		unknown: map[string]time.Time{}, seeded: map[string]bool{}, now: time.Now,
+		lru: map[string]*keyLRU{}, evicted: map[string]int{}, keyCap: DefaultKeyCap}
 }
 
 // NewLedgerClock returns an empty ledger that reads today from now (nil is the
@@ -98,6 +107,7 @@ func (l *Ledger) Charge(keys []string, usd float64, at time.Time) {
 			l.local[key] = days
 		}
 		days[day] += usd
+		l.touchLocked(key)
 	}
 	if today != l.lastPrune {
 		l.pruneLocked(today)
@@ -232,6 +242,7 @@ func (l *Ledger) TakeLocal() []SeedRow {
 		}
 	}
 	l.local = map[string]map[int32]float64{}
+	l.lru = map[string]*keyLRU{}
 	return rows
 }
 
@@ -325,7 +336,8 @@ func (l *Ledger) SeedState(ids []string) string {
 
 func (l *Ledger) pruneLocked(today int32) {
 	l.lastPrune = today
-	for _, m := range []map[string]map[int32]float64{l.local, l.remote} {
+	for i, m := range []map[string]map[int32]float64{l.local, l.remote} {
+		isLocal := i == 0
 		for key, days := range m {
 			for day := range days {
 				if day <= today-LedgerDays {
@@ -334,6 +346,9 @@ func (l *Ledger) pruneLocked(today int32) {
 			}
 			if len(days) == 0 {
 				delete(m, key)
+				if isLocal {
+					l.forgetLocked(key)
+				}
 			}
 		}
 	}
@@ -465,4 +480,111 @@ func (l *Ledger) StoreStatus(now time.Time) (age time.Duration, synced, healthy 
 		return 0, false, healthy
 	}
 	return now.Sub(l.lastFleet), true, healthy
+}
+
+// DefaultKeyCap is how many keys one launcher-keyed budget (scope actor or
+// batch) holds in memory. Those keys follow ids a launcher chooses, one per
+// run, so a runaway or hostile launcher could mint them without end; the
+// other scopes are bounded by the people, groups and connectors an admin
+// lists. Past the cap the least recently charged key of that budget is
+// dropped from this process (its spend that already reached the counters
+// stays there) and the next verdict of the budget carries
+// budget_keys_evicted:<id>.
+const DefaultKeyCap = 4096
+
+// keyLRU is the recency order of one budget's local keys.
+type keyLRU struct {
+	order *list.List // front = most recent; values are charge keys
+	at    map[string]*list.Element
+}
+
+// capped reports whether the key belongs to a launcher-keyed budget.
+func capped(key string) bool {
+	return strings.HasPrefix(key, "actor:") || strings.HasPrefix(key, "batch:")
+}
+
+// touchLocked marks key as the most recently charged of its budget and drops
+// the least recent keys past the cap. The caller holds l.mu.
+func (l *Ledger) touchLocked(key string) {
+	if !capped(key) || l.keyCap <= 0 {
+		return
+	}
+	id := budgetIDOfKey(key)
+	q := l.lru[id]
+	if q == nil {
+		q = &keyLRU{order: list.New(), at: map[string]*list.Element{}}
+		l.lru[id] = q
+	}
+	if e, ok := q.at[key]; ok {
+		q.order.MoveToFront(e)
+		return
+	}
+	q.at[key] = q.order.PushFront(key)
+	for q.order.Len() > l.keyCap {
+		old := q.order.Back()
+		k := old.Value.(string)
+		q.order.Remove(old)
+		delete(q.at, k)
+		delete(l.local, k)
+		l.evicted[id]++
+	}
+}
+
+// forgetLocked drops key from the recency order (the key left l.local).
+func (l *Ledger) forgetLocked(key string) {
+	if !capped(key) {
+		return
+	}
+	id := budgetIDOfKey(key)
+	if q := l.lru[id]; q != nil {
+		if e, ok := q.at[key]; ok {
+			q.order.Remove(e)
+			delete(q.at, key)
+		}
+		if q.order.Len() == 0 {
+			delete(l.lru, id)
+		}
+	}
+}
+
+// TakeEvicted reports, once, that budget id lost keys to the cap since the
+// last call (the evaluator turns it into one warning on the audit row).
+func (l *Ledger) TakeEvicted(id string) bool {
+	if l == nil {
+		return false
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.evicted[id] == 0 {
+		return false
+	}
+	delete(l.evicted, id)
+	return true
+}
+
+// SetKeyCap sets the per-budget key cap (tests; 0 turns the cap off).
+func (l *Ledger) SetKeyCap(n int) {
+	if l == nil {
+		return
+	}
+	l.mu.Lock()
+	l.keyCap = n
+	l.mu.Unlock()
+}
+
+// LocalKeys is how many local keys the ledger holds for budget id (tests,
+// gauges).
+func (l *Ledger) LocalKeys(id string) int {
+	if l == nil {
+		return 0
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	n := 0
+	for k := range l.local {
+		if budgetIDOfKey(k) == id {
+			n++
+		}
+	}
+	return n
 }

@@ -21,6 +21,7 @@
 // rule_allow_not_enforced:<ids>, budget_warn:<id>, budget_downgrade:<id>,
 // budget_deny_not_enforced:<id>, budget_downgrade_unavailable:<id>,
 // budget_downgrade_not_enforced:<id>, budget_spend_unknown:<id>,
+// budget_keys_evicted:<id> (an actor or batch budget passed its key cap),
 // budget_cost_unknown:<id> (warnings; budget_cost_unknown:<id> is also a
 // managed deny). budget_warn:<id> is also raised for a deny or downgrade
 // budget at warn_at_percent of its limit.
@@ -409,6 +410,9 @@ func (p *Policy) applyBudgets(req Request, ledger *Ledger, now time.Time, v *Ver
 		// subject's limit only when that limit is reached.
 		if state == Yes {
 			v.ChargeKeys = append(v.ChargeKeys, key)
+		}
+		if capped(key) && ledger.TakeEvicted(b.ID) {
+			v.warn("budget_keys_evicted:" + b.ID)
 		}
 		spend, seeded := ledger.Spend(key, b.Period, now)
 		if !seeded {
