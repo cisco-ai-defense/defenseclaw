@@ -642,7 +642,7 @@ func buildPOSIXTable() {
 	add(Program{Names: []string{"powershell", "pwsh"}, Pos: PosNone, PSLaunch: true,
 		Flags: map[string]Flag{"-command": {Value: true, Role: RoleExecCode}, "-c": {Value: true, Role: RoleExecCode}, "-encodedcommand": {Value: true, Role: RoleExecCode}, "-enc": {Value: true, Role: RoleExecCode}, "-ec": {Value: true, Role: RoleExecCode}, "-e": {Value: true, Role: RoleExecCode}, "-file": {Value: true, Role: RoleExecCode}}})
 	// These builtins only format or emit arguments; their operands are data.
-	add(Program{Names: []string{"echo", "printf", "true", "false", ":", "pwd", "read"}, Pos: PosNone, InertOperands: true})
+	add(Program{Names: []string{"echo", "printf", "true", "false"}, Pos: PosNone, InertOperands: true})
 	add(Program{Names: []string{"cat", "tac", "less", "more", "bat", "nl"}, Pos: PosAllRead,
 		Flags: fl(nil, "-n", "-b", "-E", "-s", "-v", "-A", "-T", "-e", "-t", "-u", "-r", "--number", "--show-ends")})
 	add(Program{Names: []string{"head", "tail"}, Pos: PosAllRead,
