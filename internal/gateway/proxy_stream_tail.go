@@ -90,9 +90,15 @@ const (
 type streamHold struct {
 	buf   []byte
 	since time.Time // arrival of the oldest held byte; zero when empty
+	// marks: piece by piece, the end of the piece in buf and the length of
+	// the reply text once it was read (GAP-1306, heldBeforeRun).
+	marks []holdMark
 }
 
-func (h *streamHold) add(b []byte, now time.Time) {
+type holdMark struct{ end, text int }
+
+// add holds b, a piece read when the reply had text bytes of text.
+func (h *streamHold) add(b []byte, now time.Time, text int) {
 	if len(b) == 0 {
 		return
 	}
@@ -100,6 +106,20 @@ func (h *streamHold) add(b []byte, now time.Time) {
 		h.since = now
 	}
 	h.buf = append(h.buf, b...)
+	h.marks = append(h.marks, holdMark{end: len(h.buf), text: text})
+}
+
+// beforeRun is how many held bytes end before the reply text offset from:
+// the pieces that hold no byte of the open run starting there (GAP-1306).
+func (h *streamHold) beforeRun(from int) int {
+	end := 0
+	for _, m := range h.marks {
+		if m.text > from {
+			break
+		}
+		end = m.end
+	}
+	return end
 }
 
 // take removes and returns the first n held bytes; the rest stays held as
@@ -108,10 +128,18 @@ func (h *streamHold) take(n int, now time.Time) []byte {
 	n = min(max(n, 0), len(h.buf))
 	out := h.buf[:n:n]
 	if n == len(h.buf) {
-		h.buf, h.since = nil, time.Time{}
+		h.buf, h.since, h.marks = nil, time.Time{}, nil
 	} else if n > 0 {
 		h.buf = append([]byte(nil), h.buf[n:]...)
 		h.since = now
+		k := 0
+		for k < len(h.marks) && h.marks[k].end <= n {
+			k++
+		}
+		h.marks = append([]holdMark(nil), h.marks[k:]...)
+		for i := range h.marks {
+			h.marks[i].end -= n
+		}
 	}
 	return out
 }

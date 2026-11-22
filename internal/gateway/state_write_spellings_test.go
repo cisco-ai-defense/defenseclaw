@@ -146,10 +146,14 @@ func TestStatePatternReadsOnlyTheHomeStateTree(t *testing.T) {
 		{"cp ~/.def*/config.yaml ~/project/backup.yaml", false},
 	})
 	// These rows block in the default pack for rules of their own, not as
-	// the HIGH state write alert (GAP-1563).
+	// the HIGH state write alert (GAP-1563). The wildcard walk above the
+	// home stops at its bound with no protected match among what it read
+	// and no name that can spell .ssh or a key file: it is the TRUNCATED
+	// evaluation-limit finding, no longer an authorized-keys target
+	// (rel-1-0-10:GAP-1324); the state write still blocks.
 	judgeHomeStateRuleRows(t, []homeStateRuleRow{
-		{"cp a.txt ~/.defenseclaw/config.yaml; ls /*/*/*/*/*/.defenseclaw/x", []string{gap0747StateRule, gap0747SSHKeysRule}},
-		{"cp a.txt ~/.defenseclaw/config.yaml; ls /*/*/*/*/*/*/*/.defenseclaw/x", []string{gap0747StateRule, gap0747SSHKeysRule}},
+		{"cp a.txt ~/.defenseclaw/config.yaml; ls /*/*/*/*/*/.defenseclaw/x", []string{gap0747StateRule, "ACTION-COMPOUND-LIMIT"}},
+		{"cp a.txt ~/.defenseclaw/config.yaml; ls /*/*/*/*/*/*/*/.defenseclaw/x", []string{gap0747StateRule, "ACTION-COMPOUND-LIMIT"}},
 	})
 	if elapsed := time.Since(start); elapsed > 30*time.Second {
 		t.Fatalf("44 pattern rows took %s; the reading must not walk past the home", elapsed)

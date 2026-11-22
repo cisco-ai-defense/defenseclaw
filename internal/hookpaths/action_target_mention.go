@@ -10,7 +10,6 @@ import (
 	"io/fs"
 	"iter"
 	"maps"
-	"math"
 	"net"
 	"os"
 	"path"
@@ -28,6 +27,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/psparse"
 	"github.com/defenseclaw/defenseclaw/internal/shellparse"
@@ -2068,7 +2068,7 @@ func actionProtectedFileGlobReachAs(pattern, cwd string, protected protectedFile
 	}
 	hidden := actionGlobViewHidden(cwd, home)
 	userView := !hidden && actionProcessOwnsHome(home)
-	candidates, complete, unseen := actionExpandGlob(pattern, literal, hidden, userView, dots)
+	candidates, complete, unseen, capped := actionExpandGlobWalk(pattern, literal, hidden, userView, dots, false, false)
 	for _, candidate := range candidates {
 		if protectedReachPath(candidate, protected, ssh) {
 			globs.note(pattern, "1")
@@ -2079,10 +2079,26 @@ func actionProtectedFileGlobReachAs(pattern, cwd string, protected protectedFile
 		globs.note(pattern, "0")
 		return false
 	}
+	if capped {
+		// The walk read every folder it reached and stopped only at a
+		// counted bound, with no protected file among the matches it read:
+		// the reading is TRUNCATED (the one bound rule), recorded on the
+		// hook call (noteGlobCut), not a protected target. The name match
+		// above still holds a pattern that can spell .ssh or a key file
+		// (rel-1-0-10:GAP-1324).
+		globs.note(pattern, GlobFactCapped)
+		noteGlobCut(bounded.Of(bounded.Paths))
+		return false
+	}
 	if hidden && unseen {
 		if answer := globs.answer(pattern); answer != "" {
 			// A walk this process could not see defers to the client,
-			// which expanded the pattern as the user.
+			// which expanded the pattern as the user; its walk past a
+			// bound is TRUNCATED, as this process's own would be.
+			if answer == GlobFactCapped {
+				noteGlobCut(bounded.Of(bounded.Paths))
+				return false
+			}
 			return answer == "1"
 		}
 		if !globs.fromClient() {
@@ -2272,9 +2288,10 @@ func (g *actionGlobs) recording() bool { return g != nil && g.record != nil }
 func (g *actionGlobs) full() bool { return g.recording() && len(g.record) >= maxGlobFacts }
 
 // note records the client's answer: "1" when a match reaches a protected
-// file, "0" when its walk was complete and no match does.
+// file, "0" when its walk was complete and no match does, GlobFactCapped when
+// it stopped at a bound (sent as GlobCapFactPrefix, actionGlobFacts).
 func (g *actionGlobs) note(pattern, answer string) {
-	if !g.recording() || len(GlobFactPrefix)+len(pattern) > MaxWriteTargetPathBytes {
+	if !g.recording() || len(GlobCapFactPrefix)+len(pattern) > MaxWriteTargetPathBytes {
 		return
 	}
 	if key := GlobFactPrefix + pattern; g.record[key] != "1" {
@@ -2290,7 +2307,13 @@ func (g *actionGlobs) answer(pattern string) string {
 	if g == nil || g.facts == nil {
 		return ""
 	}
-	return g.facts[GlobFactPrefix+pattern]
+	if answer := g.facts[GlobFactPrefix+pattern]; answer != "" {
+		return answer
+	}
+	if g.facts[GlobCapFactPrefix+pattern] == "1" {
+		return GlobFactCapped
+	}
+	return ""
 }
 
 // actionGlobFacts expands, as the user, each pathname pattern the action
@@ -2303,6 +2326,16 @@ func actionGlobFacts(command, cwd, home string) map[string]string {
 	}
 	globs := &actionGlobs{record: map[string]string{}}
 	actionProtectedTargetMentionDepth(command, cwd, home, 0, false, globs)
+	// A capped walk goes on the wire under its own key (GlobCapFactPrefix),
+	// never as a GlobFactPrefix value: a 1.0.10 gateway refuses the whole
+	// map for an answer it does not know and falls back to its closed
+	// default, and ignores a key it does not know.
+	for key, answer := range globs.record {
+		if answer == GlobFactCapped {
+			delete(globs.record, key)
+			globs.record[GlobCapFactPrefix+strings.TrimPrefix(key, GlobFactPrefix)] = "1"
+		}
+	}
 	return globs.record
 }
 
@@ -2349,6 +2382,20 @@ func actionExpandGlobFold(pattern, literal string, hidden, userView bool, dots f
 // unless dots, and no symlink to a directory followed. The folders it reads
 // count toward the walk's bounds (rel-1-0-10:GAP-0380).
 func actionExpandGlobStar(pattern, literal string, hidden, userView bool, dots func() bool, fold, globstar bool) (candidates []string, complete, unseen bool) {
+	candidates, complete, unseen, _ = actionExpandGlobWalk(pattern, literal, hidden, userView, dots, fold, globstar)
+	return candidates, complete, unseen
+}
+
+// actionExpandGlobWalk is actionExpandGlobStar; capped tells that the walk is
+// incomplete only because it reached one of its counted bounds (reads, names,
+// entries), with every folder it read readable and every name it read
+// decided, so what it did not read is a TRUNCATED reading, not an unproved
+// one (rel-1-0-10:GAP-1324).
+func actionExpandGlobWalk(pattern, literal string, hidden, userView bool, dots func() bool, fold, globstar bool) (candidates []string, complete, unseen, capped bool) {
+	// undecided: a folder the walk could not read or a name it could not
+	// match exactly; with it, a cap is not the only gap.
+	undecided := false
+	defer func() { capped = capped && !complete && !undecided && !unseen }()
 	separator := string(filepath.Separator)
 	start := filepath.VolumeName(pattern) + separator
 	rest := strings.TrimPrefix(pattern, start)
@@ -2376,13 +2423,16 @@ func actionExpandGlobStar(pattern, literal string, hidden, userView bool, dots f
 				next = append(next, tree...)
 				complete = complete && treeComplete
 				unseen = unseen || treeUnseen
+				// A globstar tree past its bounds is not told apart from
+				// one it could not read: unproved, as before.
+				undecided = undecided || !treeComplete
 				if len(next) > actionGlobMaxNames {
-					complete = false
+					complete, capped = false, true
 					break
 				}
 			}
 			if len(next) == 0 {
-				return nil, complete, unseen
+				return nil, complete, unseen, capped
 			}
 			paths = next
 			continue
@@ -2396,7 +2446,7 @@ func actionExpandGlobStar(pattern, literal string, hidden, userView bool, dots f
 		var next []string
 		for _, dir := range paths {
 			if reads++; reads > actionGlobMaxReads || len(next) >= actionGlobMaxNames {
-				complete = false
+				complete, capped = false, true
 				break
 			}
 			directory, err := actionGlobOpenDir(dir)
@@ -2439,7 +2489,7 @@ func actionExpandGlobStar(pattern, literal string, hidden, userView bool, dots f
 					if !exact {
 						// The user's locale or shell version decides this
 						// name: the walk cannot prove it either way.
-						complete = false
+						complete, undecided = false, true
 					}
 					if (hit || !exact) && !actionGlobSkipsDotName(component, name, dots) {
 						matched = append(matched, name)
@@ -2459,19 +2509,22 @@ func actionExpandGlobStar(pattern, literal string, hidden, userView bool, dots f
 				// the shell skips it (*/* in a project with files).
 				continue
 			}
-			if err != nil && err != io.EOF || entries > actionGlobMaxEntries {
-				complete = false
+			if err != nil && err != io.EOF {
+				complete, undecided = false, true
+			}
+			if entries > actionGlobMaxEntries {
+				complete, capped = false, true
 			}
 			for _, name := range matched {
 				next = append(next, filepath.Join(dir, name))
 			}
 		}
 		if len(next) == 0 {
-			return nil, complete, unseen
+			return nil, complete, unseen, capped
 		}
 		paths = next
 	}
-	return paths, complete, unseen
+	return paths, complete, unseen, capped
 }
 
 // actionGlobStarTree is what a globstar ** names under root: root and every
@@ -2769,8 +2822,9 @@ func ResolveActiveStateHardlinkTarget(value, home string) (string, bool) {
 		if !os.SameFile(info, file.info) {
 			continue
 		}
-		// The index can be up to activeStateIndexTTL old: confirm the name
-		// still holds this file before mapping the alias to it.
+		// A name of the index may have been replaced since its walk (a
+		// change in the same fingerprint tick): confirm the name still holds
+		// this file before mapping the alias to it.
 		path := filepath.Join(activeRoot, filepath.FromSlash(file.relative))
 		if current, err := pathStat(path); err == nil && os.SameFile(info, current) {
 			return filepath.Join(home, ".defenseclaw", filepath.FromSlash(file.relative)), true
@@ -2779,28 +2833,31 @@ func ResolveActiveStateHardlinkTarget(value, home string) (string, bool) {
 	return "", false
 }
 
-// The identity index of one active state tree is built at most once per
-// activeStateIndexTTL and shared by every shell operand and request in that
-// time, so a command naming many ordinary hard links costs one bounded walk.
-// The walk stops after activeStateIndexEntries entries or activeStateIndexBudget,
-// well inside every hook deadline; a file it did not reach is not mapped (no
-// block), which never refuses ordinary shell work. A native patch target is
-// judged by ResolveActiveStateIdentity instead, which neither caches nor
-// treats an unfinished walk as an answer (GAP-0488, GAP-0073).
+// The identity index of one active state tree is kept while every folder and
+// link it read keeps its fingerprint (activeStateView.unchanged), and shared
+// by every shell operand and request in that time, so a command naming many
+// ordinary hard links costs one bounded walk. A view whose folders changed
+// too recently to be fingerprinted (activeStateSettleLimit) is kept for the
+// hook call only. No answer depends on how much time passed: the old index
+// was kept for 2 s whatever changed in it (DET111 step 2, no wall clock in the
+// readers). The walk stops after activeStateIndexEntries entries, well inside
+// every hook deadline; a file it did not reach is not mapped (no block), which
+// never refuses ordinary shell work. Every bound of these walks counts
+// entries, never wall-clock time, so a call gets the same answer on a loaded
+// box and an idle one (GAP-0339). A native patch target is judged by
+// ResolveActiveStateIdentity instead, which neither caches nor treats an
+// unfinished walk as an answer (GAP-0488, GAP-0073).
 var (
 	activeStateIndexEntries = 4096
-	activeStateIndexBudget  = 250 * time.Millisecond
-	activeStateIndexTTL     = 2 * time.Second
 	activeStateIndexWalks   atomic.Int64
 	activeStateIndex        struct {
 		sync.Mutex
-		byRoot map[string]activeStateIdentityIndex
+		byRoot map[string]activeStateView
 	}
-	// The identity walk of a patch target has no entry bound and a time bound
-	// only: it runs for an existing multiply linked target, never answers
-	// from a partial view, and a state too large to read in the time is not
-	// proved.
-	activeStateExactBudget = 2 * time.Second
+	// The identity walk of a patch target has a large entry bound only: it
+	// runs for an existing multiply linked target, never answers from a
+	// partial view, and a state with more entries is not proved.
+	activeStateExactEntries = 100000
 )
 
 type activeStateIdentity struct {
@@ -2808,33 +2865,44 @@ type activeStateIdentity struct {
 	info     os.FileInfo
 }
 
-type activeStateIdentityIndex struct {
-	built time.Time
-	files []activeStateIdentity
-}
-
 func activeStateIdentities(activeRoot string) []activeStateIdentity {
-	activeStateIndex.Lock()
-	defer activeStateIndex.Unlock()
-	now := time.Now()
-	if index, ok := activeStateIndex.byRoot[activeRoot]; ok && now.Sub(index.built) < activeStateIndexTTL {
-		return index.files
-	}
-	for root, index := range activeStateIndex.byRoot {
-		if now.Sub(index.built) >= activeStateIndexTTL {
-			delete(activeStateIndex.byRoot, root)
+	call := currentHookCall()
+	if call != nil {
+		if files, ok := call.stateIdentities[activeRoot]; ok {
+			return files
 		}
 	}
-	if activeStateIndex.byRoot == nil {
-		activeStateIndex.byRoot = make(map[string]activeStateIdentityIndex)
+	activeStateIndex.Lock()
+	defer activeStateIndex.Unlock()
+	if view, ok := activeStateIndex.byRoot[activeRoot]; ok {
+		if view.unchanged() {
+			return view.files
+		}
+		delete(activeStateIndex.byRoot, activeRoot)
 	}
+	settleLimit := activeStateSettleLimit(time.Now())
 	activeStateIndexWalks.Add(1)
 	var files []activeStateIdentity
-	walkActiveStateFiles(activeRoot, activeStateIndexEntries, now.Add(activeStateIndexBudget), func(relative string, info os.FileInfo) bool {
-		files = append(files, activeStateIdentity{relative: relative, info: info})
-		return false
-	})
-	activeStateIndex.byRoot[activeRoot] = activeStateIdentityIndex{built: now, files: files}
+	walk := &activeStateWalk{
+		limit:  activeStateIndexEntries,
+		record: true,
+		visit: func(relative string, info os.FileInfo) bool {
+			files = append(files, activeStateIdentity{relative: relative, info: info})
+			return false
+		},
+	}
+	walk.run(activeRoot)
+	if len(walk.watches) <= activeStateViewWatches && walk.settledBefore(settleLimit) {
+		if activeStateIndex.byRoot == nil || len(activeStateIndex.byRoot) >= 4 {
+			activeStateIndex.byRoot = make(map[string]activeStateView)
+		}
+		activeStateIndex.byRoot[activeRoot] = activeStateView{files: files, watches: walk.watches}
+	} else if call != nil && len(call.stateIdentities) < 4 {
+		if call.stateIdentities == nil {
+			call.stateIdentities = make(map[string][]activeStateIdentity)
+		}
+		call.stateIdentities[activeRoot] = files
+	}
 	return files
 }
 
@@ -2911,9 +2979,8 @@ func activeStateViewOf(activeRoot string) (files []activeStateIdentity, complete
 	started := time.Now()
 	settleLimit := activeStateSettleLimit(started)
 	walk := &activeStateWalk{
-		limit:    math.MaxInt,
-		deadline: started.Add(activeStateExactBudget),
-		record:   true,
+		limit:  activeStateExactEntries,
+		record: true,
 		visit: func(relative string, info os.FileInfo) bool {
 			files = append(files, activeStateIdentity{relative: relative, info: info})
 			return false
@@ -2973,25 +3040,24 @@ const maxActiveStateDepth = 64
 
 // activeStateWalk is one pass over the regular files of the active state.
 type activeStateWalk struct {
-	limit    int
-	deadline time.Time
-	visit    func(relative string, info os.FileInfo) bool
-	record   bool // keep the fingerprint of every directory and link read
-	watches  []activeStateWatch
-	visited  int
-	stopped  bool          // visit accepted a file
-	over     bool          // the entry or time bound was reached
-	partial  bool          // some of the state could not be seen
-	linked   []os.FileInfo // directories reached through a link, walked once
+	limit   int
+	visit   func(relative string, info os.FileInfo) bool
+	record  bool // keep the fingerprint of every directory and link read
+	watches []activeStateWatch
+	visited int
+	stopped bool          // visit accepted a file
+	over    bool          // the entry bound was reached
+	partial bool          // some of the state could not be seen
+	linked  []os.FileInfo // directories reached through a link, walked once
 }
 
 // walkActiveStateFiles visits the regular files of the active state in the
 // order of activeStateFiles and activeStateTrees until visit returns true. A
 // link to a directory is followed. It reports whether the view was complete:
-// false when it stopped at the entry or time bound, or could not list a
+// false when it stopped at the entry bound, or could not list a
 // directory or stat a name, so what it did not see is unknown.
-func walkActiveStateFiles(activeRoot string, limit int, deadline time.Time, visit func(relative string, info os.FileInfo) bool) (complete bool) {
-	return (&activeStateWalk{limit: limit, deadline: deadline, visit: visit}).run(activeRoot)
+func walkActiveStateFiles(activeRoot string, limit int, visit func(relative string, info os.FileInfo) bool) (complete bool) {
+	return (&activeStateWalk{limit: limit, visit: visit}).run(activeRoot)
 }
 
 func (w *activeStateWalk) run(activeRoot string) (complete bool) {
@@ -3055,7 +3121,7 @@ func (w *activeStateWalk) enter() bool {
 		return false
 	}
 	w.visited++
-	if w.visited > w.limit || time.Now().After(w.deadline) {
+	if w.visited > w.limit {
 		w.over, w.partial = true, true
 		return false
 	}

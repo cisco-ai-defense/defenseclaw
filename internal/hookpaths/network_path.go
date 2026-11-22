@@ -191,6 +191,11 @@ type hookCall struct {
 	// keyReads are the answers of the private-key reader, by its reading
 	// (ActionPrivateKeyReadBounded).
 	keyReads map[keyReadKey]keyReadAnswer
+	// stateIdentities are the identity indexes of the active state trees
+	// this call walked whose folders had not settled (activeStateIdentities):
+	// kept for the call only, as the file system is the same for the whole
+	// decision.
+	stateIdentities map[string][]activeStateIdentity
 }
 
 type statAnswer struct {
@@ -990,6 +995,10 @@ type CallState struct {
 	scriptBytes, scripts                 int
 	budgetCuts                           uint64
 }
+
+// GlobCut is the caps the pattern expansions of the call hit so far
+// (noteGlobCut): every one is a TRUNCATED reading of the call.
+func (s CallState) GlobCut() bounded.CapSet { return s.globCut }
 
 // HookCallState is the CallState of the hook call the goroutine runs.
 func HookCallState() CallState {

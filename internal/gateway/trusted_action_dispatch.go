@@ -519,6 +519,15 @@ func dispatchTrustedActionOnce(
 	// nested in the handler's own call, or in a twin of this dispatch, it
 	// begins nothing more, rel-1-0-10:GAP-0766).
 	defer hookpaths.HookCall()()
+	// Every cap a pattern expansion of the call hit is the call's one
+	// TRUNCATED reading (the one bound rule): a walk that stopped at its
+	// bound with no protected match before it is at least the unknown tier,
+	// beside what was read, whichever reader ran it; the target scan's walk
+	// no longer holds it as a protected target (rel-1-0-10:GAP-1324). It is
+	// read while the call is open, after every reading and twin below.
+	defer func() {
+		findings = withBoundedTruncation(findings, hookpaths.HookCallState().GlobCut(), request)
+	}()
 	defer func() { findings = markShellProtectedFileFindings(request, findings) }()
 	// The rule name of a link-held state write is settled once, on the
 	// outermost call, after every reading (GAP-1568).
@@ -873,7 +882,11 @@ func dispatchTrustedActionOnce(
 	// matches when the shell runs the call (cp a.txt ~/.defenseclaw/conf*.yaml,
 	// GAP-2496); the reading with the matches is judged, and only its block
 	// counts.
-	if twin, ok := stateGlobTwinRequest(request); ok {
+	stateTwin, stateTwinOK, stateTwinCut := stateGlobTwinRequest(request)
+	if stateTwinCut.Any() {
+		defer func() { findings = withBoundedTruncation(findings, stateTwinCut, request) }()
+	}
+	if twin := stateTwin; stateTwinOK {
 		defer func() {
 			twinFindings := dispatchTrustedAction(parent, twin)
 			if request.ProtectedHomeHook {
@@ -10542,30 +10555,32 @@ func runTimeShellTwinRequest(request trustedActionRequest) (twin trustedActionRe
 // state files and trees instead (actionfacts.StateGlobTwinNamed): cp a.txt
 // ~/.def*/config.yaml and cp a.txt ~/.defenseclaw/conf*.yaml name
 // config.yaml there too (GAP-2544). Only a block of that reading counts.
-func stateGlobTwinRequest(request trustedActionRequest) (trustedActionRequest, bool) {
+//
+// cut is the caps the expansion hit (more matches than the reading spells, a
+// folder too long to list, the work of the command's patterns used up): the
+// call is then TRUNCATED, at least the unknown tier, and the matches read
+// are still judged (rel-1-0-10:GAP-1017, GAP-1726).
+func stateGlobTwinRequest(request trustedActionRequest) (twin trustedActionRequest, ok bool, cut bounded.CapSet) {
 	if request.SkipLocalFilesystemResolution {
-		return trustedActionRequest{}, false
+		return trustedActionRequest{}, false, cut
 	}
 	if request.Input.DialectHint != actionfacts.DialectPOSIX && request.Input.DialectHint != "" {
-		return trustedActionRequest{}, false
+		return trustedActionRequest{}, false, cut
 	}
 	command, known := trustedBashCommandInput(request.Input)
 	if !known {
-		return trustedActionRequest{}, false
+		return trustedActionRequest{}, false, cut
 	}
-	var (
-		rewritten string
-		ok        bool
-	)
+	var rewritten string
 	if request.ProtectedHomeHook {
-		rewritten, ok = actionfacts.StateGlobTwinNamed(command, request.Input.ActiveHome, activeDefenseClawStateNames)
+		rewritten, ok, cut = actionfacts.StateGlobTwinNamed(command, request.Input.ActiveHome, activeDefenseClawStateNames)
 	} else {
-		rewritten, ok = actionfacts.StateGlobTwin(command, request.Input.ActiveHome)
+		rewritten, ok, cut = actionfacts.StateGlobTwin(command, request.Input.ActiveHome)
 	}
 	if !ok || rewritten == command {
-		return trustedActionRequest{}, false
+		return trustedActionRequest{}, false, cut
 	}
-	return bashReadingRequest(request, command, rewritten), true
+	return bashReadingRequest(request, command, rewritten), true, cut
 }
 
 // trustedReadingCut is the cap at which the reading of a shell call stopped
@@ -10694,7 +10709,9 @@ func withOverBudgetStateMutation(parent context.Context, request trustedActionRe
 	if generation == nil {
 		generation = snapshotRulePackGenerationFor(parent, request.Connector)
 	}
-	twin, hasTwin := stateGlobTwinRequest(request)
+	// The over-budget call already carries its limit finding: the cut of the
+	// state patterns adds nothing to it.
+	twin, hasTwin, _ := stateGlobTwinRequest(request)
 	var twinFacts actionfacts.Facts
 	if hasTwin {
 		twinFacts = actionfacts.Analyze(twin.Input)
