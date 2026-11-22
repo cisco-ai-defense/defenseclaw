@@ -501,10 +501,6 @@ func (s *ContinuousDiscoveryService) brokeredChildrenSignal(sig AISignature, cat
 			if hermesRoot {
 				break
 			}
-			if len(evidence) >= maxEvidencePerSignal {
-				partial, coverageReason = true, CoverageReasonCapExceeded
-				break
-			}
 			name := sanitizeBasenameValue(child.Name)
 			if name == "" {
 				continue
@@ -513,6 +509,13 @@ func (s *ContinuousDiscoveryService) brokeredChildrenSignal(sig AISignature, cat
 			// (GAP-2263).
 			if detector == "skill" && strings.HasPrefix(child.Name, ".") && child.Regular {
 				continue
+			}
+			if detector == "plugin" && strings.HasPrefix(child.Name, ".") {
+				continue
+			}
+			if len(evidence) >= maxEvidencePerSignal {
+				partial, coverageReason = true, CoverageReasonCapExceeded
+				break
 			}
 			if detector == "skill" && strings.EqualFold(strings.TrimSpace(sig.ID), "codex") &&
 				enforce.IsBundledSkillContainerName(child.Name) {
