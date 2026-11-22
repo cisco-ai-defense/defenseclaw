@@ -8,8 +8,8 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-package enterprisebundle
+package statecarry
 
-// A bundle's effective config is checked against the v8 schema
-// (effective.go), so the package links the check.
-import _ "github.com/defenseclaw/defenseclaw/internal/config/v8schema"
+// These tests check v8 config documents through internal/config, so the
+// test program links the full config (v8 schema check, migration drivers) as every config program does.
+import _ "github.com/defenseclaw/defenseclaw/internal/config/fullconfig"

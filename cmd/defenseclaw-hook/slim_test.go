@@ -51,10 +51,20 @@ var slimHookForbidden = []string{
 	// plugin config check of connector Setup, which the hook never runs (the
 	// gateway and the CLI register it), and the v8 config schema check, which
 	// the hook never reaches (every other program that links internal/config
-	// registers it: TestEveryConfigProgramLinksTheV8SchemaCheck).
+	// registers it: TestEveryConfigProgramLinksTheFullConfig).
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/openclawschema",
 	"github.com/defenseclaw/defenseclaw/internal/config/v8schema",
 	"github.com/santhosh-tekuri/jsonschema/",
+	// The v8 to v9 config migration's Rego parser and the SQLite driver it
+	// opens the audit store with: the hook never migrates a config, and
+	// internal/config/fullconfig links them where a migration can run. The
+	// IDE inventory's state.vscdb reader, which the hook links on Windows
+	// and never runs, opens the same driver by name
+	// (TestEveryIDEInventoryProgramLinksTheSQLiteDriver).
+	"github.com/defenseclaw/defenseclaw/internal/config/fullconfig",
+	"github.com/defenseclaw/defenseclaw/internal/policy/regodata",
+	"github.com/open-policy-agent/opa/",
+	"modernc.org/",
 }
 
 // slimHookAllowed are the packages under a forbidden prefix the hook needs:
@@ -84,8 +94,6 @@ var slimHookKnownHeavy = []string{
 	"github.com/defenseclaw/defenseclaw/internal/observability",
 	"github.com/defenseclaw/defenseclaw/internal/guardrail",
 	"github.com/google/cel-go/cel",
-	"github.com/open-policy-agent/opa/v1/ast",
-	"modernc.org/sqlite",
 }
 
 // slimHookMaxPackages bounds the package count per OS: 478 to 502 when W1
@@ -180,18 +188,19 @@ func TestOpenClawPluginConfigCheckLinkedWhereSetupRuns(t *testing.T) {
 	}
 }
 
-// TestEveryConfigProgramLinksTheV8SchemaCheck pins the other half of the
-// v8 schema split: internal/config checks a v8 document with the check that
-// internal/config/v8schema registers, and fails the check where it is not
+// TestEveryConfigProgramLinksTheFullConfig pins the other half of the
+// config split: internal/config checks a v8 document and migrates a config
+// with what internal/config/fullconfig registers or links (the v8 schema
+// check, the SQLite driver, the Rego module check), and fails where it is not
 // linked. Every main package that links internal/config, on every OS, links
-// it too, as each linked the schema library before the split; the hook is
-// the one program that does not, and it never checks a v8 document.
-func TestEveryConfigProgramLinksTheV8SchemaCheck(t *testing.T) {
+// it too, as each linked those libraries before the split; the hook is the
+// one program that does not, and it never checks a v8 document or migrates.
+func TestEveryConfigProgramLinksTheFullConfig(t *testing.T) {
 	gotool := goToolOrSkip(t)
 	const (
 		module = "github.com/defenseclaw/defenseclaw"
 		cfg    = module + "/internal/config"
-		check  = module + "/internal/config/v8schema"
+		check  = module + "/internal/config/fullconfig"
 		hook   = module + "/cmd/defenseclaw-hook"
 	)
 	for _, goos := range []string{"linux", "darwin", "windows"} {
@@ -231,6 +240,51 @@ func TestEveryConfigProgramLinksTheV8SchemaCheck(t *testing.T) {
 			t.Errorf("%s: go list found %d programs that link internal/config, want at least 13", goos, programs)
 		}
 		t.Logf("%s: %d programs link internal/config", goos, programs)
+	}
+}
+
+// TestEveryIDEInventoryProgramLinksTheSQLiteDriver pins the driver that
+// internal/inventory/ideplugins opens state.vscdb with and does not import
+// (vscdb.go): every main package that links the IDE inventory, on every OS,
+// links modernc.org/sqlite, except the hook, which never scans.
+func TestEveryIDEInventoryProgramLinksTheSQLiteDriver(t *testing.T) {
+	gotool := goToolOrSkip(t)
+	const (
+		module    = "github.com/defenseclaw/defenseclaw"
+		inventory = module + "/internal/inventory/ideplugins"
+		driver    = "modernc.org/sqlite"
+		hook      = module + "/cmd/defenseclaw-hook"
+	)
+	for _, goos := range []string{"linux", "darwin", "windows"} {
+		cmd := exec.Command(gotool, "list", "-f", `{{if eq .Name "main"}}{{.ImportPath}} {{join .Deps " "}}{{end}}`, "./...")
+		cmd.Dir = "../.."
+		cmd.Env = append(os.Environ(), "GOOS="+goos, "CGO_ENABLED=0")
+		out, err := cmd.Output()
+		if err != nil {
+			t.Fatalf("%s go list ./...: %v", goos, err)
+		}
+		programs := 0
+		for _, line := range strings.Split(string(out), "\n") {
+			fields := strings.Fields(line)
+			if len(fields) == 0 || fields[0] == hook {
+				continue
+			}
+			deps := map[string]bool{}
+			for _, dep := range fields[1:] {
+				deps[dep] = true
+			}
+			if !deps[inventory] {
+				continue
+			}
+			programs++
+			if !deps[driver] {
+				t.Errorf("%s: %s links %s but not %s", goos, fields[0], inventory, driver)
+			}
+		}
+		if programs == 0 {
+			t.Errorf("%s: go list found no program that links %s", goos, inventory)
+		}
+		t.Logf("%s: %d programs link the IDE inventory", goos, programs)
 	}
 }
 

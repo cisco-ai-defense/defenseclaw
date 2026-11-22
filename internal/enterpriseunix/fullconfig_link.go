@@ -8,9 +8,10 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-package config_test
+//go:build !windows
 
-// The package tests check v8 documents, so the test program links the check
-// as every config program does. An internal test file cannot import it (the
-// check imports config); this external one shares the test program.
-import _ "github.com/defenseclaw/defenseclaw/internal/config/v8schema"
+package enterpriseunix
+
+// Managed config checks compile the v8 document (config.go, verify.go), so
+// the package links the v8 schema check.
+import _ "github.com/defenseclaw/defenseclaw/internal/config/fullconfig"

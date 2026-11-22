@@ -8,8 +8,8 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-package configwrite
+package ideplugins
 
-// These tests check v8 config documents through internal/config, so the
-// test program links the v8 schema check as every config program does.
-import _ "github.com/defenseclaw/defenseclaw/internal/config/v8schema"
+// The tests read state.vscdb fixtures, so the test program links the driver
+// the programs that scan link (vscdb.go).
+import _ "modernc.org/sqlite"

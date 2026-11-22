@@ -8,8 +8,8 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-package cli
+package gateway
 
-// The CLI loads, checks and compiles v8 config documents (config validate,
-// status, daemon start), so it links the v8 schema check.
-import _ "github.com/defenseclaw/defenseclaw/internal/config/v8schema"
+// The gateway compiles v8 config documents (config_manager.go, the
+// observability bootstrap), so it links the full config (internal/config/fullconfig).
+import _ "github.com/defenseclaw/defenseclaw/internal/config/fullconfig"

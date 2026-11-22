@@ -8,8 +8,9 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-package gateway
+package enterprisehooks
 
-// The gateway compiles v8 config documents (config_manager.go, the
-// observability bootstrap), so it links the v8 schema check.
-import _ "github.com/defenseclaw/defenseclaw/internal/config/v8schema"
+// The managed IDE inventory tests scan state.vscdb fixtures through
+// inventory/ideplugins, so the test program links the SQLite driver the
+// programs that scan link (ideplugins/vscdb.go).
+import _ "modernc.org/sqlite"

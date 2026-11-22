@@ -8,8 +8,8 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-package setup
+package configwatch
 
-// These tests check v8 config documents through internal/config, so the
-// test program links the v8 schema check as every config program does.
-import _ "github.com/defenseclaw/defenseclaw/internal/config/v8schema"
+// A watched config is checked against the v8 schema before it is applied
+// (configwatch.go), so the package links the full config (internal/config/fullconfig).
+import _ "github.com/defenseclaw/defenseclaw/internal/config/fullconfig"

@@ -13,9 +13,15 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
-
-	_ "modernc.org/sqlite" // state.vscdb reader
 )
+
+// readStateDBValue opens state.vscdb with the "sqlite" database/sql driver,
+// which this package does not import: the hook links the package for its
+// Windows grants and never scans, and the SQLite driver is the largest
+// library it would carry. Every other program that links this package links
+// the driver (internal/config/fullconfig);
+// TestEveryIDEInventoryProgramLinksTheSQLiteDriver in cmd/defenseclaw-hook
+// pins that.
 
 // stateDBMaxBytes bounds a state database and its WAL file.
 const stateDBMaxBytes = 64 << 20

@@ -11,5 +11,5 @@
 package main
 
 // This program links internal/config, which checks a v8 config document
-// with the check internal/config/v8schema registers (TestEveryConfigProgramLinksTheV8SchemaCheck).
-import _ "github.com/defenseclaw/defenseclaw/internal/config/v8schema"
+// with the checks internal/config/fullconfig registers (TestEveryConfigProgramLinksTheFullConfig).
+import _ "github.com/defenseclaw/defenseclaw/internal/config/fullconfig"

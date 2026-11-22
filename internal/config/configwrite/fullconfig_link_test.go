@@ -8,10 +8,8 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-//go:build !windows
+package configwrite
 
-package enterpriseunix
-
-// Managed config checks compile the v8 document (config.go, verify.go), so
-// the package links the v8 schema check.
-import _ "github.com/defenseclaw/defenseclaw/internal/config/v8schema"
+// These tests check v8 config documents through internal/config, so the
+// test program links the full config (v8 schema check, migration drivers) as every config program does.
+import _ "github.com/defenseclaw/defenseclaw/internal/config/fullconfig"

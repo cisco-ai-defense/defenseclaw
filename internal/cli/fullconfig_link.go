@@ -8,8 +8,8 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-package sandboxcli
+package cli
 
-// These tests check v8 config documents through internal/config, so the
-// test program links the v8 schema check as every config program does.
-import _ "github.com/defenseclaw/defenseclaw/internal/config/v8schema"
+// The CLI loads, checks and compiles v8 config documents (config validate,
+// status, daemon start), so it links the full config (internal/config/fullconfig).
+import _ "github.com/defenseclaw/defenseclaw/internal/config/fullconfig"

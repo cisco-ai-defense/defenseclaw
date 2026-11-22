@@ -22,7 +22,7 @@ import (
 func TestV8SchemaCheckFailsClosedWhenNotLinked(t *testing.T) {
 	registered := v8SchemaCheck.Load()
 	if registered == nil {
-		t.Fatal("the config test program must link internal/config/v8schema (v8schema_link_test.go)")
+		t.Fatal("the config test program must link internal/config/fullconfig (fullconfig_link_test.go)")
 	}
 	v8SchemaCheck.Store(nil)
 	t.Cleanup(func() { v8SchemaCheck.Store(registered) })
@@ -44,7 +44,7 @@ func TestV8SchemaCheckFailsClosedWhenNotLinked(t *testing.T) {
 func TestV8SchemaCheckRegistersOnce(t *testing.T) {
 	registered := v8SchemaCheck.Load()
 	if registered == nil {
-		t.Fatal("the config test program must link internal/config/v8schema")
+		t.Fatal("the config test program must link internal/config/fullconfig")
 	}
 	defer func() {
 		if recover() == nil {

@@ -36,9 +36,9 @@ type V8SchemaCheck func(document any) (violation *V8SchemaViolation, invalid boo
 var v8SchemaCheck atomic.Pointer[V8SchemaCheck]
 
 // errV8SchemaCheckNotLinked fails the v8 schema check of a program that does
-// not import internal/config/v8schema: a missing check never passes a
-// document. TestEveryConfigProgramLinksTheV8SchemaCheck pins the importers.
-var errV8SchemaCheckNotLinked = errors.New("the v8 schema check is not linked into this program (import internal/config/v8schema)")
+// not link internal/config/v8schema (through internal/config/fullconfig): a
+// missing check never passes a document. TestEveryConfigProgramLinksTheFullConfig pins the importers.
+var errV8SchemaCheckNotLinked = errors.New("the v8 schema check is not linked into this program (import internal/config/fullconfig)")
 
 // RegisterV8SchemaCheck installs the v8 schema check. internal/config/v8schema
 // calls it from its init; a second registration panics.
