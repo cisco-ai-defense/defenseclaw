@@ -185,7 +185,9 @@ The directory is readable by your account only (mode 0700, the file 0600). The
 vault is never mounted into a sandbox. It is not encrypted: anything running as
 your account can read it, as it can read your shell environment. On a managed
 computer the managed gateway never receives a value, and a captured secret is
-removed from the hook call before the call reaches it.
+removed from the hook call before the call reaches it. While capture is on, a
+sandboxed harness's own telemetry and notify calls are masked the same way
+(Codex sends the prompt in its telemetry).
 
 ## Limits
 

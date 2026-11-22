@@ -329,7 +329,6 @@ func TestReplaceWithTheSameExposedValueIsRefused(t *testing.T) {
 	}
 }
 
-
 // A captured entry is unconfirmed: no sandbox gets it until the person
 // confirms it (a sandbox can post a prompt-shaped call of its own) or
 // replaces its value. An exposed entry cannot be confirmed.
