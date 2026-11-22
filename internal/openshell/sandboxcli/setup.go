@@ -1017,6 +1017,16 @@ func (a *App) installerHow() string {
 // installed another way is
 // its user's to upgrade: the check's fix says how. It returns the doctor
 // report of the machine as it is then.
+
+// openShellUpgradeOneWay is said with every OpenShell upgrade: a newer
+// gateway migrates its database, an older one refuses to open it ("migration
+// N was previously applied but is missing"), and OpenShell has no down
+// migration. Rolling DefenseClaw back leaves OpenShell as it is
+// (rel-1-0-10:GAP-1777).
+const openShellUpgradeOneWay = "OpenShell upgrades are one-way: rolling DefenseClaw back keeps this OpenShell, " +
+	"and an older OpenShell starts only after its gateway database (~/.local/state/openshell/gateway/openshell.db) is moved aside, " +
+	"which drops the records of the sandboxes on it"
+
 func (a *App) offerOpenShellUpgrade(ctx context.Context, o SetupOptions, rep *openshell.DoctorReport, cli openshell.Check) (*openshell.DoctorReport, error) {
 	keep := func() (*openshell.DoctorReport, error) {
 		a.note("OpenShell " + cli.Detail)
@@ -1061,12 +1071,12 @@ func (a *App) offerOpenShellUpgrade(ctx context.Context, o SetupOptions, rep *op
 		}
 		var err error
 		upgrade, err = a.ask("Upgrade OpenShell "+rep.CLIVersion+" to "+openshell.InstallerVersion+" in place with NVIDIA's installer? ("+
-			why+how+"restarts the gateway: "+stops+")", legacy, o.Yes)
+			why+how+"restarts the gateway: "+stops+"; "+openShellUpgradeOneWay+")", legacy, o.Yes)
 		if err != nil {
 			return nil, err
 		}
 	} else if upgrade {
-		a.warn("upgrading OpenShell " + rep.CLIVersion + " to " + openshell.InstallerVersion + " restarts the gateway: " + stops)
+		a.warn("upgrading OpenShell " + rep.CLIVersion + " to " + openshell.InstallerVersion + " restarts the gateway: " + stops + "; " + openShellUpgradeOneWay)
 	}
 	if !upgrade {
 		return keep()

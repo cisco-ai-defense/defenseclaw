@@ -519,6 +519,8 @@ On Linux, the OpenShell gateway runs in the account's systemd user manager. If l
 
 ##### Other upgrade notes
 
+An OpenShell upgrade is one-way. The newer gateway upgrades its database, and an older OpenShell refuses to start on it. `defenseclaw rollback` does not change OpenShell: it keeps the release you upgraded to. To go back to an older OpenShell anyway, stop its gateway, move `~/.local/state/openshell/gateway/openshell.db` aside, then install the older release; the gateway then starts with no record of your sandboxes, so pull their work back first (`defenseclaw sandbox pull NAME --apply`).
+
 A Docker sandbox created on OpenShell 0.1.1 to 0.1.4 keeps its work, but OpenShell 0.1.5 cannot read the older bootstrap under `~/.local/state/openshell/docker-sandbox-tokens`. After the upgrade, use `defenseclaw sandbox start NAME`: DefenseClaw moves the bootstrap to 0.1.5's format before starting it. If the gateway already left the sandbox in an error state, save or sync accessible work first, then run `defenseclaw sandbox stop NAME` and `defenseclaw sandbox start NAME`. A raw `openshell sandbox start` does not perform this migration.
 
 Before stopping a raw OpenShell MicroVM on a gateway older than OpenShell 0.1.5, save its work yourself. On OpenShell 0.1.5 or later, `openshell sandbox stop` requests a guest flush before a planned stop. If the flush fails, changes after the last successful disk sync may still be lost.
