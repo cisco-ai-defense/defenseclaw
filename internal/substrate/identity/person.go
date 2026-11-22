@@ -90,21 +90,51 @@ func TokenKey(issuer, jti, token string) string {
 }
 
 // jwtClaims is the decoded claims of a token shaped like a compact JWS, ok
-// false when it is not one. It decodes the way the most lenient verifier
-// in front of DefenseClaw does (the kube-apiserver's go-jose: '=' trimmed,
-// spare bits and line breaks ignored), so every encoding that verifier
-// accepts gives the same bytes. It checks no signature: callers key only a
-// token a verifier or a TokenReview has already accepted.
+// false when it is not one. It decodes at least as leniently as any
+// verifier in front of DefenseClaw (the kube-apiserver's go-jose trims '='
+// and ignores spare bits and line breaks; this also drops '=' and white
+// space anywhere and reads the standard alphabet), so every encoding such
+// a verifier accepts gives the same bytes. It checks no signature: callers
+// key only a token a verifier or a TokenReview has already accepted, or
+// read only its issuer (tokenIssuer).
 func jwtClaims(token string) ([]byte, bool) {
-	parts := strings.Split(token, ".")
+	parts := strings.Split(strings.TrimSpace(token), ".")
 	if len(parts) != 3 {
 		return nil, false
 	}
-	b, err := base64.RawURLEncoding.DecodeString(strings.TrimRight(parts[1], "="))
+	part := strings.Map(func(r rune) rune {
+		switch r {
+		case '=', ' ', '\t', '\r', '\n':
+			return -1
+		case '+':
+			return '-'
+		case '/':
+			return '_'
+		}
+		return r
+	}, parts[1])
+	b, err := base64.RawURLEncoding.DecodeString(part)
 	if err != nil || !json.Valid(b) || len(b) == 0 || b[0] != '{' {
 		return nil, false
 	}
 	return b, true
+}
+
+// tokenIssuer is the iss a token shaped like a compact JWS names, decoded
+// leniently (jwtClaims), "" when it names none. It checks no signature: it
+// only says which verifier a token belongs to (RV3-01, GAP-0787).
+func tokenIssuer(token string) string {
+	b, ok := jwtClaims(token)
+	if !ok {
+		return ""
+	}
+	var c struct {
+		Issuer string `json:"iss"`
+	}
+	if json.Unmarshal(b, &c) != nil {
+		return ""
+	}
+	return c.Issuer
 }
 
 // ID is the stable owner key of a person: issuer and subject.
@@ -352,6 +382,11 @@ func emailUnverified(v json.RawMessage) bool {
 	}
 	var str string
 	return json.Unmarshal(v, &str) == nil && strings.EqualFold(strings.TrimSpace(str), "false")
+}
+
+// Trusts reports whether issuer is a configured person or workload issuer.
+func (v *PersonVerifier) Trusts(issuer string) bool {
+	return v != nil && len(v.issuers[issuer]) > 0
 }
 
 // SignInKeySet is the key set of the first person issuer (the OIDC issuer

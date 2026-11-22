@@ -240,6 +240,8 @@ func (k *KubeTokenVerifier) review(ctx context.Context, token string, audiences 
 type PersonVerifiers struct {
 	OIDC interface {
 		Verify(ctx context.Context, token string) (Person, error)
+		// Trusts reports a configured OIDC issuer.
+		Trusts(issuer string) bool
 	}
 	Kube *KubeTokenVerifier
 }
@@ -253,6 +255,14 @@ func (v PersonVerifiers) Verify(ctx context.Context, token string) (Person, erro
 		}
 		var ie *Error
 		if !errors.As(err, &ie) || (ie.Reason != ReasonIssuer && ie.Reason != ReasonMalformed) {
+			return p, err
+		}
+		// A token whose claims name a configured issuer is that issuer's,
+		// however it is written. The strict parse refuses a copy with '='
+		// padding, spare bits, line breaks or spaces; the API server
+		// decodes leniently and could take the same copy as another person,
+		// with another token key and under no end (RV3-01, GAP-0787).
+		if iss := tokenIssuer(token); iss != "" && v.OIDC.Trusts(iss) {
 			return p, err
 		}
 	}
