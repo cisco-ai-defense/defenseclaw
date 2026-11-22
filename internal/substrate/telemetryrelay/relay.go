@@ -172,8 +172,14 @@ type Store struct {
 	// marked Unregistered, without a UID or profile (GAP-0581). Nil keeps
 	// the posted fields (tests).
 	Registrations registry.Store
+	// MaxHostUses bounds the host-use map (DefaultMaxHostUses when 0).
+	MaxHostUses int
 
 	mu sync.Mutex
+	// uses is the newest allowed request of each actor to each host
+	// (MethodHostUses), useCount its entries.
+	uses     map[ActorRef]map[string]time.Time
+	useCount int
 	// life is lifecycle records and counts, egress the egress decisions.
 	life, egress queue
 	gauges       map[string]int64
@@ -385,14 +391,27 @@ func (s *Store) PostCounts(_ context.Context, in PostRequest) (struct{}, error) 
 	return struct{}{}, nil
 }
 
-// PostEgress implements MethodPostEgress.
+// PostEgress implements MethodPostEgress. Only decisions are kept: a
+// secret-injection record (Decision inject, which a callout before S6b
+// sent for each bound secret) is nothing a gateway exports, so it only
+// took room in the queue. The allowed decisions also feed the host-use map.
 func (s *Store) PostEgress(ctx context.Context, in PostRequest) (struct{}, error) {
+	var allowed []Record
 	s.post(in, func(r Record) (Record, bool) {
-		if r.Kind != KindEgress {
+		if r.Kind != KindEgress || (r.Decision != "allow" && r.Decision != "block") {
 			return r, false
 		}
-		return s.egressActor(ctx, r)
+		r, ok := s.egressActor(ctx, r)
+		if ok && r.Decision == "allow" {
+			allowed = append(allowed, r)
+		}
+		return r, ok
 	})
+	if len(allowed) > 0 {
+		s.mu.Lock()
+		s.noteUsesLocked(allowed, time.Now())
+		s.mu.Unlock()
+	}
 	return struct{}{}, nil
 }
 
@@ -525,6 +544,7 @@ func Serve(srv *leader.Server, s *Store) {
 	srv.Handle(MethodPostCounts, postHandler(s.PostCounts))
 	srv.Handle(MethodPostEgress, postHandler(s.PostEgress))
 	srv.HandleRead(MethodTake, leader.Typed(s.Take))
+	srv.HandleRead(MethodHostUses, leader.Typed(s.HostUses))
 }
 
 // ErrRefused reports a batch the leader refused as a bad request (too

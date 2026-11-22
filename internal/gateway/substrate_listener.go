@@ -247,6 +247,9 @@ type SubstrateConfig struct {
 	// through this replica's telemetry runtime (GAP-0450, GAP-0453). Nil:
 	// nothing is relayed.
 	Relay *telemetryrelay.Taker
+	// SecretUses reads when the caller's agents last reached each host,
+	// for the last use secrets list and test show (S6b). Nil: no last use.
+	SecretUses SubstrateSecretUses
 }
 
 // SubstrateActorVerifier verifies actor tokens (identity.ActorVerifier).

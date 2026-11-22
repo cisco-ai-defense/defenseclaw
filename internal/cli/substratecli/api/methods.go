@@ -370,8 +370,12 @@ type Secret struct {
 	AskID   string     `json:"ask_id,omitempty"`
 	Expires *time.Time `json:"expires,omitempty"`
 	// Agents are the person's agents that get it; nil when not known.
-	Agents   []string   `json:"agents,omitempty"`
-	LastUsed *time.Time `json:"last_used,omitempty"`
+	Agents []string `json:"agents,omitempty"`
+	// LastUsed is the newest request by one of the person's agents that
+	// Substrate added the secret to: when, the host and the agent.
+	LastUsed      *time.Time `json:"last_used,omitempty"`
+	LastUsedHost  string     `json:"last_used_host,omitempty"`
+	LastUsedAgent string     `json:"last_used_agent,omitempty"`
 }
 
 // SecretTest is the answer of secrets test: the secret as list shows it
