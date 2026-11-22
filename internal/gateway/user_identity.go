@@ -126,7 +126,6 @@ func resolveHTTPUserIdentity(r *http.Request, rawBody []byte) llmEventUser {
 	if su, ok := substrateRequestUser(r.Context()); ok {
 		user = su
 	} else if binding, ok := sandboxauth.FromContext(r.Context()); ok {
-	} else if binding, ok := sandboxauth.FromContext(r.Context()); ok {
 		user = sandboxRequestUser(r.Context(), binding)
 	} else if subject, ok := verifiedSubjectFromContext(r.Context()); ok {
 		// An authenticated caller's headers and body are claims; the
