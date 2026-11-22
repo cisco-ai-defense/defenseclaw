@@ -40,7 +40,7 @@ func TestSetupMacMicroVMQuestionFollowsTheOpenShellRelease(t *testing.T) {
 		driver  openshell.ComputeDriver
 		input   string
 		yes     bool
-		stales  bool // the question says they do not start
+		stales  bool                    // the question says they do not start
 		want    openshell.ComputeDriver // "": the gateway stays on docker, which plans no driver change
 	}{
 		{"0.1.9 vm default", "0.1.9", openshell.DriverVM, "\ny\n", false, false, openshell.DriverVM},
