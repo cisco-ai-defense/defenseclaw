@@ -356,3 +356,14 @@ def test_the_approvals_row_matches_what_approve_always_does() -> None:
     assert row("session", False) == "you may approve asks for this session only; you can't unblock destinations"
     assert row("none", True) == "you can't approve asks; they are refused"
     assert row("none", False) == "you can't approve asks; they are refused; you can't unblock destinations"
+
+
+def test_substrate_only_floor_names_the_launcher() -> None:
+    # E26: runtimes [substrate] runs the required agents on Agent Substrate.
+    explain = {**EXPLAIN, "runtimes": ["substrate"]}
+    assert dict(managed_policy_pairs(explain, NOW))["Required"] == (
+        "claude and codex run only on Agent Substrate, not on this computer: "
+        "start one with defenseclaw substrate run claude"
+    )
+    both = {**EXPLAIN, "runtimes": ["openshell", "substrate"]}
+    assert dict(managed_policy_pairs(both, NOW))["Required"] == "claude and codex run only in a sandbox on this computer"

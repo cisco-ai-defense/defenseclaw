@@ -38,7 +38,7 @@ func rejectionClient(t *testing.T, home string) *Client {
 	t.Setenv("OPENCLAW_GATEWAY_TOKEN", "")
 	dataDir := testenv.PrivateTempDir(t)
 	client, err := NewClient(&config.GatewayConfig{
-		Token:         "defenseclaw-own-token",
+		OpenClawToken: "saved-openclaw-token",
 		ClawHome:      home,
 		DeviceKeyFile: filepath.Join(dataDir, "device.key"),
 	}, dataDir)
@@ -83,8 +83,8 @@ func TestTokenRejectionKeepsItsStepWhenOpenClawHoldsAToken(t *testing.T) {
 		if hint := client.handleConnectRejection(errors.New(tokenMismatchRejection)); hint != openClawTokenRejectedHint {
 			t.Errorf("hint = %q, want the token step", hint)
 		}
-		if client.cfg.Token != "persisted-token" {
-			t.Errorf("token = %q, want the persisted token adopted", client.cfg.Token)
+		if client.wsToken() != "persisted-token" {
+			t.Errorf("token = %q, want the persisted token adopted", client.wsToken())
 		}
 	})
 	t.Run("json5 persisted token is adopted", func(t *testing.T) {
@@ -94,8 +94,8 @@ func TestTokenRejectionKeepsItsStepWhenOpenClawHoldsAToken(t *testing.T) {
 		if hint := client.handleConnectRejection(errors.New(tokenMismatchRejection)); hint != openClawTokenRejectedHint {
 			t.Errorf("hint = %q, want the token step", hint)
 		}
-		if client.cfg.Token != "json5-token" {
-			t.Errorf("token = %q, want the json5 token adopted", client.cfg.Token)
+		if client.wsToken() != "json5-token" {
+			t.Errorf("token = %q, want the json5 token adopted", client.wsToken())
 		}
 	})
 	t.Run("openclaw.json missing", func(t *testing.T) {
@@ -171,7 +171,7 @@ func TestConnectWithRetryStopsSpinningUntilOpenClawPersistsAToken(t *testing.T) 
 	client, err := NewClient(&config.GatewayConfig{
 		Host:           u.Hostname(),
 		Port:           port,
-		Token:          "defenseclaw-own-token",
+		OpenClawToken:  "saved-openclaw-token",
 		ClawHome:       home,
 		DeviceKeyFile:  filepath.Join(dataDir, "device.key"),
 		ReconnectMs:    10,
@@ -208,8 +208,8 @@ func TestConnectWithRetryStopsSpinningUntilOpenClawPersistsAToken(t *testing.T) 
 	case <-time.After(10 * time.Second):
 		t.Fatal("ConnectWithRetry did not connect after openclaw.json got a token")
 	}
-	if client.cfg.Token != persisted {
-		t.Errorf("token = %q, want the persisted token", client.cfg.Token)
+	if client.wsToken() != persisted {
+		t.Errorf("token = %q, want the persisted token", client.wsToken())
 	}
 }
 
@@ -225,11 +225,14 @@ func TestTokenRejectionWithoutPersistedTokenUsesTheEnvironmentToken(t *testing.T
 	if hint := client.handleConnectRejection(errors.New(tokenMismatchRejection)); hint == openClawTokenNotPersistedHint {
 		t.Fatalf("an environment token was diagnosed as a random runtime token: %q", hint)
 	}
-	if client.cfg.Token != "openclaw-env-token" {
-		t.Fatalf("token = %q, want the environment token tried", client.cfg.Token)
+	if client.wsToken() != "openclaw-env-token" {
+		t.Fatalf("token = %q, want the environment token tried", client.wsToken())
 	}
-	if client.RefreshedToken() != "" {
-		t.Errorf("the environment token was offered to the API server as a refreshed token")
+	if client.cfg.Token != "" {
+		t.Errorf("the environment token became the DefenseClaw gateway token: %q", client.cfg.Token)
+	}
+	if _, err := os.Stat(filepath.Join(client.dataDir, ".env")); !os.IsNotExist(err) {
+		t.Errorf("the environment token was saved to .env (stat err %v)", err)
 	}
 
 	// Rejected again: the cause is not provable, so the step must not claim one.
@@ -243,7 +246,7 @@ func TestTokenRejectionWithoutPersistedTokenUsesTheEnvironmentToken(t *testing.T
 func TestPersistedTokenAppearedWakesOnTheSameToken(t *testing.T) {
 	home := t.TempDir()
 	writeOpenClawJSON(t, home, `{"gateway":{"auth":{"mode":"token"}}}`)
-	client := &Client{cfg: &config.GatewayConfig{ClawHome: home, Token: "same-token"}}
+	client := &Client{cfg: &config.GatewayConfig{ClawHome: home, OpenClawToken: "same-token"}}
 	if client.persistedTokenAppeared() {
 		t.Fatal("woke before a token was persisted")
 	}
@@ -271,8 +274,8 @@ func TestPersistedOpenClawTokenSurvivesUnrelatedJSON5(t *testing.T) {
 			if hint := client.handleConnectRejection(errors.New(tokenMismatchRejection)); hint == openClawTokenNotPersistedHint {
 				t.Errorf("a persisted token was diagnosed as missing: %q", hint)
 			}
-			if client.cfg.Token != "persisted-json5-token" {
-				t.Errorf("token = %q, want the persisted token adopted", client.cfg.Token)
+			if client.wsToken() != "persisted-json5-token" {
+				t.Errorf("token = %q, want the persisted token adopted", client.wsToken())
 			}
 		})
 	}

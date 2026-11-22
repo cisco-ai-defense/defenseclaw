@@ -293,6 +293,10 @@ func pinnedOutageSentence(rel, sentence string) bool {
 		return strings.HasPrefix(sentence, "With the default fail mode `closed`, when the gateway is unreachable the running hook denies `PreToolUse`") ||
 			strings.HasPrefix(sentence, "When the gateway is not running, a per-user install in the default or permissive policy lets `PreToolUse` run with one warning") ||
 			strings.HasPrefix(sentence, "On a managed host the administrator's fail mode decides an outage: `closed`, the default, denies it")
+	case "connectors/openclaw.mdx":
+		// The per-tier gateway-start sentence of the OpenClaw unit section (GAP-1160,
+		// t-uxfb 840de28dbb) is pinned by docs-site/scripts/test_openclaw_gateway_unit_docs.py.
+		return strings.HasPrefix(sentence, "Until the gateway answers, hook calls follow the outage mode of the policy tier")
 	case "connectors/cursor.mdx":
 		return strings.HasPrefix(sentence, "The administrator's resolved fail mode decides what the running hook does on a gateway outage")
 	case "connectors/hermes.mdx":
@@ -302,6 +306,14 @@ func pinnedOutageSentence(rel, sentence string) bool {
 		return strings.HasPrefix(sentence, "On Windows, where Hermes has no guard, an administrator's `open` lets the call run during an outage")
 	}
 	return false
+}
+
+// nonConnectorPages are pages under connectors/ that describe no single connector.
+var nonConnectorPages = map[string]bool{
+	"connectors/index.mdx":                true,
+	"connectors/capability-matrix.mdx":    true,
+	"connectors/aliases.mdx":              true,
+	"connectors/switching-connectors.mdx": true,
 }
 
 func TestOutageBehaviourIsStatedOnlyInTheCapabilityMatrix(t *testing.T) {
@@ -325,8 +337,10 @@ func TestOutageBehaviourIsStatedOnlyInTheCapabilityMatrix(t *testing.T) {
 		if strings.Contains(text, outageTableLink) {
 			linked[rel] = true
 		}
-		// The table page itself (connectors/capability-matrix.mdx) is not a connector page.
-		connectorPage := strings.HasPrefix(rel, "connectors/") && rel != "connectors/index.mdx" && rel != "connectors/capability-matrix.mdx"
+		// The table page itself (connectors/capability-matrix.mdx) is not a connector page, and
+		// neither are the setup pages that moved into connectors/ in 1.0.10 (aliases,
+		// switching-connectors): they describe the setup commands for every connector.
+		connectorPage := strings.HasPrefix(rel, "connectors/") && !nonConnectorPages[rel]
 		for _, sentence := range sentenceBreak.Split(text, -1) {
 			sentence = strings.Join(strings.Fields(sentence), " ")
 			if pinnedOutageSentence(rel, sentence) {

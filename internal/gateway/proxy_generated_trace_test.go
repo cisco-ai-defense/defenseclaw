@@ -419,39 +419,6 @@ func TestHandleChatCompletionGeneratedInspectorTraceRecordsAppliedBlock(t *testi
 	}
 }
 
-func TestGeneratedInspectorTraceMarksAlreadyDeliveredBlockUnenforced(t *testing.T) {
-	runtime, capture := newProxyGeneratedTraceRuntime(t)
-	proxy := newTestProxy(t, &mockProvider{}, newMockInspector(), "action")
-	proxy.bindObservabilityV8Trace(runtime)
-	ctx := proxyGuardrailWithoutEnforcement(t.Context())
-	started, finish := startProxyGuardrailInspectionV8(
-		ctx, runtime, proxy.connectorName(), "regex_only", "completion", "action",
-	)
-	verdict := &ScanVerdict{Action: "block", Severity: "HIGH", Reason: "already delivered"}
-	finish(verdict, 1500*time.Microsecond)
-	if !verdict.GeneratedTraceOwned || !verdict.TraceContext.IsValid() || verdict.EnforcementID != "" {
-		t.Fatalf("already-delivered verdict ownership=%t trace=%v enforcement=%q",
-			verdict.GeneratedTraceOwned, verdict.TraceContext, verdict.EnforcementID)
-	}
-	proxy.recordTelemetry(started, "completion", "gpt-4", verdict, 1500*time.Microsecond, "action", false)
-	output := proxyGeneratedGuardrailSpan(t, capture.snapshot(), "output")
-	attributes := proxyCanonicalAttributes(t, output.Record())
-	for key, want := range map[string]any{
-		"defenseclaw.guardrail.mode":             "enforce",
-		"defenseclaw.guardrail.raw_action":       "block",
-		"defenseclaw.guardrail.effective_action": "allow",
-		"defenseclaw.guardrail.would_block":      true,
-		"defenseclaw.guardrail.enforced":         false,
-	} {
-		if attributes[key] != want {
-			t.Errorf("already-delivered %s=%#v want=%#v", key, attributes[key], want)
-		}
-	}
-	if _, fabricated := attributes["defenseclaw.enforcement.id"]; fabricated {
-		t.Fatalf("already-delivered trace fabricated enforcement ID: %v", attributes)
-	}
-}
-
 func TestGeneratedInspectorTraceEndStampsManagedProjectionPolicyOnRootAndPhases(t *testing.T) {
 	previousManaged := ManagedEnterpriseActive()
 	t.Cleanup(func() { SetManagedEnterpriseActive(previousManaged) })

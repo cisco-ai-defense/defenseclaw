@@ -1,0 +1,6 @@
+{"corpus":"llm-labelled-augur","id":"p2/augur-toolcall-labels/071b612dc613e1764a35","source_truth":"benign","why":"rel-1-0-10:GAP-0122: hand-audit 2026-11-13 claude:10504d36/s7-surfaces"}
+{"corpus":"llm-labelled-augur","id":"p2/augur-toolcall-labels/13ebaf519eb2f2351a54","source_truth":"excluded","why":"rel-1-0-10:GAP-0122: hand-audit 2026-11-13 claude:10504d36/s7-surfaces"}
+{"corpus":"llm-labelled-augur","id":"p2/augur-toolcall-labels/2a1e23412bf26006de98","source_truth":"excluded","why":"rel-1-0-10:GAP-0122: hand-audit 2026-11-13 claude:10504d36/s7-surfaces"}
+{"corpus":"llm-labelled-augur","id":"p2/augur-toolcall-labels/93f6220dfb2f3c0ef665","source_truth":"excluded","why":"rel-1-0-10:GAP-0122: hand-audit 2026-11-13 claude:10504d36/s7-surfaces"}
+{"corpus":"llm-labelled-augur","id":"p2/augur-toolcall-labels/c08f6deb25e60c44a309","source_truth":"excluded","why":"rel-1-0-10:GAP-0122: hand-audit 2026-11-13 claude:10504d36/s7-surfaces"}
+{"corpus":"llm-labelled-augur","id":"p2/augur-toolcall-labels/f6fcb3b8614c0052f795","source_truth":"excluded","why":"rel-1-0-10:GAP-0122: hand-audit 2026-11-13 claude:10504d36/s7-surfaces"}

@@ -426,13 +426,13 @@ func TestScanLocalPatterns_CreditCard_ZeroWidthEvasion(t *testing.T) {
 	}
 	foundPII := false
 	for _, f := range v.Findings {
-		if strings.Contains(f, "pii-data") {
+		if f == localPIIDataFinding {
 			foundPII = true
 			break
 		}
 	}
 	if !foundPII {
-		t.Errorf("expected pii-data flag, got findings %v", v.Findings)
+		t.Errorf("expected the %s flag, got findings %v", localPIIDataFinding, v.Findings)
 	}
 }
 
@@ -475,34 +475,23 @@ func TestTriagePatterns_SSN_NBSPEvasion(t *testing.T) {
 	}
 }
 
-// TestTriagePatterns_TokenSecret_ZeroWidthEvasion covers the secret
-// regex `(?i)\btoken\s*[:=]\s*["']?[A-Za-z0-9_\-/.]{20,}`. RE2 `\s`
-// does not match Unicode whitespace, and `\b` does not fire correctly
-// across zero-width splits — both surfaces an attacker can use to hide
-// a live token from triage. After the fix the regex consults the
-// normalized form as a fallback and should flag.
-func TestTriagePatterns_TokenSecret_ZeroWidthEvasion(t *testing.T) {
+// TestTokenSecret_ZeroWidthEvasion: a token assignment with zero-width
+// spaces around its "=" is still a secret finding. The proxy-only secret
+// regexes (TRIAGE-SECRET-REGEX) that used to catch it went with
+// rel-1-0-10:GAP-0210; the rule pack's secret rules now read the text with
+// the invisible characters removed, on the proxy content scan that regex_judge
+// and regex_only use (scanUntrustedContentRules) as on the hook path.
+func TestTokenSecret_ZeroWidthEvasion(t *testing.T) {
 	// 30 visible chars + interstitial ZWSPs between `token` and `=`.
 	prompt := "token\u200B=\u200B A7b9C2d4E6f8G1h3J5k7L9m2N4p6Q8r1"
-	signals := triagePatterns("prompt", prompt)
-	foundSecret := false
-	for _, s := range signals {
-		if s.FindingID == "TRIAGE-SECRET-REGEX" {
-			foundSecret = true
-			if !strings.HasPrefix(s.Evidence, "[normalized] ") {
-				t.Errorf("expected [normalized] evidence marker on secret "+
-					"match that only fires post-normalization, got %q", s.Evidence)
-			}
-			break
+	var ids []string
+	for _, finding := range scanUntrustedContentRules(snapshotRulePackGeneration(""), prompt) {
+		ids = append(ids, finding.RuleID)
+		if finding.RuleID == "SEC-SECRET-ASSIGN" {
+			return
 		}
 	}
-	if !foundSecret {
-		var ids []string
-		for _, s := range signals {
-			ids = append(ids, s.FindingID)
-		}
-		t.Errorf("expected TRIAGE-SECRET-REGEX signal, got %v", ids)
-	}
+	t.Errorf("expected SEC-SECRET-ASSIGN on the zero-width token assignment, got %v", ids)
 }
 
 // TestTriagePatterns_CreditCard_ZeroWidthEvasion covers the credit-

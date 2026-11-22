@@ -29,6 +29,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
@@ -98,23 +99,39 @@ func launcherActive() bool {
 	return managedHost
 }
 
-// prepareLauncherRoot cuts root down to the sandbox tree: the other commands
+// prepareLauncherRoot cuts root down to the sandbox and substrate trees: the other commands
 // are removed, the gateway's daemon bootstrap and the sidecar run are
 // replaced by the launcher's help, and the help describes the launcher.
 func prepareLauncherRoot(root *cobra.Command) {
 	var others []*cobra.Command
 	for _, command := range root.Commands() {
-		if command.Name() != "sandbox" {
+		if command.Name() != "sandbox" && command.Name() != "substrate" {
 			others = append(others, command)
 		}
 	}
 	root.RemoveCommand(others...)
+	// The substrate launcher only talks to a cluster, so the user's commands
+	// stay; the administrator tools (setup, bundle, template) are not offered
+	// here, as managedCommands says.
+	if substrate, _, err := root.Find([]string{"substrate"}); err == nil && substrate != root {
+		var admin []*cobra.Command
+		for _, command := range substrate.Commands() {
+			switch command.Name() {
+			case "setup", "bundle", "template":
+				admin = append(admin, command)
+			}
+		}
+		substrate.RemoveCommand(admin...)
+	}
 	if guardrail := newLauncherGuardrailCommand(); guardrail != nil {
 		root.AddCommand(guardrail)
 	}
 	if status := newLauncherStatusCommand(); status != nil {
 		root.AddCommand(status)
 	}
+	// The three own routing reads the table offers (REVIEW-final F1): a
+	// standard account here has no per-user CLI to read them with.
+	root.AddCommand(newManagedRoutingCmd())
 	root.Use = launcherCommand
 	root.Short = "Run coding agents in sandboxes on this managed computer"
 	root.Long = `Your organization manages DefenseClaw on this computer. Here defenseclaw runs
@@ -124,9 +141,11 @@ your coding agents in sandboxes under the policy your organization set for you:
   defenseclaw sandbox run claude     run Claude Code in a sandbox
   defenseclaw sandbox status         show your sandbox and managed policy state
   defenseclaw sandbox policy explain show the policy that applies to you
+  defenseclaw substrate run claude   run Claude Code in your organization's Agent Substrate cluster
 
 "defenseclaw guardrail profile explain" shows the guardrail profile that
-applies to your agents. Administrator status, verify and audit export use the
+applies to your agents, and "defenseclaw routing status" your own model
+routing. Administrator status, verify and audit export use the
 installed defenseclaw-gateway binary; doctor, alerts and tui are not offered
 by this managed launcher.`
 	root.CompletionOptions.DisableDefaultCmd = true
@@ -215,7 +234,7 @@ var launcherClient *sandboxapi.Client
 func launcherSandboxPreRun(cmd *cobra.Command, args []string) error {
 	cleanup := cmd.Annotations[sandboxConfigOptional] == "true"
 	if err := sandboxHostRefusal(runtime.GOOS, runtime.GOARCH, cleanup); err != nil {
-		return withExitCode(err, 3)
+		return cliusage.WithExitCode(err, 3)
 	}
 	// The configuration of a managed computer, which the commands read as
 	// such: no per-user config.yaml is written, and `sandbox setup` and the
@@ -224,7 +243,7 @@ func launcherSandboxPreRun(cmd *cobra.Command, args []string) error {
 	cfg = managedSandboxCommandConfig()
 	client, err := launcherManagedClient(runtime.GOOS)
 	if err != nil {
-		return withExitCode(err, 3)
+		return cliusage.WithExitCode(err, 3)
 	}
 	launcherClient = client
 	// A run the organization does not allow the account at all starts no
@@ -363,6 +382,9 @@ func launcherAuditedWriter(args []string) (string, bool) {
 	if launcherSingleWordWriters[args[0]] {
 		return args[0], true
 	}
+	if args[0] == "routing" {
+		return managedRoutingWriter(args[1:])
+	}
 	if len(args) > 1 && launcherWriters[args[0]][args[1]] {
 		if args[0] == "guardrail" && args[1] == "protection" && len(args) > 2 && args[2] == "list" {
 			return "", false
@@ -395,6 +417,13 @@ func executeLauncher(ctx context.Context, root *cobra.Command, args []string) in
 		// (rel-1-0-6 GAP-0104).
 		if command, ok := launcherAuditedWriter(args); ok && !launcherAsksHelp(args) {
 			reportManagedCommandRefusal(command, "")
+		}
+		if managedRoutingNamedRefusal(args) && !launcherAsksHelp(args) {
+			// A routing command the launcher does not run is the managed
+			// routing answer: the key the administrator config owns, exit 3
+			// (GAP-0573), not the generic refusal.
+			fmt.Fprintln(root.ErrOrStderr(), managedRoutingRefusal(args[1:]))
+			return 3
 		}
 		fmt.Fprintln(root.ErrOrStderr(), launcherRefusal)
 		return 2

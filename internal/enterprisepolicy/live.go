@@ -25,13 +25,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/hookevidence"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -64,12 +65,12 @@ type LiveOptions struct {
 	UID         int
 	GID         int
 	Timeout     time.Duration
-	// AuditDB is the gateway's audit database; its v8 event history holds
-	// the record a DefenseClaw hook leaves when it reports a tool call.
-	AuditDB string
-	// HookRecords searches that event history; nil uses AuditDB. Tests
-	// replace it.
-	HookRecords func(context.Context, audit.HookToolInvocationQuery) (audit.HookToolInvocationEvidence, error)
+	// HookRecords searches the v8 event history of the gateway audit
+	// database for the record a DefenseClaw hook leaves when it reports a
+	// tool call; nil when no audit database is configured. The caller binds
+	// it to the store (audit.FindHookToolInvocation), so this package does
+	// not link the audit store into the hook binary.
+	HookRecords func(context.Context, hookevidence.Query) (hookevidence.Evidence, error)
 	// Credential applies the target user's credentials to cmd (unix
 	// setuid when running as root); nil runs as the current process.
 	Credential func(cmd *exec.Cmd) error
@@ -347,10 +348,42 @@ func missingScriptInterpreter(lo LiveOptions) string {
 					return ""
 				}
 			}
-			return fmt.Sprintf("%s is a launcher script that runs %s, which is not on the probe's PATH (%s); pass --agent-binary the native Codex executable (for an npm install, node_modules/@openai/codex-<platform>/vendor/<target>/bin/codex inside the package) or link %s next to %s", binary, interpreter, value, interpreter, binary)
+			fix := "pass --agent-binary the native Codex executable (for an npm install, node_modules/@openai/codex-<platform>/vendor/<target>/bin/codex inside the package)"
+			if native := npmNativeCodex(binary); native != "" {
+				fix = "pass --agent-binary " + native
+			}
+			return fmt.Sprintf("%s is a launcher script that runs %s, which is not on the probe's PATH (%s); %s or link %s next to %s", binary, interpreter, value, fix, interpreter, binary)
 		}
 	}
 	return ""
+}
+
+// npmNativeCodex returns the native Codex executable inside the npm package
+// whose launcher (bin/codex.js, usually reached through a bin/codex symlink)
+// is binary, for this machine's architecture, or "" when the package holds
+// none or more than one: the probe then names the layout instead of a path.
+func npmNativeCodex(binary string) string {
+	real, err := filepath.EvalSymlinks(binary)
+	if err != nil {
+		return ""
+	}
+	pkg := filepath.Dir(filepath.Dir(real))
+	arch := map[string]string{"amd64": "x86_64-", "arm64": "aarch64-"}[runtime.GOARCH]
+	if arch == "" {
+		return ""
+	}
+	matches, _ := filepath.Glob(filepath.Join(pkg, "node_modules", "@openai", "codex-*", "vendor", arch+"*", "bin", "codex"))
+	found := ""
+	for _, match := range matches {
+		if info, err := os.Stat(match); err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
+			continue
+		}
+		if found != "" {
+			return ""
+		}
+		found = match
+	}
+	return found
 }
 
 func waitFor(ctx context.Context, responses <-chan map[string]json.RawMessage, id int) (map[string]json.RawMessage, error) {
@@ -438,16 +471,11 @@ func verifyClaudeLive(ctx context.Context, opts Options, lo LiveOptions, result 
 	}
 	result.evidence("Claude Code sent %d Messages requests to the local stub", stub.requests())
 	find := lo.HookRecords
-	if find == nil && strings.TrimSpace(lo.AuditDB) != "" {
-		find = func(ctx context.Context, query audit.HookToolInvocationQuery) (audit.HookToolInvocationEvidence, error) {
-			return audit.FindHookToolInvocation(ctx, lo.AuditDB, query)
-		}
-	}
 	if find == nil {
 		result.problem("no gateway audit database configured; search its event history for the tool.invocation.requested record with tool call id %s to confirm hook contact", toolCallID)
 		return nil
 	}
-	evidence, err := find(ctx, audit.HookToolInvocationQuery{
+	evidence, err := find(ctx, hookevidence.Query{
 		Connector: ConnectorClaudeCode, ToolCallID: toolCallID, Since: started, UserID: liveTargetUID(lo),
 	})
 	switch {

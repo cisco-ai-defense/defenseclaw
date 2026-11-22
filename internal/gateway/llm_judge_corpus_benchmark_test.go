@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -149,7 +150,17 @@ func (p *judgeBenchmarkProvider) count() int {
 	return len(p.records)
 }
 
+// judgeBenchmarkNonce matches the per-call section nonce of the tool judge
+// (tool_judge_nonce.go): random by design, so the request contract is hashed
+// with it blanked; the rest of the request is the contract.
+var judgeBenchmarkNonce = regexp.MustCompile(`nonce="[0-9a-f]{16}"|section nonce is [0-9a-f]{16}\.`)
+
 func judgeBenchmarkRequestSHA256(req *ChatRequest) string {
+	messages := make([]ChatMessage, len(req.Messages))
+	copy(messages, req.Messages)
+	for i := range messages {
+		messages[i].Content = judgeBenchmarkNonce.ReplaceAllString(messages[i].Content, "nonce=<call nonce>")
+	}
 	data, _ := json.Marshal(struct {
 		Model          string          `json:"model"`
 		Messages       []ChatMessage   `json:"messages"`
@@ -158,7 +169,7 @@ func judgeBenchmarkRequestSHA256(req *ChatRequest) string {
 		ResponseFormat json.RawMessage `json:"response_format"`
 		Fallbacks      []string        `json:"fallbacks"`
 		ExtraParams    map[string]any  `json:"extra_params"`
-	}{req.Model, req.Messages, req.MaxTokens, req.Temperature, req.ResponseFormat, req.Fallbacks, req.ExtraParams})
+	}{req.Model, messages, req.MaxTokens, req.Temperature, req.ResponseFormat, req.Fallbacks, req.ExtraParams})
 	digest := sha256.Sum256(data)
 	return hex.EncodeToString(digest[:])
 }
@@ -705,8 +716,10 @@ func TestValidateCorpusJudgeResumeContract(t *testing.T) {
 		t.Fatalf("stale request contract error = %v", err)
 	}
 
+	// A case with no tool name never reaches the judge. An argument-less call
+	// with a name is judged (rel-1-0-10:GAP-1279), so it is no zero-invocation
+	// case.
 	emptyCase := corpusJudgeCase{SchemaVersion: "1", ID: "empty-case", Surface: "action"}
-	emptyCase.Payload.ToolName = "shell"
 	emptyPrior := corpusJudgePrediction{SchemaVersion: "1", CaseID: "empty-case", Model: judge.model}
 	if err := validateCorpusJudgeResumeContract(t.Context(), judge, judge.model, emptyCase, emptyPrior); err != nil {
 		t.Fatalf("legitimate zero-invocation resume rejected: %v", err)
@@ -796,7 +809,7 @@ func runCorpusJudgeCase(
 		// Use a case-unique ID so the benchmark exercises the same bounded
 		// per-session history without allowing context to cross trajectories.
 		ctx = ContextWithSessionID(ctx, benchmarkCase.ID)
-		judge.ResetToolJudgeSession(benchmarkCase.ID)
+		judge.ResetToolJudgeSession(context.Background(), benchmarkCase.ID)
 		if strings.TrimSpace(benchmarkCase.Payload.Content) != "" {
 			judge.ObserveSessionPrompt(ctx, benchmarkCase.Payload.Content)
 		}

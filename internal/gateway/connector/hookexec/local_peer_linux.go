@@ -7,6 +7,7 @@ package hookexec
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"os"
 	"time"
@@ -30,5 +31,21 @@ func verifyLocalPeerIn(procNet string, client, server *net.TCPAddr) error {
 			return self, nil
 		}
 		return uid, err
+	})
+}
+
+// VerifyLocalPeerOwnedBy accepts a loopback connection whose accepted
+// server socket belongs to uid: the OpenClaw account of the separate-user
+// layout (connectors.openclaw.plugin_account), which is not this account.
+func VerifyLocalPeerOwnedBy(conn net.Conn, uid int) error {
+	local, localOK := conn.LocalAddr().(*net.TCPAddr)
+	remote, remoteOK := conn.RemoteAddr().(*net.TCPAddr)
+	if !localOK || !remoteOK || uid <= 0 {
+		return fmt.Errorf("local peer is not a TCP connection of a named account")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	return awaitPerUserLinuxSocket(ctx, uid, func() (int, error) {
+		return findConnectedTCPUID(procSelfNet, local, remote)
 	})
 }

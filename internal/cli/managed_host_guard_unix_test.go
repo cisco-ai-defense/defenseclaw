@@ -24,6 +24,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -35,12 +36,12 @@ func withUnixManagedHostDescriptor(t *testing.T) string {
 	if err := os.WriteFile(descriptor, []byte("{}"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	restore, restoreWindows, restoreTrust := managedHostDescriptorPath, managedHostWindowsStandalone, managedHostRecordTrusted
-	managedHostDescriptorPath = func() string { return descriptor }
-	managedHostWindowsStandalone = func() (string, bool) { return "", false }
-	managedHostRecordTrusted = func(string) error { return nil }
+	restore, restoreWindows, restoreTrust := hookcli.ManagedHostDescriptorPath, hookcli.ManagedHostWindowsStandalone, hookcli.ManagedHostRecordTrusted
+	hookcli.ManagedHostDescriptorPath = func() string { return descriptor }
+	hookcli.ManagedHostWindowsStandalone = func() (string, bool) { return "", false }
+	hookcli.ManagedHostRecordTrusted = func(string) error { return nil }
 	t.Cleanup(func() {
-		managedHostDescriptorPath, managedHostWindowsStandalone, managedHostRecordTrusted = restore, restoreWindows, restoreTrust
+		hookcli.ManagedHostDescriptorPath, hookcli.ManagedHostWindowsStandalone, hookcli.ManagedHostRecordTrusted = restore, restoreWindows, restoreTrust
 	})
 	t.Setenv(managed.DeploymentModeEnv, "")
 	return descriptor

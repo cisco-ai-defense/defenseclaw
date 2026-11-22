@@ -56,10 +56,13 @@ runs:
           ${{ steps.paths.outputs.modcache }}
           ${{ steps.paths.outputs.buildcache }}
         key: ${{ steps.paths.outputs.key }}
-        # The last line matches the entries actions/setup-go saved before
-        # this action (same two paths): it serves pull requests until main
-        # has written a go-* entry for their go.sum, and matches nothing
-        # once those older entries expire.
+        # The prefix alone: a pull request whose go.sum differs from main's
+        # restores main's shared entry. The old setup-go-<OS>- fallback
+        # (entries actions/setup-go saved before this action) also matched
+        # the small entries a job with actions/setup-go's own cache writes in
+        # the pull request's scope, which GitHub searches before main's: on
+        # PR #1456 every macOS job restored 11 MB instead of main's 524 MB and
+        # compiled cold (a darwin gateway part 15.6 minutes before its first
+        # test). main has a go-* shared entry for every OS since 2026-10-27.
         restore-keys: |
           ${{ steps.paths.outputs.prefix }}
-          setup-go-${{ runner.os }}-

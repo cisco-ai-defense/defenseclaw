@@ -59,11 +59,15 @@ def _database(
     payload_raw: str | None = None,
     projection_hash: str | None = None,
     indexed_connector: str | None = "claudecode",
+    store_payload: bool = True,
+    structured_raw: str | None = None,
 ) -> str:
     record = record or _record()
     raw = projected_raw if projected_raw is not None else json.dumps(record, separators=(",", ":"))
     body = record.get("body")
     payload = payload_raw if payload_raw is not None else json.dumps(body, separators=(",", ":"))
+    if not store_payload:
+        payload = None
     digest = projection_hash or "sha256:" + hashlib.sha256(raw.encode()).hexdigest()
     correlation = record["correlation"]
     assert isinstance(correlation, dict)
@@ -72,12 +76,12 @@ def _database(
         """CREATE TABLE audit_events (
                id TEXT, bucket TEXT, event_name TEXT, source TEXT, signal TEXT,
                connector TEXT, request_id TEXT, session_id TEXT, turn_id TEXT,
-               record_schema_version INTEGER, payload_json TEXT,
+               record_schema_version INTEGER, structured_json TEXT, payload_json TEXT,
                projected_record_json TEXT, projection_hash TEXT
            )"""
     )
     connection.execute(
-        "INSERT INTO audit_events VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)",
+        "INSERT INTO audit_events VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)",
         (
             record.get("record_id"),
             record.get("bucket"),
@@ -88,6 +92,7 @@ def _database(
             correlation.get("request_id"),
             correlation.get("session_id"),
             correlation.get("turn_id"),
+            structured_raw,
             payload,
             raw,
             digest,
@@ -370,3 +375,75 @@ def test_altered_field_class_set_fails_closed(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="field class set"):
         PROJECTOR._read_projected_records(database)
+
+
+_COMPAT_STRUCTURED = '{"tool":"Bash","verdict":"allow"}'
+
+
+def _compatibility_record(*, structured: bool = True) -> dict[str, object]:
+    """A legacy.audit.* connector-hook record, as the audit logger writes it."""
+    body: dict[str, object] = {"actor": "claudecode", "details": "hook=PreToolUse", "target": "Bash"}
+    if structured:
+        body["structured_json"] = _COMPAT_STRUCTURED
+    return {**_record(), "event_name": "legacy.audit.connector-hook", "body": body}
+
+
+@pytest.mark.parametrize(
+    ("record", "structured_raw"),
+    [
+        # The whole body, as the row kept it before the profile path.
+        (_compatibility_record(), json.dumps(_compatibility_record()["body"], separators=(",", ":"))),
+        # The body's own structured_json text.
+        (_compatibility_record(), _COMPAT_STRUCTURED),
+        # Nothing, for a body without structured_json.
+        (_compatibility_record(structured=False), None),
+    ],
+)
+def test_compatibility_row_without_payload_json_projects(
+    tmp_path: Path, record: dict[str, object], structured_raw: str | None
+) -> None:
+    """Since S8 R4 (#1384) a compatibility row keeps no payload_json."""
+    database = tmp_path / "audit.db"
+    expected = _database(database, record=record, store_payload=False, structured_raw=structured_raw)
+
+    assert PROJECTOR._read_projected_records(database) == [expected]
+
+
+@pytest.mark.parametrize(
+    ("record", "structured_raw", "message"),
+    [
+        (_compatibility_record(), None, "structured_json is missing"),
+        (_compatibility_record(), '{"tool":"Bash","verdict":"block"}', "structured_json disagrees"),
+        (_compatibility_record(), "{", "structured_json is invalid"),
+        (_compatibility_record(structured=False), '{"actor":"other"}', "structured_json disagrees"),
+    ],
+)
+def test_compatibility_row_structured_json_must_match_body(
+    tmp_path: Path, record: dict[str, object], structured_raw: str | None, message: str
+) -> None:
+    database = tmp_path / "audit.db"
+    _database(database, record=record, store_payload=False, structured_raw=structured_raw)
+
+    with pytest.raises(ValueError, match=message):
+        PROJECTOR._read_projected_records(database)
+
+
+def test_native_row_without_payload_json_fails_closed(tmp_path: Path) -> None:
+    """Only a legacy.audit.* row may leave payload_json NULL."""
+    database = tmp_path / "audit.db"
+    _database(database, store_payload=False, structured_raw=json.dumps(_record()["body"]))
+
+    with pytest.raises(ValueError, match="payload_json is not text"):
+        PROJECTOR._read_projected_records(database)
+
+
+def test_compatibility_row_with_payload_json_still_checks_it(tmp_path: Path) -> None:
+    """A row written before 1.0.10 keeps payload_json; it must equal the body."""
+    database = tmp_path / "audit.db"
+    expected = _database(database, record=_compatibility_record())
+    assert PROJECTOR._read_projected_records(database) == [expected]
+
+    other = tmp_path / "other.db"
+    _database(other, record=_compatibility_record(), payload_raw='{"actor":"other"}')
+    with pytest.raises(ValueError, match="payload_json disagrees"):
+        PROJECTOR._read_projected_records(other)

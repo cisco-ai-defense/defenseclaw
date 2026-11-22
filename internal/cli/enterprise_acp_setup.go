@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/acp"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/jsonc"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
@@ -58,7 +59,7 @@ gateway refuses a request that does not match them.`,
 	// The user cannot read the administrator-owned configuration, and setup
 	// needs none. Secure Client keeps the command tree of main, which has no
 	// setup (issue #1092).
-	Annotations: map[string]string{"defenseclaw.skip-daemon-bootstrap": "true", secureClientAbsentAnnotation: "true"},
+	Annotations: map[string]string{"defenseclaw.skip-daemon-bootstrap": "true", hookcli.SecureClientAbsentAnnotation: "true"},
 	RunE:        runEnterpriseACPSetup,
 }
 

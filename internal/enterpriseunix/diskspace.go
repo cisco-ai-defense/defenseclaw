@@ -48,9 +48,9 @@ func diskSpace(path string) (avail, total, device uint64, err error) {
 	return uint64(fs.Bavail) * block, uint64(fs.Blocks) * block, uint64(st.Dev), nil
 }
 
-// warnLowDiskSpace warns when the filesystem holding the audit database or
-// the logs is nearly full, and names it full once a write would fail
-// (GAP-0514). A managed hook whose audit record cannot be written is
+// warnLowDiskSpace warns when the filesystem holding the audit database, the
+// logs or the lifecycle state is nearly full, and names it full once a write
+// would fail (GAP-0514; the lifecycle state, GAP-0057). A managed hook whose audit record cannot be written is
 // blocked (reference/fail-modes: an audit write failure is not an outage
 // and fails closed on a managed install), so the warning says that agent
 // work stops while the audit filesystem is full and how it resumes; it said
@@ -59,7 +59,7 @@ func diskSpace(path string) (avail, total, device uint64, err error) {
 func (l *lifecycle) warnLowDiskSpace() {
 	env := l.env
 	seen := map[uint64]bool{}
-	for _, dir := range []string{env.Layout.DataDir, env.Layout.LogDir} {
+	for _, dir := range []string{env.Layout.DataDir, env.Layout.LogDir, env.Layout.LifecycleDir} {
 		avail, total, device, err := env.DiskSpace(env.P(dir))
 		if err != nil || total == 0 || seen[device] {
 			continue
@@ -68,19 +68,41 @@ func (l *lifecycle) warnLowDiskSpace() {
 		if avail >= diskSpaceLowBytes && avail*100 >= total*diskSpaceLowPercent {
 			continue
 		}
-		l.result.AddWarning(codeDiskSpaceLow, lowDiskSpaceMessage(dir, dir == env.Layout.DataDir, avail, total))
+		l.result.AddWarning(codeDiskSpaceLow, env.lowDiskSpaceMessage(dir, avail, total))
 	}
 }
 
+// lifecycleDirFull names the full filesystem holding the lifecycle state, or
+// "". A package install run cannot create its result file there, so it does
+// not start, and dnf or apt still print Complete (GAP-0057).
+func (l *lifecycle) lifecycleDirFull() string {
+	dir := l.env.Layout.LifecycleDir
+	avail, total, _, ok := l.diskSpaceOf(l.env.P(dir))
+	if !ok || avail >= diskFullBytes {
+		return ""
+	}
+	return fmt.Sprintf("the filesystem holding %s is full (%s free of %s), so the package's install run could not start or record its result; free space on it",
+		dir, formatDiskBytes(avail), formatDiskBytes(total))
+}
+
 // lowDiskSpaceMessage is the disk_space_low warning for the filesystem
-// holding dir; audit marks the one that holds the audit database.
-func lowDiskSpaceMessage(dir string, audit bool, avail, total uint64) string {
+// holding dir: the data folder (with the audit database), the log folder or
+// the lifecycle state folder.
+func (e *Env) lowDiskSpaceMessage(dir string, avail, total uint64) string {
 	state := fmt.Sprintf("has %.1f MiB free (%.1f%%)", float64(avail)/(1<<20), float64(avail)*100/float64(total))
 	full := avail < diskFullBytes
 	if full {
 		state = fmt.Sprintf("is full (%s free of %s)", formatDiskBytes(avail), formatDiskBytes(total))
 	}
-	if !audit {
+	if dir == e.Layout.LifecycleDir && dir != e.Layout.DataDir {
+		effect := "when it fills, a package install or upgrade cannot record its run and does not apply, although the package manager reports success"
+		if full {
+			effect = "a package install or upgrade cannot record its run and does not apply, although the package manager reports success"
+		}
+		return "the filesystem holding " + dir + " " + state + ": " + effect + "; free space on it, then apply the installed package with `" +
+			e.lifecycleCommand(ActionEnsure) + " --from-package`"
+	}
+	if dir != e.Layout.DataDir {
 		if full {
 			return "the filesystem holding " + dir + " " + state + ": the gateway logs stop recording; free space on it"
 		}

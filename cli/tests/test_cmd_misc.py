@@ -993,6 +993,13 @@ class TestSetupGuardrailUnifiedLLMSharing(unittest.TestCase):
     def setUp(self):
         self.app, self.tmp_dir, self.db_path = make_app_context()
         self.runner = CliRunner()
+        # setup guardrail asks whether the account has saved a config
+        # (config_path()); without this it reads the real ~/.defenseclaw of
+        # whoever runs the suite, and a box with one refused the first
+        # connector choice (rel-1-0-10:GAP-0200, GAP-1120).
+        config_env = patch.dict(os.environ, {"DEFENSECLAW_CONFIG": os.path.join(self.tmp_dir, "config.yaml")})
+        config_env.start()
+        self.addCleanup(config_env.stop)
 
     def tearDown(self):
         cleanup_app(self.app, self.db_path, self.tmp_dir)
@@ -1073,6 +1080,13 @@ class TestSetupGuardrailJudgeFlagsObserveMode(unittest.TestCase):
     def setUp(self):
         self.app, self.tmp_dir, self.db_path = make_app_context()
         self.runner = CliRunner()
+        # setup guardrail asks whether the account has saved a config
+        # (config_path()); without this it reads the real ~/.defenseclaw of
+        # whoever runs the suite, and a box with one refused the first
+        # connector choice (rel-1-0-10:GAP-0200, GAP-1120).
+        config_env = patch.dict(os.environ, {"DEFENSECLAW_CONFIG": os.path.join(self.tmp_dir, "config.yaml")})
+        config_env.start()
+        self.addCleanup(config_env.stop)
 
     def tearDown(self):
         cleanup_app(self.app, self.db_path, self.tmp_dir)
@@ -1120,7 +1134,10 @@ class TestSetupGuardrailJudgeFlagsObserveMode(unittest.TestCase):
         result, _ = self._invoke("observe")
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertEqual(result.output.count("The LLM judge"), 1, result.output)
-        self.assertIn("The LLM judge is off", result.output)
+        # GAP-1113: --connector claudecode puts that connector alone in place
+        # of the dormant 'all' gate, so the one warning is the run's own
+        # "was not enabled" (the 'all'-pruned "is off" line is interactive).
+        self.assertIn("The LLM judge was not enabled", result.output)
         self.assertIn("defenseclaw setup claude-code --mode action --enable-judge --yes", result.output)
         self.assertNotIn("judge add", result.output)
         self.assertFalse(self.app.cfg.guardrail.judge.enabled)

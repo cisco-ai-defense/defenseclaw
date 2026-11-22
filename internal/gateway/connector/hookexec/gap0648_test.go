@@ -515,9 +515,10 @@ func TestAManagedVerdictReadInTimeIsWrittenWhenItsCallFinishesPastTheDeadline(t 
 // call), the install answer and its closed hook-failures row (GAP-1074).
 // Hermes shows the difference: its no-answer row is fail_open.
 func TestALateManagedAnswerForAHeldWatchdogIsTheInstallAnswerDuringALifecycle(t *testing.T) {
-	previousLate, previousLog := lateAnswerWait, answerWatchdogLogWait
-	lateAnswerWait, answerWatchdogLogWait = 50*time.Millisecond, time.Minute
-	t.Cleanup(func() { lateAnswerWait, answerWatchdogLogWait = previousLate, previousLog })
+	previousLate := lateAnswerWait
+	lateAnswerWait = 50 * time.Millisecond
+	t.Cleanup(func() { lateAnswerWait = previousLate })
+	setAnswerWatchdogLogWait(t, time.Minute)
 	var running atomic.Bool
 	stubManagedLifecycle(t, running.Load)
 	home := t.TempDir()

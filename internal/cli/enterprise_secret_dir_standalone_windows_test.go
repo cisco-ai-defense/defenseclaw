@@ -61,7 +61,7 @@ func TestWindowsSecretsDirStandaloneRefusesThenStampsOnTheSameHandle(t *testing.
 			owner, _, _ := descriptor.Owner()
 			dacl, _, _ := descriptor.DACL()
 			if err := managed.RunWithWindowsRepairPrivileges(func() error {
-				return windows.SetNamedSecurityInfo(dir, windows.SE_FILE_OBJECT, windowsSDDLApplied, owner, nil, dacl, nil)
+				return windows.SetNamedSecurityInfo(dir, windows.SE_FILE_OBJECT, windowsSDDLApplied(owner), owner, nil, dacl, nil)
 			}); err != nil {
 				t.Fatal(err)
 			}

@@ -71,7 +71,6 @@ func TestDynamicOperandWordThroughProgramPathsAndWrappers(t *testing.T) {
 		{"command cp a.txt ~/.defenseclaw/config.yaml $(true)", true},
 		{"env cp a.txt ~/.defenseclaw/config.yaml $(true)", true},
 		{"sudo cp a.txt ~/.defenseclaw/config.yaml $(true)", true},
-		{"dd if=a.txt of=$HOME/.defenseclaw/config.yaml $(true)", true},
 		{"dd if=$SRC of=$HOME/.defenseclaw/config.yaml", true},
 		{"tee ~/.defenseclaw/config.yaml $(true) < a.txt", true},
 		{"cat a.txt | tee ~/.defenseclaw/config.yaml $X", true},
@@ -81,6 +80,11 @@ func TestDynamicOperandWordThroughProgramPathsAndWrappers(t *testing.T) {
 		{"dd if=a.txt of=out.img $(true)", false},
 		{"sudo cp a.txt /tmp/x.txt $(true)", false},
 		{"command -v cp $(true)", false},
+	})
+	// These rows block in the default pack for rules of their own, not as
+	// the HIGH state write alert (GAP-1563).
+	judgeHomeStateRuleRows(t, []homeStateRuleRow{
+		{"dd if=a.txt of=$HOME/.defenseclaw/config.yaml $(true)", []string{gap0747StateRule, gap0747CompoundLimitRule}},
 	})
 }
 
@@ -131,8 +135,6 @@ func TestStatePatternReadsOnlyTheHomeStateTree(t *testing.T) {
 	}
 	start := time.Now()
 	judgeHomeStateWriteRows(t, []homeStateWriteRow{
-		{"cp a.txt ~/.defenseclaw/config.yaml; ls /*/*/*/*/*/.defenseclaw/x", true},
-		{"cp a.txt ~/.defenseclaw/config.yaml; ls /*/*/*/*/*/*/*/.defenseclaw/x", true},
 		{"cp a.txt ~/.def*/config.yaml", true},
 		{"cp a.txt ~/.defensecla[w]/config.yaml", true},
 		{"ln -sf a.txt ~/.def*/config.yaml", true},
@@ -142,6 +144,12 @@ func TestStatePatternReadsOnlyTheHomeStateTree(t *testing.T) {
 		{"ls ~/.def*/conf*.yaml", false},
 		{"cp a.txt ~/.def*/nomatch.yaml", false},
 		{"cp ~/.def*/config.yaml ~/project/backup.yaml", false},
+	})
+	// These rows block in the default pack for rules of their own, not as
+	// the HIGH state write alert (GAP-1563).
+	judgeHomeStateRuleRows(t, []homeStateRuleRow{
+		{"cp a.txt ~/.defenseclaw/config.yaml; ls /*/*/*/*/*/.defenseclaw/x", []string{gap0747StateRule, gap0747SSHKeysRule}},
+		{"cp a.txt ~/.defenseclaw/config.yaml; ls /*/*/*/*/*/*/*/.defenseclaw/x", []string{gap0747StateRule, gap0747SSHKeysRule}},
 	})
 	if elapsed := time.Since(start); elapsed > 30*time.Second {
 		t.Fatalf("44 pattern rows took %s; the reading must not walk past the home", elapsed)
@@ -224,8 +232,12 @@ func TestWrappedLinkReadsLikeThePlainLink(t *testing.T) {
 		{"ln -sf $(pwd)/a.txt ~/.local/bin/tool", false},
 		{"nohup ln -sf a.txt ~/.defenseclaw/config.yaml", true},
 		{"env A=1 ln -sfn /tmp/x ~/.defenseclaw/hooks", true},
-		{"nohup ln -s ~/.ssh/authorized_keys k; cp a.txt k", true},
-		{"env PATH=/tmp/bin ln -s ~/.ssh/authorized_keys k; cp a.txt k", true},
+	})
+	// These rows block in the default pack for rules of their own, not as
+	// the HIGH state write alert (GAP-1563).
+	judgeHomeStateRuleRows(t, []homeStateRuleRow{
+		{"nohup ln -s ~/.ssh/authorized_keys k; cp a.txt k", []string{gap0747SSHKeysRule}},
+		{"env PATH=/tmp/bin ln -s ~/.ssh/authorized_keys k; cp a.txt k", []string{gap0747SSHKeysRule}},
 	})
 }
 
@@ -258,7 +270,6 @@ func TestExecRunnersWriteWhatThePlainCallWrites(t *testing.T) {
 		{"env -C / cp HOMEDIR/project/a.txt HOMEDIR/.defenseclaw/config.yaml", true},
 		{"env -C HOMEDIR cp project/a.txt .defenseclaw/config.yaml", true},
 		{"builtin command cp a.txt ~/.defenseclaw/config.yaml", true},
-		{"setsid nohup cp a.txt ~/.ssh/authorized_keys", true},
 		{"setsid cp a.txt b.txt", false},
 		{"stdbuf -oL tee out.log < a.txt", false},
 		{"flock /tmp/zzl make --version", false},
@@ -266,6 +277,11 @@ func TestExecRunnersWriteWhatThePlainCallWrites(t *testing.T) {
 		{"env -C /tmp cp HOMEDIR/project/a.txt .defenseclaw-notes.txt", false},
 		{"env -C /tmp cp HOMEDIR/project/a.txt .defenseclaw/config.yaml", false},
 		{"taskset -c 0 cp ~/.defenseclaw/config.yaml ~/project/backup.yaml", false},
+	})
+	// These rows block in the default pack for rules of their own, not as
+	// the HIGH state write alert (GAP-1563).
+	judgeHomeStateRuleRows(t, []homeStateRuleRow{
+		{"setsid nohup cp a.txt ~/.ssh/authorized_keys", []string{gap0747SSHKeysRule}},
 	})
 }
 
@@ -328,10 +344,7 @@ func TestWriteThroughALinkToStateIsAStateWrite(t *testing.T) {
 		{"nohup ln -s ~/.defenseclaw hc; tee hc/config.yaml < a.txt", true},
 		{"time ln -s ~/.defenseclaw hc; cp a.txt hc/config.yaml", true},
 		{"nice ln -s ~/.defenseclaw hc; cp a.txt hc/config.yaml", true},
-		{"ln -s HOMEDIR/.defenseclaw hc; mv a.txt hc/config.yaml", true},
 		{"ln -sfn ~/.defenseclaw/hooks hh && cp a.txt hh/", true},
-		{"ln -s ~/.ssh sd; cp a.txt sd/authorized_keys", true},
-		{"nohup ln -s ~/.ssh sd; cp a.txt sd/authorized_keys", true},
 		{"ln -s HOMEDIR/.defenseclaw hc; rm hc/config.yaml", true},
 		{"ln -s ~/.defenseclaw hc; ln -sf HOMEDIR/project/a.txt hc/config.yaml", true},
 		{"ln -s ~/.defenseclaw/config.yaml cfg-link", false},
@@ -345,6 +358,13 @@ func TestWriteThroughALinkToStateIsAStateWrite(t *testing.T) {
 		{"ln -s HOMEDIR/project/src s; cp a.txt s/x.txt", false},
 		{"ln -sf $(pwd)/a.txt ~/.local/bin/tool", false},
 		{"nohup ln -sf $(pwd)/a.txt ~/.local/bin/tool", false},
+	})
+	// These rows block in the default pack for rules of their own, not as
+	// the HIGH state write alert (GAP-1563).
+	judgeHomeStateRuleRows(t, []homeStateRuleRow{
+		{"ln -s HOMEDIR/.defenseclaw hc; mv a.txt hc/config.yaml", []string{gap0747StateRule, gap0747SSHKeysRule}},
+		{"ln -s ~/.ssh sd; cp a.txt sd/authorized_keys", []string{gap0747SSHKeysRule}},
+		{"nohup ln -s ~/.ssh sd; cp a.txt sd/authorized_keys", []string{gap0747SSHKeysRule}},
 	})
 }
 
@@ -389,7 +409,6 @@ func TestAssignedEnvChdirAndFlockStringWriteWhatThePlainCallWrites(t *testing.T)
 		{"A=1 env -C / cp HOMEDIR/project/a.txt ~/.defenseclaw/config.yaml", true},
 		{"A=1 env -C / cp HOMEDIR/project/a.txt HOMEDIR/.defenseclaw/config.yaml", true},
 		{"A=1 B=2 env -C HOMEDIR cp project/a.txt .defenseclaw/config.yaml", true},
-		{"A=1 env -C / cp a.txt b.txt; nohup cp a.txt ~/.defenseclaw/config.yaml", true},
 		{`flock /tmp/zzl -c "cp a.txt ~/.defenseclaw/config.yaml"`, true},
 		{`flock -w 5 /tmp/zzl -c "cp a.txt ~/.defenseclaw/hooks/x.sh"`, true},
 		{`flock /tmp/zzl --command "cp a.txt ~/.defenseclaw/config.yaml"`, true},
@@ -397,6 +416,15 @@ func TestAssignedEnvChdirAndFlockStringWriteWhatThePlainCallWrites(t *testing.T)
 		{"A=1 env -C /tmp cp HOMEDIR/project/a.txt .defenseclaw/config.yaml", false},
 		{`flock /tmp/zzl -c "make --version"`, false},
 		{`flock /tmp/zzl -c "cp a.txt b.txt"`, false},
+	})
+	// An env -C call ahead of a later statement is a gap in the call split,
+	// and a flagged effect after a split gap also raises the call to the
+	// evaluation limit (the substrate-1 split-gap readings on rel
+	// 8e58b26846, GAP-0693 to GAP-0704): the state write after it is the
+	// HIGH state write beside ACTION-COMPOUND-LIMIT, which the dispatch
+	// verdict blocks, as rel did (GAP-1563 split oracle, GAP-0747).
+	judgeHomeStateRuleRows(t, []homeStateRuleRow{
+		{"A=1 env -C / cp a.txt b.txt; nohup cp a.txt ~/.defenseclaw/config.yaml", []string{gap0747StateRule, gap0747CompoundLimitRule}},
 	})
 }
 
@@ -529,14 +557,12 @@ func TestEnvChdirHomeSpellingRunsTheCallInTheHome(t *testing.T) {
 		{`env --chdir "$HOME" mv project/a.txt .defenseclaw/config.yaml`, true},
 		{`env -C"${HOME}" cp project/a.txt .defenseclaw/config.yaml`, true},
 		{"env -C ~ tee .defenseclaw/config.yaml < project/a.txt", true},
-		{"env -C ~ ln -sf project/a.txt .defenseclaw/config.yaml", true},
 		{"setsid env -C ~ cp project/a.txt .defenseclaw/config.yaml", true},
 		{"A=1 env -C ~ cp project/a.txt .defenseclaw/config.yaml", true},
 		{"env -C ~ env -C .defenseclaw cp ../project/a.txt config.yaml", true},
 		{"env -C /tmp env -C ~ cp project/a.txt .defenseclaw/config.yaml", true},
 		{`sh -c "env -C ~ cp project/a.txt .defenseclaw/config.yaml"`, true},
 		{`env -C ~ sh -c "setsid cp project/a.txt .defenseclaw/config.yaml"`, true},
-		{"env -C ~ cp project/a.txt .ssh/authorized_keys", true},
 		{"env -C ~ cp project/a.txt project/b.txt", false},
 		{"env -C ~/project cp a.txt b.txt", false},
 		{`env -C "$HOME/project" make --version`, false},
@@ -546,6 +572,12 @@ func TestEnvChdirHomeSpellingRunsTheCallInTheHome(t *testing.T) {
 		{"env -C '~' cp a.txt .defenseclaw/config.yaml", false},
 		{`env -C "$HOME"x cp a.txt .defenseclaw/config.yaml`, false},
 		{"env -C ~ ls -la", false},
+	})
+	// These rows block in the default pack for rules of their own, not as
+	// the HIGH state write alert (GAP-1563).
+	judgeHomeStateRuleRows(t, []homeStateRuleRow{
+		{"env -C ~ cp project/a.txt .ssh/authorized_keys", []string{gap0747SSHKeysRule}},
+		{"env -C ~ ln -sf project/a.txt .defenseclaw/config.yaml", []string{gap0747SSHKeysRule, gap0747StateRule}},
 	})
 }
 
@@ -638,7 +670,7 @@ func TestWindowsHomeCdThenRelativeStateWrite(t *testing.T) {
 				findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
 					Input: input, Connector: connectorName, EnforcementCapable: true,
 				})
-				if blocked := buildVerdict(findings, "tool_call").Action == "block"; blocked != row.block {
+				if blocked := gap0747Blocked(findings, row.block); blocked != row.block {
 					t.Errorf("%s hint=%q %q: block=%v, want %v", connectorName, hint, row.command, blocked, row.block)
 				}
 			}
@@ -702,7 +734,7 @@ func TestHomeCdRecursiveCopyReadsSourcesInTheNewDirectory(t *testing.T) {
 				findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
 					Input: input, Connector: connectorName, EnforcementCapable: true,
 				})
-				if blocked := buildVerdict(findings, "tool_call").Action == "block"; blocked != row.block {
+				if blocked := gap0747Blocked(findings, row.block); blocked != row.block {
 					t.Errorf("%s hint=%q %q: block=%v, want %v %v", connectorName, hint, row.command, blocked, row.block, FindingStrings(findings))
 				}
 			}

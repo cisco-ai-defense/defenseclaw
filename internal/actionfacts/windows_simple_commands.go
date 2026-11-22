@@ -500,32 +500,82 @@ func windowsSimpleLiteralOutput(part string) bool {
 }
 
 type simpleWindowsState struct {
+	// cwd is the folder of the next statement when every folder move before
+	// it worked: the one reading the walk had before it tracked the moves
+	// that may fail.
 	cwd                string
 	cwdUnknown         bool
 	dirStack           []string
 	uncertainVariables map[string]bool
+	// others are the other folders the next statement may run in. A
+	// Set-Location, cd, chdir, Push-Location, pushd or Pop-Location that
+	// fails (a missing folder) is not a terminating error, and a failed CMD
+	// cd does not stop the command after & or a newline, so a statement
+	// after a move runs where the move left the shell OR where it stood
+	// before: it is read in each folder, and a write of a protected file in
+	// any of them is that write (rel-1-0-10:GAP-1150, the PowerShell and CMD
+	// side of GAP-0133). Only the statement right after `move &&` runs in the
+	// moved folder alone. others never holds the folder of cwd.
+	others []simpleWindowsLocation
+	// skipped are the folders a statement before an && left: the right side
+	// of the && does not run there, the statement after it may.
+	skipped []simpleWindowsLocation
+	// othersUnresolved reports a folder the walk cannot give: more folders
+	// than maxSimpleWindowsFolders (the one bound rule), or a move it cannot
+	// place from one of the others. A statement with a relative operand is
+	// then also read as one in an unresolved folder (UnresolvedFolder).
+	othersUnresolved bool
+	// trackOthers is set when the call has a Windows folder of its own; a
+	// call placed nowhere (a managed gateway with no cwd) keeps the one
+	// reading, as the hook client keys its facts.
+	trackOthers bool
 }
+
+// simpleWindowsLocation is one folder a statement may run in, with the
+// Push-Location stack that led there.
+type simpleWindowsLocation struct {
+	cwd      string
+	dirStack []string
+}
+
+// maxSimpleWindowsFolders bounds the folders one statement is read in, as
+// the working-folder tracking of the facts bounds its own (maxWorkFolders).
+const maxSimpleWindowsFolders = maxWorkFolders
 
 type simpleWindowsGroupSnapshot struct {
 	cwd        string
 	cwdUnknown bool
 	dirStack   []string
 	variables  map[string]string
+	others     []simpleWindowsLocation
 }
 
 func (state *simpleWindowsState) groupSnapshot(variables map[string]string) simpleWindowsGroupSnapshot {
 	return simpleWindowsGroupSnapshot{cwd: state.cwd, cwdUnknown: state.cwdUnknown,
-		dirStack: slices.Clone(state.dirStack), variables: maps.Clone(variables)}
+		dirStack: slices.Clone(state.dirStack), variables: maps.Clone(variables),
+		others: slices.Clone(state.others)}
 }
 
 // A branch, loop, or script block may not leave its directory or variables
 // changed. Retain child evidence but do not treat those side effects as facts
-// for commands that follow the group.
+// for commands that follow the group. The folders it may have left the shell
+// in, and the one before it, stay folders the next statement may run in.
 func (state *simpleWindowsState) mergeGroup(before simpleWindowsGroupSnapshot, variables map[string]string) {
+	folders := append(append(slices.Clone(state.others), state.skipped...), before.others...)
+	state.skipped = nil
 	if state.cwd != before.cwd || state.cwdUnknown != before.cwdUnknown ||
 		!slices.Equal(state.dirStack, before.dirStack) {
+		if state.trackOthers {
+			if !state.cwdUnknown && state.cwd != "" {
+				folders = append(folders, simpleWindowsLocation{cwd: state.cwd, dirStack: slices.Clone(state.dirStack)})
+			}
+			if !before.cwdUnknown && before.cwd != "" {
+				folders = append(folders, simpleWindowsLocation{cwd: before.cwd, dirStack: slices.Clone(before.dirStack)})
+			}
+		}
 		state.cwd, state.cwdUnknown, state.dirStack = "", true, nil
 	}
+	state.setOthers(folders)
 	for name, value := range variables {
 		if previous, present := before.variables[name]; !present || previous != value {
 			delete(variables, name)
@@ -590,6 +640,72 @@ func (state *simpleWindowsState) referencesUncertainVariable(part string) bool {
 		index = end - 1
 	}
 	return false
+}
+
+// setOthers makes folders the other folders of the next statement: each
+// once, never the folder of cwd, at most maxSimpleWindowsFolders-1.
+func (state *simpleWindowsState) setOthers(folders []simpleWindowsLocation) {
+	state.others = state.others[:0:0]
+	for _, folder := range folders {
+		if folder.cwd == "" || !state.cwdUnknown && folder.cwd == state.cwd && slices.Equal(folder.dirStack, state.dirStack) ||
+			slices.ContainsFunc(state.others, func(have simpleWindowsLocation) bool {
+				return have.cwd == folder.cwd && slices.Equal(have.dirStack, folder.dirStack)
+			}) {
+			continue
+		}
+		if len(state.others) >= maxSimpleWindowsFolders-1 {
+			state.othersUnresolved = true
+			break
+		}
+		state.others = append(state.others, folder)
+	}
+}
+
+// advance reads the folder move of part (next) in every folder part may run
+// in; operator is the separator after part. A move that may fail leaves the
+// folder before it as a folder of the statements after it.
+func (state *simpleWindowsState) advance(part string, dialect windowsDialect, input Input, variables map[string]string, operator string) {
+	if !state.trackOthers {
+		state.next(part, dialect, input, variables)
+		return
+	}
+	starts := slices.Clone(state.others)
+	moved := make([]simpleWindowsLocation, 0, len(starts)+1)
+	for _, start := range starts {
+		reading := simpleWindowsState{cwd: start.cwd, dirStack: slices.Clone(start.dirStack),
+			uncertainVariables: state.uncertainVariables}
+		startInput := input
+		startInput.CWD = start.cwd
+		reading.next(part, dialect, startInput, variables)
+		if reading.cwdUnknown {
+			// A move the walk cannot place from this folder: the
+			// facts' own tracking reads it as an unresolved folder.
+			state.othersUnresolved = true
+			continue
+		}
+		moved = append(moved, simpleWindowsLocation{cwd: reading.cwd, dirStack: reading.dirStack})
+	}
+	unmoved := starts
+	if !state.cwdUnknown && state.cwd != "" {
+		unmoved = append([]simpleWindowsLocation{{cwd: state.cwd, dirStack: slices.Clone(state.dirStack)}}, starts...)
+	}
+	state.next(part, dialect, input, variables)
+	if operator == "&&" {
+		state.skipped = append(state.skipped, unmoved...)
+		state.setOthers(moved)
+		return
+	}
+	folders := append(append(moved, unmoved...), state.skipped...)
+	state.skipped = nil
+	state.setOthers(folders)
+}
+
+// windowsSimpleCallFolder reports a Windows folder of its own: a drive
+// path or a UNC path.
+func windowsSimpleCallFolder(cwd string) bool {
+	return len(cwd) >= 3 && cwd[1] == ':' && (cwd[2] == '\\' || cwd[2] == '/') &&
+		(cwd[0] >= 'a' && cwd[0] <= 'z' || cwd[0] >= 'A' && cwd[0] <= 'Z') ||
+		strings.HasPrefix(cwd, `\\`) || strings.HasPrefix(cwd, "//")
 }
 
 func (state *simpleWindowsState) next(part string, dialect windowsDialect, input Input, variables map[string]string) {

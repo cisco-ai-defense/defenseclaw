@@ -32,6 +32,14 @@ const RetentionStartupDelay = time.Minute
 // for hours, and only a gateway restart cleared it (rel-1-0-6:GAP-0263).
 const RetentionRetryMax = 30 * time.Minute
 
+// RetentionSizeCapCheckInterval is the wait between runs while an audit
+// store size cap (observability.local.max_store_mb) is set, instead of the
+// six-hour cadence: a busy gateway writes far more than its cap's headroom
+// in six hours, and a store that fills its volume fails every hook closed
+// (GAP-0402). A run under the cap reads the store's page counts and deletes
+// nothing.
+const RetentionSizeCapCheckInterval = 10 * time.Minute
+
 // RetentionControllerState is a bounded lifecycle/health label. It never
 // contains a database error, path, SQL text, or retained record content.
 type RetentionControllerState string
@@ -439,6 +447,8 @@ func (controller *RetentionController) run(ctx context.Context) {
 			// The last run stopped at a time budget with work left: rows to
 			// delete or free pages to return (GAP-0287).
 			interval = audit.RetentionFollowUpInterval
+		case controller.maxStoreMB() > 0 && !controller.secureClient:
+			interval = RetentionSizeCapCheckInterval
 		}
 		wake, err := controller.scheduler.Wait(ctx, interval, controller.policyWake)
 		if err != nil {

@@ -23,10 +23,12 @@ import (
 )
 
 // Kiro runs the native hook binary on Windows. It must answer exactly like
-// kiro-hook.sh: no stdout (Kiro adds hook stdout to the agent's context), a
-// hook_output deny or block becomes exit 2 with the reason on stderr, and a
-// closed failure is exit 2, the only status Kiro honors as a block. Before
-// the binary knew Kiro it answered every event, allow included, with exit 2.
+// kiro-hook.sh: no stdout on the CLI 2.x surface these cases use (Kiro adds
+// hook stdout to the agent context; a v3 prompt prints one note, see
+// TestKiroV3PromptHookSaysNoCommandRan), a hook_output deny or block becomes
+// exit 2 with the reason on stderr, and a closed failure is exit 2, the only
+// status Kiro honors as a block. Before the binary knew Kiro it answered
+// every event, allow included, with exit 2.
 func TestKiroNativeHookAnswersLikeKiroHookScript(t *testing.T) {
 	const v3Prompt = `{"hook_event_name":"UserPromptSubmit","session_id":"s","cwd":"/work","prompt":"hello"}`
 	for _, tc := range []struct {
@@ -102,5 +104,45 @@ func TestKiroManagedRuntimeFailureBlocks(t *testing.T) {
 	}
 	if rt.requests != 0 {
 		t.Fatalf("gateway contacted %d times, want 0", rt.requests)
+	}
+}
+
+// Kiro v3 (kiro-cli 3.x by default, kiro-cli --v3 before it) adds a
+// UserPromptSubmit hook that printed nothing to the turn as
+// "Output:\n\n\nExit Code: 0", the shape of a shell result; models then
+// answered as if the command they were asked to run had already run and
+// called no tool, so no PreToolUse hook fired (rel-1-0-10:GAP-0248). On the
+// .kiro/hooks surface an answered prompt prints KiroV3PromptCheckedNote
+// instead; every other event and surface keeps stdout empty.
+func TestKiroV3PromptHookSaysNoCommandRan(t *testing.T) {
+	const prompt = `{"hook_event_name":"UserPromptSubmit","session_id":"s","cwd":"/work","prompt":"run echo hi"}`
+	const tool = `{"hook_event_name":"PreToolUse","session_id":"s","cwd":"/work","tool_name":"execute_bash","tool_input":{"command":"echo hi"}}`
+	note := KiroV3PromptCheckedNote + "\n"
+	for _, tc := range []struct {
+		name, surface, stdin string
+		rt                   *stubRT
+		wantCode             int
+		wantStdout           string
+	}{
+		{"v3 prompt allow", "v3", prompt, ok(`{"action":"allow"}`), 0, note},
+		{"v3 prompt alert", "v3", prompt, ok(`{"action":"alert","hook_output":{"decision":"allow"}}`), 0, note},
+		{"v3 prompt block", "v3", prompt, ok(`{"action":"block","hook_output":{"decision":"block","reason":"marker rule matched"}}`), 2, ""},
+		{"v3 tool allow", "v3", tool, ok(`{"action":"allow"}`), 0, ""},
+		{"2.x agent prompt allow", "", prompt, ok(`{"action":"allow"}`), 0, ""},
+		{"Secure Client v3 prompt allow", "sc", prompt, ok(`{"action":"allow"}`), 0, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := run(t, "kiro", tc.rt, func(o *Options) {
+				o.Event = ""
+				o.HookSurface = tc.surface
+				if tc.surface == "sc" {
+					o.HookSurface, o.SecureClient = "v3", true
+				}
+				o.Stdin = strings.NewReader(tc.stdin)
+			})
+			if r.code != tc.wantCode || r.stdout != tc.wantStdout {
+				t.Fatalf("exit %d stdout %q, want exit %d stdout %q (stderr=%q)", r.code, r.stdout, tc.wantCode, tc.wantStdout, r.stderr)
+			}
+		})
 	}
 }

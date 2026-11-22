@@ -79,6 +79,21 @@ var semanticProtectiveProfileOwners = map[string]semanticOwner{
 		prerequisite:     infrastructureAsCodeFullDestroyPrerequisite,
 		suppressFallback: authoritativeSemanticSafeNegative,
 	},
+	// Opt-in active-directory-protection pack rule (CRITICAL). The built-in
+	// HIGH coverage of the same calls is credential.directory_ticket_request,
+	// whose prerequisite reuses this one.
+	"credential.directory_service_credential_use": {
+		prerequisite:     directoryServiceCredentialUsePrerequisite,
+		suppressFallback: authoritativeSemanticSafeNegative,
+	},
+	"recon.directory_bulk_collection": {
+		prerequisite:     directoryBulkCollectionPrerequisite,
+		suppressFallback: authoritativeSemanticSafeNegative,
+	},
+	"credential.directory_password_spray": {
+		prerequisite:     directoryPasswordSprayPrerequisite,
+		suppressFallback: authoritativeSemanticSafeNegative,
+	},
 }
 
 func cloudBulkDataDeletePrerequisite(facts actionfacts.Facts) bool {
@@ -372,4 +387,83 @@ func staticProtectiveOperand(value string) bool {
 		!strings.ContainsAny(value, "$`\r\n") &&
 		!strings.Contains(value, "$(") &&
 		!strings.Contains(value, "${")
+}
+
+// --- Active Directory protection pack owners (rel-1-0-10:GAP-0014/0017) ----
+
+func directoryServiceCredentialUsePrerequisite(facts actionfacts.Facts) bool {
+	for _, command := range facts.Commands {
+		if !reconImpactExecutingOwned(command) ||
+			!oneOfFold(command.Program, "nxc", "netexec", "crackmapexec") {
+			continue
+		}
+		if actionfacts.ExactNetExecNTDSDump(command) {
+			// The NTDS secrets dump (--ntds or -M ntdsutil) is owned by the
+			// built-in default rule credential.directory_credential_acquisition,
+			// which blocks it.
+			continue
+		}
+		if actionfacts.ExactNetExecDomainServiceAuth(command) {
+			return true
+		}
+	}
+	return false
+}
+
+func directoryBulkCollectionPrerequisite(facts actionfacts.Facts) bool {
+	for _, command := range facts.Commands {
+		if !reconImpactExecutingOwned(command) ||
+			!oneOfFold(command.Program, "nxc", "netexec", "crackmapexec") {
+			continue
+		}
+		protocol, ok := actionfacts.NetExecProtocolIndex(command.Argv)
+		if !ok || !strings.EqualFold(command.Argv[protocol], "ldap") {
+			continue
+		}
+		if hasAnyArgFold(command.Argv, "--bloodhound", "--users", "--groups",
+			"--kerberoasting", "--asreproast") {
+			return true
+		}
+	}
+	return false
+}
+
+func directoryPasswordSprayPrerequisite(facts actionfacts.Facts) bool {
+	isWordlist := func(value string) bool {
+		value = strings.ToLower(value)
+		return strings.HasSuffix(value, ".txt") || strings.HasSuffix(value, ".lst")
+	}
+	for _, command := range facts.Commands {
+		if !reconImpactExecutingOwned(command) ||
+			!oneOfFold(command.Program, "nxc", "netexec", "crackmapexec") {
+			continue
+		}
+		if !actionfacts.ExactNetExecDomainServiceAuth(command) {
+			continue
+		}
+		// Spray means the username or password operand IS a wordlist file; a
+		// log, put-file or other operand that happens to end .txt/.lst is not
+		// (rel-1-0-10:GAP-0054 P3-1). Any firing still blocks via the broader
+		// credential-use rule; this only keeps the spray label honest.
+		argv := command.Argv
+		for i := 0; i < len(argv); i++ {
+			arg := argv[i]
+			lower := strings.ToLower(arg)
+			switch {
+			case strings.HasPrefix(lower, "--username=") || strings.HasPrefix(lower, "--password="):
+				if _, value, ok := strings.Cut(arg, "="); ok && isWordlist(value) {
+					return true
+				}
+			case len(arg) > 2 && arg[0] == '-' && (arg[1] == 'u' || arg[1] == 'p'):
+				if isWordlist(arg[2:]) {
+					return true
+				}
+			case arg == "-u" || arg == "-p" || lower == "--username" || lower == "--password":
+				if i+1 < len(argv) && isWordlist(argv[i+1]) {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }

@@ -25,6 +25,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 )
 
 // leftoverUserStateProfiles makes three account homes: one that keeps its
@@ -49,10 +50,10 @@ func leftoverUserStateProfiles(t *testing.T) (kept string) {
 		t.Fatal(err)
 	}
 	originalHomes := windowsEnterpriseProfileHomes
-	originalName := windowsPrincipalName
+	originalName := hookcli.WindowsPrincipalName
 	t.Cleanup(func() {
 		windowsEnterpriseProfileHomes = originalHomes
-		windowsPrincipalName = originalName
+		hookcli.WindowsPrincipalName = originalName
 	})
 	windowsEnterpriseProfileHomes = func() []windowsEnterpriseProfileHome {
 		return []windowsEnterpriseProfileHome{
@@ -61,7 +62,7 @@ func leftoverUserStateProfiles(t *testing.T) (kept string) {
 			{SID: "S-1-5-21-1-2-3-1019", Home: fileHome},
 		}
 	}
-	windowsPrincipalName = func(sid string) string {
+	hookcli.WindowsPrincipalName = func(sid string) string {
 		if sid == "S-1-5-21-1-2-3-1018" {
 			return `DCLAB\dcw-std2`
 		}

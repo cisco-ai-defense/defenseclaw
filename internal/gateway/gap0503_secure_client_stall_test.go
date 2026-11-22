@@ -17,7 +17,7 @@ import (
 )
 
 func TestGAP0503SecureClientStalledFinalizeRetainsAudit(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	installDefaultProfileConnector(t, "claudecode")
 	signer := &heldWriterSigner{entered: make(chan struct{}), release: make(chan struct{})}
 	fixture := newSidecarRuntimeFixtureWithSigner(t, true, signer)

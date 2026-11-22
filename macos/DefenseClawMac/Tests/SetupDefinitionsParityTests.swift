@@ -111,6 +111,9 @@ struct SetupDefinitionsParityTests {
         disabledDiscoveryDropsTuningOptions()
         seedsDiscoveryFromTheSelectedConfig()
         validatesDiscoveryCLIRanges()
+        let currentConnectors = ["openclaw", "zeptoclaw", "codex", "claudecode", "hermes", "cursor", "devin", "copilot", "antigravity", "opencode", "amp", "kiro"]
+        expect(TUIWizards.connectors == currentConnectors, "native setup choices match runtime 1.0.5")
+        expect(TUIWizards.all.first { $0.id == "connector" }!.commandBuilder!(["connector": "kiro"], false).first?.prefix(2) == ["setup", "kiro"], "Kiro setup builds native CLI arguments")
         observabilityNeverEmitsAnUnsupportedConnectorOption()
         guardrailSetupNeverEmitsTheRetiredVerifyOption()
         includesAmpAcrossSetupSurfaces()
@@ -134,6 +137,7 @@ struct SetupDefinitionsParityTests {
         splunkHECDefaultsToVerifiedTLS()
         observabilityAddOffersPrivateNetworks()
         secureSetupSecretsUseChildEnvironment()
+        splunkEnterpriseCanSkipTheHECProbe()
         webhookBuilderCoversCurrentNotifierOptions()
         webhookValidationRequiresProviderCredentials()
         removedStandaloneSandboxWizardStaysHidden()
@@ -852,11 +856,17 @@ struct SetupDefinitionsParityTests {
     }
 
     private static func secureSetupSecretsUseChildEnvironment() {
-        let cases: [(id: String, field: String, environmentKey: String, values: [String: String])] = [
-            ("splunk", "access-token", "SPLUNK_ACCESS_TOKEN", ["mode": "splunk-o11y", "access-token": "private-value"]),
-            ("splunk", "hec-token", "DEFENSECLAW_SPLUNK_HEC_TOKEN", ["mode": "splunk-enterprise", "hec-token": "private-value"]),
-            ("observability", "token", "DEFENSECLAW_SETUP_OBSERVABILITY_TOKEN", ["action": "add", "preset": "datadog", "token": "private-value"]),
-            ("splunk-dashboards", "o11y-api-token", "SFX_AUTH_TOKEN", ["action": "apply", "o11y-api-token": "private-value"]),
+        // Runtime 1.0.4+ reads the click envvars (DEFENSECLAW_SETUP_SPLUNK_*);
+        // the legacy names stay exported for older runtimes (SPLUNK_ACCESS_TOKEN
+        // is still an O11y fallback; DEFENSECLAW_SPLUNK_HEC_TOKEN is read by
+        // nothing newer than 1.0.3).
+        let cases: [(id: String, field: String, environmentKeys: [String], values: [String: String])] = [
+            ("splunk", "access-token", ["DEFENSECLAW_SETUP_SPLUNK_ACCESS_TOKEN", "SPLUNK_ACCESS_TOKEN"],
+             ["mode": "splunk-o11y", "access-token": "private-value"]),
+            ("splunk", "hec-token", ["DEFENSECLAW_SETUP_SPLUNK_HEC_TOKEN", "DEFENSECLAW_SPLUNK_HEC_TOKEN"],
+             ["mode": "enterprise", "hec-endpoint": "https://splunk.example:8088", "hec-token": "private-value"]),
+            ("observability", "token", ["DEFENSECLAW_SETUP_OBSERVABILITY_TOKEN"], ["action": "add", "preset": "datadog", "token": "private-value"]),
+            ("splunk-dashboards", "o11y-api-token", ["SFX_AUTH_TOKEN"], ["action": "apply", "o11y-api-token": "private-value"]),
         ]
 
         for item in cases {
@@ -872,7 +882,9 @@ struct SetupDefinitionsParityTests {
             )
             expect(message == nil, "\(item.id) accepts its child-environment secret transport")
             let environment = wizard.secretEnvironment?(item.values) ?? [:]
-            expect(environment[item.environmentKey] == "private-value", "\(item.id) exports its documented child environment key")
+            for key in item.environmentKeys {
+                expect(environment[key] == "private-value", "\(item.id) exports its documented child environment key \(key)")
+            }
             let arguments = wizard.commandBuilder?(item.values, false).flatMap { $0 } ?? []
             expect(!arguments.contains("private-value"), "\(item.id) secret never enters argv")
 
@@ -887,6 +899,26 @@ struct SetupDefinitionsParityTests {
                 "\(item.id) preserves non-secret setup operations"
             )
         }
+    }
+
+    /// 1.0.7: `setup splunk --enterprise` probes the HEC endpoint before saving
+    /// and saves nothing when the probe fails; `--skip-test` saves without it.
+    private static func splunkEnterpriseCanSkipTheHECProbe() {
+        guard let splunk = TUIWizards.all.first(where: { $0.id == "splunk" }) else {
+            expect(false, "splunk wizard exists")
+            return
+        }
+        let base = ["mode": "enterprise", "hec-endpoint": "https://splunk.example:8088", "hec-token": "private-value"]
+        let probing = splunk.commandBuilder?(base, false).flatMap { $0 } ?? []
+        expect(probing.contains("--enterprise") && !probing.contains("--skip-test"), "the enterprise pipeline probes HEC unless asked not to")
+        var skipping = base
+        skipping["skip-test"] = "yes"
+        expect((splunk.commandBuilder?(skipping, false).flatMap { $0 } ?? []).contains("--skip-test"), "the wizard can save without the live HEC probe")
+        var o11y = skipping
+        o11y["mode"] = "splunk-o11y"
+        expect(!(splunk.commandBuilder?(o11y, false).flatMap { $0 } ?? []).contains("--skip-test"), "--skip-test is an enterprise-only option")
+        let field = splunk.fields.first { $0.key == "skip-test" }
+        expect(field?.visibleWhen?.equals == ["enterprise"], "the probe toggle shows only for the enterprise pipeline")
     }
 
     private static func webhookBuilderCoversCurrentNotifierOptions() {

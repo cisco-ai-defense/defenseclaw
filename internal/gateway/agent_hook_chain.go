@@ -25,13 +25,16 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/netip"
+	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"slices"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
@@ -40,6 +43,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/chainstate"
 )
 
 const toolChainGatewayProjectionRevision = "authenticated-hook-projection-v12-sqlite-database-table-lineage"
@@ -91,6 +95,62 @@ type toolChainHookCapture struct {
 	artifactProjections []guardrail.ToolChainProjection
 	successfulSQLResult *toolValueLineageSQLSuccessfulProjection
 	recorded            bool
+	// reportedCWD is the directory the agent reported for the call, as sent
+	// and before the gateway checked it. It is agent text: it is only joined
+	// to relative operands of a credentials-file read or an external upload
+	// (placeSecretReadPaths), and nothing is read there.
+	reportedCWD string
+	// chainEvidence is what the repositories reported of the chains this
+	// call completed, for its audit row (GAP-0445); telemetry only.
+	chainEvidence []audit.ToolChainMatchEvidence
+}
+
+// noteChainEvidence keeps the evidence of the chains a fresh observation
+// detected, from the session window and what the root window added.
+func (capture *toolChainHookCapture) noteChainEvidence(results ...audit.ToolChainObserveResult) {
+	if capture == nil {
+		return
+	}
+	for _, result := range results {
+		if result.Status != audit.ToolChainObserveFresh {
+			continue
+		}
+		for _, ev := range result.Evidence {
+			if slices.Contains(result.DetectedChainIDs, ev.ChainID) {
+				capture.chainEvidence = append(capture.chainEvidence, ev)
+			}
+		}
+	}
+}
+
+// toolChainEvidenceAuditExtra is the chain evidence of the request's audit
+// row: one key per field, the values of several chains in the order of
+// chain_match_ids (GAP-0445).
+func toolChainEvidenceAuditExtra(ctx context.Context) map[string]string {
+	if ctx == nil {
+		return nil
+	}
+	capture, _ := ctx.Value(toolChainHookCaptureContextKey{}).(*toolChainHookCapture)
+	if capture == nil || len(capture.chainEvidence) == 0 {
+		return nil
+	}
+	cols := map[string][]string{}
+	add := func(k, v string) { cols[k] = append(cols[k], v) }
+	for _, ev := range capture.chainEvidence {
+		add("chain_match_ids", ev.ChainID)
+		add("chain_match_scope", ev.Scope)
+		add("chain_match_partition", firstNonEmpty(ev.Partition, "-"))
+		add("chain_match_sequence", strconv.FormatUint(ev.Sequence, 10))
+		add("chain_match_steps", strconv.Itoa(ev.Steps))
+		add("chain_match_artifact", firstNonEmpty(ev.Artifact, "-"))
+		add("chain_match_span_ms", strconv.FormatInt(ev.SpanMillis, 10))
+		add("chain_match_horizon_s", strconv.FormatInt(ev.HorizonSeconds, 10))
+	}
+	extra := make(map[string]string, len(cols))
+	for k, v := range cols {
+		extra[k] = strings.Join(v, ",")
+	}
+	return extra
 }
 
 func (capture *toolChainHookCapture) recordArtifactTrustedAction(
@@ -152,7 +212,7 @@ func (capture *toolChainHookCapture) recordTrustedAction(
 	if capture == nil {
 		return
 	}
-	capture.facts = facts
+	capture.facts = placeArtifactIntentPaths(placeSecretReadPaths(facts, capture.reportedCWD), capture.reportedCWD)
 	capture.findings = append([]RuleFinding(nil), findings...)
 	capture.recorded = true
 }
@@ -188,7 +248,142 @@ func toolChainPlacedFacts(facts actionfacts.Facts, request trustedActionRequest)
 	return actionfacts.Analyze(placed)
 }
 
+// placeArtifactIntentPaths places, in the directory the agent reported, the
+// relative artifact of a remote download (curl -o tool.sh, wget -O tool.sh)
+// and the relative script a call runs (bash tool.sh, ./tool.sh), when the
+// gateway could not resolve the call's directory (it does not exist on this
+// host: an Agent Substrate actor, whose folder is in the actor). Without it
+// the relative spelling named no artifact, so chain.download_then_execute_
+// same_artifact never joined curl -o tool.sh to bash tool.sh or to bash
+// /work/p1/tool.sh in an actor, while the absolute spelling did
+// (substrate-1:GAP-0493). The rule is placeSecretReadPaths': an absolute,
+// clean reported directory; a literal POSIX operand with no expansion or
+// glob character; and every other command of the call one that cannot
+// change the directory (callProvenToKeepDirectory's table), so the operand
+// names the file the command opened. The download chain is detection-only,
+// so a placement can add an alert, never a block. The facts are copied.
+func placeArtifactIntentPaths(facts actionfacts.Facts, reported string) actionfacts.Facts {
+	if facts.CWD != "" || toolChainDriveMounts || !strings.HasPrefix(reported, "/") ||
+		hasParentElement(reported) || strings.ContainsRune(reported, 0) ||
+		(facts.Parse.Status != actionfacts.StatusComplete && facts.Parse.Status != actionfacts.StatusPartial) ||
+		facts.Parse.Dialect != actionfacts.DialectPOSIX {
+		// Partial is what a call with an unresolved relative operand parses
+		// as when there is no directory: that operand is what is placed.
+		return facts
+	}
+	reported = path.Clean(reported)
+	var placed []actionfacts.PathFact
+	for i, candidate := range facts.Paths {
+		value := candidate.Value
+		// A bare relative operand (tool.sh) has no flavor of its own: the
+		// facts give a POSIX one only to ./x, ../x, ~/x and /x. In a POSIX
+		// call it is a POSIX path, placed as one.
+		if candidate.Absolute || candidate.Resolved != "" ||
+			(candidate.Flavor != actionfacts.PathFlavorPOSIX && candidate.Flavor != actionfacts.PathFlavorUnknown) ||
+			strings.ContainsAny(value, ":") ||
+			(candidate.Access != actionfacts.PathAccessWrite && candidate.Access != actionfacts.PathAccessExecute) ||
+			value == "" || strings.HasPrefix(value, "/") || strings.HasPrefix(value, "~") || hasParentElement(value) ||
+			strings.ContainsAny(value, "\\$*?[]{}`\x00") {
+			continue
+		}
+		owner, ok := integrityCommandByID(facts, candidate.CommandID)
+		if !ok || owner.Dialect != actionfacts.DialectPOSIX {
+			continue
+		}
+		if candidate.Access == actionfacts.PathAccessWrite && owner.Program != "curl" && owner.Program != "wget" {
+			continue
+		}
+		if !othersKeepDirectory(facts, candidate.CommandID) {
+			continue
+		}
+		if placed == nil {
+			placed = slices.Clone(facts.Paths)
+		}
+		placed[i].Resolved, placed[i].Flavor = path.Join(reported, value), actionfacts.PathFlavorPOSIX
+	}
+	if placed != nil {
+		facts.Paths = placed
+	}
+	return facts
+}
+
+// othersKeepDirectory reports that every command of the call but owner is
+// one that cannot change the directory (directoryKeepingPrograms, a
+// standard file reader, or chmod, which a download is usually chained to):
+// the owner's operand is then read in the directory the call started in,
+// whatever the order of the commands. chmod is added here only, not to
+// directoryKeepingPrograms, so the secret-read chain's proofs are unchanged.
+func othersKeepDirectory(facts actionfacts.Facts, owner int64) bool {
+	for _, command := range facts.Commands {
+		if command.ID == owner || command.Program == "chmod" {
+			continue
+		}
+		if _, ok := directoryKeepingPrograms[command.Program]; !ok && !actionfacts.StandardFileReaderProgram(command.Program) {
+			return false
+		}
+	}
+	return true
+}
+
+// placeSecretReadPaths places a relative operand of a credentials-file read or
+// an external upload that the gateway could not resolve (the call's directory
+// does not exist on this host, so the call has none) in the directory the
+// agent reported, lexically: the read of ".env" and the upload of
+// "/work/p/.env" then name one file (substrate-1:GAP-0388). Only absolute,
+// clean reported directories are used, and only operands without expansion or
+// glob characters; the facts are copied, never changed in place.
+func placeSecretReadPaths(facts actionfacts.Facts, reported string) actionfacts.Facts {
+	if facts.CWD != "" || toolChainDriveMounts || !strings.HasPrefix(reported, "/") ||
+		hasParentElement(reported) || strings.ContainsRune(reported, 0) ||
+		!hasUnplacedRelativePath(facts) || !callProvenToKeepDirectory(facts) {
+		return facts
+	}
+	reported = path.Clean(reported)
+	uploads := make(map[int64]struct{})
+	for _, command := range facts.Commands {
+		if command.Effect == actionfacts.EffectExecute &&
+			hasOperation(command, actionfacts.OperationUpload) &&
+			hasExternalUpload(facts, command.ID) {
+			uploads[command.ID] = struct{}{}
+		}
+	}
+	var placed []actionfacts.PathFact
+	for i, candidate := range facts.Paths {
+		value := candidate.Value
+		if candidate.Absolute || candidate.Resolved != "" || candidate.Access != actionfacts.PathAccessRead ||
+			candidate.Flavor == actionfacts.PathFlavorWindows || value == "" ||
+			strings.HasPrefix(value, "/") || strings.HasPrefix(value, "~") ||
+			strings.ContainsAny(value, "\\$*?[]{}`\x00") {
+			continue
+		}
+		command, ok := integrityCommandByID(facts, candidate.CommandID)
+		if !ok || command.Dialect != actionfacts.DialectPOSIX && command.Dialect != actionfacts.DialectArgv {
+			continue
+		}
+		_, upload := uploads[candidate.CommandID]
+		if _, read := credentialFileContentReadCommand(facts, candidate); !read && !upload {
+			continue
+		}
+		if placed == nil {
+			placed = slices.Clone(facts.Paths)
+		}
+		placed[i].Resolved = path.Join(reported, value)
+	}
+	if placed != nil {
+		facts.Paths = placed
+	}
+	// The chain's private record is placed by the same lexical rule
+	// (actionfacts.Facts.PlaceCredentialPathReads), so a relative read in it
+	// has the identity an ordinary read of the same file has.
+	return facts.PlaceCredentialPathReads(reported)
+}
+
 func hasUnplacedRelativePath(facts actionfacts.Facts) bool {
+	for _, candidate := range facts.CredentialPathReads() {
+		if candidate.Value != "" && !candidate.Absolute && candidate.Resolved == "" {
+			return true
+		}
+	}
 	for _, candidate := range facts.Paths {
 		if !candidate.Absolute && candidate.Resolved == "" {
 			return true
@@ -198,12 +393,12 @@ func hasUnplacedRelativePath(facts actionfacts.Facts) bool {
 }
 
 type toolChainHookFinalization struct {
-	repository   *audit.ToolChainRepository
+	repository   toolChainStore
 	receiptIDs   []string
 	evaluationID string
 	// rootRepository and rootReceiptIDs are the root scope's receipts
-	// (issue #1391), kept in the root-scope tables.
-	rootRepository *audit.ToolChainRepository
+	// (issue #1391, or a Substrate actor's window), kept in the root tables.
+	rootRepository toolChainStore
 	rootReceiptIDs []string
 }
 
@@ -257,12 +452,15 @@ func (a *APIServer) applyAgentHookToolChains(
 	resp agentHookResponse,
 	latency time.Duration,
 	panicState *toolChainHookPanicState,
-) (agentHookResponse, toolChainHookFinalization) {
+) (hookResp agentHookResponse, hookFinalization toolChainHookFinalization) {
 	var finalization toolChainHookFinalization
 	// Managed enterprise policy is authoritative on hook content. Keep the
 	// local semantic/chain lane disabled with the rest of the local scanners
 	// so one request cannot produce competing local and managed decisions.
-	if a == nil || ManagedEnterpriseActive() || req.toolChain == nil {
+	// The switch is the host daemon's: a verified Substrate actor's steps
+	// always feed its actor window on the leader, which the callout's egress
+	// check reads, in every tier (GAP-0211).
+	if a == nil || (ManagedEnterpriseActive() && !isSubstrateActorRequest(ctx)) || req.toolChain == nil {
 		return resp, finalization
 	}
 
@@ -275,6 +473,32 @@ func (a *APIServer) applyAgentHookToolChains(
 	lifecycleEligible := profile.ExperimentalToolLifecycleEligible()
 	projectionEligible := lifecycleEligible &&
 		(structuredAction || stateTransition || pairedResult)
+	// A verified Substrate actor's tool step must reach its actor window on
+	// the leader: the callout's egress check reads it (GAP-0201). A step
+	// that can't is reported, never skipped silently: rootMissed says why.
+	_, substrateActor := substrateActorFrom(ctx)
+	// A tool call on an event the connector's lifecycle routes nowhere (a
+	// contract with no lifecycle, or an event it does not name) is a step
+	// too: it is reported, never skipped silently (GAP-0339).
+	unroutedToolCall := route == connector.ToolEventRouteUnknown &&
+		strings.TrimSpace(req.ToolName) != "" && !req.ToolNameIsLabel
+	substrateStep := substrateActor &&
+		(structuredAction || route == connector.ToolEventRouteResultContent || unroutedToolCall)
+	rootMissed := ""
+	switch {
+	case substrateStep && substrateRegistrationNamesNoConnector(ctx):
+		rootMissed = "no attested connector is recorded for the actor (an actor made outside DefenseClaw whose template's attestation names none or could not be checked yet), so no reviewed hook contract applies"
+	case substrateStep && unroutedToolCall:
+		rootMissed = "the actor's hook contract routes no tool-call lifecycle event " + strconv.Quote(req.HookEventName)
+	case substrateStep && !lifecycleEligible:
+		rootMissed = "the hook contract is not one this gateway reviewed for the actor's agent version (" +
+			profile.CompatibilityReason + ")"
+	}
+	defer func() {
+		if substrateStep && rootMissed != "" {
+			hookResp = a.substrateChainUnrecorded(ctx, profile, req, hookResp, latency, rootMissed)
+		}
+	}()
 	var projection guardrail.ToolChainProjection
 	var typedFindings []RuleFinding
 	if projectionEligible {
@@ -331,17 +555,24 @@ func (a *APIServer) applyAgentHookToolChains(
 
 	if a.store == nil || req.SemanticEventID == "" ||
 		req.ConnectorInstanceID == "" {
-		return resp, finalization
-	}
-	repository, err := a.store.ToolChainRepository()
-	if err != nil {
+		if lifecycleEligible {
+			rootMissed = "the hook event has no correlation on this gateway replica"
+		}
 		return resp, finalization
 	}
 	// Root scope (issue #1391): nil unless guardrail.chains.root_scope is on
 	// and a trusted connector's root_session_id was honoured. Session ends and
 	// turn boundaries reset only the session scope: the root scope follows
-	// the work across them, bounded by the same event and time windows.
-	rootRepository := a.toolChainRootRepository(ctx, req)
+	// the work across them, bounded by the same event and time windows. A
+	// verified Substrate actor's session and actor windows are on the leader
+	// (toolChainStores).
+	repository, rootRepository, ok := a.toolChainStores(ctx, req)
+	if !ok {
+		if lifecycleEligible {
+			rootMissed = "this gateway replica has no binding to the leader's chain state"
+		}
+		return resp, finalization
+	}
 	rawFingerprint := sha256.Sum256(rawBody)
 	inputFingerprint := hex.EncodeToString(rawFingerprint[:])
 	if !lifecycleEligible {
@@ -390,14 +621,22 @@ func (a *APIServer) applyAgentHookToolChains(
 		return resp, finalization
 	}
 	if !projectionEligible {
+		if route == connector.ToolEventRouteResultContent {
+			if why := a.resolveCommandJoinedSecretRead(ctx, req, profile, repository, rootRepository, inputFingerprint, projection); why != "" {
+				rootMissed = why
+			}
+		}
 		return resp, finalization
 	}
-	rulesetFingerprint, err := activeToolChainRulesetFingerprint(
+	rulesetFingerprint, err := toolChainRulesetFingerprint(
 		ctx,
 		req.ConnectorName,
 		profile,
 	)
 	if err != nil {
+		// No fingerprint, no observation: an actor's step is reported, not
+		// dropped (GAP-0201 residual).
+		rootMissed = "the active tool chain ruleset could not be fingerprinted: " + err.Error()
 		return resp, finalization
 	}
 
@@ -411,7 +650,27 @@ func (a *APIServer) applyAgentHookToolChains(
 		observationProjection = terminalProjection
 	}
 
-	invocationDigest := exactToolChainInvocationDigest(lifecycle, req)
+	invocationDigest := exactToolChainInvocationDigest(ctx, lifecycle, req)
+	if structuredAction && invocationDigest == "" &&
+		lifecycle.IsPreProposalEvent(req.HookEventName) &&
+		resp.Action != guardrailActionBlock {
+		// No result can be tied to this call (the connector names no tool
+		// invocation, or this call carries none): nothing will ever say
+		// what it printed, so its credentials read starts the chain here,
+		// at the proposal (the secret-read chain start, GAP-0338).
+		started := withSecretReadStart(observationProjection, predecessorProjection)
+		switch {
+		case started.DetectionStepMask == observationProjection.DetectionStepMask:
+		case a.prepareCommandJoinedSecretRead(ctx, req, repository, rootRepository, rulesetFingerprint, inputFingerprint, predecessorProjection):
+			// Its result carries the call's command and output: that result
+			// decides, as for a paired call (GAP-0340). The pending read counts
+			// at the callout from now on.
+			started = observationProjection
+		default:
+			a.noteUnclearedRead(ctx, req.ConnectorName)
+		}
+		observationProjection = started
+	}
 	var result, rootResult audit.ToolChainObserveResult
 	resolvedSuccess := false
 	resolvedInvocation := false
@@ -464,18 +723,53 @@ func (a *APIServer) applyAgentHookToolChains(
 			SuccessfulS4UTargetPrincipalIdentityDigest: s4uTicketResult.TargetPrincipalIdentityDigest,
 			SuccessfulS4UTicketCacheDigest:             s4uTicketResult.TicketArtifactIdentityDigest,
 		}
+		ran := outcome != connector.ToolLifecycleOutcomeDenied && outcome != connector.ToolLifecycleOutcomeCancelled
+		if outcome == connector.ToolLifecycleOutcomeFailure || outcome == connector.ToolLifecycleOutcomeUnknown {
+			// The call ran (or may have) and did not succeed: the secret-read
+			// chain start decides by what it printed (GAP-0337).
+			resolveInput.UnsuccessfulMayHaveRead = !toolResultProvesNothingRead(req)
+		}
+		if substrateActor && ran {
+			// A further result of a call the leader already resolved (Claude
+			// Code and Cursor post a failure result and then a PostToolUse for
+			// one failed call; the kit retries a post) is a replay there, and
+			// one whose content may show a read still starts the secret-read
+			// chain from the call's proposal (GAP-0348, GAP-0345).
+			resolveInput.ResultMayHaveRead = resolveInput.UnsuccessfulMayHaveRead ||
+				outcome == connector.ToolLifecycleOutcomeSuccess && !toolResultProvesNothingRead(req)
+			// After an earlier result proved the read failed, only a result
+			// that shows a read chains: Claude Code's PostToolUse after a
+			// PostToolUseFailure carries no output (GAP-0352).
+			resolveInput.ResultShowsRead = resolveInput.ResultMayHaveRead && resultShowsRead(req)
+		}
 		resolved, resolveErr := repository.ResolvePending(ctx, resolveInput)
+		var rootStatus audit.ToolChainPendingStatus
+		rootFailed := false
 		if rootRepository != nil {
 			// The root scope promotes its own copy of the proposal; a failure
 			// there leaves the session verdict as it is.
-			if rootResolved, rootErr := rootRepository.ResolvePending(ctx, resolveInput); rootErr == nil &&
+			rootResolved, rootErr := rootRepository.ResolvePending(ctx, resolveInput)
+			if rootErr == nil &&
 				outcome == connector.ToolLifecycleOutcomeSuccess &&
 				rootResolved.Status == audit.ToolChainPendingResolved {
 				rootResult, rootResolvedSuccess = rootResolved.Observation, true
 			}
+			rootStatus, rootFailed = rootResolved.Status, rootErr != nil
+			if rootErr != nil {
+				rootMissed = "the leader did not take the step: " + rootErr.Error()
+			}
 		}
 		if resolveErr != nil {
 			return resp, finalization
+		}
+		if substrateActor && ran && resultCallUnjoined(resolved.Status, rootRepository != nil, rootStatus, rootFailed) &&
+			resultMayBeAnUnjoinedRead(req, projection) {
+			// The call ran (or may have) but the actor window does not know
+			// it: its PreToolUse reached no leader (a replica cut off from
+			// it, or a leader that lost or evicted it since), so the read may
+			// be in no window at all. The step is reported unrecorded, and
+			// the leader keeps that for the callout (review rch3 R1).
+			rootMissed = "a tool result whose call is not in the actor's chain window (its call did not reach the leader)"
 		}
 		resolvedInvocation = resolved.Status == audit.ToolChainPendingResolved
 		resolvedSuccess = outcome == connector.ToolLifecycleOutcomeSuccess &&
@@ -569,15 +863,21 @@ func (a *APIServer) applyAgentHookToolChains(
 	if !resolvedSuccess && toolChainProjectionHasSteps(observationProjection) {
 		result, err = repository.Observe(ctx, observeInput)
 		if err != nil {
+			if rootRepository != nil && !rootResolvedSuccess {
+				rootMissed = "the leader did not take the step: " + err.Error()
+			}
 			return resp, finalization
 		}
 	}
 	if rootRepository != nil && !rootResolvedSuccess && toolChainProjectionHasSteps(observationProjection) {
 		if observed, rootErr := rootRepository.Observe(ctx, observeInput); rootErr == nil {
 			rootResult = observed
+		} else {
+			rootMissed = "the leader did not take the step: " + rootErr.Error()
 		}
 	}
 	rootAdded := rootToolChainAdded(profile, req, resp, rootRepository, rootResult, result, panicState)
+	req.toolChain.noteChainEvidence(result, rootAdded)
 	if result.DeniedMask != 0 && panicState != nil {
 		// Observe commits the deny receipt before returning. Snapshot an
 		// enforcement-safe response immediately so a later connector shaper or
@@ -601,7 +901,7 @@ func (a *APIServer) applyAgentHookToolChains(
 	if result.Status == audit.ToolChainObserveFresh &&
 		len(result.DetectedChainIDs) != 0 {
 		chainFindings := toolChainRuleFindings(result)
-		intent := toolChainHookIntent(
+		intent := substrateChainEgressIntent(ctx, toolChainHookIntent(
 			guardrailActionForConnector(
 				a.decisionConfig(ctx),
 				req.ConnectorName,
@@ -610,7 +910,7 @@ func (a *APIServer) applyAgentHookToolChains(
 			),
 			denyEligible,
 			result,
-		)
+		), result)
 		resp = mergeAgentHookFindings(profile, req, resp, chainFindings, intent)
 		eval := a.emitHookRuleFindings(
 			ctx,
@@ -642,7 +942,7 @@ func (a *APIServer) applyAgentHookToolChains(
 		// Exact transport replays reproduce the durable decision but do not
 		// create duplicate finding telemetry.
 		chainFindings := toolChainRuleFindings(result)
-		intent := toolChainHookIntent(
+		intent := substrateChainEgressIntent(ctx, toolChainHookIntent(
 			guardrailActionForConnector(
 				a.decisionConfig(ctx),
 				req.ConnectorName,
@@ -651,7 +951,7 @@ func (a *APIServer) applyAgentHookToolChains(
 			),
 			denyEligible,
 			result,
-		)
+		), result)
 		resp = mergeAgentHookFindings(profile, req, resp, chainFindings, intent)
 		resp.RuleIDs = mergeBoundedRuleIDs(
 			8,
@@ -665,6 +965,11 @@ func (a *APIServer) applyAgentHookToolChains(
 		// a deny on exact replay even if the live mode later changes to observe.
 		resp = committedAgentHookChainBlock(profile, req, resp)
 	}
+	if slices.Contains(result.DetectedChainIDs, guardrail.ToolChainSecretReadThenEgress) &&
+		!lifecycle.SupportsExactInvocationJoin() && !commandJoinConnector(ctx, req.ConnectorName) {
+		// The read may be one no result could clear: say so (GAP-0338).
+		resp.Reason = strings.TrimSpace(resp.Reason + " The " + unclearedReadWhy(req.ConnectorName) + ".")
+	}
 	if result.Status == audit.ToolChainObserveFresh &&
 		len(result.ReceiptIDs) != 0 {
 		finalization.repository = repository
@@ -675,8 +980,19 @@ func (a *APIServer) applyAgentHookToolChains(
 			rootRepository, rootResult, rootAdded, denyEligible, latency)
 	}
 
+	// A pre-tool proposal the gateway blocked keeps only its secret-read step
+	// pending: a blocked call that never runs never promotes it, but one the
+	// agent runs anyway (its exact success outcome arrives) is a completed
+	// credentials read, and the egress after it is judged as the chain. The
+	// strict tier blocks some credential-store reads outright (the tool-shape
+	// path rules), and without this the read left no chain behind.
+	pendingProjection := predecessorProjection
+	preparePending := resp.Action != guardrailActionBlock
+	if !preparePending {
+		pendingProjection, preparePending = blockedSecretReadPredecessor(predecessorProjection)
+	}
 	if structuredAction &&
-		resp.Action != guardrailActionBlock &&
+		preparePending &&
 		invocationDigest != "" &&
 		lifecycle.IsPreProposalEvent(req.HookEventName) {
 		prepareInput := audit.ToolChainPreparePendingInput{
@@ -685,15 +1001,19 @@ func (a *APIServer) applyAgentHookToolChains(
 			PreSemanticEventID:   audit.SemanticEventID(req.SemanticEventID),
 			PreInputFingerprint:  inputFingerprint,
 			RulesetFingerprint:   rulesetFingerprint,
-			Projection:           predecessorProjection,
-			SQLValueSource:       pendingSQLValueSource(req.toolChain),
-			ReturnedCredentialSource: actionfacts.ExactReturnedCredentialSource(
+			Projection:           pendingProjection,
+		}
+		if resp.Action != guardrailActionBlock {
+			prepareInput.SQLValueSource = pendingSQLValueSource(req.toolChain)
+			prepareInput.ReturnedCredentialSource = actionfacts.ExactReturnedCredentialSource(
 				req.toolChain.facts,
-			),
+			)
 		}
 		if rootRepository != nil {
 			// Additive: a root-scope persistence failure changes nothing here.
-			_, _ = rootRepository.PreparePending(ctx, prepareInput)
+			if _, rootErr := rootRepository.PreparePending(ctx, prepareInput); rootErr != nil {
+				rootMissed = "the leader did not take the step: " + rootErr.Error()
+			}
 		}
 		if _, prepareErr := repository.PreparePending(ctx, prepareInput); prepareErr != nil {
 			// Pending state is an additive experimental lane. A persistence
@@ -702,6 +1022,121 @@ func (a *APIServer) applyAgentHookToolChains(
 		}
 	}
 	return resp, finalization
+}
+
+// resultCallUnjoined reports a call result that no chain window joins (R1).
+// The actor window, which the callout reads, decides when it is bound: its
+// Missing is marked whatever the session says, so a session replay never
+// hides it (review rk347 P3-1); a result after a turn boundary (Stop
+// discards only the session's proposal) is joined there (GAP-0345); a
+// further result of a resolved call is a replay in both (GAP-0348). A root
+// call that failed is reported by the caller already.
+func resultCallUnjoined(session audit.ToolChainPendingStatus, rootBound bool, root audit.ToolChainPendingStatus, rootFailed bool) bool {
+	switch {
+	case !rootBound:
+		return session == audit.ToolChainPendingMissing
+	case rootFailed:
+		return false
+	}
+	rootJoined := root == audit.ToolChainPendingResolved || root == audit.ToolChainPendingReplay
+	return root == audit.ToolChainPendingMissing || session == audit.ToolChainPendingMissing && !rootJoined
+}
+
+// substrateRegistrationNamesNoConnector reports a verified actor whose
+// registration names no connector: an actor made outside DefenseClaw from an
+// unattested template, or one the controller could not attest yet (GAP-0347,
+// GAP-0351). Its binding resolves the empty hook profile, so the step's real
+// reason is that, not the lifecycle.
+func substrateRegistrationNamesNoConnector(ctx context.Context) bool {
+	reg, ok := substrateRegistrationFrom(ctx)
+	return ok && strings.TrimSpace(reg.Connector) == ""
+}
+
+// substrateChainUnrecordedRule is the finding of a Substrate actor's tool
+// step that did not reach its actor window (GAP-0201).
+const substrateChainUnrecordedRule = "SUBSTRATE-CHAIN-UNRECORDED"
+
+// substrateUnrecordedTimeout bounds telling the leader of an unrecorded step.
+const substrateUnrecordedTimeout = 2 * time.Second
+
+// substrateChainWarned bounds the gateway log warning to one per actor and
+// reason.
+var substrateChainWarned sync.Map
+
+// substrateChainUnrecorded answers a verified Substrate actor's tool step
+// that can't reach the leader's actor window. The callout's egress check
+// would not see it, so a secret read followed by an upload to an allowed
+// host would pass: an alert finding on the hook, a warning in the gateway
+// log, and a block when the connector's rule pack is strict (GAP-0201).
+func (a *APIServer) substrateChainUnrecorded(ctx context.Context, profile connector.HookProfile, req agentHookRequest,
+	resp agentHookResponse, latency time.Duration, why string) agentHookResponse {
+	actor, ok := substrateActorFrom(ctx)
+	if !ok {
+		return resp
+	}
+	if _, seen := substrateChainWarned.LoadOrStore(actor.Atespace+"/"+actor.UID+"\x00"+why, true); !seen {
+		fmt.Fprintf(os.Stderr, "[substrate] warning: %s/%s: a tool step is not in the actor's chain window, so the egress check can't link it: %s\n",
+			actor.Atespace, actor.Name, why)
+	}
+	// The leader keeps it for the actor's egress checks: the callout refuses
+	// a request checked against an incomplete window where it refuses
+	// unchecked egress, and alerts elsewhere (GAP-0339). A leader that can't
+	// be reached fails the egress check itself (the chain failure mode).
+	if st := a.substrateState(); st != nil && st.cfg.Chains != nil {
+		note := substrateNote{client: st.cfg.Chains, actor: chainstate.Actor{Atespace: actor.Atespace, UID: actor.UID}, why: why}
+		if err := substrateNotes.deliver(ctx, note); err != nil {
+			why += "; the leader was not told yet (retrying): " + err.Error()
+		}
+	}
+	// Refused on a managed install and with a strict pack, an alert
+	// elsewhere (refuse-by-default for what can't be checked, GAP-0339).
+	intent := guardrailActionAlert
+	if ManagedEnterpriseActive() || strictPackPosture(a.decisionConfig(ctx), req.ConnectorName) {
+		intent = guardrailActionBlock
+	}
+	findings := []RuleFinding{{
+		RuleID: substrateChainUnrecordedRule, Severity: "HIGH", Confidence: 1,
+		Title:    "DefenseClaw could not record this tool call in the actor's chain window, so a later upload can't be checked against it",
+		Evidence: why, Tags: []string{"substrate", "tool_call_chain"},
+	}}
+	resp = mergeAgentHookFindings(profile, req, resp, findings, intent)
+	if !req.SuppressCorrelationEmit {
+		eval := a.emitHookRuleFindings(ctx, req.ConnectorName, req.HookEventName, &ToolInspectVerdict{
+			Action: resp.Action, Severity: "HIGH", Findings: FindingStrings(findings), DetailedFindings: findings,
+		}, "tool_call_chain", latency)
+		resp.RuleIDs = mergeBoundedRuleIDs(8, eval.RuleIDs, resp.RuleIDs)
+	}
+	return resp
+}
+
+// blockedSecretReadPredecessor is the secret-read steps of a blocked pre-tool
+// proposal, with their own join digests and nothing else, or false when the
+// proposal has none. Two steps: the secret-read chain, and the value-lineage
+// chain whose step 1 the success result's value digests attach to
+// (resolvePendingTx refuses a success that carries value digests when the
+// pending row lacks that step, which lost the chain, GAP-0549).
+func blockedSecretReadPredecessor(
+	projection guardrail.ToolChainProjection,
+) (guardrail.ToolChainProjection, bool) {
+	out := guardrail.ToolChainProjection{ParseStatus: projection.ParseStatus}
+	kept := false
+	for _, id := range []string{
+		guardrail.ToolChainSecretReadThenEgress,
+		guardrail.ToolChainSensitiveReadValueExternalTransmit,
+	} {
+		bit, ok := guardrail.ToolChainStepMask(id, 1)
+		index, indexed := guardrail.ToolChainIndexByID(id)
+		if !ok || !indexed || projection.DetectionStepMask&bit == 0 {
+			continue
+		}
+		kept = true
+		out.DetectionStepMask |= bit
+		out.EnforcementStepMask |= projection.EnforcementStepMask & bit
+		out.EnforcementJoinDigests[index] = projection.EnforcementJoinDigests[index]
+		out.EnforcementOutputJoinDigests[index] = projection.EnforcementOutputJoinDigests[index]
+		out.ValueJoinDigests[index] = projection.ValueJoinDigests[index]
+	}
+	return out, kept
 }
 
 // toolChainProjectionForPolicyPosture keeps useful but proximity-only chain
@@ -728,6 +1163,14 @@ func toolChainProjectionForNamedPosture(
 ) guardrail.ToolChainProjection {
 	if posture == "strict" {
 		return projection
+	}
+	// A proven secret-read-then-egress chain blocks only in strict; the
+	// default and permissive tiers keep it as an alert (GAP-0595).
+	if definition, ok := guardrail.ToolChainDefinitionByID(
+		guardrail.ToolChainSecretReadThenEgress,
+	); ok {
+		projection.EnforcementStepMask &^= definition.Step1Bit | definition.Step2Bit |
+			definition.Step3Bit | definition.Step4Bit | definition.MutationBit
 	}
 
 	definition, ok := guardrail.ToolChainDefinitionByID(
@@ -897,7 +1340,15 @@ func toolChainProjectionHasSteps(projection guardrail.ToolChainProjection) bool 
 	return projection.DetectionStepMask != 0 || projection.EnforcementStepMask != 0
 }
 
+// exactToolChainInvocationDigest is the key that joins a tool call's result
+// to its pre-tool proposal. A verified Substrate actor's proposal lives on
+// the leader, and its result may reach another gateway replica than its
+// call: each replica keys its correlation digests with its own HMAC key,
+// derived from its own device key, so the key is the actor's own, not the
+// replica's (substrate-1 GAP-0342). Elsewhere it stays the local
+// correlation digest.
 func exactToolChainInvocationDigest(
+	ctx context.Context,
 	lifecycle connector.ToolCallLifecycleContract,
 	req agentHookRequest,
 ) string {
@@ -909,10 +1360,28 @@ func exactToolChainInvocationDigest(
 		strings.TrimSpace(value.Value) == "" || value.Value != req.ToolInvocationID {
 		return ""
 	}
+	if actor, ok := substrateActorFrom(ctx); ok {
+		return substrateToolInvocationDigest(actor.Atespace, actor.UID, req.ConnectorName, req.SessionID, value)
+	}
 	return correlationValueDigest(
 		audit.ConnectorInstanceID(req.ConnectorInstanceID),
 		value,
 	)
+}
+
+// substrateToolInvocationDigest is a verified actor's tool invocation key:
+// the actor, its connector and session and the reported tool call id, the
+// same on every gateway replica. The id is the agent's own random call id;
+// the digest names it on the leader only.
+func substrateToolInvocationDigest(atespace, uid, connectorName, sessionID string, value connector.CorrelationValue) string {
+	digest := sha256.Sum256([]byte("defenseclaw/substrate/tool-invocation/v1\x00" + atespace + "\x00" + uid + "\x00" +
+		normalizeConnectorNameForDigest(connectorName) + "\x00" + sessionID + "\x00" +
+		typedCorrelationNamespace(value) + "\x00" + value.Value))
+	return hex.EncodeToString(digest[:])
+}
+
+func normalizeConnectorNameForDigest(name string) string {
+	return strings.ToLower(strings.TrimSpace(name))
 }
 
 func auditToolChainPendingOutcome(
@@ -1138,8 +1607,13 @@ func projectTrustedActionChainSteps(
 		"secrets.browser_session_store_read",
 		"secrets.workload_identity_token_read",
 	}
-	secretRead := hasAnyFinding(secretReadIDs...)
-	secretReadDigest, secretReadIdentityExact := exactSingleReadPathDigest(facts)
+	// A read of a credentials file starts the chain wherever the file is
+	// (the home, a project, a work directory) and whether or not the active
+	// pack alerts on the read itself: PATH-ENV-FILE is quiet in default and
+	// the home-path rules name only the account's own copy
+	// (substrate-1:GAP-0210).
+	secretRead := hasAnyFinding(secretReadIDs...) || credentialFileContentRead(facts)
+	secretReadDigest, secretReadIdentityExact := exactSecretReadChainDigest(facts)
 	secretReadExact := secretRead && secretReadIdentityExact &&
 		facts.Authoritative() && facts.EnforcementEligible()
 	addToolChainStep(
@@ -1150,11 +1624,32 @@ func projectTrustedActionChainSteps(
 		secretReadExact,
 	)
 	if secretReadExact {
+		joinDigest := secretReadDigest
+		if credentialFileReadDerivesFile(facts) {
+			// The read's bytes also land in another file (a copy, a move, a
+			// redirect, an archive): the file that is uploaded later may be
+			// the source or the derived one (substrate-1:GAP-0388, GAP-0410).
+			joinDigest = guardrail.ToolChainFileUnknownDigest
+		}
 		setToolChainEnforcementJoinDigest(
 			projection,
 			guardrail.ToolChainSecretReadThenEgress,
-			secretReadDigest,
+			joinDigest,
 		)
+	} else if facts.Parse.Status == actionfacts.StatusPartial ||
+		facts.Parse.Status == actionfacts.StatusComplete && facts.HasCredentialPathReads() {
+		// A pipeline or a command list the classifier cannot finish (an
+		// unknown operand grammar in another stage) still proves a
+		// credentials-file read when the reading command is complete: carry
+		// the read's identity so the chain may start here, detection only
+		// (guardrail Step1IdentityOwnsParseProof, substrate-1:GAP-0226).
+		if digest, ok := credentialFileReadProofDigest(facts); ok {
+			setToolChainEnforcementJoinDigest(
+				projection,
+				guardrail.ToolChainSecretReadThenEgress,
+				digest,
+			)
+		}
 	}
 	if _, supported := toolValueLineageSourceKindForSensitiveRead(facts); supported {
 		addToolChainStep(
@@ -1258,12 +1753,18 @@ func projectTrustedActionChainSteps(
 
 	externalEgress := externalDataBearingUpload(facts)
 	uploadDigest, uploadIdentityExact := exactExternalUploadPathDigest(facts)
-	egressDetection := externalEgress || hasAnyFinding(
+	egressDetection := externalEgress || senderReaderEgress(facts) || hasAnyFinding(
 		"CMD-WGET-POST",
 		"CMD-CURL-UPLOAD",
 		"exfil.secret_read_and_egress_oneliner",
 	)
 	egressEnforcement := externalEgress && facts.EnforcementEligible()
+	// A sender the shared reader could not read in full (a function, trap or
+	// coprocess body, interpreter code, a destination the shell builds) is the
+	// unknown tier of the one bound rule for the secret-read chain: it joins
+	// any exact credentials read and, with the strict pack's enforcement bits,
+	// blocks (GAP-0672). The other two egress chains keep their own proofs.
+	unknownSender := !egressEnforcement && senderReaderUnknownDestination(facts)
 	for _, chainID := range []string{
 		guardrail.ToolChainGuardrailsOffThenEgress,
 		guardrail.ToolChainSecretManagerReadThenEgress,
@@ -1272,6 +1773,13 @@ func projectTrustedActionChainSteps(
 		chainEnforcement := egressEnforcement
 		if chainID == guardrail.ToolChainSecretReadThenEgress {
 			chainEnforcement = chainEnforcement && uploadIdentityExact
+			if unknownSender {
+				addToolChainStep(projection, chainID, 2, true, true)
+				setToolChainEnforcementJoinDigest(
+					projection, chainID, guardrail.ToolChainUnreadSenderDigest,
+				)
+				continue
+			}
 		}
 		addToolChainStep(
 			projection,
@@ -1282,6 +1790,16 @@ func projectTrustedActionChainSteps(
 		)
 		if chainEnforcement && chainID == guardrail.ToolChainSecretReadThenEgress {
 			setToolChainEnforcementJoinDigest(projection, chainID, uploadDigest)
+		} else if chainID == guardrail.ToolChainSecretReadThenEgress &&
+			egressDetection && facts.Parse.Status == actionfacts.StatusPartial {
+			// An upload inside a command list or a pipeline whose other parts
+			// the classifier cannot finish: when every external upload command
+			// is argv-complete, the upload is proven and the chain may end
+			// here, detection only (guardrail Step2IdentityOwnsParseProof,
+			// substrate-1:GAP-0389).
+			if digest, ok := externalUploadProofDigest(facts); ok {
+				setToolChainEnforcementJoinDigest(projection, chainID, digest)
+			}
 		}
 	}
 
@@ -1985,6 +2503,427 @@ func gitBashDriveLetterIdentity(candidate actionfacts.PathFact) (string, bool) {
 	return strings.ToLower(value[:2] + path.Clean(strings.ReplaceAll(value[2:], `\`, "/"))), true
 }
 
+// credentialFileContentRead reports an executed command that reads,
+// searches (grep) or copies the contents of a file of a credentials-file shape
+// (actionfacts.MatchCredentialFileShape, the one table) anywhere the agent
+// can reach. Not counted: a repository fixture (credentialFileFixturePath)
+// and an SSH client that only presents a key (ssh -i, scp -i), which
+// PATH-SSH-KEY does not count either.
+func credentialFileContentRead(facts actionfacts.Facts) bool {
+	for _, candidate := range facts.CredentialPathReads() {
+		if !credentialFileFixturePath(semanticPathValue(candidate)) {
+			return true
+		}
+	}
+	for _, candidate := range facts.Paths {
+		if _, ok := credentialFileContentReadCommand(facts, candidate); ok {
+			return true
+		}
+	}
+	return false
+}
+
+// credentialFileContentReadCommand returns the command that reads the
+// contents of candidate when candidate is a credentials-file read that
+// credentialFileContentRead counts.
+func credentialFileContentReadCommand(
+	facts actionfacts.Facts,
+	candidate actionfacts.PathFact,
+) (actionfacts.CommandFact, bool) {
+	if candidate.Access != actionfacts.PathAccessRead {
+		return actionfacts.CommandFact{}, false
+	}
+	value := semanticPathValue(candidate)
+	if _, ok := actionfacts.MatchCredentialFileShape(value); !ok ||
+		credentialFileFixturePath(value) {
+		return actionfacts.CommandFact{}, false
+	}
+	command, ok := integrityCommandByID(facts, candidate.CommandID)
+	if !ok || command.Effect != actionfacts.EffectExecute ||
+		sshIdentityConsumer(command) && command.Program != "rsync" ||
+		!hasAnyOperation(command, actionfacts.OperationRead,
+			actionfacts.OperationSearch, actionfacts.OperationCopy) {
+		// rsync is no key consumer here: its local sources are copied, and
+		// its remote operands carry no path fact.
+		return actionfacts.CommandFact{}, false
+	}
+	return command, true
+}
+
+// credentialFileReadDerivesFile reports a call that reads a credentials
+// file and also writes, appends, copies, moves or links any file anywhere in
+// the call: in any pipeline stage or list member, by any redirect kind (>,
+// >>, >|, an fd opened by exec), by tee, dd, an archiver, rsync, cp, mv or
+// ln. The read's bytes may be in that file, so a later upload of it joins
+// the read: the read carries the file-unknown marker instead of its own
+// identity (GAP-0410). It errs towards the marker: an unrelated write in the
+// same call gives the marker too, which only joins more.
+func credentialFileReadDerivesFile(facts actionfacts.Facts) bool {
+	if !credentialFileContentRead(facts) {
+		return false
+	}
+	return callWritesAnyFile(facts)
+}
+
+// callWritesAnyFile reports a write, an append, a copy, a move or a link of a
+// file by any command of the call: by its own operands (cp, mv, ln, install,
+// dd, tee, an archiver, rsync, an -o writer) or by its redirects (>, >>, >|,
+// an fd opened by exec). A redirect to the null device or to another
+// descriptor, and a redirect of stderr (fd 2) to a file in a command that
+// duplicates no descriptor, write no file the call's bytes reach. The
+// classifier still gives the command a write op and a write path for it, so
+// both are set aside for such a redirect (GAP-0479).
+func callWritesAnyFile(facts actionfacts.Facts) bool {
+	for _, command := range facts.Commands {
+		if hasAnyOperation(command, actionfacts.OperationCopy, actionfacts.OperationMove,
+			actionfacts.OperationDiskWrite) {
+			return true
+		}
+		switch command.Program {
+		case "tee", "ln", "link", "install", "dd":
+			return true
+		}
+		quietRedirect := false
+		for _, redirect := range command.Redirects {
+			if !writesFile(redirect.Access) {
+				continue
+			}
+			if redirectWritesNoFile(command, redirect) {
+				quietRedirect = true
+				continue
+			}
+			return true
+		}
+		if !quietRedirect &&
+			hasAnyOperation(command, actionfacts.OperationWrite, actionfacts.OperationAppend) {
+			return true
+		}
+	}
+	for _, candidate := range facts.Paths {
+		if writesFile(candidate.Access) && !quietRedirectTarget(facts, candidate) {
+			return true
+		}
+	}
+	return false
+}
+
+func writesFile(access actionfacts.PathAccess) bool {
+	return access == actionfacts.PathAccessWrite || access == actionfacts.PathAccessAppend
+}
+
+// wordsMayNameDerivedSource reports a command whose words, not its path
+// facts, may name the source of a derived file: the target of a link (ln -s
+// records no path for it), or an operand the classifier does not model (gzip
+// -c .env records no read) of a command that writes its output to a file or
+// into a pipeline. A command that has a read path, echo and printf (they
+// print their words) are not tested: a pattern (grep -q .env), an exclusion
+// (tar --exclude=.env) or an ignore entry (echo .env >> .gitignore) derives
+// nothing (GAP-0479).
+func wordsMayNameDerivedSource(facts actionfacts.Facts, command actionfacts.CommandFact) bool {
+	switch command.Program {
+	case "echo", "printf":
+		return false
+	}
+	for _, candidate := range facts.Paths {
+		if candidate.CommandID == command.ID && candidate.Access == actionfacts.PathAccessRead {
+			return false
+		}
+	}
+	switch command.Program {
+	case "ln", "link":
+		return true
+	}
+	if command.PipelineID != 0 {
+		return true
+	}
+	for _, redirect := range command.Redirects {
+		if (redirect.FD == 1 || redirect.FD == -1) && writesFile(redirect.Access) &&
+			!redirectWritesNoFile(command, redirect) {
+			return true
+		}
+	}
+	return false
+}
+
+// redirectWritesNoFile reports a redirect of command to the null device or
+// to another descriptor (>&3, 2>&1), or of its stderr to a file when the
+// command duplicates no descriptor: with >&2 the output reaches the stderr
+// file too.
+func redirectWritesNoFile(command actionfacts.CommandFact, redirect actionfacts.RedirectFact) bool {
+	if redirectDuplicatesDescriptor(redirect) || redirect.Target == "/dev/null" {
+		return true
+	}
+	if redirect.FD != 2 {
+		return false
+	}
+	for _, other := range command.Redirects {
+		if redirectDuplicatesDescriptor(other) {
+			return false
+		}
+	}
+	return true
+}
+
+func redirectDuplicatesDescriptor(redirect actionfacts.RedirectFact) bool {
+	return redirect.Target == "" || strings.HasPrefix(redirect.Target, "&")
+}
+
+// quietRedirectTarget reports a written path that is the null device or the
+// target of a redirectWritesNoFile redirect of its own command.
+func quietRedirectTarget(facts actionfacts.Facts, candidate actionfacts.PathFact) bool {
+	if candidate.Value == "/dev/null" {
+		return true
+	}
+	command, ok := integrityCommandByID(facts, candidate.CommandID)
+	if !ok {
+		return false
+	}
+	for _, redirect := range command.Redirects {
+		if redirect.Target == candidate.Value && writesFile(redirect.Access) &&
+			redirectWritesNoFile(command, redirect) {
+			return true
+		}
+	}
+	return false
+}
+
+// uploadCallDerivesCredentialFile reports an upload call that also copies,
+// moves, links, archives or redirects a credentials file to a new name: a
+// command other than the uploaders (uploads, by command ID) takes a file of
+// a credentials-file shape or a file a secret-read rule names
+// (matchesAnySensitivePathCandidate; not a repository fixture) as a path, or
+// as a word where no path is recorded (wordsMayNameDerivedSource), and the
+// call writes a file (callWritesAnyFile). The file it
+// uploads may be that copy, so the upload names no one file (GAP-0445). Any
+// other write in an upload call (a response redirect, -o, a log tee, a
+// build archive, a stamp file) leaves the uploaded file named, so an upload
+// of a different, known file does not complete the chain (GAP-0479).
+func uploadCallDerivesCredentialFile(facts actionfacts.Facts, uploads map[int64]struct{}) bool {
+	if !callWritesAnyFile(facts) {
+		return false
+	}
+	source := func(command actionfacts.CommandFact, value string) bool {
+		if _, upload := uploads[command.ID]; upload || command.Effect != actionfacts.EffectExecute ||
+			sshIdentityConsumer(command) && command.Program != "rsync" {
+			return false
+		}
+		return matchesAnySensitivePathCandidate(value) && !credentialFileFixturePath(value)
+	}
+	for _, candidate := range facts.Paths {
+		if writesFile(candidate.Access) {
+			continue
+		}
+		if command, ok := integrityCommandByID(facts, candidate.CommandID); ok &&
+			source(command, semanticPathValue(candidate)) {
+			return true
+		}
+	}
+	for _, command := range facts.Commands {
+		if !wordsMayNameDerivedSource(facts, command) {
+			continue
+		}
+		for _, argument := range command.Argv[min(1, len(command.Argv)):] {
+			if !strings.HasPrefix(argument, "-") && source(command, argument) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// directoryKeepingPrograms are the programs, besides the reader table, that
+// cannot change the directory the next command runs in: external programs
+// the chain reads or sends with, and the shell builtins that only print or
+// test. A cd, pushd, popd, source, `.`, eval, trap, alias, a function call or
+// any program not named here is not proven (GAP-0418). tar is not named: -C,
+// a bundled -cC, --directory, --dir= and bsdtar --cd move its members. awk is
+// named only because the reader records an awk read solely for a plain print
+// program with no options: a gawk -f, -i, -l or @load script can chdir()
+// before awk opens its operand, so keep that restriction.
+var directoryKeepingPrograms = map[string]struct{}{
+	"cat": {}, "head": {}, "tail": {}, "less": {}, "more": {}, "grep": {}, "egrep": {}, "fgrep": {},
+	"rg": {}, "uniq": {}, "tr": {}, "wc": {}, "base64": {}, "openssl": {}, "sed": {}, "awk": {},
+	"cp": {}, "mv": {}, "ln": {}, "rm": {}, "mkdir": {}, "touch": {}, "tee": {}, "dd": {}, "install": {},
+	"zip": {}, "unzip": {}, "gzip": {}, "gunzip": {}, "bzip2": {}, "xz": {},
+	"rsync": {}, "scp": {}, "curl": {}, "wget": {}, "jq": {}, "yq": {}, "find": {}, "ls": {}, "stat": {}, "file": {},
+	"echo": {}, "printf": {}, "true": {}, "false": {}, ":": {}, "test": {}, "[": {}, "sleep": {}, "date": {},
+	"pwd": {}, "whoami": {}, "id": {}, "uname": {}, "hostname": {},
+}
+
+// callProvenToKeepDirectory reports a call proven not to change the
+// directory its commands run in: a complete parse in which every command is a
+// known program that cannot change it (the reader table, an upload or copy
+// tool, a printing builtin). Anything
+// else (a function or alias the call defines, `.`, `source`, `eval`, `trap`,
+// an unknown program that may be a function of the agent's shell, a call the
+// parser cannot finish) is not proven: a relative operand in it is unnamed and
+// the chain joins on the marker (GAP-0418).
+func callProvenToKeepDirectory(facts actionfacts.Facts) bool {
+	if facts.Parse.Status != actionfacts.StatusComplete {
+		return false
+	}
+	for _, command := range facts.Commands {
+		program := command.Program
+		if _, ok := directoryKeepingPrograms[program]; ok || actionfacts.StandardFileReaderProgram(program) {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+// secretReadPathIdentity is exactPathIdentity, except that a relative
+// operand is an exact file only when the call is PROVEN not to change
+// directory (callProvenToKeepDirectory): the path fact keeps the call's
+// starting directory, not the one the commands ran in (GAP-0409, GAP-0418).
+func secretReadPathIdentity(facts actionfacts.Facts, candidate actionfacts.PathFact) (string, bool) {
+	if !candidate.Absolute && !callProvenToKeepDirectory(facts) {
+		return "", false
+	}
+	return exactPathIdentity(candidate)
+}
+
+// exactSecretReadChainDigest is exactSingleReadPathDigest for the
+// secret-read chain: the identity of a relative operand in a call that may
+// change directory is not exact (GAP-0409).
+func exactSecretReadChainDigest(facts actionfacts.Facts) (string, bool) {
+	private := facts.CredentialPathReads()
+	if len(private) != 0 {
+		facts.Paths = append([]actionfacts.PathFact(nil), facts.Paths...)
+	}
+	for _, candidate := range private {
+		if credentialFileFixturePath(semanticPathValue(candidate)) {
+			continue
+		}
+		if candidate.Value == "" {
+			return "", false
+		}
+		facts.Paths = append(facts.Paths, candidate)
+	}
+	return exactSinglePathDigestBy(facts, func(candidate actionfacts.PathFact) bool {
+		return candidate.Access == actionfacts.PathAccessRead &&
+			matchesAnySensitivePathCandidate(semanticPathValue(candidate))
+	}, secretReadPathIdentity)
+}
+
+// externalUploadProofDigest proves an external upload in a call whose
+// overall parse is partial: every command that uploads to an external
+// destination has its argv complete. The digest is the uploaded file's
+// identity when the uploads read one exact file, else the
+// guardrail.ToolChainFileUnknownDigest marker (a stdin upload, several
+// files).
+func externalUploadProofDigest(facts actionfacts.Facts) (string, bool) {
+	uploads := make(map[int64]struct{})
+	for _, command := range facts.Commands {
+		if command.Effect != actionfacts.EffectExecute ||
+			!hasOperation(command, actionfacts.OperationUpload) ||
+			!hasExternalUpload(facts, command.ID) {
+			continue
+		}
+		if !command.ArgvComplete {
+			return "", false
+		}
+		uploads[command.ID] = struct{}{}
+	}
+	if len(uploads) == 0 {
+		return "", false
+	}
+	if uploadCallDerivesCredentialFile(facts, uploads) {
+		// The upload call derives a file from a credentials file: it names
+		// no one file (GAP-0445, GAP-0479).
+		return guardrail.ToolChainFileUnknownDigest, true
+	}
+	selected, exact := "", true
+	for _, candidate := range facts.Paths {
+		if _, ok := uploads[candidate.CommandID]; !ok || candidate.Access != actionfacts.PathAccessRead {
+			continue
+		}
+		identity, ok := secretReadPathIdentity(facts, candidate)
+		if !ok || selected != "" && selected != identity {
+			exact = false
+			continue
+		}
+		selected = identity
+	}
+	if exact && selected != "" {
+		return pathIdentityDigest(selected), true
+	}
+	return guardrail.ToolChainFileUnknownDigest, true
+}
+
+// credentialFileReadProofDigest proves a credentials-file read in a call
+// whose overall parse is partial: every command that reads a
+// credentials-shaped file (credentialFileContentReadCommand) has its argv
+// complete, whatever the other stages of the pipeline or members of the list
+// are. A member of an && or || list runs conditionally; the step is
+// detection-only, so that is enough. The digest is the read file's exact
+// identity when there is one file (a relative path joined to the call's
+// directory when the hook cannot resolve it) and it is not copied or moved,
+// else the guardrail.ToolChainFileUnknownDigest marker, which joins any upload
+// (substrate-1:GAP-0388).
+func credentialFileReadProofDigest(facts actionfacts.Facts) (string, bool) {
+	selected, found, exact := "", false, true
+	private := facts.CredentialPathReads()
+	for _, candidate := range private {
+		if credentialFileFixturePath(semanticPathValue(candidate)) {
+			continue
+		}
+		found = true
+		identity, ok := secretReadPathIdentity(facts, candidate)
+		if !ok || selected != "" && selected != identity {
+			exact = false
+		} else {
+			selected = identity
+		}
+	}
+	for _, candidate := range facts.Paths {
+		command, ok := credentialFileContentReadCommand(facts, candidate)
+		if !ok {
+			continue
+		}
+		if !command.ArgvComplete {
+			if len(private) == 0 {
+				return "", false
+			}
+			// A word the call computes may name another file: the record
+			// proves a read, not which one.
+			exact = false
+		}
+		found = true
+		identity, ok := secretReadPathIdentity(facts, candidate)
+		if !ok || selected != "" && selected != identity {
+			exact = false
+			continue
+		}
+		selected = identity
+	}
+	switch {
+	case !found:
+		return "", false
+	case exact && selected != "" && !credentialFileReadDerivesFile(facts):
+		return pathIdentityDigest(selected), true
+	default:
+		return guardrail.ToolChainFileUnknownDigest, true
+	}
+}
+
+// credentialFileFixturePath reports a credentials-shaped file inside a
+// repository's test or documentation tree, or inside an installed
+// third-party package, which ship sample keys and .env files (owner traces,
+// substrate-1:GAP-0210).
+func credentialFileFixturePath(value string) bool {
+	if integrityPathHasFixtureSegment(value) {
+		return true
+	}
+	for _, component := range strings.Split(strings.Trim(canonicalSemanticPath(value), "/"), "/") {
+		switch component {
+		case "node_modules", "site-packages", "dist-packages":
+			return true
+		}
+	}
+	return false
+}
+
 func exactSingleReadPathDigest(facts actionfacts.Facts) (string, bool) {
 	return exactSinglePathDigest(facts, func(candidate actionfacts.PathFact) bool {
 		return candidate.Access == actionfacts.PathAccessRead &&
@@ -2004,22 +2943,39 @@ func exactExternalUploadPathDigest(facts actionfacts.Facts) (string, bool) {
 	if len(externalUploadCommands) == 0 {
 		return "", false
 	}
-	return exactSinglePathDigest(facts, func(candidate actionfacts.PathFact) bool {
+	if uploadCallDerivesCredentialFile(facts, externalUploadCommands) {
+		// The upload call itself copies, moves, links, archives or redirects a
+		// credentials file to a new name: the file it uploads may be that
+		// copy, so it names no one file (GAP-0445, the upload-side twin of
+		// GAP-0410; GAP-0479 keeps any other write out of it).
+		return "", false
+	}
+	return exactSinglePathDigestBy(facts, func(candidate actionfacts.PathFact) bool {
 		_, uploadCommand := externalUploadCommands[candidate.CommandID]
 		return uploadCommand && candidate.Access == actionfacts.PathAccessRead
-	})
+	}, secretReadPathIdentity)
 }
 
 func exactSinglePathDigest(
 	facts actionfacts.Facts,
 	selectPath func(actionfacts.PathFact) bool,
 ) (string, bool) {
+	return exactSinglePathDigestBy(facts, selectPath, func(_ actionfacts.Facts, candidate actionfacts.PathFact) (string, bool) {
+		return exactPathIdentity(candidate)
+	})
+}
+
+func exactSinglePathDigestBy(
+	facts actionfacts.Facts,
+	selectPath func(actionfacts.PathFact) bool,
+	identityOf func(actionfacts.Facts, actionfacts.PathFact) (string, bool),
+) (string, bool) {
 	var selected string
 	for _, candidate := range facts.Paths {
 		if !selectPath(candidate) {
 			continue
 		}
-		identity, ok := exactPathIdentity(candidate)
+		identity, ok := identityOf(facts, candidate)
 		if !ok {
 			return "", false
 		}
@@ -2223,6 +3179,39 @@ func systemDiscoveryRoot(value string) bool {
 	}
 }
 
+// senderReaderEgress reports a sender the shared sender reader
+// (actionfacts.ReadSenders) finds beyond the upload facts
+// externalDataBearingUpload reads, or one whose destination it cannot read:
+// a remote copy (rsync, sftp), a program a find -exec or an xargs runs, a
+// sender in a shell part the projection did not read, an upload to a host
+// the shell builds (GAP-0597, GAP-0598, GAP-0599). It sends to an external
+// host, or to a destination that is not read (never "no sender"). It detects
+// the egress step only: an enforcement proof needs the exact upload.
+func senderReaderEgress(facts actionfacts.Facts) bool {
+	for _, sender := range actionfacts.ReadSenders(facts).Senders {
+		if sender.DestinationUnknown {
+			return true
+		}
+		if sender.Origin == actionfacts.SenderProjected {
+			continue // externalDataBearingUpload reads it
+		}
+		for _, network := range sender.Network {
+			if isExternalNetwork(network) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// senderReaderUnknownDestination reports a call the shared sender reader
+// cannot prove sends nothing: a sender whose destination it cannot read in
+// full, a part it cannot read (a program word the shell builds, a source the
+// parser gave up on) or a reading cap (never "no sender").
+func senderReaderUnknownDestination(facts actionfacts.Facts) bool {
+	return actionfacts.ReadSenders(facts).UnknownTier()
+}
+
 func externalDataBearingUpload(facts actionfacts.Facts) bool {
 	for _, command := range facts.Commands {
 		if command.Effect != actionfacts.EffectExecute ||
@@ -2345,6 +3334,11 @@ func toolValueLineageSourceKindForSensitiveRead(
 		return 0, false
 	}
 	value := strings.ToLower(strings.ReplaceAll(selected, `\`, "/"))
+	// An identity is "<flavor>\x00<path>"; the credentials-file table reads
+	// the path (it refuses a value with a NUL byte).
+	if index := strings.LastIndexByte(value, 0); index >= 0 {
+		value = value[index+1:]
+	}
 	switch {
 	case matchesEnvironmentFile(value) || matchesProcEnvironCandidate(value):
 		return toolValueLineageSourceEnv, true
@@ -2717,6 +3711,10 @@ var toolChainRelevantRuleIDs = []string{
 	"secrets.workload_identity_token_read",
 }
 
+// toolChainRulesetFingerprint is activeToolChainRulesetFingerprint; a test
+// replaces it to prove what a failed read does.
+var toolChainRulesetFingerprint = activeToolChainRulesetFingerprint
+
 func activeToolChainRulesetFingerprint(
 	ctx context.Context,
 	connectorName string,
@@ -2779,4 +3777,662 @@ func writeToolChainDigestPart(writer toolChainHashWriter, value string) {
 	binary.BigEndian.PutUint32(length[:], uint32(len(value)))
 	_, _ = writer.Write(length[:])
 	_, _ = writer.Write([]byte(value))
+}
+
+// resultMayBeAnUnjoinedRead reports a tool result whose own call may have
+// been a credentials read: its projection holds the secret-read step, its
+// tool input reads a credentials file (a result event runs no pre-tool rule
+// dispatch, so its facts are read here), or it names no tool to tell (R1).
+// A plain call (ls) does not.
+func resultMayBeAnUnjoinedRead(req agentHookRequest, projection guardrail.ToolChainProjection) bool {
+	if bit, ok := guardrail.ToolChainStepMask(guardrail.ToolChainSecretReadThenEgress, 1); ok && projection.DetectionStepMask&bit != 0 {
+		return true
+	}
+	if strings.TrimSpace(req.ToolName) == "" {
+		return true
+	}
+	return credentialFileContentRead(actionfacts.Analyze(actionfacts.Input{Tool: req.ToolName, Args: req.ToolArgs, CWD: req.CWD}))
+}
+
+// The secret-read chain start (owner decision 2026-11-13; substrate-1
+// GAP-0337, GAP-0338). A tool call that reads a credentials file starts
+// chain.secret_read_then_egress unless DefenseClaw proves it read nothing,
+// whatever its exit code and whatever the connector:
+//   - a call whose result is tied to it (a paired tool invocation id) keeps
+//     the read as a pending proposal. Its result decides by what it printed:
+//     a success, or a failed or unknown result that toolResultProvesNothingRead
+//     does not clear, promotes it (ResolvePending, UnsuccessfulMayHaveRead);
+//     a denied or cancelled call never ran;
+//   - a Devin or Copilot call of a verified Substrate actor (no invocation
+//     id, but a result with the call's command and output) is kept pending
+//     under the command join and decided by its result the same way
+//     (GAP-0340, commandJoinDigest);
+//   - any other call whose result cannot be tied to it (Antigravity's step
+//     index, Kiro, those connectors off Substrate, or a call that carries
+//     none) starts the chain at the proposal (withSecretReadStart): no result
+//     will say what it printed, so nothing can clear it.
+// Both keep the read's step 1 alone (guardrail.ToolChainProjectionStep).
+
+// withSecretReadStart adds the secret-read step 1 of a proposal's
+// predecessor projection to its observation. A call that also uploads keeps
+// the one join identity the projection has for the chain.
+func withSecretReadStart(observation, predecessor guardrail.ToolChainProjection) guardrail.ToolChainProjection {
+	start, ok := guardrail.ToolChainProjectionStep(predecessor, guardrail.ToolChainSecretReadThenEgress, 1)
+	if !ok {
+		return observation
+	}
+	index, _ := guardrail.ToolChainIndexByID(guardrail.ToolChainSecretReadThenEgress)
+	observation.DetectionStepMask |= start.DetectionStepMask
+	observation.EnforcementStepMask |= start.EnforcementStepMask
+	if observation.EnforcementJoinDigests[index] == "" {
+		observation.EnforcementJoinDigests[index] = start.EnforcementJoinDigests[index]
+	}
+	if observation.EnforcementOutputJoinDigests[index] == "" {
+		observation.EnforcementOutputJoinDigests[index] = start.EnforcementOutputJoinDigests[index]
+	}
+	if observation.ParseStatus == "" {
+		observation.ParseStatus = start.ParseStatus
+	}
+	return observation
+}
+
+// unclearedReadWhy says why a connector's credentials read started the
+// secret-read chain at its proposal (GAP-0338).
+func unclearedReadWhy(connectorName string) string {
+	return "credentials read could not be cleared: no result correlation for " + connectorName
+}
+
+// The command join (substrate-1 GAP-0340). Devin and Copilot name no tool
+// invocation, but their result event carries the call's own tool name and
+// arguments (Devin PostToolUse tool_input with tool_response; Copilot
+// postToolUse and postToolUseFailure toolArgs with toolResult). For a
+// verified Substrate actor, a credentials read of theirs is kept pending
+// under a key of the actor, connector, session, tool and exact arguments
+// instead of starting the chain at the proposal, and its result decides by
+// what it printed: one that proves nothing was read
+// (toolResultProvesNothingRead) clears it, any other promotes it. The
+// pending read counts at the callout from the proposal on, as a paired
+// call's does. When the key can't be made (no session, no tool, arguments
+// that are the hook envelope or uncertain) or the leader does not take the
+// pending read, the chain starts at the proposal as before. Antigravity
+// (a step index, no command on the result) and Kiro (no output) stay as
+// they are, and so does the host path.
+
+// commandJoinConnector reports a connector whose results join their calls by
+// the command for a verified Substrate actor.
+func commandJoinConnector(ctx context.Context, connectorName string) bool {
+	if _, ok := substrateActorFrom(ctx); !ok {
+		return false
+	}
+	switch normalizeConnectorNameForDigest(connectorName) {
+	case "devin", "copilot":
+		return true
+	}
+	return false
+}
+
+// commandJoinDigest is the command join key of req, "" when it has none.
+// The arguments are compared as the canonical JSON of their value, so a
+// harness that re-encodes them between the call and its result still joins.
+func commandJoinDigest(ctx context.Context, req agentHookRequest) string {
+	actor, ok := substrateActorFrom(ctx)
+	if !ok || !commandJoinConnector(ctx, req.ConnectorName) ||
+		strings.TrimSpace(req.SessionID) == "" || strings.TrimSpace(req.ToolName) == "" || req.ToolNameIsLabel ||
+		req.ToolArgsAreHookEnvelope || req.ToolArgsProjectionUncertain {
+		return ""
+	}
+	var args any
+	if err := json.Unmarshal(req.ToolArgs, &args); err != nil || args == nil {
+		return ""
+	}
+	if text, isText := args.(string); isText {
+		// Copilot's toolArgs is a JSON document in a string.
+		var inner any
+		if err := json.Unmarshal([]byte(text), &inner); err == nil && inner != nil {
+			args = inner
+		}
+	}
+	canonical, err := json.Marshal(args)
+	if err != nil {
+		return ""
+	}
+	digest := sha256.Sum256([]byte("defenseclaw/substrate/tool-command-join/v1\x00" + actor.Atespace + "\x00" + actor.UID + "\x00" +
+		normalizeConnectorNameForDigest(req.ConnectorName) + "\x00" + req.SessionID + "\x00" +
+		strings.ToLower(strings.TrimSpace(req.ToolName)) + "\x00" + string(canonical)))
+	return hex.EncodeToString(digest[:])
+}
+
+// prepareCommandJoinedSecretRead keeps a command-joined call's secret-read
+// step 1 pending in the actor window and the session window. It reports
+// false, so the chain starts at the proposal, when there is no join key, no
+// actor window binding, or a window does not take it.
+func (a *APIServer) prepareCommandJoinedSecretRead(ctx context.Context, req agentHookRequest,
+	repository, rootRepository toolChainStore, rulesetFingerprint, inputFingerprint string,
+	predecessor guardrail.ToolChainProjection,
+) bool {
+	digest := commandJoinDigest(ctx, req)
+	start, ok := guardrail.ToolChainProjectionStep(predecessor, guardrail.ToolChainSecretReadThenEgress, 1)
+	if digest == "" || !ok || rootRepository == nil {
+		return false
+	}
+	in := audit.ToolChainPreparePendingInput{
+		ConnectorInstanceID:  audit.ConnectorInstanceID(req.ConnectorInstanceID),
+		ToolInvocationDigest: digest,
+		PreSemanticEventID:   audit.SemanticEventID(req.SemanticEventID),
+		PreInputFingerprint:  inputFingerprint,
+		RulesetFingerprint:   rulesetFingerprint,
+		Projection:           start,
+	}
+	for _, repo := range []toolChainStore{rootRepository, repository} {
+		r, err := repo.PreparePending(ctx, in)
+		if err != nil || r.Status != audit.ToolChainPendingPrepared && r.Status != audit.ToolChainPendingReplay {
+			return false
+		}
+	}
+	return true
+}
+
+// resolveCommandJoinedSecretRead lets a command-joined result decide its
+// call's pending read: cleared when it proves nothing was read, promoted
+// otherwise. A result that may show a credentials read whose call is not in
+// the actor window is reported (the returned reason): the callout then
+// refuses the actor's egress, as for a paired call (review rch3 R1).
+func (a *APIServer) resolveCommandJoinedSecretRead(ctx context.Context, req agentHookRequest, profile connector.HookProfile,
+	repository, rootRepository toolChainStore, inputFingerprint string, projection guardrail.ToolChainProjection,
+) string {
+	digest := commandJoinDigest(ctx, req)
+	if digest == "" || rootRepository == nil {
+		return ""
+	}
+	rulesetFingerprint, err := toolChainRulesetFingerprint(ctx, req.ConnectorName, profile)
+	if err != nil {
+		return "the active tool chain ruleset could not be fingerprinted: " + err.Error()
+	}
+	nothingRead := toolResultProvesNothingRead(req)
+	in := audit.ToolChainResolvePendingInput{
+		ConnectorInstanceID:      audit.ConnectorInstanceID(req.ConnectorInstanceID),
+		ToolInvocationDigest:     digest,
+		Outcome:                  audit.ToolChainPendingOutcomeFailure,
+		RulesetFingerprint:       rulesetFingerprint,
+		TerminalSemanticEventID:  audit.SemanticEventID(req.SemanticEventID),
+		TerminalInputFingerprint: inputFingerprint,
+		UnsuccessfulMayHaveRead:  !nothingRead,
+		ResultMayHaveRead:        !nothingRead,
+		ResultShowsRead:          !nothingRead && resultShowsRead(req),
+	}
+	root, rootErr := rootRepository.ResolvePending(ctx, in)
+	if rootErr != nil {
+		return "the leader did not take the step: " + rootErr.Error()
+	}
+	if repository != nil {
+		_, _ = repository.ResolvePending(ctx, in)
+	}
+	if root.Status == audit.ToolChainPendingMissing && !nothingRead && resultMayBeAnUnjoinedRead(req, projection) {
+		return "a tool result whose call is not in the actor's chain window (its call did not reach the leader)"
+	}
+	return ""
+}
+
+// noteUnclearedRead tells the leader, for a verified actor, that its
+// credentials read started the chain uncleared, so the callout's refusal of
+// the chain's egress says why (GAP-0338). A failure changes nothing: the
+// read is in the window either way.
+func (a *APIServer) noteUnclearedRead(ctx context.Context, connectorName string) {
+	actor, ok := substrateActorFrom(ctx)
+	st := a.substrateState()
+	if !ok || st == nil || st.cfg.Chains == nil {
+		return
+	}
+	_ = substrateNotes.deliver(ctx, substrateNote{client: st.cfg.Chains, actor: chainstate.Actor{Atespace: actor.Atespace, UID: actor.UID},
+		why: unclearedReadWhy(connectorName), uncleared: true})
+}
+
+// substrateNote is an unrecorded step (or an uncleared read) of an actor for
+// the leader.
+type substrateNote struct {
+	client    *chainstate.Client
+	actor     chainstate.Actor
+	why       string
+	uncleared bool
+	since     time.Time
+}
+
+func (n substrateNote) key() string {
+	return n.actor.Atespace + "/" + n.actor.UID + "\x00" + strconv.FormatBool(n.uncleared)
+}
+
+func sendSubstrateNote(ctx context.Context, n substrateNote) error {
+	if n.uncleared {
+		return n.client.Uncleared(ctx, n.actor, n.why)
+	}
+	return n.client.Unrecorded(ctx, n.actor, n.why)
+}
+
+// substrateNoteQueue delivers the notes and keeps one that could not be
+// delivered, retrying it in the background until the leader takes it or
+// the chain window it is for has passed: a leader restart or a transient
+// error must not leave the callout checking an incomplete window as if it
+// were whole (GAP-0339 review F3). The newest note of an actor and kind
+// replaces an older one; the queue is bounded, oldest out first.
+type substrateNoteQueue struct {
+	send    func(context.Context, substrateNote) error
+	every   time.Duration
+	keep    time.Duration
+	timeout time.Duration
+
+	mu      sync.Mutex
+	pending map[string]substrateNote
+	order   []string
+	running bool
+}
+
+// maxPendingSubstrateNotes bounds the notes waiting for the leader.
+const maxPendingSubstrateNotes = 4096
+
+var substrateNotes = &substrateNoteQueue{send: sendSubstrateNote, every: 5 * time.Second,
+	keep: 30 * time.Minute, timeout: substrateUnrecordedTimeout}
+
+// deliver sends n once; on a failure it queues n for retry and returns the
+// error.
+func (q *substrateNoteQueue) deliver(ctx context.Context, n substrateNote) error {
+	uctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), q.timeout)
+	err := q.send(uctx, n)
+	cancel()
+	if err == nil {
+		return nil
+	}
+	if n.since.IsZero() {
+		n.since = time.Now()
+	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if q.pending == nil {
+		q.pending = map[string]substrateNote{}
+	}
+	if _, ok := q.pending[n.key()]; !ok {
+		q.order = append(q.order, n.key())
+	}
+	q.pending[n.key()] = n
+	for len(q.order) > maxPendingSubstrateNotes {
+		delete(q.pending, q.order[0])
+		q.order = q.order[1:]
+	}
+	if !q.running {
+		q.running = true
+		go q.retry()
+	}
+	return err
+}
+
+// retry resends the pending notes every q.every until none is left.
+func (q *substrateNoteQueue) retry() {
+	for {
+		time.Sleep(q.every)
+		q.mu.Lock()
+		batch := make([]substrateNote, 0, len(q.order))
+		for _, k := range q.order {
+			batch = append(batch, q.pending[k])
+		}
+		q.mu.Unlock()
+		for _, n := range batch {
+			ctx, cancel := context.WithTimeout(context.Background(), q.timeout)
+			err := q.send(ctx, n)
+			cancel()
+			if err == nil || time.Since(n.since) > q.keep {
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "[substrate] warning: %s/%s: gave up telling the leader of an unrecorded tool step after %s: %v\n",
+						n.actor.Atespace, n.actor.UID, q.keep, err)
+				}
+				q.drop(n)
+			}
+		}
+		q.mu.Lock()
+		if len(q.order) == 0 {
+			q.running = false
+			q.mu.Unlock()
+			return
+		}
+		q.mu.Unlock()
+	}
+}
+
+// drop removes n unless a newer note of the same actor and kind replaced it.
+func (q *substrateNoteQueue) drop(n substrateNote) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if cur, ok := q.pending[n.key()]; !ok || cur.why != n.why || !cur.since.Equal(n.since) {
+		return
+	}
+	delete(q.pending, n.key())
+	for i, k := range q.order {
+		if k == n.key() {
+			q.order = append(q.order[:i], q.order[i+1:]...)
+			break
+		}
+	}
+}
+
+// pendingCount is the notes waiting for the leader.
+func (q *substrateNoteQueue) pendingCount() int {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return len(q.order)
+}
+
+// readOnlyPrograms are the plain readers whose own error lines can prove a
+// failed call read nothing (toolResultProvesNothingRead).
+var readOnlyPrograms = map[string]struct{}{
+	"cat": {}, "head": {}, "tail": {}, "less": {}, "more": {}, "nl": {}, "tac": {}, "bat": {},
+}
+
+// readErrorPhrases end a reader's error line for an operand it did not read.
+var readErrorPhrases = []string{
+	"No such file or directory", "Permission denied", "Is a directory",
+	"Not a directory", "No such device or address",
+}
+
+// maxProofResultBytes bounds the result text the proof reads.
+const maxProofResultBytes = 64 << 10
+
+// claudeCodeReadMissing begins the Read tool's error for a file that is not
+// there.
+const claudeCodeReadMissing = "File does not exist."
+
+// toolResultProvesNothingRead reports an unsuccessful result that proves its
+// call read no file (substrate-1 GAP-0337, GAP-0353). Its output lines
+// (resultOutputLines: the output fields only, the harness's wrappers
+// removed) must be one of:
+//   - for one plain reader whose operands are all simple words (no operator,
+//     redirect, pipe, quote, variable, glob or option): that reader's error
+//     line for every operand ("cat: .env: No such file or directory") and an
+//     exit status line. Such a call can print nothing but what it read, and a
+//     file it printed would show as other lines;
+//   - for that reader with its errors sent to /dev/null (cat .env
+//     2>/dev/null): an exit status line that is not 0 and nothing else. Its
+//     only channel printed nothing, and an empty file it read exits 0;
+//   - for one simple word assigned to a variable and that reader on the
+//     variable (F=.env; cat $F): as for the reader on the word;
+//   - for Claude Code's Read tool: its "File does not exist." error.
+//
+// Anything else (no result text, other output, any other command shape)
+// proves nothing: a failed call that printed a credentials file is a secret
+// read.
+func toolResultProvesNothingRead(req agentHookRequest) bool {
+	lines, ok := resultOutputLines(req.Payload)
+	if !ok || len(lines) == 0 {
+		return false
+	}
+	if claudeCodeReadToolMissing(req, lines) {
+		return true
+	}
+	command, ok := trustedBashCommandInput(actionfacts.Input{Tool: req.ToolName, Args: req.ToolArgs})
+	if !ok {
+		return false
+	}
+	program, operands, quiet, ok := plainReaderCall(command)
+	if !ok {
+		return false
+	}
+	exit := ""
+	named := make(map[string]bool, len(operands))
+	for _, line := range lines {
+		if code, isExit := exitCodeOf(line); isExit {
+			exit = code
+			continue
+		}
+		operand, ok := readerErrorLine(program, line)
+		if !ok || !slices.Contains(operands, operand) {
+			return false
+		}
+		named[operand] = true
+	}
+	if quiet {
+		return len(named) == 0 && exit != "" && exit != "0"
+	}
+	for _, operand := range operands {
+		if !named[operand] {
+			return false
+		}
+	}
+	return true
+}
+
+// resultShowsRead reports a result whose own output shows its call may have
+// read: any output line but a blank one, an exit status line, a reader's
+// error line naming one of the command's operands, or the Read tool's
+// missing-file error (GAP-0352, GAP-0353). A result too large to read shows
+// one. It is the evidence a further result of a call needs to start the
+// secret-read chain once an earlier result proved the read failed (the
+// 1.0.10 lead's rule, STEER 7 and 8 2026-11-16): one that repeats the
+// failure, carries no output or only the harness's metadata and wrappers
+// shows none; one that printed shows one, so a no-read result never clears a
+// read another result shows.
+func resultShowsRead(req agentHookRequest) bool {
+	lines, ok := resultOutputLines(req.Payload)
+	if !ok {
+		return true
+	}
+	if len(lines) == 0 || claudeCodeReadToolMissing(req, lines) {
+		return false
+	}
+	program, operands := "", []string(nil)
+	if command, ok := trustedBashCommandInput(actionfacts.Input{Tool: req.ToolName, Args: req.ToolArgs}); ok {
+		if p, ops, _, plain := plainReaderCall(command); plain {
+			program, operands = p, ops
+		} else if words := strings.Fields(command); len(words) >= 2 {
+			program, operands = words[0], words[1:]
+		}
+	}
+	for _, line := range lines {
+		if _, isExit := exitCodeOf(line); isExit {
+			continue
+		}
+		if operand, ok := readerErrorLine(program, line); program != "" && ok && slices.Contains(operands, operand) {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+// claudeCodeReadToolMissing is Claude Code's Read tool answering that its
+// file does not exist: every output line is that error.
+func claudeCodeReadToolMissing(req agentHookRequest, lines []string) bool {
+	if req.ConnectorName != "claudecode" || req.ToolName != "Read" || len(lines) == 0 {
+		return false
+	}
+	for _, line := range lines {
+		if !strings.HasPrefix(line, claudeCodeReadMissing) {
+			return false
+		}
+	}
+	return true
+}
+
+// assignedReaderRE is "F=word; reader $F" (or "&&", "$F" in double quotes,
+// ${F}) with a word of no shell syntax.
+var assignedReaderRE = regexp.MustCompile(`^([A-Za-z_][A-Za-z0-9_]*)=([A-Za-z0-9_./@%+,:-]+) *(?:;|&&) *([A-Za-z0-9_./-]+) (?:\$([A-Za-z_][A-Za-z0-9_]*)|"\$([A-Za-z_][A-Za-z0-9_]*)"|\$\{([A-Za-z_][A-Za-z0-9_]*)\})$`)
+
+// plainReaderCall reads command as one plain reader on simple-word operands:
+// its program (as typed), its operands, and whether its errors go to
+// /dev/null (a trailing "2>/dev/null"). A variable assigned one simple word
+// just before is read as that word.
+func plainReaderCall(command string) (program string, operands []string, quiet, ok bool) {
+	command = strings.TrimSpace(command)
+	if rest, cut := strings.CutSuffix(command, " 2>/dev/null"); cut {
+		command, quiet = strings.TrimSpace(rest), true
+	}
+	if m := assignedReaderRE.FindStringSubmatch(command); m != nil {
+		name := m[4] + m[5] + m[6]
+		if name != m[1] {
+			return "", nil, false, false
+		}
+		command = m[3] + " " + m[2]
+	}
+	words := strings.Fields(command)
+	if len(words) < 2 || strings.ContainsAny(command, "|&;<>()$`'\"\\*?[]{}!#=\n") {
+		return "", nil, false, false
+	}
+	if _, reader := readOnlyPrograms[path.Base(words[0])]; !reader {
+		return "", nil, false, false
+	}
+	for _, operand := range words[1:] {
+		if strings.HasPrefix(operand, "-") {
+			return "", nil, false, false
+		}
+	}
+	return words[0], words[1:], quiet, true
+}
+
+// exitCodeOf is the code of the exit status line a connector adds to a
+// failed shell result ("Exit code 1").
+func exitCodeOf(line string) (string, bool) {
+	rest, ok := strings.CutPrefix(line, "Exit code ")
+	if !ok {
+		return "", false
+	}
+	if _, err := strconv.Atoi(rest); err != nil {
+		return "", false
+	}
+	return rest, true
+}
+
+// readerErrorLine is the operand of program's error line "program: operand:
+// phrase". The program prefix may be absent, typed as a path (/bin/cat), or
+// the reader's own name; the operand may be in one pair of quotes, as GNU
+// coreutils quotes one that needs it ('.env' or "it's").
+func readerErrorLine(program, line string) (string, bool) {
+	if program != "" {
+		base := path.Base(program)
+		if i := strings.Index(line, ": "); i > 0 {
+			if prefix := line[:i]; prefix == program || prefix == base || strings.HasSuffix(prefix, "/"+base) {
+				line = line[i+2:]
+			}
+		}
+	}
+	for _, phrase := range readErrorPhrases {
+		operand, ok := strings.CutSuffix(line, ": "+phrase)
+		if !ok || operand == "" {
+			continue
+		}
+		if n := len(operand); n >= 2 && (operand[0] == '\'' && operand[n-1] == '\'' || operand[0] == '"' && operand[n-1] == '"') {
+			operand = operand[1 : n-1]
+		}
+		return operand, operand != ""
+	}
+	return "", false
+}
+
+// resultTextKeys are the payload keys where a connector's harness puts a
+// tool's output and error text (Claude Code tool_response and error, Cursor
+// error_message and tool_output, Hermes extra.result, OpenCode, Amp and
+// Codex tool_response, Antigravity output and error).
+var resultTextKeys = []string{
+	"tool_response", "toolResponse", "tool_output", "toolOutput", "tool_result", "toolResult",
+	"output", "result", "response", "stdout", "stderr",
+	"error", "error_message", "errorMessage", "error_details", "errorDetails",
+}
+
+// resultMetadataKeys are fields inside a result that a harness fills with
+// its own description of the call, never with what the call printed: Claude
+// Code's Bash result (interrupted, isImage, noOutputExpected,
+// returnCodeInterpretation, persistedOutputPath, backgroundTaskId, sandbox
+// fields) and the failure flags. An unknown field is read as output.
+var resultMetadataKeys = map[string]struct{}{
+	"interrupted": {}, "isimage": {}, "nooutputexpected": {}, "returncodeinterpretation": {},
+	"persistedoutputpath": {}, "persistedoutputsize": {}, "backgroundtaskid": {}, "is_error": {},
+	"is_interrupt": {}, "duration_ms": {}, "sandboxed": {}, "dangerouslydisablesandbox": {},
+}
+
+// resultOutputLines are the output lines of a result payload, as the proof
+// and resultShowsRead read them: every string under its result keys (and the
+// same keys under extra), a string that holds a JSON object or array read as
+// that value, but status, type, kind and id fields and the harness's
+// metadata fields (resultMetadataKeys); each line trimmed, with Claude
+// Code's wrappers removed (a <tool_use_error> tag, an "Error: " before the
+// exit status line, the "Shell cwd was reset to ..." trailer) and blank
+// lines dropped. ok is false when the result is larger than
+// maxProofResultBytes. The payload is the harness plugin's, not the model's.
+func resultOutputLines(payload map[string]any) (lines []string, ok bool) {
+	var text []string
+	size := 0
+	for _, scope := range []map[string]any{payload, nestedResultScope(payload)} {
+		for _, key := range resultTextKeys {
+			if value, has := scope[key]; has && !collectText(value, &text, &size) {
+				return nil, false
+			}
+		}
+	}
+	for _, chunk := range text {
+		for _, line := range strings.Split(chunk, "\n") {
+			if line = normalizeResultLine(line); line != "" {
+				lines = append(lines, line)
+			}
+		}
+	}
+	return lines, true
+}
+
+func normalizeResultLine(line string) string {
+	line = strings.TrimSpace(line)
+	line = strings.TrimSpace(strings.TrimPrefix(line, "<tool_use_error>"))
+	line = strings.TrimSpace(strings.TrimSuffix(line, "</tool_use_error>"))
+	if rest, ok := strings.CutPrefix(line, "Error: "); ok {
+		if _, isExit := exitCodeOf(rest); isExit || strings.HasPrefix(rest, claudeCodeReadMissing) {
+			line = rest
+		}
+	}
+	if strings.HasPrefix(line, "Shell cwd was reset to ") {
+		return ""
+	}
+	return line
+}
+
+func nestedResultScope(payload map[string]any) map[string]any {
+	extra, _ := payload["extra"].(map[string]any)
+	return extra
+}
+
+func collectText(value any, out *[]string, size *int) bool {
+	switch v := value.(type) {
+	case string:
+		*size += len(v)
+		if *size > maxProofResultBytes {
+			return false
+		}
+		if trimmed := strings.TrimSpace(v); strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "[") {
+			var decoded any
+			if json.Unmarshal([]byte(trimmed), &decoded) == nil {
+				return collectText(decoded, out, size)
+			}
+		}
+		*out = append(*out, v)
+	case map[string]any:
+		for key, item := range v {
+			if resultEnumKey(key) {
+				continue
+			}
+			if _, meta := resultMetadataKeys[strings.ToLower(key)]; meta {
+				continue
+			}
+			if !collectText(item, out, size) {
+				return false
+			}
+		}
+	case []any:
+		for _, item := range v {
+			if !collectText(item, out, size) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// resultEnumKey is a field inside a result whose value is a label, not
+// output (opencode_v2_status, a content block type, an id).
+func resultEnumKey(key string) bool {
+	lower := strings.ToLower(key)
+	return strings.Contains(lower, "status") || lower == "type" || lower == "resulttype" || lower == "kind" ||
+		lower == "id" || strings.HasSuffix(lower, "_id") || strings.HasSuffix(key, "Id") || strings.HasSuffix(key, "ID")
 }

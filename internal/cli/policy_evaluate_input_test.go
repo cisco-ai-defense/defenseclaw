@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 )
 
@@ -19,7 +20,7 @@ func TestPolicyEvaluateRejectsInvalidInputsBeforeEvaluation(t *testing.T) {
 		t.Run(tc.flag, func(t *testing.T) {
 			setPolicyPathTestFlag(t, policyEvaluateCmd, tc.flag, tc.value)
 			out, err := capturePolicyPathTestOutput(t, func() error { return policyEvaluateCmd.RunE(policyEvaluateCmd, nil) })
-			if err == nil || commandExitCode(err) != 2 || !strings.Contains(err.Error(), "--"+tc.flag) || out != "" {
+			if err == nil || cliusage.ExitCode(err) != 2 || !strings.Contains(err.Error(), "--"+tc.flag) || out != "" {
 				t.Fatalf("invalid --%s: output %q, error %v", tc.flag, out, err)
 			}
 		})

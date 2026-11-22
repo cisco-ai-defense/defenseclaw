@@ -6,6 +6,8 @@ package gateway
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -145,9 +147,12 @@ func (a *APIServer) recordHookCallerGone(w http.ResponseWriter, r *http.Request)
 		_ = http.NewResponseController(w).Flush()
 	}
 	var payload map[string]interface{}
+	var body []byte
+	bodyComplete := false
 	if r.Body != nil {
 		_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(hookCallerGoneReadWait))
-		_ = json.NewDecoder(io.LimitReader(r.Body, hookCallerBodyLimit(r))).Decode(&payload)
+		body, bodyComplete = readHookCallerGoneBody(r)
+		_ = json.NewDecoder(bytes.NewReader(body)).Decode(&payload)
 	}
 	event := ""
 	if payload != nil {
@@ -168,7 +173,7 @@ func (a *APIServer) recordHookCallerGone(w http.ResponseWriter, r *http.Request)
 	if shed {
 		extra = map[string]string{"hook_shed": "admission_refused"}
 	}
-	shedKey := ""
+	shedKey, capacityKey := "", ""
 	if id := hookCallerGoneString(payload, "tool_use_id", "toolUseId", "tool_call_id", "toolCallId"); id != "" {
 		if shed {
 			// The hook retries a refused call: one row names the call. The
@@ -180,6 +185,7 @@ func (a *APIServer) recordHookCallerGone(w http.ResponseWriter, r *http.Request)
 			if !a.hookShed.first(shedKey) {
 				return
 			}
+			capacityKey = shedKey
 		}
 		extra["tool_use_id"] = id
 		// The row is found by its tool id like every other row of the call.
@@ -187,7 +193,26 @@ func (a *APIServer) recordHookCallerGone(w http.ResponseWriter, r *http.Request)
 			env.ToolID = id
 		}
 	}
+	countShed := shed && capacityKey != ""
+	if shed && capacityKey == "" {
+		// A refused call without a tool id writes a row on every resend; the
+		// capacity counter takes it once, by the bytes it resends. A body
+		// that was not read whole in the read wait, or names no event, has
+		// nothing that tells two calls apart: each send of it is counted
+		// (never more than one per resend), so distinct calls are never
+		// merged under one key (GAP-0742 N5).
+		countShed = true
+		if bodyComplete && event != "" {
+			capacityKey = hookShedCapacityKey(ctx, env.SessionID, event, body)
+			if !a.hookShed.first(capacityKey) {
+				capacityKey, countShed = "", false
+			}
+		}
+	}
 	ctx = audit.ContextWithEnvelope(ctx, env)
+	if !shed {
+		a.noteHookCallerGoneCapacity(connectorName, false)
+	}
 	if err := a.logConnectorHookAuditEnvelope(ctx, HookAuditEnvelope{
 		Connector: connectorName,
 		Event:     event,
@@ -201,9 +226,47 @@ func (a *APIServer) recordHookCallerGone(w http.ResponseWriter, r *http.Request)
 		if shedKey != "" {
 			a.hookShed.forget(shedKey)
 		}
+		if capacityKey != "" && capacityKey != shedKey {
+			a.hookShed.forget(capacityKey)
+		}
 		fmt.Fprintf(os.Stderr, "[gateway] hook call whose client left before admission not audited connector=%s: %v\n",
 			connectorName, err)
+		return
 	}
+	if countShed {
+		// Counted once per call, after its row persisted (a failed write
+		// leaves the next resend to count it).
+		a.noteHookCallerGoneCapacity(connectorName, true)
+	}
+}
+
+// readHookCallerGoneBody reads the body of a call the gateway did not admit,
+// within hookCallerBodyLimit, and reports whether it was read whole. A hook
+// that names its payload size (HookDeliveryPayloadBytesHeader) keeps the body
+// open after the payload for its delivery receipt, so exactly that many bytes
+// are read; any other body is read to its end.
+func readHookCallerGoneBody(r *http.Request) ([]byte, bool) {
+	limit := hookCallerBodyLimit(r)
+	if n, err := strconv.ParseInt(r.Header.Get(hookexec.HookDeliveryPayloadBytesHeader), 10, 64); err == nil && n > 0 {
+		body, _ := io.ReadAll(io.LimitReader(r.Body, min(n, limit)))
+		return body, int64(len(body)) == n
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, limit+1))
+	if int64(len(body)) > limit {
+		return body[:limit], false
+	}
+	return body, err == nil
+}
+
+// hookShedCapacityKey names a refused call that carries no tool id by the
+// verified caller, its session and event and a digest of the body its hook
+// resends unchanged (the bytes read, not a re-encoding of the decoded
+// payload). Two calls with the same bytes in one session are counted once:
+// the bound is the ledger, never more than one per resend.
+func hookShedCapacityKey(ctx context.Context, session, event string, body []byte) string {
+	caller, _ := verifiedAuditCaller(ctx)
+	sum := sha256.Sum256(body)
+	return "capacity\x00" + caller.IDKind + "\x00" + caller.ID + "\x00" + session + "\x00" + event + "\x00" + hex.EncodeToString(sum[:])
 }
 
 // hookShedLedger remembers the calls a shed row was written for, so the

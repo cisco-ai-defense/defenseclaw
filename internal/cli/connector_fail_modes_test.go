@@ -16,6 +16,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 )
 
 type refreshFailModesResult struct {
@@ -127,7 +129,7 @@ func TestRefreshFailModesClosesA08xSidecarOpenNobodySet(t *testing.T) {
 		if got := oldHookFailMode(t, home, name); got != "closed" {
 			t.Fatalf("the old %s hook reads %q, want closed", name, got)
 		}
-		if got := buildHookOptions(name, "PreToolUse", "", "").FailMode; got != "closed" {
+		if got := hookcli.BuildHookOptions(name, "PreToolUse", "", "").FailMode; got != "closed" {
 			t.Fatalf("the new %s hook fails %q, want closed", name, got)
 		}
 	}
@@ -143,7 +145,7 @@ func TestRefreshFailModesClosesAnExternalConfigsOpen(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeHookSidecarForTest(t, home, `{"version":2,"gateway_addr":"127.0.0.1:18970","fail_modes":{"codex":"open"}}`)
-	if got := buildHookOptions("codex", "PreToolUse", "", "").FailMode; got != "closed" {
+	if got := hookcli.BuildHookOptions("codex", "PreToolUse", "", "").FailMode; got != "closed" {
 		t.Fatalf("precondition: the new hook fails %q before the refresh", got)
 	}
 
@@ -152,7 +154,7 @@ func TestRefreshFailModesClosesAnExternalConfigsOpen(t *testing.T) {
 		t.Fatalf("refresh %+v", result)
 	}
 	t.Setenv("DEFENSECLAW_CONFIG", "")
-	if got := buildHookOptions("codex", "PreToolUse", "", "").FailMode; got != "closed" {
+	if got := hookcli.BuildHookOptions("codex", "PreToolUse", "", "").FailMode; got != "closed" {
 		t.Fatalf("the new hook fails %q, want closed", got)
 	}
 }
@@ -165,6 +167,7 @@ func TestRefreshFailModesClosesAnExternalConfigsOpen(t *testing.T) {
 // closed, wins over either (BALANCED-DEFAULTS owner decision 2026-10-23).
 // Every other native hook failure stays closed.
 func TestRefreshFailModesWritesThePolicyTiersOutageMode(t *testing.T) {
+	isolateHookOutageAccount(t)
 	for _, test := range []struct {
 		name, config, want string
 	}{
@@ -187,7 +190,7 @@ func TestRefreshFailModesWritesThePolicyTiersOutageMode(t *testing.T) {
 			if got := oldHookFailMode(t, home, "copilot"); got != test.want {
 				t.Fatalf("refreshed copilot mode %q, want %q", got, test.want)
 			}
-			if got := hookOutageFailModeNow("copilot", filepath.Join(home, "hooks")); got != test.want {
+			if got := hookcli.HookOutageFailModeNow("copilot", filepath.Join(home, "hooks")); got != test.want {
 				t.Fatalf("the native hook's call-time outage mode is %q, want %q", got, test.want)
 			}
 		})
@@ -200,6 +203,7 @@ func TestRefreshFailModesWritesThePolicyTiersOutageMode(t *testing.T) {
 // 0.8.x document the release cannot load yet is closed until the migrated
 // config renders the hooks.
 func TestRefreshFailModesGivesCursorThePolicyTiersOutageMode(t *testing.T) {
+	isolateHookOutageAccount(t)
 	const v9 = "config_version: 9\nobservability: {}\nguardrail:\n"
 	const v7 = "config_version: 7\nguardrail:\n"
 	for _, test := range []struct {
@@ -227,7 +231,7 @@ func TestRefreshFailModesGivesCursorThePolicyTiersOutageMode(t *testing.T) {
 				t.Fatalf("the old cursor hook reads %q, want %q", got, test.want)
 			}
 			if test.read == "loaded" {
-				if got := hookOutageFailModeNow("cursor", filepath.Join(home, "hooks")); got != test.want {
+				if got := hookcli.HookOutageFailModeNow("cursor", filepath.Join(home, "hooks")); got != test.want {
 					t.Fatalf("the new cursor hook's call-time outage mode is %q, want %q", got, test.want)
 				}
 			}
@@ -282,7 +286,7 @@ func TestRefreshFailModesClosesA08xAutomaticProtectionOpen(t *testing.T) {
 				if got := oldHookFailMode(t, home, name); got != want {
 					t.Fatalf("the old %s hook reads %q, want %q", name, got, want)
 				}
-				if got := buildHookOptions(name, "PreToolUse", "", "").FailMode; got != want {
+				if got := hookcli.BuildHookOptions(name, "PreToolUse", "", "").FailMode; got != want {
 					t.Fatalf("the new %s hook fails %q, want %q", name, got, want)
 				}
 			}
@@ -404,7 +408,7 @@ func TestRefreshFailModesClosedClosesEveryHookWhateverTheConfigChooses(t *testin
 				if got := oldHookFailMode(t, home, name); got != "closed" {
 					t.Fatalf("the old %s hook reads %q, want closed", name, got)
 				}
-				if got := buildHookOptions(name, "PreToolUse", "", "").FailMode; got != "closed" {
+				if got := hookcli.BuildHookOptions(name, "PreToolUse", "", "").FailMode; got != "closed" {
 					t.Fatalf("the new %s hook fails %q, want closed", name, got)
 				}
 			}

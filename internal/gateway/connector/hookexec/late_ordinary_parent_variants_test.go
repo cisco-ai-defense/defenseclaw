@@ -12,6 +12,12 @@ import (
 	"testing"
 )
 
+// ordinaryNoAnswerPayloadInHomes is the strict (PreToolUse, no cd) reader for
+// a list of homes; only this file asks it.
+func ordinaryNoAnswerPayloadInHomes(body []byte, homes []string) bool {
+	return noAnswerPayloadInHomes(body, homes, false)
+}
+
 // The OSS open tier of a late call allows an ordinary file reached by a parent
 // step in every spelling and stays closed for a protected target.
 func TestLateOrdinaryLookAllowsOrdinaryParentSpellings(t *testing.T) {

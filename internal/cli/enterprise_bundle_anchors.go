@@ -20,6 +20,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 )
@@ -109,7 +110,7 @@ written. The result also carries sha256, previous_sha256 and key_ids. Exit codes
 	}
 	install.SetFlagErrorFunc(flagError)
 	install.Args = func(c *cobra.Command, args []string) error {
-		if err := strayArgumentError(c, args); err != nil {
+		if err := cliusage.StrayArgumentError(c, args); err != nil {
 			return flagError(c, err)
 		}
 		return nil
@@ -123,7 +124,7 @@ func runEnterpriseBundleAnchorsInstall(cmd *cobra.Command, opts *bundleAnchorsOp
 		Warnings: []enterprisebundle.Warning{}, Errors: []bundleError{}}
 	err := bundleAnchorsInstall(bundleContext(cmd), cmd, opts, res)
 	if err != nil {
-		var usage *exitCodeError
+		var usage *cliusage.ExitCodeError
 		if errors.As(err, &usage) && usage.ExitCode() == enterprisestatus.InvalidArgsExitCode(runtime.GOOS) {
 			res.Errors = []bundleError{{Code: "invalid_arguments", Message: err.Error()}}
 		} else {
@@ -132,7 +133,7 @@ func runEnterpriseBundleAnchorsInstall(cmd *cobra.Command, opts *bundleAnchorsOp
 				code = enterprisestatus.UnixExitBusy
 			}
 			res.Errors, _ = bundleRefusal(err)
-			err = withExitCode(err, code)
+			err = cliusage.WithExitCode(err, code)
 		}
 	}
 	res.OK = err == nil
@@ -155,7 +156,7 @@ func bundleAnchorsInstall(ctx context.Context, cmd *cobra.Command, opts *bundleA
 	}
 	refuse := func(err error) error {
 		code := string(enterprisebundle.CodeStateInvalid)
-		if commandExitCode(err) == enterprisestatus.UnixExitInvalidArgs {
+		if cliusage.ExitCode(err) == enterprisestatus.UnixExitInvalidArgs {
 			code = "invalid_arguments"
 		}
 		if ev, ok := anchorsFailureEvent(code, false, nil); ok {

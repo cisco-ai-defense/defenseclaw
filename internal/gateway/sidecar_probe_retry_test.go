@@ -52,7 +52,7 @@ func TestSetupConnectorsIsolated_RetriesASlowProbe(t *testing.T) {
 	peer := &bootStubConnector{stubConnector: stubConnector{name: "codex"}}
 	got, err := s.setupConnectorsIsolated(
 		context.Background(), []connector.Connector{slow, peer},
-		"tok", "127.0.0.1:0", "127.0.0.1:0", "master", guardrail.NewRulePackCache(),
+		"tok", "127.0.0.1:0", "127.0.0.1:0", guardrail.NewRulePackCache(),
 	)
 	if err != nil {
 		t.Fatalf("setupConnectorsIsolated: %v", err)
@@ -68,7 +68,7 @@ func TestSetupConnectorsIsolated_RetriesASlowProbe(t *testing.T) {
 	stuck := &slowOnceConnector{bootStubConnector: bootStubConnector{stubConnector: stubConnector{name: "claudecode"}}, slowSetups: 99}
 	got, err = s.setupConnectorsIsolated(
 		context.Background(), []connector.Connector{stuck},
-		"tok", "127.0.0.1:0", "127.0.0.1:0", "master", guardrail.NewRulePackCache(),
+		"tok", "127.0.0.1:0", "127.0.0.1:0", guardrail.NewRulePackCache(),
 	)
 	if err != nil || len(got) != 0 || stuck.setupCalls != connectorProbeTimeoutAttempts || stuck.teardownCalls != 0 {
 		t.Fatalf("stuck probe: survivors=%v err=%v setupCalls=%d teardownCalls=%d", got, err, stuck.setupCalls, stuck.teardownCalls)
@@ -117,7 +117,7 @@ func TestSetupConnectorsIsolated_RetriesSettingsInUse(t *testing.T) {
 	peer := &bootStubConnector{stubConnector: stubConnector{name: "codex"}}
 	got, err := s.setupConnectorsIsolated(
 		context.Background(), []connector.Connector{held, peer},
-		"tok", "127.0.0.1:0", "127.0.0.1:0", "master", guardrail.NewRulePackCache(),
+		"tok", "127.0.0.1:0", "127.0.0.1:0", guardrail.NewRulePackCache(),
 	)
 	if err != nil {
 		t.Fatalf("setupConnectorsIsolated: %v", err)
@@ -135,7 +135,7 @@ func TestSetupConnectorsIsolated_RetriesSettingsInUse(t *testing.T) {
 	started := time.Now()
 	got, _ = s.setupConnectorsIsolated(
 		context.Background(), []connector.Connector{stuck},
-		"tok", "127.0.0.1:0", "127.0.0.1:0", "master", guardrail.NewRulePackCache(),
+		"tok", "127.0.0.1:0", "127.0.0.1:0", guardrail.NewRulePackCache(),
 	)
 	if len(got) != 0 || stuck.setupCalls < 2 || time.Since(started) > 5*time.Second {
 		t.Fatalf("stuck settings: survivors=%v setupCalls=%d after %s", got, stuck.setupCalls, time.Since(started))
@@ -146,7 +146,7 @@ func TestSetupConnectorsIsolated_RetriesSettingsInUse(t *testing.T) {
 	other.setupErr = errors.New("claudecode settings hooks: parse claude settings: bad json")
 	_, _ = s.setupConnectorsIsolated(
 		context.Background(), []connector.Connector{other},
-		"tok", "127.0.0.1:0", "127.0.0.1:0", "master", guardrail.NewRulePackCache(),
+		"tok", "127.0.0.1:0", "127.0.0.1:0", guardrail.NewRulePackCache(),
 	)
 	if other.setupCalls != 1 {
 		t.Fatalf("a parse failure was set up %d times, want 1", other.setupCalls)
@@ -166,8 +166,13 @@ func TestRunGuardrailSingleConnectorRetriesSettingsInUse(t *testing.T) {
 	connectorSettingsBusyDelay = time.Millisecond
 	errSetupReached := errors.New("setup ran with the settings file free")
 
+	// first and last are when the run's first and last setup started: the
+	// retry window the budget bounds, without the start and the rollback
+	// around it (about 8 s a run natively on Windows, rel-1-0-10:GAP-1521).
+	var first, last time.Time
 	run := func(t *testing.T, busySetups int, other error) (int, error) {
 		t.Helper()
+		first, last = time.Time{}, time.Time{}
 		codexConfig := filepath.Join(t.TempDir(), ".codex", "config.toml")
 		prevCodex := connector.CodexConfigPathOverride
 		connector.CodexConfigPathOverride = codexConfig
@@ -175,6 +180,9 @@ func TestRunGuardrailSingleConnectorRetriesSettingsInUse(t *testing.T) {
 		calls := 0
 		singleConnectorSetup = func(context.Context, connector.Connector, connector.SetupOpts) error {
 			calls++
+			if last = time.Now(); first.IsZero() {
+				first = last
+			}
 			if other != nil {
 				return other
 			}
@@ -202,12 +210,12 @@ func TestRunGuardrailSingleConnectorRetriesSettingsInUse(t *testing.T) {
 		t.Fatalf("held settings: setup calls=%d err=%v, want 4 calls ending in the free-file setup", calls, err)
 	}
 
-	// A file that stays in use still fails the start, within the budget.
+	// A file that stays in use still fails the start: the retries stop
+	// within the budget.
 	connectorSettingsBusyBudget = 200 * time.Millisecond
-	started := time.Now()
 	calls, err = run(t, 1<<20, nil)
-	if calls < 2 || !errors.Is(err, errSettingsInUse) || time.Since(started) > 5*time.Second {
-		t.Fatalf("stuck settings: setup calls=%d err=%v after %s", calls, err, time.Since(started))
+	if window := last.Sub(first); calls < 2 || !errors.Is(err, errSettingsInUse) || window > 5*time.Second {
+		t.Fatalf("stuck settings: setup calls=%d err=%v, retried for %s", calls, err, window)
 	}
 
 	// Other failures are not retried.

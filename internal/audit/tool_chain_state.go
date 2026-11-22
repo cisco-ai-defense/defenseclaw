@@ -57,6 +57,99 @@ type ToolChainObserveResult struct {
 	StableActionID          string
 	ReceiptIDs              []string
 	SuppressTelemetry       bool
+	// Evidence describes each detected chain of a fresh observation for its
+	// audit row (GAP-0445). It is telemetry only: no verdict reads it, and a
+	// replayed observation carries none.
+	Evidence []ToolChainMatchEvidence
+}
+
+// ToolChainMatchEvidence is what the repository knew when it matched one
+// chain: the scope and partition it judged the step in, the chain's step
+// count, the earlier step that completed it, the resource identity both
+// steps joined on (a digest the projector made, never a path), and the
+// time between the two steps against the chain's horizon. The repository's
+// clock is the running time on Substrate (the leader stamps every step), so
+// the span leaves out suspended time there; on a host it is wall time.
+type ToolChainMatchEvidence struct {
+	ChainID string `json:"chain_id"`
+	// Scope is session (one agent session's window) or root (every session
+	// of the root scope, an actor on Substrate).
+	Scope string `json:"scope"`
+	// Partition is the first 16 hex digits of the partition key digest and
+	// Sequence the step's place in it.
+	Partition string `json:"partition"`
+	Sequence  uint64 `json:"sequence"`
+	// Steps is how many steps the chain's definition has.
+	Steps int `json:"steps"`
+	// Predecessor is the semantic event id of the step before this one the
+	// matcher joined (for a three- or four-step chain, the last of them).
+	Predecessor string `json:"predecessor,omitempty"`
+	// Artifact is the first 16 hex digits of the resource identity both
+	// steps joined on, when the chain joins on one.
+	Artifact string `json:"artifact,omitempty"`
+	// SpanMillis is the time from Predecessor to this step; HorizonSeconds
+	// the chain's time window.
+	SpanMillis     int64 `json:"span_ms"`
+	HorizonSeconds int64 `json:"horizon_s"`
+}
+
+// toolChainEvidenceDigits is how much of a digest the evidence shows: enough
+// to tell partitions and artifacts apart in an audit read, no more.
+const toolChainEvidenceDigits = 16
+
+func shortToolChainDigest(digest string) string {
+	if digest == "" || digest == guardrail.ToolChainFileUnknownDigest || digest == guardrail.ToolChainUnreadSenderDigest {
+		return ""
+	}
+	if len(digest) > toolChainEvidenceDigits {
+		return digest[:toolChainEvidenceDigits]
+	}
+	return digest
+}
+
+// toolChainMatchEvidence builds the evidence of every detected chain from
+// what observeTx already holds: no further read.
+func (repo *ToolChainRepository) toolChainMatchEvidence(
+	session string,
+	sequence uint64,
+	prior []guardrail.ToolChainWindowEvent,
+	final guardrail.ToolChainWindowEvent,
+	matches guardrail.ToolChainMatches,
+) []ToolChainMatchEvidence {
+	if matches.DetectedMask == 0 {
+		return nil
+	}
+	scope := "session"
+	if repo.rootDigest != "" {
+		scope = "root"
+	}
+	var out []ToolChainMatchEvidence
+	for i, definition := range guardrail.ToolChainDefinitions() {
+		if i >= guardrail.ToolChainCount || matches.DetectedMask&definition.ResultBit == 0 {
+			continue
+		}
+		steps := 0
+		for _, bit := range []uint64{definition.Step1Bit, definition.Step2Bit, definition.Step3Bit, definition.Step4Bit} {
+			if bit != 0 {
+				steps++
+			}
+		}
+		ev := ToolChainMatchEvidence{
+			ChainID: definition.ID, Scope: scope, Partition: shortToolChainDigest(session), Sequence: sequence,
+			Steps: steps, Predecessor: matches.DetectionPredecessors[i], HorizonSeconds: int64(definition.TimeWindow / time.Second),
+		}
+		if definition.RequiresExactJoin || definition.RequiresEnforcementJoin {
+			ev.Artifact = shortToolChainDigest(final.Projection.EnforcementJoinDigests[i])
+		}
+		for _, event := range prior {
+			if event.SemanticEventID == ev.Predecessor && !event.ReceivedAt.IsZero() {
+				ev.SpanMillis = final.ReceivedAt.Sub(event.ReceivedAt).Milliseconds()
+				break
+			}
+		}
+		out = append(out, ev)
+	}
+	return out
 }
 
 // ToolChainRepository owns the atomic durable state for the fixed tool-call
@@ -383,8 +476,12 @@ func (repo *ToolChainRepository) observeTx(
 	if err := repo.prune(ctx, tx, input, sessionDigest, sequence, final.ReceivedAt, now); err != nil {
 		return ToolChainObserveResult{}, err
 	}
-	return makeToolChainResult(ToolChainObserveFresh, matches.DetectedMask,
+	result, err := makeToolChainResult(ToolChainObserveFresh, matches.DetectedMask,
 		matches.EnforcementSafeMask, denied, stableActionID, receiptIDs, false)
+	if err == nil {
+		result.Evidence = repo.toolChainMatchEvidence(sessionDigest, sequence, prior, final, matches)
+	}
+	return result, err
 }
 
 // toolChainSessionDigestSQL reads the session identifier of one event. The

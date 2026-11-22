@@ -131,6 +131,7 @@ func TestReadTrustedWindowsManagedPolicySurvivesMissingNameAfterFirstLookup(t *t
 }
 
 func TestWindowsManagedPolicyWriterKeepsMatchingFileAfterFirstMiss(t *testing.T) {
+	requireGAP633Elevated(t) // a standard user is refused the managed policy folder (rel-1-0-10 GAP-1519)
 	paths := withWindowsCursorStandaloneSeamsForTest(t)
 	path := paths.Adapter
 	body := []byte("same body\r\n")

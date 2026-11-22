@@ -22,34 +22,17 @@ import (
 	"strings"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/hookevidence"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 )
 
-// HookToolInvocationQuery selects the v8 event-history record the gateway
-// writes when a connector hook reports a tool call it is about to run
-// (tool.invocation.requested).
-type HookToolInvocationQuery struct {
-	// Connector is the connector the record must come from.
-	Connector string
-	// ToolCallID is the agent's tool call id (gen_ai.tool.call.id). It is an
-	// identifier, which every built-in redaction profile keeps, unlike the
-	// tool arguments.
-	ToolCallID string
-	// Since is the earliest record time accepted.
-	Since time.Time
-	// UserID, when set, is the OS user id the hook must have reported
-	// (user.id).
-	UserID string
-}
+// HookToolInvocationQuery selects the record a hook leaves for a tool call
+// (hookevidence.Query).
+type HookToolInvocationQuery = hookevidence.Query
 
-// HookToolInvocationEvidence is what the event history holds for a query.
-type HookToolInvocationEvidence struct {
-	// Matched reports a record that meets every condition of the query.
-	Matched bool
-	// Mismatches describe records with the query's tool call id that fail
-	// another condition.
-	Mismatches []string
-}
+// HookToolInvocationEvidence is what the event history holds for a query
+// (hookevidence.Evidence).
+type HookToolInvocationEvidence = hookevidence.Evidence
 
 const (
 	hookToolInvocationClockSkew = 2 * time.Second
@@ -75,9 +58,13 @@ func FindHookToolInvocation(ctx context.Context, dbPath string, query HookToolIn
 	// the indexed bound is whole seconds, one second early; the exact bound
 	// is applied to the parsed time below.
 	lower := since.Add(-hookToolInvocationClockSkew - time.Second).Truncate(time.Second).Format("2006-01-02T15:04:05Z")
+	// A hook call inside an open write batch stores its tool call in its
+	// hook_decision row only and exports tool.invocation.requested
+	// (observability.WithExportOnlyInCall, #1384); older rows, and calls
+	// outside a batch, have the tool record. Either proves the call.
 	rows, err := db.QueryContext(ctx, `SELECT timestamp, connector, tool_id, projected_record_json
-		FROM audit_events WHERE event_name = ? AND timestamp >= ? ORDER BY timestamp LIMIT ?`,
-		observability.TelemetryEventToolInvocationRequested, lower, hookToolInvocationScanLimit)
+		FROM audit_events WHERE event_name IN (?, ?) AND timestamp >= ? ORDER BY timestamp LIMIT ?`,
+		observability.TelemetryEventToolInvocationRequested, hookDecisionEventName, lower, hookToolInvocationScanLimit)
 	if err != nil {
 		return evidence, fmt.Errorf("audit: read event history %s: %w", dbPath, err)
 	}
@@ -114,6 +101,10 @@ func FindHookToolInvocation(ctx context.Context, dbPath string, query HookToolIn
 	}
 	return evidence, nil
 }
+
+// hookDecisionEventName is the event name of the hook decision record
+// (log.compat.hook_decision).
+const hookDecisionEventName = "hook_decision"
 
 type hookToolInvocationRecord struct {
 	Connector   string `json:"connector"`

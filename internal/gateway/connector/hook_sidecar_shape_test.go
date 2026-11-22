@@ -175,7 +175,7 @@ func TestHookRuntimeStateCheckReadsFlatRecordsAsTheHooksDo(t *testing.T) {
 // to rewrite, so no refresh of another connector turns it into a document a
 // reader opens on (1.0.4 review, loop round 4 of G-hooks-upg).
 func TestHookSidecarWritersRefuseEveryMalformedSharedVector(t *testing.T) {
-	raw, err := os.ReadFile(filepath.Join("..", "..", "cli", "testdata", "windows_hook_sidecar_vectors.json"))
+	raw, err := os.ReadFile(filepath.Join("..", "..", "hookcli", "testdata", "windows_hook_sidecar_vectors.json"))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -23,6 +23,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/diagnostics"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 )
 
 const testHealthReportFile = `{
@@ -43,13 +44,13 @@ const testHealthReportFile = `{
 func stubSecureClientHealthReport(t *testing.T, secureClient, root bool) string {
 	t.Helper()
 	dataDir := filepath.Join(t.TempDir(), "runtime")
-	previousDir, previousRoot, previousHost := secureClientHealthReportDataDir, healthReportReaderIsRoot, secureClientHost
+	previousDir, previousRoot, previousHost := secureClientHealthReportDataDir, healthReportReaderIsRoot, hookcli.SecureClientHost
 	t.Cleanup(func() {
-		secureClientHealthReportDataDir, healthReportReaderIsRoot, secureClientHost = previousDir, previousRoot, previousHost
+		secureClientHealthReportDataDir, healthReportReaderIsRoot, hookcli.SecureClientHost = previousDir, previousRoot, previousHost
 	})
 	secureClientHealthReportDataDir = func() string { return dataDir }
 	healthReportReaderIsRoot = func() bool { return root }
-	secureClientHost = func() bool { return secureClient }
+	hookcli.SecureClientHost = func() bool { return secureClient }
 	return dataDir
 }
 

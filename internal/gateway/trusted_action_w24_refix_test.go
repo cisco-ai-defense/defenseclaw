@@ -57,13 +57,24 @@ func TestTrustedActionW24Continuation(t *testing.T) {
 		{"ash nested list", "ash -c 'true && rm -rf /'", "/repo", "/home/alice", "CMD-RM-RF", actionfacts.DialectPOSIX, true},
 		{"builtin cd", "builtin cd /home/alice && cat .ssh/id_rsa", "/repo", "/home/alice", "PATH-SSH-KEY", actionfacts.DialectPOSIX, true},
 		{"command cd", "command cd /home/alice && cat .ssh/id_rsa", "/repo", "/home/alice", "PATH-SSH-KEY", actionfacts.DialectPOSIX, true},
-		{"unmodeled directory change", "source ./env.sh; cat .ssh/id_rsa", "/repo", "/home/alice", "", actionfacts.DialectPOSIX, false},
+		// The sourced file may move the folder anywhere, and .ssh/id_rsa
+		// is a private key in a home: the unknown tier of an unresolved
+		// folder (rel-1-0-10:GAP-0871 ruling, td327rev review; this raw
+		// verdict is a block, the profile maps it to an alert in default).
+		{"unmodeled directory change", "source ./env.sh; cat .ssh/id_rsa", "/repo", "/home/alice", "ACTION-COMPOUND-LIMIT", actionfacts.DialectPOSIX, true},
+		{"unmodeled directory change, no protected name", "source ./env.sh; cat notes.txt", "/repo", "/home/alice", "", actionfacts.DialectPOSIX, false},
 		{"PowerShell Set-Location", `Set-Location C:\Users\alice; Get-Content .ssh\id_rsa`, `C:\repo`, `C:\Users\alice`, "PATH-SSH-KEY", actionfacts.DialectPowerShell, true},
 		{"PowerShell push location", `Push-Location C:\Users\alice; Get-Content .ssh\id_rsa`, `C:\repo`, `C:\Users\alice`, "PATH-SSH-KEY", actionfacts.DialectPowerShell, true},
 		{"PowerShell unknown location", `Set-Location $target; Get-Content .ssh\id_rsa`, `C:\repo`, `C:\Users\alice`, "", actionfacts.DialectPowerShell, false},
 		{"cmd cd drive", `cd /d C:\Users\alice & type .ssh\id_rsa`, `C:\repo`, `C:\Users\alice`, "PATH-SSH-KEY", actionfacts.DialectCMD, true},
 		{"cmd push location", `pushd C:\Users\alice & type .ssh\id_rsa`, `C:\repo`, `C:\Users\alice`, "PATH-SSH-KEY", actionfacts.DialectCMD, true},
-		{"cmd drive without switch", `cd D:\ordinary & type .ssh\id_rsa`, `C:\Users\alice`, `C:\Users\alice`, "PATH-WIN-SSH-KEY", actionfacts.DialectCMD, true},
+		// A statement after a folder move that may fail (or may not run) is
+		// read in each folder it may run in, the hook's own folder included
+		// (rel-1-0-10:GAP-1150): that reading proves the semantic PATH-SSH-KEY
+		// finding the statement alone has, in place of the unproven
+		// PATH-WIN-SSH-KEY text fallback of the compound (same family, same
+		// CRITICAL severity, still a block).
+		{"cmd drive without switch", `cd D:\ordinary & type .ssh\id_rsa`, `C:\Users\alice`, `C:\Users\alice`, "PATH-SSH-KEY", actionfacts.DialectCMD, true},
 		{"cmd grouped conditional", `if exist x (echo a & rmdir /s /q C:\)`, `C:\repo`, `C:\Users\alice`, "CMD-RM-RF", actionfacts.DialectCMD, true},
 		{"cmd dynamic conditional header", `if exist %TARGET% (echo a & rmdir /s /q C:\)`, `C:\repo`, `C:\Users\alice`, "", actionfacts.DialectCMD, false},
 		{"cmd parenthesized group", `(echo a & rmdir /s /q C:\)`, `C:\repo`, `C:\Users\alice`, "CMD-RM-RF", actionfacts.DialectCMD, true},
@@ -71,8 +82,9 @@ func TestTrustedActionW24Continuation(t *testing.T) {
 		{"PowerShell dot block", `. { Remove-Item -Recurse -Force C:\ }`, `C:\repo`, `C:\Users\alice`, "CMD-RM-RF", actionfacts.DialectPowerShell, true},
 		{"PowerShell if block", `if ($true) { Write-Output a; Remove-Item -Recurse -Force C:\ }`, `C:\repo`, `C:\Users\alice`, "CMD-RM-RF", actionfacts.DialectPowerShell, true},
 		{"PowerShell adjacent else block", `if ($true) { Write-Output a } else { Remove-Item -Recurse -Force C:\ }`, `C:\repo`, `C:\Users\alice`, "CMD-RM-RF", actionfacts.DialectPowerShell, true},
-		{"PowerShell skipped directory change", `if ($false) { Set-Location C:\ordinary }; Get-Content .ssh\id_rsa`, `C:\Users\alice`, `C:\Users\alice`, "PATH-WIN-SSH-KEY", actionfacts.DialectPowerShell, true},
-		{"cmd conditional directory change", `if exist x (cd /d D:\ordinary) & type .ssh\id_rsa`, `C:\Users\alice`, `C:\Users\alice`, "PATH-WIN-SSH-KEY", actionfacts.DialectCMD, true},
+		// As for cmd drive without switch above (rel-1-0-10:GAP-1150).
+		{"PowerShell skipped directory change", `if ($false) { Set-Location C:\ordinary }; Get-Content .ssh\id_rsa`, `C:\Users\alice`, `C:\Users\alice`, "PATH-SSH-KEY", actionfacts.DialectPowerShell, true},
+		{"cmd conditional directory change", `if exist x (cd /d D:\ordinary) & type .ssh\id_rsa`, `C:\Users\alice`, `C:\Users\alice`, "PATH-SSH-KEY", actionfacts.DialectCMD, true},
 		{"PowerShell conditional path assignment", `if ($false) { $target = 'C:\ordinary' }; Get-Content $target`, `C:\Users\alice`, `C:\Users\alice`, "", actionfacts.DialectPowerShell, false},
 		{"PowerShell foreach block", `foreach ($name in 'a','b') { Write-Output $name; Remove-Item -Recurse -Force C:\ }`, `C:\repo`, `C:\Users\alice`, "CMD-RM-RF", actionfacts.DialectPowerShell, true},
 		{"PowerShell command in foreach header", `foreach ($name in Get-ChildItem C:\Users\alice\.ssh) { Write-Output $name }`, `C:\repo`, `C:\Users\alice`, "", actionfacts.DialectPowerShell, true},

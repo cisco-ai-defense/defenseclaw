@@ -58,6 +58,18 @@ func TestMaterializeSidecarGatewayTokenUsesResolvedPrecedence(t *testing.T) {
 		}
 	})
 
+	t.Run("the OpenClaw gateway token is never materialized (R-TOK)", func(t *testing.T) {
+		t.Setenv("DEFENSECLAW_GATEWAY_TOKEN", "")
+		t.Setenv("OPENCLAW_GATEWAY_TOKEN", "openclaw-ws-token")
+		gatewayConfig := config.GatewayConfig{TokenEnv: "OPENCLAW_GATEWAY_TOKEN", OpenClawToken: "openclaw-ws-token"}
+
+		materializeSidecarGatewayToken(&gatewayConfig, "")
+
+		if got := gatewayConfig.Token; got != "" {
+			t.Fatalf("materialized token = %q, want empty so the sidecar mints its own", got)
+		}
+	})
+
 	t.Run("inline config remains the final fallback", func(t *testing.T) {
 		t.Setenv("DEFENSECLAW_GATEWAY_TOKEN", "")
 		t.Setenv("OPENCLAW_GATEWAY_TOKEN", "")

@@ -11,13 +11,22 @@ import (
 	"syscall"
 )
 
+// atomicTransformFileWithStateDir runs the V1 engine on platforms without the
+// Windows handle-bound namespace primitives while honoring the caller's
+// protected stable transaction directory. This preserves the public
+// stable-state contract without compiling the Windows-only V2 protocol into a
+// POSIX build.
 func atomicTransformFileWithStateDir(
 	path string,
 	transactionDir string,
 	perm os.FileMode,
 	transform func(current []byte, exists bool) (atomicTransformResult, error),
 ) error {
-	return atomicTransformFileLegacyWithStateDir(path, atomicTransformRenameableStateDir(path, transactionDir), perm, transform)
+	stateDir, err := prepareAtomicTransformStateDir(atomicTransformRenameableStateDir(path, transactionDir))
+	if err != nil {
+		return err
+	}
+	return atomicTransformFileLegacyPrepared(path, stateDir, perm, transform)
 }
 
 // atomicTransformRenameableStateDir keeps the supplied transaction directory

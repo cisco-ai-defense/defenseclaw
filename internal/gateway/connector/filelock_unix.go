@@ -129,3 +129,30 @@ func lockFileExclusive(f *os.File, lockPath string, deadline *time.Time) error {
 // RemoveIdleFileLockSentinels does nothing here: withFileLockMode removes
 // its lock file when it releases the lock.
 func RemoveIdleFileLockSentinels() {}
+
+// removeIdleLockFile removes lockPath when it is an empty regular file no
+// one holds: it takes the file's flock without waiting and unlinks the file
+// while holding it, as a bounded release does, so a waiter that then wins the
+// flock finds the pathname gone and opens it again (openHeldLockFile). A lock
+// file another process, or another lock of this one, holds stays.
+func removeIdleLockFile(lockPath string) {
+	if info, err := os.Lstat(lockPath); err != nil || !info.Mode().IsRegular() || info.Size() != 0 {
+		return
+	}
+	lockFile, err := os.OpenFile(lockPath, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return
+	}
+	defer lockFile.Close()
+	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		return
+	}
+	defer func() { _ = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN) }()
+	held, err := lockFile.Stat()
+	if err != nil || held.Size() != 0 {
+		return
+	}
+	if named, err := os.Lstat(lockPath); err == nil && os.SameFile(held, named) {
+		_ = os.Remove(lockPath)
+	}
+}

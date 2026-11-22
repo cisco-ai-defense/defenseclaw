@@ -38,6 +38,23 @@ var cursorPin = tarballPin{
 	DigestSource: "measured by DefenseClaw (Cursor publishes no archive digests)",
 }
 
+// cursorPinSubstrate is the Cursor Agent CLI build of the Agent Substrate actor
+// kit (lane K1): the cert hosts' build, 2026.11.11-b912975, an "untested newer
+// version" of the cursor-hooks-v1 contract (a warning, not a refusal). The
+// sha256 values are of the archives Cursor's installer downloads, measured by
+// DefenseClaw on 2026-11-13.
+var cursorPinSubstrate = tarballPin{
+	Version: "2026.11.11-b912975",
+	Archives: map[string]tarballArchive{
+		"aarch64": {URL: "https://downloads.cursor.com/lab/2026.11.11-b912975/linux/arm64/agent-cli-package.tar.gz", SHA256: "f068af64ed91b5304605976586f690579679f740a41f388091a6b3a2e776987c"},
+		"x86_64":  {URL: "https://downloads.cursor.com/lab/2026.11.11-b912975/linux/x64/agent-cli-package.tar.gz", SHA256: "be01f42ad334f81d05a9992fcf060a52cc746f52cc451e849eb652146a6e3c91"},
+	},
+	Strip:        1,
+	DigestSource: "measured by DefenseClaw (Cursor publishes no archive digests)",
+}
+
+var cursorPins = tarballPins{cursorPin, cursorPinSubstrate}
+
 // cursorVersionRE matches Cursor Agent's date-hash builds.
 var cursorVersionRE = regexp.MustCompile(`^[0-9]{4}\.[0-9]{2}\.[0-9]{2}-[0-9a-f]{7,40}$`)
 
@@ -71,7 +88,7 @@ var Cursor = register(&Spec{
 	},
 	install: func(version string) ([]InstallStep, error) {
 		root := InstallRootBase + "/cursor"
-		run, err := cursorPin.installRun(root, version)
+		run, err := cursorPins.installRun(root, version)
 		if err != nil {
 			return nil, err
 		}

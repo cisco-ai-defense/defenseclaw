@@ -121,3 +121,65 @@ describe("session-bound marker on intercepted model requests (GAP-0644)", () => 
     }
   });
 });
+
+describe("one OpenClaw session key on every request (rel-1-0-10:GAP-0148)", () => {
+  let beforeToolCall: Handler;
+  const stamp = (): Record<string, string> => interceptorOpts.getCorrelationHeaders!();
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    const listeners: Record<string, Handler> = {};
+    pluginSetup({
+      config: { agents: { defaults: { model: { primary: "openai/gpt-4o" } } } },
+      pluginConfig: {},
+      on: vi.fn((event: string, handler: Handler) => {
+        listeners[event] = handler;
+      }),
+      registerService: vi.fn(),
+      registerCommand: vi.fn(),
+    } as never);
+    beforeToolCall = listeners.before_tool_call;
+    mockDaemonClient.postRaw.mockResolvedValue({
+      status: 200,
+      body: JSON.stringify({ action: "allow", raw_action: "allow", severity: "NONE", reason: "", mode: "action" }),
+    });
+  });
+
+  // The gateway's event router keeps the user's task under the session key of
+  // session.message; a tool check under the transcript id was judged without it.
+  it("sends the session key, not the transcript id, when OpenClaw names both", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      await beforeToolCall(
+        { toolName: "exec", toolCallId: "call_1", params: { command: "x" } },
+        { sessionKey: "agent:main:main", sessionId: "transcript-1", runId: "run-1", toolName: "exec" },
+      );
+      const [path, body, opts] = mockDaemonClient.postRaw.mock.calls[0] as [
+        string, Record<string, unknown>, { correlation: { sessionId?: string } },
+      ];
+      expect(path).toBe("/api/v1/inspect/tool");
+      expect(body.session_id).toBe("agent:main:main");
+      expect(opts.correlation.sessionId).toBe("agent:main:main");
+      // The model request that follows names the same session, so a tool block
+      // notice remembered under it is found (GAP-0644).
+      expect(stamp()["X-DefenseClaw-Session-Id"]).toBe("agent:main:main");
+    } finally {
+      log.mockRestore();
+    }
+  });
+
+  it("falls back to the transcript id when OpenClaw names no key", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      await beforeToolCall(
+        { toolName: "exec", toolCallId: "call_1", params: { command: "x" } },
+        { sessionId: "transcript-1", runId: "run-1", toolName: "exec" },
+      );
+      const body = mockDaemonClient.postRaw.mock.calls[0][1] as Record<string, unknown>;
+      expect(body.session_id).toBe("transcript-1");
+      expect(stamp()["X-DefenseClaw-Session-Id"]).toBe("transcript-1");
+    } finally {
+      log.mockRestore();
+    }
+  });
+});

@@ -110,7 +110,7 @@ An agent that runs in an OpenShell sandbox is attributed like a host agent, with
 
 - **The user is the host user on the sandbox binding**, the account that started the sandbox. The binding is attribution, not proof of the calling process, so it alone supplies no verified directory facts or groups. A request whose assignment needs a fact no other verified record supplies is refused and names that fact; otherwise a proven connector-only assignment or the default profile applies. Identity headers the sandbox sends are ignored.
 - **Each sandbox has its own `agt-`.** A project run in two sandboxes is two agents, and the `agt-` of the host install does not name a sandboxed run. `defenseclaw agent identities` lists one per sandbox, and they stay listed after the sandbox is gone.
-- **Its hooks enforce unless the profile says observe.** A sandbox's hooks run in `action` mode whatever `guardrail.mode` says. A mode the person's own guardrail profile sets (`mode`, or `connectors.<agent>.mode`) applies in their managed sandboxes as on their host. The selected profile's thresholds and rule pack apply either way.
+- **Its hooks enforce unless the profile says observe.** A sandbox's hooks run in `action` mode whatever `guardrail.mode` says. A mode the person's own guardrail profile sets (`mode`, or `connectors.<agent>.mode`) applies in their managed sandboxes as on their host. The selected profile's thresholds and rule pack apply either way. Agent Substrate actors always enforce: a mode is not applied to them (see [Agent Substrate: managed enterprise](/docs/substrate/enterprise)).
 - **Its web egress follows the sandbox's network profile** (`open`, `balanced` or `strict`) and its policy pack, not a guardrail profile. See [Network and egress](/docs/sandboxes/network).
 
 ## Guides
@@ -246,12 +246,14 @@ guardrail:
   default_profile: ""        # "" keeps the global guardrail.* behaviour
 ```
 
-This example uses Linux SSSD's `name@domain` group spelling. On a managed
-AD-bound Mac, use the exact `DOMAIN\group` name shown by
-`enterprise macos profile-explain --user bob --connector codex`. Replace the
-example's group selector with:
+This example uses Linux SSSD's `name@domain` group spelling. The same entry
+selects the group on an AD-bound Mac and on Windows, which list it as
+`CORP\contractors`: `name@domain` and `DOMAIN\name` are one group when the
+user's verified facts name `CORP` and `corp.example.com` as their own domain.
+`enterprise macos profile-explain --user bob --connector codex` shows the
+group list. You can also write the macOS and Windows spelling:
 
-```yaml title="macOS AD group selector"
+```yaml title="DOMAIN\name group selector"
 match: {groups: ['CORP\contractors']}
 ```
 
@@ -269,7 +271,7 @@ defenseclaw guardrail profile explain --user bob@corp.example.com --connector co
   applies (codex): mode=action block_at=MEDIUM alert_at=pack hilt=off rule_pack=...
 ```
 
-On Linux, use the group name exactly as `id -Gn` prints it. On macOS, a Linux `name@domain` selector does not select the `DOMAIN\group` AD membership. A Windows group is `CORP\Contractors`, the bare name or its SID. Users of a child domain of the joined domain match `users` assignments only when you list their domain in `ai_discovery.trusted_ad_child_domains`; see [Child domains of the joined realm](/docs/enterprise/identity-sources#child-domains-of-the-joined-realm). Precedence, worked scenarios, the audit record and delivery to managed hosts are in [User- and group-based policies](/docs/guardrail/user-and-group-policies).
+On Linux, use the group name as `id -Gn` prints it, or its `DOMAIN\name` form. One AD group is one selector on every OS: `contractors@corp.example.com`, `CORP\contractors` and `corp.example.com\contractors` select the same group on Linux (SSSD), macOS and Windows, case-insensitively. Only the user's own domain pairs its NetBIOS and DNS names, so a group of another domain never matches, and a group of a trusted domain matches only the spelling the host lists. A Windows group is `CORP\Contractors`, the bare name or its SID. Users of a child domain of the joined domain match `users` assignments only when you list their domain in `ai_discovery.trusted_ad_child_domains`; see [Child domains of the joined realm](/docs/enterprise/identity-sources#child-domains-of-the-joined-realm). Precedence, worked scenarios, the audit record and delivery to managed hosts are in [User- and group-based policies](/docs/guardrail/user-and-group-policies).
 
 ### Check what DefenseClaw knows about a user
 

@@ -49,7 +49,7 @@ var sandboxGoldenTargets = []struct {
 	provider  SandboxArtifactProvider
 	version   string
 }{
-	{"claudecode", &ClaudeCodeConnector{}, "2.1.156"},
+	{"claudecode", &ClaudeCodeConnector{}, "2.1.311"},
 	{"codex", &CodexConnector{}, "0.146.0"},
 	{"amp", NewAMPConnector(), "0.0.1785334225-g9abe75"},
 	{"copilot", NewCopilotConnector(), "1.0.88"},
@@ -296,13 +296,13 @@ func TestSandboxHardeningBakesPathAndWorkloadLogDir(t *testing.T) {
 
 // TestClaudeCodeSandboxDropInShape pins what the drop-in carries beyond the
 // controls verifyClaudeCodeSandboxDropIn enforces: only keys reviewed against
-// the Claude Code 2.1.156 settings schema (Claude drops a whole drop-in with
+// the Claude Code 2.1.311 settings schema (Claude drops a whole drop-in with
 // one invalid field), the telemetry settings, and no provider selection
 // (managed env outranks sandbox create --env, so a pin in the static image
 // would override every run's provider; the manager pins it per sandbox).
 func TestClaudeCodeSandboxDropInShape(t *testing.T) {
 	var dropIn map[string]interface{}
-	artifacts := renderSandboxGolden(t, &ClaudeCodeConnector{}, "2.1.156")
+	artifacts := renderSandboxGolden(t, &ClaudeCodeConnector{}, "2.1.311")
 	if err := json.Unmarshal(sandboxFile(t, artifacts, ClaudeCodeSandboxDropInPath).Data, &dropIn); err != nil {
 		t.Fatal(err)
 	}

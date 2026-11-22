@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
@@ -29,6 +30,11 @@ type auditDBPathHooks struct {
 	schemaTolerant bool
 	// secureClient opens with the pragmas of main (auditPragmasFor).
 	secureClient bool
+	// pageCacheKiB replaces the page cache of the pragmas (WithSmallFootprint).
+	pageCacheKiB int
+	// exclusive opens in SQLite's exclusive locking mode
+	// (exclusiveLockingQuery): only the audit compaction sets it.
+	exclusive bool
 	// reopenSidecarForHardening reopens a pinned SQLite sidecar with the
 	// ACL-changing capability.
 	reopenSidecarForHardening func(string, *os.File) (*os.File, error)
@@ -133,7 +139,7 @@ func openHardenedAuditSQLiteWithIdentity(
 	}
 
 	if prepared.inMemory {
-		db, err := openSQLiteWithPragmas(prepared.path, auditPragmasFor(hooks.secureClient))
+		db, err := openSQLiteWithPragmas(prepared.path, withPageCache(auditPragmasFor(hooks.secureClient), hooks.pageCacheKiB))
 		if err != nil {
 			prepared.close()
 			return nil, "", nil, err
@@ -146,9 +152,13 @@ func openHardenedAuditSQLiteWithIdentity(
 			return nil, "", nil, fmt.Errorf("audit: pre-open path check: %w", err)
 		}
 	}
-	pragmas := auditPragmasFor(hooks.secureClient)
+	pragmas := withPageCache(auditPragmasFor(hooks.secureClient), hooks.pageCacheKiB)
 	if hooks.schemaTolerant {
 		pragmas = schemaTolerantPragmas
+	}
+	if hooks.exclusive {
+		// First, so the mode applies before the connection reads the store.
+		pragmas = exclusiveLockingQuery + strings.TrimPrefix(pragmas, "?")
 	}
 	db, err := openSQLiteWithPragmas(prepared.path, pragmas)
 	if err != nil {
@@ -714,7 +724,39 @@ func ensureTrustedAuditDBParents(parent string, hooks auditDBPathHooks, allowCre
 	return nil
 }
 
+// trustedVolumeRoots are mount points a process declared with
+// TrustVolumeRoot.
+var trustedVolumeRoots sync.Map
+
+// TrustVolumeRoot accepts dir, a volume mount point the process alone
+// mounts (the Substrate leader's ReadWriteOnce store volume), as an
+// ancestor of an audit database although its root is group- or
+// other-writable: Kubernetes volume roots are 0777 or 2777 and a non-root
+// pod cannot change that. Only that exact directory is accepted, only as an
+// ancestor, never as the database's own directory or with a symbolic link;
+// its owner must still be trusted, and the store directory under it is
+// created 0700 by the process. Unix only (a Windows path is never one).
+func TrustVolumeRoot(dir string) {
+	if dir = filepath.Clean(strings.TrimSpace(dir)); filepath.IsAbs(dir) && dir != string(os.PathSeparator) {
+		trustedVolumeRoots.Store(dir, true)
+	}
+}
+
+func trustedVolumeRoot(path string, info os.FileInfo) bool {
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return false
+	}
+	_, ok := trustedVolumeRoots.Load(filepath.Clean(path))
+	return ok
+}
+
 func validateAuditDBDirectory(path string, info os.FileInfo, allowStickyWritableAncestor bool) error {
+	if allowStickyWritableAncestor && trustedVolumeRoot(path, info) {
+		if !auditDBVolumeRootOwnerTrusted(info) {
+			return errors.New("audit: database volume root has an untrusted owner")
+		}
+		return nil
+	}
 	if info.Mode()&os.ModeSymlink != 0 {
 		if trustedAuditDBSystemDirectoryAlias(path, info) {
 			resolved, err := filepath.EvalSymlinks(path)

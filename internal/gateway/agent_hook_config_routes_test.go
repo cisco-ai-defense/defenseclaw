@@ -82,7 +82,7 @@ func TestGAP0048Round2Variants(t *testing.T) {
 	src := filepath.Join(h.ext, "cfg")
 	_ = os.MkdirAll(src, 0o700)
 	_ = os.WriteFile(filepath.Join(src, "settings.json"), []byte("{}\n"), 0o600)
-	_ = os.Symlink(filepath.Join(h.home, ".claude"), filepath.Join(h.ext, "cdir"))
+	gap0048DirLink(t, filepath.Join(h.home, ".claude"), filepath.Join(h.ext, "cdir"))
 	hard := filepath.Join(h.project, "copy-of-user.json")
 	_ = os.Link(user, hard)
 	projectHard := filepath.Join(h.project, "copy-of-project.json")

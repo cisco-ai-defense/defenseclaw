@@ -19,9 +19,11 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterpriseunix"
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -35,7 +37,7 @@ func runSecretCheck(t *testing.T, args ...string) (map[string]any, string, int) 
 	err := cmd.ExecuteContext(context.Background())
 	code := 0
 	if err != nil {
-		code = commandExitCode(err)
+		code = cliusage.ExitCode(err)
 	}
 	var doc map[string]any
 	if err := json.Unmarshal(out.Bytes(), &doc); err != nil {
@@ -114,13 +116,13 @@ func TestSecretCheckExampleNamesTheGatewayByItsFullPath(t *testing.T) {
 // A Secure Client computer keeps the example of release 1.0.5 after the
 // command tree is cut down to the one of main (review round 4, S1).
 func TestSecretCheckExampleOnSecureClientKeepsTheReleasedText(t *testing.T) {
-	previous := secureClientHost
-	t.Cleanup(func() { secureClientHost = previous })
+	previous := hookcli.SecureClientHost
+	t.Cleanup(func() { hookcli.SecureClientHost = previous })
 	root := &cobra.Command{Use: "defenseclaw-gateway"}
 	check := newEnterpriseSecretCheckCommand()
 	root.AddCommand(check)
 
-	secureClientHost = func() bool { return true }
+	hookcli.SecureClientHost = func() bool { return true }
 	keepCommandTreeOfMainOnSecureClient(root)
 	const released = "  sudo defenseclaw-gateway enterprise secret check --name ai-defense-api-key --json"
 	if check.Example != released {

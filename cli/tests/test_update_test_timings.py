@@ -2,14 +2,21 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
+import re
+import subprocess
+import sys
 from pathlib import Path
 
 from scripts.go_test_shards import partition_packages
 from scripts.update_test_timings import (
+    TEST_FUNCTION_RE,
     go_timings,
     keep_unreached_go_tests,
     keep_unreached_windows_packages,
     merge_go_timings,
+    prune_retired,
+    python_timings,
+    runs_of,
     windows_go_timings,
 )
 
@@ -152,6 +159,90 @@ def test_a_refresh_keeps_the_time_of_a_test_a_timed_out_shard_never_reached(tmp_
     assert data["tests"]["pkg/a"] == {"*": 0.5, "TestRan": 30.0, "TestUnreached": 90.0}
 
 
+def test_a_refresh_weighs_the_test_a_timeout_cut_off_at_least_its_recorded_time(tmp_path: Path) -> None:
+    # go_test_report.py writes the test a -timeout cut off after the end of
+    # its package, with the time it had run: a lower bound. Shard 12 of run
+    # 43831888457 recorded 21 s for a test of 116.6 s that way, and the
+    # refresh took the 21 s. Now the test keeps its recorded time when that
+    # is longer, a test with no recorded time keeps the lower bound, and a
+    # run that took a test to its end still sets that time.
+    package = tmp_path / "pkg" / "a"
+    package.mkdir(parents=True)
+    (package / "a_test.go").write_text(
+        "package a\n\nfunc TestCut(t *testing.T) {}\n\nfunc TestCutNew(t *testing.T) {}\n\n"
+        "func TestCutLonger(t *testing.T) {}\n\nfunc TestEndedElsewhere(t *testing.T) {}\n",
+        encoding="utf-8",
+    )
+    shard = tmp_path / "shard"
+    shard.mkdir()
+    (shard / "t.json").write_text(
+        "\n".join(
+            [
+                _event("pass", "pkg/a", 5.0, "TestEndedElsewhere"),
+                _event("fail", "pkg/a", 720.0),
+                _event("fail", "pkg/a", 21.0, "TestCut"),
+            ]
+        ),
+        encoding="utf-8",
+    )
+    other = tmp_path / "other"
+    other.mkdir()
+    (other / "t.json").write_text(
+        "\n".join(
+            [
+                _event("fail", "pkg/a", 720.0),
+                _event("fail", "pkg/a", 259.0, "TestCutNew"),
+                _event("fail", "pkg/a", 300.0, "TestCutLonger"),
+            ]
+        ),
+        encoding="utf-8",
+    )
+    runs = runs_of([shard, other])
+    files = [file for run in runs for file in run]
+    old = {"tests": {"pkg/a": {"TestCut": 116.6, "TestCutLonger": 200.0, "TestEndedElsewhere": 90.0, "*": 0.2}}}
+
+    data = keep_unreached_go_tests(old, go_timings(files, MODULE, runs), files, MODULE, root=tmp_path)
+
+    assert data["tests"]["pkg/a"] == {
+        "*": 0.1,
+        "TestCut": 116.6,
+        "TestCutLonger": 300.0,
+        "TestCutNew": 259.0,
+        "TestEndedElsewhere": 5.0,
+    }
+
+
+def test_a_refresh_reads_the_cut_off_mark_when_the_job_died_before_the_package_ended(tmp_path: Path) -> None:
+    # A job killed before go test's own -timeout (the step or job timeout)
+    # ends the stream with no package end event: go_test_report.py still
+    # writes the test that was running as a fail, marked "CutOff", with the
+    # time it had run. Read by its place it looked like a test that ended,
+    # and its lower bound replaced the recorded time (GAP-1033).
+    package = tmp_path / "pkg" / "a"
+    package.mkdir(parents=True)
+    (package / "a_test.go").write_text(
+        "package a\n\nfunc TestCut(t *testing.T) {}\n\nfunc TestEnded(t *testing.T) {}\n",
+        encoding="utf-8",
+    )
+    run = tmp_path / "run"
+    run.mkdir()
+    # Another shard of the package ended normally; the killed one did not.
+    (run / "ended.json").write_text(_event("pass", "pkg/a", 700.0), encoding="utf-8")
+    cut = json.loads(_event("fail", "pkg/a", 21.0, "TestCut"))
+    cut["CutOff"] = True
+    (run / "killed.json").write_text(
+        "\n".join([_event("pass", "pkg/a", 5.0, "TestEnded"), json.dumps(cut)]), encoding="utf-8"
+    )
+    runs = runs_of([run])
+    files = runs[0]
+    old = {"tests": {"pkg/a": {"TestCut": 116.6, "TestEnded": 90.0, "*": 0.2}}}
+
+    data = keep_unreached_go_tests(old, go_timings(files, MODULE, runs), files, MODULE, root=tmp_path)
+
+    assert data["tests"]["pkg/a"]["TestCut"] == 116.6
+    assert data["tests"]["pkg/a"]["TestEnded"] == 5.0
+
+
 HEAVY_PART_SECONDS = (180.492, 164.289, 244.576)
 
 
@@ -221,3 +312,264 @@ def test_a_windows_refresh_keeps_the_time_of_a_package_its_timed_out_part_never_
     # the step timeout never reached keeps its old one, and a package that
     # no longer exists is dropped.
     assert data["packages"] == {f"{MODULE}/internal/reached": 18.0, f"{MODULE}/internal/unreached": 300.0}
+
+
+def _timed(seconds: float, action: str, package: str, test: str | None = None, elapsed: float = 0.0) -> str:
+    event = json.loads(_event(action, package, elapsed, test))
+    event["Time"] = f"2026-11-12T14:{int(seconds // 60):02d}:{seconds % 60:09.6f}1Z"
+    return "2026-11-12T14:00:00.0000000Z " + json.dumps(event)
+
+
+def test_a_windows_log_leaves_the_t_parallel_wait_out_of_a_test(tmp_path: Path) -> None:
+    # A Windows part log has the go test -json events with their Time. A
+    # t.Parallel test pauses until the serial tests of its package are done;
+    # the refresh timed it from its run event and so weighed that wait too
+    # (TestLater 60 s here, of which it ran 5). Its time is its share of the
+    # package run after its cont event.
+    log = tmp_path / "pk0.log"
+    log.write_text(
+        "\n".join(
+            [
+                _timed(0, "run", "internal/gateway", "TestLater"),
+                _timed(0, "pause", "internal/gateway", "TestLater"),
+                _timed(0, "run", "internal/gateway", "TestSerial"),
+                _timed(55, "pass", "internal/gateway", "TestSerial", 55.0),
+                _timed(55, "cont", "internal/gateway", "TestLater"),
+                _timed(60, "pass", "internal/gateway", "TestLater", 5.0),
+                _timed(60, "pass", "internal/gateway", None, 60.0),
+                "[go-package-time] github.com/example/internal/gateway pass 60.0",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    tests = windows_go_timings([log], MODULE)["tests"]["internal/gateway"]
+    assert tests["TestSerial"] == 55.0 and tests["TestLater"] == 5.0
+
+
+def test_a_refresh_from_several_runs_weighs_the_slowest_run(tmp_path: Path) -> None:
+    # A plan from fast runners must fit a slow one: each run directory is one
+    # run, and a package or test weighs the slowest run that timed it. The
+    # shards of one run still add up (pkg/a ran in two shards).
+    seconds = {"r1": (30.0, 70.0), "r2": (90.0, 130.0), "r3": (40.0, 80.0)}
+    for run, (slow, package) in seconds.items():
+        (tmp_path / run).mkdir()
+        (tmp_path / run / "shard-0.json").write_text(
+            _event("pass", "pkg/a", slow, "TestSlow") + "\n" + _event("pass", "pkg/a", package / 2) + "\n",
+            encoding="utf-8",
+        )
+        (tmp_path / run / "shard-1.json").write_text(_event("pass", "pkg/a", package / 2) + "\n", encoding="utf-8")
+    (tmp_path / "r2" / "extra.json").write_text(_event("pass", "pkg/b", 5.0) + "\n", encoding="utf-8")
+
+    runs = runs_of([tmp_path / "r1", tmp_path / "r2", tmp_path / "r3"])
+    data = go_timings([file for run in runs for file in run], MODULE, runs)
+
+    assert [len(run) for run in runs] == [2, 3, 2]
+    median = go_timings([file for run in runs for file in run], MODULE, runs, "median")
+    assert median["packages"] == {f"{MODULE}/pkg/a": 80.0, f"{MODULE}/pkg/b": 5.0}
+    assert median["tests"] == {"pkg/a": {"TestSlow": 40.0, "*": 0.1}}
+    assert data["packages"] == {f"{MODULE}/pkg/a": 130.0, f"{MODULE}/pkg/b": 5.0}
+    assert data["tests"] == {"pkg/a": {"TestSlow": 90.0, "*": 0.1}}
+
+
+def test_files_named_directly_are_one_run(tmp_path: Path) -> None:
+    # The documented single-run form (t/*/*.json) keeps summing the shards.
+    files = []
+    for shard in range(3):
+        path = tmp_path / f"s{shard}.json"
+        path.write_text(_event("pass", "pkg/a", 30.0) + "\n", encoding="utf-8")
+        files.append(path)
+
+    runs = runs_of(files)
+    assert runs == [files]
+    assert go_timings(files, MODULE, runs)["packages"] == {f"{MODULE}/pkg/a": 90.0}
+
+
+def test_python_timings_weigh_the_slowest_run(tmp_path: Path) -> None:
+    runs = []
+    for run, seconds in (("r1", 1.0), ("r2", 9.0), ("r3", 2.0)):
+        (tmp_path / run).mkdir()
+        (tmp_path / run / "py.xml").write_text(
+            f'<testsuite><testcase classname="cli.tests.test_go_test_report" name="t" time="{seconds}"/></testsuite>',
+            encoding="utf-8",
+        )
+        runs.append([tmp_path / run / "py.xml"])
+
+    assert python_timings([], runs) == {"files": {"cli/tests/test_go_test_report.py": 9.0}}
+
+
+def test_a_refresh_drops_packages_and_tests_this_tree_does_not_have(tmp_path: Path) -> None:
+    # Runs of another branch (feat/endpoint-health-report) put
+    # internal/diagnostics and a gateway test that rel/1.0.10 lacks in the
+    # timing files.
+    (tmp_path / "pkg" / "a").mkdir(parents=True)
+    (tmp_path / "pkg" / "a" / "a_test.go").write_text("package a\n\nfunc TestKept(t *testing.T) {}\n", encoding="utf-8")
+    data = {
+        "packages": {f"{MODULE}/pkg/a": 70.0, f"{MODULE}/pkg/gone": 30.0},
+        "tests": {"pkg/a": {"TestKept": 9.0, "TestOtherBranch": 8.0, "*": 0.1}, "pkg/gone": {"TestX": 5.0, "*": 0.1}},
+    }
+
+    assert prune_retired(data, MODULE, tmp_path) == {
+        "packages": {f"{MODULE}/pkg/a": 70.0},
+        "tests": {"pkg/a": {"TestKept": 9.0, "*": 0.1}},
+    }
+
+
+def _tagged(seconds: float, action: str, package: str, test: str | None = None, elapsed: float = 0.0) -> str:
+    # A line Invoke-WindowsNativeProcess -GoTestEventSummary prints.
+    line = _timed(seconds, action, package, test, elapsed)
+    stamp, event = line.split(" ", 1)
+    return f"{stamp} [go-test-event] {event}"
+
+
+def test_a_windows_gateway_part_weighs_its_whole_event_summary_not_its_bounded_copy(tmp_path: Path) -> None:
+    # GAP-1295: the console copy of a gateway part keeps its head and tail
+    # (1 MiB); the slow tests in the middle never reached a refresh, and the
+    # tests running across the cut split the later tests' time with them.
+    # The tagged summary of the whole stream wins for its package; another
+    # package's untagged events still count.
+    log = tmp_path / "gw0.log"
+    log.write_text(
+        "\n".join(
+            [
+                _tagged(0, "run", "internal/gateway", "TestHead"),
+                _tagged(10, "pass", "internal/gateway", "TestHead", 10.0),
+                _tagged(10, "run", "internal/gateway", "TestMiddle"),
+                _tagged(130, "pass", "internal/gateway", "TestMiddle", 120.0),
+                _tagged(130, "run", "internal/gateway", "TestTail"),
+                _tagged(160, "pass", "internal/gateway", "TestTail", 30.0),
+                _tagged(160, "pass", "internal/gateway", None, 160.0),
+                # The bounded console copy of the same run.
+                _timed(0, "run", "internal/gateway", "TestHead"),
+                _timed(10, "pass", "internal/gateway", "TestHead", 10.0),
+                _timed(10, "run", "internal/gateway", "TestMiddle"),
+                "2026-11-12T14:00:00.0000000Z [truncated]",
+                _timed(130, "run", "internal/gateway", "TestTail"),
+                _timed(160, "pass", "internal/gateway", "TestTail", 30.0),
+                _timed(160, "pass", "internal/gateway", None, 160.0),
+                _timed(0, "run", "internal/hookpaths", "TestSplit"),
+                _timed(70, "pass", "internal/hookpaths", "TestSplit", 70.0),
+                _timed(70, "pass", "internal/hookpaths", None, 70.0),
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    tests = go_timings([log], MODULE)["tests"]
+    assert tests["internal/gateway"] == {"TestHead": 10.0, "TestMiddle": 120.0, "TestTail": 30.0, "*": 0.1}
+    assert tests["internal/hookpaths"]["TestSplit"] == 70.0
+
+
+def test_a_cut_in_a_bounded_log_starts_a_new_clock(tmp_path: Path) -> None:
+    # gw8 of Windows Native CI 44412520021: a test that started before the
+    # cut had no end event after it, so it ran on in the clock and each
+    # 94 s decoy-header test after the cut weighed 47 s. After the cut a
+    # test weighs its own time; one that ends after the cut weighs Elapsed.
+    log = tmp_path / "json-gw8.log"
+    log.write_text(
+        "\n".join(
+            [
+                _timed(0, "run", "internal/gateway", "TestLostEnd"),
+                "[truncated]",
+                _timed(100, "pass", "internal/gateway", "TestStartedBeforeTheCut", 40.0),
+                _timed(100, "run", "internal/gateway", "TestDecoy"),
+                _timed(194, "pass", "internal/gateway", "TestDecoy", 94.0),
+                _timed(194, "pass", "internal/gateway", None, 194.0),
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    tests = go_timings([log], MODULE)["tests"]["internal/gateway"]
+    assert tests["TestDecoy"] == 94.0 and tests["TestStartedBeforeTheCut"] == 40.0
+    assert "TestLostEnd" not in tests
+
+
+def test_the_test_go_test_timed_out_in_weighs_at_least_the_time_it_ran(tmp_path: Path) -> None:
+    # go test's -timeout panic ends the package and no test: the test that
+    # was running is cut off (its time ran is a lower bound), a t.Parallel
+    # test still waiting ran nothing and keeps its recorded time.
+    package = tmp_path / "internal" / "gateway"
+    package.mkdir(parents=True)
+    (package / "a_test.go").write_text(
+        "package gateway\nfunc TestDone(t *testing.T) {}\nfunc TestCut(t *testing.T) {}\n"
+        "func TestWaiting(t *testing.T) {}\nfunc TestCutLong(t *testing.T) {}\n",
+        encoding="utf-8",
+    )
+    log = tmp_path / "json-gw5.log"
+    log.write_text(
+        "\n".join(
+            [
+                _tagged(0, "run", "internal/gateway", "TestWaiting"),
+                _tagged(0, "pause", "internal/gateway", "TestWaiting"),
+                _tagged(0, "run", "internal/gateway", "TestDone"),
+                _tagged(60, "pass", "internal/gateway", "TestDone", 60.0),
+                _tagged(60, "run", "internal/gateway", "TestCut"),
+                _tagged(660, "fail", "internal/gateway", None, 660.0),
+            ]
+        ),
+        encoding="utf-8",
+    )
+    old = {"tests": {"internal/gateway": {"TestCut": 100.0, "TestWaiting": 30.0, "*": 0.1}}}
+
+    new = go_timings([log], MODULE)
+    assert new["tests"]["internal/gateway"]["TestCut"] == 600.0
+    data = keep_unreached_go_tests(old, new, [log], MODULE, root=tmp_path)
+    tests = data["tests"]["internal/gateway"]
+    assert tests["TestCut"] == 600.0 and tests["TestWaiting"] == 30.0 and tests["TestDone"] == 60.0
+    old["tests"]["internal/gateway"]["TestCut"] = 900.0
+    assert (
+        keep_unreached_go_tests(old, go_timings([log], MODULE), [log], MODULE, root=tmp_path)["tests"][
+            "internal/gateway"
+        ]["TestCut"]
+        == 900.0
+    )
+
+
+def test_a_windows_gateway_refresh_with_update_keeps_the_split_package_test_times(tmp_path: Path) -> None:
+    # GAP-1295: the gateway logs measure no package time, so --update kept
+    # every package as unreached first, then counted them all as measured
+    # and dropped the per-test times of internal/hookpaths.
+    root = Path(__file__).resolve().parents[2]
+    module = re.search(r"^module\s+(\S+)", (root / "go.mod").read_text(encoding="utf-8"), re.MULTILINE).group(1)
+
+    def first_test(rel: str) -> str:
+        for path in sorted((root / rel).glob("*_test.go")):
+            names = TEST_FUNCTION_RE.findall(path.read_text(encoding="utf-8"))
+            if names:
+                return names[0]
+        raise AssertionError(rel)
+
+    split, gateway = first_test("internal/hookpaths"), first_test("internal/gateway")
+    out = tmp_path / "go-windows.json"
+    old = {
+        "packages": {f"{module}/internal/hookpaths": 300.0},
+        "tests": {"internal/hookpaths": {split: 40.0, "*": 0.1}},
+    }
+    out.write_text(json.dumps(old), encoding="utf-8")
+    events = [
+        {"Action": "run", "Package": f"{module}/internal/gateway", "Test": gateway},
+        {"Action": "pass", "Package": f"{module}/internal/gateway", "Test": gateway, "Elapsed": 70.0},
+        {"Action": "pass", "Package": f"{module}/internal/gateway", "Elapsed": 70.0},
+    ]
+    log = tmp_path / "gw0.log"
+    log.write_text("\n".join(f"{STAMP} {json.dumps(event)}" for event in events), encoding="utf-8")
+
+    subprocess.run(
+        [
+            sys.executable,
+            str(root / "scripts/update_test_timings.py"),
+            "windows-go",
+            str(log),
+            "--update",
+            "--out",
+            str(out),
+        ],
+        check=True,
+        capture_output=True,
+    )
+
+    data = json.loads(out.read_text(encoding="utf-8"))
+    assert data["packages"] == old["packages"]
+    assert data["tests"]["internal/hookpaths"] == old["tests"]["internal/hookpaths"]
+    assert data["tests"]["internal/gateway"][gateway] == 70.0

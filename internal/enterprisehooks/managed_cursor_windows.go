@@ -925,7 +925,7 @@ func windowsCursorManagedAdapterRefresh(
 	hookExecutable string,
 ) (adapter, state []byte, ok bool, err error) {
 	if !artifacts.active ||
-		!sameWindowsEnterprisePath(artifacts.parsed.HookExecutable, hookExecutable) {
+		!sameWindowsManagedHookImage(artifacts.parsed.HookExecutable, hookExecutable) {
 		return nil, nil, false, nil
 	}
 	adapter, err = renderWindowsCursorManagedAdapter(artifacts.parsed)
@@ -969,7 +969,7 @@ func windowsCursorManagedAdapterDriftCandidate(
 	if !bytes.Equal(canonical, current.state.data) {
 		return current, errors.New("enterprise hooks: Cursor managed ownership metadata is not canonical")
 	}
-	if !filepath.IsAbs(state.HookExecutable) || !sameWindowsEnterprisePath(state.HookExecutable, hookExecutable) {
+	if !filepath.IsAbs(state.HookExecutable) || !sameWindowsManagedHookImage(state.HookExecutable, hookExecutable) {
 		return current, errors.New("enterprise hooks: Cursor managed policy belongs to another hook executable")
 	}
 	adapter, err := renderWindowsCursorManagedAdapter(state)
@@ -1724,7 +1724,10 @@ func installWindowsCursorManagedPolicy(
 				receipt.ConfigOriginalSHA256 = windowsManagedPolicyDigest(before.hooks.data)
 			}
 		}
-		if current.active && (!sameWindowsEnterprisePath(state.HookExecutable, opts.HookExecutable) ||
+		// An active state an older launch image of this install recorded is
+		// this deployment's; the install rewrites it with the current image
+		// below, which is the switch (GAP-0751).
+		if current.active && (!sameWindowsManagedHookImage(state.HookExecutable, opts.HookExecutable) ||
 			state.GatewayAddr != gateway || state.GatewayServiceName != service) {
 			return errors.New("enterprise hooks: Cursor machine identity differs from the active protected deployment")
 		}
@@ -2287,7 +2290,7 @@ func windowsCursorOptionsMatch(
 	}
 	gateway, err := connector.NormalizeWindowsManagedGatewayAddr(opts.GatewayAddr)
 	if err != nil || gateway != state.GatewayAddr ||
-		!sameWindowsEnterprisePath(opts.HookExecutable, state.HookExecutable) ||
+		!sameWindowsManagedHookImage(state.HookExecutable, opts.HookExecutable) ||
 		opts.GatewayServiceName != state.GatewayServiceName ||
 		len(targets) != len(state.Targets) {
 		return errors.New("enterprise hooks: Cursor machine enrollment does not match the protected lifecycle")
@@ -2315,7 +2318,7 @@ func windowsCursorOptionsAllowState(
 	}
 	gateway, err := connector.NormalizeWindowsManagedGatewayAddr(opts.GatewayAddr)
 	if err != nil || gateway != state.GatewayAddr ||
-		!sameWindowsEnterprisePath(opts.HookExecutable, state.HookExecutable) ||
+		!sameWindowsManagedHookImage(state.HookExecutable, opts.HookExecutable) ||
 		opts.GatewayServiceName != state.GatewayServiceName ||
 		len(state.Targets) > len(targets) {
 		return errors.New("enterprise hooks: Cursor machine enrollment is outside the protected lifecycle")

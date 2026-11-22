@@ -21,6 +21,9 @@ const (
 	WindowsHookRuntimeFolder = ProductFolder + "-HookRuntime"
 	// WindowsScannerRuntimeFolder holds the standalone scanner runtime.
 	WindowsScannerRuntimeFolder = ProductFolder + "-ScannerRuntime"
+	// WindowsRulePacksFolder holds the strict and permissive rule packs a
+	// standalone install ships, one folder per release (#1445).
+	WindowsRulePacksFolder = ProductFolder + "-RulePacks"
 )
 
 var folderNames = [...]string{
@@ -29,6 +32,7 @@ var folderNames = [...]string{
 	WindowsLifecycleFolder,
 	WindowsHookRuntimeFolder,
 	WindowsScannerRuntimeFolder,
+	WindowsRulePacksFolder,
 }
 
 // IsFolderName reports whether name is exactly one of the product folder

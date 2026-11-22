@@ -453,7 +453,7 @@ func TestRunSaysWhyTheSandboxDidNotStart(t *testing.T) {
 func TestRunRefusesDockerDesktopUpFront(t *testing.T) {
 	const refusal = "no sandbox can start on this gateway: it runs sandboxes on the docker driver, and Docker Desktop's Linux VM has no Landlock, " +
 		"which OpenShell sandboxes need; nothing was built or created\n" +
-		"  → run sandboxes in OpenShell MicroVMs, which have their own kernel: `defenseclaw sandbox setup` switches the gateway to them " +
+		"  → update Docker Desktop, or run sandboxes in OpenShell MicroVMs, which have their own kernel: `defenseclaw sandbox setup` switches the gateway to them " +
 		"(or `defenseclaw sandbox doctor --fix`; details: " + setupTroubleshootingURL + ")"
 	for _, c := range []struct {
 		goos, driver, engine string
@@ -484,6 +484,45 @@ func TestRunRefusesDockerDesktopUpFront(t *testing.T) {
 		}
 		if ta.dockerAsked != c.asked {
 			t.Fatalf("%+v: docker asked %d times, want %d", c, ta.dockerAsked, c.asked)
+		}
+	}
+}
+
+// rel-1-0-10:GAP-0007: Docker Desktop 29.8's Linux VM (7.0.14-linuxkit)
+// has Landlock ABI 8, yet every docker-driver run on a Mac was refused by
+// the engine's name. The VM's Landlock decides now: a VM with ABI 3 or
+// newer reaches the create; one without Landlock, with it turned off, too
+// old, or that cannot be checked is refused before anything is built.
+func TestGAP0007DockerDesktopRunFollowsTheVMsLandlock(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		abi  int
+		err  error
+		want string // "" reaches the create
+	}{
+		{"ABI 8 (Docker Desktop 29.8)", 8, nil, ""},
+		{"ABI 3", 3, nil, ""},
+		{"ABI 2", 2, nil, "Docker Desktop's Linux VM has Landlock ABI 2, and OpenShell sandboxes need ABI 3 or newer"},
+		{"no Landlock", 0, openshell.ErrLandlockMissing, "Docker Desktop's Linux VM has no Landlock, which OpenShell sandboxes need"},
+		{"turned off", 0, openshell.ErrLandlockDisabled, "Docker Desktop's Linux VM has Landlock turned off"},
+		{"no image to check in", 0, openshell.ErrNoProbeImage, "the OpenShell base image it checks in is not on this machine yet (`defenseclaw sandbox doctor --fix` downloads it and checks)"},
+		{"probe failed", 0, errors.New("the probe container failed"), "could not check Docker Desktop's Linux VM for the Landlock OpenShell sandboxes need (the probe container failed)"},
+	} {
+		ta := newTestApp(t, "")
+		ta.GOOS, ta.dockerEngine = "darwin", "Docker Desktop"
+		ta.dockerLandlock, ta.dockerLandlockErr = c.abi, c.err
+		ta.daemon.status.Gateway.Driver = "docker"
+		ta.daemon.errors["POST "+sandboxapi.PathSandboxes] = &sandboxapi.Error{Code: sandboxapi.CodeUpstream, Message: "create reached"}
+		err := ta.Run(bg, RunOptions{Harness: "claude"})
+		creates := ta.daemon.callsTo("POST", sandboxapi.PathSandboxes)
+		switch {
+		case c.want == "" && (err == nil || !strings.HasPrefix(err.Error(), "create reached") || len(creates) != 1):
+			t.Fatalf("%s: Run = %v (%d creates), want it to reach the create", c.name, err, len(creates))
+		case c.want != "" && (err == nil || !strings.Contains(err.Error(), c.want) || len(creates) != 0 || len(ta.copy.steps) != 0):
+			t.Fatalf("%s: Run = %v (%d creates, staged %v), want a refusal naming %q", c.name, err, len(creates), ta.copy.steps, c.want)
+		}
+		if ta.landlockAsked != 1 {
+			t.Fatalf("%s: Landlock asked %d times, want 1", c.name, ta.landlockAsked)
 		}
 	}
 }

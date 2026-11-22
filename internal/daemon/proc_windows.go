@@ -54,8 +54,15 @@ func (*daemonLaunchPin) check() error { return nil }
 
 func (*daemonLaunchPin) close() {}
 
+// openProcessQuery opens pid with PROCESS_QUERY_LIMITED_INFORMATION, the one
+// handle liveness, executable and start identity are read through. Tests
+// replace it to stand in for a process this caller may not open.
+var openProcessQuery = func(pid int) (windows.Handle, error) {
+	return windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid))
+}
+
 func processExecutableWindows(pid int) (string, error) {
-	h, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid))
+	h, err := openProcessQuery(pid)
 	if err != nil {
 		return "", err
 	}
@@ -143,9 +150,16 @@ func processExists(pid int) bool {
 	// gone. Mirrors the CLI-side check in
 	// cli/defenseclaw/process_liveness.py so both agree on "running".
 	const stillActive = 259
-	h, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid))
+
+	// Access denied is not "gone": the PID names a live process this caller
+	// may not open (this account's gateway started elevated in another logon
+	// session, or another account's process). Only a PID the kernel no
+	// longer knows (ERROR_INVALID_PARAMETER) or a real exit code proves the
+	// process gone, and only that proof lets IsRunning remove gateway.pid
+	// (rel-1-0-10:GAP-1314). processSignalable reports the access denied.
+	h, err := openProcessQuery(pid)
 	if err != nil {
-		return false
+		return errors.Is(err, windows.ERROR_ACCESS_DENIED)
 	}
 	defer windows.CloseHandle(h)
 	var code uint32
@@ -190,7 +204,7 @@ func waitForProcessExit(proc *os.Process, _ int, timeout time.Duration) bool {
 // the process can't be queried (dead PID or access denied), and callers
 // treat a captured-vs-live mismatch as "not the same process".
 func processStartIdentity(pid int) (string, error) {
-	h, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid))
+	h, err := openProcessQuery(pid)
 	if err != nil {
 		return "", err
 	}
@@ -211,7 +225,17 @@ func (d *Daemon) killStaleProcesses() error {
 	return err
 }
 
-// processSignalable is always true on Windows: liveness and control go
-// through process handles, and processExists already reports a handle this
-// account cannot open as not running.
-func processSignalable(int) bool { return true }
+// processSignalable is false for a live process this caller may not open
+// (access denied), the Windows form of the EPERM kill(pid, 0) gives on Unix.
+// IsRunning then keeps a record that binds this home, unless the creation
+// time the kernel process list gives without a handle proves the PID reused
+// (rel-1-0-10:GAP-1314). Liveness and control otherwise go through process
+// handles.
+func processSignalable(pid int) bool {
+	h, err := openProcessQuery(pid)
+	if err != nil {
+		return !errors.Is(err, windows.ERROR_ACCESS_DENIED)
+	}
+	_ = windows.CloseHandle(h)
+	return true
+}

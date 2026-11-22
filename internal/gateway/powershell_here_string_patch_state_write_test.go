@@ -65,7 +65,6 @@ func TestPowerShellHereStringAndPipedPatchStateWriteIsProven(t *testing.T) {
 		row{"bound here-string only printed", "$patch=@'\n" + envelope(state, "\n") + "\n'@\nWrite-Output $patch", false},
 		row{"here-string piped into a printer", "@'\n" + envelope(state, "\n") + "\n'@ | Write-Output", false},
 	)
-	api := &APIServer{}
 	for _, tc := range rows {
 		for _, managed := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/managed=%t", tc.name, managed), func(t *testing.T) {
@@ -78,8 +77,10 @@ func TestPowerShellHereStringAndPipedPatchStateWriteIsProven(t *testing.T) {
 					EnforcementCapable: true, ResolvedWriteTargets: resolved, ProtectedHomeHook: managed,
 				})
 				verdict := buildVerdict(findings, "tool_call")
-				if got := verdict.Action == "block" && api.provenActiveStateMutation(t.Context(), verdict); got != tc.block {
-					t.Fatalf("observe-mode hard block=%t, want %t (action %q, findings %v)", got, tc.block, verdict.Action, findingIDs(findings))
+				// A proven state write is a HIGH alert on the default pack
+				// (GAP-0747 owner tiering 2026-11-15T15:20Z).
+				if msg := gap0747DefaultTierCheck(findings, tc.block); msg != "" {
+					t.Fatalf("%s (action %q, findings %v)", msg, verdict.Action, findingIDs(findings))
 				}
 			})
 		}
@@ -104,7 +105,7 @@ func TestPowerShellBoundValueFollowsAValueTheMentionScanPlacesInState(t *testing
 		{"bound write", `$p='` + link + `'; [System.IO.File]::WriteAllText($p,'x')`, twin(link), true},
 		{"bound sibling", `$p='C:\Users\Alice\project\lnkDx\config.yaml'; [System.IO.File]::WriteAllText($p,'x')`, twin(`C:\Users\Alice\project\lnkDx\config.yaml`), false},
 	} {
-		forms, bounded, ok := powerShellStateWriteForms(tc.command, home, home+`\project`, nil, mentions)
+		forms, _, _, bounded, ok := powerShellStateWriteForms(tc.command, home, home+`\project`, nil, mentions, psProtectedPaths{})
 		if bounded || !ok {
 			t.Fatalf("%s: bounded=%t ok=%t", tc.name, bounded, ok)
 		}

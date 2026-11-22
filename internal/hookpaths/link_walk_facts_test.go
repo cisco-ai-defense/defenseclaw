@@ -24,9 +24,7 @@ func TestR105GAP2569ClientLinkWalkFacts(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := os.Symlink(state, filepath.Join(cwd, "dclink")); err != nil {
-		t.Fatal(err)
-	}
+	testSymlink(t, state, filepath.Join(cwd, "dclink"))
 	t.Setenv("HOME", home)
 	home, _ = filepath.EvalSymlinks(home)
 	state = filepath.Join(home, ".defenseclaw")

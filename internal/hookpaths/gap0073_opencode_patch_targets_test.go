@@ -29,9 +29,7 @@ func TestGAP0073OpenCodePatchClientListsTargets(t *testing.T) {
 	if err := os.WriteFile(keys, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(keys, filepath.Join(project, "keylink")); err != nil {
-		t.Fatal(err)
-	}
+	testSymlink(t, keys, filepath.Join(project, "keylink"))
 	t.Setenv("HOME", home)
 	resolve := func(tool, patch string) map[string]string {
 		t.Helper()

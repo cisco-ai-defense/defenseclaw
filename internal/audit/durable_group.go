@@ -27,7 +27,8 @@ func (e *durableDirSyncError) Error() string {
 func (e *durableDirSyncError) Unwrap() error { return e.err }
 
 // durableGrouped runs run in a transaction on the store synchronous=FULL
-// connection (auditDurablePragmas) and returns once it is committed to disk.
+// connection (secureClientAuditDurablePragmas) or, on other stores, in a
+// synchronous=FULL batch of the writer, and returns once it is committed to disk.
 // Concurrent callers share one transaction, so they share one flush of the
 // write-ahead log. Every commit on this connection costs a flush, and a
 // managed sandbox call makes about five of them: the journal row, its
@@ -40,8 +41,25 @@ func (e *durableDirSyncError) Unwrap() error { return e.err }
 // caller sees only its own error. dirSync asks for the database folder to be
 // flushed once the batch has committed (a WAL file created since the store
 // opened keeps its entry).
+//
+// On a store other than Secure Client the write joins the hook-call write
+// group (callGroup) on the writer connection, and the batch that carries it
+// commits with synchronous=FULL (durableBatchConn): one transaction and one
+// flush for the durable writes and the hook-call writes queued beside them.
+// A Secure Client store keeps its own synchronous=FULL connection.
 func (s *Store) durableGrouped(ctx context.Context, dirSync bool, run func(context.Context, *sql.Tx) error) error {
-	return s.durableGroup.do(&groupedWrite{ctx: ctx, data: dirSync, run: run}, s.runDurableBatch)
+	if s.secureClientSchema {
+		return s.durableGroup.do(&groupedWrite{ctx: ctx, data: dirSync, run: run}, s.runDurableBatch)
+	}
+	return s.callGroup.do(&groupedWrite{ctx: ctx, run: run, durable: true, dirSync: dirSync}, s.runCallGroupBatch)
+}
+
+// durableQueue is the write group that carries the durable writes of s.
+func (s *Store) durableQueue() *writeGroup {
+	if s.secureClientSchema {
+		return &s.durableGroup
+	}
+	return &s.callGroup
 }
 
 func (s *Store) runDurableBatch(batch []*groupedWrite) {

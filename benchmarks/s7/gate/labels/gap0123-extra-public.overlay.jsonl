@@ -1,0 +1,3 @@
+{"corpus":"extra-public","id":"x/shellattack/28ef9d21c6c802e0cc7f","source_truth":"excluded","why":"rel-1-0-10:GAP-0123: hand-audit 2026-11-13 claude:10504d36/s7-surfaces"}
+{"corpus":"extra-public","id":"x/shellattack/c35d6f6bf96ebcce0283","source_truth":"excluded","why":"rel-1-0-10:GAP-0123: hand-audit 2026-11-13 claude:10504d36/s7-surfaces"}
+{"corpus":"extra-public","id":"x/shellattack/efa54420c3a1da5cca0e","source_truth":"excluded","why":"rel-1-0-10:GAP-0123: hand-audit 2026-11-13 claude:10504d36/s7-surfaces"}
