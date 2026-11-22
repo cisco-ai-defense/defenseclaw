@@ -14,10 +14,11 @@ import (
 
 // oracleRow is one sample row of testdata/oracle_tokenizer_rows.tsv: a public
 // script from the pwsh 7.6.6 oracle fixture (scripts/pwshoracle/fixture) and
-// the command names the real parser reads in it.
+// the command names the real parser reads in it and the parameters it binds a
+// -Name: value to.
 type oracleRow struct {
 	class, id, src string
-	names          []string
+	names, colon   []string
 }
 
 func loadOracleRows(t *testing.T) []oracleRow {
@@ -36,7 +37,7 @@ func loadOracleRows(t *testing.T) []oracleRow {
 			continue
 		}
 		c := strings.Split(ln, "\t")
-		if len(c) != 4 {
+		if len(c) != 5 {
 			t.Fatalf("bad row %q", ln)
 		}
 		b, err := base64.StdEncoding.DecodeString(c[2])
@@ -47,7 +48,11 @@ func loadOracleRows(t *testing.T) []oracleRow {
 		if c[3] != "" {
 			names = strings.Split(c[3], "|")
 		}
-		rows = append(rows, oracleRow{class: c[0], id: c[1], src: string(b), names: names})
+		var colon []string
+		if c[4] != "" {
+			colon = strings.Split(c[4], "|")
+		}
+		rows = append(rows, oracleRow{class: c[0], id: c[1], src: string(b), names: names, colon: colon})
 	}
 	if err := sc.Err(); err != nil {
 		t.Fatal(err)
@@ -125,6 +130,81 @@ func TestGAP1850GluedHashIsWordText(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%q: %v", c.src, err)
 		}
+		var got []string
+		for _, inv := range Project(sc) {
+			got = append(got, inv.Name)
+		}
+		if strings.Join(got, "|") != strings.Join(c.want, "|") {
+			t.Errorf("%q: commands %q, want %q", c.src, got, c.want)
+		}
+	}
+}
+
+// TestGAP1854ColonParamBindsDashWord: in the gap1854 sample rows pwsh 7.6.6
+// binds the word after "-Name:" as its value even when it starts with "-"
+// (-nop: -c:, -a:-b): the reader binds a value to every parameter the real
+// parser does. Red at the det111/engine-train-2 tip.
+func TestGAP1854ColonParamBindsDashWord(t *testing.T) {
+	n := 0
+	for _, r := range loadOracleRows(t) {
+		if r.class != "gap1854" {
+			continue
+		}
+		n++
+		sc, _ := Parse(r.src, Options{})
+		bound := map[string]int{}
+		WalkCommands(sc, func(c *Command) {
+			for _, el := range c.Elements {
+				if p, ok := el.(*Parameter); ok && p.Colon != nil {
+					bound[strings.ToLower(p.Name)]++
+				}
+			}
+		})
+		for _, w := range r.colon {
+			if bound[w] == 0 {
+				t.Errorf("%s: -%s: has no value (pwsh binds %q)", r.id, w, r.colon)
+				continue
+			}
+			bound[w]--
+		}
+	}
+	if n == 0 {
+		t.Fatal("no gap1854 rows")
+	}
+}
+
+// TestGAP1851BracketWordAndOperatorCommandWord: [ and ] are word characters
+// in command mode (they never group and never cross a statement separator),
+// and a word that starts with an operator character or "]" in command
+// position is a command name; the unary operators still start an expression.
+// Expected names are what pwsh 7.6.6 reads (scripts/pwshoracle probe).
+func TestGAP1851BracketWordAndOperatorCommandWord(t *testing.T) {
+	cases := []struct {
+		src  string
+		want []string
+	}{
+		{`Write-Output a[#; Remove-Item -Recurse -Force C:\`, []string{"write-output", "remove-item"}},
+		{`Write-Output a[b; Remove-Item x`, []string{"write-output", "remove-item"}},
+		{"Write-Output a[b\nRemove-Item x", []string{"write-output", "remove-item"}},
+		{`Write-Output a[b | Remove-Item x`, []string{"write-output", "remove-item"}},
+		{`Write-Output [b && Remove-Item x`, []string{"write-output", "remove-item"}},
+		{`Write-Output a[$(b; c)]; Remove-Item x`, []string{"write-output", "b", "c", "remove-item"}},
+		{`Write-Output a[1>2] y; Remove-Item x`, []string{"write-output", "remove-item"}},
+		{`*** Begin x`, []string{"***"}},
+		{`= x`, []string{"="}},
+		{`] x`, []string{"]"}},
+		{`]x y`, []string{"]x"}},
+		{`?x y`, []string{"?x"}},
+		{`*= x`, []string{"*="}},
+		{`x; ?? y`, []string{"x", "??"}},
+		{`(*** a)`, []string{"***"}},
+		{`Write-Output a | *x b`, []string{"write-output", "*x"}},
+		{`Write-Output a ] b; Remove-Item x`, []string{"write-output", "remove-item"}},
+		{`$a[(Get-X)]; Remove-Item x`, []string{"get-x", "remove-item"}},
+		{`! (Get-X)`, []string{"get-x"}},
+	}
+	for _, c := range cases {
+		sc, _ := Parse(c.src, Options{})
 		var got []string
 		for _, inv := range Project(sc) {
 			got = append(got, inv.Name)

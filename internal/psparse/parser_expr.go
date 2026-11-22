@@ -212,7 +212,9 @@ func (p *parser) parseIndex(target Expr) Expr {
 	save := p.enter()
 	em := p.exprMode
 	p.exprMode = true
+	p.inIndex++
 	idx := p.parseExpression()
+	p.inIndex--
 	p.exprMode = em
 	p.leave(save)
 	s0 := 0
