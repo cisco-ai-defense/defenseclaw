@@ -109,9 +109,6 @@ func newTargetMemo() *TargetMemo {
 type resolvedTarget struct {
 	path string
 	ok   bool
-	// unanswered: the walk failed on a local read that did not answer
-	// (walkWritePathWhy).
-	unanswered bool
 }
 
 // protectedFiles is newProtectedFiles of home, once per memo.
@@ -202,9 +199,6 @@ type walkState struct {
 	crossed   []bool
 	linkDepth int
 	failed    bool
-	// unanswered: failed on a local read that did not answer
-	// (walkWritePathWhy).
-	unanswered bool
 }
 
 type memoWordKey struct {
@@ -312,39 +306,33 @@ func (m *TargetMemo) ResolveWriteTarget(path string) (string, bool) {
 
 // resolveWriteTarget is ResolveWriteTarget through the memo.
 func (m *TargetMemo) resolveWriteTarget(path string) (string, bool) {
-	resolved, ok, _ := m.resolveWriteTargetWhy(path)
-	return resolved, ok
-}
-
-// resolveWriteTargetWhy is resolveWriteTargetWhy through the memo.
-func (m *TargetMemo) resolveWriteTargetWhy(path string) (resolved string, ok, unanswered bool) {
 	if m == nil {
-		return resolveWriteTargetWhy(path)
+		return ResolveWriteTarget(path)
 	}
 	if m.call != nil {
-		return m.call.resolveWriteTargetWhy(path)
+		return m.call.resolveWriteTarget(path)
 	}
 	writeTargetWalks.Add(1)
 	m.mu.Lock()
 	known, found := m.resolved[path]
 	m.mu.Unlock()
 	if found {
-		return known.path, known.ok, known.unanswered
+		return known.path, known.ok
 	}
 	mark := m.cutMark()
-	resolved, _, _, ok = walkWritePathWhy("", path, 0, false, false, m, &unanswered)
+	resolved, _, _, ok := walkWritePathMemo("", path, 0, false, false, m)
 	if !m.keepsSince(mark) {
 		// A share on the way did not answer only because the call's
 		// budget cut its wait short: the next ask may read it
 		// (rel-1-0-10:GAP-1606).
-		return resolved, ok, unanswered
+		return resolved, ok
 	}
 	m.mu.Lock()
 	if len(m.resolved) < maxTargetMemoEntries {
-		m.resolved[path] = resolvedTarget{path: resolved, ok: ok, unanswered: unanswered}
+		m.resolved[path] = resolvedTarget{path: resolved, ok: ok}
 	}
 	m.mu.Unlock()
-	return resolved, ok, unanswered
+	return resolved, ok
 }
 
 // stateEntry is one answer of actionStateEntryMayDiffer.
