@@ -285,20 +285,16 @@ func guardrailProfileThresholds(profile string) (blockThreshold int, alertThresh
 	}
 }
 
-// guardrailProfileForDir is the posture of a rule-pack folder without a
-// manifest posture: its base name (strict, permissive), else default. Shipped
-// packs carry manifests; this preserves the legacy directory fallback.
+// guardrailProfileForDir is the posture of a rule-pack folder whose pack
+// names no tier of its own (no manifest posture, no tiers.yaml tier): a
+// legacy copy in a folder named strict keeps strict, every other folder is
+// default (config.packFolderPosture; rel-1-0-10:GAP-1562 owner ruling: a
+// folder name never lowers a tier, a missing field never weakens one).
 func guardrailProfileForDir(dir string) string {
-	if strings.TrimSpace(dir) == "" {
-		return "default"
+	if strings.TrimSpace(dir) != "" && strings.EqualFold(filepath.Base(filepath.Clean(dir)), "strict") {
+		return "strict"
 	}
-	base := strings.ToLower(filepath.Base(filepath.Clean(dir)))
-	switch base {
-	case "strict", "permissive":
-		return base
-	default:
-		return "default"
-	}
+	return "default"
 }
 
 // hiltEnabled reports whether human-in-the-loop confirmation is active for

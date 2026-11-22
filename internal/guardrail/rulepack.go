@@ -544,11 +544,18 @@ func (rp *RulePack) FilesDigest() string {
 	return rp.filesDigest
 }
 
-// Posture is the level named by the manifest bytes loaded and covered by
-// FilesDigest. An absent or unrecognized optional manifest has no posture.
+// Posture is the pack's own tier: the level named by the manifest bytes
+// loaded and covered by FilesDigest, else the tier field of its tiers.yaml.
+// A copy that lost its manifest keeps the tier its content names, whatever
+// its folder is called (rel-1-0-10:GAP-1562, owner 2026-11-21: a pack's tier
+// comes from the pack's own tier field, never from its folder name). A pack
+// naming neither has no posture.
 func (rp *RulePack) Posture() string {
 	if rp == nil {
 		return ""
+	}
+	if rp.manifestPosture == "" && rp.Tiers != nil {
+		return rp.Tiers.Tier.String()
 	}
 	return rp.manifestPosture
 }
