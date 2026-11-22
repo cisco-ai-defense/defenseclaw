@@ -51,12 +51,45 @@ var det111R1VerdictPending = map[string]string{
 	"GAP-1653/var":   ".env read through an alias of open: .env is not a protected set (decision side)",
 }
 
-type det111R1Row struct {
-	id, gap, role, platform, tool, command string
-	attack, benign                         bool
+// det111R1WindowsPending are the Windows host rows (managed cells) whose
+// verdict does not reach the unknown tier yet, with the lane that closes each.
+var det111R1WindowsPending = map[string]string{
+	"GAP-0998/var":   "codex shell on a Windows host: the effects call gets no PowerShell dialect (S3-PRE effectCall); claudecode PowerShell reaches",
+	"GAP-0998/var2":  "codex shell on a Windows host: no PowerShell dialect for the effects call (S3-PRE effectCall)",
+	"GAP-0998/var3":  "codex shell on a Windows host: no PowerShell dialect for the effects call (S3-PRE effectCall)",
+	"GAP-1199/var":   "codex shell on a Windows host: no PowerShell dialect for the effects call (S3-PRE effectCall)",
+	"GAP-1199/var2":  "codex shell on a Windows host: no PowerShell dialect for the effects call (S3-PRE effectCall)",
+	"GAP-1199/var3":  "codex shell on a Windows host: no PowerShell dialect for the effects call (S3-PRE effectCall)",
+	"GAP-1199/var4":  "codex shell on a Windows host: no PowerShell dialect for the effects call (S3-PRE effectCall)",
+	"GAP-1550/seed2": "codex shell on a Windows host: no PowerShell dialect for the effects call (S3-PRE effectCall)",
+	"GAP-1550/var":   "codex shell on a Windows host: no PowerShell dialect for the effects call (S3-PRE effectCall)",
+	"GAP-1173/var":   "Git Bash on a Windows host: the effects call reads POSIX flavor (S3-PRE effectCall); tar on Windows has no row (S4-R2)",
+	"GAP-1173/var3":  "Git Bash on a Windows host: the effects call reads POSIX flavor (S3-PRE effectCall)",
+	"GAP-1173/var6":  "inline-code folder literal: the classifier grades a folder only for mutations (S4-R3)",
+	"GAP-1173/var4":  "Expand-Archive has no program row (S4-R2)",
+	"GAP-1173/var5":  "tar in PowerShell on Windows has no program row (S4-R2)",
+	"GAP-1667/var":   "cmd /c on Git Bash: tar on Windows has no program row (S4-R2)",
+	"GAP-1667/var2":  "cmd copy /y and tar on Windows have no program rows (S4-R2)",
+	"GAP-1561/seed":  "an lsass dump is not an effect target (decision side)",
+	"GAP-1561/seed2": "an lsass dump is not an effect target (decision side)",
+	"GAP-1561/seed4": "icacls C:\\ /grant Everyone:F is a permission change on the system root (decision side)",
+	"GAP-1561/var":   "an lsass dump is not an effect target (decision side)",
+	"GAP-1561/var2":  "an lsass dump is not an effect target (decision side)",
+	"GAP-1561/var4":  "icacls on the system root (decision side)",
+	"GAP-1588/seed":  "an lsass dump is not an effect target; legacy dialect placement on Git Bash (decision side)",
+	"GAP-1588/var":   "an lsass dump is not an effect target (decision side)",
+	"GAP-1588/var2":  "an lsass dump is not an effect target (decision side)",
+	"GAP-1588/var3":  "an lsass dump is not an effect target (decision side)",
+	"GAP-1588/var4":  "fsutil usn deletejournal is not an effect target (decision side)",
+	"GAP-1588/var5":  "icacls on the system root (decision side)",
 }
 
-func loadDET111R1Rows(t *testing.T) []det111R1Row {
+type det111R1Row struct {
+	id, gap, role, platform, dialect, tool, command string
+	attack, benign                                  bool
+}
+
+func loadDET111R1Rows(t *testing.T, keep func(platform, dialect string) bool) []det111R1Row {
 	t.Helper()
 	var rows []det111R1Row
 	for _, fn := range []string{"det111_r1.cases.jsonl", "det111_r1_launch.cases.jsonl"} {
@@ -87,7 +120,7 @@ func loadDET111R1Rows(t *testing.T) []det111R1Row {
 			}
 			r := det111R1Row{id: strings.TrimPrefix(c.ID, "gap/det111-b_"), platform: c.Strata.Platform, tool: c.Payload.ToolName}
 			r.command, _ = c.Payload.Args["command"].(string)
-			attackMiss := false
+			attackMiss, cost := false, false
 			for _, k := range c.Truth.Categories {
 				switch {
 				case strings.HasPrefix(k, "gap:"):
@@ -96,12 +129,15 @@ func loadDET111R1Rows(t *testing.T) []det111R1Row {
 					r.role = strings.TrimPrefix(k, "role:")
 				case k == "kind:attack-miss":
 					attackMiss = true
+				case k == "kind:cost":
+					cost = true // a raise the corpus expects on a benign row: judged by its own tier test
 				}
 			}
 			r.attack = attackMiss && c.Truth.Truth == "deterministic_malicious"
-			r.benign = c.Truth.Truth == "benign"
-			if c.Payload.Dialect != "posix" || (r.platform != "linux" && r.platform != "macos") || r.command == "" {
-				continue // the Windows and tool-argument rows run in their own tests
+			r.benign = c.Truth.Truth == "benign" && !cost
+			r.dialect = c.Payload.Dialect
+			if r.command == "" || !keep(r.platform, r.dialect) {
+				continue
 			}
 			rows = append(rows, r)
 		}
@@ -159,7 +195,9 @@ func det111R1Routes() []det111R1Route {
 
 func TestDET111R1BodiesVerdictFiveTiers(t *testing.T) {
 	home := det111R1Home(t)
-	rows := loadDET111R1Rows(t)
+	rows := loadDET111R1Rows(t, func(platform, dialect string) bool {
+		return dialect == "posix" && (platform == "linux" || platform == "macos")
+	})
 	if len(rows) < 60 {
 		t.Fatalf("only %d POSIX rows: the corpus copy lost rows", len(rows))
 	}
@@ -167,51 +205,159 @@ func TestDET111R1BodiesVerdictFiveTiers(t *testing.T) {
 	probe := os.Getenv("DET111_R1_PROBE") != ""
 	cwd := filepath.Join(home, "proj")
 	rewrite := strings.NewReplacer("/home/alice", home, "/Users/alice", home)
-	attacks, failed := 0, map[string]bool{}
+	j := newDET111R1Judge(t)
 	for _, tier := range boundedTestTiers {
-		floor := bounded.Unknown(tier.tier)
 		for _, route := range det111R1Routes() {
 			api := gap0589TierAPI(t, route.connector, tier.posture, tier.managed, tier.tier)
 			for _, row := range rows {
-				command := rewrite.Replace(row.command)
-				useEffectsRulesMode(t, "off")
-				off := boundedParse(route.decide(t, api, t.Context(), cwd, command))
-				on := off
-				if !laneOff {
-					useDefaultEffectsLane(t)
-					on = boundedParse(route.decide(t, api, t.Context(), cwd, command))
+				j.judge(t, api, t.Context(), tier.name, bounded.Unknown(tier.tier), route, cwd, row, rewrite.Replace(row.command), laneOff, probe)
+			}
+		}
+	}
+	j.finish(t)
+}
+
+// det111R1Judge judges rows cell by cell and keeps the pending rows honest.
+type det111R1Judge struct {
+	attacks int
+	failed  map[string]bool
+}
+
+func newDET111R1Judge(t *testing.T) *det111R1Judge {
+	return &det111R1Judge{failed: map[string]bool{}}
+}
+
+func (j *det111R1Judge) judge(t *testing.T, api *APIServer, ctx context.Context, tierName string, floor bounded.Action, route det111R1Route, cwd string, row det111R1Row, command string, laneOff, probe bool) {
+	t.Helper()
+	useEffectsRulesMode(t, "off")
+	off := boundedParse(route.decide(t, api, ctx, cwd, command))
+	on := off
+	if !laneOff {
+		useDefaultEffectsLane(t)
+		on = boundedParse(route.decide(t, api, ctx, cwd, command))
+	}
+	if probe {
+		t.Logf("ROW\t%s\t%s\t%s\t%s\toff=%s\ton=%s", tierName, route.name, row.id, row.role, off, on)
+	}
+	where := tierName + " " + route.name + " " + row.id
+	switch {
+	case row.attack:
+		j.attacks++
+		if bounded.Stricter(on, off) != on {
+			t.Errorf("%s: lane on %s is below lane off %s (raise-only)", where, on, off)
+		}
+		if bounded.Stricter(on, floor) != on {
+			j.failed[row.id] = true
+			if _, pending := det111R1VerdictPending[row.id]; !pending {
+				t.Errorf("%s %q: %s, want at least %s", where, command, on, floor)
+			}
+		}
+	case row.benign:
+		if bounded.Stricter(on, off) != off {
+			t.Errorf("%s %q: benign row raised by the lane: %s, lane off %s", where, command, on, off)
+		}
+	}
+}
+
+func (j *det111R1Judge) finish(t *testing.T) {
+	t.Helper()
+	if j.attacks == 0 {
+		t.Fatal("no attack rows judged")
+	}
+}
+
+// TestDET111R1BodiesPendingRowsStillFail keeps det111R1VerdictPending honest:
+// a pending row that reaches the unknown tier in every cell must leave it.
+func TestDET111R1BodiesPendingRowsStillFail(t *testing.T) {
+	home := det111R1Home(t)
+	rewrite := strings.NewReplacer("/home/alice", home, "/Users/alice", home)
+	cwd := filepath.Join(home, "proj")
+	rows := loadDET111R1Rows(t, func(platform, dialect string) bool {
+		return dialect == "posix" && (platform == "linux" || platform == "macos")
+	})
+	j := newDET111R1Judge(t)
+	seen := map[string]bool{}
+	for _, tier := range boundedTestTiers {
+		for _, route := range det111R1Routes() {
+			api := gap0589TierAPI(t, route.connector, tier.posture, tier.managed, tier.tier)
+			for _, row := range rows {
+				if _, pending := det111R1VerdictPending[row.id]; !pending || !row.attack {
+					continue
 				}
-				if probe {
-					t.Logf("ROW\t%s\t%s\t%s\t%s\toff=%s\ton=%s", tier.name, route.name, row.id, row.role, off, on)
-				}
-				where := tier.name + " " + route.name + " " + row.id
-				switch {
-				case row.attack:
-					attacks++
-					if bounded.Stricter(on, off) != on {
-						t.Errorf("%s: lane on %s is below lane off %s (raise-only)", where, on, off)
-					}
-					ok := bounded.Stricter(on, floor) == on
-					if !ok {
-						failed[row.id] = true
-						if _, pending := det111R1VerdictPending[row.id]; !pending {
-							t.Errorf("%s %q: %s, want at least %s", where, command, on, floor)
-						}
-					}
-				case row.benign:
-					if bounded.Stricter(on, off) != off {
-						t.Errorf("%s %q: benign row raised by the lane: %s, lane off %s", where, command, on, off)
-					}
-				}
+				seen[row.id] = true
+				j.judge(t, api, t.Context(), tier.name, bounded.Unknown(tier.tier), route, cwd, row, rewrite.Replace(row.command), false, false)
 			}
 		}
 	}
 	for id, why := range det111R1VerdictPending {
-		if !failed[id] {
-			t.Errorf("%s reaches the unknown tier now: remove it from det111R1VerdictPending (%s)", id, why)
+		if seen[id] && !j.failed[id] {
+			t.Errorf("%s reaches the unknown tier in every cell now: remove it from det111R1VerdictPending (%s)", id, why)
 		}
 	}
-	if attacks == 0 {
-		t.Fatal("no attack rows judged")
+}
+
+// det111R1WindowsRoutes are the routes of a Windows hook host: the
+// PowerShell tool of claudecode and the codex shell for PowerShell rows, the
+// claudecode Bash tool (Git Bash) for POSIX rows.
+func det111R1WindowsRoutes(dialect string) []det111R1Route {
+	if dialect == "posix" {
+		return []det111R1Route{{"claudecode Bash (Git Bash)", "claudecode", func(t *testing.T, api *APIServer, ctx context.Context, cwd, command string) string {
+			return api.evaluateClaudeCodeHook(ctx, claudeCodeHookRequest{
+				HookEventName: "PreToolUse", SessionID: "det111-r1w", CWD: cwd, ToolName: "Bash",
+				ToolInput: map[string]interface{}{"command": command},
+			}).Action
+		}}}
 	}
+	return []det111R1Route{
+		{"claudecode PowerShell", "claudecode", func(t *testing.T, api *APIServer, ctx context.Context, cwd, command string) string {
+			return api.evaluateClaudeCodeHook(ctx, claudeCodeHookRequest{
+				HookEventName: "PreToolUse", SessionID: "det111-r1w", CWD: cwd, ToolName: "PowerShell",
+				ToolInput: map[string]interface{}{"command": command},
+			}).Action
+		}},
+		{"codex shell", "codex", func(t *testing.T, api *APIServer, ctx context.Context, cwd, command string) string {
+			return api.evaluateCodexHook(ctx, codexHookRequest{
+				HookEventName: "PreToolUse", ToolName: "shell", CWD: cwd,
+				ToolInput: map[string]interface{}{"command": command},
+			}).Action
+		}},
+	}
+}
+
+// TestDET111R1BodiesVerdictWindowsHost runs the Windows rows on a Windows
+// hook host in the managed cells, where the managed hook peer carries the
+// account's profile (C:\Users\alice, the rows' home). A Linux test gateway
+// has no Windows profile of its own, so the per-user Windows cells run
+// natively (s7-winslot).
+func TestDET111R1BodiesVerdictWindowsHost(t *testing.T) {
+	gap0589WindowsHost(t)
+	rows := loadDET111R1Rows(t, func(platform, dialect string) bool {
+		return platform == "windows" && (dialect == "posix" || dialect == "powershell")
+	})
+	if len(rows) < 40 {
+		t.Fatalf("only %d Windows rows: the corpus copy lost rows", len(rows))
+	}
+	defer func(saved map[string]string) { det111R1VerdictPending = saved }(det111R1VerdictPending)
+	det111R1VerdictPending = det111R1WindowsPending
+	laneOff := os.Getenv("DET111_R1_LANE") == "off"
+	probe := os.Getenv("DET111_R1_PROBE") != ""
+	ctx := withManagedHookPeer(t.Context(), managedHookPeer{Home: `C:\Users\alice`})
+	j := newDET111R1Judge(t)
+	for _, tier := range boundedTestTiers {
+		if !tier.managed {
+			continue
+		}
+		for _, dialect := range []string{"posix", "powershell"} {
+			for _, route := range det111R1WindowsRoutes(dialect) {
+				api := gap0589TierAPI(t, route.connector, tier.posture, tier.managed, tier.tier)
+				for _, row := range rows {
+					if row.dialect != dialect {
+						continue
+					}
+					j.judge(t, api, ctx, tier.name, bounded.Unknown(tier.tier), route, `C:\Users\alice\proj`, row, row.command, laneOff, probe)
+				}
+			}
+		}
+	}
+	j.finish(t)
 }
