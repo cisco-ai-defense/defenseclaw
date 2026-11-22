@@ -37,9 +37,9 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/substrate/reasons"
 )
 
-// substrateSecretMaxBytes is the largest value the gateway takes (64 KiB,
+// substrateSecretMaxBytes is the largest value the gateway takes (56 KiB,
 // reason value_required); a source that gives more is refused here.
-const substrateSecretMaxBytes = 64 << 10
+const substrateSecretMaxBytes = 56 << 10
 
 var (
 	// substrateSourceGOOS is runtime.GOOS; tests change it to reach the
@@ -193,7 +193,7 @@ func substrateSourceErr(code, detail string) error {
 // substrateSourceValue trims one trailing line end and checks the size.
 func substrateSourceValue(v, from string) (string, error) {
 	if len(v) > substrateSecretMaxBytes {
-		return "", fmt.Errorf("the value from %s is over 64 KiB", from)
+		return "", fmt.Errorf("the value from %s is over 56 KiB", from)
 	}
 	v = strings.TrimRight(v, "\r\n")
 	if v == "" {
@@ -289,7 +289,7 @@ func runSubstrateSourceTool(ctx context.Context, tool substrateSourceTool, args 
 		return "", substrateSourceErr("secret_source_failed", detail)
 	}
 	if out.over {
-		return "", fmt.Errorf("the value from %s is over 64 KiB", tool.name)
+		return "", fmt.Errorf("the value from %s is over 56 KiB", tool.name)
 	}
 	v, err := substrateSourceValue(value, tool.name)
 	if err != nil {

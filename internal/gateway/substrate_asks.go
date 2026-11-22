@@ -126,7 +126,19 @@ func (a *APIServer) substrateDecideAsk(st *substrateState) http.HandlerFunc {
 			writeSubstrateJSONError(w, http.StatusNotFound, "ask_not_found")
 			return
 		case asks.IsDecided(err):
-			writeSubstrateJSONError(w, http.StatusConflict, "ask_already_answered")
+			// An administrator answering a binding ask again the same way
+			// applies that answer to the binding again: the binding write
+			// of the first answer may have failed (RV4 F2).
+			again, ok, berr := a.substrateReapplyBindingDecision(r.Context(), st, c, r.PathValue("id"), in.Decision)
+			switch {
+			case !ok:
+				writeSubstrateJSONError(w, http.StatusConflict, "ask_already_answered")
+			case berr != nil:
+				fmt.Fprintf(os.Stderr, "[substrate] binding of ask %s not moved: %v\n", again.ID, berr)
+				writeSubstrateJSONError(w, http.StatusBadGateway, "secret_not_stored")
+			default:
+				writeSubstrateJSON(w, http.StatusOK, askView(again))
+			}
 			return
 		case asks.IsAdminOnly(err):
 			writeSubstrateJSONError(w, http.StatusForbidden, "ask_admin_only")

@@ -199,6 +199,9 @@ type SubstrateConfig struct {
 	// KeyReplay reads substrate.launcher.key_replay live for launchers
 	// (B3.1); nil reports ask.
 	KeyReplay func() string
+	// UploadScan reads substrate.launcher.upload_scan live for launchers
+	// (B1); nil reports the defaults.
+	UploadScan func() config.SubstrateUploadScanConfig
 	// FilesPush and FilesSync read substrate.files.push and .sync live;
 	// nil reports on.
 	FilesPush func() bool

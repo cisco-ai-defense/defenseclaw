@@ -192,6 +192,8 @@ type substratePullFlags struct {
 	// pushBranch pushes the agent's work to its origin as this branch
 	// (B2 2.4, Preview).
 	pushBranch string
+	// restoreSecrets is --restore-secret-lines (B1 S9a).
+	restoreSecrets bool
 }
 
 func newSubstratePullCmd() *cobra.Command {
@@ -226,6 +228,7 @@ that safe answer, so --apply --yes writes nothing and says why; after you review
 	fl.BoolVar(&f.allowFlagged, "allow-flagged", false, "with --apply or --push-branch: also take the flagged files (review them first)")
 	fl.StringVar(&f.pushBranch, "push-branch", "", "push the agent's work to its origin as a new branch of this name (Preview)")
 	fl.DurationVar(&f.timeout, "timeout", 0, "stop reading the agent's work after this long (default 10m)")
+	fl.BoolVar(&f.restoreSecrets, "restore-secret-lines", false, "in files uploaded with credentials replaced, keep the agent's changed lines with the value put back (default: keep your line)")
 	return cmd
 }
 

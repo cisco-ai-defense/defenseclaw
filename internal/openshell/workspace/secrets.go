@@ -31,6 +31,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
@@ -106,6 +107,12 @@ type secretScanOptions struct {
 	// unmaskAsked are the run's own --unmask values (a copy names each one
 	// that matches no file it takes).
 	unmaskAsked []string
+	// rewrite, maxFileBytes, timeBudget and clock tune a copy's upload
+	// scan (StageOptions.RewriteSecrets, ScanMaxFileBytes, ScanTimeBudget).
+	rewrite      string
+	maxFileBytes int64
+	timeBudget   time.Duration
+	clock        func() time.Time
 }
 
 // trackedEntry is a path in the project's index.

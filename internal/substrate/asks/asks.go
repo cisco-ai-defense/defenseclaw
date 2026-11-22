@@ -232,8 +232,13 @@ type Store struct {
 	Expiry    time.Duration
 	Now       func() time.Time
 
-	mu        sync.Mutex
-	asks      map[string]*Ask
+	mu   sync.Mutex
+	asks map[string]*Ask
+	// deciding holds the asks with a decision in flight (between the
+	// pending check and the write): a second decision is refused and the
+	// expiry leaves them alone, so only one answer is ever recorded and
+	// returned as a success (RV4 F1).
+	deciding  map[string]bool
 	decisions []Decision
 	log       *os.File
 }
@@ -315,7 +320,7 @@ func (s *Store) remove(id string) {
 // expire marks pending asks past their time expired (and records it).
 func (s *Store) expire(now time.Time) {
 	for _, a := range s.asks {
-		if a.State == StatePending && !a.Expires.IsZero() && now.After(a.Expires) {
+		if a.State == StatePending && !a.Expires.IsZero() && now.After(a.Expires) && !s.deciding[a.ID] {
 			a.State, a.DecidedAt = StateExpired, now
 			s.persist(a)
 			s.appendLocked(Decision{At: now, Atespace: a.Atespace, Actor: a.Actor, UID: a.UID, OwnerID: a.OwnerID,
@@ -413,6 +418,14 @@ func (s *Store) Resolve(ctx context.Context, in ResolveRequest) (Ask, error) {
 		s.mu.Unlock()
 		return Ask{}, &leader.WireError{Code: "admin_only", Message: ErrAdminOnly.Error()}
 	}
+	if s.deciding[in.ID] {
+		s.mu.Unlock()
+		return Ask{}, &leader.WireError{Code: "decided", Message: ErrDecided.Error()}
+	}
+	if s.deciding == nil {
+		s.deciding = map[string]bool{}
+	}
+	s.deciding[in.ID] = true
 	out := *a
 	s.mu.Unlock()
 	out.State, out.DecidedBy, out.DecidedAt, out.Note = StateDenied, in.CallerID, now, truncate(in.Note, 512)
@@ -424,16 +437,24 @@ func (s *Store) Resolve(ctx context.Context, in ResolveRequest) (Ask, error) {
 			out.Always = false
 		} else if s.OnApprove != nil {
 			if err := s.OnApprove(ctx, out); err != nil {
+				s.mu.Lock()
+				delete(s.deciding, in.ID)
+				s.mu.Unlock()
 				return Ask{}, err
 			}
 		}
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if cur, ok := s.asks[in.ID]; ok && cur.State == StatePending {
-		*cur = out
-		s.persist(cur)
+	delete(s.deciding, in.ID)
+	cur, ok := s.asks[in.ID]
+	if !ok || cur.State != StatePending {
+		// The actor's close got there first (CloseActor): this answer is
+		// not recorded, and the caller is told so (RV4 F1).
+		return Ask{}, &leader.WireError{Code: "decided", Message: ErrDecided.Error()}
 	}
+	*cur = out
+	s.persist(cur)
 	s.appendLocked(Decision{At: now, Atespace: out.Atespace, Actor: out.Actor, UID: out.UID, OwnerID: out.OwnerID,
 		Source: "ask", Tool: firstNonEmpty(out.Tool, out.Host), Verdict: out.State, Reason: out.Note, DecidedBy: in.CallerID})
 	return out, nil

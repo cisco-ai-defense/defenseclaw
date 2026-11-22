@@ -156,6 +156,7 @@ func (a *APIServer) newSubstrateAdminHandler(st *substrateState) http.Handler {
 		writeSubstrateJSON(w, http.StatusOK, map[string]any{
 			"workspace_max_bytes": substrateWorkspaceMax(st.cfg.WorkspaceMaxBytes),
 			"key_replay":          substrateKeyReplay(st.cfg.KeyReplay),
+			"upload_scan":         substrateUploadScan(st.cfg.UploadScan),
 			"files":               map[string]bool{"push": substrateSwitch(st.cfg.FilesPush), "sync": substrateSwitch(st.cfg.FilesSync)},
 			"git":                 substrateLauncherGit(st.cfg.Git),
 		})
@@ -952,6 +953,19 @@ func substrateLauncherGit(read func() config.SubstrateGitConfig) map[string]any 
 	}
 	return map[string]any{"https_rewrite": g.EffectiveHTTPSRewrite(), "submodules": g.SubmodulesOn(), "lfs": g.LFSOn(),
 		"push_branch_effective": g.EffectivePushBranch()}
+}
+
+// substrateUploadScan is substrate.launcher.upload_scan for launchers, its
+// defaults filled in (replace, token, 8 MiB, 120s) when not wired or unset.
+func substrateUploadScan(read func() config.SubstrateUploadScanConfig) map[string]any {
+	var u config.SubstrateUploadScanConfig
+	if read != nil {
+		u = read()
+	}
+	return map[string]any{
+		"max_file_bytes": u.EffectiveMaxFileBytes(), "time_budget": u.EffectiveTimeBudget().String(),
+		"secret_action": u.EffectiveSecretAction(), "placeholder_form": u.EffectivePlaceholderForm(),
+	}
 }
 
 // substrateKeyReplay is substrate.launcher.key_replay for launchers; ask when

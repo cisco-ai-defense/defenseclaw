@@ -100,6 +100,17 @@ config:
       max_store_mb: 1024
   substrate:
     enabled: true
+    # The launchers' secret scan of a project copy before upload (Preview).
+    # secret_action replace (default) uploads a file with each credential
+    # replaced by a placeholder; hold_back keeps the whole file on the
+    # person's computer (the admin-off switch). Files over max_file_bytes,
+    # or past time_budget, are named in the run's report.
+    # launcher:
+    #   upload_scan:
+    #     max_file_bytes: 8388608
+    #     time_budget: 120s
+    #     secret_action: replace
+    #     placeholder_form: token
     supported_versions: ">=1.0.0 <1.1.0"
     identity:
       # Unique per cluster (E13): doctor fails when two clusters share one.
