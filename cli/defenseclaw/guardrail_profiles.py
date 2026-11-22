@@ -154,6 +154,9 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             "ca7e62eec5d39e2f6f1f3eeec648c25c5bfd32c19d05380e19aa44aaa1bddf1e",
             # 1.0.10 (s7/rules-fu12, rel-1-0-10:GAP-1574): cognitive.yaml CRITICAL -> HIGH (87a7927568).
             "6a7668cde7efc0eb7ec557a04a205a7416a4edd9e6f0f39c0a9d7a8597f4b870",
+            # 1.0.11 (t6/close-auth CLOSE-AUTH stages 2/3, substrate-1 GAP-0727): SEC-AWS-SECRET also matches
+            # the spaced, dashed and quoted key spellings and an access-key id followed by its secret.
+            "b8d2429990d76d73d9ff909ed8f7f9b848d0bef33fe887b0ce4d69f6690f7cb0",
         }
     ),
     "permissive": frozenset(
