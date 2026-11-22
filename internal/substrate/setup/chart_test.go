@@ -136,6 +136,9 @@ func TestChartRefusesBadValues(t *testing.T) {
 		"user secrets in kube-system":         "config.substrate.self_service_secrets.namespace=kube-system",
 		"user secrets in default":             "config.substrate.self_service_secrets.namespace=default",
 		"user secrets with the admin secrets": "config.substrate.self_service_secrets.namespace=defenseclaw-actor-secrets",
+		// RV4 F7 (GAP-0782): never an atespace where actors run.
+		"user secrets in a managed atespace":  "managedAtespaces={team-a},config.substrate.self_service_secrets.namespace=team-a",
+		"user secrets in a launcher atespace": "config.substrate.launcher_atespaces.dev={team-b},config.substrate.self_service_secrets.namespace=team-b",
 	} {
 		args := []string{"template", "dc", chartDir, "--kube-version", chartKubeVersion, "--set", set}
 		if err := exec.Command(helm, args...).Run(); err == nil {

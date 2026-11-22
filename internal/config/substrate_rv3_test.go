@@ -83,3 +83,13 @@ func TestB1SelfServiceNamespaceAndBasicUserRV3(t *testing.T) {
 		}
 	}
 }
+
+// TestRV4F7SelfServiceNamespaceNotALauncherAtespace (RV4 F7).
+func TestRV4F7SelfServiceNamespaceNotALauncherAtespace(t *testing.T) {
+	s := validSubstrate()
+	s.LauncherAtespaces = map[string][]string{"eng": {"eng-web"}}
+	s.SelfServiceSecrets.Namespace = "eng-web"
+	if err := s.Validate(); err == nil || !strings.Contains(err.Error(), "self_service_secrets.namespace") {
+		t.Errorf("a launcher atespace as the self-service namespace: %v", err)
+	}
+}
