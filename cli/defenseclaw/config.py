@@ -2326,9 +2326,10 @@ class EnterpriseOpenShellConfig:
     """``enterprise.openshell`` as far as Python reads it: the compute driver.
 
     The other keys (``install``, ``driver_fallback``, ``version``,
-    ``gateway_port``, ``e2fsprogs_dir``) are the administrator's and the
-    lifecycle's (internal/config/enterprise.go); Python never reads them, so
-    it does not model them. They are not per-user ``openshell.*`` keys: a
+    ``gateway_port``, ``e2fsprogs_dir``, ``allow_downgrade``) are the
+    administrator's and the lifecycle's (internal/config/enterprise.go);
+    Python never reads them, so it does not model them. They are not
+    per-user ``openshell.*`` keys: a
     per-user config.yaml that carries one under ``openshell:`` is refused by
     the schema, and the per-user OpenShell gateway port is fixed (17670).
     """

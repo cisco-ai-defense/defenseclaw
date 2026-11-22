@@ -96,3 +96,81 @@ func TestGAP1781SetupPinBelowWhatAnAccountRan(t *testing.T) {
 		t.Errorf("warned without a migrated database: %q", w)
 	}
 }
+
+// gap1781AccountDB puts a file where a's OpenShell gateway database goes.
+func gap1781AccountDB(t *testing.T, h *osHost, a SandboxAccount) {
+	t.Helper()
+	db := filepath.Join(h.env.P(a.Home), ".local", "state", "openshell", "gateway", "openshell.db")
+	if err := os.MkdirAll(filepath.Dir(db), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(db, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// rel-1-0-10:GAP-1781 (review P2-1): the install record and the gateway
+// database are the account's own files. A record forged to a release this
+// host never applied, with any file at the database path, must not refuse
+// the unchanged pin (ensure only warns); a real lowering below the applied
+// pin still refuses and asks for the applied release, never the forged one.
+func TestGAP1781ForgedInstallRecordCannotBlockEnsure(t *testing.T) {
+	setup := func(version string) map[string]any {
+		return map[string]any{"install": "setup", "driver": "docker", "version": version}
+	}
+	const forged = "0.2.0"
+	h := newOSHost(t, "linux")
+	requireOK(t, h.ensure(sandboxConfig(t, "linux", true, setup(openshell.InstallerVersion))))
+	h.installTarballFiles(t, h.alice, forged)
+	gap1781AccountDB(t, h, h.alice)
+
+	r := h.ensure(sandboxConfig(t, "linux", true, setup(openshell.InstallerVersion)))
+	requireOK(t, r)
+	if w := messagesOf(r.Warnings, "openshell_downgrade"); !strings.Contains(w, h.alice.Name+"'s OpenShell install record names "+forged+
+		", above enterprise.openshell.version "+openshell.InstallerVersion) || strings.Contains(w, "allow_downgrade") {
+		t.Errorf("record-only warning = %q", w)
+	}
+
+	r = h.ensure(sandboxConfig(t, "linux", true, setup(openshell.SupportedMin)))
+	all := fmt.Sprint(r.Errors, r.Warnings)
+	if r.OK || !strings.Contains(all, h.alice.Name+" (OpenShell "+openshell.InstallerVersion+")") ||
+		!strings.Contains(all, "Set enterprise.openshell.version to "+openshell.InstallerVersion+" or newer") || strings.Contains(all, forged) {
+		t.Fatalf("a lowering below the applied pin is not refused at the applied release: %+v", r)
+	}
+
+	// Applied at the floor: a record above it does not refuse the floor pin.
+	h2 := newOSHost(t, "linux")
+	requireOK(t, h2.ensure(sandboxConfig(t, "linux", true, setup(openshell.SupportedMin))))
+	h2.installTarballFiles(t, h2.alice, openshell.InstallerVersion)
+	gap1781AccountDB(t, h2, h2.alice)
+	requireOK(t, h2.ensure(sandboxConfig(t, "linux", true, setup(openshell.SupportedMin))))
+}
+
+// A refusal names a release this build installs, or says it installs none.
+func TestGAP1781RefusalNamesAnInstallableRelease(t *testing.T) {
+	min, err := openshell.ParseVersion(openshell.SupportedMin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := setupPinAtOrAbove(min), "Set enterprise.openshell.version to "+openshell.SupportedMin+" or newer"; got != want {
+		t.Errorf("setupPinAtOrAbove(%s) = %q, want %q", openshell.SupportedMin, got, want)
+	}
+	far, err := openshell.ParseVersion("99.0.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := setupPinAtOrAbove(far); !strings.Contains(got, "installs no OpenShell release at or above 99.0.0") || strings.Contains(got, "or newer") {
+		t.Errorf("setupPinAtOrAbove(99.0.0) = %q", got)
+	}
+}
+
+// enterprise.openshell.allow_downgrade is a setup-mode key: with install:
+// prerequisite ensure says it is ignored (review P4-1).
+func TestAllowDowngradeWithPrerequisiteWarns(t *testing.T) {
+	h := newOSHost(t, "linux")
+	r := h.ensure(sandboxConfig(t, "linux", true, map[string]any{"install": "prerequisite", "driver": "docker", "allow_downgrade": true}))
+	requireOK(t, r)
+	if w := messagesOf(r.Warnings, "openshell_downgrade"); !strings.Contains(w, "applies to install: setup only and is ignored with install: prerequisite") {
+		t.Errorf("allow_downgrade with prerequisite warning = %q", w)
+	}
+}

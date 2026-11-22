@@ -460,6 +460,10 @@ type openshellPlan struct {
 	// ensure warns for each (rel-1-0-10:GAP-1781). The switch then removes
 	// their install record, so only this plan still knows them.
 	downgraded []accountAbovePin
+	// recordOnly are the accounts whose own install record names a release
+	// above the pin that this host never applied above it: ensure warns
+	// and does not refuse (accountAbovePin).
+	recordOnly []accountAbovePin
 	settings   openshellSettings
 	rendered   openshell.RenderedGateway
 	files      []desiredFile
@@ -520,8 +524,15 @@ func (l *lifecycle) planOpenShell(ctx context.Context, p *plan) error {
 	// already ran leaves that account's gateway unable to open its
 	// database (rel-1-0-10:GAP-1781). describeOpenShell warns for each one
 	// that allow_downgrade lets through (op.downgraded).
+	// Only a release root applied counts: each account's record is capped
+	// at the setup pin this host last applied, so an unchanged pin never
+	// refuses, whatever an account writes in its own home.
 	if settings.Install == config.EnterpriseOpenShellInstallSetup {
-		op.downgraded = env.accountsAboveSetupPin(ctx, settings.Version)
+		applied := ""
+		if a := l.openShellAppliedForPlan(); a != nil && a.Install == config.EnterpriseOpenShellInstallSetup {
+			applied = a.Version
+		}
+		op.downgraded, op.recordOnly = splitAbovePin(env.accountsAboveSetupPin(ctx, settings.Version, applied))
 		if len(op.downgraded) > 0 && !settings.AllowDowngrade {
 			return errors.New(setupPinDowngradeRefusal(settings.Version, op.downgraded))
 		}

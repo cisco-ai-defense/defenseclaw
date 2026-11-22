@@ -122,6 +122,10 @@ func (l *lifecycle) describeOpenShell(ctx context.Context) {
 		r.AddWarning(codeOpenShellPinRaised, fmt.Sprintf("enterprise.openshell.version pins %s below the OpenShell %s floor; the effective requirement is %s. Set the pin to %s; an account with a running sandbox keeps its current runtime until that sandbox stops",
 			settings.RaisedFrom, openshell.SupportedMin, settings.Version, settings.Version))
 	}
+	if settings.AllowDowngrade && settings.Install != config.EnterpriseOpenShellInstallSetup {
+		r.AddWarning(codeOpenShellDowngrade, fmt.Sprintf("enterprise.openshell.allow_downgrade applies to install: setup only and is ignored with install: %s, "+
+			"where the administrator's own OpenShell install sets the release; remove the key", settings.Install))
+	}
 	primary, fallback := env.checkOpenShellDrivers(ctx, settings)
 	l.noteOpenShellCapability(ctx, settings, true, primary, fallback)
 	fallbackReady := fallback != nil && rowsReady(fallback)
@@ -182,6 +186,9 @@ func (l *lifecycle) describeOpenShell(ctx context.Context) {
 		if l.osPlan != nil {
 			for _, a := range l.osPlan.downgraded {
 				r.AddWarning(codeOpenShellDowngrade, setupPinDowngradeWarning(settings.Version, a))
+			}
+			for _, a := range l.osPlan.recordOnly {
+				r.AddWarning(codeOpenShellDowngrade, setupPinRecordOnlyWarning(settings.Version, a))
 			}
 		}
 	}
