@@ -370,7 +370,7 @@ Fleet and Edge `DCLAW_*` variables marked `allow` are read by the Go or C servic
 These variables exist for DefenseClaw's own test suites. Do not set them on a real install.
 
 <Accordions type="single">
-<Accordion title="Show the 170 test-only variables">
+<Accordion title="Show the 171 test-only variables">
 
 | Variable | What it does |
 | --- | --- |
@@ -412,6 +412,7 @@ These variables exist for DefenseClaw's own test suites. Do not set them on a re
 | `DEFENSECLAW_HOOK_BURST_PROBE`<br/>Default: `unset`<br/>Values: `1`, `unset`<br/>Managed host: `ignore` | Enables the opt-in hook burst probe test.<br/>**Read by:** `internal/gateway/hook_burst_probe_test.go` |
 | `DEFENSECLAW_HOOK_BURST_WARM`<br/>Default: `unset`<br/>Values: `non-negative integer`, `unset`<br/>Managed host: `ignore` | Sets the number of hook calls written before the probe burst.<br/>**Read by:** `internal/gateway/hook_burst_probe_test.go` |
 | `DEFENSECLAW_HOOK_BURST_WORKERS`<br/>Default: `unset`<br/>Values: `non-negative integer`, `unset`<br/>Managed host: `ignore` | Sets the number of concurrent callers in the probe burst.<br/>**Read by:** `internal/gateway/hook_burst_probe_test.go` |
+| `DEFENSECLAW_HOOK_BYTES_PAIRS`<br/>Default: `unset`<br/>Values: `positive integer`, `unset`<br/>Managed host: `ignore` | Sets the number of tool-call pairs the audit-bytes-per-hook-post measurement posts (default 150).<br/>**Read by:** `internal/gateway/hook_audit_bytes_per_post_test.go` |
 | `DEFENSECLAW_HOOK_DELEGATED_ADMISSION_TEST_ROOT`<br/>Default: `unset`<br/>Values: `test-defined absolute directory path`, `unset`<br/>Managed host: `ignore` | Selects the isolated protected runtime root for the delegated hook-admission helper subprocess.<br/>**Read by:** `internal/hookruntime/delegation_windows_test.go` |
 | `DEFENSECLAW_HOOK_DELEGATION_TEST_HELPER`<br/>Default: `unset`<br/>Values: `1`, `unset`<br/>Managed host: `ignore` | Selects the isolated stable-hook delegation helper subprocess.<br/>**Read by:** `internal/hookruntime/delegation_windows_test.go` |
 | `DEFENSECLAW_HOOK_FLOOD_CALLS`<br/>Default: `unset`<br/>Values: `non-negative integer`, `unset`<br/>Managed host: `ignore` | Sets the number of hook calls in each probe flood.<br/>**Read by:** `internal/gateway/hook_flood_probe_test.go` |
