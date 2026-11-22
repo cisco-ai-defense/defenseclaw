@@ -210,10 +210,18 @@ type ToolInspectVerdict struct {
 	// verdict. Never serialized.
 	laneVerdict bool
 	// decisionConfirm reports that the confirm action came from the
-	// decision model answering without the LLM judge (cascade 2). Where the
-	// agent cannot ask, such a confirm is the HIGH alert the judge mapping
-	// gives, not a block (decisionConfirmWithoutAsk). Never serialized.
+	// decision model answering without the LLM judge (cascade 2), or only
+	// from a tier-table confirm floor (decide.Output.FloorConfirm: the
+	// default tier's ask on a ticket request, GAP-0067). Where the agent
+	// cannot ask, such a confirm is an alert, not a block
+	// (decisionConfirmWithoutAsk). Never serialized.
 	decisionConfirm bool
+	// floorConfirm marks a tool-route verdict whose confirm came from a
+	// tier-table confirm floor; with decisionConfirm still set (no other
+	// lane confirmed or changed the action) the /inspect/tool route answers
+	// it with an alert where the caller cannot ask
+	// (resolveOpenClawInspectConfirm). Never serialized.
+	floorConfirm bool
 	// uninspectedRaised marks an action the uninspected marker raised
 	// (markOversizeUninspected, markContentCut), not one the content that was
 	// read proved: the cascade policy may lower it, but never below the
@@ -934,6 +942,7 @@ func inspectToolTrustedShellCWD(dir string) string {
 // short-circuits there exactly as the message lane does; native hook
 // callers reach this through inspectToolPolicy with context.Background().
 func (a *APIServer) inspectToolPolicyCtx(ctx context.Context, req *ToolInspectRequest) *ToolInspectVerdict {
+	ctx = withCallTargetMemo(ctx)
 	actionTool := req.Tool
 	if strings.EqualFold(strings.TrimSpace(req.Connector), "opencode") {
 		actionTool = agentHookTrustedActionTool(req.Connector, req.Tool, "")
@@ -1193,6 +1202,7 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 	action trustedActionRequest,
 ) *ToolInspectVerdict {
 	action.StrictPolicy = a.strictPolicyTierForHook(ctx, action.Connector)
+	action.PolicyTier, action.Tiers = configTierTable(a.decisionConfig(ctx), action.Connector)
 	action.ManagedInstall = a.managedInstallForHook(ctx)
 	// managed_enterprise: Cisco AI Defense is the sole decision-maker.
 	// Skip static block/allow + MCP-server block, connector regex packs,
@@ -1324,7 +1334,7 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 		)
 		confidence := highestInspectConfidence(ruleFindings, cgFindings, severity)
 
-		runtimeAction := profileMeetActionForFindings(
+		runtimeAction, floorConfirm := profileMeetDecisionForFindings(
 			ctx, a.decisionConfig(ctx), req.Connector, ruleFindings, true, false,
 		)
 		// CodeGuard's findings carry no member and apply to every member.
@@ -1336,6 +1346,8 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 				ctx, a.decisionConfig(ctx), req.Connector, codeGuardSeverity, true, false,
 			)
 			runtimeAction = strongerGuardrailAction(runtimeAction, codeGuardAction)
+			// A CodeGuard confirm or block is the levels' own.
+			floorConfirm = floorConfirm && codeGuardAction != guardrailActionConfirm && runtimeAction == guardrailActionConfirm
 		}
 
 		reasons := make([]string, 0, minInt(len(ruleFindings), 5))
@@ -1366,10 +1378,12 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 			Reason:           fmt.Sprintf("matched: %s", strings.Join(reasons, ", ")),
 			Findings:         findingStrs,
 			DetailedFindings: append(ruleFindings, cgFindings...),
+			decisionConfirm:  floorConfirm,
+			floorConfirm:     floorConfirm,
 		}
 		detectionOnly := len(ruleFindings) > 0 && len(cgFindings) == 0
 		for _, finding := range ruleFindings {
-			if finding.enforcement != findingEnforcementDetectionOnly {
+			if !finding.Proof.Recorded() {
 				detectionOnly = false
 				break
 			}
@@ -2088,7 +2102,7 @@ func clampSourceScopeVerdict(verdict *ToolInspectVerdict) {
 	}
 	for i := range verdict.DetailedFindings {
 		verdict.DetailedFindings[i].Severity = "LOW"
-		verdict.DetailedFindings[i].enforcement = findingEnforcementDetectionOnly
+		verdict.DetailedFindings[i].Proof = verdict.DetailedFindings[i].Proof.Record()
 	}
 }
 
@@ -2903,7 +2917,10 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.Connector = serverConnector
-	r = r.WithContext(openClawInspectIdentity(r.Context(), serverConnector))
+	// The judge keeps the session's task and calls under the connector the
+	// call is scoped to (judgeSessionKeyFor), the one the OpenClaw event
+	// router names for its own turns (GAP-0152).
+	r = r.WithContext(withJudgeSessionConnector(openClawInspectIdentity(r.Context(), serverConnector), serverConnector))
 	r = r.WithContext(withCascadeTrace(r.Context(), a.decisionConfig(r.Context()), serverConnector))
 
 	ctx, cancel := context.WithTimeout(r.Context(), a.inspectScanBudget())
@@ -3316,6 +3333,16 @@ func (a *APIServer) resolveOpenClawInspectConfirm(ctx context.Context, req *Tool
 	}
 	verdict.ApprovalTimeoutMS = int(timeout / time.Millisecond)
 
+	// A confirm that only the tier table's confirm floor gave (the default
+	// tier's ask on a ticket request, rel-1-0-10:GAP-0067) is an alert
+	// where the caller cannot ask, never the fail-closed block below: the
+	// call alerted in 1.0.10 and the ask adds a person, not a refusal.
+	canAsk := strings.EqualFold(a.connectorName(), "openclaw") &&
+		strings.EqualFold(strings.TrimSpace(req.ApprovalSurface), "native")
+	if !canAsk && verdict.floorConfirm && verdict.decisionConfirm {
+		verdict.Action = guardrailActionAlert
+		return
+	}
 	// a HIGH-severity tool call that policy escalated
 	// to `confirm` MUST NOT be downgraded to `alert` when the caller
 	// cannot deliver a human-in-the-loop approval. The previous

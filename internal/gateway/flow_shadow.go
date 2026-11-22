@@ -421,7 +421,6 @@ func runSecretFlowShadow(ctx context.Context, request trustedActionRequest) (fin
 	opts = secretFlowHostOptions(call, opts)
 	cfg.Flavor = opts.Flavor
 	opts.CaseInsensitive = secretFlowCaseInsensitive(cfg.Flavor)
-	opts.Deadline = bound.deadline
 	res := effects.Extract(call, opts)
 	if !bound.alive() {
 		return nil
@@ -489,9 +488,9 @@ func flowShadowFindings(out flow.Result, mode flowLaneMode) []RuleFinding {
 	f.disposition = findingDispositionFlowSecretEgress
 	f.proof = newFindingProof(findingProofFlow, flow.RuleIDEgress, mode == flowLaneOn)
 	if out.Action == flow.ActionAlert {
-		f.enforcement = findingEnforcementAlertOnly
+		f.Proof = f.Proof.Advise()
 	} else {
-		f.enforcement = findingEnforcementInherit
+		f.Proof = f.Proof.Enforce()
 	}
 	return []RuleFinding{f}
 }

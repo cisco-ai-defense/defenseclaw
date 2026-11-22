@@ -103,7 +103,7 @@ func shareBodyUnreadFindings(ctx context.Context, findings []RuleFinding, enforc
 	}
 	return append(findings, RuleFinding{
 		RuleID: shareBodyUnreadRuleID, Severity: "MEDIUM", Confidence: 1,
-		Title:       title,
-		enforcement: findingEnforcementAlertOnly,
+		Title: title,
+		Proof: advisoryProof,
 	})
 }

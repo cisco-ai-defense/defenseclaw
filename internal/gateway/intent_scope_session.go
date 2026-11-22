@@ -39,6 +39,11 @@ type intentScopeSession struct {
 	// task is the bounded task of the turn (toolJudgeUserIntentExcerpt); ""
 	// when the turn has none (a blocked prompt, ClearSessionTask).
 	task string
+	// ownerTyped is set when the connector said the owner typed the turn
+	// (withJudgeTurnSender with judgeTurnSenderOwner): only then does a task
+	// of a connector whose turn text a remote party can write excuse calls
+	// (GAP-1637). It is unset for a session this replica has not seen.
+	ownerTyped bool
 	// targets are the hosts, addresses and paths every user prompt of the
 	// session named: the latest prompt alone does not carry them when it says
 	// "continue".
@@ -63,12 +68,12 @@ func (j *LLMJudge) scopeSessions() *intentScopeSessions {
 
 // observe starts a turn: task (possibly "") replaces the turn's task, and the
 // targets scopeText names join the session's. The git read is kept.
-func (t *intentScopeSessions) observe(key, task, scopeText string, now time.Time) {
+func (t *intentScopeSessions) observe(key, task, scopeText string, ownerTyped bool, now time.Time) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.roomLocked(key, now)
 	entry := t.sessions[key]
-	entry.task, entry.lastSeen = task, now
+	entry.task, entry.ownerTyped, entry.lastSeen = task, ownerTyped, now
 	if task != "" {
 		entry.targets = mergeScopeTargets(entry.targets, scopeText)
 	}
@@ -194,6 +199,12 @@ func (j *LLMJudge) ObserveSessionPromptScope(ctx context.Context, content, scope
 	if sessionID == "" {
 		return
 	}
+	sender := judgeTurnSenderFrom(ctx)
+	if sender == judgeTurnSenderRemote {
+		// A messaging platform's party wrote the turn: it starts a turn with
+		// no task, for the judge and the decision model (GAP-1637).
+		content, scopeText = "", ""
+	}
 	task := ""
 	if content != "" {
 		task = strings.Clone(toolJudgeUserIntentExcerpt(content))
@@ -201,14 +212,16 @@ func (j *LLMJudge) ObserveSessionPromptScope(ctx context.Context, content, scope
 	if err := j.intentStore().ObservePrompt(ctx, sessionID, task); err != nil {
 		j.warnIntentStore("ObservePrompt", "the user's intent is not recorded for the session's next tool calls", err)
 	}
-	j.scopeSessions().observe(sessionID, task, scopeText, time.Now())
+	j.scopeSessions().observe(sessionID, task, scopeText, judgeTurnOwnerTyped(ctx), time.Now())
 	// A new turn starts a new tool chain: its target history goes with the
 	// prior calls.
 	j.judgeTargets().reset(sessionID)
 	// The decision model's history keeps the prompt as a turn and is not
 	// cleared by it. A blocked prompt comes here as "" (observeUserTurn), so
-	// it never enters the history.
-	if content != "" {
+	// it never enters the history. Neither does a turn whose sender is not
+	// known to be the owner: the decision model's state has no field to mark
+	// it unverified, as the judge's SESSION_USER_INTENT is (GAP-1637).
+	if content != "" && sender == judgeTurnSenderOwner {
 		j.recordDecisionHistory(ctx, decisionHistoryEvent{kind: 'u', text: content})
 	}
 }
@@ -261,6 +274,13 @@ func (j *LLMJudge) parentIntent(ctx context.Context, childKey string) (string, s
 func (j *LLMJudge) sessionTaskCleared(sessionID string) bool {
 	entry, ok := j.scopeSessions().get(sessionID)
 	return ok && entry.task == ""
+}
+
+// sessionTaskFromOwner reports a session whose current turn this replica saw
+// and whose connector said the owner typed it (judgeTurnOwnerTyped).
+func (j *LLMJudge) sessionTaskFromOwner(sessionID string) bool {
+	entry, ok := j.scopeSessions().get(sessionID)
+	return ok && entry.ownerTyped
 }
 
 // sessionScopeTargets are the targets the session's prompts named, or nil.

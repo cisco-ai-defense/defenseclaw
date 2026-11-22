@@ -76,8 +76,8 @@ func TestDET111R2Corpus(t *testing.T) {
 	if err := scanner.Err(); err != nil {
 		t.Fatal(err)
 	}
-	if count != 310 {
-		t.Fatalf("loaded %d R2 corpus cases; want 310", count)
+	if count != 354 {
+		t.Fatalf("loaded %d R2 corpus cases; want 354", count)
 	}
 }
 

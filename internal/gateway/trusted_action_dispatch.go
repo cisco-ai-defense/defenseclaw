@@ -40,12 +40,15 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/decide"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/semantic"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/semanticpb"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/tactics"
 	"github.com/defenseclaw/defenseclaw/internal/shellparse"
+	"github.com/defenseclaw/defenseclaw/internal/textlower"
+	"github.com/defenseclaw/defenseclaw/internal/workcount"
 	"mvdan.cc/sh/v3/expand"
 	"mvdan.cc/sh/v3/pattern"
 	"mvdan.cc/sh/v3/syntax"
@@ -162,6 +165,11 @@ type trustedActionRequest struct {
 	EnforcementCapable bool
 	// StrictPolicy grades an unverifiable extra argument as a block.
 	StrictPolicy bool
+	// PolicyTier and Tiers are the hook or proxy tier of the call and its
+	// pack's tier table: the cell a tier gate reads (gateCeiling). Zero is
+	// the default tier of decide.Builtin(); StrictPolicy reads strict.
+	PolicyTier decide.Tier
+	Tiers      *decide.Table
 	// sessionID is the connector's session of the call, for the checks that
 	// follow a session across calls (the page a browser tool has open).
 	sessionID string
@@ -279,6 +287,10 @@ type trustedActionRequest struct {
 	// the dispatch takes it once, at the outermost call, and clears it so a
 	// twin or child request never runs the lane again.
 	recordEffectShadow func(EffectShadowResult)
+	// effectLogin is the hook account's login for the effect lane
+	// (effects.Options.Login), set at the outermost dispatch from the trusted
+	// identity (effectActiveLogin).
+	effectLogin string
 	// Prevent recursive standalone evaluation of an already flattened command.
 	simpleCommandPass bool
 	// stateProofOnly limits the judgment to the rule that proves a write to
@@ -507,7 +519,21 @@ func dispatchTrustedActionOnce(
 	// nested in the handler's own call, or in a twin of this dispatch, it
 	// begins nothing more, rel-1-0-10:GAP-0766).
 	defer hookpaths.HookCall()()
+	// Every cap a pattern expansion of the call hit is the call's one
+	// TRUNCATED reading (the one bound rule): a walk that stopped at its
+	// bound with no protected match before it is at least the unknown tier,
+	// beside what was read, whichever reader ran it; the target scan's walk
+	// no longer holds it as a protected target (rel-1-0-10:GAP-1324). It is
+	// read while the call is open, after every reading and twin below.
+	defer func() {
+		findings = withBoundedTruncation(findings, hookpaths.HookCallState().GlobCut(), request)
+	}()
 	defer func() { findings = markShellProtectedFileFindings(request, findings) }()
+	// The rule name of a link-held state write is settled once, on the
+	// outermost call, after every reading (GAP-1568).
+	if parent == nil || parent.Value(effectShadowContextKey{}) == nil {
+		defer func() { findings = withLinkHeldStateWrites(findings) }()
+	}
 	defer recoverTrustedActionFault(request, &findings)
 	// A call whose shell the tool does not name is judged in the POSIX
 	// reading too, before any bound below decides the call: a credential
@@ -539,6 +565,7 @@ func dispatchTrustedActionOnce(
 	// the lane adds nothing there either: it only raises where they judge.
 	if octx, outermost := markOutermostEffectDispatch(parent); outermost {
 		parent = octx
+		request.effectLogin = effectActiveLogin(parent, request.Input)
 		switch mode := effectsRulesModeFor(); mode {
 		case effectRulesOn:
 			if ManagedEnterpriseActive() && !isSubstrateActorRequest(parent) {
@@ -546,7 +573,7 @@ func dispatchTrustedActionOnce(
 			}
 			effectRequest := request
 			defer func() {
-				findings = append(findings, effectLiveFindings(effectRequest, mode, effectsRulesTierFor())...)
+				findings = joinEffectFindings(findings, effectLiveFindings(effectRequest, mode, effectsRulesTierFor()))
 			}()
 		case effectRulesShadow:
 			// Shadow: compute and record beside today's rules, off the hook's
@@ -594,7 +621,7 @@ func dispatchTrustedActionOnce(
 		}
 	}()
 	if request.targetMemo == nil {
-		request.targetMemo = hookpaths.NewTargetMemo()
+		request.targetMemo = hookpaths.NewTargetMemoIn(callTargetMemo(parent))
 	}
 	if request.ShellStartup != nil {
 		request.targetMemo.WithShellStartup(request.ShellStartup)
@@ -855,7 +882,11 @@ func dispatchTrustedActionOnce(
 	// matches when the shell runs the call (cp a.txt ~/.defenseclaw/conf*.yaml,
 	// GAP-2496); the reading with the matches is judged, and only its block
 	// counts.
-	if twin, ok := stateGlobTwinRequest(request); ok {
+	stateTwin, stateTwinOK, stateTwinCut := stateGlobTwinRequest(request)
+	if stateTwinCut.Any() {
+		defer func() { findings = withBoundedTruncation(findings, stateTwinCut, request) }()
+	}
+	if twin := stateTwin; stateTwinOK {
 		defer func() {
 			twinFindings := dispatchTrustedAction(parent, twin)
 			if request.ProtectedHomeHook {
@@ -1795,25 +1826,23 @@ func dispatchTrustedActionWith(
 				matchedSemanticOwnerIDs[claimedID] = struct{}{}
 			}
 			finding := RuleFinding{
-				RuleID:      candidate.rule.ID,
-				Title:       candidate.rule.Title,
-				Severity:    candidate.rule.Severity,
-				Confidence:  candidate.rule.Confidence,
-				Tags:        append([]string(nil), candidate.rule.Tags...),
-				enforcement: findingEnforcementAllowed,
+				RuleID:     candidate.rule.ID,
+				Title:      candidate.rule.Title,
+				Severity:   candidate.rule.Severity,
+				Confidence: candidate.rule.Confidence,
+				Tags:       append([]string(nil), candidate.rule.Tags...),
 			}
 			if !request.EnforcementCapable ||
 				candidate.owner.detectionOnly || candidate.owner.alertOnly ||
 				!enforcementFacts.EnforcementEligible() ||
 				!enforcementResult.Matched {
-				finding.enforcement = findingEnforcementDetectionOnly
+				finding.Proof = finding.Proof.Record()
 			}
 			if request.EnforcementCapable && candidate.owner.alertOnly {
-				finding.enforcement = findingEnforcementAlertOnly
+				finding.Proof = finding.Proof.Advise()
 			}
-			if candidate.owner.strictEnforced && !request.StrictPolicy &&
-				finding.enforcement == findingEnforcementAllowed {
-				finding.enforcement = findingEnforcementAlertOnly
+			if candidate.owner.strictEnforced && finding.contributesToEnforcement() {
+				finding.Proof = request.tieredProof(finding.Proof, tierGateStrict)
 			}
 			finding = finding.withTrustedActionProof(
 				newActionFactsSemanticFindingProof(
@@ -2093,7 +2122,7 @@ func withActiveStateTargetMention(
 				// script, which the PowerShell reading walks (rel-1-0-10:GAP-1134).
 				// A .NET open that may write the state by a mode or path known
 				// only at run time is the unknown tier (rel-1-0-10:GAP-1138).
-				spelled := strings.Contains(strings.ToLower(command), ".defenseclaw")
+				spelled := strings.Contains(textlower.Lower(command), ".defenseclaw")
 				proven, unknown := spelled && provenCMDSlashCStateWrite(request), false
 				if !proven && (spelled || request.ProtectedHomeHook || strings.HasPrefix(request.Input.ActiveHome, "/")) {
 					proven, unknown = provenPowerShellStateWrite(request)
@@ -2186,9 +2215,9 @@ func withProvenActiveStateMutation(request trustedActionRequest, findings []Rule
 	finding.Severity = severity
 	finding.Title = canonical.Title
 	finding.Tags = canonical.Tags
-	finding.enforcement = findingEnforcementDetectionOnly
+	finding.Proof = finding.Proof.Record()
 	if request.EnforcementCapable {
-		finding.enforcement = findingEnforcementAllowed
+		finding.Proof = finding.Proof.Enforce()
 	}
 	finding = finding.withTrustedActionProof(newFindingProof(findingProofActiveStateMutation, ruleID, true))
 	if index >= 0 {
@@ -5719,9 +5748,9 @@ func withMigratedLiteralRuleFindings(
 		} else {
 			finding = adjustConfidence(request.Input.Tool, finding)
 		}
-		finding.enforcement = findingEnforcementDetectionOnly
+		finding.Proof = finding.Proof.Record()
 		if request.EnforcementCapable {
-			finding.enforcement = findingEnforcementAllowed
+			finding.Proof = finding.Proof.Enforce()
 		}
 		finding = finding.withTrustedActionProof(newActionFactsSubgraphFindingProof(candidate.rule.ID, true, true))
 		if index >= 0 {
@@ -5818,6 +5847,7 @@ func withTwinProvenBlocks(findings, twin []RuleFinding) []RuleFinding {
 			return 2
 		}
 	}
+	findings, twin = withEffectsFoldedEitherWay(findings, twin)
 	for _, proven := range twin {
 		if !proven.contributesToEnforcement() {
 			continue
@@ -5923,6 +5953,7 @@ func withSimpleCommandFindings(findings, alone []RuleFinding) []RuleFinding {
 			return 1
 		}
 	}
+	findings, alone = withEffectsFoldedEitherWay(findings, alone)
 	for _, finding := range alone {
 		key := trustedActionFindingKey(finding.RuleID)
 		index := slices.IndexFunc(findings, func(existing RuleFinding) bool {
@@ -7436,11 +7467,7 @@ func withCradleUnknownTier(findings []RuleFinding, request trustedActionRequest)
 			return findings
 		}
 		proven = true
-		if request.StrictPolicy || request.ManagedInstall {
-			finding.enforcement = findingEnforcementAllowed
-		} else {
-			finding.enforcement = findingEnforcementAlertOnly
-		}
+		finding.Proof = request.tieredProof(finding.Proof, tierGateManaged)
 	}
 	return findings
 }
@@ -7461,7 +7488,7 @@ func withHostTwinFindings(findings, twin []RuleFinding) []RuleFinding {
 	proven := make([]RuleFinding, len(twin))
 	for index, finding := range twin {
 		if finding.contributesToEnforcement() && !finding.proof.authorizes(finding.RuleID) {
-			finding.enforcement = findingEnforcementDetectionOnly
+			finding.Proof = finding.Proof.Record()
 		}
 		proven[index] = finding
 	}
@@ -7547,7 +7574,7 @@ func filterExactFallbackFindings(
 			continue
 		}
 		if hasTag(finding.Tags, trustedParserUncertaintyTag) {
-			finding.enforcement = findingEnforcementDetectionOnly
+			finding.Proof = finding.Proof.Record()
 			filtered = append(filtered, finding)
 			continue
 		}
@@ -7580,9 +7607,9 @@ func filterExactFallbackFindings(
 		}
 		proven = proven || boundedSubgraphProven
 		if contract.alertOnly && enforcementCapable && matched {
-			finding.enforcement = findingEnforcementAlertOnly
+			finding.Proof = finding.Proof.Advise()
 		} else if contract.detectionOnly || !enforcementCapable || !proven {
-			finding.enforcement = findingEnforcementDetectionOnly
+			finding.Proof = finding.Proof.Record()
 			// The contract proved its operation on what the analysis read, but
 			// the call was read only in part, so no enforcing reader ran
 			// (rel-1-0-10:GAP-0892). A detection-only contract never denies
@@ -7590,7 +7617,7 @@ func filterExactFallbackFindings(
 			// (withPartialStateWriteFloor).
 			finding.partialReading = matched && !proofBoundary && enforcementCapable && operandGrammarOnlyReading(facts)
 		} else {
-			finding.enforcement = findingEnforcementAllowed
+			finding.Proof = finding.Proof.Enforce()
 		}
 		if boundedSubgraphProven {
 			finding = finding.withTrustedActionProof(
@@ -8048,17 +8075,16 @@ func appendTrustedBoundedExactFallbackFindings(
 			evidence = input.Tool
 		}
 		finding := RuleFinding{
-			RuleID:      rule.ID,
-			Title:       rule.Title,
-			Severity:    rule.Severity,
-			Confidence:  rule.Confidence,
-			Evidence:    evidence,
-			Tags:        append([]string(nil), rule.Tags...),
-			LineNumber:  1,
-			enforcement: findingEnforcementAllowed,
+			RuleID:     rule.ID,
+			Title:      rule.Title,
+			Severity:   rule.Severity,
+			Confidence: rule.Confidence,
+			Evidence:   evidence,
+			Tags:       append([]string(nil), rule.Tags...),
+			LineNumber: 1,
 		}
 		if contract.boundedRequiresActiveExpression && contract.detectionOnly {
-			finding.enforcement = findingEnforcementDetectionOnly
+			finding.Proof = finding.Proof.Record()
 		}
 		findings = append(findings, adjustConfidence(input.Tool, finding))
 		seen[ruleID] = struct{}{}
@@ -8384,7 +8410,7 @@ func filterTrustedLegacyActionContext(
 	filtered := findings[:0]
 	for _, finding := range findings {
 		if hasTag(finding.Tags, trustedParserUncertaintyTag) {
-			finding.enforcement = findingEnforcementDetectionOnly
+			finding.Proof = finding.Proof.Record()
 			filtered = append(filtered, finding)
 			continue
 		}
@@ -8413,7 +8439,7 @@ func filterTrustedLegacyActionContext(
 			}
 			if readOnlyInspection {
 				finding.Severity = "LOW"
-				finding.enforcement = findingEnforcementDetectionOnly
+				finding.Proof = finding.Proof.Record()
 				filtered = append(filtered, finding)
 				continue
 			}
@@ -8534,16 +8560,16 @@ func trustedLegacyProvenCommandFinding(
 		finding.RuleID,
 		contract,
 	) && (contract.prerequisite == nil || contract.prerequisite(facts)) {
-		finding.enforcement = findingEnforcementDetectionOnly
+		finding.Proof = finding.Proof.Record()
 	}
 	if finding.RuleID == "CMD-EVAL" &&
-		finding.enforcement != findingEnforcementDetectionOnly {
+		!finding.Proof.Recorded() {
 		// eval's operand is only known when it runs, so no parse can prove
 		// the call and the proof boundary left the finding detection-only,
 		// which "defenseclaw alerts" never shows (GAP-2575). An executed
 		// eval with a runtime operand alerts at the connector's threshold
 		// and never confirms or blocks.
-		finding.enforcement = findingEnforcementAlertOnly
+		finding.Proof = finding.Proof.Advise()
 	}
 	if proof, proven := trustedSemanticOwnerFindingProofFromActions(
 		finding.RuleID,
@@ -10531,30 +10557,32 @@ func runTimeShellTwinRequest(request trustedActionRequest) (twin trustedActionRe
 // state files and trees instead (actionfacts.StateGlobTwinNamed): cp a.txt
 // ~/.def*/config.yaml and cp a.txt ~/.defenseclaw/conf*.yaml name
 // config.yaml there too (GAP-2544). Only a block of that reading counts.
-func stateGlobTwinRequest(request trustedActionRequest) (trustedActionRequest, bool) {
+//
+// cut is the caps the expansion hit (more matches than the reading spells, a
+// folder too long to list, the work of the command's patterns used up): the
+// call is then TRUNCATED, at least the unknown tier, and the matches read
+// are still judged (rel-1-0-10:GAP-1017, GAP-1726).
+func stateGlobTwinRequest(request trustedActionRequest) (twin trustedActionRequest, ok bool, cut bounded.CapSet) {
 	if request.SkipLocalFilesystemResolution {
-		return trustedActionRequest{}, false
+		return trustedActionRequest{}, false, cut
 	}
 	if request.Input.DialectHint != actionfacts.DialectPOSIX && request.Input.DialectHint != "" {
-		return trustedActionRequest{}, false
+		return trustedActionRequest{}, false, cut
 	}
 	command, known := trustedBashCommandInput(request.Input)
 	if !known {
-		return trustedActionRequest{}, false
+		return trustedActionRequest{}, false, cut
 	}
-	var (
-		rewritten string
-		ok        bool
-	)
+	var rewritten string
 	if request.ProtectedHomeHook {
-		rewritten, ok = actionfacts.StateGlobTwinNamed(command, request.Input.ActiveHome, activeDefenseClawStateNames)
+		rewritten, ok, cut = actionfacts.StateGlobTwinNamed(command, request.Input.ActiveHome, activeDefenseClawStateNames)
 	} else {
-		rewritten, ok = actionfacts.StateGlobTwin(command, request.Input.ActiveHome)
+		rewritten, ok, cut = actionfacts.StateGlobTwin(command, request.Input.ActiveHome)
 	}
 	if !ok || rewritten == command {
-		return trustedActionRequest{}, false
+		return trustedActionRequest{}, false, cut
 	}
-	return bashReadingRequest(request, command, rewritten), true
+	return bashReadingRequest(request, command, rewritten), true, cut
 }
 
 // trustedReadingCut is the cap at which the reading of a shell call stopped
@@ -10683,7 +10711,9 @@ func withOverBudgetStateMutation(parent context.Context, request trustedActionRe
 	if generation == nil {
 		generation = snapshotRulePackGenerationFor(parent, request.Connector)
 	}
-	twin, hasTwin := stateGlobTwinRequest(request)
+	// The over-budget call already carries its limit finding: the cut of the
+	// state patterns adds nothing to it.
+	twin, hasTwin, _ := stateGlobTwinRequest(request)
 	var twinFacts actionfacts.Facts
 	if hasTwin {
 		twinFacts = actionfacts.Analyze(twin.Input)
@@ -10980,7 +11010,6 @@ func trustedActionLimitFindings(enforcementCapable bool) []RuleFinding {
 	failure := RuleFinding{
 		RuleID: ruleID, Title: "Shell command exceeds policy evaluation limit",
 		Severity: "CRITICAL", Confidence: 1,
-		enforcement: findingEnforcementAllowed,
 	}.withTrustedActionProof(newEvaluationFailureFindingProof(ruleID))
 	return applyTrustedActionProofBoundary([]RuleFinding{failure}, enforcementCapable)
 }
@@ -11043,7 +11072,6 @@ func trustedActionParseFailureFindings(enforcementCapable bool) []RuleFinding {
 	failure := RuleFinding{
 		RuleID: parseFailureRuleID, Title: parseFailureTitle,
 		Severity: "CRITICAL", Confidence: 1,
-		enforcement: findingEnforcementAllowed,
 	}.withTrustedActionProof(newEvaluationFailureFindingProof(parseFailureRuleID))
 	return applyTrustedActionProofBoundary([]RuleFinding{failure}, enforcementCapable)
 }
@@ -11157,20 +11185,20 @@ func unreadPartFindings(title string, enforcementCapable bool) []RuleFinding {
 		// A record, not a finding about the call: it does not raise the
 		// severity of an allowed answer (the alert variants raise it back).
 		findings[index].Severity = "LOW"
-		findings[index].enforcement = findingEnforcementDetectionOnly
+		findings[index].Proof = findings[index].Proof.Record()
 	}
 	return findings
 }
 
 // unreadPartAlert turns unread-part records into the unknown tier as an
-// alert: CRITICAL, capped below confirm and block (findingEnforcementAlertOnly).
+// alert: CRITICAL, capped below confirm and block (the advisory row of the tier table).
 func unreadPartAlert(findings []RuleFinding, enforcementCapable bool) []RuleFinding {
 	if !enforcementCapable {
 		return findings
 	}
 	for index := range findings {
 		findings[index].Severity = "CRITICAL"
-		findings[index].enforcement = findingEnforcementAlertOnly
+		findings[index].Proof = findings[index].Proof.Advise()
 	}
 	return findings
 }
@@ -11379,6 +11407,7 @@ func trustedPowerShellExecutionTool(tool string) bool {
 }
 
 func decodeTrustedTopLevelCommandField(raw json.RawMessage) (string, bool, bool) {
+	workcount.AddLarge(workcount.ArgsDecode, len(raw))
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	opening, err := decoder.Token()
 	if err != nil || opening != json.Delim('{') {
@@ -11524,7 +11553,7 @@ func appendTrustedBashFallbackFindings(
 				// proof cannot upgrade an outer PARTIAL or INVALID shell
 				// expression. Preserve the finding for shadow analysis while
 				// replacing any nested authority with an explicit shadow proof.
-				finding.enforcement = findingEnforcementDetectionOnly
+				finding.Proof = finding.Proof.Record()
 				finding = finding.withTrustedActionProof(
 					newParserShadowFindingProof(finding.RuleID),
 				)
@@ -11540,7 +11569,7 @@ func appendTrustedBashFallbackFindings(
 }
 
 func markTrustedParserUncertainty(finding RuleFinding) RuleFinding {
-	finding.enforcement = findingEnforcementDetectionOnly
+	finding.Proof = finding.Proof.Record()
 	finding.disposition = findingDispositionAudit
 	finding.Severity = "LOW"
 	if finding.Confidence > 0.25 {

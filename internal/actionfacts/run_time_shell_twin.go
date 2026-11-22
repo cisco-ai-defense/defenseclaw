@@ -483,7 +483,16 @@ func runTimeShellTwin(command string, depth int, zeroIsShell bool, reader *shell
 						// substitution writes.
 						body, known = procSubstOutput(redir.Word)
 						hereText = holdsHereText(redir.Word)
+						// The text it writes is the -c STRING of the twin, so
+						// the redirect is left out of it as a here-document
+						// is: kept, the twin judged the same here-document
+						// again as a child of its own, 10 dispatches per
+						// hook call where the call alone takes 2
+						// (rel-1-0-10:GAP-1593).
 						source = nil
+						if known {
+							source = redir
+						}
 					case syntax.DplIn:
 						// bash <&3 after exec 3<<EOF: the reading does not
 						// follow descriptors.
@@ -1356,15 +1365,26 @@ func unescapeHeredocLiteral(text string) string {
 	return out.String()
 }
 
-// stdinRedirectCount is the number of here-strings and here-documents of stmt.
+// stdinRedirectCount is the number of here-strings, here-documents and
+// redirects from one process substitution (< <(...)) of stmt.
 func stdinRedirectCount(stmt *syntax.Stmt) int {
 	count := 0
 	for _, redir := range stmt.Redirs {
-		if redir.Op == syntax.WordHdoc || redir.Op == syntax.Hdoc || redir.Op == syntax.DashHdoc {
+		if redir.Op == syntax.WordHdoc || redir.Op == syntax.Hdoc || redir.Op == syntax.DashHdoc ||
+			redir.Op == syntax.RdrIn && procSubstWord(redir.Word) {
 			count++
 		}
 	}
 	return count
+}
+
+// procSubstWord reports a word that is one process substitution.
+func procSubstWord(word *syntax.Word) bool {
+	if word == nil || len(word.Parts) != 1 {
+		return false
+	}
+	_, ok := word.Parts[0].(*syntax.ProcSubst)
+	return ok
 }
 
 // stdinSourceSpan returns the bytes of command to remove to leave out the

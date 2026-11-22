@@ -672,7 +672,7 @@ func buildPOSIXTable() {
 	add(Program{Names: []string{"install"}, Pos: PosSourcesDest,
 		Flags: fl(map[string]Flag{"-t": {Value: true, Role: RoleWrite}, "--target-directory": {Value: true, Role: RoleWrite},
 			"-m": {Value: true, Role: RoleIgnore}, "-o": {Value: true, Role: RoleIgnore}, "-g": {Value: true, Role: RoleIgnore}, "-S": {Value: true, Role: RoleIgnore}, "--mode": {Value: true, Role: RoleIgnore}},
-			"-v", "-p", "-b", "-T", "-D", "--verbose")})
+			"-v", "-p", "-b", "-T", "-D", "-C", "--no-target-directory", "--verbose")})
 	add(Program{Names: []string{"mv"}, Pos: PosSourcesDest, MovesSources: true,
 		Flags: fl(map[string]Flag{"-t": {Value: true, Role: RoleWrite}, "--target-directory": {Value: true, Role: RoleWrite}, "-S": {Value: true, Role: RoleIgnore},
 			"--update": {Optional: true}, "--backup": {Optional: true}},

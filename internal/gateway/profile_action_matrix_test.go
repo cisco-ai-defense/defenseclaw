@@ -64,17 +64,17 @@ func TestProfileActionMatrix(t *testing.T) {
 	}{
 		{
 			name:     "strict",
-			rulePack: "policies/guardrail/strict",
+			rulePack: levelsShippedPack("strict"),
 			pick:     func(e expect) string { return e.strict },
 		},
 		{
 			name:     "default",
-			rulePack: "policies/guardrail/default",
+			rulePack: levelsShippedPack("default"),
 			pick:     func(e expect) string { return e.def },
 		},
 		{
 			name:     "permissive",
-			rulePack: "policies/guardrail/permissive",
+			rulePack: levelsShippedPack("permissive"),
 			pick:     func(e expect) string { return e.permit },
 		},
 	}

@@ -229,6 +229,17 @@ func capFloorTwin(request trustedActionRequest, text string) trustedActionReques
 		twin.ResolvedWriteTargets = maps.Clone(request.ResolvedWriteTargets)
 		delete(twin.ResolvedWriteTargets, hookpaths.UnprovenReasonKey)
 	}
+	if command, ok := trustedBashCommandInput(request.Input); ok &&
+		clientCarryIsUnknownMention(request, request.ResolvedWriteTargets, command, request.Input.CWD, request.Input.ActiveHome, request.Input.DialectHint) {
+		// The client's protected decision is its reading of the whole call
+		// too: a keys file named beside a program with no write model, the
+		// unknown tier of the call (rel-1-0-10:GAP-0843, GAP-0415), not a
+		// key write of the piece. A piece that reads the keys file is judged
+		// by the gateway readers and the client's resolved operands, as on
+		// a per-user gateway.
+		twin.ResolvedWriteTargets = maps.Clone(twin.ResolvedWriteTargets)
+		delete(twin.ResolvedWriteTargets, hookpaths.ActionDecisionKey)
+	}
 	return twin
 }
 

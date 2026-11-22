@@ -38,6 +38,7 @@ type parseCacheEntry struct {
 	key  parseCacheKey
 	file *syntax.File // the tree as parsed, never handed out
 	ok   bool
+	bash bool // the Bash grammar read the tree (ParseBash)
 	at   time.Time
 }
 
@@ -47,7 +48,7 @@ var parseCache struct {
 }
 
 // cachedParse returns a private copy of the kept tree of command.
-func cachedParse(key parseCacheKey) (file *syntax.File, ok, hit bool) {
+func cachedParse(key parseCacheKey) (file *syntax.File, ok, bash, hit bool) {
 	parseCache.Lock()
 	defer parseCache.Unlock()
 	now := time.Now()
@@ -60,15 +61,15 @@ func cachedParse(key parseCacheKey) (file *syntax.File, ok, hit bool) {
 	parseCache.entries = kept
 	for _, entry := range kept {
 		if entry.key == key {
-			return cloneFile(entry.file), entry.ok, true
+			return cloneFile(entry.file), entry.ok, entry.bash, true
 		}
 	}
-	return nil, false, false
+	return nil, false, false, false
 }
 
 // storeParse keeps a private copy of file; the caller goes on to use file.
-func storeParse(key parseCacheKey, file *syntax.File, ok bool) {
-	entry := parseCacheEntry{key: key, file: cloneFile(file), ok: ok, at: time.Now()}
+func storeParse(key parseCacheKey, file *syntax.File, ok, bash bool) {
+	entry := parseCacheEntry{key: key, file: cloneFile(file), ok: ok, bash: bash, at: time.Now()}
 	parseCache.Lock()
 	defer parseCache.Unlock()
 	if len(parseCache.entries) >= parseCacheEntries {

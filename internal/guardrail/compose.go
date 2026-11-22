@@ -22,8 +22,11 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/decide"
 )
 
 // In-memory rule-pack composition: a loaded base pack plus the
@@ -336,6 +339,14 @@ func cloneRulePackForCompose(base *RulePack) *RulePack {
 				rule.Enabled = &enabled
 			}
 			rule.Tags = append([]string(nil), rule.Tags...)
+			if rule.Keys != nil {
+				keys := RuleKeysYAML{
+					Words:    slices.Clone(rule.Keys.Words),
+					Prefixes: slices.Clone(rule.Keys.Prefixes),
+					Suffixes: slices.Clone(rule.Keys.Suffixes),
+				}
+				rule.Keys = &keys
+			}
 			cloned.Rules[index] = rule
 		}
 		out.RuleFiles = append(out.RuleFiles, &cloned)
@@ -343,13 +354,29 @@ func cloneRulePackForCompose(base *RulePack) *RulePack {
 	return out
 }
 
-// ReadPackPosture returns the "posture" a rule-pack directory's manifest
-// declares (default, strict or permissive), or "" when the manifest is
-// absent, unreadable or names no known posture.
+// ReadPackPosture returns the pack's own tier (default, strict or
+// permissive): the "posture" a rule-pack directory's manifest declares, else
+// the tier field of its tiers.yaml (RulePack.Posture, rel-1-0-10:GAP-1562),
+// or "" when neither names a known tier.
 func ReadPackPosture(dir string) string {
 	if strings.TrimSpace(dir) == "" {
 		return ""
 	}
+	if posture := readManifestPosture(dir); posture != "" {
+		return posture
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, decide.TiersFile))
+	if err != nil || len(raw) > maxRulePackFileBytes {
+		return ""
+	}
+	col, err := decide.ParseColumn(raw)
+	if err != nil {
+		return ""
+	}
+	return col.Tier.String()
+}
+
+func readManifestPosture(dir string) string {
 	raw, err := os.ReadFile(filepath.Join(dir, PackManifestFile))
 	if err != nil || len(raw) > maxRulePackFileBytes {
 		return ""

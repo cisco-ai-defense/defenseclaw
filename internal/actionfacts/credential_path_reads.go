@@ -4,6 +4,7 @@
 package actionfacts
 
 import (
+	"maps"
 	"os"
 	"path"
 	"path/filepath"
@@ -393,6 +394,12 @@ var credentialProbeFirstSegments = sync.OnceValue(func() map[string][]credential
 	return groups
 })
 
+// credentialProbeFirstSegmentOrder is the keys of
+// credentialProbeFirstSegments, sorted, so a search reads them in one order.
+var credentialProbeFirstSegmentOrder = sync.OnceValue(func() []string {
+	return slices.Sorted(maps.Keys(credentialProbeFirstSegments()))
+})
+
 var credentialProbeDepth = sync.OnceValue(func() int {
 	depth := 0
 	for _, probe := range credentialProbes() {
@@ -419,6 +426,13 @@ type credentialPathResolver struct {
 	links      []credentialPathLink
 	seen       map[PathFact]bool
 	reads      []PathFact
+	// searched holds, per folder a recursive search of the call read, the
+	// first segments of the probes that are there (searchFolder): a folder
+	// named again is not probed again (rel-1-0-10:GAP-1668).
+	searched map[string][]string
+	// searchedBy holds the folders each command already searched: the same
+	// command naming a folder again adds nothing.
+	searchedBy map[credentialHeldRead]bool
 }
 
 // resolveCredentialPathReads makes the private record of one call (nil when
@@ -1391,29 +1405,40 @@ func (r *credentialPathResolver) searchFolder(id int64, folder string, filter cr
 		}
 		dir = filepath.Join(r.cwd, dir)
 	}
-	if !r.lookups.Take() {
+	dir = filepath.Clean(dir)
+	if r.searchedBy[credentialHeldRead{id, dir}] {
 		return
 	}
-	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
-		return
+	present, searched := r.searched[dir]
+	if !searched {
+		var complete, folder bool
+		if present, complete, folder = r.firstSegmentsIn(dir); !folder {
+			return
+		}
+		if complete {
+			if r.searched == nil {
+				r.searched, r.searchedBy = make(map[string][]string), make(map[credentialHeldRead]bool)
+			}
+			r.searched[dir] = present
+			r.searchedBy[credentialHeldRead{id, dir}] = true
+		}
+	} else {
+		// Another command searching a folder already read: its first
+		// segments are kept, its probes (with this command's filter) are
+		// its own.
+		r.searchedBy[credentialHeldRead{id, dir}] = true
 	}
-	for first, probes := range credentialProbeFirstSegments() {
+	groups := credentialProbeFirstSegments()
+	for _, first := range present {
 		if r.stopped() {
 			return
 		}
-		// A first segment that is not there costs no lookup of the cap
-		// (rel-1-0-10:GAP-1045): an ordinary search over many folders stays
-		// under it. The probe it is is charged to the work cap instead.
-		if !r.work.Take() {
+		if searched && !r.lookups.Take() {
+			// A folder named again is charged a lookup per first segment
+			// that is there, as the first read was.
 			return
 		}
-		if _, err := os.Lstat(filepath.Join(dir, first)); err != nil {
-			continue
-		}
-		if !r.lookups.Take() {
-			return
-		}
-		for _, probe := range probes {
+		for _, probe := range groups[first] {
 			if !filter.searches(probe.value) {
 				continue
 			}
@@ -1426,6 +1451,40 @@ func (r *credentialPathResolver) searchFolder(id int64, folder string, filter cr
 			}
 		}
 	}
+}
+
+// firstSegmentsIn is the first segments of the probes that are there under
+// dir, in one sorted order (a cap cuts the same ones every run), each charged
+// as before: one lookup for the folder, one unit of work per segment looked
+// up and one lookup per segment that is there. folder is false when dir is
+// no folder or the folder lookup was capped; complete is false when a cap
+// stopped the reading after present (the call's caps tell it).
+func (r *credentialPathResolver) firstSegmentsIn(dir string) (present []string, complete, folder bool) {
+	if !r.lookups.Take() {
+		return nil, false, false
+	}
+	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
+		return nil, false, false
+	}
+	for _, first := range credentialProbeFirstSegmentOrder() {
+		if r.stopped() {
+			return present, false, true
+		}
+		// A first segment that is not there costs no lookup of the cap
+		// (rel-1-0-10:GAP-1045): an ordinary search over many folders stays
+		// under it. The probe it is is charged to the work cap instead.
+		if !r.work.Take() {
+			return present, false, true
+		}
+		if _, err := os.Lstat(filepath.Join(dir, first)); err != nil {
+			continue
+		}
+		if !r.lookups.Take() {
+			return present, false, true
+		}
+		present = append(present, first)
+	}
+	return present, true, true
 }
 
 func (r *credentialPathResolver) add(id int64, value string, unknown bool) {

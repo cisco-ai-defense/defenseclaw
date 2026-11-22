@@ -6,7 +6,6 @@ package effects
 
 import (
 	"encoding/json"
-	"time"
 )
 
 // Call is one normalized tool invocation handed to Extract. It is the output
@@ -40,9 +39,11 @@ type Options struct {
 	Home    string
 	CWD     string
 	Account AccountRecord
-	// Login is the active account's login name: ~Login names Home, as the
-	// shell's passwd lookup does (rel-1-0-10:GAP-1678). Empty: ~name is never
-	// the active account.
+	// Login is the active account's login name: ~Login names the account's
+	// home (Home as the call starts, whatever HOME the call later sets), as the
+	// shell's passwd lookup does (rel-1-0-10:GAP-1678). It is matched without
+	// case, as a directory (AD, sssd) login resolves and as the ~<login> twin
+	// of the hook reads it (GAP-2378). Empty: ~name is never the active account.
 	Login string
 	// Accounts maps another account's login name to its home, from a lookup
 	// the caller vouches for (passwd, the managed identity map). A ~name not
@@ -71,12 +72,10 @@ type Options struct {
 	SessionFiles map[string]string
 	// MaxEffects bounds the output; zero uses the package default.
 	MaxEffects int
-	// Deadline, when set, stops the walk once the clock passes it: the walker
-	// checks it every deadlineCheckEvery units of work and, past it, ends like
-	// an exhausted work budget (one limit unknown), so a caller that must stay
-	// inside a time cap (the live shadow lane) never waits on a long walk. It
-	// is read-only wall-clock input; the zero value means no deadline.
-	Deadline time.Time
+	// loginHome is the passwd home ~Login names: Home as the walk began. The
+	// walker sets it once, so a call that assigns HOME moves ~ and ~/ but not
+	// ~Login (bash reads ~login from the password database, never from HOME).
+	loginHome string
 }
 
 func (o Options) flavor() Flavor {

@@ -63,12 +63,17 @@ func r3Rows() []r3Row {
 	return []r3Row{
 		// home spellings
 		{gap: "GAP-1678 ~login hook config", o: px, c: sh(`echo k >> ~dcku/.claude/settings.json`), want: map[string]string{SetAgentHookConfig: K}},
-		{gap: "GAP-1678 ~login keys", o: px, c: sh(`cp x ~dcku/.ssh/authorized_keys`), want: map[string]string{SetSSHAuthorizedKeys: K}},
+		// cp cannot decide whether the destination names a file or directory;
+		// keep this active-login operand at Maybe until its target is resolved.
+		{gap: "GAP-1678 ~login keys", o: px, c: sh(`cp x ~dcku/.ssh/authorized_keys`), want: map[string]string{SetSSHAuthorizedKeys: U}},
 		{gap: "GAP-1677 ~other/../login keys", o: acct, c: sh(`echo k >> ~other/../dcku/.ssh/authorized_keys`),
 			links: map[string]string{"/home/other/../dcku/.ssh/authorized_keys": "/home/dcku/.ssh/authorized_keys"},
 			want:  map[string]string{SetSSHAuthorizedKeys: K}},
 		{gap: "GAP-1677 ~other/../login state, unresolved", o: acct, c: sh(`echo k >> ~other/../dcku/.defenseclaw/config.yaml`),
 			want: map[string]string{SetSelfProtection: U}},
+		{gap: "GAP-0898 ~account the walker cannot place, credential", o: px, c: sh(`cat ~x/.aws/credentials`), want: map[string]string{SetCredentials: U}},
+		{gap: "GAP-0898 ~account the walker cannot place, key", o: px, c: sh(`cat ~root/.ssh/id_rsa`), want: map[string]string{SetCredentials: U}},
+		{gap: "GAP-0898 fp: ~account, ordinary file", o: px, c: sh(`cat ~x/notes.txt`), want: map[string]string{"*": N}},
 		{gap: "GAP-0948 ~.. is a literal folder", o: px, c: sh(`echo k >> ~../x`), path: "/home/dcku/proj/~../x",
 			want: map[string]string{"*": N}},
 		{gap: "GAP-0948 quoted tilde is a literal folder", o: px, c: sh(`echo k >> '~/notes'`), path: "/home/dcku/proj/~/notes",
@@ -221,6 +226,7 @@ func TestDET111R3Protected(t *testing.T) {
 		{`cat ~/.ss*/id_rsa`, "credential", "maybe", "R-GLOB"},
 		{`cat /srv/homes/bob/.aws/credentials`, "other_home_credential", "maybe", "R-NAME"},
 		{`cd $X; echo x > authorized_keys`, "authorized_keys", "maybe", "R-CWD"},
+		{`echo k > u*/../keydir/authorized_keys`, "authorized_keys", "maybe", "R-FS"}, // GAP-0443
 	}
 	for _, c := range cases {
 		res := effects.Extract(effects.Call{Surface: effects.SurfaceShell, Command: c.cmd}, px)

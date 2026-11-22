@@ -7,7 +7,6 @@ package effects
 import (
 	"path"
 	"strings"
-	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/awkprog"
 	"github.com/defenseclaw/defenseclaw/internal/psparse"
@@ -302,10 +301,6 @@ func (s *childSpec) set(name, val string, ok bool) {
 
 const walkWorkBudget = 20000
 
-// deadlineCheckEvery is how many units of work pass between two reads of the
-// clock for Options.Deadline.
-const deadlineCheckEvery = 32
-
 func newWalker(res *Result, o Options) *walker {
 	env := map[string]string{}
 	for k, v := range o.Env {
@@ -317,6 +312,9 @@ func newWalker(res *Result, o Options) *walker {
 	}
 	if o.Home != "" {
 		exported["HOME"] = true // the shell's HOME is inherited from the process
+	}
+	if o.loginHome == "" {
+		o.loginHome = o.Home // ~Login stays the passwd home when the call sets HOME
 	}
 	return &walker{res: res, o: o, funcs: map[string]bool{}, aliases: map[string]string{},
 		links: map[string]string{}, writeByKey: map[string]int{},
@@ -333,11 +331,6 @@ func (w *walker) spend() bool {
 	}
 	w.work--
 	if w.work <= 0 {
-		w.overBudget = true
-		w.res.addUnknown(ReasonLimit)
-		return false
-	}
-	if !w.o.Deadline.IsZero() && w.work%deadlineCheckEvery == 0 && time.Now().After(w.o.Deadline) {
 		w.overBudget = true
 		w.res.addUnknown(ReasonLimit)
 		return false
@@ -846,6 +839,9 @@ func (w *walker) resolveWord(wd Word) Word {
 		if i == 0 && !s.Quoted && strings.HasPrefix(lit, "~") && !isTilde(lit, w.o.flavor()) {
 			v, ok := w.tildePrefix(lit)
 			if !ok {
+				// An account the walker cannot place (~x): the home is unknown,
+				// the path below it is not (~x/.aws/credentials keeps its
+				// literal tail for the classifier, rel-1-0-10:GAP-0898).
 				return Word{Static: false, Reason: ReasonDynamicExpansion, Span: wd.Span, Tail: tildeTail(lit, wd.Segs[1:])}
 			}
 			if s.Glob {
@@ -2551,7 +2547,7 @@ func (w *walker) classifyOperands(words []Word, p Program, dialect Dialect) ([]o
 	if del {
 		for _, wd := range positionals {
 			if wd.Static && (wd.Value == "!" || wd.Value == "(" || wd.Value == ")" || wd.Value == ",") {
-				findOpaque = true
+				findOpaque = true // a negated or grouped expression: not one pattern
 			}
 		}
 	}

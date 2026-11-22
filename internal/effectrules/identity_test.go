@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/effects"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/semanticpb"
 )
 
 // DET111 S4-R3 INODE: a hard link of a protected member is the member under
@@ -132,5 +133,24 @@ func TestDET111R3HardLinkOnDisk(t *testing.T) {
 	}
 	if got := identityProtected(t, `echo k >> other.txt`, o, nil); len(got) != 0 {
 		t.Fatalf("protected %v for a new file, want none", got)
+	}
+}
+
+func TestDET111R3InodeProofSurvivesSameTargetNameMaybe(t *testing.T) {
+	target := func(match *semanticpb.ProtectedMatch) *semanticpb.EffectTarget {
+		return &semanticpb.EffectTarget{Key: "/home/alice/project/keya", Protected: []*semanticpb.ProtectedMatch{match}}
+	}
+	facts := []*semanticpb.EffectFact{
+		{Kind: string(effects.KindWrite), TargetState: string(effects.TargetStateKnown), RoleState: string(effects.RoleStateKnown),
+			Target: target(&semanticpb.ProtectedMatch{Set: SetSSHAuthorizedKeys, State: string(gradeKnown), Reason: "inode"})},
+		{Kind: string(effects.KindWrite), TargetState: string(effects.TargetStateKnown), RoleState: string(effects.RoleStateKnown),
+			Target: target(&semanticpb.ProtectedMatch{Set: SetSSHAuthorizedKeys, State: string(gradeUnknown), Reason: "exact"})},
+	}
+	holdKnownOnNameMaybe(facts)
+	if got := facts[0].GetTarget().GetProtected()[0]; got.GetState() != string(gradeKnown) || got.GetReason() != "inode" {
+		t.Fatalf("resolver-proven hard-link identity was downgraded by a same-name Maybe: %+v", got)
+	}
+	if got := facts[1].GetTarget().GetProtected()[0]; got.GetState() != string(gradeUnknown) {
+		t.Fatalf("bare-name match lost its Maybe grade beside inode proof: %+v", got)
 	}
 }

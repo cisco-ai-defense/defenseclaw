@@ -486,18 +486,18 @@ func appendWindowsPathUnverifiedFinding(
 		if failure == nil {
 			continue
 		}
-		enforcement := findingEnforcementAllowed
+		enforcement := enforcingProof
 		if !request.EnforcementCapable {
-			enforcement = findingEnforcementDetectionOnly
+			enforcement = recordProof
 		}
 		return append(findings, RuleFinding{
-			RuleID:      windowsPathUnverifiedRuleID,
-			Title:       windowsPathUnverifiedReason(failure),
-			Severity:    "HIGH",
-			Confidence:  1,
-			Tags:        []string{"tool-arguments"},
-			LineNumber:  1,
-			enforcement: enforcement,
+			RuleID:     windowsPathUnverifiedRuleID,
+			Title:      windowsPathUnverifiedReason(failure),
+			Severity:   "HIGH",
+			Confidence: 1,
+			Tags:       []string{"tool-arguments"},
+			LineNumber: 1,
+			Proof:      enforcement,
 		})
 	}
 	return findings

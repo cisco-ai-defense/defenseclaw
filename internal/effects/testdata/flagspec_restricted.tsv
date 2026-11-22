@@ -65,6 +65,8 @@ install	gnu	-v	0	inert
 install	gnu	-p	0	inert
 install	gnu	-b	0	inert
 install	gnu	-T	0	inert
+install	gnu	-C	0	inert
+install	gnu	--no-target-directory	0	inert
 install	gnu	-D	0	inert
 install	gnu	--verbose	0	inert
 mv	gnu	-t	1	output

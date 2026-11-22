@@ -16,7 +16,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 )
 
 func TestG622b8StateAddedInsideIndexTTLIsStillProtected(t *testing.T) {
@@ -78,13 +77,13 @@ func TestG622b8StateAddedInsideIndexTTLIsStillProtected(t *testing.T) {
 	}
 }
 
-// A walk that reaches its time bound before it finds the file proves nothing:
+// A walk that reaches its entry bound before it finds the file proves nothing:
 // the target is left unresolved (the patch is not attested) and a watch
 // refuses it, while a walk inside its bound still names the state file and an
 // ordinary hard link stays attested as itself.
 func TestG622b8BoundedStateWalkNeverAttestsAnOrdinaryTarget(t *testing.T) {
-	old := activeStateExactBudget
-	defer func() { activeStateExactBudget = old; resetActiveStateViews() }()
+	old := activeStateExactEntries
+	defer func() { activeStateExactEntries = old; resetActiveStateViews() }()
 	for _, connector := range []string{"hermes", "opencode"} {
 		t.Run(connector, func(t *testing.T) {
 			home, err := filepath.EvalSymlinks(t.TempDir())
@@ -123,7 +122,7 @@ func TestG622b8BoundedStateWalkNeverAttestsAnOrdinaryTarget(t *testing.T) {
 				}
 			}
 			// Inside the bound the walk names the state file, and the benign twin stays itself.
-			activeStateExactBudget = old
+			activeStateExactEntries = old
 			resetActiveStateViews()
 			if got, ok := Decode(g622bPatchEvidence(t, connector, project, protected)); !ok || got[protected] != state {
 				t.Errorf("state hard link = %q, want %q", got[protected], state)
@@ -131,8 +130,8 @@ func TestG622b8BoundedStateWalkNeverAttestsAnOrdinaryTarget(t *testing.T) {
 			if got, ok := Decode(g622bPatchEvidence(t, connector, project, twin)); !ok || got[twin] != twin || got[PatchCompleteKey] != "1" {
 				t.Errorf("ordinary hard link not attested as itself: %q complete=%q", got[twin], got[PatchCompleteKey])
 			}
-			// Past the time bound the answer is unknown, and unknown is never attested.
-			activeStateExactBudget = -time.Second
+			// Past the entry bound the answer is unknown, and unknown is never attested.
+			activeStateExactEntries = 0
 			resetActiveStateViews()
 			for _, target := range []string{protected, twin} {
 				got, ok := Decode(g622bPatchEvidence(t, connector, project, target))
@@ -140,13 +139,13 @@ func TestG622b8BoundedStateWalkNeverAttestsAnOrdinaryTarget(t *testing.T) {
 					t.Errorf("target %s attested although the state walk was bounded: %q complete=%q", target, got[target], got[PatchCompleteKey])
 				}
 			}
-			activeStateExactBudget = old
+			activeStateExactEntries = old
 			resetActiveStateViews()
 			watch := watchOfEvidence(g622bPatchEvidence(t, connector, project, ordinary))
 			if watch == nil || watch.Changed() {
-				t.Fatal("ordinary patch target changed before the time bound was lowered")
+				t.Fatal("ordinary patch target changed before the entry bound was lowered")
 			}
-			activeStateExactBudget = -time.Second
+			activeStateExactEntries = 0
 			resetActiveStateViews()
 			if !watch.Changed() {
 				t.Error("a multiply linked target the bounded walk could not place was not refused")

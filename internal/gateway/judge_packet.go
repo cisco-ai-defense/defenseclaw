@@ -555,6 +555,118 @@ func withJudgeRemoteParty(ctx context.Context, connectorName string) context.Con
 	return context.WithValue(ctx, judgeRemotePartyKey{}, true)
 }
 
+// judgeSessionConnectorKey names the connector of a judge context that no
+// authenticated route sets: the OpenClaw event router, whose prompts and
+// tool calls arrive on the gateway's own WebSocket (router.go).
+type judgeSessionConnectorKey struct{}
+
+func withJudgeSessionConnector(ctx context.Context, connectorName string) context.Context {
+	if connectorName = canonicalConnectorRulePackKey(connectorName); ctx == nil || connectorName == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, judgeSessionConnectorKey{}, connectorName)
+}
+
+// judgeSessionConnector is the canonical connector of a judge context, part
+// of its session key (judgeSessionKeyFor): the one the event router named,
+// else the one the request authenticated for, reached or scans
+// (profileRequestConnector). "" for a caller with no connector.
+func judgeSessionConnector(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	if name, _ := ctx.Value(judgeSessionConnectorKey{}).(string); name != "" {
+		return name
+	}
+	return canonicalConnectorRulePackKey(profileRequestConnector(ctx))
+}
+
+// judgeTurnSender is who wrote a user turn of a connector whose turn text a
+// remote chat party can write (promptMayBeRemoteParty), as the connector
+// reports it (GAP-1637).
+type judgeTurnSender uint8
+
+const (
+	// judgeTurnSenderUnknown: the connector does not say. The turn is the
+	// task for the judge, marked requester="unverified" so it excuses no
+	// call (GAP-0149), and is not given to the decision model, which has no
+	// such mark.
+	judgeTurnSenderUnknown judgeTurnSender = iota
+	// judgeTurnSenderOwner: the turn was typed in the agent's local
+	// interface by the user who runs it. It is the task, like any
+	// connector's prompt.
+	judgeTurnSenderOwner
+	// judgeTurnSenderRemote: the turn came from a messaging platform. It is
+	// inspected like any prompt and never becomes the task.
+	judgeTurnSenderRemote
+)
+
+type judgeTurnSenderKey struct{}
+
+// withJudgeTurnSender records on ctx who wrote the turn being observed, for a
+// connector whose turn text a remote party can write. Other connectors' turns
+// carry no sender and are the owner's.
+func withJudgeTurnSender(ctx context.Context, connectorName string, sender judgeTurnSender) context.Context {
+	if ctx == nil || !promptMayBeRemoteParty(connectorName) {
+		return ctx
+	}
+	return context.WithValue(ctx, judgeTurnSenderKey{}, sender)
+}
+
+// judgeTurnSenderFrom is the sender withJudgeTurnSender recorded. Without
+// one, a turn of a connector whose turn text a remote party can write is
+// unknown, and any other connector's turn is the owner's.
+func judgeTurnSenderFrom(ctx context.Context) judgeTurnSender {
+	if ctx == nil {
+		return judgeTurnSenderOwner
+	}
+	if sender, ok := ctx.Value(judgeTurnSenderKey{}).(judgeTurnSender); ok {
+		return sender
+	}
+	if promptMayBeRemoteParty(judgeSessionConnector(ctx)) {
+		return judgeTurnSenderUnknown
+	}
+	return judgeTurnSenderOwner
+}
+
+// judgeTurnOwnerTyped reports a turn whose connector said the owner typed it:
+// withJudgeTurnSender recorded judgeTurnSenderOwner. A connector whose turns
+// are always the owner's records none and needs none.
+func judgeTurnOwnerTyped(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	sender, ok := ctx.Value(judgeTurnSenderKey{}).(judgeTurnSender)
+	return ok && sender == judgeTurnSenderOwner
+}
+
+// hermesLocalPlatform is the platform Hermes reports for a session of its
+// own terminal interface; every other non-empty platform is a messaging
+// gateway (telegram, discord, slack, ...) whose turns a remote party writes.
+const hermesLocalPlatform = "cli"
+
+// hookTurnSender reads who wrote a prompt hook's user turn from the hook
+// payload: Hermes passes its session platform with pre_llm_call (under
+// extra, like every non-top-level hook argument). OpenClaw passes no sender,
+// and a Hermes payload without a platform says nothing: both are unknown.
+// The platform is set by the agent process, not by the message text.
+func hookTurnSender(connectorName string, payload map[string]interface{}) judgeTurnSender {
+	if !promptMayBeRemoteParty(connectorName) {
+		return judgeTurnSenderOwner
+	}
+	if canonicalConnectorRulePackKey(connectorName) != "hermes" {
+		return judgeTurnSenderUnknown
+	}
+	platform, _ := objectAt(payload, "extra")["platform"].(string)
+	switch platform = strings.ToLower(strings.TrimSpace(platform)); platform {
+	case "":
+		return judgeTurnSenderUnknown
+	case hermesLocalPlatform:
+		return judgeTurnSenderOwner
+	}
+	return judgeTurnSenderRemote
+}
+
 // judgeTaskOwnerUnknown reports a judge context whose session task is not
 // known to be the installing user's: the hook's connector, the context's
 // mark (withJudgeRemoteParty) or the tool-result call's mark says so.

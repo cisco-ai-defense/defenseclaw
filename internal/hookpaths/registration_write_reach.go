@@ -4,6 +4,7 @@
 package hookpaths
 
 import (
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 	"io"
 	"maps"
 	"os"
@@ -354,10 +355,7 @@ func registrationWalkLinks(file *syntax.File, command, cwd, home string, protect
 					continue
 				}
 				if strings.ContainsAny(value, "*?[") && actionWordHasUnquotedGlob(word, command) {
-					paths, truncated := actionBoundedGlob(OperandPath(value, currentCWD), false)
-					if len(paths) > 64 {
-						continue
-					}
+					paths, truncated := registrationGlobMatches(OperandPath(value, currentCWD))
 					for _, path := range paths {
 						if protectedReachPath(path, protected, "") {
 							found = true
@@ -649,10 +647,7 @@ func registrationItemPaths(word *syntax.Word, command, cwd, home string) []strin
 		return nil
 	}
 	if strings.ContainsAny(value, "*?[") && actionWordHasUnquotedGlob(word, command) {
-		matches, truncated := actionBoundedGlob(OperandPath(value, cwd), false)
-		if len(matches) > 64 {
-			return nil
-		}
+		matches, truncated := registrationGlobMatches(OperandPath(value, cwd))
 		// The loop reader decides on the matches read before the cap: the
 		// reading is truncated (RegistrationWriteReachedBounded).
 		noteGlobCut(truncated)
@@ -1851,4 +1846,25 @@ func registrationPatchReach(file *syntax.File, cwd, home string, protected prote
 		return true
 	})
 	return found
+}
+
+// maxRegistrationGlobMatches bounds the matches of one pattern the
+// registration readers resolve and judge. A pattern that matched more than
+// 64 names was skipped before the registered-file check with no signal
+// (rel-1-0-10:GAP-1491); every match up to this cap is judged now, and past
+// it the first ones are judged and the reading is truncated (bounded.Items),
+// so a registered file the cap hides is the unknown tier, never a silent
+// allow.
+const maxRegistrationGlobMatches = 1024
+
+// registrationGlobMatches expands pattern for a registration reader
+// (actionBoundedGlob) and keeps at most maxRegistrationGlobMatches matches,
+// with the caps the expansion and the keep hit.
+func registrationGlobMatches(pattern string) ([]string, bounded.CapSet) {
+	matches, truncated := actionBoundedGlob(pattern, false)
+	if len(matches) > maxRegistrationGlobMatches {
+		matches = matches[:maxRegistrationGlobMatches]
+		truncated = truncated.Union(bounded.Of(bounded.Items))
+	}
+	return matches, truncated
 }

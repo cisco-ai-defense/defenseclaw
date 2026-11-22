@@ -6,6 +6,7 @@ package effectrules
 
 import (
 	"github.com/defenseclaw/defenseclaw/internal/effects"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/semantic"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/semanticpb"
 )
@@ -16,8 +17,11 @@ import (
 type Env struct {
 	Home   string
 	Flavor effects.Flavor
+	// AccountHomes are passwd homes the effects frontend resolved from Options.Accounts.
+	AccountHomes []string
 	// Resolve follows a write path through links; nil falls back to
-	// hookpaths.ResolveWriteTarget.
+	// hookpaths.ResolveWriteTarget for the host's own path flavor and to the
+	// placed path for the other flavor (resolverFor).
 	Resolve func(string) (string, bool)
 	// Identity reads a file's device and inode to find a hard link of a
 	// protected member (one stat per resolved target); nil reads the disk
@@ -26,6 +30,10 @@ type Env struct {
 	// AgentCreated reports whether an earlier call of this session wrote the
 	// target keyed by effects.Target.Key(). Nil means no session memory.
 	AgentCreated func(key string) bool
+	// Truncated is the call's one bound record: a cap of the projection
+	// (maxIdentityStats) that cut the reading short hits it. Nil: the hit is
+	// only counted (IdentityCounts).
+	Truncated *bounded.Truncated
 }
 
 // Project maps a pure effect result onto the CEL activation's effect list and
@@ -33,16 +41,22 @@ type Env struct {
 // mutates anything the extractor already decided; only link following and the
 // protected-set grade touch the file system, read-only.
 func Project(res effects.Result, env Env) []*semanticpb.EffectFact {
-	rsv := env.Resolve
-	if rsv == nil {
-		rsv = defaultResolver
-	}
 	flavor := env.Flavor
 	if flavor == "" {
 		flavor = effects.FlavorPOSIX
 	}
+	rsv := env.Resolve
+	if rsv == nil {
+		rsv = resolverFor(flavor)
+	}
 	sets := buildSets(env.Home, flavor)
-	ids := newIdentityCache(env.Identity, sets)
+	if len(env.AccountHomes) > 0 {
+		for name, set := range sets {
+			set.homeRoots = append([]string(nil), env.AccountHomes...)
+			sets[name] = set
+		}
+	}
+	ids := newIdentityCache(env.Identity, sets, env.Truncated)
 
 	effs := res.Effects
 	if len(effs) > semantic.MaxEffects {
@@ -77,7 +91,62 @@ func Project(res effects.Result, env Env) []*semanticpb.EffectFact {
 		}
 		out = append(out, fact)
 	}
+	holdKnownOnNameMaybe(out)
 	return out
+}
+
+// holdKnownOnNameMaybe prevents one target/set from being both Known and
+// R-NAME Maybe across effects of the same call. Independent known targets keep
+// their own resolver proof.
+func holdKnownOnNameMaybe(facts []*semanticpb.EffectFact) {
+	// A resolver-known member is still Maybe when this same target/set also
+	// has an R-NAME path: another effect in the call can leave the target's
+	// role or placement unresolved. Keep independent Known targets intact.
+	maybeNames := make(map[string]bool)
+	for _, fact := range facts {
+		target := fact.GetTarget()
+		if fact.GetTargetState() != string(effects.TargetStateKnown) &&
+			fact.GetRoleState() == string(effects.RoleStateKnown) {
+			// A physical link walk, a passwd/conventional home-tail match, or
+			// an inode identity is a resolver fact. It can settle an otherwise
+			// lexical target; a bare exact spelling cannot.
+			for _, match := range target.GetProtected() {
+				switch match.GetReason() {
+				case "link", "other_home", "inode":
+					if match.GetState() == string(gradeKnown) {
+						fact.TargetState = string(effects.TargetStateKnown)
+						break
+					}
+				}
+				if fact.GetTargetState() == string(effects.TargetStateKnown) {
+					break
+				}
+			}
+		}
+		uncertainEffect := fact.GetTargetState() != string(effects.TargetStateKnown) ||
+			fact.GetRoleState() != string(effects.RoleStateKnown) ||
+			fact.GetKind() == string(effects.KindOpaque)
+		for _, match := range target.GetProtected() {
+			if uncertainEffect && match.GetState() == string(gradeKnown) {
+				match.State = string(gradeUnknown)
+				match.Reason = "call_maybe"
+			}
+			if match.GetState() == string(gradeUnknown) &&
+				ReachForMatch(match.GetReason(), fact.GetReasons()) == ReachName {
+				maybeNames[target.GetKey()+"\x00"+match.GetSet()] = true
+			}
+		}
+	}
+	for _, fact := range facts {
+		target := fact.GetTarget()
+		for _, match := range target.GetProtected() {
+			if match.GetState() == string(gradeKnown) && match.GetReason() != "inode" &&
+				maybeNames[target.GetKey()+"\x00"+match.GetSet()] {
+				match.State = string(gradeUnknown)
+				match.Reason = "call_maybe"
+			}
+		}
+	}
 }
 
 func projectTarget(

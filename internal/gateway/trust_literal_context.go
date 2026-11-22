@@ -149,7 +149,7 @@ func applyTrustLiteralContext(
 	}
 	finding.Severity = "LOW"
 	finding.Confidence = clampConfidence(finding.Confidence * 0.5)
-	finding.enforcement = findingEnforcementDetectionOnly
+	finding.Proof = finding.Proof.Record()
 	return finding
 }
 

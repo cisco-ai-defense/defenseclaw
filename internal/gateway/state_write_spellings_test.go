@@ -146,10 +146,14 @@ func TestStatePatternReadsOnlyTheHomeStateTree(t *testing.T) {
 		{"cp ~/.def*/config.yaml ~/project/backup.yaml", false},
 	})
 	// These rows block in the default pack for rules of their own, not as
-	// the HIGH state write alert (GAP-1563).
+	// the HIGH state write alert (GAP-1563). The wildcard walk above the
+	// home stops at its bound with no protected match among what it read
+	// and no name that can spell .ssh or a key file: it is the TRUNCATED
+	// evaluation-limit finding, no longer an authorized-keys target
+	// (rel-1-0-10:GAP-1324); the state write still blocks.
 	judgeHomeStateRuleRows(t, []homeStateRuleRow{
-		{"cp a.txt ~/.defenseclaw/config.yaml; ls /*/*/*/*/*/.defenseclaw/x", []string{gap0747StateRule, gap0747SSHKeysRule}},
-		{"cp a.txt ~/.defenseclaw/config.yaml; ls /*/*/*/*/*/*/*/.defenseclaw/x", []string{gap0747StateRule, gap0747SSHKeysRule}},
+		{"cp a.txt ~/.defenseclaw/config.yaml; ls /*/*/*/*/*/.defenseclaw/x", []string{gap0747StateRule, "ACTION-COMPOUND-LIMIT"}},
+		{"cp a.txt ~/.defenseclaw/config.yaml; ls /*/*/*/*/*/*/*/.defenseclaw/x", []string{gap0747StateRule, "ACTION-COMPOUND-LIMIT"}},
 	})
 	if elapsed := time.Since(start); elapsed > 30*time.Second {
 		t.Fatalf("44 pattern rows took %s; the reading must not walk past the home", elapsed)
@@ -362,7 +366,9 @@ func TestWriteThroughALinkToStateIsAStateWrite(t *testing.T) {
 	// These rows block in the default pack for rules of their own, not as
 	// the HIGH state write alert (GAP-1563).
 	judgeHomeStateRuleRows(t, []homeStateRuleRow{
-		{"ln -s HOMEDIR/.defenseclaw hc; mv a.txt hc/config.yaml", []string{gap0747StateRule, gap0747SSHKeysRule}},
+		// A write through a link into the state tree is named by the state
+		// rule alone and keeps its block (GAP-1568).
+		{"ln -s HOMEDIR/.defenseclaw hc; mv a.txt hc/config.yaml", []string{gap0747StateRule, "!" + gap0747SSHKeysRule}},
 		{"ln -s ~/.ssh sd; cp a.txt sd/authorized_keys", []string{gap0747SSHKeysRule}},
 		{"nohup ln -s ~/.ssh sd; cp a.txt sd/authorized_keys", []string{gap0747SSHKeysRule}},
 	})
@@ -577,7 +583,9 @@ func TestEnvChdirHomeSpellingRunsTheCallInTheHome(t *testing.T) {
 	// the HIGH state write alert (GAP-1563).
 	judgeHomeStateRuleRows(t, []homeStateRuleRow{
 		{"env -C ~ cp project/a.txt .ssh/authorized_keys", []string{gap0747SSHKeysRule}},
-		{"env -C ~ ln -sf project/a.txt .defenseclaw/config.yaml", []string{gap0747SSHKeysRule, gap0747StateRule}},
+		// A link the call makes in the state tree is named by the state
+		// rule alone and keeps its block (GAP-1568).
+		{"env -C ~ ln -sf project/a.txt .defenseclaw/config.yaml", []string{gap0747StateRule, "!" + gap0747SSHKeysRule}},
 	})
 }
 

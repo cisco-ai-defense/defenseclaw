@@ -82,7 +82,7 @@ func operandBoundReading(request trustedActionRequest, reduced string) trustedAc
 func mergeBoundedFindings(findings, more []RuleFinding) []RuleFinding {
 	for _, finding := range more {
 		if !slices.ContainsFunc(findings, func(f RuleFinding) bool {
-			return f.RuleID == finding.RuleID && f.Severity == finding.Severity && f.enforcement == finding.enforcement
+			return f.RuleID == finding.RuleID && f.Severity == finding.Severity && f.Proof == finding.Proof
 		}) {
 			findings = append(findings, finding)
 		}

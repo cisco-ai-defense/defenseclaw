@@ -6,6 +6,7 @@ package effectrules
 
 import (
 	"path"
+	"runtime"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/effects"
@@ -55,6 +56,9 @@ func gradeTarget(t effects.Target, state effects.TargetState, kind effects.Kind,
 	// physically to one; otherwise its lexical candidate is a pattern (F1).
 	if t.Path == "" && t.Lexical != "" {
 		if resolved, ok := res(t.Lexical); ok && resolved != "" && resolved != t.Lexical {
+			if knownProtectedHomeTail(resolved, set, flavor) {
+				return gradeKnown
+			}
 			if memberExact(resolved, set, flavor) || underTree(resolved, set, flavor) ||
 				(t.Subtree && treeHoldsSet(resolved, set, flavor)) {
 				return gradeKnown
@@ -121,6 +125,9 @@ func gradeTarget(t effects.Target, state effects.TargetState, kind effects.Kind,
 	if underTree(t.Path, set, flavor) {
 		return gradeKnown
 	}
+	if knownProtectedHomeTail(t.Path, set, flavor) {
+		return gradeKnown
+	}
 	underDir := underProtectedDir(t.Path, set, flavor)
 
 	// Follow links. A target that resolves to a member (or under a protected
@@ -164,6 +171,61 @@ func gradeTarget(t effects.Target, state effects.TargetState, kind effects.Kind,
 	// (outside_home) covers an unresolved mutation whose destination we
 	// cannot vouch for.
 	return gradeNo
+}
+
+// knownProtectedHomeTail recognizes one exact protected tail beneath a
+// passwd home or a conventional home root. It is a resolver fact: a basename
+// that merely resembles a credential in a project or arbitrary folder remains
+// a Maybe match.
+func knownProtectedHomeTail(p string, set protectedSet, flavor effects.Flavor) bool {
+	if p == "" {
+		return false
+	}
+	roots := append([]string(nil), set.homeRoots...)
+	if root := shapedHomeRoot(p, flavor); root != "" {
+		roots = append(roots, root)
+	}
+	child := canon(p, flavor)
+	for _, root := range roots {
+		base := canon(root, flavor)
+		if child == base || !atOrUnder(child, base) {
+			continue
+		}
+		childSlash, baseSlash := toSlash(child), strings.TrimRight(toSlash(base), "/")
+		tail := strings.TrimPrefix(childSlash, baseSlash)
+		if tail == "" || !strings.HasPrefix(tail, "/") {
+			continue
+		}
+		for _, protectedTail := range set.tails {
+			if canon(protectedTail, flavor) == canon(tail, flavor) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func shapedHomeRoot(p string, flavor effects.Flavor) string {
+	if flavor == effects.FlavorWindows {
+		sep := string([]byte{92})
+		clean := strings.ToLower(strings.ReplaceAll(p, "/", sep))
+		parts := strings.Split(clean, sep)
+		if len(parts) >= 4 && len(parts[0]) == 2 && parts[0][1] == ':' && parts[1] == "users" && parts[2] != "" {
+			return strings.Join(parts[:3], sep)
+		}
+		return ""
+	}
+	if !strings.HasPrefix(p, "/") {
+		return ""
+	}
+	parts := strings.Split(strings.Trim(p, "/"), "/")
+	if len(parts) >= 3 && (parts[0] == "home" || parts[0] == "Users") && parts[1] != "" {
+		return "/" + parts[0] + "/" + parts[1]
+	}
+	if len(parts) >= 2 && parts[0] == "root" {
+		return "/root"
+	}
+	return ""
 }
 
 func memberExact(p string, set protectedSet, flavor effects.Flavor) bool {
@@ -276,6 +338,23 @@ func defaultResolver(p string) (string, bool) {
 	return hookpaths.ResolveWriteTarget(p)
 }
 
+// hostGOOS is the system whose file system the resolver reads; a test pins it.
+var hostGOOS = runtime.GOOS
+
+// resolverFor is the link resolver of a call's path flavor: the hook's file
+// system reader for the host's own flavor, else the placed path itself. A
+// Windows path judged on a POSIX host (or a POSIX path on Windows) names no
+// file of this file system, so there is no link to follow: its placed path is
+// the whole answer, a member or not by name, never an unresolved target that
+// reaches every set (DET111 D3; it graded every Windows home write the
+// unknown tier).
+func resolverFor(flavor effects.Flavor) resolver {
+	if (flavor == effects.FlavorWindows) != (hostGOOS == "windows") {
+		return func(p string) (string, bool) { return p, true }
+	}
+	return defaultResolver
+}
+
 // matchBasis names why a target matched a set, so the restricted tier can
 // require an exact canonical member. For a known grade it is exact, tree or
 // link; for unknown it is glob, dir, dynamic or unresolved.
@@ -286,6 +365,8 @@ func matchBasis(t effects.Target, grade setGrade, set protectedSet, flavor effec
 			return "link" // a non-canonical spelling the resolver walked to a member
 		case memberExact(t.Path, set, flavor):
 			return "exact"
+		case knownProtectedHomeTail(t.Path, set, flavor):
+			return "other_home"
 		case underTree(t.Path, set, flavor):
 			return "tree"
 		case t.Subtree && treeHoldsSet(t.Path, set, flavor):
@@ -295,6 +376,11 @@ func matchBasis(t effects.Target, grade setGrade, set protectedSet, flavor effec
 		}
 	}
 	switch {
+	case t.Glob != "" && dotDotAfterWildcard(t.Glob):
+		// u*/../x: the .. climbs from whatever the wildcard matched, which
+		// may be a link; where it lands is a file-system answer, not a
+		// pattern one (rel-1-0-10:GAP-0443).
+		return "unresolved"
 	case t.Glob != "":
 		return "glob"
 	case t.Path == "" && t.Lexical != "" && lexicalReachesSet(t.Lexical, set, flavor):
@@ -314,6 +400,21 @@ func matchBasis(t effects.Target, grade setGrade, set protectedSet, flavor effec
 	default:
 		return "unresolved"
 	}
+}
+
+// dotDotAfterWildcard reports a .. component after a component with a
+// pattern character.
+func dotDotAfterWildcard(glob string) bool {
+	wild := false
+	for _, seg := range strings.FieldsFunc(glob, func(r rune) bool { return r == '/' || r == '\\' }) {
+		if seg == ".." && wild {
+			return true
+		}
+		if strings.ContainsAny(seg, "*?[") {
+			wild = true
+		}
+	}
+	return false
 }
 
 // callLinkReaches reports that a target's in-call link landing (Physical, set
@@ -622,6 +723,9 @@ func Protected(pt *semanticpb.EffectTarget) []Protection {
 		}
 		if m.State == string(gradeKnown) {
 			p.Certainty = "known"
+			if m.Set == SetCredentials && m.Reason == "other_home" {
+				p.Class = "other_home_credential"
+			}
 		} else {
 			p.Certainty = "maybe"
 			switch m.Reason {

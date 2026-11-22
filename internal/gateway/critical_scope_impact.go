@@ -730,19 +730,18 @@ func withProvenScopeFindings(
 	facts actionfacts.Facts,
 	findings []RuleFinding,
 ) []RuleFinding {
-	enforced := request.StrictPolicy || request.ManagedInstall
 	findings = slices.Clone(findings)
 	grade := func(finding *RuleFinding, tiered bool) {
 		if !request.EnforcementCapable {
-			finding.enforcement = findingEnforcementDetectionOnly
+			finding.Proof = finding.Proof.Record()
 			return
 		}
 		finding.proof = newActionFactsSubgraphFindingProof(finding.RuleID, true, true)
 		switch {
-		case !tiered || enforced:
-			finding.enforcement = findingEnforcementAllowed
+		case !tiered:
+			finding.Proof = finding.Proof.Enforce()
 		default:
-			finding.enforcement = findingEnforcementAlertOnly
+			finding.Proof = request.tieredProof(finding.Proof, tierGateManaged)
 		}
 		if tiered && guardrailSeverityRank(finding.Severity) < guardrailSeverityRank("CRITICAL") {
 			finding.Severity = "CRITICAL"

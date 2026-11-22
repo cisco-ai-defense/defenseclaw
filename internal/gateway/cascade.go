@@ -67,34 +67,6 @@ const (
 	cascadePolicyLatencyNote = "guardrail.cascade.policy.timeout_ms"
 )
 
-// cascadeUnknownForConfig is the unknown-tier action a truncated input of
-// connector maps to under cfg: "" when the pack decides as it always did
-// (a strict pack maps the limit finding by its levels), else the action.
-func cascadeUnknownForConfig(cfg *config.Config, connector string) string {
-	if cfg == nil || cfg.SecureClientIntegration() {
-		return ""
-	}
-	if u := cfg.ResolveCascade(connector).Unknown; u != "" && u != config.CascadeUnknownPack {
-		return u
-	}
-	if strictPackPosture(cfg, connector) {
-		return ""
-	}
-	return guardrailActionAlert
-}
-
-// cascadeUnknownForGuardrail is cascadeUnknownForConfig for a caller that
-// holds only the guardrail block (the proxy).
-func cascadeUnknownForGuardrail(gc *config.GuardrailConfig, connector string, strict func() bool) string {
-	if u := gc.CascadeUnknown(connector); u != config.CascadeUnknownPack {
-		return u
-	}
-	if strict() {
-		return ""
-	}
-	return guardrailActionAlert
-}
-
 // cascadeBoundedTier maps the cascade's unknown tier onto the bound rule's
 // tier: pack keeps the pack's own (packTier).
 func cascadeBoundedTier(cfg *config.Config, connector string, packTier bounded.Tier) bounded.Tier {
