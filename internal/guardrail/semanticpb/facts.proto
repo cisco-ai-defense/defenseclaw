@@ -33,6 +33,8 @@ message Facts {
   // internal/effectrules). It is filled only for the effect rules; the
   // ActionFacts rules never see it populated.
   repeated EffectFact effects = 11;
+  // kube contains bounded Kubernetes API request facts (GAP-1824).
+  repeated KubeFact kube = 12;
   repeated SQLFact sql_facts = 13;
 }
 
@@ -376,4 +378,30 @@ enum ArtifactRole {
 enum ArtifactKind {
   ARTIFACT_KIND_UNSPECIFIED = 0;
   ARTIFACT_KIND_ARCHIVE = 1;
+}
+
+
+// KubeFact is one Kubernetes API request as the apiserver would see it
+// (actionfacts.KubeRequestFact). source is kubectl or http; verb is the
+// apiserver verb (get, list, watch, create, update, patch, delete), proxy
+// for kubectl proxy or meta for discovery and health URIs. unknown marks a
+// request to an apiserver that could not be decomposed: a rule reading it
+// treats it as matching (fail closed).
+message KubeFact {
+  int64 command_id = 1;
+  string source = 2;
+  string verb = 3;
+  string group = 4;
+  string version = 5;
+  string resource = 6;
+  string subresource = 7;
+  string namespace = 8;
+  string name = 9;
+  bool all_namespaces = 10;
+  bool stdin = 11;
+  bool tty = 12;
+  bool command = 13;
+  bool label_selector = 14;
+  bool reveals_content = 15;
+  bool unknown = 16;
 }

@@ -23,7 +23,7 @@ import (
 )
 
 const (
-	maxSQLFacts = 16
+	maxSQLFacts      = 16
 	maxSQLFactValues = 4096
 )
 
@@ -67,6 +67,15 @@ var semanticSizeBounds = [...]sizeBound{
 	{"f.network.@items.scheme", maxScalarBytes},
 	{"f.network.@items.host", maxScalarBytes},
 	{"f.network.@items.normalized_host", maxScalarBytes},
+	{"f.kube", maxKube},
+	{"f.kube.@items.source", maxScalarBytes},
+	{"f.kube.@items.verb", maxScalarBytes},
+	{"f.kube.@items.group", maxScalarBytes},
+	{"f.kube.@items.version", maxScalarBytes},
+	{"f.kube.@items.resource", maxScalarBytes},
+	{"f.kube.@items.subresource", maxScalarBytes},
+	{"f.kube.@items.namespace", maxScalarBytes},
+	{"f.kube.@items.name", maxScalarBytes},
 	{"f.data_flows", maxDataFlows},
 	{"f.artifacts", maxArtifacts},
 	{"f.artifacts.@items.value", maxScalarBytes},
