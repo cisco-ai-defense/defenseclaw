@@ -227,9 +227,9 @@ func TestActiveUserLoginTildeBehindProtectHomeUsesClientTargets(t *testing.T) {
 // loses its self-protection block. A stronger original finding stays.
 func TestTwinProvenBlockReplacesAWeakerProof(t *testing.T) {
 	const ruleID = "tamper.detector_state_write"
-	weak := RuleFinding{RuleID: ruleID, enforcement: findingEnforcementAllowed}
+	weak := RuleFinding{RuleID: ruleID}
 	weak = weak.withTrustedActionProof(newFindingProof(findingProofExactFallback, ruleID, false))
-	strong := RuleFinding{RuleID: ruleID, enforcement: findingEnforcementAllowed}
+	strong := RuleFinding{RuleID: ruleID}
 	strong = strong.withTrustedActionProof(newFindingProof(findingProofActiveStateMutation, ruleID, true))
 	got := withTwinProvenBlocks([]RuleFinding{weak}, []RuleFinding{strong})
 	if len(got) != 1 || got[0].proof.kind != findingProofActiveStateMutation || !got[0].proof.authorizes(ruleID) {

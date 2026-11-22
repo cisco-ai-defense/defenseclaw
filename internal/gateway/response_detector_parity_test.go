@@ -102,7 +102,7 @@ func gap0175TrustLiteralFloor(content, responseSeverity, hookSeverity string) bo
 		return false
 	}
 	for _, f := range scanUntrustedContentRules(snapshotRulePackGeneration(""), content) {
-		if f.enforcement == findingEnforcementDetectionOnly && severityRank[f.Severity] < severityRank["MEDIUM"] {
+		if f.Proof.Recorded() && severityRank[f.Severity] < severityRank["MEDIUM"] {
 			return true
 		}
 	}

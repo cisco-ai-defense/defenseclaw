@@ -162,7 +162,9 @@ const (
 	SurfaceContent
 )
 
-// Ceiling is how far a finding may move the verdict.
+// Ceiling is how far a table cell lets a finding move the verdict. It is a
+// cell of the tier table, never a reader's choice: a reader says what it
+// proved (Proof), the pack says what that is worth.
 type Ceiling uint8
 
 const (
@@ -179,7 +181,6 @@ type Finding struct {
 	RuleID   string
 	Severity Severity
 	Proof    Proof
-	Ceiling  Ceiling
 }
 
 // Levels are the severity levels of the connector and surface: block at or
@@ -255,7 +256,9 @@ type Input struct {
 // Output is the verdict.
 type Output struct {
 	Action Action
-	// Severity is the highest severity of the findings that enforce.
+	// Severity is the verdict severity: the highest severity of the findings
+	// that are not recorded only, each read as its cell reads it (a cell
+	// severity replaces the finding's own: GAP-0851, GAP-0962).
 	Severity Severity
 	// RuleIDs are the findings that set Action, in input order: the floor
 	// rows and the findings whose severity maps to it.
@@ -265,14 +268,15 @@ type Output struct {
 // Decide is the one decision function. The order, documented once:
 //
 //  1. Each finding's row in the table (by its proof) gives its cell for
-//     the deployment and the tier: a floor action, and whether the finding
-//     still maps by its severity.
+//     the deployment and the tier: a floor action, a ceiling (record: the
+//     finding never moves the verdict; alert: an alert at most), the
+//     severity it maps with, and whether it still maps by its severity.
 //  2. The truncated row's cell is replaced by guardrail.cascade.unknown when
 //     that is set; under the Secure Client integration only rows marked
 //     secure_client apply.
 //  3. The findings that map by severity give the levels' action for the
-//     highest enforcing severity; alert-ceiling findings add at most an
-//     alert; record-ceiling findings add nothing.
+//     highest enforcing severity; alert-ceiling cells add at most an
+//     alert; record-ceiling cells add nothing.
 //  4. The verdict is the strongest of the floors and the levels' action.
 func Decide(in Input) Output {
 	table := in.Table
@@ -290,66 +294,72 @@ func Decide(in Input) Output {
 
 	var out Output
 	floor := Allow
-	var floorRules []string
+	var floorRules []int
 	var enforce, alertOnly Severity
 	var levelRules []struct {
-		id      string
+		index   int
 		sev     Severity
 		ceiling Ceiling
 	}
-	for _, f := range in.Findings {
-		if f.Ceiling == CeilingRecord {
-			continue
-		}
+	var verdictSev Severity
+	for index, f := range in.Findings {
 		mapsBySeverity := true
 		sev := f.Severity
-		if f.Ceiling == CeilingNone {
-			if row := table.match(f.Proof, in.Surface, in.SecureClient); row != nil {
-				tier := tierOf
-				if row.PackTier {
-					tier = packTierOf
+		ceiling := CeilingNone
+		if row := table.match(f.Proof, in.Surface, in.SecureClient); row != nil {
+			tier := tierOf
+			if row.PackTier {
+				tier = packTierOf
+			}
+			cell := row.cell(in.Deployment, tier)
+			if row.Unknown {
+				if !unknownRead {
+					if in.Unknown != nil {
+						unknown, unknownSet = in.Unknown()
+					}
+					unknownRead = true
 				}
-				cell := row.cell(in.Deployment, tier)
-				if row.Unknown {
-					if !unknownRead {
-						if in.Unknown != nil {
-							unknown, unknownSet = in.Unknown()
-						}
-						unknownRead = true
-					}
-					if unknownSet {
-						cell = Cell{Floor: unknown}
-					}
-				}
-				if cell.Floor > Allow {
-					if cell.Floor > floor {
-						floor = cell.Floor
-						floorRules = floorRules[:0]
-					}
-					if cell.Floor == floor {
-						floorRules = append(floorRules, f.RuleID)
-					}
-				}
-				mapsBySeverity = cell.Levels
-				if cell.Severity != SevNone {
-					sev = cell.Severity
+				if unknownSet {
+					cell = Cell{Floor: unknown, Severity: cell.Severity}
 				}
 			}
+			if cell.Ceiling == CeilingRecord {
+				continue
+			}
+			ceiling = cell.Ceiling
+			if cell.Severity != SevNone {
+				sev = cell.Severity
+			}
+			floorOf := cell.Floor
+			if ceiling == CeilingAlert {
+				floorOf = min(floorOf, Alert)
+			}
+			if floorOf > Allow {
+				if floorOf > floor {
+					floor = floorOf
+					floorRules = floorRules[:0]
+				}
+				if floorOf == floor {
+					floorRules = append(floorRules, index)
+				}
+			}
+			mapsBySeverity = cell.Levels
 		}
+		verdictSev = max(verdictSev, sev)
 		if !mapsBySeverity {
 			continue
 		}
-		switch f.Ceiling {
+		switch ceiling {
 		case CeilingNone:
 			enforce = max(enforce, sev)
 		case CeilingAlert:
 			alertOnly = max(alertOnly, sev)
 		}
 		levelRules = append(levelRules, struct {
-			id      string
+			index   int
 			sev     Severity
 			ceiling Ceiling
-		}{f.RuleID, sev, f.Ceiling})
+		}{index, sev, ceiling})
 	}
 	levels := Allow
 	if enforce > SevNone {
@@ -359,18 +369,28 @@ func Decide(in Input) Output {
 		levels = Stronger(levels, min(in.Levels.ActionFor(alertOnly), Alert))
 	}
 	out.Action = Stronger(floor, levels)
-	out.Severity = enforce
+	out.Severity = verdictSev
 	if out.Action == Allow {
 		return out
 	}
+	// A finding is named once, in input order, when its floor or its
+	// severity set the action.
+	named := make([]bool, len(in.Findings))
 	if floor == out.Action {
-		out.RuleIDs = append(out.RuleIDs, floorRules...)
+		for _, i := range floorRules {
+			named[i] = true
+		}
 	}
 	if levels == out.Action {
 		for _, r := range levelRules {
 			if r.ceiling == CeilingNone && r.sev == enforce || r.ceiling == CeilingAlert && r.sev == alertOnly {
-				out.RuleIDs = append(out.RuleIDs, r.id)
+				named[r.index] = true
 			}
+		}
+	}
+	for i, ok := range named {
+		if ok {
+			out.RuleIDs = append(out.RuleIDs, in.Findings[i].RuleID)
 		}
 	}
 	return out

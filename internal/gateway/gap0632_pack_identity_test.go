@@ -101,20 +101,29 @@ func TestGAP0632PinnedPackIdentityKeepsStateProtection(t *testing.T) {
 	}
 	chainMask := chain.Step1Bit | chain.Step2Bit | chain.Step3Bit | chain.Step4Bit | chain.MutationBit
 
+	// tier is each row's hook tier, stated literally: a pack's tier comes
+	// from its own tier field (manifest posture, else tiers.yaml tier),
+	// never from its folder name; a legacy copy that names no tier keeps
+	// strict in a folder named strict and is default elsewhere
+	// (rel-1-0-10:GAP-1562 owner ruling). legacy drops the manifest; bare
+	// also drops tiers.yaml (a copy older than the tier table).
 	rows := []struct {
-		name, source, folder, selected string
-		copy, legacy, disabled         bool
+		name, source, folder, selected, tier string
+		copy, legacy, bare, disabled         bool
 	}{
-		{name: "shipped strict", source: "strict"},
-		{name: "pinned strict copy", source: "strict", folder: "strict", copy: true},
-		{name: "renamed strict copy", source: "strict", folder: "operator-pack", copy: true},
-		{name: "pinned older strict copy", source: "strict", folder: "operator-pack", copy: true, legacy: true},
-		{name: "strict copy with rule disabled", source: "strict", folder: "operator-pack", copy: true, disabled: true},
-		{name: "shipped default", source: "default"},
-		{name: "pinned default copy", source: "default", folder: "strict", copy: true},
-		{name: "older default copy named strict", source: "default", folder: "operator-pack", selected: "strict", copy: true, legacy: true},
-		{name: "shipped permissive", source: "permissive"},
-		{name: "pinned permissive copy", source: "permissive", folder: "strict", copy: true},
+		{name: "shipped strict", source: "strict", tier: "strict"},
+		{name: "pinned strict copy", source: "strict", folder: "strict", copy: true, tier: "strict"},
+		{name: "renamed strict copy", source: "strict", folder: "operator-pack", copy: true, tier: "strict"},
+		{name: "pinned older strict copy", source: "strict", folder: "operator-pack", copy: true, legacy: true, tier: "strict"},
+		{name: "bare strict copy named strict", source: "strict", folder: "strict", copy: true, legacy: true, bare: true, tier: "strict"},
+		{name: "bare strict copy renamed", source: "strict", folder: "operator-pack", copy: true, legacy: true, bare: true, tier: "default"},
+		{name: "strict copy with rule disabled", source: "strict", folder: "operator-pack", copy: true, disabled: true, tier: "strict"},
+		{name: "shipped default", source: "default", tier: "default"},
+		{name: "pinned default copy", source: "default", folder: "strict", copy: true, tier: "default"},
+		{name: "older default copy named strict", source: "default", folder: "operator-pack", selected: "strict", copy: true, legacy: true, tier: "default"},
+		{name: "shipped permissive", source: "permissive", tier: "permissive"},
+		{name: "pinned permissive copy", source: "permissive", folder: "strict", copy: true, tier: "permissive"},
+		{name: "bare permissive copy named permissive", source: "permissive", folder: "permissive", copy: true, legacy: true, bare: true, tier: "default"},
 	}
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {
@@ -133,6 +142,11 @@ func TestGAP0632PinnedPackIdentityKeepsStateProtection(t *testing.T) {
 				}
 				if row.legacy {
 					if err := os.Remove(filepath.Join(dir, guardrail.PackManifestFile)); err != nil && !os.IsNotExist(err) {
+						t.Fatal(err)
+					}
+				}
+				if row.bare {
+					if err := os.Remove(filepath.Join(dir, "tiers.yaml")); err != nil && !os.IsNotExist(err) {
 						t.Fatal(err)
 					}
 				}
@@ -159,10 +173,7 @@ func TestGAP0632PinnedPackIdentityKeepsStateProtection(t *testing.T) {
 				t.Fatal(err)
 			}
 			buildThresholdTable(cfg, nil)
-			wantTier := row.source
-			if row.legacy {
-				wantTier = "default"
-			}
+			wantTier := row.tier
 			if got := cfg.HookPolicyTierForConnector("codex"); got != wantTier {
 				t.Errorf("hook policy tier = %q, want %q", got, wantTier)
 			}
@@ -170,13 +181,13 @@ func TestGAP0632PinnedPackIdentityKeepsStateProtection(t *testing.T) {
 				DetectionStepMask: chainMask,
 			})
 			wantChain := uint64(0)
-			if row.source == "strict" && !row.legacy {
+			if wantTier == "strict" {
 				wantChain = chainMask
 			}
 			if chainProjection.DetectionStepMask != wantChain {
 				t.Errorf("chain posture mask = %d, want %d", chainProjection.DetectionStepMask, wantChain)
 			}
-			if row.copy && (!row.legacy || row.source == "default") {
+			if row.copy && wantTier == row.source {
 				shipped := ConfigThresholds(&config.Config{PolicyDir: filepath.Dir(root), Guardrail: config.GuardrailConfig{RulePack: row.source}}, "")
 				copied := resolveThresholds(cfg, "")
 				if copied.Block != shipped.Block || copied.Alert != shipped.Alert {

@@ -780,7 +780,7 @@ type codexAdditionalContextFindingKey struct {
 	Title       string
 	Severity    string
 	Evidence    string
-	Enforcement findingEnforcement
+	Enforcement string
 }
 
 // codexAdditionalContextFirstInWindow returns false only for an identical
@@ -808,7 +808,7 @@ func (a *APIServer) codexAdditionalContextFirstInWindow(
 			Title:       finding.Title,
 			Severity:    finding.Severity,
 			Evidence:    finding.Evidence,
-			Enforcement: finding.enforcement,
+			Enforcement: finding.Proof.String(),
 		})
 	}
 	sort.Slice(details, func(i, j int) bool {

@@ -14,7 +14,7 @@ import (
 // connectors, similar names and flagged calls are judged as before.
 func TestHookJudgeSkipsClaudeCodeNoEffectBuiltins(t *testing.T) {
 	flagged := &ToolInspectVerdict{Action: "allow", Severity: "CRITICAL",
-		DetailedFindings: []RuleFinding{{RuleID: "R", Severity: "CRITICAL", enforcement: findingEnforcementDetectionOnly}}}
+		DetailedFindings: []RuleFinding{{RuleID: "R", Severity: "CRITICAL", Proof: recordProof}}}
 	clean := &ToolInspectVerdict{Action: "allow", Severity: "NONE"}
 	for _, tc := range []struct {
 		connector, tool string

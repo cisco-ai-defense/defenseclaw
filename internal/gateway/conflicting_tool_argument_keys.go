@@ -717,17 +717,17 @@ func dispatchConflictingToolArguments(
 	if !conflict.shellOrWrite {
 		return findings
 	}
-	enforcement := findingEnforcementAllowed
+	enforcement := enforcingProof
 	if !request.EnforcementCapable {
-		enforcement = findingEnforcementDetectionOnly
+		enforcement = recordProof
 	}
 	return append(findings, RuleFinding{
-		RuleID:      conflictingToolArgumentsRuleID,
-		Title:       conflictingToolArgumentsTitle,
-		Severity:    "CRITICAL",
-		Confidence:  1,
-		Tags:        []string{"tool-arguments"},
-		LineNumber:  1,
-		enforcement: enforcement,
+		RuleID:     conflictingToolArgumentsRuleID,
+		Title:      conflictingToolArgumentsTitle,
+		Severity:   "CRITICAL",
+		Confidence: 1,
+		Tags:       []string{"tool-arguments"},
+		LineNumber: 1,
+		Proof:      enforcement,
 	})
 }

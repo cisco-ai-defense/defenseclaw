@@ -177,9 +177,9 @@ func outboundPIIFindings(request trustedActionRequest, findings []RuleFinding) [
 		}
 		findings = append(findings, RuleFinding{
 			RuleID: ruleID, Title: title, Severity: "MEDIUM", Confidence: 0.7,
-			Tags:        []string{"pii", "outbound"},
-			LineNumber:  1,
-			enforcement: findingEnforcementAlertOnly,
+			Tags:       []string{"pii", "outbound"},
+			LineNumber: 1,
+			Proof:      advisoryProof,
 		})
 	}
 	card := outboundPIICardPattern()

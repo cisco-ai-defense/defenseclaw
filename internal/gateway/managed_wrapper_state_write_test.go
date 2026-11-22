@@ -71,7 +71,7 @@ func TestManagedRunnerPrefixWritesWhatTheWrappedCallWrites(t *testing.T) {
 		{"L04", "caffeinate -i ln -s ../.ssh/authorized_keys k2", "block"},
 		{"L05", "env -C ~/project ln -s ../.ssh/authorized_keys k4", "block"},
 		{"L06", "env -C ~ ln -s .defenseclaw hc; cp a.txt ~/hc/config.yaml", "block"},
-		{"L09", "env -C ~ ln -s .defenseclaw/hooks hk; cp a.txt ~/hk/x.sh", "block+tamper.detector_state_write+persistence.ssh_authorized_keys_command"},
+		{"L09", "env -C ~ ln -s .defenseclaw/hooks hk; cp a.txt ~/hk/x.sh", "block+tamper.detector_state_write+!persistence.ssh_authorized_keys_command"},
 		{"L07", "env -iC ~/project ln -s keylink k5; cp a.txt k5", "block"},
 		{"N07", "ionice -c3 rsync -a ordinary/ /tmp/p1c-bk/", "allow"},
 	}

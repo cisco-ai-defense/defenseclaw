@@ -105,16 +105,13 @@ func appendUnknownKeyOverflowFinding(findings []RuleFinding, generation *compile
 	if !ok {
 		return findings
 	}
-	enforcement := findingEnforcementAlertOnly
-	if request.StrictPolicy {
-		enforcement = findingEnforcementAllowed
-	}
+	enforcement := request.tieredProof(enforcingProof, tierGateStrict)
 	return append(findings, adjustConfidence(request.Input.Tool, RuleFinding{
 		RuleID: rule.ID, Title: "Warning: file tool arguments exceed the target verification bound",
 		Severity: rule.Severity, Confidence: rule.Confidence,
 		Evidence: trustedActionInputText(request.Input, ""),
 		Tags:     append([]string(nil), rule.Tags...), LineNumber: 1,
-		enforcement: enforcement,
+		Proof: enforcement,
 	}))
 }
 
@@ -143,7 +140,6 @@ func appendUnverifiedWriteTargetFinding(
 		RuleID: rule.ID, Title: title, Severity: rule.Severity,
 		Confidence: rule.Confidence, Evidence: trustedActionInputText(request.Input, ""),
 		Tags: append([]string(nil), rule.Tags...), LineNumber: 1,
-		enforcement: findingEnforcementAllowed,
 	}))
 }
 
@@ -195,15 +191,15 @@ func appendOverLimitElidedContentFinding(
 	if !ok {
 		return findings
 	}
-	enforcement := findingEnforcementAllowed
+	enforcement := enforcingProof
 	if !request.EnforcementCapable {
-		enforcement = findingEnforcementDetectionOnly
+		enforcement = recordProof
 	}
 	finding := adjustConfidence(request.Input.Tool, RuleFinding{
 		RuleID: rule.ID, Title: title, Severity: rule.Severity,
 		Confidence: rule.Confidence, Evidence: trustedActionInputText(request.Input, ""),
 		Tags: append([]string(nil), rule.Tags...), LineNumber: 1,
-		enforcement: enforcement,
+		Proof: enforcement,
 	})
 	for index, existing := range findings {
 		if existing.RuleID != rule.ID {

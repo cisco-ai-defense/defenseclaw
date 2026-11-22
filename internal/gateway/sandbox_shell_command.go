@@ -271,18 +271,18 @@ const (
 // only blocks where the call is enforcement-capable (observe mode records
 // would_block).
 func unverifiedShellCommandFinding(enforcementCapable bool) RuleFinding {
-	enforcement := findingEnforcementAllowed
+	enforcement := enforcingProof
 	if !enforcementCapable {
-		enforcement = findingEnforcementDetectionOnly
+		enforcement = recordProof
 	}
 	return RuleFinding{
-		RuleID:      unverifiedShellCommandRuleID,
-		Title:       unverifiedShellCommandTitle,
-		Severity:    "CRITICAL",
-		Confidence:  1,
-		Tags:        []string{"tool-arguments"},
-		LineNumber:  1,
-		enforcement: enforcement,
+		RuleID:     unverifiedShellCommandRuleID,
+		Title:      unverifiedShellCommandTitle,
+		Severity:   "CRITICAL",
+		Confidence: 1,
+		Tags:       []string{"tool-arguments"},
+		LineNumber: 1,
+		Proof:      enforcement,
 	}
 }
 

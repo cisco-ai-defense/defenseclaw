@@ -132,7 +132,7 @@ func TestDownloadPipelineProfilesHaveEquivalentActions(t *testing.T) {
 				// rel-1-0-6:GAP-0081 (#1125): default alerts and strict alerts at
 				// CRITICAL; the call runs in both (alert-only, never a block).
 				if finding == nil || finding.Severity != wantSeverity ||
-					finding.enforcement != findingEnforcementAlertOnly {
+					!finding.Proof.Advisory() {
 					t.Fatalf("%s %s finding=%+v all=%v", test.ruleID, profile, finding, FindingStrings(findings))
 				}
 				for _, other := range findings {

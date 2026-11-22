@@ -33,8 +33,12 @@ type Cell struct {
 	// its floor (the truncated row in the default and permissive tiers).
 	Levels bool
 	// Severity, when set, is the severity the finding maps with instead of
-	// its own (a bound-only finding: GAP-0851, GAP-0962).
+	// its own, and its verdict severity (a bound-only finding is MEDIUM:
+	// GAP-0851, GAP-0962).
 	Severity Severity
+	// Ceiling caps what the finding may do: CeilingAlert is an alert at
+	// most (its floor too), CeilingRecord never moves the verdict.
+	Ceiling Ceiling
 }
 
 // Row is one row of the tier table: the proofs it matches and a cell per
@@ -45,6 +49,9 @@ type Row struct {
 	Targets   []TargetClass
 	Certainty []Certainty
 	Reach     []string
+	// Sets: the row matches only a proof naming one of these file classes
+	// (Proof.Set); empty matches any proof, with or without a set.
+	Sets []string
 	// Content: the row applies on the content surface too.
 	Content bool
 	// SecureClient: the row applies under the Secure Client integration.
@@ -53,6 +60,9 @@ type Row struct {
 	Unknown bool
 	// PackTier: the column is the pack posture (Input.PackTier).
 	PackTier bool
+	// Gate: the row grades a reader's tiered conclusion by name
+	// (Table.GateCeiling); it never matches a finding's proof.
+	Gate bool
 	// Source names the 1.0.10 rule or gap the row carries.
 	Source string
 	Cells  [deploymentCount][tierCount]Cell
@@ -70,6 +80,9 @@ func (t *Table) match(p Proof, surface Surface, secureClient bool) *Row {
 	}
 	for i := range t.Rows {
 		row := &t.Rows[i]
+		if row.Gate {
+			continue
+		}
 		if surface == SurfaceContent && !row.Content || secureClient && !row.SecureClient {
 			continue
 		}
@@ -84,7 +97,8 @@ func (r *Row) matches(p Proof) bool {
 	return (len(r.Kinds) == 0 || slices.Contains(r.Kinds, p.Kind)) &&
 		(len(r.Targets) == 0 || slices.Contains(r.Targets, p.Target)) &&
 		(len(r.Certainty) == 0 || slices.Contains(r.Certainty, p.Certainty)) &&
-		(len(r.Reach) == 0 || slices.Contains(r.Reach, p.Reach))
+		(len(r.Reach) == 0 || slices.Contains(r.Reach, p.Reach)) &&
+		(len(r.Sets) == 0 || slices.Contains(r.Sets, p.Set))
 }
 
 // cell is the row's cell for d, reading the tier only when the row's cells
@@ -106,14 +120,49 @@ func (r *Row) cell(d Deployment, tier func() Tier) Cell {
 
 // Row ids of the built-in table.
 const (
+	RowRecord          = "record"
+	RowAdvisory        = "advisory"
 	RowEvaluationFault = "evaluation-fault"
 	RowUnverifiedPath  = "unverified-path"
 	RowTruncated       = "truncated"
 	RowStateWrite      = "state-write"
 	RowProtectedFile   = "shell-protected-file"
+	// The known credential reads (GAP-1244, GAP-0888, GAP-0898/0899): a
+	// read proven on a credential file class takes the cell the 1.0.10
+	// rule naming that class gives its plain spelling (cat <the file>),
+	// characterized at a64bfdb931 in the five tiers, so a spelling only the
+	// effects reader resolves gets the plain spelling's verdict.
+	RowReadSSHPrivateKey          = "read-ssh-private-key"
+	RowReadCredential             = "read-credential"
+	RowReadOtherHomeSSHPrivateKey = "read-other-home-ssh-private-key"
+	RowReadOtherHomeGitCredential = "read-other-home-git-credential"
+	RowReadOtherHomeCredential    = "read-other-home-credential"
+	// RowTieredStrict grades a conclusion the 1.0.10 readers enforced in the
+	// strict tier only (an alert in default and permissive, per-user and
+	// managed alike): an inline handoff of unknown state, file tool targets
+	// past the verification bound, a strict-enforced semantic owner, the
+	// omitted plain operands of a keys write, another account's key read.
+	RowTieredStrict = "tiered-strict"
+	// RowTieredManaged grades a conclusion the 1.0.10 readers enforced in
+	// the strict tier and in every managed install (an alert in a per-user
+	// default or permissive install): a proven DefenseClaw self-disable, a
+	// proven critical scope, a fetched-content execution, a non-shell tool
+	// credential or account reach, a read-only keys mention, an unproven
+	// key write that may warn.
+	RowTieredManaged = "tiered-managed"
 )
 
 var mutatingKinds = []ProofKind{KindWrite, KindAppend, KindDelete, KindLink, KindPerm}
+
+// cloudCredentialSets are the credential classes 1.0.10 grades alike in
+// one's own and another account's home: an alert MEDIUM, nothing in
+// permissive (GAP-0888).
+var cloudCredentialSets = []string{SetAWSCredentials, SetNpmrc, SetPypirc, SetKubeConfig, SetDockerConfig}
+
+// alertMedium is the GAP-0888 cell: the read maps as MEDIUM and is an
+// alert at most (an alert in default, strict and managed; nothing in
+// permissive, which alerts from HIGH).
+var alertMedium = Cell{Levels: true, Severity: SevMedium, Ceiling: CeilingAlert}
 
 func uniform(c Cell) [tierCount]Cell { return [tierCount]Cell{c, c, c} }
 
@@ -123,6 +172,26 @@ func uniform(c Cell) [tierCount]Cell { return [tierCount]Cell{c, c, c} }
 func Builtin() *Table { return &builtin }
 
 var builtin = Table{Rows: []Row{
+	{
+		// A proof with no reach never moves the verdict (DET111 PLAN 5.3,
+		// the precision rule): the finding is recorded only, on every
+		// surface and in every tier (the 1.0.10 detection-only class).
+		ID: RowRecord, Certainty: []Certainty{CertMaybe}, Reach: []string{""},
+		Content: true, SecureClient: true, Source: "rel-1-0-10:detection-only",
+		Cells: [deploymentCount][tierCount]Cell{
+			uniform(Cell{Levels: true, Ceiling: CeilingRecord}), uniform(Cell{Levels: true, Ceiling: CeilingRecord}),
+		},
+	},
+	{
+		// An advisory proof (ReachAdvisory) maps by its severity and is an
+		// alert at most, on every surface and in every tier (the 1.0.10
+		// alert-only class).
+		ID: RowAdvisory, Certainty: []Certainty{CertMaybe}, Reach: []string{ReachAdvisory},
+		Content: true, SecureClient: true, Source: "rel-1-0-10:alert-only",
+		Cells: [deploymentCount][tierCount]Cell{
+			uniform(Cell{Levels: true, Ceiling: CeilingAlert}), uniform(Cell{Levels: true, Ceiling: CeilingAlert}),
+		},
+	},
 	{
 		// A call the evaluation failed on blocks in every pack
 		// (rel-1-0-10:GAP-0486).
@@ -136,20 +205,25 @@ var builtin = Table{Rows: []Row{
 		// not answer for, on every surface, in every tier; per-user keeps
 		// the pack's levels.
 		ID: RowUnverifiedPath, Certainty: []Certainty{CertMaybe}, Reach: []string{ReachFS},
-		Content: true, SecureClient: true, Source: "managedClosesOnUnverifiedPath",
+		Content: true, SecureClient: true, Source: "rel-1-0-10:TOOL-PATH-UNVERIFIED managed close",
 		Cells: [deploymentCount][tierCount]Cell{
 			uniform(Cell{Levels: true}), uniform(Cell{Floor: Block, Levels: true}),
 		},
 	},
 	{
 		// A truncated call is the unknown tier: an alert in the default and
-		// permissive packs, by the levels in strict (rel-1-0-6:GAP-0675,
-		// GAP-0313, GAP-0688); guardrail.cascade.unknown replaces it.
+		// permissive packs, a block in strict (rel-1-0-6:GAP-0675, GAP-0313,
+		// GAP-0688); guardrail.cascade.unknown replaces it. A bound alone is
+		// MEDIUM, and the row applies on the content surface too, so every
+		// route gives the same verdict (owner ruling 2026-11-21,
+		// GAP-0851, GAP-0962: in 1.0.10 the bound finding was CRITICAL so
+		// that strict blocked, and the content surface blocked it in
+		// every pack).
 		ID: RowTruncated, Kinds: []ProofKind{KindTruncated}, Unknown: true, PackTier: true,
-		Source: "rel-1-0-6:GAP-0675",
+		Content: true, Source: "rel-1-0-6:GAP-0675; rel-1-0-10:GAP-0851",
 		Cells: [deploymentCount][tierCount]Cell{
-			{TierDefault: {Floor: Alert}, TierPermissive: {Floor: Alert}, TierStrict: {Levels: true}},
-			{TierDefault: {Floor: Alert}, TierPermissive: {Floor: Alert}, TierStrict: {Levels: true}},
+			{TierDefault: {Floor: Alert, Severity: SevMedium}, TierPermissive: {Floor: Alert, Severity: SevMedium}, TierStrict: {Floor: Block, Levels: true, Severity: SevMedium}},
+			{TierDefault: {Floor: Alert, Severity: SevMedium}, TierPermissive: {Floor: Alert, Severity: SevMedium}, TierStrict: {Floor: Block, Levels: true, Severity: SevMedium}},
 		},
 	},
 	{
@@ -173,6 +247,75 @@ var builtin = Table{Rows: []Row{
 			uniform(Cell{Floor: Alert, Levels: true}), uniform(Cell{Floor: Alert, Levels: true}),
 		},
 	},
+	{
+		// One's own SSH private key: CRITICAL, a block in every pack
+		// (PATH-SSH-KEY on cat ~/.ssh/id_rsa).
+		ID: RowReadSSHPrivateKey, Kinds: []ProofKind{KindRead}, Targets: []TargetClass{TargetCredential},
+		Certainty: []Certainty{CertKnown}, Sets: []string{SetSSHPrivateKey}, SecureClient: true,
+		Source: "rel-1-0-10:PATH-SSH-KEY",
+		Cells: [deploymentCount][tierCount]Cell{
+			uniform(Cell{Levels: true, Severity: SevCritical}), uniform(Cell{Levels: true, Severity: SevCritical}),
+		},
+	},
+	{
+		// One's own cloud, git and package credentials: the GAP-0888 cell.
+		ID: RowReadCredential, Kinds: []ProofKind{KindRead}, Targets: []TargetClass{TargetCredential},
+		Certainty: []Certainty{CertKnown}, Sets: append([]string{SetGitCredentials}, cloudCredentialSets...), SecureClient: true,
+		Source: "rel-1-0-10:GAP-0888",
+		Cells:  [deploymentCount][tierCount]Cell{uniform(alertMedium), uniform(alertMedium)},
+	},
+	{
+		// Another account's SSH private key: an alert MEDIUM in default and
+		// managed default, nothing in permissive, a CRITICAL block in strict
+		// (PATH-SSH-KEY on cat /home/<other>/.ssh/id_rsa).
+		ID: RowReadOtherHomeSSHPrivateKey, Kinds: []ProofKind{KindRead}, Targets: []TargetClass{TargetOtherHomeCredential},
+		Certainty: []Certainty{CertKnown}, Sets: []string{SetSSHPrivateKey}, SecureClient: true,
+		Source: "rel-1-0-10:PATH-SSH-KEY other home (GAP-0837)",
+		Cells: [deploymentCount][tierCount]Cell{
+			{TierDefault: alertMedium, TierPermissive: alertMedium, TierStrict: {Levels: true, Severity: SevCritical}},
+			{TierDefault: alertMedium, TierPermissive: alertMedium, TierStrict: {Levels: true, Severity: SevCritical}},
+		},
+	},
+	{
+		// Another account's .git-credentials or .netrc: CRITICAL, an alert
+		// per-user (default and permissive), a block in strict and in every
+		// managed install (PATH-GIT-CREDS, GAP-0835).
+		ID: RowReadOtherHomeGitCredential, Kinds: []ProofKind{KindRead}, Targets: []TargetClass{TargetOtherHomeCredential},
+		Certainty: []Certainty{CertKnown}, Sets: []string{SetGitCredentials}, SecureClient: true,
+		Source: "rel-1-0-10:PATH-GIT-CREDS other home (GAP-0835)",
+		Cells: [deploymentCount][tierCount]Cell{
+			{
+				TierDefault:    {Levels: true, Severity: SevCritical, Ceiling: CeilingAlert},
+				TierPermissive: {Levels: true, Severity: SevCritical, Ceiling: CeilingAlert},
+				TierStrict:     {Levels: true, Severity: SevCritical},
+			},
+			uniform(Cell{Levels: true, Severity: SevCritical}),
+		},
+	},
+	{
+		// Another account's cloud and package credentials: as one's own
+		// (GAP-0888 cell).
+		ID: RowReadOtherHomeCredential, Kinds: []ProofKind{KindRead}, Targets: []TargetClass{TargetOtherHomeCredential},
+		Certainty: []Certainty{CertKnown}, Sets: cloudCredentialSets, SecureClient: true,
+		Source: "rel-1-0-10:PATH-AWS-CREDS other home (GAP-0837)",
+		Cells:  [deploymentCount][tierCount]Cell{uniform(alertMedium), uniform(alertMedium)},
+	},
+	{
+		ID: RowTieredStrict, Gate: true, Content: true, SecureClient: true,
+		Source: "rel-1-0-10:request.StrictPolicy readers (GAP-0810, GAP-1069)",
+		Cells: [deploymentCount][tierCount]Cell{
+			{TierDefault: {Levels: true, Ceiling: CeilingAlert}, TierPermissive: {Levels: true, Ceiling: CeilingAlert}, TierStrict: {Levels: true}},
+			{TierDefault: {Levels: true, Ceiling: CeilingAlert}, TierPermissive: {Levels: true, Ceiling: CeilingAlert}, TierStrict: {Levels: true}},
+		},
+	},
+	{
+		ID: RowTieredManaged, Gate: true, Content: true, SecureClient: true,
+		Source: "rel-1-0-10:request.StrictPolicy||ManagedInstall readers (GAP-0594, GAP-0843)",
+		Cells: [deploymentCount][tierCount]Cell{
+			{TierDefault: {Levels: true, Ceiling: CeilingAlert}, TierPermissive: {Levels: true, Ceiling: CeilingAlert}, TierStrict: {Levels: true}},
+			uniform(Cell{Levels: true}),
+		},
+	},
 }}
 
 // Column is one pack's tiers.yaml: the pack's own tier and its cells.
@@ -188,36 +331,46 @@ type ColumnRow struct {
 	Managed Cell
 }
 
-type yamlCell struct {
+// CellYAML, RowYAML and ColumnYAML are the tiers.yaml schema.
+type CellYAML struct {
 	Floor    string `yaml:"floor"`
 	Levels   *bool  `yaml:"levels,omitempty"`
 	Severity string `yaml:"severity,omitempty"`
+	Ceiling  string `yaml:"ceiling,omitempty"`
 }
 
-type yamlRow struct {
+type RowYAML struct {
 	ID      string   `yaml:"id"`
 	Source  string   `yaml:"source,omitempty"`
-	PerUser yamlCell `yaml:"per_user"`
-	Managed yamlCell `yaml:"managed"`
+	PerUser CellYAML `yaml:"per_user"`
+	Managed CellYAML `yaml:"managed"`
 }
 
-type yamlColumn struct {
+type ColumnYAML struct {
 	Version int       `yaml:"version"`
 	Tier    string    `yaml:"tier"`
-	Rows    []yamlRow `yaml:"rows"`
+	Rows    []RowYAML `yaml:"rows"`
 }
 
-// ParseColumn reads and checks a pack's tiers.yaml: version 1, a known tier,
-// every row id a row of the built-in table and listed once, known actions
-// and severities, and a floor of allow only where the cell keeps the levels
-// (a cell that maps nothing would allow the finding silently).
+// TiersFile is the tier table file of a rule pack.
+const TiersFile = "tiers.yaml"
+
+// ParseColumn reads and checks a pack's tiers.yaml (ColumnYAML.Column).
 func ParseColumn(data []byte) (*Column, error) {
-	var raw yamlColumn
+	var raw ColumnYAML
 	dec := yaml.NewDecoder(bytes.NewReader(data))
 	dec.KnownFields(true)
 	if err := dec.Decode(&raw); err != nil {
 		return nil, fmt.Errorf("tiers.yaml: %w", err)
 	}
+	return raw.Column()
+}
+
+// Column checks a decoded tiers.yaml: version 1, a known tier, every row id
+// a row of the built-in table and listed once, known actions and
+// severities, and a floor of allow only where the cell keeps the levels (a
+// cell that maps nothing would allow the finding silently).
+func (raw ColumnYAML) Column() (*Column, error) {
 	if raw.Version != 1 {
 		return nil, fmt.Errorf("tiers.yaml: version %d, want 1", raw.Version)
 	}
@@ -248,7 +401,7 @@ func ParseColumn(data []byte) (*Column, error) {
 	return col, nil
 }
 
-func (c yamlCell) cell(row, deployment string) (Cell, error) {
+func (c CellYAML) cell(row, deployment string) (Cell, error) {
 	floor := strings.ToLower(strings.TrimSpace(c.Floor))
 	switch floor {
 	case "allow", "alert", "confirm", "block":
@@ -262,7 +415,19 @@ func (c yamlCell) cell(row, deployment string) (Cell, error) {
 			return Cell{}, fmt.Errorf("tiers.yaml: row %q %s: severity %q is not LOW, MEDIUM, HIGH or CRITICAL", row, deployment, c.Severity)
 		}
 	}
-	if out.Floor == Allow && !out.Levels {
+	switch strings.ToLower(strings.TrimSpace(c.Ceiling)) {
+	case "", "none":
+	case "alert":
+		out.Ceiling = CeilingAlert
+	case "record":
+		out.Ceiling = CeilingRecord
+	default:
+		return Cell{}, fmt.Errorf("tiers.yaml: row %q %s: ceiling %q is not alert or record", row, deployment, c.Ceiling)
+	}
+	if out.Ceiling == CeilingRecord && out.Floor != Allow {
+		return Cell{}, fmt.Errorf("tiers.yaml: row %q %s: a record ceiling with floor %q", row, deployment, c.Floor)
+	}
+	if out.Floor == Allow && !out.Levels && out.Ceiling != CeilingRecord {
 		return Cell{}, fmt.Errorf("tiers.yaml: row %q %s: floor allow with levels false allows the finding silently", row, deployment)
 	}
 	return out, nil
@@ -306,13 +471,13 @@ func (t *Table) ColumnOf(tier Tier) *Column {
 // MarshalColumn writes col as tiers.yaml, with each row's source as written
 // in the built-in table.
 func MarshalColumn(col *Column) ([]byte, error) {
-	raw := yamlColumn{Version: 1, Tier: col.Tier.String()}
+	raw := ColumnYAML{Version: 1, Tier: col.Tier.String()}
 	for _, r := range col.Rows {
 		source := ""
 		if b := builtin.row(r.ID); b != nil {
 			source = b.Source
 		}
-		raw.Rows = append(raw.Rows, yamlRow{ID: r.ID, Source: source, PerUser: toYAMLCell(r.PerUser), Managed: toYAMLCell(r.Managed)})
+		raw.Rows = append(raw.Rows, RowYAML{ID: r.ID, Source: source, PerUser: toYAMLCell(r.PerUser), Managed: toYAMLCell(r.Managed)})
 	}
 	var buf bytes.Buffer
 	buf.WriteString("# Tier table of this rule pack (DET111 D4, internal/guardrail/decide).\n")
@@ -329,8 +494,8 @@ func MarshalColumn(col *Column) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-func toYAMLCell(c Cell) yamlCell {
-	out := yamlCell{Floor: c.Floor.String()}
+func toYAMLCell(c Cell) CellYAML {
+	out := CellYAML{Floor: c.Floor.String()}
 	if !c.Levels {
 		f := false
 		out.Levels = &f
@@ -338,5 +503,52 @@ func toYAMLCell(c Cell) yamlCell {
 	if c.Severity != SevNone {
 		out.Severity = c.Severity.String()
 	}
+	switch c.Ceiling {
+	case CeilingAlert:
+		out.Ceiling = "alert"
+	case CeilingRecord:
+		out.Ceiling = "record"
+	}
 	return out
+}
+
+// Severity is the severity the table gives a finding with proof p on the
+// tool surface when every cell of its row agrees (the truncated row: a
+// bound alone is MEDIUM), else SevNone: the finding's own severity stands.
+// It is the severity a verdict reports for the finding (HighestSeverity).
+func (t *Table) Severity(p Proof) Severity {
+	row := t.match(p, SurfaceTool, false)
+	if row == nil {
+		return SevNone
+	}
+	sev := row.Cells[PerUser][TierDefault].Severity
+	for d := range row.Cells {
+		for _, c := range row.Cells[d] {
+			if c.Severity != sev {
+				return SevNone
+			}
+		}
+	}
+	return sev
+}
+
+// GateCeiling is the ceiling the gate row id gives a reader's tiered
+// conclusion for deployment d in tier: CeilingNone enforces, CeilingAlert
+// is an alert at most, CeilingRecord records only. An id the table has no
+// row for enforces (fail closed).
+func (t *Table) GateCeiling(id string, d Deployment, tier Tier) Ceiling {
+	if t == nil {
+		t = Builtin()
+	}
+	row := t.row(id)
+	if row == nil {
+		return CeilingNone
+	}
+	if d >= deploymentCount {
+		d = PerUser
+	}
+	if tier >= tierCount {
+		tier = TierDefault
+	}
+	return row.Cells[d][tier].Ceiling
 }

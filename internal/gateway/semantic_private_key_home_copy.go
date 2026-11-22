@@ -439,7 +439,7 @@ func appendTrustedPrivateKeyHomeCopyAlert(
 		Confidence: rule.Confidence, Evidence: trustedActionInputText(request.Input, ""),
 		Tags: append([]string(nil), rule.Tags...), LineNumber: 1,
 	}))
-	finding.enforcement = findingEnforcementAlertOnly
+	finding.Proof = finding.Proof.Advise()
 	return append(findings, finding)
 }
 
