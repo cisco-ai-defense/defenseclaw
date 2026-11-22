@@ -760,7 +760,7 @@ func runSubstrateLeader(parent context.Context, ready *atomic.Bool) error {
 	chains.Register(srv)
 	// A crashed or deleted actor asks nothing any more (E16): its open asks
 	// close when the controller reports the lifecycle event.
-	srv.Handle(chainstate.MethodChainLifecycle, leader.Typed(substrateLifecycleRelays(substrateLifecycleClosesAsks(chains.Lifecycle, askStore, os.Stderr), store, relay)))
+	srv.Handle(chainstate.MethodChainLifecycle, leader.Typed(substrateLifecycleRelays(substrateLifecycleClosesAsks(chains.Lifecycle, askStore, os.Stderr, relay), store, relay)))
 	go func() { _ = chains.Run(ctx) }()
 	hs := &http.Server{Addr: serveFlags.leaderListen, Handler: srv, ReadHeaderTimeout: 10 * time.Second}
 	if !serveFlags.plainHTTP {
@@ -1118,20 +1118,24 @@ func substrateBlocksUnscannedSkills(c *config.Config) func(connector string) boo
 // substrateAskCloseReasons is the reason code and the words of an ask a
 // lifecycle event closes (GAP-0526).
 var substrateAskCloseReasons = map[string][2]string{
-	chainstate.LifecycleCrashed:  {"actor_crashed", "the actor crashed"},
-	chainstate.LifecycleReverted: {"actor_reverted", "the actor was reverted to a snapshot"},
-	chainstate.LifecycleDeleted:  {"actor_deleted", "the actor was deleted"},
+	chainstate.LifecycleCrashed:  {telemetryrelay.AskClosedActorCrashed, "the actor crashed"},
+	chainstate.LifecycleReverted: {telemetryrelay.AskClosedActorReverted, "the actor was reverted to a snapshot"},
+	chainstate.LifecycleDeleted:  {telemetryrelay.AskClosedActorDeleted, "the actor was deleted"},
 }
 
 // substrateLifecycleClosesAsks wraps the chain lifecycle handler: after a
 // crashed, reverted or deleted event the actor's pending asks are closed
 // (a revert drops the held request with the run it belonged to, GAP-0415).
-// Each closed ask is a decision with the reason code, as an answer is, and
-// a log line names the event and every ask it closed (GAP-0526).
+// Each closed ask is a decision with the reason code, as an answer is; a
+// log line names the event and every ask it closed; and each closure is a
+// relay record, which a gateway replica writes to its audit log and the
+// webhooks with the reason code (actor_crashed, actor_reverted,
+// actor_deleted): the closure left no record anywhere before (GAP-0526).
+// log and relay may be nil.
 func substrateLifecycleClosesAsks(next func(context.Context, chainstate.LifecycleEvent) (chainstate.LifecycleResult, error),
 	asksStore interface {
 		CloseActor(uid, code, reason string) []asks.Ask
-	}, log io.Writer) func(context.Context, chainstate.LifecycleEvent) (chainstate.LifecycleResult, error) {
+	}, log io.Writer, relay *telemetryrelay.Store) func(context.Context, chainstate.LifecycleEvent) (chainstate.LifecycleResult, error) {
 	if log == nil {
 		log = io.Discard
 	}
@@ -1147,10 +1151,15 @@ func substrateLifecycleClosesAsks(next func(context.Context, chainstate.Lifecycl
 		if !ok {
 			return res, nil
 		}
-		closed := asksStore.CloseActor(ev.Actor.UID, why[0], why[1])
+		closed := asksStore.CloseActor(ev.Actor.UID, why[0], why[1]+" ("+why[0]+")")
 		fmt.Fprintf(log, "[substrate] lifecycle %s: actor %s/%s; closed %d open ask(s) (%s)\n", ev.Event, ev.Actor.Atespace, ev.Actor.UID, len(closed), why[0])
+		now := time.Now().UTC()
 		for _, a := range closed {
 			fmt.Fprintf(log, "[substrate] ask %s of %s/%s (%s) closed: expired, reason %s (%s)\n", a.ID, a.Atespace, a.Actor, substrateFirst(a.Host, a.Tool), why[0], why[1])
+			if relay != nil {
+				relay.Add(telemetryrelay.Record{Kind: telemetryrelay.KindAskClosed, At: now, Atespace: a.Atespace, Actor: a.Actor, UID: a.UID,
+					AskID: a.ID, Host: substrateFirst(a.Host, a.Tool), Reason: why[0], Unattended: a.Unattended, Severity: a.Severity})
+			}
 		}
 		return res, nil
 	}

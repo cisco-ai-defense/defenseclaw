@@ -216,9 +216,13 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
         ("checkpoint",),
         "Save the agent's work so you can undo back to it",
         long=(
-            'Saves a restore point of the agent\'s folder inside the agent. "defenseclaw substrate undo NAME"\n'
-            "goes back to the last one. With --every 1h it saves one on that schedule for as long as the command "
-            "runs."
+            "Saves a restore point of the agent's folder inside the agent, then has the cluster store a snapshot "
+            "of\n"
+            "the agent (it pauses for a few seconds), so the restore point survives a crash of the agent's "
+            "worker.\n"
+            '"defenseclaw substrate undo NAME" goes back to the last one; after a crash it first brings the '
+            "agent back to\n"
+            "that snapshot. With --every 1h it saves one on that schedule for as long as the command runs."
         ),
         example=(
             "defenseclaw substrate checkpoint fix-tests-7f3a\n"

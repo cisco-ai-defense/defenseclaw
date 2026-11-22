@@ -173,6 +173,15 @@ func AsError(err error) (*Error, bool) {
 	return nil, false
 }
 
+// longCallKey carries a longer request bound for one call (withLongCall).
+type longCallKey struct{}
+
+// withLongCall gives the request made with ctx up to d instead of the
+// client's timeout.
+func withLongCall(ctx context.Context, d time.Duration) context.Context {
+	return context.WithValue(ctx, longCallKey{}, d)
+}
+
 func (c *Client) do(ctx context.Context, method, path string, q url.Values, in, out any) error {
 	var body io.Reader
 	if in != nil {
@@ -207,7 +216,15 @@ func (c *Client) do(ctx context.Context, method, path string, q url.Values, in, 
 	if method != http.MethodGet && method != http.MethodHead {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	resp, err := c.hc.Do(req)
+	hc := c.hc
+	if d, ok := ctx.Value(longCallKey{}).(time.Duration); ok && hc.Timeout > 0 && d > hc.Timeout {
+		// A call that waits on the cluster (a durable snapshot) gets
+		// its own bound instead of the client's (GAP-0410).
+		long := *hc
+		long.Timeout = d
+		hc = &long
+	}
+	resp, err := hc.Do(req)
 	if err != nil {
 		return friendlyTransport(c.base.Host, redactErr(err, tok))
 	}

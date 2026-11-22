@@ -34,7 +34,7 @@ func TestLifecycleRecordsTheAsksItClosesGAP0526(t *testing.T) {
 			var log strings.Builder
 			h := substrateLifecycleClosesAsks(func(context.Context, chainstate.LifecycleEvent) (chainstate.LifecycleResult, error) {
 				return chainstate.LifecycleResult{}, nil
-			}, store, &log)
+			}, store, &log, nil)
 			ev := func(kind string) chainstate.LifecycleEvent {
 				return chainstate.LifecycleEvent{Actor: chainstate.Actor{Atespace: "dc-ops", UID: wireUID1}, Event: kind}
 			}

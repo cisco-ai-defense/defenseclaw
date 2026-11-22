@@ -311,7 +311,7 @@ As in OpenShell copy mode, you see the changed files first, with any file that c
 
 Run `pull` on the computer you ran `run` on: it compares the agent's work with the folder you sent, and only that computer keeps a record of it. You can `connect` from any computer, but `pull` elsewhere stops with exit code 3 and says so; from there, commit the work and `git push` it from inside the agent, then `git pull` it.
 
-To go back in time, `defenseclaw substrate checkpoint claude-b66c97d1` saves a restore point of the agent's folder, and `defenseclaw substrate undo claude-b66c97d1` returns the folder to the last one and discards what the agent changed since. It asks first.
+To go back in time, `defenseclaw substrate checkpoint claude-b66c97d1` saves a restore point of the agent's folder, and `defenseclaw substrate undo claude-b66c97d1` returns the folder to the last one and discards what the agent changed since. It asks first. The checkpoint also has the cluster store a snapshot of the agent (the agent pauses for a few seconds), so the restore point survives a crash of the agent's worker: `undo` of a crashed agent first brings it back to that snapshot. An agent that crashes before the cluster stored any snapshot of it (for example before its first checkpoint) comes back at its template's start without the folder; `undo` says so, and you start a new agent on the folder on your computer.
 
 </Step>
 

@@ -223,8 +223,10 @@ func newSubstrateCheckpointCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "checkpoint <name>",
 		Short: "Save the agent's work so you can undo back to it",
-		Long: `Saves a restore point of the agent's folder inside the agent. "defenseclaw substrate undo NAME"
-goes back to the last one. With --every 1h it saves one on that schedule for as long as the command runs.`,
+		Long: `Saves a restore point of the agent's folder inside the agent, then has the cluster store a snapshot of
+the agent (it pauses for a few seconds), so the restore point survives a crash of the agent's worker.
+"defenseclaw substrate undo NAME" goes back to the last one; after a crash it first brings the agent back to
+that snapshot. With --every 1h it saves one on that schedule for as long as the command runs.`,
 		Example: "defenseclaw substrate checkpoint fix-tests-7f3a\ndefenseclaw substrate checkpoint fix-tests-7f3a --every 1h",
 		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {

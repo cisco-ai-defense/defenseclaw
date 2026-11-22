@@ -258,7 +258,7 @@ func (s *SubstrateATEActions) Create(ctx context.Context, req SubstrateCreate) (
 	}
 	return SubstrateCreated{
 		Atespace: req.Atespace, Name: name, UID: a.GetMetadata().GetUid(),
-		Template: ateapi.Key(tref), Connector: req.Connector, SandboxClass: substrateEffectiveClass(tmpl, req.SandboxClass),
+		Template: ateapi.Key(tref), Connector: req.Connector, SandboxClass: s.createdClass(ctx, tmpl, sel, req.SandboxClass),
 		HarnessVersion: kit.AgentVersion, HookContract: kit.HookContract,
 		KitVersion: kit.KitVersion, TemplateDigest: kit.Digest,
 	}, nil
@@ -300,6 +300,37 @@ func substrateEffectiveClass(tmpl *ateapi.ActorTemplate, class string) string {
 		return have
 	}
 	return class
+}
+
+// createdClass is the class an actor created from tmpl with the extra
+// selector sel runs in. A template with a class label names it
+// (substrateEffectiveClass). One without is placed by its pool, so the
+// workers its selector and sel match say the class: the weakest of them,
+// as the scheduler may pick any (GAP-0630: a template pinned to a microVM
+// pool with --worker-label recorded gvisor). When no worker answers, the
+// label rule stands.
+func (s *SubstrateATEActions) createdClass(ctx context.Context, tmpl *ateapi.ActorTemplate, sel *ateapi.Selector, class string) string {
+	labels := tmpl.GetWorkerSelector().GetMatchLabels()
+	if labels[controller.SandboxClassLabel] != "" {
+		return substrateEffectiveClass(tmpl, class)
+	}
+	workers, err := ateapi.AllWorkers(ctx, s.Client, 0)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[substrate] template %s: read the workers for the sandbox class on records: %v\n", ateapi.Key(ateapi.RefOf(tmpl.GetMetadata())), err)
+		return substrateEffectiveClass(tmpl, class)
+	}
+	merged := maps.Clone(labels)
+	if merged == nil {
+		merged = map[string]string{}
+	}
+	maps.Copy(merged, sel.GetMatchLabels())
+	have := controller.WorkerClasses(workers, merged)
+	for _, c := range have {
+		if controller.ClassesMeet(have, c) {
+			return c
+		}
+	}
+	return substrateEffectiveClass(tmpl, class)
 }
 
 // classSelector is the worker selector an actor needs to run in class, on
