@@ -890,8 +890,14 @@ func TestWriteEnterpriseHookGuardianStateRefusesSymlink(t *testing.T) {
 		0,
 		true,
 	)
-	if err == nil || !strings.Contains(err.Error(), "refusing to write through symlink") {
-		t.Fatalf("writeEnterpriseHookGuardianState error = %v, want symlink refusal", err)
+	// Native Windows refuses the link through the protected-machine-file check
+	// (a link is not a regular file); the other hosts refuse it by name.
+	want := "refusing to write through symlink"
+	if runtime.GOOS == "windows" {
+		want = "protected machine file is not a regular non-link file"
+	}
+	if err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("writeEnterpriseHookGuardianState error = %v, want %q", err, want)
 	}
 }
 
