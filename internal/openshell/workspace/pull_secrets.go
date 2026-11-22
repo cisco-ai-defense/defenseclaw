@@ -73,7 +73,11 @@ func dropHeldBack(ctx context.Context, base gitCmd, rec *CopyRecord, result stri
 	sort.Strings(out.dropped)
 	baseEntries := map[string]idxEntry{}
 	if len(rec.SecretLines) > 0 {
-		if err := translateSecrets(ctx, base, rec, changes, held, restore, entries, baseEntries, out); err != nil {
+		// A change that stays out keeps the file as the pull's changes start
+		// from it: after an apply, the result that apply brought (sinceRef),
+		// so what it brought is never undone.
+		applied := refCommit(ctx, base, appliedRef)
+		if err := translateSecrets(ctx, base, rec, changes, held, restore, applied, entries, baseEntries, out); err != nil {
 			return nil, err
 		}
 	}
@@ -100,7 +104,7 @@ func dropHeldBack(ctx context.Context, base gitCmd, rec *CopyRecord, result stri
 // note: the local file changed since the upload, a placeholder is gone
 // (restore takes the agent's lines as they are), repeated or moved, or
 // another file holds a placeholder.
-func translateSecrets(ctx context.Context, base gitCmd, rec *CopyRecord, changes []TreeChange, held map[string]struct{}, restore bool, entries, baseEntries map[string]idxEntry, out *heldResult) error {
+func translateSecrets(ctx context.Context, base gitCmd, rec *CopyRecord, changes []TreeChange, held map[string]struct{}, restore bool, applied string, entries, baseEntries map[string]idxEntry, out *heldResult) error {
 	byFile := map[string][]SecretLine{}
 	var files []string
 	tokens := map[string]bool{}
@@ -167,12 +171,29 @@ func translateSecrets(ctx context.Context, base gitCmd, rec *CopyRecord, changes
 		local[rel], values[rel] = b, vals
 		baseEntries[rel] = idxEntry{e.mode, oid}
 	}
-	// keep lands the folder's version: the change is not applied.
+	// keep leaves the file as the pull's changes start from it (after an
+	// apply, as that apply left it; else as the folder had it at the
+	// upload): the change is not applied.
+	var since map[string]idxEntry
+	if applied != "" {
+		var paths []string
+		for _, c := range changes {
+			paths = append(paths, c.Path)
+		}
+		if since, err = lsTree(ctx, base, applied, append(paths, files...)); err != nil {
+			return err
+		}
+	}
 	keep := func(rel string) {
-		if e, ok := baseEntries[rel]; ok {
+		switch e, ok := baseEntries[rel]; {
+		case applied != "":
+			entries[rel] = since[rel]
+		case ok:
 			entries[rel] = e
-		} else if e, ok := uploaded[rel]; ok {
-			entries[rel] = e
+		default:
+			if e, ok := uploaded[rel]; ok {
+				entries[rel] = e
+			}
 		}
 	}
 	for _, rel := range files {
@@ -249,7 +270,11 @@ func translateSecrets(ctx context.Context, base gitCmd, rec *CopyRecord, changes
 		}
 		if copyTokens(after, tokens) > copyTokens(blobs[c.OldOID], tokens) {
 			others = append(others, p)
-			entries[p] = idxEntry{c.OldMode, c.OldOID}
+			if applied != "" {
+				entries[p] = since[p]
+			} else {
+				entries[p] = idxEntry{c.OldMode, c.OldOID}
+			}
 		}
 	}
 	sort.Strings(others)
@@ -316,7 +341,7 @@ func commitWith(ctx context.Context, base gitCmd, rec *CopyRecord, from string, 
 
 // secretValues reads the values of rel's replaced credentials from the
 // local file, by placeholder: only while every line that held one is as
-// it was at the upload (LinesSHA256).
+// it was at the upload (LinesSHA256), at its line or once elsewhere.
 func secretValues(project, rel string, lines []SecretLine) (map[string][]byte, bool) {
 	b, err := readSmallRegular(filepath.Join(project, filepath.FromSlash(rel)), DefaultScanMaxFileBytes)
 	if err != nil {
@@ -328,22 +353,42 @@ func secretValues(project, rel string, lines []SecretLine) (map[string][]byte, b
 			starts = append(starts, i+1)
 		}
 	}
-	vals := map[string][]byte{}
-	for _, l := range lines {
-		last := l.Line - 1 + l.Lines - 1
-		if l.Line < 1 || l.Lines < 1 || last >= len(starts) {
-			return nil, false
+	// block is the l.Lines lines from line i (0-based) when they hash to
+	// what was uploaded.
+	block := func(l SecretLine, i int) []byte {
+		last := i + l.Lines - 1
+		if i < 0 || l.Lines < 1 || last >= len(starts) {
+			return nil
 		}
 		end := len(b)
 		if last+1 < len(starts) {
 			end = starts[last+1] - 1
 		}
-		block := b[starts[l.Line-1]:end]
-		sum := sha256.Sum256(block)
-		if hex.EncodeToString(sum[:]) != l.LinesSHA256 || l.Column < 0 || l.Length <= 0 || l.Column+l.Length > len(block) {
+		sum := sha256.Sum256(b[starts[i]:end])
+		if hex.EncodeToString(sum[:]) != l.LinesSHA256 {
+			return nil
+		}
+		return b[starts[i]:end]
+	}
+	vals := map[string][]byte{}
+	for _, l := range lines {
+		found := block(l, l.Line-1)
+		if found == nil {
+			// Lines added or removed above it (an earlier apply did that):
+			// the same lines once anywhere in the file.
+			for i := range starts {
+				if f := block(l, i); f != nil {
+					if found != nil {
+						return nil, false
+					}
+					found = f
+				}
+			}
+		}
+		if found == nil || l.Column < 0 || l.Length <= 0 || l.Column+l.Length > len(found) {
 			return nil, false
 		}
-		vals[l.Placeholder] = block[l.Column : l.Column+l.Length]
+		vals[l.Placeholder] = found[l.Column : l.Column+l.Length]
 	}
 	return vals, true
 }

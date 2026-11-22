@@ -157,3 +157,28 @@ func TestB1PatchLeavesReplacedFileOut(t *testing.T) {
 		t.Fatalf("warnings = %q", res.Warnings)
 	}
 }
+
+// After an apply moved the secret line, the next pull still finds the
+// value; a change that stays out never undoes what an apply brought, and
+// never lands a placeholder.
+func TestB1PullAfterApplyKeepsAppliedChange(t *testing.T) {
+	e, fs, key := s9aCopy(t, "s9a5")
+	fs.write(remoteRepo+"/config.py", "# header\n"+s9aRemote(t, fs, "config.py"))
+	pull(t, e, fs, "s9a5")
+	mustApply(t, e, "s9a5")
+	fs.write(remoteRepo+"/config.py", strings.Replace(s9aRemote(t, fs, "config.py"), "print(TOKEN)", "print(TOKEN, 3)", 1))
+	pull(t, e, fs, "s9a5")
+	mustApply(t, e, "s9a5")
+	want := "# header\nimport os\nTOKEN = \"" + key + "\"\nprint(TOKEN, 3)\n"
+	if got := s9aLocal(t, e, "config.py"); got != want {
+		t.Fatalf("after 2 applies config.py = %q, want %q", got, want)
+	}
+	fs.write(remoteRepo+"/config.py", "# header\nimport os\nTOKEN = os.environ[\"TOKEN\"]\nprint(TOKEN, 3)\n")
+	fs.write(remoteRepo+"/README.md", "agent readme\n")
+	pull(t, e, fs, "s9a5")
+	mustApply(t, e, "s9a5")
+	if got := s9aLocal(t, e, "config.py"); got != want {
+		t.Fatalf("after a dropped change config.py = %q, want %q", got, want)
+	}
+	noPlaceholderIn(t, e)
+}
