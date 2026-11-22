@@ -72,11 +72,22 @@ func TestClassifyRestrictedListedCommands(t *testing.T) {
 				} else if tier.tier == bounded.TierStrict {
 					decisionTier = decide.TierStrict
 				}
+				findings := []decide.Finding{{
+					RuleID: decide.RuleStateWrite, Severity: decide.SevLow,
+					Proof: decide.Proof{Kind: decide.KindWrite, Target: decide.TargetState, Certainty: decide.CertKnown, Source: "legacy"},
+				}}
+				effect := EffectShadowResult{
+					Tier: string(effectTierRestricted), Action: effectAction(c.touches, c.restrictedRuling, decisionTier == decide.TierStrict),
+					Sets: []string{effectrules.SetSelfProtection}, Program: lc.program,
+					Kind: string(effects.KindWrite), Known: true, KnownMutation: true,
+				}
+				for _, finding := range effectShadowFindings(effect, effectRulesOn) {
+					findings = append(findings, decide.Finding{
+						RuleID: finding.RuleID, Severity: decide.ParseSeverity(finding.Severity), Proof: finding.Proof,
+					})
+				}
 				got := decide.Decide(decide.Input{
-					Findings: []decide.Finding{{
-						RuleID: decide.RuleStateWrite, Severity: decide.SevLow,
-						Proof: decide.Proof{Kind: decide.KindWrite, Target: decide.TargetState, Certainty: decide.CertKnown, Source: "legacy"},
-					}},
+					Findings:   findings,
 					Deployment: deployment, Levels: decide.TierLevels(decisionTier),
 					Tier: func() decide.Tier { return decisionTier },
 				})
