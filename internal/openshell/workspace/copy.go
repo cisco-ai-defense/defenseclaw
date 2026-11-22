@@ -153,6 +153,9 @@ type CopyRecord struct {
 	// applied to the copy and to the capture Apply merges into.
 	LineEndings map[string]string `json:"line_endings,omitempty"`
 	HeldBack    []string          `json:"held_back,omitempty"`
+	// Masks are the extra exclude patterns of the copy (run --exclude);
+	// push stages with them too.
+	Masks []string `json:"masks,omitempty"`
 	// Unmasked are the files that look like secrets --unmask shared with
 	// the sandbox, which the run names so the user can confirm them.
 	Unmasked []string `json:"unmasked,omitempty"`
@@ -476,7 +479,7 @@ func stageCopy(ctx context.Context, lay layout, opts StageOptions) (*CopyRecord,
 	rec := &CopyRecord{
 		Version: 1, Name: opts.Name, Project: real, RepoName: repo,
 		RemoteDir: path.Join(path.Clean(root), repo), StateDir: stateDir, StagedAt: now().UTC(),
-		Warnings: warnings,
+		Warnings: warnings, Masks: append([]string(nil), opts.Masks...),
 	}
 	dir := lay.copyDir(opts.Name) + copyNewInfix + randomSuffix()
 	// A refused copy (too large, a secret it cannot hold back) of a

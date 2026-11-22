@@ -197,6 +197,10 @@ type SubstrateConfig struct {
 	// KeyReplay reads substrate.launcher.key_replay live for launchers
 	// (B3.1); nil reports ask.
 	KeyReplay func() string
+	// FilesPush and FilesSync read substrate.files.push and .sync live;
+	// nil reports on.
+	FilesPush func() bool
+	FilesSync func() bool
 	// Doctor runs the gateway-side doctor checks; Info is the
 	// unauthenticated sign-in information (issuer, client_id, sign_in).
 	Doctor func(ctx context.Context) []SubstrateCheck

@@ -553,6 +553,9 @@ func substrateGatewayBuilder(c *config.Config, src *configwatch.Watcher, ready *
 			WorkspaceMaxBytes: c.Substrate.EffectiveWorkspaceMaxBytes(),
 			// B3.1: read live, so the admin-off switch applies to the next attach.
 			KeyReplay: func() string { return live().Substrate.Launcher.EffectiveKeyReplay() },
+			// B2: the admin-off switches of push and sync, read live.
+			FilesPush: func() bool { return live().Substrate.Files.PushAllowed() },
+			FilesSync: func() bool { return live().Substrate.Files.SyncAllowed() },
 			Doctor: func(ctx context.Context) []gateway.SubstrateCheck {
 				return []gateway.SubstrateCheck{gateway.SubstrateUpstreamCheck(ctx,
 					gateway.DefaultSubstrateLLMProviders(serveFlags.llmCredDir, serveFlags.bedrockRegion), c.Guardrail.AllowPrivateUpstreams, nil),

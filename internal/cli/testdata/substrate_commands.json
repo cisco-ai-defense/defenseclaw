@@ -865,6 +865,84 @@
     ]
   },
   {
+    "path": "substrate push",
+    "use": "push \u003cname\u003e [path...]",
+    "short": "Send your newer changes into a running agent (Preview)",
+    "long": "Sends the changes you made in this folder since the last send (the run or an earlier push) into the\nagent's copy. Paths limit it to those files or folders. The rules of run apply: secret files are held\nback (share one with --unmask), --exclude holds more back, and the cluster's upload limit counts.\n\nBefore it writes, it saves a restore point: \"defenseclaw substrate undo NAME --to N\" goes back to it.\nWhen the agent also changed a file you changed, nothing is sent and the files are listed (exit 3).\nThen choose: --mine sends yours (the agent's version stays in the restore point), --theirs keeps the\nagent's and sends the rest, and --patch-out FILE keeps the agent's and writes your change to FILE.\nWhat you send is not shown as the agent's work in a later pull. This command is a Preview.",
+    "example": "defenseclaw substrate push fix-tests-7f3a\ndefenseclaw substrate push fix-tests-7f3a src/app.py --mine",
+    "args": [
+      {
+        "name": "name",
+        "required": true
+      },
+      {
+        "name": "path",
+        "required": false,
+        "many": true
+      }
+    ],
+    "flags": [
+      {
+        "name": "context",
+        "type": "string",
+        "usage": "cluster to use (default: the one you signed in to last)",
+        "metavar": "NAME"
+      },
+      {
+        "name": "dry-run",
+        "type": "bool",
+        "default": "false",
+        "usage": "show what would be sent and the conflicts; send nothing"
+      },
+      {
+        "name": "exclude",
+        "type": "stringArray",
+        "default": "[]",
+        "usage": "hold a path or glob back too (repeatable, for example 'data/**')",
+        "metavar": "GLOB"
+      },
+      {
+        "name": "json",
+        "type": "bool",
+        "default": "false",
+        "usage": "same as --output json"
+      },
+      {
+        "name": "mine",
+        "type": "bool",
+        "default": "false",
+        "usage": "on a conflict, send your version (the agent's stays in the restore point)"
+      },
+      {
+        "name": "output",
+        "shorthand": "o",
+        "type": "string",
+        "default": "text",
+        "usage": "output format: text or json",
+        "metavar": "FORMAT"
+      },
+      {
+        "name": "patch-out",
+        "type": "string",
+        "usage": "on a conflict, keep the agent's version and write your change to this file",
+        "metavar": "FILE"
+      },
+      {
+        "name": "theirs",
+        "type": "bool",
+        "default": "false",
+        "usage": "on a conflict, keep the agent's version and send the rest"
+      },
+      {
+        "name": "unmask",
+        "type": "stringArray",
+        "default": "[]",
+        "usage": "send a held-back secret file or pattern anyway (repeatable)",
+        "metavar": "GLOB"
+      }
+    ]
+  },
+  {
     "path": "substrate reject",
     "use": "reject \u003cid\u003e",
     "short": "Deny a waiting question",

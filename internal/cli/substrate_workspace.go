@@ -63,21 +63,31 @@ func substrateOpenRelay(ctx context.Context, s *substrateSession, a api.Actor) (
 	return &substrateRelay{Tunnel: tun, Client: workspace.NewClient(tun.HTTPClient(), tun.BaseURL(), tun.Bearer)}, nil
 }
 
-// substratePreflight stages the source before Create can leave actor state.
-func substratePreflight(ctx context.Context, cmd *cobra.Command, s *substrateSession, f *substrateRunFlags, project string) (*workspace.PreparedUpload, error) {
-	w := cmd.ErrOrStderr()
+// substrateUploadLimit reads the cluster's upload limit and launcher
+// settings; a gateway predating the route gets the launcher default.
+func substrateUploadLimit(ctx context.Context, cmd *cobra.Command, s *substrateSession) (int64, api.LauncherSettings, error) {
 	settings, err := s.Client.Launcher(ctx)
-	maxBytes := settings.WorkspaceMaxBytes
 	if err != nil {
 		apiErr, ok := api.AsError(err)
 		if !ok || apiErr.Status != http.StatusNotFound {
-			return nil, substrateFail(err)
+			return 0, settings, substrateFail(err)
 		}
 		// Compatibility with clusters predating launcher settings.
-		maxBytes = osw.DefaultCopyMaxBytes
-		fmt.Fprintln(w, "Note: this cluster does not report its upload limit. Using the 500 MiB launcher default.")
-	} else if maxBytes <= 0 || maxBytes > relay.MaxFilesBytes {
-		return nil, errors.New("the cluster reported an invalid workspace upload limit")
+		fmt.Fprintln(cmd.ErrOrStderr(), "Note: this cluster does not report its upload limit. Using the 500 MiB launcher default.")
+		return osw.DefaultCopyMaxBytes, settings, nil
+	}
+	if settings.WorkspaceMaxBytes <= 0 || settings.WorkspaceMaxBytes > relay.MaxFilesBytes {
+		return 0, settings, errors.New("the cluster reported an invalid workspace upload limit")
+	}
+	return settings.WorkspaceMaxBytes, settings, nil
+}
+
+// substratePreflight stages the source before Create can leave actor state.
+func substratePreflight(ctx context.Context, cmd *cobra.Command, s *substrateSession, f *substrateRunFlags, project string) (*workspace.PreparedUpload, error) {
+	w := cmd.ErrOrStderr()
+	maxBytes, _, err := substrateUploadLimit(ctx, cmd, s)
+	if err != nil {
+		return nil, err
 	}
 	if n := int64(f.maxUploadMB); n > 0 && n <= maxBytes>>20 {
 		maxBytes = n << 20

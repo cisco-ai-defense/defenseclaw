@@ -86,6 +86,9 @@ type Client struct {
 	// MaxDownloadBytes caps the content Download extracts
 	// (DefaultMaxDownloadBytes when 0).
 	MaxDownloadBytes int64
+	// Op names an upload that is not the first copy (relay.OpPush,
+	// relay.OpSync), so the gateway can apply its admin-off switch.
+	Op               string
 	appliedUploadCap atomic.Bool
 }
 
@@ -166,6 +169,9 @@ func (c *Client) request(ctx context.Context, op, method, route string, q url.Va
 	req.Header.Set("Authorization", "Bearer "+tok)
 	if contentType != "" {
 		req.Header.Set("Content-Type", contentType)
+	}
+	if c.Op != "" && method == http.MethodPut && route == relay.RouteFiles {
+		req.Header.Set(relay.OpHeader, c.Op)
 	}
 	resp, err := c.HTTP.Do(req)
 	if err != nil {

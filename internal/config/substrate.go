@@ -74,7 +74,10 @@ type SubstrateConfig struct {
 	WorkspaceMaxBytes int64 `mapstructure:"workspace_max_bytes" yaml:"workspace_max_bytes,omitempty"`
 	// Launcher holds what the gateway tells launchers (GET
 	// /api/v1/substrate/launcher), read live.
-	Launcher   SubstrateLauncherConfig   `mapstructure:"launcher" yaml:"launcher,omitempty"`
+	Launcher SubstrateLauncherConfig `mapstructure:"launcher" yaml:"launcher,omitempty"`
+	// Files holds the admin switches of sending more files into a running
+	// actor (push, sync); both on when unset.
+	Files      SubstrateFilesConfig      `mapstructure:"files" yaml:"files,omitempty"`
 	Unattended SubstrateUnattendedConfig `mapstructure:"unattended"         yaml:"unattended,omitempty"`
 	RateLimits SubstrateRateLimitsConfig `mapstructure:"rate_limits"        yaml:"rate_limits,omitempty"`
 	Extproc    SubstrateExtprocConfig    `mapstructure:"extproc"            yaml:"extproc,omitempty"`
@@ -475,6 +478,23 @@ func (s SubstrateConfig) EffectiveWorkspaceMaxBytes() int64 {
 		return s.WorkspaceMaxBytes
 	}
 	return DefaultSubstrateWorkspaceMaxBytes
+}
+
+// SubstrateFilesConfig is substrate.files: the admin-off switches of
+// substrate push (Push) and substrate sync --watch (Sync). The gateway
+// refuses the upload of a push or a sync batch when its switch is off;
+// the first copy of a run is not affected. Sync needs both.
+type SubstrateFilesConfig struct {
+	Push *bool `mapstructure:"push" yaml:"push,omitempty"`
+	Sync *bool `mapstructure:"sync" yaml:"sync,omitempty"`
+}
+
+// PushAllowed is substrate.files.push, true when unset.
+func (f SubstrateFilesConfig) PushAllowed() bool { return f.Push == nil || *f.Push }
+
+// SyncAllowed is substrate.files.sync (and push), true when unset.
+func (f SubstrateFilesConfig) SyncAllowed() bool {
+	return f.PushAllowed() && (f.Sync == nil || *f.Sync)
 }
 
 // SubstrateLauncherConfig is substrate.launcher: launcher behaviour the

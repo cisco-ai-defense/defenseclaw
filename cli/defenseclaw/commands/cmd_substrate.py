@@ -585,6 +585,51 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
         ),
     ),
     _Cmd(
+        ("push",),
+        "Send your newer changes into a running agent (Preview)",
+        long=(
+            "Sends the changes you made in this folder since the last send (the run or an earlier push) into the\n"
+            "agent's copy. Paths limit it to those files or folders. The rules of run apply: secret files are "
+            "held\n"
+            "back (share one with --unmask), --exclude holds more back, and the cluster's upload limit counts.\n"
+            "\n"
+            'Before it writes, it saves a restore point: "defenseclaw substrate undo NAME --to N" goes back to '
+            "it.\n"
+            "When the agent also changed a file you changed, nothing is sent and the files are listed (exit 3).\n"
+            "Then choose: --mine sends yours (the agent's version stays in the restore point), --theirs keeps "
+            "the\n"
+            "agent's and sends the rest, and --patch-out FILE keeps the agent's and writes your change to FILE.\n"
+            "What you send is not shown as the agent's work in a later pull. This command is a Preview."
+        ),
+        example=(
+            "defenseclaw substrate push fix-tests-7f3a\ndefenseclaw substrate push fix-tests-7f3a src/app.py --mine"
+        ),
+        args=(_Arg("name"), _Arg("path", required=False, many=True)),
+        flags=(
+            _Flag("context", "string", "cluster to use (default: the one you signed in to last)", metavar="NAME"),
+            _Flag("dry-run", "bool", "show what would be sent and the conflicts; send nothing"),
+            _Flag(
+                "exclude",
+                "stringArray",
+                "hold a path or glob back too (repeatable, for example 'data/**')",
+                metavar="GLOB",
+            ),
+            _Flag("json", "bool", "same as --output json"),
+            _Flag("mine", "bool", "on a conflict, send your version (the agent's stays in the restore point)"),
+            _Flag("output", "string", "output format: text or json", short="o", default="text", metavar="FORMAT"),
+            _Flag(
+                "patch-out",
+                "string",
+                "on a conflict, keep the agent's version and write your change to this file",
+                metavar="FILE",
+            ),
+            _Flag("theirs", "bool", "on a conflict, keep the agent's version and send the rest"),
+            _Flag(
+                "unmask", "stringArray", "send a held-back secret file or pattern anyway (repeatable)", metavar="GLOB"
+            ),
+        ),
+    ),
+    _Cmd(
         ("reject",),
         "Deny a waiting question",
         long='Denies one question from "defenseclaw substrate approvals". The agent is told no.',

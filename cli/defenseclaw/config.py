@@ -4661,6 +4661,13 @@ class SubstrateLauncherConfig:
 
 
 @dataclass
+class SubstrateFilesConfig:
+    # Admin switches of substrate push and sync --watch; None means on.
+    push: bool | None = None
+    sync: bool | None = None
+
+
+@dataclass
 class SubstrateUnattendedConfig:
     asks: str = ""
     ask_timeout: str = ""
@@ -4838,6 +4845,7 @@ class SubstrateConfig:
     # Workspace upload cap through the admin attach route (E23); None = 1 GiB.
     workspace_max_bytes: int | None = None
     launcher: SubstrateLauncherConfig = field(default_factory=SubstrateLauncherConfig)
+    files: SubstrateFilesConfig = field(default_factory=SubstrateFilesConfig)
     unattended: SubstrateUnattendedConfig = field(default_factory=SubstrateUnattendedConfig)
     rate_limits: SubstrateRateLimitsConfig = field(default_factory=SubstrateRateLimitsConfig)
     extproc: SubstrateExtprocConfig = field(default_factory=SubstrateExtprocConfig)
@@ -8185,6 +8193,10 @@ def _merge_substrate(raw: Any) -> SubstrateConfig:
         workspace_max_bytes=_optional_number(raw.get("workspace_max_bytes"), int),
         launcher=SubstrateLauncherConfig(
             key_replay=str(_mapping(raw.get("launcher")).get("key_replay", "") or ""),
+        ),
+        files=SubstrateFilesConfig(
+            push=_optional_bool(_mapping(raw.get("files")).get("push")),
+            sync=_optional_bool(_mapping(raw.get("files")).get("sync")),
         ),
         unattended=SubstrateUnattendedConfig(
             asks=str(unattended.get("asks", "") or ""),

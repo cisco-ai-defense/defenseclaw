@@ -267,6 +267,17 @@ Use `--exclude 'data/**'` to omit a large directory, or `--clone REPO_URL` to st
 Administrators set the cap with `substrate.workspace_max_bytes`. A run can lower it with
 `--max-upload-mb`. Rebuild an older actor template to use a cluster limit over 1 GiB.
 
+## Push sends nothing (Preview)
+
+`The agent also changed 2 of these files since your last send` means both of you edited those files. Nothing was sent.
+Run `push` again with `--mine` to send your version (the agent's stays in the restore point the push saves),
+`--theirs` to keep the agent's and send the rest, or `--patch-out FILE` to keep the agent's and get your change as a patch.
+The same edit on both sides is not a conflict.
+
+`your administrator turned off sending more files into a running agent` means `substrate.files.push` is `false`.
+`the copy in the agent moved` means another computer sent to it or the copy was replaced: pull first, or run again.
+An agent started from Windows has no push yet; run it again to send a new copy.
+
 ## Keys typed while disconnected (Preview)
 
 If the connection drops while you type, the launcher keeps those keys in memory and never sends them to a screen you cannot see.

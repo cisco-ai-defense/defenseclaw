@@ -306,6 +306,15 @@ type LauncherSettings struct {
 	// KeyReplay is substrate.launcher.key_replay (ask, on or off); ""
 	// from a gateway that predates it.
 	KeyReplay string `json:"key_replay,omitempty"`
+	// Files are the admin switches of push and sync; nil from a gateway
+	// that predates them.
+	Files *LauncherFiles `json:"files,omitempty"`
+}
+
+// LauncherFiles is substrate.files as the gateway reports it.
+type LauncherFiles struct {
+	Push bool `json:"push"`
+	Sync bool `json:"sync"`
 }
 
 // Launcher reads settings from the signed-in admin listener. A gateway

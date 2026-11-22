@@ -183,6 +183,22 @@ func (a *APIServer) substrateAttach(st *substrateState) http.HandlerFunc {
 				defer substrateReportAttach(st.cfg.Activity, reg.Atespace, reg.UID)()
 			}
 		}
+		if rest == relay.RouteFiles && r.Method == http.MethodPut {
+			// B2: a push or a sync batch says so; the admin-off switch
+			// refuses it here (the first copy of a run carries no op).
+			switch r.Header.Get(relay.OpHeader) {
+			case relay.OpPush:
+				if !substrateSwitch(st.cfg.FilesPush) {
+					writeSubstrateJSONError(w, http.StatusForbidden, "push_disabled")
+					return
+				}
+			case relay.OpSync:
+				if !substrateSwitch(st.cfg.FilesSync) {
+					writeSubstrateJSONError(w, http.StatusForbidden, "sync_disabled")
+					return
+				}
+			}
+		}
 		space, name := reg.Atespace, reg.Name
 		proxy := &httputil.ReverseProxy{
 			Rewrite: func(pr *httputil.ProxyRequest) {

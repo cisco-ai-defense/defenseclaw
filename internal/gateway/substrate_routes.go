@@ -155,6 +155,7 @@ func (a *APIServer) newSubstrateAdminHandler(st *substrateState) http.Handler {
 		writeSubstrateJSON(w, http.StatusOK, map[string]any{
 			"workspace_max_bytes": substrateWorkspaceMax(st.cfg.WorkspaceMaxBytes),
 			"key_replay":          substrateKeyReplay(st.cfg.KeyReplay),
+			"files":               map[string]bool{"push": substrateSwitch(st.cfg.FilesPush), "sync": substrateSwitch(st.cfg.FilesSync)},
 		})
 	})
 	mux.HandleFunc("GET /api/v1/substrate/asks", a.substrateListAsks(st))
@@ -933,6 +934,9 @@ func readAllLimited(r io.Reader, n int64) ([]byte, bool) {
 	b, err := io.ReadAll(io.LimitReader(r, n+1))
 	return b, err == nil && int64(len(b)) <= n
 }
+
+// substrateSwitch reads a live admin switch; on when not wired.
+func substrateSwitch(read func() bool) bool { return read == nil || read() }
 
 // substrateKeyReplay is substrate.launcher.key_replay for launchers; ask when
 // the listener has no live reader.

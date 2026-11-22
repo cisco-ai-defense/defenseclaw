@@ -24,6 +24,7 @@ DefenseClaw 1.0.10 lets you decide what each guardrail layer does, adds model ro
 - **CLI and TUI:** `defenseclaw acp refresh` re-pins an ACP agent that updated itself. The TUI config editor covers routing and tokenomics. The main TUI tables fit 80x24. MCP inventory export works for local and remote servers (#1406).
 
 ### Changed
+- **Agent Substrate push (Preview).** `defenseclaw substrate push NAME [PATH...]` sends your newer local changes into a running agent with the same masking and upload limit as `run`, after a restore point. A file both sides changed is listed and not sent unless you choose `--mine`, `--theirs` or `--patch-out FILE`. Administrators can turn it off with `substrate.files.push`.
 - **Agent Substrate key replay (Preview).** Keys typed while a terminal is reconnecting are shown after the reconnect and sent on Enter (`--key-replay`, `substrate.launcher.key_replay`), within 4 KiB and 60 seconds.
 - **Agent Substrate workspace uploads (Preview).** The launcher previews the staged size before creating an actor and the relay applies the workspace cap supplied by the gateway.
 - **A tool's output never blocks in the default pack.** A tool result is HIGH at most, so the default and permissive packs alert on it and only the strict pack blocks.

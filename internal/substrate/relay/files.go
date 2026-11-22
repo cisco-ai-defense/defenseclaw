@@ -56,6 +56,12 @@ const (
 	MaxFilesBytes int64 = 64 << 30
 	// UploadMaxHeader carries the gateway's cap and the relay's applied cap.
 	UploadMaxHeader = "X-DefenseClaw-Upload-Max"
+	// OpHeader names an upload that is not the first copy of a run: OpPush
+	// (substrate push) or OpSync (a sync --watch batch). The gateway
+	// refuses it when the admin turned that path off (substrate.files).
+	OpHeader = "X-DefenseClaw-Op"
+	OpPush   = "push"
+	OpSync   = "sync"
 	// DefaultExecMaxOutput caps stdout plus stderr of one exec.
 	DefaultExecMaxOutput int64 = 1 << 30
 	// DefaultExecTimeout applies when a request sets none.

@@ -307,6 +307,8 @@ your previous working tree is kept at refs/defenseclaw/copy/sub-55cccd5ce016/pre
 
 As in OpenShell copy mode, you see the changed files first, with any file that could run code on your machine flagged (git hooks, build scripts, shell startup files, agent settings that register hooks, MCP server configs). `--diff` prints the full diff. Nothing touches your folder until you choose: `--apply` writes the changes into it (after a question whose default is no; `--yes` takes that no, so flagged files are written only with `--allow-flagged`), `--branch NAME` puts them on a new git branch, `--patch-out FILE` writes a patch. If you cloned with `--clone`, `pull` has no folder of its own to compare with: run it in a checkout of the same repository, and it writes the changes there. Or have the agent push a branch.
 
+To send your own newer changes to the agent, run `defenseclaw substrate push claude-b66c97d1` in the folder (Preview). It sends what you changed since the last send, with the same rules as the first copy, after a restore point. If the agent changed one of the same files, it sends nothing and lists them; choose `--mine`, `--theirs` or `--patch-out FILE`.
+
 To go back in time, `defenseclaw substrate checkpoint claude-b66c97d1` saves a restore point of the agent's folder, and `defenseclaw substrate undo claude-b66c97d1` returns the folder to the last one and discards what the agent changed since. It asks first.
 
 </Step>
@@ -349,7 +351,7 @@ Error: the cluster has no free worker for a new agent right now; nothing was sta
 
 ## What you give up compared with OpenShell
 
-- No live folder. The agent works on a copy or a clone.
+- No live folder. The agent works on a copy or a clone; `push` sends your newer changes when you ask (Preview).
 - No ports on your machine (`--host-port`) and no local MCP servers. MCP servers must be in the image or reachable over the network.
 - No process-tree or kernel feed. Substrate reports each agent's CPU and memory, not its processes.
 
