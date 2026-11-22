@@ -444,6 +444,9 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			a.handleSandboxHookReceipt(w, r, connectorName, receiptID)
 			return
 		}
+		// A sandboxed agent's secret goes into the account's vault and out
+		// of the body before anything evaluates or records it.
+		rawBody, vaultCapture := captureSandboxVault(r.Context(), a.sandboxVaultStore(), connectorName, rawBody)
 		payload, b, err := rawPayloadFromJSONDecoder(json.NewDecoder(bytes.NewReader(rawBody)))
 		if err != nil {
 			a.recordConnectorHookRejection(r.Context(), connectorName, "unknown", "invalid_json", 0)
@@ -1155,6 +1158,9 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			// On a managed host, the post-tool answer tells the agent of
 			// the kernel denials its tool calls hit (kernel_block_notice.go).
 			resp = a.safeAddKernelBlockNotice(ctx, profile, connectorName, req, b, payload, resp)
+		}
+		if vaultCapture != nil {
+			resp = a.applySandboxVaultCapture(ctx, profile, req, b, payload, resp, vaultCapture)
 		}
 		if oversizeUninspectedPayload(payload) && (resp.Action == "allow" || resp.Action == "alert") {
 			// The hook could not send this oversized call whole: never a

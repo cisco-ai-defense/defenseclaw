@@ -2196,6 +2196,14 @@ class OpenShellApprovalsConfig:
 
 
 @dataclass
+class OpenShellVaultConfig:
+    auto_capture: bool | None = None
+
+    def auto_capture_enabled(self) -> bool:
+        return self.auto_capture is None or bool(self.auto_capture)
+
+
+@dataclass
 class OpenShellResourcesConfig:
     cpu: str = ""
     memory: str = ""
@@ -2383,6 +2391,7 @@ class OpenShellConfig:
     egress: OpenShellEgressConfig = field(default_factory=OpenShellEgressConfig)
     image: OpenShellImageConfig = field(default_factory=OpenShellImageConfig)
     approvals: OpenShellApprovalsConfig = field(default_factory=OpenShellApprovalsConfig)
+    vault: OpenShellVaultConfig = field(default_factory=OpenShellVaultConfig)
     resources: OpenShellResourcesConfig = field(default_factory=OpenShellResourcesConfig)
     harnesses: list[str] = field(default_factory=list)
     wrappers: list[str] = field(default_factory=list)
@@ -8667,6 +8676,7 @@ def _merge_openshell(raw: dict[str, Any] | None, data_dir: str = "") -> OpenShel
     egress = _openshell_mapping(raw.get("egress"))
     image = _openshell_mapping(raw.get("image"))
     approvals = _openshell_mapping(raw.get("approvals"))
+    vault_raw = _openshell_mapping(raw.get("vault"))
     mcp = _openshell_mapping(raw.get("mcp"))
     harness_versions = _openshell_mapping(image.get("harness_versions"))
     return OpenShellConfig(
@@ -8712,6 +8722,9 @@ def _merge_openshell(raw: dict[str, Any] | None, data_dir: str = "") -> OpenShel
         approvals=OpenShellApprovalsConfig(
             debounce_ms=_openshell_int(approvals.get("debounce_ms"), 3000),
             agent_proposals=_openshell_optional_bool(approvals.get("agent_proposals")),
+        ),
+        vault=OpenShellVaultConfig(
+            auto_capture=_openshell_optional_bool(vault_raw.get("auto_capture")),
         ),
         resources=_merge_openshell_resources(raw.get("resources")),
         harnesses=_openshell_str_list(raw.get("harnesses")),

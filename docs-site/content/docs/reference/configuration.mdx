@@ -877,6 +877,8 @@ openshell:
   approvals:
     debounce_ms: 3000          # batch approvals until hooks are quiet this long
     agent_proposals: null      # null = true
+  vault:
+    auto_capture: null         # null = true
   resources:
     cpu: ""                    # "" = unlimited
     memory: ""                 # "" = unlimited
@@ -927,6 +929,7 @@ openshell:
 | `image.harness_versions` | `{}` | Harness name to exact version, at most 64 entries. The image build refuses a version outside DefenseClaw's reviewed hook contract. |
 | `approvals.debounce_ms` | `3000` | 0–600000. How long hooks must be quiet before the sandbox manager applies a batch of approvals: every OpenShell policy reload closes open connections. |
 | `approvals.agent_proposals` | `null` | Whether the agent may submit its own connection requests for triage; `false` rejects them. `null` means `true`. |
+| `vault.auto_capture` | `null` | Whether a secret with a well-known shape (Anthropic, OpenAI, GitHub, Slack, Stripe, Google API keys) that a sandboxed Claude Code or Codex agent is given in a prompt or writes into a tool call goes into your [vault](/docs/sandboxes/vault) and the call is stopped. `null` means `true`. On a managed computer the administrator's value applies. The gateway or sandbox daemon reads it when it starts. |
 | `resources.cpu` | `""` | CPU request: cores (`"2"`, `"1.5"`) or millicores (`"500m"`). Empty means unlimited. `sandbox run --cpu` overrides it. |
 | `resources.memory` | `""` | Memory request: bytes with an optional `Ki`, `Mi`, `Gi`, `Ti` or `k`, `K`, `M`, `G`, `T` suffix (`"512Mi"`, `"4Gi"`). Empty means unlimited. `sandbox run --memory` overrides it. |
 | `harnesses` | `[]` | The harnesses set up for sandboxes, such as `claudecode` and `codex`. `sandbox setup` writes it, and `setup`, `image build`, and `doctor` default to it (then to Claude Code and Codex). At most 64, unique. |

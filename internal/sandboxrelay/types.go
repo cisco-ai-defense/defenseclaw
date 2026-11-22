@@ -418,6 +418,10 @@ type OperationalSettings struct {
 	// gateway could not use the file, and the daemon then builds no image.
 	TrustedCAs     string `json:"trusted_cas,omitempty"`
 	TrustedCAError string `json:"trusted_ca_error,omitempty"`
+	// VaultAutoCapture is the administrator's openshell.vault.auto_capture
+	// (nil: on): whether the daemon captures sandboxed agents' secrets into
+	// the account's vault.
+	VaultAutoCapture *bool `json:"vault_auto_capture,omitempty"`
 }
 
 // ImageSettings mirrors openshell.image.

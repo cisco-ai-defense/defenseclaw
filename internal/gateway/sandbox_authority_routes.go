@@ -214,6 +214,7 @@ func sandboxOperational(cfg *config.Config, floor config.OpenShellAdminConfig) s
 		TokenDelivery:    o.TokenDelivery,
 		LLM:              o.LLM,
 		KeepHeadless:     o.KeepHeadless,
+		VaultAutoCapture: o.Vault.AutoCapture,
 		// OpenShell's own telemetry stays off on a managed host unless the
 		// caller's floor allows it.
 		UpstreamTelemetry: o.UpstreamTelemetry && floor.AllowUpstreamTelemetry != nil && *floor.AllowUpstreamTelemetry,

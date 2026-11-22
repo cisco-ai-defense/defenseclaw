@@ -472,6 +472,7 @@ func (d *SandboxDaemon) buildConfigWith(floor *config.OpenShellAdminConfig) *con
 	o.Gateway.Name, o.Gateway.Workspace = op.GatewayName, op.GatewayWorkspace
 	o.Image.Base, o.Image.HarnessVersions = op.Image.Base, op.Image.HarnessVersions
 	o.Approvals.DebounceMs, o.Approvals.AgentProposals = op.Approvals.DebounceMs, op.Approvals.AgentProposals
+	o.Vault.AutoCapture = op.VaultAutoCapture
 	o.MCP.Import, o.MCP.HostPorts = op.MCP.Import, op.MCP.HostPorts
 	o.Harnesses, o.Wrappers = op.Harnesses, op.Wrappers
 	o.TokenDelivery = op.TokenDelivery
