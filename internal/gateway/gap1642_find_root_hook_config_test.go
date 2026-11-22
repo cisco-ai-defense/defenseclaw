@@ -59,7 +59,12 @@ func TestGAP1642FindFromTheRootReachesTheHookFilesFindHomeReaches(t *testing.T) 
 			t.Run(conn+"/"+tier.name, func(t *testing.T) {
 				home := filepath.Join(t.TempDir(), "home")
 				project := filepath.Join(home, "proj")
-				for _, name := range []string{".claude/settings.json", "proj/notes.txt"} {
+				// The installed hook executables are in the home as on an
+				// installed host: in the managed tiers they are the hook
+				// files a find walk reaches (a named disable), so find ~
+				// blocks there and the root must block the same.
+				for _, name := range []string{".claude/settings.json", "proj/notes.txt",
+					".local/bin/defenseclaw-hook-user", ".local/bin/defenseclaw-hook-post"} {
 					full := filepath.Join(home, filepath.FromSlash(name))
 					if err := os.MkdirAll(filepath.Dir(full), 0o700); err != nil {
 						t.Fatal(err)
@@ -82,14 +87,19 @@ func TestGAP1642FindFromTheRootReachesTheHookFilesFindHomeReaches(t *testing.T) 
 					}
 					return ""
 				}
-				for i, walk := range walks {
+				for _, walk := range walks {
 					ref := judge(project, managed, "Bash", map[string]any{"command": "find ~ " + walk})
 					refRule, refAction := rule(ref), hookConfigAction(ref)
-					// The managed route reads the hook client's resolved targets,
-					// which name no home hook file for a find walk: there find ~
-					// reaches none either, and the root must answer the same.
-					if i == 0 && refRule == "" && !managed {
-						t.Fatalf("find ~ %s: no hook config rule, the fixture is wrong: %s", walk, strings.TrimSpace(ref))
+					// Every -type f walk reaches a hook file from the home in every
+					// tier; managed reads only the DefenseClaw hook files (a named
+					// disable, which blocks), so the *.json walk stays parity only.
+					if strings.HasPrefix(walk, "-type f") {
+						if refRule == "" {
+							t.Fatalf("find ~ %s: no hook config rule, the fixture is wrong: %s", walk, strings.TrimSpace(ref))
+						}
+						if managed && (refRule != agentHookConfigDisableRuleID || refAction != "block") {
+							t.Errorf("find ~ %s: %s %q, want block %q in the managed tier", walk, refAction, refRule, agentHookConfigDisableRuleID)
+						}
 					}
 					for _, root := range roots {
 						command := "find " + root + " " + walk
