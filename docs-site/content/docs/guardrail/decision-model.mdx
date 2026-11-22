@@ -16,7 +16,9 @@ keywords:
 
 The decision model is a small, fast model that answers one question per tool call, "allow, confirm or block?", with calibrated probabilities. It is off by default. To choose what its answers do (for example, alert instead of asking when it is unsure) per connector or profile, see [Configure the cascade](/docs/guardrail/configure-cascade).
 
-Like the [unified LLM key](/docs/guardrail/unified-llm-key), it is one setting, `decision_model:`, used by two components:
+**How good it is.** On the end-to-end benchmark, adding the decision model to the rules raised alert recall from 0.21 to 0.91, and 25.8% of benign calls then raised an alert. With the LLM judge behind it, recall is 0.55 and 4.8% of benign calls alert. See [Benchmarks](/docs/guardrail/benchmarks#the-whole-cascade-end-to-end).
+
+Like the [unified LLM key](/docs/get-started/unified-llm-key), it is one setting, `decision_model:`, used by two components:
 
 | Component | What it does with the decision model |
 | --- | --- |
@@ -120,7 +122,7 @@ A cascade-2 confirmation:
 - Otherwise the agent asks the user where its hook can ask before a tool runs: Claude Code (in its default Manual permission mode), Antigravity, Amp and GitHub Copilot in VS Code.
 - Where the agent cannot ask (Codex, or Claude Code outside Manual mode) it is a HIGH alert under the default and permissive policies, as an LLM judge HIGH finding is.
 
-The rules always come first. A rule block is never revisited, and the decision model never lowers a rule finding: on a call the rules flagged, an allow keeps the rule verdict (cascade 2) or still runs the judge (cascade 3), and a block answer is not confident (`escalate_rule_flagged`): it asks (cascade 2) or goes to the judge (cascade 3). Why both gates: on real work (owner sessions) and the public benchmarks, a block answer alone was wrong often enough to block ordinary commands; requiring the risk score as well cut those false blocks by about two thirds, at a cost in block recall (the calls it no longer blocks still ask or alert). Every finding goes through `block_at` and `alert_at` like a judge finding. In observe mode nothing is blocked or asked.
+The rules always come first. A rule block is never revisited, and the decision model never lowers a rule finding: on a call the rules flagged, an allow keeps the rule verdict (cascade 2) or still runs the judge (cascade 3), and a block answer is not confident (`escalate_rule_flagged`): it asks (cascade 2) or goes to the judge (cascade 3). Why both gates: on real work (real agent sessions) and the public benchmarks, a block answer alone was wrong often enough to block ordinary commands; requiring the risk score as well cut those false blocks by about two thirds, at a cost in block recall (the calls it no longer blocks still ask or alert). Every finding goes through `block_at` and `alert_at` like a judge finding. In observe mode nothing is blocked or asked.
 
 ### Session history and the flow guard
 
@@ -129,7 +131,7 @@ With the decision model on, each request also carries the session's recent histo
 - **History** (`decision_model.history_turns`, default 25, `0` turns it off, at most 100): the last 25 turns of the session, where a turn is a tool call and the user prompts before it. Only user prompts and tool calls are sent: each prompt is cut to 1.5 KB and each tool argument to 600 bytes, and every cut is marked `[TRUNCATED n bytes]`. Tool results are not sent unless you set `decision_model.history_tool_results: true` (each result cut to 1 KB); that adds time, can make the model read a plausible result as permission, and sends command output (which can hold secrets, for example the output of `cat .env`) to the endpoint. The history is marked untrusted and wrapped in tags that carry a random value chosen for each request, so text in the session cannot end the section early; a line break inside a prompt, call or result is indented, so session text cannot start a line of its own (`USER: ...`). The whole section is at most 32 KB per request (the oldest turns go first and are counted). A prompt the rules block is removed from the history. On a gateway several accounts share, each account's history (and the LLM judge's session context) is kept apart, even when two accounts send the same session id.
 - **Flow guard** (`decision_model.flow_guard`, default on): the same request asks whether the user authorized this target or action earlier and whether the call serves the user's latest request. When either answer is 0.2 or lower, a confident allow is no longer confident: in cascade 3 the LLM judge decides; in cascade 2 the decision model gives no answer and the rule verdict stands (it does not ask the user). The flow guard itself never blocks, but a model that gives no answer is treated like any model without an answer: a call that reached System One only because its CRITICAL rule finding could not block on its own is refused under a closed hook fail mode (the strict pack, a managed install, or `hook_fail_mode: closed`), as for a judge that gives no verdict. With `guardrail.cascade.judge.no_verdict: unknown` the call is judged at least at the unknown tier ([Configure the cascade](/docs/guardrail/configure-cascade)). The judge event names it with rule id `flow_guard_escalated`.
 
-Measured on real owner sessions and spliced attacks (S7 S1FLOW, Gemini Decision 1): with the shipped routing, history raised the confident blocks of hijacked-session attacks from 31% to 37% and left none of them confidently allowed (8 of 180 without history, 0 with the flow guard), with no confident block on 296 real owner calls. The history adds about 2.5k input tokens per call (about USD 0.0005) and kept p99 latency at 0.81 s.
+In the benchmark on real sessions and spliced attacks (Gemini Decision 1), with the shipped routing, history raised the confident blocks of hijacked-session attacks from 31% to 37% and left none of them confidently allowed (8 of 180 without history, 0 with the flow guard), with no confident block on 296 real agent calls. The history adds about 2.5k input tokens per call (about USD 0.0005) and kept p99 latency at 0.81 s.
 
 ### When the judge is late, failing or busy (cascade 3)
 
@@ -152,7 +154,7 @@ Each call is recorded as a judge event of kind `decision_model` with its action 
   Decision model: jev-1.13.0 scored 0.12 unsafe (advisory only; it does not change the verdict)
 ```
 
-The score is also under `settings.decision_model` in `skill scan --json`. The skill scanner treats the tier as advisory on purpose: the model it measured did not separate malicious from benign skills. Keep the [LLM judge](/docs/scanning/skill-scanner#the-judge) on for skill verdicts. The install watcher does not call the decision model.
+The score is also under `settings.decision_model` in `skill scan --json`. The skill scanner treats the tier as advisory on purpose: the model does not separate malicious from benign skills. Keep the [LLM judge](/docs/scanning/skill-scanner#the-judge) on for skill verdicts. The install watcher does not call the decision model.
 
 ## Managed devices
 

@@ -124,11 +124,11 @@ A disabled feature gives `NOT_USED`, never `OPTIONAL`.
 
 `keys list` shows effective names: with `guardrail.judge.llm.api_key_env: MY_JUDGE_KEY` it shows `MY_JUDGE_KEY` rather than `JUDGE_API_KEY`. A default install shows six rows; the judge and skill-scanner keys appear only when overridden.
 
-For routed traffic the classifier chooses only a configured alias; the gateway resolves that alias's credential and sends it only to the configured provider. The semantic-router container does not read `.env` ([Semantic routing](/docs/guardrail/semantic-routing)).
+For routed traffic the classifier chooses only a configured alias; the gateway resolves that alias's credential and sends it only to the configured provider. The semantic-router container does not read `.env` ([Semantic routing](/docs/routing/semantic-routing)).
 
 ## Provider-specific SaaS variables are not baseline entries
 
-The Go gateway (Bifrost) and the Python scanners (LiteLLM) derive the provider key from `DEFENSECLAW_LLM_KEY` and the model prefix (`openai/`, `anthropic/`, `bedrock/`, `vertex/`, `azure/`, `ollama/`, and so on). Do not set `OPENAI_API_KEY` separately. The mapping is in `cli/defenseclaw/scanner/_llm_env.py` ([LLM providers](/docs/guardrail/unified-llm-key)).
+The Go gateway (Bifrost) and the Python scanners (LiteLLM) derive the provider key from `DEFENSECLAW_LLM_KEY` and the model prefix (`openai/`, `anthropic/`, `bedrock/`, `vertex/`, `azure/`, `ollama/`, and so on). Do not set `OPENAI_API_KEY` separately. The mapping is in `cli/defenseclaw/scanner/_llm_env.py` ([LLM providers](/docs/get-started/unified-llm-key)).
 
 ## Gateway and connector-scoped tokens
 
@@ -163,7 +163,7 @@ destination and `DEFENSECLAW_LLM_KEY` stored in `.env`:
 enabled. The last line names the [gateway token](#gateway-and-connector-scoped-tokens)
 that the sidecar generated in `.env`. `keys check` on the same install prints `1/1 required credentials set.` and `OK all required credentials present`, and exits `0`.
 
-See also [LLM providers](/docs/guardrail/unified-llm-key) and [Environment variables](/docs/reference/env-vars).
+See also [LLM providers](/docs/get-started/unified-llm-key) and [Environment variables](/docs/reference/env-vars).
 
 ## Troubleshooting
 
@@ -223,7 +223,7 @@ Fixes for the gateway, the keys it needs and the destinations it exports to.
 
 **Cause.** No LLM key is configured. The local rules work without one.
 
-**Fix.** To add the judge: `defenseclaw setup llm`, or follow [Set up an LLM key](/docs/guardrail/unified-llm-key). Check what is set with `defenseclaw keys list`.
+**Fix.** To add the judge: `defenseclaw setup llm`, or follow [Set up an LLM key](/docs/get-started/unified-llm-key). Check what is set with `defenseclaw keys list`.
 
 **Check.** `defenseclaw doctor` shows `LLM API key` and `LLM reachable` as `[PASS]`.
 

@@ -1,0 +1,179 @@
+---
+title: Intent-based guardrails
+description: Guardrails that compare a tool call with what the user asked for. Which prompt each connector gives DefenseClaw, how the judge and the decision model use it, the opt-in alignment check (ALIGNMENT-DRIFT), the send-to-an-unnamed-place check, and how well they work.
+keywords:
+  - intent based guardrails
+  - user intent
+  - alignment check
+  - ALIGNMENT-DRIFT
+  - INTENT-SCOPE-SEND
+  - guardrail.cascade.lanes.alignment
+  - intent deviation
+  - goal hijacking
+  - indirect prompt injection
+---
+
+Rules look for dangerous things. Intent-based guardrails ask a different question: **is this call something the user asked for?** Most public attacks on agents work this way. The agent reads a file, a web page or an email that carries instructions, and then sends an email, moves money or changes a setting. The call looks ordinary. Only the task shows it does not belong.
+
+DefenseClaw keeps the user's request for each session and uses it in five places:
+
+| Where intent is used | What it does | Default |
+| --- | --- | --- |
+| The tool judge | Weighs each tool call against the request | With the LLM judge, which is off by default |
+| The decision model | Asks whether the user authorized this target or action, and whether the call serves the latest request (the flow guard) | With the decision model, which is off by default. The flow guard is on. |
+| The judge of tool results | Reads a tool's output next to the call and the request for the turn | On with the judge (`judge_tool_result_context`) |
+| **The send check** (`INTENT-SCOPE-SEND`) | Finds a send to a host or mailbox no prompt named | Records only |
+| **The alignment check** (`ALIGNMENT-DRIFT`) | Asks the judge whether a side-effecting call serves the task | **Off** |
+
+Intent is untrusted text. It is data for the judge, never an instruction to it, and it never excuses a call the rules block.
+
+## What intent is captured, and where from
+
+The intent is the latest prompt the user typed in the session, at most 2 KB (the start and the end of a longer one). DefenseClaw takes it from the agent's turn-start hook. A new prompt starts a new turn. A prompt DefenseClaw blocks, and an empty prompt, leave the turn with no task.
+
+| Connector | Event that carries the prompt | Kept |
+| --- | --- | --- |
+| Claude Code, Claude Cowork | `UserPromptSubmit` | Yes |
+| Codex | `UserPromptSubmit` | Yes |
+| GitHub Copilot CLI | `userPromptSubmitted` | Yes |
+| Cursor (IDE) | `beforeSubmitPrompt` | Yes |
+| Amp | `agent.start` | Yes |
+| Kiro (IDE) | `UserPromptSubmit` | Yes |
+| Devin | `UserPromptSubmit` | Yes |
+| Hermes | `pre_llm_call` | Yes, but it names no destination: its prompt can come from a remote chat party, so no host or address in it counts as one the user named |
+| OpenCode, Antigravity, Cursor Agent CLI, Kiro CLI 2.x | none: the hooks send no prompt text | No. The judge sees the tool calls without the task. |
+| OpenClaw | the chat stream records the prompt | No: the tool-call check looks the task up under a different session key and finds none |
+
+DefenseClaw never invents intent from model or tool output. Where there is no prompt on a trusted turn boundary, there is no intent, and the checks that need it do nothing. A configuration change keeps the tasks of the sessions that are open. [Coverage](/docs/guardrail/coverage) shows the same limits next to the others.
+
+## The send check
+
+When the judge is on, DefenseClaw checks every tool call that sends data (a post or upload tool, a mail tool, `curl` with a body, `scp`, `rsync`, `mail`, a cloud copy, a backup to another place) against the places the session's prompts named. A send to a host or mailbox that none of them named gets the finding `INTENT-SCOPE-SEND`.
+
+In 1.0.10 the check only records. It writes a judge event of kind `tool_intent_scope_shadow` and a log line, and the verdict is what it would be without the check. `guardrail.judge.intent_scope: off` stops it; `shadow` is the default.
+
+- It reads the commands that run, from the parsed command. Words in quoted text, a commit message or a here-document do not count.
+- A command that may send and cannot be read, and a call too large to read in full, are recorded as outside the task.
+- Naming a host covers that host and its sub-domains, not its parent domain. The hosts of the Git remotes of your working folder count as named.
+- Naming a mailbox covers that address only. A person you name without an address counts when you also name the domain of the mailbox.
+- A place you describe but do not spell out ("the management team") is not named. Only text you typed counts.
+
+## The alignment check
+
+The alignment check is a separate lane that asks the [LLM judge](/docs/guardrail/llm-judge) one question about each side-effecting tool call:
+
+> Is this call needed for, or consistent with, the user's task?
+
+When the answer is no, the call gets its own finding, `ALIGNMENT-DRIFT`. The lane never changes, lowers or removes what the rules, System One or the tool judge decided. It only adds its finding.
+
+It is **off by default**. Turn it on only when you have a judge set up and accept the cost and delay below. Without a judge, it stays off whatever you set.
+
+### Turn it on
+
+```yaml
+guardrail:
+  judge:
+    enabled: true
+    hook_connectors: [claudecode, codex]   # the lane asks only for these connectors
+    # ... the judge model (guardrail.judge.llm)
+  cascade:
+    lanes:
+      alignment: alert   # off (default), shadow, alert or block
+```
+
+| Value | What happens |
+| --- | --- |
+| `off` | The lane does not run, keeps no session state and makes no model call. |
+| `shadow` | It runs and records `ALIGNMENT-DRIFT` in the audit log. The answer to the agent does not change. |
+| `alert` | `ALIGNMENT-DRIFT` is a MEDIUM alert. |
+| `block` | `ALIGNMENT-DRIFT` is a HIGH finding that blocks. |
+
+Start with `shadow`, look at the audit log, then move to `alert`. Check the result:
+
+```bash
+defenseclaw config validate
+defenseclaw guardrail cascade explain --connector claudecode
+defenseclaw status
+```
+
+`status` shows an **Alignment check** row while the lane is not off. `doctor` names live lanes on the **Guardrail cascade** row, and `cascade explain` lists every lane with the key that set it.
+
+### Tune it
+
+The lane follows the cascade [scopes](/docs/guardrail/configure-cascade#scopes). Set it for one connector or one profile:
+
+```yaml
+guardrail:
+  connectors:
+    codex:
+      cascade:
+        lanes:
+          alignment: shadow
+  profiles:
+    contractors:
+      cascade:
+        lanes:
+          alignment: block
+```
+
+On a managed install, `guardrail.cascade.admin.locked: [lanes.alignment]` keeps the top-level value. Writers refuse a connector or profile that sets it. If one reaches the gateway anyway, its value is ignored and doctor and `cascade explain` name it.
+
+### What it reads
+
+For each tool call the lane first decides whether the call has a side effect:
+
+- **Shell and file tools.** A network action (an upload, a download, `git push` to any remote), a write, delete, link or permission change outside the working folder and the temporary folders (or on a target the reader cannot place), or a read of a home dot-folder (credential stores). Running a program is not a side effect by itself.
+- **Other tools** (MCP and function tools). A URL or path argument the tool sends to or changes, else the verbs of the tool name: `send`, `transfer`, `delete`, `update`, `create`, `share`, `invite` and so on. `get_`, `list_`, `read_` and `search_` tools are skipped.
+
+Read-only calls are never sent to the model. A call the agent reports twice (Claude Code and Codex send `PreToolUse` and then `PermissionRequest` for the same call) is asked about once.
+
+### What is sent to the model
+
+Nothing, for a connector that is not in `guardrail.judge.hook_connectors`. For the others:
+
+- the first and the latest user prompt of the session (600 bytes each),
+- the last four tool calls (240 bytes each),
+- the current call: its tool name and arguments. A call over 1,200 bytes is cut by structure: its destinations come first, then every argument field with long values cut in the middle, and the call is marked `[TRUNCATED]`.
+
+Secrets are redacted before anything is sent, and text that copies the sample's own delimiters is neutralized, so a prompt or an argument cannot close the sample or start a section of its own.
+
+### Time
+
+The lane never holds a hook past its answer window, in any mode. Its model call ends at the earliest of 3 seconds, the judge's `hook_timeout`, the hook's answer window less 150 ms, and the hook's remaining judge budget. With less than one second left it does not ask, and the gateway log says `not asked: window`. A late, failed or unparsed answer is no finding. The lane never blocks because of its own failure.
+
+It never delays the tool-call judge. With `guardrail.judge.max_parallel` set, its model call starts only on a free slot that no other judge call is waiting for, and it gives the slot up the moment one has to wait (logged as `no answer: preempted`).
+
+## How good it is
+
+Measured on the public tool-call sets of the 1.0.10 benchmarks (AgentDojo, InjecAgent, MCPTox, MCP-hunt, DTAP, agentic red-team, Nemotron terminal, an extra public shell set and a Windows shell set), on the frozen holdout split, with one scorer for every row. The prompt was tuned on the tune split only. Judge: Gemma 4 31B. An alert counts.
+
+| Configuration | Precision | Recall | False-alert rate | F1 [95% CI] |
+| --- | --- | --- | --- | --- |
+| Rules, System One and tool judge, lane off | 0.582 | 0.420 | 0.066 | 0.488 [0.456, 0.518] |
+| Alignment check alone | 0.722 | 0.583 | 0.049 | 0.645 [0.617, 0.673] |
+| Both (a finding from either counts) | 0.623 | 0.784 | 0.103 | 0.694 [0.674, 0.715] |
+| LlamaFirewall AlignmentCheck (Llama 4 Maverick), for comparison | 0.661 | 0.782 | 0.118 | 0.716 [0.694, 0.737] |
+
+871 attack and 4,007 benign cases for the DefenseClaw rows. AlignmentCheck is scored on the 834 attack and 2,830 benign cases it applies to. With the lane on, DefenseClaw comes close to the F1 of AlignmentCheck (the intervals overlap) at a lower false-alert rate, and the lane alone has the lowest false-alert rate of the four. It alerts and does not block unless you set `block`. About 115 questions got no answer in the run, and an empty answer counts as no finding, so the recall is a floor.
+
+With the lane off, verdicts are unchanged: on 270,411 decisions of real coding sessions, the build with the lane off and the build without the lane gave identical answers.
+
+The [benchmarks page](/docs/guardrail/benchmarks) has the rest of the guardrail measurements.
+
+### Cost and delay
+
+| | Holdout sets | Real coding sessions |
+| --- | --- | --- |
+| Tool calls sent to the model | 12.3% | 12.7% |
+| Judge cost per 1,000 tool calls (Gemma 4 31B) | USD 0.015 | USD 0.015 |
+| Model time of an asked call, p50 and p95 | 580 and 1,558 ms | 614 and 1,475 ms |
+
+Read-only calls add no delay. On the holdout sets with the lane on, hook time over all tool calls was p50 12 ms, p95 654 ms, p99 1,266 ms, at most 1,858 ms.
+
+## Limits
+
+- About one answer in ten from Gemma 4 31B came back empty in the benchmark. An empty answer is no finding.
+- A slow judge, a busy judge (`max_parallel`) or a short hook window means a call is not checked. The lane gives up its answer rather than hold the agent.
+- The lane needs the user's task. A call with no earlier prompt in the session is not checked, and a vague task gives the model little to compare against: it answers `unsure`, which is no finding.
+- It judges the call against the prompt text. It does not read tool results in this release.
+- The tool-name verbs for non-shell tools are a fixed list. A side-effecting tool named with another word is not checked.

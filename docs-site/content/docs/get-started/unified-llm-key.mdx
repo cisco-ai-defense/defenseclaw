@@ -13,9 +13,9 @@ keywords:
   - per-component LLM key override
 ---
 
-DefenseClaw sends every LLM call through one of two layers: the in-process **Bifrost** SDK (the gateway and the judge) or **LiteLLM** (the scanner SDKs). Both derive the provider key from `DEFENSECLAW_LLM_KEY` and the model prefix. For the short path, see [Set up an LLM key](/docs/guardrail/unified-llm-key).
+DefenseClaw sends every LLM call through one of two layers: the in-process **Bifrost** SDK (the gateway and the judge) or **LiteLLM** (the scanner SDKs). Both derive the provider key from `DEFENSECLAW_LLM_KEY` and the model prefix. For the short path, see [Set up an LLM key](/docs/get-started/unified-llm-key).
 
-One key, `DEFENSECLAW_LLM_KEY`, powers the LLM judge and the skill, MCP and plugin scanners. The optional [decision model](/docs/guardrail/decision-model) has its own setting and token, `DEFENSECLAW_DECISION_MODEL_KEY`. Set it once. Override it per component only if you need separate billing or rate limits ([LLM providers](/docs/guardrail/unified-llm-key#per-component-overrides)).
+One key, `DEFENSECLAW_LLM_KEY`, powers the LLM judge and the skill, MCP and plugin scanners. The optional [decision model](/docs/guardrail/decision-model) has its own setting and token, `DEFENSECLAW_DECISION_MODEL_KEY`. Set it once. Override it per component only if you need separate billing or rate limits ([LLM providers](/docs/get-started/unified-llm-key#per-component-overrides)).
 
 ## The happy path
 
@@ -144,10 +144,10 @@ defenseclaw keys check
 
 | Provider | Extra settings | Details |
 | --- | --- | --- |
-| AWS Bedrock | Region and auth mode (`api_key`, `iam_credentials`, `profile`, `instance_role`) | [Bedrock](/docs/guardrail/unified-llm-key#aws-bedrock) |
-| Google Vertex AI | Project, region, auth mode | [Vertex AI](/docs/guardrail/unified-llm-key#google-vertex-ai) |
-| Azure OpenAI | Endpoint, API version, deployment aliases | [Azure OpenAI](/docs/guardrail/unified-llm-key#azure-openai) |
-| Ollama, vLLM, LM Studio | A `base_url`; no key | [Provider catalog](/docs/guardrail/unified-llm-key#bifrost-provider-catalog) |
+| AWS Bedrock | Region and auth mode (`api_key`, `iam_credentials`, `profile`, `instance_role`) | [Bedrock](/docs/get-started/unified-llm-key#aws-bedrock) |
+| Google Vertex AI | Project, region, auth mode | [Vertex AI](/docs/get-started/unified-llm-key#google-vertex-ai) |
+| Azure OpenAI | Endpoint, API version, deployment aliases | [Azure OpenAI](/docs/get-started/unified-llm-key#azure-openai) |
+| Ollama, vLLM, LM Studio | A `base_url`; no key | [Provider catalog](/docs/get-started/unified-llm-key#bifrost-provider-catalog) |
 
 DefenseClaw reads keys from the process environment first, then `~/.defenseclaw/.env`. It does not use the OS keychain or an external secret manager.
 
@@ -682,5 +682,5 @@ defenseclaw setup guardrail --non-interactive --detection-strategy regex_only
 - `cli/defenseclaw/credentials.py`: the credential registry and resolve and classify functions.
 - `internal/configs/embed.go`: the `Provider` schema behind `llm_providers.custom`.
 - [Keys and credentials](/docs/reference/keys): the full credential table.
-- [Route models](/docs/guardrail/semantic-routing)
+- [Route models](/docs/routing/semantic-routing)
 - [Tune the LLM judge](/docs/policies/suppression-cookbook)

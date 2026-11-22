@@ -18,7 +18,7 @@ One gateway guards several agents at once, each with its own mode. Adding, repla
 ## Before you start
 
 - DefenseClaw is set up for one agent.
-- The new agent is a hook agent. OpenClaw and ZeptoClaw run through a proxy and cannot sit next to hook agents. To switch between a hook agent and a proxy agent, use `--replace` (see [Changing connectors](/docs/guardrail/switching-connectors#replace-instead-of-add)).
+- The new agent is a hook agent. OpenClaw and ZeptoClaw run through a proxy and cannot sit next to hook agents. To switch between a hook agent and a proxy agent, use `--replace` (see [Changing connectors](/docs/connectors/switching-connectors#replace-instead-of-add)).
 
 ## How one gateway enforces N connectors
 
@@ -47,7 +47,7 @@ guardrail:
 
 ## Adding a connector (Add vs Replace)
 
-Run the hook setup for the agent you want to add. Setup first asks the new agent's enforcement mode, prints what it will change, and then, if another agent is already guarded, asks how to combine them. The questions, in order, are listed in [Changing connectors](/docs/guardrail/switching-connectors#the-questions-setup-asks).
+Run the hook setup for the agent you want to add. Setup first asks the new agent's enforcement mode, prints what it will change, and then, if another agent is already guarded, asks how to combine them. The questions, in order, are listed in [Changing connectors](/docs/connectors/switching-connectors#the-questions-setup-asks).
 
 1. Run the agent's setup command.
 
@@ -153,9 +153,9 @@ Per-connector policy is a guardrail concept. The egress firewall is not per-conn
 
 ## See also
 
-- [Changing connectors](/docs/guardrail/switching-connectors) — add, reconfigure, remove, or replace connector wiring
+- [Changing connectors](/docs/connectors/switching-connectors) — add, reconfigure, remove, or replace connector wiring
 - [Set up the guardrail](/docs/guardrail) — the central setup command
 - [Generate a setup command](/docs/command-generator)
 - [Turn on blocking](/docs/get-started/first-guardrail)
-- [Setup aliases](/docs/guardrail/aliases#direct-to-upstream-aliases-hook-or-policy-enforcement)
+- [Setup aliases](/docs/connectors/aliases#direct-to-upstream-aliases-hook-or-policy-enforcement)
 - [User- and group-based policies](/docs/guardrail/user-and-group-policies) — per-user, per-group and per-agent profiles that layer on top of `guardrail.connectors`

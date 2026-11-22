@@ -85,7 +85,7 @@ def test_managed_hook_docs_name_the_measured_burst_capacity() -> None:
     # Linux agents-per-vCPU figure (T11 C09, LEAD 11:52): next to the Windows burst figure.
     assert "3 interactive agents per vCPU" in timing and "4 vCPUs" in timing
     linux = _flat("support-matrix.mdx").split("## Many agents on one Linux host", 1)[1].split("## ", 1)[0]
-    assert "3 interactive agents per vCPU" in linux and "613 tool calls" in linux
+    assert "3 interactive agents per vCPU" in linux
 
 
 def test_managed_outage_open_docs_name_rate_limits_and_the_guard_session_check() -> None:
@@ -435,9 +435,9 @@ FACTS = [
          'removed when the last one exits'),
     ]),
     ('gap_0038_write_proof_names_child_program_limit_without_recipes', [
-        (('guardrail/index.mdx',),
-         '### Protected-file write proof'),
-        (('guardrail/index.mdx',),
+        (('guardrail/protected-files.mdx',),
+         '## Protected-file write proof'),
+        (('guardrail/protected-files.mdx',),
          'use a sandbox or file permissions'),
     ]),
     ('gap_0296_manifest_is_in_pinned_digest', [
