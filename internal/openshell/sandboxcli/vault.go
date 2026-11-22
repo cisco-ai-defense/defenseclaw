@@ -106,6 +106,8 @@ func (a *App) VaultList(format OutputFormat) error {
 			a.note(fmt.Sprintf("%s has no host yet; bind one: %s vault bind %s --host HOST", e.Name, CommandName, e.Name))
 		case vault.StatusExposed:
 			a.warn(fmt.Sprintf("%s may have been seen by an agent's model; rotate it with its issuer, then: %s vault replace %s", e.Name, CommandName, e.Name))
+		case vault.StatusUnconfirmed:
+			a.note(fmt.Sprintf("%s was captured from a sandbox; check it is yours, then: %s vault confirm %s", e.Name, CommandName, e.Name))
 		}
 	}
 	return nil
@@ -189,7 +191,7 @@ func (a *App) VaultReplace(name string, opts VaultValueOptions) error {
 	}
 	a.ok("replaced the value of " + e.Name)
 	a.vaultNotice(st)
-	a.note("sandboxes started from now on use the new value; restart running ones to pick it up")
+	a.note("sandboxes created from now on use the new value; a sandbox created with the old one is refused at start: delete it and start a new one")
 	return nil
 }
 
@@ -217,6 +219,46 @@ func (a *App) VaultRename(name, newName string) error {
 	return nil
 }
 
+// VaultConfirm marks a captured secret as the person's own, after showing
+// where it came from and the last 4 characters of its value.
+func (a *App) VaultConfirm(name string, yes bool) error {
+	st := a.vault()
+	e, err := st.Get(name)
+	if err != nil {
+		return err
+	}
+	if e.Source != vault.SourceCaptured {
+		a.note(name + " was added by you; it needs no confirmation")
+		return nil
+	}
+	hint, err := st.Hint(name)
+	if err != nil {
+		return err
+	}
+	a.printf("%s\n", name)
+	a.line(fmt.Sprintf("%-14s %s", "Kind", firstNonEmpty(e.Kind, "unknown")))
+	a.line(fmt.Sprintf("%-14s %s", "Captured from", firstNonEmpty(e.CapturedFrom, "a sandbox")))
+	a.line(fmt.Sprintf("%-14s %s", "Captured", e.CreatedAt.Local().Format(time.RFC3339)))
+	if hint != "" {
+		a.line(fmt.Sprintf("%-14s …%s", "Ends with", hint))
+	}
+	a.line(fmt.Sprintf("%-14s %s", "Host", firstNonEmpty(e.Target(), "none yet")))
+	a.note("An agent in a sandbox can make a call that looks like your prompt, so confirm only a secret you gave it.")
+	ok, err := a.confirm(fmt.Sprintf("Is %s your own secret?", name), yes)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		a.note("not confirmed; remove it with `" + CommandName + " vault remove " + name + "` if it is not yours")
+		return nil
+	}
+	if _, err := st.Confirm(name); err != nil {
+		return err
+	}
+	a.ok("confirmed " + name)
+	return nil
+}
+
 // VaultRemove deletes a secret.
 func (a *App) VaultRemove(name string, yes bool) error {
 	st := a.vault()
@@ -236,7 +278,7 @@ func (a *App) VaultRemove(name string, yes bool) error {
 	}
 	a.ok("removed " + name)
 	a.vaultNotice(st)
-	a.note("running sandboxes keep the value until they stop; revoke it with its issuer if it may have leaked")
+	a.note("sandboxes created with it keep the value until you delete them (a stopped one is refused at start); revoke it with its issuer if it may have leaked")
 	return nil
 }
 
@@ -297,6 +339,8 @@ func vaultStatusText(s vault.Status) string {
 		return "needs a host"
 	case vault.StatusExposed:
 		return "exposed: rotate"
+	case vault.StatusUnconfirmed:
+		return "unconfirmed"
 	}
 	return string(s)
 }
@@ -310,4 +354,47 @@ func vaultUsedText(e vault.Entry) string {
 		text += " (" + e.LastUsedBy + ")"
 	}
 	return text
+}
+
+// vaultVersions records each vault entry's version as the sandbox is
+// created with it.
+func (a *App) vaultVersions(names []string) map[string]string {
+	if len(names) == 0 {
+		return nil
+	}
+	st := a.vault()
+	out := map[string]string{}
+	for _, n := range names {
+		if e, err := st.Get(n); err == nil {
+			out[n] = e.UpdatedAt.UTC().Format(time.RFC3339Nano)
+		}
+	}
+	return out
+}
+
+// vaultGrantsCurrent refuses to start a stopped sandbox whose vault secrets
+// were removed, exposed, replaced, rebound or are no longer confirmed since
+// it was created: it still holds the old value, which only a new sandbox
+// drops. A sandbox created without --vault is not affected.
+func (a *App) vaultGrantsCurrent(sb *sandboxapi.Sandbox) error {
+	rec := a.runLaunchOf(sb)
+	if rec == nil || len(rec.Vault) == 0 {
+		return nil
+	}
+	st := a.vault()
+	for _, n := range rec.Vault {
+		e, _, err := st.Resolve(n)
+		changed := err == nil && rec.VaultVersions[n] != "" && e.UpdatedAt.UTC().Format(time.RFC3339Nano) != rec.VaultVersions[n]
+		if err == nil && !changed {
+			continue
+		}
+		why := "it was replaced, rebound or renamed in your vault"
+		if err != nil {
+			why = err.Error()
+		}
+		return fmt.Errorf("%s was created with the vault secret %s, which is no longer the same (%s); "+
+			"the sandbox would keep the old value, so it is not started: delete it (`%s delete %s`) and start a new one with --vault %s",
+			sb.Name, n, why, CommandName, sb.Name, n)
+	}
+	return nil
 }

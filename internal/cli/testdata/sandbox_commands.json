@@ -1144,6 +1144,20 @@
     ]
   },
   {
+    "path": "sandbox vault confirm",
+    "use": "confirm \u003cname\u003e",
+    "short": "Confirm a captured secret is yours, so sandboxes can use it",
+    "long": "A secret DefenseClaw captured from a sandbox is unconfirmed until you confirm it:\nan agent in a sandbox can make a call that looks like your prompt, so a captured value\nmay be one it planted. confirm shows where the secret came from and the last 4\ncharacters of its value, then asks.",
+    "flags": [
+      {
+        "name": "yes",
+        "shorthand": "y",
+        "type": "bool",
+        "default": "false"
+      }
+    ]
+  },
+  {
     "path": "sandbox vault list",
     "use": "list",
     "short": "List your secrets (names, hosts and status; never values)",
