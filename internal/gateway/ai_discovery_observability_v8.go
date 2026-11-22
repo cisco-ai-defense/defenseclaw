@@ -40,9 +40,8 @@ type aiDiscoveryV8Runtime interface {
 
 type aiDiscoveryV8Adapter struct {
 	runtime aiDiscoveryV8Runtime
-	// publishGate is the managed_enterprise change gate, nil in every other
-	// deployment mode. A nil gate never suppresses, so the lifecycle-delta
-	// contract for non-managed modes is unaffected.
+	// publishGate is the endpoint inventory change gate, in every product;
+	// nil only without a data folder. A nil gate never suppresses.
 	publishGate *managedInventoryPublishState
 }
 
@@ -404,6 +403,7 @@ func (adapter *aiDiscoveryV8Adapter) emitSignalLog(
 			DefenseClawAIDiscoverySource:     aiDiscoveryV8Optional(summary.Source),
 			DefenseClawAIComponentVendor:     aiDiscoveryV8OptionalText(signal.Vendor),
 			DefenseClawAIComponentProduct:    aiDiscoveryV8OptionalText(signal.Product),
+			DefenseClawAIComponentLocation:   aiDiscoveryV8OptionalText(signal.Location),
 			// A per-user scan's signal names the account it ran as, so the
 			// lifecycle records can be split by user like the observations.
 			UserID:                aiDiscoveryV8OptionalText(signal.UserID),
@@ -457,6 +457,7 @@ func (adapter *aiDiscoveryV8Adapter) emitSignalLog(
 				DefenseClawAIDiscoverySource:             base.DefenseClawAIDiscoverySource,
 				DefenseClawAIComponentVendor:             base.DefenseClawAIComponentVendor,
 				DefenseClawAIComponentProduct:            base.DefenseClawAIComponentProduct,
+				DefenseClawAIComponentLocation:           base.DefenseClawAIComponentLocation,
 				UserID:                                   base.UserID,
 				DefenseClawUserIDKind:                    base.DefenseClawUserIDKind,
 				DefenseClawUserName:                      base.DefenseClawUserName,
