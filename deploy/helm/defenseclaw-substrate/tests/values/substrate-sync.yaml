@@ -1,0 +1,19 @@
+# Dedicated chart values for substrate.launcher, files and git (GAP-0732).
+# config.substrate.git.lfs is set too: config wins over the chart value.
+substrate:
+  launcher:
+    keyReplay: "off"
+  files:
+    push: true
+    sync: false
+  git:
+    httpsRewrite:
+    - from: "git@git.example.test:"
+      to: https://git.example.test/
+    submodules: false
+    lfs: true
+    pushBranch: deny
+config:
+  substrate:
+    git:
+      lfs: false

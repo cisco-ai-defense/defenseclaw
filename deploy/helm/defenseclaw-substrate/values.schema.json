@@ -204,6 +204,77 @@
               "maximum": 65535
             }
           }
+        },
+        "launcher": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "keyReplay": {
+              "type": "string",
+              "enum": [
+                "ask",
+                "on",
+                "off"
+              ]
+            }
+          }
+        },
+        "files": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "push": {
+              "type": "boolean"
+            },
+            "sync": {
+              "type": "boolean"
+            }
+          }
+        },
+        "git": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "httpsRewrite": {
+              "type": "array",
+              "maxItems": 64,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "from",
+                  "to"
+                ],
+                "properties": {
+                  "from": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256,
+                    "pattern": "^[^\\s\"\\\\]+[:/]$"
+                  },
+                  "to": {
+                    "type": "string",
+                    "maxLength": 256,
+                    "pattern": "^https://[^\\s\"\\\\@]+/$"
+                  }
+                }
+              }
+            },
+            "submodules": {
+              "type": "boolean"
+            },
+            "lfs": {
+              "type": "boolean"
+            },
+            "pushBranch": {
+              "type": "string",
+              "enum": [
+                "allow",
+                "ask",
+                "deny"
+              ]
+            }
+          }
         }
       }
     },
@@ -287,6 +358,69 @@
                       ]
                     }
                   }
+                },
+                "key_replay": {
+                  "type": "string",
+                  "enum": [
+                    "ask",
+                    "on",
+                    "off"
+                  ]
+                }
+              }
+            },
+            "files": {
+              "type": "object",
+              "properties": {
+                "push": {
+                  "type": "boolean"
+                },
+                "sync": {
+                  "type": "boolean"
+                }
+              }
+            },
+            "git": {
+              "type": "object",
+              "properties": {
+                "https_rewrite": {
+                  "type": "array",
+                  "maxItems": 64,
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "from",
+                      "to"
+                    ],
+                    "properties": {
+                      "from": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 256,
+                        "pattern": "^[^\\s\"\\\\]+[:/]$"
+                      },
+                      "to": {
+                        "type": "string",
+                        "maxLength": 256,
+                        "pattern": "^https://[^\\s\"\\\\@]+/$"
+                      }
+                    }
+                  }
+                },
+                "submodules": {
+                  "type": "boolean"
+                },
+                "lfs": {
+                  "type": "boolean"
+                },
+                "push_branch": {
+                  "type": "string",
+                  "enum": [
+                    "allow",
+                    "ask",
+                    "deny"
+                  ]
                 }
               }
             }

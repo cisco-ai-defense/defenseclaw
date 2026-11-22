@@ -254,7 +254,7 @@ Prefer git to an upload? `defenseclaw substrate run claude --clone https://git.e
 
 In a checkout of your own, `defenseclaw substrate run claude --clone .` gives the agent the full history of your branch (Preview). The agent fetches the branch from its https remote, and only your unpushed commits and uncommitted changes are sent from your computer, with the same rules as a copy: secret files, and their committed versions, stay behind. `pull` works as for a copy. A remote that is a local path, an ssh address or a plain http:// address, or a branch that shares no commit with its remote, is refused; use `run` without `--clone .`. On Windows, push and commit your work first.
 
-An ssh address clones too when the cluster turns it into https, because the agent's network carries no ssh. The `git@github.com:`, `git@gitlab.com:` and `git@bitbucket.org:` forms and every `ssh://git@` address always are; your administrator can add your company's git servers (Preview, see [Secrets](/docs/substrate/secrets)). Submodules are cloned too, and Git LFS files are fetched when the image has git-lfs.
+An ssh address clones too when the cluster turns it into https, because the agent's network carries no ssh. The `git@github.com:`, `git@gitlab.com:` and `git@bitbucket.org:` forms and every `ssh://git@` address always are; your administrator can add your company's git servers (Preview, see [Secrets](/docs/substrate/secrets)). Submodules are cloned too, and Git LFS files are fetched when the image has git-lfs (Preview). A submodule whose address uses plain http is refused unless the repository itself is on this computer's loopback; use https. If the LFS fetch fails, the clone still works, the files stay pointer files, and the run prints a warning.
 
 </Step>
 
