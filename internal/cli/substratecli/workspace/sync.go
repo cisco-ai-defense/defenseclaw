@@ -358,8 +358,11 @@ func (s *syncer) batch(ctx context.Context) (bool, error) {
 	}
 	if err != nil {
 		var refused *HTTPError
-		if errors.As(err, &refused) && (refused.Reason == "sync_disabled" || refused.Reason == "push_disabled") {
+		if errors.As(err, &refused) && refused.Reason == "sync_disabled" {
 			return false, errors.New("your administrator turned off syncing into a running agent (substrate.files.sync); sync stopped")
+		}
+		if errors.As(err, &refused) && refused.Reason == "push_disabled" {
+			return false, errors.New("your administrator turned off sending changes into a running agent (substrate.files.push), which sync uses; sync stopped")
 		}
 		var moved *osw.BaselineMovedError
 		if errors.As(err, &moved) || errors.Is(err, ErrPushHostCopy) {
