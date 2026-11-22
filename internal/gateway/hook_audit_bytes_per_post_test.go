@@ -127,15 +127,6 @@ func (l *hookLoad) usedBytes(t *testing.T) int64 {
 	return (pages - free) * size
 }
 
-func (l *hookLoad) auditRows(t *testing.T) int64 {
-	t.Helper()
-	var count int64
-	if err := l.db.QueryRow(`SELECT COUNT(*) FROM audit_events`).Scan(&count); err != nil {
-		t.Fatal(err)
-	}
-	return count
-}
-
 func (l *hookLoad) measure(t *testing.T) hookLoadSample {
 	t.Helper()
 	s := hookLoadSample{used: l.usedBytes(t)}

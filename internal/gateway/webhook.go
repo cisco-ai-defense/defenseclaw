@@ -404,7 +404,7 @@ func (d *WebhookDispatcher) Dispatch(event audit.Event) {
 		if rank < ep.minSeverity && !actionItem {
 			continue
 		}
-		if len(ep.events) > 0 && !ep.events[eventCategory] && !(closedAsk && ep.events[string(audit.ActionApprovalRequest)]) {
+		if len(ep.events) > 0 && !ep.events[eventCategory] && (!closedAsk || !ep.events[string(audit.ActionApprovalRequest)]) {
 			continue
 		}
 		cooldownKey := event.Target + "\x00" + action

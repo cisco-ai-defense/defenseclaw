@@ -22,7 +22,7 @@ import (
 type gap0649Suspender struct{ *ateapifake.Fake }
 
 func (g gap0649Suspender) SuspendActorDurable(ctx context.Context, ref *ateapi.ObjectRef) (*ateapi.Actor, error) {
-	if _, err := g.Fake.SuspendActor(ctx, ref); err != nil {
+	if _, err := g.SuspendActor(ctx, ref); err != nil {
 		return nil, err
 	}
 	return nil, status.Error(codes.Unavailable, "upload to object storage failed")
