@@ -808,9 +808,10 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
     ),
     _Cmd(
         ("secrets", "test"),
-        "Check that a secret is bound and the cluster can use it",
+        "Check that a secret is stored and usable, and whether an agent gets it",
         args=(_Arg("name"),),
         flags=(
+            _Flag("agent", "string", "also say whether this agent's policy carries the secret"),
             _Flag("context", "string", "cluster to use (default: the one you signed in to last)", metavar="NAME"),
             _Flag("json", "bool", "same as --output json"),
             _Flag("mine", "bool", "your own secret (the only kind this command acts on)", default="true"),

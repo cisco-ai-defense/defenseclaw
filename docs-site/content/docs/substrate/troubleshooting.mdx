@@ -83,7 +83,7 @@ Unattended runs deny asks by default. Either allow the site in the profile, or s
 
 ### A secret I added is not used (Preview)
 
-If `secrets add` said the host is not covered by the template, an administrator must approve it first; see `defenseclaw substrate approvals`. `defenseclaw substrate secrets test NAME` checks that the value is stored. If `secrets add` was refused with `secret_bindings_locked` or `secret_bindings_off`, your administrator set `substrate.self_service_secrets.mode` to `values_only` or `off`. For a `Basic` template, store only the token, not `user:token`: the cluster adds the user name.
+If `secrets add` said the host is not covered by the template, an administrator must approve it first; see `defenseclaw substrate approvals`. `defenseclaw substrate secrets test NAME` checks that the value is stored, and `--agent AGENT` adds whether that agent's network policy carries it; the status and reason it prints say why a secret is not used (waiting on an administrator, denied, the ask expired, the binding expired, or the template no longer covers the host). If `secrets add` was refused with `secret_bindings_locked` or `secret_bindings_off`, your administrator set `substrate.self_service_secrets.mode` to `values_only` or `off`. For a `Basic` template, store only the token, not `user:token`: the cluster adds the user name.
 
 ### An actor is marked `policy_conflict`
 

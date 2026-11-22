@@ -62,6 +62,7 @@ var Table = []Reason{
 	{"shared_secret_admin_only", 403, API, "A shared secret is set by an administrator, in the store its source names.", "Ask your administrator to change it.", Person},
 	{"secret_managed_outside_defenseclaw", 409, API, "Its value lives in Vault or a cloud secret store, not in a Kubernetes Secret.", "Change the value in that store.", Person},
 	{"secret_not_found", 404, API, "No secret by that name is yours or bound to your profile.", "See the secrets you can use with: defenseclaw substrate secrets list", Person},
+	{"secret_test_agent_invalid", 400, API, "secrets test --agent takes the agent as ATESPACE/NAME.", "Give the agent as defenseclaw substrate list shows it.", Person},
 	{"value_required", 400, API, "The value is empty, over 64 KiB or not UTF-8.", "Give the value again.", Person},
 	{"secret_not_managed_by_defenseclaw", 409, API, "That Kubernetes Secret exists but DefenseClaw did not create it (it has no app.kubernetes.io/managed-by: defenseclaw label), and DefenseClaw changes only Secrets it created.", "Ask your administrator.", Admin},
 	{"secret_store_unavailable", 503, API, "The gateway cannot reach the Kubernetes secret store.", "Try again in a minute; an administrator can check it with: defenseclaw-gateway substrate doctor --cluster", Admin},
@@ -81,6 +82,13 @@ var Table = []Reason{
 	{"secret_not_in_allowed_credentials", 0, Render, "The profile limits which secrets its agents may use, and this one is not listed.", "Start the agent with --secret NAME, or ask your administrator to list it.", Person},
 	{"secret_needs_person", 0, Render, "A personal secret needs a signed-in person, and this agent has none.", "Start the agent with defenseclaw substrate run while signed in.", Person},
 	{"secret_echo_host", 0, Render, "The host returns the requests it gets, so the cluster does not add a secret there: the real value would come back to the agent.", "Bind the secret to the API host that needs it. An administrator who wants the echo can set inject.allow_echo: true on the entry.", Person},
+	{"secret_expired", 0, Render, "The binding passed its expiry, so the cluster no longer adds it.", "Add it again: defenseclaw substrate secrets rm NAME, then defenseclaw substrate secrets add NAME --template T --host H --expires 90d", Person},
+	{"secret_binding_denied", 0, Render, "An administrator denied the binding, so the cluster does not add it.", "Ask your administrator, or remove it with: defenseclaw substrate secrets rm NAME", Person},
+	{"secret_binding_ask_expired", 0, Render, "Nobody answered the administrator ask for the binding in time, so it is not used.", "Remove it with: defenseclaw substrate secrets rm NAME, then add it again to ask again.", Person},
+	{"secret_binding_not_covered", 0, Render, "The binding's template no longer covers its host, so the cluster does not add it.", "Remove it with: defenseclaw substrate secrets rm NAME, then add it again to ask an administrator.", Person},
+	{"secret_not_set", 0, Render, "No value is stored for the secret yet.", "Store it with: defenseclaw substrate secrets set NAME", Person},
+	{"secret_binding_other_person", 0, Render, "Your own binding goes only to your own agents, and this agent belongs to another person.", "Test it against one of your agents.", Person},
+	{"secret_not_in_policy", 0, Render, "The agent's network policy does not carry the secret: the cluster updates a policy within seconds, or a host rule leaves it out.", "Test again in a few seconds; see the agent's rules with: defenseclaw substrate policy explain AGENT", Person},
 	{"secret_invalid", 0, Render, "The secret's entry is malformed (the detail names the field).", "An administrator can fix the entry in substrate.secrets.", Admin},
 	{"secret_header_conflict", 0, Render, "Another secret already sets that header on that host.", "Remove one of the two bindings.", Admin},
 	{"secret_too_many_headers", 0, Render, "The host already has the most secret headers allowed.", "Remove a binding on that host.", Admin},
@@ -107,6 +115,11 @@ var Statuses = []Status{
 	{"not set", "No value is stored yet."},
 	{"managed outside DefenseClaw", "The value lives in Vault or a cloud store; DefenseClaw does not read it."},
 	{"unknown", "The gateway could not read the store just now."},
+	{"waiting on admin", "The binding waits for an administrator; the value is stored and not used until then."},
+	{"denied", "An administrator denied the binding."},
+	{"ask expired", "Nobody answered the ask in time; the binding is not used."},
+	{"expired", "The binding passed its expiry and is not used."},
+	{"not covered", "The binding's template no longer covers its host; the binding is not used."},
 }
 
 var byCode = func() map[string]Reason {

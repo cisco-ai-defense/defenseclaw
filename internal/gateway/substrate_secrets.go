@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -34,7 +35,9 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/egressspec"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/registry"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/render"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/secretbind"
 )
 
 // The secrets admin API (PLAN 7.2, D14). It returns names only, never a
@@ -121,35 +124,65 @@ func (a *APIServer) substrateSecretLookup(st *substrateState, r *http.Request) (
 
 func (a *APIServer) substrateListSecrets(st *substrateState) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		c, profile, secrets := a.substrateSecretLookup(st, r)
+		c, _ := substrateCallerFrom(r.Context())
+		profile, _, _ := st.cfg.substrateProfiles()(c.person, "", "", false)
 		mine := r.URL.Query().Get("mine") == "1"
+		entries := a.substrateSecretEntries(st, c, profile)
+		askStates := a.substrateBindingAsks(r.Context(), st, c)
+		var regs []registry.Registration
+		regsKnown := false
+		if st.cfg.Registrations != nil {
+			var err error
+			regs, err = st.cfg.Registrations.List(r.Context(), registry.Filter{OwnerID: ownerOf(c.person).ID()})
+			regsKnown = err == nil
+		}
+		now := time.Now()
 		out := []map[string]any{}
-		for _, sec := range secrets {
-			if !substrateSecretBound(sec, profile, c.admin) {
-				continue
-			}
+		for _, e := range entries {
+			sec := e.sec
 			perPerson := sec.Scope == render.ScopePerPerson
 			if mine && !perPerson {
 				continue
 			}
-			status := substrateSecretManaged
-			if ns, name, key, ok := substrateK8sSource(substrateSecretFor(sec, c.person.Subject)); ok && st.cfg.SecretStore != nil {
-				status = substrateSecretUnknown
-				if found, err := st.cfg.SecretStore.Exists(r.Context(), ns, name, key); err == nil {
-					status = map[bool]string{true: substrateSecretSet, false: substrateSecretNotSet}[found]
-				}
-			}
-			if mine && status != substrateSecretSet {
+			status, reason := a.substrateSecretState(r.Context(), st, e, c.person.Subject, askStates, now)
+			// --mine: values you stored, and every binding of yours
+			// whatever its state (waiting, denied, expired).
+			if mine && status != substrateSecretSet && e.binding == nil {
 				continue
 			}
-			scope := sec.Scope
-			if scope == "" {
-				scope = render.ScopeShared
-			}
-			out = append(out, map[string]any{"name": sec.Name, "scope": scope, "hosts": sec.Inject.Hosts, "mine": perPerson, "status": status})
+			out = append(out, substrateSecretView(e, status, reason, regs, regsKnown))
 		}
 		writeSubstrateJSON(w, http.StatusOK, map[string]any{"secrets": out})
 	}
+}
+
+// substrateSecretView is the list and test answer for one secret: never a
+// value. kind is template (the caller's own binding) or admin; last_used
+// is left out, as the gateway does not see the callout's use events.
+func substrateSecretView(e substrateSecretEntry, status, reason string, regs []registry.Registration, regsKnown bool) map[string]any {
+	sec := e.sec
+	scope := sec.Scope
+	if scope == "" {
+		scope = render.ScopeShared
+	}
+	v := map[string]any{"name": sec.Name, "scope": scope, "hosts": sec.Inject.Hosts, "mine": sec.Scope == render.ScopePerPerson,
+		"status": status, "kind": "admin"}
+	if reason != "" {
+		v["reason"] = reason
+	}
+	if b := e.binding; b != nil {
+		v["kind"], v["template"] = "template", b.Template
+		if !b.Expires.IsZero() {
+			v["expires"] = b.Expires.UTC()
+		}
+		if b.State == secretbind.Waiting && b.AskID != "" {
+			v["ask_id"] = b.AskID
+		}
+	}
+	if regsKnown {
+		v["agents"] = substrateSecretAgents(e, status, regs)
+	}
+	return v
 }
 
 // substrateWritableSecret finds the named secret the caller may write and
@@ -253,22 +286,51 @@ func substrateSecretErrorReason(err error, other string) string {
 
 func (a *APIServer) substrateTestSecret(st *substrateState) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		c, profile, secrets := a.substrateSecretLookup(st, r)
-		for _, sec := range secrets {
-			if sec.Name != r.PathValue("name") || !substrateSecretBound(sec, profile, c.admin) {
-				continue
-			}
-			ns, name, key, ok := substrateK8sSource(substrateSecretFor(sec, c.person.Subject))
-			if !ok || st.cfg.SecretStore == nil {
-				writeSubstrateJSON(w, http.StatusOK, map[string]any{"name": sec.Name, "status": substrateSecretManaged})
+		var in struct {
+			Agent string `json:"agent"`
+		}
+		if r.Body != nil {
+			if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10)).Decode(&in); err != nil && !errors.Is(err, io.EOF) {
+				writeSubstrateJSONError(w, http.StatusBadRequest, "secret_test_agent_invalid")
 				return
 			}
-			found, err := st.cfg.SecretStore.Exists(r.Context(), ns, name, key)
-			status := map[bool]string{true: substrateSecretSet, false: substrateSecretNotSet}[found]
-			if err != nil {
-				status = substrateSecretUnknown
+		}
+		c, _ := substrateCallerFrom(r.Context())
+		profile, _, _ := st.cfg.substrateProfiles()(c.person, "", "", false)
+		for _, e := range a.substrateSecretEntries(st, c, profile) {
+			if e.sec.Name != r.PathValue("name") {
+				continue
 			}
-			writeSubstrateJSON(w, http.StatusOK, map[string]any{"name": sec.Name, "status": status, "hosts": sec.Inject.Hosts})
+			var reg registry.Registration
+			if in.Agent != "" {
+				space, name, ok := strings.Cut(in.Agent, "/")
+				if !ok {
+					writeSubstrateJSONError(w, http.StatusBadRequest, "secret_test_agent_invalid")
+					return
+				}
+				got, status, reason := a.substrateFind(st, r, space, name)
+				if status != http.StatusOK {
+					writeSubstrateJSONError(w, status, reason)
+					return
+				}
+				reg = got
+			}
+			status, reason := a.substrateSecretState(r.Context(), st, e, c.person.Subject, a.substrateBindingAsks(r.Context(), st, c), time.Now())
+			out := substrateSecretView(e, status, reason, nil, false)
+			if in.Agent != "" {
+				// The actor's own person decides a personal secret's value.
+				astatus, areason := status, reason
+				if reg.Person.Subject != c.person.Subject {
+					astatus, areason = a.substrateSecretState(r.Context(), st, e, reg.Person.Subject, nil, time.Now())
+				}
+				inPolicy, why := a.substrateSecretInPolicy(r.Context(), st, e, astatus, areason, reg)
+				ag := map[string]any{"actor": reg.Atespace + "/" + reg.Name, "in_policy": inPolicy}
+				if why != "" {
+					ag["reason"] = why
+				}
+				out["agent"] = ag
+			}
+			writeSubstrateJSON(w, http.StatusOK, out)
 			return
 		}
 		writeSubstrateJSONError(w, http.StatusNotFound, "secret_not_found")

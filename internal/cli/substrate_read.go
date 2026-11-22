@@ -738,11 +738,23 @@ func newSubstrateSecretsListCmd() *cobra.Command {
 				fmt.Fprintln(w, "No secrets are available to you.")
 				return nil
 			}
+			now := time.Now()
 			rows := make([][]string, 0, len(list))
 			for _, sec := range list {
-				rows = append(rows, []string{sec.Name, substrateDash(sec.Scope), substrateDash(strings.Join(sec.Hosts, ",")), substrateDash(sec.Status)})
+				agents := "-"
+				if len(sec.Agents) > 0 {
+					agents = strings.Join(sec.Agents, ",")
+				}
+				rows = append(rows, []string{sec.Name, substrateDash(strings.Join(sec.Hosts, ",")), substrateSecretKind(sec),
+					substrateDash(sec.Status), substrateSince(sec.LastUsed, now), substrateUntil(sec.Expires, now), agents})
 			}
-			substrateTable(w, []string{"NAME", "SCOPE", "HOSTS", "STATUS"}, rows)
+			substrateTable(w, []string{"NAME", "HOST", "KIND", "STATUS", "LAST USED", "EXPIRES", "AGENTS"}, rows)
+			for _, sec := range list {
+				if days, soon := substrateExpiresSoon(sec, now); soon {
+					fmt.Fprintf(w, "warning: %s expires in %d days. Renew it: remove it with defenseclaw substrate secrets rm %s and add it again with --expires.\n",
+						sec.Name, days, sec.Name)
+				}
+			}
 			return nil
 		},
 	}
@@ -832,12 +844,13 @@ func newSubstrateSecretsRmCmd() *cobra.Command {
 
 func newSubstrateSecretsTestCmd() *cobra.Command {
 	var (
-		out substrateOutput
-		com substrateCommon
+		out   substrateOutput
+		com   substrateCommon
+		agent string
 	)
 	cmd := &cobra.Command{
 		Use:   "test <name>",
-		Short: "Check that a secret is bound and the cluster can use it",
+		Short: "Check that a secret is stored and usable, and whether an agent gets it",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			asJSON, err := out.wantJSON()
@@ -850,19 +863,28 @@ func newSubstrateSecretsTestCmd() *cobra.Command {
 			}
 			ctx, stop := substrateContext(cmd)
 			defer stop()
-			res, err := s.Client.TestSecret(ctx, args[0])
+			ref := ""
+			if agent != "" {
+				a, err := resolveSubstrateActor(ctx, s.Client, agent)
+				if err != nil {
+					return substrateFail(err)
+				}
+				ref = a.Atespace + "/" + a.Name
+			}
+			res, err := s.Client.TestSecret(ctx, args[0], ref)
 			if err != nil {
 				return substrateFail(err)
 			}
 			if asJSON {
 				return writeSubstrateJSON(cmd.OutOrStdout(), res)
 			}
-			printSubstrateMap(cmd.OutOrStdout(), res, "")
+			printSubstrateSecretTest(cmd.OutOrStdout(), res, time.Now())
 			return nil
 		},
 	}
 	out.add(cmd)
 	com.add(cmd)
+	cmd.Flags().StringVar(&agent, "agent", "", "also say whether this agent's policy carries the secret")
 	cmd.Flags().BoolVar(new(bool), "mine", true, "your own secret (the only kind this command acts on)")
 	return cmd
 }

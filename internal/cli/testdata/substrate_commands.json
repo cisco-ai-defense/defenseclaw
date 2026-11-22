@@ -1313,7 +1313,7 @@
   {
     "path": "substrate secrets test",
     "use": "test \u003cname\u003e",
-    "short": "Check that a secret is bound and the cluster can use it",
+    "short": "Check that a secret is stored and usable, and whether an agent gets it",
     "args": [
       {
         "name": "name",
@@ -1321,6 +1321,11 @@
       }
     ],
     "flags": [
+      {
+        "name": "agent",
+        "type": "string",
+        "usage": "also say whether this agent's policy carries the secret"
+      },
       {
         "name": "context",
         "type": "string",
