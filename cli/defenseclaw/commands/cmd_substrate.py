@@ -1125,13 +1125,30 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
     _Cmd(
         ("usage",),
         "Show what your agents used: model calls, tokens and cost",
-        long="Shows the model use of your agents, grouped the way the cluster reports it. You see only your own use.",
+        long=(
+            "Shows the model use of your agents and what it cost, rolled up by agent (the default),\n"
+            "model, batch, group, day, connector or provider. You see only your own use; an\n"
+            "administrator adds --all for everyone and --by person for one line per person.\n"
+            "Calls whose model is not in the price table show no cost and are not in the total."
+        ),
+        example=(
+            "  defenseclaw substrate usage\n"
+            "  defenseclaw substrate usage --by model --since 24h\n"
+            "  defenseclaw substrate usage --all --by person"
+        ),
         flags=(
             _Flag("all", "bool", "everyone's use (administrators only)"),
             _Flag("batch", "string", "only this batch", metavar="ID"),
+            _Flag(
+                "by",
+                "string",
+                "roll up by actor, model, batch, atespace, day, connector, provider or person (person needs --all)",
+                default="actor",
+            ),
             _Flag("context", "string", "cluster to use (default: the one you signed in to last)", metavar="NAME"),
             _Flag("json", "bool", "same as --output json"),
             _Flag("output", "string", "output format: text or json", short="o", default="text", metavar="FORMAT"),
+            _Flag("since", "string", "window, as <n>h or <n>d (at most 31d)", default="7d"),
         ),
     ),
     _Cmd(
