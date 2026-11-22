@@ -32,11 +32,22 @@ func ExactPostgreSQLCopyProgram(facts Facts) (string, bool) {
 	return digest, true
 }
 
-func projectPostgreSQLCopyPrograms(input Input) []PostgreSQLCopyProgramFact {
-	connection, database, query, ok := exactSQLQueryInput(input)
-	if !ok || !exactPostgreSQLConnection(connection, database) ||
-		!exactPostgreSQLCopyProgramQuery(query) {
-		return nil
+func projectPostgreSQLCopyPrograms(input Input, facts Facts) []PostgreSQLCopyProgramFact {
+	connection, database, query, structured := exactSQLQueryInput(input)
+	if structured {
+		if !exactPostgreSQLConnection(connection, database) || !exactPostgreSQLCopyProgramQuery(query) {
+			return nil
+		}
+	} else {
+		if input.Tool == "sql_query" || !facts.Authoritative() || len(facts.Commands) != 1 {
+			return nil
+		}
+		candidate, ok := exactSQLMutationCommand(facts.Commands[0])
+		if !ok || candidate.engine != "postgresql" || !exactPostgreSQLCopyProgramQuery(candidate.query) {
+			return nil
+		}
+		connection = candidate.connectionIdentity
+		database = candidate.databaseIdentity
 	}
 	digest := sqlConnectionIdentityDigest(
 		postgreSQLConnectionDigestDomain,

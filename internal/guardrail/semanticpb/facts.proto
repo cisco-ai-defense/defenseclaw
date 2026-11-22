@@ -33,6 +33,16 @@ message Facts {
   // internal/effectrules). It is filled only for the effect rules; the
   // ActionFacts rules never see it populated.
   repeated EffectFact effects = 11;
+  repeated SQLFact sql_facts = 13;
+}
+
+// SQLFact is a bounded syntax summary. Literal values and credentials are omitted.
+message SQLFact {
+  repeated string verbs = 1;
+  repeated string tables = 2;
+  repeated string functions = 3;
+  string database = 4;
+  int64 statement_count = 5;
 }
 
 // EffectFact is one effect of the call: what it reads, writes, deletes,

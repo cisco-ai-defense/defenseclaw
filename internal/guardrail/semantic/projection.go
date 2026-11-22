@@ -29,6 +29,7 @@ import (
 // It never truncates or repairs input; any failure returns no partial message.
 func Project(facts actionfacts.Facts) (*semanticpb.Facts, ProjectionCode) {
 	if len(facts.Commands) > maxCommands ||
+		len(facts.SQLFacts) > maxSQLFacts ||
 		len(facts.Paths) > maxPaths ||
 		len(facts.Network) > maxNetwork ||
 		len(facts.DataFlows) > maxDataFlows ||
@@ -60,12 +61,35 @@ func Project(facts actionfacts.Facts) (*semanticpb.Facts, ProjectionCode) {
 			Issues:  make([]semanticpb.IssueCode, len(facts.Parse.Issues)),
 		},
 		Commands:        make([]*semanticpb.CommandFact, 0, len(facts.Commands)),
+		SqlFacts:        make([]*semanticpb.SQLFact, 0, len(facts.SQLFacts)),
 		Paths:           make([]*semanticpb.PathFact, 0, len(facts.Paths)),
 		Network:         make([]*semanticpb.NetworkFact, 0, len(facts.Network)),
 		DataFlows:       make([]*semanticpb.DataFlowFact, 0, len(facts.DataFlows)),
 		Artifacts:       make([]*semanticpb.ArtifactFact, 0, len(facts.Artifacts)),
 		ArchiveLineages: make([]*semanticpb.ArchiveArtifactLineage, 0),
 	}
+	for _, fact := range facts.SQLFacts {
+		if fact.StatementCount < 0 || fact.StatementCount > 256 ||
+			len(fact.Verbs) > maxSQLFactValues || len(fact.Tables) > maxSQLFactValues || len(fact.Functions) > maxSQLFactValues {
+			return nil, ProjectionCountLimit
+		}
+		for _, value := range append(append(append([]string(nil), fact.Verbs...), fact.Tables...), fact.Functions...) {
+			if !validScalar(value) {
+				return nil, ProjectionScalarLimit
+			}
+		}
+		if !validScalar(fact.Database) {
+			return nil, ProjectionScalarLimit
+		}
+		projected.SqlFacts = append(projected.SqlFacts, &semanticpb.SQLFact{
+			Verbs: append([]string(nil), fact.Verbs...),
+			Tables: append([]string(nil), fact.Tables...),
+			Functions: append([]string(nil), fact.Functions...),
+			Database: fact.Database,
+			StatementCount: int64(fact.StatementCount),
+		})
+	}
+
 	for index, issue := range facts.Parse.Issues {
 		mapped, valid := projectIssue(issue)
 		if !valid {

@@ -37,10 +37,17 @@ func ExactSQLSensitiveServerFileRead(
 	return fact, true
 }
 
-func projectSQLSensitiveServerFileReads(input Input) []SQLSensitiveServerFileReadFact {
-	connection, database, query, ok := exactSQLQueryInput(input)
-	if !ok {
-		return nil
+func projectSQLSensitiveServerFileReads(input Input, facts Facts) []SQLSensitiveServerFileReadFact {
+	connection, database, query, structured := exactSQLQueryInput(input)
+	if !structured {
+		if input.Tool == "sql_query" || !facts.Authoritative() || len(facts.Commands) != 1 {
+			return nil
+		}
+		candidate, ok := exactSQLMutationCommand(facts.Commands[0])
+		if !ok || candidate.engine != "postgresql" {
+			return nil
+		}
+		connection, database, query = candidate.connectionIdentity, candidate.databaseIdentity, candidate.query
 	}
 	engine := ""
 	functions := []string(nil)
@@ -49,6 +56,9 @@ func projectSQLSensitiveServerFileReads(input Input) []SQLSensitiveServerFileRea
 		engine = "mysql"
 		functions = []string{"load_file"}
 	case exactPostgreSQLConnection(connection, database):
+		engine = "postgresql"
+		functions = []string{"pg_read_file", "pg_read_binary_file"}
+	case !structured && connection != "":
 		engine = "postgresql"
 		functions = []string{"pg_read_file", "pg_read_binary_file"}
 	default:

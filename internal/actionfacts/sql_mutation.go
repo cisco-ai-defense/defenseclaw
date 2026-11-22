@@ -66,7 +66,7 @@ func validSQLMutationFact(fact SQLMutationFact) bool {
 		return false
 	}
 	switch fact.Operation {
-	case SQLMutationDeleteUnbounded, SQLMutationTruncate, SQLMutationDropTable:
+	case SQLMutationDeleteUnbounded, SQLMutationUpdateUnbounded, SQLMutationTruncate, SQLMutationDropTable:
 		return fact.Scope == SQLMutationScopeTable
 	case SQLMutationDropSchema:
 		return fact.Scope == SQLMutationScopeSchema
@@ -85,71 +85,54 @@ func validSQLMutationDigest(value string) bool {
 	return err == nil
 }
 
-func projectSQLMutations(input Input, facts Facts) []SQLMutationFact {
-	inputs := exactSQLMutationInputs(input, facts)
-	mutations := make([]SQLMutationFact, 0, len(inputs))
-	for _, candidate := range inputs {
-		operation, scope, object, ok := exactSQLMutation(candidate.engine, candidate.query)
-		if candidate.engine == "sqlite" {
-			object, ok = exactSQLiteUnboundedDelete(candidate.query)
-			operation = SQLMutationDeleteUnbounded
-			scope = SQLMutationScopeTable
-		}
-		if !ok {
-			continue
-		}
-		connectionDigest := sqlMutationDigest(
-			sqlMutationConnectionDigestDomain,
-			candidate.engine,
-			candidate.connectionIdentity,
-		)
-		databaseIdentity := candidate.databaseIdentity
-		if operation == SQLMutationDropDatabase {
-			if candidate.engine == "generic" {
-				// A db.execute argument cannot authenticate the dropped database
-				// by itself. Keep the connector identity in the digest boundary.
-				databaseIdentity = candidate.connectionIdentity + "\x00" + object
-			} else {
-				databaseIdentity = object
-			}
-		}
-		if databaseIdentity == "" {
-			databaseIdentity = "implicit"
-		}
-		databaseDigest := sqlMutationDigest(
-			sqlMutationDatabaseDigestDomain,
-			candidate.engine,
-			databaseIdentity,
-		)
-		if candidate.engine == "sqlite" {
-			// MCP SQLite read_query and write_query calls name their database only
-			// through authenticated connector context. Reuse the rowset resource
-			// digest so a later bounded chain can prove the same database without
-			// retaining or trusting an argument-supplied identity.
-			databaseDigest = framedPrivateDigest(
-				sensitiveSQLRowsetIdentityDomain,
-				candidate.databaseIdentity,
-			)
-		}
-		fact := SQLMutationFact{
-			Engine:                   candidate.engine,
-			Operation:                operation,
-			Scope:                    scope,
-			QuerySource:              candidate.source,
-			ConnectionIdentityDigest: connectionDigest,
-			DatabaseIdentityDigest:   databaseDigest,
-			ObjectIdentityDigest: sqlMutationDigest(
-				sqlMutationObjectDigestDomain,
-				candidate.engine,
-				object,
-			),
-			Exact: true,
-		}
-		if validSQLMutationFact(fact) {
-			mutations = append(mutations, fact)
+func projectSQLMutationFact(
+	candidate exactSQLMutationInput,
+	operation SQLMutationOperation,
+	scope SQLMutationScope,
+	object string,
+) (SQLMutationFact, bool) {
+	connectionDigest := sqlMutationDigest(
+		sqlMutationConnectionDigestDomain,
+		candidate.engine,
+		candidate.connectionIdentity,
+	)
+	databaseIdentity := candidate.databaseIdentity
+	if operation == SQLMutationDropDatabase {
+		if candidate.engine == "generic" {
+			databaseIdentity = candidate.connectionIdentity + "\x00" + object
+		} else {
+			databaseIdentity = object
 		}
 	}
-	return mutations
+	if databaseIdentity == "" {
+		databaseIdentity = "implicit"
+	}
+	databaseDigest := sqlMutationDigest(
+		sqlMutationDatabaseDigestDomain,
+		candidate.engine,
+		databaseIdentity,
+	)
+	if candidate.engine == "sqlite" {
+		databaseDigest = framedPrivateDigest(
+			sensitiveSQLRowsetIdentityDomain,
+			candidate.databaseIdentity,
+		)
+	}
+	fact := SQLMutationFact{
+		Engine:                   candidate.engine,
+		Operation:                operation,
+		Scope:                    scope,
+		QuerySource:              candidate.source,
+		ConnectionIdentityDigest: connectionDigest,
+		DatabaseIdentityDigest:   databaseDigest,
+		ObjectIdentityDigest: sqlMutationDigest(
+			sqlMutationObjectDigestDomain,
+			candidate.engine,
+			object,
+		),
+		Exact: true,
+	}
+	return fact, validSQLMutationFact(fact)
 }
 
 func exactSQLMutationInputs(input Input, facts Facts) []exactSQLMutationInput {
