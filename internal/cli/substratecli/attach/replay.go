@@ -137,6 +137,32 @@ func (o *outageBuf) addTyped(b []byte, now time.Time) {
 	o.addLocked(&o.typed, b, now)
 }
 
+// spoil drops what is kept (the count stays): nothing is replayed.
+func (o *outageBuf) spoil() {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.spoilLocked()
+}
+
+// arrived drops the first n unsent bytes: the relay counts them as
+// received, so they reached the agent. When more arrived than is kept
+// unsent, what is kept no longer lines up with what is missing, and
+// nothing is replayed.
+func (o *outageBuf) arrived(n int64) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.count = max(o.count-n, 0)
+	if o.spoilt {
+		return
+	}
+	if n > int64(len(o.unsent)) {
+		o.spoilLocked()
+		return
+	}
+	zero(o.unsent[:n])
+	o.unsent = o.unsent[n:]
+}
+
 // held reports that what was kept so far may still be replayed.
 func (o *outageBuf) held() bool {
 	o.mu.Lock()

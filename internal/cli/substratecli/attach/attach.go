@@ -770,13 +770,7 @@ func (a *attacher) once(ctx context.Context) (relay.AttachResult, bool, error) {
 			if c.Type == relay.CtlHello {
 				connected.Store(true)
 				a.noteWarning(c.Warning)
-				if c.Received != nil && resume != "" {
-					// Sent before the cut but never written to the
-					// agent: lost on the way (a suspend).
-					if lost := prevSent - *c.Received; lost > 0 {
-						a.maybe.Add(lost)
-					}
-				}
+				a.resumeHello(resume, prevSent, c.Received)
 				a.endDrain()
 				if a.lost.Swap(false) {
 					a.replayAfterReconnect(in)
@@ -803,6 +797,31 @@ func (a *attacher) once(ctx context.Context) (relay.AttachResult, bool, error) {
 		a.prevInput, a.prevSent = ar.Input, ar.Sent
 	}
 	return ar, connected.Load(), err
+}
+
+// resumeHello squares what this launcher counted as sent on the input it
+// resumes with what the relay's hello says it received. Fewer: the rest
+// was lost on the way (a suspend) and may not have reached the agent.
+// More: a chunk reported unsent did arrive (the reply was lost, long-poll
+// through a proxy 502 or a gateway restart); those bytes lead the unsent
+// part and are dropped, never replayed (RV1 P2-2). No count at all on a
+// resumed input: the relay started a fresh session (the actor restarted),
+// so the keys typed for the old prompt are never replayed into it, only
+// counted (RV1 P3-1).
+func (a *attacher) resumeHello(resume string, prevSent int64, received *int64) {
+	if resume == "" {
+		return
+	}
+	if received == nil {
+		a.outage.spoil()
+		return
+	}
+	switch got := *received; {
+	case got < prevSent:
+		a.maybe.Add(prevSent - got)
+	case got > prevSent:
+		a.outage.arrived(got - prevSent)
+	}
 }
 
 // replayAfterReconnect opens the input of a connection the relay greeted
