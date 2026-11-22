@@ -390,7 +390,8 @@ type effectClass struct {
 	// resolver followed, counted, not raised (effectProtectedSets).
 	linkHeld bool
 	// linkTo: a touching link effect names a protected member as the link's
-	// target (an alias of the member); linkAt: one names a member as the
+	// target (an alias of the member) and a later command of the call uses
+	// that alias (effectLinkAliasUsed); linkAt: one names a member as the
 	// place a link is put. A call that puts a link at a member is judged by
 	// that placement (decide.RowEffectLink), whatever the link points to.
 	linkTo, linkAt bool
@@ -448,8 +449,8 @@ func classifyEffects(result effects.Result, facts []*semanticpb.EffectFact, flav
 		}
 		c.touches = true
 		if kind == string(effects.KindLink) {
-			if effectFactIsLinkTarget(result, f) {
-				c.linkTo = true
+			if i := int(f.GetIndex()) - 1; effectFactIsLinkTarget(result, f) {
+				c.linkTo = c.linkTo || effectLinkAliasUsed(result, i)
 			} else {
 				c.linkAt = true
 			}
@@ -646,6 +647,32 @@ func dedupeStrings(in []string) []string {
 func effectFactIsLinkTarget(result effects.Result, f *semanticpb.EffectFact) bool {
 	i := int(f.GetIndex()) - 1
 	return i >= 0 && i < len(result.Effects) && result.Effects[i].LinkTarget
+}
+
+// effectLinkAliasUsed reports that the link whose target end is effect i is
+// used later in the same call: a later effect reads, writes, copies or links
+// the link's own known path (ln -s ~/.ssh/authorized_keys s && cp -a s n;
+// ln ~/.ssh/authorized_keys n && echo k >> n). An alias that is only made
+// (a dotfiles script linking its own authorized_keys into its repo) moves
+// nothing through the member in this call. The link end is the next link
+// effect of the same command (effects emits target, then link).
+func effectLinkAliasUsed(result effects.Result, i int) bool {
+	if i < 0 || i+1 >= len(result.Effects) {
+		return false
+	}
+	at := result.Effects[i+1]
+	// The link end's path is placed even when its state is not known (the
+	// destination may be a folder): a later effect on that exact path uses
+	// the alias either way.
+	if at.Kind != effects.KindLink || at.LinkTarget || at.Origin.Command != result.Effects[i].Origin.Command || at.Target.Path == "" {
+		return false
+	}
+	for _, e := range result.Effects[i+2:] {
+		if e.Target.Path == at.Target.Path && e.Origin.Command != at.Origin.Command {
+			return true
+		}
+	}
+	return false
 }
 
 func effectProtectedSets(t *semanticpb.EffectTarget, kind string) (known, maybe []string, linkHeld bool) {
