@@ -320,6 +320,11 @@ func (st *substrateState) actorView(reg registry.Registration) map[string]any {
 	if pc := substratePolicyConflictView(reg); pc != nil {
 		v["policy_conflict"] = pc
 	}
+	if st.budget != nil && !reg.Deleted {
+		if cell := st.budget(reg); cell != "" {
+			v["budget"] = cell
+		}
+	}
 	return v
 }
 

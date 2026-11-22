@@ -489,6 +489,35 @@ func (p *Policy) applyBudgets(req Request, ledger *Ledger, now time.Time, v *Ver
 	}
 }
 
+// ActorBudgetKey is the ledger key of the actor or batch budget id for the
+// actor a whose person key is callerKey, and "" when a has none (a host
+// call, an actor without a batch, any other scope). A batch is one limit per
+// batch of one person in one atespace, so two people who pick the same batch
+// id never share a counter. chargeKey and the BUDGET column of substrate
+// list read the same key through this one function.
+func ActorBudgetKey(scope, id string, a *engine.Actor, callerKey string) string {
+	if a == nil {
+		return ""
+	}
+	switch scope {
+	case config.RoutingBudgetScopeActor:
+		if a.Key == "" {
+			return ""
+		}
+		return "actor:" + id + ":" + shortHash(a.Key)
+	case config.RoutingBudgetScopeBatch:
+		if a.BatchID == "" {
+			return ""
+		}
+		who := "-"
+		if a.Person && callerKey != "" {
+			who = callerKey
+		}
+		return "batch:" + id + ":" + shortHash(a.Atespace+"/"+who) + ":" + shortHash(a.BatchID)
+	}
+	return ""
+}
+
 // chargeKey returns the budget's key for req and whether the subject names
 // the caller. A * user budget for an unverified caller has no key (Maybe).
 func chargeKey(b *compiledBudget, req Request) (string, MatchState, string) {
@@ -498,22 +527,12 @@ func chargeKey(b *compiledBudget, req Request) (string, MatchState, string) {
 			return "", No, ""
 		}
 		return "connector:" + b.ID + ":" + req.Connector, Yes, ""
-	case config.RoutingBudgetScopeActor:
-		if req.Actor == nil || req.Actor.Key == "" {
+	case config.RoutingBudgetScopeActor, config.RoutingBudgetScopeBatch:
+		key := ActorBudgetKey(b.Scope, b.ID, req.Actor, req.Caller.Key)
+		if key == "" {
 			return "", No, ""
 		}
-		return "actor:" + b.ID + ":" + shortHash(req.Actor.Key), Yes, ""
-	case config.RoutingBudgetScopeBatch:
-		// One limit per batch of one person in one atespace, so two people
-		// who pick the same batch id never share a counter.
-		if req.Actor == nil || req.Actor.BatchID == "" {
-			return "", No, ""
-		}
-		who := "-"
-		if req.Actor.Person && req.Caller.Key != "" {
-			who = req.Caller.Key
-		}
-		return "batch:" + b.ID + ":" + shortHash(req.Actor.Atespace+"/"+who) + ":" + shortHash(req.Actor.BatchID), Yes, ""
+		return key, Yes, ""
 	case config.RoutingBudgetScopeUser:
 		if req.Actor != nil && !req.Actor.Person {
 			return "", No, ""

@@ -49,8 +49,11 @@ type Actor struct {
 	// DefenseClaw, which Foreign marks too; GAP-0419).
 	Attribution string `json:"attribution,omitempty"`
 	Foreign     bool   `json:"foreign,omitempty"`
-	Deleted     bool   `json:"deleted,omitempty"`
-	State       string `json:"state,omitempty"`
+	// Budget is the highest used share of the budgets that count this agent
+	// ("80 %", or "over"); empty when none does.
+	Budget  string `json:"budget,omitempty"`
+	Deleted bool   `json:"deleted,omitempty"`
+	State   string `json:"state,omitempty"`
 	// SessionToken is present on create for an attended run.
 	SessionToken   string    `json:"session_token,omitempty"`
 	SessionExpires time.Time `json:"session_expires,omitempty"`

@@ -12,8 +12,10 @@ import (
 	"sort"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/budgetstore"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/modelusage"
+	"github.com/defenseclaw/defenseclaw/internal/routing/engine"
 	"github.com/defenseclaw/defenseclaw/internal/routingadmin"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/registry"
 )
@@ -229,4 +231,55 @@ func substratePushUsage(ctx context.Context, l SubstrateSpendLeader, sink *model
 			push(ctx)
 		}
 	}
+}
+
+// substrateActorBudget is the BUDGET cell of one agent in substrate list and
+// status: the highest used share among the budgets that count its calls (its
+// own actor budget, its batch budget and the per-person * budget of its
+// owner), as "NN %", or "over" once one is used up. "" when no budget counts
+// it or no spend is known yet. A pooled total is never shown: the fleet store
+// answers a pooled budget with over the limit only.
+func substrateActorBudget(cfg *config.Config, reg registry.Registration, now time.Time) string {
+	if cfg == nil || cfg.Routing.Admin == nil || reg.Key == "" {
+		return ""
+	}
+	ledger := routingAdminRuntime.Ledger()
+	if ledger == nil {
+		return ""
+	}
+	personKey := ""
+	actor := &engine.Actor{Key: reg.Key, Atespace: reg.Atespace, BatchID: reg.BatchID}
+	if !reg.Attributed {
+		personKey = reg.Person.Key()
+		actor.Person = personKey != ""
+	}
+	best, seen := 0.0, false
+	for _, b := range cfg.Routing.Admin.Budgets {
+		var key string
+		switch b.Scope {
+		case config.RoutingBudgetScopeActor, config.RoutingBudgetScopeBatch:
+			key = routingadmin.ActorBudgetKey(b.Scope, b.ID, actor, personKey)
+		case config.RoutingBudgetScopeUser:
+			if b.Subject == config.RoutingBudgetSubjectAll && personKey != "" {
+				key = "user:" + b.ID + ":*:" + personKey
+			}
+		}
+		if key == "" || b.LimitUSD <= 0 {
+			continue
+		}
+		spend, known := ledger.Spend(key, b.Period, now)
+		if !known {
+			continue
+		}
+		if spend >= b.LimitUSD || spend >= budgetstore.ExceededUSD/2 {
+			return "over"
+		}
+		if p := 100 * spend / b.LimitUSD; !seen || p > best {
+			best, seen = p, true
+		}
+	}
+	if !seen {
+		return ""
+	}
+	return fmt.Sprintf("%.0f %%", best)
 }

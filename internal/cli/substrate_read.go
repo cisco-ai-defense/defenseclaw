@@ -221,20 +221,7 @@ them and how long ago they started. Administrators see only their own agents unl
 				fmt.Fprintln(cmd.OutOrStdout(), "You have no agents running. Start one with: defenseclaw substrate run claude")
 				return nil
 			}
-			now := time.Now()
-			rows := make([][]string, 0, len(live))
-			for _, a := range live {
-				row := []string{a.Atespace + "/" + a.Name, substrateDash(a.Connector), substrateDash(a.Profile), substrateActorState(a), substrateAge(a.CreatedAt, now), substrateDash(a.BatchID)}
-				if all {
-					row = append(row, substrateListOwner(a))
-				}
-				rows = append(rows, row)
-			}
-			header := []string{"NAME", "AGENT", "PROFILE", "STATE", "AGE", "BATCH"}
-			if all {
-				header = append(header, "OWNER")
-			}
-			substrateTable(cmd.OutOrStdout(), header, rows)
+			printSubstrateActors(cmd.OutOrStdout(), live, all, time.Now())
 			return nil
 		},
 	}
@@ -243,6 +230,23 @@ them and how long ago they started. Administrators see only their own agents unl
 	cmd.Flags().StringVar(&batch, "batch", "", "only the agents of this batch")
 	cmd.Flags().BoolVar(&all, "all", false, "every person's agents (administrators only)")
 	return cmd
+}
+
+// printSubstrateActors is the table of substrate list.
+func printSubstrateActors(w io.Writer, live []api.Actor, all bool, now time.Time) {
+	rows := make([][]string, 0, len(live))
+	for _, a := range live {
+		row := []string{a.Atespace + "/" + a.Name, substrateDash(a.Connector), substrateDash(a.Profile), substrateActorState(a), substrateAge(a.CreatedAt, now), substrateDash(a.BatchID), substrateDash(safetext.Line(a.Budget))}
+		if all {
+			row = append(row, substrateListOwner(a))
+		}
+		rows = append(rows, row)
+	}
+	header := []string{"NAME", "AGENT", "PROFILE", "STATE", "AGE", "BATCH", "BUDGET"}
+	if all {
+		header = append(header, "OWNER")
+	}
+	substrateTable(w, header, rows)
 }
 
 // substrateListOwner is list --all's OWNER column: the person, or that the
@@ -326,6 +330,9 @@ Exit 75 means the cluster could not be reached; there is no document.`,
 				}
 				if a.BatchID != "" {
 					fmt.Fprintf(w, "Batch:     %s\n", a.BatchID)
+				}
+				if a.Budget != "" {
+					fmt.Fprintf(w, "Budget:    %s\n", safetext.Line(a.Budget))
 				}
 				if a.Unattended {
 					fmt.Fprintf(w, "Mode:      %s\n", substrateUnattendedMode(a))

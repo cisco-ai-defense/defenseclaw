@@ -270,6 +270,9 @@ type substrateState struct {
 	// logOut is the gateway log (stderr); now is the clock. Tests set both.
 	logOut io.Writer
 	now    func() time.Time
+	// budget is the BUDGET cell of an agent (substrateActorBudget); nil
+	// when the server has no live config.
+	budget func(reg registry.Registration) string
 
 	// receiptKey signs skill scan receipts (substrate_skills.go);
 	// receiptShared says every replica has it.
@@ -336,6 +339,13 @@ func (a *APIServer) SetSubstrate(cfg SubstrateConfig) error {
 		if _, err := cryptorand.Read(st.receiptKey); err != nil {
 			return fmt.Errorf("substrate: skill receipt key: %w", err)
 		}
+	}
+	st.budget = func(reg registry.Registration) string {
+		now := time.Now()
+		if st.now != nil {
+			now = st.now()
+		}
+		return substrateActorBudget(a.liveConfig(), reg, now)
 	}
 	st.audit = func(ctx context.Context, severity, summary string, details map[string]any) {
 		if a.logger != nil {
