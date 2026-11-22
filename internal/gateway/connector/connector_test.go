@@ -10622,10 +10622,11 @@ func TestManagedEnterpriseHookFailsClosedWhenTokenIsMissing(t *testing.T) {
 	)
 	cmd.Stdin = strings.NewReader(`{"hook_event_name":"PreToolUse"}`)
 	cmd.Env = append(os.Environ(), "DEFENSECLAW_STRICT_AVAILABILITY=0")
-	err = cmd.Run()
-	exitErr, ok := err.(*exec.ExitError)
-	if !ok || exitErr.ExitCode() != 2 {
-		t.Fatalf("managed missing-token hook error = %v, want exit 2", err)
+	out, err := cmd.Output()
+	// Codex reads a non-zero status as a hook failure: the block is its deny
+	// object with exit 0 (GAP-1755).
+	if err != nil || !codexBlockAnswer("PreToolUse", 0, string(out)) {
+		t.Fatalf("managed missing-token hook error = %v, stdout %q, want exit 0 and the PreToolUse deny", err, out)
 	}
 }
 

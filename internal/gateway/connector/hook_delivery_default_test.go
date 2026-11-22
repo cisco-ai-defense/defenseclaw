@@ -294,7 +294,9 @@ func TestManagedHookDeliveryOutsideSecureClientFailsClosed(t *testing.T) {
 				cmd.Stdin = strings.NewReader(`{"hook_event_name":"` + stdinEvent + `","tool_name":"Bash","tool_input":{"command":"ls"}}`)
 				cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + home, "DEFENSECLAW_FAIL_MODE=open"}
 				out, err := cmd.CombinedOutput()
-				blocked := err != nil || strings.Contains(string(out), `"decision":"block"`)
+				// Codex reads a non-zero status as a hook failure: the managed
+				// hook blocks with its deny object and exit 0 (GAP-1755).
+				blocked := err != nil || strings.Contains(string(out), `"decision":"block"`) || strings.Contains(string(out), `"permissionDecision":"deny"`)
 				// The baked mode is the administrator's (owner decision
 				// 2026-10-20): open lets an outage through, nothing else.
 				wantBlocked := scenario != "outage" || wantBaked == "closed"
