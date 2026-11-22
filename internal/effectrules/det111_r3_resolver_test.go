@@ -221,6 +221,7 @@ func TestDET111R3Protected(t *testing.T) {
 		{`cat ~/.ss*/id_rsa`, "credential", "maybe", "R-GLOB"},
 		{`cat /srv/homes/bob/.aws/credentials`, "other_home_credential", "maybe", "R-NAME"},
 		{`cd $X; echo x > authorized_keys`, "authorized_keys", "maybe", "R-CWD"},
+		{`echo k > u*/../keydir/authorized_keys`, "authorized_keys", "maybe", "R-FS"}, // GAP-0443
 	}
 	for _, c := range cases {
 		res := effects.Extract(effects.Call{Surface: effects.SurfaceShell, Command: c.cmd}, px)

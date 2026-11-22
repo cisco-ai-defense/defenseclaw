@@ -2524,7 +2524,7 @@ func (w *walker) classifyOperands(words []Word, p Program, dialect Dialect) ([]o
 	if del {
 		for _, wd := range positionals {
 			if wd.Static && (wd.Value == "!" || wd.Value == "(" || wd.Value == ")" || wd.Value == ",") {
-				findOpaque = true
+				findOpaque = true // a negated or grouped expression: not one pattern
 			}
 		}
 	}

@@ -295,6 +295,11 @@ func matchBasis(t effects.Target, grade setGrade, set protectedSet, flavor effec
 		}
 	}
 	switch {
+	case t.Glob != "" && dotDotAfterWildcard(t.Glob):
+		// u*/../x: the .. climbs from whatever the wildcard matched, which
+		// may be a link; where it lands is a file-system answer, not a
+		// pattern one (rel-1-0-10:GAP-0443).
+		return "unresolved"
 	case t.Glob != "":
 		return "glob"
 	case t.Path == "" && t.Lexical != "" && lexicalReachesSet(t.Lexical, set, flavor):
@@ -314,6 +319,21 @@ func matchBasis(t effects.Target, grade setGrade, set protectedSet, flavor effec
 	default:
 		return "unresolved"
 	}
+}
+
+// dotDotAfterWildcard reports a .. component after a component with a
+// pattern character.
+func dotDotAfterWildcard(glob string) bool {
+	wild := false
+	for _, seg := range strings.FieldsFunc(glob, func(r rune) bool { return r == '/' || r == '\\' }) {
+		if seg == ".." && wild {
+			return true
+		}
+		if strings.ContainsAny(seg, "*?[") {
+			wild = true
+		}
+	}
+	return false
 }
 
 // callLinkReaches reports that a target's in-call link landing (Physical, set
