@@ -934,6 +934,7 @@ A few rules the flags follow:
 | `--rm` | switch |  | Delete the sandbox when the session ends. |
 | `--safe` | switch |  | Keep the harness's own permission prompts (skip-permissions off). |
 | `--unmask` | text, repeatable |  | Share a masked secret file or glob with the sandbox (repeatable). |
+| `--vault` | text, repeatable |  | NAME: give the sandbox a placeholder for `$NAME` from your vault; it works only against the host the vault binds it to (repeatable; see sandbox vault). |
 | `-y`, `--yes` | switch |  | Take the defaults at the end of the session (mount: keep the changes; copy: leave them in the sandbox for later pull --apply, --branch or --patch-out FILE). |
 {/* AUTOGEN-END: sandbox-flags */}
 
@@ -1955,6 +1956,142 @@ defenseclaw sandbox pack validate ~/.defenseclaw/policies/sandbox/team-web/pack.
 
 {/* AUTOGEN-BEGIN: sandbox-flags pack validate */}
 This command has no flags.
+{/* AUTOGEN-END: sandbox-flags */}
+
+## Secrets
+
+### `sandbox vault`
+
+The vault keeps your secrets for your sandboxes. Each secret is bound to the
+one host it may be sent to. Start a sandbox with `--vault NAME` and the agent
+sees only a placeholder in `$NAME`; OpenShell puts the real value in on the way
+out, to that host only. See [Credential vault](/docs/sandboxes/vault).
+
+```bash
+defenseclaw sandbox vault list
+```
+
+{/* AUTOGEN-BEGIN: sandbox-flags vault */}
+| Subcommand | Purpose |
+| --- | --- |
+| [`sandbox vault add`](#sandbox-vault-add) | Add a secret bound to one host (asks for the value with echo off). |
+| [`sandbox vault bind`](#sandbox-vault-bind) | Set the one host a secret may be sent to. |
+| [`sandbox vault list`](#sandbox-vault-list) | List your secrets (names, hosts and status; never values). |
+| [`sandbox vault remove`](#sandbox-vault-remove) | Remove a secret from the vault. |
+| [`sandbox vault rename`](#sandbox-vault-rename) | Rename a secret (the variable the sandbox sees). |
+| [`sandbox vault replace`](#sandbox-vault-replace) | Replace a secret's value (after you rotate it). |
+| [`sandbox vault show`](#sandbox-vault-show) | Show one secret's host, status, source and use (never its value). |
+{/* AUTOGEN-END: sandbox-flags */}
+
+### `sandbox vault list`
+
+Lists your secrets with their host, status, source and last use. Values are
+never printed. `needs a host` means no sandbox can use the secret until you
+bind one; `exposed: rotate` means an agent's model may have seen the value
+before DefenseClaw captured it.
+
+```bash
+defenseclaw sandbox vault list
+defenseclaw sandbox vault list --json
+```
+
+{/* AUTOGEN-BEGIN: sandbox-flags vault list */}
+| Flag | Takes | Default | Description |
+| --- | --- | --- | --- |
+| `--json` | switch |  | Same as --output json. |
+| `-o`, `--output` | text | `text` | Output format: text or json. |
+{/* AUTOGEN-END: sandbox-flags */}
+
+### `sandbox vault show`
+
+Shows one secret's host, status, where it came from and when a sandbox last
+used it, never its value.
+
+```bash
+defenseclaw sandbox vault show STRIPE_API_KEY
+```
+
+{/* AUTOGEN-BEGIN: sandbox-flags vault show */}
+| Flag | Takes | Default | Description |
+| --- | --- | --- | --- |
+| `--json` | switch |  | Same as --output json. |
+| `-o`, `--output` | text | `text` | Output format: text or json. |
+{/* AUTOGEN-END: sandbox-flags */}
+
+### `sandbox vault add`
+
+Adds a secret. `NAME` is the environment variable the sandbox sees; `--host`
+is the only host the value is ever sent to. The value is typed with echo off,
+or piped with `--value-stdin`; it never goes on the command line.
+
+```bash
+defenseclaw sandbox vault add STRIPE_API_KEY --host api.stripe.com
+printf '%s\n' "$VALUE" | defenseclaw sandbox vault add PAYMENTS_KEY --host api.example.com:8443 --value-stdin
+```
+
+{/* AUTOGEN-BEGIN: sandbox-flags vault add */}
+| Flag | Takes | Default | Description |
+| --- | --- | --- | --- |
+| `--host` | text |  | The only host the secret may be sent to (host or host:port). |
+| `--value-stdin` | switch |  | Read the value from standard input (one line). |
+{/* AUTOGEN-END: sandbox-flags */}
+
+### `sandbox vault replace`
+
+Replaces a secret's value, for example after you rotate it with its issuer.
+A replaced secret is no longer marked exposed. Sandboxes started afterwards use
+the new value.
+
+```bash
+defenseclaw sandbox vault replace GITHUB_TOKEN
+```
+
+{/* AUTOGEN-BEGIN: sandbox-flags vault replace */}
+| Flag | Takes | Default | Description |
+| --- | --- | --- | --- |
+| `--value-stdin` | switch |  | Read the value from standard input (one line). |
+{/* AUTOGEN-END: sandbox-flags */}
+
+### `sandbox vault bind`
+
+Sets the one host a secret may be sent to. A captured secret of a kind with no
+single API (a Google API key) needs this before a sandbox can use it.
+
+```bash
+defenseclaw sandbox vault bind GOOGLE_API_KEY --host generativelanguage.googleapis.com
+```
+
+{/* AUTOGEN-BEGIN: sandbox-flags vault bind */}
+| Flag | Takes | Default | Description |
+| --- | --- | --- | --- |
+| `--host` | text |  | The only host the secret may be sent to (host or host:port). |
+{/* AUTOGEN-END: sandbox-flags */}
+
+### `sandbox vault rename`
+
+Renames a secret, which changes the variable the sandbox sees.
+
+```bash
+defenseclaw sandbox vault rename GITHUB_TOKEN_2 GITHUB_BOT_TOKEN
+```
+
+{/* AUTOGEN-BEGIN: sandbox-flags vault rename */}
+This command has no flags.
+{/* AUTOGEN-END: sandbox-flags */}
+
+### `sandbox vault remove`
+
+Removes a secret. Running sandboxes keep the value until they stop; revoke it
+with its issuer if it may have leaked.
+
+```bash
+defenseclaw sandbox vault remove STRIPE_API_KEY --yes
+```
+
+{/* AUTOGEN-BEGIN: sandbox-flags vault remove */}
+| Flag | Takes | Default | Description |
+| --- | --- | --- | --- |
+| `-y`, `--yes` | switch |  | Do not ask. |
 {/* AUTOGEN-END: sandbox-flags */}
 
 ## Requirements and platform facts

@@ -136,6 +136,9 @@ type App struct {
 	// returns sandboxapi.ErrNotManagedHost on any other computer.
 	HostClient func(goos string) (API, error)
 	IO         IO
+	// ReadSecret reads a secret without echoing it (vault add and
+	// replace); nil reads the terminal with echo off.
+	ReadSecret func(prompt string) (string, error)
 
 	Terminal Terminal
 	Streamer Streamer
