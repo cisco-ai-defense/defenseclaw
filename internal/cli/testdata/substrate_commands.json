@@ -6,6 +6,62 @@
     "long": "Run Claude Code, Codex and other coding agents in a Kubernetes cluster that runs\nAgent Substrate, with DefenseClaw guarding every tool call, model call and network\nrequest the same way it does on a laptop. The agent works on a copy of your folder\ninside a sandbox in the cluster; no keys are in it. It keeps running when you\ndetach, and you can come back from any machine.\n\nSign in once with \"defenseclaw substrate login\", then run \"defenseclaw substrate run claude\"\nin a project folder. These commands need no local DefenseClaw install."
   },
   {
+    "path": "substrate admin",
+    "use": "admin",
+    "short": "Administer people's access to the cluster (administrators)"
+  },
+  {
+    "path": "substrate admin revoke",
+    "use": "revoke",
+    "short": "End every sign-in of a person, list the ended ones, or lift an end",
+    "long": "--user PERSON ends every sign-in of that person made before now, on every device, and closes their open\nterminals (PERSON is a principal such as bob@example.com, or issuer#subject to end the sign-ins of a person who\nhas not signed in yet). --list shows the people whose sign-ins are ended. --lift --user PERSON removes an end\nearly; it is audited.",
+    "flags": [
+      {
+        "name": "context",
+        "type": "string",
+        "usage": "cluster to use (default: the one you signed in to last)",
+        "metavar": "NAME"
+      },
+      {
+        "name": "json",
+        "type": "bool",
+        "default": "false",
+        "usage": "same as --output json"
+      },
+      {
+        "name": "lift",
+        "type": "bool",
+        "default": "false",
+        "usage": "remove the end of --user's sign-ins early"
+      },
+      {
+        "name": "list",
+        "type": "bool",
+        "default": "false",
+        "usage": "list the people whose sign-ins are ended"
+      },
+      {
+        "name": "output",
+        "shorthand": "o",
+        "type": "string",
+        "default": "text",
+        "usage": "output format: text or json",
+        "metavar": "FORMAT"
+      },
+      {
+        "name": "reason",
+        "type": "string",
+        "usage": "why (one line, up to 256 characters; kept with the end and audited)",
+        "metavar": "TEXT"
+      },
+      {
+        "name": "user",
+        "type": "string",
+        "usage": "the person: a principal (bob@example.com) or issuer#subject"
+      }
+    ]
+  },
+  {
     "path": "substrate approvals",
     "use": "approvals",
     "short": "List what your agents are waiting for you to approve",
@@ -552,9 +608,15 @@
   {
     "path": "substrate logout",
     "use": "logout",
-    "short": "Sign out of a cluster and forget the stored sign-in",
-    "long": "Removes your stored sign-in for the cluster and, where the sign-in server supports it, ends it there too. Your agents keep running; sign in again to reach them.",
+    "short": "Sign out of a cluster: end the sign-in there and forget it",
+    "long": "Ends your sign-in on the cluster, so a copy of its token stops working there, then ends it at the sign-in server\nwhere that server supports it, and removes the stored sign-in. --all ends every sign-in you made before now, on every\ndevice, and closes their open terminals. Your agents keep running; sign in again to reach them.",
     "flags": [
+      {
+        "name": "all",
+        "type": "bool",
+        "default": "false",
+        "usage": "end every sign-in of yours made before now, on every device"
+      },
       {
         "name": "context",
         "type": "string",

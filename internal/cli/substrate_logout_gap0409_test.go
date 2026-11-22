@@ -11,12 +11,13 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/auth"
 )
 
-// GAP-0409: the gateway verifies sign-in tokens statelessly, so logout says
-// how long a copied token still works instead of implying it ended it.
+// GAP-0409: a gateway that can't end sign-ins (before 1.0.11, or with
+// ending sign-ins off) answers 404, and logout says how long a copied
+// token still works instead of implying it ended it.
 func TestSubstrateLogoutNoteGAP0409(t *testing.T) {
 	now := time.Date(2026, 11, 17, 16, 0, 0, 0, time.UTC)
 	note := substrateLogoutNote(&auth.Token{AccessToken: "acc-marker", IDToken: "id-marker", Expiry: now.Add(282 * time.Second)}, now)
-	for _, want := range []string{"until it expires at 16:04 UTC", "about 5 min", "does not revoke"} {
+	for _, want := range []string{"works until 16:04 UTC", "about 5 min", "can't end sign-ins"} {
 		if !strings.Contains(note, want) {
 			t.Errorf("note %q has no %q", note, want)
 		}

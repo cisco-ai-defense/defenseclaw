@@ -131,6 +131,7 @@ func (a *APIServer) substrateSigninRevoke(st *substrateState) http.HandlerFunc {
 		}
 		c, _ := substrateCallerFrom(r.Context())
 		e := revocation.Entry{Person: c.person.ID(), By: ownerOf(c.person).ID()}
+		principal := c.person.Principal
 		switch in.Scope {
 		case "", "this":
 			if c.person.TokenKey == "" {
@@ -152,7 +153,11 @@ func (a *APIServer) substrateSigninRevoke(st *substrateState) http.HandlerFunc {
 		}
 		a.substrateAuditRevocation(st, r, c, "substrate.signin.revoked", "INFO",
 			fmt.Sprintf("person ended their own sign-in (scope %v)", substrateRevocationView(out, 0)["scope"]), out)
-		writeSubstrateJSON(w, http.StatusOK, substrateRevocationView(out, closed))
+		v := substrateRevocationView(out, closed)
+		if principal != "" {
+			v["principal"] = principal
+		}
+		writeSubstrateJSON(w, http.StatusOK, v)
 	}
 }
 
