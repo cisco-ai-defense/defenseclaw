@@ -665,12 +665,18 @@ func effectLinkAliasUsed(result effects.Result, i int) bool {
 	at := result.Effects[i+1]
 	// The link end's path is placed even when its state is not known (the
 	// destination may be a folder): a later effect on that exact path uses
-	// the alias either way.
-	if at.Kind != effects.KindLink || at.LinkTarget || at.Origin.Command != result.Effects[i].Origin.Command || at.Target.Path == "" {
+	// the alias either way. With no working folder the end is not placed;
+	// a later effect on the same relative spelling then uses it.
+	if at.Kind != effects.KindLink || at.LinkTarget || at.Origin.Command != result.Effects[i].Origin.Command ||
+		(at.Target.Path == "" && at.Target.Spelling == "") {
 		return false
 	}
 	for _, e := range result.Effects[i+2:] {
-		if e.Target.Path == at.Target.Path && e.Origin.Command != at.Origin.Command {
+		if e.Origin.Command == at.Origin.Command {
+			continue
+		}
+		if at.Target.Path != "" && e.Target.Path == at.Target.Path ||
+			at.Target.Path == "" && e.Target.Path == "" && e.Target.Spelling == at.Target.Spelling {
 			return true
 		}
 	}
