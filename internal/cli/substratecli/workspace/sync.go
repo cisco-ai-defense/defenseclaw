@@ -24,6 +24,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -92,16 +93,17 @@ func Sync(ctx context.Context, opts SyncOptions) error {
 	if err != nil {
 		return err
 	}
+	ign := newIgnoreCache(ctx, rec.Project, rec.Kind == osw.CopyGit)
 	events := opts.Events
 	if events == nil {
-		w, err := newTreeWatcher(rec.Project)
+		w, err := newTreeWatcher(rec.Project, ign)
 		if err != nil {
 			return fmt.Errorf("watch %s: %w", rec.Project, err)
 		}
 		defer w.close()
 		events = w.events
 	}
-	s := &syncer{opts: opts, out: out, rec: rec, named: map[string]bool{}}
+	s := &syncer{opts: opts, out: out, rec: rec, named: map[string]bool{}, ign: ign}
 	if err := s.checkpoint(ctx); err != nil {
 		return err
 	}
@@ -190,6 +192,7 @@ type syncer struct {
 	sentSinceCP bool
 	sent        []sentBytes
 	waitShown   bool
+	ign         *ignoreCache
 }
 
 type sentBytes struct {
@@ -215,7 +218,65 @@ func (s *syncer) note(p string) bool {
 		s.once("skip:"+why, "Not synced: "+why+".")
 		return true
 	}
-	return false
+	// What git ignores never goes (a build writing target/): no batch.
+	return s.ign.ignored(filepath.ToSlash(rel))
+}
+
+// ignoreCache answers whether git ignores a project path: the folders git
+// ignores come from one call at the start, other paths from check-ignore,
+// remembered (RV1 P3-4). A plain folder ignores nothing.
+type ignoreCache struct {
+	ctx  context.Context
+	root string
+	git  bool
+	dirs map[string]bool
+	seen map[string]bool
+}
+
+// ignoreCacheMax bounds the remembered answers (then they start again).
+const ignoreCacheMax = 20000
+
+func newIgnoreCache(ctx context.Context, root string, git bool) *ignoreCache {
+	c := &ignoreCache{ctx: ctx, root: root, git: git, dirs: map[string]bool{}, seen: map[string]bool{}}
+	if !git {
+		return c
+	}
+	out, err := hostGit(ctx, root, nil, nil, "ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--directory")
+	if err != nil {
+		return c
+	}
+	for _, e := range strings.Split(string(out), "\x00") {
+		if strings.HasSuffix(e, "/") {
+			c.dirs[strings.TrimSuffix(e, "/")] = true
+		}
+	}
+	return c
+}
+
+func (c *ignoreCache) ignored(rel string) bool {
+	if c == nil || !c.git || rel == "" || rel == "." {
+		return false
+	}
+	for d := rel; ; {
+		if c.dirs[d] {
+			return true
+		}
+		i := strings.LastIndexByte(d, '/')
+		if i < 0 {
+			break
+		}
+		d = d[:i]
+	}
+	if v, ok := c.seen[rel]; ok {
+		return v
+	}
+	_, err := hostGit(c.ctx, c.root, nil, nil, "check-ignore", "-q", "--", rel)
+	v := err == nil
+	if len(c.seen) >= ignoreCacheMax {
+		c.seen = map[string]bool{}
+	}
+	c.seen[rel] = v
+	return v
 }
 
 func (s *syncer) label() string {
@@ -328,18 +389,25 @@ func (s *syncer) batch(ctx context.Context) (bool, error) {
 // out .git and package caches.
 type treeWatcher struct {
 	w      *fsnotify.Watcher
+	ign    *ignoreCache
+	files  int
 	root   string
 	events chan string
 	done   chan struct{}
 	exited chan struct{}
 }
 
-func newTreeWatcher(root string) (*treeWatcher, error) {
+// maxKqueueEntries bounds what sync watches on macOS, where the watcher
+// (kqueue) holds one open file for every file and folder it watches: past
+// it, sync stops with advice instead of "too many open files" (RV1 P3-4).
+const maxKqueueEntries = 10000
+
+func newTreeWatcher(root string, ign *ignoreCache) (*treeWatcher, error) {
 	w, err := fsnotify.NewWatcher()
 	if err != nil {
 		return nil, err
 	}
-	t := &treeWatcher{w: w, root: root, events: make(chan string, 64), done: make(chan struct{}), exited: make(chan struct{})}
+	t := &treeWatcher{w: w, ign: ign, root: root, events: make(chan string, 64), done: make(chan struct{}), exited: make(chan struct{})}
 	if err := t.addTree(root); err != nil {
 		w.Close()
 		return nil, err
@@ -356,11 +424,21 @@ func (t *treeWatcher) addTree(dir string) error {
 			}
 			return nil
 		}
+		rel, _ := filepath.Rel(t.root, p)
+		rel = filepath.ToSlash(rel)
 		if !e.IsDir() {
+			if runtime.GOOS == "darwin" {
+				if t.files++; t.files > maxKqueueEntries {
+					return fmt.Errorf("this folder has more than %d files outside the folders git ignores, and watching them on macOS holds one open file each; send changes with push instead, or ignore build output in .gitignore", maxKqueueEntries)
+				}
+			}
 			return nil
 		}
-		if rel, _ := filepath.Rel(t.root, p); rel != "." && syncSkip(filepath.ToSlash(rel)) != "" {
+		if rel != "." && (syncSkip(rel) != "" || t.ign.ignored(rel)) {
 			return filepath.SkipDir
+		}
+		if runtime.GOOS == "darwin" {
+			t.files++
 		}
 		return t.w.Add(p)
 	})
