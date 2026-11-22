@@ -53,6 +53,8 @@ const (
 // sandboxVaultCapture is what one hook call's capture did.
 type sandboxVaultCapture struct {
 	Event string
+	// Sandbox names the sandbox, when known, for the message.
+	Sandbox string
 	// Entries are the vault entries the call's secrets are kept as, in
 	// order, one per distinct value.
 	Entries []vault.Entry
@@ -112,7 +114,7 @@ func captureSandboxVault(ctx context.Context, store *vault.Store, connectorName 
 	for _, h := range hits {
 		ins = append(ins, vault.CaptureInput{Value: h.value, Kind: h.kind, Exposed: exposed, From: from})
 	}
-	out := &sandboxVaultCapture{Event: event}
+	out := &sandboxVaultCapture{Event: event, Sandbox: binding.SandboxName}
 	names := map[string]string{}
 	if res, err := store.CaptureAll(ins, vault.CaptureWait); err != nil {
 		out.Err = err
@@ -205,10 +207,16 @@ func (c *sandboxVaultCapture) message() string {
 		if len(unbound) > 0 {
 			bind = " First give it a host: " + strings.Join(unbound, "; ") + "."
 		}
+		sandbox := c.Sandbox
+		if sandbox == "" {
+			sandbox = "<name>"
+		}
 		return fmt.Sprintf("DefenseClaw moved the secret in your prompt into your vault as %s and stopped the prompt "+
-			"before it reached the model. Send the prompt again without the value.%s To let an agent use it, start a sandbox "+
-			"with `defenseclaw sandbox run <harness> %s`: the agent reads $%s, a placeholder that OpenShell swaps for the "+
-			"value only on the way to its host.", strings.Join(kept, ", "), bind, strings.Join(flags, " "), first)
+			"before it reached the model. Delete the value from your input and send the prompt again without it.%s To let an "+
+			"agent use it, start a sandbox with `defenseclaw sandbox run <harness> %s`: the agent reads $%s, a placeholder "+
+			"that OpenShell swaps for the value only on the way to its host. The agent's session log in this sandbox still "+
+			"holds the stopped prompt: delete the sandbox when you are done (`defenseclaw sandbox delete %s`).",
+			strings.Join(kept, ", "), bind, strings.Join(flags, " "), first, sandbox)
 	}
 	var names []string
 	for _, e := range c.Entries {

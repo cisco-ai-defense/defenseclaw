@@ -82,9 +82,12 @@ kinds of secret:
 A second, different secret of the same kind gets `_2`, `_3` and so on.
 
 - **In a prompt.** The prompt is stopped before it reaches the model. Claude
-  Code and Codex hooks cannot edit a prompt, only stop it, so send the prompt
-  again without the value and start a sandbox with `--vault NAME` to let the
-  agent use the secret.
+  Code and Codex hooks cannot edit a prompt, only stop it. Claude Code puts the
+  prompt back in its input box: delete the value, send the prompt again, and
+  start a sandbox with `--vault NAME` to let the agent use the secret. The
+  agent's session log inside the sandbox still holds the stopped prompt, and
+  the agent could read that file, so delete the sandbox when you are done
+  (`defenseclaw sandbox delete NAME`).
 - **In a tool call.** The tool call is stopped. The agent's model wrote the
   value, so it has seen it, and the value may even be the agent's own: the
   secret is marked **exposed: rotate** and no sandbox gets it until you rotate

@@ -157,3 +157,16 @@ async def test_add_journey_pipes_the_value(tmp_path, sandboxes_supported) -> Non
     adds = [(argv, stdin) for argv, stdin in calls if argv[1:4] == ("sandbox", "vault", "add")]
     assert adds == [(("defenseclaw", "sandbox", "vault", "add", "--host", "api.example.com", "--value-stdin", "PAY_KEY"),
                      VALUE + "\n")]
+
+
+async def test_capital_k_opens_the_vault_tab(tmp_path, sandboxes_supported) -> None:
+    """Pressing K from another panel opens Vault (it used to fold to k, a vim move)."""
+    app = snapshot_app(tmp_path)
+    app.vault_model, app._vault_model_injected = loaded(), True
+    async with app.run_test(size=(80, 24)) as pilot:
+        for start in ("overview", "alerts", "skills", "sandboxes", "policies", "setup"):
+            app.action_switch_panel(start)
+            await pilot.pause()
+            await pilot.press("K")
+            await pilot.pause()
+            assert app.active_panel == "vault", start

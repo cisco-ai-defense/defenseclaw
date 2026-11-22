@@ -12309,7 +12309,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, RoutingPanelMixin, Vau
 
         if self.active_panel != "overview" or self.help_open or len(self.screen_stack) > 1:
             return False
-        key = key.lower()
+        # Named keys only: a capital letter is a panel shortcut (K Vault),
+        # never the vim move of its lowercase form.
+        if len(key) > 1:
+            key = key.lower()
         scroll_line_keys = {"down", "j"}
         scroll_up_keys = {"up", "k"}
         page_down_keys = {"pagedown", "page_down", "ctrl+f"}
@@ -16808,7 +16811,8 @@ def _panel_key(event: events.Key) -> str:
         # bindings: folding them to ``d``/``y`` let Alerts turn Shift+D into
         # "dismiss alert" and Overview into a foreground doctor preview.
         # ``P`` is the Policies shortcut; Runtime keeps ``p`` for its planes.
-        if event.character in {"A", "C", "D", "E", "G", "J", "M", "N", "P", "R", "S", "T", "V", "X", "Y"}:
+        # ``K`` is the Vault shortcut; ``k`` stays the vim move.
+        if event.character in {"A", "C", "D", "E", "G", "J", "K", "M", "N", "P", "R", "S", "T", "V", "X", "Y"}:
             return event.character
         return event.character.lower()
     return event.key
