@@ -8061,6 +8061,43 @@
                 "off"
               ],
               "default": "ask"
+            },
+            "upload_scan": {
+              "description": "Agent Substrate launcher: the secret scan of a project copy before upload (Linux and macOS copies).",
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "max_file_bytes": {
+                  "description": "Largest file the scan reads; a bigger one is uploaded unscanned and named in the run's report.",
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 67108864,
+                  "default": 8388608
+                },
+                "time_budget": {
+                  "description": "How long the scan may take (a Go duration, 1s to 1h); files it did not reach are named in the run's report.",
+                  "type": "string",
+                  "pattern": "^(|[0-9]+(?:\\.[0-9]+)?(?:ns|us|\u00b5s|ms|s|m|h)(?:[0-9]+(?:\\.[0-9]+)?(?:ns|us|\u00b5s|ms|s|m|h))*)$",
+                  "default": "120s"
+                },
+                "secret_action": {
+                  "description": "replace: the value is replaced with a placeholder in the uploaded copy; hold_back: the whole file stays on the computer (the admin-off switch).",
+                  "type": "string",
+                  "enum": [
+                    "replace",
+                    "hold_back"
+                  ],
+                  "default": "replace"
+                },
+                "placeholder_form": {
+                  "type": "string",
+                  "enum": [
+                    "token",
+                    "env"
+                  ],
+                  "default": "token"
+                }
+              }
             }
           }
         },

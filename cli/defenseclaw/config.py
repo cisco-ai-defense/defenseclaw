@@ -4654,10 +4654,22 @@ class SubstrateServicesConfig:
 
 
 @dataclass
+class SubstrateUploadScanConfig:
+    # Secret scan of a project copy before upload (B1): max_file_bytes
+    # (8 MiB), time_budget (120s), secret_action replace or hold_back (the
+    # admin-off switch), placeholder_form token or env.
+    max_file_bytes: int | None = None
+    time_budget: str = ""
+    secret_action: str = ""
+    placeholder_form: str = ""
+
+
+@dataclass
 class SubstrateLauncherConfig:
     # ask (default), on or off: keys typed while a launcher's terminal link
     # is down (B3.1); a launcher flag only tightens it.
     key_replay: str = ""
+    upload_scan: SubstrateUploadScanConfig = field(default_factory=lambda: SubstrateUploadScanConfig())
 
 
 @dataclass
@@ -8232,6 +8244,12 @@ def _merge_substrate(raw: Any) -> SubstrateConfig:
         workspace_max_bytes=_optional_number(raw.get("workspace_max_bytes"), int),
         launcher=SubstrateLauncherConfig(
             key_replay=str(_mapping(raw.get("launcher")).get("key_replay", "") or ""),
+            upload_scan=SubstrateUploadScanConfig(
+                max_file_bytes=_optional_number(_mapping(_mapping(raw.get("launcher")).get("upload_scan")).get("max_file_bytes"), int),
+                time_budget=_duration_text(_mapping(_mapping(raw.get("launcher")).get("upload_scan")).get("time_budget")),
+                secret_action=str(_mapping(_mapping(raw.get("launcher")).get("upload_scan")).get("secret_action", "") or ""),
+                placeholder_form=str(_mapping(_mapping(raw.get("launcher")).get("upload_scan")).get("placeholder_form", "") or ""),
+            ),
         ),
         files=SubstrateFilesConfig(
             push=_optional_bool(_mapping(raw.get("files")).get("push")),

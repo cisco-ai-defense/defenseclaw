@@ -155,6 +155,7 @@ func (a *APIServer) newSubstrateAdminHandler(st *substrateState) http.Handler {
 		writeSubstrateJSON(w, http.StatusOK, map[string]any{
 			"workspace_max_bytes": substrateWorkspaceMax(st.cfg.WorkspaceMaxBytes),
 			"key_replay":          substrateKeyReplay(st.cfg.KeyReplay),
+			"upload_scan":         substrateUploadScan(st.cfg.UploadScan),
 			"files":               map[string]bool{"push": substrateSwitch(st.cfg.FilesPush), "sync": substrateSwitch(st.cfg.FilesSync)},
 		})
 	})
@@ -939,6 +940,19 @@ func readAllLimited(r io.Reader, n int64) ([]byte, bool) {
 
 // substrateSwitch reads a live admin switch; on when not wired.
 func substrateSwitch(read func() bool) bool { return read == nil || read() }
+
+// substrateUploadScan is substrate.launcher.upload_scan for launchers, its
+// defaults filled in (replace, token, 8 MiB, 120s) when not wired or unset.
+func substrateUploadScan(read func() config.SubstrateUploadScanConfig) map[string]any {
+	var u config.SubstrateUploadScanConfig
+	if read != nil {
+		u = read()
+	}
+	return map[string]any{
+		"max_file_bytes": u.EffectiveMaxFileBytes(), "time_budget": u.EffectiveTimeBudget().String(),
+		"secret_action": u.EffectiveSecretAction(), "placeholder_form": u.EffectivePlaceholderForm(),
+	}
+}
 
 // substrateKeyReplay is substrate.launcher.key_replay for launchers; ask when
 // the listener has no live reader.

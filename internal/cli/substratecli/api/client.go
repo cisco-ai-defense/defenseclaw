@@ -309,6 +309,18 @@ type LauncherSettings struct {
 	// Files are the admin switches of push and sync; nil from a gateway
 	// that predates them.
 	Files *LauncherFiles `json:"files,omitempty"`
+	// UploadScan is substrate.launcher.upload_scan; nil from a gateway that
+	// predates it, which keeps holding files with secrets back.
+	UploadScan *LauncherUploadScan `json:"upload_scan,omitempty"`
+}
+
+// LauncherUploadScan is substrate.launcher.upload_scan as the gateway
+// reports it, defaults filled in.
+type LauncherUploadScan struct {
+	MaxFileBytes    int64  `json:"max_file_bytes"`
+	TimeBudget      string `json:"time_budget"`
+	SecretAction    string `json:"secret_action"`
+	PlaceholderForm string `json:"placeholder_form"`
 }
 
 // LauncherFiles is substrate.files as the gateway reports it.

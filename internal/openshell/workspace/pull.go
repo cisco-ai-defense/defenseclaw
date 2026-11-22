@@ -532,14 +532,21 @@ func (s *base64Sink) Close() error {
 // state: the sandbox never saw those files, so any change to them is a
 // blind overwrite or deletion of an operator secret.
 func dropHeldBack(ctx context.Context, base gitCmd, rec *CopyRecord, result string) (string, []string, error) {
-	if len(rec.HeldBack) == 0 {
+	// A file uploaded with its credentials replaced is kept out too until
+	// pull translates placeholders back (B1 S9a step 5): its change must
+	// never write a placeholder over the local line.
+	heldBack := append([]string(nil), rec.HeldBack...)
+	for _, l := range rec.SecretLines {
+		heldBack = append(heldBack, l.Rel)
+	}
+	if len(heldBack) == 0 {
 		return result, nil, nil
 	}
 	changes, err := diffTrees(ctx, base, rec.Baseline, result)
 	if err != nil {
 		return "", nil, err
 	}
-	held := toSet(rec.HeldBack)
+	held := toSet(heldBack)
 	var dropped []string
 	for _, c := range changes {
 		if skipped(held, c.Path) {

@@ -124,6 +124,20 @@ type StageOptions struct {
 	// (CopyRecord.Unmasked) here, so sharing the root .env does not share
 	// a deploy/prod/.env added later.
 	UnmaskExact []string
+	// RewriteSecrets, when set to a placeholder form (PlaceholderToken or
+	// PlaceholderEnv), uploads a file whose credentials the content scan
+	// finds with each value replaced by a placeholder instead of holding
+	// the whole file back; files held back by name or pattern, and
+	// findings that are the file as a whole, stay held back. The Agent
+	// Substrate launcher sets it (upload_scan.secret_action replace);
+	// OpenShell does not. The record keeps where each value was
+	// (CopyRecord.SecretLines), never the value.
+	RewriteSecrets string
+	// ScanMaxFileBytes and ScanTimeBudget bound the content scan
+	// (DefaultScanMaxFileBytes, DefaultScanTimeBudget); every file they
+	// leave unscanned is reported (CopyRecord.NotScanned).
+	ScanMaxFileBytes int64
+	ScanTimeBudget   time.Duration
 	// Replace discards an existing copy record of the same name once the
 	// new copy is staged (a failed Stage leaves it as it was). A replaced
 	// uploaded copy is remembered (CopyRecord.Replaced) until the new one is
@@ -169,6 +183,14 @@ type CopyRecord struct {
 	// Unmasked are the files that look like secrets --unmask shared with
 	// the sandbox, which the run names so the user can confirm them.
 	Unmasked []string `json:"unmasked,omitempty"`
+	// SecretLines are the credentials replaced with placeholders in the
+	// uploaded files (StageOptions.RewriteSecrets). They stay in this local
+	// record; the sandbox only ever sees the placeholders.
+	SecretLines []SecretLine `json:"secret_lines,omitempty"`
+	// NotScanned are the files the content scan did not read (over the
+	// per-file limit or past the time budget); they were uploaded as they
+	// are, and the warnings name them.
+	NotScanned []string `json:"not_scanned,omitempty"`
 	// Withheld counts the committed blobs left out of the shipped history
 	// (see withholdHistory); the copy is then a partial clone.
 	Withheld int `json:"withheld,omitempty"`
@@ -522,6 +544,7 @@ func stageCopy(ctx context.Context, lay layout, opts StageOptions) (*CopyRecord,
 		patterns: opts.Masks, unmask: normalizeUnmask(opts.Unmask, real), maskTracked: true,
 		detector: opts.Detector, contentScan: !opts.DisableContentScan,
 		unmaskAsked: normalizeUnmask(opts.UnmaskAsked, real), unmaskExact: exactRels(opts.UnmaskExact),
+		rewrite: opts.RewriteSecrets, maxFileBytes: opts.ScanMaxFileBytes, timeBudget: opts.ScanTimeBudget,
 	}
 	if scanOpts.detector == nil {
 		scanOpts.detector = DefaultSecretDetector()
@@ -658,6 +681,9 @@ func replaceDir(dir, live string, exchange func(a, b string) error) (string, err
 type stagedFile struct {
 	rel  string
 	info fs.FileInfo
+	// content, when set, is what the copy holds in place of the file's own
+	// bytes (its credentials replaced with placeholders).
+	content []byte
 }
 
 func stageGit(ctx context.Context, rec *CopyRecord, opts StageOptions, scanOpts secretScanOptions, maxBytes int64) error {
@@ -875,14 +901,24 @@ func stageGit(ctx context.Context, rec *CopyRecord, opts StageOptions, scanOpts 
 	if head != "" {
 		// Held-back files stay out of the shipped history as well, and so
 		// does every version of a path the name rules cover.
+		// A file uploaded with its credentials replaced keeps only the
+		// replaced version: its committed versions hold the values.
 		held := toSet(heldBack)
+		replaced := map[string]struct{}{}
+		for _, l := range rec.SecretLines {
+			replaced[l.Rel] = struct{}{}
+		}
 		withheld := func(rel string) bool {
 			if _, ok := held[rel]; ok {
 				return true
 			}
+			if _, ok := replaced[rel]; ok {
+				return true
+			}
 			return !scanOpts.isUnmasked(rel) && secretByName(scanOpts.patterns, rel)
 		}
-		n, err := withholdHistory(ctx, sg, stage, filepath.Dir(stage), withheld)
+		keep := func(rel string) bool { _, ok := replaced[rel]; return ok }
+		n, err := withholdHistory(ctx, sg, stage, filepath.Dir(stage), withheld, keep)
 		if err != nil {
 			return err
 		}
@@ -1032,10 +1068,14 @@ func stagePlain(ctx context.Context, rec *CopyRecord, stageRoot string, scanOpts
 // warnings.
 func selectFiles(root string, candidates []string, scanOpts secretScanOptions, maxBytes int64, rec *CopyRecord, summary *CopySummary) ([]stagedFile, []string, error) {
 	sort.Strings(candidates)
-	held, err := detectSecretsIn(root, candidates, scanOpts)
+	scan, err := detectSecretsIn(root, candidates, scanOpts)
 	if err != nil {
 		return nil, nil, err
 	}
+	held := scan.held
+	rec.SecretLines = scan.lines
+	rec.NotScanned = append(append([]string(nil), scan.tooBig...), scan.late...)
+	rec.Warnings = append(rec.Warnings, notScannedWarnings(scan, scanOpts.maxFileBytes, scanOpts.timeBudget)...)
 	// What --unmask shared, and what it named that the copy does not take
 	// (git-ignored files never go): both were silent (GAP-0248).
 	// A file only the pack's or the configuration's own entries share (a
@@ -1055,7 +1095,7 @@ func selectFiles(root string, candidates []string, scanOpts secretScanOptions, m
 		if unmaskedBy(scanOpts.unmaskAsked, rel) || slices.Contains(scanOpts.unmaskExact, rel) {
 			check = unmaskOnly
 		}
-		if would, err := detectSecretsIn(root, []string{rel}, check); err == nil && len(would) > 0 {
+		if would, err := detectSecretsIn(root, []string{rel}, check); err == nil && would.found() {
 			rec.Unmasked = append(rec.Unmasked, rel)
 		}
 	}
@@ -1086,46 +1126,12 @@ func selectFiles(root string, candidates []string, scanOpts secretScanOptions, m
 		} else if total > maxBytes {
 			return nil, nil, &TooLargeError{What: "the working tree", Size: total, Limit: maxBytes}
 		}
-		files = append(files, stagedFile{rel: rel, info: info})
+		files = append(files, stagedFile{rel: rel, info: info, content: scan.rewritten[rel]})
 	}
 	if total > maxBytes {
 		return nil, nil, &TooLargeError{What: "the working tree", Size: total, Limit: maxBytes}
 	}
 	return files, held, nil
-}
-
-// detectSecretsIn applies the mask rules to a fixed list of files (copy
-// mode ships exactly git's view of the working tree, not a directory walk)
-// and returns the ones it holds back.
-func detectSecretsIn(root string, rels []string, opts secretScanOptions) ([]string, error) {
-	var held []string
-	budget := defaultMaxContentScanFiles
-	for _, rel := range rels {
-		if opts.isUnmasked(rel) {
-			continue
-		}
-		if secretByName(opts.patterns, rel) {
-			held = append(held, rel)
-			continue
-		}
-		if !opts.contentScan || opts.detector == nil || budget <= 0 {
-			continue
-		}
-		p := filepath.Join(root, filepath.FromSlash(rel))
-		info, err := os.Lstat(p)
-		if err != nil || !info.Mode().IsRegular() || info.Size() == 0 || info.Size() > maxContentScanBytes {
-			continue
-		}
-		budget--
-		content, err := readSmallRegular(p, maxContentScanBytes)
-		if err != nil || looksBinary(content) {
-			continue
-		}
-		if _, ok := opts.detector.DetectSecret(rel, content); ok {
-			held = append(held, rel)
-		}
-	}
-	return held, nil
 }
 
 func copyFiles(src, dst string, files []stagedFile) error {
@@ -1142,6 +1148,12 @@ func copyFiles(src, dst string, files []stagedFile) error {
 			}
 			if err := os.Symlink(target, to); err != nil {
 				return err
+			}
+			continue
+		}
+		if f.content != nil {
+			if err := writeReplaced(to, f.content, f.info.Mode(), f.info.ModTime()); err != nil {
+				return fmt.Errorf("workspace: copy %s: %w", f.rel, err)
 			}
 			continue
 		}

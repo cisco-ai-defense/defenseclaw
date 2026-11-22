@@ -638,6 +638,72 @@ type SubstrateLauncherConfig struct {
 	// sends them on Enter, on sends them, off drops them with a count. A
 	// launcher flag can only tighten it; off is the admin-off switch.
 	KeyReplay string `mapstructure:"key_replay" yaml:"key_replay,omitempty"`
+	// UploadScan tunes the secret scan of a project copy before it goes to
+	// an actor (B1, Linux and macOS copies; the Windows host copy keeps
+	// holding files back).
+	UploadScan SubstrateUploadScanConfig `mapstructure:"upload_scan" yaml:"upload_scan,omitempty"`
+}
+
+// SubstrateUploadScanConfig is substrate.launcher.upload_scan.
+type SubstrateUploadScanConfig struct {
+	// MaxFileBytes is the largest file the scan reads (default 8 MiB); a
+	// bigger one is uploaded unscanned and named in the run's report.
+	MaxFileBytes int64 `mapstructure:"max_file_bytes" yaml:"max_file_bytes,omitempty"`
+	// TimeBudget bounds the scan (a Go duration, default 120s); the files
+	// it did not reach are named in the run's report.
+	TimeBudget string `mapstructure:"time_budget" yaml:"time_budget,omitempty"`
+	// SecretAction is replace (default: the value is replaced with a
+	// placeholder in the uploaded copy) or hold_back (the whole file stays
+	// on the computer). hold_back is the admin-off switch.
+	SecretAction string `mapstructure:"secret_action" yaml:"secret_action,omitempty"`
+	// PlaceholderForm is token (default, DC_SECRET_<n>) or env
+	// (${DC_SECRET_<n>}).
+	PlaceholderForm string `mapstructure:"placeholder_form" yaml:"placeholder_form,omitempty"`
+}
+
+// Upload scan secret actions and placeholder forms.
+const (
+	SubstrateUploadReplace  = "replace"
+	SubstrateUploadHoldBack = "hold_back"
+	SubstratePlaceholderTok = "token"
+	SubstratePlaceholderEnv = "env"
+
+	substrateUploadMaxFileDefault = 8 << 20
+	substrateUploadMaxFileCeiling = 64 << 20
+	substrateUploadBudgetDefault  = 120 * time.Second
+)
+
+// EffectiveMaxFileBytes is upload_scan.max_file_bytes, 8 MiB when unset.
+func (u SubstrateUploadScanConfig) EffectiveMaxFileBytes() int64 {
+	if u.MaxFileBytes > 0 {
+		return u.MaxFileBytes
+	}
+	return substrateUploadMaxFileDefault
+}
+
+// EffectiveTimeBudget is upload_scan.time_budget, 120s when unset or bad.
+func (u SubstrateUploadScanConfig) EffectiveTimeBudget() time.Duration {
+	if d, err := time.ParseDuration(strings.TrimSpace(u.TimeBudget)); err == nil && d > 0 {
+		return d
+	}
+	return substrateUploadBudgetDefault
+}
+
+// EffectiveSecretAction is upload_scan.secret_action, replace when unset.
+func (u SubstrateUploadScanConfig) EffectiveSecretAction() string {
+	if v := strings.ToLower(strings.TrimSpace(u.SecretAction)); v != "" {
+		return v
+	}
+	return SubstrateUploadReplace
+}
+
+// EffectivePlaceholderForm is upload_scan.placeholder_form, token when
+// unset.
+func (u SubstrateUploadScanConfig) EffectivePlaceholderForm() string {
+	if v := strings.ToLower(strings.TrimSpace(u.PlaceholderForm)); v != "" {
+		return v
+	}
+	return SubstratePlaceholderTok
 }
 
 // Key replay modes (substrate.launcher.key_replay).
@@ -806,6 +872,25 @@ func (s *SubstrateConfig) Validate() error {
 	case SubstrateKeyReplayAsk, SubstrateKeyReplayOn, SubstrateKeyReplayOff:
 	default:
 		bad("launcher.key_replay", "%q is not ask, on or off", s.Launcher.KeyReplay)
+	}
+	up := s.Launcher.UploadScan
+	if up.MaxFileBytes < 0 || up.MaxFileBytes > substrateUploadMaxFileCeiling {
+		bad("launcher.upload_scan.max_file_bytes", "%d is not between 0 and %d", up.MaxFileBytes, substrateUploadMaxFileCeiling)
+	}
+	if t := strings.TrimSpace(up.TimeBudget); t != "" {
+		if d, err := time.ParseDuration(t); err != nil || d < time.Second || d > time.Hour {
+			bad("launcher.upload_scan.time_budget", "%q is not a duration from 1s to 1h", up.TimeBudget)
+		}
+	}
+	switch up.EffectiveSecretAction() {
+	case SubstrateUploadReplace, SubstrateUploadHoldBack:
+	default:
+		bad("launcher.upload_scan.secret_action", "%q is not replace or hold_back", up.SecretAction)
+	}
+	switch up.EffectivePlaceholderForm() {
+	case SubstratePlaceholderTok, SubstratePlaceholderEnv:
+	default:
+		bad("launcher.upload_scan.placeholder_form", "%q is not token or env", up.PlaceholderForm)
 	}
 	if a := s.API.Address; a != "" {
 		if _, port, err := net.SplitHostPort(a); err != nil || port == "" {

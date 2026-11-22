@@ -26,6 +26,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -35,6 +36,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/safetext"
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/workspace"
 	"github.com/defenseclaw/defenseclaw/internal/cliusage"
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	osw "github.com/defenseclaw/defenseclaw/internal/openshell/workspace"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/relay"
 )
@@ -88,17 +90,19 @@ func substrateUploadLimit(ctx context.Context, cmd *cobra.Command, s *substrateS
 // substratePreflight stages the source before Create can leave actor state.
 func substratePreflight(ctx context.Context, cmd *cobra.Command, s *substrateSession, f *substrateRunFlags, project string) (*workspace.PreparedUpload, error) {
 	w := cmd.ErrOrStderr()
-	maxBytes, _, err := substrateUploadLimit(ctx, cmd, s)
+	maxBytes, settings, err := substrateUploadLimit(ctx, cmd, s)
 	if err != nil {
 		return nil, err
 	}
 	if n := int64(f.maxUploadMB); n > 0 && n <= maxBytes>>20 {
 		maxBytes = n << 20
 	}
+	rewrite, scanMax, scanBudget := substrateUploadScan(settings.UploadScan)
 	home, _ := os.UserHomeDir()
 	prepared, err := workspace.Preflight(ctx, workspace.StartOptions{
 		Project: project, DataDir: auth.StateDir(), Home: home, RemoteRoot: f.remoteDir, MaxBytes: maxBytes,
 		Masks: f.exclude, Unmask: f.unmask, UnmaskAsked: f.unmask, Replace: true, Upstream: f.cloneHere,
+		RewriteSecrets: rewrite, ScanMaxFileBytes: scanMax, ScanTimeBudget: scanBudget,
 	})
 	if err != nil {
 		var big *workspace.TooLargeError
@@ -112,6 +116,25 @@ func substratePreflight(ctx context.Context, cmd *cobra.Command, s *substrateSes
 		fmt.Fprintln(w, line)
 	}
 	return prepared, nil
+}
+
+// substrateUploadScan turns the cluster's upload_scan settings into the
+// copy's: the placeholder form when the action is replace ("" holds files
+// back, as does a gateway that predates the setting), the per-file limit
+// and the time budget (0 = the pipeline defaults).
+func substrateUploadScan(u *api.LauncherUploadScan) (string, int64, time.Duration) {
+	if u == nil {
+		return "", 0, 0
+	}
+	budget, _ := time.ParseDuration(u.TimeBudget)
+	rewrite := ""
+	if u.SecretAction == config.SubstrateUploadReplace {
+		rewrite = osw.PlaceholderToken
+		if u.PlaceholderForm == config.SubstratePlaceholderEnv {
+			rewrite = osw.PlaceholderEnv
+		}
+	}
+	return rewrite, u.MaxFileBytes, budget
 }
 
 // substrateCloneHere reports whether --clone names this checkout ("." or a
@@ -201,6 +224,9 @@ func substrateUploadFolder(ctx context.Context, cmd *cobra.Command, s *substrate
 	}
 	if line := res.KeptBackLine(); line != "" {
 		fmt.Fprintln(w, "Held back from the copy: "+line[len("kept back: "):]+". Share one anyway with --unmask.")
+	}
+	for _, line := range res.ReplacedLines() {
+		fmt.Fprintln(w, line)
 	}
 	for _, warn := range res.Warnings {
 		fmt.Fprintln(w, "Note: "+warn)

@@ -71,6 +71,12 @@ type StartOptions struct {
 	UnmaskExact        []string
 	Detector           osw.SecretDetector
 	DisableContentScan bool
+	// RewriteSecrets, ScanMaxFileBytes and ScanTimeBudget are the upload
+	// scan (substrate.launcher.upload_scan, osw.StageOptions). The Windows
+	// host copy does not rewrite: it keeps holding such files back.
+	RewriteSecrets   string
+	ScanMaxFileBytes int64
+	ScanTimeBudget   time.Duration
 	// Replace discards an earlier copy of the same name once the new one is
 	// staged.
 	Replace bool
@@ -105,6 +111,41 @@ func (r *StartResult) KeptBackLine() string {
 		noun = "file"
 	}
 	return fmt.Sprintf("kept back: %s%s (%d %s)", strings.Join(shown, ", "), more, n, noun)
+}
+
+// ReplacedLines say which files went up with their credentials replaced by
+// placeholders ("2 secrets replaced in config.py") and which of those are
+// signing keys a header swap cannot stand in for; nil when none were.
+func (r *StartResult) ReplacedLines() []string {
+	if r.CopyRecord == nil || len(r.SecretLines) == 0 {
+		return nil
+	}
+	var order []string
+	count := map[string]int{}
+	signing := map[string]bool{}
+	for _, l := range r.SecretLines {
+		if count[l.Rel] == 0 {
+			order = append(order, l.Rel)
+		}
+		count[l.Rel]++
+		signing[l.Rel] = signing[l.Rel] || l.Signing
+	}
+	var out, keys []string
+	for _, rel := range order {
+		noun := "secrets"
+		if count[rel] == 1 {
+			noun = "secret"
+		}
+		out = append(out, fmt.Sprintf("%d %s replaced in %s", count[rel], noun, safetext.Path(rel)))
+		if signing[rel] {
+			keys = append(keys, safetext.Path(rel))
+		}
+	}
+	lines := []string{"Replaced with placeholders in the copy (your files are unchanged; the agent sees only DC_SECRET_<n>): " + strings.Join(out, ", ") + "."}
+	if len(keys) > 0 {
+		lines = append(lines, "Note: "+strings.Join(keys, ", ")+" held a signing key (an AWS secret key or a private key); the cluster cannot add it for the agent. Use workload identity or actor_secrets.")
+	}
+	return lines
 }
 
 // TooLargeError is a project that is over the size limit.
@@ -183,6 +224,7 @@ func Preflight(ctx context.Context, opts StartOptions) (*PreparedUpload, error) 
 			FolderName: hostFolderName(opts.Project), Summary: &p.summary,
 			Masks: opts.Masks, Unmask: opts.Unmask, UnmaskAsked: opts.UnmaskAsked, UnmaskExact: opts.UnmaskExact,
 			Detector: opts.Detector, DisableContentScan: opts.DisableContentScan,
+			RewriteSecrets: opts.RewriteSecrets, ScanMaxFileBytes: opts.ScanMaxFileBytes, ScanTimeBudget: opts.ScanTimeBudget,
 		})
 		if err == nil {
 			p.bytes = p.copy.Record().Bytes

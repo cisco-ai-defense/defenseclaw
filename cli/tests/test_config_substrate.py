@@ -63,7 +63,7 @@ _FULL = {
     "idle_suspend_after": "30m",
     "idle_suspend_without_cpu": True,
     "chain_egress_action": "alert",
-    "launcher": {"key_replay": "off"},
+    "launcher": {"key_replay": "off", "upload_scan": {"max_file_bytes": 1048576, "time_budget": "30s", "secret_action": "hold_back", "placeholder_form": "env"}},
     "files": {"push": False, "sync": True},
     "unattended": {"asks": "deny", "ask_timeout": "30m", "telemetry_sampling": 0.5},
     "rate_limits": {"per_actor_rps": 20, "per_atespace_rps": 500},
