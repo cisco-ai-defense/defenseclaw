@@ -284,7 +284,11 @@ codex_closed_answer() {
     PermissionRequest) printf '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny","message":"%s"}}}\n' "$reason" ;;
     PreToolUse) printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"%s"}}\n' "$reason" ;;
     *) printf '{"decision":"block","reason":"%s"}\n' "$reason" ;;
-  esac
+  esac{{if .Sandbox}} || {
+    # The answer could not be written: exit 0 with nothing on stdout is a
+    # Codex allow, exit 2 still blocks where a status can (GAP-1769).
+    builtin exit 2
+  }{{end}}
   exit 0
 }
 {{template "shell-exit-guard" .}}
@@ -868,8 +872,9 @@ if [ "$ACTION" = "block" ]; then
     # decision=block. Exit 0 so Codex honors it.
     exit 0
   fi
-  # codex_output was not extractable (no jq/python3 for object fields).
-  # Construct minimal structured block JSON so Codex sees exit 0 + JSON
+{{if .Sandbox}}  # The gateway's block carries no codex_output.
+{{else}}  # codex_output was not extractable (no jq/python3 for object fields).
+{{end}}  # Construct minimal structured block JSON so Codex sees exit 0 + JSON
   # rather than exit 2 — newer Codex versions (v0.130+) treat exit 2 on
   # UserPromptSubmit as "hook failed" rather than "hook blocked".
 {{if .SecureClient}}  REASON=$(echo "$RESULT" | _dc_jq -r '.reason // empty' 2>/dev/null)

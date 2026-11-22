@@ -177,7 +177,8 @@ func TestSandboxCodexHookUnexpectedFailureBlocksAndIsRecorded(t *testing.T) {
 // GAP-1769: _sandbox.sh drops every exported variable it does not keep. The
 // exit guard's state is assigned before it runs, so a workload that exports
 // the same names must neither unset it (the guard would end on an unbound
-// variable, exit 1, with no block) nor choose it.
+// variable, exit 1, with no block) nor choose it, and an exported
+// BASH_XTRACEFD must not close the stdout the block answer is written to.
 func TestSandboxCodexHookGuardStateSurvivesTheScrub(t *testing.T) {
 	inherited := map[string]string{
 		SandboxTokenEnv:          "tok",
@@ -195,16 +196,59 @@ func TestSandboxCodexHookGuardStateSurvivesTheScrub(t *testing.T) {
 		{"the ingress is down", "", []string{"exit:7", "exit:7"}},
 		{"an unbound variable after hardening", `: "$_DC_TEST_UNSET_AFTER_HARDEN"`, []string{allowResponse}},
 		{"an unmarked exit 2 after hardening", "builtin exit 2", []string{allowResponse}},
+		{"the gateway blocks", "", []string{`200|{"action":"block","reason":"policy says no"}`}},
 	} {
 		h := newSandboxHookHarness(t, &CodexConnector{}, "0.146.0")
 		if tc.fail != "" {
 			breakSandboxHookAfterHardening(t, h, tc.fail, filepath.Join(t.TempDir(), "harden-reached"))
 		}
-		for _, event := range []string{"UserPromptSubmit", "PreToolUse", "PermissionRequest", "SessionStart"} {
-			t.Run(strings.ReplaceAll(tc.name, " ", "_")+"/"+event, func(t *testing.T) {
-				run := h.run(t, SandboxHookDir+"/codex-hook.sh", sandboxCodexArgs(event), codexEventPayload(event), inherited, tc.reply)
-				if !codexBlockAnswer(event, run.exitCode, run.stdout) || strings.Contains(run.stdout, "inherited reason") {
-					t.Fatalf("exit %d stdout %q stderr %q, want Codex's own %s block, not the inherited state", run.exitCode, run.stdout, run.stderr, event)
+		// An exported BASH_XTRACEFD=1 is dropped too: unsetting it closed
+		// stdout, every block object was lost and the hook ended with exit 0
+		// and nothing printed, a Codex allow (RV-OP2E).
+		for _, traceFD := range []string{"", "1"} {
+			env := inherited
+			if traceFD != "" {
+				env = map[string]string{"BASH_XTRACEFD": traceFD}
+				for k, v := range inherited {
+					env[k] = v
+				}
+			}
+			for _, event := range codexControlledEvents {
+				name := strings.ReplaceAll(tc.name, " ", "_") + "/" + event
+				if traceFD != "" {
+					name += "/BASH_XTRACEFD=" + traceFD
+				}
+				t.Run(name, func(t *testing.T) {
+					run := h.run(t, SandboxHookDir+"/codex-hook.sh", sandboxCodexArgs(event), codexEventPayload(event), env, tc.reply)
+					if !codexBlockAnswer(event, run.exitCode, run.stdout) || strings.Contains(run.stdout, "inherited reason") {
+						t.Fatalf("exit %d stdout %q stderr %q, want Codex's own %s block, not the inherited state", run.exitCode, run.stdout, run.stderr, event)
+					}
+				})
+			}
+		}
+	}
+}
+
+// GAP-1769 (RV-OP2E): when the block object cannot be written (the hook's
+// stdout is closed), codex_closed_answer still ended with exit 0 and nothing
+// printed, which Codex reads as an allow. A failed write now exits 2, which
+// blocks the events whose block is a status.
+func TestSandboxCodexHookUnwritableBlockIsNoExitZero(t *testing.T) {
+	h := newSandboxHookHarness(t, &CodexConnector{}, "0.146.0")
+	const closed = "/closed-stdout.sh"
+	wrapper := "#!/bin/bash\nexec 1>&-\nexec " + shellSingleQuote(h.path(SandboxHookDir+"/codex-hook.sh")) + " \"$@\"\n"
+	if err := os.WriteFile(h.path(closed), []byte(wrapper), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, reply := range map[string][]string{
+		"the ingress is down": {"exit:7", "exit:7"},
+		"the gateway blocks":  {`200|{"action":"block","reason":"policy says no"}`},
+	} {
+		for _, event := range codexControlledEvents {
+			t.Run(strings.ReplaceAll(name, " ", "_")+"/"+event, func(t *testing.T) {
+				run := h.run(t, closed, sandboxCodexArgs(event), codexEventPayload(event), map[string]string{SandboxTokenEnv: "tok"}, reply)
+				if run.exitCode != 2 {
+					t.Fatalf("exit %d stderr %q, want exit 2 when the block object cannot be written", run.exitCode, run.stderr)
 				}
 			})
 		}
