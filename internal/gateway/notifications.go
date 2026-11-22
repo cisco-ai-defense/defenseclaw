@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"sync"
@@ -21,8 +22,23 @@ type SecurityNotification struct {
 	Reason      string
 	ExpiresAt   time.Time
 	OneShot     bool
-	sequence    uint64
-	reserved    bool
+	// scope is who the notice is for: "" for every caller of this gateway
+	// (a host gateway serves one user), or one Agent Substrate actor
+	// (notificationScope), whose refusals must not reach another actor's
+	// model requests (substrate-1 GAP-0268).
+	scope    string
+	sequence uint64
+	reserved bool
+}
+
+// notificationScope is the scope of the notices a call raises and reads:
+// its verified Substrate actor, or "" for any other call.
+func notificationScope(ctx context.Context) string {
+	actor, ok := substrateActorFrom(ctx)
+	if !ok {
+		return ""
+	}
+	return "actor\x00" + actor.Atespace + "\x00" + actor.UID
 }
 
 // NotificationQueue is a thread-safe store for security notifications. The
@@ -85,17 +101,19 @@ func (q *NotificationQueue) ActiveNotifications() []SecurityNotification {
 // active (unexpired) notifications. Returns "" when no active notifications
 // exist. This is a non-consuming preview; request paths use PrepareSystemMessage.
 func (q *NotificationQueue) FormatSystemMessage() string {
-	notes, _ := q.snapshot(false)
+	notes, _ := q.snapshot(false, "")
 	return formatNotificationMessage(notes)
 }
 
-// PrepareSystemMessage reserves one-shot notices for a single request.
-func (q *NotificationQueue) PrepareSystemMessage() (string, []uint64) {
-	notes, ids := q.snapshot(true)
+// PrepareSystemMessage reserves one-shot notices for a single request of
+// the given scope (notificationScope): only the notices of that scope.
+func (q *NotificationQueue) PrepareSystemMessage(scope string) (string, []uint64) {
+	notes, ids := q.snapshot(true, scope)
 	return formatNotificationMessage(notes), ids
 }
 
-func (q *NotificationQueue) snapshot(reserve bool) ([]SecurityNotification, []uint64) {
+// snapshot returns the active notices; with reserve, only those of scope.
+func (q *NotificationQueue) snapshot(reserve bool, scope string) ([]SecurityNotification, []uint64) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	now := time.Now()
@@ -106,7 +124,7 @@ func (q *NotificationQueue) snapshot(reserve bool) ([]SecurityNotification, []ui
 		if !now.Before(n.ExpiresAt) {
 			continue
 		}
-		if !reserve || !n.reserved {
+		if !reserve || (!n.reserved && n.scope == scope) {
 			notes = append(notes, n)
 			if reserve && n.OneShot {
 				n.reserved = true

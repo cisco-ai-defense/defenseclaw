@@ -69,7 +69,7 @@ func TestHookRateProbe(t *testing.T) {
 	}
 	out := os.Getenv("DEFENSECLAW_HOOK_RATE_OUT")
 
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	installDefaultProfileConnector(t, "claudecode")
 	fixture := newSidecarRuntimeFixture(t, true)
 	fingerprints, err := observabilityredaction.NewEngine(bytes.Repeat([]byte{0x42}, 32))
@@ -232,6 +232,7 @@ func TestHookRateProbe(t *testing.T) {
 		}()
 	}
 
+	rowsBefore := hookRateProbeAuditRows(t, fixture.path)
 	calls := rate * seconds
 	latencies := make([]time.Duration, calls)
 	answered := make([]time.Time, calls)
@@ -260,6 +261,10 @@ func TestHookRateProbe(t *testing.T) {
 		}
 	}
 	wg.Wait()
+	rowsAfter := hookRateProbeAuditRows(t, fixture.path)
+	t.Logf("RATEPROBE rows calls=%d audit_events %d -> %d (+%d, %.2f a call) correlation_observations %d -> %d (+%d, %.2f a call)",
+		calls, rowsBefore[0], rowsAfter[0], rowsAfter[0]-rowsBefore[0], float64(rowsAfter[0]-rowsBefore[0])/float64(calls),
+		rowsBefore[1], rowsAfter[1], rowsAfter[1]-rowsBefore[1], float64(rowsAfter[1]-rowsBefore[1])/float64(calls))
 	window := start.Add(time.Duration(seconds) * time.Second)
 	sorted := slices.Clone(latencies)
 	slices.Sort(sorted)
@@ -308,6 +313,25 @@ func runtimeSetProfileRates(on bool) {
 	}
 	runtime.SetBlockProfileRate(0)
 	runtime.SetMutexProfileFraction(0)
+}
+
+// hookRateProbeAuditRows counts the audit_events and correlation_observations
+// rows in path through a read-only connection, so a run can show that every
+// call's audit rows were committed.
+func hookRateProbeAuditRows(t *testing.T, path string) [2]int64 {
+	t.Helper()
+	db, err := sql.Open("sqlite", "file:"+path+"?mode=ro&_pragma=busy_timeout(10000)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var counts [2]int64
+	for index, table := range []string{"audit_events", "correlation_observations"} {
+		if err := db.QueryRow(`SELECT count(*) FROM ` + table).Scan(&counts[index]); err != nil {
+			t.Fatalf("count %s: %v", table, err)
+		}
+	}
+	return counts
 }
 
 func hookRateProbeFileSize(path string) int64 {

@@ -17,8 +17,10 @@
 package workspace
 
 import (
+	"io/fs"
 	"path"
 	"strings"
+	"unicode"
 )
 
 // matchGlob matches a slash-separated relative path against a pattern.
@@ -195,6 +197,9 @@ const (
 	RiskDependencies   RiskKind = "dependencies"
 	RiskPolicy         RiskKind = "sensitive-pattern"
 	RiskIgnoreRules    RiskKind = "ignore-rules"
+	RiskAgentConfig    RiskKind = "agent-config"
+	RiskMCPServer      RiskKind = "mcp-server"
+	RiskShellRC        RiskKind = "shell-rc"
 	// RiskUnreadable is a folder the session made unreadable: nothing
 	// inside it can be checked.
 	RiskUnreadable RiskKind = "unreadable"
@@ -234,6 +239,22 @@ type riskRule struct {
 // opens the folder in an editor, enters it with direnv, installs
 // dependencies, commits, builds, or pushes to CI.
 var riskRules = []riskRule{
+	// An agent that starts in the folder reads these and runs what they
+	// register (hooks, commands, MCP servers): one pull could add a hook
+	// on this machine (GAP-0473).
+	// Agent settings and hook folders. The project hook and MCP configs of
+	// every connector also come from the connector registry (registryRules,
+	// GAP-0522); these name the hook script folders and settings files the
+	// registry does not list. The patterns start with **/ because an agent
+	// loads project settings from the folder it is started in, which may be
+	// a subfolder.
+	{patterns: []string{"**/.claude/settings.json", "**/.claude/settings.local.json", "**/.claude/hooks/**", "**/.codex/config.toml", "**/.codex/hooks.json",
+		"**/.cursor/hooks.json", "**/.gemini/settings.json", "**/.gemini/config/hooks.json", "**/.kiro/hooks/**", "**/.github/hooks/**",
+		"**/.opencode/**", "**/opencode.json", "**/opencode.jsonc", "**/.amp/settings.json", "**/.amp/settings.jsonc",
+		"**/.devin/hooks.v1.json", "**/.devin/config.json", "**/.devin/config.local.json"}, kind: RiskAgentConfig, severity: SeverityHigh, detail: "an agent started in this folder runs the hooks and commands it registers"},
+	{patterns: []string{".mcp.json", "**/.cursor/mcp.json", "**/.vscode/mcp.json", "**/.kiro/settings/mcp.json", "**/.gemini/mcp.json",
+		"**/.github/mcp.json", "**/.agents/mcp_config.json", "**/.devin/mcp_config.json", "**/.devin/mcp_config.local.json"}, kind: RiskMCPServer, severity: SeverityHigh, detail: "an agent started in this folder launches these MCP servers as commands"},
+	{patterns: []string{".bashrc", ".bash_profile", ".bash_login", ".bash_logout", ".bash_aliases", ".profile", ".zshrc", ".zshenv", ".zprofile", ".zlogin", ".zlogout", ".kshrc", ".cshrc", ".tcshrc"}, kind: RiskShellRC, severity: SeverityHigh, detail: "runs in every shell that reads it"},
 	{patterns: []string{".envrc", ".env.sh"}, kind: RiskAutoExec, severity: SeverityHigh, detail: "sourced by direnv when you enter the folder"},
 	{patterns: []string{".vscode/tasks.json", ".vscode/launch.json", ".vscode/settings.json", "*.code-workspace"}, kind: RiskAutoExec, severity: SeverityHigh, detail: "editor tasks and settings can run commands when the folder is opened"},
 	{patterns: []string{".idea/**", ".fleet/**", ".zed/**"}, kind: RiskAutoExec, severity: SeverityHigh, detail: "IDE run configurations execute on the host"},
@@ -247,8 +268,98 @@ var riskRules = []riskRule{
 	{patterns: []string{"dockerfile", "*.dockerfile", "containerfile", "docker-compose*.yml", "docker-compose*.yaml", "compose.yml", "compose.yaml"}, kind: RiskBuild, severity: SeverityMedium, detail: "container builds run this on the host"},
 }
 
+// classifyLinkName is classifyPath for a symbolic link (GAP-0523): a link
+// named like a run-code file (.mcp.json, .bashrc, .envrc), or one that
+// stands for a folder of a rule at any segment (.claude, .kiro/settings,
+// a/.gemini/config), makes that file appear in the folder whatever it
+// points to inside the project (GAP-0552). The folder case returns the
+// first rule a path below the link would match. Names compare under a
+// full Unicode case fold (.kiro/U+017Fettings is .kiro/settings to a
+// folding filesystem), not only strings.ToLower (GAP-0575).
+func classifyLinkName(rel string) (riskRule, bool) {
+	if r, ok := classifyPath(foldName(rel)); ok {
+		return r, true
+	}
+	segs := strings.Split(foldName(strings.Trim(rel, "/")), "/")
+	for _, r := range append(append([]riskRule{}, riskRules...), registryRules()...) {
+		for _, p := range r.patterns {
+			if !strings.Contains(p, "/") {
+				continue // a bare file name: classifyPath decided
+			}
+			if patternReachesBelow(strings.Split(foldName(strings.Trim(p, "/")), "/"), segs) {
+				return r, true
+			}
+		}
+	}
+	return riskRule{}, false
+}
+
+// foldName maps every rune to the lower case of the smallest rune of its
+// case-fold orbit, so names that strings.EqualFold equates (s, S and
+// U+017F; k and the Kelvin sign) compare equal.
+func foldName(s string) string {
+	return strings.Map(func(r rune) rune {
+		m := r
+		for f := unicode.SimpleFold(r); f != r; f = unicode.SimpleFold(f) {
+			if f < m {
+				m = f
+			}
+		}
+		return unicode.ToLower(m)
+	}, s)
+}
+
+// sentinelLink reports a symbolic link named like a run-code file or a
+// folder a rule reaches below (.kiro/settings, .kiro, out/.kiro/settings):
+// git mode's diff cannot see one at a path git ignores, so the sentinel
+// walk records it with its target and the review classifies it as it does
+// a tracked link (GAP-0574).
+func sentinelLink(rel string, d fs.DirEntry) bool {
+	if d.Type()&fs.ModeSymlink == 0 {
+		return false
+	}
+	_, ok := classifyLinkName(rel)
+	return ok
+}
+
+// patternReachesBelow reports whether the link folder segs stands for a
+// folder the pattern names, with pattern segments left below it: the link's
+// last segment is matched by a named pattern segment (never absorbed by
+// "**", or every folder link would count), the segments before it by the
+// pattern before that. "**" matches any number of earlier segments.
+func patternReachesBelow(pat, segs []string) bool {
+	if len(pat) == 0 || len(segs) == 0 {
+		return false
+	}
+	if pat[0] == "**" {
+		return patternReachesBelow(pat[1:], segs) || (len(segs) > 1 && patternReachesBelow(pat, segs[1:]))
+	}
+	if ok, _ := path.Match(pat[0], segs[0]); !ok {
+		return false
+	}
+	if len(segs) == 1 {
+		return len(pat) > 1
+	}
+	return patternReachesBelow(pat[1:], segs[1:])
+}
+
+// RunsCode reports whether a change to the project path rel (slash form)
+// is flagged as able to run code on this machine (high or medium), the
+// rule copy mode and Substrate pull apply. The connector registry drift
+// test checks every connector's project MCP and hook config against it
+// (GAP-0522).
+func RunsCode(rel string) bool {
+	r, ok := classifyPath(rel)
+	return ok && r.severity.rank() >= SeverityMedium.rank()
+}
+
 func classifyPath(rel string) (riskRule, bool) {
 	for _, r := range riskRules {
+		if _, ok := matchAny(r.patterns, rel); ok {
+			return r, true
+		}
+	}
+	for _, r := range registryRules() {
 		if _, ok := matchAny(r.patterns, rel); ok {
 			return r, true
 		}

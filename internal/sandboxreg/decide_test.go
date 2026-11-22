@@ -22,9 +22,9 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
-	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
+	"github.com/defenseclaw/defenseclaw/internal/sandboxruntime"
 )
 
 func decision(kind, scope, host string) sandboxrelay.DecisionRequest {
@@ -172,9 +172,6 @@ func TestCheckDecisionStrictFloorKeepsNothingForFutureSandboxes(t *testing.T) {
 // A decision for this computer is a host-port ask's answer: allow_host_ports
 // decides it, for the session only, whatever the egress lists say.
 func TestCheckDecisionHostPort(t *testing.T) {
-	if openShellHostAlias != packs.OpenShellHostAlias {
-		t.Fatalf("host alias %q, want packs' %q", openShellHostAlias, packs.OpenShellHostAlias)
-	}
 	allowOnly := config.OpenShellAdminConfig{EgressAllowOnly: []string{"api.anthropic.com"}}
 	if err := CheckDecision(allowOnly, decision(sandboxrelay.DecisionEgressAllow, sandboxrelay.DecisionScopeSession, "HOST.OPENSHELL.INTERNAL")); err != nil {
 		t.Fatalf("a host port under egress_allow_only = %v", err)
@@ -182,19 +179,19 @@ func TestCheckDecisionHostPort(t *testing.T) {
 	no := false
 	var refusal *DecisionRefusedError
 	if err := CheckDecision(config.OpenShellAdminConfig{AllowHostPorts: &no},
-		decision(sandboxrelay.DecisionEgressAllow, sandboxrelay.DecisionScopeSession, openShellHostAlias)); !errors.As(err, &refusal) || refusal.Rule != RuleAllowHostPorts {
+		decision(sandboxrelay.DecisionEgressAllow, sandboxrelay.DecisionScopeSession, sandboxruntime.OpenShellHostAlias)); !errors.As(err, &refusal) || refusal.Rule != RuleAllowHostPorts {
 		t.Fatalf("a host port under allow_host_ports false = %v", err)
 	}
 	for _, d := range []sandboxrelay.DecisionRequest{
-		decision(sandboxrelay.DecisionEgressAllow, sandboxrelay.DecisionScopeAlways, openShellHostAlias),
-		decision(sandboxrelay.DecisionUnblock, sandboxrelay.DecisionScopeSession, openShellHostAlias),
+		decision(sandboxrelay.DecisionEgressAllow, sandboxrelay.DecisionScopeAlways, sandboxruntime.OpenShellHostAlias),
+		decision(sandboxrelay.DecisionUnblock, sandboxrelay.DecisionScopeSession, sandboxruntime.OpenShellHostAlias),
 	} {
 		if err := CheckDecision(config.OpenShellAdminConfig{}, d); !errors.As(err, &refusal) || refusal.Rule != RuleInvalid {
 			t.Errorf("%+v = %v, want refused as invalid", d, err)
 		}
 	}
 	if err := CheckDecision(config.OpenShellAdminConfig{UserApprovals: config.OpenShellUserApprovalsNone},
-		decision(sandboxrelay.DecisionEgressAllow, sandboxrelay.DecisionScopeSession, openShellHostAlias)); !errors.As(err, &refusal) || refusal.Rule != RuleUserApprovals {
+		decision(sandboxrelay.DecisionEgressAllow, sandboxrelay.DecisionScopeSession, sandboxruntime.OpenShellHostAlias)); !errors.As(err, &refusal) || refusal.Rule != RuleUserApprovals {
 		t.Fatalf("a host port under user_approvals none = %v", err)
 	}
 }

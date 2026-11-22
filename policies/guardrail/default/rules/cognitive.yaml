@@ -106,7 +106,11 @@ rules:
       defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_METADATA]))
     pattern: '(?i)(?:~|\$HOME|\$\{HOME\}|/root|/(?:home|Users)/[^/\\"'']+|[a-z]:[/\\]Users[/\\][^/\\"'']+)[/\\]\.defenseclaw[/\\](?:\.env|config\.yaml|confidence_policy\.yaml|guardrail_runtime\.json|device\.key|picked_connector|custom-providers\.json|(?:audit|judge|judge_bodies)\.db(?:-(?:wal|shm))?|(?:cache|hooks|installer|policies|previous[/\\]installer|quarantine|receipts|registries)[/\\][^;\s]+)\b'
     title: "DefenseClaw security state mutation"
-    severity: CRITICAL
+    # HIGH in every pack (owner, 2026-11-15T15:20Z, rel-1-0-10:GAP-0747): a
+    # proven write to DefenseClaw's own state is a high alert in the default
+    # and permissive packs and a block in strict, the tiering of
+    # tamper.agent_hook_config_write.
+    severity: HIGH
     confidence: 0.98
     tags: [cognitive-tampering, tampering, security-state]
   - id: tamper.agent_hook_config_disable
@@ -130,6 +134,35 @@ rules:
     # alert in the default pack, a block in strict.
     pattern: 'a^'
     title: "Shell write to an agent hook config"
+    severity: HIGH
+    confidence: 0.80
+    tags: [cognitive-tampering, tampering]
+  - id: tamper.defenseclaw_control_disable
+    tool_call_only: true
+    # Code-owned (defenseClawControlFindings, GAP-0596): a tool call that
+    # stops, disables, uninstalls or weakens DefenseClaw itself: the
+    # defenseclaw or defenseclaw-gateway program with a stop, disable,
+    # uninstall, reset, observe-mode, fail-open or config set/unset verb, a
+    # service manager (systemctl, launchctl, sc, net, schtasks, Stop-Service)
+    # stopping a DefenseClaw unit, label or service, or kill/pkill/taskkill of
+    # a DefenseClaw process. Read-only commands, restarts and enables stay
+    # allowed. The inert regex cannot match alone. Same decision as
+    # tamper.detector_state_write: the effect is the same as writing the state.
+    pattern: 'a^'
+    title: "Stop or disable DefenseClaw"
+    severity: CRITICAL
+    confidence: 0.98
+    tags: [cognitive-tampering, tampering, security-state]
+  - id: tamper.defenseclaw_control_unproven
+    tool_call_only: true
+    # Code-owned (defenseClawControlFindings, GAP-0596): a DefenseClaw command
+    # that changes something the rules cannot name (a verb that is not a known
+    # read, stop or disable), a dynamic DefenseClaw target of a kill or service
+    # manager, or an unopened inline script that names DefenseClaw with a
+    # stopping word. HIGH: an alert in the default and permissive packs, a
+    # block in strict.
+    pattern: 'a^'
+    title: "Change or stop DefenseClaw (unproven)"
     severity: HIGH
     confidence: 0.80
     tags: [cognitive-tampering, tampering]

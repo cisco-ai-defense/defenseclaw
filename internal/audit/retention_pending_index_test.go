@@ -22,7 +22,6 @@ func TestRetentionPendingOperationBatchSearchesTheEndedOperationsIndex(t *testin
 		`INSERT INTO sqlite_stat1(tbl, idx, stat) VALUES
 			('correlation_pending_operations', 'sqlite_autoindex_correlation_pending_operations_1', '70000 1001 1001 1001 1 1 1 1'),
 			('correlation_pending_operations', 'idx_correlation_pending_status', '70000 1001 1001 1001 1001 1 1 1 1'),
-			('correlation_pending_operations', 'idx_correlation_pending_exact', '70000 1001 1001 1001 1 1 1 1 1'),
 			('correlation_pending_operations', 'idx_correlation_pending_start_event', '70000 1'),
 			('correlation_pending_operations', 'idx_correlation_pending_terminal_event', '70000 1001')`,
 		`ANALYZE sqlite_schema`,
@@ -35,13 +34,13 @@ func TestRetentionPendingOperationBatchSearchesTheEndedOperationsIndex(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	rows, err := store.db.Query(`EXPLAIN QUERY PLAN `+statement, time.Now().UnixNano(), RetentionBatchSize)
+	rows, err := store.db.Query(`EXPLAIN QUERY PLAN `+statement, time.Now().UnixNano(), RetentionBatchSize, time.Now().UnixNano(), RetentionBatchSize, RetentionBatchSize)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer rows.Close()
 	var plan []string
-	searched := false
+	searched, searchedOpen := false, false
 	for rows.Next() {
 		var id, parent, unused int
 		var detail string
@@ -56,9 +55,15 @@ func TestRetentionPendingOperationBatchSearchesTheEndedOperationsIndex(t *testin
 		if strings.Contains(detail, "idx_correlation_pending_retention") {
 			searched = true
 		}
+		if strings.Contains(detail, "idx_correlation_pending_stale") {
+			searchedOpen = true
+		}
 	}
 	if err := rows.Err(); err != nil {
 		t.Fatal(err)
+	}
+	if !searchedOpen {
+		t.Errorf("the pending-operation batch does not use idx_correlation_pending_stale:\n%s", strings.Join(plan, "\n"))
 	}
 	if !searched {
 		t.Errorf("the pending-operation batch does not use idx_correlation_pending_retention:\n%s", strings.Join(plan, "\n"))
@@ -76,7 +81,7 @@ func TestSecureClientStoreKeepsMainsPendingOperationIndexes(t *testing.T) {
 		t.Fatal(err)
 	}
 	var count int
-	if err := store.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_correlation_pending_retention'`).Scan(&count); err != nil {
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name IN ('idx_correlation_pending_retention', 'idx_correlation_pending_stale')`).Scan(&count); err != nil {
 		t.Fatal(err)
 	}
 	if count != 0 {

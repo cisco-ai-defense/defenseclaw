@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // dotDotLinkFixture links jump to a directory whose "status" is a link to
@@ -33,12 +35,8 @@ func dotDotLinkFixture(t *testing.T) (home, cwd string) {
 			t.Fatal(err)
 		}
 	}
-	if err := os.Symlink(filepath.Join(home, ".ssh", "authorized_keys"), filepath.Join(other, "status")); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(filepath.Join(other, "child"), filepath.Join(cwd, "jump")); err != nil {
-		t.Fatal(err)
-	}
+	testenv.Symlink(t, filepath.Join(home, ".ssh", "authorized_keys"), filepath.Join(other, "status"))
+	testenv.Symlink(t, filepath.Join(other, "child"), filepath.Join(cwd, "jump"))
 	if err := os.WriteFile(filepath.Join(cwd, "status"), []byte("ordinary"), 0o600); err != nil {
 		t.Fatal(err)
 	}

@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/fixturefs"
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 )
 
@@ -76,17 +77,40 @@ func joinPathElement(dir, elem string) string {
 	return dir + string(filepath.Separator) + elem
 }
 
-// linkIntoShare is the path as a link on the local path resolves it, when
-// the link leads into a network share and the resolved path names that
-// share ("" for no such link). A link as the last component is followed
-// only with followLast: lstat, readlink and a directory walk open no final
-// link. The caller asks the share and then walks the resolved path on, so
-// a link inside the share that leads into another share is met too.
-// exhausted reports a walk that followed networkLinkHopLimit links and was
-// stopped before it could tell whether a further link leads into a share.
-func linkIntoShare(path string, followLast bool) (resolved string, exhausted bool) {
+// shareWalk is what one walk of a path read (walkShareLinks).
+type shareWalk struct {
+	// share is the path as a link on the local path resolves it, when the
+	// link leads into a network share and the resolved path names that share
+	// ("" for no such link).
+	share string
+	// exhausted reports a walk that followed networkLinkHopLimit links and
+	// was stopped before it could tell whether a further link leads into a
+	// share; stale (trust only) a known folder that has changed.
+	exhausted, stale bool
+	// resolved is the path the walk read, every link on the way followed and
+	// every component read as no link, when it read all of it and spells it
+	// as the system places it ("" otherwise). The read of the path opens it,
+	// never the name again: a link the name passes that is changed after the
+	// walk is not opened (rel-1-0-10:GAP-1074 review 1). linked reports that
+	// the walk followed a link, so resolved is not the name as spelled.
+	resolved string
+	linked   bool
+	// last is the walk's own read of the last component of resolved (with
+	// followLast, an ordinary file or folder), lastErr its error when that
+	// component does not exist. A stat of the path is that read: no second
+	// read follows the name after the share decision.
+	last    os.FileInfo
+	lastErr error
+}
+
+// linkIntoShare walks path for the share gate. A link as the last component
+// is followed only with followLast: lstat, readlink and a directory walk
+// open no final link. When a link leads into a network share the caller
+// asks the share and then walks the resolved path on (walk.share), so a link
+// inside the share that leads into another share is met too.
+func linkIntoShare(path string, followLast bool) shareWalk {
 	if !networkShareLinkWalk || path == "" {
-		return "", false
+		return shareWalk{}
 	}
 	// A hook call resolves the paths of thousands of operands, nearly all
 	// below the same folders. A folder found to be no link is not read
@@ -94,38 +118,48 @@ func linkIntoShare(path string, followLast bool) (resolved string, exhausted boo
 	// still be the folder that was found; a folder that changed (a link
 	// now, or another folder) drops what was known and the path is walked
 	// from its root (rel-1-0-9:GAP-0943, about 1 ms per operand on Windows).
-	resolved, exhausted, stale := walkShareLinks(path, followLast, true)
-	if stale {
+	walk := walkShareLinks(path, followLast, true)
+	if walk.stale {
 		forgetPlainFolders()
-		resolved, exhausted, _ = walkShareLinks(path, followLast, false)
+		walk = walkShareLinks(path, followLast, false)
 	}
-	return resolved, exhausted
+	return walk
 }
 
 // walkShareLinks is linkIntoShare. With trust it skips the folders known to
 // be no link, and reports stale when a known folder has changed.
-func walkShareLinks(path string, followLast bool, trust bool) (resolved string, exhausted, stale bool) {
+func walkShareLinks(path string, followLast bool, trust bool) (walk shareWalk) {
 	sep := string(filepath.Separator)
 	vol := filepath.VolumeName(path)
 	cur, rest := vol, path[len(vol):]
-	if rest != "" && os.IsPathSeparator(rest[0]) {
+	rooted := rest != "" && os.IsPathSeparator(rest[0])
+	if rooted {
 		cur += sep
 		rest = trimPathSeparators(rest)
 	}
+	// The walk places a name as the system does unless it is drive-relative
+	// (C:x reads below the drive's own current folder), ends in a separator,
+	// or passes a ".." the walk cannot apply as the system does (above a
+	// relative start, or after a link: Windows drops "dir\.." from the name
+	// before it opens any link). Such a name is read as given (resolved "").
+	exact := (vol == "" || rooted) && !os.IsPathSeparator(path[len(path)-1])
 	if trust {
 		// The folder that holds the last name is nearly always a known one;
 		// it is read once, and the folders above it need no walk.
 		if folder, last, known, ok := knownParent(path); ok {
 			switch same, answered := stillPlain(folder, known); {
 			case !answered:
-				return "", true, false
+				walk.exhausted = true
+				return walk
 			case !same:
-				return "", false, true
+				walk.stale = true
+				return walk
 			}
 			cur, rest = folder, last
 		}
 	}
 	hops := 0
+	lastAt := ""
 	for rest != "" {
 		var elem string
 		elem, rest = cutPathElement(rest)
@@ -135,20 +169,30 @@ func walkShareLinks(path string, followLast bool, trust bool) (resolved string, 
 		case "..":
 			if parent := filepath.Dir(cur); cur != "" && parent != "." {
 				cur = parent
+			} else {
+				exact = false
+			}
+			if walk.linked {
+				exact = false
 			}
 			continue
 		}
 		if rest == "" && !followLast {
-			return "", false, false
+			if exact {
+				walk.resolved = joinPathElement(cur, elem)
+			}
+			return walk
 		}
 		next := joinPathElement(cur, elem)
 		if known, ok := knownPlain(next); ok && trust && rest != "" {
 			if !knownBelow(next, rest) {
 				switch same, answered := stillPlain(next, known); {
 				case !answered:
-					return "", true, false
+					walk.exhausted = true
+					return walk
 				case !same:
-					return "", false, true
+					walk.stale = true
+					return walk
 				}
 			}
 			cur = next
@@ -156,26 +200,39 @@ func walkShareLinks(path string, followLast bool, trust bool) (resolved string, 
 		}
 		info, err := walkLstat(next)
 		if err != nil {
-			return "", false, false
+			// A last component that does not exist is the answer of a stat
+			// of the path; any other error leaves the read to the system.
+			if rest == "" && exact && os.IsNotExist(err) {
+				walk.resolved, walk.lastErr = next, err
+			}
+			return walk
 		}
 		if info.Mode()&(os.ModeSymlink|os.ModeIrregular) == 0 {
 			if rest != "" {
 				notePlain(next, info)
+			} else {
+				walk.last, lastAt = info, next
 			}
 			cur = next
 			continue
 		}
-		target, err := os.Readlink(next)
+		target, err := os.Readlink(fixturefs.Map(next))
+		target = fixturefs.Unmap(target)
 		if err != nil {
+			// A reparse point that is no link (a cloud file): the system
+			// opens it as it is.
 			cur = next
 			continue
 		}
 		if networkShareRootOf(target) != "" {
-			return joinPathElement(target, rest), false, false
+			walk.share = joinPathElement(target, rest)
+			return walk
 		}
 		if hops++; hops > networkLinkHopLimit {
-			return "", true, false
+			walk.exhausted = true
+			return walk
 		}
+		walk.linked = true
 		targetVol := filepath.VolumeName(target)
 		tail := target[len(targetVol):]
 		if targetVol == "" && (tail == "" || !os.IsPathSeparator(tail[0])) {
@@ -201,7 +258,13 @@ func walkShareLinks(path string, followLast bool, trust bool) (resolved string, 
 		}
 		rest = tail
 	}
-	return "", false, false
+	if exact {
+		walk.resolved = cur
+	}
+	if !exact || lastAt != cur {
+		walk.last = nil
+	}
+	return walk
 }
 
 // plainFolders are the local folders the share walk found to be no link, with
@@ -299,6 +362,11 @@ func stillPlain(path string, known os.FileInfo) (same, answered bool) {
 	// comparison is made in the goroutine too: nothing of the folder is
 	// read after the wait.
 	lstat := walkLstat
+	// The goroutine reads nothing of its hook call while it waits for the
+	// read, so on Windows it lets the call's thread go for the grace wait and
+	// the read runs on that thread (releaseHookCallThread). A read that is
+	// slow is waited for on the thread taken back, by the call found again.
+	released := releaseHookCallThread()
 	go func() {
 		info, err := lstat(path)
 		done <- err == nil && info.Mode()&(os.ModeSymlink|os.ModeIrregular) == 0 && os.SameFile(known, info)
@@ -307,13 +375,22 @@ func stillPlain(path string, known os.FileInfo) (same, answered bool) {
 	defer timer.Stop()
 	select {
 	case same := <-done:
+		retakeHookCallThread(released)
 		return same, true
 	case <-timer.C:
 	}
+	retakeHookCallThread(released)
 	call := currentHookCall()
 	wait := networkShareAnswerWait
+	// budgetCut is set when the call's share wait, not the answer wait,
+	// bounds this read: a read not back then is cut by the budget, not
+	// unanswered, and is counted as such (noteBudgetCut), so the call's
+	// memory keeps no walk it failed (rel-1-0-10:GAP-1606).
+	budgetCut := false
 	if call != nil {
-		wait = min(wait, call.shareWait())
+		if left := call.shareWait(); left < wait {
+			wait, budgetCut = left, true
+		}
 	}
 	if wait -= time.Since(start); wait > 0 {
 		timer.Reset(wait)
@@ -326,6 +403,7 @@ func stillPlain(path string, known os.FileInfo) (same, answered bool) {
 	if call != nil {
 		call.waitLeft -= time.Since(start)
 	}
+	call.noteBudgetCut(budgetCut)
 	forgetPlainFolders()
 	return false, false
 }

@@ -117,8 +117,11 @@ func recognizeProviderTokens(input string) []candidate {
 	return result
 }
 
+// providerBoundary: a token stands alone, or follows an assignment's '='
+// (GAP-0426: AWS_ACCESS_KEY_ID=AKIA... in a .env file or a tool result was
+// never redacted, because '=' counted as part of a longer token).
 func providerBoundary(input string, start, end int) bool {
-	return (start == 0 || !isProviderByte(input[start-1])) &&
+	return (start == 0 || input[start-1] == '=' || !isProviderByte(input[start-1])) &&
 		(end == len(input) || !isProviderByte(input[end]))
 }
 

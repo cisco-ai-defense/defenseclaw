@@ -93,6 +93,21 @@ func TestLocalPatternSensitiveFindingsAreNeutralizedAcrossPersistence(t *testing
 		t.Fatal(err)
 	}
 
+	// A credential in a completion is found by the rule pack (SEC-BEARER,
+	// SEC-SECRET-ASSIGN); a rule finding is its rule id and title, so the
+	// value never enters the verdict at all (rel-1-0-10:GAP-0210).
+	for _, content := range []string{header, assignment} {
+		verdict := scanLocalPatterns("completion", content)
+		if verdict == nil || len(verdict.Findings) == 0 {
+			t.Fatalf("credential in a completion produced no finding: %#v", verdict)
+		}
+		for _, finding := range verdict.Findings {
+			if strings.Contains(finding, secretValue) {
+				t.Fatalf("completion verdict carries the credential value: %q", finding)
+			}
+		}
+	}
+
 	tests := []struct {
 		name      string
 		direction string
@@ -101,8 +116,6 @@ func TestLocalPatternSensitiveFindingsAreNeutralizedAcrossPersistence(t *testing
 		idPrefix  string
 		sensitive string
 	}{
-		{name: "header", direction: "completion", content: header, category: CatCredentialLeak, idPrefix: "LP-SECRET-", sensitive: secretValue},
-		{name: "assignment", direction: "completion", content: assignment, category: CatCredentialLeak, idPrefix: "LP-SECRET-", sensitive: secretValue},
 		{name: "injection", direction: "prompt", content: directive, category: CatPromptInjection, idPrefix: "LP-INJ-", sensitive: directive},
 		{name: "PII", direction: "completion", content: personalRecord, category: CatPIIExposure, idPrefix: "LP-PII-", sensitive: personalValue},
 	}
@@ -115,8 +128,7 @@ func TestLocalPatternSensitiveFindingsAreNeutralizedAcrossPersistence(t *testing
 			normalized := NormalizeScanVerdict(verdict)
 			var sensitive *NormalizedFinding
 			for index := range normalized {
-				if normalized[index].Category == tc.category && strings.HasPrefix(normalized[index].CanonicalID, tc.idPrefix) &&
-					strings.Contains(normalized[index].Evidence, tc.sensitive) {
+				if normalized[index].Category == tc.category && strings.HasPrefix(normalized[index].CanonicalID, tc.idPrefix) {
 					sensitive = &normalized[index]
 					break
 				}
@@ -127,6 +139,12 @@ func TestLocalPatternSensitiveFindingsAreNeutralizedAcrossPersistence(t *testing
 			if strings.Contains(sensitive.CanonicalID, tc.sensitive) || strings.Contains(sensitive.OriginalID, tc.sensitive) ||
 				strings.Contains(sensitive.Title, tc.sensitive) {
 				t.Fatalf("normalized identity retained raw local value: %#v", *sensitive)
+			}
+
+			// A secret or PII finding of the scanner names the rule, never the
+			// value, evidence included (rel-1-0-10:GAP-1085).
+			if tc.category != CatPromptInjection && strings.Contains(sensitive.Evidence, tc.sensitive) {
+				t.Fatalf("the scanner's finding carries the raw local value: %#v", *sensitive)
 			}
 
 			store, logger := testStoreAndLogger(t)

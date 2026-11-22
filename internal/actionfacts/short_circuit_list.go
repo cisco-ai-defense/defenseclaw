@@ -162,7 +162,11 @@ func sequenceReduction(input Input, facts Facts, compound bool) (view Facts, ok 
 			return Facts{}, false
 		}
 	}
-	return twin, true
+	// The twin runs every command one after the other, so a cd in it may
+	// fail before every later one; the action said where each runs (`cd X
+	// && b` runs b in X only). Its paths are read in the folders of the
+	// action (rel-1-0-10:GAP-0869).
+	return twin.withWorkFoldersOf(original, input.MovedWindowsShellCWD), true
 }
 
 // shortCircuitListSequence returns source with each top-level && or || list
@@ -219,6 +223,10 @@ type sequenceStatement struct {
 	// maySkip marks a statement that is the right side of && or ||: it runs
 	// only when the left side lets it.
 	maySkip bool
+	// callStarts are, for a statement of a function body the walk flattened
+	// at a call, the source offsets of the calls that run it, outermost
+	// first: the body runs where those calls are (simplePartWorkFolders).
+	callStarts []int
 	// read is the value a read of one here-string word leaves its variable
 	// (simpleHereStringRead), nil for any other statement.
 	read *simpleReadWord
@@ -259,6 +267,17 @@ type simpleLoopBind struct {
 	// body (the straight-line reading, the builtin read): the body never runs
 	// with the variable as it was before the loop.
 	certain bool
+}
+
+// pipelineStage reports whether stmt is a bare pipeline: a pipe with no
+// negation, background, coprocess or redirect of its own, which is how the
+// parser nests the left stages of x | y | z.
+func pipelineStage(stmt *syntax.Stmt) bool {
+	if stmt == nil || stmt.Negated || stmt.Background || stmt.Coprocess || stmt.Disown || len(stmt.Redirs) != 0 {
+		return false
+	}
+	binary, ok := stmt.Cmd.(*syntax.BinaryCmd)
+	return ok && (binary.Op == syntax.Pipe || binary.Op == syntax.PipeAll)
 }
 
 // sequenceStatementDetails is the one full-parser flattening step. The
@@ -388,8 +407,13 @@ func sequenceStatementDetails(source string, compound, allSimple, straight, walk
 		if call, ok := node.(*syntax.CallExpr); ok {
 			read = simpleHereStringRead(call, redirs, order, calling)
 		}
+		var callStarts []int
+		for _, call := range calling {
+			callStarts = append(callStarts, int(call.Pos().Offset()))
+		}
 		statements = append(statements, sequenceStatement{text: statement, scope: scope,
-			sourceStart: int(from.Offset()), maySkip: skippable != 0, read: read, binds: slices.Clone(loopBinds)})
+			sourceStart: int(from.Offset()), maySkip: skippable != 0, read: read, binds: slices.Clone(loopBinds),
+			callStarts: callStarts})
 		return true
 	}
 	subshells := 0
@@ -468,7 +492,18 @@ func sequenceStatementDetails(source string, compound, allSimple, straight, walk
 				if _, loop := typed.Y.Cmd.(*syntax.WhileClause); loop && typed.Op == syntax.Pipe && len(typed.Y.Redirs) == 0 {
 					pipeInput = typed.X
 				}
-				return true, childScope('s', func() bool { return flatten(typed.X) }) &&
+				// A pipeline x | y | z is the tree ((x | y) | z) and its
+				// stages are siblings, each run by its own subshell. The
+				// inner pipeline is flattened in this scope, not in a child
+				// of it, so its stages take child scopes of this scope. A
+				// child scope per level made the name of a scope as long as
+				// the pipeline before it, and the names of n stages took
+				// n^2 bytes (GAP-0254: a 67 KB pipeline held 6 GiB).
+				left := func() bool { return childScope('s', func() bool { return flatten(typed.X) }) }
+				if pipelineStage(typed.X) {
+					left = func() bool { return flatten(typed.X) }
+				}
+				return true, left() &&
 					childScope('s', func() bool { return flatten(typed.Y) })
 			}
 			if !flatten(typed.X) {
@@ -627,13 +662,25 @@ func sequenceStatementDetails(source string, compound, allSimple, straight, walk
 				return false
 			}
 			reduced = true
-			if replaced, ok := flattenRedirected(stmt); replaced {
-				return ok
+			walk := func() bool {
+				if replaced, ok := flattenRedirected(stmt); replaced {
+					return ok
+				}
+				if allSimple && !flattenSubstitutions(stmt) {
+					return false
+				}
+				return stmt.Cmd != nil && keep(stmt.Cmd, stmt.Redirs...)
 			}
-			if allSimple && !flattenSubstitutions(stmt) {
-				return false
+			if !stmt.Background {
+				return walk()
 			}
-			return stmt.Cmd != nil && keep(stmt.Cmd, stmt.Redirs...)
+			// The shell runs a background statement in a child shell: its
+			// HOME, other variables and directory stay there, and the
+			// statements after it read the values from before it
+			// (rel-1-0-10:GAP-1021).
+			subshells++
+			defer func() { subshells-- }()
+			return childScope('s', walk)
 		}
 		if replaced, ok := flattenRedirected(stmt); replaced {
 			reduced = true
@@ -1073,9 +1120,13 @@ func simpleExportedFunctionNames(decl *syntax.DeclClause) ([]string, bool) {
 
 // simpleFunctionCallName resolves literal spellings and the shell builtins
 // that can run a name supplied after them. Their interpretation can differ
-// among shells, so including the body is the conservative policy view.
+// among shells, so including the body is the conservative policy view. The
+// test builtin `[` is a name too (simpleStaticProgramWord): read as a word,
+// its unmatched glob opener is not static, and a `[ ... ]` anywhere in an
+// action that defines a function left the whole action unsplit, so a
+// protected write after it was never judged (substrate-1:GAP-0692).
 func simpleFunctionCallName(call *syntax.CallExpr) (string, bool) {
-	name, ok := simpleStaticWord(call.Args[0], nil)
+	name, ok := simpleStaticProgramWord(call.Args[0], nil)
 	if !ok {
 		return "", false
 	}
@@ -1088,7 +1139,7 @@ func simpleFunctionCallName(call *syntax.CallExpr) (string, bool) {
 		if index == len(call.Args) {
 			return name, true
 		}
-		return simpleStaticWord(call.Args[index], nil)
+		return simpleStaticProgramWord(call.Args[index], nil)
 	}
 	return name, true
 }
@@ -1165,7 +1216,7 @@ func simpleMayImportExportedFunctions(call *syntax.CallExpr, source string, expo
 	if call == nil || len(call.Args) == 0 {
 		return false
 	}
-	program, known := simpleStaticWord(call.Args[0], nil)
+	program, known := simpleStaticProgramWord(call.Args[0], nil)
 	if known && simpleNonSpawningBuiltins[program] {
 		return false
 	}

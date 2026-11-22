@@ -29,6 +29,20 @@ func TestCompromisedCredentialAuthenticationLifecycleDetectsWithoutBlocking(t *t
 			)
 			_, pre := runSQLLifecycleGatewayStage(t, api, profile, auth)
 			assertRuleAbsent(t, pre, compromisedCredentialChainID)
+			if posture == "strict" {
+				// The authentication step is a credentialed NetExec call, which the
+				// built-in HIGH credential.directory_ticket_request rule owns
+				// (rel-1-0-10:GAP-0014). Strict blocks HIGH, so it prevents the call
+				// before it runs: no successful authentication follows and the
+				// detection-only chain has nothing to observe. That is the intended
+				// balanced-defaults trade (default and permissive alert, strict
+				// blocks); default and permissive still prove the chain below.
+				assertRulePresent(t, pre, directoryTicketRequestRuleID)
+				if pre.Action != guardrailActionBlock {
+					t.Fatalf("strict did not block the credentialed NetExec call: %+v", pre)
+				}
+				return
+			}
 			_, response := runSQLLifecycleGatewayStage(
 				t, api, profile, successfulToolResult(auth),
 			)

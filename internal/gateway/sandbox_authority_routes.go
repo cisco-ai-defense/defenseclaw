@@ -166,10 +166,11 @@ func sandboxDriverClaim(cfg *config.Config, goos string, floor config.OpenShellA
 	}
 	switch {
 	case goos == "darwin" || want == config.EnterpriseOpenShellDriverDocker:
-		// One driver, no fallback: macOS runs only the MicroVM driver.
-		if goos == "darwin" {
-			want = config.EnterpriseOpenShellDriverVM
-		}
+		// One driver, no fallback: the docker driver, and macOS, which runs
+		// the MicroVM driver unless the organization sets docker
+		// (SandboxDriver). Forcing vm here refused the registration of
+		// every managed Mac sandbox on the docker driver that ensure and
+		// the availability probe had set up (rel-1-0-10:GAP-0007).
 		if driver != want {
 			return "", "", sandboxDriverSwitchRefusal(driver, want)
 		}
@@ -571,6 +572,13 @@ func (a *APIServer) handleSandboxResolve(w http.ResponseWriter, r *http.Request)
 	if sandboxDaemonOutdated(r) {
 		logOutdatedSandboxDaemon(peer, sandboxrelay.PathPolicyResolve)
 		refuse(sandboxrelay.ReasonDaemonOutdated, sandboxTextDaemonOutdated, access)
+		return
+	}
+	// runtimes without openshell (E26): the caller's agents run on Agent
+	// Substrate, so no sandbox starts on this computer, whatever OpenShell
+	// could do here.
+	if !floor.AllowsRuntime(config.SandboxRuntimeOpenShell) {
+		refuse(sandboxrelay.ReasonNotAllowed, sandboxapi.SandboxRunSubstrateOnly(req.Harness, match.decision.Name), access)
 		return
 	}
 	// Where sandboxes can run for the caller, and on which driver: the
@@ -1169,7 +1177,7 @@ func (a *APIServer) handleSandboxExplain(w http.ResponseWriter, r *http.Request)
 		Profile: label, PinnedProfile: pinned, Description: description,
 		Match: scope.match.decision.Match, MatchedGroup: scope.match.decision.MatchedGroup,
 		Provisional: scope.match.provisional, Allowed: floor.Allowed == nil || *floor.Allowed,
-		RequiredFor: slices.Clone(floor.RequiredFor), WhenUnavailable: floor.WhenUnavailable,
+		RequiredFor: slices.Clone(floor.RequiredFor), WhenUnavailable: floor.WhenUnavailable, Runtimes: slices.Clone(floor.Runtimes),
 		AllowedHarnesses: slices.Clone(floor.AllowedHarnesses), AllowedCredentials: slices.Clone(floor.AllowedCredentials),
 		EgressAllowOnly: slices.Clone(floor.EgressAllowOnly), EgressBlock: slices.Clone(floor.EgressBlock),
 		UserApprovals: floor.UserApprovals, AllowUnblock: floor.AllowUnblock == nil || *floor.AllowUnblock,

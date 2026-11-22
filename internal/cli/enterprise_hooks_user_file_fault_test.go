@@ -29,6 +29,109 @@ import (
 // still reports the records as stale, and the fault excuses nothing the
 // guardian itself recorded as failed.
 func TestVerifyComparesAUserFileOnlyFaultAsProtected(t *testing.T) {
+	f := newVerifyRecordedProtectionFixture(t)
+	settings := filepath.Join(f.scope, "Bob", ".claude", "settings.json")
+	userFile := fmt.Errorf("enterprise hooks: copilot VS Code Local hooks: %w", enterpriseHookUserFileFault{
+		err: fmt.Errorf("DefenseClaw cannot check %s for its older per-user hooks (invalid character); until the file is valid JSON or removed, Copilot CLI in a project under the home and Cursor block their tool calls on it", settings),
+	})
+	bob, reconcile, verify := f.bob, f.reconcile, f.verify
+
+	// The guardian's pass and Setup readiness record Bob protected (the
+	// file is a warning there); public verify fails his row on the file.
+	reconcile(0)
+	f.verifyErr = userFile
+	run := verify("user file only")
+	if run.Failures != 1 || len(run.Excused) != 0 {
+		t.Fatalf("user file only: failures=%d excused=%d, want Bob's row failed and not excused: %+v", run.Failures, len(run.Excused), run.Rows)
+	}
+	for _, row := range run.Rows {
+		if (row.SID == bob) == row.OK || (row.SID == bob && !strings.Contains(row.Error, settings)) {
+			t.Fatalf("user file only: row %+v, want only Bob's row failed, naming %s", row, settings)
+		}
+	}
+	if run.AuthorizationErr != nil {
+		t.Fatalf("user file only: the protected records are reported as a second fault: %v", run.AuthorizationErr)
+	}
+
+	// Control: another failure of a row the guardian recorded protected
+	// still reports the records as not matching current verification.
+	f.verifyErr = errors.New("enterprise hooks: connector codex hook verification failed: owned hook command not present")
+	run = verify("other fault")
+	if run.Failures != 1 || run.AuthorizationErr == nil || !strings.Contains(run.AuthorizationErr.Error(), "target dispositions do not match") {
+		t.Fatalf("other fault: failures=%d authorization=%v, want the records reported as stale", run.Failures, run.AuthorizationErr)
+	}
+
+	// Control: the fault excuses nothing the guardian recorded as failed.
+	f.guardianErr = errors.New("enterprise hooks: connector codex hook installation failed")
+	reconcile(1)
+	f.verifyErr = userFile
+	run = verify("guardian recorded the row failed")
+	if run.AuthorizationErr == nil {
+		t.Fatalf("guardian recorded the row failed: verify accepted the records: rows=%+v", run.Rows)
+	}
+}
+
+// rel-1-0-10 GAP-1256: an elevated Administrator's verify cannot read the
+// route-only account files (only LocalSystem can), so the row fails with
+// route_config_unverified, and that is all it reports: the protected
+// activation and authorization the guardian (as SYSTEM) recorded for that
+// target are compared as protected, not as "extra or stale target" or a
+// disposition mismatch. Verify still fails on the row. Only the unverified
+// target is compared so: a target the guardian recorded failed, or any
+// other fault, still reports the records.
+func TestVerifyComparesARouteOnlyUnverifiedTargetAsRecorded(t *testing.T) {
+	f := newVerifyRecordedProtectionFixture(t)
+	bob, reconcile, verify := f.bob, f.reconcile, f.verify
+
+	reconcile(0)
+	f.routeOnlyUnverified = true
+	run := verify("route-only unverified")
+	if run.Failures != 1 || len(run.Excused) != 0 {
+		t.Fatalf("route-only unverified: failures=%d excused=%d, want Bob's row failed and not excused: %+v", run.Failures, len(run.Excused), run.Rows)
+	}
+	for _, row := range run.Rows {
+		if (row.SID == bob) == row.OK || (row.SID == bob && !strings.Contains(row.Error, enterprisehooks.RouteConfigUnverifiedCode)) {
+			t.Fatalf("route-only unverified: row %+v, want only Bob's row failed with %s", row, enterprisehooks.RouteConfigUnverifiedCode)
+		}
+	}
+	if run.AuthorizationErr != nil {
+		t.Fatalf("route-only unverified: the protected records are compared against the partial verification: %v", run.AuthorizationErr)
+	}
+
+	// Control: another fault of the same target still reports the records.
+	f.routeOnlyUnverified = false
+	f.verifyErr = errors.New("enterprise hooks: connector codex hook verification failed: owned hook command not present")
+	run = verify("other fault")
+	if run.Failures != 1 || run.AuthorizationErr == nil || !strings.Contains(run.AuthorizationErr.Error(), "target dispositions do not match") {
+		t.Fatalf("other fault: failures=%d authorization=%v, want the records reported as stale", run.Failures, run.AuthorizationErr)
+	}
+
+	// Control: a target the guardian recorded failed is not excused.
+	f.verifyErr = nil
+	f.guardianErr = errors.New("enterprise hooks: connector codex hook installation failed")
+	reconcile(1)
+	f.routeOnlyUnverified = true
+	run = verify("guardian recorded the row failed")
+	if run.Failures != 1 || run.AuthorizationErr == nil {
+		t.Fatalf("guardian recorded the row failed: failures=%d, verify accepted the records: rows=%+v", run.Failures, run.Rows)
+	}
+}
+
+// verifyRecordedProtectionFixture is a two-account (Alice, Bob) codex
+// manifest with a guardian pass and a live verify whose outcome for Bob the
+// test sets: guardianErr fails his guardian row, verifyErr his live verify,
+// and routeOnlyUnverified returns his result with route-only unverified.
+type verifyRecordedProtectionFixture struct {
+	scope, bob             string
+	guardianErr, verifyErr error
+	routeOnlyUnverified    bool
+	reconcile              func(wantFailures int)
+	verify                 func(name string) enterpriseHookVerifyRun
+}
+
+func newVerifyRecordedProtectionFixture(t *testing.T) *verifyRecordedProtectionFixture {
+	t.Helper()
+	f := &verifyRecordedProtectionFixture{}
 	restoreEnterpriseHooksLifecycleTestState(t)
 	stubEnterpriseHookAuthorizationTrustForTempDir(t)
 	stubEnterpriseHookTokenSources(t)
@@ -64,6 +167,7 @@ func TestVerifyComparesAUserFileOnlyFaultAsProtected(t *testing.T) {
 	enterpriseHookReconcileTargetFailModeChange = func(enterprisehooks.InstallOptions) (string, string, error) { return "", "", nil }
 
 	scope := t.TempDir()
+	f.scope = scope
 	dataDir := filepath.Join(scope, "runtime")
 	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		t.Fatal(err)
@@ -97,29 +201,29 @@ func TestVerifyComparesAUserFileOnlyFaultAsProtected(t *testing.T) {
 	}
 	enterpriseHookReconcileSessionAvailable = func(enterprisehooks.ManifestTarget) (bool, error) { return true, nil }
 	enterpriseHookReconcileDeferredSessionAvailable = enterpriseHookReconcileSessionAvailable
-	settings := filepath.Join(scope, "Bob", ".claude", "settings.json")
-	userFile := fmt.Errorf("enterprise hooks: copilot VS Code Local hooks: %w", enterpriseHookUserFileFault{
-		err: fmt.Errorf("DefenseClaw cannot check %s for its older per-user hooks (invalid character); until the file is valid JSON or removed, Copilot CLI in a project under the home and Cursor block their tool calls on it", settings),
-	})
-	var guardianErr, verifyErr error
-	stub := func(err *error) func(context.Context, enterprisehooks.InstallOptions) (enterprisehooks.InstallResult, error) {
+	f.bob = bob
+	stub := func(err *error, live bool) func(context.Context, enterprisehooks.InstallOptions) (enterprisehooks.InstallResult, error) {
 		return func(_ context.Context, opts enterprisehooks.InstallOptions) (enterprisehooks.InstallResult, error) {
 			if opts.OwnerSID == bob && *err != nil {
 				return enterprisehooks.InstallResult{}, *err
 			}
-			return enterprisehooks.InstallResult{Connector: opts.ConnectorName, UserHome: opts.UserHome}, nil
+			result := enterprisehooks.InstallResult{Connector: opts.ConnectorName, UserHome: opts.UserHome}
+			if live && opts.OwnerSID == bob && f.routeOnlyUnverified {
+				result.RouteOnly = enterprisehooks.RouteOnlyUnverified
+			}
+			return result, nil
 		}
 	}
-	enterpriseHookReconcileInstaller, enterpriseHookReconcileVerifier = stub(&guardianErr), stub(&guardianErr)
-	enterpriseHookLivePublicVerifier, enterpriseHookLiveRegistrationVerifier = stub(&verifyErr), stub(&verifyErr)
-	reconcile := func(wantFailures int) {
+	enterpriseHookReconcileInstaller, enterpriseHookReconcileVerifier = stub(&f.guardianErr, false), stub(&f.guardianErr, false)
+	enterpriseHookLivePublicVerifier, enterpriseHookLiveRegistrationVerifier = stub(&f.verifyErr, true), stub(&f.verifyErr, true)
+	f.reconcile = func(wantFailures int) {
 		t.Helper()
 		run, err := runEnterpriseHookReconcileOnce(context.Background())
 		if err != nil || run.StateErr != nil || run.Failures != wantFailures {
 			t.Fatalf("guardian pass: run=%+v err=%v, want %d failure(s)", run, err, wantFailures)
 		}
 	}
-	verify := func(name string) enterpriseHookVerifyRun {
+	f.verify = func(name string) enterpriseHookVerifyRun {
 		t.Helper()
 		run, err := runEnterpriseHookVerifyAttemptWithScope(context.Background(), false)
 		if err != nil {
@@ -127,38 +231,5 @@ func TestVerifyComparesAUserFileOnlyFaultAsProtected(t *testing.T) {
 		}
 		return run
 	}
-
-	// The guardian's pass and Setup readiness record Bob protected (the
-	// file is a warning there); public verify fails his row on the file.
-	reconcile(0)
-	verifyErr = userFile
-	run := verify("user file only")
-	if run.Failures != 1 || len(run.Excused) != 0 {
-		t.Fatalf("user file only: failures=%d excused=%d, want Bob's row failed and not excused: %+v", run.Failures, len(run.Excused), run.Rows)
-	}
-	for _, row := range run.Rows {
-		if (row.SID == bob) == row.OK || (row.SID == bob && !strings.Contains(row.Error, settings)) {
-			t.Fatalf("user file only: row %+v, want only Bob's row failed, naming %s", row, settings)
-		}
-	}
-	if run.AuthorizationErr != nil {
-		t.Fatalf("user file only: the protected records are reported as a second fault: %v", run.AuthorizationErr)
-	}
-
-	// Control: another failure of a row the guardian recorded protected
-	// still reports the records as not matching current verification.
-	verifyErr = errors.New("enterprise hooks: connector codex hook verification failed: owned hook command not present")
-	run = verify("other fault")
-	if run.Failures != 1 || run.AuthorizationErr == nil || !strings.Contains(run.AuthorizationErr.Error(), "target dispositions do not match") {
-		t.Fatalf("other fault: failures=%d authorization=%v, want the records reported as stale", run.Failures, run.AuthorizationErr)
-	}
-
-	// Control: the fault excuses nothing the guardian recorded as failed.
-	guardianErr = errors.New("enterprise hooks: connector codex hook installation failed")
-	reconcile(1)
-	verifyErr = userFile
-	run = verify("guardian recorded the row failed")
-	if run.AuthorizationErr == nil {
-		t.Fatalf("guardian recorded the row failed: verify accepted the records: rows=%+v", run.Rows)
-	}
+	return f
 }

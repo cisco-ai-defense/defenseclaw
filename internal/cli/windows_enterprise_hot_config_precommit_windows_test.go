@@ -100,6 +100,7 @@ func TestWindowsConfirmedBundleReplayRepairsDriftWithPriorPolicyMismatch(t *test
 // gateway. Setup may continue through its full transaction; a signed bundle
 // reports a retryable conflict without touching the gateway.
 func TestWindowsHotConfigPrecommitConflictKeepsConcurrentConfigAndGateway(t *testing.T) {
+	requireAdministratorTestToken(t, "the config writer creates its lock with the canonical Administrators owner (managed.ErrCanonicalOwnerUnavailable otherwise)")
 	const previous = "config_version: 9\nguardrail:\n  block_at: MEDIUM\n"
 	const next = "config_version: 9\nguardrail:\n  block_at: LOW\n"
 	const concurrent = "config_version: 9\nguardrail:\n  block_at: HIGH\n"

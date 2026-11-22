@@ -81,7 +81,8 @@
       "support": "cataloged",
       "connector_id": "hermes",
       "kind": "native",
-      "source_url": "https://github.com/NousResearch/hermes-agent/blob/main/website/docs/developer-guide/programmatic-integration.md"
+      "source_url": "https://github.com/NousResearch/hermes-agent/blob/main/website/docs/developer-guide/programmatic-integration.md",
+      "runs_own_tools": true
     },
     {
       "id": "copilot",

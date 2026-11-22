@@ -61,7 +61,6 @@ import (
 // reference: https://cisco-ai-defense.github.io/defenseclaw/docs/connectors/zeptoclaw/
 type ZeptoClawConnector struct {
 	gatewayToken string
-	masterKey    string
 
 	// snapshotMu protects providers.
 	snapshotMu sync.RWMutex
@@ -230,6 +229,8 @@ func (c *ZeptoClawConnector) providerBearerMatchesSnapshot(r *http.Request) bool
 	}
 	auth := r.Header.Get("Authorization")
 	key := ExtractBearerKey(auth)
+	// A stale sk-dc- value from a pre-1.0.10 agent config is never a provider
+	// key (remove in 1.1).
 	if key == "" || strings.HasPrefix(key, "sk-dc-") {
 		return false
 	}
@@ -263,20 +264,13 @@ func (c *ZeptoClawConnector) providerBearerMatchesSnapshot(r *http.Request) bool
 //
 // The ZeptoClaw process itself sends only the upstream provider credential
 // in Authorization (e.g. Bedrock bearer). After B1 we still require either
-// X-DC-Auth, the master key, or—on loopback only—a bearer that matches an
+// X-DC-Auth or, on loopback only, a bearer that matches an
 // api_key captured in the Setup-time provider snapshot (same secret Zepto
 // has in ~/.zeptoclaw/config.json).
 func (c *ZeptoClawConnector) Authenticate(r *http.Request) bool {
 	if dcAuth := r.Header.Get("X-DC-Auth"); dcAuth != "" {
 		token := strings.TrimPrefix(dcAuth, "Bearer ")
 		if c.gatewayToken != "" && SecureTokenMatch(token, c.gatewayToken) {
-			return true
-		}
-	}
-
-	if c.masterKey != "" {
-		auth := r.Header.Get("Authorization")
-		if strings.HasPrefix(auth, "Bearer ") && SecureTokenMatch(strings.TrimPrefix(auth, "Bearer "), c.masterKey) {
 			return true
 		}
 	}
@@ -290,17 +284,16 @@ func (c *ZeptoClawConnector) Authenticate(r *http.Request) bool {
 	// effectively unreachable in production — but defensive belt-and-
 	// suspenders for the brief boot interval before ensureGatewayToken
 	// finishes writing ~/.defenseclaw/.env.
-	if c.gatewayToken == "" && c.masterKey == "" && IsLoopback(r) {
+	if c.gatewayToken == "" && IsLoopback(r) {
 		return true
 	}
 
 	return false
 }
 
-// SetCredentials injects the gateway token and master key at sidecar boot.
-func (c *ZeptoClawConnector) SetCredentials(gatewayToken, masterKey string) {
+// SetCredentials injects the gateway token at sidecar boot.
+func (c *ZeptoClawConnector) SetCredentials(gatewayToken string) {
 	c.gatewayToken = gatewayToken
-	c.masterKey = masterKey
 }
 
 // SetProviderSnapshot stores the user's resolved provider table. Called by

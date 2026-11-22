@@ -85,3 +85,48 @@ func TestStandaloneGatewayHealthReportsTheAIDefensePosture(t *testing.T) {
 		})
 	}
 }
+
+// GAP-1111: the gateway's exclude_users warning gets its own code in the
+// Windows lifecycle result.
+func TestStandaloneGatewayExcludeEntryWarningCode(t *testing.T) {
+	result := enterprisestatus.New("status", "standalone", "windows", "test")
+	const warning = "enterprise.enrollment.exclude_users: 1 entry (position 2 in the list) matches no account this host knows, so it excludes nobody"
+	appendStandaloneGatewayWarnings(result, []byte(`{}`), []byte(`{"profile_warnings":["`+warning+`"]}`))
+	for _, got := range result.Warnings {
+		if got.Message == warning && got.Code == "enrollment_exclude_unmatched" {
+			return
+		}
+	}
+	t.Fatalf("warnings = %+v, want enrollment_exclude_unmatched", result.Warnings)
+}
+
+// S8 review P3-1: Windows status and verify warn hook_over_capacity from the
+// authenticated /status, and from an administrator /health when /status is
+// absent; a document without the window gives no warning.
+func TestStandaloneGatewayHookCapacityWarning(t *testing.T) {
+	over := []byte(`{"hook_capacity":{"window_minutes":60,"window":{"answered":40,"deadline_denies":2,"shed":3}}}`)
+	for name, docs := range map[string][2][]byte{
+		"status":      {[]byte(`{}`), over},
+		"health only": {over, nil},
+	} {
+		result := enterprisestatus.New("verify", "standalone", "windows", "test")
+		appendStandaloneGatewayWarnings(result, docs[0], docs[1])
+		found := false
+		for _, warning := range result.Warnings {
+			if warning.Code == enterprisestatus.CodeHookOverCapacity {
+				found = strings.Contains(warning.Message, "2 agent tool call(s) were blocked") &&
+					strings.Contains(warning.Message, "3 call(s) refused by the admission limits")
+			}
+		}
+		if !found {
+			t.Fatalf("%s: warnings = %+v, want hook_over_capacity with both clauses", name, result.Warnings)
+		}
+	}
+	result := enterprisestatus.New("verify", "standalone", "windows", "test")
+	appendStandaloneGatewayWarnings(result, []byte(`{}`), []byte(`{}`))
+	for _, warning := range result.Warnings {
+		if warning.Code == enterprisestatus.CodeHookOverCapacity {
+			t.Fatalf("a quiet gateway warned: %+v", warning)
+		}
+	}
+}

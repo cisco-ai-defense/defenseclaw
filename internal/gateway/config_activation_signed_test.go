@@ -130,6 +130,12 @@ func bundleWrite(id string, version uint64) configwrite.Options {
 // whose first generation is the signed bundle v1 of a store.
 func managedSignedManager(t *testing.T) (mgr *ConfigManager, store *signedStore, path string, source []byte, applied *int) {
 	t.Helper()
+	// policy.last_reload_error (liveReloadError) is process-wide, and the
+	// stub apply below never publishes a generation, which is what clears it
+	// in a gateway. Callers assert on it, so it starts and ends empty: a
+	// refused reload of an earlier test is not this manager's (GAP-1215).
+	clearGenerationBuildError()
+	t.Cleanup(clearGenerationBuildError)
 	dir := t.TempDir()
 	path = filepath.Join(dir, config.DefaultConfigName)
 	writeConfigForManagerTest(t, path, dir, "observe")

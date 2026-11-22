@@ -16,6 +16,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/spf13/cobra"
 )
 
@@ -24,11 +25,11 @@ import (
 func managedPerUserSeams(t *testing.T, managedHost bool) string {
 	t.Helper()
 	where := `HKLM\SOFTWARE\Cisco\DefenseClaw\Enterprise`
-	restore, restoreAccount, restoreReport := managedHostWindowsStandalone, managedHostCurrentAccount, reportManagedCommandRefusal
+	restore, restoreAccount, restoreReport := hookcli.ManagedHostWindowsStandalone, managedHostCurrentAccount, reportManagedCommandRefusal
 	t.Cleanup(func() {
-		managedHostWindowsStandalone, managedHostCurrentAccount, reportManagedCommandRefusal = restore, restoreAccount, restoreReport
+		hookcli.ManagedHostWindowsStandalone, managedHostCurrentAccount, reportManagedCommandRefusal = restore, restoreAccount, restoreReport
 	})
-	managedHostWindowsStandalone = func() (string, bool) { return where, managedHost }
+	hookcli.ManagedHostWindowsStandalone = func() (string, bool) { return where, managedHost }
 	managedHostCurrentAccount = func() string { return `HOST\dcuser` }
 	reportManagedCommandRefusal = func(string, string) {}
 	return where

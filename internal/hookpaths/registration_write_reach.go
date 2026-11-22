@@ -8,12 +8,15 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
 	"unicode/utf8"
 
 	"mvdan.cc/sh/v3/syntax"
+
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 )
 
 // registrationWriteReachedAs is RegistrationWriteReached in one reading of
@@ -38,12 +41,13 @@ func registrationWriteReachedAs(command, cwd, home string, names []string) []str
 	}
 	protected := make(protectedFiles, 0, len(names))
 	origin := make([]string, 0, len(names))
+	call := memoHookCall() // once for the names (rel-1-0-10:GAP-1293)
 	for _, name := range names {
 		if !filepath.IsAbs(name) {
 			continue
 		}
-		entry := protectedFile{path: filepath.Clean(name)}
-		if info, err := pathStat(entry.path); err == nil {
+		entry := protectedFile{path: filepath.Clean(name), call: call}
+		if info, err := call.stat(entry.path); err == nil {
 			entry.info = info
 		} else if !os.IsNotExist(err) {
 			entry.unknown = true
@@ -54,7 +58,7 @@ func registrationWriteReachedAs(command, cwd, home string, names []string) []str
 	var reached []string
 	var narrow func(lo, hi int)
 	narrow = func(lo, hi int) {
-		if lo >= hi || !registrationWriteReach(file, command, cwd, home, protected[lo:hi]) {
+		if lo >= hi || !registrationWriteReach(file, command, cwd, home, protected[lo:hi], protected) {
 			return
 		}
 		if hi-lo == 1 {
@@ -81,7 +85,9 @@ func registrationWriteReachedAs(command, cwd, home string, names []string) []str
 	return merged
 }
 
-func registrationWriteReach(file *syntax.File, command, cwd, home string, protected protectedFiles) bool {
+// registrationWriteReach reports whether the command writes a member of
+// protected, one part of the registration set all the narrowing reads.
+func registrationWriteReach(file *syntax.File, command, cwd, home string, protected, all protectedFiles) bool {
 	fileProtected := make(protectedFiles, 0, len(protected))
 	for _, entry := range protected {
 		if entry.info == nil || !entry.info.IsDir() {
@@ -117,10 +123,10 @@ func registrationWriteReach(file *syntax.File, command, cwd, home string, protec
 		return true
 	}
 	if registrationLoopReach(file, command, cwd, home, protected) ||
-		registrationFindRsyncReach(file, cwd, home, protected) {
+		registrationFindRsyncReach(file, cwd, home, protected, all) {
 		return true
 	}
-	if strings.Contains(command, "cd ") || strings.Contains(command, "pushd ") {
+	if ChangesDirectory(command) {
 		if statements, ok := TopLevelStatements(command, cwd, home); ok {
 			for _, statement := range statements {
 				if readOperands(statement.Command, statement.Dir, statement.User) {
@@ -348,7 +354,7 @@ func registrationWalkLinks(file *syntax.File, command, cwd, home string, protect
 					continue
 				}
 				if strings.ContainsAny(value, "*?[") && actionWordHasUnquotedGlob(word, command) {
-					paths := actionBoundedGlob(OperandPath(value, currentCWD), false)
+					paths, truncated := actionBoundedGlob(OperandPath(value, currentCWD), false)
 					if len(paths) > 64 {
 						continue
 					}
@@ -358,6 +364,9 @@ func registrationWalkLinks(file *syntax.File, command, cwd, home string, protect
 							return false
 						}
 					}
+					// No match read before the cap is registered: the
+					// reading is truncated (RegistrationWriteReachedBounded).
+					noteGlobCut(truncated)
 					continue
 				}
 				if !strings.ContainsAny(value, "*?[") && protectedReachPath(OperandPath(value, currentCWD), protected, "") {
@@ -640,10 +649,13 @@ func registrationItemPaths(word *syntax.Word, command, cwd, home string) []strin
 		return nil
 	}
 	if strings.ContainsAny(value, "*?[") && actionWordHasUnquotedGlob(word, command) {
-		matches := actionBoundedGlob(OperandPath(value, cwd), false)
+		matches, truncated := actionBoundedGlob(OperandPath(value, cwd), false)
 		if len(matches) > 64 {
 			return nil
 		}
+		// The loop reader decides on the matches read before the cap: the
+		// reading is truncated (RegistrationWriteReachedBounded).
+		noteGlobCut(truncated)
 		return matches
 	}
 	return []string{value}
@@ -777,6 +789,32 @@ func registrationLoopStatementTargets(stmt *syntax.Stmt, values actionValues, cw
 				}
 			}
 		}
+	case "sh", "bash", "dash", "ash", "zsh", "ksh":
+		// A shell body that hands a word of its own to inline code (python -c
+		// CODE "$1") is handed the words the shell was given
+		// (rel-1-0-10:GAP-0365).
+		words := []string{program}
+		for _, word := range operands {
+			words = append(words, inlineWordValue(word, values, cwd, home))
+		}
+		if body, ok := shellCommandBodyIndex(words); ok && words[body] != "$" {
+			if handed, _ := InlineHandedPaths(words[body], cwd, home); InlineHandsDynamic(handed) {
+				for _, word := range words[body+1:] {
+					if actionfacts.InlineHandedWordIsPath(word) {
+						targets = append(targets, word)
+					}
+				}
+			}
+		}
+	default:
+		// An inline interpreter child is handed its argument paths as
+		// possible writes (rel-1-0-10:GAP-0365); a word with no fixed
+		// value is no path.
+		words := []string{program}
+		for _, word := range operands {
+			words = append(words, inlineWordValue(word, values, cwd, home))
+		}
+		targets = append(targets, actionfacts.InlineCodeHandedWords(words)...)
 	}
 	return targets
 }
@@ -814,7 +852,31 @@ func registrationFindActionTargets(args []*syntax.Word, values actionValues, cwd
 				if action == "-execdir" || action == "-okdir" {
 					dir = filepath.Dir(file)
 				}
-				run(registrationFindFileWords(operands, file, home), dir)
+				words := registrationFindFileWords(operands, file, home)
+				run(words, dir)
+				// A child that is no proven reader of the file it is handed (an
+				// option that writes a file or runs a program, a program that
+				// changes it) may change it: the same screens the state reader
+				// applies (actionfacts.FindEmbeddedCommandMayChange,
+				// rel-1-0-10:GAP-0501, GAP-0660).
+				var childWords []string
+				for _, word := range words {
+					text, fixed := StaticWord(word, home)
+					if !fixed {
+						text = "$"
+					}
+					childWords = append(childWords, text)
+				}
+				// Only the programs a find child may not be a reader of: the
+				// wrapper (env, nice, timeout, sudo) is looked through.
+				child, _, _ := actionfacts.InlineChild(childWords)
+				argv := append([]string{"find", action}, child...)
+				if len(child) == 0 || !slices.Contains([]string{"rg", "file", "less", "sort", "chmod", "chown", "chgrp", "touch"}, programBase(child[0])) {
+					continue
+				}
+				if actionfacts.FindEmbeddedCommandMayChange(append(argv, ";")) {
+					targets = append(targets, file)
+				}
 			}
 		default:
 			if len(operands) > 0 {
@@ -848,16 +910,13 @@ func registrationFindFileWords(words []*syntax.Word, file, home string) []*synta
 // neither spelled out nor bound is no root and no test, and a negated test
 // selects nothing.
 func registrationFindReachedFiles(args []*syntax.Word, values actionValues, cwd, home string, protected protectedFiles) []string {
-	type nameTest struct {
-		pattern     string
-		whole, fold bool
-	}
 	var roots []string
-	var tests []nameTest
-	rootsOpen, negated := true, false
+	var tests []findTest
+	rootsOpen, negated, follow := true, false, false
 	for index := 0; index < len(args); index++ {
 		text, fixed := StaticWord(args[index], home)
 		if rootsOpen && (text == "-H" || text == "-L" || text == "-P") {
+			follow = follow || text != "-P"
 			continue
 		}
 		if rootsOpen && (!fixed || !strings.HasPrefix(text, "-") && text != "!" && text != "(") {
@@ -874,10 +933,13 @@ func registrationFindReachedFiles(args []*syntax.Word, values actionValues, cwd,
 		case "!", "-not":
 			negated = !negated
 			continue
+		case "-follow":
+			follow = true
 		case "-name", "-iname", "-path", "-ipath", "-wholename", "-iwholename":
 			if index+1 < len(args) {
 				if pattern, known := StaticWord(args[index+1], home); known && !negated {
-					tests = append(tests, nameTest{pattern, strings.Contains(text, "path") || strings.Contains(text, "wholename"), strings.HasPrefix(text, "-i")})
+					test, _ := newFindTest(text, pattern, "")
+					tests = append(tests, test)
 				}
 				index++
 			}
@@ -900,18 +962,26 @@ func registrationFindReachedFiles(args []*syntax.Word, values actionValues, cwd,
 	}
 	var reached []string
 	for _, root := range roots {
-		path := OperandPath(root, cwd)
+		root, path, prefix := findRootStart(root, cwd, home)
 		if info, err := pathStat(path); err == nil && info.IsDir() {
 			for _, target := range protected {
-				if !strings.HasPrefix(target.path, path+string(filepath.Separator)) {
+				if target.path == path || !findRootHolds(path, prefix, target.path) {
 					continue
 				}
+				// A find hands its child only the entries the walk finds: a
+				// generic test does not hand a protected file that does not
+				// exist below the root (rel-1-0-10:GAP-1555). A test aimed at
+				// the file hands it either way (findTest.aimsAt), and so does
+				// a walk that follows links (rel-1-0-10:GAP-1572) and a
+				// target whose state is unknown.
+				absent := target.info == nil && !target.unknown && !follow
 				for _, test := range tests {
 					text := filepath.Base(target.path)
 					if test.whole {
 						text = target.path
 					}
-					if registrationGlobMatch(test.pattern, text, test.fold) {
+					if registrationGlobMatch(test.pattern, text, test.fold) &&
+						(!absent || test.aimsAt(root, path, target.path)) {
 						reached = append(reached, target.path)
 						break
 					}
@@ -982,7 +1052,7 @@ func registrationGlobMatch(pattern, text string, fold bool) bool {
 // registrationFindRsyncReach reads the two tools that empty a folder without
 // naming what they remove: find with -delete or an rm/mv -exec (narrowed by
 // -name or -iname when given), and rsync --delete into a folder.
-func registrationFindRsyncReach(file *syntax.File, cwd, home string, protected protectedFiles) bool {
+func registrationFindRsyncReach(file *syntax.File, cwd, home string, protected, all protectedFiles) bool {
 	found := false
 	syntax.Walk(file, func(node syntax.Node) bool {
 		call, ok := node.(*syntax.CallExpr)
@@ -999,7 +1069,7 @@ func registrationFindRsyncReach(file *syntax.File, cwd, home string, protected p
 		}
 		switch programBase(words[0]) {
 		case "find":
-			found = registrationFindReach(words, cwd, protected)
+			found = registrationFindReach(words, cwd, home, protected, all)
 		case "rsync":
 			found = registrationRsyncReach(words, cwd, protected)
 		case "install", "ginstall":
@@ -1020,6 +1090,70 @@ func registrationFindRsyncReach(file *syntax.File, cwd, home string, protected p
 	return found
 }
 
+// findRootHolds reports a path at or below a find root; prefix is the root
+// ending in one separator. Windows compares names without case, so find c:/
+// walks a C: home (rel-1-0-10:GAP-1642).
+func findRootHolds(root, prefix, path string) bool {
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(path, root) || len(path) > len(prefix) && strings.EqualFold(path[:len(prefix)], prefix)
+	}
+	return path == root || strings.HasPrefix(path, prefix)
+}
+
+// findRootStart is a find root as the walk starts from it: the root as
+// written (a Git Bash drive mount spelled as its drive root on a Windows hook
+// host), the absolute root, and the prefix of every path below it, the root
+// ending in one separator. A root that already ends in one (/, and C:\ for
+// find C:/) is its own prefix: one more separator (//, C:\\) starts no path,
+// so a find from / or a drive root reached none of the protected files a find
+// from the home reaches (rel-1-0-10:GAP-1642, GAP-1644, GAP-1647).
+func findRootStart(written, cwd, home string) (string, string, string) {
+	// Git Bash spells a drive root /c/ or /c (GAP-0781 RV8-1).
+	if runtime.GOOS == "windows" && actionWindowsHome(home) {
+		written = findGitBashDriveRoot(written)
+	}
+	root := OperandPath(written, cwd)
+	return written, root, rootPrefix(root)
+}
+
+// rootPrefix is the prefix of every path below a folder: the folder ending
+// in one separator. A folder that already ends in one (/, C:\) is its own
+// prefix: one more separator (//, C:\\) starts no path (rel-1-0-10:GAP-1642,
+// GAP-1650).
+func rootPrefix(folder string) string {
+	if strings.HasSuffix(folder, string(filepath.Separator)) {
+		return folder
+	}
+	return folder + string(filepath.Separator)
+}
+
+// folderHolds reports a path at or below a folder, the file system root and
+// a drive root included: an rsync --delete destination or an archive folder
+// of / reaches every registered file a destination of the home reaches
+// (rel-1-0-10:GAP-1650).
+func folderHolds(folder, path string) bool {
+	return findRootHolds(folder, rootPrefix(folder), path)
+}
+
+// folderBelow reports a path strictly below a folder (folderHolds without the
+// folder itself, which Windows compares without case).
+func folderBelow(folder, path string) bool {
+	prefix := rootPrefix(folder)
+	return len(path) > len(prefix) && findRootHolds(folder, prefix, path)
+}
+
+// findGitBashDriveRoot spells a Git Bash drive mount start (/c/, /c,
+// /cygdrive/c) as that drive's root: actionMSYSDrivePath leaves /c as c:, the
+// drive's current folder, while Git Bash's /c is the root
+// (rel-1-0-10:GAP-1642).
+func findGitBashDriveRoot(written string) string {
+	mapped := actionMSYSDrivePath(written)
+	if mapped != written && len(mapped) == 2 {
+		return mapped + "/"
+	}
+	return mapped
+}
+
 // findChildRemovesTree reports whether the options of an rm-like find child
 // (the words after its program) ask it to remove folders with their content.
 func findChildRemovesTree(args []string) bool {
@@ -1035,9 +1169,14 @@ func findChildRemovesTree(args []string) bool {
 	return false
 }
 
-func registrationFindReach(words []string, cwd string, protected protectedFiles) bool {
+func registrationFindReach(words []string, cwd, home string, protected, all protectedFiles) bool {
+	// paths are the -path and -regex tests, which do not filter here.
 	var roots, names []string
-	deletes, insensitive := false, false
+	var paths []findTest
+	deletes, insensitive, follow := false, false, false
+	// regexType is the -regextype in force; a BSD find -E walk reads its own
+	// extended syntax whatever follows.
+	regexType, bsdExtended := "", false
 	// A walk cut at -maxdepth N reaches nothing deeper than N below a root.
 	// Several limits or one that is not a number leave the walk unbounded.
 	maxDepth, limits := 0, 0
@@ -1076,6 +1215,25 @@ func registrationFindReach(words []string, cwd string, protected protectedFiles)
 				names = append(names, words[i+1])
 				i++
 			}
+		case "-path", "-ipath", "-wholename", "-iwholename", "-regex", "-iregex":
+			if i+1 < len(words) {
+				syntax := regexType
+				if bsdExtended {
+					syntax = findBSDExtended
+				}
+				test, _ := newFindTest(word, words[i+1], syntax)
+				paths = append(paths, test)
+				i++
+			}
+		case "-regextype":
+			if i+1 < len(words) {
+				regexType = words[i+1]
+				i++
+			}
+		case "-follow", "-H", "-L":
+			follow = true
+		case "-E":
+			bsdExtended = true
 		default:
 			if len(roots) == i-1 && !strings.HasPrefix(word, "-") && word != "!" && word != "(" {
 				roots = append(roots, word)
@@ -1088,14 +1246,46 @@ func registrationFindReach(words []string, cwd string, protected protectedFiles)
 	if len(roots) == 0 {
 		roots = []string{"."}
 	}
-	for _, root := range roots {
-		root = OperandPath(root, cwd)
+	nameOption := "-name"
+	if insensitive {
+		nameOption = "-iname"
+	}
+	nameTests := make([]findTest, len(names))
+	for i, name := range names {
+		nameTests[i], _ = newFindTest(nameOption, name, "")
+	}
+	for _, written := range roots {
+		written, root, prefix := findRootStart(written, cwd, home)
+		below := func(target protectedFile) bool {
+			return findRootHolds(root, prefix, target.path)
+		}
+		aimed := func(target protectedFile, tests []findTest) bool {
+			return slices.ContainsFunc(tests, func(test findTest) bool { return test.aimsAt(written, root, target.path) })
+		}
+		// A -path or -regex test does not filter the walk here. One aimed
+		// at a file of the whole registration set below the root judges the
+		// walk on every registration file below it, existing or not, as
+		// before GAP-1196 (rel-1-0-10:GAP-1555, GAP-1572).
+		pathNamed := slices.ContainsFunc(all, func(target protectedFile) bool { return below(target) && aimed(target, paths) })
 		for _, target := range protected {
-			if target.path != root && !strings.HasPrefix(target.path, root+string(filepath.Separator)) {
+			if !below(target) {
 				continue
 			}
-			if !tree && limits == 1 && maxDepth >= 0 && target.path != root &&
-				strings.Count(strings.TrimPrefix(target.path, root+string(filepath.Separator)), string(filepath.Separator)) >= maxDepth {
+			// The walk removes only the entries it finds: a registration
+			// file that does not exist is not reached, and a folder is
+			// reached through the registration files it holds, which are
+			// targets of their own. A spelling of the root (., ./, the
+			// absolute path) therefore reaches the same files
+			// (rel-1-0-10:GAP-1196). A target whose state is unknown counts,
+			// and so does one a name test is aimed at (rel-1-0-10:GAP-1555)
+			// and, for a walk that follows links, one that does not exist
+			// (rel-1-0-10:GAP-1572).
+			if !target.unknown && (target.info == nil && !follow || target.info != nil && target.info.IsDir()) &&
+				!pathNamed && !aimed(target, nameTests) {
+				continue
+			}
+			if !tree && limits == 1 && maxDepth >= 0 && len(target.path) > len(prefix) &&
+				strings.Count(target.path[len(prefix):], string(filepath.Separator)) >= maxDepth {
 				continue
 			}
 			if len(names) == 0 {
@@ -1401,7 +1591,7 @@ func registrationRsyncReach(words []string, cwd string, protected protectedFiles
 	destination := OperandPath(last, cwd)
 	if deletes {
 		for _, target := range protected {
-			if target.path == destination || strings.HasPrefix(target.path, destination+string(filepath.Separator)) {
+			if folderHolds(destination, target.path) {
 				return true
 			}
 		}
@@ -1485,7 +1675,7 @@ func registrationCopyReach(file *syntax.File, cwd, home string, protected protec
 // registrationArchivePossibleReachAs is RegistrationArchivePossibleReach in
 // one reading of the command.
 func registrationArchivePossibleReachAs(command, cwd, home string, names []string) string {
-	if !strings.Contains(command, "tar") && !strings.Contains(command, "unzip") {
+	if !strings.Contains(command, "tar") && !strings.Contains(command, "unzip") && !strings.Contains(command, "7z") {
 		return ""
 	}
 	file, ok := parseShell(command)
@@ -1510,15 +1700,45 @@ func registrationArchivePossibleReachAs(command, cwd, home string, names []strin
 			}
 			args = append(args, value)
 		}
+		if words := archiveProgramWords(append([]string{program}, args...)); len(words) > 0 {
+			program, args = words[0], words[1:]
+		}
+		members := ArchiveExtractionMembers(program, args)
+		unknown := archiveMembersUnknown(program, args)
 		for _, dest := range ArchiveExtractionDestinations(program, args) {
 			folder := OperandPath(dest, cwd)
+			// Members the words do not tell may be any file below the folder: a
+			// registered file there is a possible write (rel-1-0-10:GAP-0142).
+			if unknown {
+				for _, name := range names {
+					if folderBelow(folder, name) {
+						found = folder
+						return false
+					}
+				}
+			}
+			// A member lands below the folder by its own name: one that is a
+			// registered file, or holds registered files, is a write of them
+			// (rel-1-0-10:GAP-0142).
+			for _, member := range members {
+				target := archiveMemberPath(folder, member)
+				for _, name := range names {
+					// A member below a registered folder is no reach: the folder is
+					// not replaced by it, only a registered file or a member that
+					// holds one is (rel-1-0-10:GAP-0659).
+					if folderHolds(target, name) {
+						found = target
+						return false
+					}
+				}
+			}
 			// A generic ancestor such as /tmp is not a registered hook
 			// folder merely because a test home happens to live below it.
 			if !slices.Contains(names, folder) {
 				continue
 			}
 			for _, name := range names {
-				if name != folder && strings.HasPrefix(name, folder+string(filepath.Separator)) {
+				if folderBelow(folder, name) {
 					found = folder
 					return false
 				}
@@ -1534,7 +1754,7 @@ func RegistrationWriteCandidate(command string) bool {
 	if strings.ContainsAny(command, ">") {
 		return true
 	}
-	for _, word := range []string{"rm", "mv", "cp", "ln", "sed", "perl", "patch", "chmod", "chown", "chgrp", "setfacl", "chattr", "find", "truncate", "touch", "install", "rsync", "tar", "unzip", "dd", "tee", "sponge", "python", "node", "ruby", "bash", "zsh", "dash", "ksh", "sh"} {
+	for _, word := range []string{"rm", "mv", "cp", "ln", "sed", "perl", "patch", "chmod", "chown", "chgrp", "setfacl", "chattr", "find", "truncate", "touch", "install", "rsync", "tar", "unzip", "7z", "dd", "tee", "sponge", "python", "node", "bun", "ruby", "php", "bash", "zsh", "dash", "ksh", "sh"} {
 		if strings.Contains(command, word) {
 			return true
 		}

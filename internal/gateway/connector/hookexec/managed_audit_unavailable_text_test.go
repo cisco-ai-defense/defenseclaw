@@ -14,7 +14,7 @@ import (
 // gateway "returned an answer DefenseClaw could not use". The block now says
 // that DefenseClaw could not write the call's audit record and where to look.
 func TestManagedBlockSaysTheAuditRecordCouldNotBeWritten(t *testing.T) {
-	text := managedStandaloneFailClosedText("PreToolUse", "response", managedAuditUnavailableReason)
+	text := managedStandaloneFailClosedText("PreToolUse", "response", auditUnavailableReason)
 	for _, want := range []string{"could not write the call's audit record", "disk", "status"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("block text %q does not say %q", text, want)

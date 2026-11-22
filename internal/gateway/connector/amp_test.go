@@ -590,7 +590,7 @@ func TestAMPPluginPathUsesExplicitLifecycleConfigHome(t *testing.T) {
 
 func TestAMPHookEndpointRequiresBearerOnLoopbackAndRemote(t *testing.T) {
 	conn := NewAMPConnector()
-	conn.SetCredentials("amp-scoped-token", "master-token")
+	conn.SetCredentials("amp-scoped-token")
 
 	for _, tc := range []struct {
 		name       string
@@ -599,7 +599,7 @@ func TestAMPHookEndpointRequiresBearerOnLoopbackAndRemote(t *testing.T) {
 		want       bool
 	}{
 		{name: "loopback scoped", remoteAddr: "127.0.0.1:4321", bearer: "amp-scoped-token", want: true},
-		{name: "loopback master", remoteAddr: "127.0.0.1:4321", bearer: "master-token", want: true},
+		{name: "loopback stale master key", remoteAddr: "127.0.0.1:4321", bearer: staleMasterKey, want: false},
 		{name: "loopback missing", remoteAddr: "127.0.0.1:4321", bearer: "", want: false},
 		{name: "loopback wrong", remoteAddr: "127.0.0.1:4321", bearer: "wrong-token", want: false},
 		{name: "remote scoped", remoteAddr: "192.0.2.10:4321", bearer: "amp-scoped-token", want: true},

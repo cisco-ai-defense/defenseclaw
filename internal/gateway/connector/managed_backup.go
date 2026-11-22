@@ -526,7 +526,19 @@ func recaptureManagedFileBackup(
 }
 
 func discardManagedFileBackup(dataDir, connectorName, logicalName string) {
-	_ = os.Remove(managedFileBackupPath(dataDir, connectorName, logicalName))
+	_ = dropManagedFileBackup(dataDir, connectorName, logicalName)
+}
+
+// dropManagedFileBackup is discardManagedFileBackup for a teardown that must
+// know the record is gone: a record already gone is no error, one that could
+// not be removed is. A Kiro record that silently survived kept the data folder
+// an owner of the account's Windows launcher commands while its teardown
+// reported the record removed.
+func dropManagedFileBackup(dataDir, connectorName, logicalName string) error {
+	if err := os.Remove(managedFileBackupPath(dataDir, connectorName, logicalName)); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
 }
 
 func loadManagedFileBackupPath(path string) (managedFileBackup, error) {

@@ -61,7 +61,7 @@ func TestLoopVariableFromLoginReachesState(t *testing.T) {
 						continue
 					}
 					got := postSelfProtectionPackCell(t, home, project, connector, pack, managed, false, row.command)
-					block := strings.HasPrefix(got, `{"action":"block"`)
+					block := gap0747HookBlocked(got, pack)
 					if row.protected && (!block || !strings.Contains(got, "tamper.detector_state_write")) {
 						t.Errorf("%s %s managed=%t pack=%s: %s = %.200s, want protected block", row.name, connector, managed, pack, row.command, got)
 					}
@@ -131,7 +131,7 @@ func TestLoopVariableNearFormsReachState(t *testing.T) {
 						continue
 					}
 					got := postSelfProtectionPackCell(t, home, project, connector, pack, managed, false, row.command)
-					block := strings.HasPrefix(got, `{"action":"block"`)
+					block := gap0747HookBlocked(got, pack)
 					if row.protected && (!block || !strings.Contains(got, "tamper.detector_state_write")) {
 						t.Errorf("%s %s managed=%t pack=%q: %.120s = %.200s, want protected block", row.name, connector, managed, pack, row.command, got)
 					}
@@ -246,7 +246,7 @@ func TestLoopVariableOrderLinksAndDelimiters(t *testing.T) {
 						continue
 					}
 					got := postSelfProtectionPackCell(t, home, project, connector, pack, managed, false, row.command)
-					block := strings.HasPrefix(got, `{"action":"block"`)
+					block := gap0747HookBlocked(got, pack)
 					if row.protected && (!block || !strings.Contains(got, "tamper.detector_state_write")) {
 						t.Errorf("%s %s managed=%t pack=%q: = %.200s, want protected block", row.name, connector, managed, pack, got)
 					}
@@ -329,7 +329,7 @@ func TestLoopVariableCertainBindingsAndReachingIFS(t *testing.T) {
 						continue
 					}
 					got := postSelfProtectionPackCell(t, home, project, connector, pack, managed, false, row.command)
-					block := strings.HasPrefix(got, `{"action":"block"`)
+					block := gap0747HookBlocked(got, pack)
 					if protected && (!block || !strings.Contains(got, "tamper.detector_state_write")) {
 						t.Errorf("%s %s managed=%t pack=%q: = %.200s, want protected block", row.name, connector, managed, pack, got)
 					}

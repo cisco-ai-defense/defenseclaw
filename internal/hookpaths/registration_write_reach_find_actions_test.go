@@ -28,9 +28,7 @@ func TestRegistrationWriteReachFindActions(t *testing.T) {
 		}
 	}
 	link := filepath.Join(root, "linked-hook")
-	if err := os.Symlink(hook, link); err != nil {
-		t.Fatal(err)
-	}
+	testSymlink(t, hook, link)
 	rows := []struct {
 		name, command string
 		want          bool

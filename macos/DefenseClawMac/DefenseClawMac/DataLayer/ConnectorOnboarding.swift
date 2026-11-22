@@ -167,7 +167,8 @@ enum ConnectorOnboarding {
         // FirstRunPanelModel.args): an observe connector keeps failing open
         // and the CLI preserves any saved setting.
         if profile == "action" {
-            head += ["--fail-mode", failMode]
+            // "policy" saves nothing: the policy tier decides a gateway outage.
+            if ["open", "closed"].contains(failMode) { head += ["--fail-mode", failMode] }
             head.append(humanApproval ? "--human-approval" : "--no-human-approval")
             if humanApproval { head += ["--hilt-min-severity", hiltSeverity] }
         }
@@ -176,8 +177,15 @@ enum ConnectorOnboarding {
         return [head] + followUps
     }
 
+    static func hasConnectorDrift(configured: String, live: String, registered: [String]) -> Bool {
+        let configured = normalizedConnector(configured)
+        let live = normalizedConnector(live)
+        return !configured.isEmpty && !live.isEmpty && configured != live
+            && !Set(registered.map(normalizedConnector)).contains(live)
+    }
+
     static func normalizedConnector(_ connector: String) -> String {
         let normalized = connector.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        return normalized == "claude-code" ? "claudecode" : normalized
+        return ["claude-code", "claude_code"].contains(normalized) ? "claudecode" : normalized
     }
 }

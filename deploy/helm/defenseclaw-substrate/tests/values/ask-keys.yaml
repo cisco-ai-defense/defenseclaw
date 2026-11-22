@@ -1,0 +1,20 @@
+# GAP-0171: a profile's ask_hosts and url_rules reach the callout profile,
+# substrate.admin's first, the profile's added.
+config:
+  substrate:
+    egress:
+      allow: [github.com, uploads.example.com]
+    launcher_atespaces:
+      engineering: [eng-web]
+      data: [data-ml]
+    admin:
+      ask_hosts: [uploads.example.com]
+      url_rules:
+        - {name: no-repo-delete, hosts: [api.github.com], methods: [DELETE], action: deny}
+  guardrail:
+    profiles:
+      engineering:
+        sandbox:
+          ask_hosts: ["*.files.example.com", uploads.example.com]
+          url_rules:
+            - {name: release-ask, hosts: [api.github.com], methods: [POST], path_prefix: /repos/acme/releases, action: Ask}

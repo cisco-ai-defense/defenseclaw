@@ -18,7 +18,7 @@ import (
 )
 
 func TestR104LeadPrivateKeyReaderForms(t *testing.T) {
-	home, cwd := r104ReviewHome(t)
+	home, cwd := r104ReviewHomeNoAlias(t)
 	if err := os.WriteFile(filepath.Join(home, ".ssh", "id_rsa"), []byte("marker\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -67,7 +67,7 @@ func TestR104LeadPrivateKeyReaderForms(t *testing.T) {
 }
 
 func TestR104LeadProtectedCopyControl(t *testing.T) {
-	home, cwd := r104ReviewHome(t)
+	home, cwd := r104ReviewHomeNoAlias(t)
 	cfg := &config.Config{}
 	cfg.Guardrail.Mode = "action"
 	cfg.Guardrail.Connector = "claudecode"
@@ -161,7 +161,7 @@ func TestR104LeadHermesPatchLink(t *testing.T) {
 }
 
 func TestR104LeadOpenClawInspectHome(t *testing.T) {
-	home, cwd := r104ReviewHome(t)
+	home, cwd := r104ReviewHomeNoAlias(t)
 	installDefaultProfileConnector(t, "openclaw")
 	api := testAPIServerWithConfig(t, "action")
 	ctx := withManagedHookPeer(context.Background(), managedHookPeer{Home: home})

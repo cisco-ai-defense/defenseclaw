@@ -54,7 +54,9 @@ func runStateWriterRows(t *testing.T, home, project string, cells []stateCell, p
 		cell := fmt.Sprintf("%s/managed=%t/pack=%q", c.connector, c.managed, c.pack)
 		for _, row := range protected {
 			got := postSelfProtectionPackCell(t, home, project, c.connector, c.pack, c.managed, blind && c.managed, row.command)
-			if !strings.HasPrefix(got, `{"action":"block"`) || !strings.Contains(got, "tamper.detector_state_write") {
+			// A proven state write alerts outside the strict pack and blocks in it
+			// (GAP-0747 owner tiering 2026-11-15T15:20Z).
+			if !gap0747BodyBlocked(got, true, c.pack == "strict") || !strings.Contains(got, "tamper.detector_state_write") {
 				note(row, cell, got)
 			}
 		}

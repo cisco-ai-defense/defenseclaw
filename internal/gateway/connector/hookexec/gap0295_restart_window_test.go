@@ -121,9 +121,7 @@ func TestGAP0295RestartWindowFollowsTheOutageMode(t *testing.T) {
 // progress report took the call; the restart-window proof does not apply
 // to it, whatever the account's outage mode.
 func TestGAP0295TookTheCallStaysClosed(t *testing.T) {
-	previousLogWait := answerWatchdogLogWait
-	answerWatchdogLogWait = time.Minute
-	t.Cleanup(func() { answerWatchdogLogWait = previousLogWait })
+	setAnswerWatchdogLogWait(t, time.Minute)
 	stubRestartWindowProof(t, true)
 	sp, _ := specFor("claudecode")
 	for _, tc := range []struct {

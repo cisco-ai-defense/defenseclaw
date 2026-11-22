@@ -122,7 +122,7 @@ func TestWindowsHookRuntimeFilesAreReadOnTheHookPath(t *testing.T) {
 			if len(entry.Path) == 0 {
 				t.Fatal("no reader is cited")
 			}
-			if !strings.HasPrefix(entry.Path[0].File, "cli/") {
+			if !strings.HasPrefix(entry.Path[0].File, "hookcli/") {
 				t.Fatalf("the path starts in %s, not in the hook command", entry.Path[0].File)
 			}
 			for i, hop := range entry.Path {

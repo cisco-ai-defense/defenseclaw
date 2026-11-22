@@ -101,7 +101,7 @@ func TestR105CommandLinkThroughDiskLinkToStateBlocks(t *testing.T) {
 					request.ResolvedWriteTargets = targets
 				}
 				findings := dispatchTrustedAction(t.Context(), request)
-				if blocked := buildVerdict(findings, "tool_call").Action == "block"; blocked != row.block {
+				if blocked := gap0747Blocked(findings, row.block); blocked != row.block {
 					ids := ""
 					for _, finding := range findings {
 						ids += finding.RuleID + " "

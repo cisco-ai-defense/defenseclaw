@@ -110,8 +110,14 @@ func TestManagedClaudeCodeWrapperRunsUnderCmdExe(t *testing.T) {
 	}
 	for event, want := range map[string]int{"PreToolUse": 2, "UserPromptSubmit": 2, "Stop": 1} {
 		command, args := claudeManagedGuardWrapperInvocation(event, launcher, hookArgs)
-		if got := runRegisteredWrapper(t, command, args, "0"); got.code != want {
+		got := runRegisteredWrapper(t, command, args, "0")
+		if got.code != want {
 			t.Errorf("%s, guard is not a program: exit %d (want %d), stdout %q, stderr %q", event, got.code, want, got.stdout, got.stderr)
+		}
+		// GAP-0119: a guard that is there does not get the missing-file text.
+		if !strings.Contains(got.stderr, "If defenseclaw-hook-guard.exe is in the install folder but does not run: ") ||
+			strings.Contains(got.stderr, "missing from the install folder") {
+			t.Errorf("%s, guard is not a program: stderr %q, want only the does-not-run text", event, got.stderr)
 		}
 	}
 	// A guard that is not there answers by the event's documented code and
@@ -125,6 +131,10 @@ func TestManagedClaudeCodeWrapperRunsUnderCmdExe(t *testing.T) {
 		if got.code != want || strings.Contains(got.stdout, "guard-ran") ||
 			!strings.Contains(got.stderr, windowsHookGuardBinaryName) || !strings.Contains(got.stderr, "/repair") {
 			t.Errorf("%s, guard missing: exit %d (want %d), stdout %q, stderr %q", event, got.code, want, got.stdout, got.stderr)
+		}
+		if !strings.HasPrefix(strings.TrimSpace(got.stderr), "If defenseclaw-hook-guard.exe is missing from the install folder: ") ||
+			strings.Contains(got.stderr, "does not run") {
+			t.Errorf("%s, guard missing: stderr %q, want only the missing-guard text", event, got.stderr)
 		}
 	}
 }

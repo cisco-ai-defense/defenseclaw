@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"golang.org/x/sys/windows"
@@ -144,7 +145,7 @@ func repairEnterpriseHookManagedInstallPlatform() {
 		return
 	}
 	executable, _ := os.Executable()
-	programFiles, programData := windowsManagedLayout.programRoots()
+	programFiles, programData := hookcli.WindowsManagedLayout.ProgramRoots()
 	if layout, ok := enterpriseHookManagedInstallLayout(
 		executable, cfg.DataDir, enterpriseHookManifest, programFiles, programData,
 	); ok {

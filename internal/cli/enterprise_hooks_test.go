@@ -431,7 +431,8 @@ func TestEnterpriseHookGuardianFailureIssuesExposeTargetCause(t *testing.T) {
 	}}
 	signedOut := "last guardian reconcile failed for codex@S-1-5-21-111-222-333-1004: " + state.Results[0].Error
 	if runtime.GOOS == "windows" {
-		signedOut = "the guardian cannot repair codex for dave (S-1-5-21-111-222-333-1004) while that account is signed out: " +
+		signedOut = "last guardian reconcile failed for codex@dave (S-1-5-21-111-222-333-1004): " +
+			"the guardian cannot repair codex for dave (S-1-5-21-111-222-333-1004) while that account is signed out: " +
 			"have the account sign in, or remove it with its profile, then run repair again. The guardian repairs " +
 			"DefenseClaw hooks only in the account's own Windows session"
 	}

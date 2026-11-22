@@ -20,6 +20,9 @@ type embeddedProgram struct {
 	// the entry, so a relative path is not relative to the working
 	// directory.
 	inEntryDir bool
+	// whole is every word of the program, the handed-entry words kept: the
+	// sender reader reads it as the command that runs (GAP-0599).
+	whole []string
 }
 
 func findEmbeddedPrograms(argv []string) []embeddedProgram {
@@ -37,6 +40,7 @@ func findEmbeddedPrograms(argv []string) []embeddedProgram {
 		}
 		if end < len(argv) {
 			program := embeddedProgram{inEntryDir: action == "-execdir" || action == "-okdir"}
+			program.whole = cloneSlice(argv[i+1 : end])
 			for index := i + 1; index < end; index++ {
 				if strings.Contains(argv[index], "{}") {
 					continue
@@ -56,7 +60,7 @@ func xargsEmbeddedPrograms(argv []string) []embeddedProgram {
 	if !known || start >= len(argv) {
 		return nil
 	}
-	var program embeddedProgram
+	program := embeddedProgram{whole: cloneSlice(argv[start:])}
 	for index := start; index < len(argv); index++ {
 		if replace != "" && strings.Contains(argv[index], replace) {
 			continue

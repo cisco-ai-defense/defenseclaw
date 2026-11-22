@@ -17,7 +17,7 @@ import (
 )
 
 func TestSQLValueLineageGatewayLifecycleFoundationIsInertAndSuccessBound(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	installDefaultProfileConnector(t, "claudecode")
 	store, logger := testStoreAndV8Logger(t)
 	cfg := &config.Config{}
@@ -116,7 +116,7 @@ func TestSQLValueLineageGatewayLifecycleFoundationIsInertAndSuccessBound(t *test
 }
 
 func TestCodexSQLValueLineageGatewayLifecycleBindsMCPResult(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	installDefaultProfileConnector(t, "codex")
 	store, logger := testStoreAndV8Logger(t)
 	cfg := &config.Config{}

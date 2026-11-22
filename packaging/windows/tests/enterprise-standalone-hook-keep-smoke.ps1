@@ -20,8 +20,9 @@
 #   - the hold check Setup runs before the swap blocks no hook start (the
 #     upgrade window, GAP-0656);
 #   - the rollback copy of the installed hook has the digest the deployment
-#     records, or is the guardian's protected copy with it, or the run throws
-#     before anything stops (review M3).
+#     records, or is the guardian's protected copy with it (review M3), or is
+#     this Setup's verified hook (GAP-0601); with none of them (a replacement
+#     without a digest) the run throws before anything stops.
 # The fresh object is the release's bytes with one name and a trusted owner
 # and access list. Runs elevated in a disposable directory under Windows
 # PowerShell 5.1 and PowerShell 7; no service or machine root is touched.
@@ -364,8 +365,10 @@ try {
             }
 
             # No guardian copy, or one that is not the recorded release, or no
-            # recorded digest: refused, nothing written, and the check that
-            # runs before any service stops refuses too.
+            # recorded digest, and a replacement without a digest: refused,
+            # nothing written, and the check that runs before any service
+            # stops refuses too. With the replacement's digest the check
+            # accepts it as the rollback copy (GAP-0601, rederived).
             foreach ($shape in @(
                     @{ Name = 'm3-noguardian'; Guardian = $null; Recorded = $recordedHash },
                     @{ Name = 'm3-badguardian'; Guardian = $driftedBytes; Recorded = $recordedHash },
@@ -383,11 +386,18 @@ try {
                 if ($message -notlike 'refusing to replace the installed hook*') {
                     $failures.Add("$($shape.Name): the check before the services stop did not refuse ($message)")
                 }
+                if ($shape.Recorded -ne '') {
+                    $verified = @{ path = $build; sha256 = $want.ToLowerInvariant() }
+                    $message = Test-SmokeRefused { Assert-DefenseClawHookPreimageAvailable -Layout $case.Layout -Source $verified -PriorDeploymentActive }
+                    if ($message -ne '') {
+                        $failures.Add("$($shape.Name): the check refused this Setup's verified hook as the rollback copy ($message)")
+                    }
+                }
                 if ([Convert]::ToBase64String([IO.File]::ReadAllBytes($case.Hook)) -cne [Convert]::ToBase64String($driftedBytes)) {
                     $failures.Add("$($shape.Name): the installed hook was changed")
                 }
             }
-            $lines.Add('m3: matching hook copied; drifted hook refused, guardian copy used; neither: refused before anything stops')
+            $lines.Add('m3: matching hook copied; drifted hook refused, guardian copy used; neither: a verified replacement accepted, none refused before anything stops')
 
             # GAP-0656 (upgrade window): the hold check Setup runs about 5 s before
             # it swaps the hook must not block a hook start. Restart Manager,

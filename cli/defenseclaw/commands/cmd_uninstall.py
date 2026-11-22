@@ -2582,22 +2582,26 @@ def _remove_leftover_dirs(paths: tuple[str, ...], *, platform_name: str = sys.pl
 
 
 def _remove_tree_no_follow(path: str) -> None:
-    """Remove a folder tree; links and junctions inside go without being followed."""
+    """Remove a folder tree; links and junctions inside go without being followed.
+
+    A ReadOnly entry loses the attribute first (Windows; GAP-1609).
+    """
     if _is_reparse_path(path):
         raise OSError(f"refusing link or reparse point {path}")
+    remove = windows_uninstall_helper.remove_clearing_readonly
     with os.scandir(path) as entries:
         children = list(entries)
     for entry in children:
         if _is_reparse_path(entry.path):
             if entry.is_dir(follow_symlinks=False) or (sys.platform == "win32" and os.path.isdir(entry.path)):
-                os.rmdir(entry.path)
+                remove(entry.path, os.rmdir)
             else:
-                os.unlink(entry.path)
+                remove(entry.path, os.unlink)
         elif entry.is_dir(follow_symlinks=False):
             _remove_tree_no_follow(entry.path)
         else:
-            os.unlink(entry.path)
-    os.rmdir(path)
+            remove(entry.path, os.unlink)
+    remove(path, os.rmdir)
 
 
 def _remove_empty_parents(path: str) -> None:
@@ -5102,6 +5106,13 @@ def _connector_teardown(plan: UninstallPlan) -> None:
     """
     connectors = plan.connectors
     gateway_supported = _gateway_supports_connector_teardown(plan.gateway_path or None)
+    if gateway_supported:
+        # Route-only model settings go back first, for every connector that
+        # supports them (also one that is no longer active): an agent left on
+        # a removed gateway would lose model access (DESIGN 7.4, 15.9).
+        from defenseclaw.routing_route_only import restore_agent_config
+
+        restore_agent_config(None)
     for name in connectors:
         if gateway_supported:
             errors: list[str] = []
@@ -5343,17 +5354,40 @@ def _is_reparse_path(path: str | os.PathLike[str]) -> bool:
     return link_guard.is_reparse(path)
 
 
+def _readonly_refusal_removed(path: str, function, error: OSError) -> bool:
+    """Whether a ReadOnly entry Windows refused to function() went after all (GAP-1609).
+
+    Only an entry whose ReadOnly attribute is really set is retried, once;
+    the failed delete is not simply repeated. Another remover taking it
+    first counts as removed (GAP-2355).
+    """
+    try:
+        return windows_uninstall_helper.remove_refused_readonly(path, function, error)
+    except FileNotFoundError:
+        return True
+
+
 def _rmtree_gone_ok(path: str) -> None:
     """rmtree that counts a file or folder another remover took first as removed.
 
     Two uninstalls of one account at once (two terminals) walk the same
     trees: each failed with ENOENT on what the other had just deleted and
-    left data behind for a second run (GAP-2355).
+    left data behind for a second run (GAP-2355). On Windows a ReadOnly file
+    or folder that Windows refused to delete goes too (GAP-1609); rmtree
+    passes only entries of path, and links and junctions themselves. Off
+    Windows a refusal is raised as it is.
     """
 
     def gone_ok(function, failed_path, exc) -> None:
         error = exc if isinstance(exc, BaseException) else exc[1]
         if isinstance(error, FileNotFoundError):
+            return
+        if (
+            sys.platform == "win32"
+            and function in (os.unlink, os.remove, os.rmdir)
+            and isinstance(error, PermissionError)
+            and _readonly_refusal_removed(failed_path, function, error)
+        ):
             return
         raise error
 
@@ -5366,16 +5400,17 @@ def _rmtree_gone_ok(path: str) -> None:
 def _remove_tree_entry(entry: os.DirEntry[str]) -> None:
     """Remove one direct child without following symlinks/reparse points."""
     try:
+        remove = windows_uninstall_helper.remove_clearing_readonly
         if _is_reparse_path(entry.path):
             if os.path.isdir(entry.path):
-                os.rmdir(entry.path)
+                remove(entry.path, os.rmdir)
             else:
-                os.unlink(entry.path)
+                remove(entry.path, os.unlink)
             return
         if entry.is_dir(follow_symlinks=False):
             _rmtree_gone_ok(entry.path)
             return
-        os.unlink(entry.path)
+        remove(entry.path, os.unlink)
     except FileNotFoundError:
         return  # another remover took it first: it is gone (GAP-2355)
 

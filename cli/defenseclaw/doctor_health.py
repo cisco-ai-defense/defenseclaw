@@ -29,6 +29,7 @@ policy metadata for callers to reject unattended or experimental changes.
 from __future__ import annotations
 
 import dataclasses
+import os
 import re
 import time
 from collections.abc import Iterable, Mapping
@@ -109,6 +110,27 @@ class RemediationAuthorizationError(ValueError):
     def __init__(self, code: str) -> None:
         self.code = code
         super().__init__(code)
+
+
+def _openclaw_compatibility_summary(public_name: str, raw_version: str) -> str:
+    # The doctor row names the hook mode OpenClaw runs in, from the OS and the
+    # probed version only (rel-1-0-10 GAP-0047): Windows is native, before
+    # 2026.8.35 the proxy, otherwise hybrid.
+    from defenseclaw.connector_contracts import openclaw_lacks_native_hooks
+    from defenseclaw.platform_support import uses_guardrail_proxy
+
+    if not uses_guardrail_proxy("openclaw"):
+        # Windows: no proxy; setup refuses an OpenClaw before 2026.8.35.
+        return (
+            f"{public_name} uses its native plugin hooks (no guardrail proxy on this host) "
+            "and is not agent-version gated"
+        )
+    if raw_version and openclaw_lacks_native_hooks(raw_version):
+        return (
+            f"{public_name} uses the guardrail proxy and is not agent-version gated "
+            "(native hooks need OpenClaw 2026.8.35 or later)"
+        )
+    return f"{public_name} uses its plugin hooks next to the proxy and is not agent-version gated"
 
 
 def authorize_remediation(
@@ -337,6 +359,11 @@ class InstalledVersionCheck:
     discovery: Any | None
     changed: Mapping[str, str]
     unchecked: Mapping[str, str]
+    #: ``(recorded executable, executable read now)`` of a connector whose
+    #: version was read from another executable than the one the evidence
+    #: recorded: a second install, not an update of the recorded one, so its
+    #: row names both instead of saying the agent updated (GAP-0195).
+    moved: Mapping[str, tuple[str, str]] = dataclasses.field(default_factory=dict)
 
 
 #: One answer is shared by everything one Doctor run judges: the connector
@@ -412,8 +439,50 @@ def _probe_agent_version(name: str, path: str, data_dir: str) -> tuple[str, str]
     spec = agent_discovery._SPECS.get(name)
     version_args = spec.version_args if spec is not None else ("--version",)
     found, error = agent_discovery._version_for_agent_binary(name, path, version_args, data_dir=data_dir or None)
+    if error == agent_discovery.UNTRUSTED_PREFIX_ERROR and _setup_admits_for_probe(name, path, data_dir):
+        found, error = agent_discovery._version_for_agent_binary(
+            name, path, version_args, require_trusted_binary_paths=False, data_dir=data_dir or None
+        )
     _probe_answers[key] = (time.monotonic(), found, error)
     return found, error
+
+
+def _setup_admits_for_probe(name: str, path: str, data_dir: str) -> bool:
+    """Whether Doctor may read the version of *path* the way setup does (GAP-0164).
+
+    The passive probe runs only executables in a system-owned install tree,
+    so it refuses every agent this account installed itself (``~/.local/bin``,
+    the npm global prefix), and Doctor kept the version recorded before an
+    in-place update. Setup admits those with its own rule
+    (``setup_binary_trust_problem``: a built-in or protected-config root, no
+    link, no file or folder another account can write) and probes them; Doctor
+    already starts the Codex executable setup admitted. Doctor reads a version
+    under that same rule, and only from an executable owned by this account or
+    root, so an administrator running Doctor never runs another account's
+    binary. A Claude Desktop engine (setup verifies its signature first) and
+    the Windows OpenCode image (setup admits only the reviewed one) keep the
+    passive probe.
+    """
+
+    from defenseclaw.agent_selection import setup_binary_trust_problem
+    from defenseclaw.inventory import agent_discovery
+
+    if not path or agent_discovery._claude_desktop_engine(path) is not None:
+        return False
+    if os.name == "nt" and name == "opencode":
+        return False
+    try:
+        if setup_binary_trust_problem(path, data_dir, connector=name):
+            return False
+        if os.name != "nt":
+            resolved = os.path.realpath(path)
+            owners = {0, os.geteuid()}
+            for item in (resolved, os.path.dirname(resolved)):
+                if os.stat(item).st_uid not in owners:
+                    return False
+    except (OSError, ValueError):
+        return False
+    return True
 
 
 def _launch_candidates(name: str, data_dir: str) -> tuple[str, ...]:
@@ -618,9 +687,10 @@ def recheck_installed_versions(
     The discovery cache lives a day and the gateway hook contract lock
     keeps the version setup selected the contract from, so after the agent
     updated both still name the old version. Doctor judged compatibility on
-    it and printed it as ``installed``. This runs the same bounded,
-    trusted-path-only ``--version`` probe discovery uses (never a scan, a
-    write or a terminal) on the executable the evidence names, for every
+    it and printed it as ``installed``. This runs the same bounded
+    ``--version`` probe discovery uses (never a scan, a write or a terminal),
+    at a trusted install path or one setup admits (:func:`_setup_admits_for_probe`),
+    on the executable the evidence names, for every
     connector row that states a version (hook, proxy and Kiro forms alike),
     and returns the evidence with the version found now. A probe that cannot
     run leaves the recorded version in place and says why in ``unchecked``.
@@ -644,6 +714,7 @@ def recheck_installed_versions(
     replaced = False
     changed: dict[str, str] = {}
     unchecked: dict[str, str] = {}
+    moved_from: dict[str, tuple[str, str]] = {}
     for raw_name, signal in agents.items():
         name = normalize_connector(raw_name) if isinstance(raw_name, str) and len(raw_name) <= 128 else ""
         recorded = getattr(signal, "version", "")
@@ -656,6 +727,7 @@ def recheck_installed_versions(
             continue
         if name == "kiro":
             before = _kiro_installed_token(signal)
+            before_path = _kiro_selected_path(signal)
             fresh, did_change, why = _recheck_kiro(signal, data_dir)
             if why:
                 unchecked[name] = why
@@ -663,6 +735,13 @@ def recheck_installed_versions(
                 changed[name] = before
                 updated[raw_name] = fresh
                 replaced = True
+                after_path = _kiro_selected_path(fresh)
+                if (
+                    before_path
+                    and after_path
+                    and agent_discovery._path_key(before_path) != agent_discovery._path_key(after_path)
+                ):
+                    moved_from[name] = (before_path, after_path)
             continue
         if name not in agent_discovery._SPECS:
             unchecked[name] = "no version probe is defined for it"
@@ -677,6 +756,8 @@ def recheck_installed_versions(
         moved = agent_discovery._path_key(path) != agent_discovery._path_key(recorded_path) if recorded_path else True
         if version_changed and recorded.strip():
             changed[name] = _safe_semver_from_agent(recorded)
+            if recorded_path and moved:
+                moved_from[name] = (recorded_path, path)
         if version_changed or moved:
             updated[raw_name] = dataclasses.replace(
                 signal,
@@ -688,12 +769,62 @@ def recheck_installed_versions(
             replaced = True
     if not replaced:
         return InstalledVersionCheck(discovery, {}, unchecked)
-    return InstalledVersionCheck(dataclasses.replace(discovery, agents=updated), changed, unchecked)
+    return InstalledVersionCheck(dataclasses.replace(discovery, agents=updated), changed, unchecked, moved_from)
 
 
 def _kiro_installed_token(signal: Any) -> str:
     selected = assess_kiro_signal(signal).selected
     return _safe_semver_from_agent(selected.normalized) if selected is not None else ""
+
+
+#: Cursor's executables by role (ntpath stem, lower case): the Desktop hook
+#: host and the Agent CLI. Both read ~/.cursor/hooks.json; each has its own
+#: pins (Desktop semver ranges, Agent CLI date-hash builds).
+_CURSOR_DESKTOP_STEMS = frozenset({"cursor"})
+_CURSOR_AGENT_CLI_STEMS = frozenset({"agent", "cursor-agent"})
+
+
+def _executable_stem(path: str) -> str:
+    import ntpath
+
+    return ntpath.splitext(ntpath.basename(path))[0].lower()
+
+
+def cursor_agent_cli_discovery(discovery: Any | None, data_dir: str) -> tuple[Any, str] | None:
+    """The evidence with Cursor's Agent CLI in place of its Desktop (GAP-0196).
+
+    Discovery prefers the Desktop hook host, so on a host with both the
+    connector row judged the Desktop version and the Agent CLI that runs the
+    same hooks was never compared with its own pins (another account without
+    the Desktop got "untested newer" for the same CLI build). Returns
+    ``(discovery, executable)`` with the cursor signal re-read from the first
+    Agent CLI launch candidate that answers, or None when the recorded
+    executable is not the Desktop or no Agent CLI answers.
+    """
+
+    agents = getattr(discovery, "agents", None)
+    if not isinstance(agents, Mapping) or not dataclasses.is_dataclass(discovery):
+        return None
+    signal = agents.get("cursor")
+    if signal is None or not dataclasses.is_dataclass(signal) or not getattr(signal, "installed", False):
+        return None
+    recorded = getattr(signal, "binary_path", "")
+    if not isinstance(recorded, str) or _executable_stem(recorded) not in _CURSOR_DESKTOP_STEMS:
+        return None
+    for candidate in _launch_candidates("cursor", data_dir):
+        if _executable_stem(candidate) not in _CURSOR_AGENT_CLI_STEMS:
+            continue
+        found, error = _probe_agent_version("cursor", candidate, data_dir)
+        if found.strip() and not error:
+            fresh = dataclasses.replace(signal, binary_path=candidate, version=found, error="")
+            return dataclasses.replace(discovery, agents={**agents, "cursor": fresh}), candidate
+    return None
+
+
+def _kiro_selected_path(signal: Any) -> str:
+    selected = assess_kiro_signal(signal).selected
+    path = getattr(selected, "path", "") if selected is not None else ""
+    return path if isinstance(path, str) else ""
 
 
 def assess_component_health(
@@ -962,7 +1093,11 @@ def assess_connector_health(
                     status=HealthStatus.SUPPORTED,
                     reason_code="proxy-connector-not-version-gated" if proxy else "connector-not-version-gated",
                     summary=(
-                        f"{public_name} uses a proxy contract and is not agent-version gated"
+                        (
+                            _openclaw_compatibility_summary(public_name, raw_version)
+                            if connector == "openclaw"
+                            else f"{public_name} uses a proxy contract and is not agent-version gated"
+                        )
                         if proxy
                         else f"{public_name} is not agent-version gated"
                     ),

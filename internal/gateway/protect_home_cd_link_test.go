@@ -86,7 +86,10 @@ func TestProtectHomeLinkAfterCdStaysOrdinary(t *testing.T) {
 				if err := json.Unmarshal([]byte(got), &resp); err != nil {
 					t.Fatalf("verdict %q: %v", got, err)
 				}
-				if blocked := resp["action"] == "block"; blocked != tc.block {
+				action, _ := resp["action"].(string)
+				// A proven state write is a HIGH alert on the default pack
+				// (GAP-0747 owner tiering 2026-11-15T15:20Z).
+				if blocked := gap0747StateVerdict(action, got, false) == "block"; blocked != tc.block {
 					t.Fatalf("blocked = %t, want %t: evidence=%v %.600s", blocked, tc.block, evidence, got)
 				}
 				if tc.block && strings.Contains(tc.command, ".defenseclaw") && !strings.Contains(got, "tamper.detector_state_write") {

@@ -628,22 +628,23 @@ class CatalogListModel(Generic[RowT]):
     # like ``plugin list`` does (GAP-1749).
     actions_header = "Actions"
 
-    def data_table_columns(self) -> tuple[str, ...]:
-        base = ("Name", "Status", "Source", self.actions_header, "Details")
-        if self.show_connector_column:
-            return ("Connector", *base)
-        return base
+    def data_table_columns(self, width: int = 0) -> tuple[str, ...]:
+        """Column headers; ``width`` (cells, 0 = unknown) drops Details, then Source, to fit."""
+
+        return self._table_layout(width)[0]
 
     def data_table_rows(self, width: int = 0) -> tuple[tuple[str, ...], ...]:
         """Table rows; ``width`` (cells, 0 = unknown) keeps the Actions column on screen."""
 
+        return self._table_layout(width)[1]
+
+    def _table_layout(self, width: int) -> tuple[tuple[str, ...], tuple[tuple[str, ...], ...]]:
+        columns: tuple[str, ...] = ("Name", "Status", "Source", self.actions_header, "Details")
+        rows = tuple(catalog_row_cells(row) for row in self.filtered)
         if self.show_connector_column:
-            rows = tuple((self.connector_cell(row), *catalog_row_cells(row)) for row in self.filtered)
-        else:
-            rows = tuple(catalog_row_cells(row) for row in self.filtered)
-        # Fit against the base column order the cells are built in; a
-        # subclass that reorders columns (Plugins) does so after this.
-        return _fit_catalog_rows(CatalogListModel.data_table_columns(self), rows, width)
+            columns = ("Connector", *columns)
+            rows = tuple((self.connector_cell(row), *cells) for row, cells in zip(self.filtered, rows, strict=True))
+        return _fit_catalog_table(columns, rows, width)
 
     def connector_cell(self, row: RowT) -> str:
         return self.row_connector(row) or "—"
@@ -893,13 +894,11 @@ class PluginsPanelModel(CatalogListModel[PluginRow]):
 
     actions_header = "Verdict"
 
-    def data_table_columns(self) -> tuple[str, ...]:
+    def _table_layout(self, width: int) -> tuple[tuple[str, ...], tuple[tuple[str, ...], ...]]:
         # The verdict comes before the long Source path, so it stays on
         # screen at 80 columns (GAP-1905).
-        return _verdict_before_source(super().data_table_columns())
-
-    def data_table_rows(self, width: int = 0) -> tuple[tuple[str, ...], ...]:
-        return tuple(_verdict_before_source(row) for row in super().data_table_rows(width))
+        columns, rows = super()._table_layout(width)
+        return _swap_columns(columns, rows, "Source", self.actions_header)
 
     def __init__(self, *, connector: str = "") -> None:
         # Without filter fields the filter matched every row (GAP-1520).
@@ -2013,11 +2012,21 @@ def normalized_connector(connector: str) -> str:
     return (connector or "").strip().lower()
 
 
-def _verdict_before_source(cells: tuple[str, ...]) -> tuple[str, ...]:
-    """Swap the Source and Verdict cells (the 3rd and 2nd from last)."""
+def _swap_columns(
+    columns: tuple[str, ...], rows: tuple[tuple[str, ...], ...], first: str, second: str
+) -> tuple[tuple[str, ...], tuple[tuple[str, ...], ...]]:
+    """Swap two named columns; a column the fit dropped leaves the table as is."""
 
-    *head, source, verdict, details = cells
-    return (*head, verdict, source, details)
+    if first not in columns or second not in columns:
+        return columns, rows
+    i, j = columns.index(first), columns.index(second)
+
+    def swap(cells: tuple[str, ...]) -> tuple[str, ...]:
+        out = list(cells)
+        out[i], out[j] = out[j], out[i]
+        return tuple(out)
+
+    return swap(columns), tuple(swap(row) for row in rows)
 
 
 def _plugin_status(row: PluginRow) -> str:
@@ -2439,29 +2448,49 @@ def _source_path_cell(value: str, width: int = SOURCE_CELL_WIDTH) -> str:
 
 _MIN_FIT_CELLS = 10
 _DETAILS_HEADER_CELLS = len("Details")
+# A Details column narrower than this shows a few letters and an ellipsis; the
+# detail pane shows the full text, so the column goes instead (GAP-0908).
+_MIN_DETAILS_CELLS = 14
 
 
-def _fit_catalog_rows(
+def _fit_catalog_table(
     columns: tuple[str, ...], rows: tuple[tuple[str, ...], ...], width: int
-) -> tuple[tuple[str, ...], ...]:
-    """Rows whose columns, Details included, fit ``width`` cells (GAP-2624, GAP-2642).
+) -> tuple[tuple[str, ...], tuple[tuple[str, ...], ...]]:
+    """Columns and rows that fit ``width`` cells (GAP-2624, GAP-2642, GAP-0908).
 
-    At 80x24 a long skill name or source path pushed the Actions column off
-    screen, and then cut Details, the last column, to two or three letters.
-    The widest of Name and Source gives up cells first (a name keeps its head,
-    a path keeps its tail) so that the Details header and a few characters of
-    its text stay visible; a Details value longer than the cells left ends in
-    an ellipsis. The detail pane keeps every value in full.
+    The Actions column holds the decision words (``blocked, quarantined``) and
+    is never cut. When the table is too wide, the cells give up room in this
+    order: the Name and Source cells shrink (a name keeps its head, a path its
+    tail), then the Details column goes, then the Source column goes. The
+    detail pane keeps every value in full.
     """
 
     if width <= 0 or not rows or "Source" not in columns or "Name" not in columns:
-        return rows
+        return columns, rows
+    fitted = (columns, rows)
+    for dropped in ((), ("Details",), ("Details", "Source")):
+        keep = [i for i, column in enumerate(columns) if column not in dropped]
+        kept_columns = tuple(columns[i] for i in keep)
+        kept_rows = tuple(tuple(row[i] for i in keep) for row in rows)
+        fitted_rows, fits = _fit_columns(kept_columns, kept_rows, width)
+        fitted = (kept_columns, fitted_rows)
+        if fits:
+            break
+    return fitted
+
+
+def _fit_columns(
+    columns: tuple[str, ...], rows: tuple[tuple[str, ...], ...], width: int
+) -> tuple[tuple[tuple[str, ...], ...], bool]:
+    """Shrink Name and Source (never Actions); report whether the result fits ``width``."""
+
     last = len(columns) - 1
     has_details = columns[last] == "Details"
     # Every column through the one before Details must fit (DataTable pads
     # each cell by one column on each side).
     upto = last - 1 if has_details else last
-    name_i, source_i = columns.index("Name"), columns.index("Source")
+    name_i = columns.index("Name")
+    source_i = columns.index("Source") if "Source" in columns else -1
 
     def cells(i: int) -> int:
         return max(len(columns[i]), *(len(row[i]) for row in rows))
@@ -2469,14 +2498,18 @@ def _fit_catalog_rows(
     # Keep room for the Details header (a column is padded by two cells).
     reserve = _DETAILS_HEADER_CELLS + 2 if has_details else 0
     over = sum(cells(i) + 2 for i in range(upto + 1)) + reserve - width
-    caps = {name_i: cells(name_i), source_i: cells(source_i)}
-    if has_details and upto not in caps:
-        # A long Actions value ("blocked, quarantined, disabled") gives up
-        # cells too, so the Details header is not cut at the screen edge.
-        caps[upto] = cells(upto)
+    caps = {name_i: cells(name_i)}
+    if source_i >= 0:
+        caps[source_i] = cells(source_i)
+    # A Source value that is a word ("scan-history", "enforcement"), not a
+    # path, stays whole: only paths lose their head.
+    floors = {name_i: _MIN_FIT_CELLS}
+    if source_i >= 0:
+        words = [len(row[source_i]) for row in rows if not any(sep in row[source_i] for sep in "/\\")]
+        floors[source_i] = max([_MIN_FIT_CELLS, *words])
     while over > 0:
-        i = max(caps, key=lambda k: caps[k])
-        if caps[i] <= _MIN_FIT_CELLS:
+        i = max(caps, key=lambda k: caps[k] - floors[k])
+        if caps[i] <= floors[i]:
             break
         caps[i] -= 1
         over -= 1
@@ -2489,12 +2522,16 @@ def _fit_catalog_rows(
 
     fitted = tuple(tuple(cut(i, value) for i, value in enumerate(row)) for row in rows)
     if not has_details:
-        return fitted
+        return fitted, over <= 0
     left = width - sum(max(len(columns[i]), *(len(row[i]) for row in fitted)) + 2 for i in range(upto + 1)) - 2
-    details_cap = max(left, _DETAILS_HEADER_CELLS)
-    return tuple(
-        (*row[:last], row[last] if len(row[last]) <= details_cap else row[last][: details_cap - 1] + "\u2026")
-        for row in fitted
+    if over > 0 or left < _MIN_DETAILS_CELLS:
+        return fitted, False
+    return (
+        tuple(
+            (*row[:last], row[last] if len(row[last]) <= left else row[last][: left - 1] + "\u2026")
+            for row in fitted
+        ),
+        True,
     )
 
 

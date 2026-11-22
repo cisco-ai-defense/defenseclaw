@@ -126,6 +126,67 @@ struct CanonicalEventHistoryTests {
         sql("ALTER TABLE audit_events ADD COLUMN bucket TEXT;")
         if case .unavailable = await store.canonicalHistory() {} else { fatalError("partial v8 must not revive legacy data") }
         await store.close()
+
+        // GAP-0451: a legacy.audit.* compatibility row has no payload_json
+        // since S8 R4; Logs Raw JSON shows the canonical record body instead
+        // of {}. Other rows keep reading payload_json only.
+        func rawBody(_ log: LogRow?) -> [String: Any] {
+            guard let data = log?.rawJSON.data(using: .utf8),
+                  let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return [:] }
+            return object["body"] as? [String: Any] ?? [:]
+        }
+        let compatBody = #"{"body":{"actor":"operator-a","details":"connector=codex","target":"codex"},"outcome":"completed"}"#
+        func canonical(_ id: String, _ name: String, payload: String, projection: String) -> CanonicalEvent {
+            CanonicalEvent(id: id, timestamp: nil, bucket: "compliance.activity", eventName: name, source: "cli",
+                           severity: .info, action: "setup-hook-connector", actor: "operator-a", details: "connector=codex",
+                           connector: "codex", payloadJSON: payload, projectionJSON: projection, payloadOmitted: false)
+        }
+        let compatReader = EventStreamReader(
+            url: root.appendingPathComponent("retired.jsonl"),
+            gatewayLogURL: root.appendingPathComponent("gateway.log"),
+            watchdogLogURL: root.appendingPathComponent("watchdog.log")
+        )
+        _ = await compatReader.poll(canonicalHistory: .available([
+            canonical("compat", "legacy.audit.setup.hook.connector", payload: "", projection: compatBody),
+            canonical("native", "config.updated", payload: "", projection: compatBody),
+            canonical("compat-payload", "legacy.audit.upgrade", payload: #"{"from":"payload"}"#, projection: compatBody),
+        ]))
+        let compatLogs = await compatReader.logBuffers[.otel] ?? []
+        let compatRow = rawBody(compatLogs.first { $0.id == "v8:compat" })
+        check(compatRow["target"] as? String == "codex" && compatRow["actor"] as? String == "operator-a"
+              && compatRow["details"] as? String == "connector=codex", "compatibility row Raw JSON shows the record body")
+        check(rawBody(compatLogs.first { $0.id == "v8:native" }).isEmpty, "a native row without payload_json keeps body {}")
+        check(rawBody(compatLogs.first { $0.id == "v8:compat-payload" })["from"] as? String == "payload",
+              "a compatibility row with payload_json reads it")
+
+        // The SQL bound marks a compatibility row whose record is over 64 KB
+        // as omitted, as it does a payload over the bound.
+        let compatURL = root.appendingPathComponent("compat.db")
+        var compatDB: OpaquePointer?
+        check(sqlite3_open(compatURL.path, &compatDB) == SQLITE_OK, "create compat fixture")
+        defer { sqlite3_close(compatDB) }
+        func compatSQL(_ value: String) {
+            check(sqlite3_exec(compatDB, value, nil, nil, nil) == SQLITE_OK, "compat fixture SQL failed")
+        }
+        compatSQL("""
+            CREATE TABLE audit_events (id TEXT, timestamp TEXT, bucket TEXT, event_name TEXT,
+                source TEXT, signal TEXT, severity TEXT, action TEXT, actor TEXT, details TEXT,
+                connector TEXT, payload_json TEXT, projected_record_json TEXT);
+            INSERT INTO audit_events VALUES ('small', '2026-11-17T12:00:01Z', 'compliance.activity',
+                'legacy.audit.setup.hook.connector', 'cli', 'logs', 'INFO', 'setup-hook-connector', 'operator-a',
+                'connector=codex', 'codex', NULL, '\(compatBody)');
+            INSERT INTO audit_events VALUES ('big', '2026-11-17T12:00:00Z', 'compliance.activity',
+                'legacy.audit.upgrade', 'cli', 'logs', 'INFO', 'upgrade', 'operator-a', '', '', NULL,
+                '{"body":{"details":"' || hex(randomblob(40000)) || '"}}');
+            """)
+        let compatStore = AuditStore(url: compatURL)
+        guard case .available(let compatRows) = await compatStore.canonicalHistory() else { fatalError("compat canonical schema") }
+        check(compatRows.count == 2, "compat rows")
+        check(compatRows[0].id == "small" && !compatRows[0].payloadOmitted && compatRows[0].payloadJSON.isEmpty
+              && !compatRows[0].projectionJSON.isEmpty, "a small compatibility row keeps its record")
+        check(compatRows[1].id == "big" && compatRows[1].payloadOmitted && compatRows[1].projectionJSON.isEmpty,
+              "an oversize compatibility record is marked omitted")
+        await compatStore.close()
         print("Canonical event history tests passed")
 
         if CommandLine.arguments.count == 3, CommandLine.arguments[1] == "--live-audit" {

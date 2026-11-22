@@ -71,6 +71,9 @@ type ConnectorSignals struct {
 // SetupOpts is passed to Setup/Teardown during `defenseclaw setup`.
 type SetupOpts struct {
 	DataDir string // ~/.defenseclaw/
+	// RouteOnly is the route-only rendering of this connector (nil = not
+	// routed; an earlier render is removed).
+	RouteOnly *RouteOnlySetup
 	// pendingHookScriptDigests is scoped to one install read-back. It is never
 	// persisted or accepted by ordinary verification and gateway readers.
 	pendingHookScriptDigests map[string]string
@@ -82,6 +85,39 @@ type SetupOpts struct {
 	// by hidden native-maintenance commands. Ordinary setup leaves it empty and
 	// uses each vendor's documented discovery rules.
 	ConfigHome string
+	// OpenClawHome and OpenClawConfigPath are claw.home_dir and the
+	// openclaw.json config.yaml names (config.OpenClawHome,
+	// config.OpenClawConfigPath). Empty means the connector keeps the
+	// layout it last saw, else ~/.openclaw of the process account.
+	OpenClawHome       string
+	OpenClawConfigPath string
+	// OpenClawPluginDir is connectors.openclaw.plugin_dir when plugin_install
+	// is external: an administrator-installed plugin the connector verifies
+	// and registers but never writes or deletes. Empty means the managed
+	// plugin under <OpenClawHome>/extensions/defenseclaw.
+	OpenClawPluginDir string
+	// OpenClawPluginAccount, OpenClawPluginTokenFile and
+	// OpenClawPluginTokenGroup are the separate-user layout
+	// (connectors.openclaw.plugin_account, plugin_token_file,
+	// plugin_token_group): OpenClaw runs as another account, owns
+	// openclaw.json, and reads the plugin credential from the token file.
+	OpenClawPluginAccount string
+	// OpenClawHooksMode is connectors.openclaw.hooks.mode (auto or proxy);
+	// Setup resolves it with the OpenClaw version (ResolveOpenClawHookMode).
+	OpenClawHooksMode string
+	// OpenClawPromptGate is connectors.openclaw.hooks.prompt_gate.
+	OpenClawPromptGate       bool
+	OpenClawPluginTokenFile  string
+	OpenClawPluginTokenGroup string
+	// OpenClawInstallPolicy is connectors.openclaw.install_policy resolved
+	// (config.OpenClawInstallPolicyOn): setup registers DefenseClaw as
+	// OpenClaw security.installPolicy. OpenClawInstallPolicyTimeoutMs is the
+	// exec timeout it writes and OpenClawInstallPolicyFailsClosed the answer
+	// on a gateway outage, which the separate-user block carries because the
+	// OpenClaw account cannot read config.yaml there.
+	OpenClawInstallPolicy            bool
+	OpenClawInstallPolicyTimeoutMs   int
+	OpenClawInstallPolicyFailsClosed bool
 	// HookAPIToken is the least-privilege credential written beside generated
 	// hook artifacts. Proxy connectors keep APIToken as the master credential
 	// for their in-process/plugin integration while their generic shell hooks
@@ -251,6 +287,11 @@ type SetupOpts struct {
 	// Hermes command originally registered. Ordinary per-user setup leaves this
 	// empty and resolves the packaged launcher through installed-state.
 	HookExecutable string
+	// RollbackTargetVersion is the release a rollback returns to (connector
+	// prepare-rollback --to-version). The rollback converters write the hook
+	// form that release owns (rel-1-0-10:GAP-0275); "" means unknown, which
+	// gets the form every 1.0.x release owns.
+	RollbackTargetVersion string
 
 	// ClaudeSettingsOverride is the exact file path or inline JSON supplied to
 	// Claude Code through --settings for the invocation being inspected. An
@@ -305,6 +346,58 @@ type SetupOpts struct {
 	// is still configured, so a cached hook path keeps blocking and names the
 	// failed start instead of exiting 0 unguarded (GAP-0367).
 	FailedSetupFailClosed bool
+
+	// SetupRollback is set on the Teardown that rolls back a Setup the
+	// gateway could not finish. What tells the operator how to finish that
+	// setup stays: the block to merge of the OpenClaw separate-user layout
+	// (rel-1-0-10 GAP-0081). Every other teardown removes it (GAP-1130).
+	SetupRollback bool
+
+	// ClaudeManagedGuardTexts109 renders the managed Windows Claude Code guard
+	// wrapper with the texts 1.0.9 Setup wrote instead of this release's
+	// (rel-1-0-10 GAP-0119). The guardian's recorded-policy renders set it,
+	// so a drop-in 1.0.9 published still reads as this deployment's and an
+	// upgrade replaces it with the current form; without it the 1.0.10
+	// guardian refused that drop-in as an unrecognized registered command and
+	// every Setup /ensure upgrade from 1.0.9 ended 1603 (rel-1-0-10
+	// GAP-1495). The standalone machine policy also sets it while the launch
+	// folders are retired, so the 1.0.9 guardian of a rollback recognizes the
+	// drop-in (GAP-1540). Remove when 1.0.9 stops being a supported upgrade
+	// source and rollback target.
+	ClaudeManagedGuardTexts109 bool
+
+	// ReclaimOwnHooksOnly is set on the Teardown of a connector that is not
+	// configured (the boot reclaim of an unguarded connector, connector
+	// prune-orphans). The agent files are shared by every DefenseClaw data
+	// folder of the account, and a connector that proves ownership per file
+	// (Kiro, orphanedHookFiles) then removes only the entries that run one of
+	// this install's exact commands, in the files that hold them, so another
+	// install's live hooks stay (review P2 of rel-1-0-10 GAP-1092). The
+	// teardown of a configured connector leaves it false.
+	ReclaimOwnHooksOnly bool
+
+	// ReportUnreadableResidue is set by `connector teardown` and `connector
+	// verify`, the native steps of uninstall and of an operator's removal. A
+	// leftover the connector cannot clean and that guards nothing fails them
+	// and names the file to fix (Kiro: a file only a backup record names that
+	// is not a JSON object, which Kiro cannot load either, rel-1-0-10
+	// GAP-1298). The gateway's boot teardowns (guardrail disabled, a removed
+	// connector, the lock-only orphan reconcile, the unguarded reclaim) leave
+	// it false: they log the file and go on, as their failure came back on
+	// every start until the file was fixed, and the boot reclaim finishes
+	// the cleanup once it can be read (rel-1-0-10 GAP-1304).
+	ReportUnreadableResidue bool
+
+	// RollbackSavedDataDir is the saved data folder of the newer install a
+	// rollback just left (`connector prune-orphans --rollback-backups-dir`,
+	// which the installers run with that release's gateway after the data
+	// swap). A connector that proves ownership of an account-wide command by
+	// what a data folder holds (Kiro on Windows, kiroDataDirSetUpKiro) also
+	// takes the proof from this folder: the install that set the connector
+	// up is the one the rollback left, and the restored folder never held
+	// it, so the hooks it left stayed after the rollback and Kiro failed
+	// closed without its token (rel-1-0-10 GAP-1221). Empty everywhere else.
+	RollbackSavedDataDir string
 }
 
 // ManagedHookPolicyProvider renders and verifies connector-owned settings for
@@ -329,11 +422,11 @@ type Connector interface {
 	Authenticate(r *http.Request) bool
 	Route(r *http.Request, body []byte) (*ConnectorSignals, error)
 
-	// SetCredentials injects the gateway token and master key at sidecar
+	// SetCredentials injects the gateway token at sidecar
 	// boot. Every connector must implement this so that a missing
 	// implementation causes a compile-time error rather than a silent
 	// runtime auth bypass via the old type-assertion path.
-	SetCredentials(gatewayToken, masterKey string)
+	SetCredentials(gatewayToken string)
 
 	// VerifyClean checks that the connector's teardown left no stale
 	// artifacts (hooks, env files, config patches, shims). Returns nil
@@ -544,11 +637,11 @@ const (
 
 // LLMTrafficModeForConnector returns the traffic mode for a connector
 // name: "proxy" for the proxy/chat connectors (OpenClaw, ZeptoClaw)
-// that interpose on the LLM data path, "hooks-only" for every hook
-// connector. This is the authoritative classifier the API and CLI use
+// that interpose on the LLM data path on this host, "hooks-only" for every
+// hook connector and for OpenClaw in native mode (Windows). This is the authoritative classifier the API and CLI use
 // to describe custom-provider enforcement per connector.
 func LLMTrafficModeForConnector(name string) string {
-	if IsProxyConnector(normalizeConnectorName(name)) {
+	if UsesGuardrailProxy(normalizeConnectorName(name)) {
 		return LLMTrafficModeProxy
 	}
 	return LLMTrafficModeHooksOnly

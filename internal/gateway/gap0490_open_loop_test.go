@@ -14,16 +14,20 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
 	"github.com/google/uuid"
+	"golang.org/x/sys/unix"
 )
 
 // The three open-loop tests below measure wall-clock throughput: the managed
@@ -35,8 +39,16 @@ import (
 //
 // A box that is already overloaded cannot show the gateway answering in time,
 // and a launcher that falls behind its schedule never offers the rate the test
-// names, so every run is judged in this order, and the first two outcomes fail
-// the run as INCONCLUSIVE (never a pass, never a skip):
+// names, so every run is judged in this order, and the first two outcomes are
+// INCONCLUSIVE (never a pass). An INCONCLUSIVE run is a skip that names
+// rel-1-0-10 GAP-1456 and the measured numbers only when a probe that does not
+// touch the gateway confirms the box was short of CPU (openLoopBoxProbe, read
+// right before the baseline, between the baseline and the stream, and after the
+// teardown: a spin on its own OS thread got less than openLoopProbeMinShare of a
+// core, or the Linux CPU pressure of the box was openLoopProbeMaxPressure or
+// more), and so are the two timing outcomes below (unanswered, over the p95
+// budget) on such a box; on a box the probe finds quiet they fail,
+// because the slow real path is then the gateway's own:
 //   - The baseline. Right before the stream the test makes calls one after the
 //     other through the same real path (the relay, the audit and the journal
 //     write path) and measures their latency. If any is unanswered, or if the
@@ -67,6 +79,12 @@ import (
 // 429s, a slow baseline is INCONCLUSIVE naming it, and a stream within its
 // budget passes.
 //
+// Every test has its own deadline (openLoopTestDeadline, from its first call to
+// its teardown) and every phase in it a bound of its own, so a starved box ends
+// the test in about a minute and a half with its numbers; it never waits for
+// the package timeout (rel-1-0-10 GAP-1456: under load the package ran into its
+// 30 to 60 min timeout while these tests ran).
+//
 // CI runs these without -race in their own job, Go Throughput Test (no race),
 // alone on its runner, and that job is part of the required Go Test check.
 
@@ -93,14 +111,27 @@ func TestGAP0490OpenLoopTwoSandboxes(t *testing.T) {
 	runGAP0490OpenLoop(t, 2, 22, 10*time.Second)
 }
 
-// The four-sandbox stream at the documented account budget (4 x 10 = 40 calls
-// a second, sandboxUserHookRate): the managed gateway
+// The four-sandbox stream at the 1.0.9 account budget (4 x 10 = 40 calls a
+// second): the managed gateway
 // answers it inside the hook window of 3.5 s (p95 under a second on the shared
 // build box). 96 calls a second (4 x 24) did not answer in time in half the
 // runs there: a rate above the budget is refused at once with a 429 that
 // names the budget (TestGAP0490RefusalNamesTheBudget), and raising the budget
 // is a 1.0.10 performance row (rel-1-0-6 GAP-0490).
 func TestGAP0490OpenLoopFourSandboxes(t *testing.T) {
+	runGAP0490OpenLoop(t, 4, 10, 10*time.Second)
+}
+
+// TestGAP0490OpenLoopFourSandboxesAtTheAccountBudget is the same stream at
+// the 1.0.10 account budget, 4 x 25 = 100 calls a second (rel-1-0-6
+// GAP-0770, bar H1). It is opt-in (DC_GAP0490_OPEN_LOOP_BUDGET=1) until the
+// one-record-per-decision change cuts the serialised write stage enough for
+// a shared runner (S8 RESULTS.md: utilisation 1.77 of the write stage on the
+// build box today).
+func TestGAP0490OpenLoopFourSandboxesAtTheAccountBudget(t *testing.T) {
+	if os.Getenv("DC_GAP0490_OPEN_LOOP_BUDGET") != "1" {
+		t.Skip("set DC_GAP0490_OPEN_LOOP_BUDGET=1 to drive 4 x 25 calls a second")
+	}
 	runGAP0490OpenLoop(t, 4, sandboxUserHookRate/4, 10*time.Second)
 }
 
@@ -119,6 +150,9 @@ type openLoopPlan struct {
 	duration    time.Duration
 	stall       time.Duration
 	dispatchLag time.Duration
+	// cores is the CPUs the gateway and the launcher share (GOMAXPROCS of
+	// the test process); 0 leaves the CPU stage out of the budget.
+	cores int
 }
 
 // required is the account-wide rate the plan names.
@@ -134,6 +168,9 @@ type openLoopResult struct {
 	problems  map[string]int
 	refused   int // calls whose proposal or receipt got HTTP 429
 	failed    int // calls the gateway answered with an explicit failure: a status other than 200 or 429, or a proposal that did not allow
+	// cpuPerCall is the process CPU time (user and system) one call of the
+	// single-stream baseline took, launcher included; 0 when not measured.
+	cpuPerCall time.Duration
 }
 
 // achievedRate is the calls a second the launcher really issued on its
@@ -257,6 +294,12 @@ func (r *openLoopResult) record(elapsed time.Duration, status int, out []byte, e
 func driveSingleStream(parent context.Context, post openLoopPost, token, session string, calls int) openLoopResult {
 	result := openLoopResult{problems: map[string]int{}, offered: calls}
 	for n := 0; n < calls; n++ {
+		if err := parent.Err(); err != nil {
+			// Past its deadline the baseline stops: the calls it never made
+			// stay offered and unanswered.
+			result.problems[fmt.Sprintf("%d calls not made: %v", calls-n, err)]++
+			break
+		}
 		_, elapsed, status, out, err := performOpenLoopCall(parent, post, token, session, 1000000+n)
 		result.record(elapsed, status, out, err)
 	}
@@ -309,8 +352,17 @@ func driveOpenLoop(parent context.Context, post openLoopPost, plan openLoopPlan)
 			defer launch.Done()
 			session := fmt.Sprintf("g490-open-%d", i)
 			for n := 0; n < total; n++ {
+				// Past its deadline the launcher stops: the calls it never
+				// issued stay offered and unanswered, and the achieved rate
+				// says the stream fell short.
 				if d := time.Until(start.Add(time.Duration(n) * interval)); d > 0 {
-					time.Sleep(d)
+					select {
+					case <-time.After(d):
+					case <-parent.Done():
+						return
+					}
+				} else if parent.Err() != nil {
+					return
 				}
 				if plan.stall > 0 {
 					time.Sleep(plan.stall)
@@ -359,9 +411,27 @@ const openLoopBaselineCalls = 30
 //     (630 ms for the 44 calls/s stream on the reference box, against the 0.26
 //     to 0.42 s it takes there).
 //
-// A box on which rho would exceed openLoopMaxUtilisation, or on which a
-// single-stream call goes unanswered, is overloaded and cannot carry the
-// stream: the run is INCONCLUSIVE and names the baseline it measured.
+// The serialised share was measured on an idle 16-core box, where the rest of
+// a call never waits for a core. On a box with few cores it does: the stream
+// keeps the CPUs busy for its rate x the CPU time of a call, and the writer
+// of the serialised stage then waits for a core as well, so every visit to
+// it stretches by 1 / (1 - the CPU utilisation). The test measures that CPU
+// time in the baseline (process user and system time over its calls) and
+// multiplies the budget by that stretch:
+//   - CPU utilisation rhoCPU = required rate x CPU per call / cores.
+//
+// CI showed why (Go Throughput Test (no race), 28 runs 11-08..11-12): on the
+// 4-vCPU hosted runners the two-sandbox stream (44 calls/s) took a p95 of
+// 217 to 550 ms where the baseline mean was 25 to 31 ms, and failed 2 runs
+// at 1.03 and 1.19 of a budget without this term (runs 43222066812,
+// 43235986187). A block profile of that stream shows the wait in the audit
+// write group (writeGroup.do, the proposal and its receipt), not in the
+// per-session correlation turn, and its process used 1.3 cores. On a box
+// with many cores the stretch is near 1 and the budget is the design's.
+//
+// A box on which rho or rhoCPU would exceed openLoopMaxUtilisation, or on
+// which a single-stream call goes unanswered, is overloaded and cannot carry
+// the stream: the run is INCONCLUSIVE and names the baseline it measured.
 const (
 	openLoopSerialShare    = 0.3
 	openLoopQueueVisits    = 2
@@ -374,6 +444,16 @@ const (
 // busy at the required rate of the plan, given the single-stream baseline.
 func openLoopUtilisation(plan openLoopPlan, base openLoopResult) float64 {
 	return plan.required() * openLoopSerialShare * base.mean().Seconds()
+}
+
+// openLoopCPUUtilisation is the share of the cores the stream keeps busy at
+// the required rate of the plan, given the CPU time of a baseline call; 0
+// when either is unknown.
+func openLoopCPUUtilisation(plan openLoopPlan, base openLoopResult) float64 {
+	if plan.cores <= 0 || base.cpuPerCall <= 0 {
+		return 0
+	}
+	return plan.required() * base.cpuPerCall.Seconds() / float64(plan.cores)
 }
 
 // openLoopQueueingFactor is the stretch of a call at p95 over its single-stream
@@ -396,12 +476,13 @@ func judgeOpenLoopBaseline(plan openLoopPlan, base openLoopResult) *openLoopVerd
 		return &openLoopVerdict{"failed", fmt.Sprintf("the single-stream baseline of the real path had %d of %d calls answered with an explicit failure: %v", base.failed, base.offered, base.problems)}
 	}
 	rho := openLoopUtilisation(plan, base)
-	if len(base.latencies) == base.offered && rho <= openLoopMaxUtilisation {
+	rhoCPU := openLoopCPUUtilisation(plan, base)
+	if len(base.latencies) == base.offered && rho <= openLoopMaxUtilisation && rhoCPU <= openLoopMaxUtilisation {
 		return nil
 	}
-	return &openLoopVerdict{"inconclusive", fmt.Sprintf("INCONCLUSIVE: the single-stream baseline of the real path (%d of %d calls answered, mean %v, p95 %v, max %v: %v) puts a stream of %.0f calls/s at utilisation %.2f of the serialised write stage (limit %.2f; reference box: mean 36 to 39 ms); the box is overloaded, so this run says nothing about the gateway",
-		len(base.latencies), base.offered, base.mean().Round(time.Microsecond), base.percentile(95).Round(time.Microsecond), base.percentile(100).Round(time.Microsecond), base.problems,
-		plan.required(), rho, openLoopMaxUtilisation)}
+	return &openLoopVerdict{"inconclusive", fmt.Sprintf("INCONCLUSIVE: the single-stream baseline of the real path (%d of %d calls answered, mean %v, p95 %v, max %v, CPU per call %v: %v) puts a stream of %.0f calls/s at utilisation %.2f of the serialised write stage and %.2f of %d cores (limit %.2f; reference box: mean 36 to 39 ms); the box is overloaded, so this run says nothing about the gateway",
+		len(base.latencies), base.offered, base.mean().Round(time.Microsecond), base.percentile(95).Round(time.Microsecond), base.percentile(100).Round(time.Microsecond), base.cpuPerCall.Round(time.Microsecond), base.problems,
+		plan.required(), rho, rhoCPU, plan.cores, openLoopMaxUtilisation)}
 }
 
 // judgeOpenLoopStream decides what the offered stream shows about the limit:
@@ -441,10 +522,11 @@ func judgeOpenLoop(plan openLoopPlan, got, base openLoopResult) openLoopVerdict 
 	}
 	sandboxes := len(plan.tokens)
 	rho := openLoopUtilisation(plan, base)
-	budget := time.Duration(openLoopP95Slack * openLoopQueueingFactor(rho) * float64(base.percentile(95)))
-	numbers := fmt.Sprintf("%d sandboxes at %d calls/s, issued %.1f calls/s on schedule: answered share %.3f, p50 %v, p95 %v, max %v; single-stream real path mean %v, p95 %v, utilisation %.2f, queueing factor %.2f, p95 budget %v",
+	rhoCPU := openLoopCPUUtilisation(plan, base)
+	budget := time.Duration(openLoopP95Slack * openLoopQueueingFactor(rho) / (1 - rhoCPU) * float64(base.percentile(95)))
+	numbers := fmt.Sprintf("%d sandboxes at %d calls/s, issued %.1f calls/s on schedule: answered share %.3f, p50 %v, p95 %v, max %v; single-stream real path mean %v, p95 %v, CPU per call %v, utilisation %.2f, queueing factor %.2f, CPU utilisation %.2f of %d cores, p95 budget %v",
 		sandboxes, plan.perSecond, got.achievedRate(), got.answeredShare(), got.percentile(50).Round(time.Microsecond), got.percentile(95).Round(time.Microsecond), got.percentile(100).Round(time.Microsecond),
-		base.mean().Round(time.Microsecond), base.percentile(95).Round(time.Microsecond), rho, openLoopQueueingFactor(rho), budget.Round(time.Microsecond))
+		base.mean().Round(time.Microsecond), base.percentile(95).Round(time.Microsecond), base.cpuPerCall.Round(time.Microsecond), rho, openLoopQueueingFactor(rho), rhoCPU, plan.cores, budget.Round(time.Microsecond))
 	if got.answeredShare() < openLoopMinAnswered {
 		return openLoopVerdict{"unanswered", fmt.Sprintf("%d of %d calls unanswered inside %v (%s): %v", got.offered-len(got.latencies), got.offered, openLoopWait, numbers, got.problems)}
 	}
@@ -465,7 +547,185 @@ func openLoopAnswerer(w http.ResponseWriter, r *http.Request) {
 	_, _ = io.WriteString(w, `{"action":"allow","delivery_receipt":"stand-in"}`)
 }
 
+// The bounds of one open-loop test (rel-1-0-10 GAP-1456). The whole test, from
+// its first call to its teardown, ends inside openLoopTestDeadline; inside it
+// the baseline has openLoopBaselineDeadline (its 30 calls take about 1.2 s on
+// the reference box), the stream its duration plus one answer window plus
+// openLoopStreamSlack, and the teardown openLoopTeardownDeadline to see every
+// request the ingress still holds end. None of them decides a pass: they only
+// end a starved run early, and a run they end is judged on what it measured.
+const (
+	openLoopTestDeadline     = 90 * time.Second
+	openLoopBaselineDeadline = 30 * time.Second
+	openLoopStreamSlack      = 5 * time.Second
+	openLoopTeardownDeadline = 20 * time.Second
+)
+
+// The box probe. A spin on its own OS thread for openLoopProbeSpin gets about
+// one core on a box with a core to spare; a box whose cores are all busy (other
+// test binaries, a CPU burner, or fewer cores than this process runs threads
+// on) gives it less. Below openLoopProbeMinShare of a core the box is short of
+// CPU, which says nothing about the gateway: the probe never calls it. The
+// scheduler can still hand one fresh thread a whole core on a box whose cores
+// are all taken (it read 1.00 with four burners a core), so on Linux the probe
+// also reads the CPU pressure of the box over the same window
+// (/proc/pressure/cpu, the share of the time some task waited for a core): at
+// openLoopProbeMaxPressure or more the box is short of CPU as well. The
+// gateway is idle while the probe runs.
+const (
+	openLoopProbeSpin        = 200 * time.Millisecond
+	openLoopProbeMinShare    = 0.7
+	openLoopProbeMaxPressure = 0.5
+)
+
+// openLoopCPUPressure is the cumulative "some" CPU stall time of the box
+// (Linux PSI), and false where the kernel does not report it.
+func openLoopCPUPressure() (time.Duration, bool) {
+	raw, err := os.ReadFile("/proc/pressure/cpu")
+	if err != nil {
+		return 0, false
+	}
+	for _, line := range strings.Split(string(raw), "\n") {
+		if !strings.HasPrefix(line, "some ") {
+			continue
+		}
+		for _, field := range strings.Fields(line) {
+			if v, ok := strings.CutPrefix(field, "total="); ok {
+				var us int64
+				if _, err := fmt.Sscan(v, &us); err == nil {
+					return time.Duration(us) * time.Microsecond, true
+				}
+			}
+		}
+	}
+	return 0, false
+}
+
+// openLoopProbeSink keeps the probe's spin from being optimised away.
+var openLoopProbeSink atomic.Uint64
+
+// openLoopProbe is one reading of the box probe: the share of one core a spin
+// on its own OS thread got over openLoopProbeSpin of wall time (thread CPU time
+// over wall time), and the CPU pressure of the box over the same window (-1
+// where the kernel does not report it).
+type openLoopProbe struct {
+	share, pressure float64
+}
+
+// openLoopBoxProbe takes one reading, and false when the thread CPU clock
+// cannot be read.
+func openLoopBoxProbe() (openLoopProbe, bool) {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	var before, after unix.Timespec
+	if unix.ClockGettime(unix.CLOCK_THREAD_CPUTIME_ID, &before) != nil {
+		return openLoopProbe{}, false
+	}
+	stallBefore, havePressure := openLoopCPUPressure()
+	start := time.Now()
+	x := uint64(1)
+	for time.Since(start) < openLoopProbeSpin {
+		for i := 0; i < 10000; i++ {
+			x = x*6364136223846793005 + 1442695040888963407
+		}
+	}
+	wall := time.Since(start)
+	stallAfter, pressureAfter := openLoopCPUPressure()
+	if unix.ClockGettime(unix.CLOCK_THREAD_CPUTIME_ID, &after) != nil {
+		return openLoopProbe{}, false
+	}
+	openLoopProbeSink.Add(x)
+	reading := openLoopProbe{share: float64(after.Nano()-before.Nano()) / float64(wall.Nanoseconds()), pressure: -1}
+	if havePressure && pressureAfter {
+		reading.pressure = float64(stallAfter-stallBefore) / float64(wall)
+	}
+	return reading, true
+}
+
+// openLoopProbes is what the box probe measured around one stream.
+type openLoopProbes []openLoopProbe
+
+func (p *openLoopProbes) take() {
+	if reading, ok := openLoopBoxProbe(); ok {
+		*p = append(*p, reading)
+	}
+}
+
+// starved reports whether any reading found the box short of CPU.
+func (p openLoopProbes) starved() bool {
+	for _, r := range p {
+		if r.share < openLoopProbeMinShare || r.pressure >= openLoopProbeMaxPressure {
+			return true
+		}
+	}
+	return false
+}
+
+func (p openLoopProbes) String() string {
+	shares := make([]string, len(p))
+	pressures := make([]string, len(p))
+	for i, r := range p {
+		shares[i] = fmt.Sprintf("%.2f", r.share)
+		pressures[i] = "n/a"
+		if r.pressure >= 0 {
+			pressures[i] = fmt.Sprintf("%.2f", r.pressure)
+		}
+	}
+	return fmt.Sprintf("a spin on its own thread got [%s] of a core (limit %.2f), CPU pressure [%s] (limit %.2f)", strings.Join(shares, " "), openLoopProbeMinShare, strings.Join(pressures, " "), openLoopProbeMaxPressure)
+}
+
+// settleOpenLoop ends an open-loop test on its verdict. An INCONCLUSIVE verdict
+// is a skip naming GAP-1456 and the numbers when the box probe found the box
+// short of CPU, and a failure when it did not (the box had CPU to spare, so the
+// real path that could not carry the stream is the gateway's own). The two
+// timing verdicts, unanswered and slow, are measured on the same wall clock
+// and are a skip on a box the probe found short of CPU as well; on a quiet box
+// they fail. A refusal or an explicit failure is not a timing matter and fails
+// on any box.
+func settleOpenLoop(t *testing.T, verdict openLoopVerdict, probes openLoopProbes, deadline error) {
+	t.Helper()
+	if verdict.kind == "inconclusive" && !probes.starved() {
+		// The baseline's own words blame the box; the probe says otherwise.
+		verdict.detail = strings.TrimSuffix(strings.TrimPrefix(verdict.detail, "INCONCLUSIVE: "), "; the box is overloaded, so this run says nothing about the gateway")
+	}
+	if deadline != nil {
+		verdict.detail = fmt.Sprintf("%s (the test deadline of %v ran out: %v)", verdict.detail, openLoopTestDeadline, deadline)
+	}
+	switch {
+	case verdict.kind == "ok":
+		t.Logf("%s; %s", verdict.detail, probes)
+	case (verdict.kind == "inconclusive" || verdict.kind == "unanswered" || verdict.kind == "slow") && probes.starved():
+		t.Skipf("GAP-1456 INCONCLUSIVE, box short of CPU (%s): %s", probes, verdict.detail)
+	case verdict.kind == "inconclusive":
+		t.Fatalf("GAP-1456 FAIL, not a skip: the box was not short of CPU (%s), so this is the gateway: %s", probes, verdict.detail)
+	default:
+		t.Fatalf("%s (%s)", verdict.detail, probes)
+	}
+}
+
+// closeOpenLoopServer closes the ingress server, which waits for every request
+// it still serves, inside openLoopTeardownDeadline. It reports whether they all
+// ended.
+func closeOpenLoopServer(srv *httptest.Server) bool {
+	srv.CloseClientConnections()
+	done := make(chan struct{})
+	go func() {
+		srv.Close()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return true
+	case <-time.After(openLoopTeardownDeadline):
+		return false
+	}
+}
+
 func runGAP0490OpenLoop(t *testing.T, sandboxes, perSecond int, duration time.Duration) {
+	ctx, cancel := context.WithTimeout(t.Context(), openLoopTestDeadline)
+	defer cancel()
+	var probes openLoopProbes
+	probes.take()
 	f := newManagedHookAuditFixture(t, nil)
 	bindings, err := sandboxauth.OpenFileStore(sandboxauth.DefaultStorePath(t.TempDir()), sandboxauth.WithRefreshInterval(0))
 	if err != nil {
@@ -492,29 +752,73 @@ func runGAP0490OpenLoop(t *testing.T, sandboxes, perSecond int, duration time.Du
 		t.Fatal(err)
 	}
 	srv := httptest.NewServer(handler)
-	defer srv.Close()
+	closed := false
+	defer func() {
+		// A test that ends early (a Fatal) still closes inside its bound.
+		if !closed {
+			closeOpenLoopServer(srv)
+		}
+	}()
 	post := newOpenLoopPost(srv.URL)
 	// Warm the sessions: the first call of an unseen session waits for its
-	// start, which is not what this test measures.
+	// start, which is not what this test measures. A session start left
+	// unanswered on a starved box is the baseline's INCONCLUSIVE, not a hang.
 	for i, token := range tokens {
 		session := fmt.Sprintf("g490-open-%d", i)
-		warm, cancel := context.WithTimeout(t.Context(), openLoopWait)
+		warm, cancel := context.WithTimeout(ctx, openLoopWait)
 		status, out, err := post(warm, token, []byte(managedHookBody(session, "UserPromptSubmit")), false)
 		cancel()
-		if err != nil || status != http.StatusOK {
-			t.Fatalf("session start %d %s %v", status, out, err)
+		if err == nil && status != http.StatusOK {
+			t.Fatalf("session start %d %s", status, out)
+		}
+		if err != nil {
+			probes.take()
+			closed = true
+			if !closeOpenLoopServer(srv) {
+				t.Errorf("GAP-1456: the ingress still served requests %v after the session start of sandbox %d went unanswered", openLoopTeardownDeadline, i)
+			}
+			probes.take()
+			settleOpenLoop(t, openLoopVerdict{"inconclusive", fmt.Sprintf("INCONCLUSIVE: the session start of sandbox %d was not answered inside %v (%v)", i, openLoopWait, err)}, probes, ctx.Err())
+			return
 		}
 	}
 	// The baseline: the real path, one call after the other, right before the
 	// stream, on the same box in the same state.
-	base := driveSingleStream(t.Context(), post, tokens[0], "g490-open-0", openLoopBaselineCalls)
-	plan := openLoopPlan{tokens: tokens, perSecond: perSecond, duration: duration}
-	got := driveOpenLoop(t.Context(), post, plan)
-	verdict := judgeOpenLoop(plan, got, base)
-	if verdict.kind != "ok" {
-		t.Fatal(verdict.detail)
+	plan := openLoopPlan{tokens: tokens, perSecond: perSecond, duration: duration, cores: runtime.GOMAXPROCS(0)}
+	baseCtx, baseCancel := context.WithTimeout(ctx, openLoopBaselineDeadline)
+	cpuBefore := openLoopProcessCPU(t)
+	base := driveSingleStream(baseCtx, post, tokens[0], "g490-open-0", openLoopBaselineCalls)
+	base.cpuPerCall = (openLoopProcessCPU(t) - cpuBefore) / openLoopBaselineCalls
+	baseCancel()
+	probes.take()
+	var got openLoopResult
+	if judgeOpenLoopBaseline(plan, base) == nil {
+		// A baseline that already shows the box cannot carry the plan settles
+		// the run; the stream would only spend the deadline.
+		streamCtx, streamCancel := context.WithTimeout(ctx, duration+openLoopWait+openLoopStreamSlack)
+		got = driveOpenLoop(streamCtx, post, plan)
+		streamCancel()
 	}
-	t.Log(verdict.detail)
+	closed = true
+	drained := closeOpenLoopServer(srv)
+	probes.take()
+	if !drained {
+		// Every client of the stream gave up inside its answer window; a
+		// request the ingress still serves openLoopTeardownDeadline later is
+		// a request that outlived its caller.
+		t.Errorf("GAP-1456: the ingress still served requests %v after the stream ended (%s)", openLoopTeardownDeadline, probes)
+	}
+	settleOpenLoop(t, judgeOpenLoop(plan, got, base), probes, ctx.Err())
+}
+
+// openLoopProcessCPU is the user and system CPU time this process has used.
+func openLoopProcessCPU(t *testing.T) time.Duration {
+	t.Helper()
+	var usage syscall.Rusage
+	if err := syscall.Getrusage(syscall.RUSAGE_SELF, &usage); err != nil {
+		t.Fatal(err)
+	}
+	return time.Duration(usage.Utime.Nano() + usage.Stime.Nano())
 }
 
 // openLoopCapStub stands in for a relay with an account rate cap: it answers a
@@ -737,6 +1041,50 @@ func TestGAP0490OpenLoopJudgementFollowsTheBaseline(t *testing.T) {
 			}
 			if tc.kind == "inconclusive" && !strings.Contains(verdict.detail, "INCONCLUSIVE") {
 				t.Fatalf("an inconclusive verdict must say so: %s", verdict.detail)
+			}
+		})
+	}
+}
+
+// The CPU stage of the budget follows the cores. The slow-pool stream of run
+// 43235986187 (2 x 22 calls/s, p95 550 ms over a baseline mean of 31 ms and
+// p95 38 ms), with the 38 ms of CPU a call took in a profile of the same
+// stream, passes on the 4 cores of a hosted runner (CPU utilisation 0.42)
+// and is slow where 16 cores leave it no CPU wait (0.10) or where the CPU
+// time is not known. A stream past the stretched budget is still slow, a box
+// whose cores the stream would keep past openLoopMaxUtilisation is
+// INCONCLUSIVE, and a refusal still fails on any box.
+func TestGAP0490OpenLoopJudgementCPUStageFollowsTheCores(t *testing.T) {
+	slowPool := openLoopRecorded(30, 30, 31*time.Millisecond, 38*time.Millisecond, 1)
+	slowPool.cpuPerCall = 38 * time.Millisecond
+	unmeasured := openLoopRecorded(30, 30, 31*time.Millisecond, 38*time.Millisecond, 1)
+	cpuBound := openLoopRecorded(30, 30, 31*time.Millisecond, 38*time.Millisecond, 1)
+	cpuBound.cpuPerCall = 80 * time.Millisecond
+	stream := openLoopRecorded(440, 440, 266*time.Millisecond, 550*time.Millisecond, 44)
+	refused := openLoopRecorded(440, 440, 266*time.Millisecond, 550*time.Millisecond, 44)
+	refused.refused = 1
+	plan := func(cores int) openLoopPlan {
+		p := openLoopStubPlan(2, 22, 10*time.Second, 0)
+		p.cores = cores
+		return p
+	}
+	for _, tc := range []struct {
+		name string
+		plan openLoopPlan
+		got  openLoopResult
+		base openLoopResult
+		kind string
+	}{
+		{"the slow-pool stream passes on 4 cores", plan(4), stream, slowPool, "ok"},
+		{"the same stream is slow on 16 cores", plan(16), stream, slowPool, "slow"},
+		{"the same stream is slow when the CPU time is not measured", plan(4), stream, unmeasured, "slow"},
+		{"a stream past the stretched budget is slow", plan(4), openLoopRecorded(440, 440, 266*time.Millisecond, 900*time.Millisecond, 44), slowPool, "slow"},
+		{"a stream that would keep 4 cores 88% busy is inconclusive", plan(4), stream, cpuBound, "inconclusive"},
+		{"a refusal fails on 4 cores", plan(4), refused, slowPool, "refused"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if verdict := judgeOpenLoop(tc.plan, tc.got, tc.base); verdict.kind != tc.kind {
+				t.Fatalf("judged %s, want %s: %s", verdict.kind, tc.kind, verdict.detail)
 			}
 		})
 	}

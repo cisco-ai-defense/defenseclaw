@@ -43,10 +43,12 @@ func projectSkillRootSharedWritable(home, root string) (bool, error) {
 
 func projectSkillFolderSharedWritable(path, caller string) (bool, error) {
 	// The security descriptor is read only below a share that has answered.
-	if networkPathUnanswered(path) {
+	read, release, ok := gatedPath(path)
+	if !ok {
 		return false, networkShareError("security", path)
 	}
-	sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
+	defer release()
+	sd, err := windows.GetNamedSecurityInfo(read, windows.SE_FILE_OBJECT,
 		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
 	if err != nil {
 		return false, err

@@ -47,6 +47,7 @@ func TestManagedPolicySnapshotUsesThePolicyBoundNotTheStateBound(t *testing.T) {
 // managed install ended 1603 "guardian did not publish fresh required
 // coverage" (GAP-1050).
 func TestInstalledWindowsClaudePolicyFitsTheStateBound(t *testing.T) {
+	requireGAP633Elevated(t) // a standard user is refused the managed policy folder (rel-1-0-10 GAP-1519)
 	fixture := newWindowsManagedInstallFixture(t, map[string]interface{}{"allowManagedHooksOnly": true})
 	if _, err := Install(context.Background(), windowsManagedInstallOptions(fixture)); err != nil {
 		t.Fatal(err)

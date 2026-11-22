@@ -94,7 +94,10 @@ func TestProtectHomeStateGlobAndLinkWritesBlock(t *testing.T) {
 				if err := json.Unmarshal([]byte(got), &resp); err != nil {
 					t.Fatalf("verdict %q: %v", got, err)
 				}
-				blocked := resp["action"] == "block"
+				// A proven state write is a HIGH alert on the default pack (GAP-0747
+				// owner tiering 2026-11-15T15:20Z).
+				action, _ := resp["action"].(string)
+				blocked := gap0747StateVerdict(action, got, false) == "block"
 				if blocked != tc.block {
 					t.Fatalf("blocked = %t, want %t: %.600s", blocked, tc.block, got)
 				}

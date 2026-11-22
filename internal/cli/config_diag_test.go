@@ -83,3 +83,52 @@ func mustFailLoad(t *testing.T, path, dir string) error {
 	t.Fatal("the candidate was accepted")
 	return nil
 }
+
+// GAP-0586: a routing refusal of the runtime loader named no setting
+// ("configuration could not be compiled safely" at "$"). It names the key
+// and what to set.
+func TestConfigValidateNamesTheRoutingRefusal(t *testing.T) {
+	for _, c := range []struct{ name, routing, path, want string }{
+		{"systemone without a decision model",
+			"routing:\n  enabled: true\n  classifier: systemone\n  models:\n    - {name: fast, provider: openai, model: m}\n  systemone:\n    base_url: http://127.0.0.1:8791/v1/systemone\n    model: m\n",
+			"$.routing.classifier", "decision_model.base_url"},
+		{"systemone own endpoint missing", "routing:\n  enabled: true\n  classifier: systemone\n  models:\n    - {name: fast, provider: openai, model: m}\n  systemone:\n    use_decision_model: false\n",
+			"$.routing", "systemone.base_url and systemone.model"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "config.yaml")
+			if err := os.WriteFile(path, []byte("config_version: 9\ndata_dir: "+dir+"\n"+c.routing), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			failure := configV8ValidationFailure(mustFailLoad(t, path, dir))
+			if failure.Path != c.path || !strings.Contains(failure.Reason, "config_semantic_invalid") || !strings.Contains(failure.Reason, c.want) {
+				t.Fatalf("failure = %+v\nwant %s at %s", failure, c.want, c.path)
+			}
+		})
+	}
+}
+
+// GAP-1159: plugin_install external before plugin_dir failed with
+// "configuration could not be compiled safely" at "$"; it names the setting
+// and what to set first.
+func TestConfigValidateNamesTheOpenClawPluginDirRefusal(t *testing.T) {
+	for _, c := range []struct{ name, openclaw, path, want string }{
+		{"external before plugin_dir", "    plugin_install: external\n",
+			"$.connectors.openclaw.plugin_dir", "set plugin_dir first"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "config.yaml")
+			source := "config_version: 9\ndata_dir: " + dir + "\nconnectors:\n  openclaw:\n" + c.openclaw
+			if err := os.WriteFile(path, []byte(source), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			failure := configV8ValidationFailure(mustFailLoad(t, path, dir))
+			if failure.Path != c.path || !strings.Contains(failure.Reason, "config_semantic_invalid") ||
+				!strings.Contains(failure.Reason, c.want) || strings.Contains(failure.Reason, "could not be compiled safely") {
+				t.Fatalf("failure = %+v\nwant %s at %s", failure, c.want, c.path)
+			}
+		})
+	}
+}

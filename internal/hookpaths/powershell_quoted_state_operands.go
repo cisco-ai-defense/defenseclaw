@@ -25,8 +25,13 @@ const powerShellQuotedDepth = 4
 // is one); double-quoted text counts only when nothing in it expands. Quoted
 // text is also read again as code, so the literals of a pwsh -Command body
 // are listed too. The typographic quotes PowerShell accepts count as quotes.
+// A double-quoted path or a bare argument whose only expansion is the home
+// it starts with ("$HOME\.defenseclaw\config.yaml" as a .NET file method's
+// argument, $HOME\.codex\config.toml as a cmdlet's) is listed as the path in
+// home (psHomeQuotedPath, rel-1-0-10:GAP-1115): a call Codex runs through
+// its Bash tool is not read as PowerShell elsewhere in the client.
 // over is true past powerShellQuotedPathMax paths.
-func powerShellQuotedPathOperands(command, cwd string) (operands []stateOperand, over bool) {
+func powerShellQuotedPathOperands(command, cwd, home string) (operands []stateOperand, over bool) {
 	seen := map[string]bool{}
 	var read func(text string, depth int) bool
 	read = func(text string, depth int) bool {
@@ -34,6 +39,34 @@ func powerShellQuotedPathOperands(command, cwd string) (operands []stateOperand,
 		for i := 0; i < len(runes); i++ {
 			single := psQuoteOfKind(runes[i], true)
 			if !single && !psQuoteOfKind(runes[i], false) {
+				// A bare argument that starts with the home is the same path
+				// to PowerShell: Add-Content -Path $HOME\.codex\config.toml.
+				if runes[i] != '$' || i > 0 && !strings.ContainsRune(" \t\r\n(,=:;|{", runes[i-1]) {
+					continue
+				}
+				j := i + 1
+				if j < len(runes) && runes[j] == '{' {
+					// ${HOME} and ${env:USERPROFILE} end at their brace.
+					for j < len(runes) && runes[j] != '}' {
+						j++
+					}
+					if j < len(runes) {
+						j++
+					}
+				}
+				for j < len(runes) && !strings.ContainsRune(" \t\r\n;|(){},'\"`", runes[j]) && !psQuoteOfKind(runes[j], true) &&
+					!psQuoteOfKind(runes[j], false) {
+					j++
+				}
+				word := string(runes[i:j])
+				if path, ok := psHomeQuotedPath(word, home); ok && !seen[word] {
+					if len(seen) >= powerShellQuotedPathMax {
+						return false
+					}
+					seen[word] = true
+					operands = append(operands, stateOperand{path: OperandPath(path, cwd)})
+				}
+				i = j - 1
 				continue
 			}
 			var value strings.Builder
@@ -60,12 +93,16 @@ func powerShellQuotedPathOperands(command, cwd string) (operands []stateOperand,
 			}
 			i = j
 			literal := value.String()
-			if !seen[literal] && psQuotedPath(literal, single) {
+			path, quotedPath := literal, psQuotedPath(literal, single)
+			if !quotedPath && !single {
+				path, quotedPath = psHomeQuotedPath(literal, home)
+			}
+			if !seen[literal] && quotedPath {
 				if len(seen) >= powerShellQuotedPathMax {
 					return false
 				}
 				seen[literal] = true
-				operands = append(operands, stateOperand{path: OperandPath(literal, cwd)})
+				operands = append(operands, stateOperand{path: OperandPath(path, cwd)})
 			}
 			if depth < powerShellQuotedDepth && !read(literal, depth+1) {
 				return false
@@ -74,6 +111,43 @@ func powerShellQuotedPathOperands(command, cwd string) (operands []stateOperand,
 		return true
 	}
 	return operands, !read(command, 0)
+}
+
+// psHomeVariables are the spellings of the user's home a PowerShell string
+// expands (lower case): the automatic variable and the profile variable.
+var psHomeVariables = []string{"$home", "${home}", "$env:userprofile", "${env:userprofile}"}
+
+// psPOSIXHomeVariables are the spellings of the user's home pwsh expands on
+// Linux and macOS (lower case).
+var psPOSIXHomeVariables = []string{"$home", "${home}"}
+
+// psHomeQuotedPath returns the path a double-quoted string or a bare word
+// names when it starts with the home (psHomeVariables) followed by a separator and
+// expands nothing else, false for any other string. Under a Linux or macOS
+// home only $HOME counts.
+func psHomeQuotedPath(text, home string) (string, bool) {
+	variables := psHomeVariables
+	switch {
+	case actionWindowsHome(home):
+	case strings.HasPrefix(home, "/"):
+		// pwsh on Linux and macOS: $HOME is the home, USERPROFILE is not
+		// set (the script of a PowerShell launcher, rel-1-0-10:GAP-1138).
+		variables = psPOSIXHomeVariables
+	default:
+		return "", false
+	}
+	lower := strings.ToLower(text)
+	for _, variable := range variables {
+		rest, ok := strings.CutPrefix(lower, variable)
+		if !ok || rest == "" || rest[0] != '\\' && rest[0] != '/' {
+			continue
+		}
+		path := strings.TrimRight(home, `\/`) + text[len(variable):]
+		if psQuotedPath(path, false) {
+			return path, true
+		}
+	}
+	return "", false
 }
 
 // psQuoteOfKind reports a single quote (single) or a double quote of

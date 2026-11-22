@@ -498,7 +498,7 @@ func TestKiroSetupKeepsAnAgentKiroUpgraded(t *testing.T) {
 
 	// Teardown takes DefenseClaw's entries out and keeps the user's hook and
 	// the file.
-	if err := removeKiroV2AgentHooks(agentPath, command); err != nil {
+	if err := removeKiroV2AgentHooksKeeping(agentPath, command, false, nil); err != nil {
 		t.Fatalf("remove: %v", err)
 	}
 	if data, err := os.ReadFile(agentPath); err != nil || json.Unmarshal(data, &again) != nil {
@@ -519,7 +519,7 @@ func TestKiroSetupKeepsAnAgentKiroUpgraded(t *testing.T) {
 	if err := os.WriteFile(agentPath, body, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := removeKiroV2AgentHooks(agentPath, command); err != nil {
+	if err := removeKiroV2AgentHooksKeeping(agentPath, command, false, nil); err != nil {
 		t.Fatalf("remove overlay: %v", err)
 	}
 	if _, err := os.Stat(agentPath); !os.IsNotExist(err) {

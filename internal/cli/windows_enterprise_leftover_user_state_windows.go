@@ -25,6 +25,7 @@ import (
 	"golang.org/x/sys/windows/registry"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
@@ -49,7 +50,7 @@ var windowsEnterpriseTombstoneUserStatePurge = readWindowsEnterpriseTombstoneUse
 // StateRoot no longer exists, the end state of a completed purge; tests
 // replace it.
 var windowsEnterpriseStandaloneStateRootGone = func() bool {
-	roots, err := windowsManagedLayout.roots(managed.ProfileStandalone)
+	roots, err := hookcli.WindowsManagedLayout.Roots(managed.ProfileStandalone)
 	if err != nil {
 		return false
 	}
@@ -108,7 +109,7 @@ func windowsEnterpriseLeftoverUserStateFolders() []string {
 		if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 			continue
 		}
-		labels = append(labels, windowsPrincipalLabel(profile.SID)+": "+folder)
+		labels = append(labels, hookcli.WindowsPrincipalLabel(profile.SID)+": "+folder)
 	}
 	return labels
 }
@@ -143,7 +144,7 @@ func addWindowsEnterpriseLeftoverUserStateWarning(result *enterprisestatus.Resul
 // readable tombstone with uninstall_purge_user_state_requested true is false:
 // the answer only decides whether a recovery names leftover folders.
 func readWindowsEnterpriseTombstoneUserStatePurge() bool {
-	roots, err := windowsManagedLayout.roots(managed.ProfileStandalone)
+	roots, err := hookcli.WindowsManagedLayout.Roots(managed.ProfileStandalone)
 	if err != nil {
 		return false
 	}

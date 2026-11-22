@@ -140,3 +140,93 @@ func asciiLower(b byte) byte {
 func asciiAlphanumeric(b byte) bool {
 	return 'a' <= b && b <= 'z' || 'A' <= b && b <= 'Z' || '0' <= b && b <= '9'
 }
+
+// relativeHomeWritesAsTilde spells, in text, each relative operand that the
+// facts prove the call writes, appends to or deletes in the caller's home as
+// the same file under ~ (cp /tmp/x .aws/credentials from the home reads as
+// cp /tmp/x ~/.aws/credentials). The home-relative path rules read a file in
+// the home only through a home spelling (~, $HOME, /home/<word>), so the same
+// write with a relative operand, or after a cd into the home, was judged by
+// none of them: PATH-AWS-CREDS blocked the ~/ spelling and allowed the
+// relative one (substrate-1:GAP-0697). The rules that read the path facts
+// already judge the resolved file, so the respelling changes only what those
+// text rules read.
+//
+// Only an exact reading counts: the facts must be complete, and an operand
+// read in another folder its command may run in (OtherFolderReading), in a
+// folder the call does not give (UnresolvedFolder), or through a link is left
+// as written; those keep their own tiers. A partial call is judged here by the
+// pass of each of its simple commands, whose folder the walk gives. Each
+// spelling of the operand in text is respelled; the call writes that file, so
+// a second mention of the same word cannot add a finding the write does not
+// already earn.
+func relativeHomeWritesAsTilde(text string, facts actionfacts.Facts) string {
+	home := strings.TrimRight(facts.ActiveHome, "/")
+	if text == "" || !facts.Authoritative() || len(home) < 2 || home[0] != '/' {
+		return text
+	}
+	for _, candidate := range facts.Paths {
+		switch candidate.Access {
+		case actionfacts.PathAccessWrite, actionfacts.PathAccessAppend, actionfacts.PathAccessDelete:
+		default:
+			continue
+		}
+		value := candidate.Value
+		if candidate.Linked || candidate.OtherFolderReading() || candidate.UnresolvedFolder() ||
+			candidate.Flavor != actionfacts.PathFlavorPOSIX || value == "" || strings.ContainsAny(value[:1], "/~$") {
+			continue
+		}
+		below, ok := strings.CutPrefix(candidate.Resolved, home+"/")
+		if !ok || below == "" || !homeRelativeLiteral(below) {
+			continue
+		}
+		text = respellShellWord(text, value, "~/"+below)
+	}
+	return text
+}
+
+// homeRelativeLiteral reports whether below, a clean path under the home, is
+// one shell word with no quoting: the names the path rules read.
+func homeRelativeLiteral(below string) bool {
+	for _, segment := range strings.Split(below, "/") {
+		if segment == "" || segment == "." || segment == ".." {
+			return false
+		}
+	}
+	return strings.IndexFunc(below, func(r rune) bool { return !shellLiteralRune(r, "/._-+@%,:") }) < 0
+}
+
+// shellLiteralRune reports a rune a shell reads literally in a word: an ASCII
+// letter or digit, or one of punct.
+func shellLiteralRune(r rune, punct string) bool {
+	return r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || strings.ContainsRune(punct, r)
+}
+
+// respellShellWord replaces in text each occurrence of word that stands as a
+// whole shell word or operand (after a blank, a quote, a redirect, an
+// operator or an option key's "="; before a blank, a quote, a redirect or an
+// operator) with spelling.
+func respellShellWord(text, word, spelling string) string {
+	var out strings.Builder
+	last := 0
+	for from := 0; from < len(text); {
+		offset := strings.Index(text[from:], word)
+		if offset < 0 {
+			break
+		}
+		start, end := from+offset, from+offset+len(word)
+		from = start + 1
+		if start > 0 && strings.IndexByte(" \t\n'\"<>=;&|(", text[start-1]) < 0 ||
+			end < len(text) && strings.IndexByte(" \t\r\n'\"<>;&|)", text[end]) < 0 {
+			continue
+		}
+		out.WriteString(text[last:start])
+		out.WriteString(spelling)
+		last, from = end, end
+	}
+	if last == 0 {
+		return text
+	}
+	out.WriteString(text[last:])
+	return out.String()
+}

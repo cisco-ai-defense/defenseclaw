@@ -366,7 +366,15 @@ func (a *APIServer) stampHookEnvelopeIdentity(ctx context.Context, connectorName
 	if env.Connector == "" {
 		env.Connector = connectorName
 	}
-	env.StepIdx = a.stepIndexForTurn(sandboxSessionStateKey(ctx, req.SessionID), req.TurnID, req.HookEventName)
+	// A replica of a Substrate gateway sees only the hook calls that land on
+	// it, so its count of an actor session's turns is not the other
+	// replicas' (substrate-1 GAP-0270). An actor's hook calls carry no step
+	// index (0: not turn-anchored) rather than one that differs by replica.
+	if _, actor := substrateActorFrom(ctx); actor {
+		env.StepIdx = 0
+	} else {
+		env.StepIdx = a.stepIndexForTurn(sandboxSessionStateKey(ctx, req.SessionID), req.TurnID, req.HookEventName)
+	}
 	env.Enforced = resp.Action == "block"
 	env.RulePackDir = a.effectiveRulePackDir(ctx, connectorName)
 

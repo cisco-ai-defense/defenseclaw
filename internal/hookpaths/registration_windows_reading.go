@@ -7,7 +7,19 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 )
+
+// RegistrationWriteReachedBounded is RegistrationWriteReached that also
+// reports the caps its pattern expansions hit (actionBoundedGlob) where a
+// reader decided on the matches read before the cap and none was a
+// registered file: the reading is truncated, which the caller judges at
+// least at the unknown tier (the one bound rule, rel-1-0-10:GAP-1468).
+func RegistrationWriteReachedBounded(command, cwd, home string, names []string) (reached []string, truncated bounded.CapSet) {
+	truncated = globCutOf(func() { reached = RegistrationWriteReached(command, cwd, home, names) })
+	return reached, truncated
+}
 
 // RegistrationWriteReached runs the shared concrete shell mutation reader
 // against a caller-supplied registration set and returns the members of that

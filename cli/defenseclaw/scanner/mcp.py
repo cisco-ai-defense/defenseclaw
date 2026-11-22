@@ -395,6 +395,35 @@ def _trace_windows_stdio_lifecycle(
         pass
 
 
+def mcp_scanner_import_error(exc: ImportError) -> str:
+    """The error `defenseclaw mcp scan` prints when the scanner SDK does not import.
+
+    It said "cisco-ai-mcp-scanner not installed" also when the package was
+    installed and one of its dependencies failed to import (an upgrade had
+    left files of an older LiteLLM wheel, GAP-0006): it now tells the two
+    apart, quotes the import error and names the damaged files and the repair.
+    """
+    import importlib.metadata as importlib_metadata
+
+    from defenseclaw import venv_integrity
+
+    dist = settings.MCP_SCANNER_DIST
+    repair = venv_integrity.install_repair_hint("the Python environment", windows=os.name == "nt")
+    try:
+        version = importlib_metadata.version(dist)
+    except importlib_metadata.PackageNotFoundError:
+        return (
+            f"error: {dist} is not installed in this DefenseClaw environment.\n"
+            f"  To {repair}.\n  Source checkouts: uv sync"
+        )
+    lines = [f"error: {dist} {version} is installed but does not import: {type(exc).__name__}: {exc}"]
+    damaged = venv_integrity.damaged_files(venv_integrity.site_packages())
+    if damaged:
+        lines.append("  Files that differ from their wheels: " + venv_integrity.describe(damaged))
+    lines.append(f"  To {repair}; defenseclaw doctor checks the import too.")
+    lines.append("  Source checkouts: uv sync --reinstall")
+    return "\n".join(lines)
+
 class MCPStdioLaunchError(RuntimeError):
     """Actionable, secret-safe failure from the Windows stdio adapter."""
 
@@ -2116,7 +2145,7 @@ class MCPScannerWrapper:
             from mcpscanner import Config as MCPConfig
             from mcpscanner import Scanner as MCPSDKScanner
             from mcpscanner.core.models import AnalyzerEnum
-        except ImportError:
+        except ImportError as exc:
             if sys.version_info < (3, 11):
                 print(
                     "error: MCP scanning requires Python 3.11 or newer; "
@@ -2125,12 +2154,7 @@ class MCPScannerWrapper:
                     file=sys.stderr,
                 )
             else:
-                print(
-                    "error: cisco-ai-mcp-scanner not installed.\n"
-                    "  Repair the managed DefenseClaw installation.\n"
-                    "  Source checkouts: uv sync",
-                    file=sys.stderr,
-                )
+                print(mcp_scanner_import_error(exc), file=sys.stderr)
             raise SystemExit(1)
 
         pinned_target: tuple[str, str, int] | None = None

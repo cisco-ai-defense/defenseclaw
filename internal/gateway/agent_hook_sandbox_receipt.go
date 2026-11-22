@@ -93,7 +93,9 @@ var sandboxReceiptLocks keyedMutex
 // after its bounded receipt window. It also removes acknowledged journal rows
 // after the window for an idempotent retry has passed.
 func (a *APIServer) scheduleSandboxHookReceiptRecovery(id string) {
+	sandboxReceiptsOfferedHere.Store(id, struct{}{})
 	time.AfterFunc(sandboxHookReceiptWindow, func() {
+		defer sandboxReceiptsOfferedHere.Delete(id)
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		if a.store == nil {
@@ -232,6 +234,8 @@ func (a *APIServer) handleSandboxHookReceipt(w http.ResponseWriter, r *http.Requ
 	fallback := pendingResponse(closed)
 	p.Final = &fallback
 	if err := a.recordSandboxHookReceiptState(ctx, &p); err != nil {
+		// A store failure, not load: its expiry is not counted.
+		sandboxReceiptsOfferedHere.Delete(p.ID)
 		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "hook audit is unavailable"})
 		return
 	}

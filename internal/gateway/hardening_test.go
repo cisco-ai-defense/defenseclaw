@@ -651,7 +651,7 @@ func TestProxyNotificationInjectSuccess(t *testing.T) {
 func TestToolCallAccumulator(t *testing.T) {
 	t.Run("single_complete_call", func(t *testing.T) {
 		var acc toolCallAccumulator
-		acc.Merge(json.RawMessage(`[{"index":0,"id":"call_1","type":"function","function":{"name":"write_file","arguments":"{\"path\":\"/tmp/a\"}"}}]`))
+		acc.MergeChoice(0, json.RawMessage(`[{"index":0,"id":"call_1","type":"function","function":{"name":"write_file","arguments":"{\"path\":\"/tmp/a\"}"}}]`))
 
 		got := acc.JSON()
 		var calls []accToolCall
@@ -671,10 +671,10 @@ func TestToolCallAccumulator(t *testing.T) {
 
 	t.Run("reassembles_split_arguments", func(t *testing.T) {
 		var acc toolCallAccumulator
-		acc.Merge(json.RawMessage(`[{"index":0,"id":"call_1","type":"function","function":{"name":"exec","arguments":""}}]`))
-		acc.Merge(json.RawMessage(`[{"index":0,"function":{"arguments":"{\"cmd\":"}}]`))
-		acc.Merge(json.RawMessage(`[{"index":0,"function":{"arguments":"\"cat /etc"}}]`))
-		acc.Merge(json.RawMessage(`[{"index":0,"function":{"arguments":"/passwd\"}"}}]`))
+		acc.MergeChoice(0, json.RawMessage(`[{"index":0,"id":"call_1","type":"function","function":{"name":"exec","arguments":""}}]`))
+		acc.MergeChoice(0, json.RawMessage(`[{"index":0,"function":{"arguments":"{\"cmd\":"}}]`))
+		acc.MergeChoice(0, json.RawMessage(`[{"index":0,"function":{"arguments":"\"cat /etc"}}]`))
+		acc.MergeChoice(0, json.RawMessage(`[{"index":0,"function":{"arguments":"/passwd\"}"}}]`))
 
 		got := acc.JSON()
 		var calls []accToolCall
@@ -698,8 +698,8 @@ func TestToolCallAccumulator(t *testing.T) {
 
 	t.Run("multiple_tool_calls", func(t *testing.T) {
 		var acc toolCallAccumulator
-		acc.Merge(json.RawMessage(`[{"index":0,"id":"c1","type":"function","function":{"name":"read","arguments":""}},{"index":1,"id":"c2","type":"function","function":{"name":"write","arguments":""}}]`))
-		acc.Merge(json.RawMessage(`[{"index":0,"function":{"arguments":"{\"a\":1}"}},{"index":1,"function":{"arguments":"{\"b\":2}"}}]`))
+		acc.MergeChoice(0, json.RawMessage(`[{"index":0,"id":"c1","type":"function","function":{"name":"read","arguments":""}},{"index":1,"id":"c2","type":"function","function":{"name":"write","arguments":""}}]`))
+		acc.MergeChoice(0, json.RawMessage(`[{"index":0,"function":{"arguments":"{\"a\":1}"}},{"index":1,"function":{"arguments":"{\"b\":2}"}}]`))
 
 		got := acc.JSON()
 		var calls []accToolCall
@@ -726,7 +726,7 @@ func TestToolCallAccumulator(t *testing.T) {
 
 	t.Run("invalid_json_ignored", func(t *testing.T) {
 		var acc toolCallAccumulator
-		acc.Merge(json.RawMessage(`not-json`))
+		acc.MergeChoice(0, json.RawMessage(`not-json`))
 		if got := acc.JSON(); got != nil {
 			t.Errorf("expected nil after invalid merge, got %s", got)
 		}

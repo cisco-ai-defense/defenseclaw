@@ -76,15 +76,15 @@ func TestDocsListEveryHarness(t *testing.T) {
 		t.Fatalf("sandbox-cli.mdx: the Harness names bullet no longer lists \"the command you type (...)\":\n%s", bullet)
 	}
 	docsSameSet(t, "sandbox-cli.mdx harness commands", docsCodeSpans(typed), commands)
-	head, _, ok := strings.Cut(bullet, " not verified end to end")
+	head, _, ok := strings.Cut(bullet, " are not available")
 	if !ok {
-		t.Fatalf("sandbox-cli.mdx: the Harness names bullet no longer says which harnesses are \"not verified end to end\":\n%s", bullet)
+		t.Fatalf("sandbox-cli.mdx: the Harness names bullet no longer says which harnesses \"are not available\" yet:\n%s", bullet)
 	}
 	sentence := head[strings.LastIndex(head, ". ")+1:]
 	for _, name := range Names() {
 		spec, _ := Get(name)
 		if named := strings.Contains(sentence, spec.DisplayName); named != unverifiedDisplay[spec.DisplayName] {
-			t.Errorf("sandbox-cli.mdx: %s is unverified=%v, but the not-verified sentence names it=%v: %q",
+			t.Errorf("sandbox-cli.mdx: %s is unverified=%v, but the not-available sentence names it=%v: %q",
 				spec.DisplayName, unverifiedDisplay[spec.DisplayName], named, sentence)
 		}
 	}

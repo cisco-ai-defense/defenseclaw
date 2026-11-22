@@ -1,0 +1,84 @@
+{{- /* Values and config checks that render nothing. */ -}}
+{{- $cfg := .Values.config | default dict -}}
+{{- $sub := $cfg.substrate | default dict -}}
+{{- $mode := lower (toString ($cfg.deployment_mode | default "")) -}}
+{{- $fail := lower (toString (dig "extproc" "failure_mode" "closed" $sub)) -}}
+{{- if and (has $mode (list "managed" "managed_enterprise" "managed-enterprise")) (eq $fail "open") -}}
+{{- fail "config.substrate.extproc.failure_mode open is not allowed with deployment_mode managed_enterprise: the callout always fails closed there" -}}
+{{- end -}}
+{{- /* The chain egress action is one config key the gateway and the leader
+read. A pre-release build had a gateway flag for it, which never reached the
+leader; the flag is gone, and setting it here is a clear error (GAP-0250). */ -}}
+{{- range (concat (.Values.gateway.extraArgs | default list) (.Values.gateway.args | default list)) -}}
+{{- if hasPrefix "--chain-egress-action" (toString .) -}}
+{{- fail "--chain-egress-action is not a DefenseClaw flag: set config.substrate.chain_egress_action (block or alert) instead; the gateway and the leader both read it (GAP-0250)" -}}
+{{- end -}}
+{{- end -}}
+{{- $chainAction := lower (toString (dig "chain_egress_action" "block" $sub)) -}}
+{{- if not (has $chainAction (list "block" "alert")) -}}
+{{- fail (printf "config.substrate.chain_egress_action %q is not block or alert" $chainAction) -}}
+{{- end -}}
+{{- if eq .Values.substrate.credentialProvider.secretsNamespace .Release.Namespace -}}
+{{- fail "substrate.credentialProvider.secretsNamespace must not be the release namespace: the credential provider would hand DefenseClaw's own Secrets to actors" -}}
+{{- end -}}
+{{- if eq .Values.substrate.credentialProvider.secretsNamespace .Values.substrate.namespace -}}
+{{- fail "substrate.credentialProvider.secretsNamespace must not be the Substrate namespace" -}}
+{{- end -}}
+{{- if has $mode (list "managed" "managed_enterprise" "managed-enterprise") -}}
+{{- if eq (toString (dig "require_attested_templates" true $sub)) "false" -}}
+{{- fail "config.substrate.require_attested_templates false is not allowed with deployment_mode managed_enterprise" -}}
+{{- end -}}
+{{- if not (dig "templates" "allowed_images" list $sub) -}}
+{{- fail "config.substrate.templates.allowed_images is required with deployment_mode managed_enterprise (name the template registries)" -}}
+{{- end -}}
+{{- end -}}
+
+{{- range (dig "secrets" list $sub) -}}
+{{- $src := toString (.source | default "") -}}
+{{- if hasPrefix "ate-secret://k8s.io/" $src -}}
+{{- $parts := splitList "/" (trimPrefix "ate-secret://k8s.io/" $src) -}}
+{{- if and (eq (len $parts) 4) (or (eq (index $parts 1) $.Release.Namespace) (eq (index $parts 1) $.Values.substrate.namespace)) -}}
+{{- fail (printf "config.substrate.secrets %s: a Kubernetes source must not be in the release or Substrate namespace (the gateway may write Secrets in a source namespace, and DefenseClaw's own Secrets live in the release namespace)" (toString .name)) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- /* GAP-0402: the volume of the local audit store (the managed data volume,
+else the home volume) holds the store's size cap twice over (retention never
+deletes the last hour) plus 256 MiB, the audit write-ahead log's flood
+ceiling. A 256 MiB volume filled under about 15 actors, and every hook then
+failed closed. */ -}}
+{{- $capMB := int (dig "observability" "local" "max_store_mb" 0 $cfg) -}}
+{{- $sizeKey := ternary "managed.dataSizeLimit" "homeSizeLimit" (not (empty (include "dc.managed" .))) -}}
+{{- $size := toString (ternary .Values.managed.dataSizeLimit .Values.homeSizeLimit (not (empty (include "dc.managed" .)))) -}}
+{{- $sizeMB := atoi (include "dc.mib" (list $size $sizeKey "up")) -}}
+{{- if le $capMB 0 -}}
+{{- fail "config.observability.local.max_store_mb must be set (64 or more): without a size cap the local audit store can fill its volume, and every hook then fails closed (GAP-0402)" -}}
+{{- end -}}
+{{- if lt $sizeMB (add (mul $capMB 2) 256) -}}
+{{- fail (printf "%s %s is too small for config.observability.local.max_store_mb %d: it must be at least %dMi (twice the cap plus 256 MiB for the audit write-ahead log), or the audit store fills it and every hook fails closed (GAP-0402)" $sizeKey $size $capMB (add (mul $capMB 2) 256)) -}}
+{{- end -}}
+{{- /* GAP-0537: a memory home volume (homeMedium Memory) is a tmpfs whose
+pages count against the memory limit of the container that writes them, so
+the store would grow into an OOM kill (and the tmpfs outlives the restart: a
+crash loop) instead of a full store. Every pod that mounts it (gateway,
+leader, controller, callout) needs a memory limit that holds the whole
+volume plus the process: limits.memory >= homeSizeLimit + requests.memory,
+the container's own declared need being the process headroom. The managed
+data volume is always a disk volume. */ -}}
+{{- if and (empty (include "dc.managed" .)) (empty (include "dc.homeOnDisk" .)) -}}
+{{- range $pod := list "gateway" "leader" "controller" "callout" -}}
+{{- $res := (index $.Values $pod).resources | default dict -}}
+{{- $lim := toString (dig "limits" "memory" "" $res) -}}
+{{- $req := toString (dig "requests" "memory" "" $res) -}}
+{{- if or (not $lim) (not $req) -}}
+{{- fail (printf "homeMedium Memory needs %s.resources.limits.memory and %s.resources.requests.memory: a memory home volume counts against the container's memory limit, which must hold homeSizeLimit plus the memory request (the process); without them the audit store grows into an OOM kill (GAP-0537)" $pod $pod) -}}
+{{- end -}}
+{{- $limMB := atoi (include "dc.mib" (list $lim (printf "%s.resources.limits.memory" $pod) "down")) -}}
+{{- $reqMB := atoi (include "dc.mib" (list $req (printf "%s.resources.requests.memory" $pod) "up")) -}}
+{{- if lt $limMB (add $sizeMB $reqMB) -}}
+{{- $fitCap := div (sub (sub $limMB $reqMB) 256) 2 -}}
+{{- $fit := ternary (printf ", or lower homeSizeLimit to at most %dMi with config.observability.local.max_store_mb at most %d" (sub $limMB $reqMB) $fitCap) "" (ge $fitCap 64) -}}
+{{- fail (printf "%s.resources.limits.memory %s is too small for homeMedium Memory with homeSizeLimit %s: a memory home volume counts against the container's memory limit, so the limit must be at least %dMi (homeSizeLimit plus %s.resources.requests.memory %s for the process), or the audit store grows into an OOM kill instead of a full store (GAP-0537). Raise %s.resources.limits.memory to %dMi%s, or use the disk volume (homeMedium \"\")" $pod $lim $size (add $sizeMB $reqMB) $pod $req $pod (add $sizeMB $reqMB) $fit) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}

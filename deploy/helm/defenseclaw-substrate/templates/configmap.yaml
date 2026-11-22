@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: defenseclaw-config
+  labels:
+    {{- include "dc.labels" . | nindent 4 }}
+data:
+  config.yaml: |
+    {{- include "dc.config" . | nindent 4 }}

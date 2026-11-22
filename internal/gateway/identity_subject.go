@@ -192,6 +192,9 @@ func requestIdentityFor(ctx context.Context, userID string) *llmEventIdentity {
 	if !identityFactsEnabled.Load() {
 		return secureClientRequestIdentity(ctx, userID)
 	}
+	if identity, ok := substrateRequestIdentity(ctx, userID); ok {
+		return identity
+	}
 	if identity, ok := actingForRequestIdentity(ctx, userID); ok {
 		// The person a trusted connector acts for: facts the gateway
 		// resolved, at verified_by_connector; no session facts (the hook's
@@ -476,6 +479,12 @@ func applyIdentityPosture(cfg *config.Config) {
 		}
 		groups = append(groups, assignment.Match.Groups...)
 	}
+	// routing.admin rules and budgets select by groups and users too: their
+	// facts need the same lookup and proof, or an unproven group would read
+	// as proven absent and a deny rule would not apply (S11 slice 3 F2).
+	routingGroups, routingSelects := routingAdminIdentitySelectors(cfg)
+	blocking = blocking || routingSelects
+	groups = append(groups, routingGroups...)
 	setIdentityLookupBlocking(enabled && blocking)
 	if !enabled {
 		groups = nil

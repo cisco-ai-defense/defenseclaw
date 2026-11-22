@@ -11,9 +11,10 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"sync/atomic"
 )
 
-// LateOrdinaryCall reports a Claude Code or Codex shell or Read call that
+// LateOrdinaryCallAt reports a Claude Code or Codex shell or Read call that
 // plainly names nothing a protected file could be reached through. The hook
 // client asks it only when its verified gateway took the call and gave no
 // answer by the deadline (GAP-0518): such a call may then follow the outage
@@ -56,12 +57,8 @@ import (
 //
 // A protected target spelled in a way the scan cannot see is a detection
 // miss and belongs to the hook-path detection work (#1189).
-func LateOrdinaryCall(connector string, payload []byte) bool {
-	return LateOrdinaryCallAt("", connector, payload)
-}
-
-// LateOrdinaryCallAt is LateOrdinaryCall for an account whose home is given:
-// every home-relative answer (the protected folders and authorized-keys files,
+//
+// Every home-relative answer (the protected folders and authorized-keys files,
 // the hard-link identities, the home itself) is told against home, not against
 // the home of the process. A shell hook replaces HOME with a scratch folder
 // before it runs the helper, so the helper of such a hook must be given the
@@ -193,13 +190,30 @@ type lateEntry struct {
 // lateMaxCwds bounds the working directories one call may visit.
 const lateMaxCwds = 8
 
-// accountHomeDir is the home of the account database; a test replaces it.
-var accountHomeDir = func() (string, error) {
+// accountHomeOverride, when set, replaces the account database home. It is
+// an atomic value because late scans run on watchdog goroutines that can
+// outlive the test that set it (a plain variable raced under -race).
+var accountHomeOverride atomic.Pointer[string]
+
+// AccountHomeDir is the home of the account database. Every late-call reader
+// (this scan and hookexec.OrdinaryNoAnswerPayload) asks it, so a test can
+// point both at a scratch folder instead of the real account home (GAP-0277).
+func AccountHomeDir() (string, error) {
+	if home := accountHomeOverride.Load(); home != nil {
+		return *home, nil
+	}
 	current, err := user.Current()
 	if err != nil {
 		return "", err
 	}
 	return current.HomeDir, nil
+}
+
+// SetAccountHomeDirForTest points AccountHomeDir at home until the returned
+// restore runs. Tests only; safe against scans still running.
+func SetAccountHomeDirForTest(home string) (restore func()) {
+	prev := accountHomeOverride.Swap(&home)
+	return func() { accountHomeOverride.Store(prev) }
 }
 
 func newLateScan(cwd, home string) (*lateScan, bool) {
@@ -224,7 +238,7 @@ func newLateScan(cwd, home string) (*lateScan, bool) {
 	// home, so a hard link to a protected file stays closed and a hard link
 	// to an ordinary file stays ordinary.
 	if !ok && given {
-		account, err := accountHomeDir()
+		account, err := AccountHomeDir()
 		if err != nil {
 			return nil, false
 		}
@@ -239,7 +253,7 @@ func newLateScan(cwd, home string) (*lateScan, bool) {
 		// The home of the process is not always the account home (a hook
 		// run with a scratch HOME): the protected files of both are indexed,
 		// so a hard link to the account's keys file is found either way.
-		if current, err := accountHomeDir(); err == nil {
+		if current, err := AccountHomeDir(); err == nil {
 			if account, usable := lateUsableHome(current); usable && !slices.Contains(indexHomes, account) {
 				indexHomes = append(indexHomes, account)
 			}
@@ -501,7 +515,7 @@ var (
 	lateFilters = []string{"tail", "head", "grep", "egrep", "wc", "sort", "uniq", "cut", "tr", "cat", "less", "jq"}
 	// lateWrappers run another program or a shell text the scan cannot read.
 	lateWrappers = []string{"sh", "bash", "zsh", "dash", "ksh", "csh", "tcsh", "fish", "eval", "exec", "source", ".",
-		"pushd", "popd", "env", "sudo", "su", "doas", "xargs", "nohup", "command", "builtin", "time", "watch", "timeout", "setsid",
+		"pushd", "popd", "chdir", "env", "sudo", "su", "doas", "xargs", "nohup", "command", "builtin", "time", "watch", "timeout", "setsid",
 		"ssh", "scp", "sftp", "nc", "ncat", "socat", "script", "screen", "tmux", "at", "crontab",
 		"vi", "vim", "view", "nvim", "ex", "ed", "emacs", "nano"}
 	// lateInterpreters run program text given on the command line.

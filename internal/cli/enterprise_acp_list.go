@@ -15,6 +15,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/acp"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/spf13/cobra"
 )
@@ -33,7 +34,7 @@ as that user, in the enrolled data directory (or <home>/.defenseclaw for
 older enrollments).`,
 	Args: cobra.NoArgs,
 	// Secure Client keeps the command tree of main (issue #1092).
-	Annotations: map[string]string{secureClientAbsentAnnotation: "true"},
+	Annotations: map[string]string{hookcli.SecureClientAbsentAnnotation: "true"},
 	RunE:        runEnterpriseACPList,
 }
 

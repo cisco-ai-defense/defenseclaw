@@ -204,7 +204,8 @@ func correlateLLMRailOccurrence(
 	for _, value := range values {
 		digest := correlationValueDigest(instance.ConnectorInstanceID, value)
 		kind, ok := auditIdentifierKind(value)
-		if digest == "" || !ok || value.Target == connector.CorrelationTargetSemanticEvent {
+		if digest == "" || !ok || value.Target == connector.CorrelationTargetSemanticEvent ||
+			!correlationIdentifierStored(kind) {
 			continue
 		}
 		if _, err := tx.PutIdentifier(ctx, audit.CorrelationIdentifier{

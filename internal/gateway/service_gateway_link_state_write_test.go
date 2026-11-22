@@ -109,7 +109,10 @@ func judgeServiceGatewayStateRows(t *testing.T, rows []serviceGatewayStateRow) {
 				recorder := httptest.NewRecorder()
 				api.handleAgentHook("claudecode").ServeHTTP(recorder, req.WithContext(ctx))
 				got := recorder.Body.String()
-				blocked := strings.Contains(got, `"action":"block"`)
+				// A proven state write is a HIGH alert outside strict (GAP-0747 owner
+				// tiering 2026-11-15T15:20Z).
+				blocked := strings.Contains(got, `"action":"block"`) ||
+					strings.Contains(got, `"action":"alert"`) && strings.Contains(got, gap0747StateRule)
 				verdicts[managed] = blocked
 				if row.rule == rowParity {
 					continue

@@ -130,7 +130,7 @@ func inferRawCommandDialect(source string) (Dialect, bool) {
 		((powerShellAlias(first) || filesystemAlias) &&
 			(windowsPathOperand || powerShellSwitch)) ||
 		(powerShellVariable && recognizedWindowsCommand)
-	cmd := (containsCMDVariable(source) && recognizedWindowsCommand) ||
+	cmd := (ContainsCMDVariable(source) && recognizedWindowsCommand) ||
 		(cmdBuiltin(first) &&
 			(windowsPathOperand ||
 				containsCMDQuotedOperand(source) ||
@@ -293,6 +293,11 @@ func containsPowerShellCompoundCommand(source string) bool {
 		return false
 	}
 	commands, _, _ := windowsBuildCommands(lexemes, &out)
+	if len(commands) < 2 {
+		// No later statement: a separator alone (#&, a bare ;) builds none,
+		// and slicing past it panicked (found by FuzzShellReadersNeverPanic).
+		return false
+	}
 	for _, command := range commands[1:] {
 		if command.callOperator || len(command.words) == 0 ||
 			command.words[0].expands || command.words[0].quotedOnly {
@@ -448,7 +453,10 @@ func windowsPathCandidateInsideURI(source string, index int) bool {
 	return strings.Contains(source[start:index], "://")
 }
 
-func containsCMDVariable(source string) bool {
+// ContainsCMDVariable reports whether source holds a %NAME% expansion cmd
+// makes: a name of ASCII letters, digits and underscores between two percent
+// signs.
+func ContainsCMDVariable(source string) bool {
 	for start := strings.IndexByte(source, '%'); start >= 0; {
 		rest := source[start+1:]
 		end := strings.IndexByte(rest, '%')
