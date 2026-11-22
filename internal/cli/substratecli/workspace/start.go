@@ -238,19 +238,6 @@ func (p *PreparedUpload) Close() {
 	}
 }
 
-// Start stages and sends a copy over an existing actor transport.
-func Start(ctx context.Context, opts StartOptions) (*StartResult, error) {
-	if opts.Transport == nil {
-		return nil, errors.New("workspace: start needs a transport to the actor")
-	}
-	p, err := Preflight(ctx, opts)
-	if err != nil {
-		return nil, err
-	}
-	defer p.Close()
-	return p.Send(ctx, opts.Name, opts.Transport)
-}
-
 // Send uploads the stage and establishes the baseline Pull measures against.
 func (p *PreparedUpload) Send(ctx context.Context, name string, t osw.Transport) (*StartResult, error) {
 	opts := p.opts

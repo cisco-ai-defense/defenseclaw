@@ -957,13 +957,13 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             "send yours with push NAME --mine FILE). It saves a restore point at the start, then one every\n"
             "10 minutes in which something was sent. A suspended agent is not woken: changes wait until it is "
             "back.\n"
-            "Nothing keeps running after it stops. This command is a Preview."
+            "Nothing keeps running after it stops. --watch is required. This command is a Preview."
         ),
         example=(
             "defenseclaw substrate sync fix-tests-7f3a --watch\n"
             "defenseclaw substrate sync fix-tests-7f3a --watch --for 2h"
         ),
-        args=(_Arg("name"), _Arg("--watch", required=False)),
+        args=(_Arg("name"),),
         flags=(
             _Flag("context", "string", "cluster to use (default: the one you signed in to last)", metavar="NAME"),
             _Flag(

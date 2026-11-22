@@ -1487,18 +1487,14 @@
   },
   {
     "path": "substrate sync",
-    "use": "sync \u003cname\u003e --watch",
+    "use": "sync \u003cname\u003e",
     "short": "Keep sending your changes into a running agent while you work (Preview)",
-    "long": "Watches this folder and sends each change into the agent's copy, one way, until Ctrl-C, --for, or\nthe agent is deleted. It sends 1 second after the last change, and at most 5 seconds after the first.\nEach batch follows the rules of push: secret files are held back, ignored files, .git and package\ncaches are not sent, and a file the agent also changed keeps the agent's version (it is named once;\nsend yours with push NAME --mine FILE). It saves a restore point at the start, then one every\n10 minutes in which something was sent. A suspended agent is not woken: changes wait until it is back.\nNothing keeps running after it stops. This command is a Preview.",
+    "long": "Watches this folder and sends each change into the agent's copy, one way, until Ctrl-C, --for, or\nthe agent is deleted. It sends 1 second after the last change, and at most 5 seconds after the first.\nEach batch follows the rules of push: secret files are held back, ignored files, .git and package\ncaches are not sent, and a file the agent also changed keeps the agent's version (it is named once;\nsend yours with push NAME --mine FILE). It saves a restore point at the start, then one every\n10 minutes in which something was sent. A suspended agent is not woken: changes wait until it is back.\nNothing keeps running after it stops. --watch is required. This command is a Preview.",
     "example": "defenseclaw substrate sync fix-tests-7f3a --watch\ndefenseclaw substrate sync fix-tests-7f3a --watch --for 2h",
     "args": [
       {
         "name": "name",
         "required": true
-      },
-      {
-        "name": "--watch",
-        "required": false
       }
     ],
     "flags": [

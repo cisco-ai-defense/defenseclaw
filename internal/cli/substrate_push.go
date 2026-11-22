@@ -240,7 +240,7 @@ type substrateSyncFlags struct {
 func newSubstrateSyncCmd() *cobra.Command {
 	var f substrateSyncFlags
 	cmd := &cobra.Command{
-		Use:   "sync <name> --watch",
+		Use:   "sync <name>",
 		Short: "Keep sending your changes into a running agent while you work (Preview)",
 		Long: `Watches this folder and sends each change into the agent's copy, one way, until Ctrl-C, --for, or
 the agent is deleted. It sends 1 second after the last change, and at most 5 seconds after the first.
@@ -248,7 +248,7 @@ Each batch follows the rules of push: secret files are held back, ignored files,
 caches are not sent, and a file the agent also changed keeps the agent's version (it is named once;
 send yours with push NAME --mine FILE). It saves a restore point at the start, then one every
 10 minutes in which something was sent. A suspended agent is not woken: changes wait until it is back.
-Nothing keeps running after it stops. This command is a Preview.`,
+Nothing keeps running after it stops. --watch is required. This command is a Preview.`,
 		Example: "defenseclaw substrate sync fix-tests-7f3a --watch\ndefenseclaw substrate sync fix-tests-7f3a --watch --for 2h",
 		Args:    cobra.ExactArgs(1),
 		RunE:    func(cmd *cobra.Command, args []string) error { return runSubstrateSync(cmd, &f, args[0]) },

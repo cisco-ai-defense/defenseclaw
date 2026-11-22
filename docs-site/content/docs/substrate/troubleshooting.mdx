@@ -283,7 +283,7 @@ An agent started from Windows has no push or sync yet; run it again to send a ne
 `The agent also changed FILE; not synced` means the agent edited that file too. Sync keeps the agent's version and goes on with the rest; send yours with `push NAME --mine FILE`.
 `Held back: FILE (looks like a secret)` means the file matches the secret rules; send it once with `push NAME --unmask FILE`.
 `The agent is suspended; changes wait` means nothing is sent until the agent is back; sync does not wake it.
-`Sync paused: ... sent in the last hour` means sync sent four times the upload limit in an hour; changes wait.
+`Sync paused: ... sent in the last hour` means sync sent four times the upload limit in an hour; changes wait. The check runs before each batch, so the last batch of the hour can go past it by up to one upload limit.
 `your administrator turned off syncing into a running agent` means `substrate.files.sync` or `substrate.files.push` is `false`.
 `The agent is gone; sync stopped` means the agent was deleted.
 On a very large folder each batch takes longer, because sync reads the whole folder again for each batch.

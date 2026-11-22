@@ -62,6 +62,7 @@ Where a fix affects earlier releases, the affected versions are named.
 - **Secrets and local-only data.** A model response is checked by the same secret rules as a prompt or tool result. A sensitive request that must stay local is never sent to the cloud model.
 
 ### Removed
+- **`DEFENSECLAW_RELAY_FILES_MAX_BYTES`.** The relay now takes its upload cap from the gateway (`substrate.workspace_max_bytes`, 1 MiB to 64 GiB), so the environment variable is gone.
 - **The `sk-dc-` proxy master key.** No release has issued it since 0.3.0. The guardrail proxy and connector routes accept only the gateway token or connector-scoped credentials.
 
 ### Known limits
