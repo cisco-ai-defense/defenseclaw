@@ -593,8 +593,9 @@ type Protection struct {
 	// can match one), R-CWD (a relative name under an unknown folder lands on
 	// one) or R-FS (a path the resolver could not verify).
 	Reach string
-	// Basis is the classifier's match basis (exact, tree, link, subtree, glob,
-	// lexical, cwd, dir, protected_dir, wrong_dir, dynamic, unresolved).
+	// Basis is the classifier's match basis (exact, tree, link, inode,
+	// subtree, glob, inode_glob, lexical, cwd, dir, protected_dir, wrong_dir,
+	// dynamic, call_link, unresolved).
 	Basis string
 }
 
@@ -630,6 +631,9 @@ func Protected(pt *semanticpb.EffectTarget) []Protection {
 				p.Reach = "R-CWD"
 			case "lexical", "unresolved":
 				p.Reach = "R-FS"
+			case "inode_glob":
+				// a glob's literal word that is a hard link of a member
+				p.Reach = "R-NAME"
 			default: // dir, protected_dir, wrong_dir, dynamic
 				p.Reach = "R-NAME"
 			}
