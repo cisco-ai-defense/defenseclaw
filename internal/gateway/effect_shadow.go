@@ -17,7 +17,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/effectrules"
 	"github.com/defenseclaw/defenseclaw/internal/effects"
-	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/decide"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/semantic"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/semanticpb"
@@ -99,12 +98,8 @@ type EffectShadowResult struct {
 	// RuleIDs names the effect rule that would fire (empty when clean).
 	RuleIDs []string `json:"rule_ids,omitempty"`
 	// Reason is why the run has no (or a partial) verdict: parse_budget_exceeded,
-	// work_budget_exceeded or shadow_panic. Empty for a fully computed run.
+	// extract_cap_exceeded or shadow_panic. Empty for a fully computed run.
 	Reason string `json:"reason,omitempty"`
-	// truncated is the counted cap the extractor stopped at (Reason
-	// work_budget_exceeded): the ON lane reports it through the one truncated
-	// path (withBoundedTruncation), so a cut call is never a clean answer.
-	truncated bounded.CapSet
 	// Reach are the reach reasons of an unknown-tier verdict (DET111 PLAN
 	// 5.3); RoleHeld marks an R-ROLE unknown that was counted, not raised.
 	Reach    []string `json:"reach,omitempty"`
@@ -879,21 +874,17 @@ func effectFindingProof(res EffectShadowResult) decide.Proof {
 	return p
 }
 
-// joinEffectLive runs the ON lane for one outermost dispatch and joins it to
-// the call's findings: the Known verdict's findings join today's (raise only,
-// joinEffectFindings); a Maybe verdict adds none and is handed to the shadow
-// recorder off the hook's path instead, so the audit log still shows what the
-// lane reached. A run cut at a counted cap of the extractor keeps what it
-// found and makes the call TRUNCATED through the one truncated path
-// (withBoundedTruncation): the unknown tier of the pack at least, never below
-// today's findings, never clean (DET111 FIX-T19, review P2-1).
-func joinEffectLive(findings []RuleFinding, request trustedActionRequest, mode effectRulesMode, tier effectTierMode) []RuleFinding {
+// effectLiveFindings runs the ON lane for one outermost dispatch: the Known
+// verdict's findings join today's (raise only); a Maybe verdict adds none and
+// is handed to the shadow recorder off the hook's path instead, so the audit
+// log still shows what the lane reached.
+func effectLiveFindings(request trustedActionRequest, mode effectRulesMode, tier effectTierMode) []RuleFinding {
 	res := computeEffectShadow(request, mode, tier)
-	effect := effectShadowFindings(res, mode)
-	if len(effect) == 0 && res.Tier != string(effectTierClean) {
+	findings := effectShadowFindings(res, mode)
+	if len(findings) == 0 && res.Tier != string(effectTierClean) {
 		recordEffectShadowAsync(res, request.recordEffectShadow)
 	}
-	return withBoundedTruncation(joinEffectFindings(findings, effect), res.truncated, request)
+	return findings
 }
 
 // effectProofKind maps an effect kind to a proof kind. An opaque program is

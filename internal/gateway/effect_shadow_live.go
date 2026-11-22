@@ -14,7 +14,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/effectrules"
 	"github.com/defenseclaw/defenseclaw/internal/effects"
-	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 	"github.com/defenseclaw/defenseclaw/internal/shellparse"
 )
 
@@ -35,11 +34,15 @@ import (
 //     parse_budget_exceeded; the readers take their own over-limit path on
 //     that bound), and the extractor counts its own work (the walker budget,
 //     the effect count, the nesting depth). A run that hits one of those
-//     keeps what it read and classified, and the call is TRUNCATED
-//     (bounded.Effects, reason work_budget_exceeded), never clean. No clock
-//     decides an answer, so a call gets the same verdict on a loaded host as
-//     on an idle one (DET111 rule: bounds are counted work, never wall clock;
-//     FIX-T19, review P2-1);
+//     keeps what it read and classified, and its record carries
+//     extract_cap_exceeded, never a clean full answer. The call itself is
+//     decided by the 1.0.10 readers under their own registered caps (the
+//     floor), which report their own truncation: a lane cut where the floor
+//     read the whole call (300 operands: the floor reads 1024, the lane
+//     records 256 effects) adds no verdict, so it adds no benign alert. No
+//     clock decides an answer, so a call gets the same verdict on a loaded
+//     host as on an idle one (DET111 rule: bounds are counted work, never
+//     wall clock; FIX-T19, review P2-1);
 //   - one code path: effectShadowRun is what the live hook runs and what the
 //     benchmark harness (EvaluateDeterministicAction, so s7-gate's effects
 //     column) runs, so a number the gate reports is what the hook computes.
@@ -47,10 +50,9 @@ import (
 // Reason codes a shadow run records when it has no verdict (or a partial one).
 const (
 	effectShadowReasonBudget = "parse_budget_exceeded"
-	// effectShadowReasonWork: the extractor stopped at one of its counted caps
-	// (effects.ReasonLimit). The answer of what it read is kept and the call
-	// is truncated (EffectShadowResult.truncated).
-	effectShadowReasonWork  = "work_budget_exceeded"
+	// effectShadowReasonCut: the extractor stopped at one of its counted caps
+	// (effects.ReasonLimit). The answer of what it read is kept.
+	effectShadowReasonCut   = "extract_cap_exceeded"
 	effectShadowReasonPanic = "shadow_panic"
 )
 
@@ -111,18 +113,18 @@ func effectShadowBudgetReason(call effects.Call) string {
 // and the cost, so the caller records it and goes on (the lane is raise only:
 // the 1.0.10 readers decide such a call, and they take their own over-limit
 // path on the shared input bound). A run cut at a counted cap of the
-// extractor keeps its classification and carries the cut (truncated). The
-// clock is read only for the cost it reports.
+// extractor keeps its classification and carries the reason
+// extract_cap_exceeded. The clock is read only for the cost it reports.
 func effectShadowRun(request trustedActionRequest, mode effectRulesMode, tiers ...effectTierMode) (results []EffectShadowResult) {
 	start := time.Now()
 	results = make([]EffectShadowResult, len(tiers))
 	for i := range results {
 		results[i] = EffectShadowResult{Mode: string(mode), Tier: string(effectTierClean), Action: guardrailActionAllow}
 	}
-	finish := func(reason string, effectCount int, cut bounded.CapSet) []EffectShadowResult {
+	finish := func(reason string, effectCount int) []EffectShadowResult {
 		cost := time.Since(start).Microseconds()
 		for i := range results {
-			results[i].Reason, results[i].CostUS, results[i].Effects, results[i].truncated = reason, cost, effectCount, cut
+			results[i].Reason, results[i].CostUS, results[i].Effects = reason, cost, effectCount
 		}
 		return results
 	}
@@ -131,7 +133,7 @@ func effectShadowRun(request trustedActionRequest, mode effectRulesMode, tiers .
 			for i := range results {
 				results[i] = EffectShadowResult{Mode: string(mode), Tier: string(effectTierClean), Action: guardrailActionAllow}
 			}
-			results = finish(effectShadowReasonPanic, 0, bounded.CapSet{})
+			results = finish(effectShadowReasonPanic, 0)
 		}
 	}()
 	call, opts, ok := effectCall(request.Connector, request.Input, effectWindowsCall(request))
@@ -139,7 +141,7 @@ func effectShadowRun(request trustedActionRequest, mode effectRulesMode, tiers .
 		return results
 	}
 	if reason := effectShadowBudgetReason(call); reason != "" {
-		return finish(reason, 0, bounded.CapSet{})
+		return finish(reason, 0)
 	}
 	opts = effectAccountOptions(call, opts, request.effectLogin)
 	if effectShadowFaultHook != nil {
@@ -185,16 +187,16 @@ func effectShadowRun(request trustedActionRequest, mode effectRulesMode, tiers .
 		countEffectReach(results[i])
 	}
 	if effectExtractCut(result) {
-		return finish(effectShadowReasonWork, len(result.Effects), bounded.Of(bounded.Effects))
+		return finish(effectShadowReasonCut, len(result.Effects))
 	}
-	return finish("", len(result.Effects), bounded.CapSet{})
+	return finish("", len(result.Effects))
 }
 
 // effectExtractCut reports whether the extractor stopped at one of its
 // counted caps (effects.ReasonLimit: the walker work budget, the effect
 // count, the nesting depth of a script or an MCP argument tree). What it read
 // before the cap is classified and kept; the part past it is read by nothing
-// in this lane, so the call is TRUNCATED, never clean.
+// in this lane, so the record is never a clean full answer.
 func effectExtractCut(result effects.Result) bool {
 	for _, u := range result.Unknowns {
 		if u.Code == effects.ReasonLimit {

@@ -15,7 +15,6 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/config"
-	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 )
 
 // shadowLiveRequest is a hook-shaped request for one shell command.
@@ -148,20 +147,6 @@ func TestEffectShadowLiveSlowRunKeepsItsAnswer(t *testing.T) {
 	}
 	if recs[0].CostUS < effectsLaneSlowStep.Microseconds() {
 		t.Fatalf("slow record cost %d us, want at least the slow step %d us", recs[0].CostUS, effectsLaneSlowStep.Microseconds())
-	}
-}
-
-// The cut is in the record too: a shadow run past the walker budget carries
-// work_budget_exceeded and the effect cap.
-func TestEffectShadowRunReportsTheWorkCut(t *testing.T) {
-	useEffectsRulesMode(t, "shadow")
-	res := effectShadowRun(shadowLiveRequest(effectsLaneWorkCutCommand()), effectRulesShadow, tierRestricted)[0]
-	if res.Reason != effectShadowReasonWork || !res.truncated.Has(bounded.Effects) {
-		t.Fatalf("record = reason %q caps %q, want %s at the effect cap", res.Reason, res.truncated.Reason(), effectShadowReasonWork)
-	}
-	idle := effectShadowRun(shadowLiveRequest(shadowLiveWrite), effectRulesShadow, tierRestricted)[0]
-	if idle.Reason != "" || idle.truncated.Any() {
-		t.Fatalf("a call inside the budgets = reason %q caps %q, want neither", idle.Reason, idle.truncated.Reason())
 	}
 }
 

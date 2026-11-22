@@ -8,11 +8,11 @@ import (
 	"context"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 	"github.com/defenseclaw/defenseclaw/internal/shellparse"
 )
 
@@ -49,41 +49,52 @@ func TestEffectsLaneVerdictIgnoresTheClock(t *testing.T) {
 	}
 }
 
-// effectsLaneWorkCutCommand is within the shared input bound (no TooDeep, under
-// the size bound) but has more simple commands than the walker's counted
-// work budget (effects walkWorkBudget, 20000), so the walk stops before the
-// end of the call.
-func effectsLaneWorkCutCommand() string { return strings.Repeat("a;", 20001) + "echo ok" }
+// effectsLaneCutOperands is a call of 300 file operands: within the shared
+// input bound and the 1.0.10 operand bound (1024), past the extractor's
+// counted effect cap (256), so the lane's walk records a cap cut.
+func effectsLaneCutOperands(program, tail string) string {
+	files := make([]string, 300)
+	for i := range files {
+		files[i] = "src/f" + strconv.Itoa(i) + ".go"
+	}
+	return program + " " + strings.Join(files, " ") + tail
+}
 
-// TestEffectsLaneWorkBudgetIsTruncatedNotClean (DET111 FIX-T19, review P2-1
-// b): a walk stopped at a counted cap of the extractor keeps what it read,
-// and the call is TRUNCATED through the one truncated path
-// (withBoundedTruncation), never a clean effect answer. At T19 the cut walk
-// added nothing to the call.
-func TestEffectsLaneWorkBudgetIsTruncatedNotClean(t *testing.T) {
-	command := effectsLaneWorkCutCommand()
-	if shellparse.TooDeep(command) || len(command) > effectShadowMaxCommandBytes {
-		t.Fatal("the command must be within the shared input bound, so the walker reads it")
-	}
-	useEffectsRulesMode(t, "off")
-	off := dispatchTrustedAction(context.Background(), shadowLiveRequest(command))
-	useEffectsRulesMode(t, "on")
-	on := dispatchTrustedAction(context.Background(), shadowLiveRequest(command))
-	if !boundedCapsOf(on).Has(bounded.Effects) {
-		t.Fatalf("lane on: findings %v carry no truncation at the effect cap (caps %q)", ruleIDsOf(on), boundedCapsOf(on).Reason())
-	}
-	limits := 0
-	for _, f := range on {
-		if canonicalTrustedRuleID(f.RuleID) == evaluationLimitRuleID {
-			limits++
-		}
-	}
-	if limits != 1 {
-		t.Fatalf("lane on: %d evaluation-limit findings in %v, want one", limits, ruleIDsOf(on))
-	}
-	for _, f := range off {
-		if !slices.ContainsFunc(on, func(g RuleFinding) bool { return g.RuleID == f.RuleID }) {
-			t.Fatalf("lane on dropped the lane-off finding %s (off %v, on %v)", f.RuleID, ruleIDsOf(off), ruleIDsOf(on))
-		}
+// TestEffectsLaneCountedCutKeepsItsAnswer (DET111 FIX-T19, review P2-1 b, c):
+// a walk stopped at a counted cap of the extractor keeps what it classified
+// and says so in its record (extract_cap_exceeded), never a clean full
+// answer; the call keeps every 1.0.10 finding (the floor read it under its own
+// caps) and gets no new verdict from the cut, so a benign long file list
+// raises nothing new. At T19 the cut record carried no reason: it read as a
+// clean, fully computed run.
+func TestEffectsLaneCountedCutKeepsItsAnswer(t *testing.T) {
+	for _, tc := range []struct {
+		name, command, tier string
+	}{
+		{"benign cat", effectsLaneCutOperands("cat", ""), "clean"},
+		{"benign git add", effectsLaneCutOperands("git add", ""), "clean"},
+		{"keys write", effectsLaneCutOperands("cat", " > /home/u/.ssh/authorized_keys"), "unknown"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if shellparse.TooDeep(tc.command) || len(tc.command) > effectShadowMaxCommandBytes {
+				t.Fatal("the command must be within the shared input bound, so the walker reads it")
+			}
+			useEffectsRulesMode(t, "on")
+			res := computeEffectShadow(shadowLiveRequest(tc.command), effectRulesOn, tierRestricted)
+			if res.Reason != "extract_cap_exceeded" || res.Tier != tc.tier {
+				t.Fatalf("cut run = reason %q tier %s, want extract_cap_exceeded with the classified tier %s", res.Reason, res.Tier, tc.tier)
+			}
+			on := dispatchTrustedAction(context.Background(), shadowLiveRequest(tc.command))
+			useEffectsRulesMode(t, "off")
+			off := dispatchTrustedAction(context.Background(), shadowLiveRequest(tc.command))
+			for _, f := range off {
+				if !slices.ContainsFunc(on, func(g RuleFinding) bool { return g.RuleID == f.RuleID && g.Severity == f.Severity }) {
+					t.Fatalf("lane on dropped or changed the lane-off finding %s (off %v, on %v)", f.RuleID, ruleIDsOf(off), ruleIDsOf(on))
+				}
+			}
+			if tc.tier == "clean" && !reflect.DeepEqual(ruleIDsOf(on), ruleIDsOf(off)) {
+				t.Fatalf("benign cut call: lane on %v, lane off %v: the cut added a verdict", ruleIDsOf(on), ruleIDsOf(off))
+			}
+		})
 	}
 }
