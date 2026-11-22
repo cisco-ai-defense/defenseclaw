@@ -1293,12 +1293,6 @@
         "metavar": "NAME"
       },
       {
-        "name": "mine",
-        "type": "bool",
-        "default": "true",
-        "usage": "your own secret (the only kind this command acts on)"
-      },
-      {
         "name": "yes",
         "shorthand": "y",
         "type": "bool",
@@ -1363,12 +1357,6 @@
         "usage": "with --from-gh: the GitHub host to read the sign-in of (default: gh's own)"
       },
       {
-        "name": "mine",
-        "type": "bool",
-        "default": "true",
-        "usage": "your own secret (the only kind this command acts on)"
-      },
-      {
         "name": "stdin",
         "type": "bool",
         "default": "false",
@@ -1431,12 +1419,6 @@
         "type": "bool",
         "default": "false",
         "usage": "same as --output json"
-      },
-      {
-        "name": "mine",
-        "type": "bool",
-        "default": "true",
-        "usage": "your own secret (the only kind this command acts on)"
       },
       {
         "name": "output",
