@@ -4374,8 +4374,9 @@ func (l shellLinks) globalCopyScopesAfter(ownCopy string) bool {
 }
 
 type opaqueScope struct {
-	path string
-	copy bool
+	path         string
+	copy         bool
+	childrenOnly bool
 	// at is the offset of the call of the top-level walk that opened the
 	// scope, or -1 when that order is not known (a nested body, the end
 	// checks).
@@ -4473,6 +4474,15 @@ func (l *shellLinks) unknownIn(scope string) {
 	l.addOpaqueScope(scope, false)
 }
 
+// unknownInChildren holds links copied under a directory without treating
+// the destination directory entry itself as a link.
+func (l *shellLinks) unknownInChildren(scope string) {
+	l.addOpaqueScope(scope, false)
+	if scope != "" {
+		l.opaqueScopes[len(l.opaqueScopes)-1].childrenOnly = true
+	}
+}
+
 func (l *shellLinks) unknownCopyIn(scope string) {
 	l.addOpaqueScope(scope, true)
 }
@@ -4489,7 +4499,7 @@ func (l *shellLinks) addOpaqueScope(scope string, copyScope bool) {
 		}
 		return
 	}
-	l.opaqueScopes = append(l.opaqueScopes, opaqueScope{filepath.Clean(scope), copyScope, l.scopeAt})
+	l.opaqueScopes = append(l.opaqueScopes, opaqueScope{path: filepath.Clean(scope), copy: copyScope, at: l.scopeAt})
 }
 
 func (l shellLinks) opaqueTarget(path string) bool {
@@ -4585,6 +4595,10 @@ func (l shellLinks) opaqueTargetWithFacts(path, ownCopy string, facts map[string
 			forms = []string{filepath.Clean(name)}
 		}
 		for _, scope := range l.opaqueScopes {
+			if scope.childrenOnly && filepath.Clean(path) == scope.path &&
+				complete && len(forms) > 0 && forms[len(forms)-1] == scope.path {
+				continue
+			}
 			if scope.copy && scope.path == ownCopy {
 				continue
 			}
@@ -4738,9 +4752,6 @@ func commandLinksRead(command, cwd, home string, facts map[string]string, record
 			links.unknown(true)
 		}
 		return links, false
-	}
-	if normalized, ok := resolveKnownShellLinkTargets(file, command, cwd, home); ok && normalized != command {
-		return commandLinksRead(normalized, cwd, home, facts, record, nested, readDisk)
 	}
 	if opaqueLinkText(file, maskCmdMklinkCalls(file, command, home), home) || newItemLinkText(file, command, home) {
 		// A PowerShell New-Item link and Move-Item with static operands are
@@ -5120,7 +5131,11 @@ func commandLinksRead(command, cwd, home string, facts map[string]string, record
 					copyScopes = append(copyScopes, destination)
 					treeCopies = append(treeCopies, archiveTreeCopy(words[1:], static[1:], dir, destination))
 					if archiveCopiesDiskSymlink(program, words[1:], static[1:], dir, home, facts, record, stackSources) {
-						links.unknownIn(destination)
+						if rsyncDirectoryDestination(program, words[1:], static[1:]) && len(links.aliases) == 0 {
+							links.unknownInChildren(destination)
+						} else {
+							links.unknownIn(destination)
+						}
 					}
 				}
 			}
@@ -7357,6 +7372,15 @@ func treeHasSymlink(root string) bool {
 		return nil
 	})
 	return found || err != nil
+}
+
+// rsyncDirectoryDestination proves that the destination is a local
+// directory entry. A link copied from the source can occupy a child name,
+// but cannot replace the directory entry named by a trailing-slash target.
+func rsyncDirectoryDestination(program string, args []string, static []bool) bool {
+	last := len(args) - 1
+	return program == "rsync" && last >= 0 && staticAt(static, last) &&
+		filepath.IsAbs(args[last]) && strings.HasSuffix(args[last], "/")
 }
 
 // archiveDestination is the directory an archive call writes in, or "" when

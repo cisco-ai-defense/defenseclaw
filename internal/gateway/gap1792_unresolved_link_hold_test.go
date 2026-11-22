@@ -6,7 +6,6 @@ package gateway
 import (
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
@@ -14,14 +13,12 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
 
-func TestGAP1792UnresolvedLinkHoldStaysAdvisory(t *testing.T) {
+func TestGAP1792RsyncDestinationRootIsNotAnAuthorizedKeysWrite(t *testing.T) {
 	home := filepath.Join(t.TempDir(), "s7c", "fx", "Users", "synthetic")
 	cwd := filepath.Join(home, "Desktop", "synthetic-work", "repo")
-	out := "/tmp/synthetic-trial"
-	for _, dir := range []string{filepath.Join(home, ".ssh")} {
-		if err := os.MkdirAll(dir, 0o700); err != nil {
-			t.Fatal(err)
-		}
+	out := filepath.Join(t.TempDir(), "synthetic-trial")
+	if err := os.MkdirAll(filepath.Join(home, ".ssh"), 0o700); err != nil {
+		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(home, ".ssh", "authorized_keys"), []byte("synthetic\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -40,21 +37,18 @@ func TestGAP1792UnresolvedLinkHoldStaysAdvisory(t *testing.T) {
 	request.Input = input
 	request.LegacyText = command
 	request.targetMemo = hookpaths.NewTargetMemo()
-	var held unprovenWrite
-	request.unprovenTarget = &held
-	if !trustedExistingAuthorizedKeysSymlinkWrite(request, facts) {
-		links := hookpaths.CommandLinksWithFacts(input.Tool, command, cwd, home, nil)
-		t.Fatalf("synthetic link-scope hold was not reproduced: paths=%d issues=%v opaque=%v opaque-root=%v", len(facts.Paths), facts.Parse.Issues, links.OpaqueTargetWithFacts(out, true, nil), links.OpaqueTargetWithFacts(out, false, nil))
+	links := hookpaths.CommandLinksWithFacts(input.Tool, command, cwd, home, nil)
+	if links.OpaqueTargetWithFacts(out, false, nil) {
+		t.Fatal("a link copied into the destination marked its directory entry as a link")
 	}
-	if held.class != hookpaths.UnprovenLinkUnread || !filepath.IsAbs(held.operand) || !strings.HasPrefix(held.operand, "/tmp/") {
-		t.Fatalf("hold = %q at %q, want an unresolved scoped link target under /tmp", held.class, held.operand)
+	if !links.OpaqueTargetWithFacts(filepath.Join(out, "src"), false, nil) {
+		t.Fatal("the destination's children lost their uncertain link scope")
 	}
-	if !unprovenSSHKeyHoldIsMaybe(home, held) {
-		t.Fatalf("unresolved /tmp link hold was treated as a known protected write: %q", held.operand)
+	if trustedExistingAuthorizedKeysSymlinkWrite(request, facts) {
+		t.Fatal("the destination directory was held as an authorized-keys write")
 	}
 	findings := dispatchTrustedAction(t.Context(), request)
-	finding := findingWithID(findings, "persistence.ssh_authorized_keys_command")
-	if finding == nil || finding.contributesToEnforcement() {
-		t.Fatalf("unresolved synthetic link hold enforced the SSH rule: %+v", finding)
+	if finding := findingWithID(findings, "persistence.ssh_authorized_keys_command"); finding != nil {
+		t.Fatalf("a copy into an ordinary directory raised the SSH rule: %+v", finding)
 	}
 }

@@ -17,9 +17,10 @@ import (
 // pack, because a reader gap made the target unknown and unknown was judged
 // as the key file. A file name with a star, quote, newline, space or
 // semicolon is a file name; a link command whose names are absolute does not
-// depend on the working directory. A link hold without a resolver fact is
-// MAYBE and cannot block. Direct authorized-keys paths, paths resolved from
-// known HOME or CWD, and inode-proven hard links remain blocking.
+// depend on the working directory. A write the proof can only hold as
+// unknown away from the home warns in the default and permissive tiers and
+// blocks in strict and managed; one in the home, and a target it finds
+// protected, block everywhere.
 func TestGAP0013ProtectedTargetBlocksOnlyWhenKnownClaudeCode(t *testing.T) {
 	gap0013EveryCell(t, "claudecode")
 }
@@ -42,8 +43,7 @@ func gap0013EveryCell(t *testing.T, connectorName string) {
 	const keys = "persistence.ssh_authorized_keys_command"
 	allow := map[string]string{"default": "allow", "permissive": "allow", "strict": "allow", "managed": "allow"}
 	block := map[string]string{"default": "block", "permissive": "block", "strict": "block", "managed": "block"}
-	maybe := map[string]string{"default": "maybe", "permissive": "maybe", "strict": "maybe", "managed": "maybe"}
-	hookConfig := map[string]string{"default": "alert", "permissive": "alert", "strict": "block", "managed": "alert"}
+	warn := map[string]string{"default": "alert", "permissive": "alert", "strict": "block", "managed": "block"}
 	a, b := filepath.Join(data, "a.dat"), filepath.Join(data, "b.dat")
 	rows := []struct {
 		name, cwd, command string
@@ -56,17 +56,17 @@ func gap0013EveryCell(t *testing.T, connectorName string) {
 		{"link then move to a semicolon name", cwd, fmt.Sprintf("ln %s /tmp/gap13l && mv /tmp/gap13l '%s/file;with;semicolon.dat'", a, data), allow},
 		{"link then move, escaped star", cwd, fmt.Sprintf(`ln %s /tmp/gap13l && mv /tmp/gap13l %s/file\*star.dat`, a, data), allow},
 		{"absolute link then move, no cwd", "", fmt.Sprintf("ln %s /tmp/gap13l && mv /tmp/gap13l %s", a, b), allow},
-		{"interpreter link to a runtime target then write, outside the home", data, `python3 -c "import os,sys; os.symlink(sys.argv[1], 'gap13lnk')" "$T"; echo marker >> gap13lnk`, maybe},
+		{"interpreter link to a runtime target then write, outside the home", data, `python3 -c "import os,sys; os.symlink(sys.argv[1], 'gap13lnk')" "$T"; echo marker >> gap13lnk`, block},
 		// Review F1 probes: a link the call makes to a target built at run
-		// time, written through a name outside the home, stays MAYBE until its target is proved.
+		// time, written through a name outside the home, blocks everywhere.
 		{"review P3 python symlink to a built key path", cwd, `python3 -c "import os; os.symlink(os.path.join(os.path.expanduser(chr(126)),'.ss'+'h','authorized_'+'keys'),'/tmp/gap13p3')"; echo marker >> /tmp/gap13p3`, block},
 		{"review P6 ln to a printf-built .ssh", cwd, `ln -s "$(cd;pwd)/$(printf '\x2e\x73\x73\x68')" /tmp/gap13p6 && echo marker >> /tmp/gap13p6/authorized_''keys`, block},
 		{"review P7 ln to the home by cd;pwd", cwd, `ln -s "$(cd;pwd)" /tmp/gap13p7 && echo marker >> /tmp/gap13p7/.ssh/authorized_''keys`, block},
-		{"review P10 unresolved quoted path", cwd, `ln -s "$(cd;pwd)/.defense''claw/config.yaml" /tmp/gap13p10 && echo marker >> /tmp/gap13p10`, maybe},
-		{"review P11 ln to the Claude hook config", cwd, `ln -s "$(cd;pwd)/.claude/settings.json" /tmp/gap13p11 && echo marker > /tmp/gap13p11`, hookConfig},
+		{"review P10 ln to DefenseClaw state", cwd, `ln -s "$(cd;pwd)/.defense''claw/config.yaml" /tmp/gap13p10 && echo marker >> /tmp/gap13p10`, block},
+		{"review P11 ln to the Claude hook config", cwd, `ln -s "$(cd;pwd)/.claude/settings.json" /tmp/gap13p11 && echo marker > /tmp/gap13p11`, block},
 		{"review P12 python symlink from HOME, cwd outside the home", data, `python3 -c "import os,sys; os.symlink(os.environ['HOME']+'/.ssh/authorized_'+'keys', 'gap13p12')"; echo marker >> gap13p12`, block},
-		{"interpreter link to a runtime target then write, in the home", cwd, `python3 -c "import os,sys; os.symlink(sys.argv[1], 'gap13lnk')" "$T"; echo marker >> gap13lnk`, maybe},
-		{"archive extract before a write", cwd, fmt.Sprintf("tar -xf %s/missing.tar -C %s && echo marker >> %s/ledger.db", data, data, data), maybe},
+		{"interpreter link to a runtime target then write, in the home", cwd, `python3 -c "import os,sys; os.symlink(sys.argv[1], 'gap13lnk')" "$T"; echo marker >> gap13lnk`, block},
+		{"archive extract before a write", cwd, fmt.Sprintf("tar -xf %s/missing.tar -C %s && echo marker >> %s/ledger.db", data, data, data), warn},
 		{"keys: symbolic link then append", cwd, "ln -s ~/.ssh/authorized_keys /tmp/gap13k && echo marker >> /tmp/gap13k", block},
 		{"keys: hard link then append", cwd, "ln ~/.ssh/authorized_keys gap13hl && echo marker >> gap13hl", block},
 		{"keys: link onto the keys file", cwd, "ln -s notes.txt ~/.ssh/authorized_keys", block},
@@ -88,21 +88,6 @@ func gap0013EveryCell(t *testing.T, connectorName string) {
 			t.Run(fmt.Sprintf("%s %s %s", connectorName, cell, row.name), func(t *testing.T) {
 				action, rules := shellProtectedFileRoute(t, home, row.cwd, connectorName, posture, managed, row.command)
 				want := row.want[cell]
-				if want == "maybe" {
-					if action == "block" {
-						t.Fatalf("action = block (rules %v), want MAYBE/nonblocking", rules)
-					}
-					return
-				}
-				if row.name == "review P11 ln to the Claude hook config" {
-					if action != want {
-						t.Fatalf("action = %q (rules %v), want %q", action, rules, want)
-					}
-					if !slices.Contains(rules, "tamper.agent_hook_config_write") {
-						t.Fatalf("known hook-config write lost its finding: %v", rules)
-					}
-					return
-				}
 				if action != want {
 					t.Fatalf("action = %q (rules %v), want %q", action, rules, want)
 				}

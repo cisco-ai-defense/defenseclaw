@@ -11,8 +11,8 @@ import (
 )
 
 // GAP-0392: a placed cd does not turn an absolute archive extraction and
-// safe rename into an unbounded link write. A write to an unresolved path
-// in the extracted staging scope is MAYBE; a resolved key-link write blocks.
+// safe rename into an unbounded link write. A later write into that scope
+// still keeps the conservative protected decision.
 //
 // The extraction goes to an absolute staging folder of its own, not /tmp:
 // with TMPDIR=/tmp (a CI runner) the fixture home and its ~/.defenseclaw
@@ -35,7 +35,7 @@ func TestGAP0392ArchiveMoveAfterCdFourCell(t *testing.T) {
 		{"semicolon-cd", `cd ~/clean; tar -xzf out.tgz -C /tmp; mv /tmp/src /tmp/src-old; echo done`, "allow"},
 		{"redirected-cd", `cd ~/clean && tar -xzf out.tgz -C /tmp 2>/dev/null; mv /tmp/src /tmp/src-old 2>/dev/null; echo done`, "allow"},
 		{"no-cd-control", `tar -xzf out.tgz -C /tmp && mv /tmp/src /tmp/src-old && echo done`, "allow"},
-		{"scope-write-after-rename", `cd ~/clean && tar -xzf out.tgz -C /tmp && mv /tmp/src /tmp/src-old && echo x >> /tmp/src-old/authorized_keys`, "maybe"},
+		{"scope-write-after-rename", `cd ~/clean && tar -xzf out.tgz -C /tmp && mv /tmp/src /tmp/src-old && echo x >> /tmp/src-old/authorized_keys`, "block"},
 		{"keys-link-write-after-rename", `cd ~/clean && tar -xzf out.tgz -C /tmp && mv /tmp/src /tmp/src-old && echo x >> ~/clean/keylink`, "block"},
 	}
 	if err := os.Symlink("../.ssh/authorized_keys", filepath.Join(clean, "keylink")); err != nil {
@@ -56,12 +56,6 @@ func TestGAP0392ArchiveMoveAfterCdFourCell(t *testing.T) {
 	f.answerAll(t, calls)
 	for i, call := range calls {
 		want := rows[i/4].want
-		if want == "maybe" {
-			if call.verdict == "block" {
-				t.Errorf("%s: verdict block, want MAYBE/nonblocking; body %.200s", call.name, call.body)
-			}
-			continue
-		}
 		if call.verdict != want {
 			t.Errorf("%s: verdict %s, want %s; body %.200s", call.name, call.verdict, want, call.body)
 		}

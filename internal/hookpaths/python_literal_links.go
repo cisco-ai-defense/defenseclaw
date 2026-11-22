@@ -14,9 +14,12 @@ import (
 )
 
 var (
-	// pythonImportsOS matches an import statement that binds os to the
-	// standard library module, optionally alongside other imports.
-	pythonImportsOS = lazyregexp.New(`(?:^|[;\n])[ \t]*import[ \t]+os(?:[ \t]*,[ \t]*[A-Za-z_][A-Za-z0-9_]*(?:[ \t]+as[ \t]*[A-Za-z_][A-Za-z0-9_]*)?)*[ \t]*(?:[;\n]|$)`)
+	// pythonLiteralLinkCall is one os.link or os.symlink call of inline
+	// Python code whose two arguments are plain string literals.
+	pythonLiteralLinkCall = lazyregexp.New(`\bos\.(sym)?link\(\s*(?:'([^'"\\\n]*)'|"([^'"\\\n]*)")\s*,\s*(?:'([^'"\\\n]*)'|"([^'"\\\n]*)")\s*\)`)
+	// pythonImportsOS is the plain import os statement that makes os the
+	// os module.
+	pythonImportsOS = lazyregexp.New(`(?:^|[;\n])[ \t]*import[ \t]+os[ \t]*(?:[;\n]|$)`)
 	// pythonLiteralPathLinkCall is one pathlib Path(name).hardlink_to(source)
 	// or .symlink_to(source) call with two plain string literals; the Path
 	// is pathlib.Path after import pathlib, or Path after from pathlib
@@ -73,9 +76,9 @@ func (l *shellLinks) addPythonLiteralLinks(file *syntax.File, command, cwd, home
 			if !static || !opaqueLink.MatchString(code) || strings.Contains(code, "chdir") {
 				return true
 			}
-			osCalls, osSpans, hasOSCalls := pythonOSLinkCalls(code, home)
+			osCalls := pythonLiteralLinkCall.FindAllStringSubmatch(code, -1)
 			pathCalls := pythonLiteralPathLinkCall.FindAllStringSubmatch(code, -1)
-			if hasOSCalls && !pythonImportsOS.MatchString(code) {
+			if len(osCalls) > 0 && !pythonImportsOS.MatchString(code) {
 				return true
 			}
 			for _, match := range pathCalls {
@@ -83,16 +86,12 @@ func (l *shellLinks) addPythonLiteralLinks(file *syntax.File, command, cwd, home
 					return true
 				}
 			}
-			rest := pythonLiteralPathLinkCall.ReplaceAllString(code, " ")
-			for i := len(osSpans) - 1; i >= 0; i-- {
-				span := osSpans[i]
-				rest = rest[:span[0]] + strings.Repeat(" ", span[1]-span[0]) + rest[span[1]:]
-			}
+			rest := pythonLiteralPathLinkCall.ReplaceAllString(pythonLiteralLinkCall.ReplaceAllString(code, " "), " ")
 			if opaqueLink.MatchString(rest) {
 				return true
 			}
-			for _, link := range osCalls {
-				found = append(found, literalLink{source: link.source, name: link.name, symbolic: link.symbolic})
+			for _, match := range osCalls {
+				found = append(found, literalLink{source: match[2] + match[3], name: match[4] + match[5], symbolic: match[1] != ""})
 			}
 			for _, match := range pathCalls {
 				found = append(found, literalLink{source: match[5] + match[6], name: match[2] + match[3], symbolic: match[4] == "sym"})
