@@ -6948,10 +6948,12 @@ var generatedInboundNonNativeTargets = []generatedInboundTarget{
 	},
 }
 
-var generatedInboundMatches, generatedInboundTargets = deriveGeneratedInboundNativeCatalog(
-	generatedInboundNonNativeMatches,
-	generatedInboundNonNativeTargets,
-)
+func generatedInboundNativeCatalog() ([]generatedInboundMatch, []generatedInboundTarget) {
+	return deriveGeneratedInboundNativeCatalog(
+		generatedInboundNonNativeMatches,
+		generatedInboundNonNativeTargets,
+	)
+}
 
 var generatedInboundNativeMarkers = []generatedInboundNativeMarker{
 	{ID: "otlp.native.marker.logs.leaf_attribute.defenseclaw.bucket", Signal: "logs", Location: "leaf_attribute", Key: "defenseclaw.bucket", MarkerKind: "reserved_key_presence", ValuesJSON: "[]", ValueType: "string"},
