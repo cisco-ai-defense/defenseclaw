@@ -62,6 +62,7 @@ type Parser struct {
 	disableComma    bool
 	inConfiguration bool
 	errors          []ParseError
+	errorSeen       map[errorKey]struct{}
 	tokens          []*Token
 	depth           int
 	// asciiSrc is the input text when it is pure ASCII (UTF-16 offsets equal byte offsets): textOf slices it.
@@ -307,14 +308,41 @@ func (p *Parser) requireStatementTerminator() {
 	}
 }
 
+// saveError keeps the first error of each (extent, id), as SaveError does. Past errorScanMax errors the
+// duplicate check is a set instead of a scan of the list: an input of thousands of unclosed "${`" or
+// "$(" reports an error per level, and the scan made the parse quadratic (fixture row 39003, 12 KB:
+// 30 ms in the effects frontend, the legacy reader 0.07 ms).
 func (p *Parser) saveError(e extent, id string, incomplete bool) {
-	for _, last := range p.errors {
-		if last.Start == e.Start && last.End == e.End && last.ErrorID == id {
+	if p.errorSeen == nil {
+		for _, last := range p.errors {
+			if last.Start == e.Start && last.End == e.End && last.ErrorID == id {
+				return
+			}
+		}
+		if len(p.errors) >= errorScanMax {
+			p.errorSeen = make(map[errorKey]struct{}, 2*len(p.errors))
+			for _, last := range p.errors {
+				p.errorSeen[errorKey{last.Start, last.End, last.ErrorID}] = struct{}{}
+			}
+		}
+	}
+	if p.errorSeen != nil {
+		k := errorKey{e.Start, e.End, id}
+		if _, dup := p.errorSeen[k]; dup {
 			return
 		}
+		p.errorSeen[k] = struct{}{}
 	}
 	p.errors = append(p.errors, ParseError{ErrorID: id, Start: e.Start, End: e.End, Incomplete: incomplete})
 }
+
+// errorKey is the duplicate key of saveError; errorScanMax is the list length up to which a scan is cheaper.
+type errorKey struct {
+	start, end int
+	id         string
+}
+
+const errorScanMax = 32
 
 func (p *Parser) reportError(e extent, id string) { p.saveError(e, id, false) }
 
