@@ -155,10 +155,9 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) (retErr error) {
 	// (GAP-0007), and start with 0.1.9 (GAP-1775, openshell.MicroVMStartsOnMac);
 	// the docker driver needs the Landlock of the Linux VM Docker runs in.
 	// Setup asks on every Mac, also when the gateway already runs the vm
-	// driver (the upstream default of a fresh OpenShell). Before 0.1.9 a no,
-	// or --yes, moves it to docker rather than writing vm (GAP-1704); from
-	// 0.1.9 the default keeps vm, unless the gateway already runs docker.
-	// No reason to stop at the Landlock check before that question (step 2).
+	// driver (the upstream default of a fresh OpenShell): a no, or --yes,
+	// moves it to docker rather than writing vm (GAP-1704), also from 0.1.9,
+	// which only drops the claim that they do not start. No reason to stop at the Landlock check before that question (step 2).
 	macOS := a.GOOS == "darwin"
 	onVM := rep.Driver == openshell.DriverVM
 	// vmStarts: this OpenShell (the one setup installs, when none is) starts
@@ -242,12 +241,14 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) (retErr error) {
 				where + restarts + `; sandboxes made on the MicroVM driver cannot start after the switch)`
 		}
 		if macOS && vmStarts {
-			// OpenShell 0.1.9 starts them: offered like a Linux host's, and
-			// the default keeps vm, except on a gateway already on docker,
-			// whose sandboxes could not start after a switch.
+			// OpenShell 0.1.9 starts them: a choice that works, not a claim
+			// that it does not. The default stays docker (GAP-1704).
 			question = `Run sandboxes in OpenShell MicroVMs? Each sandbox gets its own kernel and disk (sets compute_driver = "vm" in ` + where + restarts +
 				`; OpenShell calls this driver experimental, and sandboxes made on the docker driver cannot start after the switch)`
-			def = rep.Driver != openshell.DriverDocker
+			if onVM {
+				question = `Run sandboxes in OpenShell MicroVMs? This gateway runs the MicroVM driver; no switches it to the docker driver, which runs sandboxes on Docker Desktop 29.8 or newer ` +
+					`(the run-time Landlock check decides) (sets compute_driver = "docker" in ` + where + restarts + `; sandboxes made on the MicroVM driver cannot start after the switch)`
+			}
 		}
 		if linuxKVM {
 			// The docker driver is a Linux host's default: MicroVMs are the

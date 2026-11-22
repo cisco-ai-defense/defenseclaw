@@ -1263,23 +1263,18 @@ def test_credential_summary_says_a_provider_that_does_not_apply_gives_way_to_aut
     assert _sandbox_credential_summary({}, str(tmp_path / "nothing")).count("(log in inside the sandbox)") == 2
 
 
-def test_a_mac_on_openshell_0_1_9_defaults_to_microvms() -> None:
-    # GAP-1775: OpenShell 0.1.9 starts MicroVMs on a Mac, so setup's question
-    # defaults to yes (a gateway already on docker keeps docker) and the
-    # wizard shows the MicroVM driver, not the docker driver's needs.
-    for version, expected in (("0.1.8", False), ("0.1.9-pre.1", False), ("0.1.9", True), ("0.1.10", True)):
+def test_a_mac_on_openshell_0_1_9_drops_the_do_not_start_text_and_keeps_docker() -> None:
+    # GAP-1775: OpenShell 0.1.9 starts MicroVMs on a Mac. The wizard's
+    # Compute Driver text follows it; the default stays the docker driver
+    # (GAP-1704), so the value, the checks and the arguments do not change.
+    for version, starts in (("0.1.8", False), ("0.1.9-pre.1", False), ("0.1.9", True), ("0.1.10", True)):
         check = sandbox_machine_check({**MAC_MICROVM, "cli_version": version})
-        assert check.microvm_default is expected, version
-        driver = next(f for f in sandbox_wizard_fields({}, machine=check, os_name="darwin") if f.label == "Compute Driver")
-        if expected:
-            assert driver.value == "MicroVMs (the vm driver)" and "do not start" not in driver.hint
-            assert "✗ bind mounts off" not in check.summary
-        else:
-            assert driver.value == "docker (Docker Desktop 29.8 or newer)" and "do not start" in driver.hint
-    docker = {**MAC_MICROVM, "cli_version": "0.1.9", "driver": "docker"}
-    assert sandbox_machine_check(docker).microvm_default is False
-    # No OpenShell yet: the release setup installs counts.
+        assert check.microvm_starts is starts, version
+        fields = sandbox_wizard_fields({}, machine=check, os_name="darwin")
+        driver = next(f for f in fields if f.label == "Compute Driver")
+        assert driver.value == "docker (Docker Desktop 29.8 or newer)"
+        assert ("do not start" in driver.hint) is not starts, version
+        assert "✗ bind mounts off" in check.summary
     missing = {**MAC_MICROVM, "cli_version": "", "openshell_install_version": "0.1.9"}
-    assert sandbox_machine_check(missing).microvm_default is True
-    assert sandbox_machine_check({**MAC_MICROVM, "cli_version": "0.1.9"}).microvm_default is True
-    assert sandbox_machine_check({**LINUX_MICROVM, "cli_version": "0.1.9"}).microvm_default is False
+    assert sandbox_machine_check(missing).microvm_starts is True
+    assert sandbox_machine_check({**LINUX_MICROVM, "cli_version": "0.1.9"}).microvm_starts is False

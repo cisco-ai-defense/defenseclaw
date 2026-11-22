@@ -26,12 +26,12 @@ import (
 )
 
 // TestSetupMacMicroVMQuestionFollowsTheOpenShellRelease (GAP-1775): with
-// OpenShell 0.1.9 MicroVM sandboxes start on a Mac, but setup still told every
-// Mac they do not, and --yes or no moved the gateway to docker. The question
-// now follows the release the host runs: from 0.1.9 it drops that text and the
-// default keeps vm (a gateway already on docker keeps docker); before 0.1.9
-// (0.1.6 to 0.1.8, which the guest-root check still refuses) the text, and the
-// docker default, stay.
+// OpenShell 0.1.9 MicroVM sandboxes start on a Mac, but the setup question told
+// every Mac they do not. The text follows the release the host runs: from
+// 0.1.9 it drops that claim and offers vm as a choice that works; 0.1.6 to
+// 0.1.8, which the guest-root check still refuses, keep it. The default does
+// not move (GAP-1704): docker unless the user says yes, and --yes never writes
+// vm, so a gateway on vm is moved to docker.
 func TestSetupMacMicroVMQuestionFollowsTheOpenShellRelease(t *testing.T) {
 	const stale = "MicroVMs do not start"
 	for _, tc := range []struct {
@@ -43,15 +43,18 @@ func TestSetupMacMicroVMQuestionFollowsTheOpenShellRelease(t *testing.T) {
 		stales  bool                    // the question says they do not start
 		want    openshell.ComputeDriver // "": the gateway stays on docker, which plans no driver change
 	}{
-		{"0.1.9 vm default", "0.1.9", openshell.DriverVM, "\ny\n", false, false, openshell.DriverVM},
-		{"0.1.9 vm yes", "0.1.9", openshell.DriverVM, "", true, false, openshell.DriverVM},
-		{"0.1.9 vm no", "0.1.9", openshell.DriverVM, "n\ny\n", false, false, openshell.DriverDocker},
-		{"0.1.10 vm default", "0.1.10", openshell.DriverVM, "\ny\n", false, false, openshell.DriverVM},
-		{"0.1.9 docker gateway keeps docker", "0.1.9", openshell.DriverDocker, "\ny\n", false, false, ""},
-		{"0.1.9 docker gateway yes to vm", "0.1.9", openshell.DriverDocker, "y\ny\n", false, false, openshell.DriverVM},
+		{"0.1.9 vm default", "0.1.9", openshell.DriverVM, "\ny\n", false, false, openshell.DriverDocker},
+		{"0.1.9 vm --yes", "0.1.9", openshell.DriverVM, "", true, false, openshell.DriverDocker},
+		{"0.1.9 vm yes", "0.1.9", openshell.DriverVM, "y\ny\n", false, false, openshell.DriverVM},
+		{"0.1.10 vm default", "0.1.10", openshell.DriverVM, "\ny\n", false, false, openshell.DriverDocker},
+		{"0.1.9 docker default", "0.1.9", openshell.DriverDocker, "\ny\n", false, false, ""},
+		{"0.1.9 docker --yes", "0.1.9", openshell.DriverDocker, "", true, false, ""},
+		{"0.1.9 docker yes", "0.1.9", openshell.DriverDocker, "y\ny\n", false, false, openshell.DriverVM},
 		{"0.1.8 vm default", "0.1.8", openshell.DriverVM, "\ny\n", false, true, openshell.DriverDocker},
 		{"0.1.8 vm --yes", "0.1.8", openshell.DriverVM, "", true, true, openshell.DriverDocker},
-		{"0.1.6 docker gateway", "0.1.6", openshell.DriverDocker, "n\ny\n", false, true, ""},
+		{"0.1.8 vm yes", "0.1.8", openshell.DriverVM, "y\ny\n", false, true, openshell.DriverVM},
+		{"0.1.8 docker default", "0.1.8", openshell.DriverDocker, "\ny\n", false, true, ""},
+		{"0.1.6 docker yes", "0.1.6", openshell.DriverDocker, "y\ny\n", false, true, openshell.DriverVM},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ta := setupApp(t, tc.input, "", false)
@@ -64,19 +67,16 @@ func TestSetupMacMicroVMQuestionFollowsTheOpenShellRelease(t *testing.T) {
 			ta.HostDoctor = macReport(tc.driver, func(r *openshell.DoctorReport) { r.CLIVersion = tc.version })
 			ta.gateway.applyRes = &openshell.GatewayApplyResult{}
 			_, _ = useGateway(ta)
-			// An answer other than the one asked for (the Allow-mounts
-			// question on a docker gateway, the upgrade offer) is not the
-			// subject: take the setup's result, whatever it ends with.
 			_ = ta.Setup(bg, SetupOptions{Yes: tc.yes, SkipImages: true, NoWrappers: true})
 			out := ta.output()
+			if !tc.yes {
+				has(t, out, "Run sandboxes in OpenShell MicroVMs? ", "[y/N]")
+			}
 			if tc.stales {
 				if !tc.yes {
 					has(t, out, stale)
 				}
 			} else {
-				if !tc.yes {
-					has(t, out, "Run sandboxes in OpenShell MicroVMs? ")
-				}
 				lacks(t, out, stale, "no sandbox starts on a Mac", "do not start until OpenShell fixes")
 			}
 			p := ta.gateway.planned
