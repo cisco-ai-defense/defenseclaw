@@ -1653,6 +1653,24 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 	// 7. Operands.
 	w.curProgram = program
 	operandWords := inner[1:]
+	// xargs appends stdin words after its command. When the preceding stage
+	// printed exactly one literal filename, feed that word through the same
+	// source/destination grammar as ordinary argv; otherwise keep the dynamic
+	// unknown operand path below. This lets cp's table role retain a literal
+	// destination (or -t source) for the protected classifier.
+	allStatic := true
+	for _, word := range operandWords {
+		if !word.Static {
+			allStatic = false
+			break
+		}
+	}
+	if fromInput && entry.Pos == PosSourcesDest && allStatic {
+		piped := strings.TrimSpace(w.stageIn.literal)
+		if piped != "" && !strings.ContainsAny(piped, " \t\r\n\x00") {
+			operandWords = append(append([]Word(nil), operandWords...), Word{Value: piped, Static: true})
+		}
+	}
 	if dialect != DialectPOSIX && (lprog == "new-item" || lprog == "ni") {
 		operandWords = w.joinNewItemName(operandWords)
 	}

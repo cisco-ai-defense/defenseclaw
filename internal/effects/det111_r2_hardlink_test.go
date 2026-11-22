@@ -62,7 +62,7 @@ func TestDET111R2HardLinkFixtures(t *testing.T) {
 	}{
 		{"GAP-1288", `sed -i -e 'w key[9]' ordinary/x`, KindWrite, "key[9]", ""},
 		{"GAP-1289", `dd of=./key[9]`, KindWrite, "key[9]", ""},
-		{"GAP-1317", `echo keya | xargs cp ordinary/x`, KindWrite, "", ReasonOperandsFromInput},
+		{"GAP-1317", `echo keya | xargs cp ordinary/x`, KindWrite, "keya", ""},
 		{"GAP-1318", `sed 's/a/b/w keya' ordinary/x`, KindWrite, "keya", ""},
 	}
 	for _, tc := range cases {
