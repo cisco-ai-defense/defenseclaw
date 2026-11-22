@@ -28,6 +28,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/substrate/identity"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/registry"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/relay"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/revocation"
 )
 
 // Attach through the admin listener (GAP-0085, GAP-0086; lead ruling
@@ -213,6 +214,10 @@ func (a *APIServer) substrateAttach(st *substrateState) http.HandlerFunc {
 				writeSubstrateJSONError(w, http.StatusBadGateway, "relay_unreachable")
 			},
 		}
-		proxy.ServeHTTP(w, r)
+		// The stream ends when its sign-in is ended (B5.1): the proxy closes
+		// the upgraded relay connection when the request context ends.
+		ctx, release := st.cfg.Streams.Open(r.Context(), revocation.Stream{Person: c.person.ID(), TokenKey: c.person.TokenKey, IssuedAt: c.person.IssuedAt})
+		defer release()
+		proxy.ServeHTTP(w, r.WithContext(ctx))
 	}
 }

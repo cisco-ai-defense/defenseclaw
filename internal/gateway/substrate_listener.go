@@ -39,6 +39,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/substrate/identity"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/ratelimit"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/registry"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/revocation"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/telemetryrelay"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
@@ -194,6 +195,13 @@ type SubstrateConfig struct {
 	// WorkspaceMaxBytes caps a workspace upload through attach
 	// (substrate.workspace_max_bytes, E23).
 	WorkspaceMaxBytes int64
+	// Revocations is this replica's copy of the ended sign-ins list,
+	// RevocationSource the leader it pulls from and writes revokes to, and
+	// Streams the open attach streams it closes on a revoke (B5.1). nil:
+	// revocation is off (substrate.identity.revocation.enabled: false).
+	Revocations      *revocation.Snapshot
+	RevocationSource revocation.Source
+	Streams          *revocation.Streams
 	// Doctor runs the gateway-side doctor checks; Info is the
 	// unauthenticated sign-in information (issuer, client_id, sign_in).
 	Doctor func(ctx context.Context) []SubstrateCheck

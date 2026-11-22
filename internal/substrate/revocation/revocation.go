@@ -79,6 +79,11 @@ type Delta struct {
 	Entries    []Entry `json:"entries"`
 }
 
+// Watermark is the not-before time of a person-wide entry made at now: the
+// next whole second, so a token whose iat (whole seconds) is at or before
+// now is refused.
+func Watermark(now time.Time) time.Time { return now.Truncate(time.Second).Add(time.Second) }
+
 // Errors of Check.
 var (
 	// ErrEnded: the token, or every sign-in of its person before it, was ended.
@@ -170,7 +175,7 @@ func (s *FileStore) Put(_ context.Context, e Entry) (Entry, error) {
 			}
 		}
 		if n >= s.maxTokens() {
-			e.Token, e.NotBefore = "", now.Truncate(time.Second)
+			e.Token, e.NotBefore = "", Watermark(now)
 		}
 	}
 	if e.Lift {
@@ -422,19 +427,37 @@ func (s *Snapshot) Active() []Entry {
 	return out
 }
 
+// Pull applies one pull from src now (a revoke reads its own write before it
+// answers, instead of waiting for the next Sync tick).
+func (s *Snapshot) Pull(ctx context.Context, src Source) error {
+	gen, seq := s.Cursor()
+	d, err := src.Since(ctx, gen, seq)
+	if err != nil {
+		return err
+	}
+	s.Apply(d)
+	return nil
+}
+
+// Synced is when the last good pull was applied (zero before the first).
+func (s *Snapshot) Synced() time.Time {
+	if s == nil {
+		return time.Time{}
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.synced
+}
+
 // Sync pulls from src every interval until ctx ends. A failed pull keeps
 // the last good list; Check refuses once it is older than MaxStale.
 func (s *Snapshot) Sync(ctx context.Context, src Source, interval time.Duration) {
 	t := time.NewTicker(interval)
 	defer t.Stop()
 	for {
-		gen, seq := s.Cursor()
 		pctx, cancel := context.WithTimeout(ctx, interval+5*time.Second)
-		d, err := src.Since(pctx, gen, seq)
+		_ = s.Pull(pctx, src)
 		cancel()
-		if err == nil {
-			s.Apply(d)
-		}
 		select {
 		case <-ctx.Done():
 			return
@@ -460,9 +483,10 @@ type Stream struct {
 type Streams struct {
 	snap *Snapshot
 
-	mu   sync.Mutex
-	next uint64
-	open map[uint64]openStream
+	mu     sync.Mutex
+	next   uint64
+	closed uint64
+	open   map[uint64]openStream
 }
 
 type openStream struct {
@@ -513,9 +537,21 @@ func (s *Streams) CloseEnded() int {
 			o.cancel()
 			delete(s.open, id)
 			n++
+			s.closed++
 		}
 	}
 	return n
+}
+
+// Closed is how many streams this registry has closed since it started; a
+// revoke reports the difference across its pull.
+func (s *Streams) Closed() uint64 {
+	if s == nil {
+		return 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.closed
 }
 
 // Count is the number of open streams (tests, doctor).

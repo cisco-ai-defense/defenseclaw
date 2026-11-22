@@ -279,6 +279,13 @@ func (a *APIServer) serveSubstrateRelayVerify(st *substrateState, w http.Respons
 		writeSubstrateRefusal(w, http.StatusForbidden, "session_not_owner")
 		return
 	}
+	// A session minted before its person's sign-ins were ended is refused,
+	// and so is every session while this replica's list is stale (B5.1).
+	if status, reason := st.substrateRevocationRefusal(s.Person, "", s.IssuedAt); status != 0 {
+		a.substrateAuditRelayDenied(st, r, "MEDIUM", reason, target, s.Person)
+		writeSubstrateRefusal(w, status, reason)
+		return
+	}
 	// The admin listener issues a session only to the actor's own person,
 	// and the check above holds a token minted any other way to that too.
 	w.Header().Set("Content-Type", "application/json")

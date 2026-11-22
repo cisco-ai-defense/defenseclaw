@@ -56,7 +56,7 @@ type Reason struct {
 	Audience Audience
 }
 
-// Table is every secret reason code. Keep it sorted by where, then code
+// Table is every secret and sign-in reason code. Keep it sorted by where, then code
 // meaning; the docs table follows this order.
 var Table = []Reason{
 	{"shared_secret_admin_only", 403, API, "A shared secret is set by an administrator, in the store its source names.", "Ask your administrator to change it.", Person},
@@ -67,6 +67,9 @@ var Table = []Reason{
 	{"secret_store_unavailable", 503, API, "The gateway cannot reach the Kubernetes secret store.", "Try again in a minute; an administrator can check it with: defenseclaw-gateway substrate doctor --cluster", Admin},
 	{"secret_not_stored", 502, API, "The secret store refused the write.", "Try again in a minute.", Person},
 	{"secret_not_removed", 502, API, "The secret store refused the removal.", "Try again in a minute.", Person},
+	{"signin_ended", 401, API, "This sign-in was ended on the cluster: you signed out, or an administrator ended it.", "Sign in again: defenseclaw substrate login", Person},
+	{"revocation_unavailable", 503, API, "The cluster can't check ended sign-ins right now.", "Try again in a minute; if it stays, run defenseclaw substrate doctor.", Person},
+	{"person_unknown", 404, API, "No sign-in of that person has been seen.", "Use issuer#subject to end the sign-ins of a person before a first sign-in.", Admin},
 
 	{"secret_on_passthrough", 0, Render, "That host is not inspected (it is in allow_passthrough_for), so no secret is added there.", "An administrator can remove the host from allow_passthrough_for.", Admin},
 	{"secret_not_for_profile", 0, Render, "The agent's profile is not one this secret is for.", "Run the agent with one of the secret's profiles.", Person},

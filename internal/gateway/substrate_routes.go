@@ -150,6 +150,8 @@ func (a *APIServer) newSubstrateAdminHandler(st *substrateState) http.Handler {
 	mux.HandleFunc("GET /api/v1/substrate/batches/{id}", a.substrateGetBatch(st))
 	mux.HandleFunc("GET /api/v1/substrate/usage", a.substrateUsage(st))
 	mux.HandleFunc("GET /api/v1/substrate/doctor", a.substrateDoctor(st))
+	mux.HandleFunc("POST /api/v1/substrate/signin/revoke", a.substrateSigninRevoke(st))
+	mux.HandleFunc("/api/v1/substrate/admin/revocations", a.substrateAdminRevocations(st))
 	mux.HandleFunc("GET /api/v1/substrate/asks", a.substrateListAsks(st))
 	mux.HandleFunc("POST /api/v1/substrate/asks/{id}", a.substrateDecideAsk(st))
 	mux.HandleFunc("GET /api/v1/substrate/decisions", a.substrateDecisions(st))
@@ -278,6 +280,13 @@ func (a *APIServer) substrateAdminAuthenticate(st *substrateState, next http.Han
 					reason = cause
 				}
 			}
+			writeSubstrateJSONError(w, status, reason)
+			return
+		}
+		// An ended sign-in, or a list this replica cannot trust, is
+		// refused before any route (B5.1).
+		if status, reason := st.substrateRevocationRefusal(p.ID(), p.TokenKey, p.IssuedAt); status != 0 {
+			st.authRefused(r, substrateListenerAdmin, identity.Reason(reason))
 			writeSubstrateJSONError(w, status, reason)
 			return
 		}
