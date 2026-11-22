@@ -1,0 +1,20 @@
+apiVersion: v2
+name: defenseclaw-substrate
+description: DefenseClaw for Agent Substrate actors (gateway, controller and egress callout).
+type: application
+# The chart version follows the DefenseClaw release; the release workflow sets
+# both from its version input.
+version: 1.0.10
+appVersion: "1.0.10"
+kubeVersion: ">=1.34.0-0"
+home: https://github.com/cisco-ai-defense/defenseclaw
+sources:
+  - https://github.com/cisco-ai-defense/defenseclaw
+keywords: [defenseclaw, agent-substrate, ai-security]
+annotations:
+  # The Agent Substrate releases this chart is tested with. Doctor warns
+  # outside this range; config substrate.supported_versions holds the same.
+  defenseclaw.cisco.com/substrate-versions: ">=1.0.0 <1.1.0"
+  # The leader store schema this chart's gateway writes. A rollback to a chart
+  # with an older schema is refused by the pre-rollback hook (E25).
+  defenseclaw.cisco.com/store-schema: "1"

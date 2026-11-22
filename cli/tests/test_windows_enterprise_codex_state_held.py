@@ -116,7 +116,7 @@ def test_the_message_does_not_repeat_the_code_and_names_the_kind_of_hold() -> No
 def test_setup_exits_1618_for_a_held_codex_file() -> None:
     go = (ROOT / "internal" / "cli" / "windows_enterprise_standalone.go").read_text(encoding="utf-8")
     assert re.search(
-        r'case "hook_calls_running", "hook_in_use", "codex_state_held", "codex_requirements_held":', go
+        r'case "hook_calls_running", "hook_in_use", "codex_state_held", "codex_requirements_held"(, "[a-z_]+")*:', go
     )
 
 

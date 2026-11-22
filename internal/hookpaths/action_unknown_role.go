@@ -1,0 +1,171 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+// SPDX-License-Identifier: Apache-2.0
+
+package hookpaths
+
+import (
+	"slices"
+	"strings"
+
+	"mvdan.cc/sh/v3/syntax"
+
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+)
+
+// A word that names a protected file as an argument of a program the scan has
+// no model of is data of unknown role, not a proven write: ./send.sh "run echo
+// x >> ~/.ssh/authorized_keys" hands text to a script, and a script named by a
+// variable ($T send ...) is no better known. Only a program the scan models
+// can be said to write its operand: the copy, link, move, archive, editor,
+// download and shell writers, the interpreters and wrappers that run code, and
+// the readers. Everything else is unknown, and its operands are not write
+// targets (rel-1-0-10:GAP-0018; S7 lead 2026-11-13: unknown asks or alerts in
+// the free default, and strict and managed installs keep the block).
+
+// actionRoleKnownWriters are the programs, besides the lists of this package,
+// that write, remove, change or run what they are given.
+// chroot, nsenter, unbuffer, taskset, flock, chrt and caffeinate run the
+// program after their options (flock FILE -c STRING runs sh -c STRING): when
+// the shared reader (actionfacts.WrapperChildIndex) cannot name that program
+// (nsenter -a, flock -c), the call is a wrapper that runs code, not a program
+// of unknown role, so a protected write behind it keeps the rel block
+// (rel-1-0-10:GAP-0925).
+// xxd writes its second operand (xxd [-r] infile outfile), so a protected name
+// there keeps the rel block of the write (rel-1-0-10:GAP-0018 sshfp probe R04).
+var actionRoleKnownWriters = strings.Fields(`rm rmdir unlink shred mkdir mkfifo mknod touch tee dd truncate xxd
+	sed gsed awk gawk mawk nawk perl ruby node deno bun php lua tclsh expect python python3 pwsh powershell cmd
+	bash sh zsh dash ksh fish csh tcsh eval source exec env sudo doas su nohup timeout nice ionice setsid stdbuf command
+	chroot nsenter unbuffer taskset flock chrt caffeinate xargs find gfind ssh scp sftp rsync git curl wget aria2c patch install chmod chown chgrp chattr setfacl
+	sort uniq tr gzip gunzip bzip2 xz zip unzip tar make cmake sqlite3 mysql psql openssl gpg ssh-keygen ssh-add
+	vi vim nano emacs ed ex code open xdg-open sendmail mail
+	set-content sc add-content ac out-file new-item ni copy-item cpi move-item mi remove-item ri rename-item rni clear-content clc
+	set-itemproperty sp tee-object export-csv export-clixml set-acl invoke-expression iex invoke-command icm start-process saps
+	start-job invoke-webrequest iwr invoke-restmethod irm copy move del erase ren rename xcopy robocopy mklink icacls takeown attrib`)
+
+// actionRoleKnownProgram reports a program the scan models: one of its own
+// lists or one of actionRoleKnownWriters.
+func actionRoleKnownProgram(base string) bool {
+	base = strings.ToLower(base)
+	return slices.Contains(actionRoleKnownWriters, base) ||
+		slices.Contains(linkPrograms, base) || slices.Contains(copyPrograms, base) ||
+		slices.Contains(renamePrograms, base) || slices.Contains(cdPrograms, base) ||
+		slices.Contains(multicallPrograms, base) || slices.Contains(archivePrograms, base) ||
+		slices.Contains(dataPrograms, base) || slices.Contains(readerPrograms, base) ||
+		slices.Contains(knownWordPrograms, base) || slices.Contains(readOnlyLinkWordPrograms, base) ||
+		slices.Contains(hiddenDirectoryPrograms, base) || slices.Contains(lateTextPrograms, base)
+}
+
+// actionScriptInterpreters run a script file; actionInterpreterCodeFlags are the
+// options after which the next word is program text (or a module), not a script.
+var (
+	actionScriptInterpreters   = strings.Fields("python python3 ruby node perl php lua deno bun")
+	actionInterpreterCodeFlags = strings.Fields("-c -e -m -r -E -p")
+)
+
+// actionInterpreterScriptArguments reports a call of an interpreter that runs a
+// script file (python3 run.py send "text"): the words after the script are
+// that script's arguments, whose role the scan cannot know. An interpreter with
+// -c, -e or a program text of its own is not that.
+func actionInterpreterScriptArguments(words []*syntax.Word, home string) bool {
+	if len(words) < 3 {
+		return false
+	}
+	program, known := staticProgramWord(words[0], home)
+	if !known {
+		return false
+	}
+	if !slices.Contains(actionScriptInterpreters, programBase(program)) {
+		return false
+	}
+	script := false
+	for _, word := range words[1:] {
+		value, known := StaticWord(word, home)
+		if !known {
+			return false
+		}
+		if strings.HasPrefix(value, "-") {
+			if value == "-" || slices.ContainsFunc(actionInterpreterCodeFlags, func(flag string) bool { return strings.HasPrefix(value, flag) }) {
+				return false
+			}
+			continue
+		}
+		script = true
+		break
+	}
+	return script
+}
+
+// actionCallRoleUnknown reports a call whose program the scan does not model,
+// or an interpreter's script call: the operands of such a call are data of
+// unknown role. A wrapper (sudo, env, timeout) is looked through to the program
+// it runs.
+func actionCallRoleUnknown(call *syntax.CallExpr, home string) bool {
+	if len(call.Args) < 2 {
+		return false
+	}
+	words := call.Args
+	if wrapped, ok := actionLiteralCommandWords(call.Args, home); ok && len(wrapped) != 0 {
+		words = wrapped
+	}
+	program, known := staticProgramWord(words[0], home)
+	if !known {
+		// Only a shell named at run time runs a -c TEXT as code. Any other
+		// program named at run time ("$GREP" -c PATTERN FILE) takes -c as
+		// an option of its own and keeps the unknown role
+		// (rel-1-0-10:GAP-0981).
+		_, shell := actionfacts.RunTimeShellWord(words[0], true)
+		return !shell || !actionRunTimeProgramRunsText(words, home)
+	}
+	if actionInterpreterScriptArguments(words, home) {
+		return true
+	}
+	base := programBase(program)
+	// A program the scan does not list is unknown, bare name or path alike;
+	// the GNU g prefix of a listed coreutil (gtee, gtruncate) is that coreutil.
+	return !actionRoleKnownProgram(base) && !actionRoleKnownProgram(strings.TrimPrefix(base, "g"))
+}
+
+// actionRunTimeProgramRunsText reports a program named at run time that is
+// given a shell -c option before its first operand ("$SHELL" -c TEXT,
+// $BASH -lc TEXT, "$SHELL" -o pipefail -c TEXT): a shell started through a
+// variable runs TEXT as code, so TEXT is no data of unknown role and a
+// protected write in it keeps the rel block in every pack. The options before
+// -c follow the shell's grammar: - and + clusters, -o/+o/-O/+O NAME (also
+// inside a cluster, -eo NAME) and --rcfile/--init-file FILE take a value word.
+// A run-time program without -c ($T send TEXT) stays unknown
+// (rel-1-0-10:GAP-0018, GAP-0975, GAP-0979).
+func actionRunTimeProgramRunsText(words []*syntax.Word, home string) bool {
+	for i := 1; i < len(words); i++ {
+		value, known := StaticWord(words[i], home)
+		if !known || value == "--" || len(value) < 2 || (value[0] != '-' && value[0] != '+') {
+			return false
+		}
+		if strings.HasPrefix(value, "--") {
+			if value == "--rcfile" || value == "--init-file" {
+				i++
+			}
+			continue
+		}
+		cluster := value[1:]
+		if strings.Trim(cluster, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ") != "" {
+			return false
+		}
+		if value[0] == '-' && strings.Contains(cluster, "c") {
+			return true
+		}
+		i += strings.Count(cluster, "o") + strings.Count(cluster, "O")
+	}
+	return false
+}
+
+// actionOptionWithAttachedValue reports an option that carries its value in the
+// word (--output=FILE, -oFILE=...): the option names what the program is to
+// write or read, so the word is not data of unknown role and keeps its
+// reading as a target.
+func actionOptionWithAttachedValue(word *syntax.Word, home string) bool {
+	value, known := StaticWord(word, home)
+	if !known {
+		return strings.HasPrefix(word.Lit(), "-") && strings.Contains(word.Lit(), "=")
+	}
+	return strings.HasPrefix(value, "-") && strings.Contains(value, "=")
+}

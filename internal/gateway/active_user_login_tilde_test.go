@@ -41,6 +41,13 @@ func TestActiveUserLoginTildeTargetIsTheActiveHome(t *testing.T) {
 		"source ./env.sh; make > U/.defenseclaw/config.yaml",
 		"HOME=/tmp/h make > U/.defenseclaw/config.yaml",
 	}
+	// block rows that block for rules of their own in the default pack.
+	blockRules := map[string][]string{
+		"echo k >> U/.ssh/authorized_keys": {gap0747SSHKeysRule},
+		// No SSH keys finding: the target's last element is the fixed name
+		// config.yaml, no authorized-keys file (GAP-1050).
+		"source ./env.sh; make > U/.defenseclaw/config.yaml": {gap0747StateRule, gap0747CompoundLimitRule},
+	}
 	allow := []string{
 		"PATH=U/bin:$PATH make test > build.log",
 		"cd U/project && make test > build.log",
@@ -91,6 +98,7 @@ func TestActiveUserLoginTildeTargetIsTheActiveHome(t *testing.T) {
 			trustedSameHostLogin = func() string { return login }
 			for _, connectorName := range []string{"claudecode", "codex"} {
 				installDefaultProfileConnector(t, connectorName)
+				var template string
 				judge := func(command string, want bool) {
 					t.Helper()
 					input := actionfacts.Input{
@@ -100,12 +108,21 @@ func TestActiveUserLoginTildeTargetIsTheActiveHome(t *testing.T) {
 					findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
 						Input: input, Connector: connectorName, EnforcementCapable: true,
 					})
-					if blocked := buildVerdict(findings, "tool_call").Action == "block"; blocked != want {
-						t.Errorf("%s %q: blocked=%v, want %v (%v)", connectorName, command, blocked, want, FindingStrings(findings))
+					if rules, ok := blockRules[template]; ok && want {
+						// The call blocks for rules of its own, not as the HIGH
+						// state write alert (GAP-1563).
+						if msg := gap0747BlockedForRule(findings, rules...); msg != "" {
+							t.Errorf("%s %q: %s (%v)", connectorName, command, msg, FindingStrings(findings))
+						}
+						return
+					}
+					if msg := gap0747DefaultTierCheck(findings, want); msg != "" {
+						t.Errorf("%s %q: %s (state write %v) (%v)", connectorName, command, msg, want, FindingStrings(findings))
 					}
 				}
 				for _, spelling := range tc.spellings {
 					for _, command := range block {
+						template = command
 						judge(strings.ReplaceAll(command, "U", spelling), true)
 					}
 					for _, command := range allow {
@@ -197,8 +214,8 @@ func TestActiveUserLoginTildeBehindProtectHomeUsesClientTargets(t *testing.T) {
 			if err := os.Chmod(homes, 0o700); err != nil {
 				t.Fatal(err)
 			}
-			if blocked := buildVerdict(findings, "tool_call").Action == "block"; blocked != want {
-				t.Errorf("%s %q: blocked=%v, want %v (%v)", connectorName, command, blocked, want, FindingStrings(findings))
+			if msg := gap0747DefaultTierCheck(findings, want); msg != "" {
+				t.Errorf("%s %q: %s (state write %v) (%v)", connectorName, command, msg, want, FindingStrings(findings))
 			}
 		}
 	}

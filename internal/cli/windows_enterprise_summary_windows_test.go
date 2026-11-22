@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
@@ -48,7 +49,7 @@ func TestWindowsRotateCredentialsHelpIsNotRefused(t *testing.T) {
 	if err := cmd.RunE(cmd, []string{"--help"}); err != nil || !strings.Contains(out.String(), "rotate-credentials") {
 		t.Fatalf("--help: err=%v output=%q", err, out.String())
 	}
-	if err := cmd.RunE(cmd, nil); commandExitCode(err) != enterprisestatus.WindowsExitInvalidArgs {
-		t.Fatalf("rotate-credentials exit = %d (%v), want %d", commandExitCode(err), err, enterprisestatus.WindowsExitInvalidArgs)
+	if err := cmd.RunE(cmd, nil); cliusage.ExitCode(err) != enterprisestatus.WindowsExitInvalidArgs {
+		t.Fatalf("rotate-credentials exit = %d (%v), want %d", cliusage.ExitCode(err), err, enterprisestatus.WindowsExitInvalidArgs)
 	}
 }

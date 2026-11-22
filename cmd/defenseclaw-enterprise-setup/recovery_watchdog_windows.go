@@ -33,7 +33,63 @@ var (
 	setupRecoveryLayout                 = managed.StandaloneWindowsLayout
 	setupRecoveryNeeded                 = standaloneUninstallRecoveryNeeded
 	setupRecoveryReplay                 = replayStandaloneSetupTransaction
+	setupRecoveryHold                   = holdStandaloneUninstallRecovery
+	setupRecoveryHoldNow                = holdStandaloneUninstallRecoveryNow
+	setupRecoveryAwait                  = awaitStandaloneUninstallRecovery
 )
+
+// standaloneUninstallRecoveryMutex is held by an armed uninstall recovery
+// from the moment its Setup exits until its replay ends, so a later Setup
+// that changes the deployment waits for it instead of running next to it
+// (rel-1-0-6:GAP-1080). Replaceable in tests.
+var standaloneUninstallRecoveryMutex = `Global\Cisco-DefenseClaw-Standalone-Setup-Uninstall-Recovery`
+
+// standaloneUninstallRecoveryHoldWait bounds how long a recovery waits for
+// another armed recovery (two uninstall runs in a row); past it, it replays
+// without the mutex and the lifecycle lock orders the two as before.
+const standaloneUninstallRecoveryHoldWait = 30 * time.Minute
+
+func holdStandaloneUninstallRecovery() (func(), error) {
+	return holdStandaloneSetupMutex(standaloneUninstallRecoveryMutex, "standalone uninstall recovery", standaloneUninstallRecoveryHoldWait)
+}
+
+// holdStandaloneUninstallRecoveryNow takes the recovery mutex only when no
+// other recovery holds it.
+func holdStandaloneUninstallRecoveryNow() (func(), error) {
+	return holdStandaloneSetupMutex(standaloneUninstallRecoveryMutex, "standalone uninstall recovery", 0)
+}
+
+// awaitStandaloneUninstallRecovery returns once no armed uninstall recovery
+// runs (it takes and lets go of the recovery mutex), or
+// errStandaloneSetupMutexHeld when one still runs after wait.
+func awaitStandaloneUninstallRecovery(wait time.Duration) error {
+	release, err := holdStandaloneSetupMutex(standaloneUninstallRecoveryMutex, "standalone uninstall recovery", wait)
+	if release != nil {
+		release()
+	}
+	return err
+}
+
+// waitForStandaloneUninstallRecovery is the wait of a standalone run that
+// changes the deployment for the uninstall recovery an earlier Setup armed:
+// past the bound (standaloneRecoveryWaitBound), the retryable 1618
+// lifecycle_busy with nothing changed.
+// A squatted mutex name is not waited for: the run says so on notice
+// (stdout, discarded in a JSON run) and goes on.
+func waitForStandaloneUninstallRecovery(opts enterpriseSetupOptions, notice io.Writer) error {
+	started := time.Now()
+	err := setupRecoveryAwait(standaloneRecoveryWaitBound(opts, started))
+	switch {
+	case errors.Is(err, errStandaloneSetupMutexHeld):
+		return enterpriseSetupRecoveryBusy{action: opts.Action, waited: time.Since(started)}
+	case errors.Is(err, errStandaloneSetupMutexIgnored):
+		if !opts.JSON && notice != nil {
+			fmt.Fprintf(notice, "warning: %v\n", err)
+		}
+		return nil
+	}
+	return err
+}
 
 // armStandaloneUninstallRecovery runs before the lifecycle worker. A killed
 // Setup must not strand a transaction after the worker removed managed hooks.
@@ -92,12 +148,31 @@ func runStandaloneSetupRecoveryWatchdog(parentArgument string, stdout, stderr io
 		return enterpriseFailureExitCode
 	}
 	defer func() { _ = parent.Close() }()
+	// From before READY until the replay ends a later Setup that changes the
+	// deployment waits for this recovery (GAP-1080). Taking the mutex only
+	// after the parent exited left a gap in which a rerun ran next to the
+	// recovery and ended 1618 (1.0.10 T1 review). The parent has passed its
+	// own wait already, so it never waits for this hold. When another
+	// recovery holds the mutex, this one takes it after the parent exits, as
+	// before; without the mutex the recovery still runs: the lifecycle lock
+	// orders it.
+	held, heldErr := setupRecoveryHoldNow()
+	if heldErr == nil {
+		defer held()
+	}
 	if _, err := io.WriteString(stdout, "READY\n"); err != nil {
 		return enterpriseFailureExitCode
 	}
 	if err := parent.Wait(); err != nil {
 		fmt.Fprintln(stderr, err)
 		return enterpriseFailureExitCode
+	}
+	if heldErr != nil {
+		if release, err := setupRecoveryHold(); err != nil {
+			fmt.Fprintln(stderr, "uninstall recovery runs without its host-wide mutex:", err)
+		} else {
+			defer release()
+		}
 	}
 	needed, err := setupRecoveryNeeded()
 	if err != nil {

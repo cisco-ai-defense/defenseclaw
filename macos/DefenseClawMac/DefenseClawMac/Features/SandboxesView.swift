@@ -27,6 +27,13 @@ struct SandboxesView: View {
     @State private var selection: SandboxRow.ID?
     @State private var confirmStop: SandboxRow?
     @State private var confirmUndo: SandboxRow?
+    /// A stop the CLI refused (exit 5) because the MicroVM disk could not be
+    /// synced: the refusal names `sandbox stop NAME --discard-unsynced`, so
+    /// the row offers it, after a confirmation, until a stop or delete lands.
+    @State private var confirmDiscardStop: SandboxRow?
+    @State private var unsyncedStops: Set<String> = []
+    /// The TUI's d key (`sandbox delete NAME`, which asks on a terminal).
+    @State private var confirmDelete: SandboxRow?
     @State private var confirmAlways: SandboxAsk?
     @State private var confirmAlwaysUnblock: SandboxActivity?
     @State private var inspectedSandbox: SandboxRow?
@@ -48,6 +55,13 @@ struct SandboxesView: View {
     }
 
     var body: some View {
+        egressDialogs(lifecycleDialogs(page))
+    }
+
+    /// The page with its loaders and the pull alert. The confirmation dialogs
+    /// are attached by the two helpers below: as one modifier chain the view
+    /// is more than the Swift 6.2 type checker solves in reasonable time.
+    private var page: some View {
         VStack(alignment: .leading, spacing: 12) {
             header
             if let message = appState.sandboxActionMessage {
@@ -77,6 +91,11 @@ struct SandboxesView: View {
         }
         .task(id: processKey) { await loadProcesses() }
         .task(id: runLogKey) { await loadDetachedRun() }
+        .onChange(of: snapshot.sandboxes) { _, rows in
+            // A sandbox stopped or deleted outside the app drops its refusal.
+            let live = Set(rows.filter(\.running).map(Self.unsyncedKey))
+            unsyncedStops = unsyncedStops.intersection(live)
+        }
         .alert(
             "Pull \(pullToNamedBranch?.name ?? "") to a branch you name",
             isPresented: Binding(get: { pullToNamedBranch != nil }, set: { if !$0 { pullToNamedBranch = nil } }),
@@ -89,6 +108,10 @@ struct SandboxesView: View {
             Text("Puts \(row.name)'s work on the branch (sandbox pull --branch-name); your working tree stays as it is. "
                 + "A branch name has no spaces and does not start with -.")
         }
+    }
+
+    private func lifecycleDialogs(_ content: some View) -> some View {
+        content
         .confirmationDialog(
             "Stop \(confirmStop?.name ?? "")?",
             isPresented: Binding(get: { confirmStop != nil }, set: { if !$0 { confirmStop = nil } }),
@@ -102,6 +125,26 @@ struct SandboxesView: View {
             Text("Ends the harness session running in \(row.name), and a detached run (sandbox run --detach) if one "
                 + "is still going; DefenseClaw keeps that run's log for: defenseclaw sandbox logs \(row.name). "
                 + "The sandbox is kept: resume it with defenseclaw sandbox connect \(row.name).")
+        }
+        .confirmationDialog(
+            "Stop \(confirmDiscardStop?.name ?? "") without syncing its disk?",
+            isPresented: Binding(get: { confirmDiscardStop != nil }, set: { if !$0 { confirmDiscardStop = nil } }),
+            presenting: confirmDiscardStop
+        ) { row in
+            Button("Stop anyway (lose unsynced work)", role: .destructive) {
+                runCLI("Stop \(row.name) --discard-unsynced", SandboxCommands.stopDiscardingUnsynced(row.name))
+            }
+        } message: { row in
+            Text(SandboxCommands.discardUnsyncedWarning(name: row.name))
+        }
+        .confirmationDialog(
+            "Delete \(confirmDelete?.name ?? "")?",
+            isPresented: Binding(get: { confirmDelete != nil }, set: { if !$0 { confirmDelete = nil } }),
+            presenting: confirmDelete
+        ) { row in
+            Button("Delete", role: .destructive) { runCLI("Delete \(row.name)", SandboxCommands.delete(row.name)) }
+        } message: { row in
+            Text(SandboxCommands.deleteWarning(name: row.name, copyMode: row.copyMode))
         }
         .confirmationDialog(
             "Undo \(confirmUndo?.name ?? "")?",
@@ -124,6 +167,10 @@ struct SandboxesView: View {
                     + "Activity lists what undo cannot restore.")
             }
         }
+    }
+
+    private func egressDialogs(_ content: some View) -> some View {
+        content
         .confirmationDialog(
             "Always allow \(confirmAlways?.destination ?? "")?",
             isPresented: Binding(get: { confirmAlways != nil }, set: { if !$0 { confirmAlways = nil } }),
@@ -329,6 +376,8 @@ struct SandboxesView: View {
         pairs.append(("Undo", row.undoLabel))
         let raised = SandboxRaisedAlerts.detailText(raisedAlerts(row))
         if !raised.isEmpty { pairs.append(("Alerts", raised)) }
+        for violation in row.violations { pairs.append(("Policy clamp", violation)) }
+        for warning in row.warnings { pairs.append(("Warning", warning)) }
         return pairs
     }
 
@@ -344,6 +393,10 @@ struct SandboxesView: View {
                 Button("Inspect policy and events") { inspectedSandbox = row }
                 Button("Stop…") { confirmStop = row }
                     .disabled(!row.running)
+                if row.running, unsyncedStops.contains(Self.unsyncedKey(row)) {
+                    Button("Stop anyway…") { confirmDiscardStop = row }
+                        .help("defenseclaw sandbox stop \(row.name) --discard-unsynced: stops it without syncing its disk, losing what it wrote since its last sync.")
+                }
                 if row.copyMode {
                     // A copy's work comes back through pull, which shows it
                     // first; applying it merges into the working tree, so it
@@ -367,7 +420,9 @@ struct SandboxesView: View {
                 Button("Undo…") { confirmUndo = row }
                     .disabled(!row.undoOffered)
                     .help(row.copyMode ? "Reverts the last pull --apply of \(row.name)" : "")
-                Button("Copy connect command") { copy("defenseclaw sandbox connect \(row.name)") }
+                Button("Delete…") { confirmDelete = row }
+                    .help("defenseclaw sandbox delete \(row.name): removes the sandbox with its providers, credentials and snapshots.")
+                Button("Copy connect command") { copy("defenseclaw sandbox connect \(ShellQuoting.quote(row.name))") }
             }
             .controlSize(.small)
             .disabled(!appState.sandboxActionsAvailable)
@@ -417,11 +472,34 @@ struct SandboxesView: View {
         }
     }
 
+    /// The refusal belongs to one sandbox, not to its name: a later sandbox
+    /// created under the same --name must not inherit "Stop anyway…".
+    static func unsyncedKey(_ row: SandboxRow) -> String {
+        "\(row.name)|\(row.createdAt?.timeIntervalSince1970 ?? 0)"
+    }
+
     private func runCLI(_ title: String, _ arguments: [String], mutation: Bool = true) {
         Task {
-            _ = await appState.runCommand(
+            guard !mutation || appState.sandboxActionsAvailable else { return }
+            let generation = appState.installationGeneration
+            let result = await appState.runCommand(
                 title: title, arguments: arguments, mutation: mutation, category: "sandbox", origin: "Sandboxes"
             )
+            guard generation == appState.installationGeneration else { return }
+            if arguments.prefix(2) == ["sandbox", "stop"], arguments.count > 2, result.exitCode == 5 {
+                let name = arguments[2]
+                appState.sandboxActionMessage = SandboxStopOutcome.keptRunning(name: name, output: result.output)
+                if SandboxStopOutcome.refusedForUnsyncedDisk(output: result.output),
+                   let row = snapshot.sandboxes.first(where: { $0.name == name }) {
+                    unsyncedStops.insert(Self.unsyncedKey(row))
+                }
+            } else {
+                appState.sandboxActionMessage = result.output
+                if result.succeeded, arguments.count > 2, ["stop", "delete"].contains(arguments[1]) {
+                    unsyncedStops = unsyncedStops.filter { !$0.hasPrefix(arguments[2] + "|") }
+                }
+            }
+            appState.sandboxActionFailed = !result.succeeded
             await appState.refreshSandboxes()
         }
     }

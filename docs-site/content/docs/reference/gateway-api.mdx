@@ -103,8 +103,9 @@ The token is resolved from one of, in priority order:
 
 1. The env var named by `gateway.token_env` (custom name — operator intent wins)
 2. `DEFENSECLAW_GATEWAY_TOKEN` (canonical)
-3. `OPENCLAW_GATEWAY_TOKEN` (legacy fallback for existing installs)
-4. `gateway.token` directly in `~/.defenseclaw/config.yaml`
+3. `gateway.token` directly in `~/.defenseclaw/config.yaml`
+
+`OPENCLAW_GATEWAY_TOKEN` is never this token. It is the credential the gateway uses to connect to OpenClaw. A `gateway.token_env` that names it is skipped, and so is any value equal to it. A request that presents the OpenClaw gateway token gets 401. Since 1.0.10 the upgrade creates a separate `DEFENSECLAW_GATEWAY_TOKEN` for installs that used the OpenClaw token here ([OpenClaw gateway token](/docs/connectors/openclaw#openclaw-gateway-token)).
 
 There is no `~/.defenseclaw/gateway-token` file. On first boot the sidecar creates `DEFENSECLAW_GATEWAY_TOKEN` in `~/.defenseclaw/.env` when no environment or dotenv source supplies one. Rotate a local token with `defenseclaw setup rotate-token --yes`, which restarts the gateway and refreshes active connector credentials; an external `gateway.token_env` is rotated by its owner ([Keys](/docs/reference/keys)).
 
@@ -470,6 +471,12 @@ routes still work. On a Secure Client device these routes keep reading and
 writing the audit database's `actions` table, as they did before version 9.
 A write that cannot take the config lock answers `503`, and one that loses a
 race with another writer answers `409`.
+
+### Model usage
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET` | `/usage` | Hourly model usage and cost from the local store, rolled up by `by=model\|connector\|route\|profile\|role\|provider\|user\|group\|hour` over `since=24h\|7d\|<n>d` (`limit` up to 1000). Answers `{enabled, by, scope, from, to, rows}`; `scope` is `own` or `all`, and each row has `calls`, token counts, `cost_usd` (absent when no call in the bucket had a known cost) and `cost_calls`. With tokenomics or the local store off it answers `{"enabled": false}`. A per-user install returns its own rows. On a managed host an administrator reads all rows; any other account reads only the rows of the identity the gateway verified, and gets `403` when it verified none. `by=group` is administrator-only (`403` otherwise). Group names are never exported. On managed Windows a standard account reads its last 24 hours from the own-status answer (`usage`). See [Tokenomics](/docs/observability/tokenomics). |
 
 ### Audit
 

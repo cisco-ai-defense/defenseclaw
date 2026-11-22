@@ -19,8 +19,11 @@ from click.testing import CliRunner
 from defenseclaw.commands import cmd_setup
 from defenseclaw.config import PerConnectorGuardrailConfig, default_config
 from defenseclaw.fail_mode import connector_fail_mode_report
+from defenseclaw.platform_support import uses_guardrail_proxy as _uses_guardrail_proxy
 
 from tests.environment import isolated_home_env
+
+pytestmark = pytest.mark.usefixtures("openclaw_proxy_topology")
 
 
 @pytest.fixture
@@ -74,6 +77,23 @@ def test_status_reports_the_openclaw_outage_mode_the_gateway_resolves(cfg, pack,
     assert report["provenance"] == "proxy-backed"
     assert ("continue with a warning" in report["note"]) is (want == "open")
     assert cmd_setup._guardrail_summary_hook_fail_mode(cfg, "openclaw").startswith(f"{want} (proxy-backed")
+
+
+def test_status_reports_native_plugin_hooks_for_openclaw_on_windows(cfg, monkeypatch):
+    # rel-1-0-10: native Windows has no guardrail proxy; OpenClaw runs on its native plugin hooks.
+    from defenseclaw import platform_support
+
+    monkeypatch.setattr(
+        platform_support,
+        "uses_guardrail_proxy",
+        lambda name, os_name=None: _uses_guardrail_proxy(name, "windows" if os_name is None else os_name),
+    )
+    cfg.claw.mode = "openclaw"
+    cfg.guardrail.connector = "openclaw"
+    report = connector_fail_mode_report(cfg, "openclaw", inspect_effective_policy=False)
+    assert report["effective"] == "open"
+    assert report["provenance"] == "native-hooks"
+    assert cmd_setup._guardrail_summary_hook_fail_mode(cfg, "openclaw").startswith("open (native plugin hooks")
 
 
 def test_a_managed_openclaw_stays_closed_over_a_saved_open(cfg):

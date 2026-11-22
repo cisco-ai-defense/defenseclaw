@@ -26,6 +26,16 @@ import (
 
 const correlationReceiptTTL = 7 * 24 * time.Hour
 
+// correlationSettledReceiptTTL is how long the receipt of a PreToolUse
+// still suppresses a replay of it once its PostToolUse settled the call
+// (audit SettleReceipt). A replay suppressed in that time is not a second
+// decision of the call: no second pending operation or chain pending action,
+// audit row or chain step. The hour is twice the longest tool chain window
+// (guardrail.ToolChainMaxHorizon), so a replay that comes later can no
+// longer join the steps of the call it repeats; it is recorded again, as
+// one past correlationReceiptTTL always was (S8 R5).
+const correlationSettledReceiptTTL = time.Hour
+
 // correlateHookOccurrence is the hook-side occurrence transaction boundary.
 // Policy evaluation still runs for an exact transport replay, but the replay
 // receipt suppresses duplicate telemetry/audit emission after incrementing its
@@ -293,6 +303,8 @@ func (a *APIServer) correlateHookOccurrenceOnce(
 
 	var pending *audit.CorrelationPendingMatch
 	var pendingLocator *audit.CorrelationPendingLocator
+	// settledStart is the start event of the tool call this end settles.
+	var settledStart audit.SemanticEventID
 	if lifecycle == connector.CorrelationLifecycleToolEnd && spec.Allows(connector.CorrelationInferenceUniquePendingTool) {
 		operation, identity, found, findErr := findHookPendingOperation(
 			ctx, repo, instance.ConnectorInstanceID, req, spec,
@@ -309,6 +321,7 @@ func (a *APIServer) correlateHookOccurrenceOnce(
 				appendHookCorrelationValue(&req, connector.CorrelationTargetTool, req.ToolInvocationID, connector.CorrelationOriginDerived)
 			}
 			restoreHookOperationContext(&req, operation)
+			settledStart = operation.StartSemanticEventID
 		}
 		if identity.valid() {
 			pending = identity.pendingMatch(audit.CorrelationOperationTool, req.ToolInvocationID, req.ToolName, req)
@@ -421,7 +434,16 @@ func (a *APIServer) correlateHookOccurrenceOnce(
 	sourceTime := parseCorrelationSourceTime(req.SourceTimestamp)
 	envelope := audit.EnvelopeFromContext(ctx)
 	exactIdentityClaims := []audit.CorrelationExactIdentityClaim(nil)
-	if hasLifecycle && !match.Conflict {
+	// A claim waits for the same provider ID on the native rail. A per-user
+	// hook has no native counterpart (nativePerUserHookOnly), so its claims
+	// were never paired and only took bytes (S8 R5). What that gives up, on
+	// a per-user host only: a native exporter wired there by hand is never
+	// merged with the hook it mirrors (no same_as, no shared logical event)
+	// when the hook comes first, the usual order; and every PostToolUse
+	// delivered again (Claude Code sends no source event ID, so it has no
+	// receipt) is its own logical event instead of joining the first by its
+	// tool ID claim.
+	if hasLifecycle && !match.Conflict && !nativePerUserHookOnly {
 		exactIdentityClaims = correlationExactIdentityClaims(
 			spec, instance.ConnectorInstanceID, audit.CorrelationRailHook, lifecycle, allValues,
 		)
@@ -475,7 +497,15 @@ func (a *APIServer) correlateHookOccurrenceOnce(
 	for _, value := range dedupeCorrelationValues(req.CorrelationIdentifiers, req.CorrelationValues) {
 		digest := correlationValueDigest(instance.ConnectorInstanceID, value)
 		kind, ok := auditIdentifierKind(value)
-		if digest == "" || !ok || value.Target == connector.CorrelationTargetSemanticEvent {
+		if digest == "" || !ok || value.Target == connector.CorrelationTargetSemanticEvent ||
+			!correlationIdentifierStored(kind) {
+			continue
+		}
+		// The tool identifier of a per-user hook could only join a native
+		// leaf of the same call (a mirror match or same_as), and a per-user
+		// gateway has none; the call's PostToolUse finds its start through
+		// the pending operation (S8 R5).
+		if nativePerUserHookOnly && kind == audit.CorrelationIdentifierTool {
 			continue
 		}
 		if _, err := tx.PutIdentifier(ctx, audit.CorrelationIdentifier{
@@ -550,11 +580,22 @@ func (a *APIServer) correlateHookOccurrenceOnce(
 	if stateAdmissible && lifecycle == connector.CorrelationLifecycleToolEnd && pendingLocator != nil &&
 		pendingLocator.OperationID != "" {
 		terminalStatus := hookToolCorrelationTerminalStatus(profile, req)
-		if resolveErr := tx.ResolvePendingOperation(ctx, *pendingLocator,
-			semantic, terminalStatus, now); resolveErr != nil &&
-			!errors.Is(resolveErr, audit.ErrCorrelationStale) &&
+		resolveErr := tx.ResolvePendingOperation(ctx, *pendingLocator, semantic, terminalStatus, now)
+		if resolveErr != nil && !errors.Is(resolveErr, audit.ErrCorrelationStale) &&
 			!errors.Is(resolveErr, audit.ErrCorrelationNotFound) {
 			return ctx, req, resolveErr
+		}
+		// The end settled the call it resolved: its start's own hook receipt
+		// (the key the PreToolUse claimed) expires soon (SettleReceipt).
+		if resolveErr == nil && settledStart != "" {
+			if startReceipt := correlationReceiptForHook(spec, instance.ConnectorInstanceID,
+				hookReceiptCaller(ctx), reviewedHookToolRetryDigest(spec, instance.ConnectorInstanceID, req,
+					connector.CorrelationLifecycleToolStart), fingerprintHex, now); startReceipt != nil {
+				if err := tx.SettleReceipt(ctx, instance.ConnectorInstanceID, startReceipt.SourceKeyDigest,
+					settledStart, now.Add(correlationSettledReceiptTTL)); err != nil {
+					return ctx, req, err
+				}
+			}
 		}
 	}
 	if stateAdmissible && lifecycle == connector.CorrelationLifecycleModelEnd && pendingLocator != nil &&
@@ -973,7 +1014,8 @@ func correlationIdentifiersForValues(
 	sourceDigest := ""
 	for _, value := range values {
 		kind, ok := auditIdentifierKind(value)
-		if !ok || value.Target == connector.CorrelationTargetSemanticEvent {
+		if !ok || value.Target == connector.CorrelationTargetSemanticEvent ||
+			!correlationIdentifierStored(kind) {
 			continue
 		}
 		digest := correlationValueDigest(instance, value)
@@ -1152,6 +1194,26 @@ func auditIdentifierKind(value connector.CorrelationValue) (audit.CorrelationIde
 		return audit.CorrelationIdentifierTool, true
 	default:
 		return "", false
+	}
+}
+
+// correlationIdentifierStored reports whether correlation_identifiers keeps
+// identifiers of kind, so whether the matcher looks them up. A turn (or
+// prompt) or agent identifier matched another event only as
+// scoped-native-membership: a belongs_to between two semantic events that
+// putCorrelationMatchRelationship drops, ranked below the session identifier
+// that every such event also carries. The turn and agent nodes of the graph
+// come from the occurrence (putHookIdentityRelationships, the native and LLM
+// rail edges) and the observation columns, not from these rows. The session
+// identifier stays: the tool chain partitions an event by it
+// (loadExactToolChainSession). Rows a 1.0.9 binary stored stay until
+// retention removes their event (S8 R5).
+func correlationIdentifierStored(kind audit.CorrelationIdentifierKind) bool {
+	switch kind {
+	case audit.CorrelationIdentifierTurn, audit.CorrelationIdentifierPrompt, audit.CorrelationIdentifierAgent:
+		return false
+	default:
+		return true
 	}
 }
 
@@ -1574,13 +1636,34 @@ func putCorrelationRelationshipEvidence(
 	semantic audit.SemanticEventID,
 	now time.Time,
 ) error {
+	return putCorrelationRelationshipEvidenceOf(ctx, tx, relationship, semantic, now, false)
+}
+
+// putCorrelationRelationshipEvidenceOf is putCorrelationRelationshipEvidence;
+// with firstSource the occurrence is recorded only as the first source of an
+// edge that has no source evidence (audit PutRelationshipFirstSourceEvidence).
+func putCorrelationRelationshipEvidenceOf(
+	ctx context.Context,
+	tx *audit.CorrelationTx,
+	relationship *audit.CorrelationRelationship,
+	semantic audit.SemanticEventID,
+	now time.Time,
+	firstSource bool,
+) error {
 	if relationship == nil {
 		return fmt.Errorf("correlation relationship evidence requires relationship")
 	}
-	if _, err := tx.PutRelationshipEvidence(ctx, audit.CorrelationRelationshipEvidence{
+	evidence := audit.CorrelationRelationshipEvidence{
 		RelationshipID: relationship.RelationshipID, SemanticEventID: semantic,
 		Role: audit.CorrelationEvidenceSource, Integrity: audit.CorrelationIntegrityVerified, CreatedAt: now,
-	}); err != nil {
+	}
+	var err error
+	if firstSource {
+		_, _, err = tx.PutRelationshipFirstSourceEvidence(ctx, evidence)
+	} else {
+		_, err = tx.PutRelationshipEvidence(ctx, evidence)
+	}
+	if err != nil {
 		return err
 	}
 	evidenceCount, err := tx.RelationshipEvidenceCount(ctx, relationship.RelationshipID)
@@ -1645,6 +1728,22 @@ type hookIdentityRelationshipFact struct {
 	toTarget   connector.CorrelationTarget
 	typeName   audit.CorrelationRelationshipType
 	ruleID     string
+}
+
+// hookSessionScopedRelationshipRules are the identity edges of a session
+// that every hook of the session reports again: its turn and agent
+// membership and its reported lineage. Their first hook is their source
+// evidence; later hooks refresh the edge (last seen) without a row each, so
+// the evidence of an edge, its exported evidence count and the writer time
+// of a hook no longer grow with the session (S8 GW1, rel-1-0-10 GAP-0621).
+// Edges of one tool call or model request keep one row per hook (a start and
+// an end).
+var hookSessionScopedRelationshipRules = map[string]bool{
+	"turn-session-membership":   true,
+	"agent-session-membership":  true,
+	"reported-session-lineage":  true,
+	"reported-agent-lineage":    true,
+	"reported-agent-delegation": true,
 }
 
 // putHookIdentityRelationships materializes only relationships supported by
@@ -1759,8 +1858,8 @@ func putHookIdentityRelationships(
 		if err != nil {
 			return nil, err
 		}
-		if err := putCorrelationRelationshipEvidence(
-			ctx, tx, &relationship, semantic, now,
+		if err := putCorrelationRelationshipEvidenceOf(
+			ctx, tx, &relationship, semantic, now, hookSessionScopedRelationshipRules[fact.ruleID],
 		); err != nil {
 			return nil, err
 		}

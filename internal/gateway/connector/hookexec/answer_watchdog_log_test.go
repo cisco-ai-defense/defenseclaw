@@ -16,6 +16,16 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/proofclock/proofclocktest"
 )
 
+// setAnswerWatchdogLogWait replaces the watchdog's log wait for the test and
+// puts the previous value back when it ends. The value is atomic, so a
+// goroutine an earlier test left running reads it without a data race.
+func setAnswerWatchdogLogWait(t *testing.T, d time.Duration) {
+	t.Helper()
+	previous := answerWatchdogLogWait.Load()
+	answerWatchdogLogWait.Store(d)
+	t.Cleanup(func() { answerWatchdogLogWait.Store(previous) })
+}
+
 // shortAnswerFloor lets a short test budget leave the gateway its answer
 // window, so a missing answer is the gateway's outage (gatewayAnswerWindowShort).
 func shortAnswerFloor(t *testing.T) {
@@ -51,11 +61,11 @@ func heldWatchdogBounds(t *testing.T) *proofclocktest.Clock {
 func askedBounds(t *testing.T, clock *proofclocktest.Clock) {
 	t.Helper()
 	for _, asked := range clock.Requested() {
-		if asked == answerWatchdogLogWait {
+		if asked == answerWatchdogLogWait.Load() {
 			return
 		}
 	}
-	t.Fatalf("the watchdog asked for the bounds %v, want its %s log wait among them", clock.Requested(), answerWatchdogLogWait)
+	t.Fatalf("the watchdog asked for the bounds %v, want its %s log wait among them", clock.Requested(), answerWatchdogLogWait.Load())
 }
 
 // answerLookupProbe is the agent-side output of a call that counts how many
@@ -186,8 +196,8 @@ func TestWatchdogKeepsAKnownRefusalClosedWhileItsRowWaits(t *testing.T) {
 // watchdog and when the hook command armed it before Run.
 func TestWatchdogRowSurvivesASlowAccountLookup(t *testing.T) {
 	const lookup = 250 * time.Millisecond
-	if lookup <= answerWatchdogLogWait {
-		t.Fatalf("the lookup (%s) must outlast the watchdog's log wait (%s)", lookup, answerWatchdogLogWait)
+	if lookup <= answerWatchdogLogWait.Load() {
+		t.Fatalf("the lookup (%s) must outlast the watchdog's log wait (%s)", lookup, answerWatchdogLogWait.Load())
 	}
 	for _, tc := range []struct {
 		name     string
@@ -327,13 +337,13 @@ func TestWatchdogLogWaitIsSpentOnTheProofClock(t *testing.T) {
 	giveUp := time.After(10 * time.Second)
 	for bounded := false; !bounded; {
 		for _, asked := range clock.Requested() {
-			bounded = bounded || asked == answerWatchdogLogWait
+			bounded = bounded || asked == answerWatchdogLogWait.Load()
 		}
 		select {
 		case <-exited:
 			t.Fatal("the process ended before the log wait was spent")
 		case <-giveUp:
-			t.Fatalf("the watchdog never asked for its %s log wait (asked %v)", answerWatchdogLogWait, clock.Requested())
+			t.Fatalf("the watchdog never asked for its %s log wait (asked %v)", answerWatchdogLogWait.Load(), clock.Requested())
 		case <-time.After(5 * time.Millisecond):
 		}
 	}
@@ -345,7 +355,7 @@ func TestWatchdogLogWaitIsSpentOnTheProofClock(t *testing.T) {
 	if out, _ := stdout.read(); out == "" {
 		t.Fatal("the watchdog waited for its row before it answered")
 	}
-	clock.Advance(answerWatchdogLogWait)
+	clock.Advance(answerWatchdogLogWait.Load())
 	select {
 	case <-exited:
 	case <-time.After(10 * time.Second):
@@ -375,8 +385,8 @@ func TestWatchdogArmedBeforeRunLogsItsAnswer(t *testing.T) {
 		{name: "ended by the hook command before the deadline", finish: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if tc.lookup > 0 && tc.lookup <= answerWatchdogLogWait {
-				t.Fatalf("the lookup (%s) must outlast the watchdog's log wait (%s)", tc.lookup, answerWatchdogLogWait)
+			if tc.lookup > 0 && tc.lookup <= answerWatchdogLogWait.Load() {
+				t.Fatalf("the lookup (%s) must outlast the watchdog's log wait (%s)", tc.lookup, answerWatchdogLogWait.Load())
 			}
 			shortAnswerBudget(t, budget)
 			shortAnswerFloor(t)

@@ -30,6 +30,7 @@ import (
 	"os/signal"
 	"runtime"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -382,6 +383,19 @@ func runTracked(cmd *exec.Cmd) error {
 		_ = cmd.Wait()
 		return fmt.Errorf("%w: scanner custody handshake: %v", ErrNotContained, err)
 	}
+	if binary.LittleEndian.Uint32(scannerPID[:]) == 0 {
+		// No process has PID 0: the launcher could not create the scanner's
+		// namespaces, so the scanner never started (reportNamespaceRefused).
+		var code [4]byte
+		_, readErr := io.ReadFull(owner, code[:])
+		_ = unix.PidfdSendSignal(pidfd, unix.SIGKILL, nil, 0)
+		_ = cmd.Wait()
+		if readErr != nil {
+			return fmt.Errorf("%w: scanner custody handshake: %v", ErrNotContained, readErr)
+		}
+		return fmt.Errorf("%w: %w: %s", ErrNotContained, ErrContainmentUnavailable,
+			namespaceRefusal(syscall.Errno(binary.LittleEndian.Uint32(code[:]))))
+	}
 	scannerFD, err = unix.PidfdOpen(int(binary.LittleEndian.Uint32(scannerPID[:])), 0)
 	if err != nil {
 		_ = unix.PidfdSendSignal(pidfd, unix.SIGKILL, nil, 0)
@@ -485,6 +499,14 @@ func launchTracked(argv []string, expectedParent int) int {
 	child.SysProcAttr.GidMappingsEnableSetgroups = false
 	if err := child.Start(); err != nil {
 		_ = gateRead.Close()
+		// No namespace (user namespaces off, or a seccomp profile or sandbox
+		// that refuses them): the scanner never runs. The gateway is told why,
+		// so it reports a host that refuses containment, not a launcher that
+		// went away mid-handshake (GAP-0521).
+		if namespaceRefused(err) {
+			reportNamespaceRefused(owner, err)
+			return containExitNoNamespace
+		}
 		return containExitNotContained
 	}
 	_ = gateRead.Close()
@@ -548,12 +570,42 @@ func launchTracked(argv []string, expectedParent int) int {
 	}
 }
 
+// reportNamespaceRefused tells the gateway on the custody channel that the
+// scanner's namespaces could not be created: scanner PID 0, which no process
+// has, then the errno.
+func reportNamespaceRefused(owner *os.File, err error) {
+	var errno syscall.Errno
+	_ = errors.As(err, &errno)
+	var msg [8]byte
+	binary.LittleEndian.PutUint32(msg[4:], uint32(errno))
+	_, _ = owner.Write(msg[:])
+}
+
+// namespaceRefusal names why the scanner's namespaces could not be created,
+// with the host setting to look at.
+func namespaceRefusal(errno syscall.Errno) string {
+	cause := "the scanner's user and PID namespaces: " + errno.Error()
+	switch errno {
+	case syscall.ENOSPC, syscall.EUSERS:
+		if b, err := os.ReadFile("/proc/sys/user/max_user_namespaces"); err == nil && strings.TrimSpace(string(b)) == "0" {
+			return cause + " (user namespaces are off on this host: user.max_user_namespaces=0)"
+		}
+		return cause + " (a namespace limit is reached: user.max_user_namespaces or user.max_pid_namespaces)"
+	case syscall.EPERM:
+		return cause + " (a seccomp profile or sandbox refuses user namespaces, as a container's default profile does)"
+	}
+	return cause
+}
+
 // execTracked is the scanner's PID-namespace init until the gate opens.
 // Exec keeps PID 1 while replacing this trusted launcher with the scanner.
 func execTracked(argv []string) int {
 	if os.Getpid() != 1 {
 		return containExitNotContained
 	}
+	// This runs in init, on the main thread, which execs the scanner below:
+	// the scanner keeps the nicer value (lowerScannerPriority, GAP-0251).
+	lowerScannerPriority()
 	if err := guardTrackedInit(); err != nil {
 		return containExitNotContained
 	}

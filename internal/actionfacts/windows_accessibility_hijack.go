@@ -61,17 +61,77 @@ func exactWindowsAccessibilityDebuggerHijack(command CommandFact) bool {
 		exactWindowsSystemCommandInterpreter(mutation.value)
 }
 
+// powerShellCopyOperands reads the arguments of a Copy-Item call by parameter
+// name: positional words fill -Path then -Destination; -Force is the only
+// other word allowed. It returns the source and destination.
+func powerShellCopyOperands(args []string) ([]string, bool) {
+	var source, destination string
+	positional := []*string{&source, &destination}
+	for index := 0; index < len(args); index++ {
+		word := args[index]
+		lower := strings.ToLower(word)
+		switch {
+		case lower == "-force":
+		case len(lower) >= 2 && strings.HasPrefix("-path", lower) || lower == "-literalpath":
+			if index+1 >= len(args) || source != "" {
+				return nil, false
+			}
+			index++
+			source = args[index]
+		case len(lower) >= 4 && strings.HasPrefix("-destination", lower):
+			if index+1 >= len(args) || destination != "" {
+				return nil, false
+			}
+			index++
+			destination = args[index]
+		case strings.HasPrefix(word, "-"):
+			return nil, false
+		default:
+			if len(positional) == 0 {
+				return nil, false
+			}
+			for len(positional) > 0 && *positional[0] != "" {
+				positional = positional[1:]
+			}
+			if len(positional) == 0 {
+				return nil, false
+			}
+			*positional[0] = word
+			positional = positional[1:]
+		}
+	}
+	if source == "" || destination == "" {
+		return nil, false
+	}
+	return []string{source, destination}, true
+}
+
 func exactWindowsAccessibilityBinaryReplacement(command CommandFact) bool {
-	if command.Dialect != DialectCMD || command.Program != "copy" ||
-		!hasFactOperation(command, OperationCopy) {
+	if !hasFactOperation(command, OperationCopy) {
 		return false
 	}
 	argv := command.Argv
-	if len(argv) == 4 {
-		if !strings.EqualFold(argv[1], "/y") {
+	switch {
+	case command.Dialect == DialectCMD && command.Program == "copy":
+		if len(argv) == 4 {
+			if !strings.EqualFold(argv[1], "/y") {
+				return false
+			}
+			argv = append(argv[:1:1], argv[2:]...)
+		}
+	case command.Dialect == DialectPowerShell &&
+		(command.Program == "copy-item" || command.Program == "copy" || command.Program == "cp"):
+		// The PowerShell spelling of the same replacement: Copy-Item SRC DST,
+		// optionally -Force, with the source and destination positional or
+		// named (-Path, -Destination) in any order. (cmd's copy /Y is not a
+		// Copy-Item parameter.)
+		named, ok := powerShellCopyOperands(argv[1:])
+		if !ok {
 			return false
 		}
-		argv = append(argv[:1:1], argv[2:]...)
+		argv = append(argv[:1:1], named...)
+	default:
+		return false
 	}
 	if len(argv) != 3 {
 		return false

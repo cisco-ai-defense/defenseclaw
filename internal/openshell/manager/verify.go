@@ -92,6 +92,7 @@ while read -r key value rest; do
   [ "$key" = MemTotal: ] && printf 'memtotal %s\n' "$value"
 done < /proc/meminfo
 if [ "$0" = defenseclaw-verify-vm ]; then
+  owner=$(/usr/bin/stat -c %u / 2>/dev/null) && printf 'rootowner %s\n' "$owner"
   trusted_resolver() {
     for d in / /usr /usr/local /usr/local/lib /usr/local/lib/defenseclaw; do
       [ ! -L "$d" ] && [ -d "$d" ] && [ "$(/usr/bin/stat -c %u "$d")" = 0 ] || return 1
@@ -173,6 +174,10 @@ type workloadFacts struct {
 	LocalhostAnswers  []string
 	LocalhostOK       bool
 	LocalhostReported bool
+	// RootUID is the owner of the MicroVM's root folder (the vm check's
+	// "rootowner" line, seen["rootowner"]). It only names why a resolver
+	// that cannot be trusted was refused; it admits nothing.
+	RootUID int
 	// DirectResolverOK is set only by a separate exec of the pinned caller,
 	// and DirectResolverRefusal to the reason that caller refused with.
 	DirectResolverOK      bool
@@ -220,7 +225,7 @@ func parseWorkloadFacts(out []byte) (workloadFacts, error) {
 		}
 		tag, rest, _ := strings.Cut(line, " ")
 		switch tag {
-		case "uid", "gid", "hostname", "home", "capeff", "cpus", "memtotal":
+		case "uid", "gid", "hostname", "home", "capeff", "cpus", "memtotal", "rootowner":
 			if facts.seen[tag] {
 				return facts, fmt.Errorf("the answer has %s twice", tag)
 			}
@@ -242,6 +247,8 @@ func parseWorkloadFacts(out []byte) (workloadFacts, error) {
 			facts.CPUs, err = strconv.Atoi(rest)
 		case "memtotal":
 			facts.MemTotalKB, err = strconv.ParseInt(rest, 10, 64)
+		case "rootowner":
+			facts.RootUID, err = strconv.Atoi(rest)
 		case "sha256":
 			sum, path, ok := strings.Cut(rest, " ")
 			if !ok || path == "" {
@@ -452,6 +459,14 @@ func workloadProblems(want verifyRecord, got workloadFacts, d openshell.Driver, 
 // image's shell ran it. The shell is the image's, so this result alone
 // admits nothing; the direct exec (directResolverOK) must pass too.
 func microVMResolverProblem(got workloadFacts) string {
+	if got.LocalhostReported && !got.LocalhostOK && got.seen["rootowner"] && got.RootUID != 0 {
+		// The resolver path is trusted only from a root-owned "/": the
+		// workload could otherwise swap /usr. OpenShell's MicroVM driver
+		// (0.1.6 and its main branch) builds the guest's overlay as the
+		// gateway's account, so "/" is never root's (rel-1-0-6:GAP-0570,
+		// rel-1-0-10:GAP-0007). Say so instead of a retry hint.
+		return fmt.Sprintf(openshell.MicroVMGuestRootLimit+" (uid %d owns it)", got.RootUID)
+	}
 	if !got.LocalhostReported || !got.LocalhostOK || len(got.LocalhostAnswers) == 0 {
 		return "the MicroVM could not resolve localhost to its loopback ingress"
 	}

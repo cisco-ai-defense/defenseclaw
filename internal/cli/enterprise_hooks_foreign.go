@@ -23,6 +23,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 )
 
 // enterpriseForeignHookCleanup removes unapproved foreign hooks from one
@@ -39,7 +40,7 @@ var enterpriseForeignHookCleanup = func(target enterprisehooks.TargetCredentials
 		return enterprisepolicy.CleanupResult{}, nil
 	}
 	name := strings.ToLower(strings.TrimSpace(connectorName))
-	layout, programFiles, programData, err := standaloneEnterprisePolicyLayout()
+	layout, programFiles, programData, err := hookcli.StandaloneEnterprisePolicyLayout()
 	if err != nil {
 		return enterprisepolicy.CleanupResult{}, err
 	}
@@ -58,7 +59,7 @@ var enterpriseForeignHookCleanup = func(target enterprisehooks.TargetCredentials
 		AccountHome:   target.UserHome,
 		HookBinary:    opts.HookBinary,
 		Policy:        policy,
-		OwnedCommands: perUserOwnedHookCommandsForBinary(name, target.UserHome, dataDir, opts.HookBinary),
+		OwnedCommands: hookcli.PerUserOwnedHookCommandsForBinary(name, target.UserHome, dataDir, opts.HookBinary),
 	}
 	if layout.GOOS == "windows" && name == enterprisepolicy.ConnectorCopilot &&
 		slices.Contains(enterprisepolicy.StandaloneConnectors(cfg), enterprisepolicy.ConnectorClaudeCode) {

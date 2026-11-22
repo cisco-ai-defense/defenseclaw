@@ -42,6 +42,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"gopkg.in/yaml.v3"
 )
 
@@ -63,7 +64,6 @@ var hermesConfigPathResolver = hermespath.ConfigPath
 
 const (
 	hermesAllowlistLogicalName      = "shell-hooks-allowlist.json"
-	hermesAllowlistFileName         = "shell-hooks-allowlist.json"
 	hermesAllowlistOwnerField       = "defenseclaw_managed"
 	hermesAllowlistMaxBytes         = 2 << 20
 	hermesDirectNativeStateFileName = "hermes-direct-native-state.json"
@@ -126,7 +126,7 @@ type hookOnlyConnector struct {
 	pluginArtifactAsset string
 
 	gatewayToken string
-	masterKey    string
+
 	loopbackWarn sync.Once
 }
 
@@ -1130,7 +1130,7 @@ func (c *hookOnlyConnector) Setup(ctx context.Context, opts SetupOpts) error {
 		// An allowlist Setup cannot repair is refused before anything is
 		// written: rolling back after the refusal tore down the hooks an
 		// earlier DefenseClaw registered and left Hermes unguarded (GAP-1241).
-		allowlistPath := filepath.Join(filepath.Dir(configPath), hermesAllowlistFileName)
+		allowlistPath := filepath.Join(filepath.Dir(configPath), HermesAllowlistFileName)
 		command := hermesConfiguredHookCommand(c.hookCommand(opts), opts.HookExecutable)
 		if err := checkHermesAllowlistRepairable(allowlistPath, command); err != nil {
 			return setupRefusedUnchanged{err: fmt.Errorf("%s hook config: %w", c.name, err)}
@@ -1336,7 +1336,7 @@ func (c *hookOnlyConnector) ownedHookContractPresent(opts SetupOpts) (bool, erro
 		// and managed verification must read back every required approval;
 		// an emptied allowlist makes the registration ineffective.
 		command := hermesConfiguredHookCommand(c.hookCommand(opts), opts.HookExecutable)
-		return hermesOwnedApprovalsPresent(filepath.Join(filepath.Dir(hermesConfig), hermesAllowlistFileName), command)
+		return hermesOwnedApprovalsPresent(filepath.Join(filepath.Dir(hermesConfig), HermesAllowlistFileName), command)
 	}
 	path := c.configPath(opts)
 	const maxManagedPluginBytes = 4 << 20
@@ -2133,7 +2133,7 @@ func (c *hookOnlyConnector) removeHermesHomeEntries(opts SetupOpts, configPath s
 		}
 	}
 	if approvals {
-		if err := removeHermesOwnedApprovals(filepath.Join(filepath.Dir(configPath), hermesAllowlistFileName), command, nil, managedStandaloneRender(opts)); err != nil {
+		if err := removeHermesOwnedApprovals(filepath.Join(filepath.Dir(configPath), HermesAllowlistFileName), command, nil, managedStandaloneRender(opts)); err != nil {
 			return fmt.Errorf("remove shell hook approvals: %w", err)
 		}
 	}
@@ -2149,7 +2149,7 @@ func hermesHomeHoldsOwnedEntries(configPath, hookScript, command string) (hooks,
 		return false, false, err
 	}
 	hooks = hermesHooksHoldOwnedEntries(cfg["hooks"], hookScript)
-	allowlistPath := filepath.Join(filepath.Dir(configPath), hermesAllowlistFileName)
+	allowlistPath := filepath.Join(filepath.Dir(configPath), HermesAllowlistFileName)
 	document, err := readHermesAllowlist(allowlistPath)
 	if err != nil {
 		return false, false, err
@@ -2514,7 +2514,7 @@ func verifyHermesCleanup(opts SetupOpts, configPath, hookScript, command string)
 	if hermesHooksHoldOwnedEntries(config["hooks"], hookScript) {
 		return fmt.Errorf("hermes teardown incomplete: DefenseClaw hook entries remain in %s", configPath)
 	}
-	allowlistPath := filepath.Join(filepath.Dir(configPath), hermesAllowlistFileName)
+	allowlistPath := filepath.Join(filepath.Dir(configPath), HermesAllowlistFileName)
 	if _, err := os.Stat(allowlistPath); err == nil {
 		document, err := readHermesAllowlist(allowlistPath)
 		if err != nil {
@@ -2634,7 +2634,7 @@ func validManagedPluginOwnershipMarker(marker []byte) bool {
 }
 
 func (c *hookOnlyConnector) Authenticate(r *http.Request) bool {
-	return authenticateHookBridgeRequest(r, c.gatewayToken, c.masterKey, c.name,
+	return authenticateHookBridgeRequest(r, c.gatewayToken, c.name,
 		"hook-only connectors run as local shell hooks; setup injects Authorization when possible, but loopback remains accepted for legacy hook installs",
 		&c.loopbackWarn)
 }
@@ -2649,9 +2649,8 @@ func (c *hookOnlyConnector) Route(r *http.Request, body []byte) (*ConnectorSigna
 	}, nil
 }
 
-func (c *hookOnlyConnector) SetCredentials(gatewayToken, masterKey string) {
+func (c *hookOnlyConnector) SetCredentials(gatewayToken string) {
 	c.gatewayToken = gatewayToken
-	c.masterKey = masterKey
 }
 
 func (c *hookOnlyConnector) AgentPaths(opts SetupOpts) AgentPaths {
@@ -2662,7 +2661,7 @@ func (c *hookOnlyConnector) AgentPaths(opts SetupOpts) AgentPaths {
 		}
 		patched := []string{
 			configPath,
-			filepath.Join(filepath.Dir(configPath), hermesAllowlistFileName),
+			filepath.Join(filepath.Dir(configPath), HermesAllowlistFileName),
 		}
 		// Setup writes the direct-native state only on Windows; listing it
 		// elsewhere made the enterprise installer refuse every POSIX Hermes
@@ -4092,7 +4091,7 @@ func setupHermesFiles(opts SetupOpts, configPath, hookScript string) (err error)
 	if err := validateHermesWindowsConfigPath(configPath); err != nil {
 		return err
 	}
-	allowlistPath := filepath.Join(filepath.Dir(configPath), hermesAllowlistFileName)
+	allowlistPath := filepath.Join(filepath.Dir(configPath), HermesAllowlistFileName)
 	configBackupPath := managedFileBackupPath(opts.DataDir, "hermes", "config.yaml")
 	allowlistBackupPath := managedFileBackupPath(opts.DataDir, "hermes", hermesAllowlistLogicalName)
 	statePath := filepath.Join(opts.DataDir, "hooks", hermesDirectNativeStateFileName)
@@ -4385,6 +4384,13 @@ func planHermesAllowlistApprovals(path string, approvals []interface{}, command 
 		_, requiredEvent := events[event]
 		owned, _ := entry[hermesAllowlistOwnerField].(bool)
 		_, recognized := recognizedCommands[entryCommand]
+		if owned && !recognized && hermesLaunchImageFamilyCommand(entryCommand) {
+			// DefenseClaw's own approval for another hook image of this
+			// install, one an earlier release or a rolled-back upgrade wrote
+			// (GAP-0601). An entry without the ownership marker keeps the
+			// earlier handling.
+			recognized = true
+		}
 		if owned && !recognized && hermesRelocatedHookCommand(entryCommand, command) {
 			// DefenseClaw's approval from before a true move of the home is
 			// replaced like any historical command (rel-1-0-2 GAP-0642).
@@ -4423,7 +4429,7 @@ func teardownHermesAllowlist(opts SetupOpts, configPath, command string) error {
 	}
 	retireManagedConsent := managedStandaloneRender(opts)
 	logicalName := hermesAllowlistLogicalName
-	path := filepath.Join(filepath.Dir(configPath), hermesAllowlistFileName)
+	path := filepath.Join(filepath.Dir(configPath), HermesAllowlistFileName)
 	backup, backupErr := loadManagedFileBackupForTransform(opts.DataDir, "hermes", logicalName, path)
 	if backupErr != nil && !os.IsNotExist(backupErr) {
 		return backupErr
@@ -4492,7 +4498,8 @@ func removeHermesOwnedApprovals(path, command string, backup *managedFileBackup,
 	// ours is DefenseClaw's hook command for this home, or the same hook
 	// script of this install at the home the account had before a move.
 	ours := func(entryCommand string) bool {
-		return entryCommand == command || hermesRelocatedHookCommand(entryCommand, command)
+		return entryCommand == command || hermesRelocatedHookCommand(entryCommand, command) ||
+			hermesLaunchImageFamilyCommand(entryCommand)
 	}
 	approvals := document["approvals"].([]interface{})
 	kept := make([]interface{}, 0, len(approvals))
@@ -5190,6 +5197,9 @@ func hermesHookEntryOwned(entry interface{}, hookScript string, recognizedComman
 	if _, recognized := recognizedCommands[command]; recognized {
 		return true
 	}
+	if hermesLaunchImageFamilyCommand(command) {
+		return true
+	}
 	if hermesCommandSpellsTheHookScript(command, hookScript) {
 		return true
 	}
@@ -5255,6 +5265,31 @@ scan:
 		}
 	}
 	return true
+}
+
+// hermesLaunchImageFamilyCommand reports the Windows Hermes hook command of
+// any hook image of this standalone install bin (the transition image or a
+// launch image bin\hooks\<16 hex>, GAP-0751), including one whose folder is
+// gone. nativeHookBinaryOwnershipCandidates lists only the launch folders on
+// disk, so the allowlist entry a rolled-back upgrade wrote for its own
+// launch image read as a tampered DefenseClaw command once that rollback
+// removed the folder, and the guardian failed the account on the next
+// upgrade (GAP-0601). The command must still be exactly the one DefenseClaw
+// renders for that path.
+func hermesLaunchImageFamilyCommand(command string) bool {
+	return hermesLaunchImageFamilyCommandFor(command, canonicalStandaloneWindowsHookBinary())
+}
+
+func hermesLaunchImageFamilyCommandFor(command, standalone string) bool {
+	if strings.TrimSpace(standalone) == "" || command == "" {
+		return false
+	}
+	for _, path := range winpath.EnterpriseHookImagePathsIn(strings.ReplaceAll(command, "/", `\`)) {
+		if winpath.SameEnterpriseHookImageFamily(path, standalone) && windowsHermesDirectHookCommand(path) == command {
+			return true
+		}
+	}
+	return false
 }
 
 func hermesRecognizedHookCommands(current string) map[string]struct{} {

@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/shellparse"
 	"mvdan.cc/sh/v3/syntax"
 )
 
@@ -65,7 +66,7 @@ func findGlobTwinStateMutation(facts actionfacts.Facts, request trustedActionReq
 // findGlobQuotedTwin is command with every unquoted pattern word after a
 // find -name/-path style predicate single-quoted; false when there is none.
 func findGlobQuotedTwin(command string) (string, bool) {
-	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(command), "")
+	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(shellparse.Reader(command), "")
 	if err != nil {
 		return "", false
 	}

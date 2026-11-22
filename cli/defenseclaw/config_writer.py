@@ -115,7 +115,15 @@ RESTART_KEYS = (
     "guardrail.protected_files",
     "claw",
     "agent",
-    "routing",
+    "routing.port",
+    "routing.version",
+    "routing.remote",
+    "routing.algorithm",
+    "routing.enabled",
+    "routing.classifier",
+    "routing.models",
+    "routing.signals",
+    "routing.decisions",
     "plugin_dir",
     "deployment_mode",
     "enterprise.profile",
@@ -821,6 +829,23 @@ def _use_go_validator() -> bool:
         return False
 
 
+def _validate_sandbox_floors_candidate(candidate: bytes) -> None:
+    """The sandbox floor refusals (config.validate_sandbox_floors, the Go
+    loader's) for a candidate the Go validator can't check. Without it a
+    value the loader refuses, such as max_silence_after: 30s, was written and
+    the next load failed with a traceback."""
+    from defenseclaw.config import validate_sandbox_floors
+
+    try:
+        raw = yaml.safe_load(candidate)
+    except yaml.YAMLError:
+        return  # load_validate_v8 reports the syntax
+    try:
+        validate_sandbox_floors(raw)
+    except ValueError as exc:
+        raise ConfigWriteError(f"config.yaml change rejected: {exc}") from exc
+
+
 def validate_candidate(target: str, candidate: bytes) -> None:
     """Validate candidate bytes before any write: the Go canonical validator
     (``defenseclaw-gateway config-v8 validate``) on a private sibling copy,
@@ -833,6 +858,7 @@ def validate_candidate(target: str, candidate: bytes) -> None:
         if not _warned_python_only:
             _warned_python_only = True
             _log.warning("defenseclaw-gateway is not installed; config.yaml is validated by the Python checks only")
+        _validate_sandbox_floors_candidate(candidate)
         return
     from defenseclaw.config_inspect import ConfigInspectError, inspect_v8_config
 
@@ -905,6 +931,22 @@ def pack_pin_repair(message: str, *, files_digest: str = "<files digest>") -> st
     )
 
 
+_CASCADE_LANE_KEY = re.compile(r"^guardrail\.cascade\.lanes\.(effects|secret_flow|nonshell)$")
+
+
+def _cascade_lane_refusal(name: str, lane: str, value: Any) -> str:
+    """Why a cascade lane value is refused, as the gateway words it (GAP-0546).
+
+    The effects and secret_flow lanes ship shadow-only in 1.0.10, so "on" is a
+    valid spelling that this release does not offer: say that, not "not in the
+    expected format". Mirrors internal/config/cascade_lanes.go Validate.
+    """
+    allowed = "on, shadow, off" if lane == "nonshell" else "off, shadow"
+    if lane != "nonshell" and isinstance(value, str) and value.strip().lower() == "on":
+        return f'{name} "{value}" is not available in 1.0.10; allowed: {allowed}.'
+    return f"{name} must be one of {allowed}."
+
+
 def plain_error(exc: BaseException, *, value: Any = None, directory: str = "") -> str:
     """:func:`_plain_error_text` plus the advice the gateway check attached (GAP-0099)."""
     text = _plain_error_text(exc, value=value, directory=directory)
@@ -973,6 +1015,11 @@ def _plain_error_text(exc: BaseException, *, value: Any = None, directory: str =
             # A pack folder deleted while the config still selects it blocks every other change too (GAP-0261).
             message += " To stop using the deleted pack: defenseclaw guardrail use-pack default."
         return message
+    lane = _CASCADE_LANE_KEY.match(name)
+    if lane and code in ("enum", "pattern"):
+        # The schema refuses a lane value by its enum (exact values); say why as
+        # the gateway does (GAP-0546).
+        return _cascade_lane_refusal(name, lane.group(1), value)
     if code == "pattern":
         if name == "openshell.trusted_ca_bundle":
             return f"{name} must be an absolute path or start with ~/ (for example, ~/proxy-root-ca.pem)."

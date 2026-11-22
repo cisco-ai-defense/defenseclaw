@@ -40,12 +40,12 @@ import (
 // a directory service.
 var userCache sync.Map // uid string -> cachedOwner
 
-// cachedOwner is the name of a uid's account; retryAt is set when the lookup
-// failed for a reason other than "no such account" (a directory service that
-// does not answer), so the uid is asked again after it.
+// cachedOwner is the name and home of a uid's account; retryAt is set when
+// the lookup failed for a reason other than "no such account" (a directory
+// service that does not answer), so the uid is asked again after it.
 type cachedOwner struct {
-	name    string
-	retryAt time.Time
+	name, home string
+	retryAt    time.Time
 }
 
 const (
@@ -95,11 +95,20 @@ func OwnerNameOfUID(uid int) string { return ownerName(uid, time.Now()) }
 // next event. An event source calls it from its read loop, where a lookup
 // that waits on a directory service (SSSD, Open Directory) would stall the
 // reader and let the kernel drop events.
-func CachedOwnerName(uid int) string {
+func CachedOwnerName(uid int) string { return cachedOwnerOf(uid).name }
+
+// CachedOwnerHome is the home directory the account database records for
+// uid's account (never the process's $HOME), answered like CachedOwnerName:
+// "" at once while a lookup runs in the background.
+func CachedOwnerHome(uid int) string { return cachedOwnerOf(uid).home }
+
+// cachedOwnerOf is the cached account of uid, the zero value while a
+// background lookup fills it.
+func cachedOwnerOf(uid int) cachedOwner {
 	if cached, ok := userCache.Load(strconv.Itoa(uid)); ok {
 		entry := cached.(cachedOwner)
 		if entry.retryAt.IsZero() || time.Now().Before(entry.retryAt) {
-			return entry.name
+			return entry
 		}
 	}
 	if _, busy := ownerFills.LoadOrStore(uid, struct{}{}); !busy {
@@ -108,7 +117,7 @@ func CachedOwnerName(uid int) string {
 			_ = ownerName(uid, time.Now())
 		}()
 	}
-	return ""
+	return cachedOwner{}
 }
 
 // ownerName is the name of the account that holds uid, "" when there is
@@ -128,6 +137,7 @@ func ownerName(uid int, now time.Time) string {
 	switch {
 	case err == nil:
 		entry.name = strings.TrimSpace(account.Name)
+		entry.home = account.Home
 	case !unixidentity.IsNotFound(err):
 		entry.retryAt = now.Add(ownerRetryAfter)
 	}

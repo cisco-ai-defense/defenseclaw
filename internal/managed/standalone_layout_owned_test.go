@@ -52,6 +52,7 @@ func TestStandaloneWindowsOwnFoldersAreTheLayoutRoots(t *testing.T) {
 			programFiles + `\Cisco\DefenseClaw`,
 			programData + `\Cisco\DefenseClaw`,
 			programData + `\Cisco\DefenseClaw-HookRuntime`,
+			programData + `\Cisco\DefenseClaw-RulePacks`,
 			programData + `\Cisco\DefenseClaw-ScannerRuntime`,
 		}
 		slices.Sort(want)

@@ -18,7 +18,9 @@ import (
 // whose probe runs probe, and restores the real share handling after the test.
 func fakeNetworkShare(t *testing.T, prefix string, wait, deadAfter time.Duration, probe func(string)) *atomic.Int64 {
 	t.Helper()
-	oldRoot, oldProbe, oldWalk := networkShareRootOf, probeNetworkShare, networkShareLinkWalk
+	oldRoot, oldProbe, oldWalk, oldLocal := networkShareRootOf, probeNetworkShare, networkShareLinkWalk, networkShareOfThisMachine
+	// The fake shares are this machine's: the gate asks only those (GAP-1074).
+	networkShareOfThisMachine = func(string) bool { return true }
 	oldWait, oldDead := networkShareAnswerWait, networkShareDeadAfter
 	networkShares.mu.Lock()
 	oldProbes := networkShares.probes
@@ -42,13 +44,42 @@ func fakeNetworkShare(t *testing.T, prefix string, wait, deadAfter time.Duration
 	networkShareLinkWalk = true
 	networkShareAnswerWait, networkShareDeadAfter = wait, deadAfter
 	t.Cleanup(func() {
-		networkShareRootOf, probeNetworkShare, networkShareLinkWalk = oldRoot, oldProbe, oldWalk
+		networkShareRootOf, probeNetworkShare, networkShareLinkWalk, networkShareOfThisMachine = oldRoot, oldProbe, oldWalk, oldLocal
 		networkShareAnswerWait, networkShareDeadAfter = oldWait, oldDead
 		networkShares.mu.Lock()
 		networkShares.probes = oldProbes
 		networkShares.mu.Unlock()
 	})
 	return &probes
+}
+
+// silentShareGuard is how long returnsWhileSharesAreSilent lets a read wait
+// for shares that never answer before it makes them answer, so a read that
+// waits for the answer fails its test instead of hanging it.
+const silentShareGuard = time.Minute
+
+// returnsWhileSharesAreSilent runs read on the calling goroutine (its hook
+// call, if any) while every fake share probe waits for answer, and reports
+// whether read came back before the shares answered. A read bounded by its
+// answer wait or by its call's share wait comes back on any box, however
+// loaded; one that waits for the share itself is let go by answer after
+// silentShareGuard and reported (rel-1-0-10:GAP-0586 substrate-1: wall-clock
+// budgets of 400 ms and 1 s failed on a loaded -race box).
+func returnsWhileSharesAreSilent(t *testing.T, answer func(), read func()) bool {
+	t.Helper()
+	done := make(chan struct{})
+	var waited atomic.Bool
+	go func() {
+		select {
+		case <-done:
+		case <-time.After(silentShareGuard):
+			waited.Store(true)
+			answer()
+		}
+	}()
+	read()
+	close(done)
+	return !waited.Load()
 }
 
 // A share that does not answer holds no call past the answer wait, is asked
@@ -140,11 +171,12 @@ func TestLocalPathCostsNoNetworkProbe(t *testing.T) {
 	}
 }
 
-// A burst of ordinary commands that spell a URL (read as a UNC path by the
-// target scan) gets its decisions inside the answer wait while the named
-// host does not answer, the same decisions as when nothing is slow, and a
-// write to the user's authorized_keys in the same burst is still a
-// protected target (rel-1-0-6 GAP-0127, GAP-0129 burst shape).
+// A burst of ordinary commands that spell a URL gets its decisions at once
+// while the named host does not answer, the same decisions as when nothing
+// is slow, and a write to the user's authorized_keys in the same burst is
+// still a protected target (rel-1-0-6 GAP-0127, GAP-0129 burst shape). The
+// target scan reads no URL as a UNC path, so the host is never asked
+// (rel-1-0-10:GAP-0920).
 func TestURLWordsDoNotWaitForTheNamedHostInABurst(t *testing.T) {
 	home := t.TempDir()
 	cwd := filepath.Join(home, "proj")
@@ -199,7 +231,9 @@ func TestURLWordsDoNotWaitForTheNamedHostInABurst(t *testing.T) {
 	if took > 2*time.Second {
 		t.Fatalf("32 calls naming a host that does not answer took %v, want about the 200ms answer wait", took)
 	}
-	if probes.Load() != 1 {
-		t.Fatalf("the share was asked %d times, want once", probes.Load())
+	// A URL is no share path: its host is never asked, so the burst does
+	// not wait on it at all (rel-1-0-10:GAP-0920; it was asked once).
+	if probes.Load() != 0 {
+		t.Fatalf("the URL host was asked as a share %d times, want never", probes.Load())
 	}
 }

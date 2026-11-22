@@ -76,7 +76,9 @@ func HomeResolvedTwin(input Input) (twin Facts, ok bool) {
 		twin.Parse.Dialect != DialectPOSIX || len(twin.Commands) == 0 {
 		return Facts{}, false
 	}
-	return twin, true
+	// Its lists run as sequences: read its paths in the folders of the
+	// action (Facts.withWorkFoldersOf, rel-1-0-10:GAP-0869).
+	return twin.withWorkFoldersOf(original, input.MovedWindowsShellCWD), true
 }
 
 // HomeSpelledTwin returns the analysis of a partial POSIX action with its

@@ -4,7 +4,9 @@
 package gateway
 
 import (
+	"encoding/json"
 	"fmt"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -116,8 +118,12 @@ func TestGAP0146OneStatementBudget(t *testing.T) {
 		for _, n := range forms {
 			commands = append(commands, gap0146Statements(form, n))
 			names = append(names, fmt.Sprintf("%s n=%d", form, n))
-			// A pipeline of n stages has n+1 statements.
-			if n > 128 || form == "pipeline" && n >= 128 {
+			// A pipeline of n stages has n+1 statements. A pipeline of 100
+			// stages is under the budget but past the action analysis bound:
+			// the unknown tier of the pack, which this strict fixture blocks
+			// (rel-1-0-10:GAP-0688, GAP-0826; the five tiers are pinned by
+			// TestGAP0826AnalysisBoundRowsTakeTheUnknownTierOfThePack).
+			if n > 128 || form == "pipeline" && n >= 100 {
 				wants = append(wants, gap0146Want{"block", limit, keys})
 			} else {
 				wants = append(wants, gap0146Want{verdict: "allow"})
@@ -166,7 +172,60 @@ func TestGAP0146BoundedMapOverflowIsTheBudget(t *testing.T) {
 			if row == 0 && managed {
 				return gap0146Want{"block", "ACTION-COMPOUND-LIMIT", "persistence.ssh_authorized_keys_command"}
 			}
+			if row == 0 {
+				// 600 redirects pass the action analysis node bound, the
+				// unknown tier of the pack for any call (rel-1-0-10:GAP-0688):
+				// this strict fixture blocks it per-user too, by the budget
+				// finding, never as a keys mutation.
+				return gap0146Want{"block", "ACTION-COMPOUND-LIMIT", "persistence.ssh_authorized_keys_command"}
+			}
 			return allow
 		},
 		[]string{"600 redirects", "600 touch operands", "3000-line heredoc"})
+}
+
+// TestGAP0826AnalysisBoundRowsTakeTheUnknownTierOfThePack pins the five tiers
+// of the GAP-0146 rows that are under the statement budget but past an
+// action analysis bound (a 100-stage pipeline, 600 redirects of one echo).
+// The bound is a bound-rule cap for any call (rel-1-0-10:GAP-0688, the one
+// bound rule): with no proven finding the answer is the unknown tier of the
+// pack, an alert in default, permissive and managed (default pack) and a
+// block in strict and managed-strict, by ACTION-COMPOUND-LIMIT and never as
+// an SSH keys mutation. A short echo list stays allowed (GAP-0826).
+func TestGAP0826AnalysisBoundRowsTakeTheUnknownTierOfThePack(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the rows are POSIX shell text")
+	}
+	cwd := t.TempDir()
+	var redirects strings.Builder
+	redirects.WriteString("echo hi")
+	for i := 0; i < 600; i++ {
+		fmt.Fprintf(&redirects, " > ordinary/r%d", i)
+	}
+	rows := []struct {
+		name, command string
+		bounded       bool
+	}{
+		{"echo_only n=100", gap0146Statements("echo_only", 100), false},
+		{"pipeline n=100", gap0146Statements("pipeline", 100), true},
+		{"600 redirects", redirects.String(), true},
+	}
+	for _, p := range gap0437Packs {
+		hook := gap0437Server(t, p, "claudecode", "action")
+		for _, row := range rows {
+			out := gap0437Hook(t, hook, cwd, p.name+row.name, row.command)
+			raw, _ := json.Marshal(out)
+			want := "allow"
+			if row.bounded {
+				want = "alert"
+				if p.pack == "strict" {
+					want = "block"
+				}
+			}
+			limited := strings.Contains(string(raw), "ACTION-COMPOUND-LIMIT")
+			if out["action"] != want || limited != row.bounded || strings.Contains(string(raw), "persistence.ssh_authorized_keys_command") {
+				t.Errorf("%s %s: action %v (limit %t), want %s (limit %t): %.300s", p.name, row.name, out["action"], limited, want, row.bounded, raw)
+			}
+		}
+	}
 }

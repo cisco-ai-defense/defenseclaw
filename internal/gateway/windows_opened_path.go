@@ -63,7 +63,7 @@ var windowsAccountWord = regexp.MustCompile(`^\w+$`)
 // such as ::$DATA) is dropped, dot segments are resolved, and an 8.3 short
 // name is expanded. Trailing dots and spaces are dropped as Win32 does, except
 // in a folder named by three or more periods (a valid name, kept), except a
-// trailing space of a folder name (kept, see windowsTrimmedSegment), and except
+// trailing space of a folder name (kept, see actionfacts.WindowsTrimmedName), and except
 // in a path with the exact extended-length prefix \\?\: Win32 does not
 // normalize that one, so a name with trailing dots or spaces there is a file
 // of its own. The forward-slash spelling of that prefix, and every other
@@ -92,7 +92,7 @@ func windowsOpenedPath(spelling string, verbatim bool) (string, bool, error) {
 		}
 		trimmed := name
 		if !verbatim {
-			trimmed = windowsTrimmedSegment(name, index == last)
+			trimmed = actionfacts.WindowsTrimmedName(name, index == last)
 		}
 		switch {
 		case name == "..":
@@ -109,22 +109,6 @@ func windowsOpenedPath(spelling string, verbatim bool) (string, bool, error) {
 		opened, err = expandShortNamesInEvaluation(opened, verbatim)
 	}
 	return opened, true, err
-}
-
-// windowsTrimmedSegment is a path segment as Win32 keeps it. Trailing periods
-// and spaces are removed from the last segment only (a path that ends in a
-// separator has an empty last segment). In any other segment only the periods
-// of a name that ends in a period go, so a trailing space stays part of the
-// folder name (a file below "x \" is not a file below "x"), and a segment of
-// three or more periods is a valid folder name, kept.
-func windowsTrimmedSegment(name string, last bool) string {
-	switch {
-	case last:
-		return strings.TrimRight(name, ". ")
-	case len(name) >= 3 && strings.Trim(name, ".") == "":
-		return name
-	}
-	return strings.TrimRight(name, ".")
 }
 
 // windowsVerbatimOperand reports an operand that, as the caller wrote it, has

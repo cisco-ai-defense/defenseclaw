@@ -592,7 +592,10 @@ CREDENTIALS: tuple[CredentialSpec, ...] = (
     CredentialSpec(
         env_name="OPENCLAW_GATEWAY_TOKEN",
         feature="gateway",
-        description="Auth token for the OpenClaw gateway; auto-detected from ~/.openclaw/openclaw.json",
+        description=(
+            "Token DefenseClaw presents to the OpenClaw gateway WebSocket; auto-detected from "
+            "~/.openclaw/openclaw.json. It is not DefenseClaw's own API token (DEFENSECLAW_GATEWAY_TOKEN)."
+        ),
         required=_openclaw_gateway_token,
         auto_detected=True,
     ),

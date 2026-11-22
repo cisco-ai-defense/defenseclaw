@@ -17,15 +17,11 @@
 package connector
 
 import (
-	"bytes"
 	"encoding/json"
-	"errors"
-	"fmt"
-	"io"
 	"strings"
-)
 
-const antigravityMaxJSONNestingDepth = 64
+	"github.com/defenseclaw/defenseclaw/internal/antigravityargs"
+)
 
 // antigravityProfileDecode implements HookProfile.Decode for Google's
 // Antigravity (`agy`) CLI / IDE. agy emits Claude-Code-derived hook
@@ -150,136 +146,22 @@ func antigravityExtractToolCall(req *HookProfileRequest, payload map[string]inte
 }
 
 // antigravityToolArgsFromRawPayload returns the literal toolCall.args JSON
-// object from the authenticated hook body. It rejects malformed JSON,
-// duplicate JSON object keys, alias collisions, and non-object args. Those
-// cases return nil so ambiguous input can never acquire structured authority
-// from the generic payload-string fallback.
+// object from the authenticated hook body (antigravityargs.ToolCall, which
+// the hook client reads the call through too), or nil for malformed JSON,
+// duplicate keys, alias collisions or non-object args, so ambiguous input
+// can never acquire structured authority from the generic payload-string
+// fallback.
 func antigravityToolArgsFromRawPayload(rawPayload []byte) json.RawMessage {
-	if err := antigravityValidateUniqueJSON(rawPayload); err != nil {
-		return nil
-	}
-	var payload map[string]json.RawMessage
-	if err := json.Unmarshal(rawPayload, &payload); err != nil {
-		return nil
-	}
-	toolCallRaw, ok := antigravityUniqueRawField(payload, "toolCall", "tool_call")
-	if !ok || !antigravityRawJSONObject(toolCallRaw) {
-		return nil
-	}
-	var toolCall map[string]json.RawMessage
-	if err := json.Unmarshal(toolCallRaw, &toolCall); err != nil {
-		return nil
-	}
-	nameRaw, ok := antigravityUniqueRawField(toolCall, "name", "tool_name", "toolName")
+	_, args, ok := antigravityargs.ToolCall(rawPayload)
 	if !ok {
 		return nil
 	}
-	var toolName string
-	if err := json.Unmarshal(nameRaw, &toolName); err != nil || strings.TrimSpace(toolName) == "" {
-		return nil
-	}
-	argsRaw, ok := antigravityUniqueRawField(toolCall,
-		"args", "arguments", "tool_input", "toolInput",
-	)
-	if !ok || !antigravityRawJSONObject(argsRaw) {
-		return nil
-	}
-	return append(json.RawMessage(nil), argsRaw...)
+	return args
 }
 
-func antigravityUniqueRawField(parent map[string]json.RawMessage, keys ...string) (json.RawMessage, bool) {
-	var found json.RawMessage
-	for _, key := range keys {
-		value, ok := parent[key]
-		if !ok {
-			continue
-		}
-		if found != nil {
-			return nil, false
-		}
-		found = value
-	}
-	return found, found != nil
-}
-
-func antigravityRawJSONObject(raw json.RawMessage) bool {
-	trimmed := bytes.TrimSpace(raw)
-	return len(trimmed) >= 2 && trimmed[0] == '{' && trimmed[len(trimmed)-1] == '}'
-}
-
+// antigravityValidateUniqueJSON is antigravityargs.ValidateUniqueJSON.
 func antigravityValidateUniqueJSON(raw []byte) error {
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	if err := antigravityConsumeUniqueJSONValue(dec, 0); err != nil {
-		return err
-	}
-	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
-		if err == nil {
-			return fmt.Errorf("multiple JSON values")
-		}
-		return err
-	}
-	return nil
-}
-
-func antigravityConsumeUniqueJSONValue(dec *json.Decoder, depth int) error {
-	token, err := dec.Token()
-	if err != nil {
-		return err
-	}
-	delim, ok := token.(json.Delim)
-	if !ok {
-		return nil
-	}
-	if depth >= antigravityMaxJSONNestingDepth {
-		return fmt.Errorf(
-			"JSON nesting exceeds maximum depth of %d",
-			antigravityMaxJSONNestingDepth,
-		)
-	}
-	switch delim {
-	case '{':
-		seen := make(map[string]struct{})
-		for dec.More() {
-			keyToken, err := dec.Token()
-			if err != nil {
-				return err
-			}
-			key, ok := keyToken.(string)
-			if !ok {
-				return fmt.Errorf("object key is not a string")
-			}
-			if _, duplicate := seen[key]; duplicate {
-				return fmt.Errorf("duplicate JSON field %q", key)
-			}
-			seen[key] = struct{}{}
-			if err := antigravityConsumeUniqueJSONValue(dec, depth+1); err != nil {
-				return err
-			}
-		}
-		end, err := dec.Token()
-		if err != nil {
-			return err
-		}
-		if end != json.Delim('}') {
-			return fmt.Errorf("invalid JSON object terminator")
-		}
-	case '[':
-		for dec.More() {
-			if err := antigravityConsumeUniqueJSONValue(dec, depth+1); err != nil {
-				return err
-			}
-		}
-		end, err := dec.Token()
-		if err != nil {
-			return err
-		}
-		if end != json.Delim(']') {
-			return fmt.Errorf("invalid JSON array terminator")
-		}
-	default:
-		return fmt.Errorf("unexpected JSON delimiter %q", delim)
-	}
-	return nil
+	return antigravityargs.ValidateUniqueJSON(raw)
 }
 
 // antigravityObject extracts the first key that resolves to a JSON

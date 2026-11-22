@@ -34,12 +34,8 @@ func dotDotFixture(t *testing.T) (home, cwd, other string) {
 			t.Fatal(err)
 		}
 	}
-	if err := os.Symlink(protected, filepath.Join(other, "status")); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(filepath.Join(other, "child"), filepath.Join(cwd, "jump")); err != nil {
-		t.Fatal(err)
-	}
+	testSymlink(t, protected, filepath.Join(other, "status"))
+	testSymlink(t, filepath.Join(other, "child"), filepath.Join(cwd, "jump"))
 	return home, cwd, other
 }
 

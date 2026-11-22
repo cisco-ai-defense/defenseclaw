@@ -36,6 +36,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/observability/router"
+	"github.com/defenseclaw/defenseclaw/internal/sandboxruntime"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 	"github.com/google/uuid"
 	"golang.org/x/net/idna"
@@ -103,12 +104,17 @@ func (phase SandboxPhase) Active() bool {
 
 // Registered values of the enumerated correlation.sandbox attributes.
 const (
-	SandboxRuntimeOpenShell = "openshell"
+	SandboxRuntimeOpenShell = sandboxruntime.OpenShell
+	SandboxRuntimeSubstrate = sandboxruntime.Substrate
 
+	// OpenShell gateway compute drivers.
 	SandboxDriverDocker = "docker"
 	SandboxDriverPodman = "podman"
 	SandboxDriverVM     = "vm"
 	SandboxDriverK8s    = "k8s"
+	// Agent Substrate sandbox classes.
+	SandboxDriverGVisor  = "gvisor"
+	SandboxDriverMicroVM = "microvm"
 
 	SandboxProfileOpen     = "open"
 	SandboxProfileBalanced = "balanced"
@@ -116,6 +122,15 @@ const (
 
 	SandboxWorkdirMount = "mount"
 	SandboxWorkdirCopy  = "copy"
+)
+
+// SandboxRuntimes and SandboxDrivers are the registered values of
+// defenseclaw.sandbox.runtime and defenseclaw.sandbox.driver.
+var (
+	SandboxRuntimes = []string{SandboxRuntimeOpenShell, SandboxRuntimeSubstrate}
+	SandboxDrivers  = []string{
+		SandboxDriverDocker, SandboxDriverPodman, SandboxDriverVM, SandboxDriverK8s, SandboxDriverGVisor, SandboxDriverMicroVM,
+	}
 )
 
 // SandboxDriverReasons are the registered values of
@@ -137,9 +152,10 @@ type SandboxIdentity struct {
 	// the record connector and is the only identity-like label on sandbox
 	// metrics (defenseclaw.connector.source).
 	Connector string
-	// Runtime is SandboxRuntimeOpenShell.
+	// Runtime is SandboxRuntimeOpenShell or SandboxRuntimeSubstrate.
 	Runtime string
-	// Driver is the OpenShell compute driver (SandboxDriver*).
+	// Driver is the OpenShell compute driver or the Agent Substrate sandbox
+	// class (SandboxDrivers).
 	Driver string
 	// DriverReason is why a managed sandbox runs on Driver
 	// (SandboxDriverReasons: configured, kvm_available, or the KVM probe's
@@ -2031,7 +2047,7 @@ func (identity SandboxIdentity) ManagedV8() SandboxManagedV8 {
 		return SandboxManagedV8{}
 	}
 	fields := sandboxV8FieldsFor(identity)
-	if !containsSandboxValue([]string{SandboxDriverDocker, SandboxDriverPodman, SandboxDriverVM, SandboxDriverK8s}, identity.Driver) {
+	if !containsSandboxValue(SandboxDrivers, identity.Driver) {
 		fields.driver = observability.Absent[string]()
 	}
 	return SandboxManagedV8{
@@ -2075,8 +2091,8 @@ func (identity SandboxIdentity) validate(requireName bool) error {
 		field, value string
 		allowed      []string
 	}{
-		{"runtime", identity.Runtime, []string{SandboxRuntimeOpenShell}},
-		{"driver", identity.Driver, []string{SandboxDriverDocker, SandboxDriverPodman, SandboxDriverVM, SandboxDriverK8s}},
+		{"runtime", identity.Runtime, SandboxRuntimes},
+		{"driver", identity.Driver, SandboxDrivers},
 		{"driver reason", identity.DriverReason, SandboxDriverReasons},
 		{"profile", identity.Profile, []string{SandboxProfileOpen, SandboxProfileBalanced, SandboxProfileStrict}},
 		{"workdir mode", identity.WorkdirMode, []string{SandboxWorkdirMount, SandboxWorkdirCopy}},

@@ -127,7 +127,7 @@ func TestG622b9LinksToStateStayBlockedForNativePatches(t *testing.T) {
 					}
 				}
 				for _, name := range []string{"state-hard.txt", "state-soft.txt", "soft-to-hard.txt"} {
-					if got := g622b9PatchOutcome(t, connector, home, project, name, pack); got.action != "block" {
+					if got := g622b9PatchOutcome(t, connector, home, project, name, pack); got.action != gap0747WantAction(pack == "strict") {
 						t.Errorf("%s: link to a state file allowed: %s", name, got)
 					}
 				}

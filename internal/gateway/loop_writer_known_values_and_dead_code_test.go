@@ -69,7 +69,7 @@ func TestLoopWriterJudgesKnownValuesAndReachableCode(t *testing.T) {
 							want = row.protected || row.strict
 						}
 						got := postSelfProtectionPackCell(t, home, project, connector, pack, managed, false, row.command)
-						blocked := strings.HasPrefix(got, `{"action":"block"`)
+						blocked := gap0747HookBlocked(got, pack)
 						if blocked != want || want && !strings.Contains(got, "tamper.detector_state_write") {
 							t.Errorf("%s managed=%t pack=%q: %s = %.240s; want block=%t", connector, managed, pack, row.command, got, want)
 						}

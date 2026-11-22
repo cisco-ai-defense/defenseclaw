@@ -190,6 +190,86 @@ func TestClaudeCodeManagedGuardLauncherReadsTheRenderedManagedForm(t *testing.T)
 	}
 }
 
+// managedWrapperEchoes returns the texts the managed wrapper's echo commands
+// print, in order: the missing-guard text, then the guard-does-not-run text.
+func managedWrapperEchoes(args []string) []string {
+	var texts []string
+	for i := 0; i < len(args); i++ {
+		if args[i] != "echo" {
+			continue
+		}
+		end := slices.Index(args[i:], "1>&2")
+		if end < 0 {
+			return append(texts, "unterminated echo")
+		}
+		texts = append(texts, strings.Join(args[i+1:i+end], " "))
+		i += end
+	}
+	return texts
+}
+
+// Claude Code shows the whole registered command beside the hook's own answer
+// when it reports a block or a hook error, so both unavailable texts of the
+// managed wrapper are on screen whichever branch ran. Each must name its own
+// condition: a newly signed-in account whose credentials were not accepted
+// yet read that the guard was missing and was sent to an administrator repair
+// of a file that was there (rel-1-0-10 GAP-0119). The 1.0.9 form keeps
+// reading as DefenseClaw's managed guard until Setup renders it again.
+func TestManagedClaudeCodeGuardTextsNameTheirOwnCondition(t *testing.T) {
+	launcher := `C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-hook.exe`
+	hookArgs := []string{"hook", "--connector", "claudecode", "--enterprise-managed"}
+	wantMissing := "If defenseclaw-hook-guard.exe is missing from the install folder: " +
+		"DefenseClaw cannot check Claude Code until an administrator runs " +
+		"DefenseClawSetup-Enterprise-Standalone-x64.exe /repair to restore it. " +
+		"Setup is not installed on this computer: use the copy in your MDM package or the release download."
+	wantStart := "If defenseclaw-hook-guard.exe is in the install folder but does not run: " +
+		"DefenseClaw cannot check Claude Code until an administrator runs " +
+		"DefenseClawSetup-Enterprise-Standalone-x64.exe /repair."
+	old := []string{
+		"DefenseClaw could not start its Claude Code hook guard defenseclaw-hook-guard.exe " +
+			"because it is missing from the install folder. Run DefenseClawSetup-Enterprise-Standalone-x64.exe /repair " +
+			"as an administrator to restore it. Setup is not installed on this computer: use the copy in your MDM package or the release download.",
+		"DefenseClaw could not start its Claude Code hook guard. Run the DefenseClaw installer again to repair it.",
+	}
+	for _, event := range []string{"UserPromptSubmit", "SessionStart", "PreToolUse", "Stop"} {
+		command, args := claudeManagedGuardWrapperInvocation(event, launcher, hookArgs)
+		echoes := managedWrapperEchoes(args)
+		if len(echoes) != 2 || echoes[0] != wantMissing || echoes[1] != wantStart {
+			t.Fatalf("%s: managed wrapper texts = %q, want [%q %q]", event, echoes, wantMissing, wantStart)
+		}
+		joined := strings.Join(args, " ")
+		if strings.Count(joined, "missing from the install folder") != 1 || strings.Count(joined, "to restore it") != 1 ||
+			strings.Contains(joined, "could not start its Claude Code hook guard") {
+			t.Fatalf("%s: the registered command states a missing guard outside its own condition: %s", event, joined)
+		}
+		// The 1.0.9 form: the same words with its two texts.
+		first := slices.Index(args, "echo") + 1
+		second := slices.Index(args[first:], "echo") + first + 1
+		var legacy []string
+		legacy = append(legacy, args[:first]...)
+		legacy = append(legacy, strings.Fields(old[0])...)
+		legacy = append(legacy, args[first+len(strings.Fields(wantMissing)):second]...)
+		legacy = append(legacy, strings.Fields(old[1])...)
+		legacy = append(legacy, args[second+len(strings.Fields(wantStart)):]...)
+		if managedWrapperEchoes(legacy)[0] != old[0] || managedWrapperEchoes(legacy)[1] != old[1] {
+			t.Fatalf("%s: building the 1.0.9 form failed: %q", event, managedWrapperEchoes(legacy))
+		}
+		raw := make([]interface{}, len(legacy))
+		for i, arg := range legacy {
+			raw[i] = arg
+		}
+		if got, gotArgs, ok := ClaudeCodeManagedGuardLauncher(map[string]interface{}{"type": "command", "command": command, "args": raw}); !ok ||
+			got != launcher || !slices.Equal(gotArgs, hookArgs) {
+			t.Fatalf("%s: the 1.0.9 managed form is no longer read as the managed guard", event)
+		}
+		edited := slices.Clone(raw)
+		edited[slices.Index(legacy, "administrator")] = "admin"
+		if _, _, ok := ClaudeCodeManagedGuardLauncher(map[string]interface{}{"type": "command", "command": command, "args": edited}); ok {
+			t.Fatalf("%s: an edited 1.0.9 text was read as the managed guard", event)
+		}
+	}
+}
+
 func TestManagedClaudeCodeSetupPublishesAvailabilityParent(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("Windows managed registration")

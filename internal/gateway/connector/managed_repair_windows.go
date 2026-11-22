@@ -230,6 +230,14 @@ func windowsManagedPathDescriptorModel(path string, directory bool) (managedDesc
 // reparse points, the wrong object type and, for files, more than one link:
 // those stay structural failures that no repair may touch.
 func openWindowsManagedRepairHandle(path string, directory bool, access uint32) (windows.Handle, error) {
+	return openWindowsManagedRepairHandleShared(path, directory, access,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE)
+}
+
+// openWindowsManagedRepairHandleShared is openWindowsManagedRepairHandle with
+// the caller's share mode. Leaving out FILE_SHARE_DELETE pins the object: it
+// cannot be renamed, deleted or replaced while the handle is held.
+func openWindowsManagedRepairHandleShared(path string, directory bool, access, share uint32) (windows.Handle, error) {
 	extended, err := winpath.Extended(path)
 	if err != nil {
 		return 0, err
@@ -241,7 +249,7 @@ func openWindowsManagedRepairHandle(path string, directory bool, access uint32) 
 	handle, err := windows.CreateFile(
 		ptr,
 		access|windows.FILE_READ_ATTRIBUTES,
-		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		share,
 		nil,
 		windows.OPEN_EXISTING,
 		windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OPEN_REPARSE_POINT,

@@ -133,6 +133,12 @@ type hookFailureLine struct {
 	// blocked is logged with the connector's fail mode open and outcome
 	// fail_closed: it did not run.
 	Outcome string `json:"outcome"`
+	// SemanticEventID, LogicalEventID and ConnectorInstanceID name the
+	// correlation event of a gateway line's call (1.0.10): the report row
+	// pairs with the call's hook_decision record. Empty in hook lines.
+	SemanticEventID     string `json:"semantic_event_id"`
+	LogicalEventID      string `json:"logical_event_id"`
+	ConnectorInstanceID string `json:"connector_instance_id"`
 }
 
 // ranUnchecked reports whether the logged call went ahead without a check.
@@ -412,6 +418,7 @@ func reportHookFailureCallsIn(logDir string, logger *audit.Logger, now time.Time
 	written, pending := 0, false
 	batch := make([]audit.HookFailureAuditRow, 0, hookFailureBatchSize)
 	ends := make([]int64, 0, hookFailureBatchSize)
+	entries := make([]hookFailureLine, 0, hookFailureBatchSize)
 	flush := func() error {
 		if len(batch) == 0 {
 			return nil
@@ -420,8 +427,13 @@ func reportHookFailureCallsIn(logDir string, logger *audit.Logger, now time.Time
 		if settled > 0 {
 			read.start.AuditOffset = ends[settled-1]
 			written += settled
+			// Counted once: the calls whose rows are settled, which a later
+			// run skips (AuditOffset).
+			for _, entry := range entries[:settled] {
+				noteHookFailureCapacity(entry)
+			}
 		}
-		batch, ends = batch[:0], ends[:0]
+		batch, ends, entries = batch[:0], ends[:0], entries[:0]
 		if err != nil {
 			read.start.AuditPending = true
 			if read.start.AuditOffset < read.start.Offset {
@@ -445,7 +457,9 @@ func reportHookFailureCallsIn(logDir string, logger *audit.Logger, now time.Time
 			break
 		}
 		env := audit.CorrelationEnvelope{Connector: call.entry.Connector,
-			SessionID: call.entry.SessionID, RequestID: call.entry.CallID}
+			SessionID: call.entry.SessionID, RequestID: call.entry.CallID,
+			SemanticEventID: call.entry.SemanticEventID, LogicalEventID: call.entry.LogicalEventID,
+			ConnectorInstanceID: call.entry.ConnectorInstanceID}
 		if call.blocked || hookFailureOwnsToolCall(call.entry) {
 			// A block, and the allow a hook gave a pre-execution event, are the
 			// record of that tool call: the row names its tool id, so the call
@@ -457,6 +471,7 @@ func reportHookFailureCallsIn(logDir string, logger *audit.Logger, now time.Time
 			Envelope: env, Action: action, Target: target, Details: details, Severity: severity,
 		})
 		ends = append(ends, call.end)
+		entries = append(entries, call.entry)
 		if len(batch) == hookFailureBatchSize {
 			if err := flush(); err != nil {
 				return err
@@ -821,4 +836,25 @@ func writeHookFailuresReported(logDir string, state hookFailuresReported) error 
 		return err
 	}
 	return nil
+}
+
+// noteHookFailureCapacity counts a hook-failure line of a call that ended
+// at its answer budget in the hook capacity counter (DESIGN 18): a late
+// allow (fail_open) or the deny the hook gave itself (fail_closed). Other
+// failures (an unreachable or stopped gateway, a refusal) and the lines the
+// gateway writes are not capacity.
+func noteHookFailureCapacity(entry hookFailureLine) {
+	if strings.TrimSpace(entry.Reason) != hookexec.PerUserGatewayNoAnswerReason {
+		return
+	}
+	at, err := time.Parse(time.RFC3339Nano, entry.TS)
+	if err != nil {
+		return
+	}
+	switch strings.TrimSpace(entry.Outcome) {
+	case "fail_open":
+		hookCapacity.note(hookCapacityLateAllow, at, 1)
+	case "fail_closed":
+		hookCapacity.note(hookCapacityDeadlineDeny, at, 1)
+	}
 }

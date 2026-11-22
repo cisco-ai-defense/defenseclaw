@@ -89,6 +89,12 @@ fi`,
 			want:    true,
 		},
 		{
+			name:    "windefend native stop",
+			command: `sc.exe stop WinDefend`,
+			dialect: DialectPowerShell,
+			want:    true,
+		},
+		{
 			name:    "generic powershell service",
 			command: "Stop-Service -Name #{service_name}\nRemove-Service -Name #{service_name}",
 			dialect: DialectPowerShell,
@@ -115,8 +121,50 @@ fi`,
 			}
 		})
 	}
-	if accepted != 7 {
-		t.Fatalf("accepted source candidates=%d want=7", accepted)
+	if accepted != 8 {
+		t.Fatalf("accepted source candidates=%d want=8", accepted)
+	}
+}
+
+func TestEndpointSecurityPowerShellCmdReader(t *testing.T) {
+	input := Input{Tool: "shell", Command: `cmd /c sc stop WinDefend`, CWD: `C:\repo`, DialectHint: DialectPowerShell}
+	facts := Analyze(input)
+	if facts.Authoritative() {
+		t.Fatal("the PowerShell reading of cmd /c is expected to be partial")
+	}
+	readings := HostScriptReadings(input, facts, 0, false)
+	for _, twin := range readings.Twins {
+		if twin.DialectHint == DialectCMD && ExactEndpointSecurityProductDisable(Analyze(twin)) {
+			return
+		}
+	}
+	t.Fatal("the shared command reader lost the exact CMD service call")
+}
+
+// TestWinDefendSequenceUnproved pins which calls leave a WinDefend stop to
+// the closed sequence proof (rel-1-0-10:GAP-1194).
+func TestWinDefendSequenceUnproved(t *testing.T) {
+	cases := []struct {
+		name, command      string
+		dialect            Dialect
+		unproved, stopOnly bool
+	}{
+		{name: "missing query", command: "sc stop WinDefend\nsc config WinDefend start=disabled", dialect: DialectCMD, unproved: true},
+		{name: "extra command", command: "sc stop WinDefend\nsc config WinDefend start=disabled\nwhoami\nsc query WinDefend", dialect: DialectCMD, unproved: true},
+		{name: "full sequence", command: "sc stop WinDefend\nsc config WinDefend start=disabled\nsc query WinDefend", dialect: DialectCMD},
+		{name: "lone stop", command: `sc.exe stop WinDefend`, dialect: DialectPowerShell, stopOnly: true},
+		{name: "sysmon then stop", command: `sysmon.exe -u; sc.exe stop WinDefend`, dialect: DialectPowerShell},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			facts := Analyze(Input{Tool: "shell", Command: tc.command, CWD: `C:\repo`, DialectHint: tc.dialect})
+			if got := WinDefendSequenceUnproved(facts); got != tc.unproved {
+				t.Errorf("WinDefendSequenceUnproved=%t want %t", got, tc.unproved)
+			}
+			if got := ExactWinDefendSingleStep(facts); got != tc.stopOnly {
+				t.Errorf("ExactWinDefendSingleStep=%t want %t", got, tc.stopOnly)
+			}
+		})
 	}
 }
 
@@ -161,7 +209,8 @@ func TestExactEndpointSecurityProductDisableHardNegatives(t *testing.T) {
 		{name: "mdatp extra option", command: `sudo mdatp config real-time-protection --value disabled --verbose`, dialect: DialectPOSIX},
 		{name: "mdatp dynamic value", command: `sudo mdatp config real-time-protection --value "$STATE"`, dialect: DialectPOSIX},
 		{name: "mdatp conditional", command: `test -f /tmp/maintenance && sudo mdatp config real-time-protection --value disabled`, dialect: DialectPOSIX},
-		{name: "windefend stop only", command: `sc stop WinDefend`, dialect: DialectCMD},
+		{name: "powershell sc alias", command: `sc stop WinDefend`, dialect: DialectPowerShell},
+		{name: "windefend query only", command: `sc.exe query WinDefend`, dialect: DialectPowerShell},
 		{name: "windefend missing query", command: "sc stop WinDefend\nsc config WinDefend start=disabled", dialect: DialectCMD},
 		{name: "windefend restore", command: "sc stop WinDefend\nsc config WinDefend start=auto\nsc query WinDefend", dialect: DialectCMD},
 		{name: "windefend extra command", command: "sc stop WinDefend\nsc config WinDefend start=disabled\nwhoami\nsc query WinDefend", dialect: DialectCMD},

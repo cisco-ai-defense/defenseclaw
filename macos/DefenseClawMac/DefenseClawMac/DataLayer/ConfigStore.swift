@@ -37,7 +37,11 @@ struct DefenseClawConfig: Sendable {
     var connectorDisabled: Set<String> = []
     /// claw.mode with the runtime loader's "openclaw" default — the drift
     /// notice's "configured" side (distinct from connectorMode's chain).
-    var clawMode = "openclaw"
+    var clawMode = ""                         // claw.mode (config.load defaults it to "openclaw")
+    /// `_mark_openclaw_not_installed` (runtime 1.0.7, GAP-0568): the loader
+    /// records that a claw.mode which only implies OpenClaw has no OpenClaw
+    /// behind it, so `hasConnectorConfigured` names no connector for it.
+    var openclawNotInstalled = false
     /// Non-empty when guardrail.connectors exists but failed to parse — the
     /// TUI's roster-degraded error notice.
     var rosterError = ""
@@ -63,6 +67,65 @@ struct DefenseClawConfig: Sendable {
     var registrySources: [RegistrySourceConfig] = []
     var registryRequiredByType: [String: Bool] = [:]
     var raw: YAMLNode = .mapping([:])
+
+    /// openclaw_presence.openclaw_only_implied: nothing but claw.mode (its
+    /// loader default, or a leftover of it) names OpenClaw.
+    var openclawOnlyImplied: Bool {
+        if !Self.normalizeConnector(raw["guardrail.connector"]?.string).isEmpty { return false }
+        if connectors.contains(where: { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) { return false }
+        return clawMode.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "openclaw"
+    }
+
+    /// Config.has_connector_configured(): the roster or guardrail.connector
+    /// selects one; a claw.mode that only implies an OpenClaw this machine
+    /// does not have selects none; otherwise any claw.mode does.
+    var hasConnectorConfigured: Bool {
+        if connectors.contains(where: { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })
+            || !Self.normalizeConnector(raw["guardrail.connector"]?.string).isEmpty {
+            return true
+        }
+        if openclawNotInstalled && openclawOnlyImplied { return false }
+        return !clawMode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    /// The TUI's claw_mode: "" when the config names no connector, else
+    /// claw.mode with the loader default — the drift notice's "configured" side.
+    var displayClawMode: String { hasConnectorConfigured ? clawMode : "" }
+
+    /// config.active_connector() (runtime 1.0.7): guardrail.connector →
+    /// the roster (claw.mode when it is listed, else the first sorted name)
+    /// → claw.mode, each trimmed and lowercased (connector_paths.normalize).
+    /// "" when nothing selects a connector, so callers never invent one.
+    var activeConnector: String {
+        guard hasConnectorConfigured else { return "" }
+        let explicit = Self.normalizeConnector(raw["guardrail.connector"]?.string)
+        if !explicit.isEmpty { return explicit }
+        let roster = Set(connectors.map(Self.normalizeConnector).filter { !$0.isEmpty }).sorted()
+        if let first = roster.first {
+            let mode = Self.normalizeConnector(clawMode)
+            return roster.contains(mode) ? mode : first
+        }
+        return Self.normalizeConnector(clawMode)
+    }
+
+    /// connector_paths.normalize: trimmed, lowercased, claude-code aliases folded.
+    static func normalizeConnector(_ value: String?) -> String {
+        let name = (value ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return ["claude-code", "claude_code"].contains(name) ? "claudecode" : name
+    }
+
+    /// GuardrailConfig.effective_mode(connector): the roster entry's own mode,
+    /// else guardrail.mode, else "observe". The connector wizard seeds its
+    /// Guardrail mode from this (TUI setup.py), so an untouched apply keeps
+    /// the connector's live posture instead of downgrading it to observe.
+    func effectiveGuardrailMode(for connector: String) -> String {
+        let key = Self.normalizeConnector(connector)
+        let override = connectorModes.first { Self.normalizeConnector($0.key) == key }?.value
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !override.isEmpty { return override }
+        let global = (guardrailMode ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        return global.isEmpty ? "observe" : global
+    }
 
     struct RegistrySourceConfig: Sendable {
         var id: String
@@ -963,19 +1026,23 @@ actor ConfigStore {
         return out
     }
 
-    /// Upstream precedence ladder (config.py::resolved_token):
+    /// Upstream precedence ladder (config.py::resolved_token, config.go ResolvedToken):
     /// 1. env var named by gateway.token_env  2. DEFENSECLAW_GATEWAY_TOKEN
-    /// 3. OPENCLAW_GATEWAY_TOKEN              4. literal gateway.token
+    /// 3. literal gateway.token
+    /// OPENCLAW_GATEWAY_TOKEN is the OpenClaw WebSocket credential, never the
+    /// DefenseClaw API token: a token_env naming it is skipped, and so is any
+    /// value equal to it (a 1.0.9 install saved the OpenClaw token as both).
+    /// Every rung skips SecretRef text (runtime 1.0.7, GatewayTokenLadder).
     private func resolveToken(root: YAMLNode, dotenv: [String: String]) -> String? {
-        func env(_ key: String) -> String? {
-            if let v = ProcessInfo.processInfo.environment[key], !v.isEmpty { return v }
+        let processEnvironment = ProcessInfo.processInfo.environment
+        return GatewayTokenLadder.resolve(
+            tokenEnvName: root["gateway.token_env"]?.string,
+            literal: root["gateway.token"]?.string
+        ) { key in
+            if let v = processEnvironment[key], !v.isEmpty { return v }
             if let v = dotenv[key], !v.isEmpty { return v }
             return nil
         }
-        if let name = root["gateway.token_env"]?.string, let v = env(name) { return v }
-        if let v = env("DEFENSECLAW_GATEWAY_TOKEN") { return v }
-        if let v = env("OPENCLAW_GATEWAY_TOKEN") { return v }
-        return root["gateway.token"]?.string
     }
 
     @discardableResult
@@ -1021,7 +1088,9 @@ actor ConfigStore {
         c.llmProvider = root["llm.provider"]?.string ?? root["inspect_llm.provider"]?.string
         c.llmModel = root["llm.model"]?.string ?? root["inspect_llm.model"]?.string
         c.aiDefenseEndpoint = root["cisco_ai_defense.endpoint"]?.string
-        c.clawMode = root["claw.mode"]?.string ?? "openclaw"
+        // config.load: a missing claw.mode is "openclaw"; an explicitly empty one
+        // (what setup remove persists) stays empty and names no connector.
+        c.clawMode = root["claw.mode"] == nil ? "openclaw" : (root["claw.mode"]?.string ?? "")
         // Multi-connector roster (guardrail.connectors: {codex: {...}, ...}),
         // plus each connector's mode and rule pack for the Overview table.
         if root["guardrail.connectors"] != nil, root["guardrail.connectors"]?.mapping == nil {
@@ -1042,6 +1111,16 @@ actor ConfigStore {
                     c.connectorDisabled.insert(name)
                 }
             }
+        }
+        // config.load → _mark_openclaw_not_installed (GAP-0568): with a loopback
+        // gateway and no fleet link, a claw.mode that only implies OpenClaw
+        // configures nothing when OpenClaw is not on this machine.
+        if !OpenClawPresence.isManagedEnterprise(root["deployment_mode"]?.string),
+           !OpenClawPresence.fleetLinkConfigured(fleetMode: root["gateway.fleet_mode"]?.string, host: root["gateway.host"]?.string),
+           c.openclawOnlyImplied {
+            c.openclawNotInstalled = !OpenClawPresence.installed(
+                configFile: root["claw.config_file"]?.string, homeDir: root["claw.home_dir"]?.string
+            )
         }
         if let sources = root["registries.sources"]?.sequence ?? root["registries"]?.sequence {
             var parsedSources: [DefenseClawConfig.RegistrySourceConfig] = []
@@ -1072,5 +1151,130 @@ actor ConfigStore {
         }
         config = c
         return c
+    }
+}
+
+/// The gateway token precedence ladder (runtime config.py::resolved_token),
+/// pure so the SecretRef rule is testable without a filesystem.
+enum GatewayTokenLadder {
+    /// True for the text of a SecretRef object saved as if it were a token:
+    /// a quoted "source" key followed by a colon inside braces — the Python
+    /// repr and the JSON form, any key order (connector_paths.is_secret_ref_text,
+    /// envvars.IsSecretRefText in Go). DefenseClaw 1.0.5 and 1.0.6 wrote
+    /// `OPENCLAW_GATEWAY_TOKEN={'source': ...}` to ~/.defenseclaw/.env before
+    /// init failed on a SecretRef (runtime issue 1404); that text is never a
+    /// token, and every gateway token reader ignores it.
+    static func isSecretRefText(_ value: String) -> Bool {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.hasPrefix("{"), trimmed.hasSuffix("}"),
+              let pattern = try? NSRegularExpression(pattern: #"^\{.*["']source["']\s*:.*\}$"#) else { return false }
+        return pattern.firstMatch(in: trimmed, range: NSRange(trimmed.startIndex..., in: trimmed)) != nil
+    }
+
+    /// The OpenClaw gateway credential name (connectors.openclaw WebSocket only).
+    static let openClawGatewayTokenEnv = "OPENCLAW_GATEWAY_TOKEN"
+
+    /// `lookup` answers one environment name (process environment, then
+    /// .env). Returns nil when no usable token is reachable. The OpenClaw
+    /// gateway credential is never a rung: a gateway.token_env naming it is
+    /// skipped, and any value equal to it is skipped (config.go ResolvedToken).
+    static func resolve(tokenEnvName: String?, literal: String?, lookup: (String) -> String?) -> String? {
+        let openClawToken = lookup(openClawGatewayTokenEnv).flatMap { $0.isEmpty ? nil : $0 }
+        func usable(_ value: String?) -> String? {
+            guard let value, !value.isEmpty, !isSecretRefText(value) else { return nil }
+            if let openClawToken, openClawToken == value { return nil }
+            return value
+        }
+        for name in [tokenEnvName ?? "", "DEFENSECLAW_GATEWAY_TOKEN"] where !name.isEmpty && name != openClawGatewayTokenEnv {
+            if let value = usable(lookup(name)) { return value }
+        }
+        return usable(literal)
+    }
+}
+
+/// openclaw_presence.py (runtime 1.0.7): whether an OpenClaw connector implied
+/// by claw.mode has an OpenClaw behind it. The gateway reports the fleet
+/// uplink off ("OpenClaw is not installed") for a loopback install whose only
+/// OpenClaw marker is the claw.mode default; the CLI and TUI then name no
+/// connector. Keep the checks, the openclaw.json candidates and the binary
+/// locations identical to that module.
+enum OpenClawPresence {
+    static func isManagedEnterprise(_ deploymentMode: String?) -> Bool {
+        (deploymentMode ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "managed_enterprise"
+    }
+
+    /// isLoopbackGatewayHost (internal/gateway/sidecar.go): empty, localhost,
+    /// or a loopback IP (optionally bracketed).
+    static func isLoopbackHost(_ host: String?) -> Bool {
+        var h = (host ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if h.isEmpty || h == "localhost" { return true }
+        if h.count >= 2, h.hasPrefix("["), h.hasSuffix("]") { h = String(h.dropFirst().dropLast()) }
+        if h.contains(":") {
+            // IPv6 loopback in its short and expanded spellings.
+            let groups = h.split(separator: ":", omittingEmptySubsequences: false)
+            if groups.count > 8 { return false }
+            let expanded = h == "::1" ? "0:0:0:0:0:0:0:1" : h
+            return expanded.split(separator: ":").allSatisfy { UInt16($0, radix: 16) != nil }
+                && expanded.split(separator: ":").count == 8
+                && expanded.split(separator: ":").dropLast().allSatisfy { UInt16($0, radix: 16) == 0 }
+                && UInt16(expanded.split(separator: ":").last ?? "", radix: 16) == 1
+        }
+        let octets = h.split(separator: ".", omittingEmptySubsequences: false).map { UInt8($0) }
+        guard octets.count == 4, octets.allSatisfy({ $0 != nil }) else { return false }
+        return octets[0] == 127
+    }
+
+    /// openclaw_fleet_link_configured: a remote gateway host or an enabled
+    /// fleet mode keeps OpenClaw; "disabled"/"off"/"false"/"0" never links.
+    static func fleetLinkConfigured(fleetMode: String?, host: String?) -> Bool {
+        let mode = (fleetMode ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if ["disabled", "off", "false", "0"].contains(mode) { return false }
+        return !["", "auto"].contains(mode) || !isLoopbackHost(host)
+    }
+
+    /// Config.OpenClawConfigCandidates: claw.config_file and
+    /// <claw.home_dir>/openclaw.json (a leading "~/" expanded), deduplicated,
+    /// with ~/.openclaw/openclaw.json when both are empty.
+    static func configCandidates(configFile: String?, homeDir: String?, home: String) -> [String] {
+        func expand(_ path: String) -> String {
+            path.hasPrefix("~/") ? home + String(path.dropFirst(1)) : path
+        }
+        var configFile = (configFile ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let homeDir = (homeDir ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        if configFile.isEmpty && homeDir.isEmpty { configFile = "~/.openclaw/openclaw.json" }
+        var raw = [configFile]
+        if !homeDir.isEmpty { raw.append((expand(homeDir) as NSString).appendingPathComponent("openclaw.json")) }
+        var out: [String] = []
+        for candidate in raw where !candidate.isEmpty {
+            let normalized = URL(fileURLWithPath: expand(candidate)).standardizedFileURL.path
+            if !out.contains(normalized) { out.append(normalized) }
+        }
+        return out
+    }
+
+    /// openclaw_binary_installed: PATH, then the npm / Homebrew / ~/.local
+    /// locations the gateway also checks.
+    static func binaryInstalled(path: String?, home: String, executable: (String) -> Bool) -> Bool {
+        var candidates = (path ?? "").split(separator: ":").map { String($0) + "/openclaw" }
+        candidates += ["/usr/local/bin/openclaw", "/opt/homebrew/bin/openclaw",
+                       home + "/.npm-global/bin/openclaw", home + "/.local/bin/openclaw"]
+        return candidates.contains(where: executable)
+    }
+
+    /// openclaw_installed: an openclaw.json candidate exists (one that cannot
+    /// be inspected counts as present, as in Go) or an openclaw binary is found.
+    static func installed(
+        configFile: String?, homeDir: String?,
+        home: String = NSHomeDirectory(),
+        path: String? = ProcessInfo.processInfo.environment["PATH"],
+        present: (String) -> Bool = { candidate in
+            var info = stat()
+            if stat(candidate, &info) == 0 { return true }
+            return errno != ENOENT && errno != ENOTDIR
+        },
+        executable: (String) -> Bool = { FileManager.default.isExecutableFile(atPath: $0) }
+    ) -> Bool {
+        configCandidates(configFile: configFile, homeDir: homeDir, home: home).contains(where: present)
+            || binaryInstalled(path: path, home: home, executable: executable)
     }
 }

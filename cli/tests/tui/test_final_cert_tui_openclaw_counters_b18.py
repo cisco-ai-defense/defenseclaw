@@ -62,6 +62,29 @@ def test_proxy_connector_stats_count_tool_inspections_llm_verdicts_and_blocks(tm
     assert "claudecode" not in stats
 
 
+def test_proxy_connector_stats_count_a_scan_timeout_as_a_call_not_a_block(tmp_path) -> None:
+    """GAP-0919: a 504 scan timeout has its own audit row; it is a call, never a block."""
+    store = _openclaw_store(tmp_path)
+    try:
+        store.log_event(
+            Event(
+                id="oc-timeout",
+                timestamp=datetime.now(timezone.utc),
+                action="inspect-tool-timeout",
+                target="exec",
+                severity="MEDIUM",
+                connector="openclaw",
+                details="verdict=none reason=scan_timeout elapsed_ms=201 budget_ms=200",
+            )
+        )
+        stats = store.connector_hook_event_stats()
+    finally:
+        store.close()
+    assert stats["openclaw"]["calls"] == 6
+    assert stats["openclaw"]["blocks"] == 2
+    assert stats["openclaw"]["alerts"] == 0
+
+
 def test_openclaw_only_overview_counts_blocks_and_does_not_say_quiet(tmp_path) -> None:
     store = _openclaw_store(tmp_path)
     cfg = OverviewConfig(

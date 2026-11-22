@@ -13,6 +13,20 @@ import (
 	"time"
 )
 
+// The late-call fixtures keep the whole account inside the fixture: a hook
+// unit test touches only its t.TempDir home, never the real account's
+// ~/.defenseclaw or ~/.ssh (rel-1-0-10:GAP-1225).
+func TestLateOrdinaryProjectKeepsTheAccountHomeInTheFixture(t *testing.T) {
+	project := lateOrdinaryProject(t)
+	fixtureHome := filepath.Dir(project)
+	if got := perUserAccountHome(); got != fixtureHome {
+		t.Errorf("account home = %q, want the fixture home %q", got, fixtureHome)
+	}
+	if got := os.Getenv("HOME"); got != fixtureHome {
+		t.Errorf("HOME = %q, want the fixture home %q", got, fixtureHome)
+	}
+}
+
 // TestLateOrdinaryCallProtectedReach: in the open tier a late call from a
 // verified gateway is still denied when it reaches a protected file through a
 // link hop (a link to the keys path after the keys were moved), or through a

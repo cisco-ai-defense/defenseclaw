@@ -205,7 +205,7 @@ func (c *findSinkCall) answer(home string) {
 	recorder := httptest.NewRecorder()
 	c.api.handleAgentHook(c.connector).ServeHTTP(recorder, req)
 	c.body = recorder.Body.String()
-	c.blocked = strings.HasPrefix(c.body, `{"action":"block"`)
+	c.blocked = gap0747HookBlockedAnyMode(c.body)
 }
 
 // The stdin filter rule is narrow: options and one grep pattern only.

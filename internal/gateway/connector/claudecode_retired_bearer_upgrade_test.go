@@ -42,104 +42,121 @@ func readClaudeUpgradeEnv(t *testing.T, path string) map[string]string {
 // Released 1.0.0, 1.0.2, and 1.0.3 routes can have their markers removed and their
 // port changed while retaining DefenseClaw's scoped bearer. Setup must not
 // leave that credential on the retired listener, even beside an operator route.
+//
+// The released install is the same Setup for the three releases (the seed
+// takes no release input), so the release label rotates over the GOOS x proof
+// table instead of tripling it: every GOOS runs every proof once, and every
+// release is paired with every GOOS and every proof (checked below). Each
+// subtest pays two product Setups, which a Windows runner takes seconds for.
 func TestClaudeReleasedMarkerlessProductBearerUpgrade(t *testing.T) {
-	for _, release := range []string{"1.0.0", "1.0.2", "1.0.3"} {
-		for _, goos := range []string{"linux", "darwin", "windows"} {
-			for _, proof := range []string{"backup", "sidecar", "generic_backup", "unmatched"} {
-				t.Run(release+"/"+goos+"/"+proof, func(t *testing.T) {
-					dir := t.TempDir()
-					pinClaudeUpgradeTestOwner(t, dir)
-					settingsPath := filepath.Join(dir, "settings.json")
-					previous := ClaudeCodeSettingsPathOverride
-					ClaudeCodeSettingsPathOverride = settingsPath
-					t.Cleanup(func() { ClaudeCodeSettingsPathOverride = previous })
-					c := NewClaudeCodeConnector()
-					earlier := SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:19081", GOOS: goos, sandboxNativeOTLP: true}
-					if err := c.Setup(context.Background(), earlier); err != nil {
-						t.Fatalf("released %s setup: %v", release, err)
+	releases := []string{"1.0.0", "1.0.2", "1.0.3"}
+	proofs := []string{"backup", "sidecar", "generic_backup", "unmatched"}
+	seen := map[string]bool{}
+	for gi, goos := range []string{"linux", "darwin", "windows"} {
+		for pi, proof := range proofs {
+			release := releases[(gi*len(proofs)+pi)%len(releases)]
+			seen[release+"/"+goos] = true
+			seen[release+"/"+proof] = true
+			t.Run(release+"/"+goos+"/"+proof, func(t *testing.T) {
+				dir := t.TempDir()
+				pinClaudeUpgradeTestOwner(t, dir)
+				settingsPath := filepath.Join(dir, "settings.json")
+				previous := ClaudeCodeSettingsPathOverride
+				ClaudeCodeSettingsPathOverride = settingsPath
+				t.Cleanup(func() { ClaudeCodeSettingsPathOverride = previous })
+				c := NewClaudeCodeConnector()
+				earlier := SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:19081", GOOS: goos, sandboxNativeOTLP: true}
+				if err := c.Setup(context.Background(), earlier); err != nil {
+					t.Fatalf("released %s setup: %v", release, err)
+				}
+				productToken, err := LoadOTLPPathToken(dir, OTLPScopeClaude)
+				if err != nil || productToken == "" {
+					t.Fatalf("released scoped token: present=%t err=%v", productToken != "", err)
+				}
+				backup, err := c.loadBackup(dir)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if proof == "sidecar" {
+					for key := range backup.ManagedEnv {
+						if claudeCodeOTLPHeadersKey(key) {
+							delete(backup.ManagedEnv, key)
+						}
 					}
-					productToken, err := LoadOTLPPathToken(dir, OTLPScopeClaude)
-					if err != nil || productToken == "" {
-						t.Fatalf("released scoped token: present=%t err=%v", productToken != "", err)
+					if err := c.saveBackup(dir, backup); err != nil {
+						t.Fatal(err)
 					}
-					backup, err := c.loadBackup(dir)
+				}
+				if proof == "generic_backup" {
+					tokenPath, err := OTLPPathTokenFilePath(dir, OTLPScopeClaude)
 					if err != nil {
 						t.Fatal(err)
 					}
-					if proof == "sidecar" {
-						for key := range backup.ManagedEnv {
-							if claudeCodeOTLPHeadersKey(key) {
-								delete(backup.ManagedEnv, key)
-							}
-						}
-						if err := c.saveBackup(dir, backup); err != nil {
-							t.Fatal(err)
-						}
-					}
-					if proof == "generic_backup" {
-						tokenPath, err := OTLPPathTokenFilePath(dir, OTLPScopeClaude)
-						if err != nil {
-							t.Fatal(err)
-						}
-						if err := os.Remove(tokenPath); err != nil {
-							t.Fatal(err)
-						}
-					}
-					currentToken := productToken
-					if proof == "unmatched" {
-						// An operator credential is not of the product token shape.
-						currentToken = "operator-collector-token"
-					}
-					retired := "http://127.0.0.1:19097/v1/logs"
-					data, err := os.ReadFile(settingsPath)
-					if err != nil {
+					if err := os.Remove(tokenPath); err != nil {
 						t.Fatal(err)
 					}
-					var settings map[string]interface{}
-					if err := json.Unmarshal(data, &settings); err != nil {
-						t.Fatal(err)
+				}
+				currentToken := productToken
+				if proof == "unmatched" {
+					// An operator credential is not of the product token shape.
+					currentToken = "operator-collector-token"
+				}
+				retired := "http://127.0.0.1:19097/v1/logs"
+				data, err := os.ReadFile(settingsPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var settings map[string]interface{}
+				if err := json.Unmarshal(data, &settings); err != nil {
+					t.Fatal(err)
+				}
+				env := settings["env"].(map[string]interface{})
+				env["OTEL_EXPORTER_OTLP_LOGS_ENDPOINT"] = retired
+				if proof == "generic_backup" {
+					delete(env, "OTEL_EXPORTER_OTLP_LOGS_HEADERS")
+					env["OTEL_EXPORTER_OTLP_HEADERS"] = "authorization=Bearer " + currentToken + ",x-tenant=logs"
+				} else {
+					env["OTEL_EXPORTER_OTLP_LOGS_HEADERS"] = "authorization=Bearer " + currentToken + ",x-tenant=logs"
+				}
+				env["OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"] = "https://collector.example.test/v1/traces"
+				env["OTEL_EXPORTER_OTLP_TRACES_HEADERS"] = "x-tenant=traces"
+				env["OTEL_TRACES_EXPORTER"] = "otlp"
+				writeClaudeUpgradeSettings(t, settingsPath, settings)
+				upgrade := earlier
+				upgrade.sandboxNativeOTLP = false
+				upgrade.APIAddr = "127.0.0.1:19082"
+				if err := c.Setup(context.Background(), upgrade); err != nil {
+					t.Fatalf("upgrade from %s: %v", release, err)
+				}
+				got := readClaudeUpgradeEnv(t, settingsPath)
+				if got["OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"] != "https://collector.example.test/v1/traces" ||
+					got["OTEL_EXPORTER_OTLP_TRACES_HEADERS"] != "x-tenant=traces" ||
+					got["OTEL_TRACES_EXPORTER"] != "otlp" || got["CLAUDE_CODE_ENABLE_TELEMETRY"] != "1" {
+					t.Fatal("operator traces route changed")
+				}
+				if proof == "unmatched" {
+					if got["OTEL_EXPORTER_OTLP_LOGS_ENDPOINT"] != retired ||
+						got["OTEL_EXPORTER_OTLP_LOGS_HEADERS"] != "authorization=Bearer "+currentToken+",x-tenant=logs" {
+						t.Fatal("unmatched operator route changed")
 					}
-					env := settings["env"].(map[string]interface{})
-					env["OTEL_EXPORTER_OTLP_LOGS_ENDPOINT"] = retired
-					if proof == "generic_backup" {
-						delete(env, "OTEL_EXPORTER_OTLP_LOGS_HEADERS")
-						env["OTEL_EXPORTER_OTLP_HEADERS"] = "authorization=Bearer " + currentToken + ",x-tenant=logs"
-					} else {
-						env["OTEL_EXPORTER_OTLP_LOGS_HEADERS"] = "authorization=Bearer " + currentToken + ",x-tenant=logs"
-					}
-					env["OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"] = "https://collector.example.test/v1/traces"
-					env["OTEL_EXPORTER_OTLP_TRACES_HEADERS"] = "x-tenant=traces"
-					env["OTEL_TRACES_EXPORTER"] = "otlp"
-					writeClaudeUpgradeSettings(t, settingsPath, settings)
-					upgrade := earlier
-					upgrade.sandboxNativeOTLP = false
-					upgrade.APIAddr = "127.0.0.1:19082"
-					if err := c.Setup(context.Background(), upgrade); err != nil {
-						t.Fatalf("upgrade from %s: %v", release, err)
-					}
-					got := readClaudeUpgradeEnv(t, settingsPath)
-					if got["OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"] != "https://collector.example.test/v1/traces" ||
-						got["OTEL_EXPORTER_OTLP_TRACES_HEADERS"] != "x-tenant=traces" ||
-						got["OTEL_TRACES_EXPORTER"] != "otlp" || got["CLAUDE_CODE_ENABLE_TELEMETRY"] != "1" {
-						t.Fatal("operator traces route changed")
-					}
-					if proof == "unmatched" {
-						if got["OTEL_EXPORTER_OTLP_LOGS_ENDPOINT"] != retired ||
-							got["OTEL_EXPORTER_OTLP_LOGS_HEADERS"] != "authorization=Bearer "+currentToken+",x-tenant=logs" {
-							t.Fatal("unmatched operator route changed")
-						}
-						return
-					}
-					if got["OTEL_EXPORTER_OTLP_LOGS_ENDPOINT"] != "" ||
-						got["OTEL_LOGS_EXPORTER"] != "none" ||
+					return
+				}
+				if got["OTEL_EXPORTER_OTLP_LOGS_ENDPOINT"] != "" ||
+					got["OTEL_LOGS_EXPORTER"] != "none" ||
+					strings.Contains(got["OTEL_EXPORTER_OTLP_LOGS_HEADERS"], productToken) ||
+					strings.Contains(got["OTEL_EXPORTER_OTLP_HEADERS"], productToken) {
+					t.Fatalf("retired product route or bearer remains: endpoint=%t gate=%q bearer=%t",
+						got["OTEL_EXPORTER_OTLP_LOGS_ENDPOINT"] != "", got["OTEL_LOGS_EXPORTER"],
 						strings.Contains(got["OTEL_EXPORTER_OTLP_LOGS_HEADERS"], productToken) ||
-						strings.Contains(got["OTEL_EXPORTER_OTLP_HEADERS"], productToken) {
-						t.Fatalf("retired product route or bearer remains: endpoint=%t gate=%q bearer=%t",
-							got["OTEL_EXPORTER_OTLP_LOGS_ENDPOINT"] != "", got["OTEL_LOGS_EXPORTER"],
-							strings.Contains(got["OTEL_EXPORTER_OTLP_LOGS_HEADERS"], productToken) ||
-								strings.Contains(got["OTEL_EXPORTER_OTLP_HEADERS"], productToken))
-					}
-				})
+							strings.Contains(got["OTEL_EXPORTER_OTLP_HEADERS"], productToken))
+				}
+			})
+		}
+	}
+	for _, release := range releases {
+		for _, other := range append([]string{"linux", "darwin", "windows"}, proofs...) {
+			if !seen[release+"/"+other] {
+				t.Errorf("release %s never ran with %s", release, other)
 			}
 		}
 	}

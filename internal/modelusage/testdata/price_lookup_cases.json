@@ -1,0 +1,241 @@
+{
+  "_comment": "One price lookup, two implementations: internal/modelusage/cost.go (PriceTable.Compute) and cli/defenseclaw/price_lookup.py (doctor, routing rules list). entry is the matched price-table key, or null when the call has no cost (rel-1-0-10 GAP-1108).",
+  "tables": [
+    {
+      "name": "seed-like",
+      "pricing": {
+        "version": "t-1",
+        "unknown_model": "omit",
+        "models": [
+          {
+            "provider": "anthropic",
+            "model": "claude-haiku-4-5*",
+            "input_per_mtok": 1,
+            "output_per_mtok": 5
+          },
+          {
+            "provider": "bedrock",
+            "model": "claude-haiku-4-5*",
+            "input_per_mtok": 1,
+            "output_per_mtok": 5
+          },
+          {
+            "provider": "bedrock",
+            "model": "claude-haiku-4-5-special",
+            "input_per_mtok": 9,
+            "output_per_mtok": 9
+          },
+          {
+            "provider": "Bedrock",
+            "model": "Claude-Sonnet-4-5*",
+            "input_per_mtok": 3,
+            "output_per_mtok": 15
+          },
+          {
+            "provider": "openai",
+            "model": "gpt-5",
+            "input_per_mtok": 1.25,
+            "output_per_mtok": 10
+          },
+          {
+            "provider": "openai",
+            "model": "gpt-5-2*",
+            "input_per_mtok": 1.75,
+            "output_per_mtok": 14
+          },
+          {
+            "provider": "openai",
+            "model": "gpt-5-mini*",
+            "input_per_mtok": 0.25
+          },
+          {
+            "provider": "*",
+            "model": "gemini-2.5-pro",
+            "input_per_mtok": 1.25,
+            "output_per_mtok": 10
+          },
+          {
+            "provider": "*",
+            "model": "claude-haiku-4-5-20251001",
+            "input_per_mtok": 7,
+            "output_per_mtok": 7
+          },
+          {
+            "provider": "bedrock",
+            "model": "nullrates*",
+            "input_per_mtok": null,
+            "output_per_mtok": 2
+          }
+        ]
+      },
+      "cases": [
+        {
+          "provider": "bedrock",
+          "model": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+          "entry": "bedrock/claude-haiku-4-5*"
+        },
+        {
+          "provider": "bedrock",
+          "model": "eu.anthropic.claude-haiku-4-5-20251001-v1:0",
+          "entry": "bedrock/claude-haiku-4-5*"
+        },
+        {
+          "provider": "bedrock",
+          "model": "apac.anthropic.claude-haiku-4-5-20251001-v1:0",
+          "entry": "bedrock/claude-haiku-4-5*"
+        },
+        {
+          "provider": "bedrock",
+          "model": "global.anthropic.claude-haiku-4-5-20251001-v1:0",
+          "entry": "bedrock/claude-haiku-4-5*"
+        },
+        {
+          "provider": "bedrock",
+          "model": "us-gov.anthropic.claude-haiku-4-5-20251001-v1:0",
+          "entry": "bedrock/claude-haiku-4-5*"
+        },
+        {
+          "provider": "bedrock",
+          "model": "anthropic.claude-haiku-4-5-20251001-v1:0",
+          "entry": "bedrock/claude-haiku-4-5*"
+        },
+        {
+          "provider": "bedrock",
+          "model": "arn:aws:bedrock:us-east-1:111122223333:inference-profile/us.anthropic.claude-haiku-4-5-20251001-v1:0",
+          "entry": "bedrock/claude-haiku-4-5*"
+        },
+        {
+          "provider": "bedrock",
+          "model": "us.anthropic.claude-haiku-4-5-special",
+          "entry": "bedrock/claude-haiku-4-5-special"
+        },
+        {
+          "provider": "Bedrock",
+          "model": " US.Anthropic.Claude-Sonnet-4-5-20250929-v1:0 ",
+          "entry": "bedrock/claude-sonnet-4-5*"
+        },
+        {
+          "provider": "anthropic",
+          "model": "claude-haiku-4-5-20251001",
+          "entry": "anthropic/claude-haiku-4-5*"
+        },
+        {
+          "provider": "openai",
+          "model": "gpt-5",
+          "entry": "openai/gpt-5"
+        },
+        {
+          "provider": "openai",
+          "model": "gpt-5-2025-08-07",
+          "entry": "openai/gpt-5-2*"
+        },
+        {
+          "provider": "openai",
+          "model": "gpt-5-mini-2025-08-07",
+          "entry": null
+        },
+        {
+          "provider": "openai",
+          "model": "gpt-4.1-mini",
+          "entry": null
+        },
+        {
+          "provider": "vertex",
+          "model": "gemini-2.5-pro",
+          "entry": "*/gemini-2.5-pro"
+        },
+        {
+          "provider": "bedrock",
+          "model": "us.meta.llama4-maverick-17b-instruct-v1:0",
+          "entry": null
+        },
+        {
+          "provider": "openai",
+          "model": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+          "entry": null
+        },
+        {
+          "provider": "bedrock",
+          "model": "",
+          "entry": null
+        },
+        {
+          "provider": "anthropic",
+          "model": "claude-haiku-4-5-20251001",
+          "entry": "anthropic/claude-haiku-4-5*",
+          "_why": "a provider-specific prefix beats a * provider exact entry"
+        },
+        {
+          "provider": "vertex",
+          "model": "claude-haiku-4-5-20251001",
+          "entry": "*/claude-haiku-4-5-20251001"
+        },
+        {
+          "provider": "bedrock",
+          "model": "nullrates-1",
+          "entry": null,
+          "_why": "an entry without both rates prices nothing"
+        },
+        {
+          "provider": null,
+          "model": "gemini-2.5-pro",
+          "entry": "*/gemini-2.5-pro"
+        },
+        {
+          "provider": "bedrock",
+          "model": null,
+          "entry": null
+        }
+      ]
+    },
+    {
+      "name": "fallback",
+      "pricing": {
+        "version": "t-2",
+        "unknown_model": "fallback",
+        "fallback": {
+          "input_per_mtok": 3,
+          "output_per_mtok": 15
+        },
+        "models": [
+          {
+            "provider": "bedrock",
+            "model": "claude-haiku-4-5*",
+            "input_per_mtok": 1,
+            "output_per_mtok": 5
+          }
+        ]
+      },
+      "cases": [
+        {
+          "provider": "bedrock",
+          "model": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+          "entry": "bedrock/claude-haiku-4-5*"
+        },
+        {
+          "provider": "vllm",
+          "model": "qwen-local",
+          "entry": "fallback"
+        }
+      ]
+    },
+    {
+      "name": "fallback-without-rates",
+      "pricing": {
+        "version": "t-3",
+        "unknown_model": "fallback",
+        "fallback": {
+          "input_per_mtok": 3
+        },
+        "models": []
+      },
+      "cases": [
+        {
+          "provider": "vllm",
+          "model": "qwen-local",
+          "entry": null
+        }
+      ]
+    }
+  ]
+}

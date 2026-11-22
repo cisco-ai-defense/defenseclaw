@@ -17,49 +17,10 @@
 package gateway
 
 import (
-	"io"
-	"os"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 )
-
-// captureStderr redirects os.Stderr for the duration of fn and
-// returns everything that was written. Used to assert on the
-// operator-facing log lines emitted by proxy helpers. The write end
-// is closed before we read back from the pipe so io.ReadAll's
-// goroutine can finish before we inspect the captured bytes.
-func captureStderr(t *testing.T, fn func()) string {
-	t.Helper()
-	orig := os.Stderr
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatalf("pipe: %v", err)
-	}
-	os.Stderr = w
-
-	var (
-		mu   sync.Mutex
-		buf  strings.Builder
-		done = make(chan struct{})
-	)
-	go func() {
-		defer close(done)
-		b, _ := io.ReadAll(r)
-		mu.Lock()
-		buf.Write(b)
-		mu.Unlock()
-	}()
-
-	fn()
-	_ = w.Close()
-	<-done
-	os.Stderr = orig
-	mu.Lock()
-	defer mu.Unlock()
-	return buf.String()
-}
 
 // logVerdict is the workhorse used by both logPreCall and
 // logPostCall; once it redacts correctly every caller benefits.

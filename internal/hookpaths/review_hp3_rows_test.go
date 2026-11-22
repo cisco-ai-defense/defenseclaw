@@ -135,9 +135,7 @@ func TestReviewHP3PosixRows(t *testing.T) {
 		t.Fatal(err)
 	}
 	for name, target := range map[string]string{"keylink": "../.ssh/authorized_keys", "sshlink": "../.ssh"} {
-		if err := os.Symlink(target, filepath.Join(project, name)); err != nil {
-			t.Fatal(err)
-		}
+		testSymlink(t, target, filepath.Join(project, name))
 	}
 	if err := os.WriteFile(filepath.Join(project, "a.txt"), []byte("x\n"), 0o600); err != nil {
 		t.Fatal(err)

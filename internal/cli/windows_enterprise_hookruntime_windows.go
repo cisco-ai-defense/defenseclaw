@@ -20,6 +20,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -33,7 +34,7 @@ import (
 // Seams for tests.
 var (
 	windowsEnterpriseHookRuntimeDir = func() (string, error) {
-		layout, err := windowsManagedLayout.standalone()
+		layout, err := hookcli.WindowsManagedLayout.Standalone()
 		return layout.HookRuntimeDir, err
 	}
 	windowsEnterpriseInspectPublicDir = enterprisepolicy.InspectWindowsPublicDir
@@ -69,7 +70,7 @@ func windowsEnterpriseHookRuntimeDrift() (string, string) {
 func windowsEnterpriseHookRuntimeDriftMessage(dir string, drift enterprisepolicy.WindowsPublicDirDrift) string {
 	var parts, removals []string
 	if drift.Owner != "" {
-		parts = append(parts, "it is owned by "+windowsPrincipalLabel(drift.Owner)+", not Administrators")
+		parts = append(parts, "it is owned by "+hookcli.WindowsPrincipalLabel(drift.Owner)+", not Administrators")
 	}
 	sids := make([]string, 0, len(drift.Extra))
 	for sid := range drift.Extra {
@@ -77,7 +78,7 @@ func windowsEnterpriseHookRuntimeDriftMessage(dir string, drift enterprisepolicy
 	}
 	sort.Strings(sids)
 	for _, sid := range sids {
-		parts = append(parts, windowsPrincipalLabel(sid)+" holds "+windowsAccessMaskWords(drift.Extra[sid])+
+		parts = append(parts, hookcli.WindowsPrincipalLabel(sid)+" holds "+hookcli.WindowsAccessMaskWords(drift.Extra[sid])+
 			", write access only SYSTEM and Administrators may hold there")
 		if sid != "S-1-5-32-545" {
 			removals = append(removals, "*"+sid)
@@ -89,10 +90,10 @@ func windowsEnterpriseHookRuntimeDriftMessage(dir string, drift enterprisepolicy
 	}
 	sort.Strings(sids)
 	for _, sid := range sids {
-		parts = append(parts, windowsPrincipalLabel(sid)+" has an explicit deny entry ("+windowsAccessMaskWords(drift.Denied[sid])+")")
+		parts = append(parts, hookcli.WindowsPrincipalLabel(sid)+" has an explicit deny entry ("+hookcli.WindowsAccessMaskWords(drift.Denied[sid])+")")
 	}
 	if drift.UsersReadMissing {
-		parts = append(parts, "the "+windowsPrincipalLabel("S-1-5-32-545")+" read and execute entry is missing, so standard users cannot read the machine policy summary")
+		parts = append(parts, "the "+hookcli.WindowsPrincipalLabel("S-1-5-32-545")+" read and execute entry is missing, so standard users cannot read the machine policy summary")
 	}
 	fix := `icacls "` + dir + `" /setowner *S-1-5-32-544 and icacls "` + dir + `" /inheritance:r /grant:r "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F" "*S-1-5-32-545:(OI)(CI)RX"`
 	if len(removals) != 0 {

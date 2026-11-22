@@ -41,8 +41,19 @@ func xargsPlainHome(parameter *syntax.ParamExp) bool {
 // fixed: literal and quoted text, a leading ~ or ~/ and plain $HOME or
 // ${HOME} (home). False for any other expansion, a glob or a brace list.
 func xargsStaticValue(word *syntax.Word, home string) (string, bool) {
-	if word == nil || !strings.HasPrefix(home, "/") || strings.ContainsAny(home, " \t\n*?[") {
+	value, globbed, ok := shellWordLiteralValue(word, home)
+	if !ok || globbed {
 		return "", false
+	}
+	return value, true
+}
+
+// shellWordLiteralValue is xargsStaticValue with an unquoted *, ? or [ kept
+// as text, the argument Bash passes for a pattern that matches no entry (no
+// nullglob, no failglob); globbed reports such a character.
+func shellWordLiteralValue(word *syntax.Word, home string) (value string, globbed, ok bool) {
+	if word == nil || !strings.HasPrefix(home, "/") || strings.ContainsAny(home, " \t\n*?[") {
+		return "", false, false
 	}
 	var text strings.Builder
 	for index, part := range word.Parts {
@@ -51,13 +62,13 @@ func xargsStaticValue(word *syntax.Word, home string) (string, bool) {
 			value := typed.Value
 			if index == 0 && strings.HasPrefix(value, "~") {
 				if value != "~" && !strings.HasPrefix(value, "~/") {
-					return "", false
+					return "", false, false
 				}
 				text.WriteString(home)
 				value = value[1:]
 			}
 			if strings.Contains(value, "{") && (strings.Contains(value, ",") || strings.Contains(value, "..")) {
-				return "", false
+				return "", false, false
 			}
 			for at := 0; at < len(value); at++ {
 				char := value[at : at+1]
@@ -69,18 +80,18 @@ func xargsStaticValue(word *syntax.Word, home string) (string, bool) {
 					continue
 				}
 				if strings.Contains("*?[", char) {
-					return "", false
+					globbed = true
 				}
 				text.WriteString(char)
 			}
 		case *syntax.SglQuoted:
 			if typed.Dollar {
-				return "", false
+				return "", false, false
 			}
 			text.WriteString(typed.Value)
 		case *syntax.DblQuoted:
 			if typed.Dollar {
-				return "", false
+				return "", false, false
 			}
 			for _, inner := range typed.Parts {
 				switch quoted := inner.(type) {
@@ -88,23 +99,23 @@ func xargsStaticValue(word *syntax.Word, home string) (string, bool) {
 					text.WriteString(xargsDoubleQuotedText(quoted.Value))
 				case *syntax.ParamExp:
 					if !xargsPlainHome(quoted) {
-						return "", false
+						return "", false, false
 					}
 					text.WriteString(home)
 				default:
-					return "", false
+					return "", false, false
 				}
 			}
 		case *syntax.ParamExp:
 			if !xargsPlainHome(typed) {
-				return "", false
+				return "", false, false
 			}
 			text.WriteString(home)
 		default:
-			return "", false
+			return "", false, false
 		}
 	}
-	return text.String(), true
+	return text.String(), globbed, true
 }
 
 // xargsDoubleQuotedText is the text of a literal inside double quotes: a

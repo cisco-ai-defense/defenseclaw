@@ -13,6 +13,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 )
 
 func TestHookColdStartRefusesAfterStopDuringInstallAndAfterAFailure(t *testing.T) {
@@ -122,10 +124,10 @@ func TestStopRecordsTheStopAndHookStartHonorsIt(t *testing.T) {
 		t.Fatalf("stop left no marker: %v", err)
 	}
 
-	if err := startCmd.Flags().Set(hookColdStartFlag, "true"); err != nil {
+	if err := startCmd.Flags().Set(hookcli.HookColdStartFlag, "true"); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = startCmd.Flags().Set(hookColdStartFlag, "false") })
+	t.Cleanup(func() { _ = startCmd.Flags().Set(hookcli.HookColdStartFlag, "false") })
 	err := runStart(startCmd, nil)
 	if err == nil || !strings.Contains(err.Error(), "hook cold start skipped") {
 		t.Fatalf("hook start after stop = %v, want it skipped", err)
@@ -233,10 +235,10 @@ func TestHookColdStartWaitsForARunningStartThenChecksAgain(t *testing.T) {
 		markGatewayStopped(dataDir)
 		release()
 	}()
-	if err := startCmd.Flags().Set(hookColdStartFlag, "true"); err != nil {
+	if err := startCmd.Flags().Set(hookcli.HookColdStartFlag, "true"); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = startCmd.Flags().Set(hookColdStartFlag, "false") })
+	t.Cleanup(func() { _ = startCmd.Flags().Set(hookcli.HookColdStartFlag, "false") })
 	started := time.Now()
 	err = runStart(startCmd, nil)
 	if elapsed := time.Since(started); elapsed < held {

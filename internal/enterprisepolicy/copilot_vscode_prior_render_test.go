@@ -85,3 +85,82 @@ func TestEnsureCopilotVSCodeUserAcceptsTheEarlierReleasesRenderOnlyWhenAsked(t *
 		}
 	}
 }
+
+// GAP-1096: releases up to 1.0.9 wrote the Local hook files for the transition
+// image bin\defenseclaw-hook.exe. An account signed out or disconnected through
+// the upgrade to the 1.0.10 launch image keeps them until the guardian rewrites
+// them in its own session, and Setup replaces that image in place with this
+// release hook, so the read-only verify that accepts an earlier release render
+// takes them as current. Only that image of the same bin: another folder, a
+// placement and a current-render verify still treat it as stale.
+func TestEnsureCopilotVSCodeUserAcceptsTheTransitionImageRenderOnlyWhenAsked(t *testing.T) {
+	const (
+		bin        = `C:\Program Files\Cisco\DefenseClaw\bin`
+		launch     = bin + `\hooks\0123456789abcdef\defenseclaw-hook.exe`
+		transition = bin + `\defenseclaw-hook.exe`
+		otherBin   = `C:\Program Files\Other\bin\defenseclaw-hook.exe`
+	)
+	home := t.TempDir()
+	request := func(dryRun, acceptPrior bool) CopilotVSCodeUserResult {
+		t.Helper()
+		result, err := EnsureCopilotVSCodeUser(CopilotVSCodeUserRequest{
+			Home: home, GOOS: "windows", HookBinary: launch, HookFile: true, Plugin: true,
+			DryRun: dryRun, AcceptPriorRelease: acceptPrior,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return result
+	}
+	if result := request(false, false); !result.HookFileOK || !result.PluginOK {
+		t.Fatalf("placement: %+v", result)
+	}
+	render := func(f func(string, string) ([]byte, error), binary string) []byte {
+		t.Helper()
+		data, err := f("windows", binary)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return data
+	}
+	current := render(RenderCopilotVSCodeLocalHooks, launch)
+	hookFile := CopilotVSCodeLocalHookFilePath(home)
+	pluginHooks := CopilotPluginHooksPath(home)
+	write := func(data []byte) {
+		t.Helper()
+		for _, path := range []string{hookFile, pluginHooks} {
+			if err := os.WriteFile(path, data, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	for _, earlier := range [][]byte{
+		render(RenderCopilotVSCodeLocalHooks, transition),             // 1.0.7 to 1.0.9
+		render(renderCopilotVSCodeLocalHooksPriorRelease, transition), // up to 1.0.6
+	} {
+		write(earlier)
+		if result := request(true, false); len(result.Changed) != 2 {
+			t.Fatalf("current-render verify of the transition-image render: %+v, want both documents changed", result)
+		}
+		if result := request(true, true); len(result.Changed)+len(result.Removed)+len(result.Kept) != 0 ||
+			!result.HookFileOK || !result.PluginOK {
+			t.Fatalf("prior-render verify of the transition-image render: %+v, want nothing to change", result)
+		}
+	}
+	// The image of another install bin is not this install hook.
+	write(render(RenderCopilotVSCodeLocalHooks, otherBin))
+	if result := request(true, true); len(result.Changed)+len(result.Kept) == 0 && result.HookFileOK {
+		t.Fatalf("a render for another install bin passed: %+v", result)
+	}
+	// The tolerance never writes: a placement puts the launch-image render.
+	write(render(RenderCopilotVSCodeLocalHooks, transition))
+	if result := request(false, true); len(result.Changed) != 2 {
+		t.Fatalf("placement with the tolerance: %+v, want both documents rewritten", result)
+	}
+	for _, path := range []string{hookFile, pluginHooks} {
+		data, err := os.ReadFile(filepath.Clean(path))
+		if err != nil || string(data) != string(current) {
+			t.Fatalf("%s after placement: err=%v, want the current render", path, err)
+		}
+	}
+}

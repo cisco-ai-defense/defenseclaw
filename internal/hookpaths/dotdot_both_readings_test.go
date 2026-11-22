@@ -45,9 +45,7 @@ func TestDotDotAfterALinkIsOrdinaryOnlyWhenEveryReadingIs(t *testing.T) {
 				if err := os.WriteFile(protected, []byte("protected"), 0o600); err != nil {
 					t.Fatal(err)
 				}
-				if err := os.Symlink(filepath.Join(other, "child"), filepath.Join(project, "jump")); err != nil {
-					t.Fatal(err)
-				}
+				testSymlink(t, filepath.Join(other, "child"), filepath.Join(project, "jump"))
 				entry := func(path string, protectedEntry bool) {
 					t.Helper()
 					var err error

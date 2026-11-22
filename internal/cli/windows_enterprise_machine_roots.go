@@ -21,11 +21,3 @@ func resolveWindowsEnterpriseMachineRoots() (windowsEnterpriseMachineRoots, erro
 func validateWindowsEnterpriseMachineRoot(value, label string) (string, error) {
 	return winpath.ValidateTrustedMachineRoot(value, label)
 }
-
-func trustedWindowsEnterpriseProgramFiles() (string, error) {
-	return winpath.TrustedProgramFiles()
-}
-
-func trustedWindowsEnterpriseProgramData() (string, error) {
-	return winpath.TrustedProgramData()
-}

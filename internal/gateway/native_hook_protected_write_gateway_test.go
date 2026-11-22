@@ -123,7 +123,7 @@ func TestR104ProtectedWriteRefix3(t *testing.T) {
 }
 
 func TestR104NestedShellProtectedPath(t *testing.T) {
-	home, cwd := r104ReviewHome(t)
+	home, cwd := r104ReviewHomeNoAlias(t)
 	for _, tc := range []struct {
 		name, command string
 		block         bool
@@ -145,7 +145,7 @@ func TestR104NestedShellProtectedPath(t *testing.T) {
 }
 
 func TestR104MaterializedLinkWriteRefix3(t *testing.T) {
-	home, cwd := r104ReviewHome(t)
+	home, cwd := r104ReviewHomeNoAlias(t)
 	if err := os.Mkdir(filepath.Join(cwd, "other-repo"), 0o700); err != nil {
 		t.Fatal(err)
 	}

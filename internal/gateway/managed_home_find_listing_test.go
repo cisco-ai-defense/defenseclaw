@@ -54,7 +54,7 @@ func r105ManagedHook(t *testing.T, connector, mode, command, cwd, home string, t
 	recorder := httptest.NewRecorder()
 	api.handleAgentHook(connector).ServeHTTP(recorder, req)
 	got := recorder.Body.String()
-	return strings.HasPrefix(got, `{"action":"block"`), got
+	return gap0747HookBlockedAnyMode(got), got
 }
 
 func r105EncodeTargets(t *testing.T, targets map[string]string) string {

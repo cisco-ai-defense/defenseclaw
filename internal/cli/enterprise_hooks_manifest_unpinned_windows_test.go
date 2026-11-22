@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"golang.org/x/sys/windows"
 )
@@ -81,9 +82,9 @@ func TestRepairEnterpriseHookManifestACLRefusesAnUntrustedManifestOnAStandaloneH
 	requireAdministratorTestToken(t, "the product trusts only administrator-owned state folders; a standard user's test folder is untrusted by design")
 	skipIfLocalSystem(t, "LocalSystem owns its t.TempDir() tree, so the fixture cannot stand in for a file a standard account owns")
 	t.Setenv(managed.EnterpriseProfileEnv, "")
-	previous := managedHostWindowsStandalone
-	t.Cleanup(func() { managedHostWindowsStandalone = previous })
-	managedHostWindowsStandalone = func() (string, bool) { return `HKLM\` + WindowsEnterpriseMarkerKey, true }
+	previous := hookcli.ManagedHostWindowsStandalone
+	t.Cleanup(func() { hookcli.ManagedHostWindowsStandalone = previous })
+	hookcli.ManagedHostWindowsStandalone = func() (string, bool) { return `HKLM\` + hookcli.WindowsEnterpriseMarkerKey, true }
 
 	manifest := untrustedManifestForTest(t)
 	before := manifestDescriptorForTest(t, manifest)
@@ -97,9 +98,9 @@ func TestRepairEnterpriseHookManifestACLRefusesAnUntrustedManifestOnAStandaloneH
 }
 
 func TestRestoredPolicySourcesAreListedInTheResultChanges(t *testing.T) {
-	previous := windowsPrincipalName
-	t.Cleanup(func() { windowsPrincipalName = previous })
-	windowsPrincipalName = func(string) string { return "" }
+	previous := hookcli.WindowsPrincipalName
+	t.Cleanup(func() { hookcli.WindowsPrincipalName = previous })
+	hookcli.WindowsPrincipalName = func(string) string { return "" }
 	result := &enterprisestatus.Result{}
 	note := `the installed config.yaml untrusted principal S-1-5-21-1-2-3-1001 has write-like access to managed path: C:\ProgramData\Cisco\DefenseClaw\etc\config.yaml; ` +
 		`kept it as C:\ProgramData\Cisco\DefenseClaw\etc\rejected-config.yaml and restored config.yaml from Setup's approved copy`

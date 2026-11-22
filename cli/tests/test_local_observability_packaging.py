@@ -191,6 +191,7 @@ def _copy_make_bundle_inputs(destination: Path) -> None:
         Path("edge-connector"),
         Path("policies"),
         Path("bundles/llm"),
+        Path("bundles/pricing"),
         Path("bundles/local_observability_stack"),
         Path("bundles/splunk_local_bridge"),
         Path("bundles/splunk_o11y_dashboards"),

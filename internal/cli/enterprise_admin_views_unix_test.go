@@ -14,7 +14,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
 )
 
@@ -42,7 +44,7 @@ func TestEnterprisePolicyRefusesAStandardUserLikeTheAdminViews(t *testing.T) {
 		enterprisePolicyVerifyCmd.SetOut(&out)
 		err := enterprisePolicyCmd.PersistentPreRunE(enterprisePolicyVerifyCmd, nil)
 		if err == nil || !strings.Contains(err.Error(), "an administrator runs it") || !strings.Contains(err.Error(), "enterprise policy verify") ||
-			strings.Contains(err.Error(), "permission denied") || commandExitCode(err) != 1 {
+			strings.Contains(err.Error(), "permission denied") || cliusage.ExitCode(err) != 1 {
 			t.Fatalf("json=%v: err = %v", asJSON, err)
 		}
 		if !asJSON {
@@ -121,16 +123,16 @@ func TestEnterprisePolicyHasThePerOSSpelling(t *testing.T) {
 		if err != nil || verify.Name() != "verify" || verify.Flags().Lookup("user") == nil || verify.Flags().Lookup("json") == nil {
 			t.Fatalf("%s policy verify = %v, %v", platform, verify, err)
 		}
-		if verify.Parent().Annotations[secureClientAbsentAnnotation] == "" {
+		if verify.Parent().Annotations[hookcli.SecureClientAbsentAnnotation] == "" {
 			t.Errorf("%s policy is kept on Secure Client, which has only `enterprise policy`", platform)
 		}
 		if enterprisePlatformGOOS(platform) != runtime.GOOS {
-			if err := verify.Parent().PersistentPreRunE(verify, nil); err == nil || commandExitCode(err) != enterprisestatus.InvalidArgsExitCode(runtime.GOOS) {
+			if err := verify.Parent().PersistentPreRunE(verify, nil); err == nil || cliusage.ExitCode(err) != enterprisestatus.InvalidArgsExitCode(runtime.GOOS) {
 				t.Errorf("%s policy on %s = %v, want invalid arguments", platform, runtime.GOOS, err)
 			}
 		}
 	}
-	if enterprisePolicyCmd.Annotations[secureClientAbsentAnnotation] != "" {
+	if enterprisePolicyCmd.Annotations[hookcli.SecureClientAbsentAnnotation] != "" {
 		t.Error("`enterprise policy` itself must stay on Secure Client")
 	}
 }

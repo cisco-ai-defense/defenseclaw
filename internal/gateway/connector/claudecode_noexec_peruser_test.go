@@ -48,18 +48,6 @@ func gap0322ClaudeRegistrationFixture(t *testing.T) (string, []string, string) {
 	return command, args, startup
 }
 
-// gap0322AssertShellRegistration checks the registration a platform without
-// the native per-user hook writes: the shell hook command with no direct
-// arguments.
-func gap0322AssertShellRegistration(t *testing.T, command string, args []string) {
-	t.Helper()
-	script := filepath.Join(os.Getenv("HOME"), ".defenseclaw", "hooks", "claude-code-hook.sh")
-	if args != nil || !strings.HasPrefix(command, posixHookCommandWord(script)) ||
-		strings.Contains(command, "defenseclaw-hook-user") || strings.Contains(command, "guard-user-hook") {
-		t.Fatalf("%s registration = %q, %q; want the shell hook %s", runtime.GOOS, command, args, script)
-	}
-}
-
 func gap0322RunRegistered(t *testing.T, command string, args []string, input string, extras ...string) (int, string) {
 	t.Helper()
 	var cmd *exec.Cmd
@@ -83,12 +71,6 @@ func gap0322RunRegistered(t *testing.T, command string, args []string, input str
 
 func TestGAP0322ClaudeRegisteredLaunchUnderShellOptions(t *testing.T) {
 	command, args, startup := gap0322ClaudeRegistrationFixture(t)
-	if runtime.GOOS != "linux" {
-		// macOS registers the shell hook (GAP-0559): no direct arguments
-		// and no native launcher in the command.
-		gap0322AssertShellRegistration(t, command, args)
-		return
-	}
 	if args == nil {
 		t.Fatal("Claude Code registration has no direct arguments")
 	}
@@ -127,12 +109,6 @@ func TestGAP0322ClaudeOrdinaryRegistrationTwin(t *testing.T) {
 
 func TestGAP0322ClaudeMissingGuardFallbackRegistration(t *testing.T) {
 	command, args, _ := gap0322ClaudeRegistrationFixture(t)
-	if runtime.GOOS != "linux" {
-		// macOS registers the shell hook (GAP-0559): no direct arguments
-		// and no native launcher in the command.
-		gap0322AssertShellRegistration(t, command, args)
-		return
-	}
 	opts := SetupOpts{DataDir: args[6], HookExecutable: args[1]}
 	hooks := map[string]interface{}{}
 	if err := appendClaudeCodeHookMatrixForSetup(hooks, command, args, opts); err != nil {

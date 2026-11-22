@@ -77,8 +77,10 @@ func TestOptionKeyHomeSpellingOfActiveStateIsTheHomePath(t *testing.T) {
 		}
 		for _, command := range state {
 			findings := judge(command)
-			if buildVerdict(findings, "tool_call").Action != "block" {
-				t.Errorf("%s %q: not blocked (%v)", connectorName, command, FindingStrings(findings))
+			// A proven state write is a HIGH alert on the default pack
+			// (GAP-0747 owner tiering 2026-11-15T15:20Z).
+			if msg := gap0747DefaultTierCheck(findings, true); msg != "" {
+				t.Errorf("%s %q: %s (%v)", connectorName, command, msg, FindingStrings(findings))
 				continue
 			}
 			proven := false

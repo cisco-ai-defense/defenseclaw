@@ -791,7 +791,7 @@ func TestSandboxConnectorInstanceID(t *testing.T) {
 // two sandboxes and checks neither can reach the host's correlation cursor,
 // replay receipts or connector instance, nor each other's.
 func TestSandboxCorrelationStateIsPerBinding(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	server, store := newHookCorrelationServer(t, filepath.Join(t.TempDir(), "audit.db"))
 	defer store.Close() //nolint:errcheck
 	promptBody := []byte(`{"hook_event_name":"UserPromptSubmit","session_id":"shared-session","prompt":"hello"}`)
@@ -887,7 +887,7 @@ func TestSandboxInMemorySessionStateIsPerBinding(t *testing.T) {
 	if sample := judge.toolJudgeContextSample(ctxA, "Bash", `{"command":"ls"}`); strings.Contains(sample, "HOST-INTENT-MARKER") {
 		t.Fatal("sandbox judge sample carries the host session's intent")
 	}
-	judge.ResetToolJudgeSession(sandboxSessionStateKey(ctxA, session))
+	judge.ResetToolJudgeSession(context.Background(), judgeSessionKeyFor(ctxA, session))
 	if sample := judge.toolJudgeContextSample(host, "Bash", `{"command":"ls"}`); !strings.Contains(sample, "HOST-INTENT-MARKER") {
 		t.Fatal("a sandbox reset cleared the host session's judge context")
 	}

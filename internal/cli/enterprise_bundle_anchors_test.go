@@ -26,6 +26,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/enterpriseunix"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -262,9 +263,9 @@ func TestBundleAnchorsInstallExampleNamesTheGatewayByItsFullPath(t *testing.T) {
 // Secure Client computer has no enterprise bundle group, so it never shows
 // that example (review round 4, S1).
 func TestBundleAnchorsInstallExampleIsAbsentFromSecureClient(t *testing.T) {
-	saved := secureClientHost
-	t.Cleanup(func() { secureClientHost = saved })
-	secureClientHost = func() bool { return true }
+	saved := hookcli.SecureClientHost
+	t.Cleanup(func() { hookcli.SecureClientHost = saved })
+	hookcli.SecureClientHost = func() bool { return true }
 	root := &cobra.Command{Use: "defenseclaw-gateway"}
 	enterprise := &cobra.Command{Use: "enterprise"}
 	enterprise.AddCommand(newEnterpriseBundleCommand())

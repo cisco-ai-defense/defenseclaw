@@ -427,3 +427,12 @@ func mustParse(s string) Version {
 	}
 	return v
 }
+
+// MicroVMGuestRootLimit is the workload check's refusal of a MicroVM whose
+// root folder OpenShell gave to a non-root account, which OpenShell 0.1.6
+// does for every MicroVM (rel-1-0-6:GAP-0570, rel-1-0-10:GAP-0007): the
+// guest's localhost resolver cannot be trusted, so the sandbox is deleted.
+// The sandbox CLI gives no retry hint for it.
+const MicroVMGuestRootLimit = "OpenShell gave the MicroVM's root folder to the sandbox's account, so DefenseClaw cannot trust what the guest resolves localhost to: " +
+	"MicroVM sandboxes do not start with this OpenShell release (a known limit); until a fixed OpenShell release is supported, run sandboxes on the docker driver " +
+	"(the sandbox guide, MicroVM known limits)"

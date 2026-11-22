@@ -13,10 +13,11 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 func TestR104DetectorStateWriteRequiresResolvedTarget(t *testing.T) {
-	home, cwd := r104ReviewHome(t)
+	home, cwd := r104ReviewHomeNoAlias(t)
 	stateDir := filepath.Join(home, ".defenseclaw")
 	if err := os.Mkdir(stateDir, 0o700); err != nil {
 		t.Fatal(err)
@@ -57,7 +58,7 @@ func TestR104DetectorStateWriteRequiresResolvedTarget(t *testing.T) {
 			if got := finding != nil && finding.contributesToEnforcement(); got != tc.block {
 				t.Fatalf("tamper enforcement=%t, want %t; finding=%+v", got, tc.block, finding)
 			}
-			if got := buildVerdict(findings, "tool_call").Action == guardrailActionBlock; got != tc.block {
+			if got := gap0747Blocked(findings, tc.block); got != tc.block {
 				t.Fatalf("tamper verdict block=%t, want %t; findings=%v", got, tc.block, FindingStrings(findings))
 			}
 		})
@@ -87,9 +88,7 @@ func TestGAP1409ObserveSelfProtectionHooks(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := os.Symlink(state, filepath.Join(cwd, "state-alias")); err != nil {
-		t.Fatal(err)
-	}
+	testenv.Symlink(t, state, filepath.Join(cwd, "state-alias"))
 	if err := os.Link(state, filepath.Join(cwd, "state-hardlink")); err != nil {
 		t.Fatal(err)
 	}
@@ -206,9 +205,7 @@ func TestGAP1409ObserveSelfProtectionWindows(t *testing.T) {
 		t.Fatal(err)
 	}
 	symlink := filepath.Join(cwd, "state-symlink.yaml")
-	if err := os.Symlink(state, symlink); err != nil {
-		t.Fatalf("create symlink (the Windows lane runs elevated): %v", err)
-	}
+	testenv.Symlink(t, state, symlink)
 	api := instructionProtectionTestAPI(t, "codex", "observe", "HIGH")
 	ctx := withManagedHookPeer(t.Context(), managedHookPeer{Home: home})
 	for _, row := range []struct {
@@ -245,7 +242,7 @@ func TestGAP1409ObserveSelfProtectionWindows(t *testing.T) {
 }
 
 func TestR104ActiveStateMentionRequiresMutation(t *testing.T) {
-	home, cwd := r104ReviewHome(t)
+	home, cwd := r104ReviewHomeNoAlias(t)
 	state := filepath.Join(home, ".defenseclaw", "config.yaml")
 	installDefaultProfileConnector(t, "claudecode")
 	dialect := actionfacts.DialectPOSIX
@@ -282,7 +279,7 @@ func TestR104ActiveStateMentionRequiresMutation(t *testing.T) {
 			if sshFinding != nil && sshFinding.contributesToEnforcement() {
 				t.Fatalf("state command received SSH enforcement: %v", FindingStrings(findings))
 			}
-			if got := buildVerdict(findings, "tool_call").Action == guardrailActionBlock; got != tc.block {
+			if got := gap0747Blocked(findings, tc.block); got != tc.block {
 				t.Fatalf("block=%t, want %t; findings=%v", got, tc.block, FindingStrings(findings))
 			}
 		})
@@ -318,9 +315,7 @@ func TestGAP1409DirectoryEntryOperandsDoNotFollowFinalLink(t *testing.T) {
 		"state-alias": state, "hook-alias": hook,
 		"state-dir": stateDir, "guardrail-dir": guardrailDir,
 	} {
-		if err := os.Symlink(target, filepath.Join(cwd, name)); err != nil {
-			t.Fatal(err)
-		}
+		testenv.Symlink(t, target, filepath.Join(cwd, name))
 	}
 	if err := os.Link(state, filepath.Join(cwd, "state-hardlink")); err != nil {
 		t.Fatal(err)

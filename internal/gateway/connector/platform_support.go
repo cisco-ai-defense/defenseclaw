@@ -39,10 +39,12 @@ type PlatformSupport struct {
 	Reason string
 }
 
-// proxyConnectors are the chat/LLM-proxy connectors that interpose on model
-// traffic through DefenseClaw's local guardrail proxy. Topology and platform
-// support are deliberately separate facts: OpenClaw itself has a native
-// Windows path, but DefenseClaw does not host its proxy lifecycle on Windows.
+// proxyConnectors are the connectors built around DefenseClaw's local
+// guardrail proxy and an in-agent plugin (OpenClaw, ZeptoClaw). Membership is
+// a fixed fact about the connector (IsProxyConnector); whether its model
+// traffic really goes through the proxy on this host follows the resolved
+// hook mode (UsesGuardrailProxy): OpenClaw on native Windows runs only its
+// native plugin hooks.
 var proxyConnectors = map[string]struct{}{
 	"openclaw":  {},
 	"zeptoclaw": {},
@@ -93,8 +95,8 @@ var windowsConnectorSupport = map[string]PlatformSupport{
 		Reason: "Hermes native shell hooks use a direct DefenseClaw executable on native Windows x64; restart any open Hermes session after setup so it loads them.",
 	},
 	"openclaw": {
-		Status: PlatformUnsupported,
-		Reason: "DefenseClaw on Windows is hook-only; OpenClaw integration requires the guardrail proxy.",
+		Status: PlatformSupported,
+		Reason: "OpenClaw 2026.8.35 or later is supported on native Windows x64 through its native plugin hooks (no guardrail proxy, no model response scan); managed Windows is not in this release.",
 	},
 	"zeptoclaw": {
 		Status: PlatformUnsupported,
@@ -102,11 +104,35 @@ var windowsConnectorSupport = map[string]PlatformSupport{
 	},
 }
 
-// IsProxyConnector reports whether name is a proxy/chat connector (as opposed
-// to a hook-based connector).
+// IsProxyConnector reports whether name is one of the proxy/plugin
+// connectors (OpenClaw, ZeptoClaw) as opposed to a hook-based connector. It
+// does not change with the host: the managed hook installers and automatic
+// application protection never take these connectors. For whether the
+// connector's model traffic goes through the guardrail proxy on this host
+// (proxy binding, token selection, traffic mode) use UsesGuardrailProxy.
 func IsProxyConnector(name string) bool {
 	_, ok := proxyConnectors[name]
 	return ok
+}
+
+// UsesGuardrailProxy reports whether name routes model traffic through
+// DefenseClaw's guardrail proxy on this host. It follows the resolved
+// OpenClaw hook mode (DESIGN-REVIEW-1 P2-12): proxy and hybrid use the proxy
+// (Linux, macOS), native does not (Windows, where DefenseClaw hosts no
+// proxy). Linux and macOS answer exactly as IsProxyConnector.
+func UsesGuardrailProxy(name string) bool {
+	return UsesGuardrailProxyOnOS(name, openClawHooksGOOS)
+}
+
+// UsesGuardrailProxyOnOS is UsesGuardrailProxy for goos.
+func UsesGuardrailProxyOnOS(name, goos string) bool {
+	if !IsProxyConnector(name) {
+		return false
+	}
+	if name == "openclaw" {
+		return OpenClawHookModeUsesProxy(resolveOpenClawHookModeOn(goos, "", ""))
+	}
+	return true
 }
 
 // ConnectorSupportOnOS returns a supported/preview/not-certified/unsupported

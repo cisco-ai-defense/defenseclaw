@@ -22,14 +22,34 @@
     ],
     "replays": 0
   },
+  "connectors/cowork-vm-sensor": {
+    "videos": [
+      "cowork-claude-desktop"
+    ],
+    "images": [
+      "/images/cowork/cowork-desktop-sensor-status.png",
+      "/images/cowork/cowork-desktop-vendor-refusal.png",
+      "/images/cowork/cowork-standin-grafana-findings.png",
+      "/images/cowork/cowork-standin-grafana-tactics.png",
+      "/images/cowork/cowork-standin-install.png",
+      "/images/posters/cowork-claude-desktop.jpg"
+    ],
+    "demos": [],
+    "replays": 0
+  },
   "connectors/cowork": {
-    "videos": [],
+    "videos": [
+      "cowork-claude-desktop"
+    ],
     "images": [
       "/images/cowork/block-in-cowork-windows.png",
+      "/images/cowork/cowork-desktop-deny-block.png",
+      "/images/cowork/cowork-desktop-grafana-hook-decisions.png",
       "/images/cowork/managed-verify-windows.png",
       "/images/cowork/setup-cowork-windows.png",
       "/images/cowork/status-doctor-windows.png",
-      "/images/cowork/tui-overview-cowork-macos.png"
+      "/images/cowork/tui-overview-cowork-macos.png",
+      "/images/posters/cowork-claude-desktop.jpg"
     ],
     "demos": [],
     "replays": 0
@@ -42,6 +62,17 @@
     "images": [
       "/images/posters/openclaw-e2e.jpg",
       "/images/posters/openclaw.jpg"
+    ],
+    "demos": [],
+    "replays": 0
+  },
+  "routing/routing-budgets": {
+    "videos": [],
+    "images": [
+      "/images/routing/cli-routing-rules.png",
+      "/images/routing/grafana-routing-budgets.png",
+      "/images/routing/grafana-routing-savings.png",
+      "/images/routing/grafana-routing-users.png"
     ],
     "demos": [],
     "replays": 0
@@ -119,7 +150,21 @@
     "demos": [],
     "replays": 0
   },
-  "guardrail/unified-llm-key": {
+  "routing/semantic-routing": {
+    "videos": [
+      "router-oss"
+    ],
+    "images": [
+      "/images/posters/router-oss.jpg",
+      "/images/routing/cli-routing-explain.png",
+      "/images/routing/tui-routing-panel.png",
+      "/images/routing/tui-setup-routing.png",
+      "/images/routing/tui-setup-wizard.png"
+    ],
+    "demos": [],
+    "replays": 0
+  },
+  "get-started/unified-llm-key": {
     "videos": [],
     "images": [],
     "demos": [],
@@ -177,6 +222,19 @@
     "images": [
       "/images/grafana/sandboxes-findings.png",
       "/images/splunk/sandbox-actions.png"
+    ],
+    "demos": [],
+    "replays": 0
+  },
+  "observability/tokenomics": {
+    "videos": [
+      "router-dashboards"
+    ],
+    "images": [
+      "/images/posters/router-dashboards.jpg",
+      "/images/routing/cli-tokenomics.png",
+      "/images/routing/grafana-tokenomics-breakdown.png",
+      "/images/routing/grafana-tokenomics-spend.png"
     ],
     "demos": [],
     "replays": 0
@@ -313,6 +371,75 @@
     "images": [
       "/images/segmentation/terminal-sandbox-ps-tree-kernel.png",
       "/images/tetragon/terminal-claude-customer-policy-notice.png"
+    ],
+    "demos": [],
+    "replays": 0
+  },
+  "substrate/eks": {
+    "videos": [],
+    "images": [
+      "/images/substrate/enterprise/attestation-refused.png",
+      "/images/substrate/oss/verify-eks-passing.png"
+    ],
+    "demos": [],
+    "replays": 0
+  },
+  "substrate/enterprise": {
+    "videos": [
+      "substrate-enterprise"
+    ],
+    "images": [
+      "/images/posters/substrate-enterprise.jpg",
+      "/images/substrate/enterprise/managed-claude-refused.png",
+      "/images/substrate/enterprise/managed-sandbox-refused.png",
+      "/images/substrate/enterprise/windows-laptop-claude.png",
+      "/images/substrate/enterprise/windows-laptop-login.png"
+    ],
+    "demos": [],
+    "replays": 0
+  },
+  "substrate/how-it-works": {
+    "videos": [],
+    "images": [
+      "/images/substrate/oss/secret-then-egress.png"
+    ],
+    "demos": [],
+    "replays": 0
+  },
+  "substrate/open-source": {
+    "videos": [
+      "substrate-oss"
+    ],
+    "images": [
+      "/images/posters/substrate-oss.jpg",
+      "/images/substrate/oss/browser-signin.png",
+      "/images/substrate/oss/codex-bedrock.png",
+      "/images/substrate/oss/hook-deny-metadata.png",
+      "/images/substrate/oss/login-device-code.png",
+      "/images/substrate/oss/mcp-build-refused.png",
+      "/images/substrate/oss/pull-applied.png",
+      "/images/substrate/oss/run-banner-macos.png",
+      "/images/substrate/oss/verify-eks-passing.png",
+      "/images/substrate/oss/whoami-doctor.png"
+    ],
+    "demos": [],
+    "replays": 0
+  },
+  "substrate/troubleshooting": {
+    "videos": [],
+    "images": [
+      "/images/substrate/enterprise/attestation-refused.png",
+      "/images/substrate/oss/doctor-not-ready.png",
+      "/images/substrate/oss/mcp-tool-refused.png"
+    ],
+    "demos": [],
+    "replays": 0
+  },
+  "substrate/unattended": {
+    "videos": [],
+    "images": [
+      "/images/substrate/oss/approvals.png",
+      "/images/substrate/oss/run-task-finished.png"
     ],
     "demos": [],
     "replays": 0

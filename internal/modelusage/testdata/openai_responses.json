@@ -1,0 +1,1 @@
+{"id":"resp_1","object":"response","model":"gpt-5-2025-08-07","status":"completed","output":[],"usage":{"input_tokens":300,"input_tokens_details":{"cached_tokens":200},"output_tokens":90,"output_tokens_details":{"reasoning_tokens":40},"total_tokens":390}}

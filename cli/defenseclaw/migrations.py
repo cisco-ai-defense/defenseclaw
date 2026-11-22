@@ -745,8 +745,10 @@ def _migrate_0_3_0_surgical(oc_json: str) -> None:
     # the operator are not modified.
     plugins = cfg.setdefault("plugins", {})
     if isinstance(plugins, dict):
-        allow = plugins.setdefault("allow", [])
-        if isinstance(allow, list) and "defenseclaw" not in allow:
+        # plugins.allow is an exclusive allowlist: join one the operator has,
+        # never create it (rel-1-0-10 GAP-0069, REVIEW-6 P3-6).
+        allow = plugins.get("allow")
+        if isinstance(allow, list) and allow and "defenseclaw" not in allow:
             allow.append("defenseclaw")
             changes.append("added plugins.allow[defenseclaw]")
             changed = True
@@ -813,9 +815,8 @@ def _migrate_0_3_0_surgical(oc_json: str) -> None:
 #      ``defenseclaw setup rotate-token`` would lock itself out of
 #      /api/v1/inspect/* and the connector hook endpoints. We
 #      synthesise a 32-byte CSPRNG hex token and atomically write it
-#      to ``<data_dir>/.env`` with mode 0o600. The legacy
-#      ``OPENCLAW_GATEWAY_TOKEN`` name is renamed if encountered so an
-#      operator who hand-edited the .env keeps their value.
+#      to ``<data_dir>/.env`` with mode 0o600. ``OPENCLAW_GATEWAY_TOKEN``
+#      is the OpenClaw gateway token and is left as it is.
 #
 #   2. **File perms tighten** — ``.env``, ``device.key`` and any
 #      ``*_backup.json`` left behind by intermediate dev builds are
@@ -931,20 +932,11 @@ def _migrate_0_4_0_token_bootstrap(ctx: MigrationContext) -> None:
     if existing.get("DEFENSECLAW_GATEWAY_TOKEN", "").strip():
         return
 
-    # Promote the legacy var name to the new canonical one without
-    # rotating the secret value — operators may have wired it into
-    # CI / agent process env, and silently rotating breaks them.
-    legacy = existing.get("OPENCLAW_GATEWAY_TOKEN", "").strip()
-    if legacy:
-        if _dotenv_update_keys(
-            env_path,
-            updates={"DEFENSECLAW_GATEWAY_TOKEN": legacy},
-            removes=("OPENCLAW_GATEWAY_TOKEN",),
-        ):
-            ctx.changes.append("renamed legacy OPENCLAW_GATEWAY_TOKEN → DEFENSECLAW_GATEWAY_TOKEN in .env")
-        return
-
-    # No token at all — synthesise a 32-byte CSPRNG hex string. Use
+    # OPENCLAW_GATEWAY_TOKEN is the OpenClaw gateway token, never the
+    # DefenseClaw one (R-TOK): it stays as it is, and a separate token is
+    # generated. (This step used to rename it to DEFENSECLAW_GATEWAY_TOKEN,
+    # which made the OpenClaw token the master.)
+    # Synthesise a 32-byte CSPRNG hex string. Use
     # secrets.token_hex which wraps os.urandom; matches the Go
     # rand.Read + hex.EncodeToString contract in firstboot.go.
     token = secrets.token_hex(32)
@@ -958,8 +950,8 @@ def _migrate_0_4_0_token_bootstrap(ctx: MigrationContext) -> None:
 def _migrate_0_4_0_token_env_in_config(ctx: MigrationContext) -> None:
     """migrate stale ``gateway.token_env`` references.
 
-    The 0.4.0 migration above renames ``OPENCLAW_GATEWAY_TOKEN`` to
-    ``DEFENSECLAW_GATEWAY_TOKEN`` in ``~/.defenseclaw/.env`` but the
+    The 0.4.0 migration above generates ``DEFENSECLAW_GATEWAY_TOKEN`` in
+    ``~/.defenseclaw/.env`` but the
     legacy installer also wrote ``gateway.token_env: OPENCLAW_GATEWAY_TOKEN``
     into ``config.yaml``. Python and TypeScript clients honour an
     explicit ``token_env`` first, so on upgraded installs they kept
@@ -1430,8 +1422,7 @@ def _dotenv_update_keys_locked(
     ``False`` on a write failure (after logging via ``click.echo``).
 
     Used by ``_migrate_0_4_0_token_bootstrap`` to set
-    ``DEFENSECLAW_GATEWAY_TOKEN`` and to retire
-    ``OPENCLAW_GATEWAY_TOKEN`` without trampling operator-curated
+    ``DEFENSECLAW_GATEWAY_TOKEN`` without trampling operator-curated
     comments. The same helper is suitable for any future migration
     that needs to flip a single key in an existing .env.
     """
@@ -2232,48 +2223,8 @@ def _align_gateway_token_env_in_config(ctx: MigrationContext) -> None:
     if text is None:
         return
 
-    # Scope the rewrite to the ``gateway:`` block (via the shared
-    # CRLF/EOF-aware block matcher) so a stray ``token_env:`` under
-    # another section is never touched.
-    block_match = _find_top_level_block(text, "gateway")
-    if not block_match:
-        return
-
-    body_start = block_match.start("body")
-    body_end = block_match.end("body")
-    body = block_match.group("body")
-
-    # Match the ``token_env: OPENCLAW_GATEWAY_TOKEN`` line. The value
-    # may be unquoted (most common), single-quoted, or double-quoted;
-    # we accept all three so we never miss a legitimately-formatted
-    # legacy entry. An inline comment after the value is preserved
-    # because the substitution only touches the captured value group.
-    # ``(?:\r?\n|$)`` in the suffix keeps a CRLF terminator intact in
-    # the rewritten line (rather than dropping the ``\r`` and leaving
-    # mixed terminators) and still matches a final line with no
-    # trailing newline.
-    pattern = re.compile(
-        r"""
-        (?P<prefix>^[ \t]+token_env\s*:\s*)   # indent + key + colon + space
-        (?P<quote>["']?)                       # optional opening quote
-        OPENCLAW_GATEWAY_TOKEN                 # the literal legacy value
-        (?P=quote)                             # matching closing quote
-        (?P<suffix>[ \t]*(?:\#[^\n]*)?(?:\r?\n|$))  # trailing space + optional comment + EOL/EOF
-        """,
-        flags=re.MULTILINE | re.VERBOSE,
-    )
-
-    new_body, count = pattern.subn(
-        lambda m: (
-            f"{m.group('prefix')}{m.group('quote')}DEFENSECLAW_GATEWAY_TOKEN{m.group('quote')}{m.group('suffix')}"
-        ),
-        body,
-    )
-    if count == 0:
-        return
-
-    new_text = text[:body_start] + new_body + text[body_end:]
-    if new_text == text:
+    new_text = _gateway_token_env_rewritten(text)
+    if new_text is None:
         return
 
     if not _atomic_write_config(cfg_path, new_text):
@@ -4118,7 +4069,7 @@ def _restore_set_aside_keys(data_dir: str, config_path: str) -> None:
     """
 
     from defenseclaw.config_writer import ACTOR_MIGRATION, Change, apply, plain_error
-    from defenseclaw.upgrade_shim import NEWER_CONFIG_KEYS, SET_ASIDE_FILE
+    from defenseclaw.upgrade_shim import IN_PROCESS_CLASSIFIERS, SET_ASIDE_FILE, config_value, newer_config_key
 
     path = os.path.join(data_dir, SET_ASIDE_FILE)
     try:
@@ -4133,40 +4084,197 @@ def _restore_set_aside_keys(data_dir: str, config_path: str) -> None:
     if not isinstance(keys, dict):
         ux.warn(f"{path} lists no keys; remove it")
         return
-    known = {key for key, _since in NEWER_CONFIG_KEYS}
+    items = record.get("items")
+    items = items if isinstance(items, dict) else {}
     current = yaml.safe_load(_read_config_text(config_path) or "") or {}
     put: dict[str, object] = {}
+    moved: dict[str, object] = {}
     for key, value in keys.items():
-        if key not in known:
+        entry = newer_config_key(key)
+        if entry is None or config_value(current, key) not in (None, ""):
             continue
-        node: object = current
-        for part in key.split("."):
-            node = node.get(part) if isinstance(node, dict) else None
-        if node in (None, ""):
+        if entry[0] != key and not _set_aside_owner_is_there(current, key, items):
+            # A key inside a list item or a map value (rel-1-0-10:GAP-0644) goes back only onto
+            # the item it came from: same place, same name. Never onto another model.
+            moved[key] = value
+            continue
+        put[key] = value
+    # rel-1-0-10:GAP-0767: decisions set aside whole go back to their place, unless one with
+    # the same name was added on the older release.
+    held_decisions = record.get("decisions") if isinstance(record.get("decisions"), list) else []
+    decisions = config_value(current, "routing.decisions")
+    decisions = list(decisions) if isinstance(decisions, list) else []
+    taken = {d.get("name") for d in decisions if isinstance(d, dict)}
+    returned: list[dict] = []
+    kept_decisions: list[dict] = []
+    for held in sorted((d for d in held_decisions if isinstance(d, dict)), key=lambda d: int(d.get("index") or 0)):
+        value = held.get("value")
+        name = value.get("name") if isinstance(value, dict) else None
+        if not isinstance(name, str):
+            continue
+        if name in taken:
+            # Kept in the record (below): the older release added a decision with this name.
+            kept_decisions.append(held)
+            ux.warn(
+                f"Did not put back the routing decision {name}: config.yaml has one with that name again. "
+                f"It is kept in {path}: {json.dumps(value, sort_keys=True)}"
+            )
+            continue
+        decisions.insert(min(int(held.get("index") or 0), len(decisions)), value)
+        taken.add(name)
+        returned.append(held)
+    # Substrate profile assignments set aside whole (upgrade_shim.NEWER_ITEM_KEYS) go back to
+    # their places in their original order: the lowest index first, each where it was.
+    held_assignments = record.get("assignments") if isinstance(record.get("assignments"), list) else []
+    assignments = config_value(current, "guardrail.profile_assignments")
+    assignments = list(assignments) if isinstance(assignments, list) else []
+    returned_assignments: list[dict] = []
+    kept_assignments: list[dict] = []
+    for held in sorted(
+        (a for a in held_assignments if isinstance(a, dict) and isinstance(a.get("value"), dict)),
+        key=lambda a: int(a.get("index") or 0),
+    ):
+        if held["value"] not in assignments:
+            assignments.insert(min(int(held.get("index") or 0), len(assignments)), held["value"])
+        returned_assignments.append(held)
+    # rel-1-0-10:GAP-0769: routing the downgrade switched off for the older release (it could not
+    # run the in-process classifier) is switched back on with that classifier.
+    switched = record.get("switched") if isinstance(record.get("switched"), dict) else {}
+    classifier = put.get("routing.classifier", config_value(current, "routing.classifier"))
+    for key, value in switched.items():
+        if key == "routing.enabled" and classifier in IN_PROCESS_CLASSIFIERS and config_value(current, key) in (None, False):
             put[key] = value
+            ux.ok(f"Routing is on again with the {classifier} classifier, as before the downgrade", indent="    ")
+    if moved:
+        # Kept in the record (below), named by the item they belonged to, never by an index that moved.
+        for key, value in moved.items():
+            owner = next((name for item, name in items.items() if key.startswith(item + ".")), "")
+            where = f"the routing model named {owner}" if owner else "its block"
+            setting = key.rsplit(".", 1)[-1]
+            ux.warn(
+                f"Did not put back {setting} of {where} (set aside by the downgrade as {key}): it is gone or "
+                f"moved since then. Its value is kept in {path}: {json.dumps(value, sort_keys=True)}; add it "
+                f"to {where} in config.yaml, then remove that entry from {path}"
+            )
+    refused: dict[str, object] = {}  # rel-1-0-10:GAP-1145: kept in the record, set by hand
     if put:
+        why = f"put back after the downgrade to {record.get('for') or 'an older release'}"
+
+        def put_back(group: dict[str, object]) -> Exception | None:
+            try:
+                apply([Change(key, value) for key, value in group.items()], ACTOR_MIGRATION, why, path=config_path)
+            except Exception as exc:  # noqa: BLE001 - a refused value is named, the upgrade goes on
+                return exc
+            return None
+
+        # One try keeps the keys together, as one edit. A refused value must not hold back the
+        # others: then the routing.* keys (an alias, a classifier, a threshold refer to each
+        # other) are retried as one group and every other key alone, each validated as before.
+        failures: list[tuple[dict[str, object], Exception]] = []
+        failure = put_back(put)
+        if failure is None:
+            ux.ok(f"Put back {', '.join(put)}, set aside by the downgrade", indent="    ")
+        else:
+            routing_keys = {key: value for key, value in put.items() if key.startswith("routing.")}
+            groups = [{key: value} for key, value in put.items() if key not in routing_keys]
+            if routing_keys:
+                groups.append(routing_keys)
+            if len(groups) == 1:
+                failures.append((put, failure))
+            else:
+                for group in groups:
+                    group_failure = put_back(group)
+                    if group_failure is None:
+                        ux.ok(f"Put back {', '.join(group)}, set aside by the downgrade", indent="    ")
+                    else:
+                        failures.append((group, group_failure))
+        for group, group_failure in failures:
+            refused.update(group)
+            commands = "; ".join(f"defenseclaw config set {key} {value}" for key, value in group.items())
+            ux.warn(f"Could not put back {', '.join(group)} ({plain_error(group_failure)}); set it again with: {commands}")
+    if returned:
+        # Apart from the keys: a decision the older release's edits no longer fit (a model or
+        # signal it names is gone) is refused alone and kept, and never holds the rest back.
         try:
             apply(
-                [Change(key, value) for key, value in put.items()],
+                [Change("routing.decisions", decisions)],
                 ACTOR_MIGRATION,
-                f"put back after the downgrade to {record.get('for') or 'an older release'}",
+                f"put back routing decisions after the downgrade to {record.get('for') or 'an older release'}",
                 path=config_path,
             )
-        except Exception as exc:  # noqa: BLE001 - a refused value is named, the upgrade goes on
-            commands = "; ".join(f"defenseclaw config set {key} {value}" for key, value in put.items())
-            ux.warn(f"Could not put back {', '.join(put)} ({plain_error(exc)}); set it again with: {commands}")
-            return
-        ux.ok(f"Put back {', '.join(put)}, set aside by the downgrade", indent="    ")
-    later = {key: value for key, value in keys.items() if key not in known}
+            ux.ok(
+                f"Put back the routing decisions {', '.join(str(d['value'].get('name')) for d in returned)}",
+                indent="    ",
+            )
+        except Exception as exc:  # noqa: BLE001 - kept in the record, named with its value
+            kept_decisions += returned
+            for held in returned:
+                ux.warn(
+                    f"Could not put back the routing decision {held['value'].get('name')} ({plain_error(exc)}). "
+                    f"It is kept in {path}: {json.dumps(held['value'], sort_keys=True)}"
+                )
+    if returned_assignments:
+        # Apart from the rest, as the decisions: an assignment whose profile is gone is refused
+        # alone and kept in the record with its value.
+        try:
+            apply(
+                [Change("guardrail.profile_assignments", assignments)],
+                ACTOR_MIGRATION,
+                f"put back Substrate profile assignments after the downgrade to {record.get('for') or 'an older release'}",
+                path=config_path,
+            )
+            ux.ok(
+                "Put back the Substrate profile assignments of "
+                + ", ".join(str(a.get("profile")) for a in returned_assignments),
+                indent="    ",
+            )
+        except Exception as exc:  # noqa: BLE001 - kept in the record, named with its value
+            kept_assignments += returned_assignments
+            for held in returned_assignments:
+                ux.warn(
+                    f"Could not put back the Substrate profile assignment of {held.get('profile')} "
+                    f"({plain_error(exc)}). It is kept in {path}: {json.dumps(held['value'], sort_keys=True)}"
+                )
+    later = {key: value for key, value in keys.items() if newer_config_key(key) is None or key in moved or key in refused}
     try:
-        if later:
+        if later or kept_decisions or kept_assignments:
             from defenseclaw.upgrade_shim import _write_private_json
 
-            _write_private_json(path, {**record, "keys": later})
+            kept = {
+                key: value for key, value in record.items() if key not in ("items", "decisions", "assignments", "switched")
+            }
+            kept["keys"] = later
+            if "routing.enabled" in refused and isinstance(switched, dict) and "routing.enabled" in switched:
+                kept["switched"] = {"routing.enabled": switched["routing.enabled"]}
+            later_items = {item: name for item, name in items.items() if any(k.startswith(item + ".") for k in later)}
+            if later_items:
+                kept["items"] = later_items
+            if kept_decisions:
+                kept["decisions"] = kept_decisions
+            if kept_assignments:
+                kept["assignments"] = kept_assignments
+            _write_private_json(path, kept)
         else:
             os.remove(path)
     except OSError as exc:
         ux.warn(f"Could not update {path} ({exc})")
+
+
+def _set_aside_owner_is_there(current: object, key: str, items: dict) -> bool:
+    """A set-aside key inside a list item or a map value can go back: its parent is still a
+    mapping, and every list item on the way has the name it had at the downgrade."""
+
+    from defenseclaw.upgrade_shim import config_value
+
+    parent = key.rsplit(".", 1)[0]
+    if not isinstance(config_value(current, parent), dict):
+        return False
+    for item, name in items.items():
+        if key.startswith(item + "."):
+            node = config_value(current, item)
+            if not isinstance(node, dict) or node.get("name") != name:
+                return False
+    return True
 
 
 def _seal_windows_hook_credentials(data_dir: str) -> None:
@@ -4521,6 +4629,169 @@ def _secure_client_stays_on_v8(config_path: str) -> bool:
     return text is not None and secure_client_managed(text.encode("utf-8"))
 
 
+# ---------------------------------------------------------------------------
+# Upgrade step: the DefenseClaw master token is not the OpenClaw token (R-TOK)
+# ---------------------------------------------------------------------------
+#
+# DefenseClaw 1.0.9 and earlier used the OpenClaw gateway.auth.token as its own
+# API token: init and setup saved it as OPENCLAW_GATEWAY_TOKEN and set
+# gateway.token_env to that name, and setup openclaw copied it under both
+# gateway-token names. The OpenClaw account, its plugins and any tool that
+# reads openclaw.json then held the token that can allow, unblock and stop the
+# gateway. From 1.0.10 OPENCLAW_GATEWAY_TOKEN is only the credential the
+# gateway presents to the OpenClaw WebSocket. Like the connector roster step
+# this one has no config_version: it runs whenever an install still has that
+# shape.
+
+def _gateway_token_env_rewritten(text: str) -> str | None:
+    """``text`` with ``gateway.token_env: OPENCLAW_GATEWAY_TOKEN`` repointed at
+    ``DEFENSECLAW_GATEWAY_TOKEN``, or None when it has no such line.
+
+    Only the ``token_env:`` line of the top-level ``gateway:`` block changes
+    (found with the shared CRLF/EOF-aware block matcher): its indentation,
+    quotes, inline comment and line ending stay as they are, and so does every
+    other byte. The name compares case-insensitively on Windows.
+    """
+    block_match = _find_top_level_block(text, "gateway")
+    if not block_match:
+        return None
+
+    body_start = block_match.start("body")
+    body_end = block_match.end("body")
+    body = block_match.group("body")
+
+    pattern = re.compile(
+        r"""
+        (?P<prefix>^[ \t]+token_env\s*:\s*)   # indent + key + colon + space
+        (?P<quote>["']?)                       # optional opening quote
+        OPENCLAW_GATEWAY_TOKEN                 # the OpenClaw credential name
+        (?P=quote)                             # matching closing quote
+        (?P<suffix>[ \t]*(?:\#[^\n]*)?(?:\r?\n|$))  # trailing space + optional comment + EOL/EOF
+        """,
+        flags=re.MULTILINE | re.VERBOSE | (re.IGNORECASE if os.name == "nt" else 0),
+    )
+
+    new_body, count = pattern.subn(
+        lambda m: (
+            f"{m.group('prefix')}{m.group('quote')}DEFENSECLAW_GATEWAY_TOKEN{m.group('quote')}{m.group('suffix')}"
+        ),
+        body,
+    )
+    if count == 0:
+        return None
+    new_text = text[:body_start] + new_body + text[body_end:]
+    return None if new_text == text else new_text
+
+
+_GATEWAY_TOKEN_SPLIT_STEP_NAME = "give the DefenseClaw gateway its own token, separate from the OpenClaw token"
+
+
+def _gateway_token_env_names_openclaw(raw: object) -> bool:
+    gateway = raw.get("gateway") if isinstance(raw, dict) else None
+    token_env = gateway.get("token_env") if isinstance(gateway, dict) else None
+    if not isinstance(token_env, str):
+        return False
+    from defenseclaw.config import is_openclaw_gateway_token_env
+
+    return is_openclaw_gateway_token_env(token_env)
+
+
+def _openclaw_json_gateway_token(raw: object) -> str:
+    """The gateway.auth.token of the openclaw.json config.yaml names, or ""."""
+    claw = raw.get("claw") if isinstance(raw, dict) else None
+    path = claw.get("config_file") if isinstance(claw, dict) else None
+    if not isinstance(path, str) or not path.strip():
+        home = claw.get("home_dir") if isinstance(claw, dict) else None
+        home = home if isinstance(home, str) and home.strip() else "~/.openclaw"
+        path = os.path.join(home, "openclaw.json")
+    try:
+        from defenseclaw.connector_paths import _read_openclaw_json, openclaw_gateway_token
+
+        return openclaw_gateway_token(_read_openclaw_json(os.path.expanduser(path))).value.strip()
+    except Exception:  # noqa: BLE001 - an unreadable openclaw.json proves nothing
+        return ""
+
+
+def _gateway_token_split_config(config_path: str) -> object | None:
+    """The parsed config when the step may apply to it, else None.
+
+    A Secure Client config and a managed enterprise one are left alone: the
+    service owns their .env, and the gateway mints its own token at start.
+    """
+    text = _read_config_text(config_path) if os.path.isfile(config_path) else None
+    if text is None or _guardrail_runtime_migration_is_managed(text):
+        return None
+    from defenseclaw.config_writer import secure_client_managed
+
+    if secure_client_managed(text.encode("utf-8")):
+        return None
+    try:
+        return yaml.safe_load(text) or {}
+    except yaml.YAMLError:
+        return None
+
+
+def _gateway_token_split_pending(config_path: str, data_dir: str) -> bool:
+    """Report an install whose master token is, or may become, the OpenClaw token."""
+    raw = _gateway_token_split_config(config_path)
+    if raw is None:
+        return False
+    if _gateway_token_env_names_openclaw(raw):
+        return True
+    from defenseclaw.connector_paths import is_secret_ref_text
+
+    env = _parse_dotenv(os.path.join(data_dir, ".env"))
+    master = env.get("DEFENSECLAW_GATEWAY_TOKEN", "").strip()
+    openclaw = env.get("OPENCLAW_GATEWAY_TOKEN", "").strip()
+    master = "" if is_secret_ref_text(master) else master
+    openclaw = "" if is_secret_ref_text(openclaw) else openclaw
+    if openclaw and (not master or master == openclaw):
+        return True
+    return bool(master) and master == _openclaw_json_gateway_token(raw)
+
+
+def _migrate_gateway_token_split(ctx: MigrationContext) -> None:
+    """Mint a DefenseClaw master token and repoint gateway.token_env.
+
+    OPENCLAW_GATEWAY_TOKEN stays as it is: the gateway still connects to
+    OpenClaw with it. The new DEFENSECLAW_GATEWAY_TOKEN replaces a missing one
+    or one equal to the OpenClaw token. Connector hooks keep working: they
+    authenticate with their own scoped tokens, and the gateway rewrites the
+    shared hooks/.token copy when it starts.
+    """
+    config_path = ctx.active_config_path()
+    raw = _gateway_token_split_config(config_path)
+    if raw is None:
+        return
+    from defenseclaw.commands.cmd_setup import _ensure_master_gateway_token
+
+    try:
+        minted = _ensure_master_gateway_token(ctx.data_dir, openclaw_token=_openclaw_json_gateway_token(raw))
+    except (click.ClickException, OSError) as exc:
+        # The gateway mints the token at its next start; the upgrade goes on.
+        ux.warn(f"could not write a DefenseClaw gateway token to .env ({type(exc).__name__}); "
+                "the gateway generates one when it starts", indent="    ")
+        minted = False
+    if minted:
+        ctx.changes.append(
+            "generated DEFENSECLAW_GATEWAY_TOKEN, a DefenseClaw gateway token separate from the OpenClaw "
+            "gateway token (OPENCLAW_GATEWAY_TOKEN now only connects the gateway to OpenClaw)"
+        )
+    if not _gateway_token_env_names_openclaw(raw):
+        return
+    text = _read_config_text(config_path)
+    updated = _gateway_token_env_rewritten(text) if text is not None else None
+    if updated is None:
+        return
+    from defenseclaw.config_writer import ACTOR_MIGRATION, ConfigWriteError, replace_document
+
+    try:
+        replace_document(updated.encode("utf-8"), ACTOR_MIGRATION, "gateway.token_env", path=config_path)
+    except (ConfigWriteError, OSError, ValueError) as exc:
+        raise MigrationError(f"could not repoint gateway.token_env in {config_path}: {exc}") from exc
+    ctx.changes.append("repointed gateway.token_env from OPENCLAW_GATEWAY_TOKEN to DEFENSECLAW_GATEWAY_TOKEN")
+
+
 def _pending_migration_steps(
     version: int,
     from_version: str | None,
@@ -4558,6 +4829,8 @@ def _pending_migration_steps(
         steps.append((_PROVIDERS_FOLD_STEP_NAME, _fold_legacy_providers_overlay))
     if _connector_roster_pending(config_path, data_dir):
         steps.append(("update renamed and removed connectors", _migrate_connector_roster))
+    if _gateway_token_split_pending(config_path, data_dir):
+        steps.append((_GATEWAY_TOKEN_SPLIT_STEP_NAME, _migrate_gateway_token_split))
     return steps
 
 

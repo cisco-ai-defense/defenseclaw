@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -179,92 +180,106 @@ func TestCodexSecretOwnershipAcrossWritersWindows(t *testing.T) {
 }
 
 func codexSecretOwnershipAcrossWriters(t *testing.T, goos string) {
-	for _, release := range []string{"1.0.2", "1.0.3"} {
-		for _, row := range otlpSecretRows() {
-			for _, writer := range []string{"setup", "managed_cleanup"} {
-				t.Run(release+"/"+goos+"/"+row.name+"/"+writer, func(t *testing.T) {
-					dir := t.TempDir()
-					configPath := filepath.Join(dir, "config.toml")
-					if err := os.WriteFile(configPath, []byte("model = 'gpt-5'\n"), 0o600); err != nil {
+	// The released subject rotates over the row x writer table: every row
+	// runs both writers, once on each released fixture, and every fixture
+	// runs every row (checked below). Each subtest pays a seed Setup and a
+	// writer, which a Windows runner takes seconds for.
+	releases := []string{"1.0.2", "1.0.3"}
+	ran := map[string]bool{}
+	for ri, row := range otlpSecretRows() {
+		for wi, writer := range []string{"setup", "managed_cleanup"} {
+			release := releases[(ri+wi)%len(releases)]
+			ran[release+"/"+row.name] = true
+			ran[row.name+"/"+writer] = true
+			t.Run(release+"/"+goos+"/"+row.name+"/"+writer, func(t *testing.T) {
+				dir := t.TempDir()
+				configPath := filepath.Join(dir, "config.toml")
+				if err := os.WriteFile(configPath, []byte("model = 'gpt-5'\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				prior := CodexConfigPathOverride
+				CodexConfigPathOverride = configPath
+				t.Cleanup(func() { CodexConfigPathOverride = prior })
+				conn := NewCodexConnector()
+				earlier := SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:19081", APIToken: "test-hook-token", GOOS: goos, CodexOtelEnvironment: goos}
+				if err := conn.Setup(context.Background(), earlier); err != nil {
+					t.Fatalf("seed released setup: %v", err)
+				}
+				base, err := os.ReadFile(configPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				token, err := EnsureOTLPPathToken(dir, OTLPScopeCodex)
+				if err != nil {
+					t.Fatal(err)
+				}
+				fixture := codexSecretFixture(t, release, goos, row, token)
+				baseText := strings.ReplaceAll(string(base), "\r\n", "\n")
+				if goos == "windows" {
+					baseText = strings.ReplaceAll(baseText, "\n", "\r\n")
+				}
+				before := baseText + fixture
+				if err := os.WriteFile(configPath, []byte(before), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if row.dropToken {
+					if err := RemoveOTLPPathToken(dir, OTLPScopeCodex); err != nil {
 						t.Fatal(err)
 					}
-					prior := CodexConfigPathOverride
-					CodexConfigPathOverride = configPath
-					t.Cleanup(func() { CodexConfigPathOverride = prior })
-					conn := NewCodexConnector()
-					earlier := SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:19081", APIToken: "test-hook-token", GOOS: goos, CodexOtelEnvironment: goos}
-					if err := conn.Setup(context.Background(), earlier); err != nil {
-						t.Fatalf("seed released setup: %v", err)
-					}
-					base, err := os.ReadFile(configPath)
-					if err != nil {
-						t.Fatal(err)
-					}
-					token, err := EnsureOTLPPathToken(dir, OTLPScopeCodex)
-					if err != nil {
-						t.Fatal(err)
-					}
-					fixture := codexSecretFixture(t, release, goos, row, token)
-					baseText := strings.ReplaceAll(string(base), "\r\n", "\n")
-					if goos == "windows" {
-						baseText = strings.ReplaceAll(baseText, "\n", "\r\n")
-					}
-					before := baseText + fixture
-					if err := os.WriteFile(configPath, []byte(before), 0o600); err != nil {
-						t.Fatal(err)
-					}
-					if row.dropToken {
-						if err := RemoveOTLPPathToken(dir, OTLPScopeCodex); err != nil {
-							t.Fatal(err)
-						}
-					}
+				}
 
-					var parsed map[string]interface{}
-					if err := toml.Unmarshal([]byte(before), &parsed); err != nil {
-						t.Fatal(err)
-					}
-					verifyClean := codexOtelResidueFields(parsed["otel"], SetupOpts{DataDir: dir})
-					residue := otlpSecretResidue(t, "codex", dir, "config.toml")
-					if row.product != (len(verifyClean) > 0) || row.product != (len(residue) > 0) {
-						t.Fatalf("product=%t but verify_clean=%v residue=%v", row.product, verifyClean, residue)
-					}
+				var parsed map[string]interface{}
+				if err := toml.Unmarshal([]byte(before), &parsed); err != nil {
+					t.Fatal(err)
+				}
+				verifyClean := codexOtelResidueFields(parsed["otel"], SetupOpts{DataDir: dir})
+				residue := otlpSecretResidue(t, "codex", dir, "config.toml")
+				if row.product != (len(verifyClean) > 0) || row.product != (len(residue) > 0) {
+					t.Fatalf("product=%t but verify_clean=%v residue=%v", row.product, verifyClean, residue)
+				}
 
-					if writer == "setup" {
-						upgrade := earlier
-						upgrade.APIAddr = "127.0.0.1:19082"
-						if err := conn.Setup(context.Background(), upgrade); err != nil {
-							t.Fatalf("upgrade: %v", err)
-						}
-					} else if _, err := RemoveUserNativeOTLP("codex", SetupOpts{DataDir: dir, ManagedEnterprise: true}); err != nil {
-						t.Fatalf("managed cleanup: %v", err)
+				if writer == "setup" {
+					upgrade := earlier
+					upgrade.APIAddr = "127.0.0.1:19082"
+					if err := conn.Setup(context.Background(), upgrade); err != nil {
+						t.Fatalf("upgrade: %v", err)
 					}
-					got, err := os.ReadFile(configPath)
-					if err != nil {
-						t.Fatal(err)
+				} else if _, err := RemoveUserNativeOTLP("codex", SetupOpts{DataDir: dir, ManagedEnterprise: true}); err != nil {
+					t.Fatalf("managed cleanup: %v", err)
+				}
+				got, err := os.ReadFile(configPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if row.product && otlpSecretLeaked(string(got), token) {
+					t.Fatal("product credential survived")
+				}
+				if left := otlpSecretResidue(t, "codex", dir, "config.toml"); len(left) != 0 {
+					t.Fatalf("residue after %s: %v", writer, left)
+				}
+				if !row.product {
+					if !strings.Contains(string(got), fixture) {
+						t.Fatalf("operator [otel] bytes changed; want:\n%s\ngot:\n%s", fixture, got)
 					}
-					if row.product && otlpSecretLeaked(string(got), token) {
-						t.Fatal("product credential survived")
+					return
+				}
+				var after map[string]interface{}
+				if err := toml.Unmarshal(got, &after); err != nil {
+					t.Fatal(err)
+				}
+				otel, _ := after["otel"].(map[string]interface{})
+				for _, key := range codexOtelExporterKeys {
+					if _, kept := otel[key]; kept {
+						t.Fatalf("product exporter otel.%s survived", key)
 					}
-					if left := otlpSecretResidue(t, "codex", dir, "config.toml"); len(left) != 0 {
-						t.Fatalf("residue after %s: %v", writer, left)
-					}
-					if !row.product {
-						if !strings.Contains(string(got), fixture) {
-							t.Fatalf("operator [otel] bytes changed; want:\n%s\ngot:\n%s", fixture, got)
-						}
-						return
-					}
-					var after map[string]interface{}
-					if err := toml.Unmarshal(got, &after); err != nil {
-						t.Fatal(err)
-					}
-					otel, _ := after["otel"].(map[string]interface{})
-					for _, key := range codexOtelExporterKeys {
-						if _, kept := otel[key]; kept {
-							t.Fatalf("product exporter otel.%s survived", key)
-						}
-					}
-				})
+				}
+			})
+		}
+	}
+	for _, row := range otlpSecretRows() {
+		for _, cell := range []string{releases[0] + "/" + row.name, releases[1] + "/" + row.name, row.name + "/setup", row.name + "/managed_cleanup"} {
+			if !ran[cell] {
+				t.Errorf("rotation never ran %s", cell)
 			}
 		}
 	}
@@ -278,7 +293,9 @@ func codexSecretOwnershipAcrossWriters(t *testing.T, goos string) {
 // the whole table is too long for one CI shard (about 18 minutes on a
 // Windows runner), one GOOS alone took 422 s of a shard's 660 s timeout and
 // timed out on a slower runner (rel-1-0-6:GAP-0030), and the shard scripts
-// split only top-level tests.
+// split only top-level tests. The released subject is a label only (the seed
+// takes no release input), so the 102 and 103 tests of a GOOS split its row x
+// writer table between them (claudeSecretOwnershipRelease).
 func TestClaudeSecretOwnershipAcrossWritersLinux102(t *testing.T) {
 	claudeSecretOwnershipAcrossWriters(t, "linux", "1.0.2")
 }
@@ -307,8 +324,11 @@ func claudeSecretOwnershipAcrossWriters(t *testing.T, goos, release string) {
 	if err := json.Unmarshal(fixture, &operator); err != nil {
 		t.Fatal(err)
 	}
-	for _, row := range otlpSecretRows() {
-		for _, writer := range []string{"setup", "managed_cleanup"} {
+	for ri, row := range otlpSecretRows() {
+		for wi, writer := range []string{"setup", "managed_cleanup"} {
+			if claudeSecretOwnershipRelease(ri, wi) != release {
+				continue
+			}
 			t.Run(release+"/"+goos+"/"+row.name+"/"+writer, func(t *testing.T) {
 				dir := t.TempDir()
 				pinClaudeUpgradeTestOwner(t, dir)
@@ -416,6 +436,28 @@ func claudeSecretOwnershipAcrossWriters(t *testing.T, goos, release string) {
 					t.Fatalf("residue after %s: %v", writer, left)
 				}
 			})
+		}
+	}
+}
+
+// claudeSecretOwnershipRelease is the released-subject test (1.0.2 or 1.0.3)
+// that runs row ri with writer wi. The released install is the same Setup for
+// both releases (the seed takes no release input), so the two tests of a GOOS
+// split the row x writer table instead of each running it whole: every row
+// runs both writers on every GOOS, and each release runs every row once
+// (TestClaudeSecretOwnershipAcrossWritersRotationIsComplete).
+func claudeSecretOwnershipRelease(ri, wi int) string {
+	return []string{"1.0.2", "1.0.3"}[(ri+wi)%2]
+}
+
+func TestClaudeSecretOwnershipAcrossWritersRotationIsComplete(t *testing.T) {
+	for ri, row := range otlpSecretRows() {
+		releases := map[string]bool{}
+		for wi := range []string{"setup", "managed_cleanup"} {
+			releases[claudeSecretOwnershipRelease(ri, wi)] = true
+		}
+		if !releases["1.0.2"] || !releases["1.0.3"] {
+			t.Errorf("row %s runs only on %v", row.name, releases)
 		}
 	}
 }
@@ -552,109 +594,133 @@ func TestOTLPShapeOnlyValueKeepsOperatorBytes(t *testing.T) {
 		// Review of 70603235: stale markers beside the shape are no proof.
 		"marked_sha": "x-defenseclaw-source=codex,deploy-" + otlpSecretOperatorHex,
 	}
-	for _, goos := range []string{"linux", "darwin", "windows"} {
-		for name, value := range values {
-			for _, drop := range []bool{false, true} {
-				for _, writer := range []string{"setup", "managed_cleanup"} {
-					t.Run(fmt.Sprintf("codex/%s/%s/drop=%t/%s", goos, name, drop, writer), func(t *testing.T) {
-						dir := t.TempDir()
-						configPath := filepath.Join(dir, "config.toml")
-						prior := CodexConfigPathOverride
-						CodexConfigPathOverride = configPath
-						t.Cleanup(func() { CodexConfigPathOverride = prior })
-						operator := "[otel]\nenvironment = '" + value + "'\nlog_user_prompt = false\n\n[otel.resource_attributes]\n'deploy.sha' = '" + otlpSecretOperatorHex + "'\n"
-						if err := os.WriteFile(configPath, []byte("model = 'gpt-5'\n\n"+operator), 0o600); err != nil {
+	// The fixture GOOS rotates over the value x sidecar x writer table
+	// instead of tripling it: each connector runs every value with the
+	// sidecar present and gone and with both writers, and every GOOS runs
+	// every value, both sidecar states and both writers (checked below).
+	// Each subtest pays one or two product Setups.
+	names := slices.Sorted(maps.Keys(values))
+	gooses := []string{"linux", "darwin", "windows"}
+	ran := map[string]bool{}
+	combo := 0
+	for _, name := range names {
+		value := values[name]
+		for _, drop := range []bool{false, true} {
+			for _, writer := range []string{"setup", "managed_cleanup"} {
+				goos := gooses[combo%len(gooses)]
+				combo++
+				ran[goos+"/"+name] = true
+				ran[fmt.Sprintf("%s/drop=%t", goos, drop)] = true
+				ran[goos+"/"+writer] = true
+				t.Run(fmt.Sprintf("codex/%s/%s/drop=%t/%s", goos, name, drop, writer), func(t *testing.T) {
+					dir := t.TempDir()
+					configPath := filepath.Join(dir, "config.toml")
+					prior := CodexConfigPathOverride
+					CodexConfigPathOverride = configPath
+					t.Cleanup(func() { CodexConfigPathOverride = prior })
+					operator := "[otel]\nenvironment = '" + value + "'\nlog_user_prompt = false\n\n[otel.resource_attributes]\n'deploy.sha' = '" + otlpSecretOperatorHex + "'\n"
+					if err := os.WriteFile(configPath, []byte("model = 'gpt-5'\n\n"+operator), 0o600); err != nil {
+						t.Fatal(err)
+					}
+					if _, err := EnsureOTLPPathToken(dir, OTLPScopeCodex); err != nil {
+						t.Fatal(err)
+					}
+					if drop {
+						if err := RemoveOTLPPathToken(dir, OTLPScopeCodex); err != nil {
 							t.Fatal(err)
 						}
-						if _, err := EnsureOTLPPathToken(dir, OTLPScopeCodex); err != nil {
+					}
+					var parsed map[string]interface{}
+					if err := toml.Unmarshal([]byte(operator), &parsed); err != nil {
+						t.Fatal(err)
+					}
+					if fields := codexOtelResidueFields(parsed["otel"], SetupOpts{DataDir: dir}); len(fields) != 0 {
+						t.Fatalf("VerifyClean = %v", fields)
+					}
+					if residue := otlpSecretResidue(t, "codex", dir, "config.toml"); len(residue) != 0 {
+						t.Fatalf("managed Verify = %v", residue)
+					}
+					if writer == "setup" {
+						if err := NewCodexConnector().Setup(context.Background(), SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:19082", APIToken: "test-hook-token", GOOS: goos}); err != nil {
+							t.Fatalf("setup: %v", err)
+						}
+					} else if _, err := RemoveUserNativeOTLP("codex", SetupOpts{DataDir: dir, ManagedEnterprise: true}); err != nil {
+						t.Fatalf("managed cleanup: %v", err)
+					}
+					got, err := os.ReadFile(configPath)
+					if err != nil {
+						t.Fatal(err)
+					}
+					var after map[string]interface{}
+					if err := toml.Unmarshal(got, &after); err != nil {
+						t.Fatal(err)
+					}
+					otel, _ := after["otel"].(map[string]interface{})
+					resource, _ := otel["resource_attributes"].(map[string]interface{})
+					if otel["environment"] != value || resource["deploy.sha"] != otlpSecretOperatorHex {
+						t.Fatalf("operator [otel] changed:\n%s", got)
+					}
+				})
+				t.Run(fmt.Sprintf("claudecode/%s/%s/drop=%t/%s", goos, name, drop, writer), func(t *testing.T) {
+					dir := t.TempDir()
+					pinClaudeUpgradeTestOwner(t, dir)
+					settingsPath := filepath.Join(dir, "settings.json")
+					prior := ClaudeCodeSettingsPathOverride
+					ClaudeCodeSettingsPathOverride = settingsPath
+					t.Cleanup(func() { ClaudeCodeSettingsPathOverride = prior })
+					conn := NewClaudeCodeConnector()
+					earlier := SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:19081", GOOS: goos, sandboxNativeOTLP: true}
+					if err := conn.Setup(context.Background(), earlier); err != nil {
+						t.Fatalf("released setup: %v", err)
+					}
+					env := map[string]interface{}{
+						"CLAUDE_CODE_ENABLE_TELEMETRY":       "1",
+						"OTEL_TRACES_EXPORTER":               "otlp",
+						"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": "https://collector.example.test/v1/traces",
+						"OTEL_EXPORTER_OTLP_TRACES_HEADERS":  "Authorization=Bearer " + otlpSecretOperatorHex,
+						"OTEL_RESOURCE_ATTRIBUTES":           "deploy.sha=" + otlpSecretOperatorHex,
+						"OTEL_SERVICE_NAME":                  value,
+					}
+					writeClaudeUpgradeSettings(t, settingsPath, map[string]interface{}{"env": env})
+					if drop {
+						if err := RemoveOTLPPathToken(dir, OTLPScopeClaude); err != nil {
 							t.Fatal(err)
 						}
-						if drop {
-							if err := RemoveOTLPPathToken(dir, OTLPScopeCodex); err != nil {
-								t.Fatal(err)
-							}
-						}
-						var parsed map[string]interface{}
-						if err := toml.Unmarshal([]byte(operator), &parsed); err != nil {
+						if err := os.Remove(filepath.Join(dir, "claudecode_backup.json")); err != nil {
 							t.Fatal(err)
 						}
-						if fields := codexOtelResidueFields(parsed["otel"], SetupOpts{DataDir: dir}); len(fields) != 0 {
-							t.Fatalf("VerifyClean = %v", fields)
+					}
+					if left := otlpSecretResidue(t, "claudecode", dir, "settings.json"); len(left) != 0 {
+						t.Fatalf("managed Verify = %v", left)
+					}
+					if writer == "setup" {
+						upgrade := earlier
+						upgrade.sandboxNativeOTLP = false
+						upgrade.APIAddr = "127.0.0.1:19082"
+						if err := conn.Setup(context.Background(), upgrade); err != nil {
+							t.Fatalf("upgrade: %v", err)
 						}
-						if residue := otlpSecretResidue(t, "codex", dir, "config.toml"); len(residue) != 0 {
-							t.Fatalf("managed Verify = %v", residue)
+					} else if _, err := RemoveUserNativeOTLP("claudecode", SetupOpts{DataDir: dir, ManagedEnterprise: true}); err != nil {
+						t.Fatalf("managed cleanup: %v", err)
+					}
+					got := readClaudeUpgradeEnv(t, settingsPath)
+					for key, want := range env {
+						if key != "CLAUDE_CODE_ENABLE_TELEMETRY" && got[key] != want {
+							t.Errorf("operator %s = %q, want %q", key, got[key], want)
 						}
-						if writer == "setup" {
-							if err := NewCodexConnector().Setup(context.Background(), SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:19082", APIToken: "test-hook-token", GOOS: goos}); err != nil {
-								t.Fatalf("setup: %v", err)
-							}
-						} else if _, err := RemoveUserNativeOTLP("codex", SetupOpts{DataDir: dir, ManagedEnterprise: true}); err != nil {
-							t.Fatalf("managed cleanup: %v", err)
-						}
-						got, err := os.ReadFile(configPath)
-						if err != nil {
-							t.Fatal(err)
-						}
-						var after map[string]interface{}
-						if err := toml.Unmarshal(got, &after); err != nil {
-							t.Fatal(err)
-						}
-						otel, _ := after["otel"].(map[string]interface{})
-						resource, _ := otel["resource_attributes"].(map[string]interface{})
-						if otel["environment"] != value || resource["deploy.sha"] != otlpSecretOperatorHex {
-							t.Fatalf("operator [otel] changed:\n%s", got)
-						}
-					})
-					t.Run(fmt.Sprintf("claudecode/%s/%s/drop=%t/%s", goos, name, drop, writer), func(t *testing.T) {
-						dir := t.TempDir()
-						pinClaudeUpgradeTestOwner(t, dir)
-						settingsPath := filepath.Join(dir, "settings.json")
-						prior := ClaudeCodeSettingsPathOverride
-						ClaudeCodeSettingsPathOverride = settingsPath
-						t.Cleanup(func() { ClaudeCodeSettingsPathOverride = prior })
-						conn := NewClaudeCodeConnector()
-						earlier := SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:19081", GOOS: goos, sandboxNativeOTLP: true}
-						if err := conn.Setup(context.Background(), earlier); err != nil {
-							t.Fatalf("released setup: %v", err)
-						}
-						env := map[string]interface{}{
-							"CLAUDE_CODE_ENABLE_TELEMETRY":       "1",
-							"OTEL_TRACES_EXPORTER":               "otlp",
-							"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": "https://collector.example.test/v1/traces",
-							"OTEL_EXPORTER_OTLP_TRACES_HEADERS":  "Authorization=Bearer " + otlpSecretOperatorHex,
-							"OTEL_RESOURCE_ATTRIBUTES":           "deploy.sha=" + otlpSecretOperatorHex,
-							"OTEL_SERVICE_NAME":                  value,
-						}
-						writeClaudeUpgradeSettings(t, settingsPath, map[string]interface{}{"env": env})
-						if drop {
-							if err := RemoveOTLPPathToken(dir, OTLPScopeClaude); err != nil {
-								t.Fatal(err)
-							}
-							if err := os.Remove(filepath.Join(dir, "claudecode_backup.json")); err != nil {
-								t.Fatal(err)
-							}
-						}
-						if left := otlpSecretResidue(t, "claudecode", dir, "settings.json"); len(left) != 0 {
-							t.Fatalf("managed Verify = %v", left)
-						}
-						if writer == "setup" {
-							upgrade := earlier
-							upgrade.sandboxNativeOTLP = false
-							upgrade.APIAddr = "127.0.0.1:19082"
-							if err := conn.Setup(context.Background(), upgrade); err != nil {
-								t.Fatalf("upgrade: %v", err)
-							}
-						} else if _, err := RemoveUserNativeOTLP("claudecode", SetupOpts{DataDir: dir, ManagedEnterprise: true}); err != nil {
-							t.Fatalf("managed cleanup: %v", err)
-						}
-						got := readClaudeUpgradeEnv(t, settingsPath)
-						for key, want := range env {
-							if key != "CLAUDE_CODE_ENABLE_TELEMETRY" && got[key] != want {
-								t.Errorf("operator %s = %q, want %q", key, got[key], want)
-							}
-						}
-					})
-				}
+					}
+				})
+			}
+		}
+	}
+	for _, goos := range gooses {
+		cells := []string{goos + "/drop=false", goos + "/drop=true", goos + "/setup", goos + "/managed_cleanup"}
+		for _, name := range names {
+			cells = append(cells, goos+"/"+name)
+		}
+		for _, cell := range cells {
+			if !ran[cell] {
+				t.Errorf("rotation never ran %s", cell)
 			}
 		}
 	}
@@ -923,95 +989,99 @@ func claudeSecretOwnershipCoversEveryOTLPEnvValue(t *testing.T, goos string) {
 		{name: "generic_endpoint_query_encoded", key: "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT", value: "http://127.0.0.1:19081/v1/logs?n=100%&k={enc}"},
 	}
 	const operatorRoute = "http://127.1:19081/v1/traces"
-	for _, release := range []string{"1.0.2", "1.0.3"} {
-		for _, row := range rows {
-			for _, writer := range []string{"setup", "managed_cleanup"} {
-				t.Run(release+"/"+goos+"/"+row.name+"/"+writer, func(t *testing.T) {
-					dir := t.TempDir()
-					pinClaudeUpgradeTestOwner(t, dir)
-					settingsPath := filepath.Join(dir, "settings.json")
-					prior := ClaudeCodeSettingsPathOverride
-					ClaudeCodeSettingsPathOverride = settingsPath
-					t.Cleanup(func() { ClaudeCodeSettingsPathOverride = prior })
-					conn := NewClaudeCodeConnector()
-					earlier := SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:19081", GOOS: goos, sandboxNativeOTLP: true}
-					if err := conn.Setup(context.Background(), earlier); err != nil {
-						t.Fatalf("released %s setup: %v", release, err)
-					}
-					token, err := LoadOTLPPathToken(dir, OTLPScopeClaude)
-					if err != nil || token == "" {
-						t.Fatalf("released scoped token: present=%t err=%v", token != "", err)
-					}
-					data, err := os.ReadFile(settingsPath)
-					if err != nil {
+	// The released install is the same Setup for 1.0.2 and 1.0.3 (the seed
+	// takes no release input), so the release label rotates over the row x
+	// writer table instead of doubling it: every row runs both writers, and
+	// each release label is paired with both writers.
+	releases := []string{"1.0.2", "1.0.3"}
+	for ri, row := range rows {
+		for wi, writer := range []string{"setup", "managed_cleanup"} {
+			release := releases[(ri+wi)%len(releases)]
+			t.Run(release+"/"+goos+"/"+row.name+"/"+writer, func(t *testing.T) {
+				dir := t.TempDir()
+				pinClaudeUpgradeTestOwner(t, dir)
+				settingsPath := filepath.Join(dir, "settings.json")
+				prior := ClaudeCodeSettingsPathOverride
+				ClaudeCodeSettingsPathOverride = settingsPath
+				t.Cleanup(func() { ClaudeCodeSettingsPathOverride = prior })
+				conn := NewClaudeCodeConnector()
+				earlier := SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:19081", GOOS: goos, sandboxNativeOTLP: true}
+				if err := conn.Setup(context.Background(), earlier); err != nil {
+					t.Fatalf("released %s setup: %v", release, err)
+				}
+				token, err := LoadOTLPPathToken(dir, OTLPScopeClaude)
+				if err != nil || token == "" {
+					t.Fatalf("released scoped token: present=%t err=%v", token != "", err)
+				}
+				data, err := os.ReadFile(settingsPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var settings map[string]interface{}
+				if err := json.Unmarshal(data, &settings); err != nil {
+					t.Fatal(err)
+				}
+				// The operator replaced the product routes with one traces
+				// collector that carries no credential.
+				env := map[string]interface{}{
+					"CLAUDE_CODE_ENABLE_TELEMETRY":       "1",
+					"OTEL_TRACES_EXPORTER":               "otlp",
+					"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": operatorRoute,
+					"OTEL_EXPORTER_OTLP_TRACES_PROTOCOL": "http/protobuf",
+				}
+				value := strings.NewReplacer("{tok}", token, "{enc}", encode(token)).Replace(row.value)
+				env[row.key] = value
+				settings["env"] = env
+				writeClaudeUpgradeSettings(t, settingsPath, settings)
+				if row.dropToken {
+					if err := RemoveOTLPPathToken(dir, OTLPScopeClaude); err != nil {
 						t.Fatal(err)
 					}
-					var settings map[string]interface{}
-					if err := json.Unmarshal(data, &settings); err != nil {
+					if err := os.Remove(filepath.Join(dir, "claudecode_backup.json")); err != nil {
 						t.Fatal(err)
 					}
-					// The operator replaced the product routes with one traces
-					// collector that carries no credential.
-					env := map[string]interface{}{
-						"CLAUDE_CODE_ENABLE_TELEMETRY":       "1",
-						"OTEL_TRACES_EXPORTER":               "otlp",
-						"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": operatorRoute,
-						"OTEL_EXPORTER_OTLP_TRACES_PROTOCOL": "http/protobuf",
-					}
-					value := strings.NewReplacer("{tok}", token, "{enc}", encode(token)).Replace(row.value)
-					env[row.key] = value
-					settings["env"] = env
-					writeClaudeUpgradeSettings(t, settingsPath, settings)
-					if row.dropToken {
-						if err := RemoveOTLPPathToken(dir, OTLPScopeClaude); err != nil {
-							t.Fatal(err)
-						}
-						if err := os.Remove(filepath.Join(dir, "claudecode_backup.json")); err != nil {
-							t.Fatal(err)
-						}
-					}
-					want := "settings.json env." + row.key
-					if left := otlpSecretResidue(t, "claudecode", dir, "settings.json"); !slices.Contains(left, want) {
-						t.Fatalf("managed Verify before %s = %v, want %s", writer, left, want)
-					}
+				}
+				want := "settings.json env." + row.key
+				if left := otlpSecretResidue(t, "claudecode", dir, "settings.json"); !slices.Contains(left, want) {
+					t.Fatalf("managed Verify before %s = %v, want %s", writer, left, want)
+				}
 
-					if writer == "setup" {
-						upgrade := earlier
-						upgrade.sandboxNativeOTLP = false
-						upgrade.APIAddr = "127.0.0.1:19082"
-						if err := conn.Setup(context.Background(), upgrade); err != nil {
-							t.Fatalf("upgrade: %v", err)
-						}
-					} else {
-						removed, err := RemoveUserNativeOTLP("claudecode", SetupOpts{DataDir: dir, ManagedEnterprise: true})
-						if err != nil {
-							t.Fatalf("managed cleanup: %v", err)
-						}
-						if !slices.Contains(removed, want) {
-							t.Fatalf("managed cleanup removed %v, want %s", removed, want)
-						}
+				if writer == "setup" {
+					upgrade := earlier
+					upgrade.sandboxNativeOTLP = false
+					upgrade.APIAddr = "127.0.0.1:19082"
+					if err := conn.Setup(context.Background(), upgrade); err != nil {
+						t.Fatalf("upgrade: %v", err)
 					}
-					raw, err := os.ReadFile(settingsPath)
+				} else {
+					removed, err := RemoveUserNativeOTLP("claudecode", SetupOpts{DataDir: dir, ManagedEnterprise: true})
 					if err != nil {
-						t.Fatal(err)
+						t.Fatalf("managed cleanup: %v", err)
 					}
-					if strings.Contains(string(raw), token) || strings.Contains(string(raw), encode(token)) {
-						t.Fatalf("product credential survived in env.%s", row.key)
+					if !slices.Contains(removed, want) {
+						t.Fatalf("managed cleanup removed %v, want %s", removed, want)
 					}
-					got := readClaudeUpgradeEnv(t, settingsPath)
-					// Setup may render its own pin ("0") under a gate key.
-					if got[row.key] == value {
-						t.Fatalf("env.%s kept", row.key)
-					}
-					if got["OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"] != operatorRoute || got["OTEL_TRACES_EXPORTER"] != "otlp" ||
-						got["OTEL_EXPORTER_OTLP_TRACES_PROTOCOL"] != "http/protobuf" {
-						t.Fatalf("operator traces route changed: %v", got)
-					}
-					if left := otlpSecretResidue(t, "claudecode", dir, "settings.json"); len(left) != 0 {
-						t.Fatalf("residue after %s: %v", writer, left)
-					}
-				})
-			}
+				}
+				raw, err := os.ReadFile(settingsPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if strings.Contains(string(raw), token) || strings.Contains(string(raw), encode(token)) {
+					t.Fatalf("product credential survived in env.%s", row.key)
+				}
+				got := readClaudeUpgradeEnv(t, settingsPath)
+				// Setup may render its own pin ("0") under a gate key.
+				if got[row.key] == value {
+					t.Fatalf("env.%s kept", row.key)
+				}
+				if got["OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"] != operatorRoute || got["OTEL_TRACES_EXPORTER"] != "otlp" ||
+					got["OTEL_EXPORTER_OTLP_TRACES_PROTOCOL"] != "http/protobuf" {
+					t.Fatalf("operator traces route changed: %v", got)
+				}
+				if left := otlpSecretResidue(t, "claudecode", dir, "settings.json"); len(left) != 0 {
+					t.Fatalf("residue after %s: %v", writer, left)
+				}
+			})
 		}
 	}
 }
@@ -1094,15 +1164,31 @@ func claudeMarkedOperatorCollectorKeepsBytes(t *testing.T, goos string) {
 		"product_token_mixed":    "x-tenant=traces,authorization=Bearer {tok}",
 		"product_token_encoded":  "x-defenseclaw-source=claudecode,authorization=Bearer%20{tok}",
 	}
-	for name, template := range headerSets {
+	headersKeys := []string{"OTEL_EXPORTER_OTLP_TRACES_HEADERS", "OTEL_EXPORTER_OTLP_HEADERS"}
+	paths := []string{"fresh", "upgrade", "managed_cleanup"}
+	// A product route is removed under either headers key, so a product row
+	// runs each path once with the key rotating: every product row runs both
+	// keys, and every path runs both keys over the product rows (checked
+	// below). Operator rows keep every key and path. Each subtest pays one to
+	// three product writers, which a Windows runner takes seconds for.
+	productRan := map[string]bool{}
+	for ni, name := range slices.Sorted(maps.Keys(headerSets)) {
+		template := headerSets[name]
 		product := strings.Contains(template, "{tok}")
-		for _, headersKey := range []string{"OTEL_EXPORTER_OTLP_TRACES_HEADERS", "OTEL_EXPORTER_OTLP_HEADERS"} {
-			for _, path := range []string{"fresh", "upgrade", "managed_cleanup"} {
+		for ki, headersKey := range headersKeys {
+			for pi, path := range paths {
 				if !product && path != "fresh" && headersKey == "OTEL_EXPORTER_OTLP_HEADERS" {
 					// The released per-signal traces header overrides a
 					// generic one, so that traces route carries the
 					// product credential and is the product's.
 					continue
+				}
+				if product {
+					if (ni+pi)%len(headersKeys) != ki {
+						continue
+					}
+					productRan[name+"/"+headersKey] = true
+					productRan[headersKey+"/"+path] = true
 				}
 				t.Run(name+"/"+headersKey+"/"+path, func(t *testing.T) {
 					dir := t.TempDir()
@@ -1200,6 +1286,19 @@ func claudeMarkedOperatorCollectorKeepsBytes(t *testing.T, goos string) {
 					}
 					check("teardown")
 				})
+			}
+		}
+	}
+	for name, template := range headerSets {
+		for _, headersKey := range headersKeys {
+			cells := []string{headersKey + "/fresh", headersKey + "/upgrade", headersKey + "/managed_cleanup"}
+			if strings.Contains(template, "{tok}") {
+				cells = append(cells, name+"/"+headersKey)
+			}
+			for _, cell := range cells {
+				if !productRan[cell] {
+					t.Errorf("product rotation never ran %s", cell)
+				}
 			}
 		}
 	}

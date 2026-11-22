@@ -30,6 +30,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/processutil"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
@@ -833,7 +834,7 @@ func windowsEnterpriseOutsideProductionScope(opts *windowsEnterpriseLifecycleOpt
 // and state roots, from the trusted known folders as the installer resolves
 // them; a seam for tests.
 var windowsEnterpriseProductionRoots = func() (install, state string, err error) {
-	layout, err := windowsManagedLayout.standalone()
+	layout, err := hookcli.WindowsManagedLayout.Standalone()
 	if err != nil {
 		return "", "", err
 	}
@@ -1919,7 +1920,7 @@ func (d windowsStandaloneScannerDocument) skillJudgeDisabled() bool {
 // readWindowsStandaloneScannerConfig reads the installed admin config; a
 // seam for tests.
 var readWindowsStandaloneScannerConfig = func() ([]byte, error) {
-	layout, err := windowsManagedLayout.standalone()
+	layout, err := hookcli.WindowsManagedLayout.Standalone()
 	if err != nil {
 		return nil, err
 	}

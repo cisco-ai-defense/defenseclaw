@@ -34,9 +34,7 @@ func TestBraceWordNamesItsExpandedTargets(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(home, ".ssh", "authorized_keys"), []byte("# decoy\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink("../.ssh/authorized_keys", filepath.Join(project, "keylink")); err != nil {
-		t.Fatal(err)
-	}
+	testSymlink(t, "../.ssh/authorized_keys", filepath.Join(project, "keylink"))
 	blocked := []string{
 		// GAP-0233: brace touch, as the plain touch.
 		"touch ../.ssh/authorized_keys",

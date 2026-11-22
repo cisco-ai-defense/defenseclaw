@@ -33,9 +33,7 @@ func TestGAP1717GitBashCallIsReadWithThePOSIXGrammar(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := os.Symlink(ssh, filepath.Join(project, ".private")); err != nil {
-		t.Fatal(err)
-	}
+	testSymlink(t, ssh, filepath.Join(project, ".private"))
 	windows := runtime.GOOS == "windows"
 	slashHome := filepath.ToSlash(home)
 	for _, tc := range []struct {

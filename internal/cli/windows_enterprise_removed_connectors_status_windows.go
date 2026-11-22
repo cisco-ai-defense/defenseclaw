@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -22,7 +23,7 @@ var windowsEnterpriseConnectorPublishedForStatus = func(name string) bool {
 // record the hook guardian keeps beside its authorization ledger; tests
 // replace it.
 var windowsEnterpriseRemovedConnectorsForStatus = func() ([]managed.RemovedConnector, error) {
-	layout, err := windowsManagedLayout.standalone()
+	layout, err := hookcli.WindowsManagedLayout.Standalone()
 	if err != nil {
 		return nil, err
 	}

@@ -397,6 +397,48 @@ func (s recordStore) has(name string) bool {
 	return err == nil
 }
 
+// NoSandboxState reports whether dataDir holds no sandbox state at all: no
+// record entry of any kind (a valid record, a malformed or oversized one, a
+// directory or link named like one) and no leftover sandbox or snapshot
+// directory. It answers false when it cannot tell, such as for a folder it
+// cannot read, so a caller that acts on "none" never acts on a guess
+// (GAP-0917). A missing folder is none.
+func NoSandboxState(dataDir string) bool {
+	// Every sub-folder of sandboxes/ but the records, and every entry of
+	// snapshots/, may be an interrupted create or delete (OrphanedSandboxData).
+	leftover := func(dir string, skip string) bool {
+		entries, err := os.ReadDir(dir)
+		if errors.Is(err, fs.ErrNotExist) {
+			return false
+		}
+		if err != nil {
+			return true
+		}
+		for _, e := range entries {
+			if e.Name() != skip && !e.Type().IsRegular() {
+				return true
+			}
+		}
+		return false
+	}
+	if leftover(filepath.Join(dataDir, "sandboxes"), recordDirName) || leftover(filepath.Join(dataDir, orphanSnapshotsDir), "") {
+		return false
+	}
+	entries, err := os.ReadDir(filepath.Join(dataDir, "sandboxes", recordDirName))
+	if errors.Is(err, fs.ErrNotExist) {
+		return true
+	}
+	if err != nil {
+		return false
+	}
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".json") {
+			return false
+		}
+	}
+	return true
+}
+
 // OrphanedSandboxData lists the sandboxes that have data under
 // <data_dir>/sandboxes/<name> (mount state and masks, copy-mode state, run
 // files, a kept run log, kept destinations) or a pre-session snapshot under

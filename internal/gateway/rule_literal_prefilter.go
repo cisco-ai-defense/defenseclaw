@@ -239,13 +239,18 @@ func foldRuleText(text string) string {
 }
 
 // ruleScanText is one text a rule scan reads, folded once on first use. The
-// mutex guards the fold: the rules of one scan may check the text from
-// several goroutines (scanRuleMatchesInParallel).
+// mutex guards the fold and the literal answers: the rules of one scan may
+// check the text from several goroutines (scanRuleMatchesInParallel).
 type ruleScanText struct {
 	text   string
 	mu     sync.Mutex
 	folded string
 	ready  bool
+	// holds is whether the folded text holds each literal searched so far.
+	// The rules of a pack share most literals (ssh, .env, curl), and each
+	// search reads the whole text: a 1 MiB command was read once per rule
+	// literal (rel-1-0-10:GAP-0299).
+	holds map[string]bool
 }
 
 // mayMatch reports whether pattern can match the text: false only when the
@@ -255,16 +260,10 @@ func (t *ruleScanText) mayMatch(pattern *regexp.Regexp) bool {
 	if plan == nil {
 		return true
 	}
-	t.mu.Lock()
-	if !t.ready {
-		t.folded, t.ready = foldRuleText(t.text), true
-	}
-	folded := t.folded
-	t.mu.Unlock()
 	for _, set := range plan {
 		found := false
 		for _, literal := range set {
-			if strings.Contains(folded, literal) {
+			if t.holdsLiteral(literal) {
 				found = true
 				break
 			}
@@ -274,4 +273,27 @@ func (t *ruleScanText) mayMatch(pattern *regexp.Regexp) bool {
 		}
 	}
 	return true
+}
+
+// holdsLiteral reports whether the folded text holds literal, searching the
+// text once per distinct literal.
+func (t *ruleScanText) holdsLiteral(literal string) bool {
+	t.mu.Lock()
+	if !t.ready {
+		t.folded, t.ready = foldRuleText(t.text), true
+	}
+	held, known := t.holds[literal]
+	folded := t.folded
+	t.mu.Unlock()
+	if known {
+		return held
+	}
+	held = strings.Contains(folded, literal)
+	t.mu.Lock()
+	if t.holds == nil {
+		t.holds = make(map[string]bool)
+	}
+	t.holds[literal] = held
+	t.mu.Unlock()
+	return held
 }

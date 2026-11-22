@@ -4717,7 +4717,10 @@ def _read_openclaw_json(config_file: str) -> dict[str, Any] | None:
 
 
 _ENV_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
-_GATEWAY_TOKEN_ENV_NAMES = frozenset({"OPENCLAW_GATEWAY_TOKEN", "DEFENSECLAW_GATEWAY_TOKEN"})
+# OpenClaw's own gateway token variable: an openclaw.json env SecretRef may
+# name it. DEFENSECLAW_GATEWAY_TOKEN is DefenseClaw's master, a separate
+# credential the OpenClaw account must never resolve (R-TOK).
+_GATEWAY_TOKEN_ENV_NAMES = frozenset({"OPENCLAW_GATEWAY_TOKEN"})
 _CREDENTIAL_NAME_PARTS = ("API_KEY", "SECRET", "PASSWORD", "ACCESS_KEY", "PRIVATE_KEY", "SESSION_TOKEN")
 
 
@@ -4782,8 +4785,8 @@ def defenseclaw_credential_names(cfg: Any = None) -> frozenset[str]:
 
     Every key in ``~/.defenseclaw/.env`` (the CLI loads that file into the
     environment), every configured ``*api_key_env``, the provider key names
-    of ``llm_keys`` and the credential registry, minus the two gateway token
-    names. An OpenClaw env SecretRef naming one of them is refused.
+    of ``llm_keys`` and the credential registry, minus OPENCLAW_GATEWAY_TOKEN.
+    An OpenClaw env SecretRef naming one of them is refused.
     """
     from defenseclaw.credentials import CREDENTIALS
     from defenseclaw.llm_keys import PROVIDER_KEY_ENV_NAMES
@@ -4832,8 +4835,8 @@ _OPENCLAW_TOKEN_UNREADABLE = (
 def _openclaw_token_notice(reason: str) -> str:
     return (
         f"{reason} "
-        "Give DefenseClaw that token in OPENCLAW_GATEWAY_TOKEN or DEFENSECLAW_GATEWAY_TOKEN, "
-        "for example: defenseclaw keys set DEFENSECLAW_GATEWAY_TOKEN"
+        "Give DefenseClaw that token in OPENCLAW_GATEWAY_TOKEN, "
+        "for example: defenseclaw keys set OPENCLAW_GATEWAY_TOKEN"
     )
 
 

@@ -722,6 +722,31 @@ try {
     Assert-Result $run 'repair-after-refusal' (@('--action', 'repair', '--installed', '--version', $Version, '--ready') + $installedChecks)
     Assert-ServicesRunning
 
+    # A refused supplied config stays reported until a run applies a config
+    # again (rel-1-0-10 GAP-1027, GAP-1038): /repair without CONFIG= puts the
+    # running config back, not the requested one, so verify still fails with
+    # config_rejected (cause config_refused), as it does after the Intune
+    # Remediate-Fix (ensure without a config).
+    Step 'installed CLI verify still reports the refused config after /repair'
+    $foreignDigest = (Get-FileHash -LiteralPath $foreignConfig -Algorithm SHA256).Hash.ToLowerInvariant().Substring(0, 12)
+    $run = Invoke-Lifecycle -Name '03-verify-config-rejected' -FilePath $cli -Arguments @('enterprise', 'windows', 'verify', '--profile', 'standalone', '--json')
+    $rejected = Get-Content -LiteralPath $run.Result -Raw | ConvertFrom-Json
+    $rejectedErrors = @($rejected.errors | Where-Object { [string]$_.code -ceq 'config_rejected' })
+    $otherErrors = @($rejected.errors | Where-Object { [string]$_.code -cne 'config_rejected' })
+    if ($run.ExitCode -ne 1603 -or [bool]$rejected.ok -or [bool]$rejected.coverage_complete -or
+        $rejectedErrors.Count -ne 1 -or $otherErrors.Count -ne 0 -or
+        -not ([string]$rejectedErrors[0].message).Contains('cause config_refused') -or
+        -not ([string]$rejectedErrors[0].message).Contains("sha256 $foreignDigest")) {
+        $codes = (@($rejected.errors | ForEach-Object { [string]$_.code }) -join ', ')
+        Fail "verify after the refused foreign-OS config and /repair did not fail with one config_rejected naming config_refused and sha256 $foreignDigest (exit $($run.ExitCode), errors: $codes)"
+    }
+
+    Step 'Setup /ensure CONFIG= applies the accepted config again and clears config_rejected'
+    $run = Invoke-Lifecycle -Name '02-ensure-after-refusal' -FilePath $Setup -Arguments @('/ensure', "CONFIG=$config", 'JSON=1')
+    Assert-Result $run 'ensure-after-refusal' (@('--action', 'ensure', '--installed', '--version', $Version, '--ready') +
+        $installedChecks + @('--allow-warning', 'ensure_repair', '--allow-warning', 'guardian_repaired_drift'))
+    Assert-ServicesRunning
+
     Step 'installed CLI verify'
     $run = Invoke-Lifecycle -Name '03-verify' -FilePath $cli -Arguments @('enterprise', 'windows', 'verify', '--profile', 'standalone', '--json')
     Assert-Result $run 'verify' (@('--action', 'verify', '--installed', '--version', $Version, '--ready') + $installedChecks)
