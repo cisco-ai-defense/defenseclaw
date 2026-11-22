@@ -44,6 +44,11 @@ const (
 	// maxSubstrateGuestLinkClaims bounds the file-tool link claims one call
 	// carries.
 	maxSubstrateGuestLinkClaims = 8
+	// maxSubstrateGuestCommandTwins bounds the readings of one shell call
+	// whose words the kit placed in more than one folder (cd a || cd b; cat
+	// lk): one twin per reading; a word placed in more folders cuts the
+	// claims (substrate-1 GAP-0623).
+	maxSubstrateGuestCommandTwins = 4
 )
 
 // substrateGuestClaims are the kit's claims of one hook call that change a
@@ -63,6 +68,20 @@ type substrateGuestClaims struct {
 	// from their spelling (kit.CommandWordField), by the word as the command
 	// spells it.
 	words map[string]hookpaths.CommandWordPlace
+	// placedWords are the same places by the word and the path it spells in
+	// the folder the kit read it in (hookpaths.PlacedCommandPathWords from
+	// wordDir), one per place: cd a && echo x >> lk && cd ../b && echo x >>
+	// lk has two (substrate-1 GAP-0623). words then keeps only a spelling
+	// with one place.
+	placedWords map[hookpaths.CommandWordAt]hookpaths.CommandWordPlace
+	// wordDir is the folder the kit placed the words from
+	// (kit.ShellCommandDir); empty when it is not known, and the words are
+	// read as LinkResolvedCommand reads them.
+	wordDir string
+	// cut is set when the kit's claims are not complete
+	// (kit.ProofClaimsCut): a word or argument past the cut may name a link
+	// no claim places (substrate-1 GAP-0622).
+	cut bool
 	// homePlaces are the places of the command's path words that the kit
 	// found private in the actor's home (kit.PathFact.PrivateHome).
 	homePlaces map[string]bool
@@ -112,8 +131,10 @@ func substrateGuestClaimsOf(env substrateEnvelope) *substrateGuestClaims {
 		len(facts.Paths) > maxSubstrateGuestPathFacts || len(facts.Proofs) > maxSubstrateGuestProofs {
 		return nil
 	}
-	claims := &substrateGuestClaims{}
+	claims := &substrateGuestClaims{cut: slices.Contains(facts.Proofs, kit.ProofClaimsCut)}
 	if command, _, ok := kit.ShellCommandOf(env.Connector, env.Event, env.Payload); ok {
+		claims.wordDir, _ = kit.ShellCommandDir(env.Connector, env.Event, env.Payload)
+		places := map[string]int{}
 		if slices.Contains(facts.Proofs, kit.ProofPrivateKeyRead) {
 			claims.keyReadCommand = command
 		}
@@ -128,8 +149,16 @@ func substrateGuestClaimsOf(env substrateEnvelope) *substrateGuestClaims {
 			if place.Followed != "" || place.Entry != "" {
 				if claims.words == nil {
 					claims.words = map[string]hookpaths.CommandWordPlace{}
+					claims.placedWords = map[hookpaths.CommandWordAt]hookpaths.CommandWordPlace{}
 				}
-				claims.words[fact.Path] = place
+				if places[fact.Path]++; places[fact.Path] == 1 {
+					claims.words[fact.Path] = place
+				} else {
+					delete(claims.words, fact.Path)
+				}
+				if abs := substrateGuestPlace(fact.Abs); abs != "" {
+					claims.placedWords[hookpaths.CommandWordAt{Text: fact.Path, Abs: abs}] = place
+				}
 			}
 			if fact.PrivateHome {
 				for _, private := range []string{substrateGuestPlace(fact.Abs), place.Followed, place.Entry} {
@@ -191,7 +220,7 @@ func substrateGuestClaimsOf(env substrateEnvelope) *substrateGuestClaims {
 		}
 	}
 	if claims.keyReadCommand == "" && claims.protectedWriteCommand == "" && len(claims.links) == 0 &&
-		len(claims.words) == 0 && len(claims.homePlaces) == 0 {
+		len(claims.placedWords) == 0 && len(claims.homePlaces) == 0 && !claims.cut {
 		return nil
 	}
 	return claims
@@ -245,33 +274,51 @@ func substrateGuestPlace(place string) string {
 	return place
 }
 
-// substrateGuestCommandTwinRequest is a shell call of an actor with each
+// substrateGuestCommandTwinRequests are a shell call of an actor with each
 // path word the kit placed through a link spelled as its place, the words of
-// an eval or -c body too (hookpaths.LinkResolvedCommand): the command the
+// an eval or -c body and the words after a static cd chain too, each in its
+// folder (hookpaths.PlacedLinkResolvedCommand), one twin per reading of a
+// word placed in more than one folder: the command the
 // laptop's gateway judges once it has followed the links (cd -P a/b/ssh &&
 // cat id_ed25519 reads /sandbox/.ssh/id_ed25519, echo x >> dc-link writes
 // /sandbox/.defenseclaw/config.yaml). trustedToolCallFindings judges it with
 // every reading of the call; it only adds findings (substrate-1 GAP-0546,
-// GAP-0547).
-func substrateGuestCommandTwinRequest(request trustedActionRequest, claims *substrateGuestClaims) (trustedActionRequest, bool) {
-	if claims == nil || len(claims.words) == 0 || request.guestCommandTwin ||
+// GAP-0547, GAP-0623). cut is set when a word has places in more folders
+// than there are twins.
+func substrateGuestCommandTwinRequests(request trustedActionRequest, claims *substrateGuestClaims) (twins []trustedActionRequest, cut bool) {
+	if claims == nil || len(claims.placedWords) == 0 || request.guestCommandTwin ||
 		request.Input.DialectHint != "" && request.Input.DialectHint != actionfacts.DialectPOSIX {
-		return trustedActionRequest{}, false
+		return nil, false
 	}
 	command, ok := trustedBashCommandInput(request.Input)
 	if !ok {
-		return trustedActionRequest{}, false
+		return nil, false
 	}
-	resolved, changed := hookpaths.LinkResolvedCommand(command, request.Input.ActiveHome, claims.words)
-	if !changed {
-		return trustedActionRequest{}, false
+	var spelled []string
+	for reading := range maxSubstrateGuestCommandTwins {
+		resolved, changed, more := command, false, false
+		if claims.wordDir == "" {
+			if reading == 0 {
+				resolved, changed = hookpaths.LinkResolvedCommand(command, request.Input.ActiveHome, claims.words)
+			}
+		} else {
+			resolved, changed, more = hookpaths.PlacedLinkResolvedCommand(command, claims.wordDir,
+				request.Input.ActiveHome, claims.placedWords, claims.words, reading)
+		}
+		if changed && !slices.Contains(spelled, resolved) {
+			spelled = append(spelled, resolved)
+			twin := bashReadingRequest(request, command, resolved)
+			twin.guestCommandTwin = true
+			// Its findings only add to the call's, so the home copy checks
+			// read the kit's places there (substrate-1 GAP-0549).
+			twin.guestHomePlaces = claims.homePlaceView()
+			twins = append(twins, twin)
+		}
+		if !more {
+			return twins, false
+		}
 	}
-	twin := bashReadingRequest(request, command, resolved)
-	twin.guestCommandTwin = true
-	// Its findings only add to the call's, so the home copy checks read the
-	// kit's places there (substrate-1 GAP-0549).
-	twin.guestHomePlaces = claims.homePlaceView()
-	return twin, true
+	return twins, true
 }
 
 // substrateGuestLinkTwinRequest is a file-tool call of an actor with each

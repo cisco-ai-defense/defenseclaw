@@ -359,7 +359,7 @@ type trustedActionRequest struct {
 	// the kit resolved through a link (substrateGuestLinkTwinRequest).
 	guestLinkTwin bool
 	// guestCommandTwin marks the twin of a shell call whose path words the
-	// kit placed through a link (substrateGuestCommandTwinRequest).
+	// kit placed through a link (substrateGuestCommandTwinRequests).
 	guestCommandTwin bool
 	// guestClaimHomePlaces reads, from a Substrate actor's kit facts, which
 	// places of the actor's home only their owner can reach; nil without

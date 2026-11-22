@@ -31,11 +31,13 @@ const (
 	maxProjectHookBytes    = 1 << 20
 	maxProjectHookEvents   = 32
 	maxProjectHookEventLen = 64
-	// maxCommandWordWalks bounds the distinct command words one shell call
-	// walks in the actor's file system (addShellCommandFacts): the 64 words
-	// hookpaths.CommandPathWords returned when the kit's link proofs came in
-	// (substrate-1 GAP-0546); it now returns every word.
-	maxCommandWordWalks = 64
+	// maxCommandWordChecks bounds the (word, folder) places of one shell
+	// command the kit resolves (PlacedCommandPathWords); past it the claims
+	// are cut (substrate-1 GAP-0622).
+	maxCommandWordChecks = 2048
+	// maxDroppedPathChecks bounds the path arguments past maxPathFacts the
+	// kit still checks for a link; past it the claims are cut.
+	maxDroppedPathChecks = 4 * maxPathFacts
 )
 
 // projectHookFiles are, per connector, the project settings files (relative
@@ -101,6 +103,7 @@ func CollectFacts(connector, event string, payload []byte, attachCap int64) *Fac
 		_ = json.Unmarshal(args, &input)
 	}
 	seen := map[string]bool{}
+	dropped := 0
 	add := func(field, p string) {
 		p = strings.TrimSpace(p)
 		if p == "" || seen[field+"\x00"+p] {
@@ -109,6 +112,13 @@ func CollectFacts(connector, event string, payload []byte, attachCap int64) *Fac
 		seen[field+"\x00"+p] = true
 		if len(f.Paths) >= maxPathFacts {
 			f.Truncated = true
+			// A dropped plain file is no lost claim (a patch of 40 files);
+			// a dropped link is (substrate-1 GAP-0622).
+			if dropped++; dropped > maxDroppedPathChecks {
+				f.claimsCut = true
+			} else if pf := inspectPath(field, p, cwd); pf.Resolved != "" && pf.Resolved != pf.Abs {
+				f.claimsCut = true
+			}
 			return
 		}
 		f.Paths = append(f.Paths, inspectPath(field, p, cwd))
@@ -152,6 +162,9 @@ func CollectFacts(connector, event string, payload []byte, attachCap int64) *Fac
 	_ = budget
 	if event == "SessionStart" || event == "sessionStart" {
 		f.ProjectHooks = collectProjectHooks(connector, cwd)
+	}
+	if f.claimsCut {
+		f.Proofs = append(f.Proofs, ProofClaimsCut)
 	}
 	if len(f.Paths) == 0 && len(f.Files) == 0 && len(f.ProjectHooks) == 0 && len(f.Proofs) == 0 && !f.Truncated && !f.readsSkill {
 		return nil
@@ -303,12 +316,7 @@ func addShellCommandFacts(f *Facts, connectorName, event string, payload []byte,
 	if !ok {
 		return
 	}
-	if workdir != "" {
-		if !filepath.IsAbs(workdir) {
-			workdir = filepath.Join(cwd, workdir)
-		}
-		cwd = filepath.Clean(workdir)
-	}
+	cwd = shellWorkdir(cwd, workdir)
 	home, err := os.UserHomeDir()
 	if err != nil || !filepath.IsAbs(home) {
 		return
@@ -325,37 +333,48 @@ func addShellCommandFacts(f *Facts, connectorName, event string, payload []byte,
 	// or writes the actor's keys: an own SSH folder copy alerts where the
 	// copy stays private (substrate-1 GAP-0549).
 	privacy := len(f.Proofs) > 0
-	seen := map[string]bool{}
-	for _, word := range hookpaths.CommandPathWords(command, home) {
-		if seen[word.Text] {
-			continue
+	// Each word is placed in every folder the laptop's statement reader
+	// gives it (cd sub && echo x >> dc-link writes sub/dc-link), one fact per
+	// place, so one spelling read in two folders has two (substrate-1
+	// GAP-0623). An unplaced word keeps the call's folder.
+	type placed struct{ text, dir string }
+	seen := map[placed]bool{}
+	for _, word := range hookpaths.PlacedCommandPathWords(command, cwd, home) {
+		dirs := word.Dirs
+		if len(dirs) == 0 || strings.HasPrefix(word.Value, "/") {
+			dirs = []string{cwd}
 		}
-		if len(seen) == maxCommandWordWalks {
-			f.Truncated = true
-			return
-		}
-		seen[word.Text] = true
-		if fact, listed := commandWordFact(word, cwd, home, privacy); listed {
-			if len(f.Paths) >= maxPathFacts {
-				f.Truncated = true
+		for _, dir := range dirs {
+			if seen[placed{word.Text, dir}] {
+				continue
+			}
+			if len(seen) == maxCommandWordChecks {
+				f.Truncated, f.claimsCut = true, true
 				return
 			}
-			f.Paths = append(f.Paths, fact)
+			seen[placed{word.Text, dir}] = true
+			if fact, listed := commandWordFact(word, dir, home, privacy); listed {
+				if len(f.Paths) >= maxPathFacts {
+					f.Truncated, f.claimsCut = true, true
+					return
+				}
+				f.Paths = append(f.Paths, fact)
+			}
 		}
 	}
 }
 
 // commandWordFact is the CommandWordField fact of one command word: its place
 // with every link followed and with its last name kept, each as the kernel
-// walks it from cwd (hookpaths.ResolveWriteTarget), and, when privacy is
+// walks it from dir (hookpaths.ResolveWriteTarget), and, when privacy is
 // asked, whether it is a private place of home. listed is false when both
 // places are the one the word spells and it is no private place.
-func commandWordFact(word hookpaths.CommandPathWord, cwd, home string, privacy bool) (PathFact, bool) {
+func commandWordFact(word hookpaths.CommandPathWord, dir, home string, privacy bool) (PathFact, bool) {
 	full := word.Value
 	if !strings.HasPrefix(full, "/") {
-		full = strings.TrimRight(cwd, "/") + "/" + full
+		full = strings.TrimRight(dir, "/") + "/" + full
 	}
-	lexical := filepath.Clean(full)
+	lexical := hookpaths.CommandWordAbs(word, dir)
 	fact := PathFact{Field: CommandWordField, Path: word.Text, Abs: lexical, UID: -1, GID: -1, Type: "missing"}
 	if followed, ok := hookpaths.ResolveWriteTarget(full); ok && followed != lexical {
 		fact.Resolved = followed

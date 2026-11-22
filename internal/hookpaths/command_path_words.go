@@ -44,7 +44,10 @@ type CommandPathWord struct {
 	// the call do not (f() { cp /tmp/x keylink; }; f; cd /tmp). A word that
 	// its own call reads in another folder or root (env -C, tar -C, chroot,
 	// ssh) is unplaced too.
-	Unplaced   bool
+	Unplaced bool
+	// Dirs are the folders the shell reads the word in
+	// (PlacedCommandPathWords; CommandPathWords leaves it empty).
+	Dirs       []string
 	start, end int  // the byte offsets of Text in the command
 	quote      byte // 0 at the top level; ' or " inside a quoted body
 }
@@ -82,6 +85,10 @@ type commandPathChange struct {
 	end   int
 	all   bool
 	paths []string
+	// cd is set for a cd, pushd or popd call of the command's own text (not
+	// of an eval or -c body), named by its program word: the change the
+	// statement reader places (PlacedCommandPathWords).
+	cd bool
 }
 
 // maxCommandPathBodyDepth is how deep CommandPathWords reads eval and -c
@@ -95,8 +102,17 @@ const maxCommandPathBodyDepth = 4
 // command is read: a caller that walks the words in the file system bounds
 // its work by the distinct words (LocalCommandWordPlaces).
 func CommandPathWords(command, home string) []CommandPathWord {
-	var scan commandPathScan
-	commandPathWordsIn(command, 0, 0, 0, home, &scan)
+	words, scan := scanCommandPathWords(command, home)
+	scan.markUnplaced(words, false)
+	return words
+}
+
+// scanCommandPathWords reads the path words of command in order and the
+// statements that change where later words lie, with Unplaced set only for
+// the words their own call reads elsewhere.
+func scanCommandPathWords(command, home string) ([]CommandPathWord, *commandPathScan) {
+	scan := &commandPathScan{}
+	commandPathWordsIn(command, 0, 0, 0, home, scan)
 	words := scan.words
 	slices.SortFunc(words, func(a, b CommandPathWord) int { return a.start - b.start })
 	for index := range scan.changes {
@@ -110,6 +126,12 @@ func CommandPathWords(command, home string) []CommandPathWord {
 			}
 		}
 	}
+	return words, scan
+}
+
+// markUnplaced sets Unplaced on each word an earlier change moves; skipCD
+// leaves out the changes of the command's own cd, pushd and popd calls.
+func (scan *commandPathScan) markUnplaced(words []CommandPathWord, skipCD bool) {
 	firstCalls := scan.functionFirstCalls()
 	for index := range words {
 		word := &words[index]
@@ -129,7 +151,7 @@ func CommandPathWords(command, home string) []CommandPathWord {
 			if word.Unplaced {
 				break
 			}
-			if change.end > word.start && (change.end <= body[1] || change.end > calledAt) {
+			if change.end > word.start && (change.end <= body[1] || change.end > calledAt) || skipCD && change.cd {
 				continue
 			}
 			if change.all {
@@ -144,7 +166,74 @@ func CommandPathWords(command, home string) []CommandPathWord {
 			}
 		}
 	}
+}
+
+// PlacedCommandPathWords is CommandPathWords with the folders the shell
+// reads each word in (Dirs), cwd being the folder the command starts in: cwd
+// for a word no earlier statement moves, and for a word that only the static
+// cd, pushd and popd statements of the command's top-level list move, the
+// folders the laptop's statement reader (TopLevelStatements) gives the
+// statement it is in: cd sub && echo x >> dc-link writes sub/dc-link, cd a ||
+// cd b; cat lk reads a/lk or b/lk (substrate-1 GAP-0623). Any other unplaced
+// word (a cd the reader does not place, a cd of a body, source, a dynamic
+// call, mv or ln onto its path, a word of a function body, a word of a cd
+// statement) keeps Unplaced and no Dirs. The reader's own bound caps the
+// folders of one word; the work is linear in the words times the statements.
+func PlacedCommandPathWords(command, cwd, home string) []CommandPathWord {
+	words, scan := scanCommandPathWords(command, home)
+	var loose []CommandPathWord
+	if slices.ContainsFunc(scan.changes, func(change commandPathChange) bool { return change.cd }) {
+		loose = slices.Clone(words)
+		scan.markUnplaced(loose, true)
+	}
+	scan.markUnplaced(words, false)
+	var statements []*syntax.Stmt
+	var dirs []string
+	read := false
+	for index := range words {
+		word := &words[index]
+		if !word.Unplaced {
+			word.Dirs = []string{cwd}
+			continue
+		}
+		if loose == nil || loose[index].Unplaced || scan.functionAt(word.start) >= 0 {
+			continue
+		}
+		if !read {
+			read = true
+			if file, parsed := parseShell(command); parsed {
+				var known bool
+				if statements, dirs, known = topLevelStatementDirectories(file, cwd, home); !known {
+					statements, dirs = nil, nil
+				}
+			}
+		}
+		for at, stmt := range statements {
+			if int(stmt.Pos().Offset()) <= word.start && word.end <= int(stmt.End().Offset()) &&
+				!slices.Contains(word.Dirs, dirs[at]) {
+				word.Dirs = append(word.Dirs, dirs[at])
+			}
+		}
+		if len(word.Dirs) != 0 {
+			word.Unplaced = false
+		}
+	}
 	return words
+}
+
+// CommandWordAt is one place of a command word: its Text and the path it
+// spells in the folder the shell reads it in (CommandWordAbs).
+type CommandWordAt struct {
+	Text, Abs string
+}
+
+// CommandWordAbs is the path word spells read in dir: its Value when that
+// is absolute, else dir joined with it, cleaned.
+func CommandWordAbs(word CommandPathWord, dir string) string {
+	if strings.HasPrefix(word.Value, "/") {
+		return path.Clean(word.Value)
+	}
+	return path.Clean(strings.TrimRight(dir, "/") + "/" + word.Value)
 }
 
 // functionAt is the index of the innermost function whose body holds byte
@@ -355,6 +444,7 @@ func commandPathWordsIn(text string, base int, quote byte, depth int, home strin
 			}
 			if change.all || len(change.paths) != 0 {
 				change.end = base + int(node.End().Offset())
+				change.cd = depth == 0 && len(values) > 0 && static[0] && slices.Contains(cdPrograms, programBase(values[0]))
 				scan.changes = append(scan.changes, change)
 			}
 			if depth < maxCommandPathBodyDepth {
@@ -752,11 +842,57 @@ func LinkResolvedCommand(command, home string, places map[string]CommandWordPlac
 	if len(places) == 0 {
 		return command, false
 	}
+	return respellCommandWords(command, CommandPathWords(command, home), func(word CommandPathWord) (CommandWordPlace, bool) {
+		place, found := places[word.Text]
+		return place, found && !word.Unplaced
+	})
+}
+
+// PlacedLinkResolvedCommand is LinkResolvedCommand for the words
+// PlacedCommandPathWords places from cwd, each occurrence by its own place:
+// a relative word read in its folder Dirs[min(reading, len(Dirs)-1)] takes
+// the place places gives it there (CommandWordAt), an absolute word (its
+// place is the same in every folder) the place byText gives its Text. One
+// call is one reading: more is set when a word has a place in a later
+// folder, so the caller judges one twin per reading (substrate-1 GAP-0623).
+func PlacedLinkResolvedCommand(command, cwd, home string, places map[CommandWordAt]CommandWordPlace,
+	byText map[string]CommandWordPlace, reading int) (resolved string, changed, more bool) {
+	if len(places) == 0 && len(byText) == 0 {
+		return command, false, false
+	}
+	words := PlacedCommandPathWords(command, cwd, home)
+	for _, word := range words {
+		if strings.HasPrefix(word.Value, "/") {
+			continue
+		}
+		for _, dir := range word.Dirs[min(reading+1, len(word.Dirs)):] {
+			if _, found := places[CommandWordAt{word.Text, CommandWordAbs(word, dir)}]; found {
+				more = true
+			}
+		}
+	}
+	resolved, changed = respellCommandWords(command, words, func(word CommandPathWord) (CommandWordPlace, bool) {
+		switch {
+		case len(word.Dirs) == 0:
+			return CommandWordPlace{}, false
+		case strings.HasPrefix(word.Value, "/"):
+			place, found := byText[word.Text]
+			return place, found
+		}
+		place, found := places[CommandWordAt{word.Text, CommandWordAbs(word, word.Dirs[min(reading, len(word.Dirs)-1)])}]
+		return place, found
+	})
+	return resolved, changed, more
+}
+
+// respellCommandWords spells each word of words that place gives an
+// absolute place as that place (LinkResolvedCommand).
+func respellCommandWords(command string, words []CommandPathWord, place func(CommandPathWord) (CommandWordPlace, bool)) (string, bool) {
 	var out strings.Builder
 	at, changed := 0, false
-	for _, word := range CommandPathWords(command, home) {
-		place, found := places[word.Text]
-		if !found || word.Unplaced || word.start < at {
+	for _, word := range words {
+		place, found := place(word)
+		if !found || word.start < at {
 			continue
 		}
 		target := place.Entry

@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -16,7 +17,7 @@ import (
 // TestGUESTFU10KitBoundsCommandWordWalks: hookpaths.CommandPathWords returns
 // every word of a command on rel follow-up 10 (rel-1-0-10:GAP-1243), where it
 // returned at most 64 when the kit's link proofs came in (substrate-1
-// GAP-0546). The kit walks at most maxCommandWordWalks distinct words of one
+// GAP-0546). The kit walks at most maxCommandWordChecks word places of one
 // call and marks the facts truncated past them; a link among the first words
 // is still placed. No call here reads a key, so a word that follows no
 // link gets no fact (commandWordFact) and the bound, not maxPathFacts, cuts.
@@ -24,7 +25,7 @@ func TestGUESTFU10KitBoundsCommandWordWalks(t *testing.T) {
 	_, app := gap0545Home(t)
 	readme := filepath.Join(app, "README.md")
 	var plain []string
-	for index := 0; index < 70; index++ { // past the 64-word bound (maxCommandWordWalks)
+	for index := 0; index < maxCommandWordChecks+10; index++ { // past the word place bound
 		plain = append(plain, fmt.Sprintf("f%d", index))
 	}
 	for _, row := range []struct {
@@ -37,8 +38,8 @@ func TestGUESTFU10KitBoundsCommandWordWalks(t *testing.T) {
 		payload, _ := json.Marshal(map[string]any{"hook_event_name": "PreToolUse", "cwd": app, "tool_name": "Bash",
 			"tool_input": map[string]any{"command": row.command}})
 		f := CollectFacts("claudecode", "PreToolUse", payload, 1<<20)
-		if f == nil || !f.Truncated {
-			t.Fatalf("%.40s...: facts %+v, want truncated", row.command, f)
+		if f == nil || !f.Truncated || !slices.Contains(f.Proofs, ProofClaimsCut) {
+			t.Fatalf("%.40s...: facts %+v, want truncated and the claims-cut proof (substrate-1 GAP-0622)", row.command, f)
 		}
 		if got := gap0545HasWord(f, "readme-link", readme); got != row.placed {
 			t.Fatalf("%.40s...: readme-link placed %v, want %v (facts %+v)", row.command, got, row.placed, f.Paths)

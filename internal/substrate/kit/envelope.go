@@ -67,6 +67,8 @@ type HookEnvelope struct {
 // it has no view of the actor's file system. Every field is a claim made by
 // code that runs as the agent's user.
 type Facts struct {
+	// claimsCut adds ProofClaimsCut to Proofs (CollectFacts).
+	claimsCut bool
 	// Paths are the path-valued arguments of the event, resolved.
 	Paths []PathFact `json:"paths,omitempty"`
 	// Files are small file contents the event refers to: a skill folder's
@@ -127,6 +129,14 @@ const ProofPrivateKeyRead = "private_key_read"
 // the actor's authorized_keys: what a managed laptop's hook client reports
 // as its ActionDecisionKey (substrate-1 GAP-0471).
 const ProofProtectedWrite = "protected_write"
+
+// ProofClaimsCut says the kit's claims of the call are not complete: its
+// placement of the shell command's path words stopped at a bound, or a path
+// fact that a link moves was dropped at the fact cap. A word or argument
+// past the cut may name a link no claim places, so the gateway gives the
+// call the unknown tier (substrate-1 GAP-0622). A gateway that does not know
+// it ignores it.
+const ProofClaimsCut = "claims_cut"
 
 // CommandWordField is the Field of a PathFact for a word of the event's
 // shell command (hookpaths.CommandPathWords) whose place in the actor's file
