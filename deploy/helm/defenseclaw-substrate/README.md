@@ -161,10 +161,6 @@ Known limits in 1.0.10:
 
 - **Bundles come from a file or the inbox ConfigMap only.** `bundle apply FILE` and the inbox are the two sources; there is
   no OCI registry source yet. A GitOps tool that pulls bundles from a registry writes them to the inbox ConfigMap.
-- **The fleet documents carry no bundle block.** `substrate status --json` and `verify --json` do not name the applied
-  bundles. `defenseclaw substrate bundle status --json` (administrators) is the bundle document: each stage's active and
-  previous bundle (id, version, signer key id), its problems and the receipts. `defenseclaw substrate doctor`, as an
-  administrator, fails its `policy_bundles` check when a stage's bundle no longer verifies.
 
 ## Upgrade, rollback, uninstall
 

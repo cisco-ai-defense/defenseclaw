@@ -97,6 +97,8 @@ func newBundleCluster(t *testing.T) *bundleCluster {
 	c := &bundleCluster{anchors: testBundleAnchors(t, "k1", key)}
 	base := &config.Config{}
 	base.Substrate.Enabled = true
+	// eng-web must be an atespace DefenseClaw manages, or Apply refuses the stage (GAP-0438).
+	base.Guardrail.ProfileAssignments = []config.ProfileAssignment{{Profile: "eng", Match: config.ProfileMatch{Substrate: &config.ProfileMatchSubstrate{Atespaces: []string{"eng-web"}}}}}
 	mem := bundle.NewMemoryConfigMaps()
 	c.store = &bundle.Store{CM: mem, Base: base, Anchors: func() (*eb.Anchors, error) { return eb.DecodeAnchors(c.anchors) }}
 	if _, err := c.store.Apply(context.Background(), testBundleArchive(t, "k1", key), "s-eng", []string{"eng-web"}, bundle.SourceAdmin); err != nil {
