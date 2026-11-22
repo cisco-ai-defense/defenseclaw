@@ -48,11 +48,9 @@ func (e *Engine) chargeBudgets(f CallFacts, rec Record) {
 	// A stream cancelled or broken by the upstream after the provider
 	// started answering, before the final usage, was billed by the provider
 	// for output nobody counted: its cost is unknown, never the input-only
-	// (or zero) total. An Anthropic message_start already carries an output
-	// count (1), so the opening usage alone is not final either
-	// (rel-1-0-10:GAP-1715).
+	// (or zero) total.
 	brokenOff := rec.Outcome == "cancelled" || rec.ErrorType == "upstream_error"
-	cutShort := brokenOff && rec.TTFB > 0 && (rec.Usage.Has&HasOutput == 0 || rec.openingUsage)
+	cutShort := brokenOff && rec.TTFB > 0 && rec.Usage.Has&HasOutput == 0
 	switch {
 	case cutShort:
 		box.sink.Add(id, f.ChargeKeys, 0, false, rec.EndedAt)

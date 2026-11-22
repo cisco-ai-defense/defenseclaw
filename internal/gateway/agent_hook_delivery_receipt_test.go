@@ -23,7 +23,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
-	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/observability/delivery"
 	observabilityredaction "github.com/defenseclaw/defenseclaw/internal/observability/redaction"
@@ -286,10 +285,9 @@ func (f managedHookAuditFixture) audited(t *testing.T, sessions ...string) map[s
 	}
 	got := make(map[string]string)
 	// A benign per-user allow keeps only its hook_decision row (#1384): on
-	// a per-user fixture (no deployment mode, or per_user) a session with no
-	// connector-hook row is audited by that row, receipt calls included
-	// (GAP-1172). A managed call always keeps its connector-hook row.
-	perUser := f.api.scannerCfg == nil || !managed.IsManagedEnterprise(f.api.scannerCfg.DeploymentMode)
+	// a per-user fixture a session with no connector-hook row is audited by
+	// that row. A managed call always keeps its connector-hook row.
+	perUser := f.api.scannerCfg == nil || f.api.scannerCfg.DeploymentMode == ""
 	for _, event := range events {
 		if !perUser || event.Action != "hook_decision" {
 			continue

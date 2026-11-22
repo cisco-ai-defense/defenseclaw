@@ -478,7 +478,6 @@ func (c *call) build(err error) Record {
 	}
 	u := c.pickUsage()
 	rec.Usage = u
-	rec.openingUsage = (c.given == nil || c.given.Has == 0) && c.parser.Opening()
 	rec.Cost = c.s.price(c.f, c.status, u, nil)
 	rec.Cost.BaselineUSD = c.s.baseline(c.f, u, rec.Cost)
 	c.s.bound(&rec)
