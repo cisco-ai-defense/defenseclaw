@@ -102,7 +102,7 @@ BOOTSTRAP_PYTHON := $(shell if [ -x "$(VENV_BIN)/python$(EXE)" ]; then printf '%
         packaging-macos-test packaging-macos-bundle packaging-linux-enterprise packaging-macos-enterprise packaging-windows-managed-gateway-zip packaging-windows-enterprise-installer packaging-windows-avc-buildkit packaging-managed-windows-bundle packaging-windows-managed-bundle macos-app-license-check macos-app-upstream-check macos-app-build macos-app-test macos-app-test-scripts macos-app-release macos-app-release-verify \
         security-suite-test security-suite-eval contextual-judge-test \
         connector-matrix-test go-connector-matrix-test py-connector-matrix-test \
-        test-verbose test-file lint py-lint go-lint go-lint-analyzers go-mod-no-toolchain check-quiet-startup repro-flags-parity assemble-parity ts-test rego-test clean \
+        test-verbose test-file lint py-lint go-lint go-vet go-lint-analyzers go-mod-no-toolchain check-quiet-startup repro-flags-parity assemble-parity ts-test rego-test clean \
         check check-audit-actions check-error-codes check-schemas telemetry-generate telemetry-check generate-guardrail-catalog check-guardrail-catalog check-opencode-plugins skill-check check-managed-paths check-grafana-dashboards check-observability-v8-hard-cut check-v7 check-provider-coverage check-llm-catalog check-llm-catalog-live check-version-sync \
         set-version \
         _bundle-data _stage-extension-fingerprint _checkout-write-preflight _source-install-preflight _source-install-dev-preflight _source-dev-install source-migrate source-acp-refresh source-restart-gateway \
@@ -1427,7 +1427,12 @@ py-lint: pycli
 	$(RUFF) check cli/defenseclaw/
 	$(RUFF) check cli/tests/
 
-go-lint: sync-openclaw-extension
+go-lint: go-vet
+	@$(MAKE) --no-print-directory go-lint-analyzers
+
+# gofmt and go vet, the first half of go-lint. CI runs it as its own job
+# (Go Lint (go vet)) beside go-lint-analyzers, behind the Go Lint check.
+go-vet: sync-openclaw-extension
 	@# gofmt drift is the #1 review comment on every PR, so fail fast
 	@# on it before running the heavier analyzers.
 	@unformatted=$$(gofmt -l $$(git ls-files '*.go') 2>/dev/null); \
@@ -1441,12 +1446,12 @@ go-lint: sync-openclaw-extension
 	@# The live Claude Code run-config test is behind a build tag, so
 	@# `go vet ./...` does not compile it; vet it here so it cannot rot (GAP-0280).
 	go vet -tags openshell_integration ./internal/openshell/image/
-	@$(MAKE) --no-print-directory go-lint-analyzers
 
 # golangci-lint $(GOLANGCI_LINT_VERSION) on the lines changed since the merge
 # base with $(GOLANGCI_LINT_BASE). A missing linter fails the gate. The one
 # documented skip is a Go toolchain newer than the pinned golangci-lint
-# supports: `go vet ./...` (run by go-lint first) is then the Go lint.
+# supports: `go vet ./...` (make go-vet, which go-lint runs first) is then
+# the Go lint.
 go-lint-analyzers:
 	@base='$(GOLANGCI_LINT_BASE)'; flags=""; \
 	if [ -n "$$base" ]; then \
@@ -1461,7 +1466,7 @@ go-lint-analyzers:
 	$(GOLANGCI_LINT) run $$flags >"$$tmp" 2>&1 || status=$$?; \
 	cat "$$tmp"; \
 	if [ $$status -ne 0 ] && grep -qE "used to build golangci-lint is lower than the targeted Go version|package requires newer Go version" "$$tmp"; then \
-		echo "golangci-lint $(GOLANGCI_LINT_VERSION) does not support this Go toolchain yet; 'go vet ./...' above is the Go lint for this run."; \
+		echo "golangci-lint $(GOLANGCI_LINT_VERSION) does not support this Go toolchain yet; 'go vet ./...' (make go-vet) is the Go lint for this run."; \
 		status=0; \
 	fi; \
 	rm -f "$$tmp"; \
