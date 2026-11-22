@@ -16,7 +16,7 @@
   "writable_atespaces" (include "dc.writableAtespaces" . | fromJsonArray)
   "editors" (list (include "dc.principal" (dict "ctx" . "component" "gateway")) (include "dc.principal" (dict "ctx" . "component" "controller")) (include "dc.principal" (dict "ctx" . "component" "hooks")))
   "global_viewers" (list (include "dc.principal" (dict "ctx" . "component" "gateway")) (include "dc.principal" (dict "ctx" . "component" "controller")) (include "dc.principal" (dict "ctx" . "component" "callout")) (include "dc.principal" (dict "ctx" . "component" "hooks")))
-  "credential_provider" (dict "grant" .Values.substrate.credentialProvider.grant "config_map" .Values.substrate.credentialProvider.policyConfigMap "deployment" .Values.substrate.credentialProvider.deployment "secrets_namespace" .Values.substrate.credentialProvider.secretsNamespace)
+  "credential_provider" (dict "grant" .Values.substrate.credentialProvider.grant "config_map" .Values.substrate.credentialProvider.policyConfigMap "deployment" .Values.substrate.credentialProvider.deployment "secrets_namespace" .Values.substrate.credentialProvider.secretsNamespace "user_secrets_namespace" (include "dc.userSecretsNsName" .) "user_secrets" (ne (include "dc.userSecretsNs" .) ""))
   "store_state_config_map" "defenseclaw-store-state"
   "controller_deployment" "defenseclaw-controller"
   "owner_token_secret" .Values.bootstrap.ownerTokenSecret

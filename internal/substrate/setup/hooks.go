@@ -209,16 +209,30 @@ func grantProvider(ctx context.Context, plan ChartPlan, kube KubeAPI, r *StepRep
 			"so no grant was written", plan.SubstrateNamespace, cp.ConfigMap)
 		return nil
 	}
-	text, changes, err := GrantNamespace(cm.Data[NamespacePolicyKey], plan.LauncherAtespaces, cp.SecretsNamespace)
-	if err != nil {
-		return err
+	grant, revoke := cp.grantedNamespaces()
+	text := cm.Data[NamespacePolicyKey]
+	var changes []GrantChange
+	for _, ns := range grant {
+		var granted, revoked []GrantChange
+		var err error
+		if text, granted, err = GrantNamespace(text, plan.LauncherAtespaces, ns); err != nil {
+			return err
+		}
+		// An atespace that left launcher_atespaces loses the grant (GAP-0083).
+		if text, revoked, err = RevokeNamespaceExcept(text, plan.LauncherAtespaces, ns); err != nil {
+			return err
+		}
+		changes = append(append(changes, granted...), revoked...)
 	}
-	// An atespace that left launcher_atespaces loses the grant (GAP-0083).
-	text, revoked, err := RevokeNamespaceExcept(text, plan.LauncherAtespaces, cp.SecretsNamespace)
-	if err != nil {
-		return err
+	// Self-service secrets turned off: no atespace keeps their namespace.
+	for _, ns := range revoke {
+		var revoked []GrantChange
+		var err error
+		if text, revoked, err = RevokeNamespaceExcept(text, nil, ns); err != nil {
+			return err
+		}
+		changes = append(changes, revoked...)
 	}
-	changes = append(changes, revoked...)
 	if len(changes) == 0 {
 		return nil
 	}
@@ -458,12 +472,21 @@ func revokeProvider(ctx context.Context, plan ChartPlan, kube KubeAPI, r *StepRe
 	if err != nil || cm == nil {
 		return err
 	}
-	// Every atespace granted the secrets namespace, not only today's
+	// Every atespace granted the secrets namespaces, not only today's
 	// launcher list: one removed from launcher_atespaces earlier keeps its
-	// grant otherwise (GAP-0083). Only DefenseClaw grants that namespace.
-	text, changes, err := RevokeNamespaceExcept(cm.Data[NamespacePolicyKey], nil, cp.SecretsNamespace)
-	if err != nil || len(changes) == 0 {
-		return err
+	// grant otherwise (GAP-0083). Only DefenseClaw grants those namespaces.
+	grant, revoke := cp.grantedNamespaces()
+	text := cm.Data[NamespacePolicyKey]
+	var changes []GrantChange
+	for _, ns := range append(grant, revoke...) {
+		var revoked []GrantChange
+		if text, revoked, err = RevokeNamespaceExcept(text, nil, ns); err != nil {
+			return err
+		}
+		changes = append(changes, revoked...)
+	}
+	if len(changes) == 0 {
+		return nil
 	}
 	cm.Data[NamespacePolicyKey] = text
 	if err := kube.UpdateConfigMap(ctx, cm); err != nil {

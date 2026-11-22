@@ -67,6 +67,11 @@ substrate:
     # The namespace holding the Secrets egress injects into actors (never
     # this release's namespace: DefenseClaw's own Secrets stay here).
     secretsNamespace: defenseclaw-actor-secrets
+    # Create config.substrate.self_service_secrets.namespace (default
+    # defenseclaw-user-secrets, where people's own secret values live) when
+    # self-service secrets are on. false: the namespace already exists. The
+    # hooks grant the credential provider this namespace too.
+    createUserSecretsNamespace: true
 
 # Sets config.deployment_mode. managed_enterprise mounts config.yaml as one
 # read-only file and gives each pod a data volume owned by the gateway

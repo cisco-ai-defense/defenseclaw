@@ -85,6 +85,27 @@ type CredentialProvider struct {
 	ConfigMap        string `json:"config_map"`
 	Deployment       string `json:"deployment"`
 	SecretsNamespace string `json:"secrets_namespace"`
+	// UserSecretsNamespace is substrate.self_service_secrets.namespace (the
+	// self-service values, dc-b-<person>); UserSecrets says whether
+	// self-service secrets are on. On, the launcher atespaces are granted
+	// it too; off, its grants are revoked. The chart always names it, so
+	// turning self-service off revokes what turning it on granted.
+	UserSecretsNamespace string `json:"user_secrets_namespace,omitempty"`
+	UserSecrets          bool   `json:"user_secrets,omitempty"`
+}
+
+// grantedNamespaces are the namespaces the launcher atespaces are granted;
+// revokedNamespaces the ones every grant of is removed (self-service off).
+func (cp CredentialProvider) grantedNamespaces() (grant, revoke []string) {
+	grant = []string{cp.SecretsNamespace}
+	if u := cp.UserSecretsNamespace; u != "" && u != cp.SecretsNamespace {
+		if cp.UserSecrets {
+			grant = append(grant, u)
+		} else {
+			revoke = append(revoke, u)
+		}
+	}
+	return grant, revoke
 }
 
 var dnsLabel = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$`)
@@ -152,6 +173,10 @@ func (p ChartPlan) Validate() error {
 	}
 	if p.CredentialProvider.SecretsNamespace == p.Namespace {
 		errs = append(errs, errors.New("credential_provider.secrets_namespace must not be the DefenseClaw namespace (D14)"))
+	}
+	if u := p.CredentialProvider.UserSecretsNamespace; u != "" &&
+		(!dnsLabel.MatchString(u) || u == p.Namespace || u == p.SubstrateNamespace) {
+		errs = append(errs, errors.New("credential_provider.user_secrets_namespace must be a namespace name other than the DefenseClaw and Substrate namespaces"))
 	}
 	if p.StoreStateConfigMap == "" {
 		errs = append(errs, errors.New("store_state_config_map is required"))

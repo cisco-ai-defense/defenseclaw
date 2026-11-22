@@ -24,6 +24,10 @@ leader; the flag is gone, and setting it here is a clear error (GAP-0250). */ -}
 {{- if eq .Values.substrate.credentialProvider.secretsNamespace .Values.substrate.namespace -}}
 {{- fail "substrate.credentialProvider.secretsNamespace must not be the Substrate namespace" -}}
 {{- end -}}
+{{- $userNs := include "dc.userSecretsNsName" . -}}
+{{- if or (eq $userNs .Release.Namespace) (eq $userNs .Values.substrate.namespace) -}}
+{{- fail "config.substrate.self_service_secrets.namespace must not be the release or Substrate namespace: the credential provider would hand those Secrets to actors" -}}
+{{- end -}}
 {{- if has $mode (list "managed" "managed_enterprise" "managed-enterprise") -}}
 {{- if eq (toString (dig "require_attested_templates" true $sub)) "false" -}}
 {{- fail "config.substrate.require_attested_templates false is not allowed with deployment_mode managed_enterprise" -}}
