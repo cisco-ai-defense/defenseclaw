@@ -15,6 +15,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 )
 
 // shadowLiveRequest is a hook-shaped request for one shell command.
@@ -135,17 +136,32 @@ func TestEffectShadowLivePanicIsRecordedAndIgnored(t *testing.T) {
 	}
 }
 
-// A run past the wall-clock cap is recorded as shadow_timeout and its answer
-// is discarded.
-func TestEffectShadowLiveTimeoutIsRecordedAndDiscarded(t *testing.T) {
+// The shadow record of a slow run is the record of an idle one: the slow step
+// shows only in the cost (FIX-T19).
+func TestEffectShadowLiveSlowRunKeepsItsAnswer(t *testing.T) {
 	useEffectsRulesMode(t, "shadow")
-	prev := effectShadowTimeCap
-	effectShadowTimeCap = 5 * time.Millisecond
-	t.Cleanup(func() { effectShadowTimeCap = prev })
-	effectShadowFaultHook = func() { time.Sleep(30 * time.Millisecond) }
+	effectShadowFaultHook = func() { time.Sleep(effectsLaneSlowStep) }
 	_, recs := dispatchShadowLive(t, shadowLiveWrite, 1)
-	if len(recs) != 1 || recs[0].Reason != effectShadowReasonTimeout || recs[0].Action != guardrailActionAllow || len(recs[0].RuleIDs) != 0 {
-		t.Fatalf("timeout record = %+v, want shadow_timeout, allow, no rule ids", recs)
+	if len(recs) != 1 || recs[0].Reason != "" || recs[0].Tier != string(effectTierRestricted) ||
+		len(recs[0].RuleIDs) != 1 || recs[0].RuleIDs[0] != "effect.protected_target_restricted" {
+		t.Fatalf("slow record = %+v, want the restricted answer with no reason", recs)
+	}
+	if recs[0].CostUS < effectsLaneSlowStep.Microseconds() {
+		t.Fatalf("slow record cost %d us, want at least the slow step %d us", recs[0].CostUS, effectsLaneSlowStep.Microseconds())
+	}
+}
+
+// The cut is in the record too: a shadow run past the walker budget carries
+// work_budget_exceeded and the effect cap.
+func TestEffectShadowRunReportsTheWorkCut(t *testing.T) {
+	useEffectsRulesMode(t, "shadow")
+	res := effectShadowRun(shadowLiveRequest(effectsLaneWorkCutCommand()), effectRulesShadow, tierRestricted)[0]
+	if res.Reason != effectShadowReasonWork || !res.truncated.Has(bounded.Effects) {
+		t.Fatalf("record = reason %q caps %q, want %s at the effect cap", res.Reason, res.truncated.Reason(), effectShadowReasonWork)
+	}
+	idle := effectShadowRun(shadowLiveRequest(shadowLiveWrite), effectRulesShadow, tierRestricted)[0]
+	if idle.Reason != "" || idle.truncated.Any() {
+		t.Fatalf("a call inside the budgets = reason %q caps %q, want neither", idle.Reason, idle.truncated.Reason())
 	}
 }
 
@@ -211,7 +227,10 @@ func TestEffectShadowAuditDetailsAreValueFree(t *testing.T) {
 func TestEffectShadowLivePathologicalInputsStayInsideTheCaps(t *testing.T) {
 	useEffectsRulesMode(t, "shadow")
 	const allocCap = 64 << 20
-	timeCap := 4 * effectShadowTimeCap // the parse before the walk is not interruptible
+	// A test bound on the cost of the worst input the lane admits, never a
+	// bound of an answer: the lane counts work (FIX-T19). 200 ms is four times
+	// the wall-clock cap the shadow lane had; the parse is not interruptible.
+	const timeCap = 200 * time.Millisecond
 	near := effectShadowMaxCommandBytes - 64
 	fill := func(unit string) string { return strings.Repeat(unit, near/len(unit)) }
 	protectedWrite := " echo k >> /home/u/.ssh/authorized_keys"

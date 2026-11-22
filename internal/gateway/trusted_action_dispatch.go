@@ -575,7 +575,7 @@ func dispatchTrustedActionOnce(
 			}
 			effectRequest := request
 			defer func() {
-				findings = joinEffectFindings(findings, effectLiveFindings(effectRequest, mode, effectsRulesTierFor()))
+				findings = joinEffectLive(findings, effectRequest, mode, effectsRulesTierFor())
 			}()
 		case effectRulesShadow:
 			// Shadow: compute and record beside today's rules, off the hook's
