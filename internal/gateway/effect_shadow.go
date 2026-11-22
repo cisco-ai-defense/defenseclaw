@@ -6,11 +6,15 @@ package gateway
 
 import (
 	"context"
+	"encoding/json"
 	"runtime"
+	"slices"
+	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/effectrules"
 	"github.com/defenseclaw/defenseclaw/internal/effects"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/decide"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/semantic"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/semanticpb"
 )
@@ -21,16 +25,18 @@ import (
 //
 //   - a known effect on a protected target (or a known attack tool) takes the
 //     severity path today's protected-file rules take;
-//   - an unknown effect that could touch a protected set takes the unknown
-//     tier: alert in OSS default and permissive, block in strict and in every
-//     managed install (there is no ask yet; S8 owns the confirm path and maps
-//     the effect_unknown disposition to it);
+//   - an unknown effect that reaches a protected set by a reach reason
+//     (effectrules.Reach*, DET111 PLAN 5.3) takes the unknown tier: alert in
+//     the default packs, per-user and managed alike (owner ruling GAP-1611,
+//     GAP-1698), block in the strict packs (there is no ask yet; S8 owns the
+//     confirm path and maps the effect_unknown disposition to it);
 //   - otherwise clean.
 //
 // guardrail.cascade.lanes.effects decides the lane: off (skip entirely, no cost),
-// shadow (compute and measure beside today's, never change the answer) or on
-// (the effect verdict participates). The lane ships shadow; the lead flips it
-// to on once the corpus numbers hold.
+// shadow (compute and measure beside today's, never change the answer) or on,
+// the default since DET111: the effect verdict joins today's findings as a
+// raise only. It adds a finding and never removes or lowers one, so the
+// decision takes the stronger of today's readers and the effect model.
 
 type effectRulesMode string
 
@@ -91,6 +97,10 @@ type EffectShadowResult struct {
 	// Reason is why the run has no (or a partial) verdict: parse_budget_exceeded,
 	// shadow_timeout or shadow_panic. Empty for a fully computed run.
 	Reason string `json:"reason,omitempty"`
+	// Reach are the reach reasons of an unknown-tier verdict (DET111 PLAN
+	// 5.3); RoleHeld marks an R-ROLE unknown that was counted, not raised.
+	Reach    []string `json:"reach,omitempty"`
+	RoleHeld bool     `json:"role_held,omitempty"`
 	// CostUS is the wall-clock cost of the run in microseconds; Effects is the
 	// number of effects the extractor produced.
 	CostUS  int64 `json:"cost_us,omitempty"`
@@ -143,6 +153,12 @@ func effectCall(connector string, in actionfacts.Input) (effects.Call, effects.O
 		BSDUserland: effectBSDUserland(effectHostGOOS, flavor)}
 
 	switch {
+	case effectPatchTool(in.Tool) && effectPatchText(in) != "":
+		// A patch tool's text is a patch envelope, never a shell command: a
+		// Codex apply_patch carries it as the command, an OpenCode patch as
+		// patchText. Both are read by the patch frontend, as the file tools
+		// of the same edit are (every route, DET111 PLAN 5.2).
+		return effects.Call{Surface: effects.SurfacePatch, Tool: in.Tool, Command: effectPatchText(in)}, opts, true
 	case in.Command != "":
 		return effects.Call{Surface: effects.SurfaceShell, Tool: in.Tool, Command: in.Command}, opts, true
 	case len(in.Argv) > 0:
@@ -152,6 +168,41 @@ func effectCall(connector string, in actionfacts.Input) (effects.Call, effects.O
 	default:
 		return effects.Call{}, opts, false
 	}
+}
+
+// effectPatchTool names the connectors' patch tools (apply_patch for Codex,
+// patch for OpenCode and Hermes).
+func effectPatchTool(tool string) bool {
+	switch strings.ToLower(strings.TrimSpace(tool)) {
+	case "apply_patch", "applypatch", "apply-patch", "patch":
+		return true
+	}
+	return false
+}
+
+// effectPatchText is the patch text a patch tool call carries: every
+// distinct envelope in the command and the patch fields, joined, so a decoy
+// envelope in a field the tool does not run cannot hide the one it does (the
+// patch frontend reads the headers of all of them). A call with no envelope
+// (Hermes' patch in replace mode) is not a patch.
+func effectPatchText(in actionfacts.Input) string {
+	const begin = "*** Begin Patch"
+	var texts []string
+	add := func(v string) {
+		if strings.Contains(v, begin) && !slices.Contains(texts, v) {
+			texts = append(texts, v)
+		}
+	}
+	add(in.Command)
+	var args map[string]any
+	if json.Unmarshal(in.Args, &args) == nil {
+		for _, k := range []string{"input", "patch", "patchText", "patch_text", "command", "content"} {
+			if v, ok := args[k].(string); ok {
+				add(v)
+			}
+		}
+	}
+	return strings.Join(texts, "\n")
 }
 
 // effectHostGOOS is the host the hook runs on; a test pins it.
@@ -186,6 +237,12 @@ type effectClass struct {
 	sets             []string
 	program          string
 	kind             string
+	// reach are the reach reasons (effectrules.Reach*) of the unknowns that
+	// made the call touch a protected set; empty when only known effects did.
+	reach []string
+	// roleHeld: an unknown target of a known write or send (R-ROLE) that
+	// does not raise (effectReachRoleRaises is off), counted only.
+	roleHeld bool
 }
 
 // classifyEffects applies the owner's three answers (2026-11-13): a known
@@ -193,7 +250,7 @@ type effectClass struct {
 // restricted tier (block); anything else that touches a protected set,
 // including any UNKNOWN effect that could reach one, is the unknown tier;
 // otherwise clean.
-func classifyEffects(result effects.Result, facts []*semanticpb.EffectFact, flavor effects.Flavor, tier effectTierMode) effectClass {
+func classifyEffects(result effects.Result, facts []*semanticpb.EffectFact, flavor effects.Flavor, tier effectTierMode, env effectReachEnv) effectClass {
 	var c effectClass
 	fullyAccounted := len(result.Unknowns) == 0
 	var touchSets []string
@@ -224,8 +281,18 @@ func classifyEffects(result effects.Result, facts []*semanticpb.EffectFact, flav
 		if !relevant {
 			continue
 		}
+		// A target only maybe in a set reaches the unknown tier only with a
+		// reach reason (DET111 PLAN 5.3); with none it stays clean, as in
+		// 1.0.10.
+		r := factReach(f, known, unknownEffect, env, flavor)
+		if len(known) == 0 && r == "" {
+			continue
+		}
 		c.touches = true
 		touchSets = append(touchSets, append(append([]string(nil), known...), maybe...)...)
+		if r != "" {
+			c.reach = append(c.reach, r)
+		}
 		if c.program == "" && c.kind == "" {
 			c.program, c.kind = f.GetOrigin().GetProgram(), kind
 		}
@@ -256,7 +323,124 @@ func classifyEffects(result effects.Result, facts []*semanticpb.EffectFact, flav
 		}
 	}
 	c.sets = dedupeStrings(touchSets)
+	c.reach = dedupeStrings(c.reach)
 	return c
+}
+
+// factReach is the reach reason of one relevant fact: none for a known effect
+// on a known member; R-NAME for an unknown effect on a known member;
+// otherwise the basis of the first maybe match that holds (glob, unresolved
+// link, dynamic cwd, protected folder, shape). A glob reaches only when its
+// components can select a member (effectrules.GlobReaches: ~/* does not
+// select ~/.ssh), and a known path beside the members only when it is one or
+// an ancestor of one (effectrules.KnownPathReaches).
+func factReach(f *semanticpb.EffectFact, known []string, unknownEffect bool, env effectReachEnv, flavor effects.Flavor) string {
+	if len(known) > 0 {
+		if unknownEffect {
+			return effectrules.ReachName
+		}
+		return ""
+	}
+	t := f.GetTarget()
+	for _, m := range t.GetProtected() {
+		if m.GetState() != semantic.ProtectedUnknown {
+			continue
+		}
+		switch m.GetReason() {
+		case "glob":
+			// The shell's dot rule holds only in a POSIX reading of a call
+			// that does not turn dot matching on.
+			dotRule := f.GetOrigin().GetDialect() == string(effects.DialectPOSIX) && !env.DotGlob
+			if t.GetGlob() != "" && !effectrules.GlobReaches(t.GetGlob(), env.Home, flavor, dotRule, f.GetKind() == string(effects.KindDelete), m.GetSet()) {
+				continue
+			}
+		case "dir":
+			if f.GetTargetState() == "known" && !effectrules.KnownPathReaches(t.GetPath(), env.Home, flavor, m.GetSet()) {
+				continue
+			}
+		}
+		return effectrules.ReachForMatch(m.GetReason(), f.GetReasons())
+	}
+	return ""
+}
+
+// effectReachEnv is what the reach rule reads beside the facts: the active
+// home, and whether the call turns dot matching on for its globs (bash
+// dotglob, zsh globdots or glob_dots).
+type effectReachEnv struct {
+	Home    string
+	DotGlob bool
+}
+
+func newEffectReachEnv(home, text string) effectReachEnv {
+	lower := strings.ToLower(text)
+	return effectReachEnv{Home: home, DotGlob: strings.Contains(lower, "dotglob") || strings.Contains(lower, "globdots") ||
+		strings.Contains(lower, "glob_dots")}
+}
+
+// effectReachRoleRaises lets R-ROLE (an unknown operand of a write or send
+// the table models) raise to the unknown tier. It is off: a write to an
+// unknown $OUT is too common in benign calls to alert on before its benign
+// rate is measured; the shadow report counts it (roleHeld).
+var effectReachRoleRaises = false
+
+// effectReachUnplaced reaches the unknowns that no protected path placed
+// (classifyEffects saw none): an unknown operand of a known write or send
+// (R-ROLE), and a call not fully read whose text names a member of the
+// persistence sets that no known effect accounts for (R-NAME, or R-CODE when
+// the unread part is code). With no reason the call stays clean, as in
+// 1.0.10.
+func effectReachUnplaced(c *effectClass, result effects.Result, facts []*semanticpb.EffectFact, text, home string, flavor effects.Flavor) {
+	if c.touches {
+		return
+	}
+	unknown := len(result.Unknowns) > 0
+	code := false
+	accounted, reads := map[string]bool{}, map[string]bool{}
+	for _, f := range facts {
+		kind := f.GetKind()
+		known := f.GetTargetState() == "known" && f.GetRoleState() == "known" && kind != string(effects.KindOpaque)
+		if !known {
+			unknown = true
+		}
+		if kind == string(effects.KindOpaque) || effectSetContains(f.GetReasons(), string(effects.ReasonOpaqueCode)) || f.GetDataKind() == string(effects.DataCode) {
+			code = true
+		}
+		t := f.GetTarget()
+		if t.GetType() == "path" && f.GetTargetState() == "known" && t.GetPath() != "" {
+			accounted[t.GetPath()] = kind != string(effects.KindRead)
+			if kind == string(effects.KindRead) {
+				reads[t.GetPath()] = true
+			}
+		}
+		if f.GetTargetState() != "known" && f.GetRoleState() == "known" &&
+			(mutatingEffectKind(kind) || kind == string(effects.KindNetworkSend)) {
+			c.roleHeld = true
+		}
+	}
+	if !unknown {
+		return
+	}
+	if c.roleHeld && effectReachRoleRaises {
+		c.touches = true
+		c.reach = append(c.reach, effectrules.ReachRole)
+	}
+	// A known read accounts for its name, unless the unread part is code that
+	// may write what the call read (cat ~/.bashrc | python -c ...).
+	if !code {
+		for p := range reads {
+			accounted[p] = true
+		}
+	}
+	if set, ok := effectrules.TextNamesProtected(text, home, flavor, accounted); ok {
+		c.touches = true
+		c.sets = dedupeStrings(append(c.sets, set))
+		r := effectrules.ReachName
+		if code {
+			r = effectrules.ReachCode
+		}
+		c.reach = dedupeStrings(append(c.reach, r))
+	}
 }
 
 func dedupeStrings(in []string) []string {
@@ -286,15 +470,15 @@ func protectedSetsByState(t *semanticpb.EffectTarget) (known, maybe []string) {
 }
 
 // effectAction maps the protected-tier read to the guardrail action. An effect
-// that touches a protected set blocks in strict and every managed install, and
-// blocks in the OSS default only when a restricted-tier effect is on a
-// ruling family (authorized-keys / self-protection); otherwise it alerts in
-// default and permissive. There is no ask yet (S8 owns the confirm path).
-func effectAction(touches, restrictedRuling, strictOrManaged bool) string {
+// that touches a protected set blocks in the strict packs, and blocks in the
+// default packs (per-user and managed) only when a restricted-tier effect is
+// on a ruling family (authorized-keys / self-protection); otherwise it alerts.
+// There is no ask yet (S8 owns the confirm path).
+func effectAction(touches, restrictedRuling, strict bool) string {
 	if !touches {
 		return guardrailActionAllow
 	}
-	if strictOrManaged || restrictedRuling {
+	if strict || restrictedRuling {
 		return guardrailActionBlock
 	}
 	return guardrailActionAlert
@@ -344,6 +528,9 @@ func effectShadowFindings(res EffectShadowResult, mode effectRulesMode) []RuleFi
 		disposition = findingDispositionEffectKnown
 	}
 	tags := append([]string{"effects", res.Tier}, res.Sets...)
+	for _, r := range res.Reach {
+		tags = append(tags, "reach:"+r)
+	}
 	f := RuleFinding{
 		RuleID:     rid,
 		Title:      title,
@@ -352,6 +539,7 @@ func effectShadowFindings(res EffectShadowResult, mode effectRulesMode) []RuleFi
 		Tags:       tags,
 	}
 	f.disposition = disposition
+	f.Proof = effectFindingProof(res)
 	f.proof = newFindingProof(findingProofEffect, rid, mode == effectRulesOn)
 	switch res.Action {
 	case guardrailActionAlert:
@@ -360,4 +548,79 @@ func effectShadowFindings(res EffectShadowResult, mode effectRulesMode) []RuleFi
 		f.enforcement = findingEnforcementInherit
 	}
 	return []RuleFinding{f}
+}
+
+// effectProofSource is the Proof.Source of every effect-lane finding: the
+// shadow report's key for the effect model beside the legacy readers.
+const effectProofSource = "effects"
+
+// effectFindingProof is the DET111 proof of an effect verdict (internal/
+// guardrail/decide): the deciding effect's kind, the strongest protected
+// class it reached, and how sure the lane is. A restricted-tier verdict, or
+// an unknown-tier one without a reach reason (a known effect on a known
+// member by a command the restricted list does not name), is known; one
+// with a reach reason is maybe and carries the first reason.
+func effectFindingProof(res EffectShadowResult) decide.Proof {
+	p := decide.Proof{
+		Kind:      effectProofKind(res.Kind),
+		Target:    effectProofTarget(res.Sets),
+		Certainty: decide.CertKnown,
+		Source:    effectProofSource,
+	}
+	if res.Tier != string(effectTierRestricted) && len(res.Reach) > 0 {
+		p.Certainty, p.Reach = decide.CertMaybe, res.Reach[0]
+	}
+	return p
+}
+
+// effectProofKind maps an effect kind to a proof kind. An opaque program is
+// exec (it runs code the lane did not read); no deciding effect (a call
+// reached by the name scan alone) is a write it may do.
+func effectProofKind(kind string) decide.ProofKind {
+	switch effects.Kind(kind) {
+	case effects.KindRead:
+		return decide.KindRead
+	case effects.KindAppend:
+		return decide.KindAppend
+	case effects.KindDelete:
+		return decide.KindDelete
+	case effects.KindLink:
+		return decide.KindLink
+	case effects.KindExec, effects.KindOpaque:
+		return decide.KindExec
+	case effects.KindNetworkSend:
+		return decide.KindSend
+	case effects.KindNetworkFetch:
+		return decide.KindFetch
+	case effects.KindPermissionChange:
+		return decide.KindPerm
+	default:
+		return decide.KindWrite
+	}
+}
+
+// effectSetClasses is the protected class of each effect-rule set, strongest
+// first: a verdict that reached several sets carries the first one here.
+var effectSetClasses = []struct {
+	set   string
+	class decide.TargetClass
+}{
+	{effectrules.SetSelfProtection, decide.TargetState},
+	{effectrules.SetSSHAuthorizedKeys, decide.TargetAuthorizedKeys},
+	{effectrules.SetAgentHookConfig, decide.TargetHookConfig},
+	{effectrules.SetCredentials, decide.TargetCredential},
+	{effectrules.SetShellRC, decide.TargetAutostart},
+	{effectrules.SetOutsideHome, decide.TargetSystem},
+}
+
+func effectProofTarget(sets []string) decide.TargetClass {
+	for _, c := range effectSetClasses {
+		if effectSetContains(sets, c.set) {
+			return c.class
+		}
+	}
+	if len(sets) > 0 {
+		return decide.TargetOther
+	}
+	return decide.TargetNone
 }

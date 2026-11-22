@@ -145,18 +145,23 @@ func effectShadowRun(request trustedActionRequest, mode effectRulesMode, tiers .
 		Flavor:  opts.Flavor,
 		Resolve: effectResolverOverride,
 	})
-	strictOrManaged := request.StrictPolicy || request.ManagedInstall
+	// The unknown tier alerts in the default pack, per-user and managed alike
+	// (owner ruling 2026-11-21, GAP-1611/1698); the strict packs block.
+	strict := request.StrictPolicy
+	text := effectReachText(call)
+	reachEnv := newEffectReachEnv(request.Input.ActiveHome, text)
 	for i, tier := range tiers {
-		c := classifyEffects(result, facts, opts.Flavor, tier)
+		c := classifyEffects(result, facts, opts.Flavor, tier, reachEnv)
+		effectReachUnplaced(&c, result, facts, text, request.Input.ActiveHome, opts.Flavor)
 		res := &results[i]
-		res.Sets, res.Program, res.Kind = c.sets, c.program, c.kind
+		res.Sets, res.Program, res.Kind, res.Reach, res.RoleHeld = c.sets, c.program, c.kind, c.reach, c.roleHeld
 		switch {
 		case c.restricted:
 			res.Tier = string(effectTierRestricted)
 		case c.touches:
 			res.Tier = string(effectTierUnknown)
 		}
-		res.Action = effectAction(c.touches, c.restrictedRuling, strictOrManaged)
+		res.Action = effectAction(c.touches, c.restrictedRuling, strict)
 		if res.Tier != string(effectTierClean) {
 			res.RuleIDs = []string{"effect.protected_target_" + res.Tier}
 		}
@@ -164,7 +169,58 @@ func effectShadowRun(request trustedActionRequest, mode effectRulesMode, tiers .
 	if time.Now().After(deadline) {
 		return finish(effectShadowReasonTimeout, len(result.Effects))
 	}
+	for i := range results {
+		countEffectReach(results[i])
+	}
 	return finish("", len(result.Effects))
+}
+
+// effectReachText is the call text the reach rule's name scan reads: the
+// shell command, else the argv words.
+func effectReachText(call effects.Call) string {
+	if call.Command != "" {
+		return call.Command
+	}
+	return strings.Join(call.Argv, " ")
+}
+
+// effectReachCounts counts, per reach reason, the effect-lane verdicts above
+// clean that carried it, and effectReachRoleHeld the R-ROLE unknowns counted
+// but not raised. The benchmark harness and the shadow report read them
+// (EffectReachCounts) to hold each reason's benign rate at 1.0.10.
+var (
+	effectReachCounts   = map[string]*atomic.Int64{}
+	effectReachRoleHeld atomic.Int64
+)
+
+func init() {
+	for _, r := range effectrules.ReachReasons {
+		effectReachCounts[r] = new(atomic.Int64)
+	}
+}
+
+func countEffectReach(res EffectShadowResult) {
+	if res.Tier != string(effectTierClean) {
+		for _, r := range res.Reach {
+			if n := effectReachCounts[r]; n != nil {
+				n.Add(1)
+			}
+		}
+	}
+	if res.RoleHeld {
+		effectReachRoleHeld.Add(1)
+	}
+}
+
+// EffectReachCounts returns the per-reason counts since the process started,
+// plus "R-ROLE-held".
+func EffectReachCounts() map[string]int64 {
+	out := make(map[string]int64, len(effectReachCounts)+1)
+	for r, n := range effectReachCounts {
+		out[r] = n.Load()
+	}
+	out[effectrules.ReachRole+"-held"] = effectReachRoleHeld.Load()
+	return out
 }
 
 // scheduleEffectShadow starts one shadow run for the hook on its own goroutine
@@ -212,6 +268,12 @@ func effectShadowAuditDetails(res EffectShadowResult, dropped int64) string {
 	}
 	if res.Kind != "" {
 		b.WriteString(" kind=" + res.Kind)
+	}
+	if len(res.Reach) > 0 {
+		b.WriteString(" reach=" + strings.Join(res.Reach, ","))
+	}
+	if res.RoleHeld {
+		b.WriteString(" role_held=1")
 	}
 	if len(res.RuleIDs) > 0 {
 		b.WriteString(" rules=" + strings.Join(res.RuleIDs, ","))

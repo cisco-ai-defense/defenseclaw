@@ -51,29 +51,41 @@ func TestLoadFromFileRefusesANullCascadeBlock(t *testing.T) {
 
 // TestCascadeLaneRefusalOffersOnlyWhatTheLaneTakes (rel-1-0-10:GAP-0645): the
 // refusal of a lane without a value, and of on for a shadow-only lane, lists
-// the values CascadeLaneAllowed gives for that lane: effects and secret_flow
-// take off and shadow, never on.
+// the values CascadeLaneAllowed gives for that lane: secret_flow takes off
+// and shadow, never on; effects takes off, shadow and on (DET111).
 func TestCascadeLaneRefusalOffersOnlyWhatTheLaneTakes(t *testing.T) {
-	for _, lane := range []string{CascadeLaneEffects, CascadeLaneSecretFlow} {
-		allowed := strings.Join(CascadeLaneAllowed(lane), ", ")
-		if allowed != "off, shadow" {
-			t.Fatalf("%s allowed = %q, want off, shadow", lane, allowed)
+	load := func(lane, value string) error {
+		dir := t.TempDir()
+		t.Setenv("DEFENSECLAW_HOME", dir)
+		path := filepath.Join(dir, DefaultConfigName)
+		raw := "config_version: 8\ndata_dir: " + dir + "\nguardrail:\n  cascade:\n    lanes:\n      " + lane + ": " + value + "\nobservability: {}\n"
+		if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+			t.Fatal(err)
 		}
-		for _, value := range []string{"null", "on"} {
-			dir := t.TempDir()
-			t.Setenv("DEFENSECLAW_HOME", dir)
-			path := filepath.Join(dir, DefaultConfigName)
-			raw := "config_version: 8\ndata_dir: " + dir + "\nguardrail:\n  cascade:\n    lanes:\n      " + lane + ": " + value + "\nobservability: {}\n"
-			if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			_, err := LoadFromFile(path)
+		_, err := LoadFromFile(path)
+		return err
+	}
+	for _, c := range []struct {
+		lane, allowed string
+		refused       []string
+	}{
+		{CascadeLaneSecretFlow, "off, shadow", []string{"null", "on"}},
+		{CascadeLaneEffects, "off, shadow, on", []string{"null"}},
+	} {
+		if allowed := strings.Join(CascadeLaneAllowed(c.lane), ", "); allowed != c.allowed {
+			t.Fatalf("%s allowed = %q, want %s", c.lane, allowed, c.allowed)
+		}
+		for _, value := range c.refused {
+			err := load(c.lane, value)
 			if err == nil {
-				t.Fatalf("%s: %s accepted", lane, value)
+				t.Fatalf("%s: %s accepted", c.lane, value)
 			}
-			if strings.Contains(err.Error(), "off, shadow, on") || !strings.Contains(err.Error(), allowed) {
-				t.Errorf("%s: %s refusal %q does not offer exactly %q", lane, value, err, allowed)
+			if c.allowed == "off, shadow" && strings.Contains(err.Error(), "off, shadow, on") || !strings.Contains(err.Error(), c.allowed) {
+				t.Errorf("%s: %s refusal %q does not offer exactly %q", c.lane, value, err, c.allowed)
 			}
 		}
+	}
+	if err := load(CascadeLaneEffects, "on"); err != nil {
+		t.Errorf("effects: on refused: %v", err)
 	}
 }

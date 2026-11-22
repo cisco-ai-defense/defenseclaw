@@ -1,7 +1,17 @@
 # Reviewed flag specification for the script-, format- and config-taking programs.
 #
 # Every flag a program in this file accepts, switches included, is listed with its
-# arity (0 = switch, 1 = takes a value) and its effect. The program table
+# arity and its effect. arity: 0 = switch, 1 = takes the next word (or =VALUE),
+# 2 = takes two words (the first has the effect, the second is inert data: find
+# -fprintf FILE FORMAT), opt = a switch whose optional value is attached to its own
+# token only (sed -i[SUFFIX], --in-place[=SUFFIX], grep --color[=WHEN]).
+#
+# The arity column is checked against the tools, not against the table, by
+# TestFlagSpecHelpOracle (the flag token and its metavar in --help / man agree)
+# and TestFlagSpecRunOracle (the tool, run in an empty folder with arity and
+# arity-1 values, reports a missing argument exactly below the arity). Both run
+# on the build boxes (GNU userland) and skip a tool that is absent (rel-1-0-10
+# GAP-0216). The program table
 # (program_table.go) may accept exactly these flags and no others for these
 # programs; TestFlagSpecMatchesTable and the property tests read THIS file, not the
 # table, so a flag added in code without a reviewed line here fails the build.
@@ -20,7 +30,7 @@
 # program<TAB>flag<TAB>arity<TAB>effect
 sed	--expression	1	text:sed
 sed	--file	1	file:script
-sed	--in-place	0	inplace
+sed	--in-place	opt	inplace
 sed	--null-data	0	inert
 sed	--quiet	0	inert
 sed	--regexp-extended	0	inert
@@ -29,7 +39,7 @@ sed	--silent	0	inert
 sed	-E	0	inert
 sed	-e	1	text:sed
 sed	-f	1	file:script
-sed	-i	0	inplace
+sed	-i	opt	inplace
 sed	-l	1	inert
 sed	-n	0	inert
 sed	-r	0	inert
@@ -166,7 +176,7 @@ find	-false	0	inert
 find	-fls	1	output
 find	-follow	0	inert
 find	-fprint	1	output
-find	-fprintf	1	output
+find	-fprintf	2	output
 find	-fstype	1	inert
 find	-gid	1	inert
 find	-group	1	inert
@@ -269,8 +279,8 @@ rg	-v	0	inert
 rg	-w	0	inert
 rg	-x	0	inert
 rg	-z	0	inert
-grep	--color	1	inert
-grep	--colour	1	inert
+grep	--color	opt	inert
+grep	--colour	opt	inert
 grep	--count	0	inert
 grep	--exclude	1	inert
 grep	--extended-regexp	0	inert

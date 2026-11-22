@@ -55,22 +55,8 @@ func (r Role) kind() Kind {
 	return KindOpaque
 }
 
-type EnvRole string
-
-const (
-	EnvCode   EnvRole = "code"
-	EnvConfig EnvRole = "config"
-	EnvHome   EnvRole = "home"
-	EnvPath   EnvRole = "path"
-)
-
-var envRoles = map[string]EnvRole{
-	"LD_PRELOAD": EnvCode, "LD_LIBRARY_PATH": EnvCode, "BASH_ENV": EnvCode, "ENV": EnvCode,
-	"GIT_SSH_COMMAND": EnvCode, "GIT_EXTERNAL_DIFF": EnvCode, "GIT_PAGER": EnvCode, "PAGER": EnvCode,
-	"NODE_OPTIONS": EnvCode, "PERL5OPT": EnvCode, "PYTHONSTARTUP": EnvCode, "RUBYOPT": EnvCode,
-	"GIT_CONFIG": EnvConfig, "GIT_CONFIG_GLOBAL": EnvConfig, "KUBECONFIG": EnvConfig,
-	"HOME": EnvHome, "USERPROFILE": EnvHome, "PATH": EnvPath,
-}
+// EnvRole, envRoles and the environment allow list are in env_roles.go
+// (rel-1-0-10 GAP-0217).
 
 type Flag struct {
 	Value bool
@@ -81,6 +67,16 @@ type Flag struct {
 	Text TextKind
 	// Subtree marks a write-valued option whose destination covers descendants (archive extraction).
 	Subtree bool
+	// Extra is the number of value words the flag takes after its first one
+	// (find -fprintf FILE FORMAT: Extra 1). They are inert data. The run oracle
+	// checks the total (rel-1-0-10 GAP-0216).
+	Extra int
+	// Optional marks a switch that may carry a value attached to its own token
+	// (sed -i[SUFFIX] and --in-place[=SUFFIX], grep --color[=WHEN]); it never
+	// takes the next word. An empty attached value is the plain switch. A
+	// non-empty one is read by the row (the sed backup suffix) or leaves the
+	// call unaccounted (rel-1-0-10 GAP-0216).
+	Optional bool
 }
 
 type PosMode string
@@ -655,22 +651,26 @@ func buildPOSIXTable() {
 	// unaccounted (rel-1-0-10 GAP-0219). install -d (make directories), -s and
 	// --strip-program (run a stripper) stay unaccounted.
 	add(Program{Names: []string{"cp"}, Pos: PosSourcesDest, Recursive: []string{"-r", "-R", "-a", "--recursive", "--archive"},
-		Flags: fl(map[string]Flag{"-t": {Value: true, Role: RoleWrite}, "--target-directory": {Value: true, Role: RoleWrite}, "-S": {Value: true, Role: RoleIgnore}},
+		Flags: fl(map[string]Flag{"-t": {Value: true, Role: RoleWrite}, "--target-directory": {Value: true, Role: RoleWrite}, "-S": {Value: true, Role: RoleIgnore},
+			"--preserve": {Optional: true}, "--update": {Optional: true}},
 			"-r", "-R", "-f", "-v", "-p", "-a", "-n", "-i", "-u", "-L", "-P", "-H", "-d", "-l", "-s", "-x", "-b", "-T",
-			"--recursive", "--force", "--preserve", "--no-clobber", "--archive", "--parents", "--no-dereference", "--dereference", "--verbose", "--update", "--symbolic-link", "--link", "--interactive")})
+			"--recursive", "--force", "--no-clobber", "--archive", "--parents", "--no-dereference", "--dereference", "--verbose", "--symbolic-link", "--link", "--interactive")})
 	add(Program{Names: []string{"install"}, Pos: PosSourcesDest,
 		Flags: fl(map[string]Flag{"-t": {Value: true, Role: RoleWrite}, "--target-directory": {Value: true, Role: RoleWrite},
 			"-m": {Value: true, Role: RoleIgnore}, "-o": {Value: true, Role: RoleIgnore}, "-g": {Value: true, Role: RoleIgnore}, "-S": {Value: true, Role: RoleIgnore}, "--mode": {Value: true, Role: RoleIgnore}},
 			"-v", "-p", "-b", "-T", "-D", "--verbose")})
 	add(Program{Names: []string{"mv"}, Pos: PosSourcesDest, MovesSources: true,
-		Flags: fl(map[string]Flag{"-t": {Value: true, Role: RoleWrite}, "--target-directory": {Value: true, Role: RoleWrite}, "-S": {Value: true, Role: RoleIgnore}},
-			"-f", "-i", "-n", "-v", "-u", "-b", "-T", "--force", "--no-clobber", "--verbose", "--update", "--backup", "--interactive")})
+		Flags: fl(map[string]Flag{"-t": {Value: true, Role: RoleWrite}, "--target-directory": {Value: true, Role: RoleWrite}, "-S": {Value: true, Role: RoleIgnore},
+			"--update": {Optional: true}, "--backup": {Optional: true}},
+			"-f", "-i", "-n", "-v", "-u", "-b", "-T", "--force", "--no-clobber", "--verbose", "--interactive")})
 	add(Program{Names: []string{"rm"}, Pos: PosAllDelete, Strict: true,
-		Flags: fl(nil, "-r", "-R", "-f", "-v", "-i", "-I", "-d", "--recursive", "--force", "--verbose", "--preserve-root", "--no-preserve-root", "--one-file-system", "--interactive", "--dir")})
+		Flags: fl(map[string]Flag{"--preserve-root": {Optional: true}, "--interactive": {Optional: true}},
+			"-r", "-R", "-f", "-v", "-i", "-I", "-d", "--recursive", "--force", "--verbose", "--no-preserve-root", "--one-file-system", "--dir")})
 	add(Program{Names: []string{"unlink"}, Pos: PosAllDelete, Strict: true, Flags: fl(nil)}) // unlink takes no option
 	add(Program{Names: []string{"shred"}, Pos: PosAllDelete, Strict: true,
-		Flags: fl(map[string]Flag{"-n": {Value: true, Role: RoleIgnore}, "-s": {Value: true, Role: RoleIgnore}, "--iterations": {Value: true, Role: RoleIgnore}, "--size": {Value: true, Role: RoleIgnore}},
-			"-f", "-u", "-v", "-x", "-z", "--force", "--remove", "--verbose", "--exact", "--zero")})
+		Flags: fl(map[string]Flag{"-n": {Value: true, Role: RoleIgnore}, "-s": {Value: true, Role: RoleIgnore}, "--iterations": {Value: true, Role: RoleIgnore}, "--size": {Value: true, Role: RoleIgnore},
+			"--remove": {Optional: true}},
+			"-f", "-u", "-v", "-x", "-z", "--force", "--verbose", "--exact", "--zero")})
 	add(Program{Names: []string{"ln"}, Pos: PosLinkTargetLink,
 		Flags: fl(map[string]Flag{"-t": {Value: true, Role: RoleLink}, "-S": {Value: true, Role: RoleIgnore}},
 			"-s", "-f", "-n", "-v", "-r", "-T", "-i", "-b", "-d", "-P", "-L", "--symbolic", "--force", "--relative", "--no-dereference", "--verbose")})
@@ -685,8 +685,9 @@ func buildPOSIXTable() {
 	add(Program{Names: []string{"tee"}, Pos: PosAllWrite, AppendFlag: "-a", Flags: fl(nil, "-a", "-i", "-p", "--append", "--ignore-interrupts")})
 	add(Program{Names: []string{"truncate"}, Pos: PosAllWrite, Flags: map[string]Flag{"-s": {Value: true}}})
 	add(Program{Names: []string{"sed"}, Pos: PosAllRead, FirstPosIgnore: true, FirstPosText: TextSed, InPlace: "-i",
-		Flags: fl(map[string]Flag{"-e": {Value: true, Text: TextSed}, "--expression": {Value: true, Text: TextSed}, "-f": {Value: true, Role: RoleRead, Text: TextScriptFile}, "--file": {Value: true, Role: RoleRead, Text: TextScriptFile}, "-l": {Value: true, Role: RoleIgnore}},
-			"-i", "-n", "-r", "-E", "-s", "-u", "-z", "--in-place", "--regexp-extended", "--quiet", "--silent", "--separate", "--null-data")})
+		Flags: fl(map[string]Flag{"-e": {Value: true, Text: TextSed}, "--expression": {Value: true, Text: TextSed}, "-f": {Value: true, Role: RoleRead, Text: TextScriptFile}, "--file": {Value: true, Role: RoleRead, Text: TextScriptFile}, "-l": {Value: true, Role: RoleIgnore},
+			"-i": {Optional: true}, "--in-place": {Optional: true}},
+			"-n", "-r", "-E", "-s", "-u", "-z", "--regexp-extended", "--quiet", "--silent", "--separate", "--null-data")})
 	// awk and its implementations: the POSIX program grammar is the same; the
 	// gawk-only options are not listed, so they leave the call unaccounted.
 	add(Program{Names: []string{"awk", "gawk", "mawk", "nawk"}, Pos: PosAllRead, FirstPosIgnore: true, FirstPosText: TextAwk,
@@ -773,7 +774,7 @@ func buildPOSIXTable() {
 	add(Program{Names: []string{"find"}, Pos: PosAllRead, DeleteFlag: "-delete",
 		Flags: fl(map[string]Flag{
 			"-exec": {Role: RoleExecProgram}, "-execdir": {Role: RoleExecProgram}, "-ok": {Role: RoleExecProgram}, "-okdir": {Role: RoleExecProgram},
-			"-fprint": {Value: true, Role: RoleWrite}, "-fprintf": {Value: true, Role: RoleWrite}, "-fls": {Value: true, Role: RoleWrite},
+			"-fprint": {Value: true, Role: RoleWrite}, "-fprintf": {Value: true, Extra: 1, Role: RoleWrite}, "-fls": {Value: true, Role: RoleWrite},
 			"-name": {Value: true, Role: RoleIgnore}, "-iname": {Value: true, Role: RoleIgnore}, "-path": {Value: true, Role: RoleIgnore}, "-ipath": {Value: true, Role: RoleIgnore},
 			"-wholename": {Value: true, Role: RoleIgnore}, "-iwholename": {Value: true, Role: RoleIgnore}, "-lname": {Value: true, Role: RoleIgnore}, "-ilname": {Value: true, Role: RoleIgnore},
 			"-type": {Value: true, Role: RoleIgnore}, "-xtype": {Value: true, Role: RoleIgnore}, "-regex": {Value: true, Role: RoleIgnore}, "-iregex": {Value: true, Role: RoleIgnore}, "-regextype": {Value: true, Role: RoleIgnore},
@@ -786,7 +787,7 @@ func buildPOSIXTable() {
 			"-false", "-true", "-quit", "-not", "-a", "-o", "-and", "-or", "-ignore_readdir_race", "-noleaf", "-daystart", "-H", "-L", "-P", "-O1", "-O2", "-O3")})
 	add(Program{Names: []string{"grep", "egrep", "fgrep"}, Pos: PosAllRead, FirstPosIgnore: true, FirstPosText: TextRegex,
 		Flags: fl(map[string]Flag{"-f": {Value: true, Role: RoleRead}, "--file": {Value: true, Role: RoleRead}, "-e": {Value: true, Role: RoleIgnore}, "--regexp": {Value: true, Role: RoleIgnore},
-			"-m": {Value: true, Role: RoleIgnore}, "-A": {Value: true, Role: RoleIgnore}, "-B": {Value: true, Role: RoleIgnore}, "-C": {Value: true, Role: RoleIgnore}, "--color": {Value: true, Role: RoleIgnore}, "--colour": {Value: true, Role: RoleIgnore}, "-d": {Value: true, Role: RoleIgnore}, "--include": {Value: true, Role: RoleIgnore}, "--exclude": {Value: true, Role: RoleIgnore}},
+			"-m": {Value: true, Role: RoleIgnore}, "-A": {Value: true, Role: RoleIgnore}, "-B": {Value: true, Role: RoleIgnore}, "-C": {Value: true, Role: RoleIgnore}, "--color": {Optional: true}, "--colour": {Optional: true}, "-d": {Value: true, Role: RoleIgnore}, "--include": {Value: true, Role: RoleIgnore}, "--exclude": {Value: true, Role: RoleIgnore}},
 			"-r", "-R", "-n", "-i", "-v", "-l", "-L", "-c", "-w", "-x", "-E", "-F", "-G", "-P", "-o", "-H", "-h", "-q", "-s", "-a", "-I", "-z", "-U", "-b", "-T",
 			"--recursive", "--ignore-case", "--invert-match", "--line-number", "--files-with-matches", "--count", "--word-regexp", "--extended-regexp", "--fixed-strings", "--only-matching", "--quiet", "--no-messages", "--with-filename", "--no-filename", "--null")})
 	// rg has its own flags (ripgrep's arities differ from grep's: -r, -E and -d take

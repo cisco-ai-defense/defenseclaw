@@ -85,10 +85,6 @@ func (w *walker) stripWrappers(words []Word) (inner []Word, wrappers []string, f
 	return words[i:], wrappers, foreign, fromInput, unaccounted
 }
 
-// shellPrograms are the POSIX shells whose login form (argv0 starting with -)
-// reads profile files before it runs its text.
-var shellPrograms = map[string]bool{"bash": true, "sh": true, "zsh": true, "dash": true, "ksh": true}
-
 // wrapperParse reads one wrapper's own words against its row.
 type wrapperParse struct {
 	w           *walker

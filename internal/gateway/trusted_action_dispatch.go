@@ -529,13 +529,18 @@ func dispatchTrustedActionOnce(
 	parent, endOpenedPaths := withOpenedPathScope(parent)
 	defer endOpenedPaths()
 	// Effect-model rule lane (S7). Compute once at the outermost dispatch.
-	// In ON the verdict participates; in shadow/off nothing is appended, so
-	// the live answer is unchanged. The benchmark measures shadow through
-	// EvaluateDeterministicAction, not here.
+	// In ON (the default) the verdict joins the findings as a raise only; in
+	// shadow/off nothing is appended, so the live answer is unchanged. The
+	// benchmark measures the lane through EvaluateDeterministicAction, not
+	// here. A managed enterprise gateway runs no local readers (below), so
+	// the lane adds nothing there either: it only raises where they judge.
 	if octx, outermost := markOutermostEffectDispatch(parent); outermost {
 		parent = octx
 		switch mode := effectsRulesModeFor(); mode {
 		case effectRulesOn:
+			if ManagedEnterpriseActive() && !isSubstrateActorRequest(parent) {
+				break
+			}
 			effectRequest := request
 			defer func() {
 				findings = append(findings, effectShadowFindings(computeEffectShadow(effectRequest, mode, effectsRulesTierFor()), mode)...)

@@ -120,7 +120,9 @@ var r2WrapperCases = []r2case{
 	{"GAP-0879 setsid rm glob", raLin, `setsid rm -rf $HOME/*`, r2HasUnknownTarget(KindDelete, ReasonGlob), true},
 	// GAP-0972: a wrapper word that expands at run time keeps the child read.
 	{"GAP-0972 env FOO=$V awk", raLin, `env FOO=$V awk 'BEGIN{print 1}'`, r2Program("awk"), false},
-	{"GAP-0972 env FOO=$V rm", raLin, `env FOO=$V rm -f /home/u/.claude/settings.json`, r2Verdict("K|delete:/home/u/.claude/settings.json"), false},
+	// The child word is read and its target kept (GAP-0972); FOO is a name the
+	// GAP-0217 allow list does not account for rm, so the call is not fully known.
+	{"GAP-0972 env FOO=$V rm", raLin, `env FOO=$V rm -f /home/u/.claude/settings.json`, r2Verdict("U|delete:/home/u/.claude/settings.json"), false},
 	{"GAP-0972 sudo -u $U rm", raLin, `sudo -u $U rm -f /home/u/.claude/settings.json`, r2Has(KindDelete, "/home/u/.claude/settings.json", true), true},
 	// GAP-1274: a login shell through exec -a -NAME / exec -l starts after its
 	// profile files: its folder is not the caller's.
