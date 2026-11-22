@@ -11,6 +11,8 @@ import (
 	"strings"
 
 	"mvdan.cc/sh/v3/syntax"
+
+	"github.com/defenseclaw/defenseclaw/internal/workcount"
 )
 
 // Reader is the reader to hand a recursive shell parser
@@ -72,6 +74,7 @@ func parseCommandVariant(command string, comments bool) (file *syntax.File, ok, 
 		return nil, false, false
 	}
 	for _, variant := range []syntax.LangVariant{syntax.LangBash, syntax.LangPOSIX} {
+		workcount.AddLarge(workcount.LargeParse, len(command))
 		file, err := containParse(nil, func() (*syntax.File, error) {
 			return syntax.NewParser(syntax.Variant(variant), syntax.KeepComments(comments)).Parse(Reader(command), "")
 		})
@@ -102,6 +105,7 @@ func ParseBash(command string) (*syntax.File, bool) {
 			return file, true
 		}
 	}
+	workcount.AddLarge(workcount.LargeParse, len(command))
 	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(command), "")
 	return file, err == nil
 }

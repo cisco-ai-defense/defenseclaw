@@ -31,6 +31,8 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/shellparse"
 	"mvdan.cc/sh/v3/expand"
 	"mvdan.cc/sh/v3/syntax"
+
+	"github.com/defenseclaw/defenseclaw/internal/workcount"
 )
 
 const Header = "X-DefenseClaw-Resolved-Writes"
@@ -1152,6 +1154,8 @@ func walkWritePathMemo(base, path string, linkDepth int, collect, patchTarget bo
 	// component of each of its ~25,000 distinct words (rel-1-0-10:GAP-0299).
 	var key, keys string
 	if memo != nil {
+		workcount.Add(workcount.MemoWalk)
+		workcount.Add(workcount.WalkKey)
 		keys = current + "\x00" + strings.Join(parts, "\x00")
 		key = current
 		var walked walkState
@@ -1167,6 +1171,7 @@ func walkWritePathMemo(base, path string, linkDepth int, collect, patchTarget bo
 			key, start, walked = next, i+1, state
 		}
 		if start > 0 {
+			workcount.Add(workcount.WalkKey)
 			current, crossed, linkDepth = walked.current, append([]bool(nil), walked.crossed...), walked.linkDepth
 		}
 	}
