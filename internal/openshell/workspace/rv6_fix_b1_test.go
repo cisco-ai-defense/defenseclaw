@@ -14,10 +14,17 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+//go:build !windows
+
 package workspace
 
 import (
+	"encoding/binary"
+	"errors"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -183,5 +190,77 @@ func TestB1RV6WrapInPlaceIsFlagged(t *testing.T) {
 	}
 	if !strings.Contains(strings.Join(pr.Review.Warnings, "\n"), "config.py: line 3 holds your credential") {
 		t.Errorf("no note: %q", pr.Review.Warnings)
+	}
+}
+
+// RV6-4 (GAP-0767): a copy that replaced a tracked file's credentials
+// warns that the sandbox's history sits on the placeholder commit, its
+// pre-push hook refuses a push that carries that commit, and the shared
+// check before pull --push-branch refuses too. A copy that replaced no
+// tracked file passes the check.
+func TestB1RV6PlaceholderCommitPushGuard(t *testing.T) {
+	k := b1Key(0)
+	e, fs := rv5Launch(t, "rv64", map[string]string{"config.py": "import os\nTOKEN = \"" + k + "\"\n"}, "", PlaceholderToken)
+	rec, err := LoadCopy(e.data, "rv64")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckPushFromSandbox(rec); !errors.Is(err, ErrPlaceholderCommit) {
+		t.Errorf("CheckPushFromSandbox = %v, want ErrPlaceholderCommit", err)
+	}
+	if !strings.Contains(strings.Join(rec.Warnings, "\n"), "pre-push hook in the copy refuses that push") {
+		t.Errorf("no copy warning: %q", rec.Warnings)
+	}
+	bare := filepath.Join(t.TempDir(), "up.git")
+	if out, err := exec.Command("git", "init", "-q", "--bare", bare).CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v %s", err, out)
+	}
+	// The remote already has your branch, as upstream does.
+	e.git(e.project, "push", "-q", bare, "HEAD:refs/heads/main")
+	fs.write(remoteRepo+"/new.py", "x = 1\n")
+	if out, err := sandboxGit(fs, "add", "new.py"); err != nil {
+		t.Fatalf("add: %v %s", err, out)
+	}
+	if out, err := sandboxGit(fs, "commit", "-q", "-m", "agent"); err != nil {
+		t.Fatalf("commit: %v %s", err, out)
+	}
+	out, err := sandboxGit(fs, "push", bare, "HEAD:refs/heads/agent")
+	if err == nil || !strings.Contains(out, "replaced credentials with placeholders") {
+		t.Errorf("push from the sandbox: err=%v out=%q, want the hook's refusal", err, out)
+	}
+	if got, _ := exec.Command("git", "--git-dir", bare, "rev-parse", "-q", "--verify", "refs/heads/agent").Output(); len(got) > 0 {
+		t.Errorf("the branch reached the remote")
+	}
+}
+
+// RV6-4: a copy that replaced no tracked file passes the push check.
+func TestB1RV6NoPlaceholderCommitPushes(t *testing.T) {
+	e2, _ := rv5Launch(t, "rv64b", map[string]string{"main.py": "print(1)\n"}, "", PlaceholderToken)
+	rec2, err := LoadCopy(e2.data, "rv64b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckPushFromSandbox(rec2); err != nil {
+		t.Errorf("a copy with no replaced file: CheckPushFromSandbox = %v", err)
+	}
+}
+
+// RV6-5: a UTF-32 file (its byte order mark starts like UTF-16 LE) is not
+// read as UTF-16 text with no credential: it is named as not scanned.
+func TestB1RV6UTF32IsNamed(t *testing.T) {
+	text := "TOKEN=" + b1Key(0) + "\r\n"
+	le32 := []byte{0xff, 0xfe, 0, 0}
+	for _, r := range text {
+		var b [4]byte
+		binary.LittleEndian.PutUint32(b[:], uint32(r))
+		le32 = append(le32, b[:]...)
+	}
+	e, _ := rv5Launch(t, "rv65", map[string]string{"utf32.ps1": string(le32)}, "", PlaceholderToken)
+	rec, err := LoadCopy(e.data, "rv65")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(rec.NotScanned, "utf32.ps1") && !slices.Contains(rec.HeldBack, "utf32.ps1") {
+		t.Errorf("utf32.ps1 is neither named as not scanned nor held back: not scanned %v, held %v", rec.NotScanned, rec.HeldBack)
 	}
 }

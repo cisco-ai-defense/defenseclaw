@@ -163,7 +163,10 @@ func detectSecretsIn(root string, rels []string, opts secretScanOptions) (*copyS
 		// as its UTF-8 form and held back when it holds a credential: its
 		// spans are not the file's bytes.
 		text, wide := decodeUTF16(content)
-		if !wide && looksBinary(content) {
+		// Decoded text with a NUL is not UTF-16 text: a UTF-32 file (its
+		// byte order mark starts like UTF-16 LE) decodes to characters
+		// split by NULs, in which no credential is found (RV6-5).
+		if (!wide && looksBinary(content)) || (wide && bytes.IndexByte(text, 0) >= 0) {
 			res.binary = append(res.binary, rel)
 			continue
 		}

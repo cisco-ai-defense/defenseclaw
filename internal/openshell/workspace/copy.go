@@ -30,6 +30,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -953,6 +954,21 @@ func stageGit(ctx context.Context, rec *CopyRecord, opts StageOptions, scanOpts 
 			return err
 		}
 		rec.SandboxHead = sandboxHead
+		// Every commit the agent makes sits on that commit, so a branch it
+		// pushes from the sandbox would put the placeholders over the
+		// credential lines upstream (RV6-4). A pre-push hook in the copy
+		// refuses such a push: an accident guard, not a control (the agent
+		// can remove it).
+		if err := writePlaceholderPrePush(stage, sandboxHead); err != nil {
+			return err
+		}
+		what := strings.Join(replacedTracked, ", ")
+		if len(replacedTracked) > 3 {
+			what = strconv.Itoa(len(replacedTracked)) + " tracked files"
+		}
+		rec.Warnings = append(rec.Warnings, "the sandbox's git history has one commit on yours that replaces the credentials in "+what+
+			" with placeholders; a branch the agent pushes from the sandbox would carry it (a pre-push hook in the copy refuses that push). "+
+			"Bring the work back with pull --branch and push it from this computer")
 	}
 	baseline, err := captureBaseline(ctx, sg, filepath.Join(stage, ".git", "index"), sandboxHead, false)
 	if err != nil {
