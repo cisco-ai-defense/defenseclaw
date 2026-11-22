@@ -112,6 +112,7 @@ type Program struct {
 	Strict  bool // an unknown flag taints operand roles
 
 	ShellCode      bool     // the code operand is shell text we can unwrap
+	StdinCode      bool     // stdin is code even when other args name an account
 	FirstPosIgnore bool     // first positional is a script/pattern, not a path (sed/grep)
 	FirstPosText   TextKind // the grammar that must accept that first positional (sed script, awk program, grep pattern)
 	InPlace        string   // primary flag that turns read positionals into writes (sed -i)
@@ -683,6 +684,8 @@ func buildPOSIXTable() {
 	add(Program{Names: []string{"dd"}, Pos: PosNone,
 		Flags: map[string]Flag{"if": {Value: true, Role: RoleRead}, "of": {Value: true, Role: RoleWrite}}})
 	add(Program{Names: []string{"tee"}, Pos: PosAllWrite, AppendFlag: "-a", Flags: fl(nil, "-a", "-i", "-p", "--append", "--ignore-interrupts")})
+	// newgrp starts a shell whose script can be supplied on stdin.
+	add(Program{Names: []string{"newgrp"}, Pos: PosNone, ShellCode: true, StdinCode: true, InertOperands: true})
 	add(Program{Names: []string{"truncate"}, Pos: PosAllWrite, Flags: map[string]Flag{"-s": {Value: true}}})
 	add(Program{Names: []string{"sed"}, Pos: PosAllRead, FirstPosIgnore: true, FirstPosText: TextSed, InPlace: "-i",
 		Flags: fl(map[string]Flag{"-e": {Value: true, Text: TextSed}, "--expression": {Value: true, Text: TextSed}, "-f": {Value: true, Role: RoleRead, Text: TextScriptFile}, "--file": {Value: true, Role: RoleRead, Text: TextScriptFile}, "-l": {Value: true, Role: RoleIgnore},
@@ -892,6 +895,8 @@ func buildWindowsTable() {
 	add(Program{Names: []string{"set-content", "add-content", "out-file"}, Pos: PosFirstWrite, PipeRole: RoleWrite,
 		Flags: map[string]Flag{"-path": {Value: true, Role: RoleWrite}, "-literalpath": {Value: true, Role: RoleWrite},
 			"-filepath": {Value: true, Role: RoleWrite}, "-value": {Value: true, Role: RoleIgnore}}})
+	add(Program{Names: []string{"tee-object"}, Pos: PosFirstWrite, PipeRole: RoleWrite, AppendFlag: "-append",
+		Flags: map[string]Flag{"-path": {Value: true, Role: RoleWrite}, "-filepath": {Value: true, Role: RoleWrite}, "-inputobject": {Value: true, Role: RoleIgnore}, "-append": {}}})
 	add(Program{Names: []string{"get-content", "gc", "cat"}, Pos: PosAllRead, PipeRole: RoleRead,
 		Flags: map[string]Flag{"-path": {Value: true, Role: RoleRead}, "-literalpath": {Value: true, Role: RoleRead}}})
 	add(Program{Names: []string{"copy-item", "cpi"}, Pos: PosSourcesDest,

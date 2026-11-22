@@ -836,12 +836,15 @@ func (w *walker) runWrittenScript(value, program string, sc shellArgv, dialect D
 
 // teeData gives tee's file writes the text tee reads on stdin, and records it
 // as the text of each file it wrote (tee x.py <<E, GAP-1640).
-func (w *walker) teeData(c *Cmd, args []Word, cmdNo, from int) {
+func (w *walker) teeData(c *Cmd, args []Word, cmdNo, from int, appendFlag string, dialect Dialect) {
 	text, _, ok := w.stdinText(c)
+	if !ok && dialect == DialectPowerShell && c.PipeIn && w.stageIn.literal != "" {
+		text, ok = w.stageIn.literal, true
+	}
 	if !ok {
 		return
 	}
-	appendMode := hasAppendFlag(args, "-a")
+	appendMode := appendFlag != "" && hasAppendFlag(args, appendFlag, dialect)
 	for i := from; i < len(w.res.Effects); i++ {
 		e := &w.res.Effects[i]
 		if e.Origin.Command != cmdNo || (e.Kind != KindWrite && e.Kind != KindAppend) || (e.Data != nil && e.Data.Text != "") {
