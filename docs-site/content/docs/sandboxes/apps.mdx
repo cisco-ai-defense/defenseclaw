@@ -20,6 +20,7 @@ Watch the live feed, answer asks, unblock sites, and stop, pull or undo a sandbo
 | Answer an ask | `sandbox approve NAME ID` | `a`, `A`, `x` in **Asks** | **Approve**, **Always…**, **Reject** |
 | Bring back a copy | `sandbox pull NAME --apply` | `P` | **Pull to branch** |
 | Undo | `sandbox undo NAME` | `U` | **Undo…** |
+| Manage vault secrets (Preview) | `sandbox vault list` | **Vault** tab (`K`) | **Vault (Preview)** card |
 
 ## The TUI Sandboxes panel
 
@@ -158,6 +159,14 @@ The [macOS app](/docs/macos-app) shows sandboxes in the Sandboxes view (under **
 ### Sandbox details and actions
 
 Each selected sandbox offers **Stop…**, **Copy pull command**, **Pull to branch**, **Review changes**, **Undo…** and **Copy connect command**. The app has no launch dialog: start runs in Terminal.
+
+### The Vault card (Preview)
+
+<Callout type="info" title="Preview">
+The Vault card is a preview feature.
+</Callout>
+
+When sandboxes are set up, the Sandboxes view has a **Vault (Preview)** card for your [credential vault](/docs/sandboxes/vault). It lists each secret with its host, status (**ready**, **needs a host** or **exposed: rotate**), source, last use and use count, never a value. **Add…**, **Replace value…**, **Set host…**, **Rename…** and **Remove…** run `defenseclaw sandbox vault add`, `replace`, `bind`, `rename` and `remove --yes` (remove asks first), so each change shows in Activity. A value is typed in a hidden field and goes to the command on standard input, never on its command line; the app does not keep it after the command starts. The changes are unavailable while the installation is read-only. If the command refuses, the card says why; on a managed computer it also says that your organization may not allow the vault there and that `defenseclaw sandbox vault list` in Terminal shows the reason.
 
 ### Menu bar and notifications
 

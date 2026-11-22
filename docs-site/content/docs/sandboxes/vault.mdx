@@ -155,6 +155,13 @@ standard input.
 On a managed computer `defenseclaw tui` is not available; use
 `defenseclaw sandbox vault` there.
 
+In the [macOS app](/docs/sandboxes/apps#the-vault-card-preview) (Preview), the
+Sandboxes view has a **Vault (Preview)** card with the same list and changes:
+**Add…**, **Replace value…**, **Set host…**, **Rename…** and **Remove…**. A
+value is typed in a hidden field and goes to the command on standard input. If
+the command refuses on a managed computer, the card says so; run
+`defenseclaw sandbox vault list` in Terminal to see why.
+
 Only terminal agents run in a sandbox (Claude Code, Codex, Copilot CLI,
 OpenCode, Kiro, Hermes, Antigravity's `agy`), so only they can use the vault.
 Desktop apps and IDE agents do not run in an OpenShell sandbox.
