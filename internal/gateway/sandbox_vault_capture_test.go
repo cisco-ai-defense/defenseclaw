@@ -148,11 +148,11 @@ func TestCaptureSandboxVaultScope(t *testing.T) {
 
 func TestSandboxVaultCaptureMessageNamesTheBind(t *testing.T) {
 	c := &sandboxVaultCapture{Event: vaultCaptureEventPrompt, Entries: []vault.Entry{{Name: "GOOGLE_API_KEY"}}}
-	if m := c.message(); !strings.Contains(m, "vault bind GOOGLE_API_KEY --host HOST") || !strings.Contains(m, "never saw it") {
+	if m := c.message(); !strings.Contains(m, "vault bind GOOGLE_API_KEY --host HOST") || !strings.Contains(m, "before it reached the model") {
 		t.Fatalf("message = %s", m)
 	}
 	c = &sandboxVaultCapture{Event: vaultCaptureEventTool, Entries: []vault.Entry{{Name: "STRIPE_API_KEY", Host: "api.stripe.com", Port: 443}}}
-	if m := c.message(); !strings.Contains(m, "$STRIPE_API_KEY") || !strings.Contains(m, "rotate") {
+	if m := c.message(); !strings.Contains(m, "vault replace STRIPE_API_KEY") || !strings.Contains(m, "rotate") || strings.Contains(m, "--vault") {
 		t.Fatalf("message = %s", m)
 	}
 }
@@ -197,7 +197,8 @@ func TestSandboxVaultCaptureBeforeRelay(t *testing.T) {
 	relay.mu.Lock()
 	calls := relay.calls
 	relay.mu.Unlock()
-	if len(calls) != 1 || strings.Contains(string(calls[0].Body), key) || !strings.Contains(string(calls[0].Body), "[vault:ANTHROPIC_API_KEY]") {
+	if len(calls) != 1 || strings.Contains(string(calls[0].Body), key) || !strings.Contains(string(calls[0].Body), "[vault:ANTHROPIC_API_KEY]") ||
+		calls[0].Header.Get(sandboxrelay.VaultCaptureHeader) != "UserPromptSubmit ANTHROPIC_API_KEY=api.anthropic.com" {
 		t.Fatalf("relayed calls = %d, body %s", len(calls), func() string {
 			if len(calls) == 0 {
 				return ""

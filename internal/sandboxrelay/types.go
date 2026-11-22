@@ -133,7 +133,15 @@ var ForwardHeaders = [...]string{
 	"X-Defenseclaw-Kiro-Surface",
 	"X-Defenseclaw-Hook-Refusal",
 	"X-Defenseclaw-Asset-Facts",
+	VaultCaptureHeader,
 }
+
+// VaultCaptureHeader carries what the per-user sandbox daemon captured into
+// the account's vault from a relayed hook call: the event and each entry's
+// name and host, never a value. The daemon drops any copy the sandbox sent
+// and sets its own; the managed gateway answers and records the call as a
+// block.
+const VaultCaptureHeader = "X-Defenseclaw-Vault-Capture"
 
 // DroppedHeaders lists request headers that must never leave the daemon on
 // a relayed call (canonical MIME form). The allowlist already excludes

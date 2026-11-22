@@ -5,13 +5,18 @@
 
 package vault
 
-import "sync"
+import (
+	"sync"
+	"time"
+)
+
+const lockWait = 5 * time.Second
 
 // Sandboxes do not run on Windows, so only the CLI writes the vault there;
 // one process-wide lock is enough.
 var windowsLock sync.Mutex
 
-func lockDir(string) (func(), error) {
+func lockDir(string, time.Duration) (func(), error) {
 	windowsLock.Lock()
 	return windowsLock.Unlock, nil
 }

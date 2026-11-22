@@ -91,6 +91,11 @@ var (
 	ErrNoHost = errors.New("the secret has no host yet")
 	// ErrFull is returned when the vault holds MaxEntries entries.
 	ErrFull = fmt.Errorf("the vault holds %d secrets, the most it keeps", MaxEntries)
+	// ErrExposed is returned when resolving an entry an agent's model may
+	// have seen: it must be rotated and replaced before a sandbox uses it.
+	ErrExposed = errors.New("an agent's model may have seen this secret's value")
+	// ErrBusy is returned when another process holds the vault lock.
+	ErrBusy = errors.New("another DefenseClaw process is writing the vault")
 )
 
 // Entry is one secret's metadata. It never carries the value.
@@ -261,8 +266,14 @@ func (s *Store) Resolve(name string) (Entry, string, error) {
 		return Entry{}, "", fmt.Errorf("%w: %s", ErrNotFound, name)
 	}
 	r := f.Entries[i]
+	if r.Exposed {
+		// A value an agent produced or saw is never handed to a sandbox: it
+		// may be the agent's own (a token it planted under a real API's
+		// name) or a leaked one. The person rotates it and replaces it.
+		return r.Entry, "", fmt.Errorf("%w: %s; rotate it with its issuer, then: defenseclaw sandbox vault replace %s", ErrExposed, name, name)
+	}
 	if r.Host == "" {
-		return r.Entry, "", fmt.Errorf("%w: %s (bind one with: defenseclaw vault bind %s --host HOST)", ErrNoHost, name, name)
+		return r.Entry, "", fmt.Errorf("%w: %s (bind one with: defenseclaw sandbox vault bind %s --host HOST)", ErrNoHost, name, name)
 	}
 	return r.Entry, r.Value, nil
 }
@@ -312,7 +323,10 @@ func (s *Store) Add(in AddInput) (Entry, error) {
 	var added Entry
 	err := s.update(func(f *file) error {
 		if f.index(in.Name) >= 0 {
-			return fmt.Errorf("%w: %s (replace its value with: defenseclaw vault replace %s)", ErrExists, in.Name, in.Name)
+			return fmt.Errorf("%w: %s (replace its value with: defenseclaw sandbox vault replace %s)", ErrExists, in.Name, in.Name)
+		}
+		if j := f.indexValue(in.Value); j >= 0 {
+			return fmt.Errorf("the vault already holds this value as %s", f.Entries[j].Name)
 		}
 		if len(f.Entries) >= MaxEntries {
 			return ErrFull
@@ -471,10 +485,15 @@ func (s *Store) read() (*file, error) {
 
 // update reads, changes and writes the vault under the writer lock.
 func (s *Store) update(change func(*file) error) error {
+	return s.updateWait(lockWait, change)
+}
+
+// updateWait is update with a bounded wait for the writer lock.
+func (s *Store) updateWait(wait time.Duration, change func(*file) error) error {
 	if err := safefile.ProtectDirectory(s.dir); err != nil {
 		return fmt.Errorf("prepare the vault directory %s: %w", s.dir, err)
 	}
-	unlock, err := lockDir(s.dir)
+	unlock, err := lockDir(s.dir, wait)
 	if err != nil {
 		return err
 	}

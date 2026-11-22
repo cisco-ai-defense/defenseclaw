@@ -74,21 +74,26 @@ kinds of secret:
 | --- | --- | --- |
 | Anthropic API key | `ANTHROPIC_API_KEY` | `api.anthropic.com` |
 | OpenAI API key | `OPENAI_API_KEY` | `api.openai.com` |
-| GitHub token (classic or fine-grained) | `GITHUB_TOKEN` | `api.github.com` |
+| GitHub token (classic or fine-grained) | `GITHUB_TOKEN` | `api.github.com` (`gh` and the API; `git push` over HTTPS goes to `github.com` and is not covered) |
 | Slack token | `SLACK_TOKEN` | `slack.com` |
 | Stripe live secret key | `STRIPE_API_KEY` | `api.stripe.com` |
 | Google API key | `GOOGLE_API_KEY` | no host: bind one before use |
 
 A second, different secret of the same kind gets `_2`, `_3` and so on.
 
-- **In a prompt.** The prompt is stopped and the model never sees the value.
-  Claude Code and Codex hooks cannot edit a prompt, only stop it, so send the
-  prompt again without the value and start a sandbox with `--vault NAME` to let
-  the agent use the secret.
-- **In a tool call.** The tool call is stopped and the agent is told to use
-  `$NAME` instead. The agent's model wrote the value, so it has seen it: the
-  secret is marked **exposed: rotate**. Rotate it with its issuer, then
-  `defenseclaw sandbox vault replace NAME`.
+- **In a prompt.** The prompt is stopped before it reaches the model. Claude
+  Code and Codex hooks cannot edit a prompt, only stop it, so send the prompt
+  again without the value and start a sandbox with `--vault NAME` to let the
+  agent use the secret.
+- **In a tool call.** The tool call is stopped. The agent's model wrote the
+  value, so it has seen it, and the value may even be the agent's own: the
+  secret is marked **exposed: rotate** and no sandbox gets it until you rotate
+  it with its issuer and run `defenseclaw sandbox vault replace NAME`.
+
+Capture keeps at most 16 captured secrets; past that a call is still stopped
+and the value still removed, but nothing more is stored until you remove some.
+A test fixture that looks exactly like a real key (the right prefix and
+length) is treated as one: give fixtures an obviously fake shape.
 
 AWS access keys are not captured: AWS signs each request with the key, which a
 placeholder swap cannot do. Turn capture off with `openshell.vault.auto_capture:

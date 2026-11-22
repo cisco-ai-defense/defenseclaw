@@ -125,3 +125,16 @@ func TestRunVaultRefusals(t *testing.T) {
 		t.Fatalf("same name twice: %v", err)
 	}
 }
+
+// A piped value is one line: more text after it is refused, never dropped.
+func TestVaultAddRefusesAMultiLineStdin(t *testing.T) {
+	ta := newTestApp(t, fakeVaultValue()+"\nsecond line\n")
+	if err := ta.VaultAdd("PAY_KEY", "api.example.com", VaultValueOptions{Stdin: true}); err == nil || !strings.Contains(err.Error(), "more than one line") {
+		t.Fatalf("multi-line stdin = %v", err)
+	}
+	if list, _ := vault.Open(ta.VaultDir()).List(); len(list) != 0 {
+		t.Fatalf("stored %d entries", len(list))
+	}
+	ta = newTestApp(t, fakeVaultValue()+"\n\n")
+	ta.ok(t, ta.VaultAdd("PAY_KEY", "api.example.com", VaultValueOptions{Stdin: true}))
+}

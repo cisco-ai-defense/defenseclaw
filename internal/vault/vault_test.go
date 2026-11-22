@@ -6,6 +6,7 @@ package vault
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -236,4 +237,73 @@ func TestCorruptVaultFailsClosed(t *testing.T) {
 func jsonOf(v any) (string, error) {
 	b, err := json.Marshal(v)
 	return string(b), err
+}
+
+// A value an agent produced (a tool-call capture) is never handed to a
+// sandbox until the person replaces it: an agent cannot plant its own
+// token under a real API's name and have a later sandbox use it.
+func TestResolveRefusesExposedUntilReplaced(t *testing.T) {
+	s := newStore(t)
+	c, err := s.Capture(CaptureInput{Value: fakeGitHub(), Kind: "github-token", Exposed: true, From: "claudecode tool call in sandbox sb"})
+	if err != nil || c.Entry.Target() != "api.github.com" {
+		t.Fatalf("capture = %+v %v", c, err)
+	}
+	if _, _, err := s.Resolve("GITHUB_TOKEN"); !errors.Is(err, ErrExposed) || !strings.Contains(err.Error(), "sandbox vault replace GITHUB_TOKEN") {
+		t.Fatalf("resolve of an exposed entry = %v", err)
+	}
+	if _, err := s.ReplaceValue("GITHUB_TOKEN", "gh"+"p_"+strings.Repeat("Mm4Nn5", 6)); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.Resolve("GITHUB_TOKEN"); err != nil {
+		t.Fatalf("resolve after replace = %v", err)
+	}
+}
+
+func TestAddRefusesAValueTheVaultHolds(t *testing.T) {
+	s := newStore(t)
+	if _, err := s.Add(AddInput{Name: "A", Value: "same-value", Host: "api.example.com"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Add(AddInput{Name: "B", Value: "same-value", Host: "api.example.com"}); err == nil || !strings.Contains(err.Error(), "as A") {
+		t.Fatalf("duplicate value = %v", err)
+	}
+}
+
+// One call's captures are one write; past MaxCaptured nothing is stored.
+func TestCaptureAllIsBoundedAndAtomic(t *testing.T) {
+	s := newStore(t)
+	var ins []CaptureInput
+	for i := 0; i < MaxCaptured; i++ {
+		ins = append(ins, CaptureInput{Value: "sk" + "_live_" + strings.Repeat("Qq", 12) + fmt.Sprintf("%04d", i), Kind: "stripe-secret-key"})
+	}
+	if _, err := s.CaptureAll(ins[:9], CaptureWait); err != nil {
+		t.Fatal(err)
+	}
+	// STRIPE_API_KEY.._9 are taken: the tenth stripe key has no name left,
+	// and the failed call stores none of its values.
+	if _, err := s.CaptureAll(ins[9:11], CaptureWait); err == nil {
+		t.Fatal("a tenth key of one kind was stored")
+	}
+	if list, _ := s.List(); len(list) != 9 {
+		t.Fatalf("entries after a failed call = %d", len(list))
+	}
+	other := []CaptureInput{}
+	for i := 0; i < MaxCaptured; i++ {
+		other = append(other, CaptureInput{Value: "gh" + "p_" + strings.Repeat("Ww", 16) + fmt.Sprintf("%04d", i), Kind: "github-token"})
+	}
+	if _, err := s.CaptureAll(other[:7], CaptureWait); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CaptureAll(other[7:8], CaptureWait); !errors.Is(err, ErrCaptureFull) {
+		t.Fatalf("capture past the cap = %v", err)
+	}
+}
+
+// A JWT whose last segment runs into a key does not hide the key.
+func TestFindCapturableIsNotHiddenByOtherShapes(t *testing.T) {
+	jwt := "eyJ" + "hbGciOiJIUzI1" + ".eyJ" + "zdWIiOiIxMjM0" + "." + strings.Repeat("Sg5Ty6", 4)
+	found := FindCapturable(jwt + "-" + fakeAnthropic())
+	if len(found) != 1 || found[0].Kind != "anthropic-key" {
+		t.Fatalf("found = %+v", found)
+	}
 }

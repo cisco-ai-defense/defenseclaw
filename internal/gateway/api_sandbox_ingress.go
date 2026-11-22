@@ -1175,7 +1175,14 @@ func (a *APIServer) sandboxRelayForwarder(st *sandboxIngressState) http.Handler 
 		if route == sandboxauth.RouteHook {
 			body, captured = captureSandboxVault(ctx, st.vault, binding.Connector, body)
 		}
-		call := sandboxrelay.RelayCall{Registration: registration, Header: r.Header, Body: body}
+		// Only the daemon says what it captured: a header the sandbox sent
+		// is dropped.
+		header := r.Header.Clone()
+		header.Del(sandboxrelay.VaultCaptureHeader)
+		if captured != nil {
+			header.Set(sandboxrelay.VaultCaptureHeader, captured.header())
+		}
+		call := sandboxrelay.RelayCall{Registration: registration, Header: header, Body: body}
 		switch route {
 		case sandboxauth.RouteHook:
 			call.Class, call.Target = sandboxrelay.RouteHook, binding.Connector
@@ -1198,6 +1205,10 @@ func (a *APIServer) sandboxRelayForwarder(st *sandboxIngressState) http.Handler 
 			if resp.Decision != nil {
 				d := *resp.Decision
 				d.Action, d.WouldBlock = "block", true
+				if d.Severity != "CRITICAL" {
+					d.Severity = "HIGH"
+				}
+				d.Reason = captured.message()
 				resp.Decision = &d
 			}
 		}

@@ -27,8 +27,19 @@ type InlineSecretSpan struct {
 // lines and are not single values). A body made of one repeated character
 // is a placeholder, not a secret, and is skipped.
 func FindInlineSecretSpans(text string) []InlineSecretSpan {
+	return FindInlineSecretSpansOf(text, nil)
+}
+
+// FindInlineSecretSpansOf is FindInlineSecretSpans over the shapes whose
+// label keep accepts (nil: every shape). Overlaps are resolved among those
+// shapes only, so a shape the caller does not want (a JWT whose last
+// segment runs into a following key) cannot hide one it does.
+func FindInlineSecretSpansOf(text string, keep func(label string) bool) []InlineSecretSpan {
 	var spans []InlineSecretSpan
 	for _, shape := range inlineCredentialShapes {
+		if keep != nil && !keep(shape.label) {
+			continue
+		}
 		for _, loc := range shape.re.FindAllStringSubmatchIndex(text, -1) {
 			body := text[loc[2*shape.body]:loc[2*shape.body+1]]
 			if body == "" || strings.Trim(body, body[:1]) == "" {

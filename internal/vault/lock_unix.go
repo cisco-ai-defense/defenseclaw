@@ -14,17 +14,18 @@ import (
 	"time"
 )
 
-// lockWait bounds how long a writer waits for another one (the CLI and the
-// gateway or sandbox daemon may write at the same time).
+// lockWait bounds how long a CLI writer waits for another one (the CLI and
+// the gateway or sandbox daemon may write at the same time). A hook call
+// captures with a much shorter wait (CaptureWait).
 const lockWait = 5 * time.Second
 
-func lockDir(dir string) (func(), error) {
+func lockDir(dir string, wait time.Duration) (func(), error) {
 	path := filepath.Join(dir, lockName)
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("open the vault lock %s: %w", path, err)
 	}
-	deadline := time.Now().Add(lockWait)
+	deadline := time.Now().Add(wait)
 	for {
 		err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
 		if err == nil {
@@ -39,7 +40,7 @@ func lockDir(dir string) (func(), error) {
 		}
 		if time.Now().After(deadline) {
 			_ = f.Close()
-			return nil, fmt.Errorf("another DefenseClaw process is still writing the vault after %s", lockWait)
+			return nil, fmt.Errorf("%w after %s", ErrBusy, wait)
 		}
 		time.Sleep(25 * time.Millisecond)
 	}

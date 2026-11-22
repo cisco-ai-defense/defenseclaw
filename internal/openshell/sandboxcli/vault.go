@@ -214,11 +214,18 @@ func (a *App) readVaultValue(prompt string, opts VaultValueOptions) (string, err
 		if in == nil {
 			in = os.Stdin
 		}
-		line, err := bufio.NewReaderSize(in, vault.MaxValueBytes+2).ReadString('\n')
+		reader := bufio.NewReaderSize(in, vault.MaxValueBytes+2)
+		line, err := reader.ReadString('\n')
 		if err != nil && !errors.Is(err, io.EOF) {
 			return "", fmt.Errorf("read the value from standard input: %w", err)
 		}
 		value = strings.TrimRight(line, "\r\n")
+		// A value is one line: more text after it is a mistake (a pasted
+		// file, two values), never silently dropped.
+		rest, _ := io.ReadAll(io.LimitReader(reader, 1<<16))
+		if strings.TrimSpace(string(rest)) != "" {
+			return "", errors.New("standard input has more than one line; pipe only the value")
+		}
 	case a.ReadSecret != nil:
 		v, err := a.ReadSecret(prompt)
 		if err != nil {

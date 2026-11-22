@@ -447,6 +447,11 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// A sandboxed agent's secret goes into the account's vault and out
 		// of the body before anything evaluates or records it.
 		rawBody, vaultCapture := captureSandboxVault(r.Context(), a.sandboxVaultStore(), connectorName, rawBody)
+		if vaultCapture == nil && relayedSandboxRequest(r.Context()) {
+			// A managed host's sandbox daemon captured before it relayed:
+			// answer and record the call as the block it is.
+			vaultCapture = vaultCaptureFromHeader(r.Header.Get(sandboxrelay.VaultCaptureHeader))
+		}
 		payload, b, err := rawPayloadFromJSONDecoder(json.NewDecoder(bytes.NewReader(rawBody)))
 		if err != nil {
 			a.recordConnectorHookRejection(r.Context(), connectorName, "unknown", "invalid_json", 0)
@@ -659,7 +664,9 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		}
 		// A connector the administrator's config turns off is answered allow
 		// here, before anything about the call is recorded (rel-1-0-6:GAP-0325).
-		if a.answerDisabledConnectorHook(r.Context(), w, r.Header, profile, connectorName, req) {
+		if vaultCapture == nil && a.answerDisabledConnectorHook(r.Context(), w, r.Header, profile, connectorName, req) {
+			// A captured call is never answered allow: Claude Code and Codex
+			// would send the original prompt with its secret on.
 			return
 		}
 		a.noteProtectedFileActivity(r.Context(), connectorName, req, identityFacts.ID)

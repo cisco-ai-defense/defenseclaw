@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/secretshape"
 )
@@ -28,6 +29,22 @@ var capturable = map[string]struct{ name, host string }{
 	"google-api-key":            {"GOOGLE_API_KEY", ""},
 }
 
+// MaxCaptured bounds the entries capture keeps: a session that keeps
+// writing token-shaped test fixtures cannot fill the vault. Past it a call
+// is still stopped and redacted, and nothing more is stored.
+const MaxCaptured = 16
+
+// CaptureWait bounds how long a hook call waits for the vault lock.
+const CaptureWait = 500 * time.Millisecond
+
+// ErrCaptureFull is returned when the vault holds MaxCaptured captured
+// entries.
+var ErrCaptureFull = fmt.Errorf("the vault already holds %d captured secrets; remove the ones you do not need", MaxCaptured)
+
+// Prefixes are the issuer prefixes of the capturable kinds: a text holding
+// none of them holds no capturable credential (a cheap first screen).
+var Prefixes = []string{"sk-", "ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_", "xox", "AIza", "sk_live_", "rk_live_"}
+
 // Found is one capturable credential in a text.
 type Found struct {
 	Kind  string
@@ -41,10 +58,9 @@ func FindCapturable(text string) []Found {
 		return nil
 	}
 	var out []Found
-	for _, s := range secretshape.FindInlineSecretSpans(text) {
-		if _, ok := capturable[s.Label]; ok {
-			out = append(out, Found{Kind: s.Label, Start: s.Start, End: s.End})
-		}
+	keep := func(label string) bool { _, ok := capturable[label]; return ok }
+	for _, s := range secretshape.FindInlineSecretSpansOf(text, keep) {
+		out = append(out, Found{Kind: s.Label, Start: s.Start, End: s.End})
 	}
 	return out
 }
@@ -68,59 +84,90 @@ type Captured struct {
 	New bool
 }
 
-// Capture stores a captured credential. A value the vault already holds is
-// not stored twice: the existing entry is returned (and marked exposed if
-// this capture exposed it). A new value gets the kind's name, with _2 to _9
-// added when that name is taken, and the kind's host when it has one.
+// Capture stores one captured credential (CaptureAll with the CLI wait).
 func (s *Store) Capture(in CaptureInput) (Captured, error) {
-	kind, ok := capturable[in.Kind]
-	if !ok {
-		return Captured{}, fmt.Errorf("%q credentials are not captured", in.Kind)
-	}
-	if err := ValidValue(in.Value); err != nil {
+	out, err := s.CaptureAll([]CaptureInput{in}, lockWait)
+	if err != nil {
 		return Captured{}, err
 	}
-	var out Captured
-	err := s.update(func(f *file) error {
+	return out[0], nil
+}
+
+// CaptureAll stores the credentials of one call in one write, waiting at
+// most wait for the vault lock. A value the vault already holds is not
+// stored twice: the existing entry is returned (and marked exposed if this
+// capture exposed it). A new value gets the kind's name, with _2 to _9
+// added when that name is taken, and the kind's host when it has one. An
+// exposed entry (an agent produced the value) is never handed to a sandbox
+// until the person replaces it (Resolve), so a value an agent planted
+// under a real API's name is never used. Any error stores nothing.
+func (s *Store) CaptureAll(ins []CaptureInput, wait time.Duration) ([]Captured, error) {
+	for _, in := range ins {
+		if _, ok := capturable[in.Kind]; !ok {
+			return nil, fmt.Errorf("%q credentials are not captured", in.Kind)
+		}
+		if err := ValidValue(in.Value); err != nil {
+			return nil, err
+		}
+	}
+	var out []Captured
+	err := s.updateWait(wait, func(f *file) error {
+		out = out[:0]
 		now := s.now().UTC()
-		if i := f.indexValue(in.Value); i >= 0 {
-			if in.Exposed && !f.Entries[i].Exposed {
-				f.Entries[i].Exposed = true
-				f.Entries[i].UpdatedAt = now
-			}
-			out = Captured{Entry: f.Entries[i].Entry}
-			return nil
-		}
-		if len(f.Entries) >= MaxEntries {
-			return ErrFull
-		}
-		name := ""
-		for n := 1; n <= 9; n++ {
-			candidate := kind.name
-			if n > 1 {
-				candidate = fmt.Sprintf("%s_%d", kind.name, n)
-			}
-			if f.index(candidate) < 0 {
-				name = candidate
-				break
+		captured := 0
+		for _, e := range f.Entries {
+			if e.Source == SourceCaptured {
+				captured++
 			}
 		}
-		if name == "" {
-			return fmt.Errorf("the vault already holds %s and %s_2 to %s_9; rename or remove one", kind.name, kind.name, kind.name)
+		for _, in := range ins {
+			kind := capturable[in.Kind]
+			if i := f.indexValue(in.Value); i >= 0 {
+				if in.Exposed && !f.Entries[i].Exposed {
+					f.Entries[i].Exposed = true
+					f.Entries[i].UpdatedAt = now
+				}
+				out = append(out, Captured{Entry: f.Entries[i].Entry})
+				continue
+			}
+			if len(f.Entries) >= MaxEntries {
+				return ErrFull
+			}
+			if captured >= MaxCaptured {
+				return ErrCaptureFull
+			}
+			name := ""
+			for n := 1; n <= 9; n++ {
+				candidate := kind.name
+				if n > 1 {
+					candidate = fmt.Sprintf("%s_%d", kind.name, n)
+				}
+				if f.index(candidate) < 0 {
+					name = candidate
+					break
+				}
+			}
+			if name == "" {
+				return fmt.Errorf("the vault already holds %s and %s_2 to %s_9; rename or remove one", kind.name, kind.name, kind.name)
+			}
+			port := 0
+			if kind.host != "" {
+				port = 443
+			}
+			r := record{Entry: Entry{
+				Name: name, Host: kind.host, Port: port, Source: SourceCaptured, Kind: in.Kind,
+				Exposed: in.Exposed, CapturedFrom: strings.TrimSpace(in.From), CreatedAt: now, UpdatedAt: now,
+			}, Value: in.Value}
+			f.Entries = append(f.Entries, r)
+			captured++
+			out = append(out, Captured{Entry: r.Entry, New: true})
 		}
-		port := 0
-		if kind.host != "" {
-			port = 443
-		}
-		r := record{Entry: Entry{
-			Name: name, Host: kind.host, Port: port, Source: SourceCaptured, Kind: in.Kind,
-			Exposed: in.Exposed, CapturedFrom: strings.TrimSpace(in.From), CreatedAt: now, UpdatedAt: now,
-		}, Value: in.Value}
-		f.Entries = append(f.Entries, r)
-		out = Captured{Entry: r.Entry, New: true}
 		return nil
 	})
-	return out, err
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // Redact replaces every capturable credential in text with its vault tag
