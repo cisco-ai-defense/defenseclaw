@@ -79,7 +79,7 @@ func TestB1PlaceholderTokens(t *testing.T) {
 	if _, ok := withValues([]byte("x DC_SECRET_1 DC_SECRET_1"), []SecretLine{{Placeholder: "DC_SECRET_1"}}, nil); ok {
 		t.Fatal("a repeated placeholder passed")
 	}
-	if _, _, _, why := translateReplaced([]byte("k = DC_SECRET_1\n"), []byte("k = DC_SECRET_1\nj = DC_SECRET_1\n"), []SecretLine{{Placeholder: "DC_SECRET_1", Line: 1}}, true); !strings.Contains(why, "more than once") {
+	if _, _, _, _, why := translateReplaced([]byte("k = DC_SECRET_1\n"), []byte("k = DC_SECRET_1\nj = DC_SECRET_1\n"), []SecretLine{{Placeholder: "DC_SECRET_1", Line: 1}}, true); !strings.Contains(why, "more than once") {
 		t.Fatalf("why = %q", why)
 	}
 }

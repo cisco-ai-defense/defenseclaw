@@ -115,3 +115,73 @@ func TestB1RV6PushedSecretPullsBack(t *testing.T) {
 	}
 	noPlaceholderIn(t, e)
 }
+
+// RV6-2 (GAP-0765): a blank line added or removed above or below the
+// credential line is an ordinary edit: it lands, with no "moved" note.
+func TestB1RV6BlankLineEditsLand(t *testing.T) {
+	k := b1Key(0)
+	up := "import os\n\nTOKEN = \"" + k + "\"\n\ndef main():\n    print(TOKEN)\n"
+	cases := map[string]string{
+		"add-blank-above":     "import os\n\n\nTOKEN = \"DC_SECRET_1\"\n\ndef main():\n    print(TOKEN)\n",
+		"drop-blank-above":    "import os\nTOKEN = \"DC_SECRET_1\"\n\ndef main():\n    print(TOKEN)\n",
+		"add-blank-below":     "import os\n\nTOKEN = \"DC_SECRET_1\"\n\n\ndef main():\n    print(TOKEN)\n",
+		"drop-blank-below":    "import os\n\nTOKEN = \"DC_SECRET_1\"\ndef main():\n    print(TOKEN)\n",
+		"add-def-above-blank": "import os\n\ndef f():\n    pass\n\nTOKEN = \"DC_SECRET_1\"\n\ndef main():\n    print(TOKEN)\n",
+	}
+	for n, agent := range cases {
+		t.Run(n, func(t *testing.T) {
+			e, fs := rv5Launch(t, "rv6b", map[string]string{"config.py": up}, "", PlaceholderToken)
+			fs.write(remoteRepo+"/config.py", agent)
+			pr, _ := rv6PullApply(t, e, fs, "rv6b")
+			want := strings.Replace(agent, "DC_SECRET_1", k, 1)
+			if got := s9aLocal(t, e, "config.py"); got != want {
+				t.Errorf("config.py = %q, want %q (warnings %q)", got, want, pr.Review.Warnings)
+			}
+			for _, f := range pr.Review.Flags {
+				if f.Kind == RiskSecretContext {
+					t.Errorf("a blank-line edit is flagged: %+v", f)
+				}
+			}
+		})
+	}
+}
+
+// RV6-2: a credential line moved past other lines still keeps the agent's
+// change out.
+func TestB1RV6MovedLineStillOut(t *testing.T) {
+	k := b1Key(0)
+	up := "import os\n\nTOKEN = \"" + k + "\"\n\ndef main():\n    print(TOKEN)\n"
+	e, fs := rv5Launch(t, "rv6m", map[string]string{"config.py": up}, "", PlaceholderToken)
+	fs.write(remoteRepo+"/config.py", "import os\n\n\ndef main():\n    print(TOKEN)\nTOKEN = \"DC_SECRET_1\"\n")
+	pr := pull(t, e, fs, "rv6m")
+	if _, err := apply(e, "rv6m", ApplyMerge, func(o *ApplyOptions) { o.AcceptSensitive = true }); err == nil {
+		if got := s9aLocal(t, e, "config.py"); got != up {
+			t.Errorf("config.py = %q, want the person's file (warnings %q)", got, pr.Review.Warnings)
+		}
+	}
+	if !strings.Contains(strings.Join(pr.Review.Warnings, "\n"), "moved") {
+		t.Errorf("no moved note: %q", pr.Review.Warnings)
+	}
+}
+
+// RV6-3 (GAP-0766): the agent wraps the credential line in place, inside a
+// string it sends. The line keeps its place, so the change lands, but the
+// review names the file and line.
+func TestB1RV6WrapInPlaceIsFlagged(t *testing.T) {
+	e, fs, key := s9aCopy(t, "rv6a")
+	fs.write(remoteRepo+"/config.py", "import os\nx = \"\"\"\nTOKEN = \"DC_SECRET_1\"\n\"\"\"\nsend(x)\nprint(TOKEN)\n")
+	pr, _ := rv6PullApply(t, e, fs, "rv6a")
+	if got := s9aLocal(t, e, "config.py"); !strings.Contains(got, "send(x)") || !strings.Contains(got, key) {
+		t.Fatalf("config.py = %q: want the agent's change with the person's value", got)
+	}
+	flagged := false
+	for _, f := range pr.Review.Flags {
+		flagged = flagged || (f.Kind == RiskSecretContext && f.Path == "config.py" && f.Label == "config.py:3")
+	}
+	if !flagged {
+		t.Errorf("no secret-context flag on config.py:3: %+v", pr.Review.Flags)
+	}
+	if !strings.Contains(strings.Join(pr.Review.Warnings, "\n"), "config.py: line 3 holds your credential") {
+		t.Errorf("no note: %q", pr.Review.Warnings)
+	}
+}

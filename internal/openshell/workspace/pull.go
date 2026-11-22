@@ -324,6 +324,7 @@ func Pull(ctx context.Context, opts PullOptions) (*PullResult, error) {
 	}
 	rep.Name, rep.Project = rec.Name, rec.Project
 	rep.Findings = dropPutFindings(rep.Findings, held.put)
+	rep.Flags = sortFlags(append(rep.Flags, held.flags...))
 	pr.Review = *rep
 	pr.Review.Warnings = append(pr.Review.Warnings, held.notes...)
 	if dirs := strings.Trim(kv["gitdirs"], ","); dirs != "" {
