@@ -90,5 +90,43 @@ class ConvertTruthRules(unittest.TestCase):
         self.assertEqual(st["dup"], 1)
 
 
+class OverlayAndExtract(unittest.TestCase):
+    def test_merge_truth_takes_truth_file_only_for_unannotated_ids(self):
+        rows = [row("a"), row("b"), row("c")]
+        truth = {"a": {"applicability": "in_scope", "deterministic_truth": "benign", "source_truth": "benign"},
+                 "b": {"applicability": "in_scope", "deterministic_truth": "benign", "source_truth": "benign"}}
+        out, n = s7_datasets.merge_truth(rows, truth, {"b"})
+        self.assertEqual(n, 1)
+        self.assertEqual(out[0]["truth"]["deterministic_truth"], "benign")
+        self.assertEqual(out[0]["truth"]["label_source"], "published_truth_file")
+        self.assertNotIn("deterministic_truth", out[1]["truth"])  # annotated id keeps the annotation path
+        self.assertNotIn("deterministic_truth", out[2]["truth"])  # no label anywhere: stays unlabeled
+        self.assertNotIn("label_source", rows[0]["truth"])  # input rows are not mutated
+
+    def test_safe_extract_refuses_parent_paths_and_symlinks(self):
+        import zipfile
+
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            bad = td / "bad.zip"
+            with zipfile.ZipFile(bad, "w") as z:
+                z.writestr("../evil.txt", "x")
+            with self.assertRaises(SystemExit):
+                s7_datasets.safe_extract_zip(bad, td / "out1")
+            link = td / "link.zip"
+            with zipfile.ZipFile(link, "w") as z:
+                info = zipfile.ZipInfo("l")
+                info.external_attr = 0o120777 << 16
+                z.writestr(info, "target")
+            with self.assertRaises(SystemExit):
+                s7_datasets.safe_extract_zip(link, td / "out2")
+            ok = td / "ok.zip"
+            with zipfile.ZipFile(ok, "w") as z:
+                z.writestr("d/a.json", "{}")
+            s7_datasets.safe_extract_zip(ok, td / "out3")
+            self.assertEqual((td / "out3/d/a.json").read_text(), "{}")
+            self.assertFalse((td / "evil.txt").exists())
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -26,6 +26,7 @@ import os
 import subprocess
 import sys
 import urllib.request
+import zipfile
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -87,7 +88,7 @@ def fetch(root: Path, dataset_id: str, max_bytes: int, token_file: str | None) -
         return
     kind = reg["fetch"]
     url, rev = ent["source_url"], ent["revision"]
-    inc = ent.get("include_paths") or []
+    inc = reg.get("include") or ent.get("include_paths") or []
     if kind == "prepare":
         lock = LOCK
         if reg.get("include_from"):
@@ -161,6 +162,26 @@ def _match(path: str, pat: str) -> bool:
     return fnmatchcase(path, pat) or path == pat or path.startswith(pat.rstrip("*").rstrip("/") + "/")
 
 
+def safe_extract_zip(archive: Path, dest: Path, max_files: int = 5000, max_bytes: int = 1 << 30) -> None:
+    """Extract an untrusted zip as inert files: no absolute or parent paths, no symlinks, bounded count and size."""
+    dest.mkdir(parents=True, exist_ok=False)
+    with zipfile.ZipFile(archive) as z:
+        infos = z.infolist()
+        if len(infos) > max_files or sum(i.file_size for i in infos) > max_bytes:
+            raise SystemExit(f"{archive.name}: archive exceeds the extraction bounds ({len(infos)} entries)")
+        for i in infos:
+            parts = Path(i.filename).parts
+            if Path(i.filename).is_absolute() or ".." in parts or ((i.external_attr >> 16) & 0o170000) == 0o120000:
+                raise SystemExit(f"{archive.name}: unsafe entry refused")
+            target = dest.joinpath(*parts)
+            if i.is_dir():
+                target.mkdir(parents=True, exist_ok=True)
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with z.open(i) as r, target.open("wb") as o:
+                o.write(r.read())
+
+
 def normalize(root: Path, dataset_id: str) -> Path:
     reg = REGISTRY[dataset_id]
     ent = lock_entry(dataset_id)
@@ -170,9 +191,13 @@ def normalize(root: Path, dataset_id: str) -> Path:
     if out.exists():
         print(f"{dataset_id}: normalized already: {out}")
         return out
-    sub = {"src": str(src_dir(root, dataset_id)), "srcroot": str(root / "data/sources"), "rev": ent["revision"], "out": str(out), "manifest": str(man),
+    ext = root / "data/extracted" / reg.get("dir", dataset_id)
+    if reg.get("extract") and not ext.exists():
+        safe_extract_zip(src_dir(root, dataset_id) / reg["extract"], ext)
+    sub = {"archive": str(src_dir(root, dataset_id) / reg.get("extract", "-")), "ext": str(ext),
+           "src": str(src_dir(root, dataset_id)), "srcroot": str(root / "data/sources"), "rev": ent["revision"], "out": str(out), "manifest": str(man),
            "lock": str(LOCK), "id": dataset_id, "data": str(root / "data")}
-    argv = [sys.executable, "-I", str(SCRIPTS / reg["norm"][0])] + [a.format(**sub) for a in reg["norm"][1:]]
+    argv = [sys.executable, "-s", str(SCRIPTS / reg["norm"][0])] + [a.format(**sub) for a in reg["norm"][1:]]
     tmp = out.with_suffix(".jsonl.partial")
     argv = [tmp.as_posix() if a == out.as_posix() else a for a in argv]
     print(f"{dataset_id}: normalize {reg['norm'][0]}")
@@ -181,13 +206,96 @@ def normalize(root: Path, dataset_id: str) -> Path:
     return out
 
 
+def overlay_path(root: Path, dataset_id: str) -> Path:
+    return norm_path(root, dataset_id).with_suffix(".labeled.jsonl")
+
+
+def merge_truth(rows: list[dict], truth_by_id: dict[str, dict], annotated: set[str]) -> tuple[list[dict], int]:
+    """Rows without a per-command annotation take the truth block of a published truth file (same id); returns (rows, n taken)."""
+    n = 0
+    out = []
+    for r in rows:
+        t = truth_by_id.get(r["id"])
+        if t is not None and r["id"] not in annotated:
+            r = dict(r)
+            nt = dict(t)
+            nt.setdefault("label_source", "published_truth_file")
+            r["truth"] = nt
+            n += 1
+        out.append(r)
+    return out, n
+
+
+def _load(path: Path) -> list[dict]:
+    with opener(path) as f:
+        return [json.loads(x) for x in f if x.strip()]
+
+
+def overlay(root: Path, dataset_id: str, labels_dir: Path) -> Path:
+    """Apply the published per-command labels (gpt-oss proposals, digest-checked by benchmark_apply_labels.py) to a normalized
+    set; ids without an annotation take the published truth file, every other row is excluded as unlabeled (abstain)."""
+    reg = REGISTRY[dataset_id]
+    ov = reg["overlay"]
+    src = norm_path(root, dataset_id)
+    dst = overlay_path(root, dataset_id)
+    if dst.exists():
+        print(f"{dataset_id}: overlay already: {dst}")
+        return dst
+    prefix = ov["prefix"]
+    rows = [r for r in _load(src) if r["id"].startswith(prefix)]
+    ids = {r["id"] for r in rows}
+    ann: dict[str, dict] = {}
+    by_digest: dict[str, list[str]] = {}
+    if ov.get("join_digest"):
+        # the published labels were made with an older adapter revision (different row ids): join on the command digest
+        sys.path.insert(0, str(SCRIPTS))
+        from benchmark_label_bedrock import extract_command  # noqa: PLC0415
+
+        for r in rows:
+            cmd = extract_command(r)
+            if cmd is not None:
+                by_digest.setdefault(hashlib.sha256(cmd.encode()).hexdigest(), []).append(r["id"])
+    for name in ov["labels"]:
+        for a in _load(labels_dir / name):
+            targets = [a["id"]] if a["id"] in ids else by_digest.get(a.get("input_sha256", ""), []) if a["id"].startswith(prefix) else []
+            for tid in targets:
+                if tid in ann:
+                    if a["id"] == tid and ann[tid]["id"] == tid:
+                        raise SystemExit(f"{dataset_id}: id annotated twice across label files: {tid}")
+                    if ann[tid]["label"] != a["label"]:
+                        raise SystemExit(f"{dataset_id}: conflicting annotations for one command digest: {tid}")
+                    continue
+                ann[tid] = dict(a, id=tid)
+    truth: dict[str, dict] = {}
+    for name in ov.get("truth", []):
+        for a in _load(labels_dir / name):
+            if a["id"] in ids and a["id"] not in ann:
+                truth[a["id"]] = a["truth"]
+    work = dst.parent / f".{dst.name}.work"
+    work.mkdir(parents=True, exist_ok=True)
+    flt, base = work / "labels.jsonl", work / "applied.jsonl"
+    with flt.open("w", encoding="utf-8", newline="\n") as o:
+        for rid in sorted(ann):
+            o.write(json.dumps(ann[rid], sort_keys=True, separators=(",", ":")) + "\n")
+    subprocess.run([sys.executable, "-s", str(SCRIPTS / "benchmark_apply_labels.py"), "--corpus", str(src), "--labels", str(flt),
+                    "--output", str(base)] + list(ov.get("apply_flags", [])), check=True)
+    merged, taken = merge_truth(_load(base), truth, set(ann))
+    tmp = dst.with_suffix(".partial")
+    with tmp.open("w", encoding="utf-8", newline="\n") as o:
+        for r in merged:
+            o.write(json.dumps(r, sort_keys=True, separators=(",", ":")) + "\n")
+    os.replace(tmp, dst)
+    print(f"{dataset_id}: overlay annotations {len(ann)} truth-file rows {taken} rows {len(merged)}")
+    return dst
+
+
 def opener(p: Path):
     return gzip.open(p, "rt", encoding="utf-8") if p.suffix == ".gz" else p.open("r", encoding="utf-8")
 
 
 def convert(root: Path, dataset_id: str, version: str, benign_modulus: int, cdir: Path) -> dict:
     reg = REGISTRY[dataset_id]
-    src = norm_path(root, dataset_id)
+    src = overlay_path(root, dataset_id) if reg.get("overlay") else norm_path(root, dataset_id)
     match = reg.get("match")
     dst = cdir / f"{reg['slug']}-{version}.cases.jsonl"
     dst.parent.mkdir(parents=True, exist_ok=True)
@@ -276,13 +384,14 @@ def convert(root: Path, dataset_id: str, version: str, benign_modulus: int, cdir
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("step", choices=["fetch", "normalize", "convert", "build", "list", "corpora-json"])
+    ap.add_argument("step", choices=["fetch", "normalize", "overlay", "convert", "build", "list", "corpora-json"])
     ap.add_argument("ids", nargs="*", help="locked dataset ids (default: every registered, non-skipped set for `list`)")
     ap.add_argument("--root", default=os.path.expanduser("~/s7c/dsets"))
     ap.add_argument("--version", default=VERSION)
     ap.add_argument("--max-bytes", type=int, default=12 << 30)
     ap.add_argument("--benign-modulus", type=int, default=1, help="keep 1 in N benign rows (sha256 of the id); attacks are never sampled")
     ap.add_argument("--corpus-dir", help="where corpora are written (default <root>/corpora); must be under ~/s7c to be registered")
+    ap.add_argument("--labels-dir", default=os.path.expanduser("~/s7c/hf/bench/data"), help="published label files (overlay)")
     ap.add_argument("--hf-token-file")
     ap.add_argument("--report", help="append one TSV line per converted set")
     a = ap.parse_args()
@@ -315,6 +424,8 @@ def main() -> int:
                 fetch(root, dataset_id, a.max_bytes, a.hf_token_file)
             if a.step in ("normalize", "build"):
                 normalize(root, dataset_id)
+            if a.step in ("overlay", "build") and REGISTRY[dataset_id].get("overlay"):
+                overlay(root, dataset_id, Path(a.labels_dir))
             if a.step in ("convert", "build"):
                 st = convert(root, dataset_id, a.version, REGISTRY[dataset_id].get("benign_modulus", a.benign_modulus), Path(a.corpus_dir) if a.corpus_dir else root / "corpora")
                 if a.report:
