@@ -4667,6 +4667,13 @@ class SubstrateRateLimitsConfig:
 
 
 @dataclass
+class SubstrateUsageConfig:
+    # Go internal/config/substrate_usage.go: None = on; 1s-30s, None = 5s.
+    enabled: bool | None = None
+    sync_interval: str = ""
+
+
+@dataclass
 class SubstrateExtprocUIDConfig:
     cache_ttl: str = ""
     stale_max: str = ""
@@ -4832,6 +4839,7 @@ class SubstrateConfig:
     workspace_max_bytes: int | None = None
     unattended: SubstrateUnattendedConfig = field(default_factory=SubstrateUnattendedConfig)
     rate_limits: SubstrateRateLimitsConfig = field(default_factory=SubstrateRateLimitsConfig)
+    usage: SubstrateUsageConfig = field(default_factory=SubstrateUsageConfig)
     extproc: SubstrateExtprocConfig = field(default_factory=SubstrateExtprocConfig)
     llm: SubstrateLLMConfig = field(default_factory=SubstrateLLMConfig)
     egress: SubstrateEgressConfig = field(default_factory=SubstrateEgressConfig)
@@ -8101,6 +8109,7 @@ def _merge_substrate(raw: Any) -> SubstrateConfig:
     services = _mapping(raw.get("services"))
     unattended = _mapping(raw.get("unattended"))
     limits = _mapping(raw.get("rate_limits"))
+    usage = _mapping(raw.get("usage"))
     extproc = _mapping(raw.get("extproc"))
     llm = _mapping(raw.get("llm"))
     egress = _mapping(raw.get("egress"))
@@ -8183,6 +8192,10 @@ def _merge_substrate(raw: Any) -> SubstrateConfig:
         rate_limits=SubstrateRateLimitsConfig(
             per_actor_rps=_optional_number(limits.get("per_actor_rps"), float),
             per_atespace_rps=_optional_number(limits.get("per_atespace_rps"), float),
+        ),
+        usage=SubstrateUsageConfig(
+            enabled=_optional_bool(usage.get("enabled")),
+            sync_interval=_duration_text(usage.get("sync_interval")),
         ),
         extproc=_merge_substrate_extproc(extproc),
         llm=SubstrateLLMConfig(

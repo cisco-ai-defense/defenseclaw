@@ -37,6 +37,9 @@ const (
 	RoutingBudgetScopeUser      = "user"
 	RoutingBudgetScopeGroup     = "group"
 	RoutingBudgetScopeConnector = "connector"
+	// RoutingBudgetScopeActor is one limit per Agent Substrate actor
+	// (subject *); it counts actor calls only.
+	RoutingBudgetScopeActor = "actor"
 )
 
 // Values of routing.admin.budgets[].period. Windows are UTC calendar
@@ -72,6 +75,8 @@ const (
 	RoutingAdminMaxBudgets      = 64
 	RoutingAdminMessageMaxChars = 512
 	RoutingBudgetMaxLimitUSD    = 1e7
+	// RoutingBudgetDefaultWarnAtPercent is warn_at_percent when unset.
+	RoutingBudgetDefaultWarnAtPercent = 80
 )
 
 var (
@@ -116,6 +121,10 @@ type RoutingAdminMatch struct {
 	// pre-call guardrail severity must be at least this. The route-only
 	// listener runs no guardrail, so such a rule never applies there.
 	SeverityAtLeast string `mapstructure:"severity_at_least" yaml:"severity_at_least,omitempty"`
+	// Substrate selects Agent Substrate actor calls by atespace, template
+	// or workload, with the guardrail.profile_assignments matcher. It
+	// never selects a laptop call. It needs substrate.enabled.
+	Substrate *ProfileMatchSubstrate `mapstructure:"substrate" yaml:"substrate,omitempty"`
 }
 
 // Identity returns the identity and connector selectors as a
@@ -126,7 +135,7 @@ func (m RoutingAdminMatch) Identity() ProfileMatch {
 
 // Empty reports whether no selector key is set.
 func (m RoutingAdminMatch) Empty() bool {
-	return m.Identity().Empty() && len(m.Categories) == 0 && m.SeverityAtLeast == ""
+	return m.Identity().Empty() && len(m.Categories) == 0 && m.SeverityAtLeast == "" && m.Substrate.Empty()
 }
 
 // NamesIdentity reports whether the match needs a verified caller.
@@ -145,7 +154,7 @@ func (r RoutingAdminRule) IsDeny() bool {
 // routing.admin.budget_store adds up every device's spend.
 type RoutingBudget struct {
 	ID string `mapstructure:"id" yaml:"id"`
-	// Scope is user, group or connector.
+	// Scope is user, group, connector or actor (Agent Substrate clusters).
 	Scope string `mapstructure:"scope" yaml:"scope"`
 	// Subject is, for user, a users entry or * (each user its own limit);
 	// for group, a groups entry (one pooled limit); for connector, a
@@ -157,6 +166,22 @@ type RoutingBudget struct {
 	LimitUSD float64 `mapstructure:"limit_usd" yaml:"limit_usd"`
 	// OnExceed is warn, deny or downgrade:<alias>[,<alias>...].
 	OnExceed string `mapstructure:"on_exceed" yaml:"on_exceed"`
+	// WarnAtPercent (0-99, nil = 80) raises budget_warn:<id> once spend
+	// reaches that share of LimitUSD, before a deny or downgrade applies;
+	// 0 turns it off. A warn budget ignores it.
+	WarnAtPercent *int `mapstructure:"warn_at_percent" yaml:"warn_at_percent,omitempty"`
+}
+
+// EffectiveWarnAtPercent returns warn_at_percent with its default, and 0
+// for a warn budget, whose only action is the warning at the limit.
+func (b RoutingBudget) EffectiveWarnAtPercent() int {
+	if action, _ := b.OnExceedAction(); action == RoutingBudgetOnExceedWarn {
+		return 0
+	}
+	if b.WarnAtPercent == nil {
+		return RoutingBudgetDefaultWarnAtPercent
+	}
+	return *b.WarnAtPercent
 }
 
 // OnExceedAction returns warn, deny or downgrade and, for downgrade, the
@@ -274,7 +299,12 @@ func validateRoutingAdminRule(at string, rule RoutingAdminRule, aliases map[stri
 
 func validateRoutingAdminMatch(at string, m RoutingAdminMatch) error {
 	if m.Empty() {
-		return settingErrorAt(at, fmt.Errorf("%s needs at least one of groups, users, connectors, agents, categories or severity_at_least", at))
+		return settingErrorAt(at, fmt.Errorf("%s needs at least one of groups, users, connectors, agents, categories, severity_at_least or substrate", at))
+	}
+	if m.Substrate != nil {
+		if err := m.Substrate.validate(at + ".substrate"); err != nil {
+			return settingErrorAt(at+".substrate", err)
+		}
 	}
 	for _, selector := range []struct {
 		key    string
@@ -339,8 +369,15 @@ func validateRoutingBudget(at string, b RoutingBudget, aliases map[string]struct
 		if subject != RoutingBudgetSubjectAll && !routingBudgetConnectorPattern.MatchString(subject) {
 			return settingErrorAt(at+".subject", fmt.Errorf("%s.subject %q must be a connector name such as codex or claudecode, or *", at, subject))
 		}
+	case RoutingBudgetScopeActor:
+		if subject != RoutingBudgetSubjectAll {
+			return settingErrorAt(at+".subject", fmt.Errorf("%s.subject: an actor budget is one limit per actor; set subject *", at))
+		}
 	default:
-		return settingErrorAt(at+".scope", fmt.Errorf("%s.scope %q must be user, group or connector", at, b.Scope))
+		return settingErrorAt(at+".scope", fmt.Errorf("%s.scope %q must be user, group, connector or actor", at, b.Scope))
+	}
+	if w := b.WarnAtPercent; w != nil && (*w < 0 || *w > 99) {
+		return settingErrorAt(at+".warn_at_percent", fmt.Errorf("%s.warn_at_percent must be 0 (off) to 99", at))
 	}
 	switch b.Period {
 	case RoutingBudgetPeriodDay, RoutingBudgetPeriodWeek, RoutingBudgetPeriodMonth:
@@ -390,6 +427,9 @@ func (c *Config) validateRoutingAdminRules() error {
 			return err
 		}
 	}
+	if err := c.validateRoutingAdminSubstrate(); err != nil {
+		return err
+	}
 	if a.BudgetStore != nil {
 		if a.BudgetStore.Server != nil && strings.TrimSpace(a.BudgetStore.URL) == "" {
 			// A store host's config: only budget-store serve reads it.
@@ -412,6 +452,34 @@ func (c *Config) validateRoutingAdminRules() error {
 		return settingErrorAt("routing.enabled", errors.New("routing.admin rules or budgets are set but routing.enabled is false: a managed device would apply none of them; set routing.enabled: true or remove them"))
 	}
 	return validateRoutingAdminFailClosed(a.Rules, a.AllowedAliases)
+}
+
+// validateRoutingAdminSubstrate checks the cluster-only routing.admin keys:
+// match.substrate and scope actor need substrate.enabled (no laptop call
+// is an actor call), and a cluster counts spend through its leader, so the
+// fleet budget store is refused there.
+func (c *Config) validateRoutingAdminSubstrate() error {
+	a := c.Routing.Admin
+	if c.Substrate.Enabled {
+		if a.BudgetStore != nil {
+			return settingErrorAt("routing.admin.budget_store", errors.New(
+				"routing.admin.budget_store: the fleet budget store is for managed devices; a cluster counts through its leader (substrate.usage)"))
+		}
+		return nil
+	}
+	for i, rule := range a.Rules {
+		if rule.Match.Substrate != nil {
+			at := fmt.Sprintf("routing.admin.rules[%d].match.substrate", i)
+			return settingErrorAt(at, fmt.Errorf("%s selects Agent Substrate actor calls; it needs substrate.enabled", at))
+		}
+	}
+	for i, budget := range a.Budgets {
+		if budget.Scope == RoutingBudgetScopeActor {
+			at := fmt.Sprintf("routing.admin.budgets[%d].scope", i)
+			return settingErrorAt(at, fmt.Errorf("%s actor counts Agent Substrate actor calls; it needs substrate.enabled", at))
+		}
+	}
+	return nil
 }
 
 // validateRoutingAdminFailClosed refuses category rules that would deny
