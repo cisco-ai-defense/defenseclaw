@@ -288,14 +288,17 @@ func TestEveryIDEInventoryProgramLinksTheSQLiteDriver(t *testing.T) {
 	}
 }
 
-// slimHookMaxBytes is the size budget of a release-flag build. DESIGN 16.5
-// test 2 named 45 MB for windows/amd64; W1 measured 47.7 MiB (49,969,664
-// bytes) on Windows and 43.9 MiB on Linux, against 144-151 MB for the
-// full-CLI main. The 6.5 MB over the first estimate is the CEL compiler of
-// the rule loader, which the hook links so that a pinned custom pack sets
-// the outage mode exactly as the gateway reads it (rel-1-0-10:GAP-0603); it
-// costs about 1 ms of start CPU. The budget leaves 2 MiB of room.
-const slimHookMaxBytes = 50 << 20
+// slimHookMaxBytes is the size budget of a release-flag build, the larger
+// Windows build plus 2 MiB of room. DESIGN 16.5 test 2 named 45 MB for
+// windows/amd64; W1 measured 47.7 MiB on Windows and the budget was 50 MiB
+// through 1.0.11, when the hook stopped linking the JSON Schema library, the
+// config migration's SQLite driver and Rego parser (internal/config/fullconfig):
+// 40.8 MiB (42,753,024 bytes) on Windows and 36.7 MiB on Linux, against
+// 144-151 MB for the full-CLI main. The CEL compiler of the rule loader stays:
+// the hook links it so that a pinned custom pack sets the outage mode exactly
+// as the gateway reads it (rel-1-0-10:GAP-0603). A change that needs more
+// than the room left here adds a heavy library to every agent tool call.
+const slimHookMaxBytes = 43 << 20
 
 func TestSlimHookSizeBudget(t *testing.T) {
 	if testing.Short() {
