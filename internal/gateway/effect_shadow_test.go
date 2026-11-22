@@ -34,8 +34,8 @@ func unaccounted() effects.Result {
 }
 
 // A listed command, every token accounted, an exact canonical known member of
-// each set is the restricted tier; a ruling family (SSH / self-protection)
-// additionally blocks in the OSS default.
+// each set is the restricted tier; the authorized-keys ruling additionally
+// blocks in the OSS default (a state write keeps the 1.0.10 tier: alert).
 func TestClassifyRestrictedListedCommands(t *testing.T) {
 	listed := []struct{ program, surface string }{
 		{"", "shell"}, // redirection
@@ -51,7 +51,7 @@ func TestClassifyRestrictedListedCommands(t *testing.T) {
 			if !c.restricted {
 				t.Fatalf("set %s cmd %q/%q: expected restricted tier", set, lc.program, lc.surface)
 			}
-			wantRuling := set == effectrules.SetSSHAuthorizedKeys || set == effectrules.SetSelfProtection
+			wantRuling := set == effectrules.SetSSHAuthorizedKeys
 			if c.restrictedRuling != wantRuling {
 				t.Fatalf("set %s cmd %q: restrictedRuling=%v want %v", set, lc.program, c.restrictedRuling, wantRuling)
 			}
