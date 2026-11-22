@@ -5834,6 +5834,7 @@ func withTwinProvenBlocks(findings, twin []RuleFinding) []RuleFinding {
 			return 2
 		}
 	}
+	findings, twin = withEffectsFoldedEitherWay(findings, twin)
 	for _, proven := range twin {
 		if !proven.contributesToEnforcement() {
 			continue
@@ -5939,6 +5940,7 @@ func withSimpleCommandFindings(findings, alone []RuleFinding) []RuleFinding {
 			return 1
 		}
 	}
+	findings, alone = withEffectsFoldedEitherWay(findings, alone)
 	for _, finding := range alone {
 		key := trustedActionFindingKey(finding.RuleID)
 		index := slices.IndexFunc(findings, func(existing RuleFinding) bool {

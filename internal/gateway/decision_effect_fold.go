@@ -26,3 +26,44 @@ func joinEffectFindings(findings, effect []RuleFinding) []RuleFinding {
 	}
 	return findings
 }
+
+// withEffectsFoldedEitherWay applies the same fold where two readings of
+// one call merge by rule id (a twin, a nested statement, a simple-command
+// pass): an effect finding of either list whose protected set a 1.0.10
+// finding of the other names is folded into that finding. Merged by rule id
+// instead, the effect finding held the id (an enforcing Known proof outranks
+// the 1.0.10 alert-only finding), so its read cell replaced the 1.0.10 copy
+// verdict of the same rule: an effect finding never replaces or lowers a
+// 1.0.10 finding (DET111 ruling A; rel-1-0-10:GAP-0998, GAP-0999, GAP-1226).
+func withEffectsFoldedEitherWay(a, b []RuleFinding) ([]RuleFinding, []RuleFinding) {
+	if !hasEffectFinding(a) && !hasEffectFinding(b) {
+		return a, b
+	}
+	return withoutEffectsFoldedInto(a, b), withoutEffectsFoldedInto(b, a)
+}
+
+func hasEffectFinding(findings []RuleFinding) bool {
+	for _, f := range findings {
+		if f.Proof.Source == decide.SourceEffects {
+			return true
+		}
+	}
+	return false
+}
+
+// withoutEffectsFoldedInto is findings without the effect findings a 1.0.10
+// finding of other folds (decide.FoldsIntoLegacy).
+func withoutEffectsFoldedInto(findings, other []RuleFinding) []RuleFinding {
+	if !hasEffectFinding(findings) {
+		return findings
+	}
+	call := decideFindings(other)
+	kept := findings[:0:0]
+	for _, f := range findings {
+		if f.Proof.Source == decide.SourceEffects && decide.FoldsIntoLegacy(decideFinding(f), call) {
+			continue
+		}
+		kept = append(kept, f)
+	}
+	return kept
+}
