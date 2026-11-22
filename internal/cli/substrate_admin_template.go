@@ -81,7 +81,7 @@ Flags:
                                   of --config, the issuer the gateway signs with)
   --session-audience AUD          aud of the session tokens (default: the one the gateway signs)
   --verify-url URL                gateway URL the relay checks each session token with (default
-                                  <gateway-url>/api/v1/substrate/relay/verify; --session-key keys are checked first)
+                                  the relay verify endpoint of <gateway-url>; --session-key keys are checked first)
 ` + templateCommonFlags + `
 Exit code: 0 built, 1 blocked, 2 usage error.`
 
