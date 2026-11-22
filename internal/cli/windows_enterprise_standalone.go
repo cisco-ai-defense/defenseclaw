@@ -3205,22 +3205,19 @@ var (
 	windowsEnterpriseAccountOwnedDataDirLink   = enterprisehooks.WindowsAccountOwnedDataDirLink
 	windowsEnterpriseAccountForeignDataDirLink = enterprisehooks.WindowsForeignOwnedDataDirLink
 	windowsEnterpriseAccountPerUserInstall     = enterprisehooks.WindowsPerUserInstallDataDir
-	// windowsEnterpriseEnrolledAccounts reads the protection ledger once and
-	// reports whether it holds a row of an account, for any connector. A
-	// ledger that cannot be read reports every account as enrolled, so
-	// status never tells an administrator to remove the "per-user install"
-	// of an enrolled account (GAP-1733 review).
+	// windowsEnterpriseEnrolledAccounts reads the layout's protection ledger
+	// once, at the layout's authorization folder (status runs without the
+	// service pins), and reports whether it holds a row of an account, for
+	// any connector, as the guardian decides it (enterpriseHookEnrolledAccounts).
+	// A layout or ledger that cannot be read reports every account as
+	// enrolled, so status never tells an administrator to remove the
+	// "per-user install" of an enrolled account (GAP-1733 review).
 	windowsEnterpriseEnrolledAccounts = func() func(sid string) bool {
-		protected := map[string]bool{}
 		layout, err := windowsEnterpriseHotConfigLayout()
-		if err == nil {
-			var authorization enterpriseHookGuardianAuthorization
-			authorization, _, err = loadEnterpriseHookGuardianAuthorization(layout.DataDir)
-			for _, row := range authorization.ProtectedTargets {
-				protected[strings.ToUpper(strings.TrimSpace(row.SID))] = true
-			}
+		if err != nil {
+			return func(string) bool { return true }
 		}
-		return func(sid string) bool { return err != nil || protected[strings.ToUpper(strings.TrimSpace(sid))] }
+		return enterpriseHookEnrolledAccounts(layout.DataDir, managed.HookGuardianAuthorizationDirForLayout(layout))
 	}
 	windowsEnterpriseAccountDeleted = func(sid string) bool {
 		// A domain or Entra account's lookup also fails while its directory
@@ -3334,8 +3331,8 @@ func applyWindowsEnterpriseAccountFolders(result *enterprisestatus.Result) {
 		case perUser != "":
 			result.AddWarning("enrollment_skipped_per_user_install", fmt.Sprintf(
 				"the account %s has a per-user DefenseClaw install in %s, so it is not protected; DefenseClaw leaves that folder "+
-					"untouched and this account out so Setup, Upgrade and Repair finish for the other accounts. Remove the per-user "+
-					"install as that account (`defenseclaw uninstall --all`), then run `%s` from an elevated PowerShell prompt",
+					"untouched and this account out so Setup, Upgrade and Repair finish for the other accounts. Have that user remove "+
+					"the per-user install (`defenseclaw uninstall --all --binaries --yes`), then run `%s` from an elevated PowerShell prompt",
 				label, filepath.Join(account.Home, ".defenseclaw"),
 				managed.WindowsAdminCommand("enterprise", "windows", "repair", "--profile", managed.ProfileStandalone)))
 		case windowsEnterpriseAccountCreatedDataDir(account.Home, account.SID):

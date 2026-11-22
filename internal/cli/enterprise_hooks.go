@@ -991,11 +991,9 @@ func enterpriseHookPerUserInstallTamperError(home string, cause error) error {
 // probed once per pass and the protection ledger is read once (GAP-1733
 // review P4).
 type enterpriseHookPerUserInstallPass struct {
-	dataDir   string
-	folders   map[string]bool
-	loaded    bool
-	ledgerErr error
-	protected map[string]bool
+	dataDir  string
+	folders  map[string]bool
+	enrolled func(sid string) bool
 }
 
 func newEnterpriseHookPerUserInstallPass(dataDir string) *enterpriseHookPerUserInstallPass {
@@ -1015,21 +1013,47 @@ func (p *enterpriseHookPerUserInstallPass) folder(home, sid string) bool {
 }
 
 // accountProtected reports whether the protection ledger holds a row of sid
-// for any connector. A ledger that cannot be read counts as protected, so
-// the folder is repaired and reported, never skipped.
+// for any connector, as enterpriseHookEnrolledAccounts decides it, so the
+// folder of an account that may be protected is repaired and reported, never
+// skipped.
 func (p *enterpriseHookPerUserInstallPass) accountProtected(sid string) bool {
-	if !p.loaded {
-		p.loaded = true
-		p.protected = map[string]bool{}
-		authorization, _, err := loadEnterpriseHookGuardianAuthorization(p.dataDir)
-		p.ledgerErr = err
-		for _, row := range authorization.ProtectedTargets {
-			if key := strings.ToUpper(strings.TrimSpace(row.SID)); key != "" {
-				p.protected[key] = true
-			}
+	if p.enrolled == nil {
+		p.enrolled = enterpriseHookEnrolledAccounts(p.dataDir, managed.HookGuardianAuthorizationDir(p.dataDir))
+	}
+	return p.enrolled(sid)
+}
+
+// enterpriseHookEnrolledAccounts reads the guardian's records once, its
+// protection ledger and activation record in authorizationDir and its state
+// in dataDir, and reports whether an account is enrolled: the ledger holds a
+// row of it, for any connector. The guardian reconcile, verify and status all
+// decide "first adoption" with it. It fails closed. A ledger that cannot be
+// read reports every account as enrolled. So does a missing ledger once the
+// guardian has published on this host: the publish writes the ledger before
+// the state and the activation record, so either of those, present or
+// unreadable, without the ledger means the ledger was removed, not that no
+// account was ever protected. Only a host with none of the three records, the
+// first adoption, reports no account enrolled (rel-1-0-10 GAP-1733 review).
+func enterpriseHookEnrolledAccounts(dataDir, authorizationDir string) func(sid string) bool {
+	if strings.TrimSpace(authorizationDir) == "" {
+		return func(string) bool { return true }
+	}
+	authorization, exists, err := loadEnterpriseHookGuardianAuthorizationFile(
+		filepath.Join(authorizationDir, hookGuardianAuthorizationFile))
+	every := err != nil
+	if err == nil && !exists {
+		_, activationExists, activationErr := loadEnterpriseHookGuardianActivationFile(
+			filepath.Join(authorizationDir, hookGuardianActivationFile))
+		_, stateExists, stateErr := loadEnterpriseHookGuardianState(dataDir)
+		every = activationExists || activationErr != nil || stateExists || stateErr != nil
+	}
+	protected := map[string]bool{}
+	for _, row := range authorization.ProtectedTargets {
+		if key := strings.ToUpper(strings.TrimSpace(row.SID)); key != "" {
+			protected[key] = true
 		}
 	}
-	return p.ledgerErr != nil || p.protected[strings.ToUpper(strings.TrimSpace(sid))]
+	return func(sid string) bool { return every || protected[strings.ToUpper(strings.TrimSpace(sid))] }
 }
 
 // classify reports, for a target whose canonical folder holds a per-user
@@ -6067,7 +6091,12 @@ func previousEnterpriseHookSuccess(
 }
 
 func loadEnterpriseHookGuardianAuthorization(dataDir string) (enterpriseHookGuardianAuthorization, bool, error) {
-	path := managed.HookGuardianAuthorizationPath(dataDir)
+	return loadEnterpriseHookGuardianAuthorizationFile(managed.HookGuardianAuthorizationPath(dataDir))
+}
+
+// loadEnterpriseHookGuardianAuthorizationFile is
+// loadEnterpriseHookGuardianAuthorization for the ledger at path.
+func loadEnterpriseHookGuardianAuthorizationFile(path string) (enterpriseHookGuardianAuthorization, bool, error) {
 	data, exists, err := readEnterpriseHookPublishedRecord(
 		path,
 		"hook guardian authorization",
@@ -6115,7 +6144,12 @@ func loadEnterpriseHookGuardianAuthorization(dataDir string) (enterpriseHookGuar
 }
 
 func loadEnterpriseHookGuardianActivation(dataDir string) (enterpriseHookGuardianActivation, bool, error) {
-	path := filepath.Join(managed.HookGuardianAuthorizationDir(dataDir), hookGuardianActivationFile)
+	return loadEnterpriseHookGuardianActivationFile(filepath.Join(managed.HookGuardianAuthorizationDir(dataDir), hookGuardianActivationFile))
+}
+
+// loadEnterpriseHookGuardianActivationFile is
+// loadEnterpriseHookGuardianActivation for the record at path.
+func loadEnterpriseHookGuardianActivationFile(path string) (enterpriseHookGuardianActivation, bool, error) {
 	data, exists, err := readEnterpriseHookPublishedRecord(
 		path,
 		"hook guardian activation",
