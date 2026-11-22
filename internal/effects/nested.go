@@ -5,6 +5,7 @@
 package effects
 
 import (
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -615,6 +616,66 @@ func interpreterInvocation(args []Word) interpCall {
 	return ic
 }
 
+var (
+	pythonOpenArgRead     = regexp.MustCompile(`\bopen\s*\(\s*sys\s*\.\s*argv\s*\[\s*([1-9][0-9]*)\s*\]\s*(?:,\s*['"]r(?:b|t)?['"])?\s*\)\s*\.read\s*\(`)
+	pythonOpenSingleRead  = regexp.MustCompile(`\bopen\s*\(\s*'([^'\\\n]+)'\s*(?:,\s*['"]r(?:b|t)?['"])?\s*\)\s*\.read\s*\(`)
+	pythonOpenDoubleRead  = regexp.MustCompile(`\bopen\s*\(\s*"([^"\\\n]+)"\s*(?:,\s*['"]r(?:b|t)?['"])?\s*\)\s*\.read\s*\(`)
+	pythonOpenArgWrite    = regexp.MustCompile(`\bopen\s*\(\s*sys\s*\.\s*argv\s*\[\s*([1-9][0-9]*)\s*\]\s*,\s*['"]([awx](?:b|t)?)['"]\s*\)\s*\.write\s*\(`)
+	pythonOpenSingleWrite = regexp.MustCompile(`\bopen\s*\(\s*'([^'\\\n]+)'\s*,\s*['"]([awx](?:b|t)?)['"]\s*\)\s*\.write\s*\(`)
+	pythonOpenDoubleWrite = regexp.MustCompile(`\bopen\s*\(\s*"([^"\\\n]+)"\s*,\s*['"]([awx](?:b|t)?)['"]\s*\)\s*\.write\s*\(`)
+)
+
+// pythonOpenReadSources recognizes bounded Python open(...).read() forms with
+// a literal path or a literal sys.argv index. Other code remains opaque.
+func pythonOpenReadSources(program, code string, args []Word) (map[int]bool, map[string]bool) {
+	argReads, literalReads := map[int]bool{}, map[string]bool{}
+	if program != "python" && program != "python3" && !strings.HasPrefix(program, "python3.") && !strings.HasPrefix(program, "python2") {
+		return argReads, literalReads
+	}
+	for _, match := range pythonOpenArgRead.FindAllStringSubmatch(code, maxCodeLiterals) {
+		index, err := strconv.Atoi(match[1])
+		if err == nil && index > 0 && index <= len(args) {
+			argReads[index-1] = true
+		}
+	}
+	for _, pattern := range []*regexp.Regexp{pythonOpenSingleRead, pythonOpenDoubleRead} {
+		for _, match := range pattern.FindAllStringSubmatch(code, maxCodeLiterals) {
+			if pathLike(match[1]) {
+				literalReads[match[1]] = true
+			}
+		}
+	}
+	return argReads, literalReads
+}
+
+// pythonOpenWriteTargets recognizes bounded Python open(..., mode).write() forms.
+func pythonOpenWriteTargets(program, code string, args []Word) (map[int]Kind, map[string]Kind) {
+	argWrites, literalWrites := map[int]Kind{}, map[string]Kind{}
+	if program != "python" && program != "python3" && !strings.HasPrefix(program, "python3.") && !strings.HasPrefix(program, "python2") {
+		return argWrites, literalWrites
+	}
+	kindFor := func(mode string) Kind {
+		if strings.HasPrefix(mode, "a") {
+			return KindAppend
+		}
+		return KindWrite
+	}
+	for _, match := range pythonOpenArgWrite.FindAllStringSubmatch(code, maxCodeLiterals) {
+		index, err := strconv.Atoi(match[1])
+		if err == nil && index > 0 && index <= len(args) {
+			argWrites[index-1] = kindFor(match[2])
+		}
+	}
+	for _, pattern := range []*regexp.Regexp{pythonOpenSingleWrite, pythonOpenDoubleWrite} {
+		for _, match := range pattern.FindAllStringSubmatch(code, maxCodeLiterals) {
+			if pathLike(match[1]) {
+				literalWrites[match[1]] = kindFor(match[2])
+			}
+		}
+	}
+	return argWrites, literalWrites
+}
+
 // codeLiterals returns the quoted string literals of a code text that look
 // like paths (a separator, or a leading . or ~), at most maxCodeLiterals.
 func codeLiterals(code string) []string {
@@ -662,10 +723,10 @@ func (w *walker) opaquePathEffect(spelling string, origin Origin, cond bool) {
 	w.emit(e)
 }
 
-// inlineCode lowers inline interpreter code as Data: the path literals in the
-// code and the path-like arguments handed to it become opaque path effects.
-// It reports whether the call has inline or stdin code (its positionals are
-// then arguments, not a program to run).
+// inlineCode lowers bounded Python open(...).read() and explicit write-mode
+// open(...).write() paths as file effects; other path literals and arguments
+// remain opaque. It reports whether the call has inline or stdin code (its
+// positionals are then arguments, not a program to run).
 func (w *walker) inlineCode(c *Cmd, args []Word, origin Origin, cond bool) bool {
 	ic := interpreterInvocation(args)
 	code := ""
@@ -684,7 +745,39 @@ func (w *walker) inlineCode(c *Cmd, args []Word, origin Origin, cond bool) bool 
 		return false
 	}
 	seen := map[string]bool{}
+	readArgs, readLiterals := pythonOpenReadSources(origin.Program, code, ic.args)
+	writeArgs, writeLiterals := pythonOpenWriteTargets(origin.Program, code, ic.args)
+	emitRead := func(spelling string) {
+		if seen[spelling] {
+			return
+		}
+		seen[spelling] = true
+		if e := w.effectForOperand(operand{value: spelling, static: true, role: RoleRead}, Program{}, origin, cond, false, false, false, origin.Dialect, origin.Depth); e != nil {
+			w.emit(*e)
+		}
+	}
+	emitWrite := func(spelling string, kind Kind) {
+		if seen[spelling] {
+			return
+		}
+		seen[spelling] = true
+		role := RoleWrite
+		if kind == KindAppend {
+			role = RoleAppend
+		}
+		if e := w.effectForOperand(operand{value: spelling, static: true, role: role}, Program{}, origin, cond, false, false, false, origin.Dialect, origin.Depth); e != nil {
+			w.emit(*e)
+		}
+	}
 	for _, lit := range codeLiterals(code) {
+		if kind, ok := writeLiterals[lit]; ok {
+			emitWrite(lit, kind)
+			continue
+		}
+		if readLiterals[lit] {
+			emitRead(lit)
+			continue
+		}
 		if !seen[lit] {
 			seen[lit] = true
 			w.opaquePathEffect(lit, origin, cond)
@@ -692,6 +785,14 @@ func (w *walker) inlineCode(c *Cmd, args []Word, origin Origin, cond bool) bool 
 	}
 	raws := rawWordsFor(ic.args, c.Words)
 	for i, a := range ic.args {
+		if kind, ok := writeArgs[i]; ok && a.Static && pathLike(a.Value) {
+			emitWrite(a.Value, kind)
+			continue
+		}
+		if readArgs[i] && a.Static && pathLike(a.Value) {
+			emitRead(a.Value)
+			continue
+		}
 		if !a.Static {
 			// A dynamic word (a ~ whose home the call changed: su -c, GAP-0662)
 			// keeps its as-written spelling, so a protected tail still reaches
