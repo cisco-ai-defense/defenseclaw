@@ -29,6 +29,8 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/rxprefilter"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/tactics"
 	"github.com/defenseclaw/defenseclaw/internal/shellparse"
+	"github.com/defenseclaw/defenseclaw/internal/textlower"
+	"github.com/defenseclaw/defenseclaw/internal/workcount"
 	"mvdan.cc/sh/v3/expand"
 	"mvdan.cc/sh/v3/syntax"
 )
@@ -1145,12 +1147,20 @@ func walkWritePathMemo(base, path string, linkDepth int, collect, patchTarget bo
 	parts := strings.Split(filepath.ToSlash(path), "/")
 	start := 0
 	// key is the memo key of parts[:i+1]: the volume root and the
-	// components as written.
-	var key string
+	// components as written, each after a NUL. Every key is a prefix of
+	// keys, the key of the whole path, built once: a key per component
+	// built by concatenation (and a copy of the stack per prefix met) cost
+	// the target scan of a 1 MiB here-document one allocation per
+	// component of each of its ~25,000 distinct words (rel-1-0-10:GAP-0299).
+	var key, keys string
 	if memo != nil {
+		workcount.Add(workcount.MemoWalk)
+		workcount.Add(workcount.WalkKey)
+		keys = current + "\x00" + strings.Join(parts, "\x00")
 		key = current
+		var walked walkState
 		for i, part := range parts {
-			next := key + "\x00" + part
+			next := keys[:len(key)+1+len(part)]
 			state, ok := memo.prefix(next)
 			if !ok {
 				break
@@ -1158,8 +1168,11 @@ func walkWritePathMemo(base, path string, linkDepth int, collect, patchTarget bo
 			if state.failed {
 				return "", nil, state.linkDepth, false
 			}
-			key, start = next, i+1
-			current, crossed, linkDepth = state.current, append([]bool(nil), state.crossed...), state.linkDepth
+			key, start, walked = next, i+1, state
+		}
+		if start > 0 {
+			workcount.Add(workcount.WalkKey)
+			current, crossed, linkDepth = walked.current, append([]bool(nil), walked.crossed...), walked.linkDepth
 		}
 	}
 	// mark is the call's cut count when the walk began: a state read after
@@ -1173,7 +1186,7 @@ func walkWritePathMemo(base, path string, linkDepth int, collect, patchTarget bo
 	}
 	for _, part := range parts[start:] {
 		if memo != nil {
-			key += "\x00" + part
+			key = keys[:len(key)+1+len(part)]
 		}
 		switch part {
 		case "", ".":
@@ -1194,7 +1207,7 @@ func walkWritePathMemo(base, path string, linkDepth int, collect, patchTarget bo
 				return fail()
 			}
 			memo.noteWork()
-			info, err := pathLstat(candidate)
+			info, err := memo.lstat(candidate)
 			if err != nil && !os.IsNotExist(err) {
 				return fail()
 			}
@@ -1251,7 +1264,7 @@ func walkWritePathMemo(base, path string, linkDepth int, collect, patchTarget bo
 	return filepath.Clean(current), forms, linkDepth, true
 }
 
-func walkWritePathMemoWithReaders(base, path string, linkDepth int, collect, patchTarget bool, memo *TargetMemo,
+func walkWritePathWithReaders(base, path string, linkDepth int, collect, patchTarget bool,
 	lstat func(string) (os.FileInfo, error), readlink func(string) (string, error),
 	procLink func(path string, below bool) bool, tail bool,
 ) (string, []string, int, bool) {
@@ -1265,9 +1278,6 @@ func walkWritePathMemoWithReaders(base, path string, linkDepth int, collect, pat
 		path = strings.TrimPrefix(path, filepath.VolumeName(path))
 	} else if !filepath.IsAbs(base) {
 		return "", nil, linkDepth, false
-	}
-	if memo != nil && (base != "" || linkDepth != 0 || collect || patchTarget || !absolute) {
-		memo = nil
 	}
 	var forms []string
 	if collect && absolute {
@@ -1286,38 +1296,8 @@ func walkWritePathMemoWithReaders(base, path string, linkDepth int, collect, pat
 	// before the command executes.
 	var crossed []bool
 	parts := strings.Split(filepath.ToSlash(path), "/")
-	start := 0
-	// key is the memo key of parts[:i+1]: the volume root and the
-	// components as written.
-	var key string
-	if memo != nil {
-		key = current
-		for i, part := range parts {
-			next := key + "\x00" + part
-			state, ok := memo.prefix(next)
-			if !ok {
-				break
-			}
-			if state.failed {
-				return "", nil, state.linkDepth, false
-			}
-			key, start = next, i+1
-			current, crossed, linkDepth = state.current, append([]bool(nil), state.crossed...), state.linkDepth
-		}
-	}
-	// mark is the call's cut count when the walk began: a state read after
-	// the budget cut a share wait short is not kept (rel-1-0-10:GAP-1606).
-	mark := memo.cutMark()
-	fail := func() (string, []string, int, bool) {
-		if memo != nil {
-			memo.storePrefix(key, walkState{linkDepth: linkDepth, failed: true}, mark)
-		}
-		return "", nil, linkDepth, false
-	}
-	for i, part := range parts[start:] {
-		if memo != nil {
-			key += "\x00" + part
-		}
+	fail := func() (string, []string, int, bool) { return "", nil, linkDepth, false }
+	for i, part := range parts {
 		switch part {
 		case "", ".":
 		case "..":
@@ -1336,7 +1316,6 @@ func walkWritePathMemoWithReaders(base, path string, linkDepth int, collect, pat
 			if !add(candidate) {
 				return fail()
 			}
-			memo.noteWork()
 			info, err := lstat(candidate)
 			if err != nil && !os.IsNotExist(err) {
 				return fail()
@@ -1346,7 +1325,7 @@ func walkWritePathMemoWithReaders(base, path string, linkDepth int, collect, pat
 				// A process link the hook reads for another process than the
 				// one opening the operand would prove a different path. below
 				// tells whether the path goes on below the link.
-				below := tail || stepFollows(parts[start+i+1:])
+				below := tail || stepFollows(parts[i+1:])
 				if procLink(candidate, below) {
 					return fail()
 				}
@@ -1363,7 +1342,7 @@ func walkWritePathMemoWithReaders(base, path string, linkDepth int, collect, pat
 				var extra []string
 				var nextDepth int
 				var ok bool
-				current, extra, nextDepth, ok = walkWritePathMemoWithReaders(current, link, linkDepth+1, collect, patchTarget, nil, lstat, readlink, procLink, below)
+				current, extra, nextDepth, ok = walkWritePathWithReaders(current, link, linkDepth+1, collect, patchTarget, lstat, readlink, procLink, below)
 				if !ok || collect && len(forms)+len(extra) > maxOpaquePathForms {
 					return fail()
 				}
@@ -1378,9 +1357,6 @@ func walkWritePathMemoWithReaders(base, path string, linkDepth int, collect, pat
 				current = candidate
 				crossed = append(crossed, unknown)
 			}
-		}
-		if memo != nil {
-			memo.storePrefix(key, walkState{current: current, crossed: crossed, linkDepth: linkDepth}, mark)
 		}
 	}
 	return filepath.Clean(current), forms, linkDepth, true
@@ -7636,7 +7612,7 @@ func cmdMklinkDriveRelative(words, args []string, cwd string) ([]string, bool) {
 // maskCmdMklinkCalls blanks the cmd /c mklink calls that cmdMklinkArgs
 // reads, so the opaque link text scan sees only the others.
 func maskCmdMklinkCalls(file *syntax.File, command, home string) string {
-	if !strings.Contains(strings.ToLower(command), "mklink") {
+	if !strings.Contains(textlower.Lower(command), "mklink") {
 		return command
 	}
 	masked := []byte(command)

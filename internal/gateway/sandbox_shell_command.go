@@ -107,6 +107,7 @@ func (a *APIServer) inspectSandboxShellToolPolicyCtx(
 	command json.RawMessage,
 	commandTool string,
 ) *ToolInspectVerdict {
+	ctx = withCallTargetMemo(ctx)
 	connectorName := action.Connector
 	if req != nil {
 		connectorName = firstNonEmpty(req.Connector, action.Connector)

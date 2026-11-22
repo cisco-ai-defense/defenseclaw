@@ -10,6 +10,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/psparse"
+	"github.com/defenseclaw/defenseclaw/internal/textlower"
 )
 
 // The archive extractions of interpreter code and PowerShell
@@ -148,7 +149,7 @@ func pythonArchivePath(arg, cwd, home string) (string, bool) {
 // With windowsShell a native tar, unzip or 7z call is read too
 // (psNativeArchiveCall). Input past the parser's bounds is TRUNCATED.
 func powerShellArchiveExtractions(command, cwd, home string, windowsShell bool, read *archiveExtractionScan) {
-	text, lower := command, strings.ToLower(command)
+	text, lower := command, textlower.Lower(command)
 	native := windowsShell && psNativeExtractorWord.MatchString(lower)
 	if !native && !strings.Contains(lower, "expand-archive") && !strings.Contains(lower, "extracttodirectory") || !filepath.IsAbs(cwd) {
 		return

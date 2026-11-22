@@ -121,14 +121,29 @@ func dispatchTrustedAction(parent context.Context, request trustedActionRequest)
 			parent = context.Background()
 		}
 		memo = &trustedDispatchMemo{}
+		trustedDispatchRun(request)
 		return dispatchTrustedActionOnce(context.WithValue(parent, trustedDispatchMemoKey{}, memo), request)
 	}
 	return memo.dispatch(parent, request)
 }
 
+// trustedDispatchRunHook is a test-only seam: when non-nil it is told each
+// request the dispatch judges with the memo on (a repeat the memo answers is
+// not judged), so a test can count the dispatches one hook call costs
+// (rel-1-0-10:GAP-1593). Unlike trustedActionFaultHook it leaves the memo on.
+// Production never sets it.
+var trustedDispatchRunHook func(trustedActionRequest)
+
+func trustedDispatchRun(request trustedActionRequest) {
+	if trustedDispatchRunHook != nil {
+		trustedDispatchRunHook(request)
+	}
+}
+
 func (memo *trustedDispatchMemo) dispatch(ctx context.Context, request trustedActionRequest) []RuleFinding {
 	if request.record != nil || request.recordTelemetry != nil || request.recordEffectShadow != nil ||
 		trustedActionFaultHook != nil || trustedSimpleCommandsFaultHook != nil {
+		trustedDispatchRun(request)
 		return dispatchTrustedActionOnce(ctx, request)
 	}
 	bucket := request.Input.Tool + "\x00" + request.Input.Command + "\x00" + request.LegacyText
@@ -151,6 +166,7 @@ func (memo *trustedDispatchMemo) dispatch(ctx context.Context, request trustedAc
 	if request.unprovenTarget != nil {
 		run.unprovenTarget = &outs.unprovenTarget
 	}
+	trustedDispatchRun(request)
 	findings := dispatchTrustedActionOnce(ctx, run)
 	outs.unprovenSet = outs.unprovenTarget != unprovenWrite{}
 	outs.replay(request)

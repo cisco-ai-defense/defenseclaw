@@ -28,6 +28,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
+	"github.com/defenseclaw/defenseclaw/internal/textlower"
 )
 
 const (
@@ -1528,7 +1529,7 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 		}
 		return kept
 	}
-	commandText := strings.ToLower(input.Command)
+	commandText := textlower.Lower(input.Command)
 	overBudget, unresolved, resolvedTarget, nonWriteMention, unknownMention := false, false, false, false, false
 	var unprovenTarget unprovenWrite
 	evidence := request
