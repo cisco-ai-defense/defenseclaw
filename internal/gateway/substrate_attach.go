@@ -218,6 +218,11 @@ func (a *APIServer) substrateAttach(st *substrateState) http.HandlerFunc {
 		// the upgraded relay connection when the request context ends.
 		ctx, release := st.cfg.Streams.Open(r.Context(), revocation.Stream{Person: c.person.ID(), TokenKey: c.person.TokenKey, IssuedAt: c.person.IssuedAt})
 		defer release()
+		if ctx.Err() != nil && r.Context().Err() == nil {
+			// Ended while the request was on its way here (RV1-04).
+			writeSubstrateJSONError(w, http.StatusUnauthorized, substrateReasonSigninEnded)
+			return
+		}
 		proxy.ServeHTTP(w, r.WithContext(ctx))
 	}
 }

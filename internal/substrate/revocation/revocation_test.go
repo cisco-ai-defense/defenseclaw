@@ -25,6 +25,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/substrate/identity"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/leader"
 )
 
@@ -63,11 +64,11 @@ func pull(t *testing.T, snap *Snapshot, src Source) {
 }
 
 func TestTokenKeyHidesTheToken(t *testing.T) {
-	k := TokenKey("iss", "jti-1", "raw.token.value")
-	if k == TokenKey("other", "jti-1", "raw.token.value") || len(k) != 36 {
+	k := identity.TokenKey("iss", "jti-1", "raw.token.value")
+	if k == identity.TokenKey("other", "jti-1", "raw.token.value") || len(k) != 36 {
 		t.Fatalf("key %q must depend on the issuer and be a fixed-size hash", k)
 	}
-	if TokenKey("iss", "", "raw.token.value") == TokenKey("iss", "", "raw.token.other") {
+	if identity.TokenKey("iss", "", "raw.token.value") == identity.TokenKey("iss", "", "raw.token.other") {
 		t.Fatal("a token without jti is keyed by a hash of the whole token")
 	}
 }
@@ -75,7 +76,7 @@ func TestTokenKeyHidesTheToken(t *testing.T) {
 func TestRevokedTokenAndWatermark(t *testing.T) {
 	c := &clock{time.Unix(1_800_000_000, 0)}
 	s := newStore(t, t.TempDir(), c)
-	key := TokenKey("iss", "j1", "")
+	key := identity.TokenKey("iss", "j1", "")
 	if _, err := s.Put(context.Background(), Entry{Person: alice, Token: key}); err != nil {
 		t.Fatal(err)
 	}
@@ -84,7 +85,7 @@ func TestRevokedTokenAndWatermark(t *testing.T) {
 	if err := snap.Check(alice, key, iat); !errors.Is(err, ErrEnded) {
 		t.Fatalf("revoked token: %v", err)
 	}
-	if err := snap.Check(alice, TokenKey("iss", "j2", ""), iat); err != nil {
+	if err := snap.Check(alice, identity.TokenKey("iss", "j2", ""), iat); err != nil {
 		t.Fatalf("another token of the same person: %v", err)
 	}
 	// logout --all: every token issued before now.
@@ -93,10 +94,10 @@ func TestRevokedTokenAndWatermark(t *testing.T) {
 		t.Fatal(err)
 	}
 	pull(t, snap, s)
-	if err := snap.Check(alice, TokenKey("iss", "j2", ""), iat); !errors.Is(err, ErrEnded) {
+	if err := snap.Check(alice, identity.TokenKey("iss", "j2", ""), iat); !errors.Is(err, ErrEnded) {
 		t.Fatalf("token from before the watermark: %v", err)
 	}
-	if err := snap.Check(alice, TokenKey("iss", "j3", ""), c.t); err != nil {
+	if err := snap.Check(alice, identity.TokenKey("iss", "j3", ""), c.t); err != nil {
 		t.Fatalf("a sign-in made after the watermark must work: %v", err)
 	}
 	if err := snap.Check("https://sso.example.test#bob", "", iat); err != nil {
@@ -110,7 +111,7 @@ func TestRevokedTokenAndWatermark(t *testing.T) {
 		t.Fatal(err)
 	}
 	pull(t, snap, s)
-	if err := snap.Check(alice, TokenKey("iss", "j2", ""), iat); err != nil || len(snap.Active()) != 0 {
+	if err := snap.Check(alice, identity.TokenKey("iss", "j2", ""), iat); err != nil || len(snap.Active()) != 0 {
 		t.Fatalf("after a lift: %v, active %+v", err, snap.Active())
 	}
 }
@@ -119,7 +120,7 @@ func TestRevocationSurvivesLeaderRestart(t *testing.T) {
 	c := &clock{time.Unix(1_800_000_000, 0)}
 	dir := t.TempDir()
 	s := newStore(t, dir, c)
-	key := TokenKey("iss", "j1", "")
+	key := identity.TokenKey("iss", "j1", "")
 	_, _ = s.Put(context.Background(), Entry{Person: alice, Token: key})
 	s2 := newStore(t, dir, c) // a new leader opens the same volume
 	if err := synced(t, s2, c).Check(alice, key, c.t); !errors.Is(err, ErrEnded) {
@@ -137,7 +138,7 @@ func TestRevocationSurvivesLeaderRestart(t *testing.T) {
 func TestRevocationPurgeAtExpiry(t *testing.T) {
 	c := &clock{time.Unix(1_800_000_000, 0)}
 	s := newStore(t, t.TempDir(), c)
-	key := TokenKey("iss", "j1", "")
+	key := identity.TokenKey("iss", "j1", "")
 	_, _ = s.Put(context.Background(), Entry{Person: alice, Token: key})
 	c.t = c.t.Add(Life + time.Second)
 	d, _ := s.Since(context.Background(), "", 0)
@@ -153,7 +154,7 @@ func TestRevocationBoundedPerPerson(t *testing.T) {
 	var last Entry
 	for i := 0; i < 4; i++ {
 		var err error
-		last, err = s.Put(context.Background(), Entry{Person: alice, Token: TokenKey("iss", string(rune('a'+i)), "")})
+		last, err = s.Put(context.Background(), Entry{Person: alice, Token: identity.TokenKey("iss", string(rune('a'+i)), "")})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -162,7 +163,7 @@ func TestRevocationBoundedPerPerson(t *testing.T) {
 		t.Fatalf("the entry past the cap must become a watermark: %+v", last)
 	}
 	snap := synced(t, s, c)
-	if err := snap.Check(alice, TokenKey("iss", "z", ""), c.t.Add(-time.Second)); !errors.Is(err, ErrEnded) {
+	if err := snap.Check(alice, identity.TokenKey("iss", "z", ""), c.t.Add(-time.Second)); !errors.Is(err, ErrEnded) {
 		t.Fatalf("past the cap every earlier token is refused: %v", err)
 	}
 }
@@ -195,14 +196,16 @@ func TestReplicaRefusesWhenRevocationStale(t *testing.T) {
 func TestRevocationGenerationChangeFullPull(t *testing.T) {
 	c := &clock{time.Unix(1_800_000_000, 0)}
 	s := newStore(t, t.TempDir(), c)
-	key := TokenKey("iss", "j1", "")
+	key := identity.TokenKey("iss", "j1", "")
 	_, _ = s.Put(context.Background(), Entry{Person: alice, Token: key})
 	snap := synced(t, s, c)
-	// The leader's volume was replaced: a new, empty list.
+	// The leader's volume was replaced: a new, empty list. The replica
+	// follows the new list and keeps the ends it knew until they lapse
+	// (RV1-07, TestRV107ResetKeepsEndsAndIsReported).
 	s2 := newStore(t, t.TempDir(), c)
 	pull(t, snap, s2)
-	if err := snap.Check(alice, key, c.t); err != nil {
-		t.Fatalf("a new generation replaces the old list: %v", err)
+	if err := snap.Check(alice, key, c.t); !errors.Is(err, ErrEnded) {
+		t.Fatalf("a new generation dropped an end the replica knew: %v", err)
 	}
 	if gen, _ := snap.Cursor(); gen != s2.doc.Generation {
 		t.Fatalf("cursor generation %q, want %q", gen, s2.doc.Generation)
@@ -215,7 +218,7 @@ func TestStreamsCloseOnRevoke(t *testing.T) {
 	snap := synced(t, s, c)
 	streams := NewStreams(snap)
 	iat := c.t.Add(-time.Minute)
-	key := TokenKey("iss", "j1", "")
+	key := identity.TokenKey("iss", "j1", "")
 	actx, release := streams.Open(context.Background(), Stream{Person: alice, TokenKey: key, IssuedAt: iat})
 	defer release()
 	bctx, releaseB := streams.Open(context.Background(), Stream{Person: "https://sso.example.test#bob", IssuedAt: iat})
@@ -251,7 +254,7 @@ func TestLeaderRPCRoundTrip(t *testing.T) {
 	hs := httptest.NewServer(srv)
 	defer hs.Close()
 	cl := &Client{Leader: &leader.Client{BaseURL: hs.URL, HTTP: hs.Client()}}
-	key := TokenKey("iss", "j1", "")
+	key := identity.TokenKey("iss", "j1", "")
 	e, err := cl.Put(context.Background(), Entry{Person: alice, Token: key})
 	if err != nil || e.Seq != 1 {
 		t.Fatalf("Put = %+v, %v", e, err)

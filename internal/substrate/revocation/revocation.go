@@ -49,9 +49,6 @@ const Life = identity.MaxPersonTokenLifetime + 5*time.Minute
 // the person's token entries become one watermark (never dropped).
 const DefaultMaxTokensPerPerson = 64
 
-// TokenKey is identity.TokenKey: the deny-list key of a person token.
-func TokenKey(issuer, jti, raw string) string { return identity.TokenKey(issuer, jti, raw) }
-
 // Entry is one revocation.
 type Entry struct {
 	Seq uint64 `json:"seq"`
@@ -63,11 +60,14 @@ type Entry struct {
 	// before it is refused.
 	NotBefore time.Time `json:"not_before,omitempty"`
 	// Lift removes Person's watermark (an admin ended it early).
-	Lift   bool      `json:"lift,omitempty"`
-	At     time.Time `json:"at"`
-	Until  time.Time `json:"until"`
-	By     string    `json:"by,omitempty"`
-	Reason string    `json:"reason,omitempty"`
+	Lift bool `json:"lift,omitempty"`
+	// Overflow marks a watermark made because Person passed the token
+	// cap: it stands for ended tokens, so a Lift never removes it.
+	Overflow bool      `json:"overflow,omitempty"`
+	At       time.Time `json:"at"`
+	Until    time.Time `json:"until"`
+	By       string    `json:"by,omitempty"`
+	Reason   string    `json:"reason,omitempty"`
 	// Also, on a Put of a token entry, names more token keys of the same
 	// person to end in the same write (a logout ends the ID token and the
 	// access token it holds). The store keeps one entry per key and never
@@ -180,12 +180,12 @@ func (s *FileStore) Put(_ context.Context, e Entry) (Entry, error) {
 	s.purgeLocked(now)
 	prev, prevSeq := append([]Entry(nil), s.doc.Entries...), s.doc.Seq
 	also := e.Also
-	e.Also = nil
+	e.Also, e.Overflow = nil, false
 	e.At, e.Until = now, now.Add(Life)
 	if e.Lift {
 		kept := s.doc.Entries[:0]
 		for _, x := range s.doc.Entries {
-			if x.Person != e.Person || x.Token != "" {
+			if x.Person != e.Person || x.Token != "" || x.Overflow {
 				kept = append(kept, x)
 			}
 		}
@@ -217,7 +217,7 @@ func (s *FileStore) addLocked(e Entry, now time.Time) Entry {
 			}
 		}
 		if n >= s.maxTokens() {
-			e.Token, e.NotBefore = "", Watermark(now)
+			e.Token, e.NotBefore, e.Overflow = "", Watermark(now), true
 		}
 	}
 	s.doc.Seq++
@@ -328,15 +328,20 @@ type Snapshot struct {
 	MaxStale time.Duration
 	now      func() time.Time
 
-	mu        sync.RWMutex
-	loaded    bool
-	synced    time.Time
-	gen       string
-	seq       uint64
-	entries   map[uint64]Entry
+	mu      sync.RWMutex
+	loaded  bool
+	synced  time.Time
+	gen     string
+	seq     uint64
+	entries map[uint64]Entry
+	// carried are the live entries of an earlier generation of the
+	// leader's list, kept until they lapse (RV1-07), in sequence order.
+	carried   []Entry
 	tokens    map[string]time.Time // key -> until
-	notBefore map[string]time.Time // person -> watermark
+	notBefore map[string]time.Time // person -> watermark (a lift removes it)
+	overflow  map[string]time.Time // person -> watermark past the token cap (never lifted)
 	onChange  []func()
+	onReset   []func(kept int)
 }
 
 // NewSnapshot returns an empty, not yet loaded snapshot.
@@ -355,6 +360,15 @@ func (s *Snapshot) OnChange(fn func()) {
 	s.mu.Unlock()
 }
 
+// OnReset registers fn to run after a pull that found the leader's list
+// reset (a new generation: its volume was recreated, or the file moved
+// aside). kept is how many live entries this replica carries over.
+func (s *Snapshot) OnReset(fn func(kept int)) {
+	s.mu.Lock()
+	s.onReset = append(s.onReset, fn)
+	s.mu.Unlock()
+}
+
 // Cursor is the generation and sequence the next pull starts from.
 func (s *Snapshot) Cursor() (string, uint64) {
 	s.mu.RLock()
@@ -367,6 +381,22 @@ func (s *Snapshot) Apply(d Delta) {
 	s.mu.Lock()
 	now := s.now()
 	changed := d.Full && len(s.entries) > 0
+	reset := -1
+	if d.Full && s.loaded && (d.Generation != s.gen || d.Seq < s.seq) {
+		// The leader's list was reset: keep the ends this replica knew
+		// until they lapse instead of dropping them without a word.
+		old := make([]uint64, 0, len(s.entries))
+		for q, e := range s.entries {
+			if now.Before(e.Until) {
+				old = append(old, q)
+			}
+		}
+		sort.Slice(old, func(i, j int) bool { return old[i] < old[j] })
+		for _, q := range old {
+			s.carried = append(s.carried, s.entries[q])
+		}
+		reset = len(old)
+	}
 	if d.Full {
 		s.entries = map[uint64]Entry{}
 	}
@@ -379,8 +409,13 @@ func (s *Snapshot) Apply(d Delta) {
 	s.gen, s.seq = d.Generation, d.Seq
 	s.rebuildLocked(now)
 	s.loaded, s.synced = true, now
-	fns := s.onChange
+	fns, resets := s.onChange, s.onReset
 	s.mu.Unlock()
+	if reset >= 0 {
+		for _, fn := range resets {
+			fn(reset)
+		}
+	}
 	if changed {
 		for _, fn := range fns {
 			fn()
@@ -400,17 +435,36 @@ func (s *Snapshot) rebuildLocked(now time.Time) {
 		seqs = append(seqs, q)
 	}
 	sort.Slice(seqs, func(i, j int) bool { return seqs[i] < seqs[j] })
-	s.tokens, s.notBefore = map[string]time.Time{}, map[string]time.Time{}
-	for _, q := range seqs {
-		e := s.entries[q]
+	carried := s.carried[:0]
+	for _, e := range s.carried {
+		if now.Before(e.Until) {
+			carried = append(carried, e)
+		}
+	}
+	s.carried = carried
+	s.tokens, s.notBefore, s.overflow = map[string]time.Time{}, map[string]time.Time{}, map[string]time.Time{}
+	apply := func(e Entry) {
 		switch {
 		case e.Lift:
 			delete(s.notBefore, e.Person)
 		case e.Token != "":
-			s.tokens[e.Token] = e.Until
+			if e.Until.After(s.tokens[e.Token]) {
+				s.tokens[e.Token] = e.Until
+			}
+		case e.Overflow:
+			if e.NotBefore.After(s.overflow[e.Person]) {
+				s.overflow[e.Person] = e.NotBefore
+			}
 		case e.NotBefore.After(s.notBefore[e.Person]):
 			s.notBefore[e.Person] = e.NotBefore
 		}
+	}
+	// Carried entries are older than every entry of the current list.
+	for _, e := range s.carried {
+		apply(e)
+	}
+	for _, q := range seqs {
+		apply(s.entries[q])
 	}
 }
 
@@ -433,25 +487,42 @@ func (s *Snapshot) Check(person, key string, issuedAt time.Time) error {
 	if nb, ok := s.notBefore[person]; ok && issuedAt.Before(nb) {
 		return ErrEnded
 	}
+	if nb, ok := s.overflow[person]; ok && issuedAt.Before(nb) {
+		return ErrEnded
+	}
 	return nil
 }
 
-// Active lists the live person-wide entries (admin revoke --list).
+// Active lists the live person-wide entries (admin revoke --list): the
+// watermark in force for each person, and each overflow watermark
+// (Overflow set), carried entries of an earlier list first.
 func (s *Snapshot) Active() []Entry {
 	if s == nil {
 		return nil
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	var out []Entry
+	var cur []Entry
 	for _, e := range s.entries {
-		if e.Token == "" && !e.Lift {
-			if nb, ok := s.notBefore[e.Person]; ok && nb.Equal(e.NotBefore) {
-				out = append(out, e)
-			}
+		cur = append(cur, e)
+	}
+	sort.Slice(cur, func(i, j int) bool { return cur[i].Seq < cur[j].Seq })
+	var out []Entry
+	seen := map[string]bool{}
+	for _, e := range append(append([]Entry(nil), s.carried...), cur...) {
+		if e.Token != "" || e.Lift {
+			continue
+		}
+		m := s.notBefore
+		if e.Overflow {
+			m = s.overflow
+		}
+		k := e.Person + "\x00" + fmt.Sprint(e.Overflow)
+		if nb, ok := m[e.Person]; ok && nb.Equal(e.NotBefore) && !seen[k] {
+			seen[k] = true
+			out = append(out, e)
 		}
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Seq < out[j].Seq })
 	return out
 }
 
@@ -541,6 +612,14 @@ func (s *Streams) Open(ctx context.Context, who Stream) (context.Context, func()
 	s.next++
 	id := s.next
 	s.open[id] = openStream{who: who, cancel: cancel}
+	// A pull that ended who's sign-in between the caller's check and this
+	// registration has already run CloseEnded: check again now that the
+	// stream is registered (RV1-04).
+	if errors.Is(s.snap.Check(who.Person, who.TokenKey, who.IssuedAt), ErrEnded) {
+		delete(s.open, id)
+		s.closed++
+		cancel()
+	}
 	s.mu.Unlock()
 	return ctx, func() {
 		s.mu.Lock()

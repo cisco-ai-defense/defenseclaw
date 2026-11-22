@@ -88,9 +88,13 @@ func (st *substrateState) substrateRevokeAndPull(ctx context.Context, e revocati
 // token key.
 func substrateRevocationView(e revocation.Entry, closed int) map[string]any {
 	v := map[string]any{"person": e.Person, "at": e.At, "until": e.Until, "closed": closed}
-	if e.Token != "" {
+	switch {
+	case e.Token != "":
 		v["scope"] = "this"
-	} else {
+	case e.Overflow:
+		// Ended tokens past the per-person cap; a lift keeps it (RV1-05).
+		v["scope"], v["not_before"] = "overflow", e.NotBefore
+	default:
 		v["scope"], v["not_before"] = "all", e.NotBefore
 	}
 	if e.By != "" {

@@ -49,10 +49,11 @@ func newSubstrateAdminRevokeCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "revoke",
 		Short: "End every sign-in of a person, list the ended ones, or lift an end",
-		Long: `--user PERSON ends every sign-in of that person made before now, on every device, and closes their open
+		Long: `--user PERSON ends every token of that person issued before now, on every device, and closes their open
 terminals (PERSON is a principal such as bob@example.com, or issuer#subject to end the sign-ins of a person who
-has not signed in yet). --list shows the people whose sign-ins are ended. --lift --user PERSON removes an end
-early; it is audited.`,
+has not signed in yet). A refresh token the person holds can still get new tokens from the sign-in server: to
+lock someone out, also end their sessions there. --list shows the people whose sign-ins are ended. --lift --user
+PERSON removes an end early; it is audited.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			asJSON, err := out.wantJSON()
@@ -89,8 +90,12 @@ early; it is audited.`,
 				}
 				var rows [][]string
 				for _, r := range revs {
+					reason := orWord(r.Reason, "-")
+					if r.Scope == "overflow" {
+						reason = "ended tokens past the per-person cap (a lift keeps this)"
+					}
 					rows = append(rows, []string{r.Person, r.NotBefore.UTC().Format("2006-01-02 15:04:05 MST"), orWord(r.By, "-"),
-						orWord(r.Reason, "-"), r.Until.UTC().Format("2006-01-02 15:04 MST")})
+						reason, r.Until.UTC().Format("2006-01-02 15:04 MST")})
 				}
 				substrateTable(w, []string{"PERSON", "ENDED BEFORE", "BY", "REASON", "UNTIL"}, rows)
 				return nil

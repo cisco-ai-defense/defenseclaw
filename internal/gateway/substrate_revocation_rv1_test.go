@@ -134,3 +134,38 @@ func TestRV103LogoutEndsBothStoredTokens(t *testing.T) {
 		t.Fatalf("five also tokens: %d", rec.Code)
 	}
 }
+
+// RV1-07: the gateway logs and audits (HIGH) a reset of the leader's list.
+func TestRV107ListResetIsAuditedHigh(t *testing.T) {
+	f := newRevocationPeopleFixture(t, fakePeople{})
+	store, logger := testStoreAndLogger(t)
+	f.api.store, f.api.logger = store, logger
+	if _, err := f.store.Put(context.Background(), revocation.Entry{Person: alice.ID(), Token: "k-1"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.snap.Pull(context.Background(), f.store); err != nil {
+		t.Fatal(err)
+	}
+	other, err := revocation.OpenFileStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.snap.Pull(context.Background(), other); err != nil {
+		t.Fatal(err)
+	}
+	for deadline := time.Now().Add(3 * time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+		events, err := store.ListEvents(100)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, e := range events {
+			if strings.Contains(e.Details, `"event":"substrate.signin.list_reset"`) {
+				if e.Severity != "HIGH" {
+					t.Fatalf("list reset audited at %s", e.Severity)
+				}
+				return
+			}
+		}
+	}
+	t.Fatal("no substrate.signin.list_reset audit row")
+}
