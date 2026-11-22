@@ -24,7 +24,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/identity"
 	"io"
-	"net/http"
 	"os"
 	"os/signal"
 	"strings"
@@ -245,12 +244,10 @@ func substrateAPIMessage(e *api.Error) string {
 		// allows: signing in again with it changes nothing (GAP-0543).
 		return "the cluster does not allow this identity (" + e.Reason + "): the token is valid, but its subject or claims are not ones the cluster accepts " +
 			"(for a workload, substrate.identity.workload_oidc). Signing in again with the same identity will not help; ask your administrator"
-	case e.Unauthorized() && e.Reason == "signin_ended":
-		// B5.1: the person signed out (on any device) or an administrator
-		// ended the sign-in.
-		return "your sign-in to this cluster was ended. Sign in again: defenseclaw substrate login"
-	case e.Status == http.StatusServiceUnavailable && e.Reason == "revocation_unavailable":
-		return "the cluster can't check ended sign-ins right now. Try again in a minute; if it stays, run defenseclaw substrate doctor"
+	case e.Unauthorized() && substrateSecretReason(e.Reason) != "":
+		// signin_ended (B5.1) and any other table reason answered with 401:
+		// the words and the fix come from the one reason table (GAP-0748).
+		return substrateSecretReason(e.Reason)
 	case e.Unauthorized():
 		return "the cluster did not accept your sign-in (" + orWord(e.Reason, "token refused") + "). Sign in again with: defenseclaw substrate login"
 	case e.NotImplemented():
