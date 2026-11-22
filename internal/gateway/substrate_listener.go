@@ -32,6 +32,7 @@ import (
 
 	"golang.org/x/time/rate"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxreg"
@@ -207,6 +208,10 @@ type SubstrateConfig struct {
 	// values (nil: list only).
 	Secrets     []config.SubstrateSecret
 	SecretStore SubstrateSecretStore
+	// SecretAudit receives each typed secret change record
+	// (log.substrate.secret.changed); nil sends it to the gateway's
+	// sandbox recorder. Tests capture it here.
+	SecretAudit func(context.Context, audit.SubstrateSecretChangeEvent)
 	// Chains is the leader's chain and intent state (lane A13): a verified
 	// actor's tool-chain windows and the judge's session intent live there,
 	// so every replica sees the same. Nil turns the chain lane off for

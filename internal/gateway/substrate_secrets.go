@@ -26,8 +26,10 @@ import (
 	"os"
 	"path"
 	"strings"
+	"time"
 	"unicode/utf8"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/egressspec"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/render"
@@ -185,11 +187,11 @@ func (a *APIServer) substrateSetSecret(st *substrateState) http.HandlerFunc {
 		if err := st.cfg.SecretStore.Set(r.Context(), ns, name, key, []byte(in.Value)); err != nil {
 			// The error names the Secret, never the value.
 			fmt.Fprintf(os.Stderr, "[substrate] secret %s not stored: %v\n", r.PathValue("name"), err)
+			a.recordSubstrateSecretChange(r.Context(), st, r.PathValue("name"), audit.SubstrateSecretSet, "", true)
 			writeSubstrateJSONError(w, substrateSecretErrorStatus(err), substrateSecretErrorReason(err, "secret_not_stored"))
 			return
 		}
-		c, _ := substrateCallerFrom(r.Context())
-		fmt.Fprintf(os.Stderr, "[substrate] secret %s set by %s\n", r.PathValue("name"), sanitizeLLMEventUser(c.person.Principal))
+		a.recordSubstrateSecretChange(r.Context(), st, r.PathValue("name"), audit.SubstrateSecretSet, "", false)
 		writeSubstrateJSON(w, http.StatusOK, map[string]any{"name": r.PathValue("name"), "status": substrateSecretSet})
 	}
 }
@@ -203,9 +205,11 @@ func (a *APIServer) substrateRemoveSecret(st *substrateState) http.HandlerFunc {
 		}
 		if err := st.cfg.SecretStore.Remove(r.Context(), ns, name, key); err != nil {
 			fmt.Fprintf(os.Stderr, "[substrate] secret %s not removed: %v\n", r.PathValue("name"), err)
+			a.recordSubstrateSecretChange(r.Context(), st, r.PathValue("name"), audit.SubstrateSecretRemoved, "", true)
 			writeSubstrateJSONError(w, substrateSecretErrorStatus(err), substrateSecretErrorReason(err, "secret_not_removed"))
 			return
 		}
+		a.recordSubstrateSecretChange(r.Context(), st, r.PathValue("name"), audit.SubstrateSecretRemoved, "", false)
 		writeSubstrateJSON(w, http.StatusOK, map[string]any{"name": r.PathValue("name"), "status": substrateSecretNotSet})
 	}
 }
@@ -247,5 +251,25 @@ func (a *APIServer) substrateTestSecret(st *substrateState) http.HandlerFunc {
 			return
 		}
 		writeSubstrateJSONError(w, http.StatusNotFound, "secret_not_found")
+	}
+}
+
+// recordSubstrateSecretChange writes the typed audit record of one secret
+// value or binding change (log.substrate.secret.changed, B1 M-OBS-1). It
+// carries the name, the operation and the bound host, never the value; it
+// replaces the old stderr "secret ... set by" line. A record that cannot be
+// written is noted on stderr and does not fail the change.
+func (a *APIServer) recordSubstrateSecretChange(ctx context.Context, st *substrateState, name string,
+	op audit.SubstrateSecretOperation, host string, failed bool) {
+	ev := audit.SubstrateSecretChangeEvent{Name: name, Operation: op, Host: host, Failed: failed, Timestamp: time.Now()}
+	if st != nil && st.cfg.SecretAudit != nil {
+		st.cfg.SecretAudit(ctx, ev)
+		return
+	}
+	if a == nil || a.logger == nil {
+		return
+	}
+	if err := a.managedSandboxRecorder().RecordSubstrateSecretChange(context.WithoutCancel(ctx), ev); err != nil {
+		fmt.Fprintf(os.Stderr, "[substrate] secret %s change record failed: %v\n", name, err)
 	}
 }

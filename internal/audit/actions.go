@@ -189,6 +189,13 @@ const (
 	ActionSandboxActivity  Action = "sandbox-activity"
 	ActionSandboxProcess   Action = "sandbox-process"
 
+	// ActionSubstrateSecretChanged is the producer key of one typed
+	// SandboxRecorder.RecordSubstrateSecretChange (substrate_secret_v8.go):
+	// a person's Substrate secret value or binding was set, removed, added,
+	// approved, denied or expired (log.substrate.secret.changed). It never
+	// carries the value.
+	ActionSubstrateSecretChanged Action = "substrate.secret.changed"
+
 	// Managed (identity-based, enterprise) sandbox records. The dotted keys
 	// are the producer keys of sandbox_policy_v8.go: a profile re-match, a
 	// network rule the managed layer did not render, and the refusals and
@@ -480,6 +487,7 @@ func AllActions() []Action {
 		ActionSandboxFinding,
 		ActionSandboxActivity,
 		ActionSandboxProcess,
+		ActionSubstrateSecretChanged,
 		ActionSandboxPolicyRematched,
 		ActionSandboxPolicyForeignRule,
 		ActionSandboxManaged,
