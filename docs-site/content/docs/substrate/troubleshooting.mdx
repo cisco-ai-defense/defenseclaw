@@ -273,6 +273,11 @@ Administrators set the cap with `substrate.workspace_max_bytes`. A run can lower
 Run `push` again with `--mine` to send your version (the agent's stays in the restore point the push saves),
 `--theirs` to keep the agent's and send the rest, or `--patch-out FILE` to keep the agent's and get your change as a patch.
 The same edit on both sides is not a conflict.
+A listed file with a note such as `the agent has a file or link at out; sending yours removes it` means your version needs that agent file or folder gone.
+`--mine` then sends nothing and says so; add `--replace` to send yours anyway (the agent's stays in the restore point).
+
+`another push or sync is writing into this agent` means another push or sync was writing at the same time; try again.
+A push that was interrupted while writing can leave its lock behind; it clears after 15 minutes.
 
 `your administrator turned off sending more files into a running agent` means `substrate.files.push` is `false`.
 `the copy in the agent moved` means another computer sent to it or the copy was replaced: pull first, or run again.
@@ -280,13 +285,15 @@ An agent started from Windows has no push or sync yet; run it again to send a ne
 
 ## Sync skips a file or stops (Preview)
 
-`The agent also changed FILE; not synced` means the agent edited that file too. Sync keeps the agent's version and goes on with the rest; send yours with `push NAME --mine FILE`.
+`The agent also changed FILE; not synced` means the agent edited that file too. Sync keeps the agent's version and goes on with the rest; send yours with `push NAME --mine FILE` (or `--mine --replace FILE` when the message says yours removes an agent file or folder).
 `Held back: FILE (looks like a secret)` means the file matches the secret rules; send it once with `push NAME --unmask FILE`.
 `The agent is suspended; changes wait` means nothing is sent until the agent is back; sync does not wake it.
 `Sync paused: ... sent in the last hour` means sync sent four times the upload limit in an hour; changes wait. The check runs before each batch, so the last batch of the hour can go past it by up to one upload limit.
 `your administrator turned off syncing into a running agent` means `substrate.files.sync` or `substrate.files.push` is `false`.
 `The agent is gone; sync stopped` means the agent was deleted.
 On a very large folder each batch takes longer, because sync reads the whole folder again for each batch.
+`Sync no longer sees new folders` (macOS) means the folder now has more files to watch than macOS allows sync to hold open; changes in new folders go with the next batch something else starts. Restart sync, or ignore build output in `.gitignore`.
+Sync reads `.gitignore` when it starts; restart it after you change `.gitignore`.
 
 ## Keys typed while disconnected (Preview)
 
