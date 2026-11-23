@@ -655,6 +655,12 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             ),
             _Flag("ref", "string", "with --clone, the branch, tag or commit", metavar="REF"),
             _Flag(
+                "remote-dir",
+                "string",
+                "where in the agent to put the copy (default: the image's working folder)",
+                hidden=True,
+            ),
+            _Flag(
                 "secret",
                 "stringArray",
                 "a secret name the agent may use, as listed by secrets list (repeatable)",
@@ -811,14 +817,12 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             _Flag("kube-context", "string", "kubectl context for the --issuer check"),
             _Flag("kubeconfig", "string", "kubectl configuration file for the --issuer check (default: kubectl's own)"),
             _Flag("namespace", "string", "the namespace DefenseClaw is installed in", default="defenseclaw"),
+            _Flag("no-chart", "bool", "same as --overlay-only", hidden=True),
             _Flag("output", "string", "output format: text or json", short="o", default="text", metavar="FORMAT"),
             _Flag(
                 "overlay-only",
                 "bool",
-                (
-                    "GitOps: write the overlay only and name the chart values it assumes; Argo CD or Flux owns the chart "
-                    "(alias --no-chart)"
-                ),
+                "GitOps: write the overlay only and name the chart values it assumes; Argo CD or Flux owns the chart",
             ),
             _Flag(
                 "plan",

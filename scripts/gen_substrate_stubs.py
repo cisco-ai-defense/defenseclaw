@@ -62,6 +62,8 @@ def render_flag(flag: dict, indent: int) -> str:
         parts.append("default=" + repr(default))
     if flag.get("metavar"):
         parts.append("metavar=" + repr(flag["metavar"]))
+    if flag.get("hidden"):
+        parts.append("hidden=True")
     return " " * indent + "_Flag(" + ", ".join(parts) + "),"
 
 

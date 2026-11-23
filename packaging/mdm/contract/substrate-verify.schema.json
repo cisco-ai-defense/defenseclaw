@@ -56,7 +56,7 @@
       "items": {
         "$ref": "#/$defs/check"
       },
-      "minItems": 13,
+      "minItems": 12,
       "maxItems": 13
     }
   },

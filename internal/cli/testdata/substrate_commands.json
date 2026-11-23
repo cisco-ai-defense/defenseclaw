@@ -998,6 +998,12 @@
         "metavar": "REF"
       },
       {
+        "name": "remote-dir",
+        "type": "string",
+        "usage": "where in the agent to put the copy (default: the image's working folder)",
+        "hidden": true
+      },
+      {
         "name": "secret",
         "type": "stringArray",
         "default": "[]",
@@ -1265,6 +1271,13 @@
         "usage": "the namespace DefenseClaw is installed in"
       },
       {
+        "name": "no-chart",
+        "type": "bool",
+        "default": "false",
+        "usage": "same as --overlay-only",
+        "hidden": true
+      },
+      {
         "name": "output",
         "shorthand": "o",
         "type": "string",
@@ -1276,7 +1289,7 @@
         "name": "overlay-only",
         "type": "bool",
         "default": "false",
-        "usage": "GitOps: write the overlay only and name the chart values it assumes; Argo CD or Flux owns the chart (alias --no-chart)"
+        "usage": "GitOps: write the overlay only and name the chart values it assumes; Argo CD or Flux owns the chart"
       },
       {
         "name": "plan",

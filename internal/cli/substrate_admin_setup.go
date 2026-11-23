@@ -30,7 +30,6 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
-	"github.com/spf13/pflag"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/fleet"
@@ -56,6 +55,7 @@ type substrateSetupOptions struct {
 	remove       bool
 	printPolicy  bool
 	overlayOnly  bool
+	noChart      bool
 	plan         string
 	dryRun       bool
 	yes          bool
@@ -109,7 +109,10 @@ It never runs helm. The next step is to commit the file and let ate-setup deploy
 			"defenseclaw substrate setup --install-file install.yaml --overlay-only --issuer https://cluster-a.example --yes\n" +
 			"defenseclaw substrate setup --print-access-policies --plan plan.json",
 		Args: cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error { return runSubstrateSetup(cmd, o) },
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			o.overlayOnly = o.overlayOnly || o.noChart
+			return runSubstrateSetup(cmd, o)
+		},
 	}
 	o.out.add(cmd)
 	f := cmd.Flags()
@@ -121,20 +124,17 @@ It never runs helm. The next step is to commit the file and let ate-setup deploy
 	f.StringVar(&o.kubeconfig, "kubeconfig", "", "kubectl configuration file for the --issuer check (default: kubectl's own)")
 	f.StringVar(&o.kubeContext, "kube-context", "", "kubectl context for the --issuer check")
 	f.StringSliceVar(&o.capabilities, "capability", nil, "a setting your Substrate build has: body-mode or route-timeouts (repeatable; off by default)")
-	f.BoolVar(&o.overlayOnly, "overlay-only", false, "GitOps: write the overlay only and name the chart values it assumes; Argo CD or Flux owns the chart (alias --no-chart)")
+	f.BoolVar(&o.overlayOnly, "overlay-only", false, "GitOps: write the overlay only and name the chart values it assumes; Argo CD or Flux owns the chart")
 	f.BoolVar(&o.remove, "remove", false, "take DefenseClaw's settings out of the file")
 	f.BoolVar(&o.printPolicy, "print-access-policies", false, "print the access policies for --plan and stop")
 	f.StringVar(&o.plan, "plan", "", "the chart's plan.json (a file, or env:NAME), for --print-access-policies")
 	f.BoolVar(&o.dryRun, "dry-run", false, "show the changes and write nothing")
 	f.BoolVarP(&o.yes, "yes", "y", false, "replace the install file (the old one is kept as FILE.bak)")
-	// --no-chart is the same switch: setup never installs the chart, so the two
-	// names say one thing (the chart is not this command's).
-	f.SetNormalizeFunc(func(_ *pflag.FlagSet, name string) pflag.NormalizedName {
-		if name == "no-chart" {
-			name = "overlay-only"
-		}
-		return pflag.NormalizedName(name)
-	})
+	// --no-chart is the same switch under a second name (setup never installs
+	// the chart). It is a real hidden flag, so the command manifest and the
+	// Python stub carry it too.
+	f.BoolVar(&o.noChart, "no-chart", false, "same as --overlay-only")
+	_ = f.MarkHidden("no-chart")
 	return cmd
 }
 
