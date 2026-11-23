@@ -37,6 +37,17 @@ DefenseClaw 1.0.11 follows 1.0.10. It is a fix release. It updates OpenShell to 
 - **The skill publisher is a content field.** A publisher a SKILL.md declares is the skill author's own text, so a redacting profile now masks a secret in `defenseclaw.inventory.skill.publisher`, as it already did in the declared description and version.
 - **A skill folder that has not changed is not read again on every scan.** Discovery keeps each folder's hash while none of its files changed and reads every folder in full at least once a day. On a managed Windows machine every scan still reads every folder.
 - **Managed scans on macOS and Linux report every install of an agent.** Each copy of an agent binary in a user's bin folders or the machine prefixes is its own discovery signal, with `defenseclaw.ai.component.location` (`~/.local/bin/claude`, or `/opt/homebrew/bin/codex` for a system location).
+- Sandbox vault (Preview): keep API keys in a personal vault and give them to an OpenShell sandbox with `defenseclaw sandbox run --vault NAME`. The agent only ever sees a placeholder; OpenShell sends the real value to the host the key is bound to.
+- `defenseclaw sandbox vault` commands to list, show, add, replace, confirm, bind, rename and remove vault entries, and a Vault tab (K) in the TUI. Values are read from a hidden prompt or stdin and are never printed.
+- In Claude Code and Codex sandboxes, a prompt or tool call that contains an API key is stopped and the key is moved into the vault. A key captured from a prompt must be confirmed before a sandbox can use it. A key the model has already seen is marked exposed until you replace it with a new value.
+- The vault is sealed with a key kept in the macOS Keychain or the Linux Secret Service when one is available; otherwise it stays an owner-only file and `vault list` says so. Set DEFENSECLAW_VAULT_STORE=keychain to require sealing. DefenseClaw refuses to store a captured key if the sealed vault file was changed or replaced, and tells you to run `defenseclaw sandbox vault list` to check it.
+- The macOS app has a Vault card to see, add, change, confirm and remove your sandbox vault entries.
+- Vault capture now covers every sandbox agent. Keys in tool calls are stopped. Keys in tool output, or in prompts the agent cannot stop, are stored as exposed and you are told to rotate them. Some agents' hooks cannot see prompts or tool output; the vault page lists which.
+- Agent Substrate: `defenseclaw substrate setup --overlay-only` writes the GitOps overlay without installing the chart, and `substrate status --cluster` and `substrate verify` show which signed policy bundles each cluster runs, with a receipt id (Preview).
+- Agent Substrate: clusters can pull signed policy bundles from an OCI registry by digest (`substrate.bundles.oci`), with the signature checked before use (Preview).
+
+### Changed
+- Telemetry that a sandboxed agent sends to DefenseClaw has API-key-shaped values masked before it is stored or forwarded.
 
 ### Security
 
