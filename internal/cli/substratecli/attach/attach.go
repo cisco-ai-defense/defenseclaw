@@ -133,6 +133,10 @@ type Options struct {
 	InitialSize relay.Resize
 	// SizeEvents adds size changes to the ones read from the terminal.
 	SizeEvents <-chan relay.Resize
+	// Notices are lines to show the person while attached (a bridged MCP
+	// server's stderr, a bridge that ended). They go on the launcher's row,
+	// where the agent cannot draw; with no row they go to Err.
+	Notices <-chan string
 }
 
 // Result is how an attachment ended.
@@ -271,6 +275,29 @@ func (a *attacher) noteWarning(w string) {
 	}
 }
 
+// showNotices puts each notice on the launcher's row, or on w when there is
+// no row (no terminal, or asks are off).
+func (a *attacher) showNotices(ch <-chan string, w io.Writer) {
+	for {
+		select {
+		case <-a.stop:
+			return
+		case n, ok := <-ch:
+			if !ok {
+				return
+			}
+			n = safetext.Line(n)
+			switch {
+			case n == "":
+			case a.asks != nil:
+				a.asks.setNotice(n)
+			default:
+				fmt.Fprintln(w, n)
+			}
+		}
+	}
+}
+
 func (a *attacher) warningText() string {
 	a.warnMu.Lock()
 	defer a.warnMu.Unlock()
@@ -347,6 +374,9 @@ func newAttacher(ctx context.Context, o Options) (*attacher, error) {
 		a.asks = newAskUI(o.Asks, o.Target, a.scr, a.currentSize, o.Now, a.term.guard)
 	}
 	go a.watchSizes()
+	if o.Notices != nil {
+		go a.showNotices(o.Notices, o.Err)
+	}
 	var once sync.Once
 	a.close = func() {
 		once.Do(func() {

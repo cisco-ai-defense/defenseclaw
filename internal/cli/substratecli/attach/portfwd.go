@@ -151,25 +151,34 @@ func (e *PortRefusal) Final() bool {
 	return true
 }
 
-// DialPort opens one port stream to the agent's port through the gateway.
-func (tu *Tunnel) DialPort(ctx context.Context, port int) (*websocket.Conn, error) {
+// streamRefusal is a stream the gateway refused on open: the HTTP status
+// and the reason code of its JSON body.
+type streamRefusal struct {
+	Status int
+	Reason string
+}
+
+// dialStream opens one WebSocket stream (port/N, mcp/NAME) through the
+// gateway, under the person's bearer. A refusal comes back as ref; any
+// other failure as err.
+func (tu *Tunnel) dialStream(ctx context.Context, route string) (conn *websocket.Conn, ref *streamRefusal, err error) {
 	tok, err := tu.Bearer(ctx)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	d := *tu.Dialer()
 	d.Subprotocols = []string{relay.Subprotocol}
-	u := strings.Replace(relay.RouteURL(tu.BaseURL(), relay.RoutePort+"/"+strconv.Itoa(port)), "https://", "wss://", 1)
+	u := strings.Replace(relay.RouteURL(tu.BaseURL(), route), "https://", "wss://", 1)
 	h := http.Header{}
 	h.Set("Authorization", "Bearer "+tok)
 	conn, resp, err := d.DialContext(ctx, u, h)
 	if err == nil {
-		return conn, nil
+		return conn, nil, nil
 	}
 	if resp == nil {
-		return nil, tu.netError(err)
+		return nil, nil, tu.netError(err)
 	}
-	ref := &PortRefusal{Status: resp.StatusCode, Port: port, Target: tu.target}
+	ref = &streamRefusal{Status: resp.StatusCode}
 	if resp.Body != nil {
 		var m struct {
 			Reason string `json:"reason"`
@@ -180,7 +189,16 @@ func (tu *Tunnel) DialPort(ctx context.Context, port int) (*websocket.Conn, erro
 			ref.Reason = m.Reason
 		}
 	}
-	return nil, ref
+	return nil, ref, nil
+}
+
+// DialPort opens one port stream to the agent's port through the gateway.
+func (tu *Tunnel) DialPort(ctx context.Context, port int) (*websocket.Conn, error) {
+	conn, ref, err := tu.dialStream(ctx, relay.RoutePort+"/"+strconv.Itoa(port))
+	if ref != nil {
+		return nil, &PortRefusal{Status: ref.Status, Reason: ref.Reason, Port: port, Target: tu.target}
+	}
+	return conn, err
 }
 
 // PortForward serves one forward until ctx ends or a final refusal.
