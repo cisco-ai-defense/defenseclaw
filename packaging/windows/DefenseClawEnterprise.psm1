@@ -1798,15 +1798,28 @@ namespace $nativeNamespace
         // Opens a file for a metadata query (no data access). A runtime file
         // the gateway created with its own private DACL grants Administrators
         // nothing, so an elevated repair could not even read its link count
-        // and exited 1603 (GAP-1220). On access denied the open is retried
-        // once with backup semantics and SeBackupPrivilege enabled for that
-        // call only; a directory opened that way is still refused, as before.
+        // and exited 1603 (GAP-1220).
         private static IntPtr OpenFileMetadataHandle(
             string path,
             uint flags,
             string failure)
         {
             const uint FILE_SHARE_ALL = 0x00000007;
+            return OpenFileReadOnlyWithBackupRetry(path, 0, FILE_SHARE_ALL, flags, failure);
+        }
+
+        // On access denied the open is retried once with backup semantics
+        // and SeBackupPrivilege enabled for that call only. Backup intent
+        // grants read access only, so the handle can never write; a
+        // directory opened that way is still refused. Callers pass read or
+        // metadata rights only.
+        private static IntPtr OpenFileReadOnlyWithBackupRetry(
+            string path,
+            uint access,
+            uint share,
+            uint flags,
+            string failure)
+        {
             const uint OPEN_EXISTING = 3;
             const uint FILE_FLAG_BACKUP_SEMANTICS = 0x02000000;
             const uint FILE_ATTRIBUTE_DIRECTORY = 0x00000010;
@@ -1816,8 +1829,13 @@ namespace $nativeNamespace
             const uint TOKEN_QUERY = 0x00000008;
             const uint SE_PRIVILEGE_ENABLED = 0x00000002;
             IntPtr invalid = new IntPtr(-1);
+            const uint GENERIC_WRITE = 0x40000000;
+            const uint GENERIC_ALL = 0x10000000;
+            const uint FILE_WRITE_RIGHTS = 0x000D0156;
+            if ((access & (GENERIC_WRITE | GENERIC_ALL | FILE_WRITE_RIGHTS)) != 0)
+                throw new ArgumentException("a backup read must not ask for write access", "access");
             IntPtr handle = CreateFileW(
-                path, 0, FILE_SHARE_ALL, IntPtr.Zero, OPEN_EXISTING, flags, IntPtr.Zero);
+                path, access, share, IntPtr.Zero, OPEN_EXISTING, flags, IntPtr.Zero);
             if (handle != invalid)
                 return handle;
             int error = Marshal.GetLastWin32Error();
@@ -1853,8 +1871,8 @@ namespace $nativeNamespace
                     {
                         handle = CreateFileW(
                             path,
-                            0,
-                            FILE_SHARE_ALL,
+                            access,
+                            share,
                             IntPtr.Zero,
                             OPEN_EXISTING,
                             flags | FILE_FLAG_BACKUP_SEMANTICS,
@@ -2375,13 +2393,21 @@ namespace $nativeNamespace
                     System.Security.AccessControl.AccessControlSections.All);
         }
 
+        // The capture reads its times from the handle it read: a second open
+        // by path can be denied, or name another file.
+        private static DateTime UserFileTimeUtc(
+            System.Runtime.InteropServices.ComTypes.FILETIME time)
+        {
+            return DateTime.FromFileTimeUtc(
+                ((long)time.dwHighDateTime << 32) | (uint)time.dwLowDateTime);
+        }
+
         public static UserFileSnapshot CaptureUserFileNoFollowIfExists(string path)
         {
             const uint GENERIC_READ = 0x80000000;
             const uint READ_CONTROL = 0x00020000;
             const uint FILE_READ_ATTRIBUTES = 0x00000080;
             const uint FILE_SHARE_READ = 0x00000001;
-            const uint OPEN_EXISTING = 3;
             const uint FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000;
             List<IntPtr> pins;
             try { pins = PinUserFileParent(path); }
@@ -2395,16 +2421,26 @@ namespace $nativeNamespace
             }
             try
             {
-                IntPtr handle = CreateFileW(path,
-                    GENERIC_READ | READ_CONTROL | FILE_READ_ATTRIBUTES,
-                    FILE_SHARE_READ, IntPtr.Zero, OPEN_EXISTING,
-                    FILE_FLAG_OPEN_REPARSE_POINT, IntPtr.Zero);
-                if (handle == new IntPtr(-1))
+                // GAP-2005: the guardian renders an enrolled account's agent
+                // file with a DACL only the account and LocalSystem can read.
+                // Setup runs as an elevated administrator, so a plain open
+                // was denied, the preimage was skipped and a rollback left
+                // that file as the failed transaction wrote it. The restore
+                // already writes it back with backup and restore privileges;
+                // the capture now reads it with backup intent the same way.
+                IntPtr handle;
+                try
                 {
-                    int error = Marshal.GetLastWin32Error();
-                    if (error == 2 || error == 3)
+                    handle = OpenFileReadOnlyWithBackupRetry(path,
+                        GENERIC_READ | READ_CONTROL | FILE_READ_ATTRIBUTES,
+                        FILE_SHARE_READ, FILE_FLAG_OPEN_REPARSE_POINT,
+                        "open user file failed: ");
+                }
+                catch (Win32Exception error)
+                {
+                    if (error.NativeErrorCode == 2 || error.NativeErrorCode == 3)
                         return null;
-                    throw new Win32Exception(error, "open user file failed: " + path);
+                    throw;
                 }
                 try
                 {
@@ -2427,7 +2463,8 @@ namespace $nativeNamespace
                         }
                     }
                     return new UserFileSnapshot(content, UserFileSddl(handle, path),
-                        File.GetCreationTimeUtc(path), File.GetLastWriteTimeUtc(path));
+                        UserFileTimeUtc(information.CreationTime),
+                        UserFileTimeUtc(information.LastWriteTime));
                 }
                 finally { CloseHandle(handle); }
             }
