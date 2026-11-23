@@ -25,7 +25,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"slices"
 	"strings"
 	"testing"
 
@@ -92,13 +91,9 @@ func TestEditedHookEntriesGolden(t *testing.T) {
 		// The same document under a drive-path data directory: the real one
 		// on Windows, a fixed one elsewhere (the predicate reads text only).
 		// The doctor's rule, shared with cli/defenseclaw/hook_integrity.py,
-		// reads POSIX script paths only, so an edited entry named by a drive
-		// path is not reported (GAP-1931, open). Setup's repair and Teardown
-		// claim it (GAP-1909 Claude Code, GAP-1923 the other connectors);
-		// this pin fails when the doctor rule reads Windows paths too: then
-		// the drive-path run expects tc.Edited. A copy in a POSIX folder is
-		// reported whatever the data directory, and the working set or a
-		// user's hook is never reported.
+		// reads a script word named by a Windows path as Setup's repair does
+		// (GAP-1931), so the answer is the golden's own: an edited entry is
+		// reported, the working set or a user's hook is not.
 		driveDir := "C:/Users/u/.defenseclaw"
 		if runtime.GOOS == "windows" {
 			driveDir = filepath.Join(testenv.PrivateTempDir(t), ".defenseclaw")
@@ -115,17 +110,9 @@ func TestEditedHookEntriesGolden(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s (drive path): %v", tc.Name, err)
 		}
-		_, copyInPOSIXFolder := editedHookGoldenDriveReported[tc.Name]
-		if got := hookDocumentHoldsEditedEntry(driveDecoded, driveDir, tc.Script); got != (tc.Edited && copyInPOSIXFolder) {
+		if got := hookDocumentHoldsEditedEntry(driveDecoded, driveDir, tc.Script); got != tc.Edited {
 			t.Errorf("%s (drive-path data dir %s): hookDocumentHoldsEditedEntry = %v, want %v",
-				tc.Name, driveDir, got, tc.Edited && copyInPOSIXFolder)
-		}
-	}
-	for name := range editedHookGoldenDriveReported {
-		if !slices.ContainsFunc(cases, func(tc editedHookGoldenCase) bool {
-			return tc.Name == name && tc.Edited
-		}) {
-			t.Errorf("editedHookGoldenDriveReported names %q, which is not an edited golden case", name)
+				tc.Name, driveDir, got, tc.Edited)
 		}
 	}
 }
@@ -137,13 +124,6 @@ type editedHookGoldenCase struct {
 	File     string `json:"file"`
 	Document string `json:"document"`
 	Edited   bool   `json:"edited"`
-}
-
-// editedHookGoldenDriveReported lists the edited golden cases whose edited
-// entry is a copy in a POSIX folder, not under {data_dir}, so the doctor
-// reports it under a drive-path data directory too.
-var editedHookGoldenDriveReported = map[string]struct{}{
-	"copilot preToolUse repointed at a copy in another folder": {},
 }
 
 // GAP-0906, GAP-0907: after a DefenseClaw hook entry's script name, hook

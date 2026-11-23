@@ -721,6 +721,26 @@ def test_edited_hook_entries_match_the_go_hook_guard(tmp_path, case):
     assert bool(problems) is case["edited"], problems
 
 
+@pytest.mark.parametrize(
+    "case",
+    json.loads(_EDITED_ENTRIES_GOLDEN.read_text(encoding="utf-8")),
+    ids=lambda case: case["name"],
+)
+def test_edited_hook_entries_under_a_drive_path_data_dir(tmp_path, monkeypatch, case):
+    # GAP-1931: the doctor reads a script word named by a Windows path as
+    # Setup's repair does, so the golden's answer holds under a drive-path
+    # data directory too (TestEditedHookEntriesGolden runs the same). The
+    # paths are text; none is opened.
+    from defenseclaw import hook_integrity
+
+    data_dir = "C:/Users/u/.defenseclaw"
+    config = tmp_path / case["file"]
+    config.write_text(case["document"].replace("{data_dir}", data_dir), encoding="utf-8")
+    monkeypatch.setattr(hook_integrity, "_hook_config_paths", lambda _cfg, _connector: [config])
+    problems = edited_hook_problems(SimpleNamespace(data_dir=data_dir), case["connector"])
+    assert bool(problems) is case["edited"], problems
+
+
 @pytest.mark.parametrize("connector", ["copilot", "hermes", "claudecode"])
 @pytest.mark.parametrize(
     "edit",

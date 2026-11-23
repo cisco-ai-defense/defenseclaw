@@ -1564,7 +1564,11 @@ def hermes_command_written(command: str, current: set[str]) -> bool:
         return True
     # The edited-path matchers trim blanks, which would claim a command
     # Setup did not write: a command with a blank at either end belongs to the user.
-    return command == command.strip() and bool(edited_hook_script(command, HOOK_SCRIPT_NAMES["hermes"]))
+    # A copy named by a Windows path is Setup's too (GAP-1923, GAP-1931).
+    script = HOOK_SCRIPT_NAMES["hermes"]
+    return command == command.strip() and (
+        bool(edited_hook_script(command, script)) or edited_windows_hook_script(command, script) is not None
+    )
 
 
 # The characters of a plain shell word: what posixHookCommandWord leaves unquoted.
@@ -2538,13 +2542,18 @@ def _split_after_wrapper(command: str) -> tuple[str, str] | None:
 def _edited_hook_shape(command: str, script_name: str) -> str:
     """The script path when *command* runs the connector's script at an edited DefenseClaw path, else ""."""
 
-    stem = script_name[:-3] if script_name.endswith(".sh") else ""
-    if not stem.endswith("-hook") or "/" in script_name:
-        return ""
     split = _split_hook_command(command.strip())
     if split is None:
         return ""
-    word, rest = split
+    return _edited_hook_word(*split, script_name)
+
+
+def _edited_hook_word(word: str, rest: str, script_name: str) -> str:
+    """:func:`_edited_hook_shape` for a command already split into its script *word* and the *rest*."""
+
+    stem = script_name[:-3] if script_name.endswith(".sh") else ""
+    if not stem.endswith("-hook") or "/" in script_name:
+        return ""
     if (
         any(char in word for char in "\x00\r\n")
         or not word.startswith("/")
@@ -2565,6 +2574,86 @@ def _edited_hook_shape(command: str, script_name: str) -> str:
         if part == ".defenseclaw" or (base == script_name and part.startswith(".") and "defenseclaw" in part):
             return word
     return ""
+
+
+def _windows_path_as_posix(name: str) -> str:
+    """A Windows absolute path without its volume, with forward slashes and in lower case, else "".
+
+    Mirrors ``windowsAbsolutePathAsPOSIX`` in
+    internal/gateway/connector/claudecode_foreign_hook.go: a drive path with
+    either separator, a UNC path (its server and share dropped), and the
+    verbatim and device forms of either give the same POSIX path. Under the
+    verbatim and device prefixes a forward slash is part of a name, so such a
+    path is refused, as is a drive-relative or volume-less path. The text is
+    read only; the path is never opened.
+    """
+
+    if any(char in name for char in "\x00\r\n"):
+        return ""
+    verbatim = False
+    for prefix in ("\\\\?\\", "\\\\.\\"):
+        if name.startswith(prefix):
+            rest = name[len(prefix) :]
+            if "/" in rest:
+                return ""
+            name, verbatim = rest, True
+            break
+    name = name.replace("\\", "/")
+    if verbatim and len(name) > 4 and name[:4].upper() == "UNC/":
+        name = "//" + name[4:]
+    if len(name) >= 3 and name[1] == ":" and name[2] == "/" and name[0] in string.ascii_letters:
+        name = name[2:]
+    elif name.startswith("//"):
+        parts = name[2:].split("/", 2)
+        if len(parts) != 3 or not parts[0] or not parts[1]:
+            return ""
+        name = "/" + parts[2]
+    else:
+        return ""
+    return name.lower()
+
+
+def _windows_hook_command_split(command: str) -> tuple[str, str] | None:
+    """The first word of *command* as :func:`_windows_path_as_posix` gives it, and the rest, or None.
+
+    Mirrors ``windowsHookScriptCommandAsPOSIX``: the word is a Windows
+    absolute path, bare or in single or double quotes. A double-quoted word
+    with a ``$`` or a backquote is not a path: the shell would expand it.
+    """
+
+    command = command.strip()
+    if command.startswith('"'):
+        end = command.find('"', 1)
+        if end < 0 or any(char in command[1:end] for char in "$`"):
+            return None
+        word, rest = command[1:end], command[end + 1 :]
+        if rest and rest[0] not in " \t":
+            return None
+    else:
+        split = _split_hook_command(command)
+        if split is None:
+            return None
+        word, rest = split
+    posix = _windows_path_as_posix(word)
+    return (posix, rest) if posix else None
+
+
+def edited_windows_hook_script(command: str, script_name: str) -> tuple[str, str] | None:
+    """The script word (POSIX form) and the rest when *command* names DefenseClaw's script by a Windows path.
+
+    Mirrors the Windows leg of ``editedDefenseClawHookCommandByAnyPath``: a
+    drive, UNC, verbatim or device script word, either separator, any case,
+    with DefenseClaw's script shape (:func:`_edited_hook_word`), alone or with
+    ``--event`` or ``--hook-surface``. A hook config copied from another
+    Windows account names the script that way, and Setup's repair removes such
+    a copy on every OS (GAP-1909, GAP-1923). A shell wrapper in front of the
+    word, or a script outside a .defenseclaw folder, is the user's.
+    """
+
+    split = _windows_hook_command_split(command)
+    if split is None or not _edited_hook_word(*split, script_name):
+        return None
+    return split
 
 
 # The keys agents read a hook command from: ``command`` (Claude Code, Codex,
@@ -2742,11 +2831,15 @@ def edited_hook_problems(cfg: Any, connector: str) -> list[str]:
     keep current, from any folder (rel-1-0-4 GAP-0600), and in DefenseClaw's
     own file any entry on a bound event that is not Setup's render
     (:func:`_foreign_owned_file_entry`). Setup (``doctor --fix`` restarts
-    the gateway, which runs it) replaces them.
+    the gateway, which runs it) replaces them. A script word named by a
+    Windows path (:func:`edited_windows_hook_script`) is read as text on every
+    OS, with the same rule, because Setup's repair removes such a copy there
+    too (GAP-1931); Windows itself registers the native launcher, which never
+    has the script shape.
     """
 
     script_name = HOOK_SCRIPT_NAMES.get(connector)
-    if os.name == "nt" or not script_name:
+    if not script_name:
         return []
     data_dir = os.path.normpath(str(getattr(cfg, "data_dir", "") or ""))
     current = os.path.join(data_dir, "hooks", script_name)
@@ -2755,6 +2848,12 @@ def edited_hook_problems(cfg: Any, connector: str) -> list[str]:
     # through a wrapper or from another data directory. An unedited entry of
     # another data directory is not reported here.
     owner = os.path.dirname(data_dir).rstrip("/") + "/"
+    # The same for a Windows-path word, in its lower-case POSIX form
+    # (hookDocumentHoldsEditedEntry); only the binding marks a copy there,
+    # because a Windows path is never opened.
+    windows_data_dir = _windows_path_as_posix(data_dir)
+    windows_current = posixpath.join(windows_data_dir, "hooks", script_name.lower()) if windows_data_dir else ""
+    windows_owner = posixpath.dirname(windows_data_dir).rstrip("/") + "/" if windows_data_dir else ""
     written = _hermes_written_command(cfg, connector)
     for path in _hook_config_paths(cfg, connector):
         try:
@@ -2781,4 +2880,13 @@ def edited_hook_problems(cfg: Any, connector: str) -> list[str]:
                 return [
                     _edited_hook_problem(connector, path, word if first == word else repr(command.strip()), current)
                 ]
+            windows = None if word else edited_windows_hook_script(command, script_name)
+            if windows is None:
+                continue
+            windows_word, windows_rest = windows
+            if windows_word != windows_current and (
+                (windows_owner and windows_word.startswith(windows_owner))
+                or (windows_rest.startswith(_HOOK_BINDINGS) and posixpath.basename(windows_word) == script_name)
+            ):
+                return [_edited_hook_problem(connector, path, repr(command.strip()), current)]
     return []

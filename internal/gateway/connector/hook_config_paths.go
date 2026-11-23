@@ -825,11 +825,11 @@ func sameHookJSON(left, right interface{}) bool {
 // every tool call, Claude Code blocked every prompt (GAP-0906, GAP-0907).
 // Setup's reconcile replaces such an entry, so reporting the registration
 // absent lets the hook guard heal the file within seconds. Windows registers
-// native launcher commands, which never have the edited-script shape.
+// native launcher commands, which never have the edited-script shape, but a
+// hook config copied from another Windows account names DefenseClaw's script
+// by a Windows path, and Setup's repair claims that copy on every OS
+// (GAP-1909, GAP-1923, GAP-1942), so the check runs there too (GAP-1931).
 func ownedHookConfigHoldsEditedEntry(conn Connector, opts SetupOpts) bool {
-	if runtime.GOOS == "windows" {
-		return false
-	}
 	owner, ok := conn.(HookScriptOwner)
 	if !ok {
 		return false
@@ -863,17 +863,41 @@ func ownedHookConfigHoldsEditedEntry(conn Connector, opts SetupOpts) bool {
 // runs a copy of a DefenseClaw hook script in any folder
 // (copiedDefenseClawHookCommand, rel-1-0-4 GAP-0600), and is not the script
 // Setup registers. Claude Code's missing-script guard is unwrapped first.
+//
+// A script word named by a Windows path (drive, UNC, \\?\ or \\.\, either
+// separator, any case) is read as text, never opened, in the lower-case POSIX
+// form windowsHookScriptCommandAsPOSIX gives: it has DefenseClaw's script
+// shape (the rule Setup's removal passes apply to it,
+// editedDefenseClawHookCommandByAnyPath), is not the script Setup registers,
+// and lies under the data directory's parent or is the script name followed
+// by DefenseClaw's binding (GAP-1931). A shell wrapper in front of such a
+// word, or a copy outside a .defenseclaw folder, is the user's, as in Setup.
 func hookDocumentHoldsEditedEntry(document interface{}, dataDir, scriptName string) bool {
 	dataDir = filepath.ToSlash(filepath.Clean(dataDir))
 	current := path.Join(dataDir, "hooks", scriptName)
 	home := strings.TrimSuffix(path.Dir(dataDir), "/") + "/"
+	windowsCurrent, windowsHome := "", ""
+	if posix, ok := windowsAbsolutePathAsPOSIX(dataDir); ok {
+		windowsCurrent = path.Join(posix, "hooks", strings.ToLower(scriptName))
+		windowsHome = strings.TrimSuffix(path.Dir(posix), "/") + "/"
+	}
 	for _, command := range hookCommandStrings(document) {
 		command = claudeCodeUnguardedHookCommand(strings.TrimSpace(command))
-		if !editedDefenseClawHookCommand(command, scriptName) {
+		if editedDefenseClawHookCommand(command, scriptName) {
+			if word, _, ok := posixHookCommandSplit(command); ok && word != current &&
+				(strings.HasPrefix(word, home) || copiedDefenseClawHookCommand(command, scriptName)) {
+				return true
+			}
 			continue
 		}
-		if word, _, ok := posixHookCommandSplit(command); ok && word != current &&
-			(strings.HasPrefix(word, home) || copiedDefenseClawHookCommand(command, scriptName)) {
+		windows := windowsHookScriptCommandAsPOSIX(command)
+		rest, ok := editedDefenseClawHookScript(windows, scriptName)
+		if !ok || (rest != "" && !defenseClawHookBinding(rest)) {
+			continue
+		}
+		if word, _, ok := posixHookCommandSplit(windows); ok && word != windowsCurrent &&
+			((windowsHome != "" && strings.HasPrefix(word, windowsHome)) ||
+				(defenseClawHookBinding(rest) && path.Base(word) == scriptName)) {
 			return true
 		}
 	}
