@@ -114,7 +114,15 @@ func main() {
 					v.Diag = append(v.Diag, fmt.Sprintf("PANIC:%v", r))
 				}
 			}()
-			s, _ := psparse.Parse(src, psparse.Options{Dialect: dialect})
+			var s *psparse.Script
+			if os.Getenv("PSVIEW_FRONTEND") == "pwshparse" {
+				if fs, ok := psparse.FromPwshparse(src, psparse.Options{Dialect: dialect}); ok {
+					s = fs
+				}
+			}
+			if s == nil {
+				s, _ = psparse.Parse(src, psparse.Options{Dialect: dialect})
+			}
 			if s == nil {
 				return
 			}

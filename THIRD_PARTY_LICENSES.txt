@@ -19,6 +19,8 @@ API definitions vendored for the Linux sensor helper:
     internal/actionfacts/kube_request.go, and the design reference (read
     only) for the bounded SQL scanner in internal/actionfacts/sql_ast.go; no
     code is imported or vendored
+  - github.com/PowerShell/PowerShell (the PowerShell parser, ported to Go in
+    internal/pwshparse; not a go.mod dependency)
 
 It is a scoped attribution artifact for those dependency additions, not an
 exhaustive inventory of every dependency in every DefenseClaw artifact.
@@ -72,6 +74,12 @@ License-text provenance:
     root LICENSE governs it)
   Upstream LICENSE SHA-256:
     c4be3acebe12527d7de689933d98329b4065f8c50cd929d0365584eafe6c20dd
+
+  Module: github.com/PowerShell/PowerShell
+  Version: the pwsh 7.6.6 parser sources (src/System.Management.Automation/engine/parser)
+  Upstream file: https://github.com/PowerShell/PowerShell/blob/master/LICENSE.txt
+  Upstream LICENSE SHA-256:
+    7c77a44a8acd9b41fdc209864a8016b3d430b5d0e09309818d5b7444336df744
 
   Module: github.com/cilium/tetragon/api
   Version: v1.7.1 (tag api/v1.7.1, commit 99ca93d98710b98a42551bf3c12613e32888885d)
@@ -896,3 +904,30 @@ FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
 COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
 IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
 CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+
+==============================================================================
+github.com/PowerShell/PowerShell (MIT, parser port in internal/pwshparse)
+==============================================================================
+
+Copyright (c) Microsoft Corporation.
+
+MIT License
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED *AS IS*, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

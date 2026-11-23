@@ -21,21 +21,37 @@ func parsePowerShell(command string, o Options) *Script {
 	return lowerPSScript(command, o, true)
 }
 
+// parsePSSource parses a PowerShell script for lowering with
+// psparse.ParseEffects: the pure-Go port of the Microsoft PowerShell parser
+// through psparse.FromPwshparse by default, psparse.Parse when the port declines
+// the input or DEFENSECLAW_PS_FRONTEND=psparse. The legacy 1.0.10 PowerShell
+// readers always use psparse.Parse (the raise-only floor). port reports that
+// the port built the Script.
+func parsePSSource(command string) (sc *psparse.Script, port bool, err error) {
+	return psparse.ParseEffects(command, psparse.Options{Dialect: psparse.DialectUnknown})
+}
+
 func lowerPSScript(command string, o Options, expandNested bool) *Script {
 	s := &Script{Dialect: DialectPowerShell}
 	// The PowerShell edition is unknown unless the connector proves it, so a
 	// dialect-divergent escape (backtick-e, \u{}) is not treated as static
 	// (psparse review 3 / R4). A future caller that knows the host edition can
 	// pass DialectPwsh7 / DialectWindowsPS51.
-	sc, err := psparse.Parse(command, psparse.Options{Dialect: psparse.DialectUnknown})
+	sc, port, err := parsePSSource(command)
 	if err != nil || sc == nil {
 		s.Unknowns = append(s.Unknowns, UnknownNode{Reason: ReasonInvalidSyntax})
 		return s
 	}
+	return lowerPSParsed(s, sc, port, o, expandNested)
+}
+
+// lowerPSParsed lowers a parsed PowerShell Script into s; port reports that
+// the parser port built sc (psparse.ParseEffects).
+func lowerPSParsed(s *Script, sc *psparse.Script, port bool, o Options, expandNested bool) *Script {
 	for _, d := range sc.Diagnostics {
 		s.Unknowns = append(s.Unknowns, UnknownNode{Reason: psReason(d.Reason)})
 	}
-	lw := &psLower{out: s, o: o, hosts: map[psparse.Node]*HostPayload{}}
+	lw := &psLower{out: s, o: o, hosts: map[psparse.Node]*HostPayload{}, port: port}
 	var nested []psparse.NestedScript
 	if expandNested {
 		nested = psparse.ExtractNestedScripts(sc)
@@ -326,6 +342,9 @@ type psLower struct {
 	// being lowered changes through the Env: drive or
 	// [Environment]::SetEnvironmentVariable: they are unknown after it.
 	envChanged []string
+	// port: the Script comes from the PowerShell parser port, so a native
+	// program's argv is its elements one for one (nativeParamWords).
+	port bool
 }
 
 func (lw *psLower) statements(sts []psparse.Statement, cond bool) {
@@ -449,6 +468,10 @@ func (lw *psLower) command(c *psparse.Command, cond, pipeIn bool) *Cmd {
 	for i := 0; i < len(c.Elements); i++ {
 		switch e := c.Elements[i].(type) {
 		case *psparse.Parameter:
+			if native && lw.port {
+				out.Words = append(out.Words, lw.nativeParamWords(e)...)
+				continue
+			}
 			if native && !e.HasColon && i+1 < len(c.Elements) {
 				if wd, ok := lw.fusedNativeArg(e, c.Elements[i+1]); ok {
 					out.Words = append(out.Words, wd)
@@ -493,10 +516,11 @@ func psNativeName(c *psparse.Command) bool {
 	return name != "" && !strings.Contains(name, "-")
 }
 
-// fusedNativeArg is the one argv word a native program gets for a switch with
-// an argument glued to it (7z -o$env:USERPROFILE\x, DET111 R1, GAP-1663): the
-// switch text and the argument's word, ok false when a blank separates them or
-// the argument is several words.
+// fusedNativeArg reads a psparse.Parse Script (the DEFENSECLAW_PS_FRONTEND=
+// psparse reader and the deep-nesting fallback): psparse splits -o$env:X\y into
+// a switch -o and a glued argument, and this joins them into one argv word
+// (DET111 R1, GAP-1663), ok false when a blank separates them or the argument
+// is several words. A port Script needs no join (nativeParamWords).
 func (lw *psLower) fusedNativeArg(p *psparse.Parameter, next psparse.CommandElement) (Word, bool) {
 	a, ok := next.(*psparse.Arg)
 	if !ok {
@@ -512,10 +536,44 @@ func (lw *psLower) fusedNativeArg(p *psparse.Parameter, next psparse.CommandElem
 		return Word{}, false
 	}
 	lw.exprCommands(a.Value, true)
-	sw := "-" + p.Name
-	w := ws[0]
+	return fuseWord("-"+p.Name, ws[0]), true
+}
+
+// nativeParamWords is the argv a native program gets for a parameter token of
+// a port Script, as PowerShell's native binder builds it (checked against
+// pwsh 7.6.6 and Windows PowerShell 5.1): the token text as written, literal
+// (-o$env:X\y is the parameter o$env with the argument X\y, passed as the one
+// unexpanded word -o$env:X\y), and for the colon form the argument's value
+// glued to "-name:" as one word (-o:$d\w is -o:<value of $d>\w), or a word of
+// its own when a blank follows the colon. A cmdlet binds parameters instead.
+func (lw *psLower) nativeParamWords(p *psparse.Parameter) []Word {
+	head := p.Raw
+	if head == "" {
+		head = "-" + p.Name
+	}
+	if !p.HasColon {
+		return []Word{{Value: head, Static: true, Segs: []WordSeg{{Lit: head}}}}
+	}
+	head += ":"
+	hw := Word{Value: head, Static: true, Segs: []WordSeg{{Lit: head}}}
+	if p.Colon == nil {
+		return []Word{hw}
+	}
+	lw.exprCommands(p.Colon, true)
+	ws := lw.argWords(p.Colon)
+	ps, _ := p.Span()
+	cs, _ := p.Colon.Span()
+	if len(ws) != 1 || cs != ps+len(head) {
+		return append([]Word{hw}, ws...)
+	}
+	return []Word{fuseWord(head, ws[0])}
+}
+
+// fuseWord is the one argv word of a literal switch text sw followed with no
+// blank by the word w.
+func fuseWord(sw string, w Word) Word {
 	if w.Reason != "" {
-		return Word{Reason: w.Reason}, true
+		return Word{Reason: w.Reason}
 	}
 	segs := []WordSeg{{Lit: sw}}
 	if w.Segs != nil {
@@ -527,7 +585,7 @@ func (lw *psLower) fusedNativeArg(p *psparse.Parameter, next psparse.CommandElem
 	if w.Static {
 		out.Value = sw + w.Value
 	}
-	return out, true
+	return out
 }
 
 func (lw *psLower) addRedir(c *Cmd, r *psparse.Redirection) {
