@@ -73,12 +73,12 @@ func (l *enterpriseHookProfileList) get(list func() ([]enterprisehooks.TargetCre
 // standalone removal falls back to the deployment's own hook launcher, the
 // one the files were rendered for.
 func windowsCopilotVSCodeUser(home string, verify, remove bool) error {
-	return windowsCopilotVSCodeUserAccepting(home, verify, remove, false)
+	return windowsCopilotVSCodeUserAccepting(home, verify, remove, false, "")
 }
 
-// windowsCopilotVSCodeUserAccepting is windowsCopilotVSCodeUser; acceptPrior is
-// windowsCopilotVSCodeUserFilesAccepting's.
-func windowsCopilotVSCodeUserAccepting(home string, verify, remove, acceptPrior bool) error {
+// windowsCopilotVSCodeUserAccepting is windowsCopilotVSCodeUser; acceptPrior and
+// recorded are windowsCopilotVSCodeUserFilesAccepting's.
+func windowsCopilotVSCodeUserAccepting(home string, verify, remove, acceptPrior bool, recorded string) error {
 	opts, ok, err := windowsCopilotVSCodeUserOptions(remove && !verify)
 	if err != nil || !ok {
 		return err
@@ -94,7 +94,7 @@ func windowsCopilotVSCodeUserAccepting(home string, verify, remove, acceptPrior 
 			}
 		}
 	}
-	err = windowsCopilotVSCodeUserFilesAccepting(opts, home, verify, remove, acceptPrior)
+	err = windowsCopilotVSCodeUserFilesAccepting(opts, home, verify, remove, acceptPrior, recorded)
 	switch {
 	case settingsErr == nil:
 		return err
@@ -110,13 +110,15 @@ func windowsCopilotVSCodeUserAccepting(home string, verify, remove, acceptPrior 
 // windowsCopilotVSCodeUserFiles places, checks (verify) or removes the VS
 // Code Local hook file and Copilot plugin themselves.
 func windowsCopilotVSCodeUserFiles(opts enterprisepolicy.Options, home string, verify, remove bool) error {
-	return windowsCopilotVSCodeUserFilesAccepting(opts, home, verify, remove, false)
+	return windowsCopilotVSCodeUserFilesAccepting(opts, home, verify, remove, false, "")
 }
 
 // windowsCopilotVSCodeUserFilesAccepting is windowsCopilotVSCodeUserFiles; with
 // acceptPrior (a read-only verify), files that hold exactly the render of
-// releases up to 1.0.6 count as current (GAP-0980).
-func windowsCopilotVSCodeUserFilesAccepting(opts enterprisepolicy.Options, home string, verify, remove, acceptPrior bool) error {
+// releases up to 1.0.6 count as current (GAP-0980), and so do files rendered
+// for recorded, the earlier launch image of this install the account's
+// protected records name (GAP-1898).
+func windowsCopilotVSCodeUserFilesAccepting(opts enterprisepolicy.Options, home string, verify, remove, acceptPrior bool, recorded string) error {
 	hookFile, plugin := enterprisepolicy.CopilotVSCodeUserWant(opts)
 	if remove {
 		hookFile, plugin = false, false
@@ -130,6 +132,7 @@ func windowsCopilotVSCodeUserFilesAccepting(opts enterprisepolicy.Options, home 
 		DryRun:     verify,
 
 		AcceptPriorRelease: acceptPrior,
+		RecordedHookBinary: recorded,
 	})
 	if err != nil {
 		return err
