@@ -8,6 +8,7 @@ import (
 	"path"
 	"slices"
 	"strings"
+	"sync"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
@@ -658,6 +659,47 @@ func guestOwnShellFolders(command, cwd, home string) map[guestShellReading]bool 
 // keeps every candidate folder of a text the walk did not place
 // (agent_hook_config_guard.go, substrate-1 GAP-0888, B43).
 func guestOwnShellWalk(command, cwd, home string) (map[guestShellReading]bool, map[string]bool) {
+	if len(command) > agentHookConfigMaxPlacedBytes {
+		return guestOwnShellWalkText(command, cwd, home)
+	}
+	guestWalks.Lock()
+	for _, walk := range guestWalks.last {
+		if walk.done && walk.command == command && walk.cwd == cwd && walk.home == home {
+			guestWalks.Unlock()
+			return walk.readings, walk.placed
+		}
+	}
+	guestWalks.Unlock()
+	readings, placed := guestOwnShellWalkText(command, cwd, home)
+	guestWalks.Lock()
+	guestWalks.last[guestWalks.next] = guestWalk{command: command, cwd: cwd, home: home, readings: readings, placed: placed, done: true}
+	guestWalks.next = (guestWalks.next + 1) % len(guestWalks.last)
+	guestWalks.Unlock()
+	return readings, placed
+}
+
+// guestWalks holds the last walks of guestOwnShellWalk. A copy-mode call is
+// walked by its placed children (sandboxGuestPlacedChildren) and again by
+// the sandbox hook-config guard, with the same script, folder and home: the
+// second walk made a long call up to 87% slower than before the guard read
+// the walk (substrate-1 GAP-0956). The walk is lexical, so a call walks
+// once. Its maps are only read.
+var guestWalks struct {
+	sync.Mutex
+	last [4]guestWalk
+	next int
+}
+
+// guestWalk is one walk kept in guestWalks.
+type guestWalk struct {
+	command, cwd, home string
+	readings           map[guestShellReading]bool
+	placed             map[string]bool
+	done               bool
+}
+
+// guestOwnShellWalkText walks the script (guestOwnShellWalk).
+func guestOwnShellWalkText(command, cwd, home string) (map[guestShellReading]bool, map[string]bool) {
 	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(command), "")
 	if err != nil || !path.IsAbs(cwd) {
 		return nil, nil
