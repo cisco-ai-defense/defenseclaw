@@ -164,7 +164,7 @@ func TestSpendTotalsOverValidated(t *testing.T) {
 		{Prefix: "batch:nightly:", Since: day, Limit: 1, Max: 0},
 		{Prefix: "batch:nightly:", Since: day, Limit: 1, Max: maxKeys + 1},
 	} {
-		in := SpendTotalsRequest{Epoch: "epoch-bbbb", Since: day, Page: true, ByKey: true, Over: []SpendOver{o}}
+		in := SpendTotalsRequest{Epoch: "epoch-bbbb", Since: day, ByKey: true, Over: []SpendOver{o}}
 		var out SpendTotalsAnswer
 		if err := c.call(ctx, MethodSpendTotals, in, &out); err == nil {
 			t.Errorf("over %+v: accepted", o)

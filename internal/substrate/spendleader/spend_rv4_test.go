@@ -13,37 +13,40 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/routingadmin"
 )
 
-// TestOldClientGetsEveryRow (GAP-0847, RV4 PROBE-D): a 1.0.10 replica asks
-// without page and reads the whole answer, today's rows included.
-func TestOldClientGetsEveryRow(t *testing.T) {
+// TestSpendTotalsAlwaysPaged (GAP-0940): no release has a spend leader, so
+// there is no older replica to answer in one piece and no older leader to
+// tolerate: every read is paged, and the leader still refuses a field it
+// does not know (the removed "page" too), never ignoring it.
+func TestSpendTotalsAlwaysPaged(t *testing.T) {
 	c, stop := startLeader(t, t.TempDir())
 	defer stop()
 	ctx := context.Background()
 	yday := time.Now().UTC().AddDate(0, 0, -1).Format(time.DateOnly)
-	today := time.Now().UTC().Format(time.DateOnly)
 	var rows []routingadmin.SeedRow
-	for i := 0; i < maxSpendRows; i++ {
-		rows = append(rows, routingadmin.SeedRow{Day: yday, Key: fmt.Sprintf("actor:b:%06d", i), USD: 0.5})
-	}
-	for i := 0; i < 5000; i++ {
-		rows = append(rows, routingadmin.SeedRow{Day: today, Key: fmt.Sprintf("user:d:*:p:%06d", i), USD: 1})
+	for i := 0; i < maxSpendRows+10; i++ {
+		rows = append(rows, routingadmin.SeedRow{Day: yday, Key: fmt.Sprintf("user:d:*:p:%06d", i), USD: 0.5})
 	}
 	if err := c.SpendPush(ctx, "epoch-aaaa", rows); err != nil {
 		t.Fatal(err)
 	}
 	var out SpendTotalsAnswer
-	old := SpendTotalsRequest{Epoch: "epoch-bbbb", Since: yday}
-	if err := c.call(ctx, MethodSpendTotals, old, &out); err != nil {
+	if err := c.call(ctx, MethodSpendTotals, SpendTotalsRequest{Epoch: "epoch-bbbb", Since: yday}, &out); err != nil {
 		t.Fatal(err)
 	}
-	n := 0
-	for _, r := range out.Rows {
-		if r.Day == today {
-			n++
-		}
+	if len(out.Rows) != maxSpendRows || !out.More {
+		t.Fatalf("first page: %d rows (more %v), want %d and more", len(out.Rows), out.More, maxSpendRows)
 	}
-	if len(out.Rows) != len(rows) || n != 5000 || out.More {
-		t.Fatalf("old client read %d rows (%d of today's 5000, more %v), want %d", len(out.Rows), n, out.More, len(rows))
+	got, err := c.SpendTotals(ctx, "epoch-bbbb", time.Now().AddDate(0, 0, -1), nil)
+	if err != nil || len(got) != len(rows) {
+		t.Fatalf("paged read: %d rows, %v; want %d", len(got), err, len(rows))
+	}
+	type withPage struct {
+		SpendTotalsRequest
+		Page bool `json:"page"`
+	}
+	err = c.call(ctx, MethodSpendTotals, withPage{SpendTotalsRequest{Epoch: "epoch-bbbb", Since: yday}, true}, &out)
+	if err == nil || !strings.Contains(err.Error(), "decode") {
+		t.Fatalf("unknown field page: %v, want a decode refusal", err)
 	}
 }
 

@@ -30,6 +30,32 @@ func (m *memRPC) SpendTotals(ctx context.Context, epoch string, since time.Time,
 	return m.c.Totals(ctx, epoch, since, keys)
 }
 
+func (m *memRPC) SpendTotalsOver(ctx context.Context, epoch string, since time.Time, keys []string, over []OverQuery) ([]SeedRow, []string, error) {
+	if m.down {
+		return nil, nil, errors.New("leader did not answer")
+	}
+	rows, err := m.c.TotalsPage(ctx, epoch, since, TotalsQuery{ByKey: keys != nil, Keys: keys, Over: over})
+	if err != nil {
+		return nil, nil, err
+	}
+	full, err := m.c.OverFull(ctx, epoch, over)
+	return rows, full, err
+}
+
+func (m *memRPC) SpendSums(ctx context.Context, epoch string, q []SumQuery) ([]PrefixSum, error) {
+	if m.down {
+		return nil, errors.New("leader did not answer")
+	}
+	return m.c.PrefixSums(ctx, q)
+}
+
+func (m *memRPC) SpendKeys(ctx context.Context, epoch string, since time.Time, keys []string) ([]SeedRow, error) {
+	if m.down {
+		return nil, errors.New("leader did not answer")
+	}
+	return m.c.TotalsPage(ctx, epoch, since, TotalsQuery{KeysOnly: true, Keys: keys})
+}
+
 // TestLeaderCounterSumsReplicas: two replicas (two epochs) charge one key; each
 // reads the other's spend through the leader and never its own twice.
 func TestLeaderCounterSumsReplicas(t *testing.T) {

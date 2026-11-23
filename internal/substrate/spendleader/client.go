@@ -52,17 +52,13 @@ func (c *Client) SpendPush(ctx context.Context, epoch string, rows []routingadmi
 // page by page. With keys (non-nil), only those of the capped keys
 // (actor:, batch:) are read, in requests of at most maxKeys keys, so
 // launcher-minted keys never push a read past maxTotalsPages (which fails
-// it: the budgets then read as not loaded, never as partial). An older
-// leader answers everything at once: that answer is used as it is.
+// it: the budgets then read as not loaded, never as partial).
 func (c *Client) SpendTotals(ctx context.Context, epoch string, since time.Time, keys []string) ([]routingadmin.SeedRow, error) {
 	rows, _, err := c.SpendTotalsOver(ctx, epoch, since, keys, nil)
 	return rows, err
 }
 
-var (
-	_ routingadmin.SpendOverRPC = (*Client)(nil)
-	_ routingadmin.SpendViewRPC = (*Client)(nil)
-)
+var _ routingadmin.SpendRPC = (*Client)(nil)
 
 // SpendKeys reads every other epoch's spend of keys only (the admin view's
 // actor list, GAP-0894), in requests of at most maxKeys keys.
@@ -94,14 +90,13 @@ func (c *Client) SpendSums(ctx context.Context, epoch string, q []routingadmin.S
 // SpendTotalsOver is SpendTotals whose by-key read also asks for the keys
 // at or over each budget's limit in over (with the first key chunk), and
 // returns the budget ids with more of them than OverQuery.Max (GAP-0892).
-// An older leader ignores over.
 func (c *Client) SpendTotalsOver(ctx context.Context, epoch string, since time.Time, keys []string, over []routingadmin.OverQuery) ([]routingadmin.SeedRow, []string, error) {
 	return c.totals(ctx, epoch, since, keys, over, false)
 }
 
 // totals is the paged read; keysOnly keeps only keys from the first chunk.
 func (c *Client) totals(ctx context.Context, epoch string, since time.Time, keys []string, over []routingadmin.OverQuery, keysOnly bool) ([]routingadmin.SeedRow, []string, error) {
-	base := SpendTotalsRequest{Epoch: epoch, Since: since.UTC().Format(time.DateOnly), Page: true, ByKey: keys != nil}
+	base := SpendTotalsRequest{Epoch: epoch, Since: since.UTC().Format(time.DateOnly), ByKey: keys != nil}
 	var wireOver []SpendOver
 	if keys != nil {
 		for _, o := range over {
@@ -133,9 +128,6 @@ func (c *Client) totals(ctx context.Context, epoch string, since time.Time, keys
 			}
 			if in.Over != nil && in.AfterDay == "" {
 				full = out.OverFull
-			}
-			if !out.Paged {
-				return rows, full, nil
 			}
 			if !out.More || len(out.Rows) == 0 {
 				break

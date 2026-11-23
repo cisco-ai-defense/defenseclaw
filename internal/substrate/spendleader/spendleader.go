@@ -73,20 +73,17 @@ type SpendTotalsRequest struct {
 	Epoch string   `json:"epoch"`
 	Since string   `json:"since"`
 	Keys  []string `json:"keys,omitempty"`
-	// Page asks for the answer page by page (More, AfterDay, AfterKey); a
-	// request without it (a 1.0.10 replica) gets every row in one answer,
-	// as before. AfterDay and AfterKey ask for the page after that (day,
-	// key) row.
-	Page     bool   `json:"page,omitempty"`
+	// The answer comes page by page (More): AfterDay and AfterKey ask for
+	// the page after that (day, key) row.
 	AfterDay string `json:"after_day,omitempty"`
 	AfterKey string `json:"after_key,omitempty"`
-	// ByKey (with Page) keeps, of the capped keys (actor:, batch:), only
+	// ByKey keeps, of the capped keys (actor:, batch:), only
 	// those in Keys, and KeysOnly keeps only the keys in Keys: launcher-
 	// minted keys never make a read too large.
 	ByKey    bool `json:"by_key,omitempty"`
 	KeysOnly bool `json:"keys_only,omitempty"`
 	// Over (with ByKey, not KeysOnly) also asks for the keys at or over each
-	// budget's limit (GAP-0892). An older leader ignores it.
+	// budget's limit (GAP-0892).
 	Over []SpendOver `json:"over,omitempty"`
 }
 
@@ -106,9 +103,6 @@ type SpendTotalsAnswer struct {
 	// More is set when rows past the last one are left (ask with its day
 	// and key as AfterDay and AfterKey).
 	More bool `json:"more,omitempty"`
-	// Paged says the leader answered Page (an older leader answers every
-	// row at once and leaves it unset).
-	Paged bool `json:"paged,omitempty"`
 	// OverFull lists, on the first page of a read with Over, the budget ids
 	// with more than Max keys at or over the limit.
 	OverFull []string `json:"over_full,omitempty"`
@@ -223,13 +217,6 @@ func (s *Service) spendTotals(ctx context.Context, in SpendTotalsRequest) (Spend
 	if err != nil {
 		return SpendTotalsAnswer{}, bad("since is a UTC date")
 	}
-	if !in.Page {
-		rows, err := s.Counter.Totals(ctx, in.Epoch, since, nil)
-		if err != nil {
-			return SpendTotalsAnswer{}, err
-		}
-		return SpendTotalsAnswer{Rows: wireRows(rows)}, nil
-	}
 	over, err := overQueries(in)
 	if err != nil {
 		return SpendTotalsAnswer{}, err
@@ -254,7 +241,7 @@ func (s *Service) spendTotals(ctx context.Context, in SpendTotalsRequest) (Spend
 			break
 		}
 	}
-	return SpendTotalsAnswer{Rows: wireRows(rows[:n]), More: n < len(rows), Paged: true, OverFull: full}, nil
+	return SpendTotalsAnswer{Rows: wireRows(rows[:n]), More: n < len(rows), OverFull: full}, nil
 }
 
 func (s *Service) spendSums(ctx context.Context, in SpendSumsRequest) (SpendSumsAnswer, error) {
