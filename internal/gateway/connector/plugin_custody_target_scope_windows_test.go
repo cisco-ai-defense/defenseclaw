@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -39,6 +40,11 @@ const custodyTestProfileListRoot = `SOFTWARE\DefenseClawTest`
 // custodyTestProfileListRoot.
 const custodyTestProfileListPrefix = "custody-"
 
+// custodyTestProfileListSeq tells apart two lists one process makes within
+// one clock tick: Windows wall-clock time can repeat between calls, so the
+// pid and time alone gave a subtest the name its parent already used.
+var custodyTestProfileListSeq atomic.Uint64
+
 // custodyTestUseProfileList points the check at a new, empty profile list of
 // this test's own (windowsCustodyProfileList) and removes it when the test
 // ends. Lists a killed run left behind (their process is gone) are removed
@@ -47,7 +53,8 @@ func custodyTestUseProfileList(t *testing.T) string {
 	t.Helper()
 	custodyTestRemoveStaleProfileLists(t)
 	run := custodyTestProfileListRoot + `\` + custodyTestProfileListPrefix +
-		strconv.Itoa(os.Getpid()) + "-" + strconv.FormatInt(time.Now().UnixNano(), 10)
+		strconv.Itoa(os.Getpid()) + "-" + strconv.FormatInt(time.Now().UnixNano(), 10) +
+		"-" + strconv.FormatUint(custodyTestProfileListSeq.Add(1), 10)
 	list := run + `\ProfileList`
 	key, existed, err := registry.CreateKey(registry.LOCAL_MACHINE, list, registry.SET_VALUE|registry.WOW64_64KEY)
 	if err != nil {
