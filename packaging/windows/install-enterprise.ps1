@@ -4492,8 +4492,11 @@ function Get-DefenseClawRenderedEnterpriseTargets {
         }
     )
     if ($users.Count -eq 0) {
-        # An empty manifest is valid YAML. This finite-profile shorthand
-        # transaction simply has no current eligible users to enroll.
+        # No eligible users: the bare `targets:` decodes as null, and the
+        # guardian manifest loader refuses it rather than withdraw every
+        # enrolled hook on an enumeration that came back empty. Only an
+        # explicit `targets: []` withdraws; the -DeferredConfig placeholder
+        # writes that literal itself.
         return $sb.ToString()
     }
     $activeProfiles = @()
@@ -4750,11 +4753,14 @@ try {
                 -ForProfile $EnterpriseProfile),
             [Text.UTF8Encoding]::new($false)
         )
+        # The placeholder target set is an explicit empty list. A bare
+        # `targets:` decodes as null, which the guardian manifest loader
+        # refuses as a possibly truncated withdrawal of enrolled hooks
+        # (rel-1-0-10:GAP-1749). Install refuses -DeferredConfig over an
+        # active deployment, so this stage never has enrolled hooks to keep.
         [IO.File]::WriteAllText(
             $deferredManifestPath,
-            (Get-DefenseClawRenderedEnterpriseTargets `
-                -Connectors $deferredConnectors -Profiles @() `
-                -ForProfile $EnterpriseProfile),
+            "version: 1`ntargets: []`n",
             [Text.UTF8Encoding]::new($false)
         )
         foreach ($renderedPath in @($deferredConfigPath, $deferredManifestPath)) {
