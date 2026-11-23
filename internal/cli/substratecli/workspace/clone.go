@@ -75,7 +75,17 @@ http)
   localhost|localhost:*|'[::1]'|'[::1]':*) ;;
   127.*)
     addr=${host%%:*}
-    printf '%s\n' "$addr" | awk -F. 'NF == 4 && $1 == 127 && $2 ~ /^[0-9]+$/ && $3 ~ /^[0-9]+$/ && $4 ~ /^[0-9]+$/ && $2 <= 255 && $3 <= 255 && $4 <= 255 { ok=1 } END { exit !ok }' || exit 0
+    rest=${addr#127.}
+    case "$rest" in *.*.*) ;; *) exit 0 ;; esac
+    one=${rest%%.*}
+    rest=${rest#*.}
+    two=${rest%%.*}
+    three=${rest#*.}
+    case "$three" in *.*) exit 0 ;; esac
+    for octet in "$one" "$two" "$three"; do
+      case "$octet" in ''|*[!0-9]*|0?*) exit 0 ;; esac
+      [ "$octet" -le 255 ] 2>/dev/null || exit 0
+    done
     ;;
   *) exit 0 ;;
   esac
