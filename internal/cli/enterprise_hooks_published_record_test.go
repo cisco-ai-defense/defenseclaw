@@ -9,7 +9,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -204,9 +203,6 @@ func publishTestGuardianGeneration(t *testing.T, dataDir string, rows []enterpri
 }
 
 func TestGuardianGenerationIsRepublishedOnlyWhenItChangesOrAges(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("enterprise hook guardian persistence is unsupported on native Windows; lifecycle gate coverage remains active")
-	}
 	stubEnterpriseHookAuthorizationTrustForTempDir(t)
 	originalOwnership := enterpriseHookAuthorizationOwnershipSetter
 	enterpriseHookAuthorizationOwnershipSetter = func(string) error { return nil }
@@ -259,9 +255,6 @@ func TestGuardianGenerationIsRepublishedOnlyWhenItChangesOrAges(t *testing.T) {
 }
 
 func TestRestartedGuardianPublishesFreshGenerationForUnchangedOutcome(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("enterprise hook guardian persistence is unsupported on native Windows; lifecycle gate coverage remains active")
-	}
 	stubEnterpriseHookAuthorizationTrustForTempDir(t)
 	originalOwnership := enterpriseHookAuthorizationOwnershipSetter
 	enterpriseHookAuthorizationOwnershipSetter = func(string) error { return nil }
@@ -339,9 +332,6 @@ func guardianFreshCoverage(t *testing.T, dataDir string, startedAfter time.Time,
 
 func useGuardianPublishFixture(t *testing.T) string {
 	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Skip("enterprise hook guardian persistence is unsupported on native Windows; lifecycle gate coverage remains active")
-	}
 	stubEnterpriseHookAuthorizationTrustForTempDir(t)
 	originalOwnership := enterpriseHookAuthorizationOwnershipSetter
 	enterpriseHookAuthorizationOwnershipSetter = func(string) error { return nil }
