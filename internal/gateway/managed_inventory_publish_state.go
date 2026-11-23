@@ -93,6 +93,8 @@ type managedInventoryPublishFile struct {
 	// Zero means "never", which forces a bundle on the next cycle.
 	FullBundleAt time.Time                                `json:"full_bundle_published_at"`
 	Collections  map[string]managedInventoryPublishRecord `json:"collections"`
+	// Skills is the last published state of each skill (managed_skill_state.go).
+	Skills map[string]managedSkillState `json:"skills,omitempty"`
 }
 
 // managedInventoryPublishState is the durable, process-wide publish memory. It
@@ -235,6 +237,7 @@ type managedInventoryPublishCycle struct {
 	bundleScope bool
 	degraded    bool
 	published   map[string]managedInventoryPublishRecord
+	skills      map[string]managedSkillState
 }
 
 // forcedBundle reports whether this cycle ignores digests and publishes
@@ -349,6 +352,9 @@ func (cycle *managedInventoryPublishCycle) commit() {
 	for key, record := range cycle.published {
 		state.file.Collections[key] = record
 	}
+	if _, ok := cycle.published[endpointSkillInventorySource]; ok && cycle.skills != nil {
+		state.file.Skills = cycle.skills
+	}
 	if stampBundle {
 		state.file.FullBundleAt = cycle.now.UTC()
 		// The next cycle must re-derive the deadline against the new stamp.
@@ -433,6 +439,10 @@ func managedInventoryOptionalBool(value *bool) string {
 func managedInventoryComponentsDigest(key string, components []endpointInventoryComponent) string {
 	rows := make([]string, 0, len(components))
 	for _, component := range components {
+		if component.skillState == skillStateRemoved {
+			// Sent once (hasRemovedSkill); the collection then settles.
+			continue
+		}
 		rows = append(rows, strings.Join([]string{
 			component.id,
 			component.componentType,
@@ -467,6 +477,7 @@ func managedInventoryComponentsDigest(key string, components []endpointInventory
 			component.agentVersion,
 			component.skillContentHash,
 			component.skillContentStatus,
+			component.skillFirstSeen,
 		}, managedInventoryFieldSeparator))
 	}
 	return managedInventoryDigest(key, rows)
