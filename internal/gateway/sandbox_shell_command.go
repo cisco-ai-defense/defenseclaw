@@ -58,8 +58,8 @@ func sandboxShellCommand(ctx context.Context, connectorName, event, toolName, ac
 }
 
 // shellCommandJudgeTool is the tool a shell call's command alone is judged
-// as: the PowerShell tool for Copilot's powershell and Kiro's execute_pwsh
-// tools, whose commands run in PowerShell, else actionTool. On Windows the call itself is
+// as: the PowerShell tool for Copilot's powershell tool, whose commands
+// Copilot runs in PowerShell, else actionTool. On Windows the call itself is
 // judged as shell (agentHookTrustedActionTool), in the dialect its text
 // infers, and a launcher line inferred as POSIX loses the backslashes of an
 // unquoted Windows path: pwsh -wd C:\Users\a\.defenseclaw -Command
@@ -70,12 +70,29 @@ func sandboxShellCommand(ctx context.Context, connectorName, event, toolName, ac
 // tool; that reading only adds to the call's verdict.
 func shellCommandJudgeTool(connectorName, toolName, actionTool string) string {
 	if strings.EqualFold(strings.TrimSpace(connectorName), "copilot") &&
-		strings.EqualFold(strings.TrimSpace(toolName), "powershell") ||
-		strings.EqualFold(strings.TrimSpace(connectorName), "kiro") &&
-			strings.EqualFold(strings.TrimSpace(toolName), "execute_pwsh") {
+		strings.EqualFold(strings.TrimSpace(toolName), "powershell") {
 		return "powershell"
 	}
 	return actionTool
+}
+
+// kiroPwshRunsPowerShell is set where kiro-cli runs its execute_pwsh tool's
+// command in PowerShell: a Windows host (kiro-cli --v3, 2.35.1). A variable,
+// as codexShellRunsPowerShell is, so a test can judge the Windows route.
+var kiroPwshRunsPowerShell = runtime.GOOS == "windows"
+
+// kiroPowerShellCommand reports a Kiro execute_pwsh call on a host where Kiro
+// runs its command in PowerShell. Its command alone is also judged as the
+// PowerShell tool, next to the shell reading every shell call has
+// (rel-1-0-10:GAP-1557). That reading is added, never put in place of the
+// shell one: judged as PowerShell alone, a second command key spelled
+// Command next to rm -rf, and the conflict of two command keys, were lost and
+// the call was allowed (GAP-1940).
+func kiroPowerShellCommand(ctx context.Context, connectorName string, req *ToolInspectRequest, commandTool string) bool {
+	return kiroPwshRunsPowerShell && req != nil && commandTool != "powershell" &&
+		strings.EqualFold(strings.TrimSpace(connectorName), "kiro") &&
+		strings.EqualFold(strings.TrimSpace(req.Tool), "execute_pwsh") &&
+		!sandboxHookForConnector(ctx, connectorName)
 }
 
 // inspectSandboxShellToolPolicyCtx is inspectTrustedToolPolicyCtx for a
@@ -140,7 +157,9 @@ func (a *APIServer) inspectSandboxShellToolPolicyCtx(
 		return mergeSandboxShellCommandVerdict(ctx, a.decisionConfig(ctx), connectorName, verdict,
 			[]RuleFinding{unverifiedShellCommandFinding(action.EnforcementCapable)})
 	}
-	if commandTool == action.Input.Tool && bytes.Equal(command, action.Input.Args) {
+	powerShell := kiroPowerShellCommand(ctx, connectorName, req, commandTool)
+	sameReading := commandTool == action.Input.Tool && bytes.Equal(command, action.Input.Args)
+	if sameReading && !powerShell {
 		return verdict
 	}
 	if action.EnforcementCapable && trustedCallOverStatementBudget(action.Input, primary) {
@@ -150,28 +169,39 @@ func (a *APIServer) inspectSandboxShellToolPolicyCtx(
 		// second (rel-1-0-2:GAP-0568).
 		return verdict
 	}
-	input := action.Input
-	input.Tool, input.Args = commandTool, command
-	if action.windowsShellDialect {
-		// The full call's hint was inferred from arguments whose parse is
-		// not complete, so it may be empty; the command alone is judged in
-		// the dialect inferred from it, as the same call without the extra
-		// keys is (GAP-0686).
-		input.DialectHint = agentHookWindowsShellDialect(input)
+	commandAlone := func(tool string) []RuleFinding {
+		input := action.Input
+		input.Tool, input.Args = tool, command
+		if action.windowsShellDialect {
+			// The full call's hint was inferred from arguments whose parse is
+			// not complete, so it may be empty; the command alone is judged in
+			// the dialect inferred from it, as the same call without the extra
+			// keys is (GAP-0686).
+			input.DialectHint = agentHookWindowsShellDialect(input)
+		}
+		return dispatchTrustedAction(ctx, trustedActionRequest{
+			Input:                         input,
+			LegacyText:                    string(command),
+			Connector:                     action.Connector,
+			EnforcementCapable:            action.EnforcementCapable,
+			ManagedHookOverflowHold:       action.ManagedHookOverflowHold,
+			DowngradeReadOnlyDataArgs:     action.DowngradeReadOnlyDataArgs,
+			SkipLocalFilesystemResolution: action.SkipLocalFilesystemResolution,
+			ResolvedWriteTargets:          action.ResolvedWriteTargets,
+			ShellStartup:                  action.ShellStartup,
+			SandboxGuestCWD:               action.SandboxGuestCWD,
+			windowsDialectReadings:        action.windowsDialectReadings,
+		})
 	}
-	findings := dispatchTrustedAction(ctx, trustedActionRequest{
-		Input:                         input,
-		LegacyText:                    string(command),
-		Connector:                     action.Connector,
-		EnforcementCapable:            action.EnforcementCapable,
-		ManagedHookOverflowHold:       action.ManagedHookOverflowHold,
-		DowngradeReadOnlyDataArgs:     action.DowngradeReadOnlyDataArgs,
-		SkipLocalFilesystemResolution: action.SkipLocalFilesystemResolution,
-		ResolvedWriteTargets:          action.ResolvedWriteTargets,
-		ShellStartup:                  action.ShellStartup,
-		SandboxGuestCWD:               action.SandboxGuestCWD,
-		windowsDialectReadings:        action.windowsDialectReadings,
-	})
+	var findings []RuleFinding
+	if !sameReading {
+		findings = commandAlone(commandTool)
+	}
+	if powerShell {
+		// Kiro runs execute_pwsh in PowerShell here: the PowerShell reading
+		// of the command only adds findings (kiroPowerShellCommand).
+		findings = mergeBoundedFindings(findings, commandAlone("powershell"))
+	}
 	if plain, ok := codexPlainShellCommand(a.decisionConfig(ctx), connectorName, req, action, commandTool); ok {
 		// Codex runs the command in PowerShell here, but the text may be
 		// one that PowerShell reads no path of (touch ~/.netrc): judged as
