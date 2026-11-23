@@ -180,6 +180,9 @@ type Store struct {
 	// (MethodHostUses), useCount its entries.
 	uses     map[ActorRef]map[string]time.Time
 	useCount int
+	// useOwner is the person (Person.ID) of each actor in uses that has
+	// one: the trim takes from the people with the most entries first.
+	useOwner map[ActorRef]string
 	// life is lifecycle records and counts, egress the egress decisions.
 	life, egress queue
 	gauges       map[string]int64
@@ -397,19 +400,21 @@ func (s *Store) PostCounts(_ context.Context, in PostRequest) (struct{}, error) 
 // took room in the queue. The allowed decisions also feed the host-use map.
 func (s *Store) PostEgress(ctx context.Context, in PostRequest) (struct{}, error) {
 	var allowed []Record
+	var owners []string
 	s.post(in, func(r Record) (Record, bool) {
 		if r.Kind != KindEgress || (r.Decision != "allow" && r.Decision != "block") {
 			return r, false
 		}
-		r, ok := s.egressActor(ctx, r)
+		r, owner, ok := s.egressActor(ctx, r)
 		if ok && r.Decision == "allow" {
 			allowed = append(allowed, r)
+			owners = append(owners, owner)
 		}
 		return r, ok
 	})
 	if len(allowed) > 0 {
 		s.mu.Lock()
-		s.noteUsesLocked(allowed, time.Now())
+		s.noteUsesLocked(allowed, owners, time.Now())
 		s.mu.Unlock()
 	}
 	return struct{}{}, nil
@@ -432,14 +437,14 @@ func (s *Store) PostEgress(ctx context.Context, in PostRequest) (struct{}, error
 // and profile it can't name another actor's registration, and a poster can
 // already omit the UID, so a drop would protect nothing and would lose real
 // refusals made on a stale cached UID. A record with no atespace or actor
-// is dropped.
-func (s *Store) egressActor(ctx context.Context, r Record) (Record, bool) {
+// is dropped. owner is the person of the registration ("" when none).
+func (s *Store) egressActor(ctx context.Context, r Record) (_ Record, owner string, _ bool) {
 	r.Unregistered = false
 	if s.Registrations == nil {
-		return r, true
+		return r, "", true
 	}
 	if r.Atespace == "" || r.Actor == "" {
-		return r, false
+		return r, "", false
 	}
 	if r.UID != "" {
 		reg, ok, err := s.Registrations.Get(ctx, r.Atespace, r.UID)
@@ -448,14 +453,14 @@ func (s *Store) egressActor(ctx context.Context, r Record) (Record, bool) {
 			if r.Profile == "" {
 				r.Profile = reg.Profile
 			}
-			return r, true
+			return r, reg.Person.ID(), true
 		}
 	}
 	if !registry.ValidName(r.Atespace) || !registry.ValidName(r.Actor) {
-		return r, false
+		return r, "", false
 	}
 	r.UID, r.Profile, r.Unregistered = "", "", true
-	return r, true
+	return r, "", true
 }
 
 // Take implements MethodTake: lifecycle records and counts first, then
