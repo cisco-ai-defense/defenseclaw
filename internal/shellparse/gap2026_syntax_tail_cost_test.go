@@ -13,30 +13,31 @@ import (
 // rel-1-0-10:GAP-2026: the longer reading of GAP-0745 parsed the text from
 // every start piece to its end and charged the budget only up to the error,
 // which for an opener the text never closes is the opener: a close paren, K
-// lines of an open brace and a long echo cost K times the text (50 KB, K =
-// 400: 2.4 s against 0.06 s in T21f). Its cost is linear in the text: the
-// time for K = 400 is within a small factor of the time for K = 4.
+// lines of an open brace and an echo of N bytes cost K times N (50 KB, K =
+// 400: 2.4 s against 0.06 s in T21f). Its cost is linear: the reading of
+// K = 400 with N = 50 KB is within a small factor of the sum of the reading
+// of K = 400 with a short echo and of K = 4 with N = 50 KB (the window
+// reading alone costs K pieces, and the echo costs N; a run under -race
+// slows all three alike).
 func TestSyntaxTailLongReadingCostIsLinear(t *testing.T) {
-	shape := func(k int) string {
-		return ")\n" + strings.Repeat("{\n", k) + " echo " + strings.Repeat("a", 50<<10) + "\n"
-	}
-	cost := func(k int) time.Duration {
+	cost := func(k, n int) time.Duration {
 		best := time.Duration(1 << 62)
 		for range 3 {
-			command := shape(k)
+			command := ")\n" + strings.Repeat("{\n", k) + " echo " + strings.Repeat("a", n) + "\n"
 			began := time.Now()
 			// readSyntaxTail: the memo of ReadSyntaxTail would answer the
 			// second try.
 			if _, ok := readSyntaxTail(command); !ok {
-				t.Fatalf("K=%d: not read", k)
+				t.Fatalf("K=%d N=%d: not read", k, n)
 			}
 			best = min(best, time.Since(began))
 		}
 		return best
 	}
-	small, large := cost(4), cost(400)
-	if large > 5*small+50*time.Millisecond {
-		t.Errorf("K=400 took %v against %v at K=4: the longer reading is not linear in the text", large, small)
+	pieces, length, both := cost(400, 8), cost(4, 50<<10), cost(400, 50<<10)
+	if both > 3*(pieces+length)+50*time.Millisecond {
+		t.Errorf("K=400 N=50K took %v against %v (K=400 N=8) and %v (K=4 N=50K): the longer reading is not linear in the text",
+			both, pieces, length)
 	}
 }
 
