@@ -34,10 +34,12 @@ const (
 )
 
 const (
-	maxSkillEntries   = 1000 // files and folders
-	maxSkillBytes     = 32 << 20
-	maxSkillScanBytes = 256 << 20
-	maxSkillDepth     = 12
+	maxSkillEntries        = 1000 // included files and folders
+	maxSkillVisitedEntries = 2 * maxSkillEntries
+	maxSkillBytes          = 32 << 20
+	maxSkillScanBytes      = 256 << 20
+	maxSkillDepth          = 12
+	skillReadDirBatch      = 64
 )
 
 var errSkillTooLarge = errors.New("skill folder exceeds the hash limits")
@@ -59,114 +61,159 @@ func (s *ContinuousDiscoveryService) resetSkillFacts() {
 // per skill scan. One scan reads at most maxSkillScanBytes across all users.
 func (s *ContinuousDiscoveryService) skillFacts(path string) *AISkillFacts {
 	s.skillFactsMu.Lock()
-	facts, seen := s.skillFactsSeen[path]
-	limit := min64(maxSkillBytes, maxSkillScanBytes-s.skillBytesRead)
-	s.skillFactsMu.Unlock()
-	if seen {
+	defer s.skillFactsMu.Unlock()
+	if facts, seen := s.skillFactsSeen[path]; seen {
 		return &facts
 	}
+	limit := min(maxSkillBytes, maxSkillScanBytes-s.skillBytesRead)
 	hash, status, read := hashSkillFolder(path, limit)
-	facts = AISkillFacts{ContentHash: hash, ContentStatus: status}
-	s.skillFactsMu.Lock()
+	facts := AISkillFacts{ContentHash: hash, ContentStatus: status}
 	s.skillBytesRead += read
 	if s.skillFactsSeen == nil {
 		s.skillFactsSeen = map[string]AISkillFacts{}
 	}
 	s.skillFactsSeen[path] = facts
-	s.skillFactsMu.Unlock()
 	return &facts
-}
-
-func min64(a, b int64) int64 {
-	if a < b {
-		return a
-	}
-	return b
 }
 
 // hashSkillFolder hashes the sorted "rel NUL kind NUL sha256(payload) LF"
 // lines of every entry below root (see defenseclaw.inventory.skill.content_hash).
-// Links are recorded by target and never followed, and each file is read
-// through safefile, so a scan running as root or SYSTEM reads only what is
-// inside the folder.
-func hashSkillFolder(root string, limit int64) (hash, status string, total int64) {
-	info, err := os.Lstat(root)
+// Child directories and files are opened relative to held parent handles.
+// Links contribute their stored targets without opening those targets.
+func hashSkillFolder(root string, limit int64) (hash, status string, consumed int64) {
+	dir, err := safefile.OpenDirectoryNoFollow(root)
+	if errors.Is(err, safefile.ErrSymlinkRefused) {
+		return "", SkillContentSymlink, 0
+	}
 	if err != nil {
 		return "", SkillContentUnreadable, 0
 	}
-	if info.Mode()&(fs.ModeSymlink|fs.ModeIrregular) != 0 {
-		return "", SkillContentSymlink, 0
+	defer dir.Close()
+	if limit <= 0 {
+		return "", SkillContentTooLarge, 0
 	}
-	var lines []string
-	entries := 0
-	err = filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		rel, err := filepath.Rel(root, path)
-		if err != nil {
-			return err
-		}
-		rel = filepath.ToSlash(rel)
-		if rel == "." {
-			return nil
-		}
-		// Every entry counts, so empty folders cannot stretch the walk.
-		if entries++; entries > maxSkillEntries {
-			return errSkillTooLarge
-		}
-		if entry.IsDir() {
-			switch {
-			case entry.Name() == ".git":
-				return fs.SkipDir
-			case strings.Count(rel, "/") >= maxSkillDepth:
-				return errSkillTooLarge
-			}
-			return nil
-		}
-		switch entry.Name() {
-		case ".DS_Store", "Thumbs.db", "desktop.ini":
-			return nil
-		}
-		kind, payload := "other", []byte(nil)
-		switch {
-		case entry.Type()&fs.ModeSymlink != 0:
-			target, err := os.Readlink(path)
-			if err != nil {
-				return err
-			}
-			kind, payload = "link", []byte(filepath.ToSlash(target))
-		case entry.Type().IsRegular():
-			info, err := entry.Info()
-			if err != nil {
-				return err
-			}
-			if info.Size() > limit-total {
-				return errSkillTooLarge
-			}
-			data, err := safefile.ReadRegularFileBounded(path, max(limit-total, 1))
-			if err != nil {
-				return err
-			}
-			total += int64(len(data))
-			kind, payload = "file", data
-		}
-		sum := sha256.Sum256(payload)
-		lines = append(lines, rel+"\x00"+kind+"\x00"+hex.EncodeToString(sum[:])+"\n")
-		return nil
-	})
+	walk := skillHashWalk{limit: limit}
+	err = walk.readDir(dir, "", 0)
 	switch {
-	case errors.Is(err, errSkillTooLarge):
-		return "", SkillContentTooLarge, total
+	case errors.Is(err, errSkillTooLarge), errors.Is(err, safefile.ErrReadLimit):
+		return "", SkillContentTooLarge, walk.consumed
 	case err != nil:
-		return "", SkillContentUnreadable, total
+		return "", SkillContentUnreadable, walk.consumed
 	}
-	sort.Strings(lines)
+	sort.Strings(walk.lines)
 	digest := sha256.New()
-	for _, line := range lines {
+	for _, line := range walk.lines {
 		_, _ = io.WriteString(digest, line)
 	}
-	return "sha256:" + hex.EncodeToString(digest.Sum(nil)), SkillContentOK, total
+	return "sha256:" + hex.EncodeToString(digest.Sum(nil)), SkillContentOK, walk.consumed
+}
+
+type skillHashWalk struct {
+	limit    int64
+	consumed int64
+	visited  int
+	included int
+	lines    []string
+}
+
+func (walk *skillHashWalk) readDir(dir *os.File, prefix string, depth int) error {
+	for {
+		batch := min(skillReadDirBatch, maxSkillVisitedEntries-walk.visited+1)
+		entries, err := dir.ReadDir(batch)
+		if err != nil && !errors.Is(err, io.EOF) {
+			return err
+		}
+		for _, entry := range entries {
+			walk.visited++
+			if walk.visited > maxSkillVisitedEntries {
+				return errSkillTooLarge
+			}
+			if excludedSkillEntry(entry) {
+				continue
+			}
+			walk.included++
+			if walk.included > maxSkillEntries {
+				return errSkillTooLarge
+			}
+			if err := walk.readEntry(dir, entry, prefix+entry.Name(), depth); err != nil {
+				return err
+			}
+		}
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+	}
+}
+
+func excludedSkillEntry(entry fs.DirEntry) bool {
+	if entry.IsDir() {
+		return entry.Name() == ".git"
+	}
+	switch entry.Name() {
+	case ".DS_Store", "Thumbs.db", "desktop.ini":
+		return true
+	default:
+		return false
+	}
+}
+
+func (walk *skillHashWalk) readEntry(parent *os.File, entry fs.DirEntry, rel string, depth int) error {
+	name := entry.Name()
+	if entry.IsDir() {
+		if depth >= maxSkillDepth {
+			return errSkillTooLarge
+		}
+		dir, err := safefile.OpenDirectoryChildNoFollow(parent, name)
+		if err != nil {
+			return err
+		}
+		defer dir.Close()
+		return walk.readDir(dir, rel+"/", depth+1)
+	}
+
+	kind := "other"
+	var sum [sha256.Size]byte
+	switch {
+	case entry.Type()&fs.ModeSymlink != 0:
+		target, err := safefile.ReadChildLink(parent, name)
+		if err != nil {
+			return err
+		}
+		kind, sum = "link", sha256.Sum256([]byte(filepath.ToSlash(target)))
+	case entry.Type().IsRegular():
+		file, err := safefile.OpenRegularChildNoFollow(parent, name)
+		if err != nil {
+			return err
+		}
+		defer file.Close()
+		digest, consumed, err := safefile.HashOpenedRegularFileBounded(file, walk.limit-walk.consumed)
+		walk.consumed += consumed
+		if err != nil {
+			return err
+		}
+		current, err := safefile.OpenRegularChildNoFollow(parent, name)
+		if err != nil {
+			return err
+		}
+		defer current.Close()
+		if !sameOpenedSkillFile(file, current) {
+			return errors.New("skill file was replaced while reading")
+		}
+		kind, sum = "file", digest
+	default:
+		sum = sha256.Sum256(nil)
+	}
+	walk.lines = append(walk.lines, rel+"\x00"+kind+"\x00"+hex.EncodeToString(sum[:])+"\n")
+	return nil
+}
+
+func sameOpenedSkillFile(first, second *os.File) bool {
+	before, err := first.Stat()
+	if err != nil {
+		return false
+	}
+	after, err := second.Stat()
+	return err == nil && os.SameFile(before, after)
 }
 
 // validateSkillFacts bounds the facts a per-user scan reports.

@@ -55,6 +55,10 @@ func TestHashSkillFolderCoversEveryFileAndIsPortable(t *testing.T) {
 		t.Fatal(err)
 	}
 	base := mustHashSkill(t, first)
+	const fixtureHash = "sha256:6c07b27b069204c825f104dfdb22c2a716934ed5bbbb4049488d0519a7fde7d1"
+	if base != fixtureHash {
+		t.Fatalf("fixture hash = %s, want %s", base, fixtureHash)
+	}
 	if got := mustHashSkill(t, second); got != base {
 		t.Fatalf("same files in another folder with other times: %s != %s", got, base)
 	}
@@ -95,6 +99,9 @@ func TestHashSkillFolderNeverFollowsLinks(t *testing.T) {
 	writeSkillFiles(t, skill, map[string]string{"SKILL.md": "x"})
 	if err := os.Symlink(outside, filepath.Join(skill, "link")); err != nil {
 		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if err := os.Symlink(filepath.Dir(outside), filepath.Join(skill, "linked-directory")); err != nil {
+		t.Fatal(err)
 	}
 	base := mustHashSkill(t, skill)
 	if err := os.WriteFile(outside, []byte("two"), 0o600); err != nil {
@@ -144,6 +151,57 @@ func TestHashSkillFolderLimits(t *testing.T) {
 
 	if _, status, _ := hashSkillFolder(filepath.Join(big, "missing"), maxSkillBytes); status != SkillContentUnreadable {
 		t.Fatalf("missing folder: status %q", status)
+	}
+}
+
+func TestHashSkillFolderRejectsRegularFileRoot(t *testing.T) {
+	root := t.TempDir()
+	writeSkillFiles(t, root, map[string]string{"skill.txt": "skill data"})
+	if hash, status, read := hashSkillFolder(filepath.Join(root, "skill.txt"), maxSkillBytes); hash != "" || status != SkillContentUnreadable || read != 0 {
+		t.Fatalf("file root: hash %q, status %q, read %d", hash, status, read)
+	}
+}
+
+func TestHashSkillFolderExclusionsHaveSeparateTraversalLimit(t *testing.T) {
+	root := t.TempDir()
+	for i := range maxSkillEntries {
+		writeSkillFiles(t, root, map[string]string{fmt.Sprintf("entry-%d", i): ""})
+	}
+	base := mustHashSkill(t, root)
+	writeSkillFiles(t, root, map[string]string{".DS_Store": "metadata", ".git/HEAD": "ref"})
+	if got := mustHashSkill(t, root); got != base {
+		t.Fatal("excluded entries changed an exact-limit folder hash")
+	}
+
+	root = t.TempDir()
+	for i := 0; i <= maxSkillVisitedEntries/5; i++ {
+		folder := filepath.Join(root, fmt.Sprintf("folder-%d", i))
+		writeSkillFiles(t, folder, map[string]string{
+			".DS_Store": "", "Thumbs.db": "", "desktop.ini": "", ".git/HEAD": "",
+		})
+	}
+	if hash, status, read := hashSkillFolder(root, maxSkillBytes); hash != "" || status != SkillContentTooLarge || read != 0 {
+		t.Fatalf("metadata-only walk above visit limit: hash %q, status %q, read %d", hash, status, read)
+	}
+}
+
+func TestHashSkillFolderReadBudget(t *testing.T) {
+	root := t.TempDir()
+	writeSkillFiles(t, root, map[string]string{"SKILL.md": "abc", "notes.txt": "def"})
+	for _, tc := range []struct {
+		limit  int64
+		read   int64
+		status string
+	}{
+		{limit: -1, status: SkillContentTooLarge},
+		{limit: 0, status: SkillContentTooLarge},
+		{limit: 5, read: 3, status: SkillContentTooLarge},
+		{limit: 6, read: 6, status: SkillContentOK},
+	} {
+		hash, status, read := hashSkillFolder(root, tc.limit)
+		if status != tc.status || read != tc.read || (hash != "") != (status == SkillContentOK) {
+			t.Errorf("limit %d: hash %q, status %q, read %d", tc.limit, hash, status, read)
+		}
 	}
 }
 
