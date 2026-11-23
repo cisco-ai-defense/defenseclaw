@@ -101,26 +101,21 @@ jobs:
       # check does not pin or preselect the next release number.
       - run: make check-version-sync
 
-  go-lint:
-    name: Go Lint
+  # Go Lint is make go-lint in two jobs side by side: go vet (gofmt and
+  # both go vet runs, make go-vet) and golangci-lint on the changed lines
+  # (make go-lint-analyzers). As one job it took 12.2-15.5 min, 3.2 of them
+  # in go vet ./... (CI run 44977112541). make go-lint runs both, in order.
+  go-vet:
+    name: Go Lint (go vet)
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.go != 'false' }}
     runs-on: ubuntu-latest
-    # make go-lint type-checks and vets the whole module (internal/gateway is
-    # one large compile unit); rel/1.0.10 push 5 (CI run 44013773983) was
-    # cancelled at 15m17s of a 15-minute budget with no finding (GAP-1090).
-    timeout-minutes: 25
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
-          # A PR checks out its merge commit. Its first parent is the target
-          # branch tip used for this check, so two commits retain the exact
-          # changed-line baseline without fetching every branch and tag.
-          # Push and dispatch jobs keep their original full-history baseline.
-          fetch-depth: ${{ github.event_name == 'pull_request' && 2 || 0 }}
           persist-credentials: false
       - uses: ./.github/actions/setup-go
-        id: go
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
           node-version: "24"
@@ -131,10 +126,106 @@ jobs:
       - run: make plugin
       - name: Type-check Amp policy plugin against official API
         run: make amp-plugin-typecheck
-      - name: Go lint (gofmt, go vet, golangci-lint on changed lines)
+      - name: Go vet (gofmt, go vet, the openshell_integration tag)
+        run: make go-vet
+
+  go-lint-analyzers:
+    name: Go Lint (golangci-lint)
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.go != 'false' }}
+    runs-on: ubuntu-latest
+    # golangci-lint type-checks the whole module (internal/gateway is one
+    # large compile unit); cold on a 4 vCPU runner it took about 8 min.
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          # A PR checks out its merge commit. Its first parent is the target
+          # branch tip used for this check, so two commits retain the exact
+          # changed-line baseline without fetching every branch and tag.
+          # Push and dispatch jobs keep their original full-history baseline.
+          fetch-depth: ${{ github.event_name == 'pull_request' && 2 || 0 }}
+          persist-credentials: false
+      - uses: ./.github/actions/setup-go
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: extensions/defenseclaw/package-lock.json
+      # golangci-lint type-checks the embedded OpenClaw extension tree that
+      # make go-lint syncs before it lints.
+      - run: make plugin sync-openclaw-extension
+      # golangci-lint itself and its analysis cache: on a 4 vCPU runner the
+      # pinned golangci-lint took 409 s cold (go run built it, then analysed
+      # every package) and 8 s with the analysis cache warm (dc-build-1, 4
+      # CPUs, 7cdbc8f4da); the cache is about 56 MB. The cache is content
+      # addressed (a changed package is analysed again), so a pull request
+      # restores the latest entry main saved. Only main saves, one entry per
+      # commit; nothing here changes what golangci-lint checks.
+      - name: Name the golangci-lint cache
+        id: golangci
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/^GOLANGCI_LINT_VERSION := //p' Makefile)"
+          test -n "$version"
+          prefix="golangci-lint-$RUNNER_OS-$RUNNER_ARCH-$(go env GOVERSION)-$version-"
+          {
+            echo "version=$version"
+            echo "prefix=$prefix"
+            echo "key=$prefix$GITHUB_SHA"
+            echo "dir=$HOME/.cache/dc-golangci-lint"
+          } >> "$GITHUB_OUTPUT"
+      - id: golangci-cache
+        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: ${{ steps.golangci.outputs.dir }}
+          key: ${{ steps.golangci.outputs.key }}
+          restore-keys: |
+            ${{ steps.golangci.outputs.prefix }}
+      - name: Go lint (golangci-lint on changed lines)
         env:
           GOLANGCI_LINT_BASE: ${{ github.event_name == 'pull_request' && 'HEAD^1' || 'origin/main' }}
-        run: make go-lint
+          GOLANGCI_DIR: ${{ steps.golangci.outputs.dir }}
+          GOLANGCI_VERSION: ${{ steps.golangci.outputs.version }}
+        run: |
+          set -euo pipefail
+          bin="$GOLANGCI_DIR/bin/golangci-lint"
+          if ! "$bin" version 2>/dev/null | grep -qF " ${GOLANGCI_VERSION#v} "; then
+            rm -rf "$GOLANGCI_DIR/bin"
+            GOBIN="$GOLANGCI_DIR/bin" go install "github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$GOLANGCI_VERSION"
+          fi
+          "$bin" version
+          GOLANGCI_LINT_CACHE="$GOLANGCI_DIR/cache" make go-lint-analyzers GOLANGCI_LINT="$bin"
+      - if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.golangci-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: ${{ steps.golangci.outputs.dir }}
+          key: ${{ steps.golangci.outputs.key }}
+
+  go-lint:
+    # The required check: passes when go vet and golangci-lint both passed,
+    # or when the pull request changes no Go and both were skipped.
+    name: Go Lint
+    needs: [changes, go-vet, go-lint-analyzers]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require go vet and golangci-lint
+        env:
+          GO_SUITE: ${{ needs.changes.outputs.go }}
+          VET_RESULT: ${{ needs.go-vet.result }}
+          ANALYZERS_RESULT: ${{ needs.go-lint-analyzers.result }}
+        run: |
+          set -euo pipefail
+          echo "go vet: $VET_RESULT, golangci-lint: $ANALYZERS_RESULT"
+          if [ "$GO_SUITE" = false ] && [ "$VET_RESULT" = skipped ] && [ "$ANALYZERS_RESULT" = skipped ]; then
+            echo "No Go change in this pull request: Go Lint was skipped."
+            exit 0
+          fi
+          test "$VET_RESULT" = success
+          test "$ANALYZERS_RESULT" = success
 
   # The defenseclaw-substrate Helm chart: lint, goldens and render
   # invariants with a pinned helm (the general Go shards have no helm and
@@ -392,7 +483,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18]
+        # 19 shards planned up to 543 s of recorded package time each (shard 3
+        # of #1490 on 447e0e8b09: 11.9 min in the test step); 32 plan at most
+        # 329 s.
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -412,7 +506,7 @@ jobs:
         timeout-minutes: 18
         env:
           GO_PACKAGE_SHARD: ${{ matrix.shard }}
-          GO_PACKAGE_SHARDS: 19
+          GO_PACKAGE_SHARDS: 32
         run: |
           set -euo pipefail
           go list ./... > "$RUNNER_TEMP/go-packages.txt"
@@ -599,12 +693,24 @@ jobs:
 
   go-pinned:
     # A pull request with no Go change still runs the Go tests that name a
-    # file it changes, such as a docs page a test reads.
+    # file it changes, such as a docs page a test reads. A README.md edit
+    # names 490 internal/gateway tests (and 25 smaller packages): as one
+    # go test process that set ran 840 s and hit the 14m -timeout (#1489 on
+    # 4afc511651). So the job runs as PINNED_SHARDS parallel shards: a
+    # target of more than 50 tests (or a whole package) is split over every
+    # shard by go_test_shards.py --match (recorded times, exact cover); a
+    # smaller target runs whole in one shard, assigned in turn. A target the
+    # script cannot split (fewer test files than shards) runs whole too, so
+    # every selected test still runs exactly once.
     name: Go Pinned Tests
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.go_pinned == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -617,17 +723,36 @@ jobs:
           cache: npm
           cache-dependency-path: extensions/defenseclaw/package-lock.json
       - run: make plugin
-      - name: Run the Go tests that name a changed file
+      - name: Run this shard of the Go tests that name a changed file
         env:
           GO_TESTS: ${{ needs.changes.outputs.go_tests }}
+          PINNED_SHARD: ${{ matrix.shard }}
+          PINNED_SHARDS: 8
         run: |
           set -euo pipefail
           status=0
-          while IFS=$'\t' read -r package pattern; do
-            echo "::group::go test -run '$pattern' $package"
-            go test -count=1 -timeout 14m -run "$pattern" "$package" || status=1
-            echo "::endgroup::"
-          done < <(python3 -c 'import json, os; [print(t["package"] + "\t" + t["run"]) for t in json.loads(os.environ["GO_TESTS"])]')
+          small=0
+          while IFS=$'\t' read -r package pattern names; do
+            regexes=()
+            plan=(python3 scripts/go_test_shards.py --package-dir "${package#./}" --match "$pattern"
+              --timings scripts/test-timings/go-linux.json --shard-count "$PINNED_SHARDS")
+            if [ "$names" -gt 50 ] && check="$("${plan[@]}" --check 2>&1)"; then
+              # Split over every shard; this shard may hold none of it.
+              if grep -qx "shard $PINNED_SHARD: 0 items" <<<"$check"; then continue; fi
+              mapfile -t regexes < <("${plan[@]}" --shard-index "$PINNED_SHARD" --bounded)
+              [ "${#regexes[@]}" -gt 0 ] || { echo "::error::no -run regex for $package shard $PINNED_SHARD"; exit 1; }
+            else
+              turn=$small
+              small=$((small + 1))
+              [ $((turn % PINNED_SHARDS)) -eq "$PINNED_SHARD" ] || continue
+              regexes=("$pattern")
+            fi
+            for regex in "${regexes[@]}"; do
+              echo "::group::go test $package (shard $PINNED_SHARD of $PINNED_SHARDS)"
+              go test -count=1 -timeout 14m -run "$regex" "$package" || status=1
+              echo "::endgroup::"
+            done
+          done < <(python3 -c 'import json, os; [print(t["package"] + "\t" + t["run"] + "\t" + str(1000 if t["run"] == "." else t["run"].count("|") + 1)) for t in json.loads(os.environ["GO_TESTS"])]')
           exit "$status"
 
   go-test-throughput:
@@ -729,9 +854,9 @@ jobs:
           mapfile -t coverage_parts < <(
             find coverage-parts -type f -name 'coverage-go-*.out' -print | sort
           )
-          # 124 gateway + 5 audit + 19 remaining-package shards, plus the
+          # 124 gateway + 5 audit + 32 remaining-package shards, plus the
           # frozen-gateway job.
-          test "${#coverage_parts[@]}" -eq 149
+          test "${#coverage_parts[@]}" -eq 162
           python3 scripts/merge_go_coverage.py \
             --output coverage.out \
             "${coverage_parts[@]}"
@@ -1714,42 +1839,53 @@ jobs:
           cache-hit: ${{ steps.go.outputs.cache-hit }}
 
   darwin-gateway-test-binary:
-    # One internal/gateway test binary for the six darwin-gateway parts.
-    # The package's test compile (about 2,000 test files, 18 MB of test
-    # source in one compile unit) peaks at 7.8 to 8.4 GB, more than the 7 GB
-    # of the hosted macOS runner. With the same commit and restored cache it
-    # took 74 s on one runner and 900 to 1,000 s on others (rel/1.0.10 run
-    # 43831888457: parts 1 and 4 at 1,130 and 1,195 s of their 1,200 s;
-    # PR #1456 run 43864447390: every part 700 to 1,000 s before its first
-    # test, parts 1 and 5 cancelled), and every part paid it. Here it runs
-    # once, under a 3 GiB GOMEMLIMIT with one compiler backend worker
-    # (-c=1): 4.6 GB at its peak and 154 s on 3 CPUs of defenseclaw-dev,
-    # against 7.8 GB and 70 s by default. Both only pace the compiler's
-    # memory; the tests are the same. go test -c runs go test's vet checks
-    # for the whole package, which part 1 used to run.
+    # One internal/gateway test binary for the six darwin-gateway parts,
+    # cross-compiled on Linux. The package's test compile (about 2,000 test
+    # files, 18 MB of test source in one compile unit) peaks at 7.8 to 8.4 GB.
+    # On the 7 GB hosted macOS runner it had to run paced (one compiler
+    # backend worker under a 3 GiB GOMEMLIMIT) and took 26.6 of the job's 27.9
+    # minutes (CI run 44948629340), the critical path of the whole run; the
+    # six parts waited on it. The 16 GB Linux runner compiles it unpaced.
+    # CGO_ENABLED=0 is how release builds every darwin binary
+    # (.goreleaser.yaml, make dist), so the parts run the code that ships;
+    # the one darwin cgo file (internal/useridentity/kerberoslink, a link
+    # flag for cgo builds) is outside the package's test dependencies either
+    # way. Go's linker ad-hoc signs darwin/arm64 executables, so the binary
+    # runs on the macOS runner as built. go test -c runs go test's vet checks
+    # for the whole package (GOOS=darwin), which part 1 used to run.
     name: Darwin Gateway Test Binary
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.enterprise != 'false' }}
-    runs-on: macos-latest
-    # The paced compile above still takes up to about 20 minutes on a slow
-    # macOS runner: rel/1.0.10 push 5 (CI run 44013773983) was cancelled at
-    # 20m32s of a 20-minute budget (GAP-1090).
-    timeout-minutes: 35
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           persist-credentials: false
+      # Its own cache entry: the shared Linux entry holds linux/amd64
+      # objects, and this job compiles every dependency for darwin/arm64.
       - uses: ./.github/actions/setup-go
+        id: go
+        with:
+          cache-name: darwin-cross
       - name: Build the internal/gateway test binary
         shell: bash
         env:
-          GOMEMLIMIT: 3GiB
+          CGO_ENABLED: "0"
+          GOOS: darwin
+          GOARCH: arm64
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/gateway-test"
-          # time -l logs the compile's time and peak memory.
-          /usr/bin/time -l go test -c -gcflags=github.com/defenseclaw/defenseclaw/internal/gateway=-c=1 \
-            -o "$RUNNER_TEMP/gateway-test/gateway.test" ./internal/gateway
+          # The tests find repository files from their own source paths
+          # (runtime.Caller), which the compiler records. Compile from the
+          # path the macOS runner checks out to, so those paths hold there;
+          # each darwin-gateway part checks that it runs from this path.
+          mac_workspace="/Users/runner/work/${GITHUB_REPOSITORY#*/}/${GITHUB_REPOSITORY#*/}"
+          sudo mkdir -p "$mac_workspace"
+          sudo mount --bind "$GITHUB_WORKSPACE" "$mac_workspace"
+          cd "$mac_workspace"
+          time go test -c -o "$RUNNER_TEMP/gateway-test/gateway.test" ./internal/gateway
           # upload-artifact drops the executable bit; the tar keeps it.
           tar -C "$RUNNER_TEMP/gateway-test" -cf "$RUNNER_TEMP/darwin-gateway-test.tar" gateway.test
       - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
@@ -1761,6 +1897,10 @@ jobs:
           if-no-files-found: error
           # A re-run of this job replaces the binary of its first attempt.
           overwrite: true
+      - uses: ./.github/actions/go-cache-save
+        with:
+          cache-name: darwin-cross
+          cache-hit: ${{ steps.go.outputs.cache-hit }}
 
   darwin-gateway:
     # The unix and darwin tests of internal/gateway in six time-balanced
@@ -1806,6 +1946,13 @@ jobs:
           TMPDIR="$(cd "$RUNNER_TEMP/go-tmp" && pwd -P)"
           export TMPDIR
           tar -C "$RUNNER_TEMP" -xf "$RUNNER_TEMP/darwin-gateway-test.tar"
+          # The binary was compiled from this path on Linux (see Darwin
+          # Gateway Test Binary); its tests read repository files there.
+          mac_workspace="/Users/runner/work/${GITHUB_REPOSITORY#*/}/${GITHUB_REPOSITORY#*/}"
+          if [ "$GITHUB_WORKSPACE" != "$mac_workspace" ]; then
+            echo "::error::the darwin gateway test binary was compiled for $mac_workspace, this runner checked out to $GITHUB_WORKSPACE"
+            exit 1
+          fi
           pkg=internal/gateway
           pattern="$(scripts/go-unix-test-pattern.sh "$pkg")"
           echo "$pkg: $(tr '|' '\n' <<<"$pattern" | wc -l | tr -d ' ') unix and darwin tests"
@@ -2105,10 +2252,25 @@ jobs:
   enterprise-windows-install:
     # Setup /ensure, /ensure (no-op), verify, status, detect.ps1, the
     # installed CLI's ensure and /uninstall with the four Windows services.
-    name: Enterprise Install Lane (Windows services)
+    # One lane in two jobs on fresh runners (CI run 44977112541: 18.4 min
+    # as one job, the two Setup installs about 3 min each): each part runs
+    # the preflight and the install, then its step groups
+    # (scripts/test-enterprise-windows-install.ps1 -Groups). Together the
+    # parts run every step once, in order (test_ci_workflow_efficiency).
+    name: Enterprise Install Lane (Windows services, ${{ matrix.part }})
     needs: enterprise-install-assets-windows
     runs-on: windows-latest
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - part: drift and refused config
+            key: drift-refusal
+            groups: drift refusal
+          - part: operate and reinstall
+            key: operate-reinstall
+            groups: operate reinstall
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -2133,14 +2295,17 @@ jobs:
           icacls $logs
       - name: Install, converge, verify and remove the standalone services
         shell: pwsh
+        env:
+          LANE_GROUPS: ${{ matrix.groups }}
         run: >-
           ./scripts/test-enterprise-windows-install.ps1
           -Setup (Join-Path $env:RUNNER_TEMP 'enterprise-install\DefenseClawSetup-Enterprise-Standalone-x64.exe')
           -Version 9.9.9 -ResultsRoot (Join-Path $env:RUNNER_TEMP 'lane-results')
+          -Groups ($env:LANE_GROUPS -split ' ')
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
-          name: enterprise-install-results-windows
+          name: enterprise-install-results-windows-${{ matrix.key }}
           path: ${{ runner.temp }}/lane-results/
           if-no-files-found: ignore
           retention-days: 5
@@ -2298,12 +2463,26 @@ jobs:
 
   enterprise-upgrade-windows:
     # The Windows lane of Enterprise Upgrade Lane: it needs only the
-    # standalone Setup, not the GoReleaser packages.
-    name: Enterprise Upgrade Lane (Windows)
+    # standalone Setup, not the GoReleaser packages. One lane in two jobs on
+    # fresh runners (CI run 44977112541: 14.1 min as one job): each part
+    # installs the previous release, stores the credential and upgrades,
+    # then runs its step groups; together they run every step once, in
+    # order (test_ci_workflow_efficiency).
+    name: Enterprise Upgrade Lane (Windows, ${{ matrix.part }})
     needs: [changes, enterprise-install-assets-windows]
     if: ${{ !cancelled() && needs.changes.outputs.enterprise != 'false' && needs.enterprise-install-assets-windows.result == 'success' }}
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - part: drift
+            key: drift
+            groups: drift
+          - part: refused config and operate
+            key: refusal-operate
+            groups: refusal operate
     env:
       GH_TOKEN: ${{ github.token }}
       LANE_ASSET: setup
@@ -2340,11 +2519,14 @@ jobs:
       - name: Upgrade, converge, verify and remove the standalone services
         if: steps.previous.outputs.version != ''
         shell: pwsh
+        env:
+          LANE_GROUPS: ${{ matrix.groups }}
         run: >-
           ./scripts/test-enterprise-windows-install.ps1
           -Setup (Join-Path $env:RUNNER_TEMP 'enterprise-install\DefenseClawSetup-Enterprise-Standalone-x64.exe')
           -Version 9.9.9 -ResultsRoot (Join-Path $env:RUNNER_TEMP 'lane-results')
           -UpgradeFrom '${{ steps.previous.outputs.package }}' -PreviousVersion '${{ steps.previous.outputs.version }}'
+          -Groups ($env:LANE_GROUPS -split ' ')
       - name: The upgrade kept the administrator config intent
         if: steps.previous.outputs.version != ''
         shell: bash
@@ -2354,7 +2536,7 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
-          name: enterprise-upgrade-results-Windows
+          name: enterprise-upgrade-results-Windows-${{ matrix.key }}
           path: ${{ runner.temp }}/lane-results/
           if-no-files-found: ignore
           retention-days: 5
