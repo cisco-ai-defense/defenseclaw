@@ -161,14 +161,44 @@ var userRequestRunWord = lazyregexp.New(`(?i)\b(run|runs|running|execute|execute
 var userRequestRunsDownloader = lazyregexp.New(`^(?i)(?:[\s:"'\x60]+|\([^()]{0,240}\)|(?:exactly|just|only|please|the|this|following|command|commands|and|nothing|else|for|me)\b)*(?:curl|wget)\b`)
 
 // userRequestAsksToRun reports a prompt with a run, execute or install word
-// whose object is not the download command.
+// whose object is not the download command. A run word is read from the
+// prompt's prose only, never from a path or URL: a whitespace-separated
+// token that holds a path separator ("/var/tmp/run-x/page.txt",
+// "C:\run\page.txt", "https://example.net/install/r") names a file or an
+// address, and a component of it that is a run word asks nothing. Reading
+// such a component as a request to run kept
+// chain.download_then_execute_same_artifact quiet on an unasked run of the
+// downloaded file whenever its path had a directory named run, run-x or
+// install (rel-1-0-10:GAP-1884; the cause of GAP-0774).
 func userRequestAsksToRun(prompt string) bool {
-	for _, match := range userRequestRunWord.FindAllStringIndex(prompt, -1) {
-		if !userRequestRunsDownloader.MatchString(prompt[match[1]:]) {
-			return true
+	if !userRequestRunWord.MatchString(prompt) {
+		return false
+	}
+	for start := 0; start < len(prompt); {
+		if userRequestSpace(prompt[start]) {
+			start++
+			continue
 		}
+		end := start
+		for end < len(prompt) && !userRequestSpace(prompt[end]) {
+			end++
+		}
+		if token := prompt[start:end]; !strings.ContainsAny(token, `/\`) {
+			for _, match := range userRequestRunWord.FindAllStringIndex(token, -1) {
+				if !userRequestRunsDownloader.MatchString(prompt[start+match[1]:]) {
+					return true
+				}
+			}
+		}
+		start = end
 	}
 	return false
+}
+
+// userRequestSpace reports an ASCII white-space byte, the separator of the
+// prompt tokens userRequestAsksToRun weighs.
+func userRequestSpace(c byte) bool {
+	return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\v' || c == '\f'
 }
 
 // userRequestedRunHosts returns the host names and IP addresses a prompt

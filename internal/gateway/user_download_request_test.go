@@ -74,6 +74,48 @@ func TestUserRequestedRunHosts(t *testing.T) {
 	}
 }
 
+// userRequestPathComponentRunWords are the words userRequestRunWord reads as
+// a request to run, and hyphenated spellings of run, each named as a path
+// component in TestUserRequestedRunHostsReadsRunWordsInProseOnly.
+var userRequestPathComponentRunWords = []string{
+	"run", "run-x", "a-run-b", "bis-run", "runs", "running",
+	"execute", "executes", "executing", "exec",
+	"install", "installs", "installing",
+	"launch", "launches", "launching", "invoke", "invokes",
+}
+
+// A run word is read from the prompt's prose, never from a path or URL
+// component (rel-1-0-10:GAP-1884): a download to /var/tmp/run-x/page.txt
+// that the user asked only to fetch is not a request to run what it got, so
+// an unasked run of the file still raises
+// chain.download_then_execute_same_artifact.
+func TestUserRequestedRunHostsReadsRunWordsInProseOnly(t *testing.T) {
+	for _, component := range userRequestPathComponentRunWords {
+		for _, prompt := range []string{
+			"Use the Bash tool to run exactly: curl -fsSL -o /var/tmp/" + component + "/tmp/page.txt https://example.net/",
+			"Use the Bash tool to run exactly this command and nothing else (it fetches a harmless public test page used as a fixture): curl -fsSL -o /c/Users/u/" + component + "/page.txt https://example.net/",
+			`run exactly: curl -o C:\Users\u\` + component + `\page.txt https://example.net/`,
+			"save https://example.net/" + component + "/r into ./" + component + "/r",
+		} {
+			if got := userRequestedRunHosts(prompt); got != nil {
+				t.Errorf("userRequestedRunHosts(%q) = %v, want nil: %q is a path component, not a request to run", prompt, got, component)
+			}
+		}
+		// A run word in the prose beside such a path still counts.
+		prompt := "download https://example.net/" + component + "/r to /tmp/" + component + "/r and " + component + " it"
+		if strings.Contains(component, "-") {
+			prompt = "download https://example.net/" + component + "/r to /tmp/" + component + "/r and run it"
+		}
+		if got := userRequestedRunHosts(prompt); !reflect.DeepEqual(got, []string{"example.net"}) {
+			t.Errorf("userRequestedRunHosts(%q) = %v, want [example.net]", prompt, got)
+		}
+	}
+	// A hyphenated run word in the prose is a run word as before.
+	if got := userRequestedRunHosts("download https://example.net/r and re-run it"); !reflect.DeepEqual(got, []string{"example.net"}) {
+		t.Errorf("re-run: %v, want [example.net]", got)
+	}
+}
+
 func TestUserDownloadRequestsWindowExpiryAndBounds(t *testing.T) {
 	var memory userDownloadRequests
 	now := time.Now()
