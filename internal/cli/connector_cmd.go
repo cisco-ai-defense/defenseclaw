@@ -1426,14 +1426,23 @@ func runConnectorPrepareRollback(cmd *cobra.Command, _ []string) error {
 			converted[name] = count
 		}
 	}
-	// A release before 1.0.10 has no route-only listener: the agent model
-	// settings route-only wrote go back before it is installed, so the
-	// agent does not get 401 on every call (rel-1-0-10 GAP-0602). The
+	// The route-only record (the user's own model_provider or
+	// ANTHROPIC_BASE_URL a render replaced) lives in the data folder the
+	// rollback swaps out. The install brought back restores a render only
+	// with a record of its own: without one its teardown (the prune after
+	// the swap) deleted our values and the user's with them, and Codex fell
+	// back to the OpenAI sign-in (rel-1-0-10 GAP-2021); a release before
+	// 1.0.10 has no route-only listener at all, and the agent got 401 on
+	// every call (GAP-0602). So the settings go back here, from this
+	// release's record, as routing disable and teardown put them back. The
 	// installers run this with the gateway stopped, after the prompt.
 	routeRestored, routeFailed := map[string]bool{}, map[string]string{}
-	if !connectorRollbackRestore && rollbackTargetLacksRouteOnly(opts.RollbackTargetVersion) {
+	if !connectorRollbackRestore {
 		for _, name := range config.RouteOnlyCapableConnectors {
 			if connectorFlagName != "" && connectorFlagName != name {
+				continue
+			}
+			if connector.RollbackTargetRestoresRouteOnly(dataDir, name) {
 				continue
 			}
 			conn, ok := reg.Get(name)
@@ -1441,6 +1450,9 @@ func runConnectorPrepareRollback(cmd *cobra.Command, _ []string) error {
 			if !ok || !routable {
 				continue
 			}
+			// Only a render this install recorded is reported; the restore
+			// also takes out one whose record was lost.
+			rendered := connector.RouteOnlyRecordApplied(dataDir, name)
 			restore, err := bindConnectorLifecycleConfigHome(name)
 			if err == nil {
 				err = rc.ApplyRouteOnly(opts, nil)
@@ -1450,7 +1462,9 @@ func runConnectorPrepareRollback(cmd *cobra.Command, _ []string) error {
 				routeFailed[name] = "route-only model settings were not put back (" + err.Error() + "); run defenseclaw routing disable --connector " + name + " before the rollback, or remove the DefenseClaw base URL and route header from its settings by hand"
 				continue
 			}
-			routeRestored[name] = true
+			if rendered {
+				routeRestored[name] = true
+			}
 		}
 	}
 	// until 1.1 (GAP-2136): the agent files the OpenHands/OmniGent teardown
