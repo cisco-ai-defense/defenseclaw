@@ -45,10 +45,10 @@ Every decision you make lives in one file, `~/.defenseclaw/config.yaml`. The run
   <Edge from="gateway" to="audit" label="records" />
 </Flow>
 
-## What DefenseClaw is not
+## Isolation
 
 <Callout type="warn">
-DefenseClaw does not prove an agent is safe, and it does not isolate the agent on its own. For isolation, run the agent in an OpenShell sandbox with `defenseclaw sandbox run`. Pair DefenseClaw with least-privilege credentials, human review and CI gates.
+DefenseClaw is a guardrail and evidence layer, not an isolation boundary. For isolation, run the agent in an OpenShell sandbox with `defenseclaw sandbox run`, and use least-privilege credentials, human review and CI gates alongside it.
 </Callout>
 
 ## Features

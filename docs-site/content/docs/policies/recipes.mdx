@@ -72,7 +72,7 @@ You are an AI agent. Turn one sentence from the user into one rule in a custom r
 
    Expected: no output.
    If the source folder is missing, run `defenseclaw init` first and tell the user.
-   An agent that copies into `~/.defenseclaw` changes DefenseClaw's own files (`tamper.detector_state_write`: DefenseClaw protects its own files with every rule pack). With the `strict` and `managed-strict` packs DefenseClaw blocks that copy in every mode, observe included; the default and permissive packs raise a HIGH alert. Do not run it yourself: ask the user to run step 2 themselves, and continue.
+   A copy into `~/.defenseclaw` from an agent counts as a change to DefenseClaw's own files, which the packs protect (see [Modes](/docs/guardrail/packs-and-modes#modes)). Do not run it yourself: ask the user to run step 2 themselves, and continue.
 
 3. Write the rule file. Use this shape, which the quickstart demo also uses. Replace the id, expression, pattern and title.
 
