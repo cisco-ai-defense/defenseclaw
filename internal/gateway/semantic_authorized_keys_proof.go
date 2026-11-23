@@ -1104,12 +1104,27 @@ func copyModeByNameGuestCWD(ctx context.Context, request trustedActionRequest) s
 // copyModeCallMayNameSSHFolder is a lexical gate on the by-name reading
 // (GAP-0999): it holds for a call that may name home's SSH folder or a place
 // in it, the only target whose finding the reading adds
-// (appendTrustedHomeResolvedSSHKeyWriteFinding). Quotes and backslashes are
-// dropped first, so ~/'.ssh', ~/.s"sh" and .\ssh still name it; a pattern in
-// the folder's name (~/.ss?, ~/.s*, ~/.[s]sh, ~/.{ssh,aws}, ~/.*, ~/*) and a call
-// in the folder itself also hold. A call that builds the name at run time
-// (ANSI-C quoting, printf, a decoder) holds too. Anything else names no
-// such place by its words alone, so the reading would find nothing.
+// (appendTrustedHomeResolvedSSHKeyWriteFinding). The gate is there for speed
+// only, so it says no only where the reading, which follows bash, finds
+// nothing (TestFX0999GateNeverSkipsAByNameDecision); anything it cannot
+// read holds. Quotes and backslashes are dropped first, so ~/'.ssh',
+// ~/.s"sh" and .\ssh still name the folder. It holds for:
+//   - a call in the folder itself;
+//   - the folder's or the keys file's name;
+//   - any expansion or a name built at run time: $x, ${x:-s}, ${HOME},
+//     $(...), $'...', `...`, printf, eval, a decoder. x=s; tar cz ~/.s${x}h,
+//     D=~/.s; tar cz ${D}sh and sh -c "x=s; tar cz ~/.s\${x}h" passed the
+//     old gate, and the actor allowed what the laptop blocks
+//     (substrate-1 GAP-1022);
+//   - a nested shell, whose words its shell reads again;
+//   - a pattern in a name that starts with a dot (~/.ss?, ~/.s*, ~/.[s]sh,
+//     ~/.*), a brace expansion ({.s,}sh), and a pattern right under a
+//     folder that may be home (~/*, ./?ssh, /*);
+//   - any pattern in a call that may turn on dotglob, GLOBIGNORE or globdots
+//     (shopt -s dotglob; tar cz *, GAP-1022).
+//
+// Without dotglob bash's * and ? never match a leading dot, so src/* names
+// no SSH folder and passes no second decision.
 func copyModeCallMayNameSSHFolder(command, cwd, home string) bool {
 	if pathWithin(cwd, path.Join(home, ".ssh")) {
 		return true
@@ -1121,24 +1136,99 @@ func copyModeCallMayNameSSHFolder(command, cwd, home string) bool {
 		}
 		return r
 	}, command))
-	if strings.Contains(text, "ssh") || strings.Contains(text, "$'") || strings.Contains(text, "$(") ||
-		strings.Contains(text, "`") || strings.Contains(text, "printf") || strings.Contains(text, "eval") ||
-		strings.Contains(text, "base64") || strings.Contains(text, "xxd") {
-		return true
-	}
-	for i := 0; i+1 < len(text); i++ {
-		if text[i] != '.' && text[i] != '/' {
-			continue
-		}
-		j := i + 1
-		for text[i] == '.' && j < len(text) && j < i+3 && text[j] == 's' {
-			j++
-		}
-		if j < len(text) && strings.IndexByte("?*[{", text[j]) >= 0 {
+	for _, word := range copyModeRunTimeNames {
+		if strings.Contains(text, word) {
 			return true
 		}
 	}
-	return strings.Contains(text, "authorized")
+	// A bracket class can spell a leading dot without spelling the folder's
+	// name literally. Let the by-name decision settle these uncommon calls.
+	if strings.Contains(text, "[") {
+		return true
+	}
+	if strings.ContainsAny(text, "*?") && hookpaths.CommandMayDotglob(command) {
+		return true
+	}
+	homeBase := strings.ToLower(path.Base(home))
+	component := 0 // where the path component before text[i] starts
+	for i := 0; i < len(text); i++ {
+		c := text[i]
+		next := byte(0)
+		if i+1 < len(text) {
+			next = text[i+1]
+		}
+		switch {
+		case c == '.':
+			j := i + 1
+			for j < len(text) && j < i+3 && text[j] == 's' {
+				j++
+			}
+			if j < len(text) && strings.IndexByte("?*[{", text[j]) >= 0 {
+				return true
+			}
+		case (c == '/' || c == '~') && strings.IndexByte("?*[", next) >= 0 && next != 0:
+			if c == '~' {
+				return true
+			}
+			switch folder := text[component:i]; {
+			case folder == "", folder == ".", folder == "..", folder == homeBase, folder[0] == '~':
+				return true
+			}
+		case c == '{' && copyModeBraceExpansion(text[i+1:]):
+			return true
+		}
+		if c == '/' || strings.IndexByte(copyModeWordBreaks, c) >= 0 {
+			component = i + 1
+		}
+	}
+	return copyModeNestedShell(text)
+}
+
+// copyModeRunTimeNames are the gate's words for a name the call may build at
+// run time, or the folder's own (lowercased, quotes dropped). One spec
+// string: $ is every expansion.
+var copyModeRunTimeNames = strings.Fields("ssh authorized $ ` printf eval base64 xxd")
+
+// copyModeWordBreaks end a word or a path component for the gate.
+const copyModeWordBreaks = " \t\n;&|()<>=:,{}"
+
+// copyModeShells are the shells whose -c or script words are read again.
+var copyModeShells = strings.Fields("sh bash zsh dash ksh mksh ash yash fish busybox pwsh powershell")
+
+// copyModeBraceExpansion reports text after a { that bash brace-expands:
+// a word that is not empty, with a comma or .. before its }.
+func copyModeBraceExpansion(text string) bool {
+	if text == "" || strings.IndexByte(" \t\n}", text[0]) >= 0 {
+		return false
+	}
+	for i := 0; i < len(text) && text[i] != '}'; i++ {
+		if text[i] == ',' || text[i] == '.' && i+1 < len(text) && text[i+1] == '.' {
+			return true
+		}
+	}
+	return false
+}
+
+// copyModeNestedShell reports a word of text that runs a shell (sh,
+// /bin/bash, busybox): the words it is given are read again.
+func copyModeNestedShell(text string) bool {
+	for start := 0; start < len(text); {
+		end := start
+		for end < len(text) && (text[end] >= 'a' && text[end] <= 'z' || text[end] >= '0' && text[end] <= '9' ||
+			strings.IndexByte("_.+-/", text[end]) >= 0) {
+			end++
+		}
+		if end > start {
+			word := text[start:end]
+			if slices.Contains(copyModeShells, word[strings.LastIndexByte(word, '/')+1:]) {
+				return true
+			}
+			start = end
+			continue
+		}
+		start++
+	}
+	return false
 }
 
 func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, facts actionfacts.Facts) bool {
