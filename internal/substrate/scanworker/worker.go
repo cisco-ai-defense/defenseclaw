@@ -317,8 +317,10 @@ func (w *Worker) refusePeer(rw http.ResponseWriter, r *http.Request) bool {
 	if w.Pod == nil {
 		return false
 	}
-	if pid := peerPID(r.Context()); pid > 1 {
-		answer(rw, http.StatusForbidden, scanner.RemoteScanAnswer{Code: "refused", Error: "a request from the scan worker's own container"})
+	// The gateway is outside this container's PID namespace and appears as
+	// PID 0. A missing credential is refused too, not treated as a gateway.
+	if pid := peerPID(r.Context()); pid != 0 {
+		answer(rw, http.StatusForbidden, scanner.RemoteScanAnswer{Code: "refused", Error: "a request not proven to be from the gateway container"})
 		return true
 	}
 	return false
