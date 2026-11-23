@@ -83,11 +83,17 @@ func gap0622Rows() []gap0622Row {
 		// GAP-0623: the word is read in the folder the cd chain gives.
 		{"cd-sub-write", "cd sub && echo x >> dc-link", "laptop"},
 		{"cd-sub-semicolon-write", "cd sub; echo x >> dc-link", "laptop"},
+		{"eval-cd-sub-write", `eval "cd sub && echo x >> dc-link"`, "laptop"},
+		{"sh-c-cd-sub-write", `bash -c 'cd sub && echo x >> dc-link'`, "laptop"},
+		{"dd-of-link", "dd if=/dev/zero of=dc-link count=1", "laptop"},
+		{"cd-sub-dd-of-link", "cd sub && dd if=/dev/zero of=dc-link count=1", "laptop"},
 		{"two-places-state-second", "cd a && echo x >> lk && cd ../b && echo x >> lk", "laptop"},
 		{"two-places-state-first", "cd b && echo x >> lk && cd ../a && echo x >> lk", "laptop"},
 		{"two-places-benign", "cd svc1 && cat py && cd ../svc2 && cat py", "exact"},
 		// Benign: the laptop's exact answer.
 		{"cd-sub-cat-notes", "cd sub && cat notes", "exact"},
+		{"eval-cd-sub-cat-notes", `eval "cd sub && cat notes"`, "exact"},
+		{"dd-plain-of", "dd if=README.md of=gap0622-copy bs=1k", "exact"},
 		{"cd-sub-ls", "cd sub && ls -l", "exact"},
 		{"git-add-70", "git add " + words(70, "f%d.txt"), "exact"},
 		{"dd-plain", "dd if=README.md of=/tmp/gap0622-copy bs=1k", "exact"},
