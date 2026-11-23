@@ -38,6 +38,10 @@ type StreamParser struct {
 	model string
 
 	anth anthropicUsage // merged field by field across message_start/_delta
+	// anthFinal is set once the final Anthropic usage arrived (message_delta
+	// or the Bedrock invocation-metrics trailer). message_start alone holds
+	// an opening output count (1), not what the call was billed.
+	anthFinal bool
 	// chat, responses, gemini and ollama blocks replace the previous one.
 	hasBlock bool
 
@@ -246,6 +250,7 @@ func (s *StreamParser) handleAnthropic(doc []byte) {
 		}
 	case "message_delta":
 		s.mergeAnthropic(e.Usage)
+		s.anthFinal = s.anthFinal || e.Usage != nil
 	}
 	if bytes.Contains(doc, []byte("amazon-bedrock-invocationMetrics")) {
 		s.handleInvocationMetrics(doc)
@@ -298,10 +303,17 @@ func (s *StreamParser) handleInvocationMetrics(doc []byte) {
 	if !s.anth.OutputTokens.ok {
 		s.anth.OutputTokens = m.Metrics.Out
 	}
-	s.hasBlock = true
+	s.hasBlock, s.anthFinal = true, true
 }
 
 func (s *StreamParser) keepTail(p []byte) { appendTail(&s.tail, p, maxTailBytes) }
+
+// Opening reports whether the usage read so far is only the opening count
+// of an Anthropic stream that never sent its final usage (message_start
+// but no message_delta). Call it after Usage. Safe on a nil receiver.
+func (s *StreamParser) Opening() bool {
+	return s != nil && (s.family == FamilyMessages || s.family == FamilyInvoke) && s.hasBlock && !s.anthFinal
+}
 
 // Usage finalises and returns the usage read so far. Call it after the body
 // ended. Safe on a nil receiver (returns empty Usage).
@@ -474,6 +486,7 @@ func (s *StreamParser) handleBigLine() {
 		var a anthropicUsage
 		if obj := lastObject(s.bigTail, "usage"); obj != nil && json.Unmarshal(obj, &a) == nil {
 			s.mergeAnthropic(&a)
+			s.anthFinal = s.anthFinal || bytes.Contains(head, []byte("message_delta"))
 		}
 		return
 	}

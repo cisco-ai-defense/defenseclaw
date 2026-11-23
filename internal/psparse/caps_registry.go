@@ -11,4 +11,5 @@ import "github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 var (
 	_ = bounded.Register("psparse.maxDepth", bounded.Depth, int(maxDepth))
 	_ = bounded.Register("psparse.maxInput", bounded.Items, int(maxInput))
+	_ = bounded.Register("psparse.maxPortNesting", bounded.Depth, maxPortNesting)
 )

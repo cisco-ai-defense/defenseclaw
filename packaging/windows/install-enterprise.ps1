@@ -4492,8 +4492,11 @@ function Get-DefenseClawRenderedEnterpriseTargets {
         }
     )
     if ($users.Count -eq 0) {
-        # An empty manifest is valid YAML. This finite-profile shorthand
-        # transaction simply has no current eligible users to enroll.
+        # No eligible users: the bare `targets:` decodes as null, and the
+        # guardian manifest loader refuses it rather than withdraw every
+        # enrolled hook on an enumeration that came back empty. Only an
+        # explicit `targets: []` withdraws; the -DeferredConfig placeholder
+        # writes that literal itself.
         return $sb.ToString()
     }
     $activeProfiles = @()
@@ -4728,7 +4731,9 @@ try {
         throw '-Mode / -Connector are valid only with Install, Upgrade, or Repair'
     }
     if ($DeferredConfig) {
-        # Use a real, valid managed-enterprise policy and an empty target set so
+        # Use a real, valid managed-enterprise policy for this -EnterpriseProfile
+        # (a standalone config must name enterprise.profile standalone, or the
+        # gateway refuses it; rel-1-0-10:GAP-1749) and an empty target set so
         # the ordinary authenticated install transaction can establish every
         # machine artifact and ACL. All services remain disabled. A later
         # Repair with both real inputs performs target preparation and the
@@ -4744,14 +4749,18 @@ try {
         [IO.File]::WriteAllText(
             $deferredConfigPath,
             (Get-DefenseClawRenderedEnterpriseConfig `
-                -Mode observe -Connectors $deferredConnectors),
+                -Mode observe -Connectors $deferredConnectors `
+                -ForProfile $EnterpriseProfile),
             [Text.UTF8Encoding]::new($false)
         )
+        # The placeholder target set is an explicit empty list. A bare
+        # `targets:` decodes as null, which the guardian manifest loader
+        # refuses as a possibly truncated withdrawal of enrolled hooks
+        # (rel-1-0-10:GAP-1749). Install refuses -DeferredConfig over an
+        # active deployment, so this stage never has enrolled hooks to keep.
         [IO.File]::WriteAllText(
             $deferredManifestPath,
-            (Get-DefenseClawRenderedEnterpriseTargets `
-                -Connectors $deferredConnectors -Profiles @() `
-                -ForProfile $EnterpriseProfile),
+            "version: 1`ntargets: []`n",
             [Text.UTF8Encoding]::new($false)
         )
         foreach ($renderedPath in @($deferredConfigPath, $deferredManifestPath)) {

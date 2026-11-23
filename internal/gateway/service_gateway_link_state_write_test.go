@@ -15,6 +15,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // serviceGatewayStateRow is one Claude Code Bash call. {E} is a folder
@@ -55,12 +56,8 @@ func judgeServiceGatewayStateRows(t *testing.T, rows []serviceGatewayStateRow) {
 			t.Fatal(err)
 		}
 	}
-	if err := os.Symlink(state, filepath.Join(ext, "y")); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(keys, filepath.Join(ext, "x")); err != nil {
-		t.Fatal(err)
-	}
+	testenv.Symlink(t, state, filepath.Join(ext, "y"))
+	testenv.Symlink(t, keys, filepath.Join(ext, "x"))
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
 	const sid = "S-1-5-21-1-2-3-1101"

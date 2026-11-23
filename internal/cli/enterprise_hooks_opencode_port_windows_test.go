@@ -337,6 +337,57 @@ func TestManagedWindowsGuardianUnknownAccountKeepsKnownAssignments(t *testing.T)
 	}
 }
 
+// GAP-1798: a signed-out account whose file Windows gives no S4U logon for
+// is pending until it signs in. It keeps its verify warning and its
+// binding, but it is no state error, so the guardian is not held in a retry
+// loop; any other account failure still fails the pass.
+func TestManagedWindowsGuardianSignedOutAccountIsPendingNotStateError(t *testing.T) {
+	f := newManagedWindowsOpenCodePortFixture(t)
+	firstHome, secondHome := f.add(t, openCodeSIDFirst), f.add(t, openCodeSIDSecond)
+	signedOut := map[string]bool{openCodeSIDFirst: true}
+	runAs := enterpriseHookWindowsOpenCodeRunAs
+	enterpriseHookWindowsOpenCodeRunAs = func(profile enterprisehooks.TargetCredentials, fn func() error) error {
+		if signedOut[profile.SID] {
+			return fmt.Errorf("%w (S4U logon: The request is not supported.)", enterprisehooks.ErrEnrolledUserSignedOut)
+		}
+		return runAs(profile, fn)
+	}
+	// First pass: the unrecorded signed-out account cannot be read.
+	ports, err := f.run(t)
+	if err != nil || ports[openCodeSIDFirst] != 0 || ports[openCodeSIDSecond] == 0 || f.files[secondHome] != ports[openCodeSIDSecond] ||
+		f.record[openCodeSIDFirst] == 0 || len(f.warningState.Unknown) != 1 || f.warningState.Unknown[0].SID != openCodeSIDFirst {
+		t.Fatalf("signed-out read: ports=%v record=%v files=%v warnings=%v err=%v", ports, f.record, f.files, f.warningState.Unknown, err)
+	}
+	// Later passes: the recorded signed-out account cannot be written.
+	ports, err = f.run(t)
+	if err != nil || ports[openCodeSIDFirst] != 0 || f.files[firstHome] != 0 || len(f.warningState.Unknown) != 1 ||
+		!strings.Contains(f.warningState.Unknown[0].Fix, "sign in") {
+		t.Fatalf("signed-out write: ports=%v files=%v warnings=%v err=%v", ports, f.files, f.warningState.Unknown, err)
+	}
+	// The account signs in: the next pass writes its recorded port.
+	delete(signedOut, openCodeSIDFirst)
+	ports, err = f.run(t)
+	if err != nil || ports[openCodeSIDFirst] != f.record[openCodeSIDFirst] || f.files[firstHome] != ports[openCodeSIDFirst] || len(f.warningState.Unknown) != 0 {
+		t.Fatalf("sign-in did not write the port: ports=%v record=%v files=%v warnings=%v err=%v", ports, f.record, f.files, f.warningState.Unknown, err)
+	}
+	// Another write failure for the same account still fails the pass.
+	f.writeFailure[firstHome] = true
+	if _, err = f.run(t); err == nil || !strings.Contains(err.Error(), firstHome) {
+		t.Fatalf("a real write failure is not a state error: %v", err)
+	}
+	// Another run-as failure (not the signed-out sentinel) still fails the pass.
+	delete(f.writeFailure, firstHome)
+	enterpriseHookWindowsOpenCodeRunAs = func(profile enterprisehooks.TargetCredentials, fn func() error) error {
+		if profile.SID == openCodeSIDFirst {
+			return fmt.Errorf("enterprise hooks: target token profile differs")
+		}
+		return runAs(profile, fn)
+	}
+	if _, err = f.run(t); err == nil || !strings.Contains(err.Error(), "profile differs") {
+		t.Fatalf("a real run-as failure is not a state error: %v", err)
+	}
+}
+
 func TestManagedWindowsGuardianUnreadableClaimsDeferThePass(t *testing.T) {
 	f := newManagedWindowsOpenCodePortFixture(t)
 	f.add(t, openCodeSIDFirst)

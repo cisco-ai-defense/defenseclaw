@@ -1,0 +1,9 @@
+{
+ "frozen": "2026-11-21",
+ "overrides": [],
+ "percent": 30,
+ "rule": "test split for the repository tests only (CI111B GAP-1581); the gate uses holdout-split-v1.json",
+ "salt": "s7-holdout-test",
+ "tuned_corpora": [],
+ "version": "s7-holdout-test"
+}

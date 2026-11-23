@@ -13,6 +13,16 @@ Tokenomics records the tokens and the cost of each model call that goes through 
 
 Cost comes from a price table that you write in `config.yaml`. DefenseClaw ships no prices and the gateway prices a call only from that table. A model that is not in the table has no cost. It does not have a cost of zero.
 
+{/* tv-demo:begin see */}
+## See it run
+
+<Video
+  src="router-dashboards"
+  aspect="16/9"
+  caption="The routing and tokenomics boards in Grafana, recorded live with three accounts running Codex through the router: tokens and cost per model, the route of each call and why, what routing saved against always using the strong model, spend against each budget, and a user crossing a budget limit as it happens. Names and users are replaced with examples, prices are example prices, and waits are shortened."
+/>
+{/* tv-demo:end see */}
+
 ## Turn it on
 
 Set `observability.tokenomics.enabled` and add a price table. The numbers below are examples. Use the prices of your own contract.
@@ -44,11 +54,26 @@ defenseclaw setup tokenomics --disable   # tokenomics and the local store off
 
 `--disable` turns tokenomics and the local store off. When the gateway applies the change, it writes the usage it still buffers, closes the store and writes it no more. The price table stays in `config.yaml`, and the usage already recorded stays in `model_usage` in the data directory until you delete that folder.
 
-Check the seeded prices against your contract before you rely on the cost. A model with no row has no cost.
+The seeded table (version `2026-11-21.1`) holds the list prices of Claude Haiku, Sonnet and Opus 4.5 on the Claude API and on Amazon Bedrock, and of OpenAI `gpt-5` and `gpt-5.2` with their dated snapshots, as the vendors' pricing pages showed them on 2026-11-21: [Claude pricing](https://platform.claude.com/docs/en/about-claude/pricing), [OpenAI pricing](https://developers.openai.com/api/docs/pricing) and the [AWS Price List for Amazon Bedrock](https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/AmazonBedrockFoundationModels/current/index.json). The Bedrock rows are the global endpoint rates; a regional (`us.`, `eu.`, `apac.`) endpoint is billed 10 percent more. Cache writes are priced at the 5-minute rate. Check the seeded prices against your contract before you rely on the cost. A model with no row has no cost.
 
 On a managed host both blocks come from the admin `config.yaml` in the signed bundle. A user cannot set them.
 
 A bundle that sets `observability.tokenomics` or `observability.pricing` needs `--min-product-version 1.0.10` when it is signed, and signing refuses it with `config_invalid` otherwise. The key counts whatever its value, so `tokenomics: {enabled: false}` needs 1.0.10 too. A device on 1.0.9 or earlier refuses the whole admin `config.yaml` for either block, because its schema is closed. A device group that stays on an older build gets a `config.yaml` without both blocks.
+
+
+{/* tv-demo:begin shots */}
+## What you see
+
+The setup tokenomics status command shows whether usage is recorded and which price table is in force. The routing pricing show command lists the prices, in USD per million tokens. The prices in the screenshot are examples.
+
+![The setup tokenomics status output followed by the routing pricing show output: tokenomics on, local store on, the price table version and its model rows with input and output prices per million tokens](/images/routing/cli-tokenomics.png)
+
+The Tokenomics board in Grafana shows the same calls: the model the agent asked for against the model that answered, with the known cost of each route, and the cost of each user.
+
+![The Per call row of the Tokenomics board in Grafana: the routed versus requested model table with calls and known cost per route, and the top users by cost](/images/routing/grafana-tokenomics-spend.png)
+
+![The Cost breakdown row of the Tokenomics board: cost by model, by route decision, by connector and by guardrail profile](/images/routing/grafana-tokenomics-breakdown.png)
+{/* tv-demo:end shots */}
 
 ## What a usage record holds
 
@@ -56,7 +81,7 @@ Each finished model call writes one `log.model.usage` record in the `model.io` b
 
 | Part | Fields |
 | --- | --- |
-| Tokens | input, output, cache read, cache creation and reasoning counts, each only when the provider reported it, and the response model. `defenseclaw.usage.source` says where the counts came from: the response body, the end of a stream, or the agent OTLP stream |
+| Tokens | input, output, cache read, cache creation and reasoning counts, each only when the provider reported it, and the response model. `defenseclaw.usage.source` says where the counts came from: the response body, the end of a stream, the response headers (Bedrock), or the agent OTLP stream |
 | Routing | the model the client asked for, the model and provider that served the call, the route decision, category, rule ID and source, and the guardrail profile |
 | Actor | the connector, the call role, the API family and the verified identity of the caller |
 | Timing | upstream time, time to first token and total time |
@@ -119,10 +144,11 @@ The table is flat. Some billing features change the price in ways it cannot show
 
 | Reason | Cause |
 | --- | --- |
-| `service_tier:<tier>` | An Anthropic tier other than `standard`, or an OpenAI `flex`, `priority` or `scale` tier. |
+| `service_tier:<tier>` | An Anthropic `priority` or `batch` tier, or an OpenAI `flex`, `priority` or `scale` tier. |
 | `cache_ttl_1h` | Anthropic cache writes with a one hour lifetime. |
 | `server_tools` | Anthropic web search or web fetch server tools. |
-| `long_context` | A Gemini prompt of more than 200,000 tokens. |
+| `long_context` | A Gemini Pro prompt of more than 200,000 tokens. |
+| `speed:fast` | Claude Code fast mode, in the agent OTLP import only. The reported cost of the call already includes it. |
 
 ## Metrics
 
@@ -138,7 +164,7 @@ Counters carry the numbers to Prometheus, Grafana or any other metric destinatio
 
 ### Saving against the requested model
 
-`defenseclaw.model.cost.baseline` is the counterfactual of routing: the call's own tokens priced on the model the client asked for, from the same price table and the same formula. `defenseclaw.model.cost.compared` is the actual cost of the same calls. A call is counted on both sides only when its own cost is known and the requested model has a price (a side that is free adds nothing to its counter); every other call is counted on neither, so the difference of the two counters is the saving of exactly the calls that can be compared. The log record carries the same number as `defenseclaw.cost.baseline_usd` and is absent when there is no baseline. When an agent reports its own cost for a call, that reported cost is the cost side and the baseline still comes from your price table, so the two sides can differ by the provider's own pricing. Judge, decision model and AI Defense calls have no requested model and no baseline. Both counters use the labels of `defenseclaw.model.cost`.
+`defenseclaw.model.cost.baseline` is the counterfactual of routing: the call's own tokens priced on the model the client asked for, from the same price table and the same formula. `defenseclaw.model.cost.compared` is the actual cost of the same calls. A call is counted on both sides only when its own cost is known and the requested model has a price (a side that is free adds nothing to its counter); every other call is counted on neither, so the difference of the two counters is the saving of exactly the calls that can be compared. The log record carries the same number as `defenseclaw.cost.baseline_usd` and is absent when there is no baseline. When an agent reports its own cost for a call, that reported cost is the cost side and the baseline still comes from your price table, so the two sides can differ by the provider's own pricing. Only agent calls have a baseline. Judge, decision model, AI Defense and router classifier calls have none. Both counters use the labels of `defenseclaw.model.cost`.
 
 The [Routing, Savings & Budgets board](/docs/observability/grafana-dashboards#routing-savings-and-budgets-board) shows both counters and the saving.
 
@@ -149,11 +175,11 @@ The [Routing, Savings & Budgets board](/docs/observability/grafana-dashboards#ro
 | `defenseclaw.semantic_routing.decision` | decisions | One count per routing decision, from the guardrail proxy and the route-only listener. Labels: `result` (`applied`, `fallback`, `denied`), `error.code`, `decision`, `connector`, `route_source`, `route_category`, `filtered_by`, `listener`, `deny_reason` and `budget_id`. |
 | `defenseclaw.budget.limit` | USD | The limit of one routing budget. |
 | `defenseclaw.budget.spend` | USD | What all subjects of the budget spent in the current window. Absent while the spend is loading, and absent for a group or connector budget under a fleet budget store (the store answers a pooled budget with over the limit only, so a device cannot know its total). |
-| `defenseclaw.budget.peak_subject_spend` | USD | What the highest single subject spent in the window. |
+| `defenseclaw.budget.peak_subject_spend` | USD | What the highest single subject spent in the window. Absent in the same cases as `defenseclaw.budget.spend`. |
 | `defenseclaw.budget.subjects_exceeded` | subjects | Subjects at or over the limit. |
 | `defenseclaw.budget.store.healthy`, `defenseclaw.budget.store.sync_age` | state, seconds | The fleet budget store sync, reported only when `routing.admin.budget_store` is set. `sync_age` counts from the last time the fleet store itself answered, so it keeps growing while the device falls back to its own spend; it is absent until the first answer. |
 
-The gauges keep their last value until the next report: after a budget is removed, or when its spend becomes unknown, a destination that keeps cumulative gauges can show the last value until the gateway restarts. The budget gauges carry only `budget_id` (the id you chose), `scope` and `period`. A user, a directory group and a budget subject are never labels. `route_source`, `filtered_by`, `listener` and `deny_reason` are closed sets, and `route_category` and `budget_id` are bounded: a value that is not a short identifier is reported as `other`, and a gateway keeps at most 32 distinct categories before it reports further ones as `other`, whatever a classifier answers. `deny_reason` is one of `budget_exceeded`, `budget_unavailable`, `budget_cost_unknown`, `budget_downgrade_unavailable`, `rule_deny`, `identity_unconfirmed`, `routing_admin_denied`, `routing_sensitive_local_unavailable` or `other`; `filtered_by` is `sensitive`, `unknown_alias`, `policy`, `api`, `capability`, `credential` or `other`. No label holds prompt text, a model alias, an endpoint or a refusal message.
+The gauges keep their last value until the next report: after a budget is removed, or when its spend becomes unknown, a destination that keeps cumulative gauges can show the last value until the gateway restarts. The budget gauges carry only `budget_id` (the id you chose), `scope` and `period`. A user, a directory group and a budget subject are never labels. `route_source`, `filtered_by`, `listener` and `deny_reason` are closed sets, and `route_category` and `budget_id` are bounded: a value that is not a short identifier is reported as `other`, and a gateway keeps at most 32 distinct categories before it reports further ones as `other`, whatever a classifier answers. `deny_reason` is one of `budget_exceeded`, `budget_unavailable`, `budget_cost_unknown`, `budget_downgrade_unavailable`, `rule_deny`, `identity_unconfirmed`, `routing_admin_denied`, `routing_sensitive_local_unavailable` or `other`; `filtered_by` is `sensitive`, `unknown_alias`, `policy`, `api`, `capability`, `credential`, `endpoint` or `other`. No label holds prompt text, a model alias, an endpoint or a refusal message.
 
 `defenseclaw.model.tokens` counts five disjoint kinds: `input` (uncached prompt tokens), `cache_read`, `cache_creation`, `output` (without reasoning) and `reasoning`. No kind contains another, so the sum over all kinds is the real total. The `gen_ai.client.token.usage` metric is unchanged and counts input with cache and output with reasoning, so it does not add up the same way.
 
@@ -174,7 +200,7 @@ Identity is never a label. A metric label creates one time series per value, so 
 
 ### Reading usage
 
-The gateway answers `GET /usage?by=model|connector|route|profile|role|provider|user|hour&since=24h|7d` from the local store. A per-user install sees its own rows. On a managed host an administrator sees all rows, and any other account sees only the rows of the identity the gateway verified for the request. The per-group rollup is for administrators. On managed Windows a standard account gets its last 24 hours in the own-status answer, because it reaches the gateway only through the own-status pipe.
+The gateway answers `GET /usage?by=model|connector|route|profile|role|provider|user|group|hour&since=24h|7d` from the local store. A per-user install sees its own rows. On a managed host an administrator sees all rows, and any other account sees only the rows of the identity the gateway verified for the request. The per-group rollup is for administrators. On managed Windows a standard account gets its last 24 hours in the own-status answer, because it reaches the gateway only through the own-status pipe.
 
 ## Agents that report their own usage
 

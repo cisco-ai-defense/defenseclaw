@@ -105,7 +105,7 @@ On Linux and macOS, a never-enrolled user whose home is untrusted (group- or oth
 
 ## Agent upgrades
 
-The enumerator reads each enrolled user's agent version again every cycle. When the version changes to one with a verified hook contract, the guardian re-renders and re-verifies that user's hooks. A version without a verified contract is not followed: the row keeps its last verified version, the guardian keeps repairing the hooks rendered for it, and `status` and `verify` report `hook_contract_unverified` until the user returns to a verified version or DefenseClaw adds the contract. On the standalone profile a version newer than every tested range is followed on the newest contract and reported as an untested newer version; the Secure Client profile keeps exact gating (see [Version policy](/docs/connectors/compatibility/#version-policy)).
+The enumerator reads each enrolled user's agent version again every cycle. When the version changes to one with a verified hook contract, the guardian re-renders and re-verifies that user's hooks. A version without a verified contract is not followed: the row keeps its last verified version, the guardian keeps repairing the hooks rendered for it, and `status` and `verify` report `hook_contract_unverified` until the user returns to a verified version or DefenseClaw adds the contract. On the standalone profile a version newer than every supported range is followed on the newest contract and reported as an untested newer version; the Secure Client profile keeps exact gating (see [Version policy](/docs/connectors/compatibility/#version-policy)).
 
 On Windows the one machine-wide Claude Code policy is rendered from the oldest contract among the enrolled Claude Code rows. An enrolled user's change to an older Claude Code contract is therefore not followed: the row stays at its version, the change is reported as `agent_unprotected`, and no other user's policy changes. A user enrolled for the first time with an older Claude Code still sets the oldest contract.
 
@@ -304,7 +304,7 @@ On Linux and macOS, a home that is not available (not mounted, or not created ye
 
 The enumerator records the version it finds, and the guardian installs the hook contract for that version. The lowest version with a verified contract for each agent (from the hook contracts DefenseClaw ships):
 
-| Agent | Lowest verified version | Newest tested contract range |
+| Agent | Lowest supported version | Newest contract range |
 | --- | --- | --- |
 | Codex | 0.124.0 | 0.145.0 and later |
 | Claude Code | 2.1.154 | 2.1.219 and later |
@@ -328,7 +328,7 @@ sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise hooks status          #
 sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise hooks status    # macOS
 ```
 
-On Windows, run from an elevated PowerShell prompt and read `enrollment.accounts`, which lists each account and connector as enrolled, pending or failed. A connector you took off the roster that an account had been enrolled for (an account whose row was only pending is listed too) is listed apart, in `enrollment.removed_connectors`, as `not managed (removed from roster)`: it is neither protected nor pending, DefenseClaw no longer governs it for that account, and a hook call a running agent still makes is allowed. The entry ends when the connector is on the roster again for the account, or the account is gone. Setup puts no DefenseClaw command on `PATH`, so the command names the installed CLI by its path:
+On Windows, run from an elevated PowerShell prompt and read `enrollment.accounts`, which lists each account and connector as enrolled, pending, skipped or failed. `skipped` means the account's DefenseClaw folder holds a per-user DefenseClaw install, which is left untouched: that account is not protected until its user removes the per-user install, and it does not count as a failure. A connector you took off the roster that an account had been enrolled for (an account whose row was only pending is listed too) is listed apart, in `enrollment.removed_connectors`, as `not managed (removed from roster)`: it is neither protected nor pending, DefenseClaw no longer governs it for that account, and a hook call a running agent still makes is allowed. The entry ends when the connector is on the roster again for the account, or the account is gone. Setup puts no DefenseClaw command on `PATH`, so the command names the installed CLI by its path:
 
 ```powershell title="Elevated PowerShell prompt"
 & 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows status --profile standalone --json

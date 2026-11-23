@@ -97,7 +97,7 @@ func extractShell(call Call, o Options) Result {
 	w.applyWorkdir(call.Workdir)
 	w.walkScript(script, 0)
 	if inferred && dialect != DialectPOSIX && o.flavor() == FlavorWindows && posixOnlySyntax(call.Command) {
-		unionPOSIXReading(&res, dialect, call, o)
+		unionPOSIXReading(&res, dialect, script.RunsNothing, call, o)
 	}
 	return res
 }
@@ -116,67 +116,151 @@ func posixOnlySyntax(c string) bool {
 // only guessed (no dialect hint) and whose text is POSIX-only syntax: Git Bash
 // and WSL are Windows shells too, and the guessed reading of POSIX text loses
 // the targets its quoting names (GAP-1915: '\” read by PowerShell leaves a
-// stray \' on a redirection target or a switch). Only the known mutations of
-// the POSIX reading are added (raise-only: a write, append, delete, link or
-// permission change whose target and role it resolves), each marked Cond (it
-// happens only under that shell), and only when the guessed reading lacks the
-// same kind on the same target fully known; an unresolved one of that kind and
-// target is replaced by the known one. When the guessed reading is
-// PowerShell with a parse error and the POSIX reading parses, the call is
-// fully read: PowerShell runs nothing of a script it cannot parse, so the
-// POSIX reading is the only one that runs (psparse read <<< without an error,
-// T21a; the port reports < as reserved, as pwsh does).
-func unionPOSIXReading(res *Result, guessed Dialect, call Call, o Options) {
+// stray \' on a redirection target or a switch). Every added effect is marked
+// Cond (it happens only under that shell). Raise-only: no effect of the
+// guessed reading is dropped.
+//
+// When the guessed reading is PowerShell that pwsh itself refuses to parse
+// (runsNothing: a parse error the parser port reports, psparse
+// Diagnostic.Syntax) and the POSIX reading parses, the POSIX reading is the
+// only one that runs: all of its effects are added and the PowerShell parse
+// error unknowns are cleared (psparse read <<< without an error, T21a; the
+// port reports < as reserved, as pwsh does). A note the reader makes on
+// PowerShell that runs (a dialect-ambiguous escape, a construct it does not
+// model) or a script the port declined never clears them: that script runs
+// (GAP-1945).
+//
+// Otherwise only the known mutations of the POSIX reading are added (a write,
+// append, delete, link or permission change whose target and role it
+// resolves), and only when the guessed reading lacks the same kind on the
+// same target fully known. An unresolved guessed effect of that kind and
+// target is the misread of the known one: it takes the known target and role
+// and keeps what else it carried (mergeGuessedInto, GAP-1946), or the
+// projection would hold the target Maybe (holdKnownOnNameMaybe).
+func unionPOSIXReading(res *Result, guessed Dialect, runsNothing bool, call Call, o Options) {
 	alt := Result{Surface: SurfaceShell, Flavor: o.flavor(), Dialect: DialectPOSIX}
 	w := newWalker(&alt, o)
 	w.pathDialect = DialectNone
 	w.applyWorkdir(call.Workdir)
 	w.walkScript(parsePOSIX(call.Command, o), 0)
-	type key struct {
-		k Kind
-		p string
-	}
-	have := make(map[key]bool, len(res.Effects))
+	posixRuns := guessed == DialectPowerShell && runsNothing && len(alt.Unknowns) == 0 && onlyParseErrors(res.Unknowns)
+	have := make(map[unionKey]bool, len(res.Effects))
 	for _, e := range res.Effects {
 		if e.TargetState == TargetStateKnown && e.RoleState == RoleStateKnown {
-			have[key{e.Kind, e.Target.Path}] = true
+			have[unionKeyOf(e)] = true
 		}
 	}
-	for _, e := range alt.Effects {
+	// placedAt maps an alt effect (1-based, as Source.Effect) to its 1-based
+	// place in res, so the data sources of the added effects point into res.
+	placedAt := make(map[int]int, len(alt.Effects))
+	type placed struct {
+		at    int
+		remap bool // its data came from alt: its sources index alt
+	}
+	var added []placed
+	for i, e := range alt.Effects {
+		known := e.TargetState == TargetStateKnown && e.RoleState == RoleStateKnown
+		mutation := false
 		switch e.Kind {
 		case KindWrite, KindAppend, KindDelete, KindLink, KindPermissionChange:
-		default:
+			mutation = true
+		}
+		if !posixRuns && (!mutation || !known) {
 			continue
 		}
-		if e.TargetState != TargetStateKnown || e.RoleState != RoleStateKnown || have[key{e.Kind, e.Target.Path}] {
+		k := unionKeyOf(e)
+		if known && have[k] {
 			continue
 		}
-		have[key{e.Kind, e.Target.Path}] = true
 		e.Cond = true
-		// The guessed reading's unresolved effect of the same kind on the
-		// same target (Out-File -Append\' read as a positional argument) is
-		// the misread of this one: the known effect takes its place, or the
-		// projection would hold the target Maybe (holdKnownOnNameMaybe).
-		placed := false
-		kept := res.Effects[:0]
-		for _, g := range res.Effects {
-			if g.Kind == e.Kind && g.Target.Path == e.Target.Path {
-				if !placed {
-					kept = append(kept, e)
-					placed = true
+		var misread []int
+		if known && mutation && e.Target.Type == TargetPath && e.Target.Path != "" {
+			have[k] = true
+			dataFromGuess := false
+			for gi, g := range res.Effects {
+				if g.Kind == e.Kind && g.Target.Path == e.Target.Path {
+					misread = append(misread, gi)
+					e, dataFromGuess = mergeGuessedInto(e, g, dataFromGuess)
 				}
-				continue
 			}
-			kept = append(kept, g)
+			// In place, so the data sources of the guessed reading stay valid.
+			for _, gi := range misread {
+				res.Effects[gi] = e
+				added = append(added, placed{gi, !dataFromGuess})
+			}
 		}
-		res.Effects = kept
-		if !placed {
+		if len(misread) == 0 {
 			res.Effects = append(res.Effects, e)
+			misread = []int{len(res.Effects) - 1}
+			added = append(added, placed{misread[0], true})
+		}
+		placedAt[i+1] = misread[0] + 1
+	}
+	for _, p := range added {
+		if p.remap {
+			res.Effects[p.at].Data = remapSources(res.Effects[p.at].Data, placedAt)
 		}
 	}
-	if guessed == DialectPowerShell && len(alt.Unknowns) == 0 && onlyParseErrors(res.Unknowns) {
+	if posixRuns {
 		res.Unknowns = nil
 	}
+}
+
+// unionKey identifies an effect across the two readings of one call: a path
+// target by its resolved path (the readings spell it differently), any other
+// target by what it names.
+type unionKey struct {
+	k                   Kind
+	t                   TargetType
+	path, url, spelling string
+}
+
+func unionKeyOf(e Effect) unionKey {
+	if e.Target.Type == TargetPath {
+		return unionKey{k: e.Kind, t: TargetPath, path: e.Target.Path}
+	}
+	return unionKey{k: e.Kind, t: e.Target.Type, path: e.Target.Path, url: e.Target.URL, spelling: e.Target.Spelling}
+}
+
+// mergeGuessedInto folds an unresolved effect of the guessed reading into the
+// known POSIX effect of the same kind on the same target (GAP-1946): the POSIX
+// target and role stay (they are the resolved ones) and the effect stays Cond;
+// the guessed effect's data is kept when it is the stronger (the POSIX effect
+// has none, or the guessed one names its producers or carries more), and a
+// link-target role of either is kept. fromGuess reports that e's data is now
+// the guessed reading's (its sources index res, not alt).
+func mergeGuessedInto(e, g Effect, fromGuess bool) (Effect, bool) {
+	if g.Data != nil && (e.Data == nil || (len(e.Data.Sources) == 0 && len(g.Data.Sources) > 0) || g.Data.Bytes > e.Data.Bytes) {
+		d := *g.Data
+		e.Data, fromGuess = &d, true
+	}
+	e.LinkTarget = e.LinkTarget || g.LinkTarget
+	return e, fromGuess
+}
+
+// remapSources points the data sources of an effect taken from the POSIX
+// reading at the places their producers got in res; a producer that was not
+// added is dropped (its index named an alt effect).
+func remapSources(d *Data, placedAt map[int]int) *Data {
+	if d == nil || len(d.Sources) == 0 {
+		return d
+	}
+	c := *d
+	c.Sources = make([]Source, 0, len(d.Sources))
+	for _, s := range d.Sources {
+		if s.Effect != 0 {
+			at, ok := placedAt[s.Effect]
+			if !ok {
+				continue
+			}
+			s.Effect = at
+		}
+		c.Sources = append(c.Sources, s)
+	}
+	if len(c.Sources) == 0 {
+		c.Sources = nil
+	}
+	return &c
 }
 
 // onlyParseErrors reports a non-empty list of structure unknowns that are all
@@ -305,6 +389,11 @@ type walker struct {
 	cdUnreliable bool
 	// lastpipe: shopt -s lastpipe is in effect (see command).
 	lastpipe bool
+	// pwdFunc is what a pwd function defined earlier in this shell prints,
+	// when its definition ran on every path and its body is one echo of a
+	// static word; nil when no such definition is the current one
+	// (rel-1-0-10:GAP-1043).
+	pwdFunc *string
 	// pwdOwn: the call assigned PWD after its last cd, so $PWD is that value
 	// and not the tracked folder.
 	pwdOwn bool
@@ -916,10 +1005,14 @@ func (w *walker) resolveWord(wd Word) Word {
 	for i, s := range wd.Segs {
 		if s.Subst == "pwd" {
 			// $(pwd) prints the working folder unless pwd is a function, an
-			// alias or disabled.
+			// alias or disabled; a pwd function whose definition the walk read
+			// prints its static word (rel-1-0-10:GAP-1043).
 			v, ok := "", false
-			if w.isBuiltin("pwd", DialectPOSIX) {
+			switch {
+			case w.isBuiltin("pwd", DialectPOSIX):
 				v, ok = w.cwdWord(i == 0)
+			case w.pwdFunc != nil && w.aliases["pwd"] == "" && w.isBuiltin("echo", DialectPOSIX):
+				v, ok = *w.pwdFunc, true
 			}
 			if !ok {
 				return Word{Static: false, Reason: ReasonDynamicExpansion, Span: wd.Span, Tail: segTail(wd.Segs[i+1:])}
@@ -1251,6 +1344,16 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 	if c.Pipeline || c.Async || c.ChildList {
 		w.childDepth++
 		defer func() { w.childDepth-- }()
+	}
+	// A pwd function definition: $(pwd) after it prints the function's static
+	// word when the definition runs on every path; any other definition
+	// leaves $(pwd) unknown (rel-1-0-10:GAP-1043).
+	if d := c.Defines; d != nil && d.Name == "pwd" && dialect == DialectPOSIX {
+		w.pwdFunc = nil
+		if d.Static && !d.Cond {
+			out := d.Out
+			w.pwdFunc = &out
+		}
 	}
 	// Subshell: runs in a child shell; save/restore cwd/home/env.
 	if c.Sub != nil {
@@ -4237,6 +4340,7 @@ type scopeState struct {
 	execState bool
 	debugTrap bool
 	pwdOwn    bool
+	pwdFunc   *string
 }
 
 // saveScope returns the current state and installs private copies of the
@@ -4245,7 +4349,7 @@ type scopeState struct {
 func (w *walker) saveScope() scopeState {
 	s := scopeState{cwd: w.curCWD, home: w.curHome, alt: w.cwdAlt, stack: w.cwdStack, env: w.env,
 		exported: w.exported, chain: w.cdChain, narrowed: w.narrowed, narrowedOther: w.narrowedOther,
-		execState: w.execState, debugTrap: w.debugTrap, pwdOwn: w.pwdOwn}
+		execState: w.execState, debugTrap: w.debugTrap, pwdOwn: w.pwdOwn, pwdFunc: w.pwdFunc}
 	w.debugTrap = false // a subshell does not inherit a DEBUG trap
 	// The env and exported maps are shared with the saved state until the child
 	// first writes one (ownVars): most scopes (a command substitution, a pipeline
@@ -4276,6 +4380,7 @@ func (w *walker) restoreScope(s scopeState) {
 	w.execState = s.execState
 	w.debugTrap = s.debugTrap
 	w.pwdOwn = s.pwdOwn
+	w.pwdFunc = s.pwdFunc
 }
 
 func cloneBools(in map[string]bool) map[string]bool {
@@ -4362,6 +4467,9 @@ func (w *walker) unbindReader(program string, inner []Word) (opaque bool) {
 	case "unset":
 		// unset does not evaluate a subscript; a non-identifier name is ignored.
 		for _, wd := range args {
+			if !wd.Static || wd.Value == "pwd" {
+				w.pwdFunc = nil // unset may remove the pwd function (GAP-1043)
+			}
 			if wd.Static && plainIdent(wd.Value) {
 				w.unsetVar(wd.Value)
 			} else if !wd.Static {

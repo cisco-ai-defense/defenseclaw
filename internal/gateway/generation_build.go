@@ -612,6 +612,7 @@ func publishGeneration(g *Generation) {
 	liveGeneration.Store(g)
 	packs.UseGenerationPacks(g.sandboxPackDir, g.sandboxPacks)
 	publishPackPostures()
+	publishPackTables(g)
 	liveReloadError.Store("")
 	applyGenerationProviders(g.Providers)
 }

@@ -290,8 +290,12 @@ func (c *failingOpenCodeConnector) Teardown(context.Context, connector.SetupOpts
 	return nil
 }
 
+// multiBootSidecar is a sidecar for connector setup tests. A setup registers
+// the connector's rule pack for the process; restoreGatewayProcessPosture puts
+// it back so a later test does not scan with it (rel-1-0-10:GAP-1305).
 func multiBootSidecar(t *testing.T) *Sidecar {
 	t.Helper()
+	restoreGatewayProcessPosture(t)
 	return &Sidecar{
 		cfg: &config.Config{
 			DataDir:   t.TempDir(),
@@ -1685,7 +1689,7 @@ func TestMultiConnectorPublicationFailureRestoresSuccessfullyRemovedConnector(t 
 		t.Fatal(err)
 	}
 	seed := multiConnectorSetupTransaction{activeState: activeState, hookLockState: hookLockState}
-	candidates, unavailable, _ := s.removedConnectorRollbackCandidates(
+	candidates, unavailable, _, _ := s.removedConnectorRollbackCandidates(
 		registry, []string{"cursor"}, []string{"claudecode"},
 		"synthetic gateway token", "127.0.0.1:0", "127.0.0.1:0",
 		hookLockState,
@@ -1693,7 +1697,7 @@ func TestMultiConnectorPublicationFailureRestoresSuccessfullyRemovedConnector(t 
 	if len(unavailable) != 0 || len(candidates) != 1 {
 		t.Fatalf("removal candidates=%v unavailable=%v, want one rollback-authorized Cursor", candidates, unavailable)
 	}
-	seed.removed, unavailable = teardownRemovedConnectorCandidates(candidates, context.Background())
+	seed.removed, unavailable, _ = teardownRemovedConnectorCandidates(candidates, context.Background())
 	if len(unavailable) != 0 || len(seed.removed) != 1 {
 		t.Fatalf("removed=%v failed=%v, want successful transactional removal", seed.removed, unavailable)
 	}
@@ -1811,7 +1815,7 @@ func TestMultiConnectorPublicationRollbackKeepsConnectorRemovedWhenItsCredential
 		t.Fatal(err)
 	}
 	seed := multiConnectorSetupTransaction{activeState: activeState, hookLockState: hookLockState}
-	candidates, unavailable, _ := s.removedConnectorRollbackCandidates(
+	candidates, unavailable, _, _ := s.removedConnectorRollbackCandidates(
 		registry, []string{"cursor"}, []string{"claudecode"},
 		"synthetic gateway token", "127.0.0.1:0", "127.0.0.1:0",
 		hookLockState,
@@ -1819,7 +1823,7 @@ func TestMultiConnectorPublicationRollbackKeepsConnectorRemovedWhenItsCredential
 	if len(unavailable) != 0 || len(candidates) != 1 {
 		t.Fatalf("removal candidates=%v unavailable=%v, want one rollback-authorized Cursor", candidates, unavailable)
 	}
-	seed.removed, unavailable = teardownRemovedConnectorCandidates(candidates, context.Background())
+	seed.removed, unavailable, _ = teardownRemovedConnectorCandidates(candidates, context.Background())
 	if len(unavailable) != 0 || len(seed.removed) != 1 {
 		t.Fatalf("removed=%v failed=%v, want successful transactional removal", seed.removed, unavailable)
 	}
@@ -1869,7 +1873,7 @@ func TestMultiConnectorPublicationRollbackKeepsConnectorRemovedWhenItsCredential
 	if err != nil {
 		t.Fatal(err)
 	}
-	candidates, unavailable, _ = s.removedConnectorRollbackCandidates(
+	candidates, unavailable, _, _ = s.removedConnectorRollbackCandidates(
 		registry, connector.LoadActiveConnectors(s.cfg.DataDir), []string{"claudecode"},
 		"synthetic gateway token", "127.0.0.1:0", "127.0.0.1:0",
 		retryLock,
@@ -1877,7 +1881,7 @@ func TestMultiConnectorPublicationRollbackKeepsConnectorRemovedWhenItsCredential
 	if len(unavailable) != 0 || len(candidates) != 1 {
 		t.Fatalf("retry candidates=%v unavailable=%v, want Cursor's removal still authorized", candidates, unavailable)
 	}
-	if again, failed := teardownRemovedConnectorCandidates(candidates, context.Background()); len(failed) != 0 || len(again) != 1 {
+	if again, failed, _ := teardownRemovedConnectorCandidates(candidates, context.Background()); len(failed) != 0 || len(again) != 1 {
 		t.Fatalf("retry removed=%v failed=%v, want Cursor removed cleanly", again, failed)
 	}
 	if lock := connector.LoadHookContractLockEntry(s.cfg.DataDir, "cursor"); lock.Connector != "" {

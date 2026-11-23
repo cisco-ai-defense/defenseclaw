@@ -63,7 +63,7 @@ Most keys apply with no restart. Keys that name a file or listener the gateway o
   `guardrail.hook_self_heal_debounce_ms`)
 - the protected-file watch (`guardrail.protected_files`)
 - `claw`, `agent` and `plugin_dir`
-- the semantic router process settings `routing.port`, `routing.version`, `routing.remote` and `routing.algorithm`, and `routing.enabled`, `routing.classifier`, `routing.models`, `routing.signals` and `routing.decisions`, which the vLLM Semantic Router container is started with. With the in-process `rules` or `systemone` classifier the gateway applies those five without a restart; `config set` still says a restart may be needed because it cannot see the running classifier
+- the semantic router process settings `routing.port`, `routing.version`, `routing.remote` and `routing.algorithm`, and `routing.enabled`, `routing.classifier`, `routing.models`, `routing.signals` and `routing.decisions`, which the vLLM Semantic Router container is started with. With the in-process `rules` or `systemone` classifier the gateway applies those five without a restart; `config set routing.enabled` says it applies on reload when config.yaml names one of those classifiers, and otherwise (`vllm_sr`, or no classifier) says to restart, because the writer cannot see the running classifier
 - `deployment_mode`, `enterprise.profile`, `enterprise.network` and
   `enterprise.openshell`
 - the resource-identity keys (`environment`, `tenant_id`, `workspace_id`,

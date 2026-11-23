@@ -14,6 +14,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -54,10 +55,16 @@ func withRestoredManagedPosture(t *testing.T) {
 // Without it the next test (and every later -count iteration) ran under the
 // last booted gateway: the organization wording of a standalone gateway, the
 // run id of TestStandaloneHookLaneBlocksOnTheLocalEngine (rel-1-0-6
-// GAP-0365). Every test fixture that boots or reloads a sidecar calls it
-// first.
+// GAP-0365). It also puts back the connector rule packs a connector setup or
+// reload registers for the process (connectorRuleGenerations): a request on a
+// generation that binds none scans a connector with them, and in a shuffled
+// order the strict pack checks of TestGAP0210ModelResponseFindsEverySecretKind
+// ran with the default pack an earlier claudecode setup left
+// (rel-1-0-10:GAP-1305). Every test fixture that boots, sets up a connector
+// on or reloads a sidecar calls it first.
 func restoreGatewayProcessPosture(t *testing.T) {
 	t.Helper()
+	restoreConnectorRuleRegistry(t)
 	aidOnly, standalone, hosted := ManagedEnterpriseActive(), standaloneEnterpriseActive.Load(), managedServiceHosted.Load()
 	email, identityConfig, retain := UserEmailCollectionEnabled(), agentIdentityConfig.Load(), retainJudgeBodies.Load()
 	generation, profiles := liveGeneration.Load(), liveGuardrailProfiles.Load()
@@ -68,6 +75,11 @@ func restoreGatewayProcessPosture(t *testing.T) {
 	// Secure Client test read no Secure Client user.
 	facts, attribution := identityFactsEnabled.Load(), secureClientUserAttribution.Load()
 	principal, blocking := userPrincipalCollectionEnabled.Load(), identityLookupBlocking.Load()
+	// A standalone enterprise boot or reload also points identity at the
+	// guardian spool; left set, a later Windows token without groups read as
+	// awaiting the spool (lookup failed) in TestBareUsersEntrySkipsLocalNamesake
+	// (rel-1-0-10:GAP-1305).
+	spool, assignmentGroups := currentIdentitySpoolDir(), profileAssignmentGroups()
 	// A managed boot makes the process ignore the provider overlay path; the
 	// posture must not outlive the test (rel-1-0-10:GAP-1305).
 	providerRegistryMu.Lock()
@@ -81,6 +93,8 @@ func restoreGatewayProcessPosture(t *testing.T) {
 		setSecureClientUserAttribution(attribution)
 		SetUserPrincipalCollectionEnabled(principal)
 		setIdentityLookupBlocking(blocking)
+		setIdentitySpoolDir(spool)
+		setProfileAssignmentGroups(assignmentGroups)
 		gatewaylog.SwapTelemetryHMACKeyForTest(hmacKey)
 		setManagedEnterpriseRedactionPosture(aidOnly)
 		setStandaloneEnterpriseActive(standalone)
@@ -102,6 +116,29 @@ func restoreGatewayProcessPosture(t *testing.T) {
 		} else {
 			_ = os.Unsetenv("DEFENSECLAW_RUN_ID")
 		}
+	})
+}
+
+// restoreConnectorRuleRegistry puts the per-connector rule packs back as they
+// were before the test. A publish writes into the maps in place, and the live
+// one (liveRegisteredRules) is the published generation's own map, so the
+// maps keep their identity and get their entries back.
+func restoreConnectorRuleRegistry(t *testing.T) {
+	t.Helper()
+	ruleCategoriesMu.Lock()
+	generations, categories, live := connectorRuleGenerations, connectorRuleCategories, liveRegisteredRules
+	savedGenerations, savedCategories, savedLive := maps.Clone(generations), maps.Clone(categories), maps.Clone(live)
+	ruleCategoriesMu.Unlock()
+	t.Cleanup(func() {
+		ruleCategoriesMu.Lock()
+		defer ruleCategoriesMu.Unlock()
+		connectorRuleGenerations, connectorRuleCategories, liveRegisteredRules = generations, categories, live
+		clear(generations)
+		maps.Copy(generations, savedGenerations)
+		clear(categories)
+		maps.Copy(categories, savedCategories)
+		clear(live)
+		maps.Copy(live, savedLive)
 	})
 }
 

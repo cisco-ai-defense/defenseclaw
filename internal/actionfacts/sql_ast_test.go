@@ -137,7 +137,7 @@ func TestSQLAST64KiBStdinP99(t *testing.T) {
 	timings := make([]time.Duration, 0, samples)
 	for i := 0; i < samples; i++ {
 		start := time.Now()
-		_, sqlFacts := projectSQLAnalysis(Input{}, facts)
+		_, sqlFacts, _ := projectSQLAnalysis(Input{}, facts)
 		timings = append(timings, time.Since(start))
 		if len(sqlFacts) != 1 || sqlFacts[0].StatementCount != 1 {
 			t.Fatalf("64 KiB SQL stdin not fully classified: %#v", sqlFacts)

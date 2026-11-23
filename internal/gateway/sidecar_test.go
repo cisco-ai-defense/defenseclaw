@@ -116,7 +116,7 @@ func TestRemovedConnectorCleansCodexTrustedHookState(t *testing.T) {
 	}
 
 	registry := connector.NewDefaultRegistry()
-	if failed, _ := teardownRemovedConnectorsReport(registry, []string{"codex"}, []string{"claudecode"}, opts, "", context.Background()); len(failed) != 0 {
+	if failed, _, _ := teardownRemovedConnectorsWhy(registry, []string{"codex"}, []string{"claudecode"}, opts, "", context.Background()); len(failed) != 0 {
 		t.Fatalf("teardown removed connector: %v", failed)
 	}
 

@@ -794,6 +794,20 @@ func (evaluator *Evaluator) route(metadata Metadata, admission Admission) []Deli
 	return deliveries
 }
 
+// managedInventoryAction reports whether action is one of the Secure Client
+// endpoint inventory actions.
+func managedInventoryAction(action observability.ProducerKey) bool {
+	switch action {
+	case config.ObservabilityV8ManagedAgentInventoryAction,
+		config.ObservabilityV8ManagedConnectorInventoryAction,
+		config.ObservabilityV8ManagedMCPInventoryAction,
+		config.ObservabilityV8ManagedSkillInventoryAction,
+		config.ObservabilityV8ManagedPluginInventoryAction:
+		return true
+	}
+	return false
+}
+
 func routeDestination(destination compiledDestination, metadata Metadata, floorOnly bool) []Delivery {
 	if !destination.enabled {
 		return nil
@@ -802,6 +816,20 @@ func routeDestination(destination compiledDestination, metadata Metadata, floorO
 		return nil
 	}
 	if _, ok := destination.selected[metadata.identity.Signal]; !ok {
+		return nil
+	}
+	// A local inventory diagnostic (a partial or over-limit collection) stays
+	// in local SQLite in every product, whatever routes a destination has.
+	if metadata.action == config.ObservabilityV8LocalInventoryDiagnosticAction &&
+		destination.kind != config.ObservabilityV8DestinationLocalSQLite {
+		return nil
+	}
+	// A Secure Client inventory record (a managed_* inventory action) goes only
+	// to local SQLite and the generated AI Defense destination, also while the
+	// plan has no AI Defense endpoint yet and so no drop routes for it.
+	if managedInventoryAction(metadata.action) &&
+		destination.kind != config.ObservabilityV8DestinationLocalSQLite &&
+		(!destination.generated || destination.name != config.ObservabilityV8ManagedAIDDestinationName) {
 		return nil
 	}
 	for _, route := range destination.routes {

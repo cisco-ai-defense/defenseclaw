@@ -9,8 +9,9 @@
 # moving; a stopped, replaced, stalled or finished guardian and a guardian
 # without the record keep the usual limit. Secure Client extends the same way
 # outside strict mode; strict Secure Client keeps the usual limit. The error names
-# the cause and the guardian log. Runs in a disposable scratch directory with
-# the service and status calls replaced.
+# the cause and the guardian log, and the error of a startup reconcile that
+# failed (GAP-1506). Runs in a disposable scratch directory with the service
+# and status calls replaced.
 
 [CmdletBinding()]
 param(
@@ -66,6 +67,9 @@ try {
                 updated_at = $UpdatedAt.ToUniversalTime().ToString('o')
                 targets_done = 3
                 targets_total = 10
+            }
+            if (-not [string]::IsNullOrEmpty($script:SmokeRecordError)) {
+                $body.last_error = $script:SmokeRecordError
             }
             [IO.File]::WriteAllText(
                 $script:SmokeRecordPath,
@@ -126,9 +130,11 @@ try {
                 [int64]$RecordPid = 4242,
                 [bool]$Heartbeat = $true,
                 $CoveredAfter = $null,
-                $GoneAfter = $null
+                $GoneAfter = $null,
+                [string]$RecordError = ''
             )
             [IO.File]::Delete($script:SmokeRecordPath)
+            $script:SmokeRecordError = $RecordError
             $script:SmokeRecordState = $RecordState
             $script:SmokeRecordPid = $RecordPid
             $script:SmokeHeartbeat = $Heartbeat -and -not [string]::IsNullOrEmpty($RecordState)
@@ -208,7 +214,18 @@ try {
             # GAP-0601: a reconcile that finished but whose coverage was not
             # accepted says so, not that the wait ran out.
             $result = & $run -Name 'finished, not covered' -RecordState 'finished'
-            & $expect $result 0.9 6.0 @('finished its first reconcile', 'its coverage was not accepted', $log) @('still running', 'did not publish fresh required coverage within')
+            & $expect $result 0.9 6.0 @('finished its first reconcile', 'its coverage was not accepted', $log) @('still running', 'did not publish fresh required coverage within', 'guardian_error=')
+
+            # GAP-1506: the startup reconcile failed, so the status stays the
+            # earlier guardian's; the error names that reconcile's error from
+            # the startup record (bounded, secrets redacted), not only the
+            # stale generation.
+            $cause = 'enterprise hooks reconcile: revoke stale protected enrollments: ensure configured Claude machine policy: existing Claude machine policy has an unrecognized registered command'
+            $result = & $run -Name 'finished, reconcile failed' -RecordState 'finished' -RecordError "$cause token=smoke-secret-1506"
+            & $expect $result 0.9 6.0 @('finished its first reconcile', 'its coverage was not accepted', "guardian_error=$cause token=<redacted>", $log) @('smoke-secret-1506')
+            # A guardian that exits on the error still names it.
+            $result = & $run -Name 'gone after a failed reconcile' -RecordState 'finished' -RecordError $cause -GoneAfter 0.5
+            & $expect $result 0.9 5.0 @('is no longer running during its first reconcile', "guardian_error=$cause")
 
             # Without a record of this guardian the usual limit stands.
             $result = & $run -Name 'no record' -RecordState ''
@@ -220,9 +237,39 @@ try {
             # another version or oversized.
             $script:SmokeStart = [DateTime]::UtcNow
             Write-SmokeStartupRecord -State 'reconciling' -UpdatedAt ([DateTime]::UtcNow) -ProcessId 4242
+            # A reader without last_error is reported, not a strict-mode stop.
+            $readError = {
+                param($Read)
+                if ($null -eq $Read) { return '<no record>' }
+                $property = $Read.PSObject.Properties['last_error']
+                if ($null -eq $property) { return '<no last_error>' }
+                return [string]$property.Value
+            }
             $read = Get-DefenseClawGuardianStartupProgress -Layout $layout -ProcessId 4242 -StartedAfter $script:SmokeStart.AddSeconds(-1)
-            if ($null -eq $read -or $read.state -cne 'reconciling' -or $read.targets_done -ne 3 -or $read.targets_total -ne 10) {
+            if ($null -eq $read -or $read.state -cne 'reconciling' -or $read.targets_done -ne 3 -or $read.targets_total -ne 10 -or (& $readError $read) -cne '') {
                 $failures.Add("record reader: a valid record read as '$read'")
+            }
+            # last_error is optional and must be a string.
+            [IO.File]::WriteAllText($script:SmokeRecordPath, ([IO.File]::ReadAllText($script:SmokeRecordPath) -replace '"targets_total":10', '"targets_total":10,"last_error":"reconcile failed"'))
+            $read = Get-DefenseClawGuardianStartupProgress -Layout $layout -ProcessId 4242 -StartedAfter $script:SmokeStart.AddSeconds(-1)
+            if ($null -eq $read -or (& $readError $read) -cne 'reconcile failed') {
+                $failures.Add("record reader: last_error read as '$(& $readError $read)'")
+            }
+            [IO.File]::WriteAllText($script:SmokeRecordPath, ([IO.File]::ReadAllText($script:SmokeRecordPath) -replace '"last_error":"reconcile failed"', '"last_error":{"x":1}'))
+            $read = Get-DefenseClawGuardianStartupProgress -Layout $layout -ProcessId 4242 -StartedAfter $script:SmokeStart.AddSeconds(-1)
+            if ($null -eq $read -or (& $readError $read) -cne '') {
+                $failures.Add("record reader: a non-string last_error read as '$(& $readError $read)'")
+            }
+            # GAP-1506 (RV-1506): the guardian writes last_error without HTML
+            # escaping, so a 1024-byte error of '&', '<' and '>' keeps the
+            # record under the 4096-byte limit and is read whole.
+            $wide = ('&' * 512) + ('<>' * 256)
+            [IO.File]::WriteAllText($script:SmokeRecordPath, ([IO.File]::ReadAllText($script:SmokeRecordPath) -replace '"last_error":\{"x":1\}', ('"last_error":"' + $wide + '"')))
+            $size = (Microsoft.PowerShell.Management\Get-Item -LiteralPath $script:SmokeRecordPath).Length
+            $read = Get-DefenseClawGuardianStartupProgress -Layout $layout -ProcessId 4242 -StartedAfter $script:SmokeStart.AddSeconds(-1)
+            $readText = & $readError $read
+            if ($size -gt 4096 -or $readText -cne $wide) {
+                $failures.Add("record reader: an unescaped 1024-byte last_error ($size bytes) read as $($readText.Length) chars '$($readText.Substring(0, [Math]::Min(40, $readText.Length)))'")
             }
             if ($null -ne (Get-DefenseClawGuardianStartupProgress -Layout $layout -ProcessId 4242 -StartedAfter $script:SmokeStart.AddSeconds(5))) {
                 $failures.Add('record reader: a record from before this start was accepted')

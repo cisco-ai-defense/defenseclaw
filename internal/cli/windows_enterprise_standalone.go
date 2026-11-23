@@ -69,6 +69,7 @@ type windowsEnterpriseInstallerReport struct {
 	Action                            string            `json:"action"`
 	Installed                         bool              `json:"installed"`
 	TransactionPending                bool              `json:"transaction_pending"`
+	DeferredConfigPending             bool              `json:"deferred_config_pending"`
 	InstallRoot                       string            `json:"install_root"`
 	StateRoot                         string            `json:"state_root"`
 	GatewayService                    string            `json:"gateway_service"`
@@ -2304,18 +2305,20 @@ var windowsEnterpriseNoStartGuardianIssues = map[string]bool{
 }
 
 // windowsEnterpriseNoStartMessages drops the guardian status issues of an
-// install, upgrade or repair that completed with --no-start (NOSTART=1): its
-// services stay stopped and disabled as asked, so the guardian has not run
-// yet. They made Setup /ensure NOSTART=1 exit 1603 on a deployment installed
-// as documented (GAP-1214). One warning names the next step instead; every
-// other error stays.
+// install, upgrade or repair that completed with its services stopped and
+// disabled on purpose, so the guardian has not run yet: --no-start
+// (NOSTART=1), whose issues made Setup /ensure NOSTART=1 exit 1603 on a
+// deployment installed as documented (GAP-1214), and a deferred-config
+// install the installer recorded as waiting for its configuration, whose
+// issues made Setup /install without CONFIG= exit 1603 (GAP-1749). One
+// warning names the next step instead; every other error stays.
 func windowsEnterpriseNoStartMessages(
 	result *enterprisestatus.Result,
 	opts *windowsEnterpriseLifecycleOptions,
 	report *windowsEnterpriseInstallerReport,
 	messages []string,
 ) []string {
-	if opts == nil || !opts.noStart || !report.OK || !report.Installed || report.TransactionPending {
+	if !opts.servicesStayStopped() || !report.OK || !report.Installed || report.TransactionPending {
 		return messages
 	}
 	switch report.Action {
@@ -2323,11 +2326,26 @@ func windowsEnterpriseNoStartMessages(
 	default:
 		return messages
 	}
+	// A deferred-config install counts only once the installer recorded the
+	// waiting state; without it the guardian issues stay errors.
+	deferred := opts.deferredConfig && report.Action == "install" && report.DeferredConfigPending
+	if !opts.noStart && !deferred {
+		return messages
+	}
 	kept := make([]string, 0, len(messages))
 	for _, message := range messages {
 		if !windowsEnterpriseNoStartGuardianIssues[strings.TrimSpace(message)] {
 			kept = append(kept, message)
 		}
+	}
+	if deferred {
+		// Both commands come from the renderer: Setup is not installed on a
+		// managed computer, so its command names where Setup comes from.
+		result.AddWarning("deferred_config_pending", "installed and waiting for its configuration (a Setup install without CONFIG= and MANIFEST=): "+
+			"the services stay stopped and disabled, so agents are not protected yet; complete it from an elevated PowerShell prompt with a repair "+
+			"that supplies both files: `"+managed.WindowsSetupCommand("/repair")+" CONFIG=<config.yaml> MANIFEST=<targets.yaml>`, or "+
+			windowsEnterpriseAdminCommand("repair", "--config", "<config.yaml>", "--manifest", "<targets.yaml>")+"."+windowsEnterpriseSetupSourceNote)
+		return kept
 	}
 	// The code Linux and macOS use for a --no-start install.
 	result.AddWarning("not_started", "installed with the services stopped and disabled (NOSTART=1, --no-start), so agents are not protected yet; "+
@@ -3204,7 +3222,22 @@ var (
 	windowsEnterpriseAccountCreatedDataDir     = enterprisehooks.WindowsAccountCreatedDataDir
 	windowsEnterpriseAccountOwnedDataDirLink   = enterprisehooks.WindowsAccountOwnedDataDirLink
 	windowsEnterpriseAccountForeignDataDirLink = enterprisehooks.WindowsForeignOwnedDataDirLink
-	windowsEnterpriseAccountDeleted            = func(sid string) bool {
+	windowsEnterpriseAccountPerUserInstall     = enterprisehooks.WindowsPerUserInstallDataDir
+	// windowsEnterpriseEnrolledAccounts reads the layout's protection ledger
+	// once, at the layout's authorization folder (status runs without the
+	// service pins), and reports whether it holds a row of an account, for
+	// any connector, as the guardian decides it (enterpriseHookEnrolledAccounts).
+	// A layout or ledger that cannot be read reports every account as
+	// enrolled, so status never tells an administrator to remove the
+	// "per-user install" of an enrolled account (GAP-1733 review).
+	windowsEnterpriseEnrolledAccounts = func() func(sid string) bool {
+		layout, err := windowsEnterpriseHotConfigLayout()
+		if err != nil {
+			return func(string) bool { return true }
+		}
+		return enterpriseHookEnrolledAccounts(layout.DataDir, managed.HookGuardianAuthorizationDirForLayout(layout))
+	}
+	windowsEnterpriseAccountDeleted = func(sid string) bool {
 		// A domain or Entra account's lookup also fails while its directory
 		// is unreachable; never tell the administrator to remove that
 		// profile.
@@ -3268,6 +3301,7 @@ func applyWindowsEnterpriseAccountFolders(result *enterprisestatus.Result) {
 	if err != nil {
 		return
 	}
+	enrolled := windowsEnterpriseEnrolledAccounts()
 	for _, account := range accounts {
 		label := account.SID
 		if strings.TrimSpace(account.User) != "" {
@@ -3282,6 +3316,7 @@ func applyWindowsEnterpriseAccountFolders(result *enterprisestatus.Result) {
 			}
 			continue
 		}
+		perUser := windowsEnterpriseAccountPerUserInstall(account.Home, account.SID)
 		switch {
 		case windowsEnterpriseAccountDeleted(account.SID):
 			result.AddWarning("deleted_account_rows", fmt.Sprintf(
@@ -3301,6 +3336,21 @@ func applyWindowsEnterpriseAccountFolders(result *enterprisestatus.Result) {
 					"administrator made, so it is not protected; DefenseClaw never follows that link and leaves this account out so "+
 					"Setup, Upgrade and Repair finish for the other accounts. Remove the link (rmdir on a junction removes only the "+
 					"link), then run `%s` from an elevated PowerShell prompt",
+				label, filepath.Join(account.Home, ".defenseclaw"),
+				managed.WindowsAdminCommand("enterprise", "windows", "repair", "--profile", managed.ProfileStandalone)))
+		case perUser != "" && enrolled(account.SID):
+			// The managed folder of an enrolled account is writable by that
+			// account: such an entry there is tamper, not a per-user install.
+			result.AddWarning("per_user_install_tamper", fmt.Sprintf(
+				"the enrolled account %s has %s in its managed folder %s, an entry only a per-user DefenseClaw install leaves; "+
+					"DefenseClaw did not write it, keeps repairing and protecting this account, and verify fails until an "+
+					"administrator removes that entry",
+				label, perUser, filepath.Join(account.Home, ".defenseclaw")))
+		case perUser != "":
+			result.AddWarning("enrollment_skipped_per_user_install", fmt.Sprintf(
+				"the account %s has a per-user DefenseClaw install in %s, so it is not protected; DefenseClaw leaves that folder "+
+					"untouched and this account out so Setup, Upgrade and Repair finish for the other accounts. Have that user remove "+
+					"the per-user install (`defenseclaw uninstall --all --binaries --yes`), then run `%s` from an elevated PowerShell prompt",
 				label, filepath.Join(account.Home, ".defenseclaw"),
 				managed.WindowsAdminCommand("enterprise", "windows", "repair", "--profile", managed.ProfileStandalone)))
 		case windowsEnterpriseAccountCreatedDataDir(account.Home, account.SID):
@@ -4417,7 +4467,8 @@ func readWindowsEnterpriseStandaloneEnrollment() (enterprisestatus.Enrollment, e
 // windowsEnterpriseEnrollmentRowFailed reports a guardian row that leaves its
 // target unprotected for a reason no sign-in or account clean-up resolves:
 // not ok, not pending, not waiting for the account's sign-in, and not a row
-// of a removed account or an account folder link (the rows status excuses).
+// of a removed account, an account folder link or a per-user install folder
+// (the rows status excuses).
 // Since a standalone install or upgrade activates on a complete reconcile
 // with such rows (GAP-0601), they are counted, so coverage_complete is not
 // true while one of them stands.
@@ -4426,7 +4477,8 @@ func windowsEnterpriseEnrollmentRowFailed(row enterpriseHookReconcileRow) bool {
 		!enterpriseHookAwaitingSignInError(row) &&
 		!enterpriseHookRemovedAccountRow(row) &&
 		!enterpriseHookAccountLinkRowStandalone(row) &&
-		!enterpriseHookAccountForeignLinkRow(row)
+		!enterpriseHookAccountForeignLinkRow(row) &&
+		!enterpriseHookAccountPerUserInstallRow(row)
 }
 
 // windowsEnterpriseHookRollbackCopyRederived is the warning code of a run

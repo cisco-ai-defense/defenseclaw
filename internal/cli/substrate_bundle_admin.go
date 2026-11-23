@@ -68,6 +68,19 @@ func substrateBundleStore(c *config.Config, live func() *config.Config) (gateway
 // atespaces a stage may name, and the anchors come from the mounted file.
 func newSubstrateBundleStore(cms bundle.ConfigMaps, c *config.Config, live func() *config.Config) *bundle.Store {
 	path := c.Substrate.Bundles.EffectiveAnchorsFile()
-	return &bundle.Store{CM: cms, Base: c, Live: live, AnchorsFile: path,
+	return &bundle.Store{CM: cms, Base: c, Live: live, AnchorsFile: path, OCIStages: substrateOCIStages(c),
 		Anchors: func() (*eb.Anchors, error) { return bundle.LoadAnchorsFile(path) }}
+}
+
+// substrateOCIStages is substrate.bundles.oci.stages when oci is on.
+func substrateOCIStages(c *config.Config) []bundle.OCIStage {
+	o := c.Substrate.Bundles.OCI
+	if !o.Enabled {
+		return nil
+	}
+	out := make([]bundle.OCIStage, 0, len(o.Stages))
+	for _, st := range o.Stages {
+		out = append(out, bundle.OCIStage{Stage: st.Stage, Ref: st.Ref, Atespaces: st.Atespaces})
+	}
+	return out
 }

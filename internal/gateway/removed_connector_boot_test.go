@@ -95,7 +95,7 @@ func (h removedBootHost) requireRemoved(t *testing.T) {
 func TestRemovedConnectorBootRemovesWhatDefenseClawWrote(t *testing.T) {
 	h := stageRemovedBootHost(t)
 	registry := connector.NewDefaultRegistry()
-	failed, dropped := teardownRemovedConnectorsReport(registry, []string{"openhands", "omnigent", "codex"}, []string{"codex"},
+	failed, dropped, _ := teardownRemovedConnectorsWhy(registry, []string{"openhands", "omnigent", "codex"}, []string{"codex"},
 		connector.SetupOpts{DataDir: h.dataDir}, "", context.Background())
 	sort.Strings(dropped)
 	if len(failed) != 0 || !reflect.DeepEqual(dropped, []string{"omnigent", "openhands"}) {

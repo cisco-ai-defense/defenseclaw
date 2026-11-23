@@ -68,6 +68,7 @@ var (
 	_ = bounded.Register("actionfacts.maxSQLASTDepth", bounded.Depth, int(maxSQLASTDepth))
 	_ = bounded.Register("actionfacts.maxSQLASTStatements", bounded.Items, int(maxSQLASTStatements))
 	_ = bounded.Register("actionfacts.maxSQLASTTokens", bounded.Items, int(maxSQLASTTokens))
+	_ = bounded.Register("actionfacts.maxSQLQueryChunks", bounded.Items, int(maxSQLQueryChunks))
 	_ = bounded.Register("actionfacts.maxSQLUDFBodyBytes", bounded.Bytes, int(maxSQLUDFBodyBytes))
 	_ = bounded.Register("actionfacts.maxSSHAuthorizedKeysApprovedFingerprints", bounded.Items, int(maxSSHAuthorizedKeysApprovedFingerprints))
 	_ = bounded.Register("actionfacts.maxScalarBytes", bounded.Bytes, int(maxScalarBytes))

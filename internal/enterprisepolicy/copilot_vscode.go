@@ -128,7 +128,14 @@ func renderCopilotVSCodeLocalHooksPriorRelease(goos, hookBinary string) ([]byte,
 // bin. Releases up to 1.0.9 named only the transition image, and Setup
 // replaces it in place with this release hook, so an account signed out
 // through the upgrade still runs this install hook from it (GAP-1096).
-func renderCopilotVSCodeLocalHooksPriorReleases(goos, hookBinary string) ([][]byte, error) {
+// recorded, when it is another launch image of the same bin
+// (winpath.SameEnterpriseHookImageFamilyExact), adds the current render for
+// it: the earlier release's launch image the account's protected records
+// still name. Releases from 1.0.10 on name a launch image, and an account
+// signed out or disconnected through an upgrade keeps that release's Local
+// hook files, which name its image, until the guardian rewrites them in the
+// account's own session (GAP-1898).
+func renderCopilotVSCodeLocalHooksPriorReleases(goos, hookBinary, recorded string) ([][]byte, error) {
 	prior, err := renderCopilotVSCodeLocalHooksPriorRelease(goos, hookBinary)
 	if err != nil {
 		return nil, err
@@ -144,6 +151,13 @@ func renderCopilotVSCodeLocalHooksPriorReleases(goos, hookBinary string) ([][]by
 		renderCopilotVSCodeLocalHooksPriorRelease,
 	} {
 		document, err := render(goos, transition)
+		if err != nil {
+			return nil, err
+		}
+		renders = append(renders, document)
+	}
+	if recorded != "" && recorded != hookBinary && winpath.SameEnterpriseHookImageFamilyExact(recorded, hookBinary) {
+		document, err := RenderCopilotVSCodeLocalHooks(goos, recorded)
 		if err != nil {
 			return nil, err
 		}
@@ -287,6 +301,13 @@ type CopilotVSCodeUserRequest struct {
 	// 1.0.9 named and Setup replaces in place (GAP-0751, GAP-1096). It never
 	// writes.
 	AcceptPriorRelease bool
+	// RecordedHookBinary, with AcceptPriorRelease and DryRun, is the earlier
+	// launch image of this install the account's protected records name (the
+	// runtime selector's image for the account, which the caller has checked
+	// is a regular, trusted file): the current render for it counts as
+	// current too. Any other value, an image of another bin or another name,
+	// adds nothing (GAP-1898).
+	RecordedHookBinary string
 }
 
 // EnsureCopilotVSCodeUser writes or removes DefenseClaw's Local hook file
@@ -326,7 +347,7 @@ func EnsureCopilotVSCodeUser(req CopilotVSCodeUserRequest) (CopilotVSCodeUserRes
 	var errs []error
 	hookFileWant, pluginWant := hooks, hooks
 	if req.AcceptPriorRelease && req.DryRun {
-		priors, err := renderCopilotVSCodeLocalHooksPriorReleases(goos, req.HookBinary)
+		priors, err := renderCopilotVSCodeLocalHooksPriorReleases(goos, req.HookBinary, req.RecordedHookBinary)
 		if err != nil {
 			return result, err
 		}

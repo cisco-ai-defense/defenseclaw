@@ -386,12 +386,13 @@ func reconcileKiroUniversalHooks(list []interface{}, hookScript string) []interf
 }
 
 // removeKiroOwnedUniversalHooks drops DefenseClaw's universal-form entries,
-// including one whose script path or name was edited (GAP-0907).
+// including one whose script path or name was edited (GAP-0907) or that is a
+// copy named by a Windows path, on every OS: on Windows hookScript is the
+// cmd.exe bridge, which names no script (GAP-1942).
 func removeKiroOwnedUniversalHooks(list []interface{}, hookScript string) []interface{} {
 	kept := make([]interface{}, 0, len(list)+len(kiroV2HookSpecs))
-	edited := hookScriptBaseName(hookScript)
 	for _, item := range list {
-		if !kiroUniversalEntryOwned(item, hookScript) && !editedDefenseClawHookEntry(item, edited) {
+		if !kiroUniversalEntryOwned(item, hookScript) && !editedDefenseClawHookEntry(item, kiroHookScriptName) {
 			kept = append(kept, item)
 		}
 	}
@@ -592,7 +593,7 @@ func kiroOwnedV3Hook(item interface{}, hookScript string) bool {
 		return false
 	}
 	command := strings.TrimSpace(fmt.Sprint(action["command"]))
-	return kiroCommandOwned(command, hookScript) || editedDefenseClawHookCommand(command, kiroHookScriptName)
+	return kiroCommandOwned(command, hookScript) || editedDefenseClawHookCommandByAnyPath(command, kiroHookScriptName)
 }
 
 func kiroFileIsDefenseClawOwned(cfg map[string]interface{}, hookScript string) bool {
@@ -801,13 +802,13 @@ func kiroV2EntryOwned(item interface{}, hookScript string) bool {
 
 // removeKiroOwnedV2Hooks drops DefenseClaw's entries (kiroV2EntryOwned) from
 // one event's hook list, including one whose script path or name was edited
-// (GAP-0907).
+// (GAP-0907) or that is a copy named by a Windows path, on every OS
+// (GAP-1942).
 func removeKiroOwnedV2Hooks(raw interface{}, hookScript string) []interface{} {
 	list, _ := raw.([]interface{})
 	out := make([]interface{}, 0, len(list))
-	edited := hookScriptBaseName(hookScript)
 	for _, item := range list {
-		if kiroV2EntryOwned(item, hookScript) || editedDefenseClawHookEntry(item, edited) {
+		if kiroV2EntryOwned(item, hookScript) || editedDefenseClawHookEntry(item, kiroHookScriptName) {
 			continue
 		}
 		out = append(out, item)
@@ -1023,6 +1024,15 @@ func removeStaleKiroDefaultOverlay(hookScript string, scope *kiroReclaimScope) e
 	return removeKiroV2AgentHooksKeeping(kiroBuiltInDefaultAgentPath(), hookScript, false, scope)
 }
 
+// kiroCommandOwned reports whether a v3 hook command is DefenseClaw's by its
+// text: it runs the current hook command, carries the native launcher's
+// hook --connector kiro arguments, or is a Windows bridge Setup wrote. A
+// command that only names kiro-hook.sh is not: a user's own hook of that name
+// (C:\Users\me\hooks\kiro-hook.sh, /home/me/bin/kiro-hook.sh --flag) was
+// removed by the v3 repair and uninstall (GAP-1932). DefenseClaw's script in
+// another data directory, or a copy, is claimed by its .defenseclaw shape or
+// its binding (editedDefenseClawHookCommandByAnyPath), as in the other
+// connectors, and every entry Setup writes is named defenseclaw-*.
 func kiroCommandOwned(command, hookScript string) bool {
 	command = strings.TrimSpace(command)
 	hookScript = strings.TrimSpace(hookScript)
@@ -1032,7 +1042,7 @@ func kiroCommandOwned(command, hookScript string) bool {
 	if hookScript != "" && (command == hookScript || strings.Contains(command, hookScript)) {
 		return true
 	}
-	if strings.Contains(command, kiroHookScriptName) || strings.Contains(command, "hook --connector kiro") {
+	if strings.Contains(command, "hook --connector kiro") {
 		return true
 	}
 	// The Windows encoded bridge carries its arguments base64-encoded.

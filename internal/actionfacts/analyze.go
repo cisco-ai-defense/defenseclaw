@@ -320,15 +320,17 @@ func analyze(input Input, twinCommand string, capture *redirectTargetCapture) Fa
 		projectStructuredTextReplacements(input)
 	facts.SQLServerCommandExecutions =
 		projectSQLServerCommandExecutions(input)
-	facts.PostgreSQLCopyPrograms = projectPostgreSQLCopyPrograms(input, facts)
+	sqlReads, sqlReadCaps := sqlCLIReadInputs(input, facts)
+	facts.PostgreSQLCopyPrograms = projectPostgreSQLCopyPrograms(input, sqlReads)
 	facts.SQLSensitiveServerFileReads =
-		projectSQLSensitiveServerFileReads(input, facts)
+		projectSQLSensitiveServerFileReads(input, sqlReads)
 	facts.SensitiveSQLRowsetReads = projectSensitiveSQLRowsetReads(input)
 	facts.SQLDirectExternalEgresses = projectSQLDirectExternalEgresses(input)
 	facts.StructuredLiteralPersistences =
 		projectStructuredLiteralPersistences(input)
 	facts.SQLCommandUDFOperations = projectSQLCommandUDFOperations(input, facts)
-	facts.SQLMutations, facts.SQLFacts = projectSQLAnalysis(input, facts)
+	facts.SQLMutations, facts.SQLFacts, facts.sqlASTCaps = projectSQLAnalysis(input, facts)
+	facts.sqlASTCaps = facts.sqlASTCaps.Union(sqlReadCaps)
 	facts.HTTPSQLInjections = projectHTTPSQLInjections(input)
 	facts.HTTPCommandInjections = projectHTTPCommandInjections(input)
 	facts.SQLClientShellEscapes = projectSQLClientShellEscapes(facts)

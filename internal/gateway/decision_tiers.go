@@ -20,38 +20,70 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"weak"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/decide"
 )
 
-// packTables holds the tier table of every pack directory: decide.Builtin()
-// with the pack's own tiers.yaml column in the pack's own tier (DET111 D4),
-// so a pack's cells, not only its tier name, decide its verdicts. Like
-// packPostures it is keyed by directory and filled from what a generation
-// build read (notePackTable), visible when the generation publishes
-// (publishPackPostures); a directory no generation loaded reads its
-// tiers.yaml once. A built-in pack's column is the built-in table itself
-// (TestShippedTiersMatchBuiltin), so it decides with decide.Builtin().
-var packTables sync.Map // directory -> *decide.Table
-
-// pendingPackTables holds what builds read until a generation publishes.
-var pendingPackTables sync.Map // directory -> *decide.Table
-
-func notePackTable(dir string, col *decide.Column) {
-	if dir = strings.TrimSpace(dir); dir != "" {
-		pendingPackTables.Store(dir, decide.Builtin().WithColumn(col))
-	}
+// The tier table of a pack directory is decide.Builtin() with the pack's own
+// tiers.yaml column in the pack's own tier (DET111 D4), so a pack's cells,
+// not only its tier name, decide its verdicts. A built-in pack's column is
+// the built-in table itself (TestShippedTiersMatchBuiltin), so it decides
+// with decide.Builtin().
+//
+// A build notes the table of each pack it loads on that pack
+// (notePackTable); a published generation makes the tables of its own packs
+// the live ones (publishPackTables). A note is keyed by the pack, weakly, so
+// the note of a build that never publishes (superseded, failed) is never
+// published by another build's generation and goes with its pack; and a
+// directory the published generation no longer loads leaves the live tables
+// (DET111 T19 review P3-4: one process-global pending map published every
+// build's notes, and the fallback cache was never invalidated).
+type packTableNote struct {
+	dir   string
+	table *decide.Table
 }
 
-func publishPackTables() {
-	pendingPackTables.Range(func(dir, table any) bool {
-		packTables.Store(dir, table)
-		pendingPackTables.Delete(dir)
-		return true
-	})
+var (
+	// packTableNotes maps weak.Pointer[guardrail.RulePack] to packTableNote.
+	packTableNotes sync.Map
+	// livePackTables is the directory -> table map of the published
+	// generation's packs; replaced whole, never written in place.
+	livePackTables atomic.Pointer[map[string]*decide.Table]
+	// packTableFallback holds the table of a directory no published
+	// generation loaded, read from its tiers.yaml once per generation.
+	packTableFallback sync.Map // directory -> *decide.Table
+)
+
+func notePackTable(pack *guardrail.RulePack, dir string, col *decide.Column) {
+	if dir = strings.TrimSpace(dir); dir == "" || pack == nil {
+		return
+	}
+	key := weak.Make(pack)
+	packTableNotes.Store(key, packTableNote{dir: dir, table: decide.Builtin().WithColumn(col)})
+	runtime.AddCleanup(pack, func(key weak.Pointer[guardrail.RulePack]) { packTableNotes.Delete(key) }, key)
+}
+
+// publishPackTables makes the tables noted on g's packs the live ones and
+// drops the fallback reads of the previous generation.
+func publishPackTables(g *Generation) {
+	tables := make(map[string]*decide.Table)
+	if g != nil {
+		for _, pack := range g.RulePacks {
+			if v, ok := packTableNotes.Load(weak.Make(pack)); ok {
+				note := v.(packTableNote)
+				tables[note.dir] = note.table
+			}
+		}
+	}
+	livePackTables.Store(&tables)
+	packTableFallback.Clear()
 }
 
 // packTable is the tier table of the pack at dir ("" is decide.Builtin()).
@@ -61,7 +93,12 @@ func packTable(dir string) *decide.Table {
 	if dir = strings.TrimSpace(dir); dir == "" {
 		return decide.Builtin()
 	}
-	if v, ok := packTables.Load(dir); ok {
+	if live := livePackTables.Load(); live != nil {
+		if table, ok := (*live)[dir]; ok {
+			return table
+		}
+	}
+	if v, ok := packTableFallback.Load(dir); ok {
 		return v.(*decide.Table)
 	}
 	var col *decide.Column
@@ -69,7 +106,7 @@ func packTable(dir string) *decide.Table {
 		col, _ = decide.ParseColumn(raw)
 	}
 	table := decide.Builtin().WithColumn(col)
-	packTables.Store(dir, table)
+	packTableFallback.Store(dir, table)
 	return table
 }
 

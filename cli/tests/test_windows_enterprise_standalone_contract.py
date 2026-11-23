@@ -1885,6 +1885,7 @@ def test_uninstall_after_a_deleted_enrolled_account_passes_on_the_first_call(tmp
     _run_lifecycle_functions(tmp_path, [
         "Test-DefenseClawDeletedAccountTeardownRefusal",
         "Test-DefenseClawManifestCatchUpTeardownRefusal",
+        "Test-DefenseClawLockWaitTeardownRefusal",
         "Invoke-DefenseClawUninstallPrecommitHookCheck",
     ], _PURGE_DELETED_ACCOUNT_HARNESS + r"""
 $stale = 'managed-hook teardown check failed: protected managed-hook activation evidence does not match the current manifest'
@@ -1936,6 +1937,7 @@ def test_uninstall_restarts_the_enumerator_on_a_later_deleted_account(tmp_path) 
     _run_lifecycle_functions(tmp_path, [
         "Test-DefenseClawDeletedAccountTeardownRefusal",
         "Test-DefenseClawManifestCatchUpTeardownRefusal",
+        "Test-DefenseClawLockWaitTeardownRefusal",
         "Invoke-DefenseClawUninstallPrecommitHookCheck",
     ], _PURGE_DELETED_ACCOUNT_HARNESS + r"""
 $stale = 'managed-hook teardown check failed: protected managed-hook activation evidence does not match the current manifest'
@@ -1960,6 +1962,41 @@ $script:UninstallDeletedAccountWaitSeconds = 1
 $script:UninstallDeletedAccountPollSeconds = 1
 $result = Invoke-Case @($stale, $deleted, $deleted, $deleted, $deleted) @()
 if ($result -notlike 'refused: *no longer exists*' -or @($script:log | Where-Object { $_ -ceq 'stop Enum' }).Count -ne 1) { throw "the deadline after a later restart did not give back the deleted-account refusal: $result / $($script:log -join ' | ')" }
+""")
+
+
+def test_uninstall_precheck_asks_again_after_a_managed_lock_wait(tmp_path) -> None:
+    # rel-1-0-10:GAP-1713: the hook Guardian held the Claude managed policy
+    # transaction lock 9-14 s every reconcile pass, so the read-only check,
+    # which waits 10 s for it, refused and Setup /uninstall failed 1603. A
+    # lock-wait refusal is asked again within the wait; nothing is restarted.
+    _run_lifecycle_functions(tmp_path, [
+        "Test-DefenseClawDeletedAccountTeardownRefusal",
+        "Test-DefenseClawManifestCatchUpTeardownRefusal",
+        "Test-DefenseClawLockWaitTeardownRefusal",
+        "Invoke-DefenseClawUninstallPrecommitHookCheck",
+    ], _PURGE_DELETED_ACCOUNT_HARNESS + r"""
+$claude = 'managed-hook teardown check failed: enterprise hooks: timed out after 10s waiting for managed policy transaction lock'
+$cursor = 'managed-hook teardown check failed: enterprise hooks: timed out waiting for Cursor transaction lock'
+$selector = 'managed-hook teardown check failed: enterprise hooks: timed out waiting for managed runtime selector lock'
+$result = Invoke-Case @($claude, $claude, 'ok') @()
+$order = $script:log -join ' | '
+if ($result -cne 'passed') { throw "a held Claude policy lock was not asked again: $result / $order" }
+if ($order -match 'stop Enum') { throw "a lock wait restarted the enumerator: $order" }
+if ($order -notmatch 'phase: a managed transaction lock was held by another DefenseClaw process') { throw "the lock wait was not reported: $order" }
+$result = Invoke-Case @($cursor, $selector, 'ok') @()
+if ($result -cne 'passed') { throw "a held Cursor or selector lock was not asked again: $result" }
+# A lock wait after a deleted account keeps the deleted-account refusal for the deadline.
+$result = Invoke-Case @($deleted, $claude, 'ok') @()
+if ($result -cne 'passed') { throw "a lock wait inside the deleted-account wait was not asked again: $result" }
+# Another refusal after a lock wait is given back at once.
+$result = Invoke-Case @($claude, 'managed-hook teardown check failed: runtime selector is untrusted') @()
+if ($result -notlike 'refused: *runtime selector is untrusted*') { throw "an unrelated refusal after a lock wait was swallowed: $result" }
+# Still held at the deadline: the lock-wait refusal comes back.
+$script:UninstallDeletedAccountWaitSeconds = 1
+$script:UninstallDeletedAccountPollSeconds = 1
+$result = Invoke-Case @($claude, $claude, $claude, $claude) @()
+if ($result -notlike 'refused: *waiting for managed policy transaction lock*') { throw "the deadline did not give back the lock-wait refusal: $result" }
 """)
 
 

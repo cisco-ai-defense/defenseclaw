@@ -162,7 +162,7 @@ func projectKubeRequests(input Input, facts Facts) ([]KubeRequestFact, kubeCutRe
 	}
 	proxyPorts := map[int64]bool{}
 	for _, command := range facts.Commands {
-		if kubeProgram(command) == "kubectl" {
+		if program := kubeProgram(command); program == "kubectl" || program == "oc" {
 			kubectlProxyPorts(kubeWords(command), proxyPorts)
 		}
 	}
@@ -172,7 +172,8 @@ func projectKubeRequests(input Input, facts Facts) ([]KubeRequestFact, kubeCutRe
 		}
 		words := kubeWords(command)
 		switch kubeProgram(command) {
-		case "kubectl":
+		case "kubectl", "oc":
+			// oc is the OpenShift kubectl: the same grammar and requests.
 			requests = append(requests, kubectlRequests(command.ID, words, "")...)
 		case "curl":
 			requests = append(requests, curlKubeRequests(command.ID, words, proxyPorts)...)
@@ -703,7 +704,7 @@ func curlKubeRequests(commandID int64, argv []string, proxyPorts map[int64]bool)
 	parsed := parseCurlArgv(argv)
 	var requests []KubeRequestFact
 	for _, target := range parsed.Targets {
-		cacert, data, get := false, false, false
+		cacert, bearer, data, get := false, false, false, false
 		for _, option := range parsed.Options {
 			if option.Group != target.Group {
 				continue
@@ -711,6 +712,10 @@ func curlKubeRequests(commandID int64, argv []string, proxyPorts map[int64]bool)
 			switch {
 			case option.Canonical == "--cacert" || option.Canonical == "--capath":
 				cacert = cacert || strings.Contains(option.Value, "/var/run/secrets/kubernetes.io/")
+			case option.Canonical == "--oauth2-bearer":
+				bearer = true
+			case option.Canonical == "--header":
+				bearer = bearer || kubeBearerHeader(option.Value)
 			case curlDataOptions[option.Canonical]:
 				data = true
 			case option.Canonical == "--get":
@@ -732,7 +737,7 @@ func curlKubeRequests(commandID int64, argv []string, proxyPorts map[int64]bool)
 		if strings.Contains(method, strings.ToUpper(awkprog.Hole)) {
 			method = ""
 		}
-		if request, ok := kubeHTTPRequest(method, target.Value, cacert, proxyPorts); ok {
+		if request, ok := kubeHTTPRequest(method, target.Value, cacert, bearer, proxyPorts); ok {
 			request.CommandID = commandID
 			requests = append(requests, request)
 		}
@@ -752,14 +757,19 @@ func wgetKubeRequests(commandID int64, argv []string, proxyPorts map[int64]bool)
 	if strings.Contains(method, strings.ToUpper(awkprog.Hole)) {
 		method = ""
 	}
-	cacert := false
-	for _, word := range argv {
+	cacert, bearer := false, false
+	for index, word := range argv {
 		cacert = cacert || strings.HasPrefix(word, "--ca-certificate") &&
 			strings.Contains(word, "/var/run/secrets/kubernetes.io/")
+		if value, ok := strings.CutPrefix(word, "--header="); ok {
+			bearer = bearer || kubeBearerHeader(value)
+		} else if word == "--header" && index+1 < len(argv) {
+			bearer = bearer || kubeBearerHeader(argv[index+1])
+		}
 	}
 	var requests []KubeRequestFact
 	for _, target := range parsed.Targets {
-		if request, ok := kubeHTTPRequest(method, target, cacert, proxyPorts); ok {
+		if request, ok := kubeHTTPRequest(method, target, cacert, bearer, proxyPorts); ok {
 			request.CommandID = commandID
 			requests = append(requests, request)
 		}
@@ -771,7 +781,11 @@ type kubeEvidence uint8
 
 const (
 	kubeEvidenceNone kubeEvidence = iota
-	// kubeEvidenceDynamicHost: the host is not static ($APISERVER).
+	// kubeEvidenceDynamicHost: the host is not static ($APISERVER), or the
+	// host is not known as an apiserver (a bare IP:443) but the request
+	// carries a bearer token, the credential an apiserver client sends
+	// (rel-1-0-10:GAP-1860). Either way only a path that decomposes as a
+	// Kubernetes API path is a request.
 	kubeEvidenceDynamicHost
 	// kubeEvidenceAPIServer: the target is an apiserver (the in-cluster
 	// service name, port 6443, a kubectl proxy port on loopback, a managed
@@ -781,11 +795,14 @@ const (
 
 // kubeHTTPRequest decomposes one HTTP URL addressed to a Kubernetes
 // apiserver. ok is false for a URL that is not an apiserver request.
-func kubeHTTPRequest(method, raw string, cacert bool, proxyPorts map[int64]bool) (KubeRequestFact, bool) {
+func kubeHTTPRequest(method, raw string, cacert, bearer bool, proxyPorts map[int64]bool) (KubeRequestFact, bool) {
 	scheme, authority, rest := splitKubeURL(raw)
 	evidence := kubeHostEvidence(scheme, authority, proxyPorts)
 	if cacert && evidence == kubeEvidenceNone {
 		evidence = kubeEvidenceAPIServer
+	}
+	if bearer && evidence == kubeEvidenceNone {
+		evidence = kubeEvidenceDynamicHost
 	}
 	if evidence == kubeEvidenceNone {
 		return KubeRequestFact{}, false
@@ -802,6 +819,17 @@ func kubeHTTPRequest(method, raw string, cacert bool, proxyPorts map[int64]bool)
 	}
 	request.Source = KubeSourceHTTP
 	return request, true
+}
+
+// kubeBearerHeader reports an HTTP header value that sends a bearer token
+// (Authorization: Bearer ...).
+func kubeBearerHeader(value string) bool {
+	name, token, found := strings.Cut(value, ":")
+	if !found || !strings.EqualFold(strings.TrimSpace(name), "authorization") {
+		return false
+	}
+	scheme, _, _ := strings.Cut(strings.TrimSpace(token), " ")
+	return strings.EqualFold(scheme, "bearer")
 }
 
 // splitKubeURL splits a curl or wget URL (the scheme is optional) into its

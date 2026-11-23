@@ -1,0 +1,17 @@
+# OCI bundle source for a private registry with its own CA, from a ConfigMap
+# key (GAP-0437, Preview). Anonymous pulls: no login Secret.
+bundles:
+  enabled: true
+  anchorsSecret: acme-bundle-anchors
+  oci:
+    enabled: true
+    ca:
+      configMap: registry-ca
+      key: registry-ca.pem
+    stages:
+    - stage: all
+      ref: registry.internal.example:5000/policy/all-bundle@sha256:fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210
+config:
+  substrate:
+    identity:
+      issuer: https://idp.cluster-a.example

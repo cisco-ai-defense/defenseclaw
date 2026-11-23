@@ -87,7 +87,7 @@ run `ensure` again.
 | `defenseclaw-gateway.service` | `defenseclaw`, no capabilities | Policy engine and hook API. `Type=notify`, 60 s watchdog, `Restart=always`. Config, binaries and ledger are read-only to it |
 | `defenseclaw-gateway-api.socket` | PID 1 | Listens on `127.0.0.1:18970` |
 | `defenseclaw-gateway-hook.socket` | PID 1 | Listens on `/run/defenseclaw-hook/hook.sock` |
-| `defenseclaw-hook-guardian.service` | root, bounded capabilities | Always running. Reconciles each user's hooks every minute through a worker that runs as that user, which also runs the user's AI Discovery scan. Every 5 seconds it checks the hook binary and Claude Code's `90-defenseclaw.json` drop-in; if either is gone or changed it logs `tamper:` and starts `defenseclaw-enterprise-apply.service`, whose `ensure` puts them back |
+| `defenseclaw-hook-guardian.service` | root, bounded capabilities | Always running. Reconciles each user's hooks every minute through a worker that runs as that user, which also runs the user's AI Discovery scan. Every 5 seconds it checks the hook binary, Claude Code's `90-defenseclaw.json` drop-in and DefenseClaw's part of Codex `requirements.toml`; if one is gone or changed it logs `tamper:` and starts `defenseclaw-enterprise-apply.service`, whose `ensure` puts it back |
 | `defenseclaw-hook-guardian-reconcile.service` | root | One immediate reconcile, on demand |
 | `defenseclaw-hook-enumerator.service` | root, homes read-only | Rewrites the target manifest every five minutes (in `auto` enrollment mode) |
 | `defenseclaw-sensor-helper.service` | root | Answers the gateway's fixed AI Discovery requests. Starts after `tetragon.service` and reads a running Tetragon |
@@ -530,14 +530,16 @@ sandboxes and the egress proxy is in [Agent segmentation](/docs/segmentation).
 
 ## Claude Cowork
 
-Claude Desktop for Linux is a beta, and Cowork on Linux is not certified. In the 1.0.8 tests the managed drop-in and per-user setup were verified on Linux, but Cowork itself was not run. The Claude Code drop-in (`/etc/claude-code/managed-settings.d/90-defenseclaw.json`) is meant to cover Cowork where it runs. There is nothing to configure for Cowork itself.
+Claude Desktop for Linux is a beta, and Cowork on Linux is not certified: Cowork on Linux is Preview. The managed drop-in and per-user setup work on Linux. The Claude Code drop-in (`/etc/claude-code/managed-settings.d/90-defenseclaw.json`) is meant to cover Cowork where it runs. There is nothing to configure for Cowork itself.
 
 | Item | Linux |
 | --- | --- |
-| Engine folder | `claude-code/<version>/` in `~/.config/Claude`, or in `~/.config/Claude-3p` for third-party inference. These follow the vendor's convention; no Linux engine build has been measured. A relocated `XDG_CONFIG_HOME` is not followed |
+| Engine folder | `claude-code/<version>/` in `~/.config/Claude`, or in `~/.config/Claude-3p` for third-party inference. These follow the vendor's convention and are Preview on Linux. A relocated `XDG_CONFIG_HOME` is not followed |
 | Engine identity | Linux builds carry no vendor signature. A build counts only when its version folder holds an executable `claude`. It is reported as unsigned, and as unidentified while it runs, so `verify` fails while Cowork or the Code tab runs |
 
 See [Claude Cowork](/docs/connectors/cowork) for the tools, `managed_hooks_only` and the limits.
+
+The [Cowork VM sensor](/docs/connectors/cowork-vm-sensor) is not available on Linux: `enterprise.cowork_vm_sensor` with `mode: "on"` is refused.
 
 ## Sandboxes
 

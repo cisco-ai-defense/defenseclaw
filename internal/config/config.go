@@ -662,6 +662,10 @@ type AIDiscoveryConfig struct {
 	// Off by default for the same reason as IncludeUserEmail: the principal
 	// identifies a person across systems.
 	IncludeUserPrincipal bool `mapstructure:"include_user_principal" yaml:"include_user_principal,omitempty"`
+	// IncludeSkillManifests sends the text of each skill's SKILL.md with the
+	// managed skill inventory, once per file version. Off by default: it is
+	// file content from the endpoint.
+	IncludeSkillManifests bool `mapstructure:"include_skill_manifests" yaml:"include_skill_manifests,omitempty"`
 	// TrustedADChildDomains lists the child domains of the joined Active
 	// Directory realm whose SSSD accounts DefenseClaw verifies on Linux
 	// (emea.corp.example.com on a host joined to corp.example.com). An

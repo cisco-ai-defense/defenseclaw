@@ -170,8 +170,8 @@ reboot.
 
 | Property | Meaning |
 | --- | --- |
-| `CONFIG=` | The administrator-approved `config.yaml`. Required for the first install. |
-| `MANIFEST=` | A guardian `targets.yaml`. Required with `/install`. Optional with `/ensure`, which builds the first manifest from the config. |
+| `CONFIG=` | The administrator-approved `config.yaml`. Required for the first `/ensure`. `/install` takes it together with `MANIFEST=`, or neither (see below). |
+| `MANIFEST=` | A guardian `targets.yaml`. Required with `/install` when `CONFIG=` is given. Optional with `/ensure`, which builds the first manifest from the config. |
 | `ALLOWEDSIGNERS=` | Comma-separated SHA-256 thumbprints of accepted Authenticode signer certificates. Meaningful only for a signed Setup. |
 | `JSON=1` | Print the lifecycle result document. |
 | `NOSTART=1` | Install, upgrade, repair or ensure without starting the services. |
@@ -194,6 +194,12 @@ folder for you.
 
 `/ensure` installs, upgrades or repairs as needed and does nothing when the
 device is compliant. The first `/ensure` without `CONFIG=` exits `1639`.
+
+The Standalone Setup's `/install` without `CONFIG=` and `MANIFEST=` stages a
+disabled deployment: every file and permission is in place and the services
+are registered but stopped. A later `/repair` with both `CONFIG=` and
+`MANIFEST=` activates it. Setup refuses this staged install on a computer that
+already has a deployment.
 
 On standalone `/uninstall`, the Cursor machine hook adapter
 (`C:\ProgramData\Cursor\defenseclaw-hook.ps1`) and its
@@ -221,8 +227,8 @@ intact and names it.
 
 Setup's own checks run before the lifecycle: a malformed command line (an
 unknown property, a missing, relative, padded or environment-expanded
-`CONFIG=` or `MANIFEST=` path, `/install` without `CONFIG=` and `MANIFEST=`,
-or `TIMEOUTSECONDS` out of range) exits `1639`; an unelevated token and a
+`CONFIG=` or `MANIFEST=` path, `/install` with only one of `CONFIG=` and
+`MANIFEST=`, or `TIMEOUTSECONDS` out of range) exits `1639`; an unelevated token and a
 `CONFIG=` or `MANIFEST=` file that is a link or can be changed by a
 non-administrator exit `1603`. The lifecycle it runs adds `1603`, `1618` and
 `1639`. The Secure Client Setup returns only `0` and `1603`.

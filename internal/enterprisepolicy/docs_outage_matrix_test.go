@@ -308,6 +308,14 @@ func pinnedOutageSentence(rel, sentence string) bool {
 	return false
 }
 
+// nonConnectorPages are pages under connectors/ that describe no single connector.
+var nonConnectorPages = map[string]bool{
+	"connectors/index.mdx":                true,
+	"connectors/capability-matrix.mdx":    true,
+	"connectors/aliases.mdx":              true,
+	"connectors/switching-connectors.mdx": true,
+}
+
 func TestOutageBehaviourIsStatedOnlyInTheCapabilityMatrix(t *testing.T) {
 	restatement := newOutageRestatement(t)
 	docs := filepath.Join(repoRoot(), "docs-site", "content", "docs")
@@ -329,8 +337,10 @@ func TestOutageBehaviourIsStatedOnlyInTheCapabilityMatrix(t *testing.T) {
 		if strings.Contains(text, outageTableLink) {
 			linked[rel] = true
 		}
-		// The table page itself (connectors/capability-matrix.mdx) is not a connector page.
-		connectorPage := strings.HasPrefix(rel, "connectors/") && rel != "connectors/index.mdx" && rel != "connectors/capability-matrix.mdx"
+		// The table page itself (connectors/capability-matrix.mdx) is not a connector page, and
+		// neither are the setup pages that moved into connectors/ in 1.0.10 (aliases,
+		// switching-connectors): they describe the setup commands for every connector.
+		connectorPage := strings.HasPrefix(rel, "connectors/") && !nonConnectorPages[rel]
 		for _, sentence := range sentenceBreak.Split(text, -1) {
 			sentence = strings.Join(strings.Fields(sentence), " ")
 			if pinnedOutageSentence(rel, sentence) {

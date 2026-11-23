@@ -101,8 +101,8 @@ func FuzzReadSyntaxTail(f *testing.F) {
 		if !ok {
 			return
 		}
-		if len(tail.Statements) > MaxSyntaxTailStatements {
-			t.Fatalf("%d statements past the cap", len(tail.Statements))
+		if len(tail.Statements)-len(tail.Extended) > MaxSyntaxTailStatements || len(tail.Extended) > MaxSyntaxTailStatements {
+			t.Fatalf("%d statements (%d of the longer reading) past the caps", len(tail.Statements), len(tail.Extended))
 		}
 		for _, statement := range tail.Statements {
 			if strings.TrimSpace(statement) == "" || !strings.Contains(command, statement) {
@@ -115,15 +115,15 @@ func FuzzReadSyntaxTail(f *testing.F) {
 	})
 }
 
-// rel-1-0-10:GAP-0745 (lead ruling (a)) and GAP-0746: a statement longer
-// than the run window is left unread without a cap (the call keeps its
-// detection-only record), and a here-document body stays in its statement.
+// rel-1-0-10:GAP-0745 and GAP-0746: text past the run window that no
+// statement can be read from is not a cap (the call keeps its detection-only
+// record), and a here-document body stays in its statement.
 func TestReadSyntaxTailWindowIsARecordAndHereDocsAreData(t *testing.T) {
-	long := "fi\nif true\n" + strings.Repeat("then\n", maxSyntaxTailRun+2) + "x"
+	long := "fi\nif true\n" + strings.Repeat("then\n", syntaxTailRunWindow+2) + "x"
 	if tail, ok := ReadSyntaxTail(long); !ok || tail.Truncated.Any() {
 		t.Errorf("a statement past the run window: ok %v truncated %q, want no cap", ok, tail.Truncated.Reason())
 	}
-	heredoc := "fi\ncat <<'EOF'\n" + strings.Repeat("echo data\n", maxSyntaxTailRun+3) + "EOF\necho c"
+	heredoc := "fi\ncat <<'EOF'\n" + strings.Repeat("echo data\n", syntaxTailRunWindow+3) + "EOF\necho c"
 	tail, ok := ReadSyntaxTail(heredoc)
 	if !ok || slices.Contains(tail.Statements, "echo data") || !slices.Contains(tail.Statements, "echo c") {
 		t.Errorf("a here-document after the error: %q, want its body kept as data and the next statement read", tail.Statements)
@@ -171,5 +171,21 @@ func TestReadSyntaxTailQuotedHereDocBodyIsItsCommandsInput(t *testing.T) {
 	}
 	if tail, ok := ReadSyntaxTail("fi\ncat <<EOF\necho data\nEOF"); ok && len(tail.HereDocs) != 0 {
 		t.Errorf("an unquoted here-document is kept apart: %+v", tail.HereDocs)
+	}
+}
+
+// rel-1-0-10:GAP-0745: a statement of more pieces than the run window is
+// read whole (with the statements the parser completes after it), and the cut-back reads the part of the statement with the
+// error before it past its word steps; neither stops silently.
+func TestReadSyntaxTailReadsPastTheWindowAndTheWordSteps(t *testing.T) {
+	loop := "for i in 1; do touch a.txt" + strings.Repeat("; :", 3*syntaxTailRunWindow) + "; done"
+	tail, ok := ReadSyntaxTail("fi\n" + loop + "\necho c")
+	if !ok || tail.Truncated.Any() || !slices.ContainsFunc(tail.Statements, func(s string) bool { return strings.HasPrefix(s, loop) }) || !slices.Contains(tail.Statements, "echo c") {
+		t.Errorf("a loop past the run window: ok %v truncated %q statements %q, want it read whole", ok, tail.Truncated.Reason(), tail.Statements)
+	}
+	words := strings.Repeat(" w", 3*syntaxTailRunWindow)
+	tail, ok = ReadSyntaxTail("echo ok; touch done.txt `" + words)
+	if !ok || tail.Truncated.Any() || !slices.ContainsFunc(tail.Statements, func(s string) bool { return strings.HasSuffix(s, "touch done.txt") }) {
+		t.Errorf("an unclosed backquote past the word steps: ok %v truncated %q statements %q, want the command before it read", ok, tail.Truncated.Reason(), tail.Statements)
 	}
 }

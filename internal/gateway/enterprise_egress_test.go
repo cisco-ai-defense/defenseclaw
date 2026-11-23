@@ -170,6 +170,7 @@ func TestStandaloneWebhookClientReachesItsEndpointThroughTheEnterpriseProxy(t *t
 // router, the telemetry dialer (which connects directly without a route) and
 // a Bifrost judge provider.
 func TestStandaloneEgressClientsGoThroughTheEnterpriseProxy(t *testing.T) {
+	closeBifrostTenantsAfter(t)
 	judge := func(w http.ResponseWriter, r *http.Request) {
 		if !strings.HasSuffix(r.URL.Path, "/chat/completions") {
 			http.NotFound(w, r)

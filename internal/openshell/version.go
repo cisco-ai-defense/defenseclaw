@@ -21,7 +21,7 @@ import (
 	"strconv"
 	"strings"
 
-	v1 "github.com/NVIDIA/OpenShell/sdk/go/openshell/v1"
+	v1 "github.com/ai-openshell/sdk-go/openshell/v1"
 )
 
 // Supported OpenShell releases. 0.1.0 broke every 0.0.x peer, and the
@@ -52,8 +52,9 @@ const (
 
 	// InstallerVersion is the release the setup flow installs, and the one
 	// it offers an older supported release an in-place upgrade to
-	// (Installer.Upgrade, DoctorReport.OpenShellUpgradeAvailable).
-	InstallerVersion = "0.1.6"
+	// (Installer.Upgrade, DoctorReport.OpenShellUpgradeAvailable). Review
+	// installerUpgradeReason and TarballPins with it.
+	InstallerVersion = "0.1.9"
 	// InstallerTag is InstallerVersion's upstream release tag.
 	InstallerTag = "v" + InstallerVersion
 	// InstallerURL is the tag-pinned upstream installer. Fetching it from a
@@ -61,13 +62,14 @@ const (
 	InstallerURL = "https://raw.githubusercontent.com/NVIDIA/OpenShell/" + InstallerTag + "/install.sh"
 	// InstallerSHA256 is the digest of InstallerURL. Setup refuses to run a
 	// script that does not match it.
-	InstallerSHA256 = "04c1a437d4a4fc11930d75a336fc4f52bf0c95251e8469c306e407e203769ae7"
+	InstallerSHA256 = "6f64d77d289f7859868119bcb7d0617804b8687dd43010b0a3cadf95e2f44cd4"
 
 	// installerUpgradeReason says why a host on an older supported release
 	// is offered InstallerVersion (the doctor's CLI check). Review it with
 	// InstallerVersion.
-	installerUpgradeReason = "initializes a missing or empty MicroVM hosts file; " +
-		"the release also includes the 0.1.5 network and lifecycle fixes"
+	installerUpgradeReason = "applies a credential only where its provider places it, " +
+		"refuses filesystem policy paths through a workspace symlink and private addresses " +
+		"on wildcard egress rules, and keeps sandboxes through supervisor reconnects"
 
 	// DefaultBaseImage is the digest-pinned NVIDIA community sandbox image
 	// the DefenseClaw overlay is built on (multi-arch; ships node, uv, git
@@ -101,6 +103,20 @@ const TarballBaseURL = "https://github.com/NVIDIA/OpenShell/releases/download/"
 // setup mode raises an older pin to InstallerVersion (ManagedVersionPin), so a
 // release older than SupportedMin is never listed.
 var TarballPins = map[string]map[string]string{
+	"0.1.9": {
+		"openshell-x86_64-unknown-linux-musl.tar.gz":           "3856ac7b6b2e33d6c8ab72a1036444156516e7303da85a9b13f661a2aa63bd2d",
+		"openshell-aarch64-unknown-linux-musl.tar.gz":          "cb923d08703b966f7e0e6b1483ed4ba6ed77bc10812c5502bcc1fb6ee0f6ad59",
+		"openshell-aarch64-apple-darwin.tar.gz":                "355bf612159eaa0c5375facd8f27536d9cb54e5af030328ea839a927a7901da5",
+		"openshell-gateway-x86_64-unknown-linux-gnu.tar.gz":    "c32085d64ccef037121c0e87bee1a57d6e886d77f77bb8b260cb08f0a6cce6a3",
+		"openshell-gateway-aarch64-unknown-linux-gnu.tar.gz":   "a41701c2dc7ac1aba13b0d48678dcb95090055aa42a2103b2ae712fb79338b1a",
+		"openshell-gateway-aarch64-apple-darwin.tar.gz":        "b348a57b97dc755d6a668631d328dd03fa88dc1b3565f16a094c9c59a420c51a",
+		"openshell-driver-vm-x86_64-unknown-linux-gnu.tar.gz":  "87bd26e5f49acdc4c6165aa463ad3964c40d5ef066125f99956f7e8eea0a0f65",
+		"openshell-driver-vm-aarch64-unknown-linux-gnu.tar.gz": "3d4a95329550472477ad1f5c108b10de194490e3404d2261e5556201a0d2d33d",
+		"openshell-driver-vm-aarch64-apple-darwin.tar.gz":      "92b90edd2f1795bf99bf708203a1b7fa13026486426a65435049f068e0393df7",
+	},
+	// SupportedMin: an exact enterprise.openshell.version pin of it is
+	// kept (ManagedVersionPin), so its tarballs stay installable until
+	// SupportedMin moves past it.
 	"0.1.6": {
 		"openshell-x86_64-unknown-linux-musl.tar.gz":           "2951c67366f3e3584ed9cec8d49b9f0b0eefc8cacea8b0582ac164590492f136",
 		"openshell-aarch64-unknown-linux-musl.tar.gz":          "259452a6065c4f76e71884b84e8696cc0fec2f8a832891d333f268ca7bb55a21",
@@ -347,17 +363,24 @@ func ProvisioningTimedOut(said string) bool {
 		strings.Contains(said, "provisioning timed out") || strings.Contains(said, "provisioning timeout cleanup")
 }
 
-// ManagedVersionPin is the effective managed version requirement. Exact pins
-// below SupportedMin move to InstallerVersion; ranges start no lower than the
-// floor. An upper bound at or below the floor has no usable release and is
-// reported by floorPossible. The lifecycle and daemon use the same result.
-func ManagedVersionPin(pin string) (effective string, raised, floorPossible bool) {
+// ManagedVersionPin is the effective managed version requirement. An exact
+// pin below SupportedMin moves to InstallerVersion in setup mode (setup is
+// true: DefenseClaw installs that release) and to SupportedMin in
+// prerequisite mode, where the administrator's packages need only meet the
+// floor (rel-1-0-6:GAP-0608; the two differ once InstallerVersion is above
+// SupportedMin). Ranges start no lower than the floor. An upper bound at or
+// below the floor has no usable release and is reported by floorPossible.
+// The lifecycle and daemon use the same result.
+func ManagedVersionPin(pin string, setup bool) (effective string, raised, floorPossible bool) {
 	pin = strings.TrimSpace(pin)
 	floor := mustParse(SupportedMin)
 	if len(strings.Fields(pin)) == 1 {
 		if v, err := ParseVersion(pin); err == nil {
 			if v.Compare(floor) < 0 {
-				return InstallerVersion, true, true
+				if setup {
+					return InstallerVersion, true, true
+				}
+				return SupportedMin, true, true
 			}
 			return pin, false, true
 		}
@@ -426,6 +449,24 @@ func mustParse(s string) Version {
 		panic(err)
 	}
 	return v
+}
+
+// MicroVMStartsOnMacMin is the first OpenShell release whose MicroVM driver
+// starts sandboxes on a Mac (rel-1-0-10:GAP-1775): 0.1.9 does not give the
+// guest's root folder to the sandbox's account, so the workload check
+// (MicroVMGuestRootLimit) passes. 0.1.6 to 0.1.8 are still refused by it.
+// Remove it, and the text it gates, when SupportedMin reaches it.
+const MicroVMStartsOnMacMin = "0.1.9"
+
+// MicroVMStartsOnMac reports whether the OpenShell release v starts MicroVM
+// sandboxes on a Mac. An empty v is no OpenShell installed yet, which setup
+// installs as InstallerVersion; one that does not parse is not known to.
+func MicroVMStartsOnMac(v string) bool {
+	if strings.TrimSpace(v) == "" {
+		v = InstallerVersion
+	}
+	pv, err := ParseVersion(v)
+	return err == nil && pv.Compare(mustParse(MicroVMStartsOnMacMin)) >= 0
 }
 
 // MicroVMGuestRootLimit is the workload check's refusal of a MicroVM whose

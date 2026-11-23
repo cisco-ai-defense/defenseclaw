@@ -791,6 +791,7 @@ func (l *lifecycle) run(ctx context.Context) (failure int) {
 		// missing hook binary refused it with payload_invalid (GAP-1217).
 		l.restoreTamperedHookBinary(ctx, record)
 		code := l.settleInputChanges(ctx, l.apply(ctx, record))
+		l.requireRepairedMachinePolicy()
 		l.summarizeRepair()
 		return l.requireProtectedTargets(code)
 	case ActionEnsure:
@@ -1743,7 +1744,7 @@ func (l *lifecycle) buildPlan(ctx context.Context, record *Deployment, account A
 		}
 	}
 
-	if err := l.planOpenShell(p); err != nil {
+	if err := l.planOpenShell(ctx, p); err != nil {
 		return nil, &codedError{code: codeOpenShell, err: err}
 	}
 	if err := l.planCoworkVM(p, record); err != nil {

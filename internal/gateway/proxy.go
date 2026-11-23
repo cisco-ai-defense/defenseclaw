@@ -31,6 +31,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -4430,10 +4431,21 @@ func (p *GuardrailProxy) writeBlockedChatReply(w http.ResponseWriter, model stri
 // writeBlockedResponseGemini returns a blocked response in Gemini
 // generateContent API format (non-streaming).
 func (p *GuardrailProxy) writeBlockedResponseGemini(w http.ResponseWriter, msg string) {
-	resp := map[string]interface{}{
-		"candidates": []map[string]interface{}{{
-			"content": map[string]interface{}{
-				"parts": []map[string]interface{}{
+	resp := geminiBlockFrame(msg)
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-DefenseClaw-Blocked", "true")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// geminiBlockFrame is the block as one Gemini candidates envelope: the whole
+// non-stream reply, one frame of a stream, or the last frame of a stream
+// the agent already got part of (GAP-1206).
+func geminiBlockFrame(msg string) map[string]any {
+	return map[string]any{
+		"candidates": []map[string]any{{
+			"content": map[string]any{
+				"parts": []map[string]any{
 					{"text": msg},
 				},
 				"role": "model",
@@ -4444,10 +4456,6 @@ func (p *GuardrailProxy) writeBlockedResponseGemini(w http.ResponseWriter, msg s
 		"defenseclaw_blocked": true,
 		"defenseclaw_reason":  msg,
 	}
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("X-DefenseClaw-Blocked", "true")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(resp)
 }
 
 // writeBlockedStreamGemini returns a blocked response as a Gemini
@@ -4473,21 +4481,7 @@ func (p *GuardrailProxy) writeBlockedStreamGemini(w http.ResponseWriter, msg str
 	w.Header().Set("X-DefenseClaw-Blocked", "true")
 	w.WriteHeader(http.StatusOK)
 
-	frame := map[string]interface{}{
-		"candidates": []map[string]interface{}{{
-			"content": map[string]interface{}{
-				"parts": []map[string]interface{}{
-					{"text": msg},
-				},
-				"role": "model",
-			},
-			"finishReason": "SAFETY",
-			"index":        0,
-		}},
-		"defenseclaw_blocked": true,
-		"defenseclaw_reason":  msg,
-	}
-	data, _ := json.Marshal(frame)
+	data, _ := json.Marshal(geminiBlockFrame(msg))
 	fmt.Fprintf(w, "data: %s\n\n", data)
 	flusher.Flush()
 }
@@ -5833,6 +5827,45 @@ func proxyPOSIXReading(action trustedActionRequest) (trustedActionRequest, bool)
 	return action, true
 }
 
+// proxyWindowsPathReading is a file tool call that names an absolute Windows
+// drive path, judged with the root of that drive as its working folder. A
+// model reply carries no session directory, and on a POSIX gateway the
+// neutral one (proxyNeutralCWD) is a POSIX folder, so the call's Windows path
+// got the POSIX reading: a credential file under a Windows home was read
+// MEDIUM in every tier where the Claude Code hook, asked from a Windows
+// folder, blocks it in strict and managed (rel-1-0-10:GAP-0909). The drive
+// root names no file of a POSIX gateway, so a relative operand still names no
+// real file. ok is false for a shell call (its Windows readings are the
+// dialect ones), a call already judged in a Windows folder, and a call that
+// names no absolute drive path.
+func proxyWindowsPathReading(action trustedActionRequest) (trustedActionRequest, bool) {
+	if trustedBashExecutionTool(action.Input.Tool) || trustedPowerShellExecutionTool(action.Input.Tool) ||
+		action.Input.Command != "" || !strings.HasPrefix(action.Input.CWD, "/") {
+		return action, false
+	}
+	var args map[string]any
+	if json.Unmarshal(action.Input.Args, &args) != nil {
+		return action, false
+	}
+	keys := make([]string, 0, len(args))
+	for key := range args {
+		keys = append(keys, key)
+	}
+	slices.Sort(keys)
+	for _, key := range keys {
+		value, _ := args[key].(string)
+		if len(value) >= 3 && asciiDriveLetter(value[0]) && value[1] == ':' && (value[2] == '\\' || value[2] == '/') {
+			action.Input.CWD = value[:1] + `:\`
+			return action, true
+		}
+	}
+	return action, false
+}
+
+func asciiDriveLetter(c byte) bool {
+	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z'
+}
+
 // toolCallStrictTier reports whether the proxy judges its connector's tool
 // calls in the strict tier: the request's policy configuration when it has
 // one, else the proxy's own rule pack (the posture toolCallVerdictAction
@@ -5898,6 +5931,12 @@ func (p *GuardrailProxy) inspectToolCalls(ctx context.Context, toolCallsJSON jso
 		// (rel-1-0-10:GAP-0784: never weaker than either reading).
 		if posix, ok := proxyPOSIXReading(action); ok {
 			findings = mergeBoundedFindings(findings, trustedToolCallFindings(ctx, posix, "", p.toolCallSecureClient(ctx)))
+		}
+		// A file call naming a Windows drive path is also judged from a
+		// Windows folder, as the hook route judges it on a Windows session;
+		// the stronger is kept (rel-1-0-10:GAP-0909).
+		if windows, ok := proxyWindowsPathReading(action); ok {
+			findings = mergeBoundedFindings(findings, trustedToolCallFindings(ctx, windows, "", p.toolCallSecureClient(ctx)))
 		}
 		// The reading the proxy made before it built the hook request (the
 		// tool name and arguments as the reply carries them: no projection,

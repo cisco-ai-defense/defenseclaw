@@ -31831,13 +31831,13 @@ function Get-DefenseClawSharedManagedHookOwners {
         if ([string]::IsNullOrWhiteSpace($owner)) {
             throw "$($specification.name) managed-hook ownership has no gateway service"
         }
-        # Secure Client counts the owner even when the bound policy file was
-        # removed or changed after DefenseClaw wrote it (an MDM or an
-        # administrator edit): the writer re-merges and re-authenticates the
-        # file later in this transaction, so a reinstall no longer fails on
-        # it. Standalone and strict keep refusing.
-        $lenientBinding = -not (Test-DefenseClawStandaloneProfile) -and
-            -not (Test-DefenseClawTrustStrictAncestors)
+        # Outside strict mode the owner counts even when the bound policy
+        # file was removed or changed after DefenseClaw wrote it (Intune, an
+        # MDM or an administrator edit): this probe only decides ownership,
+        # and the writer re-merges and re-authenticates the file later in
+        # this transaction, so a reinstall no longer fails 1603 on it. Both
+        # profiles (GAP-1732: standalone refused too); strict keeps refusing.
+        $lenientBinding = -not (Test-DefenseClawTrustStrictAncestors)
         foreach ($binding in @($specification.bindings)) {
             $boundPath = [string]$binding.path
             $expectedHash = [string]$state.([string]$binding.field)
@@ -33071,6 +33071,79 @@ function Invoke-DefenseClawLegacyHelperTombstoneHookTeardown {
     }
 }
 
+function Update-DefenseClawReleaseHistory {
+    <#
+        rel-1-0-10:GAP-1537, GAP-0644: adds the release the prior deployment
+        record names to the administrator-only machine release history,
+        <StateRoot>\install\release_history.json. A signed-out target's
+        hook-contract lock is in the account's own DefenseClaw folder, which
+        the account owns and can write, so the standalone guardian honours the
+        release a lock names (the other-release and Hermes earlier-matrix
+        sign-in waits) only when this history names it, and every guardian
+        only for a target its own release has not protected yet (GAP-1762).
+        Secure Client deployment records name no release, so it writes
+        nothing there. The first upgrade from 1.0.10 or
+        older seeds it with the release it replaces. Every entry is a release
+        this computer ran, so a run that rolls back leaves only true entries.
+        A history whose access list is not the canonical administrator-only
+        one, or that does not parse, is not carried forward.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        $PriorMetadata
+    )
+    if ($null -eq $PriorMetadata -or
+        $null -eq $PriorMetadata.PSObject.Properties['product_version']) {
+        return
+    }
+    $releasePattern = '^[0-9A-Za-z][0-9A-Za-z.+-]{0,63}$'
+    $prior = ([string]$PriorMetadata.product_version).Trim()
+    if ($prior -cnotmatch $releasePattern) {
+        return
+    }
+    # Beside the deployment record (<StateRoot>\install), where the guardian
+    # reads it.
+    $path = [IO.Path]::Combine(
+        [IO.Path]::GetDirectoryName([string]$Layout.MetadataPath),
+        'release_history.json'
+    )
+    $releases = [Collections.Generic.List[string]]::new()
+    if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $path -PathType Leaf) {
+        try {
+            Assert-DefenseClawNoReparsePath -Path $path
+            Assert-DefenseClawCanonicalPathAcl `
+                -Path $path `
+                -Expected (New-DefenseClawCanonicalPathAcl `
+                    -IsDirectory:$false `
+                    -Kind AdminFile `
+                    -GatewayServiceSID $script:AdministratorsSID)
+            $existing = [IO.File]::ReadAllText($path) |
+                Microsoft.PowerShell.Utility\ConvertFrom-Json
+            if ($null -ne $existing.PSObject.Properties['schema_version'] -and
+                [string]$existing.schema_version -ceq '1' -and
+                $null -ne $existing.PSObject.Properties['releases']) {
+                foreach ($release in @($existing.releases)) {
+                    $text = [string]$release
+                    if ($text -cmatch $releasePattern -and -not $releases.Contains($text)) {
+                        $releases.Add($text)
+                    }
+                }
+            }
+        }
+        catch {
+            $releases.Clear()
+        }
+    }
+    if ($releases.Contains($prior)) {
+        return
+    }
+    $releases.Add($prior)
+    Write-DefenseClawJsonAtomic -Path $path -Kind AdminFile -Value ([ordered]@{
+        schema_version = 1
+        releases = @($releases.ToArray())
+    })
+}
+
 function Write-DefenseClawDeploymentMetadataBytes {
     # Publishes exact deployment metadata bytes with the canonical
     # Administrators-only access list Get-DefenseClawDeploymentMetadata
@@ -33123,6 +33196,29 @@ function Test-DefenseClawManifestCatchUpTeardownRefusal {
             'contains a target outside the deployment manifest',
             'does not exactly bind the legacy deployment manifest and authorization',
             'deployment managed-hook activation evidence does not bind installed targets.yaml'
+        )) {
+        if ($text.Contains($needle)) {
+            return $true
+        }
+    }
+    return $false
+}
+
+function Test-DefenseClawLockWaitTeardownRefusal {
+    <#
+        rel-1-0-10:GAP-1713: whether a teardown refusal says only that the
+        read-only check timed out waiting for a managed transaction lock that
+        another DefenseClaw process held (the hook Guardian's reconcile pass
+        holds them while it repairs). The holder releases the lock when its
+        pass ends, so the check asks again within its wait.
+    #>
+    param([string]$Message)
+    $text = [string]$Message
+    foreach ($needle in @(
+            'waiting for managed policy transaction lock',
+            'timed out waiting for Cursor transaction lock',
+            'timed out waiting for managed runtime selector lock',
+            'timed out waiting for the per-user enrollment lock'
         )) {
         if ($text.Contains($needle)) {
             return $true
@@ -33356,7 +33452,8 @@ function Invoke-DefenseClawUninstallPrecommitHookCheck {
     }
     catch {
         $deletedAccount = Test-DefenseClawDeletedAccountTeardownRefusal -Message $_.Exception.Message
-        if (-not $deletedAccount -and
+        $lockWait = Test-DefenseClawLockWaitTeardownRefusal -Message $_.Exception.Message
+        if (-not $deletedAccount -and -not $lockWait -and
             -not (Test-DefenseClawManifestCatchUpTeardownRefusal -Message $_.Exception.Message)) {
             throw
         }
@@ -33373,7 +33470,12 @@ function Invoke-DefenseClawUninstallPrecommitHookCheck {
     $deadline = [DateTime]::UtcNow.AddSeconds($script:UninstallDeletedAccountWaitSeconds)
     $restartEnumerator = $deletedAccount
     $enumeratorRestarted = $false
-    if (-not $deletedAccount) {
+    if ($lockWait) {
+        # rel-1-0-10:GAP-1713: another DefenseClaw process held a managed
+        # transaction lock for the whole lock wait. Ask again within the wait.
+        Write-DefenseClawLifecyclePhase -Stage 'a managed transaction lock was held by another DefenseClaw process: asking again before the uninstall'
+    }
+    elseif (-not $deletedAccount) {
         # rel-1-0-6:GAP-0319: the enumerator pass already ran between the
         # lifecycle's own rebinding and this check (or the guardian had not
         # adopted its manifest yet), so the first refusal is the stale
@@ -33425,8 +33527,10 @@ function Invoke-DefenseClawUninstallPrecommitHookCheck {
         }
         catch {
             $message = $_.Exception.Message
-            if (Test-DefenseClawManifestCatchUpTeardownRefusal -Message $message) {
-                # The enumerator's new manifest is not adopted yet. This
+            if ((Test-DefenseClawManifestCatchUpTeardownRefusal -Message $message) -or
+                (Test-DefenseClawLockWaitTeardownRefusal -Message $message)) {
+                # The enumerator's new manifest is not adopted yet, or a
+                # managed transaction lock is still held (GAP-1713). This
                 # in-between refusal never replaces the one kept for the
                 # deadline (the first refusal or the last deleted-account one).
                 continue
@@ -37828,7 +37932,8 @@ function Get-DefenseClawSignedOutUntrustedFolder {
 # (enterpriseHookAccountLinkFailure, enterpriseHookAccountForeignLinkFailure).
 $script:AccountLinkGuardianErrors = @(
     'enterprise hooks: the account''s own DefenseClaw folder link is pending repair',
-    'enterprise hooks: the account''s DefenseClaw folder is a link its account does not own; it was left untouched and the account is not protected until an administrator removes the link'
+    'enterprise hooks: the account''s DefenseClaw folder is a link its account does not own; it was left untouched and the account is not protected until an administrator removes the link',
+    'enterprise hooks: the account''s DefenseClaw folder holds a per-user DefenseClaw install; it was left untouched and the account is not protected until that install is removed'
 )
 
 # The guardian never writes through a link, so a row whose machine vendor folder
@@ -38117,9 +38222,10 @@ function Get-DefenseClawStandaloneManifestAdoption {
             $removedRows++
             continue
         }
-        # The account's own folder link (GAP-0193) and a link another principal
-        # owns (GAP-0585) leave only that account unprotected; the guardian
-        # counts both in account_link_failures.
+        # The account's own folder link (GAP-0193), a link another principal
+        # owns (GAP-0585) and a folder that holds a per-user DefenseClaw
+        # install (GAP-1733) leave only that account unprotected; the guardian
+        # counts them in account_link_failures.
         if ($script:AccountLinkGuardianErrors -ccontains [string](& $field $row 'error') -and
             $accountLinks -gt 0) {
             $accountLinkRows++
@@ -42395,7 +42501,9 @@ function Get-DefenseClawGuardianStartupProgress {
         reconcile of guardian process ProcessId, started after StartedAfter,
         has come. $null when there is no such record (a release that does not
         write it, another process, or a record that cannot be read): the
-        coverage wait then keeps its usual limit.
+        coverage wait then keeps its usual limit. last_error is the error of
+        a startup reconcile that failed ('' when there is none or the release
+        does not write it, GAP-1506).
     #>
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
@@ -42452,12 +42560,18 @@ function Get-DefenseClawGuardianStartupProgress {
         if ($times[0] -lt $StartedAfter.ToUniversalTime()) {
             return $null
         }
+        $lastError = ''
+        $lastErrorProperty = $record.PSObject.Properties['last_error']
+        if ($null -ne $lastErrorProperty -and $lastErrorProperty.Value -is [string]) {
+            $lastError = [string]$lastErrorProperty.Value
+        }
         return [pscustomobject][ordered]@{
             state = [string]$record.state
             started_at = $times[0]
             updated_at = $times[1]
             targets_done = [int64]$record.targets_done
             targets_total = [int64]$record.targets_total
+            last_error = $lastError
         }
     }
     catch {
@@ -43033,6 +43147,25 @@ function Wait-DefenseClawFreshGuardianReconcile {
     }
     $waited = [int][Math]::Round(([DateTime]::UtcNow - $begin).TotalSeconds)
     $guardianLog = "the guardian log is $([string]$Layout.GuardianLogPath)"
+    # GAP-1506: a startup reconcile that failed left the earlier guardian's
+    # status in place, so last_status named only its generation. The startup
+    # record carries that reconcile's error; read it once more, as a guardian
+    # that exits on the error is gone before the loop reads the record.
+    $guardianError = ''
+    if ($guardianProcessId -ne 0) {
+        $final = Get-DefenseClawGuardianStartupProgress `
+            -Layout $Layout `
+            -ProcessId $guardianProcessId `
+            -StartedAfter $startedAfter
+        if ($null -eq $final) {
+            $final = $progress
+        }
+        if ($null -ne $final -and -not [string]::IsNullOrWhiteSpace([string]$final.last_error)) {
+            $guardianError = '; guardian_error=' + (ConvertTo-DefenseClawBoundedDiagnostic `
+                    -Value $final.last_error `
+                    -MaxLength 1024)
+        }
+    }
     # GAP-0977: a program that holds one of the guardian's state files keeps it
     # from publishing, whatever it was doing when the wait ended.
     $guardianHeld = Get-DefenseClawGuardianStateHold -Layout $Layout -Probes 3
@@ -43040,19 +43173,19 @@ function Wait-DefenseClawFreshGuardianReconcile {
         throw (New-DefenseClawGuardianStateHeldMessage -Layout $Layout -Path $guardianHeld -Phase Activation)
     }
     if (-not [string]::IsNullOrEmpty($guardianGone)) {
-        throw "LocalSystem guardian did not publish fresh required coverage: the hook guardian process $guardianProcessId $guardianGone during its first reconcile ($waited s after Setup started it); $guardianLog; last_status=$lastStatus"
+        throw "LocalSystem guardian did not publish fresh required coverage: the hook guardian process $guardianProcessId $guardianGone during its first reconcile ($waited s after Setup started it); $guardianLog; last_status=$lastStatus$guardianError"
     }
     if ($null -ne $progress -and $progress.state -ceq 'reconciling') {
         $quiet = [int][Math]::Round(([DateTime]::UtcNow - $progress.updated_at).TotalSeconds)
-        throw "LocalSystem guardian did not publish fresh required coverage: the hook guardian's first reconcile is still running after $waited s ($($progress.targets_done) of $($progress.targets_total) targets done, last progress $quiet s ago); $guardianLog; last_status=$lastStatus"
+        throw "LocalSystem guardian did not publish fresh required coverage: the hook guardian's first reconcile is still running after $waited s ($($progress.targets_done) of $($progress.targets_total) targets done, last progress $quiet s ago); $guardianLog; last_status=$lastStatus$guardianError"
     }
     if ($finishedRead) {
         # GAP-0601: the first reconcile finished and published, so this is
         # not a wait that ran out: its coverage is what was refused.
-        throw "LocalSystem guardian finished its first reconcile ($waited s after Setup started it), but its coverage was not accepted; $guardianLog; last_status=$lastStatus"
+        throw "LocalSystem guardian finished its first reconcile ($waited s after Setup started it), but its coverage was not accepted; $guardianLog; last_status=$lastStatus$guardianError"
     }
     if ($extended -or $guardianProcessId -ne 0) {
-        throw "LocalSystem guardian restarted but did not publish fresh required coverage within $([Math]::Max($TimeoutSeconds, $waited)) seconds; $guardianLog; last_status=$lastStatus"
+        throw "LocalSystem guardian restarted but did not publish fresh required coverage within $([Math]::Max($TimeoutSeconds, $waited)) seconds; $guardianLog; last_status=$lastStatus$guardianError"
     }
     throw "LocalSystem guardian restarted but did not publish fresh required coverage within $TimeoutSeconds seconds; last_status=$lastStatus"
 }
@@ -51851,6 +51984,7 @@ function Invoke-DefenseClawInstallLikeLifecycle {
             )) `
             -ManagedHooksActivation $managedHooksActivation `
             -ApprovedPolicySources $approvedPolicySources
+        Update-DefenseClawReleaseHistory -Layout $Layout -PriorMetadata $metadata
         Write-DefenseClawJsonAtomic -Value $newMetadata -Path $Layout.MetadataPath -Kind AdminFile
         Set-DefenseClawManagedAcls -Layout $Layout -GatewayServiceName $GatewayServiceName
         Set-DefenseClawStandaloneSecretsAcls `

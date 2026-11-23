@@ -254,7 +254,9 @@ func TestNativeHookAppliesTheAuditedAnswerAfterALateFailure(t *testing.T) {
 				t.Fatalf("native hook exit %d stdout %q stderr %q: denied=%t, want the recorded %s", code, stdout.String(), stderr.String(), denied, tc.action)
 			}
 			// The receipt lets the hook return before the gateway finishes
-			// persisting its terminal row. Wait for that exact row.
+			// persisting its terminal row. Wait for that exact row: the
+			// connector-hook row, or the hook_decision row of record of a
+			// benign per-user allow (#1384, GAP-1172).
 			deadline := time.Now().Add(5 * time.Second)
 			for {
 				events, err := fixture.api.store.ListEvents(4)
@@ -263,7 +265,7 @@ func TestNativeHookAppliesTheAuditedAnswerAfterALateFailure(t *testing.T) {
 				}
 				found := false
 				for _, event := range events {
-					if event.SessionID == "s-audit-toolu-late" && event.Action == "connector-hook" {
+					if event.SessionID == "s-audit-toolu-late" && (event.Action == "connector-hook" || event.Action == "hook_decision") {
 						found = true
 						break
 					}

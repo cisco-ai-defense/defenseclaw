@@ -470,6 +470,86 @@
       "since": "1.0.10"
     },
     {
+      "name": "DEFENSECLAW_TEST_GAP1733_LOCALSYSTEM_CHILD",
+      "category": "test_fixture",
+      "purpose": "Marks the LocalSystem child run that the elevated Windows test TestGAP1733PerUserInstallFoldersWithTheirOwnDACLAreSkipped starts, so the child runs the per-user install folder checks as LocalSystem.",
+      "default": "unset",
+      "accepted_values": [
+        "1",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/enterprisehooks/target_runtime_peruser_dacl_gap1733_windows_test.go",
+          "description": "TestGAP1733PerUserInstallFoldersWithTheirOwnDACLAreSkipped sets it on the LocalSystem child process it starts"
+        }
+      ],
+      "since": "1.0.11"
+    },
+    {
+      "name": "DEFENSECLAW_TEST_GAP1885_CHILD_DATA_DIR",
+      "category": "test_fixture",
+      "purpose": "Data folder of the second guardian state writer that the Windows test TestGAP1885SecondGuardianWriterWaitsForTheFirst starts as a child process; the child writes the guardian state of that folder.",
+      "default": "unset",
+      "accepted_values": [
+        "test-defined absolute path",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/cli/enterprise_hooks_guardian_state_lock_gap1885_windows_test.go",
+          "description": "TestGAP1885SecondGuardianWriterWaitsForTheFirst sets it on the child it starts; TestGAP1885GuardianStateChildWriter reads it"
+        }
+      ],
+      "since": "1.0.11"
+    },
+    {
+      "name": "DEFENSECLAW_TEST_GAP1885_CHILD_STARTED",
+      "category": "test_fixture",
+      "purpose": "File the child guardian state writer of the Windows test TestGAP1885SecondGuardianWriterWaitsForTheFirst writes its process id to, so the parent knows the child has started.",
+      "default": "unset",
+      "accepted_values": [
+        "test-defined absolute path",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/cli/enterprise_hooks_guardian_state_lock_gap1885_windows_test.go",
+          "description": "TestGAP1885SecondGuardianWriterWaitsForTheFirst sets it on the child it starts; TestGAP1885GuardianStateChildWriter writes its pid there"
+        }
+      ],
+      "since": "1.0.11"
+    },
+    {
+      "name": "DEFENSECLAW_TEST_GAP1911_FOLDER",
+      "category": "test_fixture",
+      "purpose": "Folder of the Administrators-owned plugin tree that the elevated Windows test TestGAP1911AdministratorsOwnedFolderInTheProfileKeepsItsCommandWhenNotElevated hands to the filtered-token child process it starts, so the child judges that folder without elevation.",
+      "default": "unset",
+      "accepted_values": [
+        "test-defined absolute path",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/gateway/connector/plugin_custody_admin_scope_windows_test.go",
+          "description": "TestGAP1911AdministratorsOwnedFolderInTheProfileKeepsItsCommandWhenNotElevated sets it on the filtered-token child it starts; the child reads it and judges the folder"
+        }
+      ],
+      "since": "1.0.11"
+    },
+    {
       "name": "DEFENSECLAW_TEST_SIDECAR_HOOK_PRIORITY",
       "category": "test_fixture",
       "purpose": "Marks the child process of the Windows gateway priority-class test (GAP-0050), so the class checks run in a child and the test binary keeps its own priority class.",
@@ -2488,7 +2568,7 @@
       "name": "DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR",
       "category": "runtime_path",
       "purpose": "Select the administrator-owned directory containing the hook guardian protected-target authorization ledger.",
-      "default": "${DEFENSECLAW_HOME}-hook-guardian",
+      "default": "the standalone layout's hook-guardian-state folder when DEFENSECLAW_HOME is that layout's data folder (Windows, macOS), else ${DEFENSECLAW_HOME}-hook-guardian",
       "accepted_values": [
         "any-absolute-admin-owned-path",
         "unset"

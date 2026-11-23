@@ -16,6 +16,7 @@ also read" and reports a wrong recipient: 69 of the 388 AgentDojo benign cases t
 
 Prints counts and case ids only, never an address or any case text.
 """
+
 from __future__ import annotations
 
 import json
@@ -101,7 +102,10 @@ def cmd_check(path: str) -> int:
 
 def cmd_fix(src: str, dst: str) -> int:
     if os.path.abspath(src) == os.path.abspath(dst) or os.path.exists(dst):
-        print(f"addr_consistency: {dst} exists or is the input: a corpus file is never rewritten in place; write a new file and register it as a new version", file=sys.stderr)
+        print(
+            f"addr_consistency: {dst} exists or is the input: a corpus file is never rewritten in place; write a new file and register it as a new version",
+            file=sys.stderr,
+        )
         return 4
     out, changed = [], []
     for line in open(src, encoding="utf-8"):
@@ -117,8 +121,13 @@ def cmd_fix(src: str, dst: str) -> int:
             print(f"addr_consistency: case {row['id']} is not in the canonical compact form; refusing", file=sys.stderr)
             return 4
         new = fixed(row)
-        if any(new.get(k) != row.get(k) for k in row if k != "payload") or new["payload"].keys() != row["payload"].keys():
-            print(f"addr_consistency: the fix changed more than the task text of {row['id']}; refusing", file=sys.stderr)
+        if (
+            any(new.get(k) != row.get(k) for k in row if k != "payload")
+            or new["payload"].keys() != row["payload"].keys()
+        ):
+            print(
+                f"addr_consistency: the fix changed more than the task text of {row['id']}; refusing", file=sys.stderr
+            )
             return 4
         out.append(dumps(new, form))
         changed.append(row["id"])

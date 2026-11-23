@@ -11,9 +11,7 @@
 package config
 
 import (
-	"bytes"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"regexp"
 	"slices"
@@ -24,17 +22,14 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	publicschemas "github.com/defenseclaw/defenseclaw/schemas"
-	jsonschema "github.com/santhosh-tekuri/jsonschema/v5"
 	"gopkg.in/yaml.v3"
 )
 
-// The schema file keeps its v8 directory; its $id names the version it
-// describes, config_version 9 (GAP-1651).
-const observabilityV8ConfigSchemaID = "https://schemas.defenseclaw.dev/config/v9/defenseclaw-config.schema.json"
-
+// observabilityV8SchemaDoc is the decoded embedded schema the messages of a
+// violation read (expected values, sibling keys, definitions). The schema
+// check itself is registered by internal/config/v8schema (schema_v8_check.go).
 var (
 	observabilityV8SchemaOnce sync.Once
-	observabilityV8Schema     *jsonschema.Schema
 	observabilityV8SchemaDoc  map[string]any
 	observabilityV8SchemaErr  error
 )
@@ -169,16 +164,22 @@ func ValidateV8SchemaBytes(source string, raw []byte) error {
 }
 
 func validateV8Schema(source string, document *V8YAMLDocument) error {
-	schema, err := compiledObservabilityV8Schema()
+	check, err := v8SchemaCheckFunc()
+	if err == nil {
+		err = loadObservabilityV8SchemaDoc()
+	}
 	if err != nil {
 		return fmt.Errorf("config: initialize embedded v8 schema: %w", err)
 	}
 	if document == nil {
 		return &V8SchemaError{Source: source, Path: "$", Summary: "configuration document is unavailable", Action: "parse the v8 YAML source before schema validation"}
 	}
-	if err := schema.Validate(document.Plain); err != nil {
-		var validation *jsonschema.ValidationError
-		if !errors.As(err, &validation) {
+	validation, invalid, err := check(document.Plain)
+	if err != nil {
+		return fmt.Errorf("config: initialize embedded v8 schema: %w", err)
+	}
+	if invalid {
+		if validation == nil {
 			summary := "configuration does not satisfy the canonical v8 schema"
 			if v8SchemaDocumentVersion(document) >= 9 {
 				summary = "configuration does not satisfy the config_version 9 schema"
@@ -269,32 +270,18 @@ func validateV8Schema(source string, document *V8YAMLDocument) error {
 	return nil
 }
 
-func compiledObservabilityV8Schema() (*jsonschema.Schema, error) {
+func loadObservabilityV8SchemaDoc() error {
 	observabilityV8SchemaOnce.Do(func() {
-		raw := publicschemas.DefenseClawConfigV8Schema()
-		if err := json.Unmarshal(raw, &observabilityV8SchemaDoc); err != nil {
-			observabilityV8SchemaErr = err
-			return
-		}
-		compiler := jsonschema.NewCompiler()
-		compiler.Draft = jsonschema.Draft2020
-		if err := compiler.AddResource(
-			observabilityV8ConfigSchemaID,
-			bytes.NewReader(raw),
-		); err != nil {
-			observabilityV8SchemaErr = err
-			return
-		}
-		observabilityV8Schema, observabilityV8SchemaErr = compiler.Compile(observabilityV8ConfigSchemaID)
+		observabilityV8SchemaErr = json.Unmarshal(publicschemas.DefenseClawConfigV8Schema(), &observabilityV8SchemaDoc)
 	})
-	return observabilityV8Schema, observabilityV8SchemaErr
+	return observabilityV8SchemaErr
 }
 
-func deepestV8SchemaError(root *jsonschema.ValidationError) *jsonschema.ValidationError {
+func deepestV8SchemaError(root *V8SchemaViolation) *V8SchemaViolation {
 	best := root
-	var visit func(*jsonschema.ValidationError, int)
+	var visit func(*V8SchemaViolation, int)
 	bestDepth := -1
-	visit = func(current *jsonschema.ValidationError, depth int) {
+	visit = func(current *V8SchemaViolation, depth int) {
 		locationDepth := strings.Count(current.InstanceLocation, "/")
 		score := locationDepth*1_000 + depth
 		if len(current.Causes) == 0 && score > bestDepth {
@@ -315,11 +302,11 @@ func deepestV8SchemaError(root *jsonschema.ValidationError) *jsonschema.Validati
 // applied (GAP-0940), and an admission action mapping without runtime as
 // "expected a value of type string" (GAP-1290). Other errors keep all their
 // causes.
-func v8SchemaMatchingBranches(current *jsonschema.ValidationError) []*jsonschema.ValidationError {
+func v8SchemaMatchingBranches(current *V8SchemaViolation) []*V8SchemaViolation {
 	if !strings.HasSuffix(current.KeywordLocation, "/oneOf") {
 		return current.Causes
 	}
-	matching := make([]*jsonschema.ValidationError, 0, len(current.Causes))
+	matching := make([]*V8SchemaViolation, 0, len(current.Causes))
 	for _, branch := range current.Causes {
 		if !v8SchemaKindMismatch(branch) && !v8SchemaTypeMismatch(branch, current.InstanceLocation) {
 			matching = append(matching, branch)
@@ -334,7 +321,7 @@ func v8SchemaMatchingBranches(current *jsonschema.ValidationError) []*jsonschema
 // v8SchemaTypeMismatch reports a oneOf branch that fails only because the
 // value at the location of the oneOf has another type (a string branch for
 // a mapping).
-func v8SchemaTypeMismatch(validation *jsonschema.ValidationError, instance string) bool {
+func v8SchemaTypeMismatch(validation *V8SchemaViolation, instance string) bool {
 	if len(validation.Causes) == 0 {
 		return validation.InstanceLocation == instance && strings.HasSuffix(validation.KeywordLocation, "/type")
 	}
@@ -346,7 +333,7 @@ func v8SchemaTypeMismatch(validation *jsonschema.ValidationError, instance strin
 	return true
 }
 
-func v8SchemaKindMismatch(validation *jsonschema.ValidationError) bool {
+func v8SchemaKindMismatch(validation *V8SchemaViolation) bool {
 	if strings.HasSuffix(validation.KeywordLocation, "/properties/kind/const") {
 		return true
 	}
@@ -364,11 +351,11 @@ func v8SchemaKindMismatch(validation *jsonschema.ValidationError) bool {
 // error named a different key on each run, and an unknown top-level section
 // lost to a deeper key (GAP-2234). Errors inside a oneOf or anyOf branch are
 // skipped: a key may be undeclared only in the branch that does not apply.
-func firstUnknownV8SchemaError(root *jsonschema.ValidationError, document *yaml.Node) *jsonschema.ValidationError {
-	var best *jsonschema.ValidationError
+func firstUnknownV8SchemaError(root *V8SchemaViolation, document *yaml.Node) *V8SchemaViolation {
+	var best *V8SchemaViolation
 	bestLine, bestColumn := 0, 0
-	var visit func(*jsonschema.ValidationError)
-	visit = func(current *jsonschema.ValidationError) {
+	var visit func(*V8SchemaViolation)
+	visit = func(current *V8SchemaViolation) {
 		location := current.KeywordLocation + "/"
 		if strings.Contains(location, "/oneOf/") || strings.Contains(location, "/anyOf/") {
 			return
@@ -461,7 +448,7 @@ func v8SchemaPointerSegments(pointer string) []string {
 // v8SchemaUnknownProperty names the undeclared key of an additionalProperties
 // violation. With several (two typos in one section) it is the first one in
 // the file, so the error names a key, not its section (GAP-2173).
-func v8SchemaUnknownProperty(validation *jsonschema.ValidationError, document *yaml.Node) string {
+func v8SchemaUnknownProperty(validation *V8SchemaViolation, document *yaml.Node) string {
 	if validation == nil || !strings.HasSuffix(validation.KeywordLocation, "/additionalProperties") {
 		return ""
 	}
@@ -486,7 +473,7 @@ func v8SchemaUnknownProperty(validation *jsonschema.ValidationError, document *y
 	return names[0]
 }
 
-func v8SchemaExpectation(validation *jsonschema.ValidationError, unknown string) (string, string) {
+func v8SchemaExpectation(validation *V8SchemaViolation, unknown string) (string, string) {
 	if unknown == "" {
 		if expected := v8SchemaDeclaredExpectation(validation); expected != "" {
 			return expected, ""
@@ -523,7 +510,7 @@ func v8SchemaExpectation(validation *jsonschema.ValidationError, unknown string)
 // v8SchemaKeywordValue is the value of the schema keyword validation failed
 // (current), the schema object that holds it (parent) and the keyword's
 // name; ok is false when the location does not resolve.
-func v8SchemaKeywordValue(validation *jsonschema.ValidationError) (current any, parent map[string]any, keyword string, ok bool) {
+func v8SchemaKeywordValue(validation *V8SchemaViolation) (current any, parent map[string]any, keyword string, ok bool) {
 	location := validation.AbsoluteKeywordLocation
 	if marker := strings.Index(location, "#"); marker >= 0 {
 		location = location[marker+1:]
@@ -552,7 +539,7 @@ func v8SchemaKeywordValue(validation *jsonschema.ValidationError) (current any, 
 	return current, parent, keyword, true
 }
 
-func v8SchemaDeclaredExpectation(validation *jsonschema.ValidationError) string {
+func v8SchemaDeclaredExpectation(validation *V8SchemaViolation) string {
 	current, parent, keyword, ok := v8SchemaKeywordValue(validation)
 	if !ok {
 		return ""
@@ -721,7 +708,7 @@ func v8SchemaDefinition(ref string) (map[string]any, bool) {
 
 // v8SchemaMissingKeys names the keys a required violation reports absent
 // (the validator's "missing properties: 'a', 'b'").
-func v8SchemaMissingKeys(validation *jsonschema.ValidationError) []string {
+func v8SchemaMissingKeys(validation *V8SchemaViolation) []string {
 	_, list, found := strings.Cut(validation.Message, "missing properties:")
 	if !found {
 		return nil
@@ -736,7 +723,7 @@ func v8SchemaMissingKeys(validation *jsonschema.ValidationError) []string {
 // v8SchemaRequiredExpectation names the missing required keys and, for one
 // key whose schema is a mapping of declared keys, what it takes: "the
 // required key match: a mapping that sets at least one of agents, ...".
-func v8SchemaRequiredExpectation(validation *jsonschema.ValidationError, missing []string) string {
+func v8SchemaRequiredExpectation(validation *V8SchemaViolation, missing []string) string {
 	if len(missing) == 0 {
 		return ""
 	}

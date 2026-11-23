@@ -189,6 +189,9 @@ type trustedActionRequest struct {
 	// call's findings with and without it (TestHostScriptTwinOnlyAddsFindings).
 	// Production requests never set it.
 	hostScriptTwinOff bool
+	// podExecReading marks the reading of the command a pod exec runs
+	// (podExecTwinRequests), which is not read for pod execs again.
+	podExecReading bool
 	// windowsTwinHosts, on a Windows reading twin (windowsReadingTwinRequests),
 	// holds the script readings its call judges itself, which the twin leaves
 	// out (judgedHostReadings, rel-1-0-10:GAP-1316).
@@ -502,10 +505,17 @@ func dispatchTrustedActionOnce(
 	// record of the word (rel-1-0-10:GAP-0382). It is added last, after every
 	// other defer, so a limit finding any of them raises is kept as it is and
 	// the record never stands in for it.
-	var unreadDataWord bool
+	var unreadDataWord, cutSQLQuery bool
+	var sqlASTCaps bounded.CapSet
 	defer func() {
 		if unreadDataWord {
 			findings = withPosixDataWordRecord(findings)
+		}
+		if cutSQLQuery {
+			findings = withSQLQueryCutRecord(findings)
+		}
+		if sqlASTCaps.Any() {
+			findings = withSQLASTCapRecord(findings, sqlASTCaps)
 		}
 	}()
 	// A DefenseClaw state write that only a partial reading proves is at
@@ -575,7 +585,8 @@ func dispatchTrustedActionOnce(
 			}
 			effectRequest := request
 			defer func() {
-				findings = joinEffectFindings(findings, effectLiveFindings(effectRequest, mode, effectsRulesTierFor()))
+				findings = joinEffectFindings(withFloorRaiseOnlyMark(effectRequest, findings, 0),
+					effectLiveFindings(effectRequest, mode, effectsRulesTierFor()))
 			}()
 		case effectRulesShadow:
 			// Shadow: compute and record beside today's rules, off the hook's
@@ -929,6 +940,13 @@ func dispatchTrustedActionOnce(
 			findings = withTwinProvenBlocks(findings, dispatchTrustedAction(parent, writerTwin))
 		}()
 	}
+	// A SQL client run in a container by kubectl, oc or k exec is read as
+	// the client call, for the database rules only (rel-1-0-10:GAP-1925).
+	for _, twin := range podExecTwinRequests(request, facts) {
+		defer func() {
+			findings = withPodExecReadingFindings(findings, dispatchTrustedAction(parent, twin))
+		}()
+	}
 	// Any other program run that way writes or removes what the plain call
 	// does too (find -delete, truncate, rm of the state behind setsid or
 	// "$(echo nice)", rel-1-0-10:GAP-1186, GAP-1246), but the wrapped form
@@ -1093,6 +1111,8 @@ func dispatchTrustedActionOnce(
 	// A Kubernetes request cut that dropped a request a reader proves
 	// something from is TRUNCATED as well (DET111 T20 review P2-3).
 	set := semantic.FactOnlyCuts(facts)
+	// A SQL facts cap hit is recorded only (DET111 ruling on T20 review P3-1).
+	sqlASTCaps = facts.SQLASTCaps()
 	if kubeCut, lost := facts.KubeRequestCaps(); lost {
 		set = set.Union(kubeCut)
 	}
@@ -1166,10 +1186,15 @@ func dispatchTrustedActionOnce(
 	// handed to dcx or ssh) is data: the call is judged as its twin with the
 	// word shortened, and the word leaves a detection-only record
 	// (rel-1-0-10:GAP-0382).
-	if twin, ok := posixDataWordTwinRequest(request, facts); ok {
+	if twin, split, ok := posixDataWordTwinRequest(request, facts); ok {
+		chunks := sqlQueryChunkRequests(request, facts, split)
 		defer func() {
 			findings = withOverLimitTwinFindings(findings, dispatchTrustedAction(parent, twin))
-			unreadDataWord = true
+			for _, chunk := range chunks {
+				findings = withOverLimitTwinFindings(findings, dispatchTrustedAction(parent, chunk))
+			}
+			unreadDataWord = split.Data > 0
+			cutSQLQuery = split.Query > 0
 		}()
 	}
 	// The call is read once more where the agent's working directory is
@@ -4334,7 +4359,12 @@ func placedStatementStateWrite(facts actionfacts.Facts, request trustedActionReq
 			if !ok || !stateCommandMutatesPath(command, candidate) {
 				continue
 			}
-			if active, same := hookpaths.ResolveActiveStateHardlinkTarget(candidate.Resolved, projected.ActiveHome); same {
+			// A target the state index could not rule out is not proved free of the
+			// state: refused, as an unfinished walk refuses a patch target (GAP-1789).
+			switch active, same, complete := hookpaths.ResolveActiveStateHardlinkTarget(candidate.Resolved, projected.ActiveHome); {
+			case !complete:
+				return true
+			case same:
 				candidate.Resolved = active
 			}
 			if matchesActiveDefenseClawState(projected, candidate) {
@@ -4389,7 +4419,11 @@ func provenStateCandidateMatches(
 			// find that starts there (`yes | find ~ ...`, which the
 			// client lists no target for) is judged from it (GAP-2404
 			// pod ip21, managed RHEL).
-			physical, _ = hookpaths.ResolveActiveStateHardlinkTarget(candidate.Resolved, projected.ActiveHome)
+			active, _, complete := hookpaths.ResolveActiveStateHardlinkTarget(candidate.Resolved, projected.ActiveHome)
+			if !complete {
+				return true // not proved free of the state (GAP-1789)
+			}
+			physical = active
 			if physical == "" && path.IsAbs(candidate.Resolved) &&
 				path.Clean(candidate.Resolved) == path.Clean(projected.ActiveHome) {
 				physical = path.Clean(candidate.Resolved)
@@ -4399,14 +4433,27 @@ func provenStateCandidateMatches(
 				physical, _ = hookpaths.WalkFactTarget(request.ResolvedWriteTargets, candidate.Resolved)
 			}
 		} else {
-			physical, _ = hookpaths.ResolveWriteTarget(driveFSPath(request, gitBashOperandSpelling(candidate)))
+			spelled := driveFSPath(request, gitBashOperandSpelling(candidate))
+			physical, _ = hookpaths.ResolveWriteTarget(spelled)
+			if physical == "" {
+				// A target whose own local read did not answer is not
+				// proved free of the state (rel-1-0-10:GAP-1804).
+				if _, same, complete := hookpaths.ResolveActiveStateHardlinkTarget(spelled, projected.ActiveHome); same || !complete {
+					return true
+				}
+			}
 			physical = driveViewPath(request, physical)
 		}
 	}
 	if physical == "" {
 		return false
 	}
-	if active, same := hookpaths.ResolveActiveStateHardlinkTarget(physical, projected.ActiveHome); same {
+	// A target the state index could not rule out is not proved free of the
+	// state: refused, as an unfinished walk refuses a patch target (GAP-1789).
+	switch active, same, complete := hookpaths.ResolveActiveStateHardlinkTarget(physical, projected.ActiveHome); {
+	case !complete:
+		return true
+	case same:
 		physical = active
 	}
 	if candidate.Flavor == actionfacts.PathFlavorPOSIX {
@@ -5455,7 +5502,12 @@ func provenFollowedInPlaceStateWrite(facts actionfacts.Facts, request trustedAct
 				targets = append(targets, physical)
 			}
 			for _, target := range targets {
-				if active, same := hookpaths.ResolveActiveStateHardlinkTarget(target, projected.ActiveHome); same {
+				// A target the state index could not rule out is not proved free of the
+				// state: refused, as an unfinished walk refuses a patch target (GAP-1789).
+				switch active, same, complete := hookpaths.ResolveActiveStateHardlinkTarget(target, projected.ActiveHome); {
+				case !complete:
+					return true
+				case same:
 					target = active
 				}
 				written := actionfacts.PathFact{
@@ -5562,7 +5614,12 @@ func linkedActiveStateWrite(
 		if physical == "" || physical == value || !filepath.IsAbs(physical) {
 			return false
 		}
-		if active, same := hookpaths.ResolveActiveStateHardlinkTarget(physical, projected.ActiveHome); same {
+		// A target the state index could not rule out is not proved free of the
+		// state: refused, as an unfinished walk refuses a patch target (GAP-1789).
+		switch active, same, complete := hookpaths.ResolveActiveStateHardlinkTarget(physical, projected.ActiveHome); {
+		case !complete:
+			return true
+		case same:
 			physical = active
 		}
 		linked := candidate
@@ -5583,11 +5640,23 @@ func linkedActiveStateWrite(
 			}
 		} else {
 			physical, ok = hookpaths.ResolveWriteTarget(target)
+			if !ok {
+				// A target whose own local read did not answer is not
+				// proved free of the state (rel-1-0-10:GAP-1804).
+				if _, same, complete := hookpaths.ResolveActiveStateHardlinkTarget(target, projected.ActiveHome); same || !complete {
+					return true
+				}
+			}
 		}
 		if !ok || physical == target {
 			continue
 		}
-		if active, same := hookpaths.ResolveActiveStateHardlinkTarget(physical, projected.ActiveHome); same {
+		// A target the state index could not rule out is not proved free of the
+		// state: refused, as an unfinished walk refuses a patch target (GAP-1789).
+		switch active, same, complete := hookpaths.ResolveActiveStateHardlinkTarget(physical, projected.ActiveHome); {
+		case !complete:
+			return true
+		case same:
 			physical = active
 		}
 		linked := candidate
@@ -5877,7 +5946,7 @@ func withTwinProvenBlocks(findings, twin []RuleFinding) []RuleFinding {
 		case index < 0:
 			findings = append(findings, proven)
 		case strength(proven) > strength(findings[index]):
-			findings[index] = proven
+			findings[index] = withFloorRaiseOnlyOf(proven, findings[index])
 		}
 	}
 	return findings
@@ -5960,16 +6029,7 @@ func withProvenFindingsBeforeUnprovenKeysBlock(findings []RuleFinding) []RuleFin
 // beside the whole action's result. An enforcing or alert-only proof replaces
 // a weaker finding for the same rule; a sibling removes nothing.
 func withSimpleCommandFindings(findings, alone []RuleFinding) []RuleFinding {
-	rank := func(finding RuleFinding) int {
-		switch {
-		case finding.contributesToEnforcement() && finding.proof.authorizes(finding.RuleID):
-			return 3
-		case finding.contributesToAlertOnly():
-			return 2
-		default:
-			return 1
-		}
-	}
+	rank := findingEnforcementRank
 	findings, alone = withEffectsFoldedEitherWay(findings, alone)
 	for _, finding := range alone {
 		key := trustedActionFindingKey(finding.RuleID)
@@ -5982,7 +6042,7 @@ func withSimpleCommandFindings(findings, alone []RuleFinding) []RuleFinding {
 			(rank(finding) == rank(findings[index]) &&
 				canonicalTrustedRuleID(finding.RuleID) == key &&
 				canonicalTrustedRuleID(findings[index].RuleID) != key) {
-			findings[index] = finding
+			findings[index] = withFloorRaiseOnlyOf(finding, findings[index])
 		}
 	}
 	return findings
@@ -6004,7 +6064,7 @@ func withSequenceProvenFindings(findings, sequence []RuleFinding) []RuleFinding 
 		if index < 0 {
 			findings = append(findings, proven)
 		} else {
-			findings[index] = proven
+			findings[index] = withFloorRaiseOnlyOf(proven, findings[index])
 		}
 	}
 	return findings
@@ -11146,25 +11206,33 @@ func unreadPartMayWriteProtected(request trustedActionRequest, generation *compi
 // syntaxUnreadText is command with the statements shellparse.ReadSyntaxTail
 // read blanked: the part a shell may run that the readers did not. A text
 // whose syntax error is in a nested body (no top-level reading) is unread
-// whole.
+// whole. The text only the longer reading of rel-1-0-10:GAP-0745 read
+// (SyntaxTail.Extended) is judged and stays here too: blanking it took the
+// Run-key text of a PowerShell Start-Process line out of this scan on the
+// Codex Bash route, where its Bash reading drops the backslashes, and the
+// strict and managed alert became an allow (rel-1-0-10:GAP-1986).
 func syntaxUnreadText(command string) string {
 	tail, ok := shellparse.ReadSyntaxTail(command)
 	if !ok {
 		return command
 	}
 	unread, from := []byte(command), 0
-	for _, statement := range tail.Statements {
+	for index, statement := range tail.Statements {
 		at := strings.Index(command[from:], statement)
 		if at < 0 {
 			continue
 		}
 		at += from
-		for i := at; i < at+len(statement); i++ {
+		read := at + len(statement)
+		if extended, ok := tail.ExtendedFrom(index); ok {
+			read = at + min(extended, len(statement))
+		}
+		for i := at; i < read; i++ {
 			if unread[i] != '\n' {
 				unread[i] = ' '
 			}
 		}
-		from = at + len(statement)
+		from = read
 	}
 	return string(unread)
 }

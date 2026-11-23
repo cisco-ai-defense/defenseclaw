@@ -73,12 +73,12 @@ func (l *enterpriseHookProfileList) get(list func() ([]enterprisehooks.TargetCre
 // standalone removal falls back to the deployment's own hook launcher, the
 // one the files were rendered for.
 func windowsCopilotVSCodeUser(home string, verify, remove bool) error {
-	return windowsCopilotVSCodeUserAccepting(home, verify, remove, false)
+	return windowsCopilotVSCodeUserAccepting(home, verify, remove, false, "")
 }
 
-// windowsCopilotVSCodeUserAccepting is windowsCopilotVSCodeUser; acceptPrior is
-// windowsCopilotVSCodeUserFilesAccepting's.
-func windowsCopilotVSCodeUserAccepting(home string, verify, remove, acceptPrior bool) error {
+// windowsCopilotVSCodeUserAccepting is windowsCopilotVSCodeUser; acceptPrior and
+// recorded are windowsCopilotVSCodeUserFilesAccepting's.
+func windowsCopilotVSCodeUserAccepting(home string, verify, remove, acceptPrior bool, recorded string) error {
 	opts, ok, err := windowsCopilotVSCodeUserOptions(remove && !verify)
 	if err != nil || !ok {
 		return err
@@ -94,7 +94,7 @@ func windowsCopilotVSCodeUserAccepting(home string, verify, remove, acceptPrior 
 			}
 		}
 	}
-	err = windowsCopilotVSCodeUserFilesAccepting(opts, home, verify, remove, acceptPrior)
+	err = windowsCopilotVSCodeUserFilesAccepting(opts, home, verify, remove, acceptPrior, recorded)
 	switch {
 	case settingsErr == nil:
 		return err
@@ -107,16 +107,13 @@ func windowsCopilotVSCodeUserAccepting(home string, verify, remove, acceptPrior 
 	return enterpriseHookUserFileFault{err: settingsErr}
 }
 
-// windowsCopilotVSCodeUserFiles places, checks (verify) or removes the VS
-// Code Local hook file and Copilot plugin themselves.
-func windowsCopilotVSCodeUserFiles(opts enterprisepolicy.Options, home string, verify, remove bool) error {
-	return windowsCopilotVSCodeUserFilesAccepting(opts, home, verify, remove, false)
-}
-
-// windowsCopilotVSCodeUserFilesAccepting is windowsCopilotVSCodeUserFiles; with
+// windowsCopilotVSCodeUserFilesAccepting places, checks (verify) or removes
+// the VS Code Local hook file and Copilot plugin themselves; with
 // acceptPrior (a read-only verify), files that hold exactly the render of
-// releases up to 1.0.6 count as current (GAP-0980).
-func windowsCopilotVSCodeUserFilesAccepting(opts enterprisepolicy.Options, home string, verify, remove, acceptPrior bool) error {
+// releases up to 1.0.6 count as current (GAP-0980), and so do files rendered
+// for recorded, the earlier launch image of this install the account's
+// protected records name (GAP-1898).
+func windowsCopilotVSCodeUserFilesAccepting(opts enterprisepolicy.Options, home string, verify, remove, acceptPrior bool, recorded string) error {
 	hookFile, plugin := enterprisepolicy.CopilotVSCodeUserWant(opts)
 	if remove {
 		hookFile, plugin = false, false
@@ -130,6 +127,7 @@ func windowsCopilotVSCodeUserFilesAccepting(opts enterprisepolicy.Options, home 
 		DryRun:     verify,
 
 		AcceptPriorRelease: acceptPrior,
+		RecordedHookBinary: recorded,
 	})
 	if err != nil {
 		return err
@@ -1029,6 +1027,23 @@ func enterpriseHookStandalonePlatformFinish(ctx context.Context, stderr io.Write
 	}
 	users := map[string]*user{}
 	order := []string{}
+	// An account left out for a per-user DefenseClaw install in its folder
+	// is left as found, the vendor hook configs of that install included:
+	// one whose rows carry that failure, and one without rows that the
+	// enumerator skipped (GAP-1733 review).
+	rowAccounts, perUserSkipped := map[string]bool{}, map[string]bool{}
+	for _, row := range rows {
+		key := strings.ToUpper(strings.TrimSpace(row.SID))
+		rowAccounts[key] = true
+		if row.Error == enterpriseHookAccountPerUserInstallFailure {
+			perUserSkipped[key] = true
+		}
+	}
+	dataDir := ""
+	if cfg != nil {
+		dataDir = cfg.DataDir
+	}
+	perUserInstalls := newEnterpriseHookPerUserInstallPass(dataDir)
 	for _, row := range rows {
 		if !row.OK || strings.TrimSpace(row.SID) == "" || strings.TrimSpace(row.UserHome) == "" {
 			continue
@@ -1061,6 +1076,14 @@ func enterpriseHookStandalonePlatformFinish(ctx context.Context, stderr io.Write
 		}
 		if _, ok := users[key]; ok {
 			continue
+		}
+		if perUserSkipped[key] {
+			continue
+		}
+		if !rowAccounts[key] {
+			if skip, _ := perUserInstalls.classify(enterprisehooks.ManifestTarget{}, profile.UserHome, profile.SID, false); skip {
+				continue
+			}
 		}
 		users[key] = &user{
 			creds:   enterprisehooks.TargetCredentials{UserHome: profile.UserHome, UID: -1, GID: -1, SID: profile.SID},

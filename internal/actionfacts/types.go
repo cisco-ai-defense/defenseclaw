@@ -19,7 +19,11 @@
 // not an event schema and must not be serialized into audit or telemetry data.
 package actionfacts
 
-import "encoding/json"
+import (
+	"encoding/json"
+
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
+)
 
 // Input is the normalized action material available at a tool-call or
 // execution-approval boundary. Callers should preserve structured argv instead
@@ -80,6 +84,14 @@ type Input struct {
 	// tool is read the same way without it (posixPowerShellScript,
 	// rel-1-0-10:GAP-1214).
 	PowerShellLauncherBody bool `json:"-"`
+	// FloorRaiseOnly is trusted caller provenance set on a reading made
+	// through a reading DefenseClaw 1.0.10 did not have (the -EncodedCommand
+	// body read past its blanks, psparse.NestedScript.BlankDecoded; the
+	// evaluated loop-header group of the gateway's argument reading). Every
+	// reading made of such a reading carries it. It changes no fact: the
+	// gateway lets the findings of such a reading raise the call but never
+	// folds an effect finding into them (DET111 ruling 2 on GAP-1984).
+	FloorRaiseOnly bool `json:"-"`
 	// WindowsHookHost is trusted hook-host context. A test can force Windows
 	// routing on a POSIX runner, whose process home does not describe the
 	// Windows shell's home. Such a call must not take the POSIX PowerShell
@@ -191,6 +203,8 @@ type Facts struct {
 	// kubeCut is the private record of a Kubernetes request cut
 	// (KubeRequestCaps).
 	kubeCut kubeCutRecord
+	// sqlASTCaps are the bounds the SQL facts reader hit (SQLASTCaps).
+	sqlASTCaps bounded.CapSet
 	// SensitiveEgressArtifactWrites contains only exact local artifact paths.
 	// An entry proves that a closed structured-write schema created source text
 	// containing both a protected credential/secret path and a non-local literal

@@ -1595,6 +1595,11 @@ if [[ "${ROLLBACK}" == true ]]; then
         warn "The gateway of DefenseClaw ${back_to}, restarted by this rollback, is still busy with its audit database: until it finishes, its hooks can refuse tool calls as \"the gateway is running but did not answer\" (fail closed). Check it with: defenseclaw-gateway status"
     fi
     ok "Now running DefenseClaw ${back_to}."
+    # rel-1-0-10:GAP-1777: OpenShell is not part of the swap, and a newer
+    # OpenShell's gateway database does not open in an older one.
+    if command -v openshell >/dev/null 2>&1 || [[ -x "${HOME}/.local/bin/openshell" ]]; then
+        info "OpenShell is not rolled back: it stays at the release it runs now. OpenShell upgrades are one-way: an older OpenShell starts only after its gateway database (~/.local/state/openshell/gateway/openshell.db) is moved aside, which drops the records of the sandboxes on it."
+    fi
     forward="defenseclaw rollback"
     if version_lt "${back_to}" 1.0.0; then
         forward="bash ${PREVIOUS}/installer/install.sh --rollback"

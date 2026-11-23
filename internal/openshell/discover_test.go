@@ -36,7 +36,7 @@ import (
 	"testing"
 	"time"
 
-	pb "github.com/NVIDIA/OpenShell/sdk/go/proto/openshellv1"
+	pb "github.com/ai-openshell/sdk-go/proto/openshellv1"
 
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 )

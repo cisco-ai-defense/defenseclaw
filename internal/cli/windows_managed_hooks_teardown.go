@@ -76,6 +76,12 @@ type windowsManagedHooksTeardownJournal struct {
 	CursorTargets     []enterprisehooks.WindowsCursorManagedRuntimeTarget           `json:"cursor_targets"`
 	Cursor            enterprisehooks.WindowsCursorManagedPolicyTeardownSnapshot    `json:"cursor"`
 	SelectorTargets   []enterprisehooks.WindowsManagedRuntimeSelectorTargetSnapshot `json:"selector_targets"`
+
+	// unenrolled are the failed targets the Guardian left out of the
+	// enrollment it published (GAP-1892). They are rebuilt from the
+	// protected records at every action and never written: the Setup module
+	// and older helpers reject unknown journal fields.
+	unenrolled []windowsManagedHooksTeardownTarget
 }
 
 type windowsManagedHooksTeardownMachineCapture struct {
@@ -1101,7 +1107,20 @@ func runWindowsManagedHooksTeardown(
 		if err != nil {
 			return fail(err)
 		}
+		identity.unenrolled, err = windowsManagedHooksTeardownUnenrolledFromGuardian(
+			runtimeDir,
+			identity.FailedTargets,
+		)
+		if err != nil {
+			return fail(err)
+		}
 	}
+	claudeTargets, codexTargets, cursorTargets = windowsManagedHooksTeardownWithoutUnenrolled(
+		identity.unenrolled,
+		claudeTargets,
+		codexTargets,
+		cursorTargets,
+	)
 	identity.ClaudeTargetSIDs,
 		identity.CodexPolicyActive,
 		identity.CodexTargets,
@@ -1245,6 +1264,11 @@ func runWindowsManagedHooksTeardown(
 		if err == nil {
 			report.EnrollmentTargetCount =
 				len(journal.ClaudeTargetSIDs) + len(journal.CodexTargets) + len(journal.CursorTargets)
+		}
+		if err == nil {
+			// The per-user restore leaves out what the Guardian never
+			// enrolled (GAP-1892).
+			journal.unenrolled = identity.unenrolled
 		}
 		if err == nil && journal.Phase != "captured" &&
 			journal.Phase != "prepared" && journal.Phase != "rolled_back" {
@@ -2749,36 +2773,6 @@ func windowsManagedHooksTeardownExpectedEnrollment(
 	return claudeCopy, codexPolicyActive, codexCopy, cursorCopy
 }
 
-func equalWindowsManagedHooksCodexTargets(
-	left, right []connector.WindowsCodexManagedRuntimeTarget,
-) bool {
-	if len(left) != len(right) {
-		return false
-	}
-	for index := range left {
-		if left[index].SID != right[index].SID ||
-			!sameWindowsEnterprisePathCLI(left[index].DataDir, right[index].DataDir) {
-			return false
-		}
-	}
-	return true
-}
-
-func equalWindowsManagedHooksCursorTargets(
-	left, right []enterprisehooks.WindowsCursorManagedRuntimeTarget,
-) bool {
-	if len(left) != len(right) {
-		return false
-	}
-	for index := range left {
-		if !strings.EqualFold(left[index].SID, right[index].SID) ||
-			!sameWindowsEnterprisePathCLI(left[index].DataDir, right[index].DataDir) {
-			return false
-		}
-	}
-	return true
-}
-
 func windowsManagedHooksTeardownTargets(
 	manifest enterprisehooks.Manifest,
 ) (
@@ -3026,25 +3020,33 @@ func validateWindowsManagedHooksTeardownJournal(
 			return errors.New("managed-hook teardown journal contains an invalid selector snapshot")
 		}
 	}
-	allowedClaudeTargets := make([]string, 0, len(identity.Targets))
-	allowedCodexTargets := make([]connector.WindowsCodexManagedRuntimeTarget, 0, len(identity.Targets))
+	manifestCodexTargets := 0
 	for _, target := range identity.Targets {
-		if target.Connector == "claudecode" {
-			allowedClaudeTargets = append(allowedClaudeTargets, target.SID)
-		} else if target.Connector == "codex" {
-			allowedCodexTargets = append(allowedCodexTargets, connector.WindowsCodexManagedRuntimeTarget{
-				SID: target.SID, DataDir: target.DataDir,
-			})
+		if target.Connector == "codex" {
+			manifestCodexTargets++
 		}
 	}
 	if journal.ActivationState == windowsManagedHooksActivated {
-		if !equalWindowsEnterpriseStringSet(allowedClaudeTargets, identity.ClaudeTargetSIDs) ||
-			!equalWindowsManagedHooksCodexTargets(allowedCodexTargets, identity.CodexTargets) ||
-			(len(allowedCodexTargets) != 0 && !identity.CodexPolicyActive) {
+		// The Guardian leaves a failed target it never protected out of the
+		// enrollment it publishes, so only failed targets may be missing
+		// (GAP-1892).
+		codexSIDs := make([]string, 0, len(identity.CodexTargets))
+		codexDataDirs := make([]string, 0, len(identity.CodexTargets))
+		for _, target := range identity.CodexTargets {
+			codexSIDs = append(codexSIDs, target.SID)
+			codexDataDirs = append(codexDataDirs, target.DataDir)
+		}
+		if !windowsManagedHooksTeardownEnrollmentWithinManifest(
+			identity.Targets, journal.FailedTargets, "claudecode", identity.ClaudeTargetSIDs, nil,
+		) ||
+			!windowsManagedHooksTeardownEnrollmentWithinManifest(
+				identity.Targets, journal.FailedTargets, "codex", codexSIDs, codexDataDirs,
+			) ||
+			(len(identity.CodexTargets) != 0 && !identity.CodexPolicyActive) {
 			return errors.New("activated teardown journal does not contain the exact manifest enrollment")
 		}
 	} else if len(identity.ClaudeTargetSIDs) != 0 || len(identity.CodexTargets) != 0 ||
-		(len(allowedCodexTargets) != 0 && !identity.CodexPolicyActive) {
+		(manifestCodexTargets != 0 && !identity.CodexPolicyActive) {
 		return errors.New("never-activated teardown journal contains an invalid machine enrollment")
 	}
 	// A snapshot taken behind a kept link is empty: nothing was read there
@@ -3063,16 +3065,16 @@ func validateWindowsManagedHooksTeardownJournal(
 		(len(journal.ClaudeTargetSIDs) != 0 && !journal.Claude.PolicyExisted && !claudeSnapshotKept) {
 		return errors.New("managed-hook teardown journal contains an invalid Claude snapshot")
 	}
-	allowedCursorTargets := make([]enterprisehooks.WindowsCursorManagedRuntimeTarget, 0, len(identity.Targets))
-	for _, target := range identity.Targets {
-		if target.Connector == "cursor" {
-			allowedCursorTargets = append(allowedCursorTargets, enterprisehooks.WindowsCursorManagedRuntimeTarget{
-				SID: target.SID, DataDir: target.DataDir,
-			})
-		}
+	cursorSIDs := make([]string, 0, len(identity.CursorTargets))
+	cursorDataDirs := make([]string, 0, len(identity.CursorTargets))
+	for _, target := range identity.CursorTargets {
+		cursorSIDs = append(cursorSIDs, target.SID)
+		cursorDataDirs = append(cursorDataDirs, target.DataDir)
 	}
 	if journal.ActivationState == windowsManagedHooksActivated &&
-		!equalWindowsManagedHooksCursorTargets(allowedCursorTargets, identity.CursorTargets) {
+		!windowsManagedHooksTeardownEnrollmentWithinManifest(
+			identity.Targets, journal.FailedTargets, "cursor", cursorSIDs, cursorDataDirs,
+		) {
 		return errors.New("activated teardown journal does not contain the exact Cursor manifest enrollment")
 	} else if journal.ActivationState == windowsManagedHooksNeverActivated &&
 		len(identity.CursorTargets) != 0 {

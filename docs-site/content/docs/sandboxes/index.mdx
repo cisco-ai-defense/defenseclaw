@@ -76,13 +76,13 @@ The driver decides these rows, not the operating system. A Linux host with KVM c
 OpenShell's supervisor needs Landlock. Docker Desktop's Linux VM kernel does not run it, so a sandbox on OpenShell's Docker driver fails to start there. DefenseClaw refuses that combination and sets the Mac's gateway to the MicroVM driver instead. Docker Desktop still builds the harness images.
 </Callout>
 
-Linux (amd64 or arm64) with Docker Engine 28 and a Landlock kernel, or an Apple-silicon Mac with Docker Desktop and Homebrew, as your own user. Not on Windows, WSL2, Intel Macs or as root. Setup installs OpenShell 0.1.6. On Linux with Docker your folder is mounted live; on a Mac, or with any MicroVM, the agent works on a copy.
+Linux (amd64 or arm64) with Docker Engine 28 and a Landlock kernel, or an Apple-silicon Mac with Docker Desktop and Homebrew, as your own user. Not on Windows, WSL2, Intel Macs or as root. Setup installs OpenShell 0.1.9. On Linux with Docker your folder is mounted live; on a Mac, or with any MicroVM, the agent works on a copy.
 
 Claude Code, Codex, GitHub Copilot CLI, OpenCode, Kiro CLI, Hermes Agent and Antigravity run. Amp, Cursor Agent and Devin CLI cannot run yet.
 
 ### Requirements
 
-DefenseClaw drives OpenShell 0.1.1 and later 0.1 releases, not 0.2, and runs sandboxes only on 0.1.6 or later. OpenShell 0.1.6 initializes missing or empty MicroVM hosts files and includes the earlier network and lifecycle fixes. It preserves nonempty image-authored hosts files, so DefenseClaw checks the completed image's exported hosts file with its resolver and checks the guest resolver before a session starts. Setup installs OpenShell 0.1.6 with NVIDIA's installer, and on 0.1.1 to 0.1.5 it offers the upgrade to 0.1.6 in place. On those older releases DefenseClaw still lists, stops, deletes and pulls from sandboxes, but creates and starts none. Setup is the only place that installs it.
+DefenseClaw drives OpenShell 0.1.1 and later 0.1 releases, not 0.2, and runs sandboxes only on 0.1.6 or later. OpenShell 0.1.6 initializes missing or empty MicroVM hosts files and includes the earlier network and lifecycle fixes. It preserves nonempty image-authored hosts files, so DefenseClaw checks the completed image's exported hosts file with its resolver and checks the guest resolver before a session starts. Setup installs OpenShell 0.1.9 with NVIDIA's installer, and on 0.1.1 to 0.1.8 it offers the upgrade to 0.1.9 in place. On 0.1.1 to 0.1.5 DefenseClaw still lists, stops, deletes and pulls from sandboxes, but creates and starts none. Setup is the only place that installs it.
 
 The full lists are on [Set up on Linux](/docs/sandboxes/linux#before-you-start) and [Set up on macOS](/docs/sandboxes/macos#before-you-start). In short: run DefenseClaw as your own user (not root), with its daemon running, plus rootful Docker Engine 28 or newer and a Landlock kernel on Linux, or Docker Desktop and Homebrew on an Apple-silicon Mac. Allow at least 5 GiB of free disk for the images.
 
@@ -127,16 +127,16 @@ Claude Code and Codex are set up by default. GitHub Copilot CLI, OpenCode, Kiro 
 
 | Agent | `sandbox run` name | Hook tier | Status |
 | --- | --- | --- | --- |
-| Claude Code | `claude` | managed | Verified |
-| Codex | `codex` | managed | Verified |
-| GitHub Copilot CLI | `copilot` | managed | Verified through bring-your-own-provider mode |
-| OpenCode | `opencode` | user | Verified |
-| Kiro CLI | `kiro` | user | Verified in scripted mode |
-| Hermes Agent | `hermes` | user | Verified with a mock model |
-| Antigravity | `antigravity` (or `agy`) | user | Verified with a mock Gemini API |
-| Cursor Agent | `cursor-agent` | managed | Unverified |
-| Amp | `amp` | user | Unverified |
-| Devin CLI | `devin` | user | Unverified |
+| Claude Code | `claude` | managed | Supported |
+| Codex | `codex` | managed | Supported |
+| GitHub Copilot CLI | `copilot` | managed | Supported through bring-your-own-provider mode |
+| OpenCode | `opencode` | user | Supported |
+| Kiro CLI | `kiro` | user | Supported in scripted mode |
+| Hermes Agent | `hermes` | user | Preview |
+| Antigravity | `antigravity` (or `agy`) | user | Preview |
+| Cursor Agent | `cursor-agent` | managed | Not available yet |
+| Amp | `amp` | user | Not available yet |
+| Devin CLI | `devin` | user | Not available yet |
 
 The hook tier says whether the agent could switch DefenseClaw's hooks off. **Managed**: the hook configuration is a root-owned file that user and project settings cannot override. **User**: the configuration lives where the agent could edit it, so the run banner says so and DefenseClaw watches for hooks that go silent. The [capability matrix](/docs/connectors/capability-matrix) lists each harness's hook file and version. Add another agent with `defenseclaw sandbox setup --harness NAME`.
 

@@ -975,7 +975,8 @@ psr10-H07 posix: dynamic option	U|
 psr10-H08 cmd: pwsh -wd	U|
 psr9-G02 pwsh -nop -c in order	K|delete:/home/u/.ssh/authorized_keys,delete:/home/u/authorized_keys
 psr9-K01 cmd: a word before /c	U|
-psr9-K02 cmd: unknown option before /c	U|
+psr9-K02 cmd: the /t:0a switch before /c	K|delete:c:\users\u\.ssh\authorized_keys
+psr9-K02b cmd: unknown option before /c	U|
 psr9-K03 cmd: padded /c	U|
 psr9-K04 cmd: /d /c table shape	K|delete:c:\users\u\.ssh\authorized_keys
 psr9-K05 cmd: /r	K|delete:c:\users\u\.ssh\authorized_keys

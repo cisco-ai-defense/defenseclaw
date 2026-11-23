@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/effects"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/psparse"
@@ -418,16 +419,29 @@ func psNativeArchiveCall(command *psparse.Command, program, cwd, home, text stri
 // Remove-Item of it) is not, nor is one in a tar listing of it (textBefore,
 // rel-1-0-10:GAP-1662). A call the text cannot place is read as staged.
 func psNativeArchiveWords(call psparse.Node, words []string, static []bool, cwd, text string, read *archiveExtractionScan) {
+	psArchiveWordsAfter(words, static, cwd, read.textBeforeCall(call, text), read)
+}
+
+// textBeforeCall is textBefore at the start of a PowerShell call; a call
+// the text cannot place has all of it before.
+func (read *archiveExtractionScan) textBeforeCall(call psparse.Node, text string) string {
+	at, _ := call.Span()
+	if at < 0 || at > len(text) {
+		at = len(text)
+	}
+	return read.textBefore(text, at)
+}
+
+// psArchiveWordsAfter reads the words of one native extractor call that
+// before (with its listings blanked) precedes: a whole archive before names
+// is staged.
+func psArchiveWordsAfter(words []string, static []bool, cwd, before string, read *archiveExtractionScan) {
 	first := len(read.whole)
 	archiveCallExtractions(words, static, cwd, read)
 	if first == len(read.whole) {
 		return
 	}
-	at, _ := call.Span()
-	if at < 0 || at > len(text) {
-		at = len(text)
-	}
-	before := strings.ToLower(read.textBefore(text, at))
+	before = strings.ToLower(before)
 	for index := first; index < len(read.whole); index++ {
 		if strings.Contains(before, strings.ToLower(filepath.Base(read.whole[index].Archive))) {
 			read.whole[index].staged = true
@@ -435,12 +449,19 @@ func psNativeArchiveWords(call psparse.Node, words []string, static []bool, cwd,
 	}
 }
 
-// psCmdArchiveCall reads cmd /c (or /k) running a native extractor from a
-// PowerShell command: the words after /c, one quoted body or several words,
-// are split at blanks, and %USERPROFILE% or %HOMEDRIVE%%HOMEPATH% at the
-// start of a word is the home, as cmd expands it (rel-1-0-10:GAP-1633). A
-// value with no static spelling, or an option before /c this reading does not
-// know, leaves the call unread.
+// psCmdArchiveCall reads cmd /c (or /k) running native extractors from a
+// PowerShell command. The words after /c are the command line cmd gets (a
+// word that holds a blank quoted, as PowerShell hands it, and cmd's outer
+// quotes removed); it is split into statements by the cmd statement splitter
+// (effects.CmdStatements), so `copy /y a.tar ok.tar && tar -xf ok.tar -C
+// %USERPROFILE%` reads its tar call, staged by the copy before it, and a
+// statement after an extractor is not read as its members
+// (rel-1-0-10:GAP-1667). A statement's words are split at blanks, and
+// %USERPROFILE% or %HOMEDRIVE%%HOMEPATH% at the start of a word is the home,
+// as cmd expands it (rel-1-0-10:GAP-1633). A value with no static spelling,
+// or a word before /c that is not a cmd startup switch
+// (psparse.CmdStartupSwitch, the one cmd switch set: rel-1-0-10:GAP-1708),
+// leaves the call unread.
 func psCmdArchiveCall(command *psparse.Command, cwd, home, text string, read *archiveExtractionScan) {
 	var body []string
 	inBody := false
@@ -459,26 +480,56 @@ func psCmdArchiveCall(command *psparse.Command, cwd, home, text string, read *ar
 			return
 		}
 		if inBody {
+			if word == "" || strings.ContainsAny(word, " \t") {
+				word = `"` + word + `"`
+			}
 			body = append(body, word)
 			continue
 		}
-		switch strings.ToLower(word) {
-		case "/c", "/k":
+		switch lower := strings.ToLower(word); {
+		case lower == "/c" || lower == "/k":
 			inBody = true
-		case "/d", "/s", "/q":
+		case psparse.CmdStartupSwitch(lower):
 		default:
 			return
 		}
 	}
-	fields := strings.Fields(strings.ReplaceAll(strings.Join(body, " "), `"`, ""))
+	line := strings.Join(body, " ")
+	if strings.HasPrefix(line, `"`) {
+		if last := strings.LastIndex(line, `"`); last > 0 {
+			line = line[1:last] + line[last+1:]
+		}
+	}
+	before := read.textBeforeCall(command, text)
+	for _, statement := range effects.CmdStatements(line) {
+		words, static, extractor := cmdArchiveStatementWords(statement, home)
+		switch {
+		case !extractor:
+		case archiveListing(words, static):
+			// A listing reads the archive: it does not stage it
+			// (rel-1-0-10:GAP-1662).
+			continue
+		default:
+			psArchiveWordsAfter(words, static, cwd, before, read)
+		}
+		before += " " + statement
+	}
+}
+
+// cmdArchiveStatementWords is one cmd statement as the words of a native
+// extractor call: its quotes removed and split at blanks, with the home
+// variables read (psCmdArchiveCall). extractor is false when the statement
+// does not run tar, unzip or 7z.
+func cmdArchiveStatementWords(statement, home string) (words []string, static []bool, extractor bool) {
+	fields := strings.Fields(strings.ReplaceAll(statement, `"`, ""))
 	if len(fields) == 0 {
-		return
+		return nil, nil, false
 	}
 	program, ok := psNativeExtractor(strings.ToLower(fields[0]))
 	if !ok {
-		return
+		return nil, nil, false
 	}
-	words, static := []string{program}, []bool{true}
+	words, static = []string{program}, []bool{true}
 	for _, field := range fields[1:] {
 		if home != "" {
 			for _, prefix := range []string{"%userprofile%", "%homedrive%%homepath%"} {
@@ -496,7 +547,7 @@ func psCmdArchiveCall(command *psparse.Command, cwd, home, text string, read *ar
 		}
 		words, static = append(words, psSlashWord(field)), append(static, true)
 	}
-	psNativeArchiveWords(command, words, static, cwd, text, read)
+	return words, static, true
 }
 
 // psNativeWord is one PowerShell value as the word a native program gets:

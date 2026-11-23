@@ -35,7 +35,7 @@ func gap1207NeutralChain(unit []string, count int) string {
 // depth, never weaker than the program in strict and never a clean allow
 // (rel-1-0-10:GAP-0973, the one bound rule).
 func TestGAP1207ContextNeutralWrapperKeepsTheProgramVerdict(t *testing.T) {
-	env := boundedLaneEnv(t)
+	env := boundedLaneEnvAnyOS(t)
 	limit := actionfacts.InlineChainWrappers
 	units := map[string][]string{
 		"nohup":       {"nohup"},
@@ -107,7 +107,7 @@ func TestGAP1207ContextNeutralWrapperKeepsTheProgramVerdict(t *testing.T) {
 // metadata fetch) were a clean allow in default and strict at d99d8a01a7,
 // below the truncation alert/block of rel (rel-1-0-10:GAP-1207 review r1).
 func TestGAP1207EnvAfterNeutralWrappersKeepsTheProgramVerdict(t *testing.T) {
-	env := boundedLaneEnv(t)
+	env := boundedLaneEnvAnyOS(t)
 	limit := actionfacts.InlineChainWrappers
 	programs := []struct {
 		id, command string
