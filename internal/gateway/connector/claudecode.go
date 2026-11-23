@@ -3400,32 +3400,8 @@ func removeOwnedClaudeCodeHooks(
 		return isOwnedHookHandler(hook, hooksDir) ||
 			hookUsesTrackedClaudeCodeCommand(hook, managedCommands) ||
 			hookUsesLegacyClaudeCodeNativeCommand(hook) ||
-			hookUsesForeignDefenseClawClaudeCodeScript(hook)
+			hookUsesForeignDefenseClawClaudeCodeScript(rawHook)
 	}), nil
-}
-
-// hookUsesForeignDefenseClawClaudeCodeScript recognizes a handler that runs
-// a DefenseClaw Claude Code hook Setup did not write at this path: the
-// generated hook of another DefenseClaw data dir (a settings.json copied from
-// another account or from dotfiles, whose script is often unreadable, so the
-// marker check cannot claim it; GAP-2031), or this install's handler after
-// its script path was edited by hand. A handler that still carries the exact
-// generated missing-script guard is DefenseClaw's whatever its path.
-// Setup then kept the dead entries next to its own and the edited one kept
-// failing every call (GAP-0907). Only Setup's and Teardown's removal pass
-// uses this.
-func hookUsesForeignDefenseClawClaudeCodeScript(rawHook interface{}) bool {
-	hook, ok := rawHook.(map[string]interface{})
-	if !ok {
-		return false
-	}
-	command, _ := hook["command"].(string)
-	unguarded := claudeCodeUnguardedHookCommand(command)
-	if unguarded != command {
-		return true
-	}
-	rest, edited := editedDefenseClawHookScript(unguarded, "claude-code-hook.sh")
-	return edited && rest == ""
 }
 
 func validateClaudeCodeHookEventShape(hookEventValue interface{}) error {
