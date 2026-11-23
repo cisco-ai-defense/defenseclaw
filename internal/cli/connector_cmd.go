@@ -1442,7 +1442,12 @@ func runConnectorPrepareRollback(cmd *cobra.Command, _ []string) error {
 			if connectorFlagName != "" && connectorFlagName != name {
 				continue
 			}
-			if connector.RollbackTargetRestoresRouteOnly(dataDir, name) {
+			// previous/data is the release back only for `defenseclaw
+			// rollback`: a Windows downgrade and the restore of a failed
+			// upgrade swap no data, and previous/ still holds the slot of an
+			// earlier upgrade. A target before 1.0.10 (or not given) has no
+			// listener, so its settings always go back (GAP-2038).
+			if !rollbackTargetLacksRouteOnly(opts.RollbackTargetVersion) && connector.RollbackTargetRestoresRouteOnly(dataDir, name) {
 				continue
 			}
 			conn, ok := reg.Get(name)
