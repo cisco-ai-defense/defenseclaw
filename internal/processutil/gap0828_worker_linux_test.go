@@ -90,7 +90,7 @@ func TestGAP0828WorkerRuntimeDefault(t *testing.T) {
 	for _, mode := range []string{"tracked", "pod"} {
 		t.Run(mode, func(t *testing.T) {
 			dir := t.TempDir()
-			mark := filepath.Join(dir, "scanner-ran")
+			mark := filepath.Join(dir, "tmp", "scanner-ran")
 			fake := "#!/bin/sh\n: > '" + mark + "'\necho '{\"findings\":[]}'\n"
 			if err := os.WriteFile(filepath.Join(dir, "fake-skill-scanner"), []byte(fake), 0o700); err != nil {
 				t.Fatal(err)
@@ -128,8 +128,8 @@ func TestGAP0828WorkerRuntimeDefault(t *testing.T) {
 					t.Fatalf("outside pod mode a refused namespace must fail closed: answer %s, scanner ran=%t", raw, ranErr == nil)
 				}
 			case "pod":
-				if a.Code != "" || a.Result == nil || ranErr != nil {
-					t.Fatalf("pod mode did not scan under RuntimeDefault: answer %s, scanner ran=%t", raw, ranErr == nil)
+				if a.Code != "" || a.Result == nil || ranErr == nil {
+					t.Fatalf("pod mode did not scan and clear scratch under RuntimeDefault: answer %s, marker left=%t", raw, ranErr == nil)
 				}
 			}
 		})

@@ -69,11 +69,12 @@ func TestPodRunnerHelper(t *testing.T) {
 
 	// The scan runs; a detached leftover that holds the output does not
 	// hold the scan, and is gone when Run returns.
+	podMark := filepath.Join(scratch, "pod-marker")
 	var stdout strings.Builder
-	cmd := CommandContext(ctx, "/bin/sh", "-c", `: > "$1"; setsid sleep 300 & echo scanned`, "sh", out+".pod")
+	cmd := CommandContext(ctx, "/bin/sh", "-c", `: > "$1"; setsid sleep 300 & echo scanned`, "sh", podMark)
 	cmd.Stdout = &stdout
 	err = p.Run(cmd)
-	_, ranErr = os.Stat(out + ".pod")
+	_, ranErr = os.Stat(podMark)
 	say("pod err=%v ran=%t stdout=%q alone=%t", err, ranErr == nil, strings.TrimSpace(stdout.String()), podAlone())
 
 	// A non-zero exit is the scanner's own answer.

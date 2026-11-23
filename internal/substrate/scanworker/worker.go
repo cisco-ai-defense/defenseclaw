@@ -130,7 +130,7 @@ func (w *Worker) Handler() http.Handler {
 func (w *Worker) Serve(ctx context.Context) error {
 	handler := w.Handler()
 	if w.Pod != nil {
-		if err := w.Pod.Reset(); errors.Is(err, processutil.ErrPodRestart) {
+		if err := w.Pod.Reset(); err != nil {
 			return err
 		}
 		if err := w.clearScanDir(); err != nil {

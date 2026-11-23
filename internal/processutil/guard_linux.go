@@ -156,7 +156,10 @@ func scannerFilter(blockSignals bool) ([]unix.SockFilter, error) {
 	if blockSignals {
 		a.label("pid1")
 		a.load(seccompArg(0))
-		a.jeq(1, "eperm", "allow")
+		// kill(0) and kill(-pgid) can reach PID 1 through its process
+		// group; all nonpositive targets are refused along with PID 1.
+		a.jge(0x80000000, "eperm", "")
+		a.jge(2, "allow", "eperm")
 		a.label("fcntl")
 		a.load(seccompArg(1))
 		a.jeq(unix.F_SETOWN, "eperm", "")
