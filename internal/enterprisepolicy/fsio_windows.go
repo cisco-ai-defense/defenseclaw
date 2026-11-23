@@ -1559,3 +1559,7 @@ func clearOrKeepLinkedPolicyPath(opts Options, path string, state *State) (strin
 		return link, "a link DefenseClaw could not remove, so it does not follow or change it: " + err.Error()
 	}
 }
+
+// saveReplacedPolicyFile is Unix only: the Windows Codex writer keeps its
+// own model (an administrator's added key is re-marshalled into the file).
+func saveReplacedPolicyFile(Options, string, []byte) (string, error) { return "", nil }

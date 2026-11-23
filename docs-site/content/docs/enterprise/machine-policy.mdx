@@ -17,11 +17,20 @@ Only agents you select in the config are protected; see [Choose the agents to pr
 
 You may maintain your own settings in vendor policy files. After an administrator
 or MDM changes one, run `reconcile` or `ensure` as root. On Linux and macOS,
-Codex `/etc/codex/requirements.toml` is shared with DefenseClaw: `ensure` and
-`repair` put back the file DefenseClaw last published, and only `reconcile`
-accepts your edit of it. Keep your own lines after DefenseClaw's settings
-block and before its hooks block; the guardian puts back a line added outside
-them and any change inside DefenseClaw's blocks. While a managed hook's
+Codex `/etc/codex/requirements.toml` is shared with DefenseClaw. These all put
+back the file DefenseClaw last published: `ensure`, `repair`, an upgrade, the
+config-apply job that the guardian starts when it finds a changed file, and
+the config-apply job that applies a config change. Only `reconcile` accepts
+your edit of the file. Keep your own lines after DefenseClaw's settings block
+and before its hooks block. The guardian puts back a line added outside them,
+any change inside DefenseClaw's blocks, a file that no longer parses as a
+whole, and a symbolic link put in place of the file. DefenseClaw replaces such
+a link and never writes to the file it points at. When DefenseClaw puts back
+the file over an edit, it first saves the edited file in
+`/etc/codex/defenseclaw-replaced/`, a folder only root can read. The change
+line names the saved file. DefenseClaw keeps the last 10 saved files and
+leaves them in place when it is removed. To keep an edit, copy your lines back
+and run `reconcile`. While a managed hook's
 current vendor policy differs from the digest in the trusted runtime descriptor,
 the hook keeps sending every call to the gateway, which inspects it under the
 managed policy, and raises a `HIGH` runtime alert

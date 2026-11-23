@@ -566,8 +566,23 @@ func (codexTarget) Reconcile(opts Options) (State, error) {
 		return state, nil
 	}
 	current, exists, err := readPolicyFile(opts, path)
+	link := ""
 	if err != nil {
-		return state, err
+		// A symbolic link put in place of the file DefenseClaw published is
+		// replaced by the published file: the publish renames over the link
+		// itself and never reads or writes through it (GAP-1968). Any other
+		// unreadable file, or a link at a path DefenseClaw never published,
+		// stays as it is.
+		if link = codexPublishedLink(opts, policy, path); link == "" {
+			return state, err
+		}
+		current, exists = nil, false
+		// What the link points at is not the administrator's text to adopt.
+		opts.AdoptAdministratorEdits = false
+		if state.replacing == nil {
+			state.replacing = map[string]policyFileBase{}
+		}
+		state.replacing[platformPath(opts, path)] = policyFileBase{exists: true, link: link}
 	}
 	if policy.Ownership == config.MachinePolicyOwnershipVerifyOnly {
 		if err := inspectCodex(opts, current, policy, &state); err != nil {
@@ -613,9 +628,21 @@ func (codexTarget) Reconcile(opts Options) (State, error) {
 			ownedBefore = before.OwnedEntries > 0
 		}
 	}
+	if saved, err := saveDiscardedCodexEdit(opts, path, current, exists, rendered); err != nil {
+		// The edit cannot be kept, but the published policy still goes back:
+		// a heal never waits on the copy.
+		state.warn("could not keep a copy of the edited %s before putting back the published file: %v", path, err)
+	} else if saved != "" {
+		state.SavedEdit = saved
+		state.detail("kept the edited %s, which this publish replaced, at %s", path, saved)
+	}
 	changed, err := publishWithRecord(opts, codexConnector, path, current, exists, rendered, ownedBefore, codexStrip, &state)
 	if err != nil {
 		return state, err
+	}
+	if link != "" {
+		state.ReplacedLink = link
+		state.detail("replaced the symbolic link at %s (to %s) with the published file; DefenseClaw never follows it", path, link)
 	}
 	state.Changed = changed
 	if err := inspectCodex(opts, rendered, policy, &state); err != nil {
@@ -677,6 +704,35 @@ func (codexTarget) Verify(opts Options) (State, error) {
 	}
 	state.finish()
 	return state, nil
+}
+
+// codexPublishedLink is the target of a symbolic link at path when
+// DefenseClaw published the file there with ownership merge on Linux or
+// macOS, read without following the link, else "".
+func codexPublishedLink(opts Options, policy config.ResolvedConnectorPolicy, path string) string {
+	if opts.goos() == "windows" || policy.Ownership != config.MachinePolicyOwnershipMerge {
+		return ""
+	}
+	if record, err := loadRecord(opts, codexConnector); err != nil || !publishedByRecord(record, path) {
+		return ""
+	}
+	return policyFileLink(opts, path)
+}
+
+// saveDiscardedCodexEdit keeps a copy of the Codex requirements file a
+// publish is about to replace when it holds an edit made since DefenseClaw
+// last wrote it that the publish does not adopt (ensure, repair, upgrade and
+// the restores the guardian and config changes start). It returns the
+// copy's path, or "" when nothing is discarded (GAP-1967).
+func saveDiscardedCodexEdit(opts Options, path string, current []byte, exists bool, rendered []byte) (string, error) {
+	if opts.goos() == "windows" || opts.AdoptAdministratorEdits || !exists || bytes.Equal(current, rendered) {
+		return "", nil
+	}
+	record, err := loadRecord(opts, codexConnector)
+	if err != nil || !publishedByRecord(record, path) || sha256Hex(current) == record.PostimageSHA256 {
+		return "", nil
+	}
+	return saveReplacedPolicyFile(opts, path, current)
 }
 
 // codexMissingHookConflicts is the per-event conflicts of an inspected
