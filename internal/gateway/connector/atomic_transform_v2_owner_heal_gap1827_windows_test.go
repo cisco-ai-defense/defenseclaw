@@ -9,6 +9,8 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
@@ -26,8 +28,11 @@ func gap1827LiveFolderSDDL(service string) string {
 	return "D:PAI(A;OICI;FA;;;OW)(A;OICI;FA;;;SY)(A;OICIIO;GXGR;;;" + service + ")(A;;0x1200a9;;;" + service + ")"
 }
 
-// gap1827SetFolderDACL gives the fixture folder sddl's protected DACL, which
-// Windows propagates to the config inside it.
+// gap1827SetFolderDACL gives the fixture folder sddl's protected DACL. It
+// does not reach the LocalSystem-owned config inside it: that file's DACL
+// grants the elevated test account nothing, and the propagation skips it
+// without an error. gap1827InheritFromFolder gives the config its inherited
+// entries.
 func gap1827SetFolderDACL(t *testing.T, dir, sddl string) {
 	t.Helper()
 	sd, err := windows.SecurityDescriptorFromString(sddl)
@@ -45,11 +50,35 @@ func gap1827SetFolderDACL(t *testing.T, dir, sddl string) {
 	}
 }
 
-// gap1827FileACECount is the number of ACEs on path's DACL, read as
-// LocalSystem.
-func gap1827FileACECount(t *testing.T, path string) int {
+// gap1827InheritFromFolder gives path the DACL a file a privileged writer
+// creates in its folder gets: no explicit entries, inheritance on, so it holds
+// exactly what the folder's DACL passes down. It runs with the repair
+// privileges because the LocalSystem-owned config grants the elevated test
+// account nothing (GAP-2028: without this the config kept the two entries of
+// the bare guardian folder and the test never reached the heal).
+func gap1827InheritFromFolder(t *testing.T, path string) {
 	t.Helper()
-	count := -1
+	empty, err := windows.SecurityDescriptorFromString("D:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	emptyDACL, _, err := empty.DACL()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runWindowsManagedPrivilegedRepair(func() error {
+		return windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
+			windows.DACL_SECURITY_INFORMATION|windows.UNPROTECTED_DACL_SECURITY_INFORMATION,
+			nil, nil, emptyDACL, nil)
+	}); err != nil {
+		t.Fatalf("inherit the folder DACL onto %s: %v", path, err)
+	}
+}
+
+// gap1827FileDACL is path's DACL as SDDL (D: part only), read as LocalSystem.
+func gap1827FileDACL(t *testing.T, path string) string {
+	t.Helper()
+	var sddl string
 	if err := runWindowsManagedPrivilegedRepair(func() error {
 		handle, err := openWindowsManagedRepairHandle(path, false, windows.READ_CONTROL)
 		if err != nil {
@@ -60,16 +89,35 @@ func gap1827FileACECount(t *testing.T, path string) int {
 		if err != nil {
 			return err
 		}
-		dacl, _, err := sd.DACL()
-		if err != nil || dacl == nil {
-			return err
+		sddl = sd.String()
+		if i := strings.Index(sddl, "D:"); i > 0 {
+			sddl = sddl[i:]
 		}
-		count = int(dacl.AceCount)
 		return nil
 	}); err != nil {
 		t.Fatalf("read DACL of %s: %v", path, err)
 	}
-	return count
+	return sddl
+}
+
+// gap1827RequireLiveConfigDACL fails unless sddl is the DACL of the live
+// dcw-std1 config.toml on dc-ent-win (1.0.11 smoke, 2026-11-22):
+// D:AI(A;ID;0x1200a9;;;<gateway>)(A;ID;FA;;;SY)(A;ID;FA;;;OW), not protected,
+// those three inherited entries in any order.
+func gap1827RequireLiveConfigDACL(t *testing.T, sddl string) {
+	t.Helper()
+	open := strings.Index(sddl, "(")
+	if !strings.HasPrefix(sddl, "D:") || open < 0 || strings.Contains(sddl[2:open], "P") {
+		t.Fatalf("fixture: config DACL %s is protected or empty; the live file inherits D:AI(gateway RX)(SYSTEM)(OWNER RIGHTS)", sddl)
+	}
+	got := strings.SplitAfter(sddl[open:], ")")
+	got = got[:len(got)-1]
+	want := []string{"(A;ID;0x1200a9;;;" + gap1827GatewaySID + ")", "(A;ID;FA;;;SY)", "(A;ID;FA;;;OW)"}
+	sort.Strings(got)
+	sort.Strings(want)
+	if strings.Join(got, "") != strings.Join(want, "") {
+		t.Fatalf("fixture: config carries %d ACEs %s; the live file inherits 3 (gateway RX, SYSTEM, OWNER RIGHTS)", len(got), sddl)
+	}
 }
 
 // TestGAP1827ConfigInAFolderWithTheGatewayReadGrantIsGivenBack replays the
@@ -83,9 +131,9 @@ func gap1827FileACECount(t *testing.T, path string) int {
 func TestGAP1827ConfigInAFolderWithTheGatewayReadGrantIsGivenBack(t *testing.T) {
 	path, stateDir, user := gap1651Fixture(t, nil)
 	gap1827SetFolderDACL(t, filepath.Dir(path), gap1827LiveFolderSDDL(gap1827GatewaySID))
-	if n := gap1827FileACECount(t, path); n != 3 {
-		t.Fatalf("fixture: config carries %d ACEs; the live file inherits 3 (gateway RX, SYSTEM, OWNER RIGHTS)", n)
-	}
+	t.Logf("config DACL after the folder DACL change alone: %s", gap1827FileDACL(t, path))
+	gap1827InheritFromFolder(t, path)
+	gap1827RequireLiveConfigDACL(t, gap1827FileDACL(t, path))
 	if _, err := os.ReadFile(path); !errors.Is(err, os.ErrPermission) {
 		t.Fatalf("fixture: the account can read its LocalSystem-owned config (err %v); the repro needs Access is denied", err)
 	}
@@ -125,6 +173,9 @@ func TestGAP1827ReadGrantsThatAreNotTheGatewaysAreNotHealed(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			path, _, _ := gap1651Fixture(t, nil)
 			gap1827SetFolderDACL(t, filepath.Dir(path), sddl)
+			// The config holds what this folder passes down, so only the
+			// folder rule can refuse it.
+			gap1827InheritFromFolder(t, path)
 
 			_ = healAtomicTransformV2ConfigLeftToAdmin(path)
 
