@@ -210,24 +210,42 @@ func ExactEndpointSecurityProductDisable(facts Facts) bool {
 }
 
 // WinDefendSequenceUnproved reports that an action holds more than one
-// top-level WinDefend sc step but the steps are not an exact WinDefend
-// disable. The closed sequence proof owns such a call: a per-command reading
-// of its stop or its start-type disable must not prove a disable that the
-// whole sequence does not (rel-1-0-10:GAP-1194, GAP-1656).
+// top-level WinDefend sc step and an sc config of the WinDefend start type,
+// but the steps are not an exact WinDefend disable. The closed sequence proof
+// owns such a call: a per-command reading of its stop or its start-type
+// disable must not prove a disable that the whole sequence does not
+// (rel-1-0-10:GAP-1194, GAP-1656), and a stop beside a start-type restore
+// (start= auto) is no disable. A call with no start-type config is not a
+// partial disable sequence: its WinDefend stop keeps the finding it proves
+// alone, as the PowerShell reading of the same steps does
+// (rel-1-0-10:GAP-1313).
 func WinDefendSequenceUnproved(facts Facts) bool {
 	if !facts.Authoritative() {
 		return false
 	}
-	winDefendSteps := 0
+	winDefendSteps, startTypeConfig := 0, false
 	for _, command := range facts.Commands {
 		if command.ParentCommandID != 0 {
 			continue
+		}
+		if winDefendStartTypeConfig(command) {
+			startTypeConfig = true
 		}
 		if step, ok := exactEndpointSecurityTopLevelStep(facts, command); ok && isWinDefendStep(step) {
 			winDefendSteps++
 		}
 	}
-	return winDefendSteps > 1 && !ExactEndpointSecurityProductDisable(facts)
+	return winDefendSteps > 1 && startTypeConfig && !ExactEndpointSecurityProductDisable(facts)
+}
+
+// winDefendStartTypeConfig reports an sc config of the WinDefend service,
+// whatever start type it sets: the step of a disable or of a restore.
+func winDefendStartTypeConfig(command CommandFact) bool {
+	if command.Program != "sc" && command.Program != "sc.exe" {
+		return false
+	}
+	return len(command.Argv) >= 3 && strings.EqualFold(command.Argv[1], "config") &&
+		strings.EqualFold(command.Argv[2], "WinDefend")
 }
 
 // ExactWinDefendSingleStep reports that the action is exactly one WinDefend

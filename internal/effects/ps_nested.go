@@ -275,6 +275,51 @@ func psReadLaunch(args []string) (psLaunch, bool) {
 // joined by blanks, as Start-Process joins them) is the child's command line.
 // ok is false when the child, the list or the line cannot be read.
 func psStartProcessChild(c *psparse.Command) (text string, dialect Dialect, ok bool) {
+	name, line, ok := psStartProcessLine(c)
+	if !ok {
+		return "", "", false
+	}
+	switch psLeaf(name) {
+	case "cmd":
+		body, ok := cmdSlashCBody("cmd "+line, []Word{{Value: "cmd", Static: true}, {Value: "/c", Static: true}})
+		return body, DialectCMD, ok && strings.TrimSpace(body) != ""
+	case "powershell", "pwsh":
+		code, ok := psChildCommand(winArgv(line))
+		return code, DialectPowerShell, ok
+	}
+	return "", "", false
+}
+
+// StartProcessChildArgv is the argv a Start-Process call hands the program it
+// starts: the -FilePath (or first positional) program, then its command line
+// (psStartProcessLine) split as the child splits it (CommandLineToArgvW,
+// winArgv). It reads the same binding as the effects lowering, so a reader of
+// the child of a native program (the actionfacts nested readings) and the
+// lowering of a host child agree on the call (rel-1-0-10:GAP-0201). ok is
+// false when the call has no -ArgumentList or cannot be bound.
+func StartProcessChildArgv(c *psparse.Command) (argv []string, ok bool) {
+	name, line, ok := psStartProcessLine(c)
+	if !ok || name == "" {
+		return nil, false
+	}
+	return append([]string{name}, winArgv(line)...), true
+}
+
+// WindowsCommandLineArgv splits a Windows command line into the argv a
+// program gets from it, as CommandLineToArgvW does (winArgv): the reading of
+// a PowerShell --% stop-parsing remainder, which the program gets verbatim
+// (rel-1-0-10:GAP-0201).
+func WindowsCommandLineArgv(line string) []string {
+	return winArgv(line)
+}
+
+// psStartProcessLine is the program a Start-Process call starts and the
+// command line it gives it: the -ArgumentList (one literal string, or a list
+// of literal strings joined by blanks, as Start-Process joins them). ok is
+// false when the call cannot be bound, names a parameter that changes how the
+// child reads its words (-WorkingDirectory, -Credential, redirection files),
+// or has no static program or list.
+func psStartProcessLine(c *psparse.Command) (name, line string, ok bool) {
 	b := psStartProcessBind(c)
 	if b.unsettled {
 		return "", "", false
@@ -293,42 +338,28 @@ func psStartProcessChild(c *psparse.Command) (text string, dialect Dialect, ok b
 	if argList == nil && len(positional) > 0 {
 		argList, positional = positional[0], positional[1:]
 	}
-	if file == nil || len(positional) > 0 {
+	if file == nil || argList == nil || len(positional) > 0 {
 		return "", "", false
 	}
-	name, ok := psparse.LiteralString(file)
+	name, ok = psparse.LiteralString(file)
 	if !ok {
 		return "", "", false
 	}
-	var line string
-	switch {
-	case argList == nil:
+	if s, ok := psparse.LiteralString(argList); ok {
+		return name, s, true
+	}
+	items, ok := psparse.LiteralList(argList)
+	if !ok {
 		return "", "", false
-	default:
-		if s, ok := psparse.LiteralString(argList); ok {
-			line = s
-		} else if items, ok := psparse.LiteralList(argList); ok {
-			parts := make([]string, 0, len(items))
-			for _, it := range items {
-				if !it.Static {
-					return "", "", false
-				}
-				parts = append(parts, it.Text)
-			}
-			line = strings.Join(parts, " ")
-		} else {
+	}
+	parts := make([]string, 0, len(items))
+	for _, it := range items {
+		if !it.Static {
 			return "", "", false
 		}
+		parts = append(parts, it.Text)
 	}
-	switch psLeaf(name) {
-	case "cmd":
-		body, ok := cmdSlashCBody("cmd "+line, []Word{{Value: "cmd", Static: true}, {Value: "/c", Static: true}})
-		return body, DialectCMD, ok && strings.TrimSpace(body) != ""
-	case "powershell", "pwsh":
-		code, ok := psChildCommand(winArgv(line))
-		return code, DialectPowerShell, ok
-	}
-	return "", "", false
+	return name, strings.Join(parts, " "), true
 }
 
 // psSPBinding is a Start-Process call bound as PowerShell binds it.

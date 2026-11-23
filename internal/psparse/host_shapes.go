@@ -96,10 +96,29 @@ var psCommandSwitches = map[string]bool{"-c": true, "-command": true}
 
 var psEncodedSwitches = map[string]bool{"-e": true, "-ec": true, "-enc": true, "-encodedcommand": true}
 
-// cmdHostOpts are the tested cmd.exe switches that may precede /c, /k or /r.
-var cmdHostOpts = map[string]bool{
-	"/q": true, "/d": true, "/s": true, "/a": true, "/u": true, "/x": true, "/y": true,
-	"/e:on": true, "/e:off": true, "/v:on": true, "/v:off": true, "/f:on": true, "/f:off": true,
+// CmdStartupSwitch reports a cmd.exe startup switch that may precede /c, /k
+// or /r and changes nothing about how the body after it is read: /q /d /s /a
+// /u, /x and /y (the old names of /e:on and /e:off), /e:on|off, /f:on|off,
+// /v:on|off and /t:<one or two hex digits>. option is compared without case.
+// It is the one cmd switch set: the psparse host reading and the actionfacts
+// launcher reading both take it, so the two cannot read a different cmd body
+// (rel-1-0-10:GAP-1708). Any other word before the run switch is not read.
+func CmdStartupSwitch(option string) bool {
+	option = strings.ToLower(option)
+	switch option {
+	case "/q", "/d", "/s", "/a", "/u", "/x", "/y",
+		"/e:on", "/e:off", "/f:on", "/f:off", "/v:on", "/v:off":
+		return true
+	}
+	if len(option) < 4 || len(option) > 5 || !strings.HasPrefix(option, "/t:") {
+		return false
+	}
+	for _, r := range option[3:] {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // matchPSHostShape reports which tested shape a powershell / pwsh invocation's
@@ -247,7 +266,7 @@ func matchCmdShape(c *Command, words []hostWord) (idx int, reason string) {
 			}
 			return i, ""
 		}
-		if !cmdHostOpts[l] {
+		if !CmdStartupSwitch(l) {
 			return 0, ReasonCmdArgv
 		}
 	}

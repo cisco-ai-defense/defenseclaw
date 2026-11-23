@@ -82,6 +82,22 @@ type cmdSeg struct {
 	op    Op
 }
 
+// CmdStatements returns the statements of a cmd.exe command line, each
+// trimmed, empty ones left out: the text is split at & && || and | outside
+// double quotes and not after a ^ escape, and a >& or <& stream dup is not a
+// split. It is the one cmd statement splitter: parseCMD lowers the same
+// statements, and a reader of a cmd /c body (the hookpaths archive reading)
+// reads each of them rather than the body as one call (rel-1-0-10:GAP-1667).
+func CmdStatements(command string) []string {
+	var statements []string
+	for _, seg := range splitCMDStatements(command) {
+		if text := strings.TrimSpace(seg.text); text != "" {
+			statements = append(statements, text)
+		}
+	}
+	return statements
+}
+
 func splitCMDStatements(command string) []cmdSeg {
 	var segs []cmdSeg
 	var b strings.Builder

@@ -19,6 +19,8 @@ package actionfacts
 import (
 	"path"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/psparse"
 )
 
 // ShellLauncherBody returns the script text a shell launcher argv runs and
@@ -332,10 +334,10 @@ func cmdLauncherBody(argv []string) (string, bool) {
 				return "", false
 			}
 			return body, true
-		case "/d", "/q", "/s", "/a", "/u":
-			continue
 		default:
-			if cmdSwitchWithValue(option) {
+			// One cmd switch set with the psparse host reading
+			// (rel-1-0-10:GAP-1708).
+			if psparse.CmdStartupSwitch(option) {
 				continue
 			}
 			return "", false
@@ -641,29 +643,4 @@ func posixLauncherBody(argv []string) (string, bool, bool) {
 		}
 	}
 	return "", false, false
-}
-
-// cmdSwitchWithValue reports a cmd startup switch with a valid value:
-// /e:on, /e:off, /f:on, /f:off, /v:on, /v:off or /t:<one or two hex digits>.
-// Any other value is not read.
-func cmdSwitchWithValue(option string) bool {
-	if len(option) < 4 || option[2] != ':' || option[0] != '/' {
-		return false
-	}
-	value := option[3:]
-	switch option[1] {
-	case 'e', 'f', 'v':
-		return value == "on" || value == "off"
-	case 't':
-		if len(value) > 2 {
-			return false
-		}
-		for _, r := range value {
-			if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
-				return false
-			}
-		}
-		return true
-	}
-	return false
 }
