@@ -136,7 +136,8 @@ func TestDET111BSDSedInPlaceIsSedI(t *testing.T) {
 
 // TestDET111UnlistedWritersAreThePlainSpelling (GAP-0506 writer half): a
 // sqlite3 call that changes a DefenseClaw state database and git config
-// --file on a hook config are the writes cp onto those files is, and get
+// --file or an ed script on a hook config are the writes cp onto those
+// files is, and get
 // its verdict in all five tiers on both routes. At a2d6245be7 both were
 // allowed (sqlite3 an unknown program, git config --file unaccounted).
 // Reads by the same programs and their writes of project files stay
@@ -157,6 +158,7 @@ func TestDET111UnlistedWritersAreThePlainSpelling(t *testing.T) {
 		"cp /tmp/x " + settings: {
 			"git config --file " + settings + " core.x y",
 			"git config -f " + settings + " --add a.b c",
+			"ed -s " + settings + " <<< $'1d\\nw\\nq'",
 		},
 	}
 	benign := []string{
@@ -164,6 +166,8 @@ func TestDET111UnlistedWritersAreThePlainSpelling(t *testing.T) {
 		"sqlite3 " + filepath.Join(proj, "app.db") + " 'select count(*) from t'",
 		"git config --file " + filepath.Join(proj, ".gitmodules") + " submodule.x.url https://example.invalid/x",
 		"git config --file " + filepath.Join(proj, ".gitmodules") + " --get submodule.x.url",
+		"ed -s " + filepath.Join(proj, "notes.txt") + " <<< $'1d\\nw\\nq'",
+		"ed -s " + settings + " <<< $',p\\nq'",
 	}
 	hardP5Parity(t, home, cases, benign)
 }

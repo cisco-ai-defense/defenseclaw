@@ -291,3 +291,138 @@ func (w *walker) emitOperand(op operand, origin Origin, cond bool, dialect Diale
 		w.emit(*e)
 	}
 }
+
+// edReading is what an ed script on standard input does to the file it
+// edits: writesFile for a w / wq / W with no file name (the edited file),
+// writes for the files a w names. ok is false for a script the closed
+// reading does not accept (g / v command lists, ! commands, e / E / f / r,
+// an unknown command, a text block left open).
+type edReading struct {
+	writesFile bool
+	writes     []string
+	ok         bool
+}
+
+// readEdScript reads an ed command script line by line: an address (line
+// numbers, . $ , ; + -, marks, /re/ and ?re? searches), then one command.
+func readEdScript(s string) edReading {
+	var rd edReading
+	if len(s) > maxGrammarSource {
+		return rd
+	}
+	lines := strings.Split(s, "\n")
+	for i := 0; i < len(lines); i++ {
+		line := strings.TrimLeft(lines[i], " \t")
+		j := 0
+	addr:
+		for j < len(line) {
+			switch c := line[j]; {
+			case strings.IndexByte("0123456789.,;$+- \t", c) >= 0:
+				j++
+			case c == '\'':
+				j += 2
+			case c == '/' || c == '?':
+				k := j + 1
+				for k < len(line) && line[k] != c {
+					if line[k] == '\\' {
+						k++
+					}
+					k++
+				}
+				if k >= len(line) {
+					return edReading{}
+				}
+				j = k + 1
+			default:
+				break addr
+			}
+		}
+		if j >= len(line) {
+			continue // an address alone moves to (and prints) a line
+		}
+		rest := line[j+1:]
+		switch line[j] {
+		case 'p', 'n', 'l', '=', 'd', 'j', 'u', 'h', 'H', 'P', 'q', 'Q', 'z':
+			if strings.TrimSpace(strings.TrimLeft(rest, "0123456789pnl")) != "" {
+				return edReading{}
+			}
+		case 'k':
+			if len(strings.TrimSpace(rest)) != 1 {
+				return edReading{}
+			}
+		case 'm', 't':
+			if strings.Trim(rest, "0123456789.,;$+- \t") != "" {
+				return edReading{}
+			}
+		case 'a', 'i', 'c':
+			if strings.TrimSpace(rest) != "" {
+				return edReading{}
+			}
+			for i++; i < len(lines) && lines[i] != "."; i++ {
+			}
+			if i >= len(lines) {
+				return edReading{}
+			}
+		case 's':
+			if rest == "" || strings.ContainsRune(" \n", rune(rest[0])) {
+				return edReading{}
+			}
+			d := rest[0]
+			parts, k := 0, 1
+			for ; k < len(rest) && parts < 2; k++ {
+				if rest[k] == '\\' {
+					k++
+					continue
+				}
+				if rest[k] == d {
+					parts++
+				}
+			}
+			if parts < 2 || strings.Trim(rest[k:], "gpnl0123456789") != "" {
+				return edReading{}
+			}
+		case 'w', 'W':
+			if strings.HasPrefix(rest, "q") {
+				rest = rest[1:]
+			}
+			name := strings.TrimSpace(rest)
+			switch {
+			case name == "":
+				rd.writesFile = true
+			case strings.HasPrefix(name, "!") || strings.ContainsAny(name, "$`"):
+				return edReading{}
+			default:
+				rd.writes = append(rd.writes, name)
+			}
+		default:
+			return edReading{} // g v G V ! e E f r x and anything unknown
+		}
+	}
+	rd.ok = true
+	return rd
+}
+
+// edOperands models ed [-s] [-p PROMPT] FILE with its script on standard
+// input: FILE is written when the script writes it, read when the script
+// only edits and quits, and of an unknown role when the script is not on a
+// static standard input or the reading does not accept it.
+func (w *walker) edOperands(ps []Word, mk func(Word, Role) operand) []operand {
+	if len(ps) != 1 {
+		return []operand{{role: RoleWrite, roleUncertain: true}}
+	}
+	rd := readEdScript(w.edStdin)
+	if !w.edStdinOK || !rd.ok {
+		op := mk(ps[0], RoleWrite)
+		op.roleUncertain = true
+		return []operand{op}
+	}
+	role := RoleRead
+	if rd.writesFile {
+		role = RoleWrite
+	}
+	out := []operand{mk(ps[0], role)}
+	for _, name := range rd.writes {
+		out = append(out, operand{value: name, static: true, quoted: true, role: RoleWrite})
+	}
+	return out
+}

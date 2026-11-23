@@ -103,6 +103,7 @@ const (
 	PosArchive         PosMode = "archive"  // 7z command ARCHIVE [MEMBER...]: role follows the command word
 	PosCompress        PosMode = "compress" // gzip/xz/bzip2: each operand is replaced by its (de)compressed file
 	PosSQLite          PosMode = "sqlite"   // sqlite3 DB [SQL...]: the database is written when the SQL changes it (GAP-0506)
+	PosEd              PosMode = "ed"       // ed FILE with its script on stdin: FILE is written when the script writes it (GAP-0506)
 )
 
 // Program is one table row.
@@ -908,6 +909,7 @@ func buildPOSIXTable() {
 		"-version", "-help")
 	sqliteValued := dashes("-separator", "-newline", "-nullvalue", "-mmap", "-vfs", "-maxsize")
 	add(Program{Names: []string{"sqlite3"}, Pos: PosSQLite, Strict: true, Flags: fl(inert(sqliteValued...), sqliteSwitches...)})
+	add(Program{Names: []string{"ed"}, Pos: PosEd, Strict: true, Flags: fl(inert("-p", "--prompt"), "-s", "--quiet", "--silent", "-G", "--traditional", "-l", "--loose-exit-status", "-v", "--verbose", "-E", "--extended-regexp")})
 	add(Program{Names: []string{"uniq"}, Pos: PosInOut,
 		Flags: fl(inert("-f", "-s", "-w", "--skip-fields", "--skip-chars", "--check-chars"),
 			"-c", "-d", "-D", "-i", "-u", "-z", "--count", "--repeated", "--all-repeated", "--ignore-case", "--unique", "--zero-terminated", "--group")})

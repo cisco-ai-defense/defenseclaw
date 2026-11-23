@@ -34,6 +34,15 @@ func TestGAP0506Writers(t *testing.T) {
 		{"git config file global", raLin, `git config --global --file ` + r2Hook + ` a.b c`, gap0506Unknown(), false},
 		{"git config file edit", raLin, `git config --file ` + r2Hook + ` --edit`, gap0506Unknown(), false},
 		{"git config global", raLin, `git config --global a.b c`, gap0506Unknown(), false},
+		{"ed delete write", raLin, `ed -s ` + r2Hook + ` <<< $'1d\nw\nq'`, r2Verdict("K|write:" + r2Hook), false},
+		{"ed printf pipe", raLin, `printf '1d\nw\nq\n' | ed -s ` + r2Hook, r2Verdict("U|write:" + r2Hook), false},
+		{"ed heredoc wq", raLin, "ed -s " + r2Hook + " <<'EOF'\n$a\nx\n.\nwq\nEOF", r2Verdict("K|write:" + r2Hook), false},
+		{"ed subst write", raLin, `ed -s ` + r2Hook + ` <<< $',s/a/b/g\nw'`, r2Verdict("K|write:" + r2Hook), false},
+		{"ed w other", raLin, "ed -s /home/u/proj/notes.txt <<'EOF'\nw " + r2Hook + "\nq\nEOF", r2Verdict("K|write:" + r2Hook), false},
+		{"ed print", raLin, "ed -s " + r2Hook + " <<'EOF'\n,p\nq\nEOF", r2Verdict("K|"), false},
+		{"ed stdin unknown", raLin, `ed -s ` + r2Hook, gap0506Unknown(), false},
+		{"ed shell", raLin, `printf '!sh\n' | ed -s ` + r2Hook, gap0506Unknown(), false},
+		{"ed global", raLin, `printf 'g/x/d\nw\n' | ed -s ` + r2Hook, gap0506Unknown(), false},
 	})
 }
 

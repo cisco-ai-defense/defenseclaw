@@ -430,6 +430,10 @@ type walker struct {
 	// curProgram is the program of the command being classified (a table row can
 	// serve several names, e.g. gzip and gunzip).
 	curProgram string
+	// edStdin is the static standard input of the ed call being read (its
+	// script, edOperands); edStdinOK is false when it is not known.
+	edStdin   string
+	edStdinOK bool
 	// spec is the environment change the command being walked applies to the
 	// child process it starts (prefix assignments, env/sudo wrapper options).
 	spec *childSpec
@@ -1975,6 +1979,10 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 
 	// 7. Operands.
 	w.curProgram = program
+	w.edStdin, w.edStdinOK = "", false
+	if program == "ed" && dialect == DialectPOSIX {
+		w.edStdin, _, w.edStdinOK = w.stdinText(c)
+	}
 	operandWords := inner[1:]
 	// xargs appends stdin words after its command. When the preceding stage
 	// printed exactly one literal filename, feed that word through the same
@@ -3350,6 +3358,8 @@ func (w *walker) positionalOperands(ps []Word, p Program, ctx posCtx) []operand 
 		out = append(out, gitOperands(ps)...)
 	case PosSQLite:
 		out = append(out, sqliteOperands(ps, ctx, mk)...)
+	case PosEd:
+		out = append(out, w.edOperands(ps, mk)...)
 	case PosRobocopy:
 		// robocopy SRC DST [files...]: DST is a directory; each file copies to
 		// DST/basename(file); with no files the whole SRC tree copies into DST
