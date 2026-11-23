@@ -239,6 +239,33 @@ bundles:
   anchorsSecret: defenseclaw-bundle-anchors
   # The GitOps inbox ConfigMap: <stage>.dcbundle and <stage>.atespaces.
   inbox: defenseclaw-bundle-inbox
+  # Preview. Stage bundles pulled by digest from an OCI registry
+  # (substrate.bundles.oci); the signature check is the same as for the
+  # inbox, and the registry is untrusted transport. Off: the controller makes
+  # no registry call. Needs bundles.enabled. Rendered into config.yaml unless
+  # config.substrate.bundles.oci is set there.
+  oci:
+    enabled: false
+    # [{stage: prod, ref: "registry.example.com/policy/prod@sha256:<64 hex>",
+    #   atespaces: [team-a]}], at most 8. A tag is refused.
+    stages: []
+    # Per pull, 5s to 2m. "" keeps the default (30s).
+    timeout: ""
+    # Hosts besides the registry that may serve its token realm (Docker Hub:
+    # auth.docker.io). Registry logins never go to another host.
+    authHosts: []
+    # A kubernetes.io/dockerconfigjson Secret (key .dockerconfigjson),
+    # mounted read-only in the controller at
+    # /etc/defenseclaw-substrate/bundle-oci-auth/config.json; sets
+    # oci.credentials_file. "" pulls anonymously.
+    credentialsSecret: ""
+    # A PEM CA file for a private registry, from a ConfigMap or a Secret (not
+    # both), mounted read-only in the controller at
+    # /etc/defenseclaw-substrate/bundle-oci-ca/ca.crt; sets oci.ca_file.
+    ca:
+      configMap: ""
+      secret: ""
+      key: ca.crt
 
 # The atenet-egress ext_proc callout.
 callout:
