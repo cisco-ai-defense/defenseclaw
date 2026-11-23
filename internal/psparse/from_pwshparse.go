@@ -5,7 +5,6 @@
 package psparse
 
 import (
-	"os"
 	"strings"
 	"unicode/utf8"
 
@@ -47,19 +46,26 @@ func FromPwshparse(src string, opts Options) (*Script, bool) {
 	return sc, true
 }
 
-// frontendPwshparse selects the reader of ParseEffects: true (the default)
-// is FromPwshparse; DEFENSECLAW_PS_FRONTEND=psparse keeps Parse. It is read
-// once here because the effects package must not import os (pure parse step).
-var frontendPwshparse = os.Getenv("DEFENSECLAW_PS_FRONTEND") != "psparse"
+// legacyFrontend is the differential seam of ParseEffects, never a runtime
+// switch: when it is "psparse" ParseEffects reads with Parse only (the 1.0.10
+// reader). Package tests set it directly; tests of other packages and the
+// scripts/pwshoracle tools set it at link time:
+//
+//	go test -ldflags=-X=github.com/defenseclaw/defenseclaw/internal/psparse.legacyFrontend=psparse ...
+//
+// Shipped binaries never set it. It replaces the old PS_FRONTEND
+// environment read (GAP-1924, DET111 ruling 05:55Z): an undocumented knob back
+// to the older frontend would be a production downgrade switch.
+var legacyFrontend string
 
 // ParseEffects is the PowerShell reader of the effects frontend. It parses
 // with FromPwshparse and falls back to Parse when the port declines the input
 // (a construct it does not parse, or nesting past its depth budget), so every
-// input still gets a Script. With DEFENSECLAW_PS_FRONTEND=psparse it is Parse.
+// input still gets a Script. With the legacyFrontend seam set it is Parse.
 // port reports that FromPwshparse built the Script (its elements are the
 // PowerShell parser's own: a native program's argv follows them exactly).
 func ParseEffects(src string, opts Options) (sc *Script, port bool, err error) {
-	if frontendPwshparse {
+	if legacyFrontend != "psparse" {
 		if sc, ok := FromPwshparse(src, opts); ok {
 			return sc, true, nil
 		}

@@ -24,7 +24,7 @@ func parsePowerShell(command string, o Options) *Script {
 // parsePSSource parses a PowerShell script for lowering with
 // psparse.ParseEffects: the pure-Go port of the Microsoft PowerShell parser
 // through psparse.FromPwshparse by default, psparse.Parse when the port declines
-// the input or DEFENSECLAW_PS_FRONTEND=psparse. The legacy 1.0.10 PowerShell
+// the input (or under psparse's legacyFrontend test seam). The legacy 1.0.10 PowerShell
 // readers always use psparse.Parse (the raise-only floor). port reports that
 // the port built the Script.
 func parsePSSource(command string) (sc *psparse.Script, port bool, err error) {
@@ -516,8 +516,8 @@ func psNativeName(c *psparse.Command) bool {
 	return name != "" && !strings.Contains(name, "-")
 }
 
-// fusedNativeArg reads a psparse.Parse Script (the DEFENSECLAW_PS_FRONTEND=
-// psparse reader and the deep-nesting fallback): psparse splits -o$env:X\y into
+// fusedNativeArg reads a psparse.Parse Script (the legacyFrontend seam reader
+// and the deep-nesting fallback): psparse splits -o$env:X\y into
 // a switch -o and a glued argument, and this joins them into one argv word
 // (DET111 R1, GAP-1663), ok false when a blank separates them or the argument
 // is several words. A port Script needs no join (nativeParamWords).

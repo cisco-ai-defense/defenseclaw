@@ -4,9 +4,10 @@
 
 // efftime times the PowerShell effects frontend per row: for every base64 row
 // of the input file it runs effects.Extract REPS times and prints the best
-// time in nanoseconds ("<row>\t<bytes>\t<ns>"). Run it once with
-// DEFENSECLAW_PS_FRONTEND=psparse and once without (the port), alternating the
-// two processes over several rounds, and compare per-row best times
+// time in nanoseconds ("<row>\t<bytes>\t<ns>"). Build it twice, once with
+// -ldflags=-X=github.com/defenseclaw/defenseclaw/internal/psparse.legacyFrontend=psparse
+// (the 1.0.10 reader) and once without (the port), alternate the two
+// processes over several rounds, and compare per-row best times
 // (efftime.py). Prints no row text.
 package main
 

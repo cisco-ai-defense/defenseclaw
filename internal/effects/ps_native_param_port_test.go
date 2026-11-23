@@ -58,7 +58,7 @@ func TestPSNativeParamArgvMatchesPowerShell(t *testing.T) {
 }
 
 // TestPSFusedNativeArgParseReader: a psparse.Parse Script (the
-// DEFENSECLAW_PS_FRONTEND=psparse reader and the deep-nesting fallback) splits
+// psparse legacyFrontend seam reader and the deep-nesting fallback) splits
 // -o$env:X\y into a switch and a glued argument; the lowering joins them into
 // one argv word (DET111 R1, GAP-1663).
 func TestPSFusedNativeArgParseReader(t *testing.T) {
