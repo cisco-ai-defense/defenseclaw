@@ -664,7 +664,7 @@ func guestOwnShellWalk(command, cwd, home string) (map[guestShellReading]bool, m
 	}
 	guestWalks.Lock()
 	for _, walk := range guestWalks.last {
-		if walk.done && walk.command == command && walk.cwd == cwd && walk.home == home {
+		if walk.command == command && walk.cwd == cwd && walk.home == home {
 			guestWalks.Unlock()
 			return walk.readings, walk.placed
 		}
@@ -672,7 +672,7 @@ func guestOwnShellWalk(command, cwd, home string) (map[guestShellReading]bool, m
 	guestWalks.Unlock()
 	readings, placed := guestOwnShellWalkText(command, cwd, home)
 	guestWalks.Lock()
-	guestWalks.last[guestWalks.next] = guestWalk{command: command, cwd: cwd, home: home, readings: readings, placed: placed, done: true}
+	guestWalks.last[guestWalks.next] = guestWalk{command: command, cwd: cwd, home: home, readings: readings, placed: placed}
 	guestWalks.next = (guestWalks.next + 1) % len(guestWalks.last)
 	guestWalks.Unlock()
 	return readings, placed
@@ -695,7 +695,6 @@ type guestWalk struct {
 	command, cwd, home string
 	readings           map[guestShellReading]bool
 	placed             map[string]bool
-	done               bool
 }
 
 // guestOwnShellWalkText walks the script (guestOwnShellWalk).
