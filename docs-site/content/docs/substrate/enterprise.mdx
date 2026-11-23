@@ -217,6 +217,12 @@ The TUI, with its policy panel, is an administrator tool; a standard user does n
 
 </Steps>
 
+### Agent activity and notifications (Preview)
+
+`substrate list` and `substrate status` show what each agent is doing, from times the gateway records. `substrate watch` prints a line when an agent raises an ask or finishes a `--task` run. A developer can also have it show a desktop notification, once per ask, by turning on `notifications.enabled` and `notifications.substrate` on the laptop. The notification names the kind and the host or tool, never the arguments.
+
+To keep notifications off for everyone, set `substrate.activity.notifications: off` in the gateway config. `substrate watch` then prints lines only, whatever a developer's own settings say. `substrate.activity.status_window: 0s` also turns off the `thinking` state.
+
 ## The developer
 
 <Steps>
