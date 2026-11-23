@@ -324,7 +324,7 @@ func TestVaultSealMigratesFileVault(t *testing.T) {
 	}
 	ents, _ := os.ReadDir(dir)
 	for _, e := range ents {
-		if e.Name() != FileName && e.Name() != lockName {
+		if e.Name() != FileName && e.Name() != "vault.lock" {
 			t.Fatalf("left behind: %s", e.Name())
 		}
 	}
