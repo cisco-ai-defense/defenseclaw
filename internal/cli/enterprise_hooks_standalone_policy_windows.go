@@ -107,13 +107,8 @@ func windowsCopilotVSCodeUserAccepting(home string, verify, remove, acceptPrior 
 	return enterpriseHookUserFileFault{err: settingsErr}
 }
 
-// windowsCopilotVSCodeUserFiles places, checks (verify) or removes the VS
-// Code Local hook file and Copilot plugin themselves.
-func windowsCopilotVSCodeUserFiles(opts enterprisepolicy.Options, home string, verify, remove bool) error {
-	return windowsCopilotVSCodeUserFilesAccepting(opts, home, verify, remove, false, "")
-}
-
-// windowsCopilotVSCodeUserFilesAccepting is windowsCopilotVSCodeUserFiles; with
+// windowsCopilotVSCodeUserFilesAccepting places, checks (verify) or removes
+// the VS Code Local hook file and Copilot plugin themselves; with
 // acceptPrior (a read-only verify), files that hold exactly the render of
 // releases up to 1.0.6 count as current (GAP-0980), and so do files rendered
 // for recorded, the earlier launch image of this install the account's

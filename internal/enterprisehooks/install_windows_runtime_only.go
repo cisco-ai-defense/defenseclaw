@@ -389,13 +389,7 @@ func verifyWindowsRuntimeOnlyManagedResult(
 	if err := verifyWindowsPerUserManagedRegistration(target, lock.ContractID); err != nil {
 		return InstallResult{}, err
 	}
-	// A missing or stale Local hook file or plugin fails verify, so the
-	// guardian repairs the row.
-	if opts.AcceptPriorReleaseRender {
-		if err := applyWindowsCopilotVSCodeUserPriorRender(name, target.home, target.recordsHookExecutable()); err != nil {
-			return InstallResult{}, err
-		}
-	} else if err := applyWindowsCopilotVSCodeUser(name, target.home, true, false); err != nil {
+	if err := verifyWindowsRuntimeOnlyUserFiles(opts, name, target); err != nil {
 		return InstallResult{}, err
 	}
 	return InstallResult{
@@ -406,6 +400,19 @@ func verifyWindowsRuntimeOnlyManagedResult(
 		AgentVersion:    lock.RawAgentVersion,
 		HookContractID:  lock.ContractID,
 	}, nil
+}
+
+// verifyWindowsRuntimeOnlyUserFiles checks the Copilot VS Code Local hook file
+// and plugin of the target's account. A missing or stale one fails verify, so
+// the guardian repairs the row. A verify that accepts an earlier release's
+// render checks them against the image the target's records name
+// (recordsHookExecutable), not the current one, so an account signed out
+// through a launch-image upgrade waits for its sign-in (GAP-1898).
+func verifyWindowsRuntimeOnlyUserFiles(opts InstallOptions, connectorName string, target windowsGenericManagedTarget) error {
+	if opts.AcceptPriorReleaseRender {
+		return applyWindowsCopilotVSCodeUserPriorRender(connectorName, target.home, target.recordsHookExecutable())
+	}
+	return applyWindowsCopilotVSCodeUser(connectorName, target.home, true, false)
 }
 
 func verifyWindowsRuntimeOnlyUserRuntime(target windowsGenericManagedTarget, policyPath string) error {

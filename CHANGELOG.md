@@ -54,6 +54,7 @@ DefenseClaw 1.0.11 follows 1.0.10. It is a fix release. It updates OpenShell to 
 ### Fixed
 
 #### Windows managed install, upgrade and uninstall
+- Windows managed upgrade: an account that is signed out during the upgrade no longer makes Copilot show failed or the administrator's verify return 1603; Copilot waits for the account to sign in.
 - Setup `/uninstall` asks again after waiting for the managed lock instead of failing.
 - Setup renders the recorded Claude policy before it takes the install lock, so a slow policy read no longer stops the install.
 - Standalone Setup `/install` without a config file writes a standalone starting config.
