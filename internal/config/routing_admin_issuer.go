@@ -44,27 +44,47 @@ func SplitQualifiedUser(entry string) (issuer, subject string, ok bool) {
 // credentials (identity.KubeIssuer; config does not import identity).
 const SubstrateKubeIssuer = "kubernetes"
 
-// kubeSignInOff is the gateway's --no-kube-sign-in flag
-// (TurnOffKubeSignIn). It is process-wide, so a reloaded configuration
-// keeps it.
-var kubeSignInOff atomic.Bool
+// kubeSignInPin is the gateway's boot-time Kubernetes sign-in decision
+// (PinKubeSignIn): 0 not pinned, 1 on, 2 off. It is process-wide, so a
+// reloaded configuration cannot change it: the gateway builds its sign-in
+// verifiers once at start (substrate.identity is restart-only), and the
+// issuers routing.admin users entries match against must stay the ones
+// those verifiers can produce (GAP-0968).
+var kubeSignInPin atomic.Int32
 
-// TurnOffKubeSignIn records the gateway's --no-kube-sign-in flag: from then
-// on SubstrateKubeSignIn is false for every configuration this process
-// loads, as substrate.identity.kube_sign_in false would make it (GAP-0939).
-func TurnOffKubeSignIn(off bool) { kubeSignInOff.Store(off) }
+// PinKubeSignIn records whether the gateway built a Kubernetes sign-in at
+// start (the key, the --no-kube-sign-in flag, an OIDC issuer and a managed
+// install all folded in). From then on SubstrateKubeSignIn returns it for
+// every configuration this process loads, until the next start.
+func PinKubeSignIn(on bool) {
+	if on {
+		kubeSignInPin.Store(1)
+	} else {
+		kubeSignInPin.Store(2)
+	}
+}
+
+// UnpinKubeSignIn clears the pin. Tests only: the gateway pins once at start.
+func UnpinKubeSignIn() { kubeSignInPin.Store(0) }
 
 // SubstrateKubeSignIn reports whether people sign in to the Substrate
-// admin listener with their Kubernetes credentials: no
-// identity.oidc.issuer, an install that is not managed, and neither
-// identity.kube_sign_in false nor the gateway's --no-kube-sign-in.
+// admin listener with their Kubernetes credentials. In the gateway it is
+// the decision made at start (PinKubeSignIn). Elsewhere (the CLI, doctor) it
+// is read from this configuration: no identity.oidc.issuer, an install that
+// is not managed, and identity.kube_sign_in not false.
 func (c *Config) SubstrateKubeSignIn() bool {
 	if c == nil {
 		return false
 	}
+	switch kubeSignInPin.Load() {
+	case 1:
+		return true
+	case 2:
+		return false
+	}
 	id := c.Substrate.Identity
 	return strings.TrimSpace(id.OIDC.Issuer) == "" && !managed.IsManagedEnterprise(c.DeploymentMode) &&
-		(id.KubeSignIn == nil || *id.KubeSignIn) && !kubeSignInOff.Load()
+		(id.KubeSignIn == nil || *id.KubeSignIn)
 }
 
 // PersonIssuers lists the distinct trusted person and workload issuers of

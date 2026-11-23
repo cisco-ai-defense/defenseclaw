@@ -212,9 +212,9 @@ type SubstrateIdentityConfig struct {
 	// KubeSignIn false turns the Kubernetes sign-in off (nil = on). It
 	// applies only with no oidc.issuer on an install that is not managed
 	// (Config.SubstrateKubeSignIn). The gateway's --no-kube-sign-in flag
-	// turns it off too (TurnOffKubeSignIn), so the issuers routing.admin
-	// users entries match against are the ones people can sign in with
-	// (GAP-0939).
+	// turns it off too. The gateway reads it at start only (restart it after
+	// a change), and routing.admin users entries match against the issuers
+	// people can sign in with then (GAP-0939, GAP-0968).
 	KubeSignIn *bool `mapstructure:"kube_sign_in" yaml:"kube_sign_in,omitempty"`
 }
 

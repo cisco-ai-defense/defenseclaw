@@ -18,7 +18,7 @@ import (
 // entry names the workload alice, as before GAP-0893. With the sign-in on,
 // the Kubernetes alice is the one it names.
 func TestGAP0939KubeSignInOffWorkloadMatchesBareName(t *testing.T) {
-	defer config.TurnOffKubeSignIn(false)
+	defer config.UnpinKubeSignIn()
 	cfg := &config.Config{}
 	cfg.Substrate.Enabled = true
 	cfg.Substrate.Identity.WorkloadOIDC = []config.SubstrateWorkloadOIDCConfig{{Issuer: gap0792IdpA}}
@@ -37,8 +37,31 @@ func TestGAP0939KubeSignInOffWorkloadMatchesBareName(t *testing.T) {
 		t.Fatalf("kube_sign_in false: workload alice vs users:[alice]: %v (issuers %v)", got, cfg.PersonIssuers())
 	}
 	cfg.Substrate.Identity.KubeSignIn = nil
-	config.TurnOffKubeSignIn(true) // the gateway's --no-kube-sign-in
+	config.PinKubeSignIn(false) // the gateway booted with --no-kube-sign-in
 	if got := gap0792Match(bare, ci, cfg.PersonIssuers()); got != engine.Yes {
 		t.Fatalf("--no-kube-sign-in: workload alice vs users:[alice]: %v (issuers %v)", got, cfg.PersonIssuers())
+	}
+}
+
+// GAP-0968: the gateway booted with the Kubernetes sign-in on, then a live
+// reload sets kube_sign_in false. The verifiers are still the boot ones, so
+// kube alice can still sign in: users:[alice] keeps naming her, not the
+// workload alice, until a restart.
+func TestGAP0968LiveKubeSignInEditKeepsBootIssuers(t *testing.T) {
+	defer config.UnpinKubeSignIn()
+	config.PinKubeSignIn(true) // booted with the sign-in on
+	cfg := &config.Config{}
+	cfg.Substrate.Enabled = true
+	cfg.Substrate.Identity.WorkloadOIDC = []config.SubstrateWorkloadOIDCConfig{{Issuer: gap0792IdpA}}
+	off := false
+	cfg.Substrate.Identity.KubeSignIn = &off // the live reload
+	kube := registry.Person{Kind: "user", Issuer: identity.KubeIssuer, Subject: "alice"}
+	ci := registry.Person{Kind: "user", Issuer: gap0792IdpA, Subject: "alice"}
+	bare := config.ProfileMatch{Users: []string{"alice"}}
+	if got := gap0792Match(bare, kube, cfg.PersonIssuers()); got != engine.Yes {
+		t.Fatalf("kube alice vs users:[alice] after a live edit: %v (issuers %v)", got, cfg.PersonIssuers())
+	}
+	if got := gap0792Match(bare, ci, cfg.PersonIssuers()); got != engine.No {
+		t.Fatalf("workload alice vs users:[alice] after a live edit: %v (issuers %v)", got, cfg.PersonIssuers())
 	}
 }

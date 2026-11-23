@@ -14,7 +14,7 @@ import (
 // person, so kubernetes is not a trusted issuer: with no OIDC issuer and
 // one workload issuer, that workload issuer is the only one.
 func TestGAP0939KubeSignInOffDropsKubeIssuer(t *testing.T) {
-	defer TurnOffKubeSignIn(false)
+	defer UnpinKubeSignIn()
 	const ci = "https://ci.example"
 	cfg := &Config{}
 	cfg.Substrate.Enabled = true
@@ -39,13 +39,14 @@ func TestGAP0939KubeSignInOffDropsKubeIssuer(t *testing.T) {
 	if !slices.Equal(cfg.PersonIssuers(), []string{SubstrateKubeIssuer, ci}) {
 		t.Fatalf("kube_sign_in true: %v", cfg.PersonIssuers())
 	}
-	// The flag: process-wide, so a reloaded configuration keeps it.
-	TurnOffKubeSignIn(true)
+	// The gateway's boot decision (the flag folded in): process-wide, so a
+	// reloaded configuration keeps it.
+	PinKubeSignIn(false)
 	reloaded := *cfg
 	if reloaded.SubstrateKubeSignIn() || !slices.Equal(reloaded.PersonIssuers(), []string{ci}) {
 		t.Fatalf("--no-kube-sign-in: %v %v", reloaded.SubstrateKubeSignIn(), reloaded.PersonIssuers())
 	}
-	TurnOffKubeSignIn(false)
+	UnpinKubeSignIn()
 	// OIDC and managed installs never sign in with Kubernetes credentials.
 	cfg.Substrate.Identity.KubeSignIn = nil
 	cfg.DeploymentMode = "managed_enterprise"
@@ -77,5 +78,38 @@ func TestGAP0939KubeSignInLoads(t *testing.T) {
 	}
 	if err := ValidateV8SchemaBytes("kube.yaml", []byte("config_version: 9\nsubstrate: {identity: {kube_sign_in: off-ish}}\n")); err == nil {
 		t.Fatal("schema accepted a string kube_sign_in")
+	}
+}
+
+// GAP-0968: the gateway builds its sign-in verifiers once at start
+// (substrate.identity is restart-only), so a live reload of kube_sign_in
+// must not change the issuers routing.admin users entries match against.
+func TestGAP0968BootPinSurvivesReload(t *testing.T) {
+	defer UnpinKubeSignIn()
+	const ci = "https://ci.example"
+	mk := func(kube *bool) *Config {
+		cfg := &Config{}
+		cfg.Substrate.Enabled = true
+		cfg.Substrate.Identity.WorkloadOIDC = []SubstrateWorkloadOIDCConfig{{Issuer: ci}}
+		cfg.Substrate.Identity.KubeSignIn = kube
+		return cfg
+	}
+	off, on := false, true
+	// Booted with the sign-in on; a live edit turns the key off.
+	PinKubeSignIn(true)
+	if got := mk(&off).PersonIssuers(); !slices.Equal(got, []string{SubstrateKubeIssuer, ci}) {
+		t.Fatalf("booted on, key edited off: %v", got)
+	}
+	// Booted with the sign-in off; a live edit removes or sets the key.
+	PinKubeSignIn(false)
+	for _, k := range []*bool{nil, &on} {
+		if got := mk(k).PersonIssuers(); !slices.Equal(got, []string{ci}) {
+			t.Fatalf("booted off, key edited (%v): %v", k, got)
+		}
+	}
+	// Not pinned (the CLI, doctor): the configuration decides.
+	UnpinKubeSignIn()
+	if got := mk(&off).PersonIssuers(); !slices.Equal(got, []string{ci}) {
+		t.Fatalf("unpinned, key off: %v", got)
 	}
 }
