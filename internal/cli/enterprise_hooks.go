@@ -2868,7 +2868,12 @@ func runEnterpriseHookVerifyAttemptRows(ctx context.Context, registrationOnly bo
 	// The guardian's last row of each target, for a Hermes target whose
 	// account is signed out (enterpriseHookHermesSignedOutRow).
 	recorded := map[string]enterpriseHookReconcileRow{}
+	// The route-only proofs of that pass, for Setup readiness (GAP-1975).
+	var routeOnlyProofs map[string]string
 	if guardianStateErr == nil && guardianStateExists {
+		if registrationOnly {
+			routeOnlyProofs = readEnterpriseHookRouteOnlyProofs(cfg.DataDir, guardianState.UpdatedAt)
+		}
 		for _, row := range guardianState.Results {
 			if key := enterpriseHookProtectedTargetKey(row); key != "" {
 				recorded[key] = row
@@ -3043,11 +3048,18 @@ func runEnterpriseHookVerifyAttemptRows(ctx context.Context, registrationOnly bo
 				// Standalone Amp and OpenCode only; empty on Secure Client.
 				ForeignHookGuardBinary: standaloneForeignHookGuardBinary(target.Connector),
 				ManagedHookBinary:      standaloneManagedHookBinary(),
-				RouteOnly:              enterpriseHookWindowsRouteOnly(target.Connector, target.User, resolved.sid, apiAddr, false),
+				RouteOnly:              enterpriseHookVerifyExpectedRouteOnly(target.Connector, target.User, resolved.sid, apiAddr, false),
 			}
 			opts.MachinePolicyContractID = enterpriseHookMachinePolicyContractFor(target.Connector, claudeMachineContract)
 			var result enterprisehooks.InstallResult
 			result, targetErr = enterpriseHookLiveTargetVerifier(ctx, opts, registrationOnly)
+			if targetErr == nil && registrationOnly &&
+				enterpriseHookRouteOnlyGuardianVerified(result, recorded[enterpriseHookProtectedTargetKey(row)], routeOnlyProofs[enterpriseHookProtectedTargetKey(row)], opts.RouteOnly) {
+				// Setup readiness cannot read the render as the account; the
+				// guardian, as LocalSystem, read this exact render back in
+				// the reconcile it recorded (GAP-1975).
+				result.RouteOnly = enterprisehooks.RouteOnlyGuardianVerified
+			}
 			if targetErr == nil {
 				if unverified := enterpriseHookRouteOnlyUnverified(result); unverified != nil {
 					// Neither ok nor drift: the row keeps its result, with
@@ -5804,6 +5816,9 @@ func writeEnterpriseHookGuardianState(
 	if successes+pending+failures != len(rows) {
 		return fmt.Errorf("hook guardian reconcile rows have inconsistent target dispositions")
 	}
+	// The route-only proofs go to their own record, never into the state or
+	// the authorization a prior binary reads strictly (GAP-1975).
+	rows, routeOnlyProofs := takeEnterpriseHookRouteOnlyProofs(rows)
 	authorizationDir, err := prepareEnterpriseHookAuthorizationDir(dataDir)
 	if err != nil {
 		return err
@@ -5914,6 +5929,9 @@ func writeEnterpriseHookGuardianState(
 		return err
 	}
 	data = append(data, '\n')
+	if err := writeEnterpriseHookRouteOnlyProofs(dataDir, now, routeOnlyProofs); err != nil {
+		return err
+	}
 	path := filepath.Join(dataDir, hookGuardianStateFile)
 	if err := writeEnterpriseHookProtectedFile(path, data); err != nil {
 		return fmt.Errorf("write %s: %w", path, err)
