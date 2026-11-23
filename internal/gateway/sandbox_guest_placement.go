@@ -476,9 +476,12 @@ func withSandboxGuestFolderTier(findings []RuleFinding, request trustedActionReq
 // parse gap, as the laptop's is: a copy-mode split with no folder may have
 // one where the laptop's has none (cd .cache; rm ../.bash_history), and the
 // laptop judges that call by its split alone. The reading is lexical and
-// only adds findings.
+// only adds findings. judged is what the host-placed reading of the call
+// already judged (withSplitGapEffects): a twin it judged that names no
+// folder is not judged again here, so the call spends its budget on it once,
+// as the laptop does (substrate-1 GAP-0725).
 func withSandboxGuestSplitGapEffects(ctx context.Context, request trustedActionRequest, generation *compiledRulePackCategories,
-	budget *trustedActionBudget, facts actionfacts.Facts, wholeCommand string, findings []RuleFinding) []RuleFinding {
+	budget *trustedActionBudget, facts actionfacts.Facts, wholeCommand string, findings []RuleFinding, judged *splitGapJudged) []RuleFinding {
 	guest, ok := sandboxGuestPlacedInput(request, facts)
 	if !ok {
 		return findings
@@ -494,7 +497,8 @@ func withSandboxGuestSplitGapEffects(ctx context.Context, request trustedActionR
 	placed := request
 	placed.Input = guest
 	placed.SkipLocalFilesystemResolution = true
-	return withSplitGapEffects(ctx, placed, generation, budget, guestFacts, wholeCommand, findings)
+	findings, _ = withSplitGapEffects(ctx, placed, generation, budget, guestFacts, wholeCommand, findings, judged)
+	return findings
 }
 
 // guestPlacementSkips reports a simple command the guest placement does not

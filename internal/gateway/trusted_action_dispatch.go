@@ -1408,8 +1408,9 @@ func dispatchTrustedActionWith(
 						// substrate-1:GAP-0693, GAP-0694, GAP-0695, GAP-0698).
 						if splitGapUnreadPart(simple) && wholeCommandKnown && !checkedSplitGapEffects {
 							checkedSplitGapEffects = true
-							findings = withSplitGapEffects(ctx, request, generation, budget, facts, wholeCommand, findings)
-							findings = withSandboxGuestSplitGapEffects(ctx, request, generation, budget, facts, wholeCommand, findings)
+							var judged *splitGapJudged
+							findings, judged = withSplitGapEffects(ctx, request, generation, budget, facts, wholeCommand, findings, nil)
+							findings = withSandboxGuestSplitGapEffects(ctx, request, generation, budget, facts, wholeCommand, findings, judged)
 						}
 						continue
 					}
@@ -4785,12 +4786,20 @@ func sandboxGuestPlacedInput(request trustedActionRequest, facts actionfacts.Fac
 	if guestCWD == "" || guestCWD == request.Input.CWD || request.unplacedStatement {
 		return actionfacts.Input{}, false
 	}
-	if facts.Authoritative() && !hasRelativePathOperand(facts) && !hasGitHookMutationCandidate(facts) && !hasGitReadOutputWrite(facts) {
+	if !guestFolderMayChangeJudgment(facts) {
 		return actionfacts.Input{}, false
 	}
 	input := request.Input
 	input.CWD = guestCWD
 	return input, true
+}
+
+// guestFolderMayChangeJudgment reports a call whose judgment the guest's
+// working directory may change (sandboxGuestPlacedInput): one the analysis
+// did not read in full, one with a relative operand, and one with a Git hook
+// or config candidate the git owners place by the working directory itself.
+func guestFolderMayChangeJudgment(facts actionfacts.Facts) bool {
+	return !facts.Authoritative() || hasRelativePathOperand(facts) || hasGitHookMutationCandidate(facts) || hasGitReadOutputWrite(facts)
 }
 
 // hasRelativePathOperand reports a path the call names relative to its
