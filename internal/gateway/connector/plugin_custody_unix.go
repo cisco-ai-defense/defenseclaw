@@ -101,8 +101,9 @@ func (f *custodyFix) manual() string {
 // the resolved chain too once the literal one passes, so a link it accepts
 // (a root-owned system link) must not hide a target folder it refuses: that
 // chain is judged the same way. When no element is refused (a change made
-// since), cause is returned unchanged.
-func explainPluginArtifactRefusal(path string, cause error) error {
+// since), cause is returned unchanged. The trusted owner SID is a Windows
+// notion; the Unix walk takes none.
+func explainPluginArtifactRefusal(path, _ string, cause error) error {
 	if cause == nil || !filepath.IsAbs(path) {
 		return cause
 	}

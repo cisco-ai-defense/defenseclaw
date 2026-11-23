@@ -31,7 +31,7 @@ func TestGAP0731RefusalNamesTheCarrierAndTheIcaclsCommand(t *testing.T) {
 			{Trustee: `HOST\third`, Carriers: []string{`C:\Users\lane\.config\opencode`}},
 		},
 	}
-	err := explainPluginArtifactRefusal(`C:\Users\lane\.config\opencode\plugins\defenseclaw.js`, cause)
+	err := explainPluginArtifactRefusal(`C:\Users\lane\.config\opencode\plugins\defenseclaw.js`, "", cause)
 	if !errors.Is(err, ErrPluginFolderCustody) || !errors.Is(err, cause) {
 		t.Fatalf("err=%v", err)
 	}
@@ -51,7 +51,7 @@ func TestGAP0731RefusalNamesTheCarrierAndTheIcaclsCommand(t *testing.T) {
 		}},
 		errors.New("plugin target must be a regular file"),
 	} {
-		if got := explainPluginArtifactRefusal("", other); got != other {
+		if got := explainPluginArtifactRefusal("", "", other); got != other {
 			t.Fatalf("changed an unrelated refusal: %v", got)
 		}
 	}
