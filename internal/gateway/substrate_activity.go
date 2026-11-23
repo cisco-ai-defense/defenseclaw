@@ -19,6 +19,7 @@ package gateway
 import (
 	"context"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -53,20 +54,28 @@ var substrateModelReportEvery = 10 * time.Second
 // substrateModelReportEvery until stop is called. The first report is the
 // request itself, made by the caller.
 func substrateReportOpenModel(sink SubstrateActivitySink, atespace, uid string) (stop func()) {
-	var t *time.Timer
-	done := make(chan struct{})
-	var tick func()
-	tick = func() {
-		select {
-		case <-done:
+	var (
+		mu      sync.Mutex
+		t       *time.Timer
+		stopped bool
+	)
+	mu.Lock()
+	t = time.AfterFunc(substrateModelReportEvery, func() {
+		mu.Lock()
+		defer mu.Unlock()
+		if stopped {
 			return
-		default:
 		}
 		sink.ObserveActivity(SubstrateActivityModel, atespace, uid, time.Now())
 		t.Reset(substrateModelReportEvery)
+	})
+	mu.Unlock()
+	return func() {
+		mu.Lock()
+		stopped = true
+		t.Stop()
+		mu.Unlock()
 	}
-	t = time.AfterFunc(substrateModelReportEvery, tick)
-	return func() { close(done); t.Stop() }
 }
 
 func (st *substrateState) activityConfig() config.SubstrateActivityConfig {
