@@ -202,6 +202,12 @@ func TestGAP1913ConcurrentOverridesDoNotDeadlock(t *testing.T) {
 // setEffectShadowTimeCapIdle only. A read of one is fine.
 // TestMain sets its overrides before any test and marks the line gap1913-ok.
 func TestGAP1913GatewayTestsSetHookpathsOverridesIdle(t *testing.T) {
+	// The only files that may set an override: the wrappers themselves. The
+	// second holds the one wrapper whose caller is !windows (see its comment).
+	idleWrapperFiles := map[string]bool{
+		"effect_shadow_idle_test.go":      true,
+		"effect_shadow_idle_unix_test.go": true,
+	}
 	direct := regexp.MustCompile(`hookpaths\.(\w+ForTests?|SetParentStepIsText)\(`)
 	const shadowVars = `(?:effectResolverOverride|effectShadowFaultHook|effectShadowTimeCap)`
 	// An assignment (=, :=, +=, ++ and the like) or the address taken for a write.
@@ -211,7 +217,7 @@ func TestGAP1913GatewayTestsSetHookpathsOverridesIdle(t *testing.T) {
 		t.Fatalf("no gateway test files read: %v", err)
 	}
 	for _, file := range files {
-		if file == "effect_shadow_idle_test.go" {
+		if idleWrapperFiles[file] {
 			continue
 		}
 		body, err := os.ReadFile(file)

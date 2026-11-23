@@ -100,10 +100,3 @@ func TestReportedCwdWithAParentStepAfterALinkIsPlacedAsTextWhereTheSystemDoes(t 
 		}
 	}
 }
-
-// setParentStepIsTextIdle lives here, not with the other idle overrides,
-// because this is its only caller and the file does not build on Windows.
-func setParentStepIsTextIdle(t testing.TB, text bool) func() {
-	t.Helper()
-	return idleOverride(t, func() func() { return hookpaths.SetParentStepIsText(text) })
-}
