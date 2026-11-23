@@ -119,7 +119,8 @@ type RuleFinding struct {
 	// boundRecord marks the detection-only record of a text a reader did not
 	// read past its bound while the call is still judged in full: a shell
 	// word past the byte bound that the local shell only passes on
-	// (withPosixDataWordRecord), SQL past the SQL facts bound
+	// (withPosixDataWordRecord), the inline query of a SQL client past that
+	// bound (withSQLQueryCutRecord), SQL past the SQL facts bound
 	// (withSQLASTCapRecord). It is a record, not a cap: boundedLimitIndex skips it, so no cap logic
 	// counts it as a limit the call hit or raises it to an enforcing one
 	// (rel-1-0-10:GAP-0760). Private and value-free.

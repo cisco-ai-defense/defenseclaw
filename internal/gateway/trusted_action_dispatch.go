@@ -502,11 +502,14 @@ func dispatchTrustedActionOnce(
 	// record of the word (rel-1-0-10:GAP-0382). It is added last, after every
 	// other defer, so a limit finding any of them raises is kept as it is and
 	// the record never stands in for it.
-	var unreadDataWord bool
+	var unreadDataWord, cutSQLQuery bool
 	var sqlASTCaps bounded.CapSet
 	defer func() {
 		if unreadDataWord {
 			findings = withPosixDataWordRecord(findings)
+		}
+		if cutSQLQuery {
+			findings = withSQLQueryCutRecord(findings)
 		}
 		if sqlASTCaps.Any() {
 			findings = withSQLASTCapRecord(findings, sqlASTCaps)
@@ -1172,10 +1175,11 @@ func dispatchTrustedActionOnce(
 	// handed to dcx or ssh) is data: the call is judged as its twin with the
 	// word shortened, and the word leaves a detection-only record
 	// (rel-1-0-10:GAP-0382).
-	if twin, ok := posixDataWordTwinRequest(request, facts); ok {
+	if twin, split, ok := posixDataWordTwinRequest(request, facts); ok {
 		defer func() {
 			findings = withOverLimitTwinFindings(findings, dispatchTrustedAction(parent, twin))
-			unreadDataWord = true
+			unreadDataWord = split.Data > 0
+			cutSQLQuery = split.Query > 0
 		}()
 	}
 	// The call is read once more where the agent's working directory is
