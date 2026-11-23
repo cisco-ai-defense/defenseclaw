@@ -1146,7 +1146,10 @@ func copyModeCallMayNameSSHFolder(command, cwd, home string) bool {
 	if strings.Contains(text, "[") {
 		return true
 	}
-	if strings.ContainsAny(text, "*?") && hookpaths.CommandMayDotglob(command) {
+	// The by-name decision also sees inherited shell options. If they can
+	// expose leading-dot names, no bare pattern is safe to skip here.
+	if strings.ContainsAny(text, "*?") && (hookpaths.CommandMayDotglob(command) ||
+		strings.Contains(os.Getenv("BASHOPTS"), "dotglob") || os.Getenv("GLOBIGNORE") != "") {
 		return true
 	}
 	homeBase := strings.ToLower(path.Base(home))
