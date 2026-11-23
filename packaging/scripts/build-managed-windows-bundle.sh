@@ -341,7 +341,7 @@ echo "==> stamping defenseclaw-sensor-helper.exe VERSIONINFO / icon"
     -target windows_amd64 -executable "${SENSOR_HELPER_EXE}" \
     -component sensor-helper -version "${VERSION}" -icon "${ICON_PATH}" )
 
-# ---- verify the cmid overlay actually linked into each binary ---------
+# ---- verify the CMID provider binaries and the SDK-free hook -----------
 #
 # If the overlay cp (line 265) silently no-op'd, the overlay source was
 # itself a stub, or `go build` picked up a stale cache without the
@@ -353,24 +353,27 @@ echo "==> stamping defenseclaw-sensor-helper.exe VERSIONINFO / icon"
 #
 # The real overlay imports github.com/cisco-aispg/ai-common/cmid; Go
 # embeds that module path in the binary (reflection / panic traces) even
-# with -trimpath. Zero occurrences = overlay did not link, which fails
-# fast here instead of surviving to AVC's signing pipeline.
-for binary_path in "${GATEWAY_EXE}" "${HOOK_EXE}" "${BROKER_EXE}"; do
-    # grep -ao returns exit 1 on zero matches, which under `set -euo
-    # pipefail` kills the script before the diagnostic branch below
-    # runs. Wrap the matcher in `|| true` so pipefail sees success and
-    # wc -l still reports 0 for a stub-linked binary - the ensuing
-    # `if ... -eq 0` is what emits the useful "cmid overlay did not
-    # link" message. Keeps the hard-fail intent; just surfaces WHY.
-    overlay_hits="$({ grep -ao 'cisco-aispg' "${binary_path}" 2>/dev/null || true; } | wc -l | tr -d ' ')"
-    if [[ "${overlay_hits}" -eq 0 ]]; then
-        echo "build-managed-windows-bundle: ${binary_path} has 0 cisco-aispg symbols; cmid overlay did not link" >&2
-        echo "    expected the private overlay from ${OVERLAY_PATH} to compile in via -tags cmid" >&2
-        echo "    a stub-linked broker fails on AVC CI with provider-registration success=false" >&2
+# with -trimpath. Both the gateway and the broker require the real overlay.
+# The hook runs as the agent's user and links only the hook command tree.
+CMID_MODULE='github.com/cisco-aispg/ai-common/cmid'
+count_cmid_references() {
+    # grep exits 1 for a clean miss. Propagate read errors through pipefail.
+    { grep -aFo "$CMID_MODULE" "$1" || [[ $? -eq 1 ]]; } | wc -l | tr -d ' '
+}
+for binary_path in "$GATEWAY_EXE" "$BROKER_EXE"; do
+    overlay_hits="$(count_cmid_references "$binary_path")"
+    if [[ "$overlay_hits" -eq 0 ]]; then
+        echo "build-managed-windows-bundle: $binary_path has no CMID module references; CMID overlay did not link" >&2
+        echo "    expected the private overlay from $OVERLAY_PATH to compile in via -tags cmid" >&2
         exit 1
     fi
-    echo "==> ${binary_path}: ${overlay_hits} cisco-aispg symbols (cmid overlay linked)"
+    echo "==> $binary_path: $overlay_hits CMID module references (overlay linked)"
 done
+hook_overlay_hits="$(count_cmid_references "$HOOK_EXE")"
+if [[ "$hook_overlay_hits" -ne 0 ]]; then
+    echo "build-managed-windows-bundle: $HOOK_EXE unexpectedly links the CMID SDK" >&2
+    exit 1
+fi
 
 # ---- cross-build the prebuilt outer Setup EXE + assembler EXE ----------
 #
