@@ -65,8 +65,10 @@ func TestClaudeCode_SetupReplacesForeignDefenseClawHookEntries(t *testing.T) {
 	// launcher (claudeCodeHookInvocation), and there the copied entry that
 	// names the other account's script without the generated missing-script
 	// guard is a drive path, which the edited-script predicate (POSIX
-	// absolute paths, editedDefenseClawHookScript) does not claim. The copies
-	// that carry the guard are DefenseClaw's on every OS.
+	// absolute paths, editedDefenseClawHookScript) does not claim: Setup and
+	// Teardown leave it (GAP-1909, open). The test pins that on Windows, so a
+	// product change that claims it fails here and the pin is removed with the
+	// fix. The copies that carry the guard are DefenseClaw's on every OS.
 	registered := filepath.ToSlash(filepath.Join(opts.DataDir, "hooks", "claude-code-hook.sh"))
 	plainForeignClaimed := true
 	if runtime.GOOS == "windows" {
@@ -86,6 +88,9 @@ func TestClaudeCode_SetupReplacesForeignDefenseClawHookEntries(t *testing.T) {
 	if strings.Contains(after, foreignWithSpace) || strings.Contains(after, escapedBackslashForeign) ||
 		(plainForeignClaimed && strings.Contains(after, foreign)) {
 		t.Fatalf("Setup kept the foreign DefenseClaw hook entries: %s", after)
+	}
+	if !plainForeignClaimed && !strings.Contains(after, foreign) {
+		t.Fatalf("Setup now replaces the plain drive-path foreign entry on Windows (GAP-1909 fixed?): drop plainForeignClaimed: %s", after)
 	}
 	if !strings.Contains(after, own) || !strings.Contains(after, registered) {
 		t.Fatalf("Setup lost the user's hook or did not register its own: %s", after)
@@ -114,6 +119,9 @@ func TestClaudeCode_SetupReplacesForeignDefenseClawHookEntries(t *testing.T) {
 	if strings.Contains(after, foreignWithSpace) || strings.Contains(after, escapedBackslashForeign) ||
 		(plainForeignClaimed && strings.Contains(after, foreign)) || !strings.Contains(after, own) {
 		t.Fatalf("Teardown settings = %s, want the user's hook only", after)
+	}
+	if !plainForeignClaimed && !strings.Contains(after, foreign) {
+		t.Fatalf("Teardown now removes the plain drive-path foreign entry on Windows (GAP-1909 fixed?): drop plainForeignClaimed: %s", after)
 	}
 
 	for _, command := range []string{
