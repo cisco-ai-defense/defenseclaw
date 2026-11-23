@@ -37,7 +37,7 @@ rows:
       floor: allow
       ceiling: record
   - id: effect-read
-    source: DET111 effects credential read (GAP-1825, GAP-1826)
+    source: DET111 effects credential read (GAP-1825, GAP-1826, GAP-1846)
     per_user:
       floor: allow
       ceiling: record
@@ -98,6 +98,14 @@ rows:
       floor: alert
     managed:
       floor: alert
+  - id: copy-git-credential
+    source: rel-1-0-10:PATH-GIT-CREDS copy (lead ruling 2026-11-16, GAP-1794)
+    per_user:
+      floor: allow
+      severity: CRITICAL
+    managed:
+      floor: allow
+      severity: CRITICAL
   - id: read-ssh-private-key
     source: rel-1-0-10:PATH-SSH-KEY
     per_user:

@@ -141,6 +141,15 @@ type Program struct {
 	// is a whole tree (cp -r, rsync -a).
 	DryRun    []string
 	Recursive []string
+	// Summary: the program's stdout carries a count, a test result or a
+	// digest of what it reads, never the bytes (wc, sha256sum, cmp);
+	// SummaryFlags are the options that make it so (grep -c, -l, -L, -q;
+	// diff -q). Its reads are not shown to the agent (DET111 GAP-1846).
+	Summary      bool
+	SummaryFlags []string
+	// Prints: a program outside PosAllRead that prints what it is piped
+	// (tee), so a read upstream of it reaches the call's output.
+	Prints bool
 }
 
 // gnuLongOptions are every long option of the GNU tool (its --help on the build
@@ -697,7 +706,7 @@ func buildPOSIXTable() {
 			"-R", "-v", "-c", "-f", "-H", "-L", "-P", "-h", "-b", "-k", "-d", "-n", "--recursive", "--verbose", "--changes", "--silent", "--quiet", "--preserve-root", "--no-preserve-root", "--dereference", "--no-dereference")})
 	add(Program{Names: []string{"dd"}, Pos: PosNone,
 		Flags: map[string]Flag{"if": {Value: true, Role: RoleRead}, "of": {Value: true, Role: RoleWrite}}})
-	add(Program{Names: []string{"tee"}, Pos: PosAllWrite, AppendFlag: "-a", Flags: fl(nil, "-a", "-i", "-p", "--append", "--ignore-interrupts")})
+	add(Program{Names: []string{"tee"}, Pos: PosAllWrite, AppendFlag: "-a", Prints: true, Flags: fl(nil, "-a", "-i", "-p", "--append", "--ignore-interrupts")})
 	// newgrp starts a shell whose script can be supplied on stdin.
 	add(Program{Names: []string{"newgrp"}, Pos: PosNone, ShellCode: true, StdinCode: true, InertOperands: true})
 	add(Program{Names: []string{"truncate"}, Pos: PosAllWrite, Flags: map[string]Flag{"-s": {Value: true}}})
@@ -803,6 +812,7 @@ func buildPOSIXTable() {
 			"-delete", "-print", "-print0", "-ls", "-depth", "-follow", "-xdev", "-mount", "-nouser", "-nogroup", "-empty", "-prune", "-readable", "-writable", "-executable",
 			"-false", "-true", "-quit", "-not", "-a", "-o", "-and", "-or", "-ignore_readdir_race", "-noleaf", "-daystart", "-H", "-L", "-P", "-O1", "-O2", "-O3")})
 	add(Program{Names: []string{"grep", "egrep", "fgrep"}, Pos: PosAllRead, FirstPosIgnore: true, FirstPosText: TextRegex,
+		SummaryFlags: []string{"-c", "--count", "-l", "--files-with-matches", "-L", "--files-without-match", "-q", "--quiet", "--silent"},
 		Flags: fl(map[string]Flag{"-f": {Value: true, Role: RoleRead}, "--file": {Value: true, Role: RoleRead}, "-e": {Value: true, Role: RoleIgnore}, "--regexp": {Value: true, Role: RoleIgnore},
 			"-m": {Value: true, Role: RoleIgnore}, "-A": {Value: true, Role: RoleIgnore}, "-B": {Value: true, Role: RoleIgnore}, "-C": {Value: true, Role: RoleIgnore}, "--color": {Optional: true}, "--colour": {Optional: true}, "-d": {Value: true, Role: RoleIgnore}, "--include": {Value: true, Role: RoleIgnore}, "--exclude": {Value: true, Role: RoleIgnore}},
 			"-r", "-R", "-n", "-i", "-v", "-l", "-L", "-c", "-w", "-x", "-E", "-F", "-G", "-P", "-o", "-H", "-h", "-q", "-s", "-a", "-I", "-z", "-U", "-b", "-T",
@@ -853,7 +863,11 @@ func buildPOSIXTable() {
 	// file named by a flag. uniq and xxd take an OUTPUT operand and are split out.
 	readerFlags := fl(map[string]Flag{"-o": {Value: true, Role: RoleIgnore}, "-f": {Value: true, Role: RoleIgnore}, "-d": {Value: true, Role: RoleIgnore}, "-t": {Value: true, Role: RoleIgnore}, "-w": {Value: true, Role: RoleIgnore}, "-c": {Value: true, Role: RoleIgnore}, "-n": {Value: true, Role: RoleIgnore}},
 		"-l", "-m", "-L", "-h", "-a", "-b", "-s", "-k", "-v", "-i", "-r", "-u", "-z", "-x", "-p", "-g", "-H", "-P", "-A", "-B", "-C", "-D", "-q", "-y", "-e")
-	add(Program{Names: []string{"wc", "cut", "comm", "join", "paste", "fold", "fmt", "rev", "column", "expand", "unexpand", "strings", "od", "hexdump", "md5sum", "sha1sum", "sha256sum", "sha512sum", "cksum", "b2sum", "diff", "cmp", "look", "shasum"}, Pos: PosAllRead, Flags: readerFlags})
+	add(Program{Names: []string{"cut", "comm", "join", "paste", "fold", "fmt", "rev", "column", "expand", "unexpand", "strings", "od", "hexdump", "look"}, Pos: PosAllRead, Flags: readerFlags})
+	// Summary readers print a count, a digest or a difference flag, never the
+	// bytes they read (DET111 GAP-1846); diff prints lines unless -q.
+	add(Program{Names: []string{"wc", "md5sum", "sha1sum", "sha256sum", "sha512sum", "cksum", "b2sum", "cmp", "shasum"}, Pos: PosAllRead, Summary: true, Flags: readerFlags})
+	add(Program{Names: []string{"diff"}, Pos: PosAllRead, SummaryFlags: []string{"-q", "--brief"}, Flags: readerFlags})
 	// Metadata-only programs: they report a file's size, type, inode data or
 	// resolved name, never its bytes, so an operand is accounted but carries no
 	// content-read effect (DET111 ruling 3a: stat of a credential file is not a
