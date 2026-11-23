@@ -47,6 +47,10 @@ func TestMain(m *testing.M) {
 		fmt.Println("dumpable", d, err)
 		os.Exit(0)
 	}
+	// The stand-in agent of the headless-task tests (agentchild_test.go).
+	if isTestAgent(os.Args[1:]) {
+		os.Exit(testAgent(os.Args[1:]))
+	}
 	// The relay's child commands (file copies as the agent's user).
 	if IsChildCommand(os.Args[1:]) {
 		os.Exit(runChild(os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
@@ -276,7 +280,7 @@ func testServer(t *testing.T, argv []string) (*Server, *recorder, signer) {
 	cfg := kit.DefaultConfig()
 	cfg.Relay.Connector = "claudecode"
 	cfg.Relay.Interactive = argv
-	cfg.Relay.Headless = []string{"sh", "-c", `echo "out:$0 mode:$DEFENSECLAW_ACTOR_MODE"; echo err >&2; exit 3`, "{prompt}"}
+	cfg.Relay.Headless = agentArgv("echo-mode")
 	rec := &recorder{}
 	s := NewServer(Options{Config: cfg, Verifier: v,
 		Warm:   func(context.Context, string) error { rec.add("warm"); return nil },
