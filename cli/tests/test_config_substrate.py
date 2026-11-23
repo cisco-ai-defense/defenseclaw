@@ -65,6 +65,7 @@ _FULL = {
     "chain_egress_action": "alert",
     "unattended": {"asks": "deny", "ask_timeout": "30m", "telemetry_sampling": 0.5},
     "rate_limits": {"per_actor_rps": 20, "per_atespace_rps": 500},
+    "skills": {"scan": {"enabled": False, "timeout": "30s"}, "pending_wait": "5s"},
     "extproc": {"enabled": True, "failure_mode": "closed", "body_inspection": "on", "body_max_bytes": 1048576,
                 "mcp_hosts": ["mcp.example.com=docs"], "body_hosts": ["api.example.com"],
                 "cluster_domains": ["svc.cluster.local"], "actor_trust_domain": "cluster.local",
