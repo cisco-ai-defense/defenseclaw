@@ -75,6 +75,7 @@ func TestSubstrateConfigMatchesTheClosedSchema(t *testing.T) {
 		{SubstrateLLMCredentialConfig{}, []string{"substrate", "llm", "credential"}},
 		{SubstrateEgressConfig{}, []string{"substrate", "egress"}},
 		{SubstrateTemplatesConfig{}, []string{"substrate", "templates"}},
+		{SubstrateActivityConfig{}, []string{"substrate", "activity"}},
 	} {
 		got := yamlFieldNames(reflect.TypeOf(tc.typ))
 		if want := schemaObjectProperties(t, tc.path...); !reflect.DeepEqual(got, want) {
@@ -145,6 +146,7 @@ substrate:
   idle_suspend_after: 30m
   unattended: {asks: deny, ask_timeout: 30m, telemetry_sampling: 1.0}
   rate_limits: {per_actor_rps: 20, per_atespace_rps: 500}
+  activity: {status_window: 30s, notifications: "off"}
   extproc:
     enabled: true
     failure_mode: closed

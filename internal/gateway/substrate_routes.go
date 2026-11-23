@@ -570,11 +570,15 @@ func (a *APIServer) substrateListActors(st *substrateState) http.HandlerFunc {
 		}
 		// GAP-0167: the person sees which agents hold a worker.
 		states := substrateLiveStates(r.Context(), st.cfg.Lookup, regs)
+		feed := st.activityFor(r.Context(), f.OwnerID, everyone, false)
 		out := make([]map[string]any, 0, len(regs))
 		for i, reg := range regs {
 			v := st.actorView(reg)
 			if states[i] != "" {
 				v["state"] = states[i]
+			}
+			if feed != nil && !reg.Deleted {
+				v["activity"] = feed.view(reg, states[i])
 			}
 			out = append(out, v)
 		}
@@ -719,6 +723,7 @@ func (a *APIServer) substrateGetActor(st *substrateState) http.HandlerFunc {
 			writeSubstrateJSONError(w, status, reason)
 			return
 		}
+		c, _ := substrateCallerFrom(r.Context())
 		a.substrateAuditAdminTarget(st, r, reg, "actor", "INFO")
 		v := st.actorView(reg)
 		// GAP-0410: status shows a crashed agent as crashed.
@@ -728,6 +733,10 @@ func (a *APIServer) substrateGetActor(st *substrateState) http.HandlerFunc {
 		}
 		if live, err := st.cfg.Lookup.LookupActor(r.Context(), reg.Atespace, reg.Name); err == nil && live.UID == reg.UID {
 			v["state"] = strings.ToLower(string(live.State))
+		}
+		if feed := st.activityFor(r.Context(), ownerOf(c.person).ID(), c.admin, true); feed != nil {
+			s, _ := v["state"].(string)
+			v["activity"] = feed.view(reg, s)
 		}
 		writeSubstrateJSON(w, http.StatusOK, v)
 	}

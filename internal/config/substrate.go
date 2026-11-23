@@ -86,6 +86,9 @@ type SubstrateConfig struct {
 	Admin OpenShellAdminConfig `mapstructure:"admin" yaml:"admin,omitempty"`
 	// Bundles is signed policy bundles (substrate_bundles.go).
 	Bundles SubstrateBundlesConfig `mapstructure:"bundles" yaml:"bundles,omitempty"`
+	// Activity is the agent state in list and status and the notification
+	// switch (substrate_activity.go).
+	Activity SubstrateActivityConfig `mapstructure:"activity" yaml:"activity,omitempty"`
 }
 
 // SubstrateTemplatesConfig is how the controller admits templates (PLAN
@@ -855,6 +858,7 @@ func (s *SubstrateConfig) Validate() error {
 	s.validateTemplates(bad)
 
 	s.Bundles.validate(bad)
+	s.Activity.validate(bad)
 	if err := s.Admin.validateAs("admin"); err != nil {
 		errs = append(errs, err)
 	}

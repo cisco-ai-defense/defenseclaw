@@ -4498,6 +4498,14 @@ def _default_notifications_enabled() -> bool:
 
 
 @dataclass
+class NotificationsSubstrateConfig:
+    """``notifications.substrate`` (mirrors Go ``NotificationsSubstrateConfig``)."""
+
+    asks: bool = True
+    task_end: bool = True
+
+
+@dataclass
 class NotificationsConfig:
     """User-session OS notifications. Mirrors internal/config.NotificationsConfig.
 
@@ -4529,6 +4537,9 @@ class NotificationsConfig:
     # YAML round-trips through both ends without translation.
     dedup_window: str = "30s"
     max_per_minute: int = 12
+    # ``notifications.substrate``: ``substrate watch`` and the attached
+    # launcher (B3.6). Both on by default; still need ``enabled``.
+    substrate: NotificationsSubstrateConfig = field(default_factory=lambda: NotificationsSubstrateConfig())
 
 
 @dataclass
@@ -4806,6 +4817,19 @@ class SubstrateBundlesConfig:
 
 
 @dataclass
+class SubstrateActivityConfig:
+    """``substrate.activity``: the agent state in ``substrate list`` and
+    ``status`` and the administrator's notification switch (mirrors Go
+    ``SubstrateActivityConfig``). ``status_window`` is how recent a model or
+    hook call must be to show "thinking" ("" = 20s, "0s" = off).
+    ``notifications`` is ``auto`` (the person's own ``notifications.substrate``
+    keys decide) or ``off`` (the administrator's switch)."""
+
+    status_window: str = ""
+    notifications: str = ""
+
+
+@dataclass
 class SubstrateConfig:
     """``substrate:``, DefenseClaw on Agent Substrate (mirrors Go
     ``SubstrateConfig``). Off by default and read only in the cluster; the
@@ -4839,6 +4863,7 @@ class SubstrateConfig:
     allow_passthrough_for: list[str] = field(default_factory=list)
     admin: OpenShellAdminConfig = field(default_factory=OpenShellAdminConfig)
     bundles: SubstrateBundlesConfig = field(default_factory=SubstrateBundlesConfig)
+    activity: SubstrateActivityConfig = field(default_factory=SubstrateActivityConfig)
 
 
 @dataclass
@@ -6256,7 +6281,10 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
     # touched (e.g. ``setup notifications`` flipping ``enabled:
     # true``).
     notifications = d.get("notifications")
-    if isinstance(notifications, dict) and notifications == _default_notifications_dict():
+    # Go omits notifications.substrate at its defaults (both on).
+    if isinstance(notifications, dict) and notifications.get("substrate") == {"asks": True, "task_end": True}:
+        notifications.pop("substrate")
+    if isinstance(notifications, dict) and notifications == _without_substrate(_default_notifications_dict()):
         d.pop("notifications", None)
     if d.get("asset_policy") == _default_asset_policy_dict():
         d.pop("asset_policy", None)
@@ -6823,6 +6851,10 @@ def _apply_v8_modeled_delta(
             target.pop(key, None)
         return
     target[key] = copy.deepcopy(current)
+
+
+def _without_substrate(d: dict[str, Any]) -> dict[str, Any]:
+    return {k: v for k, v in d.items() if k != "substrate"}
 
 
 def _default_notifications_dict() -> dict[str, Any]:
@@ -8204,6 +8236,15 @@ def _merge_substrate(raw: Any) -> SubstrateConfig:
         allow_passthrough_for=_string_list(raw.get("allow_passthrough_for")),
         admin=_merge_openshell_admin(raw.get("admin")),
         bundles=_merge_substrate_bundles(raw.get("bundles")),
+        activity=_merge_substrate_activity(raw.get("activity")),
+    )
+
+
+def _merge_substrate_activity(raw: Any) -> SubstrateActivityConfig:
+    raw = _mapping(raw)
+    return SubstrateActivityConfig(
+        status_window=_duration_text(raw.get("status_window")),
+        notifications=str(raw.get("notifications", "") or ""),
     )
 
 
@@ -9772,6 +9813,13 @@ def _merge_notifications(raw: dict[str, Any] | None) -> NotificationsConfig:
     if max_per_minute < 0:
         max_per_minute = defaults.max_per_minute
 
+    substrate_raw = raw.get("substrate")
+    substrate_raw = substrate_raw if isinstance(substrate_raw, dict) else {}
+    substrate = NotificationsSubstrateConfig(
+        asks=bool(substrate_raw.get("asks", defaults.substrate.asks)),
+        task_end=bool(substrate_raw.get("task_end", defaults.substrate.task_end)),
+    )
+
     return NotificationsConfig(
         enabled=bool(raw.get("enabled", defaults.enabled)),
         block_enforced=bool(raw.get("block_enforced", defaults.block_enforced)),
@@ -9780,6 +9828,7 @@ def _merge_notifications(raw: dict[str, Any] | None) -> NotificationsConfig:
         sources=sources,
         dedup_window=dedup_window,
         max_per_minute=max_per_minute,
+        substrate=substrate,
     )
 
 

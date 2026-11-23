@@ -64,6 +64,10 @@ const (
 	DefaultSnapshotTTL = 10 * time.Second
 	// maxActors bounds every map here; past it the oldest entries go.
 	maxActors = 100000
+	// maxKinds bounds the per-kind maps (hook, model, relay, egress, and
+	// room for a new kind): a replica cannot grow the store by inventing
+	// kinds.
+	maxKinds = 8
 	// retention is how long the leader keeps an actor it heard nothing of.
 	retention = 24 * time.Hour
 )
@@ -88,6 +92,18 @@ type Snapshot struct {
 	Pending  []string             `json:"pending,omitempty"`
 	Ended    map[string]time.Time `json:"ended,omitempty"`
 	Attached map[string]time.Time `json:"attached,omitempty"`
+	// Kinds is the newest time of each kind (hook, model, relay, egress) by
+	// actor UID, only when the request asked for Detail: the status and
+	// list answers show what an agent did last (B3.6). The controller never
+	// asks, so its snapshot does not grow.
+	Kinds map[string]map[string]time.Time `json:"kinds,omitempty"`
+}
+
+// SnapshotRequest is the body of MethodActivitySnapshot. An empty body is
+// the controller's request.
+type SnapshotRequest struct {
+	// Detail adds Snapshot.Kinds.
+	Detail bool `json:"detail,omitempty"`
 }
 
 // ---- gateway replica ----
@@ -184,6 +200,8 @@ type Store struct {
 	ended    map[string]time.Time // KindTaskEnd
 	attached map[string]time.Time // KindAttach
 	seen     map[string]time.Time // when the leader last heard of the UID
+	// kinds is the newest time of each other kind, by kind then UID.
+	kinds map[string]map[string]time.Time
 }
 
 func (s *Store) now() time.Time {
@@ -204,6 +222,9 @@ func (s *Store) Observe(_ context.Context, b Batch) (struct{}, error) {
 		s.last, s.ended, s.seen = map[string]time.Time{}, map[string]time.Time{}, map[string]time.Time{}
 		s.attached = map[string]time.Time{}
 	}
+	if s.kinds == nil {
+		s.kinds = map[string]map[string]time.Time{}
+	}
 	for _, e := range b.Entries {
 		if e.UID == "" {
 			continue
@@ -218,6 +239,15 @@ func (s *Store) Observe(_ context.Context, b Batch) (struct{}, error) {
 				into = s.ended
 			case KindAttach:
 				into = s.attached
+			default:
+				k := s.kinds[kind]
+				if k == nil && len(s.kinds) < maxKinds {
+					k = map[string]time.Time{}
+					s.kinds[kind] = k
+				}
+				if k != nil && t.After(k[e.UID]) {
+					k[e.UID] = t
+				}
 			}
 			if t.After(into[e.UID]) {
 				into[e.UID] = t
@@ -238,12 +268,16 @@ func (s *Store) prune(now time.Time) {
 			delete(s.last, uid)
 			delete(s.ended, uid)
 			delete(s.attached, uid)
+			for _, k := range s.kinds {
+				delete(k, uid)
+			}
 		}
 	}
 }
 
-// Snapshot answers the controller.
-func (s *Store) Snapshot(context.Context, struct{}) (Snapshot, error) {
+// Snapshot answers the controller and, with Detail, the gateway's list and
+// status.
+func (s *Store) Snapshot(_ context.Context, req SnapshotRequest) (Snapshot, error) {
 	s.mu.Lock()
 	s.prune(s.now())
 	out := Snapshot{Last: make(map[string]time.Time, len(s.last))}
@@ -260,6 +294,16 @@ func (s *Store) Snapshot(context.Context, struct{}) (Snapshot, error) {
 		out.Attached = make(map[string]time.Time, len(s.attached))
 		for uid, t := range s.attached {
 			out.Attached[uid] = t
+		}
+	}
+	if req.Detail && len(s.kinds) > 0 {
+		out.Kinds = make(map[string]map[string]time.Time, len(s.kinds))
+		for kind, m := range s.kinds {
+			c := make(map[string]time.Time, len(m))
+			for uid, t := range m {
+				c[uid] = t
+			}
+			out.Kinds[kind] = c
 		}
 	}
 	s.mu.Unlock()
@@ -378,4 +422,50 @@ func (s *Source) PendingAsk(uid string) bool {
 	defer s.mu.Unlock()
 	s.refresh()
 	return s.pending[uid]
+}
+
+// ---- gateway list and status ----
+
+// Reader is the gateway's read of the leader's feed for the list and status
+// answers (B3.6). One snapshot with Detail is reused for TTL, so a list of
+// 2,100 agents is one leader call per 10 s, not one per agent.
+type Reader struct {
+	Leader *leader.Client
+	TTL    time.Duration
+	Now    func() time.Time
+
+	mu   sync.Mutex
+	snap Snapshot
+	at   time.Time
+}
+
+func (r *Reader) now() time.Time {
+	if r.Now != nil {
+		return r.Now()
+	}
+	return time.Now()
+}
+
+// Snapshot returns the leader's snapshot with Detail, at most TTL old (10 s
+// when unset). A leader that cannot be reached is an error: the caller
+// shows the state as unknown, never as idle.
+func (r *Reader) Snapshot(ctx context.Context) (Snapshot, error) {
+	ttl := r.TTL
+	if ttl <= 0 {
+		ttl = DefaultSnapshotTTL
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	now := r.now()
+	if !r.at.IsZero() && now.Sub(r.at) < ttl {
+		return r.snap, nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	var snap Snapshot
+	if err := r.Leader.Call(ctx, leader.MethodActivitySnapshot, leader.NewRequestID(), SnapshotRequest{Detail: true}, &snap); err != nil {
+		return Snapshot{}, err
+	}
+	r.snap, r.at = snap, now
+	return snap, nil
 }
