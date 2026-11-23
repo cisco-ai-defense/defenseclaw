@@ -24,18 +24,21 @@ import (
 // repair for every refused account; the rendering rows are in
 // TestGAP0731IcaclsRemovalFix.
 func TestGAP0731RefusalNamesTheCarrierAndTheIcaclsCommand(t *testing.T) {
+	// The carrier is a real folder of this account's own tree: a command never
+	// names one outside it (GAP-1899, TestGAP1899SafefileCarrierOutsideTheUserTreeGetsNoCommand).
+	_, opencode, plugin := custodyTestTree(t)
 	cause := &safefile.UnsafePrivateDACLError{
-		Path: `C:\Users\lane\.config\opencode\plugins`,
+		Path: filepath.Dir(plugin),
 		Entries: []safefile.UnsafeDACLEntry{
-			{Trustee: `HOST\other`, Carriers: []string{`C:\Users\lane\.config\opencode`}},
-			{Trustee: `HOST\third`, Carriers: []string{`C:\Users\lane\.config\opencode`}},
+			{Trustee: `HOST\other`, Carriers: []string{opencode}},
+			{Trustee: `HOST\third`, Carriers: []string{opencode}},
 		},
 	}
-	err := explainPluginArtifactRefusal(`C:\Users\lane\.config\opencode\plugins\defenseclaw.js`, "", cause)
+	err := explainPluginArtifactRefusal(plugin, "", cause)
 	if !errors.Is(err, ErrPluginFolderCustody) || !errors.Is(err, cause) {
 		t.Fatalf("err=%v", err)
 	}
-	want := `fix: icacls 'C:\Users\lane\.config\opencode' /remove:g 'HOST\other'; icacls 'C:\Users\lane\.config\opencode' /remove:g 'HOST\third'`
+	want := `fix: icacls ` + managed.PowerShellLiteral(opencode) + ` /remove:g 'HOST\other'; icacls ` + managed.PowerShellLiteral(opencode) + ` /remove:g 'HOST\third'`
 	if !strings.Contains(err.Error(), want) {
 		t.Fatalf("message lacks %q:\n%v", want, err)
 	}
