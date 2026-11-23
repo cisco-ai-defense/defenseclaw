@@ -1232,9 +1232,11 @@ func (l *lifecycle) republishMachinePolicy(record *Deployment) {
 	// Reconcile is how an administrator accepts an edit of a shared vendor
 	// file: this publish keeps it, and the verified view is re-pinned below.
 	// Ensure and repair put back the published file instead (GAP-1928).
-	env.adoptMachinePolicyEdits = true
-	result, publishErr := env.MachinePolicy.Publish(validated.Loaded)
-	env.adoptMachinePolicyEdits = false
+	result, publishErr := func() (enterprisepolicy.Result, error) {
+		env.adoptMachinePolicyEdits = true
+		defer func() { env.adoptMachinePolicyEdits = false }()
+		return env.MachinePolicy.Publish(validated.Loaded)
+	}()
 	if isCoded(publishErr, codeMachinePolicy) {
 		r.AddWarning(codeMachinePolicy, publishErr.Error())
 		return

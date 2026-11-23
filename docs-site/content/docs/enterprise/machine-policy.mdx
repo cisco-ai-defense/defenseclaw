@@ -16,9 +16,9 @@ Some agents read a machine-wide policy file that standard users cannot change. F
 Only agents you select in the config are protected; see [Choose the agents to protect](/docs/enterprise/configuration#choose-the-agents-to-protect). DefenseClaw's entries are derived from the config (`guardrail.connectors` and `enterprise.machine_policy`) and never read back as policy. The next `ensure`, `repair` or `reconcile` rewrites a changed entry, and `verify` reports the drift until then. Change the config, not the vendor file.
 
 You may maintain your own settings in vendor policy files. After an administrator
-or MDM changes one, run `reconcile` or `ensure` as root. On Linux and macOS,
-Codex `/etc/codex/requirements.toml` is shared with DefenseClaw. These all put
-back the file DefenseClaw last published: `ensure`, `repair`, an upgrade, the
+or MDM changes one, run `reconcile` as root so DefenseClaw keeps the change. On Linux and macOS,
+Codex `/etc/codex/requirements.toml` is shared with DefenseClaw, and these
+put back the file DefenseClaw last published: `ensure`, `repair`, an upgrade, the
 config-apply job that the guardian starts when it finds a changed file, and
 the config-apply job that applies a config change. Only `reconcile` accepts
 your edit of the file. Keep your own lines after DefenseClaw's settings block

@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 
@@ -628,17 +629,24 @@ func (codexTarget) Reconcile(opts Options) (State, error) {
 			ownedBefore = before.OwnedEntries > 0
 		}
 	}
-	if saved, err := saveDiscardedCodexEdit(opts, path, current, exists, rendered); err != nil {
+	saved, saveErr := saveDiscardedCodexEdit(opts, path, current, exists, rendered)
+	if saveErr != nil {
 		// The edit cannot be kept, but the published policy still goes back:
 		// a heal never waits on the copy.
-		state.warn("could not keep a copy of the edited %s before putting back the published file: %v", path, err)
-	} else if saved != "" {
-		state.SavedEdit = saved
-		state.detail("kept the edited %s, which this publish replaced, at %s", path, saved)
+		state.warn("could not keep a copy of the edited %s before putting back the published file: %v", path, saveErr)
 	}
 	changed, err := publishWithRecord(opts, codexConnector, path, current, exists, rendered, ownedBefore, codexStrip, &state)
 	if err != nil {
+		// A refused publish replaced nothing: the copy made for it goes too
+		// (GAP-1990).
+		if saved != "" {
+			_ = os.Remove(saved)
+		}
 		return state, err
+	}
+	if saved != "" {
+		state.SavedEdit = saved
+		state.detail("kept the edited %s, which this publish replaced, at %s", path, saved)
 	}
 	if link != "" {
 		state.ReplacedLink = link
