@@ -578,8 +578,8 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
                 "restore-secret-lines",
                 "bool",
                 (
-                    "in files uploaded with credentials replaced, keep the agent's changed lines with the value put back "
-                    "(default: keep your line)"
+                    "in files uploaded with credentials replaced, keep the agent's changed lines with the value put "
+                    "back (default: keep your line)"
                 ),
             ),
             _Flag(
@@ -805,8 +805,8 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
         example=(
             "defenseclaw substrate secrets add gl-work --template gitlab --host gitlab.com --from-op "
             "op://eng/gitlab/token\n"
-            "defenseclaw substrate secrets add nexus --template generic-basic --host nexus.corp.example --user "
-            "ci-bot --from-file ~/.nexus-token"
+            "defenseclaw substrate secrets add nexus --template generic-basic --host nexus.corp.example "
+            "--user ci-bot --from-file ~/.nexus-token"
         ),
         args=(_Arg("name"),),
         flags=(
