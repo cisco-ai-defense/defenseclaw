@@ -494,7 +494,7 @@ func substrateCloseAsks(ctx context.Context, cl *api.Client, a api.Actor, why st
 		if k.Actor != a.Name || (k.Atespace != "" && k.Atespace != a.Atespace) {
 			continue
 		}
-		if cl.Decide(ctx, k.ID, "deny", false, why) == nil {
+		if _, err := cl.Decide(ctx, k.ID, "deny", false, why); err == nil {
 			n++
 		}
 	}

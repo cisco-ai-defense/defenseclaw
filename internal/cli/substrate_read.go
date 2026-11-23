@@ -636,11 +636,16 @@ func substrateDecide(cmd *cobra.Command, com *substrateCommon, id, decision stri
 	}
 	ctx, stop := substrateContext(cmd)
 	defer stop()
-	if err := s.Client.Decide(ctx, id, decision, always, reason); err != nil {
+	note, err := s.Client.Decide(ctx, id, decision, always, reason)
+	if err != nil {
 		return substrateFail(err)
 	}
 	verb := map[string]string{"approve": "Approved", "deny": "Denied"}[decision]
 	fmt.Fprintf(cmd.OutOrStdout(), "%s %s.\n", verb, id)
+	if note != "" {
+		// The answer is recorded but moved nothing (GAP-0973): say so.
+		fmt.Fprintln(cmd.OutOrStdout(), note)
+	}
 	return nil
 }
 

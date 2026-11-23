@@ -73,6 +73,19 @@ func askView(a asks.Ask) map[string]any {
 	}
 }
 
+// askAnswerView is askView for the body of an answer. When no binding names
+// the ask any more the answer stands but moved nothing; the body says so
+// (binding_gone and message) so an approval does not read as a secret that
+// went live (GAP-0973).
+func askAnswerView(a asks.Ask, bindingGone bool) map[string]any {
+	v := askView(a)
+	if bindingGone {
+		v["binding_gone"] = true
+		v["message"] = "No binding names this ask now. If it was removed, nothing changed; if its add is still finishing, the add applies your answer."
+	}
+	return v
+}
+
 func (a *APIServer) substrateListAsks(st *substrateState) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if st.cfg.Asks == nil {
@@ -138,7 +151,7 @@ func (a *APIServer) substrateDecideAsk(st *substrateState) http.HandlerFunc {
 				fmt.Fprintf(os.Stderr, "[substrate] binding of ask %s not moved: %v\n", again.ID, berr)
 				writeSubstrateJSONError(w, http.StatusBadGateway, "secret_not_stored")
 			default:
-				writeSubstrateJSON(w, http.StatusOK, askView(again))
+				writeSubstrateJSON(w, http.StatusOK, askAnswerView(again, errors.Is(berr, errSubstrateBindingGone)))
 			}
 			return
 		case asks.IsAdminOnly(err):
@@ -150,7 +163,8 @@ func (a *APIServer) substrateDecideAsk(st *substrateState) http.HandlerFunc {
 		}
 		berr := a.substrateBindingDecided(r.Context(), st, got)
 		a.emitSubstrateApprovalV8(r.Context(), got, false, audit.SandboxApprovalByOperator)
-		if errors.Is(berr, errSubstrateBindingGone) {
+		gone := errors.Is(berr, errSubstrateBindingGone)
+		if gone {
 			// No binding names this ask. Either the add that opened it has
 			// not written the binding yet (the add applies this answer when
 			// it does, RV4 F2), or rm removed it (rm denies a waiting
@@ -171,7 +185,7 @@ func (a *APIServer) substrateDecideAsk(st *substrateState) http.HandlerFunc {
 			// themselves (decided_by), and logged here.
 			fmt.Fprintf(os.Stderr, "[substrate] administrator answered another person's ask %s (%s)\n", got.ID, got.State)
 		}
-		writeSubstrateJSON(w, http.StatusOK, askView(got))
+		writeSubstrateJSON(w, http.StatusOK, askAnswerView(got, gone))
 	}
 }
 

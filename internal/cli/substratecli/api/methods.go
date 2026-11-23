@@ -313,8 +313,9 @@ func (c *Client) Asks(ctx context.Context) ([]Ask, error) {
 }
 
 // Decide answers one ask: decision is approve or deny; always keeps an
-// approval for later runs.
-func (c *Client) Decide(ctx context.Context, id, decision string, always bool, reason string) error {
+// approval for later runs. The note is the cluster's message when the answer
+// moved nothing because no binding names the ask now (binding_gone), else "".
+func (c *Client) Decide(ctx context.Context, id, decision string, always bool, reason string) (note string, err error) {
 	in := map[string]any{"decision": decision}
 	if always {
 		in["always"] = true
@@ -322,7 +323,17 @@ func (c *Client) Decide(ctx context.Context, id, decision string, always bool, r
 	if reason != "" {
 		in["reason"] = reason
 	}
-	return c.do(ctx, http.MethodPost, "asks/"+url.PathEscape(id), nil, in, nil)
+	var out struct {
+		BindingGone bool   `json:"binding_gone"`
+		Message     string `json:"message"`
+	}
+	if err := c.do(ctx, http.MethodPost, "asks/"+url.PathEscape(id), nil, in, &out); err != nil {
+		return "", err
+	}
+	if out.BindingGone {
+		return out.Message, nil
+	}
+	return "", nil
 }
 
 // Decisions lists recent decisions on the person's actors.

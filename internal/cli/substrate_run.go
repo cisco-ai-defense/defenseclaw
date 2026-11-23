@@ -66,13 +66,16 @@ func (a substrateAsks) Pending(ctx context.Context, t attach.Target) ([]attach.A
 }
 
 func (a substrateAsks) Decide(ctx context.Context, id string, d attach.Decision) error {
+	var err error
 	switch d {
 	case attach.Decision("once"):
-		return a.cl.Decide(ctx, id, "approve", false, "")
+		_, err = a.cl.Decide(ctx, id, "approve", false, "")
 	case attach.Decision("always"):
-		return a.cl.Decide(ctx, id, "approve", true, "")
+		_, err = a.cl.Decide(ctx, id, "approve", true, "")
+	default:
+		_, err = a.cl.Decide(ctx, id, "deny", false, "")
 	}
-	return a.cl.Decide(ctx, id, "deny", false, "")
+	return err
 }
 
 func substrateTransport(v string) (string, error) {
