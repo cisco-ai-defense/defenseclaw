@@ -224,7 +224,7 @@ standard input.
 ![DefenseClaw TUI Vault tab on Linux: 2 secrets for your sandboxes, values never shown; the selected DEMO_API_TOKEN line says it reaches a sandbox as $DEMO_API_TOKEN with --vault, is sent only to host.openshell.internal:28950 and was added by you; the table lists DEMO_API_TOKEN and STRIPE_API_KEY with host, status, source and last use](/images/sandboxes/screens/vault-tui-panel.png)
 
 On a managed computer `defenseclaw tui` is not available; use
-`defenseclaw sandbox vault` there.
+`defenseclaw sandbox vault` there ([Managed command availability](/docs/enterprise/managed-commands)).
 
 In the [macOS app](/docs/sandboxes/apps#the-vault-card-preview) (Preview), the
 Sandboxes view has a **Vault (Preview)** card with the same list and changes:
@@ -235,7 +235,8 @@ characters of a captured secret before you confirm it, run
 `defenseclaw sandbox vault confirm NAME` in Terminal; the app does not show
 them. If
 the command refuses on a managed computer, the card says so; run
-`defenseclaw sandbox vault list` in Terminal to see why.
+`defenseclaw sandbox vault list` in Terminal to see why
+([Managed command availability](/docs/enterprise/managed-commands)).
 
 Only terminal agents run in a sandbox (Claude Code, Codex, Copilot CLI,
 OpenCode, Kiro, Hermes, Antigravity's `agy`, Amp, Cursor Agent, Devin), so only
