@@ -6002,9 +6002,14 @@ func copilotBoundEventOwnsCommand(key, command, hookScript string) bool {
 	if !ok || (rest != "" && !copilotBoundEventArgument(rest)) {
 		return false
 	}
-	// A copy named by a Windows path, on every OS (GAP-1923).
-	if _, owned := editedDefenseClawHookScript(windowsHookScriptCommandAsPOSIX(posixHookCommandWord(word)+rest), "copilot-hook.sh"); owned {
-		return true
+	// A copy named by a Windows path, on every OS (GAP-1923): the command as
+	// written (a double-quoted word keeps its backslashes) or its script word
+	// after a shell or env wrapper.
+	for _, candidate := range []string{strings.TrimSpace(command), posixHookCommandWord(word) + rest} {
+		bound, owned := editedDefenseClawHookScript(windowsHookScriptCommandAsPOSIX(candidate), "copilot-hook.sh")
+		if owned && (bound == "" || copilotBoundEventArgument(bound)) {
+			return true
+		}
 	}
 	if !filepath.IsAbs(word) || filepath.Clean(word) != word {
 		return false
