@@ -26,6 +26,7 @@ import (
 	"io/fs"
 	"maps"
 	"os"
+	"os/exec"
 	"path"
 	"path/filepath"
 	"runtime"
@@ -293,10 +294,30 @@ func TestMigrateV9SeedsAMissingDefaultRulePack(t *testing.T) {
 	}
 }
 
+// readOnlyPackRoot makes dir refuse new entries for the test account
+// (rel-1-0-10:GAP-1523): mode 0500 on Unix, and on Windows a deny ACE for
+// write-data/add-file and append-data/add-subdirectory, which mode bits do
+// not express there. The deny is removed at cleanup so the temp dir goes.
+func readOnlyPackRoot(t *testing.T, dir string) {
+	t.Helper()
+	if runtime.GOOS != "windows" {
+		if err := os.Chmod(dir, 0o500); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+		return
+	}
+	who := os.Getenv("USERDOMAIN") + `\` + os.Getenv("USERNAME")
+	if out, err := exec.Command("icacls", dir, "/deny", who+":(WD,AD)").CombinedOutput(); err != nil {
+		t.Fatalf("deny writes in the pack root: %v: %s", err, out)
+	}
+	t.Cleanup(func() { _ = exec.Command("icacls", dir, "/remove:d", who).Run() })
+}
+
 // A v9 config must never be committed when its referenced shipped pack
 // cannot be installed.
 func TestMigrateV9RefusesFailedRulePackSeed(t *testing.T) {
-	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+	if runtime.GOOS != "windows" && os.Geteuid() == 0 {
 		t.Skip("requires an unprivileged Unix user for read-only directory permissions")
 	}
 	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
@@ -311,12 +332,14 @@ func TestMigrateV9RefusesFailedRulePackSeed(t *testing.T) {
 	if err := os.MkdirAll(packRoot, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chmod(packRoot, 0o500); err != nil {
-		t.Fatal(err)
-	}
-	defer os.Chmod(packRoot, 0o700)
-	if _, err := MigrateV9(context.Background(), MigrateV9Input{ConfigPath: configPath}); err == nil {
+	readOnlyPackRoot(t, packRoot)
+	_, err := MigrateV9(context.Background(), MigrateV9Input{ConfigPath: configPath})
+	if err == nil {
 		t.Fatal("migration committed despite a failed rule-pack seed")
+	}
+	// The refusal is the seed's: the pack root refused the write.
+	if !strings.Contains(err.Error(), "seed the shipped") || !errors.Is(err, fs.ErrPermission) {
+		t.Fatalf("migration error is not the refused seed: %v", err)
 	}
 	if got, err := os.ReadFile(configPath); err != nil || string(got) != string(source) {
 		t.Fatalf("config after failed migration = %q, %v", got, err)
