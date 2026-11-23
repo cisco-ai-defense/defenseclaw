@@ -12,7 +12,9 @@ import "testing"
 // A folder only a later cd reaches (cd ~/.defenseclaw && ls after the write)
 // made echo m > config.yaml a strict block (tamper.detector_state_write) and a
 // default alert where the laptop and rel/1.0.10 allow (substrate-1 GAP-0883,
-// RV-SEC10 rows C01-C03, C08, B43, B44, B48). The rows are benign: the actor
+// RV-SEC10 rows C01-C03, C08, B43, B44, B48), and so did a statement ending
+// in ; after pushd and popd, cd -, cd "$D", a function, a group or a loop
+// (substrate-1 GAP-0947, RV-SEC10B rows N01-N23). The rows are benign: the actor
 // must give the laptop's answer in every pack.
 func TestGAP0883GuestReadsEachStatementWhereItRuns(t *testing.T) {
 	gap0377Check(t, []gap0377Row{
@@ -23,6 +25,31 @@ func TestGAP0883GuestReadsEachStatementWhereItRuns(t *testing.T) {
 		{name: "B43 sub-or claude later cd", command: "(cd .claude || cd /tmp)\n$CMD\necho '{}' > settings.json\ncd .claude\nls", benign: true},
 		{name: "B44 sub-or dc later cd", command: "(cd ~/.defenseclaw || cd /tmp)\n$CMD\necho m > config.yaml\ncd ~/.defenseclaw && ls", benign: true},
 		{name: "B48 dc sub later cd abs", command: "(cd ~/.defenseclaw || true)\n$CMD\necho m > config.yaml\ncd ~/.defenseclaw\ncat config.yaml", benign: true},
+		// RV-SEC10B N01-N23: a folder only a later cd reaches, after pushd and
+		// popd, cd -, cd "$D", a function, a group or a loop (substrate-1 GAP-0947).
+		{name: "N01 src or-exit cfg", command: "cd src || exit; make; cd ..; echo x > config.yaml", benign: true},
+		{name: "N02 CMD build or-exit", command: "$CMD; cd build || exit 1; make install", benign: true},
+		{name: "N03 tmp or-return", command: "cd /tmp || return; $CMD; echo m > config.yaml", benign: true},
+		{name: "N04 venv src or-exit later claude", command: "source .venv/bin/activate; cd src || exit; pytest -q; cd ~/.claude && ls", benign: true},
+		{name: "N05 CMD and src or-exit", command: "$CMD && cd src || exit; echo x > settings.json", benign: true},
+		{name: "N06 p or-exit CMD later dc ls", command: "cd p || exit; $CMD; echo m > notes.txt; cd ~/.defenseclaw && ls", benign: true},
+		{name: "N07 later claude read", command: "$CMD; echo '{}' > settings.json; cd ~/.claude || exit; cat settings.json", benign: true},
+		{name: "N08 src or-exit CMD write cfg", command: "cd src || exit; $CMD; echo m > config.yaml", benign: true},
+		{name: "N09 group src make", command: "{ cd src || exit; make; }; $CMD; echo x > out.txt", benign: true},
+		{name: "N10 pushd src popd later dc", command: "pushd src; $CMD; popd; echo m > config.yaml; cd ~/.defenseclaw && ls", benign: true},
+		{name: "N11 pushd popd no later cd", command: "pushd src; $CMD; popd; echo m > config.yaml", benign: true},
+		{name: "N12 pushd popd no CMD later dc", command: "pushd src; popd; echo m > config.yaml; cd ~/.defenseclaw && ls", benign: true},
+		{name: "N13 popd only later dc", command: "popd; echo m > config.yaml; cd ~/.defenseclaw && ls", benign: true},
+		{name: "N14 cd dash later dc", command: "cd -; echo m > config.yaml; cd ~/.defenseclaw && ls", benign: true},
+		{name: "N15 cd var later dc", command: "cd \"$D\"; echo m > config.yaml; cd ~/.defenseclaw && ls", benign: true},
+		{name: "N16 fn decl later dc", command: "f() { :; }; echo m > config.yaml; cd ~/.defenseclaw && ls", benign: true},
+		{name: "N17 pushd popd later claude", command: "pushd src; $CMD; popd; echo '{}' > settings.json; cd ~/.claude && ls", benign: true},
+		{name: "N18 pushd popd later tmp", command: "pushd src; $CMD; popd; echo m > config.yaml; cd /tmp && ls", benign: true},
+		{name: "N19 pushd popd later dc newline", command: "pushd src >/dev/null\nmake\npopd >/dev/null\necho m > config.yaml\ncd ~/.defenseclaw && ls", benign: true},
+		{name: "N20 called fn later dc", command: "f() { cd src; }; f; echo m > config.yaml; cd ~/.defenseclaw && ls", benign: true},
+		{name: "N21 cd var CMD later dc", command: "cd \"$D\"; $CMD; echo m > config.yaml; cd ~/.defenseclaw && ls", benign: true},
+		{name: "N22 group cd later dc", command: "{ cd src; }; echo m > config.yaml; cd ~/.defenseclaw && ls", benign: true},
+		{name: "N23 loop cd later dc", command: "for d in src; do cd $d; done; echo m > config.yaml; cd ~/.defenseclaw && ls", benign: true},
 	})
 }
 

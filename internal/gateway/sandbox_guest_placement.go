@@ -305,6 +305,13 @@ func sandboxGuestPlacements(input actionfacts.Input, facts actionfacts.Facts, st
 	// splitRead holds the texts the simples pass read, each in the folders
 	// known at its own place in the call.
 	splitRead := map[string]bool{}
+	// followed counts, for each folder, the cd and pushd statements of the
+	// split that reach it through a value the split followed (a variable, a
+	// guessed login, a ~ it spelled out): guestKnownFolders. A statement the
+	// split reads again at once, in another folder it may run in, counts
+	// once (previous).
+	followed := map[string]int{}
+	previous := ""
 	settle := func(simple actionfacts.SimpleCommand) {
 		if !standing || simple.OtherFolder {
 			return
@@ -350,9 +357,16 @@ func sandboxGuestPlacements(input actionfacts.Input, facts actionfacts.Facts, st
 		default:
 			stoodIn, standing = path.Clean(cwd), true
 		}
-		for _, target := range guestCDTargets(simple.Text, bases, input.ActiveHome) {
+		moved := guestCDTargets(simple.Text, bases, input.ActiveHome)
+		for _, target := range moved {
 			targets = keep(targets, target)
 		}
+		if !simple.OtherFolder && simple.Text != previous && (simple.ResolvedVariable || simple.UnresolvedBoundVariable || simple.LoginGuess) {
+			for _, dir := range moved {
+				followed[path.Clean(dir)]++
+			}
+		}
+		previous = simple.Text
 	}
 	if standing {
 		dirs = keep(dirs, stoodIn)
@@ -377,29 +391,43 @@ func sandboxGuestPlacements(input actionfacts.Input, facts actionfacts.Facts, st
 	// Every call of the script, a function body's included: the split stops
 	// at a construct it cannot read (f() { cd .cache; }; f; $CMD gives one
 	// parse failure), while a static cd anywhere in the text is still a
-	// directory the laptop's readers keep. A call the simples pass read
-	// (splitRead) is not read again here: it was read in the folders known
-	// at its own place, and these lists also hold the folders of later
-	// statements. Reading it in them gave echo m > config.yaml; cd
-	// ~/.defenseclaw && ls the reading echo m > config.yaml in
+	// directory the laptop's readers keep. Each call is read only in the
+	// folders known at its own place in the text (guestScriptCall.at): a
+	// folder a static cd reaches (guestCDTargets) is known from that cd on,
+	// so a folder only a later cd reaches is not one an earlier call runs in.
+	// Read in every folder of the call, echo m > config.yaml; cd
+	// ~/.defenseclaw && ls gave the reading echo m > config.yaml in
 	// ~/.defenseclaw, and the strict actor blocked with
 	// tamper.detector_state_write where the laptop and rel allow
-	// (substrate-1 GAP-0883). Its cd targets are still kept.
+	// (substrate-1 GAP-0883); a call the split read was skipped, but only
+	// where its text was the split's, so after pushd src; popd, cd -, cd
+	// "$D", a function, a group or a loop (each statement ending in ;) the
+	// block stayed (substrate-1 GAP-0947). The guest's folder, a folder the
+	// split reached through a followed value (followed) or that no static cd
+	// of the text names, and every folder of a call that names CDPATH are
+	// known from the start, as before. A call the simples pass read
+	// (splitRead) is not read again: it was read in the folders known at its
+	// own place. Its cd targets are still kept.
+	scriptCalls := guestScriptCalls(command, input.ActiveHome)
+	known := map[string]int{}
+	targets = guestKnownFolders(scriptCalls, dirs, targets, followed, input.CWD, input.ActiveHome, strings.Contains(command, "CDPATH"), keep, known)
 	calls := &pass{statements: map[string]bool{}}
 	var callReadings []pending
 	callsDropped, callsListed := false, map[key]int{}
 	var callsPlain []int
-	for _, call := range guestScriptCalls(command) {
-		if !splitRead[call] {
-			for _, dir := range dirs {
-				callReadings = collect(callReadings, callsListed, &callsPlain, &callsDropped, pending{call, dir, false, 0})
-			}
-			for _, dir := range targets {
-				callReadings = collect(callReadings, callsListed, &callsPlain, &callsDropped, pending{call, dir, true, 0})
+	for _, call := range scriptCalls {
+		if splitRead[call.text] {
+			continue
+		}
+		for _, dir := range dirs {
+			if known[dir] <= call.at {
+				callReadings = collect(callReadings, callsListed, &callsPlain, &callsDropped, pending{call.text, dir, false, 0})
 			}
 		}
-		for _, target := range guestCDTargets(call, slices.Concat(dirs, targets), input.ActiveHome) {
-			targets = keep(targets, target)
+		for _, dir := range targets {
+			if known[dir] <= call.at {
+				callReadings = collect(callReadings, callsListed, &callsPlain, &callsDropped, pending{call.text, dir, true, 0})
+			}
 		}
 	}
 	callsCut := !placeAll(calls, callReadings) || callsDropped
@@ -817,19 +845,30 @@ func guestCall(text string) (*syntax.CallExpr, bool) {
 // operand, cd - and popd add none (they return to a directory already a
 // candidate, or to one no static word names).
 func guestCDTargets(text string, bases []string, home string) []string {
-	call, ok := guestCall(text)
+	operand, ok := guestCDOperand(text, home)
 	if !ok {
 		return nil
 	}
+	return guestCDJoin(operand, bases, home)
+}
+
+// guestCDOperand returns, lexically, the static operand of a cd or pushd
+// command text ("" for a bare cd); false for any other text, a dynamic
+// operand and cd -.
+func guestCDOperand(text, home string) (string, bool) {
+	call, ok := guestCall(text)
+	if !ok {
+		return "", false
+	}
 	program, static := hookpaths.StaticWord(call.Args[0], home)
 	if !static || program != "cd" && program != "pushd" {
-		return nil
+		return "", false
 	}
 	operand := ""
 	for _, word := range call.Args[1:] {
 		value, static := hookpaths.StaticWord(word, home)
 		if !static {
-			return nil
+			return "", false
 		}
 		if value == "--" || operand == "" && strings.HasPrefix(value, "-") && value != "-" {
 			continue
@@ -837,9 +876,14 @@ func guestCDTargets(text string, bases []string, home string) []string {
 		operand = value
 		break
 	}
+	return operand, operand != "-"
+}
+
+// guestCDJoin returns the directories a cd to operand (guestCDOperand) moves
+// to from each of bases: an absolute or ~ operand as it is, the home for a
+// bare cd, a relative one joined to each base.
+func guestCDJoin(operand string, bases []string, home string) []string {
 	switch {
-	case operand == "-":
-		return nil
 	case operand == "" || operand == "~":
 		if path.IsAbs(home) {
 			return []string{path.Clean(home)}
@@ -859,30 +903,224 @@ func guestCDTargets(text string, bases []string, home string) []string {
 	return targets
 }
 
-// guestScriptCalls returns, in source order, the source text of every
-// simple-command statement of a Bash script, with its redirections, nested
-// ones included (a function body, a group, a subshell, a process
-// substitution), lexically; nil when the script does not parse.
-func guestScriptCalls(command string) []string {
+// guestKnownFolders gives each folder of the guest placement's lists the
+// first place in the text from which a call may stand in it (known), and
+// returns the cd targets list grown by the static cd and pushd calls of the
+// script (calls). A call's targets are joined only to the folders known
+// where it may run (at): pushd src before a later cd ~/.defenseclaw does not
+// reach ~/.defenseclaw/src. A target is known from where the call starts,
+// so a cd in a loop or a function body counts for every statement after it
+// in the text. The guest's folder, every folder when the script names
+// CDPATH, and a folder of the lists no static cd of the script reaches are
+// known from the start (-1). A folder the split's cds reach through a
+// followed value more often than the static cds of the script do (followed:
+// D=~/.claude; cd "$D" before a later cd ~/.claude) is known from the first
+// call the split may follow a value in (guestScriptCall.dynamic), or from
+// the start. The walk runs again while a round knows a folder earlier, at
+// most four rounds; past them every folder is known from the start.
+func guestKnownFolders(calls []guestScriptCall, dirs, targets []string, followed map[string]int, cwd, home string, cdpath bool,
+	keep func([]string, string) []string, known map[string]int) []string {
+	listed := slices.Concat(dirs, targets)
+	for _, dir := range listed {
+		if cdpath || dir == path.Clean(cwd) {
+			known[dir] = -1
+		}
+	}
+	type move struct {
+		operand string
+		at      int
+	}
+	var moves []move
+	dynamic := -1
+	for at, call := range calls {
+		if call.dynamic && dynamic < 0 {
+			dynamic = call.start
+		}
+		if operand, ok := guestCDOperand(call.text, home); ok {
+			moves = append(moves, move{operand, at})
+		}
+	}
+	grown := targets
+	var bases []string
+	reached := map[string]int{}
+	for round := 0; ; round++ {
+		if round == 4 {
+			for _, dir := range slices.Concat(listed, grown) {
+				known[dir] = -1
+			}
+			return grown
+		}
+		changed := false
+		grown = slices.Clone(targets)
+		clear(reached)
+		for _, move := range moves {
+			call := calls[move.at]
+			bases = bases[:0]
+			for _, dir := range slices.Concat(dirs, grown) {
+				if since, ok := known[dir]; ok && since <= call.at {
+					bases = append(bases, dir)
+				}
+			}
+			for _, target := range guestCDJoin(move.operand, bases, home) {
+				reached[target]++
+				grown = keep(grown, target)
+				if since, ok := known[target]; !ok || call.start < since {
+					known[target] = call.start
+					changed = true
+				}
+			}
+		}
+		for _, dir := range slices.Concat(listed, grown) {
+			since, ok := known[dir]
+			switch {
+			case !ok:
+				known[dir] = -1
+				changed = true
+			case followed[dir] > reached[dir] && since > dynamic:
+				known[dir] = dynamic
+				changed = true
+			}
+		}
+		if !changed {
+			return grown
+		}
+	}
+}
+
+// guestScriptCall is a simple-command statement of a script
+// (guestScriptCalls): its source text, with its redirections, where it
+// starts (the first place it may run from), and at, the latest place in the
+// text it may run from. That is where it starts, the end
+// of a loop it sits in (it runs again after the later statements of the
+// loop), or the place of the last call of the function whose body holds it:
+// the end of the script where the function may be called another way (a
+// command the split cannot read, the name in a string, a recursive call),
+// and the declaration of a function that is never called.
+type guestScriptCall struct {
+	text      string
+	start, at int
+	// dynamic marks a call whose program word, or a cd or pushd operand,
+	// is not static, or one of cmdRedefiningCommands (eval, source, ...) or
+	// a builtin or command wrapper: the split may follow a value there.
+	dynamic bool
+}
+
+// guestScriptCalls returns, in source order, every simple-command statement
+// of a Bash script, nested ones included (a function body, a group, a
+// subshell, a process substitution), lexically; nil when the script does not
+// parse.
+func guestScriptCalls(command, home string) []guestScriptCall {
 	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(command), "")
 	if err != nil {
 		return nil
 	}
-	var calls []string
+	type span struct {
+		start, end int
+		name       string
+	}
+	var loops, bodies []span
+	var calls []guestScriptCall
+	// programs holds the static program word of each call, "" for none.
+	var programs []string
 	syntax.Walk(file, func(node syntax.Node) bool {
-		stmt, ok := node.(*syntax.Stmt)
-		if !ok {
-			return true
-		}
-		if call, isCall := stmt.Cmd.(*syntax.CallExpr); !isCall || len(call.Args) == 0 {
-			return true
-		}
-		// The statement's span keeps its redirections (> ../.claude/settings.json).
-		start, end := int(stmt.Pos().Offset()), int(stmt.End().Offset())
-		if start >= 0 && end <= len(command) && start < end {
-			calls = append(calls, command[start:end])
+		switch node := node.(type) {
+		case *syntax.ForClause, *syntax.WhileClause:
+			loops = append(loops, span{start: int(node.Pos().Offset()), end: int(node.End().Offset())})
+		case *syntax.FuncDecl:
+			if node.Name != nil {
+				bodies = append(bodies, span{int(node.Pos().Offset()), int(node.End().Offset()), node.Name.Value})
+			}
+		case *syntax.Stmt:
+			call, isCall := node.Cmd.(*syntax.CallExpr)
+			if !isCall || len(call.Args) == 0 {
+				return true
+			}
+			// The statement's span keeps its redirections (> ../.claude/settings.json).
+			start, end := int(node.Pos().Offset()), int(node.End().Offset())
+			if start >= 0 && end <= len(command) && start < end {
+				program, static := hookpaths.StaticWord(call.Args[0], home)
+				if !static {
+					program = ""
+				}
+				dynamic := !static || cmdRedefiningCommands[program] || program == "builtin" || program == "command"
+				if program == "cd" || program == "pushd" {
+					for _, word := range call.Args[1:] {
+						if _, static := hookpaths.StaticWord(word, home); !static {
+							dynamic = true
+						}
+					}
+				}
+				calls = append(calls, guestScriptCall{text: command[start:end], start: start, at: start, dynamic: dynamic})
+				programs = append(programs, program)
+			}
 		}
 		return true
 	})
+	if len(loops) == 0 && len(bodies) == 0 {
+		return calls
+	}
+	sites := map[string][]int{}
+	if len(bodies) != 0 {
+		for at, program := range programs {
+			if program != "" {
+				sites[program] = append(sites[program], calls[at].start)
+			}
+		}
+	}
+	unread := len(bodies) != 0 && guestNodeRunsUnreadCommand(file, home)
+	runs := map[int]int{}
+	var place func(pos, depth int) int
+	place = func(pos, depth int) int {
+		out := pos
+		for _, loop := range loops {
+			if loop.start <= pos && pos < loop.end {
+				out = max(out, loop.end)
+			}
+		}
+		for at, body := range bodies {
+			if pos < body.start || pos >= body.end {
+				continue
+			}
+			from, ok := runs[at]
+			if !ok {
+				from = len(command)
+				if !unread && depth < 8 && guestWordCount(command, body.name) == 1+len(sites[body.name]) {
+					from = body.start
+					for _, site := range sites[body.name] {
+						if site >= body.start && site < body.end {
+							from = len(command)
+							break
+						}
+						from = max(from, place(site, depth+1))
+					}
+				}
+				runs[at] = from
+			}
+			out = max(out, from)
+		}
+		return out
+	}
+	for at := range calls {
+		calls[at].at = place(calls[at].at, 0)
+	}
 	return calls
+}
+
+// guestWordCount counts the places name stands in text as a whole word, with
+// no name byte (guestNameByte) next to it.
+func guestWordCount(text, name string) int {
+	count := 0
+	for from := 0; name != "" && from < len(text); {
+		at := strings.Index(text[from:], name)
+		if at < 0 {
+			break
+		}
+		at += from
+		end := at + len(name)
+		if (at == 0 || !guestNameByte(text[at-1])) && (end == len(text) || !guestNameByte(text[end])) {
+			count++
+		}
+		from = at + 1
+	}
+	return count
 }
