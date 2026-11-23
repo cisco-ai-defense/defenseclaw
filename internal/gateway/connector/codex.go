@@ -4277,8 +4277,9 @@ func isOwnedCodexHookHandler(rawHook interface{}, hooksDir string) bool {
 	}
 	// A user edit of our generated script's path or name is still a
 	// DefenseClaw registration: repair replaces it in place and teardown
-	// must not strand its positional trust state (GAP-1032, GAP-0907).
-	if command, _ := handler["command"].(string); editedDefenseClawHookCommand(command, "codex-hook.sh") {
+	// must not strand its positional trust state (GAP-1032, GAP-0907), and
+	// so is a copy named by a Windows path (GAP-1923).
+	if command, _ := handler["command"].(string); editedDefenseClawHookCommandByAnyPath(command, "codex-hook.sh") {
 		return true
 	}
 	for _, key := range []string{"commandWindows", "command_windows"} {

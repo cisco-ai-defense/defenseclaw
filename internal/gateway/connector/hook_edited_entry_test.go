@@ -93,11 +93,12 @@ func TestEditedHookEntriesGolden(t *testing.T) {
 		// on Windows, a fixed one elsewhere (the predicate reads text only).
 		// The doctor's rule, shared with cli/defenseclaw/hook_integrity.py,
 		// reads POSIX script paths only, so an edited entry named by a drive
-		// path is not reported (GAP-1923, open; Setup's Claude Code repair
-		// claims it since GAP-1909). The pin fails when GAP-1923 is fixed:
-		// then the drive-path run expects tc.Edited too. A copy in a POSIX
-		// folder is reported whatever the data directory, and the working set
-		// or a user's hook is never reported.
+		// path is not reported (GAP-1931, open). Setup's repair and Teardown
+		// claim it (GAP-1909 Claude Code, GAP-1923 the other connectors);
+		// this pin fails when the doctor rule reads Windows paths too: then
+		// the drive-path run expects tc.Edited. A copy in a POSIX folder is
+		// reported whatever the data directory, and the working set or a
+		// user's hook is never reported.
 		driveDir := "C:/Users/u/.defenseclaw"
 		if runtime.GOOS == "windows" {
 			driveDir = filepath.Join(testenv.PrivateTempDir(t), ".defenseclaw")
