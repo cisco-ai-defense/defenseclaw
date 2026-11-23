@@ -7,6 +7,7 @@ package safefile
 
 import (
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -107,4 +108,52 @@ func ReadChildLink(parent *os.File, name string) (string, error) {
 
 func validChildName(name string) bool {
 	return name != "" && name != "." && name != ".." && !strings.ContainsAny(name, "/\x00")
+}
+
+// OpenDirectoryResolved opens the directory at path as OpenDirectoryNoFollow
+// does. When a link on the way refuses that, it resolves path once and opens
+// the resolved, link-free spelling no-follow instead, accepting it only when
+// trusted approves every directory on it, from / down; a refusal is
+// ErrSymlinkRefused. It returns the spelling it opened.
+func OpenDirectoryResolved(path string, trusted func(dir *os.File, path string) bool) (*os.File, string, error) {
+	dir, err := OpenDirectoryNoFollow(path)
+	if !errors.Is(err, ErrSymlinkRefused) || trusted == nil {
+		return dir, path, err
+	}
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return nil, "", err
+	}
+	flags := unix.O_DIRECTORY | unix.O_NOFOLLOW | unix.O_CLOEXEC
+	fd, err := unix.Open("/", unix.O_RDONLY|flags, 0)
+	if err != nil {
+		return nil, "", err
+	}
+	current, spelled := os.NewFile(uintptr(fd), "/"), "/"
+	components := strings.Split(strings.TrimPrefix(resolved, "/"), "/")
+	for i, name := range components {
+		if name == "" {
+			continue
+		}
+		if !trusted(current, spelled) {
+			_ = current.Close()
+			return nil, "", fmt.Errorf("%w: %s has an untrusted owner", ErrSymlinkRefused, spelled)
+		}
+		mode := directorySearchMode
+		if i == len(components)-1 {
+			mode = unix.O_RDONLY
+		}
+		next, openErr := unix.Openat(int(current.Fd()), name, mode|flags, 0)
+		_ = current.Close()
+		if openErr != nil {
+			return nil, "", &os.PathError{Op: "openat", Path: filepath.Join(spelled, name), Err: openErr}
+		}
+		spelled = filepath.Join(spelled, name)
+		current = os.NewFile(uintptr(next), spelled)
+	}
+	if !trusted(current, spelled) {
+		_ = current.Close()
+		return nil, "", fmt.Errorf("%w: %s has an untrusted owner", ErrSymlinkRefused, spelled)
+	}
+	return current, resolved, nil
 }

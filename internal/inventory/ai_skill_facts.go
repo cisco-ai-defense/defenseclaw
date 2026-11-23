@@ -125,7 +125,7 @@ func (s *ContinuousDiscoveryService) skillFacts(path string, bundled bool) *AISk
 	if !inCache || !signed || !cached.fresh(signature, now) {
 		var manifest []byte
 		hashed = skillHashCacheEntry{signature: signature, hashedAt: now}
-		hashed.hash, hashed.status, manifest, hashed.manifestName, read = hashSkillFolderCaptureNamed(path, limit, maxSkillBytes)
+		hashed.hash, hashed.status, manifest, hashed.manifestPath, read = hashSkillFolderCaptureNamed(path, limit, maxSkillBytes, s.skillFolderTrust(path))
 		hashed.front = parseSkillFrontMatter(manifest)
 		if hashed.status == SkillContentOK && manifest != nil {
 			hashed.manifestHash = skillManifestHash(manifest)
@@ -168,7 +168,7 @@ func (s *ContinuousDiscoveryService) skillFacts(path string, bundled bool) *AISk
 			s.skillManifests = map[string]string{}
 		}
 		if _, known := s.skillManifests[facts.ManifestHash]; known || len(s.skillManifests) < maxSkillManifestFolders {
-			s.skillManifests[facts.ManifestHash] = filepath.Join(path, hashed.manifestName)
+			s.skillManifests[facts.ManifestHash] = hashed.manifestPath
 		}
 	}
 	return &facts
@@ -246,26 +246,15 @@ func realChildDirs(dir string) []string {
 // give the walk the listing a file system can give (a stale size).
 var skillReadDir = (*os.File).ReadDir
 
-// hashSkillFolder hashes the sorted "rel NUL kind NUL sha256(payload) LF"
-// lines of every entry below root (see defenseclaw.inventory.skill.content_hash).
-// Child directories and files are opened relative to held parent handles.
-// Links contribute their stored targets without opening those targets.
-func hashSkillFolder(root string, limit int64) (hash, status string, consumed int64) {
-	hash, status, _, consumed = hashSkillFolderCapture(root, limit, 0)
-	return hash, status, consumed
-}
-
-// hashSkillFolderCapture retains only a root SKILL.md prefix from the same
-// bounded, stable read that supplies that file's complete digest.
-func hashSkillFolderCapture(root string, limit int64, captureLimit int) (hash, status string, manifest []byte, consumed int64) {
-	hash, status, manifest, _, consumed = hashSkillFolderCaptureNamed(root, limit, captureLimit)
-	return hash, status, manifest, consumed
-}
-
-// hashSkillFolderCaptureNamed also returns the exact root manifest leaf observed
-// by the pinned walk, so a later explicit readback never needs to list again.
-func hashSkillFolderCaptureNamed(root string, limit int64, captureLimit int) (hash, status string, manifest []byte, manifestName string, consumed int64) {
-	dir, err := safefile.OpenDirectoryNoFollow(root)
+// hashSkillFolderCaptureNamed hashes the sorted "rel NUL kind NUL
+// sha256(payload) LF" lines of every entry below root (see
+// defenseclaw.inventory.skill.content_hash). Child directories and files are
+// opened relative to held parent handles; links contribute their stored
+// targets without opening those targets. It retains a root SKILL.md prefix
+// from the same bounded, stable read that supplies that file's digest, and
+// returns that manifest's exact path, so a later readback never lists again.
+func hashSkillFolderCaptureNamed(root string, limit int64, captureLimit int, trusted func(*os.File, string) bool) (hash, status string, manifest []byte, manifestPath string, consumed int64) {
+	dir, opened, err := openSkillFolder(root, trusted)
 	if errors.Is(err, safefile.ErrSymlinkRefused) {
 		return "", SkillContentSymlink, nil, "", 0
 	}
@@ -279,18 +268,58 @@ func hashSkillFolderCaptureNamed(root string, limit int64, captureLimit int) (ha
 	walk := skillHashWalk{limit: limit, captureLimit: captureLimit}
 	walk.rootInfo, _ = dir.Stat()
 	err = walk.readDir(dir, "", 0)
+	if walk.manifestName != "" {
+		manifestPath = filepath.Join(opened, walk.manifestName)
+	}
 	switch {
 	case errors.Is(err, errSkillTooLarge), errors.Is(err, safefile.ErrReadLimit):
-		return "", SkillContentTooLarge, walk.manifest, walk.manifestName, walk.consumed
+		return "", SkillContentTooLarge, walk.manifest, manifestPath, walk.consumed
 	case err != nil:
-		return "", SkillContentUnreadable, walk.manifest, walk.manifestName, walk.consumed
+		return "", SkillContentUnreadable, walk.manifest, manifestPath, walk.consumed
 	}
 	sort.Strings(walk.lines)
 	digest := sha256.New()
 	for _, line := range walk.lines {
 		_, _ = io.WriteString(digest, line)
 	}
-	return "sha256:" + hex.EncodeToString(digest.Sum(nil)), SkillContentOK, walk.manifest, walk.manifestName, walk.consumed
+	return "sha256:" + hex.EncodeToString(digest.Sum(nil)), SkillContentOK, walk.manifest, manifestPath, walk.consumed
+}
+
+// openSkillFolder opens the skill folder at root. A skill folder that is a
+// link stays refused (ErrSymlinkRefused), as does every link below it. A link
+// above it, such as ~/.claude linked into a dotfiles repo or /home linked to
+// /var/home, is resolved once, and the resolved folders, the skill folder
+// included, are accepted only when trusted approves each (GAP-2001). It
+// returns the spelling it opened root by.
+func openSkillFolder(root string, trusted func(*os.File, string) bool) (*os.File, string, error) {
+	lexical := filepath.Dir(root)
+	parent, resolved, err := safefile.OpenDirectoryResolved(lexical, trusted)
+	if err != nil {
+		return nil, "", err
+	}
+	defer parent.Close()
+	name := filepath.Base(root)
+	dir, err := safefile.OpenDirectoryChildNoFollow(parent, name)
+	if err != nil {
+		if _, linkErr := safefile.ReadChildLink(parent, name); linkErr == nil {
+			return nil, "", fmt.Errorf("%w: %w", safefile.ErrSymlinkRefused, err)
+		}
+		return nil, "", err
+	}
+	opened := filepath.Join(resolved, name)
+	if resolved != lexical && !trusted(dir, opened) {
+		_ = dir.Close()
+		return nil, "", fmt.Errorf("%w: %s has an untrusted owner", safefile.ErrSymlinkRefused, opened)
+	}
+	return dir, opened, nil
+}
+
+// skillFolderTrust approves the folders a skill folder at path is reached
+// through when a link above it is resolved: those of the scanned home that
+// holds path, or of the scanning account outside every home.
+func (s *ContinuousDiscoveryService) skillFolderTrust(path string) func(*os.File, string) bool {
+	home, _ := s.skillHome(path)
+	return skillHomeOwnerTrust(home)
 }
 
 type skillHashWalk struct {
@@ -372,7 +401,7 @@ func (walk *skillHashWalk) readEntry(parent *os.File, entry fs.DirEntry, rel str
 	case entry.Type().IsRegular():
 		file, err := safefile.OpenRegularChildNoFollow(parent, name)
 		if err != nil {
-			return err
+			return walk.openRefused(parent, name, err)
 		}
 		defer file.Close()
 		captureLimit := 0
@@ -406,6 +435,19 @@ func (walk *skillHashWalk) readEntry(parent *os.File, entry fs.DirEntry, rel str
 	}
 	walk.lines = append(walk.lines, rel+"\x00"+kind+"\x00"+hex.EncodeToString(sum[:])+"\n")
 	return nil
+}
+
+// openRefused is the error for a regular file the walk could not open. A file
+// too large for the budget by its own record (never the listing, GAP-1901) is
+// too large, as on rel, even when it cannot be opened: on Windows while a
+// writer holds it open, or one the scan may not read (GAP-2006). Only its
+// size is looked at, never its bytes.
+func (walk *skillHashWalk) openRefused(parent *os.File, name string, err error) error {
+	info, statErr := os.Lstat(filepath.Join(parent.Name(), name))
+	if statErr == nil && info.Mode().IsRegular() && info.Size() > walk.limit-walk.consumed {
+		return errSkillTooLarge
+	}
+	return err
 }
 
 func sameOpenedSkillFile(first, second *os.File) bool {
@@ -581,18 +623,28 @@ func skillFrontMatterText(value string, limit int) string {
 // with forward slashes ("" when it cannot be sent), and whether path is in
 // a scanned home at all.
 func (s *ContinuousDiscoveryService) skillLocation(path string) (string, bool) {
+	home, rel := s.skillHome(path)
+	if home == "" {
+		return "", false
+	}
+	if location := "~/" + filepath.ToSlash(rel); len(location) <= maxSkillLocation && !containsUnicodeControl(location) {
+		return location, true
+	}
+	return "", true
+}
+
+// skillHome is the first scanned home that holds path and path below it, or
+// "" when no scanned home does.
+func (s *ContinuousDiscoveryService) skillHome(path string) (home, rel string) {
 	for _, home := range s.homesToScan() {
 		rel, err := filepath.Rel(home, path)
 		if err != nil || rel == "." || rel == ".." || filepath.IsAbs(rel) ||
 			strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 			continue
 		}
-		if location := "~/" + filepath.ToSlash(rel); len(location) <= maxSkillLocation && !containsUnicodeControl(location) {
-			return location, true
-		}
-		return "", true
+		return home, rel
 	}
-	return "", false
+	return "", ""
 }
 
 // validateSkillFacts bounds the facts a per-user scan reports.

@@ -9,6 +9,10 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
+
+	"golang.org/x/sys/windows"
 
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
@@ -45,4 +49,67 @@ func childReadError(err error) error {
 		return fmt.Errorf("%w: %w", ErrSymlinkRefused, err)
 	}
 	return err
+}
+
+// OpenDirectoryResolved opens the directory at path as OpenDirectoryNoFollow
+// does. When a reparse point on the way refuses that, it resolves path once
+// to its final path and opens that reparse-free spelling no-follow instead,
+// accepting it only when trusted approves every folder on it, from the
+// volume root down; a refusal is ErrSymlinkRefused. Owners are read by name
+// after the open pinned a chain with no reparse point. It returns the
+// spelling it opened.
+func OpenDirectoryResolved(path string, trusted func(dir *os.File, path string) bool) (*os.File, string, error) {
+	dir, err := OpenDirectoryNoFollow(path)
+	if !errors.Is(err, ErrSymlinkRefused) || trusted == nil {
+		return dir, path, err
+	}
+	resolved, err := finalDirectoryPath(path)
+	if err != nil {
+		return nil, "", err
+	}
+	dir, err = OpenDirectoryNoFollow(resolved)
+	if err != nil {
+		return nil, "", err
+	}
+	for folder := resolved; ; {
+		if !trusted(dir, folder) {
+			_ = dir.Close()
+			return nil, "", fmt.Errorf("%w: %s has an untrusted owner", ErrSymlinkRefused, folder)
+		}
+		parent := filepath.Dir(folder)
+		if parent == folder {
+			return dir, resolved, nil
+		}
+		folder = parent
+	}
+}
+
+// finalDirectoryPath is the path the system reaches the folder at path by,
+// through every junction and symbolic link on the way, in its plain spelling.
+func finalDirectoryPath(path string) (string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+	size := uint32(windows.MAX_PATH)
+	for {
+		buffer := make([]uint16, size)
+		n, err := windows.GetFinalPathNameByHandle(windows.Handle(file.Fd()), &buffer[0], size, 0)
+		if err != nil {
+			return "", err
+		}
+		if n >= size {
+			size = n + 1
+			continue
+		}
+		final := windows.UTF16ToString(buffer[:n])
+		switch {
+		case strings.HasPrefix(final, `\\?\UNC\`):
+			return `\\` + final[len(`\\?\UNC\`):], nil
+		case strings.HasPrefix(final, `\\?\`):
+			return final[len(`\\?\`):], nil
+		}
+		return final, nil
+	}
 }

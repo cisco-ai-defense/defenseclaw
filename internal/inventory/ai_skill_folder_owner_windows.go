@@ -31,14 +31,26 @@ var skillFolderManaged = skillFolderAdminOwned
 // a folder such as C:\ProgramData\OpenAI\Codex\skills and owns it; its
 // skills are not reported as managed.
 func skillFolderAdminOwned(path string) bool {
+	owner := skillPathOwner(path)
+	return owner != nil && skillAdminSID(owner)
+}
+
+// skillPathOwner is the owner of the file or folder at path, nil when it
+// cannot be read.
+func skillPathOwner(path string) *windows.SID {
 	sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION)
 	if err != nil {
-		return false
+		return nil
 	}
 	owner, _, err := sd.Owner()
-	if err != nil || owner == nil {
-		return false
+	if err != nil {
+		return nil
 	}
-	return owner.IsWellKnown(windows.WinLocalSystemSid) || owner.IsWellKnown(windows.WinBuiltinAdministratorsSid) ||
-		owner.String() == trustedInstallerSID
+	return owner
+}
+
+// skillAdminSID reports whether sid is SYSTEM, Administrators or TrustedInstaller.
+func skillAdminSID(sid *windows.SID) bool {
+	return sid.IsWellKnown(windows.WinLocalSystemSid) || sid.IsWellKnown(windows.WinBuiltinAdministratorsSid) ||
+		sid.String() == trustedInstallerSID
 }
