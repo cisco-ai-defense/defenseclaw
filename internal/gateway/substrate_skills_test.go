@@ -10,19 +10,27 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/substrate/skilldigest"
 )
 
+// fakeSkillScanner records the folders it scanned. The gateway scans a
+// post's folders in parallel (GAP-0980/0982), so the record is guarded
+// (GAP-1058); read it with dirs, which is sorted (scan order is not fixed).
 type fakeSkillScanner struct {
+	mu      sync.Mutex
 	scanned []string
 	fail    bool
 }
 
 func (f *fakeSkillScanner) ScanSkillFolder(_ context.Context, name, dir string, files []SubstrateAttachedFile) (bool, string, error) {
+	f.mu.Lock()
 	f.scanned = append(f.scanned, dir)
+	f.mu.Unlock()
 	if f.fail {
 		return false, "", errors.New("scanner down")
 	}
@@ -32,6 +40,13 @@ func (f *fakeSkillScanner) ScanSkillFolder(_ context.Context, name, dir string, 
 		}
 	}
 	return false, "", nil
+}
+
+// dirs is a sorted copy of the scanned folders.
+func (f *fakeSkillScanner) dirs() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Sorted(slices.Values(f.scanned))
 }
 
 func skillEnvelope(files []map[string]any) string {
@@ -94,8 +109,8 @@ func TestSubstrateHookNamesBlockedSkillFolders(t *testing.T) {
 	if len(q) != 1 || q[0].Path != "/home/agent/.claude/skills/evil" || !strings.Contains(q[0].Reason, "prompt injection") {
 		t.Fatalf("quarantine %+v", q)
 	}
-	if len(scan.scanned) != 2 {
-		t.Fatalf("scanned %v", scan.scanned)
+	if got := scan.dirs(); len(got) != 2 {
+		t.Fatalf("scanned %v", got)
 	}
 	// The connector's answer is unchanged otherwise.
 	var want map[string]json.RawMessage
