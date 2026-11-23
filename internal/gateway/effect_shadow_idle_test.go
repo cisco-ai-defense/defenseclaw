@@ -105,11 +105,6 @@ func holdKnownFolderReadsIdle(t testing.TB, hold func(folder string) bool, wait 
 	return idleOverride(t, func() func() { return hookpaths.HoldKnownFolderReadsForTest(hold, wait) })
 }
 
-func setParentStepIsTextIdle(t testing.TB, text bool) func() {
-	t.Helper()
-	return idleOverride(t, func() func() { return hookpaths.SetParentStepIsText(text) })
-}
-
 // setIdle sets *p to v with every shadow run idle and returns the restore of
 // the value it replaced, which also waits for the runs.
 func setIdle[T any](t testing.TB, p *T, v T) (restore func()) {
