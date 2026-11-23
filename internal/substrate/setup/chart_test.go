@@ -40,31 +40,63 @@ var chartCases = []string{"default", "launcher", "minimal", "full", "expose-lb",
 // different YAML, so a golden compare under them is not a test of the chart.
 const helmPinnedVersion = "v3.17.3"
 
-func helmBinary(t *testing.T) string {
-	t.Helper()
-	required := os.Getenv("DEFENSECLAW_HELM_REQUIRED") != ""
-	h := os.Getenv("DEFENSECLAW_HELM")
+// helmVerdict is what the chart tests do with the helm they found: use it
+// (path), fail the test (fail) or skip it (skip). Exactly one is set.
+type helmVerdict struct{ path, fail, skip string }
+
+// helmRequiredMessage is the sentence every helm failure or skip ends with, so
+// a gate log shows how to make a missing helm fail (GAP-0882: a gate on a box
+// without helm ran the chart tests as skips and looked green).
+const helmRequiredMessage = "the chart tests did NOT run; set DEFENSECLAW_HELM_REQUIRED=1 in every gate run so a missing or unpinned helm fails them instead"
+
+// resolveHelm decides from the environment. required is
+// DEFENSECLAW_HELM_REQUIRED=1 (any other value, "0" included, is not
+// required, as the env-var registry says); explicit is DEFENSECLAW_HELM.
+func resolveHelm(required bool, explicit string, lookPath func(string) (string, error), version func(string) (string, error)) helmVerdict {
+	h := explicit
 	if h == "" {
 		var err error
-		if h, err = exec.LookPath("helm"); err != nil {
+		if h, err = lookPath("helm"); err != nil {
 			// The CI job substrate-chart installs the pinned helm and sets
 			// DEFENSECLAW_HELM_REQUIRED; the general Go shards skip.
 			if required {
-				t.Fatal("helm is not installed; the chart goldens need it here")
+				return helmVerdict{fail: "helm is not installed; the chart goldens need it here"}
 			}
-			t.Skip("helm is not installed (set DEFENSECLAW_HELM)")
+			return helmVerdict{skip: "helm is not installed (set DEFENSECLAW_HELM): " + helmRequiredMessage}
 		}
 	}
 	// The hosted runners ship their own helm, which is not the pinned one:
 	// only the job that installs the pinned release compares the goldens.
-	out, err := exec.Command(h, "version", "--template", "{{.Version}}").Output()
-	if got := strings.TrimSpace(string(out)); err != nil || got != helmPinnedVersion {
+	out, err := version(h)
+	if got := strings.TrimSpace(out); err != nil || got != helmPinnedVersion {
 		if required {
-			t.Fatalf("helm %q is not the pinned %s the goldens are rendered with (%v)", got, helmPinnedVersion, err)
+			return helmVerdict{fail: fmt.Sprintf("helm %q is not the pinned %s the goldens are rendered with (%v)", got, helmPinnedVersion, err)}
 		}
-		t.Skipf("helm %q is not the pinned %s (set DEFENSECLAW_HELM)", got, helmPinnedVersion)
+		return helmVerdict{skip: fmt.Sprintf("helm %q is not the pinned %s (set DEFENSECLAW_HELM): %s", got, helmPinnedVersion, helmRequiredMessage)}
 	}
-	return h
+	return helmVerdict{path: h}
+}
+
+// helmRequiredFromEnv is DEFENSECLAW_HELM_REQUIRED=1.
+func helmRequiredFromEnv() bool { return os.Getenv("DEFENSECLAW_HELM_REQUIRED") == "1" }
+
+func helmBinary(t *testing.T) string {
+	t.Helper()
+	verdict := resolveHelm(helmRequiredFromEnv(), os.Getenv("DEFENSECLAW_HELM"), exec.LookPath,
+		func(h string) (string, error) {
+			out, err := exec.Command(h, "version", "--template", "{{.Version}}").Output()
+			return string(out), err
+		})
+	switch {
+	case verdict.fail != "":
+		t.Fatal(verdict.fail)
+	case verdict.skip != "":
+		// Also on stderr, so a gate that keeps only failures and warnings
+		// still shows that the chart tests were skipped.
+		fmt.Fprintf(os.Stderr, "WARNING: %s: %s\n", t.Name(), verdict.skip)
+		t.Skip(verdict.skip)
+	}
+	return verdict.path
 }
 
 func renderChart(t *testing.T, helm, values string, extra ...string) []byte {

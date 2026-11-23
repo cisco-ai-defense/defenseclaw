@@ -187,7 +187,7 @@ func TestHistoricalEvidencePurgeTreatsAbsentLegacyFindingsAsEmpty(t *testing.T) 
 func newHistoricalEvidencePurgeFixture(t *testing.T) historicalEvidencePurgeFixture {
 	t.Helper()
 	migration, migrationVersion := historicalEvidencePurgeMigration(t)
-	store, err := NewStore(filepath.Join(t.TempDir(), "audit.db"))
+	store, err := NewStore(realMigrationPath(filepath.Join(t.TempDir(), "audit.db")))
 	if err != nil {
 		t.Fatal(err)
 	}
