@@ -308,7 +308,7 @@ func pipelineStage(stmt *syntax.Stmt) bool {
 	return ok && (binary.Op == syntax.Pipe || binary.Op == syntax.PipeAll)
 }
 
-// sequenceStatementDetails is the one full-parser flattening step. The
+// sequenceStatementDetailsWalk is the one full-parser flattening step. The
 // reductions retain ordinary pipelines as a unit; simple-command policy
 // evaluation asks it to expose their individual stages too. Scope identifies
 // statements whose shell directory and variables are shared. walkUncalled
@@ -317,7 +317,7 @@ func pipelineStage(stmt *syntax.Stmt) bool {
 // judges only what the shell runs, Input.StraightLineFunctions) such a body
 // contributes no statement and no state. straight limits the code a loop
 // binding follows to the top-level statements before the loop (Input.LoopBindsStraightLine).
-func sequenceStatementDetails(source string, compound, allSimple, straight, walkUncalled bool) (statements []sequenceStatement, reduced, ok bool) {
+func sequenceStatementDetailsWalk(source string, compound, allSimple, straight, walkUncalled bool) (statements []sequenceStatement, reduced, ok bool) {
 	if source == "" {
 		return nil, false, false
 	}
