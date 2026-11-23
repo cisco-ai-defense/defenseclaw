@@ -9,9 +9,12 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 func gap1909Handler(command string, args ...string) map[string]interface{} {
@@ -82,6 +85,15 @@ func TestGAP1909ForeignWindowsPathHookEntriesAreClaimed(t *testing.T) {
 			`D:\Apps\DefenseClaw\bin\defenseclaw-hook-guard.exe`, `D:\Apps\DefenseClaw\bin\defenseclaw-hook.exe`, "Stop", managedArgs)...),
 		"one-line exec form": gap1909Handler(oneLine, hookArgs...),
 	}
+	// A real Windows data directory on Windows, a fixed one elsewhere.
+	driveDir := `C:\Users\u\.defenseclaw`
+	if runtime.GOOS == "windows" {
+		driveDir = filepath.Join(testenv.PrivateTempDir(t), ".defenseclaw")
+	}
+	driveScript := driveDir + `\hooks\claude-code-hook.sh`
+	claimed["drive data dir, backslashes"] = gap1909Handler(driveScript)
+	claimed["drive data dir, forward slashes"] = gap1909Handler(strings.ReplaceAll(driveScript, `\`, "/"))
+	claimed["drive data dir, edited script name"] = gap1909Handler(driveScript + ".bak")
 	for name, handler := range claimed {
 		if !gap1909Removed(t, handler, hooksDir) {
 			t.Errorf("%s: the removal pass kept the foreign DefenseClaw entry %v", name, handler)
