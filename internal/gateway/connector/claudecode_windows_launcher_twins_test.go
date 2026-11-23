@@ -4,11 +4,16 @@
 package connector
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -249,5 +254,73 @@ func claudeCodeWindowsPerUserHandlersGolden(t *testing.T) {
 	}
 	if strings.Contains(command, "claude-code-hook.sh") || strings.Contains(strings.Join(args, " "), "guard-user-hook") {
 		t.Fatalf("Windows invocation names the shell hook or the Unix guard: %q %q", command, args)
+	}
+}
+
+// symlinkOrSkipWithoutPrivilegeForTest links link to target. A standard
+// Windows account holds no symlink privilege (ERROR_PRIVILEGE_NOT_HELD,
+// 1314): the Limited native leg skips there and the elevated native leg runs
+// the test. Any other failure, and every failure off Windows, fails the test.
+func symlinkOrSkipWithoutPrivilegeForTest(t *testing.T, target, link string) {
+	t.Helper()
+	err := os.Symlink(target, link)
+	if err == nil {
+		return
+	}
+	if runtime.GOOS == "windows" && errors.Is(err, syscall.Errno(1314)) {
+		t.Skipf("this account holds no Windows symlink privilege; the elevated native leg runs this test: %v", err)
+	}
+	t.Fatal(err)
+}
+
+// claudeCodeWindowsRefusesLinkedSettings is the Windows form of "settings
+// linked into the home are inspected". The Windows writer replaces only a
+// regular file, so a settings file that is a link is refused wherever it
+// points (windowsSettingsFileLinkRefusal): an agent-settings refusal before
+// Setup writes anything, so a gateway start keeps the other connectors, and
+// the link and its target are left as they were.
+func claudeCodeWindowsRefusesLinkedSettings(t *testing.T, conn *ClaudeCodeConnector, opts SetupOpts, settingsPath, target string) {
+	t.Helper()
+	const refusal = "is a symbolic link or junction"
+	before, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := claudeCodeUserSettingsReadPath(settingsPath); err == nil || !strings.Contains(err.Error(), refusal) {
+		t.Fatalf("claudeCodeUserSettingsReadPath(linked settings) err = %v; want the Windows link refusal", err)
+	}
+	if err := CheckAgentSettings(conn, opts); !errors.Is(err, ErrAgentConfigRefusal) || !strings.Contains(err.Error(), refusal) {
+		t.Fatalf("CheckAgentSettings(linked settings) = %v; want an agent-settings refusal naming the link", err)
+	}
+	if err := conn.Setup(context.Background(), opts); !errors.Is(err, ErrAgentConfigRefusal) {
+		t.Fatalf("Setup(linked settings) = %v; want an agent-settings refusal", err)
+	}
+	if present, err := OwnedHooksPresent(conn, opts); present {
+		t.Fatalf("OwnedHooksPresent(linked settings) = %v, %v; want absent", present, err)
+	}
+	if info, err := os.Lstat(settingsPath); err != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("refused setup replaced the settings link: %v", err)
+	}
+	if after, err := os.ReadFile(target); err != nil || !bytes.Equal(after, before) {
+		t.Fatalf("refused setup changed the link target (err %v): %q", err, after)
+	}
+}
+
+// claudeCodeWindowsEnterpriseContractIgnoresUserSettings is the Windows form
+// of "the enterprise script contract uses user settings". Windows enterprise
+// policy pins the absolute native launcher in the managed tier
+// (claudeCodeEffectiveHookContract managedPolicy): the hooks per-user Setup
+// wrote in the user settings satisfy the per-user contract but not the
+// enterprise one, which with no managed tier is repairable absence (no
+// error), so the guardian re-runs Setup.
+func claudeCodeWindowsEnterpriseContractIgnoresUserSettings(t *testing.T, conn *ClaudeCodeConnector, opts SetupOpts) {
+	t.Helper()
+	if present, err := OwnedHooksPresent(conn, opts); err != nil || !present {
+		t.Fatalf("per-user contract = (present=%v, err=%v), want the user-settings hooks", present, err)
+	}
+	opts.ManagedEnterprise = true
+	opts.HookExecutable = filepath.Join(t.TempDir(), "defenseclaw-hook.exe")
+	if present, err := OwnedHooksPresent(conn, opts); err != nil || present {
+		t.Fatalf("Windows enterprise contract = (present=%v, err=%v), want repairable absence: user settings do not satisfy it", present, err)
 	}
 }
