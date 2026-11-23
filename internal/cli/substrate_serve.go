@@ -670,6 +670,12 @@ func substrateGatewayBuilder(c *config.Config, src *configwatch.Watcher, ready *
 		// GAP-0861: the live relay certificate per actor is on the leader.
 		out.RelayCerts = regs
 		out.RelayCertReissue = c.Substrate.RelayCertReissueFor(managed.IsManagedEnterprise(c.DeploymentMode))
+		out.Interactive = func() config.SubstrateInteractiveConfig {
+			if cur := live(); cur != nil {
+				return cur.Substrate.Interactive
+			}
+			return c.Substrate.Interactive
+		}
 		ready.Store(true)
 		return out, nil
 	}

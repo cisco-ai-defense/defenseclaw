@@ -8246,6 +8246,67 @@
             }
           }
         },
+        "interactive": {
+          "description": "Port forwards and MCP bridges an actor's owner opens through attach (B3). Each enabled switch is auto, on or off; off is the admin switch.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "port_forward": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "enabled": {
+                  "description": "auto (default) is on in open source and managed installs. off also closes the forwards already open, within a minute (at the next check), not at once.",
+                  "type": "string",
+                  "enum": ["auto", "on", "off"],
+                  "default": "auto"
+                },
+                "ports": {
+                  "description": "Actor ports a forward may reach: a port or lo-hi range list such as 3000,8000-8999, within 1024-65535. The actor relay's own port 8080 is never forwarded.",
+                  "type": "string",
+                  "pattern": "^\\s*[0-9]{1,5}(\\s*-\\s*[0-9]{1,5})?(\\s*,\\s*[0-9]{1,5}(\\s*-\\s*[0-9]{1,5})?)*\\s*$",
+                  "default": "1024-65535"
+                },
+                "max_streams": {
+                  "description": "Open forwarded connections per actor on each gateway replica (the count is not shared between replicas).",
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 1024,
+                  "default": 32
+                }
+              }
+            },
+            "mcp_bridge": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "enabled": {
+                  "description": "auto (default) is on in open source and off in managed installs. off also closes the bridges already open, within a minute (at the next check), not at once.",
+                  "type": "string",
+                  "enum": ["auto", "on", "off"],
+                  "default": "auto"
+                },
+                "max_servers": {
+                  "description": "Bridged MCP servers per actor on each gateway replica (the count is not shared between replicas).",
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 32,
+                  "default": 4
+                },
+                "message_max_bytes": {
+                  "description": "A bigger JSON-RPC message is refused, never cut.",
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 16777216,
+                  "default": 1048576
+                }
+              }
+            },
+            "idle_close": {
+              "$ref": "#/$defs/duration"
+            }
+          }
+        },
         "rate_limits": {
           "type": "object",
           "additionalProperties": false,

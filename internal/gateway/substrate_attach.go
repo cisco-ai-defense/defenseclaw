@@ -178,8 +178,20 @@ func (a *APIServer) substrateAttach(st *substrateState) http.HandlerFunc {
 			writeSubstrateJSONError(w, status, reason)
 			return
 		}
+		// A port forward or MCP bridge (B3.2, B3.3) gets a token for its
+		// own dc.scope only (substrate_streams.go).
+		stream, sstatus, sreason := a.substrateStreamOpen(st, r, reg, rest)
+		if sstatus != http.StatusOK {
+			writeSubstrateJSONError(w, sstatus, sreason)
+			return
+		}
+		defer stream.close(r.Context())
+		actor := substrateSessionActor(reg)
+		if stream != nil {
+			actor.Scope = stream.scope
+		}
 		c, _ := substrateCallerFrom(r.Context())
-		tok, exp, err := st.cfg.Sessions.IssueUntil(identity.SignInOf(c.person), substrateSessionActor(reg), substrateAttachSessionTTL, c.person.SessionBound())
+		tok, exp, err := st.cfg.Sessions.IssueUntil(identity.SignInOf(c.person), actor, substrateAttachSessionTTL, c.person.SessionBound())
 		if errors.Is(err, identity.ErrSessionBound) {
 			// The sign-in ends this second: the launcher asks for a new
 			// one (GAP-0588).
@@ -195,7 +207,7 @@ func (a *APIServer) substrateAttach(st *substrateState) http.HandlerFunc {
 			// A terminal attachment (WebSocket, or a long-poll request
 			// other than its close) is reported while it is open, so a
 			// controller without a CPU feed keeps the actor (GAP-0534).
-			if head == relay.RouteWS || (head == relay.RoutePoll && r.Method != http.MethodDelete) {
+			if head == relay.RouteWS || stream != nil || (head == relay.RoutePoll && r.Method != http.MethodDelete) {
 				defer substrateReportAttach(st.cfg.Activity, reg.Atespace, reg.UID)()
 			}
 		}
@@ -249,8 +261,11 @@ func (a *APIServer) substrateAttach(st *substrateState) http.HandlerFunc {
 				pr.Out.Header.Set("Authorization", "Bearer "+tok)
 			},
 			Transport: &http.Transport{
-				DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) { return dial(ctx) },
-				Proxy:       nil, DisableKeepAlives: true, ResponseHeaderTimeout: 60 * time.Second,
+				DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+					c, err := dial(ctx)
+					return stream.wrap(c), err
+				},
+				Proxy: nil, DisableKeepAlives: true, ResponseHeaderTimeout: 60 * time.Second,
 			},
 			FlushInterval: -1, // stream poll and task answers as they come
 			// A terminal WebSocket learns how long its session token

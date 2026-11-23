@@ -95,11 +95,13 @@ type SubstrateConfig struct {
 	// rewrite map, submodules and LFS in run --clone.
 	Git        SubstrateGitConfig        `mapstructure:"git" yaml:"git,omitempty"`
 	Unattended SubstrateUnattendedConfig `mapstructure:"unattended"         yaml:"unattended,omitempty"`
-	RateLimits SubstrateRateLimitsConfig `mapstructure:"rate_limits"        yaml:"rate_limits,omitempty"`
-	Extproc    SubstrateExtprocConfig    `mapstructure:"extproc"            yaml:"extproc,omitempty"`
-	LLM        SubstrateLLMConfig        `mapstructure:"llm"                yaml:"llm,omitempty"`
-	Egress     SubstrateEgressConfig     `mapstructure:"egress"             yaml:"egress,omitempty"`
-	Secrets    []SubstrateSecret         `mapstructure:"secrets"            yaml:"secrets,omitempty"`
+	// Interactive is the port forward and MCP bridge switches (B3).
+	Interactive SubstrateInteractiveConfig `mapstructure:"interactive" yaml:"interactive,omitempty"`
+	RateLimits  SubstrateRateLimitsConfig  `mapstructure:"rate_limits"        yaml:"rate_limits,omitempty"`
+	Extproc     SubstrateExtprocConfig     `mapstructure:"extproc"            yaml:"extproc,omitempty"`
+	LLM         SubstrateLLMConfig         `mapstructure:"llm"                yaml:"llm,omitempty"`
+	Egress      SubstrateEgressConfig      `mapstructure:"egress"             yaml:"egress,omitempty"`
+	Secrets     []SubstrateSecret          `mapstructure:"secrets"            yaml:"secrets,omitempty"`
 	// SelfServiceSecrets is how people bind their own secrets (B1 2.5).
 	SelfServiceSecrets SubstrateSelfServiceSecretsConfig `mapstructure:"self_service_secrets" yaml:"self_service_secrets,omitempty"`
 	// SecretTemplates is the admin catalog of templates people bind their
@@ -1343,6 +1345,7 @@ func (s *SubstrateConfig) Validate() error {
 	if r := s.Unattended.TelemetrySampling; r != nil && (*r < 0 || *r > 1) {
 		bad("unattended.telemetry_sampling", "%v is outside 0-1", *r)
 	}
+	s.Interactive.validate(bad)
 	if s.RateLimits.PerActorRPS < 0 {
 		bad("rate_limits.per_actor_rps", "must not be negative")
 	}

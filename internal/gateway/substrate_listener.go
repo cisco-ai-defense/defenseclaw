@@ -217,6 +217,9 @@ type SubstrateConfig struct {
 	// RelayCertReissue is the active substrate.relay_cert_reissue (refuse
 	// or flag; "" is auto: refuse when Managed).
 	RelayCertReissue string
+	// Interactive is substrate.interactive in force (B3 port forward and
+	// MCP bridge switches; nil: the defaults).
+	Interactive func() config.SubstrateInteractiveConfig
 	// WorkspaceMaxBytes caps a workspace upload through attach
 	// (substrate.workspace_max_bytes, E23).
 	WorkspaceMaxBytes int64
@@ -328,6 +331,9 @@ type substrateState struct {
 	cfg SubstrateConfig
 	// taskEnds bounds the task-end audit rows per actor.
 	taskEnds substrateTaskEnds
+	// streams counts the open port forwards and MCP bridges per actor on
+	// this replica (GAP-0818).
+	streams substrateStreamCounts
 	// refusals bounds refusal log lines: a flood of bad tokens is still
 	// refused, not logged line by line.
 	refusals *rate.Limiter
