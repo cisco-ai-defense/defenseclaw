@@ -41,8 +41,8 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/auth"
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/safetext"
 	"github.com/defenseclaw/defenseclaw/internal/config"
-	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/fleet"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/kit"
 )
 
 // The status of one doctor check.
@@ -563,9 +563,10 @@ func doctorKubeChecks(ctx context.Context, kf *substrateClusterFlags, tokenGroup
 
 // doctorSkillScan is the substrate.skill_scan row (B5.4, GAP-0477): the
 // gateway pods' skill-scanner sidecar, from the pods' container status, and
-// the gateway config (substrate.skills.scan.enabled, deployment_mode). A
-// scanner that is not running fails on a managed install (new skills are
-// refused) and warns on the others (new skills are allowed with an alert).
+// the gateway config (substrate.skills.scan.enabled, deployment_mode, the
+// hook policy tier). A scanner that is not running fails where the gateway
+// refuses new skills unscanned (managed installs, the strict tier) and warns
+// on the others (new skills are allowed with an alert).
 func doctorSkillScan(ctx context.Context, kf *substrateClusterFlags) substrateCheck {
 	const id = "substrate.skill_scan"
 	gc := doctorSkillScanConfig(ctx, kf)
@@ -619,8 +620,10 @@ func doctorSkillScan(ctx context.Context, kf *substrateClusterFlags) substrateCh
 		switch {
 		case !gc.read:
 			status, outcome = doctorFail, "refused on managed installs and allowed with an alert on others"
-		case gc.managed:
+		case gc.refusedAll:
 			status, outcome = doctorFail, "refused"
+		case len(gc.refused) > 0:
+			status, outcome = doctorFail, "refused for "+strings.Join(gc.refused, ", ")+" and allowed with an alert for the other agents"
 		}
 		return substrateCheck{ID: id, Status: status, Summary: fmt.Sprintf("Skill scanner is not running on %d of %d gateway pods. New skills are %s there.", n, len(pods.Items), outcome),
 			Fix: "kubectl -n " + kf.namespace + " logs deploy/defenseclaw-gateway -c " + skillScannerContainer}
@@ -629,8 +632,13 @@ func doctorSkillScan(ctx context.Context, kf *substrateClusterFlags) substrateCh
 }
 
 // skillScanConfig is what the substrate.skill_scan row reads of the gateway
-// config; read is false when there was none to read.
-type skillScanConfig struct{ read, scanOn, managed bool }
+// config; read is false when there was none to read. refused are the
+// connectors whose new skills the gateway refuses unscanned (managed
+// installs: every one; else the strict-tier ones).
+type skillScanConfig struct {
+	read, scanOn, refusedAll bool
+	refused                  []string
+}
 
 // doctorSkillScanConfig reads the gateway config doctor checks (--config, or
 // the cluster's config map, as the fleet checks do).
@@ -657,17 +665,21 @@ func doctorSkillScanConfig(ctx context.Context, kf *substrateClusterFlags) skill
 	if text == "" {
 		return skillScanConfig{}
 	}
-	var doc struct {
-		DeploymentMode string `yaml:"deployment_mode"`
-		Substrate      struct {
-			Skills config.SubstrateSkillsConfig `yaml:"skills"`
-		} `yaml:"substrate"`
-	}
+	var doc config.Config
 	if yaml.Unmarshal([]byte(text), &doc) != nil {
 		return skillScanConfig{}
 	}
-	return skillScanConfig{read: true, scanOn: config.SubstrateConfig{Skills: doc.Substrate.Skills}.SkillScanEnabled(),
-		managed: managed.IsManagedEnterprise(doc.DeploymentMode)}
+	// GAP-0936: the gateway's own check (managed, or the connector's strict
+	// tier), for each connector an actor can run.
+	blocks := substrateBlocksUnscannedSkills(&doc)
+	var refused []string
+	all := slices.Concat(kit.Wave1Connectors, kit.Wave2Connectors, kit.Wave3Connectors)
+	for _, c := range all {
+		if blocks(c) {
+			refused = append(refused, c)
+		}
+	}
+	return skillScanConfig{read: true, scanOn: doc.Substrate.SkillScanEnabled(), refusedAll: len(refused) == len(all), refused: refused}
 }
 
 // skillScannerContainer is the chart's scanner sidecar container name.

@@ -42,6 +42,10 @@ func TestB54DoctorSkillScanManagedFailsOSSWarns(t *testing.T) {
 		{"managed-no-sidecar", mgd, noSidecar, doctorFail, "New skills are refused there."},
 		{"config-off", off, pod("true"), doctorSkip, "substrate.skills.scan.enabled: false"},
 		{"managed-ready", mgd, pod("true"), doctorOK, "Skill scanner ready"},
+		// GAP-0936: the OSS strict tier refuses new skills like managed.
+		{"oss-strict-down", "guardrail:\n  rule_pack: strict\nsubstrate:\n  supported_versions: \">=1.0.10\"\n", pod("false"), doctorFail, "New skills are refused there."},
+		{"oss-strict-no-sidecar", "guardrail:\n  rule_pack: strict\nsubstrate:\n  skills: {}\n", noSidecar, doctorFail, "New skills are refused there."},
+		{"oss-balanced-down", "guardrail:\n  rule_pack: balanced\nsubstrate:\n  skills: {}\n", pod("false"), doctorWarn, "New skills are allowed with an alert there."},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			old := substrateKubectl
