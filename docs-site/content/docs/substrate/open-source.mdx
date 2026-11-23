@@ -238,19 +238,22 @@ Claude Code starts below the banner, in `/work/myapp`. The first start takes abo
 Replaced with placeholders in the copy (your files are unchanged; the agent sees only DC_SECRET_<n>): 2 secrets replaced in config.py, 1 secret replaced in deploy/aws.ini.
 ```
 
-A file saved as UTF-16 (some Windows tools do this) is read as text, and one that holds a credential is held back whole. Some files are not scanned at all and go up as they are, named in the same report: files bigger than 8 MiB, files the scan did not reach in its 120-second budget, files that look binary and files that could not be read. The Windows host copy does not replace values; it holds a file with a credential back whole. Signing keys (an AWS secret key, a private key) get a note: the cluster cannot add them for the agent on the way out, so use workload identity or [actor secrets](/docs/substrate/secrets) for them.
+A file saved as UTF-16 (some Windows tools do this) is read as text, and one that holds a credential is held back whole. Some files are not scanned at all and go up as they are, named in the same report: files bigger than 8 MiB, files the scan did not reach in its 120-second budget, files that look binary (a UTF-32 file counts as binary) and files that could not be read. The Windows host copy does not replace values; it holds a file with a credential back whole. Signing keys (an AWS secret key, a private key) get a note: the cluster cannot add them for the agent on the way out, so use workload identity or [actor secrets](/docs/substrate/secrets) for them.
 
 When you `pull --apply`, DefenseClaw puts your value back in the files it replaced and writes no placeholder into them:
 
 - A line the agent left alone gets your line back.
 - A line the agent changed that holds a placeholder keeps your line, and `pull` says so: `config.py: kept your line 2; the agent changed the line that holds a replaced credential (--restore-secret-lines takes the agent's line)`. With `--restore-secret-lines` the agent's line lands, with your value in place of the placeholder.
 - When the agent removed or rewrote such a line, or deleted the file, its change is not brought back unless you pass `--restore-secret-lines`, which takes the agent's lines and deletions as they are.
-- When the agent moved such a line to another place in the file, or wrote it twice, its change to that file is not brought back, and `pull` says so. `--restore-secret-lines` does not change that.
+- When the agent moved such a line to another place in the file, or wrote it twice, its change to that file is not brought back, and `pull` says so. `--restore-secret-lines` does not change that. Lines added or removed around it, blank lines included, do not count as a move.
+- When the agent left such a line in place but changed one of the few lines around it (blank lines do not count), its change lands and `pull` names the line, for example `config.py: line 3 holds your credential and the agent changed the lines next to it; check that the change does not send or print the value`.
 - When the agent moved or renamed the file, neither the new file nor the deletion is brought back, and `pull` says so. `--restore-secret-lines` does not change that either.
 - When you changed one of those lines yourself since the upload, or the agent's version can no longer be read as text, the agent's change to that file is not brought back, so your newer value is never overwritten.
 - When another changed file holds a placeholder, that file's change stays out. DefenseClaw reads files up to 8 MiB for this check; a bigger file is not checked.
 
 These files are brought back only by `pull --apply`. A patch from `--patch-out` and a branch from `--branch` leave the agent's changes to them out and say so, because a patch file or a branch commit would put the value somewhere new. `push` holds such a file back, so the agent keeps the placeholder copy it already has.
+
+The agent's git history starts at one commit on yours that holds the placeholder version of each tracked file whose credentials were replaced, so every commit the agent makes sits on it. A branch the agent pushes from the sandbox would carry that commit and put the placeholders over your credentials upstream. `run` warns about this, and the copy has a pre-push hook that refuses such a push (a guard against accidents, not a control: the agent can remove it). Bring the work back with `pull --branch` and push it from your computer.
 
 Prefer git to an upload? `defenseclaw substrate run claude --clone https://git.example.test/me/myapp.git --ref agent/fix-tests` clones inside the agent. The clone goes through the cluster's network rules, so the git host must be one your profile allows. The credential is added by the cluster's egress gateway on that host only, so the agent never holds it. Put no user name or token in the address. See [Secrets](/docs/substrate/secrets).
 

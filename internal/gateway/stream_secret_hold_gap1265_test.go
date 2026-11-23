@@ -172,7 +172,7 @@ func gap1265Serve(t *testing.T, path gap0429Path, rows []gap1265Row) ([]gap1265R
 		switch path.name {
 		case "llm":
 			prov := &gap0429PausingProvider{chunks: gap0429Chunks(row.pieces), at: row.at, pause: row.pause}
-			proxy, req := newTestProxy(t, prov, w, "action"), chatReq("", row)
+			proxy, req := gap0429Proxy(t, prov, w), chatReq("", row)
 			serve = func() { proxy.handleChatCompletion(rec, req) }
 		case "raw-forward":
 			up := gap1265Upstream(t, streamTailFormat{}, true, row.pieces, row.at, row.pause)
@@ -180,12 +180,12 @@ func gap1265Serve(t *testing.T, path gap0429Path, rows []gap1265Row) ([]gap1265R
 				registerRawForwardProviderDomain(t, up.URL, "openai")
 				registered = true
 			}
-			proxy, req := newTestProxy(t, &mockProvider{}, w, "action"), chatReq(up.URL, row)
+			proxy, req := gap0429Proxy(t, &mockProvider{}, w), chatReq(up.URL, row)
 			serve = func() { proxy.handleChatCompletion(rec, req) }
 		default:
 			f := gap1265Format(t, path.name)
 			up := gap1265Upstream(t, f, false, row.pieces, row.at, row.pause)
-			proxy, req := newTestProxy(t, &mockProvider{}, w, "action"), streamTailWithTier(streamTailRequest(t, f, "", up.URL), row.pack, row.managed)
+			proxy, req := gap0429Proxy(t, &mockProvider{}, w), streamTailWithTier(streamTailRequest(t, f, "", up.URL), row.pack, row.managed)
 			serve = func() { proxy.handlePassthrough(rec, req) }
 		}
 		runs[i] = run{rec: rec, watch: w, serve: serve}
@@ -325,7 +325,13 @@ func TestGAP1265OpenRunIdleIsNotTruncated(t *testing.T) {
 func gap1265Table() []string {
 	var pieces []string
 	for i, n := 0, 0; n < streamSecretMaxHeld*5/4; i++ {
-		p := fmt.Sprintf(" step %d took %d", i%97, (i*37)%1000)
+		// A short piece ending in a digit: the bound counts stream bytes
+		// (the frame, at least 120 bytes), and every frame is checked over
+		// the whole reply text, which costs more than linearly in its length,
+		// so the least text per frame is the cheapest table (a long piece of
+		// 8 KiB took 327 s under -race and cut the stream at the request
+		// deadline; 16-byte pieces took 155 s).
+		p := fmt.Sprintf(" k%d", i%97)
 		pieces = append(pieces, p)
 		n += len(p) + 120 // a piece is a frame of at least 120 bytes on these routes
 	}

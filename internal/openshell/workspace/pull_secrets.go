@@ -48,6 +48,8 @@ type heldResult struct {
 	put map[string]map[int]bool
 	// notes say what happened to each replaced file the agent touched.
 	notes []string
+	// flags are review flags on replaced files (RiskSecretContext).
+	flags []Flag
 }
 
 // dropHeldBack resets every held-back path in result to its baseline
@@ -253,7 +255,7 @@ func translateSecrets(ctx context.Context, base gitCmd, rec *CopyRecord, changes
 			continue
 		}
 		e := uploaded[rel]
-		t, kept, put, why := translateReplaced(blobs[e.oid], agent, byFile[rel], restore)
+		t, kept, put, near, why := translateReplaced(blobs[e.oid], agent, byFile[rel], restore)
 		if why == "" {
 			var ok bool
 			if t, ok = withValues(t, nil, values[rel]); !ok || copyTokens(t, tokens) > copyTokens(local[rel], tokens) {
@@ -273,6 +275,11 @@ func translateSecrets(ctx context.Context, base gitCmd, rec *CopyRecord, changes
 		out.restored = append(out.restored, rel)
 		for _, n := range kept {
 			note("%s: kept your line %d; the agent changed the line that holds a replaced credential (--restore-secret-lines takes the agent's line)", rel, n)
+		}
+		for _, n := range near {
+			note("%s: line %d holds your credential and the agent changed the lines next to it; check that the change does not send or print the value", rel, n)
+			out.flags = append(out.flags, Flag{Path: rel, Label: rel + ":" + strconv.Itoa(n), Kind: RiskSecretContext, Severity: SeverityInfo,
+				Detail: "the agent changed the lines next to a line that holds a replaced credential"})
 		}
 		if len(put) > 0 {
 			if out.put == nil {
@@ -542,13 +549,21 @@ func copyTokens(b []byte, tokens map[string]bool) int {
 	return n
 }
 
+// secretContextWindow is how many non-blank lines on each side of a replaced
+// credential line the review checks for an agent change (info flag only).
+const secretContextWindow = 5
+
 // translateReplaced turns the agent's version of a replaced file into the
 // one to land, placeholders still in (withValues puts the values in):
 // each line that holds a placeholder is the uploaded line when the agent
 // left it, or kept so (kept: the local line numbers), or with restore the
 // agent's line (put: its line numbers). why says why the change cannot
-// land: a placeholder is gone (without restore), repeated or moved.
-func translateReplaced(uploaded, agent []byte, lines []SecretLine, restore bool) (out []byte, kept, put []int, why string) {
+// land: a placeholder is gone (without restore), repeated or moved. near
+// are the agent's line numbers of placeholder lines left in place whose
+// a line within secretContextWindow non-blank lines that the agent added, removed or changed: the value lands, and
+// the review names the line (RV6-3: an agent that wraps the line in place,
+// in a string it sends, kept its anchors and landed with no note).
+func translateReplaced(uploaded, agent []byte, lines []SecretLine, restore bool) (out []byte, kept, put, near []int, why string) {
 	ul, al := splitKeep(uploaded), splitKeep(agent)
 	lineOf := func(ls [][]byte, p string) []int {
 		var at []int
@@ -563,27 +578,57 @@ func translateReplaced(uploaded, agent []byte, lines []SecretLine, restore bool)
 		up    int
 		local int
 	}
-	gu, ga := lineGaps(ul, al, func(l []byte) bool {
+	mu := matchLines(ul, al, func(l []byte) string {
 		for _, s := range lines {
 			if len(tokenAt(l, s.Placeholder)) > 0 {
-				return true
+				// A placeholder line compares by its placeholders.
+				return "\x00" + strings.Join(placeholderRE.FindAllString(string(l), -1), " ")
+			}
+		}
+		return string(trimEOL(l))
+	})
+	am := make([]bool, len(al))
+	for _, a := range mu {
+		if a >= 0 {
+			am[a] = true
+		}
+	}
+	// beside reports a line near up line u or agent line i that the agent
+	// added, removed or changed. Blank lines are skipped and the nearest
+	// secretContextWindow non-blank lines on each side count (RV7-1: a wrap
+	// one blank or unchanged line further out landed with no flag).
+	nearChange := func(ls [][]byte, at int, changed func(int) bool) bool {
+		for step := -1; step <= 1; step += 2 {
+			seen := 0
+			for j := at + step; j >= 0 && j < len(ls) && seen < secretContextWindow; j += step {
+				if len(bytes.TrimSpace(ls[j])) == 0 {
+					continue
+				}
+				seen++
+				if changed(j) {
+					return true
+				}
 			}
 		}
 		return false
-	})
+	}
+	beside := func(u, i int) bool {
+		return nearChange(ul, u, func(j int) bool { return mu[j] < 0 }) ||
+			nearChange(al, i, func(j int) bool { return !am[j] })
+	}
 	onAgent := map[int][]spot{}
 	ofUp := map[int]int{}
 	for _, l := range lines {
 		u := lineOf(ul, l.Placeholder)
 		if len(u) != 1 || len(tokenAt(uploaded, l.Placeholder)) != 1 {
-			return nil, nil, nil, "the uploaded copy does not hold " + l.Placeholder + " once"
+			return nil, nil, nil, nil, "the uploaded copy does not hold " + l.Placeholder + " once"
 		}
 		ofUp[u[0]]++
 		switch a := tokenAt(agent, l.Placeholder); {
 		case len(a) > 1:
-			return nil, nil, nil, "the agent's version holds " + l.Placeholder + " more than once"
+			return nil, nil, nil, nil, "the agent's version holds " + l.Placeholder + " more than once"
 		case len(a) == 0 && !restore:
-			return nil, nil, nil, "the agent removed or rewrote line " + strconv.Itoa(l.Line) + ", which holds a replaced credential (--restore-secret-lines takes the agent's lines as they are)"
+			return nil, nil, nil, nil, "the agent removed or rewrote line " + strconv.Itoa(l.Line) + ", which holds a replaced credential (--restore-secret-lines takes the agent's lines as they are)"
 		case len(a) == 1:
 			i := lineOf(al, l.Placeholder)[0]
 			onAgent[i] = append(onAgent[i], spot{u[0], l.Line})
@@ -595,9 +640,12 @@ func translateReplaced(uploaded, agent []byte, lines []SecretLine, restore bool)
 		for _, s := range spots {
 			same = same && s.up == u
 		}
+		if same && mu[u] == i && beside(u, i) {
+			near = append(near, i+1)
+		}
 		switch {
-		case gu[u] != ga[i]:
-			return nil, nil, nil, "the agent moved a replaced credential to another place in the file"
+		case mu[u] != i:
+			return nil, nil, nil, nil, "the agent moved a replaced credential to another place in the file"
 		case same && len(spots) == ofUp[u] && bytes.Equal(trimEOL(al[i]), trimEOL(ul[u])):
 			// Left as uploaded.
 		case restore:
@@ -606,86 +654,126 @@ func translateReplaced(uploaded, agent []byte, lines []SecretLine, restore bool)
 			al[i] = append(append([]byte(nil), trimEOL(ul[u])...), al[i][len(trimEOL(al[i])):]...)
 			kept = append(kept, spots[0].local)
 		default:
-			return nil, nil, nil, "the agent moved a replaced credential to another line"
+			return nil, nil, nil, nil, "the agent moved a replaced credential to another line"
 		}
 	}
 	sort.Ints(kept)
 	sort.Ints(put)
-	return bytes.Join(al, nil), kept, put, ""
+	sort.Ints(near)
+	return bytes.Join(al, nil), kept, put, near, ""
 }
 
-// lineGaps anchors two versions of a file on the lines they share, the
-// lines holding a placeholder (held) left out: the common start and end,
-// and between them the lines that occur once in each, in an order both
-// keep (as patience diff does). gu and ga give each line of up and agent
-// the number of anchors before it: a placeholder line is where it was
-// uploaded only when both numbers agree (GAP-0754).
-func lineGaps(up, agent [][]byte, held func([]byte) bool) (gu, ga []int) {
-	var ui, ai []int
+// maxLCSCells bounds the longest-common-subsequence step of matchLines:
+// a gap between anchors larger than this many line pairs is left unmatched.
+const maxLCSCells = 1 << 16
+
+// matchLines pairs the lines two versions of a file share, as a line diff
+// does (patience diff): the common start and end, then the lines that
+// occur once in each, in an order both keep, as anchors, and the same
+// again between them; a gap with no such line is matched by a longest
+// common subsequence when it is at most maxLCSCells line pairs. Lines
+// compare by key. mu[i] is the agent line that up line i is paired with,
+// or -1 (removed or changed).
+//
+// The lines that hold a placeholder take part, compared by their
+// placeholders, so a blank line or a brace added or removed above a
+// credential line can't pair duplicate lines across it (RV6-2: the earlier
+// anchoring left those lines out, and a blank line added above the line
+// read as a moved credential and dropped the agent's whole change).
+func matchLines(up, agent [][]byte, key func([]byte) string) []int {
+	uk, ak := make([]string, len(up)), make([]string, len(agent))
 	for i, l := range up {
-		if !held(l) {
-			ui = append(ui, i)
-		}
+		uk[i] = key(l)
 	}
 	for i, l := range agent {
-		if !held(l) {
-			ai = append(ai, i)
+		ak[i] = key(l)
+	}
+	mu := make([]int, len(up))
+	for i := range mu {
+		mu[i] = -1
+	}
+	var lcs func(u0, u1, a0, a1 int)
+	lcs = func(u0, u1, a0, a1 int) {
+		n, m := u1-u0, a1-a0
+		if n*m > maxLCSCells {
+			return
+		}
+		t := make([]int32, (n+1)*(m+1))
+		at := func(i, j int) *int32 { return &t[i*(m+1)+j] }
+		for i := n - 1; i >= 0; i-- {
+			for j := m - 1; j >= 0; j-- {
+				switch {
+				case uk[u0+i] == ak[a0+j]:
+					*at(i, j) = *at(i+1, j+1) + 1
+				case *at(i+1, j) >= *at(i, j+1):
+					*at(i, j) = *at(i+1, j)
+				default:
+					*at(i, j) = *at(i, j+1)
+				}
+			}
+		}
+		for i, j := 0, 0; i < n && j < m; {
+			switch {
+			case uk[u0+i] == ak[a0+j]:
+				mu[u0+i] = a0 + j
+				i, j = i+1, j+1
+			case *at(i+1, j) >= *at(i, j+1):
+				i++
+			default:
+				j++
+			}
 		}
 	}
-	uk := func(j int) string { return string(trimEOL(up[ui[j]])) }
-	ak := func(j int) string { return string(trimEOL(agent[ai[j]])) }
-	var pairs [][2]int
-	lo := 0
-	for lo < len(ui) && lo < len(ai) && uk(lo) == ak(lo) {
-		pairs = append(pairs, [2]int{lo, lo})
-		lo++
-	}
-	hu, ha := len(ui), len(ai)
-	var tail [][2]int
-	for hu > lo && ha > lo && uk(hu-1) == ak(ha-1) {
-		hu, ha = hu-1, ha-1
-		tail = append(tail, [2]int{hu, ha})
-	}
-	type count struct{ u, a, at int }
-	seen := map[string]*count{}
-	for j := lo; j < hu; j++ {
-		c := seen[uk(j)]
-		if c == nil {
-			c = &count{}
-			seen[uk(j)] = c
+	var diff func(u0, u1, a0, a1 int)
+	diff = func(u0, u1, a0, a1 int) {
+		for u0 < u1 && a0 < a1 && uk[u0] == ak[a0] {
+			mu[u0] = a0
+			u0, a0 = u0+1, a0+1
 		}
-		c.u++
-	}
-	for j := lo; j < ha; j++ {
-		if c := seen[ak(j)]; c != nil {
-			c.a++
-			c.at = j
+		for u1 > u0 && a1 > a0 && uk[u1-1] == ak[a1-1] {
+			u1, a1 = u1-1, a1-1
+			mu[u1] = a1
 		}
-	}
-	var cand [][2]int
-	for j := lo; j < hu; j++ {
-		if c := seen[uk(j)]; c.u == 1 && c.a == 1 {
-			cand = append(cand, [2]int{j, c.at})
+		if u0 == u1 || a0 == a1 {
+			return
 		}
-	}
-	pairs = append(pairs, increasing(cand)...)
-	for k := len(tail) - 1; k >= 0; k-- {
-		pairs = append(pairs, tail[k])
-	}
-	gu, ga = make([]int, len(up)), make([]int, len(agent))
-	for x, k := 0, 0; x < len(up); x++ {
-		for k < len(pairs) && ui[pairs[k][0]] < x {
-			k++
+		type count struct{ u, a, at int }
+		seen := map[string]*count{}
+		for j := u0; j < u1; j++ {
+			c := seen[uk[j]]
+			if c == nil {
+				c = &count{}
+				seen[uk[j]] = c
+			}
+			c.u++
 		}
-		gu[x] = k
-	}
-	for x, k := 0, 0; x < len(agent); x++ {
-		for k < len(pairs) && ai[pairs[k][1]] < x {
-			k++
+		for j := a0; j < a1; j++ {
+			if c := seen[ak[j]]; c != nil {
+				c.a++
+				c.at = j
+			}
 		}
-		ga[x] = k
+		var cand [][2]int
+		for j := u0; j < u1; j++ {
+			if c := seen[uk[j]]; c.u == 1 && c.a == 1 {
+				cand = append(cand, [2]int{j, c.at})
+			}
+		}
+		anchors := increasing(cand)
+		if len(anchors) == 0 {
+			lcs(u0, u1, a0, a1)
+			return
+		}
+		pu, pa := u0, a0
+		for _, p := range anchors {
+			diff(pu, p[0], pa, p[1])
+			mu[p[0]] = p[1]
+			pu, pa = p[0]+1, p[1]+1
+		}
+		diff(pu, u1, pa, a1)
 	}
-	return gu, ga
+	diff(0, len(up), 0, len(agent))
+	return mu
 }
 
 // increasing is the longest run of pairs (in order of their first

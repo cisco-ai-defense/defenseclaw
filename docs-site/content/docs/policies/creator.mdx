@@ -16,7 +16,7 @@ The shell examples require Bash. On native Windows, use Git Bash or WSL; PowerSh
 
 import PolicyCreator from "@/components/policy-creator";
 
-The creator builds a complete policy (admission preset, rule pack, suppressions, judges, webhooks) and exports it as YAML plus one install script. Quick Start asks six questions; Playground edits every section. Both share one draft.
+The creator builds a complete policy (admission preset, rule pack, suppressions, judges, webhooks) and exports it as YAML plus one install script. Quick Start walks through five questions (posture, what to block, what to allow, how to respond, where alerts go) and a Review step; Playground edits every section. Both share one draft.
 
 <Callout type="info" title="Nothing is uploaded">
 Evaluation runs in your browser with compiled copies of the bundled Rego (admission and guardrail). Your draft and test inputs never leave the page; saved progress lives in `localStorage`.
@@ -28,7 +28,7 @@ Evaluation runs in your browser with compiled copies of the bundled Rego (admiss
 
 ## How the Quick Start works
 
-1. Pick a posture (Permissive, Balanced or Strict), choose what to block, how aggressive to be, and where alerts go.
+1. Pick a posture (Permissive, Balanced or Strict), then choose what to block, what to allow, how the guardrail responds, and where alerts go.
 2. On Review, run the canned scenarios in Live Test. They use the selected policy mode; observe mode reports `alert` for the bundled CRITICAL guardrail cases.
 3. Open in Playground to fine-tune, then download the install script. A share link holds the whole policy in its URL fragment; treat it like the YAML.
 
@@ -56,4 +56,4 @@ To try the script first in a throwaway home, see [verify a policy locally](/docs
 ## Next
 
 - [Guardrail profiles reference](/docs/guardrail/user-and-group-policies)
-- [Tune the LLM judge](/docs/policies/suppression-cookbook)
+- [Suppression cookbook](/docs/policies/suppression-cookbook)

@@ -137,6 +137,8 @@ func (a *APIServer) substrateListSecrets(st *substrateState) http.HandlerFunc {
 			regsKnown = err == nil
 		}
 		now := time.Now()
+		uses := st.substrateHostUses(r.Context(), regs)
+		noSwap := st.noSwapHosts()
 		out := []map[string]any{}
 		for _, e := range entries {
 			sec := e.sec
@@ -150,15 +152,19 @@ func (a *APIServer) substrateListSecrets(st *substrateState) http.HandlerFunc {
 			if mine && status != substrateSecretSet && e.binding == nil {
 				continue
 			}
-			out = append(out, substrateSecretView(e, status, reason, regs, regsKnown))
+			v := substrateSecretView(e, status, reason, regs, regsKnown)
+			if u, agent, ok := substrateSecretLastUse(e, status, regs, uses, noSwap, now); ok {
+				addSubstrateSecretLastUse(v, u, agent)
+			}
+			out = append(out, v)
 		}
 		writeSubstrateJSON(w, http.StatusOK, map[string]any{"secrets": out})
 	}
 }
 
 // substrateSecretView is the list and test answer for one secret: never a
-// value. kind is template (the caller's own binding) or admin; last_used
-// is left out, as the gateway does not see the callout's use events.
+// value. kind is template (the caller's own binding) or admin. The last
+// use is added by the caller (addSubstrateSecretLastUse).
 func substrateSecretView(e substrateSecretEntry, status, reason string, regs []registry.Registration, regsKnown bool) map[string]any {
 	sec := e.sec
 	scope := sec.Scope
@@ -317,8 +323,16 @@ func (a *APIServer) substrateTestSecret(st *substrateState) http.HandlerFunc {
 				reg = got
 				a.substrateAuditAdminTarget(st, r, reg, "secret test", "INFO")
 			}
-			status, reason := a.substrateSecretState(r.Context(), st, e, c.person.Subject, a.substrateBindingAsks(r.Context(), st, c), time.Now())
+			now := time.Now()
+			status, reason := a.substrateSecretState(r.Context(), st, e, c.person.Subject, a.substrateBindingAsks(r.Context(), st, c), now)
 			out := substrateSecretView(e, status, reason, nil, false)
+			if st.cfg.Registrations != nil && st.cfg.SecretUses != nil {
+				if regs, err := st.cfg.Registrations.List(r.Context(), registry.Filter{OwnerID: ownerOf(c.person).ID()}); err == nil {
+					if u, agent, ok := substrateSecretLastUse(e, status, regs, st.substrateHostUses(r.Context(), regs), st.noSwapHosts(), now); ok {
+						addSubstrateSecretLastUse(out, u, agent)
+					}
+				}
+			}
 			if in.Agent != "" {
 				// The actor's own person decides a personal secret's value.
 				astatus, areason := status, reason

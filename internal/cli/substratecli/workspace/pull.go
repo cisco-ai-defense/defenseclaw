@@ -157,6 +157,7 @@ var kindWords = map[osw.RiskKind]string{
 	osw.RiskShellRC:        "is a shell startup file",
 	osw.RiskUnreadable:     "could not be read",
 	osw.RiskZeroFilled:     "came back empty (a write the actor lost)",
+	osw.RiskSecretContext:  "changes the lines next to one that holds your credential: check that it does not send or print the value",
 }
 
 var severityRank = map[osw.Severity]int{

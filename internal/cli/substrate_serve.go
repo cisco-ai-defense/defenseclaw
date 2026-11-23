@@ -532,7 +532,9 @@ func substrateGatewayBuilder(c *config.Config, src *configwatch.Watcher, ready *
 			// The controller's, the callout's and the leader's records reach
 			// the OTLP destinations through this replica (GAP-0450, GAP-0453).
 			Relay: &telemetryrelay.Taker{Leader: toLeader},
-			Asks:  &asks.Client{Leader: toLeader}, Policies: ate,
+			// Last use of a secret: the leader's host-use map (S6b).
+			SecretUses: &telemetryrelay.UseReader{Leader: toLeader},
+			Asks:       &asks.Client{Leader: toLeader}, Policies: ate,
 			UnattendedAsk: func(profile string) gateway.SubstrateUnattendedAsk {
 				return gateway.SubstrateUnattendedAskFor(live(), profile)
 			},
