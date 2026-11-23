@@ -124,7 +124,6 @@ from defenseclaw.tui.panels.tools import ToolsPanelModel
 from defenseclaw.tui.policy_panel import PolicyPanelMixin
 from defenseclaw.tui.registry import CmdEntry, build_registry
 from defenseclaw.tui.routing_panel import RoutingPanelMixin
-from defenseclaw.tui.vault_panel import VaultPanelMixin
 from defenseclaw.tui.sandbox_panel import SandboxPanelMixin
 from defenseclaw.tui.screens.command_preview import CommandPreviewScreen, mask_argv
 from defenseclaw.tui.screens.config_diff import ConfigDiffModalModel, ConfigDiffScreen
@@ -189,12 +188,13 @@ from defenseclaw.tui.services.read_repository import (
     TUIReadSnapshot,
 )
 from defenseclaw.tui.services.routing_state import RoutingPanelModel, routing_help_rows
-from defenseclaw.tui.services.vault_state import VaultPanelModel, vault_help_rows
 from defenseclaw.tui.services.setup_state import credential_reload_summary, validate_config_field
 from defenseclaw.tui.services.substrate_state import substrate_needs_terminal
 from defenseclaw.tui.services.table_fit import fit_table
 from defenseclaw.tui.services.tui_state import TUIState, TUIStateStore
+from defenseclaw.tui.services.vault_state import VaultPanelModel, vault_help_rows
 from defenseclaw.tui.theme import DEFAULT_TOKENS, TEXTUAL_CSS, severity_color, state_color
+from defenseclaw.tui.vault_panel import VaultPanelMixin
 from defenseclaw.tui.widgets.action_menu import ActionMenuScreen, MenuAction
 from defenseclaw.tui.widgets.data_table import MeasuredDataTable
 from defenseclaw.tui.widgets.fit_columns import FitColumn, FitColumnsTable

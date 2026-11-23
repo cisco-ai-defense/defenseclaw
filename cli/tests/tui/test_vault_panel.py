@@ -9,7 +9,6 @@ from __future__ import annotations
 import json
 
 import pytest
-
 from defenseclaw.tui.executor import CommandEvent
 from defenseclaw.tui.services.vault_state import (
     PROMPT_ADD_HOST,
