@@ -63,6 +63,7 @@ var (
 	_ = bounded.Register("actionfacts.maxPathFacts", bounded.Paths, int(maxPathFacts))
 	_ = bounded.Register("actionfacts.maxPowerShellTCPCommandLoopBytes", bounded.Bytes, int(maxPowerShellTCPCommandLoopBytes))
 	_ = bounded.Register("actionfacts.maxReturnedCredentialLineBytes", bounded.Bytes, int(maxReturnedCredentialLineBytes))
+	_ = bounded.Register("actionfacts.maxKubeRequests", bounded.Items, int(maxKubeRequests))
 	_ = bounded.Register("actionfacts.maxSQLASTBytes", bounded.Bytes, int(maxSQLASTBytes))
 	_ = bounded.Register("actionfacts.maxSQLASTDepth", bounded.Depth, int(maxSQLASTDepth))
 	_ = bounded.Register("actionfacts.maxSQLASTStatements", bounded.Items, int(maxSQLASTStatements))

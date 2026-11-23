@@ -341,7 +341,7 @@ func analyze(input Input, twinCommand string, capture *redirectTargetCapture) Fa
 		projectKubernetesCronJobReverseShells(input, facts)
 	facts.KubernetesSensitiveAccesses =
 		projectKubernetesSensitiveAccesses(input, facts)
-	facts.KubeRequests = projectKubeRequests(input, facts)
+	facts.KubeRequests, facts.kubeCut = projectKubeRequests(input, facts)
 	facts.StructuredPortForwards = projectStructuredPortForwards(input)
 	facts.WirelessCaptureDeauthOperations =
 		projectWirelessCaptureDeauthOperations(input)

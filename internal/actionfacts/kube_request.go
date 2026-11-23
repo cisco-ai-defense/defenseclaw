@@ -16,6 +16,7 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/awkprog"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 )
 
 // KubeRequestSource is how a Kubernetes API request was issued.
@@ -44,7 +45,9 @@ const (
 	KubeVerbMeta   = "meta"
 )
 
-const kubeMaxRequests = 32
+// maxKubeRequests bounds the Kubernetes requests one call projects (the
+// semantic f.kube bound).
+const maxKubeRequests = 32
 
 // KubeRequestFact is one Kubernetes API request as the apiserver would see
 // it: verb, group/version/resource/subresource, namespace, name and the
@@ -133,7 +136,23 @@ func KubernetesStdinExecRequest(facts Facts) bool {
 	return false
 }
 
-func projectKubeRequests(input Input, facts Facts) []KubeRequestFact {
+// KubeRequestCaps is the cap the Kubernetes request projection hit (one per
+// call): the list past maxKubeRequests was cut (bounded.Items). Lost reports
+// that the cut dropped a request a reader proves something from (a Secret
+// content read, a stdin exec); then the call is judged TRUNCATED. A cut of
+// plain requests only (33 x kubectl get pods) loses no proof and is recorded,
+// not raised (DET111 T20 review P2-3).
+func (f Facts) KubeRequestCaps() (caps bounded.CapSet, lost bool) {
+	return f.kubeCut.caps, f.kubeCut.lost
+}
+
+// kubeCutRecord is the private record of a Kubernetes request cut.
+type kubeCutRecord struct {
+	caps bounded.CapSet
+	lost bool
+}
+
+func projectKubeRequests(input Input, facts Facts) ([]KubeRequestFact, kubeCutRecord) {
 	var requests []KubeRequestFact
 	if strings.ToLower(input.Tool) == "kubectl" {
 		if argv, namespace, ok := exactKubectlArgv(input, facts); ok {
@@ -164,19 +183,50 @@ func projectKubeRequests(input Input, facts Facts) []KubeRequestFact {
 	return boundKubeRequests(requests)
 }
 
-// boundKubeRequests keeps the projection bounded; a list over the bound
-// keeps one Unknown request so readers still fail closed.
-func boundKubeRequests(requests []KubeRequestFact) []KubeRequestFact {
-	if len(requests) <= kubeMaxRequests {
-		return requests
+// boundKubeRequests keeps the projection bounded without inventing a fact:
+// past maxKubeRequests it keeps the requests a reader proves something from
+// (kubeRequestProves) first, then the others, in their order, and records
+// the cut. It never turns a request into an Unknown one, so a long list of
+// plain reads is never a Secret read (DET111 T20 review P2-3).
+func boundKubeRequests(requests []KubeRequestFact) ([]KubeRequestFact, kubeCutRecord) {
+	var trunc bounded.Truncated
+	if trunc.Within(bounded.Items, len(requests), maxKubeRequests) {
+		return requests, kubeCutRecord{}
 	}
-	requests = requests[:kubeMaxRequests]
-	requests[kubeMaxRequests-1] = KubeRequestFact{
-		CommandID: requests[kubeMaxRequests-1].CommandID,
-		Source:    requests[kubeMaxRequests-1].Source,
-		Unknown:   true,
+	keep := make([]bool, len(requests))
+	kept, proving := 0, 0
+	for index, request := range requests {
+		if kubeRequestProves(request) {
+			proving++
+			if kept < maxKubeRequests {
+				keep[index] = true
+				kept++
+			}
+		}
 	}
-	return requests
+	for index := range requests {
+		if kept == maxKubeRequests {
+			break
+		}
+		if !keep[index] {
+			keep[index] = true
+			kept++
+		}
+	}
+	out := make([]KubeRequestFact, 0, maxKubeRequests)
+	for index, request := range requests {
+		if keep[index] {
+			out = append(out, request)
+		}
+	}
+	return out, kubeCutRecord{caps: trunc.Set(), lost: proving > maxKubeRequests}
+}
+
+// kubeRequestProves reports a request a Kubernetes reader proves something
+// from: a Secret content read (failing closed) or a stdin exec.
+func kubeRequestProves(request KubeRequestFact) bool {
+	return kubeSecretContentRequest(request, true) ||
+		KubernetesStdinExecRequest(Facts{KubeRequests: []KubeRequestFact{request}})
 }
 
 func kubeProgram(command CommandFact) string {

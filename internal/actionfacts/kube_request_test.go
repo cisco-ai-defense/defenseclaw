@@ -173,16 +173,25 @@ func TestKubeRequestStructuredKubectlTool(t *testing.T) {
 	}
 }
 
+// TestKubeRequestBound: an over-bound request list is cut and the cut
+// recorded; no request is invented, so a long list of plain reads is no
+// Secret read, and a Secret read past the bound is kept (DET111 T20 review
+// P2-3).
 func TestKubeRequestBound(t *testing.T) {
-	requests := make([]KubeRequestFact, kubeMaxRequests+5)
+	requests := make([]KubeRequestFact, maxKubeRequests+5)
 	for index := range requests {
 		requests[index] = KubeRequestFact{Source: KubeSourceKubectl, Verb: KubeVerbList, Resource: "pods"}
 	}
-	bounded := boundKubeRequests(requests)
-	if len(bounded) != kubeMaxRequests || !bounded[kubeMaxRequests-1].Unknown {
-		t.Fatalf("bounded = %d, last %+v", len(bounded), bounded[len(bounded)-1])
+	cut, record := boundKubeRequests(requests)
+	if len(cut) != maxKubeRequests || !record.caps.Any() || record.lost {
+		t.Fatalf("cut = %d, record %+v", len(cut), record)
 	}
-	if !KubernetesSecretContentRequest(Facts{KubeRequests: bounded}) {
-		t.Fatal("an over-bound request list must fail closed")
+	if KubernetesSecretContentRequest(Facts{KubeRequests: cut}) {
+		t.Fatal("a cut of plain pod lists must not read as a Secret read")
+	}
+	requests[len(requests)-1] = KubeRequestFact{Source: KubeSourceHTTP, Verb: KubeVerbList, Resource: kubernetesSecretResource}
+	cut, record = boundKubeRequests(requests)
+	if len(cut) != maxKubeRequests || record.lost || !KubernetesSecretContentRequest(Facts{KubeRequests: cut}) {
+		t.Fatalf("a Secret read past the bound must be kept: %d, %+v", len(cut), record)
 	}
 }

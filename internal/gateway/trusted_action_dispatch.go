@@ -1090,7 +1090,13 @@ func dispatchTrustedActionOnce(
 	// their bounds instead of failing the projection, so a long SQL
 	// identifier no longer switches off every semantic rule of the call;
 	// the cut is TRUNCATED, never a clean read (DET111 T20 review P1-1).
-	if set := semantic.FactOnlyCuts(facts); set.Any() {
+	// A Kubernetes request cut that dropped a request a reader proves
+	// something from is TRUNCATED as well (DET111 T20 review P2-3).
+	set := semantic.FactOnlyCuts(facts)
+	if kubeCut, lost := facts.KubeRequestCaps(); lost {
+		set = set.Union(kubeCut)
+	}
+	if set.Any() {
 		defer func() {
 			findings = withBoundedTruncation(findings, set, request)
 		}()
