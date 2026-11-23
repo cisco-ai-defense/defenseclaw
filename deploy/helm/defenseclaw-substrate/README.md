@@ -83,6 +83,8 @@ Every value is checked by `values.schema.json`. The main ones:
 | `observability.redactionProfile` | `sensitive` | the redaction profile of every record the gateway keeps in its audit store and sends, unless `config.observability.defaults.redaction_profile` names one: credentials, secrets and PII in prompts, model answers and tool results are replaced before they are written (GAP-0426). `none` keeps them whole; use it only when the store and every destination share an approved trust boundary |
 | `observability.local.enabled` | false | a local OTel collector for trying the chart (debug exporter), and an otlp destination `chart-collector` to it in `config.observability.destinations` unless one with that name is set. For a real backend, add your own destination under `config.observability.destinations` |
 | `bundles.enabled`, `bundles.anchorsSecret`, `bundles.inbox` | off, `defenseclaw-bundle-anchors`, `defenseclaw-bundle-inbox` | signed policy bundles; see below |
+| `bundles.oci.enabled`, `bundles.oci.stages`, `bundles.oci.timeout`, `bundles.oci.authHosts` | off, [], "", [] | Preview: the controller pulls a stage's signed bundle by digest from an OCI registry; rendered into `config.substrate.bundles.oci` unless `config` sets it. Needs `bundles.enabled`; see "OCI registry bundles" |
+| `bundles.oci.credentialsSecret`, `bundles.oci.ca.configMap` or `bundles.oci.ca.secret`, `bundles.oci.ca.key` | "", "", "", `ca.crt` | a `kubernetes.io/dockerconfigjson` Secret with the registry login and a PEM CA file for a private registry, mounted read-only in the controller only; set `oci.credentials_file` and `oci.ca_file` |
 
 ### A memory home volume
 
@@ -157,12 +159,40 @@ A stage names only atespaces DefenseClaw manages: a launcher atespace, or one th
 `config.yaml` or of the bundle lists by name. Any other name is refused with a receipt (`stage_invalid`), and no stage is
 made for it.
 
-Known limits in 1.0.10:
+### OCI registry bundles (Preview)
 
-- **OCI registry bundles are Preview and set in `config.yaml` only.** Besides `bundle apply FILE` and the inbox ConfigMap,
-  the controller can pull a stage bundle by digest from an OCI registry (`substrate.bundles.oci`, off by default). The
-  chart has no values for it yet: set the keys in the chart's `config.yaml`, and mount a dockerconfigjson Secret or a CA
-  file yourself if the registry needs them.
+Besides `bundle apply FILE` and the inbox ConfigMap, the controller can pull a stage's bundle by digest from an OCI registry.
+It is off by default and adds no registry call until you turn it on. The registry is only transport: the bundle signature,
+checked against the anchors Secret, decides what is enforced.
+
+```yaml
+bundles:
+  enabled: true
+  oci:
+    enabled: true
+    credentialsSecret: dc-bundle-registry   # optional: kubernetes.io/dockerconfigjson, key .dockerconfigjson
+    ca:                                     # optional: a private registry CA, from a ConfigMap or a Secret
+      configMap: registry-ca
+      key: ca.crt
+    authHosts: []                           # token realm hosts besides the registry (Docker Hub: auth.docker.io)
+    stages:
+    - stage: prod
+      ref: registry.example.com/policy/prod-bundle@sha256:<64 hex>
+      atespaces: [team-a, team-b]
+```
+
+- `ref` is `host/repository@sha256:<64 hex>`; a tag is refused. The artifact is an OCI image manifest with one layer of media
+  type `application/vnd.defenseclaw.bundle.v1` (`oras push reg/repo:v7 prod.dcbundle:application/vnd.defenseclaw.bundle.v1`);
+  pin the printed manifest digest.
+- The login Secret and the CA are mounted read-only in the controller only, at
+  `/etc/defenseclaw-substrate/bundle-oci-auth/config.json` and `/etc/defenseclaw-substrate/bundle-oci-ca/ca.crt`, and set
+  `oci.credentials_file` and `oci.ca_file`. Without them the pull is anonymous and uses the system roots.
+- If `config.substrate.bundles.oci` is set, the chart renders none of these keys: you keep full control of the file, and the
+  mounts still apply when you name the Secret or CA.
+- The controller's egress NetworkPolicy allows port 443. For a registry on another port, add a rule to
+  `networkPolicy.egress.extra`.
+- `helm template` refuses `bundles.oci.enabled` without `bundles.enabled` or without a stage, and a CA from both a ConfigMap
+  and a Secret.
 
 ## Upgrade, rollback, uninstall
 

@@ -117,6 +117,21 @@ unless config names a file. */ -}}
 {{- if and .Values.bundles.enabled (not (hasKey $sub "bundles")) -}}
 {{- $_ := set $sub "bundles" (dict "enabled" true "anchors_file" "/etc/defenseclaw-substrate/bundle-anchors/bundle-anchors.json" "inbox" .Values.bundles.inbox) -}}
 {{- end -}}
+{{- /* OCI bundle source (GAP-0437, Preview): the chart values render
+substrate.bundles.oci unless config sets it. The mounts below give the
+credentials and CA paths. */ -}}
+{{- if and .Values.bundles.enabled .Values.bundles.oci.enabled -}}
+{{- $b := get $sub "bundles" | default dict -}}
+{{- if not (hasKey $b "oci") -}}
+{{- $o := dict "enabled" true "stages" .Values.bundles.oci.stages -}}
+{{- if .Values.bundles.oci.timeout }}{{ $_ := set $o "timeout" .Values.bundles.oci.timeout }}{{ end -}}
+{{- if .Values.bundles.oci.authHosts }}{{ $_ := set $o "auth_hosts" .Values.bundles.oci.authHosts }}{{ end -}}
+{{- if .Values.bundles.oci.credentialsSecret }}{{ $_ := set $o "credentials_file" (include "dc.bundleOCIAuthFile" .) }}{{ end -}}
+{{- if or .Values.bundles.oci.ca.configMap .Values.bundles.oci.ca.secret }}{{ $_ := set $o "ca_file" (include "dc.bundleOCICAFile" .) }}{{ end -}}
+{{- $_ := set $b "oci" $o -}}
+{{- $_ := set $sub "bundles" $b -}}
+{{- end -}}
+{{- end -}}
 {{- /* The actor token key set (GAP-0194): chart values fill
 identity.keys_url and keys_ca_file unless config sets them. */ -}}
 {{- $keys := .Values.substrate.actorKeys | default dict -}}
@@ -393,6 +408,31 @@ initContainers:
     secretName: {{ .ctx.Values.bundles.anchorsSecret }}
     defaultMode: 0444
 {{- end }}
+{{- if and .ctx.Values.bundles.enabled (eq .component "controller") }}
+{{- if .ctx.Values.bundles.oci.credentialsSecret }}
+- name: bundle-oci-auth
+  secret:
+    secretName: {{ .ctx.Values.bundles.oci.credentialsSecret }}
+    defaultMode: 0440
+    items:
+    - {key: .dockerconfigjson, path: config.json}
+{{- end }}
+{{- if .ctx.Values.bundles.oci.ca.configMap }}
+- name: bundle-oci-ca
+  configMap:
+    name: {{ .ctx.Values.bundles.oci.ca.configMap }}
+    defaultMode: 0444
+    items:
+    - {key: {{ .ctx.Values.bundles.oci.ca.key | quote }}, path: ca.crt}
+{{- else if .ctx.Values.bundles.oci.ca.secret }}
+- name: bundle-oci-ca
+  secret:
+    secretName: {{ .ctx.Values.bundles.oci.ca.secret }}
+    defaultMode: 0444
+    items:
+    - {key: {{ .ctx.Values.bundles.oci.ca.key | quote }}, path: ca.crt}
+{{- end }}
+{{- end }}
 {{- end -}}
 
 {{- define "dc.volumeMounts" -}}
@@ -435,6 +475,18 @@ initContainers:
 - name: bundle-anchors
   mountPath: /etc/defenseclaw-substrate/bundle-anchors
   readOnly: true
+{{- end }}
+{{- if and .ctx.Values.bundles.enabled (eq .component "controller") }}
+{{- if .ctx.Values.bundles.oci.credentialsSecret }}
+- name: bundle-oci-auth
+  mountPath: /etc/defenseclaw-substrate/bundle-oci-auth
+  readOnly: true
+{{- end }}
+{{- if or .ctx.Values.bundles.oci.ca.configMap .ctx.Values.bundles.oci.ca.secret }}
+- name: bundle-oci-ca
+  mountPath: /etc/defenseclaw-substrate/bundle-oci-ca
+  readOnly: true
+{{- end }}
 {{- end }}
 {{- end -}}
 
@@ -600,6 +652,10 @@ kubernetes.io/dockerconfigjson Secret): mounted read-only in the controller
 and the gateway, the two readers of attestations (GAP-0190). The file is
 re-read when the Secret changes.
 */}}
+{{/* The OCI bundle source's mounted files (bundles.oci), controller only. */}}
+{{- define "dc.bundleOCIAuthFile" -}}/etc/defenseclaw-substrate/bundle-oci-auth/config.json{{- end -}}
+{{- define "dc.bundleOCICAFile" -}}/etc/defenseclaw-substrate/bundle-oci-ca/ca.crt{{- end -}}
+
 {{- define "dc.templateRegistryFile" -}}/etc/defenseclaw/substrate/registry-auth/config.json{{- end -}}
 
 {{- define "dc.templateRegistryMount" -}}
