@@ -1346,9 +1346,11 @@ func (f credentialSearchFilter) searches(segments []string) bool {
 	if len(f.names) > 0 {
 		// GNU grep: the last --include or --exclude that matches the name
 		// wins; a name none matches is read unless the first is --include.
+		// An --include glob the matcher cannot read matches: the file is
+		// read.
 		read := !f.names[0].include
 		for _, name := range f.names {
-			if ok, err := path.Match(name.glob, base); err == nil && ok {
+			if ok, valid := grepGlobMatch(name.glob, base); ok || !valid && name.include {
 				read = name.include
 			}
 		}
@@ -1366,9 +1368,11 @@ func (f credentialSearchFilter) searches(segments []string) bool {
 
 // enters reports a folder grep -r enters: none its --exclude-dir globs
 // match.
+// An --exclude-dir glob the matcher cannot read excludes nothing: the
+// folder is read.
 func (f credentialSearchFilter) enters(name string) bool {
 	for _, glob := range f.excludeDir {
-		if ok, err := path.Match(glob, name); err == nil && ok {
+		if ok, _ := grepGlobMatch(glob, name); ok {
 			return false
 		}
 	}
@@ -1611,12 +1615,15 @@ func (r *credentialPathResolver) searchFolder(id int64, folder string, filter cr
 	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
 		return
 	}
+	dir, shown = filepath.Clean(dir), filepath.ToSlash(shown)
+	r.probeWithin(id, dir, shown, filter)
 	left := credentialPathWalkBounds.minus(r.walkUsed)
 	if left.spent() {
+		r.probeUnder(id, dir, shown, filter)
 		r.add(id, "", true)
 		return
 	}
-	walk := credentialPathWalk(filepath.Clean(dir), filepath.ToSlash(shown), filter, left)
+	walk := credentialPathWalk(dir, shown, filter, left)
 	r.walkUsed = r.walkUsed.plus(walk.used)
 	for _, file := range walk.found {
 		if r.stopped() {
@@ -1625,8 +1632,112 @@ func (r *credentialPathResolver) searchFolder(id int64, folder string, filter cr
 		r.candidate(id, file, false, false)
 	}
 	if walk.cut {
+		r.probeUnder(id, dir, shown, filter)
 		r.add(id, "", true)
 	}
+}
+
+// probeUnder looks up every probe of the credentials table under the folder
+// a recursive search names, as rel does, outside the shared walk budget
+// (substrate-1:GAP-0911): a walk spent on a huge folder named before it
+// (grep -r KEY /usr ~), or cut inside this one, would otherwise miss the
+// exact ~/.aws/credentials read and record only the file-unknown read. A
+// first segment that is not there costs no lookup (rel-1-0-10:GAP-1045);
+// the probes run in table order, so the reads come in the same order every
+// time.
+func (r *credentialPathResolver) probeUnder(id int64, dir, shown string, filter credentialWalkFilter) {
+	there := make(map[string]bool)
+	for _, probe := range credentialProbes() {
+		if r.stopped() {
+			return
+		}
+		first := probe.segments[0]
+		found, checked := there[first]
+		if !checked {
+			if !r.work.Take() {
+				return
+			}
+			_, err := os.Lstat(filepath.Join(dir, first))
+			if found = err == nil; found && !r.lookups.Take() {
+				return
+			}
+			there[first] = found
+		}
+		if !found || !filter.admits(shown, probe.segments) {
+			continue
+		}
+		if !r.lookups.Take() {
+			return
+		}
+		file := filepath.Join(dir, filepath.FromSlash(probe.value))
+		if info, err := os.Stat(file); err == nil && info.Mode().IsRegular() {
+			r.candidate(id, file, false, false)
+		}
+	}
+}
+
+// probeWithin looks up the files of the probes the folder a recursive
+// search names sits inside: rg KEY .aws or grep -r KEY ~/.aws reads
+// ~/.aws/credentials, and grep -r KEY ~/.config/gh reads
+// ~/.config/gh/hosts.yml (substrate-1:GAP-0913; the walk looked only at a
+// folder named as a probe's first segment, so a folder deeper in the probe
+// read nothing). The folder's trailing segments must be the probe's leading
+// folders; it is read whatever its name, as the command names it.
+func (r *credentialPathResolver) probeWithin(id int64, dir, shown string, filter credentialWalkFilter) {
+	for _, tail := range credentialProbeTails()[filepath.Base(dir)] {
+		if r.stopped() || !r.work.Take() {
+			return
+		}
+		if !credentialFolderEndsIn(dir, tail.probe.segments[:tail.depth]) {
+			continue
+		}
+		rest := tail.probe.segments[tail.depth:]
+		if !filter.admits(shown, rest) {
+			continue
+		}
+		if !r.lookups.Take() {
+			return
+		}
+		file := filepath.Join(dir, filepath.FromSlash(strings.Join(rest, "/")))
+		if info, err := os.Stat(file); err == nil && info.Mode().IsRegular() {
+			r.candidate(id, file, false, false)
+		}
+	}
+}
+
+// credentialProbeTail is a probe whose first depth segments are folders a
+// search may name: the folder named is segments[depth-1].
+type credentialProbeTail struct {
+	probe credentialProbe
+	depth int
+}
+
+// credentialProbeTails indexes the probes by each of their folder segments.
+var credentialProbeTails = sync.OnceValue(func() map[string][]credentialProbeTail {
+	tails := make(map[string][]credentialProbeTail)
+	for _, probe := range credentialProbes() {
+		for depth := 1; depth < len(probe.segments); depth++ {
+			name := probe.segments[depth-1]
+			tails[name] = append(tails[name], credentialProbeTail{probe: probe, depth: depth})
+		}
+	}
+	return tails
+})
+
+// credentialFolderEndsIn reports a folder whose trailing segments are
+// segments.
+func credentialFolderEndsIn(dir string, segments []string) bool {
+	for i := len(segments) - 1; i >= 0; i-- {
+		if filepath.Base(dir) != segments[i] {
+			return false
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir && i > 0 {
+			return false
+		}
+		dir = parent
+	}
+	return true
 }
 
 // credentialWalkKey is one folder one command searched: its resolved path
@@ -1699,25 +1810,6 @@ func credentialPathWalk(dir, shown string, filter credentialWalkFilter, limits c
 			lookups: min(budget.lookups.Load(), limits.lookups),
 		}
 	}()
-	// The folder searched may itself be the first segment of a probe
-	// (rg KEY .aws, grep -r KEY ~/.aws): its own files are looked up
-	// under it. It is read whatever its name, as the command names it.
-	for _, probe := range groups[filepath.Base(dir)] {
-		if len(probe.segments) < 2 {
-			continue
-		}
-		if !filter.admits(shown, probe.segments[1:]) {
-			continue
-		}
-		rest := strings.Join(probe.segments[1:], "/")
-		if !budget.take(&budget.lookups, limits.lookups) {
-			return walk
-		}
-		file := filepath.Join(dir, filepath.FromSlash(rest))
-		if info, err := os.Stat(file); err == nil && info.Mode().IsRegular() {
-			walk.found = append(walk.found, file)
-		}
-	}
 	// Level by level: the folders of one level are read by up to
 	// credentialPathWalkWorkers goroutines (the walk's cost is its system
 	// calls), and merged in order, so an uncut walk finds the same files in

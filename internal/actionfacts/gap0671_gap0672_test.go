@@ -143,19 +143,18 @@ func g0672Tree(t *testing.T, n, subs, flat int) (string, []string) {
 // budget's worth of the tree: the walks past it are cut, and a cut marks
 // only the chain's unknown tier (no TRUNCATED, so no verdict change, the
 // round-1 P2-1 ruling). At a6f8f54ead each name had its own budget (200
-// walks, 200 files named). A later check of the call walks the tree as it
+// whole walks). Each named folder's own probe is not a walk: every name's
+// .env is read, as on both rels (substrate-1:GAP-0911). A later check of the call walks the tree as it
 // is then (rel-1-0-10:GAP-1045): with the tree's .env removed it names
 // none, within the same one budget.
 func TestGAP0672OneWalkBudgetPerCall(t *testing.T) {
 	for _, shape := range []struct {
 		name        string
 		subs, flat  int
-		perWalk     int // folders or entries of one walk of the tree
-		budget      int // the budget that runs out first
 		description string
 	}{
-		{"folders", 40, 0, 41, maxCredentialPathWalkFolders, "41 folders of 401 entries"},
-		{"entries", 0, 1000, 1001, maxCredentialPathWalkEntries, "1 folder of 1,001 entries"},
+		{"folders", 40, 0, "41 folders of 401 entries"},
+		{"entries", 0, 1000, "1 folder of 1,001 entries"},
 	} {
 		t.Run(shape.name, func(t *testing.T) {
 			const n = 200
@@ -166,10 +165,14 @@ func TestGAP0672OneWalkBudgetPerCall(t *testing.T) {
 				t.Fatalf("a spent walk budget is a cap of the resolve: %v", caps)
 			}
 			named := g0671Named(first)
-			// Whole walks in the budget, plus the one it cut.
-			if most := shape.budget/shape.perWalk + 1; len(named) == 0 || len(named) > most {
-				t.Fatalf("%d names of a tree of %s: %d files named, want 1..%d (one shared budget)",
-					n, shape.description, len(named), most)
+			// Each name's own .env is read exactly: the one-level probe of
+			// a named folder is outside the shared walk budget, as rel
+			// probes it (substrate-1:GAP-0911); only the walks below it
+			// share the one budget, and the walks it cuts add the unknown
+			// read.
+			if len(named) != n {
+				t.Fatalf("%d names of a tree of %s: %d files named, want %d (each named folder's own probe)",
+					n, shape.description, len(named), n)
 			}
 			if !g0671Unknown(first) {
 				t.Fatalf("%d names past the shared budget: no file-unknown read (the chain's unknown tier)", n)
