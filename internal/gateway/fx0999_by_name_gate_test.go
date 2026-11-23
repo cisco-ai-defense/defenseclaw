@@ -101,15 +101,11 @@ func TestGAP1022And1023ActorAnswersAsTheLaptop(t *testing.T) {
 		"P=s; tar cz ~/.${P}${P}h", "x=s; tar cz ~/.s${x:-s}h", "x=s; tar cz ${HOME}/.s${x}h", "D=~/.s; tar cz ${D}sh",
 		"shopt -s dotglob; tar cz *", "GLOBIGNORE=x; tar cz *", "sh -c \"x=s; tar cz ~/.s\\${x}h\"",
 	}
-	// The GAP-1023 rows. The Codex exec_command shape sends the guest
-	// folder as an absolute workdir, which takes no by-name reading: its
-	// false block is older than the GAP-0922 fix (GAP-1024, parent too).
+	// The GAP-1023 rows also cover Codex exec_command: a missing guest home
+	// has no startup files that could enable dotglob (GAP-1024).
 	benign := []string{"tar cz ~/*", "cp -r ~/?ssh /tmp/x", "tar cz *"}
 	for _, s := range gap0545Shapes() {
-		rows := rows
-		if s.name != "codex exec_command cmd" {
-			rows = append(slices.Clone(rows), benign...)
-		}
+		rows := append(slices.Clone(rows), benign...)
 		t.Run(s.name, func(t *testing.T) {
 			api, actor, home, _ := gap0545API(t, s.connector, "default")
 			gap0922Layout(t, home)

@@ -2243,7 +2243,8 @@ func UseSystemShellProfilesForTests(files []string, dropInDir string) (restore f
 
 // actionShellProfileMayDotglob reports a startup file of the user's or the
 // system's shell, or an inherited BASHOPTS or GLOBIGNORE, that may set
-// dotglob, or a home this process cannot read.
+// dotglob. A missing home has no startup files; other stat errors are
+// conservative.
 //
 // A decision by name alone (fixturefs.Unread) reads no startup file: the
 // actor's files are not on this host, so it reads the actor's home as the
@@ -2259,7 +2260,7 @@ func actionShellProfileMayDotglob(home string) bool {
 	if fixturefs.Unreadable() {
 		return false
 	}
-	if _, err := pathStat(home); err != nil {
+	if _, err := pathStat(home); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return true
 	}
 	files := slices.Clone(systemShellProfiles)
