@@ -81,7 +81,7 @@ func TestGAP0928RenewalBoundToLiveManaged(t *testing.T) {
 	}
 	code, row, certA, keyA := gap0928Cert(t, g)
 	want("attacker first", 200, "INFO substrate.relay.cert", code, row)
-	code, row, _, keyR := gap0928Cert(t, g)
+	code, row, _, _ = gap0928Cert(t, g)
 	want("relay second", 403, "HIGH substrate.relay.cert_refused", code, row)
 	if err := store.ClearRelayCert(t.Context(), "eng-web", gap0861UID); err != nil {
 		t.Fatal(err)
@@ -93,14 +93,12 @@ func TestGAP0928RenewalBoundToLiveManaged(t *testing.T) {
 		t.Errorf("reason %q", out)
 	}
 	_, csrR, _ := relaytls.NewKeyAndCSR()
-	_ = keyR
-	code, row, certR := g.ask(t, relay.CertRequest{CSR: base64.StdEncoding.EncodeToString(csrR)})
+	code, row, _ = g.ask(t, relay.CertRequest{CSR: base64.StdEncoding.EncodeToString(csrR)})
 	want("relay first after recover", 200, "INFO substrate.relay.cert", code, row)
 	code, row, _ = gap0928Renew(t, g, certA, keyA)
 	want("attacker renews", 403, "HIGH substrate.relay.cert_refused", code, row)
 	code, row, _, _ = gap0928Cert(t, g)
 	want("attacker without proof", 403, "HIGH substrate.relay.cert_refused", code, row)
-	_ = certR
 }
 
 // The relay itself keeps renewing (each renewal is the live one next).
