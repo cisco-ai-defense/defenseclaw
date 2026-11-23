@@ -4,6 +4,7 @@
 package gateway
 
 import (
+	"cmp"
 	"context"
 	"math"
 	"path"
@@ -1157,6 +1158,15 @@ type guestScriptCall struct {
 // (guestNamesCDPath), -1 when the text names it outside every statement or
 // does not parse, math.MaxInt when it never does.
 func guestScriptCalls(command, home string) (calls []guestScriptCall, cdpath int) {
+	return guestScriptCallsWork(command, home, nil)
+}
+
+// guestScriptCallsWork is guestScriptCalls; when work is not nil it adds the
+// span visits the placement made after the parse (each loop or function body
+// span checked against a position), so a test can pin how the work grows with
+// the script (substrate-1 GAP-1009: the GAP-0991 loop pass visited every
+// unread command for every function and every span, cubic on an 8 KB loop).
+func guestScriptCallsWork(command, home string, work *int) (calls []guestScriptCall, cdpath int) {
 	names := guestNamesCDPath(command)
 	cdpath = math.MaxInt
 	if names {
@@ -1242,45 +1252,78 @@ func guestScriptCalls(command, home string) (calls []guestScriptCall, cdpath int
 			return true
 		})
 	}
-	inBody := func(pos int) bool {
-		return slices.ContainsFunc(bodies, func(body span) bool { return body.start <= pos && pos < body.end })
+	visits := 0
+	if work != nil {
+		defer func() { *work += visits }()
 	}
-	inLoopPast := func(pos, from int) bool {
-		return slices.ContainsFunc(loops, func(loop span) bool { return loop.start <= pos && pos < loop.end && loop.end > from })
+	// furthest answers, for spans, the end of the furthest span holding pos,
+	// -1 when none holds it: of the spans that start at or before pos, the
+	// one that ends furthest holds pos exactly when it ends past pos. A
+	// binary search, not a pass over every span (substrate-1 GAP-1009).
+	furthest := func(spans []span) func(pos int) int {
+		sorted := slices.SortedFunc(slices.Values(spans), func(a, b span) int { return cmp.Compare(a.start, b.start) })
+		reach := make([]int, len(sorted))
+		for i, s := range sorted {
+			reach[i] = s.end
+			if i > 0 {
+				reach[i] = max(reach[i], reach[i-1])
+			}
+		}
+		return func(pos int) int {
+			visits++
+			n, _ := slices.BinarySearchFunc(sorted, pos+1, func(s span, target int) int { return cmp.Compare(s.start, target) })
+			if n == 0 || reach[n-1] <= pos {
+				return -1
+			}
+			return reach[n-1]
+		}
 	}
+	// loopEnd is the end of the furthest loop holding pos, bodyEnd that of
+	// the furthest function body; -1 when none holds it.
+	loopEnd, bodyEnd := furthest(loops), furthest(bodies)
 	// open marks a function that may be called another way than where the
 	// text calls it: an unread command after its declaration in the text or
 	// in a function body, or a word of its name that is neither a call nor
 	// the declaration. An unread command before the declaration in a loop
 	// that goes on past it may call the function only on a later pass, so it
-	// counts as a call site where the loop may run (passes, then place), not
+	// counts as a call site where the loop may run (pass, then place), not
 	// as the end of the script: for i in 1 2; do $CMD; g() { echo m >
 	// config.yaml; }; done; g; cd ~/.defenseclaw && ls was a strict block
 	// where the laptop and both rels allow (substrate-1 GAP-0991). A trap it
 	// may set on a later pass, the first pass may set too (GAP-0990).
+	//
+	// Such a command is in no function body, so it runs where its loops end:
+	// pass is the furthest loop end of the unread commands before the
+	// declaration, -1 for none, worked out once per unread command in source
+	// order (reach is its running maximum), not once per function and span
+	// (substrate-1 GAP-1009).
+	slices.Sort(unread)
+	unreadInBody := false
+	reach := make([]int, len(unread))
+	for i, pos := range unread {
+		unreadInBody = unreadInBody || bodyEnd(pos) >= 0
+		reach[i] = loopEnd(pos)
+		if i > 0 {
+			reach[i] = max(reach[i], reach[i-1])
+		}
+	}
 	open := make([]bool, len(bodies))
-	passes := make([][]int, len(bodies))
+	pass := make([]int, len(bodies))
 	for at, body := range bodies {
-		open[at] = guestWordCount(command, body.name) != 1+len(sites[body.name])
-		for _, pos := range unread {
-			switch {
-			case pos >= body.start || inBody(pos):
-				open[at] = true
-			case inLoopPast(pos, body.start):
-				passes[at] = append(passes[at], pos)
-			}
+		visits++
+		open[at] = guestWordCount(command, body.name) != 1+len(sites[body.name]) ||
+			unreadInBody || len(unread) != 0 && unread[len(unread)-1] >= body.start
+		pass[at] = -1
+		if before, _ := slices.BinarySearch(unread, body.start); before != 0 {
+			pass[at] = reach[before-1]
 		}
 	}
 	runs := map[int]int{}
 	var place func(pos, depth int) int
 	place = func(pos, depth int) int {
-		out := pos
-		for _, loop := range loops {
-			if loop.start <= pos && pos < loop.end {
-				out = max(out, loop.end)
-			}
-		}
+		out := max(pos, loopEnd(pos))
 		for at, body := range bodies {
+			visits++
 			if pos < body.start || pos >= body.end {
 				continue
 			}
@@ -1288,8 +1331,8 @@ func guestScriptCalls(command, home string) (calls []guestScriptCall, cdpath int
 			if !ok {
 				from = len(command)
 				if !open[at] && depth < 8 {
-					from = body.start
-					for _, site := range slices.Concat(sites[body.name], passes[at]) {
+					from = max(body.start, pass[at])
+					for _, site := range sites[body.name] {
 						if site >= body.start && site < body.end {
 							from = len(command)
 							break
@@ -1312,6 +1355,7 @@ func guestScriptCalls(command, home string) (calls []guestScriptCall, cdpath int
 	early = func(pos, depth int) int {
 		out := pos
 		for at, body := range bodies {
+			visits++
 			if pos < body.start || pos >= body.end {
 				continue
 			}
