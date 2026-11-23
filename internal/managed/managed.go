@@ -56,7 +56,8 @@ const (
 	HookGuardianCredentialTransactionFile = "credential-transaction.json"
 	// HookGuardianReconcileLockFile, next to the ledger, serializes the
 	// standalone Unix guardian's reconciles with each other and with a
-	// credential rotation staging or committing a key.
+	// credential rotation staging or committing a key, and on Windows the
+	// guardian state writers (the service and an administrator reconcile).
 	HookGuardianReconcileLockFile = "reconcile.lock"
 	// WindowsServiceAccountEnv names the gateway service SID, as its
 	// `NT SERVICE\<name>` account, permitted to write the managed runtime

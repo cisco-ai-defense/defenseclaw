@@ -41,6 +41,14 @@ const (
 	// maxSkillHashCacheFolders bounds the memory of the cache; a scan that
 	// would add more starts it again.
 	maxSkillHashCacheFolders = maxSkillManifestFolders
+	// skillHashCacheRacyWindow is the coarsest timestamp tick of the file
+	// systems a skill folder can sit on (FAT and exFAT keep two seconds, HFS+
+	// one, a Linux kernel without multigrain timestamps one jiffy). A write
+	// that follows the hash read within one tick of an entry's last stamp can
+	// carry that same stamp, and a same-size one leaves the signature as it
+	// was. So a folder with an entry stamped within this window of the read is
+	// "racily clean", as git calls it, and is not kept (GAP-1891).
+	skillHashCacheRacyWindow = 2 * time.Second
 )
 
 // skillHashCacheEntry is what hashSkillFolder found in one folder.
@@ -53,6 +61,13 @@ type skillHashCacheEntry struct {
 	manifestSize int64
 }
 
+// skillSignatureRacy reports whether a write after a hash read at readAt could have left
+// every stamp in the signature as it was: an entry's newest modification or
+// change time (newest) is not older than the window before the read.
+func skillSignatureRacy(newest, readAt time.Time) bool {
+	return !newest.Before(readAt.Add(-skillHashCacheRacyWindow))
+}
+
 // fresh reports whether the entry can stand in for reading the folder now.
 func (entry skillHashCacheEntry) fresh(signature string, now time.Time) bool {
 	return signature != "" && entry.signature == signature &&
@@ -63,14 +78,15 @@ func (entry skillHashCacheEntry) fresh(signature string, now time.Time) bool {
 // hashSkillFolder would walk below root, without reading a file. It reports
 // false wherever hashSkillFolder would not report an ok hash from the walk
 // alone (a link or irregular root, too many entries, too deep, a walk error),
-// so those folders are always hashed again.
-func skillFolderSignature(root string) (string, bool) {
+// so those folders are always hashed again. It also returns the newest
+// modification or change time of any entry, for skillSignatureRacy.
+func skillFolderSignature(root string) (string, time.Time, bool) {
 	info, err := os.Lstat(root)
 	if err != nil || !info.IsDir() || info.Mode()&(fs.ModeSymlink|fs.ModeIrregular) != 0 {
-		return "", false
+		return "", time.Time{}, false
 	}
 	digest := sha256.New()
-	writeSkillEntrySignature(digest, ".", root, info)
+	newest := writeSkillEntrySignature(digest, ".", root, info)
 	entries := 0
 	err = filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
@@ -95,20 +111,35 @@ func skillFolderSignature(root string) (string, bool) {
 				return errSkillTooLarge
 			}
 		}
-		info, err := entry.Info()
+		// The entry's own record, not entry.Info(): on Windows that is the
+		// parent folder's listing, which NTFS brings up to date lazily (a
+		// subfolder keeps the write time it had before its last file was
+		// added until the folder is next opened), so an unchanged folder
+		// looked changed on the next scan and a changed one could look
+		// unchanged. Elsewhere entry.Info() is this same lstat.
+		info, err := os.Lstat(path)
 		if err != nil {
 			return err
 		}
-		writeSkillEntrySignature(digest, rel, path, info)
+		if stamped := writeSkillEntrySignature(digest, rel, path, info); stamped.After(newest) {
+			newest = stamped
+		}
 		return nil
 	})
 	if err != nil {
-		return "", false
+		return "", time.Time{}, false
 	}
-	return hex.EncodeToString(digest.Sum(nil)), true
+	return hex.EncodeToString(digest.Sum(nil)), newest, true
 }
 
-func writeSkillEntrySignature(w io.Writer, rel, path string, info fs.FileInfo) {
+// writeSkillEntrySignature adds one entry to the signature and returns the
+// later of its modification and change times.
+func writeSkillEntrySignature(w io.Writer, rel, path string, info fs.FileInfo) time.Time {
+	changeStamp, changed := skillEntryChangeStamp(path, info)
 	_, _ = fmt.Fprintf(w, "%q\x00%d\x00%d\x00%d\x00%s\n",
-		rel, uint32(info.Mode()), info.Size(), info.ModTime().UnixNano(), skillEntryChangeStamp(path, info))
+		rel, uint32(info.Mode()), info.Size(), info.ModTime().UnixNano(), changeStamp)
+	if modified := info.ModTime(); modified.After(changed) {
+		return modified
+	}
+	return changed
 }
