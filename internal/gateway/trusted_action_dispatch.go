@@ -11127,25 +11127,33 @@ func unreadPartMayWriteProtected(request trustedActionRequest, generation *compi
 // syntaxUnreadText is command with the statements shellparse.ReadSyntaxTail
 // read blanked: the part a shell may run that the readers did not. A text
 // whose syntax error is in a nested body (no top-level reading) is unread
-// whole.
+// whole. The text only the longer reading of rel-1-0-10:GAP-0745 read
+// (SyntaxTail.Extended) is judged and stays here too: blanking it took the
+// Run-key text of a PowerShell Start-Process line out of this scan on the
+// Codex Bash route, where its Bash reading drops the backslashes, and the
+// strict and managed alert became an allow (rel-1-0-10:GAP-1986).
 func syntaxUnreadText(command string) string {
 	tail, ok := shellparse.ReadSyntaxTail(command)
 	if !ok {
 		return command
 	}
 	unread, from := []byte(command), 0
-	for _, statement := range tail.Statements {
+	for index, statement := range tail.Statements {
 		at := strings.Index(command[from:], statement)
 		if at < 0 {
 			continue
 		}
 		at += from
-		for i := at; i < at+len(statement); i++ {
+		read := at + len(statement)
+		if extended, ok := tail.ExtendedFrom(index); ok {
+			read = at + min(extended, len(statement))
+		}
+		for i := at; i < read; i++ {
 			if unread[i] != '\n' {
 				unread[i] = ' '
 			}
 		}
-		from = at + len(statement)
+		from = read
 	}
 	return string(unread)
 }
