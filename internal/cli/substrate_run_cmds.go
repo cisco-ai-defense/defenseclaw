@@ -25,16 +25,19 @@ import (
 
 // substrateRunFlags are the flags of run.
 type substrateRunFlags struct {
-	out         substrateOutput
-	com         substrateCommon
-	profile     string
-	template    string
-	name        string
-	task        string
-	batch       string
-	parallel    int
-	detach      bool
-	clone       string
+	out      substrateOutput
+	com      substrateCommon
+	profile  string
+	template string
+	name     string
+	task     string
+	batch    string
+	parallel int
+	detach   bool
+	clone    string
+	// cloneHere: --clone named this checkout and the folder copy carries
+	// its upstream (set by substratePrepareCloneHere, not a flag).
+	cloneHere   bool
 	ref         string
 	noUpload    bool
 	unmask      []string
@@ -42,6 +45,7 @@ type substrateRunFlags struct {
 	maxUploadMB int
 	secrets     []string
 	transport   string
+	keyReplay   string
 	noAsks      bool
 	keep        bool
 	yes         bool
@@ -69,12 +73,14 @@ With --task the agent runs headless without you: asks are denied, or queued for 
 unattended_asks is queue, and the run is checked as strictly as an unattended job. Add --detach to leave it
 running and follow it with "defenseclaw substrate logs -f NAME".
 With --batch FILE every task gets its own agent on the same folder; --parallel limits how many run at once.
-With --clone URL the agent starts from a repository instead of a copy of the folder. Arguments after -- go
-to the agent.`,
+With --clone URL the agent starts from a repository instead of a copy of the folder. With --clone . (Preview)
+it starts from this checkout: the agent fetches the branch's history from its remote, and only the unpushed
+commits and uncommitted changes are sent from here. Arguments after -- go to the agent.`,
 		Example: "defenseclaw substrate run claude\n" +
 			"defenseclaw substrate run codex --task \"fix the failing tests\" --detach\n" +
 			"defenseclaw substrate run claude --batch tasks.yaml --parallel 5\n" +
-			"defenseclaw substrate run claude --clone https://git.example.test/team/app.git",
+			"defenseclaw substrate run claude --clone https://git.example.test/team/app.git\n" +
+			"defenseclaw substrate run claude --clone .",
 		Args: func(cmd *cobra.Command, args []string) error {
 			if len(args) == 0 {
 				return errors.New("name the agent: claude, codex, copilot, opencode, kiro, hermes or antigravity")
@@ -96,15 +102,16 @@ to the agent.`,
 	fl.StringVar(&f.batch, "batch", "", "run every task in this YAML file, one agent each")
 	fl.IntVar(&f.parallel, "parallel", 0, "with --batch, how many agents run at once (default 4)")
 	fl.BoolVarP(&f.detach, "detach", "d", false, "with --task, start it and return; follow it with logs -f")
-	fl.StringVar(&f.clone, "clone", "", "start from this repository instead of a copy of the folder")
+	fl.StringVar(&f.clone, "clone", "", "start from this repository instead of a copy of the folder; . for this checkout with its history (Preview)")
 	fl.StringVar(&f.ref, "ref", "", "with --clone, the branch, tag or commit")
 	fl.BoolVar(&f.noUpload, "no-upload", false, "start with an empty folder; upload nothing")
 	fl.StringArrayVar(&f.unmask, "unmask", nil, "send a held-back secret file or pattern anyway (repeatable)")
-	fl.StringArrayVar(&f.exclude, "exclude", nil, "hold a path or pattern back from the copy (repeatable)")
-	fl.IntVar(&f.maxUploadMB, "max-upload-mb", 0, "refuse a copy larger than this many MB (default 500)")
+	fl.StringArrayVar(&f.exclude, "exclude", nil, "exclude a path or glob from the copy (repeatable, for example 'data/**')")
+	fl.IntVar(&f.maxUploadMB, "max-upload-mb", 0, "lower the cluster upload limit for this copy, in MiB")
 	fl.StringArrayVar(&f.secrets, "secret", nil, "a secret name the agent may use, as listed by secrets list (repeatable)")
 	fl.StringVar(&f.transport, "transport", "auto", "how to carry the terminal: auto, websocket or longpoll")
 	fl.BoolVar(&f.noAsks, "no-asks", false, "do not show guard questions on this terminal")
+	fl.StringVar(&f.keyReplay, "key-replay", "", keyReplayHelp)
 	fl.BoolVar(&f.keep, "keep", false, "keep the agent after a finished --task (default: it stays until you delete it)")
 	fl.BoolVarP(&f.yes, "yes", "y", false, "say yes to the vendor sign-in warning without asking")
 	fl.StringVar(&f.workload, "workload-token-file", "", "CI: file holding the workload identity token")
@@ -119,6 +126,7 @@ type substrateAttachFlags struct {
 	com       substrateCommon
 	transport string
 	noAsks    bool
+	keyReplay string
 }
 
 func newSubstrateConnectCmd() *cobra.Command {
@@ -137,6 +145,7 @@ shows, or the --name you gave run when only one agent has it.`,
 	f.com.add(cmd)
 	cmd.Flags().StringVar(&f.transport, "transport", "auto", "how to carry the terminal: auto, websocket or longpoll")
 	cmd.Flags().BoolVar(&f.noAsks, "no-asks", false, "do not show guard questions on this terminal")
+	cmd.Flags().StringVar(&f.keyReplay, "key-replay", "", keyReplayHelp)
 	return cmd
 }
 
@@ -176,7 +185,9 @@ type substratePullFlags struct {
 	yes    bool
 	// allowFlagged writes flagged files with --apply (GAP-0472).
 	allowFlagged bool
-	timeout      time.Duration
+	// restoreSecrets is --restore-secret-lines (B1 S9a).
+	restoreSecrets bool
+	timeout        time.Duration
 }
 
 func newSubstratePullCmd() *cobra.Command {
@@ -211,6 +222,7 @@ git push its work from inside it.`,
 	fl.BoolVarP(&f.yes, "yes", "y", false, "take the safe default at each question")
 	fl.BoolVar(&f.allowFlagged, "allow-flagged", false, "with --apply: also write the files flagged as able to run code (review them first)")
 	fl.DurationVar(&f.timeout, "timeout", 0, "stop reading the agent's work after this long (default 10m)")
+	fl.BoolVar(&f.restoreSecrets, "restore-secret-lines", false, "in files uploaded with credentials replaced, keep the agent's changed lines with the value put back (default: keep your line)")
 	return cmd
 }
 
@@ -257,3 +269,6 @@ func newSubstrateUndoCmd() *cobra.Command {
 	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "do not ask")
 	return cmd
 }
+
+// keyReplayHelp is the --key-replay help of run and connect (B3.1).
+const keyReplayHelp = "keys typed while the connection is down: ask (show them, Enter sends), on (send) or off (drop); only tightens the cluster setting"

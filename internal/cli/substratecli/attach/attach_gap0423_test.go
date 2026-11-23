@@ -21,7 +21,7 @@ func TestReconnectLineShowsAttemptBackoffAndDowntimeGAP0423(t *testing.T) {
 	if got := r.wait(run); got.err != nil || got.res.Reconnects != 1 {
 		t.Fatalf("%+v %v", got.res, got.err)
 	}
-	line := regexp.MustCompile(`Connection lost; reconnecting: attempt 1, next in [0-9.]+m?s, down [0-9]+s \(Ctrl-\] detaches; keys typed now are not sent\)\.\.\.`)
+	line := regexp.MustCompile(`Connection lost; reconnecting: attempt 1, next in [0-9.]+m?s, down [0-9]+s \(Ctrl-\] detaches; keys typed now are offered when it is back\)\.\.\.`)
 	if !line.MatchString(r.errb.String()) {
 		t.Fatalf("no reconnect line with attempt, backoff and downtime: %q", r.errb.String())
 	}

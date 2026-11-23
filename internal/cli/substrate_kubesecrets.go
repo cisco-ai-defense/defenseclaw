@@ -68,10 +68,19 @@ var kubeNameRE = regexp.MustCompile(`^[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?$`)
 var kubeKeyRE = regexp.MustCompile(`^[-._a-zA-Z0-9]{1,253}$`)
 
 func (k *kubeSecrets) do(ctx context.Context, method, ns, name, ctype string, body []byte) (int, []byte, error) {
+	return k.doResource(ctx, method, "secrets", ns, name, ctype, body)
+}
+
+// doResource is one call on a core v1 resource (secrets, or configmaps for
+// the binding store) of namespace ns.
+func (k *kubeSecrets) doResource(ctx context.Context, method, resource, ns, name, ctype string, body []byte) (int, []byte, error) {
 	if !kubeNameRE.MatchString(ns) || !kubeNameRE.MatchString(name) {
-		return 0, nil, fmt.Errorf("secret %s/%s is not a Kubernetes name", ns, name)
+		return 0, nil, fmt.Errorf("%s %s/%s is not a Kubernetes name", resource, ns, name)
 	}
-	u := k.server + "/api/v1/namespaces/" + url.PathEscape(ns) + "/secrets"
+	if resource != "secrets" && resource != "configmaps" {
+		return 0, nil, fmt.Errorf("resource %q is not one the gateway uses", resource)
+	}
+	u := k.server + "/api/v1/namespaces/" + url.PathEscape(ns) + "/" + resource
 	if method != http.MethodPost {
 		u += "/" + url.PathEscape(name)
 	}

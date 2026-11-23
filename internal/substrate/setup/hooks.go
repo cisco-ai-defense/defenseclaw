@@ -71,7 +71,21 @@ type ConfigMap struct {
 	Name            string
 	ResourceVersion string
 	Data            map[string]string
+	// Annotations and Labels are carried through an update, so a write keeps
+	// what other tools (and GrantedUserSecretsAnnotation) recorded on the
+	// object (GAP-0909 added the labels: the PUT replaces the whole object).
+	Annotations map[string]string
+	Labels      map[string]string
 }
+
+// GrantedUserSecretsAnnotation records, on the credential provider policy
+// ConfigMap, the self-service namespace setup last granted to the launcher
+// atespaces. When self_service_secrets.namespace changes, the recorded one
+// is revoked (RV3 P3-4). Setup does not delete the orphan values in the old
+// namespace (that would widen the hook Jobs' access); it prints the kubectl
+// delete command. A namespace renamed in the same upgrade that first writes
+// this annotation is not caught: the first run only records it.
+const GrantedUserSecretsAnnotation = "defenseclaw.cisco.com/granted-user-secrets-namespace"
 
 // KubeAPI is the part of the Kubernetes API the hook steps use. Not-found
 // is (nil, nil) for GetConfigMap and nil for DeleteSecret.
@@ -221,27 +235,68 @@ func grantProvider(ctx context.Context, plan ChartPlan, kube KubeAPI, r *StepRep
 			"so no grant was written", plan.SubstrateNamespace, cp.ConfigMap)
 		return nil
 	}
-	text, changes, err := GrantNamespace(cm.Data[NamespacePolicyKey], plan.LauncherAtespaces, cp.SecretsNamespace)
-	if err != nil {
-		return err
+	grant, revoke := cp.grantedNamespaces()
+	// The namespace granted by the last run is revoked when it changed or
+	// self-service went off (RV3 P3-4).
+	cur := ""
+	if len(grant) > 1 {
+		cur = grant[1]
 	}
-	// An atespace that left launcher_atespaces loses the grant (GAP-0083).
-	text, revoked, err := RevokeNamespaceExcept(text, plan.LauncherAtespaces, cp.SecretsNamespace)
-	if err != nil {
-		return err
+	prev := cm.Annotations[GrantedUserSecretsAnnotation]
+	if prev != "" && prev != cur && prev != cp.SecretsNamespace && !slices.Contains(revoke, prev) {
+		revoke = append(revoke, prev)
+		if cur != "" {
+			r.note("self-service secrets moved from namespace %s to %s: the grant of %s is revoked. "+
+				"The values people set there (Secrets named dc-b-*) are no longer read; delete them with "+
+				"`kubectl -n %s delete secret -l app.kubernetes.io/managed-by=defenseclaw` once nobody needs them",
+				prev, cur, prev, prev)
+		}
 	}
-	changes = append(changes, revoked...)
-	if len(changes) == 0 {
+	text := cm.Data[NamespacePolicyKey]
+	var changes []GrantChange
+	for _, ns := range grant {
+		var granted, revoked []GrantChange
+		var err error
+		if text, granted, err = GrantNamespace(text, plan.LauncherAtespaces, ns); err != nil {
+			return err
+		}
+		// An atespace that left launcher_atespaces loses the grant (GAP-0083).
+		if text, revoked, err = RevokeNamespaceExcept(text, plan.LauncherAtespaces, ns); err != nil {
+			return err
+		}
+		changes = append(append(changes, granted...), revoked...)
+	}
+	// Self-service secrets turned off: no atespace keeps their namespace.
+	for _, ns := range revoke {
+		var revoked []GrantChange
+		var err error
+		if text, revoked, err = RevokeNamespaceExcept(text, nil, ns); err != nil {
+			return err
+		}
+		changes = append(changes, revoked...)
+	}
+	if len(changes) == 0 && prev == cur {
 		return nil
 	}
 	if cm.Data == nil {
 		cm.Data = map[string]string{}
 	}
 	cm.Data[NamespacePolicyKey] = text
+	if cur == "" {
+		delete(cm.Annotations, GrantedUserSecretsAnnotation)
+	} else {
+		if cm.Annotations == nil {
+			cm.Annotations = map[string]string{}
+		}
+		cm.Annotations[GrantedUserSecretsAnnotation] = cur
+	}
 	if err := kube.UpdateConfigMap(ctx, cm); err != nil {
 		return fmt.Errorf("credential provider policy: %w", err)
 	}
 	r.Grants = append(r.Grants, changes...)
+	if len(changes) == 0 {
+		return nil
+	}
 	if err := kube.RestartDeployment(ctx, plan.SubstrateNamespace, cp.Deployment); err != nil {
 		return fmt.Errorf("restart the credential provider (it reads its policy at start only): %w", err)
 	}
@@ -537,16 +592,33 @@ func revokeProvider(ctx context.Context, plan ChartPlan, kube KubeAPI, r *StepRe
 	if err != nil || cm == nil {
 		return err
 	}
-	// Every atespace granted the secrets namespace, not only today's
+	// Every atespace granted the secrets namespaces, not only today's
 	// launcher list: one removed from launcher_atespaces earlier keeps its
-	// grant otherwise (GAP-0083). Only DefenseClaw grants that namespace.
-	text, changes, err := RevokeNamespaceExcept(cm.Data[NamespacePolicyKey], nil, cp.SecretsNamespace)
-	if err != nil || len(changes) == 0 {
-		return err
+	// grant otherwise (GAP-0083). Only DefenseClaw grants those namespaces.
+	grant, revoke := cp.grantedNamespaces()
+	if prev := cm.Annotations[GrantedUserSecretsAnnotation]; prev != "" && prev != cp.SecretsNamespace {
+		revoke = append(revoke, prev)
+	}
+	text := cm.Data[NamespacePolicyKey]
+	var changes []GrantChange
+	for _, ns := range append(grant, revoke...) {
+		var revoked []GrantChange
+		if text, revoked, err = RevokeNamespaceExcept(text, nil, ns); err != nil {
+			return err
+		}
+		changes = append(changes, revoked...)
+	}
+	_, recorded := cm.Annotations[GrantedUserSecretsAnnotation]
+	if len(changes) == 0 && !recorded {
+		return nil
 	}
 	cm.Data[NamespacePolicyKey] = text
+	delete(cm.Annotations, GrantedUserSecretsAnnotation)
 	if err := kube.UpdateConfigMap(ctx, cm); err != nil {
 		return err
+	}
+	if len(changes) == 0 {
+		return nil
 	}
 	r.Grants = append(r.Grants, changes...)
 	return kube.RestartDeployment(ctx, plan.SubstrateNamespace, cp.Deployment)

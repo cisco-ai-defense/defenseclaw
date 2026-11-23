@@ -58,7 +58,9 @@ type substrateManifestFlagJ struct {
 	Default   string `json:"default,omitempty"`
 	Usage     string `json:"usage"`
 	Metavar   string `json:"metavar,omitempty"`
-	Hidden    bool   `json:"hidden,omitempty"`
+	// Hidden flags are kept out of help and docs but still accepted; the stubs
+	// declare them hidden (GAP-0904).
+	Hidden bool `json:"hidden,omitempty"`
 }
 
 // substrateUseArgs reads the positional arguments from a Use line:

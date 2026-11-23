@@ -54,6 +54,9 @@ type PullOptions struct {
 	// and empty).
 	Scanners       []osw.ContentScanner
 	SensitiveGlobs []string
+	// RestoreSecretLines is osw.PullOptions.RestoreSecretLines
+	// (--restore-secret-lines).
+	RestoreSecretLines bool
 }
 
 // File is one changed file of a review.
@@ -114,7 +117,7 @@ func Pull(ctx context.Context, opts PullOptions) (*Review, error) {
 	res, err := osw.Pull(ctx, osw.PullOptions{
 		DataDir: opts.DataDir, Name: opts.Name, Exec: opts.Exec,
 		MaxBundleBytes: opts.MaxBundleBytes, Timeout: opts.Timeout,
-		Scanners: opts.Scanners, SensitiveGlobs: opts.SensitiveGlobs,
+		Scanners: opts.Scanners, SensitiveGlobs: opts.SensitiveGlobs, RestoreSecretLines: opts.RestoreSecretLines,
 	})
 	if err != nil {
 		return nil, cleanErr("read "+label, err)
@@ -154,6 +157,7 @@ var kindWords = map[osw.RiskKind]string{
 	osw.RiskShellRC:        "is a shell startup file",
 	osw.RiskUnreadable:     "could not be read",
 	osw.RiskZeroFilled:     "came back empty (a write the actor lost)",
+	osw.RiskSecretContext:  "changes a file that holds your credential: check that the change does not send or print the value",
 }
 
 var severityRank = map[osw.Severity]int{

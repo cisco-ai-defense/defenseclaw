@@ -91,6 +91,10 @@ type Settings struct {
 	// ProviderHosts adds model provider hosts (configured LLM base URLs)
 	// to the built-in list no rule may reach.
 	ProviderHosts []string
+	// NoSwapHosts (substrate.egress.no_swap_hosts) are added to
+	// egressspec.EchoHosts: no secret is added on a host either covers
+	// unless the secret sets AllowEcho.
+	NoSwapHosts []string
 }
 
 // Profile is the actor's DefenseClaw profile, reduced to what shapes egress.
@@ -125,6 +129,9 @@ type Secret struct {
 	// Profiles are profile-name globs the secret is bound for; empty binds
 	// it for none.
 	Profiles []string
+	// AllowEcho (inject.allow_echo) lets an admin bind the secret to a
+	// host that returns the requests it gets (an echo host).
+	AllowEcho bool
 }
 
 // Input is everything one actor's policy depends on.
@@ -168,6 +175,10 @@ const (
 	ReasonSecretInvalid      = "secret_invalid"
 	ReasonSecretHeader       = "secret_header_conflict"
 	ReasonSecretTooManyHeads = "secret_too_many_headers"
+	// ReasonSecretEchoHost: the host returns the requests it gets
+	// (egressspec.EchoHosts or Settings.NoSwapHosts), so the real value
+	// would come back to the agent. Detail names the echo entries.
+	ReasonSecretEchoHost = "secret_echo_host"
 )
 
 // Binding is a secret injected on a host.
@@ -456,6 +467,15 @@ func bindSecrets(in Input, admit func(raw, source, secret string) (pattern, bool
 		hosts := slices.Clone(sec.Hosts)
 		slices.Sort(hosts)
 		for _, h := range slices.Compact(hosts) {
+			// Checked before admit: a refused binding opens no egress rule
+			// of its own (B1 D1-6).
+			if !sec.AllowEcho {
+				if hits := egressspec.EchoHostsCoveredWith(h, in.Settings.NoSwapHosts); len(hits) > 0 {
+					res.Dropped = append(res.Dropped, Drop{Host: h, Secret: sec.Name, Source: "secret",
+						Reason: ReasonSecretEchoHost, Detail: strings.Join(hits, ", ")})
+					continue
+				}
+			}
 			p, ok := admit(h, "secret", sec.Name)
 			if !ok {
 				continue

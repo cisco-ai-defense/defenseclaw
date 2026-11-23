@@ -27,6 +27,13 @@ rules:
   resources: [configmaps]
   resourceNames: [defenseclaw-config]
   verbs: [get]
+{{- if include "dc.userSecretsNs" . }}
+# The self-service binding store (B1): only the gateway writes it.
+- apiGroups: [""]
+  resources: [configmaps]
+  resourceNames: [defenseclaw-secret-bindings]
+  verbs: [get, update]
+{{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -84,6 +91,13 @@ rules:
   resources: [configmaps]
   resourceNames: [defenseclaw-config]
   verbs: [get]
+{{- if include "dc.userSecretsNs" . }}
+# The self-service binding store (B1): the controller renders it.
+- apiGroups: [""]
+  resources: [configmaps]
+  resourceNames: [defenseclaw-secret-bindings]
+  verbs: [get]
+{{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -168,6 +182,10 @@ namespace.
 {{- end -}}
 {{- end -}}
 {{- end -}}
+{{- end -}}
+{{- /* Self-service values (B1): dc-b-<person> Secrets, one per person. */ -}}
+{{- with include "dc.userSecretsNs" . -}}
+{{- $_ := set $secretNs . (dict "names" list "any" true) -}}
 {{- end -}}
 {{- range $ns := keys $secretNs | sortAlpha }}
 {{- $e := get $secretNs $ns }}

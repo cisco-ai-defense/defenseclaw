@@ -60,7 +60,7 @@ func runSubstrateLogs(cmd *cobra.Command, out *substrateOutput, com *substrateCo
 		// GAP-0420: no wait for an agent that cannot answer.
 		return substrateFail(substrateCrashedErr(a))
 	}
-	o, err := substrateAttachOptions(cmd, s, a, "auto", true)
+	o, err := substrateAttachOptions(cmd, s, a, "auto", true, attach.KeyReplayOff)
 	if err != nil {
 		return err
 	}
@@ -177,7 +177,8 @@ func runSubstratePull(cmd *cobra.Command, f *substratePullFlags, ref string) err
 	defer rel.Close()
 	w := cmd.OutOrStdout()
 	fmt.Fprintln(cmd.ErrOrStderr(), "Reading the agent's work...")
-	rev, err := workspace.Pull(ctx, workspace.PullOptions{Exec: rel.Client, DataDir: dataDir, Name: name, Label: a.Name, Timeout: f.timeout, Project: "."})
+	rev, err := workspace.Pull(ctx, workspace.PullOptions{Exec: rel.Client, DataDir: dataDir, Name: name, Label: a.Name, Timeout: f.timeout, Project: ".",
+		RestoreSecretLines: f.restoreSecrets})
 	if err != nil {
 		return fmt.Errorf("could not read the agent's work: %w", err)
 	}
@@ -482,6 +483,9 @@ func runSubstrateUndo(cmd *cobra.Command, com *substrateCommon, ref, to string, 
 		return err
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "Put %s/%s back to restore point %s.\n", a.Atespace, a.Name, info.ID)
+	if info.Pushes > 0 {
+		fmt.Fprintf(cmd.OutOrStdout(), "It also took back %d push(es) made after that point.\n", info.Pushes)
+	}
 	// GAP-0415: what the agent was asking about is gone with the folder it
 	// changed; its pending asks close now instead of waiting out their time.
 	if n := substrateCloseAsks(ctx, s.Client, a, "the agent was put back to a restore point with undo"); n > 0 {
@@ -597,7 +601,7 @@ func substrateCloseAsks(ctx context.Context, cl *api.Client, a api.Actor, why st
 		if k.Actor != a.Name || (k.Atespace != "" && k.Atespace != a.Atespace) {
 			continue
 		}
-		if cl.Decide(ctx, k.ID, "deny", false, why) == nil {
+		if _, err := cl.Decide(ctx, k.ID, "deny", false, why); err == nil {
 			n++
 		}
 	}

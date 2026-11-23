@@ -56,12 +56,14 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
 	osw "github.com/defenseclaw/defenseclaw/internal/openshell/workspace"
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/relay"
 )
 
@@ -69,6 +71,10 @@ import (
 // operating system the OpenShell copy pipeline does not support. Tests set
 // it on any OS.
 var hostCopy = runtime.GOOS == "windows"
+
+// UsesHostCopy reports whether copies on this system are host copies (no
+// git history in the actor).
+func UsesHostCopy() bool { return hostCopy }
 
 const hostRecordVersion = 1
 
@@ -322,24 +328,17 @@ func hostFolderName(project string) string {
 	return n
 }
 
-func hostStart(ctx context.Context, opts StartOptions, t interface {
-	Root(context.Context) (string, error)
-}) (*StartResult, error) {
-	c, ok := t.(*Client)
-	if !ok {
-		return nil, errors.New("workspace: the host copy needs the relay client")
-	}
+type hostUpload struct {
+	dir, project, folder, baseline string
+	held, unmasked, warnings       []string
+	files                          int
+	bytes                          int64
+}
+
+func prepareHostUpload(ctx context.Context, opts StartOptions, summary *osw.CopySummary) (_ *hostUpload, err error) {
 	project, err := filepath.Abs(opts.Project)
 	if err != nil {
 		return nil, err
-	}
-	root, err := c.Root(ctx)
-	if err != nil {
-		return nil, err
-	}
-	maxBytes := opts.MaxBytes
-	if maxBytes <= 0 {
-		maxBytes = DefaultMaxBytes
 	}
 	listed, warnings, err := listHostProject(ctx, project)
 	if err != nil {
@@ -351,7 +350,6 @@ func hostStart(ctx context.Context, opts StartOptions, t interface {
 	}
 	var files []hostFile
 	var held, unmasked []string
-	var total int64
 	for _, f := range listed {
 		abs := filepath.Join(project, filepath.FromSlash(f.rel))
 		content := func() ([]byte, bool) {
@@ -368,51 +366,80 @@ func hostStart(ctx context.Context, opts StartOptions, t interface {
 		if _, h := osw.HeldBack(f.rel, opts.Masks, nil, nil, nil); h {
 			unmasked = append(unmasked, f.rel)
 		}
-		total += f.size
-		if total > maxBytes {
-			return nil, &TooLargeError{Size: total, Limit: maxBytes}
-		}
+		summary.Add(f.rel, f.size)
 		files = append(files, f)
 	}
-	folder := hostFolderName(project)
-	remoteDir := path.Join(root, folder)
-	stateDir := opts.StateDir
-	if stateDir == "" {
-		base := root
-		if d, err := c.StateRoot(ctx); err == nil && d != "" {
-			base = d
-		}
-		if stateDir, err = NewStateDir(base, opts.Name); err != nil {
-			return nil, cleanErr("copy the project", err)
-		}
+	if summary.Bytes > opts.MaxBytes {
+		return nil, &osw.TooLargeError{What: "the working tree", Size: summary.Bytes, Limit: opts.MaxBytes}
 	}
-	// The baseline: the exact bytes about to be sent, no filters.
-	gitDir := hostGitDir(opts.DataDir, opts.Name)
-	_ = os.RemoveAll(gitDir)
-	if err := os.MkdirAll(hostDir(opts.DataDir), 0o700); err != nil {
+	if err := safefile.ProtectDirectory(hostDir(opts.DataDir)); err != nil {
 		return nil, err
 	}
-	if _, err := hostGit(ctx, project, nil, nil, "init", "-q", "--bare", gitDir); err != nil {
-		return nil, cleanErr("copy the project", err)
-	}
-	baseline, err := hostCommit(ctx, gitDir, project, files, "")
+	dir, err := os.MkdirTemp(hostDir(opts.DataDir), ".preflight-")
 	if err != nil {
-		return nil, cleanErr("record the copy's baseline", err)
+		return nil, err
 	}
-	if err := c.uploadHostTar(ctx, project, folder, files, root); err != nil {
+	p := &hostUpload{dir: dir, project: project, folder: hostFolderName(project),
+		held: held, unmasked: unmasked, warnings: warnings, files: summary.Files, bytes: summary.Bytes}
+	defer func() {
+		if err != nil {
+			p.close()
+		}
+	}()
+	gitDir := filepath.Join(dir, "baseline.git")
+	if _, err = hostGit(ctx, project, nil, nil, "init", "-q", "--bare", gitDir); err != nil {
+		return nil, err
+	}
+	p.baseline, err = hostCommit(ctx, gitDir, project, files, "")
+	if err != nil {
+		return nil, err
+	}
+	tarFile, err := os.OpenFile(filepath.Join(dir, "upload.tar"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	err = errors.Join(writeHostTar(tarFile, project, p.folder, files), tarFile.Close())
+	if err != nil {
+		return nil, err
+	}
+	return p, nil
+}
+
+func (p *hostUpload) close() { _ = os.RemoveAll(p.dir) }
+
+func (p *hostUpload) send(ctx context.Context, c *Client, dataDir, name, root, stateDir string) (*StartResult, error) {
+	if err := osw.ValidateName(name); err != nil {
+		return nil, err
+	}
+	f, err := os.Open(filepath.Join(p.dir, "upload.tar"))
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	resp, err := c.request(ctx, "the upload", http.MethodPut, relay.RouteFiles, url.Values{"dir": {root}}, f, "application/x-tar", http.StatusNoContent)
+	if err != nil {
 		return nil, cleanErr("upload the project to the actor", err)
 	}
-	now := time.Now().UTC()
-	rec := &hostRecord{Version: hostRecordVersion, Name: opts.Name, Project: project, Folder: folder,
-		RemoteDir: remoteDir, StateDir: stateDir, Baseline: baseline, HeldBack: held, Unmasked: unmasked,
-		Files: len(files), Bytes: total, UploadedAt: now}
-	if err := rec.save(opts.DataDir); err != nil {
+	resp.Body.Close()
+	gitDir := hostGitDir(dataDir, name)
+	if err := os.RemoveAll(gitDir); err != nil {
 		return nil, err
 	}
-	cr := &osw.CopyRecord{Version: 1, Name: opts.Name, Project: project, RepoName: folder, RemoteDir: remoteDir,
-		StateDir: stateDir, Baseline: baseline, HeldBack: held, Unmasked: unmasked, Files: len(files), Bytes: total,
+	if err := os.Rename(filepath.Join(p.dir, "baseline.git"), gitDir); err != nil {
+		return nil, err
+	}
+	now := time.Now().UTC()
+	remoteDir := path.Join(root, p.folder)
+	rec := &hostRecord{Version: hostRecordVersion, Name: name, Project: p.project, Folder: p.folder,
+		RemoteDir: remoteDir, StateDir: stateDir, Baseline: p.baseline, HeldBack: p.held, Unmasked: p.unmasked,
+		Files: p.files, Bytes: p.bytes, UploadedAt: now}
+	if err := rec.save(dataDir); err != nil {
+		return nil, err
+	}
+	cr := &osw.CopyRecord{Version: 1, Name: name, Project: p.project, RepoName: p.folder, RemoteDir: remoteDir,
+		StateDir: stateDir, Baseline: p.baseline, HeldBack: p.held, Unmasked: p.unmasked, Files: p.files, Bytes: p.bytes,
 		StagedAt: now, UploadedAt: &now, VerifiedAt: &now}
-	return &StartResult{CopyRecord: cr, KeptBack: held, Unmasked: unmasked, Warnings: warnings}, nil
+	return &StartResult{CopyRecord: cr, KeptBack: p.held, Unmasked: p.unmasked, Warnings: p.warnings}, nil
 }
 
 // hostCommit records files of dir (their bytes as they are now) as a
@@ -456,30 +483,6 @@ func hostCommit(ctx context.Context, gitDir, dir string, files []hostFile, paren
 		return "", err
 	}
 	return strings.TrimSpace(string(commit)), nil
-}
-
-// uploadHostTar streams files as <folder>/<rel> to remoteRoot. A file that
-// changed since its baseline was taken stops the upload (the agent would
-// start from bytes the baseline does not have).
-func (c *Client) uploadHostTar(ctx context.Context, project, folder string, files []hostFile, remoteRoot string) error {
-	pr, pw := io.Pipe()
-	done := make(chan error, 1)
-	go func() {
-		err := writeHostTar(pw, project, folder, files)
-		pw.CloseWithError(err)
-		done <- err
-	}()
-	resp, err := c.request(ctx, "the upload", http.MethodPut, relay.RouteFiles, url.Values{"dir": {remoteRoot}}, pr, "application/x-tar", http.StatusNoContent)
-	pr.CloseWithError(errUploadDone)
-	tarErr := <-done
-	if err != nil {
-		if tarErr != nil && !errors.Is(tarErr, errUploadDone) && !errors.Is(tarErr, io.ErrClosedPipe) {
-			return tarErr
-		}
-		return err
-	}
-	resp.Body.Close()
-	return nil
 }
 
 func writeHostTar(w io.Writer, project, folder string, files []hostFile) error {
@@ -699,7 +702,11 @@ func (c *Client) downloadHostTree(ctx context.Context, rec *hostRecord, dir stri
 		if heldSet[rel] {
 			return true
 		}
-		_, h := osw.HeldBack(rel, nil, rec.Unmasked, nil, nil)
+		// The shared files are exact paths, not patterns (RV1 P1-1).
+		if slices.Contains(rec.Unmasked, rel) {
+			return false
+		}
+		_, h := osw.HeldBack(rel, nil, nil, nil, nil)
 		return h
 	})
 }

@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/substrate/egressspec"
+	"gopkg.in/yaml.v3"
 )
 
 // SubstrateConfig is substrate: (PLAN §7.1), DefenseClaw on Agent Substrate.
@@ -71,13 +72,24 @@ type SubstrateConfig struct {
 	ChainEgressAction string `mapstructure:"chain_egress_action" yaml:"chain_egress_action,omitempty"`
 	// WorkspaceMaxBytes caps a workspace upload through the admin
 	// listener's attach route (E23; 0 = DefaultSubstrateWorkspaceMaxBytes).
-	WorkspaceMaxBytes int64                     `mapstructure:"workspace_max_bytes" yaml:"workspace_max_bytes,omitempty"`
-	Unattended        SubstrateUnattendedConfig `mapstructure:"unattended"         yaml:"unattended,omitempty"`
-	RateLimits        SubstrateRateLimitsConfig `mapstructure:"rate_limits"        yaml:"rate_limits,omitempty"`
-	Extproc           SubstrateExtprocConfig    `mapstructure:"extproc"            yaml:"extproc,omitempty"`
-	LLM               SubstrateLLMConfig        `mapstructure:"llm"                yaml:"llm,omitempty"`
-	Egress            SubstrateEgressConfig     `mapstructure:"egress"             yaml:"egress,omitempty"`
-	Secrets           []SubstrateSecret         `mapstructure:"secrets"            yaml:"secrets,omitempty"`
+	WorkspaceMaxBytes int64 `mapstructure:"workspace_max_bytes" yaml:"workspace_max_bytes,omitempty"`
+	// Launcher holds what the gateway tells launchers (GET
+	// /api/v1/substrate/launcher), read live.
+	Launcher SubstrateLauncherConfig `mapstructure:"launcher" yaml:"launcher,omitempty"`
+	// Files holds the admin switches of sending more files into a running
+	// actor (push, sync); both on when unset.
+	Files      SubstrateFilesConfig      `mapstructure:"files" yaml:"files,omitempty"`
+	Unattended SubstrateUnattendedConfig `mapstructure:"unattended"         yaml:"unattended,omitempty"`
+	RateLimits SubstrateRateLimitsConfig `mapstructure:"rate_limits"        yaml:"rate_limits,omitempty"`
+	Extproc    SubstrateExtprocConfig    `mapstructure:"extproc"            yaml:"extproc,omitempty"`
+	LLM        SubstrateLLMConfig        `mapstructure:"llm"                yaml:"llm,omitempty"`
+	Egress     SubstrateEgressConfig     `mapstructure:"egress"             yaml:"egress,omitempty"`
+	Secrets    []SubstrateSecret         `mapstructure:"secrets"            yaml:"secrets,omitempty"`
+	// SelfServiceSecrets is how people bind their own secrets (B1 2.5).
+	SelfServiceSecrets SubstrateSelfServiceSecretsConfig `mapstructure:"self_service_secrets" yaml:"self_service_secrets,omitempty"`
+	// SecretTemplates is the admin catalog of templates people bind their
+	// own secrets with; none = the built-in seven (secretbind.Builtin).
+	SecretTemplates []SubstrateSecretTemplate `mapstructure:"secret_templates" yaml:"secret_templates,omitempty"`
 	// AllowPassthroughFor lists hosts forwarded without inspection
 	// (certificate pinning). A secret is never bound to one.
 	AllowPassthroughFor []string `mapstructure:"allow_passthrough_for" yaml:"allow_passthrough_for,omitempty"`
@@ -87,6 +99,126 @@ type SubstrateConfig struct {
 	// Bundles is signed policy bundles (substrate_bundles.go).
 	Bundles SubstrateBundlesConfig `mapstructure:"bundles" yaml:"bundles,omitempty"`
 }
+
+// Self-service secret modes (substrate.self_service_secrets.mode).
+const (
+	SelfServiceBindings   = "bindings"
+	SelfServiceValuesOnly = "values_only"
+	SelfServiceOff        = "off"
+)
+
+// SubstrateSelfServiceSecretsConfig is substrate.self_service_secrets.
+type SubstrateSelfServiceSecretsConfig struct {
+	// Mode is bindings (default), values_only (people only set values of
+	// listed secrets) or off (no binding store is read at all).
+	Mode string `mapstructure:"mode" yaml:"mode,omitempty"`
+	// Namespace holds the self-service values; never the release or
+	// Substrate namespace (the chart refuses it).
+	Namespace string `mapstructure:"namespace" yaml:"namespace,omitempty"`
+	// Provider is the credential provider name in the generated sources.
+	Provider string `mapstructure:"provider" yaml:"provider,omitempty"`
+	// MaxPerPerson bounds one person's bindings (1-200, default 20).
+	MaxPerPerson int `mapstructure:"max_per_person" yaml:"max_per_person,omitempty"`
+	// OutsideTemplates is ask (default) or refuse, for a host no template
+	// covers.
+	OutsideTemplates string `mapstructure:"outside_templates" yaml:"outside_templates,omitempty"`
+	// AskTimeout bounds an administrator ask for a binding (default 72h,
+	// at most 168h).
+	AskTimeout string `mapstructure:"ask_timeout" yaml:"ask_timeout,omitempty"`
+	// AllowEchoBindings lets a person set allow_echo on their own binding.
+	AllowEchoBindings bool `mapstructure:"allow_echo_bindings" yaml:"allow_echo_bindings,omitempty"`
+}
+
+// SubstrateSecretTemplate is one substrate.secret_templates entry.
+type SubstrateSecretTemplate struct {
+	Name      string   `mapstructure:"name"       yaml:"name"`
+	Hosts     []string `mapstructure:"hosts"      yaml:"hosts,omitempty"`
+	Header    string   `mapstructure:"header"     yaml:"header,omitempty"`
+	Form      string   `mapstructure:"form"       yaml:"form,omitempty"`
+	BasicUser string   `mapstructure:"basic_user" yaml:"basic_user,omitempty"`
+	Profiles  []string `mapstructure:"profiles"   yaml:"profiles,omitempty"`
+	Registry  string   `mapstructure:"registry"   yaml:"registry,omitempty"`
+}
+
+// MarshalYAML keeps an explicit empty host list: hosts: [] means no host
+// without an administrator, while an unset list takes a built-in
+// template's hosts. Plain omitempty would turn the first into the second
+// on any config save (RV3 P2-3).
+func (t SubstrateSecretTemplate) MarshalYAML() (any, error) {
+	type plain SubstrateSecretTemplate
+	var n yaml.Node
+	if err := n.Encode(plain(t)); err != nil {
+		return nil, err
+	}
+	if t.Hosts != nil && len(t.Hosts) == 0 && n.Kind == yaml.MappingNode && len(n.Content) >= 2 {
+		k := &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: "hosts"}
+		v := &yaml.Node{Kind: yaml.SequenceNode, Tag: "!!seq", Style: yaml.FlowStyle}
+		n.Content = append(n.Content[:2:2], append([]*yaml.Node{k, v}, n.Content[2:]...)...)
+	}
+	return &n, nil
+}
+
+// substrateReservedNamespaces are never the self-service namespace: the
+// gateway gets get/patch on every Secret there and the actors' credential
+// provider reads it (RV3 P3-5).
+var substrateReservedNamespaces = []string{"default", "kube-system", "kube-public", "kube-node-lease"}
+
+// substrateBasicUserRE is secretbind's basic_user rule: printable ASCII,
+// no space and no ":" (RV3 P3-7).
+var substrateBasicUserRE = regexp.MustCompile(`^[!-9;-~]{1,128}$`)
+
+// EffectiveMode is the self-service mode, bindings when unset.
+func (s SubstrateSelfServiceSecretsConfig) EffectiveMode() string {
+	if s.Mode == "" {
+		return SelfServiceBindings
+	}
+	return s.Mode
+}
+
+// EffectiveNamespace is where self-service values live.
+func (s SubstrateSelfServiceSecretsConfig) EffectiveNamespace() string {
+	if s.Namespace == "" {
+		return "defenseclaw-user-secrets"
+	}
+	return s.Namespace
+}
+
+// EffectiveProvider is the credential provider of self-service sources.
+func (s SubstrateSelfServiceSecretsConfig) EffectiveProvider() string {
+	if s.Provider == "" {
+		return "k8s-credential-provider"
+	}
+	return s.Provider
+}
+
+// EffectiveMaxPerPerson is the per-person binding limit.
+func (s SubstrateSelfServiceSecretsConfig) EffectiveMaxPerPerson() int {
+	if s.MaxPerPerson <= 0 {
+		return 20
+	}
+	return s.MaxPerPerson
+}
+
+// EffectiveOutsideTemplates is ask or refuse.
+func (s SubstrateSelfServiceSecretsConfig) EffectiveOutsideTemplates() string {
+	if s.OutsideTemplates == "" {
+		return "ask"
+	}
+	return s.OutsideTemplates
+}
+
+// EffectiveAskTimeout is the binding ask timeout.
+func (s SubstrateSelfServiceSecretsConfig) EffectiveAskTimeout() time.Duration {
+	if d, err := time.ParseDuration(s.AskTimeout); err == nil && d > 0 {
+		return d
+	}
+	return 72 * time.Hour
+}
+
+var (
+	substrateTemplateNameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
+	substrateHeaderNameRE   = regexp.MustCompile(`^[A-Za-z0-9!#$%&'*+.^_|~-]{1,64}$`)
+)
 
 // SubstrateTemplatesConfig is how the controller admits templates (PLAN
 // §5.3, §6.6): every container image must be pinned by digest and carry a
@@ -374,6 +506,9 @@ type SubstrateEgressConfig struct {
 	// EcosystemPacks (nil = every pack) names package-index packs.
 	EcosystemPacks []string `mapstructure:"ecosystem_packs" yaml:"ecosystem_packs,omitempty"`
 	Registries     []string `mapstructure:"registries"      yaml:"registries,omitempty"`
+	// NoSwapHosts are added to the built-in echo hosts: no secret is added
+	// on a host they cover unless its entry sets inject.allow_echo. Hot.
+	NoSwapHosts []string `mapstructure:"no_swap_hosts" yaml:"no_swap_hosts,omitempty"`
 }
 
 // SubstrateSecret is one entry of substrate.secrets (PLAN §7.2). The value
@@ -396,6 +531,10 @@ type SubstrateSecretInject struct {
 	// Placeholder is the environment variable the actor carries in place
 	// of the value.
 	Placeholder string `mapstructure:"placeholder" yaml:"placeholder,omitempty"`
+	// AllowEcho lets the secret be added on a host that returns the
+	// requests it gets (egressspec.EchoHosts, egress.no_swap_hosts). Off by
+	// default: the real value would come back to the agent.
+	AllowEcho bool `mapstructure:"allow_echo" yaml:"allow_echo,omitempty"`
 }
 
 // Substrate defaults.
@@ -472,6 +611,116 @@ func (s SubstrateConfig) EffectiveWorkspaceMaxBytes() int64 {
 		return s.WorkspaceMaxBytes
 	}
 	return DefaultSubstrateWorkspaceMaxBytes
+}
+
+// SubstrateFilesConfig is substrate.files: the admin-off switches of
+// substrate push (Push) and substrate sync --watch (Sync). The gateway
+// refuses the upload of a push or a sync batch when its switch is off;
+// the first copy of a run is not affected. Sync needs both.
+type SubstrateFilesConfig struct {
+	Push *bool `mapstructure:"push" yaml:"push,omitempty"`
+	Sync *bool `mapstructure:"sync" yaml:"sync,omitempty"`
+}
+
+// PushAllowed is substrate.files.push, true when unset.
+func (f SubstrateFilesConfig) PushAllowed() bool { return f.Push == nil || *f.Push }
+
+// SyncAllowed is substrate.files.sync (and push), true when unset.
+func (f SubstrateFilesConfig) SyncAllowed() bool {
+	return f.PushAllowed() && (f.Sync == nil || *f.Sync)
+}
+
+// SubstrateLauncherConfig is substrate.launcher: launcher behaviour the
+// cluster admin sets for everyone.
+type SubstrateLauncherConfig struct {
+	// KeyReplay is what a launcher does with keys typed while its terminal
+	// link is down (B3.1): ask (default) shows them after the reconnect and
+	// sends them on Enter, on sends them, off drops them with a count. A
+	// launcher flag can only tighten it; off is the admin-off switch.
+	KeyReplay string `mapstructure:"key_replay" yaml:"key_replay,omitempty"`
+	// UploadScan tunes the secret scan of a project copy before it goes to
+	// an actor (B1, Linux and macOS copies; the Windows host copy keeps
+	// holding files back).
+	UploadScan SubstrateUploadScanConfig `mapstructure:"upload_scan" yaml:"upload_scan,omitempty"`
+}
+
+// SubstrateUploadScanConfig is substrate.launcher.upload_scan.
+type SubstrateUploadScanConfig struct {
+	// MaxFileBytes is the largest file the scan reads (default 8 MiB); a
+	// bigger one is uploaded unscanned and named in the run's report.
+	MaxFileBytes int64 `mapstructure:"max_file_bytes" yaml:"max_file_bytes,omitempty"`
+	// TimeBudget bounds the scan (a Go duration, default 120s); the files
+	// it did not reach are named in the run's report.
+	TimeBudget string `mapstructure:"time_budget" yaml:"time_budget,omitempty"`
+	// SecretAction is replace (default: the value is replaced with a
+	// placeholder in the uploaded copy) or hold_back (the whole file stays
+	// on the computer). hold_back is the admin-off switch.
+	SecretAction string `mapstructure:"secret_action" yaml:"secret_action,omitempty"`
+	// PlaceholderForm is token (default, DC_SECRET_<n>) or env
+	// (${DC_SECRET_<n>}).
+	PlaceholderForm string `mapstructure:"placeholder_form" yaml:"placeholder_form,omitempty"`
+}
+
+// Upload scan secret actions and placeholder forms.
+const (
+	SubstrateUploadReplace  = "replace"
+	SubstrateUploadHoldBack = "hold_back"
+	SubstratePlaceholderTok = "token"
+	SubstratePlaceholderEnv = "env"
+
+	substrateUploadMaxFileDefault = 8 << 20
+	substrateUploadMaxFileCeiling = 64 << 20
+	substrateUploadBudgetDefault  = 120 * time.Second
+)
+
+// EffectiveMaxFileBytes is upload_scan.max_file_bytes, 8 MiB when unset.
+func (u SubstrateUploadScanConfig) EffectiveMaxFileBytes() int64 {
+	if u.MaxFileBytes > 0 {
+		return u.MaxFileBytes
+	}
+	return substrateUploadMaxFileDefault
+}
+
+// EffectiveTimeBudget is upload_scan.time_budget, 120s when unset or bad.
+func (u SubstrateUploadScanConfig) EffectiveTimeBudget() time.Duration {
+	if d, err := time.ParseDuration(strings.TrimSpace(u.TimeBudget)); err == nil && d > 0 {
+		return d
+	}
+	return substrateUploadBudgetDefault
+}
+
+// EffectiveSecretAction is upload_scan.secret_action, replace when unset.
+// It is matched exactly, as the config schemas do: Replace or a padded
+// value is refused by Validate, not read as replace (RV5-8).
+func (u SubstrateUploadScanConfig) EffectiveSecretAction() string {
+	if u.SecretAction != "" {
+		return u.SecretAction
+	}
+	return SubstrateUploadReplace
+}
+
+// EffectivePlaceholderForm is upload_scan.placeholder_form, token when
+// unset, matched exactly like EffectiveSecretAction.
+func (u SubstrateUploadScanConfig) EffectivePlaceholderForm() string {
+	if u.PlaceholderForm != "" {
+		return u.PlaceholderForm
+	}
+	return SubstratePlaceholderTok
+}
+
+// Key replay modes (substrate.launcher.key_replay).
+const (
+	SubstrateKeyReplayAsk = "ask"
+	SubstrateKeyReplayOn  = "on"
+	SubstrateKeyReplayOff = "off"
+)
+
+// EffectiveKeyReplay is substrate.launcher.key_replay, ask when unset.
+func (l SubstrateLauncherConfig) EffectiveKeyReplay() string {
+	if v := strings.ToLower(strings.TrimSpace(l.KeyReplay)); v != "" {
+		return v
+	}
+	return SubstrateKeyReplayAsk
 }
 
 // Chain egress actions (substrate.chain_egress_action).
@@ -620,6 +869,30 @@ func (s *SubstrateConfig) Validate() error {
 	case SubstrateChainEgressBlock, SubstrateChainEgressAlert:
 	default:
 		bad("chain_egress_action", "%q is not block or alert", s.ChainEgressAction)
+	}
+	switch s.Launcher.EffectiveKeyReplay() {
+	case SubstrateKeyReplayAsk, SubstrateKeyReplayOn, SubstrateKeyReplayOff:
+	default:
+		bad("launcher.key_replay", "%q is not ask, on or off", s.Launcher.KeyReplay)
+	}
+	up := s.Launcher.UploadScan
+	if up.MaxFileBytes < 0 || up.MaxFileBytes > substrateUploadMaxFileCeiling {
+		bad("launcher.upload_scan.max_file_bytes", "%d is not between 0 and %d", up.MaxFileBytes, substrateUploadMaxFileCeiling)
+	}
+	if t := strings.TrimSpace(up.TimeBudget); t != "" {
+		if d, err := time.ParseDuration(t); err != nil || d < time.Second || d > time.Hour {
+			bad("launcher.upload_scan.time_budget", "%q is not a duration from 1s to 1h", up.TimeBudget)
+		}
+	}
+	switch up.EffectiveSecretAction() {
+	case SubstrateUploadReplace, SubstrateUploadHoldBack:
+	default:
+		bad("launcher.upload_scan.secret_action", "%q is not replace or hold_back", up.SecretAction)
+	}
+	switch up.EffectivePlaceholderForm() {
+	case SubstratePlaceholderTok, SubstratePlaceholderEnv:
+	default:
+		bad("launcher.upload_scan.placeholder_form", "%q is not token or env", up.PlaceholderForm)
 	}
 	if a := s.API.Address; a != "" {
 		if _, port, err := net.SplitHostPort(a); err != nil || port == "" {
@@ -787,6 +1060,7 @@ func (s *SubstrateConfig) Validate() error {
 
 	checkPatterns("egress.allow", s.Egress.Allow)
 	checkPatterns("egress.registries", s.Egress.Registries)
+	checkPatterns("egress.no_swap_hosts", s.Egress.NoSwapHosts)
 	checkPatterns("allow_passthrough_for", s.AllowPassthroughFor)
 	known := egressspec.EcosystemPacks()
 	for i, p := range s.Egress.EcosystemPacks {
@@ -801,6 +1075,60 @@ func (s *SubstrateConfig) Validate() error {
 			passthrough[p.String()] = true
 		}
 	}
+	ss := s.SelfServiceSecrets
+	if !slices.Contains([]string{"", SelfServiceBindings, SelfServiceValuesOnly, SelfServiceOff}, ss.Mode) {
+		bad("self_service_secrets.mode", "must be bindings, values_only or off")
+	}
+	if ss.Namespace != "" && !egressspec.IsDNS1123Label(ss.Namespace) {
+		bad("self_service_secrets.namespace", "%q is not a Kubernetes namespace name", ss.Namespace)
+	} else if slices.Contains(substrateReservedNamespaces, ss.Namespace) {
+		bad("self_service_secrets.namespace", "%q is a Kubernetes system namespace; use a namespace of its own", ss.Namespace)
+	} else if _, ok := s.LauncherAtespace(ss.Namespace); ok && ss.Namespace != "" {
+		bad("self_service_secrets.namespace", "%q is a launcher atespace, where actors run; use a namespace of its own", ss.Namespace)
+	}
+	if ss.Provider != "" && !egressspec.IsDNS1123Subdomain(ss.Provider) {
+		bad("self_service_secrets.provider", "%q is not a provider name", ss.Provider)
+	}
+	if ss.MaxPerPerson < 0 || ss.MaxPerPerson > 200 {
+		bad("self_service_secrets.max_per_person", "must be 1-200")
+	}
+	if !slices.Contains([]string{"", "ask", "refuse"}, ss.OutsideTemplates) {
+		bad("self_service_secrets.outside_templates", "must be ask or refuse")
+	}
+	if ss.AskTimeout != "" {
+		if d, err := time.ParseDuration(ss.AskTimeout); err != nil || d <= 0 || d > 168*time.Hour {
+			bad("self_service_secrets.ask_timeout", "must be a duration over 0 and at most 168h")
+		}
+	}
+	tmplNames := map[string]bool{}
+	for i, t := range s.SecretTemplates {
+		key := fmt.Sprintf("secret_templates[%d]", i)
+		if !substrateTemplateNameRE.MatchString(t.Name) {
+			bad(key+".name", "%q must be 1-63 lower-case letters, digits and \"-\"", t.Name)
+		} else if tmplNames[t.Name] {
+			bad(key+".name", "%q is listed twice", t.Name)
+		}
+		tmplNames[t.Name] = true
+		checkPatterns(key+".hosts", t.Hosts)
+		if !slices.Contains([]string{"", "bearer", "basic", "raw"}, t.Form) {
+			bad(key+".form", "must be bearer, basic or raw")
+		}
+		if !slices.Contains([]string{"", "none", "npm", "pypi"}, t.Registry) {
+			bad(key+".registry", "must be none, npm or pypi")
+		}
+		if t.Header != "" && !substrateHeaderNameRE.MatchString(t.Header) {
+			bad(key+".header", "%q is not a header name", t.Header)
+		}
+		if t.BasicUser != "" && !substrateBasicUserRE.MatchString(t.BasicUser) {
+			bad(key+".basic_user", "must be 1-128 printable characters with no space or \":\"")
+		}
+		for j, g := range t.Profiles {
+			if _, err := path.Match(g, ""); err != nil {
+				bad(fmt.Sprintf("%s.profiles[%d]", key, j), "%q is not a profile glob", g)
+			}
+		}
+	}
+
 	names := map[string]bool{}
 	for i, sec := range s.Secrets {
 		key := fmt.Sprintf("secrets[%d]", i)

@@ -88,6 +88,10 @@ An actor with no allow list has no network. The usual causes:
 
 Unattended runs deny asks by default. Either allow the site in the profile, or set `unattended_asks: queue` to hold the ask for up to `ask_timeout`, and answer with `defenseclaw substrate approvals`. When nobody answers, the agent is told: "Nobody answered the approval this host needs in time." If a person rejects it: "The owner denied the approval this host needs."
 
+### A secret I added is not used (Preview)
+
+If `secrets add` said the host is not covered by the template, an administrator must approve it first; see `defenseclaw substrate approvals`. `defenseclaw substrate secrets test NAME` checks that the value is stored, and `--agent AGENT` adds whether that agent's network policy carries it; the status and reason it prints say why a secret is not used (waiting on an administrator, denied, the ask expired, the binding expired, or the template no longer covers the host). If `secrets add` was refused with `secret_bindings_locked` or `secret_bindings_off`, your administrator set `substrate.self_service_secrets.mode` to `values_only` or `off`. For a `Basic` template, store only the token, not `user:token`: the cluster adds the user name.
+
 ### An actor is marked `policy_conflict`
 
 Another writer reverted DefenseClaw's egress policy three times in ten minutes, usually a GitOps tool or a script that owns `EgressPolicy` objects. The controller then raised the `sandbox.policy_conflict` event and put the actor on deny-only: it keeps only the DefenseClaw rule, so its hooks still reach DefenseClaw and every other destination is denied. It never adds access: each later change by the other writer is replaced with deny-only again (no new alert), so a foreign policy never stays in force. Find the other writer in the actor's audit records (`drift` and `policy_conflict` lifecycle records name the change) and stop it. The conflict clears (`sandbox.policy_conflict.cleared`) when another writer restores DefenseClaw's policy. An administrator can also clear it with `defenseclaw substrate policy reset ATESPACE/NAME`, which is audited (`sandbox.policy_conflict.reset`): the controller then writes the full policy again and the count of three reverts starts over. `list`, `status NAME` and `policy explain` show the conflict, `doctor` names it (red with `--cluster`), and `verify` and `status --cluster` count it per atespace (`policy_conflicts` in `--json`) and fail the `policy_conflict` check; they count every agent only with an administrator's sign-in, and otherwise say the count is unknown.
@@ -249,7 +253,7 @@ The callout's refusal is a JSON body with `error: egress_blocked`, a `message` t
 
 The placeholder was sent to a host the secret isn't bound to, so nothing was swapped. That is working as intended. Bind the secret to the right host, or stop the tool from echoing it.
 
-If a tool's output shows the real value instead, the secret is bound to a host that echoes requests (for example `httpbin.org` or `postman-echo.com`): egress swapped it in and the service sent it back. The callout never reads responses, so it can't mask the value on the way back. Remove that host from the secret's `inject.hosts` ([Bind a secret to hosts](/docs/substrate/secrets#bind-a-secret-to-hosts)) and rotate the value; the gateway's start-up warning names every secret bound to a well-known echo host. See [Hosts that echo tokens](/docs/substrate/secrets#things-to-know).
+If a tool's output shows the real value instead, the secret is bound to a host that echoes requests (for example `httpbin.org` or `postman-echo.com`): egress swapped it in and the service sent it back. The callout never reads responses, so it can't mask the value on the way back. Remove that host from the secret's `inject.hosts` ([Bind a secret to hosts](/docs/substrate/secrets#bind-a-secret-to-hosts)) and rotate the value; on a well-known echo host or one in `substrate.egress.no_swap_hosts` the cluster adds no secret at all unless the entry sets `inject.allow_echo: true`, and `substrate doctor --cluster` names those entries. See [Hosts that echo tokens](/docs/substrate/secrets#things-to-know).
 
 ### Credential injection returns 403 "atespace not permitted"
 
@@ -290,3 +294,45 @@ This section is for a coding agent, or an LLM working for one, that hits a Defen
 - **Your terminal is detached.** That is normal. The run continues. Write results to the repository or the task's output, not to your terminal.
 - **You were suspended and resumed.** Your clock may have jumped and your connections may have been reset. Check the time, reopen connections, and don't assume a long-running command is still running.
 - **Never** try to read or change the hook settings, the root-owned managed settings or the kit. They are outside your user, and changes are reported.
+
+
+## Upload exceeds the workspace limit (Preview)
+
+The launcher shows the staged size and the largest top-level directories before it creates an actor.
+Use `--exclude 'data/**'` to omit a large directory, or `--clone REPO_URL` to start from Git.
+Administrators set the cap with `substrate.workspace_max_bytes`. A run can lower it with
+`--max-upload-mb`. Rebuild an older actor template to use a cluster limit over 1 GiB.
+
+## Push sends nothing (Preview)
+
+`The agent also changed 2 of these files since your last send` means both of you edited those files. Nothing was sent.
+Run `push` again with `--mine` to send your version (the agent's stays in the restore point the push saves),
+`--theirs` to keep the agent's and send the rest, or `--patch-out FILE` to keep the agent's and get your change as a patch.
+The same edit on both sides is not a conflict.
+
+`your administrator turned off sending more files into a running agent` means `substrate.files.push` is `false`.
+`the copy in the agent moved` means another computer sent to it or the copy was replaced: pull first, or run again.
+An agent started from Windows has no push or sync yet; run it again to send a new copy.
+
+## Sync skips a file or stops (Preview)
+
+`The agent also changed FILE; not synced` means the agent edited that file too. Sync keeps the agent's version and goes on with the rest; send yours with `push NAME --mine FILE`.
+`Held back: FILE (looks like a secret)` means the file matches the secret rules; send it once with `push NAME --unmask FILE`.
+`The agent is suspended; changes wait` means nothing is sent until the agent is back; sync does not wake it.
+`Sync paused: ... sent in the last hour` means sync sent four times the upload limit in an hour; changes wait. The check runs before each batch, so the last batch of the hour can go past it by up to one upload limit.
+`your administrator turned off syncing into a running agent` means `substrate.files.sync` or `substrate.files.push` is `false`.
+`The agent is gone; sync stopped` means the agent was deleted.
+On a very large folder each batch takes longer, because sync reads the whole folder again for each batch.
+
+## Keys typed while disconnected (Preview)
+
+If the connection drops while you type, the launcher keeps those keys in memory and never sends them to a screen you cannot see.
+When it reconnects, the last line shows them, for example `7 keys typed while disconnected: "git sta". Enter sends them, Esc drops them.`
+Control keys show as `^X`. Any other key drops them and goes to the agent.
+
+Nothing is replayed after more than 4 KiB of input, an outage longer than 60 seconds, or `Ctrl-\` (the key that answers a DefenseClaw ask).
+The launcher then says how many characters to type again. Keys sent just before the connection dropped may already have reached the agent,
+so they are never replayed; the launcher says how many to check.
+
+Use `--key-replay on` to send them without asking, or `--key-replay off` to drop them. Administrators set `substrate.launcher.key_replay`;
+the flag can only tighten it.

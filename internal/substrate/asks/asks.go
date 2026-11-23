@@ -130,6 +130,31 @@ type Ask struct {
 // MaxAskTimeout bounds Ask.TimeoutSeconds (config ask_timeout).
 const MaxAskTimeout = 24 * time.Hour
 
+// KindSecretBinding is an administrator ask for a person's own secret
+// binding to a host no template covers (B1 S4). It has no actor: Tool is
+// the binding name, Rule is BindingRule(id), and only an administrator
+// decides it (the person who asked sees it and waits).
+const KindSecretBinding = "secret_binding"
+
+// MaxBindingAskTimeout bounds a secret_binding ask
+// (self_service_secrets.ask_timeout, at most 168h).
+const MaxBindingAskTimeout = 168 * time.Hour
+
+const bindingRulePrefix = "binding:"
+
+// BindingRule is the Rule of the secret_binding ask for binding id.
+func BindingRule(id string) string { return bindingRulePrefix + id }
+
+// BindingID is the binding a secret_binding ask is about, "" for any
+// other ask.
+func (a Ask) BindingID() string {
+	if a.Kind != KindSecretBinding {
+		return ""
+	}
+	id, _ := strings.CutPrefix(a.Rule, bindingRulePrefix)
+	return id
+}
+
 // Decision is one verdict that was not a plain allow.
 type Decision struct {
 	At        time.Time `json:"at"`
@@ -225,6 +250,15 @@ type RevokeResult struct {
 // the leader process) or the client's sentinel.
 func IsNotFound(err error) bool { return errors.Is(err, ErrNotFound) || wireCode(err) == "not_found" }
 
+// ErrAdminOnly is an ask only an administrator may answer.
+var ErrAdminOnly = errors.New("asks: only an administrator answers this ask")
+
+// IsAdminOnly reports a person answering an ask only an administrator may
+// answer (a secret_binding ask, even their own).
+func IsAdminOnly(err error) bool {
+	return errors.Is(err, ErrAdminOnly) || wireCode(err) == "admin_only"
+}
+
 // IsDecided reports an ask that was already answered.
 func IsDecided(err error) bool { return errors.Is(err, ErrDecided) || wireCode(err) == "decided" }
 
@@ -255,8 +289,13 @@ type Store struct {
 	Expiry   time.Duration
 	Now      func() time.Time
 
-	mu        sync.Mutex
-	asks      map[string]*Ask
+	mu   sync.Mutex
+	asks map[string]*Ask
+	// deciding holds the asks with a decision in flight (between the
+	// pending check and the write): a second decision is refused and the
+	// expiry leaves them alone, so only one answer is ever recorded and
+	// returned as a success (RV4 F1).
+	deciding  map[string]bool
 	decisions []Decision
 	log       *os.File
 }
@@ -338,7 +377,7 @@ func (s *Store) remove(id string) {
 // expire marks pending asks past their time expired (and records it).
 func (s *Store) expire(now time.Time) {
 	for _, a := range s.asks {
-		if a.State == StatePending && !a.Expires.IsZero() && now.After(a.Expires) {
+		if a.State == StatePending && !a.Expires.IsZero() && now.After(a.Expires) && !s.deciding[a.ID] {
 			a.State, a.DecidedAt = StateExpired, now
 			s.persist(a)
 			s.appendLocked(Decision{At: now, Atespace: a.Atespace, Actor: a.Actor, UID: a.UID, OwnerID: a.OwnerID,
@@ -364,7 +403,16 @@ func (s *Store) expire(now time.Time) {
 
 // Open raises an ask. The ID is minted here.
 func (s *Store) OpenAsk(_ context.Context, a Ask) (Ask, error) {
-	if a.Atespace == "" || a.UID == "" || (a.Host == "" && a.Tool == "") {
+	maxTimeout := MaxAskTimeout
+	if a.Kind == KindSecretBinding {
+		// No actor: the binding stands in for it, so the same binding is
+		// asked about once and the per-actor cap counts per binding.
+		if a.OwnerID == "" || a.Host == "" || a.Tool == "" || a.BindingID() == "" {
+			return Ask{}, &leader.WireError{Code: leader.CodeBadRequest, Message: "a binding ask names its owner, binding, name and host"}
+		}
+		a.Atespace, a.Actor, a.UID, a.Unattended = "", "", a.Rule, false
+		maxTimeout = MaxBindingAskTimeout
+	} else if a.Atespace == "" || a.UID == "" || (a.Host == "" && a.Tool == "") {
 		return Ask{}, &leader.WireError{Code: leader.CodeBadRequest, Message: "an ask names its actor and a host or tool"}
 	}
 	b := make([]byte, 12)
@@ -375,7 +423,7 @@ func (s *Store) OpenAsk(_ context.Context, a Ask) (Ask, error) {
 		exp = DefaultAskExpiry
 	}
 	if t := time.Duration(a.TimeoutSeconds) * time.Second; a.TimeoutSeconds > 0 {
-		exp = min(t, MaxAskTimeout)
+		exp = min(t, maxTimeout)
 	}
 	a.ID, a.Created, a.Expires, a.State = "ask-"+hex.EncodeToString(b), now, now.Add(exp), StatePending
 	a.DecidedBy, a.DecidedAt, a.Always, a.UsedAt = "", time.Time{}, false, time.Time{}
@@ -423,23 +471,47 @@ func (s *Store) Resolve(ctx context.Context, in ResolveRequest) (Ask, error) {
 		s.mu.Unlock()
 		return Ask{}, &leader.WireError{Code: "decided", Message: ErrDecided.Error()}
 	}
+	if a.Kind == KindSecretBinding && !in.Admin {
+		s.mu.Unlock()
+		return Ask{}, &leader.WireError{Code: "admin_only", Message: ErrAdminOnly.Error()}
+	}
+	if s.deciding[in.ID] {
+		s.mu.Unlock()
+		return Ask{}, &leader.WireError{Code: "decided", Message: ErrDecided.Error()}
+	}
+	if s.deciding == nil {
+		s.deciding = map[string]bool{}
+	}
+	s.deciding[in.ID] = true
 	out := *a
 	s.mu.Unlock()
 	out.State, out.DecidedBy, out.DecidedAt, out.Note = StateDenied, in.CallerID, now, truncate(in.Note, 512)
 	if decision == "approve" {
 		out.State, out.Always = StateApproved, in.Always
-		if s.OnApprove != nil && out.Always {
+		if out.Kind == KindSecretBinding {
+			// The gateway moves the binding (it writes the binding store);
+			// no registration changes and nothing is kept for later runs.
+			out.Always = false
+		} else if s.OnApprove != nil && out.Always {
 			if err := s.OnApprove(ctx, out); err != nil {
+				s.mu.Lock()
+				delete(s.deciding, in.ID)
+				s.mu.Unlock()
 				return Ask{}, err
 			}
 		}
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if cur, ok := s.asks[in.ID]; ok && cur.State == StatePending {
-		*cur = out
-		s.persist(cur)
+	delete(s.deciding, in.ID)
+	cur, ok := s.asks[in.ID]
+	if !ok || cur.State != StatePending {
+		// The actor's close got there first (CloseActor): this answer is
+		// not recorded, and the caller is told so (RV4 F1).
+		return Ask{}, &leader.WireError{Code: "decided", Message: ErrDecided.Error()}
 	}
+	*cur = out
+	s.persist(cur)
 	s.appendLocked(Decision{At: now, Atespace: out.Atespace, Actor: out.Actor, UID: out.UID, OwnerID: out.OwnerID,
 		Source: "ask", Tool: firstNonEmpty(out.Tool, out.Host), Verdict: out.State, Reason: out.Note, DecidedBy: in.CallerID})
 	return out, nil

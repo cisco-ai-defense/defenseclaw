@@ -32,6 +32,7 @@ import (
 
 	"golang.org/x/time/rate"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxreg"
@@ -40,6 +41,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/substrate/identity"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/ratelimit"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/registry"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/secretbind"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/telemetryrelay"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
@@ -198,6 +200,16 @@ type SubstrateConfig struct {
 	// WorkspaceMaxBytes caps a workspace upload through attach
 	// (substrate.workspace_max_bytes, E23).
 	WorkspaceMaxBytes int64
+	// KeyReplay reads substrate.launcher.key_replay live for launchers
+	// (B3.1); nil reports ask.
+	KeyReplay func() string
+	// UploadScan reads substrate.launcher.upload_scan live for launchers
+	// (B1); nil reports the defaults.
+	UploadScan func() config.SubstrateUploadScanConfig
+	// FilesPush and FilesSync read substrate.files.push and .sync live;
+	// nil reports on.
+	FilesPush func() bool
+	FilesSync func() bool
 	// Doctor runs the gateway-side doctor checks; Info is the
 	// unauthenticated sign-in information (issuer, client_id, sign_in).
 	Doctor func(ctx context.Context) []SubstrateCheck
@@ -216,6 +228,24 @@ type SubstrateConfig struct {
 	// values (nil: list only).
 	Secrets     []config.SubstrateSecret
 	SecretStore SubstrateSecretStore
+	// Bindings is the self-service binding store (nil when
+	// self_service_secrets.mode is off); SelfService and SecretTemplates
+	// are its config, NoSwapHosts substrate.egress.no_swap_hosts.
+	Bindings        *secretbind.Store
+	SelfService     config.SubstrateSelfServiceSecretsConfig
+	SecretTemplates []config.SubstrateSecretTemplate
+	// LiveSelfService, when set, is the self-service config and template
+	// catalog in force now (config.yaml applied live): mode, limits, asks
+	// and templates follow it; namespace and provider stay the boot ones.
+	LiveSelfService func() (config.SubstrateSelfServiceSecretsConfig, []config.SubstrateSecretTemplate)
+	// LiveNoSwapHosts, when set, is substrate.egress.no_swap_hosts as the
+	// gateway follows config.yaml; NoSwapHosts is the boot value.
+	LiveNoSwapHosts func() []string
+	NoSwapHosts     []string
+	// SecretAudit receives each typed secret change record
+	// (log.substrate.secret.changed); nil sends it to the gateway's
+	// sandbox recorder. Tests capture it here.
+	SecretAudit func(context.Context, audit.SubstrateSecretChangeEvent)
 	// Chains is the leader's chain and intent state (lane A13): a verified
 	// actor's tool-chain windows and the judge's session intent live there,
 	// so every replica sees the same. Nil turns the chain lane off for
@@ -226,6 +256,9 @@ type SubstrateConfig struct {
 	// through this replica's telemetry runtime (GAP-0450, GAP-0453). Nil:
 	// nothing is relayed.
 	Relay *telemetryrelay.Taker
+	// SecretUses reads when the caller's agents last reached each host,
+	// for the last use secrets list and test show (S6b). Nil: no last use.
+	SecretUses SubstrateSecretUses
 }
 
 // SubstrateActorVerifier verifies actor tokens (identity.ActorVerifier).

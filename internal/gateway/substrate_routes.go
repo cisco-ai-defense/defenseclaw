@@ -33,6 +33,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/calloutapi"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/chainstate"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/identity"
@@ -175,6 +176,14 @@ func (a *APIServer) newSubstrateAdminHandler(st *substrateState) http.Handler {
 	mux.HandleFunc("GET /api/v1/substrate/batches/{id}", a.substrateGetBatch(st))
 	mux.HandleFunc("GET /api/v1/substrate/usage", a.substrateUsage(st))
 	mux.HandleFunc("GET /api/v1/substrate/doctor", a.substrateDoctor(st))
+	mux.HandleFunc("GET /api/v1/substrate/launcher", func(w http.ResponseWriter, _ *http.Request) {
+		writeSubstrateJSON(w, http.StatusOK, map[string]any{
+			"workspace_max_bytes": substrateWorkspaceMax(st.cfg.WorkspaceMaxBytes),
+			"key_replay":          substrateKeyReplay(st.cfg.KeyReplay),
+			"upload_scan":         substrateUploadScan(st.cfg.UploadScan),
+			"files":               map[string]bool{"push": substrateSwitch(st.cfg.FilesPush), "sync": substrateSwitch(st.cfg.FilesSync)},
+		})
+	})
 	mux.HandleFunc("GET /api/v1/substrate/asks", a.substrateListAsks(st))
 	mux.HandleFunc("POST /api/v1/substrate/asks/{id}", a.substrateDecideAsk(st))
 	mux.HandleFunc("GET /api/v1/substrate/approvals", a.substrateListApprovals(st))
@@ -182,6 +191,8 @@ func (a *APIServer) newSubstrateAdminHandler(st *substrateState) http.Handler {
 	mux.HandleFunc("GET /api/v1/substrate/decisions", a.substrateDecisions(st))
 	mux.HandleFunc("GET /api/v1/substrate/policy/explain", a.substratePolicyExplain(st))
 	mux.HandleFunc("GET /api/v1/substrate/secrets", a.substrateListSecrets(st))
+	mux.HandleFunc("POST /api/v1/substrate/secrets", a.substrateAddSecret(st))
+	mux.HandleFunc("GET /api/v1/substrate/secret-templates", a.substrateSecretTemplates(st))
 	mux.HandleFunc("PUT /api/v1/substrate/secrets/{name}", a.substrateSetSecret(st))
 	mux.HandleFunc("DELETE /api/v1/substrate/secrets/{name}", a.substrateRemoveSecret(st))
 	mux.HandleFunc("POST /api/v1/substrate/secrets/{name}/test", a.substrateTestSecret(st))
@@ -209,7 +220,7 @@ func (a *APIServer) newSubstrateAdminHandler(st *substrateState) http.Handler {
 			// long-poll frames and a streaming tar upload. Person sign-in and
 			// ownership are checked as for every admin route; the JSON body
 			// gate and the 1 MiB cap do not fit it, so it has its own.
-			r.Body = http.MaxBytesReader(w, r.Body, substrateAttachBodyCap(r, st.cfg.WorkspaceMaxBytes))
+			r.Body = http.MaxBytesReader(w, r.Body, substrateAttachBodyCap(r, substrateWorkspaceMax(st.cfg.WorkspaceMaxBytes)))
 			attach.ServeHTTP(w, r)
 			return
 		}
@@ -1022,4 +1033,29 @@ func substrateCalloutAuthorized(st *substrateState, r *http.Request) bool {
 func readAllLimited(r io.Reader, n int64) ([]byte, bool) {
 	b, err := io.ReadAll(io.LimitReader(r, n+1))
 	return b, err == nil && int64(len(b)) <= n
+}
+
+// substrateSwitch reads a live admin switch; on when not wired.
+func substrateSwitch(read func() bool) bool { return read == nil || read() }
+
+// substrateUploadScan is substrate.launcher.upload_scan for launchers, its
+// defaults filled in (replace, token, 8 MiB, 120s) when not wired or unset.
+func substrateUploadScan(read func() config.SubstrateUploadScanConfig) map[string]any {
+	var u config.SubstrateUploadScanConfig
+	if read != nil {
+		u = read()
+	}
+	return map[string]any{
+		"max_file_bytes": u.EffectiveMaxFileBytes(), "time_budget": u.EffectiveTimeBudget().String(),
+		"secret_action": u.EffectiveSecretAction(), "placeholder_form": u.EffectivePlaceholderForm(),
+	}
+}
+
+// substrateKeyReplay is substrate.launcher.key_replay for launchers; ask when
+// the listener has no live reader.
+func substrateKeyReplay(read func() string) string {
+	if read == nil {
+		return config.SubstrateKeyReplayAsk
+	}
+	return read()
 }

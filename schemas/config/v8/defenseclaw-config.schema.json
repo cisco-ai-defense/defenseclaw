@@ -8054,6 +8054,72 @@
           "minimum": 0,
           "maximum": 68719476736
         },
+        "launcher": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "key_replay": {
+              "type": "string",
+              "enum": [
+                "ask",
+                "on",
+                "off"
+              ],
+              "default": "ask"
+            },
+            "upload_scan": {
+              "description": "Agent Substrate launcher: the secret scan of a project copy before upload (Linux and macOS copies).",
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "max_file_bytes": {
+                  "description": "Largest file the scan reads; a bigger one is uploaded unscanned and named in the run's report.",
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 67108864,
+                  "default": 8388608
+                },
+                "time_budget": {
+                  "description": "How long the scan may take (a Go duration, 1s to 1h); files it did not reach are named in the run's report.",
+                  "type": "string",
+                  "pattern": "^(|[0-9]+(?:\\.[0-9]+)?(?:ns|us|\u00b5s|ms|s|m|h)(?:[0-9]+(?:\\.[0-9]+)?(?:ns|us|\u00b5s|ms|s|m|h))*)$",
+                  "default": "120s"
+                },
+                "secret_action": {
+                  "description": "replace: the value is replaced with a placeholder in the uploaded copy; hold_back: the whole file stays on the computer (the admin-off switch).",
+                  "type": "string",
+                  "enum": [
+                    "replace",
+                    "hold_back"
+                  ],
+                  "default": "replace"
+                },
+                "placeholder_form": {
+                  "type": "string",
+                  "enum": [
+                    "token",
+                    "env"
+                  ],
+                  "default": "token"
+                }
+              }
+            }
+          }
+        },
+        "files": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "push": {
+              "type": "boolean",
+              "default": true
+            },
+            "sync": {
+              "type": "boolean",
+              "default": true
+            }
+          }
+        },
         "unattended": {
           "type": "object",
           "additionalProperties": false,
@@ -8339,6 +8405,15 @@
                 "minLength": 1,
                 "maxLength": 253
               }
+            },
+            "no_swap_hosts": {
+              "type": "array",
+              "maxItems": 1024,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 253
+              }
             }
           }
         },
@@ -8395,6 +8470,9 @@
                   "placeholder": {
                     "type": "string",
                     "pattern": "^[A-Z_][A-Z0-9_]*$"
+                  },
+                  "allow_echo": {
+                    "type": "boolean"
                   }
                 }
               },
@@ -8416,6 +8494,37 @@
                   "maxLength": 256
                 }
               }
+            }
+          }
+        },
+        "self_service_secrets": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "mode": {"type": "string", "enum": ["bindings", "values_only", "off"]},
+            "namespace": {"type": "string", "minLength": 1, "maxLength": 63},
+            "provider": {"type": "string", "minLength": 1, "maxLength": 253},
+            "max_per_person": {"type": "integer", "minimum": 1, "maximum": 200},
+            "outside_templates": {"type": "string", "enum": ["ask", "refuse"]},
+            "ask_timeout": {"type": "string", "minLength": 1, "maxLength": 32},
+            "allow_echo_bindings": {"type": "boolean"}
+          }
+        },
+        "secret_templates": {
+          "type": "array",
+          "maxItems": 256,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name"],
+            "properties": {
+              "name": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,62}$"},
+              "hosts": {"type": "array", "maxItems": 1024, "items": {"type": "string", "minLength": 1, "maxLength": 253}},
+              "header": {"type": "string", "minLength": 1, "maxLength": 64},
+              "form": {"type": "string", "enum": ["bearer", "basic", "raw"]},
+              "basic_user": {"type": "string", "minLength": 1, "maxLength": 128},
+              "profiles": {"type": "array", "maxItems": 256, "items": {"type": "string", "minLength": 1, "maxLength": 253}},
+              "registry": {"type": "string", "enum": ["none", "npm", "pypi"]}
             }
           }
         },

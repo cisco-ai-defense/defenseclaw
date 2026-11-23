@@ -82,6 +82,38 @@ func CheckCloneURL(raw string) error {
 	return nil
 }
 
+// CloneHost is the host git in the actor sends a credential to for raw:
+// the https host, or the host of an SSH address the actor's git
+// configuration turns into https (kit gitConfig: every ssh://git@ address
+// and git@ on GitHub, GitLab and Bitbucket). It is "" for any other
+// address, which never asks for a token.
+func CloneHost(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if m := scpLikeRE.FindString(raw); m != "" {
+		user, rest, _ := strings.Cut(m, "@")
+		host, _, _ := strings.Cut(rest, ":")
+		host = strings.ToLower(host)
+		switch {
+		case user != "git":
+			return ""
+		case host == "github.com" || host == "gitlab.com" || host == "bitbucket.org":
+			return host
+		}
+		return ""
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	switch {
+	case u.Scheme == "https" || u.Scheme == "http":
+	case u.Scheme == "ssh" && u.User != nil && u.User.Username() == "git":
+	default:
+		return ""
+	}
+	return strings.ToLower(u.Hostname())
+}
+
 // CheckCloneRef refuses a --ref git would read as an option.
 func CheckCloneRef(ref string) error {
 	if ref != "" && !refRE.MatchString(ref) {
@@ -113,21 +145,34 @@ func cloneFolder(raw string) string {
 }
 
 // CloneError is a clone git refused in the actor, in its own words.
+// Hint, when set, replaces the general advice for a refused credential
+// with what this person can do (B1 2.2: the template that covers the host,
+// or the add command an administrator approves).
 type CloneError struct {
 	URL, Message string
 	Exit         int
+	Hint         string
+}
+
+// NeedsCredential reports whether the host refused the clone for want of
+// a credential: no user name, a refused placeholder, 401 or 403.
+func (e *CloneError) NeedsCredential() bool {
+	low := strings.ToLower(e.Message)
+	return strings.Contains(low, "could not read username") || strings.Contains(low, "authentication failed") ||
+		strings.Contains(low, "terminal prompts disabled") || strings.Contains(low, "403") || strings.Contains(low, "401")
 }
 
 func (e *CloneError) Error() string {
 	msg := fmt.Sprintf("git could not clone %s in the agent: %s", e.URL, e.Message)
 	low := strings.ToLower(e.Message)
 	switch {
-	case strings.Contains(low, "could not read username") || strings.Contains(low, "authentication failed") ||
-		strings.Contains(low, "terminal prompts disabled") || strings.Contains(low, "403") || strings.Contains(low, "401"):
+	case e.NeedsCredential() && e.Hint != "":
+		msg += ". " + e.Hint
+	case e.NeedsCredential():
 		msg += ". The repository needs a credential the cluster does not add for this host; ask your administrator to allow it for your profile"
 	case strings.Contains(low, "permission denied (publickey)") || strings.Contains(low, "host key verification"):
 		msg += ". The agent has no SSH key; use the https:// address, for which the cluster adds the credential"
-	case strings.Contains(low, "could not resolve host") || strings.Contains(low, "connection refused") || strings.Contains(low, "403 forbidden"):
+	case strings.Contains(low, "could not resolve host") || strings.Contains(low, "connection refused"):
 		msg += ". The agent's network rules may not allow this host; ask your administrator"
 	case strings.Contains(low, "returned error: 503") || strings.Contains(low, "returned error: 502"):
 		msg += ". The cluster's network guard refused the request or could not check it; ask your administrator to look at the DefenseClaw egress log for this agent"

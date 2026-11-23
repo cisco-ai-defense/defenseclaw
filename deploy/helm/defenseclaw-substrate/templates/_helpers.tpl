@@ -707,3 +707,17 @@ certificates.
 - --relay-port={{ $r.relayPort }}
 {{- end -}}
 {{- end -}}
+
+{{/* The self-service secrets namespace (config.substrate.self_service_secrets.namespace),
+or "" when self_service_secrets.mode is off. */}}
+{{- define "dc.userSecretsNs" -}}
+{{- $ss := dig "substrate" "self_service_secrets" dict (.Values.config | default dict) -}}
+{{- if ne (toString (dig "mode" "bindings" $ss)) "off" -}}
+{{- dig "namespace" "defenseclaw-user-secrets" $ss -}}
+{{- end -}}
+{{- end -}}
+
+{{/* The self-service secrets namespace whatever the mode (the hooks revoke its grants when off). */}}
+{{- define "dc.userSecretsNsName" -}}
+{{- dig "substrate" "self_service_secrets" "namespace" "defenseclaw-user-secrets" (.Values.config | default dict) -}}
+{{- end -}}
