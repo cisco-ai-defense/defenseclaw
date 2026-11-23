@@ -84,6 +84,7 @@ func (s *ContinuousDiscoveryService) detectPluginSkills() []AISignal {
 						ev.Skill.Scope, ev.Skill.Plugin = SkillScopePlugin, info
 					}
 				}
+				signal.EvidenceHash = hashEvidence(signal.Evidence)
 				out = append(out, signal)
 			}
 		}

@@ -126,6 +126,13 @@ func TestDetectPluginSkillsFromTheAgentsRegistries(t *testing.T) {
 	if upgradedKeys["claudecode/review#evidence"] == keys["claudecode/review#evidence"] {
 		t.Fatal("plugin content change did not update the evidence hash")
 	}
+	writeSkillFiles(t, home, map[string]string{".claude/settings.json": `{"enabledPlugins":{"pr-review@official":true}}`})
+	metadataChanged, metadataKeys := pluginSkillFacts(t, home)
+	if metadataChanged["claudecode/review"].ContentHash != upgraded["claudecode/review"].ContentHash ||
+		metadataKeys["claudecode/review#fingerprint"] != upgradedKeys["claudecode/review#fingerprint"] ||
+		metadataKeys["claudecode/review#evidence"] == upgradedKeys["claudecode/review#evidence"] {
+		t.Fatal("changing the plugin's enabled state must update the evidence without replacing the skill identity")
+	}
 }
 
 func TestDetectCursorPluginSkillsAndManifestFolders(t *testing.T) {

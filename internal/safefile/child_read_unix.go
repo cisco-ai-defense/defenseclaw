@@ -34,16 +34,25 @@ func OpenDirectoryNoFollow(path string) (*os.File, error) {
 			}
 		}
 	}
-	flags := unix.O_RDONLY | unix.O_DIRECTORY | unix.O_NOFOLLOW | unix.O_CLOEXEC
-	fd, err := unix.Open("/", flags, 0)
+	flags := unix.O_DIRECTORY | unix.O_NOFOLLOW | unix.O_CLOEXEC
+	rootMode := directorySearchMode
+	if abs == "/" {
+		rootMode = unix.O_RDONLY
+	}
+	fd, err := unix.Open("/", rootMode|flags, 0)
 	if err != nil {
 		return nil, err
 	}
-	for _, name := range strings.Split(strings.TrimPrefix(abs, "/"), "/") {
+	components := strings.Split(strings.TrimPrefix(abs, "/"), "/")
+	for i, name := range components {
 		if name == "" {
 			continue
 		}
-		next, openErr := unix.Openat(fd, name, flags, 0)
+		mode := directorySearchMode
+		if i == len(components)-1 {
+			mode = unix.O_RDONLY
+		}
+		next, openErr := unix.Openat(fd, name, mode|flags, 0)
 		if openErr != nil {
 			var info unix.Stat_t
 			if statErr := unix.Fstatat(fd, name, &info, unix.AT_SYMLINK_NOFOLLOW); statErr == nil && info.Mode&unix.S_IFMT == unix.S_IFLNK {
