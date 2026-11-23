@@ -192,6 +192,30 @@ func TestCreateNamesTheMissingBuildxPlugin(t *testing.T) {
 	assertNothingLeft(t, e)
 }
 
+// GAP-2067: a harness not verified in a sandbox yet (Amp, Cursor Agent,
+// Devin) is refused before any docker build: a build could never verify
+// its image, so it would only spend minutes and gigabytes first.
+func TestCreateRefusesAnUnverifiedHarnessBeforeBuilding(t *testing.T) {
+	for _, name := range []string{"amp", "cursor", "devin"} {
+		t.Run(name, func(t *testing.T) {
+			e := newEnv(t, nil)
+			builds := 0
+			e.m.opts.Images = BuilderImages{Builder: &image.Builder{
+				Docker: buildFailingDocker{builds: &builds}, Store: image.NewStore(e.dataDir), Log: io.Discard,
+			}}
+			_, err := e.tryCreate(sandboxapi.CreateRequest{Name: "img-" + name, Harness: name})
+			apiErr := wantCode(t, err, sandboxapi.CodeImageUnavailable)
+			if !strings.Contains(apiErr.Message, "does not run in a sandbox yet") || !strings.Contains(apiErr.Message, "no image was built") {
+				t.Fatalf("create error = %+v", apiErr)
+			}
+			if builds != 0 {
+				t.Fatalf("docker build ran %d times", builds)
+			}
+			assertNothingLeft(t, e)
+		})
+	}
+}
+
 // relabeled is an error that wraps err under a message of its own.
 type relabeled struct{ err error }
 

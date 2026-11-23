@@ -115,15 +115,15 @@ value before it asks.
   format and a separate argument) is not. DefenseClaw's secret rules still flag
   such a value when it shows up in a file or in output, and the value is
   captured, marked exposed, when it shows up in the tool's output (below).
-- **In a prompt that reaches the model.** Copilot CLI, Hermes, Kiro, Amp,
-  Cursor and Devin hooks cannot keep a prompt from the model (or DefenseClaw
-  does not rely on them to). The secret is captured and marked **exposed:
+- **In a prompt that reaches the model.** Copilot CLI, Hermes and Kiro hooks
+  cannot keep a prompt from the model (or DefenseClaw does not rely on them
+  to). The secret is captured and marked **exposed:
   rotate**, and the agent is told not to use it where the agent allows that.
   Rotate it and run `defenseclaw sandbox vault replace NAME`.
 - **In a tool's output.** The model has read the value, so the secret is
   captured and marked **exposed: rotate**, including a key a command put
   together as it ran. Where the hook can answer the model (Claude Code and
-  Codex `PostToolUse`, Amp `tool.result`), the agent is told not to reuse the
+  Codex `PostToolUse`), the agent is told not to reuse the
   value and that you must rotate it; elsewhere DefenseClaw raises an alert that
   says the same.
 - **In the agent's reply or another hook event.** The value is removed from
@@ -142,13 +142,12 @@ Where each agent captures:
 | Hermes | exposed (`pre_llm_call`) | `pre_tool_call` | `post_tool_call`, `transform_tool_result` |
 | Kiro | exposed (`userPromptSubmit`) | `preToolUse` | `postToolUse` |
 | Antigravity (`agy`) | not sent to hooks | `PreToolUse` | not sent to hooks |
-| Amp | exposed (`agent.start`) | `tool.call` | `tool.result` (answered block) |
-| Cursor | exposed (`beforeSubmitPrompt`) | `preToolUse`, `subagentStart` and the `before*` hooks | `postToolUse` and the `after*` hooks |
-| Devin | exposed (`UserPromptSubmit`) | `PreToolUse`, `PermissionRequest` | `PostToolUse` |
 
 Antigravity's hooks receive neither your prompt nor a tool's output, so a
 secret there is captured only when the model writes it into a tool call.
-Capture in Kiro, Antigravity, Amp, Cursor and Devin is in Preview.
+Capture in Kiro and Antigravity is in Preview. Amp, Cursor Agent and Devin
+CLI are not verified in a sandbox yet: `sandbox run` refuses them before
+building an image, so they cannot use the vault.
 
 ![Claude Code in a sandbox: a prompt with a Stripe-shaped key is stopped by the UserPromptSubmit hook, and DefenseClaw says it moved the secret into the vault as STRIPE_API_KEY, sent only to api.stripe.com](/images/sandboxes/screens/vault-capture-claude.png)
 
@@ -229,8 +228,8 @@ On a managed computer `defenseclaw tui` is not available; use
 `defenseclaw sandbox vault` there.
 
 Only terminal agents run in a sandbox (Claude Code, Codex, Copilot CLI,
-OpenCode, Kiro, Hermes, Antigravity's `agy`, Amp, Cursor Agent, Devin), so only
-they can use the vault.
+OpenCode, Kiro, Hermes, Antigravity's `agy`), so only they can use the vault.
+Amp, Cursor Agent and Devin CLI do not run in a sandbox yet.
 Desktop apps and IDE agents do not run in an OpenShell sandbox.
 
 ## Where the vault lives
