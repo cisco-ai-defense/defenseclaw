@@ -211,11 +211,7 @@
           "properties": {
             "keyReplay": {
               "type": "string",
-              "enum": [
-                "ask",
-                "on",
-                "off"
-              ]
+              "pattern": "^\\s*([Aa][Ss][Kk]|[Oo][Nn]|[Oo][Ff][Ff])?\\s*$"
             }
           }
         },
@@ -268,11 +264,7 @@
             },
             "pushBranch": {
               "type": "string",
-              "enum": [
-                "allow",
-                "ask",
-                "deny"
-              ]
+              "pattern": "^\\s*([Aa][Ll][Ll][Oo][Ww]|[Aa][Ss][Kk]|[Dd][Ee][Nn][Yy])?\\s*$"
             }
           }
         }
@@ -361,11 +353,7 @@
                 },
                 "key_replay": {
                   "type": "string",
-                  "enum": [
-                    "ask",
-                    "on",
-                    "off"
-                  ]
+                  "pattern": "^\\s*([Aa][Ss][Kk]|[Oo][Nn]|[Oo][Ff][Ff])?\\s*$"
                 }
               }
             },
@@ -416,11 +404,7 @@
                 },
                 "push_branch": {
                   "type": "string",
-                  "enum": [
-                    "allow",
-                    "ask",
-                    "deny"
-                  ]
+                  "pattern": "^\\s*([Aa][Ll][Ll][Oo][Ww]|[Aa][Ss][Kk]|[Dd][Ee][Nn][Yy])?\\s*$"
                 }
               }
             }
