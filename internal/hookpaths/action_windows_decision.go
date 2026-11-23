@@ -38,6 +38,7 @@ func actionWindowsPathWithTrim(value, cwd, home string, trim bool) (string, bool
 	if value == "" || strings.ContainsAny(value, "\x00\r\n`") {
 		return "", false
 	}
+	value = actionLocalFileURIPath(value)
 	lower := strings.ToLower(value)
 	for _, prefix := range []string{"%userprofile%", "%homedrive%%homepath%", "$env:userprofile", "${env:userprofile}", "$home", "${home}", "~"} {
 		if lower == prefix || strings.HasPrefix(lower, prefix+"/") {
@@ -93,6 +94,24 @@ func actionWindowsPathWithTrim(value, cwd, home string, trim bool) (string, bool
 		return "/" + path.Clean(value), true
 	}
 	return path.Clean(value), true
+}
+
+// actionLocalFileURIPath reads localhost:///C:/x, the local file URI
+// spelling some Windows tools emit, as the drive path C:/x: no path under the
+// working folder and no share on a server named "C:" (rel-1-0-10:GAP-1671).
+// The effects resolver reads the spelling the same way
+// (effects.localWindowsURIPath); this floor reader keeps its own copy until
+// it is retired. value has forward slashes.
+func actionLocalFileURIPath(value string) string {
+	const prefix = "localhost:///"
+	if len(value) < len(prefix)+3 || !strings.EqualFold(value[:len(prefix)], prefix) {
+		return value
+	}
+	rest := value[len(prefix):]
+	if !asciiLetter(rest[0]) || rest[1] != ':' || rest[2] != '/' {
+		return value
+	}
+	return rest
 }
 
 func asciiLetter(value byte) bool {
