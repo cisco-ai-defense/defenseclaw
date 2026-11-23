@@ -131,6 +131,10 @@ func vaultJSON(e vault.Entry) vaultJSONEntry {
 // VaultList prints the vault. Values are never printed.
 func (a *App) VaultList(format OutputFormat) error {
 	st := a.vault()
+	// A vault that does not match the seal the gateway pinned is checked
+	// with the key (and pinned again when it matches): the gateway's
+	// refused capture tells the person to run this command.
+	pinNote, pinErr := st.CheckPin()
 	list, err := st.List()
 	if err != nil {
 		return err
@@ -148,9 +152,22 @@ func (a *App) VaultList(format OutputFormat) error {
 		if storage.Note != "" {
 			doc["storage_note"] = storage.Note
 		}
+		if storage.Pin != "" {
+			doc["pin"] = storage.Pin
+		}
+		if pinErr != nil {
+			doc["pin_warning"] = pinErr.Error()
+		} else if pinNote != "" {
+			doc["pin_note"] = pinNote
+		}
 		return writeJSON(a.IO.Out, doc)
 	}
 	a.vaultStorageLine(storage)
+	if pinErr != nil {
+		a.warn(pinErr.Error())
+	} else if pinNote != "" {
+		a.note(pinNote)
+	}
 	if len(list) == 0 {
 		a.note("the vault is empty; add a secret with `" + CommandName + " vault add NAME --host HOST`")
 		return nil

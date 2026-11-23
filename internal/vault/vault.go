@@ -719,6 +719,16 @@ func (s *Store) updateWait(wait time.Duration, n need, change func(*file) error)
 	}
 	defer unlock()
 	f, err := s.read()
+	// The pin is checked against the vault as read: a writer that did not
+	// read the key (the gateway, the sandbox daemon, a CLI change that
+	// needs no value) writes nothing into a vault whose seal is not the
+	// pinned one, or that was sealed and is now a plain file or gone.
+	var pu pinUpdate
+	var pinErr error
+	if err == nil {
+		verified := (f.sealer == nil && p.fresh) || (f.sealer != nil && n == needValues && s.keys != nil)
+		pu, pinErr = s.checkPin(f, verified)
+	}
 	if err == nil {
 		err = p.apply(f, n)
 	}
@@ -727,6 +737,9 @@ func (s *Store) updateWait(wait time.Duration, n need, change func(*file) error)
 		// nothing is written.
 		p.done(f)
 		return nil
+	}
+	if err == nil {
+		err = pinErr
 	}
 	if err == nil {
 		err = change(f)
@@ -746,5 +759,6 @@ func (s *Store) updateWait(wait time.Duration, n need, change func(*file) error)
 		return err
 	}
 	p.done(f)
+	pu.apply(s, f)
 	return nil
 }

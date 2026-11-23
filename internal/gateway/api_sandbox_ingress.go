@@ -1177,6 +1177,7 @@ func (a *APIServer) sandboxRelayForwarder(st *sandboxIngressState) http.Handler 
 		var captured *sandboxVaultCapture
 		if route == sandboxauth.RouteHook {
 			body, captured = captureSandboxVault(ctx, st.vault, binding.Connector, body)
+			a.alertSandboxVaultChanged(ctx, binding.Connector, captured)
 		}
 		// Only the daemon says what it captured: a header the sandbox sent
 		// is dropped.

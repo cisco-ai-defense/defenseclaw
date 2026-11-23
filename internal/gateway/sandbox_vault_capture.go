@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
@@ -207,6 +208,12 @@ func (c *sandboxVaultCapture) errorText() string {
 		return "the vault is busy: another DefenseClaw command is writing it"
 	case errors.Is(c.Err, vault.ErrCaptureFull), errors.Is(c.Err, vault.ErrFull):
 		return c.Err.Error()
+	case errors.Is(c.Err, vault.ErrSealRemoved):
+		return "your vault was sealed and is now a plain file or gone, so DefenseClaw kept nothing in it; " +
+			"run `defenseclaw sandbox vault list` to seal it again"
+	case errors.Is(c.Err, vault.ErrVaultChanged):
+		return "your vault looks changed: its seal is not the one DefenseClaw pinned, so DefenseClaw kept nothing in it; " +
+			"run `defenseclaw sandbox vault list` to check it with your vault key"
 	}
 	return "the vault could not be written; run `defenseclaw sandbox vault list` to see why"
 }
@@ -315,6 +322,30 @@ func vaultCaptureFromHeader(v string) *sandboxVaultCapture {
 		c.Entries = append(c.Entries, e)
 	}
 	return c
+}
+
+// sandboxVaultPinRuleID is the alert of a capture refused because the vault
+// does not match its pin.
+const sandboxVaultPinRuleID = "sandbox_vault_pin"
+
+// alertSandboxVaultChanged records a capture the vault refused because it
+// no longer matches the seal DefenseClaw pinned: someone changed the vault
+// file (its seal header, or a sealed vault replaced with a plain one).
+func (a *APIServer) alertSandboxVaultChanged(ctx context.Context, connectorName string, c *sandboxVaultCapture) {
+	if a == nil || a.logger == nil || c == nil || !errors.Is(c.Err, vault.ErrVaultChanged) {
+		return
+	}
+	reason := "seal_changed"
+	if errors.Is(c.Err, vault.ErrSealRemoved) {
+		reason = "seal_removed"
+	}
+	if err := a.logger.LogAlertCtx(ctx, sandboxVaultPinRuleID, "HIGH",
+		"Sandbox vault does not match its pinned seal: capture refused", map[string]any{
+			"connector": connectorName, "event": c.Event, "sandbox": c.Sandbox,
+			"reason": reason, "rule_id": sandboxVaultPinRuleID,
+		}); err != nil {
+		fmt.Fprintf(os.Stderr, "[gateway] sandbox vault pin alert failed connector=%s: %v\n", connectorName, err)
+	}
 }
 
 // applySandboxVaultCapture turns a verdict into the capture's block.

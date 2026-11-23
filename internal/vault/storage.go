@@ -42,6 +42,9 @@ type Storage struct {
 	Label string `json:"label"`
 	// Note says why a file vault is not sealed, or when it will be.
 	Note string `json:"note,omitempty"`
+	// Pin is how the vault compares with the seal the gateway and the
+	// sandbox daemon pinned (PinState): "" when it matches.
+	Pin string `json:"pin,omitempty"`
 }
 
 // StorageFileLabel is the label of a vault kept as a plain file.
@@ -53,6 +56,28 @@ func (s *Store) Storage() (Storage, error) {
 	if err != nil {
 		return Storage{}, err
 	}
+	st, err := s.storageOf(f)
+	if err != nil {
+		return st, err
+	}
+	switch st.Pin = s.pinLabel(f); st.Pin {
+	case "changed":
+		st.Note = joinNote(st.Note, "sandboxes capture nothing into this vault: its seal is not the one DefenseClaw pinned "+
+			"(the file was changed, or replaced with another vault)")
+	case "unsealed":
+		st.Note = joinNote(st.Note, "sandboxes capture nothing into this vault: it had been sealed and is now a plain file")
+	}
+	return st, nil
+}
+
+func joinNote(a, b string) string {
+	if a == "" {
+		return b
+	}
+	return a + "; " + b
+}
+
+func (s *Store) storageOf(f *file) (Storage, error) {
 	if f.sealer != nil {
 		name := keystoreName(f.sealer.h.Keystore)
 		st := Storage{Mode: "sealed", Keystore: name, Label: "sealed (" + name + ")"}
@@ -96,7 +121,11 @@ func (s *Store) readKey(f *file) error {
 	if err != nil {
 		return err
 	}
-	return s.keyInto(f, ks, why)
+	if err := s.keyInto(f, ks, why); err != nil {
+		return err
+	}
+	s.repin(f.sealer.h)
+	return nil
 }
 
 func (s *Store) keyInto(f *file, ks Keystore, why string) error {
