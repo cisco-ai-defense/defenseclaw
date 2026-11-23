@@ -167,8 +167,11 @@ confirmed yet and, separately, at most 8 from its tool calls and tool output
 that you have not replaced yet, so tools that keep printing key-shaped test
 values never use up the room a prompt's secret needs. A program inside a
 sandbox can send hook events that look like its agent's, so each sandbox only
-ever fills its own room: it cannot fill the room another sandbox needs, the
-room left for your own secrets, or the names the vault gives captured secrets.
+ever fills its own room: one sandbox cannot fill the room another sandbox
+needs or use up the names the vault gives captured secrets. All captures
+together stop at 48 that you have not confirmed or replaced, so at least 16
+entries always stay for secrets you add yourself; several sandboxes together
+can reach that limit, and then their prompts are still stopped.
 Past a limit a call is still answered and the value still removed, but
 nothing more of that kind is stored for that sandbox until you confirm,
 replace or remove some. When a limit is reached, the prompt is still stopped and

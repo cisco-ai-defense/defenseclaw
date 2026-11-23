@@ -42,14 +42,20 @@ var capturable = map[string]struct{ name, host string }{
 // sandbox can post hook events the way its harness does, and nothing tells
 // them apart, so a sandbox's events may only ever fill that sandbox's room,
 // never another sandbox's (GAP-1979). MaxCaptured and MaxCapturedFromModel
-// bound the entries captured with no sandbox named. A sandbox's captures
-// stay well under MaxEntries, so it cannot fill the vault either, and the
-// names of a kind run to MaxEntries, so it cannot use them up.
+// bound the entries captured with no sandbox named. All captures together,
+// from every sandbox and none, stop at MaxCapturedTotal, so
+// MaxEntries-MaxCapturedTotal entries always stay for the person's own
+// secrets. One sandbox holds at most MaxCapturedPerSandbox +
+// MaxCapturedFromModelPerSandbox, well under MaxCapturedTotal, so one
+// sandbox cannot reach it; several sandboxes together can, and past it a
+// prompt is still stopped (fail closed). The names of a kind run to
+// MaxEntries, so captures cannot use them up.
 const (
 	MaxCaptured                    = 16
 	MaxCapturedFromModel           = 8
 	MaxCapturedPerSandbox          = MaxCaptured / 2
 	MaxCapturedFromModelPerSandbox = MaxCapturedFromModel
+	MaxCapturedTotal               = MaxEntries - 16
 )
 
 // CaptureWait bounds how long a hook call waits for the vault lock.
@@ -67,6 +73,11 @@ var (
 	// MaxCapturedFromModel entries captured from agents' tool calls and
 	// output.
 	ErrModelCaptureFull = fmt.Errorf("the vault already holds %d secrets captured from agents' tool calls and output that are not replaced yet; rotate and replace them, or remove the ones you do not need", MaxCapturedFromModel)
+	// ErrAllCapturesFull is returned when the vault holds MaxCapturedTotal
+	// captured entries the person has not confirmed or replaced, from all
+	// sandboxes together. It is an ErrCaptureFull.
+	ErrAllCapturesFull error = &captureFullError{kind: ErrCaptureFull, msg: fmt.Sprintf(
+		"the vault already holds %d captured secrets from your sandboxes that are not confirmed or replaced yet; review them with `defenseclaw sandbox vault list`, confirm or replace the ones that are yours and remove the others", MaxCapturedTotal)}
 	// ErrSandboxModelCaptureFull is returned when one sandbox's tool calls
 	// and output hold MaxCapturedFromModelPerSandbox entries not replaced
 	// yet. It is an ErrModelCaptureFull.
@@ -297,10 +308,14 @@ func (s *Store) capture(f *file, ins []CaptureInput) (out []Captured, changed bo
 		out[i] = Captured{Entry: f.Entries[j].Entry}
 	}
 	// Unconfirmed captures with no sandbox named share the vault-wide room;
-	// a sandbox's count only toward its own (GAP-1979).
-	fromPrompts, fromModel := 0, 0
+	// a sandbox's count toward its own (GAP-1979); all of them count toward
+	// MaxCapturedTotal.
+	fromPrompts, fromModel, captured := 0, 0, 0
 	promptsBySandbox, modelBySandbox := map[string]int{}, map[string]int{}
 	for _, e := range f.Entries {
+		if e.Source == SourceCaptured && !e.Confirmed {
+			captured++
+		}
 		switch {
 		case e.Source != SourceCaptured || e.Confirmed:
 			// The person's own now: confirmed, or its value replaced.
@@ -328,6 +343,8 @@ func (s *Store) capture(f *file, ins []CaptureInput) (out []Captured, changed bo
 		switch {
 		case len(f.Entries) >= MaxEntries:
 			err = ErrFull
+		case captured >= MaxCapturedTotal:
+			err = ErrAllCapturesFull
 		case in.FromModel && sandbox != "" && modelBySandbox[sandbox] >= MaxCapturedFromModelPerSandbox:
 			err = ErrSandboxModelCaptureFull
 		case in.FromModel && sandbox == "" && fromModel >= MaxCapturedFromModel:
@@ -373,6 +390,7 @@ func (s *Store) capture(f *file, ins []CaptureInput) (out []Captured, changed bo
 			Sandbox: sandbox, CreatedAt: now, UpdatedAt: now,
 		}, Value: in.Value}
 		f.Entries = append(f.Entries, r)
+		captured++
 		switch {
 		case in.FromModel && sandbox != "":
 			modelBySandbox[sandbox]++

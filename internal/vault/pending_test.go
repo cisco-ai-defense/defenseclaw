@@ -240,6 +240,53 @@ func TestOneSandboxCannotFillAnotherSandboxsRoom(t *testing.T) {
 	}
 }
 
+// All captures together stop at MaxCapturedTotal, so the person's own
+// room is kept however many sandboxes fill their own (review of GAP-1979):
+// three full sandboxes reach it, a fourth is refused with the all-captures
+// message, and the person's add still succeeds.
+func TestCapturesFromManySandboxesKeepThePersonsRoom(t *testing.T) {
+	s := newStore(t)
+	per := MaxCapturedPerSandbox + MaxCapturedFromModelPerSandbox
+	full := MaxCapturedTotal / per
+	if full*per != MaxCapturedTotal || full < 2 {
+		t.Fatalf("test assumes whole sandboxes fill the total: %d per sandbox, total %d", per, MaxCapturedTotal)
+	}
+	value := func(sb, i int) string { return fmt.Sprintf("%s%02d%04d", fakeStripe(), sb, i) }
+	for sb := 0; sb < full; sb++ {
+		name := fmt.Sprintf("dc-%d", sb)
+		for i := 0; i < MaxCapturedPerSandbox; i++ {
+			if _, err := s.Capture(CaptureInput{Value: value(sb, i), Kind: "stripe-secret-key", Sandbox: name}); err != nil {
+				t.Fatalf("%s prompt %d: %v", name, i, err)
+			}
+		}
+		for i := 0; i < MaxCapturedFromModelPerSandbox; i++ {
+			if _, err := s.Capture(CaptureInput{Value: value(sb, 100+i), Kind: "stripe-secret-key", Sandbox: name, FromModel: true, Exposed: true}); err != nil {
+				t.Fatalf("%s model %d: %v", name, i, err)
+			}
+		}
+	}
+	_, err := s.Capture(CaptureInput{Value: value(99, 0), Kind: "stripe-secret-key", Sandbox: "dc-late"})
+	if !errors.Is(err, ErrAllCapturesFull) || !errors.Is(err, ErrCaptureFull) || !strings.Contains(err.Error(), "defenseclaw sandbox vault list") {
+		t.Fatalf("capture past the total = %v", err)
+	}
+	_, err = s.Capture(CaptureInput{Value: value(99, 1), Kind: "stripe-secret-key"})
+	if !errors.Is(err, ErrAllCapturesFull) {
+		t.Fatalf("capture with no sandbox past the total = %v", err)
+	}
+	for i := 0; i < MaxEntries-MaxCapturedTotal; i++ {
+		if _, err := s.Add(AddInput{Name: fmt.Sprintf("MINE_%d", i), Value: value(98, i), Host: "api.stripe.com"}); err != nil {
+			t.Fatalf("the person's own add %d = %v", i, err)
+		}
+	}
+	// A confirmed capture is the person's own: it frees capture room.
+	if _, err := s.Confirm("STRIPE_API_KEY"); err != nil {
+		t.Fatal(err)
+	}
+	if list, _ := s.List(); len(list) != MaxEntries {
+		t.Fatalf("entries = %d, want MaxEntries", len(list))
+	}
+}
+
 // A pending exposure that cannot be read fails every read closed: an
 // exposure is never skipped, so no value is handed out past it.
 func TestUnreadablePendingExposureFailsClosed(t *testing.T) {

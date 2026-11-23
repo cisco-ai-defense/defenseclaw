@@ -999,11 +999,13 @@ func (m *Manager) image(ctx context.Context, cfg *config.Config, spec *harness.S
 		UID: uid, GID: gid, IngressPort: m.opts.IngressPort, FailMode: connector.SandboxFailMode,
 		DefenseClawVersion: m.opts.DefenseClawVersion, MicroVM: image.MicroVMTarget(d), TrustedCAs: trusted,
 	}
-	// A harness not verified in a sandbox yet has no image a build could
-	// verify (DefenseClaw cannot prove its hooks fire), so it is refused
+	// A harness whose image hooks DefenseClaw cannot prove (no built-in mock
+	// LLM wiring) has no image a build could verify, so it is refused
 	// before a build spends minutes and gigabytes on an image that is then
-	// refused (GAP-2067). An image already verified is still used.
-	unverified := spec.Verification().Status == harness.Unverified
+	// refused (GAP-2067). An image already verified is still used. The
+	// verification label is not the test: OpenCode is labelled unverified
+	// and its image is proven with the mock.
+	unverified := !image.CanProveHooks(spec.Name)
 	if unverified {
 		build = false
 	}

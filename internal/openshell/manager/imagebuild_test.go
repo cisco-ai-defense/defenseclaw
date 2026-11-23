@@ -192,9 +192,34 @@ func TestCreateNamesTheMissingBuildxPlugin(t *testing.T) {
 	assertNothingLeft(t, e)
 }
 
-// GAP-2067: a harness not verified in a sandbox yet (Amp, Cursor Agent,
-// Devin) is refused before any docker build: a build could never verify
-// its image, so it would only spend minutes and gigabytes first.
+// GAP-2067: a harness whose image hooks cannot be proven (Amp, Cursor
+// Agent, Devin: no built-in mock) is refused before any docker build: a
+// build could never verify its image, so it would only spend minutes and
+// gigabytes first. Every harness that has a mock still builds, OpenCode
+// among them although its label says unverified.
+func TestOnlyHarnessesWithoutAMockAreRefusedBeforeBuilding(t *testing.T) {
+	for _, name := range []string{"claudecode", "codex", "opencode", "copilot", "hermes", "antigravity", "kiro"} {
+		if !image.CanProveHooks(name) {
+			t.Errorf("%s has a built-in mock but CanProveHooks says no", name)
+		}
+	}
+	for _, name := range []string{"amp", "cursor", "devin"} {
+		if image.CanProveHooks(name) {
+			t.Errorf("%s has no built-in mock but CanProveHooks says yes", name)
+		}
+	}
+	e := newEnv(t, nil)
+	builds := 0
+	e.m.opts.Images = BuilderImages{Builder: &image.Builder{
+		Docker: buildFailingDocker{builds: &builds}, Store: image.NewStore(e.dataDir), Log: io.Discard,
+	}}
+	// OpenCode reaches docker build (the stand-in docker fails it).
+	_, err := e.tryCreate(sandboxapi.CreateRequest{Name: "img-opencode", Harness: "opencode"})
+	if apiErr := wantCode(t, err, sandboxapi.CodeImageUnavailable); strings.Contains(apiErr.Message, "does not run in a sandbox yet") || builds == 0 {
+		t.Fatalf("opencode create = %+v after %d builds, want a build attempt", apiErr, builds)
+	}
+}
+
 func TestCreateRefusesAnUnverifiedHarnessBeforeBuilding(t *testing.T) {
 	for _, name := range []string{"amp", "cursor", "devin"} {
 		t.Run(name, func(t *testing.T) {
