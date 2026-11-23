@@ -10,7 +10,11 @@
 
 package winpath
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/asciifold"
+)
 
 // EnterpriseInstallBinOf returns the <InstallRoot>\bin folder that holds
 // executable: its own folder when that folder is named bin (the gateway,
@@ -68,8 +72,10 @@ func SameEnterpriseHookImageDirFamily(a, b string) bool {
 // one rendered for that path, so this only proposes candidates.
 func EnterpriseHookImagePathsIn(text string) []string {
 	var paths []string
-	lower := strings.ToLower(text)
-	name := strings.ToLower(EnterpriseHookImageName)
+	// The name is found in lower and text is cut at the same offsets, so lower
+	// keeps the bytes of text but its ASCII capitals (GAP-1935).
+	lower := asciifold.Lower(text)
+	name := asciifold.Lower(EnterpriseHookImageName)
 	for offset := 0; ; {
 		index := strings.Index(lower[offset:], name)
 		if index < 0 {
