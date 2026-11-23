@@ -52,6 +52,7 @@ DefenseClaw 1.0.11 follows 1.0.10. It is a fix release. It updates OpenShell to 
 - **A Secure Client endpoint with no AI Defense endpoint set keeps its endpoint inventory local.** During enrollment, or after a reload that cleared the endpoint, the connector, MCP, skill, plugin and agent inventory records of a Secure Client endpoint (with user ids, and SKILL.md text when `ai_discovery.include_skill_manifests` is on) also went to the operator's own log destinations. They now go only to the local audit log and to AI Defense. Affects 1.0.8 to 1.0.10.
 
 ### Fixed
+- **`defenseclaw uninstall` names the backup folder of an OpenHands or OmniGent setup that an earlier uninstall kept.** `~/.defenseclaw-removed-connector-backups` holds your own copy of files from before DefenseClaw's setup, so no uninstall deletes it, but a later uninstall found nothing to move and never mentioned it again. The uninstall now lists each such folder with the command that deletes it.
 
 #### Windows managed install, upgrade and uninstall
 - Setup `/uninstall` asks again after waiting for the managed lock instead of failing.

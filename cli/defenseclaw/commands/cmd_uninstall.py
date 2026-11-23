@@ -3177,6 +3177,47 @@ def _print_removed_connector_leftovers(
     click.echo("\n".join(lines))
 
 
+def _earlier_kept_backup_lines(data_dir: str, moved: dict[str, str], platform_name: str = sys.platform) -> list[str]:
+    """until 1.1: name each earlier-kept folder of a removed connector's backups, with the command to delete it.
+
+    The kept folder (removed_connectors.kept_backups_root) is the user's copy of
+    files from before DefenseClaw's setup, so no uninstall deletes it, not even
+    ``--all``: the consent of ``--all`` is for what DefenseClaw wrote. Without
+    this list nothing ever mentions it again once a later uninstall has nothing
+    left to move (GAP-1912). A folder this run just moved (*moved*) is already
+    listed at its new place, and a link is not DefenseClaw's copy.
+    """
+    from defenseclaw.removed_connectors import NAMES, kept_backups_root, label_of
+
+    if not data_dir:
+        return []
+    root = kept_backups_root(data_dir)
+    try:
+        entries = sorted(os.listdir(root))
+    except OSError:
+        return []
+    just_moved = {os.path.normcase(os.path.normpath(path)) for path in moved.values()}
+    lines: list[str] = []
+    for entry in entries:
+        match = re.fullmatch(r"(" + "|".join(NAMES) + r")(?:-\d+)?", entry)
+        path = os.path.join(root, entry)
+        if not match or os.path.normcase(os.path.normpath(path)) in just_moved:
+            continue
+        if _is_reparse_path(path) or not os.path.isdir(path):
+            continue
+        if platform_name == "win32":
+            command = f"Remove-Item -Recurse -Force -LiteralPath {_powershell_quoted_paths([path])}"
+        else:
+            import shlex
+
+            command = f"rm -rf {shlex.quote(path)}"
+        lines.append(
+            f"  - {path}: files an earlier uninstall kept from DefenseClaw's {label_of(match.group(1))} setup "
+            f"(DefenseClaw never deletes them). To remove: copy back what you need, then run: {command}"
+        )
+    return lines
+
+
 def _move_removed_connector_backups_out(data_dir: str, platform_name: str = sys.platform) -> dict[str, str]:
     """until 1.1: move each removed connector's backups out of a data folder that is about to go.
 
@@ -3538,6 +3579,12 @@ def _execute_plan(plan: UninstallPlan) -> ExecutionResult:
         _print_removed_connector_leftovers(
             home, data_removed=plan.remove_data_dir and home == plan.data_dir, found=found, moved=moved
         )
+    kept_listed: set[str] = set()
+    for home in plan.record_dirs:
+        for line in _earlier_kept_backup_lines(home, moved, plan.platform_name):
+            if line not in kept_listed:
+                kept_listed.add(line)
+                click.echo(line)
     if plan.stop_gateway:
         for home in plan.record_dirs:
             _remove_probe_created_state(home)
