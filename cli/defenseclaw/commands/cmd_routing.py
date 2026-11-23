@@ -965,17 +965,25 @@ def split_qualified_user(entry: str) -> tuple[str, str] | None:
     return issuer, subject
 
 
+KUBE_ISSUER = "kubernetes"
+
+
 def person_issuers(doc: dict[str, Any]) -> list[str]:
     """The distinct trusted person and workload issuers of a Substrate
-    cluster, the primary one first (config SubstrateConfig.PersonIssuers)."""
+    cluster, the primary one first (config Config.PersonIssuers): the OIDC
+    issuer; else, on an install that is not managed, the Kubernetes sign-in
+    issuer (GAP-0893); then the workload issuers."""
     sub = doc.get("substrate")
     if not isinstance(sub, dict) or not sub.get("enabled"):
         return []
     ident = sub.get("identity") if isinstance(sub.get("identity"), dict) else {}
     oidc = ident.get("oidc") if isinstance(ident.get("oidc"), dict) else {}
+    oidc_issuer = str(oidc.get("issuer") or "").strip()
+    managed = str(doc.get("deployment_mode") or "").strip().lower() == "managed_enterprise"
+    kube = [KUBE_ISSUER] if not oidc_issuer and not managed else []
     out: list[str] = []
     workloads = [w.get("issuer") for w in _list(ident.get("workload_oidc")) if isinstance(w, dict)]
-    for iss in [oidc.get("issuer"), *workloads]:
+    for iss in [oidc_issuer, *kube, *workloads]:
         iss = str(iss or "").strip()
         if iss and iss not in out:
             out.append(iss)
@@ -983,32 +991,52 @@ def person_issuers(doc: dict[str, Any]) -> list[str]:
 
 
 def _bare_user(entry: Any) -> bool:
+    # Split before lowercasing: the https:// scheme is case-sensitive, as in
+    # config.SplitQualifiedUser (GAP-0895).
+    if split_qualified_user(str(entry or "")) is not None:
+        return False
     lower = str(entry or "").strip().lower()
-    return split_qualified_user(lower) is None and not lower.startswith(("uid:", "sid:"))
+    return not lower.startswith(("uid:", "sid:"))
 
 
 def issuer_notes(doc: dict[str, Any]) -> list[str]:
-    """Bare users entries and named user budgets while more than one person
-    issuer is trusted (config RoutingAdminIssuerWarnings, GAP-0792): they
-    match only a person of the primary issuer."""
+    """Users entries and named user budgets that do not name whom they seem
+    to (config RoutingAdminIssuerWarnings): a bare name while more than one
+    person issuer is trusted matches only a person of the primary issuer
+    (GAP-0792), and an issuer#subject entry whose issuer is not trusted
+    exactly as written matches no one (GAP-0895)."""
     issuers = person_issuers(doc)
-    if len(issuers) < 2:
-        return []
     admin = _admin(doc)
-    tail = (
-        f"has no issuer; with {len(issuers)} trusted issuers it matches only a person of "
-        f"{issuers[0]} (write issuer#subject for another issuer)"
-    )
+    trusted = ", ".join(issuers) or "none"
+
+    def check(what: str, entry: Any) -> str | None:
+        split = split_qualified_user(str(entry or ""))
+        if split is not None:
+            if split[0] not in issuers:
+                return (
+                    f"{what} {entry!r} names issuer {split[0]!r}, which is not a trusted issuer "
+                    f"(trusted: {trusted}); it matches no one"
+                )
+            return None
+        if len(issuers) >= 2 and _bare_user(entry):
+            return (
+                f"{what} {entry!r} has no issuer; with {len(issuers)} trusted issuers it matches only a "
+                f"person of the primary issuer {issuers[0]} (write issuer#subject for another issuer)"
+            )
+        return None
+
     notes: list[str] = []
     for rule in _list(admin.get("rules")):
         if isinstance(rule, dict):
             for user in _list((rule.get("match") or {}).get("users")):
-                if _bare_user(user):
-                    notes.append(f"rule {rule.get('id')}: users entry {user!r} {tail}")
+                note = check(f"rule {rule.get('id')}: users entry", user)
+                if note:
+                    notes.append(note)
     for budget in _list(admin.get("budgets")):
         if isinstance(budget, dict) and budget.get("scope") == "user" and budget.get("subject") != "*":
-            if _bare_user(budget.get("subject")):
-                notes.append(f"budget {budget.get('id')}: subject {budget.get('subject')!r} {tail}")
+            note = check(f"budget {budget.get('id')}: subject", budget.get("subject"))
+            if note:
+                notes.append(note)
     return notes
 
 

@@ -524,8 +524,9 @@ func (rt *Runtime) push(ctx context.Context) {
 	if local != nil {
 		failed = pushTo(ctx, local, ledger, p)
 	}
-	// The retired and zero rows are of capped keys (actor:, batch:), which
-	// have no fleet form: they stay with this device's or cluster's counter.
+	// The retired generation and the evicted keys' rows (Stored, Unstored,
+	// Old) are of capped keys (actor:, batch:), which have no fleet form:
+	// they stay with this device's or cluster's counter.
 	if fleet != nil && len(p.Main) > 0 {
 		if err := fleet.Push(ctx, epoch, toFleet(p.Main, rt.fleetKeys())); err != nil && failed == nil {
 			failed = err

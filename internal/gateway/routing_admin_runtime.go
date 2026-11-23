@@ -157,7 +157,7 @@ func routingCallerMatcher(ctx context.Context) func(config.ProfileMatch) engine.
 	}
 	var issuers []string
 	if cfg != nil {
-		issuers = cfg.Substrate.PersonIssuers()
+		issuers = cfg.PersonIssuers()
 	}
 	return func(m config.ProfileMatch) engine.Tri {
 		return routingIssuerMatch(m, person, issuers, base)

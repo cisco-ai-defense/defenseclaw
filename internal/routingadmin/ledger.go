@@ -798,8 +798,6 @@ func (l *Ledger) touchLocked(key string) {
 	}
 }
 
-// retireLocked moves an evicted key's local spend to the retired rows and
-// marks its process-epoch days for 0.
 // retireLocked moves key's local spend to the open retired generation.
 // Past keyCap retired keys of the budget, the oldest is dropped (its spend
 // no longer counts: the budget's next verdict carries budget_keys_evicted

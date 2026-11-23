@@ -19,6 +19,8 @@ package config
 import (
 	"fmt"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // SplitQualifiedUser splits an issuer-qualified users entry or named user
@@ -37,13 +39,20 @@ func SplitQualifiedUser(entry string) (issuer, subject string, ok bool) {
 	return issuer, subject, true
 }
 
+// SubstrateKubeIssuer is the issuer of a person signed in with Kubernetes
+// credentials (identity.KubeIssuer; config does not import identity).
+const SubstrateKubeIssuer = "kubernetes"
+
 // PersonIssuers lists the distinct trusted person and workload issuers of
-// a Substrate cluster, the primary one first: identity.oidc.issuer, else
-// the first identity.workload_oidc issuer. Nil when Substrate is off.
-func (s SubstrateConfig) PersonIssuers() []string {
-	if !s.Enabled {
+// a Substrate cluster, the primary one first: identity.oidc.issuer; else,
+// on an install that is not managed, the Kubernetes sign-in issuer (people
+// sign in with their Kubernetes credentials there, GAP-0893); then the
+// identity.workload_oidc issuers. Nil when Substrate is off.
+func (c *Config) PersonIssuers() []string {
+	if c == nil || !c.Substrate.Enabled {
 		return nil
 	}
+	s := c.Substrate
 	var out []string
 	add := func(iss string) {
 		if iss = strings.TrimSpace(iss); iss != "" && !containsString(out, iss) {
@@ -51,6 +60,9 @@ func (s SubstrateConfig) PersonIssuers() []string {
 		}
 	}
 	add(s.Identity.OIDC.Issuer)
+	if strings.TrimSpace(s.Identity.OIDC.Issuer) == "" && !managed.IsManagedEnterprise(c.DeploymentMode) {
+		add(SubstrateKubeIssuer)
+	}
 	for _, w := range s.Identity.WorkloadOIDC {
 		add(w.Issuer)
 	}
@@ -66,34 +78,46 @@ func validateQualifiedUser(at, entry string) error {
 }
 
 // RoutingAdminIssuerWarnings names the routing.admin users entries and
-// named user budgets written as a bare name while the Substrate cluster
-// trusts more than one person issuer (GAP-0792): a bare name then matches
-// only a person of the primary issuer (and host accounts), never the same
-// subject at another issuer. config validate, the gateway at load and
-// doctor give them.
+// named user budgets that do not name whom they seem to:
+//   - a bare name while the Substrate cluster trusts more than one person
+//     issuer (GAP-0792): it then matches only a person of the primary issuer
+//     (and host accounts), never the same subject at another issuer;
+//   - an issuer#subject entry whose issuer is not a trusted one, exactly as
+//     written (a typo, a trailing slash, another case: GAP-0895): it matches
+//     no one, so a named budget written that way charges no one.
+//
+// config validate, the gateway at load and doctor give them.
 func (c *Config) RoutingAdminIssuerWarnings() []string {
 	if c == nil || c.Routing.Admin == nil {
 		return nil
 	}
-	issuers := c.Substrate.PersonIssuers()
-	if len(issuers) < 2 {
-		return nil
-	}
+	issuers := c.PersonIssuers()
 	var out []string
-	note := func(what, entry string) {
-		out = append(out, fmt.Sprintf("%s: %q has no issuer; with %d trusted issuers it matches only a person of %s (write issuer#subject for another issuer) (routing_admin_bare_user)",
-			what, entry, len(issuers), issuers[0]))
+	check := func(what, entry string) {
+		if iss, _, ok := SplitQualifiedUser(entry); ok {
+			if !containsString(issuers, iss) {
+				trusted := "none"
+				if len(issuers) > 0 {
+					trusted = strings.Join(issuers, ", ")
+				}
+				out = append(out, fmt.Sprintf("%s: %q names issuer %q, which is not a trusted issuer (trusted: %s); it matches no one (routing_admin_unknown_issuer)",
+					what, entry, iss, trusted))
+			}
+			return
+		}
+		if len(issuers) >= 2 && bareRoutingUser(entry) {
+			out = append(out, fmt.Sprintf("%s: %q has no issuer; with %d trusted issuers it matches only a person of the primary issuer %s (write issuer#subject for another issuer) (routing_admin_bare_user)",
+				what, entry, len(issuers), issuers[0]))
+		}
 	}
 	for _, r := range c.Routing.Admin.Rules {
 		for _, u := range r.Match.Users {
-			if bareRoutingUser(u) {
-				note("routing.admin rule "+r.ID+" users entry", u)
-			}
+			check("routing.admin rule "+r.ID+" users entry", u)
 		}
 	}
 	for _, b := range c.Routing.Admin.Budgets {
-		if b.Scope == RoutingBudgetScopeUser && b.Subject != RoutingBudgetSubjectAll && bareRoutingUser(b.Subject) {
-			note("routing.admin budget "+b.ID+" subject", b.Subject)
+		if b.Scope == RoutingBudgetScopeUser && b.Subject != RoutingBudgetSubjectAll {
+			check("routing.admin budget "+b.ID+" subject", b.Subject)
 		}
 	}
 	return out

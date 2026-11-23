@@ -53,7 +53,9 @@ def test_split_qualified_user() -> None:
 
 def test_bare_names_warn_only_with_two_issuers() -> None:
     assert cmd_routing.person_issuers(_doc()) == [IDP_A]
-    assert cmd_routing.issuer_notes(_doc()) == []
+    # One issuer: no bare-name note; the idp-b entries name an untrusted issuer (GAP-0895).
+    one = cmd_routing.issuer_notes(_doc())
+    assert len(one) == 2 and all("not a trusted issuer" in n for n in one), one
     assert cmd_routing.person_issuers(_doc(IDP_B, IDP_A)) == [IDP_A, IDP_B]
     notes = cmd_routing.issuer_notes(_doc(IDP_B))
     assert len(notes) == 2, notes

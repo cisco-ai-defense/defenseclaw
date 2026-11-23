@@ -52,7 +52,9 @@ func TestGAP0792BareNameWarnings(t *testing.T) {
 		Rules:   []RoutingAdminRule{{ID: "r1", Match: RoutingAdminMatch{Users: []string{"alice", idpB + "#bob", "uid:1001"}}}},
 		Budgets: []RoutingBudget{{ID: "b1", Scope: "user", Subject: "carol"}, {ID: "b2", Scope: "user", Subject: "*"}},
 	}
-	if w := cfg.RoutingAdminIssuerWarnings(); len(w) != 0 {
+	// One issuer: no bare-name warning; idp-b#bob names an issuer that is
+	// not trusted (GAP-0895).
+	if w := cfg.RoutingAdminIssuerWarnings(); len(w) != 1 || !strings.Contains(w[0], "routing_admin_unknown_issuer") {
 		t.Fatalf("one issuer: warnings %v", w)
 	}
 	cfg.Substrate.Identity.WorkloadOIDC = []SubstrateWorkloadOIDCConfig{{Issuer: idpB}}
@@ -68,7 +70,7 @@ func TestGAP0792BareNameWarnings(t *testing.T) {
 	if len(w) != 2 || !has(w[0], "rule r1", `"alice"`, idpA) || !has(w[1], "budget b1", `"carol"`) {
 		t.Fatalf("two issuers: warnings %v", w)
 	}
-	if got := cfg.Substrate.PersonIssuers(); !slices.Equal(got, []string{idpA, idpB}) {
+	if got := cfg.PersonIssuers(); !slices.Equal(got, []string{idpA, idpB}) {
 		t.Fatalf("issuers %v", got)
 	}
 	if _, _, ok := SplitQualifiedUser("dom#user"); ok {
