@@ -1020,9 +1020,14 @@ func effectCredentialMemberTail(path string) string {
 	return ""
 }
 
+// appendCredentialReadProof adds next unless a proof of the same class and
+// content flow is already there. The flow is part of the key: wc -l X; cat X
+// reads X twice, a local count then a show, and the show keeps its own proof
+// (and its class read row) instead of being folded into the count's record
+// (T23 review P3-2). Mutation proofs carry no flow.
 func appendCredentialReadProof(proofs []decide.Proof, next decide.Proof) []decide.Proof {
 	for _, proof := range proofs {
-		if proof.Target == next.Target && proof.Set == next.Set {
+		if proof.Target == next.Target && proof.Set == next.Set && proof.Flow == next.Flow {
 			return proofs
 		}
 	}
