@@ -97,6 +97,8 @@ DefenseClaw 1.0.11 follows 1.0.10. It is a fix release. It updates OpenShell to 
 - The AI Runtime and AI Discovery dashboards also show the Cowork VM sensor.
 - Native Windows: `setup routing` refuses only the classifier that does not run on Windows, and says why. `config set routing.enabled` says the change applies on reload when the classifier runs in the gateway.
 - Errors name their cause when removing a connector fails, and the gateway start error says why a removed connector's teardown failed.
+- On Windows, a write entry for another account on a folder above a connector's plugin folder now stops only that connector, with the `icacls` command that fixes it, instead of failing the whole gateway start.
+- The process start environment is read from `/proc` only on Linux, so a `proc` folder at a Windows drive root is never read as one.
 
 #### Endpoint inventory
 - **Adding or removing a skill no longer changes the ids of the other skills in its folder.** The managed inventory built the id of a skill, plugin or rule from whichever entry of its folder hashed lowest; it now uses the folder itself. Skill, plugin and rule ids change once on upgrade; MCP server ids do not.
