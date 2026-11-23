@@ -1001,10 +1001,13 @@ func branchCommit(ctx context.Context, rec *CopyRecord, proj gitCmd, result, bas
 	if len(edits) > 0 && kept == "" {
 		msg += "\n\nThe folder's uncommitted edits from when the copy was made are left out."
 	}
-	if raw, err := proj.output(ctx, "log", "--reverse", "--format=%s", rec.Head+".."+result); err == nil && rec.Head != "" {
+	// The sandbox's own commits start after the commit its HEAD began at
+	// (the placeholder commit, for a copy that replaced credentials), so
+	// none of ours is listed and none of theirs is hidden (RV6-6).
+	if raw, err := proj.output(ctx, "log", "--reverse", "--format=%s", rec.sandboxHead()+".."+result); err == nil && rec.Head != "" {
 		var own []string
 		for _, s := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
-			if s != "" && !strings.HasPrefix(s, "defenseclaw: ") {
+			if s != "" {
 				own = append(own, "- "+s)
 			}
 		}
