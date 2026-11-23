@@ -311,7 +311,7 @@ func newSubstrateUndoCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "undo <name>",
 		Short: "Put the agent's folder back to a restore point",
-		Long:  `Goes back to the last restore point (or --to ID) inside the agent and discards what the agent changed since. It asks first.`,
+		Long:  `Goes back to the last restore point (or --to ID) inside the agent and discards what the agent changed since. It asks first. After a crash it first brings the agent back to its last snapshot; a --task agent this computer started whose task was lost then starts that task again from the beginning, on a fresh copy of its folder.`,
 		Args:  cobra.ExactArgs(1),
 		RunE:  func(cmd *cobra.Command, args []string) error { return runSubstrateUndo(cmd, &com, args[0], to, yes) },
 	}
