@@ -61,7 +61,8 @@ type SyntaxTail struct {
 	// its standard input as shell code (rel-1-0-10:GAP-0876).
 	HereDocs []SyntaxTailHereDoc
 	// Truncated holds the caps the reading stopped at: bounded.Items for the
-	// statements or pieces, bounded.Bytes for the parse budget.
+	// statements or pieces, bounded.Bytes for the parse budget, of the window
+	// reading or of the longer reading (each has its own).
 	Truncated bounded.CapSet
 }
 
@@ -159,7 +160,7 @@ func ReadSyntaxTail(command string) (tail SyntaxTail, ok bool) {
 // syntaxTailMemo keeps the last readings: one hook call asks for the same
 // text from several readers (the per-command split, the target scans at each
 // nesting depth, the gateway's unread-part check), and each reading parses
-// the text up to MaxSyntaxTailRun times per piece.
+// the text up to syntaxTailRunWindow times per piece.
 var syntaxTailMemo = &syntaxTailCache{entries: map[string]syntaxTailEntry{}}
 
 const syntaxTailCacheEntries = 32
@@ -214,6 +215,16 @@ func readSyntaxTail(command string) (tail SyntaxTail, ok bool) {
 	openers := bounded.NewCounter(&openerTrunc, bounded.Bytes, 4*len(command)+(64<<10))
 	docs := quotedHereDocs(command, end, &openers)
 	docRuns := make([][]string, len(docs))
+	// The longer reading of rel-1-0-10:GAP-0745 (SyntaxTail.Extended) has a
+	// parse budget and a statement count of its own. It reads only on top of
+	// the window reading of 1.0.10, so its work never starves that reading
+	// (rel-1-0-10:GAP-2026) and its statements never take a slot of the
+	// statement cap the window reading counts against
+	// (rel-1-0-10:GAP-2027). Past either bound the call is TRUNCATED and the
+	// window reading goes on to the end.
+	var longTrunc bounded.Truncated
+	longBudget := bounded.NewCounter(&longTrunc, bounded.Bytes, 4*len(command)+(64<<10))
+	longStatements := bounded.NewCounter(&longTrunc, bounded.Items, MaxSyntaxTailStatements)
 	add := func(statement string, doc int) {
 		if !statements.Take() {
 			return
@@ -224,29 +235,40 @@ func readSyntaxTail(command string) (tail SyntaxTail, ok bool) {
 			docRuns[doc] = append(docRuns[doc], statement)
 		}
 	}
-	// extend adds a statement of the longer reading (SyntaxTail.Extended).
+	// extend adds a statement of the longer reading (SyntaxTail.Extended),
+	// counted on its own bound.
 	extend := func(statement string, doc, from int) {
-		count := len(tail.Statements)
-		add(statement, doc)
-		if len(tail.Statements) > count {
-			tail.Extended = append(tail.Extended, SyntaxTailExtended{Index: count, From: max(from, 0)})
+		if !longStatements.Take() {
+			return
+		}
+		if doc < 0 {
+			tail.Extended = append(tail.Extended, SyntaxTailExtended{Index: len(tail.Statements), From: max(from, 0)})
+			tail.Statements = append(tail.Statements, statement)
+		} else {
+			docRuns[doc] = append(docRuns[doc], statement)
 		}
 	}
 	// The error is inside the statement after the complete ones: the text
 	// up to it, cut back word by word, is the longest prefix that parses.
 	// Past the word steps a cut whose parse failed at a token before its end
 	// jumps back over that token (every cut that still holds it fails too),
-	// so the cut-back has no bound of its own: only the parse budget, which
-	// reports TRUNCATED (the bound rule, rel-1-0-10:GAP-0745). It stopped
-	// silently after 16 tries before, and the part of the statement before
-	// the error went unread.
+	// so the cut-back has no bound of its own: the word steps are charged to
+	// the parse budget, and the tries past them, the longer reading, to the
+	// budget of that reading, which reports TRUNCATED (the bound rule,
+	// rel-1-0-10:GAP-0745) without starving the window reading after it. It
+	// stopped silently after 16 tries before, and the part of the statement
+	// before the error went unread.
 	complete, pastSteps := end, false
-	for at, tries := errorAt, 0; at > end && !trunc.Set().Any(); tries++ {
+	for at, tries := errorAt, 0; at > end && !trunc.Set().Any() && !longTrunc.Set().Any(); tries++ {
 		prefix := trimSeparators(command[:at])
 		if prefix == "" {
 			break
 		}
-		failedAt, parsed := parseAlone(prefix, &budget)
+		cost := &budget
+		if tries >= 2*syntaxTailRunWindow {
+			cost = &longBudget
+		}
+		failedAt, _, parsed := parseAlone(prefix, cost)
 		if parsed {
 			end, pastSteps = at, tries >= 2*syntaxTailRunWindow
 			break
@@ -257,11 +279,13 @@ func readSyntaxTail(command string) (tail SyntaxTail, ok bool) {
 		}
 		at = next
 	}
-	if prefix := trimSeparators(command[:end]); prefix != "" && parsesAlone(prefix, &budget) {
-		if pastSteps {
+	if prefix := trimSeparators(command[:end]); prefix != "" {
+		if !pastSteps {
+			if parsesAlone(prefix, &budget) {
+				add(prefix, -1)
+			}
+		} else if parsesAlone(prefix, &longBudget) {
 			extend(prefix, -1, complete-strings.Index(command[:end], prefix))
-		} else {
-			add(prefix, -1)
 		}
 	}
 	rest := command[end:]
@@ -273,38 +297,53 @@ func readSyntaxTail(command string) (tail SyntaxTail, ok bool) {
 	docOf := func(piece tokenPiece) int { return hereDocAt(docs, end+piece.from) }
 	// covered is the first piece after the statements read whole so far:
 	// a piece before it is inside one, and its own long reading is part of
-	// that reading.
-	covered := 0
+	// that reading. longFrom is the first byte of rest a long reading may
+	// start at after one that failed (see below).
+	covered, longFrom := 0, 0
 	for start := 0; start < len(pieces) && !trunc.Set().Any(); {
 		next := start + 1
 		doc := docOf(pieces[start])
-		read, blank := false, false
+		read, blank, needsMore := false, false, false
 		for stop := start; stop < len(pieces) && stop < start+syntaxTailRunWindow && docOf(pieces[stop]) == doc; stop++ {
 			run := trimSeparators(rest[pieces[start].from:pieces[stop].to])
 			if run == "" {
 				blank = true
 				break
 			}
-			if parsesAlone(run, &budget) {
+			_, incomplete, parsed := parseAlone(run, &budget)
+			if parsed {
 				add(run, doc)
 				next, read = stop+1, true
 				break
 			}
+			needsMore = incomplete
 		}
 		// A statement longer than the window (a loop, an if, a brace group,
 		// a function or a case of many pieces) is read whole: the parser
 		// finds where it ends. It was left unread with no cap before
 		// (rel-1-0-10:GAP-0745). The pieces inside keep their own reading
 		// too, so nothing read before is read less.
-		if !read && !blank && start >= covered {
+		//
+		// Each try parses the text to the end of its region, so the starts it
+		// is tried from are the ones it can succeed from (rel-1-0-10:GAP-2026:
+		// a try from every piece cost pieces times length): the window's
+		// longest run from the start ran out of text (needsMore; a run that
+		// failed at a token of its own fails the same way with more text
+		// after it), and the start is past the token a failed try stopped
+		// at (an opener the text never closes is still open from every
+		// start before it).
+		if !read && !blank && needsMore && start >= covered && pieces[start].from >= longFrom && !longTrunc.Set().Any() {
 			last := start
 			for last+1 < len(pieces) && docOf(pieces[last+1]) == doc {
 				last++
 			}
 			if last-start >= syntaxTailRunWindow {
-				if stop, ok := longStatementsEnd(rest, pieces[start:last+1], &budget); ok {
+				stop, ok, failedAt := longStatementsEnd(rest, pieces[start:last+1], &longBudget)
+				if ok {
 					extend(trimSeparators(rest[pieces[start].from:pieces[start+stop].to]), doc, 0)
 					covered = start + stop + 1
+				} else if failedAt > 0 {
+					longFrom = pieces[start].from + failedAt + 1
 				}
 			}
 		}
@@ -323,7 +362,8 @@ func readSyntaxTail(command string) (tail SyntaxTail, ok bool) {
 			tail.HereDocs = append(tail.HereDocs, doc)
 		}
 	}
-	tail.Truncated = trunc.Set(&budget, &statements).Union(openerTrunc.Set(&openers))
+	tail.Truncated = trunc.Set(&budget, &statements).Union(openerTrunc.Set(&openers)).
+		Union(longTrunc.Set(&longBudget, &longStatements))
 	return tail, true
 }
 
@@ -793,17 +833,23 @@ func parseErrorOffset(err error) int {
 // before its first error. stop is the index in region of the piece they end
 // in; ok is false when the first statement does not complete, when they end
 // inside a piece (text other than separators or a comment follows them in
-// it), or past the parse budget. The budget is charged with the text the
-// parser read: up to its error, or all of region.
-func longStatementsEnd(rest string, region []tokenPiece, budget *bounded.Counter) (stop int, ok bool) {
+// it), or past the parse budget. The budget is charged with all of region
+// before the budget check and the parse: the parser reads an opener the text
+// never closes to the end, though its error is at the opener
+// (rel-1-0-10:GAP-2026). failedAt is the offset in region's text of the
+// token the parse failed at when no statement completed, or -1.
+func longStatementsEnd(rest string, region []tokenPiece, budget *bounded.Counter) (stop int, ok bool, failedAt int) {
 	from := region[0].from
 	text := rest[from:region[len(region)-1].to]
-	if TooDeep(text) {
-		return 0, false
+	if !budget.TakeN(len(text)) || TooDeep(text) {
+		return 0, false, -1
 	}
 	end, errorAt, faulted := completeStatementsEnd(text)
-	if !budget.TakeN(min(errorAt+1, len(text))) || faulted || end == 0 {
-		return 0, false
+	if faulted {
+		return 0, false, -1
+	}
+	if end == 0 {
+		return 0, false, errorAt
 	}
 	for stop = range region {
 		if region[stop].to-from >= end {
@@ -811,7 +857,7 @@ func longStatementsEnd(rest string, region []tokenPiece, budget *bounded.Counter
 		}
 	}
 	after := strings.TrimLeft(text[end:region[stop].to-from], " \t\n;&|")
-	return stop, after == "" || after[0] == '#'
+	return stop, after == "" || after[0] == '#', -1
 }
 
 // previousWordBoundary is the last offset after floor and before at where
@@ -832,15 +878,17 @@ func previousWordBoundary(command string, floor, at int) int {
 // parsesAlone parses statement with the Bash grammar, outside the parse
 // cache (the runs are throwaway text), within budget.
 func parsesAlone(statement string, budget *bounded.Counter) bool {
-	_, ok := parseAlone(statement, budget)
+	_, _, ok := parseAlone(statement, budget)
 	return ok
 }
 
 // parseAlone is parsesAlone with the offset in statement of the token the
-// parse failed at (-1 when it parsed, was not run, or has no position).
-func parseAlone(statement string, budget *bounded.Counter) (failedAt int, ok bool) {
+// parse failed at (-1 when it parsed, was not run, or has no position), and
+// incomplete, whether it failed at the end of the text with a statement or a
+// word still open (syntax.IsIncomplete: more text could complete it).
+func parseAlone(statement string, budget *bounded.Counter) (failedAt int, incomplete, ok bool) {
 	if !budget.TakeN(len(statement)) || TooDeep(statement) {
-		return -1, false
+		return -1, false, false
 	}
 	// The Bash grammar only: what it rejects the POSIX grammar rejects too,
 	// but for the aggregate redirects actionfacts normalizes itself.
@@ -848,9 +896,9 @@ func parseAlone(statement string, budget *bounded.Counter) (failedAt int, ok boo
 		return syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(Reader(statement), "")
 	})
 	if err == nil {
-		return -1, true
+		return -1, false, true
 	}
-	return parseErrorOffset(err), false
+	return parseErrorOffset(err), syntax.IsIncomplete(err), false
 }
 
 // tokenPiece is a byte range of the text after the error, ending after the
