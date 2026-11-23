@@ -275,6 +275,7 @@ func (p *Parser) redirectionRule(rt *Token, redirections *[maxRedirections]*Node
 		redirections[from] = result
 	} else {
 		p.reportError(result.ext(), "StreamAlreadyRedirected")
+		p.rejected = append(p.rejected, result)
 	}
 	*ext = result.ext()
 	return result, from

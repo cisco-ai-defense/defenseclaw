@@ -28,8 +28,13 @@ func parsePowerShell(command string, o Options) *Script {
 // readers always use psparse.Parse (the raise-only floor). port reports that
 // the port built the Script.
 func parsePSSource(command string) (sc *psparse.Script, port bool, err error) {
-	return psparse.ParseEffects(command, psparse.Options{Dialect: psparse.DialectUnknown})
+	return psSourceParser(command, psparse.Options{Dialect: psparse.DialectUnknown})
 }
+
+// psSourceParser is the reader of parsePSSource. The frontend differential
+// test (gap1915_frontend_diff_test.go) swaps in psparse.Parse to compare the
+// port with the legacy reader on the same calls.
+var psSourceParser = psparse.ParseEffects
 
 func lowerPSScript(command string, o Options, expandNested bool) *Script {
 	s := &Script{Dialect: DialectPowerShell}

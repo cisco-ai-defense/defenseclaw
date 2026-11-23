@@ -96,7 +96,98 @@ func extractShell(call Call, o Options) Result {
 	}
 	w.applyWorkdir(call.Workdir)
 	w.walkScript(script, 0)
+	if inferred && dialect != DialectPOSIX && o.flavor() == FlavorWindows && posixOnlySyntax(call.Command) {
+		unionPOSIXReading(&res, dialect, call, o)
+	}
 	return res
+}
+
+// posixOnlySyntax reports text that uses a construct only the POSIX grammar
+// gives a meaning to: the quote splice '\” (close, escaped quote, reopen), a
+// here-document or here-string (<< and <<<: PowerShell reserves < and cmd
+// has no << operator), or find's escaped \; terminator. PowerShell and cmd
+// read them as literal text (or a parse error), so a guessed Windows dialect
+// reads such a command differently from the shell it was written for.
+func posixOnlySyntax(c string) bool {
+	return strings.Contains(c, `'\''`) || strings.Contains(c, "<<") || strings.Contains(c, ` \;`)
+}
+
+// unionPOSIXReading adds the POSIX reading of a call whose Windows dialect was
+// only guessed (no dialect hint) and whose text is POSIX-only syntax: Git Bash
+// and WSL are Windows shells too, and the guessed reading of POSIX text loses
+// the targets its quoting names (GAP-1915: '\” read by PowerShell leaves a
+// stray \' on a redirection target or a switch). Only the known mutations of
+// the POSIX reading are added (raise-only: a write, append, delete, link or
+// permission change whose target and role it resolves), each marked Cond (it
+// happens only under that shell), and only when the guessed reading lacks the
+// same kind on the same target fully known; an unresolved one of that kind and
+// target is replaced by the known one. When the guessed reading is
+// PowerShell with a parse error and the POSIX reading parses, the call is
+// fully read: PowerShell runs nothing of a script it cannot parse, so the
+// POSIX reading is the only one that runs (psparse read <<< without an error,
+// T21a; the port reports < as reserved, as pwsh does).
+func unionPOSIXReading(res *Result, guessed Dialect, call Call, o Options) {
+	alt := Result{Surface: SurfaceShell, Flavor: o.flavor(), Dialect: DialectPOSIX}
+	w := newWalker(&alt, o)
+	w.pathDialect = DialectNone
+	w.applyWorkdir(call.Workdir)
+	w.walkScript(parsePOSIX(call.Command, o), 0)
+	type key struct {
+		k Kind
+		p string
+	}
+	have := make(map[key]bool, len(res.Effects))
+	for _, e := range res.Effects {
+		if e.TargetState == TargetStateKnown && e.RoleState == RoleStateKnown {
+			have[key{e.Kind, e.Target.Path}] = true
+		}
+	}
+	for _, e := range alt.Effects {
+		switch e.Kind {
+		case KindWrite, KindAppend, KindDelete, KindLink, KindPermissionChange:
+		default:
+			continue
+		}
+		if e.TargetState != TargetStateKnown || e.RoleState != RoleStateKnown || have[key{e.Kind, e.Target.Path}] {
+			continue
+		}
+		have[key{e.Kind, e.Target.Path}] = true
+		e.Cond = true
+		// The guessed reading's unresolved effect of the same kind on the
+		// same target (Out-File -Append\' read as a positional argument) is
+		// the misread of this one: the known effect takes its place, or the
+		// projection would hold the target Maybe (holdKnownOnNameMaybe).
+		placed := false
+		kept := res.Effects[:0]
+		for _, g := range res.Effects {
+			if g.Kind == e.Kind && g.Target.Path == e.Target.Path {
+				if !placed {
+					kept = append(kept, e)
+					placed = true
+				}
+				continue
+			}
+			kept = append(kept, g)
+		}
+		res.Effects = kept
+		if !placed {
+			res.Effects = append(res.Effects, e)
+		}
+	}
+	if guessed == DialectPowerShell && len(alt.Unknowns) == 0 && onlyParseErrors(res.Unknowns) {
+		res.Unknowns = nil
+	}
+}
+
+// onlyParseErrors reports a non-empty list of structure unknowns that are all
+// parse errors (a construct the frontend could not parse, invalid syntax).
+func onlyParseErrors(us []Reason) bool {
+	for _, u := range us {
+		if u.Code != ReasonUnparsedConstruct && u.Code != ReasonInvalidSyntax {
+			return false
+		}
+	}
+	return len(us) > 0
 }
 
 func extractArgv(call Call, o Options) Result {

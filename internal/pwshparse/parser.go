@@ -70,6 +70,8 @@ type Parser struct {
 	ascii    bool
 	// Unsupported is set when the input used a construct the port does not parse (configuration, dynamic keywords) or nested deeper than the budget.
 	Unsupported bool
+	// rejected collects the redirections reported StreamAlreadyRedirected (Result.Rejected).
+	rejected []*Node
 	// nestedWork counts the characters handed to nested scans (the text of a $( ) or a nested string that is
 	// tokenized again); past nestedBudget the parse is Unsupported and nested scans see no text. Every level
 	// of "$("$(..." nesting rescans the text inside it, so an unbounded parse is quadratic in the input
@@ -102,6 +104,12 @@ type Result struct {
 	Source []char
 	// Unsupported: see Parser.Unsupported.
 	Unsupported bool
+	// Rejected holds the redirections the parser read but did not attach to
+	// their command, in source order: a second redirection of a stream that is
+	// already redirected (StreamAlreadyRedirected, a parse error in pwsh). They
+	// are not part of the tree (the tree is pwsh's own AST); a reader that must
+	// still see every target the text names (the effects frontend) uses them.
+	Rejected []*Node
 }
 
 // Parse parses PowerShell source text (the equivalent of Parser.ParseInput).
@@ -132,7 +140,7 @@ func parse(input string, wantTokens bool) *Result {
 	root := p.scriptBlockRule(nil, false, nil)
 	p.tokens = p.tz.tokenList
 	p.semanticChecks(root)
-	ps.res = Result{Root: root, Tokens: p.tokens, Errors: p.errors, Source: src, Unsupported: p.Unsupported}
+	ps.res = Result{Root: root, Tokens: p.tokens, Errors: p.errors, Source: src, Unsupported: p.Unsupported, Rejected: p.rejected}
 	return &ps.res
 }
 
