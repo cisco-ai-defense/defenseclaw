@@ -4744,11 +4744,29 @@ func sandboxGuestPlacedChildren(input actionfacts.Input, facts actionfacts.Facts
 		}
 		folders = guestOwnShellFolders(command, input.CWD, input.ActiveHome)
 	}
+	isCandidate := func(placement guestPlacement) bool {
+		return placement.candidate && !folders[guestShellReading{placement.text, path.Clean(placement.cwd)}]
+	}
+	// Each list is made at its size: a long call places thousands of
+	// readings, and growing the lists copied their facts again and again
+	// (substrate-1 GAP-0956).
+	candidateCount := 0
+	for _, placement := range placements {
+		if isCandidate(placement) {
+			candidateCount++
+		}
+	}
+	if count := len(placements) - candidateCount; count != 0 {
+		children = make([]actionfacts.Facts, 0, count)
+	}
+	if candidateCount != 0 {
+		candidates = make([]actionfacts.Facts, 0, candidateCount)
+	}
 	for _, placement := range placements {
 		child := input
 		child.Command, child.CWD = placement.text, placement.cwd
 		child.Args, child.Argv = nil, nil
-		if placement.candidate && !folders[guestShellReading{placement.text, path.Clean(placement.cwd)}] {
+		if isCandidate(placement) {
 			candidates = append(candidates, actionfacts.Analyze(child))
 		} else {
 			children = append(children, actionfacts.Analyze(child))
