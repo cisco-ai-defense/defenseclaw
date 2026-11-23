@@ -821,7 +821,7 @@ func (a *App) refuseForbiddenAccount(ctx context.Context, harness string) error 
 	}
 	a.managedSeen = managedStatusOfExplain(view)
 	return apiError(&sandboxapi.Error{Code: sandboxapi.CodeAdminViolation, Status: http.StatusForbidden,
-		Message: "Your organization doesn't allow sandboxes for your account.", Detail: sandboxrelay.ReasonNotAllowed})
+		Message: sandboxapi.AccountNotAllowedMessage, Detail: sandboxrelay.ReasonNotAllowed})
 }
 
 // readyCheck judges a run before its ready installs or starts anything

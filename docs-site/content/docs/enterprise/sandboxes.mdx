@@ -760,6 +760,8 @@ The text column quotes stable fragments; the complete notice adds the sandbox na
 | Settings drift (not for a changed rendered `gateway.toml` alone, which is reported without a pause) | "Sandboxes are paused: your OpenShell settings differ from your organization's" and "Ask IT to repair them." |
 | Policy can't load | "Your organization's sandbox policy can't be loaded on this computer." |
 | Another account holds the ports | "Sandboxes aren't available for your account on this computer right now: another account is using them" and "Try again when that account has no sandbox running." |
+| Your organization turned sandboxes off | "turned off by your organization" in `sandbox status` and `sandbox run`, even while another account is using the computer's sandboxes. This is checked first. |
+| Your profile doesn't allow sandboxes | `sandbox status` shows the `Sandboxes` row as off for your account, names the profile, and says "your organization doesn't allow sandboxes for your account", the same words `sandbox run` refuses with. This is checked after the organization's setting and before another account's use of the ports. |
 | Directory lookup is provisional and no assignment needs the missing fact | "Your organization's directory couldn't be reached, so its default policy applies for now. Try again in a moment." |
 | An assignment needs an unconfirmed identity fact | The request is refused, and the message names the missing fact. |
 | Account can't be looked up on the computer (a new run) | "Your account can't be looked up on this computer right now. Try again in a moment." and "This isn't your organization's sandbox policy." |

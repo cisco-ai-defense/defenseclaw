@@ -264,7 +264,7 @@ func (a *App) printStatus(st *sandboxapi.Status) {
 		// Setup would stop at the other account's gateway (GAP-0307).
 		state = "off: another account runs this machine's OpenShell gateway (" + st.GatewayElsewhere + "); see `" + CommandName + " doctor`"
 	}
-	if st.Enabled {
+	if st.Enabled && st.ManagedOff() != sandboxapi.ManagedOffProfile {
 		state = "on"
 	}
 	row("Sandboxes", state)

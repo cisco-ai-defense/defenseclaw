@@ -736,13 +736,41 @@ func firstManaged(list ...*sandboxapi.ManagedStatus) *sandboxapi.ManagedStatus {
 // account's name, uid or PID, and no advice to run setup (the organization
 // manages the setting).
 func managedOffState(st *sandboxapi.Status) string {
-	switch {
-	case st.GatewayElsewhere != "":
+	switch kind := st.ManagedOff(); {
+	case kind == sandboxapi.ManagedOffProfile:
+		return "off for your account: " + sandboxapi.AccountNotAllowedReason + managedProfileSuffix(st.Managed)
+	case kind == sandboxapi.ManagedOffElsewhere:
 		return "not available for your account right now: another account is using them"
 	case st.Managed.Unavailable != "":
 		return "not available on this computer: " + sandboxapi.DisplayText(st.Managed.Unavailable)
 	}
 	return "off on this computer; your organization manages this setting"
+}
+
+// managedProfileSuffix names the profile that refuses the account
+// sandboxes, as the status row of a refused account ends.
+func managedProfileSuffix(m *sandboxapi.ManagedStatus) string {
+	if m.Profile == "" {
+		return " (your organization's floor)"
+	}
+	return " (profile " + sandboxapi.DisplayText(m.Profile) + ")"
+}
+
+// managedOpenShellText is the Runtime row's OpenShell part and the doctor's:
+// the release installed, and the release the organization requires when it
+// is another one.
+func managedOpenShellText(m *sandboxapi.ManagedStatus) string {
+	required := sandboxapi.DisplayText(m.OpenShellVersion)
+	installed := sandboxapi.DisplayText(m.InstalledOpenShellVersion)
+	switch {
+	case installed != "" && required != "" && installed != required:
+		return "OpenShell " + installed + " installed, " + required + " required"
+	case installed != "":
+		return "OpenShell " + installed
+	case required != "":
+		return "OpenShell " + required
+	}
+	return ""
 }
 
 // managedAccountBusyText is the OpenShell row of a managed computer whose
@@ -822,8 +850,8 @@ func managedStatusRows(m *sandboxapi.ManagedStatus, now time.Time) [][2]string {
 	}
 	rows := [][2]string{{"Your policy", policy + " — " + CommandName + " policy explain"}}
 	var openshell []string
-	if m.OpenShellVersion != "" {
-		openshell = append(openshell, "OpenShell "+sandboxapi.DisplayText(m.OpenShellVersion))
+	if text := managedOpenShellText(m); text != "" {
+		openshell = append(openshell, text)
 	}
 	if m.InstallMode != "" {
 		openshell = append(openshell, sandboxapi.DisplayText(m.InstallMode)+" install")
@@ -1054,8 +1082,8 @@ func managedHarnessListed(allowed []string, name string) bool {
 func managedRuntimeCheck(m *sandboxapi.ManagedStatus) openshell.Check {
 	c := openshell.Check{ID: CheckIDManagedRuntime, Title: "Sandbox runtime", Status: openshell.StatusPass}
 	var parts []string
-	if m.OpenShellVersion != "" {
-		parts = append(parts, "OpenShell "+sandboxapi.DisplayText(m.OpenShellVersion))
+	if text := managedOpenShellText(m); text != "" {
+		parts = append(parts, text)
 	}
 	if text := sandboxapi.DisplayText(openshell.DriverChoiceText(m.Driver, m.DriverReason)); text != "" {
 		parts = append(parts, "driver "+text)
