@@ -32,7 +32,7 @@ func TestSubstrateActorRowMatchesView(t *testing.T) {
 	created := time.Date(2026, 11, 23, 9, 12, 3, 456789000, time.UTC)
 	person := registry.Person{Kind: identity.PersonHuman, Issuer: "https://idp.example.org", Subject: "alice", Principal: "alice@example.org"}
 	workload := registry.Person{Kind: identity.PersonWorkload, Issuer: "https://ci.example.org", Subject: "repo:ci"}
-	base := registry.Registration{Key: "k1", Atespace: "eng-web", Name: "a1", UID: subUID1, Person: person, Profile: "eng", Connector: "claudecode", Template: "t1", CreatedAt: created}
+	base := registry.Registration{Key: "k1", Atespace: "eng-web", Name: "a1", UID: "4f9c3a1e-8d2b-4c77-9e0a-6b5f1d2c3e4a", Person: person, Profile: "eng", Connector: "claudecode", Template: "t1", CreatedAt: created}
 	with := func(f func(*registry.Registration)) registry.Registration { r := base; f(&r); return r }
 	regs := map[string]registry.Registration{
 		"plain":       base,
