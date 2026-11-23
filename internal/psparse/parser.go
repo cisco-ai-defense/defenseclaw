@@ -69,7 +69,7 @@ func lexDiagnostics(l *lexer, toks []Token) []Diagnostic {
 	out := l.diags
 	for _, t := range toks {
 		if t.Kind == TokError && t.Value == ReasonUnterminated {
-			out = append(out, Diagnostic{span: span{t.Start, t.End}, Reason: t.Value, Detail: "lexer error"})
+			out = append(out, Diagnostic{span: span{t.Start, t.End}, Reason: t.Value, Detail: "lexer error", Lexical: true})
 		}
 	}
 	return out

@@ -63,6 +63,26 @@ type Diagnostic struct {
 	span
 	Reason string
 	Detail string
+	// Lexical: the lexer found it and read past it (a string, here-string or
+	// block comment that runs to the end of the text, or a here-string whose
+	// $( ) never closes). Every token before it is exact.
+	Lexical bool
+}
+
+// OnlyLexicalDiagnostics reports whether every diagnostic of the script is
+// lexical (Diagnostic.Lexical), or there is none. Such a script is not a clean
+// parse, but its statements are read as pwsh reads them up to the open token,
+// and that token holds the rest of the text: psparse read it so before those
+// became diagnostics (T20 review P2-4). A raise-only reader, one whose reading
+// only adds findings (a host script twin), may read it; a reader that concludes
+// a script is safe, complete or cut must still require no diagnostics at all.
+func (s *Script) OnlyLexicalDiagnostics() bool {
+	for _, d := range s.Diagnostics {
+		if !d.Lexical {
+			return false
+		}
+	}
+	return true
 }
 
 // Statement is a top-level or block-level statement.

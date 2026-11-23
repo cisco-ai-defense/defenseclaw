@@ -172,6 +172,18 @@ func unwrapHostSource(source string, dialect Dialect, depth int) (hostUnwrap, bo
 	return result, result.layers > 0 || result.limit
 }
 
+// raiseReadable reports whether a host script reading (a twin, which only adds
+// findings to the call) may read a parse: one with only lexical diagnostics
+// (an unterminated string, here-string or block comment) is read as psparse
+// read it at 1.0.10. Such a text is often a statement of a POSIX reading of a
+// Windows-host call, cut at a ; that PowerShell reads inside a string
+// (rel-1-0-10:GAP-1919): the statement reading before the open token is exact
+// and must keep its findings. Readers that cut a script or call it safe keep
+// requiring a clean parse.
+func raiseReadable(script *psparse.Script) bool {
+	return script != nil && script.OnlyLexicalDiagnostics()
+}
+
 // unwrapPowerShellOnce replaces the static host wrappers among the top-level
 // statements of a PowerShell source. A source that is one wrapper statement is
 // replaced whole (and may change grammar to cmd.exe's); wrappers among other
@@ -179,7 +191,7 @@ func unwrapHostSource(source string, dialect Dialect, depth int) (hostUnwrap, bo
 func unwrapPowerShellOnce(source string) (string, Dialect, bool, bounded.CapSet) {
 	var caps bounded.CapSet
 	script, _ := psparse.Parse(source, psparse.Options{Dialect: psparse.DialectUnknown})
-	if script == nil || len(script.Diagnostics) != 0 || len(script.Statements) == 0 {
+	if !raiseReadable(script) || len(script.Statements) == 0 {
 		return "", DialectNone, false, psparseBoundCaps(script)
 	}
 	type edit struct {
@@ -1552,7 +1564,7 @@ func powerShellNestedTexts(source string) ([]nestedText, bounded.CapSet) {
 		return nil, caps
 	}
 	script, _ := psparse.Parse(source, psparse.Options{Dialect: psparse.DialectUnknown})
-	if script == nil || len(script.Diagnostics) != 0 {
+	if !raiseReadable(script) {
 		return nil, psparseBoundCaps(script)
 	}
 	var out []nestedText
@@ -1644,7 +1656,7 @@ func powerShellStatementTexts(source string) ([]string, bounded.CapSet) {
 		return nil, caps
 	}
 	script, _ := psparse.Parse(source, psparse.Options{Dialect: psparse.DialectUnknown})
-	if script == nil || len(script.Diagnostics) != 0 || len(script.Statements) < 2 {
+	if !raiseReadable(script) || len(script.Statements) < 2 {
 		return nil, psparseBoundCaps(script)
 	}
 	statements := script.Statements

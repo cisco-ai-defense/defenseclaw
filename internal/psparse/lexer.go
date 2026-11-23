@@ -359,7 +359,7 @@ func (l *lexer) lexHereString() {
 		// must never swallow the rest of a script as a clean parse.
 		if end, ok = scanHereBody(l.runes, body, true, false); ok {
 			l.diags = append(l.diags, Diagnostic{span: span{l.byteAt(a), l.byteAt(end)}, Reason: ReasonUnterminated,
-				Detail: "here-string $( ) not closed; read to the first terminator line"})
+				Detail: "here-string $( ) not closed; read to the first terminator line", Lexical: true})
 		}
 	}
 	if ok {
