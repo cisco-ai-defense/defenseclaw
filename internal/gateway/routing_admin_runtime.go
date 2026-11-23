@@ -286,7 +286,14 @@ func (s *Sidecar) stopRoutingAdmin() {
 }
 
 // applyRoutingAdmin applies a validated config (start and every reload):
-// whether agent call costs feed the budgets, and the fleet budget store.
+// whether agent call costs feed the budgets, the fleet budget store, and the
+// budgets of the new generation. Compiling the generation here, not only on
+// the next routed request, stops the budget sync loop as soon as a reload
+// removes every budget, so an idle gateway does no SQLite read, spend push or
+// fleet request for budgets it no longer has (GAP-1856). A reload that adds
+// budgets starts the loop the same way, and a request with this config
+// reuses the compiled generation. A request still pinned to the previous
+// generation does not put its budgets back (Runtime.Apply).
 func (s *Sidecar) applyRoutingAdmin(cfg *config.Config) {
 	if cfg == nil {
 		return
@@ -295,6 +302,7 @@ func (s *Sidecar) applyRoutingAdmin(cfg *config.Config) {
 	routingAdminFleet.apply(cfg)
 	routingAdminRuntime.SetInterval(routingAdminSyncInterval(cfg))
 	routingAdminRuntime.SetFleet(routingAdminFleet.counter(), routingAdminFleet.mapper())
+	routingAdminRuntime.Apply(cfg)
 }
 
 // routingAdminSyncInterval is routing.admin.budget_store.sync_interval (the
