@@ -105,6 +105,27 @@ func TestRV5AlternatesWrittenAfterTheReviewAreNotRead(t *testing.T) {
 	}
 }
 
+// GAP-0810: config written into the review snapshot after approval cannot
+// rewrite the pinned destination or redirect the push.
+func TestRV5SnapshotConfigCannotRedirectApprovedPush(t *testing.T) {
+	s := rv4Setup(t)
+	s.write("b14.txt", "approved\n")
+	p := s.prepare()
+	other := s.bare("redirected.git")
+	if err := os.WriteFile(filepath.Join(p.snapshot, "g", "config"), []byte("[url \"file://"+other+"\"]\n\t\tinsteadOf = https://git.example.test/team/app.git\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Push(context.Background(), localExec, "agent/b14", "a1", ""); err != nil {
+		t.Fatal(err)
+	}
+	if rv4Ref(other, "refs/heads/agent/b14") != "" {
+		t.Fatal("the push followed a snapshot config rewrite")
+	}
+	if rv4Ref(s.origin, "refs/heads/agent/b14") == "" {
+		t.Fatal("the reviewed destination did not receive the branch")
+	}
+}
+
 // rv5MoveOnPush puts a git first on PATH that, on its first push, moves
 // origin's refs/heads/BRANCH to to (a writer racing the push), then runs git.
 func rv5MoveOnPush(t *testing.T, s *rv4, branch, to string) {

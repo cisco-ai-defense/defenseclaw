@@ -217,6 +217,9 @@ ok=1
 const pushScript = pushGit + `snap=$1 url=$2 c=$3 b=$4 label=$5 prev=$6 seen=$7
 [ -f "$snap/g/objects/info/alternates" ] || { echo "the review's copy of the objects is gone" >&2; exit 6; }
 export GIT_DIR=$snap/g
+# Replace the post-review local config so url rewrites cannot redirect Git.
+rm -f "$snap/g/config" || exit 6
+printf '[core]\n\trepositoryformatversion = 0\n\tbare = true\n' > "$snap/g/config" || exit 6
 s=$(mktemp -d) || exit 6
 trap 'rm -rf "$s"' EXIT
 heads() { g ls-remote --heads "$url" > "$s/heads" && awk -v r="refs/heads/$b" '$2 == r { print $1; exit }' "$s/heads"; }
