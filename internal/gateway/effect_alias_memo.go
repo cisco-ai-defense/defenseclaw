@@ -35,6 +35,15 @@ type effectAliasSession struct {
 	aliases map[string]effectAliasEntry
 	at      time.Time
 }
+
+// effectAliasUse is one Known read or write of the call through a remembered
+// alias: the member's class proof and the index of the using effect, so the
+// caller grades it as the plain spelling of the member (its own read flow,
+// the class write cell).
+type effectAliasUse struct {
+	proof  decide.Proof
+	effect int
+}
 type effectAliasMemo struct {
 	mu       sync.Mutex
 	sessions map[effectAliasKey]*effectAliasSession
@@ -55,7 +64,7 @@ func aliasKey(request trustedActionRequest) (effectAliasKey, bool) {
 		key.cwd != "" && len(key.cwd) <= effectAliasMaxPathBytes
 }
 
-func (m *effectAliasMemo) uses(request trustedActionRequest, result effects.Result) []decide.Proof {
+func (m *effectAliasMemo) uses(request trustedActionRequest, result effects.Result) []effectAliasUse {
 	key, ok := aliasKey(request)
 	if !ok {
 		return nil
@@ -71,8 +80,8 @@ func (m *effectAliasMemo) uses(request trustedActionRequest, result effects.Resu
 		delete(m.sessions, key)
 		return nil
 	}
-	var proofs []decide.Proof
-	for _, e := range result.Effects {
+	var uses []effectAliasUse
+	for i, e := range result.Effects {
 		if e.TargetState != effects.TargetStateKnown || e.RoleState != effects.RoleStateKnown || len(e.Reasons) != 0 {
 			continue
 		}
@@ -99,10 +108,10 @@ func (m *effectAliasMemo) uses(request trustedActionRequest, result effects.Resu
 			continue
 		}
 		p := entry.proof
-		p.Kind, p.LinkTo = kind, true
-		proofs = appendCredentialReadProof(proofs, p)
+		p.Kind = kind
+		uses = append(uses, effectAliasUse{proof: p, effect: i})
 	}
-	return proofs
+	return uses
 }
 
 func (m *effectAliasMemo) remember(request trustedActionRequest, result effects.Result, facts []*semanticpb.EffectFact, flavor effects.Flavor) {
