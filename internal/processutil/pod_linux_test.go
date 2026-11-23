@@ -94,6 +94,28 @@ func TestPodRunnerHelper(t *testing.T) {
 	err = p.Run(CommandContext(ctx, "/bin/sh", "-c", `cat "/proc/$1/environ" >/dev/null 2>&1 && exit 9; exit 0`, "sh", self))
 	say("environ err=%v", err)
 
+	// Alice's scan may read Alice's job, but not Bob's queued job.
+	jobs := filepath.Join(filepath.Dir(out), "jobs")
+	alice := filepath.Join(jobs, "alice")
+	bob := filepath.Join(jobs, "bob")
+	if err := os.MkdirAll(alice, 0o700); err != nil {
+		say("setup: alice: %v", err)
+		return
+	}
+	if err := os.MkdirAll(bob, 0o700); err != nil {
+		say("setup: bob: %v", err)
+		return
+	}
+	_ = os.WriteFile(filepath.Join(alice, "SKILL.md"), []byte("alice-private"), 0o600)
+	_ = os.WriteFile(filepath.Join(bob, "SKILL.md"), []byte("bob-private"), 0o600)
+	ownOut := filepath.Join(scratch, "own")
+	otherOut := filepath.Join(scratch, "other")
+	cmd = CommandContext(ctx, "/bin/sh", "-c", `cat "$1/SKILL.md" > "$3"; cat "$2/SKILL.md" > "$4" 2>/dev/null || :`, "sh", alice, bob, ownOut, otherOut)
+	err = p.RunJob(cmd, alice)
+	own, _ := os.ReadFile(ownOut)
+	other, _ := os.ReadFile(otherOut)
+	say("jobread err=%v own=%q other=%q", err, own, other)
+
 	// Reset sweeps a leftover the worker did not start and empties scratch.
 	_ = os.WriteFile(filepath.Join(scratch, "planted"), []byte("x"), 0o600)
 	_ = os.MkdirAll(filepath.Join(scratch, "cache", "deep"), 0o700)
@@ -139,6 +161,7 @@ func TestPodRunnerScansWhereNamespacesAreRefused(t *testing.T) {
 		`pod err=<nil> ran=true stdout="scanned" alone=true` + "\n",
 		"exit3 code=3\n",
 		"environ err=<nil>\n",
+		`jobread err=<nil> own="alice-private" other=""` + "\n",
 		"reset err=<nil> scratch=0 alone=true\n",
 	} {
 		if !strings.Contains(report, want) {

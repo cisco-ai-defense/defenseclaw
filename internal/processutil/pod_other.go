@@ -35,5 +35,8 @@ func (*PodRunner) Check() error { return podUnavailable() }
 // Run never runs cmd here.
 func (*PodRunner) Run(*exec.Cmd) error { return podUnavailable() }
 
+// RunJob never runs cmd here.
+func (*PodRunner) RunJob(*exec.Cmd, string) error { return podUnavailable() }
+
 // Reset always fails here.
 func (*PodRunner) Reset() error { return podUnavailable() }

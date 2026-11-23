@@ -102,9 +102,9 @@ func (w *Worker) init() {
 	w.run = make(chan struct{}, slots)
 	w.fatal = make(chan error, 1)
 	if w.Scan == nil {
-		var contain func(*exec.Cmd) error
+		var contain func(*exec.Cmd, string) error
 		if w.Pod != nil {
-			contain = w.Pod.Run
+			contain = w.Pod.RunJob
 		}
 		launcher := w.Launcher
 		if launcher == "" {
@@ -139,6 +139,11 @@ func (w *Worker) Serve(ctx context.Context) error {
 	}
 	if err := os.MkdirAll(filepath.Join(w.Dir, scanner.ScanJobsDirName), 0o700); err != nil {
 		return err
+	}
+	if w.Pod != nil {
+		if err := os.MkdirAll(filepath.Join(w.Dir, "active"), 0o700); err != nil {
+			return err
+		}
 	}
 	w.srv = &http.Server{Handler: handler, ReadHeaderTimeout: 5 * time.Second, ConnContext: withPeer}
 	if err := w.listen(); err != nil {
@@ -370,7 +375,22 @@ func (w *Worker) serveScan(rw http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer func() { <-w.run }()
-	res, err := w.Scan(ctx, req.Kind, dir, req.Settings)
+	scanDir := dir
+	if w.Pod != nil {
+		// The gateway may queue other users' jobs, but this scanner sees only
+		// the accepted job. Landlock grants read access to this private path.
+		scanDir = filepath.Join(w.Dir, "active", req.Job)
+		if err := os.Rename(dir, scanDir); err != nil {
+			answer(rw, http.StatusOK, scanner.RemoteScanAnswer{Code: "unavailable", Error: "cannot isolate the scan job: " + err.Error()})
+			return
+		}
+		defer os.RemoveAll(scanDir)
+		if err := checkJob(scanDir); err != nil {
+			answer(rw, http.StatusBadRequest, scanner.RemoteScanAnswer{Code: "refused", Error: err.Error()})
+			return
+		}
+	}
+	res, err := w.Scan(ctx, req.Kind, scanDir, req.Settings)
 	if w.Pod != nil {
 		// Nothing the scan started or wrote may reach the next job; a
 		// container that could not be cleared answers no result.
@@ -432,15 +452,19 @@ func checkJob(dir string) error {
 // RuntimeScanner runs the release's scanner runtime at launcher: skill-scanner
 // with the gateway's static settings, or the plugin scanner. contain runs
 // each scanner command (nil: the scanner's namespace containment).
-func RuntimeScanner(launcher string, contain func(*exec.Cmd) error) ScanFunc {
+func RuntimeScanner(launcher string, contain func(*exec.Cmd, string) error) ScanFunc {
 	return func(ctx context.Context, kind, dir string, st scanner.RemoteSettings) (*scanner.ScanResult, error) {
 		return runtimeScan(ctx, launcher, contain, kind, dir, st)
 	}
 }
 
-func runtimeScan(ctx context.Context, launcher string, contain func(*exec.Cmd) error, kind, dir string, st scanner.RemoteSettings) (*scanner.ScanResult, error) {
+func runtimeScan(ctx context.Context, launcher string, contain func(*exec.Cmd, string) error, kind, dir string, st scanner.RemoteSettings) (*scanner.ScanResult, error) {
+	var run func(*exec.Cmd) error
+	if contain != nil {
+		run = func(cmd *exec.Cmd) error { return contain(cmd, dir) }
+	}
 	if kind == scanner.RemoteKindPlugin {
-		return (&scanner.PluginScanner{BinaryPath: launcher, Contain: contain}).Scan(ctx, dir)
+		return (&scanner.PluginScanner{BinaryPath: launcher, Contain: run}).Scan(ctx, dir)
 	}
 	cfg := config.SkillScannerConfig{Binary: launcher, Policy: st.Policy, Lenient: st.Lenient,
 		UseBehavioral: st.UseBehavioral, UseTrigger: st.UseTrigger}
@@ -458,5 +482,5 @@ func runtimeScan(ctx context.Context, launcher string, contain func(*exec.Cmd) e
 		sum := sha256.Sum256(st.CustomPolicy)
 		cfg.PolicyFile = config.AssetFileRef{Path: f.Name(), Digest: "sha256:" + hex.EncodeToString(sum[:])}
 	}
-	return (&scanner.SkillScanner{Config: cfg, Contain: contain}).Scan(ctx, dir)
+	return (&scanner.SkillScanner{Config: cfg, Contain: run}).Scan(ctx, dir)
 }

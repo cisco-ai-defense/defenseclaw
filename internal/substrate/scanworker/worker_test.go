@@ -8,10 +8,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
@@ -87,35 +90,62 @@ func TestScanWorkerBadJobID(t *testing.T) {
 	}
 }
 
-// A full worker makes a scan wait inside its timeout, then answer timeout,
-// which the gateway treats as an outage (the fail mode), never an allow.
+// A full worker keeps excess requests waiting, and an expired request never
+// receives an allow result. synctest advances all deadlines together, so a
+// later scan cannot begin merely because the first timed out earlier.
 func TestScanWorkerQueueFullWaitsNotAllows(t *testing.T) {
-	release := make(chan struct{})
-	t.Cleanup(func() { close(release) })
-	var started atomic.Int32
-	dir := startWorker(t, &Worker{Slots: 1, Queue: 1, Timeout: 300 * time.Millisecond,
-		Scan: func(ctx context.Context, k, d string, s scanner.RemoteSettings) (*scanner.ScanResult, error) {
-			started.Add(1)
-			select {
-			case <-release:
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			}
-			return cleanScan(ctx, k, d, s)
-		}})
-	rs := &scanner.RemoteScanner{Kind: "skill", Dir: dir, Timeout: 300 * time.Millisecond}
-	errs := make(chan error, 3)
-	for i := 0; i < 3; i++ {
-		go func() { _, err := rs.Scan(context.Background(), skillDir(t)); errs <- err }()
-	}
-	for i := 0; i < 3; i++ {
-		if err := <-errs; err == nil || !scanner.Unavailable(err) {
-			t.Fatalf("scan %d past a full worker: err=%v (want a timeout the fail mode decides)", i, err)
+	dir := t.TempDir()
+	jobs := make([]string, 3)
+	for i := range jobs {
+		jobs[i] = fmt.Sprintf("%032x", i+1)
+		jd := filepath.Join(dir, scanner.ScanJobsDirName, jobs[i])
+		if err := os.MkdirAll(jd, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(jd, "SKILL.md"), []byte("---\\nname: queued\\n---\\n"), 0o600); err != nil {
+			t.Fatal(err)
 		}
 	}
-	if n := started.Load(); n != 1 {
-		t.Fatalf("%d scans ran with one slot", n)
-	}
+	synctest.Test(t, func(t *testing.T) {
+		var started atomic.Int32
+		w := &Worker{Dir: dir, Slots: 1, Queue: 1, Timeout: 300 * time.Millisecond,
+			Scan: func(ctx context.Context, _, _ string, _ scanner.RemoteSettings) (*scanner.ScanResult, error) {
+				started.Add(1)
+				<-ctx.Done()
+				return nil, ctx.Err()
+			}}
+		handler := w.Handler()
+		done := make(chan scanner.RemoteScanAnswer, len(jobs))
+		for _, job := range jobs {
+			job := job
+			go func() {
+				body, _ := json.Marshal(scanner.RemoteScanRequest{Job: job, Kind: scanner.RemoteKindSkill})
+				req := httptest.NewRequest("POST", "/v1/scan", bytes.NewReader(body))
+				rec := httptest.NewRecorder()
+				handler.ServeHTTP(rec, req)
+				var ans scanner.RemoteScanAnswer
+				if err := json.Unmarshal(rec.Body.Bytes(), &ans); err != nil {
+					t.Errorf("job %s: bad answer: %v", job, err)
+				}
+				done <- ans
+			}()
+		}
+		synctest.Wait()
+		if got := started.Load(); got != 1 {
+			t.Fatalf("full queue started %d concurrent scans, want one", got)
+		}
+		if len(done) != 0 {
+			t.Fatal("a request answered before its timeout while the queue was full")
+		}
+		time.Sleep(300 * time.Millisecond) // fake clock in the synctest bubble
+		synctest.Wait()
+		for range jobs {
+			ans := <-done
+			if ans.Code != "timeout" || ans.Result != nil {
+				t.Fatalf("full queue answered %+v, want timeout without result", ans)
+			}
+		}
+	})
 }
 
 func TestScanWorkerTimeout(t *testing.T) {

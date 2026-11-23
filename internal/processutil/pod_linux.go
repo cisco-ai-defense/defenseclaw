@@ -187,7 +187,22 @@ func (p *PodRunner) sweepLocked() error {
 // scanner's lower priority, then sweeps the namespace. A command that ran but
 // left a process that could not be killed and reaped is reported as
 // unavailable, never as a result.
-func (p *PodRunner) Run(cmd *exec.Cmd) error {
+func (p *PodRunner) Run(cmd *exec.Cmd) error { return p.run(cmd, "") }
+
+// RunJob confines a scan to one private job folder. The caller moves the
+// accepted job there before starting the scanner.
+func (p *PodRunner) RunJob(cmd *exec.Cmd, readJob string) error {
+	if !filepath.IsAbs(readJob) || filepath.Clean(readJob) != readJob || readJob == "/" {
+		return fmt.Errorf("%w: invalid private scan job %q", ErrNotContained, readJob)
+	}
+	fi, err := os.Lstat(readJob)
+	if err != nil || !fi.IsDir() {
+		return fmt.Errorf("%w: private scan job is not a real folder: %v", ErrNotContained, err)
+	}
+	return p.run(cmd, readJob)
+}
+
+func (p *PodRunner) run(cmd *exec.Cmd, readJob string) error {
 	if cmd.Process != nil {
 		return errors.New("processutil: PodRunner.Run: already started")
 	}
@@ -201,7 +216,7 @@ func (p *PodRunner) Run(cmd *exec.Cmd) error {
 	}
 	target := cmd.Path
 	cmd.Path = "/proc/self/exe"
-	cmd.Args = append([]string{containSupervisorArg0, containPodMode, p.scratch, "--", target}, cmd.Args[1:]...)
+	cmd.Args = append([]string{containSupervisorArg0, containPodMode, p.scratch, readJob, "--", target}, cmd.Args[1:]...)
 	env := cmd.Env
 	if env == nil {
 		env = os.Environ()
@@ -318,12 +333,13 @@ func emptyFolder(dir string) error {
 // execPodScanner is the trusted stage between the scan worker and the
 // scanner: it enters the scanner's Landlock domain and filter, which allow
 // writes only beneath scratch, then execs it.
-func execPodScanner(argv []string, scratch string) int {
-	if os.Getppid() != 1 || !filepath.IsAbs(scratch) || filepath.Clean(scratch) != scratch || scratch == "/" {
+func execPodScanner(argv []string, scratch, readJob string) int {
+	if os.Getppid() != 1 || !filepath.IsAbs(scratch) || filepath.Clean(scratch) != scratch || scratch == "/" ||
+		(readJob != "" && (!filepath.IsAbs(readJob) || filepath.Clean(readJob) != readJob || readJob == "/")) {
 		return containExitNotContained
 	}
 	lowerScannerPriority()
-	if err := guardPodScanner(scratch); err != nil {
+	if err := guardPodScanner(scratch, readJob); err != nil {
 		fmt.Fprintf(os.Stderr, "processutil: scanner guard: %v\n", err)
 		return containExitNotContained
 	}

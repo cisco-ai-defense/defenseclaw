@@ -50,18 +50,18 @@ func guardTrackedInit() error {
 
 // guardPodScanner is guardTrackedInit for the pod-contained scanner, which
 // shares the scan worker's user and PID namespace (GAP-0828). Its Landlock
-// domain allows writes only beneath writable and to /dev/null, so the
-// scanner cannot rewrite the shared scan folder, the worker's socket or a
-// queued job (GAP-0873). It may not signal the worker, its PID 1 (GAP-0874):
+// domain allows writes only beneath writable and to /dev/null, and reads
+// only its private job and the runtime (GAP-0873, GAP-0902). It may not
+// signal the worker, its PID 1 (GAP-0874):
 // with Landlock signal scoping (ABI 6) it signals only its own domain;
 // without it the filter also refuses kill, tgkill, rt_sigqueueinfo,
 // rt_tgsigqueueinfo and pidfd_open of PID 1, and every tkill,
 // pidfd_send_signal and fcntl F_SETOWN, F_SETOWN_EX and F_SETSIG (a SIGIO
 // owner). podGuardAvailable tells the worker beforehand whether it can.
-func guardPodScanner(writable string) error {
+func guardPodScanner(writable, readJob string) error {
 	abi := podLandlockABI()
 	scope := abi >= landlockScopeSignalABI
-	return enterScannerGuard(func() error { return enterPodScannerDomain(abi, writable, scope) }, !scope)
+	return enterScannerGuard(func() error { return enterPodScannerDomain(abi, writable, readJob, scope) }, !scope)
 }
 
 // landlockScopeSignalABI is the first Landlock ABI with LANDLOCK_SCOPE_SIGNAL.
@@ -220,18 +220,21 @@ func podWriteAccess(abi int) uint64 {
 }
 
 // enterPodScannerDomain puts the pod scanner in a Landlock domain that
-// handles every write right of ABI abi and allows them beneath writable;
-// /dev/null may be opened for writing. Reading and running files is
-// unchanged. With scopeSignals the domain may signal only itself (Landlock
+// handles every write and read right of ABI abi. It allows writes beneath
+// writable and to /dev/null, and reads only from the private job, scanner
+// runtime and the system files observed in the E1 runtime trace. An empty
+// readJob is used for the runtime's version check. With scopeSignals the
+// domain may signal only itself (Landlock
 // ABI 6): never the scan worker, also not by a SIGIO owner. As
 // enterScannerDomain, the domain refuses ptrace access to the processes
 // outside it.
-func enterPodScannerDomain(abi int, writable string, scopeSignals bool) error {
+func enterPodScannerDomain(abi int, writable, readJob string, scopeSignals bool) error {
 	if abi < 1 {
 		return errors.New("processutil: no Landlock for the scanner")
 	}
 	write := podWriteAccess(abi)
-	attr := unix.LandlockRulesetAttr{Access_fs: write}
+	read := uint64(unix.LANDLOCK_ACCESS_FS_READ_FILE | unix.LANDLOCK_ACCESS_FS_READ_DIR)
+	attr := unix.LandlockRulesetAttr{Access_fs: write | read}
 	size := unsafe.Sizeof(attr.Access_fs)
 	switch {
 	case scopeSignals:
@@ -249,19 +252,44 @@ func enterPodScannerDomain(abi int, writable string, scopeSignals bool) error {
 	if abi >= 3 {
 		fileWrite |= unix.LANDLOCK_ACCESS_FS_TRUNCATE
 	}
-	for _, rule := range []struct {
+	rules := []struct {
 		path   string
 		access uint64
-	}{{writable, write}, {"/dev/null", fileWrite}} {
+	}{
+		{writable, write | read},
+		{"/dev/null", fileWrite | unix.LANDLOCK_ACCESS_FS_READ_FILE},
+		{"/opt/defenseclaw", read},
+		{"/lib", read},
+		{"/lib64", read},
+		{"/usr/lib", read},
+		{"/usr/local/bin", read},
+		{"/bin", read},
+		{"/usr/bin", read},
+		{"/proc", read},
+		{"/sys/devices/system/cpu", read},
+		{"/sys/fs/cgroup", read},
+		{"/sys/kernel/mm", read},
+		{"/dev/shm", read},
+	}
+	if readJob != "" {
+		rules = append(rules, struct {
+			path   string
+			access uint64
+		}{readJob, read})
+	}
+	for _, rule := range rules {
 		pfd, err := unix.Open(rule.path, unix.O_PATH|unix.O_CLOEXEC, 0)
+		if errors.Is(err, unix.ENOENT) && rule.path != writable && rule.path != readJob {
+			continue // Minimal distroless images omit some host runtime paths.
+		}
 		if err != nil {
-			return fmt.Errorf("processutil: scanner write rule %s: %w", rule.path, err)
+			return fmt.Errorf("processutil: scanner file rule %s: %w", rule.path, err)
 		}
 		beneath := unix.LandlockPathBeneathAttr{Allowed_access: rule.access, Parent_fd: int32(pfd)}
 		_, _, errno := unix.Syscall6(unix.SYS_LANDLOCK_ADD_RULE, fd, unix.LANDLOCK_RULE_PATH_BENEATH, uintptr(unsafe.Pointer(&beneath)), 0, 0, 0)
 		_ = unix.Close(pfd)
 		if errno != 0 {
-			return fmt.Errorf("processutil: scanner write rule %s: %w", rule.path, errno)
+			return fmt.Errorf("processutil: scanner file rule %s: %w", rule.path, errno)
 		}
 	}
 	if _, _, errno := unix.Syscall(unix.SYS_LANDLOCK_RESTRICT_SELF, fd, 0, 0); errno != 0 {
