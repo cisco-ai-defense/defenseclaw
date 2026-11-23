@@ -510,13 +510,16 @@ func withValues(b []byte, lines []SecretLine, vals map[string][]byte) ([]byte, b
 // sameNonBlank reports whether a and b hold the same non-blank lines, in
 // order. A blank line added or removed is no change, and neither is
 // trailing space or a line end (\n or \r\n), but indentation is: taking
-// the indent off a line under `if False:` runs it (RV9-2).
+// the indent off a line under `if False:` runs it (RV9-2). A line that ends
+// in a backslash, before or after the change, is compared with only its line
+// end removed: a space after the backslash ends the continuation, so the
+// next line runs on its own (GAP-0889).
 func sameNonBlank(a, b []byte) bool {
 	nb := func(x []byte) [][]byte {
 		var out [][]byte
 		for _, l := range splitKeep(x) {
 			if len(bytes.TrimSpace(l)) > 0 {
-				out = append(out, bytes.TrimRight(l, " \t\r\n\v\f"))
+				out = append(out, l)
 			}
 		}
 		return out
@@ -526,7 +529,11 @@ func sameNonBlank(a, b []byte) bool {
 		return false
 	}
 	for i := range la {
-		if !bytes.Equal(la[i], lb[i]) {
+		x, y := trimEOL(la[i]), trimEOL(lb[i])
+		if !bytes.HasSuffix(x, []byte("\\")) && !bytes.HasSuffix(y, []byte("\\")) {
+			x, y = bytes.TrimRight(x, " \t\r\v\f"), bytes.TrimRight(y, " \t\r\v\f")
+		}
+		if !bytes.Equal(x, y) {
 			return false
 		}
 	}
