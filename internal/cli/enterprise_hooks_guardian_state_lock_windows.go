@@ -6,13 +6,13 @@
 package cli
 
 import (
+	"fmt"
 	"path/filepath"
 	"sync"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
-	"golang.org/x/sys/windows"
 )
 
 // enterpriseHookGuardianStateLockWait bounds how long a publication waits for
@@ -20,6 +20,12 @@ import (
 const enterpriseHookGuardianStateLockWait = 2 * time.Minute
 
 var enterpriseHookGuardianStateLocal sync.Mutex
+
+// Token and file lock seams; the GAP-1894 test injects query failures.
+var (
+	enterpriseHookGuardianStateTokenFacts = enterprisehooks.CurrentWindowsTokenAdminFacts
+	enterpriseHookGuardianStateFileLock   = enterprisehooks.LockWindowsAdminOnlyFile
+)
 
 // lockEnterpriseHookGuardianState serializes writeEnterpriseHookGuardianState
 // across processes. The guardian service and an administrator's `defenseclaw
@@ -36,23 +42,30 @@ var enterpriseHookGuardianStateLocal sync.Mutex
 // it cannot be part of a lock-order cycle with the lifecycle, bundle or
 // transaction locks. The local mutex queues goroutines of this process.
 //
-// A process without an elevated token (not LocalSystem, not an elevated
-// administrator) can neither create nor open the lock file, and cannot
-// publish either: the protected folder refuses its writes. It takes only
-// the local mutex, so the writer fails where it did before (the package's
-// tests, which run at Limited on temporary folders, publish that way).
+// A process whose token is known to be standard (both token queries
+// answered: not elevated, not LocalSystem) can neither create nor open the
+// lock file, and cannot publish either: the protected folder refuses its
+// writes. It takes only the local mutex, so the writer fails where it did
+// before (the package's tests, which run at Limited on temporary folders,
+// publish that way). A token the queries cannot read takes the file lock
+// like an elevated one: windows.Token.IsElevated read a failed query as
+// standard, and the writer skipped the lock (GAP-1894).
 func lockEnterpriseHookGuardianState(authorizationDir string) (func(), error) {
 	enterpriseHookGuardianStateLocal.Lock()
-	if !windows.GetCurrentProcessToken().IsElevated() {
+	privileged, tokenErr := enterpriseHookGuardianStateTokenFacts().ElevatedOrSystem()
+	if !privileged && tokenErr == nil {
 		return enterpriseHookGuardianStateLocal.Unlock, nil
 	}
-	unlock, err := enterprisehooks.LockWindowsAdminOnlyFile(
+	unlock, err := enterpriseHookGuardianStateFileLock(
 		filepath.Join(authorizationDir, managed.HookGuardianReconcileLockFile),
 		"hook guardian state lock",
 		enterpriseHookGuardianStateLockWait,
 	)
 	if err != nil {
 		enterpriseHookGuardianStateLocal.Unlock()
+		if tokenErr != nil {
+			return nil, fmt.Errorf("%w (token privilege unknown: %v)", err, tokenErr)
+		}
 		return nil, err
 	}
 	return func() {

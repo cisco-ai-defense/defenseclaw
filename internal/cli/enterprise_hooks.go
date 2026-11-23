@@ -1594,7 +1594,9 @@ type enterpriseHookEnrollment struct {
 }
 
 // enterpriseHookEnrollmentState is one connector's state for an account:
-// "enrolled", "pending" (waiting for the user's session) or "failed".
+// "enrolled", "pending" (waiting for the user's session), "skipped" (the
+// account's folder holds a per-user DefenseClaw install, which DefenseClaw
+// leaves untouched; GAP-1733, GAP-1893) or "failed".
 type enterpriseHookEnrollmentState struct {
 	Connector string `json:"connector"`
 	State     string `json:"state"`
@@ -1625,6 +1627,11 @@ func enterpriseHookEnrollmentFromRows(rows []enterpriseHookReconcileRow) []enter
 			state = "enrolled"
 		case row.Pending, enterpriseHookAwaitingSignInError(row):
 			state = "pending"
+		case enterpriseHookAccountPerUserInstallRow(row):
+			// Left out on purpose, and excused by the totals and verify: an
+			// administrator or a fleet script counting failed rows must not
+			// count it (GAP-1893).
+			state = "skipped"
 		}
 		entry.Connectors = append(entry.Connectors, enterpriseHookEnrollmentState{
 			Connector: strings.TrimSpace(row.Connector), State: state,

@@ -52,22 +52,33 @@ func SetWindowsCopilotVSCodeUser(apply func(home string, verify, remove bool) er
 }
 
 // windowsCopilotVSCodeUserPriorRender checks, read-only, that the user's Local
-// hook file and plugin hooks are current or exactly the render releases up to
-// 1.0.6 wrote (GAP-0980). The CLI installs it with
-// SetWindowsCopilotVSCodeUserPriorRender; unset, it refuses.
+// hook file and plugin hooks are current or exactly a render an earlier
+// release wrote: releases up to 1.0.6 (GAP-0980), the transition image
+// (GAP-1096), or the earlier launch image recorded, the one the target's
+// protected records name (recordsHookExecutable, GAP-1898). The CLI installs
+// it with SetWindowsCopilotVSCodeUserPriorRender; unset, it refuses.
 var windowsCopilotVSCodeUserPriorRender struct {
 	sync.Mutex
-	check func(home string) error
+	check func(home, recorded string) error
 }
 
 // SetWindowsCopilotVSCodeUserPriorRender installs the prior-render check.
-func SetWindowsCopilotVSCodeUserPriorRender(check func(home string) error) {
+func SetWindowsCopilotVSCodeUserPriorRender(check func(home, recorded string) error) {
 	windowsCopilotVSCodeUserPriorRender.Lock()
 	defer windowsCopilotVSCodeUserPriorRender.Unlock()
 	windowsCopilotVSCodeUserPriorRender.check = check
 }
 
-func applyWindowsCopilotVSCodeUserPriorRender(connectorName, home string) error {
+// applyWindowsCopilotVSCodeUserPriorRender runs the prior-render check for a
+// Copilot row. recorded is the hook image the target's records are checked
+// against (windowsGenericManagedTarget.recordsHookExecutable): this release's
+// image, or the earlier trusted image of this install its runtime selector
+// entry names (windowsPriorReleaseTargetHookImage). Without it a 1.0.10 Local
+// hook file, which names the 1.0.10 launch image, failed the check after an
+// upgrade while the account was signed out or disconnected, so its Copilot
+// row failed instead of waiting for the sign-in, and with it every other
+// row's wait and the administrator's verify (GAP-1898).
+func applyWindowsCopilotVSCodeUserPriorRender(connectorName, home, recorded string) error {
 	if connectorName != "copilot" {
 		return nil
 	}
@@ -77,7 +88,7 @@ func applyWindowsCopilotVSCodeUserPriorRender(connectorName, home string) error 
 	if check == nil {
 		return errors.New("enterprise hooks: copilot VS Code Local prior-render check is not registered")
 	}
-	if err := check(home); err != nil {
+	if err := check(home, recorded); err != nil {
 		return fmt.Errorf("enterprise hooks: copilot VS Code Local hooks: %w", err)
 	}
 	return nil
@@ -378,13 +389,7 @@ func verifyWindowsRuntimeOnlyManagedResult(
 	if err := verifyWindowsPerUserManagedRegistration(target, lock.ContractID); err != nil {
 		return InstallResult{}, err
 	}
-	// A missing or stale Local hook file or plugin fails verify, so the
-	// guardian repairs the row.
-	if opts.AcceptPriorReleaseRender {
-		if err := applyWindowsCopilotVSCodeUserPriorRender(name, target.home); err != nil {
-			return InstallResult{}, err
-		}
-	} else if err := applyWindowsCopilotVSCodeUser(name, target.home, true, false); err != nil {
+	if err := verifyWindowsRuntimeOnlyUserFiles(opts, name, target); err != nil {
 		return InstallResult{}, err
 	}
 	return InstallResult{
@@ -395,6 +400,19 @@ func verifyWindowsRuntimeOnlyManagedResult(
 		AgentVersion:    lock.RawAgentVersion,
 		HookContractID:  lock.ContractID,
 	}, nil
+}
+
+// verifyWindowsRuntimeOnlyUserFiles checks the Copilot VS Code Local hook file
+// and plugin of the target's account. A missing or stale one fails verify, so
+// the guardian repairs the row. A verify that accepts an earlier release's
+// render checks them against the image the target's records name
+// (recordsHookExecutable), not the current one, so an account signed out
+// through a launch-image upgrade waits for its sign-in (GAP-1898).
+func verifyWindowsRuntimeOnlyUserFiles(opts InstallOptions, connectorName string, target windowsGenericManagedTarget) error {
+	if opts.AcceptPriorReleaseRender {
+		return applyWindowsCopilotVSCodeUserPriorRender(connectorName, target.home, target.recordsHookExecutable())
+	}
+	return applyWindowsCopilotVSCodeUser(connectorName, target.home, true, false)
 }
 
 func verifyWindowsRuntimeOnlyUserRuntime(target windowsGenericManagedTarget, policyPath string) error {

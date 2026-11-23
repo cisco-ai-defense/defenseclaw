@@ -2339,9 +2339,12 @@ func windowsEnterpriseNoStartMessages(
 		}
 	}
 	if deferred {
-		result.AddWarning("deferred_config_pending", "installed and waiting for its configuration (Setup /install without CONFIG= and MANIFEST=): "+
-			"the services stay stopped and disabled, so agents are not protected yet; complete it from an elevated prompt with a repair "+
-			"that supplies both files (Setup /repair CONFIG=<config.yaml> MANIFEST=<targets.yaml>, or the repair with --config and --manifest)")
+		// Both commands come from the renderer: Setup is not installed on a
+		// managed computer, so its command names where Setup comes from.
+		result.AddWarning("deferred_config_pending", "installed and waiting for its configuration (a Setup install without CONFIG= and MANIFEST=): "+
+			"the services stay stopped and disabled, so agents are not protected yet; complete it from an elevated PowerShell prompt with a repair "+
+			"that supplies both files: `"+managed.WindowsSetupCommand("/repair")+" CONFIG=<config.yaml> MANIFEST=<targets.yaml>`, or "+
+			windowsEnterpriseAdminCommand("repair", "--config", "<config.yaml>", "--manifest", "<targets.yaml>")+"."+windowsEnterpriseSetupSourceNote)
 		return kept
 	}
 	// The code Linux and macOS use for a --no-start install.

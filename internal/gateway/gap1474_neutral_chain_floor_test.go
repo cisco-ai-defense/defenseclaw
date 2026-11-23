@@ -23,7 +23,7 @@ import (
 // chain in it, or in a pipeline it splits, keeps the floor too
 // (rel-1-0-10:GAP-1507).
 func TestGAP1474NeutralChainTheReadingRefusesKeepsTheFloor(t *testing.T) {
-	env := boundedLaneEnv(t)
+	env := boundedLaneEnvAnyOS(t)
 	n := strings.Repeat
 	n8 := n("nohup nice ", 4)
 	refused := []struct{ id, prefix, suffix string }{
