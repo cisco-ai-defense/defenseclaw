@@ -822,3 +822,16 @@ Guardrail events keep matching rule IDs, evaluation IDs, reasons and severity in
 | YARA MCP-description signatures | `policies/yara/mcp-tools/description_injection.yara` |
 | Correlator patterns | `internal/guardrail/defaults/correlation-patterns.yaml` |
 | High-assurance packs | `policies/guardrail-use-cases/` |
+
+Run the repository checks after changing a detector, using Go 1.26.4 (the CI toolchain). Run the gateway suite through the shard runner:
+
+```bash
+make check-guardrail-catalog
+go test -timeout 30m ./internal/actionfacts ./internal/guardrail
+python3 scripts/go_test_shards.py --package-dir internal/gateway --shard-count 16 -- go test -timeout 30m ./internal/gateway
+go test ./benchmarks/...
+```
+
+The catalog check prevents generated Go rules from drifting from YAML. Focused
+tests exercise parser hard negatives, same-rule proof ownership, bounded chain
+identity, profile action posture, and connector enforcement eligibility.
