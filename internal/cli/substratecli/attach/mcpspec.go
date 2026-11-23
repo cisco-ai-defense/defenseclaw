@@ -209,7 +209,7 @@ func SplitMCPCommand(s string, windows bool) ([]string, error) {
 		case c == '\\':
 			inTok = true
 			switch {
-			case windows && !(i+1 < len(rs) && rs[i+1] == '"'):
+			case windows && (i+1 >= len(rs) || rs[i+1] != '"'):
 				cur.WriteRune(c)
 			case i+1 >= len(rs):
 				return nil, errors.New("ends in a backslash")
