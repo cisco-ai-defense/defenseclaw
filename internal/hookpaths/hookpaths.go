@@ -3970,6 +3970,10 @@ type shellLinks struct {
 	opaque       bool
 	relative     bool // a link operand is relative to the working directory
 	globalOpaque bool
+	// cdOnlyGlobal marks a global hold caused only by a directory change
+	// whose fixed absolute copy scope could not be placed. Absolute writes
+	// outside that scope do not move with cd.
+	cdOnlyGlobal bool
 	// cdScopes: the scopes follow a static top-level directory change that
 	// the statement walk placed them after. Every write is opaque but the own
 	// destination of a placed copy, which that walk places too (GAP-2579).
@@ -4377,6 +4381,7 @@ type opaqueScope struct {
 	path         string
 	copy         bool
 	childrenOnly bool
+	anchored     bool // a static absolute destination independent of cd
 	// at is the offset of the call of the top-level walk that opened the
 	// scope, or -1 when that order is not known (a nested body, the end
 	// checks).
@@ -5131,8 +5136,9 @@ func commandLinksRead(command, cwd, home string, facts map[string]string, record
 					copyScopes = append(copyScopes, destination)
 					treeCopies = append(treeCopies, archiveTreeCopy(words[1:], static[1:], dir, destination))
 					if archiveCopiesDiskSymlink(program, words[1:], static[1:], dir, home, facts, record, stackSources) {
-						if rsyncDirectoryDestination(program, words[1:], static[1:]) && len(links.aliases) == 0 {
+						if destination != "" && rsyncDirectoryDestination(program, words[1:], static[1:]) && len(links.aliases) == 0 {
 							links.unknownInChildren(destination)
+							links.opaqueScopes[len(links.opaqueScopes)-1].anchored = true
 						} else {
 							links.unknownIn(destination)
 						}
@@ -5403,6 +5409,11 @@ func commandLinksRead(command, cwd, home string, facts map[string]string, record
 				}
 			}
 		} else {
+			anchored := !links.globalOpaque && !links.globalOther && !links.unread
+			for _, scope := range links.opaqueScopes {
+				anchored = anchored && scope.anchored
+			}
+			links.cdOnlyGlobal = anchored
 			links.globalOpaque, links.globalOther = true, true
 		}
 	}
@@ -5412,6 +5423,7 @@ func commandLinksRead(command, cwd, home string, facts map[string]string, record
 	// so a relative write may land in a scope under another name; with or
 	// without a cd, every write is then opaque (rel-1-0-6:GAP-0260 review).
 	if len(links.opaqueScopes) > 0 && hiddenDirectoryChange(file, home, 0) {
+		links.cdOnlyGlobal = false
 		links.globalOpaque, links.globalOther = true, true
 	}
 	// A plain cd whose archive and move statements were both placed keeps
@@ -6076,8 +6088,9 @@ func linearShellStatements(file *syntax.File) ([]*syntax.Stmt, bool) {
 // RedirectOccurrence is one shell redirect in source order. The safety bit
 // belongs to that occurrence, even when a later writer names the same path.
 type RedirectOccurrence struct {
-	Path string
-	Safe bool
+	Path     string
+	Safe     bool
+	Absolute bool // the redirect word is a static absolute path
 	// NoInnerCommand proves that this redirect's own statement evaluates no
 	// nested command before opening the file. Earlier statements are separate.
 	NoInnerCommand bool
@@ -6107,6 +6120,45 @@ func SafeShellRedirectOccurrencesWithFacts(command, cwd, home string, facts map[
 	file, ok := parseShell(command)
 	if !ok {
 		return result
+	}
+	// Only rsync can make the anchored absolute copy scope below. Keep the
+	// extra redirect walk off every other hook call.
+	if strings.Contains(command, "rsync") {
+		// Record absolute redirect words even when a pipeline makes the linear
+		// before-link proof unavailable. Only the static occurrence gets the
+		// narrow absolute-scope proof; unknown words keep their own hold.
+		absolute, seen := map[string]bool{}, map[string]bool{}
+		env := expand.ListEnviron("HOME=" + strings.TrimRight(home, "/"))
+		syntax.Walk(file, func(node syntax.Node) bool {
+			redirect, ok := node.(*syntax.Redirect)
+			if !ok || redirect.Word == nil {
+				return true
+			}
+			switch redirect.Op {
+			case syntax.RdrOut, syntax.AppOut, syntax.RdrClob, syntax.RdrAll, syntax.AppAll, syntax.RdrInOut:
+			case syntax.DplOut:
+				return true
+			default:
+				return true
+			}
+			word, static := staticShellWord(redirect.Word, env, home != "")
+			if !static {
+				return true
+			}
+			if word == "" {
+				return true
+			}
+			path := OperandPath(word, cwd)
+			if !seen[path] {
+				absolute[path] = filepath.IsAbs(word)
+			}
+			seen[path] = true
+			absolute[path] = absolute[path] && filepath.IsAbs(word)
+			return true
+		})
+		for i := range result {
+			result[i].Absolute = seen[result[i].Path] && absolute[result[i].Path]
+		}
 	}
 	statements, linear := linearShellStatements(file)
 	if !linear {
@@ -6258,6 +6310,23 @@ func (l Links) OpaqueTargetWithFacts(path string, ownCopy bool, facts map[string
 		return l.links.opaqueTargetWithFacts(path, path, facts)
 	}
 	return l.links.opaqueTargetWithFacts(path, "", facts)
+}
+
+// AbsoluteRedirectOutsideCDScopes proves that an absolute redirect is
+// outside every fixed absolute copy scope. A cd can move relative writes,
+// but cannot move the redirect or the copy destination. A pre-existing link
+// into a scope is checked by the same bounded path resolver.
+func (l Links) AbsoluteRedirectOutsideCDScopes(path string, facts map[string]string) bool {
+	if !l.links.cdOnlyGlobal || !filepath.IsAbs(path) {
+		return false
+	}
+	scoped := l.links
+	scoped.globalOpaque, scoped.globalOther = false, false
+	if scoped.opaqueTargetWithFacts(path, "", facts) {
+		return false
+	}
+	resolved, ok := ResolveWriteTarget(path)
+	return ok && !scoped.opaqueTargetWithFacts(resolved, "", facts)
 }
 
 // SplitOpaqueScopeFacts separates the OpaqueScopeFactPrefix entries from the

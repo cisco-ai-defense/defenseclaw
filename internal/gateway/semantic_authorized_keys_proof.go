@@ -1298,7 +1298,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		}
 		return "", false
 	}
-	writeTarget := func(target string, safeRedirect, ownCopy bool) bool {
+	writeTarget := func(target string, safeRedirect, ownCopy, absoluteRedirect bool) bool {
 		if !filepath.IsAbs(target) && (target == "" || !filepath.IsAbs(clientCWD)) {
 			// No directory places this operand: the gateway cannot see the
 			// caller's cwd and the client evidence that would carry it is
@@ -1372,7 +1372,8 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		// so the device is read without following links. A managed gateway
 		// cannot walk the user's home (ProtectHome); the hook client's walk of
 		// the same operand replaces only that missing view (GAP-0278).
-		if !safeRedirect && links.OpaqueTargetWithFacts(target, ownCopy, opaqueFacts) {
+		if !safeRedirect && links.OpaqueTargetWithFacts(target, ownCopy, opaqueFacts) &&
+			!(absoluteRedirect && links.AbsoluteRedirectOutsideCDScopes(target, opaqueFacts)) {
 			if info, err := laneLstat(target); err != nil || info.Mode()&os.ModeCharDevice == 0 {
 				return unproven(hookpaths.UnprovenLinkUnread, target)
 			}
@@ -1653,7 +1654,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		}
 		for i, operand := range operands {
 			safe := i < len(safeRedirects) && safeRedirects[i].Safe
-			if writeTarget(operand, safe, false) {
+			if writeTarget(operand, safe, false, i < len(safeRedirects) && safeRedirects[i].Absolute) {
 				return true
 			}
 		}
@@ -1669,7 +1670,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			if ownCopy {
 				ownCopies[operand]--
 			}
-			if writeTarget(operand, false, ownCopy) {
+			if writeTarget(operand, false, ownCopy, false) {
 				return true
 			}
 		}
@@ -1684,7 +1685,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			}
 		}
 		for _, operand := range hookpaths.AdjacentAssignedWriteOperands(input.Command, input.CWD, input.ActiveHome) {
-			if writeTarget(operand, false, false) {
+			if writeTarget(operand, false, false, false) {
 				return true
 			}
 		}
@@ -1696,27 +1697,27 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			return unproven("dynamic-argument", "")
 		}
 		for _, operand := range boundedOperands {
-			if writeTarget(operand, false, false) {
+			if writeTarget(operand, false, false, false) {
 				return true
 			}
 		}
 		for _, operand := range hookpaths.QuotedDynamicCopyDestinations(input.Command, input.CWD, input.ActiveHome) {
-			if writeTarget(operand, false, true) {
+			if writeTarget(operand, false, true, false) {
 				return true
 			}
 		}
 		for _, operand := range hookpaths.BoundedLoopCopyDestinations(input.Command, input.CWD, input.ActiveHome) {
-			if writeTarget(operand, false, true) {
+			if writeTarget(operand, false, true, false) {
 				return true
 			}
 		}
 		for _, operand := range hookpaths.CopySourceGlobDestinations(input.Command, input.CWD, input.ActiveHome, request.ResolvedWriteTargets) {
-			if writeTarget(operand, false, true) {
+			if writeTarget(operand, false, true, false) {
 				return true
 			}
 		}
 		for _, operand := range hookpaths.BoundedGlobLoopCopyDestinations(input.Command, input.CWD, input.ActiveHome, request.ResolvedWriteTargets) {
-			if writeTarget(operand, false, true) {
+			if writeTarget(operand, false, true, false) {
 				return true
 			}
 		}
@@ -1727,7 +1728,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			return unproven(hookpaths.UnprovenTargetUnresolved, "")
 		}
 		for _, operand := range directoryOperands {
-			if writeTarget(operand.Path, operand.Safe, operand.OwnCopy) {
+			if writeTarget(operand.Path, operand.Safe, operand.OwnCopy, operand.Absolute) {
 				return true
 			}
 		}
@@ -1817,7 +1818,8 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		// and Tee-Object open their file at the first input instead; they
 		// are no redirect operator, so they are never matched here.
 		if integrityCommandOwnsStaticRedirect(command, candidate) && slices.ContainsFunc(safeRedirects, func(redirect hookpaths.RedirectOccurrence) bool {
-			return redirect.NoInnerCommand && filepath.Clean(filepath.FromSlash(redirect.Path)) == filepath.Clean(filepath.FromSlash(target))
+			return (redirect.NoInnerCommand || redirect.Absolute && links.AbsoluteRedirectOutsideCDScopes(target, opaqueFacts)) &&
+				filepath.Clean(filepath.FromSlash(redirect.Path)) == filepath.Clean(filepath.FromSlash(target))
 		}) {
 			continue
 		}
@@ -1830,14 +1832,14 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			// starting directory names no write of it (GAP-2579).
 			if placed := links.PlacedCopyDestinations(candidate.Value); len(placed) > 0 {
 				for _, destination := range placed {
-					if writeTarget(destination, false, true) {
+					if writeTarget(destination, false, true, false) {
 						return true
 					}
 				}
 				continue
 			}
 		}
-		if writeTarget(target, false, ownCopy) {
+		if writeTarget(target, false, ownCopy, false) {
 			return true
 		}
 	}
@@ -1943,7 +1945,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		) || hookpaths.PatchCallNamesProtectedTarget("", nil, request.LegacyText, clientCWD, facts.ActiveHome, clientTargets)
 	}
 	for _, target := range patchTargets {
-		if writeTarget(target, false, false) {
+		if writeTarget(target, false, false, false) {
 			return true
 		}
 	}
