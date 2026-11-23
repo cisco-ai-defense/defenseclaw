@@ -100,7 +100,7 @@ Before you start: DefenseClaw is initialized (`defenseclaw init`). The paths bel
      files digest: 4b04e4ffa078aff3ea14b708257ecb81a62c4e01611ba0b0b3063411888fa71b (the guardrail.custom_packs pin)
    ```
 
-   The default pack has 246 rules in 7 files; yours has 247 in 8. Exit codes: `0` valid, `1` invalid, `2` validator unavailable.
+   The default pack has 287 rules in 7 files; yours has 288 in 8. Exit codes: `0` valid, `1` invalid, `2` validator unavailable.
 
 4. Pin the pack and switch to it.
 
@@ -137,7 +137,7 @@ defenseclaw alerts --limit 25 --connector claudecode
 defenseclaw alerts --connector claudecode --show 1
 ```
 
-Use the connector you tested in both commands and the alert number from the list, so `--show` numbers the list you just read. Secret findings hide rule IDs and titles in both alert views: this rule can appear as `redacted.secret.id-…` with the title `Secret finding`. Searching alerts for `ORG-PAYMENTS-SECRETS` will not find that redacted entry. Correlate the alert's connector, time and session with your test turn. For direct verification of the original ID, use the connector's native action verdict on a harmless matching test; observe-mode alert views cannot recover it. The pack path and files digest above establish which reviewed rules are configured; they do not prove a hook exercised this rule. No CLI injects synthetic facts.
+Use the same connector in both commands and the alert number from the list, so `--show` numbers the list you just read. Secret findings hide rule IDs and titles in both alert views: this rule can appear as `redacted.secret.id-…` with the title `Secret finding`. Searching alerts for `ORG-PAYMENTS-SECRETS` will not find that redacted entry. Correlate the alert's connector, time and session with your test turn. For direct verification of the original ID, use the connector's native action verdict on a harmless matching test; observe-mode alert views cannot recover it. The pack path and files digest above establish which reviewed rules are configured; they do not prove a hook exercised this rule. No CLI injects synthetic facts.
 
 With the default pack's levels, this CRITICAL rule can block in action mode when the facts are complete. A HIGH rule would alert only.
 

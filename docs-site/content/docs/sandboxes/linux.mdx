@@ -74,14 +74,14 @@ Setup is safe to run again. Say no to mounts, or pass `--no-mounts`, and no Clau
 
 You can also run setup from the TUI (`defenseclaw tui`, `0`, **Sandboxes (OpenShell)**). The form shows the command it will run before you start it.
 
-![DefenseClaw TUI Setup, Sandboxes (OpenShell) form on Linux: the command it will run, the harnesses to set up, the credentials found, the This machine checks (Docker, Landlock, OpenShell 0.1.5, bind mounts), and the Mount Project Folder and OpenShell telemetry options](/images/sandboxes/screens/tui-setup-linux.png)
+![DefenseClaw TUI Setup, Sandboxes (OpenShell) form on Linux: the command it will run, the harnesses to set up, the credentials found, the This machine checks (Docker, Landlock, OpenShell, bind mounts), and the Mount Project Folder and OpenShell telemetry options](/images/sandboxes/screens/tui-setup-linux.png)
 
 <TerminalAnimation
   cwd="~/code/myapp"
   speed={1.6}
   height={600}
   ariaLabel="Animated terminal replay of defenseclaw sandbox setup on Linux with an older OpenShell 0.1.1 installed: the machine checks, the gateway service fix, the NVIDIA installer plan that upgrades OpenShell to 0.1.6, the questions about project mounts, OpenShell telemetry and the compute driver, the gateway changes it lists, the harnesses and their model credentials, and the Claude Code image build."
-  caption="Recorded on DefenseClaw 1.0.4 on RHEL 9 (the OpenShell version in the text is updated to the 1.0.10 pin) with Docker 29.8.1 and OpenShell 0.1.1 installed, so setup offers the in-place upgrade to the pinned OpenShell 0.1.6 (the package manager output is trimmed). Every question shows its default answer (Enter); the plan is approved with `y` and the Codex image was skipped with `n`. The shell wrapper question was left at its default, no. On a host with no OpenShell, the same question reads 'Install OpenShell'."
+  caption="Recorded on RHEL 9 with Docker 29.8.1 and OpenShell 0.1.1 installed, so setup offers the in-place upgrade to the pinned OpenShell 0.1.6 (the package manager output is trimmed). Every question shows its default answer (Enter); the plan is approved with `y` and the Codex image was skipped with `n`. The shell wrapper question was left at its default, no. On a host with no OpenShell, the same question reads 'Install OpenShell'."
   frames={[
     { type: "cmd", text: "defenseclaw sandbox setup", pauseMs: 700 },
     { type: "out", text: "DefenseClaw sandbox setup" },
@@ -175,7 +175,7 @@ defenseclaw sandbox doctor
 
 Every warning or failure names its fix on the next line. `defenseclaw sandbox doctor --fix` applies the fixes that need only your user. The command exits 1 when a check fails.
 
-![defenseclaw sandbox doctor on Linux: every check passes, with OpenShell 0.1.5 on the docker driver, the sandbox ports served by the DefenseClaw daemon, hook-verified harness images and the sandbox TLS trust row, ending ready for sandboxes](/images/sandboxes/screens/linux-doctor.png)
+![defenseclaw sandbox doctor on Linux: every check passes, with OpenShell on the docker driver, the sandbox ports served by the DefenseClaw daemon, hook-verified harness images and the sandbox TLS trust row, ending ready for sandboxes](/images/sandboxes/screens/linux-doctor.png)
 
 </Step>
 
