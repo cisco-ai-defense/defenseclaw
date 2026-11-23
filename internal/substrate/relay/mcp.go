@@ -16,17 +16,11 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
 )
-
-// MCPNameRE is an MCP server name on an mcp stream (relay route mcp/NAME,
-// token scope mcp:NAME, the agent's MCP entry). The gateway and the
-// launcher use this one pattern.
-var MCPNameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,31}$`)
 
 // MCP stream bounds (B3.3). A binary message is one JSON-RPC message; the
 // gateway refuses one over message_max_bytes (S4a), the relay never reads
