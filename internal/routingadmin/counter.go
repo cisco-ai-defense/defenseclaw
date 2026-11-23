@@ -149,7 +149,8 @@ type TotalsQuery struct {
 	// Over (with ByKey, not KeysOnly) also keeps, per query, the capped keys
 	// at or over a budget's limit in its window, so a replica that let a
 	// blocked key go (evicted and stored) still reads it as blocked until
-	// the next read (GAP-0892).
+	// the next read (GAP-0892). Their rows are only those of the budget's
+	// own window (OverQuery.Since), not every day of the read (GAP-0942).
 	Over []OverQuery
 }
 
@@ -268,7 +269,8 @@ func (c *LocalCounter) TotalsPage(ctx context.Context, epoch string, since time.
 			query += " AND " + in
 		} else {
 			for _, o := range q.Over {
-				in += " OR charge_key IN (" + overSQL + ")"
+				in += " OR (day >= ? AND charge_key IN (" + overSQL + "))"
+				args = append(args, o.Since.UTC().Format(time.DateOnly))
 				args = append(args, overArgs(epoch, o, o.Max)...)
 			}
 			query += ` AND ((substr(charge_key, 1, 6) != 'actor:' AND substr(charge_key, 1, 6) != 'batch:') OR ` + in + `)`
