@@ -98,7 +98,7 @@ type EffectShadowResult struct {
 	// RuleIDs names the effect rule that would fire (empty when clean).
 	RuleIDs []string `json:"rule_ids,omitempty"`
 	// Reason is why the run has no (or a partial) verdict: parse_budget_exceeded,
-	// shadow_timeout or shadow_panic. Empty for a fully computed run.
+	// extract_cap_exceeded or shadow_panic. Empty for a fully computed run.
 	Reason string `json:"reason,omitempty"`
 	// Reach are the reach reasons of an unknown-tier verdict (DET111 PLAN
 	// 5.3); RoleHeld marks an R-ROLE unknown that was counted, not raised.
@@ -369,7 +369,7 @@ func effectBSDUserland(goos string, flavor effects.Flavor) bool {
 // computeEffectShadow runs the effect lane for one request and returns its
 // verdict. It never mutates the request or today's findings. It is the shared
 // core (effectShadowRun) for one tier: the live hook and the benchmark harness
-// run the same code, with the same budget, time cap and recovery.
+// run the same code, with the same counted budgets and recovery.
 func computeEffectShadow(request trustedActionRequest, mode effectRulesMode, tier effectTierMode) EffectShadowResult {
 	return effectShadowRun(request, mode, tier)[0]
 }
