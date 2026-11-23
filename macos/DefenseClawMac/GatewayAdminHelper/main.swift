@@ -576,13 +576,151 @@ enum GatewayAdminStop {
     }
 }
 
+/// Hands one root-owned file in a folder the account can write over to the
+/// account (GAP-1964). A link count read in that folder proves nothing: the
+/// account adds and removes names there at will, and one lookup reads the
+/// name and the count at two different moments, so a hard link to a root file
+/// outside the folder that is unlinked between them reads one link (CI saw
+/// it). No check on the account's name can close that, so the file's name is
+/// first moved (renameat, which never follows a link) into a holding folder
+/// the helper makes on the same volume, owned by the helper, mode 700, with no
+/// access rules. The account can neither add, remove nor rename a name there,
+/// so while the file is held its count includes that name and every name it
+/// has outside the account's folder: a root file the account linked in reads
+/// at least two links for as long as it is held, whatever the account does to
+/// its folder in the meantime. The held file is then opened by that name and
+/// checked through its own descriptor (the inode inspected, the same mode and
+/// owner, the walk's volume, exactly one link), changed only through that
+/// descriptor and moved back under its name, never over a name made in the
+/// meantime. A file that fails the checks is moved back unchanged.
+final class GatewayAdminHandover {
+    enum Result { case handed, skipped, failed }
+
+    private var parent: Int32
+    private var device: dev_t = 0
+    private var holding: Int32 = -1
+    private var holdingName = ""
+    private var holdingInode: ino_t = 0
+    private var unusable = false
+    private var held = 0
+
+    /// The holding folder is made in root, the walk's own root folder, only
+    /// when the first file is handed over, and removed by finish().
+    init(root: Int32) {
+        parent = dup(root)
+        var status = stat()
+        if parent < 0 || fstat(parent, &status) != 0 { unusable = true } else { device = status.st_dev }
+    }
+
+    deinit { finish() }
+
+    /// Removes the holding folder (it is empty unless a file could not be
+    /// moved back); idempotent.
+    func finish() {
+        if holding >= 0 {
+            removeHolding(holdingName, inode: holdingInode)
+            close(holding)
+            holding = -1
+        }
+        if parent >= 0 { close(parent); parent = -1 }
+        unusable = true
+    }
+
+    /// The holding folder itself, so a walk never enters it.
+    func isHolding(_ status: stat) -> Bool {
+        holding >= 0 && status.st_ino == holdingInode && status.st_dev == device
+    }
+
+    func handOver(_ directory: Int32, _ name: String, inspected entry: stat, shown: String,
+                  change: (Int32) -> Int32) -> Result {
+        guard entry.st_dev == device else { return .skipped }
+        guard let holding = prepare() else { return .failed }
+        held += 1
+        let heldName = "f" + String(held)
+        guard renameat(directory, name, holding, heldName) == 0 else { return .failed }
+        var result = Result.failed
+        let file = openat(holding, heldName, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_NOCTTY | O_CLOEXEC)
+        if file >= 0 {
+            #if GATEWAY_ADMIN_HELPER_TESTING
+            // Declared by Tests/GatewayAdminHelperTests.swift.
+            GatewayAdminHandover.openedForTesting?(shown)
+            #endif
+            var opened = stat()
+            if fstat(file, &opened) == 0, opened.st_ino == entry.st_ino, opened.st_dev == entry.st_dev,
+               opened.st_mode == entry.st_mode, opened.st_uid == entry.st_uid, opened.st_nlink == 1 {
+                result = change(file) == 0 ? .handed : .failed
+            } else {
+                result = .skipped
+            }
+            close(file)
+        }
+        return putBack(heldName, into: directory, as: name) ? result : .failed
+    }
+
+    /// Back under its name, never replacing one made while it was held; then
+    /// next to it, so the account still finds it. A file that cannot go back
+    /// keeps the holding folder.
+    private func putBack(_ heldName: String, into directory: Int32, as name: String) -> Bool {
+        let exclusive = UInt32(RENAME_EXCL)
+        if renameatx_np(holding, heldName, directory, name, exclusive) == 0 { return true }
+        _ = renameatx_np(holding, heldName, directory, name + ".defenseclaw-kept", exclusive)
+        return false
+    }
+
+    private func prepare() -> Int32? {
+        if holding >= 0 { return holding }
+        guard !unusable else { return nil }
+        unusable = true
+        var random = [UInt8](repeating: 0, count: 8)
+        arc4random_buf(&random, random.count)
+        let name = ".defenseclaw-handover-" + random.map { String(format: "%02x", $0) }.joined()
+        guard mkdirat(parent, name, 0o700) == 0 else { return nil }
+        let descriptor = openat(parent, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        guard descriptor >= 0 else { return nil }
+        var status = stat()
+        // Only the helper makes a folder the helper owns, so a folder the
+        // account swapped in after the mkdir is refused. Inherited access
+        // rules are cleared: nobody else may remove or add a name in it.
+        guard fstat(descriptor, &status) == 0, status.st_mode & S_IFMT == S_IFDIR, status.st_uid == geteuid(),
+              status.st_dev == device else {
+            close(descriptor)
+            return nil
+        }
+        guard fchmod(descriptor, 0o700) == 0, Self.clearAccessRules(descriptor),
+              (try? GatewayAdminTrust.rejectWriteACL(descriptor: descriptor)) != nil else {
+            close(descriptor)
+            removeHolding(name, inode: status.st_ino)
+            return nil
+        }
+        holding = descriptor
+        holdingName = name
+        holdingInode = status.st_ino
+        unusable = false
+        return descriptor
+    }
+
+    private static func clearAccessRules(_ descriptor: Int32) -> Bool {
+        guard let empty = acl_init(0) else { return false }
+        defer { acl_free(UnsafeMutableRawPointer(empty)) }
+        return acl_set_fd_np(descriptor, empty, ACL_TYPE_EXTENDED) == 0 || errno == ENOTSUP
+    }
+
+    private func removeHolding(_ name: String, inode: ino_t) {
+        var status = stat()
+        guard fstatat(parent, name, &status, AT_SYMLINK_NOFOLLOW) == 0, status.st_ino == inode,
+              status.st_dev == device else { return }
+        _ = unlinkat(parent, name, AT_REMOVEDIR)
+    }
+}
+
 /// Return the root-owned folders and regular files a root-run gateway left in
 /// this account's DefenseClaw home to the account. Only DefenseClaw's own
 /// names directly in the home are considered (ownedNames), and the folders
 /// among them are walked. The walk is bound to descriptors reached from the
 /// verified home descriptor: no symlink is ever followed (O_NOFOLLOW at every
-/// step), a file is changed only through its own open descriptor and only
-/// while it has a single link (a hard link to a file elsewhere is skipped),
+/// step), a file is handed over only by GatewayAdminHandover (moved into a
+/// root-only holding folder, then changed through its own descriptor while it
+/// has a single link, so a hard link to a file elsewhere is never changed),
 /// special files and other volumes are skipped, and the walk is bounded.
 /// Modes are kept; only the owner and group change.
 enum GatewayAdminOwnershipRepair {
@@ -653,12 +791,15 @@ enum GatewayAdminOwnershipRepair {
                         names allowed: Set<String>? = GatewayAdminOwnershipRepair.ownedNames,
                         privateOnly: Bool = false,
                         maximumEntries: Int = GatewayAdminOwnershipRepair.maximumEntries,
+                        handover given: GatewayAdminHandover? = nil,
                         change: ((Int32, String) -> Int32)? = nil) throws -> Outcome {
         let apply = change ?? { descriptor, _ in fchown(descriptor, account.uid, account.gid) }
         var metadata = stat()
         guard fstat(root, &metadata) == 0, metadata.st_mode & S_IFMT == S_IFDIR else {
             throw GatewayAdminFailure.refused("The DefenseClaw home is not a folder.")
         }
+        let handover = given ?? GatewayAdminHandover(root: root)
+        defer { if given == nil { handover.finish() } }
         var outcome = Outcome()
         var visited = 0
 
@@ -718,6 +859,7 @@ enum GatewayAdminOwnershipRepair {
                 guard fstatat(directory, name, &entry, AT_SYMLINK_NOFOLLOW) == 0 else { continue }
                 switch entry.st_mode & S_IFMT {
                 case S_IFDIR:
+                    if handover.isHolding(entry) { continue }
                     guard entry.st_dev == metadata.st_dev else {
                         // Another volume is never walked; in an agent config
                         // folder that leaves it uninspected.
@@ -740,11 +882,10 @@ enum GatewayAdminOwnershipRepair {
                     if !folder(child, opened, relative, relative, depth + 1) { complete = false }
                 case S_IFREG:
                     guard entry.st_uid == owner else { continue }
-                    // One link when inspected, and the opened file is that
-                    // inode: a hard link to a file elsewhere (another link
-                    // count) opened and then unlinked before the fstat, or a
-                    // file swapped in after the fstatat, is never changed.
-                    guard entry.st_nlink == 1 else {
+                    // A hard link (two links when inspected) is reported and
+                    // never moved; one link read here proves nothing yet, so
+                    // the file is handed over only through the holding folder.
+                    guard entry.st_nlink == 1, !privateOnly || entry.st_mode & 0o6022 == 0 else {
                         outcome.skipped.append(relative)
                         continue
                     }
@@ -752,22 +893,14 @@ enum GatewayAdminOwnershipRepair {
                     // Declared by Tests/GatewayAdminHelperTests.swift.
                     GatewayAdminOwnershipRepair.walkFileCheckedForTesting?(relative)
                     #endif
-                    let file = openat(directory, name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_NOCTTY | O_CLOEXEC)
-                    guard file >= 0 else {
+                    switch handover.handOver(directory, name, inspected: entry, shown: relative,
+                                             change: { apply($0, relative) }) {
+                    case .handed: outcome.restored.append(relative)
+                    case .skipped: outcome.skipped.append(relative)
+                    case .failed:
                         outcome.incomplete = true
                         complete = false
-                        continue
                     }
-                    defer { close(file) }
-                    var opened = stat()
-                    guard fstat(file, &opened) == 0, opened.st_ino == entry.st_ino, opened.st_dev == entry.st_dev,
-                          opened.st_mode & S_IFMT == S_IFREG,
-                          opened.st_uid == owner, opened.st_dev == metadata.st_dev, opened.st_nlink == 1,
-                          !privateOnly || opened.st_mode & 0o6022 == 0 else {
-                        outcome.skipped.append(relative)
-                        continue
-                    }
-                    if !give(file, relative) { complete = false }
                 case S_IFLNK:
                     // Never followed or changed; the account owns the folder
                     // holding it and can remove it.
@@ -795,9 +928,9 @@ enum GatewayAdminOwnershipRepair {
 /// DefenseClaw home under the same file rules (`privateOnly`), and only once
 /// all of it was inspected (Go lists the outermost one); the file itself is changed
 /// only when it is a root-owned regular file with one link, on the home's
-/// volume, with no setuid, setgid, group or other write bit, pinned by inode
-/// through its own descriptor. Links, other owners and anything else stay as
-/// they are.
+/// volume, with no setuid, setgid, group or other write bit, handed over by
+/// GatewayAdminHandover (the holding folder is made in the account home).
+/// Links, other owners and anything else stay as they are.
 enum GatewayAdminAgentConfigRepair {
     // BEGIN agentConfigPaths: the macOS default candidates of
     // connector.RootOwnedAgentConfigPaths, relative to the account home
@@ -861,6 +994,8 @@ enum GatewayAdminAgentConfigRepair {
         var outcome = GatewayAdminOwnershipRepair.Outcome()
         var homeStatus = stat()
         guard fstat(home, &homeStatus) == 0 else { return GatewayAdminOwnershipRepair.Outcome(incomplete: true) }
+        let handover = GatewayAdminHandover(root: home)
+        defer { handover.finish() }
         var returnedFolders: [String] = []
         for path in paths {
             if returnedFolders.contains(where: { path.hasPrefix($0 + "/") }) { continue }
@@ -901,7 +1036,7 @@ enum GatewayAdminAgentConfigRepair {
                     }
                     if opened.st_uid == owner {
                         let folder = (try? GatewayAdminOwnershipRepair.restore(
-                            home: child, from: owner, to: account, names: nil, privateOnly: true,
+                            home: child, from: owner, to: account, names: nil, privateOnly: true, handover: handover,
                             change: { descriptor, inner in apply(descriptor, inner == "." ? shown : shown + "/" + inner) }))
                             ?? GatewayAdminOwnershipRepair.Outcome(incomplete: true)
                         outcome.merge(GatewayAdminOwnershipRepair.Outcome(
@@ -922,16 +1057,11 @@ enum GatewayAdminAgentConfigRepair {
                 // Declared by Tests/GatewayAdminHelperTests.swift.
                 Self.fileCheckedForTesting?(shown)
                 #endif
-                let file = openat(parent, name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_NOCTTY | O_CLOEXEC)
-                guard file >= 0 else { outcome.incomplete = true; break }
-                defer { close(file) }
-                var opened = stat()
-                guard fstat(file, &opened) == 0, opened.st_ino == entry.st_ino, opened.st_dev == entry.st_dev,
-                      opened.st_uid == owner, opened.st_mode == entry.st_mode, opened.st_nlink == 1 else {
-                    outcome.skipped.append(shown)
-                    break
+                switch handover.handOver(parent, name, inspected: entry, shown: shown, change: { apply($0, shown) }) {
+                case .handed: outcome.restored.append(shown)
+                case .skipped: outcome.skipped.append(shown)
+                case .failed: outcome.incomplete = true
                 }
-                if apply(file, shown) == 0 { outcome.restored.append(shown) } else { outcome.incomplete = true }
             }
             close(parent)
         }

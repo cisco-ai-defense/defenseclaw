@@ -22,15 +22,22 @@ import Foundation
 import Security
 
 extension GatewayAdminAgentConfigRepair {
-    /// Runs after a listed file passed its checks, before it is opened
-    /// (main.swift calls it in GATEWAY_ADMIN_HELPER_TESTING builds only).
+    /// Runs after a listed file passed its checks, before it is moved into
+    /// the holding folder (main.swift calls it in GATEWAY_ADMIN_HELPER_TESTING builds only).
     static var fileCheckedForTesting: ((String) -> Void)?
 }
 
 extension GatewayAdminOwnershipRepair {
-    /// Runs after a walked file passed its checks, before it is opened
-    /// (main.swift calls it in GATEWAY_ADMIN_HELPER_TESTING builds only).
+    /// Runs after a walked file passed its checks, before it is moved into
+    /// the holding folder (main.swift calls it in GATEWAY_ADMIN_HELPER_TESTING builds only).
     static var walkFileCheckedForTesting: ((String) -> Void)?
+}
+
+extension GatewayAdminHandover {
+    /// Runs after a file to hand over was opened, before its descriptor is
+    /// checked (main.swift calls it in GATEWAY_ADMIN_HELPER_TESTING builds
+    /// only), with the name the walk shows.
+    static var openedForTesting: ((String) -> Void)?
 }
 
 @main
@@ -192,6 +199,7 @@ private enum GatewayAdminHelperTests {
         try testAgentConfigRepair(root: root, account: account)
         try testAgentConfigFolderRules(root: root)
         try testAgentConfigFileEdgeCases(root: root)
+        try testHardLinkUnlinkedAtOpen(root: root)
         try testAgentConfigFolderWalkSwap(root: root)
         try testRepairOrder()
         try testRootProcessRecord(root: root)
@@ -577,6 +585,79 @@ private enum GatewayAdminHelperTests {
         }
     }
 
+    /// GAP-1964: the race of testAgentConfigFolderWalkSwap at the exact
+    /// window, every time. A root file outside the account's folder (this
+    /// account stands in for root) has its only name in the folder when the
+    /// walk inspects it (one link), gets its outside name back before the
+    /// open, and the folder name is unlinked right after the open: the opened
+    /// file is that inode and reads one link again, yet it is the outside
+    /// file. Before the fix the walk handed it over (both the folder walk and
+    /// a listed file); now the file is held in the helper's own folder before
+    /// the descriptor check, so it reads two links and stays as it is.
+    private static func testHardLinkUnlinkedAtOpen(root: URL) throws {
+        let home = root.appendingPathComponent("open-window-home", isDirectory: true)
+        let outside = root.appendingPathComponent("open-window-outside", isDirectory: true)
+        try makeFolders(home, ["", ".claude", ".kiro", ".kiro/agents"])
+        try makeFolders(outside, [""])
+        try makeFile(home.appendingPathComponent(".kiro/agents/defenseclaw.json"))
+        let descriptor = try GatewayAdminAgentConfigRepair.openAccountHome(home.path, uid: getuid())
+        defer { close(descriptor) }
+        // (listed path, name in the folder, the label the walk shows, the
+        // account the files go to): a root-owned folder walked whole, then a
+        // listed file in the account's own folder.
+        let cases: [(String, String, String, uid_t)] = [
+            (".kiro/agents/defenseclaw.json", ".kiro/window.json", "window.json", getuid() &+ 1),
+            (".claude/settings.json", ".claude/settings.json", "~/.claude/settings.json", getuid()),
+        ]
+        for (path, inFolder, label, account) in cases {
+            let secret = outside.appendingPathComponent("system-file").path
+            let linked = home.appendingPathComponent(inFolder).path
+            try makeFile(URL(fileURLWithPath: secret))
+            var secretStatus = stat()
+            check(lstat(secret, &secretStatus) == 0, "Could not inspect the outside fixture")
+            check(rename(secret, linked) == 0, "Could not move the outside fixture into the folder")
+            var reachedCheck = false
+            var reachedOpen = false
+            GatewayAdminOwnershipRepair.walkFileCheckedForTesting = { relative in
+                guard relative == label else { return }
+                reachedCheck = true
+                guard link(linked, secret) == 0 else { fatalError("Could not give the outside file its name back") }
+            }
+            GatewayAdminAgentConfigRepair.fileCheckedForTesting = GatewayAdminOwnershipRepair.walkFileCheckedForTesting
+            GatewayAdminHandover.openedForTesting = { shown in
+                guard shown == label else { return }
+                reachedOpen = true
+                _ = unlink(linked)
+            }
+            var handed: [String] = []
+            let outcome = GatewayAdminAgentConfigRepair.restore(
+                home: descriptor, from: getuid(), to: (account, getgid()), paths: [path],
+                change: { file, shown in
+                    var status = stat()
+                    if fstat(file, &status) == 0, status.st_ino == secretStatus.st_ino, status.st_dev == secretStatus.st_dev {
+                        handed.append(shown)
+                    }
+                    return 0
+                })
+            GatewayAdminOwnershipRepair.walkFileCheckedForTesting = nil
+            GatewayAdminAgentConfigRepair.fileCheckedForTesting = nil
+            GatewayAdminHandover.openedForTesting = nil
+            check(reachedCheck && reachedOpen, "The repair must reach both ends of the open window for \(inFolder)")
+            check(handed.isEmpty, "A hard link unlinked right after the open handed a file outside the folder over: "
+                + "\(handed) \(outcome)")
+            check(outcome.skipped == ["~/" + inFolder],
+                  "The held file with a second name is reported and left as it is: \(outcome)")
+            var after = stat()
+            check(lstat(secret, &after) == 0 && after.st_ino == secretStatus.st_ino,
+                  "The outside file keeps its own name")
+            check(lstat(linked, &after) == 0 && after.st_ino == secretStatus.st_ino,
+                  "The folder name is moved back: \(inFolder)")
+            check(unlink(linked) == 0 && unlink(secret) == 0, "Could not remove the open-window fixture")
+            check(GatewayAdminDirectory.names(of: descriptor)?.contains { $0.hasPrefix(".defenseclaw-handover-") } == false,
+                  "The holding folder is removed after the repair")
+        }
+    }
+
     /// GAP-0141 review: a file inside a root-owned agent config folder that
     /// the walk returns is changed only when it had one link when inspected
     /// and the opened file is that inode. Before, the walk checked the link
@@ -630,9 +711,10 @@ private enum GatewayAdminHelperTests {
         // The attack itself, with no test hook (run first, so it decides a
         // run of the helper before this fix): another thread hard-links the
         // file outside the folder into it and unlinks the link again while the
-        // walk runs. Before the fix the walk opened the link and, when the
-        // unlink landed before its fstat, read one link and handed the file
-        // over; now the inspected entry has two links and is never opened.
+        // walk runs. A link count read in the folder can show one link for
+        // that link (GAP-1964, CI walk 18938), so the walk moves a file into
+        // its holding folder before the descriptor check: held, the outside
+        // file reads two links and is never handed over.
         let race = home.appendingPathComponent(".kiro/race.json").path
         let secretPath = secret.path
         let finished = DispatchSemaphore(value: 0)
@@ -646,7 +728,8 @@ private enum GatewayAdminHelperTests {
         toggler.start()
         var handedOver = 0
         var walks = 0
-        while walks < 20_000 && handedOver == 0 {
+        let maximumWalks = ProcessInfo.processInfo.environment["GATEWAY_ADMIN_RACE_WALKS"].flatMap { Int($0) } ?? 20_000
+        while walks < maximumWalks && handedOver == 0 {
             walks += 1
             _ = GatewayAdminAgentConfigRepair.restore(
                 home: descriptor, from: getuid(), to: (getuid() &+ 1, getgid()), paths: [".kiro/agents/defenseclaw.json"],
@@ -658,6 +741,9 @@ private enum GatewayAdminHelperTests {
         toggler.cancel()
         finished.wait()
         _ = unlink(race)
+        // A link the toggler made while the walk held the file is kept next
+        // to it, never replaced.
+        _ = unlink(race + ".defenseclaw-kept")
         check(handedOver == 0, "A hard link unlinked between the open and the fstat handed a file outside the folder over "
             + "(walk \(walks))")
 
