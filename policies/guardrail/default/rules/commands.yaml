@@ -957,7 +957,9 @@ rules:
     tags: [persistence, execution, reverse-shell, kubernetes, cronjob, bounded-grammar]
   - id: secrets.kubernetes_cluster_wide_enumeration
     tool_call_only: true
-    expression: "f.tool == 'kubectl'"
+    expression: >-
+      f.tool == 'kubectl' ||
+      f.commands.exists(c, c.argv_complete && c.program == 'kubectl')
     # Exact ActionFacts owner accepts only a direct, closed kubectl get
     # secret[s] request with an explicit all-namespaces flag. Authorization
     # checks, namespaced reads, dynamic values, and compound commands abstain.
@@ -980,7 +982,7 @@ rules:
     # literal Secret plus json/yaml or a closed data selector. Universal policy
     # alerts only; protected-cluster policy owns blocking authorization.
     pattern: 'a^'
-    title: "Read the content of one named Kubernetes Secret"
+    title: "Read the content of Kubernetes Secrets"
     severity: HIGH
     confidence: 0.99
     tags: [credential, kubernetes, secret, content-read, exact-actionfacts]

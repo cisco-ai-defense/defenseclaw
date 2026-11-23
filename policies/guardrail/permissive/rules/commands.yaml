@@ -887,7 +887,9 @@ rules:
     tags: [persistence, execution, reverse-shell, kubernetes, cronjob, bounded-grammar]
   - id: secrets.kubernetes_cluster_wide_enumeration
     tool_call_only: true
-    expression: "f.tool == 'kubectl'"
+    expression: >-
+      f.tool == 'kubectl' ||
+      f.commands.exists(c, c.argv_complete && c.program == 'kubectl')
     pattern: 'a^'
     title: "Enumerate Kubernetes secrets across all namespaces"
     severity: HIGH
@@ -904,7 +906,7 @@ rules:
   - id: credential.kubernetes_named_secret_content_read
     tool_call_only: true
     pattern: 'a^'
-    title: "Read the content of one named Kubernetes Secret"
+    title: "Read the content of Kubernetes Secrets"
     severity: HIGH
     confidence: 0.99
     tags: [credential, kubernetes, secret, content-read, exact-actionfacts]

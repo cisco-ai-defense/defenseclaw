@@ -102,7 +102,6 @@ func TestGAP1824KubernetesBenignShapesUnchanged(t *testing.T) {
 		"kubectl get pods",
 		"kubectl get pods -A -o yaml",
 		"kubectl get secrets",
-		"kubectl get secrets -A",
 		"kubectl describe secret db",
 		"kubectl logs pod",
 		"curl https://example.com/api/v1/secrets",
