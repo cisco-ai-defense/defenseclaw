@@ -159,7 +159,7 @@ Amp has no hook that can stop a prompt, so a prompt rule doesn't block here: a m
 ## In an OpenShell sandbox
 
 <Callout type="warn" title="Amp cannot run in a sandbox yet">
-The Amp image is **unverified**, so `defenseclaw sandbox run amp` refuses it. Amp needs an account API key (`AMP_API_KEY`) for every run and stops at the account check before any agent turn. It has no local or bring-your-own model endpoint, so the mock-model check cannot pass. The unverified image stays: `defenseclaw sandbox image list` shows it with HOOKS VERIFIED `no`, and `defenseclaw sandbox image prune` keeps it because it is the newest Amp image. See the [Cursor note](/docs/connectors/cursor) on `image list` and `image prune`.
+The Amp image is **unverified**, so `defenseclaw sandbox run amp` refuses it. Amp needs an account API key (`AMP_API_KEY`) for every run and stops at the account check before any agent turn. It has no local or bring-your-own model endpoint, so the hook check cannot run. The unverified image stays: `defenseclaw sandbox image list` shows it with HOOKS VERIFIED `no`, and `defenseclaw sandbox image prune` keeps it because it is the newest Amp image. See the [Cursor note](/docs/connectors/cursor) on `image list` and `image prune`.
 </Callout>
 
 The [sandbox guide](/docs/sandboxes/guide) covers the `sandbox` commands. What the Amp image already holds:
