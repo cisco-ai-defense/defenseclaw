@@ -15,12 +15,21 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+// treeResume and treeTerminate are the two calls StartTree makes through the
+// OS that a test replaces to make them fail (GAP-1017).
+var (
+	treeResume    = resumeCapturedProcessByHandle
+	treeTerminate = windows.TerminateJobObject
+)
+
 // Tree is a started command held in a kill-on-close Job Object with every
 // process it starts. It is the Start half of RunTree for a caller that waits
 // on the command itself (a long-running server).
 type Tree struct {
-	mu  sync.Mutex
-	job windows.Handle // 0 once Close ran
+	mu      sync.Mutex
+	job     windows.Handle   // 0 once Close ran
+	members []windows.Handle // wait handles opened before the job ended its processes
+	ended   bool             // the job was told to terminate its processes
 }
 
 // StartTree starts cmd inside a new kill-on-close Job Object. The command is
@@ -61,12 +70,16 @@ func StartTree(cmd *exec.Cmd) (*Tree, error) {
 	// milliseconds. Either way each thread is resumed once.
 	var resumeErr error
 	if withErr := cmd.Process.WithHandle(func(handle uintptr) {
-		resumeErr = resumeCapturedProcessByHandle(windows.Handle(handle))
+		resumeErr = treeResume(windows.Handle(handle))
 	}); withErr != nil {
 		resumeErr = withErr
 	}
 	if resumeErr != nil {
-		_ = windows.TerminateJobObject(job, 1)
+		// As runTree does: end the job, then the direct process by its own
+		// handle, so a failed job terminate cannot leave it suspended and
+		// block cmd.Wait.
+		_ = treeTerminate(job, 1)
+		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
 		windows.CloseHandle(job)
 		return nil, resumeErr
@@ -80,7 +93,7 @@ func (t *Tree) Kill() {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.job != 0 {
-		_ = windows.TerminateJobObject(t.job, 1)
+		t.end()
 	}
 }
 
@@ -93,21 +106,60 @@ func (t *Tree) Close() {
 	if t.job == 0 {
 		return
 	}
-	// The members are opened before the job ends them: a terminated process
-	// can leave the job's list before it has exited, so a list taken after
-	// TerminateJobObject can miss one that still runs.
-	members := openJobMembers(t.job)
-	if windows.TerminateJobObject(t.job, 1) == nil {
-		deadline := time.Now().Add(capturedTreeExitWait)
-		for _, h := range members {
-			_, _ = windows.WaitForSingleObject(h, uint32(max(time.Until(deadline), 0).Milliseconds()))
-		}
+	t.end()
+	if t.ended {
+		t.waitGone(time.Now().Add(capturedTreeExitWait))
 	}
-	for _, h := range members {
+	for _, h := range t.members {
 		windows.CloseHandle(h)
 	}
+	t.members = nil
 	windows.CloseHandle(t.job)
 	t.job = 0
+}
+
+// end terminates the job's processes once. The members are opened first: a
+// terminated process leaves the job's list and its active count before it has
+// exited, so Close, which runs after Kill, would find nothing to wait on and
+// the presence record would go while the last process was still exiting
+// (GAP-1016). The caller holds t.mu.
+func (t *Tree) end() {
+	if t.ended {
+		return
+	}
+	t.members = append(t.members, openJobMembers(t.job)...)
+	t.ended = treeTerminate(t.job, 1) == nil
+}
+
+// waitGone waits until every member opened by end has exited and the job has
+// no active process, which also covers one that started after the members
+// were listed. It stops at deadline: a member with pending I/O in a driver can
+// stay unsignalled indefinitely.
+func (t *Tree) waitGone(deadline time.Time) {
+	for _, h := range t.members {
+		_, _ = windows.WaitForSingleObject(h, uint32(max(time.Until(deadline), 0).Milliseconds()))
+	}
+	for time.Now().Before(deadline) {
+		var info jobAccounting
+		if err := windows.QueryInformationJobObject(t.job, windows.JobObjectBasicAccountingInformation,
+			uintptr(unsafe.Pointer(&info)), uint32(unsafe.Sizeof(info)), nil); err != nil || info.ActiveProcesses == 0 {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// jobAccounting is JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, which
+// golang.org/x/sys/windows does not define.
+type jobAccounting struct {
+	TotalUserTime             int64
+	TotalKernelTime           int64
+	ThisPeriodTotalUserTime   int64
+	ThisPeriodTotalKernelTime int64
+	TotalPageFaultCount       uint32
+	TotalProcesses            uint32
+	ActiveProcesses           uint32
+	TotalTerminatedProcesses  uint32
 }
 
 // openJobMembers opens a wait handle to every process now in job.
