@@ -69,12 +69,21 @@ func TestEditedHookEntriesGolden(t *testing.T) {
 	}
 	for _, tc := range cases {
 		dataDir := filepath.Join(testenv.PrivateTempDir(t), ".defenseclaw")
+		want := tc.Edited
 		if runtime.GOOS == "windows" {
 			// The predicate reads command text only. The golden names POSIX
 			// data directories, so this run uses a POSIX-form one and the
-			// expectation is the golden's own, on every OS. The drive-path
-			// run below covers a real Windows data directory.
+			// expectation is the golden's own. The drive-path run below
+			// covers a real Windows data directory.
 			dataDir = "/home/u/.defenseclaw"
+			// Windows registers native launcher commands and never opens a
+			// hook script (defenseClawHookFile), so a case that is reported
+			// only because the copy it names carries the generated-hook
+			// marker has no marker to read here: its answer is the one where
+			// nothing is opened, the golden's drive_edited (GAP-2031).
+			if len(tc.Marked) > 0 {
+				want = tc.driveEdited()
+			}
 		}
 		if runtime.GOOS != "windows" {
 			writeEditedHookGoldenMarkers(t, tc, dataDir)
@@ -88,8 +97,8 @@ func TestEditedHookEntriesGolden(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: %v", tc.Name, err)
 		}
-		if got := hookDocumentHoldsEditedEntry(decoded, tc.Connector, dataDir, tc.Script); got != tc.Edited {
-			t.Errorf("%s: hookDocumentHoldsEditedEntry = %v, want %v", tc.Name, got, tc.Edited)
+		if got := hookDocumentHoldsEditedEntry(decoded, tc.Connector, dataDir, tc.Script); got != want {
+			t.Errorf("%s: hookDocumentHoldsEditedEntry = %v, want %v", tc.Name, got, want)
 		}
 
 		// The same document under a drive-path data directory: the real one
