@@ -11,6 +11,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"golang.org/x/sys/windows"
 )
 
 func TestReadChildUsesHeldDirectoryAndRefusesDirectoryJunction(t *testing.T) {
@@ -48,9 +50,23 @@ func TestReadChildUsesHeldDirectoryAndRefusesDirectoryJunction(t *testing.T) {
 	if err != nil || string(data) != "ordinary test skill\n" {
 		t.Fatalf("held child read = %q, %v", data, err)
 	}
-	if writer, err := os.OpenFile(filePath, os.O_WRONLY, 0); err == nil {
+	writer, err := os.OpenFile(filePath, os.O_WRONLY, 0)
+	if err == nil {
 		writer.Close()
 		t.Fatal("regular child read allowed a concurrent write handle")
+	}
+	if !errors.Is(err, windows.ERROR_SHARING_VIOLATION) {
+		t.Fatalf("concurrent write failed with %v, want a sharing violation", err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	writer, err = os.OpenFile(filePath, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatalf("write open after the read handle closed: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
 	}
 	junction := filepath.Join(root, "linked")
 	if err := setTestMountPoint(t, junction, `\??\`+nested, nested); err != nil {

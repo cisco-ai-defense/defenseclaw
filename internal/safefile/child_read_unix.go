@@ -10,19 +10,50 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"golang.org/x/sys/unix"
 )
 
-// OpenDirectoryNoFollow opens a directory without following its final component.
+// OpenDirectoryNoFollow pins a directory through no-follow lookups from /.
+// No user-controlled ancestor is resolved through a symlink.
 func OpenDirectoryNoFollow(path string) (*os.File, error) {
-	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	abs, err := filepath.Abs(path)
 	if err != nil {
-		if info, statErr := os.Lstat(path); statErr == nil && info.Mode()&fs.ModeSymlink != 0 {
-			return nil, ErrSymlinkRefused
-		}
 		return nil, err
+	}
+	// macOS spells these fixed, system-owned roots through /private. Use the
+	// physical spelling rather than following even those symlinks. Never resolve
+	// arbitrary descendants with EvalSymlinks.
+	if runtime.GOOS == "darwin" {
+		for _, alias := range []string{"/var", "/tmp", "/etc"} {
+			if abs == alias || strings.HasPrefix(abs, alias+"/") {
+				abs = "/private" + abs
+				break
+			}
+		}
+	}
+	flags := unix.O_RDONLY | unix.O_DIRECTORY | unix.O_NOFOLLOW | unix.O_CLOEXEC
+	fd, err := unix.Open("/", flags, 0)
+	if err != nil {
+		return nil, err
+	}
+	for _, name := range strings.Split(strings.TrimPrefix(abs, "/"), "/") {
+		if name == "" {
+			continue
+		}
+		next, openErr := unix.Openat(fd, name, flags, 0)
+		if openErr != nil {
+			var info unix.Stat_t
+			if statErr := unix.Fstatat(fd, name, &info, unix.AT_SYMLINK_NOFOLLOW); statErr == nil && info.Mode&unix.S_IFMT == unix.S_IFLNK {
+				openErr = ErrSymlinkRefused
+			}
+			_ = unix.Close(fd)
+			return nil, openErr
+		}
+		_ = unix.Close(fd)
+		fd = next
 	}
 	return os.NewFile(uintptr(fd), path), nil
 }

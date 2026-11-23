@@ -5,6 +5,8 @@ package gateway
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
@@ -22,6 +24,14 @@ func (s *Sidecar) bindManifestReceipts(ctx context.Context, owner *sidecarOwnedO
 		reader = owner.destinationFactory.ManifestReceiptReader(ctx, plan)
 	}
 	binding := manifestReceiptRuntimeBinding{}
+	if plan != nil {
+		if destination, ok := plan.RuntimeDestination(config.ObservabilityV8ManagedAIDDestinationName); ok {
+			// Retain only an opaque identity, never the destination address or
+			// credentials, in the protected publisher state.
+			sum := sha256.Sum256([]byte(destination.Transport.Endpoint))
+			binding.destination = "sha256:" + hex.EncodeToString(sum[:])
+		}
+	}
 	if owner.runtime != nil && owner.runtime.Active() != nil {
 		binding.generation = owner.runtime.Active().Generation()
 		binding.current = func() uint64 {

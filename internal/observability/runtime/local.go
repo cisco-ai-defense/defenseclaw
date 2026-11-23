@@ -315,12 +315,26 @@ func (component *localLogComponent) Process(
 	metadata router.Metadata,
 	builder router.RecordBuilder,
 ) (pipeline.LocalLogOutcome, error) {
+	return component.process(ctx, metadata, builder, nil)
+}
+
+func (component *localLogComponent) ProcessChecked(ctx context.Context, metadata router.Metadata, builder router.RecordBuilder, check func(pipeline.LocalLogOutcome) bool) (pipeline.LocalLogOutcome, error) {
+	return component.process(ctx, metadata, builder, check)
+}
+
+func (component *localLogComponent) process(ctx context.Context, metadata router.Metadata, builder router.RecordBuilder, check func(pipeline.LocalLogOutcome) bool) (pipeline.LocalLogOutcome, error) {
 	if component == nil || component.pipeline == nil || component.store == nil ||
 		!component.active.Load() || component.closed.Load() {
 		return pipeline.LocalLogOutcome{}, &localFactoryError{}
 	}
 	ctx, pending, report := component.trackDeferred(ctx)
-	outcome, err := component.pipeline.Process(ctx, metadata, builder)
+	var outcome pipeline.LocalLogOutcome
+	var err error
+	if check == nil {
+		outcome, err = component.pipeline.Process(ctx, metadata, builder)
+	} else {
+		outcome, err = component.pipeline.ProcessChecked(ctx, metadata, builder, check)
+	}
 	if report.Deferred() {
 		pending.processed(outcome)
 		return outcome, err

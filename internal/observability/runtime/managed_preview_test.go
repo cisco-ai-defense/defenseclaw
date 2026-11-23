@@ -6,6 +6,7 @@ package runtime
 import (
 	"bytes"
 	"fmt"
+	"reflect"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -21,6 +22,7 @@ func TestProjectManagedLogIsPureAndMatchesDelivery(t *testing.T) {
 			const id = "preview-managed-record"
 			const content = "preview-person@example.test"
 			builder := runtimeContentRecordBuilder(id, content)
+			before := managedPreviewEnqueueCounts(t, runtime)
 			preview, err := runtime.ProjectManagedLog(t.Context(), diagnosticMetadata(t), builder)
 			if err != nil {
 				t.Fatal(err)
@@ -39,21 +41,15 @@ func TestProjectManagedLogIsPureAndMatchesDelivery(t *testing.T) {
 			if n := countRuntimeRecord(t, deps, id); n != 0 {
 				t.Fatalf("preview wrote %d records", n)
 			}
-			managed := adapters.named(t, config.ObservabilityV8ManagedAIDDestinationName)
-			operator := adapters.named(t, "operator-console")
-			select {
-			case <-managed.delivered:
-				t.Fatal("preview dispatched managed work")
-			default:
-			}
-			select {
-			case <-operator.delivered:
-				t.Fatal("preview dispatched operator work")
-			default:
+			if after := managedPreviewEnqueueCounts(t, runtime); !reflect.DeepEqual(before, after) {
+				t.Fatalf("preview attempted to enqueue work: before=%v after=%v", before, after)
 			}
 			outcome, err := runtime.Emit(t.Context(), diagnosticMetadata(t), builder)
 			if err != nil {
 				t.Fatal(err)
+			}
+			if after := managedPreviewEnqueueCounts(t, runtime); after[config.ObservabilityV8ManagedAIDDestinationName][0] != before[config.ObservabilityV8ManagedAIDDestinationName][0]+1 {
+				t.Fatalf("ordinary emit did not enqueue one managed item: before=%v after=%v", before, after)
 			}
 			for _, actual := range outcome.OptionalWork() {
 				if actual.Delivery().DestinationName != config.ObservabilityV8ManagedAIDDestinationName {
@@ -71,4 +67,26 @@ func TestProjectManagedLogIsPureAndMatchesDelivery(t *testing.T) {
 			t.Fatal("ordinary emit did not produce the managed projection")
 		})
 	}
+}
+
+// Enqueue counters change synchronously in Emit, independently of worker
+// scheduling. Delivery channels cannot prove that pure preview queued nothing.
+func managedPreviewEnqueueCounts(t *testing.T, runtime *Runtime) map[string][3]uint64 {
+	t.Helper()
+	lease, err := runtime.manager.Acquire(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lease.Release()
+	value, ok := lease.Component(DestinationDispatchComponentName)
+	component, typed := value.(*destinationDispatchComponent)
+	if !ok || !typed {
+		t.Fatal("destination dispatcher is unavailable")
+	}
+	counts := make(map[string][3]uint64, len(component.byName))
+	for name, target := range component.byName {
+		c := target.dispatcher.Counters()
+		counts[name] = [3]uint64{c.Accepted, c.Rejected, c.Dropped}
+	}
+	return counts
 }

@@ -13,12 +13,13 @@ package inventory
 import (
 	"encoding/json"
 	"fmt"
-	"github.com/defenseclaw/defenseclaw/internal/config"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/config"
 )
 
 func writeSkillFiles(t *testing.T, root string, files map[string]string) {
@@ -432,7 +433,7 @@ func TestSkillFrontMatterDescriptionAndVersion(t *testing.T) {
 		{"---\nname: a\nmetadata:\n  version: \"1.4\" # pinned\n  description: not top level\n---\n", "", "1.4"},
 		{"---\ndescription: >-\n  Folded over\n  two lines.\n\n  And a second paragraph.\nversion: 3\n---\n", "Folded over two lines. And a second paragraph.", "3"},
 		{"---\ndescription: |\n  keep # this\n  literal\nname: a\n---\n", "keep # this literal", ""},
-		{"---\ndescription: A plain value\n  wrapped onto a second line # not a comment\nname: a\n---\n", "A plain value wrapped onto a second line # not a comment", ""},
+		{"---\ndescription: A plain value\n  wrapped onto a second line # maintainer comment\nname: a\n---\n", "A plain value wrapped onto a second line", ""},
 		{"---\ndescription: \"A quoted value\n  that wraps\"\n---\n", "A quoted value that wraps", ""},
 		{"---\ndescription: first\ndescription: second\n---\n", "first", ""},
 		{"---\ndescription:\n  nested: map\n---\n", "", ""},
@@ -565,4 +566,95 @@ func TestSkillContentHashOptOutPreservesDiscovery(t *testing.T) {
 	}}}}
 	assertSkillWithoutFacts([]AISignal{svc.attributeUserScanSignal(old, "1000", "test-user")})
 	assertSkillWithoutFacts([]AISignal{svc.attributeSandboxSignal(old, "sandbox-id", "sandbox-name")})
+}
+
+func TestSkillFrontMatterKeepsMetadataDepthAndScalarBoundaries(t *testing.T) {
+	for _, tc := range []struct {
+		name, manifest string
+		want           skillFrontMatter
+	}{
+		{"direct metadata", "---\nmetadata:\n  extra:\n    author: Inner\n    version: hidden\n  author: Outer\n  version: 2\n---\n", skillFrontMatter{author: "Outer", version: "2"}},
+		{"indented delimiters", "---\ndescription: |\n  Before\n  ---\n  ...\n  After\nversion: 3\n---\n", skillFrontMatter{description: "Before --- ... After", version: "3"}},
+		{"plain continuation comments", "---\ndescription: Review changes\n  carefully # maintainer note\n  # an entire comment\n  before release\nversion: 4\n---\n", skillFrontMatter{description: "Review changes carefully before release", version: "4"}},
+		{"literal hashes", "---\ndescription: |\n  Keep # literal\nversion: 5\n---\n", skillFrontMatter{description: "Keep # literal", version: "5"}},
+		{"quoted hashes", "---\ndescription: \"Keep\n  # quoted\"\n---\n", skillFrontMatter{description: "Keep # quoted"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := parseSkillFrontMatter([]byte(tc.manifest)); got != tc.want {
+				t.Fatalf("frontmatter = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestSkillManifestIndexPreservesCurrentLookupsAtCapacity(t *testing.T) {
+	home := t.TempDir()
+	first, second := filepath.Join(home, "first"), filepath.Join(home, "second")
+	writeSkillFiles(t, first, map[string]string{"SKILL.md": "first"})
+	writeSkillFiles(t, second, map[string]string{"SKILL.md": "second"})
+	hash := skillManifestHash([]byte("first"))
+	svc := &ContinuousDiscoveryService{opts: AIDiscoveryOptions{HomeDir: home}, skillManifests: map[string]string{hash: filepath.Join(first, "SKILL.md")}}
+	for i := 1; i < maxSkillManifestFolders; i++ {
+		svc.skillManifests[fmt.Sprintf("old-%d", i)] = "unused"
+	}
+	facts := svc.skillFacts(first, false)
+	if facts.ManifestHash != hash || len(svc.skillManifests) != maxSkillManifestFolders {
+		t.Fatal("refreshing a known manifest evicted the full index")
+	}
+	other := svc.skillFacts(second, false)
+	if _, ok := svc.SkillManifest(hash); !ok || len(svc.skillManifests) != maxSkillManifestFolders {
+		t.Fatal("a new hash at capacity evicted an existing lookup")
+	}
+	if _, ok := svc.skillManifests[other.ManifestHash]; ok {
+		t.Fatal("manifest index exceeded its cap")
+	}
+	svc.beginSkillFactsScan()
+	if svc.skillManifests != nil {
+		t.Fatal("stale manifest paths survived the next scan reset")
+	}
+	svc.skillFacts(second, false)
+	if got, ok := svc.SkillManifest(other.ManifestHash); !ok || string(got) != "second" {
+		t.Fatal("next scan did not repopulate the current manifest")
+	}
+	svc.opts.DisableSkillContentHashes = true
+	if _, ok := svc.SkillManifest(other.ManifestHash); ok {
+		t.Fatal("disabled hashing allowed lazy body readback")
+	}
+}
+
+func TestSkillManifestIndexSurvivesScanUntilReadback(t *testing.T) {
+	home := t.TempDir()
+	root := filepath.Join(home, ".agents", "skills", "review")
+	writeSkillFiles(t, root, map[string]string{"SKILL.md": "first version"})
+	svc := &ContinuousDiscoveryService{
+		opts:    AIDiscoveryOptions{HomeDir: home},
+		catalog: []AISignature{{ID: "codex", SkillPaths: []string{"~/.agents/skills"}}},
+	}
+	manifestHash := func() string {
+		t.Helper()
+		for _, signal := range svc.detectSkills() {
+			for _, ev := range signal.Evidence {
+				if ev.Skill != nil && ev.Skill.ManifestHash != "" {
+					return ev.Skill.ManifestHash
+				}
+			}
+		}
+		t.Fatal("skill scan did not record a manifest hash")
+		return ""
+	}
+	first := manifestHash()
+	if body, ok := svc.SkillManifest(first); !ok || string(body) != "first version" {
+		t.Fatal("scan cleanup discarded a manifest before managed readback")
+	}
+	writeSkillFiles(t, root, map[string]string{"SKILL.md": "second version"})
+	second := manifestHash()
+	if first == second {
+		t.Fatal("changed manifest kept the old hash")
+	}
+	if _, ok := svc.skillManifests[first]; ok {
+		t.Fatal("next scan retained a stale manifest lookup")
+	}
+	if body, ok := svc.SkillManifest(second); !ok || string(body) != "second version" {
+		t.Fatal("next scan did not retain its current manifest")
+	}
 }

@@ -93,6 +93,13 @@ func (s *ContinuousDiscoveryService) resetSkillFacts() {
 	s.skillFactsMu.Unlock()
 }
 
+func (s *ContinuousDiscoveryService) beginSkillFactsScan() {
+	s.skillFactsMu.Lock()
+	s.skillFactsSeen, s.skillBytesRead = nil, 0
+	s.skillManifests = nil
+	s.skillFactsMu.Unlock()
+}
+
 // skillFacts returns the facts of the skill folder at path, computed once
 // per skill scan. One scan reads at most maxSkillScanBytes across all users.
 func (s *ContinuousDiscoveryService) skillFacts(path string, bundled bool) *AISkillFacts {
@@ -128,10 +135,12 @@ func (s *ContinuousDiscoveryService) skillFacts(path string, bundled bool) *AISk
 	}
 	s.skillFactsSeen[path] = facts
 	if facts.ManifestHash != "" {
-		if s.skillManifests == nil || len(s.skillManifests) >= maxSkillManifestFolders {
+		if s.skillManifests == nil {
 			s.skillManifests = map[string]string{}
 		}
-		s.skillManifests[facts.ManifestHash] = filepath.Join(path, manifestName)
+		if _, known := s.skillManifests[facts.ManifestHash]; known || len(s.skillManifests) < maxSkillManifestFolders {
+			s.skillManifests[facts.ManifestHash] = filepath.Join(path, manifestName)
+		}
 	}
 	return &facts
 }
@@ -139,6 +148,9 @@ func (s *ContinuousDiscoveryService) skillFacts(path string, bundled bool) *AISk
 // SkillManifest returns the SKILL.md a skill scan hashed to hash, read again
 // from its recorded root leaf, or false when it is gone or changed since.
 func (s *ContinuousDiscoveryService) SkillManifest(hash string) ([]byte, bool) {
+	if s.opts.DisableSkillContentHashes {
+		return nil, false
+	}
 	s.skillFactsMu.Lock()
 	path := s.skillManifests[hash]
 	s.skillFactsMu.Unlock()
@@ -375,11 +387,12 @@ func parseSkillFrontMatter(manifest []byte) skillFrontMatter {
 		return out
 	}
 	seen := map[string]bool{}
-	inMetadata := false
+	inMetadata, metadataIndent := false, 0
 	for i := 1; i < len(lines); i++ {
 		line := strings.TrimRight(lines[i], "\r")
 		trimmed := strings.TrimSpace(line)
-		if trimmed == "---" || trimmed == "..." {
+		indent := len(line) - len(strings.TrimLeft(line, " \t"))
+		if indent == 0 && (trimmed == "---" || trimmed == "...") {
 			break
 		}
 		key, value, ok := strings.Cut(trimmed, ":")
@@ -387,16 +400,18 @@ func parseSkillFrontMatter(manifest []byte) skillFrontMatter {
 			continue
 		}
 		value = strings.TrimSpace(value)
-		indent := len(line) - len(strings.TrimLeft(line, " \t"))
 		if indent == 0 {
 			inMetadata = key == "metadata" && value == ""
+			metadataIndent = 0
+		} else if inMetadata && metadataIndent == 0 {
+			metadataIndent = indent
 		}
 		var field *string
 		limit := 0
 		switch {
-		case key == "author" && (indent == 0 || inMetadata):
+		case key == "author" && (indent == 0 || inMetadata && indent == metadataIndent):
 			field, limit = &out.author, maxSkillAuthorBytes
-		case key == "version" && (indent == 0 || inMetadata):
+		case key == "version" && (indent == 0 || inMetadata && indent == metadataIndent):
 			field, limit = &out.version, maxSkillVersionBytes
 		case key == "description" && indent == 0:
 			field, limit = &out.description, maxSkillDescriptionBytes
@@ -405,6 +420,7 @@ func parseSkillFrontMatter(manifest []byte) skillFrontMatter {
 		}
 		block := isYAMLBlockIndicator(value)
 		inner, quoted := closedQuotedValue(value)
+		plain := !block && (value == "" || value[0] != '"' && value[0] != '\'')
 		switch {
 		case quoted:
 			value = inner
@@ -429,8 +445,17 @@ func parseSkillFrontMatter(manifest []byte) skillFrontMatter {
 					i++
 					continue
 				}
-				if len(next)-len(strings.TrimLeft(next, " \t")) <= indent || nextTrimmed == "---" || nextTrimmed == "..." {
+				if len(next)-len(strings.TrimLeft(next, " \t")) <= indent {
 					break
+				}
+				if plain {
+					if strings.HasPrefix(nextTrimmed, "#") {
+						i++
+						continue
+					}
+					if comment := strings.Index(nextTrimmed, " #"); comment >= 0 {
+						nextTrimmed = strings.TrimSpace(nextTrimmed[:comment])
+					}
 				}
 				if folded.Len() == 0 {
 					folded.WriteString(value)

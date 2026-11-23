@@ -103,6 +103,7 @@ type managedInventoryPublishFile struct {
 	ManifestReceipts      map[string]managedManifestReceiptState `json:"manifest_receipts,omitempty"`
 	ManifestReceiptCursor string                                 `json:"manifest_receipt_cursor,omitempty"`
 	ManifestBodyCursor    string                                 `json:"manifest_body_cursor,omitempty"`
+	ManifestDestination   string                                 `json:"manifest_destination,omitempty"`
 }
 
 // managedInventoryPublishState is the durable, process-wide publish memory. It
@@ -111,9 +112,10 @@ type managedInventoryPublishFile struct {
 // restart or upgrade does not trigger a fleet-wide republish storm or reset the
 // daily bundle clock.
 type managedInventoryPublishState struct {
-	mu   sync.Mutex
-	path string
-	file managedInventoryPublishFile
+	commitMu sync.Mutex
+	mu       sync.Mutex
+	path     string
+	file     managedInventoryPublishFile
 
 	// Bundle-due decision memoized per discovery scan so the two publishers
 	// reached from one inventory.fanoutReport agree, even though the timestamp
@@ -126,6 +128,8 @@ type managedInventoryPublishState struct {
 	receiptReader     managedaid.ManifestReceiptReader
 	receiptEpoch      uint64
 	receiptBinding    manifestReceiptRuntimeBinding
+	destinationEpoch  uint64
+	destinationDirty  bool
 }
 
 // newManagedInventoryPublishState returns nil outside managed_enterprise. A nil
@@ -232,36 +236,40 @@ func (state *managedInventoryPublishState) beginCycle(
 		return nil
 	}
 	return &managedInventoryPublishCycle{
-		state:       state,
-		now:         now,
-		scanID:      strings.TrimSpace(scanID),
-		forced:      state.bundleDue(scanID, now),
-		bundleScope: bundleScope,
-		published:   map[string]managedInventoryPublishRecord{},
+		state:            state,
+		now:              now,
+		scanID:           strings.TrimSpace(scanID),
+		forced:           state.bundleDue(scanID, now),
+		bundleScope:      bundleScope,
+		published:        map[string]managedInventoryPublishRecord{},
+		destinationEpoch: state.manifestDestinationEpoch(),
 	}
 }
 
 // managedInventoryPublishCycle accumulates one cycle's decisions so the state
 // file is written at most once per cycle (and not at all in steady state).
 type managedInventoryPublishCycle struct {
-	state               *managedInventoryPublishState
-	now                 time.Time
-	scanID              string
-	forced              bool
-	bundleScope         bool
-	degraded            bool
-	published           map[string]managedInventoryPublishRecord
-	skills              map[string]managedSkillState
-	manifests           map[string]managedSkillManifest
-	receipts            map[string]managedManifestReceiptState
-	manifestProjected   map[string]managedManifestReceiptState
-	receiptEpoch        uint64
-	receiptCursor       string
-	bodyCursor          string
-	receiptDirty        bool
-	receiptFresh        map[string]bool
-	receiptGeneration   uint64
-	receiptAcknowledged map[string]managedSkillManifest
+	state                  *managedInventoryPublishState
+	now                    time.Time
+	scanID                 string
+	forced                 bool
+	bundleScope            bool
+	degraded               bool
+	published              map[string]managedInventoryPublishRecord
+	skills                 map[string]managedSkillState
+	skillRemovalCandidates map[string]managedSkillState
+	skillRemovals          map[string]managedSkillState
+	manifests              map[string]managedSkillManifest
+	receipts               map[string]managedManifestReceiptState
+	manifestProjected      map[string]managedManifestReceiptState
+	receiptEpoch           uint64
+	receiptCursor          string
+	bodyCursor             string
+	receiptDirty           bool
+	receiptFresh           map[string]bool
+	receiptGeneration      uint64
+	receiptAcknowledged    map[string]managedSkillManifest
+	destinationEpoch       uint64
 }
 
 // forcedBundle reports whether this cycle ignores digests and publishes
@@ -365,11 +373,20 @@ func (cycle *managedInventoryPublishCycle) commit() {
 		return
 	}
 	state := cycle.state
+	// Keep the durable replacements in the same order as their state merges.
+	// A slow earlier writer must not replace a newer acknowledgement on disk.
+	state.commitMu.Lock()
+	defer state.commitMu.Unlock()
 	stampBundle := cycle.forced && cycle.bundleScope && !cycle.degraded
-	if len(cycle.published) == 0 && !stampBundle && !cycle.receiptDirty {
+	state.mu.Lock()
+	if cycle.destinationEpoch != state.destinationEpoch {
+		state.mu.Unlock()
 		return
 	}
-	state.mu.Lock()
+	if len(cycle.published) == 0 && !stampBundle && !cycle.receiptDirty && len(cycle.skillRemovals) == 0 && !state.destinationDirty {
+		state.mu.Unlock()
+		return
+	}
 	currentReceiptContext := cycle.receiptEpoch == state.receiptEpoch && (state.receiptBinding.current == nil || state.receiptBinding.current() == cycle.receiptGeneration)
 	if cycle.receipts != nil && currentReceiptContext {
 		state.file.ManifestReceipts = cycle.receipts
@@ -403,11 +420,29 @@ func (cycle *managedInventoryPublishCycle) commit() {
 	if _, ok := cycle.published[endpointSkillInventorySource]; ok && cycle.skills != nil {
 		state.file.Skills = cycle.skills
 		if cycle.manifests != nil && (cycle.receiptEpoch == 0 || currentReceiptContext) {
-			state.file.SkillManifests = cycle.manifests
+			progress := make(map[string]managedSkillManifest, len(cycle.manifests))
+			for hash, submitted := range cycle.manifests {
+				if latest := state.file.SkillManifests[hash]; latest.Parts == submitted.Parts && latest.Sent > submitted.Sent {
+					submitted.Sent = latest.Sent
+				}
+				progress[hash] = submitted
+			}
+			state.file.SkillManifests = progress
 			if cycle.bodyCursor != "" {
 				state.file.ManifestBodyCursor = cycle.bodyCursor
 			}
 		}
+	} else if len(cycle.skillRemovals) > 0 {
+		remaining := make(map[string]managedSkillState, len(state.file.Skills))
+		for id, skill := range state.file.Skills {
+			remaining[id] = skill
+		}
+		for id, removed := range cycle.skillRemovals {
+			if current, ok := remaining[id]; ok && current == removed {
+				delete(remaining, id)
+			}
+		}
+		state.file.Skills = remaining
 	}
 	if stampBundle {
 		state.file.FullBundleAt = cycle.now.UTC()
@@ -418,6 +453,7 @@ func (cycle *managedInventoryPublishCycle) commit() {
 	}
 	state.file.Version = managedInventoryPublishStateVersion
 	state.file.UpdatedAt = cycle.now.UTC()
+	state.destinationDirty = false
 	payload, err := json.MarshalIndent(state.file, "", "  ")
 	path := state.path
 	state.mu.Unlock()

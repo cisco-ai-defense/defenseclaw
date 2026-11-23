@@ -13,6 +13,7 @@ package inventory
 import (
 	"encoding/json"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -33,6 +34,11 @@ func pluginSkillFacts(t *testing.T, home string) (map[string]AISkillFacts, map[s
 		for _, ev := range signal.Evidence {
 			if ev.Skill != nil {
 				facts[signal.SignatureID+"/"+ev.Basename] = *ev.Skill
+				key := signal.SignatureID + "/" + ev.Basename
+				keys[key+"#fingerprint"] = signal.Fingerprint
+				keys[key+"#evidence"] = signal.EvidenceHash
+				keys[key+"#paths"] = strings.Join(signal.PathHashes, "|")
+				keys[key+"#entry"] = ev.PathHash
 				for _, row := range signal.Evidence {
 					if row.Type == "skill" {
 						keys[signal.SignatureID+"/"+ev.Basename] = row.PathHash
@@ -110,6 +116,15 @@ func TestDetectPluginSkillsFromTheAgentsRegistries(t *testing.T) {
 	if upgradedKeys["claudecode/review"] != keys["claudecode/review"] || upgraded["claudecode/review"].ContentHash == facts["claudecode/review"].ContentHash {
 		t.Fatalf("upgrade: key %q -> %q, hash unchanged %v", keys["claudecode/review"], upgradedKeys["claudecode/review"],
 			upgraded["claudecode/review"].ContentHash == facts["claudecode/review"].ContentHash)
+	}
+	for _, field := range []string{"#fingerprint", "#paths", "#entry"} {
+		key := "claudecode/review" + field
+		if upgradedKeys[key] == "" || upgradedKeys[key] != keys[key] {
+			t.Errorf("plugin upgrade changed %s: %q -> %q", field, keys[key], upgradedKeys[key])
+		}
+	}
+	if upgradedKeys["claudecode/review#evidence"] == keys["claudecode/review#evidence"] {
+		t.Fatal("plugin content change did not update the evidence hash")
 	}
 }
 

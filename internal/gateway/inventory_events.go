@@ -317,8 +317,13 @@ func emitEndpointInventory(
 			discoveredEntriesFromReport(*discoveryReport, inventory.SignalSkill, "skill"),
 			skillsComplete,
 		)
+		var removalErr error
+		skillEntries, removalErr = prepareManagedSkillSnapshot(ctx, emitter, skillEntries, skillsComplete, publish)
+		if removalErr != nil && firstErr == nil {
+			firstErr = removalErr
+		}
 		// A partial skill list cannot prune saved receipts or advance a manifest.
-		if skillsComplete && cfg != nil && cfg.AIDiscovery.IncludeSkillManifests {
+		if skillsComplete && managedInventorySnapshotEligible(endpointSkillInventorySource, config.ObservabilityV8ManagedSkillInventoryAction, skillEntries) && cfg != nil && cfg.AIDiscovery.IncludeSkillManifests {
 			publish.cycle.refreshManifestReceipts(ctx, emitter, skillEntries)
 			publish.cycle.attachSkillManifests(skillEntries)
 		}
@@ -1308,13 +1313,9 @@ func emitInventorySnapshot(
 			active++
 		}
 	}
-	limit := managedInventoryComponentLimit(managedAction, components)
-	carrier, carrierOK := endpointInventoryCarrierFor(managedAction, components)
-	if len(components) == 0 && strings.HasSuffix(source, "_mcp_tool_inventory") {
-		carrier, carrierOK = endpointInventoryCarrier{}, true
-	}
+	carrier, eligible := managedInventorySnapshotCarrier(source, managedAction, components)
 	action := managedAction
-	if partial || limit == 0 || len(components) > limit || !carrierOK {
+	if partial || !eligible {
 		partial = true
 		carrier = endpointInventoryCarrier{}
 		action = config.ObservabilityV8LocalInventoryDiagnosticAction
@@ -1376,6 +1377,20 @@ func emitInventorySnapshot(
 		}
 	}
 	return firstErr
+}
+
+func managedInventorySnapshotCarrier(source string, action observability.ProducerKey, components []endpointInventoryComponent) (endpointInventoryCarrier, bool) {
+	limit := managedInventoryComponentLimit(action, components)
+	carrier, ok := endpointInventoryCarrierFor(action, components)
+	if len(components) == 0 && strings.HasSuffix(source, "_mcp_tool_inventory") {
+		carrier, ok = endpointInventoryCarrier{}, true
+	}
+	return carrier, ok && limit > 0 && len(components) <= limit
+}
+
+func managedInventorySnapshotEligible(source string, action observability.ProducerKey, components []endpointInventoryComponent) bool {
+	_, eligible := managedInventorySnapshotCarrier(source, action, components)
+	return eligible
 }
 
 func managedInventoryLimit(action observability.ProducerKey) int {
