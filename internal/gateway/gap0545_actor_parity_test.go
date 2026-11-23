@@ -299,9 +299,9 @@ func gap0546Rows() []gap0546Row {
 // Read a/b/ssh/../.ssh/id_ed25519, cd -P a/b/ssh && cat id_ed25519, eval cat
 // a/b/ssh/id_ed25519 and eval "cat key-link" read the key and block as on
 // the laptop (substrate-1 GAP-0546: allowed or only CMD-EVAL); echo x >>
-// dc-link blocks tamper.detector_state_write and a shell write through a link
-// to ~/.claude alerts tamper.agent_hook_config_write, as on the laptop
-// (GAP-0547: allowed); a copy of the key or the SSH folder to a private place
+// dc-link alerts tamper.detector_state_write (an exact-path rule since the
+// DET111 carrier test change) and a shell write through a link to ~/.claude
+// alerts tamper.agent_hook_config_write, as on the laptop (GAP-0547: allowed); a copy of the key or the SSH folder to a private place
 // of the home alerts as on the laptop instead of blocking (GAP-0549 a), in
 // every pack, with the kit's honest facts.
 func TestGAP0546GAP0547ActorLinkFormsKeepLaptopVerdict(t *testing.T) {
