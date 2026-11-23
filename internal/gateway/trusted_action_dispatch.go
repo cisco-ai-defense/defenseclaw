@@ -6086,14 +6086,18 @@ var exactFallbackContracts = map[string]exactFallbackContract{
 		// the protected-cluster rule below is the explicit blocking boundary.
 		alertOnly: true,
 	},
+	// The blocking protected-cluster rule needs a Secret read the action
+	// names (R-NAME): an exact named read or a request whose resource is
+	// secrets. An undecomposed request fails closed only into the alert-only
+	// rule above (DET111 T20 review P2-2).
 	"credential.protected_kubernetes_named_secret_content_read": {
 		proves: func(input actionfacts.Input, facts actionfacts.Facts) bool {
 			_, ok := actionfacts.ExactKubernetesSecretContentRead(input, facts)
-			return ok || actionfacts.KubernetesSecretContentRequest(facts)
+			return ok || actionfacts.KubernetesKnownSecretContentRequest(facts)
 		},
 		boundedSubgraphProves: func(input actionfacts.Input, facts actionfacts.Facts) bool {
 			_, ok := actionfacts.ExactKubernetesSecretContentRead(input, facts)
-			return ok || actionfacts.KubernetesSecretContentRequest(facts)
+			return ok || actionfacts.KubernetesKnownSecretContentRequest(facts)
 		},
 		requiresExactDetectionProof: true,
 		codeOwnedDetection:          true,

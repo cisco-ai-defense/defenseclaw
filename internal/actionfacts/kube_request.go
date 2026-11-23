@@ -78,24 +78,43 @@ type KubeRequestFact struct {
 // decomposed (fail closed).
 func KubernetesSecretContentRequest(facts Facts) bool {
 	for _, request := range facts.KubeRequests {
-		if request.Subresource != "" {
-			continue
+		if kubeSecretContentRequest(request, true) {
+			return true
 		}
-		if request.Unknown {
-			if request.Resource == "" || request.Resource == kubernetesSecretResource {
-				return true
-			}
-			continue
+	}
+	return false
+}
+
+// KubernetesKnownSecretContentRequest is KubernetesSecretContentRequest for a
+// request the action itself names as a Secret read: its resource resolves to
+// secrets from the action's own spelling (R-NAME). A request that cannot be
+// decomposed (a kind named by a file, a dynamic resource) is no Secret read
+// for a blocking rule; only the alert-only rule fails closed on it (DET111
+// T20 review P2-2).
+func KubernetesKnownSecretContentRequest(facts Facts) bool {
+	for _, request := range facts.KubeRequests {
+		if kubeSecretContentRequest(request, false) {
+			return true
 		}
-		if request.Resource != kubernetesSecretResource {
-			continue
-		}
-		switch request.Verb {
-		case KubeVerbGet, KubeVerbList, KubeVerbWatch:
-			if request.Source == KubeSourceHTTP || request.RevealsContent {
-				return true
-			}
-		}
+	}
+	return false
+}
+
+// kubeSecretContentRequest reports one request that returns Secret content;
+// with failClosed an undecomposed request of an unknown or Secret kind counts.
+func kubeSecretContentRequest(request KubeRequestFact, failClosed bool) bool {
+	if request.Subresource != "" {
+		return false
+	}
+	if request.Unknown {
+		return failClosed && (request.Resource == "" || request.Resource == kubernetesSecretResource)
+	}
+	if request.Resource != kubernetesSecretResource {
+		return false
+	}
+	switch request.Verb {
+	case KubeVerbGet, KubeVerbList, KubeVerbWatch:
+		return request.Source == KubeSourceHTTP || request.RevealsContent
 	}
 	return false
 }
@@ -462,9 +481,16 @@ func kubectlRequests(commandID int64, argv []string, schemaNamespace string) []K
 func kubectlReadRequests(base KubeRequestFact, parsed kubectlArgv) []KubeRequestFact {
 	if len(parsed.operands) == 0 {
 		if _, ok := parsed.value("-f", "--filename", "-k", "--kustomize"); ok {
-			// Objects named by a file: their kinds are not in the action.
+			// Objects named by a file: their kinds are not in the action. A
+			// read that prints no object content (the table of get, describe)
+			// reads no Secret content whatever the file names, so only one
+			// that prints objects (-o json|yaml, a data template, edit) or
+			// whose options are not known is undecomposed (DET111 T20 review
+			// P2-2: kubectl get -f deploy.yaml is no Secret read).
 			request := base
-			request.Verb, request.Unknown = KubeVerbGet, true
+			request.Verb = KubeVerbGet
+			request.RevealsContent = kubectlPrintsObjects(parsed)
+			request.Unknown = request.RevealsContent || parsed.unknown
 			return []KubeRequestFact{request}
 		}
 		return nil
@@ -486,8 +512,6 @@ func kubectlReadRequests(base KubeRequestFact, parsed kubectlArgv) []KubeRequest
 			}
 		}
 	}
-	output, _ := parsed.value("-o", "--output")
-	template, hasTemplate := parsed.value("--template")
 	watch := parsed.flag("-w", "--watch", "--watch-only")
 	allNamespaces := parsed.flag("-A", "--all-namespaces")
 	_, selector := parsed.value("-l", "--selector")
@@ -511,13 +535,7 @@ func kubectlReadRequests(base KubeRequestFact, parsed kubectlArgv) []KubeRequest
 		default:
 			request.Verb = KubeVerbList
 		}
-		switch parsed.subcommand {
-		case "edit":
-			request.RevealsContent = true
-		case "get":
-			request.RevealsContent = kubectlOutputRevealsContent(output) ||
-				hasTemplate && kubectlSelectorRevealsContent(template)
-		}
+		request.RevealsContent = kubectlPrintsObjects(parsed)
 		secretLike := strings.Contains(strings.ToLower(target.kind), "secret")
 		if request.Resource == "" || strings.Contains(target.kind, awkprog.Hole) ||
 			strings.Contains(target.name, awkprog.Hole) && secretLike {
@@ -532,6 +550,20 @@ func kubectlReadRequests(base KubeRequestFact, parsed kubectlArgv) []KubeRequest
 		requests = append(requests, request)
 	}
 	return requests
+}
+
+// kubectlPrintsObjects reports a kubectl read that prints the objects it
+// reads: edit, or a get whose output (-o, --template) shows their content.
+func kubectlPrintsObjects(parsed kubectlArgv) bool {
+	switch parsed.subcommand {
+	case "edit":
+		return true
+	case "get":
+		output, _ := parsed.value("-o", "--output")
+		template, hasTemplate := parsed.value("--template")
+		return kubectlOutputRevealsContent(output) || hasTemplate && kubectlSelectorRevealsContent(template)
+	}
+	return false
 }
 
 // kubectlResource resolves a kubectl resource spelling (secret, secrets,
