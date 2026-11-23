@@ -110,11 +110,20 @@ func TestKnownCredentialReadTakesThePlainSpellingCellFiveTiers(t *testing.T) {
 				}))
 				out := decide.Decide(in)
 				if row.target == decide.TargetCredential {
-					// One's own file: the effects read is a shadow record
-					// (decide.RowEffectRead, GAP-1825/1826): it does not move
-					// the variant's verdict.
+					// One's own file: an effects read whose content stays
+					// local is a shadow record (decide.RowEffectRead,
+					// GAP-1825/1826): it does not move the variant's verdict.
 					if got := decideAction(out.Action); got != variantAction {
-						t.Errorf("%s %s %s: an effects read of %q moves the verdict %s -> %s", tier.name, route.connector, row.name, row.variant, variantAction, got)
+						t.Errorf("%s %s %s: a local effects read of %q moves the verdict %s -> %s", tier.name, route.connector, row.name, row.variant, variantAction, got)
+					}
+					// With its content shown to the agent (GAP-1846) it takes
+					// the plain spelling's cell, like another account's file.
+					shown := proof
+					shown.Flow = decide.FlowShown
+					in.Findings[len(in.Findings)-1] = decideFinding(RuleFinding{RuleID: decide.RuleFor(shown), Severity: "HIGH", Proof: shown})
+					if out := decide.Decide(in); decideAction(out.Action) != plainAction || out.Severity.String() != plainSeverity {
+						t.Errorf("%s %s %s: a shown read of %q is %s/%s, want the plain spelling %q verdict %s/%s",
+							tier.name, route.connector, row.name, row.variant, decideAction(out.Action), out.Severity, row.plain, plainAction, plainSeverity)
 					}
 					continue
 				}
