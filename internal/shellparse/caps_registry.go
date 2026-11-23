@@ -10,5 +10,4 @@ import "github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 // max* cap this package compares a count against is added here.
 var (
 	_ = bounded.Register("shellparse.maxSyntaxTailPieces", bounded.Items, int(maxSyntaxTailPieces))
-	_ = bounded.Register("shellparse.maxSyntaxTailRun", bounded.Items, int(maxSyntaxTailRun))
 )
