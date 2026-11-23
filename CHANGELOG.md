@@ -36,6 +36,7 @@ DefenseClaw 1.0.11 follows 1.0.10. It is a fix release. It updates OpenShell to 
 - **The skill publisher is a content field.** A publisher a SKILL.md declares is the skill author's own text, so a redacting profile now masks a secret in `defenseclaw.inventory.skill.publisher`, as it already did in the declared description and version.
 - **A skill folder that has not changed is not read again on every scan.** Discovery keeps each folder's hash while none of its files changed and reads every folder in full at least once a day. On a managed Windows machine every scan still reads every folder.
 - **Managed scans on macOS and Linux report every install of an agent.** Each copy of an agent binary in a user's bin folders or the machine prefixes is its own discovery signal, with `defenseclaw.ai.component.location` (`~/.local/bin/claude`, or `/opt/homebrew/bin/codex` for a system location).
+- **DefenseClaw now also checks skills that OpenCode loads from `~/.config/opencode/skill` and `skills`, `~/.opencode/skill` and `skills`, a project's `.opencode/skill` and `skills`, and the `.claude/skills` and `.agents/skills` folders in a project or your home.**
 
 ### Security
 
