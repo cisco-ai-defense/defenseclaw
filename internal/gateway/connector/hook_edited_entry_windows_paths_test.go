@@ -138,28 +138,32 @@ func TestGAP1923CodexSetupAndTeardownClaimWindowsPathCopies(t *testing.T) {
 	previous := CodexConfigPathOverride
 	CodexConfigPathOverride = path
 	t.Cleanup(func() { CodexConfigPathOverride = previous })
-	seed := func(commands ...map[string]string) string {
+	// Codex asks for a manual repair when one group holds several
+	// DefenseClaw handlers, so each copy gets its own run, in its own group
+	// before a group of the user's hooks.
+	seed := func(copied string) string {
 		var b strings.Builder
-		b.WriteString("[[hooks.PreToolUse]]\nmatcher = '*'\n")
-		for _, set := range commands {
-			for _, name := range gap1923Names(set) {
-				b.WriteString("\n[[hooks.PreToolUse.hooks]]\ncommand = " + gap1923JSON(t, set[name]) + "\ntype = 'command'\n")
-			}
+		b.WriteString("[[hooks.PreToolUse]]\nmatcher = '*'\n\n[[hooks.PreToolUse.hooks]]\ncommand = " +
+			gap1923JSON(t, copied) + "\ntype = 'command'\n\n[[hooks.PreToolUse]]\nmatcher = '*'\n")
+		for _, name := range gap1923Names(kept) {
+			b.WriteString("\n[[hooks.PreToolUse.hooks]]\ncommand = " + gap1923JSON(t, kept[name]) + "\ntype = 'command'\n")
 		}
 		return b.String()
 	}
-	gap1923WriteFile(t, path, seed(claimed, kept))
 	opts := gap1923SetupOpts(root)
 	codex := NewCodexConnector()
-	if err := codex.Setup(context.Background(), opts); err != nil {
-		t.Fatalf("Setup: %v", err)
+	for _, name := range gap1923Names(claimed) {
+		gap1923WriteFile(t, path, seed(claimed[name]))
+		if err := codex.Setup(context.Background(), opts); err != nil {
+			t.Fatalf("%s: Setup: %v", name, err)
+		}
+		gap1923Check(t, name+": Codex Setup", readHookFileForTest(t, path), len(kept))
+		gap1923WriteFile(t, path, seed(claimed[name]))
+		if err := codex.Teardown(context.Background(), opts); err != nil {
+			t.Fatalf("%s: Teardown: %v", name, err)
+		}
+		gap1923Check(t, name+": Codex Teardown", readHookFileForTest(t, path), len(kept))
 	}
-	gap1923Check(t, "Codex Setup", readHookFileForTest(t, path), len(kept))
-	gap1923WriteFile(t, path, seed(claimed, kept))
-	if err := codex.Teardown(context.Background(), opts); err != nil {
-		t.Fatalf("Teardown: %v", err)
-	}
-	gap1923Check(t, "Codex Teardown", readHookFileForTest(t, path), len(kept))
 }
 
 func TestGAP1923KiroSetupAndTeardownClaimWindowsPathCopies(t *testing.T) {
@@ -234,22 +238,23 @@ func TestGAP1923CopilotSetupAndTeardownClaimWindowsPathCopies(t *testing.T) {
 		return gap1923JSON(t, map[string]interface{}{"version": 1, "hooks": map[string]interface{}{"preToolUse": entries}})
 	}
 
-	// DefenseClaw owns this file: every copy is claimed and replaced.
+	// DefenseClaw owns this file: a copy is claimed and replaced. Copilot
+	// refuses an event with several DefenseClaw entries, so each copy gets
+	// its own run.
 	claimed := gap1923Claimed(t, "copilot-hook.sh", binding)
-	copies := make([]string, 0, len(claimed))
 	for _, name := range gap1923Names(claimed) {
-		copies = append(copies, claimed[name])
+		gap1923WriteFile(t, path, document(claimed[name]))
+		if err := patchCopilotHooks(path, hookScript); err != nil {
+			t.Errorf("%s: repair refused a file that holds only a DefenseClaw copy: %v", name, err)
+			continue
+		}
+		gap1923Check(t, name+": Copilot repair", readHookFileForTest(t, path), 0)
+		gap1923WriteFile(t, path, document(claimed[name]))
+		if err := removeCopilotHookReferences(path, hookScript); err != nil {
+			t.Fatalf("%s: uninstall: %v", name, err)
+		}
+		gap1923Check(t, name+": Copilot uninstall", readHookFileForTest(t, path), 0)
 	}
-	gap1923WriteFile(t, path, document(copies...))
-	if err := patchCopilotHooks(path, hookScript); err != nil {
-		t.Fatalf("repair refused a file that holds only DefenseClaw copies: %v", err)
-	}
-	gap1923Check(t, "Copilot repair", readHookFileForTest(t, path), 0)
-	gap1923WriteFile(t, path, document(copies...))
-	if err := removeCopilotHookReferences(path, hookScript); err != nil {
-		t.Fatalf("uninstall: %v", err)
-	}
-	gap1923Check(t, "Copilot uninstall", readHookFileForTest(t, path), 0)
 
 	// A user's command in it is not DefenseClaw's: the repair still refuses
 	// the file and uninstall keeps the command.
