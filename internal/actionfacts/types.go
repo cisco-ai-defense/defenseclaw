@@ -80,6 +80,14 @@ type Input struct {
 	// tool is read the same way without it (posixPowerShellScript,
 	// rel-1-0-10:GAP-1214).
 	PowerShellLauncherBody bool `json:"-"`
+	// FloorRaiseOnly is trusted caller provenance set on a reading made
+	// through a reading DefenseClaw 1.0.10 did not have (the -EncodedCommand
+	// body read past its blanks, psparse.NestedScript.BlankDecoded; the
+	// evaluated loop-header group of the gateway's argument reading). Every
+	// reading made of such a reading carries it. It changes no fact: the
+	// gateway lets the findings of such a reading raise the call but never
+	// folds an effect finding into them (DET111 ruling 2 on GAP-1984).
+	FloorRaiseOnly bool `json:"-"`
 	// WindowsHookHost is trusted hook-host context. A test can force Windows
 	// routing on a POSIX runner, whose process home does not describe the
 	// Windows shell's home. Such a call must not take the POSIX PowerShell

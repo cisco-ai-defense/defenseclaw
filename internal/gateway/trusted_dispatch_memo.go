@@ -114,8 +114,14 @@ func trustedDispatchMemoFrom(ctx context.Context) *trustedDispatchMemo {
 
 // dispatchTrustedAction judges request (dispatchTrustedActionOnce). The
 // outermost dispatch of a call begins its memo; the dispatches inside it,
-// its twins and simple-command passes, are judged through the memo.
+// its twins and simple-command passes, are judged through the memo. The
+// findings of a reading 1.0.10 did not have are marked as such
+// (withFloorRaiseOnlyMark).
 func dispatchTrustedAction(parent context.Context, request trustedActionRequest) []RuleFinding {
+	return withFloorRaiseOnlyMark(request, dispatchTrustedActionMemo(parent, request), 0)
+}
+
+func dispatchTrustedActionMemo(parent context.Context, request trustedActionRequest) []RuleFinding {
 	if trustedDispatchMemoOff.Load() {
 		return dispatchTrustedActionOnce(parent, request)
 	}

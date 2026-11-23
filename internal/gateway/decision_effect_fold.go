@@ -4,7 +4,11 @@
 
 package gateway
 
-import "github.com/defenseclaw/defenseclaw/internal/guardrail/decide"
+import (
+	"slices"
+
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/decide"
+)
 
 // joinEffectFindings is the call's findings with the effect lane's joined
 // (raise only). An effect finding whose protected set a 1.0.10 finding of
@@ -58,12 +62,19 @@ func findingEnforcementRank(f RuleFinding) int {
 // f11/f12), so f stands beside it (rel-1-0-10:GAP-1984). A 1.0.10 finding
 // that grades the set lower than f still takes f (its own 1.0.10 cell,
 // ruling A), and so does one that acts on its own.
+//
+// Fold targets are the findings of 1.0.10's own readings. A finding of a
+// reading 1.0.10 did not have (floorRaiseOnly: the -EncodedCommand body
+// read past its blanks, GAP-1199; an evaluated loop-header group, GAP-1550)
+// raises the call but takes no effect finding: folded into it, the effect
+// finding's CRITICAL fell to that reading's HIGH while the plain spelling
+// kept it (DET111 ruling 2, rel-1-0-10:GAP-1984).
 func foldTargetsFor(f RuleFinding, other []RuleFinding) []decide.Finding {
 	strong := findingEnforcementRank(f) > 1
 	_, sev := verdictSeverity(f)
 	var out []decide.Finding
 	for _, g := range other {
-		if g.Proof.Source == decide.SourceEffects {
+		if g.Proof.Source == decide.SourceEffects || g.floorRaiseOnly {
 			continue
 		}
 		if _, gs := verdictSeverity(g); strong && gs >= sev && findingEnforcementRank(g) == 1 {
@@ -72,6 +83,31 @@ func foldTargetsFor(f RuleFinding, other []RuleFinding) []decide.Finding {
 		out = append(out, decideFinding(g))
 	}
 	return out
+}
+
+// withFloorRaiseOnlyMark is findings, each marked floorRaiseOnly, when
+// request is a reading made through a reading 1.0.10 did not have
+// (actionfacts.Input.FloorRaiseOnly); from is the first finding the reading
+// made (the findings before it are the caller's). The marked list is a copy:
+// the dispatch memo keeps the reading's own.
+func withFloorRaiseOnlyMark(request trustedActionRequest, findings []RuleFinding, from int) []RuleFinding {
+	if !request.Input.FloorRaiseOnly || from >= len(findings) {
+		return findings
+	}
+	marked := slices.Clone(findings)
+	for i := from; i < len(marked); i++ {
+		marked[i].floorRaiseOnly = true
+	}
+	return marked
+}
+
+// withFloorRaiseOnlyOf is replacement standing for replaced, a finding of
+// the same rule: it is floorRaiseOnly only when both are, so a 1.0.10
+// reading's finding stays a fold target when a new reading proves its rule
+// more strongly.
+func withFloorRaiseOnlyOf(replacement, replaced RuleFinding) RuleFinding {
+	replacement.floorRaiseOnly = replacement.floorRaiseOnly && replaced.floorRaiseOnly
+	return replacement
 }
 
 // withEffectsFoldedEitherWay applies the same fold where two readings of

@@ -1154,7 +1154,8 @@ func trustedToolCallFindings(ctx context.Context, action trustedActionRequest, m
 			findings = withHostTwinFindings(findings, trustedToolCallFindingsOf(ctx, nested.request, mcpServer, secureClient))
 			continue
 		}
-		findings = trustedToolCallLaneFindings(ctx, nested.request, findings, mcpServer, secureClient)
+		from := len(findings)
+		findings = withFloorRaiseOnlyMark(nested.request, trustedToolCallLaneFindings(ctx, nested.request, findings, mcpServer, secureClient), from)
 	}
 	if twin, ok := localCommandLinkTwinRequest(action); ok {
 		// The shell call as it runs once its links are followed (command
@@ -1174,7 +1175,7 @@ func trustedToolCallFindings(ctx context.Context, action trustedActionRequest, m
 }
 
 func trustedToolCallFindingsOf(ctx context.Context, action trustedActionRequest, mcpServer string, secureClient bool) []RuleFinding {
-	return trustedToolCallLaneFindings(ctx, action, inspectDispatchTrustedAction(ctx, action), mcpServer, secureClient)
+	return withFloorRaiseOnlyMark(action, trustedToolCallLaneFindings(ctx, action, inspectDispatchTrustedAction(ctx, action), mcpServer, secureClient), 0)
 }
 
 // trustedToolCallLaneFindings adds to findings every reading of the call but

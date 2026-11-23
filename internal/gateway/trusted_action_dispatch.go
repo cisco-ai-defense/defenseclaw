@@ -575,7 +575,8 @@ func dispatchTrustedActionOnce(
 			}
 			effectRequest := request
 			defer func() {
-				findings = joinEffectFindings(findings, effectLiveFindings(effectRequest, mode, effectsRulesTierFor()))
+				findings = joinEffectFindings(withFloorRaiseOnlyMark(effectRequest, findings, 0),
+					effectLiveFindings(effectRequest, mode, effectsRulesTierFor()))
 			}()
 		case effectRulesShadow:
 			// Shadow: compute and record beside today's rules, off the hook's
@@ -5862,7 +5863,7 @@ func withTwinProvenBlocks(findings, twin []RuleFinding) []RuleFinding {
 		case index < 0:
 			findings = append(findings, proven)
 		case strength(proven) > strength(findings[index]):
-			findings[index] = proven
+			findings[index] = withFloorRaiseOnlyOf(proven, findings[index])
 		}
 	}
 	return findings
@@ -5958,7 +5959,7 @@ func withSimpleCommandFindings(findings, alone []RuleFinding) []RuleFinding {
 			(rank(finding) == rank(findings[index]) &&
 				canonicalTrustedRuleID(finding.RuleID) == key &&
 				canonicalTrustedRuleID(findings[index].RuleID) != key) {
-			findings[index] = finding
+			findings[index] = withFloorRaiseOnlyOf(finding, findings[index])
 		}
 	}
 	return findings
@@ -5980,7 +5981,7 @@ func withSequenceProvenFindings(findings, sequence []RuleFinding) []RuleFinding 
 		if index < 0 {
 			findings = append(findings, proven)
 		} else {
-			findings[index] = proven
+			findings[index] = withFloorRaiseOnlyOf(proven, findings[index])
 		}
 	}
 	return findings

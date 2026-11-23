@@ -28,9 +28,13 @@ import (
 // effect finding into any 1.0.10 finding naming its set, also one with no
 // proof that authorizes its rule (the nested decoded persistence finding of
 // gap-1576 f11/f12): the call fell from block to allow under a CRITICAL
-// finding. Every attack row keeps at least its T20 (23ee0d55e2) action in
-// every tier on the Claude Code hook, and no benign twin rises above its
-// T20 cell (action, then severity).
+// finding. Every attack row keeps at least its T20 (23ee0d55e2) cell
+// (action, then severity) in every tier on the Claude Code hook, and no
+// benign twin rises above its T20 cell. The findings of those two readings
+// raise the call but take no effect finding (DET111 ruling 2): folded into
+// the HIGH tamper.detector_state_write they make, the CRITICAL
+// effect.protected_target_restricted fell to HIGH under the same action
+// while the plain spelling kept CRITICAL.
 func TestGAP1984EffectFoldNeverLowersTheCall(t *testing.T) {
 	rows := gap1984Rows(t)
 	actionRank := map[string]int{"allow": 0, "alert": 1, "confirm": 2, "block": 3}
@@ -70,7 +74,7 @@ func TestGAP1984EffectFoldNeverLowersTheCall(t *testing.T) {
 					ga, gs := cell(got)
 					wa, ws := cell(r.t20[ti])
 					switch {
-					case r.attack && ga < wa:
+					case r.attack && (ga < wa || ga == wa && gs < ws):
 						t.Errorf("attack %s: %s, below the T20 cell %s", r.key, got, r.t20[ti])
 					case !r.attack && (ga > wa || ga == wa && gs > ws):
 						t.Errorf("benign twin %s: %s, above the T20 cell %s", r.key, got, r.t20[ti])

@@ -126,6 +126,11 @@ type RuleFinding struct {
 	// facts while the analysis read the call only in part, so it could not
 	// enforce (exact fallback, rel-1-0-10:GAP-0892). Private and value-free.
 	partialReading bool
+	// floorRaiseOnly marks a finding of a reading made through a reading
+	// DefenseClaw 1.0.10 did not have (actionfacts.Input.FloorRaiseOnly,
+	// withFloorRaiseOnlyMark): it raises the call, never takes an effect
+	// finding into its own cell (foldTargetsFor). Private and value-free.
+	floorRaiseOnly bool
 	// evaluationFault marks the finding of a call the evaluation failed on:
 	// the shell parser failed on its text (shellparse.ErrParserFault) or a
 	// reader panicked (recoverTrustedActionFault). Nothing proves what the

@@ -17,6 +17,11 @@ type NestedScript struct {
 	Static  bool
 	Reason  string // set when !Static (a Reason* code)
 	Source  Node   // the command or expression it was embedded in
+	// BlankDecoded is an -EncodedCommand body read only through the host
+	// decoder's skip of the tab, CR and LF blanks inside its quoted value
+	// (hostWord.enc, rel-1-0-10:GAP-1199), a reading DefenseClaw 1.0.10 did
+	// not have. It is provenance only: the body is read the same either way.
+	BlankDecoded bool
 }
 
 const (
@@ -604,7 +609,7 @@ func decodeWord(w hostWord, src Node) NestedScript {
 		return ns
 	}
 	if dec, ok := DecodeEncodedCommand(text); ok {
-		ns.Text, ns.Static = dec, true
+		ns.Text, ns.Static, ns.BlankDecoded = dec, true, !w.static
 	} else {
 		ns.Reason = ReasonNonLiteral
 	}
