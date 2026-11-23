@@ -269,6 +269,7 @@ func TestDetectSkillsAttachesFactsOncePerFolder(t *testing.T) {
 		Enabled: true, Mode: "enhanced", DataDir: filepath.Join(home, "data"), HomeDir: home,
 	}, catalog)
 	cleanupPreparedDiscoveryService(t, svc)
+	svc.skillClock = skillClockAfterTheWrites
 
 	var facts []*AISkillFacts
 	for _, signal := range svc.detectSkills() {

@@ -31,6 +31,7 @@ func TestSkillHashCacheAgesOut(t *testing.T) {
 		Enabled: true, Mode: "enhanced", DataDir: filepath.Join(home, "data"), HomeDir: home,
 	}, nil)
 	cleanupPreparedDiscoveryService(t, svc)
+	svc.skillClock = skillClockAfterTheWrites
 
 	first := *svc.skillFacts(dir, false)
 	// Every folder is read again once its cached hash is a day old.
@@ -66,6 +67,7 @@ func TestSkillHashCacheManagedWindowsReadsEveryScan(t *testing.T) {
 		Enabled: true, Mode: "enhanced", DataDir: filepath.Join(home, "data"), HomeDir: home,
 	}, nil)
 	cleanupPreparedDiscoveryService(t, svc)
+	svc.skillClock = skillClockAfterTheWrites
 	svc.opts.ManagedEnterprise = true
 	svc.skillFacts(dir, false)
 	svc.resetSkillFacts()
