@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync/atomic"
 	"testing"
 	"testing/synctest"
@@ -40,6 +41,20 @@ func startWorker(t *testing.T, w *Worker) string {
 	}
 	t.Fatal("worker did not start")
 	return ""
+}
+
+// skipSidecarClientOnWindows skips a test that sends a job through
+// scanner.RemoteScanner. The scanner sidecar is Linux only (the chart's
+// container; processutil.PodRunner refuses everywhere else, see
+// TestGAP1035PodRunnerRefusesOffLinux), and the client refuses every Windows
+// folder because Windows reports mode 0777 for all of them
+// (scanner.TestRemoteScannerRefusesEveryScanOnWindows). The worker's own
+// handler tests above and below run on Windows.
+func skipSidecarClientOnWindows(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("the scanner sidecar client is Linux only: it refuses every folder on Windows (GAP-1050)")
+	}
 }
 
 func skillDir(t *testing.T) string {
@@ -149,6 +164,7 @@ func TestScanWorkerQueueFullWaitsNotAllows(t *testing.T) {
 }
 
 func TestScanWorkerTimeout(t *testing.T) {
+	skipSidecarClientOnWindows(t)
 	dir := startWorker(t, &Worker{Timeout: 100 * time.Millisecond,
 		Scan: func(ctx context.Context, _, _ string, _ scanner.RemoteSettings) (*scanner.ScanResult, error) {
 			<-ctx.Done()
@@ -164,6 +180,7 @@ func TestScanWorkerTimeout(t *testing.T) {
 // The job the gateway wrote reaches the scanner as regular files, and the
 // worker deletes it after the scan.
 func TestScanWorkerScansJobAndDeletesIt(t *testing.T) {
+	skipSidecarClientOnWindows(t)
 	var seen string
 	dir := startWorker(t, &Worker{Scan: func(ctx context.Context, k, d string, s scanner.RemoteSettings) (*scanner.ScanResult, error) {
 		b, err := os.ReadFile(filepath.Join(d, "SKILL.md"))

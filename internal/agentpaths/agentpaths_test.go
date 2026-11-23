@@ -10,7 +10,9 @@ import (
 func TestDirsLaptopOrderAndScopes(t *testing.T) {
 	in := Inputs{Home: "/h", Cwd: "/w", ConfigHome: "/cfg", GOOS: "linux", Dynamic: func(k string) []string {
 		if k == DynClaudeProjectSkills {
-			return []string{"/w/.claude/skills", "/w/sub/.claude/skills"}
+			// The real provider (claudecodepath.ProjectSkillDirs) joins with
+			// filepath, so its folders are OS-native; Dirs does not rewrite them.
+			return []string{filepath.FromSlash("/w/.claude/skills"), filepath.FromSlash("/w/sub/.claude/skills")}
 		}
 		return nil
 	}}

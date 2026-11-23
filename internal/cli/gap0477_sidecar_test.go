@@ -9,6 +9,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -40,6 +41,12 @@ func gap0477ScanDir(t *testing.T) string {
 // gateway has no sidecar path: the folder was unscanned (fail mode, MEDIUM
 // alert in OSS) and the model read it.
 func TestMidSessionSkillBlockedBySidecarScan(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// The sidecar is the chart's Linux container; its client refuses every
+		// Windows folder (scanner.TestRemoteScannerRefusesEveryScanOnWindows) and
+		// the gateway builds it only when /run/defenseclaw-scan exists (GAP-1050).
+		t.Skip("the scanner sidecar client is Linux only: it refuses every folder on Windows")
+	}
 	dir := gap0477ScanDir(t)
 	var scannedSkill string
 	w := &scanworker.Worker{Dir: dir, Scan: func(_ context.Context, kind, job string, _ scanner.RemoteSettings) (*scanner.ScanResult, error) {
