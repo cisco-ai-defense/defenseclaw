@@ -11,6 +11,8 @@ import (
 	"unicode"
 
 	"mvdan.cc/sh/v3/syntax"
+
+	"github.com/defenseclaw/defenseclaw/internal/asciifold"
 )
 
 // DefenseClawControlKind names how a command reaches DefenseClaw's own
@@ -558,11 +560,33 @@ func fanOut(argv []string, name string) ([][]string, bool) {
 // and whose commands the parse could not resolve (a program in a variable, a
 // script fed to a shell on stdin, a reading cut by the parse bounds) is the
 // unknown tier, never a clean allow.
-func DefenseClawControl(facts Facts, text string) []DefenseClawControlFact {
+//
+// The gateway calls it outside Analyze's recovery, so a reader fault is
+// contained here: it is a reading that could not resolve the commands, the
+// unknown tier when the text names DefenseClaw and nothing otherwise, as a
+// parse that could not resolve them (GAP-1914: a fault here reached the hook's
+// fail-mode answer).
+func DefenseClawControl(facts Facts, text string) (out []DefenseClawControlFact) {
+	defer func() {
+		if recover() != nil {
+			out = nil
+			if containsFold(text, defenseClawNamespace) {
+				out = []DefenseClawControlFact{{Kind: DefenseClawControlUnproven}}
+			}
+		}
+	}()
+	if defenseClawControlFaultHook != nil {
+		defenseClawControlFaultHook()
+	}
 	reader := &controlReader{seen: map[DefenseClawControlFact]bool{}}
 	reader.read(facts, text, 0)
 	return reader.out
 }
+
+// defenseClawControlFaultHook is a test-only seam: when non-nil it runs at the
+// start of every DefenseClawControl, inside its recovery. Production never
+// sets it.
+var defenseClawControlFaultHook func()
 
 type controlReader struct {
 	out  []DefenseClawControlFact
@@ -1136,7 +1160,7 @@ func packageManagerRemovesDefenseClaw(manager string, words, flags []string) boo
 // scratch folder) is that test's own gateway, not this host's guard.
 func pidFileInState(text, home string) bool {
 	for start := 0; ; {
-		index := strings.Index(strings.ToLower(text[start:]), ".pid")
+		index := strings.Index(asciifold.Lower(text[start:]), ".pid")
 		if index < 0 {
 			return false
 		}
@@ -2353,7 +2377,7 @@ func namesProduct(text string) bool {
 		}
 		// A Windows service or task: DefenseClaw, then an upper-case letter or
 		// an underscore (DefenseClawGateway, DefenseClawCertGuardian_<hex>).
-		if index := strings.Index(strings.ToLower(base), defenseClawNamespace); index >= 0 && index+len(defenseClawNamespace) < len(base) {
+		if index := strings.Index(asciifold.Lower(base), defenseClawNamespace); index >= 0 && index+len(defenseClawNamespace) < len(base) {
 			next := base[index+len(defenseClawNamespace)]
 			if next >= 'A' && next <= 'Z' || next == '_' {
 				return true

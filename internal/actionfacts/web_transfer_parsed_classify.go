@@ -23,6 +23,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/asciifold"
 )
 
 type curlTransferProjection struct {
@@ -3048,7 +3050,7 @@ func curlEffectiveSOCKSProxyOption(
 // curlProxyResolvesTargetHostname reports whether the effective SOCKS mode
 // carries the URL hostname to the proxy instead of resolving it locally.
 func curlProxyResolvesTargetHostname(canonical string, value string) bool {
-	if delimiter := strings.Index(strings.ToLower(value), "://"); delimiter >= 0 {
+	if delimiter := strings.Index(asciifold.Lower(value), "://"); delimiter >= 0 {
 		switch strings.ToLower(value[:delimiter]) {
 		case "socks4a", "socks5h":
 			return true
@@ -4137,7 +4139,7 @@ func curlProxyURLCredentialFields(
 	value string,
 ) (user string, password string, present bool, valid bool) {
 	remainder := value
-	if delimiter := strings.Index(strings.ToLower(value), "://"); delimiter >= 0 {
+	if delimiter := strings.Index(asciifold.Lower(value), "://"); delimiter >= 0 {
 		remainder = value[delimiter+3:]
 	} else if strings.HasPrefix(remainder, "//") {
 		remainder = remainder[2:]
@@ -5167,7 +5169,7 @@ func staticCurlFTPProxyRoute(
 		preproxyOption := parsed.Options[lastPreproxy]
 		preproxyScheme := ""
 		if delimiter := strings.Index(
-			strings.ToLower(preproxyOption.Value),
+			asciifold.Lower(preproxyOption.Value),
 			"://",
 		); delimiter >= 0 {
 			preproxyScheme = strings.ToLower(preproxyOption.Value[:delimiter])
@@ -5468,7 +5470,7 @@ func curlProxyDecodedControlUserinfoDisables(
 		return false
 	}
 	remainder := value
-	if delimiter := strings.Index(strings.ToLower(value), "://"); delimiter >= 0 {
+	if delimiter := strings.Index(asciifold.Lower(value), "://"); delimiter >= 0 {
 		scheme := strings.ToLower(value[:delimiter])
 		switch scheme {
 		case "http", "https", "socks", "socks4", "socks4a", "socks5", "socks5h":
@@ -5539,7 +5541,7 @@ func staticCurlProxyFact(
 	}
 	socks := canonical == "--socks4" || canonical == "--socks4a" ||
 		canonical == "--socks5" || canonical == "--socks5-hostname"
-	lower := strings.ToLower(value)
+	lower := asciifold.Lower(value)
 	explicitScheme := ""
 	if delimiter := strings.Index(lower, "://"); delimiter >= 0 {
 		explicitScheme = lower[:delimiter]
@@ -5597,7 +5599,7 @@ func curlSOCKS4UserWithinBounds(
 		return true
 	}
 	remainder := value
-	if delimiter := strings.Index(strings.ToLower(value), "://"); delimiter >= 0 {
+	if delimiter := strings.Index(asciifold.Lower(value), "://"); delimiter >= 0 {
 		remainder = value[delimiter+3:]
 	} else if strings.HasPrefix(remainder, "//") {
 		remainder = remainder[2:]
@@ -5626,7 +5628,7 @@ func curlSOCKS4UserWithinBounds(
 
 func curlProxyUsesSOCKS4(canonical string, value string) bool {
 	socks4 := canonical == "--socks4" || canonical == "--socks4a"
-	if delimiter := strings.Index(strings.ToLower(value), "://"); delimiter >= 0 {
+	if delimiter := strings.Index(asciifold.Lower(value), "://"); delimiter >= 0 {
 		switch strings.ToLower(value[:delimiter]) {
 		case "socks", "socks4", "socks4a":
 			return true
@@ -5641,7 +5643,7 @@ func curlProxyUsesSOCKS4(canonical string, value string) bool {
 
 func curlProxyUsesSOCKS4A(canonical string, value string) bool {
 	socks4a := canonical == "--socks4a"
-	if delimiter := strings.Index(strings.ToLower(value), "://"); delimiter >= 0 {
+	if delimiter := strings.Index(asciifold.Lower(value), "://"); delimiter >= 0 {
 		switch strings.ToLower(value[:delimiter]) {
 		case "socks4a":
 			return true
@@ -6410,7 +6412,7 @@ func curlRemoteNameFilename(
 	command CommandFact,
 	target curlTransferTarget,
 ) (string, bool) {
-	lower := strings.ToLower(target.Value)
+	lower := asciifold.Lower(target.Value)
 	schemeEnd := strings.Index(lower, "://")
 	if schemeEnd < 0 {
 		return "", false

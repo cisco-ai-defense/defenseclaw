@@ -15,6 +15,7 @@ import (
 	"strings"
 	"unicode"
 
+	"github.com/defenseclaw/defenseclaw/internal/asciifold"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/paymentcard"
 	"github.com/defenseclaw/defenseclaw/internal/secretshape"
@@ -1232,7 +1233,7 @@ func acceptedCredentialMatch(ruleID, match string) bool {
 
 func credentialCandidate(ruleID, match string) string {
 	trimmed := strings.Trim(strings.TrimSpace(match), `"'`)
-	lower := strings.ToLower(trimmed)
+	lower := asciifold.Lower(trimmed)
 	switch ruleID {
 	case "SEC-AWS-KEY":
 		if len(trimmed) > 4 {

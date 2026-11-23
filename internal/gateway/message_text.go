@@ -28,6 +28,7 @@ import (
 	"unicode/utf16"
 	"unicode/utf8"
 
+	"github.com/defenseclaw/defenseclaw/internal/asciifold"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 	publicschemas "github.com/defenseclaw/defenseclaw/schemas"
 )
@@ -82,7 +83,7 @@ const (
 	messageRunMinBytes = 16
 )
 
-// Key names are matched with asciiLowerPreservingBytes on both sides: a full
+// Key names are matched with asciifold.Lower on both sides: a full
 // Unicode lowercase would read a key like "İd" as "id" in Go and not in
 // JavaScript.
 //
@@ -250,7 +251,7 @@ func (w *messageWalk) walk(value interface{}, depth int, path string) {
 			keys = append(keys, k)
 		}
 		rank := func(k string) int {
-			lower := asciiLowerPreservingBytes(k)
+			lower := asciifold.Lower(k)
 			for i, t := range messageTextKeys {
 				if t == lower {
 					return i
@@ -270,7 +271,7 @@ func (w *messageWalk) walk(value interface{}, depth int, path string) {
 			if path != "" {
 				child = path + "." + k
 			}
-			if messageRoutingKeys[asciiLowerPreservingBytes(k)] && w.routingValue(child, v[k]) {
+			if messageRoutingKeys[asciifold.Lower(k)] && w.routingValue(child, v[k]) {
 				continue
 			}
 			if s, ok := v[k].(string); ok && messageAttachmentField(k) && w.attachment(s) {
@@ -345,7 +346,7 @@ func (w *messageWalk) fileRouting(path, s string) {
 // (an attachments[] entry names its own). A text field (message, text,
 // caption, content, body ...) is always text, whatever it holds.
 func messageAttachmentField(key string) bool {
-	return messageAttachmentKeys[asciiLowerPreservingBytes(key)]
+	return messageAttachmentKeys[asciifold.Lower(key)]
 }
 
 // messageAttachmentKeys and messageDataURLHeaderMaxBytes are
@@ -364,7 +365,7 @@ var messageAttachmentKeys, messageDataURLHeaderMaxBytes = func() (map[string]boo
 	}
 	keys := make(map[string]bool, len(limits.Keys))
 	for _, k := range limits.Keys {
-		keys[asciiLowerPreservingBytes(k)] = true
+		keys[asciifold.Lower(k)] = true
 	}
 	return keys, limits.HeaderMax
 }()

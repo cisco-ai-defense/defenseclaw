@@ -6,6 +6,8 @@ package hookpaths
 import (
 	"strings"
 	"unicode"
+
+	"github.com/defenseclaw/defenseclaw/internal/asciifold"
 )
 
 // powerShellQuotedPathMax bounds the quoted paths of one call the client
@@ -136,7 +138,7 @@ func psHomeQuotedPath(text, home string) (string, bool) {
 	default:
 		return "", false
 	}
-	lower := strings.ToLower(text)
+	lower := asciifold.Lower(text)
 	for _, variable := range variables {
 		rest, ok := strings.CutPrefix(lower, variable)
 		if !ok || rest == "" || rest[0] != '\\' && rest[0] != '/' {

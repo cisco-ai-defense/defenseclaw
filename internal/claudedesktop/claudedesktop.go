@@ -70,6 +70,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/asciifold"
 )
 
 // Deployment says which Claude Desktop deployment a data folder belongs to.
@@ -418,12 +420,12 @@ func splitGlob(pattern string) (parent, element, rest string, ok bool) {
 // Packages/Claude_<id> folder of the same base.
 func preferredNames(goos, pattern string) map[string]bool {
 	var out map[string]bool
-	hay := asciiLower(filepath.ToSlash(pattern)) + "/"
+	hay := asciifold.Lower(filepath.ToSlash(pattern)) + "/"
 	for _, root := range roots[goos] {
 		if root.Prefer == "" {
 			continue
 		}
-		at := strings.Index(hay, "/"+asciiLower(root.Path)+"/")
+		at := strings.Index(hay, "/"+asciifold.Lower(root.Path)+"/")
 		if at < 0 {
 			continue
 		}
@@ -460,17 +462,6 @@ func foldName(goos, name string) string {
 		return strings.ToLower(name)
 	}
 	return name
-}
-
-// asciiLower lowers ASCII letters only, so byte offsets stay the same.
-func asciiLower(s string) string {
-	b := []byte(s)
-	for i, c := range b {
-		if 'A' <= c && c <= 'Z' {
-			b[i] = c + 'a' - 'A'
-		}
-	}
-	return string(b)
 }
 
 // linuxEngineBuildsMax bounds the build folders one Linux version folder is

@@ -29,6 +29,11 @@ var evaluatorFaults atomic.Int64
 // evaluation fail. Production never sets it.
 var trustedActionFaultHook func(trustedActionRequest)
 
+// trustedToolLaneFaultHook is a test-only seam: when non-nil it runs at the
+// start of every trustedToolCallLaneFindings, after the dispatch and outside
+// its recovery, so a test can make a lane fail. Production never sets it.
+var trustedToolLaneFaultHook func(trustedActionRequest)
+
 // acpEvaluateFaultHook is a test-only seam: when non-nil it runs at the start
 // of every ACP frame evaluation (handleACPEvaluate), inside its recovery, so
 // a route test can make it fail. Production never sets it.

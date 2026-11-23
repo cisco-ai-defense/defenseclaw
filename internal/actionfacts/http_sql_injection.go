@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/defenseclaw/defenseclaw/internal/asciifold"
 )
 
 var (
@@ -374,7 +376,7 @@ func exactHTTPSQLInjectionTechniques(value string) []HTTPSQLInjectionTechnique {
 
 func exactHTTPQuotedBooleanTautology(value string) bool {
 	value = strings.TrimSpace(value)
-	lower := strings.ToLower(value)
+	lower := asciifold.Lower(value)
 	const quotedMarker = "' or '"
 	if index := strings.Index(lower, quotedMarker); index >= 0 &&
 		httpSQLIdentifierPrefixPattern.MatchString(value[:index]) {
@@ -391,7 +393,7 @@ func exactHTTPQuotedBooleanTautology(value string) bool {
 
 func exactHTTPUnionSelect(value string) bool {
 	value = strings.TrimSpace(value)
-	lower := strings.ToLower(value)
+	lower := asciifold.Lower(value)
 	marker := " union select "
 	index := strings.Index(lower, marker)
 	if index < 0 || strings.Contains(value, ";") || !httpSQLPrefixPattern.MatchString(strings.TrimSpace(value[:index])) {
@@ -405,7 +407,7 @@ func exactHTTPUnionSelect(value string) bool {
 	statement = strings.TrimSpace(statement[:comment])
 	selectPart := statement
 	fromPart := ""
-	if fromIndex := strings.Index(strings.ToLower(statement), " from "); fromIndex >= 0 {
+	if fromIndex := strings.Index(asciifold.Lower(statement), " from "); fromIndex >= 0 {
 		selectPart = strings.TrimSpace(statement[:fromIndex])
 		fromPart = strings.TrimSpace(statement[fromIndex+len(" from "):])
 	}
@@ -417,7 +419,7 @@ func exactHTTPUnionSelect(value string) bool {
 	}
 	table := fromPart
 	where := ""
-	if whereIndex := strings.Index(strings.ToLower(fromPart), " where "); whereIndex >= 0 {
+	if whereIndex := strings.Index(asciifold.Lower(fromPart), " where "); whereIndex >= 0 {
 		table = strings.TrimSpace(fromPart[:whereIndex])
 		where = strings.TrimSpace(fromPart[whereIndex+len(" where "):])
 	}

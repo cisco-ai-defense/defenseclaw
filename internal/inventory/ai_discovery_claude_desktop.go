@@ -16,6 +16,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/defenseclaw/defenseclaw/internal/asciifold"
 	"github.com/defenseclaw/defenseclaw/internal/claudedesktop"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
@@ -273,7 +274,7 @@ func claudeDesktopNewestVersion(dir, prefix string, acc *claudeDesktopAcc, limit
 	best := ""
 	for _, entry := range entries {
 		name := entry.Name()
-		if !entry.IsDir() || !strings.HasPrefix(strings.ToLower(name), prefix) {
+		if !entry.IsDir() || !strings.HasPrefix(asciifold.Lower(name), prefix) {
 			continue
 		}
 		version := name[len(prefix):]

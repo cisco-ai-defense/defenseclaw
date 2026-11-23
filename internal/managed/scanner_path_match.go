@@ -16,7 +16,11 @@
 
 package managed
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/asciifold"
+)
 
 // windowsPathWithinProfileRoots compares Windows paths on component boundaries.
 // The Windows caller resolves existing reparse points and short names first.
@@ -36,7 +40,7 @@ func windowsPathWithinProfileRoots(path string, roots []string) bool {
 
 func normalizeWindowsProfileComparePath(path string) string {
 	path = strings.ReplaceAll(path, "/", `\`)
-	lower := strings.ToLower(path)
+	lower := asciifold.Lower(path)
 	if strings.HasPrefix(lower, `\\?\unc\`) {
 		path = `\\` + path[len(`\\?\UNC\`):]
 	} else if strings.HasPrefix(lower, `\\?\`) {
