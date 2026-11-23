@@ -96,6 +96,7 @@ These messages come from the cluster or from the launcher:
 | MCP bridges need WebSocket. Your network allows only the long-poll fallback. | `websocket_required` | Use a network that allows WebSocket |
 | This agent already has the most bridged MCP servers allowed (mcp_bridge.max_servers). | `too_many_streams` | Bridge fewer servers, or ask your administrator to raise `max_servers` |
 | NAME is not a valid MCP server name (a-z, 0-9, _ and -, up to 32). | `not_found` | Use a valid name |
+| NAME is on this cluster's MCP block list, so it cannot be bridged. Ask your administrator. | `mcp_server_blocked` | An administrator blocked this MCP server name. Ask your administrator to remove it from the block list, or use another server |
 | The cluster could not reach the agent; it may still be starting. Try again in a moment, or check it with: defenseclaw substrate status | `relay_unreachable` | Wait for the agent to start, then try again |
 | This agent's relay accepts TLS only and its image predates that. Rebuild its template (`template build`) and start a new agent. | `relay_tls_required` | Rebuild the template and start a new agent |
 | Another launcher already bridges NAME to this agent. | `mcp_busy` | Stop the other launcher, or use another name |

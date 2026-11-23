@@ -441,7 +441,7 @@ func TestMCPBridgeRefusalsPrinted(t *testing.T) {
 		status int
 		reason string
 	}{
-		{403, "mcp_bridge_off"}, {403, "not_your_agent"}, {409, "relay_too_old"}, {400, "websocket_required"}, {429, "too_many_streams"},
+		{403, "mcp_bridge_off"}, {403, "mcp_server_blocked"}, {403, "not_your_agent"}, {409, "relay_too_old"}, {400, "websocket_required"}, {429, "too_many_streams"},
 		{404, "not_found"}, {502, "relay_unreachable"}, {403, "relay_tls_required"},
 	} {
 		mr := &mcpRelay{refuse: map[string]refusal{"bad": {tc.status, tc.reason}}, conns: make(chan *websocket.Conn, 4)}

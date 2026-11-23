@@ -51,6 +51,7 @@ var MCPMessages = []MCPMessage{
 	{"websocket_required", "gateway", "MCP bridges need WebSocket. Your network allows only the long-poll fallback."},
 	{"too_many_streams", "gateway", "This agent already has the most bridged MCP servers allowed (mcp_bridge.max_servers)."},
 	{"not_found", "gateway", "NAME is not a valid MCP server name (a-z, 0-9, _ and -, up to 32)."},
+	{"mcp_server_blocked", "gateway", "NAME is on this cluster's MCP block list, so it cannot be bridged. Ask your administrator."},
 	{"relay_unreachable", "gateway", "The cluster could not reach the agent; it may still be starting. Try again in a moment, or check it with: defenseclaw substrate status"},
 	{"relay_tls_required", "gateway", "This agent's relay accepts TLS only and its image predates that. Rebuild its template (`template build`) and start a new agent."},
 	{"mcp_busy", "stream", "Another launcher already bridges NAME to this agent."},
