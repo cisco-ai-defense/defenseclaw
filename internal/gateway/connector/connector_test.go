@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -5300,9 +5301,17 @@ func TestCodexRepairRefusesSharedMatcherDriftWithoutChangingUserHandlerSemantics
 		t.Fatalf("write shared matcher edit: %v", err)
 	}
 
+	// A refusal before any change that names the group and the entry to
+	// delete, so `defenseclaw setup` stops before it restarts the gateway
+	// (GAP-2007).
 	err = conn.Setup(context.Background(), opts)
-	if err == nil || !strings.Contains(err.Error(), "unrelated handler semantics") {
-		t.Fatalf("repair error = %v, want shared matcher refusal", err)
+	if !errors.Is(err, ErrAgentConfigRefusal) || !errors.Is(err, ErrSetupRefusedUnchanged) {
+		t.Fatalf("repair error = %v, want a shared matcher refusal (ErrAgentConfigRefusal)", err)
+	}
+	for _, want := range []string{"PreToolUse matcher group 1", "^UserSelectedMatcher$", "delete that [[hooks.PreToolUse.hooks]] entry"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("refusal does not name %q: %v", want, err)
+		}
 	}
 	after, readErr := os.ReadFile(registrationPath)
 	if readErr != nil {

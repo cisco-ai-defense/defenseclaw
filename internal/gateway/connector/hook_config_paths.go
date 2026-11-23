@@ -923,11 +923,11 @@ func hookDocumentEditedEntry(document interface{}, connector, dataDir, scriptNam
 			// A marker-bearing copy at an edited-shape path with an argument
 			// that binds nothing is a copy too (copiedDefenseClawHookCommand),
 			// as the Python doctor reads it (GAP-1962).
-			if editedDefenseClawHookCommand(command, scriptName) || copiedDefenseClawHookCommand(command, scriptName) {
+			copied := copiedDefenseClawHookCommand(command, scriptName)
+			if copied || editedDefenseClawHookCommand(command, scriptName) {
 				word, first, ok := posixHookCommandSplit(command)
 				_, rest, _ := hookScriptWordAfterWrapper(command)
-				if ok && word != current &&
-					(strings.HasPrefix(word, home) || copiedDefenseClawHookCommand(command, scriptName)) &&
+				if ok && word != current && (strings.HasPrefix(word, home) || copied) &&
 					editedHookEntryClaimed(connector, command, current, word, first, rest, guarded, part.unboundEvent) {
 					return entry, true
 				}

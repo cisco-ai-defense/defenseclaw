@@ -87,7 +87,7 @@ DefenseClaw 1.0.11 follows 1.0.10. It is a fix release. It updates OpenShell to 
 - `doctor` and `sandbox run` agree on Docker Desktop's Landlock support.
 
 #### Connectors and CLI
-- `defenseclaw setup codex` no longer fails, and no longer leaves the gateway stopped, when `~/.codex/config.toml` holds a second copy of the DefenseClaw hook (for example one copied from another account, with a Windows or a macOS path). Setup removes the copy and keeps your own hooks. A copy that shares a hook group with your own hooks is left alone: Setup stops before it changes anything, the running gateway keeps working, and the message names the entry to delete.
+- `defenseclaw setup codex` no longer fails, and no longer leaves the gateway stopped, when `~/.codex/config.toml` holds a second copy of the DefenseClaw hook (for example one copied from another account, with a Windows or a macOS path). Setup removes the copy and keeps your own hooks. When the copy, or the DefenseClaw hook itself, sits in a hook group with your own hooks and cannot be taken out or rewritten without changing them, Setup stops before it changes anything, the running gateway keeps working, and the message names the entry to delete.
 - Kiro: `setup remove kiro` also removes this install's older hooks from the user's earlier default agent; a broken Kiro agent file is reported once.
 - OpenClaw: the permission message for `openclaw.json` names the first folder the account cannot open.
 - A Claude Code tool call that the guardrail allows now writes one local hook row on a per-user gateway, not two.
