@@ -116,40 +116,18 @@ func NamesSet(ruleID string, p Proof) bool {
 // lane never grades a set above the rule that names it (a variant spelling
 // gets the plain spelling's tier, never above it). Where no 1.0.10 finding
 // of the call names the set (a spelling only the effect lane resolves), f
-// stands and its own table row decides. A Known protected write finding
-// (RowKnownProtectedWrite) carries the rule of the plain spelling on its
-// set, so it names the set as the 1.0.10 finding does: the effect lane
-// finding beside it folds into it, and the call carries the rules of the
-// plain spelling only (GAP-1243, GAP-1308 after the GAP-1478 ruling of
-// 2026-11-23).
+// stands and its own table row decides. A Known protected write finding is
+// an effects-lane finding too: it names no set, so the effect lane's raise
+// beside it stands (R-NOLOSS).
 func FoldsIntoLegacy(f Finding, call []Finding) bool {
 	p := f.Proof
 	if p.Source != SourceEffects || !(p.Certainty == CertKnown || p.Advisory()) {
 		return false
 	}
-	known := knownProtectedWrite(f)
 	for _, g := range call {
-		// A 1.0.10 finding names its set; a Known protected write finding
-		// names it for the other effect findings of the call, never for
-		// itself or another Known write.
-		names := g.Proof.Source != SourceEffects || (!known && knownProtectedWrite(g))
-		if names && NamesSet(g.RuleID, p) {
+		if g.Proof.Source != SourceEffects && NamesSet(g.RuleID, p) {
 			return true
 		}
 	}
 	return false
-}
-
-// knownProtectedWrite reports a Known protected write finding of the effects
-// lane (RowKnownProtectedWrite): a resolved write or append proof on a
-// restricted set that carries the rule the plain spelling fires on it
-// (RuleFor). An effect finding that only bears such a rule id, without that
-// proof, is not one: it names no set.
-func knownProtectedWrite(f Finding) bool {
-	p := f.Proof
-	if p.Source != SourceEffects || (p.Kind != KindWrite && p.Kind != KindAppend) {
-		return false
-	}
-	rule := RuleFor(p)
-	return rule != "" && strings.EqualFold(rule, strings.TrimSpace(f.RuleID))
 }

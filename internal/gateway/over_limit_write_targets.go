@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/decide"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
 
@@ -288,8 +289,18 @@ func withOverLimitTwinFindings(findings, twin []RuleFinding) []RuleFinding {
 	findings = withTwinProvenBlocks(findings, twin)
 	_, twin = withEffectsFoldedEitherWay(findings, twin)
 	for _, finding := range twin {
-		if finding.contributesToEnforcement() ||
-			slices.ContainsFunc(findings, func(f RuleFinding) bool { return f.RuleID == finding.RuleID }) {
+		if finding.contributesToEnforcement() {
+			continue
+		}
+		if i := slices.IndexFunc(findings, func(f RuleFinding) bool { return f.RuleID == finding.RuleID }); i >= 0 {
+			// The 1.0.10 reading of the twin takes the place of the
+			// effects-lane finding of the same rule (a Known protected write
+			// names the plain spelling's rule, GAP-1478): the call holds the
+			// 1.0.10 finding, so the effect lane folds into it as it does for
+			// the plain spelling (GAP-1243, GAP-1308).
+			if findings[i].Proof.Source == decide.SourceEffects && finding.Proof.Source != decide.SourceEffects {
+				findings[i] = finding
+			}
 			continue
 		}
 		findings = append(findings, finding)
