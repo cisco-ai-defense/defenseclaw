@@ -351,8 +351,9 @@ var skillAskConnectors = map[string]bool{"claudecode": true}
 // moves it, and the call that brought it does not run either); they never
 // have a pending folder (scanSkillFolder waits for the whole scan there).
 // The OSS tiers add no block: a use of a folder still being scanned asks
-// where the agent can ask (sk.ask) and else is allowed with a MEDIUM alert,
-// as rel (B5.4 skill_pending). It returns the refusal message, or "".
+// where the agent can ask (sk.ask) and a person is there, and else (other
+// agents, unattended runs) is allowed with a MEDIUM alert, as rel (B5.4
+// skill_pending). It returns the refusal message, or "".
 func (st *substrateState) substrateSkillUseGate(ctx context.Context, env substrateEnvelope, sk *substrateSkillAnswer) string {
 	if len(sk.pending) == 0 && len(sk.Quarantine) == 0 {
 		return ""
@@ -389,7 +390,8 @@ func (st *substrateState) substrateSkillUseGate(ctx context.Context, env substra
 	}
 	name := path.Base(dir)
 	outcome := "allowed"
-	if skillAskConnectors[env.Connector] {
+	// An unattended run never asks (D12, GAP-0935): it gets the alert.
+	if reg, ok := substrateRegistrationFrom(ctx); skillAskConnectors[env.Connector] && (!ok || !reg.Unattended) {
 		outcome, sk.ask = "asked", skillPendingAskMessage(name)
 	}
 	st.auditSkill(ctx, AuditSkillPending, "MEDIUM", env.Connector, dir, env.Facts, map[string]any{"reason": SkillReasonPending, "outcome": outcome})
