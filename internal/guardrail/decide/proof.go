@@ -265,6 +265,7 @@ func parseName[T ~uint8](names []string, s string) (T, bool) {
 const (
 	RuleStateWrite          = "TAMPER.DETECTOR_STATE_WRITE"
 	RuleAuthorizedKeysWrite = "PERSISTENCE.SSH_AUTHORIZED_KEYS_COMMAND"
+	RuleHookConfigWrite     = "TAMPER.AGENT_HOOK_CONFIG_WRITE"
 	RuleShellProfileWrite   = "PERSISTENCE.SHELL_PROFILE_WRITE"
 	RuleGitHookWrite        = "PERSISTENCE.GIT_HOOK_WRITE"
 	RuleSSHDir              = "PATH-SSH-DIR"
@@ -344,5 +345,44 @@ func RuleFor(p Proof) string {
 	case TargetAuthorizedKeys:
 		return RuleAuthorizedKeysWrite
 	}
+	// A write or append to a hook config or a credential file names the rule
+	// the plain spelling fires on it (GAP-1478, GAP-1500). An own SSH private
+	// key write has none in 1.0.10 (GAP-1878).
+	if p.Kind != KindWrite && p.Kind != KindAppend {
+		return ""
+	}
+	switch p.Target {
+	case TargetHookConfig:
+		return RuleHookConfigWrite
+	case TargetCredential:
+		if p.Set != SetSSHPrivateKey {
+			return setRules[p.Set]
+		}
+	}
 	return ""
+}
+
+// plainWriteSeverity is the severity every shipped pack gives the 1.0.10
+// rule a Known protected write names (policies/guardrail/*/rules,
+// TestPlainWriteSeverityIsThePackSeverity). The effect finding carries it,
+// so its cell maps it as the plain spelling's finding.
+var plainWriteSeverity = map[string]Severity{
+	RuleAuthorizedKeysWrite: SevCritical,
+	RuleStateWrite:          SevHigh,
+	RuleHookConfigWrite:     SevHigh,
+	"PATH-AWS-CREDS":        SevCritical,
+	"PATH-GIT-CREDS":        SevCritical,
+	"PATH-NPMRC":            SevMedium,
+	"PATH-PYPIRC":           SevMedium,
+	"PATH-KUBE":             SevHigh,
+	"PATH-DOCKER":           SevHigh,
+}
+
+// PlainWriteSeverity is the pack severity of rule ruleID on a Known
+// protected write (RuleFor).
+func PlainWriteSeverity(ruleID string) Severity {
+	if s, ok := plainWriteSeverity[ruleID]; ok {
+		return s
+	}
+	return SevHigh
 }

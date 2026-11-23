@@ -141,8 +141,8 @@ func (r *Row) cell(d Deployment, tier func() Tier) Cell {
 
 // Row ids of the built-in table.
 const (
-	RowRecord                   = "record"
-	RowKnownAuthorizedKeysWrite = "known-authorized-keys-write"
+	RowRecord              = "record"
+	RowKnownProtectedWrite = "known-protected-write"
 	// RowEffectUnknown: the effect lane's unknown tier is a shadow record on
 	// every set and never moves the live verdict, whatever its Known flag,
 	// target or tier (the MAYBE rule, DET111 PLAN 5.3, GAP-1796; DET111
@@ -248,18 +248,26 @@ func uniform(c Cell) [tierCount]Cell { return [tierCount]Cell{c, c, c} }
 // pack's tiers.yaml is its column of this table (TestShippedTiersMatchBuiltin).
 func Builtin() *Table { return &builtin }
 
+// knownProtectedWriteRules are the rules RuleFor names for a Known write:
+// the plain spelling's rule of each restricted set.
+var knownProtectedWriteRules = []string{RuleAuthorizedKeysWrite, RuleStateWrite, RuleHookConfigWrite,
+	"PATH-AWS-CREDS", "PATH-GIT-CREDS", "PATH-NPMRC", "PATH-PYPIRC", "PATH-KUBE", "PATH-DOCKER"}
+
 var builtin = Table{Rows: []Row{
 	{
-		// A resolved write to the authorized_keys member has the plain
-		// 1.0.10 keys-write cell regardless of the program that produced it.
-		ID: RowKnownAuthorizedKeysWrite, Rules: []string{RuleAuthorizedKeysWrite},
-		Kinds: []ProofKind{KindWrite, KindAppend}, Targets: []TargetClass{TargetAuthorizedKeys},
+		// A resolved write or append to an exact member of a restricted set
+		// (authorized_keys, DefenseClaw state, an agent hook config, a
+		// credential file) has the plain spelling's 1.0.10 decision whatever
+		// program the program table modeled it for: the rule the plain
+		// spelling fires (RuleFor) at that rule's pack severity
+		// (PlainWriteSeverity), mapped by the tier levels as that rule's
+		// finding is (GAP-1865, GAP-1478, GAP-1500, GAP-0662, GAP-0506).
+		ID: RowKnownProtectedWrite, Rules: knownProtectedWriteRules,
+		Kinds:     []ProofKind{KindWrite, KindAppend},
+		Targets:   []TargetClass{TargetAuthorizedKeys, TargetState, TargetHookConfig, TargetCredential},
 		Certainty: []Certainty{CertKnown}, Sources: []string{SourceEffects},
-		Content: true, SecureClient: true, Source: "rel-1-0-10:persistence.ssh_authorized_keys_command (GAP-1865)",
-		Cells: [deploymentCount][tierCount]Cell{
-			uniform(Cell{Floor: Block, Levels: true, Severity: SevCritical}),
-			uniform(Cell{Floor: Block, Levels: true, Severity: SevCritical}),
-		},
+		Content: true, SecureClient: true, Source: "rel-1-0-10:plain spelling of each restricted set (GAP-1865, GAP-1478)",
+		Cells: [deploymentCount][tierCount]Cell{uniform(Cell{Levels: true}), uniform(Cell{Levels: true})},
 	},
 	{
 		ID: RowEffectUnknown, Rules: []string{RuleEffectUnknown},

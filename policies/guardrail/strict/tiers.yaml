@@ -4,14 +4,12 @@
 version: 1
 tier: strict
 rows:
-  - id: known-authorized-keys-write
-    source: rel-1-0-10:persistence.ssh_authorized_keys_command (GAP-1865)
+  - id: known-protected-write
+    source: rel-1-0-10:plain spelling of each restricted set (GAP-1865, GAP-1478)
     per_user:
-      floor: block
-      severity: CRITICAL
+      floor: allow
     managed:
-      floor: block
-      severity: CRITICAL
+      floor: allow
   - id: effect-unknown
     source: DET111 PLAN 5.3 MAYBE rule (GAP-1796)
     per_user:

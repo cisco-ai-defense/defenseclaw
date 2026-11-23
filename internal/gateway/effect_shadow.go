@@ -493,11 +493,16 @@ func classifyEffects(result effects.Result, facts []*semanticpb.EffectFact, flav
 			c.known = true
 			c.readProofs = appendCredentialReadProof(c.readProofs, proof)
 		}
-		if proof, ok := knownAuthorizedKeysMutationProof(f, flavor); ok && fullyAccounted {
-			c.mutationProofs = appendCredentialReadProof(c.mutationProofs, proof)
-			c.restricted, c.restrictedRuling = true, true
-			c.restrictedSets = append(c.restrictedSets, effectrules.SetSSHAuthorizedKeys)
-			c.known, c.knownMutation = true, true
+		if fullyAccounted {
+			for _, proof := range knownProtectedMutationProofs(f, flavor) {
+				c.mutationProofs = appendCredentialReadProof(c.mutationProofs, proof)
+				c.known, c.knownMutation = true, true
+				// The authorized-keys ruling blocks in every pack.
+				if proof.Target == decide.TargetAuthorizedKeys {
+					c.restricted, c.restrictedRuling = true, true
+					c.restrictedSets = append(c.restrictedSets, effectrules.SetSSHAuthorizedKeys)
+				}
+			}
 		}
 		if c.program == "" && c.kind == "" {
 			c.program, c.kind = f.GetOrigin().GetProgram(), kind
@@ -786,7 +791,8 @@ func effectShadowFindings(res EffectShadowResult, mode effectRulesMode) []RuleFi
 		if ruleID == "" {
 			continue
 		}
-		f := RuleFinding{RuleID: ruleID, Title: "Known authorized keys write", Severity: "CRITICAL", Confidence: 1, Proof: proof}
+		f := RuleFinding{RuleID: ruleID, Title: "Known protected file write", Severity: decide.PlainWriteSeverity(ruleID).String(),
+			Confidence: 1, Proof: proof}
 		f.proof = newFindingProof(findingProofEffect, ruleID, mode == effectRulesOn)
 		findings = append(findings, f)
 	}
@@ -840,27 +846,60 @@ func effectShadowFindings(res EffectShadowResult, mode effectRulesMode) []RuleFi
 	return append(findings, f)
 }
 
-// knownAuthorizedKeysMutationProof uses the resolved target, independent of
-// the program that produced the write. The exact file and a known account-home
-// match carry the same proof through an identity-preserving wrapper.
-func knownAuthorizedKeysMutationProof(f *semanticpb.EffectFact, flavor effects.Flavor) (decide.Proof, bool) {
+// knownProtectedMutationProofs are the decision proofs of one Known write
+// or append to an exact member of a protected set, whatever program the
+// program table modeled it for (redirection, cp, tee, sort -o, rsync, a sed
+// w command, an interpreter's open().write): the spelling gets the 1.0.10
+// rule of the plain spelling on that member and that rule's cell (GAP-1865,
+// generalized to the restricted sets by the DET111 ruling of 2026-11-23:
+// GAP-1478, GAP-1500, GAP-0662, GAP-0506). It reads the resolved target, not
+// a reviewed program list. A shell profile write stays content-decided
+// (RowEffectContentDecided, GAP-1795) and an own SSH private key write has
+// no 1.0.10 rule (RowEffectOwnKeyWrite, GAP-1878): neither makes a proof. A
+// Maybe target or an unknown role makes none either.
+func knownProtectedMutationProofs(f *semanticpb.EffectFact, flavor effects.Flavor) []decide.Proof {
 	if f == nil || (f.GetKind() != string(effects.KindWrite) && f.GetKind() != string(effects.KindAppend)) ||
 		f.GetTargetState() != "known" || f.GetRoleState() != "known" || len(f.GetReasons()) != 0 ||
 		!effectrules.CanonicalAbsolute(f.GetTarget().GetPath(), flavor) {
-		return decide.Proof{}, false
+		return nil
 	}
+	kind := decide.KindWrite
+	if f.GetKind() == string(effects.KindAppend) {
+		kind = decide.KindAppend
+	}
+	var proofs []decide.Proof
 	for _, match := range f.GetTarget().GetProtected() {
-		if match.GetSet() == effectrules.SetSSHAuthorizedKeys && match.GetState() == "known" &&
-			(match.GetReason() == "exact" || match.GetReason() == "other_home") {
-			kind := decide.KindWrite
-			if f.GetKind() == string(effects.KindAppend) {
-				kind = decide.KindAppend
-			}
-			return decide.Proof{Kind: kind, Target: decide.TargetAuthorizedKeys,
-				Certainty: decide.CertKnown, Source: effectProofSource}, true
+		if match.GetState() != "known" {
+			continue
 		}
+		p := decide.Proof{Kind: kind, Certainty: decide.CertKnown, Source: effectProofSource}
+		switch match.GetSet() {
+		case effectrules.SetSSHAuthorizedKeys:
+			// The exact file and a known account-home match carry the same
+			// proof through an identity-preserving wrapper.
+			if r := match.GetReason(); r != "exact" && r != "other_home" {
+				continue
+			}
+			p.Target = decide.TargetAuthorizedKeys
+		case effectrules.SetSelfProtection:
+			p.Target = decide.TargetState
+		case effectrules.SetAgentHookConfig:
+			p.Target = decide.TargetHookConfig
+		case effectrules.SetCredentials:
+			p.Target = decide.TargetCredential
+			p.Set = decide.CredentialSet(effectCredentialMemberTail(f.GetTarget().GetPath()))
+		default:
+			continue
+		}
+		if p.Target != decide.TargetAuthorizedKeys && match.GetReason() != "exact" {
+			continue
+		}
+		if decide.RuleFor(p) == "" {
+			continue
+		}
+		proofs = append(proofs, p)
 	}
-	return decide.Proof{}, false
+	return proofs
 }
 
 // knownCredentialReadProof extracts the one 1.0.10 credential class a Known
