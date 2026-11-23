@@ -38,7 +38,6 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/open-policy-agent/opa/ast" //nolint:staticcheck // The v8/v9 migration shares the legacy AST type with regodata until 1.1.
 	"golang.org/x/text/unicode/norm"
 	"gopkg.in/yaml.v3"
 
@@ -48,7 +47,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/envvars"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
-	"github.com/defenseclaw/defenseclaw/internal/policy/regodata"
 	"github.com/defenseclaw/defenseclaw/policies"
 )
 
@@ -77,10 +75,6 @@ const (
 
 // MigrationRecordSchemaVersion versions the migration-v9.json shape.
 const MigrationRecordSchemaVersion = 1
-
-// ErrMigrateV9NotImplemented was returned by the frozen stub. Nothing returns
-// it now; it stays for callers compiled against the stub contract.
-var ErrMigrateV9NotImplemented = errors.New("config: the config_version 9 migration is not implemented yet")
 
 // MigrateV9Input names the migration inputs.
 type MigrateV9Input struct {
@@ -1639,7 +1633,11 @@ func (m *v9Migrator) planRegoRefresh() error {
 	if err != nil {
 		return nil
 	}
-	parsed, sources := map[string]*ast.Module{}, map[string][]byte{}
+	rego, err := v9RegoReadsCheck()
+	if err != nil {
+		return err
+	}
+	parsed, sources := map[string]any{}, map[string][]byte{}
 	for _, entry := range entries {
 		name := entry.Name()
 		if filepath.Ext(name) != ".rego" || !entry.Type().IsRegular() {
@@ -1650,7 +1648,7 @@ func (m *v9Migrator) planRegoRefresh() error {
 		if err != nil {
 			continue
 		}
-		mod, parseErr := ast.ParseModuleWithOpts(name, string(raw), ast.ParserOptions{RegoVersion: ast.RegoV1})
+		mod, parseErr := rego.Parse(name, raw)
 		if parseErr != nil {
 			if slices.Contains(v9VendorRegoModules, name) {
 				m.note("%s could not be parsed to check its data references (%v); it was left in place", path, parseErr)
@@ -1659,17 +1657,7 @@ func (m *v9Migrator) planRegoRefresh() error {
 		}
 		parsed[name], sources[name] = mod, raw
 	}
-	reads := map[string][]string{}
-	for _, read := range regodata.OutsideReads(parsed, "data.defenseclaw.admission", "data.defenseclaw.guardrail") {
-		reads[read.Module] = read.Docs
-	}
-	for _, name := range v9VendorRegoModules {
-		if mod := parsed[name]; mod != nil && reads[name] == nil {
-			if _, docs := regodata.ModuleReads(mod); len(docs) > 0 {
-				reads[name] = docs
-			}
-		}
-	}
+	reads := rego.Reads(parsed, v9VendorRegoModules)
 	names := make([]string, 0, len(reads))
 	for name := range reads {
 		names = append(names, name)

@@ -153,6 +153,17 @@ func reservedDropIn(connector string) bool {
 	return connector == ConnectorClaudeCode
 }
 
+// keepsRecordedPreimage reports whether a publish over a file changed since
+// DefenseClaw last wrote it keeps the recorded preimage: a reserved drop-in
+// keeps the preimage of its first publish, and the Codex requirements file
+// keeps it unless the publish adopts administrator edits (codexAdminText).
+func keepsRecordedPreimage(opts Options, connector string, record *ownershipRecord, path string) bool {
+	if !publishedByRecord(record, path) {
+		return false
+	}
+	return reservedDropIn(connector) || (connector == codexConnector && !opts.AdoptAdministratorEdits)
+}
+
 // publishedByRecord reports whether record says DefenseClaw published path.
 func publishedByRecord(record *ownershipRecord, path string) bool {
 	return record != nil && record.Path == path && record.PostimageSHA256 != ""
@@ -294,7 +305,10 @@ var errPublishedDirExposes = errors.New("cannot restore user access to machine p
 // administrator content of that version replaces the recorded preimage
 // before DefenseClaw merges into it. Otherwise a reconcile would fold the
 // edit into the postimage and removal would restore the stale install-time
-// preimage, dropping the edit (or resurrecting deleted content).
+// preimage, dropping the edit (or resurrecting deleted content). The Codex
+// requirements file is the exception: only a publish that adopts
+// administrator edits (reconcile) takes the edited text; any other publish
+// puts the recorded text back (codexAdminText), so the preimage stays too.
 func publishWithRecord(opts Options, connector, path string, current []byte, exists bool, rendered []byte, ownedWasPresent bool, strip stripFunc, state *State, alsoCreated ...string) (bool, error) {
 	record, err := loadRecord(opts, connector)
 	if err != nil {
@@ -320,7 +334,7 @@ func publishWithRecord(opts Options, connector, path string, current []byte, exi
 			if err := record.keepCopilotPreimageThroughMalformed(current); err != nil {
 				return false, err
 			}
-		} else if !reservedDropIn(connector) || !publishedByRecord(record, path) {
+		} else if !keepsRecordedPreimage(opts, connector, record, path) {
 			if err := record.capturePreimage(current, exists, strip); err != nil {
 				return false, err
 			}

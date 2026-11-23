@@ -88,6 +88,19 @@ func gap1923Check(t *testing.T, step, text string, kept int) {
 	}
 }
 
+// gap1942Launcher is the native launcher a Windows Setup registers.
+const gap1942Launcher = `C:\Program Files\DefenseClaw\defenseclaw-hook.exe`
+
+// gap1942HookCommands are the hook commands a connector's Setup passes to its
+// removal passes: the Unix script path, and on Windows the native launcher,
+// adapter or bridge command, which names no script. The Windows-path claim
+// was a no-op on a Windows host for Hermes, Kiro's agent files and Copilot's
+// unexpected events, which took the script name from that command (GAP-1942);
+// each removal pass runs with both on every OS.
+func gap1942HookCommands(unix, windows string) map[string]string {
+	return map[string]string{"unix script": unix, "windows command": windows}
+}
+
 func gap1923SetupOpts(root string) SetupOpts {
 	return SetupOpts{
 		DataDir:       filepath.Join(root, ".defenseclaw"),
@@ -168,31 +181,36 @@ func TestGAP1923CodexSetupAndTeardownClaimWindowsPathCopies(t *testing.T) {
 
 func TestGAP1923KiroSetupAndTeardownClaimWindowsPathCopies(t *testing.T) {
 	root := testenv.PrivateTempDir(t)
-	hookScript := filepath.Join(root, ".defenseclaw", "hooks", kiroHookScriptName)
+	unixScript := filepath.Join(root, ".defenseclaw", "hooks", kiroHookScriptName)
+	agentCommands := gap1942HookCommands(unixScript, windowsKiroHookCommandForBinary(gap1942Launcher, "", false))
+	v3Commands := gap1942HookCommands(unixScript, windowsKiroHookCommandForBinary(gap1942Launcher, KiroHookSurfaceV3, false))
 	for surface, binding := range map[string]string{"agent": "", "v3": " --hook-surface v3"} {
 		claimed := gap1923Claimed(t, kiroHookScriptName, binding)
 		kept := gap1923Kept(kiroHookScriptName, binding)
-		for _, name := range gap1923Names(claimed) {
-			command := claimed[name]
-			if len(removeKiroOwnedV2Hooks([]interface{}{map[string]interface{}{"command": command}}, hookScript)) != 0 {
-				t.Errorf("%s %s: the Kiro agent removal pass kept the copied DefenseClaw entry %q", surface, name, command)
+		for _, form := range gap1923Names(agentCommands) {
+			agentCommand, v3Command := agentCommands[form], v3Commands[form]
+			for _, name := range gap1923Names(claimed) {
+				command := claimed[name]
+				if len(removeKiroOwnedV2Hooks([]interface{}{map[string]interface{}{"command": command}}, agentCommand)) != 0 {
+					t.Errorf("%s %s, %s: the Kiro agent removal pass kept the copied DefenseClaw entry %q", surface, name, form, command)
+				}
+				v3 := map[string]interface{}{"name": "copied", "action": map[string]interface{}{"type": "command", "command": command}}
+				if !kiroOwnedV3Hook(v3, v3Command) {
+					t.Errorf("%s %s, %s: the Kiro v3 removal pass kept the copied DefenseClaw entry %q", surface, name, form, command)
+				}
 			}
-			v3 := map[string]interface{}{"name": "copied", "action": map[string]interface{}{"type": "command", "command": command}}
-			if !kiroOwnedV3Hook(v3, hookScript) {
-				t.Errorf("%s %s: the Kiro v3 removal pass kept the copied DefenseClaw entry %q", surface, name, command)
-			}
-		}
-		for _, name := range gap1923Names(kept) {
-			command := kept[name]
-			if len(removeKiroOwnedV2Hooks([]interface{}{map[string]interface{}{"command": command}}, hookScript)) != 1 {
-				t.Errorf("%s %s: the Kiro agent removal pass claimed %q", surface, name, command)
-			}
-			// A v3 command that names kiro-hook.sh anywhere is DefenseClaw's
-			// already (kiroCommandOwned, as in rel/1.0.10), so only the kept
-			// commands without that name apply to the v3 pass.
-			v3 := map[string]interface{}{"name": "user", "action": map[string]interface{}{"type": "command", "command": command}}
-			if !strings.Contains(command, kiroHookScriptName) && kiroOwnedV3Hook(v3, hookScript) {
-				t.Errorf("%s %s: the Kiro v3 removal pass claimed %q", surface, name, command)
+			for _, name := range gap1923Names(kept) {
+				command := kept[name]
+				if len(removeKiroOwnedV2Hooks([]interface{}{map[string]interface{}{"command": command}}, agentCommand)) != 1 {
+					t.Errorf("%s %s, %s: the Kiro agent removal pass claimed %q", surface, name, form, command)
+				}
+				// A user's v3 hook that names kiro-hook.sh is the user's too
+				// (GAP-1932): v3 claims only DefenseClaw's names, commands and
+				// script shape.
+				v3 := map[string]interface{}{"name": "user", "action": map[string]interface{}{"type": "command", "command": command}}
+				if kiroOwnedV3Hook(v3, v3Command) {
+					t.Errorf("%s %s, %s: the Kiro v3 removal pass claimed %q", surface, name, form, command)
+				}
 			}
 		}
 	}
@@ -213,16 +231,18 @@ func TestGAP1923KiroSetupAndTeardownClaimWindowsPathCopies(t *testing.T) {
 		}
 		return gap1923JSON(t, map[string]interface{}{"hooks": hooks})
 	}
-	gap1923WriteFile(t, path, seed())
-	if err := patchKiroV2AgentHooks(path, hookScript); err != nil {
-		t.Fatalf("repair: %v", err)
+	for _, form := range gap1923Names(agentCommands) {
+		gap1923WriteFile(t, path, seed())
+		if err := patchKiroV2AgentHooks(path, agentCommands[form]); err != nil {
+			t.Fatalf("%s: repair: %v", form, err)
+		}
+		gap1923Check(t, form+": Kiro repair", readHookFileForTest(t, path), len(kept))
+		gap1923WriteFile(t, path, seed())
+		if err := removeKiroV2AgentHooksKeeping(path, agentCommands[form], false, nil); err != nil {
+			t.Fatalf("%s: uninstall: %v", form, err)
+		}
+		gap1923Check(t, form+": Kiro uninstall", readHookFileForTest(t, path), len(kept))
 	}
-	gap1923Check(t, "Kiro repair", readHookFileForTest(t, path), len(kept))
-	gap1923WriteFile(t, path, seed())
-	if err := removeKiroV2AgentHooksKeeping(path, hookScript, false, nil); err != nil {
-		t.Fatalf("uninstall: %v", err)
-	}
-	gap1923Check(t, "Kiro uninstall", readHookFileForTest(t, path), len(kept))
 }
 
 func TestGAP1923CopilotSetupAndTeardownClaimWindowsPathCopies(t *testing.T) {
@@ -272,6 +292,31 @@ func TestGAP1923CopilotSetupAndTeardownClaimWindowsPathCopies(t *testing.T) {
 			t.Errorf("%s: uninstall removed the user's command %q", name, kept[name])
 		}
 	}
+
+	// An event Setup does not bind: the copy is claimed by its script shape,
+	// with or without the event binding, whatever command Setup registers.
+	commands := gap1942HookCommands(hookScript, hookInvocationCommandFor("windows", "copilot", hookScript))
+	for _, form := range gap1923Names(commands) {
+		for _, binding := range []string{binding, ""} {
+			for _, name := range gap1923Names(gap1923Claimed(t, "copilot-hook.sh", binding)) {
+				command := gap1923Claimed(t, "copilot-hook.sh", binding)[name]
+				for _, entry := range []interface{}{
+					map[string]interface{}{"type": "command", "bash": command},
+					map[string]interface{}{"hooks": []interface{}{map[string]interface{}{"type": "command", "command": command}}},
+				} {
+					if !copilotUnexpectedEventOwnsHook(entry, commands[form]) {
+						t.Errorf("%s, %s: an unexpected event kept the copied DefenseClaw entry %v", form, name, entry)
+					}
+				}
+			}
+			for _, name := range gap1923Names(gap1923Kept("copilot-hook.sh", binding)) {
+				command := gap1923Kept("copilot-hook.sh", binding)[name]
+				if copilotUnexpectedEventOwnsHook(map[string]interface{}{"type": "command", "bash": command}, commands[form]) {
+					t.Errorf("%s, %s: an unexpected event claimed the user's command %q", form, name, command)
+				}
+			}
+		}
+	}
 }
 
 func TestGAP1923HermesSetupAndTeardownClaimWindowsPathCopies(t *testing.T) {
@@ -290,14 +335,26 @@ func TestGAP1923HermesSetupAndTeardownClaimWindowsPathCopies(t *testing.T) {
 		}
 		return b.String()
 	}
-	gap1923WriteFile(t, path, seed())
-	if err := patchHermesHooks(path, hookScript, ""); err != nil {
-		t.Fatalf("repair: %v", err)
+	// The command each OS's Setup passes (hookCommandForOS), with the
+	// launcher a Windows Setup records (opts.HookExecutable).
+	opts := gap1923SetupOpts(root)
+	opts.HookExecutable = gap1942Launcher
+	hermes := NewHermesConnector()
+	commands := gap1942HookCommands(hookScript, hermes.hookCommandForOS("windows", opts))
+	executables := map[string]string{"unix script": "", "windows command": gap1942Launcher}
+	if commands["windows command"] == "" {
+		t.Fatal("fixture: no Windows Hermes command")
 	}
-	gap1923Check(t, "Hermes repair", readHookFileForTest(t, path), len(kept))
-	gap1923WriteFile(t, path, seed())
-	if err := removeHermesHooks(path, hookScript, nil); err != nil {
-		t.Fatalf("uninstall: %v", err)
+	for _, form := range gap1923Names(commands) {
+		gap1923WriteFile(t, path, seed())
+		if err := patchHermesHooks(path, commands[form], executables[form]); err != nil {
+			t.Fatalf("%s: repair: %v", form, err)
+		}
+		gap1923Check(t, form+": Hermes repair", readHookFileForTest(t, path), len(kept))
+		gap1923WriteFile(t, path, seed())
+		if err := removeHermesHooks(path, commands[form], nil); err != nil {
+			t.Fatalf("%s: uninstall: %v", form, err)
+		}
+		gap1923Check(t, form+": Hermes uninstall", readHookFileForTest(t, path), len(kept))
 	}
-	gap1923Check(t, "Hermes uninstall", readHookFileForTest(t, path), len(kept))
 }
