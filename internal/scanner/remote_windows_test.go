@@ -8,6 +8,7 @@ package scanner
 
 import (
 	"context"
+	"os"
 	"strings"
 	"testing"
 )
@@ -24,4 +25,17 @@ func TestRemoteScannerRefusesEveryScanOnWindows(t *testing.T) {
 	if res != nil || err == nil || !strings.Contains(err.Error(), "is not a private folder of this user") {
 		t.Fatalf("a Windows scan was not refused by the private-folder check: result=%+v err=%v", res, err)
 	}
+}
+
+// shortSocketDir is a new folder with a short path for a unix socket: a
+// socket path over 108 characters fails to bind on Windows, and t.TempDir
+// under a standard user's TMP is longer.
+func shortSocketDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "dcrs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	return dir
 }

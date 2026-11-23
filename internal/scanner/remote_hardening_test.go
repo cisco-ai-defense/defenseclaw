@@ -26,19 +26,6 @@ func skipSidecarClientOnWindows(t *testing.T) {
 	}
 }
 
-// shortSocketDir is a new folder with a short path for a unix socket: a
-// socket path over 108 characters fails to bind on Windows, and t.TempDir
-// under a standard user's TMP is longer.
-func shortSocketDir(t *testing.T) string {
-	t.Helper()
-	dir, err := os.MkdirTemp("", "dcrs")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { os.RemoveAll(dir) })
-	return dir
-}
-
 func forgedRemoteServer(t *testing.T, dir string) {
 	t.Helper()
 	ln, err := net.Listen("unix", filepath.Join(dir, ScanSocketName))
