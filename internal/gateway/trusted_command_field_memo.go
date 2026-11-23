@@ -14,13 +14,16 @@ const (
 	// commandFieldMemoMin is the size of tool arguments from which the
 	// answer of trustedTopLevelCommandField is remembered. About twenty
 	// proofs of one call each read the command field of the same arguments;
-	// for an 889 KB patch every read was a full JSON decode (GAP-1040).
-	// Smaller arguments are decoded each time, as before.
-	commandFieldMemoMin = 64 << 10
+	// for an 889 KB patch every read was a full JSON decode (GAP-1040). A
+	// sandbox hook reads the field of one 8 KB call some hundred times, 1.5
+	// ms a hook, so arguments are remembered from a few hundred bytes
+	// (substrate-1 GAP-1028). Smaller arguments are decoded each time.
+	commandFieldMemoMin = 256
 	// commandFieldMemoMax bounds the arguments remembered.
 	commandFieldMemoMax = 4 << 20
-	// commandFieldMemoEntries bounds how many arguments are remembered.
-	commandFieldMemoEntries = 4
+	// commandFieldMemoEntries bounds how many arguments are remembered: the
+	// call, its twins and the hooks that run at the same time.
+	commandFieldMemoEntries = 8
 	// commandFieldMemoLife is how long an answer is kept: one hook call, with
 	// room for a retry.
 	commandFieldMemoLife = 30 * time.Second
