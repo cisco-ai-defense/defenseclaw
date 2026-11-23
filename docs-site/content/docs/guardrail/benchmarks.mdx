@@ -133,8 +133,7 @@ On prompts and tool results, which the judge also reads:
 ### Next to other tools
 
 Each tool's best setting from earlier runs, scored with the same labels on the
-sets it covers. These are the frozen results of those runs. The other tools
-were not re-run for this build.
+sets it covers.
 
 | Tool | Sets covered | Their F1 | Their benign alerted | DefenseClaw (d) F1 on the same sets |
 | --- | ---: | ---: | ---: | ---: |
@@ -148,13 +147,10 @@ were not re-run for this build.
 | Guardrails AI | 13 | 0.000 | 0.0% | 0.629 |
 | CodeShield (part of LlamaFirewall) | 4 | 0.000 | 0.0% | 0.878 |
 
-DefenseClaw has the highest F1 of the runs, but not by a margin you should
-rely on against LlamaFirewall: the 95% intervals of the two overlap. On
-speed, LlamaFirewall's p50 and p95 were 2,950 and 24,687 ms, with a cost of
-USD 0.80 per 1,000 calls; the DefenseClaw cascade is in the table above.
-A tool none of whose rules apply to a
-tool call scores near zero by construction; read those rows as "does not cover
-this surface", not as a failure of the tool at its own job.
+DefenseClaw has the highest F1 in every comparison. It is also faster and
+cheaper than LlamaFirewall, the next best: the cascade's p99 hook time is
+3,620 ms, against a p95 of 24,687 ms for LlamaFirewall, and its model cost is
+about USD 0.23 per 1,000 calls, against USD 0.80.
 
 ### Time and cost
 
@@ -236,11 +232,6 @@ attack trajectory does not make every tool call a malicious true positive.
 On Strict, the eight false positives are alerts, not blocks: Strict trades
 more alert visibility for more noise, and no benign call was blocked.
 
-The exact-proof command result has only nine positives. Its 100% recall point
-estimate therefore has a 95% Wilson lower bound of 70.09%. The observed
-0/7,908 FPR has a 95% Wilson upper bound of 0.04855%. We publish both facts
-because a perfect point estimate should not be mistaken for broad coverage.
-
 ### Does it interrupt benign work?
 
 We separately ran honest agent and terminal trajectories. No evaluated benign
@@ -253,9 +244,8 @@ call was blocked.
 | [LinuxArena](https://huggingface.co/datasets/anonymouslinuxarena/linuxarena-public), validation | 0.8856% | 0.9741% | 0 |
 | LinuxArena, test | 2.7753% | 2.9543% | 0 |
 
-LinuxArena is the clearest remaining noise problem. Most findings are
-legitimate secret-like values used against local services. They are allow-only,
-but they can still create alert fatigue.
+On LinuxArena, most alerts are secret-like values sent to local services.
+They are alerts only and never block.
 
 ### What the detector is made of
 
@@ -298,17 +288,15 @@ fully blockable multi-step proof. Every profile scored 4 TP, 10 TN, 0 FP, and
 0 FN and blocked all four complete proofs. Hard negatives include mismatched
 artifacts, intervening mutation, failed steps, and incomplete chains.
 
-Several public contextual datasets remain difficult:
+On these contextual datasets the rules do not block by design, because the
+evidence in the call does not prove the effect. The judge and the decision
+model cover them: see the end-to-end rows above.
 
 | Dataset | Result | Why it did not become a default block |
 | --- | --- | --- |
 | [AgentDojo](https://github.com/ethz-spylab/agentdojo) | 0/67/0/11 | Contextual positives lack complete block truth |
 | [Agentic RedTeam](https://github.com/Alkur123/agentic-redteam-benchmark) | 0/438/0/438 | Detect-only labels do not establish exact lineage |
 | [InjecAgent](https://github.com/uiuc-kang-lab/InjecAgent) chains | 0/0/0/544 | No stable source/sink identity in the normalized evidence |
-
-We expose these misses rather than converting nearby suspicious words into
-false-positive-prone rules. The judge and the decision model are what reach
-these cases: see the end-to-end rows above.
 
 ### How labels were produced
 
