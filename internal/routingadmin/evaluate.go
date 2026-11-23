@@ -208,6 +208,8 @@ func Compile(rules []config.RoutingAdminRule, budgets []config.RoutingBudget, ma
 		switch {
 		case b.Scope == config.RoutingBudgetScopeConnector && b.Subject != config.RoutingBudgetSubjectAll:
 			c.subject = config.NormalizeConnectorName(b.Subject)
+		case b.Scope == config.RoutingBudgetScopeUser && b.Subject != config.RoutingBudgetSubjectAll:
+			c.subject = UserSubjectKey(b.Subject)
 		case b.Subject != config.RoutingBudgetSubjectAll:
 			c.subject = shortHash(b.Subject)
 		}
@@ -367,11 +369,24 @@ func BudgetChargeKey(b config.RoutingBudget) string {
 	}
 	switch b.Scope {
 	case config.RoutingBudgetScopeUser:
-		return "user:" + b.ID + ":=" + shortHash(b.Subject)
+		return "user:" + b.ID + ":=" + UserSubjectKey(b.Subject)
 	case config.RoutingBudgetScopeGroup:
 		return "group:" + b.ID + ":" + shortHash(b.Subject)
 	}
 	return ""
+}
+
+// UserSubjectKey is the spend key part of a named user budget's subject,
+// for the evaluator (Compile) and the budget views (BudgetChargeKey) alike.
+// An issuer-qualified subject keys on its person id, issuer#subject, so
+// alice at a second issuer is a different person with her own spend
+// (GAP-0792); a bare name keeps the key it had before, so nobody's spend
+// resets on upgrade.
+func UserSubjectKey(subject string) string {
+	if issuer, sub, ok := config.SplitQualifiedUser(subject); ok {
+		return shortHash(issuer + "#" + sub)
+	}
+	return shortHash(subject)
 }
 
 // NamesCaller reports whether the facts prove that the users and groups

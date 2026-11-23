@@ -5657,6 +5657,7 @@
           }
         },
         "users": {
+          "description": "Users this rule selects: a name, uid:/sid:, or issuer#subject (an Agent Substrate person of exactly that issuer; with more than one trusted issuer a bare name selects only the primary issuer's person).",
           "type": "array",
           "minItems": 1,
           "maxItems": 4096,
@@ -5773,7 +5774,7 @@
           "minLength": 1,
           "maxLength": 512,
           "pattern": "^\\S(.*\\S)?$",
-          "description": "user: a users entry or * (each user its own limit); group: one groups entry (pooled); connector: a connector name or *; actor: * (each Agent Substrate actor its own limit); batch: * (each batch of one person its own limit)."
+          "description": "user: a users entry (a name, or issuer#subject for one person of one trusted issuer) or * (each user its own limit); group: one groups entry (pooled); connector: a connector name or *; actor: * (each Agent Substrate actor its own limit); batch: * (each batch of one person its own limit)."
         },
         "period": {
           "type": "string",

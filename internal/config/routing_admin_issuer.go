@@ -1,0 +1,110 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
+// SPDX-License-Identifier: Apache-2.0
+
+package config
+
+import (
+	"fmt"
+	"strings"
+)
+
+// SplitQualifiedUser splits an issuer-qualified users entry or named user
+// budget subject, issuer#subject (identity.Person.ID, GAP-0792): the issuer
+// is an https URL and never holds a '#'. ok is false for a bare name, so a
+// host account name with a '#' keeps matching as before.
+func SplitQualifiedUser(entry string) (issuer, subject string, ok bool) {
+	entry = strings.TrimSpace(entry)
+	if !strings.HasPrefix(entry, "https://") {
+		return "", "", false
+	}
+	issuer, subject, ok = strings.Cut(entry, "#")
+	if !ok {
+		return "", "", false
+	}
+	return issuer, subject, true
+}
+
+// PersonIssuers lists the distinct trusted person and workload issuers of
+// a Substrate cluster, the primary one first: identity.oidc.issuer, else
+// the first identity.workload_oidc issuer. Nil when Substrate is off.
+func (s SubstrateConfig) PersonIssuers() []string {
+	if !s.Enabled {
+		return nil
+	}
+	var out []string
+	add := func(iss string) {
+		if iss = strings.TrimSpace(iss); iss != "" && !containsString(out, iss) {
+			out = append(out, iss)
+		}
+	}
+	add(s.Identity.OIDC.Issuer)
+	for _, w := range s.Identity.WorkloadOIDC {
+		add(w.Issuer)
+	}
+	return out
+}
+
+// validateQualifiedUser refuses an issuer#subject entry with no subject.
+func validateQualifiedUser(at, entry string) error {
+	if _, subject, ok := SplitQualifiedUser(entry); ok && strings.TrimSpace(subject) == "" {
+		return settingErrorAt(at, fmt.Errorf("%s: %q names an issuer but no subject; write issuer#subject", at, entry))
+	}
+	return nil
+}
+
+// RoutingAdminIssuerWarnings names the routing.admin users entries and
+// named user budgets written as a bare name while the Substrate cluster
+// trusts more than one person issuer (GAP-0792): a bare name then matches
+// only a person of the primary issuer (and host accounts), never the same
+// subject at another issuer. config validate, the gateway at load and
+// doctor give them.
+func (c *Config) RoutingAdminIssuerWarnings() []string {
+	if c == nil || c.Routing.Admin == nil {
+		return nil
+	}
+	issuers := c.Substrate.PersonIssuers()
+	if len(issuers) < 2 {
+		return nil
+	}
+	var out []string
+	note := func(what, entry string) {
+		out = append(out, fmt.Sprintf("%s: %q has no issuer; with %d trusted issuers it matches only a person of %s (write issuer#subject for another issuer) (routing_admin_bare_user)",
+			what, entry, len(issuers), issuers[0]))
+	}
+	for _, r := range c.Routing.Admin.Rules {
+		for _, u := range r.Match.Users {
+			if bareRoutingUser(u) {
+				note("routing.admin rule "+r.ID+" users entry", u)
+			}
+		}
+	}
+	for _, b := range c.Routing.Admin.Budgets {
+		if b.Scope == RoutingBudgetScopeUser && b.Subject != RoutingBudgetSubjectAll && bareRoutingUser(b.Subject) {
+			note("routing.admin budget "+b.ID+" subject", b.Subject)
+		}
+	}
+	return out
+}
+
+// bareRoutingUser is a users entry that can name a person by subject or
+// principal without an issuer (not issuer#subject, not a uid: or sid:).
+func bareRoutingUser(entry string) bool {
+	if _, _, ok := SplitQualifiedUser(entry); ok {
+		return false
+	}
+	lower := strings.ToLower(strings.TrimSpace(entry))
+	return !strings.HasPrefix(lower, "uid:") && !strings.HasPrefix(lower, "sid:")
+}

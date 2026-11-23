@@ -13682,6 +13682,35 @@ def _check_routing_policy(r: _DoctorResult) -> None:
         _emit(status, "Routing policy", detail, remediation=remediation, r=r)
 
 
+def _check_routing_budget_keys(cfg, r: _DoctorResult) -> None:
+    """Actor and batch budgets whose retired keys pile up (GAP-0848): the
+    gateway's budget view, read with the administrator's token, names the
+    keys waiting to be stored; warn from half the bound."""
+    from defenseclaw.commands.cmd_routing import retired_key_rows
+
+    admin = getattr(getattr(cfg, "routing", None), "admin", None)
+    budgets = admin.get("budgets") if isinstance(admin, dict) else getattr(admin, "budgets", None)
+    scopes = {str(b.get("scope") if isinstance(b, dict) else getattr(b, "scope", "")) for b in budgets or []}
+    if not scopes & {"actor", "batch"} or r.gateway_down:
+        return
+    try:
+        token = cfg.gateway.resolved_token()
+        if not token:
+            return
+        from defenseclaw.gateway import OrchestratorClient
+
+        client = OrchestratorClient(host=_gateway_api_host(cfg), port=int(cfg.gateway.api_port), timeout=3, token=token)
+        try:
+            answer = client.routing_request("GET", "/api/v1/routing/budgets")
+        finally:
+            client.close()
+    except Exception:  # noqa: BLE001 - no token, no gateway, a refusal: the budget list says why
+        return
+    for status, detail in retired_key_rows((answer or {}).get("budgets") if isinstance(answer, dict) else None):
+        remedy = "defenseclaw routing budgets list; check the budget store or leader"
+        _emit(status, "Routing budget keys", detail, remediation=remedy, r=r)
+
+
 def routing_sensitive_row(cfg) -> tuple[str, str, str] | None:
     """The routing.sensitive row (GAP-0003): what keeps sensitive prompts
     local, and how to add the decision-model check. None when routing or
@@ -17288,6 +17317,7 @@ def doctor(
     _check_semantic_routing(cfg, r, live_health=routing_health)
     _check_routing_aliases(cfg, r)
     _check_routing_policy(r)
+    _check_routing_budget_keys(cfg, r)
     _check_routing_sensitive(cfg, r)
     _check_routing_tokenomics(cfg, r)
     _check_route_only(cfg, r, live_health=routing_health)

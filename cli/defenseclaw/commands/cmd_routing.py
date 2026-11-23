@@ -953,6 +953,94 @@ def routing_rules_list(app: AppContext, profile: str, as_json: bool) -> None:
         ux.warn(note)
 
 
+def split_qualified_user(entry: str) -> tuple[str, str] | None:
+    """(issuer, subject) of an issuer#subject users entry or named user
+    budget subject (config.SplitQualifiedUser, GAP-0792); None for a bare
+    name. The issuer is an https URL and never holds a '#', so a host account
+    name with a '#' stays bare."""
+    entry = str(entry or "").strip()
+    if not entry.startswith("https://") or "#" not in entry:
+        return None
+    issuer, _, subject = entry.partition("#")
+    return issuer, subject
+
+
+def person_issuers(doc: dict[str, Any]) -> list[str]:
+    """The distinct trusted person and workload issuers of a Substrate
+    cluster, the primary one first (config SubstrateConfig.PersonIssuers)."""
+    sub = doc.get("substrate")
+    if not isinstance(sub, dict) or not sub.get("enabled"):
+        return []
+    ident = sub.get("identity") if isinstance(sub.get("identity"), dict) else {}
+    oidc = ident.get("oidc") if isinstance(ident.get("oidc"), dict) else {}
+    out: list[str] = []
+    workloads = [w.get("issuer") for w in _list(ident.get("workload_oidc")) if isinstance(w, dict)]
+    for iss in [oidc.get("issuer"), *workloads]:
+        iss = str(iss or "").strip()
+        if iss and iss not in out:
+            out.append(iss)
+    return out
+
+
+def _bare_user(entry: Any) -> bool:
+    lower = str(entry or "").strip().lower()
+    return split_qualified_user(lower) is None and not lower.startswith(("uid:", "sid:"))
+
+
+def issuer_notes(doc: dict[str, Any]) -> list[str]:
+    """Bare users entries and named user budgets while more than one person
+    issuer is trusted (config RoutingAdminIssuerWarnings, GAP-0792): they
+    match only a person of the primary issuer."""
+    issuers = person_issuers(doc)
+    if len(issuers) < 2:
+        return []
+    admin = _admin(doc)
+    tail = (
+        f"has no issuer; with {len(issuers)} trusted issuers it matches only a person of "
+        f"{issuers[0]} (write issuer#subject for another issuer)"
+    )
+    notes: list[str] = []
+    for rule in _list(admin.get("rules")):
+        if isinstance(rule, dict):
+            for user in _list((rule.get("match") or {}).get("users")):
+                if _bare_user(user):
+                    notes.append(f"rule {rule.get('id')}: users entry {user!r} {tail}")
+    for budget in _list(admin.get("budgets")):
+        if isinstance(budget, dict) and budget.get("scope") == "user" and budget.get("subject") != "*":
+            if _bare_user(budget.get("subject")):
+                notes.append(f"budget {budget.get('id')}: subject {budget.get('subject')!r} {tail}")
+    return notes
+
+
+def retired_key_rows(budgets: Any) -> list[tuple[str, str]]:
+    """(status, detail) rows for the retired keys an administrator's budget
+    view reports (retired_keys, GAP-0848): warn from half the bound of keys
+    waiting to be stored, and when the bound dropped spend."""
+    rows: list[tuple[str, str]] = []
+    for b in _dicts(budgets):
+        r = b.get("retired_keys")
+        if not isinstance(r, dict):
+            continue
+        waiting, dropped, cap = (int(r.get(k) or 0) for k in ("waiting", "dropped", "cap"))
+        if dropped > 0:
+            rows.append(
+                (
+                    "warn",
+                    f"budget {b.get('id')}: the spend of {dropped} retired key(s) was dropped at the bound of {cap} "
+                    "(the leader or budget store did not take it in time)",
+                )
+            )
+        elif cap > 0 and 2 * waiting >= cap:
+            rows.append(
+                (
+                    "warn",
+                    f"budget {b.get('id')}: {waiting} of {cap} retired keys wait to be stored; at {cap} "
+                    "a managed deny budget refuses new keys and others drop the oldest",
+                )
+            )
+    return rows
+
+
 def _lint(doc: dict[str, Any]) -> list[str]:
     """Plain warnings about rules and budgets that do less than they look."""
     routing, admin = _routing(doc), _admin(doc)
@@ -990,6 +1078,7 @@ def _lint(doc: dict[str, Any]) -> list[str]:
             notes.append(f"budget {budget.get('id')}: deny is reported, not enforced, on this (unmanaged) device")
         if budget.get("scope") == "group" and not managed:
             notes.append(f"budget {budget.get('id')}: a group budget counts only this device's user here")
+    notes.extend(issuer_notes(doc))
     obs = doc.get("observability") or {}
     # What the gateway's budget feed needs (config.BudgetFeedReady), not the
     # local usage store: budget spend has its own ledger.
@@ -1168,7 +1257,7 @@ def routing_budgets_list(app: AppContext, as_json: bool) -> None:
         if not isinstance(b, dict):
             continue
         live = spend.get(b.get("id")) or {}
-        shown = ("spent_usd", "percent_used", "resets_at", "exceeded", "seed")
+        shown = ("spent_usd", "percent_used", "resets_at", "exceeded", "seed", "retired_keys")
         rows.append({**b, **{k: live[k] for k in shown if k in live}})
     if as_json:
         _emit_json({"budgets": rows, "live": not error, "error": error or None})
@@ -1197,6 +1286,8 @@ def routing_budgets_list(app: AppContext, as_json: bool) -> None:
         seed = str(r.get("seed") or "")
         if seed and seed != "seeded":
             ux.warn(f"budget {r.get('id')}: spend {seed}")
+    for _status, detail in retired_key_rows(rows):
+        ux.warn(detail)
 
 
 @routing_budgets.command("add")

@@ -90,6 +90,18 @@ type routingBudgetView struct {
 	Exceeded    bool     `json:"exceeded"`
 	ResetsAt    string   `json:"resets_at"`
 	Seed        string   `json:"seed,omitempty"`
+	// RetiredKeys is, for an administrator, how many evicted keys of an
+	// actor or batch budget wait to be stored and how many the bound
+	// dropped (GAP-0848): doctor warns at half the bound.
+	RetiredKeys *routingRetiredKeys `json:"retired_keys,omitempty"`
+}
+
+// routingRetiredKeys is the retired-key state of one launcher-keyed budget
+// on this process (Ledger.RetiredKeys), with its bound.
+type routingRetiredKeys struct {
+	Waiting int `json:"waiting"`
+	Dropped int `json:"dropped"`
+	Cap     int `json:"cap"`
 }
 
 // routingBudgetViews lists the budgets the caller may see with their spend:
@@ -122,6 +134,11 @@ func routingBudgetViews(cfg *config.Config, key string, admin bool, own routinga
 		switch {
 		case admin:
 			view.Subject = b.Subject
+			if b.Scope == config.RoutingBudgetScopeActor || b.Scope == config.RoutingBudgetScopeBatch {
+				if waiting, dropped := ledger.RetiredKeys(b.ID); waiting > 0 || dropped > 0 {
+					view.RetiredKeys = &routingRetiredKeys{Waiting: waiting, Dropped: dropped, Cap: ledger.KeyCap()}
+				}
+			}
 			spend, known = ledger.SpendPrefix(b.Scope+":"+b.ID+":", b.Period, now)
 		case b.Scope == config.RoutingBudgetScopeUser && b.Subject == config.RoutingBudgetSubjectAll:
 			if key == "" {

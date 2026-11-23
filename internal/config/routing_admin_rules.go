@@ -325,6 +325,11 @@ func validateRoutingAdminMatch(at string, m RoutingAdminMatch) error {
 			}
 		}
 	}
+	for _, user := range m.Users {
+		if err := validateQualifiedUser(at+".users", user); err != nil {
+			return err
+		}
+	}
 	for _, agent := range m.Agents {
 		if !agentIdentityPattern.MatchString(agent) {
 			return settingErrorAt(at+".agents", fmt.Errorf("%s.agents: %q is not an agent identity (want agt- followed by 16 hex digits)", at, agent))
@@ -367,6 +372,9 @@ func validateRoutingBudget(at string, b RoutingBudget, aliases map[string]struct
 	}
 	switch b.Scope {
 	case RoutingBudgetScopeUser:
+		if err := validateQualifiedUser(at+".subject", subject); err != nil {
+			return err
+		}
 	case RoutingBudgetScopeGroup:
 		if subject == RoutingBudgetSubjectAll {
 			return settingErrorAt(at+".subject", fmt.Errorf("%s.subject: a group budget names one group; use scope user with subject * for a limit per user", at))

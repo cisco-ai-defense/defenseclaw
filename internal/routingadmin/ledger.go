@@ -945,6 +945,17 @@ func (l *Ledger) RetiredKeys(id string) (waiting, dropped int) {
 	return waiting, l.dropped[id]
 }
 
+// KeyCap is the per-budget bound of live keys, and of retired keys
+// waiting to be stored (DefaultKeyCap unless SetKeyCap changed it).
+func (l *Ledger) KeyCap() int {
+	if l == nil {
+		return DefaultKeyCap
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.keyCap
+}
+
 // CappedKeys lists, in order, the capped keys this process holds spend of
 // (live and retired): the cluster read asks for those capped keys only.
 func (l *Ledger) CappedKeys() []string {
