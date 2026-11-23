@@ -31,10 +31,12 @@ type substrateStream struct {
 	scope                  string // the token's dc.scope: port:N or mcp:NAME
 	space, name, uid, user string
 	target                 string // the port or the MCP server name
+	port                   int    // the port of a port stream
 	start                  time.Time
 	idle                   time.Duration
 	in, out                atomic.Int64
 	last                   atomic.Int64 // unix nanos of the last byte
+	ended                  atomic.Value // string: why the gateway ended it (idle_close, admin_off)
 	release                func()
 }
 
@@ -42,10 +44,50 @@ type substrateStream struct {
 // shape, identity.ValidScope).
 var substrateMCPNameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,31}$`)
 
-// substrateStreamCounts counts open streams per actor UID and kind.
+// substrateStreamCounts counts open streams per actor UID and kind on this
+// gateway replica (GAP-0818: the caps are per replica, as the schema says;
+// a shared count would need a leader round trip on every open and close).
 type substrateStreamCounts struct {
 	mu   sync.Mutex
 	open map[string]int
+	// refused is when a refused row was last written per actor, kind and
+	// reason, and how many refusals it has held back since (GAP-0817).
+	refused map[string]*substrateStreamRefusal
+}
+
+type substrateStreamRefusal struct {
+	at   time.Time
+	held int
+}
+
+// substrateStreamRefusedEvery bounds refused rows: one per actor, kind and
+// reason in each window, the next one counting those held back.
+var substrateStreamRefusedEvery = 10 * time.Second
+
+// refusedRow reports whether a refused row for key is due now, and how many
+// refusals for key it has held back since the last row.
+func (c *substrateStreamCounts) refusedRow(key string, now time.Time) (held int, due bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.refused == nil {
+		c.refused = map[string]*substrateStreamRefusal{}
+	}
+	if r := c.refused[key]; r != nil && now.Sub(r.at) < substrateStreamRefusedEvery {
+		r.held++
+		return 0, false
+	}
+	if len(c.refused) >= 1024 {
+		for k, r := range c.refused {
+			if now.Sub(r.at) >= substrateStreamRefusedEvery {
+				delete(c.refused, k)
+			}
+		}
+	}
+	if r := c.refused[key]; r != nil {
+		held = r.held
+	}
+	c.refused[key] = &substrateStreamRefusal{at: now}
+	return held, true
 }
 
 func (c *substrateStreamCounts) take(key string, limit int) (release func(), ok bool) {
@@ -83,13 +125,42 @@ func (st *substrateState) interactive() config.SubstrateInteractiveConfig {
 // port_forward_off, mcp_bridge_off), the target (404 not_found, 403
 // port_not_allowed), a template whose relay predates streams (409
 // relay_too_old), a plain request (400 websocket_required) and the
-// per-actor cap (429 too_many_streams).
+// per-actor cap on this replica (429 too_many_streams). Each refusal writes
+// a rate-limited substrate.port|mcp.refused row (GAP-0817).
 func (a *APIServer) substrateStreamOpen(st *substrateState, r *http.Request, reg registry.Registration, rest string) (*substrateStream, int, string) {
 	head, target, _ := strings.Cut(rest, "/")
 	if head != relay.RoutePort && head != relay.RouteMCP {
 		return nil, http.StatusOK, ""
 	}
+	s, status, reason := a.substrateStreamAdmit(st, r, reg, head, target)
+	if status != http.StatusOK {
+		substrateStreamRefused(st, r, reg, head, target, reason)
+	}
+	return s, status, reason
+}
+
+// substrateStreamRefused writes substrate.port|mcp.refused for one refusal,
+// at most one row per actor, kind and reason in each window.
+func substrateStreamRefused(st *substrateState, r *http.Request, reg registry.Registration, kind, target, reason string) {
+	if st.audit == nil {
+		return
+	}
+	held, due := st.streams.refusedRow(reg.UID+"/"+kind+"/"+reason, st.clock())
+	if !due {
+		return
+	}
+	person := ""
+	if c, ok := substrateCallerFrom(r.Context()); ok {
+		person = c.person.ID()
+	}
+	st.audit(r.Context(), "INFO", kind+" stream refused for "+reg.Atespace+"/"+reg.Name+" ("+target+"): "+reason, map[string]any{
+		"event": "substrate." + kind + ".refused", "reason": reason, "atespace": reg.Atespace, "actor": reg.Name,
+		"actor_uid": reg.UID, "person": person, kind: target, "held_back": held})
+}
+
+func (a *APIServer) substrateStreamAdmit(st *substrateState, r *http.Request, reg registry.Registration, head, target string) (*substrateStream, int, string) {
 	ic := st.interactive()
+	port := 0
 	limit := ic.EffectiveMaxStreams()
 	switch head {
 	case relay.RoutePort:
@@ -103,6 +174,7 @@ func (a *APIServer) substrateStreamOpen(st *substrateState, r *http.Request, reg
 		if !ic.PortAllowed(n) {
 			return nil, http.StatusForbidden, "port_not_allowed"
 		}
+		port = n
 	case relay.RouteMCP:
 		if !ic.MCPBridgeOn(st.cfg.Managed) {
 			return nil, http.StatusForbidden, "mcp_bridge_off"
@@ -126,7 +198,7 @@ func (a *APIServer) substrateStreamOpen(st *substrateState, r *http.Request, reg
 		return nil, http.StatusTooManyRequests, "too_many_streams"
 	}
 	s := &substrateStream{st: st, kind: head, scope: head + ":" + target, space: reg.Atespace, name: reg.Name, uid: reg.UID,
-		target: target, start: st.clock(), idle: ic.EffectiveIdleClose(), release: release}
+		target: target, port: port, start: st.clock(), idle: ic.EffectiveIdleClose(), release: release}
 	if s.idle <= 0 {
 		s.idle = config.DefaultSubstrateIdleClose
 	}
@@ -162,25 +234,46 @@ func (s *substrateStream) audit(ctx context.Context, what string, extra map[stri
 	s.st.audit(ctx, "INFO", s.kind+" stream "+what+" for "+s.space+"/"+s.name+" ("+s.target+")", d)
 }
 
-// close ends the stream: the per-actor slot and a close row with bytes
-// and duration.
+// close ends the stream: the per-actor slot and a close row with bytes,
+// duration and why it ended (ended, idle_close or admin_off).
 func (s *substrateStream) close(ctx context.Context) {
 	if s == nil {
 		return
 	}
 	s.release()
+	reason, _ := s.ended.Load().(string)
+	if reason == "" {
+		reason = "ended"
+	}
 	s.audit(context.WithoutCancel(ctx), "close", map[string]any{"bytes_in": s.in.Load(), "bytes_out": s.out.Load(),
-		"duration_ms": s.st.clock().Sub(s.start).Milliseconds()})
+		"duration_ms": s.st.clock().Sub(s.start).Milliseconds(), "reason": reason})
+}
+
+// allowed reports whether the live substrate.interactive still admits the
+// stream (GAP-0816): its switch is on (managed auto included) and, for a
+// port, the port is still in ports.
+func (s *substrateStream) allowed(ic config.SubstrateInteractiveConfig) bool {
+	if s.kind == relay.RoutePort {
+		return ic.PortForwardOn() && ic.PortAllowed(s.port)
+	}
+	return ic.MCPBridgeOn(s.st.cfg.Managed)
 }
 
 // wrap counts the bytes on the relay connection and closes it after idle
-// with no bytes either way (substrate.interactive.idle_close).
+// with no bytes either way (substrate.interactive.idle_close), or as soon as
+// a tick finds the live config no longer admits it (admin_off).
 func (s *substrateStream) wrap(c net.Conn) net.Conn {
 	if s == nil || c == nil {
 		return c
 	}
 	sc := &substrateStreamConn{Conn: c, s: s, done: make(chan struct{})}
-	go sc.watch()
+	// The tick is read here, not in the watcher, so the watcher never
+	// reads the package setting while a caller changes it.
+	tick := substrateStreamIdleTick
+	if s.idle < 4*tick {
+		tick = s.idle / 4
+	}
+	go sc.watch(tick)
 	return sc
 }
 
@@ -217,11 +310,7 @@ func (c *substrateStreamConn) Close() error {
 // substrateStreamIdleTick bounds how late an idle stream is closed.
 var substrateStreamIdleTick = time.Minute
 
-func (c *substrateStreamConn) watch() {
-	tick := substrateStreamIdleTick
-	if c.s.idle < 4*tick {
-		tick = c.s.idle / 4
-	}
+func (c *substrateStreamConn) watch(tick time.Duration) {
 	t := time.NewTicker(tick)
 	defer t.Stop()
 	for {
@@ -229,7 +318,15 @@ func (c *substrateStreamConn) watch() {
 		case <-c.done:
 			return
 		case now := <-t.C:
+			// An admin switch to off, or a port taken out of ports,
+			// ends the streams already open, not just new ones (GAP-0816).
+			if !c.s.allowed(c.s.st.interactive()) {
+				c.s.ended.Store("admin_off")
+				_ = c.Close()
+				return
+			}
 			if now.Sub(time.Unix(0, c.s.last.Load())) >= c.s.idle {
+				c.s.ended.Store("idle_close")
 				c.s.audit(context.Background(), "idle", map[string]any{"idle_close_s": int(c.s.idle / time.Second)})
 				_ = c.Close()
 				return

@@ -8103,13 +8103,13 @@
                   "default": "auto"
                 },
                 "ports": {
-                  "description": "Actor ports a forward may reach: a port or lo-hi range list such as 3000,8000-8999.",
+                  "description": "Actor ports a forward may reach: a port or lo-hi range list such as 3000,8000-8999, within 1024-65535. The actor relay's own port 8080 is never forwarded.",
                   "type": "string",
                   "pattern": "^\\s*[0-9]{1,5}(\\s*-\\s*[0-9]{1,5})?(\\s*,\\s*[0-9]{1,5}(\\s*-\\s*[0-9]{1,5})?)*\\s*$",
                   "default": "1024-65535"
                 },
                 "max_streams": {
-                  "description": "Open forwarded connections per actor.",
+                  "description": "Open forwarded connections per actor on each gateway replica (the count is not shared between replicas).",
                   "type": "integer",
                   "minimum": 0,
                   "maximum": 1024,
@@ -8128,7 +8128,7 @@
                   "default": "auto"
                 },
                 "max_servers": {
-                  "description": "Bridged MCP servers per actor.",
+                  "description": "Bridged MCP servers per actor on each gateway replica (the count is not shared between replicas).",
                   "type": "integer",
                   "minimum": 0,
                   "maximum": 32,

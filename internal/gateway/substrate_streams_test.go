@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -30,8 +31,8 @@ func tixStreamReq(ws bool) *http.Request {
 
 // TestSubstrateStreamOpenRefusals (S2b, B3.2/B3.3): the admin switches,
 // the target, a relay too old for streams, a plain request and the
-// per-actor cap each refuse with their own reason; an admitted stream
-// carries its dc.scope and writes open and close rows.
+// per-actor cap each refuse with their own reason and a refused row; an
+// admitted stream carries its dc.scope and writes open and close rows.
 func TestSubstrateStreamOpenRefusals(t *testing.T) {
 	streams := registry.Registration{Atespace: "tix", Name: "a", UID: "0001", RelayStreams: "mcp,port,tls"}
 	old := registry.Registration{Atespace: "tix", Name: "a", UID: "0001", RelayStreams: "tls"}
@@ -66,8 +67,15 @@ func TestSubstrateStreamOpenRefusals(t *testing.T) {
 			t.Fatalf("%s: got %d %s", tc.name, status, reason)
 		}
 		if tc.scope == "" {
-			if s != nil || len(au.events) != 0 {
-				t.Fatalf("%s: no stream and no row expected, got %v %v", tc.name, s, au.events)
+			// A refusal writes its refused row (GAP-0817); the
+			// terminal route writes none here.
+			var want []string
+			if tc.status != http.StatusOK {
+				kind, _, _ := strings.Cut(tc.rest, "/")
+				want = []string{"substrate." + kind + ".refused"}
+			}
+			if s != nil || !slices.Equal(au.events, want) {
+				t.Fatalf("%s: no stream and rows %v expected, got %v %v", tc.name, want, s, au.events)
 			}
 			continue
 		}

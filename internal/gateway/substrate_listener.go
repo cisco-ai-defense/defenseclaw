@@ -265,7 +265,8 @@ type substrateState struct {
 	cfg SubstrateConfig
 	// taskEnds bounds the task-end audit rows per actor.
 	taskEnds substrateTaskEnds
-	// streams counts the open port forwards and MCP bridges per actor.
+	// streams counts the open port forwards and MCP bridges per actor on
+	// this replica (GAP-0818).
 	streams substrateStreamCounts
 	// refusals bounds refusal log lines: a flood of bad tokens is still
 	// refused, not logged line by line.

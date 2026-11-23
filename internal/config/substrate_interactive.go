@@ -29,9 +29,11 @@ type SubstratePortForwardConfig struct {
 	// Enabled is auto (default: on in open source and managed), on or off.
 	Enabled string `mapstructure:"enabled" yaml:"enabled,omitempty"`
 	// Ports is the actor ports a forward may reach: "1024-65535"
-	// (default) or a list such as "3000,8000-8999".
+	// (default) or a list such as "3000,8000-8999". Ports below 1024 and
+	// the actor relay's own port (SubstrateRelayPort) are never forwarded.
 	Ports string `mapstructure:"ports" yaml:"ports,omitempty"`
-	// MaxStreams caps open forwarded connections per actor (0 = 32).
+	// MaxStreams caps open forwarded connections per actor on each
+	// gateway replica (0 = 32).
 	MaxStreams int `mapstructure:"max_streams" yaml:"max_streams,omitempty"`
 }
 
@@ -40,7 +42,8 @@ type SubstratePortForwardConfig struct {
 type SubstrateMCPBridgeConfig struct {
 	// Enabled is auto (default: on in open source, off in managed), on or off.
 	Enabled string `mapstructure:"enabled" yaml:"enabled,omitempty"`
-	// MaxServers caps bridged servers per actor (0 = 4).
+	// MaxServers caps bridged servers per actor on each gateway replica
+	// (0 = 4).
 	MaxServers int `mapstructure:"max_servers" yaml:"max_servers,omitempty"`
 	// MessageMaxBytes refuses (never cuts) a bigger JSON-RPC message
 	// (0 = 1 MiB).
@@ -56,7 +59,10 @@ const (
 
 // Defaults and bounds of substrate.interactive.
 const (
-	DefaultSubstratePorts            = "1024-65535"
+	DefaultSubstratePorts = "1024-65535"
+	// SubstrateRelayPort is the actor relay's own port (the kit's
+	// relay.listen ":8080"): a forward never reaches it.
+	SubstrateRelayPort               = 8080
 	DefaultSubstrateMaxStreams       = 32
 	MaxSubstrateMaxStreams           = 1024
 	DefaultSubstrateMaxServers       = 4
@@ -111,8 +117,8 @@ func ParsePortRanges(v string) ([]PortRange, error) {
 		}
 		l, err1 := strconv.Atoi(strings.TrimSpace(lo))
 		h, err2 := strconv.Atoi(strings.TrimSpace(hi))
-		if err1 != nil || err2 != nil || l < 1 || h > 65535 || l > h {
-			return nil, fmt.Errorf("%q is not a port or a lo-hi range within 1-65535", part)
+		if err1 != nil || err2 != nil || l < 1024 || h > 65535 || l > h {
+			return nil, fmt.Errorf("%q is not a port or a lo-hi range within 1024-65535", part)
 		}
 		out = append(out, PortRange{Lo: l, Hi: h})
 	}
@@ -125,6 +131,9 @@ func ParsePortRanges(v string) ([]PortRange, error) {
 // PortAllowed reports whether a forward may reach port. A list that does
 // not parse allows nothing (Validate refuses it at load).
 func (c SubstrateInteractiveConfig) PortAllowed(port int) bool {
+	if port == SubstrateRelayPort {
+		return false
+	}
 	v := strings.TrimSpace(c.PortForward.Ports)
 	if v == "" {
 		v = DefaultSubstratePorts
@@ -180,8 +189,14 @@ func (c SubstrateInteractiveConfig) validate(bad func(key, format string, a ...a
 		}
 	}
 	if v := strings.TrimSpace(c.PortForward.Ports); v != "" {
-		if _, err := ParsePortRanges(v); err != nil {
+		ranges, err := ParsePortRanges(v)
+		if err != nil {
 			bad("interactive.port_forward.ports", "%v", err)
+		}
+		for _, r := range ranges {
+			if r.Lo == SubstrateRelayPort && r.Hi == SubstrateRelayPort {
+				bad("interactive.port_forward.ports", "%d is the actor relay's own port", SubstrateRelayPort)
+			}
 		}
 	}
 	if n := c.PortForward.MaxStreams; n < 0 || n > MaxSubstrateMaxStreams {
