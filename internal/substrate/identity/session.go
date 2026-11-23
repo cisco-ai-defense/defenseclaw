@@ -29,6 +29,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -61,7 +62,17 @@ type SessionActor struct {
 	// TaskDigest is the registration task digest ("" for an interactive
 	// run). It travels as the top-level SessionTaskClaim, not in dc.actor.
 	TaskDigest string `json:"-"`
+	// Scope limits the token to one relay stream (B3 dc.scope: "port:N"
+	// or "mcp:NAME"); "" is a terminal, task or file token. It travels as
+	// the top-level dc.scope claim.
+	Scope string `json:"-"`
 }
+
+// scopeRE is the shape of a stream scope: a port forward or an MCP bridge.
+var scopeRE = regexp.MustCompile(`^(port:[1-9][0-9]{0,4}|mcp:[a-z0-9][a-z0-9_-]{0,31})$`)
+
+// ValidScope reports an empty scope or one stream scope.
+func ValidScope(s string) bool { return s == "" || scopeRE.MatchString(s) }
 
 // Session is a verified relay session token.
 type Session struct {
@@ -84,6 +95,8 @@ type Session struct {
 	// sign-in is refused (GAP-0744).
 	SignInIssuedAt time.Time `json:"-"`
 	SignInKey      string    `json:"-"`
+	// Scope is the dc.scope claim ("" when the token has none).
+	Scope string `json:"scope,omitempty"`
 }
 
 // SessionSignIn is the sign-in a session token is handed out for.
@@ -114,6 +127,7 @@ type sessionClaims struct {
 	Task      string        `json:"dc.task_sha256,omitempty"`
 	SignInIAT *int64        `json:"dc.signin_iat,omitempty"`
 	SignInKey string        `json:"dc.signin_key,omitempty"`
+	Scope     string        `json:"dc.scope,omitempty"`
 }
 
 // validTaskDigest reports an empty digest or 64 lowercase hex digits.
@@ -228,6 +242,9 @@ func (s *SessionSigner) IssueUntil(signIn SessionSignIn, actor SessionActor, ttl
 	if !validTaskDigest(actor.TaskDigest) {
 		return "", time.Time{}, errors.New("identity: a task digest is the SHA-256 of the task in hex")
 	}
+	if !ValidScope(actor.Scope) {
+		return "", time.Time{}, errors.New("identity: a session scope is port:N or mcp:NAME")
+	}
 	if ttl <= 0 {
 		ttl = DefaultSessionLifetime
 	}
@@ -254,7 +271,7 @@ func (s *SessionSigner) IssueUntil(signIn SessionSignIn, actor SessionActor, ttl
 	claims := sessionClaims{
 		Issuer: s.issuer, Subject: person, Audience: audience{SessionAudience},
 		Expiry: &ex, NotBefore: &nbf, IssuedAt: &iat,
-		ID: base64.RawURLEncoding.EncodeToString(jti), Actor: &actor, Task: actor.TaskDigest,
+		ID: base64.RawURLEncoding.EncodeToString(jti), Actor: &actor, Task: actor.TaskDigest, Scope: actor.Scope,
 		SignInKey: signIn.TokenKey,
 	}
 	if !signIn.IssuedAt.IsZero() {
@@ -322,10 +339,13 @@ func (s *SessionSigner) Verify(token string) (Session, error) {
 		return Session{}, reasonf(ReasonClaims, "session token names its sign-in in the wrong form")
 	}
 	actor := *c.Actor
-	actor.TaskDigest = c.Task
+	if !ValidScope(c.Scope) {
+		return Session{}, reasonf(ReasonClaims, "session token scope is not a stream scope")
+	}
+	actor.TaskDigest, actor.Scope = c.Task, c.Scope
 	out := Session{
 		Person: c.Subject, Actor: actor, ActorRef: c.Actor.Atespace + "/" + c.Actor.Name, ActorUID: c.Actor.UID,
-		TokenID: c.ID, Expires: time.Unix(*c.Expiry, 0), IssuedAt: time.Unix(*c.IssuedAt, 0), TaskDigest: c.Task,
+		TokenID: c.ID, Expires: time.Unix(*c.Expiry, 0), IssuedAt: time.Unix(*c.IssuedAt, 0), TaskDigest: c.Task, Scope: c.Scope,
 		SignInKey: c.SignInKey,
 	}
 	if c.SignInIAT != nil {

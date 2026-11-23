@@ -328,6 +328,12 @@ func (a *APIServer) serveSubstrateRelayVerify(st *substrateState, w http.Respons
 	out := map[string]any{
 		"person": s.Person, "actor": s.ActorRef, "actor_uid": s.ActorUID, "jti": s.TokenID, "expires": s.Expires,
 	}
+	// The relay serves a token only on the routes of its own dc.scope (B3),
+	// and reads the scope from this answer on a relay-TLS kit (GAP-0815):
+	// without it a stream token would be a terminal token there.
+	if s.Scope != "" {
+		out["scope"] = s.Scope
+	}
 	// A --task run's relay checks the task it runs is the one the
 	// launcher registered (GAP-0071): the digest, never the text.
 	if reg, ok := substrateRegistrationFrom(r.Context()); ok && reg.TaskDigest != "" {
