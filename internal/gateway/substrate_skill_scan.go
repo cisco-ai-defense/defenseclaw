@@ -17,17 +17,23 @@
 package gateway
 
 import (
+	"archive/tar"
+	"archive/zip"
 	"bytes"
+	"compress/bzip2"
+	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"path"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // Reason codes of the skill pass (B5.4, GAP-0477). They go in the code field
@@ -419,27 +425,41 @@ func (st *substrateState) auditSkill(ctx context.Context, action, severity, conn
 }
 
 // skillArchiveMagic are the leading bytes of archive and compression
-// formats (gzip, bzip2, xz, zstd, lz4, lzma, cpio, ar); at offset 257 a tar
-// header says "ustar". skillArchiveAnywhere are the headers found anywhere
-// in a file (GAP-0933): a zip local, central or end record, and the rar and
-// 7z signatures, so a script with an archive appended or a self-extracting
-// archive is found too. Each is long enough that text does not hold it.
+// formats (gzip, xz, zstd, lz4, ar) that no text file starts with; at offset
+// 257 a tar header says "ustar", and a cpio archive starts with a whole
+// ASCII header (skillCPIOHeader). skillArchiveAnywhere are the headers found
+// anywhere in a file (GAP-0933): a zip local, central or end record, and the
+// rar and 7z signatures, so a script with an archive appended or a
+// self-extracting archive is found too. skillArchiveShortMagic (lzma, cpio
+// binary and ASCII magic, bzip2 in skillArchiveFile) and the name rule
+// skillArchiveExt are short or name-only, so they count only for a binary
+// file: a text file named messages.ar or README.pt.br, or a CSV that starts
+// 070701, is not an archive (GAP-0981).
 var (
 	skillArchiveMagic = [][]byte{
-		{0x1f, 0x8b}, {0xfd, '7', 'z', 'X', 'Z', 0x00}, {0x28, 0xb5, 0x2f, 0xfd}, {0x04, 0x22, 0x4d, 0x18},
-		{0x5d, 0x00, 0x00}, []byte("070701"), []byte("070702"), []byte("070707"), {0xc7, 0x71}, []byte("!<arch>\n"),
+		{0x1f, 0x8b}, {0xfd, '7', 'z', 'X', 'Z', 0x00}, {0x28, 0xb5, 0x2f, 0xfd}, {0x04, 0x22, 0x4d, 0x18}, []byte("!<arch>\n"),
+	}
+	skillArchiveShortMagic = [][]byte{
+		{0x5d, 0x00, 0x00}, []byte("070701"), []byte("070702"), []byte("070707"), {0xc7, 0x71},
 	}
 	skillArchiveAnywhere = [][]byte{
 		[]byte("PK\x03\x04"), []byte("PK\x01\x02"), []byte("PK\x05\x06"), []byte("PK\x07\x08"),
 		[]byte("Rar!\x1a\x07"), {'7', 'z', 0xbc, 0xaf, 0x27, 0x1c},
 	}
-	// skillArchiveExt are archive file names, whatever their content.
+	// skillArchiveExt are archive file names (binary files only).
 	skillArchiveExt = map[string]bool{
 		".zip": true, ".jar": true, ".war": true, ".ear": true, ".apk": true, ".whl": true, ".egg": true, ".nupkg": true,
 		".vsix": true, ".xpi": true, ".crx": true, ".tar": true, ".tgz": true, ".gz": true, ".bz2": true, ".tbz": true,
 		".tbz2": true, ".xz": true, ".txz": true, ".zst": true, ".tzst": true, ".lz4": true, ".lzma": true, ".lz": true,
 		".7z": true, ".rar": true, ".cpio": true, ".ar": true, ".deb": true, ".rpm": true, ".cab": true, ".iso": true,
 		".dmg": true, ".z": true, ".sz": true, ".br": true,
+		".docx": true, ".docm": true, ".xlsx": true, ".xlsm": true, ".pptx": true, ".pptm": true, ".odt": true, ".ods": true, ".odp": true,
+	}
+	// skillScannerZipExt are the zip formats the skill scanner opens and
+	// scans inside (skill-scanner content_extractor ZIP_EXTENSIONS).
+	skillScannerZipExt = map[string]bool{
+		".zip": true, ".jar": true, ".war": true, ".apk": true, ".docx": true, ".docm": true, ".xlsx": true, ".xlsm": true,
+		".pptx": true, ".pptm": true, ".odt": true, ".ods": true, ".odp": true,
 	}
 )
 
@@ -447,32 +467,243 @@ var (
 // headers (the kit attaches at most substrateAttachedMaxBytes per post).
 const skillArchiveScanMax = substrateAttachedMaxBytes
 
-// skillArchiveFile is the first file of a folder that is an archive (by
-// name, leading bytes, a bzip2 "BZh1".."BZh9" header, or an archive header
-// anywhere in it), as a path inside the folder; "" when there is none. The
-// static analyzers read files as they are, so a clean verdict says nothing
-// of what an archive holds (B5.4 skill_archive): the fail mode decides. The
-// search is linear in the attached bytes and bounded by skillArchiveScanMax.
+// skillArchiveListMax bounds the bytes a tar is read through (decompressed)
+// to list its members, and skillGzipMax the payload of a plain .gz the
+// gateway unpacks for the scan.
+const (
+	skillArchiveListMax = 8 << 20
+	skillGzipMax        = 1 << 20
+)
+
+// skillArchiveFile is the first file of a folder that is an archive the scan
+// could not look inside, as a path inside the folder; "" when there is none.
+// See skillArchiveFileFrom.
 func skillArchiveFile(dir string, files []SubstrateAttachedFile) string {
+	return skillArchiveFileFrom(dir, files, nil)
+}
+
+// skillArchiveFileFrom is skillArchiveFile for files that include the
+// payloads of plain .gz files the gateway unpacked for the scan
+// (skillExpandGzip; from maps a payload to its .gz). An archive is found by
+// its leading bytes, a header anywhere in it or, for a binary file, its name
+// or a short magic. The static analyzers read files as they are, so a clean
+// verdict says nothing of what an archive holds (B5.4 skill_archive): the
+// fail mode decides. Not counted: a zip or tar the skill scanner itself
+// opens and scans inside (skillScannerOpens), and a .gz whose payload was
+// scanned (the payload is checked in its place, and named by its .gz). The
+// search is linear in the attached bytes and bounded by skillArchiveScanMax.
+func skillArchiveFileFrom(dir string, files []SubstrateAttachedFile, from map[string]string) string {
+	unpacked := make(map[string]bool, len(from))
+	for _, gz := range from {
+		unpacked[gz] = true
+	}
 	for _, f := range files {
-		c := f.Content
-		if len(c) > skillArchiveScanMax {
-			c = c[:skillArchiveScanMax]
+		if unpacked[f.Path] || !skillArchiveHit(f) {
+			continue
 		}
-		hit := skillArchiveExt[strings.ToLower(path.Ext(f.Path))] ||
-			(len(c) >= 262 && bytes.Equal(c[257:262], []byte("ustar"))) ||
-			(len(c) >= 4 && bytes.HasPrefix(c, []byte("BZh")) && c[3] >= '1' && c[3] <= '9')
-		for _, m := range skillArchiveMagic {
-			hit = hit || bytes.HasPrefix(c, m)
+		p := f.Path
+		if gz, ok := from[p]; ok {
+			p = gz
 		}
-		for _, m := range skillArchiveAnywhere {
-			hit = hit || bytes.Contains(c, m)
-		}
-		if hit {
-			return strings.TrimPrefix(path.Clean("/"+strings.TrimPrefix(f.Path, "/")), dir+"/")
-		}
+		return strings.TrimPrefix(path.Clean("/"+strings.TrimPrefix(p, "/")), dir+"/")
 	}
 	return ""
+}
+
+// skillArchiveHit reports whether one attached file is an archive the scan
+// could not look inside.
+func skillArchiveHit(f SubstrateAttachedFile) bool {
+	c := f.Content
+	if len(c) > skillArchiveScanMax {
+		c = c[:skillArchiveScanMax]
+	}
+	if len(c) == 0 || (!f.Truncated && skillScannerOpens(f.Path, f.Content)) {
+		return false
+	}
+	if (len(c) >= 262 && bytes.Equal(c[257:262], []byte("ustar"))) || skillCPIOHeader(c) {
+		return true
+	}
+	for _, m := range skillArchiveMagic {
+		if bytes.HasPrefix(c, m) {
+			return true
+		}
+	}
+	for _, m := range skillArchiveAnywhere {
+		if bytes.Contains(c, m) {
+			return true
+		}
+	}
+	if skillTextContent(c, f.Truncated || len(c) < len(f.Content)) {
+		return false
+	}
+	if skillArchiveExt[strings.ToLower(path.Ext(f.Path))] ||
+		(len(c) >= 4 && bytes.HasPrefix(c, []byte("BZh")) && c[3] >= '1' && c[3] <= '9') {
+		return true
+	}
+	for _, m := range skillArchiveShortMagic {
+		if bytes.HasPrefix(c, m) {
+			return true
+		}
+	}
+	return false
+}
+
+// skillTextContent reports whether c is text: valid UTF-8 with no NUL byte
+// (a rune cut at the end of a cut file does not count).
+func skillTextContent(c []byte, cut bool) bool {
+	if bytes.IndexByte(c, 0) >= 0 {
+		return false
+	}
+	if utf8.Valid(c) {
+		return true
+	}
+	for i := 0; cut && i < utf8.UTFMax-1 && len(c) > 0; i++ {
+		if c = c[:len(c)-1]; utf8.Valid(c) {
+			return true
+		}
+	}
+	return false
+}
+
+// skillCPIOHeader reports whether c starts with a whole cpio ASCII header:
+// newc or crc ("070701", "070702" and 104 hex digits) or odc ("070707" and
+// 70 octal digits). A text file that only starts with the magic is not one.
+func skillCPIOHeader(c []byte) bool {
+	digits, n := "0123456789abcdefABCDEF", 110
+	switch {
+	case bytes.HasPrefix(c, []byte("070701")), bytes.HasPrefix(c, []byte("070702")):
+	case bytes.HasPrefix(c, []byte("070707")):
+		digits, n = "01234567", 76
+	default:
+		return false
+	}
+	if len(c) < n {
+		return false
+	}
+	for _, b := range c[6:n] {
+		if strings.IndexByte(digits, b) < 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// skillScannerOpens reports whether the skill scanner opens this file and
+// scans what it holds (its content extractor): a zip format (zip, jar, war,
+// apk, Office and OpenDocument) or a tar (.tar, .tar.gz, .tgz, .tar.bz2)
+// whose name and content agree, that Go opens too, whose zip entries are
+// neither encrypted nor compressed in a way it does not read, and that holds
+// no archive the scanner does not open (only the scanner's own formats are
+// unpacked inside it). A .tar.xz is not checked here and stays skill_archive.
+func skillScannerOpens(name string, c []byte) bool {
+	lower := strings.ToLower(path.Base(name))
+	switch {
+	case skillScannerZipExt[path.Ext(lower)]:
+		if !bytes.HasPrefix(c, []byte("PK\x03\x04")) {
+			return false
+		}
+		zr, err := zip.NewReader(bytes.NewReader(c), int64(len(c)))
+		if err != nil {
+			return false
+		}
+		for _, e := range zr.File {
+			if e.Flags&0x1 != 0 || (e.Method != zip.Store && e.Method != zip.Deflate) || !skillMemberOK(e.Name) {
+				return false
+			}
+		}
+		return true
+	case strings.HasSuffix(lower, ".tar"):
+		return skillTarMembersOK(bytes.NewReader(c))
+	case strings.HasSuffix(lower, ".tar.gz"), strings.HasSuffix(lower, ".tgz"):
+		zr, err := gzip.NewReader(bytes.NewReader(c))
+		if err != nil {
+			return false
+		}
+		return skillTarMembersOK(zr)
+	case strings.HasSuffix(lower, ".tar.bz2"):
+		if !bytes.HasPrefix(c, []byte("BZh")) {
+			return false
+		}
+		return skillTarMembersOK(bzip2.NewReader(bytes.NewReader(c)))
+	}
+	return false
+}
+
+// skillMemberOK reports whether an archive member's name is not an archive
+// the scanner leaves unopened.
+func skillMemberOK(name string) bool {
+	lower := strings.ToLower(path.Base(name))
+	ext := path.Ext(lower)
+	if !skillArchiveExt[ext] {
+		return true
+	}
+	return skillScannerZipExt[ext] || ext == ".tar" || ext == ".tgz" ||
+		strings.HasSuffix(lower, ".tar.gz") || strings.HasSuffix(lower, ".tar.bz2")
+}
+
+// skillTarMembersOK reads a tar to its end (at most skillArchiveListMax
+// bytes) and reports whether it is whole and every member name passes
+// skillMemberOK.
+func skillTarMembersOK(r io.Reader) bool {
+	lr := &io.LimitedReader{R: r, N: skillArchiveListMax}
+	tr := tar.NewReader(lr)
+	members := 0
+	for {
+		h, err := tr.Next()
+		if err == io.EOF {
+			return members > 0 && lr.N > 0
+		}
+		if err != nil || !skillMemberOK(h.Name) {
+			return false
+		}
+		members++
+	}
+}
+
+// skillExpandGzip returns a folder's files with the payload of each plain
+// .gz file (not a .tar.gz or .tgz, which the scanner opens) added for the
+// scan, at the .gz path without ".gz", and a map from each payload to its
+// .gz (GAP-0981: managed installs scan the payload instead of refusing the
+// .gz as skill_archive). A payload is added only when the .gz is whole and
+// unpacks to at most skillGzipMax bytes, and no file of the folder has its
+// path; otherwise the .gz stays an archive. The .gz header's own file name
+// is never used.
+func skillExpandGzip(dir string, files []SubstrateAttachedFile) ([]SubstrateAttachedFile, map[string]string) {
+	var add []SubstrateAttachedFile
+	var from map[string]string
+	have := make(map[string]bool, len(files))
+	for _, f := range files {
+		have[f.Path] = true
+	}
+	for _, f := range files {
+		lower := strings.ToLower(f.Path)
+		if f.Truncated || !strings.HasSuffix(lower, ".gz") || strings.HasSuffix(lower, ".tar.gz") || !bytes.HasPrefix(f.Content, []byte{0x1f, 0x8b}) {
+			continue
+		}
+		p := f.Path[:len(f.Path)-len(".gz")]
+		if have[p] || path.Clean(p) != p || !strings.HasPrefix(p, dir+"/") || strings.HasSuffix(p, "/") {
+			continue
+		}
+		zr, err := gzip.NewReader(bytes.NewReader(f.Content))
+		if err != nil {
+			continue
+		}
+		payload, err := io.ReadAll(io.LimitReader(zr, skillGzipMax+1))
+		if err != nil || len(payload) > skillGzipMax {
+			continue
+		}
+		sum := sha256.Sum256(payload)
+		have[p] = true
+		add = append(add, SubstrateAttachedFile{Role: f.Role, Path: p, Size: int64(len(payload)), SHA256: hex.EncodeToString(sum[:]), Content: payload})
+		if from == nil {
+			from = map[string]string{}
+		}
+		from[p] = f.Path
+	}
+	if len(add) == 0 {
+		return files, nil
+	}
+	return append(append(make([]SubstrateAttachedFile, 0, len(files)+len(add)), files...), add...), from
 }
 
 // skillArchiveMessage is the reason of a folder with an archive in it.

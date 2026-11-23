@@ -222,7 +222,11 @@ func (st *substrateState) substrateScanSkills(ctx context.Context, connector str
 			passed[dir] = d
 			continue
 		}
-		jobs = append(jobs, &skillScanJob{dir: dir, digest: d})
+		// GAP-0981: the payload of a plain .gz is scanned in its place (the
+		// parent and rel let it through unscanned), not refused as an
+		// archive the scan could not look inside.
+		files, from := skillExpandGzip(dir, folders[dir])
+		jobs = append(jobs, &skillScanJob{dir: dir, digest: d, files: files, from: from})
 	}
 	until, cancel := st.skillPostUntil(ctx, len(jobs) > 0)
 	defer cancel()
@@ -231,7 +235,7 @@ func (st *substrateState) substrateScanSkills(ctx context.Context, connector str
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			j.res = st.scanSkillFolder(ctx, until, st.blocksUnscanned(connector), path.Base(j.dir), j.dir, folders[j.dir])
+			j.res = st.scanSkillFolder(ctx, until, st.blocksUnscanned(connector), path.Base(j.dir), j.dir, j.files)
 		}()
 	}
 	wg.Wait()
@@ -277,7 +281,7 @@ func (st *substrateState) substrateScanSkills(ctx context.Context, connector str
 			out = append(out, SubstrateQuarantine{Path: dir, Reason: msg, Code: code})
 			st.auditSkill(ctx, AuditSkillBlocked, "HIGH", connector, dir, f, map[string]any{"reason": code, "detail": reason, "duration_ms": res.took.Milliseconds(),
 				"quarantine": path.Join(path.Dir(path.Dir(dir)), ".defenseclaw-quarantine")})
-		} else if a := skillArchiveFile(dir, folders[dir]); a != "" {
+		} else if a := skillArchiveFileFrom(dir, j.files, j.from); a != "" {
 			// B5.4 skill_archive: the scan could not look inside it.
 			if q := st.substrateRefuseOrAlert(ctx, connector, dir, skillArchiveMessage(a, path.Base(dir)), SkillReasonArchive, f); q != nil {
 				out = append(out, *q)
@@ -311,6 +315,8 @@ func (st *substrateState) substrateScanSkills(ctx context.Context, connector str
 // skillScanJob is one folder of a post the runtime scan decides.
 type skillScanJob struct {
 	dir, digest string
+	files       []SubstrateAttachedFile // what is scanned (skillExpandGzip)
+	from        map[string]string
 	res         skillScanResult
 }
 
