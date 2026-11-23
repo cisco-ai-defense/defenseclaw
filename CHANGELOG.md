@@ -99,6 +99,7 @@ DefenseClaw 1.0.11 follows 1.0.10. It is a fix release. It updates OpenShell to 
 #### Endpoint inventory
 - **Adding or removing a skill no longer changes the ids of the other skills in its folder.** The managed inventory built the id of a skill, plugin or rule from whichever entry of its folder hashed lowest; it now uses the folder itself. Skill, plugin and rule ids change once on upgrade; MCP server ids do not.
 - **The plugin inventory no longer reports Codex's install staging folder as a plugin.** Hidden folders in an agent's plugins folder, such as Codex's `.remote-plugin-install-staging`, are the agent's own working state; discovery, and the Linux sensor helper's read of a home, now leave them out.
+- **On Windows, an unchanged skill folder is no longer read again on the next scan.** The skill cache now checks each entry in the folder directly, because Windows can report an out-of-date time for a subfolder until it is next opened.
 
 ### Known limits
 
