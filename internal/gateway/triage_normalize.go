@@ -117,11 +117,11 @@ func stripZeroWidth(s string) string {
 // for running whole-word and path-anchored regexes against. The
 // normalizations applied, in order:
 //
-//  1. Unicode NFC composition so that pre-composed "é" and
-//     decomposed "e\u0301" are treated identically. Without this,
-//     "se\u0301nsitive" with a combining mark slips past every regex
-//     scanning the ASCII fast path, even though a human reader treats
-//     the rendered string as "sensitive".
+//  1. Unicode NFKC: composes decomposed forms (pre-composed "é" and
+//     decomposed "e\u0301" read alike) and folds compatibility forms
+//     to their plain letter (fullwidth "ｆｉｎｄ", U+017F long s,
+//     ligatures, NBSP), so "paſſword" reads as "password"
+//     (rel-1-0-10:GAP-1952).
 //  2. Zero-width strip — removes common invisible format characters
 //     (soft hyphen, bidi controls, ZWSP/ZWJ/ZWNJ, word joiner, BOM,
 //     invisible math operators, deprecated format controls, etc.)
@@ -131,11 +131,17 @@ func stripZeroWidth(s string) string {
 //  3. Lowercase via strings.ToLower. Substring scans with
 //     strings.Contains (case-sensitive) operate on the normalized
 //     string so a case-only mismatch does not leak past triage.
-//  4. Whitespace-around-slash collapse — removes any ASCII whitespace
+//  4. Mixed-script fold (foldTriageConfusables): inside a word that
+//     holds an ASCII letter, a bounded set of Cyrillic, Greek and
+//     Latin-extension lookalikes becomes its ASCII twin and combining
+//     marks stacked on an ASCII letter are dropped ("fi\u0307nd" and
+//     "p\u0430ssword" read as "find" and "password"). Words wholly in
+//     another script are not touched.
+//  5. Whitespace-around-slash collapse — removes any ASCII whitespace
 //     OR Unicode-Z whitespace (NBSP, ideographic space, etc.) on
 //     either side of `/` or `\`. Defeats the "/ etc / passwd" visual
 //     evasion and its NBSP variant.
-//  5. Duplicate-slash collapse — collapses `//…//` and `\\…\\` runs
+//  6. Duplicate-slash collapse — collapses `//…//` and `\\…\\` runs
 //     down to a single separator of the same kind, preserving the
 //     distinction between POSIX and Windows paths.
 //
@@ -143,15 +149,17 @@ func stripZeroWidth(s string) string {
 // what to expect when choosing between relying on normalization and
 // relying on the LLM judge as defense-in-depth):
 //
-//   - Homoglyph folding (Cyrillic/Greek lookalikes, full-width Latin).
-//     An attacker can still send Cyrillic `еtc/passwd` (first byte
-//     U+0435) and miss the regex. Mitigation is the LLM judge via
-//     judge_sweep, not this helper.
+//   - Homoglyph folding beyond step 4: a word written wholly in
+//     lookalike letters of another script, and lookalikes outside the
+//     bounded triageConfusables set, are not folded, so benign
+//     Cyrillic or Greek prose never turns into an English pattern
+//     word. Mitigation is the LLM judge via judge_sweep.
 //   - Case-folding beyond strings.ToLower. Unicode full case-folding
 //     (e.g. German ß → ss) is not applied because it breaks round-
 //     tripping for token-level evidence extraction.
-//   - Diacritic stripping. "é" stays "é"; only decomposed forms are
-//     composed.
+//   - Diacritic stripping. Pre-composed "é" stays "é"; only marks
+//     with no pre-composed form that sit on an ASCII letter are
+//     dropped (step 4).
 //
 // IMPORTANT: this function is intended for triage regex matching ONLY.
 // The guardrail deliberately does NOT pass the normalized string to
@@ -169,20 +177,27 @@ func normalizeForTriage(content string) string {
 	if content == "" {
 		return ""
 	}
-	// Step 1: NFC — composes any decomposed forms. Hot path for
-	// ASCII-only inputs returns the original string unchanged (the
-	// x/text package fast-paths the common case).
-	s := norm.NFC.String(content)
-	// Step 2: strip zero-width / format characters. Allocation-free
-	// when none are present.
+	// Step 1: NFKC — composes decomposed forms and folds compatibility
+	// forms. Hot path for ASCII-only inputs returns the original string
+	// unchanged (the x/text package fast-paths the common case).
+	// The zero-width strip (step 2) also runs before NFKC: a format
+	// character between two combining marks blocks their composition, so
+	// stripping it only after NFKC would leave a string the next pass
+	// composes differently and break idempotency.
+	s := norm.NFKC.String(stripZeroWidth(content))
+	// Step 2: strip zero-width / format characters, including those NFKC
+	// produced from a compatibility form (U+3164 and U+FFA0 become
+	// U+1160). Allocation-free when none are present.
 	s = stripZeroWidth(s)
 	// Step 3: lowercase.
 	s = strings.ToLower(s)
-	// Step 4: collapse whitespace (ASCII and Unicode-Z) adjacent to
+	// Step 4: mixed-script lookalike fold and marks on ASCII letters.
+	s = foldTriageConfusables(s)
+	// Step 5: collapse whitespace (ASCII and Unicode-Z) adjacent to
 	// slashes. $1 is the captured slash character so a run like
 	// "   /\u00A0" collapses to just "/" while preserving `/` vs `\`.
 	s = slashWhitespaceRegex.ReplaceAllString(s, "$1")
-	// Step 5: collapse duplicate slashes of the same kind.
+	// Step 6: collapse duplicate slashes of the same kind.
 	s = forwardSlashRunRegex.ReplaceAllString(s, `/`)
 	s = backSlashRunRegex.ReplaceAllString(s, `\`)
 	return s

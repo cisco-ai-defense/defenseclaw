@@ -32,7 +32,7 @@ func ExactPostgreSQLCopyProgram(facts Facts) (string, bool) {
 	return digest, true
 }
 
-func projectPostgreSQLCopyPrograms(input Input, facts Facts) []PostgreSQLCopyProgramFact {
+func projectPostgreSQLCopyPrograms(input Input, sqlReads []exactSQLMutationInput) []PostgreSQLCopyProgramFact {
 	connection, database, query, structured := exactSQLQueryInput(input)
 	if structured {
 		if !exactPostgreSQLConnection(connection, database) || !exactPostgreSQLCopyProgramQuery(query) {
@@ -40,9 +40,9 @@ func projectPostgreSQLCopyPrograms(input Input, facts Facts) []PostgreSQLCopyPro
 		}
 		return postgreSQLCopyProgramFacts(connection, database)
 	}
-	// A psql in any command of a shell call and each of its -c (DET111 T20
-	// review P3-3).
-	for _, candidate := range sqlCLIReadInputs(input, facts) {
+	// A psql in any command of a shell call, each of its -c (DET111 T20
+	// review P3-3) and each statement of a query (sqlCLIReadInputs).
+	for _, candidate := range sqlReads {
 		if candidate.engine == "postgresql" && exactPostgreSQLCopyProgramQuery(candidate.query) {
 			return postgreSQLCopyProgramFacts(candidate.connectionIdentity, candidate.databaseIdentity)
 		}

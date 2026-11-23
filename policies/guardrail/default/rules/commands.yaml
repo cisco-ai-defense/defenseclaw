@@ -980,7 +980,7 @@ rules:
     # literal Secret plus json/yaml or a closed data selector. Universal policy
     # alerts only; protected-cluster policy owns blocking authorization.
     pattern: 'a^'
-    title: "Read the content of one named Kubernetes Secret"
+    title: "Read the content of Kubernetes Secrets"
     severity: HIGH
     confidence: 0.99
     tags: [credential, kubernetes, secret, content-read, exact-actionfacts]

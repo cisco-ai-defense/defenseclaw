@@ -189,6 +189,9 @@ type trustedActionRequest struct {
 	// call's findings with and without it (TestHostScriptTwinOnlyAddsFindings).
 	// Production requests never set it.
 	hostScriptTwinOff bool
+	// podExecReading marks the reading of the command a pod exec runs
+	// (podExecTwinRequests), which is not read for pod execs again.
+	podExecReading bool
 	// windowsTwinHosts, on a Windows reading twin (windowsReadingTwinRequests),
 	// holds the script readings its call judges itself, which the twin leaves
 	// out (judgedHostReadings, rel-1-0-10:GAP-1316).
@@ -936,6 +939,13 @@ func dispatchTrustedActionOnce(
 			findings = withTwinProvenBlocks(findings, dispatchTrustedAction(parent, writerTwin))
 		}()
 	}
+	// A SQL client run in a container by kubectl, oc or k exec is read as
+	// the client call, for the database rules only (rel-1-0-10:GAP-1925).
+	for _, twin := range podExecTwinRequests(request, facts) {
+		defer func() {
+			findings = withPodExecReadingFindings(findings, dispatchTrustedAction(parent, twin))
+		}()
+	}
 	// Any other program run that way writes or removes what the plain call
 	// does too (find -delete, truncate, rm of the state behind setsid or
 	// "$(echo nice)", rel-1-0-10:GAP-1186, GAP-1246), but the wrapped form
@@ -1176,8 +1186,12 @@ func dispatchTrustedActionOnce(
 	// word shortened, and the word leaves a detection-only record
 	// (rel-1-0-10:GAP-0382).
 	if twin, split, ok := posixDataWordTwinRequest(request, facts); ok {
+		chunks := sqlQueryChunkRequests(request, facts, split)
 		defer func() {
 			findings = withOverLimitTwinFindings(findings, dispatchTrustedAction(parent, twin))
+			for _, chunk := range chunks {
+				findings = withOverLimitTwinFindings(findings, dispatchTrustedAction(parent, chunk))
+			}
 			unreadDataWord = split.Data > 0
 			cutSQLQuery = split.Query > 0
 		}()
