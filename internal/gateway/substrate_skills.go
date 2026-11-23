@@ -243,6 +243,11 @@ func (st *substrateState) substrateScanSkills(ctx context.Context, connector str
 			out = append(out, SubstrateQuarantine{Path: dir, Reason: msg, Code: code})
 			st.auditSkill(ctx, AuditSkillBlocked, "HIGH", connector, dir, f, map[string]any{"reason": code, "detail": reason, "duration_ms": res.took.Milliseconds(),
 				"quarantine": path.Join(path.Dir(path.Dir(dir)), ".defenseclaw-quarantine")})
+		} else if a := skillArchiveFile(dir, folders[dir]); a != "" {
+			// B5.4 skill_archive: the scan could not look inside it.
+			if q := st.substrateRefuseOrAlert(ctx, connector, dir, skillArchiveMessage(a, path.Base(dir)), SkillReasonArchive, f); q != nil {
+				out = append(out, *q)
+			}
 		} else {
 			passed[dir] = d
 			st.auditSkill(ctx, AuditSkillScanned, "INFO", connector, dir, f, map[string]any{"duration_ms": res.took.Milliseconds()})
@@ -465,17 +470,23 @@ type substrateSkillAnswer struct {
 	Quarantine []SubstrateQuarantine
 	Scanned    []SubstrateScanned
 	Unscanned  []SubstrateUnscanned
+	// pending are the folders still being scanned (also in Unscanned), for
+	// the use gate (substrateSkillPendingUse).
+	pending []SubstrateUnscanned
+	// ask, when set, turns an allow of this PreToolUse call into the
+	// connector's ask with this text (B5.4 skill_pending, OSS).
+	ask string
 }
 
 func (s substrateSkillAnswer) empty() bool {
-	return len(s.Quarantine) == 0 && len(s.Scanned) == 0 && len(s.Unscanned) == 0
+	return len(s.Quarantine) == 0 && len(s.Scanned) == 0 && len(s.Unscanned) == 0 && s.ask == ""
 }
 
 // substrateSkills runs the skill pass of one hook post.
 func (st *substrateState) substrateSkills(ctx context.Context, connector string, f *SubstrateFacts) substrateSkillAnswer {
 	q, scanned, decided, pending := st.substrateScanSkills(ctx, connector, f)
 	unscanned, refused := st.substrateUnscannedSkills(ctx, connector, f, decided)
-	return substrateSkillAnswer{Quarantine: append(q, refused...), Scanned: scanned, Unscanned: append(unscanned, pending...)}
+	return substrateSkillAnswer{Quarantine: append(q, refused...), Scanned: scanned, Unscanned: append(unscanned, pending...), pending: pending}
 }
 
 // substrateAnswerRecorder holds a hook answer so the quarantine field can
@@ -518,6 +529,15 @@ func withSubstrateAnswer(w http.ResponseWriter, r *http.Request, next http.Handl
 			}
 			if len(sk.Unscanned) > 0 {
 				obj[substrateUnscannedField], _ = json.Marshal(sk.Unscanned)
+			}
+			var action string
+			if sk.ask != "" && json.Unmarshal(obj["action"], &action) == nil && (action == "allow" || action == "alert") {
+				// The connector's own ask (Claude Code PreToolUse), the shape
+				// its hook handler renders for a confirm verdict.
+				obj["action"], _ = json.Marshal("confirm")
+				obj["reason"], _ = json.Marshal(sk.ask)
+				obj["claude_code_output"], _ = json.Marshal(map[string]any{"hookSpecificOutput": map[string]any{
+					"hookEventName": "PreToolUse", "permissionDecision": "ask", "permissionDecisionReason": sk.ask}})
 			}
 			if merged, err := json.Marshal(obj); err == nil {
 				body = append(merged, '\n')

@@ -17,13 +17,16 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"path"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -37,6 +40,7 @@ const (
 	SkillReasonScanFailed  = "skill_scan_failed"
 	SkillReasonTooBig      = "skill_too_big"
 	SkillReasonNotSent     = "skill_not_sent"
+	SkillReasonArchive     = "skill_archive"
 )
 
 // Audit actions of the skill pass (B5.4): the passed side as well as the
@@ -193,7 +197,7 @@ func (st *substrateState) auditSkill(ctx context.Context, action, severity, conn
 			}
 		}
 	}
-	key := "audit\x00" + action + "\x00" + actor.UID + "\x00" + dir + "\x00" + fp
+	key := "audit\x00" + action + "\x00" + actor.UID + "\x00" + dir + "\x00" + fp + "\x00" + fmt.Sprint(extra["outcome"])
 	st.alertMu.Lock()
 	if st.alerted == nil || len(st.alerted) >= substrateAlertMemory {
 		st.alerted = map[string]bool{}
@@ -210,4 +214,114 @@ func (st *substrateState) auditSkill(ctx context.Context, action, severity, conn
 		details[k] = v
 	}
 	st.action(ctx, action, severity, details)
+}
+
+// skillArchiveMagic are the leading bytes of archive formats; at offset 257
+// a tar header says "ustar".
+var skillArchiveMagic = [][]byte{
+	[]byte("PK\x03\x04"), {0x1f, 0x8b}, []byte("BZh"), {0xfd, '7', 'z', 'X', 'Z', 0x00},
+	{'7', 'z', 0xbc, 0xaf, 0x27, 0x1c}, {0x28, 0xb5, 0x2f, 0xfd},
+}
+
+// skillArchiveFile is the first file of a folder whose content is an
+// archive (zip, gzip, bzip2, xz, 7z, zstd, tar), by its leading bytes, as a
+// path inside the folder; "" when there is none. The static analyzers read
+// files as they are, so a clean verdict says nothing of what an archive
+// holds (B5.4 skill_archive): the fail mode decides.
+func skillArchiveFile(dir string, files []SubstrateAttachedFile) string {
+	for _, f := range files {
+		c := f.Content
+		hit := len(c) >= 262 && bytes.Equal(c[257:262], []byte("ustar"))
+		for _, m := range skillArchiveMagic {
+			hit = hit || bytes.HasPrefix(c, m)
+		}
+		if hit {
+			return strings.TrimPrefix(path.Clean("/"+strings.TrimPrefix(f.Path, "/")), dir+"/")
+		}
+	}
+	return ""
+}
+
+// skillArchiveMessage is the reason of a folder with an archive in it.
+func skillArchiveMessage(file, name string) string {
+	return fmt.Sprintf("DefenseClaw could not look inside %q in the skill %q", file, name)
+}
+
+// skillPendingAskMessage is the OSS ask for a use while the scan runs.
+func skillPendingAskMessage(name string) string {
+	return fmt.Sprintf("DefenseClaw is still checking the skill %q. Use it anyway?", name)
+}
+
+// skillAskConnectors are the connectors whose PreToolUse answer can ask the
+// person (Claude Code: permissionDecision ask) and that reach the use gate
+// (their Skill tool and skill reads run the folder pass).
+var skillAskConnectors = map[string]bool{"claudecode": true}
+
+// substrateSkillPendingUse is the use gate for a skill still being scanned
+// (B5.4 skill_pending): a PreToolUse call that uses a folder the pass of this
+// call left pending (the Skill tool naming it, or a read of one of its
+// files). Managed installs and the strict tier refuse the use (the returned
+// message). The OSS tiers ask where the agent can ask (sk.ask) and else
+// allow it with a MEDIUM alert, as rel.
+func (st *substrateState) substrateSkillPendingUse(ctx context.Context, env substrateEnvelope, sk *substrateSkillAnswer) string {
+	if pre, _ := substrateMCPEvent(env.Event); !pre || len(sk.pending) == 0 {
+		return ""
+	}
+	dir := skillUsedFolder(env.Payload, sk.pending)
+	if dir == "" {
+		return ""
+	}
+	name := path.Base(dir)
+	block := st.cfg.BlockUnscannedSkills != nil && st.cfg.BlockUnscannedSkills(env.Connector)
+	outcome, sev := "allowed", "MEDIUM"
+	switch {
+	case block:
+		outcome, sev = "refused", "HIGH"
+	case skillAskConnectors[env.Connector]:
+		outcome, sk.ask = "asked", skillPendingAskMessage(name)
+	}
+	st.auditSkill(ctx, AuditSkillPending, sev, env.Connector, dir, env.Facts, map[string]any{"reason": SkillReasonPending, "outcome": outcome})
+	if block {
+		return skillPendingMessage(name)
+	}
+	if outcome == "allowed" {
+		st.alertOnce(ctx, "MEDIUM", "Substrate skill used while its scan runs: "+name, dir, env.Facts, nil)
+	}
+	return ""
+}
+
+// skillUsedFolder is the pending folder a PreToolUse call uses: the one the
+// Skill tool names (a plugin skill is "plugin:name"), or the one holding the
+// file a read names; "" when the call uses none of them.
+func skillUsedFolder(payload json.RawMessage, pending []SubstrateUnscanned) string {
+	var ev struct {
+		Tool  string         `json:"tool_name"`
+		Input map[string]any `json:"tool_input"`
+	}
+	if json.Unmarshal(payload, &ev) != nil {
+		return ""
+	}
+	str := func(k string) string { s, _ := ev.Input[k].(string); return s }
+	for _, p := range pending {
+		dir := path.Clean("/" + strings.TrimPrefix(p.Path, "/"))
+		if ev.Tool == "Skill" {
+			n := str("skill")
+			if n == "" {
+				n = str("name")
+			}
+			if i := strings.LastIndex(n, ":"); i >= 0 {
+				n = n[i+1:]
+			}
+			if n != "" && n == path.Base(dir) {
+				return dir
+			}
+			continue
+		}
+		for _, k := range []string{"file_path", "notebook_path", "path"} {
+			if f := str(k); f != "" && strings.HasPrefix(path.Clean("/"+f), dir+"/") {
+				return dir
+			}
+		}
+	}
+	return ""
 }
