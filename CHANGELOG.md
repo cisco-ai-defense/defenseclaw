@@ -70,6 +70,7 @@ DefenseClaw 1.0.11 follows 1.0.10. It is a fix release. It updates OpenShell to 
 - On a managed Windows machine the Hook Guardian no longer keeps about one CPU core busy while idle: a check that finds nothing changed renders the Claude Code machine settings once, not once per earlier hook contract.
 - On a managed Windows machine the hook release protection record is written before a new hook generation is published, so a failed write leaves the previous generation in place instead of one the record does not cover.
 - On a managed Windows machine the guardian service and an administrator running `defenseclaw enterprise hooks reconcile` at the same time no longer overwrite each other's release protection record, so a hook that fails a check keeps its protection.
+- Windows Setup `/install` without `CONFIG=` (configuration delivered later) no longer fails with error 1603: the install finishes and waits for its configuration.
 
 #### Routing, budgets and cost
 - A Claude stream that stops before its usage record is charged to budgets as unknown spend, not as its opening token count.
