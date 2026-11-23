@@ -1153,10 +1153,12 @@ func (r SubstrateVersionRange) Contains(version string) bool {
 // laptop's skill-scanner on each folder the kit attaches.
 type SubstrateSkillsConfig struct {
 	Scan SubstrateSkillsScanConfig `mapstructure:"scan" yaml:"scan,omitempty"`
-	// PendingWait is how long a hook waits for a scan in progress (default
-	// 10s, at most 60s). Past it the folder is still being checked: managed
-	// installs and the strict tier refuse its use, the OSS tiers allow it with
-	// an alert, and the kit sends it again with its next hook.
+	// PendingWait is how long a hook waits for a scan in progress on the OSS
+	// tiers, and for a free scan slot in every tier (default 10s, at most
+	// 60s). Past it the folder is still being checked: the OSS tiers ask or
+	// allow it with an alert, and the kit sends it again with its next hook.
+	// Managed installs and the strict tier wait for the whole scan
+	// (Scan.Timeout; GAP-0931).
 	PendingWait string `mapstructure:"pending_wait" yaml:"pending_wait,omitempty"`
 }
 
