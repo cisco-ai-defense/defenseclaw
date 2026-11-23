@@ -48,12 +48,29 @@ import (
 // workload. Attributed registrations (actors DefenseClaw did not create)
 // have none and name their atespace instead.
 type Person struct {
-	Kind      string   `json:"kind"`
-	Issuer    string   `json:"issuer"`
-	Subject   string   `json:"subject"`
-	Principal string   `json:"principal,omitempty"`
-	Groups    []string `json:"groups,omitempty"`
+	Kind      string `json:"kind"`
+	Issuer    string `json:"issuer"`
+	Subject   string `json:"subject"`
+	Principal string `json:"principal,omitempty"`
+	// EmailUnverified: the sign-in carried an email its issuer marked
+	// unverified, so it was not used as the principal (GAP-0640). Shown as
+	// lower assurance.
+	EmailUnverified bool     `json:"email_unverified,omitempty"`
+	Groups          []string `json:"groups,omitempty"`
 }
+
+// Assurance names the person's sign-in assurance when it is lower than a
+// verified one ("email_unverified"), "" otherwise.
+func (p Person) Assurance() string {
+	if p.EmailUnverified {
+		return AssuranceEmailUnverified
+	}
+	return ""
+}
+
+// AssuranceEmailUnverified is the assurance mark of a sign-in whose email
+// the issuer did not verify.
+const AssuranceEmailUnverified = "email_unverified"
 
 // ID is the owner key (issuer#subject), "" for no person.
 func (p Person) ID() string {
@@ -121,6 +138,19 @@ type PolicyConflict struct {
 	// Reverts is how many foreign changes it reverted in the conflict
 	// window before it marked the conflict.
 	Reverts int `json:"reverts"`
+}
+
+// olderLeaderForm is r without the fields a leader older than 1.0.11 does
+// not decode (its RegistrationWrite refuses unknown fields), and whether r
+// set any. Person.EmailUnverified (GAP-0640) is the only one; such a leader
+// keeps the record without the lower-assurance mark, as 1.0.10 did. Kept
+// while a rolling upgrade from a 1.0.10 leader is supported (GAP-0943).
+func (r Registration) olderLeaderForm() (Registration, bool) {
+	if !r.Person.EmailUnverified {
+		return r, false
+	}
+	r.Person.EmailUnverified = false
+	return r, true
 }
 
 // Version is the record version.
