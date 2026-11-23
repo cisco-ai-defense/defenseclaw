@@ -159,8 +159,10 @@ made for it.
 
 Known limits in 1.0.10:
 
-- **Bundles come from a file or the inbox ConfigMap only.** `bundle apply FILE` and the inbox are the two sources; there is
-  no OCI registry source yet. A GitOps tool that pulls bundles from a registry writes them to the inbox ConfigMap.
+- **OCI registry bundles are Preview and set in `config.yaml` only.** Besides `bundle apply FILE` and the inbox ConfigMap,
+  the controller can pull a stage bundle by digest from an OCI registry (`substrate.bundles.oci`, off by default). The
+  chart has no values for it yet: set the keys in the chart's `config.yaml`, and mount a dockerconfigjson Secret or a CA
+  file yourself if the registry needs them.
 
 ## Upgrade, rollback, uninstall
 

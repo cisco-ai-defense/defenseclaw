@@ -1181,6 +1181,10 @@ A `custom-providers.json` marked `_derived_from` is rendered from this section o
 | `substrate.bundles.anchors_file` | `/etc/defenseclaw-substrate/bundle-anchors/bundle-anchors.json` | The bundle trust anchors (`bundle-anchors.json`), mounted from an admin-only Secret. |
 | `substrate.bundles.inbox` | `defenseclaw-bundle-inbox` | The ConfigMap a GitOps tool writes signed bundles to: `<stage>.dcbundle` and `<stage>.atespaces`. |
 | `substrate.bundles.refresh_interval` | `10s` | How often the controller re-reads the bundle state, the inbox and the anchors (1s to 10m). |
+| `substrate.bundles.oci.enabled` | `false` | **Preview.** The controller also pulls stage bundles from an OCI registry. Off by default, on managed installs too, because it adds egress from the controller. The pulled bundle is checked exactly like an inbox bundle; a bundle that does not verify is refused once and the stage keeps its last verified bundle. |
+| `substrate.bundles.oci.stages` | none | **Preview.** Up to 8 entries of `stage`, `ref` and `atespaces` (empty for the `all` stage). `ref` is `host/repository@sha256:<64 hex>`: a tag is refused, so a new bundle is a new digest in `config.yaml`. The artifact is an OCI image manifest with one layer of media type `application/vnd.defenseclaw.bundle.v1`, for example `oras push registry.example.com/policy/prod:v7 prod.dcbundle:application/vnd.defenseclaw.bundle.v1`; pin the manifest digest it prints. A digest is pulled once. |
+| `substrate.bundles.oci.credentials_file`, `.ca_file` | none | **Preview.** A mounted `kubernetes.io/dockerconfigjson` Secret for a private registry (empty pulls anonymously), and PEM certificates trusted besides the system roots for a registry with a private CA. Only HTTPS is used, redirects must stay on HTTPS, and credentials are never sent to a redirect on another host. |
+| `substrate.bundles.oci.timeout` | `30s` | **Preview.** How long one pull may take (5s to 2m). A pull that fails changes nothing and is tried again at the next refresh. |
 
 ## Environment variables
 
