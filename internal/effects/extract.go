@@ -2063,7 +2063,13 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 		case KindLink:
 			w.recordLink(op, ops)
 		}
-		if op.role == RoleExecCode && op.static && entry.ShellCode {
+		if op.role == RoleExecCode && op.static && op.shellCode && dialect == DialectPOSIX {
+			// sed e COMMAND: the command runs in a child /bin/sh, once for
+			// each input line its address selects, so only when the input
+			// has one: its effects are conditional (GAP-1500).
+			w.spec = spec
+			w.unwrapCodeScoped(op.value, true, dialect, depth, true, origin, true)
+		} else if op.role == RoleExecCode && op.static && entry.ShellCode {
 			childScope := program != "eval" && program != "source" && program != "."
 			w.spec = spec
 			switch {
@@ -2517,6 +2523,10 @@ type operand struct {
 	// walk does not read as a pattern (findFiltered alone).
 	findName     string
 	findFiltered bool
+	// shellCode: a RoleExecCode value that is POSIX shell text whatever the
+	// program's row says (a sed e COMMAND, which sed runs with /bin/sh): it
+	// is lowered as sh -c COMMAND is (rel-1-0-10:GAP-1500).
+	shellCode bool
 }
 
 func hasWordFold(words []Word, v string) bool {
@@ -2935,7 +2945,7 @@ func (w *walker) textOperands(kind TextKind, v Word) (ops []operand, bad bool) {
 		// track: the read is kept, the call is not fully known.
 		bad = len(rd.reads) > 0
 		for _, c := range rd.execs {
-			ops = append(ops, operand{value: c, static: true, role: RoleExecCode})
+			ops = append(ops, operand{value: c, static: true, role: RoleExecCode, shellCode: true})
 		}
 		if rd.execDyn {
 			ops = append(ops, operand{role: RoleExecCode})
@@ -3584,7 +3594,7 @@ func (w *walker) effectForOperand(op operand, p Program, origin Origin, cond, fo
 	case RoleExecCode:
 		e.Kind = KindExec
 		e.Target.Type = TargetProcess
-		if op.static && p.ShellCode {
+		if op.static && (p.ShellCode || op.shellCode) {
 			e.Data = &Data{Kind: DataCode, Bytes: len(op.value), Text: cap8k(op.value)}
 		} else {
 			e.addReason(ReasonOpaqueCode, ScopeTarget)

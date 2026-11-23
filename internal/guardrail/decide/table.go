@@ -264,7 +264,7 @@ var knownProtectedWriteRules = []string{RuleAuthorizedKeysWrite, RuleStateWrite,
 
 var builtin = Table{Rows: []Row{
 	{
-		// A resolved write or append to an exact member of a restricted set
+		// A resolved write, append or delete of an exact member of a restricted set
 		// (authorized_keys, DefenseClaw state, an agent hook config, a
 		// credential file) has the plain spelling's 1.0.10 decision whatever
 		// program the program table modeled it for: the rule the plain
@@ -272,7 +272,7 @@ var builtin = Table{Rows: []Row{
 		// (PlainWriteSeverity), mapped by the tier levels as that rule's
 		// finding is (GAP-1865, GAP-1478, GAP-1500, GAP-0662, GAP-0506).
 		ID: RowKnownProtectedWrite, Rules: knownProtectedWriteRules,
-		Kinds:     []ProofKind{KindWrite, KindAppend},
+		Kinds:     []ProofKind{KindWrite, KindAppend, KindDelete},
 		Targets:   []TargetClass{TargetAuthorizedKeys, TargetState, TargetHookConfig, TargetCredential},
 		Certainty: []Certainty{CertKnown}, Sources: []string{SourceEffects},
 		Content: true, SecureClient: true, Source: "rel-1-0-10:plain spelling of each restricted set (GAP-1865, GAP-1478)",

@@ -155,7 +155,11 @@ func buildSets(home string, flavor effects.Flavor) map[string]protectedSet {
 		agentTrees = append(agentTrees, j(base, "hooks"))
 		agentDirs = append(agentDirs, base)
 	}
-	agentFiles = append(agentFiles, j(home, "CLAUDE.md"), j(home, "AGENTS.md"))
+	// Codex keeps its hooks and notify command in config.toml: the 1.0.10
+	// hook config guard reads it as a hook config (hookpaths), so a delete or
+	// write of it by any program is the plain spelling's hook config change
+	// (rel-1-0-10:GAP-1478).
+	agentFiles = append(agentFiles, j(home, ".codex", "config.toml"), j(home, "CLAUDE.md"), j(home, "AGENTS.md"))
 	sets[SetAgentHookConfig] = protectedSet{files: agentFiles, dirs: agentDirs, trees: agentTrees}
 
 	// DefenseClaw self-protection state under ~/.defenseclaw.

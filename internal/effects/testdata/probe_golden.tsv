@@ -613,7 +613,7 @@ S1a ~\ no Home	U|
 S1b ~\ with Home	K|delete:c:\users\u\.ssh
 S1c ~/ with Home	K|
 S2 gci | Remove-Item	U|
-S2 python heredoc	U|
+S2 python heredoc	U|delete:/etc/passwd
 S20 if cd	U|
 S20 pwsh -c from cmd	U|
 S21 ForEach cd	U|

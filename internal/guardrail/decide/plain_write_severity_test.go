@@ -72,8 +72,13 @@ func TestRuleForNamesEveryPlainWriteRule(t *testing.T) {
 			t.Errorf("%+v: rule %q has no plain write severity", p, rule)
 		}
 	}
-	if RuleFor(Proof{Kind: KindDelete, Target: TargetHookConfig, Certainty: CertKnown}) != "" {
-		t.Error("a hook config delete names a write rule")
+	// rm FILE fires the hook config guard and the credential file rules, so a
+	// Known delete names them as the plain spelling does (GAP-1478).
+	if got := RuleFor(Proof{Kind: KindDelete, Target: TargetHookConfig, Certainty: CertKnown}); got != RuleHookConfigWrite {
+		t.Errorf("a hook config delete names %q, want %q", got, RuleHookConfigWrite)
+	}
+	if got := RuleFor(Proof{Kind: KindDelete, Target: TargetCredential, Certainty: CertKnown, Set: SetAWSCredentials}); got != "PATH-AWS-CREDS" {
+		t.Errorf("an AWS credentials delete names %q, want PATH-AWS-CREDS", got)
 	}
 	if RuleFor(Proof{Kind: KindWrite, Target: TargetHookConfig, Certainty: CertMaybe}) != "" {
 		t.Error("a Maybe hook config write names a rule")

@@ -892,10 +892,11 @@ func effectShadowFindings(res EffectShadowResult, mode effectRulesMode) []RuleFi
 	return append(findings, f)
 }
 
-// knownProtectedMutationProofs are the decision proofs of one Known write
-// or append to an exact member of a protected set, whatever program the
-// program table modeled it for (redirection, cp, tee, sort -o, rsync, a sed
-// w command, an interpreter's open().write): the spelling gets the 1.0.10
+// knownProtectedMutationProofs are the decision proofs of one Known write,
+// append or delete of an exact member of a protected set, whatever program
+// the program table modeled it for (redirection, cp, tee, sort -o, rsync, a
+// sed w command, an interpreter's open().write or os.remove): the spelling
+// gets the 1.0.10
 // rule of the plain spelling on that member and that rule's cell (GAP-1865,
 // generalized to the restricted sets by the DET111 ruling of 2026-11-23:
 // GAP-1478, GAP-1500, GAP-0662, GAP-0506). It reads the resolved target, not
@@ -904,14 +905,21 @@ func effectShadowFindings(res EffectShadowResult, mode effectRulesMode) []RuleFi
 // no 1.0.10 rule (RowEffectOwnKeyWrite, GAP-1878): neither makes a proof. A
 // Maybe target or an unknown role makes none either.
 func knownProtectedMutationProofs(f *semanticpb.EffectFact, flavor effects.Flavor) []decide.Proof {
-	if f == nil || (f.GetKind() != string(effects.KindWrite) && f.GetKind() != string(effects.KindAppend)) ||
-		f.GetTargetState() != "known" || f.GetRoleState() != "known" || len(f.GetReasons()) != 0 ||
-		!effectrules.CanonicalAbsolute(f.GetTarget().GetPath(), flavor) {
+	var kind decide.ProofKind
+	switch f.GetKind() {
+	case string(effects.KindWrite):
+		kind = decide.KindWrite
+	case string(effects.KindAppend):
+		kind = decide.KindAppend
+	case string(effects.KindDelete):
+		// rm FILE and python3 -c 'os.remove(FILE)' are one delete (GAP-1478).
+		kind = decide.KindDelete
+	default:
 		return nil
 	}
-	kind := decide.KindWrite
-	if f.GetKind() == string(effects.KindAppend) {
-		kind = decide.KindAppend
+	if f.GetTargetState() != "known" || f.GetRoleState() != "known" || len(f.GetReasons()) != 0 ||
+		!effectrules.CanonicalAbsolute(f.GetTarget().GetPath(), flavor) {
+		return nil
 	}
 	var proofs []decide.Proof
 	for _, match := range f.GetTarget().GetProtected() {
@@ -992,7 +1000,9 @@ const maxEffectFlowHops = 8
 // comes from it to another folder (cp, mv, install, a redirect). A copy
 // beside the file (install key key.bak), a discard (> /dev/null) or a
 // summary (grep -c, wc) keeps it local. A copy's own content is followed
-// on: a later send of the copy is a send.
+// on: a later send of the copy is a send, and so is a send of a copy of
+// the copy (a later read of a file the flow wrote carries its content:
+// cat .env > a && cp a b && curl --data-binary @b, GAP-1641).
 func effectReadFlow(result effects.Result, i int) decide.ReadFlow {
 	flow, _ := effectReadFlowTo(result, i)
 	return flow
@@ -1009,9 +1019,18 @@ func effectReadFlowTo(result effects.Result, i int) (decide.ReadFlow, effects.Ta
 		return decide.FlowShown, effects.Target{}
 	}
 	from := map[int]bool{i + 1: true}
+	written := map[string]bool{}
 	flow, hops := decide.FlowNone, 0
 	for j := i + 1; j < len(result.Effects) && hops < maxEffectFlowHops; j++ {
 		e := result.Effects[j]
+		if e.Kind == effects.KindRead {
+			// A read of a file the flow wrote (cp a b after cat .env > a)
+			// carries the content on to the effects whose data comes from it.
+			if k := e.Target.Key(); k != "" && written[k] {
+				from[j+1] = true
+			}
+			continue
+		}
 		if e.Data == nil || !slices.ContainsFunc(e.Data.Sources, func(s effects.Source) bool {
 			return s.Kind == effects.SourceEffect && from[s.Effect]
 		}) {
@@ -1027,6 +1046,9 @@ func effectReadFlowTo(result effects.Result, i int) (decide.ReadFlow, effects.Ta
 			}
 			hops++
 			from[j+1] = true
+			if k := e.Target.Key(); k != "" {
+				written[k] = true
+			}
 			if e.Target.Type == effects.TargetRemote {
 				return decide.FlowSent, e.Target
 			}
