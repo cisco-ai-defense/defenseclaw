@@ -18,6 +18,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"golang.org/x/sys/windows"
+	"golang.org/x/sys/windows/registry"
 )
 
 // pluginCustodyQuote writes p for a PowerShell command line as the repair
@@ -58,7 +59,10 @@ func pluginCustodyQuote(p string) string {
 // system or installer folder, or any folder another account owns gets a step
 // by hand and no command, since removing it there changes every folder that
 // inherits from it (GAP-1899). A folder Administrators owns is this account's
-// only below its own profile folder (GAP-1910, GAP-1911).
+// only below its own profile folder (GAP-1910, GAP-1911; for a run that
+// verifies another account, the profile Windows records for that account,
+// GAP-1916). One left out although it is in the profile gets a step to take it
+// back, never one to move the plugin folder (GAP-1917).
 func explainPluginArtifactRefusal(path, trustedOwnerSID string, cause error) error {
 	if cause == nil {
 		return nil
@@ -70,10 +74,10 @@ func explainPluginArtifactRefusal(path, trustedOwnerSID string, cause error) err
 		clean = filepath.Clean(path)
 		chain = hookAPIDirectoryChain(filepath.Dir(clean), extra)
 	}
-	tree := windowsCustodyUserTree(chain, clean, extra)
+	tree, profile := windowsCustodyUserTree(chain, clean, extra)
 	var refusal *safefile.UnsafePrivateDACLError
 	if errors.As(cause, &refusal) {
-		placed := windowsCustodyJudge{tree: tree}
+		placed := windowsCustodyJudge{tree: tree, profile: profile}
 		if explained := placed.unsafePrivateDACL(cause, refusal); explained != nil {
 			return explained
 		}
@@ -81,7 +85,7 @@ func explainPluginArtifactRefusal(path, trustedOwnerSID string, cause error) err
 	if clean == "" {
 		return cause
 	}
-	judge := windowsCustodyJudge{tree: tree}
+	judge := windowsCustodyJudge{tree: tree, profile: profile}
 	whole := true
 	for i := len(chain) - 1; i >= 0 && whole; i-- {
 		element := chain[i]
@@ -127,77 +131,99 @@ func (j *windowsCustodyJudge) unsafePrivateDACL(cause error, refusal *safefile.U
 // may be told to change by command: the elements of chain, and the plugin file
 // clean, that windowsCustodyOwnElement accepts. A folder outside it is shared
 // with other accounts or belongs to Windows or an installer (GAP-1899).
-func windowsCustodyUserTree(chain []hookAPIDirectoryElement, clean string, extra *windows.SID) []string {
-	profile := windowsCustodyAdministratorsScope(extra)
-	var tree []string
+// profile is the account's profile folder as read, for the steps by hand
+// (windowsCustodyAdministratorsScope).
+func windowsCustodyUserTree(chain []hookAPIDirectoryElement, clean string, extra *windows.SID) (tree []string, profile string) {
+	scope, profile := windowsCustodyAdministratorsScope(extra)
 	for _, element := range chain {
-		if windowsCustodyOwnElement(element.path, extra, profile) {
+		if windowsCustodyOwnElement(element.path, extra, scope) {
 			tree = append(tree, element.path)
 		}
 	}
-	if clean != "" && windowsCustodyOwnElement(clean, extra, profile) {
+	if clean != "" && windowsCustodyOwnElement(clean, extra, scope) {
 		tree = append(tree, clean)
 	}
-	return tree
+	return tree, profile
 }
 
 // windowsCustodyAdministratorsScope is the folder below which a folder or file
-// BUILTIN\Administrators owns is still this account's own: the effective
-// user's profile folder. An elevated run of this account makes its new folders
-// there Administrators-owned, and the profile's inherited full control lets
-// this account change them whether or not the next run is elevated (GAP-1911).
-// Outside the profile an Administrators-owned folder is shared by every
-// administrator (another administrator's C:\src, an installer's folder, a
-// vendor's ProgramData folder), so a command there would change other
-// accounts' access, elevated or not (GAP-1910). It is empty, and
-// Administrators is never this account, for a run that verifies another
-// account (extra) and when the profile cannot be read.
-func windowsCustodyAdministratorsScope(extra *windows.SID) string {
+// BUILTIN\Administrators owns is still this account's own (scope): the profile
+// folder of the account this run verifies, the effective user's, or for a run
+// that verifies another account (extra) the one Windows records for it
+// (windowsCustodyProfileImagePath, GAP-1916). An elevated run of the account
+// makes its new folders there Administrators-owned, and the profile's
+// inherited full control lets the account change them whether or not the next
+// run is elevated (GAP-1911). Outside the profile an Administrators-owned
+// folder is shared by every administrator (another administrator's C:\src, an
+// installer's folder, a vendor's ProgramData folder), so a command there would
+// change other accounts' access, elevated or not (GAP-1910). scope is empty,
+// and Administrators is never the account, when the profile cannot be read or
+// is not spelled as a plain drive path already in clean form. profile is the
+// folder as read, cleaned, whatever its spelling (empty when it cannot be
+// read): it only chooses the words of a step by hand (GAP-1917).
+func windowsCustodyAdministratorsScope(extra *windows.SID) (scope, profile string) {
+	var err error
 	if extra != nil {
-		return ""
+		profile, err = windowsCustodyProfileImagePath(extra)
+	} else {
+		profile, err = windowsEffectiveUserProfile()
 	}
-	profile, err := windowsEffectiveUserProfile()
 	if err != nil || !filepath.IsAbs(profile) {
-		return ""
+		return "", ""
 	}
-	return filepath.Clean(profile)
+	if profile == filepath.Clean(profile) && len(filepath.VolumeName(profile)) == 2 {
+		scope = profile
+	}
+	return scope, filepath.Clean(profile)
+}
+
+// windowsCustodyProfileList is the machine's list of user profiles; only
+// administrators and LocalSystem can change it.
+const windowsCustodyProfileList = `SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList`
+
+// windowsCustodyProfileImagePath is the profile folder Windows records for sid
+// (ProfileList\<SID>\ProfileImagePath). Only a %SystemDrive% prefix is
+// expanded, as the enterprise profile walk does; a value with any other
+// expansion is not read.
+func windowsCustodyProfileImagePath(sid *windows.SID) (string, error) {
+	key, err := registry.OpenKey(registry.LOCAL_MACHINE, windowsCustodyProfileList+`\`+sid.String(), registry.QUERY_VALUE|registry.WOW64_64KEY)
+	if err != nil {
+		return "", err
+	}
+	defer key.Close()
+	value, kind, err := key.GetStringValue("ProfileImagePath")
+	if err != nil {
+		return "", err
+	}
+	const systemDrive = "%SystemDrive%"
+	if kind == registry.EXPAND_SZ && len(value) >= len(systemDrive) && strings.EqualFold(value[:len(systemDrive)], systemDrive) {
+		windowsDir, err := windows.GetSystemWindowsDirectory()
+		if err != nil {
+			return "", err
+		}
+		value = filepath.VolumeName(windowsDir) + value[len(systemDrive):]
+	}
+	if strings.Contains(value, "%") {
+		return "", fmt.Errorf("the profile folder of %s is recorded with an expansion this check does not make", sid)
+	}
+	return value, nil
 }
 
 // windowsCustodyOwnElement reports whether path is a folder or file of this
-// account's own tree: not a volume root, not an operating system or installer
-// folder (managed.AdvisoryAncestorPath), not a reparse point, and owned by this
-// account (the effective user, or the per-user target a privileged guardian
-// verifies), or by Administrators strictly below profile
+// account's own tree: a plain element (windowsCustodyPlainElementOwner) owned
+// by this account (the effective user, or the per-user target a privileged
+// guardian verifies), or by Administrators strictly below profile
 // (windowsCustodyAdministratorsScope) and reached from it through plain
 // folders only (a junction inside the profile may lead to a shared folder).
 // LocalSystem and TrustedInstaller own Windows' folders, never the user's. Any
 // read that fails is outside the tree.
 func windowsCustodyOwnElement(path string, extra *windows.SID, profile string) bool {
-	if path == "" || !filepath.IsAbs(path) || filepath.Dir(path) == path || managed.AdvisoryAncestorPath(path) {
-		return false
-	}
-	pathPtr, err := winpath.UTF16Ptr(path)
-	if err != nil {
-		return false
-	}
-	attributes, err := windows.GetFileAttributes(pathPtr)
-	if err != nil || attributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-		return false
-	}
-	extended, err := winpath.Extended(path)
-	if err != nil {
-		return false
-	}
-	sd, err := windows.GetNamedSecurityInfo(extended, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION)
-	if err != nil || sd == nil {
-		return false
-	}
-	owner, _, err := sd.Owner()
-	if err != nil || owner == nil {
+	owner := windowsCustodyPlainElementOwner(path)
+	if owner == nil {
 		return false
 	}
 	if managed.IsWindowsTrustedAdminOwner(owner) {
-		return extra == nil && profile != "" && owner.IsWellKnown(windows.WinBuiltinAdministratorsSid) &&
+		return profile != "" && owner.IsWellKnown(windows.WinBuiltinAdministratorsSid) &&
 			winpath.RejectReparseBelow(profile, path) == nil
 	}
 	if extra != nil {
@@ -205,6 +231,76 @@ func windowsCustodyOwnElement(path string, extra *windows.SID, profile string) b
 	}
 	current, err := windowsEffectiveUserSID()
 	return err == nil && current != nil && owner.Equals(current)
+}
+
+// windowsCustodyPlainElementOwner is the owner of path when path can be in an
+// account's own tree at all: not a volume root, not an operating system or
+// installer folder (managed.AdvisoryAncestorPath), not a reparse point. It is
+// nil otherwise and when a read fails.
+func windowsCustodyPlainElementOwner(path string) *windows.SID {
+	if path == "" || !filepath.IsAbs(path) || filepath.Dir(path) == path || managed.AdvisoryAncestorPath(path) {
+		return nil
+	}
+	pathPtr, err := winpath.UTF16Ptr(path)
+	if err != nil {
+		return nil
+	}
+	attributes, err := windows.GetFileAttributes(pathPtr)
+	if err != nil || attributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+		return nil
+	}
+	extended, err := winpath.Extended(path)
+	if err != nil {
+		return nil
+	}
+	sd, err := windows.GetNamedSecurityInfo(extended, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION)
+	if err != nil || sd == nil {
+		return nil
+	}
+	owner, _, err := sd.Owner()
+	if err != nil || owner == nil {
+		return nil
+	}
+	owner, err = owner.Copy()
+	if err != nil {
+		return nil
+	}
+	return owner
+}
+
+// windowsCustodyAdministratorsLeftOut reports whether path, a folder or file
+// outside the account's tree, is left out only because Administrators owns it
+// and the check could not show it below the account's profile (an elevated
+// run made it there, and the profile is unread or not plainly spelled, a
+// junction-redirected profile, or path an 8.3 or subst spelling). The folder
+// is then already in the profile, and the user takes it back or has an
+// administrator remove the entry; moving the plugin folder is no fix
+// (GAP-1917). path is compared with profile as spelled and once both resolve
+// to their final paths; with the profile unread it may be anywhere, and
+// either step still clears the entry. This only chooses the words of a step
+// by hand; it never puts path in the tree.
+func windowsCustodyAdministratorsLeftOut(path, profile string) bool {
+	owner := windowsCustodyPlainElementOwner(path)
+	if owner == nil || !owner.IsWellKnown(windows.WinBuiltinAdministratorsSid) {
+		return false
+	}
+	if profile == "" || windowsCustodyStrictlyBelow(profile, path) {
+		return true
+	}
+	finalProfile, err := atomicTransformResolveDirectoryPathPlatform(profile)
+	if err != nil {
+		return false
+	}
+	finalPath, err := atomicTransformResolveDirectoryPathPlatform(path)
+	return err == nil && windowsCustodyStrictlyBelow(finalProfile, finalPath)
+}
+
+// windowsCustodyStrictlyBelow reports whether path names an element strictly
+// below root, compared case-insensitively as spelled.
+func windowsCustodyStrictlyBelow(root, path string) bool {
+	prefix := strings.TrimSuffix(filepath.Clean(root), `\`) + `\`
+	path = filepath.Clean(path)
+	return len(path) > len(prefix) && strings.EqualFold(path[:len(prefix)], prefix)
 }
 
 // windowsCustodyJudge collects what the refused elements of one plugin
@@ -218,6 +314,9 @@ type windowsCustodyJudge struct {
 	// tree is windowsCustodyUserTree: the only folders and files a command
 	// may name.
 	tree []string
+	// profile is the account's profile folder as read, empty when it could
+	// not be read (windowsCustodyAdministratorsScope).
+	profile string
 	// outside holds the entries already given a step by hand because a
 	// folder that grants them is outside tree (once where the entry is the
 	// folder's own, once where a folder inherits it).
@@ -311,12 +410,16 @@ func (j *windowsCustodyJudge) write(path string, write *hookAPIUntrustedWriteErr
 // this account's own tree, no command is printed for the entry (removing it
 // at the others alone would leave the refusal, and a command on a drive root or
 // a shared folder changes every folder that inherits from it): the step by
-// hand names the folder that grants it, once per entry (GAP-1899).
+// hand names the folder that grants it, once per entry (GAP-1899). When every
+// such folder is one Administrators owns in the account's profile, the step
+// says to take it back or have an administrator remove the entry (GAP-1917).
 func (j *windowsCustodyJudge) place(path, trustee string, deny bool, carriers []string) {
 	var outside []string
+	administrators := true
 	for _, carrier := range carriers {
 		if !j.inTree(carrier) {
 			outside = append(outside, pluginCustodyQuote(carrier))
+			administrators = administrators && windowsCustodyAdministratorsLeftOut(carrier, j.profile)
 		}
 	}
 	if len(outside) > 0 {
@@ -335,6 +438,17 @@ func (j *windowsCustodyJudge) place(path, trustee string, deny bool, carriers []
 		}
 		j.outside[key] = true
 		granted := strings.Join(outside, ", ")
+		switch {
+		case administrators && own:
+			j.step(path, "Administrators owns "+granted+", so no command is printed for the "+kind+" entry of "+trustee+
+				" on it: take ownership of "+granted+" and remove the entry, or have an administrator remove it")
+			return
+		case administrators:
+			j.step(path, "the "+kind+" entry of "+trustee+" that "+pluginCustodyQuote(path)+" inherits is granted at "+granted+
+				", which Administrators owns, so no command is printed for it: take ownership of "+granted+
+				" and remove the entry there, or have an administrator remove it")
+			return
+		}
 		if own {
 			j.step(path, "the "+kind+" entry of "+trustee+" on "+granted+
 				" is outside the folders this account owns, so no command is printed for it: move the plugin folder under a folder this account owns"+
