@@ -22,6 +22,7 @@ import (
 	"context"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -133,5 +134,69 @@ func TestListAsksReadIsBoundedAndRemembered(t *testing.T) {
 	}
 	if n := h.lists.Load(); n != 1 {
 		t.Fatalf("asks reads = %d, want 1 within the backoff", n)
+	}
+}
+
+// cancelAsks is an ask store whose first List blocks until ctx ends or
+// release closes (a slow leader read); later lists answer at once.
+type cancelAsks struct {
+	asksDirect
+	calls   atomic.Int32
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (c *cancelAsks) List(ctx context.Context, in asks.ListRequest) ([]asks.Ask, error) {
+	if c.calls.Add(1) == 1 {
+		close(c.entered)
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-c.release:
+			return nil, nil
+		}
+	}
+	return c.asksDirect.List(ctx, in)
+}
+
+// GAP-1043: the pending-asks failure memory is gateway-wide, so one
+// caller's cancellation (a Ctrl-C of its list) must not set it; the next
+// person's list still shows activity.
+func TestListCallerCancelDoesNotBlankOthers(t *testing.T) {
+	now := time.Now()
+	c := &cancelAsks{asksDirect: asksDirect{asks.NewMemory()}, entered: make(chan struct{}), release: make(chan struct{})}
+	f := newSubstrateFixture(t, func(cfg *SubstrateConfig) {
+		cfg.ActivityFeed = &fakeActivityFeed{snap: activity.Snapshot{Last: map[string]time.Time{subUID1: now}}}
+		cfg.Asks = c
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/substrate/actors", nil).WithContext(ctx)
+	req.RemoteAddr = "10.0.0.7:43210"
+	req.Header.Set("X-DefenseClaw-Client", "actor-hook/1.0")
+	req.Header.Set("Authorization", "Bearer p-alice")
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		f.admin.ServeHTTP(httptest.NewRecorder(), req)
+	}()
+	select {
+	case <-c.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the asks read did not start")
+	}
+	cancel() // caller A gives up mid-read
+	close(c.release)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("caller A's list did not end")
+	}
+	rec := f.do(t, f.admin, http.MethodGet, "/api/v1/substrate/actors", "p-alice", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list: %d %s", rec.Code, rec.Body)
+	}
+	if a := activityOf(t, rec.Body.Bytes(), "alice-1"); a == nil {
+		t.Fatal("caller B's list shows no activity after caller A cancelled: A's cancel marked the asks read down for everyone")
 	}
 }

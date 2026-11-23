@@ -189,7 +189,11 @@ func (st *substrateState) activityFor(ctx context.Context, ownerID string, all, 
 		if all {
 			in.OwnerID, in.All = "", true
 		}
-		actx, cancel := context.WithTimeout(leader.WithoutRetry(ctx), substrateActivityAsksWait)
+		// The read does not follow the caller's cancellation (like the
+		// shared activity.Reader refresh): the failure memory below is
+		// gateway-wide, so one person's Ctrl-C must never set it (GAP-1043).
+		// The 500 ms cap still bounds the read.
+		actx, cancel := context.WithTimeout(leader.WithoutRetry(context.WithoutCancel(ctx)), substrateActivityAsksWait)
 		list, err := st.cfg.Asks.List(actx, in)
 		cancel()
 		if err != nil {
