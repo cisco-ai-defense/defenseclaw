@@ -223,6 +223,11 @@ func (r *RuntimeScanner) Scan(ctx context.Context, a RuntimeAsset) (*RuntimeDeci
 			// (and is never cached); the caller's fail mode decides.
 			return nil, ctx.Err()
 		}
+		if errors.Is(err, scanner.ErrScanTimeout) {
+			// The sidecar's own timeout: the same, and the caller names it
+			// skill_scan_timeout, not a scanner outage (GAP-0934).
+			return nil, err
+		}
 		unavailable = err != nil && scanner.Unavailable(err)
 		if err != nil || res == nil {
 			res = failedScan(r.Skill.Name(), a.Name, err)

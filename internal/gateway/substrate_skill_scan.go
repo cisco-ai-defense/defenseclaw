@@ -58,8 +58,9 @@ var (
 	// It goes on in the background; the kit sends the folder again with its
 	// next hook and gets the verdict then.
 	errSkillPending = errors.New("substrate: the skill is still being checked")
-	// errSkillScanTimeout: the scan did not finish inside skills.scan.timeout.
-	errSkillScanTimeout = errors.New("substrate: the skill scan did not finish in time")
+	// ErrSubstrateSkillScanTimeout: the scan did not finish inside
+	// skills.scan.timeout (in the gateway or in the scanner sidecar).
+	ErrSubstrateSkillScanTimeout = errors.New("substrate: the skill scan did not finish in time")
 	// errSkillScannerBusy: no scan slot came free inside skills.pending_wait
 	// (GAP-0932); never an allow as scanned.
 	errSkillScannerBusy = errors.New("substrate: the skill scanner is busy")
@@ -176,7 +177,7 @@ func (st *substrateState) scanSkillFolder(ctx context.Context, connector, name, 
 			c.took = time.Since(start)
 			if sctx.Err() != nil {
 				// Past the timeout nothing the scan said is a verdict.
-				c.blocked, c.reason, c.err = false, "", errSkillScanTimeout
+				c.blocked, c.reason, c.err = false, "", ErrSubstrateSkillScanTimeout
 			}
 			st.scanMu.Lock()
 			delete(st.scans, key)
@@ -214,7 +215,7 @@ func skillScanErrCode(err error) (code, why string) {
 	switch {
 	case errors.Is(err, errSkillPending):
 		return SkillReasonPending, "DefenseClaw is still checking the skill"
-	case errors.Is(err, errSkillScanTimeout):
+	case errors.Is(err, ErrSubstrateSkillScanTimeout):
 		return SkillReasonScanTimeout, "the skill scan did not finish in time"
 	case errors.Is(err, errSkillScannerBusy):
 		return SkillReasonScannerBusy, "the skill scanner is busy with other skills"

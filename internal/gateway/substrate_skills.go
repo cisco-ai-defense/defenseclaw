@@ -234,7 +234,7 @@ func (st *substrateState) substrateScanSkills(ctx context.Context, connector str
 			pending = append(pending, SubstrateUnscanned{Path: dir, FP: listedFP[dir]})
 			st.auditSkill(ctx, AuditSkillPending, "MEDIUM", connector, dir, f, map[string]any{"reason": c, "waited_ms": res.waited.Milliseconds(), "outcome": "sent again"})
 			continue
-		case errors.Is(err, ErrSubstrateSkillScannerUnavailable), errors.Is(err, errSkillScanTimeout):
+		case errors.Is(err, ErrSubstrateSkillScannerUnavailable), errors.Is(err, ErrSubstrateSkillScanTimeout):
 			// No verdict (scanner down or off, or too slow): the fail mode
 			// decides, never silently.
 			c, why := skillScanErrCode(err)

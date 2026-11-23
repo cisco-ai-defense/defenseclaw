@@ -156,7 +156,11 @@ func newRuntimeSkillScanner(cfg *config.Config) runtimeSkillScanner {
 	// renders the sidecar; without it the scan is unavailable as in rel and
 	// the fail mode decides.
 	if fi, err := os.Stat(substrateScanDir); err == nil && fi.IsDir() {
-		if rs, err := scanner.NewRemoteSkillScanner(cfg.Scanners.SkillScanner, 0); err == nil {
+		// The client waits skills.scan.timeout, as the chart's worker
+		// --timeout does (GAP-0934: with 0 it waited 20s and cut at 25s
+		// whatever the key said). The gateway's own deadline is the live
+		// value, so a lower reload applies at once.
+		if rs, err := scanner.NewRemoteSkillScanner(cfg.Scanners.SkillScanner, cfg.Substrate.EffectiveSkillScanTimeout()); err == nil {
 			rs.Dir = substrateScanDir
 			rt.Skill = rs
 			remote = rs
@@ -207,6 +211,9 @@ func (s runtimeSkillScanner) ScanSkillFolder(ctx context.Context, name, dir stri
 		return false, "", fmt.Errorf("%w: skill scanning is turned off (substrate.skills.scan.enabled: false)", gateway.ErrSubstrateSkillScannerUnavailable)
 	}
 	d, err := s.rt.Scan(ctx, asset)
+	if errors.Is(err, scanner.ErrScanTimeout) {
+		return false, "", fmt.Errorf("%w: %v", gateway.ErrSubstrateSkillScanTimeout, err)
+	}
 	if err != nil {
 		return false, "", err
 	}
