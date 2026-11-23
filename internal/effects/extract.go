@@ -97,7 +97,7 @@ func extractShell(call Call, o Options) Result {
 	w.applyWorkdir(call.Workdir)
 	w.walkScript(script, 0)
 	if inferred && dialect != DialectPOSIX && o.flavor() == FlavorWindows && posixOnlySyntax(call.Command) {
-		unionPOSIXReading(&res, dialect, call, o)
+		unionPOSIXReading(&res, dialect, script.RunsNothing, call, o)
 	}
 	return res
 }
@@ -116,67 +116,151 @@ func posixOnlySyntax(c string) bool {
 // only guessed (no dialect hint) and whose text is POSIX-only syntax: Git Bash
 // and WSL are Windows shells too, and the guessed reading of POSIX text loses
 // the targets its quoting names (GAP-1915: '\” read by PowerShell leaves a
-// stray \' on a redirection target or a switch). Only the known mutations of
-// the POSIX reading are added (raise-only: a write, append, delete, link or
-// permission change whose target and role it resolves), each marked Cond (it
-// happens only under that shell), and only when the guessed reading lacks the
-// same kind on the same target fully known; an unresolved one of that kind and
-// target is replaced by the known one. When the guessed reading is
-// PowerShell with a parse error and the POSIX reading parses, the call is
-// fully read: PowerShell runs nothing of a script it cannot parse, so the
-// POSIX reading is the only one that runs (psparse read <<< without an error,
-// T21a; the port reports < as reserved, as pwsh does).
-func unionPOSIXReading(res *Result, guessed Dialect, call Call, o Options) {
+// stray \' on a redirection target or a switch). Every added effect is marked
+// Cond (it happens only under that shell). Raise-only: no effect of the
+// guessed reading is dropped.
+//
+// When the guessed reading is PowerShell that pwsh itself refuses to parse
+// (runsNothing: a parse error the parser port reports, psparse
+// Diagnostic.Syntax) and the POSIX reading parses, the POSIX reading is the
+// only one that runs: all of its effects are added and the PowerShell parse
+// error unknowns are cleared (psparse read <<< without an error, T21a; the
+// port reports < as reserved, as pwsh does). A note the reader makes on
+// PowerShell that runs (a dialect-ambiguous escape, a construct it does not
+// model) or a script the port declined never clears them: that script runs
+// (GAP-1945).
+//
+// Otherwise only the known mutations of the POSIX reading are added (a write,
+// append, delete, link or permission change whose target and role it
+// resolves), and only when the guessed reading lacks the same kind on the
+// same target fully known. An unresolved guessed effect of that kind and
+// target is the misread of the known one: it takes the known target and role
+// and keeps what else it carried (mergeGuessedInto, GAP-1946), or the
+// projection would hold the target Maybe (holdKnownOnNameMaybe).
+func unionPOSIXReading(res *Result, guessed Dialect, runsNothing bool, call Call, o Options) {
 	alt := Result{Surface: SurfaceShell, Flavor: o.flavor(), Dialect: DialectPOSIX}
 	w := newWalker(&alt, o)
 	w.pathDialect = DialectNone
 	w.applyWorkdir(call.Workdir)
 	w.walkScript(parsePOSIX(call.Command, o), 0)
-	type key struct {
-		k Kind
-		p string
-	}
-	have := make(map[key]bool, len(res.Effects))
+	posixRuns := guessed == DialectPowerShell && runsNothing && len(alt.Unknowns) == 0 && onlyParseErrors(res.Unknowns)
+	have := make(map[unionKey]bool, len(res.Effects))
 	for _, e := range res.Effects {
 		if e.TargetState == TargetStateKnown && e.RoleState == RoleStateKnown {
-			have[key{e.Kind, e.Target.Path}] = true
+			have[unionKeyOf(e)] = true
 		}
 	}
-	for _, e := range alt.Effects {
+	// placedAt maps an alt effect (1-based, as Source.Effect) to its 1-based
+	// place in res, so the data sources of the added effects point into res.
+	placedAt := make(map[int]int, len(alt.Effects))
+	type placed struct {
+		at    int
+		remap bool // its data came from alt: its sources index alt
+	}
+	var added []placed
+	for i, e := range alt.Effects {
+		known := e.TargetState == TargetStateKnown && e.RoleState == RoleStateKnown
+		mutation := false
 		switch e.Kind {
 		case KindWrite, KindAppend, KindDelete, KindLink, KindPermissionChange:
-		default:
+			mutation = true
+		}
+		if !posixRuns && (!mutation || !known) {
 			continue
 		}
-		if e.TargetState != TargetStateKnown || e.RoleState != RoleStateKnown || have[key{e.Kind, e.Target.Path}] {
+		k := unionKeyOf(e)
+		if known && have[k] {
 			continue
 		}
-		have[key{e.Kind, e.Target.Path}] = true
 		e.Cond = true
-		// The guessed reading's unresolved effect of the same kind on the
-		// same target (Out-File -Append\' read as a positional argument) is
-		// the misread of this one: the known effect takes its place, or the
-		// projection would hold the target Maybe (holdKnownOnNameMaybe).
-		placed := false
-		kept := res.Effects[:0]
-		for _, g := range res.Effects {
-			if g.Kind == e.Kind && g.Target.Path == e.Target.Path {
-				if !placed {
-					kept = append(kept, e)
-					placed = true
+		var misread []int
+		if known && mutation && e.Target.Type == TargetPath && e.Target.Path != "" {
+			have[k] = true
+			dataFromGuess := false
+			for gi, g := range res.Effects {
+				if g.Kind == e.Kind && g.Target.Path == e.Target.Path {
+					misread = append(misread, gi)
+					e, dataFromGuess = mergeGuessedInto(e, g, dataFromGuess)
 				}
-				continue
 			}
-			kept = append(kept, g)
+			// In place, so the data sources of the guessed reading stay valid.
+			for _, gi := range misread {
+				res.Effects[gi] = e
+				added = append(added, placed{gi, !dataFromGuess})
+			}
 		}
-		res.Effects = kept
-		if !placed {
+		if len(misread) == 0 {
 			res.Effects = append(res.Effects, e)
+			misread = []int{len(res.Effects) - 1}
+			added = append(added, placed{misread[0], true})
+		}
+		placedAt[i+1] = misread[0] + 1
+	}
+	for _, p := range added {
+		if p.remap {
+			res.Effects[p.at].Data = remapSources(res.Effects[p.at].Data, placedAt)
 		}
 	}
-	if guessed == DialectPowerShell && len(alt.Unknowns) == 0 && onlyParseErrors(res.Unknowns) {
+	if posixRuns {
 		res.Unknowns = nil
 	}
+}
+
+// unionKey identifies an effect across the two readings of one call: a path
+// target by its resolved path (the readings spell it differently), any other
+// target by what it names.
+type unionKey struct {
+	k                   Kind
+	t                   TargetType
+	path, url, spelling string
+}
+
+func unionKeyOf(e Effect) unionKey {
+	if e.Target.Type == TargetPath {
+		return unionKey{k: e.Kind, t: TargetPath, path: e.Target.Path}
+	}
+	return unionKey{k: e.Kind, t: e.Target.Type, path: e.Target.Path, url: e.Target.URL, spelling: e.Target.Spelling}
+}
+
+// mergeGuessedInto folds an unresolved effect of the guessed reading into the
+// known POSIX effect of the same kind on the same target (GAP-1946): the POSIX
+// target and role stay (they are the resolved ones) and the effect stays Cond;
+// the guessed effect's data is kept when it is the stronger (the POSIX effect
+// has none, or the guessed one names its producers or carries more), and a
+// link-target role of either is kept. fromGuess reports that e's data is now
+// the guessed reading's (its sources index res, not alt).
+func mergeGuessedInto(e, g Effect, fromGuess bool) (Effect, bool) {
+	if g.Data != nil && (e.Data == nil || (len(e.Data.Sources) == 0 && len(g.Data.Sources) > 0) || g.Data.Bytes > e.Data.Bytes) {
+		d := *g.Data
+		e.Data, fromGuess = &d, true
+	}
+	e.LinkTarget = e.LinkTarget || g.LinkTarget
+	return e, fromGuess
+}
+
+// remapSources points the data sources of an effect taken from the POSIX
+// reading at the places their producers got in res; a producer that was not
+// added is dropped (its index named an alt effect).
+func remapSources(d *Data, placedAt map[int]int) *Data {
+	if d == nil || len(d.Sources) == 0 {
+		return d
+	}
+	c := *d
+	c.Sources = make([]Source, 0, len(d.Sources))
+	for _, s := range d.Sources {
+		if s.Effect != 0 {
+			at, ok := placedAt[s.Effect]
+			if !ok {
+				continue
+			}
+			s.Effect = at
+		}
+		c.Sources = append(c.Sources, s)
+	}
+	if len(c.Sources) == 0 {
+		c.Sources = nil
+	}
+	return &c
 }
 
 // onlyParseErrors reports a non-empty list of structure unknowns that are all

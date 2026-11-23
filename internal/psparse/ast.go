@@ -67,6 +67,22 @@ type Diagnostic struct {
 	// block comment that runs to the end of the text, or a here-string whose
 	// $( ) never closes). Every token before it is exact.
 	Lexical bool
+	// Syntax: a parse error pwsh itself reports (the parser port's error list,
+	// FromPwshparse). pwsh runs none of a script with one. A diagnostic the
+	// reader makes on PowerShell that parses (a dialect-ambiguous escape, a
+	// construct it does not model) is never Syntax.
+	Syntax bool
+}
+
+// HasSyntaxError reports whether a diagnostic of the script is a parse error
+// pwsh reports (Diagnostic.Syntax): pwsh would run none of it.
+func (s *Script) HasSyntaxError() bool {
+	for _, d := range s.Diagnostics {
+		if d.Syntax {
+			return true
+		}
+	}
+	return false
 }
 
 // OnlyLexicalDiagnostics reports whether every diagnostic of the script is

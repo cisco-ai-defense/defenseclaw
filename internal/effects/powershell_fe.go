@@ -47,6 +47,7 @@ func lowerPSScript(command string, o Options, expandNested bool) *Script {
 		s.Unknowns = append(s.Unknowns, UnknownNode{Reason: ReasonInvalidSyntax})
 		return s
 	}
+	s.RunsNothing = port && sc.HasSyntaxError()
 	return lowerPSParsed(s, sc, port, o, expandNested)
 }
 

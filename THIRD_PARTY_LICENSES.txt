@@ -76,8 +76,9 @@ License-text provenance:
     c4be3acebe12527d7de689933d98329b4065f8c50cd929d0365584eafe6c20dd
 
   Module: github.com/PowerShell/PowerShell
-  Version: the pwsh 7.6.6 parser sources (src/System.Management.Automation/engine/parser)
-  Upstream file: https://github.com/PowerShell/PowerShell/blob/master/LICENSE.txt
+  Version: v7.6.6 (tag v7.6.6, commit f260eb9c31ec72c5282f98e5ea24d9be4f8d7536), the parser
+    sources (src/System.Management.Automation/engine/parser)
+  Upstream file: https://github.com/PowerShell/PowerShell/blob/v7.6.6/LICENSE.txt
   Upstream LICENSE SHA-256:
     7c77a44a8acd9b41fdc209864a8016b3d430b5d0e09309818d5b7444336df744
 

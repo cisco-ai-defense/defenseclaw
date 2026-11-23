@@ -273,6 +273,8 @@ func psReadLaunch(args []string) (psLaunch, bool) {
 // psStartProcessChild is the script a Start-Process of powershell / pwsh / cmd
 // starts: the -ArgumentList (one literal string, or a list of literal strings
 // joined by blanks, as Start-Process joins them) is the child's command line.
+// A string with `" escapes (-ArgumentList "-Command `"...`"") is read by its
+// decoded value as the child gets it (psparse.NestedScriptText, GAP-1941).
 // ok is false when the child, the list or the line cannot be read.
 func psStartProcessChild(c *psparse.Command) (text string, dialect Dialect, ok bool) {
 	name, line, ok := psStartProcessLine(c)
@@ -345,10 +347,12 @@ func psStartProcessLine(c *psparse.Command) (name, line string, ok bool) {
 	if !ok {
 		return "", "", false
 	}
-	if s, ok := psparse.LiteralString(argList); ok {
+	// A string with `" escapes is read by its decoded value, as the child
+	// gets it (psparse.NestedScriptText, GAP-1941).
+	if s, ok := psparse.NestedScriptText(argList); ok {
 		return name, s, true
 	}
-	items, ok := psparse.LiteralList(argList)
+	items, ok := psparse.NestedScriptList(argList)
 	if !ok {
 		return "", "", false
 	}

@@ -138,7 +138,7 @@ func (p *Parser) statementDefault(token *Token, attributes []*Node, restorePoint
 // unsupportedStatement is used for the tier-2 constructs that are not ported (configuration, dynamic keywords):
 // the port does not parse them, flags the result and recovers as the reference does on a bad statement.
 func (p *Parser) unsupportedStatement(token *Token) *Node {
-	p.Unsupported = true
+	p.markUnsupported()
 	p.reportError(tokExt(token), "UnsupportedByPort")
 	p.syncOnError(true, TkRCurly)
 	return newErrorStmt(tokExt(token))

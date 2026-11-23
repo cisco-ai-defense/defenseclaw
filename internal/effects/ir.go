@@ -19,6 +19,9 @@ type Script struct {
 	// Unread is the text a frontend could not read (from the line of a syntax
 	// error on), with an invalid_syntax unknown; "" when the text was read.
 	Unread string
+	// RunsNothing: a PowerShell script the parser port read with a parse error
+	// pwsh reports too (psparse Diagnostic.Syntax): pwsh runs none of it.
+	RunsNothing bool
 }
 
 // Op is the control operator that joins a statement to the next.
