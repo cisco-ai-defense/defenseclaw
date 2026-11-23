@@ -2989,9 +2989,14 @@ def edited_hook_problems(cfg: Any, connector: str) -> list[str]:
                     continue
                 # Claude Code's exact missing-script guard is unwrapped first, as
                 # hookDocumentEditedEntry does: Unix Setup writes that form (GAP-1956).
+                # Only Claude Code's Setup claims a guarded handler, and it reads
+                # the guard off the command as written (GAP-1963).
                 runs = entry.strip()
-                command = claude_unguarded_hook_command(runs)
-                guarded = command != runs
+                command, guarded = runs, False
+                if connector == "claudecode":
+                    unguarded = claude_unguarded_hook_command(entry)
+                    if unguarded != entry:
+                        command, guarded = unguarded.strip(), True
                 word = edited_hook_script(command, script_name)
                 first, first_rest = _split_hook_command(command) or ("", "")
                 rest = (_split_after_wrapper(command) or ("", ""))[1]
@@ -3008,8 +3013,15 @@ def edited_hook_problems(cfg: Any, connector: str) -> list[str]:
                 if windows is None:
                     continue
                 windows_word, windows_rest = windows
+                # Setup's hooks-dir claim reads a Windows path in this install's
+                # Windows hooks dir too (hookCommandInWindowsDir, GAP-1981): such a
+                # word is passed as the same name under current's dir.
+                claim_word = ""
+                windows_hooks = posixpath.dirname(windows_current) + "/" if windows_current else ""
+                if windows_hooks and windows_word.startswith(windows_hooks):
+                    claim_word = os.path.dirname(current) + "/" + windows_word[len(windows_hooks) :]
                 if not _setup_claims_edited_entry(
-                    connector, command, current, "", windows_rest, windows_rest, guarded, unbound_event
+                    connector, command, current, claim_word, windows_rest, windows_rest, guarded, unbound_event
                 ):
                     continue
                 if windows_word != windows_current and (

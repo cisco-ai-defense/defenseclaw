@@ -3063,14 +3063,15 @@ func isOwnedHookHandler(rawHook interface{}, hooksDir string) bool {
 			return true
 		}
 	}
-	command = posixHookCommandUnquoted(claudeCodeUnguardedHookCommand(command))
+	unguarded := claudeCodeUnguardedHookCommand(command)
+	command = posixHookCommandUnquoted(unguarded)
 	if _, ok := claudeCodePerUserNativeOwnerHome(hook, false); ok {
 		return true
 	}
 	if _, ok := claudeCodePerUserNativeOwnerHome(hook, true); ok {
 		return true
 	}
-	if hooksDir != "" && strings.HasPrefix(command, hooksDir+"/") {
+	if hooksDir != "" && (strings.HasPrefix(command, hooksDir+"/") || hookCommandInWindowsDir(unguarded, hooksDir)) {
 		return true
 	}
 	// Native Go hook commands (Windows) are not a file path under hooksDir
@@ -3083,6 +3084,21 @@ func isOwnedHookHandler(rawHook interface{}, hooksDir string) bool {
 		return true
 	}
 	return scriptHasMarker(command)
+}
+
+// hookCommandInWindowsDir reports whether command's first word is a Windows
+// path inside dir, a Windows path too, compared as the doctor's Windows leg
+// compares them (windowsAbsolutePathAsPOSIX: either separator, any case, no
+// volume). On a Windows host the hooks dir is a backslash path, so the
+// hooks-dir claim above never matched a handler there and Setup kept one the
+// doctor reported, then failed its final check (GAP-1981).
+func hookCommandInWindowsDir(command, dir string) bool {
+	posixDir, ok := windowsAbsolutePathAsPOSIX(dir)
+	if !ok {
+		return false
+	}
+	word, _, ok := posixHookCommandSplit(windowsHookScriptCommandAsPOSIX(command))
+	return ok && strings.HasPrefix(word, strings.TrimSuffix(posixDir, "/")+"/")
 }
 
 // isClaudeCodeNativeExecHook recognizes the shell-free Windows hook shape only
