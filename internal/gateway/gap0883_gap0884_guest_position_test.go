@@ -74,6 +74,35 @@ func TestGAP0883GuestReadsEachStatementWhereItRuns(t *testing.T) {
 	})
 }
 
+// TestGAP0989GuestKnowsTheFolderWhereTheMoveRuns: the folder a cd reaches is
+// known only from where that cd may first run. builtin cd and command cd move
+// the shell as cd does; a cd in a function body moves it from the first call
+// of the function; after export CDPATH=. a relative cd reaches only a folder
+// that ends in its operand. Read as known from the start, each made the
+// earlier echo m > config.yaml a strict tamper.detector_state_write block
+// where the laptop and both rels allow (substrate-1 GAP-0989, RV-SEC10C rows
+// Y04, Z14, Y08, Y10, Z16). The attack rows keep the laptop's block: the
+// write after a builtin cd, a CDPATH spelled CD""PATH, a function called
+// after the cd.
+func TestGAP0989GuestKnowsTheFolderWhereTheMoveRuns(t *testing.T) {
+	gap0377Check(t, []gap0377Row{
+		{name: "Y04 git -C builtin later dc", command: "git -C src status; echo m > config.yaml; builtin cd ~/.defenseclaw && ls", benign: true},
+		{name: "Z14 command cd later dc", command: "git -C src status; echo m > config.yaml; command cd ~/.defenseclaw && ls", benign: true},
+		{name: "Y08 fn cd called after write", command: "f() { cd ~/.defenseclaw && ls; }; echo m > config.yaml; f", benign: true},
+		{name: "Y10 CDPATH later dc", command: "export CDPATH=.; cd src; echo m > config.yaml; cd ~/.defenseclaw && ls", benign: true},
+		{name: "Z16 CDPATH home later dc", command: "export CDPATH=$HOME; cd src; echo m > config.yaml; cd ~/.defenseclaw && ls", benign: true},
+		{name: "X01 builtin cd ssh", command: "$CMD; builtin cd .ssh; echo k >> authorized_keys; cd ~/.ssh"},
+		{name: "X02 command cd ssh", command: "$CMD; command cd .ssh; echo k >> authorized_keys; cd ~/.ssh"},
+		{name: "X18 CD quote PATH", command: "cd /tmp; export CD\"\"PATH=$HOME; $CMD; cd .ssh; echo k >> authorized_keys; cd ~/.ssh"},
+		{name: "X19 CD quote PATH no later", command: "cd /tmp; export CD\"\"PATH=$HOME; $CMD; cd .ssh; echo k >> authorized_keys"},
+		{name: "X28 builtin cd dc", command: "$CMD; builtin cd .defenseclaw; echo m > config.yaml; cd ~/.defenseclaw"},
+		{name: "Z17 fn cd ssh called", command: "f() { cd ~/.ssh; }; f; echo k >> authorized_keys"},
+		{name: "Z18 fn cd ssh write twice", command: "f() { cd ~/.ssh; }; echo k >> authorized_keys; f; echo k >> authorized_keys"},
+		{name: "W01 CDPATH home ssh", command: "cd /tmp; export CDPATH=$HOME; cd .ssh; echo k >> authorized_keys"},
+		{name: "W02 fn builtin cd dc", command: "f() { builtin cd ~/.defenseclaw; }; f; echo m > config.yaml"},
+	})
+}
+
 // TestGAP0884GuestCdOrExitStandsInTheFolder: after the failing-cd fan, cd
 // ../.ssh || exit leaves the shell in ../.ssh for what follows, as on the
 // laptop, so the authorized_keys write there blocks

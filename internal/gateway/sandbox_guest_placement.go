@@ -5,6 +5,7 @@ package gateway
 
 import (
 	"context"
+	"math"
 	"path"
 	"slices"
 	"strings"
@@ -418,15 +419,16 @@ func sandboxGuestPlacements(input actionfacts.Input, facts actionfacts.Facts, st
 	// "$D", a function, a group or a loop (each statement ending in ;) the
 	// block stayed (substrate-1 GAP-0947). The guest's folder, a folder the
 	// split reached through a followed value (followed) or that no static cd
-	// of the text names, and every folder of a call that names CDPATH are
-	// known from the start, as before. The hook-config guard reads a call
+	// of the text names are known from the start, as before; after a
+	// statement that may set CDPATH, a folder a later relative cd may reach
+	// through it is known from that cd (guestKnownFolders). The hook-config guard reads a call
 	// the laptop guard does not place in every folder (byPosition,
 	// substrate-1 GAP-0988). A call the simples pass read
 	// (splitRead) is not read again: it was read in the folders known at its
 	// own place. Its cd targets are still kept.
-	scriptCalls := guestScriptCalls(command, input.ActiveHome)
+	scriptCalls, cdpath := guestScriptCalls(command, input.ActiveHome)
 	known := map[string]int{}
-	targets = guestKnownFolders(scriptCalls, dirs, targets, followed, input.CWD, input.ActiveHome, strings.Contains(command, "CDPATH"), keep, known)
+	targets = guestKnownFolders(scriptCalls, dirs, targets, followed, input.CWD, input.ActiveHome, cdpath, keep, known)
 	calls := &pass{statements: map[string]bool{}}
 	var callReadings []pending
 	callsDropped, callsListed := false, map[key]int{}
@@ -909,19 +911,19 @@ func guestCDTargets(text string, bases []string, home string) []string {
 }
 
 // guestCDOperand returns, lexically, the static operand of a cd or pushd
-// command text ("" for a bare cd); false for any other text, a dynamic
-// operand and cd -.
+// command text ("" for a bare cd), behind builtin or command too
+// (guestCDWords); false for any other text, a dynamic operand and cd -.
 func guestCDOperand(text, home string) (string, bool) {
 	call, ok := guestCall(text)
 	if !ok {
 		return "", false
 	}
-	program, static := hookpaths.StaticWord(call.Args[0], home)
-	if !static || program != "cd" && program != "pushd" {
+	words := guestCDWords(call.Args, home)
+	if words == nil {
 		return "", false
 	}
 	operand := ""
-	for _, word := range call.Args[1:] {
+	for _, word := range words[1:] {
 		value, static := hookpaths.StaticWord(word, home)
 		if !static {
 			return "", false
@@ -933,6 +935,66 @@ func guestCDOperand(text, home string) (string, bool) {
 		break
 	}
 	return operand, operand != "-"
+}
+
+// guestCDWords returns the words of a cd or pushd call from its program word
+// on, past a builtin or command wrapper with no option: builtin cd
+// ~/.defenseclaw moves the shell as cd does, and read as a command that may
+// go anywhere it made every earlier write a strict block in ~/.defenseclaw
+// where the laptop and both rels allow (substrate-1 GAP-0989). nil for any
+// other call (a wrapper option, command -v cd).
+func guestCDWords(args []*syntax.Word, home string) []*syntax.Word {
+	program, static := hookpaths.StaticWord(args[0], home)
+	if static && (program == "builtin" || program == "command") && len(args) > 1 {
+		args = args[1:]
+		program, static = hookpaths.StaticWord(args[0], home)
+	}
+	if !static || program != "cd" && program != "pushd" {
+		return nil
+	}
+	return args
+}
+
+// guestCDPathLooksUp reports a cd or pushd operand Bash may look up in
+// CDPATH: a relative one that does not start with . or .. (as
+// hookpaths.pushdBypassesCDPath).
+func guestCDPathLooksUp(operand string) bool {
+	return operand != "" && operand != "~" && !strings.HasPrefix(operand, "~/") && !path.IsAbs(operand) &&
+		operand != "." && operand != ".." && !strings.HasPrefix(operand, "./") && !strings.HasPrefix(operand, "../")
+}
+
+// guestCDPathMayReach reports a folder a cd to operand may reach through a
+// CDPATH entry the text does not name: one that ends in the operand, or any
+// folder for an operand that climbs out of its entry (a/.., ../x).
+func guestCDPathMayReach(dir, operand string) bool {
+	operand = path.Clean(operand)
+	if operand == "." || operand == ".." || strings.HasPrefix(operand, "../") {
+		return true
+	}
+	return strings.HasSuffix(dir, "/"+operand)
+}
+
+// guestNamesCDPath reports, lexically, a text that spells CDPATH once its
+// quotes and backslashes are removed (export CD""PATH=$HOME). It allocates
+// nothing.
+func guestNamesCDPath(text string) bool {
+	const name = "CDPATH"
+	matched := 0
+	for index := 0; index < len(text); index++ {
+		switch c := text[index]; {
+		case c == '"' || c == '\'' || c == '\\':
+		case c == name[matched]:
+			matched++
+			if matched == len(name) {
+				return true
+			}
+		case c == name[0]:
+			matched = 1
+		default:
+			matched = 0
+		}
+	}
+	return false
 }
 
 // guestCDJoin returns the directories a cd to operand (guestCDOperand) moves
@@ -966,19 +1028,26 @@ func guestCDJoin(operand string, bases []string, home string) []string {
 // where it may run (at): pushd src before a later cd ~/.defenseclaw does not
 // reach ~/.defenseclaw/src. A target is known from where the call starts,
 // so a cd in a loop or a function body counts for every statement after it
-// in the text. The guest's folder, every folder when the script names
-// CDPATH, and a folder of the lists no static cd of the script reaches are
-// known from the start (-1). A folder the split's cds reach through a
+// in the text, and one in a function body from the first call of the
+// function (guestScriptCall.first). The guest's folder and a folder of the
+// lists no static cd of the script reaches are known from the start (-1).
+// cdpath is the first place a statement may set CDPATH
+// (guestScriptCalls; -1 when the text names it outside every statement):
+// a folder a relative cd that may run after it can reach through a CDPATH
+// entry (guestCDPathMayReach) is known from that cd. Every folder known from
+// the start for any text that named CDPATH made export CDPATH=.; cd src;
+// echo m > config.yaml; cd ~/.defenseclaw && ls a strict block where the
+// laptop and both rels allow (substrate-1 GAP-0989). A folder the split's cds reach through a
 // followed value more often than the static cds of the script do (followed:
 // D=~/.claude; cd "$D" before a later cd ~/.claude) is known from the first
 // call the split may follow a value in (guestScriptCall.dynamic), or from
 // the start. The walk runs again while a round knows a folder earlier, at
 // most four rounds; past them every folder is known from the start.
-func guestKnownFolders(calls []guestScriptCall, dirs, targets []string, followed map[string]int, cwd, home string, cdpath bool,
+func guestKnownFolders(calls []guestScriptCall, dirs, targets []string, followed map[string]int, cwd, home string, cdpath int,
 	keep func([]string, string) []string, known map[string]int) []string {
 	listed := slices.Concat(dirs, targets)
 	for _, dir := range listed {
-		if cdpath || dir == path.Clean(cwd) {
+		if cdpath < 0 || dir == path.Clean(cwd) {
 			known[dir] = -1
 		}
 	}
@@ -1020,8 +1089,17 @@ func guestKnownFolders(calls []guestScriptCall, dirs, targets []string, followed
 			for _, target := range guestCDJoin(move.operand, bases, home) {
 				reached[target]++
 				grown = keep(grown, target)
-				if since, ok := known[target]; !ok || call.start < since {
-					known[target] = call.start
+				if since, ok := known[target]; !ok || call.first < since {
+					known[target] = call.first
+					changed = true
+				}
+			}
+			if call.at < cdpath || !guestCDPathLooksUp(move.operand) {
+				continue
+			}
+			for _, dir := range slices.Concat(listed, grown) {
+				if since, ok := known[dir]; guestCDPathMayReach(dir, move.operand) && (!ok || call.first < since) {
+					known[dir] = call.first
 					changed = true
 				}
 			}
@@ -1055,6 +1133,13 @@ func guestKnownFolders(calls []guestScriptCall, dirs, targets []string, followed
 type guestScriptCall struct {
 	text      string
 	start, at int
+	// first is the earliest place in the text it may run from: where it
+	// starts, or the first call of the function whose body holds it when the
+	// function runs only where the text calls it and no command the split
+	// cannot read comes in the script (f() { cd ~/.defenseclaw && ls; }; echo
+	// m > config.yaml; f writes the starting folder's config.yaml; substrate-1
+	// GAP-0989).
+	first int
 	// dynamic marks a call whose program word, or a cd or pushd operand,
 	// is not static, or one of cmdRedefiningCommands (eval, source, ...) or
 	// a builtin or command wrapper: the split may follow a value there.
@@ -1064,18 +1149,25 @@ type guestScriptCall struct {
 // guestScriptCalls returns, in source order, every simple-command statement
 // of a Bash script, nested ones included (a function body, a group, a
 // subshell, a process substitution), lexically; nil when the script does not
-// parse.
-func guestScriptCalls(command, home string) []guestScriptCall {
+// parse. cdpath is the start of the first statement that names CDPATH
+// (guestNamesCDPath), -1 when the text names it outside every statement or
+// does not parse, math.MaxInt when it never does.
+func guestScriptCalls(command, home string) (calls []guestScriptCall, cdpath int) {
+	names := guestNamesCDPath(command)
+	cdpath = math.MaxInt
+	if names {
+		cdpath = -1
+	}
 	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(command), "")
 	if err != nil {
-		return nil
+		return nil, cdpath
 	}
+	cdpath = math.MaxInt
 	type span struct {
 		start, end int
 		name       string
 	}
 	var loops, bodies []span
-	var calls []guestScriptCall
 	// programs holds the static program word of each call, "" for none.
 	var programs []string
 	syntax.Walk(file, func(node syntax.Node) bool {
@@ -1087,33 +1179,40 @@ func guestScriptCalls(command, home string) []guestScriptCall {
 				bodies = append(bodies, span{int(node.Pos().Offset()), int(node.End().Offset()), node.Name.Value})
 			}
 		case *syntax.Stmt:
-			call, isCall := node.Cmd.(*syntax.CallExpr)
-			if !isCall || len(call.Args) == 0 {
-				return true
-			}
 			// The statement's span keeps its redirections (> ../.claude/settings.json).
 			start, end := int(node.Pos().Offset()), int(node.End().Offset())
-			if start >= 0 && end <= len(command) && start < end {
-				program, static := hookpaths.StaticWord(call.Args[0], home)
-				if !static {
-					program = ""
-				}
-				dynamic := !static || cmdRedefiningCommands[program] || program == "builtin" || program == "command"
-				if program == "cd" || program == "pushd" {
-					for _, word := range call.Args[1:] {
-						if _, static := hookpaths.StaticWord(word, home); !static {
-							dynamic = true
-						}
-					}
-				}
-				calls = append(calls, guestScriptCall{text: command[start:end], start: start, at: start, dynamic: dynamic})
-				programs = append(programs, program)
+			spans := start >= 0 && end <= len(command) && start < end
+			if names && spans && start < cdpath && guestNamesCDPath(command[start:end]) {
+				cdpath = start
 			}
+			call, isCall := node.Cmd.(*syntax.CallExpr)
+			if !isCall || len(call.Args) == 0 || !spans {
+				return true
+			}
+			program, static := hookpaths.StaticWord(call.Args[0], home)
+			if !static {
+				program = ""
+			}
+			var words []*syntax.Word
+			if program == "cd" || program == "pushd" || program == "builtin" || program == "command" {
+				words = guestCDWords(call.Args, home)
+			}
+			dynamic := !static || cmdRedefiningCommands[program] || (program == "builtin" || program == "command") && words == nil
+			for index := 1; index < len(words); index++ {
+				if _, static := hookpaths.StaticWord(words[index], home); !static {
+					dynamic = true
+				}
+			}
+			calls = append(calls, guestScriptCall{text: command[start:end], start: start, at: start, first: start, dynamic: dynamic})
+			programs = append(programs, program)
 		}
 		return true
 	})
+	if names && cdpath == math.MaxInt {
+		cdpath = -1 // a comment or a here-document: every folder, as before
+	}
 	if len(loops) == 0 && len(bodies) == 0 {
-		return calls
+		return calls, cdpath
 	}
 	sites := map[string][]int{}
 	if len(bodies) != 0 {
@@ -1156,10 +1255,42 @@ func guestScriptCalls(command, home string) []guestScriptCall {
 		}
 		return out
 	}
+	// early is the earliest place pos may run from: the first call of the
+	// function whose body holds it, when that function runs only where the
+	// text calls it (no unread command, every word of its name a call or the
+	// declaration, no call in its own body); else where it starts.
+	firsts := map[int]int{}
+	var early func(pos, depth int) int
+	early = func(pos, depth int) int {
+		out := pos
+		for at, body := range bodies {
+			if pos < body.start || pos >= body.end {
+				continue
+			}
+			from, ok := firsts[at]
+			if !ok {
+				from = body.start
+				if !unread && depth < 8 && len(sites[body.name]) != 0 && guestWordCount(command, body.name) == 1+len(sites[body.name]) {
+					from = len(command)
+					for _, site := range sites[body.name] {
+						if site >= body.start && site < body.end {
+							from = body.start
+							break
+						}
+						from = min(from, early(site, depth+1))
+					}
+				}
+				firsts[at] = from
+			}
+			out = max(out, from)
+		}
+		return out
+	}
 	for at := range calls {
+		calls[at].first = early(calls[at].start, 0)
 		calls[at].at = place(calls[at].at, 0)
 	}
-	return calls
+	return calls, cdpath
 }
 
 // guestWordCount counts the places name stands in text as a whole word, with
