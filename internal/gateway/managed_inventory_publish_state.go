@@ -32,7 +32,9 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/observability/destinations/managedaid"
 	"github.com/defenseclaw/defenseclaw/internal/observability/pipeline"
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
 // Change-gated managed inventory publishing.
@@ -46,11 +48,11 @@ import (
 // guaranteed complete bundle every managedInventoryFullBundleInterval so a cloud
 // that missed the baseline always re-baselines within a day.
 //
-// The whole mechanism is managed_enterprise-exclusive:
-// newManagedInventoryPublishState returns nil for every other deployment mode,
-// and every method here is nil-receiver safe with "never suppress" semantics. A
-// nil gate therefore reproduces the pre-change behavior exactly, so OSS and
-// other non-managed deployments are untouched and no state file is created.
+// Outside Secure Client the same gate keeps the endpoint inventory sent to
+// the operator's own destinations in its own file,
+// endpointInventoryPublishStateFile, so a machine that later moves to Secure
+// Client re-baselines AI Defense in full.
+// Every method here is nil-receiver safe with "never suppress" semantics.
 const (
 	// managedInventoryFullBundleInterval is release-owned: AI Defense receives
 	// one complete, self-consistent copy of the endpoint inventory at least
@@ -60,6 +62,9 @@ const (
 	managedInventoryFullBundleInterval = 24 * time.Hour
 
 	managedInventoryPublishStateFile = "managed_inventory_publish_state.json"
+	// endpointInventoryPublishStateFile is the inventory state of an OSS
+	// per-user or managed standalone gateway, in that gateway's data dir.
+	endpointInventoryPublishStateFile = "endpoint_inventory_publish_state.json"
 	// Version 2 invalidates v1 publish digests so the first complete scan after
 	// upgrade re-baselines AI Defense with connector-native MCP details. This is
 	// required because v1 could record a successful native publish before the
@@ -93,6 +98,14 @@ type managedInventoryPublishFile struct {
 	// Zero means "never", which forces a bundle on the next cycle.
 	FullBundleAt time.Time                                `json:"full_bundle_published_at"`
 	Collections  map[string]managedInventoryPublishRecord `json:"collections"`
+	// Skills is the last published state of each skill (managed_skill_state.go).
+	Skills map[string]managedSkillState `json:"skills,omitempty"`
+	// SkillManifests is how much of each SKILL.md, by hash, was locally submitted
+	// (managed_skill_manifest.go).
+	SkillManifests        map[string]managedSkillManifest        `json:"skill_manifests,omitempty"`
+	ManifestReceipts      map[string]managedManifestReceiptState `json:"manifest_receipts,omitempty"`
+	ManifestReceiptCursor string                                 `json:"manifest_receipt_cursor,omitempty"`
+	ManifestBodyCursor    string                                 `json:"manifest_body_cursor,omitempty"`
 }
 
 // managedInventoryPublishState is the durable, process-wide publish memory. It
@@ -104,6 +117,12 @@ type managedInventoryPublishState struct {
 	mu   sync.Mutex
 	path string
 	file managedInventoryPublishFile
+	// aidBundle: the daily bundle is AI Defense's complete copy, so only a
+	// complete, non-degraded cycle stamps it (Secure Client). Elsewhere it is
+	// the daily refresh of the operator's own destinations, stamped by any
+	// forced scan cycle: a collection that stays partial must not make every
+	// scan send every collection again.
+	aidBundle bool
 
 	// Bundle-due decision memoized per discovery scan so the two publishers
 	// reached from one inventory.fanoutReport agree, even though the timestamp
@@ -111,21 +130,32 @@ type managedInventoryPublishState struct {
 	cycleScanID string
 	cycleKnown  bool
 	cycleForced bool
+
+	readSkillManifest func(hash string) ([]byte, bool)
+	receiptReader     managedaid.ManifestReceiptReader
+	receiptEpoch      uint64
+	receiptBinding    manifestReceiptRuntimeBinding
 }
 
-// newManagedInventoryPublishState returns nil outside managed_enterprise. A nil
-// state is the OSS/non-managed path: no digest is ever computed and no state
-// file is ever created or read.
+// newManagedInventoryPublishState returns the publish state of cfg's
+// gateway: the managed inventory state on a Secure Client endpoint, the
+// operator inventory state everywhere else. It returns nil without a data dir.
 func newManagedInventoryPublishState(cfg *config.Config) *managedInventoryPublishState {
-	if cfg == nil || !managed.IsManagedEnterprise(cfg.DeploymentMode) {
+	if cfg == nil {
 		return nil
 	}
 	dataDir := strings.TrimSpace(cfg.DataDir)
 	if dataDir == "" {
 		return nil
 	}
+	name := endpointInventoryPublishStateFile
+	aidBundle := managed.IsManagedEnterprise(cfg.DeploymentMode) && cfg.ManagedAIDOnly()
+	if aidBundle {
+		name = managedInventoryPublishStateFile
+	}
 	state := &managedInventoryPublishState{
-		path: filepath.Join(dataDir, managedInventoryPublishStateFile),
+		path:      filepath.Join(dataDir, name),
+		aidBundle: aidBundle,
 	}
 	state.file = loadManagedInventoryPublishFile(state.path)
 	return state
@@ -141,7 +171,7 @@ func loadManagedInventoryPublishFile(path string) managedInventoryPublishFile {
 		Version:     managedInventoryPublishStateVersion,
 		Collections: map[string]managedInventoryPublishRecord{},
 	}
-	raw, err := os.ReadFile(path)
+	raw, err := safefile.ReadRegularFileBounded(path, 32<<20)
 	if err != nil {
 		// A first-run absence is the norm; only surface real read errors.
 		if !os.IsNotExist(err) {
@@ -165,6 +195,7 @@ func loadManagedInventoryPublishFile(path string) managedInventoryPublishFile {
 	if file.Collections == nil {
 		file.Collections = map[string]managedInventoryPublishRecord{}
 	}
+	sanitizeManifestReceipts(&file)
 	return file
 }
 
@@ -228,23 +259,34 @@ func (state *managedInventoryPublishState) beginCycle(
 // managedInventoryPublishCycle accumulates one cycle's decisions so the state
 // file is written at most once per cycle (and not at all in steady state).
 type managedInventoryPublishCycle struct {
-	state       *managedInventoryPublishState
-	now         time.Time
-	scanID      string
-	forced      bool
-	bundleScope bool
-	degraded    bool
-	published   map[string]managedInventoryPublishRecord
+	state               *managedInventoryPublishState
+	now                 time.Time
+	scanID              string
+	forced              bool
+	bundleScope         bool
+	degraded            bool
+	published           map[string]managedInventoryPublishRecord
+	skills              map[string]managedSkillState
+	manifests           map[string]managedSkillManifest
+	receipts            map[string]managedManifestReceiptState
+	manifestProjected   map[string]managedManifestReceiptState
+	receiptEpoch        uint64
+	receiptCursor       string
+	bodyCursor          string
+	receiptDirty        bool
+	receiptFresh        map[string]bool
+	receiptGeneration   uint64
+	receiptAcknowledged map[string]managedSkillManifest
 }
 
 // forcedBundle reports whether this cycle ignores digests and publishes
-// everything. A nil cycle (non-managed) always publishes.
+// everything. A nil cycle (no publish state) always publishes.
 func (cycle *managedInventoryPublishCycle) forcedBundle() bool {
 	return cycle == nil || cycle.forced
 }
 
 // shouldPublish reports whether a collection needs to ship this cycle. A nil
-// cycle never suppresses, which is what keeps non-managed behavior identical.
+// cycle (no publish state: no data folder) never suppresses.
 func (cycle *managedInventoryPublishCycle) shouldPublish(key, digest string) bool {
 	if cycle == nil || cycle.state == nil || cycle.forced {
 		return true
@@ -339,15 +381,51 @@ func (cycle *managedInventoryPublishCycle) commit() {
 	}
 	state := cycle.state
 	stampBundle := cycle.forced && cycle.bundleScope && !cycle.degraded
-	if len(cycle.published) == 0 && !stampBundle {
+	if !state.aidBundle {
+		stampBundle = cycle.forced && cycle.scanID != ""
+	}
+	if len(cycle.published) == 0 && !stampBundle && !cycle.receiptDirty {
 		return
 	}
 	state.mu.Lock()
+	currentReceiptContext := cycle.receiptEpoch == state.receiptEpoch && (state.receiptBinding.current == nil || state.receiptBinding.current() == cycle.receiptGeneration)
+	if cycle.receipts != nil && currentReceiptContext {
+		state.file.ManifestReceipts = cycle.receipts
+		if len(cycle.receiptAcknowledged) > 0 {
+			// Other in-flight scans retain this immutable map after releasing
+			// mu. Publish a replacement instead of mutating their snapshot.
+			progress := make(map[string]managedSkillManifest, len(state.file.SkillManifests)+len(cycle.receiptAcknowledged))
+			for hash, submitted := range state.file.SkillManifests {
+				progress[hash] = submitted
+			}
+			for hash, acknowledged := range cycle.receiptAcknowledged {
+				progress[hash] = acknowledged
+			}
+			state.file.SkillManifests = progress
+		}
+		if cycle.receiptCursor != "" {
+			state.file.ManifestReceiptCursor = cycle.receiptCursor
+		}
+		if _, ok := cycle.published[endpointSkillInventorySource]; ok {
+			for hash, record := range cycle.manifestProjected {
+				state.file.ManifestReceipts[hash] = record
+			}
+		}
+	}
 	if state.file.Collections == nil {
 		state.file.Collections = map[string]managedInventoryPublishRecord{}
 	}
 	for key, record := range cycle.published {
 		state.file.Collections[key] = record
+	}
+	if _, ok := cycle.published[endpointSkillInventorySource]; ok && cycle.skills != nil {
+		state.file.Skills = cycle.skills
+		if cycle.manifests != nil && (cycle.receiptEpoch == 0 || currentReceiptContext) {
+			state.file.SkillManifests = cycle.manifests
+			if cycle.bodyCursor != "" {
+				state.file.ManifestBodyCursor = cycle.bodyCursor
+			}
+		}
 	}
 	if stampBundle {
 		state.file.FullBundleAt = cycle.now.UTC()
@@ -433,6 +511,10 @@ func managedInventoryOptionalBool(value *bool) string {
 func managedInventoryComponentsDigest(key string, components []endpointInventoryComponent) string {
 	rows := make([]string, 0, len(components))
 	for _, component := range components {
+		if component.skillState == skillStateRemoved {
+			// Sent once (hasRemovedSkill); the collection then settles.
+			continue
+		}
 		rows = append(rows, strings.Join([]string{
 			component.id,
 			component.componentType,
@@ -465,6 +547,20 @@ func managedInventoryComponentsDigest(key string, components []endpointInventory
 			component.agentBinaryBasename,
 			component.agentBinaryPathHash,
 			component.agentVersion,
+			component.skillContentHash,
+			component.skillContentStatus,
+			component.skillFirstSeen,
+			component.skillScope,
+			component.skillLocation,
+			strings.Join(component.skillAgents, ","),
+			component.skillPublisher,
+			component.skillPublisherSource,
+			component.skillPlugin,
+			component.skillPluginVersion,
+			managedInventoryOptionalBool(component.skillPluginEnabled),
+			component.vendor,
+			component.skillVersion,
+			strconv.FormatInt(component.skillManifestSize, 10),
 		}, managedInventoryFieldSeparator))
 	}
 	return managedInventoryDigest(key, rows)

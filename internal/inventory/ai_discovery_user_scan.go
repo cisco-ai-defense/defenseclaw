@@ -502,6 +502,10 @@ func ValidateUserScanReport(report AIDiscoveryReport, catalog []AISignature) err
 		if sig.Component != nil {
 			fields = append(fields, sig.Component.Ecosystem, sig.Component.Name, sig.Component.Version, sig.Component.Framework)
 		}
+		if sig.Location != "" && ((!strings.HasPrefix(sig.Location, "~/") && !filepath.IsAbs(sig.Location)) ||
+			!userScanText(sig.Location, maxSkillLocation)) {
+			return errors.New("signal location must be a printable home-relative or absolute path")
+		}
 		if len(sig.Basenames) > maxUserScanField || len(sig.EvidenceTypes) > maxUserScanField || len(sig.PathHashes) > maxUserScanField {
 			return errors.New("signal lists are too long")
 		}
@@ -511,6 +515,11 @@ func ValidateUserScanReport(report AIDiscoveryReport, catalog []AISignature) err
 			fields = append(fields, ev.Type, ev.Basename, ev.MatchKind, ev.Origin, ev.ValueHash)
 			if !userScanText(ev.RawPath, 4096) {
 				return errors.New("evidence paths must be printable")
+			}
+			if ev.Skill != nil {
+				if err := validateSkillFacts(*ev.Skill); err != nil {
+					return err
+				}
 			}
 		}
 		for _, value := range fields {
