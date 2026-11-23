@@ -32,7 +32,7 @@ func TestGAP0669RestrictedMetricResourceKeepsTheNamespace(t *testing.T) {
 	got := map[string]string{}
 	for iter := restrictedMetricResource(full).Iter(); iter.Next(); {
 		kv := iter.Attribute()
-		got[string(kv.Key)] = kv.Value.Emit()
+		got[string(kv.Key)] = kv.Value.String()
 	}
 	if got["k8s.namespace.name"] != "defenseclaw-substrate" {
 		t.Errorf("k8s.namespace.name left the restricted resource as %q (resource %v); the scoped alert rules read it", got["k8s.namespace.name"], got)
