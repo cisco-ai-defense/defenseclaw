@@ -60,7 +60,7 @@ func TestSourcedScriptBehindTooManyLinksIsJudgedByTheTier(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			restore := hookpaths.OverrideNetworkSharesForTest(func(string) string { return "" }, func(string) {})
+			restore := overrideNetworkSharesIdle(t, func(string) string { return "" }, func(string) {})
 			t.Cleanup(restore)
 			cwd := gatewayLinkChain(t, tc.links, live)
 			for _, strict := range []bool{true, false} {
