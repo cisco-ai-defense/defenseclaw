@@ -15,6 +15,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 	"golang.org/x/sys/windows"
 )
 
@@ -103,5 +104,59 @@ func TestGAP0731PluginFileWithAForeignWriteEntryNamesTheIcaclsCommand(t *testing
 	}
 	if !strings.Contains(err.Error(), `icacls `+managed.PowerShellLiteral(plugin)+` /remove:g 'Everyone'`) {
 		t.Fatalf("refusal lacks the icacls command for the plugin file:\n%v", err)
+	}
+}
+
+// GAP-1887: a write entry of another account on a folder above the plugin
+// folder is a custody refusal, so Setup stops only this connector, and the
+// refusal names the folder and the icacls command for that account.
+func TestGAP1887PluginFolderAncestorWriteEntryIsACustodyRefusal(t *testing.T) {
+	config := testenv.PrivateTempDir(t)
+	dir := filepath.Join(config, "plugins")
+	if _, err := safefile.CreatePrivateDirectory(dir); err != nil {
+		t.Fatal(err)
+	}
+	plugin := filepath.Join(dir, "defenseclaw.js")
+	if err := validatePluginArtifactDestination(plugin); err != nil {
+		t.Fatalf("a private plugin folder was refused: %v", err)
+	}
+	everyone, err := windows.CreateWellKnownSid(windows.WinWorldSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sd, err := windows.GetNamedSecurityInfo(config, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old, _, err := sd.DACL()
+	if err != nil {
+		t.Fatal(err)
+	}
+	acl, err := windows.ACLFromEntries([]windows.EXPLICIT_ACCESS{{
+		AccessPermissions: windows.GENERIC_ALL,
+		AccessMode:        windows.GRANT_ACCESS,
+		Inheritance:       windows.NO_INHERITANCE,
+		Trustee: windows.TRUSTEE{
+			TrusteeForm:  windows.TRUSTEE_IS_SID,
+			TrusteeType:  windows.TRUSTEE_IS_WELL_KNOWN_GROUP,
+			TrusteeValue: windows.TrusteeValueFromSID(everyone),
+		},
+	}}, old)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := windows.SetNamedSecurityInfo(config, windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, acl, nil); err != nil {
+		t.Fatal(err)
+	}
+	err = validatePluginArtifactDestination(plugin)
+	if err == nil || !errors.Is(err, ErrPluginFolderCustody) || !PluginFolderRefusedBeforeChange(err) {
+		t.Fatalf("err=%v, want a custody refusal before any change", err)
+	}
+	if want := `icacls ` + managed.PowerShellLiteral(config) + ` /remove:g '*S-1-1-0'`; !strings.Contains(err.Error(), want) {
+		t.Fatalf("refusal lacks %s:\n%v", want, err)
+	}
+	if !strings.Contains(err.Error(), "untrusted Windows principal S-1-1-0 has write-like access mask") {
+		t.Fatalf("refusal lost the principal text the enterprise parsers read:\n%v", err)
 	}
 }
