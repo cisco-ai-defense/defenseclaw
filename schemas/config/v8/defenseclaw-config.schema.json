@@ -8475,6 +8475,16 @@
                   "minLength": 1,
                   "maxLength": 4096
                 },
+                "auth_hosts": {
+                  "description": "Token realm hosts a registry may name besides itself (auth.docker.io for Docker Hub); a realm on any other host is refused.",
+                  "type": "array",
+                  "maxItems": 16,
+                  "items": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9-]+(\\.[A-Za-z0-9-]+)+(:[0-9]{1,5})?$",
+                    "maxLength": 261
+                  }
+                },
                 "timeout": {
                   "$ref": "#/$defs/duration"
                 },

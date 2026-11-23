@@ -4811,6 +4811,7 @@ class SubstrateBundleOCIConfig:
     enabled: bool = False
     credentials_file: str = ""
     ca_file: str = ""
+    auth_hosts: list[str] = field(default_factory=list)
     timeout: str = ""
     stages: list[SubstrateBundleOCIStage] = field(default_factory=list)
 
@@ -8249,6 +8250,7 @@ def _merge_substrate_bundle_oci(raw: Any) -> SubstrateBundleOCIConfig:
         enabled=raw.get("enabled") is True,
         credentials_file=str(raw.get("credentials_file", "") or ""),
         ca_file=str(raw.get("ca_file", "") or ""),
+        auth_hosts=[str(h) for h in (raw.get("auth_hosts") or []) if isinstance(h, str)],
         timeout=_duration_text(raw.get("timeout")),
         stages=[
             SubstrateBundleOCIStage(
@@ -8364,7 +8366,7 @@ def _serialize_substrate(cfg: Config, d: dict[str, Any]) -> None:
         oci = bundles.get("oci")
         if isinstance(oci, dict):
             # Go omitempty everywhere but stages[].stage and stages[].ref.
-            for k in ("enabled", "credentials_file", "ca_file", "timeout", "stages"):
+            for k in ("enabled", "credentials_file", "ca_file", "auth_hosts", "timeout", "stages"):
                 if not oci.get(k):
                     oci.pop(k, None)
             for st in oci.get("stages", []):

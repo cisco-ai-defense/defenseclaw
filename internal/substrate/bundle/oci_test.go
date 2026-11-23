@@ -151,13 +151,13 @@ func TestGAP0437OCIValidPullAppliesOnceByDigest(t *testing.T) {
 	if st, err := e.store.Status(ctx, 0); err != nil || len(st.OCI) != 1 || st.OCI[0].State != OCIPending {
 		t.Fatalf("status before the pull: %+v %v", st, err)
 	}
-	rcs, err := e.store.SyncOCI(ctx, c, e.store.OCIStages)
-	if err != nil || len(rcs) != 1 || rcs[0].Result != ResultApplied || rcs[0].Source != SourceOCI || rcs[0].Stage != "prod" {
+	rcs, pulls, err := e.store.SyncOCI(ctx, c, e.store.OCIStages)
+	if err != nil || len(pulls) != 0 || len(rcs) != 1 || rcs[0].Result != ResultApplied || rcs[0].Source != SourceOCI || rcs[0].Stage != "prod" {
 		t.Fatalf("valid pull: %+v %v", rcs, err)
 	}
 	// The digest is immutable: the next passes make no registry call.
 	for range 2 {
-		if rcs, err := e.store.SyncOCI(ctx, c, e.store.OCIStages); err != nil || len(rcs) != 0 {
+		if rcs, pulls, err := e.store.SyncOCI(ctx, c, e.store.OCIStages); err != nil || len(pulls) != 0 || len(rcs) != 0 {
 			t.Fatalf("second pass: %+v %v", rcs, err)
 		}
 	}
@@ -177,16 +177,16 @@ func TestGAP0437OCIWrongSignatureIsRefusedOnceAndKeepsTheStage(t *testing.T) {
 	ctx := context.Background()
 	e := newEnv(t)
 	good := newTestRegistry(t, buildBundle(t, e.key, 3, policyYAML("paste.example.com")))
-	if _, err := e.store.SyncOCI(ctx, good.client(t, ""), ociStage(good.ref())); err != nil {
+	if _, pulls, err := e.store.SyncOCI(ctx, good.client(t, ""), ociStage(good.ref())); err != nil || len(pulls) != 0 {
 		t.Fatal(err)
 	}
 	rogue := newTestRegistry(t, buildBundle(t, newSigner(t, "rogue"), 4, policyYAML("x.example.com")))
 	c := rogue.client(t, "")
 	e.store.OCIStages = ociStage(rogue.ref())
 	for i := range 2 {
-		rcs, err := e.store.SyncOCI(ctx, c, e.store.OCIStages)
-		if err != nil {
-			t.Fatal(err)
+		rcs, pulls, err := e.store.SyncOCI(ctx, c, e.store.OCIStages)
+		if err != nil || len(pulls) != 0 {
+			t.Fatal(err, pulls)
 		}
 		if i == 0 && (len(rcs) != 1 || rcs[0].Result != ResultRefused || rcs[0].Code != string(eb.CodeKeyUnknown) || rcs[0].Source != SourceOCI) {
 			t.Fatalf("rogue bundle: %+v", rcs)
@@ -250,11 +250,11 @@ func TestGAP0437OCIPullFailuresFailClosed(t *testing.T) {
 			reg := newTestRegistry(t, buildBundle(t, e.key, 3, policyYAML("paste.example.com")))
 			ref := tc.setup(reg)
 			e.store.OCIStages = ociStage(ref)
-			rcs, err := e.store.SyncOCI(ctx, reg.client(t, ""), e.store.OCIStages)
-			if err == nil || !strings.Contains(err.Error(), tc.want) || len(rcs) != 0 {
-				t.Fatalf("want %q, got %+v %v", tc.want, rcs, err)
+			rcs, pulls, serr := e.store.SyncOCI(ctx, reg.client(t, ""), e.store.OCIStages)
+			if serr != nil || len(pulls) != 1 || !strings.Contains(pulls[0].Error(), tc.want) || len(rcs) != 0 {
+				t.Fatalf("want %q, got %+v %v %v", tc.want, rcs, pulls, serr)
 			}
-			if strings.Contains(err.Error(), "Bearer") || strings.Contains(err.Error(), reg.token+`"`) {
+			if err := pulls[0]; strings.Contains(err.Error(), "Bearer") || strings.Contains(err.Error(), reg.token+`"`) {
 				t.Fatalf("error leaks the token: %v", err)
 			}
 			if strings.HasPrefix(tc.name, "tag") && reg.manifestGets.Load()+reg.tokenGets.Load() != 0 {
@@ -278,8 +278,8 @@ func TestGAP0437OCIRedirectToAnotherHostDropsAuth(t *testing.T) {
 	reg := newTestRegistry(t, buildBundle(t, e.key, 3, policyYAML("paste.example.com")))
 	reg.redirect = "cdn"
 	creds := fmt.Sprintf(`{"auths":{%q:{"auth":%q}}}`, reg.host(), base64.StdEncoding.EncodeToString([]byte("puller:s3cret")))
-	rcs, err := e.store.SyncOCI(ctx, reg.client(t, creds), ociStage(reg.ref()))
-	if err != nil || len(rcs) != 1 || rcs[0].Result != ResultApplied {
+	rcs, pulls, err := e.store.SyncOCI(ctx, reg.client(t, creds), ociStage(reg.ref()))
+	if err != nil || len(pulls) != 0 || len(rcs) != 1 || rcs[0].Result != ResultApplied {
 		t.Fatalf("redirected pull: %+v %v", rcs, err)
 	}
 	if a, _ := reg.cdnAuth.Load().(string); a != "" {

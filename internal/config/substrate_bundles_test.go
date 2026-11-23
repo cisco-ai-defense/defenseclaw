@@ -101,6 +101,7 @@ func TestGAP0437SubstrateBundlesOCIValidate(t *testing.T) {
 		"duplicate stage":  {SubstrateBundleOCIConfig{Stages: []SubstrateBundleOCIStage{{Stage: "prod", Ref: ref}, {Stage: "prod", Ref: ref}}}, "bundles.oci.stages[1].stage"},
 		"relative ca":      {SubstrateBundleOCIConfig{CAFile: "ca.pem"}, "bundles.oci.ca_file"},
 		"relative creds":   {SubstrateBundleOCIConfig{CredentialsFile: "config.json"}, "bundles.oci.credentials_file"},
+		"auth host url":    {SubstrateBundleOCIConfig{AuthHosts: []string{"https://auth.docker.io/token"}}, "bundles.oci.auth_hosts[0]"},
 		"timeout too long": {SubstrateBundleOCIConfig{Timeout: "10m"}, "bundles.oci.timeout"},
 		"on, no stage":     {SubstrateBundleOCIConfig{Enabled: true}, "bundles.oci.stages"},
 	} {

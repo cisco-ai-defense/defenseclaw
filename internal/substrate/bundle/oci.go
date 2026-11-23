@@ -24,7 +24,6 @@ package bundle
 // file and inbox bundles. Everything fails closed.
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"crypto/tls"
@@ -39,10 +38,14 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	eb "github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/controller"
 )
 
 // SourceOCI is the receipt source of a bundle pulled from a registry.
@@ -82,9 +85,27 @@ type ociCred struct{ user, pass string }
 
 // OCIClient pulls bundles by digest.
 type OCIClient struct {
-	http    *http.Client
-	creds   map[string]ociCred // registry host -> credentials
-	timeout time.Duration
+	http  *http.Client
+	creds map[string]ociCred // ociHostKey(registry) -> credentials
+	// idTok are the registries whose credentials_file entry has only an
+	// identitytoken (not supported: named in the error, never sent).
+	idTok map[string]bool
+	// authHosts are the token realm hosts besides the registry itself
+	// (substrate.bundles.oci.auth_hosts, GAP-0950).
+	authHosts map[string]bool
+	timeout   time.Duration
+}
+
+// ociHostKey is the form registry hosts are compared and keyed in: lower
+// case, no default https port, and the Docker Hub names (docker login
+// writes the key https://index.docker.io/v1/) as registry-1.docker.io.
+func ociHostKey(h string) string {
+	h = strings.TrimSuffix(strings.ToLower(h), ":443")
+	switch h {
+	case "docker.io", "index.docker.io", "registry.hub.docker.com":
+		return "registry-1.docker.io"
+	}
+	return h
 }
 
 // NewOCIClient builds the client from substrate.bundles.oci: TLS 1.2+ with
@@ -104,9 +125,12 @@ func NewOCIClient(o config.SubstrateBundleOCIConfig) (*OCIClient, error) {
 			return nil, fmt.Errorf("oci ca_file %s: no PEM certificate", o.CAFile)
 		}
 	}
-	c := &OCIClient{timeout: o.EffectiveTimeout(), creds: map[string]ociCred{}}
+	c := &OCIClient{timeout: o.EffectiveTimeout(), creds: map[string]ociCred{}, authHosts: map[string]bool{}}
+	for _, h := range o.AuthHosts {
+		c.authHosts[ociHostKey(strings.TrimSpace(h))] = true
+	}
 	if o.CredentialsFile != "" {
-		if c.creds, err = readDockerConfig(o.CredentialsFile); err != nil {
+		if c.creds, c.idTok, err = readDockerConfig(o.CredentialsFile); err != nil {
 			return nil, err
 		}
 	}
@@ -137,38 +161,49 @@ func checkOCIRedirect(req *http.Request, via []*http.Request) error {
 	return nil
 }
 
-func readDockerConfig(path string) (map[string]ociCred, error) {
+// readDockerConfig reads the auths of a dockerconfigjson document, keyed by
+// ociHostKey of the host (any scheme and path dropped). An entry with an
+// identitytoken is listed in idTok and gives no credentials: the
+// refresh-token exchange is not supported.
+func readDockerConfig(path string) (creds map[string]ociCred, idTok map[string]bool, err error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("oci credentials_file: %w", err)
+		return nil, nil, fmt.Errorf("oci credentials_file: %w", err)
 	}
 	var doc struct {
 		Auths map[string]struct {
-			Auth     string `json:"auth"`
-			Username string `json:"username"`
-			Password string `json:"password"`
+			Auth          string `json:"auth"`
+			Username      string `json:"username"`
+			Password      string `json:"password"`
+			IdentityToken string `json:"identitytoken"`
 		} `json:"auths"`
 	}
 	if err := json.Unmarshal(raw, &doc); err != nil {
-		return nil, fmt.Errorf("oci credentials_file %s: not a dockerconfigjson document", path)
+		return nil, nil, fmt.Errorf("oci credentials_file %s: not a dockerconfigjson document", path)
 	}
-	out := map[string]ociCred{}
-	for host, a := range doc.Auths {
-		host = strings.TrimSuffix(strings.TrimPrefix(strings.TrimPrefix(host, "https://"), "http://"), "/")
+	creds, idTok = map[string]ociCred{}, map[string]bool{}
+	for key, a := range doc.Auths {
+		host := strings.TrimPrefix(strings.TrimPrefix(key, "https://"), "http://")
+		host, _, _ = strings.Cut(host, "/")
+		host = ociHostKey(host)
+		if a.IdentityToken != "" {
+			idTok[host] = true
+			continue
+		}
 		cr := ociCred{user: a.Username, pass: a.Password}
 		if a.Auth != "" {
 			dec, err := base64.StdEncoding.DecodeString(a.Auth)
 			u, p, ok := strings.Cut(string(dec), ":")
 			if err != nil || !ok {
-				return nil, fmt.Errorf("oci credentials_file %s: auth for %s is not base64 user:password", path, host)
+				return nil, nil, fmt.Errorf("oci credentials_file %s: auth for %s is not base64 user:password", path, host)
 			}
 			cr = ociCred{user: u, pass: p}
 		}
 		if cr.user != "" {
-			out[strings.ToLower(host)] = cr
+			creds[host] = cr
 		}
 	}
-	return out, nil
+	return creds, idTok, nil
 }
 
 type ociDescriptor struct {
@@ -260,6 +295,7 @@ func (p *ociPull) fail(format string, a ...any) error {
 // challenge.
 func (p *ociPull) get(ctx context.Context, path, accept string, limit int64) ([]byte, error) {
 	u := "https://" + p.host + "/v2/" + p.repo + "/" + path
+	kind := path[:strings.IndexByte(path, '/')]
 	for {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 		if err != nil {
@@ -276,6 +312,13 @@ func (p *ociPull) get(ctx context.Context, path, accept string, limit int64) ([]
 			return nil, p.fail("%s", transportReason(err))
 		}
 		if resp.StatusCode == http.StatusUnauthorized && !p.answered {
+			// Only the registry itself may ask for credentials (GAP-0950):
+			// a 401 from a host a redirect led to (a blob CDN) is not
+			// answered, so a realm it names never sees them.
+			if from := resp.Request.URL.Host; ociHostKey(from) != ociHostKey(p.host) {
+				drain(resp)
+				return nil, p.fail("%s %s: 401 from the redirect target %s is not answered (only the registry may ask for credentials)", kind, p.host, from)
+			}
 			challenge := resp.Header.Get("WWW-Authenticate")
 			drain(resp)
 			p.answered = true
@@ -284,23 +327,27 @@ func (p *ociPull) get(ctx context.Context, path, accept string, limit int64) ([]
 			}
 			continue
 		}
-		body, err := readLimited(resp, limit)
+		body, err := readLimited(ctx, resp, limit)
 		if err != nil {
-			return nil, p.fail("%s %s: %v", path[:strings.IndexByte(path, '/')], p.host, err)
+			return nil, p.fail("%s %s: %v", kind, p.host, err)
 		}
 		return body, nil
 	}
 }
 
 // answer turns a challenge into an Authorization value: Basic with the
-// configured credentials, or a Bearer token from the realm (https only),
-// asked with the credentials when there are any.
+// configured credentials, or a Bearer token from the realm, asked with the
+// credentials when there are any. The realm must be https on the registry
+// host or on one of auth_hosts (GAP-0950).
 func (p *ociPull) answer(ctx context.Context, challenge string) (string, error) {
 	scheme, params := parseChallenge(challenge)
-	cred, haveCred := p.c.creds[strings.ToLower(p.host)]
+	cred, haveCred := p.c.creds[ociHostKey(p.host)]
 	switch scheme {
 	case "basic":
 		if !haveCred {
+			if p.c.idTok[ociHostKey(p.host)] {
+				return "", p.fail("registry %s wants credentials; its credentials_file entry has only an identitytoken, which is not supported (use auth or username and password)", p.host)
+			}
 			return "", p.fail("registry %s wants credentials and none are configured", p.host)
 		}
 		return "Basic " + base64.StdEncoding.EncodeToString([]byte(cred.user+":"+cred.pass)), nil
@@ -311,6 +358,9 @@ func (p *ociPull) answer(ctx context.Context, challenge string) (string, error) 
 	realm, err := url.Parse(params["realm"])
 	if err != nil || realm.Scheme != "https" || realm.Host == "" {
 		return "", p.fail("token realm of %s must be an https URL", p.host)
+	}
+	if rh := ociHostKey(realm.Host); rh != ociHostKey(p.host) && !p.c.authHosts[rh] {
+		return "", p.fail("token realm host %s of %s is neither the registry nor one of substrate.bundles.oci.auth_hosts", realm.Host, p.host)
 	}
 	q := realm.Query()
 	if s := params["service"]; s != "" {
@@ -329,7 +379,7 @@ func (p *ociPull) answer(ctx context.Context, challenge string) (string, error) 
 	if err != nil {
 		return "", p.fail("token %s: %s", realm.Host, transportReason(err))
 	}
-	body, err := readLimited(resp, ociMaxTokenBytes)
+	body, err := readLimited(ctx, resp, ociMaxTokenBytes)
 	if err != nil {
 		return "", p.fail("token %s: %v", realm.Host, err)
 	}
@@ -373,8 +423,9 @@ func parseChallenge(h string) (string, map[string]string) {
 }
 
 // readLimited reads a 200 body of at most limit bytes; any other status is
-// an error naming the status only.
-func readLimited(resp *http.Response, limit int64) ([]byte, error) {
+// an error naming the status only. A body cut by the pull deadline is
+// "timed out".
+func readLimited(ctx context.Context, resp *http.Response, limit int64) ([]byte, error) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, ociMaxErrorBytes))
@@ -388,6 +439,9 @@ func readLimited(resp *http.Response, limit int64) ([]byte, error) {
 	}
 	b, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
 	if err != nil {
+		if ctx.Err() != nil {
+			return nil, errors.New("timed out")
+		}
 		return nil, errors.New("read failed")
 	}
 	if int64(len(b)) > limit {
@@ -415,8 +469,8 @@ func transportReason(err error) string {
 }
 
 // ociSeen is the processed key of an OCI stage: its manifest digest and
-// atespaces. The content of a digest never changes, so a stage whose key
-// was processed is never pulled again.
+// atespaces. The content of a digest never changes, so a stage applied
+// under its key is never pulled again.
 func ociSeen(st OCIStage) string {
 	h := sha256.New()
 	h.Write([]byte(st.Ref))
@@ -425,42 +479,85 @@ func ociSeen(st OCIStage) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// SyncOCI applies every OCI stage not processed yet. A bundle that does not
-// verify is receipted once (source oci) and leaves the stage as it was; a
-// pull that fails changes nothing and is tried again the next pass (its
-// errors are joined in err).
-func (s *Store) SyncOCI(ctx context.Context, c *OCIClient, stages []OCIStage) ([]Receipt, error) {
+// ociClusterKey hashes the cluster state a refusal can depend on besides
+// the bundle: the trust anchors (or the code of why they cannot be read)
+// and the atespaces config.yaml lets DefenseClaw manage. A refused digest
+// is pulled again once that changes (GAP-0952): an anchors Secret mounted
+// late or rotated, a launcher atespace added.
+func (s *Store) ociClusterKey() string {
+	h := sha256.New()
+	if a, err := s.Anchors(); err != nil {
+		fmt.Fprintf(h, "error:%s", eb.CodeOf(err))
+	} else {
+		_ = json.NewEncoder(h).Encode(a)
+	}
+	h.Write([]byte{0})
+	managed := slices.Clone((&controller.ConfigResolver{Config: s.managedBase()}).ManagedAtespaces())
+	slices.Sort(managed)
+	h.Write([]byte(strings.Join(managed, ",")))
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// ociProcessed says whether the stored oci_seen value v covers st now: its
+// key (applied), or its key and the current cluster key (refused under the
+// same cluster state).
+func ociProcessed(v string, st OCIStage, clusterKey string) bool {
+	seen := ociSeen(st)
+	return v == seen || v == seen+"@"+clusterKey
+}
+
+// SyncOCI applies every OCI stage not processed yet. The pulls run side by
+// side, each bounded by the client timeout, so a pass takes about one
+// timeout however many registries are down (GAP-0953). A bundle that does
+// not verify is receipted once per cluster state and leaves the stage as it
+// was. A pull that fails changes nothing, is tried again the next pass and
+// is returned in pulls; err is a storage error only (GAP-0951).
+func (s *Store) SyncOCI(ctx context.Context, c *OCIClient, stages []OCIStage) (rcs []Receipt, pulls []error, err error) {
 	d, err := s.read(ctx)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	var out []Receipt
-	var errs []error
+	// Taken before any apply: anchors restored during this pass then give
+	// a new key, so a refusal is never stored under the fixed state.
+	ck := s.ociClusterKey()
+	var todo []OCIStage
 	for _, st := range stages {
-		seen := ociSeen(st)
-		if d.state.OCISeen[st.Stage] == seen {
+		if !ociProcessed(d.state.OCISeen[st.Stage], st, ck) {
+			todo = append(todo, st)
+		}
+	}
+	archives := make([][]byte, len(todo))
+	errs := make([]error, len(todo))
+	var wg sync.WaitGroup
+	for i, st := range todo {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			archives[i], errs[i] = c.Pull(ctx, st.Ref)
+		}()
+	}
+	wg.Wait()
+	for i, st := range todo {
+		if errs[i] != nil {
+			pulls = append(pulls, errs[i])
 			continue
 		}
-		archive, err := c.Pull(ctx, st.Ref)
-		if err != nil {
-			errs = append(errs, err)
-			continue
-		}
-		rc, aerr := s.Apply(ctx, bytes.Clone(archive), st.Stage, st.Atespaces, SourceOCI)
+		rc, aerr := s.Apply(ctx, archives[i], st.Stage, st.Atespaces, SourceOCI)
 		if rc != nil {
-			out = append(out, *rc)
+			rcs = append(rcs, *rc)
 		}
 		if aerr != nil && isStorageError(aerr) {
-			return out, errors.Join(append(errs, aerr)...)
+			return rcs, pulls, aerr
+		}
+		seen := ociSeen(st)
+		if aerr != nil {
+			seen += "@" + ck
 		}
 		if err := s.retry(ctx, func() error { return s.markOCISeen(ctx, st.Stage, seen) }); err != nil {
-			return out, errors.Join(append(errs, err)...)
-		}
-		if d, err = s.read(ctx); err != nil {
-			return out, errors.Join(append(errs, err)...)
+			return rcs, pulls, err
 		}
 	}
-	return out, errors.Join(errs...)
+	return rcs, pulls, nil
 }
 
 func (s *Store) markOCISeen(ctx context.Context, stage, seen string) error {

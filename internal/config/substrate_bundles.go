@@ -56,6 +56,10 @@ type SubstrateBundleOCIConfig struct {
 	// CAFile is a PEM bundle trusted besides the system roots (a private
 	// registry CA).
 	CAFile string `mapstructure:"ca_file" yaml:"ca_file,omitempty"`
+	// AuthHosts are the hosts a registry may name as its token realm besides
+	// itself (auth.docker.io for Docker Hub); a realm on any other host is
+	// refused, so registry credentials never go there (GAP-0950).
+	AuthHosts []string `mapstructure:"auth_hosts" yaml:"auth_hosts,omitempty"`
 	// Timeout bounds one pull (token, manifest and layer).
 	Timeout string `mapstructure:"timeout" yaml:"timeout,omitempty"`
 	// Stages are the stages whose bundle comes from a registry.
@@ -154,6 +158,14 @@ func (o SubstrateBundleOCIConfig) validate(bad func(key, format string, a ...any
 	for key, f := range map[string]string{"credentials_file": o.CredentialsFile, "ca_file": o.CAFile} {
 		if f = strings.TrimSpace(f); f != "" && !filepath.IsAbs(f) {
 			bad("bundles.oci."+key, "%q must be an absolute path", f)
+		}
+	}
+	if len(o.AuthHosts) > 16 {
+		bad("bundles.oci.auth_hosts", "at most 16 hosts")
+	}
+	for i, h := range o.AuthHosts {
+		if !substrateOCIHostRe.MatchString(h) || !strings.Contains(h, ".") {
+			bad(fmt.Sprintf("bundles.oci.auth_hosts[%d]", i), "%q must be a host name (host or host:port)", h)
 		}
 	}
 	if v := strings.TrimSpace(o.Timeout); v != "" {

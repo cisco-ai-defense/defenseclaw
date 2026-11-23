@@ -212,8 +212,13 @@ func (m *Manager) emit(ev controller.Event) {
 	}
 }
 
-// Refresh runs one pass. On a storage error the resolver keeps its last
-// snapshot and the error is returned.
+// Refresh runs one pass: the inbox, then the re-verify of every active
+// bundle against the current anchors (a revoked key is enforced before any
+// registry is asked, GAP-0953), then the OCI stages. A failed OCI pull is
+// a warning event and is tried again at the next refresh: a registry that
+// is down never fails the pass or the controller start (GAP-0951). On a
+// storage error the resolver keeps its last snapshot and the error is
+// returned.
 func (m *Manager) Refresh(ctx context.Context) error {
 	var errs []error
 	if m.Inbox != "" {
@@ -223,20 +228,38 @@ func (m *Manager) Refresh(ctx context.Context) error {
 			errs = append(errs, fmt.Errorf("bundle inbox: %w", err))
 		}
 	}
+	if err := m.load(ctx); err != nil {
+		return errors.Join(append(errs, err)...)
+	}
 	if m.OCI != nil && len(m.OCIStages) > 0 {
-		rcs, err := m.Store.SyncOCI(ctx, m.OCI, m.OCIStages)
+		rcs, pulls, err := m.Store.SyncOCI(ctx, m.OCI, m.OCIStages)
 		m.emitReceipts("oci", rcs)
+		for _, perr := range pulls {
+			m.emit(controller.Event{Type: controller.EventWarning, Severity: controller.SeverityWarn,
+				Message: "bundle oci: " + perr.Error() + "; tried again at the next refresh"})
+		}
 		if err != nil {
 			errs = append(errs, fmt.Errorf("bundle oci: %w", err))
 		}
+		if slices.ContainsFunc(rcs, func(rc Receipt) bool { return rc.Result == ResultApplied }) {
+			if err := m.load(ctx); err != nil {
+				errs = append(errs, err)
+			}
+		}
 	}
+	return errors.Join(errs...)
+}
+
+// load re-verifies every stage's active bundle and hands the snapshot to
+// the resolver.
+func (m *Manager) load(ctx context.Context) error {
 	snap, problems, err := m.Store.Load(ctx)
 	if err != nil {
-		return errors.Join(append(errs, fmt.Errorf("bundle state: %w", err))...)
+		return fmt.Errorf("bundle state: %w", err)
 	}
 	m.Resolver.Set(snap)
 	m.report(snap, problems)
-	return errors.Join(errs...)
+	return nil
 }
 
 // emitReceipts reports the receipts of one source (inbox or oci): applied

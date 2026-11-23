@@ -72,7 +72,7 @@ class TestSubstrateBundles(unittest.TestCase):
     def test_oci_round_trip_and_schema(self):
         # GAP-0437: substrate.bundles.oci mirrors Go and omits what Go omits.
         ref = "registry.example.com/policy/prod@sha256:" + "ab" * 32
-        oci = {"enabled": True, "ca_file": "/etc/dc/ca.pem", "stages": [
+        oci = {"enabled": True, "ca_file": "/etc/dc/ca.pem", "auth_hosts": ["auth.docker.io"], "stages": [
             {"stage": "prod", "ref": ref, "atespaces": ["team-a"]}, {"stage": "all", "ref": ref}]}
         with tempfile.TemporaryDirectory() as tmpdir:
             path = self._write(tmpdir, {"substrate": {"enabled": True, "bundles": {"enabled": True, "oci": oci}}})
@@ -80,6 +80,7 @@ class TestSubstrateBundles(unittest.TestCase):
             cfg = self._load(tmpdir)
             got = cfg.substrate.bundles.oci
             self.assertTrue(got.enabled)
+            self.assertEqual(got.auth_hosts, ["auth.docker.io"])  # GAP-0950
             self.assertEqual([s.stage for s in got.stages], ["prod", "all"])
             self.assertEqual(got.stages[1].atespaces, [])
             cfg.save()

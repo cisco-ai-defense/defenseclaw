@@ -106,7 +106,8 @@ type State struct {
 	// so an unchanged inbox is not re-applied or re-receipted.
 	InboxSeen map[string]string `json:"inbox_seen,omitempty"`
 	// OCISeen is the same per OCI stage: the SHA-256 of its digest-pinned
-	// reference and atespaces last processed (GAP-0437).
+	// reference and atespaces last processed (GAP-0437), with "@" and the
+	// cluster key when the bundle was refused (GAP-0952).
 	OCISeen map[string]string `json:"oci_seen,omitempty"`
 }
 
@@ -692,9 +693,10 @@ func (s *Store) Status(ctx context.Context, receipts int) (*Status, error) {
 		if err != nil {
 			return nil, err
 		}
+		ck := s.ociClusterKey()
 		for _, st := range s.OCIStages {
 			o := OCIStageStatus{Stage: st.Stage, Ref: st.Ref, State: OCIPending}
-			if d.state.OCISeen[st.Stage] == ociSeen(st) {
+			if ociProcessed(d.state.OCISeen[st.Stage], st, ck) {
 				o.State = OCIProcessed
 				var last *Receipt
 				for i := range all {
