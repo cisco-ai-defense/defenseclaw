@@ -16,6 +16,7 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/awkprog"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 )
 
 // KubeRequestSource is how a Kubernetes API request was issued.
@@ -44,7 +45,9 @@ const (
 	KubeVerbMeta   = "meta"
 )
 
-const kubeMaxRequests = 32
+// maxKubeRequests bounds the Kubernetes requests one call projects (the
+// semantic f.kube bound).
+const maxKubeRequests = 32
 
 // KubeRequestFact is one Kubernetes API request as the apiserver would see
 // it: verb, group/version/resource/subresource, namespace, name and the
@@ -78,24 +81,43 @@ type KubeRequestFact struct {
 // decomposed (fail closed).
 func KubernetesSecretContentRequest(facts Facts) bool {
 	for _, request := range facts.KubeRequests {
-		if request.Subresource != "" {
-			continue
+		if kubeSecretContentRequest(request, true) {
+			return true
 		}
-		if request.Unknown {
-			if request.Resource == "" || request.Resource == kubernetesSecretResource {
-				return true
-			}
-			continue
+	}
+	return false
+}
+
+// KubernetesKnownSecretContentRequest is KubernetesSecretContentRequest for a
+// request the action itself names as a Secret read: its resource resolves to
+// secrets from the action's own spelling (R-NAME). A request that cannot be
+// decomposed (a kind named by a file, a dynamic resource) is no Secret read
+// for a blocking rule; only the alert-only rule fails closed on it (DET111
+// T20 review P2-2).
+func KubernetesKnownSecretContentRequest(facts Facts) bool {
+	for _, request := range facts.KubeRequests {
+		if kubeSecretContentRequest(request, false) {
+			return true
 		}
-		if request.Resource != kubernetesSecretResource {
-			continue
-		}
-		switch request.Verb {
-		case KubeVerbGet, KubeVerbList, KubeVerbWatch:
-			if request.Source == KubeSourceHTTP || request.RevealsContent {
-				return true
-			}
-		}
+	}
+	return false
+}
+
+// kubeSecretContentRequest reports one request that returns Secret content;
+// with failClosed an undecomposed request of an unknown or Secret kind counts.
+func kubeSecretContentRequest(request KubeRequestFact, failClosed bool) bool {
+	if request.Subresource != "" {
+		return false
+	}
+	if request.Unknown {
+		return failClosed && (request.Resource == "" || request.Resource == kubernetesSecretResource)
+	}
+	if request.Resource != kubernetesSecretResource {
+		return false
+	}
+	switch request.Verb {
+	case KubeVerbGet, KubeVerbList, KubeVerbWatch:
+		return request.Source == KubeSourceHTTP || request.RevealsContent
 	}
 	return false
 }
@@ -114,7 +136,23 @@ func KubernetesStdinExecRequest(facts Facts) bool {
 	return false
 }
 
-func projectKubeRequests(input Input, facts Facts) []KubeRequestFact {
+// KubeRequestCaps is the cap the Kubernetes request projection hit (one per
+// call): the list past maxKubeRequests was cut (bounded.Items). Lost reports
+// that the cut dropped a request a reader proves something from (a Secret
+// content read, a stdin exec); then the call is judged TRUNCATED. A cut of
+// plain requests only (33 x kubectl get pods) loses no proof and is recorded,
+// not raised (DET111 T20 review P2-3).
+func (f Facts) KubeRequestCaps() (caps bounded.CapSet, lost bool) {
+	return f.kubeCut.caps, f.kubeCut.lost
+}
+
+// kubeCutRecord is the private record of a Kubernetes request cut.
+type kubeCutRecord struct {
+	caps bounded.CapSet
+	lost bool
+}
+
+func projectKubeRequests(input Input, facts Facts) ([]KubeRequestFact, kubeCutRecord) {
 	var requests []KubeRequestFact
 	if strings.ToLower(input.Tool) == "kubectl" {
 		if argv, namespace, ok := exactKubectlArgv(input, facts); ok {
@@ -145,19 +183,50 @@ func projectKubeRequests(input Input, facts Facts) []KubeRequestFact {
 	return boundKubeRequests(requests)
 }
 
-// boundKubeRequests keeps the projection bounded; a list over the bound
-// keeps one Unknown request so readers still fail closed.
-func boundKubeRequests(requests []KubeRequestFact) []KubeRequestFact {
-	if len(requests) <= kubeMaxRequests {
-		return requests
+// boundKubeRequests keeps the projection bounded without inventing a fact:
+// past maxKubeRequests it keeps the requests a reader proves something from
+// (kubeRequestProves) first, then the others, in their order, and records
+// the cut. It never turns a request into an Unknown one, so a long list of
+// plain reads is never a Secret read (DET111 T20 review P2-3).
+func boundKubeRequests(requests []KubeRequestFact) ([]KubeRequestFact, kubeCutRecord) {
+	var trunc bounded.Truncated
+	if trunc.Within(bounded.Items, len(requests), maxKubeRequests) {
+		return requests, kubeCutRecord{}
 	}
-	requests = requests[:kubeMaxRequests]
-	requests[kubeMaxRequests-1] = KubeRequestFact{
-		CommandID: requests[kubeMaxRequests-1].CommandID,
-		Source:    requests[kubeMaxRequests-1].Source,
-		Unknown:   true,
+	keep := make([]bool, len(requests))
+	kept, proving := 0, 0
+	for index, request := range requests {
+		if kubeRequestProves(request) {
+			proving++
+			if kept < maxKubeRequests {
+				keep[index] = true
+				kept++
+			}
+		}
 	}
-	return requests
+	for index := range requests {
+		if kept == maxKubeRequests {
+			break
+		}
+		if !keep[index] {
+			keep[index] = true
+			kept++
+		}
+	}
+	out := make([]KubeRequestFact, 0, maxKubeRequests)
+	for index, request := range requests {
+		if keep[index] {
+			out = append(out, request)
+		}
+	}
+	return out, kubeCutRecord{caps: trunc.Set(), lost: proving > maxKubeRequests}
+}
+
+// kubeRequestProves reports a request a Kubernetes reader proves something
+// from: a Secret content read (failing closed) or a stdin exec.
+func kubeRequestProves(request KubeRequestFact) bool {
+	return kubeSecretContentRequest(request, true) ||
+		KubernetesStdinExecRequest(Facts{KubeRequests: []KubeRequestFact{request}})
 }
 
 func kubeProgram(command CommandFact) string {
@@ -462,9 +531,16 @@ func kubectlRequests(commandID int64, argv []string, schemaNamespace string) []K
 func kubectlReadRequests(base KubeRequestFact, parsed kubectlArgv) []KubeRequestFact {
 	if len(parsed.operands) == 0 {
 		if _, ok := parsed.value("-f", "--filename", "-k", "--kustomize"); ok {
-			// Objects named by a file: their kinds are not in the action.
+			// Objects named by a file: their kinds are not in the action. A
+			// read that prints no object content (the table of get, describe)
+			// reads no Secret content whatever the file names, so only one
+			// that prints objects (-o json|yaml, a data template, edit) or
+			// whose options are not known is undecomposed (DET111 T20 review
+			// P2-2: kubectl get -f deploy.yaml is no Secret read).
 			request := base
-			request.Verb, request.Unknown = KubeVerbGet, true
+			request.Verb = KubeVerbGet
+			request.RevealsContent = kubectlPrintsObjects(parsed)
+			request.Unknown = request.RevealsContent || parsed.unknown
 			return []KubeRequestFact{request}
 		}
 		return nil
@@ -486,8 +562,6 @@ func kubectlReadRequests(base KubeRequestFact, parsed kubectlArgv) []KubeRequest
 			}
 		}
 	}
-	output, _ := parsed.value("-o", "--output")
-	template, hasTemplate := parsed.value("--template")
 	watch := parsed.flag("-w", "--watch", "--watch-only")
 	allNamespaces := parsed.flag("-A", "--all-namespaces")
 	_, selector := parsed.value("-l", "--selector")
@@ -511,13 +585,7 @@ func kubectlReadRequests(base KubeRequestFact, parsed kubectlArgv) []KubeRequest
 		default:
 			request.Verb = KubeVerbList
 		}
-		switch parsed.subcommand {
-		case "edit":
-			request.RevealsContent = true
-		case "get":
-			request.RevealsContent = kubectlOutputRevealsContent(output) ||
-				hasTemplate && kubectlSelectorRevealsContent(template)
-		}
+		request.RevealsContent = kubectlPrintsObjects(parsed)
 		secretLike := strings.Contains(strings.ToLower(target.kind), "secret")
 		if request.Resource == "" || strings.Contains(target.kind, awkprog.Hole) ||
 			strings.Contains(target.name, awkprog.Hole) && secretLike {
@@ -532,6 +600,20 @@ func kubectlReadRequests(base KubeRequestFact, parsed kubectlArgv) []KubeRequest
 		requests = append(requests, request)
 	}
 	return requests
+}
+
+// kubectlPrintsObjects reports a kubectl read that prints the objects it
+// reads: edit, or a get whose output (-o, --template) shows their content.
+func kubectlPrintsObjects(parsed kubectlArgv) bool {
+	switch parsed.subcommand {
+	case "edit":
+		return true
+	case "get":
+		output, _ := parsed.value("-o", "--output")
+		template, hasTemplate := parsed.value("--template")
+		return kubectlOutputRevealsContent(output) || hasTemplate && kubectlSelectorRevealsContent(template)
+	}
+	return false
 }
 
 // kubectlResource resolves a kubectl resource spelling (secret, secrets,

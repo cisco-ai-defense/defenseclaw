@@ -188,6 +188,9 @@ type Facts struct {
 	// call sets it; it is unexported, never serialized and printed as a
 	// pointer. Read it with CredentialPathReads.
 	credentialPaths *credentialPathRecord
+	// kubeCut is the private record of a Kubernetes request cut
+	// (KubeRequestCaps).
+	kubeCut kubeCutRecord
 	// SensitiveEgressArtifactWrites contains only exact local artifact paths.
 	// An entry proves that a closed structured-write schema created source text
 	// containing both a protected credential/secret path and a non-local literal
@@ -884,10 +887,10 @@ type DirectoryCredentialAcquisitionFact struct {
 
 // SQLFact contains the bounded, value-free syntactic facts of one SQL input.
 type SQLFact struct {
-	Verbs []string
-	Tables []string
-	Functions []string
-	Database string
+	Verbs          []string
+	Tables         []string
+	Functions      []string
+	Database       string
 	StatementCount int
 }
 
