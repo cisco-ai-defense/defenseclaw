@@ -10,6 +10,7 @@ import (
 	"unicode/utf16"
 	"unicode/utf8"
 
+	"github.com/defenseclaw/defenseclaw/internal/asciifold"
 	"github.com/defenseclaw/defenseclaw/internal/psparse"
 )
 
@@ -891,7 +892,9 @@ func actionWindowsWrapperDecision(program string, words []string, cwd, home stri
 	}
 	index := 1
 	for index < len(words) && strings.HasPrefix(words[index], "-") {
-		option := strings.ToLower(words[index])
+		// words[index] is cut at len("--chdir=") below: asciifold.Lower keeps its
+		// offsets, and the wrapper reads U+0130 and U+212A as no ASCII letter.
+		option := asciifold.Lower(words[index])
 		if option == "--" {
 			index++
 			break
