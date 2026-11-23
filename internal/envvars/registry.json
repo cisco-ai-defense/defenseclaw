@@ -5853,6 +5853,26 @@
       "security_note": "The kubeconfig user's token is sent to the cluster's admin listener, which checks it with a TokenReview. Nothing is stored by the launcher."
     },
     {
+      "name": "DEFENSECLAW_SUBSTRATE_MCP",
+      "category": "test_fixture",
+      "purpose": "Set by the substrate --mcp unit test to prove that --mcp is a per-run flag only: the variable is never read, so setting it changes nothing.",
+      "default": "unset",
+      "accepted_values": [
+        "name=command",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/cli/substrate_mcp_test.go",
+          "description": "TestSubstrateMCPIsNotASetting sets it and checks that substrate run still bridges no MCP server"
+        }
+      ],
+      "since": "1.0.11"
+    },
+    {
       "name": "DEFENSECLAW_SUBSTRATE_PROFILE",
       "category": "runtime_path",
       "purpose": "Guard profile that substrate run uses when --profile is not given.",

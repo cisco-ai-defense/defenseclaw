@@ -4028,7 +4028,11 @@ def _sandbox_runtime_keys_error(section: Mapping[str, Any], prefix: str) -> str 
     for index, name in enumerate(runtimes if isinstance(runtimes, list) else []):
         if name not in ("openshell", "substrate"):
             return f"{prefix}.runtimes[{index}]: {_go_quote(name)} must be openshell or substrate"
-    for key, allowed in (("sandbox_class", ("gvisor", "microvm")), ("unattended_asks", ("deny", "queue")), ("git_push", ("allow", "ask", "deny"))):
+    for key, allowed in (
+        ("sandbox_class", ("gvisor", "microvm")),
+        ("unattended_asks", ("deny", "queue")),
+        ("git_push", ("allow", "ask", "deny")),
+    ):
         error = _sandbox_enum_error(f"{prefix}.{key}", section.get(key), *allowed)
         if error:
             return error
