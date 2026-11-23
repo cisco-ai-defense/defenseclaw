@@ -38,11 +38,7 @@ import (
 // elsewhere). A pending row is still held to its lane-off (1.0.10) verdict;
 // one that reaches the unknown tier in every cell fails the test (finish).
 var det111R1VerdictPending = map[string]string{
-	"GAP-1538/var": "$SHELL stays unknown until the hook account's login shell is supplied (S3-R1, ruling 04:25Z)",
-	"det111/GAP-1142/linux-rel-dotdot-add-content/var": "the nested PowerShell Add-Content body is a Maybe target (S3-R1)",
-	"det111/GAP-1142/linux-rel-set-content/var":        "the nested PowerShell Set-Content body is a Maybe target (S3-R1)",
-	"det111/GAP-1142/macos-rel-dotdot-add-content/var": "the nested PowerShell Add-Content body is a Maybe target (S3-R1)",
-	"det111/GAP-1142/macos-rel-set-content/var":        "the nested PowerShell Set-Content body is a Maybe target (S3-R1)",
+	"GAP-1538/var":   "$SHELL stays unknown until the hook account's login shell is supplied (S3-R1, ruling 04:25Z)",
 	"GAP-1502/var2":  "the file a staged curl -d @FILE sends is not graded (send source, S3-PRE flow lane)",
 	"GAP-1508/seed":  "fetch piped to a shell is the remote-code verdict, not an effect target (decision side)",
 	"GAP-1508/var":   "fetch piped to a shell under coproc: remote-code verdict, not an effect target (decision side)",

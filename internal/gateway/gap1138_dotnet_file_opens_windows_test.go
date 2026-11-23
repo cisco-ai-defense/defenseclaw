@@ -72,15 +72,7 @@ func TestGAP1138PowerShellWriteSpellings(t *testing.T) {
 			return nil
 		}
 		return []string{"$env:USERPROFILE", "~", "relative"}
-	}, func(peer bool, target gap1138Target, spelling string) string {
-		// A managed gateway does not place the relative and ~ spellings of
-		// the state the PowerShell reading names (also for the writes before
-		// GAP-1138): rel-1-0-10:GAP-1191.
-		if peer && target.name == "DefenseClaw state" && (spelling == "relative" || spelling == "~") {
-			return "rel-1-0-10:GAP-1191"
-		}
-		return ""
-	})
+	}, nil) // a managed gateway places the relative and ~ spellings too (rel-1-0-10:GAP-1191)
 }
 
 // gap1138WindowsRun judges forms through each connector of conns, for every

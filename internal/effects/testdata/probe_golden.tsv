@@ -1443,16 +1443,16 @@ rv9-M04 pwsh -NoProfile -wd -c	U|write:/home/u/.ssh/authorized_keys
 rv9-M05 win powershell -wd -c	U|write:c:\users\u\.ssh\authorized_keys
 rv9-M06 cmd pwsh -wd -c	U|
 rv9-M07 posix pwsh -wd -c	U|
-rv9-M08 pwsh -wd rel -c	U|
+rv9-M08 pwsh -wd rel -c	U|write:/home/.ssh/authorized_keys
 rv9-M09 pwsh -wd dot -c abs	U|write:/home/u/.ssh/authorized_keys
 rv9-M10 pwsh -wd -c Set-Location inside	U|write:/tmp/authorized_keys
 rv9-M11 S5 powershell positional	U|delete:c:\users\u\.ssh
-rv9-M12 pwsh -wd dir/. rel	U|
-rv9-M13 pwsh -WorkingDirectory dir/. rel	U|
+rv9-M12 pwsh -wd dir/. rel	U|write:/home/u/.ssh/authorized_keys
+rv9-M13 pwsh -WorkingDirectory dir/. rel	U|write:/home/u/.ssh/authorized_keys
 rv9-M14 pwsh -wd dir/ rel	U|write:/home/u/.ssh/authorized_keys
-rv9-M15 pwsh -wd .ssh/. rel	U|
+rv9-M15 pwsh -wd .ssh/. rel	U|write:/home/u/.ssh/authorized_keys
 rv9-M16 win powershell -wd dir-bs-dot rel	U|write:c:\users\u\.ssh\authorized_keys
-rv9-M17 pwsh -wd dir/echo rel	U|
+rv9-M17 pwsh -wd dir/echo rel	U|write:/home/u/.ssh/authorized_keys
 rv9-M18 posix bash pwsh -wd dir/.	U|
 rv9-M19 pwsh -wd dot rel (control)	U|write:/home/u/authorized_keys
 rv9-N01 cd || brace eval	K|append:/home/u/.ssh/authorized_keys,append:/home/u/proj/authorized_keys
