@@ -235,12 +235,26 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             "Ctrl-]\n"
             'to detach again. If the connection drops, it reconnects by itself. NAME is the name "defenseclaw '
             'substrate list"\n'
-            "shows, or the --name you gave run when only one agent has it."
+            "shows, or the --name you gave run when only one agent has it.\n"
+            "\n"
+            "With --mcp NAME=COMMAND (Preview, repeatable) the agent can use an MCP server that runs on this "
+            "computer, while this\n"
+            'command is attached. See "defenseclaw substrate run --help". An agent that is already running reads '
+            "its MCP servers\n"
+            "when it starts, so start a new session in it to see NAME."
         ),
         example="defenseclaw substrate connect fix-tests-7f3a\ndefenseclaw substrate connect fix-tests",
         args=(_Arg("name"),),
         flags=(
             _Flag("context", "string", "cluster to use (default: the one you signed in to last)", metavar="NAME"),
+            _Flag(
+                "mcp",
+                "stringArray",
+                (
+                    "(Preview) start COMMAND on this computer and offer it to the agent as the MCP server NAME while "
+                    "this command is attached (repeatable)"
+                ),
+            ),
             _Flag("no-asks", "bool", "do not show guard questions on this terminal"),
             _Flag(
                 "transport",
@@ -642,13 +656,24 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             "at once.\n"
             "With --clone URL the agent starts from a repository instead of a copy of the folder. Arguments "
             "after -- go\n"
-            "to the agent."
+            "to the agent.\n"
+            "\n"
+            "With --mcp NAME=COMMAND (Preview, repeatable) the agent can use an MCP server that runs on this "
+            "computer. This command\n"
+            "starts COMMAND when the agent opens the server NAME and carries its messages through the cluster "
+            "while this command is\n"
+            "attached; every tool call goes through the cluster's guard first. COMMAND is split like a shell "
+            "would split it, with\n"
+            "quotes and backslashes only, and runs without a shell. NAME is a-z, 0-9, _ and -, up to 32 "
+            "characters. --mcp does not\n"
+            "go with --detach or --batch."
         ),
         example=(
             "defenseclaw substrate run claude\n"
             'defenseclaw substrate run codex --task "fix the failing tests" --detach\n'
             "defenseclaw substrate run claude --batch tasks.yaml --parallel 5\n"
-            "defenseclaw substrate run claude --clone https://git.example.test/team/app.git"
+            "defenseclaw substrate run claude --clone https://git.example.test/team/app.git\n"
+            'defenseclaw substrate run claude --mcp "files=npx -y @modelcontextprotocol/server-filesystem ."'
         ),
         args=(_Arg("agent"), _Arg("agent_args", required=False, many=True)),
         flags=(
@@ -660,6 +685,14 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             _Flag("json", "bool", "same as --output json"),
             _Flag("keep", "bool", "keep the agent after a finished --task (default: it stays until you delete it)"),
             _Flag("max-upload-mb", "int", "refuse a copy larger than this many MB (default 500)", default="0"),
+            _Flag(
+                "mcp",
+                "stringArray",
+                (
+                    "(Preview) start COMMAND on this computer and offer it to the agent as the MCP server NAME while "
+                    "this command is attached (repeatable)"
+                ),
+            ),
             _Flag(
                 "name",
                 "string",
