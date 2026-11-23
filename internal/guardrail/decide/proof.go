@@ -285,12 +285,16 @@ func parseName[T ~uint8](names []string, s string) (T, bool) {
 const (
 	RuleStateWrite          = "TAMPER.DETECTOR_STATE_WRITE"
 	RuleAuthorizedKeysWrite = "PERSISTENCE.SSH_AUTHORIZED_KEYS_COMMAND"
-	RuleHookConfigWrite     = "TAMPER.AGENT_HOOK_CONFIG_WRITE"
 	RuleShellProfileWrite   = "PERSISTENCE.SHELL_PROFILE_WRITE"
 	RuleGitHookWrite        = "PERSISTENCE.GIT_HOOK_WRITE"
 	RuleSSHDir              = "PATH-SSH-DIR"
 	RuleEvaluationLimit     = "ACTION-COMPOUND-LIMIT"
 )
+
+// RuleHookConfigWrite is the agent hook config guard rule as the packs and
+// the plain spelling write it: a Known write finding carries the same id, so
+// the call shows the rule set of the plain spelling (GAP-1243, GAP-1308).
+const RuleHookConfigWrite = "tamper.agent_hook_config_write"
 
 // Credential file classes (Proof.Set) of a known read: one per 1.0.10 rule
 // that names the file, so the read is named and graded by that rule's row
