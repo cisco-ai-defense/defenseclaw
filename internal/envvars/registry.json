@@ -490,6 +490,46 @@
       "since": "1.0.11"
     },
     {
+      "name": "DEFENSECLAW_TEST_GAP1885_CHILD_DATA_DIR",
+      "category": "test_fixture",
+      "purpose": "Data folder of the second guardian state writer that the Windows test TestGAP1885SecondGuardianWriterWaitsForTheFirst starts as a child process; the child writes the guardian state of that folder.",
+      "default": "unset",
+      "accepted_values": [
+        "test-defined absolute path",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/cli/enterprise_hooks_guardian_state_lock_gap1885_windows_test.go",
+          "description": "TestGAP1885SecondGuardianWriterWaitsForTheFirst sets it on the child it starts; TestGAP1885GuardianStateChildWriter reads it"
+        }
+      ],
+      "since": "1.0.11"
+    },
+    {
+      "name": "DEFENSECLAW_TEST_GAP1885_CHILD_STARTED",
+      "category": "test_fixture",
+      "purpose": "File the child guardian state writer of the Windows test TestGAP1885SecondGuardianWriterWaitsForTheFirst writes its process id to, so the parent knows the child has started.",
+      "default": "unset",
+      "accepted_values": [
+        "test-defined absolute path",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/cli/enterprise_hooks_guardian_state_lock_gap1885_windows_test.go",
+          "description": "TestGAP1885SecondGuardianWriterWaitsForTheFirst sets it on the child it starts; TestGAP1885GuardianStateChildWriter writes its pid there"
+        }
+      ],
+      "since": "1.0.11"
+    },
+    {
       "name": "DEFENSECLAW_TEST_SIDECAR_HOOK_PRIORITY",
       "category": "test_fixture",
       "purpose": "Marks the child process of the Windows gateway priority-class test (GAP-0050), so the class checks run in a child and the test binary keeps its own priority class.",
