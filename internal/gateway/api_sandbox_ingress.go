@@ -43,6 +43,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
+	"github.com/defenseclaw/defenseclaw/internal/vault"
 )
 
 // The sandbox ingress is a second listener, on 127.0.0.1:<ingress_port>,
@@ -194,6 +195,10 @@ type SandboxIngressConfig struct {
 	// carries (sandboxrelay.GenerationHeader) and the registration it is
 	// for, before the answer goes to the sandbox. It must not block.
 	OnGeneration func(registration string, generation uint64)
+	// Vault is the account's vault that sandbox hook calls capture secrets
+	// into (sandbox_vault_capture.go); nil captures nothing. It is set from
+	// openshell.vault.auto_capture.
+	Vault *vault.Store
 }
 
 // SandboxHookDecision is one hook verdict for a sandbox binding.
@@ -279,6 +284,8 @@ type sandboxIngressState struct {
 	relay        sandboxrelay.Client
 	registration func(sandboxauth.Binding) (string, bool)
 	onGeneration func(string, uint64)
+	// vault is SandboxIngressConfig.Vault.
+	vault *vault.Store
 	// authFailures bounds auth-failure telemetry. Every sandbox shares one
 	// source address, so a flood of bad credentials cannot be told apart
 	// per caller; it still gets 401, just not one event per request.
@@ -336,6 +343,7 @@ func (a *APIServer) SetSandboxIngress(cfg SandboxIngressConfig) error {
 		egressRefusalsTold: cfg.EgressRefusalsTold,
 		registration:       cfg.Registration,
 		onGeneration:       cfg.OnGeneration,
+		vault:              cfg.Vault,
 	}
 	if st.limiter == nil {
 		st.limiter = sandboxauth.NewLimiter(sandboxauth.DefaultLimiterConfig())
@@ -600,6 +608,9 @@ func (a *APIServer) newSandboxIngressHandler(st *sandboxIngressState) http.Handl
 		// Forwarding mode: nothing is evaluated on a managed host's daemon.
 		h = a.sandboxRelayForwarder(st)
 	}
+	// A harness's telemetry and notify bodies can carry the prompt: mask
+	// capturable credentials before anything relays or stores them.
+	h = a.sandboxVaultMaskMiddleware(st, h)
 	h = st.idem.middleware(h)
 	h = apiBodyLimitMiddleware(h, apiRequestBodyMaxBytes, st.otlpMaxBytes)
 	h = a.apiCSRFProtect(h)
@@ -1161,7 +1172,21 @@ func (a *APIServer) sandboxRelayForwarder(st *sandboxIngressState) http.Handler 
 			w.WriteHeader(http.StatusOK)
 			return
 		}
-		call := sandboxrelay.RelayCall{Registration: registration, Header: r.Header, Body: body}
+		// The daemon owns the account's vault: a captured secret leaves the
+		// body before the call is relayed, so the managed gateway never sees it.
+		var captured *sandboxVaultCapture
+		if route == sandboxauth.RouteHook {
+			body, captured = captureSandboxVault(ctx, st.vault, binding.Connector, body)
+			a.alertSandboxVaultChanged(ctx, binding.Connector, captured)
+		}
+		// Only the daemon says what it captured: a header the sandbox sent
+		// is dropped.
+		header := r.Header.Clone()
+		header.Del(sandboxrelay.VaultCaptureHeader)
+		if captured != nil {
+			header.Set(sandboxrelay.VaultCaptureHeader, captured.header())
+		}
+		call := sandboxrelay.RelayCall{Registration: registration, Header: header, Body: body}
 		switch route {
 		case sandboxauth.RouteHook:
 			call.Class, call.Target = sandboxrelay.RouteHook, binding.Connector
@@ -1179,10 +1204,25 @@ func (a *APIServer) sandboxRelayForwarder(st *sandboxIngressState) http.Handler 
 			writeSandboxRelayError(w, err)
 			return
 		}
+		if captured != nil && resp.Status >= 200 && resp.Status <= 299 {
+			resp.Body = a.relayedVaultCaptureAnswer(ctx, binding.Connector, body, resp.Body, captured)
+			if resp.Decision != nil {
+				d := *resp.Decision
+				d.Action, d.WouldBlock = "block", true
+				if d.Severity != "CRITICAL" {
+					d.Severity = "HIGH"
+				}
+				d.Reason = captured.message()
+				resp.Decision = &d
+			}
+		}
 		for name, values := range resp.Header {
 			for _, v := range values {
 				w.Header().Add(name, v)
 			}
+		}
+		if captured != nil {
+			w.Header().Del("Content-Length")
 		}
 		if st.onGeneration != nil {
 			if g, err := strconv.ParseUint(resp.Header.Get(sandboxrelay.GenerationHeader), 10, 64); err == nil {
