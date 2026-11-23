@@ -370,7 +370,7 @@ Fleet and Edge `DCLAW_*` variables marked `allow` are read by the Go or C servic
 These variables exist for DefenseClaw's own test suites. Do not set them on a real install.
 
 <Accordions type="single">
-<Accordion title="Show the 171 test-only variables">
+<Accordion title="Show the 172 test-only variables">
 
 | Variable | What it does |
 | --- | --- |
@@ -465,6 +465,7 @@ These variables exist for DefenseClaw's own test suites. Do not set them on a re
 | `DEFENSECLAW_MANAGED_BREAKAWAY_CHILD`<br/>Default: `unset`<br/>Values: `1`, `unset`<br/>Managed host: `ignore` | Selects the detached managed-breakaway child subprocess fixture.<br/>**Read by:** `internal/processutil/command_windows_test.go` |
 | `DEFENSECLAW_MANAGED_BREAKAWAY_HELPER`<br/>Default: `unset`<br/>Values: `1`, `unset`<br/>Managed host: `ignore` | Selects the managed-breakaway parent subprocess fixture.<br/>**Read by:** `internal/processutil/command_windows_test.go` |
 | `DEFENSECLAW_MCPHUNT_PUBLIC_DIR`<br/>Default: `unset` (external corpus regression skipped)<br/>Values: `absolute directory path containing JSON result files`, `unset`<br/>Managed host: `ignore` | Supplies an external public MCPHunt result directory to the optional SQL value-lineage format regression.<br/>**Read by:** `internal/gateway/tool_value_lineage_sql_test.go` |
+| `DEFENSECLAW_PIN_REACHABILITY`<br/>Default: `unset`<br/>Values: `1`, `unset`<br/>Managed host: `ignore` | Opt-in for the release and nightly check that every pinned vendor harness archive (Cursor, Devin, Kiro) is still served; unset skips it, because it needs the network and fails on a day a vendor withdraws an old build.<br/>**Read by:** `internal/openshell/harness/pin_reachability_test.go` |
 | `DEFENSECLAW_PROCESSUTIL_INHERITED_OUTPUT_CHILD`<br/>Default: `unset`<br/>Values: `1`, `unset`<br/>Managed host: `ignore` | Selects the inherited-output descendant subprocess fixture.<br/>**Read by:** `internal/processutil/command_windows_test.go` |
 | `DEFENSECLAW_PROCESSUTIL_INHERITED_OUTPUT_HELPER`<br/>Default: `unset`<br/>Values: `1`, `unset`<br/>Managed host: `ignore` | Selects the inherited-output parent subprocess fixture.<br/>**Read by:** `internal/processutil/command_windows_test.go` |
 | `DEFENSECLAW_PROCESS_TREE_GRANDCHILD`<br/>Default: `unset`<br/>Values: `1`, `unset`<br/>Managed host: `ignore` | Selects the process-tree grandchild subprocess fixture.<br/>**Read by:** `internal/processutil/command_windows_test.go` |
