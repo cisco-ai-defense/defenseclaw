@@ -7,6 +7,7 @@ import (
 	"context"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -155,5 +156,27 @@ func TestGAP0817RefusedRowsRateLimited(t *testing.T) {
 	(&APIServer{}).substrateStreamOpen(st, tixStreamReq(true), reg, "port/3000")
 	if n, row := au.count("substrate.port.refused"), au.last("substrate.port.refused"); n != 2 || row["held_back"] != 4 {
 		t.Fatalf("after the window: %d rows, last %v (want held_back 4)", n, row)
+	}
+}
+
+// GAP-0862: a refused row names an invalid target only quoted and cut to
+// 64 bytes, so a request path writes no raw newline or long text into the
+// audit log; a valid port or NAME is kept as is.
+func TestGAP0862RefusedTargetQuotedAndCut(t *testing.T) {
+	au := &tixRows{}
+	st := &substrateState{audit: au.fn, cfg: SubstrateConfig{Interactive: func() config.SubstrateInteractiveConfig {
+		return config.SubstrateInteractiveConfig{PortForward: config.SubstratePortForwardConfig{Enabled: "off"}}
+	}}}
+	reg := registry.Registration{Atespace: "tix", Name: "a", UID: "0001", RelayStreams: "mcp,port,tls"}
+	long := "x\nFAKE row/" + strings.Repeat("y", 300)
+	(&APIServer{}).substrateStreamOpen(st, tixStreamReq(true), reg, "port/"+long)
+	got, _ := au.last("substrate.port.refused")["port"].(string)
+	if strings.ContainsAny(got, "\n\r") || len(got) > 2*substrateStreamLogTargetMax || !strings.HasPrefix(got, `"x\nFAKE row/`) || !strings.HasSuffix(got, `"...`) {
+		t.Fatalf("refused row port %q, want the target quoted and cut to %d bytes", got, substrateStreamLogTargetMax)
+	}
+	for kind, target := range map[string]string{"port": "3000", "mcp": "docs"} {
+		if got := substrateStreamLogTarget(kind, target); got != target {
+			t.Fatalf("%s %q logged as %q, want it unchanged", kind, target, got)
+		}
 	}
 }

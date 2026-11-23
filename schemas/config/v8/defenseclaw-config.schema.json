@@ -8097,7 +8097,7 @@
               "additionalProperties": false,
               "properties": {
                 "enabled": {
-                  "description": "auto (default) is on in open source and managed installs.",
+                  "description": "auto (default) is on in open source and managed installs. off also closes the forwards already open, within a minute (at the next check), not at once.",
                   "type": "string",
                   "enum": ["auto", "on", "off"],
                   "default": "auto"
@@ -8122,7 +8122,7 @@
               "additionalProperties": false,
               "properties": {
                 "enabled": {
-                  "description": "auto (default) is on in open source and off in managed installs.",
+                  "description": "auto (default) is on in open source and off in managed installs. off also closes the bridges already open, within a minute (at the next check), not at once.",
                   "type": "string",
                   "enum": ["auto", "on", "off"],
                   "default": "auto"

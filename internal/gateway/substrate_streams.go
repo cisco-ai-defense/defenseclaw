@@ -153,9 +153,37 @@ func substrateStreamRefused(st *substrateState, r *http.Request, reg registry.Re
 	if c, ok := substrateCallerFrom(r.Context()); ok {
 		person = c.person.ID()
 	}
+	target = substrateStreamLogTarget(kind, target)
 	st.audit(r.Context(), "INFO", kind+" stream refused for "+reg.Atespace+"/"+reg.Name+" ("+target+"): "+reason, map[string]any{
 		"event": "substrate." + kind + ".refused", "reason": reason, "atespace": reg.Atespace, "actor": reg.Name,
 		"actor_uid": reg.UID, "person": person, kind: target, "held_back": held})
+}
+
+// substrateStreamLogTargetMax caps the bytes of an invalid target a
+// refused row keeps.
+const substrateStreamLogTargetMax = 64
+
+// substrateStreamLogTarget is the target a refused row names: the target
+// itself when it is a valid port or NAME, else its first 64 bytes, quoted,
+// so a request path writes no raw or long text into the audit log
+// (GAP-0862). A refusal can come before the target is checked
+// (port_forward_off, mcp_bridge_off).
+func substrateStreamLogTarget(kind, target string) string {
+	switch kind {
+	case relay.RoutePort:
+		if n, err := strconv.Atoi(target); err == nil && n >= 1 && n <= 65535 && strconv.Itoa(n) == target {
+			return target
+		}
+	case relay.RouteMCP:
+		if substrateMCPNameRE.MatchString(target) {
+			return target
+		}
+	}
+	more := ""
+	if len(target) > substrateStreamLogTargetMax {
+		target, more = target[:substrateStreamLogTargetMax], "..."
+	}
+	return strconv.QuoteToASCII(target) + more
 }
 
 func (a *APIServer) substrateStreamAdmit(st *substrateState, r *http.Request, reg registry.Registration, head, target string) (*substrateStream, int, string) {

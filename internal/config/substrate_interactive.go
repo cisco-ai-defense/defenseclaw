@@ -14,7 +14,10 @@ import (
 // SubstrateInteractiveConfig is substrate.interactive (B3): the streams an
 // actor's owner opens through attach next to the terminal. Each switch is
 // auto, on or off; off is the admin's switch for a managed install. The
-// gateway reads these keys on every stream it opens (hot).
+// gateway reads these keys on every stream it opens (hot), and checks the
+// open streams once a minute (or each quarter of idle_close, if sooner): a
+// switch set to off, or a port taken out of ports, closes the streams
+// already open at that check, so up to a minute later (GAP-0863).
 type SubstrateInteractiveConfig struct {
 	PortForward SubstratePortForwardConfig `mapstructure:"port_forward" yaml:"port_forward,omitempty"`
 	MCPBridge   SubstrateMCPBridgeConfig   `mapstructure:"mcp_bridge"   yaml:"mcp_bridge,omitempty"`
