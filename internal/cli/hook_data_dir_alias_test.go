@@ -10,6 +10,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // oss-outage-open round i loop 2 (P1, config filename alias): the hooks of
@@ -111,9 +112,7 @@ func writeAliasConfig(t *testing.T, path string) {
 
 func aliasLink(t *testing.T, target, link string) {
 	t.Helper()
-	if err := os.Symlink(target, link); err != nil {
-		t.Skipf("symlink: %v", err)
-	}
+	testenv.Symlink(t, target, link)
 }
 
 // oss-outage-open round j (lock path aliases): hook-data-dir tells folders

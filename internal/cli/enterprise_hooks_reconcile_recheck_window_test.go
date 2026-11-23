@@ -83,31 +83,82 @@ func TestEnterpriseHookReconcileRecheckWindowIsSharedByAllTargets(t *testing.T) 
 		t.Fatal(err)
 	}
 
-	var start time.Time
+	// The repair bound is relative to the target's own first check, never to
+	// the start of the pass: a loaded host (the full native Windows run) takes
+	// an unbounded time to verify the first targets, and that time is not the
+	// window under test. The window is wide enough that a window per target in
+	// turn (5 x window between the first and the last first check, or five
+	// windows of late repair) cannot pass for a shared one: a loaded host was
+	// seen to take 1.4 s over the first five targets, the bound is 3 windows.
+	const (
+		window      = 1000 * time.Millisecond
+		damageAfter = 200 * time.Millisecond
+	)
+	firstCheck := map[string]time.Time{}
+	calls := []string{}
 	enterpriseHookReconcileVerifier = func(_ context.Context, opts enterprisehooks.InstallOptions) (enterprisehooks.InstallResult, error) {
-		if opts.ConnectorName == "hermes" && time.Since(start) >= 100*time.Millisecond {
+		now := time.Now()
+		calls = append(calls, opts.ConnectorName)
+		first, seen := firstCheck[opts.ConnectorName]
+		if !seen {
+			firstCheck[opts.ConnectorName], first = now, now
+		}
+		if opts.ConnectorName == "hermes" && now.Sub(first) >= damageAfter {
 			return enterprisehooks.InstallResult{}, errors.New("hermes hooks block is empty")
 		}
 		return enterprisehooks.InstallResult{Connector: opts.ConnectorName, UserHome: opts.UserHome}, nil
 	}
-	var repairedAt time.Duration
+	var repairedAt time.Time
 	installs := []string{}
 	enterpriseHookReconcileInstaller = func(_ context.Context, opts enterprisehooks.InstallOptions) (enterprisehooks.InstallResult, error) {
-		repairedAt = time.Since(start)
+		repairedAt = time.Now()
 		installs = append(installs, opts.ConnectorName)
 		return enterprisehooks.InstallResult{Connector: opts.ConnectorName, UserHome: opts.UserHome}, nil
 	}
-	enterpriseHookReconcileRecheckWindow = 300 * time.Millisecond
-	start = time.Now()
+	enterpriseHookReconcileRecheckWindow = window
 	run, err := runEnterpriseHookReconcileOnce(context.Background())
-	took := time.Since(start)
+	finished := time.Now()
 	if err != nil || run.Failures != 0 || run.Repairs != 1 || strings.Join(installs, ",") != "hermes" {
 		t.Fatalf("run=%+v installs=%v err=%v, want the one Hermes repair", run, installs, err)
 	}
 	if _, ok := guardianRestoresForTest(t, dataDir)[enterpriseHookGuardianRestoreKey(sid, "hermes")]; !ok {
 		t.Fatalf("the Hermes repair inside the window was not recorded as a restore")
 	}
-	if repairedAt > 400*time.Millisecond || took > 1500*time.Millisecond {
-		t.Fatalf("the sixth target, damaged 100 ms in, was repaired %s in and the pass took %s; want one shared 300 ms window", repairedAt, took)
+	var firstFirst, lastFirst time.Time
+	for _, at := range firstCheck {
+		if firstFirst.IsZero() || at.Before(firstFirst) {
+			firstFirst = at
+		}
+		if at.After(lastFirst) {
+			lastFirst = at
+		}
+	}
+	// Every first check comes before any recheck: the loop only verifies, the
+	// shared window then rechecks all of them together.
+	if len(calls) < len(connectors) {
+		t.Fatalf("verified %v, want every target checked once", calls)
+	}
+	seenFirst := map[string]bool{}
+	for i, name := range calls[:len(connectors)] {
+		if seenFirst[name] {
+			t.Fatalf("target %s was verified again (call %d of %v) before every target had its first check", name, i+1, calls)
+		}
+		seenFirst[name] = true
+	}
+	// The first checks are not spread over a window per target: waiting a
+	// window after each target in turn puts the last first check 5 windows
+	// after the first, and no load on a host does that.
+	if spread := lastFirst.Sub(firstFirst); spread > 3*window {
+		t.Fatalf("the first checks of the %d targets were spread over %s; want one shared %s window, not a window per target", len(connectors), spread, window)
+	}
+	// Shared window: hermes (the sixth target) is repaired about damageAfter
+	// plus one recheck step after its own first check, and the pass ends one
+	// window after the last first check. A window per target in turn after the
+	// loop would repair it five windows late.
+	if repaired := repairedAt.Sub(firstCheck["hermes"]); repaired > 2*window {
+		t.Fatalf("the sixth target, damaged %s after its first check, was repaired %s after it; want one shared %s window", damageAfter, repaired, window)
+	}
+	if tail := finished.Sub(lastFirst); tail > 3*window {
+		t.Fatalf("the pass ended %s after its last first check; want one shared %s window", tail, window)
 	}
 }
