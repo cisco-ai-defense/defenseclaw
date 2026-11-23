@@ -87,7 +87,9 @@ func ResolveObservabilityV8ProtectedCredential(secretsDir, name string) (string,
 // ObservabilityV8CredentialReference returns where an enabled destination of
 // a v8 source references the protected credential name, or "" when none
 // does. It reads no secret; a source that fails to compile for another
-// reason reports "".
+// reason reports "". A program that does not link the v8 schema check
+// (internal/config/fullconfig) cannot tell, so it reports a reference
+// rather than let a credential still in use be removed (GAP-1862).
 func ObservabilityV8CredentialReference(sourceName string, raw []byte, defaultDataDir, name string) string {
 	_, err := ParseCompileObservabilityV8(sourceName, raw, ObservabilityV8CompileOptions{
 		DefaultDataDir: defaultDataDir, Secrets: observabilityV8CredentialProbe{missing: name},
@@ -95,6 +97,9 @@ func ObservabilityV8CredentialReference(sourceName string, raw []byte, defaultDa
 	var secretError *V8SecretReferenceError
 	if errors.As(err, &secretError) && secretError.Credential && secretError.Reference == name {
 		return secretError.Path
+	}
+	if errors.Is(err, errV8SchemaCheckNotLinked) {
+		return "observability (not checked: " + errV8SchemaCheckNotLinked.Error() + ")"
 	}
 	return ""
 }

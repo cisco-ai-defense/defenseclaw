@@ -56,3 +56,28 @@ func TestV8SchemaCheckRegistersOnce(t *testing.T) {
 	}()
 	RegisterV8SchemaCheck(func(any) (*V8SchemaViolation, bool, error) { return nil, false, nil })
 }
+
+// GAP-1862: a program without the v8 schema check cannot tell whether an
+// observability destination still uses a credential, so the credential
+// reference check reports one instead of "" (which would let the credential
+// be removed).
+func TestCredentialReferenceFailsClosedWhenTheSchemaCheckIsNotLinked(t *testing.T) {
+	registered := v8SchemaCheck.Load()
+	if registered == nil {
+		t.Fatal("the config test program must link internal/config/fullconfig (fullconfig_link_test.go)")
+	}
+	raw := []byte("config_version: 9\n")
+	if at := InstalledCredentialReference("config.yaml", raw, t.TempDir(), "unused"); at != "" {
+		t.Fatalf("linked: InstalledCredentialReference = %q, want none", at)
+	}
+	v8SchemaCheck.Store(nil)
+	t.Cleanup(func() { v8SchemaCheck.Store(registered) })
+	for _, at := range []string{
+		ObservabilityV8CredentialReference("config.yaml", raw, t.TempDir(), "unused"),
+		InstalledCredentialReference("config.yaml", raw, t.TempDir(), "unused"),
+	} {
+		if !strings.Contains(at, "not linked") {
+			t.Fatalf("not linked: credential reference = %q, want the not-linked reference", at)
+		}
+	}
+}
