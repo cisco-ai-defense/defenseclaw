@@ -222,6 +222,10 @@ func min64(a, b int64) int64 {
 	return b
 }
 
+// skillWalkDir is how hashSkillFolder lists a folder; a test replaces it to
+// show the listing a file system can give (a stale size) to the walk.
+var skillWalkDir = filepath.WalkDir
+
 // hashSkillFolder hashes the sorted "rel NUL kind NUL sha256(payload) LF"
 // lines of every entry below root (see defenseclaw.inventory.skill.content_hash).
 // Links are recorded by target and never followed, and each file is read
@@ -238,7 +242,7 @@ func hashSkillFolder(root string, limit int64) (hash, status string, manifest []
 	rootInfo := info
 	var lines []string
 	entries := 0
-	err = filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+	err = skillWalkDir(root, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -276,7 +280,12 @@ func hashSkillFolder(root string, limit int64) (hash, status string, manifest []
 			}
 			kind, payload = "link", []byte(filepath.ToSlash(target))
 		case entry.Type().IsRegular():
-			info, err := entry.Info()
+			// The file's own record, not entry.Info(): on Windows that is the
+			// parent folder's listing, which NTFS brings up to date lazily, so
+			// the size it gives can differ from the file's. The size gate
+			// follows the file, as the folder signature and safefile do
+			// (GAP-1901). Elsewhere entry.Info() is this same lstat.
+			info, err := os.Lstat(path)
 			if err != nil {
 				return err
 			}
