@@ -11,8 +11,6 @@ import (
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
 
 // gap1074Spellings are the spellings Windows opens a share on another machine
@@ -95,9 +93,9 @@ func TestGatewayRemoteShareOperandIsNeverAsked(t *testing.T) {
 							"tool_name": route.tool, "tool_use_id": "tu-g1074-" + id, "tool_input": route.input(path),
 						})
 					}
-					restore := hookpaths.OverrideRemoteSharesForTest(ask, nil)
+					restore := overrideRemoteSharesIdle(t, ask, nil)
 					server := strings.ToLower(host)
-					unobserve := hookpaths.ObserveRemoteShareReadsForTest(func(name string) {
+					unobserve := observeRemoteShareReadsIdle(t, func(name string) {
 						if strings.Contains(strings.ToLower(name), server) {
 							ask(name)
 						}
@@ -113,7 +111,7 @@ func TestGatewayRemoteShareOperandIsNeverAsked(t *testing.T) {
 					if !compare {
 						continue
 					}
-					restore = hookpaths.OverrideRemoteSharesForTest(func(string) {}, func(string) bool { return true })
+					restore = overrideRemoteSharesIdle(t, func(string) {}, func(string) bool { return true })
 					answered := hook(fmt.Sprintf("a%d", rows))
 					restore()
 					if gap1074Rank(unread["action"]) < gap1074Rank(answered["action"]) {

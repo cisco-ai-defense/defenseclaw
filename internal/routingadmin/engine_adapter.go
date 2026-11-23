@@ -38,10 +38,16 @@ type Runtime struct {
 	capped []CappedBudget // its actor and batch budgets (CappedBudgets)
 	last   *config.Config
 	lastEv *evaluator
-	ctx    context.Context
-	local  SpendCounter // this device's store (per-device budgets and the fallback)
-	fleet  SpendCounter // optional: shared by devices or gateway replicas
-	keys   FleetKeys    // local <-> fleet key forms (nil: the same keys)
+	// applied is the newest generation Apply installed (start and every
+	// reload). A request still pinned to an older one gets its evaluator from
+	// For but never replaces the newest budget ids or restarts the sync loop
+	// of budgets the reload removed (GAP-1856). nil (no Apply yet) leaves
+	// every generation newest.
+	applied *config.Config
+	ctx     context.Context
+	local   SpendCounter // this device's store (per-device budgets and the fallback)
+	fleet   SpendCounter // optional: shared by devices or gateway replicas
+	keys    FleetKeys    // local <-> fleet key forms (nil: the same keys)
 	// feed is true once agent call costs reach Charge (the usage engine
 	// records agent calls with a computed cost); until then budgets read
 	// as not loaded, so a managed deny budget refuses instead of counting 0.
@@ -298,8 +304,30 @@ func (rt *Runtime) Add(callID string, keys []string, usd float64, known bool, at
 	l.Charge(keys, usd, at)
 }
 
+// Apply makes cfg the newest generation and compiles it (start and every
+// reload): its budget ids replace the old ones, so the sync loop stops when a
+// reload removes every budget and starts when one adds them. It returns the
+// evaluator of cfg, as For.
+func (rt *Runtime) Apply(cfg *config.Config) engine.AdminEvaluator {
+	if rt == nil || cfg == nil {
+		return nil
+	}
+	rt.mu.Lock()
+	rt.applied = cfg
+	rt.mu.Unlock()
+	return rt.For(cfg)
+}
+
+// newestLocked reports whether cfg is the newest generation: the one Apply
+// installed last, or any while Apply never ran. rt.mu is held.
+func (rt *Runtime) newestLocked(cfg *config.Config) bool {
+	return rt.applied == nil || rt.applied == cfg
+}
+
 // For returns the admin evaluator of cfg, or nil when cfg has no
-// routing.admin rules or budgets (the engine then skips it).
+// routing.admin rules or budgets (the engine then skips it). Only the newest
+// generation sets the budget ids and the sync loop; a request pinned to an
+// older one during a reload gets its own evaluator and changes neither.
 func (rt *Runtime) For(cfg *config.Config) engine.AdminEvaluator {
 	if rt == nil || cfg == nil {
 		return nil
@@ -308,8 +336,10 @@ func (rt *Runtime) For(cfg *config.Config) engine.AdminEvaluator {
 		// routing.admin removed: stop the sync loop of the budgets it had.
 		if rt.budgeted.Load() {
 			rt.mu.Lock()
-			rt.last, rt.lastEv = cfg, nil
-			rt.setIDsLocked(nil)
+			if rt.newestLocked(cfg) {
+				rt.last, rt.lastEv = cfg, nil
+				rt.setIDsLocked(nil)
+			}
 			rt.mu.Unlock()
 		}
 		return nil
@@ -329,8 +359,10 @@ func (rt *Runtime) For(cfg *config.Config) engine.AdminEvaluator {
 	policy.SetLauncherAtespaces(cfg.Substrate.LauncherAtespaces)
 	if policy == nil {
 		rt.mu.Lock()
-		rt.last, rt.lastEv = cfg, nil
-		rt.setIDsLocked(nil)
+		if rt.newestLocked(cfg) {
+			rt.last, rt.lastEv = cfg, nil
+			rt.setIDsLocked(nil)
+		}
 		rt.mu.Unlock()
 		return nil
 	}
@@ -352,6 +384,11 @@ func (rt *Runtime) For(cfg *config.Config) engine.AdminEvaluator {
 	}
 	if rt.feed {
 		ev.ledger = rt.ledger
+	}
+	if !rt.newestLocked(cfg) {
+		// An older generation still in flight: its evaluator only.
+		rt.mu.Unlock()
+		return ev
 	}
 	rt.last, rt.lastEv = cfg, ev
 	rt.setIDsLocked(policy.BudgetIDs())

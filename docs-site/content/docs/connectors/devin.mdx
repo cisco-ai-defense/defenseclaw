@@ -184,7 +184,7 @@ Upgrading from a release that protected Devin Desktop under its previous product
 ## In an OpenShell sandbox
 
 <Callout type="warn" title="Devin CLI cannot run in a sandbox yet">
-The image is **unverified**, so `defenseclaw sandbox run devin` refuses it. Devin CLI needs a Devin account login (`devin auth login`) before any agent turn, and no API key or bring-your-own model skips it. The image check uses a mock model, so it cannot pass. The unverified image stays (see the [Cursor note](/docs/connectors/cursor) on `image list` and `image prune`).
+The image is **unverified**, so `defenseclaw sandbox run devin` refuses it. Devin CLI needs a Devin account login (`devin auth login`) before any agent turn, and no API key or bring-your-own model skips it. Without it the hook check cannot run. The unverified image stays (see the [Cursor note](/docs/connectors/cursor) on `image list` and `image prune`).
 </Callout>
 
 | Item | Detail |

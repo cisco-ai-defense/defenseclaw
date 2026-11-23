@@ -776,7 +776,7 @@ The correlator is **post-event detection**, not an in-flight block of the reques
 
 #### Why alert-only, not block
 
-Promoting a later request in the session to *deny* based on an earlier pattern match has two honest costs:
+Promoting a later request in the session to *deny* based on an earlier pattern match has two costs:
 
 - It inverts the existing "each request is evaluated on its own" contract.
 - It can cause spurious blocks on legitimate parallel/retry traffic in the same session.
