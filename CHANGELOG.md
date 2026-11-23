@@ -71,6 +71,8 @@ DefenseClaw 1.0.11 follows 1.0.10. It is a fix release. It updates OpenShell to 
 - On a managed Windows machine the hook release protection record is written before a new hook generation is published, so a failed write leaves the previous generation in place instead of one the record does not cover.
 - On a managed Windows machine the guardian service and an administrator running `defenseclaw enterprise hooks reconcile` at the same time no longer overwrite each other's release protection record, so a hook that fails a check keeps its protection.
 - The Windows guardian now takes its state lock unless it knows it runs as a standard user, so a failed account check no longer lets two writers overwrite each other's record.
+- Setup `/uninstall` no longer fails with error 1603 when one account still has an old per-user DefenseClaw folder. The hook teardown now expects the enrollment the guardian published, and it refuses when a guardian record it needs is missing or unreadable.
+- `status --json` lists an account left out because it holds a per-user DefenseClaw install as skipped, not as failed, so fleet scripts that count failed accounts no longer count it.
 - Windows Setup `/install` without `CONFIG=` (configuration delivered later) no longer fails with error 1603: the install finishes and waits for its configuration.
 
 #### Routing, budgets and cost
@@ -99,6 +101,7 @@ DefenseClaw 1.0.11 follows 1.0.10. It is a fix release. It updates OpenShell to 
 - Native Windows: `setup routing` refuses only the classifier that does not run on Windows, and says why. `config set routing.enabled` says the change applies on reload when the classifier runs in the gateway.
 - Errors name their cause when removing a connector fails, and the gateway start error says why a removed connector's teardown failed.
 - On Windows, a write entry for another account on a folder above a connector's plugin folder now stops only that connector, with the `icacls` command that fixes it, instead of failing the whole gateway start.
+- The Windows plugin folder check reads every folder from the user's profile down to the plugin. It prints `icacls` commands only for folders the user owns. For a folder owned by the Administrators group it says to take ownership or have an administrator remove the entry, instead of telling the user to move the plugin folder.
 - The process start environment is read from `/proc` only on Linux, so a `proc` folder at a Windows drive root is never read as one.
 
 #### Endpoint inventory
