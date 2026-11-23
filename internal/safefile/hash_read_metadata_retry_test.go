@@ -116,3 +116,30 @@ func TestGAP2033HashOpenedMetadataOnlyChangeFollowsPlatformRule(t *testing.T) {
 		t.Fatalf("reads = %d, want 1 (no retry on this platform)", calls)
 	}
 }
+
+// GAP-2034: a read that gave up under churn leaves nothing behind. Once the
+// file stops changing, the next read (the next scan opens the file again)
+// succeeds on its first attempt.
+func TestGAP2034HashOpenedReadsOkOnceTheChurnStops(t *testing.T) {
+	const body = "body\n"
+	churn, calls := true, 0
+	file := openHashRetryFile(t, body, func(path string, call int) {
+		calls++
+		if churn {
+			moveChangeTimeOnly(t, path, call)
+		}
+	})
+	if _, _, _, err := HashOpenedRegularFileBoundedCapture(file, 1024, 1024); err == nil {
+		t.Fatal("hash under churn succeeded; want a failure")
+	}
+	churn, calls = false, 0
+	again, err := os.Open(file.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = again.Close() }()
+	digest, captured, _, err := HashOpenedRegularFileBoundedCapture(again, 1024, 1024)
+	if err != nil || digest != sha256.Sum256([]byte(body)) || string(captured) != body || calls != 1 {
+		t.Fatalf("hash once quiet = %x %q, %v after %d reads; want the content on the first read", digest, captured, err, calls)
+	}
+}
