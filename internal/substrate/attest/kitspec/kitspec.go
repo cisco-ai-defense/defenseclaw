@@ -124,8 +124,9 @@ func Spec(o Options) (attest.KitSpec, attest.TemplateInfo, error) {
 	// gateway route to ask and stay plain.
 	cfg.Relay.Streams = nil
 	if o.VerifyURL != "" {
-		// The relay serves port forwards (B3.2) over that TLS.
-		cfg.Relay.Streams = []string{kit.StreamTLS, kit.StreamPort}
+		// The relay serves port forwards (B3.2) and laptop MCP bridges
+		// (B3.3) over that TLS.
+		cfg.Relay.Streams = []string{kit.StreamTLS, kit.StreamPort, kit.StreamMCP}
 	}
 	cfg.Relay.SessionIssuer = strings.TrimSpace(o.SessionIssuer)
 	keyFiles := map[string][]byte{}

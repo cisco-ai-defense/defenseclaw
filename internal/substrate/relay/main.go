@@ -67,12 +67,19 @@ func Main(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	switch args[0] {
+	case "mcp-stdio":
+		// The agent's side of a laptop MCP bridge (B3.3, mcp.go).
+		if fs.NArg() != 1 {
+			fmt.Fprintln(stderr, "usage: defenseclaw-actor-relay mcp-stdio NAME")
+			return 2
+		}
+		return MCPStdio(fs.Arg(0), os.Stdin, stdout, stderr)
 	case "version", "--version":
 		fmt.Fprintf(stdout, "defenseclaw-actor-relay %s (%s)\n", kit.Version, Version)
 		return 0
 	case "serve", "task":
 	default:
-		fmt.Fprintf(stderr, "defenseclaw-actor-relay: unknown command %q (serve, task, version)\n", args[0])
+		fmt.Fprintf(stderr, "defenseclaw-actor-relay: unknown command %q (serve, task, mcp-stdio, version)\n", args[0])
 		return 2
 	}
 	cfg, err := kit.LoadConfig(kit.ConfigPath)
