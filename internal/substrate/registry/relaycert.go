@@ -28,6 +28,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/sandboxreg"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/leader"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/relaytls"
 )
 
 // RelayCert is the live relay serving certificate of one actor incarnation
@@ -36,17 +37,36 @@ import (
 // the same one. It is kept apart from the Registration, which the launcher
 // and the controller write back whole.
 type RelayCert struct {
-	Serial   string    `json:"serial"`
+	Serial   string    `json:"serial,omitempty"`
 	NotAfter time.Time `json:"not_after"`
+	// CA is the issuing CA's fingerprint (relaytls.CA.Fingerprint), so a
+	// renewal refused after an emergency CA rotation says so (GAP-0929).
+	CA string `json:"ca,omitempty"`
+	// Cleared is the mark recover leaves (GAP-0928): no certificate is
+	// live, so the next request without proof is a first certificate, and
+	// no certificate issued before it renews. It lasts one certificate life.
+	Cleared bool `json:"cleared,omitempty"`
 }
 
+// relayCertClearedFor is how long recover's mark lasts: every certificate
+// issued before it has expired by then (relaytls.CertTTL, with slack for
+// the clocks of the replicas).
+const relayCertClearedFor = relaytls.CertTTL + 10*time.Minute
+
 // RelayCertClaim asks to record Cert as the actor's live certificate.
-// Without Replace it is recorded only when the actor has no live one.
+// With Replace it is recorded whatever is live (flag, a second
+// certificate). With Expect, a renewal, it is a compare-and-swap on the
+// live serial (GAP-0928): recorded only while Expect is the live
+// certificate, or when the actor has no record at all, so a proof of any
+// other certificate of the actor is a second certificate. With neither it
+// is recorded only when the actor has no live certificate.
 type RelayCertClaim struct {
 	Atespace string    `json:"atespace"`
 	UID      string    `json:"uid"`
 	Cert     RelayCert `json:"cert"`
 	Replace  bool      `json:"replace,omitempty"`
+	// Expect is the serial of the certificate a renewal proved.
+	Expect string `json:"expect,omitempty"`
 	// Now is the gateway's clock (zero: the leader's).
 	Now time.Time `json:"now,omitzero"`
 }
@@ -61,9 +81,14 @@ type RelayCertClaimed struct {
 // RelayCerts is the leader's record of live relay certificates.
 type RelayCerts interface {
 	ClaimRelayCert(ctx context.Context, c RelayCertClaim) (RelayCertClaimed, error)
-	// ClearRelayCert drops the actor's record, so its relay's next request
-	// is a first certificate (the recover route, an owner or administrator).
+	// ClearRelayCert replaces the actor's record with recover's mark
+	// (RelayCert.Cleared), so its relay's next request without proof is a
+	// first certificate and no older certificate renews (the recover
+	// route, an owner or administrator).
 	ClearRelayCert(ctx context.Context, atespace, uid string) error
+	// LiveRelayCert is the actor's unexpired record, the mark included
+	// (ok false for none): attach takes only the live certificate.
+	LiveRelayCert(ctx context.Context, atespace, uid string) (RelayCert, bool, error)
 }
 
 // relayCertDir is the record's folder under the registry folder
@@ -118,11 +143,22 @@ func (s *FileStore) ClaimRelayCert(_ context.Context, c RelayCertClaim) (RelayCe
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var out RelayCertClaimed
-	if old, ok := s.certs[key]; ok && now.Before(old.NotAfter) {
+	old, live := s.certs[key]
+	live = live && now.Before(old.NotAfter)
+	if live {
 		out.Prev = old
-		if !c.Replace {
+	}
+	switch {
+	case c.Replace:
+	case c.Expect != "":
+		if live && (old.Cleared || old.Serial != c.Expect) {
 			return out, nil
 		}
+	case live && !old.Cleared:
+		return out, nil
+	}
+	if c.Cert.Cleared {
+		return out, errors.New("registry: a relay certificate claim cannot be recover's mark")
 	}
 	b, err := json.Marshal(relayCertFile{Key: key, RelayCert: c.Cert})
 	if err != nil {
@@ -149,13 +185,45 @@ func (s *FileStore) ClearRelayCert(_ context.Context, atespace, uid string) erro
 	if err != nil {
 		return fmt.Errorf("registry: %w", err)
 	}
+	mark := RelayCert{Cleared: true, NotAfter: time.Now().Add(relayCertClearedFor)}
+	b, err := json.Marshal(relayCertFile{Key: key, RelayCert: mark})
+	if err != nil {
+		return err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if err := os.Remove(filepath.Join(s.dir, relayCertDir, fileName(key))); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("registry: %w", err)
+	if err := writeFileAtomic(filepath.Join(s.dir, relayCertDir), fileName(key), b); err != nil {
+		return err
 	}
-	delete(s.certs, key)
+	s.certs[key] = mark
 	return nil
+}
+
+// LiveRelayCert implements RelayCerts.
+func (s *FileStore) LiveRelayCert(_ context.Context, atespace, uid string) (RelayCert, bool, error) {
+	key, err := sandboxreg.SubstrateKey(atespace, uid)
+	if err != nil {
+		return RelayCert{}, false, fmt.Errorf("registry: %w", err)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	c, ok := s.certs[key]
+	if !ok || !time.Now().Before(c.NotAfter) {
+		return RelayCert{}, false, nil
+	}
+	return c, true, nil
+}
+
+type liveRelayCertOut struct {
+	Cert RelayCert `json:"cert"`
+	OK   bool      `json:"ok"`
+}
+
+// LiveRelayCert implements RelayCerts on the leader. It is never cached.
+func (s *Remote) LiveRelayCert(ctx context.Context, atespace, uid string) (RelayCert, bool, error) {
+	var out liveRelayCertOut
+	err := s.Client.Call(ctx, leader.MethodRelayCertGet, leader.NewRequestID(), getIn{Atespace: atespace, UID: uid}, &out)
+	return out.Cert, out.OK, err
 }
 
 // ClaimRelayCert implements RelayCerts on the leader. It is never cached.
@@ -177,6 +245,13 @@ func serveRelayCerts(srv *leader.Server, rc RelayCerts) {
 			return out, &leader.WireError{Code: leader.CodeBadRequest, Message: err.Error()}
 		}
 		return out, nil
+	}))
+	srv.Handle(leader.MethodRelayCertGet, leader.Typed(func(ctx context.Context, in getIn) (liveRelayCertOut, error) {
+		c, ok, err := rc.LiveRelayCert(ctx, in.Atespace, in.UID)
+		if err != nil {
+			return liveRelayCertOut{}, &leader.WireError{Code: leader.CodeBadRequest, Message: err.Error()}
+		}
+		return liveRelayCertOut{Cert: c, OK: ok}, nil
 	}))
 	srv.Handle(leader.MethodRelayCertClear, leader.Typed(func(ctx context.Context, in getIn) (putOut, error) {
 		if err := rc.ClearRelayCert(ctx, in.Atespace, in.UID); err != nil {

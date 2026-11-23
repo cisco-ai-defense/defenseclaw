@@ -233,6 +233,30 @@ goes back to the last one. With --every 1h it saves one on that schedule for as 
 	return cmd
 }
 
+func newSubstrateRecoverCmd() *cobra.Command {
+	var (
+		com substrateCommon
+		yes bool
+	)
+	cmd := &cobra.Command{
+		Use:   "recover <name>",
+		Short: "Let the agent's relay get a new certificate; bring a crashed agent back",
+		Long: `Clears the cluster's record of the agent's relay certificate, so the relay's next request
+gets a first certificate and no certificate issued before it can renew. Use it when
+"defenseclaw substrate connect" fails because the relay restarted inside the agent, or after an
+emergency relay CA rotation, while substrate.relay_cert_reissue is refuse (the managed default).
+A crashed agent is also brought back to its last snapshot, as "defenseclaw substrate undo" does;
+what it did after that snapshot is lost, so it asks first. Only the agent's owner or an
+administrator can run it.`,
+		Example: "defenseclaw substrate recover fix-tests-7f3a",
+		Args:    cobra.ExactArgs(1),
+		RunE:    func(cmd *cobra.Command, args []string) error { return runSubstrateRecover(cmd, &com, args[0], yes) },
+	}
+	com.add(cmd)
+	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "do not ask")
+	return cmd
+}
+
 func newSubstrateUndoCmd() *cobra.Command {
 	var (
 		com substrateCommon

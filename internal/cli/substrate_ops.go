@@ -371,6 +371,49 @@ func runSubstrateCheckpoint(cmd *cobra.Command, out *substrateOutput, com *subst
 	}
 }
 
+// runSubstrateRecover is substrate recover (GAP-0930): the gateway's
+// recover route clears the relay certificate record, and brings a crashed
+// agent back to its last snapshot.
+func runSubstrateRecover(cmd *cobra.Command, com *substrateCommon, ref string, yes bool) error {
+	s, err := substrateOpen(cmd, com)
+	if err != nil {
+		return err
+	}
+	ctx, stop := substrateContext(cmd)
+	defer stop()
+	a, err := resolveSubstrateActor(ctx, s.Client, ref)
+	if err != nil {
+		return substrateFail(err)
+	}
+	if a.State == substrateStateCrashed && !yes {
+		ok, err := substrateConfirm(cmd, fmt.Sprintf("%s/%s crashed. Bring it back to its last snapshot? What it did after that snapshot is lost.", a.Atespace, a.Name))
+		if err != nil {
+			return err
+		}
+		if !ok {
+			fmt.Fprintln(cmd.OutOrStdout(), "Nothing changed.")
+			return nil
+		}
+	}
+	_, err = s.Client.Recover(ctx, a.Atespace, a.Name)
+	var ae *api.Error
+	switch {
+	case err == nil:
+		fmt.Fprintf(cmd.OutOrStdout(), "%s/%s crashed; it is back at its last snapshot and starting, and its relay certificate record is cleared.\n", a.Atespace, a.Name)
+		return nil
+	case errors.As(err, &ae) && ae.Reason == "not_crashed":
+		if !ae.RelayCertCleared {
+			fmt.Fprintf(cmd.OutOrStdout(), "%s/%s is running and this cluster keeps no relay certificate record; nothing changed.\n", a.Atespace, a.Name)
+			return nil
+		}
+		fmt.Fprintf(cmd.OutOrStdout(), "%s/%s: its relay certificate record is cleared. The relay gets a new certificate at the next connect.\n", a.Atespace, a.Name)
+		return nil
+	case errors.As(err, &ae) && ae.NotImplemented():
+		return substrateFail(fmt.Errorf("this cluster cannot recover agents yet; ask your administrator to upgrade DefenseClaw"))
+	}
+	return substrateFail(fmt.Errorf("recovering %s/%s: %w", a.Atespace, a.Name, err))
+}
+
 func runSubstrateUndo(cmd *cobra.Command, com *substrateCommon, ref, to string, yes bool) error {
 	s, err := substrateOpen(cmd, com)
 	if err != nil {

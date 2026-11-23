@@ -18,6 +18,7 @@ package gateway
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -78,20 +79,34 @@ func (a *APIServer) substrateRecoverActor(st *substrateState) http.HandlerFunc {
 		a.substrateAuditAdminTarget(st, r, reg, "recover", "HIGH")
 		// GAP-0861: the relay of a recovered actor lost its key, so its
 		// next certificate request has no proof; recover is the owner's or
-		// an administrator's way to let it through in refuse mode. The
-		// record is cleared first, also for an actor that has not crashed
-		// (a relay that restarted inside a running actor).
+		// an administrator's way to let it through in refuse mode
+		// (defenseclaw substrate recover, GAP-0930). The record is cleared
+		// first, also for an actor that has not crashed (a relay that
+		// restarted inside a running actor, or an emergency CA rotation);
+		// recover's mark keeps any certificate issued before it from
+		// renewing (GAP-0928).
+		cleared := false
 		if st.cfg.RelayCerts != nil {
+			row := map[string]any{"atespace": reg.Atespace, "actor": reg.Name, "actor_uid": reg.UID}
 			if cerr := st.cfg.RelayCerts.ClearRelayCert(r.Context(), reg.Atespace, reg.UID); cerr != nil {
+				a.substrateRelayCertAudit(st, r, "HIGH", "recover of "+reg.Atespace+"/"+reg.Name+": the relay certificate record was not cleared",
+					"substrate.relay.cert_record_cleared", row, map[string]any{"relay_cert_record": "unavailable", "error": cerr.Error()})
 				fmt.Fprintf(os.Stderr, "[substrate] recover of %s/%s: the relay certificate record was not cleared: %v\n", reg.Atespace, reg.Name, cerr)
 				writeSubstrateJSONError(w, http.StatusServiceUnavailable, "relay_cert_record_unavailable")
 				return
 			}
+			cleared = true
+			a.substrateRelayCertAudit(st, r, "HIGH", "recover of "+reg.Atespace+"/"+reg.Name+" cleared the relay certificate record: the relay's next request without proof gets a first certificate, and no certificate issued before renews",
+				"substrate.relay.cert_record_cleared", row, map[string]any{"relay_cert_record": "cleared"})
 		}
 		err := rec.Recover(r.Context(), reg.Atespace, reg.Name)
 		switch {
 		case errors.Is(err, ErrSubstrateNotCrashed):
-			writeSubstrateJSONError(w, http.StatusConflict, "not_crashed")
+			// The CLI reads relay_cert_record to say what recover did to a
+			// running agent.
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusConflict)
+			_ = json.NewEncoder(w).Encode(map[string]any{"error": http.StatusText(http.StatusConflict), "reason": "not_crashed", "relay_cert_record_cleared": cleared})
 			return
 		case errors.Is(err, ErrSubstrateNoWorker):
 			w.Header().Set("Retry-After", "30")

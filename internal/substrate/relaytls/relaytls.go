@@ -19,6 +19,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/hex"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -210,6 +211,34 @@ func (c *CA) Pool() *x509.CertPool {
 	return p
 }
 
+// Fingerprint is the signing CA's fingerprint, kept with each relay
+// certificate record (GAP-0929).
+func (c *CA) Fingerprint() string { return caFingerprint(c.der) }
+
+// Trusts reports whether the CA with this fingerprint is still in the
+// pool: false after an emergency rotation dropped it.
+func (c *CA) Trusts(fp string) bool {
+	if fp == c.Fingerprint() {
+		return true
+	}
+	for _, p := range c.prev {
+		if caFingerprint(p.Raw) == fp {
+			return true
+		}
+	}
+	return false
+}
+
+func caFingerprint(der []byte) string {
+	sum := sha256.Sum256(der)
+	return hex.EncodeToString(sum[:])
+}
+
+// ErrRenewalUntrustedCA is a renewal proof that holds but whose
+// certificate no CA in the pool signed (an emergency rotation dropped its
+// CA, GAP-0929, or it was never this CA's).
+var ErrRenewalUntrustedCA = errors.New("renewal proof: the current certificate's CA is not trusted")
+
 // RenewalProof signs a new CSR with the key of the certificate it renews
 // (GAP-0819): the gateway then knows the request comes from the holder of
 // the actor's live relay key, not only from a holder of the actor JWT.
@@ -224,7 +253,8 @@ func RenewalProof(cur *tls.Certificate, csrDER []byte) ([]byte, error) {
 
 // CheckRenewal verifies a renewal proof: curPEM is an unexpired certificate
 // of this CA's pool for uid, and proof is its key's signature of csrDER.
-// It returns the certificate renewed.
+// It returns the certificate renewed. A proof that holds for a certificate
+// no CA in the pool signed returns it with ErrRenewalUntrustedCA.
 func (c *CA) CheckRenewal(uid string, curPEM, csrDER, proof []byte, now time.Time) (*x509.Certificate, error) {
 	san, err := SANForUID(uid)
 	if err != nil {
@@ -238,14 +268,19 @@ func (c *CA) CheckRenewal(uid string, curPEM, csrDER, proof []byte, now time.Tim
 	if err != nil {
 		return nil, fmt.Errorf("renewal proof: %w", err)
 	}
-	if _, err := cur.Verify(x509.VerifyOptions{Roots: c.Pool(), DNSName: san, CurrentTime: now,
-		KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}}); err != nil {
-		return nil, fmt.Errorf("renewal proof: %w", err)
-	}
 	pub, ok := cur.PublicKey.(*ecdsa.PublicKey)
 	sum := sha256.Sum256(csrDER)
 	if !ok || !ecdsa.VerifyASN1(pub, sum[:], proof) {
 		return nil, errors.New("renewal proof: the signature is not the current key's")
+	}
+	if _, err := cur.Verify(x509.VerifyOptions{Roots: c.Pool(), DNSName: san, CurrentTime: now,
+		KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}}); err != nil {
+		var ua x509.UnknownAuthorityError
+		if errors.As(err, &ua) {
+			// The caller tells a dropped CA from a stranger with the record.
+			return cur, fmt.Errorf("%w: %v", ErrRenewalUntrustedCA, err)
+		}
+		return nil, fmt.Errorf("renewal proof: %w", err)
 	}
 	return cur, nil
 }
@@ -334,9 +369,12 @@ func KeyPair(certPEM []byte, key *ecdsa.PrivateKey) (*tls.Certificate, error) {
 // Split serves TLS and plain HTTP on one port: a connection whose first
 // byte is a TLS handshake record (0x16) goes to the TLS listener, any other
 // to the plain one. The relay keeps one port, so Substrate's plain wake-up
-// probe still reaches /readyz (design unknown (a)).
-func Split(ln net.Listener, tlsConf *tls.Config) (tlsLn, plainLn net.Listener) {
-	s := &splitter{ln: ln, tls: newChanListener(ln.Addr()), plain: newChanListener(ln.Addr())}
+// probe still reaches /readyz (design unknown (a)). The TLS handshake is
+// done before the connection is handed on, and a failed one goes to
+// failed when it is not nil (the relay renews at once when the gateway
+// refuses its certificate, GAP-0929).
+func Split(ln net.Listener, tlsConf *tls.Config, failed func(error)) (tlsLn, plainLn net.Listener) {
+	s := &splitter{ln: ln, tls: newChanListener(ln.Addr()), plain: newChanListener(ln.Addr()), failed: failed}
 	go s.run(tlsConf)
 	return s.tls, s.plain
 }
@@ -344,6 +382,7 @@ func Split(ln net.Listener, tlsConf *tls.Config) (tlsLn, plainLn net.Listener) {
 type splitter struct {
 	ln         net.Listener
 	tls, plain *chanListener
+	failed     func(error)
 }
 
 func (s *splitter) run(conf *tls.Config) {
@@ -373,7 +412,18 @@ func (s *splitter) route(c net.Conn, conf *tls.Config) {
 	}
 	pc := &prefixConn{Conn: c, prefix: bytes.NewReader(b)}
 	if b[0] == 0x16 {
-		s.tls.push(tls.Server(pc, conf))
+		tc := tls.Server(pc, conf)
+		if s.failed != nil {
+			_ = tc.SetDeadline(time.Now().Add(10 * time.Second))
+			err := tc.Handshake()
+			_ = tc.SetDeadline(time.Time{})
+			if err != nil {
+				s.failed(err)
+				_ = tc.Close()
+				return
+			}
+		}
+		s.tls.push(tc)
 		return
 	}
 	s.plain.push(pc)

@@ -111,6 +111,13 @@ func TestGAP0861RelayCertOverLeader(t *testing.T) {
 	if got, err := a.ClaimRelayCert(ctx, RelayCertClaim{Atespace: "eng-web", UID: gap0861UID, Cert: c}); err != nil || !got.Set {
 		t.Fatalf("after clear %+v %v", got, err)
 	}
+	// GAP-0928: the live record and the renewal compare-and-swap over the leader.
+	if live, ok, err := b.LiveRelayCert(ctx, "eng-web", gap0861UID); err != nil || !ok || live.Serial != c.Serial {
+		t.Fatalf("live over the leader %+v %v %v", live, ok, err)
+	}
+	if got, err := b.ClaimRelayCert(ctx, RelayCertClaim{Atespace: "eng-web", UID: gap0861UID, Cert: RelayCert{Serial: "z9", NotAfter: c.NotAfter}, Expect: "not-live"}); err != nil || got.Set {
+		t.Fatalf("renewal of a certificate that is not live over the leader %+v %v", got, err)
+	}
 	if _, err := a.ClaimRelayCert(ctx, RelayCertClaim{Atespace: "eng-web", UID: "../x", Cert: c}); err == nil {
 		t.Fatal("bad UID over the leader")
 	}

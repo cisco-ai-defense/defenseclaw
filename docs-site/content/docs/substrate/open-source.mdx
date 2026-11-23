@@ -307,7 +307,7 @@ your previous working tree is kept at refs/defenseclaw/copy/sub-55cccd5ce016/pre
 
 As in OpenShell copy mode, you see the changed files first, with any file that could run code on your machine flagged (git hooks, build scripts, shell startup files, agent settings that register hooks, MCP server configs). `--diff` prints the full diff. Nothing touches your folder until you choose: `--apply` writes the changes into it (after a question whose default is no; `--yes` takes that no, so flagged files are written only with `--allow-flagged`), `--branch NAME` puts them on a new git branch, `--patch-out FILE` writes a patch. If you cloned with `--clone`, `pull` has no folder of its own to compare with: run it in a checkout of the same repository, and it writes the changes there. Or have the agent push a branch.
 
-To go back in time, `defenseclaw substrate checkpoint claude-b66c97d1` saves a restore point of the agent's folder, and `defenseclaw substrate undo claude-b66c97d1` returns the folder to the last one and discards what the agent changed since. It asks first.
+To go back in time, `defenseclaw substrate checkpoint claude-b66c97d1` saves a restore point of the agent's folder, and `defenseclaw substrate undo claude-b66c97d1` returns the folder to the last one and discards what the agent changed since. It asks first. If `connect` fails with `reissue_refused` because the agent's relay restarted, `defenseclaw substrate recover claude-b66c97d1` lets the relay get a new certificate (see [Troubleshooting](/docs/substrate/troubleshooting)).
 
 </Step>
 

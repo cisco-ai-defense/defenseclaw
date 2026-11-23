@@ -16,6 +16,7 @@ import (
 	"net"
 	"net/http"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -62,6 +63,39 @@ type CertSource struct {
 
 	mu  sync.Mutex // one request at a time
 	cur atomic.Pointer[heldCert]
+	// rejected is when a refused handshake last made the next one renew.
+	rejected atomic.Int64
+}
+
+// rejectEvery bounds the renewals refused handshakes ask for.
+const rejectEvery = time.Minute
+
+// Rejected is a TLS handshake that failed. When the gateway refused the
+// certificate (alert bad_certificate or unknown_certificate_authority: an
+// emergency CA rotation dropped its CA, GAP-0929, or recover cleared it
+// and attach takes only the live one, GAP-0928), the next handshake asks
+// the gateway again at once instead of at half life; at most once a
+// minute, as anyone who reaches the port can send that alert.
+func (c *CertSource) Rejected(err error) {
+	var op *net.OpError
+	if !errors.As(err, &op) || op.Op != "remote error" {
+		return
+	}
+	if m := op.Err.Error(); !strings.HasSuffix(m, "bad certificate") && !strings.HasSuffix(m, "unknown certificate authority") {
+		return
+	}
+	now := c.now()
+	if last := c.rejected.Load(); last != 0 && now.Sub(time.Unix(0, last)) < rejectEvery {
+		return
+	}
+	h := c.cur.Load()
+	if h == nil {
+		return
+	}
+	c.rejected.Store(now.UnixNano())
+	nh := *h
+	nh.renewAt = time.Time{}
+	c.cur.CompareAndSwap(h, &nh)
 }
 
 type heldCert struct {
@@ -130,28 +164,15 @@ func (c *CertSource) fetch(ctx context.Context, uid string) (*heldCert, error) {
 			in.Proof = base64.StdEncoding.EncodeToString(proof)
 		}
 	}
-	body, _ := json.Marshal(in)
-	budget := c.Budget
-	if budget <= 0 {
-		budget = certBudget
+	raw, reason, err := c.post(ctx, in)
+	if in.Proof != "" && (reason == "renewal_ca_dropped" || reason == "renewal_not_live") {
+		// The certificate it proved is no longer the live one (an
+		// emergency CA rotation, GAP-0929, or recover, GAP-0928): ask
+		// again without proof, under the mode's rules for that.
+		raw, _, err = c.post(ctx, CertRequest{CSR: in.CSR})
 	}
-	ctx, cancel := context.WithTimeout(ctx, budget)
-	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.URL, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set(kit.PlaceholderHeader, kit.PlaceholderValue)
-	req.Header.Set("X-DefenseClaw-Client", "actor-relay/"+kit.Version)
-	resp, err := c.Client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("relay certificate: %w", err)
-	}
-	defer resp.Body.Close()
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("relay certificate refused by the gateway (status %d)", resp.StatusCode)
 	}
 	var out CertResponse
 	if err := json.Unmarshal(raw, &out); err != nil {
@@ -168,6 +189,39 @@ func (c *CertSource) fetch(ctx context.Context, uid string) (*heldCert, error) {
 	}
 	life := kp.Leaf.NotAfter.Sub(kp.Leaf.NotBefore)
 	return &heldCert{uid: uid, cert: kp, renewAt: kp.Leaf.NotBefore.Add(life / 2), notAfter: kp.Leaf.NotAfter}, nil
+}
+
+// post sends one certificate request: the body of a 200, or the
+// gateway's refusal reason with an error.
+func (c *CertSource) post(ctx context.Context, in CertRequest) ([]byte, string, error) {
+	body, _ := json.Marshal(in)
+	budget := c.Budget
+	if budget <= 0 {
+		budget = certBudget
+	}
+	ctx, cancel := context.WithTimeout(ctx, budget)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.URL, bytes.NewReader(body))
+	if err != nil {
+		return nil, "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(kit.PlaceholderHeader, kit.PlaceholderValue)
+	req.Header.Set("X-DefenseClaw-Client", "actor-relay/"+kit.Version)
+	resp, err := c.Client.Do(req)
+	if err != nil {
+		return nil, "", fmt.Errorf("relay certificate: %w", err)
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	if resp.StatusCode != http.StatusOK {
+		var refusal struct {
+			Reason string `json:"reason"`
+		}
+		_ = json.Unmarshal(raw, &refusal)
+		return nil, refusal.Reason, fmt.Errorf("relay certificate refused by the gateway (status %d %s)", resp.StatusCode, refusal.Reason)
+	}
+	return raw, "", nil
 }
 
 // Warm asks for the certificate now, so the first attach after a start or
@@ -195,7 +249,7 @@ func serveListeners(ln net.Listener, h http.Handler, certs *CertSource) error {
 		srv := &http.Server{Handler: h, ReadHeaderTimeout: 10 * time.Second}
 		return srv.Serve(ln)
 	}
-	tl, pl := relaytls.Split(ln, certs.ServerConfig())
+	tl, pl := relaytls.Split(ln, certs.ServerConfig(), certs.Rejected)
 	plain := &http.Server{Handler: plainOnlyHandler(), ReadHeaderTimeout: 10 * time.Second}
 	errc := make(chan error, 2)
 	go func() { errc <- plain.Serve(pl) }()

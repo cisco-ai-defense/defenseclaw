@@ -70,12 +70,13 @@ const (
 	// idle check (internal/substrate/activity).
 	MethodActivityObserve  = "ActivityObserve"
 	MethodActivitySnapshot = "ActivitySnapshot"
-	// MethodRelayCertClaim and MethodRelayCertClear keep the live relay
-	// serving certificate per actor (GAP-0861): every gateway replica
-	// checks a certificate request without proof of the live key against
-	// the same record.
+	// MethodRelayCertClaim, MethodRelayCertClear and MethodRelayCertGet
+	// keep the live relay serving certificate per actor (GAP-0861): every
+	// gateway replica checks a certificate request without proof of the
+	// live key, a renewal (GAP-0928) and an attach against the same record.
 	MethodRelayCertClaim = "RelayCertClaim"
 	MethodRelayCertClear = "RelayCertClear"
+	MethodRelayCertGet   = "RelayCertGet"
 )
 
 // Methods lists every method a leader serves.
@@ -84,7 +85,7 @@ var Methods = []string{
 	MethodAskOpen, MethodAskResolve, MethodRegistrationWrite,
 	MethodRegistrationGet, MethodRegistrationList, MethodRegistrationLookup,
 	MethodActivityObserve, MethodActivitySnapshot,
-	MethodRelayCertClaim, MethodRelayCertClear,
+	MethodRelayCertClaim, MethodRelayCertClear, MethodRelayCertGet,
 }
 
 // Error codes.
