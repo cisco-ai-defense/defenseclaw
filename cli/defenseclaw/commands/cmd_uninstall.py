@@ -3177,6 +3177,9 @@ def _print_removed_connector_leftovers(
     click.echo("\n".join(lines))
 
 
+_EARLIER_KEPT_HEADING = "Backups an earlier uninstall kept (your copy of files from before DefenseClaw's setup):"
+
+
 def _earlier_kept_backup_lines(data_dir: str, moved: dict[str, str], platform_name: str = sys.platform) -> list[str]:
     """until 1.1: name each earlier-kept folder of a removed connector's backups, with the command to delete it.
 
@@ -3192,6 +3195,13 @@ def _earlier_kept_backup_lines(data_dir: str, moved: dict[str, str], platform_na
     if not data_dir:
         return []
     root = kept_backups_root(data_dir)
+    if _is_reparse_path(root):
+        # A link where DefenseClaw's folder should be is not that folder: never list or follow it.
+        return [
+            _EARLIER_KEPT_HEADING,
+            f"  - {root}: not listed, it is a link and DefenseClaw does not follow links. "
+            "If it is not yours, remove the link itself.",
+        ]
     try:
         entries = sorted(os.listdir(root))
     except OSError:
@@ -3215,7 +3225,7 @@ def _earlier_kept_backup_lines(data_dir: str, moved: dict[str, str], platform_na
             f"  - {path}: files an earlier uninstall kept from DefenseClaw's {label_of(match.group(1))} setup "
             f"(DefenseClaw never deletes them). To remove: copy back what you need, then run: {command}"
         )
-    return lines
+    return [_EARLIER_KEPT_HEADING, *lines] if lines else []
 
 
 def _move_removed_connector_backups_out(data_dir: str, platform_name: str = sys.platform) -> dict[str, str]:

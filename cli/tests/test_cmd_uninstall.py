@@ -2010,12 +2010,75 @@ class RemovedConnectorBackupsKeptTests(unittest.TestCase):
             root = data_dir + "-removed-connector-backups"
             os.makedirs(os.path.join(root, "omnigent-2"))
             posix = cmd_uninstall._earlier_kept_backup_lines(data_dir, {}, "linux")
-            self.assertEqual(len(posix), 1, posix)
-            self.assertIn(f"rm -rf {os.path.join(root, 'omnigent-2')}", posix[0])
+            self.assertEqual(len(posix), 2, posix)
+            self.assertIn(f"rm -rf {os.path.join(root, 'omnigent-2')}", posix[1])
             windows = cmd_uninstall._earlier_kept_backup_lines(data_dir, {}, "win32")
-            self.assertIn("Remove-Item -Recurse -Force -LiteralPath", windows[0])
+            self.assertIn("Remove-Item -Recurse -Force -LiteralPath", windows[1])
             os.makedirs(os.path.join(root, "codex"))
-            self.assertEqual(len(cmd_uninstall._earlier_kept_backup_lines(data_dir, {}, "linux")), 1)
+            self.assertEqual(len(cmd_uninstall._earlier_kept_backup_lines(data_dir, {}, "linux")), 2)
+
+    def test_the_kept_folders_are_listed_under_one_heading(self):
+        """GAP-1994: the list of earlier-kept folders opens with a heading line, once."""
+        with tempfile.TemporaryDirectory() as home:
+            data_dir = os.path.join(home, ".defenseclaw")
+            root = data_dir + "-removed-connector-backups"
+            os.makedirs(os.path.join(root, "openhands"))
+            os.makedirs(os.path.join(root, "omnigent-2"))
+            lines = cmd_uninstall._earlier_kept_backup_lines(data_dir, {}, "linux")
+            heading = "Backups an earlier uninstall kept (your copy of files from before DefenseClaw's setup):"
+            self.assertEqual(lines[0], heading)
+            self.assertEqual(len(lines), 3, lines)
+            self.assertTrue(all(line.startswith("  - ") for line in lines[1:]), lines)
+            self.assertEqual(cmd_uninstall._earlier_kept_backup_lines(os.path.join(home, "none"), {}, "linux"), [])
+
+    def test_a_linked_kept_root_is_refused_and_never_followed(self):
+        """GAP-1994: a link in place of the kept folder is named and refused: nothing behind it is listed or offered for deletion."""
+        with tempfile.TemporaryDirectory() as home:
+            data_dir = os.path.join(home, ".defenseclaw")
+            root = data_dir + "-removed-connector-backups"
+            target = os.path.join(home, "elsewhere")
+            os.makedirs(os.path.join(target, "openhands"))
+            try:
+                os.symlink(target, root, target_is_directory=True)
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest(f"cannot create a symlink here: {exc}")
+            for platform_name in ("linux", "win32"):
+                text = "\n".join(cmd_uninstall._earlier_kept_backup_lines(data_dir, {}, platform_name))
+                self.assertIn(f"  - {root}: not listed, it is a link and DefenseClaw does not follow links", text)
+                self.assertNotIn(os.path.join(root, "openhands"), text)
+                self.assertNotIn(os.path.join(target, "openhands"), text)
+                self.assertNotIn("rm -rf", text)
+                self.assertNotIn("Remove-Item", text)
+            self.assertTrue(os.path.isdir(os.path.join(target, "openhands")))
+
+    def test_an_uninstall_with_a_linked_kept_root_says_so_and_deletes_nothing(self):
+        with (
+            tempfile.TemporaryDirectory() as home,
+            patch("os.path.expanduser", side_effect=lambda p, home=home: p.replace("~", home, 1)),
+        ):
+            data_dir, _kept = self._stage(home)
+            shutil.rmtree(os.path.join(data_dir, "connector_backups", "omnigent"))
+            shutil.rmtree(os.path.join(data_dir, "connector_backups", "openhands"))
+            root = data_dir + "-removed-connector-backups"
+            target = os.path.join(home, "elsewhere")
+            theirs = os.path.join(target, "openhands", "mine.txt")
+            os.makedirs(os.path.dirname(theirs))
+            with open(theirs, "w", encoding="utf-8") as fh:
+                fh.write("not DefenseClaw's\n")
+            try:
+                os.symlink(target, root, target_is_directory=True)
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest(f"cannot create a symlink here: {exc}")
+            plan = cmd_uninstall.UninstallPlan(
+                data_dir=data_dir, connectors=("codex",), stop_gateway=True, remove_data_dir=True, gateway_path="gw"
+            )
+            echoed, error = self._run(plan, "")
+            self.assertEqual(error, "")
+            text = "\n".join(echoed)
+            self.assertIn(f"  - {root}: not listed, it is a link", text)
+            self.assertNotIn("rm -rf", text)
+            self.assertTrue(os.path.isfile(theirs))
+            self.assertTrue(os.path.islink(root))
 
     def test_a_backup_that_cannot_move_stops_the_uninstall_before_any_removal(self):
         with (
