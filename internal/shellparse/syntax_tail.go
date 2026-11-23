@@ -42,6 +42,17 @@ type SyntaxTail struct {
 	// then each run of the text after it that parses on its own, outside the
 	// bodies of HereDocs.
 	Statements []string
+	// Extended are the statements of Statements read only by the longer
+	// reading of rel-1-0-10:GAP-0745: a statement past the run window of the
+	// token split (longStatementsEnd), whole, and the cut of the statement
+	// with the error found past the word steps of the cut-back, from the end
+	// of the complete statements on. They are judged like the others, but
+	// their text is not taken out of the raw-text scan of what the readers
+	// did not read (the gateway parser-differential check of strict and
+	// managed, syntaxUnreadText): the Bash reading of a text the shell
+	// rejected may not be what another dialect runs, so the longer reading
+	// only raises and the floor of 1.0.10 stays (rel-1-0-10:GAP-1986).
+	Extended []SyntaxTailExtended
 	// HereDocs are the quoted here-documents opened in the statement with
 	// the error or after it whose bodies hold readable runs of the text after
 	// the error. Those runs are input of the here-document's command, not
@@ -52,6 +63,24 @@ type SyntaxTail struct {
 	// Truncated holds the caps the reading stopped at: bounded.Items for the
 	// statements or pieces, bounded.Bytes for the parse budget.
 	Truncated bounded.CapSet
+}
+
+// SyntaxTailExtended is a statement of SyntaxTail.Extended: Statements[Index],
+// read by the longer reading from byte From of it on.
+type SyntaxTailExtended struct {
+	Index, From int
+}
+
+// ExtendedFrom is the byte of Statements[index] from which only the longer
+// reading read it (SyntaxTail.Extended); ok is false for a statement read as
+// in 1.0.10.
+func (tail SyntaxTail) ExtendedFrom(index int) (from int, ok bool) {
+	for _, extended := range tail.Extended {
+		if extended.Index == index {
+			return extended.From, true
+		}
+	}
+	return 0, false
 }
 
 // SyntaxTailHereDoc is a quoted here-document of a text with a syntax error
@@ -77,6 +106,7 @@ type SyntaxTailHereDoc struct {
 
 func (tail SyntaxTail) clone() SyntaxTail {
 	tail.Statements = slices.Clone(tail.Statements)
+	tail.Extended = slices.Clone(tail.Extended)
 	tail.HereDocs = slices.Clone(tail.HereDocs)
 	for index := range tail.HereDocs {
 		tail.HereDocs[index].Statements = slices.Clone(tail.HereDocs[index].Statements)
@@ -194,6 +224,14 @@ func readSyntaxTail(command string) (tail SyntaxTail, ok bool) {
 			docRuns[doc] = append(docRuns[doc], statement)
 		}
 	}
+	// extend adds a statement of the longer reading (SyntaxTail.Extended).
+	extend := func(statement string, doc, from int) {
+		count := len(tail.Statements)
+		add(statement, doc)
+		if len(tail.Statements) > count {
+			tail.Extended = append(tail.Extended, SyntaxTailExtended{Index: count, From: max(from, 0)})
+		}
+	}
 	// The error is inside the statement after the complete ones: the text
 	// up to it, cut back word by word, is the longest prefix that parses.
 	// Past the word steps a cut whose parse failed at a token before its end
@@ -202,6 +240,7 @@ func readSyntaxTail(command string) (tail SyntaxTail, ok bool) {
 	// reports TRUNCATED (the bound rule, rel-1-0-10:GAP-0745). It stopped
 	// silently after 16 tries before, and the part of the statement before
 	// the error went unread.
+	complete, pastSteps := end, false
 	for at, tries := errorAt, 0; at > end && !trunc.Set().Any(); tries++ {
 		prefix := trimSeparators(command[:at])
 		if prefix == "" {
@@ -209,7 +248,7 @@ func readSyntaxTail(command string) (tail SyntaxTail, ok bool) {
 		}
 		failedAt, parsed := parseAlone(prefix, &budget)
 		if parsed {
-			end = at
+			end, pastSteps = at, tries >= 2*syntaxTailRunWindow
 			break
 		}
 		next := previousWordBoundary(command, end, at)
@@ -219,7 +258,11 @@ func readSyntaxTail(command string) (tail SyntaxTail, ok bool) {
 		at = next
 	}
 	if prefix := trimSeparators(command[:end]); prefix != "" && parsesAlone(prefix, &budget) {
-		add(prefix, -1)
+		if pastSteps {
+			extend(prefix, -1, complete-strings.Index(command[:end], prefix))
+		} else {
+			add(prefix, -1)
+		}
 	}
 	rest := command[end:]
 	pieces, split := tokenPieces(rest)
@@ -260,7 +303,7 @@ func readSyntaxTail(command string) (tail SyntaxTail, ok bool) {
 			}
 			if last-start >= syntaxTailRunWindow {
 				if stop, ok := longStatementsEnd(rest, pieces[start:last+1], &budget); ok {
-					add(trimSeparators(rest[pieces[start].from:pieces[start+stop].to]), doc)
+					extend(trimSeparators(rest[pieces[start].from:pieces[start+stop].to]), doc, 0)
 					covered = start + stop + 1
 				}
 			}
