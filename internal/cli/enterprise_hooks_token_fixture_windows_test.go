@@ -108,8 +108,14 @@ func assertEnterpriseHookSecretCustody(t *testing.T, dataDir, path, label string
 		if err := windows.GetAce(dacl, uint32(i), &ace); err != nil {
 			t.Fatal(err)
 		}
-		if ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE {
+		switch ace.Header.AceType {
+		case windows.ACCESS_ALLOWED_ACE_TYPE:
+		case windows.ACCESS_DENIED_ACE_TYPE:
+			// A deny entry grants nothing.
 			continue
+		default:
+			// Callback, object and any other allowed type could grant another account: do not let it pass unread.
+			t.Fatalf("%s has an entry of ACE type %d: only plain allowed and denied entries are expected", label, ace.Header.AceType)
 		}
 		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
 		switch {
