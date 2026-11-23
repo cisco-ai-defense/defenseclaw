@@ -72,8 +72,18 @@ func TestGAP1989GuardianRestoreOfCodexRequirementsTakesNoTransaction(t *testing.
 			if after := c.deploymentJSON(t); after != beforeRecord {
 				t.Fatalf("the restore ran a transaction: the deployment record changed\nbefore %s\nafter  %s", beforeRecord, after)
 			}
-			if after := c.deploymentJSON(t); after != beforeRecord {
-				t.Fatalf("the restore ran a transaction: the deployment record changed\nbefore %s\nafter  %s", beforeRecord, after)
+			// The same file text and an identical deployment record land
+			// either way. What differs is what the run reports: the
+			// transaction also restores the guardian's protected-target
+			// owner and restarts the gateway, which the restore path never
+			// does. This fails when the Codex branch of
+			// restoreTamperedMachinePolicy is removed (the apply then heals
+			// the file).
+			if len(ensure.Changes) != 1 || !strings.HasPrefix(ensure.Changes[0], "restored the published codex machine policy") {
+				t.Fatalf("ensure reported more than the restore of the Codex requirements file (a transaction ran); changes %q", ensure.Changes)
+			}
+			if strings.Contains(strings.Join(ensure.Changes, "\n"), "restarted") {
+				t.Fatalf("the restore restarted the gateway: %q", ensure.Changes)
 			}
 			for _, call := range c.runner.calls[before:] {
 				if strings.Contains(call, "restart") || strings.Contains(call, "kickstart") || strings.Contains(call, "bootstrap") {
