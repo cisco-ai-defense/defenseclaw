@@ -53,11 +53,12 @@ func TestEffectShadowOnlyRows(t *testing.T) {
 		// call can write through: it keeps its row (GAP-1530, GAP-1538).
 		{"restricted link to authorized_keys", linkTo(effect(RuleEffectRestricted, KindLink, TargetAuthorizedKeys, CertKnown)), false},
 		{"restricted link to credential", linkTo(effect(RuleEffectRestricted, KindLink, TargetCredential, CertKnown)), false},
-		// GAP-1878: an own SSH private key write, append or mode change no
-		// 1.0.10 rule names is recorded; a delete, another credential class,
-		// a write with no single class and another account's key keep rows.
+		// GAP-1878: an own SSH private key write or mode change no 1.0.10
+		// rule names is recorded; an append (GAP-1666/114), a delete, another
+		// credential class, a write with no single class and another
+		// account's key keep rows.
 		{"restricted write own ssh key", inSet(effect(RuleEffectRestricted, KindWrite, TargetCredential, CertKnown), SetSSHPrivateKey), true},
-		{"restricted append own ssh key", inSet(effect(RuleEffectRestricted, KindAppend, TargetCredential, CertKnown), SetSSHPrivateKey), true},
+		{"restricted append own ssh key", inSet(effect(RuleEffectRestricted, KindAppend, TargetCredential, CertKnown), SetSSHPrivateKey), false},
 		{"restricted perm own ssh key", inSet(effect(RuleEffectRestricted, KindPerm, TargetCredential, CertKnown), SetSSHPrivateKey), true},
 		{"restricted delete own ssh key", inSet(effect(RuleEffectRestricted, KindDelete, TargetCredential, CertKnown), SetSSHPrivateKey), false},
 		{"restricted link own ssh key", inSet(effect(RuleEffectRestricted, KindLink, TargetCredential, CertKnown), SetSSHPrivateKey), true},
