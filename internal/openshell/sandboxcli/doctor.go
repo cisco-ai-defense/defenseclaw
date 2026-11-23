@@ -177,6 +177,11 @@ func (a *App) runDoctorFor(ctx context.Context, machine openshell.ComputeDriver)
 	}
 	rep := a.HostDoctor(ctx, d)
 	rep.Managed = rep.Managed || managed
+	if st != nil && st.status != nil && st.offKind != sandboxapi.ManagedOffNone {
+		// The one reason of `sandbox status` and `sandbox run`: the verdict
+		// below names it for every kind, whichever rows are skipped.
+		rep.ManagedOffReason = st.status.OffMessage()
+	}
 	// The host checks set it; the Docker access row below asks it again.
 	dockerGroup := d.DockerGroup
 	if managed && st != nil && st.managed != nil {
@@ -1346,9 +1351,10 @@ func (a *App) RunDoctor(ctx context.Context, o DoctorOptions) error {
 	refusal := a.doctorRunRefusal(ctx, rep)
 	if o.Output == OutputJSON {
 		_, off := sandboxesOff(rep)
-		// One exit contract: a failed check exits 1 in either format, so a
-		// script that checks the status alone is not told a host that
-		// cannot run sandboxes is fine (GAP-0308).
+		// One exit contract: a failed check, or sandboxes off for the account
+		// on a managed computer, exits 1 in either format, so a script that
+		// checks the status alone is not told a host that cannot run
+		// sandboxes is fine (GAP-0308, GAP-2036).
 		if err := writeJSON(a.IO.Out, struct {
 			OK bool `json:"ok"`
 			// Ready is OK with sandboxes turned on (sandboxesOff), on a
@@ -1364,16 +1370,23 @@ func (a *App) RunDoctor(ctx context.Context, o DoctorOptions) error {
 			// OpenShellInstallVersion is the release setup installs.
 			OpenShellInstallVersion string `json:"openshell_install_version"`
 			*openshell.DoctorReport
-		}{rep.OK(), rep.OK() && !off && refusal == nil, rep.OpenShellInstallNeeded(), rep.OpenShellUpgradeAvailable(), openshell.InstallerVersion, rep}); err != nil {
+		}{doctorOK(rep), rep.OK() && !off && refusal == nil, rep.OpenShellInstallNeeded(), rep.OpenShellUpgradeAvailable(), openshell.InstallerVersion, rep}); err != nil {
 			return err
 		}
 	} else {
 		a.printDoctor(rep, refusal)
 	}
-	if !rep.OK() {
+	if !doctorOK(rep) {
 		return &ExitError{Code: 1, Err: &Silent{Err: errors.New("sandbox doctor found problems")}}
 	}
 	return nil
+}
+
+// doctorOK is the doctor's exit contract: no check failed, and sandboxes are
+// not off for the account by a managed reason (sandboxapi.Status.ManagedOff),
+// which a run refuses whichever rows were skipped as not needed (GAP-2036).
+func doctorOK(rep *openshell.DoctorReport) bool {
+	return rep.OK() && rep.ManagedOffReason == ""
 }
 
 // waitReconnect waits, at most 30 s, while the daemon runs with sandboxes
@@ -1442,15 +1455,21 @@ func (a *App) printDoctor(rep *openshell.DoctorReport, refusal error) {
 	why, off := sandboxesOff(rep)
 	failed := failedChecks(rep)
 	setupChanging := rep.Get(CheckIDManagedRuntime)
-	if off && (failed == 0 || failed == 1 && setupChanging != nil && setupChanging.Status == openshell.StatusFail && setupChanging.Detail == sandboxrelay.UnavailableSetupChanging) {
+	switch {
+	case off && failed == 1 && setupChanging != nil && setupChanging.Status == openshell.StatusFail && setupChanging.Detail == sandboxrelay.UnavailableSetupChanging:
 		a.warn("not ready for sandboxes yet: " + why)
-	} else if failed > 0 {
+	case rep.ManagedOffReason != "":
+		// The reason sandbox run refuses with, whatever the rows say.
+		a.bad("not ready for sandboxes: " + rep.ManagedOffReason)
+	case off && failed == 0:
+		a.warn("not ready for sandboxes yet: " + why)
+	case failed > 0:
 		a.bad("not ready for sandboxes: " + plural(int64(failed), "check", "checks") + " failed")
-	} else if refusal != nil {
+	case refusal != nil:
 		// The run's words, the reason and its way on (the Landlock row's
 		// fix is the doctor's own).
 		a.warn("not ready for sandboxes yet: sandbox run refuses on this machine: " + refusal.Error())
-	} else {
+	default:
 		a.ok("ready for sandboxes")
 	}
 }
@@ -1466,11 +1485,15 @@ func failedChecks(rep *openshell.DoctorReport) int {
 	return n
 }
 
-// sandboxesOff reports a daemon whose sandboxes are turned off or a managed
-// setup change that has not finished: a run refuses in either state.
+// sandboxesOff reports a daemon whose sandboxes are turned off, a managed
+// setup change that has not finished, or sandboxes off for the account by a
+// managed reason (DoctorReport.ManagedOffReason): a run refuses in each state.
 func sandboxesOff(rep *openshell.DoctorReport) (string, bool) {
 	if c := rep.Get(CheckIDManagedRuntime); c != nil && c.Status == openshell.StatusFail && c.Detail == sandboxrelay.UnavailableSetupChanging {
 		return c.Detail, true
+	}
+	if rep.ManagedOffReason != "" {
+		return rep.ManagedOffReason, true
 	}
 	c := rep.Get(CheckIDDaemon)
 	if c == nil || c.Status != openshell.StatusWarn {
