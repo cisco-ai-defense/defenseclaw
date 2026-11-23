@@ -4,9 +4,6 @@
 package fixturefs
 
 import (
-	"bytes"
-	"runtime"
-	"strconv"
 	"sync"
 	"sync/atomic"
 )
@@ -23,20 +20,39 @@ import (
 // The scope is the goroutine: the readers of one decision call Map in the
 // goroutine that runs it, or in one started through Go. The check costs one
 // atomic load while no Unread runs anywhere in the process; while one runs,
-// a check reads the goroutine's number and a lock-free map, and takes no
-// lock that other goroutines' reads wait on (substrate-1 GAP-0997).
+// a check reads the key of the calling goroutine (unreadKey) and a lock-free
+// map, and takes no lock that other goroutines' reads wait on (substrate-1
+// GAP-0997). On Linux and Windows Unread holds its goroutine on its thread
+// and the key is the thread's id: the goroutine's number is read from a
+// traceback of its whole stack, which took 79% of a by-name decision, 1.4
+// to 13 ms for an ordinary call (substrate-1 GAP-0999).
 
 var (
 	unreadActive atomic.Int64
-	// unreadIDs counts, by goroutine number, the Unread calls that goroutine
-	// is inside. Only the goroutine itself changes its entry.
+	// unreadIDs counts, by key (unreadKey), the Unread calls the goroutine
+	// of that key is inside. Only the goroutine itself changes its entry.
 	unreadIDs sync.Map // uint64 -> int
 )
 
 // Unread runs fn with no file system for the goroutine that runs it.
 func Unread(fn func()) {
-	leave := enterUnread(goroutineID())
-	defer leave()
+	// Keep the thread pinned until its entry is removed. Register the unlock
+	// immediately so even a panic while setting up the entry releases it.
+	unlock := lockUnreadKey()
+	defer unlock()
+	id := unreadKey()
+	depth, _ := unreadIDs.Load(id)
+	n, _ := depth.(int)
+	unreadIDs.Store(id, n+1)
+	unreadActive.Add(1)
+	defer func() {
+		if n <= 0 {
+			unreadIDs.Delete(id)
+		} else {
+			unreadIDs.Store(id, n)
+		}
+		unreadActive.Add(-1)
+	}()
 	fn()
 }
 
@@ -45,7 +61,7 @@ func Unreadable() bool {
 	if unreadActive.Load() == 0 {
 		return false
 	}
-	depth, _ := unreadIDs.Load(goroutineID())
+	depth, _ := unreadIDs.Load(unreadKey())
 	n, _ := depth.(int)
 	return n > 0
 }
@@ -58,35 +74,4 @@ func Go(fn func()) {
 		return
 	}
 	go Unread(fn)
-}
-
-func enterUnread(id uint64) (leave func()) {
-	depth, _ := unreadIDs.Load(id)
-	n, _ := depth.(int)
-	unreadIDs.Store(id, n+1)
-	unreadActive.Add(1)
-	return func() {
-		if n <= 0 {
-			unreadIDs.Delete(id)
-		} else {
-			unreadIDs.Store(id, n)
-		}
-		unreadActive.Add(-1)
-	}
-}
-
-// goroutineID is the runtime's number of the calling goroutine (0: unknown,
-// which no Unread registers, so such a goroutine reads as before).
-func goroutineID() uint64 {
-	var buf [64]byte
-	line, ok := bytes.CutPrefix(buf[:runtime.Stack(buf[:], false)], []byte("goroutine "))
-	if !ok {
-		return 0
-	}
-	digits, _, _ := bytes.Cut(line, []byte(" "))
-	id, err := strconv.ParseUint(string(digits), 10, 64)
-	if err != nil {
-		return 0
-	}
-	return id
 }
