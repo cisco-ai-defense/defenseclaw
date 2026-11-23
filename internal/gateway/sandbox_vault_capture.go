@@ -58,10 +58,23 @@ import (
 const (
 	// maxVaultCaptureHeaderEntries bounds the relay header's entries.
 	maxVaultCaptureHeaderEntries = 16
-	// vaultCaptureRetryWait bounds the background retry that marks held
-	// values exposed when the vault lock was busy during the hook call.
+	// vaultCaptureRetryWait bounds each background retry's wait for the
+	// vault lock when a hook call could not write an exposure.
 	vaultCaptureRetryWait = 5 * time.Second
+	// sandboxVaultExposureRuleID is the alert of an exposure the vault has
+	// not written yet when its retries give up.
+	sandboxVaultExposureRuleID = "sandbox_vault_exposure"
+	// vaultCaptureUnkeptField ends a relay header whose call had a value
+	// removed that the vault does not hold.
+	vaultCaptureUnkeptField = "+unkept"
 )
+
+// vaultExposureRetrySlots bounds the exposure retries that run at once;
+// past it the pending record alone keeps the value from any sandbox.
+var vaultExposureRetrySlots = make(chan struct{}, 8)
+
+// vaultExposureRetryDelays are the waits before each exposure retry.
+var vaultExposureRetryDelays = []time.Duration{250 * time.Millisecond, time.Second, 4 * time.Second, 15 * time.Second}
 
 // errVaultCaptureAmbiguous: the body has duplicate keys or trailing data,
 // so capture cannot read one meaning of it; nothing of it is forwarded.
@@ -87,16 +100,22 @@ type sandboxVaultCapture struct {
 	// mode), so its secrets were marked exposed.
 	NotStopped bool
 	// markExposed marks this call's values exposed in the vault, waiting at
-	// most wait for its lock. Set only where the vault is owned (never from
-	// a relay header); it holds the values, so it is never logged.
+	// most wait for its lock, and writes the vault's pending exposures. Set
+	// only where the vault is owned (never from a relay header); it holds
+	// the values, so it is never logged.
 	markExposed func(wait time.Duration) error
+	// exposeErr: the capture exposed values and could not write the vault
+	// (vault.ErrExposurePending or vault.ErrExposureNotRecorded).
+	exposeErr error
 }
 
 // captureSandboxVault returns body with its capturable secrets replaced by
 // their vault tags, and what it captured (nil: nothing to capture, body
 // unchanged). The body is decoded and every string value is scanned, so a
-// secret after an escaped newline or a \u escape is found.
-func captureSandboxVault(ctx context.Context, store *vault.Store, connectorName string, header http.Header, body []byte) ([]byte, *sandboxVaultCapture) {
+// secret after an escaped newline or a \u escape is found. promptGoesOn,
+// when set, says the call's answer will not stop it (observe mode): a
+// prompt is then stored exposed in the capture's one write.
+func captureSandboxVault(ctx context.Context, store *vault.Store, connectorName string, header http.Header, body []byte, promptGoesOn func() bool) ([]byte, *sandboxVaultCapture) {
 	if store == nil || len(body) == 0 || !mayHoldCapturable(body) {
 		return body, nil
 	}
@@ -146,32 +165,41 @@ func captureSandboxVault(ctx context.Context, store *vault.Store, connectorName 
 		return body, nil
 	}
 	from := strings.TrimSpace(fmt.Sprintf("%s %s (%s) in sandbox %s", name, point.Where(), event, binding.SandboxName))
+	exposed, notStopped := point.Exposed(), false
+	if point.Point == connector.VaultCapturePrompt && promptGoesOn != nil && promptGoesOn() {
+		// The answer will not stop the prompt: it reaches the model, so it
+		// is stored exposed now, in one write.
+		exposed, notStopped = true, true
+	}
 	ins := make([]vault.CaptureInput, 0, len(hits))
 	for _, h := range hits {
 		ins = append(ins, vault.CaptureInput{
-			Value: h.value, Kind: h.kind, Exposed: point.Exposed(), From: from,
-			FromModel: point.FromModel(), KnownOnly: !point.Stores(),
+			Value: h.value, Kind: h.kind, Exposed: exposed, From: from,
+			FromModel: point.FromModel(), KnownOnly: !point.Stores(), Sandbox: binding.SandboxName,
 		})
 	}
-	out := &sandboxVaultCapture{Connector: name, Event: event, Sandbox: binding.SandboxName}
+	out := &sandboxVaultCapture{Connector: name, Event: event, Sandbox: binding.SandboxName, NotStopped: notStopped}
 	out.markExposed = func(wait time.Duration) error {
 		again := make([]vault.CaptureInput, len(ins))
 		for i, in := range ins {
 			in.Exposed, in.KnownOnly = true, true
 			again[i] = in
 		}
-		_, err := store.CaptureAll(again, wait)
-		return err
+		if _, err := store.CaptureAll(again, wait); err != nil {
+			return err
+		}
+		return store.ApplyPendingExposures(wait)
 	}
 	names := map[string]string{}
 	// A store error still returns the values the vault holds (their
-	// exposure is written whatever else failed).
+	// exposure is written whatever else failed). When nothing could be
+	// written, the exposed values are recorded as pending exposures, which
+	// keep them from any sandbox; the caller retries the write
+	// (followVaultExposure).
 	res, err := store.CaptureAll(ins, vault.CaptureWait)
 	out.Err = err
-	if errors.Is(err, vault.ErrBusy) && point.Exposed() {
-		// Nothing was written: mark the held values exposed once the lock
-		// frees, so a value the model has seen never stays usable.
-		go func() { _ = out.markExposed(vaultCaptureRetryWait) }()
+	if errors.Is(err, vault.ErrExposurePending) || errors.Is(err, vault.ErrExposureNotRecorded) {
+		out.exposeErr = err
 	}
 	have := map[string]bool{}
 	for i, c := range res {
@@ -180,7 +208,7 @@ func captureSandboxVault(ctx context.Context, store *vault.Store, connectorName 
 			continue
 		}
 		e := c.Entry
-		e.Exposed = e.Exposed || point.Exposed()
+		e.Exposed = e.Exposed || exposed
 		names[hits[i].value] = e.Name
 		if !have[e.Name] {
 			have[e.Name] = true
@@ -231,7 +259,9 @@ func sandboxVaultCaptureEventName(name string, header http.Header, doc map[strin
 	return event
 }
 
-// validVaultCaptureEventName: 1 to 64 letters, digits, '.', '_' or '-'.
+// validVaultCaptureEventName: 1 to 64 letters, digits, '.', '_' or '-',
+// and not shaped like a credential (the name is carried unredacted into
+// the body, the entry's CapturedFrom, the relay header and the messages).
 func validVaultCaptureEventName(event string) bool {
 	if event == "" || len(event) > 64 {
 		return false
@@ -243,7 +273,11 @@ func validVaultCaptureEventName(event string) bool {
 			return false
 		}
 	}
-	return true
+	if len(vault.FindCapturable(event)) > 0 {
+		return false
+	}
+	_, masked := vault.MaskCapturable([]byte(event))
+	return !masked
 }
 
 // point places the call; a connector capture does not read is
@@ -436,7 +470,8 @@ func (c *sandboxVaultCapture) exposedMessage(point connector.VaultCaptureEvent) 
 }
 
 // header encodes the capture for the managed gateway: the event and each
-// entry's name and target, never a value ("-" when nothing was kept).
+// entry's name and target, never a value ("-" when nothing was kept, and
+// a last "+unkept" when another value was removed but not kept).
 func (c *sandboxVaultCapture) header() string {
 	parts := []string{c.Event}
 	for i, e := range c.Entries {
@@ -445,8 +480,11 @@ func (c *sandboxVaultCapture) header() string {
 		}
 		parts = append(parts, e.Name+"="+e.Target())
 	}
-	if len(c.Entries) == 0 {
+	switch {
+	case len(c.Entries) == 0:
 		parts = append(parts, "-")
+	case c.Unkept:
+		parts = append(parts, vaultCaptureUnkeptField)
 	}
 	return strings.Join(parts, " ")
 }
@@ -455,6 +493,10 @@ func (c *sandboxVaultCapture) header() string {
 // connectorName; anything that does not parse strictly is ignored (nil).
 func vaultCaptureFromHeader(connectorName, v string) *sandboxVaultCapture {
 	fields := strings.Fields(v)
+	unkept := false
+	if n := len(fields); n > 2 && fields[n-1] == vaultCaptureUnkeptField {
+		unkept, fields = true, fields[:n-1]
+	}
 	if len(fields) < 2 || len(fields) > maxVaultCaptureHeaderEntries+1 {
 		return nil
 	}
@@ -462,8 +504,11 @@ func vaultCaptureFromHeader(connectorName, v string) *sandboxVaultCapture {
 	if _, reads := connector.SandboxVaultCaptureEventFor(name, ""); !reads || !validVaultCaptureEventName(fields[0]) {
 		return nil
 	}
-	c := &sandboxVaultCapture{Connector: name, Event: fields[0]}
+	c := &sandboxVaultCapture{Connector: name, Event: fields[0], Unkept: unkept}
 	if len(fields) == 2 && fields[1] == "-" {
+		if unkept {
+			return nil
+		}
 		c.Err = errors.New("the sandbox daemon could not keep it")
 		return c
 	}
@@ -483,6 +528,106 @@ func vaultCaptureFromHeader(connectorName, v string) *sandboxVaultCapture {
 		c.Entries = append(c.Entries, e)
 	}
 	return c
+}
+
+// afterSandboxVaultCapture follows a capture up where the vault is owned:
+// the alert of a vault that no longer matches its pin, and the retries of
+// an exposure the hook call could not write.
+func (a *APIServer) afterSandboxVaultCapture(ctx context.Context, connectorName string, c *sandboxVaultCapture) {
+	if c == nil {
+		return
+	}
+	a.alertSandboxVaultChanged(ctx, connectorName, c)
+	if c.exposeErr != nil {
+		a.followVaultExposure(c, c.exposeErr)
+	}
+}
+
+// followVaultExposure retries, in the background, the write of an
+// exposure a hook call could not make (cause wraps
+// vault.ErrExposurePending or vault.ErrExposureNotRecorded), with backoff,
+// for as long as the ingress runs. The pending record already keeps the
+// value from any sandbox; the retry writes the exposure into the vault.
+// When the exposure could not be recorded, or the retries give up, it is
+// logged and audited.
+func (a *APIServer) followVaultExposure(c *sandboxVaultCapture, cause error) {
+	if c == nil || c.markExposed == nil {
+		return
+	}
+	pending := errors.Is(cause, vault.ErrExposurePending)
+	if !pending && !errors.Is(cause, vault.ErrExposureNotRecorded) {
+		return
+	}
+	ctx := a.sandboxVaultRetryContext()
+	if !pending {
+		a.alertVaultExposure(ctx, c, "not_recorded")
+	}
+	select {
+	case vaultExposureRetrySlots <- struct{}{}:
+	default:
+		a.alertVaultExposure(ctx, c, exposureGiveUpReason(pending, "retries_busy"))
+		return
+	}
+	mark, delays := c.markExposed, vaultExposureRetryDelays
+	go func() {
+		defer func() { <-vaultExposureRetrySlots }()
+		for _, d := range delays {
+			t := time.NewTimer(d)
+			select {
+			case <-ctx.Done():
+				t.Stop()
+				fmt.Fprintf(os.Stderr, "[gateway] sandbox vault exposure retry stopped with the ingress connector=%s event=%s pending=%v\n",
+					c.Connector, c.Event, pending)
+				return
+			case <-t.C:
+			}
+			err := mark(vaultCaptureRetryWait)
+			if err == nil {
+				return
+			}
+			pending = pending || errors.Is(err, vault.ErrExposurePending)
+		}
+		a.alertVaultExposure(ctx, c, exposureGiveUpReason(pending, "retries_exhausted"))
+	}()
+}
+
+func exposureGiveUpReason(pending bool, why string) string {
+	if pending {
+		return why + "_pending"
+	}
+	return why + "_not_recorded"
+}
+
+// alertVaultExposure logs and audits an exposure the vault has not
+// written: names, never values.
+func (a *APIServer) alertVaultExposure(ctx context.Context, c *sandboxVaultCapture, reason string) {
+	var names []string
+	for _, e := range c.Entries {
+		names = append(names, e.Name)
+	}
+	fmt.Fprintf(os.Stderr, "[gateway] sandbox vault exposure not written connector=%s event=%s sandbox=%s reason=%s entries=%s\n",
+		c.Connector, c.Event, c.Sandbox, reason, strings.Join(names, ","))
+	if a == nil || a.logger == nil {
+		return
+	}
+	severity, title := "MEDIUM", "Sandbox vault exposure is pending: no sandbox gets the value until it is written"
+	if strings.HasSuffix(reason, "not_recorded") {
+		severity, title = "HIGH", "Sandbox vault exposure could not be recorded: rotate the secret and replace it in the vault"
+	}
+	if err := a.logger.LogAlertCtx(context.WithoutCancel(ctx), sandboxVaultExposureRuleID, severity, title, map[string]any{
+		"connector": c.Connector, "event": c.Event, "sandbox": c.Sandbox, "entries": names,
+		"reason": reason, "rule_id": sandboxVaultExposureRuleID,
+	}); err != nil {
+		fmt.Fprintf(os.Stderr, "[gateway] sandbox vault exposure alert failed connector=%s: %v\n", c.Connector, err)
+	}
+}
+
+// sandboxVaultRetryContext ends when the sandbox ingress stops.
+func (a *APIServer) sandboxVaultRetryContext() context.Context {
+	if st := a.sandboxIngressState(); st != nil {
+		return st.lifeContext()
+	}
+	return context.Background()
 }
 
 // sandboxVaultPinRuleID is the alert of a capture refused because the vault
@@ -508,7 +653,6 @@ func (a *APIServer) alertSandboxVaultChanged(ctx context.Context, connectorName 
 		fmt.Fprintf(os.Stderr, "[gateway] sandbox vault pin alert failed connector=%s: %v\n", connectorName, err)
 	}
 }
-
 
 // stops reports whether the event's answer, in action mode, is block.
 func (c *sandboxVaultCapture) stops() bool { return c.point().Stop }
@@ -563,8 +707,20 @@ func (a *APIServer) applySandboxVaultCapture(
 			resp.RawAction = resp.Action
 		}
 	}
-	if c.point().Point == connector.VaultCapturePrompt && resp.Action != "block" {
-		a.markVaultCaptureExposed(c)
+	if c.Connector == "cursor" && cursorTurnRestartEvent(c.Event) && resp.Action == "block" {
+		// Cursor answers a block of stop or subagentStop with a followup
+		// message, which starts a new turn: never block them.
+		resp.Action, resp.RawAction, resp.WouldBlock = "alert", "block", true
+	}
+	if c.point().Point == connector.VaultCapturePrompt {
+		switch {
+		case resp.Action != "block":
+			a.markVaultCaptureExposed(c)
+		case c.NotStopped:
+			// Stored exposed for an answer that, after all, stops it: it
+			// stays exposed (the stricter state), and the message says so.
+			c.NotStopped = false
+		}
 	}
 	if resp.Severity != "CRITICAL" {
 		resp.Severity = "HIGH"
@@ -581,18 +737,22 @@ func (a *APIServer) applySandboxVaultCapture(
 }
 
 // markVaultCaptureExposed marks a prompt capture exposed because the
-// prompt went on to the model. A busy lock is retried in the background.
+// prompt went on to the model. A capture that stored it exposed already
+// (captureSandboxVault knew the answer would not stop it) writes nothing
+// more; otherwise (a relayed call, whose answer the managed gateway
+// chose) a write the vault could not make is recorded pending and
+// retried (followVaultExposure).
 func (a *APIServer) markVaultCaptureExposed(c *sandboxVaultCapture) {
+	already := c.NotStopped
 	c.NotStopped = true
 	for i := range c.Entries {
 		c.Entries[i].Exposed = true
 	}
-	if c.markExposed == nil {
+	if already || c.markExposed == nil {
 		return
 	}
-	if err := c.markExposed(vault.CaptureWait); errors.Is(err, vault.ErrBusy) {
-		mark := c.markExposed
-		go func() { _ = mark(vaultCaptureRetryWait) }()
+	if err := c.markExposed(vault.CaptureWait); err != nil {
+		a.followVaultExposure(c, err)
 	}
 }
 

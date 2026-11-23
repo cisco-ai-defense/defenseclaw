@@ -128,23 +128,23 @@ func TestSandboxVaultCaptureOffWritesNothing(t *testing.T) {
 func TestCaptureSandboxVaultScope(t *testing.T) {
 	st := vault.Open(filepath.Join(t.TempDir(), "vault"))
 	body := []byte(`{"hook_event_name":"UserPromptSubmit","prompt":"` + vaultTestAnthropicKey() + `"}`)
-	if out, c := captureSandboxVault(context.Background(), st, "claudecode", nil, body); c != nil || string(out) != string(body) {
+	if out, c := captureSandboxVault(context.Background(), st, "claudecode", nil, body, nil); c != nil || string(out) != string(body) {
 		t.Fatal("a host call (no sandbox binding) was captured")
 	}
 	ctx := sandboxauth.WithRequest(context.Background(), sandboxauth.Binding{SandboxName: "sb", Connector: "openclaw"}, nil)
-	if _, c := captureSandboxVault(ctx, st, "openclaw", nil, body); c != nil {
+	if _, c := captureSandboxVault(ctx, st, "openclaw", nil, body, nil); c != nil {
 		t.Fatal("a connector that runs in no sandbox was captured")
 	}
 	ctx = sandboxauth.WithRequest(context.Background(), sandboxauth.Binding{SandboxName: "sb", Connector: "claudecode"}, nil)
 	post := []byte(`{"hook_event_name":"PostToolUse","tool_response":"` + vaultTestStripeKey() + `"}`)
-	if out, c := captureSandboxVault(ctx, st, "claudecode", nil, post); c == nil || len(c.Entries) != 1 || !c.Entries[0].Exposed ||
+	if out, c := captureSandboxVault(ctx, st, "claudecode", nil, post, nil); c == nil || len(c.Entries) != 1 || !c.Entries[0].Exposed ||
 		!c.stops() || strings.Contains(string(out), vaultTestStripeKey()) {
 		t.Fatalf("a post-tool event was not captured exposed: %+v", c)
 	}
-	if _, c := captureSandboxVault(ctx, nil, "claudecode", nil, body); c != nil {
+	if _, c := captureSandboxVault(ctx, nil, "claudecode", nil, body, nil); c != nil {
 		t.Fatal("captured with no vault")
 	}
-	out, c := captureSandboxVault(ctx, st, "claudecode", nil, body)
+	out, c := captureSandboxVault(ctx, st, "claudecode", nil, body, nil)
 	if c == nil || len(c.Entries) != 1 || strings.Contains(string(out), vaultTestAnthropicKey()) || !strings.Contains(string(out), "[vault:ANTHROPIC_API_KEY]") {
 		t.Fatalf("capture = %+v body %s", c, out)
 	}

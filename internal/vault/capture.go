@@ -37,9 +37,15 @@ var capturable = map[string]struct{ name, host string }{
 // token-shaped test fixtures can never use up the room a prompt's secret
 // needs. Past a bound the call is still answered and the value still
 // removed from the body; only nothing more of that kind is stored.
+//
+// One sandbox holds at most MaxCapturedPerSandbox of the prompt entries:
+// a process inside a sandbox can post prompt events the way its harness
+// does, and it must not be able to fill the room every other sandbox's
+// prompts need.
 const (
-	MaxCaptured          = 16
-	MaxCapturedFromModel = 8
+	MaxCaptured           = 16
+	MaxCapturedFromModel  = 8
+	MaxCapturedPerSandbox = MaxCaptured / 2
 )
 
 // CaptureWait bounds how long a hook call waits for the vault lock.
@@ -48,7 +54,10 @@ const CaptureWait = 500 * time.Millisecond
 var (
 	// ErrCaptureFull is returned when the vault holds MaxCaptured entries
 	// captured from prompts.
-	ErrCaptureFull = fmt.Errorf("the vault already holds %d unconfirmed secrets captured from prompts; confirm the ones that are yours and remove the others", MaxCaptured)
+	ErrCaptureFull = fmt.Errorf("the vault already holds %d unconfirmed secrets captured from prompts; review them with `defenseclaw sandbox vault list` and confirm the ones that are yours or remove the others", MaxCaptured)
+	// ErrSandboxCaptureFull is returned when one sandbox's prompts hold
+	// MaxCapturedPerSandbox unconfirmed entries. It is an ErrCaptureFull.
+	ErrSandboxCaptureFull = fmt.Errorf("%w (this sandbox alone holds %d of them)", ErrCaptureFull, MaxCapturedPerSandbox)
 	// ErrModelCaptureFull is returned when the vault holds
 	// MaxCapturedFromModel entries captured from agents' tool calls and
 	// output.
@@ -97,6 +106,9 @@ type CaptureInput struct {
 	// holds exposed (a reply or another event, where a value the vault does
 	// not hold is only removed from the body).
 	KnownOnly bool
+	// Sandbox names the sandbox the value came from ("" when unknown); one
+	// sandbox's prompts hold at most MaxCapturedPerSandbox entries.
+	Sandbox string
 }
 
 // Captured is the result of one capture. Entry.Name is empty when the value
@@ -134,6 +146,12 @@ func (s *Store) Capture(in CaptureInput) (Captured, error) {
 // (ErrBusy) nothing is written, and the results name the values the vault
 // already held. A call that changes nothing is answered from a read,
 // without the lock or a write.
+//
+// When nothing could be written (a busy lock, a failed write), the values
+// the call exposed are recorded as pending exposures (recordPending), and
+// the error also wraps ErrExposurePending, or ErrExposureNotRecorded when
+// even that failed: no sandbox gets a pending value, and the next change
+// of the vault writes the exposure.
 func (s *Store) CaptureAll(ins []CaptureInput, wait time.Duration) ([]Captured, error) {
 	for _, in := range ins {
 		if _, ok := capturable[in.Kind]; !ok {
@@ -168,6 +186,7 @@ func (s *Store) CaptureAll(ins []CaptureInput, wait time.Duration) ([]Captured, 
 		return nil
 	})
 	if err != nil {
+		err = s.recordExposures(held, ins, err)
 		if errors.Is(err, ErrBusy) && readErr == nil {
 			out, _ = heldCaptures(held, ins)
 			return out, err
@@ -175,6 +194,26 @@ func (s *Store) CaptureAll(ins []CaptureInput, wait time.Duration) ([]Captured, 
 		return nil, err
 	}
 	return out, partial
+}
+
+// recordExposures records the exposed values of a capture that wrote
+// nothing as pending exposures and returns cause joined with what became
+// of them; cause alone when the call exposed nothing. f is the vault as
+// last read (nil when it could not be read).
+func (s *Store) recordExposures(f *file, ins []CaptureInput, cause error) error {
+	var values []string
+	for _, in := range ins {
+		if in.Exposed {
+			values = append(values, in.Value)
+		}
+	}
+	if len(values) == 0 {
+		return cause
+	}
+	if err := s.recordPending(f, values); err != nil {
+		return errors.Join(cause, fmt.Errorf("%w: %v", ErrExposureNotRecorded, err))
+	}
+	return errors.Join(cause, ErrExposurePending)
 }
 
 // heldCaptures answers ins from f without changing it; changes reports
@@ -215,6 +254,7 @@ func (s *Store) capture(f *file, ins []CaptureInput) (out []Captured, changed bo
 		out[i] = Captured{Entry: f.Entries[j].Entry}
 	}
 	fromPrompts, fromModel := 0, 0
+	bySandbox := map[string]int{}
 	for _, e := range f.Entries {
 		switch {
 		case e.Source != SourceCaptured || e.Confirmed:
@@ -223,6 +263,9 @@ func (s *Store) capture(f *file, ins []CaptureInput) (out []Captured, changed bo
 			fromModel++
 		default:
 			fromPrompts++
+			if e.Sandbox != "" {
+				bySandbox[e.Sandbox]++
+			}
 		}
 	}
 	for i, in := range ins {
@@ -242,6 +285,8 @@ func (s *Store) capture(f *file, ins []CaptureInput) (out []Captured, changed bo
 			err = ErrModelCaptureFull
 		case !in.FromModel && fromPrompts >= MaxCaptured:
 			err = ErrCaptureFull
+		case !in.FromModel && in.Sandbox != "" && bySandbox[in.Sandbox] >= MaxCapturedPerSandbox:
+			err = ErrSandboxCaptureFull
 		}
 		kind := capturable[in.Kind]
 		name := ""
@@ -272,14 +317,18 @@ func (s *Store) capture(f *file, ins []CaptureInput) (out []Captured, changed bo
 		}
 		r := record{Entry: Entry{
 			Name: name, Host: kind.host, Port: port, Source: SourceCaptured, Kind: in.Kind,
-			Exposed: in.Exposed, FromModel: in.FromModel, CapturedFrom: strings.TrimSpace(in.From),
-			CreatedAt: now, UpdatedAt: now,
+			// A value with a pending exposure is stored exposed.
+			Exposed: in.Exposed || f.pendingExposes(in.Value), FromModel: in.FromModel, CapturedFrom: strings.TrimSpace(in.From),
+			Sandbox: strings.TrimSpace(in.Sandbox), CreatedAt: now, UpdatedAt: now,
 		}, Value: in.Value}
 		f.Entries = append(f.Entries, r)
 		if in.FromModel {
 			fromModel++
 		} else {
 			fromPrompts++
+			if r.Sandbox != "" {
+				bySandbox[r.Sandbox]++
+			}
 		}
 		changed = true
 		out[i] = Captured{Entry: r.Entry, New: true}

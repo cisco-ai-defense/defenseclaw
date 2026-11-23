@@ -168,10 +168,20 @@ and, separately, at most 8 from tool calls and tool output that you have not
 replaced yet, so tools that keep printing key-shaped test values never use up
 the room a prompt's secret needs. Past either limit a call is still answered
 and the value still removed, but nothing more of that kind is stored until you
-confirm, replace or remove some. A secret the vault already holds is still
+confirm, replace or remove some. One sandbox can hold at most 8 of the 16
+unconfirmed prompt secrets, so a program inside one sandbox cannot fill the
+room the others need. When a limit is reached, the prompt is still stopped and
+you are told to review the captures: `defenseclaw sandbox vault list` shows
+which sandbox each one came from, and you confirm the ones that are yours and
+remove the others. A secret the vault already holds is still
 marked exposed when the model sees it, even with the vault full. A test
 fixture that looks exactly like a real key (the right prefix and length) is
 treated as one: give fixtures an obviously fake shape.
+
+When another DefenseClaw command is writing the vault at the moment a secret
+is exposed, the exposure is kept in a small record next to the vault (it holds
+a keyed digest, never the value) and written into the vault right after. From
+the moment it is recorded the secret reads as exposed and no sandbox gets it.
 
 Capture follows the hook mode your administrator set for a sandbox. In
 observe mode nothing is stopped: a secret is still moved into the vault and
@@ -392,3 +402,9 @@ from the disk: rotate a secret if that matters to you.
 - A host that echoes the `Authorization` header back would return the value to
   the agent. Bind secrets to the API host itself.
 - Any program in the sandbox can use a secret against its host.
+- Going back to an earlier DefenseClaw version: an earlier version counts every
+  captured secret, from prompts and from tool calls and output alike, against
+  the single limit of 16, so it can report the vault full; confirm, replace or
+  remove captured secrets to make room. It also does not read exposures still
+  waiting to be written: run `defenseclaw sandbox vault list` before you go
+  back, which writes them.

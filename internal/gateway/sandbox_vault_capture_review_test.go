@@ -29,7 +29,7 @@ func TestSandboxVaultCapturesAfterAnEscapedNewline(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	out, c := captureSandboxVault(ctx, st, "claudecode", nil, body)
+	out, c := captureSandboxVault(ctx, st, "claudecode", nil, body, nil)
 	if c == nil || len(c.Entries) != 1 || strings.Contains(string(out), vaultTestAnthropicKey()) {
 		t.Fatalf("capture = %+v body %s", c, out)
 	}
@@ -120,14 +120,14 @@ func TestSandboxVaultCapturesASecretInAKey(t *testing.T) {
 	st := vault.Open(filepath.Join(t.TempDir(), "vault"))
 	ctx := sandboxauth.WithRequest(context.Background(), sandboxauth.Binding{SandboxName: "sb", Connector: "claudecode"}, nil)
 	body := []byte(`{"hook_event_name":"PreToolUse","tool_name":"Write","tool_input":{"headers":{"` + vaultTestAnthropicKey() + `":"x"}}}`)
-	out, c := captureSandboxVault(ctx, st, "claudecode", nil, body)
+	out, c := captureSandboxVault(ctx, st, "claudecode", nil, body, nil)
 	if c == nil || len(c.Entries) != 1 || strings.Contains(string(out), vaultTestAnthropicKey()) || !strings.Contains(string(out), "[vault:ANTHROPIC_API_KEY]") {
 		t.Fatalf("capture = %+v body %s", c, out)
 	}
 	// Two keys that redact to one tag: the body is replaced, never a value forwarded.
 	k2 := "sk-" + "ant-api03-" + strings.Repeat("Zy7Xw6", 8)
 	body = []byte(`{"hook_event_name":"PreToolUse","tool_input":{"[vault:ANTHROPIC_API_KEY]":"a","` + k2 + `":"b"}}`)
-	out, c = captureSandboxVault(ctx, vault.Open(filepath.Join(t.TempDir(), "other")), "claudecode", nil, body)
+	out, c = captureSandboxVault(ctx, vault.Open(filepath.Join(t.TempDir(), "other")), "claudecode", nil, body, nil)
 	if c == nil || string(out) != `{"hook_event_name":"PreToolUse"}` {
 		t.Fatalf("collision capture = %+v body %s", c, out)
 	}
@@ -154,7 +154,7 @@ func TestCaptureAmbiguousJSONForwardsNothing(t *testing.T) {
 		`{"hook_event_name":"UserPromptSubmit","prompt":"` + key + `","prompt":"x"}`,
 		`{"hook_event_name":"Stop","last_assistant_message":"` + key + `"}{"x":1}`,
 	} {
-		out, c := captureSandboxVault(ctx, st, "claudecode", nil, []byte(body))
+		out, c := captureSandboxVault(ctx, st, "claudecode", nil, []byte(body), nil)
 		if c == nil || !errors.Is(c.Err, errVaultCaptureAmbiguous) || strings.Contains(string(out), key) || hookToolCallJSONUnambiguous("claudecode", out) {
 			t.Fatalf("ambiguous body -> %s (%+v)", out, c)
 		}

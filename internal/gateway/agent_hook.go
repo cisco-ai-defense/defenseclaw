@@ -446,8 +446,12 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		}
 		// A sandboxed agent's secret goes into the account's vault and out
 		// of the body before anything evaluates or records it.
-		rawBody, vaultCapture := captureSandboxVault(r.Context(), a.sandboxVaultStore(), connectorName, r.Header, rawBody)
-		a.alertSandboxVaultChanged(r.Context(), connectorName, vaultCapture)
+		rawBody, vaultCapture := captureSandboxVault(r.Context(), a.sandboxVaultStore(), connectorName, r.Header, rawBody, func() bool {
+			// The answer's mode decides whether a stopped prompt goes on:
+			// decided before the capture's one write.
+			return sandboxHookMode(r.Context(), connectorName, a.agentHookMode(r.Context(), connectorName)) != "action"
+		})
+		a.afterSandboxVaultCapture(r.Context(), connectorName, vaultCapture)
 		if vaultCapture == nil && relayedSandboxRequest(r.Context()) {
 			// A managed host's sandbox daemon captured before it relayed:
 			// answer and record the call as the block it is.

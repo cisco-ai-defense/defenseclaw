@@ -142,13 +142,17 @@ func TestSandboxVaultBusyVaultAtOutput(t *testing.T) {
 	if reason, _ := resp["reason"].(string); resp["action"] != "block" || !strings.Contains(reason, "STRIPE_LIVE") {
 		t.Fatalf("answer = %v", resp)
 	}
-	if e, _ := st.Get("STRIPE_LIVE"); e.Exposed {
+	if raw, _ := os.ReadFile(st.Path()); strings.Contains(string(raw), `"exposed": true`) {
 		t.Fatal("written through a held lock")
+	}
+	// The exposure is pending: it reads exposed at once.
+	if e, _ := st.Get("STRIPE_LIVE"); !e.Exposed {
+		t.Fatal("the pending exposure does not read as exposed")
 	}
 	_ = syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
 	deadline := time.Now().Add(10 * time.Second)
 	for {
-		if e, _ := st.Get("STRIPE_LIVE"); e.Exposed {
+		if raw, _ := os.ReadFile(st.Path()); strings.Contains(string(raw), `"exposed": true`) {
 			return
 		}
 		if time.Now().After(deadline) {

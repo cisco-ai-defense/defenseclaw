@@ -128,6 +128,10 @@ func vaultJSON(e vault.Entry) vaultJSONEntry {
 	return vaultJSONEntry{Entry: e, Target: e.Target(), Status: e.Status()}
 }
 
+// vaultListApplyWait bounds the vault list's wait to write pending
+// exposures.
+const vaultListApplyWait = 2 * time.Second
+
 // VaultList prints the vault. Values are never printed.
 func (a *App) VaultList(format OutputFormat) error {
 	st := a.vault()
@@ -135,6 +139,11 @@ func (a *App) VaultList(format OutputFormat) error {
 	// with the key (and pinned again when it matches): the gateway's
 	// refused capture tells the person to run this command.
 	pinNote, pinErr := st.CheckPin()
+	if pinErr == nil {
+		// Exposures a sandbox recorded while the vault was busy are written
+		// now (each already reads as exposed); a failure leaves them pending.
+		_ = st.ApplyPendingExposures(vaultListApplyWait)
+	}
 	list, err := st.List()
 	if err != nil {
 		return err
@@ -184,7 +193,10 @@ func (a *App) VaultList(format OutputFormat) error {
 		case vault.StatusExposed:
 			a.warn(fmt.Sprintf("%s may have been seen by an agent's model; rotate it with its issuer, then: %s vault replace %s", e.Name, CommandName, e.Name))
 		case vault.StatusUnconfirmed:
-			a.note(fmt.Sprintf("%s was captured from a sandbox; check it is yours, then: %s vault confirm %s", e.Name, CommandName, e.Name))
+			// Which sandbox it came from: a sandbox that keeps posting
+			// prompts it was never given shows up here.
+			a.note(fmt.Sprintf("%s was captured from %s; check it is yours, then: %s vault confirm %s (or remove it: %s vault remove %s)",
+				e.Name, firstNonEmpty(e.CapturedFrom, "a sandbox"), CommandName, e.Name, CommandName, e.Name))
 		}
 	}
 	return nil
