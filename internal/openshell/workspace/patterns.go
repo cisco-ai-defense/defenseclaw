@@ -200,8 +200,9 @@ const (
 	RiskAgentConfig    RiskKind = "agent-config"
 	RiskMCPServer      RiskKind = "mcp-server"
 	RiskShellRC        RiskKind = "shell-rc"
-	// RiskSecretContext: the agent changed the lines next to a line that
-	// holds a replaced credential (pull of a copy with replaced credentials).
+	// RiskSecretContext: the agent changed a file that holds a replaced
+	// credential (pull of a copy with replaced credentials); the label
+	// names the line when the change is next to it.
 	RiskSecretContext RiskKind = "secret-context"
 	// RiskUnreadable is a folder the session made unreadable: nothing
 	// inside it can be checked.

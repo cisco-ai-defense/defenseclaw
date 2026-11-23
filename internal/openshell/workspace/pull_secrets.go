@@ -256,6 +256,10 @@ func translateSecrets(ctx context.Context, base gitCmd, rec *CopyRecord, changes
 		}
 		e := uploaded[rel]
 		t, kept, put, near, why := translateReplaced(blobs[e.oid], agent, byFile[rel], restore)
+		// lands: the agent changed a non-blank line other than the
+		// placeholder lines kept as uploaded, so its code lands in a file
+		// that holds the value.
+		lands := why == "" && !sameNonBlank(t, blobs[e.oid])
 		if why == "" {
 			var ok bool
 			if t, ok = withValues(t, nil, values[rel]); !ok || copyTokens(t, tokens) > copyTokens(local[rel], tokens) {
@@ -280,6 +284,28 @@ func translateSecrets(ctx context.Context, base gitCmd, rec *CopyRecord, changes
 			note("%s: line %d holds your credential and the agent changed the lines next to it; check that the change does not send or print the value", rel, n)
 			out.flags = append(out.flags, Flag{Path: rel, Label: rel + ":" + strconv.Itoa(n), Kind: RiskSecretContext, Severity: SeverityInfo,
 				Detail: "the agent changed the lines next to a line that holds a replaced credential"})
+		}
+		if lands && len(near) == 0 {
+			// The near-line flag only looks a few lines out; code that
+			// wraps the whole file (or reads it from afar) is a change
+			// anywhere in it, so the file gets one note (RV8-1).
+			var ns []int
+			for _, l := range byFile[rel] {
+				ns = append(ns, l.Line)
+			}
+			sort.Ints(ns)
+			ls, word := []string{}, "line"
+			for i, n := range ns {
+				if i == 0 || n != ns[i-1] {
+					ls = append(ls, strconv.Itoa(n))
+				}
+			}
+			if len(ls) > 1 {
+				word = "lines"
+			}
+			note("%s holds your credential on %s %s and the agent changed this file; check that the change does not send or print the value", rel, word, strings.Join(ls, ", "))
+			out.flags = append(out.flags, Flag{Path: rel, Label: rel, Kind: RiskSecretContext, Severity: SeverityInfo,
+				Detail: "the agent changed a file that holds a replaced credential"})
 		}
 		if len(put) > 0 {
 			if out.put == nil {
@@ -538,6 +564,39 @@ func withValues(b []byte, lines []SecretLine, vals map[string][]byte) ([]byte, b
 	return b, true
 }
 
+// sameNonBlank reports whether a and b hold the same non-blank lines, in
+// order. A blank line added or removed is no change, and neither is
+// trailing space or a line end (\n or \r\n), but indentation is: taking
+// the indent off a line under `if False:` runs it (RV9-2). A line that ends
+// in a backslash, before or after the change, is compared with only its line
+// end removed: a space after the backslash ends the continuation, so the
+// next line runs on its own (GAP-0889).
+func sameNonBlank(a, b []byte) bool {
+	nb := func(x []byte) [][]byte {
+		var out [][]byte
+		for _, l := range splitKeep(x) {
+			if len(bytes.TrimSpace(l)) > 0 {
+				out = append(out, l)
+			}
+		}
+		return out
+	}
+	la, lb := nb(a), nb(b)
+	if len(la) != len(lb) {
+		return false
+	}
+	for i := range la {
+		x, y := trimEOL(la[i]), trimEOL(lb[i])
+		if !bytes.HasSuffix(x, []byte("\\")) && !bytes.HasSuffix(y, []byte("\\")) {
+			x, y = bytes.TrimRight(x, " \t\r\v\f"), bytes.TrimRight(y, " \t\r\v\f")
+		}
+		if !bytes.Equal(x, y) {
+			return false
+		}
+	}
+	return true
+}
+
 // copyTokens counts the copy's placeholders in b.
 func copyTokens(b []byte, tokens map[string]bool) int {
 	n := 0
@@ -559,9 +618,10 @@ const secretContextWindow = 5
 // left it, or kept so (kept: the local line numbers), or with restore the
 // agent's line (put: its line numbers). why says why the change cannot
 // land: a placeholder is gone (without restore), repeated or moved. near
-// are the agent's line numbers of placeholder lines left in place whose
-// a line within secretContextWindow non-blank lines that the agent added, removed or changed: the value lands, and
-// the review names the line (RV6-3: an agent that wraps the line in place,
+// are the agent's line numbers of placeholder lines left in place with a
+// line the agent added, removed or changed within secretContextWindow
+// non-blank lines: the value lands, and the review names the line (the
+// caller notes any other change to the file once, RV8-1) (RV6-3: an agent that wraps the line in place,
 // in a string it sends, kept its anchors and landed with no note).
 func translateReplaced(uploaded, agent []byte, lines []SecretLine, restore bool) (out []byte, kept, put, near []int, why string) {
 	ul, al := splitKeep(uploaded), splitKeep(agent)
@@ -692,8 +752,7 @@ func matchLines(up, agent [][]byte, key func([]byte) string) []int {
 	for i := range mu {
 		mu[i] = -1
 	}
-	var lcs func(u0, u1, a0, a1 int)
-	lcs = func(u0, u1, a0, a1 int) {
+	lcs := func(u0, u1, a0, a1 int) {
 		n, m := u1-u0, a1-a0
 		if n*m > maxLCSCells {
 			return
