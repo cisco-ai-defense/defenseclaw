@@ -1023,6 +1023,15 @@ func removeStaleKiroDefaultOverlay(hookScript string, scope *kiroReclaimScope) e
 	return removeKiroV2AgentHooksKeeping(kiroBuiltInDefaultAgentPath(), hookScript, false, scope)
 }
 
+// kiroCommandOwned reports whether a v3 hook command is DefenseClaw's by its
+// text: it runs the current hook command, carries the native launcher's
+// hook --connector kiro arguments, or is a Windows bridge Setup wrote. A
+// command that only names kiro-hook.sh is not: a user's own hook of that name
+// (C:\Users\me\hooks\kiro-hook.sh, /home/me/bin/kiro-hook.sh --flag) was
+// removed by the v3 repair and uninstall (GAP-1932). DefenseClaw's script in
+// another data directory, or a copy, is claimed by its .defenseclaw shape or
+// its binding (editedDefenseClawHookCommandByAnyPath), as in the other
+// connectors, and every entry Setup writes is named defenseclaw-*.
 func kiroCommandOwned(command, hookScript string) bool {
 	command = strings.TrimSpace(command)
 	hookScript = strings.TrimSpace(hookScript)
