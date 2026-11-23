@@ -2,12 +2,16 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+//go:build !windows
+
 package gateway
 
 import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -164,20 +168,23 @@ func TestMCPBridgeDenyByToolRule(t *testing.T) {
 	// A notification form of the same call is judged too, and gets no answer.
 	send(`{"jsonrpc":"2.0","method":"tools/call","params":{"name":"exec","arguments":` + tixgBlockedArgs + `}}`)
 	send(`{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"read_note","arguments":{"id":"a"}}}`)
-	// Duplicate keys: the laptop receives the one value that was judged.
+	// Duplicate keys are refused (GAP-0838), never collapsed to one value.
 	send(`{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"exec","name":"read_note","arguments":{"id":"b"}}}`)
+	if m := tixgRead(t, agent); m["id"] != float64(4) || !strings.HasPrefix(m["error"].(map[string]any)["message"].(string), "invalid_message") {
+		t.Fatalf("duplicate key answer %v", m)
+	}
 	send(`[{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"exec","arguments":` + tixgBlockedArgs + `}}]`)
 	if m := tixgRead(t, agent); m["id"] != nil || !strings.HasPrefix(m["error"].(map[string]any)["message"].(string), "invalid_message") {
 		t.Fatalf("batch answer %v", m)
 	}
 	send(`{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"read_note","arguments":{"x":"` + strings.Repeat("a", 1<<20) + `"}}}`)
-	if m := tixgRead(t, agent); !strings.HasPrefix(m["error"].(map[string]any)["message"].(string), "message_too_large") {
+	if m := tixgRead(t, agent); m["id"] != float64(6) || !strings.HasPrefix(m["error"].(map[string]any)["message"].(string), "message_too_large") {
 		t.Fatalf("oversize answer %v", m)
 	}
 	send(`{"jsonrpc":"2.0","method":"notifications/initialized"}`)
 
 	var got []string
-	for len(got) < 4 {
+	for len(got) < 3 {
 		m := tixgRead(t, laptop)
 		p, _ := m["params"].(map[string]any)
 		name, _ := p["name"].(string)
@@ -186,7 +193,7 @@ func TestMCPBridgeDenyByToolRule(t *testing.T) {
 			t.Fatalf("a blocked call reached the laptop: %v", m)
 		}
 	}
-	if want := "initialize |tools/call read_note|tools/call read_note|notifications/initialized "; strings.Join(got, "|") != want {
+	if want := "initialize |tools/call read_note|notifications/initialized "; strings.Join(got, "|") != want {
 		t.Fatalf("laptop saw %q, want %q", strings.Join(got, "|"), want)
 	}
 	// The laptop's answer reaches the agent unchanged.
@@ -211,14 +218,14 @@ func TestMCPBridgeDenyByToolRule(t *testing.T) {
 		}
 		scopes := append([]string(nil), b.scopes...)
 		b.mu.Unlock()
-		if denials == 4 && closes == 1 {
+		if denials == 5 && closes == 1 {
 			if len(scopes) != 1 || scopes[0] != "mcp:notes" {
 				t.Fatalf("relay token scopes %v", scopes)
 			}
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("audit rows: %d denied, %d close (want 4, 1)", denials, closes)
+			t.Fatalf("audit rows: %d denied, %d close (want 5, 1)", denials, closes)
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
@@ -249,8 +256,10 @@ func TestMCPBridgeManagedDefaultOff(t *testing.T) {
 // kept as written, no trailing data.
 func TestSubstrateMCPCanonical(t *testing.T) {
 	for in, want := range map[string]string{
-		`{"id":12345678901234567890,"method":"a","method":"tools/call"}`: `{"id":12345678901234567890,"method":"tools/call"}`,
+		`{"method":"tools/call","id":12345678901234567890}`: `{"id":12345678901234567890,"method":"tools/call"}`,
 		`{"m":"<&>"}`: `{"m":"<&>"}`,
+		// Keys below params are the arguments' own; they are kept as sent.
+		`{"params":{"arguments":{"Name":1,"name":2,"x":{"x":1,"x":2}}}}`: `{"params":{"arguments":{"Name":1,"name":2,"x":{"x":2}}}}`,
 	} {
 		got, _, err := substrateMCPCanonical([]byte(in))
 		if err != nil || string(got) != want {
@@ -260,6 +269,66 @@ func TestSubstrateMCPCanonical(t *testing.T) {
 	for _, bad := range []string{`{"a":1}{"b":2}`, `{"a":1} x`, `{`, ``} {
 		if _, _, err := substrateMCPCanonical([]byte(bad)); err == nil {
 			t.Fatalf("%q parsed", bad)
+		}
+	}
+	// GAP-0838: a duplicate key (exact or folded) or a folded judged key in
+	// the envelope or in params is refused; the last duplicate no longer wins.
+	for _, bad := range []string{
+		`{"id":1,"method":"a","method":"tools/call"}`,
+		`{"Method":"tools/call"}`,
+		`{"params":{},"PARAMS":{}}`,
+		"{\"param\u017f\":{}}",
+		`{"param\u017f":{}}`,
+		`{"params":{"name":"a","name":"b"}}`,
+		`{"params":{"nAme":"a"}}`,
+		"{\"params\":{\"argument\u017f\":{}}}",
+		"{\"params\":{\"k\":1,\"\u212a\":2}}",
+		`{"id":1,"ID":2}`,
+	} {
+		if _, _, err := substrateMCPCanonical([]byte(bad)); !errors.Is(err, errSubstrateMCPAmbiguous) {
+			t.Fatalf("%q: %v, want refused as ambiguous", bad, err)
+		}
+	}
+}
+
+// TestSubstrateMCPCall (RV-S4A P4-3): an arguments value that does not
+// encode refuses the call; it is never judged as a call with no arguments.
+func TestSubstrateMCPCall(t *testing.T) {
+	call := func(params map[string]any) map[string]any {
+		return map[string]any{"method": "tools/call", "params": params}
+	}
+	if tool, args, why := substrateMCPCall(call(map[string]any{"name": "read_note", "arguments": map[string]any{"id": "a"}})); tool != "read_note" || string(args) != `{"id":"a"}` || why != "" {
+		t.Fatalf("good call: %q %s %q", tool, args, why)
+	}
+	if _, _, why := substrateMCPCall(call(map[string]any{"arguments": map[string]any{}})); why == "" {
+		t.Fatal("a call with no tool name was not refused")
+	}
+	if tool, args, why := substrateMCPCall(call(map[string]any{"name": "exec", "arguments": map[string]any{"n": math.Inf(1)}})); why != "the tools/call arguments do not encode" || tool != "" || args != nil {
+		t.Fatalf("unencodable arguments: %q %s %q, want refused", tool, args, why)
+	}
+}
+
+// TestSubstrateMCPPrefixID (GAP-0839): the id of an oversize message comes
+// from the bounded prefix, and only when it is unambiguous.
+func TestSubstrateMCPPrefixID(t *testing.T) {
+	for _, c := range []struct {
+		in        string
+		id        any
+		resp, req bool
+	}{
+		{`{"jsonrpc":"2.0","id":7,"result":{"text":"aaaa`, json.Number("7"), true, false},
+		{`{"jsonrpc":"2.0","id":"x","error":{"code":1}`, "x", true, false},
+		{`{"jsonrpc":"2.0","result":{"text":"aaaa`, nil, true, false},
+		{`{"id":9,"method":"sampling/createMessage","params":{"x":"aa`, json.Number("9"), false, true},
+		{`{"id":1,"id":2,"result":{"x":"aa`, nil, true, false},
+		{`{"id":true,"result":{"x":"aa`, nil, true, false},
+		{`{"id":1,"method":"a","result":{"x":"aa`, nil, false, false},
+		{`[{"id":1,"result":{}}`, nil, false, false},
+		{`{"jsonrpc":"2.0","id":3`, json.Number("3"), false, false},
+	} {
+		id, resp, req := substrateMCPPrefixID([]byte(c.in))
+		if id != c.id || resp != c.resp || req != c.req {
+			t.Fatalf("%s: id %v resp %v req %v, want %v %v %v", c.in, id, resp, req, c.id, c.resp, c.req)
 		}
 	}
 }
