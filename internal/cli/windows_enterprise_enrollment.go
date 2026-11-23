@@ -36,15 +36,28 @@ import (
 // "each account's detail", which status did not show).
 func windowsEnterpriseEnrollmentAccounts(rows []enterpriseHookReconcileRow) []enterprisestatus.EnrollmentAccount {
 	var accounts []enterprisestatus.EnrollmentAccount
-	// The first failure of each account names why it failed.
+	// The first failure of each account names why it failed, and the first
+	// skipped row why it was left out.
 	failures := map[string]string{}
+	skips := map[string]string{}
 	for _, row := range rows {
 		key := windowsEnterpriseEnrollmentKey(row.SID, row.User, row.UserHome)
 		// A row that waits for its account's next sign-in is pending, not
 		// failed (GAP-0644).
-		if !row.OK && !row.Pending && !enterpriseHookAwaitingSignInError(row) &&
-			strings.TrimSpace(row.Error) != "" && failures[key] == "" {
-			failures[key] = strings.TrimSpace(row.Connector) + ": " + boundedEnterpriseHookUserCleanupText(strings.TrimSpace(row.Error))
+		if row.OK || row.Pending || enterpriseHookAwaitingSignInError(row) || strings.TrimSpace(row.Error) == "" {
+			continue
+		}
+		text := strings.TrimSpace(row.Connector) + ": " + boundedEnterpriseHookUserCleanupText(strings.TrimSpace(row.Error))
+		// A row skipped for a per-user DefenseClaw install is skipped, not
+		// failed (GAP-1893), as enterpriseHookEnrollmentFromRows says.
+		if enterpriseHookAccountPerUserInstallRow(row) {
+			if skips[key] == "" {
+				skips[key] = text
+			}
+			continue
+		}
+		if failures[key] == "" {
+			failures[key] = text
 		}
 	}
 	for _, entry := range enterpriseHookEnrollmentFromRows(rows) {
@@ -125,6 +138,12 @@ func windowsEnterpriseEnrollmentAccounts(rows []enterpriseHookReconcileRow) []en
 			if failure := failures[windowsEnterpriseEnrollmentKey(entry.SID, entry.User, entry.UserHome)]; failure != "" {
 				account.Reason += "; failed: " + failure
 			}
+		}
+		if skip := skips[windowsEnterpriseEnrollmentKey(entry.SID, entry.User, entry.UserHome)]; skip != "" {
+			if account.Reason != "" {
+				account.Reason += "; "
+			}
+			account.Reason += "skipped: " + skip
 		}
 		for _, note := range earlier {
 			if account.Reason != "" {

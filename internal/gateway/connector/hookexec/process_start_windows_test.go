@@ -8,6 +8,7 @@ package hookexec
 import (
 	"encoding/base64"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -146,8 +147,17 @@ func TestWindowsOneCallPowerShellBridgeStillCountsItsStartup(t *testing.T) {
 		if lead := own.Sub(ProcessStartTime()); lead < 900*time.Millisecond {
 			detail := "no launching process could be read"
 			if chain := hookWrapperChain(); len(chain) > 0 {
+				wrapperLead := own.Sub(chain[0].created)
+				if wrapperLead > maxHookWrapperLead && lead == 0 {
+					// The runner, not the hook: the bridge took longer
+					// than the cap to start this process, so the hook
+					// rightly kept its own start (the budget never gets
+					// longer). This attempt cannot show the counting.
+					fmt.Fprintf(os.Stderr, "bridge startup %s exceeded the cap %s and was rightly not counted\n", wrapperLead, maxHookWrapperLead)
+					os.Exit(bridgeStartupOverCapExit)
+				}
 				detail = fmt.Sprintf("%s started %s before this process (cap %s)",
-					chain[0].image, own.Sub(chain[0].created), maxHookWrapperLead)
+					chain[0].image, wrapperLead, maxHookWrapperLead)
 			}
 			t.Fatalf("PowerShell bridge startup %s was not counted: %s", lead, detail)
 		}
@@ -161,12 +171,35 @@ func TestWindowsOneCallPowerShellBridgeStillCountsItsStartup(t *testing.T) {
 		"$hookProcess=[System.Diagnostics.Process]::Start($hookStart); " +
 		"$hookProcess.WaitForExit(); exit $hookProcess.ExitCode"
 	argv := testPowerShellBridgeArgs(script)
-	cmd := exec.Command(argv[0], argv[1:]...)
-	cmd.Env = append(os.Environ(), "DC_CF517_BRIDGE_CHILD=1")
-	if output, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("one-call PowerShell bridge: %v\n%s", err, output)
+	// A cold hosted runner took 27 s to start the bridge and its child
+	// (CI run 45105136439; about 3 s otherwise), past maxHookWrapperLead.
+	// One PowerShell start first warms the runtime, and an attempt whose
+	// bridge outlasted the cap is made again: the hook kept its own start
+	// there, as it must, so it pins nothing about the counting.
+	warm := testPowerShellBridgeArgs("exit 0")
+	if output, err := exec.Command(warm[0], warm[1:]...).CombinedOutput(); err != nil {
+		t.Fatalf("PowerShell warm-up: %v\n%s", err, output)
 	}
+	const attempts = 3
+	for attempt := 1; attempt <= attempts; attempt++ {
+		cmd := exec.Command(argv[0], argv[1:]...)
+		cmd.Env = append(os.Environ(), "DC_CF517_BRIDGE_CHILD=1")
+		output, err := cmd.CombinedOutput()
+		if err == nil {
+			return
+		}
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) || exitErr.ExitCode() != bridgeStartupOverCapExit {
+			t.Fatalf("one-call PowerShell bridge: %v\n%s", err, output)
+		}
+		t.Logf("attempt %d of %d: %s", attempt, attempts, strings.TrimSpace(string(output)))
+	}
+	t.Fatalf("the PowerShell bridge outlasted the %s cap in all %d attempts: the runner is too slow to show the counting", maxHookWrapperLead, attempts)
 }
+
+// bridgeStartupOverCapExit is the exit of a bridge child whose bridge took
+// longer than maxHookWrapperLead to start it.
+const bridgeStartupOverCapExit = 3
 
 // The live reader never names a start after this process's own creation.
 func TestProcessStartTimeIsNoLaterThanThisProcess(t *testing.T) {
