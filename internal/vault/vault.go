@@ -726,8 +726,12 @@ func (s *Store) updateWait(wait time.Duration, n need, change func(*file) error)
 	var pu pinUpdate
 	var pinErr error
 	if err == nil {
-		verified := (f.sealer == nil && p.fresh) || (f.sealer != nil && n == needValues && s.keys != nil)
-		pu, pinErr = s.checkPin(f, verified)
+		// fresh: apply seals this plain (or missing) vault with the new
+		// key. keyed: apply opens it with the key prepare checked against
+		// this header (or fails the change).
+		fresh := f.sealer == nil && p.fresh
+		keyed := f.sealer != nil && n == needValues && s.keys != nil
+		pu, pinErr = s.checkPin(f, fresh, keyed)
 	}
 	if err == nil {
 		err = p.apply(f, n)

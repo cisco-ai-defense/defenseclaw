@@ -18,6 +18,9 @@ package vault
 
 import (
 	"bytes"
+	"crypto/rand"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -180,7 +183,7 @@ func TestVaultListKeepsASwappedVaultRefused(t *testing.T) {
 		t.Fatalf("storage = %+v", st)
 	}
 	note, err := OpenWith(s.Dir(), ks).CheckPin()
-	if err == nil || note != "" || !strings.Contains(err.Error(), "not the one of your vault key") {
+	if err == nil || note != "" || !strings.Contains(err.Error(), "the file was changed") {
 		t.Fatalf("check = %q, %v", note, err)
 	}
 	if after, _ := os.ReadFile(s.PinPath()); !bytes.Equal(pinBefore, after) {
@@ -251,6 +254,90 @@ func TestDowngradedVaultWithoutKeystore(t *testing.T) {
 	if _, err := os.Stat(s.PinPath()); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("the pin was kept after the person chose a plain vault")
 	}
+	if err := capture(s); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func rewriteHeader(t *testing.T, s *Store, field, value string) {
+	t.Helper()
+	var f map[string]any
+	if err := json.Unmarshal(rawVault(t, s), &f); err != nil {
+		t.Fatal(err)
+	}
+	f["seal"].(map[string]any)[field] = value
+	b, err := json.MarshalIndent(f, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(s.Path(), b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A swapped fingerprint salt is caught: captures are refused, and `vault
+// list` finds the fingerprints do not match and pins nothing.
+func TestVaultListRefusesASwappedSalt(t *testing.T) {
+	ks := newFakeKeys()
+	s := sealedWithA(t, ks)
+	if err := capture(s); err != nil {
+		t.Fatal(err)
+	}
+	salt := make([]byte, 32)
+	if _, err := rand.Read(salt); err != nil {
+		t.Fatal(err)
+	}
+	pinBefore, _ := os.ReadFile(s.PinPath())
+	rewriteHeader(t, s, "fp_salt", base64.StdEncoding.EncodeToString(salt))
+	if err := capture(s); !errors.Is(err, ErrSealChanged) {
+		t.Fatalf("err = %v, want ErrSealChanged", err)
+	}
+	if _, err := OpenWith(s.Dir(), ks).CheckPin(); err == nil || !strings.Contains(err.Error(), "fingerprint salt") {
+		t.Fatalf("check = %v", err)
+	}
+	if after, _ := os.ReadFile(s.PinPath()); !bytes.Equal(pinBefore, after) {
+		t.Fatal("a swapped salt was pinned")
+	}
+}
+
+// A CLI change that reads the key does not replace a pin that differs from
+// the header: only `vault list` does, after checking every value.
+func TestKeyedChangeLeavesADifferingPinToVaultList(t *testing.T) {
+	ks := newFakeKeys()
+	s := sealedWithA(t, ks)
+	b, err := os.ReadFile(s.PinPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, _ := s.read()
+	if err := os.WriteFile(s.PinPath(), bytes.Replace(b, []byte(headerDigest(f.sealer.h)), []byte(strings.Repeat("0", 64)), 1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := OpenWith(s.Dir(), ks).Add(AddInput{Name: "B", Value: "value-b", Host: "api.example.com"}); !errors.Is(err, ErrSealChanged) {
+		t.Fatalf("add = %v, want ErrSealChanged", err)
+	}
+	if _, _, err := OpenWith(s.Dir(), ks).Resolve("A"); err != nil {
+		t.Fatal(err)
+	}
+	if st, _ := s.Storage(); st.Pin != "changed" {
+		t.Fatalf("a read with the key replaced a differing pin: %+v", st)
+	}
+}
+
+// A CLI change that can seal a downgraded vault seals it again and says so.
+func TestChangeResealsADowngradedVaultAndSaysSo(t *testing.T) {
+	ks := newFakeKeys()
+	s := sealedWithA(t, ks)
+	downgrade(t, s)
+	cli := OpenWith(s.Dir(), ks)
+	if _, err := cli.Add(AddInput{Name: "B", Value: "value-b", Host: "api.example.com"}); err != nil {
+		t.Fatal(err)
+	}
+	if n := cli.Notice(); !strings.Contains(n, "sealed again") {
+		t.Fatalf("notice = %q", n)
+	}
+	mustPin(t, s, pinByKey)
+	mustNotHold(t, rawVault(t, s), "value-b")
 	if err := capture(s); err != nil {
 		t.Fatal(err)
 	}

@@ -284,10 +284,10 @@ could not tell a real header from one a program rewrote. They therefore keep a
 pin: a digest of the sealed vault's header (its public key, key ID and
 fingerprint salt) in `vault-pin.json`, next to the `vault` directory (for
 example `~/.defenseclaw/vault-pin.json`), not inside it. The CLI writes the pin
-when it seals the vault and whenever it reads the key and the key matches the
-header (a vault change, `sandbox run --vault`, `vault list` after a mismatch).
-A sealed vault that has no pin yet (sealed by an earlier DefenseClaw) is pinned
-by its first capture.
+when it seals the vault, and when it reads the key for a vault that has no pin
+yet. A sealed vault that has no pin yet (sealed by an earlier DefenseClaw) is
+otherwise pinned by its first capture. Only `vault list` replaces a pin that
+differs from the vault.
 
 Before a capture, the gateway and the sandbox daemon compare the vault with
 the pin. When the header is not the pinned one, or a vault that was sealed is
@@ -299,27 +299,33 @@ has no pin and captures as before.
 
 `defenseclaw sandbox vault list` then checks the vault:
 
-- Sealed, header not the pinned one: it reads your key. When the key matches
-  the header, the pin is renewed and capture works again. When it does not,
-  the vault file was changed: list warns, nothing is pinned, and capture stays
+- Sealed, header not the pinned one: it reads your key and checks that the key
+  matches the header, that every value opens with it, and that every stored
+  fingerprint matches the header's salt. When all of that holds, the pin is
+  renewed and capture works again. When it does not, the vault file was
+  changed: list warns, nothing is pinned, and capture and vault changes stay
   off. Move `vault.json` aside; the next vault change or `sandbox run` makes a
   new sealed vault and pins it. Without the key in this session it says it
   cannot check and changes nothing.
 - Sealed before, now a plain file or gone: with a usable keystore it seals the
   vault again with a new key and pins it (check the entries: DefenseClaw did not
-  write that plain file). Without one it warns, and vault changes stop rather
-  than write a plain file. To keep a plain-file vault on purpose, set
-  `DEFENSECLAW_VAULT_STORE=file` and run `vault list`, which removes the pin.
+  write that plain file). A vault change, `sandbox setup`, `run`, `start` or
+  `connect` that can use the keystore does the same and says so. Without a
+  keystore it warns, and vault changes stop rather than write a plain file. To
+  keep a plain-file vault on purpose, set `DEFENSECLAW_VAULT_STORE=file` and run
+  `vault list`, which removes the pin.
 
 `--output json` has the result as `pin` (`changed`, `unsealed` or
 `not pinned yet`; absent when the vault matches) with `pin_note` or
 `pin_warning`.
 
 What the pin stops: a change to the vault file alone, such as a header
-rewritten in place so later captures would be sealed to someone else's key, or
-a sealed vault replaced with a plain or older copy (a restore, a sync, a tool
-that writes only that file) or deleted, so later captures would be written in
-the clear. What it does not stop: the pin is a file of your account too. A
+rewritten in place so later captures would be sealed to someone else's key, a
+sealed vault replaced with a plain copy or with one sealed under another key
+(a restore, a sync, a tool that writes only that file), or a sealed vault
+deleted, so later captures would be written in the clear. An older copy of the
+same sealed vault (same key) matches the pin, so going back to it is not
+detected. What it does not stop: the pin is a file of your account too. A
 program running as your account can rewrite the vault and the pin together, as
 it can run DefenseClaw or read the keystore while it is unlocked. Your account
 is the trust boundary, here and on a managed computer, where the sandbox

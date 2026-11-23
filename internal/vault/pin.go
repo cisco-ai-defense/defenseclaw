@@ -25,12 +25,14 @@ package vault
 // vault with it and writes nothing into a vault that does not match (no
 // value sealed to another key, no value in the clear).
 //
-// Who sets it: the CLI, whenever it read the private key and that key
-// matches the header (a change that needs the values, sandbox run --vault,
-// vault list after a mismatch), or when it seals the vault; otherwise the
-// first writer that sees a sealed vault with no pin (trust on first use).
-// A plain vault has no pin; the CLI removes it only when it is told to
-// keep a plain vault (DEFENSECLAW_VAULT_STORE=file).
+// Who sets it: the CLI when it seals the vault, and when it read the
+// private key and that key matches a header that has no pin yet (or one
+// pinned on first use); otherwise the first writer that sees a sealed vault
+// with no pin (trust on first use). A pin that differs from the header is
+// only replaced by `vault list` (CheckPin), after every value opened with
+// the key and every fingerprint matched the header's salt. A plain vault
+// has no pin; the CLI removes it only when it is told to keep a plain vault
+// (DEFENSECLAW_VAULT_STORE=file).
 //
 // What it does not stop: the pin is a file of the same account. A process
 // running as that account can rewrite the vault and the pin together, as
@@ -177,7 +179,8 @@ func (s *Store) plainAllowed() bool { return s.keys != nil && storeMode() == "fi
 
 func (s *Store) pinError(st pinState) error {
 	if st == pinUnsealed {
-		return fmt.Errorf("%w (%s); nothing is written into it until `sandbox vault list` seals it again with a key in your OS keystore", ErrSealRemoved, s.Path())
+		return fmt.Errorf("%w (%s); nothing is written into it until `sandbox vault list` seals it again with a key in your OS keystore, "+
+			"or until %s=file says to keep a plain vault", ErrSealRemoved, s.Path(), EnvStore)
 	}
 	return fmt.Errorf("%w (%s); nothing is written into it until `sandbox vault list` checks it with your vault key", ErrSealChanged, s.Path())
 }
@@ -187,27 +190,41 @@ type pinUpdate struct {
 	write  bool
 	by     string
 	remove bool
+	// resealed: a vault pinned sealed was found plain or gone, and this
+	// change seals it again with a new key.
+	resealed bool
 }
 
 // checkPin decides, under the writer lock, whether a change may write f
-// (as read, before the change) and what it does to the pin. verified: the
-// writer read the private key and it matches f's header, or it seals f
-// now with a new key.
-func (s *Store) checkPin(f *file, verified bool) (pinUpdate, error) {
+// (as read, before the change) and what it does to the pin. fresh: the
+// change seals the plain (or missing) vault f with a new key. keyed: the
+// writer read the private key and it matches f's header. A header that
+// differs from the pin is refused even with the key: only CheckPin, which
+// checks every value and fingerprint, pins a new header.
+func (s *Store) checkPin(f *file, fresh, keyed bool) (pinUpdate, error) {
 	st, p := s.comparePin(f)
-	switch {
-	case verified:
-		if st != pinMatches || p.By != pinByKey {
+	switch st {
+	case pinDiffers:
+		return pinUpdate{}, s.pinError(st)
+	case pinUnsealed:
+		switch {
+		case fresh:
+			return pinUpdate{write: true, by: pinByKey, resealed: true}, nil
+		case s.plainAllowed():
+			return pinUpdate{remove: true}, nil
+		}
+		return pinUpdate{}, s.pinError(st)
+	case pinAbsent:
+		switch {
+		case fresh, f.sealer != nil && keyed:
+			return pinUpdate{write: true, by: pinByKey}, nil
+		case f.sealer != nil:
+			return pinUpdate{write: true, by: pinByFirstUse}, nil
+		}
+	case pinMatches:
+		if keyed && p.By != pinByKey {
 			return pinUpdate{write: true, by: pinByKey}, nil
 		}
-	case st == pinDiffers:
-		return pinUpdate{}, s.pinError(st)
-	case st == pinUnsealed && s.plainAllowed():
-		return pinUpdate{remove: true}, nil
-	case st == pinUnsealed:
-		return pinUpdate{}, s.pinError(st)
-	case st == pinAbsent && f.sealer != nil:
-		return pinUpdate{write: true, by: pinByFirstUse}, nil
 	}
 	return pinUpdate{}, nil
 }
@@ -218,16 +235,21 @@ func (u pinUpdate) apply(s *Store, f *file) {
 	switch {
 	case u.write && f.sealer != nil:
 		_ = s.writePin(f.sealer.h, u.by)
+		if u.resealed {
+			s.setNotice("the vault had been sealed and was found as a plain file or gone; it is sealed again with a new key " +
+				"(check its entries: DefenseClaw did not write that plain file)")
+		}
 	case u.remove && f.sealer == nil:
 		_ = s.removePin()
 	}
 }
 
 // repin pins the vault's header once the CLI read the key and it matched
-// (Resolve and the other reads that open values): under the writer lock,
-// and only while the vault still has that header.
+// (Resolve and the other reads that open values), when it has no pin or
+// one pinned on first use: under the writer lock, and only while the
+// vault still has that header. A pin that differs is left to CheckPin.
 func (s *Store) repin(h sealHeader) {
-	if p, err := s.readPin(); err == nil && p != nil && p.Header == headerDigest(h) && p.By == pinByKey {
+	if !s.needsRepin(h) {
 		return
 	}
 	unlock, err := lockDir(s.dir, lockWait)
@@ -235,9 +257,65 @@ func (s *Store) repin(h sealHeader) {
 		return
 	}
 	defer unlock()
-	if f, err := s.read(); err == nil && f.sealer != nil && f.sealer.h == h {
+	if f, err := s.read(); err == nil && f.sealer != nil && f.sealer.h == h && s.needsRepin(h) {
 		_ = s.writePin(h, pinByKey)
 	}
+}
+
+func (s *Store) needsRepin(h sealHeader) bool {
+	p, err := s.readPin()
+	switch {
+	case err != nil:
+		return false
+	case p == nil:
+		return true
+	}
+	return p.Header == headerDigest(h) && p.By != pinByKey
+}
+
+// pinChecked pins f's header after CheckPin opened every value with the
+// key: under the writer lock, only while the vault still has that header.
+func (s *Store) pinChecked(h sealHeader) error {
+	unlock, err := lockDir(s.dir, lockWait)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	f, err := s.read()
+	if err != nil {
+		return err
+	}
+	if f.sealer == nil || f.sealer.h != h {
+		return errors.New("the vault changed while DefenseClaw checked it; run the command again")
+	}
+	return s.writePin(h, pinByKey)
+}
+
+// verifyWithKey checks a sealed vault against its key: the key matches the
+// public key, every value opens (which also binds the key id, the entry
+// name and its host), and every fingerprint is the one of its value under
+// the header's salt.
+func (s *Store) verifyWithKey(f *file) error {
+	if s.keys == nil {
+		return fmt.Errorf("%w: this process does not read the vault key", ErrKeyUnavailable)
+	}
+	ks, why, err := s.keys()
+	if err != nil {
+		return err
+	}
+	if err := s.keyInto(f, ks, why); err != nil {
+		return err
+	}
+	if err := s.openAll(f); err != nil {
+		return err
+	}
+	for i := range f.Entries {
+		r := &f.Entries[i]
+		if r.FP != "" && r.FP != f.sealer.fingerprint(r.Value) {
+			return s.damaged("its fingerprint salt is not the one its values were written with")
+		}
+	}
+	return nil
 }
 
 // PinState says how the vault compares with the pin the gateway checks
@@ -283,13 +361,16 @@ func (s *Store) CheckPin() (note string, err error) {
 	}
 	switch st, _ := s.comparePin(f); st {
 	case pinDiffers:
-		if err := s.readKey(f); err != nil {
+		if err := s.verifyWithKey(f); err != nil {
 			if errors.Is(err, ErrDamaged) {
-				return "", fmt.Errorf("the vault %s does not match the seal DefenseClaw pinned, and its public key is not the one of your vault key: "+
-					"the file was changed. Sandboxes capture nothing into it. Move it aside and add your secrets again", s.Path())
+				return "", fmt.Errorf("the vault %s does not match the seal DefenseClaw pinned, and it does not check out with your vault key (%v): "+
+					"the file was changed. Sandboxes capture nothing into it. Move it aside and add your secrets again", s.Path(), err)
 			}
 			return "", fmt.Errorf("the vault %s does not match the seal DefenseClaw pinned, and DefenseClaw cannot check it with your vault key here (%v), "+
 				"so sandboxes capture nothing into it; run this command where your keystore can be read", s.Path(), err)
+		}
+		if err := s.pinChecked(f.sealer.h); err != nil {
+			return "", fmt.Errorf("the vault %s matches your vault key, but its pin could not be written (%v), so sandboxes capture nothing into it", s.Path(), err)
 		}
 		return "the vault's seal matches your vault key: it is pinned again and sandboxes capture into it again", nil
 	case pinUnsealed:
@@ -302,9 +383,9 @@ func (s *Store) CheckPin() (note string, err error) {
 		if err := s.Seal(); err != nil {
 			return "", fmt.Errorf("the vault %s had been sealed and is now a plain file or gone; it could not be sealed again (%v), so sandboxes capture nothing into it", s.Path(), err)
 		}
-		if g, err := s.read(); err == nil && g.sealer != nil {
+		if g, err := s.read(); err == nil && g.sealer != nil && s.pinLabel(g) == "" {
 			return "the vault had been sealed and was found as a plain file or gone; it is sealed again with a new key " +
-				"(check its entries: DefenseClaw did not write the plain file)", nil
+				"(check its entries: DefenseClaw did not write that plain file)", nil
 		}
 		return "", fmt.Errorf("the vault %s had been sealed and is now a plain file or gone; sandboxes capture nothing into it until it is sealed again: "+
 			"run this command where your OS keystore can be read, or set %s=file to keep a plain vault", s.Path(), EnvStore)
