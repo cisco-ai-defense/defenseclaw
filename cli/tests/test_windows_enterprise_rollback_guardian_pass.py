@@ -14,10 +14,20 @@ that hook:
   the guard. The result then reported 54 machine_policy_not_covered and
   cov=False until the guardian's next pass.
 
-The readiness now keeps a file that is exactly DefenseClaw's last
-publication and checks it again once the restored hook is back. Once the hook
-is back, the guardian is restarted and Setup waits, bounded, for one fresh
+The readiness now takes a file that is exactly DefenseClaw's last
+publication for no hand edit (no backup, no recovery note). Once the hook is
+back, the guardian is restarted and Setup waits, bounded, for one fresh
 reconcile before the result. A real hand edit still goes through the recovery.
+
+GAP-2056: keeping the file as it was broke the rollback over a published
+1.0.10. That file names the restored hook's folder while the guard is still the
+hook, and the restored 1.0.10 guardian refuses its startup reconcile on it
+("hooks.windows_managed_dir ... does not match protected managed directory"),
+so activation never finished. The restored gateway now publishes DefenseClaw's
+own file again for the guard during the readiness, and again for the restored
+hook before the guardian restarts. The model below is that 1.0.10 guardian:
+it refuses to start while the file names another hook than the one at the
+transition path.
 """
 
 from __future__ import annotations
@@ -45,7 +55,8 @@ $real = @('Repair-DefenseClawRecoveredCodexRequirements', 'Read-DefenseClawSmall
     'Restore-DefenseClawSnapshotHookAfterActivation', 'Get-DefenseClawEarlyHookField')
 # Present only with the fix; the cases judge behavior, not names.
 $optional = @('Test-DefenseClawCodexRequirementsOwnPublication', 'Complete-DefenseClawRestoredHookGuardianPass',
-    'Invoke-DefenseClawRestoredHookGuardianReconcile', 'Start-DefenseClawRestoredGuardianAgain')
+    'Invoke-DefenseClawRestoredHookGuardianReconcile', 'Start-DefenseClawRestoredGuardianAgain',
+    'Invoke-DefenseClawRestoredHookCodexStep')
 foreach ($name in @($real + $optional)) {
     $definition = $ast.Find({
         param($node)
@@ -62,10 +73,32 @@ $script:VerifyFails = $true
 $script:DefenseClawRecoveredCodexRequirementsNotes = @()
 $script:DefenseClawRollbackTransitionHookPending = $false
 $script:DefenseClawRollbackCodexVerifyDeferred = $false
+# GAP-2056: the restored 1.0.10 gateway. The file names one hook; verify and
+# the guardian's startup reconcile refuse it unless that is the hook at the
+# transition path, and reconcile publishes it for that hook.
+$script:Model1010 = $Case -like 'restored-1010*'
+$script:GuardianStatus = if ($Case -ceq 'restored-1010-stopped') { 'Stopped' } else { 'Running' }
+function Get-NamedHook { ([IO.File]::ReadAllText($layout.CodexMachinePolicyPath)).Trim() -replace '^managed_hook = ', '' }
+function Get-LiveHook { [IO.File]::ReadAllText($layout.HookPath) }
+function Assert-RestoredGuardianStarts {
+    if ((Get-NamedHook) -cne (Get-LiveHook)) { $script:calls.Add('guardian-refused') }
+}
 function Test-DefenseClawStandaloneProfile { $true }
 function Invoke-DefenseClawCodexRequirementsCommand {
     param($Layout, $GatewayServiceName, $Action, [string]$BaseFile = '', [switch]$Teardown)
     $script:calls.Add("codex-$Action")
+    if ($script:Model1010) {
+        if ($Action -ceq 'verify' -and (Get-NamedHook) -cne (Get-LiveHook)) {
+            throw "Codex requirements verify failed: hooks.windows_managed_dir names $(Get-NamedHook), not $(Get-LiveHook)"
+        }
+        if ($Action -ceq 'reconcile') {
+            [IO.File]::WriteAllText($Layout.CodexMachinePolicyPath, "managed_hook = $(Get-LiveHook)`n")
+            $record = Get-Content -Raw -LiteralPath $Layout.CodexRequirementsOwnershipPath | ConvertFrom-Json
+            $record.postimage_sha256 = Get-Sha $Layout.CodexMachinePolicyPath
+            [IO.File]::WriteAllText($Layout.CodexRequirementsOwnershipPath, ($record | ConvertTo-Json))
+        }
+        return [pscustomobject]@{ ok = $true }
+    }
     if ($Action -ceq 'verify' -and $script:VerifyFails) {
         throw 'Codex requirements verify failed: hooks.windows_managed_dir="C:\\Program Files\\Cisco\\DefenseClaw\\bin" does not match protected managed directory "C:\\Program Files\\Cisco\\DefenseClaw\\bin\\hooks\\6081ba06f39a5eb8"'
     }
@@ -92,10 +125,11 @@ function Install-DefenseClawFileAtomic {
 function Wait-DefenseClawFreshGuardianReconcile {
     param($Layout, $GatewayServiceName, $GuardianServiceName, $ExpectedManifestSHA256, $TimeoutSeconds, [switch]$AllowFailedTargets)
     $script:calls.Add("guardian-wait-$GuardianServiceName-$([bool]$AllowFailedTargets)")
+    if ($script:Model1010) { Assert-RestoredGuardianStarts }
 }
 function Start-DefenseClawService { param($Name) $script:calls.Add("start-$Name") }
 # GAP-2017: the pass restarts only a running guardian that can start again.
-function Get-DefenseClawServiceChecked { param($Name) [pscustomobject]@{ Name = $Name; Status = 'Running' } }
+function Get-DefenseClawServiceChecked { param($Name) [pscustomobject]@{ Name = $Name; Status = $script:GuardianStatus } }
 function Get-DefenseClawServiceStartMode { param($Name) 2 }
 function Test-DefenseClawRollbackHeldMessage { param($Message) $false }
 function Add-DefenseClawRollbackDeferredHold { param($Message) $script:calls.Add('held') }
@@ -116,7 +150,13 @@ $layout = @{
     StateRoot = $state
     HookPath = (Join-Path $Scratch 'bin/defenseclaw-hook.exe')
 }
-[IO.File]::WriteAllText($requirements, "[[hooks.SessionStart]]`n# defenseclaw-hook published`n")
+if ($script:Model1010) {
+    # The 1.0.10 install published the file for its own hook before the upgrade.
+    [IO.File]::WriteAllText($requirements, "managed_hook = previous release hook`n")
+}
+else {
+    [IO.File]::WriteAllText($requirements, "[[hooks.SessionStart]]`n# defenseclaw-hook published`n")
+}
 $published = Get-Sha $requirements
 if ($Case -ceq 'handedit') {
     # An administrator changed the file after DefenseClaw published it.
@@ -133,6 +173,28 @@ $before = Get-Sha $requirements
 if ($Case -in @('keep', 'handedit')) {
     $script:DefenseClawRollbackTransitionHookPending = $true
     Repair-DefenseClawRecoveredCodexRequirements -Layout $layout -GatewayServiceName 'DefenseClawGateway'
+}
+elseif ($script:Model1010) {
+    # The rollback restored the 1.0.10 payload and requirements.toml; the
+    # transaction's guard is still the hook until after activation.
+    $old = Join-Path $state 'hook.bak'
+    [IO.File]::WriteAllText($old, 'previous release hook')
+    [IO.File]::WriteAllText($layout.HookPath, 'transaction guard hook')
+    $snapshot = [pscustomobject]@{
+        early_hook_guard_copy = 'guard.bak'
+        early_hook_preimage_sha256 = (Get-Sha $old)
+        gateway_service = 'DefenseClawGateway'
+        guardian_service = 'DefenseClawHookGuardian'
+        files = @([pscustomobject]@{ path = $layout.HookPath; existed = $true; backup = $old })
+    }
+    $script:DefenseClawRollbackTransitionHookPending = $true
+    Repair-DefenseClawRecoveredCodexRequirements -Layout $layout -GatewayServiceName 'DefenseClawGateway'
+    $script:DefenseClawRollbackTransitionHookPending = $false
+    # Activation: the restored guardian's startup reconcile.
+    $script:calls.Add('activation')
+    Assert-RestoredGuardianStarts
+    Restore-DefenseClawSnapshotHookAfterActivation -Snapshot $snapshot -Layout $layout
+    $script:calls.Add("final-names-$(Get-NamedHook)")
 }
 elseif ($Case -in @('restore', 'restore-same')) {
     $old = Join-Path $state 'hook.bak'
@@ -180,12 +242,13 @@ def _run(tmp_path: Path, case: str) -> dict:
     return json.loads(completed.stdout.strip().splitlines()[-1])
 
 
-def test_the_rollback_keeps_the_requirements_defenseclaw_published_while_the_guard_is_the_hook(tmp_path: Path) -> None:
+def test_the_requirements_defenseclaw_published_are_no_hand_edit_while_the_guard_is_the_hook(tmp_path: Path) -> None:
     result = _run(tmp_path, "keep")
     assert result["backups"] == 0, result
-    assert result["unchanged"] is True, result
-    assert "codex-reconcile" not in result["calls"], result
     assert result["notes"] == 0, result
+    assert "event-defenseclaw_recover" not in result["calls"], result
+    # GAP-2056: published again for the guard by the restored gateway.
+    assert "codex-reconcile" in result["calls"], result
     assert result["deferred"] is True, result
 
 
@@ -210,3 +273,32 @@ def test_no_extra_guardian_pass_when_the_previous_hook_was_already_in_place(tmp_
     calls = _run(tmp_path, "restore-same")["calls"]
     assert not any(call.startswith("guardian-wait-") for call in calls), calls
     assert "codex-verify" not in calls, calls
+
+
+def test_the_rollback_over_published_1_0_10_activates_and_ends_on_the_restored_hook(tmp_path: Path) -> None:
+    # GAP-2056 (cap-f2005a): the restored 1.0.10 guardian refused its startup
+    # reconcile, so the rollback never finished.
+    result = _run(tmp_path, "restored-1010")
+    calls = result["calls"]
+    assert "guardian-refused" not in calls, calls
+    wait = "guardian-wait-DefenseClawHookGuardian-True"
+    assert calls.count(wait) == 1, calls
+    # The file names the restored hook before the guardian restarts for it.
+    assert calls.index("hook-install") < max(i for i, c in enumerate(calls) if c == "codex-reconcile") < calls.index(wait), calls
+    assert "codex-verify" in calls[calls.index(wait):], calls
+    assert calls[-1] == "final-names-previous release hook", calls
+    assert result["backups"] == 0, result
+    assert result["notes"] == 0, result
+    assert "event-defenseclaw_recover" not in calls, calls
+    assert result["deferred"] is False, result
+
+
+def test_the_rollback_over_published_1_0_10_ends_on_the_restored_hook_with_the_guardian_stopped(tmp_path: Path) -> None:
+    # GAP-2017: a guardian the rollback left stopped gets no pass; the file
+    # still goes back to the restored hook.
+    result = _run(tmp_path, "restored-1010-stopped")
+    calls = result["calls"]
+    assert not any(call.startswith("guardian-wait-") for call in calls), calls
+    assert calls[-1] == "final-names-previous release hook", calls
+    assert result["backups"] == 0, result
+    assert result["notes"] == 0, result
