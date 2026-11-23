@@ -679,10 +679,30 @@ func NextReset(period string, now time.Time) time.Time {
 	}
 }
 
-// prefixSum is one budget's leader sums and the first day they cover.
+// prefixSum is one budget's leader sums, the first day they cover and the
+// limit its Exceeded counts against.
 type prefixSum struct {
 	PrefixSum
-	from int32
+	from  int32
+	limit float64
+}
+
+// exceededAt is how many keys the sums show at or over limit. Exceeded
+// counts against the read's limit; after a limit change (until the next
+// read, at most 2 intervals) it is recomputed from what the sums still
+// tell (GAP-0941): none when limit is above the highest key, and else at
+// least the highest key, plus every key over a higher old limit.
+func (s prefixSum) exceededAt(limit float64) int {
+	switch {
+	case limit <= 0 || s.Subjects == 0 || s.Peak < limit:
+		return 0
+	case limit == s.limit:
+		return s.Exceeded
+	case limit < s.limit:
+		return max(s.Exceeded, 1)
+	default:
+		return 1
+	}
 }
 
 // SetPrefixSums keeps the leader's per-budget sums of q until until.
@@ -690,14 +710,14 @@ func (l *Ledger) SetPrefixSums(q []SumQuery, sums []PrefixSum, until time.Time) 
 	if l == nil {
 		return
 	}
-	from := make(map[string]int32, len(q))
+	asked := make(map[string]SumQuery, len(q))
 	for _, s := range q {
-		from[s.Prefix] = dayNumber(s.Since)
+		asked[s.Prefix] = s
 	}
 	m := make(map[string]prefixSum, len(sums))
 	for _, s := range sums {
-		if f, ok := from[s.Prefix]; ok {
-			m[s.Prefix] = prefixSum{PrefixSum: s, from: f}
+		if a, ok := asked[s.Prefix]; ok {
+			m[s.Prefix] = prefixSum{PrefixSum: s, from: dayNumber(a.Since), limit: a.Limit}
 		}
 	}
 	l.mu.Lock()
@@ -817,12 +837,14 @@ func (l *Ledger) Snapshot(prefix, period string, limit float64, now time.Time) (
 	// keys, so the view takes the leader's sums of every replica's stored
 	// spend, read right after this replica's push, once per interval
 	// (GAP-0894). Each figure is the larger of both: this replica's newest
-	// spend shows at once, the others' within one interval.
+	// spend shows at once, the others' within one interval. Exceeded is
+	// taken against today's limit, not the one the sums were read with
+	// (GAP-0941).
 	if s, ok := l.sums[prefix]; ok && s.from == from && !now.After(l.sumsUntil) {
 		snap.Total = max(snap.Total, s.Total)
 		snap.Peak = max(snap.Peak, s.Peak)
 		snap.Subjects = max(snap.Subjects, s.Subjects)
-		snap.Exceeded = max(snap.Exceeded, s.Exceeded)
+		snap.Exceeded = max(snap.Exceeded, s.exceededAt(limit))
 	}
 	return snap, true
 }
