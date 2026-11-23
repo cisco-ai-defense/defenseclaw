@@ -169,7 +169,7 @@ func TestStartRefusesAChangedVaultGrant(t *testing.T) {
 	if err := st.Remove("PAY_KEY"); err != nil {
 		t.Fatal(err)
 	}
-	if err := ta.vaultGrantsCurrent(sb); err == nil || !strings.Contains(err.Error(), "no such secret") {
+	if err := ta.vaultGrantsCurrent(sb); err == nil || !strings.Contains(err.Error(), "no longer in your vault") {
 		t.Fatalf("removed grant = %v", err)
 	}
 }
