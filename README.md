@@ -27,7 +27,7 @@ DefenseClaw combines a Python operator CLI, a Go gateway, connector hooks, polic
 scanners, and observability exporters. It is an enforcement and evidence layer
 for AI agents.
 
-A hook blocks when the gateway gives no decision. When the account's gateway is
+A running gateway that gives no decision in time blocks the call. When the account's gateway is
 stopped, the default and permissive policies let a call run with a warning and
 the strict policy blocks; an explicit `guardrail.hook_fail_mode` overrides this.
 Cisco Secure Client deployments default hook delivery to open when no policy is
