@@ -21,6 +21,7 @@ package workspace
 
 import (
 	"context"
+	"encoding/json"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -35,6 +36,21 @@ import (
 // rvhardCreds is a credential helper that answers like the actor image's.
 const rvhardCreds = "!f() { echo username=x-access-token; echo password=placeholder-not-a-secret; }; f"
 
+// rvhardImageHelper stands in for the actor image's root-owned helper.
+func rvhardImageHelper(t *testing.T) {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "git-credential-defenseclaw")
+	if err := os.WriteFile(p, []byte(`#!/bin/sh
+cat >/dev/null
+if [ "$1" = get ]; then printf 'username=x-access-token\npassword=placeholder-not-a-secret\n'; fi
+`), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	old := cloneImageCredHelper
+	cloneImageCredHelper = p
+	t.Cleanup(func() { cloneImageCredHelper = old })
+}
+
 // lfsRecorder answers every request 401 until it carries credentials and
 // records each request's host and Authorization header. Used as an http
 // proxy, it sees what git-lfs would send to any http host.
@@ -46,8 +62,9 @@ type lfsRecorder struct {
 func (l *lfsRecorder) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	l.mu.Lock()
 	l.seen = append(l.seen, r.Host+" "+r.Header.Get("Authorization"))
+	count := len(l.seen)
 	l.mu.Unlock()
-	if r.Header.Get("Authorization") == "" {
+	if r.Header.Get("Authorization") == "" && count == 1 {
 		w.Header().Set("LFS-Authenticate", `Basic realm="lfs"`)
 		w.WriteHeader(http.StatusUnauthorized)
 		return
@@ -77,6 +94,7 @@ func TestRVHARDCloneLFSHTTPEndpointRefused(t *testing.T) {
 	// git (curl) ignores HTTP_PROXY; git-lfs sends every http request there.
 	t.Setenv("HTTP_PROXY", proxy.URL)
 	t.Setenv("NO_PROXY", "")
+	rvhardImageHelper(t)
 	gitEnv(t, "credential.helper", rvhardCreds,
 		"filter.lfs.smudge", "git-lfs smudge -- %f", "filter.lfs.process", "git-lfs filter-process",
 		"filter.lfs.required", "true")
@@ -114,6 +132,7 @@ func TestRVHARDCloneLFSLoopbackEndpointFetched(t *testing.T) {
 	o, srv := hardeningServerWith(t, func(o *hcEnv, src, _ string) {
 		hcWrite(t, src, ".lfsconfig", "[lfs]\n\turl = "+lfs.URL+"/lfs\n")
 	})
+	rvhardImageHelper(t)
 	gitEnv(t, "credential.helper", rvhardCreds,
 		"filter.lfs.smudge", "git-lfs smudge -- %f", "filter.lfs.process", "git-lfs filter-process",
 		"filter.lfs.required", "true")
@@ -140,5 +159,119 @@ func TestRVHARDCloneLoopbackTopHTTPSubmoduleRefused(t *testing.T) {
 	_, err := Clone(context.Background(), c, o.data, "sub", srv.URL+"/app.git", "", CloneOptions{Submodules: true})
 	if err == nil || !strings.Contains(err.Error(), "not allowed") {
 		t.Fatalf("Clone err = %v, want the http transport refused for the non-loopback submodule", err)
+	}
+}
+
+// GAP-0927: the helper guard also applies to LFS in a checked-out submodule.
+func TestRVHARDSubmoduleLFSHTTPHrefDoesNotGetCredential(t *testing.T) {
+	if _, err := exec.LookPath("git-lfs"); err != nil {
+		t.Skip("git-lfs not installed")
+	}
+	rec := &lfsRecorder{}
+	proxy := httptest.NewServer(rec)
+	t.Cleanup(proxy.Close)
+	batch := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/vnd.git-lfs+json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"transfer": "basic", "objects": []any{
+			map[string]any{"oid": "4d7a214614ab2935c943f9e0ff69d22eadbb8f32b1258daaa5e2ca24d17e2393", "size": 12345,
+				"actions": map[string]any{"download": map[string]string{"href": "http://lfs-media.test/obj"}}},
+		}})
+	}))
+	t.Cleanup(batch.Close)
+	o, srv := hardeningServerWithLib(t, func(o *hcEnv, lib, _ string) {
+		hcWrite(t, lib, ".gitattributes", "*.bin filter=lfs diff=lfs merge=lfs -text\n")
+		hcWrite(t, lib, "model.bin", hardeningPointer)
+		hcWrite(t, lib, ".lfsconfig", "[lfs]\n\turl = "+batch.URL+"/lfs\n")
+	}, nil)
+	t.Setenv("HTTP_PROXY", proxy.URL)
+	t.Setenv("NO_PROXY", "")
+	rvhardImageHelper(t)
+	gitEnv(t, "credential.helper", rvhardCreds,
+		"filter.lfs.smudge", "git-lfs smudge -- %f", "filter.lfs.process", "git-lfs filter-process",
+		"filter.lfs.required", "true", "lfs.transfer.maxretries", "1", "lfs.transfer.maxretrydelay", "0")
+	_, c := hcActor(t)
+	res, err := Clone(context.Background(), c, o.data, "sub-lfs", srv.URL+"/app.git", "", CloneOptions{Submodules: true, LFS: true})
+	if err != nil {
+		t.Fatalf("Clone: %v", err)
+	}
+	if len(rec.requests()) == 0 {
+		t.Fatal("the submodule LFS object href was not requested")
+	}
+	for _, request := range rec.requests() {
+		if strings.Contains(request, "Basic ") {
+			t.Errorf("credential sent to the submodule's plain-http object href: %q", request)
+		}
+	}
+	if !strings.Contains(strings.Join(res.Warnings, "\n"), "lib") {
+		t.Errorf("submodule LFS warning missing: %q", res.Warnings)
+	}
+	got, err := os.ReadFile(filepath.Join(res.Dir, "lib", "model.bin"))
+	if err != nil || string(got) != hardeningPointer {
+		t.Errorf("submodule LFS file = %q (%v), want pointer", got, err)
+	}
+}
+
+// GAP-0927 probe: an allowed (loopback here; https behaves the same in
+// git-lfs) batch endpoint answers with a plain-http object href on another
+// host, which answers 401. Does git-lfs send the helper placeholder there?
+func TestRVHARD2LFSHTTPHrefAfter401(t *testing.T) {
+	if _, err := exec.LookPath("git-lfs"); err != nil {
+		t.Skip("git-lfs not installed")
+	}
+	for _, batchAuth := range []bool{false, true} {
+		rec := &lfsRecorder{}
+		proxy := httptest.NewServer(rec)
+		batch := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if batchAuth && r.Header.Get("Authorization") == "" {
+				w.Header().Set("LFS-Authenticate", `Basic realm="lfs"`)
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			var in struct {
+				Objects []struct {
+					Oid  string `json:"oid"`
+					Size int64  `json:"size"`
+				} `json:"objects"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&in)
+			type act struct {
+				Href string `json:"href"`
+			}
+			var objs []map[string]any
+			for _, o := range in.Objects {
+				objs = append(objs, map[string]any{"oid": o.Oid, "size": o.Size,
+					"actions": map[string]any{"download": act{Href: "http://lfs-media.test/obj/" + o.Oid}}})
+			}
+			w.Header().Set("Content-Type", "application/vnd.git-lfs+json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"transfer": "basic", "objects": objs})
+		}))
+		o, srv := hardeningServerWith(t, func(o *hcEnv, src, _ string) {
+			hcWrite(t, src, ".lfsconfig", "[lfs]\n\turl = "+batch.URL+"/lfs\n")
+		})
+		t.Setenv("HTTP_PROXY", proxy.URL)
+		t.Setenv("NO_PROXY", "")
+		rvhardImageHelper(t)
+		gitEnv(t, "credential.helper", rvhardCreds,
+			"filter.lfs.smudge", "git-lfs smudge -- %f", "filter.lfs.process", "git-lfs filter-process",
+			"filter.lfs.required", "true", "lfs.transfer.maxretries", "1", "lfs.transfer.maxretrydelay", "0")
+		_, c := hcActor(t)
+		res, err := Clone(context.Background(), c, o.data, "lfs", srv.URL+"/app.git", "", CloneOptions{LFS: true})
+		if err != nil {
+			t.Fatalf("batchAuth=%v: Clone: %v", batchAuth, err)
+		}
+		if len(res.Warnings) == 0 {
+			t.Errorf("batchAuth=%v: want an LFS warning", batchAuth)
+		}
+		leaked := false
+		for _, r := range rec.requests() {
+			if strings.Contains(r, "Basic ") {
+				leaked = true
+			}
+		}
+		if leaked {
+			t.Errorf("batchAuth=%v: credential placeholder went to plain-http object href", batchAuth)
+		}
+		proxy.Close()
+		batch.Close()
 	}
 }

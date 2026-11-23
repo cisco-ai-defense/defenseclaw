@@ -34,6 +34,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	osw "github.com/defenseclaw/defenseclaw/internal/openshell/workspace"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/kit"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/reasons"
 )
 
@@ -45,6 +46,46 @@ import (
 // token is bound to. Nothing of this computer's git credentials is used.
 
 const cloneTimeout = 15 * time.Minute
+
+// The actor image owns this helper. Tests replace the path with a fixture
+// that gives the same placeholder without writing into the actor image.
+var cloneImageCredHelper = kit.CredHelper
+
+// cloneCredentialGuard resets every inherited helper, then installs a wrapper
+// for this clone operation. In particular, git-lfs asks for credentials for
+// object hrefs supplied by a batch server, not just the checked endpoint.
+// The wrapper never answers a request over plain http outside loopback.
+func cloneCredentialGuard() []string {
+	wrapper := `!f() {
+input=
+protocol=
+host=
+while IFS= read -r line && [ -n "$line" ]; do
+  input="$input$line
+"
+  case "$line" in
+  protocol=*) protocol=${line#protocol=} ;;
+  host=*) host=${line#host=} ;;
+  esac
+done
+case "$protocol" in
+https) ;;
+http)
+  case "$host" in
+  localhost|localhost:*|'[::1]'|'[::1]':*) ;;
+  127.*)
+    addr=${host%%:*}
+    printf '%s\n' "$addr" | awk -F. 'NF == 4 && $1 == 127 && $2 ~ /^[0-9]+$/ && $3 ~ /^[0-9]+$/ && $4 ~ /^[0-9]+$/ && $2 <= 255 && $3 <= 255 && $4 <= 255 { ok=1 } END { exit !ok }' || exit 0
+    ;;
+  *) exit 0 ;;
+  esac
+  ;;
+*) exit 0 ;;
+esac
+printf '%s\n\n' "$input" | "` + cloneImageCredHelper + `" "$@"
+}; f`
+	return []string{"-c", "credential.helper=", "-c", "credential.helper=" + wrapper}
+}
 
 // CloneResult is where a clone landed in the actor. Note, when set, says
 // why pull will not be able to review the agent's work on it.
@@ -238,14 +279,14 @@ func Clone(ctx context.Context, c *Client, dataDir, name, rawURL, ref string, op
 		_, err := call(nil, argv...)
 		return err
 	}
-	// The image's credential helper stays: its placeholder is what egress
-	// swaps for the bound token. No prompt, no local or ext transport.
-	guard := []string{"git", "-c", "protocol.file.allow=never", "-c", "protocol.ext.allow=never"}
+	// The wrapper lets only HTTPS and loopback HTTP ask the image helper.
+	// No prompt, no local or ext transport.
+	guard := append([]string{"git", "-c", "protocol.file.allow=never", "-c", "protocol.ext.allow=never"}, cloneCredentialGuard()...)
 	if err := run(append(slices.Clone(guard), "clone", "--quiet", "--", rawURL, dir)...); err != nil {
 		return nil, err
 	}
 	if ref != "" {
-		if err := run("git", "-C", dir, "-c", "advice.detachedHead=false", "checkout", "--quiet", ref, "--"); err != nil {
+		if err := run(append(slices.Clone(guard), "-C", dir, "-c", "advice.detachedHead=false", "checkout", "--quiet", ref, "--")...); err != nil {
 			return nil, err
 		}
 	}
@@ -445,7 +486,9 @@ func cloneLFSFetch(ctx context.Context, c *Client, root, dir string, env map[str
 			warns = append(warns, notFetched(p, why))
 			continue
 		}
-		pull, err := c.Exec(ctx, "", osw.ExecRequest{Argv: []string{"git", "-C", path.Join(dir, p), "-c", "lfs.url=" + ep, "lfs", "pull"}, Workdir: root, Env: pullEnv, Timeout: cloneTimeout})
+		argv := append([]string{"git"}, cloneCredentialGuard()...)
+		argv = append(argv, "-C", path.Join(dir, p), "-c", "lfs.url="+ep, "lfs", "pull")
+		pull, err := c.Exec(ctx, "", osw.ExecRequest{Argv: argv, Workdir: root, Env: pullEnv, Timeout: cloneTimeout})
 		switch {
 		case err != nil:
 			warns = append(warns, notFetched(p, lastLine(err.Error())))

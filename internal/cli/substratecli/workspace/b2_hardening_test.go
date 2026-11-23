@@ -43,6 +43,11 @@ func hardeningServer(t *testing.T) (*hcEnv, *httptest.Server) {
 // hardeningServerWith is hardeningServer with mod run on the app source
 // (the server is already up at srvURL) before the app is committed.
 func hardeningServerWith(t *testing.T, mod func(o *hcEnv, src, srvURL string)) (*hcEnv, *httptest.Server) {
+	return hardeningServerWithLib(t, nil, mod)
+}
+
+// hardeningServerWithLib also permits a test to put LFS files in the submodule.
+func hardeningServerWithLib(t *testing.T, modLib, modApp func(o *hcEnv, src, srvURL string)) (*hcEnv, *httptest.Server) {
 	t.Helper()
 	git := b2NeedGit(t)
 	out, _ := exec.Command(git, "--exec-path").Output()
@@ -58,6 +63,9 @@ func hardeningServerWith(t *testing.T, mod func(o *hcEnv, src, srvURL string)) (
 	_ = os.MkdirAll(lib, 0o755)
 	o.git(lib, "init", "-q", "-b", "main")
 	hcWrite(t, lib, "lib.txt", "from the submodule\n")
+	if modLib != nil {
+		modLib(o, lib, srv.URL)
+	}
 	o.git(lib, "add", ".")
 	o.git(lib, "commit", "-qm", "lib")
 	o.git(served, "clone", "-q", "--bare", lib, filepath.Join(served, "lib.git"))
@@ -68,8 +76,8 @@ func hardeningServerWith(t *testing.T, mod func(o *hcEnv, src, srvURL string)) (
 	o.git(src, "config", "--file", ".gitmodules", "submodule.lib.url", "../lib.git")
 	hcWrite(t, src, ".gitattributes", "*.bin filter=lfs diff=lfs merge=lfs -text\n")
 	hcWrite(t, src, "model.bin", hardeningPointer)
-	if mod != nil {
-		mod(o, src, srv.URL)
+	if modApp != nil {
+		modApp(o, src, srv.URL)
 	}
 	o.git(src, "add", ".")
 	o.git(src, "commit", "-qm", "app")
