@@ -96,7 +96,7 @@ var (
 	admin = identity.Person{Kind: identity.PersonHuman, Issuer: "https://idp.example", Subject: "root", Groups: []string{"dc-admins"}}
 )
 
-func newSubstrateFixture(t *testing.T, mutate ...func(*SubstrateConfig)) *substrateFixture {
+func newSubstrateFixture(t testing.TB, mutate ...func(*SubstrateConfig)) *substrateFixture {
 	t.Helper()
 	cfg := &config.Config{DataDir: t.TempDir(), Gateway: config.GatewayConfig{Token: sandboxTestMasterToken}}
 	// The proxy resolves the guardrail profiles the process's API server
@@ -183,7 +183,7 @@ func (f substrateActivityFunc) ObserveActivity(kind, atespace, uid string, _ tim
 	f(kind, atespace, uid)
 }
 
-func (f *substrateFixture) do(t *testing.T, h http.Handler, method, path, token, body string, headers ...string) *httptest.ResponseRecorder {
+func (f *substrateFixture) do(t testing.TB, h http.Handler, method, path, token, body string, headers ...string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(method, path, strings.NewReader(body))
 	req.RemoteAddr = "10.0.0.7:43210"

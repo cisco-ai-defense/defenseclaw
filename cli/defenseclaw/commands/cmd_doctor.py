@@ -157,6 +157,10 @@ from defenseclaw.file_permissions import (
 )
 from defenseclaw.gateway import gateway_api_client_host
 from defenseclaw.inventory.plugin_identity import is_link_or_reparse
+from defenseclaw.notification_capabilities import (
+    desktop_notification_capability,
+    desktop_notifier_tool_missing,
+)
 from defenseclaw.openclaw_presence import (
     OPENCLAW_NOT_INSTALLED_DETAIL,
     openclaw_implied_but_not_installed,
@@ -16650,6 +16654,50 @@ def _endpoint_is_loopback(endpoint: str) -> bool:
     return endpoint_is_loopback(endpoint)
 
 
+def _check_substrate_notifier(cfg, r: _DoctorResult, *, system: str | None = None, which=None) -> None:
+    """Doctor row for the desktop notifier ``substrate watch`` uses.
+
+    Mirrors the Go ``substrate doctor`` ``notifier`` row: off is a skip, a
+    missing tool is a warning with the way to install it, never a failure.
+    Only runs when Agent Substrate is on.
+    """
+    if not getattr(getattr(cfg, "substrate", None), "enabled", False):
+        return
+    label = "Substrate notifier"
+    capab = desktop_notification_capability(system)
+    note = getattr(cfg, "notifications", None)
+    sub = getattr(note, "substrate", None)
+    if not capab.supported:
+        _emit("skip", label, f"not checked: {capab.unsupported_reason}", r=r)
+    elif getattr(getattr(cfg.substrate, "activity", None), "notifications", "") == "off":
+        _emit("skip", label, "an administrator turned notifications off (substrate.activity.notifications: off)", r=r)
+    elif not getattr(note, "enabled", False):
+        _emit(
+            "skip",
+            label,
+            "desktop notifications are off (notifications.enabled is false); substrate watch prints only",
+            r=r,
+        )
+    elif sub is not None and not (sub.asks or sub.task_end):
+        _emit("skip", label, "notifications.substrate.asks and notifications.substrate.task_end are both off", r=r)
+    else:
+        kwargs = {"which": which} if which is not None else {}
+        missing = desktop_notifier_tool_missing(system, **kwargs)
+        if not missing:
+            _emit("pass", label, f"desktop notifications can be shown with {capab.provider}", r=r)
+        else:
+            fix = f"install {missing}"
+            if capab.system == "linux":
+                fix = "install notify-send (Debian and Ubuntu: apt install libnotify-bin; RHEL: dnf install libnotify)"
+            _emit(
+                "warn",
+                label,
+                f"{missing} is not installed, so substrate watch cannot show desktop notifications",
+                r=r,
+                remediation=fix,
+            )
+
+
 def _check_webhooks(cfg, r: _DoctorResult) -> None:
     """Validate every entry in ``webhooks[]`` (notifier webhooks).
 
@@ -17378,6 +17426,7 @@ def doctor(
         _doctor_subsection("Webhooks")
     r.set_section("webhooks")
     _check_webhooks(cfg, r)
+    _check_substrate_notifier(cfg, r)
     if not json_out:
         _doctor_subsection("Sandbox")
     r.set_section("sandbox")
