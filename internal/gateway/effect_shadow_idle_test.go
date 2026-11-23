@@ -110,14 +110,41 @@ func setParentStepIsTextIdle(t testing.TB, text bool) func() {
 	return idleOverride(t, func() func() { return hookpaths.SetParentStepIsText(text) })
 }
 
+// setIdle sets *p to v with every shadow run idle and returns the restore of
+// the value it replaced, which also waits for the runs.
+func setIdle[T any](t testing.TB, p *T, v T) (restore func()) {
+	t.Helper()
+	var prev T
+	withEffectShadowIdle(t, func() { prev, *p = *p, v })
+	return func() { withEffectShadowIdle(t, func() { *p = prev }) }
+}
+
+// The three gateway variables a shadow run reads (effectResolverOverride,
+// effectShadowFaultHook, effectShadowTimeCap) are set and restored only through
+// these, so a test never writes one while a run of an earlier test reads it.
+
+func setEffectResolverIdle(t testing.TB, resolver func(string) (string, bool)) func() {
+	t.Helper()
+	return setIdle(t, &effectResolverOverride, resolver)
+}
+
+func setEffectShadowFaultHookIdle(t testing.TB, hook func()) func() {
+	t.Helper()
+	return setIdle(t, &effectShadowFaultHook, hook)
+}
+
+func setEffectShadowTimeCapIdle(t testing.TB, limit time.Duration) func() {
+	t.Helper()
+	return setIdle(t, &effectShadowTimeCap, limit)
+}
+
 // A shadow run in flight keeps an override from being set until it finished,
 // and the run's reads happen before the override.
 func TestGAP1913OverrideWaitsForAShadowRunInFlight(t *testing.T) {
 	hold := make(chan struct{})
 	var finished atomic.Bool
 	// The hook variable is read by every run, so it is set with them idle too.
-	withEffectShadowIdle(t, func() { effectShadowFaultHook = func() { <-hold } })
-	t.Cleanup(func() { withEffectShadowIdle(t, func() { effectShadowFaultHook = nil }) })
+	t.Cleanup(setEffectShadowFaultHookIdle(t, func() { <-hold }))
 	scheduleEffectShadow(shadowLiveRequest(shadowLiveWrite), effectRulesShadow, tierRestricted,
 		func(EffectShadowResult) { finished.Store(true) })
 	if len(effectShadowSlots) == 0 {
@@ -163,16 +190,27 @@ func TestGAP1913ConcurrentOverridesDoNotDeadlock(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("concurrent withEffectShadowIdle calls did not finish")
 	}
-	if len(effectShadowSlots) != 0 {
-		t.Fatalf("%d slot(s) left held", len(effectShadowSlots))
+	// A run an earlier test left in flight holds a slot until it read, so wait
+	// for the slots to come back before asserting that none stayed held.
+	for deadline := time.Now().Add(effectShadowIdleWait); len(effectShadowSlots) != 0; time.Sleep(5 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("%d slot(s) left held", len(effectShadowSlots))
+		}
 	}
 }
 
 // No gateway test sets a hookpaths test override directly: the override goes
 // through the *Idle wrappers above, or an earlier test's shadow run races it.
+// The same holds for the three gateway variables a shadow run reads
+// (effectResolverOverride, effectShadowFaultHook, effectShadowTimeCap): a test
+// writes them through setEffectResolverIdle, setEffectShadowFaultHookIdle and
+// setEffectShadowTimeCapIdle only. A read of one is fine.
 // TestMain sets its overrides before any test and marks the line gap1913-ok.
 func TestGAP1913GatewayTestsSetHookpathsOverridesIdle(t *testing.T) {
 	direct := regexp.MustCompile(`hookpaths\.(\w+ForTests?|SetParentStepIsText)\(`)
+	const shadowVars = `(?:effectResolverOverride|effectShadowFaultHook|effectShadowTimeCap)`
+	// An assignment (=, :=, +=, ++ and the like) or the address taken for a write.
+	directVar := regexp.MustCompile(`\b` + shadowVars + `\b\s*(?:=[^=]|:=|[-+*/|&^%]=|\+\+|--)|&\s*` + shadowVars + `\b`)
 	files, err := filepath.Glob("*_test.go")
 	if err != nil || len(files) == 0 {
 		t.Fatalf("no gateway test files read: %v", err)
@@ -191,6 +229,9 @@ func TestGAP1913GatewayTestsSetHookpathsOverridesIdle(t *testing.T) {
 			}
 			if direct.MatchString(line) && !strings.Contains(line, "gap1913-ok") {
 				t.Errorf("%s:%d sets a hookpaths override directly (rel-1-0-11:GAP-1913): use the *Idle wrapper of effect_shadow_idle_test.go", file, n+1)
+			}
+			if directVar.MatchString(line) && !strings.Contains(line, "gap1913-ok") {
+				t.Errorf("%s:%d writes an effect-shadow variable directly (rel-1-0-11:GAP-1954): use the set*Idle helper of effect_shadow_idle_test.go", file, n+1)
 			}
 		}
 	}
