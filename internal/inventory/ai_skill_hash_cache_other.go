@@ -21,6 +21,7 @@ package inventory
 import (
 	"fmt"
 	"io/fs"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -31,11 +32,13 @@ const skillChangeStampTamperEvident = true
 
 // skillEntryChangeStamp is the inode change time, inode, link count and
 // owner of path. Any write or chmod, and any link or owner change that would
-// change whether a SKILL.md is kept as the manifest, moves one of them.
-func skillEntryChangeStamp(path string, _ fs.FileInfo) string {
+// change whether a SKILL.md is kept as the manifest, moves one of them. It
+// also returns the inode change time, for the racy-entry check.
+func skillEntryChangeStamp(path string, _ fs.FileInfo) (string, time.Time) {
 	var st unix.Stat_t
 	if err := unix.Lstat(path, &st); err != nil {
-		return "?"
+		return "?", time.Time{}
 	}
-	return fmt.Sprintf("%d.%d:%d:%d:%d:%d", st.Ctim.Sec, st.Ctim.Nsec, st.Dev, st.Ino, st.Nlink, st.Uid)
+	return fmt.Sprintf("%d.%d:%d:%d:%d:%d", st.Ctim.Sec, st.Ctim.Nsec, st.Dev, st.Ino, st.Nlink, st.Uid),
+		time.Unix(int64(st.Ctim.Sec), int64(st.Ctim.Nsec))
 }

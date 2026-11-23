@@ -28,8 +28,16 @@ func pluginCustodyQuote(p string) string {
 // entry makes the DACL unsafe and every folder that holds each entry itself;
 // icaclsRemovalFix removes each account at each of them. Any other cause, and a
 // DACL refusal that names no single entry or cannot place one of its entries,
-// is returned unchanged.
+// is returned unchanged. The directory walk's refusal of a write entry of
+// another account on the plugin folder or a folder above it is the same
+// custody refusal: that account is removed at that folder, and Setup stops
+// only this connector (GAP-1887, the Windows form of GAP-0798).
 func explainPluginArtifactRefusal(_ string, cause error) error {
+	var write *hookAPIUntrustedWriteError
+	if errors.As(cause, &write) && write.sid != "" && write.path != "" {
+		fix, failing := icaclsRemovalFix([]icaclsRefusedEntry{{trustee: "*" + write.sid, carriers: []string{write.path}}})
+		return &pluginCustodyError{cause: cause, failing: failing, fix: fix}
+	}
 	var refusal *safefile.UnsafePrivateDACLError
 	if !errors.As(cause, &refusal) || len(refusal.Entries) == 0 {
 		return cause

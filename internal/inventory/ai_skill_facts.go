@@ -105,8 +105,8 @@ func (s *ContinuousDiscoveryService) skillFacts(path string, bundled bool) *AISk
 	}
 	// An unchanged folder keeps its last hash without being read again
 	// (ai_skill_hash_cache.go), and costs nothing from the scan budget.
-	now := time.Now()
-	signature, signed := skillFolderSignature(path)
+	now := s.skillNow()
+	signature, newest, signed := skillFolderSignature(path)
 	// A managed Windows scan reads every folder each time: the metadata a
 	// user can write back by hand there is all the cache could check.
 	signed = signed && (skillChangeStampTamperEvident || !s.opts.ManagedEnterprise)
@@ -124,6 +124,10 @@ func (s *ContinuousDiscoveryService) skillFacts(path string, bundled bool) *AISk
 		// read again next scan.
 		keep = signed && (hashed.status == SkillContentOK ||
 			hashed.status == SkillContentTooLarge && limit >= maxSkillBytes)
+		// A folder with an entry stamped within one timestamp tick of the read
+		// is not kept: a later same-size write could carry the same stamp and
+		// leave the signature as it was (skillHashCacheRacyWindow).
+		keep = keep && !skillSignatureRacy(newest, now)
 	}
 	location, inHome := s.skillLocation(path)
 	facts = AISkillFacts{
@@ -157,6 +161,15 @@ func (s *ContinuousDiscoveryService) skillFacts(path string, bundled bool) *AISk
 	}
 	s.skillFactsMu.Unlock()
 	return &facts
+}
+
+// skillNow is the time a skill folder's hash is read at, for the racy-entry
+// check and the cache age; a test sets skillClock.
+func (s *ContinuousDiscoveryService) skillNow() time.Time {
+	if s.skillClock != nil {
+		return s.skillClock()
+	}
+	return time.Now()
 }
 
 // SkillManifest returns the SKILL.md a skill scan hashed to hash, read again
@@ -209,6 +222,10 @@ func min64(a, b int64) int64 {
 	return b
 }
 
+// skillWalkDir is how hashSkillFolder lists a folder; a test replaces it to
+// show the listing a file system can give (a stale size) to the walk.
+var skillWalkDir = filepath.WalkDir
+
 // hashSkillFolder hashes the sorted "rel NUL kind NUL sha256(payload) LF"
 // lines of every entry below root (see defenseclaw.inventory.skill.content_hash).
 // Links are recorded by target and never followed, and each file is read
@@ -225,7 +242,7 @@ func hashSkillFolder(root string, limit int64) (hash, status string, manifest []
 	rootInfo := info
 	var lines []string
 	entries := 0
-	err = filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+	err = skillWalkDir(root, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -263,7 +280,12 @@ func hashSkillFolder(root string, limit int64) (hash, status string, manifest []
 			}
 			kind, payload = "link", []byte(filepath.ToSlash(target))
 		case entry.Type().IsRegular():
-			info, err := entry.Info()
+			// The file's own record, not entry.Info(): on Windows that is the
+			// parent folder's listing, which NTFS brings up to date lazily, so
+			// the size it gives can differ from the file's. The size gate
+			// follows the file, as the folder signature and safefile do
+			// (GAP-1901). Elsewhere entry.Info() is this same lstat.
+			info, err := os.Lstat(path)
 			if err != nil {
 				return err
 			}
