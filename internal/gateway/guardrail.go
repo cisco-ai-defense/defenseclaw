@@ -33,6 +33,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/defenseclaw/defenseclaw/internal/asciifold"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
@@ -2587,20 +2588,19 @@ func signalsToVerdict(signals []TriageSignal, scanner string) *ScanVerdict {
 // so we extract the window from the normalized string instead and prefix
 // the returned snippet with "[normalized]" so log consumers can tell.
 //
-// Rationale: before Phase 7, `lower` was just strings.ToLower(original)
-// and its byte offsets aligned 1:1 with original for the ASCII+BMP fast
-// path. After Phase 7, `normalized` can be shorter than original (whitespace-
-// around-slash collapse, duplicate-slash collapse, NFC composition), so
-// using a normalized offset as an index into original produces a window
-// pointing at the wrong bytes. Re-locating against strings.ToLower(original)
-// restores byte alignment in the common case.
+// `normalized` can be shorter than original (whitespace-around-slash
+// collapse, duplicate-slash collapse, NFC composition), so a normalized
+// offset is not an offset of original. The pattern is located in
+// asciifold.Lower(original), which has the length and the bytes of original
+// at every offset: strings.ToLower is not, because a letter's lower case can
+// be longer (U+023A, 2 bytes, lowers to 3) or shorter (U+212A, U+0130), and
+// its offsets cut original at the wrong byte or past its end (GAP-1933).
 //
 // UTF-8 safety: extractEvidenceAt clamps both ends to the nearest rune
 // boundary so we never emit invalid UTF-8 to logs, audit records, or
 // downstream sinks.
 func extractEvidence(original, normalized, pattern string) string {
-	lowerOrig := strings.ToLower(original)
-	if idx := strings.Index(lowerOrig, pattern); idx >= 0 {
+	if idx := strings.Index(asciifold.Lower(original), pattern); idx >= 0 {
 		return extractEvidenceAt(original, idx, idx+len(pattern))
 	}
 	// Fast path missed: normalization was load-bearing for the match.
@@ -2620,10 +2620,11 @@ func extractEvidence(original, normalized, pattern string) string {
 // required for the regex to hit.
 //
 // Assumes `re` is pre-lowercased (all triage regexes in this file are);
-// case-insensitivity is handled by lowercasing original rather than by
-// a `(?i)` flag, matching how the rest of this file dispatches.
+// case-insensitivity is handled by lowering original's ASCII letters
+// (asciifold.Lower, whose offsets are original's) rather than by a `(?i)`
+// flag, matching how the rest of this file dispatches.
 func extractEvidenceRegex(original, normalized string, re *regexp.Regexp) string {
-	if loc := re.FindStringIndex(strings.ToLower(original)); loc != nil {
+	if loc := re.FindStringIndex(asciifold.Lower(original)); loc != nil {
 		return extractEvidenceAt(original, loc[0], loc[1])
 	}
 	if loc := re.FindStringIndex(normalized); loc != nil {
