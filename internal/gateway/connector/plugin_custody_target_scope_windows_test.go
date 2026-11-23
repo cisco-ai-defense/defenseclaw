@@ -9,12 +9,15 @@ package connector
 import (
 	"crypto/rand"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/testenv"
@@ -22,14 +25,132 @@ import (
 	"golang.org/x/sys/windows/registry"
 )
 
-// custodyTestProfileList is the machine's list of user profiles.
-const custodyTestProfileList = `SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList`
+// custodyTestMachineProfileList is the machine's list of user profiles. The
+// tests never write it: an entry with a user-shaped SID there is a user to the
+// enterprise profile walk, and a killed run would leave it behind (GAP-1921).
+const custodyTestMachineProfileList = `SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList`
+
+// custodyTestProfileListRoot holds the tests' own profile lists, one per test
+// (custody-<pid>-<unix nano>\ProfileList), in HKLM like the machine's so the
+// check reads it the same way.
+const custodyTestProfileListRoot = `SOFTWARE\DefenseClawTest`
+
+// custodyTestProfileListPrefix starts the name of every profile list key below
+// custodyTestProfileListRoot.
+const custodyTestProfileListPrefix = "custody-"
+
+// custodyTestUseProfileList points the check at a new, empty profile list of
+// this test's own (windowsCustodyProfileList) and removes it when the test
+// ends. Lists a killed run left behind (their process is gone) are removed
+// first. It needs an elevated token.
+func custodyTestUseProfileList(t *testing.T) string {
+	t.Helper()
+	custodyTestRemoveStaleProfileLists(t)
+	run := custodyTestProfileListRoot + `\` + custodyTestProfileListPrefix +
+		strconv.Itoa(os.Getpid()) + "-" + strconv.FormatInt(time.Now().UnixNano(), 10)
+	list := run + `\ProfileList`
+	key, existed, err := registry.CreateKey(registry.LOCAL_MACHINE, list, registry.SET_VALUE|registry.WOW64_64KEY)
+	if err != nil {
+		t.Fatalf("create the test profile list %s: %v", list, err)
+	}
+	_ = key.Close()
+	if existed {
+		t.Fatalf("the test profile list %s already exists", list)
+	}
+	previous := windowsCustodyProfileList
+	windowsCustodyProfileList = list
+	t.Cleanup(func() {
+		windowsCustodyProfileList = previous
+		if err := custodyTestDeleteKeyTree(run); err != nil {
+			t.Errorf("remove the test profile list %s: %v", run, err)
+		}
+		// Only succeeds once no other run keeps a list there.
+		_ = registry.DeleteKey(registry.LOCAL_MACHINE, custodyTestProfileListRoot)
+	})
+	return list
+}
+
+// custodyTestRemoveStaleProfileLists removes the profile lists below
+// custodyTestProfileListRoot whose test process is no longer running (a run
+// killed by a timeout or a reboot), so a killed run heals on the next one.
+func custodyTestRemoveStaleProfileLists(t *testing.T) {
+	t.Helper()
+	key, err := registry.OpenKey(registry.LOCAL_MACHINE, custodyTestProfileListRoot, registry.ENUMERATE_SUB_KEYS|registry.WOW64_64KEY)
+	if errors.Is(err, registry.ErrNotExist) {
+		return
+	}
+	if err != nil {
+		t.Fatalf("open %s: %v", custodyTestProfileListRoot, err)
+	}
+	names, err := key.ReadSubKeyNames(-1)
+	_ = key.Close()
+	if err != nil {
+		t.Fatalf("list %s: %v", custodyTestProfileListRoot, err)
+	}
+	for _, name := range names {
+		rest, ok := strings.CutPrefix(name, custodyTestProfileListPrefix)
+		if !ok {
+			continue
+		}
+		pid, _, _ := strings.Cut(rest, "-")
+		if n, err := strconv.ParseUint(pid, 10, 32); err == nil && custodyTestProcessRunning(uint32(n)) {
+			continue
+		}
+		if err := custodyTestDeleteKeyTree(custodyTestProfileListRoot + `\` + name); err != nil {
+			t.Fatalf("remove the stale test profile list %s: %v", name, err)
+		}
+	}
+}
+
+// custodyTestProcessRunning reports whether process pid is running; a process
+// this token may not open is taken as running.
+func custodyTestProcessRunning(pid uint32) bool {
+	if pid == 0 {
+		return false
+	}
+	process, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
+	if err != nil {
+		return !errors.Is(err, windows.ERROR_INVALID_PARAMETER)
+	}
+	defer windows.CloseHandle(process)
+	var code uint32
+	if err := windows.GetExitCodeProcess(process, &code); err != nil {
+		return true
+	}
+	const stillActive = 259
+	return code == stillActive
+}
+
+// custodyTestDeleteKeyTree removes HKLM\path and every key below it; a path
+// that does not exist is no error.
+func custodyTestDeleteKeyTree(path string) error {
+	key, err := registry.OpenKey(registry.LOCAL_MACHINE, path, registry.ENUMERATE_SUB_KEYS|registry.WOW64_64KEY)
+	if errors.Is(err, registry.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	names, err := key.ReadSubKeyNames(-1)
+	_ = key.Close()
+	if err != nil {
+		return err
+	}
+	for _, name := range names {
+		if err := custodyTestDeleteKeyTree(path + `\` + name); err != nil {
+			return err
+		}
+	}
+	return registry.DeleteKey(registry.LOCAL_MACHINE, path)
+}
 
 // custodyTestTargetSID is a fresh local-user-shaped SID no account has: the
 // per-user target a managed guardian verifies without that user's token
-// (opts.ManagedTargetSID).
+// (opts.ManagedTargetSID). The check reads the target's profile from the
+// test's own profile list (custodyTestUseProfileList), never the machine's.
 func custodyTestTargetSID(t *testing.T) *windows.SID {
 	t.Helper()
+	custodyTestUseProfileList(t)
 	var random [12]byte
 	if _, err := rand.Read(random[:]); err != nil {
 		t.Fatal(err)
@@ -42,13 +163,17 @@ func custodyTestTargetSID(t *testing.T) *windows.SID {
 	return sid
 }
 
-// custodyTestProfileEntry gives sid a ProfileList entry whose ProfileImagePath
-// is value (REG_EXPAND_SZ when expand), as Windows records a user's profile
-// folder; the entry is removed when the test ends.
+// custodyTestProfileEntry gives sid an entry in the test's profile list whose
+// ProfileImagePath is value (REG_EXPAND_SZ when expand), as Windows records a
+// user's profile folder; the entry is removed when the test ends. It refuses
+// to write the machine's profile list (GAP-1921).
 func custodyTestProfileEntry(t *testing.T, sid *windows.SID, value string, expand bool) {
 	t.Helper()
-	name := custodyTestProfileList + `\` + sid.String()
-	key, existed, err := registry.CreateKey(registry.LOCAL_MACHINE, name, registry.SET_VALUE)
+	if !strings.HasPrefix(strings.ToUpper(windowsCustodyProfileList), strings.ToUpper(custodyTestProfileListRoot+`\`)) {
+		t.Fatalf("the check reads %s, not a test profile list: call custodyTestTargetSID first", windowsCustodyProfileList)
+	}
+	name := windowsCustodyProfileList + `\` + sid.String()
+	key, existed, err := registry.CreateKey(registry.LOCAL_MACHINE, name, registry.SET_VALUE|registry.WOW64_64KEY)
 	if err != nil {
 		t.Fatalf("create the ProfileList entry of %s: %v", sid, err)
 	}
@@ -57,7 +182,7 @@ func custodyTestProfileEntry(t *testing.T, sid *windows.SID, value string, expan
 		t.Fatalf("ProfileList already has an entry for %s", sid)
 	}
 	t.Cleanup(func() {
-		if err := registry.DeleteKey(registry.LOCAL_MACHINE, name); err != nil {
+		if err := registry.DeleteKey(registry.LOCAL_MACHINE, name); err != nil && !errors.Is(err, registry.ErrNotExist) {
 			t.Errorf("remove the ProfileList entry of %s: %v", sid, err)
 		}
 	})
@@ -142,6 +267,18 @@ func custodyTestTakeOwnershipInherited(trustee, path, folder string) string {
 	return "the write entry of " + trustee + " that " + pluginCustodyQuote(path) + " inherits is granted at " + pluginCustodyQuote(folder) +
 		", which Administrators owns, so no command is printed for it: take ownership of " + pluginCustodyQuote(folder) +
 		" and remove the entry there, or have an administrator remove it"
+}
+
+// custodyTestTakeOwnershipIfInProfile is the step for a write entry granted at
+// folder, a folder Administrators owns, when the account's profile could not
+// be read: the folder may be in the profile or a shared one such as C:\tools,
+// so the step names both cases and keeps the warning that a change there
+// reaches every folder that inherits from it (GAP-1920).
+func custodyTestTakeOwnershipIfInProfile(trustee, folder string) string {
+	return "Administrators owns " + pluginCustodyQuote(folder) + ", so no command is printed for the write entry of " + trustee +
+		" on it: if " + pluginCustodyQuote(folder) + " is inside this account's own profile, take ownership of it and remove the entry" +
+		" or have an administrator remove it, and if not, move the plugin folder under a folder this account owns" +
+		" (removing the entry there changes every folder that inherits from it)"
 }
 
 // GAP-1916: the guardian's run for a managed target account (a target SID)
@@ -256,10 +393,12 @@ func TestGAP1917AdministratorsOwnedFolderLeftOutOfTheProfileSaysTakeOwnership(t 
 		check(t, plugin, target.String(), custodyTestTakeOwnership(guests, config))
 	})
 	t.Run("target has no profile entry", func(t *testing.T) {
+		// GAP-1920: with the profile unread the folder is not shown to be in
+		// it, so the step says take ownership only if it is.
 		target := custodyTestTargetSID(t)
 		config, plugin := custodyTestTargetTree(t, custodyTestTargetFolder(t, "dc-gap1917b-", target), target)
 		custodyTestGrant(t, config, guestsSID, windows.GENERIC_ALL, windows.NO_INHERITANCE)
-		check(t, plugin, target.String(), custodyTestTakeOwnership(guests, config))
+		check(t, plugin, target.String(), custodyTestTakeOwnershipIfInProfile(guests, config))
 	})
 	t.Run("target profile folder is a junction", func(t *testing.T) {
 		target := custodyTestTargetSID(t)
@@ -332,5 +471,62 @@ func TestGAP1916AdministratorsOwnedFolderBehindAJunctionInTheProfileIsNotOwn(t *
 	}
 	if through := filepath.Join(link, "inner"); windowsCustodyOwnElement(through, nil, profile) {
 		t.Fatalf("%s (Administrators-owned, reached through a junction in %s) is the account's own", through, profile)
+	}
+}
+
+// GAP-1921: the custody tests keep the target accounts' profile entries in a
+// profile list of their own, never in the machine's ProfileList (where an
+// entry with a user-shaped SID is a user to the enterprise profile walk), and
+// the check still reads it from the registry with %SystemDrive% expanded. A
+// list a killed run left behind is removed by the next run; a live run's is
+// kept.
+func TestGAP1921CustodyTestProfileEntriesStayOutOfTheMachineProfileList(t *testing.T) {
+	if !windows.GetCurrentProcessToken().IsElevated() {
+		t.Skip("a key in HKLM needs an elevated token; run elevated")
+	}
+	target := custodyTestTargetSID(t)
+	list := windowsCustodyProfileList
+	if strings.EqualFold(list, custodyTestMachineProfileList) {
+		t.Fatalf("the check reads the machine's ProfileList during a test")
+	}
+	custodyTestProfileEntry(t, target, `%SystemDrive%\dc-gap1921`, true)
+	windowsDir, err := windows.GetSystemWindowsDirectory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := windowsCustodyProfileImagePath(target)
+	if want := filepath.VolumeName(windowsDir) + `\dc-gap1921`; err != nil || got != want {
+		t.Fatalf("profile of %s = %q, %v; want %q (read from %s)", target, got, err, want, list)
+	}
+	if key, err := registry.OpenKey(registry.LOCAL_MACHINE, custodyTestMachineProfileList+`\`+target.String(), registry.QUERY_VALUE|registry.WOW64_64KEY); err == nil {
+		_ = key.Close()
+		t.Fatalf("the machine's ProfileList has an entry for the test SID %s", target)
+	} else if !errors.Is(err, registry.ErrNotExist) {
+		t.Fatalf("read the machine's ProfileList entry of %s: %v", target, err)
+	}
+
+	stale := custodyTestProfileListRoot + `\` + custodyTestProfileListPrefix + "0-1" + `\ProfileList\` + target.String()
+	key, _, err := registry.CreateKey(registry.LOCAL_MACHINE, stale, registry.SET_VALUE|registry.WOW64_64KEY)
+	if err != nil {
+		t.Fatalf("create a stale test profile list: %v", err)
+	}
+	_ = key.Close()
+	t.Cleanup(func() {
+		_ = custodyTestDeleteKeyTree(custodyTestProfileListRoot + `\` + custodyTestProfileListPrefix + "0-1")
+	})
+	t.Run("next run", func(t *testing.T) {
+		custodyTestUseProfileList(t)
+		if key, err := registry.OpenKey(registry.LOCAL_MACHINE, custodyTestProfileListRoot+`\`+custodyTestProfileListPrefix+"0-1", registry.QUERY_VALUE|registry.WOW64_64KEY); err == nil {
+			_ = key.Close()
+			t.Fatalf("the stale test profile list of a run that is gone was kept")
+		}
+		if key, err := registry.OpenKey(registry.LOCAL_MACHINE, list+`\`+target.String(), registry.QUERY_VALUE|registry.WOW64_64KEY); err != nil {
+			t.Fatalf("the live run's test profile list %s was removed: %v", list, err)
+		} else {
+			_ = key.Close()
+		}
+	})
+	if windowsCustodyProfileList != list {
+		t.Fatalf("the test profile list was not restored after the subtest: %s", windowsCustodyProfileList)
 	}
 }

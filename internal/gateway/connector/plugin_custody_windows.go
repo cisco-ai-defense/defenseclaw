@@ -178,8 +178,11 @@ func windowsCustodyAdministratorsScope(extra *windows.SID) (scope, profile strin
 }
 
 // windowsCustodyProfileList is the machine's list of user profiles; only
-// administrators and LocalSystem can change it.
-const windowsCustodyProfileList = `SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList`
+// administrators and LocalSystem can change it. It is a variable only as a
+// test seam: the Windows tests point it at a throwaway key of their own
+// (GAP-1921). Nothing in production assigns it, and it is never taken from
+// config or the environment.
+var windowsCustodyProfileList = `SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList`
 
 // windowsCustodyProfileImagePath is the profile folder Windows records for sid
 // (ProfileList\<SID>\ProfileImagePath). Only a %SystemDrive% prefix is
