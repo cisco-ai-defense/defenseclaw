@@ -36,7 +36,8 @@ import (
 // (GetSwitchKey: args[i].Trim()), so " -ec" is -ec and the script after it
 // runs (rel-1-0-10:GAP-0155). Option values are never padded: the host does
 // not trim those. The base64 word is read as the host decodes it (HostBase64,
-// rel-1-0-10:GAP-1197).
+// rel-1-0-10:GAP-1197): the tab, CR and LF it skips may stand in a quoted
+// base64 word too (GAP-1199), though they keep every other word non-static.
 // A positional command is deliberately not a shape: pwsh 7 reads a positional
 // word as a script file, Windows PowerShell 5.1 as a command.
 const (
@@ -110,7 +111,11 @@ func matchPSHostShape(c *Command, words []hostWord) (shape string, idx int, reas
 		return "", 0, ReasonStopParsing
 	}
 	for i, w := range words {
-		if !w.static && (!w.folder || i == 0 || !psFolderOpts[strings.ToLower(strings.TrimSpace(words[i-1].text))]) {
+		prev := ""
+		if i > 0 && words[i-1].static {
+			prev = strings.ToLower(strings.TrimSpace(words[i-1].text))
+		}
+		if !w.static && (!w.folder || !psFolderOpts[prev]) && (w.enc == "" || !psEncodedSwitches[prev]) {
 			return "", 0, ReasonNonLiteral
 		}
 		if w.colon {
@@ -165,7 +170,8 @@ func matchPSHostShape(c *Command, words []hostWord) (shape string, idx int, reas
 			// The base64 word is read as the host reads it (HostBase64): a blank
 			// in it is skipped by the host, so it is no reason to leave the
 			// script unread (GAP-1197).
-			if _, ok := DecodeEncodedCommand(words[i+1].text); !ok {
+			text, _ := words[i+1].encodedText()
+			if _, ok := DecodeEncodedCommand(text); !ok {
 				return "", 0, ReasonNonLiteral
 			}
 			return shapePSEncoded, i, ""
