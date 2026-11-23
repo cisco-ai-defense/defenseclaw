@@ -101,8 +101,8 @@ func FuzzReadSyntaxTail(f *testing.F) {
 		if !ok {
 			return
 		}
-		if len(tail.Statements) > MaxSyntaxTailStatements {
-			t.Fatalf("%d statements past the cap", len(tail.Statements))
+		if len(tail.Statements)-len(tail.Extended) > MaxSyntaxTailStatements || len(tail.Extended) > MaxSyntaxTailStatements {
+			t.Fatalf("%d statements (%d of the longer reading) past the caps", len(tail.Statements), len(tail.Extended))
 		}
 		for _, statement := range tail.Statements {
 			if strings.TrimSpace(statement) == "" || !strings.Contains(command, statement) {
