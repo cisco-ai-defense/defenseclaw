@@ -823,11 +823,9 @@ final class GatewayAdminHandover {
         return descriptor
     }
 
-    /// holdingPath by descriptor from /, never following a link: every folder
-    /// on the way is owned by root (or this process) and nobody else can
-    /// write it, and the holding folder is this process's own, mode 700, with
-    /// no access rules.
-    static func openHoldingFolder(create: Bool) -> Int32? {
+    /// The folder that holds the holding folder, opened by descriptor from /
+    /// the same way, or nil when a folder on the way is not trusted.
+    private static func openHoldingParent() -> Int32? {
         var current = open("/", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
         for component in holdingParent.split(separator: "/").map(String.init) {
             guard current >= 0 else { return nil }
@@ -840,8 +838,31 @@ final class GatewayAdminHandover {
             current = next
         }
         guard current >= 0 else { return nil }
+        guard isTrustedParent(current) else {
+            close(current)
+            return nil
+        }
+        return current
+    }
+
+    /// Removes the holding folder when nothing is held in it, so a Mac
+    /// that never had a file held, or has had every one returned, keeps no
+    /// folder behind when DefenseClawMac is removed. A folder with a held
+    /// file or record (of any account) stays: rmdir refuses it.
+    @discardableResult
+    static func removeEmptyHoldingFolder() -> Bool {
+        guard let parent = openHoldingParent() else { return false }
+        defer { close(parent) }
+        return unlinkat(parent, holdingName, AT_REMOVEDIR) == 0
+    }
+
+    /// holdingPath by descriptor from /, never following a link: every folder
+    /// on the way is owned by root (or this process) and nobody else can
+    /// write it, and the holding folder is this process's own, mode 700, with
+    /// no access rules.
+    static func openHoldingFolder(create: Bool) -> Int32? {
+        guard let current = openHoldingParent() else { return nil }
         defer { close(current) }
-        guard isTrustedParent(current) else { return nil }
         if create, mkdirat(current, holdingName, 0o700) != 0, errno != EEXIST { return nil }
         let folder = openat(current, holdingName, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
         guard folder >= 0 else { return nil }
@@ -1532,6 +1553,8 @@ private final class GatewayAdminSession: NSObject, GatewayAdminProtocol {
                             let unclaimed = GatewayAdminHandover.unclaimed(
                                 account: account.uid, roots: [installation.descriptor, accountHome])
                             outcome.merge(GatewayAdminOwnershipRepair.Outcome(incomplete: !unclaimed.isEmpty, held: unclaimed))
+                            // Nothing left held: the holding folder goes too.
+                            if outcome.held.isEmpty, !outcome.incomplete { _ = GatewayAdminHandover.removeEmptyHoldingFolder() }
                             return outcome
                         },
                         removeStagedGateway: { try GatewayAdminTrust.removeStagedGateway(account: account) }

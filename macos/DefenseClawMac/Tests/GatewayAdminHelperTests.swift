@@ -768,7 +768,79 @@ private enum GatewayAdminHelperTests {
                   "A file put back next to a new file at its name is reported as returned there: \(fallback)")
             check(unlink(listed) == 0 && unlink(kept) == 0, "Could not remove the kept fixtures")
         }
+        if wanted("resumed") {
+            // A repair that stopped after it changed the owner: the held file
+            // is the account's already, though its record names root.
+            try makeFile(URL(fileURLWithPath: listed))
+            GatewayAdminHandover.movedForTesting = { $0 == shown }
+            _ = repair()
+            GatewayAdminHandover.movedForTesting = nil
+            let records = holdingFolder().filter { $0.hasSuffix(".record") }
+            check(records.count == 1, "The stopped repair must leave one record: \(holdingFolder())")
+            let recordPath = GatewayAdminHandover.holdingPath + "/" + (records.first ?? "")
+            if let data = FileManager.default.contents(atPath: recordPath),
+               var record = try JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                record["owner"] = 4242
+                try JSONSerialization.data(withJSONObject: record).write(to: URL(fileURLWithPath: recordPath))
+            }
+            let next = repair()
+            check(exists(listed) && next.restored == [shown] && !next.incomplete && holdingFolder().isEmpty,
+                  "A file whose owner already changed goes back to the account's folder: \(next)")
+            check(unlink(listed) == 0, "Could not remove the held fixture")
+        }
+        if wanted("unclaimed") {
+            // The folder a repair stopped in moved or was removed: the held file is
+            // reported by its shown name, and returned once its folder is repaired again.
+            try makeFile(URL(fileURLWithPath: listed))
+            GatewayAdminHandover.movedForTesting = { $0 == shown }
+            _ = repair()
+            GatewayAdminHandover.movedForTesting = nil
+            let elsewhere = root.appendingPathComponent("held-elsewhere", isDirectory: true)
+            try makeFolders(elsewhere, [""])
+            let other = open(elsewhere.path, O_RDONLY | O_DIRECTORY)
+            defer { close(other) }
+            check(GatewayAdminHandover.unclaimed(account: getuid(), roots: [other]) == [shown],
+                  "A held file of a folder that is no longer repaired is reported")
+            check(GatewayAdminHandover.unclaimed(account: getuid(), roots: [descriptor, other]).isEmpty,
+                  "A held file of a folder still repaired is not reported as unclaimed")
+            check(GatewayAdminHandover.unclaimed(account: getuid() &+ 1, roots: [other]).isEmpty,
+                  "Another account's held files are not reported")
+            let next = repair()
+            check(exists(listed) && next.restored == [shown] && !next.incomplete && holdingFolder().isEmpty,
+                  "The held file goes back at the next repair of its folder: \(next)")
+            check(unlink(listed) == 0, "Could not remove the held fixture")
+        }
+        if wanted("defenseclaw-home") {
+            // The DefenseClaw home is walked without a shared handover: its own held
+            // files come back at the end of the next walk of that folder.
+            let dcHome = root.appendingPathComponent("held-dc-home", isDirectory: true)
+            try makeFolders(dcHome, [""])
+            let config = dcHome.appendingPathComponent("config.yaml")
+            try makeFile(config)
+            let fd = open(dcHome.path, O_RDONLY | O_DIRECTORY)
+            defer { close(fd) }
+            GatewayAdminHandover.movedForTesting = { $0 == "config.yaml" }
+            _ = try GatewayAdminOwnershipRepair.restore(home: fd, from: getuid(), to: (getuid(), getgid()))
+            GatewayAdminHandover.movedForTesting = nil
+            check(!exists(config.path), "The stopped walk must hold the file")
+            let next = try GatewayAdminOwnershipRepair.restore(home: fd, from: getuid(), to: (getuid(), getgid()))
+            check(exists(config.path) && next.restored.contains("config.yaml") && !next.incomplete && holdingFolder().isEmpty,
+                  "The next walk of the DefenseClaw home returns what the stopped one held: \(next)")
+        }
         check(holdingFolder().isEmpty, "Every held file went back and its record was removed: \(holdingFolder())")
+        if wanted("placement") {
+            // Empty, the holding folder goes; with a file held in it, it stays.
+            GatewayAdminHandover.movedForTesting = { $0 == shown }
+            try makeFile(URL(fileURLWithPath: listed))
+            _ = repair()
+            GatewayAdminHandover.movedForTesting = nil
+            check(!GatewayAdminHandover.removeEmptyHoldingFolder() && exists(GatewayAdminHandover.holdingPath),
+                  "A holding folder with a held file stays")
+            _ = repair()
+            check(unlink(listed) == 0, "Could not remove the held fixture")
+        }
+        check(GatewayAdminHandover.removeEmptyHoldingFolder() && !exists(GatewayAdminHandover.holdingPath),
+              "An empty holding folder is removed")
     }
 
     /// GAP-0141 review: a file inside a root-owned agent config folder that
