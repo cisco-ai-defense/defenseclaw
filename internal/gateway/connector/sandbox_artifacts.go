@@ -277,7 +277,7 @@ func ResolveSandboxHookContract(connectorName, agentVersion string) HookContract
 // contract itself lists the build.
 var substrateReviewedBuilds = map[string]map[string]string{
 	"cursor": {"2026.11.11-b912975": "2026.07.23-e383d2b"},
-	"devin":  {"3000.12.57": "3000.11.3"},
+	"devin":  {"3000.14.30821": "3000.11.3"},
 	"kiro":   {"2.35.1": "2.24.1"},
 }
 

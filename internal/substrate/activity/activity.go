@@ -39,6 +39,7 @@ package activity
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"time"
 
@@ -66,6 +67,21 @@ const (
 	maxActors = 100000
 	// retention is how long the leader keeps an actor it heard nothing of.
 	retention = 24 * time.Hour
+	// replicaSilentAfter is three missed replica heartbeats.
+	replicaSilentAfter = 3 * DefaultFlushInterval
+	// replicaForget is how long a silent replica's last attachment report
+	// stays unknown (open); past it the replica counts as gone.
+	replicaForget = time.Hour
+	// attachLiveAtSilence: an attachment report this close to the replica's
+	// last heartbeat was still being re-sent (every minute) when it fell
+	// silent.
+	attachLiveAtSilence = 2 * time.Minute
+	// maxReplicas bounds the heartbeat map.
+	maxReplicas = 1024
+	// kindHeartbeat and replicaUIDPrefix make a replica's heartbeat entry; an
+	// actor UID never holds a slash.
+	kindHeartbeat    = "heartbeat"
+	replicaUIDPrefix = "replica/"
 )
 
 // Entry is one actor's last activity.
@@ -97,6 +113,11 @@ type Snapshot struct {
 type Recorder struct {
 	Leader   *leader.Client
 	Interval time.Duration
+	// Replica names this replica (its pod name). Set, every flush carries a
+	// heartbeat entry, an empty batch too, so the leader can tell a replica
+	// that stopped reporting from one with nothing to report
+	// (substrate-1:GAP-0578 e). Empty sends no heartbeat (the old wire).
+	Replica string
 
 	mu    sync.Mutex
 	dirty map[string]*Entry // by UID
@@ -125,22 +146,33 @@ func (r *Recorder) ObserveActivity(kind, atespace, uid string, at time.Time) {
 	}
 }
 
-// Flush sends what was recorded since the last flush. A failed send keeps
-// the entries for the next one.
+// Flush sends what was recorded since the last flush, and the replica's
+// heartbeat when Replica is set. A failed send keeps the entries for the
+// next one.
 func (r *Recorder) Flush(ctx context.Context) error {
 	r.mu.Lock()
-	batch := Batch{Entries: make([]Entry, 0, len(r.dirty))}
+	batch := Batch{Entries: make([]Entry, 0, len(r.dirty)+1)}
 	for _, e := range r.dirty {
 		batch.Entries = append(batch.Entries, *e)
 	}
 	r.dirty = nil
 	r.mu.Unlock()
+	if r.Replica != "" {
+		// An entry, not a new Batch field: a leader of the previous release
+		// refuses unknown fields, and takes this as one more actor it never
+		// asks about.
+		batch.Entries = append(batch.Entries, Entry{UID: replicaUIDPrefix + r.Replica,
+			Last: map[string]time.Time{kindHeartbeat: time.Now()}})
+	}
 	if len(batch.Entries) == 0 {
 		return nil
 	}
 	err := r.Leader.Call(ctx, leader.MethodActivityObserve, leader.NewRequestID(), batch, nil)
 	if err != nil {
 		for _, e := range batch.Entries {
+			if strings.HasPrefix(e.UID, replicaUIDPrefix) {
+				continue
+			}
 			for k, t := range e.Last {
 				r.ObserveActivity(k, e.Atespace, e.UID, t)
 			}
@@ -184,6 +216,11 @@ type Store struct {
 	ended    map[string]time.Time // KindTaskEnd
 	attached map[string]time.Time // KindAttach
 	seen     map[string]time.Time // when the leader last heard of the UID
+	// attachVia is the replica that sent each UID's newest attachment
+	// report, and replicas when the leader last heard each replica's
+	// heartbeat (substrate-1:GAP-0578 e).
+	attachVia map[string]string
+	replicas  map[string]time.Time
 }
 
 func (s *Store) now() time.Time {
@@ -195,17 +232,29 @@ func (s *Store) now() time.Time {
 
 // Observe merges a batch. A time in the future of the leader's clock is
 // capped at now: replicas share a clock source, and an actor cannot push
-// its idle time forward through a replica.
+// its idle time forward through a replica. A batch's heartbeat entry names
+// the replica that sent it; it is not an actor.
 func (s *Store) Observe(_ context.Context, b Batch) (struct{}, error) {
 	now := s.now()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.last == nil {
 		s.last, s.ended, s.seen = map[string]time.Time{}, map[string]time.Time{}, map[string]time.Time{}
-		s.attached = map[string]time.Time{}
+		s.attached, s.attachVia, s.replicas = map[string]time.Time{}, map[string]string{}, map[string]time.Time{}
+	}
+	replica := ""
+	for _, e := range b.Entries {
+		if name, ok := strings.CutPrefix(e.UID, replicaUIDPrefix); ok && name != "" {
+			replica = name
+			if len(s.replicas) < maxReplicas {
+				s.replicas[name] = now
+			} else if _, known := s.replicas[name]; known {
+				s.replicas[name] = now
+			}
+		}
 	}
 	for _, e := range b.Entries {
-		if e.UID == "" {
+		if e.UID == "" || strings.HasPrefix(e.UID, replicaUIDPrefix) {
 			continue
 		}
 		for kind, t := range e.Last {
@@ -221,6 +270,13 @@ func (s *Store) Observe(_ context.Context, b Batch) (struct{}, error) {
 			}
 			if t.After(into[e.UID]) {
 				into[e.UID] = t
+				if kind == KindAttach {
+					if replica != "" {
+						s.attachVia[e.UID] = replica
+					} else {
+						delete(s.attachVia, e.UID)
+					}
+				}
 			}
 		}
 		s.seen[e.UID] = now
@@ -238,14 +294,48 @@ func (s *Store) prune(now time.Time) {
 			delete(s.last, uid)
 			delete(s.ended, uid)
 			delete(s.attached, uid)
+			delete(s.attachVia, uid)
 		}
 	}
+	for name, at := range s.replicas {
+		if now.Sub(at) > retention {
+			delete(s.replicas, name)
+		}
+	}
+}
+
+// attachedNow is the attachment time the snapshot gives uid, whose newest
+// report came at at (substrate-1:GAP-0578 e). A replica re-sends a report
+// every minute while it proxies a terminal, and sends its heartbeat every
+// flush. When the replica that sent uid's newest report has stopped
+// reporting since (no heartbeat for replicaSilentAfter), while the
+// attachment was still being reported (at within attachLiveAtSilence of its
+// last heartbeat), the leader cannot tell a closed terminal from a replica
+// that lost its way to the leader: the attachment is unknown, so it is
+// reported as open now, and a controller without a CPU feed keeps the actor.
+// After replicaForget of silence (a replica that is gone, as after a
+// rollout) the report counts at its own time again.
+func (s *Store) attachedNow(uid string, at, now time.Time) time.Time {
+	via, ok := s.attachVia[uid]
+	if !ok {
+		return at
+	}
+	heard, ok := s.replicas[via]
+	if !ok {
+		return at
+	}
+	silent := now.Sub(heard)
+	if silent <= replicaSilentAfter || silent > replicaForget || heard.Sub(at) > attachLiveAtSilence {
+		return at
+	}
+	return now
 }
 
 // Snapshot answers the controller.
 func (s *Store) Snapshot(context.Context, struct{}) (Snapshot, error) {
 	s.mu.Lock()
-	s.prune(s.now())
+	now := s.now()
+	s.prune(now)
 	out := Snapshot{Last: make(map[string]time.Time, len(s.last))}
 	for uid, t := range s.last {
 		out.Last[uid] = t
@@ -259,7 +349,7 @@ func (s *Store) Snapshot(context.Context, struct{}) (Snapshot, error) {
 	if len(s.attached) > 0 {
 		out.Attached = make(map[string]time.Time, len(s.attached))
 		for uid, t := range s.attached {
-			out.Attached[uid] = t
+			out.Attached[uid] = s.attachedNow(uid, t, now)
 		}
 	}
 	s.mu.Unlock()

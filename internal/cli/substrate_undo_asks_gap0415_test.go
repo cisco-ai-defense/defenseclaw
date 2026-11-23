@@ -51,7 +51,7 @@ func TestGAP0415RevertClosesPendingAsks(t *testing.T) {
 	_, _ = store.OpenAsk(ctx, asks.Ask{Atespace: "eng-web", Actor: "a1", UID: wireUID1, OwnerID: "o", Host: "example.com"})
 	h := substrateLifecycleClosesAsks(func(context.Context, chainstate.LifecycleEvent) (chainstate.LifecycleResult, error) {
 		return chainstate.LifecycleResult{}, nil
-	}, store)
+	}, store, nil, nil)
 	if _, err := h(ctx, chainstate.LifecycleEvent{Actor: chainstate.Actor{Atespace: "eng-web", UID: wireUID1}, Event: chainstate.LifecycleReverted}); err != nil {
 		t.Fatal(err)
 	}

@@ -136,6 +136,7 @@ const (
 // Snapshot owner and durable storage states (ActorStatus.snapshots).
 const (
 	SnapshotOwnerActor       = pb.SnapshotOwner_SNAPSHOT_OWNER_ACTOR
+	SnapshotOwnerTag         = pb.SnapshotOwner_SNAPSHOT_OWNER_TAG
 	SnapshotStoragePending   = pb.SnapshotStorageState_SNAPSHOT_STORAGE_STATE_PENDING
 	SnapshotStorageCompleted = pb.SnapshotStorageState_SNAPSHOT_STORAGE_STATE_COMPLETED
 )
@@ -485,6 +486,27 @@ type Reverter interface {
 	RevertActor(ctx context.Context, actor *ObjectRef) (*Actor, error)
 }
 
+// DurableSuspender is a Client that can also suspend a running actor with
+// synchronous durability: the call returns once the snapshot is in object
+// storage, so a later revert (a crash recovery) returns to it rather than
+// to an older snapshot or the template's golden one. The launcher's
+// checkpoint keeps the person's work this way (GAP-0410).
+type DurableSuspender interface {
+	SuspendActorDurable(ctx context.Context, actor *ObjectRef) (*Actor, error)
+}
+
+// SuspendActorDurable implements DurableSuspender.
+func (c *GRPCClient) SuspendActorDurable(ctx context.Context, actor *ObjectRef) (*Actor, error) {
+	resp, err := c.ctl.SuspendActor(ctx, &pb.SuspendActorRequest{
+		Actor:   actor,
+		Options: &pb.SuspendOptions{Mode: pb.DurabilityMode_DURABILITY_MODE_SYNCHRONOUS},
+	})
+	if err != nil {
+		return nil, err
+	}
+	return resp.GetActor(), nil
+}
+
 // RevertActor implements Reverter.
 func (c *GRPCClient) RevertActor(ctx context.Context, actor *ObjectRef) (*Actor, error) {
 	resp, err := c.ctl.RevertActor(ctx, &pb.RevertActorRequest{Actor: actor})
@@ -701,6 +723,16 @@ func AllAtespaces(ctx context.Context, c Client, pageSize int32) ([]*Atespace, e
 // IsResourceExhausted reports a RESOURCE_EXHAUSTED status: on resume, no
 // worker of the pool has room for the actor.
 func IsResourceExhausted(err error) bool { return status.Code(err) == codes.ResourceExhausted }
+
+// IsBusy reports a call the control plane could not finish now
+// (DEADLINE_EXCEEDED, UNAVAILABLE, ABORTED): busy, not broken (GAP-0468).
+func IsBusy(err error) bool {
+	switch status.Code(err) {
+	case codes.DeadlineExceeded, codes.Unavailable, codes.Aborted:
+		return true
+	}
+	return false
+}
 
 // IsNotFound reports a NOT_FOUND status.
 func IsNotFound(err error) bool { return status.Code(err) == codes.NotFound }

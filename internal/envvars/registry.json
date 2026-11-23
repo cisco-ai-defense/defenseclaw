@@ -2225,6 +2225,26 @@
       "since": "0.8.8"
     },
     {
+      "name": "DEFENSECLAW_HOOK_BYTES_PAIRS",
+      "category": "test_fixture",
+      "purpose": "Sets the number of tool-call pairs the audit-bytes-per-hook-post measurement posts (default 150).",
+      "default": "unset",
+      "accepted_values": [
+        "positive integer",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/gateway/hook_audit_bytes_per_post_test.go",
+          "description": "Hook audit bytes-per-post measurement fixture; never read by production runtime paths"
+        }
+      ],
+      "since": "1.0.11"
+    },
+    {
       "name": "DEFENSECLAW_HOOK_BURST_CALLS",
       "category": "test_fixture",
       "purpose": "Sets the number of hook calls in the probe burst.",

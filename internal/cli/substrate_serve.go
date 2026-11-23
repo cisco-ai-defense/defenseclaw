@@ -24,6 +24,7 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -495,7 +496,9 @@ func substrateGatewayBuilder(c *config.Config, src *configwatch.Watcher, ready *
 			Proxy:         llmProxy,
 			BedrockModels: c.Substrate.LLM.BedrockModels,
 			// actor_secrets: exact-value DLP on prompts (PLAN §7.2), from
-			// the callout's actor-secrets Secret mounted in the gateway.
+			// the callout's actor-secrets Secret mounted in the gateway; the
+			// hook route masks the same values before any audit row
+			// (GAP-0504).
 			ExposedValues: gateway.SubstrateExposedValues(c, c.Substrate.Extproc.ActorSecretsDir),
 		})
 		if err != nil {
@@ -513,7 +516,10 @@ func substrateGatewayBuilder(c *config.Config, src *configwatch.Watcher, ready *
 		regs := &registry.Remote{Client: toLeader}
 		// The idle feed: last hook, model call and relay byte per actor,
 		// sent to the leader every few seconds (A3's ActivitySource reads it).
-		recorder := &activity.Recorder{Leader: toLeader}
+		// Replica (the pod name) adds a heartbeat to every flush, so the leader
+		// can tell a replica that stopped reporting (substrate-1:GAP-0578 e).
+		replicaName, _ := os.Hostname()
+		recorder := &activity.Recorder{Leader: toLeader, Replica: replicaName}
 		go recorder.Run(context.Background())
 		// The create path's policy writer: the controller's own admission,
 		// profiles and render, run before the first resume.
@@ -521,6 +527,12 @@ func substrateGatewayBuilder(c *config.Config, src *configwatch.Watcher, ready *
 		if err != nil {
 			return out, fmt.Errorf("serve: controller for the create path: %w", err)
 		}
+		// The create path writes the same policy as the controller while
+		// another callout holds Substrate's egress slot (GAP-0505). The
+		// gateway may not read the slot: it reads the controller's latest
+		// report from the leader; none, or one older than three reads, is
+		// unknown.
+		ctl.SetCallout(&controller.LeaderCallout{Leader: toLeader})
 		router, routerErr := substrateRouter()
 		runtimeScan := newRuntimeSkillScanner(c)
 		out = gateway.SubstrateConfig{
@@ -546,6 +558,9 @@ func substrateGatewayBuilder(c *config.Config, src *configwatch.Watcher, ready *
 			SkillReceiptKey:      substrateSkillReceiptKey(chainKey),
 			TemplateSkills:       substrateTemplateSkills(ctl),
 			Info:                 substrateInfo(c),
+			// GAP-0497: /info says when another callout holds Substrate's
+			// egress slot and which checks are off; launchers print it.
+			EgressCallout: ctl.CalloutStatus,
 			// GAP-0262: the gateway checks the sign-in server it verifies
 			// people with, from its own network.
 			SignInServer: substrateSignInServer(people),
@@ -591,6 +606,9 @@ func substrateGatewayBuilder(c *config.Config, src *configwatch.Watcher, ready *
 			}
 			out.Profiles = func(p identity.Person, requested, connector string, admin bool) (string, string, error) {
 				return gateway.SubstrateLauncherProfiles(live())(p, requested, connector, admin)
+			}
+			out.ProfileWhy = func(p identity.Person, admin bool) gateway.SubstrateProfileWhy {
+				return gateway.SubstrateProfileWhyFor(live())(p, admin)
 			}
 			out.WorkloadEntry = func(subject string) (string, string) {
 				return gateway.SubstrateWorkloadEntry(live(), subject)
@@ -670,14 +688,14 @@ func runSubstrateLeader(parent context.Context, ready *atomic.Bool) error {
 	if err := substrateRecordStoreState(ctx, ns); err != nil {
 		return err
 	}
+	// chains is the leader's chain state, opened below before the elector
+	// runs; becoming the leader starts its start grace term (GAP-0601).
+	var chains *chainstate.Service
 	el := &leader.Elector{
 		API: &leader.KubeLeaseAPI{Server: "https://" + net.JoinHostPort(host, port), Namespace: ns, Name: serveFlags.lease,
 			TokenFile: serveFlags.kubeTokenFile, HTTP: kube},
 		Name: serveFlags.lease, Ns: ns, Identity: pod,
-		OnStarted: func(context.Context) {
-			fmt.Fprintf(os.Stderr, "[substrate] %s is the leader\n", pod)
-			ready.Store(true)
-		},
+		OnStarted: func(context.Context) { substrateLeaderStarted(os.Stderr, pod, chains, ready) },
 		OnStopped: func() { ready.Store(false) },
 	}
 	srv := &leader.Server{IsLeader: el.IsLeader}
@@ -690,8 +708,9 @@ func runSubstrateLeader(parent context.Context, ready *atomic.Bool) error {
 	if cfg != nil {
 		askStore.Expiry = cfg.Substrate.EffectiveAskTimeout()
 	}
-	// An approved host joins the actor's registration; the controller adds
-	// it to the policy on its next pass.
+	// A host approved always joins the actor's registration; the controller
+	// adds it to the policy on its next pass. The store never runs this for
+	// a once approval, which lets one request through (GAP-0484).
 	askStore.OnApprove = func(ctx context.Context, a asks.Ask) error {
 		// Only a host-wide approval joins the registration (and so the
 		// policy); a url_rules approval covers its rule only (GAP-0177).
@@ -707,6 +726,11 @@ func runSubstrateLeader(parent context.Context, ready *atomic.Bool) error {
 		}
 		return store.Put(ctx, reg)
 	}
+	// A revoked always approval leaves the registration, and so the policy
+	// on the controller's next pass (GAP-0492).
+	askStore.OnRevoke = func(ctx context.Context, in asks.RevokeRequest) (bool, error) {
+		return registry.RemoveApproved(ctx, store, in.Atespace, in.UID, in.Host, in.CallerID, in.Admin)
+	}
 	asks.Serve(srv, askStore)
 	activity.Serve(srv, &activity.Store{Pending: askStore.Pending})
 	// The records the gateway replicas export for the components that have
@@ -714,10 +738,13 @@ func runSubstrateLeader(parent context.Context, ready *atomic.Bool) error {
 	// decisions and the lifecycle events below (GAP-0450, GAP-0453).
 	relay := &telemetryrelay.Store{Registrations: store}
 	telemetryrelay.Serve(srv, relay)
+	// The controller's egress callout slot reads, for the gateways
+	// (GAP-0505).
+	controller.ServeCallout(srv, &controller.CalloutBoard{})
 	chainOpts, source := leaderChainOptions(cfg, store, serveFlags.storeDir, serveFlags.chainRetention)
 	fmt.Fprintf(os.Stderr, "[substrate] leader: chain egress action %s (%s): a request after a secret read is %s at the egress callout\n",
 		chainOpts.EgressAction, source, map[string]string{chainstate.EgressBlock: "refused", chainstate.EgressAlert: "allowed with an alert"}[chainOpts.EgressAction])
-	chains, err := chainstate.New(chainOpts)
+	chains, err = chainstate.New(chainOpts)
 	if err != nil {
 		return err
 	}
@@ -736,7 +763,7 @@ func runSubstrateLeader(parent context.Context, ready *atomic.Bool) error {
 	chains.Register(srv)
 	// A crashed or deleted actor asks nothing any more (E16): its open asks
 	// close when the controller reports the lifecycle event.
-	srv.Handle(chainstate.MethodChainLifecycle, leader.Typed(substrateLifecycleRelays(substrateLifecycleClosesAsks(chains.Lifecycle, askStore), store, relay)))
+	srv.Handle(chainstate.MethodChainLifecycle, leader.Typed(substrateLifecycleRelays(substrateLifecycleClosesAsks(chains.Lifecycle, askStore, os.Stderr, relay), store, relay)))
 	go func() { _ = chains.Run(ctx) }()
 	hs := &http.Server{Addr: serveFlags.leaderListen, Handler: srv, ReadHeaderTimeout: 10 * time.Second}
 	if !serveFlags.plainHTTP {
@@ -773,6 +800,16 @@ func runSubstrateLeader(parent context.Context, ready *atomic.Bool) error {
 	return err
 }
 
+// substrateLeaderStarted runs when this replica becomes the leader: the
+// chain start grace term begins (its 30 s cap runs from here, not from when
+// the chain state was opened, which can be a lease duration earlier), then
+// ready (GAP-0601).
+func substrateLeaderStarted(w io.Writer, pod string, chains *chainstate.Service, ready *atomic.Bool) {
+	fmt.Fprintf(w, "[substrate] %s is the leader\n", pod)
+	chains.Leading()
+	ready.Store(true)
+}
+
 func kubeHTTPClient() (*http.Client, error) {
 	pem, err := os.ReadFile(serveFlags.kubeCAFile)
 	if err != nil {
@@ -788,11 +825,13 @@ func kubeHTTPClient() (*http.Client, error) {
 }
 
 // substrateLeaderPermissions is who may call what on the leader
-// (GAP-0094): gateway replicas every method; the callout only the egress
-// chain check, the name lookup of a registration (GAP-0090) and its egress
-// decisions for the telemetry relay; the controller the registrations, the
-// chain lifecycle, the activity feed and its counts for the relay
-// (GAP-0450). Each relay method accepts only its poster's kinds of record.
+// (GAP-0094): gateway replicas every method but the controller's own
+// (leader.NamedOnly, GAP-0553); the callout only the egress chain check,
+// the name lookup of a registration (GAP-0090) and its egress decisions for
+// the telemetry relay; the controller the registrations, the chain
+// lifecycle, the activity feed, its counts for the relay (GAP-0450) and
+// publishing its egress callout slot read (GAP-0505). Each relay method
+// accepts only its poster's kinds of record.
 // An identity listed in two roles gets both sets.
 func substrateLeaderPermissions(gateways, callouts, controllers []string) leader.Permissions {
 	p := leader.Permissions{}
@@ -806,7 +845,8 @@ func substrateLeaderPermissions(gateways, callouts, controllers []string) leader
 	add(gateways, "*")
 	add(callouts, chainstate.MethodChainEgress, leader.MethodRegistrationLookup, telemetryrelay.MethodPostEgress)
 	add(controllers, leader.MethodRegistrationGet, leader.MethodRegistrationList, leader.MethodRegistrationWrite,
-		chainstate.MethodChainLifecycle, chainstate.MethodChainRunning, leader.MethodActivitySnapshot, telemetryrelay.MethodPostCounts)
+		chainstate.MethodChainLifecycle, chainstate.MethodChainRunning, leader.MethodActivitySnapshot, telemetryrelay.MethodPostCounts,
+		leader.MethodCalloutPublish)
 	return p
 }
 
@@ -1088,11 +1128,30 @@ func substrateBlocksUnscannedSkills(c *config.Config) func(connector string) boo
 	}
 }
 
+// substrateAskCloseReasons is the reason code and the words of an ask a
+// lifecycle event closes (GAP-0526).
+var substrateAskCloseReasons = map[string][2]string{
+	chainstate.LifecycleCrashed:  {telemetryrelay.AskClosedActorCrashed, "the actor crashed"},
+	chainstate.LifecycleReverted: {telemetryrelay.AskClosedActorReverted, "the actor was reverted to a snapshot"},
+	chainstate.LifecycleDeleted:  {telemetryrelay.AskClosedActorDeleted, "the actor was deleted"},
+}
+
 // substrateLifecycleClosesAsks wraps the chain lifecycle handler: after a
 // crashed, reverted or deleted event the actor's pending asks are closed
 // (a revert drops the held request with the run it belonged to, GAP-0415).
+// Each closed ask is a decision with the reason code, as an answer is; a
+// log line names the event and every ask it closed; and each closure is a
+// relay record, which a gateway replica writes to its audit log and the
+// webhooks with the reason code (actor_crashed, actor_reverted,
+// actor_deleted): the closure left no record anywhere before (GAP-0526).
+// log and relay may be nil.
 func substrateLifecycleClosesAsks(next func(context.Context, chainstate.LifecycleEvent) (chainstate.LifecycleResult, error),
-	asksStore interface{ CloseActor(uid, reason string) int }) func(context.Context, chainstate.LifecycleEvent) (chainstate.LifecycleResult, error) {
+	asksStore interface {
+		CloseActor(uid, code, reason string) []asks.Ask
+	}, log io.Writer, relay *telemetryrelay.Store) func(context.Context, chainstate.LifecycleEvent) (chainstate.LifecycleResult, error) {
+	if log == nil {
+		log = io.Discard
+	}
 	return func(ctx context.Context, ev chainstate.LifecycleEvent) (chainstate.LifecycleResult, error) {
 		res, err := next(ctx, ev)
 		if err != nil || res.Ignored {
@@ -1101,13 +1160,19 @@ func substrateLifecycleClosesAsks(next func(context.Context, chainstate.Lifecycl
 			// (GAP-0142 residual).
 			return res, err
 		}
-		switch ev.Event {
-		case chainstate.LifecycleCrashed:
-			asksStore.CloseActor(ev.Actor.UID, "the actor crashed")
-		case chainstate.LifecycleReverted:
-			asksStore.CloseActor(ev.Actor.UID, "the actor was reverted to a snapshot")
-		case chainstate.LifecycleDeleted:
-			asksStore.CloseActor(ev.Actor.UID, "the actor was deleted")
+		why, ok := substrateAskCloseReasons[ev.Event]
+		if !ok {
+			return res, nil
+		}
+		closed := asksStore.CloseActor(ev.Actor.UID, why[0], why[1]+" ("+why[0]+")")
+		fmt.Fprintf(log, "[substrate] lifecycle %s: actor %s/%s; closed %d open ask(s) (%s)\n", ev.Event, ev.Actor.Atespace, ev.Actor.UID, len(closed), why[0])
+		now := time.Now().UTC()
+		for _, a := range closed {
+			fmt.Fprintf(log, "[substrate] ask %s of %s/%s (%s) closed: expired, reason %s (%s)\n", a.ID, a.Atespace, a.Actor, substrateFirst(a.Host, a.Tool), why[0], why[1])
+			if relay != nil {
+				relay.Add(telemetryrelay.Record{Kind: telemetryrelay.KindAskClosed, At: now, Atespace: a.Atespace, Actor: a.Actor, UID: a.UID,
+					AskID: a.ID, Host: substrateFirst(a.Host, a.Tool), Reason: why[0], Unattended: a.Unattended, Severity: a.Severity})
+			}
 		}
 		return res, nil
 	}

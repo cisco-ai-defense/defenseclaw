@@ -176,6 +176,20 @@ func (k *Kube) DeleteSecret(ctx context.Context, namespace, name string) error {
 	return nil
 }
 
+// DeleteJob implements KubeAPI. Background propagation deletes the Job's
+// pods too (a bare Job delete would orphan them).
+func (k *Kube) DeleteJob(ctx context.Context, namespace, name string) (bool, error) {
+	path := "/apis/batch/v1/namespaces/" + url.PathEscape(namespace) + "/jobs/" + url.PathEscape(name)
+	body := map[string]any{"kind": "DeleteOptions", "apiVersion": "v1", "propagationPolicy": "Background"}
+	if err := k.do(ctx, http.MethodDelete, path, "application/json", body, nil); err != nil {
+		if isNotFound(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
+
 func deployPath(namespace, name string) string {
 	return "/apis/apps/v1/namespaces/" + url.PathEscape(namespace) + "/deployments/" + url.PathEscape(name)
 }

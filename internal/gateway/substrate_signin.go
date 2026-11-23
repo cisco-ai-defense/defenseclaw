@@ -19,9 +19,11 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/registry"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/signin"
 )
 
@@ -66,11 +68,43 @@ func sameSubstrateConnector(a, b string) bool {
 // writeSubstrateSigninRefusal answers 403 with the reason code and the text
 // a person (or the actor kit, for its agent's screen) shows.
 func writeSubstrateSigninRefusal(w http.ResponseWriter, d signin.Decision) {
+	writeSubstrateSigninAnswer(w, http.StatusForbidden, d.Code, d.Message)
+}
+
+// writeSubstrateSigninAckRequired answers an open-source create whose
+// sign-in warning the person has not acknowledged (GAP-0482): 428 with
+// signin_ack_required and the warning, before any actor exists.
+func writeSubstrateSigninAckRequired(w http.ResponseWriter, d signin.Decision) {
+	writeSubstrateSigninAnswer(w, http.StatusPreconditionRequired, signin.AckRequiredCode, d.Message)
+}
+
+func writeSubstrateSigninAnswer(w http.ResponseWriter, status int, reason, message string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Cache-Control", "no-store")
-	w.WriteHeader(http.StatusForbidden)
+	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(map[string]string{
-		"error": http.StatusText(http.StatusForbidden), "reason": d.Code, "message": d.Message,
+		"error": http.StatusText(status), "reason": reason, "message": message,
+	})
+}
+
+// auditSigninAcknowledged writes the audit row of a create that went on
+// after the person acknowledged the sign-in warning (GAP-0482): who, the
+// connector and the actor. One row per created actor.
+func (st *substrateState) auditSigninAcknowledged(ctx context.Context, c substrateCaller, reg registry.Registration, d signin.Decision) {
+	if st == nil || st.audit == nil {
+		return
+	}
+	who := c.person.Principal
+	if who == "" {
+		who = "an unnamed person"
+	}
+	summary := fmt.Sprintf("%s acknowledged the %s sign-in warning and started %s/%s", who, signin.DisplayName(reg.Connector), reg.Atespace, reg.Name)
+	st.audit(context.WithoutCancel(ctx), "INFO", summary, map[string]any{
+		"event": "signin_acknowledged", "acknowledged": true,
+		"atespace": reg.Atespace, "actor": reg.Name, "actor_uid": reg.UID,
+		"connector": reg.Connector, "route": string(d.Route), "profile": reg.Profile,
+		"principal": c.person.Principal, "person_id": reg.Person.ID(),
+		"batch_id": reg.BatchID, "unattended": reg.Unattended, "warning": d.Message,
 	})
 }

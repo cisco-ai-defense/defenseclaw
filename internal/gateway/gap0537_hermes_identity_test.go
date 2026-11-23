@@ -5,6 +5,7 @@ package gateway
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -144,10 +145,16 @@ func TestGAP0537HermesSparseAgentIDKeepsSessionAuditIdentity(t *testing.T) {
 	if later := hook(firstPeer, "hermes-session", ""); later.AgentID != "agent-main" {
 		t.Fatalf("later root identity = %+v", later)
 	}
-	if other := hook(firstPeer, "other-session", ""); other.AgentID != "" {
-		t.Fatalf("another session inherited an id: %+v", other)
+	// An agentless hook of another session, or of another account, names
+	// only its own session's root agent (substrate-1:GAP-0422), never the
+	// Hermes id reported in this session.
+	inherited := func(id string) bool { return id == "agent-main" || id == "agent-child" }
+	otherSession := hook(firstPeer, "other-session", "")
+	if inherited(otherSession.AgentID) || !strings.HasPrefix(otherSession.AgentID, "agent-") {
+		t.Fatalf("another session inherited an id: %+v", otherSession)
 	}
-	if other := hook(secondPeer, "hermes-session", ""); other.AgentID != "" || other.AgentInstanceID == first.AgentInstanceID {
+	if other := hook(secondPeer, "hermes-session", ""); inherited(other.AgentID) || other.AgentID == otherSession.AgentID ||
+		other.AgentInstanceID == first.AgentInstanceID {
 		t.Fatalf("another account inherited an id or instance: %+v", other)
 	}
 

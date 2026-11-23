@@ -76,8 +76,15 @@ type SubstrateFacts struct {
 	Paths []SubstratePathFact     `json:"paths,omitempty"`
 	Files []SubstrateAttachedFile `json:"files,omitempty"`
 	// Skills fingerprints every skill folder (A5's kit, GAP-0039).
-	Skills    []SubstrateSkillFingerprint `json:"skills,omitempty"`
-	Truncated bool                        `json:"truncated,omitempty"`
+	Skills []SubstrateSkillFingerprint `json:"skills,omitempty"`
+	// ProjectHooks are the project settings files that declare hooks the
+	// actor's managed settings ignore (the kit's SessionStart fact,
+	// GAP-0479): recorded, never run.
+	ProjectHooks []kit.ProjectHooks `json:"project_hooks,omitempty"`
+	// Proofs are the laptop's file-system proofs the kit made in the
+	// actor's file system (kit.ProofPrivateKeyRead, substrate-1 GAP-0471).
+	Proofs    []string `json:"proofs,omitempty"`
+	Truncated bool     `json:"truncated,omitempty"`
 }
 
 // SubstrateSkillFingerprint is one skill folder's content digest
@@ -101,19 +108,21 @@ type SubstrateSkillFingerprint struct {
 
 // SubstratePathFact is one path argument as the actor resolves it.
 type SubstratePathFact struct {
-	Field     string   `json:"field"`
-	Path      string   `json:"path"`
-	Abs       string   `json:"abs"`
-	Resolved  string   `json:"resolved,omitempty"`
-	LinkChain []string `json:"link_chain,omitempty"`
-	Type      string   `json:"type"`
-	Mode      string   `json:"mode,omitempty"`
-	UID       int      `json:"uid"`
-	GID       int      `json:"gid"`
-	NLink     uint64   `json:"nlink,omitempty"`
-	Size      int64    `json:"size,omitempty"`
-	InsideCWD bool     `json:"inside_cwd"`
-	Error     string   `json:"error,omitempty"`
+	Field       string   `json:"field"`
+	Path        string   `json:"path"`
+	Abs         string   `json:"abs"`
+	Resolved    string   `json:"resolved,omitempty"`
+	Entry       string   `json:"entry,omitempty"`
+	PrivateHome bool     `json:"private_home,omitempty"`
+	LinkChain   []string `json:"link_chain,omitempty"`
+	Type        string   `json:"type"`
+	Mode        string   `json:"mode,omitempty"`
+	UID         int      `json:"uid"`
+	GID         int      `json:"gid"`
+	NLink       uint64   `json:"nlink,omitempty"`
+	Size        int64    `json:"size,omitempty"`
+	InsideCWD   bool     `json:"inside_cwd"`
+	Error       string   `json:"error,omitempty"`
 }
 
 // SubstrateAttachedFile is a file the kit read for the gateway.
@@ -197,9 +206,20 @@ func substrateEnvelopeMiddleware(st *substrateState, next http.Handler) http.Han
 				return
 			}
 		}
+		// GAP-0504: an exposed actor_secrets value never reaches the hook
+		// rows (tool results, typed prompts).
+		if reg, ok := substrateRegistrationFrom(r.Context()); ok {
+			if masked, names := substrateMaskExposed(env.Payload, st.exposedValues(reg.Profile)); len(names) > 0 {
+				env.Payload = masked
+				st.logRefusal("hook payload of %s/%s carried the exposed value(s) %s (actor_secrets); replaced before evaluation and audit",
+					reg.Atespace, reg.Name, strings.Join(names, ", "))
+			}
+		}
 		// The facts stay on the envelope (substrateEnvelopeFrom); the skill
 		// scan below reads the attached files from it.
 		ctx := context.WithValue(r.Context(), substrateEnvelopeKey{}, env)
+		// The kit's proofs and link targets the policy reads (GAP-0471).
+		ctx = withSubstrateGuestClaims(ctx, env)
 		r = r.WithContext(ctx)
 		r.Body = io.NopCloser(bytes.NewReader(env.Payload))
 		r.ContentLength = int64(len(env.Payload))
@@ -209,6 +229,7 @@ func substrateEnvelopeMiddleware(st *substrateState, next http.Handler) http.Han
 			r.Header.Set("X-DefenseClaw-Hook-Event", env.Event)
 		}
 		if route.class == sandboxauth.RouteHook {
+			st.substrateRecordProjectHooks(ctx, env)
 			msg := st.substrateMCPRefusal(ctx, env)
 			if msg == "" {
 				msg = st.substrateSkillWriteRefusal(ctx, env)

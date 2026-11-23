@@ -34,6 +34,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/api"
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/auth"
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/safetext"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/identity"
 )
 
 type substrateLoginFlags struct {
@@ -371,16 +372,25 @@ func newSubstrateLogoutCmd() *cobra.Command {
 // (GAP-0409). The gateway verifies sign-in tokens by signature and expiry,
 // with no revocation list, so logout ends the refresh token at the issuer
 // and forgets the stored tokens, but an access or ID token copied before
-// it stays valid until it expires. "" when nothing was stored or it has
-// already expired.
+// it stays valid until it expires: its exp, or 15 minutes after it was
+// issued (identity.MaxPersonSignInAge) when that comes first. "" when
+// nothing was stored or it has already expired.
 func substrateLogoutNote(saved *auth.Token, now time.Time) string {
-	if saved == nil || saved.AccessToken == "" && saved.IDToken == "" || !saved.Expiry.After(now) {
+	if saved == nil || saved.AccessToken == "" && saved.IDToken == "" {
 		return ""
 	}
-	left := max(int(saved.Expiry.Sub(now).Round(time.Minute)/time.Minute), 1)
-	return fmt.Sprintf("A copy of this sign-in's token still works on the cluster until it expires at %s (about %d min): "+
-		"the gateway does not revoke sign-in tokens. If you think a token was copied, ask an administrator to end your session at the sign-in server.",
-		saved.Expiry.UTC().Format("15:04 MST"), left)
+	until := saved.UsableUntil()
+	if until.IsZero() {
+		until = saved.Expiry
+	}
+	if !until.After(now) {
+		return ""
+	}
+	left := max(int(until.Sub(now).Round(time.Minute)/time.Minute), 1)
+	return fmt.Sprintf("A copy of this sign-in's token still works on the cluster until it expires at %s (about %d min; "+
+		"the cluster accepts a sign-in token for at most %d minutes after it was issued): the gateway does not revoke sign-in tokens. "+
+		"If you think a token was copied, ask an administrator to end your session at the sign-in server.",
+		until.UTC().Format("15:04 MST"), left, int(identity.MaxPersonSignInAge/time.Minute))
 }
 
 func newSubstrateWhoamiCmd() *cobra.Command {

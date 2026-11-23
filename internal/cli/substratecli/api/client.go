@@ -173,6 +173,15 @@ func AsError(err error) (*Error, bool) {
 	return nil, false
 }
 
+// longCallKey carries a longer request bound for one call (withLongCall).
+type longCallKey struct{}
+
+// withLongCall gives the request made with ctx up to d instead of the
+// client's timeout.
+func withLongCall(ctx context.Context, d time.Duration) context.Context {
+	return context.WithValue(ctx, longCallKey{}, d)
+}
+
 func (c *Client) do(ctx context.Context, method, path string, q url.Values, in, out any) error {
 	var body io.Reader
 	if in != nil {
@@ -207,7 +216,15 @@ func (c *Client) do(ctx context.Context, method, path string, q url.Values, in, 
 	if method != http.MethodGet && method != http.MethodHead {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	resp, err := c.hc.Do(req)
+	hc := c.hc
+	if d, ok := ctx.Value(longCallKey{}).(time.Duration); ok && hc.Timeout > 0 && d > hc.Timeout {
+		// A call that waits on the cluster (a durable snapshot) gets
+		// its own bound instead of the client's (GAP-0410).
+		long := *hc
+		long.Timeout = d
+		hc = &long
+	}
+	resp, err := hc.Do(req)
 	if err != nil {
 		return friendlyTransport(c.base.Host, redactErr(err, tok))
 	}
@@ -262,6 +279,25 @@ type Info struct {
 	// (the key set cannot be read, a wrong issuer): no hook or model call
 	// of any agent runs (GAP-0194).
 	ActorTokens *ActorTokens `json:"actor_tokens,omitempty"`
+	// EgressCallout is who holds Substrate's egress callout slot (nil from
+	// a gateway that does not report it, GAP-0497).
+	EgressCallout *EgressCallout `json:"egress_callout,omitempty"`
+}
+
+// EgressCallout is the /info egress_callout member.
+type EgressCallout struct {
+	// State is defenseclaw, other, none or unknown.
+	State string `json:"state"`
+	// FailMode is closed, open or off.
+	FailMode  string   `json:"fail_mode"`
+	ChecksOff []string `json:"checks_off,omitempty"`
+	Since     string   `json:"since,omitempty"`
+}
+
+// Replaced reports that the DefenseClaw callout does not hold the slot:
+// another callout does, or none is registered.
+func (e *EgressCallout) Replaced() bool {
+	return e != nil && (e.State == "other" || e.State == "none")
 }
 
 // ActorTokens is the /info actor_tokens member.

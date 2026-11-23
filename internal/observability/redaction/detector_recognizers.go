@@ -75,7 +75,7 @@ func recognize(
 	case "credentials.private_key":
 		return recognizePrivateKeys(input), nil
 	case "credentials.authorization":
-		return recognizeAuthorization(input), nil
+		return append(recognizeAuthorization(input), recognizeInlineCredentials(input)...), nil
 	case "credentials.cookie":
 		return recognizeCookies(input), nil
 	case "credentials.connection_string":
@@ -119,10 +119,18 @@ func recognizeProviderTokens(input string) []candidate {
 
 // providerBoundary: a token stands alone, or follows an assignment's '='
 // (GAP-0426: AWS_ACCESS_KEY_ID=AKIA... in a .env file or a tool result was
-// never redacted, because '=' counted as part of a longer token).
+// never redacted, because '=' counted as part of a longer token), or follows
+// a URL-encoded '=' (GAP-0512: token%3DAKIA... in a logged URL or form body,
+// where the 'D' of "%3D" counted as part of a longer token).
 func providerBoundary(input string, start, end int) bool {
-	return (start == 0 || input[start-1] == '=' || !isProviderByte(input[start-1])) &&
+	return (start == 0 || input[start-1] == '=' || afterEncodedEquals(input, start) || !isProviderByte(input[start-1])) &&
 		(end == len(input) || !isProviderByte(input[end]))
+}
+
+// afterEncodedEquals reports whether input[:start] ends with "%3D" or "%3d".
+func afterEncodedEquals(input string, start int) bool {
+	return start >= 3 && input[start-3] == '%' && input[start-2] == '3' &&
+		(input[start-1] == 'D' || input[start-1] == 'd')
 }
 
 func isProviderByte(value byte) bool {
@@ -504,7 +512,7 @@ func overlapsAnyRange(start, end int, ranges [][]int) bool {
 }
 
 func recognizeAssignments(input string) []candidate {
-	return scanKeyValues(input, assignmentKeyRE, false)
+	return append(scanKeyValues(input, assignmentKeyRE, false), recognizeCredentialKeys(input)...)
 }
 
 func scanKeyValues(input string, keyPattern *regexp.Regexp, dsn bool) []candidate {
@@ -703,7 +711,7 @@ func validHighEntropy(value string, fieldClass observability.FieldClass) bool {
 	if looksUUID(value) || (len(value) == 32 && allHex(value)) || (len(value) == 64 && allHex(value) && fieldClass == observability.FieldClassIdentifier) {
 		return false
 	}
-	if identifierShaped(value) {
+	if identifierShaped(value) || labelWithSuffixShaped(value) {
 		return false
 	}
 	classes := 0
@@ -737,6 +745,109 @@ func validHighEntropy(value string, fieldClass observability.FieldClass) bool {
 // rule fired. The shape needs at least three segments, at least one of them an
 // upper-case word of three or more letters, and every mixed or numeric segment
 // at most four characters; random keys with long mixed groups still match.
+// labelWithSuffixShaped reports a Substrate actor name, attribution data
+// rather than key material (GAP-0520): [<atespace>/]<words>[-<n>]-<hex>,
+// where the hex suffix is the launcher's 8 digits (newSubstrateID(4)) or the
+// gateway's 6 (substrateActorName). Before the suffix come at most five
+// segments and 40 characters, each a word (at most 12 lower-case letters
+// and digits, at least three letters, at most three digits, no five
+// consonants in a row, and not a hex-only group of six or more) or a counter (at most four digits), and at
+// least one is a word; short parts of at most four characters (g3, r102)
+// may sit between them. The atespace, when present, is at most 32
+// characters of the same words and parts. Anything else (a bare hex token, a longer
+// suffix, upper case, random groups) is judged by the detector as before.
+func labelWithSuffixShaped(value string) bool {
+	if space, name, ok := strings.Cut(value, "/"); ok {
+		return len(space) <= 32 && dnsLabel(space) && wordsAndCounters(strings.Split(space, "-"), true) &&
+			!strings.Contains(name, "/") && labelWithSuffixShaped(name)
+	}
+	if !dnsLabel(value) {
+		return false
+	}
+	segments := strings.Split(value, "-")
+	if len(segments) < 2 || len(segments) > 6 {
+		return false
+	}
+	suffix := segments[len(segments)-1]
+	if (len(suffix) != 6 && len(suffix) != 8) || !allHex(suffix) {
+		return false
+	}
+	head := segments[:len(segments)-1]
+	if len(strings.Join(head, "-")) > 40 {
+		return false
+	}
+	return wordsAndCounters(head, false)
+}
+
+// wordsAndCounters reports segments that are all words or counters (see
+// labelWithSuffixShaped), with at least one word; an atespace (atespace
+// true) may be short parts only, such as "t".
+func wordsAndCounters(segments []string, atespace bool) bool {
+	word := false
+	for _, segment := range segments {
+		letters, digits := 0, 0
+		for i := range len(segment) {
+			switch c := segment[i]; {
+			case isASCIILower(c):
+				letters++
+			case isASCIIDigit(c):
+				digits++
+			default:
+				return false
+			}
+		}
+		switch {
+		case segment == "" || len(segment) > 16:
+			return false
+		case letters == 0:
+			if digits > 4 {
+				return false
+			}
+		case len(segment) >= 6 && allHex(segment):
+			return false // a hex group is not a word
+		case letters >= 3 && digits <= 3:
+			if len(segment) > 12 || consonantRun(segment) >= 5 {
+				return false // random letters, not a word
+			}
+			word = true
+		case len(segment) <= 4:
+			// a short part: dc, t, l5, g3, r102
+		default:
+			return false
+		}
+	}
+	return word || atespace
+}
+
+// consonantRun is the longest run of lower-case consonants in s (y counts
+// as a vowel); readable words rarely have five in a row, random letters do.
+func consonantRun(s string) int {
+	longest, run := 0, 0
+	for i := range len(s) {
+		c := s[i]
+		if isASCIILower(c) && !strings.ContainsRune("aeiouy", rune(c)) {
+			run++
+			longest = max(longest, run)
+			continue
+		}
+		run = 0
+	}
+	return longest
+}
+
+// dnsLabel reports a lower-case DNS-1123 label.
+func dnsLabel(value string) bool {
+	if value == "" || len(value) > 63 || value[0] == '-' || value[len(value)-1] == '-' {
+		return false
+	}
+	for i := range len(value) {
+		if c := value[i]; !isASCIILower(c) && !isASCIIDigit(c) && c != '-' {
+			return false
+		}
+	}
+	return true
+}
+
 func identifierShaped(value string) bool {
 	segments := strings.FieldsFunc(value, func(character rune) bool { return character == '-' || character == '_' })
 	if len(segments) < 3 || strings.Count(value, "-")+strings.Count(value, "_") != len(segments)-1 {

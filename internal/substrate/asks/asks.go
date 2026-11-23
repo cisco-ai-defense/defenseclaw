@@ -19,13 +19,17 @@
 //
 // An ask is raised by the callout (through the gateway's callout route) or
 // the gateway for one actor; its person answers it from the launcher
-// (approvals) or the inline ask row, an administrator as themselves. An
+// (approvals) or the inline ask row, an administrator as themselves. A
+// once approval lets exactly one request through (Use takes it); an always
 // approval of a host adds it to the actor's registration (Approved), and
-// the controller adds it to the actor's policy on its next pass. A
-// decision is a verdict that was not a plain allow (a block, an alert, an
-// ask and its answer), kept so a person can see what happened to their
-// actors. Users see only their own asks and decisions; the gateway passes
-// the caller's owner key, and the store filters by it.
+// the controller adds it to the actor's policy on its next pass. Revoke
+// takes an always approval back (GAP-0492): its asks answer no request any
+// more, and the host leaves the registration (OnRevoke), so the controller
+// drops it from the policy on its next pass. A decision is a verdict that
+// was not a plain allow (a block, an alert, an ask and its answer), kept so
+// a person can see what happened to their actors. Users see only their own
+// asks and decisions; the gateway passes the caller's owner key, and the
+// store filters by it.
 package asks
 
 import (
@@ -50,6 +54,8 @@ const (
 	MethodAskOpen        = leader.MethodAskOpen
 	MethodAskResolve     = leader.MethodAskResolve
 	MethodAskList        = "AskList"
+	MethodAskUse         = "AskUse"
+	MethodAskRevoke      = "AskRevoke"
 	MethodDecisionRecord = "DecisionRecord"
 	MethodDecisionList   = "DecisionList"
 )
@@ -60,6 +66,9 @@ const (
 	StateApproved = "approved"
 	StateDenied   = "denied"
 	StateExpired  = "expired"
+	// StateRevoked is an always approval its person or an administrator
+	// took back (GAP-0492): it answers no request any more.
+	StateRevoked = "revoked"
 )
 
 const (
@@ -94,13 +103,20 @@ type Ask struct {
 	Created  time.Time `json:"created"`
 	Expires  time.Time `json:"expires"`
 	State    string    `json:"state"`
-	// DecidedBy is the deciding person's owner key; Always keeps the
-	// approval for later runs of the same person and profile (the gateway's
-	// callout ask route answers their asks for the same host or rule with
-	// it, GAP-0387).
+	// DecidedBy is the deciding person's owner key. Always keeps the
+	// approval for every later request of this actor and for later runs of
+	// the same person and profile (the gateway's callout ask route answers
+	// their asks for the same host or rule with it, GAP-0387); without it
+	// the approval lets one request through, and UsedAt is when that
+	// request took it (GAP-0484).
 	DecidedBy string    `json:"decided_by,omitempty"`
 	DecidedAt time.Time `json:"decided_at,omitzero"`
 	Always    bool      `json:"always,omitempty"`
+	UsedAt    time.Time `json:"used_at,omitzero"`
+	// RevokedBy and RevokedAt are who took an always approval back, and
+	// when (GAP-0492).
+	RevokedBy string    `json:"revoked_by,omitempty"`
+	RevokedAt time.Time `json:"revoked_at,omitzero"`
 	Note      string    `json:"note,omitempty"`
 	// Unattended marks an ask an unattended actor queued (D12
 	// unattended_asks: queue): nobody is watching the run, so a person
@@ -159,12 +175,61 @@ var ErrNotFound = errors.New("asks: no such ask")
 // ErrDecided is an ask that is no longer pending.
 var ErrDecided = errors.New("asks: the ask was already answered")
 
+// ErrUsed is an approval that lets no more requests through: a once
+// approval another request took, or one older than OnceWindow, or an ask
+// that was not approved.
+var ErrUsed = errors.New("asks: the approval was already used")
+
+// OnceWindow is how long after its answer a once approval waits for the
+// one request it lets through (the held request, or the agent's retry
+// after the hold ended).
+const OnceWindow = 10 * time.Minute
+
+// UseRequest takes an approval for one request of the actor UID.
+type UseRequest struct {
+	ID  string `json:"id"`
+	UID string `json:"uid"`
+}
+
+// RevokeRequest takes back the standing (always) approvals of Host for the
+// actor UID (GAP-0492): its always-approved asks, and the host in the
+// actor's registration (Store.OnRevoke).
+type RevokeRequest struct {
+	Atespace string `json:"atespace"`
+	Actor    string `json:"actor"`
+	UID      string `json:"uid"`
+	// OwnerID is the actor's person, for the decision record.
+	OwnerID string `json:"owner_id,omitempty"`
+	Host    string `json:"host"`
+	// Profile is the actor's profile. An always approval that the same
+	// person gave on an earlier actor of this profile answers this actor
+	// too (the callout ask route, GAP-0387), so the revoke takes it back
+	// as well. "" takes back the actor's own approvals only.
+	Profile string `json:"profile,omitempty"`
+	// CallerID is the person taking the approval back; Admin lets them take
+	// back anyone's.
+	CallerID string `json:"caller_id"`
+	Admin    bool   `json:"admin,omitempty"`
+}
+
+// RevokeResult is what a revoke took back.
+type RevokeResult struct {
+	// Asks are the always approvals that answer no request any more.
+	Asks []Ask `json:"asks"`
+	// Registration is set when the host left the actor's registration, and
+	// so leaves its policy on the controller's next pass.
+	Registration bool `json:"registration,omitempty"`
+}
+
 // IsNotFound reads either form of the error: the store's wire error (in
 // the leader process) or the client's sentinel.
 func IsNotFound(err error) bool { return errors.Is(err, ErrNotFound) || wireCode(err) == "not_found" }
 
 // IsDecided reports an ask that was already answered.
 func IsDecided(err error) bool { return errors.Is(err, ErrDecided) || wireCode(err) == "decided" }
+
+// IsUsed reports an approval that lets no more requests through.
+func IsUsed(err error) bool { return errors.Is(err, ErrUsed) || wireCode(err) == "used" }
 
 func wireCode(err error) string {
 	var we *leader.WireError
@@ -179,11 +244,16 @@ func wireCode(err error) string {
 // last decisionsKept are loaded back on start.
 type Store struct {
 	Dir string
-	// OnApprove runs when an ask is approved (it adds the host to the
-	// actor's registration); an error fails the answer.
+	// OnApprove runs when an ask is approved always (it adds the host to
+	// the actor's registration); an error fails the answer. A once
+	// approval never runs it: it is not a standing approval (GAP-0484).
 	OnApprove func(ctx context.Context, a Ask) error
-	Expiry    time.Duration
-	Now       func() time.Time
+	// OnRevoke runs first on a revoke: it removes the host from the actor's
+	// registration and reports whether the registration had it; an error
+	// fails the revoke (GAP-0492).
+	OnRevoke func(ctx context.Context, in RevokeRequest) (bool, error)
+	Expiry   time.Duration
+	Now      func() time.Time
 
 	mu        sync.Mutex
 	asks      map[string]*Ask
@@ -308,7 +378,7 @@ func (s *Store) OpenAsk(_ context.Context, a Ask) (Ask, error) {
 		exp = min(t, MaxAskTimeout)
 	}
 	a.ID, a.Created, a.Expires, a.State = "ask-"+hex.EncodeToString(b), now, now.Add(exp), StatePending
-	a.DecidedBy, a.DecidedAt, a.Always = "", time.Time{}, false
+	a.DecidedBy, a.DecidedAt, a.Always, a.UsedAt = "", time.Time{}, false, time.Time{}
 	if a.Kind == "" {
 		a.Kind = "egress"
 		if a.Host == "" {
@@ -358,7 +428,7 @@ func (s *Store) Resolve(ctx context.Context, in ResolveRequest) (Ask, error) {
 	out.State, out.DecidedBy, out.DecidedAt, out.Note = StateDenied, in.CallerID, now, truncate(in.Note, 512)
 	if decision == "approve" {
 		out.State, out.Always = StateApproved, in.Always
-		if s.OnApprove != nil {
+		if s.OnApprove != nil && out.Always {
 			if err := s.OnApprove(ctx, out); err != nil {
 				return Ask{}, err
 			}
@@ -372,6 +442,80 @@ func (s *Store) Resolve(ctx context.Context, in ResolveRequest) (Ask, error) {
 	}
 	s.appendLocked(Decision{At: now, Atespace: out.Atespace, Actor: out.Actor, UID: out.UID, OwnerID: out.OwnerID,
 		Source: "ask", Tool: firstNonEmpty(out.Tool, out.Host), Verdict: out.State, Reason: out.Note, DecidedBy: in.CallerID})
+	return out, nil
+}
+
+// Use takes the approval of ask ID for one request of the actor UID. An
+// always approval answers every request and is not changed; a once
+// approval answers the first request that takes it, within OnceWindow of
+// its answer, and ErrUsed every later one (GAP-0484). The callout asks
+// for each request, and the gateway calls Use before it answers approved,
+// so no request rides on another's once approval.
+func (s *Store) Use(_ context.Context, in UseRequest) (Ask, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	a, ok := s.asks[in.ID]
+	if !ok || in.UID == "" || a.UID != in.UID {
+		return Ask{}, &leader.WireError{Code: "not_found", Message: ErrNotFound.Error()}
+	}
+	now := s.now()
+	switch {
+	case a.State != StateApproved:
+	case a.Always:
+		return *a, nil
+	case a.UsedAt.IsZero() && now.Before(a.DecidedAt.Add(OnceWindow)):
+		a.UsedAt = now
+		s.persist(a)
+		return *a, nil
+	}
+	return Ask{}, &leader.WireError{Code: "used", Message: ErrUsed.Error()}
+}
+
+// Revoke takes back the always approvals of in.Host for the actor in.UID
+// (GAP-0492): OnRevoke removes the host from the registration, and every
+// always-approved ask of that host turns revoked, so neither the policy nor
+// the callout lets a request through on it any more. Without Admin only
+// the caller's own approvals are taken back. ErrNotFound when there was
+// nothing to take back.
+func (s *Store) Revoke(ctx context.Context, in RevokeRequest) (RevokeResult, error) {
+	in.Host = strings.ToLower(strings.TrimSpace(in.Host))
+	if in.Atespace == "" || in.UID == "" || in.Host == "" || in.CallerID == "" {
+		return RevokeResult{}, &leader.WireError{Code: leader.CodeBadRequest, Message: "a revoke names its actor, a host and the caller"}
+	}
+	out := RevokeResult{Asks: []Ask{}}
+	if s.OnRevoke != nil {
+		removed, err := s.OnRevoke(ctx, in)
+		if err != nil {
+			return RevokeResult{}, err
+		}
+		out.Registration = removed
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := s.now()
+	for _, a := range s.asks {
+		if a.Host != in.Host || a.State != StateApproved || !a.Always || (!in.Admin && a.OwnerID != in.CallerID) {
+			continue
+		}
+		// The actor's own approvals, and an approval the same person gave
+		// on an earlier actor of the same profile: the callout answers this
+		// actor (and every later run) with it too (GAP-0387), so leaving it
+		// in force would leave the host open after the revoke.
+		own := a.UID == in.UID && a.Atespace == in.Atespace
+		earlier := in.Profile != "" && in.OwnerID != "" && a.Kind != "tool" && a.OwnerID == in.OwnerID && a.Profile == in.Profile
+		if !own && !earlier {
+			continue
+		}
+		a.State, a.RevokedBy, a.RevokedAt = StateRevoked, in.CallerID, now
+		s.persist(a)
+		out.Asks = append(out.Asks, *a)
+	}
+	if len(out.Asks) == 0 && !out.Registration {
+		return RevokeResult{}, &leader.WireError{Code: "not_found", Message: ErrNotFound.Error()}
+	}
+	sort.Slice(out.Asks, func(i, j int) bool { return out.Asks[i].Created.Before(out.Asks[j].Created) })
+	s.appendLocked(Decision{At: now, Atespace: in.Atespace, Actor: in.Actor, UID: in.UID, OwnerID: in.OwnerID,
+		Source: "ask", Tool: in.Host, Verdict: StateRevoked, Reason: "the always approval was taken back", DecidedBy: in.CallerID})
 	return out, nil
 }
 
@@ -397,12 +541,14 @@ func (s *Store) List(_ context.Context, in ListRequest) ([]Ask, error) {
 
 // CloseActor ends every pending ask of the actor UID (E16: a crashed or
 // deleted actor asks nothing any more) with state expired and reason, and
-// records one decision per ask. It returns how many it closed.
-func (s *Store) CloseActor(uid, reason string) int {
+// records one decision per ask, as an answer is recorded, whose event is
+// code (actor_crashed, actor_reverted, actor_deleted; GAP-0526). It returns
+// the asks it closed.
+func (s *Store) CloseActor(uid, code, reason string) []Ask {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := s.now()
-	n := 0
+	var closed []Ask
 	for _, a := range s.asks {
 		if a.UID != uid || a.State != StatePending {
 			continue
@@ -410,10 +556,11 @@ func (s *Store) CloseActor(uid, reason string) int {
 		a.State, a.DecidedAt, a.Note = StateExpired, now, truncate(reason, 512)
 		s.persist(a)
 		s.appendLocked(Decision{At: now, Atespace: a.Atespace, Actor: a.Actor, UID: a.UID, OwnerID: a.OwnerID,
-			Source: "ask", Tool: firstNonEmpty(a.Tool, a.Host), Verdict: StateExpired, Reason: a.Note})
-		n++
+			Source: "ask", Event: code, Tool: firstNonEmpty(a.Tool, a.Host), Verdict: StateExpired, Reason: a.Note})
+		closed = append(closed, *a)
 	}
-	return n
+	sort.Slice(closed, func(i, j int) bool { return closed[i].Created.Before(closed[j].Created) })
+	return closed
 }
 
 // Pending lists the actor UIDs with an ask waiting (the idle check).
@@ -486,6 +633,8 @@ func Serve(srv *leader.Server, s *Store) {
 	srv.Handle(MethodAskOpen, leader.Typed(s.OpenAsk))
 	srv.Handle(MethodAskResolve, leader.Typed(s.Resolve))
 	srv.HandleRead(MethodAskList, leader.Typed(s.List))
+	srv.Handle(MethodAskUse, leader.Typed(s.Use))
+	srv.Handle(MethodAskRevoke, leader.Typed(s.Revoke))
 	srv.Handle(MethodDecisionRecord, leader.Typed(s.Record))
 	srv.HandleRead(MethodDecisionList, leader.Typed(s.Decisions))
 }
@@ -509,6 +658,31 @@ func (c *Client) Resolve(ctx context.Context, in ResolveRequest) (Ask, error) {
 		case "decided":
 			return Ask{}, ErrDecided
 		}
+	}
+	return out, err
+}
+
+func (c *Client) Use(ctx context.Context, in UseRequest) (Ask, error) {
+	var out Ask
+	err := c.Leader.Call(ctx, MethodAskUse, leader.NewRequestID(), in, &out)
+	var we *leader.WireError
+	if errors.As(err, &we) {
+		switch we.Code {
+		case "not_found":
+			return Ask{}, ErrNotFound
+		case "used":
+			return Ask{}, ErrUsed
+		}
+	}
+	return out, err
+}
+
+func (c *Client) Revoke(ctx context.Context, in RevokeRequest) (RevokeResult, error) {
+	var out RevokeResult
+	err := c.Leader.Call(ctx, MethodAskRevoke, leader.NewRequestID(), in, &out)
+	var we *leader.WireError
+	if errors.As(err, &we) && we.Code == "not_found" {
+		return RevokeResult{}, ErrNotFound
 	}
 	return out, err
 }

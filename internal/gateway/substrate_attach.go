@@ -18,10 +18,12 @@ package gateway
 
 import (
 	"context"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httputil"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -42,8 +44,9 @@ import (
 //	ANY  /api/v1/substrate/actors/{atespace}/{name}/attach/{rest}   the relay's dcrelay/1/{rest}:
 //	     poll[/{id}] (long-poll fallback), task[/{id}], status, exec, files
 //
-// The person must own the actor; an administrator may attach to any actor
-// and is recorded as themselves (E2). The relay still requires a
+// Only the person who owns the actor may attach; an administrator sees the
+// inventory, never a session, and is refused with not_your_agent and
+// audited as themselves (GAP-0435). The relay still requires a
 // person-bound session token: the gateway mints one for the signed-in
 // person and this actor incarnation for each request, so a token never
 // crosses the laptop's network. The hop from the router to the relay is
@@ -99,8 +102,10 @@ type SubstrateRelayDialer interface {
 }
 
 // substrateAttachSessionTTL is the lifetime of the per-request session
-// token (a WebSocket keeps its connection past it; the relay checks the
-// token at the upgrade).
+// token. The relay ends an attachment at its token's exp (GAP-0070), and
+// the token ends with the caller's sign-in when that comes first
+// (GAP-0588): the launcher then reconnects with a fresh one, as a planned
+// renew.
 const substrateAttachSessionTTL = 10 * time.Minute
 
 // substrateSessionActor is the actor incarnation a relay session token
@@ -163,7 +168,13 @@ func (a *APIServer) substrateAttach(st *substrateState) http.HandlerFunc {
 			return
 		}
 		c, _ := substrateCallerFrom(r.Context())
-		tok, _, err := st.cfg.Sessions.Issue(c.person.ID(), substrateSessionActor(reg), substrateAttachSessionTTL)
+		tok, exp, err := st.cfg.Sessions.IssueUntil(c.person.ID(), substrateSessionActor(reg), substrateAttachSessionTTL, c.person.SessionBound())
+		if errors.Is(err, identity.ErrSessionBound) {
+			// The sign-in ends this second: the launcher asks for a new
+			// one (GAP-0588).
+			writeSubstrateRefusal(w, http.StatusUnauthorized, string(identity.ReasonExpired))
+			return
+		}
 		if err != nil {
 			writeSubstrateJSONError(w, http.StatusBadRequest, "session_refused")
 			return
@@ -208,6 +219,19 @@ func (a *APIServer) substrateAttach(st *substrateState) http.HandlerFunc {
 				Proxy: nil, DisableKeepAlives: true, ResponseHeaderTimeout: 60 * time.Second,
 			},
 			FlushInterval: -1, // stream poll and task answers as they come
+			// A terminal WebSocket learns how long its session token
+			// lives, so the launcher renews the attachment just before
+			// the relay would end it (GAP-0588). Only the gateway sets the
+			// header; one from the relay is dropped.
+			ModifyResponse: func(resp *http.Response) error {
+				resp.Header.Del(relay.SessionSecondsHeader)
+				if resp.StatusCode == http.StatusSwitchingProtocols {
+					if left := int(time.Until(exp) / time.Second); left > 0 {
+						resp.Header.Set(relay.SessionSecondsHeader, strconv.Itoa(left))
+					}
+				}
+				return nil
+			},
 			ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
 				st.logRefusal("attach to %s/%s failed: %v", space, name, err)
 				writeSubstrateJSONError(w, http.StatusBadGateway, "relay_unreachable")
