@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 )
 
 // TestKubeFactProjection: the Kubernetes request tuple (GAP-1824) reaches the
@@ -38,8 +39,18 @@ k.verb == 'list' && k.resource == 'secrets' && k.all_namespaces && k.reveals_con
 		}
 	}
 
-	over := actionfacts.Facts{KubeRequests: make([]actionfacts.KubeRequestFact, maxKube+1)}
-	if _, projection := Project(over); projection != ProjectionCountLimit {
+	// f.kube is a fact-only section: a list over its bound is cut, never a
+	// failure of the whole projection, and the cut is reported (DET111 T20
+	// review P1-1).
+	over := actionfacts.Facts{
+		Parse:        actionfacts.ParseResult{Status: actionfacts.StatusComplete, Dialect: actionfacts.DialectNone},
+		KubeRequests: make([]actionfacts.KubeRequestFact, maxKube+1),
+	}
+	projected, projection := Project(over)
+	if projection != ProjectionOK || len(projected.Kube) != maxKube {
 		t.Fatalf("over-bound kube list: Project() code = %q", projection)
+	}
+	if !FactOnlyCuts(over).Has(bounded.Items) {
+		t.Fatalf("over-bound kube list: FactOnlyCuts = %v", FactOnlyCuts(over))
 	}
 }

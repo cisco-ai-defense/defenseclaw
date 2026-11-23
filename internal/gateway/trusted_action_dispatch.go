@@ -1086,6 +1086,15 @@ func dispatchTrustedActionOnce(
 			findings = withBoundedTruncation(findings, set, request)
 		}()
 	}
+	// The fact-only sections of the projection (sql_facts, kube) cut past
+	// their bounds instead of failing the projection, so a long SQL
+	// identifier no longer switches off every semantic rule of the call;
+	// the cut is TRUNCATED, never a clean read (DET111 T20 review P1-1).
+	if set := semantic.FactOnlyCuts(facts); set.Any() {
+		defer func() {
+			findings = withBoundedTruncation(findings, set, request)
+		}()
+	}
 	if reason := actionfacts.CredentialSenderUnreadDestination(facts); reason != actionfacts.CredentialSenderNone {
 		defer func() {
 			findings = withCredentialSenderFinding(findings, reason, request.EnforcementCapable)
