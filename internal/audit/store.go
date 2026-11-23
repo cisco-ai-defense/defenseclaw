@@ -2726,15 +2726,15 @@ func (tx storeMigrationTx) context() context.Context {
 }
 
 func (tx storeMigrationTx) Exec(query string, args ...any) (sql.Result, error) {
-	return tx.Tx.ExecContext(tx.context(), query, args...)
+	return tx.ExecContext(tx.context(), query, args...)
 }
 
 func (tx storeMigrationTx) Query(query string, args ...any) (*sql.Rows, error) {
-	return tx.Tx.QueryContext(tx.context(), query, args...)
+	return tx.QueryContext(tx.context(), query, args...)
 }
 
 func (tx storeMigrationTx) QueryRow(query string, args ...any) *sql.Row {
-	return tx.Tx.QueryRowContext(tx.context(), query, args...)
+	return tx.QueryRowContext(tx.context(), query, args...)
 }
 
 // migrationStatementTimeout bounds one schema migration. A migration on a
