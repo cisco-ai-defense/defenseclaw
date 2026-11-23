@@ -37,6 +37,13 @@ DefenseClaw 1.0.11 follows 1.0.10. It is a fix release. It updates OpenShell to 
 - **A skill folder that has not changed is not read again on every scan.** Discovery keeps each folder's hash while none of its files changed and reads every folder in full at least once a day. On a managed Windows machine every scan still reads every folder.
 - **Managed scans on macOS and Linux report every install of an agent.** Each copy of an agent binary in a user's bin folders or the machine prefixes is its own discovery signal, with `defenseclaw.ai.component.location` (`~/.local/bin/claude`, or `/opt/homebrew/bin/codex` for a system location).
 
+### Changed
+- **Agent Substrate push (Preview).** `defenseclaw substrate push NAME [PATH...]` sends your newer local changes into a running agent with the same masking and upload limit as `run`, after a restore point. A file both sides changed is listed and not sent unless you choose `--mine`, `--theirs` or `--patch-out FILE`. Administrators can turn it off with `substrate.files.push`.
+- **Agent Substrate sync (Preview).** `defenseclaw substrate sync NAME --watch` keeps sending your local changes into a running agent while you work, one way, with the rules of `push`, a restore point at the start and every 10 minutes, and an hourly cap. A file the agent also changed keeps the agent's version. Administrators can turn it off with `substrate.files.sync`.
+- **Agent Substrate run --clone . (Preview).** `defenseclaw substrate run AGENT --clone .` starts the agent from this checkout with its full history: the agent fetches the branch from its https remote, and only your unpushed commits and uncommitted changes are sent, with the same masking (secret files and their committed versions stay on your computer). On Windows it needs the branch pushed and clean. A remote that is a local path, an ssh address, or a branch that shares no commit with its remote is refused with what to use instead.
+- **Agent Substrate key replay (Preview).** Keys typed while a terminal is reconnecting are shown after the reconnect and sent on Enter (`--key-replay`, `substrate.launcher.key_replay`), within 4 KiB and 60 seconds.
+- **Agent Substrate workspace uploads (Preview).** The launcher previews the staged size before creating an actor and the relay applies the workspace cap supplied by the gateway.
+
 ### Security
 
 - **GitHub Copilot CLI:** when the guardrail blocks a prompt in action mode, the prompt is now replaced before it reaches the model on every install (Copilot CLI 1.0.76 or later), not only on some profiles.
@@ -100,6 +107,9 @@ DefenseClaw 1.0.11 follows 1.0.10. It is a fix release. It updates OpenShell to 
 - **Adding or removing a skill no longer changes the ids of the other skills in its folder.** The managed inventory built the id of a skill, plugin or rule from whichever entry of its folder hashed lowest; it now uses the folder itself. Skill, plugin and rule ids change once on upgrade; MCP server ids do not.
 - **The plugin inventory no longer reports Codex's install staging folder as a plugin.** Hidden folders in an agent's plugins folder, such as Codex's `.remote-plugin-install-staging`, are the agent's own working state; discovery, and the Linux sensor helper's read of a home, now leave them out.
 
+### Removed
+- **`DEFENSECLAW_RELAY_FILES_MAX_BYTES`.** The relay now takes its upload cap from the gateway (`substrate.workspace_max_bytes`, 1 MiB to 64 GiB), so the environment variable is gone.
+
 ### Known limits
 
 - **An OpenShell upgrade cannot be undone.** Rolling DefenseClaw back keeps OpenShell 0.1.9. An older OpenShell starts only after its gateway database (`~/.local/state/openshell/gateway/openshell.db`) is moved aside, which drops the records of your sandboxes, so pull their work back first.
@@ -122,11 +132,6 @@ DefenseClaw 1.0.10 lets you decide what each guardrail layer does, adds model ro
 - **CLI and TUI:** `defenseclaw acp refresh` re-pins an ACP agent that updated itself. The TUI config editor covers routing and tokenomics. The main TUI tables fit 80x24. MCP inventory export works for local and remote servers (#1406).
 
 ### Changed
-- **Agent Substrate push (Preview).** `defenseclaw substrate push NAME [PATH...]` sends your newer local changes into a running agent with the same masking and upload limit as `run`, after a restore point. A file both sides changed is listed and not sent unless you choose `--mine`, `--theirs` or `--patch-out FILE`. Administrators can turn it off with `substrate.files.push`.
-- **Agent Substrate sync (Preview).** `defenseclaw substrate sync NAME --watch` keeps sending your local changes into a running agent while you work, one way, with the rules of `push`, a restore point at the start and every 10 minutes, and an hourly cap. A file the agent also changed keeps the agent's version. Administrators can turn it off with `substrate.files.sync`.
-- **Agent Substrate run --clone . (Preview).** `defenseclaw substrate run AGENT --clone .` starts the agent from this checkout with its full history: the agent fetches the branch from its https remote, and only your unpushed commits and uncommitted changes are sent, with the same masking (secret files and their committed versions stay on your computer). On Windows it needs the branch pushed and clean. A remote that is a local path, an ssh address, or a branch that shares no commit with its remote is refused with what to use instead.
-- **Agent Substrate key replay (Preview).** Keys typed while a terminal is reconnecting are shown after the reconnect and sent on Enter (`--key-replay`, `substrate.launcher.key_replay`), within 4 KiB and 60 seconds.
-- **Agent Substrate workspace uploads (Preview).** The launcher previews the staged size before creating an actor and the relay applies the workspace cap supplied by the gateway.
 - **A tool's output never blocks in the default pack.** A tool result is HIGH at most, so the default and permissive packs alert on it and only the strict pack blocks.
 - **A credential a tool call writes out now alerts.** This covers a `Write`, an `Edit`, a send-tool message and a redirected `echo`. Before, it stayed audit telemetry (rule `SEC-SECRET-ASSIGN` and related rules).
 - **Hook answers keep up under load.** A late hook answer no longer starts a 140 MB gateway process per call, the hook journal commits once per batch, and a hook no longer costs more the longer its session runs. macOS per-user Claude Code hooks use the native `defenseclaw-hook-user` launcher. Managed hook budgets are now 120 requests a second, a burst of 240 and 64 in flight per account (before: 60, 120 and 32).
@@ -160,7 +165,6 @@ Where a fix affects earlier releases, the affected versions are named.
 - **Secrets and local-only data.** A model response is checked by the same secret rules as a prompt or tool result. A sensitive request that must stay local is never sent to the cloud model.
 
 ### Removed
-- **`DEFENSECLAW_RELAY_FILES_MAX_BYTES`.** The relay now takes its upload cap from the gateway (`substrate.workspace_max_bytes`, 1 MiB to 64 GiB), so the environment variable is gone.
 - **The `sk-dc-` proxy master key.** No release has issued it since 0.3.0. The guardrail proxy and connector routes accept only the gateway token or connector-scoped credentials.
 
 ### Known limits
