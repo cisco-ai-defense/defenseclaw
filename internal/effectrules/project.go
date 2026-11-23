@@ -133,7 +133,9 @@ func holdKnownOnNameMaybe(facts []*semanticpb.EffectFact) {
 				match.State = string(gradeUnknown)
 				match.Reason = "call_maybe"
 			}
-			if match.GetState() == string(gradeUnknown) &&
+			// A link end the call just placed has an uncertain destination
+			// role, not an uncertain identity of its Known source member.
+			if match.GetState() == string(gradeUnknown) && match.GetReason() != "call_link" &&
 				ReachForMatch(match.GetReason(), fact.GetReasons()) == ReachName {
 				maybeNames[target.GetKey()+"\x00"+match.GetSet()] = true
 			}
