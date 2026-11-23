@@ -533,6 +533,7 @@ func substrateGatewayBuilder(c *config.Config, src *configwatch.Watcher, ready *
 		}
 		router, routerErr := substrateRouter()
 		runtimeScan := newRuntimeSkillScanner(c)
+		runtimeScan.enabled = func() bool { return live().Substrate.SkillScanEnabled() }
 		go runtimeScan.checkSidecar(context.Background(), os.Stderr, 12, 5*time.Second)
 		out = gateway.SubstrateConfig{
 			ActorAddr: serveFlags.actorListen, ActorTLS: actorTLS,
@@ -556,7 +557,11 @@ func substrateGatewayBuilder(c *config.Config, src *configwatch.Watcher, ready *
 			BlockUnscannedSkills: func(connector string) bool { return substrateBlocksUnscannedSkills(live())(connector) },
 			SkillReceiptKey:      substrateSkillReceiptKey(chainKey),
 			TemplateSkills:       substrateTemplateSkills(ctl),
-			Info:                 substrateInfo(c),
+			SkillScanLimits: func() (time.Duration, time.Duration) {
+				s := live().Substrate
+				return s.EffectiveSkillScanTimeout(), s.EffectiveSkillPendingWait()
+			},
+			Info: substrateInfo(c),
 			// GAP-0262: the gateway checks the sign-in server it verifies
 			// people with, from its own network.
 			SignInServer: substrateSignInServer(people),

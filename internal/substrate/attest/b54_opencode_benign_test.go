@@ -24,12 +24,15 @@ import (
 
 // cleanSkillScanner answers what skill-scanner 2.3.2 gives a clean skill
 // (the scanner image on E1, B5.4): one INFO manifest note, nothing else.
-type cleanSkillScanner struct{}
+type cleanSkillScanner struct{ scans *int }
 
 func (cleanSkillScanner) Name() string               { return "skill-scanner" }
 func (cleanSkillScanner) Version() string            { return "2.3.2" }
 func (cleanSkillScanner) SupportedTargets() []string { return []string{"skill"} }
-func (cleanSkillScanner) Scan(_ context.Context, target string) (*scanner.ScanResult, error) {
+func (c cleanSkillScanner) Scan(_ context.Context, target string) (*scanner.ScanResult, error) {
+	if c.scans != nil {
+		*c.scans++
+	}
 	return &scanner.ScanResult{Scanner: "skill-scanner", Target: target, Findings: []scanner.Finding{{
 		ID: "f1", RuleID: "MANIFEST_MISSING_LICENSE", Severity: scanner.SeverityInfo, Title: "no license in the manifest"}}}, nil
 }
@@ -40,7 +43,8 @@ func (cleanSkillScanner) Scan(_ context.Context, target string) (*scanner.ScanRe
 // at the head (each is now a skill folder, scanned, and allowed).
 func TestOpenCodeCleanSkillNoNewAlertVsRel(t *testing.T) {
 	rt := NewRuntimeScanner(&config.Config{})
-	rt.Skill = cleanSkillScanner{}
+	scans := 0
+	rt.Skill = cleanSkillScanner{scans: &scans}
 	clean := "---\nname: tables\ndescription: Formats a markdown table.\n---\nFormat the table the user gives you as markdown.\n"
 	for _, dir := range []string{
 		"/home/u/.config/opencode/skill", "/home/u/.config/opencode/skills",
@@ -50,11 +54,22 @@ func TestOpenCodeCleanSkillNoNewAlertVsRel(t *testing.T) {
 		"/home/u/.claude/skills", "/home/u/.agents/skills",
 	} {
 		ev := gap0185Event(t, "Write", "/work", map[string]any{"file_path": dir + "/tables/SKILL.md", "content": clean})
-		for _, a := range HookAssets(ev, []AttachedFile{{Role: RoleSkillFile, Path: dir + "/tables/SKILL.md", Content: []byte(clean)}}) {
+		assets := HookAssets(ev, []AttachedFile{{Role: RoleSkillFile, Path: dir + "/tables/SKILL.md", Content: []byte(clean)}})
+		// The head must have decided something: a folder that yields no
+		// asset, or an asset the scanner never saw, would pass the checks
+		// below without scanning anything (rel decides none).
+		if len(assets) == 0 {
+			t.Errorf("%s: no asset decided for the skill written here", dir)
+		}
+		before := scans
+		for _, a := range assets {
 			d, err := rt.Scan(context.Background(), a)
 			if err != nil || d.Action != "allow" {
 				t.Errorf("%s: clean skill %s: action=%q reason=%q err=%v", dir, a.Name, d.Action, d.Reason, err)
 			}
+		}
+		if len(assets) > 0 && scans == before {
+			t.Errorf("%s: the skill was not scanned (scanner calls stayed at %d)", dir, scans)
 		}
 	}
 }

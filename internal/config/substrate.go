@@ -89,6 +89,9 @@ type SubstrateConfig struct {
 	Admin OpenShellAdminConfig `mapstructure:"admin" yaml:"admin,omitempty"`
 	// Bundles is signed policy bundles (substrate_bundles.go).
 	Bundles SubstrateBundlesConfig `mapstructure:"bundles" yaml:"bundles,omitempty"`
+	// Skills is the gateway's scan of skill folders an agent adds while it
+	// runs (B5.4, GAP-0477).
+	Skills SubstrateSkillsConfig `mapstructure:"skills" yaml:"skills,omitempty"`
 }
 
 // SubstrateTemplatesConfig is how the controller admits templates (PLAN
@@ -748,6 +751,16 @@ func (s *SubstrateConfig) Validate() error {
 			bad("unattended.ask_timeout", "%q must be a Go duration over 0 and at most 24h", v)
 		}
 	}
+	if v := s.Skills.Scan.Timeout; v != "" {
+		if d, err := time.ParseDuration(strings.TrimSpace(v)); err != nil || d <= 0 || d > MaxSubstrateSkillScanTimeout {
+			bad("skills.scan.timeout", "%q must be a Go duration over 0 and at most 10m", v)
+		}
+	}
+	if v := s.Skills.PendingWait; v != "" {
+		if d, err := time.ParseDuration(strings.TrimSpace(v)); err != nil || d <= 0 || d > MaxSubstrateSkillPendingWait {
+			bad("skills.pending_wait", "%q must be a Go duration over 0 and at most 8s (under the kit's 9 s first attempt)", v)
+		}
+	}
 	if r := s.Unattended.TelemetrySampling; r != nil && (*r < 0 || *r > 1) {
 		bad("unattended.telemetry_sampling", "%v is outside 0-1", *r)
 	}
@@ -1146,4 +1159,62 @@ func (r SubstrateVersionRange) Contains(version string) bool {
 		}
 	}
 	return true
+}
+
+// SubstrateSkillsConfig is the gateway's scan of skill folders an agent adds
+// while it runs (B5.4, GAP-0477): the chart's scanner sidecar runs the
+// laptop's skill-scanner on each folder the kit attaches.
+type SubstrateSkillsConfig struct {
+	Scan SubstrateSkillsScanConfig `mapstructure:"scan" yaml:"scan,omitempty"`
+	// PendingWait is how long one hook post waits for the scans of its skill
+	// folders, in every tier: one deadline for the post, the wait for a scan
+	// slot and every folder included (default 8s, at most 8s: under the
+	// kit's 9 s first attempt, so every post is answered; GAP-0980,
+	// GAP-0982). Past it the folder is still being checked and its scan goes
+	// on (Scan.Timeout): the OSS tiers ask or allow it with an alert; managed
+	// installs and the strict tier refuse every tool call until it has a
+	// verdict. The kit sends it again with its next hook.
+	PendingWait string `mapstructure:"pending_wait" yaml:"pending_wait,omitempty"`
+}
+
+// SubstrateSkillsScanConfig turns the scanner sidecar on or off and bounds
+// one scan.
+type SubstrateSkillsScanConfig struct {
+	// Enabled uses the scanner sidecar (nil = on). Off: no folder is scanned
+	// and the fail mode decides, as before the sidecar (managed installs and
+	// the strict tier refuse every new skill). This is the admin-off switch.
+	Enabled *bool `mapstructure:"enabled" yaml:"enabled,omitempty"`
+	// Timeout bounds one folder's scan (default 20s, at most 10m); past it
+	// the fail mode decides (reason skill_scan_timeout).
+	Timeout string `mapstructure:"timeout" yaml:"timeout,omitempty"`
+}
+
+const (
+	DefaultSubstrateSkillScanTimeout = 20 * time.Second
+	MaxSubstrateSkillScanTimeout     = 10 * time.Minute
+	DefaultSubstrateSkillPendingWait = 8 * time.Second
+	MaxSubstrateSkillPendingWait     = 8 * time.Second
+)
+
+// SkillScanEnabled says whether the gateway scans skill folders (default on).
+func (s SubstrateConfig) SkillScanEnabled() bool {
+	return s.Skills.Scan.Enabled == nil || *s.Skills.Scan.Enabled
+}
+
+// EffectiveSkillScanTimeout is skills.scan.timeout, bounded.
+func (s SubstrateConfig) EffectiveSkillScanTimeout() time.Duration {
+	d := durationOr(s.Skills.Scan.Timeout, DefaultSubstrateSkillScanTimeout)
+	if d <= 0 || d > MaxSubstrateSkillScanTimeout {
+		return DefaultSubstrateSkillScanTimeout
+	}
+	return d
+}
+
+// EffectiveSkillPendingWait is skills.pending_wait, bounded.
+func (s SubstrateConfig) EffectiveSkillPendingWait() time.Duration {
+	d := durationOr(s.Skills.PendingWait, DefaultSubstrateSkillPendingWait)
+	if d <= 0 || d > MaxSubstrateSkillPendingWait {
+		return DefaultSubstrateSkillPendingWait
+	}
+	return d
 }

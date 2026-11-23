@@ -247,9 +247,23 @@ The Kubernetes Secret named by the secret's source already exists, and DefenseCl
 
 ### A skill I added in the session was refused
 
-A gateway whose image has skill-scanner but runs where user namespaces are refused (a pod under the default seccomp profile) cannot contain the scan, so it counts as having no scanner and the fail mode below decides.
+The gateway checks each skill folder an agent adds while it runs with skill-scanner in the gateway pod's scanner sidecar (Preview). A skill in the attested template is trusted by its digest. The hook reply says why a skill was refused:
 
-skill-scanner does not run in the cluster. A skill in the attested template is trusted by its digest. A skill added mid-session is not scanned, so it follows the fail mode: managed installs and the strict tier refuse it and raise an alert; open source allows it and raises an alert. To use the skill everywhere, put it in the image and rebuild the template with `template build`.
+- `DefenseClaw blocked the skill "NAME": ...`: skill-scanner found a problem at or above the block level. The kit moved the folder to `.defenseclaw-quarantine` next to its skills folder. Fix the skill, or put a reviewed one in the image and rebuild the template with `template build`.
+- `... the skill scanner is not running; this install refuses skills it could not scan`: see [The skill scanner is not running](#the-skill-scanner-is-not-running).
+- `... the skill scan did not finish in time`: the check took longer than `substrate.skills.scan.timeout`, so the fail mode decided. A large skill folder or a busy sidecar can cause it.
+- `... the skill scanner is busy with other skills`: no check could start within `substrate.skills.pending_wait`, because the agent or the gateway has many checks running. The skill is sent again with the next hook; until it has a verdict, managed installs and the strict tier refuse every tool call.
+- `DefenseClaw could not look inside "FILE" in the skill "NAME"`: the skill folder holds an archive (zip, tar or a compressed file). skill-scanner reads files as they are, so the fail mode decides. Unpack the files into the skill folder instead.
+
+Managed installs and the strict tier refuse a skill they could not check and raise an alert; open source allows it and raises an alert.
+
+### A skill is still being checked
+
+`DefenseClaw is still checking the skill "NAME". Try again in a few seconds.` means the check took longer than `substrate.skills.pending_wait`. The check goes on, and the next hook gets its verdict. Managed installs and the strict tier refuse every tool call with this message until then. Open source asks in Claude Code (`DefenseClaw is still checking the skill "NAME". Use it anyway?`) and allows it with an alert in other agents and in unattended runs.
+
+### The skill scanner is not running
+
+The gateway logs `substrate: skill scanner is not running` at start, and `defenseclaw substrate doctor` shows the `substrate.skill_scan` row as failed on a managed install or the strict tier (new skills are refused) and as a warning on others (new skills are allowed with an alert). Read the sidecar's log with `kubectl -n NAMESPACE logs deploy/defenseclaw-gateway -c skill-scanner`. Until it runs, new skills follow the fail mode. The doctor row is skipped when scanning is turned off (`substrate.skills.scan.enabled: false`, or `gateway.skillScanner.enabled: false` in the chart). Which `defenseclaw` commands a standard user can run on a managed computer is in [Managed command availability](/docs/enterprise/managed-commands).
 
 ### Pull says there is no record of the folder
 

@@ -4840,6 +4840,22 @@ class SubstrateBundlesConfig:
 
 
 @dataclass
+class SubstrateSkillsScanConfig:
+    # None = on (Go *bool); False is the admin-off switch.
+    enabled: bool | None = None
+    timeout: str = ""  # Go duration, default 20s, at most 10m
+
+
+@dataclass
+class SubstrateSkillsConfig:
+    """``substrate.skills``: the gateway's scan of skill folders an agent adds
+    while it runs (mirrors Go ``SubstrateSkillsConfig``)."""
+
+    scan: SubstrateSkillsScanConfig = field(default_factory=SubstrateSkillsScanConfig)
+    pending_wait: str = ""  # Go duration, default 8s, at most 8s (kit's 9 s first attempt); one deadline per hook post
+
+
+@dataclass
 class SubstrateConfig:
     """``substrate:``, DefenseClaw on Agent Substrate (mirrors Go
     ``SubstrateConfig``). Off by default and read only in the cluster; the
@@ -4874,6 +4890,7 @@ class SubstrateConfig:
     allow_passthrough_for: list[str] = field(default_factory=list)
     admin: OpenShellAdminConfig = field(default_factory=OpenShellAdminConfig)
     bundles: SubstrateBundlesConfig = field(default_factory=SubstrateBundlesConfig)
+    skills: SubstrateSkillsConfig = field(default_factory=SubstrateSkillsConfig)
 
 
 @dataclass
@@ -8229,6 +8246,7 @@ def _merge_substrate(raw: Any) -> SubstrateConfig:
             sync_interval=_duration_text(usage.get("sync_interval")),
         ),
         extproc=_merge_substrate_extproc(extproc),
+        skills=_merge_substrate_skills(raw.get("skills")),
         llm=SubstrateLLMConfig(
             providers=_string_list(llm.get("providers")),
             credential=SubstrateLLMCredentialConfig(
@@ -8245,6 +8263,18 @@ def _merge_substrate(raw: Any) -> SubstrateConfig:
         allow_passthrough_for=_string_list(raw.get("allow_passthrough_for")),
         admin=_merge_openshell_admin(raw.get("admin")),
         bundles=_merge_substrate_bundles(raw.get("bundles")),
+    )
+
+
+def _merge_substrate_skills(raw: Any) -> SubstrateSkillsConfig:
+    raw = _mapping(raw)
+    scan = _mapping(raw.get("scan"))
+    return SubstrateSkillsConfig(
+        scan=SubstrateSkillsScanConfig(
+            enabled=_optional_bool(scan.get("enabled")),
+            timeout=_duration_text(scan.get("timeout")),
+        ),
+        pending_wait=_duration_text(raw.get("pending_wait")),
     )
 
 

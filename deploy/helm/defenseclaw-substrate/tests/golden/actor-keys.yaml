@@ -1530,6 +1530,8 @@ spec:
         - substrate
         - scan-worker
         - --dir=/run/defenseclaw-scan
+        # One scan's bound: substrate.skills.scan.timeout (B5.4).
+        - --timeout=20s
         # The container is the scanner's boundary (GAP-0828): RuntimeDefault
         # refuses the namespaces the laptop's containment uses, so the worker
         # is PID 1 of this container's own PID namespace (the pod does not

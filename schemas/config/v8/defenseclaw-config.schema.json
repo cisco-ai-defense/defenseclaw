@@ -8074,6 +8074,28 @@
           "minimum": 0,
           "maximum": 68719476736
         },
+        "skills": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "scan": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "enabled": {
+                  "type": "boolean",
+                  "default": true
+                },
+                "timeout": {
+                  "$ref": "#/$defs/duration"
+                }
+              }
+            },
+            "pending_wait": {
+              "$ref": "#/$defs/duration"
+            }
+          }
+        },
         "unattended": {
           "type": "object",
           "additionalProperties": false,

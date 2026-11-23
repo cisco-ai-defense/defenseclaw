@@ -34,12 +34,15 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"gopkg.in/yaml.v3"
 
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/api"
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/attach"
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/auth"
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/safetext"
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/fleet"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/kit"
 )
 
 // The status of one doctor check.
@@ -656,9 +659,17 @@ func doctorKubeChecks(ctx context.Context, kf *substrateClusterFlags, tokenGroup
 }
 
 // doctorSkillScan is the substrate.skill_scan row (B5.4, GAP-0477): the
-// gateway pods' skill-scanner sidecar, from the pods' container status.
+// gateway pods' skill-scanner sidecar, from the pods' container status, and
+// the gateway config (substrate.skills.scan.enabled, deployment_mode, the
+// hook policy tier). A scanner that is not running fails where the gateway
+// refuses new skills unscanned (managed installs, the strict tier) and warns
+// on the others (new skills are allowed with an alert).
 func doctorSkillScan(ctx context.Context, kf *substrateClusterFlags) substrateCheck {
 	const id = "substrate.skill_scan"
+	gc := doctorSkillScanConfig(ctx, kf)
+	if gc.read && !gc.scanOn {
+		return substrateCheck{ID: id, Status: doctorSkip, Summary: "Skill scanning is turned off (substrate.skills.scan.enabled: false)."}
+	}
 	raw, err := substrateKubectl(ctx, kf, "get", "pods", "-n", kf.namespace, "-l", "app.kubernetes.io/component=gateway", "-o", "json")
 	if err != nil {
 		return substrateCheck{ID: id, Status: doctorWarn, Summary: "the skill scanner was not read: " + doctorFirstLine(err), Fix: "check your kubectl access, then run doctor again"}
@@ -696,14 +707,76 @@ func doctorSkillScan(ctx context.Context, kf *substrateClusterFlags) substrateCh
 			}
 		}
 	}
-	switch {
-	case with == 0:
+	if with == 0 && !gc.read {
+		// No sidecar and no config to say otherwise: the chart renders none
+		// when gateway.skillScanner.enabled is false.
 		return substrateCheck{ID: id, Status: doctorSkip, Summary: "Skill scanning is turned off (substrate.skills.scan.enabled: false)."}
-	case down > 0 || with < len(pods.Items):
-		return substrateCheck{ID: id, Status: doctorFail, Summary: fmt.Sprintf("Skill scanner is not running on %d of %d gateway pods. New skills follow the hook fail mode there (managed installs refuse them, others allow them with an alert).", down+len(pods.Items)-with, len(pods.Items)),
+	}
+	if n := down + len(pods.Items) - with; n > 0 {
+		status, outcome := doctorWarn, "allowed with an alert"
+		switch {
+		case !gc.read:
+			status, outcome = doctorFail, "refused on managed installs and allowed with an alert on others"
+		case gc.refusedAll:
+			status, outcome = doctorFail, "refused"
+		case len(gc.refused) > 0:
+			status, outcome = doctorFail, "refused for "+strings.Join(gc.refused, ", ")+" and allowed with an alert for the other agents"
+		}
+		return substrateCheck{ID: id, Status: status, Summary: fmt.Sprintf("Skill scanner is not running on %d of %d gateway pods. New skills are %s there.", n, len(pods.Items), outcome),
 			Fix: "kubectl -n " + kf.namespace + " logs deploy/defenseclaw-gateway -c " + skillScannerContainer}
 	}
 	return substrateCheck{ID: id, Status: doctorOK, Summary: "Skill scanner ready (skill-scanner image " + doctorWord(version, "untagged") + ")."}
+}
+
+// skillScanConfig is what the substrate.skill_scan row reads of the gateway
+// config; read is false when there was none to read. refused are the
+// connectors whose new skills the gateway refuses unscanned (managed
+// installs: every one; else the strict-tier ones).
+type skillScanConfig struct {
+	read, scanOn, refusedAll bool
+	refused                  []string
+}
+
+// doctorSkillScanConfig reads the gateway config doctor checks (--config, or
+// the cluster's config map, as the fleet checks do).
+func doctorSkillScanConfig(ctx context.Context, kf *substrateClusterFlags) skillScanConfig {
+	text := ""
+	if kf.configFile != "" {
+		b, err := os.ReadFile(kf.configFile)
+		if err != nil {
+			return skillScanConfig{}
+		}
+		text = string(b)
+	} else {
+		cms, err := kubeGetList(ctx, kf, "get", "configmaps", "-n", kf.namespace)
+		if err != nil {
+			return skillScanConfig{}
+		}
+		for _, c := range cms {
+			if t := c.Data["config.yaml"]; strings.Contains(t, "substrate:") {
+				text = t
+				break
+			}
+		}
+	}
+	if text == "" {
+		return skillScanConfig{}
+	}
+	var doc config.Config
+	if yaml.Unmarshal([]byte(text), &doc) != nil {
+		return skillScanConfig{}
+	}
+	// GAP-0936: the gateway's own check (managed, or the connector's strict
+	// tier), for each connector an actor can run.
+	blocks := substrateBlocksUnscannedSkills(&doc)
+	var refused []string
+	all := slices.Concat(kit.Wave1Connectors, kit.Wave2Connectors, kit.Wave3Connectors)
+	for _, c := range all {
+		if blocks(c) {
+			refused = append(refused, c)
+		}
+	}
+	return skillScanConfig{read: true, scanOn: doc.Substrate.SkillScanEnabled(), refusedAll: len(refused) == len(all), refused: refused}
 }
 
 // skillScannerContainer is the chart's scanner sidecar container name.

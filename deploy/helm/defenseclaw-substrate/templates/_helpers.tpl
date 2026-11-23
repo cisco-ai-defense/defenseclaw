@@ -119,6 +119,15 @@ name this release's Services and the Substrate API filled in.
 {{- $cfg := deepCopy .Values.config -}}
 {{- $sub := get $cfg "substrate" | default dict -}}
 {{- $_ := set $sub "enabled" (ternary true $sub.enabled (not (hasKey $sub "enabled"))) -}}
+{{- /* No scanner sidecar: the gateway does not scan skills (B5.4), so the
+fail mode decides (managed installs refuse new skills). */ -}}
+{{- if not .Values.gateway.skillScanner.enabled -}}
+{{- $sk := get $sub "skills" | default dict -}}
+{{- $sc := get $sk "scan" | default dict -}}
+{{- $_ := set $sc "enabled" false -}}
+{{- $_ := set $sk "scan" $sc -}}
+{{- $_ := set $sub "skills" $sk -}}
+{{- end -}}
 {{- if not (hasKey $sub "services") -}}
 {{- $_ := set $sub "services" (dict "actor" (include "dc.actorHost" .) "admin" (include "dc.adminHost" .)) -}}
 {{- end -}}
