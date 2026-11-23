@@ -644,6 +644,8 @@ type ContinuousDiscoveryService struct {
 	// skillHashCache keeps each skill folder's hash across scans while the
 	// folder is unchanged (GAP-1816).
 	skillHashCache map[string]skillHashCacheEntry
+	// skillClock replaces time.Now for the skill hash cache in a test.
+	skillClock func() time.Time
 	// modelAPIProbeCursor rotates origins and catalogs across bounded passes so
 	// a stalled or over-cap loopback provider cannot starve later providers.
 	modelAPIProbeCursor  atomic.Uint64
