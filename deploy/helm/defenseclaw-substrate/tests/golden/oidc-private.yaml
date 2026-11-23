@@ -1297,6 +1297,8 @@ spec:
         runAsUser: 65532
         seccompProfile:
           type: RuntimeDefault
+      # The scan worker must be PID 1 of its container (GAP-0828).
+      shareProcessNamespace: false
       topologySpreadConstraints:
       - maxSkew: 1
         topologyKey: kubernetes.io/hostname
@@ -1456,6 +1458,12 @@ spec:
         - substrate
         - scan-worker
         - --dir=/run/defenseclaw-scan
+        # The container is the scanner's boundary (GAP-0828): RuntimeDefault
+        # refuses the namespaces the laptop's containment uses, so the worker
+        # is PID 1 of this container's own PID namespace (the pod does not
+        # share one), scans one job at a time and clears the container after
+        # each. Its security settings are fixed here, not taken from values.
+        - --pod-contained
         resources:
           limits:
             memory: 1Gi
@@ -1463,11 +1471,15 @@ spec:
             cpu: 100m
             memory: 256Mi
         securityContext:
+          runAsNonRoot: true
+          runAsUser: 65532
+          runAsGroup: 65532
           allowPrivilegeEscalation: false
-          capabilities:
-            drop:
-            - ALL
           readOnlyRootFilesystem: true
+          capabilities:
+            drop: [ALL]
+          seccompProfile:
+            type: RuntimeDefault
         volumeMounts:
         - name: skill-scan
           mountPath: /run/defenseclaw-scan
