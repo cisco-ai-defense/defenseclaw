@@ -463,7 +463,9 @@ func decideFinding(f RuleFinding) decide.Finding {
 // verdictSeverity is the severity a verdict reports for f: the tier
 // table's severity for its proof when the table gives one (a bound alone is
 // MEDIUM, GAP-0851, GAP-0962), else its own. ok is false for a label the
-// levels never rank.
+// levels never rank. A pack's tiers.yaml cannot change a cell severity (the
+// loader refuses it, decide.packCellError), so the built-in severity is the
+// one Decide reads on the call's pack table (DET111 T19 review P3-1).
 func verdictSeverity(f RuleFinding) (string, int) {
 	if sev := decide.Builtin().Severity(decideFinding(f)); sev != decide.SevNone {
 		return sev.String(), int(sev)

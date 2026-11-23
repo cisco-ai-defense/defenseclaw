@@ -3,6 +3,7 @@
   "pages": [
     "defaults",
     "thresholds",
+    "tiers",
     "rules",
     "admission",
     "deterministic-detection",

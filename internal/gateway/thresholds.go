@@ -91,7 +91,6 @@ func notePackPosture(dir, posture string) {
 // publishPackPostures makes the postures the published generation's build
 // read the ones the request path resolves with.
 func publishPackPostures() {
-	publishPackTables()
 	pendingPackPostures.Range(func(dir, posture any) bool {
 		packPostures.Store(dir, posture)
 		pendingPackPostures.Delete(dir)

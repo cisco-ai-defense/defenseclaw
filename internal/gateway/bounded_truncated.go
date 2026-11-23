@@ -119,12 +119,12 @@ func withBoundedReason(finding *RuleFinding, reason string) {
 
 // boundedLimitIndex is the index of the evaluation-limit finding in
 // findings, or -1. The detection-only record of a data word
-// (RuleFinding.dataWordRecord) is not a limit the call hit and is skipped:
+// (RuleFinding.boundRecord) is not a limit the call hit and is skipped:
 // only an enforcing cap or a truncated reading counts, so a record never
 // makes a call capped or stands in for its limit finding (rel-1-0-10:GAP-0760).
 func boundedLimitIndex(findings []RuleFinding) int {
 	return slices.IndexFunc(findings, func(finding RuleFinding) bool {
-		return !finding.dataWordRecord && canonicalTrustedRuleID(finding.RuleID) == evaluationLimitRuleID
+		return !finding.boundRecord && canonicalTrustedRuleID(finding.RuleID) == evaluationLimitRuleID
 	})
 }
 

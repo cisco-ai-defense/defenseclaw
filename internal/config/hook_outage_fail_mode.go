@@ -12,8 +12,8 @@ import (
 	"sync"
 	"weak"
 
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/decide"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
-	"gopkg.in/yaml.v3"
 )
 
 // Policy tiers of a connector's guardrail rule pack (its posture).
@@ -245,7 +245,11 @@ func packManifestPosture(dir string) string {
 
 // packOwnPosture is the pack's own tier in dir: its manifest posture, else
 // the tier field of its tiers.yaml (guardrail.ReadPackPosture reads the same
-// two), "" when neither names one.
+// two), "" when neither names one. The tiers.yaml is read as the loader reads
+// it (decide.ParseColumn: known fields, version, rows): a file the loader
+// refuses names no tier, so the caller falls back to the built-in name or
+// the folder, never to a tier from a file no generation would load (DET111
+// T19 review P3-3).
 func packOwnPosture(dir string) string {
 	if posture := packManifestPosture(dir); posture != "" {
 		return posture
@@ -257,13 +261,11 @@ func packOwnPosture(dir string) string {
 	if err != nil || len(raw) > 1<<20 {
 		return ""
 	}
-	var column struct {
-		Tier string `yaml:"tier"`
-	}
-	if yaml.Unmarshal(raw, &column) != nil {
+	column, err := decide.ParseColumn(raw)
+	if err != nil {
 		return ""
 	}
-	switch tier := strings.ToLower(strings.TrimSpace(column.Tier)); tier {
+	switch tier := column.Tier.String(); tier {
 	case HookPolicyTierDefault, HookPolicyTierStrict, HookPolicyTierPermissive:
 		return tier
 	}

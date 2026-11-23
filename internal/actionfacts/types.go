@@ -19,7 +19,11 @@
 // not an event schema and must not be serialized into audit or telemetry data.
 package actionfacts
 
-import "encoding/json"
+import (
+	"encoding/json"
+
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
+)
 
 // Input is the normalized action material available at a tool-call or
 // execution-approval boundary. Callers should preserve structured argv instead
@@ -191,6 +195,8 @@ type Facts struct {
 	// kubeCut is the private record of a Kubernetes request cut
 	// (KubeRequestCaps).
 	kubeCut kubeCutRecord
+	// sqlASTCaps are the bounds the SQL facts reader hit (SQLASTCaps).
+	sqlASTCaps bounded.CapSet
 	// SensitiveEgressArtifactWrites contains only exact local artifact paths.
 	// An entry proves that a closed structured-write schema created source text
 	// containing both a protected credential/secret path and a non-local literal
