@@ -121,7 +121,7 @@ func TestGAP1241NestedWrapperChildFolder(t *testing.T) {
 		// folder), not the POSIX rules the cd walk uses: a product fix,
 		// rel-1-0-10:GAP-1881. The other POSIX directory rows of this
 		// package run on Windows.
-		t.Skip("POSIX directory rows (GAP-1038)")
+		t.Skip("POSIX directory rows (GAP-1038); chroot and nsenter --wd use native path rules on Windows (GAP-1881)")
 	}
 	for _, row := range []struct {
 		name, command, cwd string

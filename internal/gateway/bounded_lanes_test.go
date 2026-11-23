@@ -322,7 +322,7 @@ func boundedParse(action string) bounded.Action {
 func boundedLaneEnv(t *testing.T) boundedEnv {
 	t.Helper()
 	if runtime.GOOS == "windows" {
-		t.Skip("POSIX home fixture requires an unprivileged Unix user")
+		t.Skip("POSIX home fixture requires an unprivileged Unix user; these rows are not yet proven on a Windows gateway (see boundedLaneEnvAnyOS)")
 	}
 	return boundedLaneEnvAnyOS(t)
 }
