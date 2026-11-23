@@ -40,7 +40,7 @@ func TestHashSkillFolderKeepsNoHardLinkedManifest(t *testing.T) {
 	if err := os.Link(other, filepath.Join(linked, "SKILL.md")); err != nil {
 		t.Skipf("hard link: %v", err)
 	}
-	hash, status, manifest, _ := hashSkillFolder(linked, maxSkillBytes)
+	hash, status, manifest, _ := hashSkillFolderCapture(linked, maxSkillBytes, maxSkillBytes)
 	if status != SkillContentOK || hash == "" {
 		t.Fatalf("hard-linked skill: status %q hash %q, want ok with a hash", status, hash)
 	}
@@ -55,7 +55,7 @@ func TestHashSkillFolderKeepsNoHardLinkedManifest(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(plain, "SKILL.md"), []byte("---\nname: y\n---\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, status, manifest, _ := hashSkillFolder(plain, maxSkillBytes); status != SkillContentOK || manifest == nil {
+	if _, status, manifest, _ := hashSkillFolderCapture(plain, maxSkillBytes, maxSkillBytes); status != SkillContentOK || manifest == nil {
 		t.Fatalf("own SKILL.md: status %q manifest %q, want it kept", status, manifest)
 	}
 }

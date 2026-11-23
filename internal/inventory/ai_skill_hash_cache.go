@@ -59,6 +59,8 @@ type skillHashCacheEntry struct {
 	front        skillFrontMatter
 	manifestHash string
 	manifestSize int64
+	// manifestName is the exact root SKILL.md leaf the walk read.
+	manifestName string
 }
 
 // skillSignatureRacy reports whether a write after a hash read at readAt could have left

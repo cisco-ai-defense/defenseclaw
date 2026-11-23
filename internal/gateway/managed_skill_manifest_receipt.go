@@ -46,8 +46,9 @@ type managedManifestReceiptState struct {
 }
 
 type manifestReceiptRuntimeBinding struct {
-	generation uint64
-	current    func() uint64
+	generation  uint64
+	current     func() uint64
+	destination string
 }
 
 func (state *managedInventoryPublishState) SetSkillManifestReceiptReader(reader managedaid.ManifestReceiptReader, bindings ...manifestReceiptRuntimeBinding) {
@@ -60,8 +61,35 @@ func (state *managedInventoryPublishState) SetSkillManifestReceiptReader(reader 
 	state.receiptBinding = manifestReceiptRuntimeBinding{}
 	if len(bindings) == 1 {
 		state.receiptBinding = bindings[0]
+		if destination := bindings[0].destination; managedaid.ValidManifestSHA256(destination) {
+			if state.file.ManifestDestination != destination {
+				state.destinationDirty = true
+			}
+			if prior := state.file.ManifestDestination; prior != "" && prior != destination {
+				// A different managed receiver needs its own baseline. Preserve
+				// the scope-mismatch guard for ordinary reloads of this receiver.
+				state.file.Collections = map[string]managedInventoryPublishRecord{}
+				state.file.Skills = nil
+				state.file.SkillManifests = nil
+				state.file.ManifestReceipts = nil
+				state.file.ManifestReceiptCursor = ""
+				state.file.ManifestBodyCursor = ""
+				state.file.FullBundleAt = time.Time{}
+				state.cycleKnown = false
+				state.destinationEpoch++
+			}
+			// Older state has no receiver identity. Adopt the current one
+			// without discarding supported legacy submission progress.
+			state.file.ManifestDestination = destination
+		}
 	}
 	state.receiptEpoch++
+}
+
+func (state *managedInventoryPublishState) manifestDestinationEpoch() uint64 {
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	return state.destinationEpoch
 }
 
 type skillManifestProjectionPreview interface {
@@ -189,6 +217,9 @@ func receiptSnapshotMatches(record managedManifestReceiptState, receipt manageda
 // Network work and legacy preview run without holding the publisher mutex.
 func (cycle *managedInventoryPublishCycle) refreshManifestReceipts(ctx context.Context, emitter sidecarRuntimeEmitter, components []endpointInventoryComponent) {
 	if cycle == nil || cycle.state == nil || ctx == nil {
+		return
+	}
+	if !managedInventorySnapshotEligible(endpointSkillInventorySource, config.ObservabilityV8ManagedSkillInventoryAction, components) {
 		return
 	}
 	state := cycle.state
@@ -395,6 +426,9 @@ func (cycle *managedInventoryPublishCycle) receiptContextCurrent() bool {
 func (cycle *managedInventoryPublishCycle) manifestEmissionContext(ctx context.Context, component endpointInventoryComponent) (context.Context, bool) {
 	if cycle == nil || component.skillManifest == "" {
 		return ctx, true
+	}
+	if cycle.state != nil && cycle.destinationEpoch != cycle.state.manifestDestinationEpoch() {
+		return ctx, false
 	}
 	if cycle.receiptEpoch != 0 && !cycle.receiptContextCurrent() {
 		return ctx, false

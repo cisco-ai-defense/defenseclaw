@@ -72,20 +72,19 @@ func (s *ContinuousDiscoveryService) detectPluginSkills() []AISignal {
 					continue
 				}
 				seen[rel] = true
-				signal := s.signalFromDirectoryChildren(*sig, SignalSkill, "skill", skills)
+				identityPath := filepath.Join(home, plugin.signature, "plugins", plugin.id, rel)
+				signal := s.signalFromDirectoryChildrenIdentity(*sig, SignalSkill, "skill", skills, identityPath)
 				if s.profileLinkRefused(skills) {
 					continue // the folder became a link while it was read
 				}
 				// The plugin, not its version folder, keys these skills, so an
 				// upgrade reads as changed rather than removed and added.
-				for i, ev := range signal.Evidence {
-					if ev.Type == "skill" {
-						signal.Evidence[i].PathHash = hashPath(filepath.Join(home, plugin.signature, "plugins", plugin.id, rel))
-					}
+				for _, ev := range signal.Evidence {
 					if ev.Skill != nil {
 						ev.Skill.Scope, ev.Skill.Plugin = SkillScopePlugin, info
 					}
 				}
+				signal.EvidenceHash = hashEvidence(signal.Evidence)
 				out = append(out, signal)
 			}
 		}

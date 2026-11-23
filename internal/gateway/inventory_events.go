@@ -1239,17 +1239,26 @@ func emitSkillInventorySnapshot(
 		discoveredEntriesFromReport(*report, inventory.SignalSkill, "skill"),
 		skillsComplete,
 	)
-	// A partial skill list cannot prune saved receipts or advance a manifest.
-	if skillsComplete && cfg != nil && cfg.AIDiscovery.IncludeSkillManifests {
+	// Removals that would push a complete collection over its limit go out
+	// first, in bounded batches.
+	skillEntries, removalErr := prepareManagedSkillSnapshot(ctx, emitter, skillEntries, skillsComplete, publish, action)
+	// A partial or over-limit skill list cannot prune saved receipts or
+	// advance a manifest.
+	if skillsComplete && managedInventorySnapshotEligible(endpointSkillInventorySource, action, skillEntries) &&
+		cfg != nil && cfg.AIDiscovery.IncludeSkillManifests {
 		if action == config.ObservabilityV8ManagedSkillInventoryAction {
 			// Receipts are AI Defense's; no other destination has them.
 			publish.cycle.refreshManifestReceipts(ctx, emitter, skillEntries)
 		}
 		publish.cycle.attachSkillManifests(skillEntries)
 	}
-	return emitEndpointInventorySnapshot(
+	err := emitEndpointInventorySnapshot(
 		ctx, emitter, endpointSkillInventorySource, skillEntries, !skillsComplete, action, publish,
 	)
+	if removalErr != nil {
+		return removalErr
+	}
+	return err
 }
 
 func emitEndpointInventorySnapshot(
@@ -1343,13 +1352,9 @@ func emitInventorySnapshot(
 			active++
 		}
 	}
-	limit := managedInventoryComponentLimit(managedAction, components)
-	carrier, carrierOK := endpointInventoryCarrierFor(managedAction, components)
-	if len(components) == 0 && strings.HasSuffix(source, "_mcp_tool_inventory") {
-		carrier, carrierOK = endpointInventoryCarrier{}, true
-	}
+	carrier, eligible := managedInventorySnapshotCarrier(source, managedAction, components)
 	action := managedAction
-	if partial || limit == 0 || len(components) > limit || !carrierOK {
+	if partial || !eligible {
 		partial = true
 		carrier = endpointInventoryCarrier{}
 		action = config.ObservabilityV8LocalInventoryDiagnosticAction
@@ -1452,6 +1457,20 @@ func managedInventoryActionOf(action observability.ProducerKey) observability.Pr
 		return managedOf
 	}
 	return action
+}
+
+func managedInventorySnapshotCarrier(source string, action observability.ProducerKey, components []endpointInventoryComponent) (endpointInventoryCarrier, bool) {
+	limit := managedInventoryComponentLimit(action, components)
+	carrier, ok := endpointInventoryCarrierFor(action, components)
+	if len(components) == 0 && strings.HasSuffix(source, "_mcp_tool_inventory") {
+		carrier, ok = endpointInventoryCarrier{}, true
+	}
+	return carrier, ok && limit > 0 && len(components) <= limit
+}
+
+func managedInventorySnapshotEligible(source string, action observability.ProducerKey, components []endpointInventoryComponent) bool {
+	_, eligible := managedInventorySnapshotCarrier(source, action, components)
+	return eligible
 }
 
 func managedInventoryLimit(action observability.ProducerKey) int {

@@ -13,3 +13,14 @@ package inventory
 // agentBinaryDirs is empty on Windows, where the gateway service cannot list
 // the users' bin folders.
 var agentBinaryDirs = func(string) []string { return nil }
+
+func systemAgentInstallLocation(path string) bool {
+	// Resolve machine roots through Known Folders, never a caller's PATH or
+	// account-controlled environment overrides.
+	for _, name := range []string{"PROGRAMFILES", "PROGRAMFILES(X86)"} {
+		if root, ok := platformDiscoveryVariable(name, ""); ok && pathBelow(root, path) {
+			return true
+		}
+	}
+	return false
+}

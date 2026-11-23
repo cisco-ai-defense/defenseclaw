@@ -141,6 +141,7 @@ type AIDiscoveryOptions struct {
 	DisabledSignatureIDs        []string
 	IncludeShellHistory         bool
 	IncludePackageManifests     bool
+	DisableSkillContentHashes   bool
 	IncludeEnvVarNames          bool
 	IncludeNetworkDomains       bool
 	LookupModelProvenanceOnline bool
@@ -640,7 +641,7 @@ type ContinuousDiscoveryService struct {
 	skillFactsMu   sync.Mutex
 	skillFactsSeen map[string]AISkillFacts
 	skillBytesRead int64
-	skillManifests map[string]string // SKILL.md hash -> skill folder
+	skillManifests map[string]string // SKILL.md hash -> exact root manifest leaf path
 	// skillHashCache keeps each skill folder's hash across scans while the
 	// folder is unchanged (GAP-1816).
 	skillHashCache map[string]skillHashCacheEntry
@@ -896,6 +897,7 @@ func AIDiscoveryOptionsFromConfig(cfg *config.Config) AIDiscoveryOptions {
 		DisabledSignatureIDs:        append([]string{}, ad.DisabledSignatureIDs...),
 		IncludeShellHistory:         ad.IncludeShellHistory,
 		IncludePackageManifests:     ad.IncludePackageManifests,
+		DisableSkillContentHashes:   !ad.EffectiveIncludeSkillContentHashes(),
 		IncludeEnvVarNames:          ad.IncludeEnvVarNames,
 		IncludeNetworkDomains:       ad.IncludeNetworkDomains,
 		LookupModelProvenanceOnline: ad.LookupModelProvenanceOnline,
@@ -2656,7 +2658,7 @@ func dirHasEntry(path string) bool {
 // constant — trivial to grep, trivial to disable via
 // disabled_signature_ids per surface.
 func (s *ContinuousDiscoveryService) detectSkills() []AISignal {
-	s.resetSkillFacts()
+	s.beginSkillFactsScan()
 	defer s.resetSkillFacts()
 	var out []AISignal
 	for _, sig := range s.catalog {
@@ -2783,7 +2785,13 @@ func (s *ContinuousDiscoveryService) detectPlugins() []AISignal {
 // Evidence is capped at maxEvidencePerSignal so a pathological skill
 // directory with thousands of children cannot blow up payload size.
 func (s *ContinuousDiscoveryService) signalFromDirectoryChildren(sig AISignature, category, detector, path string) AISignal {
-	base := AIEvidence{Type: detector, Basename: filepath.Base(path), PathHash: hashPath(path)}
+	return s.signalFromDirectoryChildrenIdentity(sig, category, detector, path, path)
+}
+
+// signalFromDirectoryChildrenIdentity separates an installed plugin's stable
+// identity from its versioned cache directory. All actual reads still use path.
+func (s *ContinuousDiscoveryService) signalFromDirectoryChildrenIdentity(sig AISignature, category, detector, path, identityPath string) AISignal {
+	base := AIEvidence{Type: detector, Basename: filepath.Base(path), PathHash: hashPath(identityPath)}
 	if s.keepEvidencePath() {
 		base.RawPath = path
 	}
@@ -2854,8 +2862,8 @@ func (s *ContinuousDiscoveryService) signalFromDirectoryChildren(sig AISignature
 				// Only the exact per-user `$CODEX_HOME/skills/.system` cache is
 				// vendor-bundled; a same-named container under `.agents` or a
 				// workspace stays user-owned and scan/enforcement eligible.
-				if detector == "skill" && strings.EqualFold(strings.TrimSpace(sig.ID), "codex") &&
-					enforce.IsBundledSkillContainerName(entry.Name()) {
+				if detector == "skill" && enforce.IsBundledSkillContainerName(entry.Name()) &&
+					(strings.EqualFold(strings.TrimSpace(sig.ID), "codex") || s.isCodexBundledSkillContainer(filepath.Join(path, entry.Name()))) {
 					systemDir := filepath.Join(path, entry.Name())
 					bundled := s.isCodexBundledSkillContainer(systemDir)
 					if childPartial, childReason := s.appendSystemSkillChildren(&evidence, systemDir, bundled); childPartial {
@@ -2866,11 +2874,29 @@ func (s *ContinuousDiscoveryService) signalFromDirectoryChildren(sig AISignature
 					}
 					continue
 				}
-				evidence = append(evidence, s.directoryChildEvidence(detector, path, entry.Name(), name))
+				ev := s.directoryChildEvidence(detector, path, entry.Name(), name)
+				ev.PathHash = hashPath(filepath.Join(identityPath, entry.Name()))
+				evidence = append(evidence, ev)
 			}
 		}
 	}
-	out := s.signalFromEvidence(sig, category, detector, evidence)
+	identityEvidence := evidence
+	if identityPath != path {
+		identityEvidence = append([]AIEvidence(nil), evidence...)
+		for i := range identityEvidence {
+			// Content/version facts and private cache paths change on upgrade;
+			// they describe this observation, not the installed plugin identity.
+			identityEvidence[i].Skill = nil
+			identityEvidence[i].RawPath = ""
+		}
+	}
+	out := s.signalFromEvidence(sig, category, detector, identityEvidence)
+	out.Evidence = evidence
+	if identityPath != path {
+		// Preserve change detection for updated content while the fingerprint
+		// remains tied to the stable install and its child identities.
+		out.EvidenceHash = hashEvidence(evidence)
+	}
 	s.stampHomeOwner(&out, path)
 	out.Partial = partial
 	out.CoverageReason = coverageReason

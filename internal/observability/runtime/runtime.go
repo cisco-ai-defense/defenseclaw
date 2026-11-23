@@ -477,6 +477,10 @@ func (runtime *Runtime) emitWithLeaseControls(
 		(suppressAll && originDestination != "") || (localOnly && originDestination != "") {
 		return pipeline.LocalLogOutcome{}, &Error{code: ErrorInvalidDependency}
 	}
+	guardedManifest := managedManifestDigestBound(ctx)
+	if guardedManifest && (localOnly || inbound || originDestination != "" || suppressAll) {
+		return pipeline.LocalLogOutcome{}, &Error{code: ErrorInvalidDependency}
+	}
 	graph := lease.Graph()
 	component, ok := lease.Component(LocalLogComponentName)
 	if graph == nil || !ok {
@@ -514,7 +518,18 @@ func (runtime *Runtime) emitWithLeaseControls(
 			ctx, metadata, originDestination, suppressAll, processBuilder,
 		)
 	default:
-		outcome, processErr = local.Process(ctx, metadata, processBuilder)
+		if guardedManifest {
+			mismatch := false
+			outcome, processErr = local.ProcessChecked(ctx, metadata, processBuilder, func(candidate pipeline.LocalLogOutcome) bool {
+				mismatch = !managedManifestProjectionMatches(ctx, candidate)
+				return !mismatch
+			})
+			if mismatch {
+				return pipeline.LocalLogOutcome{}, &Error{code: ErrorInvalidDependency}
+			}
+		} else {
+			outcome, processErr = local.Process(ctx, metadata, processBuilder)
+		}
 	}
 	if processErr != nil {
 		// A failed SQLite write (disk full) still hands back the remote
