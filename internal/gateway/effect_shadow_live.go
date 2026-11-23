@@ -14,6 +14,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/effectrules"
 	"github.com/defenseclaw/defenseclaw/internal/effects"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/decide"
 	"github.com/defenseclaw/defenseclaw/internal/shellparse"
 )
 
@@ -160,6 +161,10 @@ func effectShadowRun(request trustedActionRequest, mode effectRulesMode, tiers .
 		AccountHomes: accountHomes,
 		Resolve:      effectResolverOverride,
 	})
+	var aliasUses []decide.Proof
+	if len(result.Unknowns) == 0 {
+		aliasUses = sessionEffectAliases.uses(request, result)
+	}
 	// The unknown tier alerts in the default pack, per-user and managed alike
 	// (owner ruling 2026-11-21, GAP-1611/1698); the strict packs block.
 	strict := request.StrictPolicy
@@ -167,11 +172,26 @@ func effectShadowRun(request trustedActionRequest, mode effectRulesMode, tiers .
 	reachEnv := newEffectReachEnv(request.Input.ActiveHome, text)
 	for i, tier := range tiers {
 		c := classifyEffects(result, facts, opts.Flavor, tier, reachEnv)
+		for _, proof := range aliasUses {
+			c.touches, c.known, c.restricted, c.linkTo = true, true, true, true
+			c.sets = dedupeStrings(append(c.sets, effectrules.SetCredentials))
+			c.restrictedSets = dedupeStrings(append(c.restrictedSets, effectrules.SetCredentials))
+			if proof.Kind == decide.KindRead {
+				c.readProofs = appendCredentialReadProof(c.readProofs, proof)
+			} else {
+				c.knownMutation = true
+				c.writtenCredentialSets = dedupeStrings(append(c.writtenCredentialSets, proof.Set))
+				c.credentialAppend = c.credentialAppend || proof.Kind == decide.KindAppend
+			}
+			if c.kind == "" {
+				c.kind = proof.Kind.String()
+			}
+		}
 		effectReachUnplaced(&c, result, facts, text, request.Input.ActiveHome, opts.Flavor)
 		res := &results[i]
 		res.Sets, res.Program, res.Kind, res.Reach, res.RoleHeld, res.LinkHeld, res.Known = c.sets, c.program, c.kind, c.reach, c.roleHeld, c.linkHeld, c.known
 		res.KnownMutation, res.LinkTo = c.knownMutation, c.linkTo && !c.linkAt
-		res.ReadProofs, res.RestrictedSets, res.CredentialAppend = c.readProofs, c.restrictedSets, c.credentialAppend
+		res.ReadProofs, res.MutationProofs, res.RestrictedSets, res.CredentialAppend = c.readProofs, c.mutationProofs, c.restrictedSets, c.credentialAppend
 		if len(c.writtenCredentialSets) == 1 {
 			res.WrittenCredentialSet = c.writtenCredentialSets[0]
 		}
@@ -191,6 +211,9 @@ func effectShadowRun(request trustedActionRequest, mode effectRulesMode, tiers .
 	}
 	if effectExtractCut(result) {
 		return finish(effectShadowReasonCut, len(result.Effects))
+	}
+	if len(result.Unknowns) == 0 {
+		sessionEffectAliases.remember(request, result, facts, opts.Flavor)
 	}
 	return finish("", len(result.Effects))
 }

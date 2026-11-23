@@ -61,7 +61,6 @@ var r3VerdictPending = map[string]string{
 	"GAP-1156":  "cd inside a PowerShell function body is not tracked (S4-R3, S3-R1)",
 	"GAP-1553":  "an 8.3 short name stays Maybe until the resolver reads it (S4-R3)",
 	"GAP-1556":  "an unknown PowerShell environment folder stays Maybe (S4-R3)",
-	"GAP-1671":  "only the effect unknown tier reached it; that tier is shadow-only on every set (DET111 ruling 2026-11-22T17:00Z, TRAIN-C reopens)",
 }
 
 // r3Ratchet judges R3 rows cell by cell: the lane-off floor, the target, and

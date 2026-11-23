@@ -4,6 +4,14 @@
 version: 1
 tier: permissive
 rows:
+  - id: known-authorized-keys-write
+    source: rel-1-0-10:persistence.ssh_authorized_keys_command (GAP-1865)
+    per_user:
+      floor: block
+      severity: CRITICAL
+    managed:
+      floor: block
+      severity: CRITICAL
   - id: effect-unknown
     source: DET111 PLAN 5.3 MAYBE rule (GAP-1796)
     per_user:

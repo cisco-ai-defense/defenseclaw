@@ -145,7 +145,8 @@ func (r *Row) cell(d Deployment, tier func() Tier) Cell {
 
 // Row ids of the built-in table.
 const (
-	RowRecord = "record"
+	RowRecord                   = "record"
+	RowKnownAuthorizedKeysWrite = "known-authorized-keys-write"
 	// RowEffectUnknown: the effect lane's unknown tier is a shadow record on
 	// every set and never moves the live verdict, whatever its Known flag,
 	// target or tier (the MAYBE rule, DET111 PLAN 5.3, GAP-1796; DET111
@@ -258,6 +259,18 @@ func Builtin() *Table { return &builtin }
 
 var builtin = Table{Rows: []Row{
 	{
+		// A resolved write to the authorized_keys member has the plain
+		// 1.0.10 keys-write cell regardless of the program that produced it.
+		ID: RowKnownAuthorizedKeysWrite, Rules: []string{RuleAuthorizedKeysWrite},
+		Kinds: []ProofKind{KindWrite, KindAppend}, Targets: []TargetClass{TargetAuthorizedKeys},
+		Certainty: []Certainty{CertKnown}, Sources: []string{SourceEffects},
+		Content: true, SecureClient: true, Source: "rel-1-0-10:persistence.ssh_authorized_keys_command (GAP-1865)",
+		Cells: [deploymentCount][tierCount]Cell{
+			uniform(Cell{Floor: Block, Levels: true, Severity: SevCritical}),
+			uniform(Cell{Floor: Block, Levels: true, Severity: SevCritical}),
+		},
+	},
+	{
 		ID: RowEffectUnknown, Rules: []string{RuleEffectUnknown},
 		Content: true, SecureClient: true, Source: "DET111 PLAN 5.3 MAYBE rule (GAP-1796)",
 		Cells: [deploymentCount][tierCount]Cell{
@@ -290,7 +303,7 @@ var builtin = Table{Rows: []Row{
 		},
 	},
 	{
-		ID: RowEffectRead, Kinds: []ProofKind{KindRead}, Targets: []TargetClass{TargetCredential}, Sources: []string{SourceEffects},
+		ID: RowEffectRead, Kinds: []ProofKind{KindRead}, Targets: []TargetClass{TargetCredential}, Sources: []string{SourceEffects}, LinkAt: true,
 		Flows: []ReadFlow{FlowNone}, Content: true, SecureClient: true, Source: "DET111 effects credential read (GAP-1825, GAP-1826, GAP-1846)",
 		Cells: [deploymentCount][tierCount]Cell{
 			uniform(Cell{Levels: true, Ceiling: CeilingRecord}), uniform(Cell{Levels: true, Ceiling: CeilingRecord}),

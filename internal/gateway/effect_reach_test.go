@@ -249,10 +249,12 @@ func TestClassifyEffectsKnownBesideReached(t *testing.T) {
 		t.Fatalf("restricted write: result %+v, want a known mutation", res)
 	} else if res.Tier != string(effectTierRestricted) || res.Action != guardrailActionBlock {
 		t.Fatalf("known authorized_keys mutation = tier %s action %s, want restricted block", res.Tier, res.Action)
-	} else if f := effectShadowFindings(res, effectRulesOn); len(f) != 1 ||
-		f[0].RuleID != "effect.protected_target_restricted" ||
-		f[0].Proof.Certainty != decide.CertKnown {
-		t.Fatalf("known mutation did not raise with its tier proof: %+v", f)
+	} else if f := effectShadowFindings(res, effectRulesOn); len(f) != 2 ||
+		f[0].RuleID != decide.RuleAuthorizedKeysWrite ||
+		f[0].Proof.Certainty != decide.CertKnown ||
+		f[1].RuleID != "effect.protected_target_restricted" ||
+		f[1].Proof.Certainty != decide.CertKnown {
+		t.Fatalf("known mutation did not carry its exact member and tier proofs: %+v", f)
 	}
 	// A Known credential read is handed to Decide with its exact member
 	// class. The existing credential table, not the effect tier, decides it.
