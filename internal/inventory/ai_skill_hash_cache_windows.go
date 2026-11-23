@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io/fs"
 	"syscall"
+	"time"
 )
 
 // skillChangeStampTamperEvident: a user can set every time Windows keeps on
@@ -31,9 +32,9 @@ const skillChangeStampTamperEvident = false
 // skillEntryChangeStamp is the creation time of path. Windows has no change
 // time in the file metadata Go reads, so the cache age bound catches a write
 // time restored by hand.
-func skillEntryChangeStamp(_ string, info fs.FileInfo) string {
+func skillEntryChangeStamp(_ string, info fs.FileInfo) (string, time.Time) {
 	if data, ok := info.Sys().(*syscall.Win32FileAttributeData); ok {
-		return fmt.Sprintf("%d", data.CreationTime.Nanoseconds())
+		return fmt.Sprintf("%d", data.CreationTime.Nanoseconds()), time.Unix(0, data.CreationTime.Nanoseconds())
 	}
-	return "?"
+	return "?", time.Time{}
 }
