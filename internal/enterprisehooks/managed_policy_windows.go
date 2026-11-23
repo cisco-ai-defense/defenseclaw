@@ -997,13 +997,7 @@ func validateWindowsClaudeManagedPolicyTeardownState(
 }
 
 func requireWindowsClaudeTeardownAdministrator() error {
-	token := windows.GetCurrentProcessToken()
-	if token.IsElevated() {
-		return nil
-	}
-	user, err := token.GetTokenUser()
-	if err == nil && user != nil && user.User.Sid != nil &&
-		user.User.Sid.IsWellKnown(windows.WinLocalSystemSid) {
+	if privileged, _ := CurrentWindowsTokenAdminFacts().ElevatedOrSystem(); privileged {
 		return nil
 	}
 	return errors.New(
@@ -1882,9 +1876,13 @@ func warmWindowsClaudeRecordedRenders(renders *windowsClaudeRecordedRenders, opt
 
 // windowsClaudeKeepDecidedBeforeLock reads the published drop-in without the
 // transaction lock and returns keep, answering from that read for the same
-// bytes. keep depends only on the bytes it is given, so the answer for them
-// is the one keep gives under the lock. Nothing is kept on this read alone:
-// the caller asks only about a drop-in it has authenticated under the lock.
+// bytes. keep renders the recorded forms and checks the hook executables,
+// so its answer can change with them between the read and the lock; that is
+// no weaker than asking under the lock, which does not cover the hook images
+// either, and the body staging publishes is rendered and checked outside it
+// anyway. Bytes that changed since the read are asked again. Nothing is kept
+// on this read alone: the caller asks only about a drop-in it has
+// authenticated under the lock.
 // A read that fails, a drop-in that is absent, or one behind a link kept at
 // the folder (nothing behind it is read, GAP-0758) leaves keep as it is.
 func windowsClaudeKeepDecidedBeforeLock(keep func(published []byte) bool) func(published []byte) bool {

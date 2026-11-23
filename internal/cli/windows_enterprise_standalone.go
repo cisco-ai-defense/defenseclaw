@@ -69,6 +69,7 @@ type windowsEnterpriseInstallerReport struct {
 	Action                            string            `json:"action"`
 	Installed                         bool              `json:"installed"`
 	TransactionPending                bool              `json:"transaction_pending"`
+	DeferredConfigPending             bool              `json:"deferred_config_pending"`
 	InstallRoot                       string            `json:"install_root"`
 	StateRoot                         string            `json:"state_root"`
 	GatewayService                    string            `json:"gateway_service"`
@@ -2304,18 +2305,20 @@ var windowsEnterpriseNoStartGuardianIssues = map[string]bool{
 }
 
 // windowsEnterpriseNoStartMessages drops the guardian status issues of an
-// install, upgrade or repair that completed with --no-start (NOSTART=1): its
-// services stay stopped and disabled as asked, so the guardian has not run
-// yet. They made Setup /ensure NOSTART=1 exit 1603 on a deployment installed
-// as documented (GAP-1214). One warning names the next step instead; every
-// other error stays.
+// install, upgrade or repair that completed with its services stopped and
+// disabled on purpose, so the guardian has not run yet: --no-start
+// (NOSTART=1), whose issues made Setup /ensure NOSTART=1 exit 1603 on a
+// deployment installed as documented (GAP-1214), and a deferred-config
+// install the installer recorded as waiting for its configuration, whose
+// issues made Setup /install without CONFIG= exit 1603 (GAP-1749). One
+// warning names the next step instead; every other error stays.
 func windowsEnterpriseNoStartMessages(
 	result *enterprisestatus.Result,
 	opts *windowsEnterpriseLifecycleOptions,
 	report *windowsEnterpriseInstallerReport,
 	messages []string,
 ) []string {
-	if opts == nil || !opts.noStart || !report.OK || !report.Installed || report.TransactionPending {
+	if !opts.servicesStayStopped() || !report.OK || !report.Installed || report.TransactionPending {
 		return messages
 	}
 	switch report.Action {
@@ -2323,11 +2326,23 @@ func windowsEnterpriseNoStartMessages(
 	default:
 		return messages
 	}
+	// A deferred-config install counts only once the installer recorded the
+	// waiting state; without it the guardian issues stay errors.
+	deferred := opts.deferredConfig && report.Action == "install" && report.DeferredConfigPending
+	if !opts.noStart && !deferred {
+		return messages
+	}
 	kept := make([]string, 0, len(messages))
 	for _, message := range messages {
 		if !windowsEnterpriseNoStartGuardianIssues[strings.TrimSpace(message)] {
 			kept = append(kept, message)
 		}
+	}
+	if deferred {
+		result.AddWarning("deferred_config_pending", "installed and waiting for its configuration (Setup /install without CONFIG= and MANIFEST=): "+
+			"the services stay stopped and disabled, so agents are not protected yet; complete it from an elevated prompt with a repair "+
+			"that supplies both files (Setup /repair CONFIG=<config.yaml> MANIFEST=<targets.yaml>, or the repair with --config and --manifest)")
+		return kept
 	}
 	// The code Linux and macOS use for a --no-start install.
 	result.AddWarning("not_started", "installed with the services stopped and disabled (NOSTART=1, --no-start), so agents are not protected yet; "+
