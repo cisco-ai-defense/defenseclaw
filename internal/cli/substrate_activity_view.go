@@ -29,6 +29,8 @@ import (
 // lines of `substrate status NAME` (B3.6). The times are the gateway's
 // receive times; nothing here comes from the agent.
 
+// substratePlural is "1 commit" or "3 commits": n with the word for one or
+// for many.
 func substratePlural(n int, one, many string) string {
 	if n == 1 {
 		return fmt.Sprintf("%d %s", n, one)
