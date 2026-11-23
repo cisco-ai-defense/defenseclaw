@@ -167,26 +167,23 @@ func (k *KubeTokenVerifier) Verify(ctx context.Context, token string) (Person, e
 // kubeTokenExpiry reads the exp claim of a bearer token that is a JWT,
 // without verifying it: the TokenReview authenticates the token, and exp
 // only shortens how long the answer is used, never lengthens it
-// (GAP-0569). isJWT is false for a token whose middle part is not a
-// base64url JSON object (a static or provider token): it has no exp to
-// read. For a JWT, ok is false when exp is missing, is not a finite JSON
-// number (RFC 7519 NumericDate: an integer or a decimal such as
-// 1799999990.0 or 1.79999999e9), or the claims repeat a member; the caller
-// refuses it (GAP-0587).
+// (GAP-0569). The claims are decoded with jwtClaims, the decoder of the
+// token key and issue time, which reads every encoding the API server's
+// go-jose accepts ('=' padding, spare bits, Unicode white space, the
+// standard alphabet), so a re-encoded copy of a JWT is never taken for an
+// opaque token that skips the exp rule (GAP-1032). isJWT is false for a
+// token whose middle part is not a base64 JSON object (a static or
+// provider token): it has no exp to read. For a JWT, ok is false when exp
+// is missing, is not a finite JSON number (RFC 7519 NumericDate: an
+// integer or a decimal such as 1799999990.0 or 1.79999999e9), or the
+// claims repeat a member; the caller refuses it (GAP-0587).
 func kubeTokenExpiry(token string) (exp time.Time, isJWT, ok bool) {
-	parts := strings.Split(token, ".")
-	if len(parts) != 3 {
-		return time.Time{}, false, false
-	}
-	cb, err := b64url(parts[1])
-	if err != nil {
+	cb, isJWT := jwtClaims(token)
+	if !isJWT {
 		return time.Time{}, false, false
 	}
 	var c map[string]json.RawMessage
-	if err := json.Unmarshal(cb, &c); err != nil || c == nil {
-		return time.Time{}, false, false
-	}
-	if checkDuplicateKeys(cb) != nil {
+	if err := json.Unmarshal(cb, &c); err != nil || c == nil || checkDuplicateKeys(cb) != nil {
 		return time.Time{}, true, false
 	}
 	raw := bytes.TrimSpace(c["exp"])

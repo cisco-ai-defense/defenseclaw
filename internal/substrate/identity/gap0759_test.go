@@ -141,8 +141,8 @@ func TestGAP0759KubeTokenKeyIgnoresTheEncoding(t *testing.T) {
 		return p
 	}
 	for _, c := range []string{
-		fmt.Sprintf(`{"iat":%d,"sub":"alice"}`, now.Unix()-30),
-		fmt.Sprintf(`{"iat":%d,"sub":"alice","jti":"k-1"}`, now.Unix()-30),
+		fmt.Sprintf(`{"iat":%d,"exp":%d,"sub":"alice"}`, now.Unix()-30, now.Unix()+600),
+		fmt.Sprintf(`{"iat":%d,"exp":%d,"sub":"alice","jti":"k-1"}`, now.Unix()-30, now.Unix()+600),
 	} {
 		for len(c)%3 != 1 { // 4 spare bits in the claims part
 			c = c[:len(c)-1] + ` }`

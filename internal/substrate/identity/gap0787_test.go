@@ -129,7 +129,7 @@ func TestGAP0787ReencodedOIDCTokenNeverFallsToKube(t *testing.T) {
 
 	// A token of another issuer, a JWT the cluster issued and an opaque
 	// kubeconfig token still go to the TokenReview.
-	other := "eyJhbGciOiJSUzI1NiJ9." + base64.RawURLEncoding.EncodeToString([]byte(fmt.Sprintf(`{"iss":"https://kubernetes.default.svc","sub":"system:serviceaccount:ns:x","iat":%d}`, now.Unix()-30))) + ".c2ln"
+	other := "eyJhbGciOiJSUzI1NiJ9." + base64.RawURLEncoding.EncodeToString([]byte(fmt.Sprintf(`{"iss":"https://kubernetes.default.svc","sub":"system:serviceaccount:ns:x","iat":%d,"exp":%d}`, now.Unix()-30, now.Unix()+600))) + ".c2ln"
 	for name, tok := range map[string]string{"cluster JWT": other, "cluster JWT padded": other + "==", "opaque": "kube-static-alice"} {
 		reviews.Store(0)
 		got, err := pv.Verify(context.Background(), tok)

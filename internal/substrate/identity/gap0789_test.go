@@ -82,7 +82,7 @@ func TestGAP0789LeadingSpaceClaimsAreKeyedByClaims(t *testing.T) {
 	// A cluster JWT whose claims start with white space: claims key too.
 	var reviews atomic.Int64
 	k := gap0787Kube(t, now, &reviews)
-	kc := base64.RawURLEncoding.EncodeToString([]byte(fmt.Sprintf(" {\"iss\":\"https://kubernetes.default.svc\",\"sub\":\"x\",\"iat\":%d}", now.Unix()-30)))
+	kc := base64.RawURLEncoding.EncodeToString([]byte(fmt.Sprintf(" {\"iss\":\"https://kubernetes.default.svc\",\"sub\":\"x\",\"iat\":%d,\"exp\":%d}", now.Unix()-30, now.Unix()+600)))
 	kp, err := k.Verify(context.Background(), "eyJhbGciOiJSUzI1NiJ9."+kc+".c2ln")
 	if err != nil || !strings.HasPrefix(kp.TokenKey, "clm:") || kp.IssuedAt.IsZero() {
 		t.Fatalf("cluster JWT with leading white space: key %q iat %v err %v", kp.TokenKey, kp.IssuedAt, err)

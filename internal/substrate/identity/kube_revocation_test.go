@@ -55,8 +55,8 @@ func TestKubePersonCarriesTokenKeyAndIssueTime(t *testing.T) {
 	}{
 		{"bound token", jwt(fmt.Sprintf(`{"iat":%d,"exp":%d}`, now.Unix()-30, now.Unix()+3600)), now.Add(-30 * time.Second)},
 		{"opaque token", "kube-static-alice", time.Time{}},
-		{"no iat", jwt(`{"sub":"alice"}`), time.Time{}},
-		{"iat far ahead", jwt(fmt.Sprintf(`{"iat":%d}`, now.Unix()+3600)), time.Time{}},
+		{"no iat", jwt(fmt.Sprintf(`{"sub":"alice","exp":%d}`, now.Unix()+3600)), time.Time{}},
+		{"iat far ahead", jwt(fmt.Sprintf(`{"iat":%d,"exp":%d}`, now.Unix()+3600, now.Unix()+7200)), time.Time{}},
 	} {
 		p, err := k.Verify(context.Background(), tc.token)
 		if err != nil {
