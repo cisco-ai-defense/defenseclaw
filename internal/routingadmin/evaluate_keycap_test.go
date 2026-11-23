@@ -55,8 +55,9 @@ func TestBatchBudgetKeyCapKeepsRecent(t *testing.T) {
 	}
 	l.Charge([]string{k(0)}, 1, now) // run-0 is now the most recent
 	l.Charge([]string{k(3)}, 1, now) // evicts run-1, the least recent
-	if spendOf(l, k(1)) != 0 {
-		t.Fatalf("run-1 should be evicted")
+	// run-1 left the keys; its spend still counts (GAP-0811).
+	if l.LocalKeys("nightly") != 3 || spendOf(l, k(1)) != 1 {
+		t.Fatalf("run-1 should be evicted with its spend kept: keys %d spend %v", l.LocalKeys("nightly"), spendOf(l, k(1)))
 	}
 	if spendOf(l, k(0)) != 2 || spendOf(l, k(3)) != 1 {
 		t.Fatalf("recent keys lost: %v %v", spendOf(l, k(0)), spendOf(l, k(3)))

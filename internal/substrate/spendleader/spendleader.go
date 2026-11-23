@@ -17,6 +17,7 @@ import (
 	"errors"
 	"math"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -37,10 +38,14 @@ const (
 var Methods = []string{MethodSpendPush, MethodSpendTotals, MethodUsagePush, MethodUsageQuery}
 
 const (
-	// maxSpendRows bounds one spend push or answer.
+	// maxSpendRows bounds one spend push or answer (Client pushes in chunks
+	// of it and reads answers page by page).
 	maxSpendRows = 20000
-	maxKeyLen    = 256
-	maxKeys      = 5000
+	// maxTotalsPages bounds one totals read (pages of maxSpendRows): past it
+	// the read fails, so the budgets read as not loaded, never as partial.
+	maxTotalsPages = 50
+	maxKeyLen      = 256
+	maxKeys        = 5000
 )
 
 var epochRE = regexp.MustCompile(`^[A-Za-z0-9._:-]{8,64}$`)
@@ -63,11 +68,17 @@ type SpendTotalsRequest struct {
 	Epoch string   `json:"epoch"`
 	Since string   `json:"since"`
 	Keys  []string `json:"keys,omitempty"`
+	// AfterDay and AfterKey ask for the page after that (day, key) row.
+	AfterDay string `json:"after_day,omitempty"`
+	AfterKey string `json:"after_key,omitempty"`
 }
 
 // SpendTotalsAnswer is the sum of the other epochs per (day, key).
 type SpendTotalsAnswer struct {
 	Rows []SpendRow `json:"rows"`
+	// More is set when rows past the last one are left (ask with its day
+	// and key as AfterDay and AfterKey).
+	More bool `json:"more,omitempty"`
 }
 
 // UsagePushRequest is one replica's absolute hourly usage buckets.
@@ -160,8 +171,27 @@ func (s *Service) spendTotals(ctx context.Context, in SpendTotalsRequest) (Spend
 	if err != nil {
 		return SpendTotalsAnswer{}, err
 	}
-	out := SpendTotalsAnswer{Rows: make([]SpendRow, 0, len(rows))}
-	for _, r := range rows {
+	// One (day, key) row per pair, in that order: a page starts after the
+	// cursor, so a push between pages never repeats a row.
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].Day != rows[j].Day {
+			return rows[i].Day < rows[j].Day
+		}
+		return rows[i].Key < rows[j].Key
+	})
+	start := 0
+	if in.AfterDay != "" {
+		start = sort.Search(len(rows), func(i int) bool {
+			return rows[i].Day > in.AfterDay || (rows[i].Day == in.AfterDay && rows[i].Key > in.AfterKey)
+		})
+	}
+	page := rows[start:]
+	out := SpendTotalsAnswer{}
+	if len(page) > maxSpendRows {
+		page, out.More = page[:maxSpendRows], true
+	}
+	out.Rows = make([]SpendRow, 0, len(page))
+	for _, r := range page {
 		out.Rows = append(out.Rows, SpendRow{Day: r.Day, Key: r.Key, USD: r.USD})
 	}
 	return out, nil

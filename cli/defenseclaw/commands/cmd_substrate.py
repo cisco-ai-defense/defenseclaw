@@ -1127,7 +1127,7 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
         "Show what your agents used: model calls, tokens and cost",
         long=(
             "Shows the model use of your agents and what it cost, rolled up by agent (the default),\n"
-            "model, batch, group, day, connector or provider. You see only your own use; an\n"
+            "model, batch, atespace, day, connector or provider. You see only your own use; an\n"
             "administrator adds --all for everyone and --by person for one line per person.\n"
             "Calls whose model is not in the price table show no cost and are not in the total."
         ),

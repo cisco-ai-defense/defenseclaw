@@ -5773,7 +5773,7 @@
           "minLength": 1,
           "maxLength": 512,
           "pattern": "^\\S(.*\\S)?$",
-          "description": "user: a users entry or * (each user its own limit); group: one groups entry (pooled); connector: a connector name or *; actor: * (each Agent Substrate actor its own limit)."
+          "description": "user: a users entry or * (each user its own limit); group: one groups entry (pooled); connector: a connector name or *; actor: * (each Agent Substrate actor its own limit); batch: * (each batch of one person its own limit)."
         },
         "period": {
           "type": "string",

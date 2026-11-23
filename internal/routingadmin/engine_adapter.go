@@ -221,22 +221,23 @@ func (rt *Runtime) SetFleet(fleet SpendCounter, keys FleetKeys) {
 	rt.last, rt.lastEv = nil, nil
 	rt.mu.Unlock()
 	if rotate && ledger != nil {
-		if rows := ledger.TakeLocal(); len(rows) > 0 {
+		if p := ledger.TakePush(); !p.Empty() {
 			if ctx == nil {
 				ctx = context.Background()
 			}
 			pctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 			var err error
 			if local != nil {
-				err = local.Push(pctx, epoch, rows)
+				err = pushTo(pctx, local, epoch, ledger, p)
 			}
-			if old != nil && old != fleet {
+			if old != nil && old != fleet && len(p.Main) > 0 {
 				// The old credential's last word, so other devices see it.
-				_ = old.Push(pctx, epoch, toFleet(rows, oldKeys))
+				_ = old.Push(pctx, epoch, toFleet(p.Main, oldKeys))
 			}
 			ledger.PushResult(err)
 			cancel()
 		}
+		ledger.TakeLocal()
 	}
 	rt.pushMu.Unlock()
 	rt.startSync()
@@ -428,7 +429,7 @@ func (rt *Runtime) SyncOnce(ctx context.Context) {
 		return
 	}
 	rt.push(ctx)
-	since := time.Unix(int64(dayNumber(rt.clock())-LedgerDays)*86400, 0).UTC()
+	since := KeepSince(rt.clock())
 	var rows []SeedRow
 	var err error
 	// This device's earlier processes always count: a fleet answer that
@@ -505,22 +506,53 @@ func (rt *Runtime) push(ctx context.Context) {
 	if ledger == nil {
 		return
 	}
-	rows := ledger.LocalRows()
-	if len(rows) == 0 {
+	p := ledger.TakePush()
+	if p.Empty() {
 		return
 	}
 	var failed error
 	if local != nil {
-		if err := local.Push(ctx, epoch, rows); err != nil {
-			failed = err
-		}
+		failed = pushTo(ctx, local, epoch, ledger, p)
 	}
-	if fleet != nil {
-		if err := fleet.Push(ctx, epoch, toFleet(rows, rt.fleetKeys())); err != nil && failed == nil {
+	// The retired and zero rows are of capped keys (actor:, batch:), which
+	// have no fleet form: they stay with this device's or cluster's counter.
+	if fleet != nil && len(p.Main) > 0 {
+		if err := fleet.Push(ctx, epoch, toFleet(p.Main, rt.fleetKeys())); err != nil && failed == nil {
 			failed = err
 		}
 	}
 	ledger.PushResult(failed)
+}
+
+// pushTo stores p with c: the evicted keys' spend first, under its own
+// epoch, then the process epoch with the 0 rows of those keys (sent only
+// once the retired rows are stored, so a lost push counts that spend twice
+// for a sync interval, never not at all).
+func pushTo(ctx context.Context, c SpendCounter, epoch string, ledger *Ledger, p PushSet) error {
+	var failed error
+	retiredOK := true
+	if len(p.Retired) > 0 {
+		if err := c.Push(ctx, RetiredEpoch(epoch, p.Gen), p.Retired); err != nil {
+			failed, retiredOK = err, false
+		} else {
+			ledger.RetiredStored(p)
+		}
+	}
+	rows := p.Main
+	if retiredOK && len(p.Zero) > 0 {
+		rows = append(append(make([]SeedRow, 0, len(p.Main)+len(p.Zero)), p.Main...), p.Zero...)
+	}
+	if len(rows) == 0 {
+		return failed
+	}
+	if err := c.Push(ctx, epoch, rows); err != nil {
+		if failed == nil {
+			failed = err
+		}
+	} else if retiredOK {
+		ledger.ZeroStored(p)
+	}
+	return failed
 }
 
 func (rt *Runtime) fleetKeys() FleetKeys {

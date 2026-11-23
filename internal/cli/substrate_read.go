@@ -688,7 +688,7 @@ func newSubstrateUsageCmd() *cobra.Command {
 		Use:   "usage",
 		Short: "Show what your agents used: model calls, tokens and cost",
 		Long: `Shows the model use of your agents and what it cost, rolled up by agent (the default),
-model, batch, group, day, connector or provider. You see only your own use; an
+model, batch, atespace, day, connector or provider. You see only your own use; an
 administrator adds --all for everyone and --by person for one line per person.
 Calls whose model is not in the price table show no cost and are not in the total.`,
 		Example: `  defenseclaw substrate usage

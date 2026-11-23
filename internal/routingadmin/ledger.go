@@ -6,7 +6,9 @@ package routingadmin
 import (
 	"container/list"
 	"math"
+	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -14,8 +16,8 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 )
 
-// LedgerDays is how many UTC days of spend the ledger keeps: enough for
-// the longest window (a month) plus a margin.
+// LedgerDays is how many UTC days of spend a counter file keeps (the
+// ledger itself keeps only the days a budget window reads, keepFrom).
 const LedgerDays = 62
 
 // Ledger is the budget spend the evaluator reads, per charge key and UTC
@@ -40,9 +42,21 @@ type Ledger struct {
 	lru     map[string]*keyLRU
 	evicted map[string]int
 	keyCap  int
-	syncErr  string
-	pushErr  string
-	lastSync time.Time
+	// retired is the spend of keys the cap evicted that no counter has stored
+	// yet: it still counts here, and the next push stores it under
+	// RetiredEpoch(epoch, retiredGen), an epoch of its own, so a re-charged
+	// key adds to it instead of replacing it. retiredDirty is set when it
+	// grew after TakePush. tombs holds the evicted keys whose process-epoch
+	// rows still carry the moved spend: the next push stores 0 for those
+	// days (once the retired rows are stored), so nothing counts twice.
+	retired      map[string]map[int32]float64
+	retiredGen   int
+	retiredDirty bool
+	tombs        map[string]tomb
+	tombSeq      uint64
+	syncErr      string
+	pushErr      string
+	lastSync     time.Time
 	// lastFleet is when the fleet counter last answered (a fallback to this
 	// device's own store does not count), for the store gauges.
 	lastFleet time.Time
@@ -71,7 +85,8 @@ func (l *Ledger) SetStaleAfter(d time.Duration) {
 func NewLedger() *Ledger {
 	return &Ledger{local: map[string]map[int32]float64{}, remote: map[string]map[int32]float64{},
 		unknown: map[string]time.Time{}, seeded: map[string]bool{}, now: time.Now,
-		lru: map[string]*keyLRU{}, evicted: map[string]int{}, keyCap: DefaultKeyCap}
+		lru: map[string]*keyLRU{}, evicted: map[string]int{}, keyCap: DefaultKeyCap,
+		retired: map[string]map[int32]float64{}, tombs: map[string]tomb{}}
 }
 
 // NewLedgerClock returns an empty ledger that reads today from now (nil is the
@@ -118,9 +133,11 @@ func (l *Ledger) Charge(keys []string, usd float64, at time.Time) {
 // budget unknown (a stream cut short, usage no price covers).
 const UnknownTTL = 10 * time.Minute
 
-// MarkUnknown records a call whose usage no price covers. Only the caller's
-// own keys (user:) are marked: one person's unpriced call never blocks a
-// group or connector budget others share.
+// MarkUnknown records a call whose usage no price covers. Only keys of one
+// caller are marked: user: (the person), actor: (one agent) and batch: (one
+// person's batch), so an agent that cuts its streams or calls an unpriced
+// model is still bounded. One person's unpriced call never blocks a group or
+// connector budget others share.
 func (l *Ledger) MarkUnknown(keys []string, at time.Time) {
 	if l == nil {
 		return
@@ -131,7 +148,7 @@ func (l *Ledger) MarkUnknown(keys []string, at time.Time) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	for _, key := range keys {
-		if strings.HasPrefix(key, "user:") {
+		if strings.HasPrefix(key, "user:") || capped(key) {
 			l.unknown[key] = at
 		}
 	}
@@ -182,9 +199,9 @@ func (l *Ledger) SpendPrefix(prefix, period string, now time.Time) (float64, boo
 // windowLocked sums in day order, so the same state gives the same total.
 func (l *Ledger) windowLocked(key string, from, today int32) float64 {
 	var total float64
-	local, remote := l.local[key], l.remote[key]
+	local, remote, retired := l.local[key], l.remote[key], l.retired[key]
 	for day := from; day <= today; day++ {
-		total += local[day] + remote[day]
+		total += local[day] + remote[day] + retired[day]
 	}
 	return total
 }
@@ -203,8 +220,13 @@ func (l *Ledger) LocalRows() []SeedRow {
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	return rowsOf(l.local)
+}
+
+// rowsOf lists m as rows in (day, key) order.
+func rowsOf(m map[string]map[int32]float64) []SeedRow {
 	var rows []SeedRow
-	for key, days := range l.local {
+	for key, days := range m {
 		for day, usd := range days {
 			rows = append(rows, SeedRow{Day: dayDate(day), Key: key, USD: usd})
 		}
@@ -216,6 +238,105 @@ func (l *Ledger) LocalRows() []SeedRow {
 		return rows[i].Key < rows[j].Key
 	})
 	return rows
+}
+
+// tomb is one evicted key's process-epoch days to store as 0.
+type tomb struct {
+	seq  uint64
+	days []int32
+}
+
+// RetiredEpoch is the epoch the evicted keys' spend of generation gen is
+// stored under (it passes every counter's epoch check).
+func RetiredEpoch(epoch string, gen int) string {
+	return epoch + ".r" + strconv.Itoa(gen)
+}
+
+// PushSet is one push of this process's spend (TakePush).
+type PushSet struct {
+	// Main is the local spend, under the process epoch.
+	Main []SeedRow
+	// Zero sets the process-epoch rows of evicted keys to 0; it is sent with
+	// Main only once Retired is stored.
+	Zero []SeedRow
+	// Retired is the evicted keys' spend, under RetiredEpoch(epoch, Gen).
+	Retired []SeedRow
+	Gen     int
+	tombs   map[string]uint64
+}
+
+// Empty reports whether there is nothing to store.
+func (p PushSet) Empty() bool { return len(p.Main) == 0 && len(p.Zero) == 0 && len(p.Retired) == 0 }
+
+// TakePush returns what the next push stores. Call RetiredStored and
+// ZeroStored with it after the counter acked each part.
+func (l *Ledger) TakePush() PushSet {
+	if l == nil {
+		return PushSet{}
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	p := PushSet{Main: rowsOf(l.local), Retired: rowsOf(l.retired), Gen: l.retiredGen}
+	l.retiredDirty = false
+	if len(l.tombs) > 0 {
+		p.tombs = make(map[string]uint64, len(l.tombs))
+		for key, t := range l.tombs {
+			p.tombs[key] = t.seq
+			for _, day := range t.days {
+				if _, charged := l.local[key][day]; !charged {
+					p.Zero = append(p.Zero, SeedRow{Day: dayDate(day), Key: key})
+				}
+			}
+		}
+	}
+	return p
+}
+
+// RetiredStored records that the counter stored p.Retired: unless more keys
+// were evicted since TakePush (the next push sends the whole generation
+// again), that spend counts as remote until the next sync reads it back and
+// the next generation starts empty.
+func (l *Ledger) RetiredStored(p PushSet) {
+	if l == nil || len(p.Retired) == 0 {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if p.Gen != l.retiredGen || l.retiredDirty {
+		return
+	}
+	moveLocked(l.remote, l.retired)
+	l.retired = map[string]map[int32]float64{}
+	l.retiredGen++
+}
+
+// ZeroStored records that the counter stored p.Zero (tombs of keys evicted
+// again since TakePush stay).
+func (l *Ledger) ZeroStored(p PushSet) {
+	if l == nil {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for key, seq := range p.tombs {
+		if t, ok := l.tombs[key]; ok && t.seq == seq {
+			delete(l.tombs, key)
+		}
+	}
+}
+
+// moveLocked adds src into dst.
+func moveLocked(dst, src map[string]map[int32]float64) {
+	for key, days := range src {
+		d := dst[key]
+		if d == nil {
+			d = map[int32]float64{}
+			dst[key] = d
+		}
+		for day, usd := range days {
+			d[day] += usd
+		}
+	}
 }
 
 // TakeLocal returns this process's spend and moves it to the remote side
@@ -232,17 +353,13 @@ func (l *Ledger) TakeLocal() []SeedRow {
 		for day, usd := range days {
 			rows = append(rows, SeedRow{Day: dayDate(day), Key: key, USD: usd})
 		}
-		r := l.remote[key]
-		if r == nil {
-			r = map[int32]float64{}
-			l.remote[key] = r
-		}
-		for day, usd := range days {
-			r[day] += usd
-		}
 	}
+	moveLocked(l.remote, l.local)
 	l.local = map[string]map[int32]float64{}
 	l.lru = map[string]*keyLRU{}
+	// The old epoch is closed: its rows of evicted keys are no longer
+	// written (if their 0 was not stored, they count twice, never not at all).
+	l.tombs = map[string]tomb{}
 	return rows
 }
 
@@ -334,13 +451,40 @@ func (l *Ledger) SeedState(ids []string) string {
 	return "seeded"
 }
 
+// keepFrom is the first day any budget period window that contains today
+// reads (a week can start in the previous month), the oldest day the ledger
+// keeps and asks the counters for.
+func keepFrom(today int32) int32 {
+	t := time.Unix(int64(today)*86400, 0).UTC()
+	return min(windowStart(config.RoutingBudgetPeriodWeek, t), windowStart(config.RoutingBudgetPeriodMonth, t))
+}
+
+// KeepSince is the UTC midnight of keepFrom for now (the counters' since).
+func KeepSince(now time.Time) time.Time {
+	return time.Unix(int64(keepFrom(dayNumber(now)))*86400, 0).UTC()
+}
+
 func (l *Ledger) pruneLocked(today int32) {
 	l.lastPrune = today
-	for i, m := range []map[string]map[int32]float64{l.local, l.remote} {
+	oldest := keepFrom(today)
+	for key, t := range l.tombs {
+		kept := t.days[:0]
+		for _, day := range t.days {
+			if day >= oldest {
+				kept = append(kept, day)
+			}
+		}
+		if t.days = kept; len(kept) == 0 {
+			delete(l.tombs, key)
+		} else {
+			l.tombs[key] = t
+		}
+	}
+	for i, m := range []map[string]map[int32]float64{l.local, l.remote, l.retired} {
 		isLocal := i == 0
 		for key, days := range m {
 			for day := range days {
-				if day <= today-LedgerDays {
+				if day < oldest {
 					delete(days, day)
 				}
 			}
@@ -353,7 +497,7 @@ func (l *Ledger) pruneLocked(today int32) {
 		}
 	}
 	for key, at := range l.unknown {
-		if dayNumber(at) <= today-LedgerDays {
+		if dayNumber(at) < oldest {
 			delete(l.unknown, key)
 		}
 	}
@@ -430,7 +574,7 @@ func (l *Ledger) Snapshot(prefix, period string, limit float64, now time.Time) (
 		return snap, false
 	}
 	keys := map[string]bool{}
-	for _, m := range []map[string]map[int32]float64{l.local, l.remote} {
+	for _, m := range []map[string]map[int32]float64{l.local, l.remote, l.retired} {
 		for k := range m {
 			if strings.HasPrefix(k, prefix) {
 				keys[k] = true
@@ -487,9 +631,10 @@ func (l *Ledger) StoreStatus(now time.Time) (age time.Duration, synced, healthy 
 // run, so a runaway or hostile launcher could mint them without end; the
 // other scopes are bounded by the people, groups and connectors an admin
 // lists. Past the cap the least recently charged key of that budget is
-// dropped from this process (its spend that already reached the counters
-// stays there) and the next verdict of the budget carries
-// budget_keys_evicted:<id>.
+// dropped from this process's keys: its spend moves to the retired rows,
+// which still count here and are stored under an epoch of their own
+// (RetiredEpoch), so the key's total never goes down, here or on the leader.
+// The next verdict of the budget carries budget_keys_evicted:<id>.
 const DefaultKeyCap = 4096
 
 // keyLRU is the recency order of one budget's local keys.
@@ -525,9 +670,34 @@ func (l *Ledger) touchLocked(key string) {
 		k := old.Value.(string)
 		q.order.Remove(old)
 		delete(q.at, k)
-		delete(l.local, k)
+		l.retireLocked(k)
 		l.evicted[id]++
 	}
+}
+
+// retireLocked moves an evicted key's local spend to the retired rows and
+// marks its process-epoch days for 0.
+func (l *Ledger) retireLocked(key string) {
+	days := l.local[key]
+	delete(l.local, key)
+	if len(days) == 0 {
+		return
+	}
+	r := l.retired[key]
+	if r == nil {
+		r = map[int32]float64{}
+		l.retired[key] = r
+	}
+	l.tombSeq++
+	t := tomb{seq: l.tombSeq, days: l.tombs[key].days}
+	for day, usd := range days {
+		r[day] += usd
+		if !slices.Contains(t.days, day) {
+			t.days = append(t.days, day)
+		}
+	}
+	l.tombs[key] = t
+	l.retiredDirty = true
 }
 
 // forgetLocked drops key from the recency order (the key left l.local).

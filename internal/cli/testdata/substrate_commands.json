@@ -1480,7 +1480,7 @@
     "path": "substrate usage",
     "use": "usage",
     "short": "Show what your agents used: model calls, tokens and cost",
-    "long": "Shows the model use of your agents and what it cost, rolled up by agent (the default),\nmodel, batch, group, day, connector or provider. You see only your own use; an\nadministrator adds --all for everyone and --by person for one line per person.\nCalls whose model is not in the price table show no cost and are not in the total.",
+    "long": "Shows the model use of your agents and what it cost, rolled up by agent (the default),\nmodel, batch, atespace, day, connector or provider. You see only your own use; an\nadministrator adds --all for everyone and --by person for one line per person.\nCalls whose model is not in the price table show no cost and are not in the total.",
     "example": "  defenseclaw substrate usage\n  defenseclaw substrate usage --by model --since 24h\n  defenseclaw substrate usage --all --by person",
     "flags": [
       {
