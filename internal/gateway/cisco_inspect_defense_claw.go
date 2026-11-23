@@ -246,6 +246,8 @@ func managedInspectAgentClass(ctx context.Context) string {
 		return "DEFENSE_CLAW_AGENT_CLASS_CURSOR"
 	case "claudecode":
 		return "DEFENSE_CLAW_AGENT_CLASS_CLAUDECODE"
+	case "copilot":
+		return "DEFENSE_CLAW_AGENT_CLASS_COPILOT"
 	default:
 		return ""
 	}

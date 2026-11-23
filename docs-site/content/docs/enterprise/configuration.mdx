@@ -57,7 +57,7 @@ Always set `enterprise.profile`. When it is unset, Windows and macOS resolve to 
 
 ## AI Defense class policies
 
-Managed inspection can report the authenticated connector class for Codex, Cursor, and Claude Code to AI Defense. Leave `cisco_ai_defense.report_agent_class` at its default `false` until the AI Defense connection schema and class resolver are deployed and the resolver is in enforce mode. Then set it to `true` in the administrator-owned config and apply the config through the normal lifecycle. The managed gateway sends only the canonical class, never a client-selected connection ID. Unsupported or conflicting connector context remains on the global policy path.
+Managed inspection can report the authenticated connector class for Codex, Cursor, Claude Code, and GitHub Copilot to AI Defense. Leave `cisco_ai_defense.report_agent_class` at its default `false` until the AI Defense connection schema and class resolver are deployed and the resolver is in enforce mode. Then set it to `true` in the administrator-owned config and apply the config through the normal lifecycle. The managed gateway sends only the canonical class, never a client-selected connection ID. A class with no enabled class policy uses the global connection policy. Unsupported or conflicting connector context remains on the global policy path.
 
 ```yaml title="config.yaml (excerpt)"
 cisco_ai_defense:

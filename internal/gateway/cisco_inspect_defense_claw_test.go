@@ -197,11 +197,13 @@ func TestDefenseClawInspect_AgentClass(t *testing.T) {
 		{"codex hook", withAuthenticatedHookConnector(t.Context(), "codex"), "DEFENSE_CLAW_AGENT_CLASS_CODEX"},
 		{"cursor inspect", withAuthenticatedInspectConnector(t.Context(), "cursor"), "DEFENSE_CLAW_AGENT_CLASS_CURSOR"},
 		{"claude hook", withAuthenticatedHookConnector(t.Context(), "claudecode"), "DEFENSE_CLAW_AGENT_CLASS_CLAUDECODE"},
+		{"copilot hook", withAuthenticatedHookConnector(t.Context(), "copilot"), "DEFENSE_CLAW_AGENT_CLASS_COPILOT"},
+		{"copilot inspect", withAuthenticatedInspectConnector(t.Context(), "copilot"), "DEFENSE_CLAW_AGENT_CLASS_COPILOT"},
 		{"unsupported", withAuthenticatedHookConnector(t.Context(), "openclaw"), ""},
 		{"conflicting trusted contexts", withAuthenticatedInspectConnector(withAuthenticatedHookConnector(t.Context(), "codex"), "cursor"), ""},
 	}
 	defaultOff := NewCiscoDefenseClawInspectClient(&config.CiscoAIDefenseConfig{Endpoint: srv.URL, TimeoutMs: 3000}, newFakeCloudProvider("token"))
-	if defaultOff.Inspect(withAuthenticatedHookConnector(t.Context(), "codex"), []ChatMessage{{Role: "user", Content: "hello"}}) == nil {
+	if defaultOff.Inspect(withAuthenticatedHookConnector(t.Context(), "copilot"), []ChatMessage{{Role: "user", Content: "hello"}}) == nil {
 		t.Fatal("expected default-off inspection response")
 	}
 	var offBody map[string]json.RawMessage
