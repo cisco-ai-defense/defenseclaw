@@ -455,7 +455,9 @@ func editedDefenseClawHookEntry(raw interface{}, scriptName string) bool {
 }
 
 // hookScriptBaseName is the script name editedDefenseClawHookEntry matches
-// for a hook script path Setup writes.
+// for a hook script path Setup writes. A Windows hook command (a launcher,
+// adapter or bridge) is not such a path, so the Hermes, Copilot and Kiro
+// passes, whose command is one there, name their script instead (GAP-1942).
 func hookScriptBaseName(hookScript string) string {
 	return path.Base(filepath.ToSlash(strings.TrimSpace(hookScript)))
 }

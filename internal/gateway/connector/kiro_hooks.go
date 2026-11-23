@@ -386,12 +386,13 @@ func reconcileKiroUniversalHooks(list []interface{}, hookScript string) []interf
 }
 
 // removeKiroOwnedUniversalHooks drops DefenseClaw's universal-form entries,
-// including one whose script path or name was edited (GAP-0907).
+// including one whose script path or name was edited (GAP-0907) or that is a
+// copy named by a Windows path, on every OS: on Windows hookScript is the
+// cmd.exe bridge, which names no script (GAP-1942).
 func removeKiroOwnedUniversalHooks(list []interface{}, hookScript string) []interface{} {
 	kept := make([]interface{}, 0, len(list)+len(kiroV2HookSpecs))
-	edited := hookScriptBaseName(hookScript)
 	for _, item := range list {
-		if !kiroUniversalEntryOwned(item, hookScript) && !editedDefenseClawHookEntry(item, edited) {
+		if !kiroUniversalEntryOwned(item, hookScript) && !editedDefenseClawHookEntry(item, kiroHookScriptName) {
 			kept = append(kept, item)
 		}
 	}
@@ -801,13 +802,13 @@ func kiroV2EntryOwned(item interface{}, hookScript string) bool {
 
 // removeKiroOwnedV2Hooks drops DefenseClaw's entries (kiroV2EntryOwned) from
 // one event's hook list, including one whose script path or name was edited
-// (GAP-0907).
+// (GAP-0907) or that is a copy named by a Windows path, on every OS
+// (GAP-1942).
 func removeKiroOwnedV2Hooks(raw interface{}, hookScript string) []interface{} {
 	list, _ := raw.([]interface{})
 	out := make([]interface{}, 0, len(list))
-	edited := hookScriptBaseName(hookScript)
 	for _, item := range list {
-		if kiroV2EntryOwned(item, hookScript) || editedDefenseClawHookEntry(item, edited) {
+		if kiroV2EntryOwned(item, hookScript) || editedDefenseClawHookEntry(item, kiroHookScriptName) {
 			continue
 		}
 		out = append(out, item)
@@ -1041,7 +1042,7 @@ func kiroCommandOwned(command, hookScript string) bool {
 	if hookScript != "" && (command == hookScript || strings.Contains(command, hookScript)) {
 		return true
 	}
-	if strings.Contains(command, kiroHookScriptName) || strings.Contains(command, "hook --connector kiro") {
+	if strings.Contains(command, "hook --connector kiro") {
 		return true
 	}
 	// The Windows encoded bridge carries its arguments base64-encoded.
