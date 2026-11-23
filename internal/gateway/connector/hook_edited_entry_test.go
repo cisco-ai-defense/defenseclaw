@@ -58,9 +58,6 @@ func TestEditedHookCommandGolden(t *testing.T) {
 // every other entry is intact (GAP-0906). cli/tests/test_hook_integrity.py
 // reads the same golden.
 func TestEditedHookEntriesGolden(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("Windows registers the native hook launcher, not a hook script")
-	}
 	data, err := os.ReadFile(filepath.Join("testdata", "hook_edited_entries.json"))
 	if err != nil {
 		t.Fatal(err)
@@ -77,6 +74,13 @@ func TestEditedHookEntriesGolden(t *testing.T) {
 	}
 	for _, tc := range cases {
 		dataDir := filepath.Join(testenv.PrivateTempDir(t), ".defenseclaw")
+		if runtime.GOOS == "windows" {
+			// The predicate reads command text only. The golden names POSIX
+			// data directories, so the Windows run uses a POSIX-form one and
+			// the expectation is the golden's own, on every OS. What a drive-path
+			// entry means on Windows is GAP-1909, not this golden.
+			dataDir = "/home/u/.defenseclaw"
+		}
 		path := filepath.Join(t.TempDir(), tc.File)
 		document := strings.ReplaceAll(tc.Document, "{data_dir}", filepath.ToSlash(dataDir))
 		if err := os.WriteFile(path, []byte(document), 0o600); err != nil {

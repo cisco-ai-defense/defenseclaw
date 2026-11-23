@@ -19,9 +19,6 @@ import (
 // removal failed and the gateway could not start until the file was edited by
 // hand. The teardown now removes what VerifyClean counts, and only that.
 func TestKiroRemoveCleansAnOlderCommandFormFromTheUsersEarlierDefaultAgent(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("POSIX command forms; a Windows command runs the account's launcher and its ownership stays exact")
-	}
 	home := t.TempDir()
 	KiroHomeOverride = home
 	t.Cleanup(func() { KiroHomeOverride = "" })
@@ -53,6 +50,15 @@ func TestKiroRemoveCleansAnOlderCommandFormFromTheUsersEarlierDefaultAgent(t *te
 		"/usr/bin/env LC_ALL=C " + script + " --event postToolUse",
 	}
 	other := "/bin/bash '" + otherScript + "' --event preToolUse"
+	if runtime.GOOS == "windows" {
+		// A Windows command runs the account's launcher, so ownership stays
+		// exact: the older form the account's launcher ran goes, the command
+		// of another account's launcher and the user's hook stay.
+		var foreign []string
+		older, foreign = kiroWindowsOlderAndForeignForms("", KiroHookSurfaceV3)
+		other = foreign[0]
+		kiroRequireOwned(t, conn, opts, older)
+	}
 	if err := writeJSONObject(mine, map[string]interface{}{"name": "mine", "hooks": map[string]interface{}{
 		"preToolUse": []interface{}{
 			map[string]interface{}{"command": kiroUserLint, "matcher": "*"},
@@ -63,7 +69,7 @@ func TestKiroRemoveCleansAnOlderCommandFormFromTheUsersEarlierDefaultAgent(t *te
 	}}); err != nil {
 		t.Fatal(err)
 	}
-	if held, err := kiroAgentFileHoldsCommand(mine, conn.installHookCommands(opts)); err != nil || held {
+	if held, err := kiroAgentFileHoldsCommand(mine, kiroCommandsSetupWritesNow(conn, opts)); err != nil || held {
 		t.Fatalf("the file holds a command Setup writes now (%v, %v); this test checks nothing", held, err)
 	}
 	if err := conn.Teardown(context.Background(), opts); err != nil {

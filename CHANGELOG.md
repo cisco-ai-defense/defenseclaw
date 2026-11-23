@@ -56,6 +56,7 @@ DefenseClaw 1.0.11 follows 1.0.10. It is a fix release. It updates OpenShell to 
 ### Fixed
 
 #### Windows managed install, upgrade and uninstall
+- Windows managed upgrade: an account that is signed out during the upgrade no longer makes Copilot show failed or the administrator's verify return 1603; Copilot waits for the account to sign in.
 - Setup `/uninstall` asks again after waiting for the managed lock instead of failing.
 - Setup renders the recorded Claude policy before it takes the install lock, so a slow policy read no longer stops the install.
 - Standalone Setup `/install` without a config file writes a standalone starting config.
@@ -103,6 +104,7 @@ DefenseClaw 1.0.11 follows 1.0.10. It is a fix release. It updates OpenShell to 
 - Native Windows: `setup routing` refuses only the classifier that does not run on Windows, and says why. `config set routing.enabled` says the change applies on reload when the classifier runs in the gateway.
 - Errors name their cause when removing a connector fails, and the gateway start error says why a removed connector's teardown failed.
 - On Windows, a write entry for another account on a folder above a connector's plugin folder now stops only that connector, with the `icacls` command that fixes it, instead of failing the whole gateway start.
+- The Windows plugin folder check reads every folder from the user's profile down to the plugin. It prints `icacls` commands only for folders the user owns. For a folder owned by the Administrators group it says to take ownership or have an administrator remove the entry, instead of telling the user to move the plugin folder.
 - The process start environment is read from `/proc` only on Linux, so a `proc` folder at a Windows drive root is never read as one.
 
 #### Endpoint inventory

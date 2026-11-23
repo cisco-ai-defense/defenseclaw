@@ -189,6 +189,34 @@ func walkDaclCarriers(
 // passes keeps only the entries that carry that inherit flag, which are the
 // ones that pass on to a child that is a folder or a file; zero keeps all.
 func daclRefusedEntryOf(path string, why *daclRefusal, passes byte) (explicit, inherited bool) {
+	return daclEntryHeld(path, passes, func(deny bool, sid *windows.SID, mask windows.ACCESS_MASK) bool {
+		// The refused entry's account is trusted exactly when it is a deny entry.
+		return deny == why.deny && sid.Equals(why.sid) && daclEntryRefused(deny, deny, mask)
+	})
+}
+
+// AllowEntryCarriers is the walk of daclEntryCarriers for an allow entry of sid
+// that another check refused on path: refused reports whether an entry's
+// access mask is the refused kind. It returns every folder or file that holds
+// such an entry as its own, outermost first, or nil when the walk cannot reach
+// the end of every inherited chain (a partial list would print a repair that
+// leaves the refusal in place).
+func AllowEntryCarriers(path string, sid *windows.SID, refused func(windows.ACCESS_MASK) bool) []string {
+	if sid == nil || refused == nil {
+		return nil
+	}
+	return walkDaclCarriers(path, nil, func(current string, _ *daclRefusal, passes byte) (explicit, inherited bool) {
+		return daclEntryHeld(current, passes, func(deny bool, entry *windows.SID, mask windows.ACCESS_MASK) bool {
+			return !deny && entry.Equals(sid) && refused(mask)
+		})
+	})
+}
+
+// daclEntryHeld reports whether path's DACL holds an allow or deny entry that
+// match accepts, as its own entry (explicit) or inherited from above
+// (inherited). A non-zero passes keeps only the entries that carry that
+// inherit flag; zero keeps all.
+func daclEntryHeld(path string, passes byte, match func(deny bool, sid *windows.SID, mask windows.ACCESS_MASK) bool) (explicit, inherited bool) {
 	sd, err := privateDACLDescriptor(path)
 	if err != nil {
 		return false, false
@@ -203,9 +231,8 @@ func daclRefusedEntryOf(path string, why *daclRefusal, passes byte) (explicit, i
 			continue
 		}
 		deny := ace.Header.AceType == windows.ACCESS_DENIED_ACE_TYPE
-		// The refused entry's account is trusted exactly when it is a deny entry.
-		if deny != why.deny || (passes != 0 && ace.Header.AceFlags&passes == 0) ||
-			!(*windows.SID)(unsafe.Pointer(&ace.SidStart)).Equals(why.sid) || !daclEntryRefused(deny, deny, ace.Mask) {
+		if (passes != 0 && ace.Header.AceFlags&passes == 0) ||
+			!match(deny, (*windows.SID)(unsafe.Pointer(&ace.SidStart)), ace.Mask) {
 			continue
 		}
 		if ace.Header.AceFlags&windows.INHERITED_ACE == 0 {

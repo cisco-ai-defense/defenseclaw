@@ -1753,7 +1753,7 @@ func validatePluginArtifactDestination(path string) error {
 func validatePluginArtifactDestinationFor(path, trustedOwnerSID string) error {
 	// A refusal names what to fix: every refused folder and the one command
 	// (GAP-0730, GAP-0731), not just the first element the walk met.
-	return explainPluginArtifactRefusal(path, checkPluginArtifactDestination(path, trustedOwnerSID))
+	return explainPluginArtifactRefusal(path, trustedOwnerSID, checkPluginArtifactDestination(path, trustedOwnerSID))
 }
 
 // checkPluginArtifactDestination is the custody check itself.
