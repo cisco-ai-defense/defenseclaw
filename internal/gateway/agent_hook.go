@@ -4320,7 +4320,7 @@ func (a *APIServer) inspectAgentHookToolCall(
 		patchTarget:             hermesV4APatch,
 		strictPatchLinks:        hermesV4APatch && a.strictPolicyTierForHook(ctx, req.ConnectorName),
 		SandboxGuestCWD:         guestCWD,
-		guestToolCWDUnresolved:  isSandboxHookRequest(ctx) && strings.TrimSpace(toolCWD) != "" && guestCWD == "",
+		guestToolCWDUnresolved:  isSandboxHookRequest(ctx) && filepath.IsAbs(req.ReportedCWD) && strings.TrimSpace(toolCWD) != "" && guestCWD == "",
 		record:                  toolChainRecorder(ctx, req.ConnectorName, req.toolChain),
 	}
 	withWindowsShellDialect(&action, dialectHint)
