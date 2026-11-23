@@ -286,6 +286,36 @@ var effectLookupAccountHome = func(name string) (string, bool) {
 	return account.HomeDir, true
 }
 
+// effectMountedAccountHomes are the passwd homes behind a call's placed
+// credential targets outside the conventional home roots (/mnt/home/<u>,
+// /srv/homes/<u>): a candidate folder (effectrules.AccountHomeCandidates) is
+// another account's home only when the passwd lookup of its last name
+// returns that folder, never by its shape (rel-1-0-10:GAP-0899). The lookups
+// are bounded by maxEffectAccountLookups per call and counted like the ~name
+// lookups; a candidate past the cap stays unknown. A folder already in known
+// (a ~name the call spells) is not looked up again.
+func effectMountedAccountHomes(res effects.Result, activeHome, login string, known []string) []string {
+	var homes []string
+	looked := 0
+	for _, root := range effectrules.AccountHomeCandidates(res, activeHome) {
+		name := root[strings.LastIndexByte(root, '/')+1:]
+		if name == "" || name == "." || name == ".." || name[0] == '-' || (login != "" && strings.EqualFold(name, login)) ||
+			slices.ContainsFunc(known, func(h string) bool { return strings.TrimRight(h, "/") == root }) {
+			continue
+		}
+		if looked == maxEffectAccountLookups {
+			effectAccountLookupsOver.Add(1)
+			continue
+		}
+		looked++
+		effectAccountLookups.Add(1)
+		if home, ok := effectLookupAccountHome(name); ok && strings.TrimRight(home, "/") == root {
+			homes = append(homes, root)
+		}
+	}
+	return homes
+}
+
 // effectActiveLogin is the hook account's login for the lane, from the
 // trusted identity the ~<login> twin reads (trustedActiveLogins, GAP-2378):
 // "" for a call that spells no ~, so such a call costs nothing.

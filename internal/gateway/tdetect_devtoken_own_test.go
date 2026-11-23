@@ -13,10 +13,10 @@ import (
 // (rel-1-0-10:GAP-0888): a read of the active account's own .git-credentials,
 // .netrc or .pgpass gets the verdict rel gives it, the tier of a read of the
 // account's own AWS or kube credentials, in every pack, on the Claude Code
-// hook and on /inspect/tool, for a shell read and a native Read. The
-// stronger-finding replacement of the native lane is for another account's
-// home (GAP-0835); it must not raise one's own files to CRITICAL or make the
-// managed default pack block them.
+// hook and on /inspect/tool, for a shell read (cat, sudo cat, base64) and a
+// native Read. The stronger-finding replacement of the native lane is for
+// another account's home (GAP-0835); it must not raise one's own files to
+// CRITICAL or make the managed default pack block them.
 func TestOwnDeveloperTokenReadIsJudgedLikeOwnCloudCredentialsFiveTiers(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX home spellings")
@@ -47,6 +47,8 @@ func TestOwnDeveloperTokenReadIsJudgedLikeOwnCloudCredentialsFiveTiers(t *testin
 		for _, f := range files {
 			target := home + "/" + f.relative
 			got["hook-bash:"+f.kind] = read(gap0437Hook(t, hook, cwd, "gap0888-"+p.name+f.kind, "cat "+target))
+			got["hook-sudo:"+f.kind] = read(gap0437Hook(t, hook, cwd, "gap0888-sudo-"+p.name+f.kind, "sudo cat "+target))
+			got["hook-b64:"+f.kind] = read(gap0437Hook(t, hook, cwd, "gap0888-b64-"+p.name+f.kind, "base64 "+target))
 			got["hook-read:"+f.kind] = read(gap0437Serve(t, hook.handleAgentHook("claudecode"), "/api/v1/claude-code/hook", map[string]any{
 				"hook_event_name": "PreToolUse", "session_id": "gap0888-read-" + p.name + f.kind, "cwd": cwd,
 				"tool_name": "Read", "tool_use_id": "tu-gap0888-" + p.name + f.kind, "tool_input": map[string]any{"file_path": target},
@@ -60,7 +62,7 @@ func TestOwnDeveloperTokenReadIsJudgedLikeOwnCloudCredentialsFiveTiers(t *testin
 				"tool": "read", "connector": "openclaw", "args": map[string]any{"path": target},
 			}))
 		}
-		for _, route := range []string{"hook-bash", "hook-read", "inspect-exec", "inspect-read"} {
+		for _, route := range []string{"hook-bash", "hook-sudo", "hook-b64", "hook-read", "inspect-exec", "inspect-read"} {
 			aws := got[route+":aws"]
 			where := func(kind string) string { return fmt.Sprintf("%s %s %s", p.name, route, kind) }
 			if aws.severity == "CRITICAL" || aws.action == "block" {
