@@ -32,6 +32,7 @@ import (
 	"golang.org/x/term"
 
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/api"
+	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/auth"
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/safetext"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxcli"
 )
@@ -340,14 +341,19 @@ Exit 75 means the cluster could not be reached; there is no document.`,
 					// GAP-0410: say it crashed and the way back.
 					fmt.Fprintf(w, "Crashed:   its worker went away. Bring it back with: defenseclaw substrate undo %s\n", a.Name)
 					if a.Unattended {
-						// GAP-0420 (known limit in 1.0.10): a headless task does
-						// not resume after a crash; its record and log were in
-						// the crashed actor.
-						agent := a.Connector
-						if spec, err := sandboxcli.ResolveHarness(a.Connector); err == nil {
-							agent = spec.Command
+						// GAP-0420: the run and log of a headless task were in
+						// the crashed actor. undo starts the task again from
+						// the record run --task keeps on the computer that
+						// started it (at least once).
+						if _, ok := loadSubstrateTaskRecord(auth.StateDir(), a); ok {
+							fmt.Fprintf(w, "Task:      lost in the crash. undo starts it again from the beginning on a fresh copy of its folder: defenseclaw substrate undo %s\n", a.Name)
+						} else {
+							agent := a.Connector
+							if spec, err := sandboxcli.ResolveHarness(a.Connector); err == nil {
+								agent = spec.Command
+							}
+							fmt.Fprintf(w, "Task:      lost in the crash. Run defenseclaw substrate undo %s on the computer that started it to start the task again, or re-run it with: defenseclaw substrate run %s --task ...\n", a.Name, substrateDash(agent))
 						}
-						fmt.Fprintf(w, "Task:      crashed and does not resume; undo brings the agent back without it. Re-run the task with: defenseclaw substrate run %s --task ...\n", substrateDash(agent))
 					}
 					return nil
 				}

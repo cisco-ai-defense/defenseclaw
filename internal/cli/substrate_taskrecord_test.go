@@ -20,16 +20,8 @@ import (
 	"os"
 	"testing"
 
-	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/api"
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/auth"
 )
-
-// gap0420Actor is the unattended --task agent the GAP-0420 tests share: one
-// name and UID in one atespace, in the given state ("running" before a crash,
-// "crashed" after it), so the record path and the UID check see one actor.
-func gap0420Actor(state string) api.Actor {
-	return api.Actor{Atespace: "eng-web", Name: "fix-tests-1", UID: "uid-1", State: state, Unattended: true}
-}
 
 // GAP-0420: the record is of one actor: a later actor with the same name
 // (another UID) is not resumed with it, and another computer has none.
