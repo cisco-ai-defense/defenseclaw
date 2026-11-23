@@ -18,9 +18,16 @@
 // written only by processes running as that account (the CLI, the per-user
 // gateway, the per-user sandbox daemon). It is one JSON file, mode 0600, in
 // a 0700 directory. The sandbox cannot see it: it is never mounted into a
-// sandbox. It is not encrypted at rest: anyone who can read files as this
-// account can read it, as they can read the shell environment the
-// --credential flag takes values from.
+// sandbox.
+//
+// Sealed: when the CLI can use an OS keystore (the macOS Keychain, the
+// Linux Secret Service), each value is encrypted to the vault's public key
+// and the private key stays in the keystore (seal.go). Otherwise, or with
+// DEFENSECLAW_VAULT_STORE=file, the values are kept in the file as they
+// are, not encrypted: anyone who can read files as this account can read
+// them, as they can read the shell environment the --credential flag takes
+// values from. A file vault is sealed by the next CLI change once a
+// keystore works; a sealed vault is never written back as a file.
 package vault
 
 import (
@@ -35,6 +42,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
@@ -152,26 +160,87 @@ func (e Entry) Target() string {
 	return e.Host + ":" + strconv.Itoa(e.Port)
 }
 
-// record is an entry as it is kept on disk, value included.
+// record is an entry as it is kept on disk: with its value in a file
+// vault, with its sealed value (and maybe a fingerprint) in a sealed one.
+// In memory Value is the value once known: read from a file vault, opened
+// with the key, or newly set.
 type record struct {
 	Entry
-	Value string `json:"value"`
+	Value  string `json:"value,omitempty"`
+	Sealed string `json:"sealed,omitempty"`
+	FP     string `json:"fp,omitempty"`
+
+	// sealedFor is what Sealed was sealed for (name, host, port) when it
+	// was read: a value this process did not open cannot be moved.
+	sealedFor string
 }
 
 type file struct {
-	Version int      `json:"version"`
-	Entries []record `json:"entries"`
+	Version int         `json:"version"`
+	Seal    *sealHeader `json:"seal,omitempty"`
+	Entries []record    `json:"entries"`
+
+	// sealer is the parsed Seal header (nil: a file vault).
+	sealer *sealer
 }
 
 // Store is one account's vault.
 type Store struct {
 	dir string
 	now func() time.Time
+	// keys reaches the keystore; nil: this store never does.
+	keys func() (Keystore, string, error)
+
+	mu     sync.Mutex
+	notice string
+	// key is the sealed vault's key once read (a CLI process reads it once).
+	key *sealer
 }
 
-// Open returns the vault in dir. The directory is created on first write.
+// Open returns the vault in dir for a process that never reads the OS
+// keystore: the per-user gateway and sandbox daemon on the hook path. It
+// keeps a file vault a file and seals what it writes into a sealed vault
+// with the vault's public key; it cannot open sealed values. The directory
+// is created on first write.
 func Open(dir string) *Store {
 	return &Store{dir: filepath.Clean(dir), now: time.Now}
+}
+
+// OpenWithKeystore returns the vault in dir for the CLI: it reads the
+// private key from the OS keystore DEFENSECLAW_VAULT_STORE selects, and
+// seals a file vault on its next change when that keystore works.
+func OpenWithKeystore(dir string) *Store {
+	s := Open(dir)
+	s.keys = keysFromEnv
+	return s
+}
+
+// OpenWith is OpenWithKeystore with a given keystore (nil: none usable).
+func OpenWith(dir string, ks Keystore) *Store {
+	s := Open(dir)
+	s.keys = func() (Keystore, string, error) {
+		if ks == nil {
+			return nil, "no keystore is usable", nil
+		}
+		return ks, "", nil
+	}
+	return s
+}
+
+// Notice is what the last change of this store has to tell the person
+// about how the vault is kept ("" when nothing), then forgets it.
+func (s *Store) Notice() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := s.notice
+	s.notice = ""
+	return n
+}
+
+func (s *Store) setNotice(n string) {
+	s.mu.Lock()
+	s.notice = n
+	s.mu.Unlock()
 }
 
 // Dir is the vault directory.
@@ -293,14 +362,34 @@ func (s *Store) Resolve(name string) (Entry, string, error) {
 	if r.Host == "" {
 		return r.Entry, "", fmt.Errorf("%w: %s (bind one with: defenseclaw sandbox vault bind %s --host HOST)", ErrNoHost, name, name)
 	}
+	if f.sealer != nil {
+		if err := s.readKey(f); err != nil {
+			return r.Entry, "", err
+		}
+		v, err := f.sealer.open(&r)
+		if err != nil {
+			return r.Entry, "", s.damaged(err.Error())
+		}
+		return r.Entry, v, nil
+	}
 	return r.Entry, r.Value, nil
 }
 
-// FindByValue returns the entry that holds value, if any.
+// FindByValue returns the entry that holds value, if any. In a sealed vault
+// a store that reads the keystore opens every value; one that does not
+// finds only captured-shape values (by fingerprint).
 func (s *Store) FindByValue(value string) (Entry, bool, error) {
 	f, err := s.read()
 	if err != nil {
 		return Entry{}, false, err
+	}
+	if f.sealer != nil && s.keys != nil {
+		if err := s.readKey(f); err != nil {
+			return Entry{}, false, err
+		}
+		if err := s.openAll(f); err != nil {
+			return Entry{}, false, err
+		}
 	}
 	if i := f.indexValue(value); i >= 0 {
 		return f.Entries[i].Entry, true, nil
@@ -339,7 +428,7 @@ func (s *Store) Add(in AddInput) (Entry, error) {
 		src = SourceManual
 	}
 	var added Entry
-	err := s.update(func(f *file) error {
+	err := s.update(needValues, func(f *file) error {
 		if f.index(in.Name) >= 0 {
 			return fmt.Errorf("%w: %s (replace its value with: defenseclaw sandbox vault replace %s)", ErrExists, in.Name, in.Name)
 		}
@@ -368,7 +457,7 @@ func (s *Store) ReplaceValue(name, value string) (Entry, error) {
 		return Entry{}, err
 	}
 	var out Entry
-	err := s.update(func(f *file) error {
+	err := s.update(needValues, func(f *file) error {
 		i := f.index(name)
 		if i < 0 {
 			return fmt.Errorf("%w: %s", ErrNotFound, name)
@@ -397,7 +486,7 @@ func (s *Store) ReplaceValue(name, value string) (Entry, error) {
 // last 4 characters of the value, for the person to recognise it.
 func (s *Store) Confirm(name string) (Entry, error) {
 	var out Entry
-	err := s.update(func(f *file) error {
+	err := s.update(needNothing, func(f *file) error {
 		i := f.index(name)
 		if i < 0 {
 			return fmt.Errorf("%w: %s", ErrNotFound, name)
@@ -425,6 +514,16 @@ func (s *Store) Hint(name string) (string, error) {
 		return "", fmt.Errorf("%w: %s", ErrNotFound, name)
 	}
 	v := f.Entries[i].Value
+	if f.sealer != nil {
+		// A sealed value is opened with the keystore key (the CLI only).
+		if err := s.readKey(f); err != nil {
+			return "", err
+		}
+		r := f.Entries[i]
+		if v, err = f.sealer.open(&r); err != nil {
+			return "", s.damaged(err.Error())
+		}
+	}
 	if len(v) < 16 {
 		return "", nil
 	}
@@ -438,7 +537,7 @@ func (s *Store) Bind(name, target string) (Entry, error) {
 		return Entry{}, err
 	}
 	var out Entry
-	err = s.update(func(f *file) error {
+	err = s.update(needValues, func(f *file) error {
 		i := f.index(name)
 		if i < 0 {
 			return fmt.Errorf("%w: %s", ErrNotFound, name)
@@ -457,7 +556,7 @@ func (s *Store) Rename(name, newName string) (Entry, error) {
 		return Entry{}, err
 	}
 	var out Entry
-	err := s.update(func(f *file) error {
+	err := s.update(needValues, func(f *file) error {
 		i := f.index(name)
 		if i < 0 {
 			return fmt.Errorf("%w: %s", ErrNotFound, name)
@@ -475,7 +574,7 @@ func (s *Store) Rename(name, newName string) (Entry, error) {
 
 // Remove deletes an entry. Removing a missing entry is ErrNotFound.
 func (s *Store) Remove(name string) error {
-	return s.update(func(f *file) error {
+	return s.update(needNothing, func(f *file) error {
 		i := f.index(name)
 		if i < 0 {
 			return fmt.Errorf("%w: %s", ErrNotFound, name)
@@ -491,7 +590,7 @@ func (s *Store) MarkUsed(names []string, by string) error {
 	if len(names) == 0 {
 		return nil
 	}
-	return s.update(func(f *file) error {
+	return s.update(needNothing, func(f *file) error {
 		now := s.now().UTC()
 		for _, n := range names {
 			if i := f.index(n); i >= 0 {
@@ -514,15 +613,29 @@ func (f *file) index(name string) int {
 	return -1
 }
 
+// indexValue finds the entry holding value: by the value itself where it
+// is known, else by fingerprint (a sealed vault this process cannot open).
 func (f *file) indexValue(value string) int {
 	if value == "" {
 		return -1
 	}
 	want := sha256.Sum256([]byte(value))
+	fp := ""
+	if f.sealer != nil {
+		fp = f.sealer.fingerprint(value)
+	}
 	found := -1
 	for i := range f.Entries {
-		got := sha256.Sum256([]byte(f.Entries[i].Value))
-		if subtle.ConstantTimeCompare(want[:], got[:]) == 1 && found < 0 {
+		r := &f.Entries[i]
+		match := false
+		switch {
+		case r.Value != "":
+			got := sha256.Sum256([]byte(r.Value))
+			match = subtle.ConstantTimeCompare(want[:], got[:]) == 1
+		case fp != "" && r.FP != "":
+			match = subtle.ConstantTimeCompare([]byte(fp), []byte(r.FP)) == 1
+		}
+		if match && found < 0 {
 			found = i
 		}
 	}
@@ -541,49 +654,134 @@ func (s *Store) read() (*file, error) {
 	if err := json.Unmarshal(b, &f); err != nil {
 		return nil, fmt.Errorf("the vault %s is not valid; move it aside to start a new one", s.Path())
 	}
-	if f.Version != fileVersion {
+	switch f.Version {
+	case fileVersion:
+		if f.Seal != nil {
+			return nil, s.damaged("a version 1 vault has a seal header")
+		}
+		for i := range f.Entries {
+			if f.Entries[i].Value == "" || f.Entries[i].Sealed != "" || f.Entries[i].FP != "" {
+				return nil, fmt.Errorf("the vault %s is not valid; move it aside to start a new one", s.Path())
+			}
+		}
+	case sealedVersion:
+		sl, err := parseHeader(f.Seal)
+		if err != nil {
+			return nil, s.damaged(err.Error())
+		}
+		for i := range f.Entries {
+			r := &f.Entries[i]
+			if r.Value != "" {
+				return nil, s.damaged("it holds a value that is not sealed")
+			}
+			if r.Sealed == "" {
+				return nil, s.damaged("an entry has no sealed value")
+			}
+			r.sealedFor = sl.infoOf(r)
+		}
+		f.sealer = sl
+	default:
 		return nil, fmt.Errorf("the vault %s has version %d, which this DefenseClaw does not read", s.Path(), f.Version)
 	}
 	return &f, nil
 }
 
+// need says what a change needs of a sealed vault.
+type need int
+
+const (
+	// needNothing: names and metadata only; new values are sealed with
+	// the public key.
+	needNothing need = iota
+	// needValues: every value open (to compare or to re-seal), so the key.
+	needValues
+	// needSeal: nothing changes; a file vault is written only when this
+	// change seals it (Seal).
+	needSeal
+)
+
 // update reads, changes and writes the vault under the writer lock.
-func (s *Store) update(change func(*file) error) error {
-	return s.updateWait(lockWait, change)
+func (s *Store) update(n need, change func(*file) error) error {
+	return s.updateWait(lockWait, n, change)
 }
 
 // errUnchanged is what a change returns when it changed nothing: the
 // vault is not written.
 var errUnchanged = errors.New("the vault is unchanged")
 
-// updateWait is update with a bounded wait for the writer lock.
-func (s *Store) updateWait(wait time.Duration, change func(*file) error) error {
+// updateWait is update with a bounded wait for the writer lock. Keystore
+// work happens before the lock is taken: a keychain prompt or a slow
+// Secret Service never holds the lock a hook call waits on.
+func (s *Store) updateWait(wait time.Duration, n need, change func(*file) error) error {
 	if err := safefile.ProtectDirectory(s.dir); err != nil {
 		return fmt.Errorf("prepare the vault directory %s: %w", s.dir, err)
 	}
+	p, err := s.prepare(n, change)
+	if err != nil {
+		return err
+	}
 	unlock, err := lockDir(s.dir, wait)
 	if err != nil {
+		p.discard()
 		return err
 	}
 	defer unlock()
 	f, err := s.read()
-	if err != nil {
-		return err
+	// The pin is checked against the vault as read: a writer that did not
+	// read the key (the gateway, the sandbox daemon, a CLI change that
+	// needs no value) writes nothing into a vault whose seal is not the
+	// pinned one, or that was sealed and is now a plain file or gone.
+	var pu pinUpdate
+	var pinErr error
+	if err == nil {
+		// fresh: apply seals this plain (or missing) vault with the new
+		// key. keyed: apply opens it with the key prepare checked against
+		// this header (or fails the change).
+		fresh := f.sealer == nil && p.fresh
+		keyed := f.sealer != nil && n == needValues && s.keys != nil
+		pu, pinErr = s.checkPin(f, fresh, keyed)
 	}
-	if err := change(f); err != nil {
+	if err == nil {
+		err = p.apply(f, n)
+	}
+	if err == nil && n == needSeal && !p.fresh {
+		// No key was made, or another process sealed the vault meanwhile:
+		// nothing is written.
+		p.done(f)
+		return nil
+	}
+	if err == nil {
+		err = pinErr
+	}
+	if err == nil {
+		err = change(f)
 		if errors.Is(err, errUnchanged) {
-			return nil
+			if !p.fresh {
+				// Nothing to write: the vault on disk is f as read, and
+				// the pin was checked against it.
+				p.done(f)
+				pu.apply(s, f)
+				return nil
+			}
+			// A new key seals the vault: that is a change to write.
+			err = nil
 		}
-		return err
 	}
-	sort.Slice(f.Entries, func(i, j int) bool { return f.Entries[i].Name < f.Entries[j].Name })
-	f.Version = fileVersion
-	b, err := json.MarshalIndent(f, "", "  ")
+	var b []byte
+	if err == nil {
+		sort.Slice(f.Entries, func(i, j int) bool { return f.Entries[i].Name < f.Entries[j].Name })
+		b, err = s.encode(f)
+	}
+	if err == nil {
+		if werr := safefile.Write(s.Path(), append(b, '\n')); werr != nil {
+			err = fmt.Errorf("write the vault %s: %w", s.Path(), werr)
+		}
+	}
 	if err != nil {
+		p.discard()
 		return err
 	}
-	if err := safefile.Write(s.Path(), append(b, '\n')); err != nil {
-		return fmt.Errorf("write the vault %s: %w", s.Path(), err)
-	}
+	p.done(f)
+	pu.apply(s, f)
 	return nil
 }

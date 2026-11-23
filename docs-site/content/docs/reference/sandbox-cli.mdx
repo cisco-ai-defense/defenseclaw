@@ -1991,6 +1991,13 @@ never printed. `needs a host` means no sandbox can use the secret until you
 bind one; `exposed: rotate` means an agent's model may have seen the value
 before DefenseClaw captured it.
 
+The first line says how the vault is kept: `sealed (macOS Keychain)`,
+`sealed (Secret Service)` or `file (owner-only, not encrypted)`. `--json`
+carries it as `storage` and `sealed`, with `storage_note` when a plain file is
+not sealed (the reason) or when this session cannot read a sealed vault's key
+(commands that need its values then fail). See
+[Where the vault lives](/docs/sandboxes/vault#where-the-vault-lives).
+
 ```bash
 defenseclaw sandbox vault list
 defenseclaw sandbox vault list --json

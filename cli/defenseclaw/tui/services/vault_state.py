@@ -113,6 +113,9 @@ def _ago(stamp: str, now: datetime) -> str:
 class VaultPanelModel:
     entries: list[dict[str, Any]] = field(default_factory=list)
     path: str = ""
+    # How the vault is kept: "sealed (macOS Keychain)", "sealed (Secret
+    # Service)" or "file (owner-only, not encrypted)".
+    storage: str = ""
     cursor: int = 0
     loaded: bool = False
     error: str = ""
@@ -137,6 +140,7 @@ class VaultPanelModel:
         # A value never reaches the model, whatever the command printed.
         self.entries = [{k: v for k, v in e.items() if k != "value"} for e in entries if isinstance(e, dict)]
         self.path = str(doc.get("path") or "")
+        self.storage = str(doc.get("storage") or "")
         self.loaded, self.error = True, ""
         self.cursor = max(0, min(self.cursor, len(self.entries) - 1))
 
@@ -189,7 +193,10 @@ class VaultPanelModel:
             parts.append(f"{c['needs_host']} need{'s' if c['needs_host'] == 1 else ''} a host")
         if c["exposed"]:
             parts.append(f"{c['exposed']} exposed: rotate")
-        return " · ".join(parts) + " · values are never shown"
+        line = " · ".join(parts) + " · values are never shown"
+        if self.storage:
+            line += " · " + self.storage
+        return line
 
     def empty_state(self) -> str:
         return ("Your vault is empty. Press a to add a secret; a secret a sandboxed agent is given "

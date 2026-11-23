@@ -63,6 +63,16 @@ def test_rows_summary_and_never_a_value() -> None:
     assert VALUE not in json.dumps(model.entries)
 
 
+def test_summary_names_the_storage() -> None:
+    model = VaultPanelModel()
+    model.apply_list_json(json.dumps(dict(LIST, storage="sealed (macOS Keychain)", sealed=True)))
+    assert model.summary_line().endswith("never shown · sealed (macOS Keychain)")
+    model.apply_list_json(json.dumps(dict(LIST, storage="file (owner-only, not encrypted)")))
+    assert "file (owner-only, not encrypted)" in model.summary_line()
+    model.apply_list_json(json.dumps(LIST))
+    assert model.summary_line().endswith("values are never shown")
+
+
 def test_bad_json_is_an_error_not_a_crash() -> None:
     model = VaultPanelModel()
     model.apply_list_json("not json")

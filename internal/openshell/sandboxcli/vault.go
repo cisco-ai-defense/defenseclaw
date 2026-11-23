@@ -34,7 +34,87 @@ func (a *App) VaultDir() string {
 	return vault.DirIn(a.dataDir())
 }
 
-func (a *App) vault() *vault.Store { return vault.Open(a.VaultDir()) }
+// openVault opens the CLI's vault: it reads the vault key from the OS
+// keystore and seals a file vault on its next change (tests replace it).
+var openVault = vault.OpenWithKeystore
+
+func (a *App) vault() *vault.Store { return openVault(a.VaultDir()) }
+
+// vaultNotice prints what a change has to say about how the vault is kept
+// (sealed now, or still a file and why).
+func (a *App) vaultNotice(st *vault.Store) {
+	if n := st.Notice(); n != "" {
+		a.note(n)
+	}
+}
+
+// vaultSealWait bounds each keystore call of the seal on the way to a
+// sandbox (tests shorten it).
+var vaultSealWait = vault.SealWait
+
+// sealVault seals the vault before a sandbox can capture into it (`sandbox
+// run`, `start`, and `connect` when it starts a stopped sandbox): the
+// gateway and the sandbox daemon never read the keystore, so they keep a
+// file vault a file. With a keystore that answers now the vault is sealed
+// (an empty one is made) and the command says so; without one it stays a
+// file readable only by you, as `vault list` shows. Unless
+// DEFENSECLAW_VAULT_STORE=keychain, the keystore gets vault.SealWait per
+// call, so a Secret Service that never answers does not stall every run
+// (vault.Store.Briefly). It runs once per command.
+func (a *App) sealVault() error {
+	if a.vaultSealTried {
+		return nil
+	}
+	a.vaultSealTried = true
+	st := a.vault().Briefly(vaultSealWait)
+	if err := a.sealFailed(st.Seal()); err != nil {
+		return err
+	}
+	a.vaultNotice(st)
+	return nil
+}
+
+// sealFailed is what a failed seal does to the command: with
+// DEFENSECLAW_VAULT_STORE=keychain any failure (the keystore, the writer
+// lock, the vault directory, a damaged vault) fails it, as does a storage
+// setting that cannot be honoured; another failure is a warning, since a
+// sandbox does not need the vault to start.
+func (a *App) sealFailed(err error) error {
+	if err == nil {
+		return nil
+	}
+	if vault.Required() || errors.Is(err, vault.ErrStoreSetting) {
+		return fmt.Errorf("the sandbox vault was not sealed: %w", err)
+	}
+	a.warn("the sandbox vault was not sealed: " + err.Error())
+	return nil
+}
+
+// setupSealVault is sealVault for `sandbox setup`, which also says how the
+// vault is kept when it stays a file. It fails setup as sealVault fails a
+// run. Setup waits for the keystore as a vault change does.
+func (a *App) setupSealVault() error {
+	st := a.vault()
+	if err := st.Seal(); err != nil {
+		return a.sealFailed(err)
+	}
+	if n := st.Notice(); n != "" {
+		a.note(n)
+		return nil
+	}
+	if s, err := st.Storage(); err == nil && s.Mode == "file" && s.Note != "" {
+		a.note("the sandbox vault is a file readable only by you, not encrypted: " + s.Note)
+	}
+	return nil
+}
+
+// vaultStorageLine prints how the vault is kept.
+func (a *App) vaultStorageLine(s vault.Storage) {
+	a.line("Storage: " + s.Label)
+	if s.Note != "" {
+		a.note(s.Note)
+	}
+}
 
 // vaultJSONEntry is one entry in --output json: the metadata and the
 // derived status and target; never the value.
@@ -51,7 +131,15 @@ func vaultJSON(e vault.Entry) vaultJSONEntry {
 // VaultList prints the vault. Values are never printed.
 func (a *App) VaultList(format OutputFormat) error {
 	st := a.vault()
+	// A vault that does not match the seal the gateway pinned is checked
+	// with the key (and pinned again when it matches): the gateway's
+	// refused capture tells the person to run this command.
+	pinNote, pinErr := st.CheckPin()
 	list, err := st.List()
+	if err != nil {
+		return err
+	}
+	storage, err := st.Storage()
 	if err != nil {
 		return err
 	}
@@ -60,7 +148,25 @@ func (a *App) VaultList(format OutputFormat) error {
 		for _, e := range list {
 			out = append(out, vaultJSON(e))
 		}
-		return writeJSON(a.IO.Out, map[string]any{"path": st.Path(), "entries": out})
+		doc := map[string]any{"path": st.Path(), "entries": out, "storage": storage.Label, "sealed": storage.Mode == "sealed"}
+		if storage.Note != "" {
+			doc["storage_note"] = storage.Note
+		}
+		if storage.Pin != "" {
+			doc["pin"] = storage.Pin
+		}
+		if pinErr != nil {
+			doc["pin_warning"] = pinErr.Error()
+		} else if pinNote != "" {
+			doc["pin_note"] = pinNote
+		}
+		return writeJSON(a.IO.Out, doc)
+	}
+	a.vaultStorageLine(storage)
+	if pinErr != nil {
+		a.warn(pinErr.Error())
+	} else if pinNote != "" {
+		a.note(pinNote)
 	}
 	if len(list) == 0 {
 		a.note("the vault is empty; add a secret with `" + CommandName + " vault add NAME --host HOST`")
@@ -135,11 +241,13 @@ func (a *App) VaultAdd(name, host string, opts VaultValueOptions) error {
 	if err != nil {
 		return err
 	}
-	e, err := a.vault().Add(vault.AddInput{Name: name, Value: value, Host: host, Source: vault.SourceManual})
+	st := a.vault()
+	e, err := st.Add(vault.AddInput{Name: name, Value: value, Host: host, Source: vault.SourceManual})
 	if err != nil {
 		return err
 	}
 	a.ok(fmt.Sprintf("added %s for %s", e.Name, e.Target()))
+	a.vaultNotice(st)
 	a.note(fmt.Sprintf("use it in a sandbox: %s run claude --vault %s", CommandName, e.Name))
 	return nil
 }
@@ -153,32 +261,38 @@ func (a *App) VaultReplace(name string, opts VaultValueOptions) error {
 	if err != nil {
 		return err
 	}
-	e, err := a.vault().ReplaceValue(name, value)
+	st := a.vault()
+	e, err := st.ReplaceValue(name, value)
 	if err != nil {
 		return err
 	}
 	a.ok("replaced the value of " + e.Name)
+	a.vaultNotice(st)
 	a.note("sandboxes created from now on use the new value; a sandbox created with the old one is refused at start: delete it and start a new one")
 	return nil
 }
 
 // VaultBind sets the host a secret may be sent to.
 func (a *App) VaultBind(name, host string) error {
-	e, err := a.vault().Bind(name, host)
+	st := a.vault()
+	e, err := st.Bind(name, host)
 	if err != nil {
 		return err
 	}
 	a.ok(fmt.Sprintf("%s may now be sent to %s only", e.Name, e.Target()))
+	a.vaultNotice(st)
 	return nil
 }
 
 // VaultRename renames a secret.
 func (a *App) VaultRename(name, newName string) error {
-	e, err := a.vault().Rename(name, newName)
+	st := a.vault()
+	e, err := st.Rename(name, newName)
 	if err != nil {
 		return err
 	}
 	a.ok(fmt.Sprintf("renamed %s to %s", name, e.Name))
+	a.vaultNotice(st)
 	return nil
 }
 
@@ -194,15 +308,21 @@ func (a *App) VaultConfirm(name string, yes bool) error {
 		a.note(name + " was added by you; it needs no confirmation")
 		return nil
 	}
+	// The last characters need the vault key; confirming does not, so a
+	// key that cannot be read here only hides them.
 	hint, err := st.Hint(name)
-	if err != nil {
+	unreadable := errors.Is(err, vault.ErrKeyUnavailable)
+	if err != nil && !unreadable {
 		return err
 	}
 	a.printf("%s\n", name)
 	a.line(fmt.Sprintf("%-14s %s", "Kind", firstNonEmpty(e.Kind, "unknown")))
 	a.line(fmt.Sprintf("%-14s %s", "Captured from", firstNonEmpty(e.CapturedFrom, "a sandbox")))
 	a.line(fmt.Sprintf("%-14s %s", "Captured", e.CreatedAt.Local().Format(time.RFC3339)))
-	if hint != "" {
+	switch {
+	case unreadable:
+		a.line(fmt.Sprintf("%-14s %s", "Ends with", "(not readable without the key)"))
+	case hint != "":
 		a.line(fmt.Sprintf("%-14s …%s", "Ends with", hint))
 	}
 	a.line(fmt.Sprintf("%-14s %s", "Host", firstNonEmpty(e.Target(), "none yet")))
@@ -240,6 +360,7 @@ func (a *App) VaultRemove(name string, yes bool) error {
 		return err
 	}
 	a.ok("removed " + name)
+	a.vaultNotice(st)
 	a.note("sandboxes created with it keep the value until you delete them (a stopped one is refused at start); revoke it with its issuer if it may have leaked")
 	return nil
 }

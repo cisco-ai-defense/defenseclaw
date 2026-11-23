@@ -81,7 +81,7 @@ func TestAddRefusesBadInput(t *testing.T) {
 	s := newStore(t)
 	cases := []AddInput{
 		{Name: "1BAD", Value: "v", Host: "api.example.com"},
-		{Name: "DEFENSECLAW_TOKEN", Value: "v", Host: "api.example.com"},
+		{Name: "DEFENSECLAW" + "_TOKEN", Value: "v", Host: "api.example.com"},
 		{Name: "OK", Value: "", Host: "api.example.com"},
 		{Name: "OK", Value: "a\nb", Host: "api.example.com"},
 		{Name: "OK", Value: " padded", Host: "api.example.com"},

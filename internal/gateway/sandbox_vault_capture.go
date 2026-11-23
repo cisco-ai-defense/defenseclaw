@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -311,6 +312,12 @@ func (c *sandboxVaultCapture) errorText() string {
 		return c.Err.Error()
 	case errors.Is(c.Err, errVaultCaptureAmbiguous):
 		return c.Err.Error() + ", so DefenseClaw passed none of it on"
+	case errors.Is(c.Err, vault.ErrSealRemoved):
+		return "your vault was sealed and is now a plain file or gone, so DefenseClaw kept nothing in it; " +
+			"run `defenseclaw sandbox vault list` to seal it again"
+	case errors.Is(c.Err, vault.ErrVaultChanged):
+		return "your vault looks changed: its seal is not the one DefenseClaw pinned, so DefenseClaw kept nothing in it; " +
+			"run `defenseclaw sandbox vault list` to check it with your vault key"
 	}
 	return "the vault could not be written; run `defenseclaw sandbox vault list` to see why"
 }
@@ -477,6 +484,31 @@ func vaultCaptureFromHeader(connectorName, v string) *sandboxVaultCapture {
 	}
 	return c
 }
+
+// sandboxVaultPinRuleID is the alert of a capture refused because the vault
+// does not match its pin.
+const sandboxVaultPinRuleID = "sandbox_vault_pin"
+
+// alertSandboxVaultChanged records a capture the vault refused because it
+// no longer matches the seal DefenseClaw pinned: someone changed the vault
+// file (its seal header, or a sealed vault replaced with a plain one).
+func (a *APIServer) alertSandboxVaultChanged(ctx context.Context, connectorName string, c *sandboxVaultCapture) {
+	if a == nil || a.logger == nil || c == nil || !errors.Is(c.Err, vault.ErrVaultChanged) {
+		return
+	}
+	reason := "seal_changed"
+	if errors.Is(c.Err, vault.ErrSealRemoved) {
+		reason = "seal_removed"
+	}
+	if err := a.logger.LogAlertCtx(ctx, sandboxVaultPinRuleID, "HIGH",
+		"Sandbox vault does not match its pinned seal: capture refused", map[string]any{
+			"connector": connectorName, "event": c.Event, "sandbox": c.Sandbox,
+			"reason": reason, "rule_id": sandboxVaultPinRuleID,
+		}); err != nil {
+		fmt.Fprintf(os.Stderr, "[gateway] sandbox vault pin alert failed connector=%s: %v\n", connectorName, err)
+	}
+}
+
 
 // stops reports whether the event's answer, in action mode, is block.
 func (c *sandboxVaultCapture) stops() bool { return c.point().Stop }

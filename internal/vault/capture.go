@@ -145,13 +145,21 @@ func (s *Store) CaptureAll(ins []CaptureInput, wait time.Duration) ([]Captured, 
 	}
 	held, readErr := s.read()
 	if readErr == nil {
+		// The answer from a read is the vault's only while it is the
+		// pinned one: a swapped or unsealed file goes to the locked path,
+		// which refuses it.
+		if _, err := s.checkPin(held, false, false); err != nil {
+			held, readErr = nil, err
+		}
+	}
+	if readErr == nil {
 		if out, changes := heldCaptures(held, ins); !changes {
 			return out, nil
 		}
 	}
 	var out []Captured
 	var partial error
-	err := s.updateWait(wait, func(f *file) error {
+	err := s.updateWait(wait, needNothing, func(f *file) error {
 		var changed bool
 		out, changed, partial = s.capture(f, ins)
 		if !changed {
