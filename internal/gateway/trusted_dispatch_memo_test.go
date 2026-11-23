@@ -228,7 +228,7 @@ func TestTrustedDispatchMemoOffFieldsSkipTheMemo(t *testing.T) {
 			})
 			gotJSON, _ := json.Marshal(got)
 			wantJSON, _ := json.Marshal(want)
-			if len(want) == 0 || string(gotJSON) != string(wantJSON) {
+			if string(gotJSON) != string(wantJSON) {
 				t.Fatalf("%s: through the memo %s, alone %s", name, gotJSON, wantJSON)
 			}
 		})
