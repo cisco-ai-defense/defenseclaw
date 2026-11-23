@@ -278,7 +278,13 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             "Ctrl-]\n"
             'to detach again. If the connection drops, it reconnects by itself. NAME is the name "defenseclaw '
             'substrate list"\n'
-            "shows, or the --name you gave run when only one agent has it."
+            "shows, or the --name you gave run when only one agent has it.\n"
+            "\n"
+            "With --mcp NAME=COMMAND (Preview, repeatable) the agent can use an MCP server that runs on this "
+            "computer, while this\n"
+            'command is attached. See "defenseclaw substrate run --help". An agent that is already running reads '
+            "its MCP servers\n"
+            "when it starts, so start a new session in it to see NAME."
         ),
         example="defenseclaw substrate connect fix-tests-7f3a\ndefenseclaw substrate connect fix-tests",
         args=(_Arg("name"),),
@@ -290,6 +296,14 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
                 (
                     "keys typed while the connection is down: ask (show them, Enter sends), on (send) or off (drop); "
                     "only tightens the cluster setting"
+                ),
+            ),
+            _Flag(
+                "mcp",
+                "stringArray",
+                (
+                    "(Preview) start COMMAND on this computer and offer it to the agent as the MCP server NAME while "
+                    "this command is attached (repeatable)"
                 ),
             ),
             _Flag("no-asks", "bool", "do not show guard questions on this terminal"),
@@ -605,6 +619,32 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
         ),
     ),
     _Cmd(
+        ("port",),
+        "Open an agent's dev server in your browser (port forward)",
+        long=(
+            "Forwards a port the agent's app listens on (127.0.0.1:PORT inside the agent) to 127.0.0.1:LOCAL on "
+            "this\n"
+            "computer, so you can open http://127.0.0.1:LOCAL in your browser. LOCAL is PORT unless you give "
+            "PORT:LOCAL; when PORT\n"
+            "is taken here, the next free port is used. The forward listens on 127.0.0.1 only and only you can "
+            "open it. It stays\n"
+            "in the foreground until you press Ctrl-C.\n"
+            "\n"
+            "Ports 1024-65535 can be forwarded, except the relay's own port; your administrator can allow fewer "
+            "or turn port\n"
+            "forwarding off. Every forward is recorded in the cluster's audit log. The forwarded app runs as "
+            '"localhost" in your\n'
+            "browser, like any local dev server: open only apps you trust there."
+        ),
+        example="defenseclaw substrate port web-3f2a 3000\ndefenseclaw substrate port web-3f2a 3000:8000 5173",
+        args=(_Arg("name"), _Arg("port[:local]>", many=True)),
+        flags=(
+            _Flag("context", "string", "cluster to use (default: the one you signed in to last)", metavar="NAME"),
+            _Flag("json", "bool", "same as --output json"),
+            _Flag("output", "string", "output format: text or json", short="o", default="text", metavar="FORMAT"),
+        ),
+    ),
+    _Cmd(
         ("pull",),
         "Review what the agent changed and bring it home",
         long=(
@@ -803,14 +843,25 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             "(Preview)\n"
             "it starts from this checkout: the agent fetches the branch's history from its remote, and only the "
             "unpushed\n"
-            "commits and uncommitted changes are sent from here. Arguments after -- go to the agent."
+            "commits and uncommitted changes are sent from here. Arguments after -- go to the agent.\n"
+            "\n"
+            "With --mcp NAME=COMMAND (Preview, repeatable) the agent can use an MCP server that runs on this "
+            "computer. This command\n"
+            "starts COMMAND when the agent opens the server NAME and carries its messages through the cluster "
+            "while this command is\n"
+            "attached; every tool call goes through the cluster's guard first. COMMAND is split like a shell "
+            "would split it, with\n"
+            "quotes and backslashes only, and runs without a shell. NAME is a-z, 0-9, _ and -, up to 32 "
+            "characters. --mcp does not\n"
+            "go with --detach or --batch."
         ),
         example=(
             "defenseclaw substrate run claude\n"
             'defenseclaw substrate run codex --task "fix the failing tests" --detach\n'
             "defenseclaw substrate run claude --batch tasks.yaml --parallel 5\n"
             "defenseclaw substrate run claude --clone https://git.example.test/team/app.git\n"
-            "defenseclaw substrate run claude --clone ."
+            "defenseclaw substrate run claude --clone .\n"
+            'defenseclaw substrate run claude --mcp "files=npx -y @modelcontextprotocol/server-filesystem ."'
         ),
         args=(_Arg("agent"), _Arg("agent_args", required=False, many=True)),
         flags=(
@@ -843,6 +894,14 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
                 ),
             ),
             _Flag("max-upload-mb", "int", "lower the cluster upload limit for this copy, in MiB", default="0"),
+            _Flag(
+                "mcp",
+                "stringArray",
+                (
+                    "(Preview) start COMMAND on this computer and offer it to the agent as the MCP server NAME while "
+                    "this command is attached (repeatable)"
+                ),
+            ),
             _Flag(
                 "name",
                 "string",

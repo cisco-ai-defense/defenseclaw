@@ -299,7 +299,7 @@
     "path": "substrate connect",
     "use": "connect \u003cname\u003e",
     "short": "Come back to an agent and put it on this terminal",
-    "long": "Attaches your terminal to a running or suspended agent from any machine you are signed in on.\nA suspended agent wakes in about a fifth of a second and shows the screen as you left it. Press Ctrl-]\nto detach again. If the connection drops, it reconnects by itself. NAME is the name \"defenseclaw substrate list\"\nshows, or the --name you gave run when only one agent has it.",
+    "long": "Attaches your terminal to a running or suspended agent from any machine you are signed in on.\nA suspended agent wakes in about a fifth of a second and shows the screen as you left it. Press Ctrl-]\nto detach again. If the connection drops, it reconnects by itself. NAME is the name \"defenseclaw substrate list\"\nshows, or the --name you gave run when only one agent has it.\n\nWith --mcp NAME=COMMAND (Preview, repeatable) the agent can use an MCP server that runs on this computer, while this\ncommand is attached. See \"defenseclaw substrate run --help\". An agent that is already running reads its MCP servers\nwhen it starts, so start a new session in it to see NAME.",
     "example": "defenseclaw substrate connect fix-tests-7f3a\ndefenseclaw substrate connect fix-tests",
     "args": [
       {
@@ -318,6 +318,12 @@
         "name": "key-replay",
         "type": "string",
         "usage": "keys typed while the connection is down: ask (show them, Enter sends), on (send) or off (drop); only tightens the cluster setting"
+      },
+      {
+        "name": "mcp",
+        "type": "stringArray",
+        "default": "[]",
+        "usage": "(Preview) start COMMAND on this computer and offer it to the agent as the MCP server NAME while this command is attached (repeatable)"
       },
       {
         "name": "no-asks",
@@ -861,6 +867,46 @@
     ]
   },
   {
+    "path": "substrate port",
+    "use": "port \u003cname\u003e \u003cport[:local]\u003e...",
+    "short": "Open an agent's dev server in your browser (port forward)",
+    "long": "Forwards a port the agent's app listens on (127.0.0.1:PORT inside the agent) to 127.0.0.1:LOCAL on this\ncomputer, so you can open http://127.0.0.1:LOCAL in your browser. LOCAL is PORT unless you give PORT:LOCAL; when PORT\nis taken here, the next free port is used. The forward listens on 127.0.0.1 only and only you can open it. It stays\nin the foreground until you press Ctrl-C.\n\nPorts 1024-65535 can be forwarded, except the relay's own port; your administrator can allow fewer or turn port\nforwarding off. Every forward is recorded in the cluster's audit log. The forwarded app runs as \"localhost\" in your\nbrowser, like any local dev server: open only apps you trust there.",
+    "example": "defenseclaw substrate port web-3f2a 3000\ndefenseclaw substrate port web-3f2a 3000:8000 5173",
+    "args": [
+      {
+        "name": "name",
+        "required": true
+      },
+      {
+        "name": "port[:local]\u003e",
+        "required": true,
+        "many": true
+      }
+    ],
+    "flags": [
+      {
+        "name": "context",
+        "type": "string",
+        "usage": "cluster to use (default: the one you signed in to last)",
+        "metavar": "NAME"
+      },
+      {
+        "name": "json",
+        "type": "bool",
+        "default": "false",
+        "usage": "same as --output json"
+      },
+      {
+        "name": "output",
+        "shorthand": "o",
+        "type": "string",
+        "default": "text",
+        "usage": "output format: text or json",
+        "metavar": "FORMAT"
+      }
+    ]
+  },
+  {
     "path": "substrate pull",
     "use": "pull \u003cname\u003e",
     "short": "Review what the agent changed and bring it home",
@@ -1117,8 +1163,8 @@
     "path": "substrate run",
     "use": "run \u003cagent\u003e [agent_args...]",
     "short": "Run a coding agent in the cluster on a copy of this folder",
-    "long": "Starts the coding agent in a sandbox in the cluster, on a copy of the current folder (secret\nfiles such as .env and keys are held back), and puts the agent on your terminal. The agent is claude,\ncodex, copilot, opencode, hermes, kiro, antigravity, cursor-agent, amp or devin. The agents that sign in to a\nvendor account (kiro, antigravity, cursor-agent, amp, devin) start in open source only after you say yes to a\nwarning (or pass --yes), because the sign-in token stays in the agent and its snapshots; a managed cluster refuses them. A banner shows the guard profile, model, allowed hosts and how to leave. When the\nguard asks before a step, the question appears on the last line: press Ctrl-\\ to answer once, always or deny.\n\nPress Ctrl-] to detach; the agent keeps running and suspends when idle. Come back from any machine with\n\"defenseclaw substrate connect NAME\". Bring the changes home with \"defenseclaw substrate pull NAME\".\n\nWith --task the agent runs headless without you: asks are denied, or queued for approval when the profile's\nunattended_asks is queue, and the run is checked as strictly as an unattended job. Add --detach to leave it\nrunning and follow it with \"defenseclaw substrate logs -f NAME\".\nWith --batch FILE every task gets its own agent on the same folder; --parallel limits how many run at once.\nWith --clone URL the agent starts from a repository instead of a copy of the folder. With --clone . (Preview)\nit starts from this checkout: the agent fetches the branch's history from its remote, and only the unpushed\ncommits and uncommitted changes are sent from here. Arguments after -- go to the agent.",
-    "example": "defenseclaw substrate run claude\ndefenseclaw substrate run codex --task \"fix the failing tests\" --detach\ndefenseclaw substrate run claude --batch tasks.yaml --parallel 5\ndefenseclaw substrate run claude --clone https://git.example.test/team/app.git\ndefenseclaw substrate run claude --clone .",
+    "long": "Starts the coding agent in a sandbox in the cluster, on a copy of the current folder (secret\nfiles such as .env and keys are held back), and puts the agent on your terminal. The agent is claude,\ncodex, copilot, opencode, hermes, kiro, antigravity, cursor-agent, amp or devin. The agents that sign in to a\nvendor account (kiro, antigravity, cursor-agent, amp, devin) start in open source only after you say yes to a\nwarning (or pass --yes), because the sign-in token stays in the agent and its snapshots; a managed cluster refuses them. A banner shows the guard profile, model, allowed hosts and how to leave. When the\nguard asks before a step, the question appears on the last line: press Ctrl-\\ to answer once, always or deny.\n\nPress Ctrl-] to detach; the agent keeps running and suspends when idle. Come back from any machine with\n\"defenseclaw substrate connect NAME\". Bring the changes home with \"defenseclaw substrate pull NAME\".\n\nWith --task the agent runs headless without you: asks are denied, or queued for approval when the profile's\nunattended_asks is queue, and the run is checked as strictly as an unattended job. Add --detach to leave it\nrunning and follow it with \"defenseclaw substrate logs -f NAME\".\nWith --batch FILE every task gets its own agent on the same folder; --parallel limits how many run at once.\nWith --clone URL the agent starts from a repository instead of a copy of the folder. With --clone . (Preview)\nit starts from this checkout: the agent fetches the branch's history from its remote, and only the unpushed\ncommits and uncommitted changes are sent from here. Arguments after -- go to the agent.\n\nWith --mcp NAME=COMMAND (Preview, repeatable) the agent can use an MCP server that runs on this computer. This command\nstarts COMMAND when the agent opens the server NAME and carries its messages through the cluster while this command is\nattached; every tool call goes through the cluster's guard first. COMMAND is split like a shell would split it, with\nquotes and backslashes only, and runs without a shell. NAME is a-z, 0-9, _ and -, up to 32 characters. --mcp does not\ngo with --detach or --batch.",
+    "example": "defenseclaw substrate run claude\ndefenseclaw substrate run codex --task \"fix the failing tests\" --detach\ndefenseclaw substrate run claude --batch tasks.yaml --parallel 5\ndefenseclaw substrate run claude --clone https://git.example.test/team/app.git\ndefenseclaw substrate run claude --clone .\ndefenseclaw substrate run claude --mcp \"files=npx -y @modelcontextprotocol/server-filesystem .\"",
     "args": [
       {
         "name": "agent",
@@ -1185,6 +1231,12 @@
         "type": "int",
         "default": "0",
         "usage": "lower the cluster upload limit for this copy, in MiB"
+      },
+      {
+        "name": "mcp",
+        "type": "stringArray",
+        "default": "[]",
+        "usage": "(Preview) start COMMAND on this computer and offer it to the agent as the MCP server NAME while this command is attached (repeatable)"
       },
       {
         "name": "name",

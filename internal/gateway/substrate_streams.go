@@ -8,7 +8,6 @@ import (
 	"context"
 	"net"
 	"net/http"
-	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -16,6 +15,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/kit"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/registry"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/relay"
@@ -39,10 +39,6 @@ type substrateStream struct {
 	ended                  atomic.Value // string: why the gateway ended it (idle_close, admin_off)
 	release                func()
 }
-
-// substrateMCPNameRE is an MCP server name on an mcp stream (the dc.scope
-// shape, identity.ValidScope).
-var substrateMCPNameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,31}$`)
 
 // substrateStreamCounts counts open streams per actor UID and kind on this
 // gateway replica (GAP-0818: the caps are per replica, as the schema says;
@@ -125,8 +121,9 @@ func (st *substrateState) interactive() config.SubstrateInteractiveConfig {
 // port_forward_off, mcp_bridge_off), the target (404 not_found, 403
 // port_not_allowed), a template whose relay predates streams (409
 // relay_too_old), a plain request (400 websocket_required) and the
-// per-actor cap on this replica (429 too_many_streams). Each refusal writes
-// a rate-limited substrate.port|mcp.refused row (GAP-0817).
+// per-actor cap on this replica (429 too_many_streams); an mcp stream also
+// needs a server name its block lists do not refuse (403 mcp_server_blocked).
+// Each refusal writes a rate-limited substrate.port|mcp.refused row (GAP-0817).
 func (a *APIServer) substrateStreamOpen(st *substrateState, r *http.Request, reg registry.Registration, rest string) (*substrateStream, int, string) {
 	head, target, _ := strings.Cut(rest, "/")
 	if head != relay.RoutePort && head != relay.RouteMCP {
@@ -175,7 +172,7 @@ func substrateStreamLogTarget(kind, target string) string {
 			return target
 		}
 	case relay.RouteMCP:
-		if substrateMCPNameRE.MatchString(target) {
+		if relay.MCPNameRE.MatchString(target) {
 			return target
 		}
 	}
@@ -207,8 +204,19 @@ func (a *APIServer) substrateStreamAdmit(st *substrateState, r *http.Request, re
 		if !ic.MCPBridgeOn(st.cfg.Managed) {
 			return nil, http.StatusForbidden, "mcp_bridge_off"
 		}
-		if !substrateMCPNameRE.MatchString(target) {
+		if !relay.MCPNameRE.MatchString(target) {
 			return nil, http.StatusNotFound, "not_found"
+		}
+		// T6 ruling 2: the MCP block and allow lists (an operator block,
+		// asset_policy.mcp.denied, an admission verdict) apply to NAME
+		// when the bridge opens, not only to each tools/call.
+		if blocked, why := a.substrateMCPServerBlocked(r.Context(), reg, target); blocked {
+			if st.audit != nil {
+				st.audit(r.Context(), "WARN", "mcp stream refused for "+reg.Atespace+"/"+reg.Name+" ("+target+"): "+why,
+					map[string]any{"event": "substrate.mcp.blocked", "atespace": reg.Atespace, "actor": reg.Name,
+						"actor_uid": reg.UID, "mcp": target, "reason": "mcp_server_blocked", "detail": why})
+			}
+			return nil, http.StatusForbidden, "mcp_server_blocked"
 		}
 		limit = ic.EffectiveMaxServers()
 	}
@@ -361,4 +369,16 @@ func (c *substrateStreamConn) watch(tick time.Duration) {
 			}
 		}
 	}
+}
+
+// substrateMCPServerBlocked reports whether the MCP block lists refuse the
+// server name for the actor's connector, the same lookup a hook's MCP
+// tool call gets (mcpServerRuntimeBlock: fail closed on a lookup error).
+func (a *APIServer) substrateMCPServerBlocked(ctx context.Context, reg registry.Registration, name string) (bool, string) {
+	if a == nil || a.store == nil {
+		return false, ""
+	}
+	ctx = a.substrateEvaluationContext(ctx, reg, sandboxauth.RouteHook)
+	deny, _, why := mcpServerRuntimeBlock(a.toolPolicyEngine(ctx), "", sandboxauth.CanonicalConnector(reg.Connector), name)
+	return deny, why
 }

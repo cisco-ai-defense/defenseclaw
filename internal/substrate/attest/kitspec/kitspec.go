@@ -128,7 +128,9 @@ func Spec(o Options) (attest.KitSpec, attest.TemplateInfo, error) {
 	// also serves TLS with a certificate that gateway signs (B3.5).
 	cfg.Relay.Streams = nil
 	if cfg.Relay.VerifyURL != "" {
-		cfg.Relay.Streams = []string{kit.StreamTLS}
+		// The relay serves port forwards (B3.2) and laptop MCP bridges
+		// (B3.3) over that TLS.
+		cfg.Relay.Streams = []string{kit.StreamTLS, kit.StreamPort, kit.StreamMCP}
 	}
 	cfg.Relay.SessionIssuer = strings.TrimSpace(o.SessionIssuer)
 	keyFiles := map[string][]byte{}

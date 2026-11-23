@@ -87,7 +87,11 @@ type Server struct {
 
 	mu    sync.Mutex
 	polls map[string]*pollAttachment
-	tasks map[string]*task
+	// mcpOpen holds the names with an mcp stream (one each, mcp.go);
+	// mcpCfgMu serialises the agent MCP configuration edits.
+	mcpOpen  map[string]bool
+	mcpCfgMu sync.Mutex
+	tasks    map[string]*task
 	// used are the session token IDs that opened an attachment or a task,
 	// with their expiry: a token opens one (GAP-0070).
 	used map[string]time.Time
@@ -422,6 +426,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST "+Path(RouteExec), s.fileExec)
 	mux.HandleFunc("PUT "+Path(RouteFiles), s.filePut)
 	mux.HandleFunc("GET "+Path(RouteFiles), s.fileGet)
+	mux.HandleFunc("GET "+Path(RoutePort+"/{port}"), s.servePort)
+	mux.HandleFunc("GET "+Path(RouteMCP+"/{name}"), s.serveMCP)
 	return mux
 }
 

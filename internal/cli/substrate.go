@@ -347,7 +347,7 @@ func init() {
 		newSubstrateLoginCmd(), newSubstrateLogoutCmd(), newSubstrateWhoamiCmd(),
 		newSubstrateRunCmd(), newSubstrateConnectCmd(), newSubstrateListCmd(), newSubstrateStatusCmd(),
 		newSubstrateLogsCmd(), newSubstratePullCmd(), newSubstratePushCmd(), newSubstrateSyncCmd(), newSubstrateCheckpointCmd(), newSubstrateUndoCmd(), newSubstrateRecoverCmd(),
-		newSubstrateDeleteCmd(), newSubstrateMigrateCmd(),
+		newSubstrateDeleteCmd(), newSubstrateMigrateCmd(), newSubstratePortCmd(),
 		newSubstrateApprovalsCmd(), newSubstrateApproveCmd(), newSubstrateRejectCmd(), newSubstrateRevokeCmd(), newSubstrateUsageCmd(),
 		newSubstrateSecretsCmd(), newSubstratePolicyCmd(),
 		newSubstrateDoctorCmd(), newSubstrateVerifyCmd(), newSubstrateSetupCmd(), newSubstrateBundleCmd(), newSubstrateTemplateCmd(),

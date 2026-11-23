@@ -1465,11 +1465,15 @@ var (
 	// read. The judge reads only the first word after `substrate`, so the whole
 	// group, `--list` included, is a control exactly as at rel (where an
 	// unnamed verb already is).
+	// `port` forwards a port of a running agent to this computer over the
+	// agent's tunnel: like
+	// `connect` it reaches into an agent runtime with the person's session,
+	// and it opens a listener and a presence record, so it is not a read.
 	defenseClawSubstrateStopVerbs = map[string]bool{
 		"run": true, "connect": true, "pull": true, "checkpoint": true, "undo": true, "delete": true,
 		"migrate": true, "approve": true, "reject": true, "login": true, "logout": true, "set": true,
 		"rm": true, "reset": true, "setup": true, "apply": true, "rollback": true, "build": true,
-		"publish": true, "keygen": true, "serve": true, "admin": true,
+		"publish": true, "keygen": true, "serve": true, "admin": true, "port": true,
 	}
 )
 

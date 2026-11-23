@@ -287,6 +287,15 @@ Press `Ctrl-\`. The line becomes `... -- [o]nce [a]lways [d]eny [Esc] cancel`. O
 
 An `always` answer stays in force for the agent until you take it back. `defenseclaw substrate approvals --standing` lists them: the agent, the host, what the approval covers, who approved it and when. `defenseclaw substrate revoke NAME HOST` takes one back: the agent's next request to that host asks you again, and the cluster drops the host from the agent's network rules within about a minute. An `always` answer also covers your later agents of the same profile, so they list it too. A revoke on one of those ends it for that agent and for your later runs; the agent you first approved it on keeps the host until you revoke it there as well.
 
+**Preview.** When the agent runs a dev server, open it in your browser from a second terminal:
+
+```text
+$ defenseclaw substrate port claude-b66c97d1 3000
+Forwarding http://127.0.0.1:3000 -> claude-b66c97d1 port 3000 (only you, only this computer). Ctrl-C to stop.
+```
+
+The forward listens on `127.0.0.1` only and only you can open it. See [Forward a port](/docs/substrate/reference#forward-a-port).
+
 </Step>
 
 <Step>

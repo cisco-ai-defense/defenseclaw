@@ -232,6 +232,12 @@ func (a *APIServer) substrateAttach(st *substrateState) http.HandlerFunc {
 			writeSubstrateJSONError(w, dstatus, dreason)
 			return
 		}
+		if stream != nil && stream.kind == relay.RouteMCP {
+			// B3.3: the gateway ends an MCP stream itself and judges every
+			// tools/call (substrate_mcpbridge.go); it is never a byte proxy.
+			a.serveSubstrateMCPBridge(w, r, st, reg, stream, tok, dial)
+			return
+		}
 		space, name := reg.Atespace, reg.Name
 		proxy := &httputil.ReverseProxy{
 			Rewrite: func(pr *httputil.ProxyRequest) {
