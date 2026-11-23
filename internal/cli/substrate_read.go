@@ -667,7 +667,7 @@ var substrateUsageBys = map[string][2]string{
 // usage retention) and returns the window for the heading.
 func substrateUsageSince(v string) error {
 	n, err := strconv.Atoi(strings.TrimSuffix(strings.TrimSuffix(v, "h"), "d"))
-	if err != nil || n <= 0 || !(strings.HasSuffix(v, "h") || strings.HasSuffix(v, "d")) {
+	if err != nil || n <= 0 || (!strings.HasSuffix(v, "h") && !strings.HasSuffix(v, "d")) {
 		return cliusage.WithExitCode(errors.New("--since takes a window such as 24h or 7d"), 2)
 	}
 	if (strings.HasSuffix(v, "h") && n > 31*24) || (strings.HasSuffix(v, "d") && n > 31) {

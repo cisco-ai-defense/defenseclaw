@@ -87,7 +87,9 @@ func TestSubstrateUsageUsersSeeNone(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Routing.Admin = &config.RoutingAdminConfig{Visibility: &config.RoutingVisibility{UsersSee: config.RoutingUsersSeeNone}}
 	a := &APIServer{configSnapshot: func() *config.Config { return cfg }}
-	fu := usageFunc(func(context.Context, SubstrateUsageQuery) (SubstrateUsageAnswer, error) { return SubstrateUsageAnswer{}, nil })
+	fu := usageFunc(func(context.Context, SubstrateUsageQuery) (SubstrateUsageAnswer, error) {
+		return SubstrateUsageAnswer{}, nil
+	})
 	st := &substrateState{cfg: SubstrateConfig{Usage: fu}}
 	p := identity.Person{Kind: identity.PersonHuman, Issuer: "https://idp-a.example", Subject: "alice"}
 	r, w := usageReq(withSubstratePerson(context.Background(), p, false), "")

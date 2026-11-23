@@ -93,7 +93,7 @@ func TestRetiredDrainsUnderChurnAtKeyCap(t *testing.T) {
 		t.Fatalf("another replica reads run-A %.2f, true 9", other)
 	}
 	// Every key's spend is counted once, here and on the counter.
-	var want float64 = 9 + 0.01*float64(DefaultKeyCap-1+1+n)
+	var want = 9 + 0.01*float64(DefaultKeyCap-1+1+n)
 	h.before = nil
 	rt.SyncOnce(ctx)
 	snap, _ := l.Snapshot("batch:nightly:", "day", 0, time.Now())
@@ -101,7 +101,7 @@ func TestRetiredDrainsUnderChurnAtKeyCap(t *testing.T) {
 		t.Fatalf("here the budget totals %.4f, want %.4f", snap.Total, want)
 	}
 	var other float64
-	rows, err := h.LocalCounter.Totals(ctx, "epoch-other-replica", time.Now().AddDate(0, 0, -1), nil)
+	rows, err := h.Totals(ctx, "epoch-other-replica", time.Now().AddDate(0, 0, -1), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
