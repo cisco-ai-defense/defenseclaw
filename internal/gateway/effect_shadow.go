@@ -1098,8 +1098,12 @@ func effectLiveFindings(request trustedActionRequest, mode effectRulesMode, tier
 func withEffectClassWriteSeverity(findings []RuleFinding, generation func() *compiledRulePackCategories) []RuleFinding {
 	out := findings[:0]
 	for _, f := range findings {
+		// Only the class rule finding of a credential write: the call's
+		// effect.protected_target_<tier> finding has a credential proof too
+		// and keeps its own grading.
 		if f.Proof.Kind != decide.KindRead && f.Proof.Source == decide.SourceEffects &&
-			(f.Proof.Target == decide.TargetCredential || f.Proof.Target == decide.TargetOtherHomeCredential) {
+			(f.Proof.Target == decide.TargetCredential || f.Proof.Target == decide.TargetOtherHomeCredential) &&
+			f.RuleID != "" && f.RuleID == decide.RuleFor(f.Proof) {
 			severity := effectRuleSeverity(generation(), f.RuleID)
 			if severity == "" {
 				continue
