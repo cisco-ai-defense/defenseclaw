@@ -25336,6 +25336,9 @@ function Assert-DefenseClawRestoredTransactionReadyForActivation {
     # the flag). The try and finally lines stay at the left edge so the call
     # below keeps its text.
     $script:DefenseClawRollbackDeferBusyWriter = [bool](Test-DefenseClawStandaloneProfile)
+    $script:DefenseClawRollbackTransitionHookPending = [bool](Test-DefenseClawStandaloneProfile) -and
+        -not [string]::IsNullOrWhiteSpace((Get-DefenseClawEarlyHookField -Record $Snapshot -Name 'early_hook_guard_copy'))
+    $script:DefenseClawRollbackCodexVerifyDeferred = $false
     try {
     Assert-DefenseClawEnterpriseDeployment `
         -Layout $Layout `
@@ -25353,6 +25356,7 @@ function Assert-DefenseClawRestoredTransactionReadyForActivation {
     }
     finally {
         $script:DefenseClawRollbackDeferBusyWriter = $false
+        $script:DefenseClawRollbackTransitionHookPending = $false
     }
     return $true
 }
@@ -29954,6 +29958,12 @@ function Restore-DefenseClawSnapshotHookAfterActivation {
     $backup = [string]$rows[0].backup
     Assert-DefenseClawDescendant -Path $backup -Root $Layout.StateRoot -Label 'transaction hook backup' |
         Microsoft.PowerShell.Core\Out-Null
+    $guardInPlace = $true
+    if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.HookPath -PathType Leaf) {
+        $guardInPlace = (
+            Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $Layout.HookPath -Algorithm SHA256
+        ).Hash.ToLowerInvariant() -cne $oldDigest
+    }
     try {
         Install-DefenseClawFileAtomic `
             -Source $backup `
@@ -29978,6 +29988,76 @@ function Restore-DefenseClawSnapshotHookAfterActivation {
     ).Hash.ToLowerInvariant()
     if ($live -cne $oldDigest) {
         throw 'restored prior hook digest does not match its transaction preimage'
+    }
+    if ($guardInPlace) {
+        Complete-DefenseClawRestoredHookGuardianPass -Snapshot $Snapshot -Layout $Layout
+    }
+}
+
+function Complete-DefenseClawRestoredHookGuardianPass {
+    <#
+        GAP-2012: the restored guardian's first reconcile ran while the
+        transaction's guard was still the hook at the transition path, so it
+        resolved no launch folder for that hook and published the machine
+        policy (Claude Code, Copilot, Codex) for the guard instead of the
+        restored hook. The run then reported 54 machine_policy_not_covered and
+        cov=False until the guardian's next pass. Now the restored hook is
+        back, the guardian is restarted and Setup waits, bounded as for any
+        fresh reconcile, for one complete pass before the result is reported.
+        A pass that does not finish in time is reported, not fatal: the
+        restored release is running and the guardian keeps reconciling. The
+        Codex check the readiness deferred runs after that pass, when it judges
+        the restored hook, and a file that still fails it goes through the
+        hand-edit recovery (GAP-0802) as before.
+    #>
+    param(
+        [Parameter(Mandatory)]$Snapshot,
+        [Parameter(Mandatory)][hashtable]$Layout
+    )
+    if (-not (Test-DefenseClawStandaloneProfile)) {
+        return
+    }
+    $gatewayServiceName = [string]$Snapshot.gateway_service
+    $guardianServiceName = [string]$Snapshot.guardian_service
+    Write-DefenseClawLifecyclePhase -Stage 'guardian reconcile with the restored hook'
+    try {
+        [void](Wait-DefenseClawFreshGuardianReconcile `
+            -Layout $Layout `
+            -GatewayServiceName $gatewayServiceName `
+            -GuardianServiceName $guardianServiceName `
+            -AllowFailedTargets)
+    }
+    catch {
+        $reason = ConvertTo-DefenseClawBoundedDiagnostic -Value ([string]$_.Exception.Message) -MaxLength 512
+        Write-DefenseClawResilienceEvent -Marker defenseclaw_degraded -Fields @{
+            subsystem = 'guardian'
+            reason    = "the restored guardian did not finish a reconcile with the restored hook, so coverage is reported as it last published it: $reason"
+        }
+        try {
+            Start-DefenseClawService -Name $guardianServiceName
+        }
+        catch {
+            $null = $_
+        }
+    }
+    if (-not $script:DefenseClawRollbackCodexVerifyDeferred) {
+        return
+    }
+    $script:DefenseClawRollbackCodexVerifyDeferred = $false
+    try {
+        Repair-DefenseClawRecoveredCodexRequirements `
+            -Layout $Layout `
+            -GatewayServiceName $gatewayServiceName
+        [void](Invoke-DefenseClawCodexRequirementsCommand `
+            -Layout $Layout `
+            -GatewayServiceName $gatewayServiceName `
+            -Action verify)
+    }
+    catch {
+        if (-not (Test-DefenseClawRollbackHeldMessage -Message ([string]$_.Exception.Message))) {
+            throw
+        }
+        Add-DefenseClawRollbackDeferredHold -Message ([string]$_.Exception.Message)
     }
 }
 
@@ -39171,6 +39251,14 @@ $script:DefenseClawRollbackKeptGuardedNote = ''
 # Codex writer that holds the lock defers the Codex checks
 # (Invoke-DefenseClawCodexRequirementsCommand).
 $script:DefenseClawRollbackDeferBusyWriter = $false
+# GAP-2012: set around the readiness assertion of a standalone rollback whose
+# transition hook is still the transaction's guard (the restored hook goes back
+# only after activation). The Codex check of the restored requirements.toml
+# then judges it against the guard, so a file DefenseClaw itself published is
+# not a hand edit; its check is deferred until the restored hook is back
+# (Complete-DefenseClawRestoredHookGuardianPass).
+$script:DefenseClawRollbackTransitionHookPending = $false
+$script:DefenseClawRollbackCodexVerifyDeferred = $false
 # GAP-0999: set around the call of the managed-hook teardown rollback of a transaction so
 # a busy Codex writer defers that rollback; the second says it did.
 $script:DefenseClawTeardownRollbackDeferBusy = $false
@@ -39609,6 +39697,35 @@ function Get-DefenseClawCodexRequirementsGuardProblem {
     return ''
 }
 
+function Test-DefenseClawCodexRequirementsOwnPublication {
+    <#
+        GAP-2012: whether requirements.toml is, byte for byte, the file
+        DefenseClaw last published there: its ownership record names this
+        path and records the file's SHA-256 as its postimage. An
+        administrator's hand edit never matches that record.
+    #>
+    param([Parameter(Mandatory)][hashtable]$Layout)
+    $path = [string]$Layout.CodexMachinePolicyPath
+    $ownershipPath = [string](Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name CodexRequirementsOwnershipPath)
+    if ([string]::IsNullOrWhiteSpace($path) -or [string]::IsNullOrWhiteSpace($ownershipPath)) {
+        return $false
+    }
+    $ownership = Read-DefenseClawSmallJson -Path $ownershipPath
+    $hash = Get-DefenseClawPlainFileSha256 -Path $path
+    if ($null -eq $ownership -or [string]::IsNullOrEmpty($hash) -or
+        $null -eq $ownership.PSObject.Properties['requirements_path'] -or
+        $null -eq $ownership.PSObject.Properties['postimage_sha256']) {
+        return $false
+    }
+    if (-not [string]::Equals(
+            [IO.Path]::GetFullPath([string]$ownership.requirements_path).TrimEnd('\'),
+            [IO.Path]::GetFullPath($path).TrimEnd('\'),
+            [StringComparison]::OrdinalIgnoreCase)) {
+        return $false
+    }
+    return ([string]$ownership.postimage_sha256).ToLowerInvariant().Replace('sha256:', '') -ceq $hash
+}
+
 function Repair-DefenseClawRecoveredCodexRequirements {
     <#
         g582 round 11e (GAP-0802). A rollback puts back the requirements.toml
@@ -39656,6 +39773,17 @@ function Repair-DefenseClawRecoveredCodexRequirements {
         # GAP-0999: a Codex writer holds the lock; the file was not judged and
         # is not touched.
         throw $verifyError
+    }
+    if ($script:DefenseClawRollbackTransitionHookPending -and
+        (Test-DefenseClawCodexRequirementsOwnPublication -Layout $Layout)) {
+        # GAP-2012: the rollback restored the file DefenseClaw last published,
+        # but the hook at the transition path is still the transaction's guard,
+        # so the verify named the guard's folder as the managed directory. The
+        # file is not a hand edit: it is kept, and it is checked again once
+        # the restored hook is back.
+        $script:DefenseClawRollbackCodexVerifyDeferred = $true
+        Write-DefenseClawLifecyclePhase -Stage 'Codex requirements check deferred until the restored hook is back (the file is the one DefenseClaw published)'
+        return
     }
     $blockedState = Get-DefenseClawBlockedCodexStatePath -Layout $Layout
     if ($blockedState -ne '') {
@@ -40955,6 +41083,9 @@ function Assert-DefenseClawEnterpriseDeployment {
             Repair-DefenseClawRecoveredCodexRequirements `
                 -Layout $Layout `
                 -GatewayServiceName $GatewayServiceName
+            if ($script:DefenseClawRollbackCodexVerifyDeferred) {
+                $codexRequirementsDeferred = $true
+            }
         }
         catch {
             # GAP-0947: a program that holds the file keeps the recovery from
