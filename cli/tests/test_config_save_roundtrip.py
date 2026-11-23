@@ -67,6 +67,32 @@ def _make_cfg(tmpdir: str, **overrides) -> Config:
     return cfg
 
 
+class TestSkillContentHashesRoundTrip(unittest.TestCase):
+    def test_opt_out_survives_save_load_even_when_discovery_is_disabled(self):
+        for enabled in (True, False):
+            with self.subTest(enabled=enabled), tempfile.TemporaryDirectory() as tmpdir:
+                config_path = os.path.join(tmpdir, "config.yaml")
+                with open(config_path, "w", encoding="utf-8") as stream:
+                    yaml.safe_dump(
+                        {"config_version": 9, "ai_discovery": {"enabled": enabled}},
+                        stream,
+                    )
+                with patch.dict(os.environ, {"DEFENSECLAW_HOME": tmpdir}, clear=False):
+                    cfg = load()
+                    cfg.ai_discovery.include_skill_content_hashes = False
+                    cfg.save()
+                    for _ in range(2):
+                        with open(config_path, encoding="utf-8") as stream:
+                            raw = yaml.safe_load(stream)
+                        self.assertIs(
+                            raw["ai_discovery"]["include_skill_content_hashes"], False
+                        )
+                        cfg = load()
+                        self.assertIs(cfg.ai_discovery.enabled, enabled)
+                        self.assertIs(cfg.ai_discovery.include_skill_content_hashes, False)
+                        cfg.save()
+
+
 @unittest.skipIf(os.name == "nt", "POSIX mode preservation; native Windows DACL preservation has dedicated coverage")
 class TestConfigSavePreservesFileMode(unittest.TestCase):
     """P1 security regression: ``Config.save()`` must NOT widen the

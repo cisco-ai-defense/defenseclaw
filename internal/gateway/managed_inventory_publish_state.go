@@ -465,6 +465,8 @@ func managedInventoryComponentsDigest(key string, components []endpointInventory
 			component.agentBinaryBasename,
 			component.agentBinaryPathHash,
 			component.agentVersion,
+			component.skillContentHash,
+			component.skillContentStatus,
 		}, managedInventoryFieldSeparator))
 	}
 	return managedInventoryDigest(key, rows)
