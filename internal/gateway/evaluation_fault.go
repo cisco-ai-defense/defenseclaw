@@ -61,10 +61,17 @@ func evaluationFaultFindings(title string, enforcementCapable bool) []RuleFindin
 // withParserFaultFinding puts the parser-fault finding first in findings
 // (its title is the call's reason) and keeps every other reader's finding.
 func withParserFaultFinding(findings []RuleFinding, enforcementCapable bool) []RuleFinding {
+	return withEvaluationFaultFinding(findings, parserFaultTitle, enforcementCapable)
+}
+
+// withEvaluationFaultFinding puts the evaluation-fault finding with title
+// first in findings and keeps every other reader's finding; findings that
+// already hold one are returned as they are.
+func withEvaluationFaultFinding(findings []RuleFinding, title string, enforcementCapable bool) []RuleFinding {
 	if slices.ContainsFunc(findings, func(finding RuleFinding) bool { return finding.evaluationFault }) {
 		return findings
 	}
-	return append(evaluationFaultFindings(parserFaultTitle, enforcementCapable), findings...)
+	return append(evaluationFaultFindings(title, enforcementCapable), findings...)
 }
 
 // hasEvaluationFault reports an enforceable evaluation-fault finding.

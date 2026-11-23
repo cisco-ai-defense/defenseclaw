@@ -6,6 +6,8 @@
 package actionfacts
 
 import (
+	"fmt"
+	"runtime/debug"
 	"slices"
 	"strings"
 	"unicode"
@@ -45,13 +47,20 @@ const (
 	// disable, a dynamic operand, an unparsed nested shell, a reading the
 	// parse bounds cut). It is judged at the unknown tier.
 	DefenseClawControlUnproven DefenseClawControlKind = "unproven"
+	// DefenseClawControlFault is a reader fault: the reading stopped on an
+	// internal error after the facts before it. The caller answers it as an
+	// evaluation fault of the call (a block in every pack), never as fewer
+	// facts (GAP-1936). Fault holds the error and its stack.
+	DefenseClawControlFault DefenseClawControlKind = "evaluator-fault"
 )
 
 // DefenseClawControlFact is one command of the call that stops or changes the
-// DefenseClaw guardrail. Proven is false for DefenseClawControlUnproven.
+// DefenseClaw guardrail. Proven is false for DefenseClawControlUnproven and
+// DefenseClawControlFault; Fault is set only for DefenseClawControlFault.
 type DefenseClawControlFact struct {
 	Kind   DefenseClawControlKind
 	Proven bool
+	Fault  string
 }
 
 // defenseClawNamespace is the product namespace every packaged program,
@@ -561,31 +570,31 @@ func fanOut(argv []string, name string) ([][]string, bool) {
 // script fed to a shell on stdin, a reading cut by the parse bounds) is the
 // unknown tier, never a clean allow.
 //
-// The gateway calls it outside Analyze's recovery, so a reader fault is
-// contained here: it is a reading that could not resolve the commands, the
-// unknown tier when the text names DefenseClaw and nothing otherwise, as a
-// parse that could not resolve them (GAP-1914: a fault here reached the hook's
-// fail-mode answer).
+// The gateway calls it outside Analyze's recovery. A reader fault is reported,
+// not hidden: the facts read before it, then one DefenseClawControlFault fact,
+// which the gateway answers as the evaluation fault of the call, a block in
+// every pack and mode (GAP-1914: a fault here reached the hook's fail-mode
+// answer; GAP-1936: answering it as fewer facts allowed the call).
 func DefenseClawControl(facts Facts, text string) (out []DefenseClawControlFact) {
+	reader := &controlReader{seen: map[DefenseClawControlFact]bool{}}
 	defer func() {
-		if recover() != nil {
-			out = nil
-			if containsFold(text, defenseClawNamespace) {
-				out = []DefenseClawControlFact{{Kind: DefenseClawControlUnproven}}
-			}
+		if recovered := recover(); recovered != nil {
+			out = append(slices.Clip(reader.out), DefenseClawControlFact{
+				Kind:  DefenseClawControlFault,
+				Fault: fmt.Sprintf("defenseclaw control reader: %v\n%s", recovered, debug.Stack()),
+			})
 		}
 	}()
 	if defenseClawControlFaultHook != nil {
 		defenseClawControlFaultHook()
 	}
-	reader := &controlReader{seen: map[DefenseClawControlFact]bool{}}
 	reader.read(facts, text, 0)
 	return reader.out
 }
 
 // defenseClawControlFaultHook is a test-only seam: when non-nil it runs at the
-// start of every DefenseClawControl, inside its recovery. Production never
-// sets it.
+// start of every DefenseClawControl and after every fact the reading adds,
+// inside its recovery. Production never sets it.
 var defenseClawControlFaultHook func()
 
 type controlReader struct {
@@ -603,6 +612,9 @@ func (r *controlReader) add(fact DefenseClawControlFact) {
 	if !r.seen[fact] {
 		r.seen[fact] = true
 		r.out = append(r.out, fact)
+	}
+	if defenseClawControlFaultHook != nil {
+		defenseClawControlFaultHook()
 	}
 }
 
