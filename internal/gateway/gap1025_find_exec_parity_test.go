@@ -33,6 +33,7 @@ func TestGAP1025FindExecActorAnswersAsLaptop(t *testing.T) {
 		{"find ~ -path *ssh*", false},
 		{"find ~ -name '*ssh*' -exec cat {} \\;", true},
 		{"find ~ -name 'auth*' -exec cat {} +", false},
+		{"find . -path '*ssh*' -exec cat {} +", true},
 		{"find ~ -path '*.txt' -exec cat {} +", false},
 		{"find ~ -name '*' -exec cat {} +", true},
 		{"find ~ -exec cat {} +", true},
