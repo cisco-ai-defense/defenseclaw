@@ -43,8 +43,10 @@ func newSubstrateScanWorkerCmd() *cobra.Command {
 			var contain func(*exec.Cmd) error
 			if podContained {
 				// Only the chart's flag selects it (GAP-0828), never a
-				// refused namespace.
-				w.Pod = processutil.NewPodRunner(os.TempDir())
+				// refused namespace. The scanner writes only to the
+				// container's tmp; Reset also empties the pod's /dev/shm
+				// (GAP-0875).
+				w.Pod = processutil.NewPodRunner(os.TempDir(), podShm)
 				contain = w.Pod.Run
 				if err := w.Pod.Check(); err != nil {
 					fmt.Fprintf(cmd.ErrOrStderr(), "scan-worker: cannot contain scans, every scan is refused: %v\n", err)
@@ -61,6 +63,10 @@ func newSubstrateScanWorkerCmd() *cobra.Command {
 		"contain scans with the container (PID 1 of its own PID namespace, one scan at a time), for a sidecar whose seccomp profile refuses namespaces")
 	return cmd
 }
+
+// podShm is the pod's shared memory folder, which pod mode empties after
+// each job.
+const podShm = "/dev/shm"
 
 // runtimeVersion asks the scanner runtime for its version once it answers;
 // a failure is asked again next time (the runtime may still be starting).

@@ -31,6 +31,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -73,6 +74,14 @@ type Worker struct {
 
 	admit chan struct{}
 	run   chan struct{}
+	// fatal ends Serve with an error: a container the worker could not
+	// clear after a job, or a socket it could not listen on again.
+	fatal chan error
+
+	srv      *http.Server
+	sockMu   sync.Mutex
+	ln       *net.UnixListener
+	sockInfo os.FileInfo
 }
 
 func (w *Worker) init() {
@@ -91,6 +100,7 @@ func (w *Worker) init() {
 	}
 	w.admit = make(chan struct{}, slots+queue)
 	w.run = make(chan struct{}, slots)
+	w.fatal = make(chan error, 1)
 	if w.Scan == nil {
 		var contain func(*exec.Cmd) error
 		if w.Pod != nil {
@@ -113,27 +123,149 @@ func (w *Worker) Handler() http.Handler {
 	return mux
 }
 
-// Serve listens on Dir/scan.sock (0600) until ctx ends.
+// Serve listens on Dir/scan.sock (0600) until ctx ends. In pod mode it
+// first empties the container's folders: a /tmp emptyDir outlives a
+// container restart (GAP-0875). It returns an error, so the container
+// restarts, when a job leaves the container in a state it cannot clear.
 func (w *Worker) Serve(ctx context.Context) error {
+	handler := w.Handler()
+	if w.Pod != nil {
+		if err := w.Pod.Reset(); errors.Is(err, processutil.ErrPodRestart) {
+			return err
+		}
+		if err := w.clearScanDir(); err != nil {
+			return err
+		}
+	}
 	if err := os.MkdirAll(filepath.Join(w.Dir, scanner.ScanJobsDirName), 0o700); err != nil {
 		return err
 	}
+	w.srv = &http.Server{Handler: handler, ReadHeaderTimeout: 5 * time.Second, ConnContext: withPeer}
+	if err := w.listen(); err != nil {
+		return err
+	}
+	select {
+	case <-ctx.Done():
+		_ = w.srv.Close()
+		return nil
+	case err := <-w.fatal:
+		_ = w.srv.Close()
+		return err
+	}
+}
+
+// listen (again) binds Dir/scan.sock and serves it; an earlier listener is
+// closed without removing what is at the path now.
+func (w *Worker) listen() error {
 	sock := filepath.Join(w.Dir, scanner.ScanSocketName)
 	_ = os.Remove(sock)
-	ln, err := net.Listen("unix", sock)
+	ln, err := net.ListenUnix("unix", &net.UnixAddr{Name: sock, Net: "unix"})
 	if err != nil {
 		return err
 	}
-	if err := os.Chmod(sock, 0o600); err != nil {
+	fi, err := os.Lstat(sock)
+	if err == nil {
+		err = os.Chmod(sock, 0o600)
+	}
+	if err != nil {
 		ln.Close()
 		return err
 	}
-	srv := &http.Server{Handler: w.Handler(), ReadHeaderTimeout: 5 * time.Second}
-	go func() { <-ctx.Done(); _ = srv.Close() }()
-	if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		return err
+	w.sockMu.Lock()
+	old := w.ln
+	w.ln, w.sockInfo = ln, fi
+	w.sockMu.Unlock()
+	if old != nil {
+		old.SetUnlinkOnClose(false)
+		_ = old.Close()
+	}
+	go func() {
+		err := w.srv.Serve(ln)
+		w.sockMu.Lock()
+		current := w.ln == ln
+		w.sockMu.Unlock()
+		if current && err != nil && !errors.Is(err, http.ErrServerClosed) {
+			w.fail(err)
+		}
+	}()
+	return nil
+}
+
+func (w *Worker) fail(err error) {
+	select {
+	case w.fatal <- err:
+	default:
+	}
+}
+
+// keepShared puts the shared scan folder back after a pod-mode job: the
+// socket must be the one the worker listens on (a scanner that replaced it
+// would answer later scans), the jobs folder a real folder, both private to
+// the worker's user. The scanner's Landlock domain already refuses these
+// writes (GAP-0873); this holds even where it did not.
+func (w *Worker) keepShared() error {
+	jobs := filepath.Join(w.Dir, scanner.ScanJobsDirName)
+	if fi, err := os.Lstat(jobs); err != nil || !fi.IsDir() {
+		_ = os.Remove(jobs)
+		if err := os.Mkdir(jobs, 0o700); err != nil {
+			return err
+		}
+	} else if fi.Mode().Perm() != 0o700 {
+		if err := os.Chmod(jobs, 0o700); err != nil {
+			return err
+		}
+	}
+	sock := filepath.Join(w.Dir, scanner.ScanSocketName)
+	w.sockMu.Lock()
+	want := w.sockInfo
+	w.sockMu.Unlock()
+	fi, err := os.Lstat(sock)
+	if err != nil || want == nil || !os.SameFile(fi, want) || fi.Mode().Type() != os.ModeSocket {
+		return w.listen()
+	}
+	if fi.Mode().Perm() != 0o600 {
+		return os.Chmod(sock, 0o600)
 	}
 	return nil
+}
+
+// clearScanDir removes what an earlier container left in the shared scan
+// folder besides the gateway's jobs.
+func (w *Worker) clearScanDir() error {
+	entries, err := os.ReadDir(w.Dir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		if e.Name() == scanner.ScanJobsDirName && e.IsDir() {
+			continue
+		}
+		if err := os.RemoveAll(filepath.Join(w.Dir, e.Name())); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// endPodJob clears the container after a pod-mode job or health check and
+// checks the shared folder. Its error is the answer; one only a new
+// container clears also ends Serve.
+func (w *Worker) endPodJob() error {
+	err := w.Pod.Reset()
+	if err == nil {
+		if serr := w.keepShared(); serr != nil {
+			err = fmt.Errorf("the scan worker cannot keep its socket: %w", serr)
+			w.fail(err)
+		}
+		return err
+	}
+	if errors.Is(err, processutil.ErrPodRestart) {
+		w.fail(err)
+	}
+	return err
 }
 
 func answer(rw http.ResponseWriter, status int, a scanner.RemoteScanAnswer) {
@@ -144,6 +276,9 @@ func answer(rw http.ResponseWriter, status int, a scanner.RemoteScanAnswer) {
 
 func (w *Worker) serveHealth(rw http.ResponseWriter, r *http.Request) {
 	h := scanner.RemoteHealth{}
+	if w.refusePeer(rw, r) {
+		return
+	}
 	if w.Pod != nil {
 		// The version check may start the runtime: it takes the job slot,
 		// and a worker that cannot contain a scan is not ready.
@@ -166,7 +301,7 @@ func (w *Worker) serveHealth(rw http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if w.Pod != nil {
-		if err := w.Pod.Reset(); err != nil {
+		if err := w.endPodJob(); err != nil {
 			h.Ready, h.Error = false, err.Error()
 		}
 	}
@@ -174,7 +309,25 @@ func (w *Worker) serveHealth(rw http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(rw).Encode(h)
 }
 
+// refusePeer refuses, in pod mode, a request from another process of the
+// worker's own PID namespace: only a scanner runs there, and it must not ask
+// for (and so delete) a queued job of the gateway's, which connects from its
+// own container (GAP-0873).
+func (w *Worker) refusePeer(rw http.ResponseWriter, r *http.Request) bool {
+	if w.Pod == nil {
+		return false
+	}
+	if pid := peerPID(r.Context()); pid > 1 {
+		answer(rw, http.StatusForbidden, scanner.RemoteScanAnswer{Code: "refused", Error: "a request from the scan worker's own container"})
+		return true
+	}
+	return false
+}
+
 func (w *Worker) serveScan(rw http.ResponseWriter, r *http.Request) {
+	if w.refusePeer(rw, r) {
+		return
+	}
 	var req scanner.RemoteScanRequest
 	dec := json.NewDecoder(io.LimitReader(r.Body, maxRequest))
 	dec.DisallowUnknownFields()
@@ -189,6 +342,11 @@ func (w *Worker) serveScan(rw http.ResponseWriter, r *http.Request) {
 	if req.Kind != scanner.RemoteKindSkill && req.Kind != scanner.RemoteKindPlugin {
 		answer(rw, http.StatusBadRequest, scanner.RemoteScanAnswer{Code: "refused", Error: "bad kind"})
 		return
+	}
+	// Every answer names its job, which the gateway checks (GAP-0873).
+	answer := func(rw http.ResponseWriter, status int, a scanner.RemoteScanAnswer) {
+		a.Job = req.Job
+		answer(rw, status, a)
 	}
 	dir := filepath.Join(w.Dir, scanner.ScanJobsDirName, req.Job)
 	// The job is the gateway's; the worker deletes it whatever the outcome.
@@ -214,7 +372,7 @@ func (w *Worker) serveScan(rw http.ResponseWriter, r *http.Request) {
 	if w.Pod != nil {
 		// Nothing the scan started or wrote may reach the next job; a
 		// container that could not be cleared answers no result.
-		if rerr := w.Pod.Reset(); rerr != nil {
+		if rerr := w.endPodJob(); rerr != nil {
 			answer(rw, http.StatusOK, scanner.RemoteScanAnswer{Code: "unavailable", Error: rerr.Error()})
 			return
 		}

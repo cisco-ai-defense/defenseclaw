@@ -18,21 +18,16 @@
 
 package processutil
 
-import (
-	"fmt"
-	"os/exec"
-)
+import "os/exec"
 
 // PodRunner is the Linux scanner sidecar's pod-contained mode (GAP-0828).
 // It refuses every command on other platforms.
 type PodRunner struct{}
 
 // NewPodRunner returns a runner that refuses every command.
-func NewPodRunner(string) *PodRunner { return &PodRunner{} }
+func NewPodRunner(string, ...string) *PodRunner { return &PodRunner{} }
 
-func podUnavailable() error {
-	return fmt.Errorf("%w: %w: the pod-contained scan worker runs only on Linux", ErrNotContained, ErrContainmentUnavailable)
-}
+func podUnavailable() error { return &podError{msg: "it runs only on Linux"} }
 
 // Check always fails here.
 func (*PodRunner) Check() error { return podUnavailable() }

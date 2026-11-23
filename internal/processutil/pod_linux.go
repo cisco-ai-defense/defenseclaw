@@ -21,6 +21,7 @@ package processutil
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -43,6 +44,13 @@ import (
 // empties the scratch folder. Only the scan worker selects this mode, from an
 // explicit flag the chart passes; nothing selects it after a namespace call
 // fails, and RunTracked is unchanged everywhere.
+//
+// The scanner shares the worker's user, so the container's own limits do not
+// keep it from the worker: its Landlock domain allows writes only beneath the
+// scratch folder (and to /dev/null), so it cannot rewrite the shared scan
+// folder, its socket or a queued job (GAP-0873), and it may not signal the
+// worker (GAP-0874; Landlock signal scoping, or a seccomp filter on kernels
+// without it).
 const containPodMode = "pod-scanner"
 
 // podSweepTimeout bounds how long a sweep waits for the killed processes to
@@ -54,17 +62,27 @@ const podSweepTimeout = 5 * time.Second
 type PodRunner struct {
 	mu       sync.Mutex
 	scratch  string
+	clear    []string
 	setup    error
 	prepared bool
 }
 
-// NewPodRunner returns the pod's scan worker runner. scratch is the writable
-// folder Reset empties after each job (the container's tmp). A runner with
-// no usable scratch folder refuses every command; Check says why.
-func NewPodRunner(scratch string) *PodRunner {
+// NewPodRunner returns the pod's scan worker runner. scratch is the one
+// folder the scanner may write, which Reset empties after each job (the
+// container's tmp); Reset also empties each folder of clear (the pod's
+// /dev/shm). A runner with no usable scratch folder refuses every command;
+// Check says why.
+func NewPodRunner(scratch string, clear ...string) *PodRunner {
 	p := &PodRunner{scratch: filepath.Clean(scratch)}
-	if scratch == "" || p.scratch == "/" || !filepath.IsAbs(p.scratch) {
-		p.setup = fmt.Errorf("the scratch folder %q is not an absolute folder below /", scratch)
+	for _, d := range append([]string{scratch}, clear...) {
+		c := filepath.Clean(d)
+		if d == "" || c == "/" || !filepath.IsAbs(c) {
+			p.setup = fmt.Errorf("the folder %q is not an absolute folder below /", d)
+			return p
+		}
+		if d != scratch {
+			p.clear = append(p.clear, c)
+		}
 	}
 	return p
 }
@@ -88,7 +106,12 @@ func (p *PodRunner) prepareLocked() error {
 }
 
 func podUnavailable(format string, args ...any) error {
-	return fmt.Errorf("%w: %w: pod-contained scan worker: %s", ErrNotContained, ErrContainmentUnavailable, fmt.Sprintf(format, args...))
+	return &podError{msg: fmt.Sprintf(format, args...)}
+}
+
+// podRestart is a refusal only a new container can clear (ErrPodRestart).
+func podRestart(format string, args ...any) error {
+	return &podError{msg: fmt.Sprintf(format, args...), restart: true}
 }
 
 // Check reports whether this process can contain a scanner in pod mode: it
@@ -113,6 +136,9 @@ func (p *PodRunner) checkLocked() error {
 	}
 	if caps := effectiveCapabilities(); caps != 0 {
 		return podUnavailable("it has capabilities (effective %#x); the sidecar must drop all", caps)
+	}
+	if err := podGuardAvailable(); err != nil {
+		return podUnavailable("%v", err)
 	}
 	if err := p.prepareLocked(); err != nil {
 		return err
@@ -147,17 +173,17 @@ func (p *PodRunner) sweepLocked() error {
 				return nil
 			}
 			if time.Now().After(deadline) {
-				return podUnavailable("other processes still run in the namespace after the sweep")
+				return podRestart("other processes still run in the namespace after the sweep")
 			}
 		} else if time.Now().After(deadline) {
-			return podUnavailable("killed children were not reaped in %s", podSweepTimeout)
+			return podRestart("killed children were not reaped in %s", podSweepTimeout)
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
 }
 
 // Run runs cmd as a direct child of the scan worker after a Check, behind
-// the scanner's Landlock domain and filter (guardTrackedInit) and at the
+// the scanner's Landlock domain and filter (guardPodScanner) and at the
 // scanner's lower priority, then sweeps the namespace. A command that ran but
 // left a process that could not be killed and reaped is reported as
 // unavailable, never as a result.
@@ -175,7 +201,7 @@ func (p *PodRunner) Run(cmd *exec.Cmd) error {
 	}
 	target := cmd.Path
 	cmd.Path = "/proc/self/exe"
-	cmd.Args = append([]string{containSupervisorArg0, containPodMode, "1", "--", target}, cmd.Args[1:]...)
+	cmd.Args = append([]string{containSupervisorArg0, containPodMode, p.scratch, "--", target}, cmd.Args[1:]...)
 	env := cmd.Env
 	if env == nil {
 		env = os.Environ()
@@ -229,34 +255,76 @@ func waitPidfdExit(fd int) {
 	}
 }
 
-// Reset ends a job: it sweeps the namespace and empties the scratch folder,
-// so nothing a scan started or wrote reaches the next one.
+// Reset ends a job: it sweeps the namespace and empties the scratch folder
+// and the clear folders, so nothing a scan started or wrote reaches the next
+// one. A sweep or a folder that fails is ErrPodRestart: what is left there
+// stays until the container is replaced (GAP-0875).
 func (p *PodRunner) Reset() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if err := p.checkLocked(); err != nil {
 		return err
 	}
-	entries, err := os.ReadDir(p.scratch)
+	for i, dir := range append([]string{p.scratch}, p.clear...) {
+		err := emptyFolder(dir)
+		if i > 0 && errors.Is(err, fs.ErrNotExist) {
+			// A container without that folder has nothing to clear.
+			continue
+		}
+		if err != nil {
+			return podRestart("cannot empty %s: %v", dir, err)
+		}
+	}
+	return nil
+}
+
+// emptyFolder removes everything in dir. The scanner may have made a folder
+// of its own (or dir itself, where it owns it) read-only to the worker's
+// user, which it shares, so each folder gets the user's write and search
+// access back before it is removed (GAP-0875). Links are removed, never
+// followed.
+func emptyFolder(dir string) error {
+	fi, err := os.Lstat(dir)
 	if err != nil {
-		return podUnavailable("cannot read the scratch folder: %v", err)
+		return err
+	}
+	if !fi.IsDir() {
+		return fmt.Errorf("%s is not a folder", dir)
+	}
+	if fi.Mode().Perm()&0o700 != 0o700 {
+		if err := os.Chmod(dir, fi.Mode().Perm()|0o700); err != nil {
+			return err
+		}
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return err
 	}
 	for _, e := range entries {
-		if err := os.RemoveAll(filepath.Join(p.scratch, e.Name())); err != nil {
-			return podUnavailable("cannot empty the scratch folder: %v", err)
+		path := filepath.Join(dir, e.Name())
+		_ = filepath.WalkDir(path, func(p string, d fs.DirEntry, err error) error {
+			if err == nil && d.IsDir() {
+				_ = os.Chmod(p, 0o700)
+			}
+			return nil
+		})
+		if err := os.RemoveAll(path); err != nil {
+			return err
 		}
 	}
 	return nil
 }
 
 // execPodScanner is the trusted stage between the scan worker and the
-// scanner: it enters the scanner's Landlock domain and filter, then execs it.
-func execPodScanner(argv []string) int {
-	if os.Getppid() != 1 {
+// scanner: it enters the scanner's Landlock domain and filter, which allow
+// writes only beneath scratch, then execs it.
+func execPodScanner(argv []string, scratch string) int {
+	if os.Getppid() != 1 || !filepath.IsAbs(scratch) || filepath.Clean(scratch) != scratch || scratch == "/" {
 		return containExitNotContained
 	}
 	lowerScannerPriority()
-	if err := guardTrackedInit(); err != nil {
+	if err := guardPodScanner(scratch); err != nil {
+		fmt.Fprintf(os.Stderr, "processutil: scanner guard: %v\n", err)
 		return containExitNotContained
 	}
 	if err := syscall.Exec(argv[0], argv, withoutEnv(os.Environ(), containSupervisorEnv)); err != nil {

@@ -75,6 +75,9 @@ type RemoteScanRequest struct {
 // else unavailable (no scanner runtime in the sidecar), timeout, refused (a
 // job the worker will not scan) or failed.
 type RemoteScanAnswer struct {
+	// Job is the job the answer is for; the gateway takes no answer for
+	// another (GAP-0873).
+	Job    string      `json:"job,omitempty"`
 	Result *ScanResult `json:"result,omitempty"`
 	Code   string      `json:"code,omitempty"`
 	Error  string      `json:"error,omitempty"`
@@ -155,7 +158,7 @@ func (r *RemoteScanner) Scan(ctx context.Context, target string) (*ScanResult, e
 	if err := requireScannerTargetPath(target); err != nil {
 		return nil, err
 	}
-	if _, err := os.Lstat(filepath.Join(r.Dir, ScanSocketName)); err != nil {
+	if fi, err := os.Lstat(filepath.Join(r.Dir, ScanSocketName)); err != nil || fi.Mode().Type() != os.ModeSocket {
 		return nil, unavailable("the skill scanner sidecar is not running (no %s)", filepath.Join(r.Dir, ScanSocketName))
 	}
 	var raw [16]byte
@@ -167,13 +170,25 @@ func (r *RemoteScanner) Scan(ctx context.Context, target string) (*ScanResult, e
 	if err := os.MkdirAll(jobs, 0o700); err != nil {
 		return nil, unavailable("scan jobs folder: %v", err)
 	}
+	// A jobs folder or job that is a link would put the skill where its
+	// target is, not where the worker reads (GAP-0873).
+	jobsInfo, err := realFolder(jobs)
+	if err != nil {
+		return nil, err
+	}
 	dir := filepath.Join(jobs, job)
 	if err := os.Mkdir(dir, 0o700); err != nil {
 		return nil, err
 	}
 	defer os.RemoveAll(dir)
+	if _, err := realFolder(dir); err != nil {
+		return nil, err
+	}
 	if err := copyRegularTree(target, dir); err != nil {
 		return nil, err
+	}
+	if fi, err := realFolder(jobs); err != nil || !os.SameFile(fi, jobsInfo) {
+		return nil, fmt.Errorf("scanner sidecar: the scan jobs folder %s changed while the job was written", jobs)
 	}
 	body, _ := json.Marshal(RemoteScanRequest{Job: job, Kind: r.Kind, Settings: r.Settings})
 	// The worker enforces the timeout; the client waits a little longer so
@@ -199,6 +214,10 @@ func (r *RemoteScanner) Scan(ctx context.Context, target string) (*ScanResult, e
 	var ans RemoteScanAnswer
 	if err := json.NewDecoder(io.LimitReader(resp.Body, maxRemoteAnswer)).Decode(&ans); err != nil {
 		return nil, fmt.Errorf("scanner sidecar answer (HTTP %d): %w", resp.StatusCode, err)
+	}
+	if ans.Job != job {
+		// Not the worker's answer to this job: never a result.
+		return nil, fmt.Errorf("scanner sidecar: the answer is for job %q, not %s", ans.Job, job)
 	}
 	switch ans.Code {
 	case "":
@@ -232,6 +251,19 @@ func (r *RemoteScanner) Health(ctx context.Context) RemoteHealth {
 		return RemoteHealth{Error: "the skill scanner sidecar answered badly: " + err.Error()}
 	}
 	return h
+}
+
+// realFolder is the Lstat of path when it is a folder (not a link to one)
+// of this process's user that no one else may write.
+func realFolder(path string) (os.FileInfo, error) {
+	fi, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if !fi.IsDir() || fi.Mode().Perm()&0o022 != 0 || !ownedBySelf(fi) {
+		return nil, fmt.Errorf("scanner sidecar: %s is not a private folder of this user (mode %v)", path, fi.Mode())
+	}
+	return fi, nil
 }
 
 // copyRegularTree copies the folders and regular files of src into dst;
