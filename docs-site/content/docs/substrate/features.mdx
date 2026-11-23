@@ -79,7 +79,7 @@ Reading a body needs a Substrate version that lets the callout ask for it. Witho
 | Egress | Stronger | Substrate denies by default, and DefenseClaw writes the allow list and checks each request |
 | Blocked tools | Same | Hook rules |
 | Persistence | Changed | Substrate keeps an agent's files and memory across suspends. Changes to startup files and hooks are flagged when they happen, and `pull` flags them before they reach your machine |
-| Foreign hooks (a repo or the agent adding its own hooks) | Same | DefenseClaw's hook config sits in root-owned managed settings in the image, and the agent runs as an ordinary user |
+| Foreign hooks (a repo or the agent adding its own hooks) | Same | DefenseClaw's hook config sits in root-owned managed settings in the image, and the agent runs as an ordinary user. Claude Code's managed settings run only DefenseClaw's hooks, so hooks in the project's `.claude/settings.json` or `.claude/settings.local.json` never run; at session start the kit reports such a file and the gateway writes a `foreign_hook_ignored` audit event (once per agent, file and content) |
 | Process lineage, kernel feed | Not available | gVisor and microVM hide the agent's processes from the node, so there is nothing to watch. Substrate reports CPU and memory per agent |
 
 ## Asks and approvals

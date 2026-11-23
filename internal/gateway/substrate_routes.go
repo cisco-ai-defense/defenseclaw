@@ -65,6 +65,12 @@ type SubstrateCreate struct {
 	// Unattended is a --task or --batch run (fail closed, D8).
 	Unattended bool     `json:"unattended,omitempty"`
 	Secrets    []string `json:"secrets,omitempty"`
+	// AcknowledgeSignin is the person's yes to the open-source sign-in
+	// warning (GAP-0482). A create whose agent signs in to a vendor account
+	// (or keeps the hook in a folder it owns) and does not carry it is
+	// answered 428 signin_ack_required with the warning, before any actor
+	// exists; the acknowledged create is audited.
+	AcknowledgeSignin bool `json:"acknowledge_signin,omitempty"`
 	// Atespace is filled by the gateway from the profile; a request value
 	// is refused unless it is one of the profile's launcher atespaces.
 	Atespace string `json:"atespace,omitempty"`
@@ -105,6 +111,24 @@ type SubstrateActorActions interface {
 	Delete(ctx context.Context, atespace, name string) error
 }
 
+// SubstrateSnapshotCounter is optional on SubstrateActorActions: how many
+// snapshots the cluster holds for an actor. Status shows the count and a
+// delete names how many it removed (GAP-0474).
+type SubstrateSnapshotCounter interface {
+	Snapshots(ctx context.Context, atespace, name string) (int, error)
+}
+
+// substrateSnapshots is the actor's snapshot count, ok false when the
+// actions cannot count them or the cluster did not answer.
+func (st *substrateState) substrateSnapshots(ctx context.Context, reg registry.Registration) (int, bool) {
+	sc, ok := st.cfg.Actions.(SubstrateSnapshotCounter)
+	if !ok {
+		return 0, false
+	}
+	n, err := sc.Snapshots(ctx, reg.Atespace, reg.Name)
+	return n, err == nil
+}
+
 // SubstrateUsage answers usage for one owner ("" for every owner).
 type SubstrateUsage interface {
 	Usage(ctx context.Context, ownerID, batchID string) (any, error)
@@ -143,6 +167,7 @@ func (a *APIServer) newSubstrateAdminHandler(st *substrateState) http.Handler {
 	mux.HandleFunc("DELETE /api/v1/substrate/actors/{atespace}/{name}", a.substrateDeleteActor(st))
 	mux.HandleFunc("POST /api/v1/substrate/actors/{atespace}/{name}/policy/reset", a.substratePolicyReset(st))
 	mux.HandleFunc("POST /api/v1/substrate/actors/{atespace}/{name}/recover", a.substrateRecoverActor(st))
+	mux.HandleFunc("POST /api/v1/substrate/actors/{atespace}/{name}/snapshot", a.substrateSnapshotActor(st))
 	mux.HandleFunc("POST /api/v1/substrate/session-cert", a.substrateSessionCert(st))
 	mux.HandleFunc("/api/v1/substrate/actors/{atespace}/{name}/attach", a.substrateAttach(st))
 	mux.HandleFunc("/api/v1/substrate/actors/{atespace}/{name}/attach/{rest...}", a.substrateAttach(st))
@@ -152,6 +177,8 @@ func (a *APIServer) newSubstrateAdminHandler(st *substrateState) http.Handler {
 	mux.HandleFunc("GET /api/v1/substrate/doctor", a.substrateDoctor(st))
 	mux.HandleFunc("GET /api/v1/substrate/asks", a.substrateListAsks(st))
 	mux.HandleFunc("POST /api/v1/substrate/asks/{id}", a.substrateDecideAsk(st))
+	mux.HandleFunc("GET /api/v1/substrate/approvals", a.substrateListApprovals(st))
+	mux.HandleFunc("DELETE /api/v1/substrate/approvals/{atespace}/{name}/{host}", a.substrateRevokeApproval(st))
 	mux.HandleFunc("GET /api/v1/substrate/decisions", a.substrateDecisions(st))
 	mux.HandleFunc("GET /api/v1/substrate/policy/explain", a.substratePolicyExplain(st))
 	mux.HandleFunc("GET /api/v1/substrate/secrets", a.substrateListSecrets(st))
@@ -439,8 +466,16 @@ func (a *APIServer) substrateCreateActor(st *substrateState) http.HandlerFunc {
 		// vendor account, before any actor exists. The connector is now the
 		// template's whenever the template has one; it is checked again
 		// below on what the created actor runs.
-		if d := st.cfg.signinDecision(req.Connector, req.Secrets); !d.Allowed {
-			writeSubstrateSigninRefusal(w, d)
+		preDecision := st.cfg.signinDecision(req.Connector, req.Secrets)
+		if !preDecision.Allowed {
+			writeSubstrateSigninRefusal(w, preDecision)
+			return
+		}
+		if preDecision.Warn && !req.AcknowledgeSignin {
+			// GAP-0482: open source asks first. The warning goes back
+			// before anything is created or uploaded; the launcher asks the
+			// person and sends the create again with their yes.
+			writeSubstrateSigninAckRequired(w, preDecision)
 			return
 		}
 		createStart := time.Now()
@@ -467,6 +502,14 @@ func (a *APIServer) substrateCreateActor(st *substrateState) http.HandlerFunc {
 		if !signinDecision.Allowed {
 			_ = st.cfg.Actions.Delete(context.WithoutCancel(r.Context()), created.Atespace, created.Name)
 			writeSubstrateSigninRefusal(w, signinDecision)
+			return
+		}
+		if signinDecision.Warn && !req.AcknowledgeSignin {
+			// The actor runs another connector than the one checked above
+			// (a template with no label): it never ran, so remove it and
+			// ask as above.
+			_ = st.cfg.Actions.Delete(context.WithoutCancel(r.Context()), created.Atespace, created.Name)
+			writeSubstrateSigninAckRequired(w, signinDecision)
 			return
 		}
 		if signinDecision.Warn {
@@ -523,6 +566,11 @@ func (a *APIServer) substrateCreateActor(st *substrateState) http.HandlerFunc {
 				writeSubstrateJSONError(w, http.StatusServiceUnavailable, "no_free_worker")
 				return
 			}
+			if errors.Is(err, ErrSubstrateResumeBusy) {
+				// GAP-0468: busy, not broken; the person can retry.
+				writeSubstrateJSONError(w, http.StatusServiceUnavailable, "resume_busy")
+				return
+			}
 			writeSubstrateJSONError(w, http.StatusBadGateway, "resume_failed")
 			return
 		}
@@ -530,12 +578,16 @@ func (a *APIServer) substrateCreateActor(st *substrateState) http.HandlerFunc {
 		out := st.actorView(reg)
 		if signinDecision.Warn {
 			createWarnings = append(createWarnings, signinDecision.Message)
+			st.auditSigninAcknowledged(r.Context(), c, reg, signinDecision)
 		}
 		if len(createWarnings) > 0 {
 			out["warnings"] = createWarnings
 		}
 		if st.cfg.Sessions != nil && !req.Unattended {
-			tok, exp, err := st.cfg.Sessions.Issue(c.person.ID(), substrateSessionActor(reg), 0)
+			// The token ends with the caller's sign-in, at the latest
+			// (GAP-0588); with no time left the answer carries none and
+			// the launcher attaches through the attach route.
+			tok, exp, err := st.cfg.Sessions.IssueUntil(c.person.ID(), substrateSessionActor(reg), 0, c.person.SessionBound())
 			if err == nil {
 				out["session_token"], out["session_expires"] = tok, exp
 			}
@@ -721,6 +773,10 @@ func (a *APIServer) substrateGetActor(st *substrateState) http.HandlerFunc {
 		}
 		a.substrateAuditAdminTarget(st, r, reg, "actor", "INFO")
 		v := st.actorView(reg)
+		// What a delete would remove with it (GAP-0474).
+		if n, ok := st.substrateSnapshots(r.Context(), reg); ok {
+			v["snapshots"] = n
+		}
 		// GAP-0410: status shows a crashed agent as crashed.
 		if st.cfg.Lookup == nil {
 			writeSubstrateJSON(w, http.StatusOK, v)
@@ -745,6 +801,9 @@ func (a *APIServer) substrateDeleteActor(st *substrateState) http.HandlerFunc {
 			return
 		}
 		a.substrateAuditAdminTarget(st, r, reg, "delete", "HIGH")
+		// The snapshots go with the actor: count them first, so the
+		// launcher and the audit row say how many were removed (GAP-0474).
+		snaps, counted := st.substrateSnapshots(r.Context(), reg)
 		if err := st.cfg.Actions.Delete(r.Context(), reg.Atespace, reg.Name); err != nil {
 			writeSubstrateJSONError(w, http.StatusBadGateway, "delete_failed")
 			return
@@ -757,8 +816,41 @@ func (a *APIServer) substrateDeleteActor(st *substrateState) http.HandlerFunc {
 		if inv, ok := st.cfg.Actors.(interface{ Invalidate(string, string) }); ok {
 			inv.Invalidate(reg.Atespace, reg.Name)
 		}
-		writeSubstrateJSON(w, http.StatusOK, st.actorView(reg))
+		v := st.actorView(reg)
+		a.substrateAuditDeleted(st, r, reg, snaps, counted)
+		if counted {
+			v["snapshots"] = snaps
+		}
+		writeSubstrateJSON(w, http.StatusOK, v)
 	}
+}
+
+// substrateAuditDeleted writes the person-level audit row of a delete: who
+// deleted which actor (UID) and how many snapshots went with it, so the
+// audit store, not only the controller's sandbox event, records the purge
+// (GAP-0474). snapshots is -1 in the row when the cluster did not count
+// them.
+func (a *APIServer) substrateAuditDeleted(st *substrateState, r *http.Request, reg registry.Registration, snaps int, counted bool) {
+	if st.audit == nil {
+		return
+	}
+	c, _ := substrateCallerFrom(r.Context())
+	who := c.person.Principal
+	if who == "" {
+		who = ownerOf(c.person).ID()
+	}
+	what := "the agent and its snapshots"
+	if counted {
+		what = fmt.Sprintf("the agent and %d snapshot(s)", snaps)
+	} else {
+		snaps = -1
+	}
+	summary := fmt.Sprintf("%s deleted %s/%s (uid %s): %s, with the checkpoints inside it", who, reg.Atespace, reg.Name, reg.UID, what)
+	st.audit(context.WithoutCancel(r.Context()), "INFO", summary, map[string]any{
+		"event": "actor_deleted", "atespace": reg.Atespace, "actor": reg.Atespace + "/" + reg.Name, "actor_uid": reg.UID,
+		"principal": c.person.Principal, "person_id": ownerOf(c.person).ID(), "owner": reg.Person.Principal,
+		"admin": c.admin && !substrateOwnedBy(c, reg), "snapshots": snaps, "batch_id": reg.BatchID,
+	})
 }
 
 func (a *APIServer) substrateSessionCert(st *substrateState) http.HandlerFunc {
@@ -787,8 +879,13 @@ func (a *APIServer) substrateSessionCert(st *substrateState) http.HandlerFunc {
 			ttl = substrateSessionMaxTTL
 		}
 		// The token names the person as issuer#subject: two issuers may
-		// use the same subject (GAP-0061).
-		tok, exp, err := st.cfg.Sessions.Issue(c.person.ID(), substrateSessionActor(reg), ttl)
+		// use the same subject (GAP-0061). It ends with the caller's
+		// sign-in, at the latest (GAP-0588).
+		tok, exp, err := st.cfg.Sessions.IssueUntil(c.person.ID(), substrateSessionActor(reg), ttl, c.person.SessionBound())
+		if errors.Is(err, identity.ErrSessionBound) {
+			writeSubstrateRefusal(w, http.StatusUnauthorized, string(identity.ReasonExpired))
+			return
+		}
 		if err != nil {
 			writeSubstrateJSONError(w, http.StatusBadRequest, "session_refused")
 			return

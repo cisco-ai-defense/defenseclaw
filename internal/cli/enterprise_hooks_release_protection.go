@@ -36,6 +36,13 @@ import (
 // release has not yet protected: after a 1.0.10 -> 1.0.11 upgrade an account
 // the 1.0.11 guardian already protected could edit its lock back to 1.0.10,
 // strip its hooks and sign out, and read as awaiting sign-in (GAP-1762).
+//
+// The record names the ledger generation it was written for (the ledger's
+// updated_at) and the one it was built on. It counts only while the ledger
+// is that generation: another guardian (an earlier release after a
+// rollback) that published since may have re-rendered a target with the
+// times this record holds, and a record written for a generation whose
+// ledger write then failed is ahead of the ledger (GAP-1763).
 const enterpriseHookReleaseProtectionFile = "release_protection.json"
 
 // enterpriseHookReleaseProtectionMaxBytes bounds the read: one short entry
@@ -43,9 +50,13 @@ const enterpriseHookReleaseProtectionFile = "release_protection.json"
 const enterpriseHookReleaseProtectionMaxBytes = 4 << 20
 
 type enterpriseHookReleaseProtection struct {
-	SchemaVersion int                                    `json:"schema_version"`
-	Release       string                                 `json:"release"`
-	Targets       []enterpriseHookReleaseProtectedTarget `json:"targets"`
+	SchemaVersion int    `json:"schema_version"`
+	Release       string `json:"release"`
+	// Generation is the ledger updated_at this record was written for.
+	Generation string `json:"generation"`
+	// BaseGeneration is the ledger updated_at it was built on.
+	BaseGeneration string                                 `json:"base_generation,omitempty"`
+	Targets        []enterpriseHookReleaseProtectedTarget `json:"targets"`
 }
 
 type enterpriseHookReleaseProtectedTarget struct {
@@ -90,7 +101,10 @@ func enterpriseHookTargetReleaseNotProtectedHere(opts enterprisehooks.InstallOpt
 // this release's record holds for the target. Another guardian that protected
 // the target since (an earlier release after a rollback, which re-rendered
 // it and recorded new times) makes it no: its lock may then rightly name that
-// release. Both records are SYSTEM-written; the account can write neither.
+// release. So does a ledger generation the record was not written for: an
+// earlier guardian that published since may have re-rendered the target with
+// the same recovery times (GAP-1763 c). Both records are SYSTEM-written; the
+// account can write neither.
 func enterpriseHookTargetProtectedHere(opts enterprisehooks.InstallOptions) (bool, error) {
 	if !enterpriseHookReleaseProtectionRecorded() {
 		return false, nil
@@ -121,6 +135,9 @@ func enterpriseHookTargetProtectedHere(opts enterprisehooks.InstallOptions) (boo
 	if err != nil {
 		return false, err
 	}
+	if record.Generation == "" || record.Generation != authorization.UpdatedAt {
+		return false, nil
+	}
 	for _, row := range authorization.ProtectedTargets {
 		if !strings.EqualFold(strings.TrimSpace(row.SID), sid) ||
 			enterpriseHookReleaseProtectionConnector(row) != connectorName {
@@ -132,25 +149,76 @@ func enterpriseHookTargetProtectedHere(opts enterprisehooks.InstallOptions) (boo
 	return false, nil
 }
 
-// recordEnterpriseHookReleaseProtection adds every target this pass
-// protected (OK, not pending) to the record, with the times of its result,
-// and keeps the record's other targets when the record is this release's. A
-// record of another release, or one that does not read back trusted and
-// well formed, is not carried forward. It writes only a changed record.
-func recordEnterpriseHookReleaseProtection(authorizationDir string, rows []enterpriseHookReconcileRow) error {
+// recordEnterpriseHookReleaseProtection writes the record for the ledger
+// generation the guardian is about to publish (generation, the ledger's
+// updated_at), built on base, the ledger generation published now. The
+// guardian writes it before the ledger and the activation receipt, so a pass
+// whose record write fails publishes nothing and says so, instead of
+// publishing a ledger the record does not cover (GAP-1763 a).
+//
+// A target counts as protected by this release when this pass protected it
+// (OK, not pending or removed) or installed it (a result with lock times)
+// even if its row then failed: that install wrote this release's lock, so
+// the account must not be able to forge an older one (GAP-1763 d). A row
+// that failed is bound to the ledger row the pass publishes for the target
+// (the protection carried forward), and is left out when there is none.
+// The record's earlier targets are kept, bound to their ledger rows, when it
+// is this release's and was written for base, or built on it (its own
+// ledger write failed); one with no ledger row is left out. A record
+// that does not read back trusted and well formed is rebuilt with every
+// protected ledger row, so a target failing now keeps its protection
+// instead of being able to wait (GAP-1763 b): that only ever turns an
+// other-release wait into a failure.
+func recordEnterpriseHookReleaseProtection(
+	authorizationDir string,
+	base enterpriseHookGuardianAuthorization,
+	generation string,
+	protected []enterpriseHookReconcileRow,
+	rows []enterpriseHookReconcileRow,
+) error {
 	if !enterpriseHookReleaseProtectionRecorded() {
 		return nil
 	}
 	release := enterpriseHookThisRelease()
+	key := func(connectorName, sid string) string { return connectorName + "\x00" + sid }
+	ledger := map[string]enterpriseHookReconcileRow{}
+	for _, row := range protected {
+		connectorName := enterpriseHookReleaseProtectionConnector(row)
+		sid := strings.ToUpper(strings.TrimSpace(row.SID))
+		if connectorName != "" && sid != "" {
+			ledger[key(connectorName, sid)] = row
+		}
+	}
 	targets := map[string]enterpriseHookReleaseProtectedTarget{}
+	add := func(connectorName, sid string, row enterpriseHookReconcileRow) {
+		lock, entry := enterpriseHookReleaseProtectionTimes(row)
+		targets[key(connectorName, sid)] = enterpriseHookReleaseProtectedTarget{
+			Connector: connectorName, SID: sid, LockUpdatedAt: lock, EntryUpdatedAt: entry,
+		}
+	}
 	previous, exists, loadErr := loadEnterpriseHookReleaseProtection(authorizationDir)
-	if loadErr == nil && exists && previous.Release == release {
+	switch {
+	case exists && loadErr != nil:
+		for _, row := range ledger {
+			add(enterpriseHookReleaseProtectionConnector(row), strings.ToUpper(strings.TrimSpace(row.SID)), row)
+		}
+	case exists && previous.Release == release && previous.Generation != "" &&
+		(previous.Generation == base.UpdatedAt || previous.BaseGeneration == base.UpdatedAt):
+		// Bound to the ledger row the pass publishes: the same times when
+		// the record was written for base, and the protection base carries
+		// when it was written for a generation that was never published.
 		for _, target := range previous.Targets {
-			targets[target.Connector+"\x00"+target.SID] = target
+			if row, ok := ledger[key(target.Connector, target.SID)]; ok {
+				add(target.Connector, target.SID, row)
+			}
 		}
 	}
 	for _, row := range rows {
-		if !row.OK || row.Pending || row.Removed {
+		if row.Pending || row.Removed {
+			continue
+		}
+		installed := row.Result != nil && strings.TrimSpace(row.Result.HookContractLockUpdatedAt) != ""
+		if !row.OK && !installed {
 			continue
 		}
 		connectorName := enterpriseHookReleaseProtectionConnector(row)
@@ -158,12 +226,19 @@ func recordEnterpriseHookReleaseProtection(authorizationDir string, rows []enter
 		if connectorName == "" || sid == "" {
 			continue
 		}
-		lock, entry := enterpriseHookReleaseProtectionTimes(row)
-		targets[connectorName+"\x00"+sid] = enterpriseHookReleaseProtectedTarget{
-			Connector: connectorName, SID: sid, LockUpdatedAt: lock, EntryUpdatedAt: entry,
+		if !row.OK {
+			carried, ok := ledger[key(connectorName, sid)]
+			if !ok {
+				continue
+			}
+			row = carried
 		}
+		add(connectorName, sid, row)
 	}
-	record := enterpriseHookReleaseProtection{SchemaVersion: 1, Release: release, Targets: []enterpriseHookReleaseProtectedTarget{}}
+	record := enterpriseHookReleaseProtection{
+		SchemaVersion: 1, Release: release, Generation: generation, BaseGeneration: base.UpdatedAt,
+		Targets: []enterpriseHookReleaseProtectedTarget{},
+	}
 	for _, target := range targets {
 		record.Targets = append(record.Targets, target)
 	}
@@ -178,11 +253,6 @@ func recordEnterpriseHookReleaseProtection(authorizationDir string, rows []enter
 		return err
 	}
 	data = append(data, '\n')
-	if loadErr == nil && exists {
-		if published, err := json.MarshalIndent(previous, "", "  "); err == nil && bytes.Equal(append(published, '\n'), data) {
-			return nil
-		}
-	}
 	path := filepath.Join(authorizationDir, enterpriseHookReleaseProtectionFile)
 	if err := writeEnterpriseHookProtectedFile(path, data); err != nil {
 		return fmt.Errorf("write %s: %w", path, err)

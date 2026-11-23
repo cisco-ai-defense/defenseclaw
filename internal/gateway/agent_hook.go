@@ -1292,14 +1292,17 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		hungUpBeforeAnswer := r.Context().Err() != nil
 		var preKey preToolDecisionKey
 		preNoted := false
-		shellBridge := r.Header.Get(hookexec.HookShellBridgeHeader) == "shell"
+		// A managed shell bridge post and a verified Substrate actor's kit
+		// post answer their agent with this reply and send no receipt
+		// (GAP-2614, GAP-0550).
+		synchronousPost := r.Header.Get(hookexec.HookShellBridgeHeader) == "shell" || isSubstrateActorRequest(ctx)
 		unreceipted := func(proposal agentHookResponse) agentHookResponse {
-			if a.scannerCfg != nil && !a.scannerCfg.SecureClientIntegration() && !shellBridge &&
+			if a.scannerCfg != nil && !a.scannerCfg.SecureClientIntegration() && !synchronousPost &&
 				r.Header.Get(hookexec.HookDeliveryReceiptHeader) == "1" &&
 				hookexec.DeliveryReceiptEvent(connectorName, req.HookEventName) {
 				return a.deliveredHookDecision(connectorName, proposal, "")
 			}
-			return a.unreceiptedHookDecision(shellBridge, hungUpBeforeAnswer, connectorName, req.HookEventName, proposal)
+			return a.unreceiptedHookDecision(synchronousPost, hungUpBeforeAnswer, connectorName, req.HookEventName, proposal)
 		}
 		var capacityReceipt *hookCapacityReceipt
 		if delivery != nil {
@@ -2993,6 +2996,13 @@ func hookStageForTest(ctx context.Context, stage string) {
 }
 
 func enrichAgentHookContext(ctx context.Context, req agentHookRequest) context.Context {
+	return withHookSessionRootAgent(enrichAgentHookContextOnly(ctx, req), req)
+}
+
+// enrichAgentHookContextOnly is enrichAgentHookContext without the session
+// root agent: for a caller that names the session's agent itself, as the
+// foreign-hook denial does from the live hook snapshot first (GAP-1903).
+func enrichAgentHookContextOnly(ctx context.Context, req agentHookRequest) context.Context {
 	ctx = ContextWithSessionID(ctx, req.SessionID)
 	identity := agentIdentityForGenericHook(ctx, req)
 	ctx = ContextWithAgentIdentity(ctx, identity)
@@ -3052,6 +3062,39 @@ func enrichAgentHookContext(ctx context.Context, req agentHookRequest) context.C
 		ctx = audit.ContextWithEnvelope(ctx, env)
 	}
 	return ctx
+}
+
+// withHookSessionRootAgent names the session's root agent on the audit
+// envelope of a hook that reported no agent. The id is the one the hook's
+// hook_decision, lifecycle and model records derive (hookLLMEventMeta) and the
+// one correlation mints at the session's start, so it is the same on every
+// gateway replica and needs no cross-replica lookup. Before, the envelope got
+// an agent only from this replica's correlation cursor: a replica that saw an
+// actor's session first on a tool hook, with the session's start on another
+// replica, wrote its connector-hook rows with agent_id empty while the
+// hook_decision rows of the same events named the agent (substrate-1:GAP-0422).
+// A cursor's or the payload's agent still wins (contextWithHookCorrelation).
+// The key is the hook's own session, as hookLLMEventMeta's. An agentless
+// sub-agent start or stop is left alone: hookLLMEventMeta names a sub-agent
+// node for it, not the root. Traffic with no agent identity, and Secure Client
+// (UUIDv7 agents, issue #1092), keep the envelope as it was.
+func withHookSessionRootAgent(ctx context.Context, req agentHookRequest) context.Context {
+	env := audit.EnvelopeFromContext(ctx)
+	connectorName, sessionID := strings.TrimSpace(req.ConnectorName), strings.TrimSpace(req.SessionID)
+	if env.AgentID != "" || sessionID == "" || connectorName == "" || ManagedEnterpriseActive() {
+		return ctx
+	}
+	switch canonicalHookLifecycleEvent(firstString(req.Payload,
+		"hook_event_name", "hookEventName", "event_type", "eventType", "event_name", "eventName")) {
+	case "subagent_start", "subagent_stop":
+		return ctx
+	}
+	scope := agentIdentityIDForTraffic(ctx, AgentIdentityFromContext(ctx))
+	if scope == "" {
+		return ctx
+	}
+	env.AgentID = agentNodeID(scope, connectorName, sessionID, "root")
+	return audit.ContextWithEnvelope(ctx, env)
 }
 
 // refreshAuditEnvelopeFromHook copies payload-derived correlation

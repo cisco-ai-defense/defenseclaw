@@ -38,6 +38,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
+	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/manager"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 )
@@ -201,11 +202,39 @@ type sandboxRuntimeFixture struct {
 	squatter net.Listener
 }
 
+// sandboxRuntimeRefusedOnWindows is the Windows branch of the sandbox runtime
+// tests (rel-1-0-10:GAP-1617): OpenShell sandboxes run on Linux and macOS
+// only, so on Windows an enabled openshell config still builds no runtime and
+// the health report says the subsystem is disabled for the platform. It
+// reports true on Windows (the caller returns).
+func sandboxRuntimeRefusedOnWindows(t *testing.T) bool {
+	t.Helper()
+	if runtime.GOOS != "windows" {
+		return false
+	}
+	store, logger := testStoreAndLogger(t)
+	cfg := &config.Config{DataDir: t.TempDir()}
+	cfg.Gateway.Token = "test-token"
+	cfg.OpenShell.Enabled = true
+	sc := &Sidecar{health: NewSidecarHealth(), logger: logger}
+	sc.cfgCurrent.Store(cfg)
+	api := NewAPIServer("127.0.0.1:0", sc.health, nil, store, logger, cfg)
+	rt, err := sc.newSandboxRuntime(api)
+	if rt != nil || err != nil {
+		t.Fatalf("an enabled sandbox config on Windows built runtime=%v err=%v, want none", rt, err)
+	}
+	snap := sc.health.Snapshot()
+	if snap.Sandbox == nil || snap.Sandbox.State != StateDisabled || !strings.Contains(snap.Sandbox.LastError, "running on windows") {
+		t.Fatalf("sandbox health on Windows = %+v, want disabled for the platform", snap.Sandbox)
+	}
+	if dir := inventory.SandboxScanDirForConfig(cfg); dir != "" {
+		t.Fatalf("a Windows host reads sandbox scan records from %q", dir)
+	}
+	return true
+}
+
 func newSandboxRuntimeFixture(t *testing.T, squat bool) *sandboxRuntimeFixture {
 	t.Helper()
-	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
-		t.Skip("sandboxes run on Linux and macOS only")
-	}
 	store, logger := testStoreAndLogger(t)
 	f := &sandboxRuntimeFixture{cfg: &config.Config{DataDir: t.TempDir()}}
 	f.cfg.Gateway.Token = "test-token"
@@ -255,6 +284,9 @@ func (f *sandboxRuntimeFixture) run(t *testing.T, serveAPI func(context.Context)
 // fail closed, egress needs a credential), and the API reports the
 // subsystem as unavailable.
 func TestSandboxRuntimeServesListeners(t *testing.T) {
+	if sandboxRuntimeRefusedOnWindows(t) {
+		return
+	}
 	f := newSandboxRuntimeFixture(t, false)
 	f.run(t, nil)
 	ingress := "http://" + net.JoinHostPort("127.0.0.1", strconv.Itoa(f.cfg.OpenShell.IngressPort))
@@ -295,6 +327,9 @@ func TestSandboxRuntimeServesListeners(t *testing.T) {
 // GAP-0701: the configured address cannot be reported as this daemon's
 // listener when a second account owns the ingress port.
 func TestSandboxStatusDoesNotClaimAnotherAccountsIngress(t *testing.T) {
+	if sandboxRuntimeRefusedOnWindows(t) {
+		return
+	}
 	f := newSandboxRuntimeFixture(t, false)
 	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(f.cfg.OpenShell.IngressPort))
 	var err error
@@ -343,6 +378,9 @@ func TestSandboxStatusListenerAvailabilityRequiresOwnership(t *testing.T) {
 // OpenShell would relay the sandbox's hooks (with its real ingress token)
 // or egress to that program.
 func TestSandboxRuntimeRefusesSandboxesWithoutItsListeners(t *testing.T) {
+	if sandboxRuntimeRefusedOnWindows(t) {
+		return
+	}
 	f := newSandboxRuntimeFixture(t, true)
 	rt := f.rt
 	f.run(t, nil)
@@ -611,6 +649,9 @@ func TestContainListenerLossWaitsForItsAPI(t *testing.T) {
 // their hooks with the real ingress token, to that program), the subsystem
 // reports why, and a durable health record says the listener failed.
 func TestSandboxRuntimeStopsSandboxesWhenAListenerIsLost(t *testing.T) {
+	if sandboxRuntimeRefusedOnWindows(t) {
+		return
+	}
 	f := newSandboxRuntimeFixture(t, true)
 	rt := f.rt
 	if rt.fleet == nil || rt.publish == nil || rt.tel == nil {

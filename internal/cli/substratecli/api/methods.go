@@ -51,6 +51,10 @@ type Actor struct {
 	Foreign     bool   `json:"foreign,omitempty"`
 	Deleted     bool   `json:"deleted,omitempty"`
 	State       string `json:"state,omitempty"`
+	// Snapshots is how many snapshots the cluster holds for the actor (one
+	// actor's status), or removed with it (delete); nil when the gateway
+	// did not count them (GAP-0474).
+	Snapshots *int `json:"snapshots,omitempty"`
 	// SessionToken is present on create for an attended run.
 	SessionToken   string    `json:"session_token,omitempty"`
 	SessionExpires time.Time `json:"session_expires,omitempty"`
@@ -62,6 +66,15 @@ type Actor struct {
 	// the DefenseClaw rule (deny-only) until an administrator resets it
 	// (GAP-0398).
 	PolicyConflict *PolicyConflict `json:"policy_conflict,omitempty"`
+	// RecoveredFrom comes with a recover: "snapshot" (the actor's own last
+	// snapshot) or "template" (it had none of its own, so the folder copied
+	// into it is gone; GAP-0410). Empty from an older gateway.
+	RecoveredFrom string `json:"recovered_from,omitempty"`
+	// SnapshotGeneration comes with a snapshot: the generation stored.
+	SnapshotGeneration int32 `json:"snapshot_generation,omitempty"`
+	// ResumeError comes with a snapshot whose agent could not be started
+	// again (state suspended): no_worker when the pool had no room.
+	ResumeError string `json:"resume_error,omitempty"`
 }
 
 // PolicyConflict is an actor's policy_conflict as the cluster shows it.
@@ -79,7 +92,7 @@ type PolicyConflict struct {
 // tables, status lines, prompts and errors. The identifiers the launcher
 // sends back (UID, registration key, session token) are left as they are.
 func (a Actor) shown() Actor {
-	for _, f := range []*string{&a.Atespace, &a.Name, &a.Profile, &a.Connector, &a.Template, &a.BatchID, &a.Owner, &a.Attribution, &a.State} {
+	for _, f := range []*string{&a.Atespace, &a.Name, &a.Profile, &a.Connector, &a.Template, &a.BatchID, &a.Owner, &a.Attribution, &a.State, &a.RecoveredFrom, &a.ResumeError} {
 		*f = safetext.Line(*f)
 	}
 	if a.PolicyConflict != nil {
@@ -128,6 +141,10 @@ type CreateRequest struct {
 	BatchID    string   `json:"batch_id,omitempty"`
 	Unattended bool     `json:"unattended,omitempty"`
 	Secrets    []string `json:"secrets,omitempty"`
+	// AcknowledgeSignin is the person's yes to the cluster's sign-in
+	// warning (GAP-0482). Without it an open-source cluster answers 428
+	// signin_ack_required with the warning and creates nothing.
+	AcknowledgeSignin bool `json:"acknowledge_signin,omitempty"`
 }
 
 // ListOptions filters ListActors.
@@ -252,9 +269,27 @@ func (c *Client) Recover(ctx context.Context, atespace, name string) (Actor, err
 	return a.shown(), err
 }
 
-// Delete removes an actor and its snapshots.
-func (c *Client) Delete(ctx context.Context, atespace, name string) error {
-	return c.do(ctx, http.MethodDelete, "actors/"+url.PathEscape(atespace)+"/"+url.PathEscape(name), nil, nil, nil)
+// SnapshotTimeout bounds a Snapshot call: the upload of a large agent's
+// memory takes longer than an ordinary request. The gateway finishes the
+// snapshot and starts the agent again even when the launcher stops waiting.
+const SnapshotTimeout = 6 * time.Minute
+
+// Snapshot has the cluster store the running actor's state durably (it
+// pauses for the seconds that takes), so a crash recovery returns to it
+// rather than to the template's start (GAP-0410). The gateway answers 409
+// not_running for an actor that is not running and 501 when it cannot.
+func (c *Client) Snapshot(ctx context.Context, atespace, name string) (Actor, error) {
+	var a Actor
+	err := c.do(withLongCall(ctx, SnapshotTimeout), http.MethodPost, "actors/"+url.PathEscape(atespace)+"/"+url.PathEscape(name)+"/snapshot", nil, map[string]any{}, &a)
+	return a.shown(), err
+}
+
+// Delete removes an actor and its snapshots. The answer is the deleted
+// actor; its Snapshots says how many went with it (GAP-0474).
+func (c *Client) Delete(ctx context.Context, atespace, name string) (Actor, error) {
+	var a Actor
+	err := c.do(ctx, http.MethodDelete, "actors/"+url.PathEscape(atespace)+"/"+url.PathEscape(name), nil, nil, &a)
+	return a.shown(), err
 }
 
 // SessionCert mints a relay session token for an actor the person may
@@ -294,11 +329,19 @@ func (c *Client) Usage(ctx context.Context, batch string, all bool) (map[string]
 }
 
 // Asks lists the person's pending approvals.
-func (c *Client) Asks(ctx context.Context) ([]Ask, error) {
+func (c *Client) Asks(ctx context.Context) ([]Ask, error) { return c.AsksOf(ctx, false) }
+
+// AsksOf lists the pending approvals of the person, or with all every
+// person's (administrators only; the gateway audits the read, GAP-0466).
+func (c *Client) AsksOf(ctx context.Context, all bool) ([]Ask, error) {
 	var out struct {
 		Asks []Ask `json:"asks"`
 	}
-	if err := c.do(ctx, http.MethodGet, "asks", nil, nil, &out); err != nil {
+	var q url.Values
+	if all {
+		q = url.Values{"all": {"1"}}
+	}
+	if err := c.do(ctx, http.MethodGet, "asks", q, nil, &out); err != nil {
 		return nil, err
 	}
 	for i := range out.Asks {
@@ -307,8 +350,9 @@ func (c *Client) Asks(ctx context.Context) ([]Ask, error) {
 	return out.Asks, nil
 }
 
-// Decide answers one ask: decision is approve or deny; always keeps an
-// approval for later runs.
+// Decide answers one ask: decision is approve or deny. An approval lets
+// one request through; always keeps it for every later request of the
+// agent (GAP-0484).
 func (c *Client) Decide(ctx context.Context, id, decision string, always bool, reason string) error {
 	in := map[string]any{"decision": decision}
 	if always {
@@ -318,6 +362,58 @@ func (c *Client) Decide(ctx context.Context, id, decision string, always bool, r
 		in["reason"] = reason
 	}
 	return c.do(ctx, http.MethodPost, "asks/"+url.PathEscape(id), nil, in, nil)
+}
+
+// StandingApproval is one approval given with approve --always that is
+// still in force (GAP-0492): every later request of the agent to Host (in
+// Scope) goes through without asking.
+type StandingApproval struct {
+	Atespace string `json:"atespace"`
+	Actor    string `json:"actor"`
+	Host     string `json:"host"`
+	// Scope is "host" for the whole host, else the url_rules rule and
+	// methods the approval covers.
+	Scope string `json:"scope,omitempty"`
+	// ApprovedBy is "you", "owner" or "administrator"; empty, like
+	// ApprovedAt, when the cluster no longer has the answer.
+	ApprovedBy string    `json:"approved_by,omitempty"`
+	ApprovedAt time.Time `json:"approved_at,omitzero"`
+	AskID      string    `json:"ask_id,omitempty"`
+	// Owner is the agent's person, in an administrator's all view.
+	Owner string `json:"owner,omitempty"`
+}
+
+func (s StandingApproval) shown() StandingApproval {
+	for _, f := range []*string{&s.Atespace, &s.Actor, &s.Host, &s.Scope, &s.ApprovedBy, &s.AskID, &s.Owner} {
+		*f = safetext.Line(*f)
+	}
+	return s
+}
+
+// StandingApprovals lists the always approvals in force on the person's
+// agents, or with all every person's (administrators only; audited).
+func (c *Client) StandingApprovals(ctx context.Context, all bool) ([]StandingApproval, error) {
+	var out struct {
+		Approvals []StandingApproval `json:"approvals"`
+	}
+	var q url.Values
+	if all {
+		q = url.Values{"all": {"1"}}
+	}
+	if err := c.do(ctx, http.MethodGet, "approvals", q, nil, &out); err != nil {
+		return nil, err
+	}
+	for i := range out.Approvals {
+		out.Approvals[i] = out.Approvals[i].shown()
+	}
+	return out.Approvals, nil
+}
+
+// Revoke takes back the always approvals of host on one agent: the agent's
+// next request to it asks again (GAP-0492).
+func (c *Client) Revoke(ctx context.Context, atespace, name, host string) (map[string]any, error) {
+	var out map[string]any
+	return out, c.do(ctx, http.MethodDelete, "approvals/"+url.PathEscape(atespace)+"/"+url.PathEscape(name)+"/"+url.PathEscape(host), nil, nil, &out)
 }
 
 // Decisions lists recent decisions on the person's actors.
@@ -336,16 +432,6 @@ func (c *Client) Decisions(ctx context.Context, actor string, limit int) ([]map[
 		return nil, err
 	}
 	return out.Decisions, nil
-}
-
-// PolicyExplain returns the effective policy of one actor.
-func (c *Client) PolicyExplain(ctx context.Context, actor string) (map[string]any, error) {
-	q := url.Values{}
-	if actor != "" {
-		q.Set("actor", actor)
-	}
-	var out map[string]any
-	return out, c.do(ctx, http.MethodGet, "policy/explain", q, nil, &out)
 }
 
 // Secret is a secret's name and where it applies (never its value).

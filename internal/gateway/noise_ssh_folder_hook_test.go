@@ -21,7 +21,7 @@ import (
 // the test sets it beside HOME; with HOME alone the temporary .ssh is not the
 // account's SSH folder and rel and this branch both allow every row. A
 // Windows path has no mode bits that prove a place private
-// (homePlaceOwnerOnly), so there every row keeps the block of rel. The home
+// (hookpaths.HomePlaceOwnerOnly), so there every row keeps the block of rel. The home
 // is made here, without the r104ReviewHome link, because a file symlink needs
 // a privilege a Windows standard user lacks (rel-1-0-10:GAP-0900).
 func TestOwnSSHFolderCopyThroughTheHookRoute(t *testing.T) {

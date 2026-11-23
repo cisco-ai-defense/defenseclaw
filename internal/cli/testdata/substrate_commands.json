@@ -9,8 +9,14 @@
     "path": "substrate approvals",
     "use": "approvals",
     "short": "List what your agents are waiting for you to approve",
-    "long": "Lists the questions your agents asked that nobody has answered yet. Answer with\n\"defenseclaw substrate approve ID\" or \"defenseclaw substrate reject ID\". An agent attached to your\nterminal shows the same question on its last line. An unattended run (--task, --batch)\ndenies its asks unless its profile sets unattended_asks: queue; a queued ask is marked\n\"unattended\" in the RUN column and is denied when its time runs out.",
+    "long": "Lists the questions your agents asked that nobody has answered yet. Answer with\n\"defenseclaw substrate approve ID\" or \"defenseclaw substrate reject ID\". An agent attached to your\nterminal shows the same question on its last line. An unattended run (--task, --batch)\ndenies its asks unless its profile sets unattended_asks: queue; a queued ask is marked\n\"unattended\" in the RUN column and is denied when its time runs out.\n\nWith --standing it lists the approvals given with \"approve --always\" that are still in force:\nthe agent, the host, what the approval covers, who approved it and when. Take one back with\n\"defenseclaw substrate revoke NAME HOST\".",
     "flags": [
+      {
+        "name": "all",
+        "type": "bool",
+        "default": "false",
+        "usage": "every person's, not only yours (administrators only)"
+      },
       {
         "name": "context",
         "type": "string",
@@ -30,6 +36,12 @@
         "default": "text",
         "usage": "output format: text or json",
         "metavar": "FORMAT"
+      },
+      {
+        "name": "standing",
+        "type": "bool",
+        "default": "false",
+        "usage": "list the approvals given with --always that are still in force"
       }
     ]
   },
@@ -37,7 +49,7 @@
     "path": "substrate approve",
     "use": "approve \u003cid\u003e",
     "short": "Approve a waiting question",
-    "long": "Approves one question from \"defenseclaw substrate approvals\" once, or with --always for every later run that asks the same thing.",
+    "long": "Approves one question from \"defenseclaw substrate approvals\" for one request: the next request asks again. With --always it covers every later request of the agent that asks the same thing.",
     "args": [
       {
         "name": "id",
@@ -49,7 +61,7 @@
         "name": "always",
         "type": "bool",
         "default": "false",
-        "usage": "keep this approval for later runs"
+        "usage": "keep this approval for every later request of the agent"
       },
       {
         "name": "context",
@@ -189,7 +201,7 @@
     "path": "substrate checkpoint",
     "use": "checkpoint \u003cname\u003e",
     "short": "Save the agent's work so you can undo back to it",
-    "long": "Saves a restore point of the agent's folder inside the agent. \"defenseclaw substrate undo NAME\"\ngoes back to the last one. With --every 1h it saves one on that schedule for as long as the command runs.",
+    "long": "Saves a restore point of the agent's folder inside the agent, then has the cluster store a snapshot of\nthe agent (it pauses for a few seconds), so the restore point survives a crash of the agent's worker.\n\"defenseclaw substrate undo NAME\" goes back to the last one; after a crash it first brings the agent back to\nthat snapshot. With --every 1h it saves one on that schedule for as long as the command runs.",
     "example": "defenseclaw substrate checkpoint fix-tests-7f3a\ndefenseclaw substrate checkpoint fix-tests-7f3a --every 1h",
     "args": [
       {
@@ -265,7 +277,7 @@
     "path": "substrate delete",
     "use": "delete [name...]",
     "short": "Delete agents with their work and snapshots",
-    "long": "Deletes the named agents (or every agent of --batch) and the snapshots the cluster\nholds for them. Pull the changes first with \"defenseclaw substrate pull\": what is not pulled\nis gone.",
+    "long": "Deletes the named agents (or every agent of --batch), the snapshots the cluster\nholds for them and the checkpoints saved inside them. The question and the output say how\nmany snapshots each agent had. Pull the changes first with \"defenseclaw substrate pull\":\nwhat is not pulled is gone.",
     "args": [
       {
         "name": "name",
@@ -299,7 +311,7 @@
     "path": "substrate doctor",
     "use": "doctor",
     "short": "Check that this computer can run agents in the cluster",
-    "long": "Checks, from this computer, everything a run needs: the cluster is set up here, its admin address answers\nover TLS, you are signed in and the cluster accepts it, the sign-in server matches, attach through the gateway works and\nyou have what it asks for, your sign-in can be kept safely, and (for administrators, when the cluster uses signed policy\nbundles) every stage's bundle still verifies. Nothing needs to be installed here, and nothing in the\ncluster changes.\n\nAdministrators add the cluster's own checks (version, issuer, snapshot bucket, access policies, egress callout, router\nclients, routes, API access) with --install-file, the SubstrateInstall file you gave ate-setup: they are read with\nkubectl and your own cloud credentials, the same as defenseclaw substrate verify. --cluster without it says what is missing.\n\nThe last line is \"ready for agents\" when no check failed. Otherwise it is \"not ready\" and each failed check says how to fix\nit, and the exit code is 1.",
+    "long": "Checks, from this computer, everything a run needs: the cluster is set up here, its admin address answers\nover TLS, you are signed in and the cluster accepts it, the sign-in server matches, attach through the gateway works and\nyou have what it asks for, your sign-in can be kept safely, and (for administrators, when the cluster uses signed policy\nbundles) every stage's bundle still verifies. Nothing needs to be installed here, and nothing in the\ncluster changes.\n\nAdministrators add the cluster's own checks (version, issuer, snapshot bucket, access policies, egress callout, router\nclients, routes, API access) with --install-file, the SubstrateInstall file you gave ate-setup: they are read with\nkubectl and your own cloud credentials, the same as defenseclaw substrate verify. --cluster without it says what is missing.\n\nThe last line is \"ready for agents\" when no check failed and the cluster components (gateway, leader, controller,\ncallout) were checked, which needs --install-file. Without it the last line says that the checks on this computer pass\nand that the cluster components were not checked. Otherwise it is \"not ready\" and each failed check says how to fix\nit, and the exit code is 1.",
     "example": "defenseclaw substrate doctor\ndefenseclaw substrate doctor --cluster --json",
     "flags": [
       {
@@ -639,12 +651,13 @@
   },
   {
     "path": "substrate policy explain",
-    "use": "explain \u003cname\u003e",
-    "short": "Explain the rules and recent decisions for one agent",
+    "use": "explain [name]",
+    "short": "Explain the rules and recent decisions for one agent, or the profile you get",
+    "long": "With an agent name, explains the rules and recent decisions for that agent. With no name, explains the profile you get\nfor a new agent: the profile and where it came from (the profile assignment that selected you, or default_profile when none\ndid), default_profile, and the assignments that were checked first and did not select you (by place and the selector that\nfailed, never another person's group or account).",
     "args": [
       {
         "name": "name",
-        "required": true
+        "required": false
       }
     ],
     "flags": [
@@ -784,7 +797,7 @@
     "path": "substrate pull",
     "use": "pull \u003cname\u003e",
     "short": "Review what the agent changed and bring it home",
-    "long": "Reads the agent's work back to this machine and shows what changed, with the files that need a\ncareful look first (scripts, CI and hook files, dotfiles, secrets in the text, large or binary files,\nlinks that leave the folder, agent settings, MCP servers, shell startup files). Nothing touches your folder\nuntil you choose: --apply writes the changes into the folder, --branch NAME puts them on a new git branch,\n--patch-out FILE writes a patch.\n\nWhen a change can run code on this machine, --apply asks first (the default answer is no). --yes takes\nthat safe answer, so --apply --yes writes nothing and says why; after you reviewed the flagged files,\n--allow-flagged writes them too.",
+    "long": "Reads the agent's work back to this machine and shows what changed, with the files that need a\ncareful look first (scripts, CI and hook files, dotfiles, secrets in the text, large or binary files,\nlinks that leave the folder, agent settings, MCP servers, shell startup files). Nothing touches your folder\nuntil you choose: --apply writes the changes into the folder, --branch NAME puts them on a new git branch,\n--patch-out FILE writes a patch.\n\nWhen a change can run code on this machine, --apply asks first (the default answer is no). --yes takes\nthat safe answer, so --apply --yes writes nothing and says why; after you reviewed the flagged files,\n--allow-flagged writes them too.\n\nRun it on the computer you started the agent from: it compares the changes with the folder you\nsent, and only that computer keeps a record of it. From another computer, connect to the agent and\ngit push its work from inside it.",
     "example": "defenseclaw substrate pull fix-tests-7f3a\ndefenseclaw substrate pull fix-tests-7f3a --branch agent/fix-tests",
     "args": [
       {
@@ -886,10 +899,35 @@
     ]
   },
   {
+    "path": "substrate revoke",
+    "use": "revoke \u003cname\u003e \u003chost\u003e",
+    "short": "Take back an approval given with --always",
+    "long": "Takes back what \"defenseclaw substrate approve --always\" allowed for one agent and host: the agent's\nnext request to the host asks you again. The cluster drops the host from the agent's network rules\nwithin about a minute. List the approvals in force with \"defenseclaw substrate approvals --standing\".\nAn administrator names another person's agent as ATESPACE/NAME; the revoke is recorded under their\nown name.",
+    "example": "defenseclaw substrate revoke fix-tests-7f3a registry.example.test",
+    "args": [
+      {
+        "name": "name",
+        "required": true
+      },
+      {
+        "name": "host",
+        "required": true
+      }
+    ],
+    "flags": [
+      {
+        "name": "context",
+        "type": "string",
+        "usage": "cluster to use (default: the one you signed in to last)",
+        "metavar": "NAME"
+      }
+    ]
+  },
+  {
     "path": "substrate run",
     "use": "run \u003cagent\u003e [agent_args...]",
     "short": "Run a coding agent in the cluster on a copy of this folder",
-    "long": "Starts the coding agent in a sandbox in the cluster, on a copy of the current folder (secret\nfiles such as .env and keys are held back), and puts the agent on your terminal. The agent is claude,\ncodex, copilot, opencode, hermes, kiro, antigravity, cursor-agent, amp or devin. The agents that sign in to a\nvendor account (kiro, antigravity, cursor-agent, amp, devin) run with a warning in open source, because the\nsign-in token stays in the agent and its snapshots; a managed cluster refuses them. A banner shows the guard profile, model, allowed hosts and how to leave. When the\nguard asks before a step, the question appears on the last line: press Ctrl-\\ to answer once, always or deny.\n\nPress Ctrl-] to detach; the agent keeps running and suspends when idle. Come back from any machine with\n\"defenseclaw substrate connect NAME\". Bring the changes home with \"defenseclaw substrate pull NAME\".\n\nWith --task the agent runs headless without you: asks are denied, or queued for approval when the profile's\nunattended_asks is queue, and the run is checked as strictly as an unattended job. Add --detach to leave it\nrunning and follow it with \"defenseclaw substrate logs -f NAME\".\nWith --batch FILE every task gets its own agent on the same folder; --parallel limits how many run at once.\nWith --clone URL the agent starts from a repository instead of a copy of the folder. Arguments after -- go\nto the agent.",
+    "long": "Starts the coding agent in a sandbox in the cluster, on a copy of the current folder (secret\nfiles such as .env and keys are held back), and puts the agent on your terminal. The agent is claude,\ncodex, copilot, opencode, hermes, kiro, antigravity, cursor-agent, amp or devin. The agents that sign in to a\nvendor account (kiro, antigravity, cursor-agent, amp, devin) start in open source only after you say yes to a\nwarning (or pass --yes), because the sign-in token stays in the agent and its snapshots; a managed cluster refuses them. A banner shows the guard profile, model, allowed hosts and how to leave. When the\nguard asks before a step, the question appears on the last line: press Ctrl-\\ to answer once, always or deny.\n\nPress Ctrl-] to detach; the agent keeps running and suspends when idle. Come back from any machine with\n\"defenseclaw substrate connect NAME\". Bring the changes home with \"defenseclaw substrate pull NAME\".\n\nWith --task the agent runs headless without you: asks are denied, or queued for approval when the profile's\nunattended_asks is queue, and the run is checked as strictly as an unattended job. Add --detach to leave it\nrunning and follow it with \"defenseclaw substrate logs -f NAME\".\nWith --batch FILE every task gets its own agent on the same folder; --parallel limits how many run at once.\nWith --clone URL the agent starts from a repository instead of a copy of the folder. Arguments after -- go\nto the agent.",
     "example": "defenseclaw substrate run claude\ndefenseclaw substrate run codex --task \"fix the failing tests\" --detach\ndefenseclaw substrate run claude --batch tasks.yaml --parallel 5\ndefenseclaw substrate run claude --clone https://git.example.test/team/app.git",
     "args": [
       {
@@ -1048,7 +1086,7 @@
         "shorthand": "y",
         "type": "bool",
         "default": "false",
-        "usage": "answer questions with their defaults"
+        "usage": "say yes to the vendor sign-in warning without asking"
       }
     ]
   },
@@ -1407,7 +1445,7 @@
     "path": "substrate template build",
     "use": "build [flags]",
     "short": "Build an actor image from a base image and push it with its attestation",
-    "long": "Builds a coding-agent image for the cluster from a base image: adds the DefenseClaw hook and relay, scans what is\ninside, and pushes it with a signed attestation that the cluster checks before it runs the image.\n\nUsage: defenseclaw substrate template build --from IMAGE --to REPO:TAG --hook-binary FILE --relay-binary FILE --key FILE [flags]\n\nFlags:\n  --connector NAME                connector to build: claudecode, codex, opencode, copilot, hermes, kiro, antigravity,\n                                  cursor, amp or devin (default claudecode)\n  --from IMAGE                    base image (the OpenShell harness image for the connector, with tmux)\n  --to REPO:TAG                   target repository and tag\n  --kit-version VERSION           kit version (default dev)\n  --hook-binary FILE              defenseclaw-actor-hook (linux static)\n  --relay-binary FILE             defenseclaw-actor-relay (linux static)\n  --key FILE                      attestation private key (PEM, mode 0600); not needed with --dry-run\n  --anchors FILE                  trust anchors, to let an attested base count as trusted\n  --allow-unverified-base         build on a base that is not trusted (the cluster will refuse it by default)\n  --block-at LEVEL                lowest finding severity that blocks the build: critical, high, medium, low or none (default high)\n  --policy-generation N           policy generation recorded in the attestation (default 1)\n  --builder-id ID                 builder id recorded in the attestation\n  --provider NAME                 model route (claudecode: bedrock or anthropic; codex: bedrock or openai; default from substrate.llm.providers)\n  --model ID                      default model id\n  --gateway-url URL               actor listener URL (default http://\u003csubstrate.services.actor\u003e of --config)\n  --fail-mode MODE                interactive outage mode: open or closed\n  --task-stall DURATION           end a --task run that makes no progress for this long (1m to 24h; default 10m)\n  --no-mcp-static                 do not run mcp-scanner over tool descriptions\n  --mcp-analyzers LIST            mcp-scanner analyzers (default yara)\n  --keep-entrypoint               keep the base image ENTRYPOINT and CMD (tests; a real actor image starts the relay)\n  --dry-run                       scan the composed image and stop before pushing\n  --trusted-base sha256:DIGEST    base image digest the admin trusts (repeatable)\n  --mcp-host HOST                 remote MCP host that is allowed (repeatable)\n  --session-key FILE              the gateway's relay session public key (public.pem of the relay session Secret);\n                                  KID=FILE is checked against the key's own id (repeatable)\n  --session-issuer URL            iss of the session tokens the keys verify (default https://\u003csubstrate.services.admin\u003e\n                                  of --config, the issuer the gateway signs with)\n  --session-audience AUD          aud of the session tokens (default: the one the gateway signs)\n  --verify-url URL                ask the gateway to check each session token, instead of --session-key\n                                  An image that starts the relay needs --session-key or --verify-url.\n\nFlags build, verify, scan and publish all take:\n  --json                          print JSON\n  --insecure-registry HOST:PORT   registry reached over plain HTTP (repeatable)\n  --registry-user USER            registry user\n  --registry-password-file FILE   file with the registry password\n  --registry-auth-host HOST       registry or token host that gets the login (repeatable; build adds the --to host,\n                                  never the --from host)\n  --config FILE                   DefenseClaw config.yaml (scanner and admission settings)\n  --platform OS/ARCH              image platform (default linux/amd64)\n\nExit code: 0 built, 1 blocked, 2 usage error.",
+    "long": "Builds a coding-agent image for the cluster from a base image: adds the DefenseClaw hook and relay, scans what is\ninside, and pushes it with a signed attestation that the cluster checks before it runs the image.\n\nUsage: defenseclaw substrate template build --from IMAGE --to REPO:TAG --hook-binary FILE --relay-binary FILE --key FILE [flags]\n\nFlags:\n  --connector NAME                connector to build: claudecode, codex, opencode, copilot, hermes, kiro, antigravity,\n                                  cursor, amp or devin (default claudecode)\n  --from IMAGE                    base image (the OpenShell harness image for the connector, with tmux)\n  --to REPO:TAG                   target repository and tag\n  --kit-version VERSION           kit version (default dev)\n  --hook-binary FILE              defenseclaw-actor-hook (linux static)\n  --relay-binary FILE             defenseclaw-actor-relay (linux static)\n  --key FILE                      attestation private key (PEM, mode 0600); not needed with --dry-run\n  --anchors FILE                  trust anchors, to let an attested base count as trusted\n  --allow-unverified-base         build on a base that is not trusted (the cluster will refuse it by default)\n  --block-at LEVEL                lowest finding severity that blocks the build: critical, high, medium, low or none (default high)\n  --policy-generation N           policy generation recorded in the attestation (default 1)\n  --builder-id ID                 builder id recorded in the attestation\n  --provider NAME                 model route (claudecode: bedrock or anthropic; codex: bedrock or openai; default from substrate.llm.providers)\n  --model ID                      default model id\n  --gateway-url URL               actor listener URL (default http://\u003csubstrate.services.actor\u003e of --config)\n  --fail-mode MODE                interactive outage mode: open or closed\n  --task-stall DURATION           end a --task run that makes no progress for this long (1m to 24h; default 10m)\n  --no-mcp-static                 do not run mcp-scanner over tool descriptions\n  --mcp-analyzers LIST            mcp-scanner analyzers (default yara)\n  --keep-entrypoint               keep the base image ENTRYPOINT and CMD (tests; a real actor image starts the relay)\n  --dry-run                       scan the composed image and stop before pushing\n  --trusted-base sha256:DIGEST    base image digest the admin trusts (repeatable)\n  --mcp-host HOST                 remote MCP host that is allowed (repeatable)\n  --session-key FILE              the gateway's relay session public key (public.pem of the relay session Secret);\n                                  KID=FILE is checked against the key's own id (repeatable)\n  --session-issuer URL            iss of the session tokens the keys verify (default https://\u003csubstrate.services.admin\u003e\n                                  of --config, the issuer the gateway signs with)\n  --session-audience AUD          aud of the session tokens (default: the one the gateway signs)\n  --verify-url URL                gateway URL the relay checks each session token with (default\n                                  the relay verify endpoint of \u003cgateway-url\u003e; --session-key keys are checked first)\n\nFlags build, verify, scan and publish all take:\n  --json                          print JSON\n  --insecure-registry HOST:PORT   registry reached over plain HTTP (repeatable)\n  --registry-user USER            registry user\n  --registry-password-file FILE   file with the registry password\n  --registry-auth-host HOST       registry or token host that gets the login (repeatable; build adds the --to host,\n                                  never the --from host)\n  --config FILE                   DefenseClaw config.yaml (scanner and admission settings)\n  --platform OS/ARCH              image platform (default linux/amd64)\n\nExit code: 0 built, 1 blocked, 2 usage error.",
     "example": "defenseclaw substrate template build --connector claudecode --from REGISTRY/base:TAG --to REGISTRY/actor:TAG --hook-binary hook --relay-binary relay --key attestation.key",
     "passthrough": true
   },
