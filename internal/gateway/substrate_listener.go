@@ -274,9 +274,12 @@ type substrateState struct {
 	alert func(ctx context.Context, severity, summary string, details map[string]any)
 	// action writes one skill audit row (B5.4: substrate.skill.*).
 	action func(ctx context.Context, action, severity string, details map[string]any)
-	// scanMu guards scans, the skill scans in flight (B5.4 pending).
-	scanMu sync.Mutex
-	scans  map[string]*skillScanCall
+	// scanMu guards scans, the skill scans in flight (B5.4 pending), their
+	// count per actor UID (GAP-0932) and scanFree, closed when one ends.
+	scanMu     sync.Mutex
+	scans      map[string]*skillScanCall
+	scanActors map[string]int
+	scanFree   chan struct{}
 	// alerted is alertOnce's memory (substrate_skills.go).
 	alertMu    sync.Mutex
 	alerted    map[string]bool

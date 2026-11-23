@@ -37,6 +37,7 @@ const (
 	SkillReasonPending     = "skill_pending"
 	SkillReasonScannerDown = "skill_scanner_down"
 	SkillReasonScanTimeout = "skill_scan_timeout"
+	SkillReasonScannerBusy = "skill_scanner_busy"
 	SkillReasonScanFailed  = "skill_scan_failed"
 	SkillReasonTooBig      = "skill_too_big"
 	SkillReasonNotSent     = "skill_not_sent"
@@ -59,11 +60,20 @@ var (
 	errSkillPending = errors.New("substrate: the skill is still being checked")
 	// errSkillScanTimeout: the scan did not finish inside skills.scan.timeout.
 	errSkillScanTimeout = errors.New("substrate: the skill scan did not finish in time")
+	// errSkillScannerBusy: no scan slot came free inside skills.pending_wait
+	// (GAP-0932); never an allow as scanned.
+	errSkillScannerBusy = errors.New("substrate: the skill scanner is busy")
 )
 
 // substrateSkillScansInFlight bounds the scans running on one replica (the
-// sidecar queues 32); past it a new folder is pending, never allowed as scanned.
-const substrateSkillScansInFlight = 32
+// sidecar queues 32), and substrateSkillScansPerActor one actor's share of
+// them (GAP-0932: one post carries at most 8 folders), so one actor cannot
+// keep every other actor's folders from being scanned. Past either a new
+// folder waits for a slot inside pending_wait, then is skill_scanner_busy.
+const (
+	substrateSkillScansInFlight = 32
+	substrateSkillScansPerActor = substrateSkillFoldersMax
+)
 
 // skillScanCall is one scan of one folder content; hooks of any actor that
 // bring the same content while it runs wait for the same call.
@@ -115,22 +125,45 @@ func (st *substrateState) scanSkillFolder(ctx context.Context, connector, name, 
 	if st.cfg.SkillScanLimits != nil {
 		timeout, wait = st.cfg.SkillScanLimits()
 	}
+	start := time.Now()
+	// The wait for a scan slot is pending_wait in every tier.
+	var slot <-chan time.Time
+	if wait > 0 {
+		t := time.NewTimer(wait)
+		defer t.Stop()
+		slot = t.C
+	}
 	if st.blocksUnscanned(connector) {
 		wait = 0
 	}
+	actor, _ := substrateActorFrom(ctx)
 	key := skillScanKey(name, dir, files)
 	st.scanMu.Lock()
 	c, ok := st.scans[key]
-	if !ok {
-		if len(st.scans) >= substrateSkillScansInFlight {
-			st.scanMu.Unlock()
-			return skillScanResult{err: errSkillPending}
+	for !ok && (len(st.scans) >= substrateSkillScansInFlight || st.scanActors[actor.UID] >= substrateSkillScansPerActor) {
+		if st.scanFree == nil {
+			st.scanFree = make(chan struct{})
 		}
+		free := st.scanFree
+		st.scanMu.Unlock()
+		select {
+		case <-free:
+		case <-slot:
+			return skillScanResult{err: errSkillScannerBusy, waited: time.Since(start)}
+		case <-ctx.Done():
+			return skillScanResult{err: errSkillPending, waited: time.Since(start)}
+		}
+		st.scanMu.Lock()
+		c, ok = st.scans[key]
+	}
+	if !ok {
 		if st.scans == nil {
 			st.scans = map[string]*skillScanCall{}
+			st.scanActors = map[string]int{}
 		}
 		c = &skillScanCall{done: make(chan struct{})}
 		st.scans[key] = c
+		st.scanActors[actor.UID]++
 		sctx := context.WithoutCancel(ctx)
 		cancel := context.CancelFunc(func() {})
 		if timeout > 0 {
@@ -147,15 +180,22 @@ func (st *substrateState) scanSkillFolder(ctx context.Context, connector, name, 
 			}
 			st.scanMu.Lock()
 			delete(st.scans, key)
+			if st.scanActors[actor.UID]--; st.scanActors[actor.UID] <= 0 {
+				delete(st.scanActors, actor.UID)
+			}
+			if st.scanFree != nil {
+				close(st.scanFree)
+				st.scanFree = nil
+			}
 			st.scanMu.Unlock()
 			close(c.done)
 		}()
 	}
 	st.scanMu.Unlock()
-	start := time.Now()
 	var timer <-chan time.Time
 	if wait > 0 {
-		t := time.NewTimer(wait)
+		// What is left of pending_wait after the wait for a slot.
+		t := time.NewTimer(max(wait-time.Since(start), time.Nanosecond))
 		defer t.Stop()
 		timer = t.C
 	}
@@ -176,6 +216,8 @@ func skillScanErrCode(err error) (code, why string) {
 		return SkillReasonPending, "DefenseClaw is still checking the skill"
 	case errors.Is(err, errSkillScanTimeout):
 		return SkillReasonScanTimeout, "the skill scan did not finish in time"
+	case errors.Is(err, errSkillScannerBusy):
+		return SkillReasonScannerBusy, "the skill scanner is busy with other skills"
 	case errors.Is(err, ErrSubstrateSkillScannerUnavailable):
 		return SkillReasonScannerDown, "the skill scanner is not running"
 	}

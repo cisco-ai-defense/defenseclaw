@@ -70,7 +70,7 @@ func (st *substrateState) substrateSkillWriteRefusal(ctx context.Context, env su
 		res := st.scanSkillFolder(ctx, env.Connector, a.Name, a.Path, files)
 		blocked, reason, err := res.blocked, res.reason, res.err
 		switch {
-		case errors.Is(err, errSkillPending):
+		case errors.Is(err, errSkillPending), errors.Is(err, errSkillScannerBusy):
 			// B5.4 skill_pending: managed installs and the strict tier waited
 			// for the whole scan, so this is a hook that went away or no scan
 			// slot: refuse. The OSS tiers allow it with an alert, as before.
@@ -79,8 +79,12 @@ func (st *substrateState) substrateSkillWriteRefusal(ctx context.Context, env su
 			if block {
 				outcome, sev = "refused", "HIGH"
 			}
-			st.auditSkill(ctx, AuditSkillPending, sev, env.Connector, a.Path, env.Facts, map[string]any{"reason": SkillReasonPending, "waited_ms": res.waited.Milliseconds(), "outcome": outcome})
+			code, why := skillScanErrCode(err)
+			st.auditSkill(ctx, AuditSkillPending, sev, env.Connector, a.Path, env.Facts, map[string]any{"reason": code, "waited_ms": res.waited.Milliseconds(), "outcome": outcome})
 			if block {
+				if code == SkillReasonScannerBusy {
+					return "DefenseClaw refused writing the skill " + a.Name + ": " + why + "; try again in a few seconds"
+				}
 				return skillPendingMessage(a.Name)
 			}
 			st.alertOnce(ctx, "MEDIUM", "Substrate skill write allowed while its scan runs: "+a.Name, a.Path, env.Facts, nil)

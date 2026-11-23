@@ -215,7 +215,7 @@ func (st *substrateState) substrateScanSkills(ctx context.Context, connector str
 		blocked, reason, err := res.blocked, res.reason, res.err
 		code := SkillReasonFinding
 		switch {
-		case errors.Is(err, errSkillPending) && st.blocksUnscanned(connector):
+		case (errors.Is(err, errSkillPending) || errors.Is(err, errSkillScannerBusy)) && st.blocksUnscanned(connector):
 			// GAP-0931: managed installs and the strict tier never leave a
 			// folder pending (the hook went away, or no scan could start).
 			c, why := skillScanErrCode(err)
@@ -223,14 +223,16 @@ func (st *substrateState) substrateScanSkills(ctx context.Context, connector str
 				out = append(out, *q)
 			}
 			continue
-		case errors.Is(err, errSkillPending):
-			// B5.4: still scanning after pending_wait. The folder is not
-			// hidden (that would break a write in progress); the kit sends it
-			// again with its next hook, which gets the verdict, and a use
-			// before then follows skill_pending at the use gate.
+		case errors.Is(err, errSkillPending), errors.Is(err, errSkillScannerBusy):
+			// B5.4 (OSS tiers): still scanning after pending_wait, or no scan
+			// slot came free (GAP-0932). The folder is not hidden (that would
+			// break a write in progress); the kit sends it again with its next
+			// hook, which gets the verdict, and a use before then follows
+			// skill_pending at the use gate.
+			c, _ := skillScanErrCode(err)
 			decided[dir] = true
 			pending = append(pending, SubstrateUnscanned{Path: dir, FP: listedFP[dir]})
-			st.auditSkill(ctx, AuditSkillPending, "MEDIUM", connector, dir, f, map[string]any{"reason": SkillReasonPending, "waited_ms": res.waited.Milliseconds(), "outcome": "sent again"})
+			st.auditSkill(ctx, AuditSkillPending, "MEDIUM", connector, dir, f, map[string]any{"reason": c, "waited_ms": res.waited.Milliseconds(), "outcome": "sent again"})
 			continue
 		case errors.Is(err, ErrSubstrateSkillScannerUnavailable), errors.Is(err, errSkillScanTimeout):
 			// No verdict (scanner down or off, or too slow): the fail mode
