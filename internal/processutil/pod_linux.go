@@ -114,8 +114,10 @@ func podRestart(format string, args ...any) error {
 }
 
 // Check reports whether this process can contain a scanner in pod mode: it
-// is PID 1 of its PID namespace, it is not root and has no capabilities, and
-// no other process runs in the namespace. It kills and reaps any other
+// is PID 1 of its PID namespace, it is not root and has no capabilities, it
+// is in the chart's container (podMountsCheck: a read-only root and its own
+// mount on each folder Reset empties, GAP-1031), and no other process runs
+// in the namespace. It kills and reaps any other
 // process first (a kubectl exec, a scanner's leftover).
 func (p *PodRunner) Check() error {
 	p.mu.Lock()
@@ -135,6 +137,9 @@ func (p *PodRunner) checkLocked() error {
 	}
 	if caps := effectiveCapabilities(); caps != 0 {
 		return podUnavailable("it has capabilities (effective %#x); the sidecar must drop all", caps)
+	}
+	if err := podMountsCheck(p.scratch, p.clear); err != nil {
+		return podUnavailable("%v", err)
 	}
 	if err := podGuardAvailable(); err != nil {
 		return podUnavailable("%v", err)

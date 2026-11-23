@@ -64,6 +64,10 @@ func TestPodRunnerHelper(t *testing.T) {
 		say("setup: scratch: %v", err)
 		return
 	}
+	// The helper's PID and user namespaces are the container's; its mounts
+	// are the chart container's (GAP-1031: a read-only root, scratch its own
+	// mount).
+	fakePodMounts(t, scratch)
 	p := NewPodRunner(scratch)
 	say("check err=%v", p.Check())
 
