@@ -254,18 +254,18 @@ func (w *Worker) clearScanDir() error {
 // checks the shared folder. Its error is the answer; one only a new
 // container clears also ends Serve.
 func (w *Worker) endPodJob() error {
-	err := w.Pod.Reset()
-	if err == nil {
-		if serr := w.keepShared(); serr != nil {
-			err = fmt.Errorf("the scan worker cannot keep its socket: %w", serr)
-			w.fail(err)
-		}
+	if err := w.Pod.Reset(); err != nil {
+		// A failed reset cannot prove the next job starts in a clean,
+		// contained pod, regardless of whether cleanup or Check refused.
+		w.fail(err)
 		return err
 	}
-	if errors.Is(err, processutil.ErrPodRestart) {
+	if err := w.keepShared(); err != nil {
+		err = fmt.Errorf("the scan worker cannot keep its socket: %w", err)
 		w.fail(err)
+		return err
 	}
-	return err
+	return nil
 }
 
 func answer(rw http.ResponseWriter, status int, a scanner.RemoteScanAnswer) {

@@ -22,3 +22,20 @@ func TestPodWorkerExitsOnStartupResetRefusal(t *testing.T) {
 		t.Fatal("pod worker served despite a refused initial reset")
 	}
 }
+
+func TestPodWorkerExitsOnAnyResetRefusal(t *testing.T) {
+	w := &Worker{Pod: processutil.NewPodRunner(t.TempDir())}
+	w.Handler()
+	err := w.endPodJob()
+	if err == nil {
+		t.Fatal("expected Reset to refuse outside PID 1")
+	}
+	select {
+	case got := <-w.fatal:
+		if got != err {
+			t.Fatalf("fatal = %v, want %v", got, err)
+		}
+	default:
+		t.Fatal("worker kept serving after Reset refused containment")
+	}
+}
