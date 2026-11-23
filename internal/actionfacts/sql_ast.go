@@ -405,6 +405,12 @@ func extractSQLASTMutations(tokens []sqlASTToken) []sqlASTMutation {
 			}
 			word := strings.ToUpper(statement[i].text)
 			switch word {
+			case "TRUNCATE", "DELETE", "UPDATE":
+				if !sqlASTStatementVerb(statement, i) {
+					continue // a clause word: ON CONFLICT DO UPDATE, GRANT TRUNCATE ON, FOR UPDATE
+				}
+			}
+			switch word {
 			case "DROP":
 				if i+2 >= len(statement) {
 					continue
@@ -435,7 +441,7 @@ func extractSQLASTMutations(tokens []sqlASTToken) []sqlASTMutation {
 				if objectIndex < len(statement) && strings.EqualFold(statement[objectIndex].text, "TABLE") {
 					objectIndex++
 				}
-				if object, ok := sqlASTQualifiedObject(statement, objectIndex); ok {
+				if object, ok := sqlASTMutationObject(statement, objectIndex); ok {
 					result = append(result, sqlASTMutation{operation: SQLMutationTruncate, scope: SQLMutationScopeTable, object: object})
 				}
 			case "DELETE":
@@ -443,14 +449,14 @@ func extractSQLASTMutations(tokens []sqlASTToken) []sqlASTMutation {
 					sqlASTHasWord(statement[i+2:], "WHERE") {
 					continue
 				}
-				if object, ok := sqlASTQualifiedObject(statement, i+2); ok {
+				if object, ok := sqlASTMutationObject(statement, i+2); ok {
 					result = append(result, sqlASTMutation{operation: SQLMutationDeleteUnbounded, scope: SQLMutationScopeTable, object: object})
 				}
 			case "UPDATE":
 				if i+1 >= len(statement) || sqlASTHasWord(statement[i+1:], "WHERE") {
 					continue
 				}
-				if object, ok := sqlASTQualifiedObject(statement, i+1); ok &&
+				if object, ok := sqlASTMutationObject(statement, i+1); ok &&
 					sqlASTHasWord(statement[i+1:], "SET") {
 					result = append(result, sqlASTMutation{operation: SQLMutationUpdateUnbounded, scope: SQLMutationScopeTable, object: object})
 				}
@@ -467,6 +473,40 @@ func sqlASTHasWord(tokens []sqlASTToken, word string) bool {
 		}
 	}
 	return false
+}
+
+// sqlASTStatementVerb reports whether the TRUNCATE, DELETE or UPDATE at
+// statement[i] starts a statement rather than naming an operation in a clause:
+// INSERT ... ON CONFLICT ... DO UPDATE SET (a bounded upsert), ON DUPLICATE KEY
+// UPDATE, ON UPDATE CASCADE, SELECT ... FOR UPDATE, a trigger's BEFORE/AFTER/
+// INSTEAD OF ... OR UPDATE OF, and GRANT/REVOKE privilege lists (DET111 T20
+// review P2-1).
+func sqlASTStatementVerb(statement []sqlASTToken, i int) bool {
+	if i == 0 {
+		return true
+	}
+	previous := statement[i-1]
+	if previous.kind == sqlASTPunctuation {
+		return previous.text != ","
+	}
+	switch strings.ToUpper(previous.text) {
+	case "DO", "ON", "FOR", "BEFORE", "AFTER", "OF", "OR", "GRANT", "REVOKE", "KEY", "INSTEAD", "EACH":
+		return false
+	}
+	return true
+}
+
+// sqlASTMutationObject is the table a TRUNCATE, DELETE FROM or UPDATE names at
+// tokens[start] (after an optional ONLY): never a keyword such as SET, so
+// DO UPDATE SET is not an update of a table named "set".
+func sqlASTMutationObject(tokens []sqlASTToken, start int) (string, bool) {
+	if start < len(tokens) && tokens[start].kind == sqlASTWord && strings.EqualFold(tokens[start].text, "ONLY") {
+		start++
+	}
+	if start < len(tokens) && tokens[start].kind == sqlASTWord && isSQLASTControlWord(strings.ToUpper(tokens[start].text)) {
+		return "", false
+	}
+	return sqlASTQualifiedObject(tokens, start)
 }
 
 func sqlASTQualifiedObject(tokens []sqlASTToken, start int) (string, bool) {
