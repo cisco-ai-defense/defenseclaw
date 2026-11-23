@@ -523,6 +523,20 @@ func hookAPIDriftRelaxer(
 // for a tree it controls, so owner-based drift acceptance never covers it.
 type hookAPIReplaceVerdict struct{ error }
 
+// hookAPIUntrustedWriteError is the refusal of a write-like allow entry of an
+// untrusted account on path. Its text is the one the enterprise principal
+// parsers read (hookcli windows_enterprise_principals_windows.go); the plugin
+// custody refusal reads the account and the path from it (GAP-1887).
+type hookAPIUntrustedWriteError struct {
+	sid  string
+	mask uint32
+	path string
+}
+
+func (e *hookAPIUntrustedWriteError) Error() string {
+	return fmt.Sprintf("untrusted Windows principal %s has write-like access mask 0x%x on %s", e.sid, e.mask, e.path)
+}
+
 func (v hookAPIReplaceVerdict) Unwrap() error { return v.error }
 
 // hookAPIWindowsReplaceAccess reports whether mask lets its holder replace the
@@ -606,10 +620,9 @@ func hookAPIRejectUntrustedWindowsWriteACEsWith(
 			continue
 		}
 		if !hookAPIWindowsTrustedPrincipalOrExtra(sid, extra) {
-			verdict := fmt.Errorf(
-				"untrusted Windows principal %s has write-like access mask 0x%x on %s",
-				hookAPIWindowsSIDString(sid), uint32(ace.Mask), path,
-			)
+			var verdict error = &hookAPIUntrustedWriteError{
+				sid: hookAPIWindowsSIDString(sid), mask: uint32(ace.Mask), path: path,
+			}
 			if hookAPIWindowsReplaceAccess(ace.Mask) && !managed.WindowsAdminEquivalentPrincipal(sid) {
 				verdict = hookAPIReplaceVerdict{error: verdict}
 			}
