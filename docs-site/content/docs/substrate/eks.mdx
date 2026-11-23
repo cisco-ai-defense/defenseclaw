@@ -10,11 +10,11 @@ keywords:
 
 {/* Checked on EKS 1.37 with Substrate v1.0.0. The example files are in docs/examples/substrate/eks/ (overlay patch, install file, asset-staging script). */}
 
-Upstream documents `kind` and GKE. This page lists what to do differently on EKS. The files it mentions (the overlay patch, the install file and the asset-staging script) are in [`docs/examples/substrate/eks/`](https://github.com/cisco-ai-defense/defenseclaw/tree/main/docs/examples/substrate/eks) in the DefenseClaw repository. It was run on a real EKS cluster with both sandbox classes: actors create, answer HTTP, suspend and resume with memory kept, snapshots go to S3, egress is default deny, and a Bedrock call works from an actor through an injected credential. Placeholders: `BUCKET`, `CLUSTER`.
+Upstream documents `kind` and GKE. This page lists what to do differently on EKS. The files it mentions (the overlay patch, the install file and the asset-staging script) are in [`docs/examples/substrate/eks/`](https://github.com/cisco-ai-defense/defenseclaw/tree/main/docs/examples/substrate/eks) in the DefenseClaw repository. On EKS with both sandbox classes, actors create, answer HTTP, suspend and resume with memory kept, snapshots go to S3, egress is default deny, and a Bedrock call works from an actor through an injected credential. Placeholders: `BUCKET`, `CLUSTER`.
 
 ## The cluster
 
-- **Version.** The account default (1.37 when tested). Nodes: Amazon Linux 2023.
+- **Version.** The account default (for example 1.37). Nodes: Amazon Linux 2023.
 - **Endpoint.** Private only is fine. Add an ingress rule on the cluster security group (tcp 443) from the VPC range so the hosts that use `kubectl` can reach it, and give each caller an EKS access entry.
 - **Subnets and egress.** Private nodes need a way out: the control plane pulls images from `ghcr.io`, the node agent fetches gVisor from a Google bucket, and the microVM install downloads Kata and Cloud Hypervisor from GitHub. VPC endpoints alone are not enough. Use private subnets with a NAT gateway.
 - **Node metadata.** Require IMDSv2 with a **hop limit of 2**. The object-store plugin runs in a pod and takes its S3 credentials from the node role. With a hop limit of 1 the pod can't reach the metadata service.

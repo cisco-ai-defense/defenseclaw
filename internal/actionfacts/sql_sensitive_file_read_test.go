@@ -284,10 +284,9 @@ func sqlSensitiveServerFileReadInput(
 	return Input{Tool: "sql_query", Args: raw, CWD: "/repo"}
 }
 
-
 func TestSQLSensitiveServerFileReadsPSQLCLI(t *testing.T) {
 	facts := Analyze(Input{
-		Tool: "shell",
+		Tool:    "shell",
 		Command: `psql -d production -c "SELECT pg_read_file('/etc/passwd');"`,
 	})
 	got, ok := ExactSQLSensitiveServerFileRead(facts)

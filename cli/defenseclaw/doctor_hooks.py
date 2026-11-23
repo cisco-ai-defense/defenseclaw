@@ -39,7 +39,11 @@ from typing import Any
 import yaml
 
 from defenseclaw import codex_toml, connector_paths
-from defenseclaw.connector_contracts import resolve_connector_contract
+from defenseclaw.connector_contracts import (
+    compare_agent_versions,
+    normalize_agent_version,
+    resolve_connector_contract,
+)
 from defenseclaw.hook_guard_matrix import TOOL_GUARD_HOOKS
 from defenseclaw.hook_integrity import (
     HERMES_ALLOWLIST_FILE,
@@ -1633,6 +1637,19 @@ def _read_claude_cli_settings(raw: str, workspace_dir: str) -> _ClaudeSettingsSo
     return _ClaudeSettingsSource("CLI --settings", path, document)
 
 
+_CLAUDE_SOURCE_CONTROL_KEYS = frozenset({"managedSourcesBehavior", "wslInheritsWindowsSettings"})
+# First Claude Code release that honours managedSourcesBehavior: merge
+# (claudeCodeMergeMinimumVersion in the Go connector).
+_CLAUDE_MERGE_MINIMUM_VERSION = "2.1.242"
+
+
+def _claude_source_has_policy_key(settings: dict[str, Any] | None) -> bool:
+    """Whether Claude Code selects this managed source (a non-null key other than the source-control keys)."""
+    return bool(settings) and any(
+        key not in _CLAUDE_SOURCE_CONTROL_KEYS and value is not None for key, value in settings.items()
+    )
+
+
 def _claude_managed_sources(
     config_path: str,
     managed_settings_paths: tuple[str, ...] | None,
@@ -1718,8 +1735,15 @@ def inspect_claude_managed_enabled_plugins(
     except _InspectionError:
         return {}, False
 
+    # Claude Code skips a managed source that carries only source-control
+    # keys (managedSourcesBehavior, wslInheritsWindowsSettings) and applies
+    # the next one.
     active_managed = next(
-        (source for source in (remote, os_managed, file_managed, hkcu) if source is not None and source.settings),
+        (
+            source
+            for source in (remote, os_managed, file_managed, hkcu)
+            if source is not None and _claude_source_has_policy_key(source.settings)
+        ),
         None,
     )
     if (
@@ -1775,6 +1799,25 @@ def _validate_claude_managed_controls(source: _ClaudeSettingsSource | None, mana
         )
 
 
+def _claude_lock_agent_version(data_dir: str) -> str:
+    """Return the Claude Code version the hook contract lock records, or "".
+
+    The guardian audit applies the managedSourcesBehavior merge floor to the
+    same lock version (GAP-1731). An unreadable lock leaves the version
+    unknown here; _contract_evidence reports the lock itself.
+    """
+    try:
+        with open(os.path.join(data_dir, "hook_contract_lock.json"), encoding="utf-8") as handle:
+            lock = json.load(handle)
+    except (OSError, ValueError):
+        return ""
+    connectors = lock.get("connectors") if isinstance(lock, dict) else None
+    entry = connectors.get("claudecode") if isinstance(connectors, dict) else None
+    if not isinstance(entry, dict):
+        return ""
+    return str(entry.get("raw_agent_version") or entry.get("normalized_agent_version") or "").strip()
+
+
 def _resolve_claude_effective_document(
     document: dict[str, Any],
     *,
@@ -1784,13 +1827,21 @@ def _resolve_claude_effective_document(
     cli_settings: str | None,
     remote_settings_path: str | None,
     managed_enterprise: bool,
+    agent_version: str = "",
 ) -> tuple[dict[str, Any], str]:
     remote, os_managed, file_managed, hkcu = _claude_managed_sources(
         config_path, managed_settings_paths, remote_settings_path
     )
 
+    # Claude Code skips a managed source that carries only source-control
+    # keys (managedSourcesBehavior, wslInheritsWindowsSettings) and applies
+    # the next one.
     active_managed = next(
-        (source for source in (remote, os_managed, file_managed, hkcu) if source is not None and source.settings),
+        (
+            source
+            for source in (remote, os_managed, file_managed, hkcu)
+            if source is not None and _claude_source_has_policy_key(source.settings)
+        ),
         None,
     )
     # policyHelper is honored only when its administrator-controlled MDM/file
@@ -1815,6 +1866,36 @@ def _resolve_claude_effective_document(
                 "containing the DefenseClaw hook matrix",
             )
         _validate_claude_managed_controls(active_managed, True)
+        merges = (
+            active_managed is os_managed
+            and active_managed.settings.get("managedSourcesBehavior") == "merge"
+            and file_managed is not None
+        )
+        version = normalize_agent_version(agent_version)
+        if merges and version and compare_agent_versions(version, _CLAUDE_MERGE_MINIMUM_VERSION) < 0:
+            # An older client ignores merge: only the HKLM policy's own hooks
+            # count, as in the Go connector's classifyClaudeCodeOSAdminPolicy.
+            merges = False
+            if not isinstance(active_managed.settings.get("hooks"), dict):
+                raise _InspectionError(
+                    "policy-blocked",
+                    f"Claude Code {version} ignores managedSourcesBehavior: merge from {active_managed.label} "
+                    f"(it needs {_CLAUDE_MERGE_MINIMUM_VERSION} or later), so the policy hides DefenseClaw's "
+                    "file-based managed hooks; upgrade Claude Code or deploy the DefenseClaw hook matrix "
+                    "through that source",
+                )
+        if merges:
+            # GAP-1731: an HKLM policy that merges managed sources (Claude
+            # Code 2.1.242+) leaves DefenseClaw's file-based drop-in in force;
+            # the merged hooks carry the matrix exactly when the drop-in does.
+            _validate_claude_managed_controls(file_managed, True)
+            hooks = file_managed.settings.get("hooks")
+            if not isinstance(hooks, dict):
+                raise _InspectionError(
+                    "policy-blocked",
+                    f"Claude Code {file_managed.label} has no hooks table containing the DefenseClaw contract",
+                )
+            return file_managed.settings, f"managed_source={active_managed.label} merged with {file_managed.label}"
         hooks = active_managed.settings.get("hooks")
         if not isinstance(hooks, dict):
             raise _InspectionError(
@@ -4076,6 +4157,7 @@ def validate_windows_hook_registration(
                 cli_settings=claude_cli_settings,
                 remote_settings_path=claude_remote_settings_path,
                 managed_enterprise=managed_enterprise,
+                agent_version=_claude_lock_agent_version(data_dir),
             )
         if connector == "antigravity":
             commands = _validate_antigravity_hook_matrix(document)

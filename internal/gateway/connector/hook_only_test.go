@@ -1684,45 +1684,48 @@ func TestHermesHookRepairReconcilesExactOwnedStateAndIsByteIdempotent(t *testing
 // DefenseClaw command; Setup used to refuse the repair and leave Hermes
 // unguarded. A command that only names the connector stays refused.
 func TestHermesHookRepairReplacesEditedHookPath(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("Windows registers the native hook launcher, not hermes-hook.sh")
-	}
 	root := testenv.PrivateTempDir(t)
 	path := filepath.Join(root, "config.yaml")
-	hookScript := filepath.Join(root, ".defenseclaw", "hooks", "hermes-hook.sh")
-	command := hermesConfiguredHookCommand(hookScript, "")
-	if err := patchHermesHooks(path, hookScript, ""); err != nil {
-		t.Fatalf("install Hermes hooks: %v", err)
-	}
-	installed, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	edited := strings.ReplaceAll(string(installed), "/.defenseclaw/hooks/", "/.defenseclaw/xhooks/")
-	if edited == string(installed) {
-		t.Fatal("fixture did not edit the hook path")
-	}
-	if err := os.WriteFile(path, []byte(edited), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := patchHermesHooks(path, hookScript, ""); err != nil {
-		t.Fatalf("repair edited Hermes hooks: %v", err)
-	}
-	repaired, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(repaired, installed) {
-		t.Fatalf("repaired config differs from the installed one\n got %q\nwant %q", repaired, installed)
-	}
-	config, err := readYAMLObject(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, spec := range hermesRequiredHooks {
-		entries := config["hooks"].(map[string]interface{})[spec.event].([]interface{})
-		if len(entries) != 1 || entries[0].(map[string]interface{})["command"] != command {
-			t.Fatalf("%s entries = %#v, want one DefenseClaw entry", spec.event, entries)
+	hookScript, hookExecutable := hermesHookRegistrationForTest(filepath.Join(root, ".defenseclaw"))
+	if runtime.GOOS == "windows" {
+		// Windows registers the launcher, not a script path: no hook path is
+		// edited; the edit of a launcher path is the user's own entry.
+		hermesWindowsRepairKeepsAnEditedLauncherForTest(t, path, hookScript, hookExecutable)
+	} else {
+		command := hermesConfiguredHookCommand(hookScript, hookExecutable)
+		if err := patchHermesHooks(path, hookScript, hookExecutable); err != nil {
+			t.Fatalf("install Hermes hooks: %v", err)
+		}
+		installed, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		edited := strings.ReplaceAll(string(installed), "/.defenseclaw/hooks/", "/.defenseclaw/xhooks/")
+		if edited == string(installed) {
+			t.Fatal("fixture did not edit the hook path")
+		}
+		if err := os.WriteFile(path, []byte(edited), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := patchHermesHooks(path, hookScript, hookExecutable); err != nil {
+			t.Fatalf("repair edited Hermes hooks: %v", err)
+		}
+		repaired, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(repaired, installed) {
+			t.Fatalf("repaired config differs from the installed one\n got %q\nwant %q", repaired, installed)
+		}
+		config, err := readYAMLObject(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, spec := range hermesRequiredHooks {
+			entries := config["hooks"].(map[string]interface{})[spec.event].([]interface{})
+			if len(entries) != 1 || entries[0].(map[string]interface{})["command"] != command {
+				t.Fatalf("%s entries = %#v, want one DefenseClaw entry", spec.event, entries)
+			}
 		}
 	}
 
@@ -1738,7 +1741,7 @@ func TestHermesHookRepairReplacesEditedHookPath(t *testing.T) {
 	// A command that is not one Setup writes is the user content: repair keeps
 	// it beside the current entry and does not refuse (LEAD 15:58, one ownership
 	// predicate for Setup, repair and teardown).
-	if err := patchHermesHooks(path, hookScript, ""); err != nil {
+	if err := patchHermesHooks(path, hookScript, hookExecutable); err != nil {
 		t.Fatalf("repair refused a user entry: %v", err)
 	}
 	cfg, err := readYAMLObject(path)

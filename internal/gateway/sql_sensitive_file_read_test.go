@@ -115,12 +115,11 @@ func TestSQLSensitiveServerFileReadAlertsWithoutBlockingInEveryProfile(t *testin
 	}
 }
 
-
 func TestSQLSensitiveServerFileReadPSQLCLIAlerts(t *testing.T) {
 	input := actionfacts.Input{
-		Tool: "shell",
+		Tool:    "shell",
 		Command: `psql -d production -c "SELECT pg_read_file('/etc/passwd');"`,
-		CWD: "/repo",
+		CWD:     "/repo",
 	}
 	findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
 		Input: input, LegacyText: input.Command, EnforcementCapable: true,

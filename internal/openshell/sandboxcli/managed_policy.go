@@ -1076,6 +1076,10 @@ func managedRuntimeCheck(m *sandboxapi.ManagedStatus) openshell.Check {
 		c.Status = openshell.StatusFail
 		c.Detail = m.Unavailable
 		c.Fix = &openshell.Fix{Summary: "nothing to do on this computer; run the command again in a few minutes"}
+	case m.Unavailable != "" && m.Recovery != "":
+		c.Status = openshell.StatusFail
+		c.Detail = sandboxapi.DisplayText(m.Unavailable)
+		c.Fix = &openshell.Fix{Summary: sandboxapi.DisplayText(m.Recovery)}
 	case m.Unavailable != "":
 		c.Status = openshell.StatusFail
 		c.Detail = sandboxapi.DisplayText(m.Unavailable)

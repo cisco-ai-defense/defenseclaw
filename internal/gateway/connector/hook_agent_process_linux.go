@@ -5,6 +5,7 @@ package connector
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -12,9 +13,14 @@ import (
 	"syscall"
 )
 
+// procReadFile reads a /proc file; a test replaces it to make the process
+// table answer as it does for a process that ends during the scan.
+var procReadFile = os.ReadFile
+
 // accountAgentProcessMayRun reports whether a running process of the account
 // that owns dataDir, other than this one, names agent in its command line
-// (Linux /proc). Anything it cannot read counts as a process that may run it.
+// (Linux /proc). Anything it cannot read counts as a process that may run it,
+// except a process that ended while it was being read.
 func accountAgentProcessMayRun(dataDir, agent string) bool {
 	info, err := os.Lstat(dataDir)
 	if err != nil {
@@ -42,9 +48,10 @@ func accountAgentProcessMayRun(dataDir, agent string) bool {
 		if owner, ok := process.Sys().(*syscall.Stat_t); !ok || owner.Uid != stat.Uid {
 			continue
 		}
-		cmdline, err := os.ReadFile(filepath.Join(dir, "cmdline"))
+		cmdline, err := procReadFile(filepath.Join(dir, "cmdline"))
 		if err != nil {
-			if os.IsNotExist(err) {
+			// ESRCH: it ended between the listing and the read.
+			if os.IsNotExist(err) || errors.Is(err, syscall.ESRCH) {
 				continue
 			}
 			return true

@@ -18,10 +18,13 @@ import (
 // identity), and the only holder of every listening socket on that port. A
 // listener of another account, another process of this account (a decoy
 // bound to the port), a stale record, or a listener nobody can read is not
-// proof.
-func ownGatewayHoldsQueue(ctx context.Context, server *net.TCPAddr) bool {
+// proof. recordedHolder, when not nil, is called once the recorded gateway is
+// shown to hold the listener, before the other processes of the account are
+// read (connectBy tells an unfinished scan of the gateway from an unproven
+// listener by it, GAP-1534).
+func ownGatewayHoldsQueue(ctx context.Context, server *net.TCPAddr, recordedHolder func()) bool {
 	for _, home := range perUserGatewayHomes(ctx) {
-		if pid, ok := recordedGatewayPID(home); ok && listenersHeldOnlyByPID(pid, server) {
+		if pid, ok := recordedGatewayPID(home); ok && listenersHeldOnlyByPID(pid, server, recordedHolder) {
 			return true
 		}
 	}

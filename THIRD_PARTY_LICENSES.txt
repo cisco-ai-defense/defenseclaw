@@ -9,8 +9,8 @@ API definitions vendored for the Linux sensor helper:
   - github.com/google/cel-go v0.30.0
   - github.com/antlr4-go/antlr/v4 v4.13.1
   - golang.org/x/exp v0.0.0-20250305212735-054e65f0b394
-  - github.com/NVIDIA/OpenShell/sdk/go v0.0.0-20260926030648-4ce767fc0cad
-    (the OpenShell v0.1.1 release commit)
+  - github.com/ai-openshell/sdk-go v0.1.9
+    (the OpenShell Go SDK, versioned with OpenShell releases)
   - github.com/cilium/tetragon/api v1.7.1 (the .proto files under
     third_party/tetragon, vendored unmodified, and the Go stubs generated
     from them; not a go.mod dependency)
@@ -67,13 +67,11 @@ License-text provenance:
   Upstream PATENTS SHA-256:
     96f408bfae65bf137fc2525d3ecb030271c50c1e90799f87abf8846d8dd505cc
 
-  Module: github.com/NVIDIA/OpenShell/sdk/go
-  Version: v0.0.0-20260926030648-4ce767fc0cad
-  Upstream file: https://github.com/NVIDIA/OpenShell/blob/v0.1.1/LICENSE
-    (the module directory carries no LICENSE of its own; the repository
-    root LICENSE governs it)
+  Module: github.com/ai-openshell/sdk-go
+  Version: v0.1.9
+  Upstream file: https://github.com/ai-openshell/sdk-go/blob/v0.1.9/LICENSE
   Upstream LICENSE SHA-256:
-    c4be3acebe12527d7de689933d98329b4065f8c50cd929d0365584eafe6c20dd
+    d07c0367e2861e7fe70fa1b679f879f4fa2f9138ade4457d44ecf8b2e135bb45
 
   Module: github.com/PowerShell/PowerShell
   Version: v7.6.6 (tag v7.6.6, commit f260eb9c31ec72c5282f98e5ea24d9be4f8d7536), the parser
@@ -90,7 +88,7 @@ License-text provenance:
   Upstream LICENSE SHA-256:
     f096c31ac0fb2e66df5b7ec20049741ae15accd50c8cd4d100b4db6c9353f6aa
 
-cel.dev/expr v0.25.2 is Apache-2.0-only and has no upstream NOTICE. The
+cel.dev/expr v0.25.3 is Apache-2.0-only and has no upstream NOTICE. The
 DefenseClaw root LICENSE already reproduces its exact license text, so it is
 not duplicated below.
 
@@ -459,7 +457,7 @@ rights granted to you under this License for this implementation of Go
 shall terminate as of the date such litigation is filed.
 
 ==============================================================================
-github.com/NVIDIA/OpenShell/sdk/go v0.0.0-20260926030648-4ce767fc0cad (LICENSE)
+github.com/ai-openshell/sdk-go v0.1.9 (LICENSE)
 ==============================================================================
 
 Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
@@ -514,7 +512,7 @@ Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
       "Contribution" shall mean any work of authorship, including
       the original version of the Work and any modifications or additions
       to that Work or Derivative Works thereof, that is intentionally
-      submitted to the Licensor for inclusion in the Work by the copyright owner
+      submitted to Licensor for inclusion in the Work by the copyright owner
       or by an individual or Legal Entity authorized to submit on behalf of
       the copyright owner. For the purposes of this definition, "submitted"
       means any form of electronic, verbal, or written communication sent
@@ -526,7 +524,7 @@ Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
       designated in writing by the copyright owner as "Not a Contribution."
 
       "Contributor" shall mean Licensor and any individual or Legal Entity
-      on behalf of whom a Contribution has been received by the Licensor and
+      on behalf of whom a Contribution has been received by Licensor and
       subsequently incorporated within the Work.
 
    2. Grant of Copyright License. Subject to the terms and conditions of
@@ -572,7 +570,7 @@ Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
       (d) If the Work includes a "NOTICE" text file as part of its
           distribution, then any Derivative Works that You distribute must
           include a readable copy of the attribution notices contained
-          within such NOTICE file, excluding any notices that do not
+          within such NOTICE file, excluding those notices that do not
           pertain to any part of the Derivative Works, in at least one
           of the following places: within a NOTICE text file distributed
           as part of the Derivative Works; within the Source form or

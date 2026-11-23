@@ -2326,9 +2326,10 @@ class EnterpriseOpenShellConfig:
     """``enterprise.openshell`` as far as Python reads it: the compute driver.
 
     The other keys (``install``, ``driver_fallback``, ``version``,
-    ``gateway_port``, ``e2fsprogs_dir``) are the administrator's and the
-    lifecycle's (internal/config/enterprise.go); Python never reads them, so
-    it does not model them. They are not per-user ``openshell.*`` keys: a
+    ``gateway_port``, ``e2fsprogs_dir``, ``allow_downgrade``) are the
+    administrator's and the lifecycle's (internal/config/enterprise.go);
+    Python never reads them, so it does not model them. They are not
+    per-user ``openshell.*`` keys: a
     per-user config.yaml that carries one under ``openshell:`` is refused by
     the schema, and the per-user OpenShell gateway port is fixed (17670).
     """
@@ -4792,6 +4793,30 @@ class SubstrateSecret:
 
 
 @dataclass
+class SubstrateBundleOCIStage:
+    """One ``substrate.bundles.oci.stages`` entry (mirrors Go
+    ``SubstrateBundleOCIStage``): ``ref`` is ``host/repo@sha256:<hex>``."""
+
+    stage: str = ""
+    ref: str = ""
+    atespaces: list[str] = field(default_factory=list)
+
+
+@dataclass
+class SubstrateBundleOCIConfig:
+    """``substrate.bundles.oci`` (Preview, GAP-0437; mirrors Go
+    ``SubstrateBundleOCIConfig``): stage bundles pulled from an OCI registry
+    by digest. Off by default."""
+
+    enabled: bool = False
+    credentials_file: str = ""
+    ca_file: str = ""
+    auth_hosts: list[str] = field(default_factory=list)
+    timeout: str = ""
+    stages: list[SubstrateBundleOCIStage] = field(default_factory=list)
+
+
+@dataclass
 class SubstrateBundlesConfig:
     """``substrate.bundles``: signed policy bundles for the cluster (mirrors
     Go ``SubstrateBundlesConfig``). Empty strings take the defaults: the
@@ -4802,6 +4827,7 @@ class SubstrateBundlesConfig:
     anchors_file: str = ""
     inbox: str = ""
     refresh_interval: str = ""
+    oci: SubstrateBundleOCIConfig = field(default_factory=SubstrateBundleOCIConfig)
 
 
 @dataclass
@@ -5098,6 +5124,9 @@ class AIDiscoveryConfig:
     # session's Kerberos principal identify a person. When on they ride every
     # identity-carrying record, not only inventory. Mirrors IncludeUserPrincipal.
     include_user_principal: bool = False
+    # Opt-in: sends each skill's SKILL.md text with the managed skill
+    # inventory. Mirrors internal/config.AIDiscoveryConfig.IncludeSkillManifests.
+    include_skill_manifests: bool = False
     # Child domains of the joined AD realm whose SSSD accounts are verified;
     # empty trusts the joined domain only. Mirrors TrustedADChildDomains.
     trusted_ad_child_domains: list[str] = field(default_factory=list)
@@ -6364,13 +6393,12 @@ def _serialize_v9_scanner_keys(scanners: Any) -> None:
 
 
 def _strip_ai_discovery_omitempty(ai_discovery: Any) -> None:
-    """Mirror Go's ``omitempty`` on ``ai_discovery.include_user_principal``,
-    ``trusted_ad_child_domains`` and ``ide_inventory`` so configs that never
-    set them stay byte-identical."""
+    """Mirror Go's omission of default-valued optional discovery settings."""
     if not isinstance(ai_discovery, dict):
         return
-    if not ai_discovery.get("include_user_principal"):
-        ai_discovery.pop("include_user_principal", None)
+    for key in ("include_user_principal", "include_skill_manifests"):
+        if not ai_discovery.get(key):
+            ai_discovery.pop(key, None)
     if not ai_discovery.get("trusted_ad_child_domains"):
         ai_discovery.pop("trusted_ad_child_domains", None)
     if ai_discovery.get("ide_inventory") in (None, "", "all"):
@@ -6674,6 +6702,7 @@ _OWNED_NESTED_KEYS: frozenset[str] = frozenset(
         "guardrail.default_profile",
         # AI discovery identity/IDE opt-ins: stripped at their defaults.
         "ai_discovery.include_user_principal",
+        "ai_discovery.include_skill_manifests",
         "ai_discovery.trusted_ad_child_domains",
         "ai_discovery.ide_inventory",
     }
@@ -8210,6 +8239,28 @@ def _merge_substrate_bundles(raw: Any) -> SubstrateBundlesConfig:
         anchors_file=str(raw.get("anchors_file", "") or ""),
         inbox=str(raw.get("inbox", "") or ""),
         refresh_interval=_duration_text(raw.get("refresh_interval")),
+        oci=_merge_substrate_bundle_oci(raw.get("oci")),
+    )
+
+
+def _merge_substrate_bundle_oci(raw: Any) -> SubstrateBundleOCIConfig:
+    raw = _mapping(raw)
+    stages = raw.get("stages")
+    return SubstrateBundleOCIConfig(
+        enabled=raw.get("enabled") is True,
+        credentials_file=str(raw.get("credentials_file", "") or ""),
+        ca_file=str(raw.get("ca_file", "") or ""),
+        auth_hosts=[str(h) for h in (raw.get("auth_hosts") or []) if isinstance(h, str)],
+        timeout=_duration_text(raw.get("timeout")),
+        stages=[
+            SubstrateBundleOCIStage(
+                stage=str(s.get("stage", "") or ""),
+                ref=str(s.get("ref", "") or ""),
+                atespaces=[str(a) for a in (s.get("atespaces") or []) if isinstance(a, str)],
+            )
+            for s in (stages if isinstance(stages, list) else [])
+            if isinstance(s, dict)
+        ],
     )
 
 
@@ -8312,6 +8363,17 @@ def _serialize_substrate(cfg: Config, d: dict[str, Any]) -> None:
     if isinstance(bundles, dict):
         if bundles.get("enabled") is False:  # Go omitempty
             bundles.pop("enabled")
+        oci = bundles.get("oci")
+        if isinstance(oci, dict):
+            # Go omitempty everywhere but stages[].stage and stages[].ref.
+            for k in ("enabled", "credentials_file", "ca_file", "auth_hosts", "timeout", "stages"):
+                if not oci.get(k):
+                    oci.pop(k, None)
+            for st in oci.get("stages", []):
+                if isinstance(st, dict) and not st.get("atespaces"):
+                    st.pop("atespaces", None)
+            if not oci:
+                bundles.pop("oci")
         if not bundles:
             pruned.pop("bundles")
     if packs == []:
@@ -8846,7 +8908,7 @@ def _validate_enterprise_cowork_vm_sensor(raw: Mapping[str, Any]) -> None:
     patterns = {
         "tenant": (r"[A-Za-z0-9][A-Za-z0-9._-]*", 128),
         "device": (r"[A-Za-z0-9][A-Za-z0-9._-]*", 128),
-        "collector": (r"[A-Za-z0-9][A-Za-z0-9.-]*:[0-9]{1,5}", 253),
+        "collector": (r"[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?:[0-9]{1,5}", 200),
         "vendor": (r"[a-z][a-z0-9_-]*", 64),
         "package_sha256": (r"[0-9a-f]{64}", 64),
         "signature_sha256": (r"[0-9a-f]{64}", 64),
@@ -9610,6 +9672,7 @@ def _merge_ai_discovery(raw: dict[str, Any] | None) -> AIDiscoveryConfig:
         include_network_domains=bool(raw.get("include_network_domains", True)),
         include_user_email=_coerce_bool(raw.get("include_user_email", False)),
         include_user_principal=_coerce_bool(raw.get("include_user_principal", False)),
+        include_skill_manifests=_coerce_bool(raw.get("include_skill_manifests", False)),
         trusted_ad_child_domains=[str(v) for v in (raw.get("trusted_ad_child_domains", []) or [])],
         ide_inventory=_normalize_ide_inventory(raw.get("ide_inventory")),
         lookup_model_provenance_online=_coerce_bool(raw.get("lookup_model_provenance_online", False)),

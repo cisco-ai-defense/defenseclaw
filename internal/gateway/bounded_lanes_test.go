@@ -320,10 +320,26 @@ func boundedParse(action string) bounded.Action {
 	return a
 }
 
-// boundedLaneEnv is the POSIX home the shell lanes run in.
+// boundedLaneEnv is the POSIX home the shell lanes run in. It skips on
+// Windows for the callers not yet proven there; a test whose rows hold on a
+// Windows gateway takes boundedLaneEnvAnyOS.
 func boundedLaneEnv(t *testing.T) boundedEnv {
 	t.Helper()
-	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX home fixture requires an unprivileged Unix user; these rows are not yet proven on a Windows gateway (see boundedLaneEnvAnyOS)")
+	}
+	return boundedLaneEnvAnyOS(t)
+}
+
+// boundedLaneEnvAnyOS is the home of boundedLaneEnv on every host: a temp
+// homes/alice with a project folder and the DefenseClaw state file, HOME and
+// USERPROFILE set to it (the home Git Bash and the gateway read on Windows).
+// The POSIX-form commands of the lanes name it through ~ and relative paths,
+// so the same rows run on a Windows gateway (rel-1-0-10:GAP-1523). Root is
+// skipped on Unix, where it reads every file; os.Geteuid is -1 on Windows.
+func boundedLaneEnvAnyOS(t *testing.T) boundedEnv {
+	t.Helper()
+	if os.Geteuid() == 0 {
 		t.Skip("POSIX home fixture requires an unprivileged Unix user")
 	}
 	homes := filepath.Join(t.TempDir(), "homes")

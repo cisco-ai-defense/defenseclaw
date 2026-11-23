@@ -16,7 +16,10 @@ import (
 // A per-user tool call whose shell spent 0.4 s before the request gives the
 // helper the 3.35 s left after the startup reserve. The whole-second
 // --max-time rounds down, while the millisecond deadline uses the rest of
-// the four-second shell request (GAP-0483).
+// the four-second shell request (GAP-0483). A resend after a 429's
+// Retry-After with less than a whole second left still goes out with the
+// milliseconds after the reserve (GAP-1460); with nothing left after the
+// reserve it fails as a timeout (28) and the helper never runs.
 func TestHostHookGivesTheHelperTheMillisecondsLeft(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell hooks are not used on Windows")
@@ -60,6 +63,8 @@ func TestHostHookGivesTheHelperTheMillisecondsLeft(t *testing.T) {
 		{"tool call, 0.4 s spent", 4, 400, "3", 3250, 3350},
 		{"tool call, 1.2 s spent", 4, 1200, "2", 2450, 2550},
 		{"other event, 0.4 s spent", 10, 400, "9", 9500, 9600},
+		{"tool call resend, 3.2 s spent", 4, 3200, "1", 450, 550},
+		{"tool call resend, 3.8 s spent", 4, 3800, "", 0, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			script := `set -euo pipefail; . "$1"; HOOK_DIR="$2"; API_ADDR=127.0.0.1:18960
@@ -67,9 +72,22 @@ defenseclaw_api_listener_unproven() { return 1; }
 curl() { echo leaked; }
 now="${EPOCHREALTIME/[.,]/}"; _DC_HOOK_STARTED_US=$(( 10#$now - $3 * 1000 ))
 defenseclaw_gateway_post "http://${API_ADDR}/api/v1/claude-code/hook" "$4" '{"hook_event_name":"PreToolUse"}' -H 'Authorization: Bearer secret' >/dev/null && echo sent`
+			_ = os.Remove(marker)
+			if tc.wantMaxTime == "" {
+				script += ` || echo "refused $?"`
+			}
 			cmd := exec.Command("bash", "-c", script, "bash", helper, hookDir, strconv.Itoa(tc.spentMS), strconv.Itoa(tc.maxTime))
 			cmd.Env = append(os.Environ(), "HOME="+home, "DEFENSECLAW_AGENT_HOME="+home, "DC_NATIVE_MARKER="+marker)
 			out, err := cmd.CombinedOutput()
+			if tc.wantMaxTime == "" {
+				if err != nil || strings.TrimSpace(string(out)) != "refused 28" {
+					t.Fatalf("bash: %v\n%s, want refused 28", err, out)
+				}
+				if _, err := os.Stat(marker); !os.IsNotExist(err) {
+					t.Fatalf("the helper ran with no time left (stat err %v)", err)
+				}
+				return
+			}
 			if err != nil || strings.TrimSpace(string(out)) != "sent" {
 				t.Fatalf("bash: %v\n%s", err, out)
 			}

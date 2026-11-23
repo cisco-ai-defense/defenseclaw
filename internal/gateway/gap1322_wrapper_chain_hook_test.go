@@ -14,7 +14,7 @@ import (
 // them). sudo nohup cat ~/.aws/credentials is left out: it was already
 // allowed before the regression.
 func TestGAP1322SudoNohupAndSudoEnvKeepTheProgramVerdict(t *testing.T) {
-	env := boundedLaneEnv(t)
+	env := boundedLaneEnvAnyOS(t)
 	rank := map[string]int{"allow": 0, "alert": 1, "block": 2}
 	prefixes := []struct{ id, p string }{
 		{"sudo-nohup", "sudo nohup "},

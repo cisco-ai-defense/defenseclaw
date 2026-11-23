@@ -72,7 +72,7 @@ func init() {
 // call is at least the unknown tier of its pack; within the limits the write
 // keeps its block.
 func TestCapFloorOwnLimitsAreTruncated(t *testing.T) {
-	env := boundedLaneEnv(t)
+	env := boundedLaneEnvAnyOS(t)
 	type row struct {
 		id, command string
 		blocks      bool
@@ -107,7 +107,7 @@ func TestCapFloorOwnLimitsAreTruncated(t *testing.T) {
 // when a word of its operands is (GAP-0691): data given to grep, which, echo
 // or cat keeps the verdict of the readers.
 func TestCapFloorHeredocConsumer(t *testing.T) {
-	env := boundedLaneEnv(t)
+	env := boundedLaneEnvAnyOS(t)
 	doc := func(head string) string { return head + " <<'EOF'\n" + boundedShellSeen + "\nEOF" }
 	script := map[string]string{
 		"bash":          doc("bash"),
@@ -146,7 +146,7 @@ func TestCapFloorHeredocConsumer(t *testing.T) {
 // reads the state, or names nothing, is the unknown tier of its pack past the
 // bound; a write proven in it keeps its block.
 func TestCapFloorDepthTruncatesEveryCall(t *testing.T) {
-	env := boundedLaneEnv(t)
+	env := boundedLaneEnvAnyOS(t)
 	inners := map[string]string{
 		"names-nothing": "true",
 		"print-state":   "echo ~/.defenseclaw/config.yaml",
@@ -178,7 +178,7 @@ func TestCapFloorDepthTruncatesEveryCall(t *testing.T) {
 // tier of the pack. The statements are the ones of the depth-impact review
 // (pcapchk TestPcapchkDepthImpact).
 func TestCapFloorDepthKeepsWhatItProves(t *testing.T) {
-	env := boundedLaneEnv(t)
+	env := boundedLaneEnvAnyOS(t)
 	statements := map[string]string{
 		"state-write": boundedShellSeen,
 		"rm-home":     "rm -rf ~/",

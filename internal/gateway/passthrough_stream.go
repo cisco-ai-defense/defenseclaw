@@ -215,10 +215,15 @@ func (s *passthroughStream) run() {
 		sseCalls = newSSEToolCalls(p.maxBodyValues())
 	}
 	framer := &sseFramer{ndjson: s.ndjson}
-	var bedrockPending []byte // the start of a Bedrock frame whose end has not come
-	var queue [][]byte        // events read and not yet sent
-	var queueAt []time.Time   // when each event of the queue was read
-	var queueMark []int       // the text length once each event of the queue was read (GAP-1306)
+	// tail is the wire shape of the block tail; sent is what the agent got
+	// of the content blocks, from the marks of the events sent (GAP-1206).
+	tail := streamTailOf(s.path, s.provider, s.ndjson)
+	sent := newStreamSent()
+	var bedrockPending []byte  // the start of a Bedrock frame whose end has not come
+	var queue [][]byte         // events read and not yet sent
+	var queueAt []time.Time    // when each event of the queue was read
+	var queueMark []streamMark // the content blocks each event of the queue opens or closes
+	var queueText []int        // the text length once each event of the queue was read (GAP-1306)
 	// heldCut: the held bound behind an open token or digit run was passed;
 	// only the first heldCut events may go out, the rest holds the run
 	// (GAP-1306). -1: no cut.
@@ -273,14 +278,15 @@ func (s *passthroughStream) run() {
 		if n == 0 {
 			return
 		}
-		for _, ev := range queue[:n] {
+		for i, ev := range queue[:n] {
 			_, _ = w.Write(ev)
 			queueBytes -= len(ev)
 			released += len(ev)
+			sent.add(queueMark[i])
 		}
-		queue, queueAt, queueMark = queue[n:], queueAt[n:], queueMark[n:]
+		queue, queueAt, queueMark, queueText = queue[n:], queueAt[n:], queueMark[n:], queueText[n:]
 		if len(queue) == 0 {
-			queue, queueAt, queueMark = nil, nil, nil
+			queue, queueAt, queueMark, queueText = nil, nil, nil, nil
 		}
 		relN -= n
 		if flusher != nil {
@@ -308,16 +314,17 @@ func (s *passthroughStream) run() {
 	}
 	// endBlock ends a refused stream: the whole block reply when nothing was
 	// sent yet, else the block as the last assistant text of the stream
-	// under way. Held events are dropped.
+	// under way, in its own shape after the last content block the agent
+	// got (GAP-1206). Held events are dropped.
 	endBlock := func() {
 		switch {
 		case released == 0:
 			blockedReply(sseBlockMsg)
 		case sseCalls != nil:
-			sseCalls.writeSSEBlockTail(w, s.model, sseBlockMsg)
+			writeStreamBlockTail(w, tail, sseCalls, sent, s.model, sseBlockMsg)
 		default:
 			hw := &headersSentWriter{ResponseWriter: w}
-			s.bedrock.writeBlockTail(hw, sseBlockMsg)
+			s.bedrock.writeBlockTail(hw, sent.bedrock+1, sseBlockMsg)
 			hw.Flush()
 		}
 	}
@@ -424,7 +431,7 @@ func (s *passthroughStream) run() {
 			// before the one with the run's first byte go out once the
 			// check has read them, with no verdict, and the run stays held
 			// (GAP-1306). When the rest is over the bound itself, all go.
-			if k := heldBeforeRun(queueMark, accumulated.OpenRunFrom()); k > 0 && queueBytes-bufferedBytes(queue[:k]) <= streamSecretMaxHeld {
+			if k := heldBeforeRun(queueText, accumulated.OpenRunFrom()); k > 0 && queueBytes-bufferedBytes(queue[:k]) <= streamSecretMaxHeld {
 				heldCut = k
 			}
 			return false, true
@@ -611,7 +618,15 @@ func (s *passthroughStream) run() {
 		}
 		queue = append(queue, ev.Raw)
 		queueAt = append(queueAt, lastRead)
-		queueMark = append(queueMark, accumulated.Len())
+		queueText = append(queueText, accumulated.Len())
+		mark := noStreamMark
+		switch {
+		case s.bedrock != nil:
+			mark.bedrock = s.bedrock.maxIndex
+		case tail == streamTailAnthropic && ev.HasData:
+			mark = anthropicStreamMark(ev.Data)
+		}
+		queueMark = append(queueMark, mark)
 		queueBytes += len(ev.Raw)
 		if sseCalls != nil && mode == "action" && !holdOff {
 			if sseCalls.Open() {

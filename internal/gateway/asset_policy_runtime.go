@@ -333,6 +333,23 @@ func (a *APIServer) mcpAdmissionStatusDecision(ctx context.Context, cfg *config.
 	if matched && existing.Action == "block" {
 		return existing, true
 	}
+	if !cfg.MCPAdmissionFailsClosed(connectorName) {
+		// The tier lets a call of a server not admitted yet run. A server is
+		// often added and blocked in one breath (mcp set, then mcp block):
+		// the block reaches the gateway as a config write that is applied
+		// after the reload debounce, so the first call, pinned to the
+		// generation before it, met no deny and was allowed while admission
+		// was pending (rel-1-0-10:GAP-1699). When a config write is being
+		// applied, wait for it and let a deny of the generation it publishes
+		// refuse the call; that generation only adds the refusal, the rest of
+		// the decision stays on the pinned one.
+		if latest, waited := a.configAppliedContext(ctx, mcpPendingReloadWait); waited {
+			if denied, refused := a.evaluateRuntimeMCPAssetPolicy(latest, connectorName, hookEvent, probe); refused &&
+				denied.Action == "block" {
+				return denied, true
+			}
+		}
+	}
 	// A rule the administrator wrote for this server (asset_policy.mcp.allowed
 	// by name and URL or launcher, or defenseclaw mcp allow) beats a scan
 	// that could not complete in every tier, strict and managed included:
@@ -399,6 +416,28 @@ func (a *APIServer) mcpAdmissionStatusDecision(ctx context.Context, cfg *config.
 	}
 	a.recordMCPAdmissionDecision(ctx, connectorName, hookEvent, probe, decision)
 	return decision, true
+}
+
+// mcpPendingReloadWait bounds how long a call that admission would let run
+// waits for a config write being applied (configAppliedContext). A reload
+// normally lands within about a second of the write.
+const mcpPendingReloadWait = 3 * time.Second
+
+// configAppliedContext waits, up to max, for a config write the gateway is
+// applying (configReloadInFlight), and returns ctx pinned to the generation
+// published once it is applied (with no pin when the server has no
+// generations, so the live config is read). false when no write was being
+// applied: ctx then already reads the config in force.
+func (a *APIServer) configAppliedContext(ctx context.Context, max time.Duration) (context.Context, bool) {
+	if configReloadInFlight.wait(0) {
+		return ctx, false
+	}
+	configReloadInFlight.wait(max)
+	g := a.generation()
+	if !g.published() {
+		g = nil
+	}
+	return context.WithValue(ctx, pinnedGenerationKey{}, g), true
 }
 
 func (a *APIServer) recordMCPAdmissionDecision(ctx context.Context, connectorName, hookEvent string, probe mcpRuntimeProbe, decision config.AssetPolicyDecision) {

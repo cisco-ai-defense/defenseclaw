@@ -1555,6 +1555,164 @@ func removeTreeAt(dirFD int, name string, uid, depth int) (bool, error) {
 	return true, nil
 }
 
+// accountAbovePin is an account whose install record names an OpenShell
+// release newer than the setup pin, with its gateway database there.
+// Recorded is the release that record names. Ran is Recorded capped at the
+// setup pin this host last applied, "" when that cap is not above the pin
+// or no setup pin was applied: the record is the account's own file, so
+// only a release root applied may refuse a pin, and an account cannot
+// block ensure by forging it (rel-1-0-10:GAP-1781).
+type accountAbovePin struct {
+	Name, Ran, Recorded string
+}
+
+// refuses reports whether a, by a release root applied, refuses the pin.
+func (a accountAbovePin) refuses() bool { return a.Ran != "" }
+
+// gatewayDBRel is the account's OpenShell gateway database below its home
+// (openshell.GatewayDBPath).
+var gatewayDBRel = filepath.Join(".local", "state", openshell.GatewayDBRel)
+
+// accountsAboveSetupPin lists the accounts whose setup-mode OpenShell, by
+// the install record in their home, is a release newer than pin and whose
+// gateway database is there: that release's gateway migrated it, and the
+// pin's gateway cannot open it (rel-1-0-10:GAP-1781). An account whose
+// database was moved aside, or that never installed a newer release, is
+// not listed. A database that cannot be looked at counts as there.
+// applied is the setup pin this host last applied ("" when none): each
+// account's Ran is capped at it (accountAbovePin).
+func (e *Env) accountsAboveSetupPin(ctx context.Context, pin, applied string) []accountAbovePin {
+	want, err := openshell.ParseVersion(pin)
+	if err != nil {
+		return nil
+	}
+	ceiling, ceilingErr := openshell.ParseVersion(applied)
+	capAbovePin := strings.TrimSpace(applied) != "" && ceilingErr == nil && ceiling.Compare(want) > 0
+	var out []accountAbovePin
+	for _, a := range e.sandboxOps().Accounts(ctx) {
+		data, ok, err := e.readBelowHome(a, filepath.ToSlash(filepath.Join(installStateRel, openshell.TarballManifestName)), 1<<20)
+		if err != nil || !ok {
+			continue
+		}
+		var manifest openshell.InstalledRelease
+		if json.Unmarshal(data, &manifest) != nil {
+			continue
+		}
+		ran, err := openshell.ParseVersion(manifest.Version)
+		if err != nil || ran.Compare(want) <= 0 {
+			continue
+		}
+		if there, err := e.regularBelowHome(a, filepath.ToSlash(gatewayDBRel)); err == nil && !there {
+			continue
+		}
+		above := accountAbovePin{Name: a.Name, Recorded: manifest.Version}
+		switch {
+		case !capAbovePin:
+		case ran.Compare(ceiling) <= 0:
+			above.Ran = manifest.Version
+		default:
+			above.Ran = applied
+		}
+		out = append(out, above)
+	}
+	return out
+}
+
+// splitAbovePin parts the listed accounts into those that refuse the pin
+// (a release root applied is above it) and those whose own record alone
+// names a newer release, which ensure only warns about.
+func splitAbovePin(above []accountAbovePin) (refusing, recordOnly []accountAbovePin) {
+	for _, a := range above {
+		if a.refuses() {
+			refusing = append(refusing, a)
+		} else {
+			recordOnly = append(recordOnly, a)
+		}
+	}
+	return refusing, recordOnly
+}
+
+// setupPinAtOrAbove is the step that names the lowest release this build
+// installs at or above v, so a refusal never asks for a pin ensure refuses
+// as not installable.
+func setupPinAtOrAbove(v openshell.Version) string {
+	var best openshell.Version
+	found := false
+	for _, release := range openshell.PinnedTarballReleases() {
+		r, err := openshell.ParseVersion(release)
+		if err != nil || r.Compare(v) < 0 {
+			continue
+		}
+		if !found || r.Compare(best) < 0 {
+			best, found = r, true
+		}
+	}
+	if !found {
+		return fmt.Sprintf("This DefenseClaw build installs no OpenShell release at or above %s (it installs %s); upgrade DefenseClaw first",
+			v.Release(), strings.Join(openshell.PinnedTarballReleases(), ", "))
+	}
+	return fmt.Sprintf("Set enterprise.openshell.version to %s or newer", best.Release())
+}
+
+// setupPinDowngradeRefusal is ensure's refusal of a setup pin below what
+// the accounts above already ran.
+func setupPinDowngradeRefusal(pin string, above []accountAbovePin) string {
+	names := make([]string, 0, len(above))
+	var newest openshell.Version
+	for _, a := range above {
+		names = append(names, a.Name+" (OpenShell "+a.Ran+")")
+		if v, err := openshell.ParseVersion(a.Ran); err == nil && v.Compare(newest) > 0 {
+			newest = v
+		}
+	}
+	return fmt.Sprintf("enterprise.openshell.version %q is below the OpenShell these accounts already ran: %s. OpenShell has no down migration: "+
+		"the %s gateway cannot open a database a newer OpenShell migrated, so their sandboxes would not start. %s; "+
+		"or, to go back anyway, set enterprise.openshell.allow_downgrade: true and have each of these accounts move "+
+		"~/.local/state/openshell/gateway/openshell.db (with openshell.db-wal and openshell.db-shm) aside, which loses that account's sandbox records",
+		pin, strings.Join(names, ", "), pin, setupPinAtOrAbove(newest))
+}
+
+// setupPinRecordOnlyWarning is the warning for an account whose own install
+// record names a release above the pin that this host never applied above
+// it: ensure does not refuse on that file alone.
+func setupPinRecordOnlyWarning(pin string, a accountAbovePin) string {
+	return fmt.Sprintf("%s's OpenShell install record names %s, above enterprise.openshell.version %s, but the setup pin this host last applied is not above %s, "+
+		"so ensure does not refuse on that record, which is the account's own file. If %s's sandboxes do not start, %s's sandbox doctor names the cause and the way back",
+		a.Name, a.Recorded, pin, pin, a.Name, a.Name)
+}
+
+// setupPinDowngradeWarning is the warning for one account that
+// enterprise.openshell.allow_downgrade lets a lower setup pin through for.
+func setupPinDowngradeWarning(pin string, a accountAbovePin) string {
+	return fmt.Sprintf("%s already ran OpenShell %s, above enterprise.openshell.version %s (enterprise.openshell.allow_downgrade): the %s gateway "+
+		"cannot open the database %s migrated, so %s's sandboxes do not start until that account moves "+
+		"~/.local/state/openshell/gateway/openshell.db (with openshell.db-wal and openshell.db-shm) aside, which loses its sandbox records",
+		a.Name, a.Ran, pin, pin, a.Ran, a.Name)
+}
+
+// regularBelowHome reports whether rel is a regular file below the
+// account's home, following no symlink.
+func (e *Env) regularBelowHome(a SandboxAccount, rel string) (bool, error) {
+	home, err := e.openHome(a)
+	if err != nil {
+		return false, err
+	}
+	defer unix.Close(home)
+	parent, name, err := walkDirs(home, rel, a.UID)
+	if err != nil || parent < 0 {
+		return false, err
+	}
+	defer unix.Close(parent)
+	var st unix.Stat_t
+	if err := unix.Fstatat(parent, name, &st, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		if errors.Is(err, unix.ENOENT) {
+			return false, nil
+		}
+		return false, err
+	}
+	return st.Mode&unix.S_IFMT == unix.S_IFREG, nil
+}
+
 // readBelowHome reads a regular file below the account's home, bounded;
 // ok is false when it does not exist.
 func (e *Env) readBelowHome(a SandboxAccount, rel string, limit int64) (data []byte, ok bool, err error) {

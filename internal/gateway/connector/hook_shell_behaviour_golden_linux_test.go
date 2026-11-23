@@ -196,44 +196,62 @@ func TestShellHookBehaviourMatchesGolden(t *testing.T) {
 	}
 	base := hookGoldenScratchDir(t)
 	t.Logf("golden scratch root: %s", base)
-	for w := 0; w < workers; w++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for {
-				i := int(next.Add(1)) - 1
-				if i >= len(cases) {
-					return
-				}
-				c := cases[i]
-				obs, err := runHookGoldenCase(base, i, c)
-				mu.Lock()
-				if err != nil {
-					failures = append(failures, fmt.Sprintf("%s: setup: %v", c.id, err))
-					mu.Unlock()
-					continue
-				}
-				digest := obs.digest()
-				got[c.id] = digest
-				if dump != "" {
-					body, _ := json.MarshalIndent(obs, "", "  ")
-					_ = os.WriteFile(filepath.Join(dump, strings.ReplaceAll(c.id, "/", "_")+".json"), body, 0o644)
-				}
-				if compare {
-					if w, ok := want[c.id]; !ok {
-						failures = append(failures, fmt.Sprintf("%s: no golden digest", c.id))
-					} else if w != digest {
-						body, _ := json.MarshalIndent(obs, "", "  ")
-						failures = append(failures, fmt.Sprintf("%s: digest %s, golden %s; observation:\n%s", c.id, digest, w, body))
-						mismatch = append(mismatch, hookGoldenMismatch{Case: c.id, Index: i, Golden: w, Digest: digest,
-							Observation: obs, Raw: obs.raw, c: c})
-					}
-				}
-				mu.Unlock()
-			}
-		}()
+	// Every case runs once. The http-429-then-allow answers wait the
+	// gateway's one-second Retry-After inside the four-second tool-call
+	// budget, so they run last with at most 4 hooks at once: next to 15 other
+	// hooks on a loaded host the resend no longer fit (GAP-1460).
+	var early, late []int
+	for i, c := range cases {
+		if c.answer.name == "http-429-then-allow" {
+			late = append(late, i)
+		} else {
+			early = append(early, i)
+		}
 	}
-	wg.Wait()
+	runPool := func(idx []int, n int) {
+		next.Store(0)
+		for w := 0; w < n; w++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for {
+					k := int(next.Add(1)) - 1
+					if k >= len(idx) {
+						return
+					}
+					i := idx[k]
+					c := cases[i]
+					obs, err := runHookGoldenCase(base, i, c)
+					mu.Lock()
+					if err != nil {
+						failures = append(failures, fmt.Sprintf("%s: setup: %v", c.id, err))
+						mu.Unlock()
+						continue
+					}
+					digest := obs.digest()
+					got[c.id] = digest
+					if dump != "" {
+						body, _ := json.MarshalIndent(obs, "", "  ")
+						_ = os.WriteFile(filepath.Join(dump, strings.ReplaceAll(c.id, "/", "_")+".json"), body, 0o644)
+					}
+					if compare {
+						if w, ok := want[c.id]; !ok {
+							failures = append(failures, fmt.Sprintf("%s: no golden digest", c.id))
+						} else if w != digest {
+							body, _ := json.MarshalIndent(obs, "", "  ")
+							failures = append(failures, fmt.Sprintf("%s: digest %s, golden %s; observation:\n%s", c.id, digest, w, body))
+							mismatch = append(mismatch, hookGoldenMismatch{Case: c.id, Index: i, Golden: w, Digest: digest,
+								Observation: obs, Raw: obs.raw, c: c})
+						}
+					}
+					mu.Unlock()
+				}
+			}()
+		}
+		wg.Wait()
+	}
+	runPool(early, workers)
+	runPool(late, min(4, workers))
 	if len(mismatch) > 0 {
 		writeHookGoldenMismatches(t, base, len(cases), mismatch, workers)
 	}

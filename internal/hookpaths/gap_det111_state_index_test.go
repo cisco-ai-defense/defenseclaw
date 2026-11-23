@@ -32,7 +32,7 @@ func TestActiveStateIndexFollowsTheStateNotTheClock(t *testing.T) {
 	}
 	before := activeStateIndexWalks.Load()
 	for range 3 {
-		if _, same := ResolveActiveStateHardlinkTarget(plain+".link", home); same {
+		if _, same, _ := ResolveActiveStateHardlinkTarget(plain+".link", home); same {
 			t.Fatal("an ordinary hard link mapped to the state")
 		}
 	}
@@ -48,7 +48,7 @@ func TestActiveStateIndexFollowsTheStateNotTheClock(t *testing.T) {
 	if err := os.Link(state, alias); err != nil {
 		t.Fatal(err)
 	}
-	if mapped, same := ResolveActiveStateHardlinkTarget(alias, home); !same || mapped != state {
+	if mapped, same, _ := ResolveActiveStateHardlinkTarget(alias, home); !same || mapped != state {
 		t.Fatalf("a hard link to a state file written after the index was built: mapped=%q same=%v, want %q", mapped, same, state)
 	}
 }

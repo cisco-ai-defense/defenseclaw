@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # ruff: noqa: E501  (regex and data tables read better on one line; the checked-in corpus tooling has always been long-line)
 """Shared helpers for the Windows shell corpus builder (case-v1 rows, redaction, wrappers, validation). Stdlib only (jsonschema optional)."""
+
 from __future__ import annotations
 
 import hashlib
@@ -43,35 +44,137 @@ _MAC = re.compile(r"(?<![0-9A-Fa-f:-])(?:[0-9A-Fa-f]{2}([:-])){5}[0-9A-Fa-f]{2}(
 _EMAIL = re.compile(r"\b[\w.+-]+@(?!(?:[\w-]+\.)*example\.com\b)[\w-]+(?:\.[\w-]+)+\b")
 _ACCT = re.compile(r"(?<![\w.:/-])\d{12}(?![\w.-])")
 _SECRETS = [
-    re.compile(r"\bhf_[A-Za-z0-9]{20,}\b"), re.compile(r"\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}\b"),
-    re.compile(r"\bgithub_pat_[A-Za-z0-9_]{40,}"), re.compile(r"\bsk-ant-[A-Za-z0-9_\-]{16,}"),
-    re.compile(r"\bsk-[A-Za-z0-9_\-]{32,}"), re.compile(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b"),
-    re.compile(r"\bxox[abprs]-[A-Za-z0-9-]{10,}"), re.compile(r"\bAIza[0-9A-Za-z_\-]{35}\b"),
+    re.compile(r"\bhf_[A-Za-z0-9]{20,}\b"),
+    re.compile(r"\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}\b"),
+    re.compile(r"\bgithub_pat_[A-Za-z0-9_]{40,}"),
+    re.compile(r"\bsk-ant-[A-Za-z0-9_\-]{16,}"),
+    re.compile(r"\bsk-[A-Za-z0-9_\-]{32,}"),
+    re.compile(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b"),
+    re.compile(r"\bxox[abprs]-[A-Za-z0-9-]{10,}"),
+    re.compile(r"\bAIza[0-9A-Za-z_\-]{35}\b"),
     re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"),
     re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/\-]{24,}=*"),
     re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----", re.S),
 ]
-_ASSIGN = re.compile(r"(?i)\b((?:password|passwd|secret|api[_-]?key|access[_-]?token|auth[_-]?token|client[_-]?secret|private[_-]?key|refresh[_-]?token|session[_-]?token|token)\s*[=:]\s*['\"]?)([A-Za-z0-9_\-+/=.]{16,})")
+_ASSIGN = re.compile(
+    r"(?i)\b((?:password|passwd|secret|api[_-]?key|access[_-]?token|auth[_-]?token|client[_-]?secret|private[_-]?key|refresh[_-]?token|session[_-]?token|token)\s*[=:]\s*['\"]?)([A-Za-z0-9_\-+/=.]{16,})"
+)
 # computer names
 _EC2WIN = re.compile(r"\b(?:(?i:EC2AMAZ-[a-z0-9]+)|WIN-[A-Z0-9]{11})\b(?P<sfx>(?:\.[A-Za-z0-9-]+)+)?")
-_EC2DNS = re.compile(r"\b(?:ip-\d{1,3}-\d{1,3}-\d{1,3}-\d{1,3}|ec2-\d{1,3}-\d{1,3}-\d{1,3}-\d{1,3})(?:\.[a-z0-9-]+)*(?:\.compute[a-z0-9-]*\.(?:internal|amazonaws\.com)|\.ec2\.internal|\.internal)\b", re.I)
-_UNC = re.compile(r"(?<![\w$\\:])(\\\\)(?!\.[\\/]|\?[\\/]|wsl\$|wsl\.localhost|localhost\b|[*$]|(?i:users|windows|program|programdata|temp|tmp|system32|device|globalroot|pipe)\b|\d+\.\d+\.\d+\.\d+\\)([A-Za-z0-9][A-Za-z0-9_-]{1,62})(?=\\)")
-_COMPFLAG = re.compile(r"(?i)((?:-(?:ComputerName|Computer|CN|Server|DomainController|PSComputerName)(?:\s+|:|=)|\b(?:schtasks|tasklist|taskkill|systeminfo|shutdown|wmic)\b[^\n|;&]{0,80}?\s/(?:s\s+|node:))['\"]?)([A-Za-z][A-Za-z0-9_-]{1,14})(?![\w.$\\(-])")
+_EC2DNS = re.compile(
+    r"\b(?:ip-\d{1,3}-\d{1,3}-\d{1,3}-\d{1,3}|ec2-\d{1,3}-\d{1,3}-\d{1,3}-\d{1,3})(?:\.[a-z0-9-]+)*(?:\.compute[a-z0-9-]*\.(?:internal|amazonaws\.com)|\.ec2\.internal|\.internal)\b",
+    re.I,
+)
+_UNC = re.compile(
+    r"(?<![\w$\\:])(\\\\)(?!\.[\\/]|\?[\\/]|wsl\$|wsl\.localhost|localhost\b|[*$]|(?i:users|windows|program|programdata|temp|tmp|system32|device|globalroot|pipe)\b|\d+\.\d+\.\d+\.\d+\\)([A-Za-z0-9][A-Za-z0-9_-]{1,62})(?=\\)"
+)
+_COMPFLAG = re.compile(
+    r"(?i)((?:-(?:ComputerName|Computer|CN|Server|DomainController|PSComputerName)(?:\s+|:|=)|\b(?:schtasks|tasklist|taskkill|systeminfo|shutdown|wmic)\b[^\n|;&]{0,80}?\s/(?:s\s+|node:))['\"]?)([A-Za-z][A-Za-z0-9_-]{1,14})(?![\w.$\\(-])"
+)
 # domains
-_PRIVFQDN = re.compile(r"(?<![\w.@-])(?:(?<!/)|(?<=//))((?:[a-z0-9][a-z0-9-]*\.)+(?:local|corp|internal|lan|intranet|localdomain|home\.arpa))(?![\w-])(?!\()(?!\.(?:json|ya?ml|toml|env|js|ts|py|md|txt|cfg|conf|ini|log|bak|example)\b)", re.I)
-_PRIVSKIP = re.compile(r"(?i)^(?:settings|appsettings|env|config|secrets|application|docker-compose|compose|launchSettings|\.env)\.local$")
-_UPN = re.compile(r"\b([\w.-]+)@((?:[\w-]+\.)*[\w-]+\.(?:onmicrosoft\.com|local|corp|internal|lan|intranet|localdomain))\b", re.I)
+_PRIVFQDN = re.compile(
+    r"(?<![\w.@-])(?:(?<!/)|(?<=//))((?:[a-z0-9][a-z0-9-]*\.)+(?:local|corp|internal|lan|intranet|localdomain|home\.arpa))(?![\w-])(?!\()(?!\.(?:json|ya?ml|toml|env|js|ts|py|md|txt|cfg|conf|ini|log|bak|example)\b)",
+    re.I,
+)
+_PRIVSKIP = re.compile(
+    r"(?i)^(?:settings|appsettings|env|config|secrets|application|docker-compose|compose|launchSettings|\.env)\.local$"
+)
+_UPN = re.compile(
+    r"\b([\w.-]+)@((?:[\w-]+\.)*[\w-]+\.(?:onmicrosoft\.com|local|corp|internal|lan|intranet|localdomain))\b", re.I
+)
 # users
-_IDCTX = re.compile(r"(?i)((?:/user:|/ru\s+|/u\s+|-user(?:name)?(?:\s+|:|=)|-credential\s+|-samaccountname\s+|-runasuser\s+|-owner\s+|-principal\s+|/(?:grant|deny|remove|setowner)(?::r)?\s+)['\"]?)([A-Za-z][\w.-]{1,30})\\{1,2}([A-Za-z0-9][\w.$-]{0,40})")
-_SYSDOM = {"NT", "BUILTIN", "WORKGROUP", "NTAUTHORITY", "NTSERVICE", "NTVIRTUALMACHINE", "WINDOWSMANAGER", "FONTDRIVER", "FONT", "IIS", "APPPOOL", "MICROSOFT",
-           "HKLM", "HKCU", "HKCR", "HKU", "HKCC", "HKEY_LOCAL_MACHINE", "HKEY_CURRENT_USER", "HKEY_CLASSES_ROOT", "HKEY_USERS", "SOFTWARE", "SYSTEM", "SAM", "SECURITY", "HARDWARE",
-           "TEMP", "TMP", "APPDATA", "LOCALAPPDATA", "PROGRAMFILES", "PROGRAMDATA", "SYSTEMROOT", "WINDIR", "USERPROFILE", "HOMEPATH", "PUBLIC", "ALLUSERSPROFILE", "CURRENTCONTROLSET",
-           "CONTROLSET001", "MACHINE", "USER", "USERS", "SERVICES", "WINDOWS", "DRIVERS", "CONFIG", "SYSTEM32", "SYSWOW64", "ROOT", "ACL", "ACE", "NTUSER", "CLASSES", "POLICIES",
-           "ENV", "APP", "SYS", "LOCAL", "DOS", "DEVICE", "GLOBALROOT", "STORAGE", "SHARE", "VOLUME", "HOME", "DATA", "BIN", "LIB", "SRC", "TESTS", "TEST", "BUILD", "SCRIPTS", "PROFILE", "AUTHORITY", "SERVICE"}
+_IDCTX = re.compile(
+    r"(?i)((?:/user:|/ru\s+|/u\s+|-user(?:name)?(?:\s+|:|=)|-credential\s+|-samaccountname\s+|-runasuser\s+|-owner\s+|-principal\s+|/(?:grant|deny|remove|setowner)(?::r)?\s+)['\"]?)([A-Za-z][\w.-]{1,30})\\{1,2}([A-Za-z0-9][\w.$-]{0,40})"
+)
+_SYSDOM = {
+    "NT",
+    "BUILTIN",
+    "WORKGROUP",
+    "NTAUTHORITY",
+    "NTSERVICE",
+    "NTVIRTUALMACHINE",
+    "WINDOWSMANAGER",
+    "FONTDRIVER",
+    "FONT",
+    "IIS",
+    "APPPOOL",
+    "MICROSOFT",
+    "HKLM",
+    "HKCU",
+    "HKCR",
+    "HKU",
+    "HKCC",
+    "HKEY_LOCAL_MACHINE",
+    "HKEY_CURRENT_USER",
+    "HKEY_CLASSES_ROOT",
+    "HKEY_USERS",
+    "SOFTWARE",
+    "SYSTEM",
+    "SAM",
+    "SECURITY",
+    "HARDWARE",
+    "TEMP",
+    "TMP",
+    "APPDATA",
+    "LOCALAPPDATA",
+    "PROGRAMFILES",
+    "PROGRAMDATA",
+    "SYSTEMROOT",
+    "WINDIR",
+    "USERPROFILE",
+    "HOMEPATH",
+    "PUBLIC",
+    "ALLUSERSPROFILE",
+    "CURRENTCONTROLSET",
+    "CONTROLSET001",
+    "MACHINE",
+    "USER",
+    "USERS",
+    "SERVICES",
+    "WINDOWS",
+    "DRIVERS",
+    "CONFIG",
+    "SYSTEM32",
+    "SYSWOW64",
+    "ROOT",
+    "ACL",
+    "ACE",
+    "NTUSER",
+    "CLASSES",
+    "POLICIES",
+    "ENV",
+    "APP",
+    "SYS",
+    "LOCAL",
+    "DOS",
+    "DEVICE",
+    "GLOBALROOT",
+    "STORAGE",
+    "SHARE",
+    "VOLUME",
+    "HOME",
+    "DATA",
+    "BIN",
+    "LIB",
+    "SRC",
+    "TESTS",
+    "TEST",
+    "BUILD",
+    "SCRIPTS",
+    "PROFILE",
+    "AUTHORITY",
+    "SERVICE",
+}
 _DOMUSER = re.compile(r"(?<![\w\\./$:-])([A-Z][A-Z0-9-]{2,14})(\\{1,2})([a-z][a-z0-9._-]{2,20})\b(?![\\/:(])")
-_USERDIR = re.compile(r"(?i)((?:[A-Za-z]:|/[a-z]|/mnt/[a-z])?[\\/]+Users[\\/]+)(?!alice\b|Public\b|Default\b|All Users\b)([^\\/\s\"';:*?<>|]+)")
-_USERDIR_BARE = re.compile(r"(?i)(?<![\w\\/.:-])(Users[\\/]+)(?!alice\b|Public\b|Default\b|All Users\b)([^\\/\s\"';:*?<>|]+)")
-_HOMEDIR = re.compile(r"(?<![\w.-])(/(?:home|usr/home)/)(?!alice\b|user\b|username\b|runner\b|[%$*{(\[<~.])([A-Za-z0-9._-]+)")
+_USERDIR = re.compile(
+    r"(?i)((?:[A-Za-z]:|/[a-z]|/mnt/[a-z])?[\\/]+Users[\\/]+)(?!alice\b|Public\b|Default\b|All Users\b)([^\\/\s\"';:*?<>|]+)"
+)
+_USERDIR_BARE = re.compile(
+    r"(?i)(?<![\w\\/.:-])(Users[\\/]+)(?!alice\b|Public\b|Default\b|All Users\b)([^\\/\s\"';:*?<>|]+)"
+)
+_HOMEDIR = re.compile(
+    r"(?<![\w.-])(/(?:home|usr/home)/)(?!alice\b|user\b|username\b|runner\b|[%$*{(\[<~.])([A-Za-z0-9._-]+)"
+)
 # hosts / ids
 _HOST = re.compile(r"\bdc-(?:[a-z0-9]+-)*?(?:win|ewin|rhel|mac|ubuntu|ent|float)[a-z0-9-]*\b", re.I)
 _INSTID = re.compile(r"\bi-[0-9a-f]{8}(?:[0-9a-f]{9})?\b")
@@ -81,15 +184,22 @@ _SID = re.compile(r"\bS-1-5-21-(\d+)-(\d+)-(\d+)((?:-\d+)?)")
 _KEEP_V4 = ("0.", "127.", "192.0.2.", "198.51.100.", "203.0.113.", "255.")
 # Keep-list: cloud metadata endpoints and cluster-internal names are the TARGET of real attacks (credential theft from IMDS, SSRF to the Kubernetes API) and are public,
 # fixed values. Rewriting them would erase the attack text, so redact() and the leak scan leave them alone.
-_KEEP_NETS = tuple(ipaddress.ip_network(n) for n in ("169.254.0.0/16", "100.100.100.200/32", "168.63.129.16/32", "fd00:ec2::/32", "fd00:ec2::254/128"))
-_KEEP_NAME = re.compile(r"(?i)^(?:metadata(?:\.google\.internal)?|instance-data(?:\.ec2\.internal)?|metadata\.goog|kubernetes\.default(?:\.svc)?(?:\.cluster\.local)?|"
-                        r"(?:[a-z0-9-]+\.)*(?:cluster\.local|docker\.internal))$")
+_KEEP_NETS = tuple(
+    ipaddress.ip_network(n)
+    for n in ("169.254.0.0/16", "100.100.100.200/32", "168.63.129.16/32", "fd00:ec2::/32", "fd00:ec2::254/128")
+)
+_KEEP_NAME = re.compile(
+    r"(?i)^(?:metadata(?:\.google\.internal)?|instance-data(?:\.ec2\.internal)?|metadata\.goog|kubernetes\.default(?:\.svc)?(?:\.cluster\.local)?|"
+    r"(?:[a-z0-9-]+\.)*(?:cluster\.local|docker\.internal))$"
+)
 
 
 def _keep_ip(a) -> bool:
     return any(a in n for n in _KEEP_NETS if n.version == a.version)
+
+
 _maps: dict[str, dict] = {}
-_deny: list = []   # [(compiled regex, {lowercased value -> category})]
+_deny: list = []  # [(compiled regex, {lowercased value -> category})]
 
 
 def reset() -> None:
@@ -131,7 +241,21 @@ def _nb(v: str) -> str:
     return v if _is_ph(v, r"labdom\d+") else f"LABDOM{_n('dom', v)}"
 
 
-_KEEPUSER = {"administrator", "administrators", "guest", "system", "krbtgt", "defaultaccount", "wdagutilityaccount", "admin", "root", "everyone", "users", "domain admins", "domain users"}
+_KEEPUSER = {
+    "administrator",
+    "administrators",
+    "guest",
+    "system",
+    "krbtgt",
+    "defaultaccount",
+    "wdagutilityaccount",
+    "admin",
+    "root",
+    "everyone",
+    "users",
+    "domain admins",
+    "domain users",
+}
 
 
 def _user(v: str) -> str:
@@ -221,7 +345,7 @@ def _idctx(m: re.Match) -> str:
     dom, user = m.group(2), m.group(3)
     if dom.upper().replace(" ", "") in _SYSDOM or _is_ph(dom, r"labdom\d+|labpc\d+"):
         return m.group(0)
-    sep = "\\\\" if "\\\\" in m.group(0)[len(m.group(1)):] else "\\"
+    sep = "\\\\" if "\\\\" in m.group(0)[len(m.group(1)) :] else "\\"
     return m.group(1) + _nb(dom.upper() if dom.isupper() else dom) + sep + _user(user)
 
 
@@ -243,7 +367,10 @@ def load_denylist(path: str) -> int:
     _deny = []
     if ents:
         vals = sorted(ents, key=len, reverse=True)
-        rx = re.compile(r"(?<![A-Za-z0-9])(?:" + "|".join(re.escape(v).replace("\\\\", r"\\+") for v in vals) + r")(?![A-Za-z0-9])", re.I)
+        rx = re.compile(
+            r"(?<![A-Za-z0-9])(?:" + "|".join(re.escape(v).replace("\\\\", r"\\+") for v in vals) + r")(?![A-Za-z0-9])",
+            re.I,
+        )
         _deny.append((rx, ents))
     return len(ents)
 
@@ -365,11 +492,27 @@ def redact_obj(o):
 
 # Leak scan: pattern categories (no real values), plus the real-values denylist. Run on every string of every row.
 LEAK_PATTERNS = {
-    "ipv4": _IP, "ipv6": _IP6, "mac": _MAC, "sid": _SID, "computername": _EC2WIN, "ec2dns": _EC2DNS, "unc": _UNC, "compflag": _COMPFLAG,
-    "email": re.compile(r"\b(?!git@)[\w.+-]+@(?!(?:[\w-]+\.)*example\.com\b)[\w-]+(?:\.[\w-]+)+\b"), "upn": _UPN, "idctx": _IDCTX,
-    "domuser": _DOMUSER, "privfqdn": _PRIVFQDN, "labhost": _HOST,
-    "userdir": _USERDIR, "userdir_bare": _USERDIR_BARE, "homedir": _HOMEDIR, "instance": _INSTID, "awsres": _AWSRES,
-    "account": _ACCT, "secret": re.compile("|".join(r.pattern for r in _SECRETS[:9])),
+    "ipv4": _IP,
+    "ipv6": _IP6,
+    "mac": _MAC,
+    "sid": _SID,
+    "computername": _EC2WIN,
+    "ec2dns": _EC2DNS,
+    "unc": _UNC,
+    "compflag": _COMPFLAG,
+    "email": re.compile(r"\b(?!git@)[\w.+-]+@(?!(?:[\w-]+\.)*example\.com\b)[\w-]+(?:\.[\w-]+)+\b"),
+    "upn": _UPN,
+    "idctx": _IDCTX,
+    "domuser": _DOMUSER,
+    "privfqdn": _PRIVFQDN,
+    "labhost": _HOST,
+    "userdir": _USERDIR,
+    "userdir_bare": _USERDIR_BARE,
+    "homedir": _HOMEDIR,
+    "instance": _INSTID,
+    "awsres": _AWSRES,
+    "account": _ACCT,
+    "secret": re.compile("|".join(r.pattern for r in _SECRETS[:9])),
 }
 
 
@@ -386,7 +529,13 @@ def _hit_ok(name: str, m: re.Match) -> bool:
             a = ipaddress.ip_address(s.split("%")[0])
         except ValueError:
             return True
-        return a.version != 6 or a.is_loopback or a.is_unspecified or a in ipaddress.ip_network("2001:db8::/32") or _keep_ip(a)
+        return (
+            a.version != 6
+            or a.is_loopback
+            or a.is_unspecified
+            or a in ipaddress.ip_network("2001:db8::/32")
+            or _keep_ip(a)
+        )
     if name == "mac":
         low = s.lower().replace("-", ":")
         return low in ("ff:ff:ff:ff:ff:ff", "00:00:00:00:00:00") or low.startswith("00:00:5e:00:53:")
@@ -442,7 +591,7 @@ def _expand_alternations(s: str, cap: int = 64) -> list[str]:
             out.append(cur)
             continue
         for alt in (m.group(1) or m.group(2)).split("|"):
-            todo.append(cur[: m.start()] + alt + cur[m.end():])
+            todo.append(cur[: m.start()] + alt + cur[m.end() :])
     return out
 
 
@@ -538,15 +687,42 @@ SHELL_TOOL = {"claudecode": "PowerShell", "codex": "Bash", "cursor": "Shell", "o
 PROVIDERS = ["claudecode", "codex", "cursor", "opencode", "kiro"]
 
 
-def mkcase(cid: str, src: str, original_id: str, tool: str, args: dict, command: str | None, dialect: str, provider: str, *, truth: str,
-           cats: list[str], label_source: str, conf: str = "high", disp: str | None = None, actions: dict | None = None,
-           rule_ids: list[str] | None = None, cwd: str = "C:\\Users\\alice\\proj", campaign: str = "windows-shell", hard_neg: bool = False,
-           applicability: str = "in_scope", exclusion: str = "", platform: str = "windows", domain: str = "windows-shell") -> dict:
+def mkcase(
+    cid: str,
+    src: str,
+    original_id: str,
+    tool: str,
+    args: dict,
+    command: str | None,
+    dialect: str,
+    provider: str,
+    *,
+    truth: str,
+    cats: list[str],
+    label_source: str,
+    conf: str = "high",
+    disp: str | None = None,
+    actions: dict | None = None,
+    rule_ids: list[str] | None = None,
+    cwd: str = "C:\\Users\\alice\\proj",
+    campaign: str = "windows-shell",
+    hard_neg: bool = False,
+    applicability: str = "in_scope",
+    exclusion: str = "",
+    platform: str = "windows",
+    domain: str = "windows-shell",
+) -> dict:
     ds, lic, red = DATASET_BY_SRC[src]
     payload: dict = {"tool_name": tool, "args": args, "dialect": dialect, "direction": "tool_call", "cwd": cwd}
     if command is not None:
         payload["command"] = command
-    t: dict = {"applicability": applicability, "categories": sorted(set(cats)), "label_confidence": conf, "label_source": label_source, "source_truth": truth}
+    t: dict = {
+        "applicability": applicability,
+        "categories": sorted(set(cats)),
+        "label_confidence": conf,
+        "label_source": label_source,
+        "source_truth": truth,
+    }
     if truth == "benign":
         t.update(deterministic_truth="benign", expected_disposition="allow")
     elif truth == "malicious":
@@ -561,12 +737,32 @@ def mkcase(cid: str, src: str, original_id: str, tool: str, args: dict, command:
         t["rule_ids"] = sorted(set(rule_ids))
     h = sha(cid)
     return {
-        "id": cid, "payload": payload, "schema_version": "1",
-        "source": {"dataset": ds, "license": lic, "original_id": original_id[:240], "redistribution": red, "revision": REVISION},
+        "id": cid,
+        "payload": payload,
+        "schema_version": "1",
+        "source": {
+            "dataset": ds,
+            "license": lic,
+            "original_id": original_id[:240],
+            "redistribution": red,
+            "revision": REVISION,
+        },
         "split": "test",
-        "strata": {"call_index": 0, "campaign": campaign, "dialect": dialect, "domain": domain, "ecosystem": "coding_agent", "hard_negative": hard_neg,
-                   "platform": platform, "provider": provider, "sequence_index": 0, "split_group": h[:24], "trajectory_id": h[:32]},
-        "surface": "action", "truth": t,
+        "strata": {
+            "call_index": 0,
+            "campaign": campaign,
+            "dialect": dialect,
+            "domain": domain,
+            "ecosystem": "coding_agent",
+            "hard_negative": hard_neg,
+            "platform": platform,
+            "provider": provider,
+            "sequence_index": 0,
+            "split_group": h[:24],
+            "trajectory_id": h[:32],
+        },
+        "surface": "action",
+        "truth": t,
     }
 
 

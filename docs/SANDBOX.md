@@ -589,7 +589,9 @@ Each request passes these steps in order:
 
 1. **Authenticate.** Exactly one `Authorization: Bearer` header must carry a
    live binding credential, or the answer is 401. OpenShell substitutes the
-   credential into every header and the query string of a bound endpoint, so
+   credential into the `Authorization` header of a bound endpoint (OpenShell
+   0.1.8 and later; 0.1.6 and 0.1.7 also into every header and the query
+   string), so
    a credential anywhere else (another header, the host, the path, the query,
    percent- or Basic-encoded) answers 400: it would otherwise be echoed back
    or written to audit sinks.
@@ -3179,7 +3181,7 @@ service) in September 2026, with Claude Code 2.1.156 and Codex 0.146.0.
 | Behaviour | Design consequence |
 | --- | --- |
 | A placeholder is opaque and scoped to a policy revision (`openshell:resolve:env:v<revision>_<KEY>`); an unversioned one gets HTTP 500. | Hooks and OTLP helpers read the variable per request; launchers refresh first-run state on each start. |
-| Placeholders are substituted in any header and in the query string on bound endpoints, including plain-HTTP `protocol: rest` endpoints, but not in bodies. | The ingress accepts the credential only in `Authorization` and refuses it anywhere else. |
+| Placeholders are substituted only where the provider profile places the credential (`Authorization` for a bearer binding; OpenShell 0.1.8 and later), or on 0.1.6 and 0.1.7 in any header and in the query string, on bound endpoints including plain-HTTP `protocol: rest` endpoints, but not in bodies. | The ingress accepts the credential only in `Authorization` and refuses it anywhere else. |
 | Provider profiles are imported one file at a time; their rules appear as `_provider_<name>`. | `Client.ImportProfiles` imports items one by one. |
 
 ### Images, mounts and harnesses
@@ -3249,7 +3251,7 @@ nothing of the vm driver, but the names of its caches carry the release
   `>=0.1.1 <0.1.6` (`LegacyMin`, `CheckConnects`, prereleases of 0.1.6
   included) only to move the host off it. The
   installer code (`openshell.Installer`) runs the upstream installer from the
-  v0.1.6 tag (`InstallerVersion`) only after checking it against a pinned
+  v0.1.9 tag (`InstallerVersion`) only after checking it against a pinned
   SHA-256 for that tag; the release comes from `OPENSHELL_VERSION`.
   Releases before 0.0.37 must be cleaned up
   with the old CLI first; later ones upgrade in place. A supported release

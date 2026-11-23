@@ -682,6 +682,8 @@ if [ "$ACTION" = "block" ]; then
   case "$COPILOT_HOOK_EVENT" in
     preToolUse) NATIVE_DENY=$(echo "$OUTPUT" | _dc_jq -r '.permissionDecision == "deny"' 2>/dev/null) || fail_response "invalid native output in gateway response" ;;
     permissionRequest) NATIVE_DENY=$(echo "$OUTPUT" | _dc_jq -r '.behavior == "deny"' 2>/dev/null) || fail_response "invalid native output in gateway response" ;;
+    # The replaced prompt is the block of a prompt (GAP-1730).
+    userPromptTransformed) NATIVE_DENY=$(echo "$OUTPUT" | _dc_jq -r '(.modifiedTransformedPrompt | type) == "string" and (.modifiedTransformedPrompt | length) > 0' 2>/dev/null) || fail_response "invalid native output in gateway response" ;;
     *) fail_response "unsupported native block in gateway response" ;;
   esac
   [ "$NATIVE_DENY" = "true" ] || fail_response "missing native deny in gateway response"
@@ -713,6 +715,7 @@ if [ "$FAIL_MODE" != "open" ]; then
     preToolUse:confirm) NATIVE_ANSWER=$(echo "$OUTPUT" | _dc_jq -r '.permissionDecision == "ask"' 2>/dev/null) || NATIVE_ANSWER=false ;;
     permissionRequest:block) NATIVE_ANSWER=$(echo "$OUTPUT" | _dc_jq -r '.behavior == "deny"' 2>/dev/null) || NATIVE_ANSWER=false ;;
     permissionRequest:confirm) NATIVE_ANSWER=$(echo "$OUTPUT" | _dc_jq -r '.behavior == "ask"' 2>/dev/null) || NATIVE_ANSWER=false ;;
+    userPromptTransformed:block) NATIVE_ANSWER=$(echo "$OUTPUT" | _dc_jq -r '(.modifiedTransformedPrompt | type) == "string" and (.modifiedTransformedPrompt | length) > 0' 2>/dev/null) || NATIVE_ANSWER=false ;;
   esac
   if [ "$NATIVE_ANSWER" != "true" ]; then
     case "$ACTION" in

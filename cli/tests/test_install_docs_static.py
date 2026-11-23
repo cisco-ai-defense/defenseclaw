@@ -63,7 +63,7 @@ INSTALLER_FILES = (
 OBSERVABILITY_V8_CURRENT_AUTHORITY_FILES = (
     "docs-site/components/command-generator.tsx",
     "docs-site/content/docs/command-generator.mdx",
-    "docs-site/content/docs/guardrail/aliases.mdx",
+    "docs-site/content/docs/connectors/aliases.mdx",
     "docs-site/content/docs/connectors/openclaw.mdx",
     "docs-site/content/docs/connectors/zeptoclaw.mdx",
     "docs-site/content/docs/connectors/claudecode.mdx",
@@ -1027,7 +1027,7 @@ def test_v9_migration_docs_name_the_released_config_v8_source() -> None:
         "reference/cli.mdx",
         "reference/configuration.mdx",
         "enterprise/lifecycle.mdx",
-        "guardrail/unified-llm-key.mdx",
+        "get-started/unified-llm-key.mdx",
         "policies/admission.mdx",
     ):
         assert not re.search(r"\b1\.0\.x\b|the 1\.0 (?:behavior|admission)", (docs / page).read_text(encoding="utf-8")), page
@@ -1072,7 +1072,7 @@ def test_profile_docs_apply_levels_to_content_decisions() -> None:
 
 
 def test_provider_docs_explain_legacy_overlay_migration() -> None:
-    text = (ROOT / "docs-site/content/docs/guardrail/unified-llm-key.mdx").read_text(encoding="utf-8")
+    text = (ROOT / "docs-site/content/docs/get-started/unified-llm-key.mdx").read_text(encoding="utf-8")
     section = text.split("Manage the entries with", 1)[1].split("```bash", 1)[0]
     assert "migration" in section and "request_overrides" in section
     assert "live input" in section and "0.8.x" in section

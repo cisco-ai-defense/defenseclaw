@@ -1,12 +1,12 @@
 package actionfacts
 
 import (
+	"runtime"
 	"slices"
 	"testing"
 )
 
 func TestGAP1182WrapperChildShellBodyReadings(t *testing.T) {
-	skipPOSIXPathsOnWindows(t)
 	for _, prefix := range []string{
 		"chroot / ", "chroot --userspec=1000:1000 / ",
 		"nsenter -t 1 ", "nsenter --target=1 ",
@@ -23,7 +23,6 @@ func TestGAP1182WrapperChildShellBodyReadings(t *testing.T) {
 }
 
 func TestGAP1183TopLevelHereDocBodyReadings(t *testing.T) {
-	skipPOSIXPathsOnWindows(t)
 	// want: "body", the body is read here as the script of the consumer;
 	// "unknown", the unknown tier; "strict", the strict tiers only (a data
 	// program after a PATH change, rel-1-0-10:GAP-1481); "none", this reader adds nothing because
@@ -70,7 +69,6 @@ func TestGAP1183TopLevelHereDocBodyReadings(t *testing.T) {
 }
 
 func TestGAP1183OrdinaryHereDocDataKeepsReleaseReading(t *testing.T) {
-	skipPOSIXPathsOnWindows(t)
 	for _, command := range []string{
 		"python3 - <<'EOF'\nprint('hello')\nEOF",
 		"cat <<'EOF' | python3 -\nprint('hello')\nEOF",
@@ -96,7 +94,6 @@ func TestGAP1183OrdinaryHereDocDataKeepsReleaseReading(t *testing.T) {
 // (the FU9 owner A/B rows where a recovered panic became a parse-failure
 // alert).
 func TestGAP1183EmptyHereDocBodyReadsNothing(t *testing.T) {
-	skipPOSIXPathsOnWindows(t)
 	for _, command := range []string{
 		"python3 - <<EOF\nEOF",
 		"cd /work && python3 - <<EOF\nEOF",
@@ -118,7 +115,14 @@ func TestGAP1183EmptyHereDocBodyReadsNothing(t *testing.T) {
 }
 
 func TestGAP1241NestedWrapperChildFolder(t *testing.T) {
-	skipPOSIXPathsOnWindows(t)
+	if runtime.GOOS == "windows" {
+		// The chroot root and nsenter --wd folders are read with native
+		// path rules on Windows (chroot / joins "/" under the current
+		// folder), not the POSIX rules the cd walk uses: a product fix,
+		// rel-1-0-10:GAP-1881. The other POSIX directory rows of this
+		// package run on Windows.
+		t.Skip("POSIX directory rows (GAP-1038); chroot and nsenter --wd use native path rules on Windows (GAP-1881)")
+	}
 	for _, row := range []struct {
 		name, command, cwd string
 		unknown            bool

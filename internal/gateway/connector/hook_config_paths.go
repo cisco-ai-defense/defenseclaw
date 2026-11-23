@@ -18,6 +18,7 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
+	"golang.org/x/mod/semver"
 	"gopkg.in/yaml.v3"
 )
 
@@ -679,6 +680,37 @@ func priorReleaseHookRender(rendered interface{}) interface{} {
 		return out
 	}
 	return rendered
+}
+
+// hermesFailClosedFirstRelease is the first DefenseClaw release whose Hermes
+// setup put fail_closed on the pre_tool_call entry of the hermes-hooks-v2
+// matrix on the standalone profile (da48b147f9, DefenseClaw 1.0.4).
+const hermesFailClosedFirstRelease = "v1.0.4"
+
+// HermesReleaseRegisteredWithoutFailClosed reports that DefenseClaw release
+// predates fail_closed in the Hermes matrix, so the hooks it registered lack
+// it. The earlier-matrix sign-in wait (HookRegistrationLacksOnlyFailClosed)
+// needs it: the Hermes config is in the account's profile and its owner can
+// write it. release is the defenseclaw_version of the target's hook-contract
+// lock, which the account can write too, so the caller passes it only after
+// the administrator-only machine release history proved this computer ran
+// that release. A release from 1.0.4 on registered fail_closed itself, so a
+// config without it was changed after the render (GAP-1537). A version that
+// does not parse reads as no.
+func HermesReleaseRegisteredWithoutFailClosed(release string) bool {
+	v := strings.TrimSpace(release)
+	if v == "" {
+		return false
+	}
+	if !strings.HasPrefix(v, "v") {
+		v = "v" + v
+	}
+	if !semver.IsValid(v) {
+		return false
+	}
+	// A pre-release or build of a release renders what that release renders.
+	v = strings.TrimSuffix(semver.Canonical(v), semver.Prerelease(v))
+	return semver.Compare(v, hermesFailClosedFirstRelease) < 0
 }
 
 // HookRegistrationLacksOnlyFailClosed reports a Hermes registration that

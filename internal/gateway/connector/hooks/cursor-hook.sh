@@ -209,19 +209,20 @@ defenseclaw_install_held() {
   defenseclaw_install_lock_held "${DEFENSECLAW_HOME:-${HOME:+${HOME}/.defenseclaw}}" && return 0
   [ -n "${_DC_HOOK_DATA_DIR:-}" ] && defenseclaw_install_lock_held "${_DC_HOOK_DATA_DIR}"
 }
-# A failure before the helpers load (a hook path that does not resolve, a
-# missing or broken _hardening.sh, a set -e error) blocks with exit 2
-# in fail mode closed, under strict availability and while this account's
-# installer holds its data directory; fail mode open keeps the exit status.
-# The installed mode decides (GAP-0315).
-# defenseclaw_harden_env replaces this trap with the hook's own.
+# A failure (a hook path that does not resolve, a missing or broken
+# _hardening.sh, a set -e error, an unbound variable, before or after the
+# helpers load) blocks with Cursor's deny object and exit 2 in fail mode
+# closed, under strict availability and while this account's installer holds
+# its data directory; fail mode open keeps the exit status. The installed
+# mode decides (GAP-0315). The exit guard (shell-exit-guard) stays the EXIT
+# trap to the end (GAP-1734).
 _DC_BOOT_FAIL_MODE="{{.FailMode}}"
 defenseclaw_boot_fails_closed() {
   [ "$_DC_BOOT_FAIL_MODE" = "open" ] || return 0
   case "${DEFENSECLAW_STRICT_AVAILABILITY:-}" in 1|true|TRUE|yes|YES) return 0 ;; esac
   defenseclaw_install_held
 }
-trap '_dc_boot_rc=$?; if [ "$_dc_boot_rc" -ne 0 ] && defenseclaw_boot_fails_closed; then exit 2; fi' EXIT
+{{template "shell-exit-guard" .}}
 {{end}}# Windows: HOME may be unset when agents spawn hooks. Fall back to USERPROFILE.
 HOME="${HOME:-${USERPROFILE:-$(cd ~ 2>/dev/null && pwd)}}"
 export HOME
@@ -306,6 +307,7 @@ _DC_SECURE_CLIENT_DELIVERY={{if .SecureClientDelivery}}1{{else}}0{{end}}
 {{end}}DEFENSECLAW_HOME="$(cd "${HOOK_DIR}/.." && pwd -P)"
 export DEFENSECLAW_HOME
 {{if .ManagedShellGuard}}{{template "managed-prologue" .}}
+{{else if and (not .SecureClient) (not .Sandbox)}}{{template "shell-exit-guard" .}}
 {{end}}{{else}}
 # A per-user render is never a managed or Secure Client hook: those markers
 # come only from a managed render (the branch above), never from the

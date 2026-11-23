@@ -15,12 +15,11 @@ import (
 
 const postgreSQLCopyProgramRuleID = "exec.postgresql_copy_program"
 
-
 func TestPostgreSQLCopyProgramPSQLCLIAlerts(t *testing.T) {
 	input := actionfacts.Input{
-		Tool: "shell",
+		Tool:    "shell",
 		Command: `psql -d production -c "COPY audit.events FROM PROGRAM 'printf data';"`,
-		CWD: "/repo",
+		CWD:     "/repo",
 	}
 	findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
 		Input: input, LegacyText: input.Command, EnforcementCapable: true,

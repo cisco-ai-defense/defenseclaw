@@ -1,0 +1,120 @@
+---
+title: Fix a false block
+description: Stop the guardrail from blocking or alerting on work you trust. Pick the narrowest fix for the layer that decided, check it worked, and undo it.
+keywords:
+  - false positive
+  - false block
+  - allow a blocked call
+  - guardrail rule disable
+  - guardrail suppress
+  - tool allow
+  - guardrail mode observe
+  - rule severity
+---
+
+The guardrail blocked something it should not have. Find what decided, then use the smallest change that fixes it. Each fix takes effect on the next gateway reload, with no restart. The one exception is `guardrail judge remove`, which restarts the gateway for you.
+
+CRITICAL findings cannot be approved at the prompt. Change the rule, not the call.
+
+## Find what decided
+
+Follow [why was this blocked](/docs/guardrail/why-blocked). You need the rule ID (for example `C2-WEBHOOK-SITE`) and the layer it came from. The first letters of the ID tell you: a rule ID starting `SEC-`, `C2-`, `PATH-` or `CMD-` is a rule, `JUDGE-` is a model.
+
+```bash
+defenseclaw alerts --connector claudecode --limit 25
+defenseclaw alerts --connector claudecode --limit 25 --show 1    # its Rule: line names the ID
+```
+
+## Pick the narrowest fix
+
+| What decided | Fix | Effect |
+| --- | --- | --- |
+| One call, once | [Human approval](/docs/guardrail/human-approval) | You approve the call. It works only for a finding below the block level, on an agent that can ask. |
+| A rule | `defenseclaw guardrail rule disable ID --connector X` | The rule is off for that agent. |
+| A rule that is right sometimes | `defenseclaw guardrail rule severity ID medium --connector X` | The rule stays, at a level below your block level. |
+| Text a model flagged (`JUDGE-PII-…`) | `defenseclaw guardrail suppress add` | Drops that judge finding when its ID and the matched text match. |
+| A tool you reviewed | `defenseclaw tool allow NAME --connector X` | The tool skips the scan gate. |
+| The LLM judge on a tool call (`JUDGE-TOOL-…`) | `defenseclaw guardrail judge remove X`, or `guardrail.cascade.judge.max_action: alert` | The judge stops, or can only alert. |
+| The decision model (`JUDGE-DECISION-MODEL`) | Raise `decision_model.block_threshold` or `decision_model.block_risk_score`, or set `decision_model.enabled` to `false` | It blocks less, or not at all. |
+| An input too long to read in full (`CASCADE-UNKNOWN-FLOOR`) | `guardrail.cascade.unknown: alert` | The call alerts instead of blocking. |
+| The whole pack is too strict | `defenseclaw guardrail use-pack default --connector X`, or `defenseclaw guardrail block-at CRITICAL --connector X` | A looser pack, or a higher block level. |
+| You are still tuning | `defenseclaw guardrail mode observe --connector X` | Nothing blocks; findings are recorded and `alerts` says `would block (observe mode)`. |
+
+Suppressions act on the LLM judge only. They never silence a rule finding; for a rule use `rule disable` or `rule severity`. See the [suppression cookbook](/docs/policies/suppression-cookbook).
+
+## Steps: turn off one rule for one agent
+
+1. List the alerts, then show the one you want. The `1` is the row number; with more than 25 rows, raise `--limit` in both commands.
+
+   ```bash
+   defenseclaw alerts --connector claudecode --limit 25
+   defenseclaw alerts --connector claudecode --limit 25 --show 1
+   ```
+
+   The `Rule:` line names it, for example `C2-WEBHOOK-SITE`.
+
+2. Turn the rule off for that agent.
+
+   ```bash
+   defenseclaw guardrail rule disable C2-WEBHOOK-SITE --connector claudecode
+   ```
+
+   ```text
+     OK Rule C2-WEBHOOK-SITE is turned off for Claude Code. Saved (config generation 18). The running gateway applies it on its next reload.
+   ```
+
+   Or keep the rule and lower it, so the call alerts without blocking:
+
+   ```bash
+   defenseclaw guardrail rule severity C2-WEBHOOK-SITE medium --connector claudecode
+   ```
+
+3. For a model finding on text that is safe, drop only the matching finding, with a recorded reason:
+
+   ```bash
+   defenseclaw guardrail suppress add ACME-SUPP-BUILD-EMAIL \
+     --finding JUDGE-PII-EMAIL --entity '@build[.]acme[.]example$' \
+     --reason "Build bot addresses are not personal data" --connector claudecode
+   ```
+
+4. Or allow a tool you reviewed. An allowed tool skips rule, pattern and judge scanning, so allow only what you vetted. A write tool still gets a code check.
+
+   ```bash
+   defenseclaw tool allow Bash --connector claudecode --reason "vetted"
+   ```
+
+   ```text
+   [tool] 'Bash' (connector 'claudecode') added to allow list
+   ```
+
+On a managed computer the administrator makes these changes in the managed config. The per-user commands refuse there.
+
+## Check it worked
+
+Run the same call again. No alert appears for it, and `defenseclaw alerts --limit 5` shows no new row for the rule. To see the setting itself, `defenseclaw guardrail cascade explain --connector claudecode` and `defenseclaw config get guardrail.rules`.
+
+## Undo
+
+```bash
+defenseclaw guardrail rule enable C2-WEBHOOK-SITE --connector claudecode
+defenseclaw guardrail rule severity C2-WEBHOOK-SITE default --connector claudecode
+defenseclaw guardrail suppress remove ACME-SUPP-BUILD-EMAIL --connector claudecode
+defenseclaw tool unblock Bash --connector claudecode
+defenseclaw guardrail mode action --connector claudecode
+```
+
+## Change what a rule matches
+
+When a rule is too broad, narrow it instead of turning it off. Copy the pack, edit it, validate it, and select it. Do not edit a bundled pack in place.
+
+```bash
+cp -R ~/.defenseclaw/policies/guardrail/default ~/my-guardrail-pack
+defenseclaw guardrail validate-pack ~/my-guardrail-pack
+defenseclaw guardrail use-pack ~/my-guardrail-pack --connector claudecode
+```
+
+`use-pack` pins the pack by its digest. If you edit the pack later, the gateway keeps the old policy; `defenseclaw doctor` fails the **Config validation** and **Rule pack** rows and skips **Policy** until you pin the new `files digest` (the Rule pack row prints the `config set` command). [Rules and custom packs](/docs/policies/rules) has the details, and [customize the guardrail](/docs/guardrail/customize) covers the other layers.
+
+## If it keeps happening
+
+A rule that blocks ordinary work for many people should change in the pack, not be turned off one agent at a time. Check the default posture first: the `default` pack blocks only CRITICAL findings and alerts from MEDIUM, and `strict` blocks from MEDIUM ([thresholds](/docs/policies/thresholds)). Then look at the layer: a judge or decision model on a model you did not choose can add noise, and [the benchmarks](/docs/guardrail/benchmarks) show what each layer does to benign work.

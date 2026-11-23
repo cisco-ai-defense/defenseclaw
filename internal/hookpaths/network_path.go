@@ -671,6 +671,16 @@ func networkShareError(op, name string) error {
 	return &fs.PathError{Op: op, Path: name, Err: errNetworkShareUnanswered}
 }
 
+// localReadUnanswered reports a read of path that did not answer
+// (errNetworkShareUnanswered) while the gate places path on no network
+// share: a local folder read past networkShareAnswerWait (stillPlain). What
+// that read would have shown is unknown, not absent (rel-1-0-10:GAP-1804).
+// A path on a share is not reported: a file there cannot be a hard link to
+// a local file, so a slow share keeps its answer.
+func localReadUnanswered(path string, err error) bool {
+	return errors.Is(err, errNetworkShareUnanswered) && path != "" && networkShareRootOf(path) == ""
+}
+
 // The file system reads of the target scans and of the write-target walk.
 // Each reads a local path as the os function does, and a path below a
 // network share only once the share has answered (networkPathGate). Each

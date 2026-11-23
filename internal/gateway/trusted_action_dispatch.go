@@ -4344,7 +4344,12 @@ func placedStatementStateWrite(facts actionfacts.Facts, request trustedActionReq
 			if !ok || !stateCommandMutatesPath(command, candidate) {
 				continue
 			}
-			if active, same := hookpaths.ResolveActiveStateHardlinkTarget(candidate.Resolved, projected.ActiveHome); same {
+			// A target the state index could not rule out is not proved free of the
+			// state: refused, as an unfinished walk refuses a patch target (GAP-1789).
+			switch active, same, complete := hookpaths.ResolveActiveStateHardlinkTarget(candidate.Resolved, projected.ActiveHome); {
+			case !complete:
+				return true
+			case same:
 				candidate.Resolved = active
 			}
 			if matchesActiveDefenseClawState(projected, candidate) {
@@ -4399,7 +4404,11 @@ func provenStateCandidateMatches(
 			// find that starts there (`yes | find ~ ...`, which the
 			// client lists no target for) is judged from it (GAP-2404
 			// pod ip21, managed RHEL).
-			physical, _ = hookpaths.ResolveActiveStateHardlinkTarget(candidate.Resolved, projected.ActiveHome)
+			active, _, complete := hookpaths.ResolveActiveStateHardlinkTarget(candidate.Resolved, projected.ActiveHome)
+			if !complete {
+				return true // not proved free of the state (GAP-1789)
+			}
+			physical = active
 			if physical == "" && path.IsAbs(candidate.Resolved) &&
 				path.Clean(candidate.Resolved) == path.Clean(projected.ActiveHome) {
 				physical = path.Clean(candidate.Resolved)
@@ -4409,14 +4418,27 @@ func provenStateCandidateMatches(
 				physical, _ = hookpaths.WalkFactTarget(request.ResolvedWriteTargets, candidate.Resolved)
 			}
 		} else {
-			physical, _ = hookpaths.ResolveWriteTarget(driveFSPath(request, gitBashOperandSpelling(candidate)))
+			spelled := driveFSPath(request, gitBashOperandSpelling(candidate))
+			physical, _ = hookpaths.ResolveWriteTarget(spelled)
+			if physical == "" {
+				// A target whose own local read did not answer is not
+				// proved free of the state (rel-1-0-10:GAP-1804).
+				if _, same, complete := hookpaths.ResolveActiveStateHardlinkTarget(spelled, projected.ActiveHome); same || !complete {
+					return true
+				}
+			}
 			physical = driveViewPath(request, physical)
 		}
 	}
 	if physical == "" {
 		return false
 	}
-	if active, same := hookpaths.ResolveActiveStateHardlinkTarget(physical, projected.ActiveHome); same {
+	// A target the state index could not rule out is not proved free of the
+	// state: refused, as an unfinished walk refuses a patch target (GAP-1789).
+	switch active, same, complete := hookpaths.ResolveActiveStateHardlinkTarget(physical, projected.ActiveHome); {
+	case !complete:
+		return true
+	case same:
 		physical = active
 	}
 	if candidate.Flavor == actionfacts.PathFlavorPOSIX {
@@ -5465,7 +5487,12 @@ func provenFollowedInPlaceStateWrite(facts actionfacts.Facts, request trustedAct
 				targets = append(targets, physical)
 			}
 			for _, target := range targets {
-				if active, same := hookpaths.ResolveActiveStateHardlinkTarget(target, projected.ActiveHome); same {
+				// A target the state index could not rule out is not proved free of the
+				// state: refused, as an unfinished walk refuses a patch target (GAP-1789).
+				switch active, same, complete := hookpaths.ResolveActiveStateHardlinkTarget(target, projected.ActiveHome); {
+				case !complete:
+					return true
+				case same:
 					target = active
 				}
 				written := actionfacts.PathFact{
@@ -5572,7 +5599,12 @@ func linkedActiveStateWrite(
 		if physical == "" || physical == value || !filepath.IsAbs(physical) {
 			return false
 		}
-		if active, same := hookpaths.ResolveActiveStateHardlinkTarget(physical, projected.ActiveHome); same {
+		// A target the state index could not rule out is not proved free of the
+		// state: refused, as an unfinished walk refuses a patch target (GAP-1789).
+		switch active, same, complete := hookpaths.ResolveActiveStateHardlinkTarget(physical, projected.ActiveHome); {
+		case !complete:
+			return true
+		case same:
 			physical = active
 		}
 		linked := candidate
@@ -5593,11 +5625,23 @@ func linkedActiveStateWrite(
 			}
 		} else {
 			physical, ok = hookpaths.ResolveWriteTarget(target)
+			if !ok {
+				// A target whose own local read did not answer is not
+				// proved free of the state (rel-1-0-10:GAP-1804).
+				if _, same, complete := hookpaths.ResolveActiveStateHardlinkTarget(target, projected.ActiveHome); same || !complete {
+					return true
+				}
+			}
 		}
 		if !ok || physical == target {
 			continue
 		}
-		if active, same := hookpaths.ResolveActiveStateHardlinkTarget(physical, projected.ActiveHome); same {
+		// A target the state index could not rule out is not proved free of the
+		// state: refused, as an unfinished walk refuses a patch target (GAP-1789).
+		switch active, same, complete := hookpaths.ResolveActiveStateHardlinkTarget(physical, projected.ActiveHome); {
+		case !complete:
+			return true
+		case same:
 			physical = active
 		}
 		linked := candidate

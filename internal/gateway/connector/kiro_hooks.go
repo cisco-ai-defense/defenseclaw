@@ -592,7 +592,7 @@ func kiroOwnedV3Hook(item interface{}, hookScript string) bool {
 		return false
 	}
 	command := strings.TrimSpace(fmt.Sprint(action["command"]))
-	return kiroCommandOwned(command, hookScript) || editedDefenseClawHookCommand(command, kiroHookScriptName)
+	return kiroCommandOwned(command, hookScript) || editedDefenseClawHookCommandByAnyPath(command, kiroHookScriptName)
 }
 
 func kiroFileIsDefenseClawOwned(cfg map[string]interface{}, hookScript string) bool {

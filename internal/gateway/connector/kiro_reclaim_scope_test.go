@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -61,9 +62,6 @@ func TestKiroReclaimOfADataFolderThatNeverSetKiroUpTouchesNothing(t *testing.T) 
 // global hook file, the defenseclaw agent and the default-agent setting. B's
 // reclaim removes its workspace hooks and leaves A's files byte for byte.
 func TestKiroReclaimRemovesOnlyThisInstallsFiles(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("known limit: two Windows data folders that both set Kiro up run identical launcher commands, so both own them")
-	}
 	home := t.TempDir()
 	KiroHomeOverride = home
 	t.Cleanup(func() { KiroHomeOverride = "" })
@@ -88,12 +86,51 @@ func TestKiroReclaimRemovesOnlyThisInstallsFiles(t *testing.T) {
 	shared := kiroSharedFiles(home)
 	before := readKiroFiles(t, shared)
 	workspaceHooks := filepath.Join(workspace, ".kiro", "hooks", kiroManagedHooksName)
-	if found, err := conn.orphanedHookFiles(optsB); err != nil || len(found) != 1 || found[0] != workspaceHooks {
+	globalHooks, agent := shared[0], shared[1]
+	var workspaceCommands []string
+	if runtime.GOOS == "windows" {
+		// Known limit: two Windows data folders that both set Kiro up run the
+		// account's launcher, so their commands are identical and both own
+		// them. Each install's proof is the same entries, in the shared files
+		// too; the data folder that never set Kiro up owns none (the first
+		// test above).
+		foundB, err := conn.orphanedHookFiles(optsB)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, want := range []string{workspaceHooks, globalHooks, agent} {
+			if !slices.Contains(foundB, want) {
+				t.Fatalf("install B's proof = %v, missing %s: on Windows both installs own the launcher entries", foundB, want)
+			}
+		}
+		foundA, err := NewKiroConnector().orphanedHookFiles(optsA)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, want := range []string{globalHooks, agent} {
+			if !slices.Contains(foundA, want) {
+				t.Fatalf("install A's proof = %v, missing %s", foundA, want)
+			}
+		}
+		workspaceCommands = conn.installHookCommands(optsB)
+	} else if found, err := conn.orphanedHookFiles(optsB); err != nil || len(found) != 1 || found[0] != workspaceHooks {
 		t.Fatalf("install B's proof = %v, %v; want only its workspace file", found, err)
 	}
 	optsB.ReclaimOwnHooksOnly = true
 	if err := conn.Teardown(context.Background(), optsB); err != nil {
 		t.Fatalf("reclaim Teardown: %v", err)
+	}
+	if runtime.GOOS == "windows" {
+		// The shared entries are B's to remove too (the known limit above);
+		// what stays exact is B's own workspace copy, which no longer holds
+		// its launcher entries, and B owning nothing afterwards.
+		if held, err := kiroV3FileHoldsCommand(workspaceHooks, workspaceCommands); err != nil || held {
+			t.Errorf("install B's workspace hooks still run its launcher: %v, %v", held, err)
+		}
+		if found, err := conn.orphanedHookFiles(optsB); err != nil || len(found) != 0 {
+			t.Fatalf("after the reclaim install B still owns %v, %v", found, err)
+		}
+		return
 	}
 	for path, want := range readKiroFiles(t, shared) {
 		if want != before[path] {

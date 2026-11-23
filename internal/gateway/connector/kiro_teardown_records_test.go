@@ -16,6 +16,46 @@ import (
 // kiroUserLint is the user's own hook command in these tests.
 const kiroUserLint = "/usr/local/bin/lint"
 
+// kiroForeignWindowsLauncher is another account's launcher: a Windows Kiro
+// command that runs it is not this install's, whatever its shape.
+const kiroForeignWindowsLauncher = `C:\Other Account\bin\defenseclaw-hook.exe`
+
+// kiroWindowsOlderAndForeignForms are, for each surface, the per-user command
+// this account's launcher ran before releases wrote the answering bridge (the
+// older form, still owned) and the same bridge for another account's launcher
+// (never owned). A Windows command runs the account's launcher, so there is
+// no script path or wrapper to tell a form apart: ownership is the exact
+// command (kiroWindowsOwnedHookCommandsFor).
+func kiroWindowsOlderAndForeignForms(surfaces ...string) (older, foreign []string) {
+	launcher := defenseclawHookBinary()
+	for _, surface := range surfaces {
+		older = append(older, preStartAnswerWindowsKiroHookCommand(launcher, surface))
+		foreign = append(foreign, windowsKiroHookCommandForBinary(kiroForeignWindowsLauncher, surface, false))
+	}
+	return older, foreign
+}
+
+// kiroCommandsSetupWritesNow are the commands a Setup of opts writes. On
+// Windows ownership also covers the older forms (installHookCommands), so the
+// live pair is named there.
+func kiroCommandsSetupWritesNow(conn *KiroConnector, opts SetupOpts) []string {
+	if runtime.GOOS == "windows" {
+		return []string{conn.hookCommand(opts), conn.hookCommandForV3Surface(opts)}
+	}
+	return conn.installHookCommands(opts)
+}
+
+// kiroRequireOwned fails unless every form is a command this install owns.
+func kiroRequireOwned(t *testing.T, conn *KiroConnector, opts SetupOpts, forms []string) {
+	t.Helper()
+	owned := conn.installHookCommands(opts)
+	for _, form := range forms {
+		if !slices.Contains(owned, form) {
+			t.Fatalf("the older form %q is not one this install owns; this test checks nothing", form)
+		}
+	}
+}
+
 // kiroChooseDefaultAgent sets chat.defaultAgent in the Kiro CLI settings of
 // home, as the user does.
 func kiroChooseDefaultAgent(t *testing.T, home, agent string) {
@@ -338,9 +378,6 @@ func TestKiroTeardownSkipsARecordedFileItCannotParse(t *testing.T) {
 // nothing cleaned it afterwards. Those entries go too; another install's
 // script in the same form and the user's hook stay.
 func TestKiroRemoveCleansAnOlderCommandFormFromAFileOnlyItsRecordNames(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("POSIX command forms; a Windows command runs the account's launcher and its ownership stays exact")
-	}
 	home := t.TempDir()
 	KiroHomeOverride = home
 	t.Cleanup(func() { KiroHomeOverride = "" })
@@ -364,6 +401,14 @@ func TestKiroRemoveCleansAnOlderCommandFormFromAFileOnlyItsRecordNames(t *testin
 		"/usr/bin/env LC_ALL=C " + script + " --event preToolUse",
 	}
 	keep := []string{"/bin/bash '" + otherScript + "' --hook-surface " + KiroHookSurfaceV3, kiroUserLint}
+	if runtime.GOOS == "windows" {
+		// A Windows command runs the account's launcher: the older form the
+		// account's launcher ran goes, another account's launcher stays.
+		var foreign []string
+		older, foreign = kiroWindowsOlderAndForeignForms(KiroHookSurfaceV3, "")
+		keep = []string{foreign[0], kiroUserLint}
+		kiroRequireOwned(t, conn, opts, older)
+	}
 	w1Hooks := filepath.Join(w1, ".kiro", "hooks", kiroManagedHooksName)
 	if err := writeJSONObject(w1Hooks, map[string]interface{}{"version": "v1", "hooks": []interface{}{
 		kiroV3Entry("defenseclaw-pre-tool", "PreToolUse", older[0]),
@@ -373,7 +418,7 @@ func TestKiroRemoveCleansAnOlderCommandFormFromAFileOnlyItsRecordNames(t *testin
 	}}); err != nil {
 		t.Fatal(err)
 	}
-	if held, err := kiroV3FileHoldsCommand(w1Hooks, conn.installHookCommands(opts)); err != nil || held {
+	if held, err := kiroV3FileHoldsCommand(w1Hooks, kiroCommandsSetupWritesNow(conn, opts)); err != nil || held {
 		t.Fatalf("the file holds a command Setup writes now (%v, %v); this test checks nothing", held, err)
 	}
 	// Only the record names W1 now.

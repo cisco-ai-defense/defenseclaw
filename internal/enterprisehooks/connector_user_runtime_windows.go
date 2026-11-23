@@ -114,7 +114,7 @@ func WindowsConnectorUserRuntimeLeftovers(rawHome, rawSID, rawDataDir string, co
 		return nil
 	}
 	for _, marker := range windowsPerUserInstallLeftovers {
-		if _, err := root.Lstat(marker); err == nil {
+		if _, err := root.Lstat(marker); !errors.Is(err, os.ErrNotExist) {
 			return nil
 		}
 	}
