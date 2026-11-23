@@ -155,6 +155,22 @@ enum SandboxVaultChange: Equatable, Sendable {
         }
     }
 
+    /// What the card says after the change landed. It is fixed text, never
+    /// the command's output: `confirm` prints the last 4 characters of the
+    /// value, and no vault output is shown or kept by the app.
+    var successText: String {
+        switch self {
+        case .add(let name, let host): return "Added \(name) for \(Self.trim(host)). Start a sandbox with --vault \(name) to use it."
+        case .replace(let name): return "Replaced the value of \(name). Sandboxes created from now on use the new value; "
+            + "delete a sandbox created with the old one and start a new one."
+        case .bind(let name, let host): return "\(name) may now be sent to \(Self.trim(host)) only."
+        case .rename(let name, let newName): return "Renamed \(name) to \(Self.trim(newName))."
+        case .remove(let name): return "Removed \(name). Sandboxes created with it keep it until you delete them; "
+            + "revoke it with its issuer if it may have leaked."
+        case .confirm(let name): return "Confirmed \(name)."
+        }
+    }
+
     /// Why the change cannot run as typed, or nil.
     var problem: String? {
         switch self {
@@ -240,10 +256,16 @@ enum SandboxVault {
     /// Why a captured secret needs the person's confirmation (the TUI's c).
     static let confirmCaution = "An agent in a sandbox can make a call that looks like your prompt: confirm only a secret you gave it."
 
-    /// The Confirm dialog's text: where the secret came from, the caution,
-    /// how to see its last 4 characters first, and the command that runs.
+    /// The Confirm dialog's text: where the secret came from, its kind and
+    /// host, the caution, how to see its last 4 characters first, and the
+    /// command that runs.
     static func confirmText(_ entry: SandboxVaultEntry) -> String {
-        "\(entry.name) was \(entry.sourceText). Sandboxes may then use it. \(confirmCaution) "
+        let kind = entry.kind.isEmpty ? "unknown" : entry.kind
+        let use = entry.target.isEmpty
+            ? "It has no host yet: it needs one (Set host…) before a sandbox can use it."
+            : "Sandboxes may then send it to \(entry.target) only."
+        return "\(entry.name) was \(entry.sourceText). Kind: \(kind). Host: \(entry.target.isEmpty ? "none yet" : entry.target). "
+            + "\(use) \(confirmCaution) "
             + "To check its last 4 characters first, run in Terminal: defenseclaw sandbox vault confirm \(entry.name). "
             + "Runs: defenseclaw " + SandboxVaultChange.confirm(name: entry.name).arguments.joined(separator: " ")
     }
@@ -359,7 +381,7 @@ enum SandboxVault {
         else if unsupported(result.output) {
             message = "This DefenseClaw has no sandbox vault yet: update DefenseClaw to use it."
         } else {
-            let detail = lastLine(result.output)
+            let detail = redactedLine(result.output)
             message = "\(action) failed (exit \(result.exitCode))" + (detail.isEmpty ? "." : ": \(detail)")
         }
         if managed {
@@ -373,6 +395,26 @@ enum SandboxVault {
         let lower = output.lowercased()
         return lower.contains("no such command 'vault'") || lower.contains("no such command \"vault\"")
             || lower.contains("unknown command \"vault\"") || lower.contains("unknown command 'vault'")
+    }
+
+    /// The last line of a vault command's output that says nothing about a
+    /// value: `confirm` prints "Ends with …" and the last 4 characters, so
+    /// such a line is dropped wherever it is.
+    static func redactedLine(_ output: String) -> String {
+        let kept = output.split(whereSeparator: \.isNewline).filter { line in
+            !line.localizedCaseInsensitiveContains("ends with") && !line.contains("\u{2026}")
+        }
+        return lastLine(kept.joined(separator: "\n"))
+    }
+
+    /// What Activity keeps of a vault command: its exit status and, when it
+    /// failed, the redacted last line. The streamed output is not kept.
+    static func activityOutput(_ result: CLIResult) -> String {
+        let note = "The app does not keep the output of vault commands."
+        if result.cancelled { return "Cancelled. \(note)\n" }
+        if result.succeeded { return "Done (exit 0). \(note)\n" }
+        let detail = redactedLine(result.output)
+        return "Exit \(result.exitCode)" + (detail.isEmpty ? "." : ": \(detail)") + " \(note)\n"
     }
 
     static func lastLine(_ output: String) -> String {
@@ -390,6 +432,7 @@ final class SandboxVaultStore {
     /// Reads `defenseclaw <args>` (read only, no Activity row).
     typealias Reader = @Sendable ([String]) async -> CLIResult
     /// Runs a change: title, argv, standard input (Activity row, mutation).
+    /// The row keeps only `SandboxVault.activityOutput`, never the output.
     typealias Runner = @MainActor (String, [String], String?) async -> CLIResult
 
     private(set) var list: SandboxVaultList?
@@ -400,6 +443,9 @@ final class SandboxVaultStore {
     var message: String?
     var messageFailed = false
     private var generation = 0
+    /// A refresh asked for while one was in flight (the re-read after a
+    /// change): the read in flight may predate the change, so one more runs.
+    private var queuedRefresh: (read: Reader, managed: Bool)?
 
     var loaded: Bool { list != nil || !error.isEmpty }
 
@@ -407,16 +453,30 @@ final class SandboxVaultStore {
     func reset() {
         generation += 1
         list = nil; fetchedAt = nil; error = ""; message = nil; messageFailed = false
-        loading = false; busy = false
+        loading = false; busy = false; queuedRefresh = nil
     }
 
-    func refresh(read: Reader, managed: Bool) async {
-        guard !loading else { return }
+    /// Read the list. A call while a read is in flight is not dropped: one
+    /// more read runs after it, so a change is never shown with stale data.
+    func refresh(read: @escaping Reader, managed: Bool) async {
+        guard !loading else {
+            queuedRefresh = (read, managed)
+            return
+        }
         loading = true
         let epoch = generation
-        let result = await read(SandboxVault.listArguments)
-        guard epoch == generation else { return }
+        var next: (read: Reader, managed: Bool)? = (read, managed)
+        while let current = next {
+            queuedRefresh = nil
+            let result = await current.read(SandboxVault.listArguments)
+            guard epoch == generation else { return }
+            apply(result, managed: current.managed)
+            next = queuedRefresh
+        }
         loading = false
+    }
+
+    private func apply(_ result: CLIResult, managed: Bool) {
         guard result.succeeded else {
             error = SandboxVault.failureMessage(result, action: "Reading the vault", managed: managed)
             return
@@ -434,7 +494,7 @@ final class SandboxVaultStore {
     /// standard input and nowhere else; the caller clears its field before
     /// calling. Returns whether the change landed.
     @discardableResult
-    func perform(_ change: SandboxVaultChange, value: String? = nil, run: Runner, read: Reader, managed: Bool) async -> Bool {
+    func perform(_ change: SandboxVaultChange, value: String? = nil, run: Runner, read: @escaping Reader, managed: Bool) async -> Bool {
         guard !busy else { return false }
         if let problem = change.problem { return refuse(problem) }
         var input: String?
@@ -450,8 +510,7 @@ final class SandboxVaultStore {
         guard epoch == generation else { return false }
         busy = false
         if result.succeeded {
-            let said = result.output.trimmingCharacters(in: .whitespacesAndNewlines)
-            message = said.isEmpty ? "\(change.title): done." : String(said.prefix(400))
+            message = change.successText
             messageFailed = false
         } else {
             message = SandboxVault.failureMessage(result, action: change.title, managed: managed)

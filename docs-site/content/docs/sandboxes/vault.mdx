@@ -173,8 +173,12 @@ On a managed computer `defenseclaw tui` is not available; use
 
 In the [macOS app](/docs/sandboxes/apps#the-vault-card-preview) (Preview), the
 Sandboxes view has a **Vault (Preview)** card with the same list and changes:
-**Add…**, **Replace value…**, **Set host…**, **Rename…** and **Remove…**. A
-value is typed in a hidden field and goes to the command on standard input. If
+**Add…**, **Replace value…**, **Set host…**, **Rename…**, **Remove…** and
+**Confirm…** (for a secret captured from a sandbox). A value is typed in a
+hidden field and goes to the command on standard input. To see the last 4
+characters of a captured secret before you confirm it, run
+`defenseclaw sandbox vault confirm NAME` in Terminal; the app does not show
+them. If
 the command refuses on a managed computer, the card says so; run
 `defenseclaw sandbox vault list` in Terminal to see why.
 

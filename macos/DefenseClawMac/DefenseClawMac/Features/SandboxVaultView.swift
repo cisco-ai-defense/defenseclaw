@@ -199,13 +199,16 @@ struct SandboxVaultCard: View {
     }
 
     /// Changes run as Sandboxes commands, so each lands in Activity. The
-    /// value travels only as standard input.
+    /// value travels only as standard input. The row keeps the exit status
+    /// and a redacted line, never the output (confirm prints the last 4
+    /// characters of the value).
     private var runner: SandboxVaultStore.Runner {
         let state = appState
         return { title, arguments, standardInput in
             await state.runCommand(
                 title: title, arguments: arguments, standardInput: standardInput,
-                mutation: true, category: "sandbox", origin: "Sandboxes"
+                mutation: true, category: "sandbox", origin: "Sandboxes",
+                outputSummary: SandboxVault.activityOutput
             )
         }
     }

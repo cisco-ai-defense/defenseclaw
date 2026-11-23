@@ -48,6 +48,27 @@ struct VaultRun: Sendable {
     }
 }
 
+/// A reader whose first read is still in flight when the next refresh is
+/// asked for (the re-read after a change).
+@MainActor final class VaultRacingReads {
+    var outputs: [String] = []
+    var reads = 0
+    var store: SandboxVaultStore?
+
+    func reader() -> SandboxVaultStore.Reader {
+        { arguments in await self.read(arguments) }
+    }
+
+    func read(_ arguments: [String]) async -> CLIResult {
+        reads += 1
+        let output = outputs[min(reads, outputs.count) - 1]
+        if reads == 1, let store {
+            await store.refresh(read: reader(), managed: false)
+        }
+        return CLIResult(exitCode: 0, output: output)
+    }
+}
+
 @main
 struct SandboxVaultTests {
     static var checks = 0
@@ -72,6 +93,8 @@ struct SandboxVaultTests {
         commands()
         try decoding()
         await store()
+        await hintNeverShown()
+        await queuedRefresh()
         print("PASS \(checks) sandbox vault checks")
     }
 
@@ -199,6 +222,15 @@ struct SandboxVaultTests {
         expect(SandboxVault.confirmCaution.contains("looks like your prompt") && SandboxVault.confirmCaution.contains("you gave it"),
                "the caution says why")
         expect(dialog.hasSuffix("Runs: defenseclaw sandbox vault confirm --yes AWS_KEY"), "the dialog shows the command")
+        expect(dialog.contains("Host: api.example.com:443") && dialog.contains("send it to api.example.com:443 only"),
+               "the dialog names the host")
+        expect(dialog.contains("Kind: \(unconfirmed.kind.isEmpty ? "unknown" : unconfirmed.kind)"), "the dialog names the kind")
+        var hostless = unconfirmed
+        hostless.target = ""
+        hostless.kind = "api_key"
+        let noHost = SandboxVault.confirmText(hostless)
+        expect(noHost.contains("Kind: api_key") && noHost.contains("Host: none yet")
+               && noHost.contains("needs one (Set host…) before a sandbox can use it"), "a hostless entry needs a host first")
         for bad in ["", "not json", "[]", "{\"entries\":{}}", "{\"path\":\"x\"}"] {
             expect((try? SandboxVault.decodeList(bad)) == nil, "refuse malformed list: \(bad)")
         }
@@ -215,6 +247,62 @@ struct SandboxVaultTests {
                "an unmanaged failure does not mention management")
         expect(SandboxVault.failureMessage(CLIResult(exitCode: 130, output: "", cancelled: true), action: "Reading the vault", managed: false)
                .contains("cancelled"), "cancel")
+    }
+
+    /// confirm prints the last 4 characters of the value: neither the card
+    /// nor Activity shows any vault command's output.
+    @MainActor static func hintNeverShown() async {
+        let hint = "WXYZ"
+        let said = "AWS_KEY\nKind           api_key\nCaptured from  demo\nEnds with      \u{2026}\(hint)\n"
+            + "Host           api.example.com\nconfirmed AWS_KEY\n"
+        let cli = VaultFakeCLI()
+        let store = SandboxVaultStore()
+        cli.runResult = CLIResult(exitCode: 0, output: said)
+        var ok = await store.perform(.confirm(name: "AWS_KEY"), run: cli.runner(), read: cli.reader(), managed: false)
+        expect(ok && store.message == "Confirmed AWS_KEY." && !store.messageFailed, "confirm says Confirmed NAME")
+        let changes: [SandboxVaultChange] = [
+            .add(name: "A_KEY", host: "api.example.com"), .replace(name: "A_KEY"), .bind(name: "A_KEY", host: "api.example.com"),
+            .rename(name: "A_KEY", newName: "B_KEY"), .remove(name: "B_KEY"), .confirm(name: "B_KEY"),
+        ]
+        for change in changes {
+            ok = await store.perform(change, value: change.needsValue ? fixtureValue() : nil,
+                                     run: cli.runner(), read: cli.reader(), managed: false)
+            expect(ok && store.message == change.successText && !(store.message ?? "").contains(hint),
+                   "\(change.title): fixed message, no output")
+        }
+        // A failure keeps a redacted line: never one with the hint, even last.
+        cli.runResult = CLIResult(exitCode: 1, output: said + "Error: the vault is locked\n")
+        ok = await store.perform(.confirm(name: "AWS_KEY"), run: cli.runner(), read: cli.reader(), managed: false)
+        expect(!ok && store.messageFailed && (store.message ?? "").contains("the vault is locked")
+               && !(store.message ?? "").contains(hint), "a failure shows the error line only")
+        cli.runResult = CLIResult(exitCode: 1, output: "Ends with \u{2026}\(hint)\n")
+        ok = await store.perform(.confirm(name: "AWS_KEY"), run: cli.runner(), read: cli.reader(), managed: false)
+        expect(!ok && !(store.message ?? "").contains(hint), "a hint as the last line is dropped")
+        // What Activity keeps.
+        let kept = SandboxVault.activityOutput(CLIResult(exitCode: 0, output: said))
+        expect(!kept.contains(hint) && kept.contains("exit 0") && kept.contains("does not keep"), "Activity: status only")
+        let failed = SandboxVault.activityOutput(CLIResult(exitCode: 1, output: said + "Error: the vault is locked\n"))
+        expect(failed.contains("Exit 1") && failed.contains("the vault is locked") && !failed.contains(hint),
+               "Activity: exit and the redacted line")
+        expect(!SandboxVault.activityOutput(CLIResult(exitCode: 2, output: "x \u{2026}\(hint)")).contains(hint), "Activity: hint dropped")
+        expect(SandboxVault.activityOutput(CLIResult(exitCode: 130, output: said, cancelled: true)).hasPrefix("Cancelled"),
+               "Activity: cancel")
+    }
+
+    /// The re-read after a change is not dropped while a read is in flight.
+    @MainActor static func queuedRefresh() async {
+        let reads = VaultRacingReads()
+        let store = SandboxVaultStore()
+        reads.store = store
+        reads.outputs = [
+            json(["path": "/fixture/vault.json", "entries": [["name": "OLD_KEY", "status": "ready", "source": "manual"]]]),
+            json(["path": "/fixture/vault.json", "entries": [["name": "NEW_KEY", "status": "ready", "source": "manual"]]]),
+        ]
+        await store.refresh(read: reads.reader(), managed: false)
+        expect(reads.reads == 2, "a refresh asked for during a read runs once more")
+        expect(store.list?.entries.map(\.name) == ["NEW_KEY"] && !store.loading, "the newer read wins")
+        await store.refresh(read: reads.reader(), managed: false)
+        expect(reads.reads == 3 && !store.loading, "no read is left queued")
     }
 
     @MainActor static func store() async {
@@ -234,6 +322,8 @@ struct SandboxVaultTests {
         expect(cli.runs[0].standardInput == value, "the value travels on stdin, one line")
         expect(!cli.runs[0].arguments.contains { $0.contains(value) } && !cli.runs[0].title.contains(value), "never in argv or the title")
         expect(!(store.message ?? "").contains(value) && !store.messageFailed, "never in the message")
+        expect(store.message == "Added NEW_KEY for api.example.com. Start a sandbox with --vault NEW_KEY to use it.",
+               "a fixed success message, not the command output")
         expect(!String(describing: store.list as Any).contains(value), "never in the list")
         expect(cli.reads.count == 2, "a change re-reads the list")
 
