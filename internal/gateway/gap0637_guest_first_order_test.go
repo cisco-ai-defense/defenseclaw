@@ -27,7 +27,7 @@ func TestGAP0637GuestFirstReadingsKeepListedOrder(t *testing.T) {
 	b.WriteString(strings.Replace(gap0625Lines(200, "cat g%d.txt\n"), "cat g110.txt\n", "cat ../.ssh/id_ed25519\n", 1))
 	b.WriteString("cat late.txt\n")
 	input := actionfacts.Input{Tool: "Bash", Command: b.String(), CWD: "/sandbox/app", ActiveHome: "/sandbox"}
-	placements, cut := sandboxGuestPlacements(input, actionfacts.Analyze(input), true)
+	placements, cut := new(guestReadingMemo).plan(input, actionfacts.Analyze(input)).placements(true)
 	if !cut {
 		t.Fatalf("placements=%d not cut", len(placements))
 	}

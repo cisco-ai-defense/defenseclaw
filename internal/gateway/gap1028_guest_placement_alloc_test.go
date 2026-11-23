@@ -49,11 +49,11 @@ func TestGAP1028GuestPlacementAllocations(t *testing.T) {
 	for _, shape := range shapes {
 		input := actionfacts.Input{Tool: "Bash", Command: shape.command, CWD: "/home/alice/src", ActiveHome: "/home/alice"}
 		facts := actionfacts.Analyze(input)
-		sandboxGuestPlacements(input, facts, false) // warm
+		new(guestReadingMemo).plan(input, facts).placements(false) // warm
 		var before, after runtime.MemStats
 		runtime.GC()
 		runtime.ReadMemStats(&before)
-		sandboxGuestPlacements(input, facts, false)
+		new(guestReadingMemo).plan(input, facts).placements(false)
 		runtime.ReadMemStats(&after)
 		allocated := after.TotalAlloc - before.TotalAlloc
 		t.Logf("%s: %d bytes, %.2f MB placed", shape.name, len(shape.command), float64(allocated)/1e6)

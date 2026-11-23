@@ -1449,7 +1449,7 @@ func sandboxAgentHookConfigChange(ctx context.Context, request trustedActionRequ
 	}
 	if !whole.Authoritative() {
 		// A call the whole reading did not finish is read in the directories
-		// the guest placement gives its commands (sandboxGuestPlacements):
+		// the guest placement gives its commands (guestPlacementPlan):
 		// after pushd, popd, cd -, { cd x; } or a function body that cds,
 		// and in an Args-only call the POSIX reader rejects, the statement
 		// split declines and the settings write went unnamed where the

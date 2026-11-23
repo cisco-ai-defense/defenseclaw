@@ -1494,7 +1494,7 @@ func dispatchTrustedActionWith(
 				// A statement the walk placed nowhere is judged as the laptop
 				// judges it, in no folder: the guest placement of the call
 				// already reads it in each directory the guest may be in
-				// (sandboxGuestPlacements). Placed in the guest's directory
+				// (guestPlacementPlan). Placed in the guest's directory
 				// here, its proof there hid the unknown tier of the folder it
 				// may really run in, which the laptop names
 				// (withUnresolvedFolderTier, rel-1-0-10:GAP-0871; substrate-1
@@ -4697,7 +4697,7 @@ const placedReadingFirstView = 6
 // bound of trustedCallOverStatementBudget) in the guest placement: the
 // distinct simple-command readings of a call the analysis read in full, and
 // the statements of a pass over a call it did not read in full when the call
-// is over that budget (sandboxGuestPlacements); the readings share the call's
+// is over that budget (guestPlacementPlan); the readings share the call's
 // semantic budget. A cap of 16 gave ACTION-COMPOUND-LIMIT to a cd followed by
 // 17 or more distinct commands, a setup script the laptop allows
 // (substrate-1 GAP-0359).
@@ -4732,7 +4732,7 @@ func (placed placedReading) provesSSHPrivateKeyContentRead() bool {
 // .profile. The dispatch's own simple-command pass places the command in the
 // request's working directory, which a copy-mode actor does not have, so the
 // cd led nowhere there. The commands and their directories are
-// sandboxGuestPlacements; a call whose readings stop short reports cut
+// guestPlacementPlan; a call whose readings stop short reports cut
 // (bounded.Items): the caller adds the evaluation-limit finding, so a padded
 // chain is never a silent allow (substrate-1 GAP-0304).
 //

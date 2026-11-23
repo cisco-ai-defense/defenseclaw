@@ -20,7 +20,7 @@ import (
 
 // maxSandboxGuestCandidateDirs bounds the directories a sandbox call may
 // stand in that the guest placement keeps as candidates
-// (sandboxGuestPlacements): the 64 places the laptop's statement reader
+// (guestPlacementPlan): the 64 places the laptop's statement reader
 // keeps (hookpaths.TopLevelStatements). Past it the directories already kept
 // stay and a later one is not added, as the laptop's private-key reader
 // keeps its first candidate directories (actionPosixPrivateKeyRead): an
@@ -57,13 +57,26 @@ type guestPlacement struct {
 	candidate bool
 }
 
-// sandboxGuestPlacements lists, lexically, the commands of a sandbox call
+// guestPending is a reading a pass of the guest placement lists before it is
+// placed (guestPlacementPlan).
+type guestPending struct {
+	text, cwd string
+	candidate bool
+	// seq is the reading's place in the order the pass lists its readings
+	// (guestCollect).
+	seq int
+}
+
+// guestKey is a reading of the guest placement: a command text in a folder.
+type guestKey struct{ text, cwd string }
+
+// guestPlacementPlan lists, lexically, the commands of a sandbox call
 // (input is placed in the guest's working directory, sandboxGuestPlacedInput)
 // with each directory they may run in, for the guest placement
 // (sandboxGuestPlacedChildren) and the sandbox hook-config guard
 // (sandboxAgentHookConfigChange). A text repeated in the same directory is
-// listed once. cut reports a call whose readings stop short; the caller
-// gives it the evaluation-limit finding, never a clean allow
+// listed once. The cut of placements reports a call whose readings stop
+// short; the caller gives it the evaluation-limit finding, never a clean allow
 // (substrate-1 GAP-0304).
 //
 // A call the analysis read in full lists each simple command a static cd
@@ -100,26 +113,10 @@ type guestPlacement struct {
 // hook-config guard passes statementBudget false: like the laptop guard it
 // reads a call past the statement budget too, so the call that carries the
 // limit finding still names the write (substrate-1 GAP-0359).
-func sandboxGuestPlacements(input actionfacts.Input, facts actionfacts.Facts, statementBudget bool) (placements []guestPlacement, cut bool) {
-	return newGuestPlacementPlan(input, facts, nil).placements(statementBudget)
-}
-
-// guestPending is a reading a pass of the guest placement lists before it is
-// placed (guestPlacementPlan).
-type guestPending struct {
-	text, cwd string
-	candidate bool
-	// seq is the reading's place in the order the pass lists its readings
-	// (guestCollect).
-	seq int
-}
-
-// guestKey is a reading of the guest placement: a command text in a folder.
-type guestKey struct{ text, cwd string }
-
-// guestPlacementPlan is the walk of sandboxGuestPlacements, made once for
-// both statement budgets: the placements of a call the analysis read in
-// full, or, for any other call, the readings each pass lists in order and
+//
+// A plan is that walk, made once for both statement budgets: the
+// placements of a call the analysis read in full, or, for any other call,
+// the readings each pass lists in order and
 // whether a pass dropped one. Only placing them (placements) depends on the
 // statement budget: it cuts a pass of a call over the laptop's own statement
 // budget at maxSandboxGuestPlacedChildren statements, and the placed
@@ -155,7 +152,7 @@ type guestPlacementPlan struct {
 	overBudgetSet  bool
 }
 
-// newGuestPlacementPlan walks input and facts for sandboxGuestPlacements.
+// newGuestPlacementPlan walks input and facts for the guest placement.
 // split is the simple-command split (actionfacts.SimpleCommands when nil):
 // the call's own split serves the walk and the statement budget both.
 func newGuestPlacementPlan(input actionfacts.Input, facts actionfacts.Facts,
@@ -411,7 +408,7 @@ func newGuestPlacementPlan(input actionfacts.Input, facts actionfacts.Facts,
 }
 
 // guestAuthoritativePlacements places the simple commands of a call the
-// analysis read in full (sandboxGuestPlacements).
+// analysis read in full (guestPlacementPlan).
 func guestAuthoritativePlacements(input actionfacts.Input, simples []actionfacts.SimpleCommand) (placements []guestPlacement, cut bool) {
 	type key struct{ text, cwd string }
 	seen := map[key]bool{}
@@ -446,7 +443,7 @@ func guestAuthoritativePlacements(input actionfacts.Input, simples []actionfacts
 }
 
 // placements places the plan's readings, each pass in turn
-// (sandboxGuestPlacements); statementBudget cuts a pass of a call over the
+// (guestPlacementPlan); statementBudget cuts a pass of a call over the
 // laptop's statement budget at maxSandboxGuestPlacedChildren statements and
 // reads each script call only in the folders known at its own place
 // (byPosition).
@@ -701,7 +698,7 @@ func guestNameByte(c byte) bool {
 // copy-mode call names no folder, so the tier is read on the call placed in
 // the guest's working directory (sandboxGuestPlacedInput), as the laptop
 // reads it in its own. It is decided on that whole-call reading alone: the
-// commands the guest placement reads one by one (sandboxGuestPlacements) are
+// commands the guest placement reads one by one (guestPlacementPlan) are
 // the laptop's piece readings, whose proof comes after the laptop's tier, so
 // their proof does not take the tier away here either. f() { cd .cache; };
 // f; $CMD; rm .defenseclaw/audit.db blocked in both, and only the laptop

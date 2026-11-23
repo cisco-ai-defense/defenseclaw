@@ -241,7 +241,7 @@ func gap0377S7Rows() []gap0377Row {
 
 // TestGAP0377SandboxGuestPlacementKeepsLaptopCandidates: the copy-mode
 // actor's guest placement of a call the analysis did not read in full
-// (sandboxGuestPlacements).
+// (guestPlacementPlan).
 //   - substrate-1 GAP-0377: it counts statements, not the places of each
 //     statement, so a script under the laptop's statement budget is read in
 //     full and never cut with ACTION-COMPOUND-LIMIT where the laptop blocks
