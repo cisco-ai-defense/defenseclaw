@@ -847,7 +847,7 @@ func ownedHookConfigHoldsEditedEntry(conn Connector, opts SetupOpts) bool {
 			if conn.Name() == "claudecode" && name == claudeCodeOTLPHeadersHelperScript {
 				continue
 			}
-			if hookDocumentHoldsEditedEntry(decoded, opts.DataDir, name) {
+			if hookDocumentHoldsEditedEntry(decoded, conn.Name(), opts.DataDir, name) {
 				return true
 			}
 		}
@@ -872,7 +872,14 @@ func ownedHookConfigHoldsEditedEntry(conn Connector, opts SetupOpts) bool {
 // and lies under the data directory's parent or is the script name followed
 // by DefenseClaw's binding (GAP-1931). A shell wrapper in front of such a
 // word, or a copy outside a .defenseclaw folder, is the user's, as in Setup.
-func hookDocumentHoldsEditedEntry(document interface{}, dataDir, scriptName string) bool {
+//
+// Either leg reports only a command connector's Setup repair removes
+// (editedHookEntryClaimed, antigravityOwnedHookSections): reporting one
+// Setup keeps left the registration absent after every repair, so Setup's
+// final check failed, the hook guard repaired in a loop, a managed Windows
+// install rolled back and the doctor's "doctor --fix replaces it" was wrong
+// (GAP-1951).
+func hookDocumentHoldsEditedEntry(document interface{}, connector, dataDir, scriptName string) bool {
 	dataDir = filepath.ToSlash(filepath.Clean(dataDir))
 	current := path.Join(dataDir, "hooks", scriptName)
 	home := strings.TrimSuffix(path.Dir(dataDir), "/") + "/"
@@ -881,18 +888,27 @@ func hookDocumentHoldsEditedEntry(document interface{}, dataDir, scriptName stri
 		windowsCurrent = path.Join(posix, "hooks", strings.ToLower(scriptName))
 		windowsHome = strings.TrimSuffix(path.Dir(posix), "/") + "/"
 	}
-	for _, command := range hookCommandStrings(document) {
-		command = claudeCodeUnguardedHookCommand(strings.TrimSpace(command))
+	if connector == "antigravity" {
+		document = antigravityOwnedHookSections(document)
+	}
+	for _, written := range hookCommandStrings(document) {
+		written = strings.TrimSpace(written)
+		command := claudeCodeUnguardedHookCommand(written)
+		guarded := command != written
 		if editedDefenseClawHookCommand(command, scriptName) {
-			if word, _, ok := posixHookCommandSplit(command); ok && word != current &&
-				(strings.HasPrefix(word, home) || copiedDefenseClawHookCommand(command, scriptName)) {
+			word, first, ok := posixHookCommandSplit(command)
+			_, rest, _ := hookScriptWordAfterWrapper(command)
+			if ok && word != current &&
+				(strings.HasPrefix(word, home) || copiedDefenseClawHookCommand(command, scriptName)) &&
+				editedHookEntryClaimed(connector, command, current, first, rest, guarded) {
 				return true
 			}
 			continue
 		}
 		windows := windowsHookScriptCommandAsPOSIX(command)
 		rest, ok := editedDefenseClawHookScript(windows, scriptName)
-		if !ok || (rest != "" && !defenseClawHookBinding(rest)) {
+		if !ok || (rest != "" && !defenseClawHookBinding(rest)) ||
+			!editedHookEntryClaimed(connector, command, current, rest, rest, guarded) {
 			continue
 		}
 		if word, _, ok := posixHookCommandSplit(windows); ok && word != windowsCurrent &&
@@ -902,6 +918,53 @@ func hookDocumentHoldsEditedEntry(document interface{}, dataDir, scriptName stri
 		}
 	}
 	return false
+}
+
+// editedHookEntryClaimed reports whether connector's Setup repair removes a
+// hook command that hookDocumentHoldsEditedEntry's shape rule matched, so the
+// doctor and the presence check report only what Setup heals (GAP-1951).
+// first is the text after the command's first word, rest the text after its
+// script word (past a shell or env wrapper), and guarded marks Claude Code's
+// missing-script guard. cli/defenseclaw/hook_integrity.py
+// (_setup_claims_edited_entry) applies the same rule, and
+// TestEditedHookGoldenReportedExactlyWhenSetupRemoves runs every golden case
+// through the connector's repair.
+func editedHookEntryClaimed(connector, command, current, first, rest string, guarded bool) bool {
+	switch connector {
+	case "claudecode":
+		// removeOwnedClaudeCodeHooks claims a guarded handler, and otherwise
+		// the script word alone (hookUsesForeignDefenseClawClaudeCodeScript,
+		// scriptHasMarker). Claude Code never registered an argument: a copy
+		// followed by --event, or run through a wrapper, is the user's.
+		return guarded || first == ""
+	case "copilot":
+		// copilotBoundEventOwnsCommand claims the script alone or with the
+		// exact --event of a Copilot event; any other argument makes Setup
+		// refuse a bound event (copilotIndependentHandlerIn), and a live
+		// script of that name without DefenseClaw's marker is the operator's
+		// (copilotLiveOperatorLookalike).
+		return (rest == "" || copilotBoundEventArgument(rest)) &&
+			!copilotLiveOperatorLookalike(map[string]interface{}{"bash": command}, current)
+	}
+	return true
+}
+
+// antigravityOwnedHookSections keeps the outer keys DefenseClaw owns in a
+// decoded Antigravity hooks.json. Setup rewrites those whole and never
+// touches another key (patchAntigravityHooksFor), so a DefenseClaw-shaped
+// copy under a user's key is the user's (GAP-1951).
+func antigravityOwnedHookSections(document interface{}) interface{} {
+	cfg, ok := document.(map[string]interface{})
+	if !ok {
+		return nil
+	}
+	owned := make(map[string]interface{}, len(antigravityLifecycleEvents))
+	for key, value := range cfg {
+		if strings.HasPrefix(key, antigravityOwnedHookKeyPrefix) {
+			owned[key] = value
+		}
+	}
+	return owned
 }
 
 // hookCommandStrings returns every string under a command or bash key of a

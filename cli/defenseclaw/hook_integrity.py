@@ -2821,6 +2821,75 @@ def _independent_handler_problem(connector: str, path: Path, runs: str, current:
     )
 
 
+# copilotCurrentHookEvents in internal/gateway/connector/hook_contract.go, in
+# order (TestDoctorCopilotHookEventsMatchSetup reads this tuple).
+_COPILOT_HOOK_EVENTS = (
+    "sessionStart",
+    "sessionEnd",
+    "userPromptSubmitted",
+    "userPromptTransformed",
+    "preToolUse",
+    "postToolUse",
+    "permissionRequest",
+    "agentStop",
+    "subagentStart",
+    "subagentStop",
+    "postToolUseFailure",
+    "errorOccurred",
+    "preCompact",
+    "notification",
+)
+# copilotBoundEventArgument: Setup's --event binding, quoted or bare.
+_COPILOT_BOUND_EVENT_ARGUMENTS = frozenset(
+    [f" --event {event}" for event in _COPILOT_HOOK_EVENTS]
+    + [f" --event {_shell_quote(event)}" for event in _COPILOT_HOOK_EVENTS]
+)
+
+
+def _copilot_live_lookalike(command: str, current: str) -> bool:
+    """A live operator script named copilot-hook.sh with Copilot's binding and no DefenseClaw marker.
+
+    Mirrors ``copilotLiveOperatorLookalike``: neither Setup nor teardown
+    claims it, so the doctor does not report it. A deleted copy stays
+    repairable.
+    """
+
+    split = _split_after_wrapper(command.strip())
+    if split is None:
+        return False
+    word, rest = split
+    if word == current or posixpath.basename(word.strip("\"'")) != "copilot-hook.sh":
+        return False
+    if rest not in _COPILOT_BOUND_EVENT_ARGUMENTS:
+        return False
+    try:
+        info = os.lstat(word)
+    except (OSError, ValueError):
+        return False
+    return stat.S_ISREG(info.st_mode) and not _is_defenseclaw_hook_file(word)
+
+
+def _setup_claims_edited_entry(connector: str, command: str, current: str, first_rest: str, rest: str) -> bool:
+    """Whether *connector*'s Setup repair removes an entry the edited-hook shape rule matched.
+
+    Mirrors ``editedHookEntryClaimed`` (internal/gateway/connector): the doctor
+    reports only what ``doctor --fix`` heals, or the hook guard repaired in a
+    loop and Setup's final check failed (GAP-1951). *first_rest* is the text
+    after the command's first word, *rest* the text after its script word
+    (past a wrapper). Claude Code's repair claims the script word alone, and
+    Copilot's the script alone or with the exact ``--event`` of an event,
+    except a live script of that name without DefenseClaw's marker.
+    """
+
+    if connector == "claudecode":
+        return first_rest == ""
+    if connector == "copilot":
+        return (rest == "" or rest in _COPILOT_BOUND_EVENT_ARGUMENTS) and not _copilot_live_lookalike(
+            command, current
+        )
+    return True
+
+
 def edited_hook_problems(cfg: Any, connector: str) -> list[str]:
     """Report DefenseClaw hook entries whose script path or name was edited.
 
@@ -2871,12 +2940,25 @@ def edited_hook_problems(cfg: Any, connector: str) -> list[str]:
             if not unguarded and connector == "copilot" and command_changed:
                 return [_independent_handler_problem(connector, path, repr(runs.strip()), current)]
             return unguarded or [_edited_hook_problem(connector, path, repr(runs.strip()), current)]
+        if connector == "antigravity" and isinstance(document, dict):
+            # Setup rewrites only DefenseClaw's own outer keys (GAP-1951).
+            document = {
+                key: value
+                for key, value in document.items()
+                if isinstance(key, str) and key.startswith(_ANTIGRAVITY_HOOK_KEY_PREFIX)
+            }
         for command in _hook_command_strings(document):
             if written is not None and not written(command):
                 continue
             word = edited_hook_script(command, script_name)
-            first = (_split_hook_command(command.strip()) or ("",))[0]
-            if word and first != current and (first.startswith(owner) or copied_hook_script(command, script_name)):
+            first, first_rest = _split_hook_command(command.strip()) or ("", "")
+            rest = (_split_after_wrapper(command.strip()) or ("", ""))[1]
+            if (
+                word
+                and first != current
+                and (first.startswith(owner) or copied_hook_script(command, script_name))
+                and _setup_claims_edited_entry(connector, command, current, first_rest, rest)
+            ):
                 return [
                     _edited_hook_problem(connector, path, word if first == word else repr(command.strip()), current)
                 ]
@@ -2884,6 +2966,8 @@ def edited_hook_problems(cfg: Any, connector: str) -> list[str]:
             if windows is None:
                 continue
             windows_word, windows_rest = windows
+            if not _setup_claims_edited_entry(connector, command, current, windows_rest, windows_rest):
+                continue
             if windows_word != windows_current and (
                 (windows_owner and windows_word.startswith(windows_owner))
                 or (windows_rest.startswith(_HOOK_BINDINGS) and posixpath.basename(windows_word) == script_name)

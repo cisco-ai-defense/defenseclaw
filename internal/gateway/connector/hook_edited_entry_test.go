@@ -84,7 +84,7 @@ func TestEditedHookEntriesGolden(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: %v", tc.Name, err)
 		}
-		if got := hookDocumentHoldsEditedEntry(decoded, dataDir, tc.Script); got != tc.Edited {
+		if got := hookDocumentHoldsEditedEntry(decoded, tc.Connector, dataDir, tc.Script); got != tc.Edited {
 			t.Errorf("%s: hookDocumentHoldsEditedEntry = %v, want %v", tc.Name, got, tc.Edited)
 		}
 
@@ -110,20 +110,156 @@ func TestEditedHookEntriesGolden(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s (drive path): %v", tc.Name, err)
 		}
-		if got := hookDocumentHoldsEditedEntry(driveDecoded, driveDir, tc.Script); got != tc.Edited {
+		if got := hookDocumentHoldsEditedEntry(driveDecoded, tc.Connector, driveDir, tc.Script); got != tc.Edited {
 			t.Errorf("%s (drive-path data dir %s): hookDocumentHoldsEditedEntry = %v, want %v",
 				tc.Name, driveDir, got, tc.Edited)
 		}
 	}
 }
 
+// GAP-1951: the doctor and the presence check report an edited entry only
+// when the connector's Setup repair removes one, for every golden case, under
+// a POSIX data directory (Setup runs) and a drive-path one (the doctor reads
+// text; Setup's claim of a Windows-path copy does not depend on the data
+// directory). Reporting a copy Setup keeps left the registration absent after
+// every repair: Setup's final check failed, the hook guard repaired in a loop
+// and a managed Windows install rolled back. The Windows-path inputs are read
+// as text, so this runs on Linux and macOS; Windows renders native commands.
+func TestEditedHookGoldenReportedExactlyWhenSetupRemoves(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Setup registers the native hook launcher on Windows; the golden's script entries are read as text elsewhere")
+	}
+	data, err := os.ReadFile(filepath.Join("testdata", "hook_edited_entries.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cases []editedHookGoldenCase
+	if err := json.Unmarshal(data, &cases); err != nil {
+		t.Fatal(err)
+	}
+	opts := func(root string) SetupOpts {
+		return SetupOpts{
+			DataDir:       filepath.Join(root, ".defenseclaw"),
+			ProxyAddr:     "127.0.0.1:4000",
+			APIAddr:       "127.0.0.1:18970",
+			APIToken:      "api-token",
+			OTLPPathToken: strings.Repeat("a", 64),
+		}
+	}
+	repair := map[string]func(t *testing.T, root, path, hookScript string) error{
+		"claudecode": func(t *testing.T, root, path, _ string) error {
+			ClaudeCodeSettingsPathOverride = path
+			t.Cleanup(func() { ClaudeCodeSettingsPathOverride = "" })
+			return NewClaudeCodeConnector().Setup(context.Background(), opts(root))
+		},
+		"codex": func(t *testing.T, root, path, _ string) error {
+			CodexConfigPathOverride = path
+			t.Cleanup(func() { CodexConfigPathOverride = "" })
+			return NewCodexConnector().Setup(context.Background(), opts(root))
+		},
+		"copilot": func(_ *testing.T, _, path, hookScript string) error { return patchCopilotHooks(path, hookScript) },
+		"cursor": func(_ *testing.T, _, path, hookScript string) error {
+			return patchCursorHooks(path, hookScript, "", false)
+		},
+		"devin":       func(_ *testing.T, _, path, hookScript string) error { return patchDevinHooks(path, hookScript) },
+		"hermes":      func(_ *testing.T, _, path, hookScript string) error { return patchHermesHooks(path, hookScript, "") },
+		"kiro":        func(_ *testing.T, _, path, hookScript string) error { return patchKiroV3Hooks(path, hookScript) },
+		"antigravity": func(_ *testing.T, _, path, hookScript string) error { return patchAntigravityHooks(path, hookScript) },
+	}
+	decode := func(t *testing.T, path string) interface{} {
+		t.Helper()
+		decoded, err := decodeHookConfigFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return decoded
+	}
+	for _, tc := range cases {
+		t.Run(tc.Name, func(t *testing.T) {
+			run, ok := repair[tc.Connector]
+			if !ok {
+				t.Fatalf("no repair for connector %q", tc.Connector)
+			}
+			root := testenv.PrivateTempDir(t)
+			dataDir := filepath.Join(root, ".defenseclaw")
+			hookScript := filepath.Join(dataDir, "hooks", tc.Script)
+			path := filepath.Join(root, "agent", tc.File)
+			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			document := strings.ReplaceAll(tc.Document, "{data_dir}", filepath.ToSlash(dataDir))
+			if err := os.WriteFile(path, []byte(document), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			before := decode(t, path)
+			reported := hookDocumentHoldsEditedEntry(before, tc.Connector, dataDir, tc.Script)
+
+			drivePath := filepath.Join(root, "drive-"+tc.File)
+			driveDocument := strings.ReplaceAll(tc.Document, "{data_dir}", "C:/Users/u/.defenseclaw")
+			if err := os.WriteFile(drivePath, []byte(driveDocument), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			driveReported := hookDocumentHoldsEditedEntry(decode(t, drivePath), tc.Connector, "C:/Users/u/.defenseclaw", tc.Script)
+
+			if err := run(t, root, path, hookScript); err != nil {
+				// A refused repair (Copilot's independent handler) removes nothing.
+				t.Logf("repair: %v", err)
+			}
+			after := map[string]bool{}
+			for _, command := range hookCommandStrings(decode(t, path)) {
+				after[command] = true
+			}
+			removed := []string{}
+			for _, command := range hookCommandStrings(before) {
+				if !strings.Contains(command, filepath.ToSlash(hookScript)) && !after[command] {
+					removed = append(removed, command)
+				}
+			}
+			// Reported is a subset of removed: a few golden copies Setup
+			// removes stay unreported by design (another account's copy with
+			// no binding, a shell wrapper), which leaves the hook guard idle,
+			// never looping.
+			if reported != tc.Edited || (reported && len(removed) == 0) {
+				t.Errorf("reported %v (golden %v), Setup removed %q", reported, tc.Edited, removed)
+			}
+			if driveReported && len(removed) == 0 {
+				t.Errorf("reported under a drive-path data dir, but Setup removes nothing")
+			}
+		})
+	}
+}
+
+// The doctor's Copilot rule (cli/defenseclaw/hook_integrity.py
+// _COPILOT_HOOK_EVENTS) names every event copilotBoundEventArgument accepts.
+func TestDoctorCopilotHookEventsMatchSetup(t *testing.T) {
+	source, err := os.ReadFile(filepath.Join("..", "..", "..", "cli", "defenseclaw", "hook_integrity.py"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, block, ok := strings.Cut(string(source), "_COPILOT_HOOK_EVENTS = (")
+	block, _, closed := strings.Cut(block, ")")
+	if !ok || !closed {
+		t.Fatal("hook_integrity.py has no _COPILOT_HOOK_EVENTS tuple")
+	}
+	var named []string
+	for _, field := range strings.Split(block, ",") {
+		if field = strings.Trim(strings.TrimSpace(field), `"`); field != "" {
+			named = append(named, field)
+		}
+	}
+	if fmt.Sprint(named) != fmt.Sprint(copilotCurrentHookEvents) {
+		t.Fatalf("_COPILOT_HOOK_EVENTS = %v, want copilotCurrentHookEvents %v", named, copilotCurrentHookEvents)
+	}
+}
+
 // editedHookGoldenCase is one case of testdata/hook_edited_entries.json.
 type editedHookGoldenCase struct {
-	Name     string `json:"name"`
-	Script   string `json:"script"`
-	File     string `json:"file"`
-	Document string `json:"document"`
-	Edited   bool   `json:"edited"`
+	Name      string `json:"name"`
+	Connector string `json:"connector"`
+	Script    string `json:"script"`
+	File      string `json:"file"`
+	Document  string `json:"document"`
+	Edited    bool   `json:"edited"`
 }
 
 // GAP-0906, GAP-0907: after a DefenseClaw hook entry's script name, hook
