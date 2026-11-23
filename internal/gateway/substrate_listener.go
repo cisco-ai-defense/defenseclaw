@@ -20,6 +20,7 @@ import (
 	"context"
 	cryptorand "crypto/rand"
 	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -171,6 +172,9 @@ type SubstrateConfig struct {
 	// template "atespace/name" (the controller's verdict): a folder with one
 	// of them is trusted without a scan (GAP-0164). Nil trusts none.
 	TemplateSkills func(ctx context.Context, template string) ([]string, error)
+	// SkillScanLimits returns skills.scan.timeout and skills.pending_wait
+	// (B5.4); nil or 0 waits for the whole scan.
+	SkillScanLimits func() (timeout, pendingWait time.Duration)
 	// SkillReceiptKey signs skill scan receipts; every replica must have the
 	// same key (derived from the shared chain key). Empty: a random key per
 	// process, so receipts hold only on the replica that gave them.
@@ -268,6 +272,11 @@ type substrateState struct {
 	receiptShared bool
 	// alert raises an audit alert (the API server's logger).
 	alert func(ctx context.Context, severity, summary string, details map[string]any)
+	// action writes one skill audit row (B5.4: substrate.skill.*).
+	action func(ctx context.Context, action, severity string, details map[string]any)
+	// scanMu guards scans, the skill scans in flight (B5.4 pending).
+	scanMu sync.Mutex
+	scans  map[string]*skillScanCall
 	// alerted is alertOnce's memory (substrate_skills.go).
 	alertMu    sync.Mutex
 	alerted    map[string]bool
@@ -331,6 +340,12 @@ func (a *APIServer) SetSubstrate(cfg SubstrateConfig) error {
 	st.audit = func(ctx context.Context, severity, summary string, details map[string]any) {
 		if a.logger != nil {
 			_ = a.logger.LogAlertCtx(ctx, "substrate", severity, summary, details)
+		}
+	}
+	st.action = func(ctx context.Context, action, severity string, details map[string]any) {
+		if a.logger != nil {
+			raw, _ := json.Marshal(details)
+			_ = a.logger.LogActionCtxSeverity(ctx, action, fmt.Sprint(details["folder"]), string(raw), severity)
 		}
 	}
 	st.alert = func(ctx context.Context, severity, summary string, details map[string]any) {

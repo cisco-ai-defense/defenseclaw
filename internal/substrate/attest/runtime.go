@@ -218,6 +218,11 @@ func (r *RuntimeScanner) Scan(ctx context.Context, a RuntimeAsset) (*RuntimeDeci
 			}
 		}
 		res, err = r.Skill.Scan(ctx, dir)
+		if ctx.Err() != nil {
+			// B5.4: a scan cut by its deadline or cancelled is not a verdict
+			// (and is never cached); the caller's fail mode decides.
+			return nil, ctx.Err()
+		}
 		unavailable = err != nil && scanner.Unavailable(err)
 		if err != nil || res == nil {
 			res = failedScan(r.Skill.Name(), a.Name, err)

@@ -175,7 +175,7 @@ func TestGAP0164NoScannerFollowsTheFailMode(t *testing.T) {
 		r := newGAP0164Rig(t, true)
 		r.scan.unavailable = true
 		out := r.post(t, dir, newSkill)
-		if q := quarantined(out); len(q) != 1 || !strings.Contains(q[0].Reason, "no skill scanner") {
+		if q := quarantined(out); len(q) != 1 || !strings.Contains(q[0].Reason, "the skill scanner is not running") {
 			t.Fatalf("not refused: %+v", q)
 		}
 		if len(r.alerts) != 1 || r.alerts[0].sev != "HIGH" {

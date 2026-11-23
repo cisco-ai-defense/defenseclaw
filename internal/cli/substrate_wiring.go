@@ -144,6 +144,8 @@ type runtimeSkillScanner struct {
 	rt *attest.RuntimeScanner
 	// remote is the scanner sidecar client, nil without the sidecar folder.
 	remote *scanner.RemoteScanner
+	// enabled is substrate.skills.scan.enabled, read on each scan (hot).
+	enabled func() bool
 }
 
 func newRuntimeSkillScanner(cfg *config.Config) runtimeSkillScanner {
@@ -198,6 +200,11 @@ func (s runtimeSkillScanner) ScanSkillFolder(ctx context.Context, name, dir stri
 	asset := attest.RuntimeAsset{Kind: config.AdmissionTypeSkill, Name: name, Path: dir}
 	for _, f := range files {
 		asset.Files = append(asset.Files, attest.AttachedFile{Role: attest.RoleSkillFile, Path: f.Path, Content: f.Content, Truncated: f.Truncated})
+	}
+	if s.enabled != nil && !s.enabled() {
+		// The admin-off switch (substrate.skills.scan.enabled: false): no
+		// scan, the fail mode decides (managed installs refuse new skills).
+		return false, "", fmt.Errorf("%w: skill scanning is turned off (substrate.skills.scan.enabled: false)", gateway.ErrSubstrateSkillScannerUnavailable)
 	}
 	d, err := s.rt.Scan(ctx, asset)
 	if err != nil {

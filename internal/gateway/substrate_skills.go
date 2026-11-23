@@ -76,6 +76,8 @@ type SubstrateSkillScanner interface {
 type SubstrateQuarantine struct {
 	Path   string `json:"path"`
 	Reason string `json:"reason,omitempty"`
+	// Code is the reason code (SkillReason*, B5.4); the kit ignores it.
+	Code string `json:"code,omitempty"`
 }
 
 // substrateSkillFolders groups the attached skill files by the folders the
@@ -113,12 +115,14 @@ func substrateSkillFolders(f *SubstrateFacts) map[string][]SubstrateAttachedFile
 // not scan (GAP-0039, GAP-0164): managed installs and the strict tier refuse
 // it with a HIGH alert, the OSS default tiers alert (MEDIUM). It returns the
 // quarantine entry, or nil when the folder is allowed.
-func (st *substrateState) substrateRefuseOrAlert(ctx context.Context, connector, dir, why string, f *SubstrateFacts) *SubstrateQuarantine {
+func (st *substrateState) substrateRefuseOrAlert(ctx context.Context, connector, dir, why, code string, f *SubstrateFacts) *SubstrateQuarantine {
 	if st.cfg.BlockUnscannedSkills != nil && st.cfg.BlockUnscannedSkills(connector) {
 		st.alertOnce(ctx, "HIGH", "Substrate skill folder refused: "+why, dir, f, nil)
-		return &SubstrateQuarantine{Path: dir, Reason: why + "; this install refuses skills it could not scan"}
+		st.auditSkill(ctx, AuditSkillUnscanned, "HIGH", connector, dir, f, map[string]any{"reason": code, "detail": why, "outcome": "refused"})
+		return &SubstrateQuarantine{Path: dir, Reason: why + "; this install refuses skills it could not scan", Code: code}
 	}
 	st.alertOnce(ctx, "MEDIUM", "Substrate skill folder allowed unscanned: "+why, dir, f, nil)
+	st.auditSkill(ctx, AuditSkillUnscanned, "MEDIUM", connector, dir, f, map[string]any{"reason": code, "detail": why, "outcome": "allowed"})
 	return nil
 }
 
@@ -127,10 +131,11 @@ func (st *substrateState) substrateRefuseOrAlert(ctx context.Context, connector,
 // folders it decided (so the unscanned pass leaves them alone). A scan error
 // blocks the folder: the kit attached it because the model would see it
 // next (fail closed, as the runtime scan does for an incomplete folder).
-func (st *substrateState) substrateScanSkills(ctx context.Context, connector string, f *SubstrateFacts) ([]SubstrateQuarantine, []SubstrateScanned, map[string]bool) {
+func (st *substrateState) substrateScanSkills(ctx context.Context, connector string, f *SubstrateFacts) ([]SubstrateQuarantine, []SubstrateScanned, map[string]bool, []SubstrateUnscanned) {
 	if f == nil || st.cfg.Skills == nil {
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
+	var pending []SubstrateUnscanned
 	decided := map[string]bool{}
 	var out []SubstrateQuarantine
 	// A folder past a kit cap (too many, too deep or too big files, or the
@@ -139,7 +144,7 @@ func (st *substrateState) substrateScanSkills(ctx context.Context, connector str
 	for _, fp := range f.Skills {
 		if fp.Over {
 			dir := path.Clean("/" + strings.TrimPrefix(fp.Path, "/"))
-			if q := st.substrateRefuseOrAlert(ctx, connector, dir, "the skill folder is larger than DefenseClaw scans (more files, deeper or bigger files than the kit attaches)", f); q != nil {
+			if q := st.substrateRefuseOrAlert(ctx, connector, dir, "the skill folder is larger than DefenseClaw scans (more files, deeper or bigger files than the kit attaches)", SkillReasonTooBig, f); q != nil {
 				out = append(out, *q)
 			}
 		}
@@ -175,7 +180,7 @@ func (st *substrateState) substrateScanSkills(ctx context.Context, connector str
 				passed[dir], decided[dir] = fp.FP, true
 			case fp.Big:
 				decided[dir] = true
-				if q := st.substrateRefuseOrAlert(ctx, connector, dir, "the skill folder is bigger than one DefenseClaw hook post carries and is not one the attested template build scanned", f); q != nil {
+				if q := st.substrateRefuseOrAlert(ctx, connector, dir, "the skill folder is bigger than one DefenseClaw hook post carries and is not one the attested template build scanned", SkillReasonTooBig, f); q != nil {
 					out = append(out, *q)
 				}
 			}
@@ -185,7 +190,7 @@ func (st *substrateState) substrateScanSkills(ctx context.Context, connector str
 		if i >= substrateSkillFoldersMax {
 			// More attached folders than one post scans: none of them is left
 			// silently unscanned (fail closed past the cap).
-			if q := st.substrateRefuseOrAlert(ctx, connector, dir, "more skill folders came in one post than DefenseClaw scans", f); q != nil {
+			if q := st.substrateRefuseOrAlert(ctx, connector, dir, "more skill folders came in one post than DefenseClaw scans", SkillReasonTooBig, f); q != nil {
 				out = append(out, *q)
 			}
 			continue
@@ -195,7 +200,7 @@ func (st *substrateState) substrateScanSkills(ctx context.Context, connector str
 		// folder whose files did not all come (or came cut) gets none.
 		d := substrateSkillFolderDigest(dir, folders[dir])
 		if d == "" || d != listedFP[dir] {
-			if q := st.substrateRefuseOrAlert(ctx, connector, dir, "the attached files are not the whole skill folder", f); q != nil {
+			if q := st.substrateRefuseOrAlert(ctx, connector, dir, "the attached files are not the whole skill folder", SkillReasonNotSent, f); q != nil {
 				out = append(out, *q)
 			}
 			continue
@@ -206,24 +211,41 @@ func (st *substrateState) substrateScanSkills(ctx context.Context, connector str
 			passed[dir] = d
 			continue
 		}
-		blocked, reason, err := st.cfg.Skills.ScanSkillFolder(ctx, path.Base(dir), dir, folders[dir])
+		res := st.scanSkillFolder(ctx, path.Base(dir), dir, folders[dir])
+		blocked, reason, err := res.blocked, res.reason, res.err
+		code := SkillReasonFinding
 		switch {
-		case errors.Is(err, ErrSubstrateSkillScannerUnavailable):
-			// No scanner can run here: the fail mode decides, never silently.
-			if q := st.substrateRefuseOrAlert(ctx, connector, dir, "no skill scanner can run in the gateway", f); q != nil {
+		case errors.Is(err, errSkillPending):
+			// B5.4: still scanning after pending_wait. The folder is not
+			// hidden (that would break a write in progress); the kit sends it
+			// again with its next hook, which gets the verdict, and a use
+			// before then follows skill_pending at the use gate.
+			decided[dir] = true
+			pending = append(pending, SubstrateUnscanned{Path: dir, FP: listedFP[dir]})
+			st.auditSkill(ctx, AuditSkillPending, "MEDIUM", connector, dir, f, map[string]any{"reason": SkillReasonPending, "waited_ms": res.waited.Milliseconds(), "outcome": "sent again"})
+			continue
+		case errors.Is(err, ErrSubstrateSkillScannerUnavailable), errors.Is(err, errSkillScanTimeout):
+			// No verdict (scanner down or off, or too slow): the fail mode
+			// decides, never silently.
+			c, why := skillScanErrCode(err)
+			if q := st.substrateRefuseOrAlert(ctx, connector, dir, why, c, f); q != nil {
 				out = append(out, *q)
 			}
 			continue
 		case err != nil:
-			blocked, reason = true, "the skill scan could not complete"
+			blocked, reason, code = true, "the skill scan could not complete", SkillReasonScanFailed
 			st.alertOnce(ctx, "HIGH", "Substrate skill folder refused: the skill scan could not complete", dir, f, err)
 		case blocked:
 			st.alertOnce(ctx, "HIGH", "Substrate skill folder refused by the runtime skill scan", dir, f, errors.New(reason))
 		}
 		if blocked {
-			out = append(out, SubstrateQuarantine{Path: dir, Reason: reason})
+			msg := skillBlockedMessage(dir, reason)
+			out = append(out, SubstrateQuarantine{Path: dir, Reason: msg, Code: code})
+			st.auditSkill(ctx, AuditSkillBlocked, "HIGH", connector, dir, f, map[string]any{"reason": code, "detail": reason, "duration_ms": res.took.Milliseconds(),
+				"quarantine": path.Join(path.Dir(path.Dir(dir)), ".defenseclaw-quarantine")})
 		} else {
 			passed[dir] = d
+			st.auditSkill(ctx, AuditSkillScanned, "INFO", connector, dir, f, map[string]any{"duration_ms": res.took.Milliseconds()})
 		}
 	}
 	if len(out) > 0 {
@@ -244,13 +266,14 @@ func (st *substrateState) substrateScanSkills(ctx context.Context, connector str
 			scanned = append(scanned, SubstrateScanned{Path: dir, FP: d, Receipt: st.skillReceipt(actor.UID, dir, d)})
 		}
 	}
-	return out, scanned, decided
+	return out, scanned, decided, pending
 }
 
 // ErrSubstrateSkillScannerUnavailable is what a SubstrateSkillScanner returns
-// when no scanner can run here (not installed in the gateway image, or the
-// pod refuses scanner containment): the fail mode decides (GAP-0164).
-var ErrSubstrateSkillScannerUnavailable = errors.New("substrate: no skill scanner can run in the gateway")
+// when the skill scanner is not running (no scanner sidecar, the sidecar
+// down, scanning turned off, or the pod refuses scanner containment): the
+// fail mode decides (GAP-0164, B5.4 skill_scanner_down).
+var ErrSubstrateSkillScannerUnavailable = errors.New("substrate: the skill scanner is not running")
 
 // templateSkillDigests are the admitted skill folder digests of the calling
 // actor's attested template; empty when there is none or it cannot be read.
@@ -428,7 +451,7 @@ func (st *substrateState) substrateUnscannedSkills(ctx context.Context, connecto
 		}
 		// One alert per actor, folder and fingerprint, not one per post.
 		if st.cfg.BlockUnscannedSkills != nil && st.cfg.BlockUnscannedSkills(connector) {
-			refused = append(refused, SubstrateQuarantine{Path: dir, Reason: "the skill folder was not scanned: " + why})
+			refused = append(refused, SubstrateQuarantine{Path: dir, Reason: "the skill folder was not scanned: " + why, Code: SkillReasonNotSent})
 			st.alertOnce(ctx, "HIGH", "Substrate skill folder refused: it reached the actor without a scan", dir, f, errors.New(why))
 		} else {
 			st.alertOnce(ctx, "MEDIUM", "Substrate skill folder reached the actor without a scan", dir, f, errors.New(why))
@@ -450,9 +473,9 @@ func (s substrateSkillAnswer) empty() bool {
 
 // substrateSkills runs the skill pass of one hook post.
 func (st *substrateState) substrateSkills(ctx context.Context, connector string, f *SubstrateFacts) substrateSkillAnswer {
-	q, scanned, decided := st.substrateScanSkills(ctx, connector, f)
+	q, scanned, decided, pending := st.substrateScanSkills(ctx, connector, f)
 	unscanned, refused := st.substrateUnscannedSkills(ctx, connector, f, decided)
-	return substrateSkillAnswer{Quarantine: append(q, refused...), Scanned: scanned, Unscanned: unscanned}
+	return substrateSkillAnswer{Quarantine: append(q, refused...), Scanned: scanned, Unscanned: append(unscanned, pending...)}
 }
 
 // substrateAnswerRecorder holds a hook answer so the quarantine field can

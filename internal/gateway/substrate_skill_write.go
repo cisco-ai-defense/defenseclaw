@@ -67,14 +67,26 @@ func (st *substrateState) substrateSkillWriteRefusal(ctx context.Context, env su
 		for _, f := range a.Files {
 			files = append(files, SubstrateAttachedFile{Role: f.Role, Path: f.Path, Content: f.Content, Truncated: f.Truncated})
 		}
-		blocked, reason, err := st.cfg.Skills.ScanSkillFolder(ctx, a.Name, a.Path, files)
+		res := st.scanSkillFolder(ctx, a.Name, a.Path, files)
+		blocked, reason, err := res.blocked, res.reason, res.err
 		switch {
-		case err != nil:
-			why := "a skill the agent is writing (" + a.Name + ") could not be scanned"
-			if errors.Is(err, ErrSubstrateSkillScannerUnavailable) {
-				why += ": no skill scanner can run in the gateway"
+		case errors.Is(err, errSkillPending):
+			// B5.4 skill_pending: managed installs and the strict tier refuse
+			// this use; the OSS tiers allow it with an alert, as before.
+			block := st.cfg.BlockUnscannedSkills != nil && st.cfg.BlockUnscannedSkills(env.Connector)
+			outcome, sev := "allowed", "MEDIUM"
+			if block {
+				outcome, sev = "refused", "HIGH"
 			}
-			if q := st.substrateRefuseOrAlert(ctx, env.Connector, a.Path, why, env.Facts); q != nil {
+			st.auditSkill(ctx, AuditSkillPending, sev, env.Connector, a.Path, env.Facts, map[string]any{"reason": SkillReasonPending, "waited_ms": res.waited.Milliseconds(), "outcome": outcome})
+			if block {
+				return skillPendingMessage(a.Name)
+			}
+			st.alertOnce(ctx, "MEDIUM", "Substrate skill write allowed while its scan runs: "+a.Name, a.Path, env.Facts, nil)
+		case err != nil:
+			code, why0 := skillScanErrCode(err)
+			why := "a skill the agent is writing (" + a.Name + ") could not be scanned: " + why0
+			if q := st.substrateRefuseOrAlert(ctx, env.Connector, a.Path, why, code, env.Facts); q != nil {
 				return "DefenseClaw refused writing the skill " + a.Name + ": " + q.Reason
 			}
 		case blocked:
