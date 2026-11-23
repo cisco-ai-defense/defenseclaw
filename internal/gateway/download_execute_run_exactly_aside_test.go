@@ -54,8 +54,30 @@ func upperDrive(path string) string {
 // (serviceAccountCallerCWD) or none outside the caller's home, and a
 // download the user asked to run stays quiet.
 func TestDownloadThenExecuteAlertsAfterARunExactlyPromptWithAnAside(t *testing.T) {
+	downloadThenExecuteRunExactlyAsideRows(t, t.TempDir())
+}
+
+// rel-1-0-10:GAP-1884 (the cause of GAP-0774). The same rows with the
+// fetched file under a fixed fixture directory whose name is a run word or a
+// hyphenated run: the run word was read out of the download path in the
+// run-exactly prompt as a request to run what it fetched, so the unasked
+// run raised no chain whenever the temporary directory had a component
+// named run, run-x, a-run-b or bis-run. The rows no longer depend on the
+// name of the test's temporary directory.
+func TestDownloadThenExecuteAlertsWhenTheArtifactPathHasARunWordComponent(t *testing.T) {
+	for _, component := range userRequestPathComponentRunWords {
+		t.Run(component, func(t *testing.T) {
+			downloadThenExecuteRunExactlyAsideRows(t, filepath.Join(t.TempDir(), component, "tmp"))
+		})
+	}
+}
+
+// downloadThenExecuteRunExactlyAsideRows runs the rows of
+// TestDownloadThenExecuteAlertsAfterARunExactlyPromptWithAnAside with the
+// fixture users under base.
+func downloadThenExecuteRunExactlyAsideRows(t *testing.T, base string) {
+	t.Helper()
 	installCorrelationHMACForTest(t)
-	base := t.TempDir()
 	home := filepath.Join(base, "Users", "dcw-fxc1")
 	project := filepath.Join(home, "proj")
 	public := filepath.Join(base, "Users", "Public", "s02w")
