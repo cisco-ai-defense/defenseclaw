@@ -149,14 +149,14 @@ func TestGAP1926MultiStatementQueryReadsEachStatement(t *testing.T) {
 			}
 			var forms []string
 			for _, q := range queries {
-				forms = append(forms, row.client+" \"" + q + "\"")
+				forms = append(forms, row.client+" \""+q+"\"")
 				if strings.HasSuffix(row.long, "=") {
-					forms = append(forms, row.long+"\"" + q + "\"")
+					forms = append(forms, row.long+"\""+q+"\"")
 				} else {
-					forms = append(forms, row.long+" \"" + q + "\"")
+					forms = append(forms, row.long+" \""+q+"\"")
 				}
 			}
-			hx2bSameAsBare(t, row.client+" \"" + s + "\"", forms)
+			hx2bSameAsBare(t, row.client+" \""+s+"\"", forms)
 		})
 	}
 }
@@ -179,7 +179,7 @@ func TestGAP1926RolledBackStatements(t *testing.T) {
 			}
 		}
 	}
-	hx2bSameAsBare(t, "psql -d production -c \"COPY t (c) TO PROGRAM " + hx2bQuote("id") + "\"", []string{
+	hx2bSameAsBare(t, "psql -d production -c \"COPY t (c) TO PROGRAM "+hx2bQuote("id")+"\"", []string{
 		"psql -d production -c \"BEGIN; SELECT 1; COPY t (c) TO PROGRAM " + hx2bQuote("id") + "; ROLLBACK\"",
 	})
 	hx2bSameAsBare(t, "mysql -h db -e \"DROP TABLE users\"", []string{
