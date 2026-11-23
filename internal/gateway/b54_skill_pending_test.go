@@ -120,10 +120,12 @@ const b54Dir = "/sandbox/.claude/skills/evil"
 
 var b54Skill = map[string]string{"SKILL.md": "---\nname: evil\n---\nfixture body"}
 
-// A scan still running after pending_wait: no tier hides the folder, the
-// kit is told to send it again, and the next hook gets the verdict.
+// A scan still running after pending_wait (OSS tiers): the folder is not
+// hidden, the kit is told to send it again, and the next hook gets the
+// verdict. Managed and strict never leave a folder pending (GAP-0931,
+// b58_gap0931_test.go).
 func TestB54SkillPendingThenBlocked(t *testing.T) {
-	for _, block := range []bool{true, false} {
+	for _, block := range []bool{false} {
 		t.Run(fmt.Sprintf("managed=%v", block), func(t *testing.T) {
 			r := newB54Rig(t, block, 5*time.Second, 20*time.Millisecond)
 			r.scan.bad = true
@@ -226,26 +228,29 @@ func TestB54ConcurrentHooksShareOneScan(t *testing.T) {
 	}
 }
 
-// The write gate: a skill write whose scan is still running is refused in
-// managed installs (skill_pending message) and allowed with an alert in OSS.
+// The write gate: a skill write whose scan is still running is waited for
+// in managed installs (GAP-0931: refused as skill_scan_timeout at the
+// timeout, never pending) and allowed with an alert in OSS.
 func TestB54SkillWritePendingManagedRefusesOSSAllows(t *testing.T) {
 	for _, block := range []bool{true, false} {
 		t.Run(fmt.Sprintf("managed=%v", block), func(t *testing.T) {
-			r := newB54Rig(t, block, 5*time.Second, 20*time.Millisecond)
+			r := newB54Rig(t, block, map[bool]time.Duration{true: 100 * time.Millisecond, false: 5 * time.Second}[block], 20*time.Millisecond)
 			defer close(r.scan.release)
 			st := r.f.api.substrateState()
 			p, _ := json.Marshal(map[string]any{"hook_event_name": "PreToolUse", "tool_name": "Write", "cwd": "/work",
 				"tool_input": map[string]any{"file_path": b54Dir + "/SKILL.md", "content": b54Skill["SKILL.md"]}})
 			msg := st.substrateSkillWriteRefusal(context.Background(), substrateEnvelope{Connector: "claudecode", Event: "PreToolUse", Payload: p})
 			rows := r.rowsOf(AuditSkillPending)
-			if len(rows) != 1 {
-				t.Fatalf("pending rows %+v (msg %q)", rows, msg)
-			}
 			if block {
-				if msg != `DefenseClaw is still checking the skill "evil". Try again in a few seconds.` || rows[0].d["outcome"] != "refused" {
-					t.Fatalf("managed: %q %+v", msg, rows)
+				u := r.rowsOf(AuditSkillUnscanned)
+				if len(rows) != 0 || len(u) != 1 || u[0].d["reason"] != SkillReasonScanTimeout || u[0].d["outcome"] != "refused" ||
+					!strings.Contains(msg, "the skill scan did not finish in time") {
+					t.Fatalf("managed: %q %+v %+v", msg, rows, u)
 				}
 				return
+			}
+			if len(rows) != 1 {
+				t.Fatalf("pending rows %+v (msg %q)", rows, msg)
 			}
 			if msg != "" || rows[0].d["outcome"] != "allowed" || len(r.alerts) != 1 || r.alerts[0].sev != "MEDIUM" {
 				t.Fatalf("OSS: %q %+v %+v", msg, rows, r.alerts)

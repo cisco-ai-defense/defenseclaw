@@ -67,13 +67,14 @@ func (st *substrateState) substrateSkillWriteRefusal(ctx context.Context, env su
 		for _, f := range a.Files {
 			files = append(files, SubstrateAttachedFile{Role: f.Role, Path: f.Path, Content: f.Content, Truncated: f.Truncated})
 		}
-		res := st.scanSkillFolder(ctx, a.Name, a.Path, files)
+		res := st.scanSkillFolder(ctx, env.Connector, a.Name, a.Path, files)
 		blocked, reason, err := res.blocked, res.reason, res.err
 		switch {
 		case errors.Is(err, errSkillPending):
-			// B5.4 skill_pending: managed installs and the strict tier refuse
-			// this use; the OSS tiers allow it with an alert, as before.
-			block := st.cfg.BlockUnscannedSkills != nil && st.cfg.BlockUnscannedSkills(env.Connector)
+			// B5.4 skill_pending: managed installs and the strict tier waited
+			// for the whole scan, so this is a hook that went away or no scan
+			// slot: refuse. The OSS tiers allow it with an alert, as before.
+			block := st.blocksUnscanned(env.Connector)
 			outcome, sev := "allowed", "MEDIUM"
 			if block {
 				outcome, sev = "refused", "HIGH"

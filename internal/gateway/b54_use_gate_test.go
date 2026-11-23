@@ -51,21 +51,26 @@ func (r *b54Rig) b54Use(t *testing.T, dir string, files map[string]string) (int,
 }
 
 // B5.4 skill_pending at the use gate: the Skill tool used while its folder
-// is still being scanned is refused on managed installs and the strict tier,
-// and asked on OSS (Claude Code PreToolUse can ask).
+// is still being scanned is asked on OSS (Claude Code PreToolUse can ask).
+// Managed installs and the strict tier wait for the scan and refuse the use
+// at its timeout (GAP-0931).
 func TestB54SkillPendingAtUse(t *testing.T) {
 	for _, block := range []bool{true, false} {
 		t.Run(fmt.Sprintf("managed=%v", block), func(t *testing.T) {
-			r := newB54Rig(t, block, 5*time.Second, 20*time.Millisecond)
+			r := newB54Rig(t, block, map[bool]time.Duration{true: 100 * time.Millisecond, false: 5 * time.Second}[block], 20*time.Millisecond)
 			defer close(r.scan.release)
 			code, out := r.b54Use(t, b54Dir, b54Skill)
 			var msg, action string
 			_ = json.Unmarshal(out["message"], &msg)
 			_ = json.Unmarshal(out["action"], &action)
 			if block {
-				if code != http.StatusForbidden || msg != `DefenseClaw is still checking the skill "evil". Try again in a few seconds.` {
-					t.Fatalf("managed use while scanning: %d %v", code, out)
+				if code != http.StatusForbidden || msg != `DefenseClaw refused the skill "evil": the skill scan did not finish in time; this install refuses skills it could not scan.` {
+					t.Fatalf("managed use while scanning: %d %q", code, msg)
 				}
+				if u := r.rowsOf(AuditSkillUnscanned); len(u) != 1 || u[0].d["outcome"] != "refused" || len(r.rowsOf(AuditSkillPending)) != 0 {
+					t.Fatalf("managed rows %+v", r.rows)
+				}
+				return
 			} else {
 				var native struct {
 					H struct{ PermissionDecision, PermissionDecisionReason string } `json:"hookSpecificOutput"`
@@ -76,13 +81,12 @@ func TestB54SkillPendingAtUse(t *testing.T) {
 					t.Fatalf("OSS use while scanning: %d %s", code, fmt.Sprint(out))
 				}
 			}
-			want := map[bool]string{true: "refused", false: "asked"}[block]
 			found := false
 			for _, p := range r.rowsOf(AuditSkillPending) {
-				found = found || p.d["outcome"] == want
+				found = found || p.d["outcome"] == "asked"
 			}
 			if !found {
-				t.Fatalf("no pending row with outcome %s: %+v", want, r.rowsOf(AuditSkillPending))
+				t.Fatalf("no pending row with outcome asked: %+v", r.rowsOf(AuditSkillPending))
 			}
 		})
 	}

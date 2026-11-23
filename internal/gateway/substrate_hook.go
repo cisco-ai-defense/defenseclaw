@@ -223,7 +223,7 @@ func substrateEnvelopeMiddleware(st *substrateState, next http.Handler) http.Han
 				return
 			}
 			sk := st.substrateSkills(ctx, env.Connector, env.Facts)
-			if msg := st.substrateSkillPendingUse(ctx, env, &sk); msg != "" {
+			if msg := st.substrateSkillUseGate(ctx, env, &sk); msg != "" {
 				st.logRefusal("%s", msg)
 				writeSubstrateMCPRefusal(w, msg)
 				if reg, ok := substrateRegistrationFrom(ctx); ok {

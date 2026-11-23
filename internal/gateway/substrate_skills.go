@@ -116,7 +116,7 @@ func substrateSkillFolders(f *SubstrateFacts) map[string][]SubstrateAttachedFile
 // it with a HIGH alert, the OSS default tiers alert (MEDIUM). It returns the
 // quarantine entry, or nil when the folder is allowed.
 func (st *substrateState) substrateRefuseOrAlert(ctx context.Context, connector, dir, why, code string, f *SubstrateFacts) *SubstrateQuarantine {
-	if st.cfg.BlockUnscannedSkills != nil && st.cfg.BlockUnscannedSkills(connector) {
+	if st.blocksUnscanned(connector) {
 		st.alertOnce(ctx, "HIGH", "Substrate skill folder refused: "+why, dir, f, nil)
 		st.auditSkill(ctx, AuditSkillUnscanned, "HIGH", connector, dir, f, map[string]any{"reason": code, "detail": why, "outcome": "refused"})
 		return &SubstrateQuarantine{Path: dir, Reason: why + "; this install refuses skills it could not scan", Code: code}
@@ -211,10 +211,18 @@ func (st *substrateState) substrateScanSkills(ctx context.Context, connector str
 			passed[dir] = d
 			continue
 		}
-		res := st.scanSkillFolder(ctx, path.Base(dir), dir, folders[dir])
+		res := st.scanSkillFolder(ctx, connector, path.Base(dir), dir, folders[dir])
 		blocked, reason, err := res.blocked, res.reason, res.err
 		code := SkillReasonFinding
 		switch {
+		case errors.Is(err, errSkillPending) && st.blocksUnscanned(connector):
+			// GAP-0931: managed installs and the strict tier never leave a
+			// folder pending (the hook went away, or no scan could start).
+			c, why := skillScanErrCode(err)
+			if q := st.substrateRefuseOrAlert(ctx, connector, dir, why, c, f); q != nil {
+				out = append(out, *q)
+			}
+			continue
 		case errors.Is(err, errSkillPending):
 			// B5.4: still scanning after pending_wait. The folder is not
 			// hidden (that would break a write in progress); the kit sends it
@@ -455,7 +463,7 @@ func (st *substrateState) substrateUnscannedSkills(ctx context.Context, connecto
 			why = "the DefenseClaw kit did not send it in " + strconv.Itoa(substrateSkillMaxPending) + " posts"
 		}
 		// One alert per actor, folder and fingerprint, not one per post.
-		if st.cfg.BlockUnscannedSkills != nil && st.cfg.BlockUnscannedSkills(connector) {
+		if st.blocksUnscanned(connector) {
 			refused = append(refused, SubstrateQuarantine{Path: dir, Reason: "the skill folder was not scanned: " + why, Code: SkillReasonNotSent})
 			st.alertOnce(ctx, "HIGH", "Substrate skill folder refused: it reached the actor without a scan", dir, f, errors.New(why))
 		} else {
@@ -471,7 +479,7 @@ type substrateSkillAnswer struct {
 	Scanned    []SubstrateScanned
 	Unscanned  []SubstrateUnscanned
 	// pending are the folders still being scanned (also in Unscanned), for
-	// the use gate (substrateSkillPendingUse).
+	// the use gate (substrateSkillUseGate); only the OSS tiers have any.
 	pending []SubstrateUnscanned
 	// ask, when set, turns an allow of this PreToolUse call into the
 	// connector's ask with this text (B5.4 skill_pending, OSS).

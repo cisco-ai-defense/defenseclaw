@@ -95,15 +95,28 @@ func skillScanKey(name, dir string, files []SubstrateAttachedFile) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// scanSkillFolder scans one folder inside skills.scan.timeout and waits for
-// it at most skills.pending_wait (B5.4). The scan runs detached from the
-// hook, so a hook that stops waiting leaves it running: its verdict is
-// cached by the runtime scanner and the next hook gets it at once. Without
-// limits (tests, or no config) it waits for the whole scan, as before.
-func (st *substrateState) scanSkillFolder(ctx context.Context, name, dir string, files []SubstrateAttachedFile) skillScanResult {
+// blocksUnscanned: managed installs and the strict tier refuse a skill
+// folder DefenseClaw could not scan (the hook fail mode, GAP-0039).
+func (st *substrateState) blocksUnscanned(connector string) bool {
+	return st.cfg.BlockUnscannedSkills != nil && st.cfg.BlockUnscannedSkills(connector)
+}
+
+// scanSkillFolder scans one folder inside skills.scan.timeout. Managed
+// installs and the strict tier wait for the whole scan, as the parent did
+// (GAP-0931): a folder is never left pending there, it gets a verdict or the
+// fail mode at the timeout, whatever the connector and however the agent
+// later uses it. The OSS tiers wait at most skills.pending_wait (B5.4): the
+// scan runs detached from the hook, so a hook that stops waiting leaves it
+// running; its verdict is cached by the runtime scanner and the next hook
+// gets it at once. Without limits (tests, or no config) it waits for the
+// whole scan.
+func (st *substrateState) scanSkillFolder(ctx context.Context, connector, name, dir string, files []SubstrateAttachedFile) skillScanResult {
 	var timeout, wait time.Duration
 	if st.cfg.SkillScanLimits != nil {
 		timeout, wait = st.cfg.SkillScanLimits()
+	}
+	if st.blocksUnscanned(connector) {
+		wait = 0
 	}
 	key := skillScanKey(name, dir, files)
 	st.scanMu.Lock()
@@ -257,69 +270,150 @@ func skillPendingAskMessage(name string) string {
 // (their Skill tool and skill reads run the folder pass).
 var skillAskConnectors = map[string]bool{"claudecode": true}
 
-// substrateSkillPendingUse is the use gate for a skill still being scanned
-// (B5.4 skill_pending): a PreToolUse call that uses a folder the pass of this
-// call left pending (the Skill tool naming it, or a read of one of its
-// files). Managed installs and the strict tier refuse the use (the returned
-// message). The OSS tiers ask where the agent can ask (sk.ask) and else
-// allow it with a MEDIUM alert, as rel.
-func (st *substrateState) substrateSkillPendingUse(ctx context.Context, env substrateEnvelope, sk *substrateSkillAnswer) string {
-	if pre, _ := substrateMCPEvent(env.Event); !pre || len(sk.pending) == 0 {
+// substrateSkillUseGate is the use gate of a PreToolUse call that uses a
+// folder this call's own pass decided (the kit runs the pass for the Claude
+// Code Skill tool and for reads of skill files). Managed installs and the
+// strict tier refuse a use of a folder the pass refused (GAP-0931: the kit
+// moves it, and the call that brought it does not run either); they never
+// have a pending folder (scanSkillFolder waits for the whole scan there).
+// The OSS tiers add no block: a use of a folder still being scanned asks
+// where the agent can ask (sk.ask) and else is allowed with a MEDIUM alert,
+// as rel (B5.4 skill_pending). It returns the refusal message, or "".
+func (st *substrateState) substrateSkillUseGate(ctx context.Context, env substrateEnvelope, sk *substrateSkillAnswer) string {
+	if len(sk.pending) == 0 && len(sk.Quarantine) == 0 {
 		return ""
 	}
-	dir := skillUsedFolder(env.Payload, sk.pending)
+	if pre, _ := substrateMCPEvent(env.Event); !pre {
+		return ""
+	}
+	if st.blocksUnscanned(env.Connector) {
+		dirs := make([]string, 0, len(sk.Quarantine))
+		for _, q := range sk.Quarantine {
+			dirs = append(dirs, q.Path)
+		}
+		dir := skillUsedFolder(env, dirs)
+		if dir == "" {
+			return ""
+		}
+		for _, q := range sk.Quarantine {
+			if path.Clean("/"+strings.TrimPrefix(q.Path, "/")) == dir {
+				return skillUseRefusedMessage(path.Base(dir), q)
+			}
+		}
+		return ""
+	}
+	if len(sk.pending) == 0 {
+		return ""
+	}
+	dirs := make([]string, 0, len(sk.pending))
+	for _, p := range sk.pending {
+		dirs = append(dirs, p.Path)
+	}
+	dir := skillUsedFolder(env, dirs)
 	if dir == "" {
 		return ""
 	}
 	name := path.Base(dir)
-	block := st.cfg.BlockUnscannedSkills != nil && st.cfg.BlockUnscannedSkills(env.Connector)
-	outcome, sev := "allowed", "MEDIUM"
-	switch {
-	case block:
-		outcome, sev = "refused", "HIGH"
-	case skillAskConnectors[env.Connector]:
+	outcome := "allowed"
+	if skillAskConnectors[env.Connector] {
 		outcome, sk.ask = "asked", skillPendingAskMessage(name)
 	}
-	st.auditSkill(ctx, AuditSkillPending, sev, env.Connector, dir, env.Facts, map[string]any{"reason": SkillReasonPending, "outcome": outcome})
-	if block {
-		return skillPendingMessage(name)
-	}
+	st.auditSkill(ctx, AuditSkillPending, "MEDIUM", env.Connector, dir, env.Facts, map[string]any{"reason": SkillReasonPending, "outcome": outcome})
 	if outcome == "allowed" {
 		st.alertOnce(ctx, "MEDIUM", "Substrate skill used while its scan runs: "+name, dir, env.Facts, nil)
 	}
 	return ""
 }
 
-// skillUsedFolder is the pending folder a PreToolUse call uses: the one the
-// Skill tool names (a plugin skill is "plugin:name"), or the one holding the
-// file a read names; "" when the call uses none of them.
-func skillUsedFolder(payload json.RawMessage, pending []SubstrateUnscanned) string {
+// skillUseRefusedMessage is the hook reply for a use of a refused folder.
+func skillUseRefusedMessage(name string, q SubstrateQuarantine) string {
+	switch {
+	case q.Code == SkillReasonPending:
+		return skillPendingMessage(name)
+	case strings.HasPrefix(q.Reason, "DefenseClaw "):
+		return q.Reason
+	}
+	return fmt.Sprintf("DefenseClaw refused the skill %q: %s.", name, q.Reason)
+}
+
+// skillUsedFolder is the folder of dirs a PreToolUse call uses: the one the
+// Skill tool names by its folder name or its SKILL.md frontmatter name (a
+// plugin skill is "plugin:name"; case-insensitive), the one holding a path
+// the call names (as given, or as the kit resolved it: relative paths and
+// links), or one a command names; "" when the call uses none of them.
+func skillUsedFolder(env substrateEnvelope, dirs []string) string {
 	var ev struct {
 		Tool  string         `json:"tool_name"`
 		Input map[string]any `json:"tool_input"`
 	}
-	if json.Unmarshal(payload, &ev) != nil {
+	if json.Unmarshal(env.Payload, &ev) != nil {
 		return ""
 	}
 	str := func(k string) string { s, _ := ev.Input[k].(string); return s }
-	for _, p := range pending {
-		dir := path.Clean("/" + strings.TrimPrefix(p.Path, "/"))
-		if ev.Tool == "Skill" {
-			n := str("skill")
-			if n == "" {
-				n = str("name")
+	skill := ""
+	if ev.Tool == "Skill" {
+		if skill = str("skill"); skill == "" {
+			skill = str("name")
+		}
+		if i := strings.LastIndex(skill, ":"); i >= 0 {
+			skill = skill[i+1:]
+		}
+	}
+	var named []string
+	for _, k := range []string{"file_path", "notebook_path", "path"} {
+		if f := str(k); strings.HasPrefix(f, "/") {
+			named = append(named, path.Clean(f))
+		}
+	}
+	var folders map[string][]SubstrateAttachedFile
+	if env.Facts != nil {
+		for _, p := range env.Facts.Paths {
+			for _, x := range []string{p.Abs, p.Resolved} {
+				if strings.HasPrefix(x, "/") {
+					named = append(named, path.Clean(x))
+				}
 			}
-			if i := strings.LastIndex(n, ":"); i >= 0 {
-				n = n[i+1:]
-			}
-			if n != "" && n == path.Base(dir) {
+		}
+		if skill != "" {
+			folders = substrateSkillFolders(env.Facts)
+		}
+	}
+	cmd := str("command")
+	for _, d := range dirs {
+		dir := path.Clean("/" + strings.TrimPrefix(d, "/"))
+		if skill != "" && (strings.EqualFold(skill, path.Base(dir)) || strings.EqualFold(skill, skillFrontmatterName(dir, folders[dir]))) {
+			return dir
+		}
+		for _, n := range named {
+			if n == dir || strings.HasPrefix(n, dir+"/") {
 				return dir
 			}
+		}
+		if cmd != "" && strings.Contains(cmd, path.Base(path.Dir(dir))+"/"+path.Base(dir)) {
+			return dir
+		}
+	}
+	return ""
+}
+
+// skillFrontmatterName is the name: of the folder's SKILL.md frontmatter
+// (the name the agent loads the skill by), read from its first 64 lines;
+// "" when there is none.
+func skillFrontmatterName(dir string, files []SubstrateAttachedFile) string {
+	for _, f := range files {
+		if path.Clean("/"+strings.TrimPrefix(f.Path, "/")) != dir+"/SKILL.md" {
 			continue
 		}
-		for _, k := range []string{"file_path", "notebook_path", "path"} {
-			if f := str(k); f != "" && strings.HasPrefix(path.Clean("/"+f), dir+"/") {
-				return dir
+		lines := strings.SplitN(strings.TrimPrefix(string(f.Content), "\ufeff"), "\n", 65)
+		if len(lines) == 0 || strings.TrimSpace(lines[0]) != "---" {
+			return ""
+		}
+		for _, l := range lines[1:] {
+			if strings.TrimSpace(l) == "---" {
+				return ""
+			}
+			if k, v, ok := strings.Cut(l, ":"); ok && strings.TrimSpace(k) == "name" {
+				return strings.Trim(strings.TrimSpace(v), `"'`)
 			}
 		}
 	}
