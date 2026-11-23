@@ -35,6 +35,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/safetext"
+	"github.com/defenseclaw/defenseclaw/internal/config"
 )
 
 const (
@@ -335,3 +336,53 @@ func redactErr(err error, tok string) error {
 
 // StatusCode lets the attach package tell a refusal from a failure.
 func (e *Error) StatusCode() int { return e.Status }
+
+// LauncherSettings holds the cluster's limits and defaults for the launcher.
+type LauncherSettings struct {
+	WorkspaceMaxBytes int64 `json:"workspace_max_bytes"`
+	// KeyReplay is substrate.launcher.key_replay (ask, on or off); ""
+	// from a gateway that predates it.
+	KeyReplay string `json:"key_replay,omitempty"`
+	// Files are the admin switches of push and sync; nil from a gateway
+	// that predates them.
+	Files *LauncherFiles `json:"files,omitempty"`
+	// Git is substrate.git (B2 2.5); nil from a gateway that predates it.
+	Git *LauncherGit `json:"git,omitempty"`
+	// UploadScan is substrate.launcher.upload_scan; nil from a gateway that
+	// predates it, which keeps holding files with secrets back.
+	UploadScan *LauncherUploadScan `json:"upload_scan,omitempty"`
+}
+
+// LauncherGit is substrate.git as the gateway reports it: the effective
+// https rewrite map and the submodule and LFS switches of run --clone.
+type LauncherGit struct {
+	HTTPSRewrite []config.SubstrateGitRewrite `json:"https_rewrite"`
+	Submodules   bool                         `json:"submodules"`
+	LFS          bool                         `json:"lfs"`
+	// PushBranch is the cluster's substrate.git.push_branch (allow, ask or
+	// deny; "" from a gateway before 1.0.11).
+	PushBranch string `json:"push_branch_effective,omitempty"`
+}
+
+// LauncherUploadScan is substrate.launcher.upload_scan as the gateway
+// reports it, defaults filled in.
+type LauncherUploadScan struct {
+	MaxFileBytes    int64  `json:"max_file_bytes"`
+	TimeBudget      string `json:"time_budget"`
+	SecretAction    string `json:"secret_action"`
+	PlaceholderForm string `json:"placeholder_form"`
+}
+
+// LauncherFiles is substrate.files as the gateway reports it.
+type LauncherFiles struct {
+	Push bool `json:"push"`
+	Sync bool `json:"sync"`
+}
+
+// Launcher reads settings from the signed-in admin listener. A gateway
+// predating this route returns 404.
+func (c *Client) Launcher(ctx context.Context) (LauncherSettings, error) {
+	var settings LauncherSettings
+	err := c.do(ctx, http.MethodGet, "launcher", nil, nil, &settings)
+	return settings, err
+}

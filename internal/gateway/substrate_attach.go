@@ -27,6 +27,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/identity"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/registry"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/relay"
@@ -69,12 +70,21 @@ const (
 // workspace cap (E23) for a file upload, a frame cap otherwise.
 func substrateAttachBodyCap(r *http.Request, workspaceMax int64) int64 {
 	if r.Method == http.MethodPut && strings.HasSuffix(r.URL.Path, "/attach/files") {
-		if workspaceMax <= 0 {
-			workspaceMax = 1 << 30
-		}
 		return workspaceMax + substrateTarOverhead
 	}
 	return substrateAttachFrameMax
+}
+
+// substrateWorkspaceMin is the smallest workspace cap (design 2.6: 1 MiB
+// to 64 GiB): a value meant as megabytes (workspace_max_bytes: 512) would
+// otherwise refuse every upload (RV1 P4-1).
+const substrateWorkspaceMin int64 = 1 << 20
+
+func substrateWorkspaceMax(configured int64) int64 {
+	if configured <= 0 {
+		return config.DefaultSubstrateWorkspaceMaxBytes
+	}
+	return max(min(configured, relay.MaxFilesBytes), substrateWorkspaceMin)
 }
 
 // substrateAttachCSRF is the browser gate of attach traffic: a request
@@ -188,6 +198,22 @@ func (a *APIServer) substrateAttach(st *substrateState) http.HandlerFunc {
 				defer substrateReportAttach(st.cfg.Activity, reg.Atespace, reg.UID)()
 			}
 		}
+		if rest == relay.RouteFiles && r.Method == http.MethodPut {
+			// B2: a push or a sync batch says so; the admin-off switch
+			// refuses it here (the first copy of a run carries no op).
+			switch r.Header.Get(relay.OpHeader) {
+			case relay.OpPush:
+				if !substrateSwitch(st.cfg.FilesPush) {
+					writeSubstrateJSONError(w, http.StatusForbidden, "push_disabled")
+					return
+				}
+			case relay.OpSync:
+				if !substrateSwitch(st.cfg.FilesSync) {
+					writeSubstrateJSONError(w, http.StatusForbidden, "sync_disabled")
+					return
+				}
+			}
+		}
 		space, name := reg.Atespace, reg.Name
 		proxy := &httputil.ReverseProxy{
 			Rewrite: func(pr *httputil.ProxyRequest) {
@@ -197,6 +223,10 @@ func (a *APIServer) substrateAttach(st *substrateState) http.HandlerFunc {
 				pr.Out.Header.Del("Authorization")
 				pr.Out.Header.Del("Cookie")
 				pr.Out.Header.Del("X-Forwarded-For")
+				pr.Out.Header.Del(relay.UploadMaxHeader)
+				if rest == relay.RouteFiles && r.Method == http.MethodPut {
+					pr.Out.Header.Set(relay.UploadMaxHeader, strconv.FormatInt(substrateWorkspaceMax(st.cfg.WorkspaceMaxBytes), 10))
+				}
 				// Only the token the gateway minted reaches the relay.
 				var keep []string
 				for _, v := range pr.In.Header.Values("Sec-WebSocket-Protocol") {

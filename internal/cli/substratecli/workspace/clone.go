@@ -26,11 +26,14 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 	"unicode"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	osw "github.com/defenseclaw/defenseclaw/internal/openshell/workspace"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/reasons"
 )
 
 // run --clone (GAP-0175): the repository is cloned inside the actor through
@@ -47,6 +50,17 @@ const cloneTimeout = 15 * time.Minute
 type CloneResult struct {
 	Dir  string
 	Note string
+	// Warnings say what the clone could not bring (LFS files left as
+	// pointers); the clone itself worked.
+	Warnings []string
+}
+
+// CloneOptions are the cluster's substrate.git switches for one clone.
+type CloneOptions struct {
+	// Submodules clones submodules too (substrate.git.submodules).
+	Submodules bool
+	// LFS fetches LFS files (substrate.git.lfs); off leaves pointers.
+	LFS bool
 }
 
 var (
@@ -82,6 +96,23 @@ func CheckCloneURL(raw string) error {
 	return nil
 }
 
+// CloneHost is the host git in the actor sends a credential to for raw:
+// the https host, or the host of an ssh address the actor's git turns
+// into https (the baked rules plus rules, substrate.git.https_rewrite:
+// config.RewriteGitURL). It is "" for any other address, which never asks
+// for a token.
+func CloneHost(raw string, rules []config.SubstrateGitRewrite) string {
+	raw = strings.TrimSpace(raw)
+	if v, ok := config.RewriteGitURL(raw, rules); ok {
+		raw = v
+	}
+	u, err := url.Parse(raw)
+	if err != nil || (u.Scheme != "https" && u.Scheme != "http") {
+		return ""
+	}
+	return strings.ToLower(u.Hostname())
+}
+
 // CheckCloneRef refuses a --ref git would read as an option.
 func CheckCloneRef(ref string) error {
 	if ref != "" && !refRE.MatchString(ref) {
@@ -113,21 +144,48 @@ func cloneFolder(raw string) string {
 }
 
 // CloneError is a clone git refused in the actor, in its own words.
+// Hint, when set, replaces the general advice for a refused credential
+// with what this person can do (B1 2.2: the template that covers the host,
+// or the add command an administrator approves).
+//
+// Refused is a host the agent's network rules do not allow, which the
+// launcher learned from the gateway's policy explain after the clone
+// failed (GAP-0720): a 403 from the egress guard then means the rules,
+// not a missing token, so no credential is offered.
 type CloneError struct {
 	URL, Message string
 	Exit         int
+	Hint         string
+	Refused      string
+}
+
+// NeedsCredential reports whether the host refused the clone for want of
+// a credential: no user name, a refused placeholder, 401 or 403. It is
+// false when the agent's network rules refused a host (Refused).
+func (e *CloneError) NeedsCredential() bool {
+	if e.Refused != "" {
+		return false
+	}
+	low := strings.ToLower(e.Message)
+	return strings.Contains(low, "could not read username") || strings.Contains(low, "authentication failed") ||
+		strings.Contains(low, "terminal prompts disabled") || strings.Contains(low, "403") || strings.Contains(low, "401")
 }
 
 func (e *CloneError) Error() string {
 	msg := fmt.Sprintf("git could not clone %s in the agent: %s", e.URL, e.Message)
 	low := strings.ToLower(e.Message)
 	switch {
-	case strings.Contains(low, "could not read username") || strings.Contains(low, "authentication failed") ||
-		strings.Contains(low, "terminal prompts disabled") || strings.Contains(low, "403") || strings.Contains(low, "401"):
+	case e.Refused != "":
+		msg += ". The agent's network rules do not allow " + e.Refused + ": " + reasons.Message(reasons.Must("not_in_allow_only"))
+	case e.NeedsCredential() && e.Hint != "":
+		msg += ". " + e.Hint
+	case e.NeedsCredential():
 		msg += ". The repository needs a credential the cluster does not add for this host; ask your administrator to allow it for your profile"
 	case strings.Contains(low, "permission denied (publickey)") || strings.Contains(low, "host key verification"):
-		msg += ". The agent has no SSH key; use the https:// address, for which the cluster adds the credential"
-	case strings.Contains(low, "could not resolve host") || strings.Contains(low, "connection refused") || strings.Contains(low, "403 forbidden"):
+		msg += ". The agent has no SSH key; use the https:// address, for which the cluster adds the credential, or ask your administrator to add this host to substrate.git.https_rewrite"
+	case strings.Contains(low, "no space left on device"):
+		msg += ". The agent's disk is full; clone a smaller repository, or ask your administrator for a template with more disk"
+	case strings.Contains(low, "could not resolve host") || strings.Contains(low, "connection refused"):
 		msg += ". The agent's network rules may not allow this host; ask your administrator"
 	case strings.Contains(low, "returned error: 503") || strings.Contains(low, "returned error: 502"):
 		msg += ". The cluster's network guard refused the request or could not check it; ask your administrator to look at the DefenseClaw egress log for this agent"
@@ -140,7 +198,7 @@ func (e *CloneError) Error() string {
 // copy baseline on this computer (the same private git directory the host
 // copy uses), so the agent starts in the clone, checkpoint and undo find it,
 // and pull reviews and brings back what the agent changed on any OS.
-func Clone(ctx context.Context, c *Client, dataDir, name, rawURL, ref string) (*CloneResult, error) {
+func Clone(ctx context.Context, c *Client, dataDir, name, rawURL, ref string, opts CloneOptions) (*CloneResult, error) {
 	if err := CheckCloneURL(rawURL); err != nil {
 		return nil, err
 	}
@@ -153,6 +211,9 @@ func Clone(ctx context.Context, c *Client, dataDir, name, rawURL, ref string) (*
 	}
 	dir := path.Join(root, cloneFolder(rawURL))
 	env := map[string]string{"GIT_TERMINAL_PROMPT": "0", "GIT_ASKPASS": "/bin/true", "SSH_ASKPASS": "/bin/true"}
+	if !opts.LFS {
+		env["GIT_LFS_SKIP_SMUDGE"] = "1"
+	}
 	run := func(argv ...string) error {
 		res, err := c.Exec(ctx, "", osw.ExecRequest{Argv: argv, Workdir: root, Env: env, Timeout: cloneTimeout})
 		if err != nil {
@@ -164,28 +225,107 @@ func Clone(ctx context.Context, c *Client, dataDir, name, rawURL, ref string) (*
 		return nil
 	}
 	// The image's credential helper stays: its placeholder is what egress
-	// swaps for the bound token. No prompt, no local or ext transport.
-	if err := run("git", "-c", "protocol.file.allow=never", "-c", "protocol.ext.allow=never",
-		"clone", "--quiet", "--", rawURL, dir); err != nil {
+	// swaps for the bound token. No prompt, no local or ext transport; git
+	// passes the -c settings on to the submodule clones it starts.
+	guard := []string{"git", "-c", "protocol.file.allow=never", "-c", "protocol.ext.allow=never"}
+	args := append(slices.Clone(guard), "clone", "--quiet")
+	if opts.Submodules {
+		args = append(args, "--recurse-submodules")
+	}
+	if err := run(append(args, "--", rawURL, dir)...); err != nil {
 		return nil, err
 	}
 	if ref != "" {
 		if err := run("git", "-C", dir, "-c", "advice.detachedHead=false", "checkout", "--quiet", ref, "--"); err != nil {
 			return nil, err
 		}
+		if opts.Submodules {
+			if err := run(append(slices.Clone(guard), "-C", dir, "submodule", "update", "--quiet", "--init", "--recursive")...); err != nil {
+				return nil, err
+			}
+		}
 	}
 	rec := &hostRecord{Version: hostRecordVersion, Name: name, Folder: path.Base(dir), RemoteDir: dir,
 		CloneURL: rawURL, CloneRef: ref, UploadedAt: time.Now().UTC()}
 	res := &CloneResult{Dir: dir}
+	if w := cloneLFSWarning(ctx, c, root, dir, env, opts.LFS); w != "" {
+		res.Warnings = append(res.Warnings, w)
+	}
 	if err := cloneBaseline(ctx, c, dataDir, rec); err != nil {
 		rec.Baseline, rec.Files, rec.Bytes = "", 0, 0
 		res.Note = "pull cannot review this agent's work (" + lastLine(strings.TrimPrefix(err.Error(), "workspace: ")) +
-			"); push from inside the agent with git instead"
+			"); push it to its origin as a branch instead with pull --push-branch NAME"
 	}
 	if err := rec.save(dataDir); err != nil {
 		return nil, fmt.Errorf("workspace: record the clone: %w", err)
 	}
 	return res, nil
+}
+
+// cloneLFSWarning says when files the clone's attributes mark for LFS
+// stayed pointers: the template has no git-lfs, or substrate.git.lfs is
+// off. It is "" when there are none, or git-lfs fetched them.
+func cloneLFSWarning(ctx context.Context, c *Client, root, dir string, env map[string]string, lfsOn bool) string {
+	const script = `n=$(git -C "$1" ls-files -- ':(attr:filter=lfs)' | wc -l); if git lfs version >/dev/null 2>&1; then echo "$n lfs"; else echo "$n none"; fi`
+	res, err := c.Exec(ctx, "", osw.ExecRequest{Argv: []string{"sh", "-c", script, "sh", dir}, Workdir: root, Env: env, Timeout: time.Minute})
+	if err != nil || res.ExitCode != 0 {
+		return ""
+	}
+	var n int
+	var tool string
+	if _, err := fmt.Sscan(string(res.Stdout), &n, &tool); err != nil || n == 0 {
+		return ""
+	}
+	files := fmt.Sprintf("%d LFS files are pointers", n)
+	if n == 1 {
+		files = "1 LFS file is a pointer"
+	}
+	switch {
+	case tool != "lfs":
+		return "this template has no git-lfs; " + files
+	case !lfsOn:
+		return "LFS is off on this cluster (substrate.git.lfs); " + files
+	}
+	return ""
+}
+
+// gitRewriteScript writes the https rewrite pairs ($1 from, $2 to, ...)
+// into the actor user's git config: a file of its own, included once from
+// ~/.config/git/config, so a second start replaces it in place. The pairs
+// are argv, never shell text.
+const gitRewriteScript = `set -e
+d="${XDG_CONFIG_HOME:-$HOME/.config}/git"
+f="$d/defenseclaw-rewrite"
+mkdir -p "$d"
+: > "$f.tmp"
+while [ "$#" -ge 2 ]; do git config --file "$f.tmp" --add "url.$2.insteadOf" "$1"; shift 2; done
+mv -f "$f.tmp" "$f"
+git config --file "$d/config" --get-all include.path 2>/dev/null | grep -qxF defenseclaw-rewrite || git config --file "$d/config" --add include.path defenseclaw-rewrite`
+
+// WriteGitRewrite puts substrate.git.https_rewrite into the actor's git
+// config at start (B2 2.5), before any upload or clone, so the agent's own
+// git calls turn the same ssh addresses into https. It is a convenience,
+// not a control: egress decides what the agent reaches. A pair that fails
+// CheckSubstrateGitRewrite is left out.
+func WriteGitRewrite(ctx context.Context, c *Client, rules []config.SubstrateGitRewrite) error {
+	argv := []string{"sh", "-c", gitRewriteScript, "sh"}
+	for _, r := range rules {
+		if config.CheckSubstrateGitRewrite(r) == nil {
+			argv = append(argv, r.From, r.To)
+		}
+	}
+	root, err := c.Root(ctx)
+	if err != nil {
+		return err
+	}
+	res, err := c.Exec(ctx, "", osw.ExecRequest{Argv: argv, Workdir: root, Timeout: time.Minute})
+	if err != nil {
+		return err
+	}
+	if res.ExitCode != 0 {
+		return errors.New(lastLine(string(res.Stderr), string(res.Stdout)))
+	}
+	return nil
 }
 
 // cloneBaseline reads the fresh clone back (the host copy's own reader:

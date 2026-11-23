@@ -161,6 +161,9 @@
             },
             "secretsNamespace": {
               "$ref": "#/definitions/dnsLabel"
+            },
+            "createUserSecretsNamespace": {
+              "type": "boolean"
             }
           }
         },
@@ -250,6 +253,40 @@
                 "issuer": {
                   "type": "string",
                   "pattern": "^https://"
+                }
+              }
+            },
+            "launcher": {
+              "type": "object",
+              "properties": {
+                "upload_scan": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "description": "The secret scan of a project copy before upload (Linux and macOS launchers). secret_action hold_back is the admin-off switch for in-source replacement.",
+                  "properties": {
+                    "max_file_bytes": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 67108864
+                    },
+                    "time_budget": {
+                      "type": "string"
+                    },
+                    "secret_action": {
+                      "type": "string",
+                      "enum": [
+                        "replace",
+                        "hold_back"
+                      ]
+                    },
+                    "placeholder_form": {
+                      "type": "string",
+                      "enum": [
+                        "token",
+                        "env"
+                      ]
+                    }
+                  }
                 }
               }
             }
@@ -733,7 +770,10 @@
     },
     "homeMedium": {
       "type": "string",
-      "enum": ["", "Memory"]
+      "enum": [
+        "",
+        "Memory"
+      ]
     },
     "bundles": {
       "type": "object",

@@ -135,13 +135,35 @@ func (a *APIServer) substrateDecideAsk(st *substrateState) http.HandlerFunc {
 			writeSubstrateJSONError(w, http.StatusNotFound, "ask_not_found")
 			return
 		case asks.IsDecided(err):
-			writeSubstrateJSONError(w, http.StatusConflict, "ask_already_answered")
+			// An administrator answering a binding ask again the same way
+			// applies that answer to the binding again: the binding write
+			// of the first answer may have failed (RV4 F2).
+			again, ok, berr := a.substrateReapplyBindingDecision(r.Context(), st, c, r.PathValue("id"), in.Decision)
+			switch {
+			case !ok:
+				writeSubstrateJSONError(w, http.StatusConflict, "ask_already_answered")
+			case berr != nil:
+				fmt.Fprintf(os.Stderr, "[substrate] binding of ask %s not moved: %v\n", again.ID, berr)
+				writeSubstrateJSONError(w, http.StatusBadGateway, "secret_not_stored")
+			default:
+				writeSubstrateJSON(w, http.StatusOK, askView(again))
+			}
+			return
+		case asks.IsAdminOnly(err):
+			writeSubstrateJSONError(w, http.StatusForbidden, "ask_admin_only")
 			return
 		case err != nil:
 			writeSubstrateJSONError(w, http.StatusServiceUnavailable, "asks_unavailable")
 			return
 		}
 		a.emitSubstrateApprovalV8(r.Context(), got, false, audit.SandboxApprovalByOperator)
+		if err := a.substrateBindingDecided(r.Context(), st, got); err != nil {
+			// The ask is answered but the binding store refused the write:
+			// the binding stays waiting; the administrator is told.
+			fmt.Fprintf(os.Stderr, "[substrate] binding of ask %s not moved: %v\n", got.ID, err)
+			writeSubstrateJSONError(w, http.StatusBadGateway, "secret_not_stored")
+			return
+		}
 		if got.OwnerID != ownerOf(c.person).ID() {
 			// An administrator answering someone else's ask is recorded as
 			// themselves (decided_by), and logged here.
@@ -598,7 +620,7 @@ func (st *substrateState) substrateRecordDecision(ctx context.Context, reg regis
 // and host-wide for a host-wide ask or the same rule covering every method
 // for a url_rules ask (as within one actor, GAP-0177).
 func alwaysApprovalCovers(approved, asked asks.Ask) bool {
-	return approved.Always && approved.State == asks.StateApproved && approved.Kind != "tool" &&
+	return approved.Always && approved.State == asks.StateApproved && approved.Kind != "tool" && approved.Kind != asks.KindGitPush &&
 		approved.OwnerID == asked.OwnerID && approved.Profile == asked.Profile && approved.Host == asked.Host &&
 		(urlRuleApprovalCovers(approved.Rule, asked.Rule) || (asks.HostWide(asked.Rule) && asks.HostWide(approved.Rule)))
 }

@@ -58,6 +58,8 @@ defenseclaw substrate status --batch BATCH
 defenseclaw substrate delete --batch BATCH
 ```
 
+To hand back a finished task as a branch of the repository, run `defenseclaw substrate pull NAME --push-branch agent/NAME` (Preview). Without a terminal it waits up to 30 minutes for a person to answer its question with `defenseclaw substrate approve`, unless the profile allows pushes (`git_push: allow`).
+
 The file is a list of tasks, under `tasks:` or bare. A task is a line of text, or `name`, `task` and `agent` (a task may name its own agent). One batch takes at most 500 tasks. Each task gets its own actor, with a shared batch ID, and `--parallel` (default 4) limits how many run at once. A batch can be larger than the worker pool: a task that finds every worker taken waits up to 15 minutes for one, and a finished task gives its worker back about a minute after it ends. With `--parallel` at most the number of free workers, no task waits. `--clone` and `--ref` start every task from the same commit; without them every task starts from a copy of the same folder. `status --batch` shows each agent's state. `usage --batch` is not available yet: see [Feature coverage](/docs/substrate/features#routing-budgets-and-cost). An agent that signs in to a vendor account (Cursor, Kiro, Antigravity, Devin, Amp) needs `--yes` in a batch, or in any run with no terminal, on an open-source cluster: `--yes` is your acknowledgement of the [sign-in warning](/docs/substrate/agents#vendor-sign-in), and without it nothing is created.
 
 ## From CI

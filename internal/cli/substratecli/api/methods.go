@@ -118,17 +118,22 @@ func (k Ask) shown() Ask {
 }
 
 func (s Secret) shown() Secret {
-	for _, f := range []*string{&s.Name, &s.Scope, &s.Status} {
+	for _, f := range []*string{&s.Name, &s.Scope, &s.Status, &s.Kind, &s.Template, &s.Reason, &s.AskID} {
 		*f = safetext.Line(*f)
 	}
-	if s.Hosts != nil {
-		hosts := make([]string, len(s.Hosts))
-		for i, h := range s.Hosts {
-			hosts[i] = safetext.Line(h)
-		}
-		s.Hosts = hosts
-	}
+	s.Hosts, s.Agents = safeLines(s.Hosts), safeLines(s.Agents)
 	return s
+}
+
+func safeLines(in []string) []string {
+	if in == nil {
+		return nil
+	}
+	out := make([]string, len(in))
+	for i, v := range in {
+		out[i] = safetext.Line(v)
+	}
+	return out
 }
 
 // CreateRequest is POST /actors.
@@ -441,6 +446,33 @@ type Secret struct {
 	Hosts  []string `json:"hosts,omitempty"`
 	Mine   bool     `json:"mine,omitempty"`
 	Status string   `json:"status,omitempty"`
+	// Kind is template (the person's own binding, Template names it) or
+	// admin (an administrator's entry).
+	Kind     string `json:"kind,omitempty"`
+	Template string `json:"template,omitempty"`
+	// Reason is the reason code of a status that keeps the secret out of
+	// every policy (expired, denied, waiting on admin, ...).
+	Reason  string     `json:"reason,omitempty"`
+	AskID   string     `json:"ask_id,omitempty"`
+	Expires *time.Time `json:"expires,omitempty"`
+	// Agents are the person's agents that get it; nil when not known.
+	Agents   []string   `json:"agents,omitempty"`
+	LastUsed *time.Time `json:"last_used,omitempty"`
+}
+
+// SecretTest is the answer of secrets test: the secret as list shows it
+// and, for --agent, whether that agent's policy carries it.
+type SecretTest struct {
+	Secret
+	Agent *SecretTestAgent `json:"agent,omitempty"`
+}
+
+// SecretTestAgent says whether one agent's policy carries the secret.
+// InPolicy is nil when DefenseClaw could not tell.
+type SecretTestAgent struct {
+	Actor    string `json:"actor"`
+	InPolicy *bool  `json:"in_policy"`
+	Reason   string `json:"reason,omitempty"`
 }
 
 // Secrets lists secret names; mine limits it to the person's own.
@@ -467,13 +499,100 @@ func (c *Client) SetSecret(ctx context.Context, name, value string) error {
 	return c.do(ctx, http.MethodPut, "secrets/"+url.PathEscape(name), nil, map[string]string{"value": value}, nil)
 }
 
+// SecretTemplate is one admin-approved way to bind a secret of your own.
+type SecretTemplate struct {
+	Name      string   `json:"name"`
+	Hosts     []string `json:"hosts"`
+	Header    string   `json:"header"`
+	Form      string   `json:"form"`
+	BasicUser string   `json:"basic_user,omitempty"`
+}
+
+func (t SecretTemplate) shown() SecretTemplate {
+	for _, f := range []*string{&t.Name, &t.Header, &t.Form, &t.BasicUser} {
+		*f = safetext.Line(*f)
+	}
+	hosts := make([]string, len(t.Hosts))
+	for i, h := range t.Hosts {
+		hosts[i] = safetext.Line(h)
+	}
+	t.Hosts = hosts
+	return t
+}
+
+// SecretTemplates lists the templates your profile may use and the
+// self-service mode (bindings or values_only).
+func (c *Client) SecretTemplates(ctx context.Context) ([]SecretTemplate, string, error) {
+	var out struct {
+		Templates []SecretTemplate `json:"templates"`
+		Mode      string           `json:"mode"`
+	}
+	if err := c.do(ctx, http.MethodGet, "secret-templates", nil, nil, &out); err != nil {
+		return nil, "", err
+	}
+	for i := range out.Templates {
+		out.Templates[i] = out.Templates[i].shown()
+	}
+	return out.Templates, safetext.Line(out.Mode), nil
+}
+
+// AddSecretRequest creates a binding of your own; Value is the plain
+// token (the gateway forms a basic credential itself).
+type AddSecretRequest struct {
+	Name      string    `json:"name"`
+	Template  string    `json:"template"`
+	Host      string    `json:"host"`
+	Value     string    `json:"value"`
+	Expires   time.Time `json:"expires,omitzero"`
+	AllowEcho bool      `json:"allow_echo,omitempty"`
+	User      string    `json:"user,omitempty"`
+}
+
+// AddSecretResult is the new binding; Reason is set when it waits on an
+// administrator (202).
+type AddSecretResult struct {
+	Name     string    `json:"name"`
+	ID       string    `json:"id"`
+	Template string    `json:"template"`
+	Host     string    `json:"host"`
+	Status   string    `json:"status"`
+	Reason   string    `json:"reason,omitempty"`
+	AskID    string    `json:"ask_id,omitempty"`
+	Expires  time.Time `json:"expires,omitzero"`
+}
+
+// AddSecret stores a new secret of your own for one host; the value
+// travels once, over TLS, and is never echoed.
+func (c *Client) AddSecret(ctx context.Context, req AddSecretRequest) (AddSecretResult, error) {
+	var out AddSecretResult
+	if err := c.do(ctx, http.MethodPost, "secrets", nil, req, &out); err != nil {
+		return AddSecretResult{}, err
+	}
+	for _, f := range []*string{&out.Name, &out.ID, &out.Template, &out.Host, &out.Status, &out.Reason} {
+		*f = safetext.Line(*f)
+	}
+	return out, nil
+}
+
 // RemoveSecret deletes a per-person secret.
 func (c *Client) RemoveSecret(ctx context.Context, name string) error {
 	return c.do(ctx, http.MethodDelete, "secrets/"+url.PathEscape(name), nil, nil, nil)
 }
 
-// TestSecret asks the gateway to check a secret against its bound host.
-func (c *Client) TestSecret(ctx context.Context, name string) (map[string]any, error) {
-	var out map[string]any
-	return out, c.do(ctx, http.MethodPost, "secrets/"+url.PathEscape(name)+"/test", nil, map[string]any{}, &out)
+// TestSecret asks the gateway whether a secret is stored and usable and,
+// with agent (atespace/name), whether that agent's policy carries it.
+func (c *Client) TestSecret(ctx context.Context, name, agent string) (SecretTest, error) {
+	var out SecretTest
+	body := map[string]any{}
+	if agent != "" {
+		body["agent"] = agent
+	}
+	if err := c.do(ctx, http.MethodPost, "secrets/"+url.PathEscape(name)+"/test", nil, body, &out); err != nil {
+		return SecretTest{}, err
+	}
+	out.Secret = out.shown()
+	if out.Agent != nil {
+		out.Agent.Actor, out.Agent.Reason = safetext.Line(out.Agent.Actor), safetext.Line(out.Agent.Reason)
+	}
+	return out, nil
 }

@@ -67,6 +67,11 @@ substrate:
     # The namespace holding the Secrets egress injects into actors (never
     # this release's namespace: DefenseClaw's own Secrets stay here).
     secretsNamespace: defenseclaw-actor-secrets
+    # Create config.substrate.self_service_secrets.namespace (default
+    # defenseclaw-user-secrets, where people's own secret values live) when
+    # self-service secrets are on. false: the namespace already exists. The
+    # hooks grant the credential provider this namespace too.
+    createUserSecretsNamespace: true
 
 # Sets config.deployment_mode. managed_enterprise mounts config.yaml as one
 # read-only file and gives each pod a data volume owned by the gateway
@@ -96,6 +101,17 @@ config:
       max_store_mb: 1024
   substrate:
     enabled: true
+    # The launchers' secret scan of a project copy before upload (Preview).
+    # secret_action replace (default) uploads a file with each credential
+    # replaced by a placeholder; hold_back keeps the whole file on the
+    # person's computer (the admin-off switch). Files over max_file_bytes,
+    # or past time_budget, are named in the run's report.
+    # launcher:
+    #   upload_scan:
+    #     max_file_bytes: 8388608
+    #     time_budget: 120s
+    #     secret_action: replace
+    #     placeholder_form: token
     supported_versions: ">=1.0.0 <1.1.0"
     identity:
       # Unique per cluster (E13): doctor fails when two clusters share one.

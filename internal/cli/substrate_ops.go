@@ -60,7 +60,7 @@ func runSubstrateLogs(cmd *cobra.Command, out *substrateOutput, com *substrateCo
 		// GAP-0420: no wait for an agent that cannot answer.
 		return substrateFail(substrateCrashedErr(a))
 	}
-	o, err := substrateAttachOptions(cmd, s, a, "auto", true)
+	o, err := substrateAttachOptions(cmd, s, a, "auto", true, attach.KeyReplayOff)
 	if err != nil {
 		return err
 	}
@@ -139,18 +139,18 @@ func runSubstratePull(cmd *cobra.Command, f *substratePullFlags, ref string) err
 		return err
 	}
 	modes := 0
-	for _, on := range []bool{f.apply, f.branch != "", f.patch != ""} {
+	for _, on := range []bool{f.apply, f.branch != "", f.patch != "", f.pushBranch != ""} {
 		if on {
 			modes++
 		}
 	}
 	if modes > 1 {
-		return cliusage.WithExitCode(errors.New("choose one of --apply, --branch NAME or --patch-out FILE"), 2)
+		return cliusage.WithExitCode(errors.New("choose one of --apply, --branch NAME, --patch-out FILE or --push-branch NAME"), 2)
 	}
-	if f.allowFlagged && !f.apply {
+	if f.allowFlagged && !f.apply && f.pushBranch == "" {
 		// Refused before anything is read, also on an empty pull
 		// (GAP-0531).
-		return cliusage.WithExitCode(errors.New("--allow-flagged goes with --apply (a branch or a patch writes nothing that runs)"), 2)
+		return cliusage.WithExitCode(errors.New("--allow-flagged goes with --apply or --push-branch (a branch or a patch writes nothing that runs)"), 2)
 	}
 	s, err := substrateOpen(cmd, &f.com)
 	if err != nil {
@@ -165,6 +165,9 @@ func runSubstratePull(cmd *cobra.Command, f *substratePullFlags, ref string) err
 	if a.State == substrateStateCrashed {
 		return substrateFail(substrateCrashedErr(a))
 	}
+	if f.pushBranch != "" {
+		return runSubstratePushBranch(ctx, cmd, f, s, a, asJSON)
+	}
 	name := substrateCopyName(a)
 	dataDir := auth.StateDir()
 	if !workspace.HasCopy(dataDir, name) {
@@ -177,7 +180,8 @@ func runSubstratePull(cmd *cobra.Command, f *substratePullFlags, ref string) err
 	defer rel.Close()
 	w := cmd.OutOrStdout()
 	fmt.Fprintln(cmd.ErrOrStderr(), "Reading the agent's work...")
-	rev, err := workspace.Pull(ctx, workspace.PullOptions{Exec: rel.Client, DataDir: dataDir, Name: name, Label: a.Name, Timeout: f.timeout, Project: "."})
+	rev, err := workspace.Pull(ctx, workspace.PullOptions{Exec: rel.Client, DataDir: dataDir, Name: name, Label: a.Name, Timeout: f.timeout, Project: ".",
+		RestoreSecretLines: f.restoreSecrets})
 	if err != nil {
 		return fmt.Errorf("could not read the agent's work: %w", err)
 	}
@@ -263,8 +267,9 @@ func substratePullAccept(f *substratePullFlags, sensitive, interactive bool, ask
 func substratePullElsewhere(a api.Actor) error {
 	return cliusage.WithExitCode(fmt.Errorf("this computer has no record of the folder you sent to %s/%s, so pull cannot tell what the agent changed: "+
 		"only the computer you ran \"defenseclaw substrate run\" on keeps it. Run pull there (--apply, --branch NAME or --patch-out FILE). "+
-		"From this computer, connect to the agent (defenseclaw substrate connect %s), commit its work and git push it from inside the agent, then git pull it here",
-		a.Atespace, a.Name, a.Name), substrateExitRefused)
+		"If it was started with run --clone, push its work to its origin as a branch from here (defenseclaw substrate pull %s --push-branch NAME). "+
+		"Otherwise, from this computer, connect to the agent (defenseclaw substrate connect %s), commit its work and git push it from inside the agent, then git pull it here",
+		a.Atespace, a.Name, a.Name, a.Name), substrateExitRefused)
 }
 
 // substratePullChoose asks what to do with the changes on a terminal; with
@@ -482,6 +487,9 @@ func runSubstrateUndo(cmd *cobra.Command, com *substrateCommon, ref, to string, 
 		return err
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "Put %s/%s back to restore point %s.\n", a.Atespace, a.Name, info.ID)
+	if info.Pushes > 0 {
+		fmt.Fprintf(cmd.OutOrStdout(), "It also took back %d push(es) made after that point.\n", info.Pushes)
+	}
 	// GAP-0415: what the agent was asking about is gone with the folder it
 	// changed; its pending asks close now instead of waiting out their time.
 	if n := substrateCloseAsks(ctx, s.Client, a, "the agent was put back to a restore point with undo"); n > 0 {

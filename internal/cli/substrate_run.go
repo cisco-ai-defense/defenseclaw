@@ -132,15 +132,19 @@ func substrateBanner(ctx context.Context, cl *api.Client, a api.Actor) attach.Ba
 	return b
 }
 
-func substrateAttachOptions(cmd *cobra.Command, s *substrateSession, a api.Actor, transport string, noAsks bool) (attach.Options, error) {
+func substrateAttachOptions(cmd *cobra.Command, s *substrateSession, a api.Actor, transport string, noAsks bool, keyReplay string) (attach.Options, error) {
 	tr, err := substrateTransport(transport)
+	if err != nil {
+		return attach.Options{}, err
+	}
+	replay, err := substrateKeyReplay(cmd, s, keyReplay)
 	if err != nil {
 		return attach.Options{}, err
 	}
 	o := attach.Options{
 		Target:  attach.Target{Atespace: a.Atespace, Name: a.Name},
 		Gateway: attach.Gateway{BaseURL: s.Ctx.AdminURL, CAFile: s.Ctx.AdminCAFile}, Bearer: s.Bearer, In: os.Stdin, Out: cmd.OutOrStdout(), Err: cmd.ErrOrStderr(),
-		Transport: tr, NoAsks: noAsks,
+		Transport: tr, NoAsks: noAsks, KeyReplay: replay,
 	}
 	// The agent starts in the copy of the project, so what it writes where
 	// it starts comes back with pull (GAP-0163). A computer that did not
@@ -194,7 +198,7 @@ func runSubstrateConnect(cmd *cobra.Command, f *substrateAttachFlags, ref string
 	if a.State == substrateStateCrashed {
 		return substrateFail(substrateCrashedErr(a))
 	}
-	o, err := substrateAttachOptions(cmd, s, a, f.transport, f.noAsks)
+	o, err := substrateAttachOptions(cmd, s, a, f.transport, f.noAsks, f.keyReplay)
 	if err != nil {
 		return err
 	}
@@ -472,6 +476,14 @@ func substrateCreate(ctx context.Context, cmd *cobra.Command, s *substrateSessio
 	// (GAP-0133). Every actor gets a name nobody had before.
 	req.Name = uniqueSubstrateActorName(req.Name, t.spec.Command)
 	req.Secrets = f.secrets
+	var prepared *workspace.PreparedUpload
+	if project != "" {
+		prepared, err = substratePreflight(ctx, cmd, s, f, project)
+		if err != nil {
+			return a, err
+		}
+		defer prepared.Close()
+	}
 	a, err = s.Client.Create(ctx, req)
 	// GAP-0527: the profile login saved (--default-profile) is a preference,
 	// not the person's assignment. Refused (a contractor whose login saved
@@ -542,8 +554,9 @@ func substrateCreate(ctx context.Context, cmd *cobra.Command, s *substrateSessio
 			}
 		}
 	}()
-	if project != "" {
-		if err = substrateUploadFolder(ctx, cmd, s, a, f, project); err != nil {
+	substrateGitRewriteAtStart(ctx, cmd, s, a, f)
+	if prepared != nil {
+		if err = substrateUploadFolder(ctx, cmd, s, a, prepared); err != nil {
 			return a, err
 		}
 	}
@@ -592,11 +605,18 @@ func substrateCloneInActor(ctx context.Context, cmd *cobra.Command, s *substrate
 	}
 	defer rel.Close()
 	fmt.Fprintf(cmd.ErrOrStderr(), "Cloning %s in the agent...\n", safetext.Line(f.clone))
-	res, err := workspace.Clone(ctx, rel.Client, auth.StateDir(), substrateCopyName(a), f.clone, f.ref)
+	g := substrateGitSettings(ctx, s, f)
+	res, err := substrateCloneOnce(ctx, cmd, s.Client, a, f, func() (*workspace.CloneResult, error) {
+		return workspace.Clone(ctx, rel.Client, auth.StateDir(), substrateCopyName(a), f.clone, f.ref,
+			workspace.CloneOptions{Submodules: g.Submodules, LFS: g.LFS})
+	})
 	if err != nil {
 		return cliusage.WithExitCode(err, 1)
 	}
 	fmt.Fprintf(cmd.ErrOrStderr(), "Cloned into %s.\n", safetext.Line(res.Dir))
+	for _, warn := range res.Warnings {
+		fmt.Fprintf(cmd.ErrOrStderr(), "Warning: %s.\n", safetext.Line(warn))
+	}
 	if res.Note != "" {
 		fmt.Fprintf(cmd.ErrOrStderr(), "Note: %s.\n", safetext.Line(res.Note))
 	}
@@ -617,8 +637,10 @@ func runSubstrateRun(cmd *cobra.Command, f *substrateRunFlags, args []string) er
 		return cliusage.WithExitCode(errors.New("--parallel goes with --batch"), 2)
 	case f.clone != "" && f.noUpload:
 		return cliusage.WithExitCode(errors.New("--clone and --no-upload both say what the agent starts with; use one"), 2)
-	case f.clone != "" && workspace.CheckCloneURL(f.clone) != nil:
+	case f.clone != "" && !substrateCloneHere(f.clone) && workspace.CheckCloneURL(f.clone) != nil:
 		return cliusage.WithExitCode(workspace.CheckCloneURL(f.clone), 2)
+	case f.ref != "" && f.clone != "" && substrateCloneHere(f.clone):
+		return cliusage.WithExitCode(errors.New("--ref goes with --clone URL; --clone . starts at this checkout's HEAD"), 2)
 	case workspace.CheckCloneRef(f.ref) != nil:
 		return cliusage.WithExitCode(workspace.CheckCloneRef(f.ref), 2)
 	case f.ref != "" && f.clone == "":
@@ -640,7 +662,12 @@ func runSubstrateRun(cmd *cobra.Command, f *substrateRunFlags, args []string) er
 		agentArgs = args[dash:]
 	}
 	project := ""
-	if f.clone == "" && !f.noUpload {
+	if f.clone != "" && substrateCloneHere(f.clone) {
+		if project, err = substratePrepareCloneHere(cmd, s, f); err != nil {
+			return err
+		}
+	}
+	if f.clone == "" && !f.noUpload && project == "" {
 		project, err = os.Getwd()
 		if err != nil {
 			return err
@@ -669,7 +696,7 @@ func runSubstrateRun(cmd *cobra.Command, f *substrateRunFlags, args []string) er
 	if err != nil {
 		return err
 	}
-	o, err := substrateAttachOptions(cmd, s, a, f.transport, f.noAsks)
+	o, err := substrateAttachOptions(cmd, s, a, f.transport, f.noAsks, f.keyReplay)
 	if err != nil {
 		return err
 	}
@@ -696,7 +723,7 @@ func runSubstrateOneTask(ctx context.Context, cmd *cobra.Command, s *substrateSe
 	if err != nil {
 		return -1, err
 	}
-	o, err := substrateAttachOptions(cmd, s, a, f.transport, true)
+	o, err := substrateAttachOptions(cmd, s, a, f.transport, true, attach.KeyReplayOff)
 	if err != nil {
 		return -1, err
 	}
@@ -935,4 +962,26 @@ func uniqueSubstrateActorName(label, agent string) string {
 		base = strings.Trim(base[:40], "-")
 	}
 	return base + "-" + newSubstrateID(4)
+}
+
+// substrateKeyReplay is what happens to keys typed while the terminal link
+// is down (B3.1): the tighter of the cluster's substrate.launcher.key_replay
+// and the --key-replay flag, which can only tighten it. A gateway that does
+// not report it (older than this launcher) leaves the default, ask.
+func substrateKeyReplay(cmd *cobra.Command, s *substrateSession, flag string) (string, error) {
+	if flag != "" && !attach.ValidKeyReplay(flag) {
+		return "", cliusage.WithExitCode(fmt.Errorf("--key-replay %q: use ask, on or off", flag), 2)
+	}
+	if flag == attach.KeyReplayOff || s == nil || s.Client == nil {
+		return attach.TightestKeyReplay("", flag), nil
+	}
+	ctx := cmd.Context()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	settings, err := s.Client.Launcher(ctx)
+	if err != nil {
+		return attach.TightestKeyReplay("", flag), nil
+	}
+	return attach.TightestKeyReplay(settings.KeyReplay, flag), nil
 }

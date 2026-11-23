@@ -37,6 +37,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/auth"
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/safetext"
 	"github.com/defenseclaw/defenseclaw/internal/envvars"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/reasons"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/signin"
 )
 
@@ -275,6 +276,10 @@ func substrateAPIMessage(e *api.Error) string {
 			"); nothing was started. Run a template published for that class (template publish --class, or --worker-label of a pool of that class), or ask your administrator"
 	case e.Status == 403 && e.Reason == "template_connector_unlabeled":
 		return "the template's attestation names no agent connector, so a managed cluster starts nothing from it; ask your administrator to rebuild it with defenseclaw substrate template build"
+	case substrateSecretReason(e.Reason) != "":
+		// One reason table (internal/substrate/reasons): the gateway sends
+		// the code, the words and the fix come from the table.
+		return substrateSecretReason(e.Reason)
 	case e.Status == 403:
 		return "the cluster refused this (" + orWord(e.Reason, "not allowed") + ")"
 	case e.Status == 404:
@@ -291,6 +296,15 @@ func substrateAPIMessage(e *api.Error) string {
 		return "the cluster could not do that right now (" + orWord(e.Reason, "unavailable") + "); try again in a minute"
 	}
 	return e.Error()
+}
+
+// substrateSecretReason is the table message of a gateway secret reason,
+// or "" when the code is not a gateway answer in the table.
+func substrateSecretReason(code string) string {
+	if r, ok := reasons.Lookup(code); ok && r.Where == reasons.API {
+		return reasons.Message(code)
+	}
+	return ""
 }
 
 func orWord(v, def string) string {
@@ -328,7 +342,7 @@ func init() {
 	substrateCmd.AddCommand(
 		newSubstrateLoginCmd(), newSubstrateLogoutCmd(), newSubstrateWhoamiCmd(),
 		newSubstrateRunCmd(), newSubstrateConnectCmd(), newSubstrateListCmd(), newSubstrateStatusCmd(),
-		newSubstrateLogsCmd(), newSubstratePullCmd(), newSubstrateCheckpointCmd(), newSubstrateUndoCmd(),
+		newSubstrateLogsCmd(), newSubstratePullCmd(), newSubstratePushCmd(), newSubstrateSyncCmd(), newSubstrateCheckpointCmd(), newSubstrateUndoCmd(),
 		newSubstrateDeleteCmd(), newSubstrateMigrateCmd(),
 		newSubstrateApprovalsCmd(), newSubstrateApproveCmd(), newSubstrateRejectCmd(), newSubstrateRevokeCmd(), newSubstrateUsageCmd(),
 		newSubstrateSecretsCmd(), newSubstratePolicyCmd(),

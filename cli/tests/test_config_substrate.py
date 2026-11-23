@@ -63,6 +63,10 @@ _FULL = {
     "idle_suspend_after": "30m",
     "idle_suspend_without_cpu": True,
     "chain_egress_action": "alert",
+    "launcher": {"key_replay": "off", "upload_scan": {"max_file_bytes": 1048576, "time_budget": "30s", "secret_action": "hold_back", "placeholder_form": "env"}},
+    "files": {"push": False, "sync": True},
+    "git": {"https_rewrite": [{"from": "git@ghe.example.com:", "to": "https://ghe.example.com/"}],
+            "submodules": False, "lfs": True},
     "unattended": {"asks": "deny", "ask_timeout": "30m", "telemetry_sampling": 0.5},
     "rate_limits": {"per_actor_rps": 20, "per_atespace_rps": 500},
     "extproc": {"enabled": True, "failure_mode": "closed", "body_inspection": "on", "body_max_bytes": 1048576,
@@ -79,11 +83,19 @@ _FULL = {
     "llm": {"providers": ["anthropic", "bedrock"],
             "credential": {"provider_uri": "ate-secret://k8s.io/default/defenseclaw-system/llm-keys"}},
     "egress": {"allow": ["github.com", "*.githubusercontent.com"], "ecosystem_packs": ["pypi", "npm"],
-               "registries": ["ghcr.io"]},
+               "registries": ["ghcr.io"], "no_swap_hosts": ["echo.corp.example", "*.mirror.example"]},
+    "self_service_secrets": {"mode": "values_only", "namespace": "eng-secrets", "provider": "k8s-credential-provider",
+                             "max_per_person": 5, "outside_templates": "refuse", "ask_timeout": "24h",
+                             "allow_echo_bindings": True},
+    "secret_templates": [
+        {"name": "gitlab", "hosts": ["git.corp.example", "*.git.corp.example"]},
+        {"name": "artifactory", "hosts": ["npm.corp.example"], "header": "Authorization", "form": "bearer",
+         "profiles": ["eng-*"], "registry": "npm"},
+    ],
     "secrets": [
         {"name": "github-push", "source": "ate-secret://k8s.io/default/dc-secrets/github-app/token",
          "inject": {"hosts": ["github.com", "api.github.com"], "header": "Authorization", "prefix": "Bearer ",
-                    "placeholder": "DC_SECRET_GITHUB"},
+                    "placeholder": "DC_SECRET_GITHUB", "allow_echo": True},
          "scope": "shared", "profiles": ["eng-*"]},
         {"name": "npm-mine", "source": "ate-secret://k8s.io/default/dc-people/{person}-npm/token",
          "inject": {"hosts": ["registry.npmjs.org"], "header": "Authorization"},
@@ -163,10 +175,32 @@ class TestSubstrateLoadSave(unittest.TestCase):
             self.assertEqual(sub.secrets[1].scope, "per_person")
             self.assertEqual(sub.egress.ecosystem_packs, ["pypi", "npm"])
             self.assertEqual(sub.admin.egress_block, ["paste.example.com"])
+            self.assertEqual(sub.egress.no_swap_hosts, ["echo.corp.example", "*.mirror.example"])
+            self.assertIs(sub.secrets[0].inject.allow_echo, True)
+            self.assertEqual(sub.self_service_secrets.mode, "values_only")
+            self.assertEqual(sub.self_service_secrets.max_per_person, 5)
+            self.assertIs(sub.self_service_secrets.allow_echo_bindings, True)
+            self.assertEqual(sub.secret_templates[0].hosts, ["git.corp.example", "*.git.corp.example"])
+            self.assertEqual(sub.secret_templates[1].registry, "npm")
+            self.assertIs(sub.secrets[1].inject.allow_echo, False)
             cfg.save()  # validates the merged document against the v8 schema
             saved = yaml.safe_load(Path(path).read_text())["substrate"]
             self.assertEqual(saved, _FULL)
             self.assertEqual(self._load(tmpdir).substrate, sub)
+
+    def test_template_empty_hosts_survive_save(self):
+        # An explicit hosts: [] means no host without an administrator; an
+        # unset list takes the built-in hosts. A save keeps the difference.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = self._write(tmpdir, {"substrate": {"secret_templates": [{"name": "github", "hosts": []}, {"name": "gitlab"}]}})
+            cfg = self._load(tmpdir)
+            self.assertEqual(cfg.substrate.secret_templates[0].hosts, [])
+            self.assertIsNone(cfg.substrate.secret_templates[1].hosts)
+            cfg.save()
+            saved = yaml.safe_load(Path(path).read_text())["substrate"]["secret_templates"]
+            self.assertEqual(saved, [{"name": "github", "hosts": []}, {"name": "gitlab"}])
+            again = self._load(tmpdir).substrate.secret_templates
+            self.assertEqual([t.hosts for t in again], [[], None])
 
     def test_set_from_python_writes_only_what_is_set(self):
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -35,10 +35,14 @@ import (
 type Live struct {
 	// Digest is the config.yaml source it came from ("" when the
 	// controller has no ConfigSource); Gen its configwatch generation.
-	Digest             string
-	Gen                uint64
-	Settings           render.Settings
-	Secrets            []render.Secret
+	Digest   string
+	Gen      uint64
+	Settings render.Settings
+	Secrets  []render.Secret
+	// Bindings returns the active self-service bindings of one person
+	// (their OIDC subject) as secrets; nil when self_service_secrets.mode
+	// is off. Only an actor bound to that person gets them.
+	Bindings           func(person string) []render.Secret
 	LauncherAtespaces  map[string]bool
 	RequireAttestation bool
 	Templates          config.SubstrateTemplatesConfig

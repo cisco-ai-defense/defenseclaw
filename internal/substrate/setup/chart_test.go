@@ -137,6 +137,10 @@ func TestChartRefusesBadValues(t *testing.T) {
 		// request (controller 128Mi), so a 1Mi request does not make a 520Mi
 		// limit fit a 512Mi tmpfs.
 		"memory home, tiny request": memoryHomeExample + ",controller.resources.requests.memory=1Mi,controller.resources.limits.memory=520Mi",
+		// RV3 P3-5: the self-service namespace is one of its own.
+		"user secrets in kube-system":         "config.substrate.self_service_secrets.namespace=kube-system",
+		"user secrets in default":             "config.substrate.self_service_secrets.namespace=default",
+		"user secrets with the admin secrets": "config.substrate.self_service_secrets.namespace=defenseclaw-actor-secrets",
 	} {
 		args := []string{"template", "dc", chartDir, "--kube-version", chartKubeVersion, "--set", set}
 		if err := exec.Command(helm, args...).Run(); err == nil {

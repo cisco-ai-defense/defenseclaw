@@ -33,6 +33,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -49,13 +50,13 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/substrate/chainstate"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/configwatch"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/controller"
-	"github.com/defenseclaw/defenseclaw/internal/substrate/egressspec"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/identity"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/identity/ateactors"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/leader"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/podcert"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/ratelimit"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/registry"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/secretbind"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/telemetryrelay"
 	policyassets "github.com/defenseclaw/defenseclaw/policies"
 )
@@ -535,6 +536,7 @@ func substrateGatewayBuilder(c *config.Config, src *configwatch.Watcher, ready *
 		ctl.SetCallout(&controller.LeaderCallout{Leader: toLeader})
 		router, routerErr := substrateRouter()
 		runtimeScan := newRuntimeSkillScanner(c)
+		bindingStore := substrateBindingStore(c)
 		out = gateway.SubstrateConfig{
 			ActorAddr: serveFlags.actorListen, ActorTLS: actorTLS,
 			Actors: actors, Registrations: regs, Activity: recorder,
@@ -547,8 +549,15 @@ func substrateGatewayBuilder(c *config.Config, src *configwatch.Watcher, ready *
 				return gateway.SubstrateUnattendedAskFor(live(), profile)
 			},
 			Secrets: c.Substrate.Secrets, SecretStore: substrateKubeSecrets(),
-			Relays: relayDialer(router),
-			Skills: runtimeScan,
+			Bindings: bindingStore, SelfService: c.Substrate.SelfServiceSecrets,
+			SecretTemplates: c.Substrate.SecretTemplates, NoSwapHosts: c.Substrate.Egress.NoSwapHosts,
+			LiveSelfService: func() (config.SubstrateSelfServiceSecretsConfig, []config.SubstrateSecretTemplate) {
+				l := live()
+				return l.Substrate.SelfServiceSecrets, l.Substrate.SecretTemplates
+			},
+			LiveNoSwapHosts: func() []string { return live().Substrate.Egress.NoSwapHosts },
+			Relays:          relayDialer(router),
+			Skills:          runtimeScan,
 			// E20, GAP-0185: the runtime MCP scan of hook events.
 			MCP: gateway.AttestMCPScanner{RT: runtimeScan.rt},
 			// GAP-0039: an unscanned skill folder is refused where hooks fail
@@ -566,11 +575,24 @@ func substrateGatewayBuilder(c *config.Config, src *configwatch.Watcher, ready *
 			SignInServer: substrateSignInServer(people),
 			// E23: the workspace cap of an upload through attach.
 			WorkspaceMaxBytes: c.Substrate.EffectiveWorkspaceMaxBytes(),
+			// B3.1: read live, so the admin-off switch applies to the next attach.
+			KeyReplay: func() string { return live().Substrate.Launcher.EffectiveKeyReplay() },
+			// B1: the upload scan, read live; hold_back is its admin-off switch.
+			UploadScan: func() config.SubstrateUploadScanConfig { return live().Substrate.Launcher.UploadScan },
+			// B2: the admin-off switches of push and sync, read live.
+			FilesPush: func() bool { return live().Substrate.Files.PushAllowed() },
+			FilesSync: func() bool { return live().Substrate.Files.SyncAllowed() },
+			// B2 2.5: the https rewrite map, submodules and LFS, read live.
+			Git: func() config.SubstrateGitConfig { return live().Substrate.Git },
+			// B2 2.4: git_push and substrate.git.push_branch, read live.
+			GitPush: func(profile string) string { return gateway.SubstrateGitPushFor(live())(profile) },
 			Doctor: func(ctx context.Context) []gateway.SubstrateCheck {
 				return []gateway.SubstrateCheck{gateway.SubstrateUpstreamCheck(ctx,
 					gateway.DefaultSubstrateLLMProviders(serveFlags.llmCredDir, serveFlags.bedrockRegion), c.Guardrail.AllowPrivateUpstreams, nil),
 					substrateRouterCheck(ctx, router, routerErr), substrateActorKeysCheck(ctx, ks),
-					substrateTemplateAllowlistCheck(ctx, ate, ctl.LiveAttestor()), substrateRelaySeparationCheck(ctx, ate, ctl.LiveAttestor())}
+					substrateTemplateAllowlistCheck(ctx, ate, ctl.LiveAttestor()), substrateRelaySeparationCheck(ctx, ate, ctl.LiveAttestor()),
+					gateway.SubstrateSecretEchoHostCheck(live().Substrate.Secrets, live().Substrate.Egress.NoSwapHosts),
+					gateway.SubstrateSecretBindingStoreCheck(bindingStore)}
 			},
 			Actions: &gateway.SubstrateATEActions{Client: ate, Ensure: substrateEnsurer(ctl), TemplateKit: substrateTemplateKit(ctl.LiveAttestor())},
 			// PLAN 7.3: the profile sandbox_class picks the class at create.
@@ -850,6 +872,33 @@ func substrateLeaderPermissions(gateways, callouts, controllers []string) leader
 	return p
 }
 
+// substrateBindingsConfigMap is the chart's binding store ConfigMap in the
+// release namespace.
+const substrateBindingsConfigMap = "defenseclaw-secret-bindings"
+
+// substrateBindingStore is the self-service binding store, watched every
+// 2 s. It is nil, and nothing reads the ConfigMap, when
+// self_service_secrets.mode is off or outside a cluster (M-PERF-1).
+func substrateBindingStore(c *config.Config) *secretbind.Store {
+	if c.Substrate.SelfServiceSecrets.EffectiveMode() == config.SelfServiceOff {
+		return nil
+	}
+	return substrateBindingsWatched()
+}
+
+// substrateBindingsWatched is the one store and watcher of this process
+// (gateway or controller).
+var substrateBindingsWatched = sync.OnceValue(func() *secretbind.Store {
+	ns := strings.TrimSpace(os.Getenv("POD_NAMESPACE"))
+	k, ok := substrateKubeSecrets().(*kubeSecrets)
+	if ns == "" || !ok || k == nil {
+		return nil
+	}
+	st := secretbind.New(kubeBindings{k: k, ns: ns, name: substrateBindingsConfigMap})
+	go st.Watch(context.Background(), 2*time.Second)
+	return st
+})
+
 // substrateKubeSecrets is the secrets admin API's writer over the
 // Kubernetes API (nil outside a cluster: the list still answers).
 func substrateKubeSecrets() gateway.SubstrateSecretStore {
@@ -976,7 +1025,7 @@ func substrateStartupChecks(c *config.Config) {
 	if line := substrateAuditExportWarning(c); line != "" {
 		fmt.Fprintln(os.Stderr, line)
 	}
-	for _, line := range substrateEchoHostWarnings(c.Substrate.Secrets) {
+	for _, line := range substrateEchoHostWarnings(c.Substrate.Secrets, c.Substrate.Egress.NoSwapHosts) {
 		fmt.Fprintln(os.Stderr, line)
 	}
 	go func() {
@@ -990,28 +1039,22 @@ func substrateStartupChecks(c *config.Config) {
 	}()
 }
 
-// substrateEchoHostWarnings says, once at start, which secrets are bound to
-// a host that echoes or publishes requests (GAP-0405): egress injects the
-// real value there, and the answer hands it back to the agent and its
-// model. A warning, not a refusal: a test binding is legitimate, and no
-// list covers every echoing service.
-func substrateEchoHostWarnings(secrets []config.SubstrateSecret) []string {
+// substrateEchoHostWarnings says, once at start, which secrets an
+// administrator let be added on a host that echoes or publishes requests
+// (inject.allow_echo; GAP-0405): egress injects the real value there, and
+// the answer hands it back to the agent and its model. Every other echo
+// binding is dropped by the controller (secret_echo_host) and failed by
+// the doctor row substrate.secret_echo_host, so it needs no start line.
+func substrateEchoHostWarnings(secrets []config.SubstrateSecret, noSwap []string) []string {
 	var out []string
 	for _, sec := range secrets {
-		seen := map[string]bool{}
-		var hits []string
-		for _, h := range sec.Inject.Hosts {
-			for _, e := range egressspec.EchoHostsCovered(h) {
-				if !seen[e] {
-					seen[e] = true
-					hits = append(hits, e)
-				}
-			}
+		if !sec.Inject.AllowEcho {
+			continue
 		}
-		if len(hits) > 0 {
-			out = append(out, fmt.Sprintf("[substrate] warning: secret %s is injected on %s, which return the request they get: "+
-				"the real value comes back to the agent and its model. Bind the secret only to the API that needs it "+
-				"(docs: Substrate secrets, hosts that echo tokens).", sec.Name, strings.Join(hits, ", ")))
+		if hits := gateway.SubstrateSecretEchoHits(sec, noSwap); len(hits) > 0 {
+			out = append(out, fmt.Sprintf("[substrate] warning: secret %s is injected on %s, which return the request they get, "+
+				"because its entry sets inject.allow_echo: the real value comes back to the agent and its model.",
+				sec.Name, strings.Join(hits, ", ")))
 		}
 	}
 	return out
