@@ -8,6 +8,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"net/netip"
+	"net/url"
 	osuser "os/user"
 	pathpkg "path"
 	"runtime"
@@ -133,6 +135,9 @@ type EffectShadowResult struct {
 	ReadProofs []decide.Proof `json:"-"`
 	// MutationProofs are member-exact effects writes graded by Decide.
 	MutationProofs []decide.Proof `json:"-"`
+	// UploadProofs are Known reads of a credentials file outside the
+	// protected sets (.env) whose content the call sends out (GAP-1641).
+	UploadProofs []decide.Proof `json:"-"`
 	// CostUS is the wall-clock cost of the run in microseconds; Effects is the
 	// number of effects the extractor produced.
 	CostUS  int64 `json:"cost_us,omitempty"`
@@ -415,6 +420,7 @@ type effectClass struct {
 	knownMutation  bool
 	readProofs     []decide.Proof
 	mutationProofs []decide.Proof
+	uploadProofs   []decide.Proof
 	// restrictedSets are the sets of the exact members that made the call
 	// restricted: the sets the restricted verdict is about. A file of ~/.ssh
 	// is also a known member of the authorized-keys set by its folder, but
@@ -446,6 +452,9 @@ func classifyEffects(result effects.Result, facts []*semanticpb.EffectFact, flav
 		known, maybe, linkHeld := effectProtectedSets(t, kind)
 		if linkHeld {
 			c.linkHeld = true
+		}
+		if proof, ok := knownCredentialFileUploadProof(result, f); ok && fullyAccounted && len(c.uploadProofs) == 0 {
+			c.uploadProofs = append(c.uploadProofs, proof)
 		}
 		if len(known) == 0 && len(maybe) == 0 {
 			continue
@@ -797,6 +806,12 @@ func effectShadowFindings(res EffectShadowResult, mode effectRulesMode) []RuleFi
 		f.proof = newFindingProof(findingProofEffect, ruleID, mode == effectRulesOn)
 		findings = append(findings, f)
 	}
+	for _, proof := range res.UploadProofs {
+		f := RuleFinding{RuleID: credentialFileExternalUploadRuleID, Title: "Credentials file content sent to an external destination",
+			Severity: "HIGH", Confidence: 1, Proof: proof}
+		f.proof = newFindingProof(findingProofEffect, credentialFileExternalUploadRuleID, mode == effectRulesOn)
+		findings = append(findings, f)
+	}
 	for _, proof := range res.ReadProofs {
 		ruleID := decide.RuleFor(proof)
 		if ruleID == "" {
@@ -949,12 +964,19 @@ const maxEffectFlowHops = 8
 // summary (grep -c, wc) keeps it local. A copy's own content is followed
 // on: a later send of the copy is a send.
 func effectReadFlow(result effects.Result, i int) decide.ReadFlow {
+	flow, _ := effectReadFlowTo(result, i)
+	return flow
+}
+
+// effectReadFlowTo is effectReadFlow and, for a sent read, the target of
+// the send (a network send's endpoint or a remote copy's destination).
+func effectReadFlowTo(result effects.Result, i int) (decide.ReadFlow, effects.Target) {
 	if i < 0 || i >= len(result.Effects) || result.Effects[i].Kind != effects.KindRead {
-		return decide.FlowNone
+		return decide.FlowNone, effects.Target{}
 	}
 	read := result.Effects[i]
 	if read.Shown {
-		return decide.FlowShown
+		return decide.FlowShown, effects.Target{}
 	}
 	from := map[int]bool{i + 1: true}
 	flow, hops := decide.FlowNone, 0
@@ -967,7 +989,7 @@ func effectReadFlow(result effects.Result, i int) decide.ReadFlow {
 		}
 		switch e.Kind {
 		case effects.KindNetworkSend:
-			return decide.FlowSent
+			return decide.FlowSent, e.Target
 		case effects.KindWrite, effects.KindAppend:
 			// The null device is lowered as no target (> /dev/null).
 			if e.Target.Type == effects.TargetNone || effectDiscardPath(e.Target.Path) || effectDiscardPath(e.Target.Spelling) {
@@ -976,14 +998,62 @@ func effectReadFlow(result effects.Result, i int) decide.ReadFlow {
 			hops++
 			from[j+1] = true
 			if e.Target.Type == effects.TargetRemote {
-				return decide.FlowSent
+				return decide.FlowSent, e.Target
 			}
 			if !effectSameFolder(e.Target, read.Target) {
 				flow = decide.FlowCopied
 			}
 		}
 	}
-	return flow
+	return flow, effects.Target{}
+}
+
+// knownCredentialFileUploadProof is the proof of a Known read of a
+// credentials file outside the protected sets (a .env: any shape of the
+// credentials-file table, actionfacts.MatchCredentialFileShape) whose
+// content the call sends to a destination that is not loopback or private,
+// through copies of copies (effectReadFlowTo, the GAP-1846 content flow):
+// cat .env > f && curl -d @f URL is the upload curl -d @.env URL is, and
+// takes the 1.0.10 rule of that plain spelling (GAP-1641). A read that is
+// only shown, copied or kept local raises nothing here (the 1.0.10 .env
+// reader still grades it), and a file of a protected credential class takes
+// its own read row (knownCredentialReadProof).
+func knownCredentialFileUploadProof(result effects.Result, f *semanticpb.EffectFact) (decide.Proof, bool) {
+	if f == nil || f.GetKind() != string(effects.KindRead) || f.GetTargetState() != "known" ||
+		f.GetRoleState() != "known" || len(f.GetReasons()) != 0 {
+		return decide.Proof{}, false
+	}
+	path := f.GetTarget().GetPath()
+	_, ok := actionfacts.MatchCredentialFileShape(path)
+	if !ok || decide.CredentialSet(effectCredentialMemberTail(path)) != "" {
+		return decide.Proof{}, false
+	}
+	flow, to := effectReadFlowTo(result, int(f.GetIndex())-1)
+	if flow != decide.FlowSent || !effectSendExternal(to) {
+		return decide.Proof{}, false
+	}
+	return decide.Proof{Kind: decide.KindSend, Target: decide.TargetOther, Certainty: decide.CertKnown,
+		Source: effectProofSource, Flow: decide.FlowSent}, true
+}
+
+// effectSendExternal reports a send destination the 1.0.10 upload rule
+// counts as external: a public or unknown host (NETWORK_SCOPE_PUBLIC or
+// _UNKNOWN), not a loopback, private or link-local address.
+func effectSendExternal(t effects.Target) bool {
+	host := t.Host
+	if host == "" && t.URL != "" {
+		if u, err := url.Parse(t.URL); err == nil {
+			host = u.Hostname()
+		}
+	}
+	host = strings.Trim(strings.ToLower(strings.TrimSpace(host)), "[]")
+	if host == "localhost" || strings.HasSuffix(host, ".localhost") {
+		return false
+	}
+	if a, err := netip.ParseAddr(host); err == nil {
+		return !(a.IsLoopback() || a.IsPrivate() || a.IsLinkLocalUnicast() || a.IsUnspecified())
+	}
+	return true
 }
 
 // effectDiscardPath is the null device: what is written there goes nowhere.
