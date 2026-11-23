@@ -492,6 +492,10 @@ func copyTokens(b []byte, tokens map[string]bool) int {
 	return n
 }
 
+// secretContextWindow is how many non-blank lines on each side of a replaced
+// credential line the review checks for an agent change (info flag only).
+const secretContextWindow = 5
+
 // translateReplaced turns the agent's version of a replaced file into the
 // one to land, placeholders still in (withValues puts the values in):
 // each line that holds a placeholder is the uploaded line when the agent
@@ -499,7 +503,7 @@ func copyTokens(b []byte, tokens map[string]bool) int {
 // agent's line (put: its line numbers). why says why the change cannot
 // land: a placeholder is gone (without restore), repeated or moved. near
 // are the agent's line numbers of placeholder lines left in place whose
-// neighbour line the agent added, removed or changed: the value lands, and
+// a line within secretContextWindow non-blank lines that the agent added, removed or changed: the value lands, and
 // the review names the line (RV6-3: an agent that wraps the line in place,
 // in a string it sends, kept its anchors and landed with no note).
 func translateReplaced(uploaded, agent []byte, lines []SecretLine, restore bool) (out []byte, kept, put, near []int, why string) {
@@ -532,12 +536,28 @@ func translateReplaced(uploaded, agent []byte, lines []SecretLine, restore bool)
 			am[a] = true
 		}
 	}
-	// beside reports a line next to up line u or agent line i that the
-	// agent added, removed or changed; a blank line does not count.
-	text := func(l []byte) bool { return len(bytes.TrimSpace(l)) > 0 }
+	// beside reports a line near up line u or agent line i that the agent
+	// added, removed or changed. Blank lines are skipped and the nearest
+	// secretContextWindow non-blank lines on each side count (RV7-1: a wrap
+	// one blank or unchanged line further out landed with no flag).
+	nearChange := func(ls [][]byte, at int, changed func(int) bool) bool {
+		for step := -1; step <= 1; step += 2 {
+			seen := 0
+			for j := at + step; j >= 0 && j < len(ls) && seen < secretContextWindow; j += step {
+				if len(bytes.TrimSpace(ls[j])) == 0 {
+					continue
+				}
+				seen++
+				if changed(j) {
+					return true
+				}
+			}
+		}
+		return false
+	}
 	beside := func(u, i int) bool {
-		return (u > 0 && mu[u-1] < 0 && text(ul[u-1])) || (u+1 < len(ul) && mu[u+1] < 0 && text(ul[u+1])) ||
-			(i > 0 && !am[i-1] && text(al[i-1])) || (i+1 < len(al) && !am[i+1] && text(al[i+1]))
+		return nearChange(ul, u, func(j int) bool { return mu[j] < 0 }) ||
+			nearChange(al, i, func(j int) bool { return !am[j] })
 	}
 	onAgent := map[int][]spot{}
 	ofUp := map[int]int{}
