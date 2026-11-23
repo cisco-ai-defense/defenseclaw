@@ -121,7 +121,8 @@ receipt's `actor` and `principal`, the bundle `created_by` and
 `secret_refs_missing`, `secret_refs_mismatch`), the identity refresh
 `user_id`, `user_name` and `windows_token_groups_pending`, a bundle's `dir`,
 and the tenant, device group and signing key (`anchors`, `keys`,
-`tenant_id`, `device_group`, `device_groups`, `signer_key_id`). For agent
+`tenant_id`, `device_group`, `device_groups`, `signer_key_id`, and the
+`key_id` of a substrate rollout stage). For agent
 sessions that need a restart, forward the `count` and `state` of
 `sessions_restart_required` and the connector names in
 `enforcement_pending` (4.3). `forward/` holds one closed schema per document

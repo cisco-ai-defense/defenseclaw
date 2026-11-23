@@ -175,7 +175,6 @@
         "applied_at",
         "atespaces",
         "bundle_id",
-        "key_id",
         "manifest_sha256",
         "receipt_id",
         "source",
@@ -183,7 +182,7 @@
         "state",
         "version"
       ],
-      "description": "One rollout stage and the signed policy bundle in force there (GAP-0432): bundle_id, version, key_id and receipt_id name the bundle and its apply receipt.",
+      "description": "One rollout stage and the signed policy bundle in force there (GAP-0432): bundle_id, version and receipt_id name the bundle and its apply receipt. The signing key id is not forwarded.",
       "properties": {
         "stage": {
           "type": "string",
@@ -203,10 +202,6 @@
         "version": {
           "type": "integer",
           "minimum": 0
-        },
-        "key_id": {
-          "type": "string",
-          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
         },
         "manifest_sha256": {
           "type": "string",

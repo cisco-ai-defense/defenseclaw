@@ -131,10 +131,10 @@ func fakeBundleKubectl(t *testing.T, c *bundleCluster, secretErr error) {
 	inner := substrateKubectl
 	substrateKubectl = func(ctx context.Context, f *substrateClusterFlags, args ...string) ([]byte, error) {
 		joined := strings.Join(args, " ")
-		switch {
-		case joined == "get configmap defenseclaw-bundles -n defenseclaw-system -o json --ignore-not-found":
+		switch joined {
+		case "get configmap defenseclaw-bundles -n defenseclaw-system -o json --ignore-not-found":
 			return c.state, nil
-		case joined == "get secret defenseclaw-bundle-anchors -n defenseclaw-system -o json":
+		case "get secret defenseclaw-bundle-anchors -n defenseclaw-system -o json":
 			if secretErr != nil {
 				return nil, secretErr
 			}
