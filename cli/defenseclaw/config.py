@@ -8248,10 +8248,18 @@ def _merge_substrate(raw: Any) -> SubstrateConfig:
         launcher=SubstrateLauncherConfig(
             key_replay=str(_mapping(raw.get("launcher")).get("key_replay", "") or ""),
             upload_scan=SubstrateUploadScanConfig(
-                max_file_bytes=_optional_number(_mapping(_mapping(raw.get("launcher")).get("upload_scan")).get("max_file_bytes"), int),
-                time_budget=_duration_text(_mapping(_mapping(raw.get("launcher")).get("upload_scan")).get("time_budget")),
-                secret_action=str(_mapping(_mapping(raw.get("launcher")).get("upload_scan")).get("secret_action", "") or ""),
-                placeholder_form=str(_mapping(_mapping(raw.get("launcher")).get("upload_scan")).get("placeholder_form", "") or ""),
+                max_file_bytes=_optional_number(
+                    _mapping(_mapping(raw.get("launcher")).get("upload_scan")).get("max_file_bytes"), int
+                ),
+                time_budget=_duration_text(
+                    _mapping(_mapping(raw.get("launcher")).get("upload_scan")).get("time_budget")
+                ),
+                secret_action=str(
+                    _mapping(_mapping(raw.get("launcher")).get("upload_scan")).get("secret_action", "") or ""
+                ),
+                placeholder_form=str(
+                    _mapping(_mapping(raw.get("launcher")).get("upload_scan")).get("placeholder_form", "") or ""
+                ),
             ),
         ),
         files=SubstrateFilesConfig(
@@ -8395,7 +8403,9 @@ def _serialize_substrate(cfg: Config, d: dict[str, Any]) -> None:
     if isinstance(admin, dict):
         _strip_unset_sandbox_keys(admin)
     packs = (block.get("egress") or {}).get("ecosystem_packs")
-    no_hosts = [i for i, t in enumerate(block.get("secret_templates") or []) if isinstance(t, dict) and t.get("hosts") == []]
+    no_hosts = [
+        i for i, t in enumerate(block.get("secret_templates") or []) if isinstance(t, dict) and t.get("hosts") == []
+    ]
     pruned = _prune_unset(block)
     if pruned is _V8_MISSING:
         pruned = {}
