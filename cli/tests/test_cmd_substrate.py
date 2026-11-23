@@ -254,6 +254,6 @@ def test_setup_no_chart_is_a_hidden_flag_the_stub_accepts() -> None:
     options = {opt: param for param in setup.params if isinstance(param, GatewayOption) for opt in param.opts}
     assert "--no-chart" in options and options["--no-chart"].hidden
     assert not options["--overlay-only"].hidden
-    help_text = CliRunner().invoke(substrate, ["setup", "--help"], obj=AppContext()).output
-    assert "--overlay-only" in help_text
-    assert "--no-chart" not in help_text.replace("(also spelled --no-chart)", "")
+    ctx = click.Context(setup)
+    assert options["--overlay-only"].get_help_record(ctx) is not None
+    assert options["--no-chart"].get_help_record(ctx) is None
