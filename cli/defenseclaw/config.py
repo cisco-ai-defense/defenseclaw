@@ -4793,6 +4793,29 @@ class SubstrateSecret:
 
 
 @dataclass
+class SubstrateBundleOCIStage:
+    """One ``substrate.bundles.oci.stages`` entry (mirrors Go
+    ``SubstrateBundleOCIStage``): ``ref`` is ``host/repo@sha256:<hex>``."""
+
+    stage: str = ""
+    ref: str = ""
+    atespaces: list[str] = field(default_factory=list)
+
+
+@dataclass
+class SubstrateBundleOCIConfig:
+    """``substrate.bundles.oci`` (Preview, GAP-0437; mirrors Go
+    ``SubstrateBundleOCIConfig``): stage bundles pulled from an OCI registry
+    by digest. Off by default."""
+
+    enabled: bool = False
+    credentials_file: str = ""
+    ca_file: str = ""
+    timeout: str = ""
+    stages: list[SubstrateBundleOCIStage] = field(default_factory=list)
+
+
+@dataclass
 class SubstrateBundlesConfig:
     """``substrate.bundles``: signed policy bundles for the cluster (mirrors
     Go ``SubstrateBundlesConfig``). Empty strings take the defaults: the
@@ -4803,6 +4826,7 @@ class SubstrateBundlesConfig:
     anchors_file: str = ""
     inbox: str = ""
     refresh_interval: str = ""
+    oci: SubstrateBundleOCIConfig = field(default_factory=SubstrateBundleOCIConfig)
 
 
 @dataclass
@@ -8214,6 +8238,27 @@ def _merge_substrate_bundles(raw: Any) -> SubstrateBundlesConfig:
         anchors_file=str(raw.get("anchors_file", "") or ""),
         inbox=str(raw.get("inbox", "") or ""),
         refresh_interval=_duration_text(raw.get("refresh_interval")),
+        oci=_merge_substrate_bundle_oci(raw.get("oci")),
+    )
+
+
+def _merge_substrate_bundle_oci(raw: Any) -> SubstrateBundleOCIConfig:
+    raw = _mapping(raw)
+    stages = raw.get("stages")
+    return SubstrateBundleOCIConfig(
+        enabled=raw.get("enabled") is True,
+        credentials_file=str(raw.get("credentials_file", "") or ""),
+        ca_file=str(raw.get("ca_file", "") or ""),
+        timeout=_duration_text(raw.get("timeout")),
+        stages=[
+            SubstrateBundleOCIStage(
+                stage=str(s.get("stage", "") or ""),
+                ref=str(s.get("ref", "") or ""),
+                atespaces=[str(a) for a in (s.get("atespaces") or []) if isinstance(a, str)],
+            )
+            for s in (stages if isinstance(stages, list) else [])
+            if isinstance(s, dict)
+        ],
     )
 
 
@@ -8316,6 +8361,17 @@ def _serialize_substrate(cfg: Config, d: dict[str, Any]) -> None:
     if isinstance(bundles, dict):
         if bundles.get("enabled") is False:  # Go omitempty
             bundles.pop("enabled")
+        oci = bundles.get("oci")
+        if isinstance(oci, dict):
+            # Go omitempty everywhere but stages[].stage and stages[].ref.
+            for k in ("enabled", "credentials_file", "ca_file", "timeout", "stages"):
+                if not oci.get(k):
+                    oci.pop(k, None)
+            for st in oci.get("stages", []):
+                if isinstance(st, dict) and not st.get("atespaces"):
+                    st.pop("atespaces", None)
+            if not oci:
+                bundles.pop("oci")
         if not bundles:
             pruned.pop("bundles")
     if packs == []:

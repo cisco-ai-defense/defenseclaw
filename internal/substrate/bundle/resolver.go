@@ -191,9 +191,12 @@ type Manager struct {
 	Store    *Store
 	Resolver *Resolver
 	// Inbox is the inbox ConfigMap name; empty skips the inbox.
-	Inbox    string
-	Interval time.Duration
-	Sink     controller.Sink
+	Inbox string
+	// OCI pulls the OCIStages by digest (GAP-0437); nil skips it.
+	OCI       *OCIClient
+	OCIStages []OCIStage
+	Interval  time.Duration
+	Sink      controller.Sink
 
 	mu       sync.Mutex
 	active   map[string]string // stage -> manifest SHA-256 last reported
@@ -215,19 +218,16 @@ func (m *Manager) Refresh(ctx context.Context) error {
 	var errs []error
 	if m.Inbox != "" {
 		rcs, err := m.Store.SyncInbox(ctx, m.Inbox)
-		for _, rc := range rcs {
-			ev := controller.Event{Type: EventApplied, Severity: controller.SeverityInfo,
-				Message: fmt.Sprintf("inbox bundle %s version %d %s for stage %s", rc.BundleID, rc.Version, rc.Result, rc.Stage),
-				Detail:  map[string]any{"stage": rc.Stage, "bundle_id": rc.BundleID, "version": rc.Version, "result": rc.Result, "manifest_sha256": rc.ManifestSHA256}}
-			if rc.Result == ResultRefused {
-				ev.Type, ev.Severity = EventRefused, controller.SeverityAlert
-				ev.Message += ": " + rc.Error
-				ev.Detail["code"] = rc.Code
-			}
-			m.emit(ev)
-		}
+		m.emitReceipts("inbox", rcs)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("bundle inbox: %w", err))
+		}
+	}
+	if m.OCI != nil && len(m.OCIStages) > 0 {
+		rcs, err := m.Store.SyncOCI(ctx, m.OCI, m.OCIStages)
+		m.emitReceipts("oci", rcs)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("bundle oci: %w", err))
 		}
 	}
 	snap, problems, err := m.Store.Load(ctx)
@@ -237,6 +237,22 @@ func (m *Manager) Refresh(ctx context.Context) error {
 	m.Resolver.Set(snap)
 	m.report(snap, problems)
 	return errors.Join(errs...)
+}
+
+// emitReceipts reports the receipts of one source (inbox or oci): applied
+// as info, refused as an alert with the refusal code.
+func (m *Manager) emitReceipts(source string, rcs []Receipt) {
+	for _, rc := range rcs {
+		ev := controller.Event{Type: EventApplied, Severity: controller.SeverityInfo,
+			Message: fmt.Sprintf("%s bundle %s version %d %s for stage %s", source, rc.BundleID, rc.Version, rc.Result, rc.Stage),
+			Detail:  map[string]any{"stage": rc.Stage, "bundle_id": rc.BundleID, "version": rc.Version, "result": rc.Result, "manifest_sha256": rc.ManifestSHA256, "source": rc.Source}}
+		if rc.Result == ResultRefused {
+			ev.Type, ev.Severity = EventRefused, controller.SeverityAlert
+			ev.Message += ": " + rc.Error
+			ev.Detail["code"] = rc.Code
+		}
+		m.emit(ev)
+	}
 }
 
 func (m *Manager) report(snap *Snapshot, problems []Problem) {
