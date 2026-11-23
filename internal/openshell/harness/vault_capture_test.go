@@ -26,6 +26,10 @@ func TestVaultCaptureCoversEverySandboxHarness(t *testing.T) {
 	}
 	// Events a newer or older pin than the default registers.
 	versioned := map[string]bool{"copilot/userPromptTransformed": true}
+	// A subagent launch the harness can deny that is not routed as a
+	// structured tool action: its task is model-written, so capture places
+	// it as a tool call, and it must still be blockable.
+	delegation := map[string]bool{"cursor/subagentStart": true}
 	for _, name := range names {
 		spec, _ := Get(name)
 		provider, ok := spec.Provider.(connector.HookProfileProvider)
@@ -50,7 +54,8 @@ func TestVaultCaptureCoversEverySandboxHarness(t *testing.T) {
 			}
 			switch ce.Point {
 			case connector.VaultCaptureToolCall:
-				if !in(event, routing.StructuredActionEvents) || !in(event, profile.Capabilities.BlockEvents) {
+				structured := in(event, routing.StructuredActionEvents) || delegation[name+"/"+event]
+				if !structured || !in(event, profile.Capabilities.BlockEvents) {
 					t.Errorf("%s: tool call event %s is not a blockable structured action", name, event)
 				}
 			case connector.VaultCaptureToolOutput:
