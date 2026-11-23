@@ -336,14 +336,15 @@ func (s *JudgeBodyStore) init() error {
 }
 
 func (s *JudgeBodyStore) applyMigration(ver int, m migration) error {
-	ctx, cancel := context.WithTimeout(context.Background(), migrationStatementTimeout)
-	defer cancel()
+	run := startMigration("judge_body", ver, m.description, 0)
+	defer run.finish()
+	ctx := run.ctx
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("judge_body: begin migration %d: %w", ver, err)
 	}
 	defer tx.Rollback() //nolint:errcheck
-	if err := m.apply(storeMigrationTx{Tx: tx, ctx: ctx}); err != nil {
+	if err := m.apply(storeMigrationTx{Tx: tx, ctx: ctx, run: run}); err != nil {
 		return fmt.Errorf("judge_body: migration %d (%s): %w", ver, m.description, err)
 	}
 	if _, err := txExecContextObserved(ctx, tx, "judge_body_migration_version_insert", s.sqliteBusyObservabilityV8(),
