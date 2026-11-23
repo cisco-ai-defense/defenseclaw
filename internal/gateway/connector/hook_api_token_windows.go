@@ -485,7 +485,11 @@ func hookAPIJudgeWindowsPathElement(
 		return fmt.Errorf("inspect Windows DACL for %s: %w", path, err)
 	}
 	if dacl == nil {
-		return relax(&hookAPINullDACLError{path: path})
+		// No DACL grants every account every right, DELETE and WRITE_DAC
+		// included: the widest grant there is, judged like an explicit
+		// Everyone full-control entry (a replace verdict), so owner-based drift
+		// acceptance never covers it (GAP-1900).
+		return relax(hookAPIReplaceVerdict{error: &hookAPINullDACLError{path: path}})
 	}
 	return hookAPIRejectUntrustedWindowsWriteACEsWith(path, dacl, wantDir, protectChildren, extra, relax)
 }
@@ -535,8 +539,9 @@ func hookAPIDriftRelaxer(
 
 // hookAPIReplaceVerdict marks an untrusted, non-administrator grant that can
 // rename, delete or re-ACL an element (DELETE, DELETE_CHILD, WRITE_DAC,
-// WRITE_OWNER, GENERIC_ALL). Such a principal can swap the token directory
-// for a tree it controls, so owner-based drift acceptance never covers it.
+// WRITE_OWNER, GENERIC_ALL), or a null DACL, which grants all of them to every
+// account. Such a principal can swap the token directory for a tree it
+// controls, so owner-based drift acceptance never covers it.
 type hookAPIReplaceVerdict struct{ error }
 
 // hookAPIUntrustedWriteError is the refusal of a write-like allow entry of an
@@ -573,7 +578,8 @@ func (e *hookAPIUntrustedOwnerError) Error() string {
 	return fmt.Sprintf("owner %s is not trusted for hook API token path %s", e.sid, e.path)
 }
 
-// hookAPINullDACLError is an element with no DACL, which every account may write.
+// hookAPINullDACLError is an element with no DACL, which every account may
+// write, rename and re-ACL; the walk hands it on as a hookAPIReplaceVerdict.
 type hookAPINullDACLError struct{ path string }
 
 func (e *hookAPINullDACLError) Error() string { return "null Windows DACL is not trusted: " + e.path }

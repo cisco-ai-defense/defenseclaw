@@ -16,6 +16,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"golang.org/x/sys/windows"
 )
 
@@ -51,23 +52,35 @@ func pluginCustodyQuote(p string) string {
 // below depends on what the user puts in its place. When nothing is refused (a
 // change made since) or an element cannot be judged, cause is returned
 // unchanged, and the gateway refuses the start as before.
+//
+// A command only ever names a folder or file of this account's own tree
+// (windowsCustodyUserTree): an entry granted at a drive root, an operating
+// system or installer folder, or any folder another account owns gets a step
+// by hand and no command, since removing it there changes every folder that
+// inherits from it (GAP-1899).
 func explainPluginArtifactRefusal(path, trustedOwnerSID string, cause error) error {
 	if cause == nil {
 		return nil
 	}
+	extra := hookAPIParseTrustedOwnerSID(trustedOwnerSID)
+	var clean string
+	var chain []hookAPIDirectoryElement
+	if filepath.IsAbs(path) {
+		clean = filepath.Clean(path)
+		chain = hookAPIDirectoryChain(filepath.Dir(clean), extra)
+	}
+	tree := windowsCustodyUserTree(chain, clean, extra)
 	var refusal *safefile.UnsafePrivateDACLError
 	if errors.As(cause, &refusal) {
-		if explained := explainUnsafePrivateDACL(cause, refusal); explained != nil {
+		placed := windowsCustodyJudge{tree: tree}
+		if explained := placed.unsafePrivateDACL(cause, refusal); explained != nil {
 			return explained
 		}
 	}
-	if !filepath.IsAbs(path) {
+	if clean == "" {
 		return cause
 	}
-	clean := filepath.Clean(path)
-	extra := hookAPIParseTrustedOwnerSID(trustedOwnerSID)
-	var judge windowsCustodyJudge
-	chain := hookAPIDirectoryChain(filepath.Dir(clean), extra)
+	judge := windowsCustodyJudge{tree: tree}
 	whole := true
 	for i := len(chain) - 1; i >= 0 && whole; i-- {
 		element := chain[i]
@@ -91,22 +104,81 @@ func explainPluginArtifactRefusal(path, trustedOwnerSID string, cause error) err
 	return judge.refusal(cause)
 }
 
-// explainUnsafePrivateDACL is the safefile refusal with its repair, or nil when
-// one of its entries names no account or no folder (a repair that leaves one
-// refused entry in place is not offered).
-func explainUnsafePrivateDACL(cause error, refusal *safefile.UnsafePrivateDACLError) error {
+// unsafePrivateDACL is the safefile refusal with its repair, or nil when one of
+// its entries names no account or no folder (a repair that leaves one refused
+// entry in place is not offered).
+func (j *windowsCustodyJudge) unsafePrivateDACL(cause error, refusal *safefile.UnsafePrivateDACLError) error {
 	if len(refusal.Entries) == 0 {
 		return nil
 	}
-	entries := make([]icaclsRefusedEntry, 0, len(refusal.Entries))
 	for _, entry := range refusal.Entries {
 		if entry.Trustee == "" || len(entry.Carriers) == 0 {
 			return nil
 		}
-		entries = append(entries, icaclsRefusedEntry{trustee: entry.Trustee, deny: entry.Deny, carriers: entry.Carriers})
 	}
-	fix, failing := icaclsRemovalFix(entries)
-	return &pluginCustodyError{cause: cause, failing: failing, fix: fix}
+	for _, entry := range refusal.Entries {
+		j.place(refusal.Path, entry.Trustee, entry.Deny, entry.Carriers)
+	}
+	return j.refusal(cause)
+}
+
+// windowsCustodyUserTree is the part of the plugin destination this account
+// may be told to change by command: the elements of chain, and the plugin file
+// clean, that windowsCustodyOwnElement accepts. A folder outside it is shared
+// with other accounts or belongs to Windows or an installer (GAP-1899).
+func windowsCustodyUserTree(chain []hookAPIDirectoryElement, clean string, extra *windows.SID) []string {
+	var tree []string
+	for _, element := range chain {
+		if windowsCustodyOwnElement(element.path, extra) {
+			tree = append(tree, element.path)
+		}
+	}
+	if clean != "" && windowsCustodyOwnElement(clean, extra) {
+		tree = append(tree, clean)
+	}
+	return tree
+}
+
+// windowsCustodyOwnElement reports whether path is a folder or file of this
+// account's own tree: not a volume root, not an operating system or installer
+// folder (managed.AdvisoryAncestorPath), not a reparse point, and owned by this
+// account (the effective user, or the per-user target a privileged guardian
+// verifies), or by Administrators when this process runs elevated for itself
+// (an elevated administrator's new folders are owned by Administrators).
+// LocalSystem and TrustedInstaller own Windows' folders, never the user's. Any
+// read that fails is outside the tree.
+func windowsCustodyOwnElement(path string, extra *windows.SID) bool {
+	if path == "" || !filepath.IsAbs(path) || filepath.Dir(path) == path || managed.AdvisoryAncestorPath(path) {
+		return false
+	}
+	pathPtr, err := winpath.UTF16Ptr(path)
+	if err != nil {
+		return false
+	}
+	attributes, err := windows.GetFileAttributes(pathPtr)
+	if err != nil || attributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+		return false
+	}
+	extended, err := winpath.Extended(path)
+	if err != nil {
+		return false
+	}
+	sd, err := windows.GetNamedSecurityInfo(extended, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION)
+	if err != nil || sd == nil {
+		return false
+	}
+	owner, _, err := sd.Owner()
+	if err != nil || owner == nil {
+		return false
+	}
+	if managed.IsWindowsTrustedAdminOwner(owner) {
+		return extra == nil && owner.IsWellKnown(windows.WinBuiltinAdministratorsSid) && windows.GetCurrentProcessToken().IsElevated()
+	}
+	if extra != nil {
+		return owner.Equals(extra)
+	}
+	current, err := windowsEffectiveUserSID()
+	return err == nil && current != nil && owner.Equals(current)
 }
 
 // windowsCustodyJudge collects what the refused elements of one plugin
@@ -117,6 +189,13 @@ type windowsCustodyJudge struct {
 	manual    []string
 	failing   []string
 	inherited bool
+	// tree is windowsCustodyUserTree: the only folders and files a command
+	// may name.
+	tree []string
+	// outside holds the entries already given a step by hand because a
+	// folder that grants them is outside tree (once where the entry is the
+	// folder's own, once where a folder inherits it).
+	outside map[string]bool
 }
 
 // element judges one element. whole is false after a structural refusal (the
@@ -198,19 +277,74 @@ func (j *windowsCustodyJudge) write(path string, write *hookAPIUntrustedWriteErr
 			return
 		}
 	}
+	j.place(path, trustee, false, carriers)
+}
+
+// place records the removal of trustee's entry, refused on path, at every
+// carrier, the folders and files that grant it. When one of them is outside
+// this account's own tree, no command is printed for the entry (removing it
+// at the others alone would leave the refusal, and a command on a drive root or
+// a shared folder changes every folder that inherits from it): the step by
+// hand names the folder that grants it, once per entry (GAP-1899).
+func (j *windowsCustodyJudge) place(path, trustee string, deny bool, carriers []string) {
+	var outside []string
+	for _, carrier := range carriers {
+		if !j.inTree(carrier) {
+			outside = append(outside, pluginCustodyQuote(carrier))
+		}
+	}
+	if len(outside) > 0 {
+		kind := "write"
+		if deny {
+			kind = "deny"
+		}
+		own := len(carriers) == 1 && carriers[0] == path
+		key := fmt.Sprint(own) + "\x00" + kind + "\x00" + trustee + "\x00" + strings.Join(outside, "\x00")
+		if j.outside == nil {
+			j.outside = map[string]bool{}
+		}
+		if j.outside[key] {
+			j.addFailing(path)
+			return
+		}
+		j.outside[key] = true
+		granted := strings.Join(outside, ", ")
+		if own {
+			j.step(path, "the "+kind+" entry of "+trustee+" on "+granted+
+				" is outside the folders this account owns, so no command is printed for it: move the plugin folder under a folder this account owns"+
+				" (removing the entry there changes every folder that inherits from it)")
+			return
+		}
+		j.step(path, "the "+kind+" entry of "+trustee+" that "+pluginCustodyQuote(path)+" inherits is granted at "+granted+
+			", outside the folders this account owns, so no command is printed for it (a change there reaches every folder that inherits from it):"+
+			" have "+pluginCustodyQuote(path)+" stop inheriting the entry, or move the plugin folder under a folder this account owns")
+		return
+	}
 	if j.removed == nil {
 		j.removed = map[string]bool{}
 	}
 	var fresh []string
 	for _, carrier := range carriers {
-		if key := trustee + "\x00" + carrier; !j.removed[key] {
+		if key := fmt.Sprint(deny) + "\x00" + trustee + "\x00" + carrier; !j.removed[key] {
 			j.removed[key] = true
 			fresh = append(fresh, carrier)
 		}
 	}
 	if len(fresh) > 0 {
-		j.removals = append(j.removals, icaclsRefusedEntry{trustee: trustee, carriers: fresh})
+		j.removals = append(j.removals, icaclsRefusedEntry{trustee: trustee, deny: deny, carriers: fresh})
 	}
+}
+
+// inTree reports whether path is one of the folders or files a command may
+// name.
+func (j *windowsCustodyJudge) inTree(path string) bool {
+	clean := filepath.Clean(path)
+	for _, own := range j.tree {
+		if strings.EqualFold(clean, own) {
+			return true
+		}
+	}
+	return false
 }
 
 // step records a step by hand for path, once.
