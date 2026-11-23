@@ -14,6 +14,7 @@ import (
 	"sync"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 	"mvdan.cc/sh/v3/syntax"
 )
@@ -101,7 +102,7 @@ type guestPlacement struct {
 // reads a call past the statement budget too, so the call that carries the
 // limit finding still names the write (substrate-1 GAP-0359).
 func sandboxGuestPlacements(input actionfacts.Input, facts actionfacts.Facts, statementBudget bool) (placements []guestPlacement, cut bool) {
-	return newGuestPlacementPlan(input, facts, nil).placements(statementBudget)
+	return newGuestPlacementPlan(input, facts, nil, nil).placements(statementBudget)
 }
 
 // guestPending is a reading a pass of the guest placement lists before it is
@@ -158,10 +159,16 @@ type guestPlacementPlan struct {
 // newGuestPlacementPlan walks input and facts for sandboxGuestPlacements.
 // split is the simple-command split (actionfacts.SimpleCommands when nil):
 // the call's own split serves the walk and the statement budget both.
+// analyze reads a call sent as tool arguments as its command
+// (actionfacts.Analyze when nil).
 func newGuestPlacementPlan(input actionfacts.Input, facts actionfacts.Facts,
-	split func(actionfacts.Input, actionfacts.Facts) []actionfacts.SimpleCommand) *guestPlacementPlan {
+	split func(actionfacts.Input, actionfacts.Facts) []actionfacts.SimpleCommand,
+	analyze func(actionfacts.Input) actionfacts.Facts) *guestPlacementPlan {
 	if split == nil {
 		split = actionfacts.SimpleCommands
+	}
+	if analyze == nil {
+		analyze = actionfacts.Analyze
 	}
 	plan := &guestPlacementPlan{}
 	if facts.Authoritative() {
@@ -173,7 +180,7 @@ func newGuestPlacementPlan(input actionfacts.Input, facts actionfacts.Facts,
 	if input.Command == "" {
 		if command, ok := trustedBashCommandInput(input); ok {
 			input.Command, input.Args, input.Argv = command, nil, nil
-			facts = actionfacts.Analyze(input)
+			facts = analyze(input)
 			swapped = true
 		}
 	}
@@ -582,6 +589,10 @@ type guestReadingMemo struct {
 	mu     sync.Mutex
 	splits []guestSplitEntry
 	plans  []guestPlanEntry
+	// readings are the guest readings of the hook (analyze), and children
+	// their placed children (sandboxGuestPlacedChildren).
+	readings []guestAnalysisEntry
+	children []guestChildrenEntry
 	// relative keeps the relative-operand answers of every split of the
 	// hook (actionfacts.RelativeOperandMemo).
 	relative actionfacts.RelativeOperandMemo
@@ -597,6 +608,18 @@ type guestPlanEntry struct {
 	input actionfacts.Input
 	facts actionfacts.Facts
 	plan  *guestPlacementPlan
+}
+
+type guestAnalysisEntry struct {
+	input actionfacts.Input
+	facts actionfacts.Facts
+}
+
+type guestChildrenEntry struct {
+	input                actionfacts.Input
+	facts                actionfacts.Facts
+	children, candidates []actionfacts.Facts
+	cut                  bounded.CapSet
 }
 
 // guestReadingMemoEntries bounds each list of a guestReadingMemo: a hook
@@ -627,10 +650,98 @@ func (memo *guestReadingMemo) simpleCommands(input actionfacts.Input, facts acti
 	return simples
 }
 
+// analyze is actionfacts.Analyze(input). Each dispatch of a hook reads the
+// guest reading of its call (sandboxGuestPlacedInput) up to five times, the
+// sandbox hook-config guard and the high-write proof read it again, and a
+// hook dispatches the same call many times: one sandbox call was analyzed
+// about fifty times a hook for the same input (substrate-1 GAP-1028). The
+// analysis is lexical and depends on the input alone. Each caller gets the
+// facts with every list at its length (clippedFacts), so an append by one
+// never writes into the array another holds.
+func (memo *guestReadingMemo) analyze(input actionfacts.Input) actionfacts.Facts {
+	if memo == nil {
+		return actionfacts.Analyze(input)
+	}
+	memo.mu.Lock()
+	for _, entry := range memo.readings {
+		if reflect.DeepEqual(entry.input, input) {
+			memo.mu.Unlock()
+			return clippedFacts(entry.facts)
+		}
+	}
+	memo.mu.Unlock()
+	facts := actionfacts.Analyze(input)
+	memo.mu.Lock()
+	if len(memo.readings) == guestReadingMemoReadings {
+		memo.readings = slices.Delete(memo.readings, 0, 1)
+	}
+	memo.readings = append(memo.readings, guestAnalysisEntry{input: input, facts: facts})
+	memo.mu.Unlock()
+	return clippedFacts(facts)
+}
+
+// guestReadingMemoReadings bounds the guest readings a guestReadingMemo
+// keeps: the call, its twins and the statements the dispatch reads alone.
+const guestReadingMemoReadings = 8
+
+// clippedFacts is facts with each of its lists at its length.
+func clippedFacts(facts actionfacts.Facts) actionfacts.Facts {
+	value := reflect.ValueOf(&facts).Elem()
+	for at := range value.NumField() {
+		if field := value.Field(at); field.Kind() == reflect.Slice && field.CanSet() && !field.IsNil() {
+			field.Set(field.Slice3(0, field.Len(), field.Len()))
+		}
+	}
+	return facts
+}
+
+// placedChildren is sandboxGuestPlacedChildren(memo, input, facts) for a
+// hook that already read them: every dispatch of the call reads the same
+// children again.
+func (memo *guestReadingMemo) placedChildren(input actionfacts.Input, facts actionfacts.Facts) (children, candidates []actionfacts.Facts, cut bounded.CapSet, ok bool) {
+	if memo == nil {
+		return nil, nil, bounded.CapSet{}, false
+	}
+	memo.mu.Lock()
+	defer memo.mu.Unlock()
+	for _, entry := range memo.children {
+		if reflect.DeepEqual(entry.input, input) && reflect.DeepEqual(entry.facts, facts) {
+			return clippedFactsList(entry.children), clippedFactsList(entry.candidates), entry.cut, true
+		}
+	}
+	return nil, nil, bounded.CapSet{}, false
+}
+
+// keepPlacedChildren keeps the placed children of input and facts.
+func (memo *guestReadingMemo) keepPlacedChildren(input actionfacts.Input, facts actionfacts.Facts, children, candidates []actionfacts.Facts, cut bounded.CapSet) {
+	if memo == nil {
+		return
+	}
+	entry := guestChildrenEntry{input: input, facts: facts, children: clippedFactsList(children), candidates: clippedFactsList(candidates), cut: cut}
+	memo.mu.Lock()
+	defer memo.mu.Unlock()
+	if len(memo.children) == guestReadingMemoEntries {
+		memo.children = slices.Delete(memo.children, 0, 1)
+	}
+	memo.children = append(memo.children, entry)
+}
+
+// clippedFactsList is a copy of list with each facts clipped (clippedFacts).
+func clippedFactsList(list []actionfacts.Facts) []actionfacts.Facts {
+	if list == nil {
+		return nil
+	}
+	out := make([]actionfacts.Facts, len(list))
+	for at, facts := range list {
+		out[at] = clippedFacts(facts)
+	}
+	return out
+}
+
 // plan is newGuestPlacementPlan(input, facts) over the memo's splits.
 func (memo *guestReadingMemo) plan(input actionfacts.Input, facts actionfacts.Facts) *guestPlacementPlan {
 	if memo == nil {
-		return newGuestPlacementPlan(input, facts, nil)
+		return newGuestPlacementPlan(input, facts, nil, nil)
 	}
 	memo.mu.Lock()
 	for _, entry := range memo.plans {
@@ -640,7 +751,7 @@ func (memo *guestReadingMemo) plan(input actionfacts.Input, facts actionfacts.Fa
 		}
 	}
 	memo.mu.Unlock()
-	plan := newGuestPlacementPlan(input, facts, memo.simpleCommands)
+	plan := newGuestPlacementPlan(input, facts, memo.simpleCommands, memo.analyze)
 	memo.mu.Lock()
 	if len(memo.plans) == guestReadingMemoEntries {
 		memo.plans = slices.Delete(memo.plans, 0, 1)
@@ -715,7 +826,7 @@ func withSandboxGuestFolderTier(findings []RuleFinding, request trustedActionReq
 	if !ok {
 		return findings
 	}
-	guestFacts := actionfacts.Analyze(guest)
+	guestFacts := request.guestMemo.analyze(guest)
 	if !guestFacts.MayRunInUnresolvedFolder() {
 		return findings
 	}
@@ -748,7 +859,7 @@ func withSandboxGuestSplitGapEffects(ctx context.Context, request trustedActionR
 	if !ok {
 		return findings
 	}
-	guestFacts := actionfacts.Analyze(guest)
+	guestFacts := request.guestMemo.analyze(guest)
 	if !slices.ContainsFunc(request.guestMemo.simpleCommands(guest, guestFacts), splitGapUnreadPart) {
 		return findings
 	}
