@@ -30,6 +30,10 @@ func TestGAP1229MoverDefinedInAListLeavesTheShellWhereItMayFiveTiers(t *testing.
 		{"and-tail", "cd ~/.defenseclaw && " + mover + "; f; echo m > config.yaml", state},
 		{"and-tail-and", "cd ~/.defenseclaw && f() { cd /nonexistent-g1229 || return 0; }; f && echo m > config.yaml", state},
 		{"and-tail-variable", "cd ~/.defenseclaw && " + mover + "; f; x=config.yaml; echo m > $x", state},
+		// The same write after a top-level cd that may fail: the folder of
+		// cd ~/.defenseclaw was dropped under a Windows home (GAP-1880).
+		{"may-fail-cd-variable", "cd ~/.defenseclaw; cd /nonexistent-g1229 || true; x=config.yaml; echo m > $x", state},
+		{"may-fail-cd-relative-variable", "cd ~ && cd .defenseclaw; cd /nonexistent-g1229 || true; x=config.yaml; echo m > $x", state},
 		{"and-tail-key", "cd ~/.ssh && " + mover + "; f; echo k >> authorized_keys", key},
 		{"branch", "cd ~/.defenseclaw; if true; then " + mover + "; fi; f; echo m > config.yaml", state},
 		{"body-called-first", "h() { " + mover + "; }; cd ~/.defenseclaw && h; f; echo m > config.yaml", state},
