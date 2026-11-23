@@ -1171,7 +1171,8 @@ func substrateLifecycleClosesAsks(next func(context.Context, chainstate.Lifecycl
 			fmt.Fprintf(log, "[substrate] ask %s of %s/%s (%s) closed: expired, reason %s (%s)\n", a.ID, a.Atespace, a.Actor, substrateFirst(a.Host, a.Tool), why[0], why[1])
 			if relay != nil {
 				relay.Add(telemetryrelay.Record{Kind: telemetryrelay.KindAskClosed, At: now, Atespace: a.Atespace, Actor: a.Actor, UID: a.UID,
-					AskID: a.ID, Host: substrateFirst(a.Host, a.Tool), Reason: why[0], Unattended: a.Unattended, Severity: a.Severity})
+					AskID: a.ID, Host: substrateFirst(a.Host, a.Tool), Reason: why[0], Unattended: a.Unattended, Severity: a.Severity,
+					Profile: a.Profile, UserID: a.OwnerID})
 			}
 		}
 		return res, nil

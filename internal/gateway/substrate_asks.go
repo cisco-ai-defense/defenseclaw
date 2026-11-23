@@ -546,6 +546,10 @@ func (a *APIServer) recordSubstrateAskClosed(ctx context.Context, r telemetryrel
 			"target": r.Host, "reason": reason, "unattended": r.Unattended,
 		})
 	}
+	// The closure is the end of the ask's lifecycle: log.approval.resolved,
+	// result cancelled, answered by the system (GAP-0677).
+	a.emitSubstrateApprovalV8(ctx, asks.Ask{ID: r.AskID, State: asks.StateExpired, Host: r.Host, Atespace: r.Atespace,
+		Actor: r.Actor, UID: r.UID, Profile: r.Profile, OwnerID: r.UserID}, false, audit.SandboxApprovalByAutomatic)
 	if !r.Unattended || a.webhookSource == nil {
 		return
 	}

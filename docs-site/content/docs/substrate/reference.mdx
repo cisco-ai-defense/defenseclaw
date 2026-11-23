@@ -177,7 +177,7 @@ A direct edit of the `defenseclaw-config` ConfigMap, for example with `kubectl e
 | `deployment_mode` and the enterprise profile | Never live. An edit that changes them, for example one that drops `managed_enterprise`, is refused whole with a `sandbox.config.refused` alert that names `deployment_mode_change` (or `managed_downgrade`); none of the edit applies, the guardrail part included. It applies only when the pods restart with it, through `helm upgrade` |
 | `substrate.extproc`, and the callout's copy of `url_rules`, `ask_hosts`, `actor_secrets` and unattended asks | Only through `helm upgrade`, which renders the callout's own ConfigMap. The controller keeps the `mcp_hosts` it started with, so an edit opens no egress the callout does not inspect yet |
 
-After a direct edit of a setting that waits for a restart, run `kubectl -n defenseclaw-system rollout restart deploy/defenseclaw-gateway` (or `deploy/defenseclaw-gateway-leader`). With `substrate.bundles` on, the stage bundles are layered over the profiles that config.yaml had when the controller started, so a profile change in config.yaml applies when the controller restarts.
+After a direct edit of a setting that waits for a restart, run `kubectl -n defenseclaw-system rollout restart deploy/defenseclaw-gateway` (or `deploy/defenseclaw-gateway-leader`, and `deploy/defenseclaw-controller` for the settings the controller keeps: identity, services, API, `llm_providers` and the bundle layering). With `substrate.bundles` on, the stage bundles are layered over the profiles that config.yaml had when the controller started, so a profile change in config.yaml applies when the controller restarts.
 
 ## Chart values
 

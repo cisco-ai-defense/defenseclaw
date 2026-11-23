@@ -290,12 +290,24 @@ func PreUpgrade(ctx context.Context, plan ChartPlan, config []byte, validate fun
 
 // PreRollback refuses a rollback to a release that reads an older store
 // schema than the store has, naming the backup (E25), and how to clear the
-// revision helm keeps for the refused rollback (GAP-0448).
+// revision helm keeps for the refused rollback (GAP-0448). helm writes that
+// revision before it runs the hook, so every refusal carries the recovery: a
+// store state that cannot be read or parsed leaves it as much as a schema
+// refusal does (GAP-0666).
 func PreRollback(ctx context.Context, plan ChartPlan, kube KubeAPI) (StepReport, error) {
 	r := StepReport{Step: "pre-rollback"}
-	st, err := storeState(ctx, plan, kube)
+	cm, err := kube.GetConfigMap(ctx, plan.Namespace, plan.StoreStateConfigMap)
 	if err != nil {
-		return r, err
+		return r, fmt.Errorf("store state: %w. %s", err, RefusedRollbackRecovery(plan))
+	}
+	var st *StoreState
+	if cm != nil {
+		if st, err = ParseStoreState(cm.Data); err != nil {
+			// The same ConfigMap fails every rerun of this hook, so clearing
+			// the pending-rollback revision with a helm rollback is not enough:
+			// the ConfigMap is repaired first (GAP-0917).
+			return r, fmt.Errorf("%w. %s", err, UnreadableStoreStateRecovery(plan))
+		}
 	}
 	if err := CheckRollback(plan.StoreSchema, st); err != nil {
 		return r, fmt.Errorf("%w. %s", err, RefusedRollbackRecovery(plan))
@@ -315,6 +327,21 @@ func RefusedRollbackRecovery(plan ChartPlan) string {
 	return fmt.Sprintf("Nothing was rolled back, but helm keeps this rollback as a pending-rollback revision and refuses "+
 		"every helm upgrade until it is cleared: run helm -n %[1]s rollback %[2]s N, where N is the revision helm -n %[1]s "+
 		"history %[2]s shows as deployed (it changes nothing), then upgrade as usual", plan.Namespace, plan.Release)
+}
+
+// UnreadableStoreStateRecovery is the recovery for a store-state ConfigMap
+// that does not parse. Every rollback runs this hook again and fails the same
+// way, so the ConfigMap comes first: set schema_version to the whole number the
+// store is at (the leader logs it at start), or delete the ConfigMap (the
+// recorded backup name is lost, the leader writes a new one at its next
+// start). Then the pending-rollback revision is cleared as for any refusal.
+func UnreadableStoreStateRecovery(plan ChartPlan) string {
+	return fmt.Sprintf("Nothing was rolled back. Repairing the ConfigMap comes first, because a helm rollback runs this "+
+		"check again and fails the same way: run kubectl -n %[1]s edit configmap %[3]s and set %[4]s to the schema version "+
+		"the store is at (a whole number, 1 or more), or run kubectl -n %[1]s delete configmap %[3]s (the leader writes a "+
+		"new one at its next start; the backup name it recorded is lost). Then clear the pending-rollback revision helm "+
+		"keeps: run helm -n %[1]s rollback %[2]s N, where N is the revision helm -n %[1]s history %[2]s shows as deployed, "+
+		"and retry the rollback you wanted", plan.Namespace, plan.Release, plan.StoreStateConfigMap, StoreStateSchemaKey)
 }
 
 // ErrPoliciesLeft fails the uninstall while DefenseClaw-written egress

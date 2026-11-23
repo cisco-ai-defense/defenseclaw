@@ -4313,6 +4313,26 @@
       "security_note": "Installer-only override — treated as untrusted operator input, so the referenced plist must be root-owned and never group/world-writable. The bundled default plist next to install.sh is accepted regardless of extraction owner (content originates from the trusted bundle) but group/world-writable is still refused."
     },
     {
+      "name": "DEFENSECLAW_PIN_REACHABILITY",
+      "category": "test_fixture",
+      "purpose": "Opt-in for the release and nightly check that every pinned vendor harness archive (Cursor, Devin, Kiro) is still served; unset skips it, because it needs the network and fails on a day a vendor withdraws an old build.",
+      "default": "unset",
+      "accepted_values": [
+        "1",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/openshell/harness/pin_reachability_test.go",
+          "description": "TestPinnedArchivesAreReachable runs only when the variable is 1"
+        }
+      ],
+      "since": "1.0.11"
+    },
+    {
       "name": "DEFENSECLAW_PLUGIN_AGENT_ID",
       "category": "hook_internal",
       "purpose": "Plugin-side agent ID. Falls back to DEFENSECLAW_AGENT_ID when unset.",
