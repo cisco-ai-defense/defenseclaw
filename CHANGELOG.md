@@ -65,6 +65,12 @@ DefenseClaw 1.0.11 follows 1.0.10. It is a fix release. It updates OpenShell to 
 - Standalone Setup no longer takes over a user's own earlier per-user DefenseClaw folder; it leaves that account as it found it. One busy or unusable profile no longer stops the install for every other user.
 - Managed Claude Code enrollment accepts an existing ClaudeCode policy in the machine registry that merges managed sources, instead of failing on any such policy.
 - A standalone reinstall keeps the shared hook files' owner when Intune or an administrator edited `requirements.toml` or `90-defenseclaw.json`, instead of failing with error 1603.
+- Setup no longer fails with error 1603 when an administrator has already placed a Codex `requirements.toml` on the machine with no DefenseClaw settings in it. A DefenseClaw section without its lock is still refused.
+- On a managed standalone Windows install, upgrading an older config that names the strict or permissive rule pack DefenseClaw ships keeps that pack as the preset, instead of treating it as a custom pack that needs a digest.
+- On a managed Windows machine the Hook Guardian no longer keeps about one CPU core busy while idle: a check that finds nothing changed renders the Claude Code machine settings once, not once per earlier hook contract.
+- On a managed Windows machine the hook release protection record is written before a new hook generation is published, so a failed write leaves the previous generation in place instead of one the record does not cover.
+- On a managed Windows machine the guardian service and an administrator running `defenseclaw enterprise hooks reconcile` at the same time no longer overwrite each other's release protection record, so a hook that fails a check keeps its protection.
+- Windows Setup `/install` without `CONFIG=` (configuration delivered later) no longer fails with error 1603: the install finishes and waits for its configuration.
 
 #### Routing, budgets and cost
 - A Claude stream that stops before its usage record is charged to budgets as unknown spend, not as its opening token count.
@@ -95,6 +101,7 @@ DefenseClaw 1.0.11 follows 1.0.10. It is a fix release. It updates OpenShell to 
 #### Endpoint inventory
 - **Adding or removing a skill no longer changes the ids of the other skills in its folder.** The managed inventory built the id of a skill, plugin or rule from whichever entry of its folder hashed lowest; it now uses the folder itself. Skill, plugin and rule ids change once on upgrade; MCP server ids do not.
 - **The plugin inventory no longer reports Codex's install staging folder as a plugin.** Hidden folders in an agent's plugins folder, such as Codex's `.remote-plugin-install-staging`, are the agent's own working state; discovery, and the Linux sensor helper's read of a home, now leave them out.
+- **On Windows, an unchanged skill folder is no longer read again on the next scan.** The skill cache now checks each entry in the folder directly, because Windows can report an out-of-date time for a subfolder until it is next opened.
 
 ### Known limits
 
