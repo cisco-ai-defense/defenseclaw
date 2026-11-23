@@ -7,6 +7,7 @@ package cli
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -18,7 +19,7 @@ import (
 // asked anything: run and connect both read the flag the same way.
 func TestSubstrateMCPFlagErrors(t *testing.T) {
 	self := os.Args[0]
-	for _, tc := range []struct {
+	cases := []struct {
 		name string
 		args []string
 		want string
@@ -27,10 +28,22 @@ func TestSubstrateMCPFlagErrors(t *testing.T) {
 		{"empty name", []string{"--mcp", "=cmd"}, "mcp_spec_invalid"},
 		{"bad name", []string{"--mcp", "Files=" + self}, "mcp_spec_invalid"},
 		{"empty command", []string{"--mcp", "files="}, "mcp_spec_invalid"},
-		{"unclosed quote", []string{"--mcp", "files=prog 'x"}, "mcp_spec_invalid"},
+		{"unclosed double quote", []string{"--mcp", "files=prog \"x"}, "mcp_spec_invalid"},
 		{"duplicate", []string{"--mcp", "files=" + self, "--mcp", "files=" + self}, "mcp_name_duplicate"},
 		{"command missing", []string{"--mcp", "files=/no/such/dc-mcp-tool"}, "mcp_command_missing"},
-	} {
+	}
+	if runtime.GOOS != "windows" {
+		// Only POSIX splitting treats a single quote as quoting. On Windows it
+		// is an ordinary character (C:\Users\O'Brien\srv.exe must work as
+		// typed), so there is no unclosed quote to report; see
+		// TestParseMCPSpec in the attach package.
+		cases = append(cases, struct {
+			name string
+			args []string
+			want string
+		}{"unclosed single quote", []string{"--mcp", "files=prog 'x"}, "mcp_spec_invalid"})
+	}
+	for _, tc := range cases {
 		for _, sub := range []string{"run", "connect"} {
 			cmd := newSubstrateRunCmd()
 			args := append([]string{"claude"}, tc.args...)
