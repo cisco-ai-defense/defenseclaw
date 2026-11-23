@@ -1289,7 +1289,7 @@
         "name": "overlay-only",
         "type": "bool",
         "default": "false",
-        "usage": "GitOps: write the overlay only and name the chart values it assumes; Argo CD or Flux owns the chart (alias --no-chart)"
+        "usage": "GitOps: write the overlay only and name the chart values it assumes; Argo CD or Flux owns the chart"
       },
       {
         "name": "plan",

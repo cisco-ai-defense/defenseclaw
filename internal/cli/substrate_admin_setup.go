@@ -124,7 +124,7 @@ It never runs helm. The next step is to commit the file and let ate-setup deploy
 	f.StringVar(&o.kubeconfig, "kubeconfig", "", "kubectl configuration file for the --issuer check (default: kubectl's own)")
 	f.StringVar(&o.kubeContext, "kube-context", "", "kubectl context for the --issuer check")
 	f.StringSliceVar(&o.capabilities, "capability", nil, "a setting your Substrate build has: body-mode or route-timeouts (repeatable; off by default)")
-	f.BoolVar(&o.overlayOnly, "overlay-only", false, "GitOps: write the overlay only and name the chart values it assumes; Argo CD or Flux owns the chart (alias --no-chart)")
+	f.BoolVar(&o.overlayOnly, "overlay-only", false, "GitOps: write the overlay only and name the chart values it assumes; Argo CD or Flux owns the chart")
 	f.BoolVar(&o.remove, "remove", false, "take DefenseClaw's settings out of the file")
 	f.BoolVar(&o.printPolicy, "print-access-policies", false, "print the access policies for --plan and stop")
 	f.StringVar(&o.plan, "plan", "", "the chart's plan.json (a file, or env:NAME), for --print-access-policies")

@@ -822,10 +822,7 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             _Flag(
                 "overlay-only",
                 "bool",
-                (
-                    "GitOps: write the overlay only and name the chart values it assumes; Argo CD or Flux owns the chart "
-                    "(alias --no-chart)"
-                ),
+                "GitOps: write the overlay only and name the chart values it assumes; Argo CD or Flux owns the chart",
             ),
             _Flag(
                 "plan",
