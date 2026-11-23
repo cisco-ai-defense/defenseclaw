@@ -25,7 +25,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"sync"
 	"syscall"
 	"time"
@@ -49,13 +48,6 @@ const containPodMode = "pod-scanner"
 // podSweepTimeout bounds how long a sweep waits for the killed processes to
 // be reaped before it reports the namespace as not empty.
 const podSweepTimeout = 5 * time.Second
-
-// Test seams: the in-package helper runs as PID 1 of a user namespace it
-// owns, where it is root without capabilities.
-var (
-	podAllowRoot = false
-	podProcRoot  = "/proc"
-)
 
 // PodRunner runs scanner commands in the pod-contained mode. Run and Reset
 // take one lock, so at most one scanner runs at a time.
@@ -100,9 +92,9 @@ func podUnavailable(format string, args ...any) error {
 }
 
 // Check reports whether this process can contain a scanner in pod mode: it
-// is PID 1 of the PID namespace its /proc shows, it has no capabilities and
-// is not root, and no other process runs in the namespace. It kills and
-// reaps any other process first (a kubectl exec, a scanner's leftover).
+// is PID 1 of its PID namespace, it is not root and has no capabilities, and
+// no other process runs in the namespace. It kills and reaps any other
+// process first (a kubectl exec, a scanner's leftover).
 func (p *PodRunner) Check() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -116,10 +108,7 @@ func (p *PodRunner) checkLocked() error {
 	if os.Getpid() != 1 {
 		return podUnavailable("it is PID %d, not PID 1 of the container's own PID namespace (is shareProcessNamespace set?)", os.Getpid())
 	}
-	if self, err := os.Readlink(filepath.Join(podProcRoot, "self")); err != nil || self != "1" {
-		return podUnavailable("%s is not the procfs of its PID namespace (self=%q, %v)", podProcRoot, self, err)
-	}
-	if !podAllowRoot && os.Geteuid() == 0 {
+	if os.Geteuid() == 0 {
 		return podUnavailable("it runs as root; the sidecar must run as a non-root user")
 	}
 	if caps := effectiveCapabilities(); caps != 0 {
@@ -132,7 +121,8 @@ func (p *PodRunner) checkLocked() error {
 }
 
 // sweepLocked kills every process of the namespace but this one, reaps them,
-// and checks that /proc lists only PID 1.
+// and checks that none is left. Only PID 1 may call it: kill(-1) of any
+// other process reaches every process of its user outside the namespace too.
 func (p *PodRunner) sweepLocked() error {
 	deadline := time.Now().Add(podSweepTimeout)
 	for {
@@ -149,36 +139,21 @@ func (p *PodRunner) sweepLocked() error {
 			}
 		}
 		if errors.Is(err, unix.ECHILD) {
-			others, lerr := podOtherPIDs()
-			if lerr != nil {
-				return podUnavailable("cannot list the namespace's processes: %v", lerr)
-			}
-			if len(others) == 0 {
+			// kill(-1, 0) from PID 1 finds no process exactly when no other
+			// process is left in this namespace or one below it; one it may
+			// not signal (another user) answers EPERM.
+			alone := errors.Is(unix.Kill(-1, 0), unix.ESRCH)
+			if alone {
 				return nil
 			}
 			if time.Now().After(deadline) {
-				return podUnavailable("processes %v still run after the sweep", others)
+				return podUnavailable("other processes still run in the namespace after the sweep")
 			}
 		} else if time.Now().After(deadline) {
 			return podUnavailable("killed children were not reaped in %s", podSweepTimeout)
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-}
-
-// podOtherPIDs lists the processes /proc shows besides PID 1.
-func podOtherPIDs() ([]int, error) {
-	entries, err := os.ReadDir(podProcRoot)
-	if err != nil {
-		return nil, err
-	}
-	var pids []int
-	for _, e := range entries {
-		if pid, err := strconv.Atoi(e.Name()); err == nil && pid != 1 {
-			pids = append(pids, pid)
-		}
-	}
-	return pids, nil
 }
 
 // Run runs cmd as a direct child of the scan worker after a Check, behind

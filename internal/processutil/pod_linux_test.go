@@ -36,7 +36,7 @@ import (
 const podHelperEnv = "DC_PROCESSUTIL_TEST_POD_HELPER"
 
 // TestPodRunnerHelper is a scanner sidecar under a container's default
-// seccomp profile: PID 1 of its own PID namespace with its own /proc, no
+// seccomp profile: PID 1 of its own PID namespace, not root and without
 // capabilities, and a filter that refuses user namespaces with EPERM. It
 // writes one line per check to the result file.
 func TestPodRunnerHelper(t *testing.T) {
@@ -51,24 +51,7 @@ func TestPodRunnerHelper(t *testing.T) {
 		say("setup: pid %d", os.Getpid())
 		return
 	}
-	if err := unix.Mount("", "/", "", unix.MS_REC|unix.MS_PRIVATE, ""); err != nil {
-		say("setup: private mounts: %v", err)
-		return
-	}
-	if err := unix.Mount("proc", "/proc", "proc", unix.MS_NOSUID|unix.MS_NODEV|unix.MS_NOEXEC, ""); err != nil {
-		say("setup: mount proc: %v", err)
-		return
-	}
 	refuseUserNamespaces(t, syscall.EPERM)
-	// Root of this user namespace only; drop every capability as the chart's
-	// sidecar has none.
-	hdr := unix.CapUserHeader{Version: unix.LINUX_CAPABILITY_VERSION_3}
-	var none [2]unix.CapUserData
-	if err := unix.Capset(&hdr, &none[0]); err != nil {
-		say("setup: drop capabilities: %v", err)
-		return
-	}
-	podAllowRoot = true
 	ctx := context.Background()
 
 	// Outside pod mode a refused namespace still fails closed, as PID 1 too.
@@ -91,8 +74,7 @@ func TestPodRunnerHelper(t *testing.T) {
 	cmd.Stdout = &stdout
 	err = p.Run(cmd)
 	_, ranErr = os.Stat(out + ".pod")
-	others, _ := podOtherPIDs()
-	say("pod err=%v ran=%t stdout=%q others=%d", err, ranErr == nil, strings.TrimSpace(stdout.String()), len(others))
+	say("pod err=%v ran=%t stdout=%q alone=%t", err, ranErr == nil, strings.TrimSpace(stdout.String()), podAlone())
 
 	// A non-zero exit is the scanner's own answer.
 	err = p.Run(CommandContext(ctx, "/bin/sh", "-c", "exit 3"))
@@ -104,8 +86,11 @@ func TestPodRunnerHelper(t *testing.T) {
 		return -1
 	}())
 
-	// The scanner's Landlock domain and filter: no ptrace of the worker.
-	err = p.Run(CommandContext(ctx, "/bin/sh", "-c", `cat /proc/1/environ >/dev/null 2>&1 && exit 9; exit 0`))
+	// The worker is not dumpable and the scanner is in its own Landlock
+	// domain: it cannot read the worker's environment or memory. This /proc
+	// is the host's, where the worker has its host PID.
+	self, _ := os.Readlink("/proc/self")
+	err = p.Run(CommandContext(ctx, "/bin/sh", "-c", `cat "/proc/$1/environ" >/dev/null 2>&1 && exit 9; exit 0`, "sh", self))
 	say("environ err=%v", err)
 
 	// Reset sweeps a leftover the worker did not start and empties scratch.
@@ -115,9 +100,10 @@ func TestPodRunnerHelper(t *testing.T) {
 	_ = stray.Start()
 	err = p.Reset()
 	left, _ := os.ReadDir(scratch)
-	others, _ = podOtherPIDs()
-	say("reset err=%v scratch=%d others=%d", err, len(left), len(others))
+	say("reset err=%v scratch=%d alone=%t", err, len(left), podAlone())
 }
+
+func podAlone() bool { return errors.Is(unix.Kill(-1, 0), unix.ESRCH) }
 
 // GAP-0828: under RuntimeDefault the scanner sidecar never scanned, as
 // RunTracked's namespaces are refused there and it fails closed (GAP-0521).
@@ -128,9 +114,11 @@ func TestPodRunnerScansWhereNamespacesAreRefused(t *testing.T) {
 	helper := exec.Command(os.Args[0], "-test.run=^TestPodRunnerHelper$", "-test.count=1")
 	helper.Env = append(os.Environ(), podHelperEnv+"="+out)
 	helper.SysProcAttr = &syscall.SysProcAttr{
-		Cloneflags:                 syscall.CLONE_NEWUSER | syscall.CLONE_NEWPID | syscall.CLONE_NEWNS,
-		UidMappings:                []syscall.SysProcIDMap{{ContainerID: 0, HostID: os.Geteuid(), Size: 1}},
-		GidMappings:                []syscall.SysProcIDMap{{ContainerID: 0, HostID: os.Getegid(), Size: 1}},
+		// The helper keeps its own non-root IDs, so its exec leaves it
+		// without capabilities, as the chart's sidecar is.
+		Cloneflags:                 syscall.CLONE_NEWUSER | syscall.CLONE_NEWPID,
+		UidMappings:                []syscall.SysProcIDMap{{ContainerID: os.Geteuid(), HostID: os.Geteuid(), Size: 1}},
+		GidMappings:                []syscall.SysProcIDMap{{ContainerID: os.Getegid(), HostID: os.Getegid(), Size: 1}},
 		GidMappingsEnableSetgroups: false,
 	}
 	if b, err := helper.CombinedOutput(); err != nil {
@@ -147,10 +135,10 @@ func TestPodRunnerScansWhereNamespacesAreRefused(t *testing.T) {
 	for _, want := range []string{
 		"tracked unavailable=true ran=false\n",
 		"check err=<nil>\n",
-		`pod err=<nil> ran=true stdout="scanned" others=0` + "\n",
+		`pod err=<nil> ran=true stdout="scanned" alone=true` + "\n",
 		"exit3 code=3\n",
 		"environ err=<nil>\n",
-		"reset err=<nil> scratch=0 others=0\n",
+		"reset err=<nil> scratch=0 alone=true\n",
 	} {
 		if !strings.Contains(report, want) {
 			t.Fatalf("pod mode report lacks %q:\n%s", want, report)

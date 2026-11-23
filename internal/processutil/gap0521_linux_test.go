@@ -105,8 +105,8 @@ func TestRunTrackedReportsAHostThatRefusesTheScannerNamespaces(t *testing.T) {
 	}
 }
 
-// refuseUserNamespaces installs a seccomp filter that fails every clone or
-// unshare asking for a new user namespace with errno, as a container's
+// refuseUserNamespaces installs, on every thread, a seccomp filter that fails
+// every clone or unshare asking for a new user namespace with errno, as a container's
 // default profile does (EPERM) and as user.max_user_namespaces=0 does
 // (ENOSPC).
 func refuseUserNamespaces(t *testing.T, errno syscall.Errno) {
@@ -137,8 +137,10 @@ func refuseUserNamespaces(t *testing.T, errno syscall.Errno) {
 	if err := unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0); err != nil {
 		t.Fatal(err)
 	}
-	if err := unix.Prctl(unix.PR_SET_SECCOMP, unix.SECCOMP_MODE_FILTER, uintptr(unsafe.Pointer(&prog)), 0, 0); err != nil {
-		t.Fatal(err)
+	// Every thread: a child started from any goroutine meets the filter.
+	if _, _, errno := unix.Syscall(unix.SYS_SECCOMP, unix.SECCOMP_SET_MODE_FILTER, unix.SECCOMP_FILTER_FLAG_TSYNC,
+		uintptr(unsafe.Pointer(&prog))); errno != 0 {
+		t.Fatal(errno)
 	}
 	runtime.KeepAlive(filter)
 }

@@ -21,8 +21,6 @@ import (
 	"testing"
 	"time"
 
-	"golang.org/x/sys/unix"
-
 	"github.com/defenseclaw/defenseclaw/internal/processutil"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/scanworker"
@@ -36,7 +34,7 @@ const gap0828Job = "0123456789abcdef0123456789abcdef"
 // TestGAP0828WorkerHelper is the scanner sidecar under the chart's default
 // seccomp profile (user namespaces refused with EPERM), with the worker's
 // default containment (tracked) or the chart's pod-contained mode (pod, as
-// PID 1 of its own PID namespace with its own /proc and no capabilities).
+// PID 1 of its own PID namespace, not root, without capabilities).
 // It sends one skill job and writes the answer to <folder>/answer.json.
 func TestGAP0828WorkerHelper(t *testing.T) {
 	spec := os.Getenv(workerHelperEnv)
@@ -44,23 +42,9 @@ func TestGAP0828WorkerHelper(t *testing.T) {
 		t.Skip("helper process")
 	}
 	mode, dir, _ := strings.Cut(spec, ",")
-	if mode == "pod" {
-		if err := unix.Mount("", "/", "", unix.MS_REC|unix.MS_PRIVATE, ""); err != nil {
-			t.Fatal(err)
-		}
-		if err := unix.Mount("proc", "/proc", "proc", unix.MS_NOSUID|unix.MS_NODEV|unix.MS_NOEXEC, ""); err != nil {
-			t.Fatal(err)
-		}
-	}
 	processutil.RefuseUserNamespacesForTest(t, syscall.EPERM)
 	w := &scanworker.Worker{Dir: filepath.Join(dir, "scan"), Launcher: filepath.Join(dir, "fake-skill-scanner"), Timeout: 20 * time.Second}
 	if mode == "pod" {
-		hdr := unix.CapUserHeader{Version: unix.LINUX_CAPABILITY_VERSION_3}
-		var none [2]unix.CapUserData
-		if err := unix.Capset(&hdr, &none[0]); err != nil {
-			t.Fatal(err)
-		}
-		processutil.AllowPodRootForTest()
 		w.Pod = processutil.NewPodRunner(filepath.Join(dir, "tmp"))
 	}
 	job := filepath.Join(w.Dir, scanner.ScanJobsDirName, gap0828Job)
@@ -118,9 +102,9 @@ func TestGAP0828WorkerRuntimeDefault(t *testing.T) {
 			helper.Env = append(os.Environ(), workerHelperEnv+"="+mode+","+dir)
 			if mode == "pod" {
 				helper.SysProcAttr = &syscall.SysProcAttr{
-					Cloneflags:  syscall.CLONE_NEWUSER | syscall.CLONE_NEWPID | syscall.CLONE_NEWNS,
-					UidMappings: []syscall.SysProcIDMap{{ContainerID: 0, HostID: os.Geteuid(), Size: 1}},
-					GidMappings: []syscall.SysProcIDMap{{ContainerID: 0, HostID: os.Getegid(), Size: 1}},
+					Cloneflags:  syscall.CLONE_NEWUSER | syscall.CLONE_NEWPID,
+					UidMappings: []syscall.SysProcIDMap{{ContainerID: os.Geteuid(), HostID: os.Geteuid(), Size: 1}},
+					GidMappings: []syscall.SysProcIDMap{{ContainerID: os.Getegid(), HostID: os.Getegid(), Size: 1}},
 				}
 			}
 			if b, err := helper.CombinedOutput(); err != nil {
