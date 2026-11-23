@@ -1351,10 +1351,10 @@ func (a *App) RunDoctor(ctx context.Context, o DoctorOptions) error {
 	refusal := a.doctorRunRefusal(ctx, rep)
 	if o.Output == OutputJSON {
 		_, off := sandboxesOff(rep)
-		// One exit contract: a failed check, or sandboxes off for the account
-		// on a managed computer, exits 1 in either format, so a script that
-		// checks the status alone is not told a host that cannot run
-		// sandboxes is fine (GAP-0308, GAP-2036).
+		// One exit contract: a failed check exits 1 in either format, and so
+		// do sandboxes that are off for the account on a managed computer, so
+		// a script that checks the status alone is not told a host that
+		// cannot run sandboxes is fine (GAP-0308, GAP-2036).
 		if err := writeJSON(a.IO.Out, struct {
 			OK bool `json:"ok"`
 			// Ready is OK with sandboxes turned on (sandboxesOff), on a
