@@ -12,10 +12,16 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from defenseclaw.commands.cmd_doctor import _check_substrate_notifier, _DoctorResult
+from defenseclaw.commands.cmd_doctor import (
+    _check_substrate_notifier,
+    _DoctorResult,
+    substrate_admin_notifications_off,
+)
 from defenseclaw.notification_capabilities import desktop_notifier_tool_missing
 
 
@@ -41,8 +47,38 @@ def test_tool_missing_per_platform() -> None:
     assert desktop_notifier_tool_missing("linux", some) == ""
 
 
-def test_no_row_when_substrate_is_off() -> None:
+# The table Go's TestSubstrateNotificationsOffTable reads (GAP-1020).
+REPO_ROOT = Path(__file__).resolve().parents[2]
+OFF_TABLE = REPO_ROOT / "internal" / "config" / "testdata" / "substrate_activity_notifications.json"
+
+
+@pytest.fixture(autouse=True)
+def _home(tmp_path, monkeypatch):
+    """An empty DefenseClaw home: no launcher context unless a test adds one."""
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path))
+    return tmp_path
+
+
+def test_no_row_without_substrate_or_launcher() -> None:
     assert _row(_cfg(substrate=False), "linux", lambda _: None) == []
+
+
+def test_row_on_a_laptop_with_a_launcher_context(_home) -> None:
+    # GAP-1020: substrate.enabled is a cluster key; `substrate watch` runs on
+    # the laptop, where only the launcher's context file says it is used.
+    (_home / "substrate").mkdir()
+    (_home / "substrate" / "contexts.json").write_text('{"current": "c", "contexts": {}}')
+    (row,) = _row(_cfg(substrate=False), "linux", lambda _: None)
+    assert row["status"] == "warn"
+
+
+def test_admin_off_reads_like_go() -> None:
+    cases = json.loads(OFF_TABLE.read_text())["cases"]
+    assert cases
+    for case in cases:
+        assert substrate_admin_notifications_off(case["value"]) is case["off"], case
+        (row,) = _row(_cfg(admin=case["value"]), "linux", lambda _: None)
+        assert (row["status"] == "skip" and "administrator" in row["detail"]) is case["off"], case
 
 
 @pytest.mark.parametrize(

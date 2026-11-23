@@ -39,6 +39,7 @@ package activity
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"time"
 
@@ -426,9 +427,34 @@ func (s *Source) PendingAsk(uid string) bool {
 
 // ---- gateway list and status ----
 
+// ErrUnavailable is Reader's answer when it has no recent snapshot: the
+// leader cannot be reached or has not answered yet.
+var ErrUnavailable = errors.New("activity: the leader's snapshot is not available")
+
+// The Reader's bounds (GAP-1018). Vars so that tests can shorten them.
+var (
+	// readerCallTimeout bounds one read of the leader (one attempt).
+	readerCallTimeout = 2 * time.Second
+	// readerWait is how long a caller with no snapshot at all waits for
+	// the read in flight (a cold start); later reads run behind the
+	// snapshot in hand.
+	readerWait = 250 * time.Millisecond
+	// readerFailTTL is how long a failed read is remembered: no caller
+	// waits and no new read starts until it ends.
+	readerFailTTL = 10 * time.Second
+)
+
 // Reader is the gateway's read of the leader's feed for the list and status
 // answers (B3.6). One snapshot with Detail is reused for TTL, so a list of
 // 2,100 agents is one leader call per 10 s, not one per agent.
+//
+// It is best effort and never puts a caller behind a network call
+// (GAP-1018): no lock is held over the read, which runs in the background
+// with one attempt and readerCallTimeout. A snapshot past its TTL is still
+// answered while a newer one is read, up to two replica flushes past it
+// (like Source.fresh); a failed read is remembered for readerFailTTL. With
+// no usable snapshot the answer is ErrUnavailable, which list and status
+// show as unknown, never as idle.
 type Reader struct {
 	Leader *leader.Client
 	TTL    time.Duration
@@ -436,7 +462,14 @@ type Reader struct {
 
 	mu   sync.Mutex
 	snap Snapshot
-	at   time.Time
+	got  time.Time // when snap came from the leader
+	// failed is when the last read failed, or a caller stopped waiting for
+	// it (zero after a good read).
+	failed time.Time
+	// inflight is closed when the read in flight ends; nil when none runs.
+	inflight chan struct{}
+	// fetch reads the leader (nil: Leader.Call). Tests replace it.
+	fetch func(ctx context.Context) (Snapshot, error)
 }
 
 func (r *Reader) now() time.Time {
@@ -446,26 +479,83 @@ func (r *Reader) now() time.Time {
 	return time.Now()
 }
 
+func (r *Reader) ttl() time.Duration {
+	if r.TTL <= 0 {
+		return DefaultSnapshotTTL
+	}
+	return r.TTL
+}
+
 // Snapshot returns the leader's snapshot with Detail, at most TTL old (10 s
-// when unset). A leader that cannot be reached is an error: the caller
-// shows the state as unknown, never as idle.
+// when unset), or an older one while a newer one is read. It does not wait
+// on the leader, except a first caller for at most readerWait.
 func (r *Reader) Snapshot(ctx context.Context) (Snapshot, error) {
-	ttl := r.TTL
-	if ttl <= 0 {
-		ttl = DefaultSnapshotTTL
+	ttl := r.ttl()
+	r.mu.Lock()
+	now := r.now()
+	if !r.got.IsZero() && now.Sub(r.got) < ttl {
+		snap := r.snap
+		r.mu.Unlock()
+		return snap, nil
+	}
+	failed := !r.failed.IsZero()
+	if r.inflight == nil && (!failed || now.Sub(r.failed) >= readerFailTTL) {
+		r.inflight = make(chan struct{})
+		go r.refresh(r.inflight)
+	}
+	if !r.got.IsZero() && now.Sub(r.got) < ttl+2*DefaultFlushInterval {
+		snap := r.snap
+		r.mu.Unlock()
+		return snap, nil
+	}
+	ch := r.inflight
+	r.mu.Unlock()
+	if failed || ch == nil {
+		// The last read failed: callers do not wait on the next one.
+		return Snapshot{}, ErrUnavailable
+	}
+	t := time.NewTimer(readerWait)
+	defer t.Stop()
+	select {
+	case <-ch:
+	case <-t.C:
+		r.mu.Lock()
+		if r.failed.IsZero() && r.inflight == ch {
+			r.failed = r.now() // a slow leader: no one else waits on it
+		}
+		r.mu.Unlock()
+		return Snapshot{}, ErrUnavailable
+	case <-ctx.Done():
+		return Snapshot{}, ctx.Err()
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	now := r.now()
-	if !r.at.IsZero() && now.Sub(r.at) < ttl {
-		return r.snap, nil
+	if r.got.IsZero() || !r.failed.IsZero() {
+		return Snapshot{}, ErrUnavailable
 	}
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	return r.snap, nil
+}
+
+// refresh reads the leader once and closes done.
+func (r *Reader) refresh(done chan struct{}) {
+	ctx, cancel := context.WithTimeout(leader.WithoutRetry(context.Background()), readerCallTimeout)
 	defer cancel()
-	var snap Snapshot
-	if err := r.Leader.Call(ctx, leader.MethodActivitySnapshot, leader.NewRequestID(), SnapshotRequest{Detail: true}, &snap); err != nil {
-		return Snapshot{}, err
+	fetch := r.fetch
+	if fetch == nil {
+		fetch = func(ctx context.Context) (Snapshot, error) {
+			var snap Snapshot
+			err := r.Leader.Call(ctx, leader.MethodActivitySnapshot, leader.NewRequestID(), SnapshotRequest{Detail: true}, &snap)
+			return snap, err
+		}
 	}
-	r.snap, r.at = snap, now
-	return snap, nil
+	snap, err := fetch(ctx)
+	r.mu.Lock()
+	if err != nil {
+		r.failed = r.now()
+	} else {
+		r.snap, r.got, r.failed = snap, r.now(), time.Time{}
+	}
+	r.inflight = nil
+	r.mu.Unlock()
+	close(done)
 }

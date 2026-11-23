@@ -31,7 +31,8 @@ import (
 // the list as it was before the activity state (no feed, so no snapshot read
 // and no activity object); "on" adds the leader snapshot, the pending asks
 // (one in twenty agents) and the per-agent activity object. Read the ratio of
-// the two lines of one size; there is no regression bar yet.
+// the two lines of one size. The bar (GAP-1019) is "on" at 2,100 agents within
+// 1.10x of the rel list, measured interleaved on the timing box.
 func BenchmarkSubstrateListActivity(b *testing.B) {
 	for _, n := range []int{210, 2100} {
 		for _, on := range []bool{false, true} {

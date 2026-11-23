@@ -4,6 +4,9 @@
 package config
 
 import (
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -43,5 +46,31 @@ func TestNotificationsSubstrateIsZeroAtDefaults(t *testing.T) {
 	}
 	if (NotificationsSubstrateConfig{Asks: true}).IsZero() {
 		t.Fatal("a person who turned task_end off must keep it")
+	}
+}
+
+// TestSubstrateNotificationsOffTable pins how substrate.activity.notifications
+// is read against the table the Python doctor row reads too (GAP-1020).
+func TestSubstrateNotificationsOffTable(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("testdata", "substrate_activity_notifications.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var table struct {
+		Cases []struct {
+			Value string `json:"value"`
+			Off   bool   `json:"off"`
+		} `json:"cases"`
+	}
+	if err := json.Unmarshal(raw, &table); err != nil {
+		t.Fatal(err)
+	}
+	if len(table.Cases) == 0 {
+		t.Fatal("the table has no cases")
+	}
+	for _, c := range table.Cases {
+		if got := !(SubstrateActivityConfig{Notifications: c.Value}).NotificationsOn(); got != c.Off {
+			t.Errorf("notifications %q: off = %v, want %v", c.Value, got, c.Off)
+		}
 	}
 }

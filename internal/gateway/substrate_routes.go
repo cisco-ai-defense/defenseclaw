@@ -295,26 +295,74 @@ func substrateVisible(c substrateCaller, reg registry.Registration) bool {
 // says what its asks do (D12, GAP-0388): unattended_asks deny or queue from
 // its profile, and with queue how long an ask waits for a person. An actor
 // in policy_conflict carries the controller's mark (GAP-0398).
-func (st *substrateState) actorView(reg registry.Registration) map[string]any {
-	v := map[string]any{
-		"atespace": reg.Atespace, "name": reg.Name, "uid": reg.UID, "registration_key": reg.Key,
-		"profile": reg.Profile, "connector": reg.Connector, "template": reg.Template,
-		"batch_id": reg.BatchID, "unattended": reg.Unattended, "created_at": reg.CreatedAt,
-		"owner": reg.Person.Principal, "deleted": reg.Deleted,
-		"attribution": substrateAttribution(reg), "foreign": reg.Attributed,
+// substrateActorRow is one actor of a list answer: the JSON of actorView
+// as a typed struct, fields in key order as a map encodes them, so a list
+// of 2,100 agents builds and key-sorts no map per agent (GAP-1019).
+// TestSubstrateActorRowMatchesView pins the two to the same bytes.
+type substrateActorRow struct {
+	Activity          *substrateActivityOut `json:"activity,omitempty"`
+	AskTimeoutSeconds *int64                `json:"ask_timeout_seconds,omitempty"`
+	Atespace          string                `json:"atespace"`
+	Attribution       string                `json:"attribution"`
+	BatchID           string                `json:"batch_id"`
+	Connector         string                `json:"connector"`
+	CreatedAt         time.Time             `json:"created_at"`
+	Deleted           bool                  `json:"deleted"`
+	Foreign           bool                  `json:"foreign"`
+	Name              string                `json:"name"`
+	Owner             string                `json:"owner"`
+	PolicyConflict    map[string]any        `json:"policy_conflict,omitempty"`
+	Profile           string                `json:"profile"`
+	RegistrationKey   string                `json:"registration_key"`
+	State             string                `json:"state,omitempty"`
+	Template          string                `json:"template"`
+	UID               string                `json:"uid"`
+	Unattended        bool                  `json:"unattended"`
+	UnattendedAsks    string                `json:"unattended_asks,omitempty"`
+}
+
+// actorRow is reg as list, status and the other actor answers show it.
+func (st *substrateState) actorRow(reg registry.Registration) substrateActorRow {
+	row := substrateActorRow{
+		Atespace: reg.Atespace, Name: reg.Name, UID: reg.UID, RegistrationKey: reg.Key,
+		Profile: reg.Profile, Connector: reg.Connector, Template: reg.Template,
+		BatchID: reg.BatchID, Unattended: reg.Unattended, CreatedAt: reg.CreatedAt,
+		Owner: reg.Person.Principal, Deleted: reg.Deleted,
+		Attribution: substrateAttribution(reg), Foreign: reg.Attributed,
+		PolicyConflict: substratePolicyConflictView(reg),
 	}
 	if reg.Unattended {
 		var rule SubstrateUnattendedAsk // no rule: deny (D12)
 		if st.cfg.UnattendedAsk != nil {
 			rule = st.cfg.UnattendedAsk(reg.Profile)
 		}
-		v["unattended_asks"] = "deny"
+		row.UnattendedAsks = "deny"
 		if rule.Queue {
-			v["unattended_asks"], v["ask_timeout_seconds"] = "queue", int64(rule.Timeout/time.Second)
+			secs := int64(rule.Timeout / time.Second)
+			row.UnattendedAsks, row.AskTimeoutSeconds = "queue", &secs
 		}
 	}
-	if pc := substratePolicyConflictView(reg); pc != nil {
-		v["policy_conflict"] = pc
+	return row
+}
+
+// actorView is actorRow as a map, for the answers that add keys to it.
+func (st *substrateState) actorView(reg registry.Registration) map[string]any {
+	row := st.actorRow(reg)
+	v := map[string]any{
+		"atespace": row.Atespace, "name": row.Name, "uid": row.UID, "registration_key": row.RegistrationKey,
+		"profile": row.Profile, "connector": row.Connector, "template": row.Template,
+		"batch_id": row.BatchID, "unattended": row.Unattended, "created_at": row.CreatedAt,
+		"owner": row.Owner, "deleted": row.Deleted,
+		"attribution": row.Attribution, "foreign": row.Foreign,
+	}
+	if row.UnattendedAsks != "" {
+		v["unattended_asks"] = row.UnattendedAsks
+	}
+	if row.AskTimeoutSeconds != nil {
+		v["ask_timeout_seconds"] = *row.AskTimeoutSeconds
+	}
+	if row.PolicyConflict != nil {
+		v["policy_conflict"] = row.PolicyConflict
 	}
 	return v
 }
@@ -571,16 +619,19 @@ func (a *APIServer) substrateListActors(st *substrateState) http.HandlerFunc {
 		// GAP-0167: the person sees which agents hold a worker.
 		states := substrateLiveStates(r.Context(), st.cfg.Lookup, regs)
 		feed := st.activityFor(r.Context(), f.OwnerID, everyone, false)
-		out := make([]map[string]any, 0, len(regs))
+		// Typed rows and one allocation for the activity (GAP-1019).
+		var acts []substrateActivityOut
+		if feed != nil {
+			acts = make([]substrateActivityOut, len(regs))
+		}
+		out := make([]substrateActorRow, len(regs))
 		for i, reg := range regs {
-			v := st.actorView(reg)
-			if states[i] != "" {
-				v["state"] = states[i]
-			}
+			out[i] = st.actorRow(reg)
+			out[i].State = states[i]
 			if feed != nil && !reg.Deleted {
-				v["activity"] = feed.view(reg, states[i])
+				feed.fill(&acts[i], reg.UID, states[i])
+				out[i].Activity = &acts[i]
 			}
-			out = append(out, v)
 		}
 		if f.OwnerID == "" {
 			a.substrateAuditAdminRead(st, r, "actors", len(out), "")

@@ -255,6 +255,9 @@ const (
 
 type substrateState struct {
 	cfg SubstrateConfig
+	// activityAsks remembers a failed pending-asks read of list and status
+	// (GAP-1018).
+	activityAsks substrateActivityAsksDown
 	// taskEnds bounds the task-end audit rows per actor.
 	taskEnds substrateTaskEnds
 	// refusals bounds refusal log lines: a flood of bad tokens is still

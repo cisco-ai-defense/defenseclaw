@@ -16654,14 +16654,40 @@ def _endpoint_is_loopback(endpoint: str) -> bool:
     return endpoint_is_loopback(endpoint)
 
 
+def substrate_admin_notifications_off(value) -> bool:
+    """``substrate.activity.notifications`` is the administrator's ``off``.
+
+    Same test as Go ``SubstrateActivityConfig.NotificationsOn``: spaces
+    trimmed, case ignored (GAP-1020).
+    """
+    return str(value or "").strip().lower() == "off"
+
+
+def _substrate_notifier_applies(cfg) -> bool:
+    """Whether the notifier row belongs in this doctor run (GAP-1020).
+
+    ``substrate watch`` runs on a person's machine, where substrate.enabled
+    (a cluster-only key) is false: the row also shows when the launcher has
+    a context file (<DEFENSECLAW_HOME>/substrate/contexts.json, the same
+    path as Go ``auth.ContextsPath``).
+    """
+    if getattr(getattr(cfg, "substrate", None), "enabled", False):
+        return True
+    from defenseclaw.config import default_data_path
+
+    return (default_data_path() / "substrate" / "contexts.json").is_file()
+
+
 def _check_substrate_notifier(cfg, r: _DoctorResult, *, system: str | None = None, which=None) -> None:
     """Doctor row for the desktop notifier ``substrate watch`` uses.
 
     Mirrors the Go ``substrate doctor`` ``notifier`` row: off is a skip, a
     missing tool is a warning with the way to install it, never a failure.
-    Only runs when Agent Substrate is on.
+    Go shows that row wherever the launcher runs ``substrate doctor``; here it
+    shows where the launcher is set up (a signed-in context file, where
+    ``substrate watch`` runs) or on a cluster (substrate.enabled), GAP-1020.
     """
-    if not getattr(getattr(cfg, "substrate", None), "enabled", False):
+    if not _substrate_notifier_applies(cfg):
         return
     label = "Substrate notifier"
     capab = desktop_notification_capability(system)
@@ -16669,7 +16695,7 @@ def _check_substrate_notifier(cfg, r: _DoctorResult, *, system: str | None = Non
     sub = getattr(note, "substrate", None)
     if not capab.supported:
         _emit("skip", label, f"not checked: {capab.unsupported_reason}", r=r)
-    elif getattr(getattr(cfg.substrate, "activity", None), "notifications", "") == "off":
+    elif substrate_admin_notifications_off(getattr(getattr(cfg.substrate, "activity", None), "notifications", "")):
         _emit("skip", label, "an administrator turned notifications off (substrate.activity.notifications: off)", r=r)
     elif not getattr(note, "enabled", False):
         _emit(
