@@ -44,7 +44,7 @@ func TestRV4GitPushAskNamesTheURL(t *testing.T) {
 		return rec.Code, v
 	}
 	code, v := push("https://git.example.test/team/app.git")
-	if code != http.StatusOK || v["summary"] != "Push agent/x (1 commits, 1 files) to https://git.example.test/team/app.git?" {
+	if code != http.StatusOK || v["summary"] != "Push agent/x at aaaaaaaaaaaa (1 commits, 1 files) to https://git.example.test/team/app.git?" {
 		t.Fatalf("ask: %d %v", code, v)
 	}
 	for _, bad := range []string{"https://other.example/team/app.git", "http://git.example.test/team/app", "https://git.example.test/team/app2"} {

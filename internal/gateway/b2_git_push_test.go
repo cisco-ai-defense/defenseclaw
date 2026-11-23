@@ -67,7 +67,7 @@ func TestB2GitPushRoute(t *testing.T) {
 	code, v := push("p-alice", body("agent/fix-login", ""))
 	id, _ := v["ask_id"].(string)
 	if code != http.StatusOK || v["decision"] != "ask" || id == "" ||
-		v["summary"] != "Push agent/fix-login (3 commits, 5 files) to git.example.test/team/app?" {
+		v["summary"] != "Push agent/fix-login at aaaaaaaaaaaa (3 commits, 5 files) to git.example.test/team/app?" {
 		t.Fatalf("ask: %d %v", code, v)
 	}
 	if _, v := push("p-alice", body("agent/fix-login", id)); v["decision"] != "ask" || v["ask_id"] != id {
@@ -99,8 +99,8 @@ func TestB2GitPushRoute(t *testing.T) {
 // B2 2.4: an Always approval of a push never answers an egress ask.
 func TestB2GitPushAlwaysIsNotAnEgressApproval(t *testing.T) {
 	approved := asks.Ask{Kind: asks.KindGitPush, Always: true, State: asks.StateApproved, OwnerID: "o", Profile: "eng",
-		Host: "git.example.test", Rule: asks.GitPushRule("team/app")}
-	for _, rule := range []string{"", "ask_hosts:git.example.test", asks.GitPushRule("team/app")} {
+		Host: "git.example.test", Rule: asks.GitPushRule("team/app", "")}
+	for _, rule := range []string{"", "ask_hosts:git.example.test", asks.GitPushRule("team/app", "")} {
 		if alwaysApprovalCovers(approved, asks.Ask{OwnerID: "o", Profile: "eng", Host: "git.example.test", Rule: rule}) {
 			t.Fatalf("push approval answers egress ask rule %q", rule)
 		}

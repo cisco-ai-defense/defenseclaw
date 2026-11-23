@@ -56,7 +56,8 @@ func SubstrateGitPushFor(cfg *config.Config) func(profile string) string {
 }
 
 // substrateGitPushApproval is how long an approved git_push ask answers the
-// launcher's next call for the same push (it pushes right after the answer).
+// launcher's next call for the same push: same branch, repository and
+// head (it pushes right after the answer).
 const substrateGitPushApproval = 10 * time.Minute
 
 var (
@@ -133,8 +134,8 @@ func (a *APIServer) substrateGitPush(st *substrateState) http.HandlerFunc {
 		}
 		ask := asks.Ask{
 			Kind: asks.KindGitPush, Atespace: reg.Atespace, Actor: reg.Name, UID: reg.UID, OwnerID: reg.Person.ID(), Profile: reg.Profile,
-			Host: in.Host, Tool: in.Branch, Rule: asks.GitPushRule(in.Repo),
-			Summary: fmt.Sprintf("Push %s (%d commits, %d files) to %s?", in.Branch, in.Commits, in.Files, target),
+			Host: in.Host, Tool: in.Branch, Rule: asks.GitPushRule(in.Repo, in.Head),
+			Summary: fmt.Sprintf("Push %s at %s (%d commits, %d files) to %s?", in.Branch, in.Head[:12], in.Commits, in.Files, target),
 		}
 		mine, err := st.cfg.Asks.List(r.Context(), asks.ListRequest{All: true, OwnerID: ask.OwnerID})
 		if err != nil {

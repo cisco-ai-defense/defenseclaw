@@ -131,16 +131,16 @@ func BindingRule(id string) string { return bindingRulePrefix + id }
 
 // KindGitPush is a person's ask to push an actor's work to its origin as
 // a branch (B2 2.4, substrate pull --push-branch). Host is the git host,
-// Tool the branch and Rule GitPushRule(repo). Its approval adds no host to
-// the actor's policy; with Always it covers the same person, profile and
-// host.
+// Tool the branch and Rule GitPushRule(repo, head). Its approval adds no
+// host to the actor's policy and answers again only for the same head
+// (RV4-7); with Always it covers the same person, profile and host.
 const KindGitPush = "git_push"
 
 const gitPushRulePrefix = "git_push:"
 
 // GitPushRule is the Rule of the git_push ask for repo (the path on its
-// host, such as team/app).
-func GitPushRule(repo string) string { return gitPushRulePrefix + repo }
+// host, such as team/app) at the pushed commit head.
+func GitPushRule(repo, head string) string { return gitPushRulePrefix + repo + "@" + head }
 
 // BindingID is the binding a secret_binding ask is about, "" for any
 // other ask.

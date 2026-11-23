@@ -21,7 +21,7 @@ import "testing"
 // B2 2.4: approving a git_push ask is about one push; it never joins the
 // actor's approved hosts (OnApprove skips what is not host-wide).
 func TestB2GitPushAskIsNotHostWide(t *testing.T) {
-	if HostWide(GitPushRule("team/app")) {
+	if HostWide(GitPushRule("team/app", "")) {
 		t.Fatal("a git_push approval would open the host's egress")
 	}
 	if !HostWide("ask_hosts:git.example.test") || HostWide("url_rules:x POST") {
