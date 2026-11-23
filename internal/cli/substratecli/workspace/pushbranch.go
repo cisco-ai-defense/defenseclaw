@@ -27,7 +27,8 @@ package workspace
 // and the push read neither (RV4): the review uses a scratch git directory,
 // while the push builds a fresh bare repository from the reviewed commit's
 // content-addressed objects. Both disable system and global Git config and
-// talk to the one HTTPS address the review names. What origin lacks comes from that address's ls-remote,
+// explicitly use only the image-bound credential helper and CA bundle for
+// HTTPS. They talk to the one HTTPS address the review names. What origin lacks comes from that address's ls-remote,
 // and the "pushed before" record is kept on this computer.
 //
 // The agent can also write its object store's metadata (RV-SYNC5): a
@@ -82,10 +83,10 @@ type BranchPush struct {
 	// Host and Repo the https host and path (team/app) it pushes to, and
 	// PushURL the exact address the review, the push and its checks use.
 	Dir, URL, Host, Repo, PushURL string
-	// Head is the agent's HEAD; Commit what is pushed: Head, or a commit
-	// of the agent's uncommitted work on Head when Made.
-	Head, Commit string
-	Made         bool
+	// Commit is the agent's HEAD, or a commit of its uncommitted work
+	// on HEAD when Made.
+	Commit string
+	Made   bool
 	// Commits counts the commits origin does not have; Files the paths they
 	// change.
 	Commits int
@@ -151,17 +152,19 @@ if [ -n "$(git status --porcelain --untracked-files=normal)" ]; then
   commit=$(git commit-tree "$tree" -p "$head" -m "defenseclaw: work of agent $label") || exit 6
   made=1
 fi
-printf 'dir\t%s\000url\t%s\000head\t%s\000commit\t%s\000made\t%s\000objects\t%s\000' "$(pwd)" "$url" "$head" "$commit" "$made" "$objs"
+printf 'dir\t%s\000url\t%s\000commit\t%s\000made\t%s\000objects\t%s\000' "$(pwd)" "$url" "$commit" "$made" "$objs"
 `
 
 // pushGit is the start of the review and push scripts: no repository or
 // system or user config, no templates, hooks, replace refs, commit-graph,
 // multi-pack index or bitmaps, so nothing in the checkout changes where
-// the push goes, what it carries, or what the review sees. g runs git.
+// the push goes, what it carries, or what the review sees. The only
+// credential and TLS settings are image-bound paths from kit; no actor
+// config is parsed for them. g runs git.
 const pushGit = `set -u
-unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_CONFIG GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT GIT_CONFIG_SYSTEM GIT_NAMESPACE GIT_TEMPLATE_DIR GIT_REPLACE_REF_BASE
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_CONFIG GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT GIT_CONFIG_SYSTEM GIT_NAMESPACE GIT_TEMPLATE_DIR GIT_REPLACE_REF_BASE GIT_SSL_CAINFO GIT_SSL_CAPATH GIT_SSL_NO_VERIFY
 export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_NO_REPLACE_OBJECTS=1
-g() { git -c core.quotePath=false -c core.hooksPath=/dev/null -c core.commitGraph=false -c core.multiPackIndex=false -c pack.useBitmaps=false "$@"; }
+g() { git -c core.quotePath=false -c core.hooksPath=/dev/null -c core.commitGraph=false -c core.multiPackIndex=false -c pack.useBitmaps=false -c credential.helper=` + kit.CredHelper + ` -c credential.useHttpPath=false -c http.sslCAInfo=` + kit.TrustBundle + ` "$@"; }
 `
 
 // pushReviewScript lists what origin lacks and makes the review pack
@@ -285,7 +288,7 @@ func PrepareBranchPush(ctx context.Context, run BranchExec, root, label string, 
 		return nil, &BranchPushError{Kind: "failed", Msg: "could not read the agent's checkout: " + lastLine(stderr, out)}
 	}
 	kv := pushRecords(out)
-	p := &BranchPush{Dir: kv["dir"], URL: kv["url"], Head: kv["head"], Commit: kv["commit"], Made: kv["made"] == "1", objects: kv["objects"]}
+	p := &BranchPush{Dir: kv["dir"], URL: kv["url"], Commit: kv["commit"], Made: kv["made"] == "1", objects: kv["objects"]}
 	if p.Commit == "" || p.objects == "" {
 		return nil, &BranchPushError{Kind: "failed", Msg: "could not read the agent's checkout: " + lastLine(stderr, out)}
 	}
