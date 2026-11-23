@@ -1457,12 +1457,19 @@ var (
 	// credentials or session, or start, connect to or change an agent runtime.
 	// A Substrate verb in neither table is judged the same way (an ambiguous
 	// verb is a control); this table names the registered ones so the CLI
-	// drift test can tell a new verb from a reviewed one.
+	// drift test can tell a new verb from a reviewed one. `admin` is the
+	// administrators' group (`admin revoke --user PERSON` ends every sign-in
+	// of a person, closes their open terminals and, with --lift, removes an
+	// end early; `--list` prints who is ended): it changes who may use the
+	// cluster, so like `login`, `logout` and `approve` it is a control, never a
+	// read. The judge reads only the first word after `substrate`, so the whole
+	// group, `--list` included, is a control exactly as at rel (where an
+	// unnamed verb already is).
 	defenseClawSubstrateStopVerbs = map[string]bool{
 		"run": true, "connect": true, "pull": true, "checkpoint": true, "undo": true, "delete": true,
 		"migrate": true, "approve": true, "reject": true, "login": true, "logout": true, "set": true,
 		"rm": true, "reset": true, "setup": true, "apply": true, "rollback": true, "build": true,
-		"publish": true, "keygen": true, "serve": true,
+		"publish": true, "keygen": true, "serve": true, "admin": true,
 	}
 )
 

@@ -536,3 +536,9 @@
 {"id": "sub19-01", "dialect": "", "command": "defenseclaw config set substrate.chain_egress_action alert", "want": "config"}
 {"id": "sub19-02", "dialect": "", "command": "defenseclaw config set substrate.require_attested_templates false", "want": "config"}
 {"id": "sub19-03", "dialect": "", "command": "defenseclaw config get substrate.chain_egress_action", "want": ""}
+{"id": "sub20-adm-01", "dialect": "", "command": "defenseclaw substrate admin revoke --user bob@example.com", "want": "substrate"}
+{"id": "sub20-adm-02", "dialect": "", "command": "defenseclaw substrate admin revoke --user bob@example.com --reason \"left the team\" --json", "want": "substrate"}
+{"id": "sub20-adm-03", "dialect": "", "command": "defenseclaw substrate admin revoke --lift --user bob@example.com", "want": "substrate"}
+{"id": "sub20-adm-04", "dialect": "", "command": "defenseclaw substrate admin revoke --list", "want": "substrate"}
+{"id": "sub20-adm-05", "dialect": "", "command": "defenseclaw substrate admin", "want": "substrate"}
+{"id": "sub20-adm-06", "dialect": "", "command": "defenseclaw substrate status", "want": ""}
