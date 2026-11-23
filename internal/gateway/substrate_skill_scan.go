@@ -84,7 +84,23 @@ type skillScanCall struct {
 	reason  string
 	err     error
 	took    time.Duration
+	// keep: a managed or strict post stopped waiting for it (the folder is
+	// held), so its outcome is kept for the next post (scanKept).
+	keep bool
 }
+
+// skillScanKept is the kept outcome of a held folder's scan.
+type skillScanKept struct {
+	res skillScanResult
+	at  time.Time
+}
+
+// substrateSkillKeptMax bounds scanKept and heldSince; skillKeptTTL is how
+// long a kept outcome waits for the next post (the longest skills.scan.timeout).
+const (
+	substrateSkillKeptMax = 512
+	skillKeptTTL          = 10 * time.Minute
+)
 
 // skillScanResult is what one hook learns from a scan.
 type skillScanResult struct {
@@ -157,7 +173,12 @@ func (st *substrateState) skillPostUntil(ctx context.Context, scans bool) (<-cha
 // The scan runs detached from the hook, so a hook that stops waiting leaves
 // it running; its verdict is cached by the runtime scanner, and a post that
 // brings the same content while it runs waits for the same call.
-func (st *substrateState) scanSkillFolder(ctx context.Context, until <-chan struct{}, name, dir string, files []SubstrateAttachedFile) skillScanResult {
+// keep (managed, strict: the folder is held while pending) bounds the hold
+// (GAP-0980): the outcome of a scan that ends after the post left is kept
+// for the next post (a timeout or a dead scanner then goes to the fail mode,
+// never a new scan that holds it again), and the content is held at most
+// skills.scan.timeout from the first post that brought it.
+func (st *substrateState) scanSkillFolder(ctx context.Context, until <-chan struct{}, keep bool, name, dir string, files []SubstrateAttachedFile) skillScanResult {
 	var timeout time.Duration
 	if st.cfg.SkillScanLimits != nil {
 		timeout, _ = st.cfg.SkillScanLimits()
@@ -167,6 +188,18 @@ func (st *substrateState) scanSkillFolder(ctx context.Context, until <-chan stru
 	key := skillScanKey(name, dir, files)
 	st.scanMu.Lock()
 	c, ok := st.scans[key]
+	if !ok && keep {
+		if k, found := st.scanKept[key]; found {
+			delete(st.scanKept, key)
+			delete(st.heldSince, key)
+			st.scanMu.Unlock()
+			if time.Since(k.at) <= skillKeptTTL {
+				k.res.waited = time.Since(start)
+				return k.res
+			}
+			st.scanMu.Lock()
+		}
+	}
 	for !ok && (len(st.scans) >= substrateSkillScansInFlight || st.scanActors[actor.UID] >= substrateSkillScansPerActor) {
 		if st.scanFree == nil {
 			st.scanFree = make(chan struct{})
@@ -176,7 +209,7 @@ func (st *substrateState) scanSkillFolder(ctx context.Context, until <-chan stru
 		select {
 		case <-free:
 		case <-until:
-			return skillScanResult{err: errSkillScannerBusy, waited: time.Since(start)}
+			return st.skillHeld(ctx, keep, key, timeout, skillScanResult{err: errSkillScannerBusy, waited: time.Since(start)})
 		case <-ctx.Done():
 			return skillScanResult{err: errSkillPending, waited: time.Since(start)}
 		}
@@ -194,7 +227,13 @@ func (st *substrateState) scanSkillFolder(ctx context.Context, until <-chan stru
 		sctx := context.WithoutCancel(ctx)
 		cancel := context.CancelFunc(func() {})
 		if timeout > 0 {
-			sctx, cancel = context.WithTimeout(sctx, timeout)
+			scanFor := timeout
+			if since, held := st.heldSince[key]; keep && held {
+				// Held already (no scan slot came free): the hold ends at
+				// skills.scan.timeout from the first post, not from now.
+				scanFor = max(timeout-time.Since(since), time.Millisecond)
+			}
+			sctx, cancel = context.WithTimeout(sctx, scanFor)
 		}
 		go func() {
 			defer cancel()
@@ -207,6 +246,9 @@ func (st *substrateState) scanSkillFolder(ctx context.Context, until <-chan stru
 			}
 			st.scanMu.Lock()
 			delete(st.scans, key)
+			if c.keep {
+				st.keepSkillScanLocked(key, skillScanResult{blocked: c.blocked, reason: c.reason, err: c.err, took: c.took})
+			}
 			if st.scanActors[actor.UID]--; st.scanActors[actor.UID] <= 0 {
 				delete(st.scanActors, actor.UID)
 			}
@@ -214,18 +256,93 @@ func (st *substrateState) scanSkillFolder(ctx context.Context, until <-chan stru
 				close(st.scanFree)
 				st.scanFree = nil
 			}
-			st.scanMu.Unlock()
+			// Closed under scanMu, so a post that stops waiting either sees
+			// it done or marks it keep before the outcome is kept.
 			close(c.done)
+			st.scanMu.Unlock()
 		}()
 	}
 	st.scanMu.Unlock()
 	select {
 	case <-c.done:
+		if keep {
+			st.scanMu.Lock()
+			delete(st.scanKept, key)
+			delete(st.heldSince, key)
+			st.scanMu.Unlock()
+		}
 		return skillScanResult{blocked: c.blocked, reason: c.reason, err: c.err, took: c.took, waited: time.Since(start)}
 	case <-until:
 	case <-ctx.Done():
 	}
-	return skillScanResult{err: errSkillPending, waited: time.Since(start)}
+	if keep {
+		st.scanMu.Lock()
+		select {
+		case <-c.done:
+			// It ended just now: this post has the outcome, keep none.
+			st.scanMu.Unlock()
+			return skillScanResult{blocked: c.blocked, reason: c.reason, err: c.err, took: c.took, waited: time.Since(start)}
+		default:
+		}
+		c.keep = true
+		st.scanMu.Unlock()
+	}
+	return st.skillHeld(ctx, keep, key, timeout, skillScanResult{err: errSkillPending, waited: time.Since(start)})
+}
+
+// skillHeld records when a held (keep) content was first held and turns a
+// hold that has lasted skills.scan.timeout into a scan timeout, so the fail
+// mode decides (GAP-0980). Without keep it returns res unchanged.
+func (st *substrateState) skillHeld(ctx context.Context, keep bool, key string, timeout time.Duration, res skillScanResult) skillScanResult {
+	if !keep {
+		return res
+	}
+	first, ok := ctx.Value(skillPostStartKey{}).(time.Time)
+	if !ok {
+		first = time.Now()
+	}
+	st.scanMu.Lock()
+	defer st.scanMu.Unlock()
+	if since, held := st.heldSince[key]; held {
+		first = since
+	} else {
+		if st.heldSince == nil {
+			st.heldSince = map[string]time.Time{}
+		}
+		if len(st.heldSince) >= substrateSkillKeptMax {
+			for k, t := range st.heldSince {
+				if time.Since(t) > skillKeptTTL {
+					delete(st.heldSince, k)
+				}
+			}
+		}
+		if len(st.heldSince) < substrateSkillKeptMax {
+			st.heldSince[key] = first
+		}
+	}
+	if timeout > 0 && time.Since(first) >= timeout {
+		delete(st.heldSince, key)
+		res.err = ErrSubstrateSkillScanTimeout
+	}
+	return res
+}
+
+// keepSkillScanLocked keeps a held folder's scan outcome for its next post
+// (bounded; an entry past skillKeptTTL is dropped). st.scanMu is held.
+func (st *substrateState) keepSkillScanLocked(key string, res skillScanResult) {
+	if st.scanKept == nil {
+		st.scanKept = map[string]skillScanKept{}
+	}
+	if len(st.scanKept) >= substrateSkillKeptMax {
+		for k, v := range st.scanKept {
+			if time.Since(v.at) > skillKeptTTL {
+				delete(st.scanKept, k)
+			}
+		}
+	}
+	if len(st.scanKept) < substrateSkillKeptMax {
+		st.scanKept[key] = skillScanKept{res: res, at: time.Now()}
+	}
 }
 
 // skillScanErrCode is the reason code and the plain reason of a scan that
@@ -256,7 +373,7 @@ func skillHeldMessage(held []SubstrateUnscanned) string {
 	for _, h := range held {
 		names = append(names, strconv.Quote(path.Base(path.Clean("/"+strings.TrimPrefix(h.Path, "/")))))
 	}
-	return fmt.Sprintf("DefenseClaw is still checking the skill %s. Try again in a few seconds.", strings.Join(names, ", "))
+	return fmt.Sprintf("%s is still being scanned; DefenseClaw refuses tool calls until the scan finishes. Try again in a few seconds.", strings.Join(names, ", "))
 }
 
 // skillBlockedMessage is the reason of a folder the scan refused: the kit

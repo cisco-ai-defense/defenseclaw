@@ -231,7 +231,7 @@ func (st *substrateState) substrateScanSkills(ctx context.Context, connector str
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			j.res = st.scanSkillFolder(ctx, until, path.Base(j.dir), j.dir, folders[j.dir])
+			j.res = st.scanSkillFolder(ctx, until, st.blocksUnscanned(connector), path.Base(j.dir), j.dir, folders[j.dir])
 		}()
 	}
 	wg.Wait()

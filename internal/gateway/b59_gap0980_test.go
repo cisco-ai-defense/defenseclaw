@@ -195,7 +195,7 @@ func TestB59ManagedSlowScanHeldEveryConnector(t *testing.T) {
 				_ = json.Unmarshal(out["message"], &msg)
 				var held []SubstrateUnscanned
 				_ = json.Unmarshal(out[SubstratePendingField], &held)
-				if code != http.StatusForbidden || !strings.Contains(msg, `still checking the skill "evil"`) || len(held) != 1 || held[0].Path != b54Dir {
+				if code != http.StatusForbidden || !strings.Contains(msg, `"evil" is still being scanned`) || len(held) != 1 || held[0].Path != b54Dir {
 					t.Fatalf("a call while the folder is held: %d %q %+v", code, msg, held)
 				}
 			})

@@ -73,7 +73,7 @@ func (st *substrateState) substrateSkillWriteRefusal(ctx context.Context, env su
 		for _, f := range a.Files {
 			files = append(files, SubstrateAttachedFile{Role: f.Role, Path: f.Path, Content: f.Content, Truncated: f.Truncated})
 		}
-		res := st.scanSkillFolder(ctx, until, a.Name, a.Path, files)
+		res := st.scanSkillFolder(ctx, until, st.blocksUnscanned(env.Connector), a.Name, a.Path, files)
 		blocked, reason, err := res.blocked, res.reason, res.err
 		switch {
 		case errors.Is(err, errSkillPending), errors.Is(err, errSkillScannerBusy):

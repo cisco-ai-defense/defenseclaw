@@ -64,7 +64,7 @@ func TestB54SkillPendingAtUse(t *testing.T) {
 			_ = json.Unmarshal(out["message"], &msg)
 			_ = json.Unmarshal(out["action"], &action)
 			if block {
-				if code != http.StatusForbidden || msg != `DefenseClaw is still checking the skill "evil". Try again in a few seconds.` {
+				if code != http.StatusForbidden || msg != `"evil" is still being scanned; DefenseClaw refuses tool calls until the scan finishes. Try again in a few seconds.` {
 					t.Fatalf("managed use while scanning: %d %q", code, msg)
 				}
 				if p := r.rowsOf(AuditSkillPending); len(p) != 1 || p[0].d["outcome"] != "refused until scanned" || len(r.rowsOf(AuditSkillUnscanned)) != 0 {

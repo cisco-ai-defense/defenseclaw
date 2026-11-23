@@ -280,6 +280,12 @@ type substrateState struct {
 	scans      map[string]*skillScanCall
 	scanActors map[string]int
 	scanFree   chan struct{}
+	// scanKept is the outcome of a managed or strict scan that ended after
+	// its post stopped waiting (a held folder, GAP-0980), for the next post
+	// of that content, and heldSince is when that content was first held:
+	// a hold ends at skills.scan.timeout, whatever the scanner does.
+	scanKept  map[string]skillScanKept
+	heldSince map[string]time.Time
 	// alerted is alertOnce's memory (substrate_skills.go).
 	alertMu    sync.Mutex
 	alerted    map[string]bool
