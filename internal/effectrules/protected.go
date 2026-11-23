@@ -7,7 +7,6 @@ package effectrules
 import (
 	"path"
 	"runtime"
-	"slices"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/effects"
@@ -204,39 +203,6 @@ func knownProtectedHomeTail(p string, set protectedSet, flavor effects.Flavor) b
 		}
 	}
 	return false
-}
-
-// AccountHomeCandidates are the folders that would be another account's home
-// for the placed POSIX targets of res: a target less one credential tail
-// (/mnt/home/bob for /mnt/home/bob/.ssh/id_rsa), outside the active home and
-// outside the home roots the classifier places by shape (/home/<u>,
-// /Users/<u>, /root). A candidate is only a question for the passwd lookup:
-// it is an account home when the lookup of its last name returns that folder
-// (rel-1-0-10:GAP-0899), never by its shape.
-func AccountHomeCandidates(res effects.Result, home string) []string {
-	const posix = effects.FlavorPOSIX
-	tailHome := home
-	if tailHome == "" {
-		tailHome = "/home/u" // the tails are home-relative
-	}
-	tails := buildSets(tailHome, posix)[SetCredentials].tails
-	active := canon(home, posix)
-	var out []string
-	for i := range res.Effects {
-		p := canon(res.Effects[i].Target.Path, posix)
-		if !strings.HasPrefix(p, "/") || (active != "" && atOrUnder(p, active)) || shapedHomeRoot(p, posix) != "" {
-			continue
-		}
-		for _, tail := range tails {
-			if len(p) <= len(tail) || !strings.HasSuffix(p, tail) {
-				continue
-			}
-			if root := p[:len(p)-len(tail)]; root != "" && !slices.Contains(out, root) {
-				out = append(out, root)
-			}
-		}
-	}
-	return out
 }
 
 func shapedHomeRoot(p string, flavor effects.Flavor) string {

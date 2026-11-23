@@ -52,6 +52,7 @@ type r3TierRoute struct {
 // reaches its target in every cell of a run fails the run (r3Ratchet.finish).
 var r3VerdictPending = map[string]string{
 	"GAP-0898":  "peer and mounted-home credential reads need resolver passwd-home facts (S4-R3; read row in Decide, S1-MECH)",
+	"GAP-0899":  "mounted-home credential read needs a resolver passwd-home fact (S4-R3; read row in Decide, S1-MECH)",
 	"GAP-1677":  "alias/peer tilde targets remain Maybe until every row is resolver-known (S4-R3)",
 	"GAP-0443":  "wildcard followed by .. is a file-system answer and stays Maybe (S4-R3)",
 	"GAP-1573c": "find below an in-call link stays Maybe until subtree resolution is known (S4-R3)",
@@ -147,9 +148,7 @@ func r3PosixTierRows(home, login string) []r3TierRow {
 		{gap: "GAP-1677 ~other/../login keys", command: `echo k >> ~root/../` + login + `/.ssh/authorized_keys`, want: "maybe"},
 		{gap: "GAP-0948 fp: ~.. is a literal folder", command: `echo k >> ~../x`, want: "allow"},
 		{gap: "GAP-0898 other account credential", command: `cat /srv/homes/bob/.aws/credentials`, want: "maybe"},
-		// GAP-0899: a mounted home the passwd lookup names is
-		// TestDET111R3KnownResolverFactsFiveTiers; one it does not name stays
-		// at its 1.0.10 verdict there (an unknown home never raises).
+		{gap: "GAP-0899 mounted home credential", command: `cat /mnt/home/bob/.ssh/id_rsa`, want: "maybe"},
 		// dot-dot and links
 		{gap: "GAP-1648 find $HOME/.. -delete", command: `find $HOME/.. -type f -delete`, want: "maybe"},
 		{gap: "GAP-1020 x/../ glob", command: `cat proj/../.ss*/id_*`, cwd: ".", want: "maybe"},

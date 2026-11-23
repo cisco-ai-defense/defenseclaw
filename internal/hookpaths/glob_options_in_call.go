@@ -6,7 +6,6 @@ package hookpaths
 import (
 	"strings"
 
-	"mvdan.cc/sh/v3/expand"
 	"mvdan.cc/sh/v3/syntax"
 )
 
@@ -136,14 +135,7 @@ func globOptionsCall(call *syntax.CallExpr, o *shellGlobOptions) {
 		text, literal := globOptionLiteral(arg)
 		if !literal {
 			if len(words) == 0 {
-				// A program the scan cannot name is not one read here, unless
-				// it is an ANSI-C quote whose escapes do not decode: that may
-				// be eval or shopt, so the options are unknown
-				// (rel-1-0-10:GAP-1629).
-				if globOptionUndecodedANSIC(arg) {
-					o.unknown = true
-				}
-				return
+				return // a program the scan cannot name: not one read here
 			}
 			if globOptionProgram(words[0]) {
 				o.unknown = true
@@ -269,14 +261,7 @@ func globOptionLiteral(word *syntax.Word) (string, bool) {
 			}
 		case *syntax.SglQuoted:
 			if part.Dollar && strings.ContainsRune(part.Value, '\\') {
-				// ANSI-C escapes, decoded as the shell decodes them:
-				// $'\x65val' is eval (rel-1-0-10:GAP-1629).
-				text, ok := globOptionANSIC(part)
-				if !ok {
-					return "", false
-				}
-				b.WriteString(text)
-				continue
+				return "", false
 			}
 			b.WriteString(part.Value)
 		case *syntax.DblQuoted:
@@ -300,29 +285,6 @@ func globOptionLiteral(word *syntax.Word) (string, bool) {
 		}
 	}
 	return b.String(), true
-}
-
-// globOptionANSIC decodes an ANSI-C quote ($'...') as the shell does. A
-// decoded NUL or an escape the decoder does not take is no literal.
-func globOptionANSIC(part *syntax.SglQuoted) (string, bool) {
-	text, err := expand.Literal(&expand.Config{}, &syntax.Word{Parts: []syntax.WordPart{part}})
-	if err != nil || strings.ContainsRune(text, 0) {
-		return "", false
-	}
-	return text, true
-}
-
-// globOptionUndecodedANSIC reports a word holding an ANSI-C quote that
-// globOptionANSIC does not decode.
-func globOptionUndecodedANSIC(word *syntax.Word) bool {
-	for _, part := range word.Parts {
-		if q, ok := part.(*syntax.SglQuoted); ok && q.Dollar {
-			if _, ok := globOptionANSIC(q); !ok {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 // globReadings are the option states a word is read under: opts with each
@@ -370,44 +332,8 @@ func globOptionsChangeTextMatches(command string) bool {
 		return false
 	}
 	read := strings.ReplaceAll(command, "\\\n", "")
-	if strings.Contains(read, "$'") {
-		// An ANSI-C quote names a word by its escapes ($'\x65val', $'sh\x6fpt'):
-		// the gate reads it decoded (rel-1-0-10:GAP-1629).
-		read = globOptionsDecodeANSIC(read)
-	}
 	read = globOptionsQuoteRemoval.Replace(read)
 	return globOptionsChangeTextMayMatch(read) && globOptionsChangeText.MatchString(read)
-}
-
-// globOptionsDecodeANSIC is text with each closed ANSI-C quote replaced by
-// its decoded value (an undecodable one is kept as written), for the gate.
-func globOptionsDecodeANSIC(text string) string {
-	var b strings.Builder
-	for {
-		i := strings.Index(text, "$'")
-		if i < 0 {
-			b.WriteString(text)
-			return b.String()
-		}
-		j := i + 2
-		for j < len(text) && text[j] != '\'' {
-			if text[j] == '\\' {
-				j++
-			}
-			j++
-		}
-		if j >= len(text) {
-			b.WriteString(text)
-			return b.String()
-		}
-		b.WriteString(text[:i])
-		if v, ok := globOptionANSIC(&syntax.SglQuoted{Dollar: true, Value: text[i+2 : j]}); ok {
-			b.WriteString(v)
-		} else {
-			b.WriteString(text[i : j+1])
-		}
-		text = text[j+1:]
-	}
 }
 
 // globOptionsQuoteRemoval drops the quote and escape characters of a call's

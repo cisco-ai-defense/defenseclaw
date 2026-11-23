@@ -25,13 +25,8 @@ const (
 	// maxSyntaxTailPieces bounds the pieces the token split makes of the
 	// text after the error.
 	maxSyntaxTailPieces = 512
-	// syntaxTailRunWindow is the pieces the reading tries, one longer run at
-	// a time, for a statement starting at a piece. It is a window, not a cap:
-	// a statement longer than it is read whole by the parser
-	// (longStatementsEnd), and the cut-back steps word by word this many
-	// times before it jumps over the token a parse failed at
-	// (rel-1-0-10:GAP-0745).
-	syntaxTailRunWindow = 8
+	// maxSyntaxTailRun bounds the pieces one statement may span.
+	maxSyntaxTailRun = 8
 )
 
 // SyntaxTail is the reading of a text the shell parser rejects with a syntax
@@ -196,27 +191,16 @@ func readSyntaxTail(command string) (tail SyntaxTail, ok bool) {
 	}
 	// The error is inside the statement after the complete ones: the text
 	// up to it, cut back word by word, is the longest prefix that parses.
-	// Past the word steps a cut whose parse failed at a token before its end
-	// jumps back over that token (every cut that still holds it fails too),
-	// so the cut-back has no bound of its own: only the parse budget, which
-	// reports TRUNCATED (the bound rule, rel-1-0-10:GAP-0745). It stopped
-	// silently after 16 tries before, and the part of the statement before
-	// the error went unread.
-	for at, tries := errorAt, 0; at > end && !trunc.Set().Any(); tries++ {
-		prefix := trimSeparators(command[:at])
-		if prefix == "" {
-			break
-		}
-		failedAt, parsed := parseAlone(prefix, &budget)
-		if parsed {
+	// Past the tries the cut stops; the part not read stays the call's
+	// detection-only ACTION-PARSE-FAILURE record (lead ruling (a) on
+	// rel-1-0-10:GAP-0745: a TRUNCATED report here added 82 strict owner-trace
+	// blocks, over the 0.1% bar).
+	for at, tries := errorAt, 0; at > end && tries < maxSyntaxTailRun*2; tries++ {
+		if prefix := trimSeparators(command[:at]); prefix != "" && parsesAlone(prefix, &budget) {
 			end = at
 			break
 		}
-		next := previousWordBoundary(command, end, at)
-		if lead := strings.Index(command[:at], prefix); tries >= 2*syntaxTailRunWindow && failedAt >= 0 && lead+failedAt < next {
-			next = previousWordBoundary(command, end, lead+failedAt+1)
-		}
-		at = next
+		at = previousWordBoundary(command, end, at)
 	}
 	if prefix := trimSeparators(command[:end]); prefix != "" && parsesAlone(prefix, &budget) {
 		add(prefix, -1)
@@ -226,43 +210,23 @@ func readSyntaxTail(command string) (tail SyntaxTail, ok bool) {
 	if !split {
 		trunc.Hit(bounded.Items)
 	}
+	// A statement longer than maxSyntaxTailRun pieces is not read; like the
+	// cut-back tries above, that is the detection-only record, not a cap
+	// (lead ruling (a) on GAP-0745).
 	// A run stays within one here-document body, or outside every one.
 	docOf := func(piece tokenPiece) int { return hereDocAt(docs, end+piece.from) }
-	// covered is the first piece after the statements read whole so far:
-	// a piece before it is inside one, and its own long reading is part of
-	// that reading.
-	covered := 0
 	for start := 0; start < len(pieces) && !trunc.Set().Any(); {
 		next := start + 1
 		doc := docOf(pieces[start])
-		read, blank := false, false
-		for stop := start; stop < len(pieces) && stop < start+syntaxTailRunWindow && docOf(pieces[stop]) == doc; stop++ {
+		for stop := start; stop < len(pieces) && stop < start+maxSyntaxTailRun && docOf(pieces[stop]) == doc; stop++ {
 			run := trimSeparators(rest[pieces[start].from:pieces[stop].to])
 			if run == "" {
-				blank = true
 				break
 			}
 			if parsesAlone(run, &budget) {
 				add(run, doc)
-				next, read = stop+1, true
+				next = stop + 1
 				break
-			}
-		}
-		// A statement longer than the window (a loop, an if, a brace group,
-		// a function or a case of many pieces) is read whole: the parser
-		// finds where it ends. It was left unread with no cap before
-		// (rel-1-0-10:GAP-0745). The pieces inside keep their own reading
-		// too, so nothing read before is read less.
-		if !read && !blank && start >= covered {
-			last := start
-			for last+1 < len(pieces) && docOf(pieces[last+1]) == doc {
-				last++
-			}
-			if last-start >= syntaxTailRunWindow {
-				if stop, ok := longStatementsEnd(rest, pieces[start:last+1], &budget); ok {
-					add(trimSeparators(rest[pieces[start].from:pieces[start+stop].to]), doc)
-					covered = start + stop + 1
-				}
 			}
 		}
 		start = next
@@ -725,50 +689,15 @@ func completeStatementsEnd(command string) (end, errorAt int, faulted bool) {
 		return nil, nil
 	})
 	errorAt = len(command)
-	if at := parseErrorOffset(err); at >= 0 {
-		errorAt = at
-	}
-	return end, min(max(errorAt, end), len(command)), errors.Is(err, ErrParserFault)
-}
-
-// parseErrorOffset is the offset of the token a parse error is at, or -1
-// for no error or an error without a position.
-func parseErrorOffset(err error) int {
 	var parseErr syntax.ParseError
 	var langErr syntax.LangError
 	switch {
 	case errors.As(err, &parseErr) && parseErr.Pos.IsValid():
-		return int(parseErr.Pos.Offset())
+		errorAt = int(parseErr.Pos.Offset())
 	case errors.As(err, &langErr) && langErr.Pos.IsValid():
-		return int(langErr.Pos.Offset())
+		errorAt = int(langErr.Pos.Offset())
 	}
-	return -1
-}
-
-// longStatementsEnd reads region, pieces of rest from a piece the window
-// could not read, with the Bash grammar: the statements the parser completes
-// before its first error. stop is the index in region of the piece they end
-// in; ok is false when the first statement does not complete, when they end
-// inside a piece (text other than separators or a comment follows them in
-// it), or past the parse budget. The budget is charged with the text the
-// parser read: up to its error, or all of region.
-func longStatementsEnd(rest string, region []tokenPiece, budget *bounded.Counter) (stop int, ok bool) {
-	from := region[0].from
-	text := rest[from:region[len(region)-1].to]
-	if TooDeep(text) {
-		return 0, false
-	}
-	end, errorAt, faulted := completeStatementsEnd(text)
-	if !budget.TakeN(min(errorAt+1, len(text))) || faulted || end == 0 {
-		return 0, false
-	}
-	for stop = range region {
-		if region[stop].to-from >= end {
-			break
-		}
-	}
-	after := strings.TrimLeft(text[end:region[stop].to-from], " \t\n;&|")
-	return stop, after == "" || after[0] == '#'
+	return end, min(max(errorAt, end), len(command)), errors.Is(err, ErrParserFault)
 }
 
 // previousWordBoundary is the last offset after floor and before at where
@@ -789,25 +718,15 @@ func previousWordBoundary(command string, floor, at int) int {
 // parsesAlone parses statement with the Bash grammar, outside the parse
 // cache (the runs are throwaway text), within budget.
 func parsesAlone(statement string, budget *bounded.Counter) bool {
-	_, ok := parseAlone(statement, budget)
-	return ok
-}
-
-// parseAlone is parsesAlone with the offset in statement of the token the
-// parse failed at (-1 when it parsed, was not run, or has no position).
-func parseAlone(statement string, budget *bounded.Counter) (failedAt int, ok bool) {
 	if !budget.TakeN(len(statement)) || TooDeep(statement) {
-		return -1, false
+		return false
 	}
 	// The Bash grammar only: what it rejects the POSIX grammar rejects too,
 	// but for the aggregate redirects actionfacts normalizes itself.
 	_, err := containParse(nil, func() (*syntax.File, error) {
 		return syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(Reader(statement), "")
 	})
-	if err == nil {
-		return -1, true
-	}
-	return parseErrorOffset(err), false
+	return err == nil
 }
 
 // tokenPiece is a byte range of the text after the error, ending after the
