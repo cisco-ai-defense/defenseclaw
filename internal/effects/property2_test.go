@@ -395,7 +395,9 @@ EOF`, refWrites, "posix"},
 	{`iwr http://example.test/ -OutFile {W}`, refWrites, "ps"},
 	{`Get-Content {W}`, refNoWrite, "ps"},
 	{`powershell -c Remove-Item {W}`, refWrites, "ps"},
-	{`Start-Process cmd -ArgumentList '/c','del',{W}`, refUnknown, "ps"},
+	// a cmd child reads its literal command line one way: its body is the
+	// call's reading (GAP-1577)
+	{`Start-Process cmd -ArgumentList '/c','del',{W}`, refWrites, "ps"},
 	{`iex $x`, refUnknown, "ps"},
 	{`cpi f {W}`, refWrites, "ps"},
 	{`mi f {W}`, refWrites, "ps"},
