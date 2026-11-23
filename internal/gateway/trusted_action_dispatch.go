@@ -584,8 +584,14 @@ func dispatchTrustedActionOnce(
 				break
 			}
 			effectRequest := request
+			generation := func() *compiledRulePackCategories {
+				if request.generation != nil {
+					return request.generation
+				}
+				return snapshotRulePackGenerationFor(parent, request.Connector)
+			}
 			defer func() {
-				findings = joinEffectFindings(findings, effectLiveFindings(effectRequest, mode, effectsRulesTierFor()))
+				findings = joinEffectFindings(findings, effectLiveFindings(effectRequest, mode, effectsRulesTierFor(), generation))
 			}()
 		case effectRulesShadow:
 			// Shadow: compute and record beside today's rules, off the hook's

@@ -363,6 +363,8 @@ func RuleFor(p Proof) string {
 		return RuleStateWrite
 	case TargetAuthorizedKeys:
 		return RuleAuthorizedKeysWrite
+	case TargetCredential, TargetOtherHomeCredential:
+		return setRules[p.Set]
 	}
 	return ""
 }

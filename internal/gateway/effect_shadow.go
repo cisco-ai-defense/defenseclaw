@@ -131,7 +131,9 @@ type EffectShadowResult struct {
 	// ReadProofs are private decision inputs. Do not serialize member paths or
 	// credential classes into the shadow telemetry record.
 	ReadProofs []decide.Proof `json:"-"`
-	// MutationProofs are member-exact effects writes graded by Decide.
+	// MutationProofs are member-exact effects writes graded by Decide: an
+	// authorized_keys write, and a write through a session alias of a
+	// credential member (its class rule, GAP-2025).
 	MutationProofs []decide.Proof `json:"-"`
 	// CostUS is the wall-clock cost of the run in microseconds; Effects is the
 	// number of effects the extractor produced.
@@ -818,6 +820,11 @@ func effectShadowFindings(res EffectShadowResult, mode effectRulesMode) []RuleFi
 			continue
 		}
 		f := RuleFinding{RuleID: ruleID, Title: "Known authorized keys write", Severity: "CRITICAL", Confidence: 1, Proof: proof}
+		if proof.Target != decide.TargetAuthorizedKeys {
+			// The pack's class rule severity replaces it on the live path
+			// (withEffectClassWriteSeverity).
+			f.Title, f.Severity = "Known credential write", "HIGH"
+		}
 		f.proof = newFindingProof(findingProofEffect, ruleID, mode == effectRulesOn)
 		findings = append(findings, f)
 	}
@@ -1065,13 +1072,65 @@ func effectFindingProof(res EffectShadowResult) decide.Proof {
 // verdict's findings join today's (raise only); a Maybe verdict adds none and
 // is handed to the shadow recorder off the hook's path instead, so the audit
 // log still shows what the lane reached.
-func effectLiveFindings(request trustedActionRequest, mode effectRulesMode, tier effectTierMode) []RuleFinding {
+func effectLiveFindings(request trustedActionRequest, mode effectRulesMode, tier effectTierMode, generation func() *compiledRulePackCategories) []RuleFinding {
 	res := computeEffectShadow(request, mode, tier)
-	findings := effectShadowFindings(res, mode)
+	findings := withEffectClassWriteSeverity(effectShadowFindings(res, mode), generation)
 	if len(findings) == 0 && res.Tier != string(effectTierClean) {
 		recordEffectShadowAsync(res, request.recordEffectShadow)
 	}
 	return findings
+}
+
+// withEffectClassWriteSeverity gives a credential write finding (a write
+// through a session alias of the member, GAP-2025) the severity the call's
+// rule pack gives the member's class rule (PATH-NPMRC MEDIUM, PATH-KUBE HIGH,
+// PATH-SSH-KEY CRITICAL): that rule is what grades the plain write of the
+// member, whatever the program (the restricted effect finding of the plain
+// spelling folds into it, decide.FoldsIntoLegacy). So the finding carries
+// that rule's cell, not a proof row: its Decide proof is the reader's (zero),
+// as the plain spelling's deciding finding is; a Known credential write proof
+// would take decide.RowProtectedFile, an alert floor the plain write does not
+// have in permissive. The gateway proof (findingProofEffect) still names the
+// effects lane. The strictest member of a profile combination decides. A
+// pack without the class rule grades no class write, as it grades no plain
+// one, so the finding is dropped. The generation is read only when there is
+// such a finding.
+func withEffectClassWriteSeverity(findings []RuleFinding, generation func() *compiledRulePackCategories) []RuleFinding {
+	out := findings[:0]
+	for _, f := range findings {
+		if f.Proof.Kind != decide.KindRead && f.Proof.Source == decide.SourceEffects &&
+			(f.Proof.Target == decide.TargetCredential || f.Proof.Target == decide.TargetOtherHomeCredential) {
+			severity := effectRuleSeverity(generation(), f.RuleID)
+			if severity == "" {
+				continue
+			}
+			f.Severity, f.Proof = severity, decide.Proof{}
+		}
+		out = append(out, f)
+	}
+	return out
+}
+
+// effectRuleSeverity is the highest severity a generation (and each member
+// of a profile combination) gives rule id; "" when no rule has the id.
+func effectRuleSeverity(g *compiledRulePackCategories, id string) string {
+	if g == nil {
+		return ""
+	}
+	best := ""
+	for _, category := range g.categories {
+		for _, rule := range category.Rules {
+			if strings.EqualFold(rule.ID, id) && decide.ParseSeverity(rule.Severity) > decide.ParseSeverity(best) {
+				best = strings.ToUpper(strings.TrimSpace(rule.Severity))
+			}
+		}
+	}
+	for _, member := range g.members {
+		if s := effectRuleSeverity(member, id); decide.ParseSeverity(s) > decide.ParseSeverity(best) {
+			best = s
+		}
+	}
+	return best
 }
 
 // effectProofKind maps an effect kind to a proof kind. An opaque program is
