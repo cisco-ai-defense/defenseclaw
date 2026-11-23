@@ -53,7 +53,7 @@ Per operating system, the guardrail differs in four places:
 
 ## Your attack class
 
-"Default" says what is on before you change anything. "Measured" is from the 1.0.10 benchmarks ([Guardrail benchmarks](/docs/guardrail/benchmarks)): recall with the `default` rules alone, then with rules, decision model and judge together, on the public set named. A benchmark row says how a layer did on that set, not that it catches every case of the class.
+"Default" says what is on before you change anything. "Measured" is from the 1.0.10 benchmarks ([Guardrail benchmarks](/docs/guardrail/benchmarks)): recall with the `default` rules alone, then with rules, decision model and judge together, on the public set named. Each row is the result on the named public set.
 
 | Attack class | Layers that see it | Default | Can block | Measured |
 | --- | --- | --- | --- | --- |
@@ -79,7 +79,7 @@ Alert-only detectors never block: the YARA signatures and the after-the-fact ses
 - **A connector with no prompt hook.** A matching prompt reaches the model. The tool call it leads to is still checked.
 - **A connector that sends no prompt text** (OpenCode, Antigravity, Cursor Agent CLI, Kiro CLI 2.x, and OpenClaw's tool-call check). The judge sees tool calls without the user's task, so intent-based checks cannot run there ([Intent-based guardrails](/docs/guardrail/intent)).
 - **Tool results are not blocked** in the `default` pack. The call has run. The agent is told not to follow the text, and you see a line.
-- **Layers that are off.** The decision model, the judge and the alignment check are off until you turn them on. The rules alone catch about a fifth of the attacks in the public sets and almost no prompt injection that needs the context of the request.
+- **Layers that are off.** The decision model, the judge and the alignment check are off until you turn them on. Prompt injection that needs the context of the request is read by these layers.
 - **Blocking needs a pre-tool hook.** Where a hook cannot stop a call, the finding stays in the audit log and DefenseClaw does not claim it prevented anything.
 - **Observe mode** only records. It enforces nothing, apart from the tamper rule in the strict packs.
 - **An input too long to read in full** is judged at least at the unknown tier, but only the part DefenseClaw read can prove a block.
