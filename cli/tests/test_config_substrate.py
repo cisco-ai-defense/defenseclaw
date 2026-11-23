@@ -169,6 +169,23 @@ class TestSubstrateLoadSave(unittest.TestCase):
             self.assertEqual(saved, _FULL)
             self.assertEqual(self._load(tmpdir).substrate, sub)
 
+    def test_notifications_substrate_defaults_are_not_written_and_off_is_kept(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = self._write(tmpdir, {})
+            cfg = self._load(tmpdir)
+            self.assertTrue(cfg.notifications.substrate.asks)
+            self.assertTrue(cfg.notifications.substrate.task_end)
+            self.assertEqual(cfg.substrate.activity.status_window, "")
+            cfg.gateway.api_port = 19000
+            cfg.save()
+            saved = yaml.safe_load(Path(path).read_text())
+            self.assertNotIn("substrate", saved.get("notifications", {}))
+            cfg.notifications.substrate.task_end = False
+            cfg.save()
+            saved = yaml.safe_load(Path(path).read_text())
+            self.assertEqual(saved["notifications"]["substrate"], {"asks": True, "task_end": False})
+            self.assertFalse(self._load(tmpdir).notifications.substrate.task_end)
+
     def test_set_from_python_writes_only_what_is_set(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             path = self._write(tmpdir, {})
