@@ -4664,15 +4664,15 @@ class SubstrateUnattendedConfig:
 class SubstratePortForwardConfig:
     # auto (default: on), on or off (the admin switch).
     enabled: str = ""
-    ports: str = ""  # "1024-65535" (default) or "3000,8000-8999"
-    max_streams: int | None = None  # open forwarded connections per actor; None = 32
+    ports: str = ""  # "1024-65535" (default) or "3000,8000-8999"; never below 1024 or the relay port 8080
+    max_streams: int | None = None  # open forwarded connections per actor on each gateway replica; None = 32
 
 
 @dataclass
 class SubstrateMCPBridgeConfig:
     # auto (default: on in open source, off in managed), on or off.
     enabled: str = ""
-    max_servers: int | None = None  # bridged servers per actor; None = 4
+    max_servers: int | None = None  # bridged servers per actor on each gateway replica; None = 4
     message_max_bytes: int | None = None  # a bigger JSON-RPC message is refused; None = 1 MiB
 
 

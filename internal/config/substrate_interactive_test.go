@@ -28,6 +28,10 @@ func TestSubstrateInteractiveDefaults(t *testing.T) {
 	if c.PortAllowed(1023) || !c.PortAllowed(1024) || !c.PortAllowed(65535) {
 		t.Fatal("default ports are 1024-65535")
 	}
+	// S2B-4: the relay's own port is never forwarded, whatever the list.
+	if c.PortAllowed(SubstrateRelayPort) || (SubstrateInteractiveConfig{PortForward: SubstratePortForwardConfig{Ports: "8000-8999"}}).PortAllowed(SubstrateRelayPort) {
+		t.Fatal("the relay port 8080 must never be allowed")
+	}
 	c.PortForward.Enabled, c.MCPBridge.Enabled = "off", "OFF"
 	if c.PortForwardOn() || c.MCPBridgeOn(false) {
 		t.Fatal("off must switch both streams off")
@@ -52,6 +56,9 @@ func TestSubstrateInteractiveValidate(t *testing.T) {
 		{"mcp switch", SubstrateInteractiveConfig{MCPBridge: SubstrateMCPBridgeConfig{Enabled: "true"}}, "interactive.mcp_bridge.enabled"},
 		{"ports", SubstrateInteractiveConfig{PortForward: SubstratePortForwardConfig{Ports: "9000-80"}}, "interactive.port_forward.ports"},
 		{"port zero", SubstrateInteractiveConfig{PortForward: SubstratePortForwardConfig{Ports: "0"}}, "interactive.port_forward.ports"},
+		{"privileged port", SubstrateInteractiveConfig{PortForward: SubstratePortForwardConfig{Ports: "22"}}, "interactive.port_forward.ports"},
+		{"privileged range", SubstrateInteractiveConfig{PortForward: SubstratePortForwardConfig{Ports: "3000,80-9000"}}, "interactive.port_forward.ports"},
+		{"relay port", SubstrateInteractiveConfig{PortForward: SubstratePortForwardConfig{Ports: "3000,8080"}}, "interactive.port_forward.ports"},
 		{"streams", SubstrateInteractiveConfig{PortForward: SubstratePortForwardConfig{MaxStreams: 5000}}, "interactive.port_forward.max_streams"},
 		{"servers", SubstrateInteractiveConfig{MCPBridge: SubstrateMCPBridgeConfig{MaxServers: -1}}, "interactive.mcp_bridge.max_servers"},
 		{"message", SubstrateInteractiveConfig{MCPBridge: SubstrateMCPBridgeConfig{MessageMaxBytes: 1 << 30}}, "interactive.mcp_bridge.message_max_bytes"},
