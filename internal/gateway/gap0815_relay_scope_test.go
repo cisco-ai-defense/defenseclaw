@@ -48,7 +48,7 @@ func TestGAP0815GatewayScopedTokenThroughRelay(t *testing.T) {
 		Client: &http.Client{Transport: egressToActorListener{h: f.actor, actorJWT: "tok-alice"}}}
 	issue := func(scope string) string {
 		t.Helper()
-		tok, _, err := f.sessions.Issue(alice.ID(), identity.SessionActor{Atespace: "eng-web", Name: "alice-1", UID: subUID1, Scope: scope}, 0)
+		tok, _, err := f.sessions.Issue(identity.SignInOf(alice), identity.SessionActor{Atespace: "eng-web", Name: "alice-1", UID: subUID1, Scope: scope}, 0)
 		if err != nil {
 			t.Fatal(err)
 		}

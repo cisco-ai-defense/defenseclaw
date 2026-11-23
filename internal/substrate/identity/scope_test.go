@@ -23,7 +23,7 @@ func TestSessionScope(t *testing.T) {
 	for _, sc := range []string{"", "port:3000", "port:65535", "mcp:github", "mcp:fs_local-2"} {
 		a := actor
 		a.Scope = sc
-		tok, _, err := s.Issue("alice@example.test", a, time.Minute)
+		tok, _, err := s.Issue(SessionSignIn{Person: "alice@example.test", TokenKey: "jti:scope"}, a, time.Minute)
 		if err != nil {
 			t.Fatalf("%q: %v", sc, err)
 		}
@@ -35,7 +35,7 @@ func TestSessionScope(t *testing.T) {
 	for _, sc := range []string{"code", "port:", "port:0", "port:123456", "mcp:", "mcp:Up", "port:22,mcp:x", "ws"} {
 		a := actor
 		a.Scope = sc
-		if _, _, err := s.Issue("alice@example.test", a, time.Minute); err == nil {
+		if _, _, err := s.Issue(SessionSignIn{Person: "alice@example.test", TokenKey: "jti:scope"}, a, time.Minute); err == nil {
 			t.Errorf("scope %q issued", sc)
 		}
 	}
