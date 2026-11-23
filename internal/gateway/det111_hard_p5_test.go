@@ -133,3 +133,37 @@ func TestDET111BSDSedInPlaceIsSedI(t *testing.T) {
 	benign := []string{"/usr/bin/sed -I .bak s/a/b/ " + filepath.Join(home, "proj", "notes.txt")}
 	hardP5Parity(t, home, cases, benign)
 }
+
+// TestDET111UnlistedWritersAreThePlainSpelling (GAP-0506 writer half): a
+// sqlite3 call that changes a DefenseClaw state database and git config
+// --file on a hook config are the writes cp onto those files is, and get
+// its verdict in all five tiers on both routes. At a2d6245be7 both were
+// allowed (sqlite3 an unknown program, git config --file unaccounted).
+// Reads by the same programs and their writes of project files stay
+// allowed.
+func TestDET111UnlistedWritersAreThePlainSpelling(t *testing.T) {
+	home := hardP5Home(t)
+	audit := filepath.Join(home, ".defenseclaw", "audit.db")
+	if err := os.WriteFile(audit, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	settings := filepath.Join(home, ".claude", "settings.json")
+	proj := filepath.Join(home, "proj")
+	cases := map[string][]string{
+		"cp /tmp/x " + audit: {
+			"sqlite3 " + audit + " 'delete from audit_events'",
+			"sqlite3 -batch " + audit + ` "insert into audit_events values('x')"`,
+		},
+		"cp /tmp/x " + settings: {
+			"git config --file " + settings + " core.x y",
+			"git config -f " + settings + " --add a.b c",
+		},
+	}
+	benign := []string{
+		"sqlite3 " + filepath.Join(proj, "app.db") + " 'insert into t values (1)'",
+		"sqlite3 " + filepath.Join(proj, "app.db") + " 'select count(*) from t'",
+		"git config --file " + filepath.Join(proj, ".gitmodules") + " submodule.x.url https://example.invalid/x",
+		"git config --file " + filepath.Join(proj, ".gitmodules") + " --get submodule.x.url",
+	}
+	hardP5Parity(t, home, cases, benign)
+}

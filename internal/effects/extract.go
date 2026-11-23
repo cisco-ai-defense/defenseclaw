@@ -1903,8 +1903,23 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 			}
 		case !gitKnownSubcommands[sub]:
 			unaccounted = true
+		case sub == "config" && (hasGitFileOption(inner[1:]) || hasWordFold(inner[1:], "-f")):
+			// git config --file FILE: the file it names is the whole effect
+			// (GAP-0506); a form gitConfigFile does not accept is unaccounted.
+			if file, role, ok := gitConfigFile(inner[1:]); ok {
+				w.emitOperand(operand{value: file.Value, static: true, quoted: file.Quoted, role: role}, origin, cond, dialect, depth)
+			} else {
+				unaccounted = true
+			}
 		case sub == "config" && gitConfigWrites(inner[1:]):
 			unaccounted = true
+		case hasGitFileOption(inner[1:]):
+			// commit / tag / notes --file FILE read the message from FILE.
+			if file, ok := gitFileOptionValue(inner[1:]); ok {
+				w.emitOperand(operand{value: file.Value, static: true, quoted: file.Quoted, role: RoleRead}, origin, cond, dialect, depth)
+			} else {
+				unaccounted = true
+			}
 		}
 	}
 	// programs that run arbitrary code from their arguments (review N18).
@@ -3333,6 +3348,8 @@ func (w *walker) positionalOperands(ps []Word, p Program, ctx posCtx) []operand 
 		}
 	case PosGit:
 		out = append(out, gitOperands(ps)...)
+	case PosSQLite:
+		out = append(out, sqliteOperands(ps, ctx, mk)...)
 	case PosRobocopy:
 		// robocopy SRC DST [files...]: DST is a directory; each file copies to
 		// DST/basename(file); with no files the whole SRC tree copies into DST
