@@ -738,7 +738,7 @@ func firstManaged(list ...*sandboxapi.ManagedStatus) *sandboxapi.ManagedStatus {
 func managedOffState(st *sandboxapi.Status) string {
 	switch kind := st.ManagedOff(); {
 	case kind == sandboxapi.ManagedOffProfile:
-		return "off for your account: " + sandboxapi.AccountNotAllowedReason + managedProfileSuffix(st.Managed)
+		return managedProfileOffText(st.Managed)
 	case kind == sandboxapi.ManagedOffElsewhere:
 		return "not available for your account right now: another account is using them"
 	case st.Managed.Unavailable != "":
@@ -768,6 +768,13 @@ func (a *App) managedOpenShellRow(st *sandboxapi.Status) (text string, ok bool) 
 		return "unavailable: " + st.PortConflict.Message(), true
 	}
 	return a.managedFirstRunText(st.Managed), true
+}
+
+// managedProfileOffText is why a profile that sets sandbox.allowed false turns
+// sandboxes off for the account: the Sandboxes row of `status` and the doctor's
+// Sandbox runtime row say it in these words.
+func managedProfileOffText(m *sandboxapi.ManagedStatus) string {
+	return "off for your account: " + sandboxapi.AccountNotAllowedReason + managedProfileSuffix(m)
 }
 
 // managedProfileSuffix names the profile that refuses the account
@@ -995,7 +1002,10 @@ func firstCovering(globs []string, host string) string {
 // managedPolicyCheck is the doctor's "Organization policy" row on a managed
 // computer: the caller's own profile and policy id, never the local
 // configuration, and a warning while the directory could not be reached.
-func (a *App) managedPolicyCheck(ctx context.Context, m *sandboxapi.ManagedStatus) openshell.Check {
+// off is why sandboxes are off for the account (Status.ManagedOff): while the
+// organization turned them off, the row does not judge the profile, whose
+// denial is not the reason; the organization's switch is (GAP-2020).
+func (a *App) managedPolicyCheck(ctx context.Context, m *sandboxapi.ManagedStatus, off sandboxapi.ManagedOffKind) openshell.Check {
 	c := openshell.Check{ID: CheckIDAdmin, Title: "Organization policy", Status: openshell.StatusPass}
 	// Before the first sandbox the daemon knows no profile: the row then
 	// names the policy, not a "profile" without a name (GAP-0175).
@@ -1008,6 +1018,12 @@ func (a *App) managedPolicyCheck(ctx context.Context, m *sandboxapi.ManagedStatu
 	}
 	if ago := agoText(m.UpdatedAt, a.Now()); ago != "" {
 		c.Detail += ", updated " + ago
+	}
+	if off == sandboxapi.ManagedOffOrganization {
+		// The Sandbox runtime row carries the sentence and the contact.
+		c.Status = openshell.StatusSkip
+		c.Detail += "; not applied: " + sandboxapi.OrganizationOffReason + " (see Sandbox runtime)"
+		return c
 	}
 	allowed, denied := m.Allowed, m.DeniedHarnesses
 	if m.LegacyAllowedMissing {
@@ -1120,8 +1136,17 @@ func managedHarnessListed(allowed []string, name string) bool {
 
 // managedRuntimeCheck is the doctor's row for the daemon's OpenShell on a
 // managed computer: how it is installed and driven, and a pending restart.
-func managedRuntimeCheck(m *sandboxapi.ManagedStatus) openshell.Check {
+// off is why sandboxes are off for the account (Status.ManagedOff): a profile
+// that denies them is the reason before any install reason the daemon gave
+// (a missing docker group, an OpenShell that runs no sandbox), so the row
+// says that and gives no fix; the Organization policy row fails the denial
+// (GAP-2019).
+func managedRuntimeCheck(m *sandboxapi.ManagedStatus, off sandboxapi.ManagedOffKind) openshell.Check {
 	c := openshell.Check{ID: CheckIDManagedRuntime, Title: "Sandbox runtime", Status: openshell.StatusPass}
+	if off == sandboxapi.ManagedOffProfile {
+		c.Status, c.Detail = openshell.StatusSkip, managedProfileOffText(m)
+		return c
+	}
 	var parts []string
 	if text := managedOpenShellText(m); text != "" {
 		parts = append(parts, text)
