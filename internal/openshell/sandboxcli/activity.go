@@ -119,7 +119,13 @@ func (a *App) Activity(ctx context.Context, o ActivityOptions) error {
 	// sandboxes: follow the feed it serves next (from its start; what this
 	// one showed is skipped), or say why the feed stopped.
 	// A daemon whose events name no epoch cannot be followed across its
-	// restarts: what it replays could not be told from what is new.
+	// restarts: what it replays could not be told from what is new. An empty
+	// feed names none either, so its end says why it ended here.
+	if o.Follow && epoch == "" && ctx.Err() == nil && (err == nil || sandboxapi.IsCode(err, sandboxapi.CodeUnavailable) || sandboxapi.IsCode(err, sandboxapi.CodeDisabled)) {
+		if endErr := a.endOfUnfollowedFeed(ctx, api, err == nil); endErr != nil {
+			return endErr
+		}
+	}
 	for quiet := 0; o.Follow && epoch != "" && ctx.Err() == nil && (err == nil || sandboxapi.IsCode(err, sandboxapi.CodeUnavailable)); {
 		if quiet++; quiet > followQuietReconnects {
 			return &ExitError{Code: 1, Err: errors.New("the activity feed stopped: the DefenseClaw daemon keeps ending the stream")}
@@ -148,6 +154,25 @@ func (a *App) Activity(ctx context.Context, o ActivityOptions) error {
 		default:
 			a.note("no activity yet")
 		}
+	}
+	return nil
+}
+
+// endOfUnfollowedFeed says why a followed feed that named no epoch ended (or
+// never started): while sandboxes are off for the account it is the one
+// reason `sandbox status` and `sandbox run` give (sandboxapi.Status.ManagedOff,
+// OffMessage), as the same DisabledError, so the exit status is `run`'s
+// (GAP-2050). Otherwise a stream that ended cleanly (ended) was the daemon
+// stopping or closing it: a line on stderr says so, and the exit status stays
+// what it was. An error that is not a clean end is left to the caller.
+func (a *App) endOfUnfollowedFeed(ctx context.Context, api API, ended bool) error {
+	st, err := api.Status(ctx)
+	if err == nil && st.ManagedOff() != sandboxapi.ManagedOffNone {
+		a.noteManaged(st)
+		return &DisabledError{Message: st.OffMessage(), Enabled: st.Enabled}
+	}
+	if ended {
+		a.warnErr("the activity feed ended: the DefenseClaw daemon stopped or closed the stream; run `" + CommandName + " activity -f` again to follow it")
 	}
 	return nil
 }

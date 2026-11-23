@@ -1248,8 +1248,10 @@ its port unless it is 443, and an IPv6 address with its port is bracketed
 `unblock` command. A large upload is a ⚠ report (`⚠ large upload to
 files.example.net (more than 25 MiB)`), or with
 [the large-upload block](/docs/sandboxes/policy-packs) on, a ✗
-that names the threshold. `-f` follows the feed. Each event has a sequence
-number, and `--since` starts after one.
+that names the threshold. `-f` follows the feed. When the feed ends while
+sandboxes are off for your account, `-f` prints the reason `run` prints and exits
+`1`; when the daemon just stops, it says so. Each event has a sequence number,
+and `--since` starts after one.
 
 ```bash
 defenseclaw sandbox activity -f

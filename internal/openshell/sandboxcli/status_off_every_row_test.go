@@ -307,3 +307,62 @@ func TestDoctorIsNeverReadyWhileSandboxesAreOffForTheAccount(t *testing.T) {
 		}
 	}
 }
+
+// `sandbox activity -f` on an empty feed: the stream ends without one event,
+// so there is no epoch to follow across a restart, and the follower used to
+// leave with 0 and no word while every other command named why sandboxes are
+// off for the account (GAP-2050). For every kind ManagedOff names, it ends the
+// way `sandbox run` ends: the same DisabledError, with the line OffMessage
+// gives, which the CLI prints and exits 1 for.
+func TestActivityFollowOnAnEmptyFeedNamesWhySandboxesAreOff(t *testing.T) {
+	withManagedHost(t)
+	for _, tc := range offCases {
+		if tc.kind == sandboxapi.ManagedOffNone {
+			continue
+		}
+		for _, goos := range []string{"linux", "darwin"} {
+			for _, output := range []OutputFormat{OutputText, OutputJSON} {
+				t.Run(tc.name+"/"+goos+"/"+string(output), func(t *testing.T) {
+					ta := offFixture(t, tc, goos, false, false)
+					want := ta.daemon.status.OffMessage()
+					runErr := ta.Run(bg, RunOptions{Harness: "claude"})
+					var runOff *DisabledError
+					if tc.kind != sandboxapi.ManagedOffElsewhere && !errors.As(runErr, &runOff) {
+						t.Fatalf("run = %v, want the DisabledError its exit code 1 comes from", runErr)
+					}
+					ta.out.Reset()
+					err := ta.Activity(bg, ActivityOptions{Follow: true, Output: output})
+					var off *DisabledError
+					if !errors.As(err, &off) {
+						t.Fatalf("activity -f ended with %v, want a DisabledError with %q (the CLI exits 1 for it, as for run)", err, want)
+					}
+					if off.Message != want {
+						t.Errorf("activity -f says %q, want the line run prints: %q", off.Message, want)
+					}
+					if runOff != nil && off.Message != runOff.Message {
+						t.Errorf("activity -f says %q, run says %q", off.Message, runOff.Message)
+					}
+					if off.Enabled != ta.daemon.status.Enabled {
+						t.Errorf("activity -f Enabled = %v, status says %v", off.Enabled, ta.daemon.status.Enabled)
+					}
+				})
+			}
+		}
+	}
+}
+
+// With sandboxes on, a follow that ends with no event (the daemon stopped, or
+// closed the stream) says so on stderr, where it ended with 0 and nothing.
+func TestActivityFollowEndsWithAWordWhileSandboxesAreOn(t *testing.T) {
+	ta := newTestApp(t, "")
+	err := ta.Activity(bg, ActivityOptions{Follow: true})
+	if err != nil {
+		t.Fatalf("activity -f = %v, want the exit status it has had (0)", err)
+	}
+	if got := ta.err.String(); !strings.Contains(got, "the activity feed ended") || !strings.Contains(got, "daemon") {
+		t.Errorf("activity -f said %q on stderr, want a daemon-stopped line", got)
+	}
+	if got := ta.output(); got != "" {
+		t.Errorf("activity -f printed %q on stdout, want nothing", got)
+	}
+}
