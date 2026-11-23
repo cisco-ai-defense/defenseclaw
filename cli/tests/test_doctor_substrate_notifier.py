@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -106,3 +107,19 @@ def test_present_tool_passes() -> None:
     (row,) = _row(_cfg(), "darwin", lambda name: "/usr/bin/" + name)
     assert row["status"] == "pass"
     assert "osascript" in row["detail"]
+
+
+@pytest.mark.skipif(os.name == "nt" or (hasattr(os, "geteuid") and os.geteuid() == 0), reason="needs a directory the user cannot search")
+def test_unsearchable_launcher_dir_is_a_skip_row_not_a_crash(_home) -> None:
+    # GAP-1045: Path.is_file() re-raises EACCES on Python 3.11-3.13, which
+    # killed the whole doctor run on a laptop whose substrate dir is mode 000.
+    d = _home / "substrate"
+    d.mkdir()
+    (d / "contexts.json").write_text("{}")
+    d.chmod(0)
+    try:
+        (row,) = _row(_cfg(substrate=False), "linux", lambda _: None)
+    finally:
+        d.chmod(0o700)
+    assert row["status"] == "skip"
+    assert "cannot be read" in row["detail"]

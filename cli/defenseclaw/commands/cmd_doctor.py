@@ -16687,9 +16687,17 @@ def _check_substrate_notifier(cfg, r: _DoctorResult, *, system: str | None = Non
     shows where the launcher is set up (a signed-in context file, where
     ``substrate watch`` runs) or on a cluster (substrate.enabled), GAP-1020.
     """
-    if not _substrate_notifier_applies(cfg):
-        return
     label = "Substrate notifier"
+    try:
+        applies = _substrate_notifier_applies(cfg)
+    except OSError:
+        # The launcher dir exists but cannot be searched (mode 000, a
+        # protected parent): Path.is_file() re-raises EACCES on Python
+        # 3.11-3.13. A plain row, never a doctor crash (GAP-1045).
+        _emit("skip", label, "not checked: the launcher folder cannot be read", r=r)
+        return
+    if not applies:
+        return
     capab = desktop_notification_capability(system)
     note = getattr(cfg, "notifications", None)
     sub = getattr(note, "substrate", None)
