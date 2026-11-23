@@ -971,7 +971,7 @@ func stageGit(ctx context.Context, rec *CopyRecord, opts StageOptions, scanOpts 
 			what = strconv.Itoa(len(replacedTracked)) + " tracked files"
 		}
 		rec.Warnings = append(rec.Warnings, "the sandbox's git history has one commit on yours that replaces the credentials in "+what+
-			" with placeholders; a branch the agent pushes from the sandbox would carry it (a pre-push hook in the copy refuses that push). "+
+			" with placeholders; a branch the agent pushes from the sandbox would carry it (a pre-push hook in the copy refuses that push, but it is an accident guard: the agent can skip or remove it). "+
 			"Bring the work back with pull --branch and push it from this computer")
 	}
 	baseline, err := captureBaseline(ctx, sg, filepath.Join(stage, ".git", "index"), sandboxHead, false)

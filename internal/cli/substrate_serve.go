@@ -56,7 +56,10 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/substrate/podcert"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/ratelimit"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/registry"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/relaytls"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/revocation"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/secretbind"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/setup"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/telemetryrelay"
 	policyassets "github.com/defenseclaw/defenseclaw/policies"
 )
@@ -90,6 +93,7 @@ var serveFlags struct {
 	leaderIDs        []string
 	issuerCA         string
 	sessionKeyFile   string
+	relayCADir       string
 	calloutTokenFile string
 	llmCredDir       string
 	bedrockRegion    string
@@ -157,6 +161,7 @@ func init() {
 	f.StringVar(&serveFlags.issuerCA, "issuer-ca", "", "deprecated: use substrate.identity.keys_ca_file")
 	_ = f.MarkDeprecated("issuer-ca", "use substrate.identity.keys_ca_file")
 	f.StringVar(&serveFlags.sessionKeyFile, "session-key-file", "/var/run/secrets/defenseclaw-relay-session/private.pem", "relay session signing key")
+	f.StringVar(&serveFlags.relayCADir, "relay-ca-dir", "/var/run/secrets/defenseclaw-relay-ca", "relay CA (ca.pem, ca-key.pem) that signs and verifies relay TLS certificates")
 	f.StringVar(&serveFlags.calloutTokenFile, "callout-token-file", "/var/run/secrets/defenseclaw-callout-judge/token", "callout service token")
 	f.StringVar(&serveFlags.llmCredDir, "llm-credentials-dir", "/var/run/secrets/defenseclaw-llm", "provider keys, one file per provider")
 	f.StringVar(&serveFlags.bedrockRegion, "bedrock-region", "us-east-1", "Bedrock runtime region")
@@ -537,14 +542,25 @@ func substrateGatewayBuilder(c *config.Config, src *configwatch.Watcher, ready *
 		router, routerErr := substrateRouter()
 		runtimeScan := newRuntimeSkillScanner(c)
 		bindingStore := substrateBindingStore(c)
+		// B5.1: the ended sign-ins list, pulled from the leader (nil: off).
+		revs := newSubstrateRevocation(context.Background(), c.Substrate.Identity.Revocation, &revocation.Client{Leader: toLeader})
 		out = gateway.SubstrateConfig{
 			ActorAddr: serveFlags.actorListen, ActorTLS: actorTLS,
 			Actors: actors, Registrations: regs, Activity: recorder,
+			ActivityFeed: &activity.Reader{Leader: toLeader},
+			ActivityConfig: func() config.SubstrateActivityConfig {
+				if cur := live(); cur != nil {
+					return cur.Substrate.Activity
+				}
+				return c.Substrate.Activity
+			},
 			Chains: &chainstate.Client{Leader: toLeader},
 			// The controller's, the callout's and the leader's records reach
 			// the OTLP destinations through this replica (GAP-0450, GAP-0453).
 			Relay: &telemetryrelay.Taker{Leader: toLeader},
-			Asks:  &asks.Client{Leader: toLeader}, Policies: ate,
+			// Last use of a secret: the leader's host-use map (S6b).
+			SecretUses: &telemetryrelay.UseReader{Leader: toLeader},
+			Asks:       &asks.Client{Leader: toLeader}, Policies: ate,
 			UnattendedAsk: func(profile string) gateway.SubstrateUnattendedAsk {
 				return gateway.SubstrateUnattendedAskFor(live(), profile)
 			},
@@ -580,8 +596,9 @@ func substrateGatewayBuilder(c *config.Config, src *configwatch.Watcher, ready *
 			// B1: the upload scan, read live; hold_back is its admin-off switch.
 			UploadScan: func() config.SubstrateUploadScanConfig { return live().Substrate.Launcher.UploadScan },
 			// B2: the admin-off switches of push and sync, read live.
-			FilesPush: func() bool { return live().Substrate.Files.PushAllowed() },
-			FilesSync: func() bool { return live().Substrate.Files.SyncAllowed() },
+			FilesPush:   func() bool { return live().Substrate.Files.PushAllowed() },
+			FilesSync:   func() bool { return live().Substrate.Files.SyncAllowed() },
+			Revocations: revs.snap, RevocationSource: revs.src, Streams: revs.streams,
 			// B2 2.5: the https rewrite map, submodules and LFS, read live.
 			Git: func() config.SubstrateGitConfig { return live().Substrate.Git },
 			// B2 2.4: git_push and substrate.git.push_branch, read live.
@@ -592,7 +609,9 @@ func substrateGatewayBuilder(c *config.Config, src *configwatch.Watcher, ready *
 					substrateRouterCheck(ctx, router, routerErr), substrateActorKeysCheck(ctx, ks),
 					substrateTemplateAllowlistCheck(ctx, ate, ctl.LiveAttestor()), substrateRelaySeparationCheck(ctx, ate, ctl.LiveAttestor()),
 					gateway.SubstrateSecretEchoHostCheck(live().Substrate.Secrets, live().Substrate.Egress.NoSwapHosts),
-					gateway.SubstrateSecretBindingStoreCheck(bindingStore)}
+					gateway.SubstrateSecretBindingStoreCheck(bindingStore),
+					gateway.SubstrateRevocationCheck(revs.snap, time.Now()),
+					gateway.SubstrateRelayCertReissueCheck(c.Substrate.EffectiveRelayCertReissue(), c.Substrate.RelayCertReissueFor(managed.IsManagedEnterprise(c.DeploymentMode)))}
 			},
 			Actions: &gateway.SubstrateATEActions{Client: ate, Ensure: substrateEnsurer(ctl), TemplateKit: substrateTemplateKit(ctl.LiveAttestor())},
 			// PLAN 7.3: the profile sandbox_class picks the class at create.
@@ -651,9 +670,45 @@ func substrateGatewayBuilder(c *config.Config, src *configwatch.Watcher, ready *
 			}
 			out.Sessions = s
 		}
+		if out.RelayCA, err = loadRelayCA(serveFlags.relayCADir); err != nil {
+			return out, err
+		}
+		out.RelayTLS = relaytls.Mode(c.Substrate.EffectiveRelayTLS())
+		// GAP-0861: the live relay certificate per actor is on the leader.
+		out.RelayCerts = regs
+		out.RelayCertReissue = c.Substrate.RelayCertReissueFor(managed.IsManagedEnterprise(c.DeploymentMode))
+		out.Interactive = func() config.SubstrateInteractiveConfig {
+			if cur := live(); cur != nil {
+				return cur.Substrate.Interactive
+			}
+			return c.Substrate.Interactive
+		}
 		ready.Store(true)
 		return out, nil
 	}
+}
+
+// loadRelayCA reads the relay CA Secret mount (substrate setup,
+// gateway.relayCASecret). A missing folder is no CA: TLS relays then
+// answer relay_ca_missing and doctor fails substrate.relay_tls.
+func loadRelayCA(dir string) (*relaytls.CA, error) {
+	certPEM, err := os.ReadFile(filepath.Join(dir, setup.RelayCACertKey))
+	if errors.Is(err, os.ErrNotExist) {
+		fmt.Fprintln(os.Stderr, "[substrate] no relay CA at", dir+": actors on templates with relay TLS cannot be attached")
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("serve: relay CA: %w", err)
+	}
+	keyPEM, err := os.ReadFile(filepath.Join(dir, setup.RelayCAKeyKey))
+	if err != nil {
+		return nil, fmt.Errorf("serve: relay CA key: %w", err)
+	}
+	ca, err := relaytls.LoadCA(certPEM, keyPEM)
+	if err != nil {
+		return nil, fmt.Errorf("serve: relay CA: %w", err)
+	}
+	return ca, nil
 }
 
 // substrateSecretPlaceholders resolves bound secret names to the environment
@@ -722,6 +777,9 @@ func runSubstrateLeader(parent context.Context, ready *atomic.Bool) error {
 	}
 	srv := &leader.Server{IsLeader: el.IsLeader}
 	registry.Serve(srv, store)
+	if err := serveSubstrateRevocations(srv, cfg, serveFlags.storeDir); err != nil {
+		return err
+	}
 	askStore, err := asks.Open(filepath.Join(serveFlags.storeDir, "asks"))
 	if err != nil {
 		return err
@@ -1214,7 +1272,8 @@ func substrateLifecycleClosesAsks(next func(context.Context, chainstate.Lifecycl
 			fmt.Fprintf(log, "[substrate] ask %s of %s/%s (%s) closed: expired, reason %s (%s)\n", a.ID, a.Atespace, a.Actor, substrateFirst(a.Host, a.Tool), why[0], why[1])
 			if relay != nil {
 				relay.Add(telemetryrelay.Record{Kind: telemetryrelay.KindAskClosed, At: now, Atespace: a.Atespace, Actor: a.Actor, UID: a.UID,
-					AskID: a.ID, Host: substrateFirst(a.Host, a.Tool), Reason: why[0], Unattended: a.Unattended, Severity: a.Severity})
+					AskID: a.ID, Host: substrateFirst(a.Host, a.Tool), Reason: why[0], Unattended: a.Unattended, Severity: a.Severity,
+					Profile: a.Profile, UserID: a.OwnerID})
 			}
 		}
 		return res, nil

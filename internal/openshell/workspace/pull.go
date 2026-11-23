@@ -971,8 +971,9 @@ func branchTree(ctx context.Context, g gitCmd, rec *CopyRecord, result, base str
 // credentials always gets that one commit, without the files that held
 // them (secretFreeTree): the sandbox's commits hold placeholders and the
 // result the values (GAP-0753). note says what the branch holds of the
-// folder's uncommitted edits, when it had any.
-func branchCommit(ctx context.Context, rec *CopyRecord, proj gitCmd, result, base, branch string) (commit, note string, err error) {
+// folder's uncommitted edits, when it had any. sandboxHead is the
+// sandbox's HEAD as pulled: the commits named end there.
+func branchCommit(ctx context.Context, rec *CopyRecord, proj gitCmd, result, base, sandboxHead, branch string) (commit, note string, err error) {
 	tree, edits, kept, err := branchTree(ctx, proj, rec, result, base)
 	if err != nil {
 		return "", "", err
@@ -1001,10 +1002,15 @@ func branchCommit(ctx context.Context, rec *CopyRecord, proj gitCmd, result, bas
 	if len(edits) > 0 && kept == "" {
 		msg += "\n\nThe folder's uncommitted edits from when the copy was made are left out."
 	}
-	if raw, err := proj.output(ctx, "log", "--reverse", "--format=%s", rec.Head+".."+result); err == nil && rec.Head != "" {
+	// The sandbox's own commits start after the commit its HEAD began at
+	// (the placeholder commit, for a copy that replaced credentials) and
+	// end at its HEAD as pulled (sandboxHead), so none of ours is listed,
+	// neither the uncommitted-changes commit nor the landing commit
+	// (RV8-5), and none of theirs is hidden (RV6-6).
+	if raw, err := proj.output(ctx, "log", "--reverse", "--format=%s", rec.sandboxHead()+".."+sandboxHead); err == nil && rec.Head != "" && sandboxHead != "" {
 		var own []string
 		for _, s := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
-			if s != "" && !strings.HasPrefix(s, "defenseclaw: ") {
+			if s != "" {
 				own = append(own, "- "+s)
 			}
 		}
@@ -1140,7 +1146,7 @@ func createBranch(ctx context.Context, rec *CopyRecord, pr *PullResult, opts App
 		_ = proj.run(ctx, "update-ref", "-d", imported)
 		_ = proj.run(ctx, "update-ref", "-d", importedBase)
 	}()
-	tip, note, err := branchCommit(ctx, rec, proj, imported, importedBase, branch)
+	tip, note, err := branchCommit(ctx, rec, proj, imported, importedBase, pr.SandboxHead, branch)
 	if err != nil {
 		return "", "", err
 	}

@@ -171,6 +171,23 @@ func (t Template) Prefix() string {
 	return ""
 }
 
+// FormStamp names how StoredValue forms a value for b under t: the form,
+// and for basic the user. A binding keeps the stamp of its stored value, so
+// a later template edit that changes it can be flagged (RV3 P4-3).
+func (t Template) FormStamp(b Binding) string {
+	if t.Form == FormBasic {
+		user := b.BasicUser
+		if user == "" {
+			user = t.BasicUser
+		}
+		return FormBasic + ":" + user
+	}
+	if t.Form == "" {
+		return FormRaw
+	}
+	return t.Form
+}
+
 // StoredValue is what the launcher stores for token under t for binding
 // b. For basic it is base64(user:token), with the user from the binding
 // (generic-basic takes it at add) or else the template; Substrate puts

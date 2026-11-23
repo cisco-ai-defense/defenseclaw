@@ -1194,7 +1194,7 @@ func dispatchTrustedActionOnce(
 	// needs no second reading.
 	placed := placedReading{}
 	if input, ok := sandboxGuestPlacedInput(request, facts); ok {
-		analyzed := actionfacts.Analyze(input)
+		analyzed := request.guestMemo.analyze(input)
 		children, candidates, cut := sandboxGuestPlacedChildren(request.guestMemo, input, analyzed)
 		placed = placedReading{facts: &analyzed, everyOwner: true, children: children, candidates: candidates}
 		if cut.Any() {
@@ -4754,6 +4754,17 @@ func (placed placedReading) provesSSHPrivateKeyContentRead() bool {
 // (cd ~/.defenseclaw || cd /tmp); $CMD; echo m > config.yaml where the
 // laptop allows.
 func sandboxGuestPlacedChildren(memo *guestReadingMemo, input actionfacts.Input, facts actionfacts.Facts) (children, candidates []actionfacts.Facts, cut bounded.CapSet) {
+	if children, candidates, cut, ok := memo.placedChildren(input, facts); ok {
+		return children, candidates, cut
+	}
+	children, candidates, cut = sandboxGuestPlacedChildrenWalk(memo, input, facts)
+	memo.keepPlacedChildren(input, facts, children, candidates, cut)
+	return children, candidates, cut
+}
+
+// sandboxGuestPlacedChildrenWalk reads the placed children of a call
+// (sandboxGuestPlacedChildren) afresh.
+func sandboxGuestPlacedChildrenWalk(memo *guestReadingMemo, input actionfacts.Input, facts actionfacts.Facts) (children, candidates []actionfacts.Facts, cut bounded.CapSet) {
 	placements, stopped := memo.plan(input, facts).placements(true)
 	var folders map[guestShellReading]bool
 	if slices.ContainsFunc(placements, func(placement guestPlacement) bool { return placement.candidate }) {

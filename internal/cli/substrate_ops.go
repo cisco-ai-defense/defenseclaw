@@ -75,8 +75,12 @@ func runSubstrateLogs(cmd *cobra.Command, out *substrateOutput, com *substrateCo
 			if a.Unattended {
 				// GAP-0420: a headless run whose actor crashed and came back
 				// lost its run and its log with the worker.
+				if _, ok := loadSubstrateTaskRecord(auth.StateDir(), a); ok {
+					return fmt.Errorf("%s/%s has no headless task now: its run and log were lost when it crashed and was brought back to an earlier snapshot. "+
+						"Start the task again from the beginning with: defenseclaw substrate undo %s", a.Atespace, a.Name, a.Name)
+				}
 				return fmt.Errorf("%s/%s has no headless task now: its run and log were lost when it crashed and was brought back to an earlier snapshot. "+
-					"Bring its folder home with: defenseclaw substrate pull %s, or start the task again in a new agent", a.Atespace, a.Name, a.Name)
+					"Start it again with defenseclaw substrate undo %s on the computer that started it, or start the task again in a new agent", a.Atespace, a.Name, a.Name)
 			}
 			return fmt.Errorf("%s/%s has no headless task; start one with: defenseclaw substrate run AGENT --task \"...\"", a.Atespace, a.Name)
 		}
@@ -267,8 +271,8 @@ func substratePullAccept(f *substratePullFlags, sensitive, interactive bool, ask
 func substratePullElsewhere(a api.Actor) error {
 	return cliusage.WithExitCode(fmt.Errorf("this computer has no record of the folder you sent to %s/%s, so pull cannot tell what the agent changed: "+
 		"only the computer you ran \"defenseclaw substrate run\" on keeps it. Run pull there (--apply, --branch NAME or --patch-out FILE). "+
-		"If it was started with run --clone, push its work to its origin as a branch from here (defenseclaw substrate pull %s --push-branch NAME). "+
-		"Otherwise, from this computer, connect to the agent (defenseclaw substrate connect %s), commit its work and git push it from inside the agent, then git pull it here",
+		"From this computer, connect to the agent (defenseclaw substrate connect %s), commit its work and git push it from inside the agent, then git pull it here. "+
+		"If it was started with run --clone, push the work to its origin as a branch: defenseclaw substrate pull %s --push-branch NAME",
 		a.Atespace, a.Name, a.Name, a.Name), substrateExitRefused)
 }
 
@@ -407,6 +411,49 @@ func runSubstrateCheckpoint(cmd *cobra.Command, out *substrateOutput, com *subst
 	}
 }
 
+// runSubstrateRecover is substrate recover (GAP-0930): the gateway's
+// recover route clears the relay certificate record, and brings a crashed
+// agent back to its last snapshot.
+func runSubstrateRecover(cmd *cobra.Command, com *substrateCommon, ref string, yes bool) error {
+	s, err := substrateOpen(cmd, com)
+	if err != nil {
+		return err
+	}
+	ctx, stop := substrateContext(cmd)
+	defer stop()
+	a, err := resolveSubstrateActor(ctx, s.Client, ref)
+	if err != nil {
+		return substrateFail(err)
+	}
+	if a.State == substrateStateCrashed && !yes {
+		ok, err := substrateConfirm(cmd, fmt.Sprintf("%s/%s crashed. Bring it back to its last snapshot? What it did after that snapshot is lost.", a.Atespace, a.Name))
+		if err != nil {
+			return err
+		}
+		if !ok {
+			fmt.Fprintln(cmd.OutOrStdout(), "Nothing changed.")
+			return nil
+		}
+	}
+	_, err = s.Client.Recover(ctx, a.Atespace, a.Name)
+	var ae *api.Error
+	switch {
+	case err == nil:
+		fmt.Fprintf(cmd.OutOrStdout(), "%s/%s crashed; it is back at its last snapshot and starting, and its relay certificate record is cleared.\n", a.Atespace, a.Name)
+		return nil
+	case errors.As(err, &ae) && ae.Reason == "not_crashed":
+		if !ae.RelayCertCleared {
+			fmt.Fprintf(cmd.OutOrStdout(), "%s/%s is running and this cluster keeps no relay certificate record; nothing changed.\n", a.Atespace, a.Name)
+			return nil
+		}
+		fmt.Fprintf(cmd.OutOrStdout(), "%s/%s: its relay certificate record is cleared. The relay asks for a new certificate when a connect refuses its old one, so the first connect can still fail; connect again, and if that fails too, wait a minute.\n", a.Atespace, a.Name)
+		return nil
+	case errors.As(err, &ae) && ae.NotImplemented():
+		return substrateFail(fmt.Errorf("this cluster cannot recover agents yet; ask your administrator to upgrade DefenseClaw"))
+	}
+	return substrateFail(fmt.Errorf("recovering %s/%s: %w", a.Atespace, a.Name, err))
+}
+
 func runSubstrateUndo(cmd *cobra.Command, com *substrateCommon, ref, to string, yes bool) error {
 	s, err := substrateOpen(cmd, com)
 	if err != nil {
@@ -445,6 +492,20 @@ func runSubstrateUndo(cmd *cobra.Command, com *substrateCommon, ref, to string, 
 			return substrateFail(substrateFolderLost(a, workspace.RemoteDirOf(auth.StateDir(), substrateCopyName(a))))
 		}
 		fmt.Fprintf(cmd.ErrOrStderr(), "%s/%s crashed; it is back at its last snapshot and starting.\n", a.Atespace, a.Name)
+	}
+	if a.Unattended && to == "" {
+		// GAP-0420: a --task agent this computer started whose run was lost
+		// (a crash, or an administrator's revert) starts its task again on a
+		// fresh copy of its folder: at least once, never silently dropped.
+		if rec, ok := loadSubstrateTaskRecord(auth.StateDir(), a); ok {
+			lost, err := substrateTaskLost(ctx, cmd, s, a, rec.Transport)
+			if err != nil {
+				return err
+			}
+			if lost {
+				return substrateRerunTask(ctx, cmd, s, a, rec, yes)
+			}
+		}
 	}
 	dir, err := substrateRemoteDir(a)
 	if err != nil {
@@ -605,7 +666,7 @@ func substrateCloseAsks(ctx context.Context, cl *api.Client, a api.Actor, why st
 		if k.Actor != a.Name || (k.Atespace != "" && k.Atespace != a.Atespace) {
 			continue
 		}
-		if cl.Decide(ctx, k.ID, "deny", false, why) == nil {
+		if _, err := cl.Decide(ctx, k.ID, "deny", false, why); err == nil {
 			n++
 		}
 	}

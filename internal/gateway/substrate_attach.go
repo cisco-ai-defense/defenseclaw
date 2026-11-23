@@ -31,6 +31,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/substrate/identity"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/registry"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/relay"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/revocation"
 )
 
 // Attach through the admin listener (GAP-0085, GAP-0086; lead ruling
@@ -51,8 +52,8 @@ import (
 // person-bound session token: the gateway mints one for the signed-in
 // person and this actor incarnation for each request, so a token never
 // crosses the laptop's network. The hop from the router to the relay is
-// inside the cluster network; it is plain HTTP until the relay serves TLS
-// with a certificate the gateway can verify (GAP-0109, documented limit).
+// TLS for a template whose signed kit serves it (substrate.relay_tls,
+// substrate_relaycert.go); templates built before 1.0.11 are plain.
 
 // substrateAttachPath is the attach route and everything below it.
 var substrateAttachPath = regexp.MustCompile(`^/api/v1/substrate/actors/[^/]+/[^/]+/attach(/.*)?$`)
@@ -177,8 +178,20 @@ func (a *APIServer) substrateAttach(st *substrateState) http.HandlerFunc {
 			writeSubstrateJSONError(w, status, reason)
 			return
 		}
+		// A port forward or MCP bridge (B3.2, B3.3) gets a token for its
+		// own dc.scope only (substrate_streams.go).
+		stream, sstatus, sreason := a.substrateStreamOpen(st, r, reg, rest)
+		if sstatus != http.StatusOK {
+			writeSubstrateJSONError(w, sstatus, sreason)
+			return
+		}
+		defer stream.close(r.Context())
+		actor := substrateSessionActor(reg)
+		if stream != nil {
+			actor.Scope = stream.scope
+		}
 		c, _ := substrateCallerFrom(r.Context())
-		tok, exp, err := st.cfg.Sessions.IssueUntil(c.person.ID(), substrateSessionActor(reg), substrateAttachSessionTTL, c.person.SessionBound())
+		tok, exp, err := st.cfg.Sessions.IssueUntil(identity.SignInOf(c.person), actor, substrateAttachSessionTTL, c.person.SessionBound())
 		if errors.Is(err, identity.ErrSessionBound) {
 			// The sign-in ends this second: the launcher asks for a new
 			// one (GAP-0588).
@@ -194,7 +207,7 @@ func (a *APIServer) substrateAttach(st *substrateState) http.HandlerFunc {
 			// A terminal attachment (WebSocket, or a long-poll request
 			// other than its close) is reported while it is open, so a
 			// controller without a CPU feed keeps the actor (GAP-0534).
-			if head == relay.RouteWS || (head == relay.RoutePoll && r.Method != http.MethodDelete) {
+			if head == relay.RouteWS || stream != nil || (head == relay.RoutePoll && r.Method != http.MethodDelete) {
 				defer substrateReportAttach(st.cfg.Activity, reg.Atespace, reg.UID)()
 			}
 		}
@@ -213,6 +226,17 @@ func (a *APIServer) substrateAttach(st *substrateState) http.HandlerFunc {
 					return
 				}
 			}
+		}
+		dial, dstatus, dreason := a.substrateRelayDial(r.Context(), st, reg)
+		if dstatus != http.StatusOK {
+			writeSubstrateJSONError(w, dstatus, dreason)
+			return
+		}
+		if stream != nil && stream.kind == relay.RouteMCP {
+			// B3.3: the gateway ends an MCP stream itself and judges every
+			// tools/call (substrate_mcpbridge.go); it is never a byte proxy.
+			a.serveSubstrateMCPBridge(w, r, st, reg, stream, tok, dial)
+			return
 		}
 		space, name := reg.Atespace, reg.Name
 		proxy := &httputil.ReverseProxy{
@@ -244,7 +268,8 @@ func (a *APIServer) substrateAttach(st *substrateState) http.HandlerFunc {
 			},
 			Transport: &http.Transport{
 				DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-					return st.cfg.Relays.DialRelay(ctx, space, name)
+					c, err := dial(ctx)
+					return stream.wrap(c), err
 				},
 				Proxy: nil, DisableKeepAlives: true, ResponseHeaderTimeout: 60 * time.Second,
 			},
@@ -267,6 +292,15 @@ func (a *APIServer) substrateAttach(st *substrateState) http.HandlerFunc {
 				writeSubstrateJSONError(w, http.StatusBadGateway, "relay_unreachable")
 			},
 		}
-		proxy.ServeHTTP(w, r)
+		// The stream ends when its sign-in is ended (B5.1): the proxy closes
+		// the upgraded relay connection when the request context ends.
+		ctx, release := st.cfg.Streams.Open(r.Context(), revocation.Stream{Person: c.person.ID(), TokenKey: c.person.TokenKey, IssuedAt: c.person.IssuedAt})
+		defer release()
+		if ctx.Err() != nil && r.Context().Err() == nil {
+			// Ended while the request was on its way here (RV1-04).
+			writeSubstrateJSONError(w, http.StatusUnauthorized, substrateReasonSigninEnded)
+			return
+		}
+		proxy.ServeHTTP(w, r.WithContext(ctx))
 	}
 }

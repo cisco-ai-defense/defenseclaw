@@ -157,6 +157,10 @@ from defenseclaw.file_permissions import (
 )
 from defenseclaw.gateway import gateway_api_client_host
 from defenseclaw.inventory.plugin_identity import is_link_or_reparse
+from defenseclaw.notification_capabilities import (
+    desktop_notification_capability,
+    desktop_notifier_tool_missing,
+)
 from defenseclaw.openclaw_presence import (
     OPENCLAW_NOT_INSTALLED_DETAIL,
     openclaw_implied_but_not_installed,
@@ -16650,6 +16654,84 @@ def _endpoint_is_loopback(endpoint: str) -> bool:
     return endpoint_is_loopback(endpoint)
 
 
+def substrate_admin_notifications_off(value) -> bool:
+    """``substrate.activity.notifications`` is the administrator's ``off``.
+
+    Same test as Go ``SubstrateActivityConfig.NotificationsOn``: spaces
+    trimmed, case ignored (GAP-1020).
+    """
+    return str(value or "").strip().lower() == "off"
+
+
+def _substrate_notifier_applies(cfg) -> bool:
+    """Whether the notifier row belongs in this doctor run (GAP-1020).
+
+    ``substrate watch`` runs on a person's machine, where substrate.enabled
+    (a cluster-only key) is false: the row also shows when the launcher has
+    a context file (<DEFENSECLAW_HOME>/substrate/contexts.json, the same
+    path as Go ``auth.ContextsPath``).
+    """
+    if getattr(getattr(cfg, "substrate", None), "enabled", False):
+        return True
+    from defenseclaw.config import default_data_path
+
+    return (default_data_path() / "substrate" / "contexts.json").is_file()
+
+
+def _check_substrate_notifier(cfg, r: _DoctorResult, *, system: str | None = None, which=None) -> None:
+    """Doctor row for the desktop notifier ``substrate watch`` uses.
+
+    Mirrors the Go ``substrate doctor`` ``notifier`` row: off is a skip, a
+    missing tool is a warning with the way to install it, never a failure.
+    Go shows that row wherever the launcher runs ``substrate doctor``; here it
+    shows where the launcher is set up (a signed-in context file, where
+    ``substrate watch`` runs) or on a cluster (substrate.enabled), GAP-1020.
+    """
+    label = "Substrate notifier"
+    try:
+        applies = _substrate_notifier_applies(cfg)
+    except OSError:
+        # The launcher dir exists but cannot be searched (mode 000, a
+        # protected parent): Path.is_file() re-raises EACCES on Python
+        # 3.11-3.13. A plain row, never a doctor crash (GAP-1045).
+        _emit("skip", label, "not checked: the launcher folder cannot be read", r=r)
+        return
+    if not applies:
+        return
+    capab = desktop_notification_capability(system)
+    note = getattr(cfg, "notifications", None)
+    sub = getattr(note, "substrate", None)
+    if not capab.supported:
+        _emit("skip", label, f"not checked: {capab.unsupported_reason}", r=r)
+    elif substrate_admin_notifications_off(getattr(getattr(cfg.substrate, "activity", None), "notifications", "")):
+        _emit("skip", label, "an administrator turned notifications off (substrate.activity.notifications: off)", r=r)
+    elif not getattr(note, "enabled", False):
+        _emit(
+            "skip",
+            label,
+            "desktop notifications are off (notifications.enabled is false); substrate watch prints only",
+            r=r,
+        )
+    elif sub is not None and not (sub.asks or sub.task_end):
+        _emit("skip", label, "notifications.substrate.asks and notifications.substrate.task_end are both off", r=r)
+    else:
+        kwargs = {"which": which} if which is not None else {}
+        missing = desktop_notifier_tool_missing(system, **kwargs)
+        if not missing:
+            _emit("pass", label, f"desktop notifications can be shown with {capab.provider}", r=r)
+        else:
+            fix = f"install {missing}"
+            if capab.system == "linux":
+                fix = "install notify-send (Debian and Ubuntu: apt install libnotify-bin; RHEL: dnf install libnotify)"
+            _emit(
+                "warn",
+                label,
+                f"{missing} is not installed, so substrate watch cannot show desktop notifications",
+                r=r,
+                remediation=fix,
+            )
+
+
 def _check_webhooks(cfg, r: _DoctorResult) -> None:
     """Validate every entry in ``webhooks[]`` (notifier webhooks).
 
@@ -17378,6 +17460,7 @@ def doctor(
         _doctor_subsection("Webhooks")
     r.set_section("webhooks")
     _check_webhooks(cfg, r)
+    _check_substrate_notifier(cfg, r)
     if not json_out:
         _doctor_subsection("Sandbox")
     r.set_section("sandbox")

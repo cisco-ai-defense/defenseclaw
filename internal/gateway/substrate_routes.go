@@ -99,6 +99,7 @@ type SubstrateCreated struct {
 	HarnessVersion string
 	HookContract   string
 	KitVersion     string
+	RelayStreams   string
 	// SandboxClass is the class the actor runs in (gvisor or microvm).
 	SandboxClass string
 }
@@ -186,6 +187,8 @@ func (a *APIServer) newSubstrateAdminHandler(st *substrateState) http.Handler {
 			"git":                 substrateLauncherGit(st.cfg.Git),
 		})
 	})
+	mux.HandleFunc("POST /api/v1/substrate/signin/revoke", a.substrateSigninRevoke(st))
+	mux.HandleFunc("/api/v1/substrate/admin/revocations", a.substrateAdminRevocations(st))
 	mux.HandleFunc("GET /api/v1/substrate/asks", a.substrateListAsks(st))
 	mux.HandleFunc("POST /api/v1/substrate/asks/{id}", a.substrateDecideAsk(st))
 	mux.HandleFunc("GET /api/v1/substrate/approvals", a.substrateListApprovals(st))
@@ -321,6 +324,13 @@ func (a *APIServer) substrateAdminAuthenticate(st *substrateState, next http.Han
 			writeSubstrateJSONError(w, status, reason)
 			return
 		}
+		// An ended sign-in, or a list this replica cannot trust, is
+		// refused before any route (B5.1).
+		if status, reason := st.substrateRevocationRefusal(p.ID(), p.TokenKey, p.IssuedAt); status != 0 {
+			st.authRefused(r, substrateListenerAdmin, identity.Reason(reason))
+			writeSubstrateJSONError(w, status, reason)
+			return
+		}
 		r.Header.Del("Authorization")
 		next.ServeHTTP(w, r.WithContext(withSubstratePerson(r.Context(), p, st.cfg.IsAdmin(p))))
 	})
@@ -335,26 +345,74 @@ func substrateVisible(c substrateCaller, reg registry.Registration) bool {
 // says what its asks do (D12, GAP-0388): unattended_asks deny or queue from
 // its profile, and with queue how long an ask waits for a person. An actor
 // in policy_conflict carries the controller's mark (GAP-0398).
-func (st *substrateState) actorView(reg registry.Registration) map[string]any {
-	v := map[string]any{
-		"atespace": reg.Atespace, "name": reg.Name, "uid": reg.UID, "registration_key": reg.Key,
-		"profile": reg.Profile, "connector": reg.Connector, "template": reg.Template,
-		"batch_id": reg.BatchID, "unattended": reg.Unattended, "created_at": reg.CreatedAt,
-		"owner": reg.Person.Principal, "deleted": reg.Deleted,
-		"attribution": substrateAttribution(reg), "foreign": reg.Attributed,
+// substrateActorRow is one actor of a list answer: the JSON of actorView
+// as a typed struct, fields in key order as a map encodes them, so a list
+// of 2,100 agents builds and key-sorts no map per agent (GAP-1019).
+// TestSubstrateActorRowMatchesView pins the two to the same bytes.
+type substrateActorRow struct {
+	Activity          *substrateActivityOut `json:"activity,omitempty"`
+	AskTimeoutSeconds *int64                `json:"ask_timeout_seconds,omitempty"`
+	Atespace          string                `json:"atespace"`
+	Attribution       string                `json:"attribution"`
+	BatchID           string                `json:"batch_id"`
+	Connector         string                `json:"connector"`
+	CreatedAt         time.Time             `json:"created_at"`
+	Deleted           bool                  `json:"deleted"`
+	Foreign           bool                  `json:"foreign"`
+	Name              string                `json:"name"`
+	Owner             string                `json:"owner"`
+	PolicyConflict    map[string]any        `json:"policy_conflict,omitempty"`
+	Profile           string                `json:"profile"`
+	RegistrationKey   string                `json:"registration_key"`
+	State             string                `json:"state,omitempty"`
+	Template          string                `json:"template"`
+	UID               string                `json:"uid"`
+	Unattended        bool                  `json:"unattended"`
+	UnattendedAsks    string                `json:"unattended_asks,omitempty"`
+}
+
+// actorRow is reg as list, status and the other actor answers show it.
+func (st *substrateState) actorRow(reg registry.Registration) substrateActorRow {
+	row := substrateActorRow{
+		Atespace: reg.Atespace, Name: reg.Name, UID: reg.UID, RegistrationKey: reg.Key,
+		Profile: reg.Profile, Connector: reg.Connector, Template: reg.Template,
+		BatchID: reg.BatchID, Unattended: reg.Unattended, CreatedAt: reg.CreatedAt,
+		Owner: reg.Person.Principal, Deleted: reg.Deleted,
+		Attribution: substrateAttribution(reg), Foreign: reg.Attributed,
+		PolicyConflict: substratePolicyConflictView(reg),
 	}
 	if reg.Unattended {
 		var rule SubstrateUnattendedAsk // no rule: deny (D12)
 		if st.cfg.UnattendedAsk != nil {
 			rule = st.cfg.UnattendedAsk(reg.Profile)
 		}
-		v["unattended_asks"] = "deny"
+		row.UnattendedAsks = "deny"
 		if rule.Queue {
-			v["unattended_asks"], v["ask_timeout_seconds"] = "queue", int64(rule.Timeout/time.Second)
+			secs := int64(rule.Timeout / time.Second)
+			row.UnattendedAsks, row.AskTimeoutSeconds = "queue", &secs
 		}
 	}
-	if pc := substratePolicyConflictView(reg); pc != nil {
-		v["policy_conflict"] = pc
+	return row
+}
+
+// actorView is actorRow as a map, for the answers that add keys to it.
+func (st *substrateState) actorView(reg registry.Registration) map[string]any {
+	row := st.actorRow(reg)
+	v := map[string]any{
+		"atespace": row.Atespace, "name": row.Name, "uid": row.UID, "registration_key": row.RegistrationKey,
+		"profile": row.Profile, "connector": row.Connector, "template": row.Template,
+		"batch_id": row.BatchID, "unattended": row.Unattended, "created_at": row.CreatedAt,
+		"owner": row.Owner, "deleted": row.Deleted,
+		"attribution": row.Attribution, "foreign": row.Foreign,
+	}
+	if row.UnattendedAsks != "" {
+		v["unattended_asks"] = row.UnattendedAsks
+	}
+	if row.AskTimeoutSeconds != nil {
+		v["ask_timeout_seconds"] = *row.AskTimeoutSeconds
+	}
+	if row.PolicyConflict != nil {
+		v["policy_conflict"] = row.PolicyConflict
 	}
 	return v
 }
@@ -531,7 +589,7 @@ func (a *APIServer) substrateCreateActor(st *substrateState) http.HandlerFunc {
 		reg := registry.Registration{
 			Atespace: created.Atespace, Name: created.Name, UID: created.UID, Person: req.Owner,
 			Profile: profile, Template: created.Template, TemplateDigest: created.TemplateDigest,
-			KitVersion: created.KitVersion, Connector: created.Connector, HarnessVersion: created.HarnessVersion,
+			KitVersion: created.KitVersion, RelayStreams: created.RelayStreams, Connector: created.Connector, HarnessVersion: created.HarnessVersion,
 			HookContract: created.HookContract, BatchID: req.BatchID, Unattended: req.Unattended,
 			SandboxClass: created.SandboxClass,
 			Secrets:      append([]string(nil), req.Secrets...),
@@ -600,7 +658,7 @@ func (a *APIServer) substrateCreateActor(st *substrateState) http.HandlerFunc {
 			// The token ends with the caller's sign-in, at the latest
 			// (GAP-0588); with no time left the answer carries none and
 			// the launcher attaches through the attach route.
-			tok, exp, err := st.cfg.Sessions.IssueUntil(c.person.ID(), substrateSessionActor(reg), 0, c.person.SessionBound())
+			tok, exp, err := st.cfg.Sessions.IssueUntil(identity.SignInOf(c.person), substrateSessionActor(reg), 0, c.person.SessionBound())
 			if err == nil {
 				out["session_token"], out["session_expires"] = tok, exp
 			}
@@ -635,13 +693,20 @@ func (a *APIServer) substrateListActors(st *substrateState) http.HandlerFunc {
 		}
 		// GAP-0167: the person sees which agents hold a worker.
 		states := substrateLiveStates(r.Context(), st.cfg.Lookup, regs)
-		out := make([]map[string]any, 0, len(regs))
+		feed := st.activityFor(r.Context(), f.OwnerID, everyone, false)
+		// Typed rows and one allocation for the activity (GAP-1019).
+		var acts []substrateActivityOut
+		if feed != nil {
+			acts = make([]substrateActivityOut, len(regs))
+		}
+		out := make([]substrateActorRow, len(regs))
 		for i, reg := range regs {
-			v := st.actorView(reg)
-			if states[i] != "" {
-				v["state"] = states[i]
+			out[i] = st.actorRow(reg)
+			out[i].State = states[i]
+			if feed != nil && !reg.Deleted {
+				feed.fill(&acts[i], reg.UID, states[i])
+				out[i].Activity = &acts[i]
 			}
-			out = append(out, v)
 		}
 		if f.OwnerID == "" {
 			a.substrateAuditAdminRead(st, r, "actors", len(out), "")
@@ -784,6 +849,7 @@ func (a *APIServer) substrateGetActor(st *substrateState) http.HandlerFunc {
 			writeSubstrateJSONError(w, status, reason)
 			return
 		}
+		c, _ := substrateCallerFrom(r.Context())
 		a.substrateAuditAdminTarget(st, r, reg, "actor", "INFO")
 		v := st.actorView(reg)
 		// What a delete would remove with it (GAP-0474).
@@ -797,6 +863,10 @@ func (a *APIServer) substrateGetActor(st *substrateState) http.HandlerFunc {
 		}
 		if live, err := st.cfg.Lookup.LookupActor(r.Context(), reg.Atespace, reg.Name); err == nil && live.UID == reg.UID {
 			v["state"] = strings.ToLower(string(live.State))
+		}
+		if feed := st.activityFor(r.Context(), ownerOf(c.person).ID(), c.admin, true); feed != nil {
+			s, _ := v["state"].(string)
+			v["activity"] = feed.view(reg, s)
 		}
 		writeSubstrateJSON(w, http.StatusOK, v)
 	}
@@ -894,7 +964,7 @@ func (a *APIServer) substrateSessionCert(st *substrateState) http.HandlerFunc {
 		// The token names the person as issuer#subject: two issuers may
 		// use the same subject (GAP-0061). It ends with the caller's
 		// sign-in, at the latest (GAP-0588).
-		tok, exp, err := st.cfg.Sessions.IssueUntil(c.person.ID(), substrateSessionActor(reg), ttl, c.person.SessionBound())
+		tok, exp, err := st.cfg.Sessions.IssueUntil(identity.SignInOf(c.person), substrateSessionActor(reg), ttl, c.person.SessionBound())
 		if errors.Is(err, identity.ErrSessionBound) {
 			writeSubstrateRefusal(w, http.StatusUnauthorized, string(identity.ReasonExpired))
 			return

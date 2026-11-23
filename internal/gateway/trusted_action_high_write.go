@@ -385,7 +385,7 @@ func provedHighWriteFindings(
 		if home := path.Clean(guest.ActiveHome); path.IsAbs(guest.ActiveHome) && home != "/" {
 			guestHome = home
 		}
-		judgePaths(actionfacts.Analyze(guest))
+		judgePaths(request.guestMemo.analyze(guest))
 		guestHome = ""
 	}
 	// A native write call with a key outside its reviewed schema stays

@@ -141,6 +141,18 @@ identity.keys_url and keys_ca_file unless config sets them. */ -}}
 {{- if and $keys.caConfigMap (not (hasKey $id "keys_ca_file")) }}{{ $_ := set $id "keys_ca_file" "/etc/defenseclaw-substrate/actor-keys-ca/ca.crt" }}{{ end -}}
 {{- $_ := set $sub "identity" $id -}}
 {{- end -}}
+{{- /* Dedicated values for substrate.launcher, files and git. Each fills
+its config key unless config.substrate sets it: config stays the single
+source and wins. An unset value adds nothing; false is a value. */ -}}
+{{- $cv := .Values.substrate -}}
+{{- range $sect, $keys := dict "launcher" (dict "keyReplay" "key_replay") "files" (dict "push" "push" "sync" "sync") "git" (dict "httpsRewrite" "https_rewrite" "submodules" "submodules" "lfs" "lfs" "pushBranch" "push_branch") -}}
+{{- $have := get $cv $sect | default dict -}}
+{{- $target := get $sub $sect | default dict -}}
+{{- range $v, $k := $keys -}}
+{{- if and (hasKey $have $v) (not (hasKey $target $k)) }}{{ $_ := set $target $k (get $have $v) }}{{ end -}}
+{{- end -}}
+{{- if $target }}{{ $_ := set $sub $sect $target }}{{ end -}}
+{{- end -}}
 {{- $_ := set $cfg "substrate" $sub -}}
 {{- /* GAP-0426: redact before the gateway keeps or sends a record. The
 chart's profile is the observability default unless config names one. */ -}}
@@ -572,6 +584,9 @@ the leader. */}}
 - name: relay-session
   mountPath: /var/run/secrets/defenseclaw-relay-session
   readOnly: true
+- name: relay-ca
+  mountPath: /var/run/secrets/defenseclaw-relay-ca
+  readOnly: true
 - name: llm-credentials
   mountPath: /var/run/secrets/defenseclaw-llm
   readOnly: true
@@ -593,6 +608,11 @@ the leader. */}}
 - name: relay-session
   secret:
     secretName: {{ .Values.gateway.relaySessionSecret }}
+    optional: true
+    defaultMode: 0440
+- name: relay-ca
+  secret:
+    secretName: {{ .Values.gateway.relayCASecret }}
     optional: true
     defaultMode: 0440
 - name: llm-credentials

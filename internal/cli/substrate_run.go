@@ -81,13 +81,16 @@ func substrateAskActor(k api.Ask) string {
 }
 
 func (a substrateAsks) Decide(ctx context.Context, id string, d attach.Decision) error {
+	var err error
 	switch d {
 	case attach.Decision("once"):
-		return a.cl.Decide(ctx, id, "approve", false, "")
+		_, err = a.cl.Decide(ctx, id, "approve", false, "")
 	case attach.Decision("always"):
-		return a.cl.Decide(ctx, id, "approve", true, "")
+		_, err = a.cl.Decide(ctx, id, "approve", true, "")
+	default:
+		_, err = a.cl.Decide(ctx, id, "deny", false, "")
 	}
-	return a.cl.Decide(ctx, id, "deny", false, "")
+	return err
 }
 
 func substrateTransport(v string) (string, error) {
@@ -185,6 +188,10 @@ const substrateStateCrashed = "crashed"
 // --- connect ----------------------------------------------------------------
 
 func runSubstrateConnect(cmd *cobra.Command, f *substrateAttachFlags, ref string) error {
+	specs, err := substrateMCPSpecs(f.mcp, false, false)
+	if err != nil {
+		return err
+	}
 	s, err := substrateOpen(cmd, &f.com)
 	if err != nil {
 		return err
@@ -203,6 +210,12 @@ func runSubstrateConnect(cmd *cobra.Command, f *substrateAttachFlags, ref string
 		return err
 	}
 	o.Banner = substrateBanner(ctx, s.Client, a)
+	mcp, err := startSubstrateMCP(ctx, cmd, s, a, specs, true)
+	if err != nil {
+		return err
+	}
+	defer mcp.Close()
+	o.Notices = mcp.Notices()
 	return substrateAttachAndReport(ctx, cmd, o, a)
 }
 
@@ -211,14 +224,18 @@ func runSubstrateConnect(cmd *cobra.Command, f *substrateAttachFlags, ref string
 // snapshots keep no command line). The record holds the command, the
 // connector and the context name only. It returns the cleanup.
 func substratePresence(cmd *cobra.Command, a api.Actor) func() {
+	remove, _ := launcherpresence.Write(auth.StateDir(), substrateRecord(cmd, a))
+	return remove
+}
+
+// substrateRecord is the presence record of this launcher: the command, the
+// connector and the context name.
+func substrateRecord(cmd *cobra.Command, a api.Actor) launcherpresence.Record {
 	ctxName := ""
 	if name, _, err := auth.ResolveContext(""); err == nil {
 		ctxName = name
 	}
-	remove, _ := launcherpresence.Write(auth.StateDir(), launcherpresence.Record{
-		Command: cmd.Name(), Connector: strings.ToLower(a.Connector), Context: strings.ToLower(ctxName),
-	})
-	return remove
+	return launcherpresence.Record{Command: cmd.Name(), Connector: strings.ToLower(a.Connector), Context: strings.ToLower(ctxName)}
 }
 
 // substrateAttachAndReport attaches and says how the session ended.
@@ -649,6 +666,9 @@ func runSubstrateRun(cmd *cobra.Command, f *substrateRunFlags, args []string) er
 	if _, err := substrateTransport(f.transport); err != nil {
 		return cliusage.WithExitCode(err, 2)
 	}
+	if f.mcpSpecs, err = substrateMCPSpecs(f.mcp, f.detach, f.batch != ""); err != nil {
+		return err
+	}
 	s, err := substrateOpen(cmd, &f.com)
 	if err != nil {
 		return err
@@ -701,6 +721,12 @@ func runSubstrateRun(cmd *cobra.Command, f *substrateRunFlags, args []string) er
 		return err
 	}
 	o.Banner = substrateBanner(ctx, s.Client, a)
+	mcp, err := startSubstrateMCP(ctx, cmd, s, a, f.mcpSpecs, true)
+	if err != nil {
+		return err
+	}
+	defer mcp.Close()
+	o.Notices = mcp.Notices()
 	return substrateAttachAndReport(ctx, cmd, o, a)
 }
 
@@ -727,21 +753,28 @@ func runSubstrateOneTask(ctx context.Context, cmd *cobra.Command, s *substrateSe
 	if err != nil {
 		return -1, err
 	}
+	mcp, err := startSubstrateMCP(ctx, cmd, s, a, f.mcpSpecs, false)
+	if err != nil {
+		return -1, err
+	}
+	defer mcp.Close()
 	w := cmd.OutOrStdout()
+	// GAP-0420: what undo needs to start the task again after a crash.
+	rec := substrateTaskRecord{Prompt: task, Clone: f.clone, Ref: f.ref, RemoteDir: f.remoteDir, Exclude: f.exclude,
+		Unmask: f.unmask, MaxUploadMB: f.maxUploadMB, Transport: f.transport, Started: time.Now().UTC()}
+	if project != "" {
+		if abs, aerr := filepath.Abs(project); aerr == nil {
+			rec.Project = abs
+		}
+	}
+	if serr := saveSubstrateTaskRecord(auth.StateDir(), a, rec); serr != nil {
+		fmt.Fprintf(cmd.ErrOrStderr(), "Note: could not keep a record of the task on this computer (%v); after a crash it cannot be started again from here.\n", serr)
+	}
 	if f.detach {
 		// The first event is the task's start; once it is seen the task
 		// runs on its own.
-		dctx, cancel := context.WithCancel(ctx)
-		started := false
-		_, rerr := attach.RunTask(dctx, attach.TaskOptions{Options: o, Prompt: task, Args: agentArgs, Emit: func(e relay.TaskEvent) {
-			if e.Type == "start" {
-				started = true
-				cancel()
-			}
-		}})
-		cancel()
-		if !started {
-			return -1, substrateFail(substrateFirstErr(rerr, errors.New("the task did not start")))
+		if serr := substrateStartDetached(ctx, o, task, agentArgs); serr != nil {
+			return -1, substrateFail(serr)
 		}
 		if asJSON {
 			return -1, writeSubstrateJSON(w, map[string]any{"atespace": a.Atespace, "name": a.Name, "batch_id": batchID, "state": "started"})
@@ -775,7 +808,7 @@ func runSubstrateOneTask(ctx context.Context, cmd *cobra.Command, s *substrateSe
 		return code, cliusage.WithExitCode(fmt.Errorf("the task failed (exit %d)", code), 1)
 	}
 	fmt.Fprintf(cmd.ErrOrStderr(), "The task finished. Bring changes home with: defenseclaw substrate pull %s\n", a.Name)
-	return code, nil
+	return code, substrateMCPNone(mcp, f.mcpSpecs)
 }
 
 // substrateTokenRefusal asks the cluster whether it refused every agent's

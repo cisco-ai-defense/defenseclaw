@@ -75,6 +75,36 @@ type Actor struct {
 	// ResumeError comes with a snapshot whose agent could not be started
 	// again (state suspended): no_worker when the pool had no room.
 	ResumeError string `json:"resume_error,omitempty"`
+	// Activity is what the agent is doing (B3.6); nil when the cluster
+	// cannot say (shown as "-", never as idle).
+	Activity *Activity `json:"activity,omitempty"`
+}
+
+// Activity is an actor's activity as list and status show it: the state
+// (thinking, waiting_on_ask, idle, suspended, task_done), the gateway's
+// receive times of the last model call, tool call and attachment, and (on
+// status only) the pending asks, each by id, kind and host or tool, never
+// its arguments. Notify is false when an administrator turned desktop
+// notifications off (substrate.activity.notifications).
+type Activity struct {
+	State       string        `json:"state"`
+	Last        time.Time     `json:"last,omitempty"`
+	LastKind    string        `json:"last_kind,omitempty"`
+	LastModel   time.Time     `json:"last_model,omitempty"`
+	LastTool    time.Time     `json:"last_tool,omitempty"`
+	Attached    time.Time     `json:"attached,omitempty"`
+	TaskEnded   time.Time     `json:"task_ended,omitempty"`
+	PendingAsks int           `json:"pending_asks"`
+	Notify      *bool         `json:"notify,omitempty"`
+	Asks        []ActivityAsk `json:"asks,omitempty"`
+}
+
+// ActivityAsk is one pending ask in a status answer.
+type ActivityAsk struct {
+	ID      string    `json:"id"`
+	Kind    string    `json:"kind"`
+	Target  string    `json:"target"`
+	Created time.Time `json:"created"`
 }
 
 // PolicyConflict is an actor's policy_conflict as the cluster shows it.
@@ -106,6 +136,18 @@ func (a Actor) shown() Actor {
 			warnings[i] = safetext.Line(w)
 		}
 		a.Warnings = warnings
+	}
+	if a.Activity != nil {
+		act := *a.Activity
+		act.State, act.LastKind = safetext.Line(act.State), safetext.Line(act.LastKind)
+		if act.Asks != nil {
+			list := make([]ActivityAsk, len(act.Asks))
+			for i, k := range act.Asks {
+				list[i] = ActivityAsk{ID: safetext.Line(k.ID), Kind: safetext.Line(k.Kind), Target: safetext.Line(k.Target), Created: k.Created}
+			}
+			act.Asks = list
+		}
+		a.Activity = &act
 	}
 	return a
 }
@@ -266,8 +308,9 @@ func (c *Client) Get(ctx context.Context, atespace, name string) (Actor, error) 
 }
 
 // Recover brings a crashed actor back to its last snapshot and starts it
-// again (GAP-0410). The gateway answers 409 not_crashed for an actor that
-// has not crashed.
+// again (GAP-0410). It first clears the agent's relay certificate record
+// (GAP-0861, GAP-0930). The gateway answers 409 not_crashed for an actor
+// that has not crashed, with Error.RelayCertCleared.
 func (c *Client) Recover(ctx context.Context, atespace, name string) (Actor, error) {
 	var a Actor
 	err := c.do(ctx, http.MethodPost, "actors/"+url.PathEscape(atespace)+"/"+url.PathEscape(name)+"/recover", nil, map[string]any{}, &a)
@@ -357,8 +400,9 @@ func (c *Client) AsksOf(ctx context.Context, all bool) ([]Ask, error) {
 
 // Decide answers one ask: decision is approve or deny. An approval lets
 // one request through; always keeps it for every later request of the
-// agent (GAP-0484).
-func (c *Client) Decide(ctx context.Context, id, decision string, always bool, reason string) error {
+// agent (GAP-0484). The note is the cluster's message when the answer
+// moved nothing because no binding names the ask now (binding_gone), else "".
+func (c *Client) Decide(ctx context.Context, id, decision string, always bool, reason string) (note string, err error) {
 	in := map[string]any{"decision": decision}
 	if always {
 		in["always"] = true
@@ -366,7 +410,17 @@ func (c *Client) Decide(ctx context.Context, id, decision string, always bool, r
 	if reason != "" {
 		in["reason"] = reason
 	}
-	return c.do(ctx, http.MethodPost, "asks/"+url.PathEscape(id), nil, in, nil)
+	var out struct {
+		BindingGone bool   `json:"binding_gone"`
+		Message     string `json:"message"`
+	}
+	if err := c.do(ctx, http.MethodPost, "asks/"+url.PathEscape(id), nil, in, &out); err != nil {
+		return "", err
+	}
+	if out.BindingGone {
+		return out.Message, nil
+	}
+	return "", nil
 }
 
 // StandingApproval is one approval given with approve --always that is
@@ -456,8 +510,12 @@ type Secret struct {
 	AskID   string     `json:"ask_id,omitempty"`
 	Expires *time.Time `json:"expires,omitempty"`
 	// Agents are the person's agents that get it; nil when not known.
-	Agents   []string   `json:"agents,omitempty"`
-	LastUsed *time.Time `json:"last_used,omitempty"`
+	Agents []string `json:"agents,omitempty"`
+	// LastUsed is the newest request by one of the person's agents that
+	// Substrate added the secret to: when, the host and the agent.
+	LastUsed      *time.Time `json:"last_used,omitempty"`
+	LastUsedHost  string     `json:"last_used_host,omitempty"`
+	LastUsedAgent string     `json:"last_used_agent,omitempty"`
 }
 
 // SecretTest is the answer of secrets test: the secret as list shows it

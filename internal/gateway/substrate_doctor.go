@@ -444,6 +444,21 @@ func (st *substrateState) signInChanged(ctx context.Context, before string, d id
 	}
 }
 
+// SubstrateRelayCertReissueCheck is the doctor row for
+// substrate.relay_cert_reissue (GAP-0861): the configured value and the
+// active mode.
+func SubstrateRelayCertReissueCheck(configured, active string) SubstrateCheck {
+	src := "set to " + active
+	if configured == config.SubstrateRelayCertReissueAuto {
+		src = "auto: " + active + " in this install"
+	}
+	detail := "relay_cert_reissue is " + active + " (" + src + "): a second relay serving certificate for an actor without proof of the live key is issued with a HIGH audit row on every replica"
+	if active == config.SubstrateRelayCertReissueRefuse {
+		detail = "relay_cert_reissue is " + active + " (" + src + "): a second relay serving certificate for an actor without proof of the live key is refused on every replica and after restarts; the owner or an administrator clears it with recover"
+	}
+	return SubstrateCheck{ID: "substrate.relay_cert_reissue", Status: "pass", Detail: detail}
+}
+
 // SignInServerCheck is the doctor row for a sign-in server check, with a
 // fix for each cause (GAP-0262).
 func SignInServerCheck(d identity.IssuerDiagnosis) SubstrateCheck {

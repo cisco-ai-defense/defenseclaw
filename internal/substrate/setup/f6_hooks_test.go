@@ -5,6 +5,7 @@ package setup
 
 import (
 	"context"
+	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"io"
@@ -277,5 +278,51 @@ func TestPreDeleteKeepsGoingWhenAHookJobCannotBeDeleted(t *testing.T) {
 		if !strings.Contains(notes, w) {
 			t.Errorf("notes lack %q:\n%s", w, notes)
 		}
+	}
+}
+
+// GAP-0909: UpdateConfigMap is a full PUT, so it carries the labels it read
+// as well as the annotations; a grant write must not wipe the labels other
+// tools put on the policy ConfigMap.
+func TestUpdateConfigMapKeepsLabelsAndAnnotations(t *testing.T) {
+	var put map[string]any
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.Method {
+		case http.MethodGet:
+			_, _ = w.Write([]byte(`{"metadata":{"name":"p","namespace":"ns","resourceVersion":"7","labels":{"app.kubernetes.io/managed-by":"helm","team":"sec"},"annotations":{"note":"kept"}},"data":{"k":"v"}}`))
+		case http.MethodPut:
+			if err := json.NewDecoder(r.Body).Decode(&put); err != nil {
+				t.Error(err)
+			}
+			_, _ = w.Write([]byte(`{}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	tok := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(tok, []byte("t"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	k, err := NewKube(srv.URL, tok, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: srv.Certificate().Raw}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cm, err := k.GetConfigMap(context.Background(), "ns", "p")
+	if err != nil || cm == nil {
+		t.Fatalf("get: %v %v", cm, err)
+	}
+	cm.Data["k"] = "w"
+	if err := k.UpdateConfigMap(context.Background(), cm); err != nil {
+		t.Fatal(err)
+	}
+	meta, _ := put["metadata"].(map[string]any)
+	labels, _ := meta["labels"].(map[string]any)
+	if labels["app.kubernetes.io/managed-by"] != "helm" || labels["team"] != "sec" || len(labels) != 2 {
+		t.Errorf("the PUT dropped the labels: %v", meta)
+	}
+	if ann, _ := meta["annotations"].(map[string]any); ann["note"] != "kept" {
+		t.Errorf("the PUT dropped the annotations: %v", meta)
 	}
 }

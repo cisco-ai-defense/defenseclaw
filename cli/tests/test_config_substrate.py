@@ -39,6 +39,7 @@ _FULL = {
         "actor_cert_oid": "1.3.6.1.4.1.11129.2.12.2",
         "keys_url": "https://idp.ate-system.svc/openid/v1/jwks",
         "keys_ca_file": "/run/servicedns.podcert.ate.dev/trust-bundle.pem",
+        "revocation": {"enabled": False, "sync_interval": "2s", "max_stale": "30s", "max_tokens_per_person": 16},
         "oidc": {"issuer": "https://login.example.com", "client_id": "defenseclaw-launcher", "groups_claim": "groups"},
         "workload_oidc": [
             {
@@ -67,8 +68,14 @@ _FULL = {
     "files": {"push": False, "sync": True},
     "git": {"https_rewrite": [{"from": "git@ghe.example.com:", "to": "https://ghe.example.com/"}],
             "submodules": False, "lfs": True},
+    "relay_tls": "required",
+    "relay_cert_reissue": "refuse",
     "unattended": {"asks": "deny", "ask_timeout": "30m", "telemetry_sampling": 0.5},
+    "interactive": {"port_forward": {"enabled": "on", "ports": "3000,8000-8999", "max_streams": 8},
+                    "mcp_bridge": {"enabled": "off", "max_servers": 2, "message_max_bytes": 65536},
+                    "idle_close": "1h"},
     "rate_limits": {"per_actor_rps": 20, "per_atespace_rps": 500},
+    "activity": {"status_window": "30s", "notifications": "off"},
     "extproc": {"enabled": True, "failure_mode": "closed", "body_inspection": "on", "body_max_bytes": 1048576,
                 "mcp_hosts": ["mcp.example.com=docs"], "body_hosts": ["api.example.com"],
                 "cluster_domains": ["svc.cluster.local"], "actor_trust_domain": "cluster.local",
@@ -170,6 +177,9 @@ class TestSubstrateLoadSave(unittest.TestCase):
             self.assertEqual(sub.templates.min_policy_generation, 3)
             self.assertEqual(sub.templates.profile_images, {"ci": ["registry.example.com/defenseclaw/ci-*"]})
             self.assertEqual(sub.identity.workload_oidc[0].audience, "defenseclaw-prod")
+            self.assertIs(sub.identity.revocation.enabled, False)
+            self.assertEqual(sub.identity.revocation.max_stale, "30s")
+            self.assertEqual(sub.identity.revocation.max_tokens_per_person, 16)
             self.assertEqual(sub.identity.workload_oidc[0].subject, "repo:acme/web:ref:refs/heads/*")
             self.assertEqual(sub.identity.workload_oidc[0].claims, {"repository": "acme/web"})
             self.assertEqual(sub.secrets[1].scope, "per_person")
@@ -201,6 +211,23 @@ class TestSubstrateLoadSave(unittest.TestCase):
             self.assertEqual(saved, [{"name": "github", "hosts": []}, {"name": "gitlab"}])
             again = self._load(tmpdir).substrate.secret_templates
             self.assertEqual([t.hosts for t in again], [[], None])
+
+    def test_notifications_substrate_defaults_are_not_written_and_off_is_kept(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = self._write(tmpdir, {})
+            cfg = self._load(tmpdir)
+            self.assertTrue(cfg.notifications.substrate.asks)
+            self.assertTrue(cfg.notifications.substrate.task_end)
+            self.assertEqual(cfg.substrate.activity.status_window, "")
+            cfg.gateway.api_port = 19000
+            cfg.save()
+            saved = yaml.safe_load(Path(path).read_text())
+            self.assertNotIn("substrate", saved.get("notifications", {}))
+            cfg.notifications.substrate.task_end = False
+            cfg.save()
+            saved = yaml.safe_load(Path(path).read_text())
+            self.assertEqual(saved["notifications"]["substrate"], {"asks": True, "task_end": False})
+            self.assertFalse(self._load(tmpdir).notifications.substrate.task_end)
 
     def test_set_from_python_writes_only_what_is_set(self):
         with tempfile.TemporaryDirectory() as tmpdir:

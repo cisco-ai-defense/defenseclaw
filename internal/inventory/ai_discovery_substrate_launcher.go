@@ -27,7 +27,7 @@ import (
 )
 
 // SubstrateLauncherSignatureID names the DefenseClaw Agent Substrate
-// launcher in discovery (PLAN E26): `defenseclaw substrate run|connect|logs`
+// launcher in discovery (PLAN E26): `defenseclaw substrate run|connect|logs|port`
 // puts a coding agent that runs in the organization's cluster on this
 // terminal. It is DefenseClaw itself, guarded by the cluster, so discovery
 // labels it instead of listing an unknown AI process. The signature is
@@ -92,7 +92,7 @@ func (s *ContinuousDiscoveryService) detectSubstrateLaunchers(procs []processInf
 			if err != nil {
 				continue
 			}
-			if r, ok := launcherpresence.Parse(b, p.PID); ok && r.Matches(p.StartedAt) {
+			if r, ok := launcherpresence.Parse(b, p.PID); ok && r.Kind == "" && r.Matches(p.StartedAt) {
 				found = append(found, p)
 				break
 			}

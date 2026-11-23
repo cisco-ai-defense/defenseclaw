@@ -30,6 +30,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/api"
+	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/auth"
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/safetext"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxcli"
 )
@@ -221,13 +222,13 @@ them and how long ago they started. Administrators see only their own agents unl
 			now := time.Now()
 			rows := make([][]string, 0, len(live))
 			for _, a := range live {
-				row := []string{a.Atespace + "/" + a.Name, substrateDash(a.Connector), substrateDash(a.Profile), substrateActorState(a), substrateAge(a.CreatedAt, now), substrateDash(a.BatchID)}
+				row := []string{a.Atespace + "/" + a.Name, substrateDash(a.Connector), substrateDash(a.Profile), substrateActorState(a), substrateActivityCell(a, now), substrateAge(a.CreatedAt, now), substrateDash(a.BatchID)}
 				if all {
 					row = append(row, substrateListOwner(a))
 				}
 				rows = append(rows, row)
 			}
-			header := []string{"NAME", "AGENT", "PROFILE", "STATE", "AGE", "BATCH"}
+			header := []string{"NAME", "AGENT", "PROFILE", "STATE", "ACTIVITY", "AGE", "BATCH"}
 			if all {
 				header = append(header, "OWNER")
 			}
@@ -310,6 +311,10 @@ Exit 75 means the cluster could not be reached; there is no document.`,
 				if err != nil {
 					return substrateFail(err)
 				}
+				// Only the one-agent answer names the pending asks.
+				if one, err := s.Client.Get(ctx, a.Atespace, a.Name); err == nil && one.Activity != nil {
+					a.Activity = one.Activity
+				}
 				if asJSON {
 					return writeSubstrateJSON(w, a)
 				}
@@ -320,6 +325,9 @@ Exit 75 means the cluster could not be reached; there is no document.`,
 				fmt.Fprintf(w, "Started:   %s ago\n", substrateAge(a.CreatedAt, time.Now()))
 				if a.State != "" {
 					fmt.Fprintf(w, "State:     %s\n", a.State)
+				}
+				for _, line := range substrateActivityLines(a, time.Now()) {
+					fmt.Fprintln(w, line)
 				}
 				if a.BatchID != "" {
 					fmt.Fprintf(w, "Batch:     %s\n", a.BatchID)
@@ -338,14 +346,19 @@ Exit 75 means the cluster could not be reached; there is no document.`,
 					// GAP-0410: say it crashed and the way back.
 					fmt.Fprintf(w, "Crashed:   its worker went away. Bring it back with: defenseclaw substrate undo %s\n", a.Name)
 					if a.Unattended {
-						// GAP-0420 (known limit in 1.0.10): a headless task does
-						// not resume after a crash; its record and log were in
-						// the crashed actor.
-						agent := a.Connector
-						if spec, err := sandboxcli.ResolveHarness(a.Connector); err == nil {
-							agent = spec.Command
+						// GAP-0420: the run and log of a headless task were in
+						// the crashed actor. undo starts the task again from
+						// the record run --task keeps on the computer that
+						// started it (at least once).
+						if _, ok := loadSubstrateTaskRecord(auth.StateDir(), a); ok {
+							fmt.Fprintf(w, "Task:      lost in the crash. undo starts it again from the beginning on a fresh copy of its folder: defenseclaw substrate undo %s\n", a.Name)
+						} else {
+							agent := a.Connector
+							if spec, err := sandboxcli.ResolveHarness(a.Connector); err == nil {
+								agent = spec.Command
+							}
+							fmt.Fprintf(w, "Task:      lost in the crash. Run defenseclaw substrate undo %s on the computer that started it to start the task again, or re-run it with: defenseclaw substrate run %s --task ...\n", a.Name, substrateDash(agent))
 						}
-						fmt.Fprintf(w, "Task:      crashed and does not resume; undo brings the agent back without it. Re-run the task with: defenseclaw substrate run %s --task ...\n", substrateDash(agent))
 					}
 					return nil
 				}
@@ -786,11 +799,16 @@ func substrateDecide(cmd *cobra.Command, com *substrateCommon, id, decision stri
 	}
 	ctx, stop := substrateContext(cmd)
 	defer stop()
-	if err := s.Client.Decide(ctx, id, decision, always, reason); err != nil {
+	note, err := s.Client.Decide(ctx, id, decision, always, reason)
+	if err != nil {
 		return substrateFail(err)
 	}
 	verb := map[string]string{"approve": "Approved", "deny": "Denied"}[decision]
 	fmt.Fprintf(cmd.OutOrStdout(), "%s %s.\n", verb, id)
+	if note != "" {
+		// The answer is recorded but moved nothing (GAP-0973): say so.
+		fmt.Fprintln(cmd.OutOrStdout(), note)
+	}
 	return nil
 }
 
@@ -949,7 +967,11 @@ func newSubstrateSecretsSetCmd() *cobra.Command {
 	}
 	com.add(cmd)
 	src.add(cmd)
+	// A no-op kept so older scripts that pass it still run (1.0.10 shipped it);
+	// hidden from help, docs and the TUI (GAP-0786). The stub manifest records it
+	// as hidden, and the Python stub accepts it and forwards it (GAP-0904).
 	cmd.Flags().BoolVar(new(bool), "mine", true, "your own secret (the only kind this command acts on)")
+	_ = cmd.Flags().MarkHidden("mine")
 	return cmd
 }
 
@@ -988,7 +1010,11 @@ func newSubstrateSecretsRmCmd() *cobra.Command {
 	}
 	com.add(cmd)
 	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "do not ask")
+	// A no-op kept so older scripts that pass it still run (1.0.10 shipped it);
+	// hidden from help, docs and the TUI (GAP-0786). The stub manifest records it
+	// as hidden, and the Python stub accepts it and forwards it (GAP-0904).
 	cmd.Flags().BoolVar(new(bool), "mine", true, "your own secret (the only kind this command acts on)")
+	_ = cmd.Flags().MarkHidden("mine")
 	return cmd
 }
 
@@ -1035,7 +1061,11 @@ func newSubstrateSecretsTestCmd() *cobra.Command {
 	out.add(cmd)
 	com.add(cmd)
 	cmd.Flags().StringVar(&agent, "agent", "", "also say whether this agent's policy carries the secret")
+	// A no-op kept so older scripts that pass it still run (1.0.10 shipped it);
+	// hidden from help, docs and the TUI (GAP-0786). The stub manifest records it
+	// as hidden, and the Python stub accepts it and forwards it (GAP-0904).
 	cmd.Flags().BoolVar(new(bool), "mine", true, "your own secret (the only kind this command acts on)")
+	_ = cmd.Flags().MarkHidden("mine")
 	return cmd
 }
 

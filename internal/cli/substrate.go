@@ -244,6 +244,10 @@ func substrateAPIMessage(e *api.Error) string {
 		// allows: signing in again with it changes nothing (GAP-0543).
 		return "the cluster does not allow this identity (" + e.Reason + "): the token is valid, but its subject or claims are not ones the cluster accepts " +
 			"(for a workload, substrate.identity.workload_oidc). Signing in again with the same identity will not help; ask your administrator"
+	case e.Unauthorized() && substrateSecretReason(e.Reason) != "":
+		// signin_ended (B5.1) and any other table reason answered with 401:
+		// the words and the fix come from the one reason table (GAP-0748).
+		return substrateSecretReason(e.Reason)
 	case e.Unauthorized():
 		return "the cluster did not accept your sign-in (" + orWord(e.Reason, "token refused") + "). Sign in again with: defenseclaw substrate login"
 	case e.NotImplemented():
@@ -341,12 +345,13 @@ func substrateTable(w io.Writer, header []string, rows [][]string) {
 func init() {
 	substrateCmd.AddCommand(
 		newSubstrateLoginCmd(), newSubstrateLogoutCmd(), newSubstrateWhoamiCmd(),
-		newSubstrateRunCmd(), newSubstrateConnectCmd(), newSubstrateListCmd(), newSubstrateStatusCmd(),
-		newSubstrateLogsCmd(), newSubstratePullCmd(), newSubstratePushCmd(), newSubstrateSyncCmd(), newSubstrateCheckpointCmd(), newSubstrateUndoCmd(),
-		newSubstrateDeleteCmd(), newSubstrateMigrateCmd(),
+		newSubstrateRunCmd(), newSubstrateConnectCmd(), newSubstrateListCmd(), newSubstrateStatusCmd(), newSubstrateWatchCmd(),
+		newSubstrateLogsCmd(), newSubstratePullCmd(), newSubstratePushCmd(), newSubstrateSyncCmd(), newSubstrateCheckpointCmd(), newSubstrateUndoCmd(), newSubstrateRecoverCmd(),
+		newSubstrateDeleteCmd(), newSubstrateMigrateCmd(), newSubstratePortCmd(),
 		newSubstrateApprovalsCmd(), newSubstrateApproveCmd(), newSubstrateRejectCmd(), newSubstrateRevokeCmd(), newSubstrateUsageCmd(),
 		newSubstrateSecretsCmd(), newSubstratePolicyCmd(),
 		newSubstrateDoctorCmd(), newSubstrateVerifyCmd(), newSubstrateSetupCmd(), newSubstrateBundleCmd(), newSubstrateTemplateCmd(),
+		newSubstrateAdminCmd(),
 	)
 	rootCmd.AddCommand(substrateCmd)
 }

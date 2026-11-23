@@ -31,6 +31,9 @@ leader; the flag is gone, and setting it here is a clear error (GAP-0250). */ -}
 {{- if has $userNs (list "default" "kube-system" "kube-public" "kube-node-lease") -}}
 {{- fail "config.substrate.self_service_secrets.namespace must not be a Kubernetes system namespace: the gateway could read and change every Secret there" -}}
 {{- end -}}
+{{- if has $userNs (include "dc.writableAtespaces" . | fromJsonArray) -}}
+{{- fail "config.substrate.self_service_secrets.namespace must not be a launcher or managed atespace: the gateway could read and change every Secret in a namespace where actors run" -}}
+{{- end -}}
 {{- if eq $userNs .Values.substrate.credentialProvider.secretsNamespace -}}
 {{- fail "config.substrate.self_service_secrets.namespace must not be substrate.credentialProvider.secretsNamespace: people's values and the admin secrets need separate namespaces" -}}
 {{- end -}}

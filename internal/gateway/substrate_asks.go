@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -79,6 +80,19 @@ func askView(a asks.Ask) map[string]any {
 		"summary": a.Summary, "reason": a.Reason, "severity": a.Severity, "created": a.Created, "expires": a.Expires,
 		"state": a.State, "unattended": a.Unattended, "note": a.Note, "rule": a.Rule,
 	}
+}
+
+// askAnswerView is askView for the body of an answer. When no binding names
+// the ask any more the answer stands but moved nothing; the body says so
+// (binding_gone and message) so an approval does not read as a secret that
+// went live (GAP-0973).
+func askAnswerView(a asks.Ask, bindingGone bool) map[string]any {
+	v := askView(a)
+	if bindingGone {
+		v["binding_gone"] = true
+		v["message"] = "No binding names this ask now. If it was removed, nothing changed; if its add is still finishing, the add applies your answer."
+	}
+	return v
 }
 
 func (a *APIServer) substrateListAsks(st *substrateState) http.HandlerFunc {
@@ -142,11 +156,11 @@ func (a *APIServer) substrateDecideAsk(st *substrateState) http.HandlerFunc {
 			switch {
 			case !ok:
 				writeSubstrateJSONError(w, http.StatusConflict, "ask_already_answered")
-			case berr != nil:
+			case berr != nil && !errors.Is(berr, errSubstrateBindingGone):
 				fmt.Fprintf(os.Stderr, "[substrate] binding of ask %s not moved: %v\n", again.ID, berr)
 				writeSubstrateJSONError(w, http.StatusBadGateway, "secret_not_stored")
 			default:
-				writeSubstrateJSON(w, http.StatusOK, askView(again))
+				writeSubstrateJSON(w, http.StatusOK, askAnswerView(again, errors.Is(berr, errSubstrateBindingGone)))
 			}
 			return
 		case asks.IsAdminOnly(err):
@@ -156,11 +170,22 @@ func (a *APIServer) substrateDecideAsk(st *substrateState) http.HandlerFunc {
 			writeSubstrateJSONError(w, http.StatusServiceUnavailable, "asks_unavailable")
 			return
 		}
+		berr := a.substrateBindingDecided(r.Context(), st, got)
 		a.emitSubstrateApprovalV8(r.Context(), got, false, audit.SandboxApprovalByOperator)
-		if err := a.substrateBindingDecided(r.Context(), st, got); err != nil {
+		gone := errors.Is(berr, errSubstrateBindingGone)
+		if gone {
+			// No binding names this ask. Either the add that opened it has
+			// not written the binding yet (the add applies this answer when
+			// it does, RV4 F2), or rm removed it (rm denies a waiting
+			// binding's ask; an answer that wins that race moves nothing).
+			// The answer stands and is recorded above (GAP-0903, GAP-0908).
+			fmt.Fprintf(os.Stderr, "[substrate] ask %s answered (%s); no binding names it now\n", got.ID, got.State)
+			berr = nil
+		}
+		if berr != nil {
 			// The ask is answered but the binding store refused the write:
 			// the binding stays waiting; the administrator is told.
-			fmt.Fprintf(os.Stderr, "[substrate] binding of ask %s not moved: %v\n", got.ID, err)
+			fmt.Fprintf(os.Stderr, "[substrate] binding of ask %s not moved: %v\n", got.ID, berr)
 			writeSubstrateJSONError(w, http.StatusBadGateway, "secret_not_stored")
 			return
 		}
@@ -169,7 +194,7 @@ func (a *APIServer) substrateDecideAsk(st *substrateState) http.HandlerFunc {
 			// themselves (decided_by), and logged here.
 			fmt.Fprintf(os.Stderr, "[substrate] administrator answered another person's ask %s (%s)\n", got.ID, got.State)
 		}
-		writeSubstrateJSON(w, http.StatusOK, askView(got))
+		writeSubstrateJSON(w, http.StatusOK, askAnswerView(got, gone))
 	}
 }
 
@@ -568,6 +593,10 @@ func (a *APIServer) recordSubstrateAskClosed(ctx context.Context, r telemetryrel
 			"target": r.Host, "reason": reason, "unattended": r.Unattended,
 		})
 	}
+	// The closure is the end of the ask's lifecycle: log.approval.resolved,
+	// result cancelled, answered by the system (GAP-0677).
+	a.emitSubstrateApprovalV8(ctx, asks.Ask{ID: r.AskID, State: asks.StateExpired, Host: r.Host, Atespace: r.Atespace,
+		Actor: r.Actor, UID: r.UID, Profile: r.Profile, OwnerID: r.UserID}, false, audit.SandboxApprovalByAutomatic)
 	if !r.Unattended || a.webhookSource == nil {
 		return
 	}

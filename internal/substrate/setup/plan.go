@@ -50,6 +50,9 @@ type ChartPlan struct {
 	// RelaySessionSecret is the relay session key Secret the relay-session
 	// hook creates when absent (gateway.relaySessionSecret).
 	RelaySessionSecret string `json:"relay_session_secret,omitempty"`
+	// RelayCASecret is the relay CA Secret the relay-session hook creates
+	// when absent (gateway.relayCASecret).
+	RelayCASecret string `json:"relay_ca_secret,omitempty"`
 }
 
 // ChartEditors are the principals the chart's plan makes editors
@@ -177,8 +180,9 @@ func (p ChartPlan) Validate() error {
 	}
 	if u := p.CredentialProvider.UserSecretsNamespace; u != "" &&
 		(!dnsLabel.MatchString(u) || u == p.Namespace || u == p.SubstrateNamespace || u == p.CredentialProvider.SecretsNamespace ||
-			slices.Contains([]string{"default", "kube-system", "kube-public", "kube-node-lease"}, u)) {
-		errs = append(errs, errors.New("credential_provider.user_secrets_namespace must be a namespace of its own: not the DefenseClaw, Substrate or admin secrets namespace, and not a Kubernetes system namespace"))
+			slices.Contains([]string{"default", "kube-system", "kube-public", "kube-node-lease"}, u) ||
+			slices.Contains(p.LauncherAtespaces, u) || slices.Contains(p.WritableAtespaces, u)) {
+		errs = append(errs, errors.New("credential_provider.user_secrets_namespace must be a namespace of its own: not the DefenseClaw, Substrate or admin secrets namespace, not a launcher or writable atespace, and not a Kubernetes system namespace"))
 	}
 	if p.StoreStateConfigMap == "" {
 		errs = append(errs, errors.New("store_state_config_map is required"))

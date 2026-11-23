@@ -70,6 +70,18 @@ type SubstrateConfig struct {
 	// check with it; the gateway and the leader read it from the same
 	// config (GAP-0250).
 	ChainEgressAction string `mapstructure:"chain_egress_action" yaml:"chain_egress_action,omitempty"`
+	// RelayTLS is how the gateway reaches an actor's relay (B3.5): auto
+	// (default) uses TLS when the template's signed kit serves it and plain
+	// HTTP with an audit row and a doctor warning for older templates;
+	// required refuses those; off drops the row and the warning. A kit that
+	// serves TLS is dialed with TLS in every mode.
+	RelayTLS string `mapstructure:"relay_tls" yaml:"relay_tls,omitempty"`
+	// RelayCertReissue is what the gateway does with a second relay
+	// serving certificate for an actor asked for without proof of the live
+	// key (GAP-0861): refuse answers 403 until an owner or administrator
+	// runs recover; flag issues it with a HIGH audit row; auto (default)
+	// is refuse in a managed enterprise install and flag in OSS.
+	RelayCertReissue string `mapstructure:"relay_cert_reissue" yaml:"relay_cert_reissue,omitempty"`
 	// WorkspaceMaxBytes caps a workspace upload through the admin
 	// listener's attach route (E23; 0 = DefaultSubstrateWorkspaceMaxBytes).
 	WorkspaceMaxBytes int64 `mapstructure:"workspace_max_bytes" yaml:"workspace_max_bytes,omitempty"`
@@ -83,11 +95,13 @@ type SubstrateConfig struct {
 	// rewrite map, submodules and LFS in run --clone.
 	Git        SubstrateGitConfig        `mapstructure:"git" yaml:"git,omitempty"`
 	Unattended SubstrateUnattendedConfig `mapstructure:"unattended"         yaml:"unattended,omitempty"`
-	RateLimits SubstrateRateLimitsConfig `mapstructure:"rate_limits"        yaml:"rate_limits,omitempty"`
-	Extproc    SubstrateExtprocConfig    `mapstructure:"extproc"            yaml:"extproc,omitempty"`
-	LLM        SubstrateLLMConfig        `mapstructure:"llm"                yaml:"llm,omitempty"`
-	Egress     SubstrateEgressConfig     `mapstructure:"egress"             yaml:"egress,omitempty"`
-	Secrets    []SubstrateSecret         `mapstructure:"secrets"            yaml:"secrets,omitempty"`
+	// Interactive is the port forward and MCP bridge switches (B3).
+	Interactive SubstrateInteractiveConfig `mapstructure:"interactive" yaml:"interactive,omitempty"`
+	RateLimits  SubstrateRateLimitsConfig  `mapstructure:"rate_limits"        yaml:"rate_limits,omitempty"`
+	Extproc     SubstrateExtprocConfig     `mapstructure:"extproc"            yaml:"extproc,omitempty"`
+	LLM         SubstrateLLMConfig         `mapstructure:"llm"                yaml:"llm,omitempty"`
+	Egress      SubstrateEgressConfig      `mapstructure:"egress"             yaml:"egress,omitempty"`
+	Secrets     []SubstrateSecret          `mapstructure:"secrets"            yaml:"secrets,omitempty"`
 	// SelfServiceSecrets is how people bind their own secrets (B1 2.5).
 	SelfServiceSecrets SubstrateSelfServiceSecretsConfig `mapstructure:"self_service_secrets" yaml:"self_service_secrets,omitempty"`
 	// SecretTemplates is the admin catalog of templates people bind their
@@ -101,6 +115,9 @@ type SubstrateConfig struct {
 	Admin OpenShellAdminConfig `mapstructure:"admin" yaml:"admin,omitempty"`
 	// Bundles is signed policy bundles (substrate_bundles.go).
 	Bundles SubstrateBundlesConfig `mapstructure:"bundles" yaml:"bundles,omitempty"`
+	// Activity is the agent state in list and status and the notification
+	// switch (substrate_activity.go).
+	Activity SubstrateActivityConfig `mapstructure:"activity" yaml:"activity,omitempty"`
 }
 
 // Self-service secret modes (substrate.self_service_secrets.mode).
@@ -341,6 +358,62 @@ type SubstrateIdentityConfig struct {
 	// administrators on the admin listener. The gateway's --admin-groups
 	// flag adds to them.
 	AdminGroups []string `mapstructure:"admin_groups" yaml:"admin_groups,omitempty"`
+	// Revocation is the list of ended sign-ins (B5.1): logout, logout
+	// --all and admin revoke.
+	Revocation SubstrateRevocationConfig `mapstructure:"revocation" yaml:"revocation,omitempty"`
+}
+
+// SubstrateRevocationConfig is the list of ended sign-ins the leader keeps
+// and every gateway replica pulls (B5.1). Enabled is read at start: turning
+// it on or off takes a gateway restart. Managed installs may not turn it
+// off.
+type SubstrateRevocationConfig struct {
+	// Enabled (default true). false: no list, no pull loop; a copied
+	// sign-in token works until it expires (doctor warns).
+	Enabled *bool `mapstructure:"enabled" yaml:"enabled,omitempty"`
+	// SyncInterval is how often a replica pulls from the leader (Go
+	// duration, 1s to 60s, default 5s).
+	SyncInterval string `mapstructure:"sync_interval" yaml:"sync_interval,omitempty"`
+	// MaxStale is how old a replica's copy may get before it refuses
+	// sign-ins with revocation_unavailable (default 60s or 2 x
+	// sync_interval, whichever is longer; at least 2 x sync_interval, so
+	// one slow pull does not make the replica refuse, at most 1h).
+	MaxStale string `mapstructure:"max_stale" yaml:"max_stale,omitempty"`
+	// MaxTokensPerPerson is how many single-token ends the leader keeps
+	// per person before it turns them into one person-wide end (default
+	// 64, 1 to 4096).
+	MaxTokensPerPerson int `mapstructure:"max_tokens_per_person" yaml:"max_tokens_per_person,omitempty"`
+}
+
+// Defaults of substrate.identity.revocation.
+const (
+	DefaultSubstrateRevocationSyncInterval = 5 * time.Second
+	DefaultSubstrateRevocationMaxStale     = 60 * time.Second
+	DefaultSubstrateRevocationMaxTokens    = 64
+)
+
+// EffectiveEnabled reports whether ended sign-ins are kept (default on).
+func (r SubstrateRevocationConfig) EffectiveEnabled() bool {
+	return r.Enabled == nil || *r.Enabled
+}
+
+// EffectiveSyncInterval is the replica pull interval.
+func (r SubstrateRevocationConfig) EffectiveSyncInterval() time.Duration {
+	return durationOr(r.SyncInterval, DefaultSubstrateRevocationSyncInterval)
+}
+
+// EffectiveMaxStale is the age past which a replica refuses sign-ins:
+// max_stale, or 60s or 2 x sync_interval, whichever is longer (RV1-09).
+func (r SubstrateRevocationConfig) EffectiveMaxStale() time.Duration {
+	return durationOr(r.MaxStale, max(DefaultSubstrateRevocationMaxStale, 2*r.EffectiveSyncInterval()))
+}
+
+// EffectiveMaxTokensPerPerson is the per-person single-token cap.
+func (r SubstrateRevocationConfig) EffectiveMaxTokensPerPerson() int {
+	if r.MaxTokensPerPerson <= 0 {
+		return DefaultSubstrateRevocationMaxTokens
+	}
+	return r.MaxTokensPerPerson
 }
 
 // SubstrateOIDCConfig is the people's identity provider (launcher sign-in).
@@ -861,18 +934,20 @@ func (u SubstrateUploadScanConfig) EffectiveTimeBudget() time.Duration {
 }
 
 // EffectiveSecretAction is upload_scan.secret_action, replace when unset.
+// It is matched exactly, as the config schemas do: Replace or a padded
+// value is refused by Validate, not read as replace (RV5-8).
 func (u SubstrateUploadScanConfig) EffectiveSecretAction() string {
-	if v := strings.ToLower(strings.TrimSpace(u.SecretAction)); v != "" {
-		return v
+	if u.SecretAction != "" {
+		return u.SecretAction
 	}
 	return SubstrateUploadReplace
 }
 
 // EffectivePlaceholderForm is upload_scan.placeholder_form, token when
-// unset.
+// unset, matched exactly like EffectiveSecretAction.
 func (u SubstrateUploadScanConfig) EffectivePlaceholderForm() string {
-	if v := strings.ToLower(strings.TrimSpace(u.PlaceholderForm)); v != "" {
-		return v
+	if u.PlaceholderForm != "" {
+		return u.PlaceholderForm
 	}
 	return SubstratePlaceholderTok
 }
@@ -897,6 +972,49 @@ const (
 	SubstrateChainEgressBlock = "block"
 	SubstrateChainEgressAlert = "alert"
 )
+
+// Values of substrate.relay_tls.
+const (
+	SubstrateRelayTLSAuto     = "auto"
+	SubstrateRelayTLSRequired = "required"
+	SubstrateRelayTLSOff      = "off"
+)
+
+// EffectiveRelayTLS is substrate.relay_tls, auto when unset.
+func (s SubstrateConfig) EffectiveRelayTLS() string {
+	if v := strings.ToLower(strings.TrimSpace(s.RelayTLS)); v != "" {
+		return v
+	}
+	return SubstrateRelayTLSAuto
+}
+
+// Values of substrate.relay_cert_reissue.
+const (
+	SubstrateRelayCertReissueAuto   = "auto"
+	SubstrateRelayCertReissueFlag   = "flag"
+	SubstrateRelayCertReissueRefuse = "refuse"
+)
+
+// EffectiveRelayCertReissue is substrate.relay_cert_reissue, auto when
+// unset.
+func (s SubstrateConfig) EffectiveRelayCertReissue() string {
+	if v := strings.ToLower(strings.TrimSpace(s.RelayCertReissue)); v != "" {
+		return v
+	}
+	return SubstrateRelayCertReissueAuto
+}
+
+// RelayCertReissueFor is the active substrate.relay_cert_reissue: auto is
+// refuse in a managed enterprise install and flag in OSS.
+func (s SubstrateConfig) RelayCertReissueFor(managed bool) string {
+	switch v := s.EffectiveRelayCertReissue(); {
+	case v != SubstrateRelayCertReissueAuto:
+		return v
+	case managed:
+		return SubstrateRelayCertReissueRefuse
+	}
+	return SubstrateRelayCertReissueFlag
+}
 
 // EffectiveChainEgressAction is substrate.chain_egress_action, block when
 // unset.
@@ -1086,6 +1204,16 @@ func (s *SubstrateConfig) Validate() error {
 	default:
 		bad("launcher.upload_scan.placeholder_form", "%q is not token or env", up.PlaceholderForm)
 	}
+	switch s.EffectiveRelayTLS() {
+	case SubstrateRelayTLSAuto, SubstrateRelayTLSRequired, SubstrateRelayTLSOff:
+	default:
+		bad("relay_tls", "%q is not auto, required or off", s.RelayTLS)
+	}
+	switch s.EffectiveRelayCertReissue() {
+	case SubstrateRelayCertReissueAuto, SubstrateRelayCertReissueFlag, SubstrateRelayCertReissueRefuse:
+	default:
+		bad("relay_cert_reissue", "%q is not auto, flag or refuse", s.RelayCertReissue)
+	}
 	if a := s.API.Address; a != "" {
 		if _, port, err := net.SplitHostPort(a); err != nil || port == "" {
 			bad("api.address", "%q must be host:port", a)
@@ -1188,6 +1316,20 @@ func (s *SubstrateConfig) Validate() error {
 	default:
 		bad("default_sandbox_class", "%q must be gvisor or microvm", s.DefaultSandboxClass)
 	}
+	rv := s.Identity.Revocation
+	if v := rv.SyncInterval; v != "" {
+		if d, err := time.ParseDuration(strings.TrimSpace(v)); err != nil || d < time.Second || d > time.Minute {
+			bad("identity.revocation.sync_interval", "%q must be a Go duration from 1s to 60s", v)
+		}
+	}
+	if v := rv.MaxStale; v != "" {
+		if d, err := time.ParseDuration(strings.TrimSpace(v)); err != nil || d < 2*rv.EffectiveSyncInterval() || d > time.Hour {
+			bad("identity.revocation.max_stale", "%q must be a Go duration of at least 2 x sync_interval (%s) and at most 1h", v, 2*rv.EffectiveSyncInterval())
+		}
+	}
+	if n := rv.MaxTokensPerPerson; n < 0 || n > 4096 {
+		bad("identity.revocation.max_tokens_per_person", "%d must be from 1 to 4096 (0 = default 64)", n)
+	}
 	if v := s.IdleSuspendAfter; v != "" {
 		if d, err := time.ParseDuration(strings.TrimSpace(v)); err != nil || d < 0 || (d > 0 && d < time.Minute) {
 			bad("idle_suspend_after", "%q must be a Go duration of at least 1m, or 0s for off", v)
@@ -1206,6 +1348,7 @@ func (s *SubstrateConfig) Validate() error {
 	if r := s.Unattended.TelemetrySampling; r != nil && (*r < 0 || *r > 1) {
 		bad("unattended.telemetry_sampling", "%v is outside 0-1", *r)
 	}
+	s.Interactive.validate(bad)
 	if s.RateLimits.PerActorRPS < 0 {
 		bad("rate_limits.per_actor_rps", "must not be negative")
 	}
@@ -1275,6 +1418,8 @@ func (s *SubstrateConfig) Validate() error {
 		bad("self_service_secrets.namespace", "%q is not a Kubernetes namespace name", ss.Namespace)
 	} else if slices.Contains(substrateReservedNamespaces, ss.Namespace) {
 		bad("self_service_secrets.namespace", "%q is a Kubernetes system namespace; use a namespace of its own", ss.Namespace)
+	} else if _, ok := s.LauncherAtespace(ss.Namespace); ok && ss.Namespace != "" {
+		bad("self_service_secrets.namespace", "%q is a launcher atespace, where actors run; use a namespace of its own", ss.Namespace)
 	}
 	if ss.Provider != "" && !egressspec.IsDNS1123Subdomain(ss.Provider) {
 		bad("self_service_secrets.provider", "%q is not a provider name", ss.Provider)
@@ -1373,6 +1518,7 @@ func (s *SubstrateConfig) Validate() error {
 	s.validateTemplates(bad)
 
 	s.Bundles.validate(bad)
+	s.Activity.validate(bad)
 	if err := s.Admin.validateAs("admin"); err != nil {
 		errs = append(errs, err)
 	}
@@ -1463,6 +1609,9 @@ func (s *SubstrateConfig) ValidateManaged(deploymentMode string) error {
 	}
 	if s.Enabled && len(s.Templates.AllowedImages) == 0 {
 		errs = append(errs, errors.New("templates.allowed_images: managed_enterprise names the template registries and repositories"))
+	}
+	if !s.Identity.Revocation.EffectiveEnabled() {
+		errs = append(errs, errors.New("identity.revocation.enabled: false is not allowed in managed_enterprise (ended sign-ins are always refused)"))
 	}
 	return errors.Join(errs...)
 }

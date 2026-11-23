@@ -24,6 +24,7 @@ import (
 	"os"
 
 	"github.com/defenseclaw/defenseclaw/internal/substrate/identity"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/revocation"
 )
 
 // Refused tokens on the Substrate listeners (GAP-0407, GAP-0408). The actor
@@ -65,6 +66,8 @@ var substrateAuthReasons = map[identity.Reason]bool{
 	identity.ReasonSubject: true, identity.ReasonClaims: true, identity.ReasonActorGone: true,
 	identity.ReasonActorUID: true, identity.ReasonActorState: true, identity.ReasonUnavailable: true,
 	identity.ReasonKeysetFailed: true,
+	// B5.1: an ended sign-in, and a replica whose ended list is stale.
+	identity.Reason(revocation.ReasonEnded): true, identity.Reason(revocation.ReasonUnavailable): true,
 }
 
 func substrateAuthReason(r identity.Reason) string {

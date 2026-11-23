@@ -44,12 +44,15 @@ Every value is checked by `values.schema.json`. The main ones:
 |---|---|---|
 | `image.repository`, `image.tag`, `image.digest` | ghcr.io/cisco-ai-defense/defenseclaw-gateway, appVersion, "" | the digest wins over the tag; the release chart pins it |
 | `config` | substrate section on | DefenseClaw config.yaml; the chart fills `substrate.services` and `substrate.api` |
+| `config.substrate.identity.revocation` | `{enabled: true, sync_interval: 5s, max_stale: 60s, max_tokens_per_person: 64}` | ended sign-ins: the leader keeps the list on its volume, each gateway replica pulls it every `sync_interval` and refuses sign-ins with `revocation_unavailable` when its copy is older than `max_stale`; `enabled` takes a gateway restart, and managed installs may not turn it off |
 | `config.substrate.launcher_atespaces` | {} | profile to atespaces; only DefenseClaw edits these |
 | `managedAtespaces` | [] | other atespaces DefenseClaw writes egress policy in |
 | `substrate.namespace`, `substrate.apiAddress`, `substrate.apiAudience` | ate-system | where Substrate runs |
 | `substrate.actorKeys.url` | `""` | the key set the gateway verifies actor tokens with (`config.substrate.identity.keys_url`); empty is the idp Service, `https://idp.<substrate.namespace>.svc/openid/v1/jwks`. The token's `iss` is compared with `config.substrate.identity.issuer` as a string, so a unique per-cluster issuer need not resolve (GAP-0194). A URL on another in-cluster Service or a private address may need a change to `networkPolicy.egress` |
 | `substrate.actorKeys.caConfigMap` | `""` | a ConfigMap (key `ca.crt`) with the PEM CA of the keys URL certificate, mounted on the gateway as `keys_ca_file`; empty is the servicedns trust bundle, which signs the idp Service certificate |
 | `substrate.credentialProvider.*` | grant on, namespace `defenseclaw-actor-secrets` | the launcher atespaces' grant in the Kubernetes credential provider policy |
+| `substrate.launcher.keyReplay`, `substrate.files.push`, `substrate.files.sync` | unset (config defaults: `ask`, `true`, `true`) | Preview. The launcher key replay mode (`ask`, `on`, `off`; `off` is the admin-off switch) and the switches that refuse the upload of a push or a sync batch. Each fills `config.substrate.launcher.key_replay`, `files.push` and `files.sync` unless `config` sets it; `config` wins |
+| `substrate.git.httpsRewrite`, `substrate.git.submodules`, `substrate.git.lfs`, `substrate.git.pushBranch` | unset (config defaults: the SaaS rewrites, `true`, `true`, `ask`) | Preview. Git in agents: extra ssh-to-https pairs (`from`, `to`; at most 64), whether `run --clone` clones submodules and fetches Git LFS files, and whether `pull --push-branch` may push (`allow`, `ask`, `deny`; `deny` is the admin-off switch). Each fills `config.substrate.git.https_rewrite`, `submodules`, `lfs` and `push_branch` unless `config` sets it; `config` wins |
 | `bootstrap.ownerTokenSecret` | "" | a global owner's token Secret (key `token`) for the OpenFGA bootstrap |
 | `callout.judge.tokenSecret` | `defenseclaw-callout-judge` | the callout's token for the MCP tool verdict route on the admin Service; the chain-key hook creates this Secret when absent. `""` turns the route off (tools/call alerts on OSS, refused on managed) |
 | `gateway.extraArgs` | [] | flags appended to the gateway's serve flags |
@@ -58,6 +61,7 @@ Every value is checked by `values.schema.json`. The main ones:
 | `gateway.extraEnv`, `gateway.extraVolumes`, `gateway.extraVolumeMounts` | [] | added to the gateway container and pod |
 | `gateway.args` | [] | replaces the whole container argument list (`serve --substrate ...` included); for an added flag use `gateway.extraArgs` |
 | `gateway.authDelegatorBinding` | "" | name of the one cluster-wide object: the gateway's ClusterRoleBinding to `system:auth-delegator`, rendered only for the Kubernetes sign-in (no OIDC issuer); "" is `defenseclaw-auth-delegator-<namespace>-<release>` |
+| `gateway.relayCASecret` | `defenseclaw-relay-ca` | the relay CA (keys `ca.pem`, `ca-key.pem`, Preview): the gateway signs each relay's TLS serving certificate with it and checks the relay on attach (`config.substrate.relay_tls`). The relay-session hook creates it when absent and never replaces it; uninstall keeps it. To rotate it, make a new CA, put its certificate first in `ca.pem` with the old CA certificate after it, put the new key in `ca-key.pem`, and restart the gateway: it signs with the first CA and trusts both. Remove the old certificate from `ca.pem` after 24 hours (one relay certificate lifetime), when every relay has renewed onto the new CA; until then relays still on an old-CA certificate keep working. If the old CA key leaked, do not keep the old CA: put only the new CA certificate in `ca.pem` and the new key in `ca-key.pem`, and restart every gateway replica. The old CA is then no longer trusted, so whoever holds its key cannot mint relay certificates the gateway accepts. At the next attach the gateway refuses the relay's old certificate, and the relay asks for a new one at once: its renewal is refused (`renewal_ca_dropped`), so it asks again without proof, which follows `config.substrate.relay_cert_reissue`. With `flag` (the default outside managed installs) it gets a certificate from the new CA with a HIGH audit row, and attach works again. With `refuse` (the managed default) that request is refused with a HIGH audit row naming `previous_ca: dropped`, so for each running agent the owner or an administrator runs `defenseclaw substrate recover NAME` (list them with `defenseclaw substrate list`); the next attach then works. Suspending and resuming an agent also gives it a new certificate. Without either, attach to an agent fails until its old certificate expires (at most 24 hours) |
 | `callout.actorSecrets.secretName` | "" | exposed `actor_secrets` values for exact-value DLP, mounted read-only in the callout (egress) and the gateway (/llm); sets `config.substrate.extproc.actor_secrets_dir` |
 | `networkPolicy.adminFrom` | [] | extra peers for the admin port |
 | `deploymentMode` | "" | sets `config.deployment_mode`; `managed_enterprise` mounts `config.yaml` as one read-only file and gives each pod a data volume (`managed.dataSizeLimit`, `4Gi`, sized as `homeSizeLimit`) owned by the gateway account (`0700`, set by an init container running as root with only `CHOWN` and `FOWNER`), as the managed trust checks require. `managed.serviceAccountName` names that account (`nonroot`). |
@@ -199,11 +203,15 @@ bundles:
 
 - `helm upgrade` checks the new config, refuses a skipped minor (N-1 to N only) and rolls under the PDBs. The leader
   migrates the store at start after a backup.
-- `helm rollback` to a release with an older store schema is refused, naming the backup. helm keeps the refused
+- `helm rollback` to a release with an older store schema is refused, naming the backup. A pre-rollback hook that
+  fails for another reason (the store state cannot be read) leaves the same trouble. helm keeps the failed
   rollback as a revision in status pending-rollback (it writes the revision before it runs the hook), and every later
-  `helm upgrade` fails with another operation in progress. Clear it with `helm rollback RELEASE N`, where N is the
-  revision `helm history RELEASE` shows as deployed: that release passes the check and nothing changes. helm prints only
-  that the hook failed; the refusal, with these steps, is in `kubectl logs job/defenseclaw-pre-rollback`.
+  `helm upgrade` fails with another operation in progress. Clear it with `helm -n NAMESPACE rollback RELEASE N`, where N is the
+  revision `helm -n NAMESPACE history RELEASE` shows as deployed: that release passes the check and nothing changes. Every failed
+  pre-rollback hook says this too. If the store-state ConfigMap itself cannot be parsed, every rollback fails the same
+  way, so repair it first (`kubectl -n NAMESPACE edit configmap defenseclaw-store-state`: set `schema_version` to the
+  schema the store is at, or delete the ConfigMap and the leader writes a new one), then clear the revision. helm prints only that the hook failed; the refusal, with these steps, is in
+  `kubectl -n NAMESPACE logs job/defenseclaw-pre-rollback`.
 - Outside managed mode every pod (gateway, leader, controller, callout) runs a root init container, `substrate-datadir`,
   with only `CHOWN` and `FOWNER`. A namespace that enforces the Pod Security `restricted` level, or OpenShift's
   `restricted` SCC, refuses those pods: on an upgrade from a chart without it, `helm upgrade` stalls with the old pods

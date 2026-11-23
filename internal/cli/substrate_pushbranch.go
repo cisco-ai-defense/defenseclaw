@@ -130,7 +130,7 @@ func runSubstratePushBranch(ctx context.Context, cmd *cobra.Command, f *substrat
 		return writeSubstrateJSONCompact(w, map[string]any{"pushed": true, "branch": branch, "host": p.Host, "repo": p.Repo, "commit": p.Commit,
 			"commits": p.Commits, "files": len(p.Files), "compare": link})
 	}
-	fmt.Fprintf(w, "Pushed %s to %s (%s).", branch, target, substratePlural(p.Commits, "commit"))
+	fmt.Fprintf(w, "Pushed %s to %s (%s).", branch, target, substratePlural(p.Commits, "commit", "commits"))
 	if link != "" {
 		fmt.Fprintf(w, " Open a pull request: %s", link)
 	}
@@ -160,7 +160,7 @@ func substratePushBranchReplaced(dataDir, copyName, actor, branch string) error 
 
 // substratePushReview prints what the push carries and what is flagged.
 func substratePushReview(w io.Writer, p *workspace.BranchPush, branch, target string) {
-	fmt.Fprintf(w, "Push %s (%s, %s) to %s\n", branch, substratePlural(p.Commits, "commit"), substratePlural(len(p.Files), "file"), target)
+	fmt.Fprintf(w, "Push %s (%s, %s) to %s\n", branch, substratePlural(p.Commits, "commit", "commits"), substratePlural(len(p.Files), "file", "files"), target)
 	if p.Made {
 		fmt.Fprintln(w, "  The agent's uncommitted work goes in one commit, \"defenseclaw: work of agent ...\".")
 	}
@@ -213,18 +213,23 @@ func substratePushDecide(ctx context.Context, cmd *cobra.Command, f *substratePu
 			asked = true
 			fmt.Fprintf(errw, "%s [y/N/a] ", strings.TrimSuffix(d.Summary, "?")+"?")
 			line, _ := bufio.NewReader(cmd.InOrStdin()).ReadString('\n')
+			var note string
 			switch strings.ToLower(strings.TrimSpace(line)) {
 			case "y", "yes":
-				err = s.Client.Decide(ctx, d.AskID, "approve", false, "")
+				note, err = s.Client.Decide(ctx, d.AskID, "approve", false, "")
 			case "a", "always":
-				err = s.Client.Decide(ctx, d.AskID, "approve", true, "")
+				note, err = s.Client.Decide(ctx, d.AskID, "approve", true, "")
 			default:
-				_ = s.Client.Decide(ctx, d.AskID, "deny", false, "")
+				_, _ = s.Client.Decide(ctx, d.AskID, "deny", false, "")
 				fmt.Fprintln(errw, "Not pushed.")
 				return cliusage.WithExitCode(errors.New("not pushed"), substrateExitRefused)
 			}
 			if err != nil {
 				return substrateFail(err)
+			}
+			if note != "" {
+				// The answer is recorded but moved nothing (GAP-0973): say so.
+				fmt.Fprintln(errw, note)
 			}
 			continue
 		}
@@ -241,12 +246,4 @@ func substratePushDecide(ctx context.Context, cmd *cobra.Command, f *substratePu
 		case <-time.After(substratePushPoll):
 		}
 	}
-}
-
-// substratePlural is "1 commit" or "3 commits".
-func substratePlural(n int, word string) string {
-	if n == 1 {
-		return "1 " + word
-	}
-	return fmt.Sprintf("%d %ss", n, word)
 }

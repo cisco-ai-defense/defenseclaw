@@ -39,6 +39,7 @@ package activity
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"time"
@@ -65,6 +66,10 @@ const (
 	DefaultSnapshotTTL = 10 * time.Second
 	// maxActors bounds every map here; past it the oldest entries go.
 	maxActors = 100000
+	// maxKinds bounds the per-kind maps (hook, model, relay, egress, and
+	// room for a new kind): a replica cannot grow the store by inventing
+	// kinds.
+	maxKinds = 8
 	// retention is how long the leader keeps an actor it heard nothing of.
 	retention = 24 * time.Hour
 	// replicaSilentAfter is three missed replica heartbeats.
@@ -104,6 +109,18 @@ type Snapshot struct {
 	Pending  []string             `json:"pending,omitempty"`
 	Ended    map[string]time.Time `json:"ended,omitempty"`
 	Attached map[string]time.Time `json:"attached,omitempty"`
+	// Kinds is the newest time of each kind (hook, model, relay, egress) by
+	// actor UID, only when the request asked for Detail: the status and
+	// list answers show what an agent did last (B3.6). The controller never
+	// asks, so its snapshot does not grow.
+	Kinds map[string]map[string]time.Time `json:"kinds,omitempty"`
+}
+
+// SnapshotRequest is the body of MethodActivitySnapshot. An empty body is
+// the controller's request.
+type SnapshotRequest struct {
+	// Detail adds Snapshot.Kinds.
+	Detail bool `json:"detail,omitempty"`
 }
 
 // ---- gateway replica ----
@@ -221,6 +238,8 @@ type Store struct {
 	// heartbeat (substrate-1:GAP-0578 e).
 	attachVia map[string]string
 	replicas  map[string]time.Time
+	// kinds is the newest time of each other kind, by kind then UID.
+	kinds map[string]map[string]time.Time
 }
 
 func (s *Store) now() time.Time {
@@ -253,6 +272,9 @@ func (s *Store) Observe(_ context.Context, b Batch) (struct{}, error) {
 			}
 		}
 	}
+	if s.kinds == nil {
+		s.kinds = map[string]map[string]time.Time{}
+	}
 	for _, e := range b.Entries {
 		if e.UID == "" || strings.HasPrefix(e.UID, replicaUIDPrefix) {
 			continue
@@ -267,6 +289,15 @@ func (s *Store) Observe(_ context.Context, b Batch) (struct{}, error) {
 				into = s.ended
 			case KindAttach:
 				into = s.attached
+			default:
+				k := s.kinds[kind]
+				if k == nil && len(s.kinds) < maxKinds {
+					k = map[string]time.Time{}
+					s.kinds[kind] = k
+				}
+				if k != nil && t.After(k[e.UID]) {
+					k[e.UID] = t
+				}
 			}
 			if t.After(into[e.UID]) {
 				into[e.UID] = t
@@ -295,6 +326,9 @@ func (s *Store) prune(now time.Time) {
 			delete(s.ended, uid)
 			delete(s.attached, uid)
 			delete(s.attachVia, uid)
+			for _, k := range s.kinds {
+				delete(k, uid)
+			}
 		}
 	}
 	for name, at := range s.replicas {
@@ -331,8 +365,9 @@ func (s *Store) attachedNow(uid string, at, now time.Time) time.Time {
 	return now
 }
 
-// Snapshot answers the controller.
-func (s *Store) Snapshot(context.Context, struct{}) (Snapshot, error) {
+// Snapshot answers the controller and, with Detail, the gateway's list and
+// status.
+func (s *Store) Snapshot(_ context.Context, req SnapshotRequest) (Snapshot, error) {
 	s.mu.Lock()
 	now := s.now()
 	s.prune(now)
@@ -350,6 +385,16 @@ func (s *Store) Snapshot(context.Context, struct{}) (Snapshot, error) {
 		out.Attached = make(map[string]time.Time, len(s.attached))
 		for uid, t := range s.attached {
 			out.Attached[uid] = s.attachedNow(uid, t, now)
+		}
+	}
+	if req.Detail && len(s.kinds) > 0 {
+		out.Kinds = make(map[string]map[string]time.Time, len(s.kinds))
+		for kind, m := range s.kinds {
+			c := make(map[string]time.Time, len(m))
+			for uid, t := range m {
+				c[uid] = t
+			}
+			out.Kinds[kind] = c
 		}
 	}
 	s.mu.Unlock()
@@ -468,4 +513,139 @@ func (s *Source) PendingAsk(uid string) bool {
 	defer s.mu.Unlock()
 	s.refresh()
 	return s.pending[uid]
+}
+
+// ---- gateway list and status ----
+
+// ErrUnavailable is Reader's answer when it has no recent snapshot: the
+// leader cannot be reached or has not answered yet.
+var ErrUnavailable = errors.New("activity: the leader's snapshot is not available")
+
+// The Reader's bounds (GAP-1018). Vars so that tests can shorten them.
+var (
+	// readerCallTimeout bounds one read of the leader (one attempt).
+	readerCallTimeout = 2 * time.Second
+	// readerWait is how long a caller with no snapshot at all waits for
+	// the read in flight (a cold start); later reads run behind the
+	// snapshot in hand.
+	readerWait = 250 * time.Millisecond
+	// readerFailTTL is how long a failed read is remembered: no caller
+	// waits and no new read starts until it ends.
+	readerFailTTL = 10 * time.Second
+)
+
+// Reader is the gateway's read of the leader's feed for the list and status
+// answers (B3.6). One snapshot with Detail is reused for TTL, so a list of
+// 2,100 agents is one leader call per 10 s, not one per agent.
+//
+// It is best effort and never puts a caller behind a network call
+// (GAP-1018): no lock is held over the read, which runs in the background
+// with one attempt and readerCallTimeout. A snapshot past its TTL is still
+// answered while a newer one is read, up to two replica flushes past it
+// (like Source.fresh); a failed read is remembered for readerFailTTL. With
+// no usable snapshot the answer is ErrUnavailable, which list and status
+// show as unknown, never as idle.
+type Reader struct {
+	Leader *leader.Client
+	TTL    time.Duration
+	Now    func() time.Time
+
+	mu   sync.Mutex
+	snap Snapshot
+	got  time.Time // when snap came from the leader
+	// failed is when the last read failed, or a caller stopped waiting for
+	// it (zero after a good read).
+	failed time.Time
+	// inflight is closed when the read in flight ends; nil when none runs.
+	inflight chan struct{}
+	// fetch reads the leader (nil: Leader.Call). Tests replace it.
+	fetch func(ctx context.Context) (Snapshot, error)
+}
+
+func (r *Reader) now() time.Time {
+	if r.Now != nil {
+		return r.Now()
+	}
+	return time.Now()
+}
+
+func (r *Reader) ttl() time.Duration {
+	if r.TTL <= 0 {
+		return DefaultSnapshotTTL
+	}
+	return r.TTL
+}
+
+// Snapshot returns the leader's snapshot with Detail, at most TTL old (10 s
+// when unset), or an older one while a newer one is read. It does not wait
+// on the leader, except a first caller for at most readerWait.
+func (r *Reader) Snapshot(ctx context.Context) (Snapshot, error) {
+	ttl := r.ttl()
+	r.mu.Lock()
+	now := r.now()
+	if !r.got.IsZero() && now.Sub(r.got) < ttl {
+		snap := r.snap
+		r.mu.Unlock()
+		return snap, nil
+	}
+	failed := !r.failed.IsZero()
+	if r.inflight == nil && (!failed || now.Sub(r.failed) >= readerFailTTL) {
+		r.inflight = make(chan struct{})
+		go r.refresh(r.inflight)
+	}
+	if !r.got.IsZero() && now.Sub(r.got) < ttl+2*DefaultFlushInterval {
+		snap := r.snap
+		r.mu.Unlock()
+		return snap, nil
+	}
+	ch := r.inflight
+	r.mu.Unlock()
+	if failed || ch == nil {
+		// The last read failed: callers do not wait on the next one.
+		return Snapshot{}, ErrUnavailable
+	}
+	t := time.NewTimer(readerWait)
+	defer t.Stop()
+	select {
+	case <-ch:
+	case <-t.C:
+		r.mu.Lock()
+		if r.failed.IsZero() && r.inflight == ch {
+			r.failed = r.now() // a slow leader: no one else waits on it
+		}
+		r.mu.Unlock()
+		return Snapshot{}, ErrUnavailable
+	case <-ctx.Done():
+		return Snapshot{}, ctx.Err()
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.got.IsZero() || !r.failed.IsZero() {
+		return Snapshot{}, ErrUnavailable
+	}
+	return r.snap, nil
+}
+
+// refresh reads the leader once and closes done.
+func (r *Reader) refresh(done chan struct{}) {
+	ctx, cancel := context.WithTimeout(leader.WithoutRetry(context.Background()), readerCallTimeout)
+	defer cancel()
+	fetch := r.fetch
+	if fetch == nil {
+		fetch = func(ctx context.Context) (Snapshot, error) {
+			var snap Snapshot
+			err := r.Leader.Call(ctx, leader.MethodActivitySnapshot, leader.NewRequestID(), SnapshotRequest{Detail: true}, &snap)
+			return snap, err
+		}
+	}
+	snap, err := fetch(ctx)
+	r.mu.Lock()
+	if err != nil {
+		r.failed = r.now()
+	} else {
+		r.snap, r.got, r.failed = snap, r.now(), time.Time{}
+	}
+	r.inflight = nil
+	r.mu.Unlock()
+	close(done)
 }

@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -255,6 +256,10 @@ func translateSecrets(ctx context.Context, base gitCmd, rec *CopyRecord, changes
 		}
 		e := uploaded[rel]
 		t, kept, put, near, why := translateReplaced(blobs[e.oid], agent, byFile[rel], restore)
+		// lands: the agent changed a non-blank line other than the
+		// placeholder lines kept as uploaded, so its code lands in a file
+		// that holds the value.
+		lands := why == "" && !sameNonBlank(t, blobs[e.oid])
 		if why == "" {
 			var ok bool
 			if t, ok = withValues(t, nil, values[rel]); !ok || copyTokens(t, tokens) > copyTokens(local[rel], tokens) {
@@ -280,6 +285,28 @@ func translateSecrets(ctx context.Context, base gitCmd, rec *CopyRecord, changes
 			out.flags = append(out.flags, Flag{Path: rel, Label: rel + ":" + strconv.Itoa(n), Kind: RiskSecretContext, Severity: SeverityInfo,
 				Detail: "the agent changed the lines next to a line that holds a replaced credential"})
 		}
+		if lands && len(near) == 0 {
+			// The near-line flag only looks a few lines out; code that
+			// wraps the whole file (or reads it from afar) is a change
+			// anywhere in it, so the file gets one note (RV8-1).
+			var ns []int
+			for _, l := range byFile[rel] {
+				ns = append(ns, l.Line)
+			}
+			sort.Ints(ns)
+			ls, word := []string{}, "line"
+			for i, n := range ns {
+				if i == 0 || n != ns[i-1] {
+					ls = append(ls, strconv.Itoa(n))
+				}
+			}
+			if len(ls) > 1 {
+				word = "lines"
+			}
+			note("%s holds your credential on %s %s and the agent changed this file; check that the change does not send or print the value", rel, word, strings.Join(ls, ", "))
+			out.flags = append(out.flags, Flag{Path: rel, Label: rel, Kind: RiskSecretContext, Severity: SeverityInfo,
+				Detail: "the agent changed a file that holds a replaced credential"})
+		}
 		if len(put) > 0 {
 			if out.put == nil {
 				out.put = map[string]map[int]bool{}
@@ -298,10 +325,21 @@ func translateSecrets(ctx context.Context, base gitCmd, rec *CopyRecord, changes
 			continue
 		}
 		after, ok := blobs[c.NewOID]
-		if !ok || copyTokens(after, tokens) == 0 {
+		if !ok {
+			// Over the scan cap, so not read into memory: look for a
+			// placeholder by streaming it (RV5-7). One in it, old or new,
+			// keeps the change out: the old one cannot be compared.
+			found, err := streamHasPlaceholder(ctx, base, c.NewOID)
+			if err != nil {
+				return err
+			}
+			if !found {
+				continue
+			}
+		} else if copyTokens(after, tokens) == 0 {
 			continue
 		}
-		if copyTokens(after, tokens) > copyTokens(blobs[c.OldOID], tokens) {
+		if !ok || copyTokens(after, tokens) > copyTokens(blobs[c.OldOID], tokens) {
 			others = append(others, p)
 			if applied != "" {
 				entries[p] = since[p]
@@ -316,6 +354,51 @@ func translateSecrets(ctx context.Context, base gitCmd, rec *CopyRecord, changes
 	}
 	sort.Strings(out.restored)
 	return nil
+}
+
+// streamHasPlaceholder reports whether the blob holds DC_SECRET_, read in
+// pieces so a file over the scan cap is not held in memory.
+func streamHasPlaceholder(ctx context.Context, g gitCmd, oid string) (bool, error) {
+	cmd, cleanup, err := g.command(ctx, []string{"cat-file", "blob", oid})
+	if err != nil {
+		return false, err
+	}
+	defer cleanup()
+	out, err := cmd.StdoutPipe()
+	if err != nil {
+		return false, err
+	}
+	if err := cmd.Start(); err != nil {
+		return false, err
+	}
+	const prefix = "DC_SECRET_"
+	buf := make([]byte, 1<<20)
+	tail := []byte{}
+	found := false
+	for !found {
+		n, rerr := out.Read(buf)
+		if n > 0 {
+			win := append(tail, buf[:n]...)
+			found = bytes.Contains(win, []byte(prefix))
+			if k := len(prefix) - 1; len(win) > k {
+				tail = append([]byte{}, win[len(win)-k:]...)
+			} else {
+				tail = win
+			}
+		}
+		if rerr != nil {
+			break
+		}
+	}
+	if found {
+		_ = cmd.Process.Kill()
+	}
+	_, _ = io.Copy(io.Discard, out)
+	werr := cmd.Wait()
+	if found {
+		return true, nil
+	}
+	return false, werr
 }
 
 // lsTree lists the entries of paths in commit.
@@ -481,6 +564,39 @@ func withValues(b []byte, lines []SecretLine, vals map[string][]byte) ([]byte, b
 	return b, true
 }
 
+// sameNonBlank reports whether a and b hold the same non-blank lines, in
+// order. A blank line added or removed is no change, and neither is
+// trailing space or a line end (\n or \r\n), but indentation is: taking
+// the indent off a line under `if False:` runs it (RV9-2). A line that ends
+// in a backslash, before or after the change, is compared with only its line
+// end removed: a space after the backslash ends the continuation, so the
+// next line runs on its own (GAP-0889).
+func sameNonBlank(a, b []byte) bool {
+	nb := func(x []byte) [][]byte {
+		var out [][]byte
+		for _, l := range splitKeep(x) {
+			if len(bytes.TrimSpace(l)) > 0 {
+				out = append(out, l)
+			}
+		}
+		return out
+	}
+	la, lb := nb(a), nb(b)
+	if len(la) != len(lb) {
+		return false
+	}
+	for i := range la {
+		x, y := trimEOL(la[i]), trimEOL(lb[i])
+		if !bytes.HasSuffix(x, []byte("\\")) && !bytes.HasSuffix(y, []byte("\\")) {
+			x, y = bytes.TrimRight(x, " \t\r\v\f"), bytes.TrimRight(y, " \t\r\v\f")
+		}
+		if !bytes.Equal(x, y) {
+			return false
+		}
+	}
+	return true
+}
+
 // copyTokens counts the copy's placeholders in b.
 func copyTokens(b []byte, tokens map[string]bool) int {
 	n := 0
@@ -492,15 +608,20 @@ func copyTokens(b []byte, tokens map[string]bool) int {
 	return n
 }
 
+// secretContextWindow is how many non-blank lines on each side of a replaced
+// credential line the review checks for an agent change (info flag only).
+const secretContextWindow = 5
+
 // translateReplaced turns the agent's version of a replaced file into the
 // one to land, placeholders still in (withValues puts the values in):
 // each line that holds a placeholder is the uploaded line when the agent
 // left it, or kept so (kept: the local line numbers), or with restore the
 // agent's line (put: its line numbers). why says why the change cannot
 // land: a placeholder is gone (without restore), repeated or moved. near
-// are the agent's line numbers of placeholder lines left in place whose
-// neighbour line the agent added, removed or changed: the value lands, and
-// the review names the line (RV6-3: an agent that wraps the line in place,
+// are the agent's line numbers of placeholder lines left in place with a
+// line the agent added, removed or changed within secretContextWindow
+// non-blank lines: the value lands, and the review names the line (the
+// caller notes any other change to the file once, RV8-1) (RV6-3: an agent that wraps the line in place,
 // in a string it sends, kept its anchors and landed with no note).
 func translateReplaced(uploaded, agent []byte, lines []SecretLine, restore bool) (out []byte, kept, put, near []int, why string) {
 	ul, al := splitKeep(uploaded), splitKeep(agent)
@@ -532,12 +653,28 @@ func translateReplaced(uploaded, agent []byte, lines []SecretLine, restore bool)
 			am[a] = true
 		}
 	}
-	// beside reports a line next to up line u or agent line i that the
-	// agent added, removed or changed; a blank line does not count.
-	text := func(l []byte) bool { return len(bytes.TrimSpace(l)) > 0 }
+	// beside reports a line near up line u or agent line i that the agent
+	// added, removed or changed. Blank lines are skipped and the nearest
+	// secretContextWindow non-blank lines on each side count (RV7-1: a wrap
+	// one blank or unchanged line further out landed with no flag).
+	nearChange := func(ls [][]byte, at int, changed func(int) bool) bool {
+		for step := -1; step <= 1; step += 2 {
+			seen := 0
+			for j := at + step; j >= 0 && j < len(ls) && seen < secretContextWindow; j += step {
+				if len(bytes.TrimSpace(ls[j])) == 0 {
+					continue
+				}
+				seen++
+				if changed(j) {
+					return true
+				}
+			}
+		}
+		return false
+	}
 	beside := func(u, i int) bool {
-		return (u > 0 && mu[u-1] < 0 && text(ul[u-1])) || (u+1 < len(ul) && mu[u+1] < 0 && text(ul[u+1])) ||
-			(i > 0 && !am[i-1] && text(al[i-1])) || (i+1 < len(al) && !am[i+1] && text(al[i+1]))
+		return nearChange(ul, u, func(j int) bool { return mu[j] < 0 }) ||
+			nearChange(al, i, func(j int) bool { return !am[j] })
 	}
 	onAgent := map[int][]spot{}
 	ofUp := map[int]int{}

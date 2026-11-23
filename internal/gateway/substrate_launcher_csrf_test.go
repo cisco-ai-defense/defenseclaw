@@ -40,7 +40,7 @@ func TestLauncherWritesPassTheAdminCSRFGate(t *testing.T) {
 			return err
 		},
 		"delete":    func() error { _, err := c.Delete(ctx, "eng-web", "a1"); return err },
-		"decide":    func() error { return c.Decide(ctx, "ask-1", "approve", false, "") },
+		"decide":    func() error { _, err := c.Decide(ctx, "ask-1", "approve", false, ""); return err },
 		"setsecret": func() error { return c.SetSecret(ctx, "NPM_TOKEN", "v") },
 		"rmsecret":  func() error { return c.RemoveSecret(ctx, "NPM_TOKEN") },
 		"session":   func() error { _, err := c.SessionCert(ctx, "eng-web", "a1", 0); return err },

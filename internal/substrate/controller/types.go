@@ -39,6 +39,9 @@ type Attestation struct {
 	// sends.
 	AgentVersion string
 	HookContract string
+	// RelayStreams are the signed kit's relay features, comma-joined
+	// (registry.JoinStreams).
+	RelayStreams string
 	// Reason says why a template is not attested (no attestation, bad
 	// signature, digest mismatch...).
 	Reason string
@@ -153,6 +156,7 @@ type Registration struct {
 	HookContract   string `json:"hook_contract,omitempty"`
 	KitVersion     string `json:"kit_version,omitempty"`
 	TemplateDigest string `json:"template_digest,omitempty"`
+	RelayStreams   string `json:"relay_streams,omitempty"`
 	// Person is the verified OIDC subject; Workload a verified workload
 	// principal. Both empty for atespace attribution.
 	Person   string `json:"person,omitempty"`

@@ -145,7 +145,10 @@ func TestB1RV6BlankLineEditsLand(t *testing.T) {
 				t.Errorf("config.py = %q, want %q (warnings %q)", got, want, pr.Review.Warnings)
 			}
 			for _, f := range pr.Review.Flags {
-				if f.Kind == RiskSecretContext {
+				// Code added within a few lines of the credential line is
+				// named (info) even over a blank line (RV7-1); blank-line
+				// edits alone are not.
+				if f.Kind == RiskSecretContext && n != "add-def-above-blank" {
 					t.Errorf("a blank-line edit is flagged: %+v", f)
 				}
 			}

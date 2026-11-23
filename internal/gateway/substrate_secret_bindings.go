@@ -141,6 +141,8 @@ func (a *APIServer) substrateAddSecret(st *substrateState) http.HandlerFunc {
 			writeSubstrateJSONError(w, status, reason)
 			return
 		}
+		// One view of the config for the whole request (RV4 F10).
+		ss, tmpls, noSwap := st.selfService(), st.secretTemplates(), st.noSwapHosts()
 		c, profile, secrets := a.substrateSecretLookup(st, r)
 		if c.person.Subject == "" {
 			writeSubstrateJSONError(w, http.StatusForbidden, "secret_needs_person")
@@ -169,7 +171,7 @@ func (a *APIServer) substrateAddSecret(st *substrateState) http.HandlerFunc {
 			writeSubstrateJSONError(w, http.StatusBadRequest, "value_required")
 			return
 		}
-		t, ok := secretbind.Find(secretbind.Catalog(st.secretTemplates()), in.Template)
+		t, ok := secretbind.Find(secretbind.Catalog(tmpls), in.Template)
 		if !ok || (!c.admin && !t.ForProfile(profile)) {
 			writeSubstrateJSONError(w, http.StatusBadRequest, "secret_template_unknown")
 			return
@@ -183,7 +185,7 @@ func (a *APIServer) substrateAddSecret(st *substrateState) http.HandlerFunc {
 			writeSubstrateJSONError(w, http.StatusBadRequest, "invalid_pattern")
 			return
 		}
-		if len(egressspec.EchoHostsCoveredWith(host, st.noSwapHosts())) > 0 && (!in.AllowEcho || !st.selfService().AllowEchoBindings) {
+		if len(egressspec.EchoHostsCoveredWith(host, noSwap)) > 0 && (!in.AllowEcho || !ss.AllowEchoBindings) {
 			writeSubstrateJSONError(w, http.StatusForbidden, "secret_echo_host")
 			return
 		}
@@ -199,9 +201,24 @@ func (a *APIServer) substrateAddSecret(st *substrateState) http.HandlerFunc {
 			}
 		}
 		owner := render.PersonKey(c.person.Subject)
+		// The cached store answers the name and the limit before an ask is
+		// opened or a value is written; the Update below keeps the
+		// authoritative check (RV4 F6).
+		mine := st.cfg.Bindings.ForOwner(owner)
+		for _, x := range mine {
+			if x.Name == in.Name {
+				writeSubstrateJSONError(w, http.StatusConflict, "secret_name_taken")
+				return
+			}
+		}
+		if len(mine) >= ss.EffectiveMaxPerPerson() {
+			writeSubstrateJSONError(w, http.StatusConflict, "secret_binding_limit")
+			return
+		}
 		b := secretbind.Binding{ID: secretbind.NewID(), Name: in.Name, Owner: owner, Template: t.Name, Hosts: []string{host},
-			State: secretbind.Active, Expires: in.Expires.UTC(), AllowEcho: in.AllowEcho && st.selfService().AllowEchoBindings,
+			State: secretbind.Active, Expires: in.Expires.UTC(), AllowEcho: in.AllowEcho && ss.AllowEchoBindings,
 			BasicUser: in.User, Created: now}
+		b.StoredForm = t.FormStamp(b)
 		reason := ""
 		if !t.Covers(host) {
 			b.State, reason = secretbind.Waiting, "secret_binding_outside_templates"
@@ -217,7 +234,6 @@ func (a *APIServer) substrateAddSecret(st *substrateState) http.HandlerFunc {
 		// again below if the binding is not stored.
 		var ask asks.Ask
 		if reason != "" {
-			ss := st.selfService()
 			switch {
 			case ss.EffectiveOutsideTemplates() == "refuse":
 				writeSubstrateJSONError(w, http.StatusForbidden, "secret_binding_outside_refused")
@@ -245,7 +261,7 @@ func (a *APIServer) substrateAddSecret(st *substrateState) http.HandlerFunc {
 					Note: "the binding was not stored", CallerID: ownerOf(c.person).ID(), Admin: true})
 			}
 		}
-		ns, vname := st.selfService().EffectiveNamespace(), secretbind.ValueSecretName(owner)
+		ns, vname := ss.EffectiveNamespace(), secretbind.ValueSecretName(owner)
 		if err := st.cfg.SecretStore.Set(r.Context(), ns, vname, b.ID, []byte(stored)); err != nil {
 			fmt.Fprintf(os.Stderr, "[substrate] secret %s not stored: %v\n", b.Name, err)
 			dropAsk()
@@ -253,7 +269,7 @@ func (a *APIServer) substrateAddSecret(st *substrateState) http.HandlerFunc {
 			writeSubstrateJSONError(w, substrateSecretErrorStatus(err), substrateSecretErrorReason(err, "secret_not_stored"))
 			return
 		}
-		limit := st.selfService().EffectiveMaxPerPerson()
+		limit := ss.EffectiveMaxPerPerson()
 		err = st.cfg.Bindings.Update(r.Context(), func(d *secretbind.Doc) error {
 			n := 0
 			for _, x := range d.Bindings {
@@ -297,7 +313,7 @@ func (a *APIServer) substrateAddSecret(st *substrateState) http.HandlerFunc {
 			// was written; that answer found no binding to move, so it is
 			// applied now (RV4 F2).
 			if got, ok := a.substrateFindAsk(r.Context(), st, ownerOf(c.person).ID(), ask.ID); ok && got.State != asks.StatePending {
-				if err := a.substrateBindingDecided(r.Context(), st, got); err != nil {
+				if err := a.substrateBindingDecided(r.Context(), st, got); err != nil && !errors.Is(err, errSubstrateBindingGone) {
 					fmt.Fprintf(os.Stderr, "[substrate] binding %s: answered ask not applied: %v\n", b.Name, err)
 				} else if got.State == asks.StateApproved {
 					delete(out, "reason")
@@ -344,6 +360,29 @@ func (a *APIServer) substrateStoredValue(st *substrateState, c substrateCaller, 
 	return value, ""
 }
 
+// substrateRestampBinding records, after a set of the caller's own binding
+// value, the form the value was just stored in (RV3 P4-3).
+func (a *APIServer) substrateRestampBinding(ctx context.Context, st *substrateState, c substrateCaller, ns, name, key string) {
+	if st.cfg.Bindings == nil || c.person.Subject == "" {
+		return
+	}
+	owner := render.PersonKey(c.person.Subject)
+	if ns != st.selfService().EffectiveNamespace() || name != secretbind.ValueSecretName(owner) {
+		return
+	}
+	catalog := secretbind.Catalog(st.secretTemplates())
+	_ = st.cfg.Bindings.Update(ctx, func(d *secretbind.Doc) error {
+		for i := range d.Bindings {
+			if x := &d.Bindings[i]; x.ID == key && x.Owner == owner {
+				if t, ok := secretbind.Find(catalog, x.Template); ok {
+					x.StoredForm = t.FormStamp(*x)
+				}
+			}
+		}
+		return nil
+	})
+}
+
 // substrateRemoveBinding drops the caller's binding named name from the
 // store after the value under removedKey was removed. A name that is not a
 // binding (a per-person admin secret) is left alone. When an admin
@@ -356,11 +395,15 @@ func (a *APIServer) substrateRemoveBinding(ctx context.Context, st *substrateSta
 	}
 	owner := render.PersonKey(c.person.Subject)
 	found := false
+	var askIDs []string
 	for _, b := range st.cfg.Bindings.ForOwner(owner) {
 		if b.Name != name {
 			continue
 		}
 		found = true
+		if b.State == secretbind.Waiting && b.AskID != "" {
+			askIDs = append(askIDs, b.AskID)
+		}
 		if b.ID != removedKey && st.cfg.SecretStore != nil {
 			if err := st.cfg.SecretStore.Remove(ctx, st.selfService().EffectiveNamespace(), secretbind.ValueSecretName(owner), b.ID); err != nil {
 				return err
@@ -370,10 +413,22 @@ func (a *APIServer) substrateRemoveBinding(ctx context.Context, st *substrateSta
 	if !found {
 		return nil
 	}
-	return st.cfg.Bindings.Update(ctx, func(d *secretbind.Doc) error {
+	if err := st.cfg.Bindings.Update(ctx, func(d *secretbind.Doc) error {
 		d.Bindings = slicesDeleteBinding(d.Bindings, owner, name)
 		return nil
-	})
+	}); err != nil {
+		return err
+	}
+	// A waiting binding's ask is denied with it, so no administrator is
+	// asked about a binding that is gone (RV4 F4). An ask that was already
+	// answered answers ErrDecided, which is fine.
+	if st.cfg.Asks != nil {
+		for _, id := range askIDs {
+			_, _ = st.cfg.Asks.Resolve(ctx, asks.ResolveRequest{ID: id, Decision: "deny",
+				Note: "the binding was removed", CallerID: ownerOf(c.person).ID(), Admin: true})
+		}
+	}
+	return nil
 }
 
 func slicesDeleteBinding(in []secretbind.Binding, owner, name string) []secretbind.Binding {
@@ -425,13 +480,17 @@ func (a *APIServer) substrateReapplyBindingDecision(ctx context.Context, st *sub
 }
 
 // errSubstrateBindingGone is an answered binding ask whose binding was
-// removed (or already decided) meanwhile.
+// removed meanwhile.
 var errSubstrateBindingGone = errors.New("the binding of this ask is gone")
 
-// substrateBindingDecided moves the binding of an answered secret_binding
-// ask: approved -> active (its owner's actors get it on the controller's
-// next pass), denied or expired -> denied (render drops it with
-// secret_binding_denied). Only a waiting binding that names this ask moves.
+// substrateBindingDecided moves the binding of a secret_binding ask an
+// administrator answered: approved -> active (its owner's actors get it on
+// the controller's next pass), anything else -> denied (render drops it
+// with secret_binding_denied). Only a waiting binding that names this ask
+// moves; one that already moved stays. A binding that is gone answers
+// errSubstrateBindingGone. An ask that expires unanswered moves nothing:
+// list says "ask expired", and the person removes the binding and adds it
+// again (RV4 F5).
 func (a *APIServer) substrateBindingDecided(ctx context.Context, st *substrateState, got asks.Ask) error {
 	id := got.BindingID()
 	if id == "" || st.cfg.Bindings == nil {
@@ -444,18 +503,22 @@ func (a *APIServer) substrateBindingDecided(ctx context.Context, st *substrateSt
 	var name, host string
 	err := st.cfg.Bindings.Update(ctx, func(d *secretbind.Doc) error {
 		for i := range d.Bindings {
-			if x := &d.Bindings[i]; x.ID == id && x.AskID == got.ID && x.State == secretbind.Waiting {
+			x := &d.Bindings[i]
+			if x.ID != id || x.AskID != got.ID {
+				continue
+			}
+			if x.State == secretbind.Waiting {
 				x.State, name = state, x.Name
 				if len(x.Hosts) > 0 {
 					host = x.Hosts[0]
 				}
-				return nil
 			}
+			return nil
 		}
 		return errSubstrateBindingGone
 	})
-	if errors.Is(err, errSubstrateBindingGone) {
-		return nil
+	if errors.Is(err, errSubstrateBindingGone) || (err == nil && name == "") {
+		return err
 	}
 	a.recordSubstrateSecretChange(ctx, st, firstNonEmptyString(name, got.Tool), op, firstNonEmptyString(host, got.Host), err != nil)
 	return err

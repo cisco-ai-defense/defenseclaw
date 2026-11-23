@@ -56,7 +56,7 @@ type Reason struct {
 	Audience Audience
 }
 
-// Table is every secret reason code. Keep it sorted by where, then code
+// Table is every secret and sign-in reason code. Keep it sorted by where, then code
 // meaning; the docs table follows this order.
 var Table = []Reason{
 	{"shared_secret_admin_only", 403, API, "A shared secret is set by an administrator, in the store its source names.", "Ask your administrator to change it.", Person},
@@ -76,6 +76,10 @@ var Table = []Reason{
 	{"secret_template_unknown", 400, API, "No approved template by that name is open to your profile.", "See the templates you can use with: defenseclaw substrate secrets templates", Person},
 	{"secret_binding_limit", 409, API, "You have the most bindings allowed.", "Remove one with: defenseclaw substrate secrets rm NAME", Person},
 	{"secret_name_taken", 409, API, "You or your administrator already have a secret by that name.", "Pick another name.", Person},
+	{"signin_ended", 401, API, "This sign-in was ended on the cluster: you signed out, or an administrator ended it.", "Sign in again: defenseclaw substrate login", Person},
+	{"revocation_unavailable", 503, API, "The cluster can't check ended sign-ins right now.", "Try again in a minute; if it stays, run defenseclaw substrate doctor.", Person},
+	{"signin_no_issue_time", 400, API, "This sign-in has no issue time the cluster can use (a static Kubernetes token, a legacy Secret-based ServiceAccount token, or a token whose issue time is ahead of the cluster's clock), so the cluster can't tell your later sign-ins from it.", "To stop the token everywhere, remove it at the cluster; to end only this sign-in, run defenseclaw substrate logout.", Person},
+	{"person_unknown", 404, API, "No sign-in of that person has been seen.", "Use issuer#subject to end the sign-ins of a person before a first sign-in.", Admin},
 
 	{"secret_on_passthrough", 0, Render, "That host is not inspected (it is in allow_passthrough_for), so no secret is added there.", "An administrator can remove the host from allow_passthrough_for.", Admin},
 	{"secret_not_for_profile", 0, Render, "The agent's profile is not one this secret is for.", "Run the agent with one of the secret's profiles.", Person},
@@ -87,6 +91,7 @@ var Table = []Reason{
 	{"secret_binding_ask_expired", 0, Render, "Nobody answered the administrator ask for the binding in time, so it is not used.", "Remove it with: defenseclaw substrate secrets rm NAME, then add it again to ask again.", Person},
 	{"secret_binding_not_applied", 0, Render, "An administrator approved the binding, but the binding store was not updated, so it is not used yet.", "Ask your administrator to approve it again with: defenseclaw substrate approve ID", Person},
 	{"secret_binding_not_covered", 0, Render, "The binding's template no longer covers its host, so the cluster does not add it.", "Remove it with: defenseclaw substrate secrets rm NAME, then add it again to ask an administrator.", Person},
+	{"secret_binding_form_changed", 0, Render, "The binding's template changed its form since the value was stored, so the stored value no longer fits the header.", "Store the value again with: defenseclaw substrate secrets set NAME", Person},
 	{"secret_not_set", 0, Render, "No value is stored for the secret yet.", "Store it with: defenseclaw substrate secrets set NAME", Person},
 	{"secret_binding_other_person", 0, Render, "Your own binding goes only to your own agents, and this agent belongs to another person.", "Test it against one of your agents.", Person},
 	{"secret_not_in_policy", 0, Render, "The agent's network policy does not carry the secret: the cluster updates a policy within seconds, or a host rule leaves it out.", "Test again in a few seconds; see the agent's rules with: defenseclaw substrate policy explain AGENT", Person},
@@ -121,6 +126,7 @@ var Statuses = []Status{
 	{"ask expired", "Nobody answered the ask in time; the binding is not used."},
 	{"expired", "The binding passed its expiry and is not used."},
 	{"not covered", "The binding's template no longer covers its host; the binding is not used."},
+	{"template changed", "The binding's template changed its form since the value was stored; store the value again."},
 	{"approved, not applied", "An administrator approved the binding, and the cluster has not applied it yet."},
 	{"locked", "Your administrator allows values only, so your own bindings are not used."},
 }

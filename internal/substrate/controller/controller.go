@@ -1206,7 +1206,7 @@ func (c *Controller) attributeKit(ctx context.Context, a *ateapi.Actor, reg *Reg
 		return nil
 	}
 	reg.Connector, reg.AgentVersion, reg.HookContract = att.Connector, att.AgentVersion, att.HookContract
-	reg.KitVersion, reg.TemplateDigest = att.KitVersion, att.Digest
+	reg.KitVersion, reg.TemplateDigest, reg.RelayStreams = att.KitVersion, att.Digest, att.RelayStreams
 	return tmpl
 }
 

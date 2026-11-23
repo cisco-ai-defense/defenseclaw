@@ -3425,6 +3425,20 @@
           "minimum": 0,
           "maximum": 1000000,
           "default": 12
+        },
+        "substrate": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "asks": {
+              "type": "boolean",
+              "default": true
+            },
+            "task_end": {
+              "type": "boolean",
+              "default": true
+            }
+          }
         }
       }
     },
@@ -7869,6 +7883,28 @@
                 }
               }
             },
+            "revocation": {
+              "type": "object",
+              "additionalProperties": false,
+              "description": "Ended sign-ins (logout, logout --all, admin revoke). enabled is read at gateway start; managed_enterprise may not turn it off. max_stale is at least 2 x sync_interval and at most 1h (unset: 60s or 2 x sync_interval, whichever is longer).",
+              "properties": {
+                "enabled": {
+                  "type": "boolean",
+                  "default": true
+                },
+                "sync_interval": {
+                  "$ref": "#/$defs/duration"
+                },
+                "max_stale": {
+                  "$ref": "#/$defs/duration"
+                },
+                "max_tokens_per_person": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 4096
+                }
+              }
+            },
             "admin_groups": {
               "type": "array",
               "maxItems": 256,
@@ -8064,6 +8100,26 @@
           ],
           "default": "block"
         },
+        "relay_tls": {
+          "description": "How the gateway reaches an actor's relay: auto (default) uses TLS when the template's signed kit serves it and plain HTTP with an audit row for older templates; required refuses those; off drops the row and the doctor warning.",
+          "type": "string",
+          "enum": [
+            "auto",
+            "required",
+            "off"
+          ],
+          "default": "auto"
+        },
+        "relay_cert_reissue": {
+          "description": "What the gateway does with a second relay serving certificate for an actor asked for without proof of the live key: refuse answers 403 reissue_refused with a HIGH audit row until the owner or an administrator runs recover; flag issues it with a HIGH audit row; auto (default) is refuse in a managed enterprise install and flag in OSS.",
+          "type": "string",
+          "enum": [
+            "auto",
+            "flag",
+            "refuse"
+          ],
+          "default": "auto"
+        },
         "workspace_max_bytes": {
           "type": "integer",
           "minimum": 0,
@@ -8206,6 +8262,67 @@
               "minimum": 0,
               "maximum": 1,
               "default": 1.0
+            }
+          }
+        },
+        "interactive": {
+          "description": "Port forwards and MCP bridges an actor's owner opens through attach (B3). Each enabled switch is auto, on or off; off is the admin switch.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "port_forward": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "enabled": {
+                  "description": "auto (default) is on in open source and managed installs. off also closes the forwards already open, within a minute (at the next check), not at once.",
+                  "type": "string",
+                  "enum": ["auto", "on", "off"],
+                  "default": "auto"
+                },
+                "ports": {
+                  "description": "Actor ports a forward may reach: a port or lo-hi range list such as 3000,8000-8999, within 1024-65535. The actor relay's own port 8080 is never forwarded.",
+                  "type": "string",
+                  "pattern": "^\\s*[0-9]{1,5}(\\s*-\\s*[0-9]{1,5})?(\\s*,\\s*[0-9]{1,5}(\\s*-\\s*[0-9]{1,5})?)*\\s*$",
+                  "default": "1024-65535"
+                },
+                "max_streams": {
+                  "description": "Open forwarded connections per actor on each gateway replica (the count is not shared between replicas).",
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 1024,
+                  "default": 32
+                }
+              }
+            },
+            "mcp_bridge": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "enabled": {
+                  "description": "auto (default) is on in open source and off in managed installs. off also closes the bridges already open, within a minute (at the next check), not at once.",
+                  "type": "string",
+                  "enum": ["auto", "on", "off"],
+                  "default": "auto"
+                },
+                "max_servers": {
+                  "description": "Bridged MCP servers per actor on each gateway replica (the count is not shared between replicas).",
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 32,
+                  "default": 4
+                },
+                "message_max_bytes": {
+                  "description": "A bigger JSON-RPC message is refused, never cut.",
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 16777216,
+                  "default": 1048576
+                }
+              }
+            },
+            "idle_close": {
+              "$ref": "#/$defs/duration"
             }
           }
         },
@@ -8693,6 +8810,23 @@
                   }
                 }
               }
+            }
+          }
+        },
+        "activity": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "status_window": {
+              "$ref": "#/$defs/duration"
+            },
+            "notifications": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "off"
+              ],
+              "default": "auto"
             }
           }
         }

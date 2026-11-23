@@ -4028,7 +4028,11 @@ def _sandbox_runtime_keys_error(section: Mapping[str, Any], prefix: str) -> str 
     for index, name in enumerate(runtimes if isinstance(runtimes, list) else []):
         if name not in ("openshell", "substrate"):
             return f"{prefix}.runtimes[{index}]: {_go_quote(name)} must be openshell or substrate"
-    for key, allowed in (("sandbox_class", ("gvisor", "microvm")), ("unattended_asks", ("deny", "queue")), ("git_push", ("allow", "ask", "deny"))):
+    for key, allowed in (
+        ("sandbox_class", ("gvisor", "microvm")),
+        ("unattended_asks", ("deny", "queue")),
+        ("git_push", ("allow", "ask", "deny")),
+    ):
         error = _sandbox_enum_error(f"{prefix}.{key}", section.get(key), *allowed)
         if error:
             return error
@@ -4501,6 +4505,14 @@ def _default_notifications_enabled() -> bool:
 
 
 @dataclass
+class NotificationsSubstrateConfig:
+    """``notifications.substrate`` (mirrors Go ``NotificationsSubstrateConfig``)."""
+
+    asks: bool = True
+    task_end: bool = True
+
+
+@dataclass
 class NotificationsConfig:
     """User-session OS notifications. Mirrors internal/config.NotificationsConfig.
 
@@ -4532,6 +4544,9 @@ class NotificationsConfig:
     # YAML round-trips through both ends without translation.
     dedup_window: str = "30s"
     max_per_minute: int = 12
+    # ``notifications.substrate``: ``substrate watch`` and the attached
+    # launcher (B3.6). Both on by default; still need ``enabled``.
+    substrate: NotificationsSubstrateConfig = field(default_factory=lambda: NotificationsSubstrateConfig())
 
 
 @dataclass
@@ -4634,6 +4649,22 @@ class SubstrateWorkloadOIDCConfig:
 
 
 @dataclass
+class SubstrateRevocationConfig:
+    """substrate.identity.revocation (mirror of Go SubstrateRevocationConfig).
+
+    enabled None is the default (on); managed_enterprise may not turn it
+    off. Durations are Go duration strings; "" is the default (5s, and for
+    max_stale 60s or 2 x sync_interval, whichever is longer). max_stale is
+    at least 2 x sync_interval; the Go config validation refuses it
+    otherwise. max_tokens_per_person None is the default (64)."""
+
+    enabled: bool | None = None
+    sync_interval: str = ""
+    max_stale: str = ""
+    max_tokens_per_person: int | None = None
+
+
+@dataclass
 class SubstrateIdentityConfig:
     issuer: str = ""
     audience: str = ""
@@ -4648,6 +4679,8 @@ class SubstrateIdentityConfig:
     workload_oidc: list[SubstrateWorkloadOIDCConfig] = field(default_factory=list)
     # Groups whose members are Substrate administrators (GAP-0191).
     admin_groups: list[str] = field(default_factory=list)
+    # Ended sign-ins (B5.1): logout, logout --all, admin revoke.
+    revocation: SubstrateRevocationConfig = field(default_factory=SubstrateRevocationConfig)
 
 
 @dataclass
@@ -4700,6 +4733,29 @@ class SubstrateUnattendedConfig:
     asks: str = ""
     ask_timeout: str = ""
     telemetry_sampling: float | None = None
+
+
+@dataclass
+class SubstratePortForwardConfig:
+    # auto (default: on), on or off (the admin switch).
+    enabled: str = ""
+    ports: str = ""  # "1024-65535" (default) or "3000,8000-8999"; never below 1024 or the relay port 8080
+    max_streams: int | None = None  # open forwarded connections per actor on each gateway replica; None = 32
+
+
+@dataclass
+class SubstrateMCPBridgeConfig:
+    # auto (default: on in open source, off in managed), on or off.
+    enabled: str = ""
+    max_servers: int | None = None  # bridged servers per actor on each gateway replica; None = 4
+    message_max_bytes: int | None = None  # a bigger JSON-RPC message is refused; None = 1 MiB
+
+
+@dataclass
+class SubstrateInteractiveConfig:
+    port_forward: SubstratePortForwardConfig = field(default_factory=SubstratePortForwardConfig)
+    mcp_bridge: SubstrateMCPBridgeConfig = field(default_factory=SubstrateMCPBridgeConfig)
+    idle_close: str = ""  # Go duration, 1m to 24h; "" = 30m
 
 
 @dataclass
@@ -4908,6 +4964,19 @@ class SubstrateSecretTemplate:
 
 
 @dataclass
+class SubstrateActivityConfig:
+    """``substrate.activity``: the agent state in ``substrate list`` and
+    ``status`` and the administrator's notification switch (mirrors Go
+    ``SubstrateActivityConfig``). ``status_window`` is how recent a model or
+    hook call must be to show "thinking" ("" = 20s, "0s" = off).
+    ``notifications`` is ``auto`` (the person's own ``notifications.substrate``
+    keys decide) or ``off`` (the administrator's switch)."""
+
+    status_window: str = ""
+    notifications: str = ""
+
+
+@dataclass
 class SubstrateConfig:
     """``substrate:``, DefenseClaw on Agent Substrate (mirrors Go
     ``SubstrateConfig``). Off by default and read only in the cluster; the
@@ -4930,12 +4999,19 @@ class SubstrateConfig:
     # block (default) or alert: a request after a secret read at the egress
     # callout; the leader reads it (GAP-0250).
     chain_egress_action: str = ""
+    # auto (default), required or off: how the gateway reaches an actor's
+    # relay (TLS when the template's kit serves it).
+    relay_tls: str = ""
+    # auto (default), flag or refuse: a second relay certificate for an actor
+    # without proof of the live key (auto: refuse in managed, flag in OSS).
+    relay_cert_reissue: str = ""
     # Workspace upload cap through the admin attach route (E23); None = 1 GiB.
     workspace_max_bytes: int | None = None
     launcher: SubstrateLauncherConfig = field(default_factory=SubstrateLauncherConfig)
     files: SubstrateFilesConfig = field(default_factory=SubstrateFilesConfig)
     git: SubstrateGitConfig = field(default_factory=SubstrateGitConfig)
     unattended: SubstrateUnattendedConfig = field(default_factory=SubstrateUnattendedConfig)
+    interactive: SubstrateInteractiveConfig = field(default_factory=SubstrateInteractiveConfig)
     rate_limits: SubstrateRateLimitsConfig = field(default_factory=SubstrateRateLimitsConfig)
     extproc: SubstrateExtprocConfig = field(default_factory=SubstrateExtprocConfig)
     llm: SubstrateLLMConfig = field(default_factory=SubstrateLLMConfig)
@@ -4946,6 +5022,7 @@ class SubstrateConfig:
     allow_passthrough_for: list[str] = field(default_factory=list)
     admin: OpenShellAdminConfig = field(default_factory=OpenShellAdminConfig)
     bundles: SubstrateBundlesConfig = field(default_factory=SubstrateBundlesConfig)
+    activity: SubstrateActivityConfig = field(default_factory=SubstrateActivityConfig)
 
 
 @dataclass
@@ -6366,7 +6443,10 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
     # touched (e.g. ``setup notifications`` flipping ``enabled:
     # true``).
     notifications = d.get("notifications")
-    if isinstance(notifications, dict) and notifications == _default_notifications_dict():
+    # Go omits notifications.substrate at its defaults (both on).
+    if isinstance(notifications, dict) and notifications.get("substrate") == {"asks": True, "task_end": True}:
+        notifications.pop("substrate")
+    if isinstance(notifications, dict) and notifications == _without_substrate(_default_notifications_dict()):
         d.pop("notifications", None)
     if d.get("asset_policy") == _default_asset_policy_dict():
         d.pop("asset_policy", None)
@@ -6933,6 +7013,10 @@ def _apply_v8_modeled_delta(
             target.pop(key, None)
         return
     target[key] = copy.deepcopy(current)
+
+
+def _without_substrate(d: dict[str, Any]) -> dict[str, Any]:
+    return {k: v for k, v in d.items() if k != "substrate"}
 
 
 def _default_notifications_dict() -> dict[str, Any]:
@@ -8213,6 +8297,9 @@ def _merge_substrate(raw: Any) -> SubstrateConfig:
     oidc = _mapping(ident.get("oidc"))
     services = _mapping(raw.get("services"))
     unattended = _mapping(raw.get("unattended"))
+    interactive = _mapping(raw.get("interactive"))
+    port_forward = _mapping(interactive.get("port_forward"))
+    mcp_bridge = _mapping(interactive.get("mcp_bridge"))
     limits = _mapping(raw.get("rate_limits"))
     extproc = _mapping(raw.get("extproc"))
     llm = _mapping(raw.get("llm"))
@@ -8277,6 +8364,14 @@ def _merge_substrate(raw: Any) -> SubstrateConfig:
                 for w in ident.get("workload_oidc") or []
             ],
             admin_groups=_string_list(ident.get("admin_groups")),
+            revocation=SubstrateRevocationConfig(
+                enabled=_optional_bool(_mapping(ident.get("revocation")).get("enabled")),
+                sync_interval=str(_mapping(ident.get("revocation")).get("sync_interval", "") or ""),
+                max_stale=str(_mapping(ident.get("revocation")).get("max_stale", "") or ""),
+                max_tokens_per_person=_optional_number(
+                    _mapping(ident.get("revocation")).get("max_tokens_per_person"), int
+                ),
+            ),
         ),
         services=SubstrateServicesConfig(
             actor=str(services.get("actor", "") or ""),
@@ -8289,14 +8384,24 @@ def _merge_substrate(raw: Any) -> SubstrateConfig:
         idle_suspend_after=_duration_text(raw.get("idle_suspend_after")),
         idle_suspend_without_cpu=_optional_bool(raw.get("idle_suspend_without_cpu")),
         chain_egress_action=str(raw.get("chain_egress_action", "") or ""),
+        relay_tls=str(raw.get("relay_tls", "") or ""),
+        relay_cert_reissue=str(raw.get("relay_cert_reissue", "") or ""),
         workspace_max_bytes=_optional_number(raw.get("workspace_max_bytes"), int),
         launcher=SubstrateLauncherConfig(
             key_replay=str(_mapping(raw.get("launcher")).get("key_replay", "") or ""),
             upload_scan=SubstrateUploadScanConfig(
-                max_file_bytes=_optional_number(_mapping(_mapping(raw.get("launcher")).get("upload_scan")).get("max_file_bytes"), int),
-                time_budget=_duration_text(_mapping(_mapping(raw.get("launcher")).get("upload_scan")).get("time_budget")),
-                secret_action=str(_mapping(_mapping(raw.get("launcher")).get("upload_scan")).get("secret_action", "") or ""),
-                placeholder_form=str(_mapping(_mapping(raw.get("launcher")).get("upload_scan")).get("placeholder_form", "") or ""),
+                max_file_bytes=_optional_number(
+                    _mapping(_mapping(raw.get("launcher")).get("upload_scan")).get("max_file_bytes"), int
+                ),
+                time_budget=_duration_text(
+                    _mapping(_mapping(raw.get("launcher")).get("upload_scan")).get("time_budget")
+                ),
+                secret_action=str(
+                    _mapping(_mapping(raw.get("launcher")).get("upload_scan")).get("secret_action", "") or ""
+                ),
+                placeholder_form=str(
+                    _mapping(_mapping(raw.get("launcher")).get("upload_scan")).get("placeholder_form", "") or ""
+                ),
             ),
         ),
         files=SubstrateFilesConfig(
@@ -8308,6 +8413,19 @@ def _merge_substrate(raw: Any) -> SubstrateConfig:
             asks=str(unattended.get("asks", "") or ""),
             ask_timeout=_duration_text(unattended.get("ask_timeout")),
             telemetry_sampling=_optional_number(unattended.get("telemetry_sampling"), float),
+        ),
+        interactive=SubstrateInteractiveConfig(
+            port_forward=SubstratePortForwardConfig(
+                enabled=str(port_forward.get("enabled", "") or ""),
+                ports=str(port_forward.get("ports", "") or ""),
+                max_streams=_optional_number(port_forward.get("max_streams"), int),
+            ),
+            mcp_bridge=SubstrateMCPBridgeConfig(
+                enabled=str(mcp_bridge.get("enabled", "") or ""),
+                max_servers=_optional_number(mcp_bridge.get("max_servers"), int),
+                message_max_bytes=_optional_number(mcp_bridge.get("message_max_bytes"), int),
+            ),
+            idle_close=_duration_text(interactive.get("idle_close")),
         ),
         rate_limits=SubstrateRateLimitsConfig(
             per_actor_rps=_optional_number(limits.get("per_actor_rps"), float),
@@ -8352,6 +8470,15 @@ def _merge_substrate(raw: Any) -> SubstrateConfig:
         allow_passthrough_for=_string_list(raw.get("allow_passthrough_for")),
         admin=_merge_openshell_admin(raw.get("admin")),
         bundles=_merge_substrate_bundles(raw.get("bundles")),
+        activity=_merge_substrate_activity(raw.get("activity")),
+    )
+
+
+def _merge_substrate_activity(raw: Any) -> SubstrateActivityConfig:
+    raw = _mapping(raw)
+    return SubstrateActivityConfig(
+        status_window=_duration_text(raw.get("status_window")),
+        notifications=str(raw.get("notifications", "") or ""),
     )
 
 
@@ -8483,7 +8610,9 @@ def _serialize_substrate(cfg: Config, d: dict[str, Any]) -> None:
     if isinstance(admin, dict):
         _strip_unset_sandbox_keys(admin)
     packs = (block.get("egress") or {}).get("ecosystem_packs")
-    no_hosts = [i for i, t in enumerate(block.get("secret_templates") or []) if isinstance(t, dict) and t.get("hosts") == []]
+    no_hosts = [
+        i for i, t in enumerate(block.get("secret_templates") or []) if isinstance(t, dict) and t.get("hosts") == []
+    ]
     pruned = _prune_unset(block)
     if pruned is _V8_MISSING:
         pruned = {}
@@ -9991,6 +10120,13 @@ def _merge_notifications(raw: dict[str, Any] | None) -> NotificationsConfig:
     if max_per_minute < 0:
         max_per_minute = defaults.max_per_minute
 
+    substrate_raw = raw.get("substrate")
+    substrate_raw = substrate_raw if isinstance(substrate_raw, dict) else {}
+    substrate = NotificationsSubstrateConfig(
+        asks=bool(substrate_raw.get("asks", defaults.substrate.asks)),
+        task_end=bool(substrate_raw.get("task_end", defaults.substrate.task_end)),
+    )
+
     return NotificationsConfig(
         enabled=bool(raw.get("enabled", defaults.enabled)),
         block_enforced=bool(raw.get("block_enforced", defaults.block_enforced)),
@@ -9999,6 +10135,7 @@ def _merge_notifications(raw: dict[str, Any] | None) -> NotificationsConfig:
         sources=sources,
         dedup_window=dedup_window,
         max_per_minute=max_per_minute,
+        substrate=substrate,
     )
 
 

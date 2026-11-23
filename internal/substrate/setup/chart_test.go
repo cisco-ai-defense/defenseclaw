@@ -33,7 +33,7 @@ const chartKubeVersion = "1.34.0"
 
 // chartCases are the golden renders: values files under
 // deploy/helm/defenseclaw-substrate/tests/values (empty for the defaults).
-var chartCases = []string{"default", "launcher", "minimal", "full", "expose-lb", "expose-ingress", "bundles", "managed", "actor-secrets", "kube-signin", "ask-keys", "managed-bundles", "person-secrets", "oidc-private", "private-registry", "actor-keys", "bundles-oci", "bundles-oci-ca"}
+var chartCases = []string{"default", "launcher", "minimal", "full", "expose-lb", "expose-ingress", "bundles", "managed", "actor-secrets", "kube-signin", "ask-keys", "managed-bundles", "person-secrets", "oidc-private", "private-registry", "actor-keys", "bundles-oci", "bundles-oci-ca", "substrate-sync"}
 
 // helmPinnedVersion is the helm release the goldens are rendered with and
 // that the CI job substrate-chart installs (keep it equal to HELM_VERSION in
@@ -141,6 +141,9 @@ func TestChartRefusesBadValues(t *testing.T) {
 		"user secrets in kube-system":         "config.substrate.self_service_secrets.namespace=kube-system",
 		"user secrets in default":             "config.substrate.self_service_secrets.namespace=default",
 		"user secrets with the admin secrets": "config.substrate.self_service_secrets.namespace=defenseclaw-actor-secrets",
+		// RV4 F7 (GAP-0782): never an atespace where actors run.
+		"user secrets in a managed atespace":  "managedAtespaces={team-a},config.substrate.self_service_secrets.namespace=team-a",
+		"user secrets in a launcher atespace": "config.substrate.launcher_atespaces.dev={team-b},config.substrate.self_service_secrets.namespace=team-b",
 	} {
 		args := []string{"template", "dc", chartDir, "--kube-version", chartKubeVersion, "--set", set}
 		if err := exec.Command(helm, args...).Run(); err == nil {
@@ -585,10 +588,17 @@ func checkChartInvariants(t *testing.T, name string, out []byte) {
 	}
 	// F4 follow-up: the relay session key is created by its own hook (never
 	// rendered), with its own ServiceAccount that may read only that
-	// Secret, and the gateway mounts it.
+	// Secret and (B3.5) the relay CA Secret the same step creates, and the
+	// gateway mounts both, the relay CA as optional (a gateway upgraded
+	// before setup ran again starts without it).
 	if !strings.Contains(string(out), "- relay-session\n") || !strings.Contains(string(out), "serviceAccountName: defenseclaw-relay-key") ||
-		!strings.Contains(string(out), "resourceNames: [\"defenseclaw-relay-session\"]") {
+		!strings.Contains(string(out), "resourceNames: [\"defenseclaw-relay-session\", \"defenseclaw-relay-ca\"]") {
 		t.Errorf("%s: no relay-session hook with its own ServiceAccount", name)
+	}
+	if !strings.Contains(string(out), "mountPath: /var/run/secrets/defenseclaw-relay-ca") ||
+		!strings.Contains(string(out), "secretName: defenseclaw-relay-ca\n    optional: true") &&
+			!strings.Contains(string(out), "secretName: defenseclaw-relay-ca\n          optional: true") {
+		t.Errorf("%s: the gateway does not mount the relay CA Secret, or not as optional", name)
 	}
 	if c, ok := byName["Deployment/defenseclaw-callout"]; ok {
 		raw, _ := yaml.Marshal(c.Spec)

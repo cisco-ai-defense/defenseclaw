@@ -124,6 +124,16 @@ func printSubstrateSecretTest(w io.Writer, res api.SecretTest, now time.Time) {
 		}
 		fmt.Fprintln(w, line+".")
 	}
+	if res.LastUsed != nil && !res.LastUsed.IsZero() {
+		line := "Last used " + substrateSince(res.LastUsed, now)
+		if res.LastUsedAgent != "" {
+			line += " by " + res.LastUsedAgent
+		}
+		if res.LastUsedHost != "" {
+			line += " on " + res.LastUsedHost
+		}
+		fmt.Fprintln(w, line+".")
+	}
 	if res.AskID != "" {
 		fmt.Fprintf(w, "Ask: %s\n", res.AskID)
 	}

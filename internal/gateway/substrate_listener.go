@@ -41,6 +41,8 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/substrate/identity"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/ratelimit"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/registry"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/relaytls"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/revocation"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/secretbind"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/telemetryrelay"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
@@ -96,7 +98,10 @@ const (
 	substrateRelayTask = "/api/v1/substrate/relay/task"
 	// substrateRelayTamper takes a relay guard trip (substrate_task.go).
 	substrateRelayTamper = "/api/v1/substrate/relay/tamper"
-	substrateLLMPrefix   = "/llm/"
+	// substrateRelayCert signs the relay's TLS serving certificate
+	// (substrate_relaycert.go).
+	substrateRelayCert = "/api/v1/substrate/relay/cert"
+	substrateLLMPrefix = "/llm/"
 
 	substrateShutdownTimeout = 10 * time.Second
 )
@@ -163,6 +168,11 @@ type SubstrateConfig struct {
 	Bundles SubstrateBundles
 	// Activity receives the last-activity feed of A3's idle logic.
 	Activity SubstrateActivitySink
+	// ActivityFeed is the leader's activity snapshot, read by list and
+	// status for the agent state (B3.6; nil: no activity in the answers).
+	ActivityFeed SubstrateActivityFeed
+	// ActivityConfig is the live substrate.activity block (nil: defaults).
+	ActivityConfig func() config.SubstrateActivityConfig
 	// Skills scans the skill folders the kit attaches (GAP-0039); nil
 	// scans nothing.
 	Skills SubstrateSkillScanner
@@ -197,6 +207,24 @@ type SubstrateConfig struct {
 	// Relays reaches an actor's relay through the router for attach
 	// (nil: attach answers 503).
 	Relays SubstrateRelayDialer
+	// RelayCA signs relay serving certificates and verifies them on attach
+	// (B3.5, the gateway.relayCASecret Secret); nil: TLS relays cannot be
+	// reached and /relay/cert answers relay_ca_missing.
+	RelayCA *relaytls.CA
+	// RelayTLS is substrate.relay_tls ("" is auto).
+	RelayTLS relaytls.Mode
+	// RelayCerts is the leader's record of the live relay serving
+	// certificate per actor (GAP-0861), shared by every replica and kept
+	// over restarts. nil: in refuse mode /relay/cert answers
+	// relay_cert_record_unavailable; in flag mode every certificate asked
+	// for without proof of the live key is a HIGH row.
+	RelayCerts registry.RelayCerts
+	// RelayCertReissue is the active substrate.relay_cert_reissue (refuse
+	// or flag; "" is auto: refuse when Managed).
+	RelayCertReissue string
+	// Interactive is substrate.interactive in force (B3 port forward and
+	// MCP bridge switches; nil: the defaults).
+	Interactive func() config.SubstrateInteractiveConfig
 	// WorkspaceMaxBytes caps a workspace upload through attach
 	// (substrate.workspace_max_bytes, E23).
 	WorkspaceMaxBytes int64
@@ -210,6 +238,13 @@ type SubstrateConfig struct {
 	// nil reports on.
 	FilesPush func() bool
 	FilesSync func() bool
+	// Revocations is this replica's copy of the ended sign-ins list,
+	// RevocationSource the leader it pulls from and writes revokes to, and
+	// Streams the open attach streams it closes on a revoke (B5.1). nil:
+	// revocation is off (substrate.identity.revocation.enabled: false).
+	Revocations      *revocation.Snapshot
+	RevocationSource revocation.Source
+	Streams          *revocation.Streams
 	// Git reads substrate.git live for launchers (B2 2.5: the https
 	// rewrite map, submodules, LFS); nil reports the defaults.
 	Git func() config.SubstrateGitConfig
@@ -263,6 +298,9 @@ type SubstrateConfig struct {
 	// through this replica's telemetry runtime (GAP-0450, GAP-0453). Nil:
 	// nothing is relayed.
 	Relay *telemetryrelay.Taker
+	// SecretUses reads when the caller's agents last reached each host,
+	// for the last use secrets list and test show (S6b). Nil: no last use.
+	SecretUses SubstrateSecretUses
 }
 
 // SubstrateActorVerifier verifies actor tokens (identity.ActorVerifier).
@@ -296,8 +334,14 @@ const (
 
 type substrateState struct {
 	cfg SubstrateConfig
+	// activityAsks remembers a failed pending-asks read of list and status
+	// (GAP-1018).
+	activityAsks substrateActivityAsksDown
 	// taskEnds bounds the task-end audit rows per actor.
 	taskEnds substrateTaskEnds
+	// streams counts the open port forwards and MCP bridges per actor on
+	// this replica (GAP-0818).
+	streams substrateStreamCounts
 	// refusals bounds refusal log lines: a flood of bad tokens is still
 	// refused, not logged line by line.
 	refusals *rate.Limiter
@@ -382,6 +426,16 @@ func (a *APIServer) SetSubstrate(cfg SubstrateConfig) error {
 	st.alert = func(ctx context.Context, severity, summary string, details map[string]any) {
 		st.audit(ctx, severity, summary, details)
 		st.logRefusal("%s: %v", summary, details["folder"])
+	}
+	if cfg.Revocations != nil {
+		// RV1-07: the leader's list of ended sign-ins was reset (its volume
+		// was recreated, or the file moved aside). Say so; the replica
+		// keeps what it knew until it lapses.
+		cfg.Revocations.OnReset(func(kept int) {
+			summary := fmt.Sprintf("the leader's list of ended sign-ins was reset: this replica keeps the %d end(s) it knew until they lapse; a replica that starts now does not know them", kept)
+			st.audit(context.Background(), "HIGH", summary, map[string]any{"event": "substrate.signin.list_reset", "kept": kept})
+			st.logRefusal("%s", summary)
+		})
 	}
 	a.substrateMu.Lock()
 	a.substrate = st
@@ -521,6 +575,8 @@ type substrateActorRoute struct {
 	task bool
 	// tamper is the relay's guard trip report (relay is set too).
 	tamper bool
+	// cert is the relay's certificate request (relay is set too).
+	cert bool
 }
 
 // classifySubstrateActorPath maps a path to its route, or false (404).
@@ -553,6 +609,8 @@ func (a *APIServer) classifySubstrateActorPath(path string) (substrateActorRoute
 		return substrateActorRoute{relay: true, task: true}, true
 	case path == substrateRelayTamper:
 		return substrateActorRoute{relay: true, tamper: true}, true
+	case path == substrateRelayCert:
+		return substrateActorRoute{relay: true, cert: true}, true
 	case strings.HasPrefix(path, substrateLLMPrefix) && len(path) > len(substrateLLMPrefix):
 		return substrateActorRoute{llm: true}, true
 	}
@@ -838,6 +896,11 @@ func (a *APIServer) substrateActorScope(st *substrateState, next http.Handler) h
 			}
 			// Gateway receive time only (E15): nothing the actor sends.
 			st.cfg.Activity.ObserveActivity(kind, actor.Atespace, actor.UID, time.Now())
+			// While a model stream is open the agent is thinking: report it
+			// every 10 s. Off (status_window 0s) adds no timer.
+			if route.llm && st.activityConfig().EffectiveStatusWindow() > 0 {
+				defer substrateReportOpenModel(st.cfg.Activity, actor.Atespace, actor.UID)()
+			}
 		}
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
@@ -884,6 +947,9 @@ func (a *APIServer) serveSubstrateActorRoute(w http.ResponseWriter, r *http.Requ
 		return
 	case route.tamper:
 		a.serveSubstrateRelayTamper(st, w, r)
+		return
+	case route.cert:
+		a.serveSubstrateRelayCert(st, w, r)
 		return
 	case route.relay:
 		a.serveSubstrateRelayVerify(st, w, r)

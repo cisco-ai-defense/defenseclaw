@@ -70,12 +70,19 @@ func Main(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	switch args[0] {
+	case "mcp-stdio":
+		// The agent's side of a laptop MCP bridge (B3.3, mcp.go).
+		if fs.NArg() != 1 {
+			fmt.Fprintln(stderr, "usage: defenseclaw-actor-relay mcp-stdio NAME")
+			return 2
+		}
+		return MCPStdio(fs.Arg(0), os.Stdin, stdout, stderr)
 	case "version", "--version":
 		fmt.Fprintf(stdout, "defenseclaw-actor-relay %s (%s)\n", kit.Version, Version)
 		return 0
 	case "serve", "task":
 	default:
-		fmt.Fprintf(stderr, "defenseclaw-actor-relay: unknown command %q (serve, task, version)\n", args[0])
+		fmt.Fprintf(stderr, "defenseclaw-actor-relay: unknown command %q (serve, task, mcp-stdio, version)\n", args[0])
 		return 2
 	}
 	cfg, err := kit.LoadConfig(kit.ConfigPath)
@@ -135,9 +142,25 @@ func Main(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "defenseclaw-actor-relay:", err)
 		return 1
 	}
-	srv := &http.Server{Handler: NewServer(Options{Config: cfg, Verifier: v, sep: sep,
-		Log: slog.New(slog.NewJSONHandler(stderr, nil))}).Handler(), ReadHeaderTimeout: 10 * time.Second}
-	if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	log := slog.New(slog.NewJSONHandler(stderr, nil))
+	var certs *CertSource
+	if cfg.Relay.ServesTLS() {
+		t, err := kit.NewTransport(cfg)
+		if err != nil {
+			fmt.Fprintln(stderr, "defenseclaw-actor-relay:", err)
+			return 1
+		}
+		certs = &CertSource{URL: cfg.Relay.CertURL(), Client: t.Client(), Self: IdentityFiles(cfg.Relay.IdentityDir)}
+		// Best effort: in a template snapshot the actor has no egress yet,
+		// and the first handshake asks again.
+		go func() {
+			if err := certs.Warm(context.Background()); err != nil {
+				log.Info("relay.tls_cert", "state", "deferred", "reason", err.Error())
+			}
+		}()
+	}
+	h := NewServer(Options{Config: cfg, Verifier: v, sep: sep, Log: log, Certs: certs}).Handler()
+	if err := serveListeners(ln, h, certs); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		fmt.Fprintln(stderr, "defenseclaw-actor-relay:", err)
 		return 1
 	}

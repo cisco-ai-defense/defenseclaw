@@ -300,12 +300,39 @@ func (a *APIServer) serveSubstrateRelayVerify(st *substrateState, w http.Respons
 		writeSubstrateRefusal(w, http.StatusForbidden, "session_not_owner")
 		return
 	}
+	// A session minted before its person's sign-ins were ended is refused,
+	// and so is every session while this replica's list is stale (B5.1).
+	if status, reason := st.substrateRevocationRefusal(s.Person, "", s.IssuedAt); status != 0 {
+		a.substrateAuditRelayDenied(st, r, "MEDIUM", reason, target, s.Person)
+		writeSubstrateRefusal(w, status, reason)
+		return
+	}
+	// So is a session of an ended sign-in: a plain logout ends that one
+	// token, and an end by time covers the sign-in's own issue time, so a
+	// session a lagging replica handed out after the end is refused too
+	// (GAP-0744). A session minted by released 1.0.10 names no sign-in, and
+	// lives at most MaxSessionLifetime (1 h) across the upgrade; Issue never
+	// mints one now (RV4-03). Compat shim for sessions minted by released
+	// 1.0.10: remove in 1.0.12 and refuse a session that names no sign-in.
+	if s.SignInKey != "" {
+		if status, reason := st.substrateRevocationRefusal(s.Person, s.SignInKey, s.SignInIssuedAt); status != 0 {
+			a.substrateAuditRelayDenied(st, r, "MEDIUM", reason, target, s.Person)
+			writeSubstrateRefusal(w, status, reason)
+			return
+		}
+	}
 	// The admin listener issues a session only to the actor's own person,
 	// and the check above holds a token minted any other way to that too.
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	out := map[string]any{
 		"person": s.Person, "actor": s.ActorRef, "actor_uid": s.ActorUID, "jti": s.TokenID, "expires": s.Expires,
+	}
+	// The relay serves a token only on the routes of its own dc.scope (B3),
+	// and reads the scope from this answer on a relay-TLS kit (GAP-0815):
+	// without it a stream token would be a terminal token there.
+	if s.Scope != "" {
+		out["scope"] = s.Scope
 	}
 	// A --task run's relay checks the task it runs is the one the
 	// launcher registered (GAP-0071): the digest, never the text.
