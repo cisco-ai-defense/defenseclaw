@@ -1133,6 +1133,7 @@ macos-app-test-scripts:
 	macos/DefenseClawMac/script/test_runtime_contract_surfaces.sh
 	macos/DefenseClawMac/script/test_sandbox_inspection.sh
 	macos/DefenseClawMac/script/test_sandbox_models.sh
+	macos/DefenseClawMac/script/test_sandbox_vault.sh
 	macos/DefenseClawMac/script/test_secret_file_safety.sh
 	macos/DefenseClawMac/script/test_setup_definitions_parity.sh
 	macos/DefenseClawMac/script/test_structured_detail_parser.sh

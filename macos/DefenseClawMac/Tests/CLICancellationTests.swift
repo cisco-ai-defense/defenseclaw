@@ -31,6 +31,7 @@ struct CLICancellationTests {
     static func main() async {
         CLIProcessGroupLauncher.execIfRequested()
         await readOnlyCommandsDoNotClaimConfigurationChanges()
+        await summarizedOutputIsNotKept()
         await exclusiveUpgradeOperationBlocksOtherCommands()
         await launcherRejectsExternalInvocation()
         await launcherPreservesArgumentsAndStandardInput()
@@ -44,6 +45,18 @@ struct CLICancellationTests {
         await standardInputIsWrittenAndClosed()
         cancelledResultIsNotSuccessful()
         print("CLICancellationTests passed")
+    }
+
+    /// A command run with an output summary (the vault's) keeps only that
+    /// summary in its Activity row: nothing streamed, not the output.
+    @MainActor
+    private static func summarizedOutputIsNotKept() async {
+        let store = CommandActivityStore(runner: CLIRunner())
+        let result = await store.run(title: "Summarized", binary: "/bin/echo", arguments: ["Ends", "with", "\u{2026}WXYZ"],
+                                     mutation: false, category: "sandbox", origin: "Test",
+                                     outputSummary: { "exit \($0.exitCode)" })
+        expect(result.succeeded && result.output.contains("WXYZ"), "the caller still gets the output")
+        expect(store.entries.first?.output == "exit 0", "the Activity row keeps only the summary")
     }
 
     @MainActor
