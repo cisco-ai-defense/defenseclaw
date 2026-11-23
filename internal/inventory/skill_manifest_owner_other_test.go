@@ -59,3 +59,61 @@ func TestHashSkillFolderKeepsNoHardLinkedManifest(t *testing.T) {
 		t.Fatalf("own SKILL.md: status %q manifest %q, want it kept", status, manifest)
 	}
 }
+
+// The ownership check judges the file the walk read, not whatever the path
+// names when it runs. A hard-linked SKILL.md that is swapped, after it was
+// opened, for an own single-link copy with the same bytes is still refused;
+// a check that opens the path again and compares the bytes would keep it
+// (GAP-1811).
+func TestSkillManifestOwnedChecksTheOpenedFile(t *testing.T) {
+	dir := t.TempDir()
+	root := filepath.Join(dir, "skill")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	text := []byte("---\nname: x\ndescription: not mine\n---\n")
+	other := filepath.Join(dir, "other.txt")
+	if err := os.WriteFile(other, text, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	manifest := filepath.Join(root, "SKILL.md")
+	for _, name := range []string{manifest, filepath.Join(dir, "third-name.txt")} {
+		if err := os.Link(other, name); err != nil {
+			t.Skipf("hard link: %v", err)
+		}
+	}
+	rootInfo, err := os.Stat(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opened, err := os.Open(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer opened.Close()
+	if err := os.Remove(manifest); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(manifest, text, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if skillManifestOwned(opened, rootInfo) {
+		t.Fatal("a hard-linked SKILL.md swapped out after it was opened was kept")
+	}
+	current, err := os.Open(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer current.Close()
+	if !skillManifestOwned(current, rootInfo) {
+		t.Fatal("an own single-link SKILL.md was refused")
+	}
+	folder, err := os.Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer folder.Close()
+	if skillManifestOwned(folder, rootInfo) || skillManifestOwned(nil, rootInfo) || skillManifestOwned(current, nil) {
+		t.Fatal("a folder, a missing file or a missing owner was accepted")
+	}
+}

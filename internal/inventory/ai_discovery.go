@@ -2892,13 +2892,6 @@ func (s *ContinuousDiscoveryService) signalFromDirectoryChildrenIdentity(sig AIS
 	}
 	out := s.signalFromEvidence(sig, category, detector, identityEvidence)
 	out.Evidence = evidence
-	if identityPath != path {
-		// Preserve change detection for updated content while the fingerprint
-		// remains tied to the stable install and its child identities.
-		// hashEvidence leaves the facts out (GAP-1819); the id still does.
-		raw, _ := json.Marshal(evidence)
-		out.EvidenceHash = hashValue(string(raw))
-	}
 	s.stampHomeOwner(&out, path)
 	out.Partial = partial
 	out.CoverageReason = coverageReason
@@ -5528,6 +5521,16 @@ func hashEvidence(evidence []AIEvidence) string {
 		rows[i].Skill = nil
 	}
 	raw, _ := json.Marshal(rows)
+	return hashValue(string(raw))
+}
+
+// hashObservedEvidence hashes the evidence with its skill folder facts. A
+// plugin skill signal uses it as its EvidenceHash, so a content, version or
+// enabled-state change of the plugin reads as changed while the fingerprint
+// and id, built with hashEvidence, stay the same. The facts are digests and
+// bounded metadata lines; no file text goes into the hash input.
+func hashObservedEvidence(evidence []AIEvidence) string {
+	raw, _ := json.Marshal(evidence)
 	return hashValue(string(raw))
 }
 

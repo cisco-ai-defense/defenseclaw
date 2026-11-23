@@ -125,7 +125,7 @@ func TestDetectPluginSkillsFromTheAgentsRegistries(t *testing.T) {
 		}
 	}
 	if upgradedKeys["claudecode/review#evidence"] == keys["claudecode/review#evidence"] {
-		t.Fatal("plugin content change did not update the evidence hash")
+		t.Error("plugin content change did not update the evidence hash")
 	}
 	writeSkillFiles(t, home, map[string]string{".claude/settings.json": `{"enabledPlugins":{"pr-review@official":true}}`})
 	metadataChanged, metadataKeys := pluginSkillFacts(t, home)

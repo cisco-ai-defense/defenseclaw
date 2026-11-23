@@ -84,7 +84,10 @@ func (s *ContinuousDiscoveryService) detectPluginSkills() []AISignal {
 						ev.Skill.Scope, ev.Skill.Plugin = SkillScopePlugin, info
 					}
 				}
-				signal.EvidenceHash = hashEvidence(signal.Evidence)
+				// The evidence hash keeps the facts, so a content, version or
+				// enabled-state change reads as changed; the fingerprint, built
+				// from the fact-free identity evidence, keeps the skill's id.
+				signal.EvidenceHash = hashObservedEvidence(signal.Evidence)
 				out = append(out, signal)
 			}
 		}
