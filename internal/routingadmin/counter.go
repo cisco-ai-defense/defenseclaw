@@ -171,6 +171,52 @@ func overArgs(epoch string, o OverQuery, limit int) []any {
 	return []any{epoch, o.Since.UTC().Format(time.DateOnly), len(o.Prefix), o.Prefix, o.Limit, limit}
 }
 
+// SumQuery asks for the spend of one budget's keys (Prefix,
+// "<scope>:<id>:") since Since, the first day of its period; Limit counts
+// the keys at or over it.
+type SumQuery struct {
+	Prefix string
+	Since  time.Time
+	Limit  float64
+}
+
+// PrefixSum is the stored spend of one budget's keys, every epoch (each
+// replica pushes before it reads): Total over all keys, Peak the highest
+// key, Subjects the keys, Exceeded the keys at or over the limit (the admin
+// view of a cluster, GAP-0894).
+type PrefixSum struct {
+	Prefix             string
+	Total, Peak        float64
+	Subjects, Exceeded int
+}
+
+// PrefixSums sums each query's keys in SQL over every epoch: one row per
+// budget, never a row per key.
+func (c *LocalCounter) PrefixSums(ctx context.Context, q []SumQuery) ([]PrefixSum, error) {
+	if c == nil {
+		return nil, errors.New("budget spend: no counter")
+	}
+	db, err := c.open()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]PrefixSum, 0, len(q))
+	for _, s := range q {
+		var total, peak sql.NullFloat64
+		var subjects, exceeded sql.NullInt64
+		err := db.QueryRowContext(ctx, `SELECT COUNT(*), SUM(s), MAX(s), SUM(s >= ?) FROM (
+			SELECT SUM(usd) AS s FROM budget_spend WHERE day >= ? AND substr(charge_key, 1, ?) = ?
+			GROUP BY charge_key HAVING SUM(usd) > 0)`,
+			s.Limit, s.Since.UTC().Format(time.DateOnly), len(s.Prefix), s.Prefix).Scan(&subjects, &total, &peak, &exceeded)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, PrefixSum{Prefix: s.Prefix, Total: total.Float64, Peak: peak.Float64,
+			Subjects: int(subjects.Int64), Exceeded: int(exceeded.Int64)})
+	}
+	return out, nil
+}
+
 // OverFull lists the budget ids of over with more than Max over-limit keys:
 // the read could not name them all, so a managed deny budget refuses a key
 // this process does not hold (Ledger.SetOverFull).

@@ -1043,26 +1043,30 @@ def issuer_notes(doc: dict[str, Any]) -> list[str]:
 def retired_key_rows(budgets: Any) -> list[tuple[str, str]]:
     """(status, detail) rows for the retired keys an administrator's budget
     view reports (retired_keys, GAP-0848): warn from half the bound of keys
-    waiting to be stored, and when the bound dropped spend."""
+    waiting to be stored, and when the bound dropped spend. The counts are of
+    the replica that answered, named by retired_keys.replica (GAP-0894)."""
     rows: list[tuple[str, str]] = []
     for b in _dicts(budgets):
         r = b.get("retired_keys")
         if not isinstance(r, dict):
             continue
         waiting, dropped, cap = (int(r.get(k) or 0) for k in ("waiting", "dropped", "cap"))
+        # The counts are of the gateway replica that answered (GAP-0894).
+        replica = str(r.get("replica") or "").strip()
+        where = f"this replica ({replica})" if replica else "this replica"
         if dropped > 0:
             rows.append(
                 (
                     "warn",
-                    f"budget {b.get('id')}: the spend of {dropped} retired key(s) was dropped at the bound of {cap} "
-                    "(the leader or budget store did not take it in time)",
+                    f"budget {b.get('id')}: on {where}, the spend of {dropped} retired key(s) was dropped at the "
+                    f"bound of {cap} (the leader or budget store did not take it in time)",
                 )
             )
         elif cap > 0 and 2 * waiting >= cap:
             rows.append(
                 (
                     "warn",
-                    f"budget {b.get('id')}: {waiting} of {cap} retired keys wait to be stored; at {cap} "
+                    f"budget {b.get('id')}: on {where}, {waiting} of {cap} retired keys wait to be stored; at {cap} "
                     "a managed deny budget refuses new keys and others drop the oldest",
                 )
             )

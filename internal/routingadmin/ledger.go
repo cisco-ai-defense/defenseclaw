@@ -66,8 +66,16 @@ type Ledger struct {
 	// does not hold may be one of them (CapState, GAP-0892).
 	overFull map[string]bool
 	dropped  map[string]int
-	tombs    map[tombKey]tomb
-	tombSeq  uint64
+	// sums is the leader's per-budget sums of every epoch's keys, by
+	// prefix, for the admin view until sumsUntil (SetPrefixSums); view the
+	// other epochs' spend of keys an administrator listed, until viewUntil
+	// (SetViewKeys). Neither is read on the request path (GAP-0894).
+	sums      map[string]prefixSum
+	sumsUntil time.Time
+	view      map[string]map[int32]float64
+	viewUntil time.Time
+	tombs     map[tombKey]tomb
+	tombSeq   uint64
 	// epoch is the process epoch Main rows are stored under (SetEpoch,
 	// Rotate).
 	epoch    string
@@ -671,6 +679,89 @@ func NextReset(period string, now time.Time) time.Time {
 	}
 }
 
+// prefixSum is one budget's leader sums and the first day they cover.
+type prefixSum struct {
+	PrefixSum
+	from int32
+}
+
+// SetPrefixSums keeps the leader's per-budget sums of q until until.
+func (l *Ledger) SetPrefixSums(q []SumQuery, sums []PrefixSum, until time.Time) {
+	if l == nil {
+		return
+	}
+	from := make(map[string]int32, len(q))
+	for _, s := range q {
+		from[s.Prefix] = dayNumber(s.Since)
+	}
+	m := make(map[string]prefixSum, len(sums))
+	for _, s := range sums {
+		if f, ok := from[s.Prefix]; ok {
+			m[s.Prefix] = prefixSum{PrefixSum: s, from: f}
+		}
+	}
+	l.mu.Lock()
+	l.sums, l.sumsUntil = m, until
+	l.mu.Unlock()
+}
+
+// SetViewKeys keeps the other epochs' spend of keys (rows) until until;
+// a listed key with no row has none.
+func (l *Ledger) SetViewKeys(keys []string, rows []SeedRow, until time.Time) {
+	if l == nil {
+		return
+	}
+	m := make(map[string]map[int32]float64, len(keys))
+	for _, k := range keys {
+		m[k] = map[int32]float64{}
+	}
+	for _, r := range rows {
+		date, err := time.Parse(time.DateOnly, r.Day)
+		if days, ok := m[r.Key]; ok && err == nil && r.USD > 0 && !math.IsInf(r.USD, 0) {
+			days[dayNumber(date)] += r.USD
+		}
+	}
+	l.mu.Lock()
+	l.view, l.viewUntil = m, until
+	l.mu.Unlock()
+}
+
+// ownLocked is this process's spend of key in the window (live, retired
+// and pending: what the leader's other-epoch sums may not hold yet).
+func (l *Ledger) ownLocked(key string, from, today int32) float64 {
+	var total float64
+	local, retired := l.local[key], l.retired[key]
+	var pending map[int32]float64
+	if l.pending != nil {
+		pending = l.pending.spend[key]
+	}
+	for day := from; day <= today; day++ {
+		total += local[day] + retired[day] + pending[day]
+	}
+	return total
+}
+
+// ViewSpend is Spend for an administrator's view: with a fresh SetViewKeys
+// read of key, the larger of this replica's spend and the other epochs'
+// spend plus this process's own (a key another replica holds).
+func (l *Ledger) ViewSpend(key, period string, now time.Time) (float64, bool) {
+	spend, ok := l.Spend(key, period, now)
+	if !ok {
+		return spend, ok
+	}
+	today, from := dayNumber(now), windowStart(period, now)
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if days, in := l.view[key]; in && !now.After(l.viewUntil) {
+		var other float64
+		for day := from; day <= today; day++ {
+			other += days[day]
+		}
+		spend = max(spend, other+l.ownLocked(key, from, today))
+	}
+	return spend, true
+}
+
 // BudgetSnapshot is the spend of every subject of one budget in its current
 // window, for the budget gauges: Total is every subject added, Peak the
 // highest single subject, Exceeded how many subjects are at or over the limit.
@@ -721,6 +812,17 @@ func (l *Ledger) Snapshot(prefix, period string, limit float64, now time.Time) (
 		if limit > 0 && v >= limit {
 			snap.Exceeded++
 		}
+	}
+	// An actor or batch budget in a cluster: this replica holds only its own
+	// keys, so the view takes the leader's sums of every replica's stored
+	// spend, read right after this replica's push, once per interval
+	// (GAP-0894). Each figure is the larger of both: this replica's newest
+	// spend shows at once, the others' within one interval.
+	if s, ok := l.sums[prefix]; ok && s.from == from && !now.After(l.sumsUntil) {
+		snap.Total = max(snap.Total, s.Total)
+		snap.Peak = max(snap.Peak, s.Peak)
+		snap.Subjects = max(snap.Subjects, s.Subjects)
+		snap.Exceeded = max(snap.Exceeded, s.Exceeded)
 	}
 	return snap, true
 }

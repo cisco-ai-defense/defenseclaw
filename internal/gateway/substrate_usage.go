@@ -239,6 +239,44 @@ func substratePushUsage(ctx context.Context, l SubstrateSpendLeader, sink *model
 // owner), as "NN %", or "over" once one is used up. "" when no budget counts
 // it or no spend is known yet. A pooled total is never shown: the fleet store
 // answers a pooled budget with over the limit only.
+// substrateBudgetActor is the actor and person key a budget charges reg's
+// calls to.
+func substrateBudgetActor(reg registry.Registration) (*engine.Actor, string) {
+	personKey := ""
+	actor := &engine.Actor{Key: reg.Key, Atespace: reg.Atespace, BatchID: reg.BatchID}
+	if !reg.Attributed {
+		personKey = reg.Person.Key()
+		actor.Person = personKey != ""
+	}
+	return actor, personKey
+}
+
+// substrateReadBudgetKeys reads, before a list or status view, the actor
+// and batch budget keys of regs from the spend leader (in a cluster this
+// replica holds only its own keys), so the BUDGET cell shows the cluster's
+// spend. One bounded read by key list; nothing on a device.
+func substrateReadBudgetKeys(ctx context.Context, cfg *config.Config, regs []registry.Registration) {
+	if cfg == nil || cfg.Routing.Admin == nil || len(regs) == 0 {
+		return
+	}
+	var keys []string
+	for _, b := range cfg.Routing.Admin.Budgets {
+		if b.LimitUSD <= 0 || (b.Scope != config.RoutingBudgetScopeActor && b.Scope != config.RoutingBudgetScopeBatch) {
+			continue
+		}
+		for _, reg := range regs {
+			if reg.Key == "" || reg.Deleted {
+				continue
+			}
+			actor, personKey := substrateBudgetActor(reg)
+			if k := routingadmin.ActorBudgetKey(b.Scope, b.ID, actor, personKey); k != "" {
+				keys = append(keys, k)
+			}
+		}
+	}
+	routingAdminRuntime.ReadViewKeys(ctx, keys)
+}
+
 func substrateActorBudget(cfg *config.Config, reg registry.Registration, now time.Time) string {
 	if cfg == nil || cfg.Routing.Admin == nil || reg.Key == "" {
 		return ""
@@ -247,12 +285,7 @@ func substrateActorBudget(cfg *config.Config, reg registry.Registration, now tim
 	if ledger == nil {
 		return ""
 	}
-	personKey := ""
-	actor := &engine.Actor{Key: reg.Key, Atespace: reg.Atespace, BatchID: reg.BatchID}
-	if !reg.Attributed {
-		personKey = reg.Person.Key()
-		actor.Person = personKey != ""
-	}
+	actor, personKey := substrateBudgetActor(reg)
 	best, seen := 0.0, false
 	for _, b := range cfg.Routing.Admin.Budgets {
 		var key string
@@ -267,7 +300,9 @@ func substrateActorBudget(cfg *config.Config, reg registry.Registration, now tim
 		if key == "" || b.LimitUSD <= 0 {
 			continue
 		}
-		spend, known := ledger.Spend(key, b.Period, now)
+		// An actor or batch key another replica holds: the list read it
+		// from the leader (substrateReadBudgetKeys, GAP-0894).
+		spend, known := ledger.ViewSpend(key, b.Period, now)
 		if !known {
 			continue
 		}

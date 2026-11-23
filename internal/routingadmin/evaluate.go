@@ -415,25 +415,27 @@ func (p *Policy) HoldFullIDs() []string {
 	return ids
 }
 
-// OverBudget is a launcher-keyed (actor, batch) budget that blocks or
-// downgrades past its limit: the cluster read asks for its keys at or over
-// the limit, so a replica never forgets a blocked key (GAP-0892).
-type OverBudget struct {
+// CappedBudget is a launcher-keyed (actor, batch) budget. The cluster read
+// asks for the keys at or over the limit of one that Blocks (deny or
+// downgrade), so a replica never forgets a blocked key (GAP-0892), and for
+// the per-budget sums of each, for the admin view (GAP-0894).
+type CappedBudget struct {
 	Prefix   string // "<scope>:<id>:"
 	Period   string
 	LimitUSD float64
+	Blocks   bool
 }
 
-// OverBudgets lists the actor and batch budgets whose action is not warn.
-func (p *Policy) OverBudgets() []OverBudget {
+// CappedBudgets lists the actor and batch budgets with a limit.
+func (p *Policy) CappedBudgets() []CappedBudget {
 	if p == nil {
 		return nil
 	}
-	var out []OverBudget
+	var out []CappedBudget
 	for _, b := range p.budgets {
-		if b.action != config.RoutingBudgetOnExceedWarn && b.LimitUSD > 0 &&
-			(b.Scope == config.RoutingBudgetScopeActor || b.Scope == config.RoutingBudgetScopeBatch) {
-			out = append(out, OverBudget{Prefix: b.Scope + ":" + b.ID + ":", Period: b.Period, LimitUSD: b.LimitUSD})
+		if b.LimitUSD > 0 && (b.Scope == config.RoutingBudgetScopeActor || b.Scope == config.RoutingBudgetScopeBatch) {
+			out = append(out, CappedBudget{Prefix: b.Scope + ":" + b.ID + ":", Period: b.Period, LimitUSD: b.LimitUSD,
+				Blocks: b.action != config.RoutingBudgetOnExceedWarn})
 		}
 	}
 	return out

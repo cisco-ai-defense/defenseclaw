@@ -299,6 +299,13 @@ func substrateVisible(c substrateCaller, reg registry.Registration) bool {
 // says what its asks do (D12, GAP-0388): unattended_asks deny or queue from
 // its profile, and with queue how long an ask waits for a person. An actor
 // in policy_conflict carries the controller's mark (GAP-0398).
+// readViewBudgets reads the budget keys of regs before their views.
+func (st *substrateState) readViewBudgets(ctx context.Context, regs ...registry.Registration) {
+	if st.readBudgets != nil {
+		st.readBudgets(ctx, regs)
+	}
+}
+
 func (st *substrateState) actorView(reg registry.Registration) map[string]any {
 	v := map[string]any{
 		"atespace": reg.Atespace, "name": reg.Name, "uid": reg.UID, "registration_key": reg.Key,
@@ -579,6 +586,7 @@ func (a *APIServer) substrateListActors(st *substrateState) http.HandlerFunc {
 		}
 		// GAP-0167: the person sees which agents hold a worker.
 		states := substrateLiveStates(r.Context(), st.cfg.Lookup, regs)
+		st.readViewBudgets(r.Context(), regs...)
 		out := make([]map[string]any, 0, len(regs))
 		for i, reg := range regs {
 			v := st.actorView(reg)
@@ -729,6 +737,7 @@ func (a *APIServer) substrateGetActor(st *substrateState) http.HandlerFunc {
 			return
 		}
 		a.substrateAuditAdminTarget(st, r, reg, "actor", "INFO")
+		st.readViewBudgets(r.Context(), reg)
 		v := st.actorView(reg)
 		// GAP-0410: status shows a crashed agent as crashed.
 		if st.cfg.Lookup == nil {
@@ -828,6 +837,7 @@ func (a *APIServer) substrateBatches(st *substrateState, r *http.Request, batchI
 	if substrateAllView(r) {
 		a.substrateAuditAdminRead(st, r, "batches", len(regs), "")
 	}
+	st.readViewBudgets(r.Context(), regs...)
 	out := map[substrateBatchKey][]map[string]any{}
 	for _, reg := range regs {
 		if reg.BatchID != "" {

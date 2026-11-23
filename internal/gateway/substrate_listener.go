@@ -273,6 +273,9 @@ type substrateState struct {
 	// budget is the BUDGET cell of an agent (substrateActorBudget); nil
 	// when the server has no live config.
 	budget func(reg registry.Registration) string
+	// readBudgets reads the budget keys of regs before a view
+	// (substrateReadBudgetKeys); nil with budget.
+	readBudgets func(ctx context.Context, regs []registry.Registration)
 
 	// receiptKey signs skill scan receipts (substrate_skills.go);
 	// receiptShared says every replica has it.
@@ -346,6 +349,9 @@ func (a *APIServer) SetSubstrate(cfg SubstrateConfig) error {
 			now = st.now()
 		}
 		return substrateActorBudget(a.liveConfig(), reg, now)
+	}
+	st.readBudgets = func(ctx context.Context, regs []registry.Registration) {
+		substrateReadBudgetKeys(ctx, a.liveConfig(), regs)
 	}
 	st.audit = func(ctx context.Context, severity, summary string, details map[string]any) {
 		if a.logger != nil {

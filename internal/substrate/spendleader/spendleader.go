@@ -29,12 +29,13 @@ import (
 const (
 	MethodSpendPush   = "SpendPush"
 	MethodSpendTotals = "SpendTotals"
+	MethodSpendSums   = "SpendSums"
 	MethodUsagePush   = "UsagePush"
 	MethodUsageQuery  = "UsageQuery"
 )
 
 // Methods lists every method Serve registers (the gateway's permission set).
-var Methods = []string{MethodSpendPush, MethodSpendTotals, MethodUsagePush, MethodUsageQuery}
+var Methods = []string{MethodSpendPush, MethodSpendTotals, MethodSpendSums, MethodUsagePush, MethodUsageQuery}
 
 const (
 	// maxSpendRows bounds one spend push or answer (Client pushes in chunks
@@ -113,6 +114,28 @@ type SpendTotalsAnswer struct {
 	OverFull []string `json:"over_full,omitempty"`
 }
 
+// SpendSumsRequest asks for the stored spend of each budget's keys, every
+// epoch (the admin view, GAP-0894): one answer row per budget.
+type SpendSumsRequest struct {
+	Epoch string      `json:"epoch"`
+	Sums  []SpendOver `json:"sums"` // Prefix, Since, Limit (Max unused)
+}
+
+// SpendSum is one budget's answer: Total over its keys, Peak the highest
+// key, Subjects the keys, Exceeded the keys at or over Limit.
+type SpendSum struct {
+	Prefix   string  `json:"prefix"`
+	Total    float64 `json:"total"`
+	Peak     float64 `json:"peak"`
+	Subjects int     `json:"subjects"`
+	Exceeded int     `json:"exceeded"`
+}
+
+// SpendSumsAnswer holds one SpendSum per requested budget.
+type SpendSumsAnswer struct {
+	Sums []SpendSum `json:"sums"`
+}
+
 // UsagePushRequest is one replica's absolute hourly usage buckets.
 type UsagePushRequest struct {
 	Epoch string                 `json:"epoch"`
@@ -161,6 +184,7 @@ func Serve(srv *leader.Server, s *Service) {
 	if s.Counter != nil {
 		srv.HandleRead(MethodSpendPush, leader.Typed(s.spendPush))
 		srv.HandleRead(MethodSpendTotals, leader.Typed(s.spendTotals))
+		srv.HandleRead(MethodSpendSums, leader.Typed(s.spendSums))
 	}
 	if s.Usage != nil {
 		srv.HandleRead(MethodUsagePush, leader.Typed(s.usagePush))
@@ -233,6 +257,35 @@ func (s *Service) spendTotals(ctx context.Context, in SpendTotalsRequest) (Spend
 	return SpendTotalsAnswer{Rows: wireRows(rows[:n]), More: n < len(rows), Paged: true, OverFull: full}, nil
 }
 
+func (s *Service) spendSums(ctx context.Context, in SpendSumsRequest) (SpendSumsAnswer, error) {
+	if !epochRE.MatchString(in.Epoch) || len(in.Sums) == 0 || len(in.Sums) > maxOver {
+		return SpendSumsAnswer{}, bad("epoch and 1 to 256 sums are required")
+	}
+	q := make([]routingadmin.SumQuery, 0, len(in.Sums))
+	for _, o := range in.Sums {
+		since, err := time.Parse(time.DateOnly, o.Since)
+		if err != nil || !budgetPrefix(o.Prefix) || !(o.Limit > 0) || math.IsInf(o.Limit, 0) {
+			return SpendSumsAnswer{}, bad("a sum is a budget prefix, a UTC date and a limit")
+		}
+		q = append(q, routingadmin.SumQuery{Prefix: o.Prefix, Since: since, Limit: o.Limit})
+	}
+	sums, err := s.Counter.PrefixSums(ctx, q)
+	if err != nil {
+		return SpendSumsAnswer{}, err
+	}
+	out := SpendSumsAnswer{Sums: make([]SpendSum, 0, len(sums))}
+	for _, p := range sums {
+		out.Sums = append(out.Sums, SpendSum{Prefix: p.Prefix, Total: p.Total, Peak: p.Peak, Subjects: p.Subjects, Exceeded: p.Exceeded})
+	}
+	return out, nil
+}
+
+// budgetPrefix is "actor:<id>:" or "batch:<id>:" within maxKeyLen.
+func budgetPrefix(p string) bool {
+	return len(p) <= maxKeyLen && len(p) >= len("actor:x:") && strings.HasSuffix(p, ":") &&
+		(strings.HasPrefix(p, "actor:") || strings.HasPrefix(p, "batch:"))
+}
+
 // overQueries checks a read's Over (only a by-key read, not KeysOnly, has
 // one).
 func overQueries(in SpendTotalsRequest) ([]routingadmin.OverQuery, error) {
@@ -245,9 +298,7 @@ func overQueries(in SpendTotalsRequest) ([]routingadmin.OverQuery, error) {
 	out := make([]routingadmin.OverQuery, 0, len(in.Over))
 	for _, o := range in.Over {
 		since, err := time.Parse(time.DateOnly, o.Since)
-		if err != nil || len(o.Prefix) > maxKeyLen || !strings.HasSuffix(o.Prefix, ":") ||
-			!(strings.HasPrefix(o.Prefix, "actor:") || strings.HasPrefix(o.Prefix, "batch:")) || len(o.Prefix) < len("actor:x:") ||
-			!(o.Limit > 0) || math.IsInf(o.Limit, 0) || o.Max < 1 || o.Max > maxKeys {
+		if err != nil || !budgetPrefix(o.Prefix) || !(o.Limit > 0) || math.IsInf(o.Limit, 0) || o.Max < 1 || o.Max > maxKeys {
 			return nil, bad("over is a budget prefix, a UTC date, a limit and a max")
 		}
 		out = append(out, routingadmin.OverQuery{Prefix: o.Prefix, Since: since, Limit: o.Limit, Max: o.Max})

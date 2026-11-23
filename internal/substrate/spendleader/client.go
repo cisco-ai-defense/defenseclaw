@@ -59,13 +59,48 @@ func (c *Client) SpendTotals(ctx context.Context, epoch string, since time.Time,
 	return rows, err
 }
 
-var _ routingadmin.SpendOverRPC = (*Client)(nil)
+var (
+	_ routingadmin.SpendOverRPC = (*Client)(nil)
+	_ routingadmin.SpendViewRPC = (*Client)(nil)
+)
+
+// SpendKeys reads every other epoch's spend of keys only (the admin view's
+// actor list, GAP-0894), in requests of at most maxKeys keys.
+func (c *Client) SpendKeys(ctx context.Context, epoch string, since time.Time, keys []string) ([]routingadmin.SeedRow, error) {
+	if len(keys) == 0 {
+		return nil, nil
+	}
+	rows, _, err := c.totals(ctx, epoch, since, keys, nil, true)
+	return rows, err
+}
+
+// SpendSums reads the per-budget sums of every epoch (GAP-0894).
+func (c *Client) SpendSums(ctx context.Context, epoch string, q []routingadmin.SumQuery) ([]routingadmin.PrefixSum, error) {
+	in := SpendSumsRequest{Epoch: epoch}
+	for _, s := range q {
+		in.Sums = append(in.Sums, SpendOver{Prefix: s.Prefix, Since: s.Since.UTC().Format(time.DateOnly), Limit: s.Limit})
+	}
+	var out SpendSumsAnswer
+	if err := c.call(ctx, MethodSpendSums, in, &out); err != nil {
+		return nil, err
+	}
+	sums := make([]routingadmin.PrefixSum, 0, len(out.Sums))
+	for _, s := range out.Sums {
+		sums = append(sums, routingadmin.PrefixSum{Prefix: s.Prefix, Total: s.Total, Peak: s.Peak, Subjects: s.Subjects, Exceeded: s.Exceeded})
+	}
+	return sums, nil
+}
 
 // SpendTotalsOver is SpendTotals whose by-key read also asks for the keys
 // at or over each budget's limit in over (with the first key chunk), and
 // returns the budget ids with more of them than OverQuery.Max (GAP-0892).
 // An older leader ignores over.
 func (c *Client) SpendTotalsOver(ctx context.Context, epoch string, since time.Time, keys []string, over []routingadmin.OverQuery) ([]routingadmin.SeedRow, []string, error) {
+	return c.totals(ctx, epoch, since, keys, over, false)
+}
+
+// totals is the paged read; keysOnly keeps only keys from the first chunk.
+func (c *Client) totals(ctx context.Context, epoch string, since time.Time, keys []string, over []routingadmin.OverQuery, keysOnly bool) ([]routingadmin.SeedRow, []string, error) {
 	base := SpendTotalsRequest{Epoch: epoch, Since: since.UTC().Format(time.DateOnly), Page: true, ByKey: keys != nil}
 	var wireOver []SpendOver
 	if keys != nil {
@@ -79,8 +114,8 @@ func (c *Client) SpendTotalsOver(ctx context.Context, epoch string, since time.T
 	for start := 0; ; start += maxKeys {
 		in := base
 		if keys != nil {
-			in.Keys, in.KeysOnly = keys[start:min(start+maxKeys, len(keys))], start > 0
-			if start == 0 {
+			in.Keys, in.KeysOnly = keys[start:min(start+maxKeys, len(keys))], keysOnly || start > 0
+			if start == 0 && !keysOnly {
 				in.Over = wireOver
 			}
 		}

@@ -34,8 +34,8 @@ type Runtime struct {
 
 	mu     sync.Mutex
 	ledger *Ledger
-	ids    []string     // budget ids of the newest generation
-	over   []OverBudget // its actor and batch budgets that block (OverBudgets)
+	ids    []string       // budget ids of the newest generation
+	capped []CappedBudget // its actor and batch budgets (CappedBudgets)
 	last   *config.Config
 	lastEv *evaluator
 	ctx    context.Context
@@ -52,6 +52,7 @@ type Runtime struct {
 	epoch      string
 	writer     string      // the last fleet writer id (device), kept while no fleet is set
 	syncW      *syncWorker // the running sync loop (nil: none)
+	sumsAt     time.Time   // the last good PrefixSums read
 	kick       chan struct{}
 	// budgeted mirrors len(ids) > 0, so For with no routing.admin (the
 	// per-request default) stays lock-free while no budget ever ran.
@@ -354,7 +355,7 @@ func (rt *Runtime) For(cfg *config.Config) engine.AdminEvaluator {
 	}
 	rt.last, rt.lastEv = cfg, ev
 	rt.setIDsLocked(policy.BudgetIDs())
-	rt.over = policy.OverBudgets()
+	rt.capped = policy.CappedBudgets()
 	rt.mu.Unlock()
 	rt.startSync()
 	return ev
@@ -368,7 +369,7 @@ type syncWorker struct{ stop context.CancelFunc }
 // no SQLite read, spend write or fleet request outlives the budgets
 // (rel-1-0-10:GAP-1716). rt.mu is held.
 func (rt *Runtime) setIDsLocked(ids []string) {
-	rt.ids, rt.over = ids, nil
+	rt.ids, rt.capped = ids, nil
 	rt.budgeted.Store(len(ids) > 0)
 	if len(ids) == 0 && rt.syncW != nil {
 		rt.syncW.stop()
@@ -433,8 +434,9 @@ func (rt *Runtime) syncLoop(ctx context.Context, w *syncWorker) {
 func (rt *Runtime) SyncOnce(ctx context.Context) {
 	rt.mu.Lock()
 	ledger, local, fleet, keys, ids, epoch := rt.ledger, rt.local, rt.fleet, rt.keys, append([]string(nil), rt.ids...), rt.epoch
-	overBudgets := rt.over
+	capped, interval, sumsAt := rt.capped, rt.interval, rt.sumsAt
 	rt.mu.Unlock()
+	now := rt.clock()
 	if ledger == nil || local == nil {
 		return
 	}
@@ -454,13 +456,25 @@ func (rt *Runtime) SyncOnce(ctx context.Context) {
 	var localRows []SeedRow
 	var localErr error
 	var overFull []string
-	if or, ok := local.(OverReader); ok && len(overBudgets) > 0 {
-		localRows, overFull, localErr = or.TotalsOver(ctx, epoch, since, ledger.CappedKeys(), overQueries(overBudgets, ledger.KeyCap(), rt.clock()))
+	if or, ok := local.(OverReader); ok && len(capped) > 0 {
+		localRows, overFull, localErr = or.TotalsOver(ctx, epoch, since, ledger.CappedKeys(), overQueries(capped, ledger.KeyCap(), now))
 	} else {
 		localRows, localErr = local.Totals(ctx, epoch, since, ledger.CappedKeys())
 	}
 	if localErr == nil {
 		ledger.SetOverFull(overFull)
+	}
+	// The admin view of an actor or batch budget sums every replica's keys:
+	// the leader's per-budget sums, read at most once per interval
+	// (GAP-0894). A failed read keeps the last sums until they expire.
+	if sr, ok := local.(SumReader); ok && len(capped) > 0 && (sumsAt.IsZero() || now.Sub(sumsAt) >= interval) {
+		q := sumQueries(capped, now)
+		if sums, err := sr.PrefixSums(ctx, epoch, q); err == nil {
+			ledger.SetPrefixSums(q, sums, now.Add(2*interval))
+			rt.mu.Lock()
+			rt.sumsAt = now
+			rt.mu.Unlock()
+		}
 	}
 	if fleet != nil {
 		if rows, err = fleet.Totals(ctx, epoch, since, fleetWanted(ledger, keys)); err == nil {
@@ -493,17 +507,82 @@ type OverReader interface {
 
 // overQueries asks, per blocking budget, for at most keyCap of its keys at
 // or over the limit in the period that contains now.
-func overQueries(budgets []OverBudget, keyCap int, now time.Time) []OverQuery {
+func overQueries(budgets []CappedBudget, keyCap int, now time.Time) []OverQuery {
 	if keyCap <= 0 {
 		keyCap = DefaultKeyCap
 	}
 	out := make([]OverQuery, 0, len(budgets))
 	for _, b := range budgets {
-		out = append(out, OverQuery{Prefix: b.Prefix, Since: time.Unix(int64(windowStart(b.Period, now))*86400, 0).UTC(),
-			Limit: b.LimitUSD, Max: keyCap})
+		if b.Blocks {
+			out = append(out, OverQuery{Prefix: b.Prefix, Since: windowDate(b.Period, now), Limit: b.LimitUSD, Max: keyCap})
+		}
 	}
 	return out
 }
+
+// SumReader is a counter that sums the stored spend of a budget's keys,
+// every epoch, in the leader (LeaderCounter): the admin view of a cluster.
+type SumReader interface {
+	PrefixSums(ctx context.Context, epoch string, q []SumQuery) ([]PrefixSum, error)
+}
+
+// KeyReader is a counter that reads every other epoch's spend of the listed
+// keys only (LeaderCounter): the substrate actor list of a cluster.
+type KeyReader interface {
+	TotalsKeys(ctx context.Context, epoch string, since time.Time, keys []string) ([]SeedRow, error)
+}
+
+func sumQueries(budgets []CappedBudget, now time.Time) []SumQuery {
+	out := make([]SumQuery, 0, len(budgets))
+	for _, b := range budgets {
+		out = append(out, SumQuery{Prefix: b.Prefix, Since: windowDate(b.Period, now), Limit: b.LimitUSD})
+	}
+	return out
+}
+
+// windowDate is the first UTC day of period's window that contains now.
+func windowDate(period string, now time.Time) time.Time {
+	return time.Unix(int64(windowStart(period, now))*86400, 0).UTC()
+}
+
+// ReadViewKeys reads, for an administrator's view (the substrate actor
+// list), every other replica's spend of the listed actor and batch keys
+// this replica may not hold, at most maxViewKeys of them, kept for one sync
+// interval (Ledger.ViewSpend). A device counter reads every key already: it
+// does nothing then.
+func (rt *Runtime) ReadViewKeys(ctx context.Context, keys []string) {
+	if rt == nil {
+		return
+	}
+	rt.mu.Lock()
+	ledger, local, epoch, interval := rt.ledger, rt.local, rt.epoch, rt.interval
+	rt.mu.Unlock()
+	kr, ok := local.(KeyReader)
+	if !ok || ledger == nil {
+		return
+	}
+	want := make([]string, 0, len(keys))
+	seen := map[string]bool{}
+	for _, k := range keys {
+		if capped(k) && !seen[k] {
+			seen[k] = true
+			want = append(want, k)
+		}
+	}
+	if len(want) == 0 || len(want) > maxViewKeys {
+		return
+	}
+	sort.Strings(want)
+	now := rt.clock()
+	rows, err := kr.TotalsKeys(ctx, epoch, KeepSince(now), want)
+	if err != nil {
+		return
+	}
+	ledger.SetViewKeys(want, rows, now.Add(interval))
+}
+
+// maxViewKeys bounds one ReadViewKeys.
+const maxViewKeys = 20000
 
 // maxRows merges two spend answers per (key, day), keeping the larger.
 func maxRows(a, b []SeedRow) []SeedRow {

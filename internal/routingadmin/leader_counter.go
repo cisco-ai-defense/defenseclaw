@@ -17,6 +17,14 @@ type SpendRPC interface {
 	SpendTotals(ctx context.Context, epoch string, since time.Time, keys []string) ([]SeedRow, error)
 }
 
+// SpendViewRPC is a SpendRPC that also answers the admin view's reads
+// (spendleader.Client; GAP-0894): per-budget sums and a read of listed keys
+// only.
+type SpendViewRPC interface {
+	SpendSums(ctx context.Context, epoch string, q []SumQuery) ([]PrefixSum, error)
+	SpendKeys(ctx context.Context, epoch string, since time.Time, keys []string) ([]SeedRow, error)
+}
+
 // SpendOverRPC is a SpendRPC whose by-key read also names the keys at or
 // over a budget's limit (spendleader.Client; GAP-0892).
 type SpendOverRPC interface {
@@ -39,7 +47,42 @@ type LeaderCounter struct {
 var (
 	_ SpendCounter = (*LeaderCounter)(nil)
 	_ OverReader   = (*LeaderCounter)(nil)
+	_ SumReader    = (*LeaderCounter)(nil)
+	_ KeyReader    = (*LeaderCounter)(nil)
 )
+
+var errNoViewRPC = errors.New("budget spend: the leader has no admin view reads")
+
+// PrefixSums reads the per-budget sums of every epoch (an older
+// leader: an error, and the view stays this replica's).
+func (c *LeaderCounter) PrefixSums(ctx context.Context, epoch string, q []SumQuery) ([]PrefixSum, error) {
+	v, ok := c.viewRPC()
+	if !ok {
+		return nil, errNoViewRPC
+	}
+	ctx, cancel := c.ctx(ctx)
+	defer cancel()
+	return v.SpendSums(ctx, epoch, q)
+}
+
+// TotalsKeys reads every other epoch's spend of keys only.
+func (c *LeaderCounter) TotalsKeys(ctx context.Context, epoch string, since time.Time, keys []string) ([]SeedRow, error) {
+	v, ok := c.viewRPC()
+	if !ok {
+		return nil, errNoViewRPC
+	}
+	ctx, cancel := c.ctx(ctx)
+	defer cancel()
+	return v.SpendKeys(ctx, epoch, since, keys)
+}
+
+func (c *LeaderCounter) viewRPC() (SpendViewRPC, bool) {
+	if c == nil || c.rpc == nil {
+		return nil, false
+	}
+	v, ok := c.rpc.(SpendViewRPC)
+	return v, ok
+}
 
 // NewLeaderCounter returns the counter over rpc.
 func NewLeaderCounter(rpc SpendRPC) *LeaderCounter {

@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -102,7 +103,18 @@ type routingRetiredKeys struct {
 	Waiting int `json:"waiting"`
 	Dropped int `json:"dropped"`
 	Cap     int `json:"cap"`
+	// Replica names the gateway process these counts are of (the host
+	// name: the pod in a cluster). They are per process by nature; doctor
+	// says "this replica" (GAP-0894).
+	Replica string `json:"replica,omitempty"`
 }
+
+// routingReplicaName is this gateway's host name (the pod name in a
+// cluster), read once.
+var routingReplicaName = sync.OnceValue(func() string {
+	name, _ := os.Hostname()
+	return name
+})
 
 // routingBudgetViews lists the budgets the caller may see with their spend:
 // an administrator sees every budget (a * budget as the sum over its
@@ -136,7 +148,7 @@ func routingBudgetViews(cfg *config.Config, key string, admin bool, own routinga
 			view.Subject = b.Subject
 			if b.Scope == config.RoutingBudgetScopeActor || b.Scope == config.RoutingBudgetScopeBatch {
 				if waiting, dropped := ledger.RetiredKeys(b.ID); waiting > 0 || dropped > 0 {
-					view.RetiredKeys = &routingRetiredKeys{Waiting: waiting, Dropped: dropped, Cap: ledger.KeyCap()}
+					view.RetiredKeys = &routingRetiredKeys{Waiting: waiting, Dropped: dropped, Cap: ledger.KeyCap(), Replica: routingReplicaName()}
 				}
 			}
 			spend, known = ledger.SpendPrefix(b.Scope+":"+b.ID+":", b.Period, now)
