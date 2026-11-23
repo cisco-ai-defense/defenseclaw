@@ -201,6 +201,15 @@ type SubstrateConfig struct {
 	RelayCA *relaytls.CA
 	// RelayTLS is substrate.relay_tls ("" is auto).
 	RelayTLS relaytls.Mode
+	// RelayCerts is the leader's record of the live relay serving
+	// certificate per actor (GAP-0861), shared by every replica and kept
+	// over restarts. nil: in refuse mode /relay/cert answers
+	// relay_cert_record_unavailable; in flag mode every certificate asked
+	// for without proof of the live key is a HIGH row.
+	RelayCerts registry.RelayCerts
+	// RelayCertReissue is the active substrate.relay_cert_reissue (refuse
+	// or flag; "" is auto: refuse when Managed).
+	RelayCertReissue string
 	// WorkspaceMaxBytes caps a workspace upload through attach
 	// (substrate.workspace_max_bytes, E23).
 	WorkspaceMaxBytes int64
@@ -271,9 +280,6 @@ type substrateState struct {
 	// logOut is the gateway log (stderr); now is the clock. Tests set both.
 	logOut io.Writer
 	now    func() time.Time
-	// relayCerts is the live relay serving certificate per actor UID this
-	// replica issued (GAP-0819).
-	relayCerts substrateRelayCertsLive
 
 	// receiptKey signs skill scan receipts (substrate_skills.go);
 	// receiptShared says every replica has it.

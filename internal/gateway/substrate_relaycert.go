@@ -10,12 +10,13 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"io"
 	"net"
 	"net/http"
-	"sync"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/registry"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/relay"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/relaytls"
@@ -84,20 +85,94 @@ func (a *APIServer) serveSubstrateRelayCert(st *substrateState, w http.ResponseW
 		writeSubstrateRefusal(w, http.StatusBadRequest, "bad_csr")
 		return
 	}
-	prev, second := st.relayCerts.issued(actor.UID, cert, now)
+	rec, err := substrateRelayCertRecord(cert)
+	if err != nil {
+		writeSubstrateRefusal(w, http.StatusInternalServerError, "relay_cert_failed")
+		return
+	}
+	// One live certificate per actor, on the leader (GAP-0861), so every
+	// replica and a restarted gateway answer the same. A renewal replaces
+	// it; a request without proof is a first certificate only when the
+	// actor has no live one.
+	refuse := st.cfg.relayCertRefuse()
+	ttl := int(relaytls.CertTTL / time.Second)
+	claim := func(replace bool) (registry.RelayCertClaimed, error) {
+		if st.cfg.RelayCerts == nil {
+			return registry.RelayCertClaimed{}, errSubstrateNoRelayCerts
+		}
+		return st.cfg.RelayCerts.ClaimRelayCert(r.Context(), registry.RelayCertClaim{
+			Atespace: actor.Atespace, UID: actor.UID, Cert: rec, Replace: replace, Now: now})
+	}
+	got, cerr := claim(renewal)
 	switch {
-	case second && !renewal:
-		// One live certificate per actor: a second one asked for with the
-		// actor JWT alone is what an attacker holding that JWT would do. A
-		// relay that restarted (crash, suspend and resume) does the same
-		// and cannot prove a key it lost, so it is issued and flagged.
-		a.substrateRelayCertAudit(st, r, "HIGH", "second relay serving certificate issued for "+actor.Atespace+"/"+actor.Name+" without proof of the live key",
-			"substrate.relay.cert_second", row, map[string]any{"previous_serial": prev, "ttl_s": int(relaytls.CertTTL / time.Second)})
-	default:
+	case cerr != nil && refuse:
+		a.substrateRelayCertAudit(st, r, "HIGH", "relay serving certificate not issued for "+actor.Atespace+"/"+actor.Name+": the leader's record of live relay certificates is unavailable",
+			"substrate.relay.cert_refused", row, map[string]any{"reason": "relay_cert_record_unavailable", "error": cerr.Error()})
+		w.Header().Set("Retry-After", "5")
+		writeSubstrateRefusal(w, http.StatusServiceUnavailable, "relay_cert_record_unavailable")
+		return
+	case renewal:
+		extra := map[string]any{"renewal": true, "ttl_s": ttl}
+		if cerr != nil {
+			extra["record"] = "unavailable"
+		}
 		a.substrateRelayCertAudit(st, r, "INFO", "relay serving certificate issued for "+actor.Atespace+"/"+actor.Name,
-			"substrate.relay.cert", row, map[string]any{"renewal": renewal, "ttl_s": int(relaytls.CertTTL / time.Second)})
+			"substrate.relay.cert", row, extra)
+	case cerr != nil:
+		// flag: without the record this may be a second certificate.
+		a.substrateRelayCertAudit(st, r, "HIGH", "relay serving certificate issued for "+actor.Atespace+"/"+actor.Name+" without proof of the live key; the leader's record of live relay certificates is unavailable, so it may be a second one",
+			"substrate.relay.cert_second", row, map[string]any{"record": "unavailable", "error": cerr.Error(), "ttl_s": ttl})
+	case got.Set:
+		a.substrateRelayCertAudit(st, r, "INFO", "relay serving certificate issued for "+actor.Atespace+"/"+actor.Name,
+			"substrate.relay.cert", row, map[string]any{"renewal": false, "ttl_s": ttl})
+	case refuse:
+		// A second certificate asked for with the actor JWT alone is what
+		// someone holding that JWT would do. A relay that restarted inside
+		// its actor asks the same way and cannot prove a key it lost: the
+		// owner or an administrator lets it through with recover.
+		a.substrateRelayCertAudit(st, r, "HIGH", "second relay serving certificate refused for "+actor.Atespace+"/"+actor.Name+": no proof of the live key (substrate.relay_cert_reissue refuse; recover clears it)",
+			"substrate.relay.cert_refused", row, map[string]any{"reason": "reissue_refused", "previous_serial": got.Prev.Serial})
+		writeSubstrateRefusal(w, http.StatusForbidden, "reissue_refused")
+		return
+	default:
+		// flag: issued, and it is the live one now.
+		extra := map[string]any{"previous_serial": got.Prev.Serial, "ttl_s": ttl}
+		if _, err := claim(true); err != nil {
+			extra["record"] = "unavailable"
+		}
+		a.substrateRelayCertAudit(st, r, "HIGH", "second relay serving certificate issued for "+actor.Atespace+"/"+actor.Name+" without proof of the live key",
+			"substrate.relay.cert_second", row, extra)
 	}
 	writeSubstrateJSON(w, http.StatusOK, relay.CertResponse{Cert: string(cert)})
+}
+
+// errSubstrateNoRelayCerts is a gateway without the leader's record of
+// live relay certificates (SubstrateConfig.RelayCerts nil).
+var errSubstrateNoRelayCerts = errors.New("no record of live relay certificates")
+
+// relayCertRefuse reports whether a second relay certificate without proof
+// of the live key is refused (substrate.relay_cert_reissue, GAP-0861).
+func (c SubstrateConfig) relayCertRefuse() bool {
+	switch c.RelayCertReissue {
+	case config.SubstrateRelayCertReissueRefuse:
+		return true
+	case config.SubstrateRelayCertReissueFlag:
+		return false
+	}
+	return c.Managed
+}
+
+// substrateRelayCertRecord is the leader's record of a signed certificate.
+func substrateRelayCertRecord(certPEM []byte) (registry.RelayCert, error) {
+	b, _ := pem.Decode(certPEM)
+	if b == nil {
+		return registry.RelayCert{}, errors.New("relay certificate: no PEM block")
+	}
+	cert, err := x509.ParseCertificate(b.Bytes)
+	if err != nil {
+		return registry.RelayCert{}, err
+	}
+	return registry.RelayCert{Serial: cert.SerialNumber.Text(16), NotAfter: cert.NotAfter}, nil
 }
 
 func (a *APIServer) substrateRelayCertAudit(st *substrateState, r *http.Request, severity, summary, event string, row, extra map[string]any) {
@@ -112,48 +187,6 @@ func (a *APIServer) substrateRelayCertAudit(st *substrateState, r *http.Request,
 		d[k] = v
 	}
 	st.audit(r.Context(), severity, summary, d)
-}
-
-// substrateRelayCertsLive is the live relay serving certificate per actor
-// UID (serial and expiry) that this replica issued (GAP-0819).
-type substrateRelayCertsLive struct {
-	mu   sync.Mutex
-	live map[string]substrateRelayCertLive
-}
-
-type substrateRelayCertLive struct {
-	serial   string
-	notAfter time.Time
-}
-
-// issued records certPEM as uid's live certificate. second is set when uid
-// already had an unexpired one, whose serial is prev.
-func (c *substrateRelayCertsLive) issued(uid string, certPEM []byte, now time.Time) (prev string, second bool) {
-	b, _ := pem.Decode(certPEM)
-	if b == nil {
-		return "", false
-	}
-	cert, err := x509.ParseCertificate(b.Bytes)
-	if err != nil {
-		return "", false
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.live == nil {
-		c.live = map[string]substrateRelayCertLive{}
-	}
-	if old, ok := c.live[uid]; ok && now.Before(old.notAfter) {
-		prev, second = old.serial, true
-	}
-	if len(c.live) >= 4096 {
-		for k, v := range c.live {
-			if !now.Before(v.notAfter) {
-				delete(c.live, k)
-			}
-		}
-	}
-	c.live[uid] = substrateRelayCertLive{serial: cert.SerialNumber.Text(16), notAfter: cert.NotAfter}
-	return prev, second
 }
 
 func (st *substrateState) clock() time.Time {

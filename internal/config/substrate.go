@@ -75,6 +75,12 @@ type SubstrateConfig struct {
 	// required refuses those; off drops the row and the warning. A kit that
 	// serves TLS is dialed with TLS in every mode.
 	RelayTLS string `mapstructure:"relay_tls" yaml:"relay_tls,omitempty"`
+	// RelayCertReissue is what the gateway does with a second relay
+	// serving certificate for an actor asked for without proof of the live
+	// key (GAP-0861): refuse answers 403 until an owner or administrator
+	// runs recover; flag issues it with a HIGH audit row; auto (default)
+	// is refuse in a managed enterprise install and flag in OSS.
+	RelayCertReissue string `mapstructure:"relay_cert_reissue" yaml:"relay_cert_reissue,omitempty"`
 	// WorkspaceMaxBytes caps a workspace upload through the admin
 	// listener's attach route (E23; 0 = DefaultSubstrateWorkspaceMaxBytes).
 	WorkspaceMaxBytes int64                     `mapstructure:"workspace_max_bytes" yaml:"workspace_max_bytes,omitempty"`
@@ -501,6 +507,34 @@ func (s SubstrateConfig) EffectiveRelayTLS() string {
 	return SubstrateRelayTLSAuto
 }
 
+// Values of substrate.relay_cert_reissue.
+const (
+	SubstrateRelayCertReissueAuto   = "auto"
+	SubstrateRelayCertReissueFlag   = "flag"
+	SubstrateRelayCertReissueRefuse = "refuse"
+)
+
+// EffectiveRelayCertReissue is substrate.relay_cert_reissue, auto when
+// unset.
+func (s SubstrateConfig) EffectiveRelayCertReissue() string {
+	if v := strings.ToLower(strings.TrimSpace(s.RelayCertReissue)); v != "" {
+		return v
+	}
+	return SubstrateRelayCertReissueAuto
+}
+
+// RelayCertReissueFor is the active substrate.relay_cert_reissue: auto is
+// refuse in a managed enterprise install and flag in OSS.
+func (s SubstrateConfig) RelayCertReissueFor(managed bool) string {
+	switch v := s.EffectiveRelayCertReissue(); {
+	case v != SubstrateRelayCertReissueAuto:
+		return v
+	case managed:
+		return SubstrateRelayCertReissueRefuse
+	}
+	return SubstrateRelayCertReissueFlag
+}
+
 // EffectiveChainEgressAction is substrate.chain_egress_action, block when
 // unset.
 func (s SubstrateConfig) EffectiveChainEgressAction() string {
@@ -646,6 +680,11 @@ func (s *SubstrateConfig) Validate() error {
 	case SubstrateRelayTLSAuto, SubstrateRelayTLSRequired, SubstrateRelayTLSOff:
 	default:
 		bad("relay_tls", "%q is not auto, required or off", s.RelayTLS)
+	}
+	switch s.EffectiveRelayCertReissue() {
+	case SubstrateRelayCertReissueAuto, SubstrateRelayCertReissueFlag, SubstrateRelayCertReissueRefuse:
+	default:
+		bad("relay_cert_reissue", "%q is not auto, flag or refuse", s.RelayCertReissue)
 	}
 	if a := s.API.Address; a != "" {
 		if _, port, err := net.SplitHostPort(a); err != nil || port == "" {

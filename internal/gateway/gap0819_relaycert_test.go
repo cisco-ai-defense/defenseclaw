@@ -19,13 +19,14 @@ import (
 )
 
 // GAP-0819: one live relay certificate per actor. A renewal proves the
-// live key and is an INFO row; a second certificate asked for with the
-// actor JWT alone is issued (a restarted relay lost its key) with a HIGH
-// row; a renewal with a proof that does not hold is refused, HIGH.
+// live key and is an INFO row; in flag mode (OSS auto, GAP-0861) a second
+// certificate asked for with the actor JWT alone is issued (a restarted
+// relay lost its key) with a HIGH row; a renewal with a proof that does
+// not hold is refused, HIGH.
 func TestGAP0819SecondRelayCertIsFlagged(t *testing.T) {
 	const uid = "3b6c2d1e-8f4a-4b9c-a1d2-5e6f7a8b9c0d"
 	var rows []string
-	st := &substrateState{cfg: SubstrateConfig{RelayCA: tixRelayCA(t)}, audit: func(_ context.Context, sev, _ string, d map[string]any) {
+	st := &substrateState{cfg: SubstrateConfig{RelayCA: tixRelayCA(t), RelayCerts: tixRelayCerts(t)}, audit: func(_ context.Context, sev, _ string, d map[string]any) {
 		rows = append(rows, sev+" "+d["event"].(string))
 	}}
 	ctx := withSubstrateActor(t.Context(), *f14Actor(t, "tix", uid))

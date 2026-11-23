@@ -75,6 +75,9 @@ func Serve(srv *leader.Server, s Store) {
 	srv.HandleRead(leader.MethodRegistrationLookup, leader.Typed(func(ctx context.Context, in lookupIn) (Lookup, error) {
 		return LookupName(ctx, s, in.Atespace, in.Name)
 	}))
+	if rc, ok := s.(RelayCerts); ok {
+		serveRelayCerts(srv, rc)
+	}
 }
 
 // remoteTTL is how long a follower reuses a registration it read. A

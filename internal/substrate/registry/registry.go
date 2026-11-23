@@ -275,6 +275,9 @@ type FileStore struct {
 	// name), so LookupName reads one entry: the leader answers one for
 	// every egress chain check (GAP-0234).
 	newest map[string]string
+	// certs is the live relay certificate per registration key
+	// (relaycert.go, GAP-0861).
+	certs map[string]RelayCert
 }
 
 // OpenFileStore loads every registration under dir.
@@ -282,7 +285,7 @@ func OpenFileStore(dir string) (*FileStore, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("registry: %w", err)
 	}
-	s := &FileStore{dir: dir, mem: map[string]Registration{}, newest: map[string]string{}}
+	s := &FileStore{dir: dir, mem: map[string]Registration{}, newest: map[string]string{}, certs: map[string]RelayCert{}}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, fmt.Errorf("registry: %w", err)
@@ -304,6 +307,9 @@ func OpenFileStore(dir string) (*FileStore, error) {
 		}
 		s.mem[r.Key] = r
 		s.indexLocked(r)
+	}
+	if err := s.loadRelayCerts(); err != nil {
+		return nil, err
 	}
 	return s, nil
 }
@@ -401,21 +407,8 @@ func (s *FileStore) Put(_ context.Context, r Registration) error {
 	if err != nil {
 		return err
 	}
-	path := filepath.Join(s.dir, fileName(r.Key))
-	tmp, err := os.CreateTemp(s.dir, ".reg-*")
-	if err != nil {
-		return fmt.Errorf("registry: %w", err)
-	}
-	_, werr := tmp.Write(b)
-	serr := tmp.Sync()
-	cerr := tmp.Close()
-	if werr != nil || serr != nil || cerr != nil {
-		_ = os.Remove(tmp.Name())
-		return fmt.Errorf("registry: write: %v", errors.Join(werr, serr, cerr))
-	}
-	if err := os.Rename(tmp.Name(), path); err != nil {
-		_ = os.Remove(tmp.Name())
-		return fmt.Errorf("registry: %w", err)
+	if err := writeFileAtomic(s.dir, fileName(r.Key), b); err != nil {
+		return err
 	}
 	s.mem[r.Key] = r
 	s.indexLocked(r)

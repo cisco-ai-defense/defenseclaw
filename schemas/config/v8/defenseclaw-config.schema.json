@@ -8059,6 +8059,16 @@
           ],
           "default": "auto"
         },
+        "relay_cert_reissue": {
+          "description": "What the gateway does with a second relay serving certificate for an actor asked for without proof of the live key: refuse answers 403 reissue_refused with a HIGH audit row until the owner or an administrator runs recover; flag issues it with a HIGH audit row; auto (default) is refuse in a managed enterprise install and flag in OSS.",
+          "type": "string",
+          "enum": [
+            "auto",
+            "flag",
+            "refuse"
+          ],
+          "default": "auto"
+        },
         "workspace_max_bytes": {
           "type": "integer",
           "minimum": 0,

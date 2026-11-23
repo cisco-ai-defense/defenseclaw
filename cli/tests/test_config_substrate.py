@@ -64,6 +64,7 @@ _FULL = {
     "idle_suspend_without_cpu": True,
     "chain_egress_action": "alert",
     "relay_tls": "required",
+    "relay_cert_reissue": "refuse",
     "unattended": {"asks": "deny", "ask_timeout": "30m", "telemetry_sampling": 0.5},
     "rate_limits": {"per_actor_rps": 20, "per_atespace_rps": 500},
     "extproc": {"enabled": True, "failure_mode": "closed", "body_inspection": "on", "body_max_bytes": 1048576,

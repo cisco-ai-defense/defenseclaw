@@ -23,6 +23,16 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/substrate/relaytls"
 )
 
+// tixRelayCerts is a leader record of live relay certificates (GAP-0861).
+func tixRelayCerts(t *testing.T) registry.RelayCerts {
+	t.Helper()
+	s, err := registry.OpenFileStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+
 func tixRelayCA(t *testing.T) *relaytls.CA {
 	t.Helper()
 	c, k, err := relaytls.GenerateCA(time.Now())
@@ -48,7 +58,7 @@ func TestRelayCertRouteSignsOwnUID(t *testing.T) {
 	const uid = "3b6c2d1e-8f4a-4b9c-a1d2-5e6f7a8b9c0d"
 	ca := tixRelayCA(t)
 	au := &tixAudit{}
-	st := &substrateState{cfg: SubstrateConfig{RelayCA: ca}, audit: au.fn}
+	st := &substrateState{cfg: SubstrateConfig{RelayCA: ca, RelayCerts: tixRelayCerts(t)}, audit: au.fn}
 	a := &APIServer{}
 	_, csr, err := relaytls.NewKeyAndCSR()
 	if err != nil {

@@ -76,6 +76,18 @@ func (a *APIServer) substrateRecoverActor(st *substrateState) http.HandlerFunc {
 			return
 		}
 		a.substrateAuditAdminTarget(st, r, reg, "recover", "HIGH")
+		// GAP-0861: the relay of a recovered actor lost its key, so its
+		// next certificate request has no proof; recover is the owner's or
+		// an administrator's way to let it through in refuse mode. The
+		// record is cleared first, also for an actor that has not crashed
+		// (a relay that restarted inside a running actor).
+		if st.cfg.RelayCerts != nil {
+			if cerr := st.cfg.RelayCerts.ClearRelayCert(r.Context(), reg.Atespace, reg.UID); cerr != nil {
+				fmt.Fprintf(os.Stderr, "[substrate] recover of %s/%s: the relay certificate record was not cleared: %v\n", reg.Atespace, reg.Name, cerr)
+				writeSubstrateJSONError(w, http.StatusServiceUnavailable, "relay_cert_record_unavailable")
+				return
+			}
+		}
 		err := rec.Recover(r.Context(), reg.Atespace, reg.Name)
 		switch {
 		case errors.Is(err, ErrSubstrateNotCrashed):
