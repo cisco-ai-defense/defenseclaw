@@ -86,6 +86,7 @@ var newerConfigKeys = []struct {
 	{"openshell.admin.sandbox_class", [3]int{1, 0, 10}},
 	{"openshell.admin.unattended_asks", [3]int{1, 0, 10}},
 	{"openshell.admin.url_rules", [3]int{1, 0, 10}},
+	{"openshell.vault", [3]int{1, 0, 11}},
 	{"substrate", [3]int{1, 0, 10}},
 	{"substrate.bundles.oci", [3]int{1, 0, 11}},
 	{"enterprise.openshell.allow_downgrade", [3]int{1, 0, 11}},
