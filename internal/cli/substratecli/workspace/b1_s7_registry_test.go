@@ -181,3 +181,35 @@ func TestB1S7RegistryMode(t *testing.T) {
 		t.Errorf("mode %q", both.Mode())
 	}
 }
+
+// globalOnly answers the probe with the image's global npmrc only.
+type globalOnly struct{ global string }
+
+func (g globalOnly) Exec(_ context.Context, _ string, req osw.ExecRequest) (*osw.ExecResult, error) {
+	return &osw.ExecResult{Stdout: []byte("\n" + req.Env["DC_REG_SEP"] + " G global\n" + g.global)}, nil
+}
+
+// B1 S7: a template built now still carries the build-time npm lines (for
+// launchers older than 1.0.11). The new launcher does not write a host
+// again that the template's npmrc names with the same placeholder, and still
+// writes a host bound after the build or one whose placeholder changed.
+func TestB1S7NewLauncherSkipsHostsTheTemplateNames(t *testing.T) {
+	p := ProbeRegistryFiles(t.Context(), globalOnly{global: "fund=false\n//T-REG.t.svc/:_authToken=DC_SECRET_NPM\n//old.example/:_authToken=DC_OLD\n"}, "a")
+	plan := PlanRegistryFiles(RegistryEntries([]RegistryEntry{
+		{Kind: RegistryNPM, Secret: "npm", Host: "t-reg.t.svc", Placeholder: "DC_SECRET_NPM"},
+		{Kind: RegistryNPM, Secret: "new", Host: "new.example", Placeholder: "DC_SECRET_NEW"},
+		{Kind: RegistryNPM, Secret: "old", Host: "old.example", Placeholder: "DC_NEW_PH"},
+	}), p)
+	rc := plan.Write[NPMRCFile]
+	if strings.Contains(rc, "t-reg.t.svc") || !strings.Contains(rc, "//new.example/:_authToken=DC_SECRET_NEW\n") || !strings.Contains(rc, "//old.example/:_authToken=DC_NEW_PH\n") {
+		t.Fatalf("~/.npmrc:\n%s", rc)
+	}
+	if !strings.Contains(strings.Join(plan.Notes, "|"), "already names t-reg.t.svc") {
+		t.Errorf("notes %q", plan.Notes)
+	}
+	// Every bound host is in the template: nothing is written.
+	plan = PlanRegistryFiles(RegistryEntries([]RegistryEntry{{Kind: RegistryNPM, Secret: "npm", Host: "t-reg.t.svc", Placeholder: "DC_SECRET_NPM"}}), p)
+	if len(plan.Write) != 0 {
+		t.Errorf("wrote %v", plan.Write)
+	}
+}

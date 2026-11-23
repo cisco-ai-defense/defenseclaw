@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxruntime"
 )
@@ -83,6 +84,18 @@ type OverlayOptions struct {
 	// HarnessVersion is the agent version the image pins (it decides the
 	// Claude Code default model, ClaudeCodeHaiku55MinVersion).
 	HarnessVersion string
+	// RegistryTokens are the npm registry hosts a substrate.secrets entry
+	// injects the Authorization header on, with the placeholder the kit's
+	// npmrc sends there (NPMRegistryTokens, GAP-0529). Build-time lines for
+	// launchers older than 1.0.11, which write no start files: remove in 1.0.12, when launchers older than 1.0.11 are unsupported.
+	RegistryTokens []RegistryToken
+}
+
+// RegistryToken is one npm registry host that egress injects a credential
+// on, and the placeholder npm sends it in the credential's place.
+// Build-time path: remove in 1.0.12, when launchers older than 1.0.11 are unsupported.
+type RegistryToken struct {
+	Host, Placeholder string
 }
 
 // NPMGlobalConfig is the kit's npm configuration. npm reads its global
@@ -361,7 +374,7 @@ func ActorOverlay(art connector.SandboxArtifacts, o OverlayOptions) (Overlay, er
 		ImageFile{Path: "/etc/machine-id", Mode: 0o444},
 		ImageFile{Path: "/etc/gitconfig", Mode: 0o644, Data: []byte(gitConfig())},
 		ImageFile{Path: CredHelper, Mode: 0o755, Data: []byte(gitCredentialHelper)},
-		ImageFile{Path: NPMGlobalConfig, Mode: 0o644, Data: []byte(npmConfig())},
+		ImageFile{Path: NPMGlobalConfig, Mode: 0o644, Data: []byte(npmConfig(o.RegistryTokens))},
 	)
 	if art.Connector == "codex" {
 		ov.Files = append(ov.Files, ImageFile{Path: path.Join(o.Home, ".codex", "config.toml"), Mode: 0o600, User: true,
@@ -786,15 +799,52 @@ esac
 exit 0
 `
 
-// npmConfig is the kit's npmrc. It holds no registry token: the launcher
+// npmConfig is the kit's npmrc. It holds no credential. The launcher
 // writes the placeholders of the registries bound in the agent's policy in
-// the agent's ~/.npmrc at each start (B1 2.6), so a new registry needs no
-// template rebuild. Templates built before 1.0.11 still carry the
-// placeholders of the registries bound at their build here (harmless:
-// placeholders only) until they are rebuilt.
-func npmConfig() string {
-	return "# DefenseClaw actor image (root-owned). Registry tokens are written at agent start\n" +
-		"# in ~/.npmrc, as placeholders: Substrate egress swaps each for the real credential\n" +
-		"# on its bound host only.\n" +
-		"update-notifier=false\nfund=false\naudit=false\n"
+// the agent's ~/.npmrc at each start (B1 2.6), so a registry bound after the
+// build needs no template rebuild. The template build still writes a
+// placeholder line for each registry bound at build time (tokens), because
+// a launcher older than 1.0.11 writes no start files and its agents would
+// get a 401 from a private registry without them. The new launcher skips a
+// host this file already names. Build-time lines: remove in 1.0.12, when launchers older than 1.0.11 are unsupported.
+func npmConfig(tokens []RegistryToken) string {
+	var b strings.Builder
+	b.WriteString("# DefenseClaw actor image (root-owned). Registry tokens are placeholders: Substrate\n" +
+		"# egress swaps each for the real credential on its bound host only. Registries bound\n" +
+		"# after the build are written at agent start in ~/.npmrc.\n" +
+		"update-notifier=false\nfund=false\naudit=false\n")
+	for _, t := range tokens {
+		fmt.Fprintf(&b, "//%s/:_authToken=%s\n", t.Host, t.Placeholder)
+	}
+	return b.String()
+}
+
+// NPMRegistryTokens are the build-time registry placeholders for the kit's
+// npmrc: every exact host of a secret injected in the Authorization header
+// (npm sends a registry's _authToken there), with the secret's placeholder
+// (else PlaceholderSecret). A host pattern (*.example.com) cannot name an
+// npm registry and is left out. Sorted by host; the first secret wins a
+// host. Build-time path for launchers older than 1.0.11: remove in 1.0.12, when launchers older than 1.0.11 are unsupported.
+func NPMRegistryTokens(secrets []config.SubstrateSecret) []RegistryToken {
+	seen := map[string]bool{}
+	var out []RegistryToken
+	for _, s := range secrets {
+		if !strings.EqualFold(strings.TrimSpace(s.Inject.Header), "Authorization") {
+			continue
+		}
+		ph := s.Inject.Placeholder
+		if ph == "" {
+			ph = PlaceholderSecret
+		}
+		for _, h := range s.Inject.Hosts {
+			h = strings.ToLower(strings.TrimSpace(h))
+			if h == "" || seen[h] || strings.ContainsAny(h, "*?[]/ ") {
+				continue
+			}
+			seen[h] = true
+			out = append(out, RegistryToken{Host: h, Placeholder: ph})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Host < out[j].Host })
+	return out
 }

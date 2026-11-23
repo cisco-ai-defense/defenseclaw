@@ -101,8 +101,8 @@ func printSubstrateRegistryPlan(w io.Writer, plan workspace.RegistryPlan, err er
 
 // doctorRegistryFiles is the registry_files row: how the agent the attach
 // row checks gets its npm and pip placeholders: written at its start
-// (1.0.11 and later), the lines its template image carries from a build
-// before 1.0.11, both, or none.
+// (1.0.11 and later), the lines its template image carries from its build
+// (kept for launchers older than 1.0.11), both, or none.
 func doctorRegistryFiles(ctx context.Context, s *substrateSession, mine []api.Actor, signedIn bool) substrateCheck {
 	const id = "registry_files"
 	if !signedIn || len(mine) == 0 {
@@ -134,10 +134,9 @@ func doctorRegistryFiles(ctx context.Context, s *substrateSession, mine []api.Ac
 	case "start":
 		return substrateCheck{ID: id, Status: doctorOK, Summary: "agent " + a.Name + ": registry placeholders were written at its start (mode start)"}
 	case "template+start":
-		return substrateCheck{ID: id, Status: doctorOK, Summary: "agent " + a.Name + ": registry placeholders were written at its start; its template, built before 1.0.11, also names " + baked + " (mode template+start)",
-			Fix: "rebuild the template to drop the build-time lines (they hold placeholders only)"}
+		return substrateCheck{ID: id, Status: doctorOK, Summary: "agent " + a.Name + ": registry placeholders were written at its start; its template also names " + baked + " from its build (mode template+start)"}
 	case "template":
-		return substrateCheck{ID: id, Status: doctorOK, Summary: "agent " + a.Name + ": its template, built before 1.0.11, names " + baked + " in its npm configuration; none was written at start (mode template)",
+		return substrateCheck{ID: id, Status: doctorOK, Summary: "agent " + a.Name + ": its template names " + baked + " in its npm configuration from its build; none was written at start (mode template)",
 			Fix: "a registry bound since its start reaches the next agent you run"}
 	}
 	return substrateCheck{ID: id, Status: doctorOK, Summary: "agent " + a.Name + ": no registry secret is bound for it (mode none)"}

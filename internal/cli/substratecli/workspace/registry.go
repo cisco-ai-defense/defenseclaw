@@ -138,18 +138,20 @@ func pypiUploadHost(h string) bool { return h == "upload.pypi.org" || h == "test
 // RegistryProbe is what the agent's home and the image hold before the
 // start writes anything: the content of each file that exists (Links names
 // those that are symbolic links; they are never read or written), and the
-// hosts the image's global npmrc names with a token (a template built
-// before 1.0.11 carries them, GAP-0529).
+// hosts the image's global npmrc names with a token: the template build
+// writes them for launchers older than 1.0.11 (GAP-0529). BakedNPMTokens
+// maps each such host to its placeholder.
 type RegistryProbe struct {
-	Files     map[string]string
-	Links     []string
-	BakedNPM  []string
-	ReadError error
+	Files          map[string]string
+	Links          []string
+	BakedNPM       []string
+	BakedNPMTokens map[string]string
+	ReadError      error
 }
 
 // Mode says how an agent gets its registry placeholders: "start" (files
 // DefenseClaw wrote at agent start), "template" (lines its template image
-// carries from the build, before 1.0.11), "template+start", or "none".
+// carries from its build), "template+start", or "none".
 func (p RegistryProbe) Mode() string {
 	start := false
 	for _, f := range []string{NPMRCFile, PipConfFile, PyPIRCFile} {
@@ -190,6 +192,22 @@ func PlanRegistryFiles(entries []RegistryEntry, probe RegistryProbe) RegistryPla
 	placeholders := map[string]bool{kit.PlaceholderSecret: true}
 	for _, e := range entries {
 		placeholders[e.Placeholder] = true
+	}
+	// A host the image's global npmrc already names with the same
+	// placeholder (the template build's lines) is not written again.
+	// Build-time lines: remove in 1.0.12, when launchers older than 1.0.11 are unsupported.
+	var baked []string
+	kept := make([]RegistryEntry, 0, len(entries))
+	for _, e := range entries {
+		if ph, ok := probe.BakedNPMTokens[e.Host]; e.Kind == RegistryNPM && ok && ph == e.Placeholder {
+			baked = append(baked, e.Host)
+			continue
+		}
+		kept = append(kept, e)
+	}
+	entries = kept
+	if len(baked) > 0 {
+		plan.Notes = append(plan.Notes, "the template's npm configuration already names "+strings.Join(baked, ", ")+" (placeholders from its build); DefenseClaw did not add them to ~/.npmrc")
 	}
 	for _, f := range []string{NPMRCFile, PipConfFile, PyPIRCFile} {
 		content, ok := RegistryFiles(entries)[f]
@@ -317,7 +335,15 @@ func ProbeRegistryFiles(ctx context.Context, ex osw.Execer, sandbox string) Regi
 		case "G":
 			for _, line := range strings.Split(body, "\n") {
 				if h, ok := strings.CutPrefix(strings.TrimSpace(line), "//"); ok && strings.Contains(h, "/:_authToken=") {
-					p.BakedNPM = append(p.BakedNPM, h[:strings.Index(h, "/:_authToken=")])
+					host, ph, _ := strings.Cut(h, "/:_authToken=")
+					host = strings.ToLower(host)
+					if p.BakedNPMTokens == nil {
+						p.BakedNPMTokens = map[string]string{}
+					}
+					if _, dup := p.BakedNPMTokens[host]; !dup {
+						p.BakedNPM = append(p.BakedNPM, host)
+						p.BakedNPMTokens[host] = strings.Trim(strings.TrimSpace(ph), `"'`)
+					}
 				}
 			}
 		}
