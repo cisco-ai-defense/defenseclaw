@@ -5797,6 +5797,19 @@ func writeEnterpriseHookGuardianState(
 	if successes+pending+failures != len(rows) {
 		return fmt.Errorf("hook guardian reconcile rows have inconsistent target dispositions")
 	}
+	authorizationDir, err := prepareEnterpriseHookAuthorizationDir(dataDir)
+	if err != nil {
+		return err
+	}
+	// One writer at a time reads the published generation and publishes the
+	// next (GAP-1885): two writers that read the same ledger could leave
+	// one's release protection record beside the other's ledger. The
+	// generation is stamped under the lock, so a later writer's is later.
+	unlock, err := lockEnterpriseHookGuardianState(authorizationDir)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	nowTime := time.Now().UTC()
 	now := nowTime.Format(time.RFC3339Nano)
 	previous, _, err := loadEnterpriseHookGuardianAuthorization(dataDir)
@@ -5844,10 +5857,6 @@ func writeEnterpriseHookGuardianState(
 		ProtectedTargets: protected,
 	}
 
-	authorizationDir, err := prepareEnterpriseHookAuthorizationDir(dataDir)
-	if err != nil {
-		return err
-	}
 	// The enrolled accounts are recorded first and on every pass, even one
 	// that keeps its generation: the record only grows, so a crash after it
 	// over-protects and never drops an account (GAP-1733 review 2).
@@ -5865,6 +5874,14 @@ func writeEnterpriseHookGuardianState(
 	if enterpriseHookGuardianPublishedByProcess.Load() &&
 		enterpriseHookGuardianGenerationCurrent(dataDir, nowTime, authorization, state, activation) {
 		return nil
+	}
+	// The targets this release protected bind the other-release sign-in
+	// waits to the target (GAP-1762), for the generation published below.
+	// The record goes first (GAP-1763): a failed write publishes nothing,
+	// and the next pass publishes again, since the process has not
+	// published a complete generation yet.
+	if err := recordEnterpriseHookReleaseProtection(authorizationDir, previous, now, protected, rows); err != nil {
+		return err
 	}
 	authorizationData, err := json.MarshalIndent(authorization, "", "  ")
 	if err != nil {
@@ -5926,12 +5943,6 @@ func writeEnterpriseHookGuardianState(
 		return fmt.Errorf("set hook guardian activation ownership: %w", err)
 	}
 	if err := enterpriseHookAuthorizationFileTrustCheck(activationPath); err != nil {
-		return err
-	}
-	// The targets this release protected bind the other-release sign-in
-	// waits to the target (GAP-1762). A failed write publishes again on the
-	// next pass: the process has not published a complete generation yet.
-	if err := recordEnterpriseHookReleaseProtection(authorizationDir, rows); err != nil {
 		return err
 	}
 	enterpriseHookGuardianPublishedByProcess.Store(true)
