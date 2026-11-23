@@ -81,8 +81,8 @@ func ResolveUpstream(ctx context.Context, project string, toHTTPS func(string) (
 	return up, nil
 }
 
-// loopbackURL: the URL's host is localhost or a loopback address.
-func loopbackURL(raw string) bool {
+// LoopbackURL: the URL's host is localhost or a loopback address.
+func LoopbackURL(raw string) bool {
 	u, err := url.Parse(raw)
 	if err != nil {
 		return false
@@ -124,7 +124,7 @@ func resolveUpstream(ctx context.Context, proj gitCmd, head, branch string, toHT
 		// The agent's credential helper would send the git token in clear
 		// over the agent's egress (RV2 N7). A loopback address never
 		// leaves the agent.
-		if !loopbackURL(clean) {
+		if !LoopbackURL(clean) {
 			return nil, &UpstreamError{Msg: "remote " + remote + " uses http://, which sends your git credentials unencrypted; --clone . needs an https remote (use run without --clone .)"}
 		}
 	default:

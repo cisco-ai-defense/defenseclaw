@@ -37,6 +37,13 @@ const hardeningPointer = "version https://git-lfs.github.com/spec/v1\noid sha256
 // pointer file over smart http on the loopback.
 func hardeningServer(t *testing.T) (*hcEnv, *httptest.Server) {
 	t.Helper()
+	return hardeningServerWith(t, nil)
+}
+
+// hardeningServerWith is hardeningServer with mod run on the app source
+// (the server is already up at srvURL) before the app is committed.
+func hardeningServerWith(t *testing.T, mod func(o *hcEnv, src, srvURL string)) (*hcEnv, *httptest.Server) {
+	t.Helper()
 	git := b2NeedGit(t)
 	out, _ := exec.Command(git, "--exec-path").Output()
 	backend := filepath.Join(strings.TrimSpace(string(out)), "git-http-backend")
@@ -45,6 +52,8 @@ func hardeningServer(t *testing.T) (*hcEnv, *httptest.Server) {
 	}
 	o := newHCEnv(t)
 	served := t.TempDir()
+	srv := httptest.NewServer(&cgi.Handler{Path: backend, Env: []string{"GIT_PROJECT_ROOT=" + served, "GIT_HTTP_EXPORT_ALL=1"}})
+	t.Cleanup(srv.Close)
 	lib := filepath.Join(t.TempDir(), "lib")
 	_ = os.MkdirAll(lib, 0o755)
 	o.git(lib, "init", "-q", "-b", "main")
@@ -59,17 +68,21 @@ func hardeningServer(t *testing.T) (*hcEnv, *httptest.Server) {
 	o.git(src, "config", "--file", ".gitmodules", "submodule.lib.url", "../lib.git")
 	hcWrite(t, src, ".gitattributes", "*.bin filter=lfs diff=lfs merge=lfs -text\n")
 	hcWrite(t, src, "model.bin", hardeningPointer)
+	if mod != nil {
+		mod(o, src, srv.URL)
+	}
 	o.git(src, "add", ".")
 	o.git(src, "commit", "-qm", "app")
 	o.git(served, "clone", "-q", "--bare", src, filepath.Join(served, "app.git"))
-	srv := httptest.NewServer(&cgi.Handler{Path: backend, Env: []string{"GIT_PROJECT_ROOT=" + served, "GIT_HTTP_EXPORT_ALL=1"}})
-	t.Cleanup(srv.Close)
 	return o, srv
 }
 
 // gitEnv sets git config through the environment for the relay's git calls.
+// The system git config is left out: a host with git-lfs installed sets
+// filter.lfs.process there, which would bypass the test filters.
 func gitEnv(t *testing.T, kv ...string) {
 	t.Helper()
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
 	t.Setenv("GIT_CONFIG_COUNT", itoa(len(kv)/2))
 	for i := 0; i < len(kv); i += 2 {
 		t.Setenv("GIT_CONFIG_KEY_"+itoa(i/2), kv[i])
@@ -121,7 +134,7 @@ func TestSyncCloneSubmoduleHTTPRefused(t *testing.T) {
 	})
 }
 
-func TestCloneIsLoopback(t *testing.T) {
+func TestCloneHTTPLoopback(t *testing.T) {
 	for raw, want := range map[string]bool{
 		"http://127.0.0.1:8080/a.git":    true,
 		"http://localhost/a.git":         true,
@@ -130,9 +143,12 @@ func TestCloneIsLoopback(t *testing.T) {
 		"http://10.0.0.5/a.git":          false,
 		"git@github.com:org/a.git":       false,
 		"http://127.0.0.1.evil.test/a":   false,
+		"ssh://127.0.0.1/a.git":          false,
+		"file:///tmp/a.git":              false,
+		"../lib.git":                     false,
 	} {
-		if got := cloneIsLoopback(raw); got != want {
-			t.Errorf("cloneIsLoopback(%q) = %v, want %v", raw, got, want)
+		if got := cloneHTTPLoopback(raw); got != want {
+			t.Errorf("cloneHTTPLoopback(%q) = %v, want %v", raw, got, want)
 		}
 	}
 }
@@ -145,6 +161,7 @@ func TestSyncCloneLFSFailureIsWarning(t *testing.T) {
 	o, srv := hardeningServer(t)
 	bin := t.TempDir()
 	shim := "#!/bin/sh\ncase \"$1\" in\nversion) echo 'git-lfs/0.0 (test shim)';;\n" +
+		"env) echo 'Endpoint=https://media.example.test/lfs (auth=none)';;\n" +
 		"smudge) if [ \"$GIT_LFS_SKIP_SMUDGE\" = 1 ]; then cat; else echo 'media host not allowed' >&2; exit 1; fi;;\n" +
 		"pull) echo 'batch response: media host not allowed' >&2; exit 2;;\nesac\n"
 	if err := os.WriteFile(filepath.Join(bin, "git-lfs"), []byte(shim), 0o755); err != nil {

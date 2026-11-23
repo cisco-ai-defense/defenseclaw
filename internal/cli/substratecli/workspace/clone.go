@@ -22,7 +22,6 @@ import (
 	"errors"
 	"fmt"
 	"maps"
-	"net/netip"
 	"net/url"
 	"os"
 	"path"
@@ -216,19 +215,28 @@ func Clone(ctx context.Context, c *Client, dataDir, name, rawURL, ref string, op
 	// LFS fetch must not fail the clone. With substrate.git.lfs on, git lfs
 	// pull follows below and its failure is a warning.
 	env := map[string]string{"GIT_TERMINAL_PROMPT": "0", "GIT_ASKPASS": "/bin/true", "SSH_ASKPASS": "/bin/true", "GIT_LFS_SKIP_SMUDGE": "1"}
-	run := func(argv ...string) error {
+	// call runs one git command in the actor. An exit in okExit (git
+	// config's "no such key") is not an error and comes back as "".
+	call := func(okExit []int, argv ...string) (string, error) {
 		res, err := c.Exec(ctx, "", osw.ExecRequest{Argv: argv, Workdir: root, Env: env, Timeout: cloneTimeout})
 		if err != nil {
-			return err
+			return "", err
+		}
+		if slices.Contains(okExit, res.ExitCode) {
+			return "", nil
 		}
 		if res.ExitCode != 0 {
 			msg := lastLine(string(res.Stderr), string(res.Stdout))
 			if l := refusedLine(string(res.Stderr)); l != "" {
 				msg = l
 			}
-			return &CloneError{URL: rawURL, Message: msg, Exit: res.ExitCode}
+			return "", &CloneError{URL: rawURL, Message: msg, Exit: res.ExitCode}
 		}
-		return nil
+		return string(res.Stdout), nil
+	}
+	run := func(argv ...string) error {
+		_, err := call(nil, argv...)
+		return err
 	}
 	// The image's credential helper stays: its placeholder is what egress
 	// swaps for the bound token. No prompt, no local or ext transport.
@@ -242,16 +250,7 @@ func Clone(ctx context.Context, c *Client, dataDir, name, rawURL, ref string, op
 		}
 	}
 	if opts.Submodules {
-		// Submodule urls come from the repository's .gitmodules, which the
-		// person did not write: plain http would send the credential
-		// helper's placeholder in the clear, so it is off for them. The
-		// top-level clone above may still use http (CheckCloneURL takes it);
-		// a loopback remote keeps http for its submodules too.
-		sub := slices.Clone(guard)
-		if !cloneIsLoopback(rawURL) {
-			sub = append(sub, "-c", "protocol.http.allow=never")
-		}
-		if err := run(append(sub, "-C", dir, "submodule", "update", "--quiet", "--init", "--recursive")...); err != nil {
+		if err := cloneSubmodules(call, guard, rawURL, dir, 0); err != nil {
 			return nil, err
 		}
 	}
@@ -259,9 +258,7 @@ func Clone(ctx context.Context, c *Client, dataDir, name, rawURL, ref string, op
 		CloneURL: rawURL, CloneRef: ref, UploadedAt: time.Now().UTC()}
 	res := &CloneResult{Dir: dir}
 	if opts.LFS {
-		if w := cloneLFSFetch(ctx, c, root, dir, env, opts.Submodules); w != "" {
-			res.Warnings = append(res.Warnings, w)
-		}
+		res.Warnings = append(res.Warnings, cloneLFSFetch(ctx, c, root, dir, env, opts.Submodules)...)
 	}
 	if w := cloneLFSWarning(ctx, c, root, dir, env, opts.LFS); w != "" {
 		res.Warnings = append(res.Warnings, w)
@@ -288,48 +285,175 @@ func refusedLine(stderr string) string {
 	return ""
 }
 
-// cloneIsLoopback is true when the clone address is on this computer's
-// loopback (a test or local mirror): its http submodules are fine.
-func cloneIsLoopback(raw string) bool {
-	raw = strings.TrimSpace(raw)
-	if scpLikeRE.MatchString(raw) {
-		return false
+// cloneSubmoduleDepth bounds how deep cloneSubmodules follows submodules
+// of submodules (a repository can name itself).
+const cloneSubmoduleDepth = 16
+
+// cloneSubmodules checks out dir's submodules one at a time, then theirs.
+// Their urls come from the repository's .gitmodules, which the person did
+// not write: plain http would send the credential helper's placeholder in
+// the clear, so http is off for every submodule whose own url is not on the
+// loopback (a test or local mirror), whatever the top-level clone used
+// (GAP-0907). The top-level clone may still use http: CheckCloneURL takes it.
+func cloneSubmodules(call func([]int, ...string) (string, error), guard []string, rawURL, dir string, depth int) error {
+	if depth >= cloneSubmoduleDepth {
+		return &CloneError{URL: rawURL, Message: fmt.Sprintf("submodules nest more than %d deep", cloneSubmoduleDepth), Exit: 1}
 	}
-	u, err := url.Parse(raw)
+	git := func(okExit []int, args ...string) (string, error) {
+		return call(okExit, append(append(slices.Clone(guard), "-C", dir), args...)...)
+	}
+	// init fetches nothing: it records each active submodule's url, resolved
+	// against this repository's remote, in .git/config.
+	if _, err := git(nil, "submodule", "init", "--quiet"); err != nil {
+		return err
+	}
+	urls, err := git([]int{1}, "config", "-z", "--get-regexp", `^submodule\..*\.url$`)
+	if err != nil || urls == "" {
+		return err
+	}
+	paths, err := git([]int{1}, "config", "-z", "--file", ".gitmodules", "--get-regexp", `^submodule\..*\.path$`)
+	if err != nil {
+		return err
+	}
+	pathOf := configZ(paths, ".path")
+	byName := configZ(urls, ".url")
+	names := slices.Sorted(maps.Keys(byName))
+	for _, n := range names {
+		p, ok := pathOf[n]
+		if !ok {
+			continue
+		}
+		upd := []string{"submodule", "update", "--quiet", "--init", "--", p}
+		if !cloneHTTPLoopback(byName[n]) {
+			upd = append([]string{"-c", "protocol.http.allow=never"}, upd...)
+		}
+		if _, err := git(nil, upd...); err != nil {
+			return err
+		}
+	}
+	// Only the submodules that were checked out (an update = none one stays
+	// empty, and git there would find this repository again).
+	out, err := git(nil, "submodule", "foreach", "--quiet", `printf '%s\0' "$sm_path"`)
+	if err != nil {
+		return err
+	}
+	for _, p := range strings.Split(strings.TrimSuffix(out, "\x00"), "\x00") {
+		if p == "" {
+			continue
+		}
+		if err := cloneSubmodules(call, guard, rawURL, path.Join(dir, p), depth+1); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// configZ reads git config -z --get-regexp output ("submodule.NAME.KEY\n
+// VALUE\0" records) into NAME -> VALUE for the keys ending in suffix.
+func configZ(out, suffix string) map[string]string {
+	m := map[string]string{}
+	for _, rec := range strings.Split(out, "\x00") {
+		k, v, ok := strings.Cut(rec, "\n")
+		if !ok || !strings.HasPrefix(k, "submodule.") || !strings.HasSuffix(k, suffix) {
+			continue
+		}
+		m[strings.TrimSuffix(strings.TrimPrefix(k, "submodule."), suffix)] = v
+	}
+	return m
+}
+
+// cloneHTTPLoopback is true for an http or https address on this
+// computer's loopback, the only place plain http may go.
+func cloneHTTPLoopback(raw string) bool {
+	u, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil {
 		return false
 	}
-	h := strings.ToLower(u.Hostname())
-	if h == "localhost" || strings.HasSuffix(h, ".localhost") {
-		return true
+	switch strings.ToLower(u.Scheme) {
+	case "http", "https":
+		return osw.LoopbackURL(u.String())
 	}
-	ip, err := netip.ParseAddr(h)
-	return err == nil && ip.IsLoopback()
+	return false
 }
 
-// cloneLFSFetch runs git lfs pull in the clone (and its submodules) when
-// substrate.git.lfs is on and git-lfs is there. A failed fetch (a media
-// host egress does not allow, a rate limit, a missing object) leaves the
-// files as pointers and comes back as a warning: the clone worked.
-func cloneLFSFetch(ctx context.Context, c *Client, root, dir string, env map[string]string, submodules bool) string {
-	const script = `git lfs version >/dev/null 2>&1 || exit 0
+// cloneLFSEndpointOK is true for an LFS endpoint the credential helper's
+// placeholder may go to: https, or http on the loopback.
+func cloneLFSEndpointOK(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return false
+	}
+	return strings.EqualFold(u.Scheme, "https") || cloneHTTPLoopback(raw)
+}
+
+// cloneLFSList prints "PATH\tN\tENDPOINT" for the clone (".") and, with $2
+// = 1, each checked-out submodule: N files the attributes mark for LFS and
+// the endpoint git lfs would use there. It prints nothing without git-lfs.
+const cloneLFSList = `git lfs version >/dev/null 2>&1 || exit 0
 cd "$1" || exit 1
-git lfs pull 2>&1 || exit 1
-if [ "$2" = 1 ]; then git submodule foreach --quiet --recursive 'git lfs pull' 2>&1 || exit 1; fi`
+{ echo .; if [ "$2" = 1 ]; then git submodule foreach --quiet --recursive 'echo "$displaypath"'; fi; } | while IFS= read -r p; do
+  n=$(cd "$p" 2>/dev/null && git ls-files -- ':(attr:filter=lfs)' | wc -l)
+  e=$(cd "$p" 2>/dev/null && git lfs env 2>/dev/null | sed -n 's/^Endpoint=\([^ ]*\).*$/\1/p' | head -n 1)
+  printf '%s\t%s\t%s\n' "$p" "${n:-0}" "$e"
+done`
+
+// cloneLFSFetch runs git lfs pull in the clone (and its submodules) when
+// substrate.git.lfs is on and git-lfs is there. The LFS endpoint comes from
+// the repository (its .lfsconfig, or its remote), which the person did not
+// write, and the credential helper answers it with the placeholder: an
+// endpoint that is not https or on the loopback would get it in the clear.
+// Such a repository is left out with a warning, and every pull runs with
+// lfs.url set to the endpoint checked here, so .lfsconfig cannot change it
+// (GAP-0905). A failed fetch (a media host egress does not allow, a rate
+// limit, a missing object) leaves the files as pointers and comes back as a
+// warning: the clone worked.
+func cloneLFSFetch(ctx context.Context, c *Client, root, dir string, env map[string]string, submodules bool) []string {
 	sub := "0"
 	if submodules {
 		sub = "1"
 	}
 	pullEnv := maps.Clone(env)
 	delete(pullEnv, "GIT_LFS_SKIP_SMUDGE")
-	res, err := c.Exec(ctx, "", osw.ExecRequest{Argv: []string{"sh", "-c", script, "sh", dir, sub}, Workdir: root, Env: pullEnv, Timeout: cloneTimeout})
+	notFetched := func(where, why string) string {
+		if where == "." {
+			return "LFS files were not fetched (" + why + "); they stay pointers"
+		}
+		return "LFS files in " + where + " were not fetched (" + why + "); they stay pointers"
+	}
+	res, err := c.Exec(ctx, "", osw.ExecRequest{Argv: []string{"sh", "-c", cloneLFSList, "sh", dir, sub}, Workdir: root, Env: env, Timeout: cloneTimeout})
 	if err != nil {
-		return "LFS files were not fetched (" + lastLine(err.Error()) + "); they stay pointers"
+		return []string{notFetched(".", lastLine(err.Error()))}
 	}
 	if res.ExitCode != 0 {
-		return "LFS files were not fetched (" + lastLine(string(res.Stderr), string(res.Stdout)) + "); they stay pointers"
+		return []string{notFetched(".", lastLine(string(res.Stderr), string(res.Stdout)))}
 	}
-	return ""
+	var warns []string
+	for _, line := range strings.Split(string(res.Stdout), "\n") {
+		p, rest, ok := strings.Cut(line, "\t")
+		if !ok {
+			continue
+		}
+		n, ep, _ := strings.Cut(rest, "\t")
+		if strings.TrimSpace(n) == "0" {
+			continue
+		}
+		if !cloneLFSEndpointOK(ep) {
+			why := "its repository names no LFS endpoint"
+			if u, err := url.Parse(ep); err == nil && u.Host != "" {
+				why = "its LFS endpoint " + u.Scheme + "://" + u.Host + " is not https; the credential would go unencrypted"
+			}
+			warns = append(warns, notFetched(p, why))
+			continue
+		}
+		pull, err := c.Exec(ctx, "", osw.ExecRequest{Argv: []string{"git", "-C", path.Join(dir, p), "-c", "lfs.url=" + ep, "lfs", "pull"}, Workdir: root, Env: pullEnv, Timeout: cloneTimeout})
+		switch {
+		case err != nil:
+			warns = append(warns, notFetched(p, lastLine(err.Error())))
+		case pull.ExitCode != 0:
+			warns = append(warns, notFetched(p, lastLine(string(pull.Stderr), string(pull.Stdout))))
+		}
+	}
+	return warns
 }
 
 // cloneLFSWarning says when files the clone's attributes mark for LFS
