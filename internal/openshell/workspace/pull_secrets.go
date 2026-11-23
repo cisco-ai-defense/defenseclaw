@@ -615,8 +615,7 @@ func matchLines(up, agent [][]byte, key func([]byte) string) []int {
 	for i := range mu {
 		mu[i] = -1
 	}
-	var lcs func(u0, u1, a0, a1 int)
-	lcs = func(u0, u1, a0, a1 int) {
+	lcs := func(u0, u1, a0, a1 int) {
 		n, m := u1-u0, a1-a0
 		if n*m > maxLCSCells {
 			return
