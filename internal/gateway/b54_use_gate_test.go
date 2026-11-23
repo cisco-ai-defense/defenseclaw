@@ -52,8 +52,8 @@ func (r *b54Rig) b54Use(t *testing.T, dir string, files map[string]string) (int,
 
 // B5.4 skill_pending at the use gate: the Skill tool used while its folder
 // is still being scanned is asked on OSS (Claude Code PreToolUse can ask).
-// Managed installs and the strict tier wait for the scan and refuse the use
-// at its timeout (GAP-0931).
+// Managed installs and the strict tier refuse it while the folder is held
+// (GAP-0980), and every other call too.
 func TestB54SkillPendingAtUse(t *testing.T) {
 	for _, block := range []bool{true, false} {
 		t.Run(fmt.Sprintf("managed=%v", block), func(t *testing.T) {
@@ -64,10 +64,10 @@ func TestB54SkillPendingAtUse(t *testing.T) {
 			_ = json.Unmarshal(out["message"], &msg)
 			_ = json.Unmarshal(out["action"], &action)
 			if block {
-				if code != http.StatusForbidden || msg != `DefenseClaw refused the skill "evil": the skill scan did not finish in time; this install refuses skills it could not scan.` {
+				if code != http.StatusForbidden || msg != `DefenseClaw is still checking the skill "evil". Try again in a few seconds.` {
 					t.Fatalf("managed use while scanning: %d %q", code, msg)
 				}
-				if u := r.rowsOf(AuditSkillUnscanned); len(u) != 1 || u[0].d["outcome"] != "refused" || len(r.rowsOf(AuditSkillPending)) != 0 {
+				if p := r.rowsOf(AuditSkillPending); len(p) != 1 || p[0].d["outcome"] != "refused until scanned" || len(r.rowsOf(AuditSkillUnscanned)) != 0 {
 					t.Fatalf("managed rows %+v", r.rows)
 				}
 				return

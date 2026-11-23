@@ -112,31 +112,57 @@ func (st *substrateState) blocksUnscanned(connector string) bool {
 	return st.cfg.BlockUnscannedSkills != nil && st.cfg.BlockUnscannedSkills(connector)
 }
 
-// scanSkillFolder scans one folder inside skills.scan.timeout. Managed
-// installs and the strict tier wait for the whole scan, as the parent did
-// (GAP-0931): a folder is never left pending there, it gets a verdict or the
-// fail mode at the timeout, whatever the connector and however the agent
-// later uses it. The OSS tiers wait at most skills.pending_wait (B5.4): the
-// scan runs detached from the hook, so a hook that stops waiting leaves it
-// running; its verdict is cached by the runtime scanner and the next hook
-// gets it at once. Without limits (tests, or no config) it waits for the
-// whole scan.
-func (st *substrateState) scanSkillFolder(ctx context.Context, connector, name, dir string, files []SubstrateAttachedFile) skillScanResult {
-	var timeout, wait time.Duration
+// skillPostWait is how long one hook post waits for the scans of its
+// folders, in every tier: skills.pending_wait (GAP-0980, GAP-0982). It is
+// one deadline for the whole post (the wait for a scan slot and every folder,
+// scanned in parallel), under the kit's first attempt (9 s), so a post is
+// always answered: a folder still being scanned then is pending, its scan
+// goes on (skills.scan.timeout) and a later post gets the verdict. 0 without
+// limits (tests, or no config): the post waits for the scans.
+func (st *substrateState) skillPostWait() time.Duration {
+	if st.cfg.SkillScanLimits == nil {
+		return 0
+	}
+	_, wait := st.cfg.SkillScanLimits()
+	return wait
+}
+
+// skillPostStartKey holds when the gateway took the hook post
+// (withSkillPostStart): the write gate and the folder pass share the post's
+// one deadline.
+type skillPostStartKey struct{}
+
+func withSkillPostStart(ctx context.Context) context.Context {
+	return context.WithValue(ctx, skillPostStartKey{}, time.Now())
+}
+
+// skillPostUntil is the post's scan deadline (skillPostWait from the post's
+// start) and its cancel; nil (wait for the scans) without limits or when
+// the call scans nothing (scans false).
+func (st *substrateState) skillPostUntil(ctx context.Context, scans bool) (<-chan struct{}, context.CancelFunc) {
+	wait := st.skillPostWait()
+	if wait <= 0 || !scans {
+		return nil, func() {}
+	}
+	start, ok := ctx.Value(skillPostStartKey{}).(time.Time)
+	if !ok {
+		start = time.Now()
+	}
+	pctx, cancel := context.WithDeadline(ctx, start.Add(wait))
+	return pctx.Done(), cancel
+}
+
+// scanSkillFolder scans one folder inside skills.scan.timeout and waits for
+// the scan until the post's deadline (until; nil waits for the whole scan).
+// The scan runs detached from the hook, so a hook that stops waiting leaves
+// it running; its verdict is cached by the runtime scanner, and a post that
+// brings the same content while it runs waits for the same call.
+func (st *substrateState) scanSkillFolder(ctx context.Context, until <-chan struct{}, name, dir string, files []SubstrateAttachedFile) skillScanResult {
+	var timeout time.Duration
 	if st.cfg.SkillScanLimits != nil {
-		timeout, wait = st.cfg.SkillScanLimits()
+		timeout, _ = st.cfg.SkillScanLimits()
 	}
 	start := time.Now()
-	// The wait for a scan slot is pending_wait in every tier.
-	var slot <-chan time.Time
-	if wait > 0 {
-		t := time.NewTimer(wait)
-		defer t.Stop()
-		slot = t.C
-	}
-	if st.blocksUnscanned(connector) {
-		wait = 0
-	}
 	actor, _ := substrateActorFrom(ctx)
 	key := skillScanKey(name, dir, files)
 	st.scanMu.Lock()
@@ -149,7 +175,7 @@ func (st *substrateState) scanSkillFolder(ctx context.Context, connector, name, 
 		st.scanMu.Unlock()
 		select {
 		case <-free:
-		case <-slot:
+		case <-until:
 			return skillScanResult{err: errSkillScannerBusy, waited: time.Since(start)}
 		case <-ctx.Done():
 			return skillScanResult{err: errSkillPending, waited: time.Since(start)}
@@ -193,17 +219,10 @@ func (st *substrateState) scanSkillFolder(ctx context.Context, connector, name, 
 		}()
 	}
 	st.scanMu.Unlock()
-	var timer <-chan time.Time
-	if wait > 0 {
-		// What is left of pending_wait after the wait for a slot.
-		t := time.NewTimer(max(wait-time.Since(start), time.Nanosecond))
-		defer t.Stop()
-		timer = t.C
-	}
 	select {
 	case <-c.done:
 		return skillScanResult{blocked: c.blocked, reason: c.reason, err: c.err, took: c.took, waited: time.Since(start)}
-	case <-timer:
+	case <-until:
 	case <-ctx.Done():
 	}
 	return skillScanResult{err: errSkillPending, waited: time.Since(start)}
@@ -228,6 +247,16 @@ func skillScanErrCode(err error) (code, why string) {
 // skillPendingMessage is the hook reply for a use refused while the scan runs.
 func skillPendingMessage(name string) string {
 	return fmt.Sprintf("DefenseClaw is still checking the skill %q. Try again in a few seconds.", name)
+}
+
+// skillHeldMessage is the hook reply of a managed or strict call refused
+// while folders it can reach are still being checked (GAP-0980).
+func skillHeldMessage(held []SubstrateUnscanned) string {
+	names := make([]string, 0, len(held))
+	for _, h := range held {
+		names = append(names, strconv.Quote(path.Base(path.Clean("/"+strings.TrimPrefix(h.Path, "/")))))
+	}
+	return fmt.Sprintf("DefenseClaw is still checking the skill %s. Try again in a few seconds.", strings.Join(names, ", "))
 }
 
 // skillBlockedMessage is the reason of a folder the scan refused: the kit
@@ -348,8 +377,9 @@ var skillAskConnectors = map[string]bool{"claudecode": true}
 // folder this call's own pass decided (the kit runs the pass for the Claude
 // Code Skill tool and for reads of skill files). Managed installs and the
 // strict tier refuse a use of a folder the pass refused (GAP-0931: the kit
-// moves it, and the call that brought it does not run either); they never
-// have a pending folder (scanSkillFolder waits for the whole scan there).
+// moves it, and the call that brought it does not run either), and refuse
+// every PreToolUse call while a folder is still being checked (sk.held,
+// GAP-0980).
 // The OSS tiers add no block: a use of a folder still being scanned asks
 // where the agent can ask (sk.ask) and a person is there, and else (other
 // agents, unattended runs) is allowed with a MEDIUM alert, as rel (B5.4
@@ -362,6 +392,13 @@ func (st *substrateState) substrateSkillUseGate(ctx context.Context, env substra
 		return ""
 	}
 	if st.blocksUnscanned(env.Connector) {
+		if len(sk.held) > 0 {
+			// GAP-0980: a folder the agent can reach is still being checked
+			// at the post's deadline. Every tool call is refused until it has
+			// a verdict (the kit sends it again with each call), whatever the
+			// connector and however the agent would use it.
+			return skillHeldMessage(sk.held)
+		}
 		dirs := make([]string, 0, len(sk.Quarantine))
 		for _, q := range sk.Quarantine {
 			dirs = append(dirs, q.Path)

@@ -4818,7 +4818,7 @@ class SubstrateSkillsConfig:
     while it runs (mirrors Go ``SubstrateSkillsConfig``)."""
 
     scan: SubstrateSkillsScanConfig = field(default_factory=SubstrateSkillsScanConfig)
-    pending_wait: str = ""  # Go duration, default 10s, at most 60s; OSS tiers only (managed/strict wait scan.timeout)
+    pending_wait: str = ""  # Go duration, default 8s, at most 8s (kit's 9 s first attempt); one deadline per hook post
 
 
 @dataclass

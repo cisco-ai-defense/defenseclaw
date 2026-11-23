@@ -29,6 +29,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/defenseclaw/defenseclaw/internal/substrate/skilldigest"
 )
@@ -43,6 +44,7 @@ import (
 //	"substrate_quarantine": [{"path": "<folder>", "reason": "..."}]
 //	"substrate_scanned":    [{"path": "<folder>", "fp": "...", "receipt": "..."}]
 //	"substrate_unscanned":  [{"path": "<folder>", "fp": "..."}]
+//	"substrate_pending":    [{"path": "<folder>", "fp": "..."}] (managed, strict)
 //
 // The kit moves a quarantined folder out of its skill root (only a folder
 // it listed in that call), keeps a receipt with the fingerprint and sends it
@@ -59,6 +61,11 @@ const (
 	// not attached and have no valid receipt (A5's contract: the kit
 	// attaches them again in its next post).
 	substrateUnscannedField = "substrate_unscanned"
+	// SubstratePendingField names the folders a managed or strict call is
+	// refused for while they are being checked (GAP-0980), in the answer and
+	// in the refusal: the kit records them and refuses every tool call while
+	// one is in reach and the gateway does not answer.
+	SubstratePendingField = "substrate_pending"
 	// substrateSkillFoldersMax bounds the folders scanned per call (the
 	// kit attaches at most 8, maxSkillFoldersPerCall); past it the fail
 	// mode decides.
@@ -186,6 +193,10 @@ func (st *substrateState) substrateScanSkills(ctx context.Context, connector str
 			}
 		}
 	}
+	// The folders left are scanned in parallel inside one deadline for the
+	// whole post (skillPostWait; GAP-0980, GAP-0982), so the post is
+	// answered before the kit gives up on it, however many folders it has.
+	var jobs []*skillScanJob
 	for i, dir := range dirs {
 		if i >= substrateSkillFoldersMax {
 			// More attached folders than one post scans: none of them is left
@@ -211,28 +222,41 @@ func (st *substrateState) substrateScanSkills(ctx context.Context, connector str
 			passed[dir] = d
 			continue
 		}
-		res := st.scanSkillFolder(ctx, connector, path.Base(dir), dir, folders[dir])
+		jobs = append(jobs, &skillScanJob{dir: dir, digest: d})
+	}
+	until, cancel := st.skillPostUntil(ctx, len(jobs) > 0)
+	defer cancel()
+	var wg sync.WaitGroup
+	for _, j := range jobs {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			j.res = st.scanSkillFolder(ctx, until, path.Base(j.dir), j.dir, folders[j.dir])
+		}()
+	}
+	wg.Wait()
+	for _, j := range jobs {
+		dir, d, res := j.dir, j.digest, j.res
 		blocked, reason, err := res.blocked, res.reason, res.err
 		code := SkillReasonFinding
 		switch {
-		case (errors.Is(err, errSkillPending) || errors.Is(err, errSkillScannerBusy)) && st.blocksUnscanned(connector):
-			// GAP-0931: managed installs and the strict tier never leave a
-			// folder pending (the hook went away, or no scan could start).
-			c, why := skillScanErrCode(err)
-			if q := st.substrateRefuseOrAlert(ctx, connector, dir, why, c, f); q != nil {
-				out = append(out, *q)
-			}
-			continue
 		case errors.Is(err, errSkillPending), errors.Is(err, errSkillScannerBusy):
-			// B5.4 (OSS tiers): still scanning after pending_wait, or no scan
-			// slot came free (GAP-0932). The folder is not hidden (that would
-			// break a write in progress); the kit sends it again with its next
-			// hook, which gets the verdict, and a use before then follows
+			// B5.4: still scanning at the post's deadline, or no scan slot
+			// came free (GAP-0932). A slow scan is no verdict: the folder is
+			// neither hidden nor moved (that would break a write in progress).
+			// The kit sends it again with its next hook, which gets the
+			// verdict. Until then managed installs and the strict tier refuse
+			// every PreToolUse call (GAP-0980: the use gate, and the kit's
+			// record when a post goes unanswered); the OSS tiers follow
 			// skill_pending at the use gate.
 			c, _ := skillScanErrCode(err)
 			decided[dir] = true
 			pending = append(pending, SubstrateUnscanned{Path: dir, FP: listedFP[dir]})
-			st.auditSkill(ctx, AuditSkillPending, "MEDIUM", connector, dir, f, map[string]any{"reason": c, "waited_ms": res.waited.Milliseconds(), "outcome": "sent again"})
+			outcome := "sent again"
+			if st.blocksUnscanned(connector) {
+				outcome = "refused until scanned"
+			}
+			st.auditSkill(ctx, AuditSkillPending, "MEDIUM", connector, dir, f, map[string]any{"reason": c, "waited_ms": res.waited.Milliseconds(), "outcome": outcome})
 			continue
 		case errors.Is(err, ErrSubstrateSkillScannerUnavailable), errors.Is(err, ErrSubstrateSkillScanTimeout):
 			// No verdict (scanner down or off, or too slow): the fail mode
@@ -282,6 +306,12 @@ func (st *substrateState) substrateScanSkills(ctx context.Context, connector str
 		}
 	}
 	return out, scanned, decided, pending
+}
+
+// skillScanJob is one folder of a post the runtime scan decides.
+type skillScanJob struct {
+	dir, digest string
+	res         skillScanResult
 }
 
 // ErrSubstrateSkillScannerUnavailable is what a SubstrateSkillScanner returns
@@ -483,6 +513,10 @@ type substrateSkillAnswer struct {
 	// pending are the folders still being scanned (also in Unscanned), for
 	// the use gate (substrateSkillUseGate); only the OSS tiers have any.
 	pending []SubstrateUnscanned
+	// held are the pending folders of a managed or strict call (GAP-0980):
+	// every PreToolUse is refused while one is, and the kit records them
+	// (substrate_pending) and sends them again with every call.
+	held []SubstrateUnscanned
 	// ask, when set, turns an allow of this PreToolUse call into the
 	// connector's ask with this text (B5.4 skill_pending, OSS).
 	ask string
@@ -496,7 +530,11 @@ func (s substrateSkillAnswer) empty() bool {
 func (st *substrateState) substrateSkills(ctx context.Context, connector string, f *SubstrateFacts) substrateSkillAnswer {
 	q, scanned, decided, pending := st.substrateScanSkills(ctx, connector, f)
 	unscanned, refused := st.substrateUnscannedSkills(ctx, connector, f, decided)
-	return substrateSkillAnswer{Quarantine: append(q, refused...), Scanned: scanned, Unscanned: append(unscanned, pending...), pending: pending}
+	sk := substrateSkillAnswer{Quarantine: append(q, refused...), Scanned: scanned, Unscanned: append(unscanned, pending...), pending: pending}
+	if len(pending) > 0 && st.blocksUnscanned(connector) {
+		sk.held = pending
+	}
+	return sk
 }
 
 // substrateAnswerRecorder holds a hook answer so the quarantine field can
@@ -539,6 +577,9 @@ func withSubstrateAnswer(w http.ResponseWriter, r *http.Request, next http.Handl
 			}
 			if len(sk.Unscanned) > 0 {
 				obj[substrateUnscannedField], _ = json.Marshal(sk.Unscanned)
+			}
+			if len(sk.held) > 0 {
+				obj[SubstratePendingField], _ = json.Marshal(sk.held)
 			}
 			var action string
 			if sk.ask != "" && json.Unmarshal(obj["action"], &action) == nil && (action == "allow" || action == "alert") {

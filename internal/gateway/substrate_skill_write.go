@@ -59,21 +59,28 @@ func (st *substrateState) substrateSkillWriteRefusal(ctx context.Context, env su
 			attached = append(attached, attest.AttachedFile{Role: f.Role, Path: f.Path, Content: f.Content, Truncated: f.Truncated})
 		}
 	}
+	var until <-chan struct{}
 	for _, a := range attest.HookAssets(env.Payload, attached) {
 		if a.Kind != config.AdmissionTypeSkill {
 			continue
+		}
+		if until == nil {
+			var cancel context.CancelFunc
+			until, cancel = st.skillPostUntil(ctx, true)
+			defer cancel()
 		}
 		files := make([]SubstrateAttachedFile, 0, len(a.Files))
 		for _, f := range a.Files {
 			files = append(files, SubstrateAttachedFile{Role: f.Role, Path: f.Path, Content: f.Content, Truncated: f.Truncated})
 		}
-		res := st.scanSkillFolder(ctx, env.Connector, a.Name, a.Path, files)
+		res := st.scanSkillFolder(ctx, until, a.Name, a.Path, files)
 		blocked, reason, err := res.blocked, res.reason, res.err
 		switch {
 		case errors.Is(err, errSkillPending), errors.Is(err, errSkillScannerBusy):
-			// B5.4 skill_pending: managed installs and the strict tier waited
-			// for the whole scan, so this is a hook that went away or no scan
-			// slot: refuse. The OSS tiers allow it with an alert, as before.
+			// B5.4 skill_pending: still scanning at the post's deadline
+			// (GAP-0980), or no scan slot. Managed installs and the strict tier
+			// refuse the write (the agent writes again and gets the verdict);
+			// the OSS tiers allow it with an alert, as before.
 			block := st.blocksUnscanned(env.Connector)
 			outcome, sev := "allowed", "MEDIUM"
 			if block {

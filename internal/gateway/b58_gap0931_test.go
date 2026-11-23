@@ -112,49 +112,15 @@ func (r *b54Rig) b58Hook(t *testing.T, connector, event string, payload map[stri
 
 func b58Every(string) bool { return true }
 
-// b58Refused: the pass refused the folder with code (the audit row the
-// middleware writes before the connector's handler answers) and named
-// nothing pending.
-func b58Refused(r *b54Rig, code string) bool {
-	u := r.rowsOf(AuditSkillUnscanned)
-	return len(u) == 1 && u[0].d["reason"] == code && u[0].d["outcome"] == "refused" && len(r.rowsOf(AuditSkillPending)) == 0
-}
-
 // b58FolderEvent is a hook of each connector that runs the folder pass.
 var b58FolderEvent = map[string]string{"claudecode": "PostToolUse", "codex": "PostToolUse", "copilot": "postToolUse", "opencode": "PostToolUse", "cursor": "postToolUse"}
 
-// Every connector, managed and strict: a scan that outlasts pending_wait is
-// waited for; past skills.scan.timeout it is refused as skill_scan_timeout,
-// never named pending (red at 131a19c94f: substrate_unscanned, no refusal).
-func TestB58ManagedSkillNeverPendingEveryConnector(t *testing.T) {
-	for _, c := range b58Connectors {
-		for tier, block := range map[string]func(string) bool{"managed": b58Every, "strict": func(x string) bool { return x == c }} {
-			t.Run(c+"/"+tier, func(t *testing.T) {
-				r := newB58Rig(t, block, 150*time.Millisecond, 10*time.Millisecond, false)
-				defer close(r.scan.release)
-				code, out := r.b58Hook(t, c, b58FolderEvent[c], map[string]any{"tool_name": "Bash"}, b54Dir, b54Skill, nil)
-				if !b58Refused(r, SkillReasonScanTimeout) {
-					t.Fatalf("%s %s: a slow scan must be waited for and refused at its timeout, never left pending: %d %v %+v", c, tier, code, out, r.rows)
-				}
-				if c == "claudecode" {
-					if q := quarantined(out); code != http.StatusOK || unscannedIn(out, b54Dir) || len(q) != 1 || q[0].Code != SkillReasonScanTimeout {
-						t.Fatalf("the answer must carry the refusal: %d %v", code, out)
-					}
-				}
-				if len(r.rowsOf(AuditSkillPending)) != 0 {
-					t.Fatalf("pending rows on a %s install: %+v", tier, r.rowsOf(AuditSkillPending))
-				}
-			})
-		}
-	}
-}
-
-// A scan that ends after pending_wait but inside skills.scan.timeout: the
-// hook gets its verdict (managed, every connector).
+// A scan that ends inside the post's deadline (pending_wait): the hook gets
+// its verdict (managed, every connector).
 func TestB58ManagedSkillWaitsForTheVerdict(t *testing.T) {
 	for _, c := range b58Connectors {
 		t.Run(c, func(t *testing.T) {
-			r := newB58Rig(t, b58Every, 5*time.Second, 5*time.Millisecond, false)
+			r := newB58Rig(t, b58Every, 5*time.Second, 2*time.Second, false)
 			r.scan.bad = true
 			go func() {
 				for r.f.api.substrateState().inFlightScans() == 0 {
@@ -199,9 +165,11 @@ func TestB58ManagedUseRoutes(t *testing.T) {
 	}
 	for _, rt := range routes {
 		t.Run(rt.name, func(t *testing.T) {
-			r := newB58Rig(t, b58Every, 150*time.Millisecond, 10*time.Millisecond, false)
-			defer close(r.scan.release)
-			// The folder arrives with a hook first (SessionStart, PostToolUse).
+			r := newB58Rig(t, b58Every, 5*time.Second, 2*time.Second, false)
+			r.scan.bad = true
+			close(r.scan.release)
+			// The folder arrives with a hook first (SessionStart, PostToolUse)
+			// and the scan refuses it.
 			_, out := r.b58Hook(t, "claudecode", "PostToolUse", map[string]any{"tool_name": "Write"}, b54Dir, b58Alias, nil)
 			if q := quarantined(out); unscannedIn(out, b54Dir) || len(q) != 1 {
 				t.Fatalf("the folder post must refuse the folder, not name it pending: %v", out)

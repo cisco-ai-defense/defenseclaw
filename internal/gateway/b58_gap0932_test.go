@@ -71,11 +71,13 @@ func TestB58PerActorScanCapManagedRefusesBusy(t *testing.T) {
 	}
 	r.b58Hook(t, "claudecode", "PostToolUse", map[string]any{"tool_name": "Bash"}, "/sandbox/.claude/skills/late",
 		map[string]string{"SKILL.md": "---\nname: late\n---\nok"}, nil)
+	// GAP-0980: busy is no verdict; the folder is held (every call refused
+	// until it is scanned), not moved.
 	found := false
-	for _, u := range r.rowsOf(AuditSkillUnscanned) {
-		found = found || (u.d["folder"] == "/sandbox/.claude/skills/late" && u.d["reason"] == SkillReasonScannerBusy && u.d["outcome"] == "refused")
+	for _, u := range r.rowsOf(AuditSkillPending) {
+		found = found || (u.d["folder"] == "/sandbox/.claude/skills/late" && u.d["reason"] == SkillReasonScannerBusy && u.d["outcome"] == "refused until scanned")
 	}
-	if !found || len(r.rowsOf(AuditSkillPending)) != 0 {
+	if !found || len(r.rowsOf(AuditSkillUnscanned)) != 0 {
 		t.Fatalf("managed busy: %+v", r.rows)
 	}
 }

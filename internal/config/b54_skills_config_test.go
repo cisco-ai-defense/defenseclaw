@@ -27,7 +27,7 @@ import (
 // B5.4 (GAP-0477): substrate.skills keys, their defaults and bounds.
 func TestSubstrateSkillsConfigDefaultsAndBounds(t *testing.T) {
 	var s SubstrateConfig
-	if !s.SkillScanEnabled() || s.EffectiveSkillScanTimeout() != 20*time.Second || s.EffectiveSkillPendingWait() != 10*time.Second {
+	if !s.SkillScanEnabled() || s.EffectiveSkillScanTimeout() != 20*time.Second || s.EffectiveSkillPendingWait() != 8*time.Second {
 		t.Fatalf("defaults: on=%v timeout=%v wait=%v", s.SkillScanEnabled(), s.EffectiveSkillScanTimeout(), s.EffectiveSkillPendingWait())
 	}
 	off := false
@@ -35,13 +35,17 @@ func TestSubstrateSkillsConfigDefaultsAndBounds(t *testing.T) {
 	if s.SkillScanEnabled() || s.EffectiveSkillScanTimeout() != 45*time.Second || s.EffectiveSkillPendingWait() != 3*time.Second {
 		t.Fatalf("set: on=%v timeout=%v wait=%v", s.SkillScanEnabled(), s.EffectiveSkillScanTimeout(), s.EffectiveSkillPendingWait())
 	}
-	s.Skills.PendingWait = "5m"
-	if s.EffectiveSkillPendingWait() != 10*time.Second {
-		t.Fatalf("a pending_wait over 60s must not be used: %v", s.EffectiveSkillPendingWait())
+	// GAP-0982: a post must be answered inside the kit's 9 s first attempt.
+	for _, w := range []string{"9s", "5m"} {
+		s.Skills.PendingWait = w
+		if s.EffectiveSkillPendingWait() != 8*time.Second {
+			t.Fatalf("a pending_wait of %s (over 8s) must not be used: %v", w, s.EffectiveSkillPendingWait())
+		}
 	}
 	for _, tc := range []struct{ timeout, wait, key string }{
 		{"0s", "", "skills.scan.timeout"},
 		{"11m", "", "skills.scan.timeout"},
+		{"", "9s", "skills.pending_wait"},
 		{"", "61s", "skills.pending_wait"},
 		{"", "soon", "skills.pending_wait"},
 	} {

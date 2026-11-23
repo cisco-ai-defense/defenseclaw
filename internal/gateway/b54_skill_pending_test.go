@@ -242,10 +242,10 @@ func TestB54SkillWritePendingManagedRefusesOSSAllows(t *testing.T) {
 			msg := st.substrateSkillWriteRefusal(context.Background(), substrateEnvelope{Connector: "claudecode", Event: "PreToolUse", Payload: p})
 			rows := r.rowsOf(AuditSkillPending)
 			if block {
-				u := r.rowsOf(AuditSkillUnscanned)
-				if len(rows) != 0 || len(u) != 1 || u[0].d["reason"] != SkillReasonScanTimeout || u[0].d["outcome"] != "refused" ||
-					!strings.Contains(msg, "the skill scan did not finish in time") {
-					t.Fatalf("managed: %q %+v %+v", msg, rows, u)
+				// GAP-0980: refused at the post's deadline, not waited to the
+				// scan timeout; the agent writes again and gets the verdict.
+				if len(rows) != 1 || rows[0].d["outcome"] != "refused" || len(r.rowsOf(AuditSkillUnscanned)) != 0 || msg != skillPendingMessage("evil") {
+					t.Fatalf("managed: %q %+v", msg, r.rows)
 				}
 				return
 			}
