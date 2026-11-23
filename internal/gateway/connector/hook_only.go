@@ -1753,7 +1753,7 @@ func validatePluginArtifactDestination(path string) error {
 func validatePluginArtifactDestinationFor(path, trustedOwnerSID string) error {
 	// A refusal names what to fix: every refused folder and the one command
 	// (GAP-0730, GAP-0731), not just the first element the walk met.
-	return explainPluginArtifactRefusal(path, checkPluginArtifactDestination(path, trustedOwnerSID))
+	return explainPluginArtifactRefusal(path, trustedOwnerSID, checkPluginArtifactDestination(path, trustedOwnerSID))
 }
 
 // checkPluginArtifactDestination is the custody check itself.
@@ -5203,11 +5203,12 @@ func hermesHookEntryOwned(entry interface{}, hookScript string, recognizedComman
 	if hermesCommandSpellsTheHookScript(command, hookScript) {
 		return true
 	}
-	// The generated script at an edited path. Its matchers trim blanks, which
-	// would claim a command Setup did not write, so a command with a blank at
-	// either end is the user's.
+	// The generated script at an edited path, or a copy named by a Windows
+	// path (GAP-1923). Its matchers trim blanks, which would claim a command
+	// Setup did not write, so a command with a blank at either end is the
+	// user's.
 	return command == strings.TrimSpace(command) &&
-		editedDefenseClawHookCommand(command, hookScriptBaseName(hookScript))
+		editedDefenseClawHookCommandByAnyPath(command, hookScriptBaseName(hookScript))
 }
 
 // hermesCommandSpellsTheHookScript reports whether command runs the generated
@@ -5997,9 +5998,22 @@ func copilotBoundEventOwnsCommand(key, command, hookScript string) bool {
 	if key != "bash" && key != "command" {
 		return false
 	}
+	// A copy named by a Windows path, on every OS (GAP-1923), read as
+	// written first: the POSIX split undoes the escapes of a double-quoted
+	// word, which drops a Windows path's backslashes.
+	if bound, owned := editedDefenseClawHookScript(windowsHookScriptCommandAsPOSIX(command), "copilot-hook.sh"); owned &&
+		(bound == "" || copilotBoundEventArgument(bound)) {
+		return true
+	}
 	word, rest, ok := hookScriptWordAfterWrapper(strings.TrimSpace(command))
-	if !ok || !filepath.IsAbs(word) || filepath.Clean(word) != word ||
-		(rest != "" && !copilotBoundEventArgument(rest)) {
+	if !ok || (rest != "" && !copilotBoundEventArgument(rest)) {
+		return false
+	}
+	// A copy named by a Windows path after a shell or env wrapper (GAP-1923).
+	if _, owned := editedDefenseClawHookScript(windowsHookScriptCommandAsPOSIX(posixHookCommandWord(word)+rest), "copilot-hook.sh"); owned {
+		return true
+	}
+	if !filepath.IsAbs(word) || filepath.Clean(word) != word {
 		return false
 	}
 	if copilotMarkedShellCopy(word) {

@@ -34,7 +34,7 @@ Details are in the [Windows security model](/docs/get-started/windows/telemetry-
 - A machine-wide install, MSI or Windows service. Use [Enterprise](/docs/enterprise/windows); on a computer with a standalone enterprise deployment the per-user installer, `upgrade`, `rollback` and gateway refuse.
 - The proxy connectors (OpenClaw, ZeptoClaw): native Windows has no guardrail proxy.
 - OpenShell sandboxes. `defenseclaw sandbox` commands stop with "OpenShell sandboxes run on Linux and macOS only". Use [sandboxes](/docs/sandboxes) on Linux or an Apple-silicon Mac.
-- An agent on another computer sending hooks to this gateway: only the same computer, same user, over loopback is tested.
+- An agent on another computer sending hooks to this gateway: only the same computer, same user, over loopback is supported.
 
 ## If you are migrating
 

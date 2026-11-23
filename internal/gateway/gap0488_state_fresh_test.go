@@ -37,7 +37,7 @@ func TestG622b8LateStateHardlinkBlocksNativePatches(t *testing.T) {
 					t.Fatal(err)
 				}
 				// A normal patch target builds the shared identity index.
-				if mapped, same := hookpaths.ResolveActiveStateHardlinkTarget(ordinary, home); same {
+				if mapped, same, _ := hookpaths.ResolveActiveStateHardlinkTarget(ordinary, home); same {
 					t.Fatalf("ordinary link mapped to %s", mapped)
 				}
 				state := filepath.Join(root, "policies", "new-rule.rego")

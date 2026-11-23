@@ -74,11 +74,9 @@ A non-empty pack directory is an overlay on the compiled baseline. Missing `supp
 ```bash
 defenseclaw doctor
 ```
-The pack also sets what a gateway outage does when you saved no fail mode: with `strict` a call is blocked while the gateway is not running, and `default` lets it run with a warning again ([Fail modes](/docs/reference/fail-modes)).
-
 
 ```text
-  [PASS] Rule pack [codex]  -  configured rule pack "default" "/home/alice/.defenseclaw/policies/guardrail/default": 239/243 rules enabled; digest=36bc8fb6…
+  [PASS] Rule pack [codex]  -  configured rule pack "default" "/home/alice/.defenseclaw/policies/guardrail/default": 283/287 rules enabled; digest=c6011cf6…
 ```
 
 Doctor validates the pack every connector uses. It shows `FAIL` for an invalid pack and `WARN` when the validator is missing.
@@ -87,15 +85,9 @@ Doctor validates the pack every connector uses. It shows `FAIL` for an invalid p
 
 The pinned digest also covers the optional `defenseclaw-pack.json` posture file. Adding or editing that file changes the digest, so validate the pack again and pin the new digest, as for a rule file ([Thresholds](/docs/policies/thresholds#rule-pack-default-posture), [custom rule packs](/docs/enterprise/configuration#custom-rule-packs)).
 
-A `guardrail.custom_packs` entry is checked once, when the configuration is read, and every reader (the gateway, the hooks, `defenseclaw status` and `defenseclaw doctor`) uses that one result. An entry is a config error when its path is empty, is not a readable folder, or loads no valid pack, or when its `digest` is missing or does not match the pack's files digest (a pack with no files has no usable digest). A relative `path` is read against the folder that holds `config.yaml`, not the current directory, and `~` is not expanded. While an entry has a config error, a setting that selects it runs the built-in pack of that name (`default` for any other name), `status` and `doctor` name the error, and the hook's outage behaviour follows the strict tier, so it does not open. Fix the entry, then reload.
+For the pinned digest, the optional `defenseclaw-pack.json` posture file and what happens when a `guardrail.custom_packs` entry has an error, see [Rules and custom packs](/docs/policies/rules#add-your-own-pack).
 
-DefenseClaw ships three rule packs: `permissive`, `default` and `strict`. A pack changes which rules run and the default block and alert levels.
-
-| Pack | Blocks | Alerts | Pick it when |
-| --- | --- | --- | --- |
-| `permissive` | CRITICAL | HIGH and above | You are piloting. Pair it with observe mode and review what would have happened. |
-| `default` | CRITICAL | MEDIUM and above | You want to stop obvious harm. With HITL on, eligible HIGH findings ask first. |
-| `strict` | MEDIUM and above | LOW and above | Regulated work, where a missed attack costs more than an interruption. Turn the LLM judge on too. |
+DefenseClaw ships three rule packs: `permissive`, `default` and `strict`. A pack changes which rules run and the default block and alert levels, which are listed in [Thresholds](/docs/policies/thresholds#rule-pack-default-posture).
 
 1. Switch every agent to the strict pack.
 
@@ -119,11 +111,16 @@ DefenseClaw ships three rule packs: `permissive`, `default` and `strict`. A pack
 
    ```text
      Guardrail rule packs
-     --------------------
-     * built-in presets:
-         - default: Balanced built-in pack - the shipped baseline.
+     ────────────────────
+     • built-in presets:
+         - default: Balanced built-in pack — the shipped baseline.
          - strict: Tighter thresholds; blocks more aggressively.
          - permissive: Looser thresholds; favors availability over blocking.
+
+     • global rule-pack dir: ~/.defenseclaw/policies/guardrail/strict
+
+     • per connector:
+         - Codex (codex): (built-in default)
    ```
 
 The running gateway applies the change on its next reload. Nothing restarts.
@@ -146,4 +143,4 @@ defenseclaw guardrail use-pack --clear --connector codex
 defenseclaw policy activate default   # admission back to the default preset; also undoes the plugin edit
 ```
 
-Next: [tune the judge](/docs/policies/suppression-cookbook), [what happens when an edit fails](/docs/policies/rules#when-something-is-wrong), [change the levels](/docs/policies/thresholds), [what each pack ships](/docs/policies/defaults).
+Next: [the suppression cookbook](/docs/policies/suppression-cookbook), [what happens when an edit fails](/docs/policies/rules#when-something-is-wrong), [change the levels](/docs/policies/thresholds), [what each pack ships](/docs/policies/defaults).

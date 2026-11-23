@@ -119,7 +119,7 @@ sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway audit export --since 2h --co
 | Command | What it shows |
 | --- | --- |
 | `status` | The gateway's health, its subsystems, and its connectors and their modes |
-| `enterprise hooks status` | The guardian's summary, then an Enrollment section: one line per account with each connector's state from the last reconcile (enrolled, pending or failed). `--json` adds the same list as `enrollment`. When every connector uses machine policy the section can be absent while eligible users remain protected; check `status` and `verify` for coverage |
+| `enterprise hooks status` | The guardian's summary, then an Enrollment section: one line per account with each connector's state from the last reconcile (enrolled, pending, skipped for a per-user DefenseClaw install, or failed). `--json` adds the same list as `enrollment`. When every connector uses machine policy the section can be absent while eligible users remain protected; check `status` and `verify` for coverage |
 | `audit export` | The audit records as JSONL, oldest first. `--since` and `--until` take an RFC3339 time or a duration ago (`30m`, `2h`). `--limit N` keeps the first N matching rows, or with `--newest` the N most recent. `--connector` keeps one agent's rows, and `--output` writes a file (it refuses to replace one unless you pass `--force`). An administrator can use `--db <copied-audit.db>` to read a retained database copy read-only after decommission; keep its WAL and SHM companions with it. |
 | `audit findings` | The distinct current scan findings: skill, MCP, plugin, code, AIBOM and inventory scans. Guardrail decisions are not tracked here; use `alerts` or `audit export` |
 | `audit compact` | Gives the disk space of deleted audit history back (`--dry-run` shows how much). Stop the gateway service first; the command refuses while the store is open and names the stop and start commands for the OS. On Linux and macOS, run as root it runs as the gateway service account, which owns the store. |
@@ -565,7 +565,7 @@ unprotected until the user or an administrator fixes them: a link or non-directo
 where an agent's config folder belongs, an agent config the agent cannot parse, a
 special file such as a named pipe at a config path, and files another account owns.
 
-A file event starts a guardian pass at once, and the pass watches every protected target for 300 ms, so a program that rewrites an agent's hook block over and over (Hermes was the case tested) is repaired within about 3 seconds of its first damaged write. Faster restores can still undo the repair. On macOS the guardian reads an account's launchd `HERMES_HOME` (set with `launchctl setenv`), so a Hermes home outside `~/.hermes` is protected.
+A file event starts a guardian pass at once, and the pass watches every protected target for 300 ms, so a program that rewrites an agent's hook block over and over (Hermes is an example) is repaired within about 3 seconds of its first damaged write. Faster restores can still undo the repair. On macOS the guardian reads an account's launchd `HERMES_HOME` (set with `launchctl setenv`), so a Hermes home outside `~/.hermes` is protected.
 
 To find the account, read `warnings[]` in `status --json` or `verify --json`: each
 `guardian_target_user_path` and `guardian_target_failed` entry names the user, the

@@ -103,7 +103,9 @@ type templateData struct {
 	FailMode            string // Rendered non-outage mode; per-user hooks bake "closed" and ask the current config for a classified outage.
 	Managed             bool
 	// ManagedShellGuard renders the managed shell prologue (fail-mode exit
-	// guard, stderr hygiene) into a Secure Client macOS connector hook.
+	// guard, stderr hygiene) into a Secure Client macOS connector hook. The
+	// other renders that are not Secure Client ones carry the shell exit
+	// guard instead (shell-exit-guard, GAP-1734).
 	ManagedShellGuard bool
 	SecureClient      bool // render-time profile marker for Unix shell identity headers
 	// SecureClientDelivery marks a Secure Client render on a verified install.

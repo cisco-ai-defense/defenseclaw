@@ -1,0 +1,19 @@
+# OCI bundle source with a registry login Secret (GAP-0437, Preview): the
+# controller pulls the prod stage by digest; Docker Hub-style token realm
+# host named in authHosts.
+bundles:
+  enabled: true
+  anchorsSecret: acme-bundle-anchors
+  oci:
+    enabled: true
+    timeout: 45s
+    authHosts: [auth.registry.example.com]
+    credentialsSecret: dc-bundle-registry
+    stages:
+    - stage: prod
+      ref: registry.example.com/policy/prod-bundle@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+      atespaces: [team-a, team-b]
+config:
+  substrate:
+    identity:
+      issuer: https://idp.cluster-a.example

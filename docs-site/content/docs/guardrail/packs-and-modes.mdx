@@ -1,0 +1,94 @@
+---
+title: Packs and modes
+description: The two choices that decide how hard the DefenseClaw guardrail acts - the rule pack (default, strict or permissive) and the mode (observe or action) - what each one does, and how to set them.
+keywords:
+  - DefenseClaw rule pack
+  - default strict permissive
+  - observe mode
+  - action mode
+  - guardrail mode
+  - block_at alert_at
+  - defenseclaw guardrail mode
+  - defenseclaw guardrail use-pack
+---
+
+Two choices decide how hard the guardrail acts on an agent:
+
+- The **rule pack** sets how severe a finding must be before it alerts or blocks.
+- The **mode** says whether the guardrail enforces at all.
+
+You can set both for every agent, or for one agent. Start with the `default` pack in `observe` mode. Move an agent to `action` when its alerts look right.
+
+## Rule packs
+
+A finding has a severity: CRITICAL, HIGH, MEDIUM or LOW. The pack sets the lowest severity that blocks (`block_at`) and the lowest that alerts (`alert_at`).
+
+| Pack | Gateway not running (per-user install) | Pick it when |
+| --- | --- | --- |
+| `default` | The call runs, with a warning and a record. | You want the shipped baseline. |
+| `strict` | The call is blocked. | A missed attack costs more than a stopped call. |
+| `permissive` | The call runs, with a warning and a record. | Agents must stay available and you read alerts. |
+
+The block and alert levels of each pack are listed in [Thresholds](/docs/policies/thresholds#rule-pack-default-posture).
+
+- A managed install keeps its administrator's fail mode, `closed` unless the administrator chose `open`. The pack never opens a managed hook. See [Fail modes](/docs/reference/fail-modes#per-user-installs).
+- A custom pack takes the `default` levels unless its `defenseclaw-pack.json` sets a posture; [Thresholds](/docs/policies/thresholds#rule-pack-default-posture) explains.
+- A level you set yourself (`guardrail block-at`, `alert-at`, a connector or a profile) wins over the pack's level.
+
+Change the pack:
+
+```bash
+defenseclaw guardrail list-packs                          # packs, and which one each agent enforces
+defenseclaw guardrail use-pack strict                     # every agent
+defenseclaw guardrail use-pack strict --connector codex   # one agent
+defenseclaw guardrail use-pack --clear --connector codex  # back to the global pack
+```
+
+`defenseclaw setup guardrail --rule-pack default|strict|permissive` sets the pack during setup. The pack applies on the gateway's next reload, with no restart.
+
+## Modes
+
+| Mode | What happens to a finding |
+| --- | --- |
+| `observe` | Recorded as an alert. Nothing is blocked and nothing asks you. Start here. |
+| `action` | The pack's levels apply: a finding at the block level is blocked, and one at the alert level raises an alert. [Human approval](/docs/guardrail/human-approval) can ask you first for a finding below the block level. |
+
+With the `default` pack in action mode:
+
+| Finding | Human approval off | Human approval on (minimum HIGH) |
+| --- | --- | --- |
+| CRITICAL | Block | Block |
+| HIGH | Alert | Ask, or alert where the agent cannot ask |
+| MEDIUM | Alert | Alert |
+| LOW | Allow | Allow |
+
+Observe mode does not enforce policy findings, whatever the levels say. Hook fail mode and proxy availability still apply. There is one exception: an agent that changes DefenseClaw's own files, such as a copy into `~/.defenseclaw` (rule `tamper.detector_state_write`) is blocked in every mode by the `strict` and `managed-strict` packs; the default and permissive packs, a managed install's default pack included, raise a HIGH alert and do not block it.
+
+Change the mode:
+
+```bash
+defenseclaw guardrail mode action                       # every agent
+defenseclaw guardrail mode action --connector claudecode  # one agent
+defenseclaw guardrail mode --clear --connector claudecode # follow the global mode again
+defenseclaw guardrail status                            # the resolved pack and mode of each agent
+```
+
+Switching an agent out of action mode runs the same checks setup runs. If one holds in every mode, the command stops and names the reason, so a switch can always be undone.
+
+## Levels without a new pack
+
+To move the thresholds without changing the pack, set them directly:
+
+```bash
+defenseclaw guardrail block-at HIGH
+defenseclaw guardrail alert-at MEDIUM
+```
+
+Or take a preset's levels with `defenseclaw policy activate strict`. [Thresholds](/docs/policies/thresholds) shows which scope wins when several are set.
+
+## Next
+
+- [How the guardrail works](/docs/guardrail/how-it-works): the layers a call passes through, and what each can override.
+- [Customize the guardrail](/docs/guardrail/customize): layers, models, thresholds, suppressions and custom rules in one place.
+- [Rules and custom packs](/docs/policies/rules): pin your own pack by digest.
+- [Turn on blocking](/docs/get-started/first-guardrail): move one agent from observe to action.

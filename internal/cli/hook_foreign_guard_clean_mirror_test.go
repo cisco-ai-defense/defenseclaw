@@ -192,7 +192,7 @@ func cleanOutagePayload(t *testing.T, fixture *foreignGuardFixture, event string
 // the account's lock and before the first ledger record; if they cannot be
 // removed the hook file and the ledger stay as they were.
 func TestForeignHookRemovalDropsCleanEntriesBeforeTheFirstRecord(t *testing.T) {
-	skipForeignHookLedgerOnWindows(t)
+	skipForeignHookCleanupFixtureOnWindows(t)
 	useForeignHookGuardian(t, nil)
 	useInProcessCleanupAsSelf(t)
 	trace := traceForeignHookRemovals(t)
@@ -228,7 +228,7 @@ func TestForeignHookRemovalDropsCleanEntriesBeforeTheFirstRecord(t *testing.T) {
 // removal of the account's entries: the commit removes them again before it
 // lets go of the lock.
 func TestForeignHookRemovalDropsCleanEntriesAgainAtTheCommit(t *testing.T) {
-	skipForeignHookLedgerOnWindows(t)
+	skipForeignHookCleanupFixtureOnWindows(t)
 	useForeignHookGuardian(t, nil)
 	useInProcessCleanupAsSelf(t)
 	root := managed.ForeignHookCleanDir(cfg.DataDir)

@@ -71,8 +71,8 @@ Platform and software requirements are at the end of the page ([Requirements and
   connector name (`claudecode`, `kiro`, `antigravity`), or by its display name.
   Setup and the
   image commands default to `openshell.harnesses`, then to Claude Code and Codex;
-  `image rm` removes only the harnesses you name. OpenCode, Amp, Cursor Agent, and Devin CLI are not verified
-  end to end yet: their images build, but they never pass the hook check, so
+  `image rm` removes only the harnesses you name. OpenCode, Amp, Cursor Agent, and Devin CLI are not available
+  yet: their images build, but they never pass the hook check, so
   no sandbox runs them. The
   [capability matrix](/docs/connectors/capability-matrix) says why for each harness.
 - **Sandbox names.** A name is lowercase letters, digits, and `-`, at most
@@ -133,7 +133,7 @@ commands change in these ways. Everything else on this page works as written.
   The administrator turns sandboxes on with `openshell.enabled` and decides how
   OpenShell is provided; in `setup` install mode your daemon installs NVIDIA's
   release into `~/.local` at your first sandbox. The first-use progress line is
-  "Installing OpenShell 0.1.6 for your account and starting it (first run only)…".
+  "Installing OpenShell 0.1.9 for your account and starting it (first run only)…".
 - **`sandbox policy allow` and `block`** save one host decision at a time in
   the managed gateway. Start a sandbox first; if you have several, use
   `--sandbox NAME` to select the policy that checks the decision. The gateway
@@ -232,7 +232,7 @@ asking. Doctor exits `1` when a check fails, with `--output json` too, after it
 prints the result (so `ok` is `false` exactly when it exits `1`). The JSON holds `ok`,
 `ready` (`ok`, with sandboxes turned on), `openshell_install` (setup would offer
 to install OpenShell), `openshell_upgrade` (setup would offer to upgrade a
-  supported OpenShell older than 0.1.6 in place) and `openshell_install_version`
+  supported OpenShell older than 0.1.9 in place) and `openshell_install_version`
 (the release setup installs), then every check with its id, title, status,
 detail and fix, the OpenShell and Docker versions found, and the compute driver. When a burst of sandbox commands hit the request limit while doctor read the organization policy, that row warns and asks you to run doctor again; it does not report a failed policy;
 the TUI's Setup wizard reads these fields. When sandboxes are on
@@ -901,7 +901,7 @@ A few rules the flags follow:
   of an image the driver has not prepared yet says it takes about a minute.
   That start prepares a disk of about the image's size in the driver's image
   cache: before anything is copied, `run` refuses it when the volume has less
-  free space than the measured first-start use of about 12 GiB (at least 13 GiB), and warns
+  free space than the first-start use of about 12 GiB (at least 13 GiB), and warns
   below twice that (at least 24 GiB), naming what is free and
   `sandbox image prune`. The daemon refuses such a create from any client the
   same way.

@@ -1142,6 +1142,37 @@ class TestSetupGuardrailJudgeFlagsObserveMode(unittest.TestCase):
         self.assertNotIn("judge add", result.output)
         self.assertFalse(self.app.cfg.guardrail.judge.enabled)
 
+    def test_interactive_prune_of_an_all_gate_to_nothing_says_the_judge_is_off(self):
+        # GAP-1679 (GAP-2297): after GAP-1113 the non-interactive --connector
+        # path replaces a dormant 'all' gate, so only the interactive prune
+        # reaches the "The LLM judge is off" line. An 'all' gate whose
+        # connectors are all observe-mode prunes to nothing: one warning that
+        # says the judge is off and how to fix it, no 'all' talk, and no
+        # 'guardrail judge add' hint (it refuses observe-mode connectors).
+        from defenseclaw.commands.cmd_setup import _prune_judge_gate_to_action_scope
+
+        gc = SimpleNamespace(
+            judge=SimpleNamespace(hook_connectors=["*"], enabled=True),
+            connectors={},
+            connector="claudecode",
+            detection_strategy="regex_judge",
+            detection_strategy_completion="regex_judge",
+            effective_mode=lambda name: "observe",
+        )
+        with patch("defenseclaw.commands.cmd_setup.ux.warn") as warn:
+            gate = _prune_judge_gate_to_action_scope(gc, ["claudecode"])
+        self.assertEqual(gate, [])
+        warn.assert_called_once()
+        text = warn.call_args.args[0]
+        self.assertTrue(text.startswith("The LLM judge is off: "), text)
+        self.assertIn("defenseclaw setup claude-code --mode action --enable-judge --yes", text)
+        self.assertNotIn("judge add", text)
+        self.assertNotIn("'all'", text)
+        self.assertFalse(gc.judge.enabled)
+        self.assertEqual(gc.judge.hook_connectors, [])
+        self.assertEqual(gc.detection_strategy, "regex_only")
+        self.assertEqual(gc.detection_strategy_completion, "regex_only")
+
     def test_action_connector_keeps_judge_and_writes_only_v5_fields(self):
         judge = self.app.cfg.guardrail.judge
         judge.model, judge.api_base, judge.api_key_env = "old-model", "https://old.example", "OLD_KEY"

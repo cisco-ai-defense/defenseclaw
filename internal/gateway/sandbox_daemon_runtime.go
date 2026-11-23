@@ -2041,6 +2041,10 @@ func (d *SandboxDaemon) managedStatusFor(ctx context.Context, s sandboxrelay.Dae
 		out.Unavailable = "sandboxes are turned off by your organization"
 	case !s.Available:
 		out.Unavailable = s.Unavailable
+	default:
+		if c, ok := d.openShell.(openShellConflictReporter); ok {
+			out.Unavailable, out.Recovery = c.SetupConflict(ctx, s)
+		}
 	}
 	registered := false
 	if r, ok := d.regs.newest(); ok {
@@ -2288,6 +2292,10 @@ func (c *managedSandboxController) Status(ctx context.Context) (*sandboxapi.Stat
 		st.Enabled = s.Enabled
 		if !s.Enabled || !s.Available {
 			st.Available, st.Reason = false, s.Unavailable
+		} else if st.Managed.Recovery != "" {
+			// The organization's pinned OpenShell cannot run for the
+			// account (rel-1-0-10:GAP-1781).
+			st.Available, st.Reason = false, st.Managed.Unavailable
 		}
 		if st.Gateway != nil {
 			c.d.driverInForce(st.Managed, st.Gateway.Driver)

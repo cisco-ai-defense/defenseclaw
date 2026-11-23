@@ -79,6 +79,24 @@ func orphanedHookConfigPathsFor(goos string, conn Connector, opts SetupOpts) ([]
 	if len(exact) == 0 && len(scripts) == 0 && len(registrationPrefixes) == 0 {
 		return found, nil
 	}
+	match := hookCommandMatches
+	if goos == "windows" && conn.Name() == "codex" {
+		// Per-user Codex registers each event with its own exact command
+		// (the cmd.exe direct start, or the -EncodedCommand guarded or
+		// answering bridge), never the plain launcher command, so the
+		// `hook --connector codex` needle alone found nothing and a rollback
+		// left every Codex hook table (GAP-1714). Take the exact commands
+		// teardown removes (isNativeHookCommand); they name this account's
+		// launcher, so they are this account's.
+		owned := nativeHookExactCommands(nativeHookBinaryOwnershipCandidates())
+		match = func(command, needle string) bool {
+			if hookCommandMatches(command, needle) {
+				return true
+			}
+			_, ok := owned[command]
+			return ok
+		}
+	}
 	paths := HookConfigPathsForConnector(conn, opts)
 	if hermes, ok := conn.(*hookOnlyConnector); ok && hermes.name == "hermes" {
 		other, err := hermes.orphanedOtherHermesHomes(opts)
@@ -98,7 +116,7 @@ func orphanedHookConfigPathsFor(goos string, conn Connector, opts SetupOpts) ([]
 		if decoded == nil {
 			continue
 		}
-		if structuredHookCommandReferences(decoded, exact) || hookCommandRunsScript(decoded, scripts) ||
+		if structuredHookCommandReferencesWith(decoded, exact, match) || hookCommandRunsScript(decoded, scripts) ||
 			ownedRegistrationKeyPresent(decoded, registrationPrefixes) {
 			found = append(found, path)
 		}

@@ -257,15 +257,29 @@ func identitySpoolAccountName(sid string) string {
 // default as a verified answer.
 func readIdentitySpoolFactsForAccount(key, accountName, accountSID string, now time.Time) (enterprisehooks.IdentitySpoolRecord, bool, error) {
 	record, ok := readIdentitySpoolFacts(key, now)
-	if !ok || record.User == "" || accountName == "" || !strings.EqualFold(record.User, accountName) {
+	if !ok || !spoolRecordNamesAccount(record, accountName) {
 		return enterprisehooks.IdentitySpoolRecord{}, false, nil
 	}
-	if record.AccountSID != "" && accountSID != "" && !strings.EqualFold(record.AccountSID, accountSID) {
+	if spoolRecordOfOtherSID(record, accountSID) {
 		return enterprisehooks.IdentitySpoolRecord{}, false, &identityFactsUnconfirmedError{err: fmt.Errorf("the hook guardian's identity "+
 			"record for uid %s is of another account under the same uid and name (another SID): this account's UPN is unknown until the "+
 			"guardian's next pass writes its record; the lookup is retried every %s", key, identityDirectoryRetry)}
 	}
 	return record, true, nil
+}
+
+// spoolRecordNamesAccount reports whether record is the guardian's record of
+// accountName, the account that holds its uid now. The gateway merges no
+// other record (readIdentitySpoolFactsForAccount, verifiedGroupDomains).
+func spoolRecordNamesAccount(record enterprisehooks.IdentitySpoolRecord, accountName string) bool {
+	return record.User != "" && accountName != "" && strings.EqualFold(record.User, accountName)
+}
+
+// spoolRecordOfOtherSID reports whether record names another SID than
+// accountSID, the one the gateway's own lookup gave the account. A SID either
+// side lacks contradicts nothing.
+func spoolRecordOfOtherSID(record enterprisehooks.IdentitySpoolRecord, accountSID string) bool {
+	return record.AccountSID != "" && accountSID != "" && !strings.EqualFold(record.AccountSID, accountSID)
 }
 
 // mergeSpoolFacts overlays the guardian's root-resolved record on the facts

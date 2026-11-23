@@ -216,7 +216,7 @@ record the proof with `/repair ATTESTCLAUDEEFFECTIVEPOLICY=1`. The proof is
 bound to the manifest's hash, so a manifest change clears it.
 
 `ATTESTAGENTAPPLICATIONCONTROL=1` is optional. Pass it only after WDAC or
-AppLocker is deployed and tested to allow approved agent builds and block old
+AppLocker is deployed to allow approved agent builds and block old
 and unsigned ones. Without it, the managed hooks still run.
 
 The version floors on Windows are Codex 0.131.0 and Claude Code 2.1.152.
@@ -458,6 +458,25 @@ The text output adds one line, such as `Health report: degraded (HOOKS_PARTIAL) 
 The report never changes `ok`, `warnings` or the exit code, and `verify` does not check it. Read `status`, `stale`
 and `delivery.result` to find a device that needs attention. The gateway sends nothing until the Cisco AI Defense endpoint is configured.
 
+## Skill inventory
+
+The gateway sends Cisco AI Defense every skill the enrolled agents load, with its content hash, state
+(new, changed, unchanged or removed), scope, home-relative location, the agents that read it and its
+publisher. The fields are listed in [Skill inventory](/docs/ai-discovery#skill-inventory).
+Nothing needs to be turned on.
+
+To also send the text of each skill's SKILL.md, add this to the config you install with `CONFIG=`, or apply
+it later with `/repair CONFIG=`:
+
+```yaml
+ai_discovery:
+  enabled: true
+  include_skill_manifests: true
+```
+
+SKILL.md text leaves the endpoint once per file version, through the `sensitive` redaction profile, which
+masks secrets before upload. Leave it off where skill text must stay on the device.
+
 ## Restart-required controls
 
 In managed mode, `config.yaml` is the only live configuration source. Hot
@@ -519,6 +538,6 @@ administrator rights, treat the endpoint as compromised
 - [ ] The first reconcile succeeds for every enabled target before any connector moves to action mode.
 - [ ] On Windows, the Claude Code proof is recorded and `security_complete` is `true`.
 - [ ] Monitoring alerts on guardian errors, connector errors, repeated repair and enforcement downgrade.
-- [ ] Allowed and blocked tool calls, and the measured hook-repair time, are recorded for the deployed version.
+- [ ] Allowed and blocked tool calls, and the hook-repair time, are recorded for the deployed version.
 - [ ] MDM or EDR locks native agent config where repair-after-tamper is not enough.
 - [ ] Upgrades and incident response use an administrator channel the AI agent cannot reach.

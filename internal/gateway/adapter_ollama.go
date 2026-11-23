@@ -105,6 +105,25 @@ func (ollamaAdapter) WriteBlockResponse(p *GuardrailProxy, w http.ResponseWriter
 	p.writeBlockedResponseOllama(w, model, msg)
 }
 
+// ollamaBlockBody is the block as one terminal Ollama object (done:true): an
+// /api/chat assistant message, or an /api/generate response when generate
+// is set (the block tail of a generate stream, GAP-1206).
+func ollamaBlockBody(model, msg string, generate bool) map[string]any {
+	resp := map[string]any{
+		"model":               model,
+		"created_at":          time.Now().UTC().Format(time.RFC3339Nano),
+		"done":                true,
+		"done_reason":         "guardrail_intervened",
+		"defenseclaw_blocked": true,
+	}
+	if generate {
+		resp["response"] = msg
+	} else {
+		resp["message"] = map[string]any{"role": "assistant", "content": msg}
+	}
+	return resp
+}
+
 // writeBlockedResponseOllama emits the DefenseClaw block in Ollama's
 // /api/chat response shape (done:true terminates the reply; clients
 // parse this as a complete assistant turn and surface the block
@@ -119,17 +138,7 @@ func (ollamaAdapter) WriteBlockResponse(p *GuardrailProxy, w http.ResponseWriter
 // signal so operators grep-ping NDJSON can filter block responses
 // without parsing the banner out of the content.
 func (p *GuardrailProxy) writeBlockedResponseOllama(w http.ResponseWriter, model, msg string) {
-	resp := map[string]any{
-		"model":      model,
-		"created_at": time.Now().UTC().Format(time.RFC3339Nano),
-		"message": map[string]any{
-			"role":    "assistant",
-			"content": msg,
-		},
-		"done":                true,
-		"done_reason":         "guardrail_intervened",
-		"defenseclaw_blocked": true,
-	}
+	resp := ollamaBlockBody(model, msg, false)
 	// Disable nginx/HAProxy response buffering so streaming clients
 	// see the terminal chunk immediately instead of after the proxy's
 	// internal buffer fills. Must be set before WriteHeader.

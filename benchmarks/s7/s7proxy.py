@@ -15,8 +15,19 @@ by the exact request makes repeated identical requests free; a model name suffix
 cap (--cap-usd, persisted in --ledger) refuses calls once reached.
 Credentials come from the host's AWS chain; no secret is printed or logged.
 """
-import argparse, base64, hashlib, json, os, sys, threading, time, urllib.request, urllib.error
+
+import argparse
+import base64
+import hashlib
+import json
+import os
+import sys
+import threading
+import time
+import urllib.error
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
 from botocore.auth import SigV4QueryAuth
 from botocore.awsrequest import AWSRequest
 from botocore.session import Session
@@ -37,7 +48,11 @@ ap.add_argument("--cap-usd", type=float, default=70.0)
 ap.add_argument("--region", default="us-east-1")
 ap.add_argument("--conc", type=int, default=16)
 ap.add_argument("--replay-latency", action="store_true")
-ap.add_argument("--cache-only", action="store_true", help="answer only from the cache; a miss is refused (503) and logged, never sent to a model")
+ap.add_argument(
+    "--cache-only",
+    action="store_true",
+    help="answer only from the cache; a miss is refused (503) and logged, never sent to a model",
+)
 args = ap.parse_args()
 
 lock = threading.Lock()
@@ -61,19 +76,29 @@ cachef = open(args.cache, "a")
 logf = open(args.log, "a")
 _tok = {"v": None, "t": 0}
 
+
 def mantle_token():
     if _tok["v"] and time.time() - _tok["t"] < 1800:
         return _tok["v"]
     creds = Session().get_credentials().get_frozen_credentials()
-    req = AWSRequest(method="POST", url="https://bedrock.amazonaws.com/", headers={"host": "bedrock.amazonaws.com"}, params={"Action": "CallWithBearerToken"})
+    req = AWSRequest(
+        method="POST",
+        url="https://bedrock.amazonaws.com/",
+        headers={"host": "bedrock.amazonaws.com"},
+        params={"Action": "CallWithBearerToken"},
+    )
     SigV4QueryAuth(creds, "bedrock", args.region, expires=3600).add_auth(req)
-    _tok["v"] = "bedrock-api-key-" + base64.b64encode((req.url.replace("https://", "") + "&Version=1").encode()).decode()
+    _tok["v"] = (
+        "bedrock-api-key-" + base64.b64encode((req.url.replace("https://", "") + "&Version=1").encode()).decode()
+    )
     _tok["t"] = time.time()
     return _tok["v"]
+
 
 def cost(model, tin, tout, tcache):
     p = PRICES[model]
     return (tin * p[0] + tout * p[1] + tcache * p[2]) / 1e6
+
 
 def call_model(model, messages, max_tokens, temperature, response_format=None):
     """Returns (text, in_tokens, out_tokens, cache_read_tokens, stop)."""
@@ -85,44 +110,65 @@ def call_model(model, messages, max_tokens, temperature, response_format=None):
         body["response_format"] = response_format
     last = None
     for attempt in range(6):
-        req = urllib.request.Request(f"https://bedrock-mantle.{args.region}.api.aws{route}/chat/completions",
-                                     data=json.dumps(body).encode(), method="POST",
-                                     headers={"Content-Type": "application/json", "Authorization": "Bearer " + mantle_token()})
+        req = urllib.request.Request(
+            f"https://bedrock-mantle.{args.region}.api.aws{route}/chat/completions",
+            data=json.dumps(body).encode(),
+            method="POST",
+            headers={"Content-Type": "application/json", "Authorization": "Bearer " + mantle_token()},
+        )
         try:
             with urllib.request.urlopen(req, timeout=120) as r:
                 d = json.loads(r.read())
             u = d.get("usage") or {}
             ch = d["choices"][0]
             msg = ch.get("message") or {}
-            return (msg.get("content") or ""), u.get("prompt_tokens", 0), u.get("completion_tokens", 0), 0, ch.get("finish_reason")
+            return (
+                (msg.get("content") or ""),
+                u.get("prompt_tokens", 0),
+                u.get("completion_tokens", 0),
+                0,
+                ch.get("finish_reason"),
+            )
         except urllib.error.HTTPError as e:
             last = f"http {e.code}"
             if e.code in (429, 500, 502, 503, 504):
-                time.sleep(min(30, 2 ** attempt))
+                time.sleep(min(30, 2**attempt))
                 continue
             raise RuntimeError(last + " " + e.read()[:200].decode("utf-8", "replace"))
         except Exception as e:
             last = type(e).__name__
-            time.sleep(min(30, 2 ** attempt))
+            time.sleep(min(30, 2**attempt))
     raise RuntimeError("mantle retries exhausted: " + str(last))
+
 
 def run(kind, model_tag, messages, max_tokens, temperature, response_format=None):
     global spent
     model, _, tag = model_tag.partition("#")
     if model not in PRICES:
         raise ValueError("unknown model")
-    key = hashlib.sha256(json.dumps([model_tag, messages, max_tokens, temperature, response_format], sort_keys=True).encode()).hexdigest()
+    key = hashlib.sha256(
+        json.dumps([model_tag, messages, max_tokens, temperature, response_format], sort_keys=True).encode()
+    ).hexdigest()
     with lock:
         hit = cache.get(key)
     if hit is None and args.cache_only:
         with lock:
-            logf.write(json.dumps({"ts": time.time(), "kind": kind, "model": model, "key": key[:16], "cache_miss_refused": True}) + "\n"); logf.flush()
+            logf.write(
+                json.dumps(
+                    {"ts": time.time(), "kind": kind, "model": model, "key": key[:16], "cache_miss_refused": True}
+                )
+                + "\n"
+            )
+            logf.flush()
         raise PermissionError("cache-only: miss refused")
     rec = {"ts": time.time(), "kind": kind, "model": model, "tag": tag, "key": key[:16]}
     if hit is not None:
-        rec.update(cache_hit=True, in_tok=hit["in"], out_tok=hit["out"], latency_ms=hit["ms"], cost=0.0, stop=hit.get("stop"))
+        rec.update(
+            cache_hit=True, in_tok=hit["in"], out_tok=hit["out"], latency_ms=hit["ms"], cost=0.0, stop=hit.get("stop")
+        )
         with lock:
-            logf.write(json.dumps(rec) + "\n"); logf.flush()
+            logf.write(json.dumps(rec) + "\n")
+            logf.flush()
         if args.replay_latency:
             time.sleep(hit["ms"] / 1000.0)
         return hit["text"], hit["in"], hit["out"], hit.get("stop")
@@ -147,36 +193,83 @@ def run(kind, model_tag, messages, max_tokens, temperature, response_format=None
         spent += c
         json.dump({"spent_usd": spent, "updated": time.time()}, open(args.ledger, "w"))
         cache[key] = {"text": text, "in": tin, "out": tout, "ms": ms, "stop": stop}
-        cachef.write(key + "\t" + json.dumps(cache[key]) + "\n"); cachef.flush()
-        rec.update(cache_hit=False, in_tok=tin, out_tok=tout, cache_read=tcache, latency_ms=ms, cost=c, stop=stop, text=text[:2000])
-        logf.write(json.dumps(rec) + "\n"); logf.flush()
+        cachef.write(key + "\t" + json.dumps(cache[key]) + "\n")
+        cachef.flush()
+        rec.update(
+            cache_hit=False,
+            in_tok=tin,
+            out_tok=tout,
+            cache_read=tcache,
+            latency_ms=ms,
+            cost=c,
+            stop=stop,
+            text=text[:2000],
+        )
+        logf.write(json.dumps(rec) + "\n")
+        logf.flush()
     return text, tin, tout, stop
+
 
 class H(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
+
     def _send(self, code, obj):
         b = json.dumps(obj).encode()
-        self.send_response(code); self.send_header("Content-Type", "application/json"); self.send_header("Content-Length", str(len(b)))
-        self.end_headers(); self.wfile.write(b)
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(b)))
+        self.end_headers()
+        self.wfile.write(b)
+
     def do_GET(self):
         self._send(200, {"spent_usd": spent, "cache": len(cache)})
+
     def do_POST(self):
         try:
             body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
             if self.path.endswith("/systemone"):
                 return self._send(404, {"error": {"message": "no System One model behind this proxy"}})
-            msgs = [{"role": m["role"], "content": m["content"] if isinstance(m["content"], str) else "".join(p.get("text", "") for p in m["content"])} for m in body["messages"]]
-            text, tin, tout, stop = run("judge", body["model"].split("/", 1)[-1], msgs, int(body.get("max_tokens") or body.get("max_completion_tokens") or 512), body.get("temperature"), body.get("response_format"))
-            self._send(200, {"id": "s7", "object": "chat.completion", "model": body["model"],
-                             "choices": [{"index": 0, "message": {"role": "assistant", "content": text}, "finish_reason": stop or "stop"}],
-                             "usage": {"prompt_tokens": tin, "completion_tokens": tout, "total_tokens": tin + tout}})
+            msgs = [
+                {
+                    "role": m["role"],
+                    "content": m["content"]
+                    if isinstance(m["content"], str)
+                    else "".join(p.get("text", "") for p in m["content"]),
+                }
+                for m in body["messages"]
+            ]
+            text, tin, tout, stop = run(
+                "judge",
+                body["model"].split("/", 1)[-1],
+                msgs,
+                int(body.get("max_tokens") or body.get("max_completion_tokens") or 512),
+                body.get("temperature"),
+                body.get("response_format"),
+            )
+            self._send(
+                200,
+                {
+                    "id": "s7",
+                    "object": "chat.completion",
+                    "model": body["model"],
+                    "choices": [
+                        {"index": 0, "message": {"role": "assistant", "content": text}, "finish_reason": stop or "stop"}
+                    ],
+                    "usage": {"prompt_tokens": tin, "completion_tokens": tout, "total_tokens": tin + tout},
+                },
+            )
         except PermissionError as e:
             self._send(503, {"error": {"message": str(e)}})
         except Exception as e:
             with lock:
-                logf.write(json.dumps({"ts": time.time(), "error": type(e).__name__ + ": " + str(e)[:300], "path": self.path}) + "\n"); logf.flush()
+                logf.write(
+                    json.dumps({"ts": time.time(), "error": type(e).__name__ + ": " + str(e)[:300], "path": self.path})
+                    + "\n"
+                )
+                logf.flush()
             self._send(502, {"error": {"message": type(e).__name__}})
+
 
 print(f"s7proxy on 127.0.0.1:{args.port} spent so far ${spent:.4f}", file=sys.stderr, flush=True)
 ThreadingHTTPServer(("127.0.0.1", args.port), H).serve_forever()

@@ -409,10 +409,43 @@ func doctorBundles(ctx context.Context, s *substrateSession, signedIn bool) (sub
 		return substrateCheck{ID: id, Status: doctorWarn, Fix: "create the bundle-anchors Secret before a bundle is applied",
 			Summary: "no bundle is applied and the cluster cannot read its bundle trust anchors: " + safetext.Line(anchorsErr)}, true
 	}
+	if c, ok := doctorBundlesOCI(res); ok {
+		return c, true
+	}
 	if len(stages) == 0 {
 		return substrateCheck{ID: id, Status: doctorOK, Summary: "no policy bundle is applied; config.yaml is in force"}, true
 	}
 	return substrateCheck{ID: id, Status: doctorOK, Summary: fmt.Sprintf("the active bundle of each of %d stage(s) verifies", len(stages))}, true
+}
+
+// doctorBundlesOCI fails the policy_bundles row when the bundle pulled for an
+// OCI stage was refused, and warns while one is not pulled yet (GAP-0437).
+func doctorBundlesOCI(res map[string]any) (substrateCheck, bool) {
+	const id = "policy_bundles"
+	oci, _ := res["oci"].([]any)
+	var refused, pending []string
+	for _, o := range oci {
+		om, _ := o.(map[string]any)
+		stage, _ := om["stage"].(string)
+		state, _ := om["state"].(string)
+		result, _ := om["result"].(string)
+		code, _ := om["code"].(string)
+		switch {
+		case state != "processed":
+			pending = append(pending, safetext.Line(stage))
+		case result == "refused":
+			refused = append(refused, safetext.Line(stage)+" ("+safetext.Line(code)+")")
+		}
+	}
+	if len(refused) > 0 {
+		return substrateCheck{ID: id, Status: doctorFail, Fix: "sign the bundle with a key in the bundle anchors, push it and pin the new digest in substrate.bundles.oci.stages",
+			Summary: "the bundle pulled from the OCI registry was refused for stage(s) " + strings.Join(refused, ", ") + "; those stages keep their last verified bundle"}, true
+	}
+	if len(pending) > 0 {
+		return substrateCheck{ID: id, Status: doctorWarn, Fix: "check the controller events (sandbox.bundle.*) for the pull error: registry reachable, digest, credentials, CA",
+			Summary: "the OCI bundle of stage(s) " + strings.Join(pending, ", ") + " is not pulled yet; the controller retries every refresh"}, true
+	}
+	return substrateCheck{}, false
 }
 
 func doctorSignInServer(ctx context.Context, c auth.Context) substrateCheck {

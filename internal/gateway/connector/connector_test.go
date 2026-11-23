@@ -4428,7 +4428,9 @@ func TestIsDefenseClawCodexProxyRedirect(t *testing.T) {
 // bearer so Codex never receives the master API bearer and the credential
 // never appears in an endpoint URL.
 func TestCodex_Setup_WritesOtelBlock(t *testing.T) {
-	skipManagedWindowsCodexHostSetup(t)
+	if codexManagedSetupRefusedOnWindows(t) {
+		return
+	}
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.toml")
 	if err := os.WriteFile(configPath, []byte(`model = "gpt-5"
@@ -4552,7 +4554,9 @@ func TestCodex_Setup_WritesOtelBlock(t *testing.T) {
 }
 
 func TestCodex_Setup_SourceCaptureEnablesPromptLoggingAndTeardownRestores(t *testing.T) {
-	skipManagedWindowsCodexHostSetup(t)
+	if codexManagedSetupRefusedOnWindows(t) {
+		return
+	}
 
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.toml")
@@ -4733,8 +4737,8 @@ hooks = false
 }
 
 func TestCodexManagedSetupRepairsUserHooksFalseWithoutLosingProjectTrust(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("managed Windows Codex uses the machine requirements installer")
+	if codexManagedSetupRefusedOnWindows(t) {
+		return
 	}
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "codex", "config.toml")
@@ -6138,7 +6142,9 @@ func TestCodexSurgicalRestorePreservesEditedTelemetryEnvironment(t *testing.T) {
 }
 
 func TestCodex_TeardownKeepsScopedOTLPTokenWhenConfigCleanupFails(t *testing.T) {
-	skipManagedWindowsCodexHostSetup(t)
+	if codexManagedSetupRefusedOnWindows(t) {
+		return
+	}
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.toml")
 	if err := os.WriteFile(configPath, []byte("model = \"gpt-5\"\n"), 0o600); err != nil {
@@ -7158,9 +7164,44 @@ func TestZeptoClaw_Route_SkipsEntriesWithNoAPIKey(t *testing.T) {
 	}
 }
 
+// zeptoClawSetupRefusedOnWindows is the Windows branch of the ZeptoClaw setup
+// tests (rel-1-0-10:GAP-1529). The proxy connector needs the guardrail proxy,
+// which DefenseClaw does not host on native Windows, so there the contract is
+// that Setup refuses with the platform error and leaves the vendor config and
+// the data dir untouched. It reports true on Windows (the caller returns).
+func zeptoClawSetupRefusedOnWindows(t *testing.T) bool {
+	t.Helper()
+	if runtime.GOOS != "windows" {
+		return false
+	}
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "zeptoclaw-config.json")
+	original := `{"providers":{"openrouter":{"api_key":"sk-or-test","api_base":"https://openrouter.ai/api/v1"}}}`
+	if err := os.WriteFile(configPath, []byte(original), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ZeptoClawConfigPathOverride = configPath
+	defer func() { ZeptoClawConfigPathOverride = "" }()
+	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970"}
+	err := NewZeptoClawConnector().Setup(context.Background(), opts)
+	if err == nil || !strings.Contains(err.Error(), "requires the guardrail proxy") {
+		t.Fatalf("ZeptoClaw Setup on Windows = %v, want the platform refusal", err)
+	}
+	if got, rerr := os.ReadFile(configPath); rerr != nil || string(got) != original {
+		t.Fatalf("a refused ZeptoClaw Setup changed the vendor config: %v %q", rerr, got)
+	}
+	entries, _ := os.ReadDir(dir)
+	for _, e := range entries {
+		if e.Name() != "zeptoclaw-config.json" {
+			t.Fatalf("a refused ZeptoClaw Setup left %q in the data dir", e.Name())
+		}
+	}
+	return true
+}
+
 func TestZeptoClaw_Setup_IsIdempotent(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("ZeptoClaw setup is unsupported on native Windows")
+	if zeptoClawSetupRefusedOnWindows(t) {
+		return
 	}
 	// On every sidecar boot, Setup runs. If it overwrites the backup each
 	// time, the second boot captures the already-patched api_base (the
@@ -7253,8 +7294,8 @@ func TestZeptoClaw_Setup_UsesHookFailMode(t *testing.T) {
 }
 
 func TestZeptoClaw_Setup_LoadsProviderSnapshot(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("ZeptoClaw setup is unsupported on native Windows")
+	if zeptoClawSetupRefusedOnWindows(t) {
+		return
 	}
 	// After Setup(), the connector must retain the user's provider table
 	// in memory so Route() can look up upstreams. Otherwise we'd have to
@@ -9586,8 +9627,8 @@ func TestClaudeCode_VerifyCleanChecksEveryManagedEnvKeyWithoutValidHooks(t *test
 }
 
 func TestZeptoClaw_Setup_Surface1_PatchesConfig(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("ZeptoClaw setup is unsupported on native Windows")
+	if zeptoClawSetupRefusedOnWindows(t) {
+		return
 	}
 	dir := t.TempDir()
 
@@ -9663,8 +9704,8 @@ func TestZeptoClaw_Setup_Surface1_PatchesConfig(t *testing.T) {
 }
 
 func TestZeptoClaw_Setup_PreservesExistingHooks(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("ZeptoClaw setup is unsupported on native Windows")
+	if zeptoClawSetupRefusedOnWindows(t) {
+		return
 	}
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "zeptoclaw-config.json")
@@ -9767,8 +9808,8 @@ func TestZeptoClaw_Teardown_Surface1_RestoresConfig(t *testing.T) {
 }
 
 func TestZeptoClaw_Setup_ProducesValidZeptoClawConfig(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("ZeptoClaw setup is unsupported on native Windows")
+	if zeptoClawSetupRefusedOnWindows(t) {
+		return
 	}
 	// Regression test: before the fix, Setup wrote config["hooks"] as
 	// {before_tool: <string path>, ...}, which ZeptoClaw rejected with
@@ -10622,10 +10663,11 @@ func TestManagedEnterpriseHookFailsClosedWhenTokenIsMissing(t *testing.T) {
 	)
 	cmd.Stdin = strings.NewReader(`{"hook_event_name":"PreToolUse"}`)
 	cmd.Env = append(os.Environ(), "DEFENSECLAW_STRICT_AVAILABILITY=0")
-	err = cmd.Run()
-	exitErr, ok := err.(*exec.ExitError)
-	if !ok || exitErr.ExitCode() != 2 {
-		t.Fatalf("managed missing-token hook error = %v, want exit 2", err)
+	out, err := cmd.Output()
+	// Codex reads a non-zero status as a hook failure: the block is its deny
+	// object with exit 0 (GAP-1755).
+	if err != nil || !codexBlockAnswer("PreToolUse", 0, string(out)) {
+		t.Fatalf("managed missing-token hook error = %v, stdout %q, want exit 0 and the PreToolUse deny", err, out)
 	}
 }
 
@@ -11142,8 +11184,8 @@ func TestPatchOpenClawConfig_Concurrent(t *testing.T) {
 }
 
 func TestZeptoClaw_Setup_EmptyProviders_Fails(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("ZeptoClaw setup is unsupported on native Windows")
+	if zeptoClawSetupRefusedOnWindows(t) {
+		return
 	}
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "zeptoclaw-config.json")
@@ -12568,15 +12610,44 @@ func TestCodexOtelBlockLooksManaged_AcceptsLegacyExporterOnlyBlock(t *testing.T)
 	}
 }
 
-// skipManagedWindowsCodexHostSetup skips a test of managed Codex host Setup
-// on Windows: there the managed hooks are machine policy that the
-// administrator-owned requirements installer writes, and host Setup refuses
-// them by design.
-func skipManagedWindowsCodexHostSetup(t *testing.T) {
+// codexManagedSetupRefusedOnWindows is the Windows branch of the managed Codex
+// host Setup tests (rel-1-0-10:GAP-1530). There the managed hooks are machine
+// policy that the administrator-owned requirements installer writes, so host
+// Setup refuses them by design: the contract is the named refusal, the user's
+// config.toml and the data dir untouched, and no registration read back from
+// the user config. It reports true on Windows (the caller returns).
+func codexManagedSetupRefusedOnWindows(t *testing.T) bool {
 	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Skip("managed Windows Codex hooks are machine policy that the requirements installer writes; host Setup refuses them")
+	if runtime.GOOS != "windows" {
+		return false
 	}
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	const original = "model = \"gpt-5\"\n"
+	if err := os.WriteFile(configPath, []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	prior := CodexConfigPathOverride
+	CodexConfigPathOverride = configPath
+	t.Cleanup(func() { CodexConfigPathOverride = prior })
+	dataDir := filepath.Join(dir, "dc")
+	opts := SetupOpts{DataDir: dataDir, APIAddr: "127.0.0.1:18970", APIToken: "hook-token", ManagedEnterprise: true}
+	conn := NewCodexConnector()
+	err := conn.Setup(context.Background(), opts)
+	if err == nil || !strings.Contains(err.Error(), "administrator-owned machine requirements installer") {
+		t.Fatalf("managed Codex Setup on Windows = %v, want the machine requirements refusal", err)
+	}
+	if got, readErr := os.ReadFile(configPath); readErr != nil || string(got) != original {
+		t.Fatalf("a refused managed Codex Setup changed the user config: %v %q", readErr, got)
+	}
+	if _, statErr := os.Stat(dataDir); !os.IsNotExist(statErr) {
+		t.Fatalf("a refused managed Codex Setup created the data dir (err=%v)", statErr)
+	}
+	registered, reason, checkErr := conn.checkOwnedHookContract(opts)
+	if checkErr != nil || registered || !strings.Contains(reason, "not verified from the user config.toml") {
+		t.Fatalf("managed Windows Codex registration check = %v %q %v, want not verified from the user config.toml", registered, reason, checkErr)
+	}
+	return true
 }
 
 func TestClaudeCodeWatchPathsForUnverifiedHomeKeepProjectEntries(t *testing.T) {

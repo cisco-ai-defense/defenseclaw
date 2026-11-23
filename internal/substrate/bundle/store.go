@@ -105,6 +105,10 @@ type State struct {
 	// InboxSeen is the SHA-256 of the inbox entry last processed per stage,
 	// so an unchanged inbox is not re-applied or re-receipted.
 	InboxSeen map[string]string `json:"inbox_seen,omitempty"`
+	// OCISeen is the same per OCI stage: the SHA-256 of its digest-pinned
+	// reference and atespaces last processed (GAP-0437), with "@" and the
+	// cluster key when the bundle was refused (GAP-0952).
+	OCISeen map[string]string `json:"oci_seen,omitempty"`
 }
 
 // Receipt records one apply or rollback, refused or not.
@@ -141,6 +145,8 @@ type Store struct {
 	// It decides which atespaces a stage may name (GAP-0494); nil uses Base.
 	Live func() *config.Config
 	Now  func() time.Time
+	// OCIStages, when set, are listed in Status (GAP-0437).
+	OCIStages []OCIStage
 }
 
 func (s *Store) now() time.Time {
@@ -334,6 +340,9 @@ func (s *Store) apply(ctx context.Context, archive []byte, stage string, atespac
 		cur = &Stage{}
 	}
 	anchors, err := s.Anchors()
+	if rec, ok := ctx.Value(ociAnchorsRecKey{}).(*ociAnchorsRec); ok {
+		rec.part = anchorsPart(anchors, err)
+	}
 	if err != nil {
 		return err
 	}
@@ -640,7 +649,26 @@ type Status struct {
 	// AnchorsError says why the anchors could not be read.
 	AnchorsError string    `json:"anchors_error,omitempty"`
 	Receipts     []Receipt `json:"receipts,omitempty"`
+	// OCI lists the configured OCI stages (GAP-0437).
+	OCI []OCIStageStatus `json:"oci,omitempty"`
 }
+
+// OCIStageStatus is one configured OCI stage: pending until the controller
+// has pulled and processed its digest, then the result of its last oci
+// receipt.
+type OCIStageStatus struct {
+	Stage  string `json:"stage"`
+	Ref    string `json:"ref"`
+	State  string `json:"state"`
+	Result string `json:"result,omitempty"`
+	Code   string `json:"code,omitempty"`
+}
+
+// OCI stage states.
+const (
+	OCIPending   = "pending"
+	OCIProcessed = "processed"
+)
 
 // Status reads the state, re-verifies it and lists the last receipts.
 func (s *Store) Status(ctx context.Context, receipts int) (*Status, error) {
@@ -662,6 +690,29 @@ func (s *Store) Status(ctx context.Context, receipts int) (*Status, error) {
 	}
 	if out.Receipts, err = s.Receipts(ctx, receipts); err != nil {
 		return nil, err
+	}
+	if len(s.OCIStages) > 0 {
+		all, err := s.Receipts(ctx, 0)
+		if err != nil {
+			return nil, err
+		}
+		ck := s.ociClusterKey()
+		for _, st := range s.OCIStages {
+			o := OCIStageStatus{Stage: st.Stage, Ref: st.Ref, State: OCIPending}
+			if ociProcessed(d.state.OCISeen[st.Stage], st, ck) {
+				o.State = OCIProcessed
+				var last *Receipt
+				for i := range all {
+					if rc := &all[i]; rc.Source == SourceOCI && rc.Stage == st.Stage && (last == nil || !rc.Time.Before(last.Time)) {
+						last = rc
+					}
+				}
+				if last != nil {
+					o.Result, o.Code = last.Result, last.Code
+				}
+			}
+			out.OCI = append(out.OCI, o)
+		}
 	}
 	return out, nil
 }
@@ -713,8 +764,8 @@ func (s *Store) SyncInbox(ctx context.Context, inbox string) ([]Receipt, error) 
 		if rc != nil {
 			out = append(out, *rc)
 		}
-		if aerr != nil && eb.CodeOf(aerr) == "" {
-			return out, aerr // storage error: retry next pass
+		if aerr != nil && isStorageError(aerr) {
+			return out, aerr // retry next pass
 		}
 		if err := s.retry(ctx, func() error { return s.markSeen(ctx, stage, seen) }); err != nil {
 			return out, err
@@ -725,6 +776,10 @@ func (s *Store) SyncInbox(ctx context.Context, inbox string) ([]Receipt, error) 
 	}
 	return out, nil
 }
+
+// isStorageError is an apply error that is not a refusal (no code): the
+// entry is tried again the next pass instead of being marked seen.
+func isStorageError(err error) bool { return eb.CodeOf(err) == "" }
 
 func (s *Store) markSeen(ctx context.Context, stage, seen string) error {
 	d, err := s.read(ctx)

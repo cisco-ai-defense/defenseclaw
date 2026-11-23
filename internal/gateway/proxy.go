@@ -4430,10 +4430,21 @@ func (p *GuardrailProxy) writeBlockedChatReply(w http.ResponseWriter, model stri
 // writeBlockedResponseGemini returns a blocked response in Gemini
 // generateContent API format (non-streaming).
 func (p *GuardrailProxy) writeBlockedResponseGemini(w http.ResponseWriter, msg string) {
-	resp := map[string]interface{}{
-		"candidates": []map[string]interface{}{{
-			"content": map[string]interface{}{
-				"parts": []map[string]interface{}{
+	resp := geminiBlockFrame(msg)
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-DefenseClaw-Blocked", "true")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// geminiBlockFrame is the block as one Gemini candidates envelope: the whole
+// non-stream reply, one frame of a stream, or the last frame of a stream
+// the agent already got part of (GAP-1206).
+func geminiBlockFrame(msg string) map[string]any {
+	return map[string]any{
+		"candidates": []map[string]any{{
+			"content": map[string]any{
+				"parts": []map[string]any{
 					{"text": msg},
 				},
 				"role": "model",
@@ -4444,10 +4455,6 @@ func (p *GuardrailProxy) writeBlockedResponseGemini(w http.ResponseWriter, msg s
 		"defenseclaw_blocked": true,
 		"defenseclaw_reason":  msg,
 	}
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("X-DefenseClaw-Blocked", "true")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(resp)
 }
 
 // writeBlockedStreamGemini returns a blocked response as a Gemini
@@ -4473,21 +4480,7 @@ func (p *GuardrailProxy) writeBlockedStreamGemini(w http.ResponseWriter, msg str
 	w.Header().Set("X-DefenseClaw-Blocked", "true")
 	w.WriteHeader(http.StatusOK)
 
-	frame := map[string]interface{}{
-		"candidates": []map[string]interface{}{{
-			"content": map[string]interface{}{
-				"parts": []map[string]interface{}{
-					{"text": msg},
-				},
-				"role": "model",
-			},
-			"finishReason": "SAFETY",
-			"index":        0,
-		}},
-		"defenseclaw_blocked": true,
-		"defenseclaw_reason":  msg,
-	}
-	data, _ := json.Marshal(frame)
+	data, _ := json.Marshal(geminiBlockFrame(msg))
 	fmt.Fprintf(w, "data: %s\n\n", data)
 	flusher.Flush()
 }

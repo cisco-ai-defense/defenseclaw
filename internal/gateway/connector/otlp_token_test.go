@@ -561,19 +561,16 @@ func TestLoadOTLPPathToken_RejectsUnsafeFiles(t *testing.T) {
 	t.Parallel()
 	token := strings.Repeat("a", 64) + "\n"
 	cases := []struct {
-		name  string
-		setup func(t *testing.T, path string)
+		name      string
+		disclosed bool // every local account can read the token
+		setup     func(t *testing.T, path string)
 	}{
 		{
-			name: "wide_mode",
+			name:      "wide_mode",
+			disclosed: true,
 			setup: func(t *testing.T, path string) {
 				t.Helper()
-				if runtime.GOOS == "windows" {
-					t.Skip("POSIX mode bits do not represent an NTFS DACL; see native DACL coverage")
-				}
-				if err := os.WriteFile(path, []byte(token), 0o644); err != nil {
-					t.Fatal(err)
-				}
+				writeOTLPTokenEveryAccountCanRead(t, path, token)
 			},
 		},
 		{
@@ -644,7 +641,20 @@ func TestLoadOTLPPathToken_RejectsUnsafeFiles(t *testing.T) {
 			if got, err := LoadOTLPPathToken(dir, OTLPScopeClaude); err == nil {
 				t.Fatalf("LoadOTLPPathToken succeeded with token %q, want error", got)
 			}
-			if got, err := EnsureOTLPPathToken(dir, OTLPScopeClaude); err == nil {
+			got, err := EnsureOTLPPathToken(dir, OTLPScopeClaude)
+			if tc.disclosed && runtime.GOOS == "windows" {
+				// The token may already be copied, so Windows rotates it into
+				// a private file instead of reusing the disclosed value
+				// (otlpPathTokenNeedsSecureReplacement).
+				if err != nil || got == "" || got == strings.TrimSpace(string(before)) {
+					t.Fatalf("EnsureOTLPPathToken over a disclosed token: err=%v, want a new token", err)
+				}
+				if loaded, err := LoadOTLPPathToken(dir, OTLPScopeClaude); err != nil || loaded != got {
+					t.Fatalf("load the rotated token: matched=%v err=%v", loaded == got, err)
+				}
+				return
+			}
+			if err == nil {
 				t.Fatalf("EnsureOTLPPathToken succeeded with token %q, want error", got)
 			}
 			after, err := os.ReadFile(path)

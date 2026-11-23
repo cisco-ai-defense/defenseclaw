@@ -191,9 +191,12 @@ type Manager struct {
 	Store    *Store
 	Resolver *Resolver
 	// Inbox is the inbox ConfigMap name; empty skips the inbox.
-	Inbox    string
-	Interval time.Duration
-	Sink     controller.Sink
+	Inbox string
+	// OCI pulls the OCIStages by digest (GAP-0437); nil skips it.
+	OCI       *OCIClient
+	OCIStages []OCIStage
+	Interval  time.Duration
+	Sink      controller.Sink
 
 	mu       sync.Mutex
 	active   map[string]string // stage -> manifest SHA-256 last reported
@@ -209,34 +212,70 @@ func (m *Manager) emit(ev controller.Event) {
 	}
 }
 
-// Refresh runs one pass. On a storage error the resolver keeps its last
-// snapshot and the error is returned.
+// Refresh runs one pass: the inbox, then the re-verify of every active
+// bundle against the current anchors (a revoked key is enforced before any
+// registry is asked, GAP-0953), then the OCI stages. A failed OCI pull is
+// a warning event and is tried again at the next refresh: a registry that
+// is down never fails the pass or the controller start (GAP-0951). On a
+// storage error the resolver keeps its last snapshot and the error is
+// returned.
 func (m *Manager) Refresh(ctx context.Context) error {
 	var errs []error
 	if m.Inbox != "" {
 		rcs, err := m.Store.SyncInbox(ctx, m.Inbox)
-		for _, rc := range rcs {
-			ev := controller.Event{Type: EventApplied, Severity: controller.SeverityInfo,
-				Message: fmt.Sprintf("inbox bundle %s version %d %s for stage %s", rc.BundleID, rc.Version, rc.Result, rc.Stage),
-				Detail:  map[string]any{"stage": rc.Stage, "bundle_id": rc.BundleID, "version": rc.Version, "result": rc.Result, "manifest_sha256": rc.ManifestSHA256}}
-			if rc.Result == ResultRefused {
-				ev.Type, ev.Severity = EventRefused, controller.SeverityAlert
-				ev.Message += ": " + rc.Error
-				ev.Detail["code"] = rc.Code
-			}
-			m.emit(ev)
-		}
+		m.emitReceipts("inbox", rcs)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("bundle inbox: %w", err))
 		}
 	}
+	if err := m.load(ctx); err != nil {
+		return errors.Join(append(errs, err)...)
+	}
+	if m.OCI != nil && len(m.OCIStages) > 0 {
+		rcs, pulls, err := m.Store.SyncOCI(ctx, m.OCI, m.OCIStages)
+		m.emitReceipts("oci", rcs)
+		for _, perr := range pulls {
+			m.emit(controller.Event{Type: controller.EventWarning, Severity: controller.SeverityWarn,
+				Message: "bundle oci: " + perr.Error() + "; tried again at the next refresh"})
+		}
+		if err != nil {
+			errs = append(errs, fmt.Errorf("bundle oci: %w", err))
+		}
+		if slices.ContainsFunc(rcs, func(rc Receipt) bool { return rc.Result == ResultApplied }) {
+			if err := m.load(ctx); err != nil {
+				errs = append(errs, err)
+			}
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// load re-verifies every stage's active bundle and hands the snapshot to
+// the resolver.
+func (m *Manager) load(ctx context.Context) error {
 	snap, problems, err := m.Store.Load(ctx)
 	if err != nil {
-		return errors.Join(append(errs, fmt.Errorf("bundle state: %w", err))...)
+		return fmt.Errorf("bundle state: %w", err)
 	}
 	m.Resolver.Set(snap)
 	m.report(snap, problems)
-	return errors.Join(errs...)
+	return nil
+}
+
+// emitReceipts reports the receipts of one source (inbox or oci): applied
+// as info, refused as an alert with the refusal code.
+func (m *Manager) emitReceipts(source string, rcs []Receipt) {
+	for _, rc := range rcs {
+		ev := controller.Event{Type: EventApplied, Severity: controller.SeverityInfo,
+			Message: fmt.Sprintf("%s bundle %s version %d %s for stage %s", source, rc.BundleID, rc.Version, rc.Result, rc.Stage),
+			Detail:  map[string]any{"stage": rc.Stage, "bundle_id": rc.BundleID, "version": rc.Version, "result": rc.Result, "manifest_sha256": rc.ManifestSHA256, "source": rc.Source}}
+		if rc.Result == ResultRefused {
+			ev.Type, ev.Severity = EventRefused, controller.SeverityAlert
+			ev.Message += ": " + rc.Error
+			ev.Detail["code"] = rc.Code
+		}
+		m.emit(ev)
+	}
 }
 
 func (m *Manager) report(snap *Snapshot, problems []Problem) {
