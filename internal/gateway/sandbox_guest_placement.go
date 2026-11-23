@@ -8,6 +8,7 @@ import (
 	"context"
 	"math"
 	"path"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -100,69 +101,90 @@ type guestPlacement struct {
 // reads a call past the statement budget too, so the call that carries the
 // limit finding still names the write (substrate-1 GAP-0359).
 func sandboxGuestPlacements(input actionfacts.Input, facts actionfacts.Facts, statementBudget bool) (placements []guestPlacement, cut bool) {
-	type key struct{ text, cwd string }
-	seen := map[key]int{}
-	if facts.Authoritative() {
-		// Counted by statements, as the laptop counts them: the walk reads a
-		// command after a cd that may not run in every directory it may run
-		// in, so after three such cds each later command has seven readings
-		// outside the guest's directory, and a cap on readings cut a 24-line
-		// script the laptop allows (a here-string call, judged by its
-		// authoritative twin, substrate-1 GAP-0377).
-		statements := map[string]bool{}
-		for _, simple := range actionfacts.SimpleCommands(input, facts) {
-			cwd := simple.CWD
-			if guestPlacementSkips(simple) || !path.IsAbs(cwd) || cwd == input.CWD {
-				continue
-			}
-			if _, ok := seen[key{simple.Text, cwd}]; ok {
-				continue
-			}
-			if !statements[simple.Text] {
-				if len(statements) == maxSandboxGuestPlacedChildren {
-					return placements, true
-				}
-				statements[simple.Text] = true
-			}
-			if len(placements) == maxSandboxGuestPlacements {
-				return placements, true
-			}
-			seen[key{simple.Text, cwd}] = len(placements)
-			placements = append(placements, guestPlacement{text: simple.Text, cwd: cwd})
-		}
-		return placements, false
+	return newGuestPlacementPlan(input, facts, nil).placements(statementBudget)
+}
+
+// guestPending is a reading a pass of the guest placement lists before it is
+// placed (guestPlacementPlan).
+type guestPending struct {
+	text, cwd string
+	candidate bool
+	// seq is the reading's place in the order the pass lists its readings
+	// (guestCollect).
+	seq int
+}
+
+// guestKey is a reading of the guest placement: a command text in a folder.
+type guestKey struct{ text, cwd string }
+
+// guestPlacementPlan is the walk of sandboxGuestPlacements, made once for
+// both statement budgets: the placements of a call the analysis read in
+// full, or, for any other call, the readings each pass lists in order and
+// whether a pass dropped one. Only placing them (placements) depends on the
+// statement budget: it cuts a pass of a call over the laptop's own statement
+// budget at maxSandboxGuestPlacedChildren statements, and the placed
+// children read every script call by position (byPosition). The
+// placed-children reading and the sandbox hook-config guard each made the
+// whole walk again, SimpleCommands and guestScriptCalls included, for the
+// same input; one plan serves both (guestReadingMemo, substrate-1 GAP-0923,
+// GAP-1028). A plan is not changed once made.
+type guestPlacementPlan struct {
+	authoritative bool
+	// whole and wholeCut are the placements of an authoritative call.
+	whole    []guestPlacement
+	wholeCut bool
+	// The passes of any other call: the simple commands, the top-level
+	// statements and every call of the script the split did not read
+	// (calls), with the folders the walk ended with (dirs, targets) and the
+	// place each folder is known from (known). rest is false when the call
+	// has no top-level or script-call pass (no command text, or one over
+	// agentHookConfigMaxPlacedBytes). byPosition reports a call the laptop
+	// guard places statement by statement.
+	simples        []guestPending
+	simplesDropped bool
+	rest           bool
+	top            []guestPending
+	calls          []guestScriptCall
+	dirs, targets  []string
+	known          map[string]int
+	byPosition     bool
+	// overBudget is trustedCallOverStatementBudget of the call as the hook
+	// sent it, worked out once when a statement-budget placement asks.
+	overBudget     func() bool
+	overBudgetOnce sync.Once
+	overBudgetSet  bool
+}
+
+// newGuestPlacementPlan walks input and facts for sandboxGuestPlacements.
+// split is the simple-command split (actionfacts.SimpleCommands when nil):
+// the call's own split serves the walk and the statement budget both.
+func newGuestPlacementPlan(input actionfacts.Input, facts actionfacts.Facts,
+	split func(actionfacts.Input, actionfacts.Facts) []actionfacts.SimpleCommand) *guestPlacementPlan {
+	if split == nil {
+		split = actionfacts.SimpleCommands
 	}
-	overBudget := statementBudget && trustedCallOverStatementBudget(input, facts)
+	plan := &guestPlacementPlan{}
+	if facts.Authoritative() {
+		plan.authoritative = true
+		plan.whole, plan.wholeCut = guestAuthoritativePlacements(input, split(input, facts))
+		return plan
+	}
+	sent, sentFacts, swapped := input, facts, false
 	if input.Command == "" {
 		if command, ok := trustedBashCommandInput(input); ok {
 			input.Command, input.Args, input.Argv = command, nil, nil
 			facts = actionfacts.Analyze(input)
+			swapped = true
 		}
 	}
-	// pass counts the statements and readings of one pass.
-	type pass struct {
-		statements map[string]bool
-		read       int
+	simples := split(input, facts)
+	plan.overBudget = func() bool {
+		if swapped {
+			return trustedCallOverStatementBudgetWith(sent, sentFacts, split(sent, sentFacts))
+		}
+		return trustedCallOverStatementBudgetWith(sent, sentFacts, simples)
 	}
-	place := func(p *pass, text, cwd string, candidate bool) bool {
-		if at, ok := seen[key{text, cwd}]; ok {
-			placements[at].candidate = placements[at].candidate && candidate
-			return true
-		}
-		if !p.statements[text] {
-			if overBudget && len(p.statements) == maxSandboxGuestPlacedChildren {
-				return false
-			}
-			p.statements[text] = true
-		}
-		if p.read == maxSandboxGuestPlacements {
-			return false
-		}
-		p.read++
-		seen[key{text, cwd}] = len(placements)
-		placements = append(placements, guestPlacement{text: text, cwd: cwd, candidate: candidate})
-		return true
-	}
+	type key = guestKey
 	// dirs are the directories the call's commands run in, targets the cd
 	// targets no command is read in yet; each keeps its first
 	// maxSandboxGuestCandidateDirs entries, the guest's directory first
@@ -203,13 +225,6 @@ func sandboxGuestPlacements(input actionfacts.Input, facts actionfacts.Facts, st
 	// pass, it cuts touch f1 ... touch f150, not the cat ../.ssh/id_ed25519
 	// after them, which read keeps the laptop's block next to the limit
 	// (substrate-1 GAP-0501).
-	type pending struct {
-		text, cwd string
-		candidate bool
-		// seq is the reading's place in the order the pass lists its
-		// readings (collect).
-		seq int
-	}
 	arrivals := 0
 	// collect keeps the distinct readings of a pass, at most
 	// maxSandboxGuestPlacements. Past the bound the pass is cut (dropped): a
@@ -233,56 +248,13 @@ func sandboxGuestPlacements(input actionfacts.Input, facts actionfacts.Facts, st
 	// private-key read and a hook-config write, it let the actor allow the
 	// write the laptop blocks with tamper.detector_state_write
 	// (substrate-1 GAP-0645).
-	collect := func(list []pending, listed map[key]int, plain *[]int, dropped *bool, reading pending) []pending {
-		at := key{reading.text, reading.cwd}
-		if index, ok := listed[at]; ok {
-			list[index].candidate = list[index].candidate && reading.candidate
-			return list
-		}
-		first := guestReadingFirst(reading.text)
-		reading.seq = arrivals
-		arrivals++
-		if len(list) >= maxSandboxGuestPlacements {
-			*dropped = true
-			if !first || len(*plain) == 0 {
-				return list
-			}
-			last := (*plain)[len(*plain)-1]
-			*plain = (*plain)[:len(*plain)-1]
-			delete(listed, key{list[last].text, list[last].cwd})
-			listed[at] = last
-			list[last] = reading
-			return list
-		}
-		if !first {
-			*plain = append(*plain, len(list))
-		}
-		listed[at] = len(list)
-		return append(list, reading)
+	collect := func(list []guestPending, listed map[key]int, plain *[]int, dropped *bool, reading guestPending) []guestPending {
+		return guestCollect(list, listed, plain, dropped, &arrivals, reading)
 	}
 	// placeAll places the first readings of a pass in the order they were
 	// listed, then the plain ones: under the statement budget an earlier
 	// protected reading is never skipped for a later one.
-	placeAll := func(p *pass, list []pending) bool {
-		var firsts, plains []pending
-		for _, reading := range list {
-			if guestReadingFirst(reading.text) {
-				firsts = append(firsts, reading)
-			} else {
-				plains = append(plains, reading)
-			}
-		}
-		slices.SortFunc(firsts, func(a, b pending) int { return a.seq - b.seq })
-		for _, reading := range slices.Concat(firsts, plains) {
-			if !place(p, reading.text, reading.cwd, reading.candidate) {
-				return false
-			}
-		}
-		return true
-	}
-	simples := &pass{statements: map[string]bool{}}
-	var simpleReadings []pending
-	simplesDropped, simplesListed := false, map[key]int{}
+	simplesListed := map[key]int{}
 	var simplesPlain []int
 	// stoodIn is the folder of the last command that is not a directory
 	// change, held until the next command of the split shows whether the
@@ -326,7 +298,8 @@ func sandboxGuestPlacements(input actionfacts.Input, facts actionfacts.Facts, st
 		}
 		dirs = keep(dirs, stoodIn)
 	}
-	for _, simple := range actionfacts.SimpleCommands(input, facts) {
+	cdMemo := newGuestCDMemo(input.ActiveHome)
+	for _, simple := range simples {
 		settle(simple)
 		if guestPlacementSkips(simple) {
 			continue
@@ -334,13 +307,13 @@ func sandboxGuestPlacements(input actionfacts.Input, facts actionfacts.Facts, st
 		splitRead[simple.Text] = true
 		cwd := simple.CWD
 		if path.IsAbs(cwd) {
-			simpleReadings = collect(simpleReadings, simplesListed, &simplesPlain, &simplesDropped, pending{simple.Text, cwd, false, 0})
+			plan.simples = collect(plan.simples, simplesListed, &simplesPlain, &plan.simplesDropped, guestPending{simple.Text, cwd, false, 0})
 		}
 		for _, dir := range dirs {
-			simpleReadings = collect(simpleReadings, simplesListed, &simplesPlain, &simplesDropped, pending{simple.Text, dir, false, 0})
+			plan.simples = collect(plan.simples, simplesListed, &simplesPlain, &plan.simplesDropped, guestPending{simple.Text, dir, false, 0})
 		}
 		for _, dir := range targets {
-			simpleReadings = collect(simpleReadings, simplesListed, &simplesPlain, &simplesDropped, pending{simple.Text, dir, true, 0})
+			plan.simples = collect(plan.simples, simplesListed, &simplesPlain, &plan.simplesDropped, guestPending{simple.Text, dir, true, 0})
 		}
 		bases := slices.Concat(dirs, targets)
 		if path.IsAbs(cwd) {
@@ -352,15 +325,19 @@ func sandboxGuestPlacements(input actionfacts.Input, facts actionfacts.Facts, st
 		// a candidate; the directory of any other command is one the call
 		// runs in, once the next command shows the call still stands there
 		// (stoodIn).
+		reading := cdMemo.reading(simple.Text)
 		switch {
-		case guestChangesDirectory(simple.Text, input.ActiveHome):
+		case reading.changes:
 			targets = keep(targets, cwd)
 		case simple.OtherFolder || simple.UnresolvedFolder || simple.LastStageOrBackground || !path.IsAbs(cwd):
 			dirs = keep(dirs, cwd)
 		default:
 			stoodIn, standing = path.Clean(cwd), true
 		}
-		moved := guestCDTargets(simple.Text, bases, input.ActiveHome)
+		var moved []string
+		if reading.moves {
+			moved = guestCDJoin(reading.operand, bases, input.ActiveHome)
+		}
 		for _, target := range moved {
 			targets = keep(targets, target)
 		}
@@ -374,14 +351,11 @@ func sandboxGuestPlacements(input actionfacts.Input, facts actionfacts.Facts, st
 	if standing {
 		dirs = keep(dirs, stoodIn)
 	}
-	// A cut pass does not end the others: each has its own bound, and the
-	// call is reported cut.
-	simplesCut := !placeAll(simples, simpleReadings) || simplesDropped
 	command := input.Command
 	if command == "" || len(command) > agentHookConfigMaxPlacedBytes {
-		return placements, simplesCut
+		return plan
 	}
-	topCut := false
+	plan.rest = true
 	// byPosition reads each call of the script below only in the folders
 	// known at its own place. The hook-config guard (statementBudget false)
 	// reads by position only a call the laptop guard places statement by
@@ -393,14 +367,11 @@ func sandboxGuestPlacements(input actionfacts.Input, facts actionfacts.Facts, st
 	// tamper.agent_hook_config_write on the laptop and both rels, and the
 	// actor allowed it once every call was read by position (substrate-1
 	// GAP-0988).
-	byPosition := statementBudget
 	if statements, ok := hookpaths.TopLevelStatements(command, input.CWD, input.ActiveHome); ok {
-		byPosition = byPosition || len(statements) != 0 && hookpaths.ChangesDirectory(command)
-		top := &pass{statements: map[string]bool{}}
+		plan.byPosition = len(statements) != 0 && hookpaths.ChangesDirectory(command)
 		for _, statement := range statements {
-			if path.IsAbs(statement.Dir) && !place(top, statement.Command, statement.Dir, false) {
-				topCut = true
-				break
+			if path.IsAbs(statement.Dir) {
+				plan.top = append(plan.top, guestPending{statement.Command, statement.Dir, false, 0})
 			}
 		}
 	}
@@ -429,28 +400,254 @@ func sandboxGuestPlacements(input actionfacts.Input, facts actionfacts.Facts, st
 	// own place. Its cd targets are still kept.
 	scriptCalls, cdpath := guestScriptCalls(command, input.ActiveHome)
 	known := map[string]int{}
-	targets = guestKnownFolders(scriptCalls, dirs, targets, followed, input.CWD, input.ActiveHome, cdpath, keep, known)
-	calls := &pass{statements: map[string]bool{}}
-	var callReadings []pending
-	callsDropped, callsListed := false, map[key]int{}
-	var callsPlain []int
+	targets = guestKnownFolders(scriptCalls, dirs, targets, followed, input.CWD, input.ActiveHome, cdpath, keep, known, cdMemo)
 	for _, call := range scriptCalls {
-		if splitRead[call.text] {
+		if !splitRead[call.text] {
+			plan.calls = append(plan.calls, call)
+		}
+	}
+	plan.dirs, plan.targets, plan.known = dirs, targets, known
+	return plan
+}
+
+// guestAuthoritativePlacements places the simple commands of a call the
+// analysis read in full (sandboxGuestPlacements).
+func guestAuthoritativePlacements(input actionfacts.Input, simples []actionfacts.SimpleCommand) (placements []guestPlacement, cut bool) {
+	type key struct{ text, cwd string }
+	seen := map[key]bool{}
+	// Counted by statements, as the laptop counts them: the walk reads a
+	// command after a cd that may not run in every directory it may run
+	// in, so after three such cds each later command has seven readings
+	// outside the guest's directory, and a cap on readings cut a 24-line
+	// script the laptop allows (a here-string call, judged by its
+	// authoritative twin, substrate-1 GAP-0377).
+	statements := map[string]bool{}
+	for _, simple := range simples {
+		cwd := simple.CWD
+		if guestPlacementSkips(simple) || !path.IsAbs(cwd) || cwd == input.CWD {
 			continue
 		}
-		for _, dir := range dirs {
-			if !byPosition || known[dir] <= call.at {
-				callReadings = collect(callReadings, callsListed, &callsPlain, &callsDropped, pending{call.text, dir, false, 0})
+		if seen[key{simple.Text, cwd}] {
+			continue
+		}
+		if !statements[simple.Text] {
+			if len(statements) == maxSandboxGuestPlacedChildren {
+				return placements, true
+			}
+			statements[simple.Text] = true
+		}
+		if len(placements) == maxSandboxGuestPlacements {
+			return placements, true
+		}
+		seen[key{simple.Text, cwd}] = true
+		placements = append(placements, guestPlacement{text: simple.Text, cwd: cwd})
+	}
+	return placements, false
+}
+
+// placements places the plan's readings, each pass in turn
+// (sandboxGuestPlacements); statementBudget cuts a pass of a call over the
+// laptop's statement budget at maxSandboxGuestPlacedChildren statements and
+// reads each script call only in the folders known at its own place
+// (byPosition).
+func (plan *guestPlacementPlan) placements(statementBudget bool) (placements []guestPlacement, cut bool) {
+	if plan.authoritative {
+		return slices.Clone(plan.whole), plan.wholeCut
+	}
+	overBudget := false
+	if statementBudget {
+		plan.overBudgetOnce.Do(func() { plan.overBudgetSet = plan.overBudget() })
+		overBudget = plan.overBudgetSet
+	}
+	type key = guestKey
+	seen := map[key]int{}
+	// pass counts the statements and readings of one pass.
+	type pass struct {
+		statements map[string]bool
+		read       int
+	}
+	place := func(p *pass, text, cwd string, candidate bool) bool {
+		if at, ok := seen[key{text, cwd}]; ok {
+			placements[at].candidate = placements[at].candidate && candidate
+			return true
+		}
+		if !p.statements[text] {
+			if overBudget && len(p.statements) == maxSandboxGuestPlacedChildren {
+				return false
+			}
+			p.statements[text] = true
+		}
+		if p.read == maxSandboxGuestPlacements {
+			return false
+		}
+		p.read++
+		seen[key{text, cwd}] = len(placements)
+		placements = append(placements, guestPlacement{text: text, cwd: cwd, candidate: candidate})
+		return true
+	}
+	placeAll := func(p *pass, list []guestPending) bool {
+		var firsts, plains []guestPending
+		for _, reading := range list {
+			if guestReadingFirst(reading.text) {
+				firsts = append(firsts, reading)
+			} else {
+				plains = append(plains, reading)
 			}
 		}
-		for _, dir := range targets {
-			if !byPosition || known[dir] <= call.at {
-				callReadings = collect(callReadings, callsListed, &callsPlain, &callsDropped, pending{call.text, dir, true, 0})
+		slices.SortFunc(firsts, func(a, b guestPending) int { return a.seq - b.seq })
+		for _, reading := range slices.Concat(firsts, plains) {
+			if !place(p, reading.text, reading.cwd, reading.candidate) {
+				return false
+			}
+		}
+		return true
+	}
+	// A cut pass does not end the others: each has its own bound, and the
+	// call is reported cut.
+	simplesCut := !placeAll(&pass{statements: map[string]bool{}}, plan.simples) || plan.simplesDropped
+	if !plan.rest {
+		return placements, simplesCut
+	}
+	topCut := false
+	top := &pass{statements: map[string]bool{}}
+	for _, reading := range plan.top {
+		if !place(top, reading.text, reading.cwd, false) {
+			topCut = true
+			break
+		}
+	}
+	// The placed children (statementBudget) read each script call by
+	// position; the hook-config guard only a call the laptop guard places
+	// statement by statement (plan.byPosition; see newGuestPlacementPlan,
+	// substrate-1 GAP-0988).
+	byPosition := statementBudget || plan.byPosition
+	var callReadings []guestPending
+	callsDropped, callsListed, arrivals := false, map[key]int{}, 0
+	var callsPlain []int
+	for _, call := range plan.calls {
+		for _, dir := range plan.dirs {
+			if !byPosition || plan.known[dir] <= call.at {
+				callReadings = guestCollect(callReadings, callsListed, &callsPlain, &callsDropped, &arrivals, guestPending{call.text, dir, false, 0})
+			}
+		}
+		for _, dir := range plan.targets {
+			if !byPosition || plan.known[dir] <= call.at {
+				callReadings = guestCollect(callReadings, callsListed, &callsPlain, &callsDropped, &arrivals, guestPending{call.text, dir, true, 0})
 			}
 		}
 	}
-	callsCut := !placeAll(calls, callReadings) || callsDropped
+	callsCut := !placeAll(&pass{statements: map[string]bool{}}, callReadings) || callsDropped
 	return placements, simplesCut || topCut || callsCut
+}
+
+// guestCollect is collect of the guest placement walk (newGuestPlacementPlan,
+// guestPlacementPlan.placements); arrivals counts the readings of the pass.
+func guestCollect(list []guestPending, listed map[guestKey]int, plain *[]int, dropped *bool, arrivals *int, reading guestPending) []guestPending {
+	at := guestKey{reading.text, reading.cwd}
+	if index, ok := listed[at]; ok {
+		list[index].candidate = list[index].candidate && reading.candidate
+		return list
+	}
+	first := guestReadingFirst(reading.text)
+	reading.seq = *arrivals
+	(*arrivals)++
+	if len(list) >= maxSandboxGuestPlacements {
+		*dropped = true
+		if !first || len(*plain) == 0 {
+			return list
+		}
+		last := (*plain)[len(*plain)-1]
+		*plain = (*plain)[:len(*plain)-1]
+		delete(listed, guestKey{list[last].text, list[last].cwd})
+		listed[at] = last
+		list[last] = reading
+		return list
+	}
+	if !first {
+		*plain = append(*plain, len(list))
+	}
+	listed[at] = len(list)
+	return append(list, reading)
+}
+
+// guestReadingMemo keeps, for one hook evaluation, the simple-command split
+// of each guest-placed input and its guest placement plan: the
+// placed-children reading, the split-gap reading and the sandbox hook-config
+// guard each made them from the start for the same input, up to four
+// SimpleCommands passes a hook (substrate-1 GAP-0923, GAP-1028). An entry
+// serves only an input and facts equal to the ones it was made for; any
+// other is read afresh. A copy of the request shares it; a nil memo keeps
+// nothing.
+type guestReadingMemo struct {
+	mu     sync.Mutex
+	splits []guestSplitEntry
+	plans  []guestPlanEntry
+	// relative keeps the relative-operand answers of every split of the
+	// hook (actionfacts.RelativeOperandMemo).
+	relative actionfacts.RelativeOperandMemo
+}
+
+type guestSplitEntry struct {
+	input   actionfacts.Input
+	facts   actionfacts.Facts
+	simples []actionfacts.SimpleCommand
+}
+
+type guestPlanEntry struct {
+	input actionfacts.Input
+	facts actionfacts.Facts
+	plan  *guestPlacementPlan
+}
+
+// guestReadingMemoEntries bounds each list of a guestReadingMemo: a hook
+// reads a few guest inputs (the call, its twins), and an older entry gives
+// way to a newer one.
+const guestReadingMemoEntries = 4
+
+// simpleCommands is actionfacts.SimpleCommands(input, facts).
+func (memo *guestReadingMemo) simpleCommands(input actionfacts.Input, facts actionfacts.Facts) []actionfacts.SimpleCommand {
+	if memo == nil {
+		return actionfacts.SimpleCommands(input, facts)
+	}
+	memo.mu.Lock()
+	for _, entry := range memo.splits {
+		if reflect.DeepEqual(entry.input, input) && reflect.DeepEqual(entry.facts, facts) {
+			memo.mu.Unlock()
+			return slices.Clone(entry.simples)
+		}
+	}
+	memo.mu.Unlock()
+	simples := actionfacts.SimpleCommandsWith(input, facts, &memo.relative)
+	memo.mu.Lock()
+	if len(memo.splits) == guestReadingMemoEntries {
+		memo.splits = slices.Delete(memo.splits, 0, 1)
+	}
+	memo.splits = append(memo.splits, guestSplitEntry{input: input, facts: facts, simples: slices.Clone(simples)})
+	memo.mu.Unlock()
+	return simples
+}
+
+// plan is newGuestPlacementPlan(input, facts) over the memo's splits.
+func (memo *guestReadingMemo) plan(input actionfacts.Input, facts actionfacts.Facts) *guestPlacementPlan {
+	if memo == nil {
+		return newGuestPlacementPlan(input, facts, nil)
+	}
+	memo.mu.Lock()
+	for _, entry := range memo.plans {
+		if reflect.DeepEqual(entry.input, input) && reflect.DeepEqual(entry.facts, facts) {
+			memo.mu.Unlock()
+			return entry.plan
+		}
+	}
+	memo.mu.Unlock()
+	plan := newGuestPlacementPlan(input, facts, memo.simpleCommands)
+	memo.mu.Lock()
+	if len(memo.plans) == guestReadingMemoEntries {
+		memo.plans = slices.Delete(memo.plans, 0, 1)
+	}
+	memo.plans = append(memo.plans, guestPlanEntry{input: input, facts: facts, plan: plan})
+	memo.mu.Unlock()
+	return plan
 }
 
 // guestReadingFirst reports a command text whose reading in another folder
@@ -552,7 +749,7 @@ func withSandboxGuestSplitGapEffects(ctx context.Context, request trustedActionR
 		return findings
 	}
 	guestFacts := actionfacts.Analyze(guest)
-	if !slices.ContainsFunc(actionfacts.SimpleCommands(guest, guestFacts), splitGapUnreadPart) {
+	if !slices.ContainsFunc(request.guestMemo.simpleCommands(guest, guestFacts), splitGapUnreadPart) {
 		return findings
 	}
 	// The twins are judged in full (dispatchTrustedAction), in a folder of
@@ -571,17 +768,6 @@ func withSandboxGuestSplitGapEffects(ctx context.Context, request trustedActionR
 // a guessed login.
 func guestPlacementSkips(simple actionfacts.SimpleCommand) bool {
 	return simple.EvaluationFailure != "" || simple.OpaqueValueAssignment || simple.LiteralOutputOnly || simple.LoginGuess
-}
-
-// guestChangesDirectory reports, lexically, a cd, pushd or popd command
-// text.
-func guestChangesDirectory(text, home string) bool {
-	call, ok := guestCall(text)
-	if !ok {
-		return false
-	}
-	program, static := hookpaths.StaticWord(call.Args[0], home)
-	return static && (program == "cd" || program == "pushd" || program == "popd")
 }
 
 // guestCallRunsUnreadCommand reports, lexically, a script with a command the
@@ -894,13 +1080,22 @@ func guestNodeChangesDirectory(node syntax.Node, home string, moving map[string]
 
 // guestCall parses a command text that is one simple command.
 func guestCall(text string) (*syntax.CallExpr, bool) {
-	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(text), "")
+	parser := guestParsers.Get().(*syntax.Parser)
+	file, err := parser.Parse(strings.NewReader(text), "")
+	// Parse returned, so the parser is done working and may be reused
+	// (syntax.Parser.Parse); a panic does not return it.
+	guestParsers.Put(parser)
 	if err != nil || len(file.Stmts) != 1 {
 		return nil, false
 	}
 	call, ok := file.Stmts[0].Cmd.(*syntax.CallExpr)
 	return call, ok && len(call.Args) != 0
 }
+
+// guestParsers keeps Bash parsers for guestCall: a parser allocates two 1 KB
+// buffers, and the guest placement reads every command text of a call
+// (substrate-1 GAP-0923).
+var guestParsers = sync.Pool{New: func() any { return syntax.NewParser(syntax.Variant(syntax.LangBash)) }}
 
 // guestCDTargets returns, lexically, the directories a cd or pushd command
 // text moves to from each of bases: a static operand joined to each base,
@@ -923,6 +1118,11 @@ func guestCDOperand(text, home string) (string, bool) {
 	if !ok {
 		return "", false
 	}
+	return guestCallCDOperand(call, home)
+}
+
+// guestCallCDOperand is guestCDOperand of a parsed call.
+func guestCallCDOperand(call *syntax.CallExpr, home string) (string, bool) {
 	words := guestCDWords(call.Args, home)
 	if words == nil {
 		return "", false
@@ -940,6 +1140,44 @@ func guestCDOperand(text, home string) (string, bool) {
 		break
 	}
 	return operand, operand != "-"
+}
+
+// guestCDReading is what the lexical cd readers make of one command text:
+// changes reports a cd, pushd or popd command; moves a cd or pushd with a
+// static operand (guestCDOperand), "" for a bare cd.
+type guestCDReading struct {
+	changes, moves bool
+	operand        string
+}
+
+// guestCDMemo reads each command text of one placement once
+// (guestCDReading): an 8 KB call repeats a few texts hundreds of times ($C;
+// f0() { :; }; $C; f1() { :; }; ...), and parsing each again for the
+// simples pass and for every script call (guestKnownFolders) made some 6 MB
+// a hook on such a call, 15-25 ms over rel with the collections it caused
+// (substrate-1 GAP-1028). The readings are lexical: a text reads the same
+// in one home every time.
+type guestCDMemo struct {
+	home  string
+	texts map[string]guestCDReading
+}
+
+func newGuestCDMemo(home string) *guestCDMemo {
+	return &guestCDMemo{home: home, texts: map[string]guestCDReading{}}
+}
+
+func (memo *guestCDMemo) reading(text string) guestCDReading {
+	if reading, ok := memo.texts[text]; ok {
+		return reading
+	}
+	var reading guestCDReading
+	if call, ok := guestCall(text); ok {
+		program, static := hookpaths.StaticWord(call.Args[0], memo.home)
+		reading.changes = static && (program == "cd" || program == "pushd" || program == "popd")
+		reading.operand, reading.moves = guestCallCDOperand(call, memo.home)
+	}
+	memo.texts[text] = reading
+	return reading
 }
 
 // guestCDWords returns the words of a cd or pushd call from its program word
@@ -1049,7 +1287,7 @@ func guestCDJoin(operand string, bases []string, home string) []string {
 // the start. The walk runs again while a round knows a folder earlier, at
 // most four rounds; past them every folder is known from the start.
 func guestKnownFolders(calls []guestScriptCall, dirs, targets []string, followed map[string]int, cwd, home string, cdpath int,
-	keep func([]string, string) []string, known map[string]int) []string {
+	keep func([]string, string) []string, known map[string]int, cdMemo *guestCDMemo) []string {
 	listed := slices.Concat(dirs, targets)
 	for _, dir := range listed {
 		if cdpath < 0 || dir == path.Clean(cwd) {
@@ -1066,8 +1304,8 @@ func guestKnownFolders(calls []guestScriptCall, dirs, targets []string, followed
 		if call.dynamic && dynamic < 0 {
 			dynamic = call.start
 		}
-		if operand, ok := guestCDOperand(call.text, home); ok {
-			moves = append(moves, move{operand, at})
+		if reading := cdMemo.reading(call.text); reading.moves {
+			moves = append(moves, move{reading.operand, at})
 		}
 	}
 	grown := targets
@@ -1309,24 +1547,84 @@ func guestScriptCallsWork(command, home string, work *int) (calls []guestScriptC
 	}
 	open := make([]bool, len(bodies))
 	pass := make([]int, len(bodies))
+	// A name of name bytes only is counted from one pass over the text
+	// (guestWordCounts), not one search of the text per function (substrate-1
+	// GAP-1028).
+	var words map[string]int
 	for at, body := range bodies {
 		visits++
-		open[at] = guestWordCount(command, body.name) != 1+len(sites[body.name]) ||
+		count := 0
+		if guestAllNameBytes(body.name) {
+			if words == nil {
+				words = guestWordCounts(command)
+			}
+			count = words[body.name]
+		} else {
+			count = guestWordCount(command, body.name)
+		}
+		open[at] = count != 1+len(sites[body.name]) ||
 			unreadInBody || len(unread) != 0 && unread[len(unread)-1] >= body.start
 		pass[at] = -1
 		if before, _ := slices.BinarySearch(unread, body.start); before != 0 {
 			pass[at] = reach[before-1]
 		}
 	}
+	// holders lists, in declaration order, the function bodies that hold
+	// pos. Bodies nest (one is inside another or apart from it), so they are
+	// the enclosing chain of the last body that starts at or before pos: a
+	// binary search and a walk up the chain, not a pass over every body for
+	// every call (substrate-1 GAP-1028). Spans that do not nest fall back to
+	// the pass over every body.
+	order := make([]int, len(bodies))
+	for at := range order {
+		order[at] = at
+	}
+	slices.SortStableFunc(order, func(a, b int) int { return cmp.Compare(bodies[a].start, bodies[b].start) })
+	parent := make([]int, len(bodies))
+	nested := true
+	var stack []int
+	for _, at := range order {
+		for len(stack) != 0 && bodies[stack[len(stack)-1]].end <= bodies[at].start {
+			stack = stack[:len(stack)-1]
+		}
+		parent[at] = -1
+		if len(stack) != 0 {
+			parent[at] = stack[len(stack)-1]
+			nested = nested && bodies[at].end <= bodies[parent[at]].end
+		}
+		stack = append(stack, at)
+	}
+	holders := func(pos int) []int {
+		var held []int
+		if !nested {
+			for at, body := range bodies {
+				visits++
+				if pos >= body.start && pos < body.end {
+					held = append(held, at)
+				}
+			}
+			return held
+		}
+		visits++
+		n, _ := slices.BinarySearchFunc(order, pos+1, func(at, target int) int { return cmp.Compare(bodies[at].start, target) })
+		if n == 0 {
+			return nil
+		}
+		for at := order[n-1]; at >= 0; at = parent[at] {
+			visits++
+			if pos < bodies[at].end {
+				held = append(held, at)
+			}
+		}
+		slices.Sort(held)
+		return held
+	}
 	runs := map[int]int{}
 	var place func(pos, depth int) int
 	place = func(pos, depth int) int {
 		out := max(pos, loopEnd(pos))
-		for at, body := range bodies {
-			visits++
-			if pos < body.start || pos >= body.end {
-				continue
-			}
+		for _, at := range holders(pos) {
+			body := bodies[at]
 			from, ok := runs[at]
 			if !ok {
 				from = len(command)
@@ -1354,11 +1652,8 @@ func guestScriptCallsWork(command, home string, work *int) (calls []guestScriptC
 	var early func(pos, depth int) int
 	early = func(pos, depth int) int {
 		out := pos
-		for at, body := range bodies {
-			visits++
-			if pos < body.start || pos >= body.end {
-				continue
-			}
+		for _, at := range holders(pos) {
+			body := bodies[at]
 			from, ok := firsts[at]
 			if !ok {
 				from = body.start
@@ -1383,6 +1678,40 @@ func guestScriptCallsWork(command, home string, work *int) (calls []guestScriptC
 		calls[at].at = place(calls[at].at, 0)
 	}
 	return calls, cdpath
+}
+
+// guestWordCounts counts each word of text, a longest run of name bytes
+// (guestNameByte): for a name of name bytes only, words[name] is
+// guestWordCount(text, name), as a place the name stands with no name byte
+// next to it is exactly such a run.
+func guestWordCounts(text string) map[string]int {
+	words := map[string]int{}
+	for at := 0; at < len(text); {
+		if !guestNameByte(text[at]) {
+			at++
+			continue
+		}
+		end := at + 1
+		for end < len(text) && guestNameByte(text[end]) {
+			end++
+		}
+		words[text[at:end]]++
+		at = end
+	}
+	return words
+}
+
+// guestAllNameBytes reports a name of one or more name bytes only.
+func guestAllNameBytes(name string) bool {
+	if name == "" {
+		return false
+	}
+	for index := 0; index < len(name); index++ {
+		if !guestNameByte(name[index]) {
+			return false
+		}
+	}
+	return true
 }
 
 // guestWordCount counts the places name stands in text as a whole word, with

@@ -28,7 +28,7 @@ func TestTrustedDispatchMemoKeyCoversEveryField(t *testing.T) {
 		"guestClaimHomePlaces": "value", "guestHomePlaces": "value",
 		"budget": "identity", "capFloor": "identity", "generation": "identity", "targetMemo": "identity",
 		"windowsTwinHosts": "identity", "windowsPowerShellReading": "identity",
-		"simpleMemo":         "cache",
+		"simpleMemo": "cache", "guestMemo": "cache",
 		"overBudgetOmission": "out", "unresolvedTarget": "out", "resolvedTarget": "out",
 		"nonWriteMention": "out", "unprovenTarget": "out", "unknownMention": "out",
 		"record": "recorder", "recordTelemetry": "recorder", "recordEffectShadow": "recorder",
