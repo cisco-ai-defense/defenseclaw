@@ -19,6 +19,9 @@ import (
 // captures with a much shorter wait (CaptureWait).
 const lockWait = 5 * time.Second
 
+// lockName serializes writers (the CLI and the gateway or daemon).
+const lockName = "vault.lock"
+
 func lockDir(dir string, wait time.Duration) (func(), error) {
 	path := filepath.Join(dir, lockName)
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW, 0o600)

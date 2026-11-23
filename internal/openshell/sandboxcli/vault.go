@@ -343,16 +343,24 @@ func (a *App) vaultGrantsCurrent(sb *sandboxapi.Sandbox) error {
 	if rec == nil || len(rec.Vault) == 0 {
 		return nil
 	}
+	// Metadata only: this check never opens a value, so it needs no key.
 	st := a.vault()
 	for _, n := range rec.Vault {
-		e, _, err := st.Resolve(n)
-		changed := err == nil && rec.VaultVersions[n] != "" && e.UpdatedAt.UTC().Format(time.RFC3339Nano) != rec.VaultVersions[n]
-		if err == nil && !changed {
-			continue
-		}
-		why := "it was replaced, rebound or renamed in your vault"
-		if err != nil {
+		e, err := st.Get(n)
+		var why string
+		switch {
+		case errors.Is(err, vault.ErrNotFound):
+			return fmt.Errorf("%s was created with the vault secret %s, which is no longer in your vault; "+
+				"the sandbox would keep the old value, so it is not started: delete it (`%s delete %s`) and start a new one without that secret, or add it again first",
+				sb.Name, n, CommandName, sb.Name)
+		case err != nil:
 			why = err.Error()
+		case e.Status() != vault.StatusReady:
+			why = "its status is now " + string(e.Status())
+		case rec.VaultVersions[n] != "" && e.UpdatedAt.UTC().Format(time.RFC3339Nano) != rec.VaultVersions[n]:
+			why = "it was replaced, rebound or renamed in your vault"
+		default:
+			continue
 		}
 		return fmt.Errorf("%s was created with the vault secret %s, which is no longer the same (%s); "+
 			"the sandbox would keep the old value, so it is not started: delete it (`%s delete %s`) and start a new one with --vault %s",
