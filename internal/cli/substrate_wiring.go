@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"reflect"
 	"strings"
@@ -139,10 +140,15 @@ func substrateEnsurer(ctl *controller.Controller) gateway.SubstratePolicyEnsurer
 
 // runtimeSkillScanner is the gateway's skill folder scan (GAP-0039): A9's
 // runtime scanner with the host admission rules (attest.RuntimeScanner).
-type runtimeSkillScanner struct{ rt *attest.RuntimeScanner }
+type runtimeSkillScanner struct {
+	rt *attest.RuntimeScanner
+	// remote is the scanner sidecar client, nil without the sidecar folder.
+	remote *scanner.RemoteScanner
+}
 
 func newRuntimeSkillScanner(cfg *config.Config) runtimeSkillScanner {
 	rt := attest.NewRuntimeScanner(cfg)
+	var remote *scanner.RemoteScanner
 	// GAP-0477: the gateway image has no Python, so skill-scanner runs in the
 	// chart's scanner sidecar. Its shared folder exists only when the chart
 	// renders the sidecar; without it the scan is unavailable as in rel and
@@ -151,9 +157,37 @@ func newRuntimeSkillScanner(cfg *config.Config) runtimeSkillScanner {
 		if rs, err := scanner.NewRemoteSkillScanner(cfg.Scanners.SkillScanner, 0); err == nil {
 			rs.Dir = substrateScanDir
 			rt.Skill = rs
+			remote = rs
 		}
 	}
-	return runtimeSkillScanner{rt: rt}
+	return runtimeSkillScanner{rt: rt, remote: remote}
+}
+
+// checkSidecar is the missing-tool check (GAP-0477): with the chart's
+// scanner sidecar, serve start asks it whether skill-scanner is ready and
+// says so once. The sidecar can start after the gateway, so it asks tries
+// times, every apart, before it reports the scanner missing; new skills then
+// follow the fail mode (the doctor row substrate.skill_scan shows the same).
+func (s runtimeSkillScanner) checkSidecar(ctx context.Context, w io.Writer, tries int, every time.Duration) scanner.RemoteHealth {
+	if s.remote == nil {
+		return scanner.RemoteHealth{}
+	}
+	var h scanner.RemoteHealth
+	for i := 0; i < tries; i++ {
+		if h = s.remote.Health(ctx); h.Ready {
+			fmt.Fprintf(w, "substrate: skill scanner ready (skill-scanner %s)\n", h.Version)
+			return h
+		}
+		if i+1 < tries {
+			select {
+			case <-ctx.Done():
+				i = tries
+			case <-time.After(every):
+			}
+		}
+	}
+	fmt.Fprintf(w, "substrate: skill scanner is not running (%s); new skills follow the hook fail mode. Check: kubectl logs deploy/defenseclaw-gateway -c skill-scanner\n", h.Error)
+	return h
 }
 
 // substrateScanDir is the scanner sidecar's shared folder (a var for tests).

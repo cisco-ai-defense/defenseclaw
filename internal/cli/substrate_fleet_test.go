@@ -93,6 +93,8 @@ func fakeKubectl(t *testing.T, fail error) {
 		// the Service proxy (GAP-0262): healthy, so no sign_in_server member.
 		case joined == "get --raw /api/v1/namespaces/defenseclaw-system/services/https:defenseclaw-admin:443/proxy/api/v1/substrate/info":
 			return []byte(`{"sign_in":"oidc","issuer":"https://kc.cluster-a.example.test/realms/dc","attach":true}`), nil
+		case joined == "get pods -n defenseclaw-system -l app.kubernetes.io/component=gateway -o json":
+			return []byte(`{"items":[{"spec":{"containers":[{"name":"gateway","image":"g:1"},{"name":"skill-scanner","image":"ghcr.io/x/defenseclaw-scanner:1.0.11"}]},"status":{"containerStatuses":[{"name":"gateway","ready":true},{"name":"skill-scanner","ready":true}]}}]}`), nil
 		case strings.HasPrefix(joined, "get deployments -n ate-system"):
 			return []byte(`{"items":[{"metadata":{"name":"ate-api-server"},"spec":{"template":{"spec":{"containers":[{"name":"api","image":"ghcr.io/agent-substrate/substrate:v1.0.0"}]}}}}]}`), nil
 		}

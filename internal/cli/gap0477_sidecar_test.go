@@ -9,6 +9,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -91,4 +92,52 @@ func waitSock(t *testing.T, dir string) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	t.Fatal("worker did not start")
+}
+
+// The missing-tool check: serve start reports a sidecar that is down, and
+// the skill-scanner version once it answers ready.
+func TestSkillScannerSidecarHealthCheck(t *testing.T) {
+	dir := gap0477ScanDir(t)
+	var out strings.Builder
+	rs := newRuntimeSkillScanner(&config.Config{})
+	if h := rs.checkSidecar(context.Background(), &out, 2, time.Millisecond); h.Ready || !strings.Contains(out.String(), "skill scanner is not running") {
+		t.Fatalf("sidecar down: health=%+v log=%q", h, out.String())
+	}
+	w := &scanworker.Worker{Dir: dir, Version: func(context.Context) (string, error) { return "2.0.11", nil }}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = w.Serve(ctx) }()
+	waitSock(t, dir)
+	out.Reset()
+	if h := rs.checkSidecar(context.Background(), &out, 2, time.Millisecond); !h.Ready || !strings.Contains(out.String(), "skill-scanner 2.0.11") {
+		t.Fatalf("sidecar up: health=%+v log=%q", h, out.String())
+	}
+	if h := (runtimeSkillScanner{}).checkSidecar(context.Background(), &out, 1, 0); h.Ready || h.Error != "" {
+		t.Fatalf("no sidecar: health=%+v", h)
+	}
+}
+
+// The doctor row substrate.skill_scan reads the gateway pods' sidecar.
+func TestDoctorSkillScanRow(t *testing.T) {
+	pod := func(ready string) string {
+		return `{"spec":{"containers":[{"name":"gateway","image":"g:1"},{"name":"skill-scanner","image":"r/defenseclaw-scanner:1.0.11"}]},"status":{"containerStatuses":[{"name":"skill-scanner","ready":` + ready + `}]}}`
+	}
+	for _, tc := range []struct{ name, pods, status, want string }{
+		{"ready", `[` + pod("true") + `]`, doctorOK, "Skill scanner ready (skill-scanner image 1.0.11)."},
+		{"down", `[` + pod("true") + `,` + pod("false") + `]`, doctorFail, "not running on 1 of 2 gateway pods"},
+		{"off", `[{"spec":{"containers":[{"name":"gateway","image":"g:1"}]}}]`, doctorSkip, "substrate.skills.scan.enabled: false"},
+		{"nopods", `[]`, doctorSkip, "no gateway pod"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			old := substrateKubectl
+			t.Cleanup(func() { substrateKubectl = old })
+			substrateKubectl = func(_ context.Context, _ *substrateClusterFlags, args ...string) ([]byte, error) {
+				return []byte(`{"items":` + tc.pods + `}`), nil
+			}
+			c := doctorSkillScan(context.Background(), &substrateClusterFlags{namespace: "defenseclaw-system"})
+			if c.ID != "substrate.skill_scan" || c.Status != tc.status || !strings.Contains(c.Summary, tc.want) {
+				t.Fatalf("row %+v, want %s %q", c, tc.status, tc.want)
+			}
+		})
+	}
 }
