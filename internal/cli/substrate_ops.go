@@ -406,7 +406,7 @@ func runSubstrateRecover(cmd *cobra.Command, com *substrateCommon, ref string, y
 			fmt.Fprintf(cmd.OutOrStdout(), "%s/%s is running and this cluster keeps no relay certificate record; nothing changed.\n", a.Atespace, a.Name)
 			return nil
 		}
-		fmt.Fprintf(cmd.OutOrStdout(), "%s/%s: its relay certificate record is cleared. The relay gets a new certificate at the next connect.\n", a.Atespace, a.Name)
+		fmt.Fprintf(cmd.OutOrStdout(), "%s/%s: its relay certificate record is cleared. The relay asks for a new certificate when a connect refuses its old one, so the first connect can still fail; connect again, and if that fails too, wait a minute.\n", a.Atespace, a.Name)
 		return nil
 	case errors.As(err, &ae) && ae.NotImplemented():
 		return substrateFail(fmt.Errorf("this cluster cannot recover agents yet; ask your administrator to upgrade DefenseClaw"))

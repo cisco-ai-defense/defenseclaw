@@ -137,6 +137,11 @@ func (a *APIServer) serveSubstrateRelayCert(st *substrateState, w http.ResponseW
 		if cerr != nil {
 			extra["record"] = "unavailable"
 		}
+		if got.Retry {
+			// The relay asked again with the same proof: the reply to its
+			// renewal was lost (GAP-0958).
+			extra["retry"] = true
+		}
 		a.substrateRelayCertAudit(st, r, "INFO", "relay serving certificate issued for "+actor.Atespace+"/"+actor.Name,
 			"substrate.relay.cert", row, extra)
 	case renewal && refuse:
@@ -192,29 +197,50 @@ func (st *substrateState) relayCertCADropped(ctx context.Context, atespace, uid 
 }
 
 // relayCertLive checks the certificate a relay serves at attach against
-// the leader's record (GAP-0928): only the live one, not any certificate
-// the CA signed for the UID. With no live record (recover's mark, or none)
-// refuse takes none and flag takes the CA's word; the refused relay asks
-// for a new certificate at its next handshake (relay CertSource.Rejected).
+// the leader's record (GAP-0928). The live one passes, and the one its
+// last renewal replaced until the relay presents the new one (GAP-0958: a
+// lost renewal reply). Under refuse nothing else passes: the refused relay
+// asks for a new certificate at its next handshake (relay
+// CertSource.Rejected). Under flag the CA's word is enough, as it is when
+// flag signs a second certificate (GAP-0959): any certificate the CA
+// signed for the actor passes, with a HIGH audit row when it is not the
+// live one.
 func (st *substrateState) relayCertLive(ctx context.Context, reg registry.Registration, leaf *x509.Certificate) error {
 	if st.cfg.RelayCerts == nil {
 		return nil
 	}
 	refuse := st.cfg.relayCertRefuse()
+	serial := leaf.SerialNumber.Text(16)
 	live, ok, err := st.cfg.RelayCerts.LiveRelayCert(ctx, reg.Atespace, reg.UID)
+	why := ""
 	switch {
 	case err != nil:
 		if refuse {
 			return fmt.Errorf("relay certificate record: %w", err)
 		}
 		return nil
-	case ok && !live.Cleared:
-		if live.Serial != leaf.SerialNumber.Text(16) {
-			return errSubstrateRelayCertNotLive
+	case ok && !live.Cleared && live.Serial == serial:
+		if live.Prev != "" {
+			// The relay presents the new one: the previous one is done. A
+			// failure only leaves it taken until it expires.
+			_, _ = st.cfg.RelayCerts.ClaimRelayCert(ctx, registry.RelayCertClaim{Atespace: reg.Atespace, UID: reg.UID, Seen: serial})
 		}
+		return nil
+	case ok && !live.Cleared && live.Prev == serial && st.clock().Before(live.PrevUntil):
 		return nil
 	case refuse:
 		return errSubstrateRelayCertNotLive
+	case !ok:
+		why = "no live record"
+	case live.Cleared:
+		why = "cleared by recover"
+	default:
+		why = "not the live serial"
+	}
+	if st.audit != nil {
+		st.audit(ctx, "HIGH", "attach to "+reg.Atespace+"/"+reg.Name+" takes a relay certificate that is not the actor's live one (substrate.relay_cert_reissue flag)",
+			map[string]any{"event": "substrate.relay.cert_not_live", "atespace": reg.Atespace, "actor": reg.Name, "actor_uid": reg.UID,
+				"serial": serial, "live_serial": live.Serial, "record": why, "mode": "flag"})
 	}
 	return nil
 }
@@ -275,8 +301,11 @@ func (st *substrateState) clock() time.Time {
 
 // substrateRelayDial is how attach reaches one actor's relay under
 // substrate.relay_tls (B3.5): TLS verified against the relay CA and the
-// actor's UID, and only its live certificate (GAP-0928), when its signed kit serves TLS, plain HTTP with an audit row
-// for an older template in auto, or a refusal reason.
+// actor's UID, and under refuse only its live certificate (GAP-0928; under
+// flag any certificate the CA signed for the UID, with a HIGH row when it
+// is not the live one, GAP-0959), when its signed kit serves TLS, plain
+// HTTP with an audit row for an older template in auto, or a refusal
+// reason.
 func (a *APIServer) substrateRelayDial(ctx context.Context, st *substrateState, reg registry.Registration) (func(context.Context) (net.Conn, error), int, string) {
 	space, name := reg.Atespace, reg.Name
 	plain := func(ctx context.Context) (net.Conn, error) { return st.cfg.Relays.DialRelay(ctx, space, name) }

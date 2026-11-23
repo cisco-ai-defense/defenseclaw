@@ -46,6 +46,13 @@ type RelayCert struct {
 	// live, so the next request without proof is a first certificate, and
 	// no certificate issued before it renews. It lasts one certificate life.
 	Cleared bool `json:"cleared,omitempty"`
+	// Prev is the serial the last renewal replaced, taken until PrevUntil
+	// or until the relay presents Serial (GAP-0958): a renewal whose reply
+	// was lost (a timeout, a dropped connection, a leader failover after
+	// the write) is asked again with proof of Prev and gets the same
+	// answer, and attach takes Prev meanwhile. Recover's mark has none.
+	Prev      string    `json:"prev,omitempty"`
+	PrevUntil time.Time `json:"prev_until,omitzero"`
 }
 
 // relayCertClearedFor is how long recover's mark lasts: every certificate
@@ -58,8 +65,11 @@ const relayCertClearedFor = relaytls.CertTTL + 10*time.Minute
 // certificate). With Expect, a renewal, it is a compare-and-swap on the
 // live serial (GAP-0928): recorded only while Expect is the live
 // certificate, or when the actor has no record at all, so a proof of any
-// other certificate of the actor is a second certificate. With neither it
-// is recorded only when the actor has no live certificate.
+// other certificate of the actor is a second certificate. Expect is also
+// taken for the serial the live one replaced, until that one expires or
+// the relay presents the live one (GAP-0958), so a renewal whose reply was
+// lost is asked again. With neither it is recorded only when the actor has
+// no live certificate.
 type RelayCertClaim struct {
 	Atespace string    `json:"atespace"`
 	UID      string    `json:"uid"`
@@ -67,15 +77,21 @@ type RelayCertClaim struct {
 	Replace  bool      `json:"replace,omitempty"`
 	// Expect is the serial of the certificate a renewal proved.
 	Expect string `json:"expect,omitempty"`
+	// Seen is the serial attach found the relay serving; when it is the
+	// live one, the previous one is no longer taken (GAP-0958). A Seen
+	// claim records nothing else.
+	Seen string `json:"seen,omitempty"`
 	// Now is the gateway's clock (zero: the leader's).
 	Now time.Time `json:"now,omitzero"`
 }
 
 // RelayCertClaimed is a claim's answer: Set when Cert is now the live one;
-// Prev is the live certificate the claim found (zero for none).
+// Prev is the live certificate the claim found (zero for none); Retry when
+// the renewal proved the previous serial (a retry after a lost reply).
 type RelayCertClaimed struct {
-	Set  bool      `json:"set"`
-	Prev RelayCert `json:"prev,omitzero"`
+	Set   bool      `json:"set"`
+	Prev  RelayCert `json:"prev,omitzero"`
+	Retry bool      `json:"retry,omitempty"`
 }
 
 // RelayCerts is the leader's record of live relay certificates.
@@ -87,7 +103,8 @@ type RelayCerts interface {
 	// route, an owner or administrator).
 	ClearRelayCert(ctx context.Context, atespace, uid string) error
 	// LiveRelayCert is the actor's unexpired record, the mark included
-	// (ok false for none): attach takes only the live certificate.
+	// (ok false for none): under refuse, attach takes only the live
+	// certificate and, in its grace, the previous one.
 	LiveRelayCert(ctx context.Context, atespace, uid string) (RelayCert, bool, error)
 }
 
@@ -133,6 +150,9 @@ func (s *FileStore) ClaimRelayCert(_ context.Context, c RelayCertClaim) (RelayCe
 	if err != nil {
 		return RelayCertClaimed{}, fmt.Errorf("registry: %w", err)
 	}
+	if c.Seen != "" {
+		return s.relayCertSeen(key, c.Seen)
+	}
 	if c.Cert.Serial == "" || c.Cert.NotAfter.IsZero() {
 		return RelayCertClaimed{}, errors.New("registry: a relay certificate claim names the serial and the expiry")
 	}
@@ -148,26 +168,32 @@ func (s *FileStore) ClaimRelayCert(_ context.Context, c RelayCertClaim) (RelayCe
 	if live {
 		out.Prev = old
 	}
+	if c.Cert.Cleared || c.Cert.Prev != "" {
+		return out, errors.New("registry: a relay certificate claim names only the serial, the expiry and the CA")
+	}
+	rec := c.Cert
 	switch {
 	case c.Replace:
-	case c.Expect != "":
-		if live && (old.Cleared || old.Serial != c.Expect) {
-			return out, nil
-		}
-	case live && !old.Cleared:
+	case c.Expect != "" && live && !old.Cleared && old.Serial == c.Expect:
+		// The renewal of the live one: it stays taken until the relay
+		// presents the new one, or until it expires.
+		rec.Prev, rec.PrevUntil = old.Serial, old.NotAfter
+	case c.Expect != "" && live && !old.Cleared && old.Prev == c.Expect && now.Before(old.PrevUntil):
+		// The same renewal again: its reply was lost. The grace does not
+		// grow with it.
+		rec.Prev, rec.PrevUntil = old.Prev, old.PrevUntil
+		out.Retry = true
+	case live && (c.Expect != "" || !old.Cleared):
 		return out, nil
 	}
-	if c.Cert.Cleared {
-		return out, errors.New("registry: a relay certificate claim cannot be recover's mark")
-	}
-	b, err := json.Marshal(relayCertFile{Key: key, RelayCert: c.Cert})
+	b, err := json.Marshal(relayCertFile{Key: key, RelayCert: rec})
 	if err != nil {
 		return out, err
 	}
 	if err := writeFileAtomic(filepath.Join(s.dir, relayCertDir), fileName(key), b); err != nil {
 		return out, err
 	}
-	s.certs[key] = c.Cert
+	s.certs[key] = rec
 	out.Set = true
 	for k, v := range s.certs {
 		if !now.Before(v.NotAfter) {
@@ -179,7 +205,30 @@ func (s *FileStore) ClaimRelayCert(_ context.Context, c RelayCertClaim) (RelayCe
 	return out, nil
 }
 
-// ClearRelayCert implements RelayCerts.
+// relayCertSeen ends the previous serial's grace once attach finds the
+// relay serving the live one (GAP-0958).
+func (s *FileStore) relayCertSeen(key, serial string) (RelayCertClaimed, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	old, ok := s.certs[key]
+	if !ok || old.Cleared || old.Prev == "" || old.Serial != serial {
+		return RelayCertClaimed{}, nil
+	}
+	old.Prev, old.PrevUntil = "", time.Time{}
+	b, err := json.Marshal(relayCertFile{Key: key, RelayCert: old})
+	if err != nil {
+		return RelayCertClaimed{}, err
+	}
+	if err := writeFileAtomic(filepath.Join(s.dir, relayCertDir), fileName(key), b); err != nil {
+		return RelayCertClaimed{}, err
+	}
+	s.certs[key] = old
+	return RelayCertClaimed{Set: true}, nil
+}
+
+// ClearRelayCert implements RelayCerts. The mark carries no serial, so
+// neither the live certificate nor the previous one renews or is taken
+// at attach.
 func (s *FileStore) ClearRelayCert(_ context.Context, atespace, uid string) error {
 	key, err := sandboxreg.SubstrateKey(atespace, uid)
 	if err != nil {

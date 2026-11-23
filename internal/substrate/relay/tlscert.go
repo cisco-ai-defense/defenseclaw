@@ -63,11 +63,17 @@ type CertSource struct {
 
 	mu  sync.Mutex // one request at a time
 	cur atomic.Pointer[heldCert]
+	// failedAt and failErr are the last request that failed (under mu):
+	// the next one waits rejectEvery (GAP-0960), so handshakes from anyone
+	// who reaches the port cannot make the relay ask on every one.
+	failedAt time.Time
+	failErr  error
 	// rejected is when a refused handshake last made the next one renew.
 	rejected atomic.Int64
 }
 
-// rejectEvery bounds the renewals refused handshakes ask for.
+// rejectEvery bounds the renewals refused handshakes ask for, and is the
+// wait after a request that failed.
 const rejectEvery = time.Minute
 
 // Rejected is a TLS handshake that failed. When the gateway refused the
@@ -133,15 +139,23 @@ func (c *CertSource) Get(ctx context.Context) (*tls.Certificate, error) {
 	if h := c.cur.Load(); h != nil && h.uid == id.UID && c.now().Before(h.renewAt) {
 		return h.cert, nil
 	}
-	h, err := c.fetch(ctx, id.UID)
-	if err != nil {
-		// A renewal that fails keeps a certificate of this actor that has
-		// not expired; a new actor gets none.
+	// A renewal that fails keeps a certificate of this actor that has not
+	// expired; a new actor gets none.
+	keep := func(err error) (*tls.Certificate, error) {
 		if old := c.cur.Load(); old != nil && old.uid == id.UID && c.now().Before(old.notAfter) {
 			return old.cert, nil
 		}
 		return nil, err
 	}
+	if !c.failedAt.IsZero() && c.now().Sub(c.failedAt) < rejectEvery {
+		return keep(c.failErr)
+	}
+	h, err := c.fetch(ctx, id.UID)
+	if err != nil {
+		c.failedAt, c.failErr = c.now(), err
+		return keep(err)
+	}
+	c.failedAt, c.failErr = time.Time{}, nil
 	c.cur.Store(h)
 	return h.cert, nil
 }

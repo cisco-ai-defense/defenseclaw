@@ -39,13 +39,28 @@ func TestGAP0928ClaimCompareAndSwap(t *testing.T) {
 	if !claim(RelayCertClaim{Cert: c("a2"), Expect: "a1"}).Set {
 		t.Fatal("renewal of the live one")
 	}
-	if claim(RelayCertClaim{Cert: c("x2"), Expect: "a1"}).Set {
-		t.Fatal("a renewed certificate renews again")
+	// GAP-0958: the same renewal asked again (its reply was lost) is
+	// taken, without moving the grace on, until the relay serves the new
+	// one; after that the renewed certificate never renews again.
+	if got := claim(RelayCertClaim{Cert: c("x2"), Expect: "a1"}); !got.Set || !got.Retry {
+		t.Fatalf("the renewal asked again: %+v", got)
+	}
+	if live, _, _ := s.LiveRelayCert(ctx, "eng-web", gap0861UID); live.Serial != "x2" || live.Prev != "a1" || !live.PrevUntil.Equal(now.Add(time.Hour)) {
+		t.Fatalf("after the retry: %+v", live)
+	}
+	if !claim(RelayCertClaim{Seen: "x2"}).Set {
+		t.Fatal("attach saw the live one")
+	}
+	if claim(RelayCertClaim{Cert: c("x3"), Expect: "a1"}).Set {
+		t.Fatal("a renewed certificate renews again after the relay served the new one")
+	}
+	if !claim(RelayCertClaim{Cert: c("a2"), Expect: "x2"}).Set {
+		t.Fatal("renewal of the live one after the retry")
 	}
 	if err := s.ClearRelayCert(ctx, "eng-web", gap0861UID); err != nil {
 		t.Fatal(err)
 	}
-	if live, ok, err := s.LiveRelayCert(ctx, "eng-web", gap0861UID); err != nil || !ok || !live.Cleared || live.Serial != "" {
+	if live, ok, err := s.LiveRelayCert(ctx, "eng-web", gap0861UID); err != nil || !ok || !live.Cleared || live.Serial != "" || live.Prev != "" {
 		t.Fatalf("mark: %+v %v %v", live, ok, err)
 	}
 	s2, err := OpenFileStore(dir)
@@ -55,8 +70,10 @@ func TestGAP0928ClaimCompareAndSwap(t *testing.T) {
 	if live, ok, _ := s2.LiveRelayCert(ctx, "eng-web", gap0861UID); !ok || !live.Cleared {
 		t.Fatal("the mark is lost across a restart")
 	}
-	if got := claim(RelayCertClaim{Cert: c("a3"), Expect: "a2"}); got.Set || !got.Prev.Cleared {
-		t.Fatalf("renewal through the mark: %+v", got)
+	for _, e := range []string{"a2", "x2"} {
+		if got := claim(RelayCertClaim{Cert: c("a3"), Expect: e}); got.Set || !got.Prev.Cleared {
+			t.Fatalf("renewal of %s through the mark: %+v", e, got)
+		}
 	}
 	if !claim(RelayCertClaim{Cert: c("r1")}).Set {
 		t.Fatal("first after recover")
