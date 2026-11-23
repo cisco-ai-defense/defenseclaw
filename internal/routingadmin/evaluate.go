@@ -383,6 +383,23 @@ func NamesCaller(c Caller, m config.ProfileMatch) bool {
 	return state == Yes
 }
 
+// HoldFullIDs lists the managed deny budgets of the launcher-keyed scopes
+// (actor, batch): at the retired-key bound they refuse new keys instead of
+// dropping spend (Ledger.SetHoldFull).
+func (p *Policy) HoldFullIDs() []string {
+	if p == nil || !p.Managed {
+		return nil
+	}
+	var ids []string
+	for _, b := range p.budgets {
+		if b.action == config.RoutingBudgetOnExceedDeny &&
+			(b.Scope == config.RoutingBudgetScopeActor || b.Scope == config.RoutingBudgetScopeBatch) {
+			ids = append(ids, b.ID)
+		}
+	}
+	return ids
+}
+
 func (p *Policy) applyBudgets(req Request, ledger *Ledger, now time.Time, v *Verdict) {
 	var strongest *compiledBudget
 	for i := range p.budgets {
@@ -411,8 +428,17 @@ func (p *Policy) applyBudgets(req Request, ledger *Ledger, now time.Time, v *Ver
 		if state == Yes {
 			v.ChargeKeys = append(v.ChargeKeys, key)
 		}
-		if capped(key) && ledger.TakeEvicted(b.ID) {
-			v.warn("budget_keys_evicted:" + b.ID)
+		if capped(key) {
+			evicted, full := ledger.CapState(key)
+			if evicted {
+				v.warn("budget_keys_evicted:" + b.ID)
+			}
+			// Full of keys whose spend is not stored yet: a managed deny
+			// budget refuses a new key rather than drop spend (as when stale).
+			if full && p.Managed && b.action == config.RoutingBudgetOnExceedDeny {
+				v.Deny = &Deny{Code: "budget_unavailable:" + b.ID, Message: "Model use is paused: DefenseClaw is still storing the spend of budget " + b.ID + ". Try again shortly or contact your administrator."}
+				return
+			}
 		}
 		spend, seeded := ledger.Spend(key, b.Period, now)
 		if !seeded {

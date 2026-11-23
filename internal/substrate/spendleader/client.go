@@ -29,44 +29,64 @@ func (c *Client) call(ctx context.Context, method string, in, out any) error {
 }
 
 // SpendPush sends this replica's absolute spend, in chunks of at most
-// maxSpendRows (each row is stored on its own, so a chunk that fails is
-// sent again whole with the next push).
+// maxSpendRows rows and about maxPageBytes (each row is stored on its own,
+// so a chunk that fails is sent again whole with the next push).
 func (c *Client) SpendPush(ctx context.Context, epoch string, rows []routingadmin.SeedRow) error {
-	for start := 0; ; start += maxSpendRows {
-		chunk := rows[start:min(start+maxSpendRows, len(rows))]
-		in := SpendPushRequest{Epoch: epoch, Rows: make([]SpendRow, 0, len(chunk))}
-		for _, r := range chunk {
-			in.Rows = append(in.Rows, SpendRow{Day: r.Day, Key: r.Key, USD: r.USD})
+	for first := true; first || len(rows) > 0; first = false {
+		n, size := 0, 0
+		for ; n < len(rows) && n < maxSpendRows; n++ {
+			if size += rowBytes(rows[n]); n > 0 && size > maxPageBytes {
+				break
+			}
 		}
+		in := SpendPushRequest{Epoch: epoch, Rows: wireRows(rows[:n])}
 		if err := c.call(ctx, MethodSpendPush, in, nil); err != nil {
 			return err
 		}
-		if start+maxSpendRows >= len(rows) {
-			return nil
-		}
+		rows = rows[n:]
 	}
+	return nil
 }
 
-// SpendTotals reads every other epoch's spend since the UTC day of since.
+// SpendTotals reads every other epoch's spend since the UTC day of since,
+// page by page. With keys (non-nil), only those of the capped keys
+// (actor:, batch:) are read, in requests of at most maxKeys keys, so
+// launcher-minted keys never push a read past maxTotalsPages (which fails
+// it: the budgets then read as not loaded, never as partial). An older
+// leader answers everything at once: that answer is used as it is.
 func (c *Client) SpendTotals(ctx context.Context, epoch string, since time.Time, keys []string) ([]routingadmin.SeedRow, error) {
-	in := SpendTotalsRequest{Epoch: epoch, Since: since.UTC().Format(time.DateOnly), Keys: keys}
+	base := SpendTotalsRequest{Epoch: epoch, Since: since.UTC().Format(time.DateOnly), Page: true, ByKey: keys != nil}
 	var rows []routingadmin.SeedRow
-	for page := 0; ; page++ {
-		if page == maxTotalsPages {
-			return nil, errors.New("spendleader: spend answer too large")
+	pages := 0
+	for start := 0; ; start += maxKeys {
+		in := base
+		if keys != nil {
+			in.Keys, in.KeysOnly = keys[start:min(start+maxKeys, len(keys))], start > 0
 		}
-		var out SpendTotalsAnswer
-		if err := c.call(ctx, MethodSpendTotals, in, &out); err != nil {
-			return nil, err
+		for {
+			if pages == maxTotalsPages {
+				return nil, errors.New("spendleader: spend answer too large")
+			}
+			pages++
+			var out SpendTotalsAnswer
+			if err := c.call(ctx, MethodSpendTotals, in, &out); err != nil {
+				return nil, err
+			}
+			for _, r := range out.Rows {
+				rows = append(rows, routingadmin.SeedRow{Day: r.Day, Key: r.Key, USD: r.USD})
+			}
+			if !out.Paged {
+				return rows, nil
+			}
+			if !out.More || len(out.Rows) == 0 {
+				break
+			}
+			last := out.Rows[len(out.Rows)-1]
+			in.AfterDay, in.AfterKey = last.Day, last.Key
 		}
-		for _, r := range out.Rows {
-			rows = append(rows, routingadmin.SeedRow{Day: r.Day, Key: r.Key, USD: r.USD})
-		}
-		if !out.More || len(out.Rows) == 0 {
+		if keys == nil || start+maxKeys >= len(keys) {
 			return rows, nil
 		}
-		last := out.Rows[len(out.Rows)-1]
-		in.AfterDay, in.AfterKey = last.Day, last.Key
 	}
 }
 

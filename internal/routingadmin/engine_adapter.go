@@ -9,6 +9,8 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"maps"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -214,6 +216,7 @@ func (rt *Runtime) SetFleet(fleet SpendCounter, keys FleetKeys) {
 	if rotate {
 		rt.epoch = newEpoch()
 	}
+	next := rt.epoch
 	if fleet != nil {
 		rt.writer = writerOf(fleet)
 	}
@@ -228,7 +231,7 @@ func (rt *Runtime) SetFleet(fleet SpendCounter, keys FleetKeys) {
 			pctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 			var err error
 			if local != nil {
-				err = pushTo(pctx, local, epoch, ledger, p)
+				err = pushTo(pctx, local, ledger, p)
 			}
 			if old != nil && old != fleet && len(p.Main) > 0 {
 				// The old credential's last word, so other devices see it.
@@ -237,7 +240,7 @@ func (rt *Runtime) SetFleet(fleet SpendCounter, keys FleetKeys) {
 			ledger.PushResult(err)
 			cancel()
 		}
-		ledger.TakeLocal()
+		ledger.Rotate(next)
 	}
 	rt.pushMu.Unlock()
 	rt.startSync()
@@ -340,6 +343,10 @@ func (rt *Runtime) For(cfg *config.Config) engine.AdminEvaluator {
 	if len(a.Budgets) > 0 && rt.ledger == nil {
 		rt.ledger = NewLedgerClock(rt.now)
 		rt.ledger.SetStaleAfter(rt.staleAfter)
+		rt.ledger.SetEpoch(rt.epoch)
+	}
+	if rt.ledger != nil {
+		rt.ledger.SetHoldFull(policy.HoldFullIDs())
 	}
 	if rt.feed {
 		ev.ledger = rt.ledger
@@ -435,7 +442,10 @@ func (rt *Runtime) SyncOnce(ctx context.Context) {
 	// This device's earlier processes always count: a fleet answer that
 	// leaves them out (a user with no fleet id, a store that lost data) can
 	// never lower what this device already knows.
-	localRows, localErr := local.Totals(ctx, epoch, since, nil)
+	// The capped keys (actor:, batch:) are read by list: only the ones this
+	// process holds, so launcher-minted keys never make the read too large
+	// (a key new here gets the others' spend at the next sync).
+	localRows, localErr := local.Totals(ctx, epoch, since, ledger.CappedKeys())
 	if fleet != nil {
 		if rows, err = fleet.Totals(ctx, epoch, since, fleetWanted(ledger, keys)); err == nil {
 			ledger.ApplyRemote(ids, maxRows(fromFleet(rows, keys), localRows), rt.clock())
@@ -512,7 +522,7 @@ func (rt *Runtime) push(ctx context.Context) {
 	}
 	var failed error
 	if local != nil {
-		failed = pushTo(ctx, local, epoch, ledger, p)
+		failed = pushTo(ctx, local, ledger, p)
 	}
 	// The retired and zero rows are of capped keys (actor:, batch:), which
 	// have no fleet form: they stay with this device's or cluster's counter.
@@ -524,33 +534,52 @@ func (rt *Runtime) push(ctx context.Context) {
 	ledger.PushResult(failed)
 }
 
-// pushTo stores p with c: the evicted keys' spend first, under its own
-// epoch, then the process epoch with the 0 rows of those keys (sent only
-// once the retired rows are stored, so a lost push counts that spend twice
-// for a sync interval, never not at all).
-func pushTo(ctx context.Context, c SpendCounter, epoch string, ledger *Ledger, p PushSet) error {
+// pushTo stores p with c: the frozen generation of evicted keys' spend
+// first, under its own epoch, then the process epoch. An evicted key's rows
+// there hold what this process still has of it: with the generation stored
+// that is its local spend (0 clears what moved), without it the moved
+// spend too, so a failed push counts it twice for a sync interval at worst,
+// never not at all. The rows under earlier epochs wait for the generation.
+func pushTo(ctx context.Context, c SpendCounter, ledger *Ledger, p PushSet) error {
 	var failed error
+	note := func(err error) {
+		if failed == nil {
+			failed = err
+		}
+	}
 	retiredOK := true
 	if len(p.Retired) > 0 {
-		if err := c.Push(ctx, RetiredEpoch(epoch, p.Gen), p.Retired); err != nil {
-			failed, retiredOK = err, false
+		if err := c.Push(ctx, p.RetiredEpoch, p.Retired); err != nil {
+			note(err)
+			retiredOK = false
 		} else {
 			ledger.RetiredStored(p)
 		}
 	}
-	rows := p.Main
-	if retiredOK && len(p.Zero) > 0 {
-		rows = append(append(make([]SeedRow, 0, len(p.Main)+len(p.Zero)), p.Main...), p.Zero...)
+	rows, tombs := p.Main, p.Unstored
+	if retiredOK {
+		tombs = p.Stored
 	}
-	if len(rows) == 0 {
-		return failed
+	if len(tombs) > 0 {
+		rows = append(append(make([]SeedRow, 0, len(p.Main)+len(tombs)), p.Main...), tombs...)
 	}
-	if err := c.Push(ctx, epoch, rows); err != nil {
-		if failed == nil {
-			failed = err
+	ok := retiredOK
+	if len(rows) > 0 {
+		if err := c.Push(ctx, p.Epoch, rows); err != nil {
+			note(err)
+			ok = false
 		}
-	} else if retiredOK {
-		ledger.ZeroStored(p)
+	}
+	if retiredOK {
+		for _, epoch := range slices.Sorted(maps.Keys(p.Old)) {
+			if err := c.Push(ctx, epoch, p.Old[epoch]); err != nil {
+				note(err)
+				ok = false
+			}
+		}
+	}
+	if ok {
+		ledger.TombsStored(p)
 	}
 	return failed
 }

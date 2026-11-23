@@ -17,7 +17,6 @@ import (
 	"errors"
 	"math"
 	"regexp"
-	"sort"
 	"strings"
 	"time"
 
@@ -41,6 +40,9 @@ const (
 	// maxSpendRows bounds one spend push or answer (Client pushes in chunks
 	// of it and reads answers page by page).
 	maxSpendRows = 20000
+	// maxPageBytes bounds one push chunk or answer page by size too (well
+	// under the leader's 4 MB body, with keys up to maxKeyLen).
+	maxPageBytes = 2 << 20
 	// maxTotalsPages bounds one totals read (pages of maxSpendRows): past it
 	// the read fails, so the budgets read as not loaded, never as partial.
 	maxTotalsPages = 50
@@ -68,9 +70,18 @@ type SpendTotalsRequest struct {
 	Epoch string   `json:"epoch"`
 	Since string   `json:"since"`
 	Keys  []string `json:"keys,omitempty"`
-	// AfterDay and AfterKey ask for the page after that (day, key) row.
+	// Page asks for the answer page by page (More, AfterDay, AfterKey); a
+	// request without it (a 1.0.10 replica) gets every row in one answer,
+	// as before. AfterDay and AfterKey ask for the page after that (day,
+	// key) row.
+	Page     bool   `json:"page,omitempty"`
 	AfterDay string `json:"after_day,omitempty"`
 	AfterKey string `json:"after_key,omitempty"`
+	// ByKey (with Page) keeps, of the capped keys (actor:, batch:), only
+	// those in Keys, and KeysOnly keeps only the keys in Keys: launcher-
+	// minted keys never make a read too large.
+	ByKey    bool `json:"by_key,omitempty"`
+	KeysOnly bool `json:"keys_only,omitempty"`
 }
 
 // SpendTotalsAnswer is the sum of the other epochs per (day, key).
@@ -79,6 +90,9 @@ type SpendTotalsAnswer struct {
 	// More is set when rows past the last one are left (ask with its day
 	// and key as AfterDay and AfterKey).
 	More bool `json:"more,omitempty"`
+	// Paged says the leader answered Page (an older leader answers every
+	// row at once and leaves it unset).
+	Paged bool `json:"paged,omitempty"`
 }
 
 // UsagePushRequest is one replica's absolute hourly usage buckets.
@@ -167,34 +181,39 @@ func (s *Service) spendTotals(ctx context.Context, in SpendTotalsRequest) (Spend
 	if err != nil {
 		return SpendTotalsAnswer{}, bad("since is a UTC date")
 	}
-	rows, err := s.Counter.Totals(ctx, in.Epoch, since, nil)
+	if !in.Page {
+		rows, err := s.Counter.Totals(ctx, in.Epoch, since, nil)
+		if err != nil {
+			return SpendTotalsAnswer{}, err
+		}
+		return SpendTotalsAnswer{Rows: wireRows(rows)}, nil
+	}
+	// One (day, key) row per pair, sorted by the store; a page starts after
+	// the cursor, so a push between pages never repeats a row.
+	rows, err := s.Counter.TotalsPage(ctx, in.Epoch, since, routingadmin.TotalsQuery{
+		AfterDay: in.AfterDay, AfterKey: in.AfterKey, Limit: maxSpendRows + 1,
+		ByKey: in.ByKey, KeysOnly: in.KeysOnly, Keys: in.Keys})
 	if err != nil {
 		return SpendTotalsAnswer{}, err
 	}
-	// One (day, key) row per pair, in that order: a page starts after the
-	// cursor, so a push between pages never repeats a row.
-	sort.Slice(rows, func(i, j int) bool {
-		if rows[i].Day != rows[j].Day {
-			return rows[i].Day < rows[j].Day
+	n, size := 0, 0
+	for ; n < len(rows) && n < maxSpendRows; n++ {
+		if size += rowBytes(rows[n]); n > 0 && size > maxPageBytes {
+			break
 		}
-		return rows[i].Key < rows[j].Key
-	})
-	start := 0
-	if in.AfterDay != "" {
-		start = sort.Search(len(rows), func(i int) bool {
-			return rows[i].Day > in.AfterDay || (rows[i].Day == in.AfterDay && rows[i].Key > in.AfterKey)
-		})
 	}
-	page := rows[start:]
-	out := SpendTotalsAnswer{}
-	if len(page) > maxSpendRows {
-		page, out.More = page[:maxSpendRows], true
+	return SpendTotalsAnswer{Rows: wireRows(rows[:n]), More: n < len(rows), Paged: true}, nil
+}
+
+// rowBytes is about what one row takes in a JSON body.
+func rowBytes(r routingadmin.SeedRow) int { return len(r.Key) + len(r.Day) + 48 }
+
+func wireRows(rows []routingadmin.SeedRow) []SpendRow {
+	out := make([]SpendRow, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, SpendRow{Day: r.Day, Key: r.Key, USD: r.USD})
 	}
-	out.Rows = make([]SpendRow, 0, len(page))
-	for _, r := range page {
-		out.Rows = append(out.Rows, SpendRow{Day: r.Day, Key: r.Key, USD: r.USD})
-	}
-	return out, nil
+	return out
 }
 
 func (s *Service) usagePush(_ context.Context, in UsagePushRequest) (struct{}, error) {

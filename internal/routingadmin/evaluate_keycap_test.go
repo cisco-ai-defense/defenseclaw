@@ -62,12 +62,18 @@ func TestBatchBudgetKeyCapKeepsRecent(t *testing.T) {
 	if spendOf(l, k(0)) != 2 || spendOf(l, k(3)) != 1 {
 		t.Fatalf("recent keys lost: %v %v", spendOf(l, k(0)), spendOf(l, k(3)))
 	}
-	if !l.TakeEvicted("nightly") || l.TakeEvicted("nightly") {
-		t.Fatalf("TakeEvicted must report once")
+	if !takeEvicted(l, "nightly") || takeEvicted(l, "nightly") {
+		t.Fatalf("CapState must report the eviction once")
 	}
-	if l.TakeEvicted("other") {
+	if takeEvicted(l, "other") {
 		t.Fatalf("another budget reported an eviction")
 	}
+}
+
+// takeEvicted is the eviction half of CapState for budget id.
+func takeEvicted(l *Ledger, id string) bool {
+	evicted, _ := l.CapState("batch:" + id + ":x")
+	return evicted
 }
 
 func spendOf(l *Ledger, key string) float64 {

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -131,6 +132,24 @@ func (c *LocalCounter) Push(ctx context.Context, epoch string, rows []SeedRow) e
 // Totals sums every other epoch's spend per (key, day) since since (all
 // keys: the device holds only its own).
 func (c *LocalCounter) Totals(ctx context.Context, epoch string, since time.Time, _ []string) ([]SeedRow, error) {
+	return c.TotalsPage(ctx, epoch, since, TotalsQuery{})
+}
+
+// TotalsQuery selects part of Totals, in (day, key) order (the cluster
+// leader answers a replica's read page by page with it).
+type TotalsQuery struct {
+	// AfterDay and AfterKey start after that (day, key) row; Limit bounds
+	// the rows (0: all).
+	AfterDay, AfterKey string
+	Limit              int
+	// ByKey keeps, of the capped keys (actor:, batch:), only those in Keys;
+	// KeysOnly keeps only the keys in Keys.
+	ByKey, KeysOnly bool
+	Keys            []string
+}
+
+// TotalsPage is Totals restricted by q, sorted by (day, key) in SQL.
+func (c *LocalCounter) TotalsPage(ctx context.Context, epoch string, since time.Time, q TotalsQuery) ([]SeedRow, error) {
 	if c == nil {
 		return nil, errors.New("budget spend: no counter")
 	}
@@ -138,8 +157,32 @@ func (c *LocalCounter) Totals(ctx context.Context, epoch string, since time.Time
 	if err != nil {
 		return nil, err
 	}
-	rows, err := db.QueryContext(ctx, `SELECT day, charge_key, SUM(usd) FROM budget_spend
-		WHERE epoch != ? AND day >= ? GROUP BY day, charge_key`, epoch, since.UTC().Format(time.DateOnly))
+	query := `SELECT day, charge_key, SUM(usd) FROM budget_spend WHERE epoch != ? AND day >= ?`
+	args := []any{epoch, since.UTC().Format(time.DateOnly)}
+	if q.AfterDay != "" {
+		query += ` AND (day > ? OR (day = ? AND charge_key > ?))`
+		args = append(args, q.AfterDay, q.AfterDay, q.AfterKey)
+	}
+	if q.ByKey || q.KeysOnly {
+		in := "0"
+		if len(q.Keys) > 0 {
+			in = "charge_key IN (?" + strings.Repeat(",?", len(q.Keys)-1) + ")"
+			for _, k := range q.Keys {
+				args = append(args, k)
+			}
+		}
+		if q.KeysOnly {
+			query += " AND " + in
+		} else {
+			query += ` AND ((substr(charge_key, 1, 6) != 'actor:' AND substr(charge_key, 1, 6) != 'batch:') OR ` + in + `)`
+		}
+	}
+	query += ` GROUP BY day, charge_key ORDER BY day, charge_key`
+	if q.Limit > 0 {
+		query += ` LIMIT ?`
+		args = append(args, q.Limit)
+	}
+	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
