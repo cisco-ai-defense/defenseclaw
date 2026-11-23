@@ -15,6 +15,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
@@ -116,11 +117,19 @@ type CA struct {
 	cert *x509.Certificate
 	key  *ecdsa.PrivateKey
 	der  []byte
+	// prev is the CAs after the first in ca.pem: trusted, never used to
+	// sign (GAP-0820), so a rotation keeps relays on their old-CA
+	// certificate working for one certificate lifetime.
+	prev []*x509.Certificate
 }
 
+// MaxCABundle bounds the certificates in ca.pem: the signing CA and the
+// ones it replaced.
+const MaxCABundle = 4
+
 // GenerateCA makes a new relay CA (substrate setup). It is valid for ten
-// years; rotating it means a new Secret and a gateway restart, after which
-// relays renew at their next half life.
+// years. To rotate it, put the new CA first in ca.pem and the old one after
+// it, restart the gateway, and drop the old one after CertTTL (GAP-0820).
 func GenerateCA(now time.Time) (certPEM, keyPEM []byte, err error) {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -149,11 +158,28 @@ func GenerateCA(now time.Time) (certPEM, keyPEM []byte, err error) {
 		pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: kder}), nil
 }
 
-// LoadCA parses the relay CA Secret's PEM files.
+// LoadCA parses the relay CA Secret's PEM files. ca.pem holds the signing
+// CA first (its key is ca-key.pem), then any CA it replaced, still trusted
+// for the certificates it signed (GAP-0820).
 func LoadCA(certPEM, keyPEM []byte) (*CA, error) {
-	cb, _ := pem.Decode(certPEM)
+	cb, rest := pem.Decode(certPEM)
 	if cb == nil || cb.Type != "CERTIFICATE" {
 		return nil, errors.New("relay CA: no CERTIFICATE block")
+	}
+	var prev []*x509.Certificate
+	for len(bytes.TrimSpace(rest)) > 0 {
+		var b *pem.Block
+		b, rest = pem.Decode(rest)
+		if b == nil || b.Type != "CERTIFICATE" {
+			return nil, errors.New("relay CA: ca.pem holds something other than CERTIFICATE blocks")
+		}
+		p, err := x509.ParseCertificate(b.Bytes)
+		if err != nil || !p.IsCA {
+			return nil, errors.New("relay CA: a previous certificate in ca.pem is not a CA")
+		}
+		if prev = append(prev, p); len(prev) >= MaxCABundle {
+			return nil, fmt.Errorf("relay CA: ca.pem holds more than %d certificates", MaxCABundle)
+		}
 	}
 	cert, err := x509.ParseCertificate(cb.Bytes)
 	if err != nil {
@@ -170,14 +196,58 @@ func LoadCA(certPEM, keyPEM []byte) (*CA, error) {
 	if !cert.IsCA || !key.PublicKey.Equal(cert.PublicKey) {
 		return nil, errors.New("relay CA: the key does not match a CA certificate")
 	}
-	return &CA{cert: cert, key: key, der: cb.Bytes}, nil
+	return &CA{cert: cert, key: key, der: cb.Bytes, prev: prev}, nil
 }
 
-// Pool is the trust pool a gateway dials relays with.
+// Pool is the trust pool a gateway dials relays with: the signing CA and
+// the previous ones in ca.pem.
 func (c *CA) Pool() *x509.CertPool {
 	p := x509.NewCertPool()
 	p.AddCert(c.cert)
+	for _, prev := range c.prev {
+		p.AddCert(prev)
+	}
 	return p
+}
+
+// RenewalProof signs a new CSR with the key of the certificate it renews
+// (GAP-0819): the gateway then knows the request comes from the holder of
+// the actor's live relay key, not only from a holder of the actor JWT.
+func RenewalProof(cur *tls.Certificate, csrDER []byte) ([]byte, error) {
+	k, ok := cur.PrivateKey.(*ecdsa.PrivateKey)
+	if !ok {
+		return nil, errors.New("renewal proof: the current key is not ECDSA")
+	}
+	sum := sha256.Sum256(csrDER)
+	return ecdsa.SignASN1(rand.Reader, k, sum[:])
+}
+
+// CheckRenewal verifies a renewal proof: curPEM is an unexpired certificate
+// of this CA's pool for uid, and proof is its key's signature of csrDER.
+// It returns the certificate renewed.
+func (c *CA) CheckRenewal(uid string, curPEM, csrDER, proof []byte, now time.Time) (*x509.Certificate, error) {
+	san, err := SANForUID(uid)
+	if err != nil {
+		return nil, err
+	}
+	b, _ := pem.Decode(curPEM)
+	if b == nil || b.Type != "CERTIFICATE" {
+		return nil, errors.New("renewal proof: no current certificate")
+	}
+	cur, err := x509.ParseCertificate(b.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("renewal proof: %w", err)
+	}
+	if _, err := cur.Verify(x509.VerifyOptions{Roots: c.Pool(), DNSName: san, CurrentTime: now,
+		KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}}); err != nil {
+		return nil, fmt.Errorf("renewal proof: %w", err)
+	}
+	pub, ok := cur.PublicKey.(*ecdsa.PublicKey)
+	sum := sha256.Sum256(csrDER)
+	if !ok || !ecdsa.VerifyASN1(pub, sum[:], proof) {
+		return nil, errors.New("renewal proof: the signature is not the current key's")
+	}
+	return cur, nil
 }
 
 // CertPEM is the CA certificate (no key).

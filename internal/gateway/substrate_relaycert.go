@@ -6,11 +6,14 @@ package gateway
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"io"
 	"net"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/substrate/registry"
@@ -58,17 +61,99 @@ func (a *APIServer) serveSubstrateRelayCert(st *substrateState, w http.ResponseW
 		writeSubstrateRefusal(w, http.StatusBadRequest, "bad_csr")
 		return
 	}
-	cert, err := st.cfg.RelayCA.Sign(der, actor.UID, st.clock())
+	now := st.clock()
+	row := map[string]any{"atespace": actor.Atespace, "actor": actor.Name, "actor_uid": actor.UID}
+	// A renewal proves the live key (GAP-0819). A bad proof is refused: it
+	// is never a relay's own renewal.
+	renewal := false
+	if in.Current != "" || in.Proof != "" {
+		proof, perr := base64.StdEncoding.DecodeString(in.Proof)
+		if perr == nil {
+			_, perr = st.cfg.RelayCA.CheckRenewal(actor.UID, []byte(in.Current), der, proof, now)
+		}
+		if perr != nil {
+			a.substrateRelayCertAudit(st, r, "HIGH", "relay certificate renewal refused for "+actor.Atespace+"/"+actor.Name+": the proof of the current key does not hold",
+				"substrate.relay.cert_refused", row, map[string]any{"reason": "renewal_proof_refused"})
+			writeSubstrateRefusal(w, http.StatusForbidden, "renewal_proof_refused")
+			return
+		}
+		renewal = true
+	}
+	cert, err := st.cfg.RelayCA.Sign(der, actor.UID, now)
 	if err != nil {
 		writeSubstrateRefusal(w, http.StatusBadRequest, "bad_csr")
 		return
 	}
-	if st.audit != nil {
-		st.audit(r.Context(), "INFO", "relay serving certificate issued for "+actor.Atespace+"/"+actor.Name,
-			map[string]any{"event": "substrate.relay.cert", "atespace": actor.Atespace, "actor": actor.Name, "actor_uid": actor.UID,
-				"ttl_s": int(relaytls.CertTTL / time.Second)})
+	prev, second := st.relayCerts.issued(actor.UID, cert, now)
+	switch {
+	case second && !renewal:
+		// One live certificate per actor: a second one asked for with the
+		// actor JWT alone is what an attacker holding that JWT would do. A
+		// relay that restarted (crash, suspend and resume) does the same
+		// and cannot prove a key it lost, so it is issued and flagged.
+		a.substrateRelayCertAudit(st, r, "HIGH", "second relay serving certificate issued for "+actor.Atespace+"/"+actor.Name+" without proof of the live key",
+			"substrate.relay.cert_second", row, map[string]any{"previous_serial": prev, "ttl_s": int(relaytls.CertTTL / time.Second)})
+	default:
+		a.substrateRelayCertAudit(st, r, "INFO", "relay serving certificate issued for "+actor.Atespace+"/"+actor.Name,
+			"substrate.relay.cert", row, map[string]any{"renewal": renewal, "ttl_s": int(relaytls.CertTTL / time.Second)})
 	}
 	writeSubstrateJSON(w, http.StatusOK, relay.CertResponse{Cert: string(cert)})
+}
+
+func (a *APIServer) substrateRelayCertAudit(st *substrateState, r *http.Request, severity, summary, event string, row, extra map[string]any) {
+	if st.audit == nil {
+		return
+	}
+	d := map[string]any{"event": event}
+	for k, v := range row {
+		d[k] = v
+	}
+	for k, v := range extra {
+		d[k] = v
+	}
+	st.audit(r.Context(), severity, summary, d)
+}
+
+// substrateRelayCertsLive is the live relay serving certificate per actor
+// UID (serial and expiry) that this replica issued (GAP-0819).
+type substrateRelayCertsLive struct {
+	mu   sync.Mutex
+	live map[string]substrateRelayCertLive
+}
+
+type substrateRelayCertLive struct {
+	serial   string
+	notAfter time.Time
+}
+
+// issued records certPEM as uid's live certificate. second is set when uid
+// already had an unexpired one, whose serial is prev.
+func (c *substrateRelayCertsLive) issued(uid string, certPEM []byte, now time.Time) (prev string, second bool) {
+	b, _ := pem.Decode(certPEM)
+	if b == nil {
+		return "", false
+	}
+	cert, err := x509.ParseCertificate(b.Bytes)
+	if err != nil {
+		return "", false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.live == nil {
+		c.live = map[string]substrateRelayCertLive{}
+	}
+	if old, ok := c.live[uid]; ok && now.Before(old.notAfter) {
+		prev, second = old.serial, true
+	}
+	if len(c.live) >= 4096 {
+		for k, v := range c.live {
+			if !now.Before(v.notAfter) {
+				delete(c.live, k)
+			}
+		}
+	}
+	c.live[uid] = substrateRelayCertLive{serial: cert.SerialNumber.Text(16), notAfter: cert.NotAfter}
+	return prev, second
 }
 
 func (st *substrateState) clock() time.Time {

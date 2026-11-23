@@ -271,6 +271,9 @@ type substrateState struct {
 	// logOut is the gateway log (stderr); now is the clock. Tests set both.
 	logOut io.Writer
 	now    func() time.Time
+	// relayCerts is the live relay serving certificate per actor UID this
+	// replica issued (GAP-0819).
+	relayCerts substrateRelayCertsLive
 
 	// receiptKey signs skill scan receipts (substrate_skills.go);
 	// receiptShared says every replica has it.

@@ -9,6 +9,7 @@ import (
 	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
@@ -31,6 +32,10 @@ const certBudget = 8 * time.Second
 type CertRequest struct {
 	// CSR is the base64 DER certificate request of the relay's key.
 	CSR string `json:"csr"`
+	// Current and Proof prove a renewal (GAP-0819): the PEM certificate
+	// being renewed and its key's base64 signature of the CSR.
+	Current string `json:"current,omitempty"`
+	Proof   string `json:"proof,omitempty"`
 }
 
 // CertResponse carries the signed serving certificate.
@@ -116,7 +121,16 @@ func (c *CertSource) fetch(ctx context.Context, uid string) (*heldCert, error) {
 	if err != nil {
 		return nil, err
 	}
-	body, _ := json.Marshal(CertRequest{CSR: base64.StdEncoding.EncodeToString(csr)})
+	in := CertRequest{CSR: base64.StdEncoding.EncodeToString(csr)}
+	// A renewal proves the live key, so the gateway can tell it from a
+	// second certificate asked for with the actor JWT alone (GAP-0819).
+	if h := c.cur.Load(); h != nil && h.uid == uid && c.now().Before(h.notAfter) && h.cert.Leaf != nil {
+		if proof, err := relaytls.RenewalProof(h.cert, csr); err == nil {
+			in.Current = string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: h.cert.Leaf.Raw}))
+			in.Proof = base64.StdEncoding.EncodeToString(proof)
+		}
+	}
+	body, _ := json.Marshal(in)
 	budget := c.Budget
 	if budget <= 0 {
 		budget = certBudget
