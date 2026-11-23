@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -129,7 +130,9 @@ func TestVaultSealRoundTrip(t *testing.T) {
 	if fileVersionOf(t, raw) != sealedVersion {
 		t.Fatalf("version = %d", fileVersionOf(t, raw))
 	}
-	if fi, _ := os.Stat(s.Path()); fi.Mode().Perm() != 0o600 {
+	// POSIX permission bits only: Windows reports no owner-only mode
+	// (TestFileIsPrivate skips there for the same reason, GAP-2000).
+	if fi, _ := os.Stat(s.Path()); runtime.GOOS != "windows" && fi.Mode().Perm() != 0o600 {
 		t.Fatalf("mode %v", fi.Mode().Perm())
 	}
 	for name, want := range map[string]string{"A": "value-a", "ANTHROPIC_API_KEY": fakeAnthropic()} {
@@ -251,7 +254,9 @@ func TestVaultSealFallsBackToFile(t *testing.T) {
 	if fileVersionOf(t, raw) != fileVersion || !bytes.Contains(raw, []byte("value-a")) {
 		t.Fatal("not a file vault")
 	}
-	if fi, _ := os.Stat(s.Path()); fi.Mode().Perm() != 0o600 {
+	// POSIX permission bits only: Windows reports no owner-only mode
+	// (TestFileIsPrivate skips there for the same reason, GAP-2000).
+	if fi, _ := os.Stat(s.Path()); runtime.GOOS != "windows" && fi.Mode().Perm() != 0o600 {
 		t.Fatalf("mode %v", fi.Mode().Perm())
 	}
 	st, _ := s.Storage()
