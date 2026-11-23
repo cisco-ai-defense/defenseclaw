@@ -20,6 +20,9 @@ import (
 // Code hook in the five tiers; the same shapes on project files stay
 // unblocked.
 func TestGAP1229MoverDefinedInAListLeavesTheShellWhereItMayFiveTiers(t *testing.T) {
+	// boundedLaneEnv, not boundedLaneEnvAnyOS: on a Windows gateway the
+	// and-tail-variable row (the write through $x) is allowed in every tier
+	// while its oracle keeps its verdict, a product gap (rel-1-0-10:GAP-1880).
 	env := boundedLaneEnv(t)
 	const mover = "f() { cd /nonexistent-g1229 || return; }"
 	state, key := "cd ~/.defenseclaw && echo m > config.yaml", "cd ~/.ssh && echo k >> authorized_keys"

@@ -152,7 +152,7 @@ var capFloorShellBodies = []struct {
 // hit before it, after it or around it, or when it sits in the script of a
 // shell (rel-1-0-10:GAP-0312, GAP-0360, GAP-0435, GAP-0381, GAP-0532).
 func TestCapFloorKeepsProvenBlocks(t *testing.T) {
-	env := boundedLaneEnv(t)
+	env := boundedLaneEnvAnyOS(t)
 	writes := []struct{ name, command string }{
 		{"state", boundedShellSeen},
 		{"keys", capFloorCorpusCommand(t, "authorized-keys-command-home-relative")},
@@ -221,7 +221,7 @@ func TestCapFloorKeepsProvenBlocks(t *testing.T) {
 // cap around the write or a shell script it sits in does not change that
 // (GAP-0360, GAP-0532).
 func TestCapFloorObserveKeepsTheStateBlock(t *testing.T) {
-	env := boundedLaneEnv(t)
+	env := boundedLaneEnvAnyOS(t)
 	api := instructionProtectionTestAPIWithPack(t, "claudecode", "observe", "HIGH", "default")
 	commands := map[string]string{"alone": boundedShellSeen}
 	for _, f := range capFloorFillers {
@@ -244,7 +244,7 @@ func TestCapFloorObserveKeepsTheStateBlock(t *testing.T) {
 // (an alert outside strict), a shell script that writes none is not
 // blocked, and reads of a protected folder beside a cap are not blocks.
 func TestCapFloorCapAloneKeepsItsVerdict(t *testing.T) {
-	env := boundedLaneEnv(t)
+	env := boundedLaneEnvAnyOS(t)
 	commands := map[string]string{}
 	for _, f := range capFloorFillers {
 		commands[f.name] = f.build("true")
