@@ -25,6 +25,9 @@ import (
 const (
 	maxSQLFacts      = 16
 	maxSQLFactValues = 4096
+	// maxSQLFactStatements is the statement count an SQL fact can hold: the
+	// SQL reader's own statement bound (actionfacts.maxSQLASTStatements).
+	maxSQLFactStatements = 256
 )
 
 type sizeBound struct {

@@ -56,8 +56,23 @@ func Parse(src string, opts Options) (*Script, error) {
 	}
 	sc.Statements = p.parseStatementList(stopTop)
 	sc.Params = p.topParams
-	sc.Diagnostics = p.diags
+	sc.Diagnostics = append(lexDiagnostics(l, toks), p.diags...)
 	return sc, nil
+}
+
+// lexDiagnostics turns the lexer's errors into parse diagnostics: every
+// unterminated TokError (a string, here-string or block comment that runs to
+// the end of input) and every error the lexer read past. A script with one is not a
+// clean parse, so a reader that trusts an empty Diagnostics never takes a
+// swallowed tail for a full reading.
+func lexDiagnostics(l *lexer, toks []Token) []Diagnostic {
+	out := l.diags
+	for _, t := range toks {
+		if t.Kind == TokError && t.Value == ReasonUnterminated {
+			out = append(out, Diagnostic{span: span{t.Start, t.End}, Reason: t.Value, Detail: "lexer error"})
+		}
+	}
+	return out
 }
 
 // subParse parses nested script text found inside an expandable string ($( )).
@@ -71,9 +86,10 @@ func (p *parser) subParse(src string) ([]Statement, []Diagnostic) {
 	}
 	*p.budget -= len(src)
 	l := newLexer(src)
-	sub := &parser{toks: l.lex(), dialect: p.dialect, depth: p.depth + 1, budget: p.budget, src: src}
+	toks := l.lex()
+	sub := &parser{toks: toks, dialect: p.dialect, depth: p.depth + 1, budget: p.budget, src: src}
 	sts := sub.parseStatementList(stopTop)
-	return sts, sub.diags
+	return sts, append(lexDiagnostics(l, toks), sub.diags...)
 }
 
 // topParams accumulates names from a top-level param() block.
