@@ -7,7 +7,6 @@ import (
 	"context"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 )
@@ -16,9 +15,6 @@ import (
 // the removal fails, and the error names the file once, not once for each
 // pass that read it.
 func TestKiroRemoveNamesABrokenDefaultAgentOnce(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("POSIX command forms; see the Windows rows of the teardown tests")
-	}
 	home := t.TempDir()
 	KiroHomeOverride = home
 	t.Cleanup(func() { KiroHomeOverride = "" })
