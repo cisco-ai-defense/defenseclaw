@@ -536,3 +536,10 @@
 {"id": "sub19-01", "dialect": "", "command": "defenseclaw config set substrate.chain_egress_action alert", "want": "config"}
 {"id": "sub19-02", "dialect": "", "command": "defenseclaw config set substrate.require_attested_templates false", "want": "config"}
 {"id": "sub19-03", "dialect": "", "command": "defenseclaw config get substrate.chain_egress_action", "want": ""}
+{"id": "g1978-u01", "dialect": "", "command": "defenseclaw sandbox vault confirm --yes GITHUB_TOKEN", "want": "unproven"}
+{"id": "g1978-u02", "dialect": "", "command": "defenseclaw sandbox vault confirm GITHUB_TOKEN", "want": "unproven"}
+{"id": "g1978-v01", "dialect": "", "command": "defenseclaw sandbox vault list", "want": ""}
+{"id": "g1978-v02", "dialect": "", "command": "defenseclaw sandbox vault show GITHUB_TOKEN", "want": ""}
+{"id": "g1978-v03", "dialect": "", "command": "defenseclaw sandbox vault replace --value-stdin DEMO_API_TOKEN", "want": ""}
+{"id": "g1978-v04", "dialect": "", "command": "defenseclaw sandbox vault bind DEMO_API_TOKEN --host api.example.com", "want": ""}
+{"id": "g1978-v05", "dialect": "", "command": "defenseclaw sandbox vault rename DEMO_API_TOKEN PAY_TOKEN", "want": ""}

@@ -81,7 +81,7 @@ The numbers come from the 1.0.10 benchmarks ([Guardrail benchmarks](/docs/guardr
 | Rules, `strict` pack | 17 ms and 30 ms | Local CPU only | Precision 0.876, recall 0.221, 0.7% alerted, 0.4% blocked |
 | Command readers | Part of the rules | Local CPU only | On 7,908 benign commands, no false finding in `default` or `permissive` |
 | Secret and PII patterns | Part of the rules | Local CPU only | English privacy pack F1 89.08%, independent PII holdout F1 96.88%, no false findings on either |
-| Decision model, after the rules | 209 ms and 363 ms | About USD 0.115 per 1,000 calls | Recall 0.907, but 25.8% of benign calls alerted. Do not run it as the only layer after the rules. |
+| Decision model, after the rules | 209 ms and 363 ms | About USD 0.115 per 1,000 calls | Recall 0.907, 25.8% of benign calls alerted. With the LLM judge behind it, 4.8%. |
 | Decision model and LLM judge | 834 ms and 2,905 ms | About USD 0.229 per 1,000 calls | Precision 0.728, recall 0.554, 4.8% of benign calls alerted, F1 0.629 |
 | Alignment check, alone | Up to 3 seconds when it asks. A call it asks about takes 580 ms and 1,558 ms. | About USD 0.015 per 1,000 calls | Precision 0.722, recall 0.583, 4.9% alerted, F1 0.645 |
 | Tool-result checks | Part of the rules | Local CPU only. The judge adds model cost when on. | Rules alone: 0.635 recall on AgentDojo results, 0.010 on BIPIA email. With the cascade: 0.973 and 0.913. |

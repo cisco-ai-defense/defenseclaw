@@ -76,11 +76,15 @@ struct SandboxesView: View {
                         sandboxTable
                         if let selected { detail(selected) }
                         asksCard
+                        SandboxVaultCard()
                         activityCard
                     }
                 }
             } else {
                 notReady
+                if SandboxVault.shown(snapshot.status) {
+                    ScrollView { SandboxVaultCard() }
+                }
             }
         }
         .padding(16)

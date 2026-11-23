@@ -66,10 +66,17 @@ func SameEnterpriseHookImageDirFamily(a, b string) bool {
 // hook paths a rendered hook command names (GAP-0751). Callers keep only
 // paths of the family they own and still compare the whole command with the
 // one rendered for that path, so this only proposes candidates.
+//
+// The search folds ASCII letters only, so every offset in the folded copy is
+// the same byte offset in text: strings.ToLower changes the byte length of
+// some letters (U+023A grows from 2 to 3 bytes, U+0130 shrinks to ASCII i),
+// and slicing text with offsets from that copy panicked or lost the path on a
+// non-ASCII folder name (GAP-1859). The image name is ASCII, and Windows does
+// not fold a non-ASCII letter to an ASCII one.
 func EnterpriseHookImagePathsIn(text string) []string {
 	var paths []string
-	lower := strings.ToLower(text)
-	name := strings.ToLower(EnterpriseHookImageName)
+	lower := asciiLowerSameLength(text)
+	name := asciiLowerSameLength(EnterpriseHookImageName)
 	for offset := 0; ; {
 		index := strings.Index(lower[offset:], name)
 		if index < 0 {
@@ -90,4 +97,16 @@ func EnterpriseHookImagePathsIn(text string) []string {
 			paths = append(paths, candidate)
 		}
 	}
+}
+
+// asciiLowerSameLength lowers A-Z and leaves every other byte as is, so the
+// result has the byte offsets of value.
+func asciiLowerSameLength(value string) string {
+	out := []byte(value)
+	for i, b := range out {
+		if b >= 'A' && b <= 'Z' {
+			out[i] = b + ('a' - 'A')
+		}
+	}
+	return string(out)
 }
